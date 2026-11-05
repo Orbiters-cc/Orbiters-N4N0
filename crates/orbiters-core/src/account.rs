@@ -31,14 +31,43 @@ pub enum Server {
 
 /// Unity's EditorPrefs key for the switch (Toolkit's `OrbitersEnvironment`).
 const DEV_SWITCH: &str = "MCB_DevEnvironment";
+/// The N4N0 gallery item on production (published 2026-10-29 as 1.0.17). IDs are scoped to their server.
+pub const N4N0_PRODUCTION_GALLERY_ASSET_ID: Option<u64> = Some(29);
 /// Toolkit's DPAPI entropy for the account file.
 const ENTROPY: &[u8] = b"Orbiters.Toolkit account";
 /// The client name Orbiters - N4N0 signs in as (the server's editor-link clients).
 pub const CLIENT: &str = "desktop";
 
+/// The server an app chose for itself ([`choose_server`]): 0 none, 1 production, 2 development.
+static CHOSEN: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+/// Talks to `server` from now on, whatever the Unity tools are set to (Orbiters - N4N0's own Development environment
+/// switch); `None` follows the Unity tools again.
+pub fn choose_server(server: Option<Server>) {
+    let value = match server {
+        None => 0,
+        Some(Server::Production) => 1,
+        Some(Server::Development) => 2,
+    };
+    CHOSEN.store(value, Ordering::Relaxed);
+}
+
 impl Server {
-    /// The server the Unity tools are set to (production when Unity never set it, or on other systems).
+    pub fn n4n0_gallery_asset_id(self) -> Option<u64> {
+        match self {
+            Server::Development => Some(30),
+            Server::Production => N4N0_PRODUCTION_GALLERY_ASSET_ID,
+        }
+    }
+
+    /// The server the app chose ([`choose_server`]), else the one the Unity tools are set to (production when Unity
+    /// never set it, or on other systems).
     pub fn current() -> Self {
+        match CHOSEN.load(Ordering::Relaxed) {
+            1 => return Server::Production,
+            2 => return Server::Development,
+            _ => {}
+        }
         if dev_switch().unwrap_or(false) {
             Server::Development
         } else {
@@ -283,42 +312,13 @@ fn dev_switch() -> Option<bool> {
 
 #[cfg(windows)]
 mod protect {
-    use super::ENTROPY;
-    use windows::Win32::Foundation::{LocalFree, HLOCAL};
-    use windows::Win32::Security::Cryptography::{CryptProtectData, CryptUnprotectData, CRYPTPROTECT_UI_FORBIDDEN, CRYPT_INTEGER_BLOB};
-
-    fn blob(data: &[u8]) -> CRYPT_INTEGER_BLOB {
-        CRYPT_INTEGER_BLOB { cbData: data.len() as u32, pbData: data.as_ptr() as *mut u8 }
-    }
-
-    fn take(out: CRYPT_INTEGER_BLOB) -> Vec<u8> {
-        if out.pbData.is_null() {
-            return Vec::new();
-        }
-        // SAFETY: DPAPI allocated `cbData` bytes at `pbData` (not null, checked above) with LocalAlloc; they are copied,
-        // then freed once.
-        unsafe {
-            let bytes = std::slice::from_raw_parts(out.pbData, out.cbData as usize).to_vec();
-            let _ = LocalFree(Some(HLOCAL(out.pbData.cast())));
-            bytes
-        }
-    }
-
     pub fn protect(data: &[u8]) -> anyhow::Result<Vec<u8>> {
-        let mut out = CRYPT_INTEGER_BLOB::default();
-        // SAFETY: input blobs point at live slices for the duration of the call.
-        unsafe { CryptProtectData(&blob(data), None, Some(&blob(ENTROPY)), None, None, CRYPTPROTECT_UI_FORBIDDEN, &mut out)? };
-        Ok(take(out))
+        crate::dpapi::crypt(data, super::ENTROPY, true)
     }
-
     pub fn unprotect(data: &[u8]) -> anyhow::Result<Vec<u8>> {
-        let mut out = CRYPT_INTEGER_BLOB::default();
-        // SAFETY: as above.
-        unsafe { CryptUnprotectData(&blob(data), None, Some(&blob(ENTROPY)), None, None, CRYPTPROTECT_UI_FORBIDDEN, &mut out)? };
-        Ok(take(out))
+        crate::dpapi::crypt(data, super::ENTROPY, false)
     }
 }
-
 #[cfg(not(windows))]
 mod protect {
     pub fn protect(data: &[u8]) -> anyhow::Result<Vec<u8>> {

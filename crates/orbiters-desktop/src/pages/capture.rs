@@ -5,7 +5,7 @@ use crate::state::CaptureState;
 use egui::{pos2, vec2, Align, Align2, Id, Layout, Rect, Sense, Ui, UiBuilder, Vec2};
 use orbiters_contracts::manifest::{CaptureMode, StorageQuality};
 use orbiters_core::settings::{Photo3dLength, Settings};
-use orbiters_orb::menu::layout::LENGTH_LABELS;
+use orbiters_n4n0_core::menu::layout::LENGTH_LABELS;
 use orbiters_ui::anim::{self, Spring};
 use orbiters_ui::format;
 use orbiters_ui::record::{self, RecState, RecordButton};
@@ -21,17 +21,17 @@ const GRID_H: f32 = 500.0;
 /// What each of a 3D picture's camera flights does (1 s, 4 s, 8 s), here and on Home's 3D picture page.
 pub(super) const FLIGHT_HINTS: [&str; 3] = [
     "A gentle sweep around what the camera aims at",
-    "Around you, then straight up and down and 10 m out every way",
-    "As 4 s, plus circles around four points 8 m away",
+    "Looks around, goes around the people in the picture and you, then through the room as far as it can see it goes",
+    "As 4 s, with more views of each person and more of the place",
 ];
 
-pub fn show(ui: &mut Ui, cx: &mut Cx, _state: &mut State) {
+pub fn show(ui: &mut Ui, cx: &mut Cx, _state: &mut State, projects: &mut super::projects::State) {
     let from = orbiters_ui::blur::next_shape(ui);
     egui::ScrollArea::vertical().id_salt("capture").auto_shrink([false, false]).scroll_bar_rect(super::below_bar(ui, cx)).show(ui, |ui| {
         egui::Frame::NONE.inner_margin(egui::Margin { left: 32, right: 32, top: 8 + cx.top as i8, bottom: 32 }).show(ui, |ui| {
             ui.spacing_mut().item_spacing = vec2(0.0, 20.0);
             header(ui, cx);
-            chips(ui, cx);
+            chips(ui, cx, projects);
             grid(ui, cx);
             performance(ui, cx);
             camera_path(ui, cx);
@@ -39,6 +39,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, _state: &mut State) {
     });
     // Down to where the content starts (its top margin).
     super::under_top(ui, cx, "capture", from, ui.max_rect().top() + cx.top + 8.0);
+    super::projects::modals(ui, cx, projects);
 }
 
 fn rec_state(s: CaptureState) -> RecState {
@@ -122,7 +123,7 @@ fn header(ui: &mut Ui, cx: &mut Cx) {
             let w3 = b3.desired_width(ui);
             let r3 = Rect::from_min_size(pos2(r.left() - 8.0 - w3, rect.bottom() - 34.0), vec2(w3, 32.0));
             picture = b3.show_at(ui, r3).clicked();
-            // How long the camera flies: 1 s gentle, 4 s around you and out every way, 8 s with far circles too.
+            // How long the camera flies: 1 s gentle, 4 s around the people and through the room, 8 s with more of both.
             let mut length = snap.settings.photo_3d;
             let lengths = [Photo3dLength::Quick, Photo3dLength::Standard, Photo3dLength::Full]
                 .into_iter()
@@ -151,14 +152,16 @@ fn header(ui: &mut Ui, cx: &mut Cx) {
         cx.ctl.start_test_capture();
     }
     if picture {
-        cx.ctl.orb(crate::ipc::OrbCommand::Photo3D);
+        cx.ctl.n4n0(crate::ipc::N4n0Command::Photo3D);
     }
     if scan {
         cx.ctl.scan();
     }
 }
 
-fn chips(ui: &mut Ui, cx: &mut Cx) {
+/// What capturing needs, as status cards: VRChat, N4N0 on the avatar (the one card to act on: it opens the avatar
+/// picker), the Spout source, the Action Menu and the storage. Five on a row, or three then two on narrow windows.
+fn chips(ui: &mut Ui, cx: &mut Cx, projects: &mut super::projects::State) {
     let snap = cx.snap;
     let world = &snap.vrchat.world;
     let source = if snap.settings.spout_sender.is_empty() {
@@ -192,13 +195,9 @@ fn chips(ui: &mut Ui, cx: &mut Cx) {
         (
             icons::SPARKLE,
             "Action Menu",
-            osc.last_event.clone().unwrap_or_else(|| {
-                if osc.listening {
-                    format!("“{}” toggle", snap.settings.osc.record_parameter)
-                } else {
-                    osc.error.clone().unwrap_or_else(|| "OSC off".into())
-                }
-            }),
+            osc.last_event
+                .clone()
+                .unwrap_or_else(|| if osc.listening { "N4N0 › Record".into() } else { osc.error.clone().unwrap_or_else(|| "OSC off".into()) }),
             if osc.listening {
                 Tone::Ok
             } else if osc.enabled {
@@ -218,13 +217,36 @@ fn chips(ui: &mut Ui, cx: &mut Cx) {
             if storage.free_bytes.is_some_and(|f| f < 20_000_000_000) { Tone::Warn } else { Tone::Ok },
         ),
     ];
-    block(ui, cx, 1, 62.0, |ui, rect| {
-        let w = (rect.width() - 36.0) / 4.0;
-        for (i, (glyph, label, value, tone)) in chips.iter().enumerate() {
-            let r = Rect::from_min_size(pos2(rect.left() + i as f32 * (w + 12.0), rect.top()), vec2(w, rect.height()));
-            widgets::status_chip(ui, r, Id::unique(("capture-chip", i)), glyph, label, value, *tone);
+    // Each card as wide as its words want, the row filled; three then two on windows too narrow for that.
+    let width = ui.available_width();
+    let want = |label: &str, value: &str| {
+        14.0 + 36.0 + 12.0 + widgets::text_size(ui, &Txt::caps(label)).x.max(widgets::text_size(ui, &Txt::new(value, 13.0).weight(weight::MEDIUM)).x) + 14.0
+    };
+    let mut wanted: Vec<f32> = chips.iter().map(|(_, label, value, _)| want(label, value)).collect();
+    wanted.insert(1, want("N4N0", "Add to my avatar") + 26.0);
+    let one_row = orbiters_ui::layout::share_scale(&wanted, width, 12.0) >= 0.82;
+    let rows: Vec<std::ops::Range<usize>> = if one_row { vec![0..5] } else { vec![0..3, 3..5] };
+    let (rect, _) = ui.allocate_exact_size(vec2(width, rows.len() as f32 * 74.0 - 12.0), Sense::hover());
+    let (rect, alpha) = entering(ui, cx, 1, rect);
+    let mut cells = Vec::with_capacity(5);
+    for (r, range) in rows.iter().enumerate() {
+        // Each row filled, as wide as its cards' words want (the second row's two cards included).
+        let widths = orbiters_ui::layout::share(&wanted[range.clone()], rect.width(), 12.0);
+        let mut x = rect.left();
+        for w in widths {
+            cells.push(Rect::from_min_size(pos2(x, rect.top() + r as f32 * 74.0), vec2(w, 62.0)));
+            x += w + 12.0;
         }
-    });
+    }
+    let cell = |i: usize| cells[i];
+    let mut cu = ui.new_child(UiBuilder::new().max_rect(rect).id_salt("capture-chips"));
+    cu.multiply_opacity(alpha);
+    // N4N0 second, after VRChat.
+    for (i, (glyph, label, value, tone)) in chips.iter().enumerate() {
+        let slot = if i == 0 { 0 } else { i + 1 };
+        widgets::status_chip(&mut cu, cell(slot), Id::unique(("capture-chip", i)), glyph, label, value, *tone);
+    }
+    super::projects::capture_card(&mut cu, cx, projects, cell(1));
 }
 
 fn grid(ui: &mut Ui, cx: &mut Cx) {
@@ -387,11 +409,14 @@ fn consent_overlay(ui: &mut Ui, cx: &mut Cx, card: Rect) {
     let p = ui.painter();
     widgets::frame(p, card, theme::CARD_RADIUS, theme::alpha(theme::INK_950, 0.78 * k.clamp(0.0, 1.0)));
     let w = (card.width() - 48.0).min(420.0);
-    let bullets = [
+    let mut bullets = vec![
         "Capture your own worlds, or worlds whose creators agreed, and keep the results private.",
         "Other players are left out: hide them in the Stream camera (Remote Players off).",
-        "Orbiters - N4N0 never asks for your VRChat login and only reads VRChat's local log, OSC and Spout.",
     ];
+    // With VRChat sign-in open to the member, the app can hold their VRChat session: the promise would not hold.
+    if !cx.snap.vrchat_login.allowed {
+        bullets.push("Orbiters - N4N0 never asks for your VRChat login and only reads VRChat's local log, OSC and Spout.");
+    }
     let galleys: Vec<_> = bullets.iter().map(|b| p.layout_job(Txt::new(*b, 13.0).color(theme::FG_2).line_height(20.0).job(w - 48.0 - 16.0))).collect();
     let text_h: f32 = galleys.iter().map(|g| g.size().y + 8.0).sum();
     let h = 24.0 + 36.0 + 16.0 + text_h + 12.0 + 40.0 + 24.0;
@@ -446,8 +471,8 @@ fn tiles(ui: &mut Ui, cx: &mut Cx, rect: Rect) {
             "Strip decoded",
             s.map(|_| if decoded > 99.95 { format!("{decoded:.0}%") } else { format!("{decoded:.1}%") }).unwrap_or_else(|| "–".into()),
             match s {
-                // Gone for a while: the camera may not see the avatar (the kit's "Near you" reach), and no keyframes come.
-                Some(s) if s.strip_missing_s >= 2.0 => format!("none for {:.0} s: is your avatar in view?", s.strip_missing_s),
+                // Gone for a while, and why: no keyframes come meanwhile.
+                Some(s) if s.strip_missing_s >= 2.0 => format!("none for {:.0} s: {}", s.strip_missing_s, snap.capture.no_strip.unwrap_or(crate::state::NoStrip::Unknown).short()),
                 Some(s) => format!("{} unreadable", format::integer(s.strip_failed as f64)),
                 None => "pose strip in every frame".into(),
             },
@@ -589,7 +614,13 @@ fn camera_path(ui: &mut Ui, cx: &mut Cx) {
         // be opened, files that could not be written), as the worker last said them.
         let warnings = s.map(|s| s.warnings.join(" · ")).filter(|w| !w.is_empty());
         if let Some((text, color)) = c.error.clone().map(|e| (e, theme::DANGER)).or_else(|| warnings.map(|w| (w, theme::WARN))) {
-            widgets::text_truncated(p, pos2(rect.right() - 20.0, rect.top() + 36.0), Align2::RIGHT_CENTER, &Txt::new(text, 12.0).color(color), rect.width() * 0.55);
+            widgets::text_truncated(
+                p,
+                pos2(rect.right() - 20.0, rect.top() + 36.0),
+                Align2::RIGHT_CENTER,
+                &Txt::new(text, 12.0).color(color),
+                rect.width() * 0.55,
+            );
         }
         let map = Rect::from_min_max(pos2(rect.left() + 16.0, rect.top() + 68.0), pos2(rect.right() - 16.0, rect.bottom() - 16.0));
         let coverage = c.coverage.as_ref().map(|m| trail::Coverage {

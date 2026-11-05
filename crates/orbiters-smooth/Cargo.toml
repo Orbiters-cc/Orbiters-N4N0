@@ -1,0 +1,15 @@
+[package]
+name = "orbiters-smooth"
+description = "Tracking smoothing for SteamVR: the control block shared by Orbiters - N4N0 and its SteamVR driver (orbiters-smooth-driver), and installing that driver."
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[features]
+default = ["install"]
+# Installing the driver for SteamVR (the app). The driver itself only needs the control block.
+install = ["dep:serde_json", "dep:anyhow"]
+
+[dependencies]
+serde_json = { workspace = true, optional = true }
+anyhow = { workspace = true, optional = true }

@@ -7,26 +7,35 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod app;
+mod audio_devices;
 mod backend;
 mod bench;
+mod capture_picture;
 mod controller;
+mod coverage_window;
 mod device;
+mod drag_out;
 mod gpu;
 mod ipc;
+mod keys;
 mod mailbox;
 mod media;
 mod menu_host;
 mod mixer_inbox;
 mod overlay;
 mod pages;
+mod qr;
 mod reconstruct;
 mod screenshot;
 mod service;
 mod single;
+mod splat_export;
 mod startup;
 mod state;
 mod streams;
+mod tracking;
 mod tray;
+mod upload_prep;
 mod views;
 mod worlds;
 mod window;
@@ -36,11 +45,25 @@ fn main() -> anyhow::Result<()> {
     orbiters_core::panic_log::install();
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
-        Some("--screenshot") => screenshot::run(&args[1..]),
+        Some("--screenshot") => {
+            // On a thread of its own: its table of scenarios and a page's frames outgrow the main thread's 1 MB stack in
+            // debug builds (screenshot::run alone takes some 700 KB there).
+            let args = args[1..].to_vec();
+            std::thread::Builder::new()
+                .name("screenshots".into())
+                .stack_size(16 << 20)
+                .spawn(move || screenshot::run(&args))
+                .map_err(anyhow::Error::from)
+                .and_then(|t| t.join().unwrap_or_else(|_| Err(anyhow::anyhow!("the screenshots stopped on a panic"))))
+        }
         Some("--gpu-bench") => bench::run(&args[1..]),
         Some("--window") => window::run(&args[1..]),
         Some("--overlay") => overlay::run(&args[1..]),
-        Some("--orb-menu") => overlay::menu_pages::run(&args[1..]),
+        Some("--n4n0-menu") => overlay::menu_pages::run(&args[1..]),
+        Some("--world-view") => overlay::worlds::shots::run(&args[1..]),
+        Some("--world-timing") => overlay::worlds::timing_lab::run(&args[1..]),
+        Some("--n4n0-menu-strings") => overlay::menu_pages::run_strings(&args[1..]),
+        Some("--prepare-upload") => upload_prep::run(&args[1..]),
         #[cfg(windows)]
         Some("--eye-picture") => overlay::eye_picture::run(&args[1..]),
         Some("--quit") => {

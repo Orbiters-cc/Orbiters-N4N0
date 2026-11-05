@@ -1,4 +1,4 @@
-//! What N4N0 shows the apps (their window, the SteamVR overlay, a phone's screen): [`OrbStatus`], republished on every
+//! What N4N0 shows the apps (their window, the SteamVR overlay, a phone's screen): [`N4n0Status`], republished on every
 //! change, with what the person is told ([`NoticeKind`]).
 
 use serde::{Deserialize, Serialize};
@@ -12,10 +12,10 @@ pub enum NoticeKind {
     Error,
 }
 
-/// What N4N0 shows (`N4N0/State`, contracts `Docs/orb.md`).
+/// What N4N0 shows (`N4N0/State`, contracts `Docs/n4n0.md`).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum OrbFace {
+pub enum N4n0Face {
     #[default]
     Idle,
     Listening,
@@ -27,26 +27,26 @@ pub enum OrbFace {
     Surprised,
 }
 
-impl OrbFace {
+impl N4n0Face {
     /// Every state, in `N4N0/State`'s order.
-    pub const ALL: [OrbFace; 8] =
-        [OrbFace::Idle, OrbFace::Listening, OrbFace::Thinking, OrbFace::Talking, OrbFace::Sleeping, OrbFace::Happy, OrbFace::Annoyed, OrbFace::Surprised];
+    pub const ALL: [N4n0Face; 8] =
+        [N4n0Face::Idle, N4n0Face::Listening, N4n0Face::Thinking, N4n0Face::Talking, N4n0Face::Sleeping, N4n0Face::Happy, N4n0Face::Annoyed, N4n0Face::Surprised];
 }
 
 /// Who said a line of N4N0's conversation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum OrbWho {
+pub enum N4n0Who {
     You,
-    Orb,
+    N4n0,
     /// Something N4N0 did or noticed (a tool ran, a video was saved).
     Note,
     Error,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct OrbLine {
-    pub who: OrbWho,
+pub struct N4n0Line {
+    pub who: N4n0Who,
     pub text: String,
     /// Unix time in milliseconds.
     pub at_ms: u64,
@@ -54,7 +54,7 @@ pub struct OrbLine {
 
 /// An action of N4N0's (publishing an event…) waiting for the member's approval on Orbiters.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct OrbConfirmation {
+pub struct N4n0Confirmation {
     pub id: String,
     pub title: String,
     pub summary: String,
@@ -63,9 +63,9 @@ pub struct OrbConfirmation {
 
 /// The link of a confirmation the owner gives in Orbiters - N4N0 itself (what N4N0 asks before it does a public,
 /// lasting or costly thing), rather than on the Orbiters website: the number of what waits follows it.
-pub const LOCAL_APPROVAL: &str = "orbiters-desktop:orb/approve/";
+pub const LOCAL_APPROVAL: &str = "orbiters-desktop:n4n0/approve/";
 
-impl OrbConfirmation {
+impl N4n0Confirmation {
     /// Approved in Orbiters - N4N0 (the N4N0 page's button, or a spoken yes), not on the Orbiters website.
     pub fn is_local(&self) -> bool {
         self.approve_url.starts_with(LOCAL_APPROVAL)
@@ -100,7 +100,7 @@ pub struct ProcessUsage {
 
 /// N4N0, the companion on the avatar.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-pub struct OrbStatus {
+pub struct N4n0Status {
     /// The avatar VRChat loaded.
     pub avatar_id: Option<String>,
     /// The avatar carries the N4N0 prop, with this many text sync values.
@@ -109,32 +109,35 @@ pub struct OrbStatus {
     pub manifest: bool,
     /// Controls N4N0 can reach on the avatar.
     pub controls: usize,
-    pub face: OrbFace,
+    pub face: N4n0Face,
     /// What the panel shows now.
     pub panel: Option<String>,
     pub listening: bool,
     pub thinking: bool,
     pub afk: bool,
     /// The conversation as shown, the newest last.
-    pub lines: Vec<OrbLine>,
-    pub confirmations: Vec<OrbConfirmation>,
+    pub lines: Vec<N4n0Line>,
+    pub confirmations: Vec<N4n0Confirmation>,
     /// The free quota of N4N0's assistant, as the last answer told it.
-    pub quota: Option<orbiters_orb::assistant::Quota>,
+    pub quota: Option<orbiters_n4n0_core::assistant::Quota>,
     pub voice: VoiceStatus,
     /// Saved videos, the newest first.
-    pub videos: Vec<orbiters_orb::videos::SavedVideo>,
+    pub videos: Vec<orbiters_n4n0_core::videos::SavedVideo>,
     /// Orbiters' processes and VRChat's.
     pub resources: Vec<ProcessUsage>,
     /// Testing: the state N4N0 is held in, every state shown in turn, the owner acted as away.
     #[serde(default)]
-    pub test_face: Option<OrbFace>,
+    pub test_face: Option<N4n0Face>,
     #[serde(default)]
     pub test_cycle: bool,
     #[serde(default)]
     pub test_afk: bool,
-    /// Testing: the whole orb is hidden (`N4N0/Visible` sent false).
+    /// Testing: all of N4N0 is hidden (`N4N0/Visible` sent false).
     #[serde(default)]
     pub test_hidden: bool,
+    /// Testing: the avatar's screen shows the full pictures' diagnostics.
+    #[serde(default)]
+    pub test_pictures: bool,
     /// Calls with VRChat friends (the app's own: [`crate::Host::calls`]).
     #[serde(default)]
     pub calls: CallsStatus,
@@ -161,7 +164,7 @@ pub struct OrbStatus {
     pub photo_countdown: Option<u32>,
     /// N4N0's light, when the avatar's N4N0 has one (the Light option).
     #[serde(default)]
-    pub light: Option<OrbLight>,
+    pub light: Option<N4n0Light>,
     /// The avatar worn's saved states.
     #[serde(default)]
     pub states: StatesView,
@@ -171,6 +174,59 @@ pub struct OrbStatus {
     /// The link card the avatar's screen shows now, dropped in the world.
     #[serde(default)]
     pub card: Option<CardView>,
+    /// Tracking smoothing as the menus show it; `None` where the app has none (`tracking_note` says why).
+    #[serde(default)]
+    pub tracking: Option<TrackingView>,
+    #[serde(default)]
+    pub tracking_note: String,
+    /// The last suggestion a menu sent, numbered, and why it did not reach Orbiters (`None`: it did).
+    #[serde(default)]
+    pub suggestion: Option<(u32, Option<String>)>,
+    /// The avatar's N4N0 version and the app's, as the bottom of Home shows them ("N4N0 1.0.9 · App 0.4.0").
+    #[serde(default)]
+    pub versions: String,
+    /// The computer's keys typed for the overlay menu's keyboard, numbered, the last few.
+    #[serde(default)]
+    pub keys: Vec<(u32, orbiters_n4n0_core::menu::KeyInput)>,
+    /// The video the world's player plays (VRChat's log), its title once known, and when it started (Unix seconds).
+    #[serde(default)]
+    pub world_video: Option<(String, Option<String>, Option<u64>)>,
+    /// What stopped the last 3D picture asked for ("Open the camera before": VRChat's camera was closed), numbered: the
+    /// menus show it on their 3D picture page.
+    #[serde(default)]
+    pub photo_note: Option<(u32, String)>,
+    /// How the last Invite me a menu other than the screen's asked went (Previous instances), numbered.
+    #[serde(default)]
+    pub invite: Option<(u32, orbiters_n4n0_core::menu::InviteAnswer)>,
+    /// The QR code scanner, as every menu shows it.
+    #[serde(default)]
+    pub qr: orbiters_n4n0_core::qr::QrView,
+    /// The 3D captures as the app keeps them (the last one made, History's), and the VRChat friends a capture goes to
+    /// while a menu's Share to … shows (contracts `Docs/n4n0.md`, Menu, from screen version 12).
+    #[serde(default)]
+    pub captures: orbiters_n4n0_core::captures::CapturesView,
+    #[serde(default)]
+    pub friends: orbiters_n4n0_core::captures::Friends,
+    /// The worlds' feedback as the app keeps it, the player's actions not sent yet included (contracts `Docs/n4n0.md`,
+    /// Menu, from screen version 13).
+    #[serde(default)]
+    pub feedback: orbiters_n4n0_core::feedback::FeedbackView,
+    /// How many of N4N0's controller input parameters (contracts `Docs/n4n0-input.md`) the worn avatar lists.
+    #[serde(default)]
+    pub input_params: u8,
+    /// The screen mirror as the overlay's menu shows it (from screen version 14: its card says why it is not there).
+    #[serde(default)]
+    pub mirror: orbiters_n4n0_core::mirror::MirrorView,
+}
+
+/// Tracking smoothing (the app's SteamVR driver), as the Tracking page shows it.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TrackingView {
+    pub on: bool,
+    /// Each kind's strength, an index of `orbiters_n4n0_core::menu::SMOOTHING_LABELS`: headset, controllers, trackers.
+    pub levels: [u8; 3],
+    /// What the driver does now.
+    pub note: String,
 }
 
 /// The saved states of the avatar worn, as the window and the menus show them.
@@ -178,13 +234,29 @@ pub struct OrbStatus {
 pub struct StatesView {
     /// The avatar they are for (`None`: VRChat's avatar is not known yet).
     pub avatar_id: Option<String>,
-    /// What VRChat's log calls the avatar.
+    /// The avatar's name: as set in its SDK (VRChat's OSCQuery `/avatar/name`), else as remembered with its states, else
+    /// as VRChat's log calls it.
     pub avatar_name: Option<String>,
     pub states: Vec<StateView>,
     /// What the last save, apply or change said (an error too).
     pub note: Option<StatesNote>,
     /// A save is under way.
     pub saving: bool,
+    /// Every avatar with saved states, and the avatar worn (with or without): the worn one first, then the one saved in
+    /// last.
+    #[serde(default)]
+    pub avatars: Vec<AvatarView>,
+}
+
+/// An avatar's saved states, as the window's States page shows it: a card per avatar, opening its states.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct AvatarView {
+    pub id: String,
+    /// Its name as set in its SDK (VRChat's OSCQuery `/avatar/name`), remembered with its states.
+    pub name: Option<String>,
+    /// The avatar worn now: only its states are applied and saved.
+    pub worn: bool,
+    pub states: Vec<StateView>,
 }
 
 /// A line about the states, numbered (each new one shows again, even when it says the same).
@@ -216,9 +288,16 @@ pub struct StateView {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "do", rename_all = "snake_case")]
 pub enum StateAction {
-    /// Save how the avatar is now (`None`: named "State n").
+    /// Save how the avatar is now (`None`: named "State n"); applying it also puts back the avatar's size (`size`) and
+    /// GoGoLoco's pose (`pose`), and it is the avatar's default (`default`).
     Save {
         name: Option<String>,
+        #[serde(default)]
+        size: bool,
+        #[serde(default)]
+        pose: bool,
+        #[serde(default)]
+        default: bool,
     },
     Apply {
         id: String,
@@ -251,9 +330,9 @@ pub struct CardView {
     pub left: u32,
 }
 
-/// N4N0's light as the avatar holds it (`N4N0/Light`, `N4N0/Light/Color`, `N4N0/Light/Level`).
+/// N4N0's light as the avatar holds it (`N4N0/Light/On`, `N4N0/Light/Color`, `N4N0/Light/Level`).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
-pub struct OrbLight {
+pub struct N4n0Light {
     pub on: bool,
     pub color: u8,
     pub level: f32,
@@ -332,13 +411,13 @@ impl CallsStatus {
     }
 
     /// The friends who can be called, as N4N0's menu lists them.
-    pub fn menu_contacts(&self) -> Vec<orbiters_orb::menu::Contact> {
-        self.contacts.iter().map(|c| orbiters_orb::menu::Contact { id: c.id.clone(), name: c.name.clone() }).collect()
+    pub fn menu_contacts(&self) -> Vec<orbiters_n4n0_core::menu::Contact> {
+        self.contacts.iter().map(|c| orbiters_n4n0_core::menu::Contact { id: c.id.clone(), name: c.name.clone() }).collect()
     }
 
     /// The call as N4N0's menu shows it, at Unix time `now_ms`.
-    pub fn menu_call(&self, now_ms: u64) -> Option<orbiters_orb::menu::Call> {
-        use orbiters_orb::menu::Call;
+    pub fn menu_call(&self, now_ms: u64) -> Option<orbiters_n4n0_core::menu::Call> {
+        use orbiters_n4n0_core::menu::Call;
         self.call.as_ref().map(|c| match c.phase {
             CallPhase::Ringing => Call::Ringing { name: c.name.clone() },
             CallPhase::Calling | CallPhase::Connecting => Call::Calling { name: c.name.clone() },

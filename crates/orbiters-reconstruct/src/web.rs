@@ -9,6 +9,38 @@ use crate::gaussians::Gaussians;
 pub const SPLAT_BYTES: usize = 32;
 /// About 19 MB: what a phone on the website still loads and draws smoothly.
 pub const DEFAULT_MAX: usize = 600_000;
+
+/// A downloaded web preview (the server makes it from the PC tree's leaves: at most crate::tree_tune::PC_SPLATS), back in
+/// the renderer's Unity coordinates. Reject malformed or non-finite splats.
+pub fn read_splat(bytes: &[u8]) -> anyhow::Result<Gaussians> {
+    anyhow::ensure!(
+        !bytes.is_empty() && bytes.len().is_multiple_of(SPLAT_BYTES) && bytes.len() / SPLAT_BYTES <= crate::tree_tune::PC_SPLATS,
+        "Invalid splat file"
+    );
+    let mut g = Gaussians::default();
+    for b in bytes.chunks_exact(SPLAT_BYTES) {
+        let f = |i: usize| f32::from_le_bytes(b[i..i + 4].try_into().unwrap());
+        let position = [f(0), f(4), -f(8)];
+        let scales = [f(12), f(16), f(20)];
+        anyhow::ensure!(position.iter().chain(scales.iter()).all(|v| v.is_finite()) && scales.iter().all(|v| *v > 0.0), "Invalid splat position or scale");
+        let mut q = [(b[28] as f32 - 128.0) / 128.0, -(b[29] as f32 - 128.0) / 128.0, -(b[30] as f32 - 128.0) / 128.0, (b[31] as f32 - 128.0) / 128.0];
+        let n = q.iter().map(|v| v * v).sum::<f32>().sqrt();
+        anyhow::ensure!(n > 0.01, "Invalid splat rotation");
+        for v in &mut q {
+            *v /= n;
+        }
+        let alpha = (b[27] as f32 / 255.0).clamp(1e-6, 1.0 - 1e-6);
+        g.means.push(position);
+        g.log_scales.push(scales.map(f32::ln));
+        g.rotations.push(q);
+        g.opacity_logits.push((alpha / (1.0 - alpha)).ln());
+        g.colors.push([b[24] as f32 / 255.0, b[25] as f32 / 255.0, b[26] as f32 / 255.0]);
+        g.sky.push(false);
+        g.filter_3d.push(0.0);
+        g.seen.push(crate::gaussians::Seen::UNKNOWN);
+    }
+    Ok(g)
+}
 /// Splats fainter than this never show and are left out.
 const MIN_OPACITY: f32 = 1.0 / 255.0;
 
@@ -47,20 +79,26 @@ pub fn splat_file(g: &Gaussians, max: usize, origin: [f32; 3]) -> WebPreview {
     keep.sort_by(|a, b| distance(a.0).total_cmp(&distance(b.0)));
     let mut bytes = Vec::with_capacity(keep.len() * SPLAT_BYTES);
     for &(i, _) in &keep {
-        let [x, y, z] = g.means[i];
-        let s = g.log_scales[i];
-        let c = g.colors[i];
-        let q = g.rotations[i];
-        let n = q.iter().map(|v| v * v).sum::<f32>().sqrt().max(1e-12);
-        // Mirroring Z: positions negate z; a rotation R becomes S R S, the quaternion (w, -x, -y, z).
-        let rotation = [q[0] / n, -q[1] / n, -q[2] / n, q[3] / n];
-        for v in [x, y, -z, s[0].exp(), s[1].exp(), s[2].exp()] {
-            bytes.extend_from_slice(&v.to_le_bytes());
-        }
-        bytes.extend_from_slice(&[byte(c[0]), byte(c[1]), byte(c[2]), byte(sigmoid(g.opacity_logits[i]))]);
-        bytes.extend(rotation.map(|v| (v * 128.0 + 128.0).round().clamp(0.0, 255.0) as u8));
+        write_splat(&mut bytes, g, i);
     }
     WebPreview { count: keep.len(), bytes }
+}
+
+/// Splat `i` of `g` in the `.splat` layout (the server writes the same from a VRChat PC tree's leaves, which it decodes:
+/// crate::tree_file).
+pub fn write_splat(bytes: &mut Vec<u8>, g: &Gaussians, i: usize) {
+    let [x, y, z] = g.means[i];
+    let s = g.log_scales[i];
+    let c = g.colors[i];
+    let q = g.rotations[i];
+    let n = q.iter().map(|v| v * v).sum::<f32>().sqrt().max(1e-12);
+    // Mirroring Z: positions negate z; a rotation R becomes S R S, the quaternion (w, -x, -y, z).
+    let rotation = [q[0] / n, -q[1] / n, -q[2] / n, q[3] / n];
+    for v in [x, y, -z, s[0].exp(), s[1].exp(), s[2].exp()] {
+        bytes.extend_from_slice(&v.to_le_bytes());
+    }
+    bytes.extend_from_slice(&[byte(c[0]), byte(c[1]), byte(c[2]), byte(sigmoid(g.opacity_logits[i]))]);
+    bytes.extend(rotation.map(|v| (v * 128.0 + 128.0).round().clamp(0.0, 255.0) as u8));
 }
 
 #[cfg(test)]
@@ -97,5 +135,23 @@ mod tests {
         assert_eq!(&web.bytes[28..32], &[255, 128, 128, 128]);
         // The invisible splat is left out even with room to spare.
         assert_eq!(splat_file(&g, 1000, [0.0; 3]).count, 99);
+    }
+    #[test]
+    fn downloaded_splats_preserve_coordinates_and_reject_corruption() {
+        let mut g = Gaussians::default();
+        g.means.push([1.0, 2.0, 3.0]);
+        g.log_scales.push([-1.0, -2.0, -3.0]);
+        g.rotations.push([1.0, 0.0, 0.0, 0.0]);
+        g.colors.push([0.2, 0.4, 0.6]);
+        g.opacity_logits.push(0.0);
+        let mut bytes = Vec::new();
+        write_splat(&mut bytes, &g, 0);
+        let back = read_splat(&bytes).unwrap();
+        assert_eq!(back.means, g.means);
+        assert_eq!(back.rotations[0], [1.0, 0.0, 0.0, 0.0]);
+        assert!((back.log_scales[0][1] + 2.0).abs() < 1e-5);
+        assert!(read_splat(&bytes[..31]).is_err());
+        bytes[0..4].copy_from_slice(&f32::NAN.to_le_bytes());
+        assert!(read_splat(&bytes).is_err());
     }
 }

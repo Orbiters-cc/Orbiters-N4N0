@@ -498,6 +498,7 @@ mod tests {
     #[test]
     fn undo_leaves_clean_frames_alone_and_masks_what_it_cannot_fill() {
         let dataset = |images: Vec<Vec<u32>>| Dataset {
+            faces: None,
             dir: Default::default(),
             views: images.into_iter().map(view).collect(),
             depth_views: Vec::new(),

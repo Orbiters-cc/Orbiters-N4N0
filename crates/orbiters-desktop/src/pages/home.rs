@@ -1,22 +1,24 @@
-//! Home: N4N0's menu as a page of the window. Its seven features (fast walk, YouTube, calls, a 3D picture, music, the
-//! light, the avatar's saved states) are cards like the rest of the app's, and each opens a page of its own drawn the
+//! Home: N4N0's menu as a page of the window. Its features (fast walk, YouTube, calls, a 3D picture, music, the light,
+//! the avatar's saved states, tracking, suggest, previous instances, the QR code scanner) are cards like the rest of the
+//! app's, and each opens a page of its own drawn the
 //! same way; what N4N0 says fills the grid's last row. What they show and what a press does are the menu's
-//! (`orbiters_orb::menu`, run by [`crate::menu_host`] in step with the tray service like the menu in VR); only the
+//! (`orbiters_n4n0_core::menu`, run by [`crate::menu_host`] in step with the tray service like the menu in VR); only the
 //! drawing is the window's (the States page is [`super::states`]). Cards and choices act on the pointer's press, buttons
 //! on its release with the press shown at once, and the menu shows a change before the service answers.
 
-use super::{block, section, Cx};
-use crate::ipc::OrbCommand;
+use super::{block, row_columns, section, section_up_to, Cx};
+use crate::ipc::N4n0Command;
 use crate::menu_host::MenuHost;
 use crate::overlay::menu_ui;
 use crate::state::StateAction;
 use egui::epaint::RectShape;
 use egui::{pos2, vec2, Align, Align2, Color32, CursorIcon, Id, Key, Layout, Painter, Pos2, Rect, Sense, Stroke, TextureId, Ui, UiBuilder, Vec2};
-use orbiters_contracts::orb::{LIGHT_COLORS, LIGHT_LEVELS};
+use orbiters_contracts::n4n0::{LIGHT_COLORS, LIGHT_LEVELS};
 use orbiters_core::settings::Settings;
-use orbiters_orb::menu::layout::{self, Content, Tint, HOME_TILES, LENGTH_LABELS, TIMER_LABELS};
-use orbiters_orb::menu::{Call, Effect, MediaCommand, Menu, Page, PhotoLength, Target, Volume, TIMERS};
-use orbiters_orb::youtube::Video;
+use orbiters_n4n0_core::menu::layout::{self, Content, Icon, Tint, HOME_TILES, LENGTH_LABELS, MORE_CARDS_QR, TIMER_LABELS};
+use orbiters_n4n0_core::menu::strings::Text;
+use orbiters_n4n0_core::menu::{Call, Effect, Media, MediaCommand, Menu, Page, PhotoLength, Target, Volume, SMOOTHING_LABELS, TIMERS, TRACKING_KINDS};
+use orbiters_n4n0_core::youtube::Video;
 use orbiters_ui::anim::{self, Spring};
 use orbiters_ui::icons;
 use orbiters_ui::theme::{self, weight, Txt};
@@ -25,6 +27,9 @@ use std::time::Duration;
 
 /// The page's width at most, as the Settings cards'.
 const MAX_W: f32 = 980.0;
+/// The narrowest a list's row gets beside another one (results, instances on a wide page), and the room between them.
+const ROW_MIN_W: f32 = 560.0;
+const ROW_GAP: f32 = 32.0;
 /// Home's feature cards, the room between them, and their insets (the Settings cards').
 const CARD_H: f32 = 128.0;
 const GAP: f32 = 16.0;
@@ -33,6 +38,12 @@ const INSET: f32 = 24.0;
 const THUMB: Vec2 = vec2(160.0, 90.0);
 /// How long a result's button says its link was copied.
 const COPIED_FOR: f64 = 2.0;
+
+/// The window's features: every Home tile, then previous instances and the QR code scanner (More's, on the avatar's
+/// screen).
+fn features() -> impl Iterator<Item = (Target, Icon, Text, Tint)> {
+    HOME_TILES.into_iter().chain(MORE_CARDS_QR.into_iter().filter(|t| matches!(t.0, Target::Instances | Target::Qr)))
+}
 
 /// What a press asks of the menu, done once the page is drawn.
 enum Act {
@@ -43,8 +54,12 @@ enum Act {
     Call(usize),
     /// The speakers' volume, in percent.
     Volume(u8),
-    /// What the States page asks of the service.
-    States(StateAction),
+    /// What plays, to this second (its timeline dragged or clicked).
+    Seek(u32),
+    /// What the States page asks of the service (`Some`: another avatar's states than the worn one's).
+    States(StateAction, Option<String>),
+    /// The suggestion's new text.
+    Suggestion(String),
     /// Back to Home itself.
     Home,
 }
@@ -64,19 +79,27 @@ pub struct State {
     copied: Option<(String, f64)>,
     /// The States page's own state (what was asked and not yet seen, a name being typed).
     states: super::states::StatesPage,
+    /// What going back to Home asked of the menu's host from outside a frame (the sidebar's Home: the QR code scanner
+    /// stops), done at the next one.
+    pending: Vec<Effect>,
 }
 
 impl State {
     /// Back to Home itself (the sidebar's Home pressed on a feature's page).
     pub fn back_home(&mut self) {
         if let Some(host) = self.host.as_mut() {
-            go_home(host);
+            self.pending.extend(go_home(host));
         }
     }
 
     /// The menu Home runs, once shown (the screenshot review opens its pages).
     pub fn menu_host(&mut self) -> Option<&mut MenuHost> {
         self.host.as_mut()
+    }
+
+    /// The States page (the screenshot review opens an avatar's states).
+    pub fn states_mut(&mut self) -> &mut super::states::StatesPage {
+        &mut self.states
     }
 }
 
@@ -88,19 +111,22 @@ fn shown_page(page: Page) -> Page {
     }
 }
 
-fn go_home(host: &mut MenuHost) {
-    // Results go back to the search, the search to Home.
+/// Back to Home (results go back to the search, the search to Home), with what leaving a page asks for (the QR code
+/// scanner stops).
+fn go_home(host: &mut MenuHost) -> Vec<Effect> {
+    let mut effects = Vec::new();
     for _ in 0..2 {
         if host.menu.page != Page::Home {
-            host.press(Target::Back);
+            effects.extend(host.press(Target::Back));
         }
     }
+    effects
 }
 
 pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
     let ctx = ui.ctx().clone();
     let snap = cx.snap;
-    let State { host, shown, since, opened, focus, copied, states } = state;
+    let State { host, shown, since, opened, focus, copied, states, pending } = state;
     let host = host.get_or_insert_with(|| {
         let mut host = MenuHost::new(ctx.clone());
         host.open(snap);
@@ -112,6 +138,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
         host.follow_media();
     }
     let mut effects = host.poll();
+    effects.append(pending);
 
     // A page opened enters as a page of its own: its blocks count from then.
     let page = shown_page(host.menu.page);
@@ -121,6 +148,10 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
         *since = now;
         *opened += 1;
         *focus = page == Page::Search;
+        // States opens on the avatars' cards.
+        if page == Page::States {
+            states.show_cards();
+        }
     }
     let (visit, entered) = (cx.visit, cx.entered);
     cx.visit = (visit << 20) | *opened;
@@ -147,19 +178,30 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
         egui::Frame::NONE.inner_margin(egui::Margin { left: 32, right: 32, top: 8 + cx.top as i8, bottom: 40 }).show(ui, |ui| {
             ui.spacing_mut().item_spacing = vec2(0.0, 20.0);
             match page {
-                // The window never shows a dropped card itself (the avatar's screen does).
-                Page::Home | Page::Card => home(ui, cx, menu, &idle, &mut acts),
+                // The window never shows a dropped card itself (the avatar's screen does), nor the simple Home's More (its
+                // Home has every feature).
+                // World feedback is given from the world's window (Visited worlds) and the menus, not from this Home; the
+                // screen mirror shows only on the avatar's screen.
+                Page::Home | Page::Card | Page::More | Page::Feedback | Page::FeedbackLabels | Page::Comments | Page::Mirror => {
+                    home(ui, cx, menu, &idle, copied_id, &mut acts)
+                }
+                Page::Instances | Page::AddFriend => instances(ui, cx, menu, &mut acts),
                 Page::Search | Page::Results => youtube(ui, cx, menu, &picture, focus, copied_id, &mut acts),
                 Page::Call => call(ui, cx, menu, &mut acts),
                 Page::Photo => photo(ui, cx, menu, take_blocked, &mut acts),
-                Page::Music => music(ui, cx, menu, &picture, &mut acts),
+                Page::Music => music(ui, cx, menu, &picture, copied_id, &mut acts),
                 Page::Light => light(ui, cx, menu, &mut acts),
-                Page::States => {
+                Page::Tracking => tracking(ui, cx, menu, &mut acts),
+                Page::Suggest | Page::Type => suggest(ui, cx, menu, &mut acts),
+                Page::Qr => qr(ui, cx, menu, &mut acts),
+                // The window shares captures in Photos & captures: its 3D picture page has no History.
+                Page::History | Page::ShareTo | Page::Explicit => photo(ui, cx, menu, take_blocked, &mut acts),
+                Page::States | Page::NewState => {
                     let mut out = Vec::new();
                     super::states::show(ui, cx, states, &mut out);
                     acts.extend(out.into_iter().map(|o| match o {
                         super::states::Out::Home => Act::Home,
-                        super::states::Out::Action(action) => Act::States(action),
+                        super::states::Out::Action(action, avatar) => Act::States(action, avatar),
                     }));
                 }
             }
@@ -178,6 +220,10 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
                         *copied = Some((video.id.clone(), now));
                     }
                 }
+                // The YouTube video playing, as a result.
+                if let (Target::CopyPlaying, Some(video)) = (target, host.menu.media.as_ref().and_then(|m| m.video.clone())) {
+                    *copied = Some((video, now));
+                }
                 effects.extend(host.press(target));
             }
             Act::Query(text) => {
@@ -192,8 +238,16 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
                 host.menu.volume = Some(Volume { percent, muted: false });
                 effects.push(Effect::Media(MediaCommand::Volume(percent)));
             }
-            Act::States(action) => cx.ctl.orb(OrbCommand::States { action }),
-            Act::Home => go_home(host),
+            // Shown where it goes at once; the computer follows.
+            Act::Seek(at) => {
+                if let Some(media) = host.menu.media.as_mut() {
+                    media.position = Some(at);
+                }
+                effects.push(Effect::Media(MediaCommand::Seek(at)));
+            }
+            Act::States(action, avatar) => cx.ctl.n4n0(N4n0Command::States { action, avatar }),
+            Act::Suggestion(text) => host.menu.suggestion = text,
+            Act::Home => effects.extend(go_home(host)),
         }
     }
     // It stays open here (nothing closes it): a close goes back to Home. A dropped card is on the avatar's screen: the
@@ -224,7 +278,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
 
 /// What Home's heading says while N4N0 does not listen: how to call it from here.
 fn idle_line(settings: &Settings) -> String {
-    match settings.orb.wake_words.first().filter(|_| settings.orb.wake_word) {
+    match settings.n4n0.wake_words.first().filter(|_| settings.n4n0.wake_word) {
         Some(word) => {
             let mut letters = word.chars();
             let word: String = letters.next().map(|c| c.to_uppercase().chain(letters).collect()).unwrap_or_default();
@@ -234,7 +288,7 @@ fn idle_line(settings: &Settings) -> String {
     }
 }
 
-fn home(ui: &mut Ui, cx: &Cx, menu: &Menu, idle: &str, acts: &mut Vec<Act>) {
+fn home(ui: &mut Ui, cx: &Cx, menu: &Menu, idle: &str, copied: Option<&str>, acts: &mut Vec<Act>) {
     block(ui, cx, 0, 72.0, |ui, rect| {
         let p = ui.painter();
         widgets::text(p, pos2(rect.left(), rect.top() + 7.0), Align2::LEFT_CENTER, &Txt::caps("N4N0 menu"));
@@ -250,37 +304,48 @@ fn home(ui: &mut Ui, cx: &Cx, menu: &Menu, idle: &str, acts: &mut Vec<Act>) {
         }
     });
 
-    let w = ui.available_width().min(MAX_W);
+    let w = ui.available_width();
     let cols = home_columns(w);
     let card_w = (w - GAP * (cols - 1) as f32) / cols as f32;
+    let card_h = tile_height(card_w);
     // The features, then what N4N0 says in the rest of the last row (one place at least): the grid stays whole.
-    let cells = HOME_TILES.len() + 1;
+    let count = features().count();
+    let cells = count + 1;
     let rows = cells.div_ceil(cols);
-    let (area, _) = ui.allocate_exact_size(vec2(w, rows as f32 * (CARD_H + GAP) - GAP), Sense::hover());
-    let cell = |i: usize| area.min + vec2((i % cols) as f32 * (card_w + GAP), (i / cols) as f32 * (CARD_H + GAP));
-    for i in 0..HOME_TILES.len() {
-        feature(ui, cx, i, Rect::from_min_size(cell(i), vec2(card_w, CARD_H)), menu, acts);
+    let (area, _) = ui.allocate_exact_size(vec2(w, rows as f32 * (card_h + GAP) - GAP), Sense::hover());
+    let cell = |i: usize| area.min + vec2((i % cols) as f32 * (card_w + GAP), (i / cols) as f32 * (card_h + GAP));
+    for (i, tile) in features().enumerate() {
+        feature(ui, cx, i, tile, Rect::from_min_size(cell(i), vec2(card_w, card_h)), menu, copied, acts);
     }
-    let span = cols - HOME_TILES.len() % cols;
-    let at = cell(HOME_TILES.len());
-    said(ui, cx, 1 + HOME_TILES.len(), Rect::from_min_size(at, vec2(span as f32 * (card_w + GAP) - GAP, CARD_H)), menu);
+    let span = cols - count % cols;
+    let at = cell(count);
+    said(ui, cx, 1 + count, Rect::from_min_size(at, vec2(span as f32 * (card_w + GAP) - GAP, card_h)), menu);
 }
 
-/// Home's columns at `width`: four on a wide window, three, two on a narrow one.
+/// The narrowest a Home tile gets before the row takes one fewer, the widest before it takes one more past six, and
+/// the most tiles on a row (two rows of six hold every feature and what N4N0 says).
+const TILE_MIN: f32 = 210.0;
+const TILE_MAX: f32 = 440.0;
+const MAX_COLUMNS: usize = 8;
+
+/// Home's columns at `width`: as many tiles of [`TILE_MIN`] as fit, two to six (four on the default window); past six,
+/// enough to keep tiles under [`TILE_MAX`].
 fn home_columns(width: f32) -> usize {
-    if width >= 900.0 {
-        4
-    } else if width >= 700.0 {
-        3
-    } else {
-        2
-    }
+    let fit = (((width + GAP) / (TILE_MIN + GAP)).floor() as usize).clamp(2, 6);
+    let wide = ((width + GAP) / (TILE_MAX + GAP)).ceil() as usize;
+    fit.max(wide).min(MAX_COLUMNS)
+}
+
+/// A tile's height at `width`: wider tiles on very wide windows grow a little taller, so they keep a card's shape.
+fn tile_height(width: f32) -> f32 {
+    CARD_H + ((width - 260.0) * 0.2).clamp(0.0, 40.0)
 }
 
 /// One of Home's features: its icon chip, its name and what it says now, with a switch for what turns on and off (fast
-/// walk, the light) or an arrow for what opens a page.
-fn feature(ui: &mut Ui, cx: &Cx, i: usize, rect: Rect, menu: &Menu, acts: &mut Vec<Act>) {
-    let (target, icon, title, tint) = HOME_TILES[i];
+/// walk, the light), the Copy link of the YouTube video playing (music), or an arrow for what opens a page.
+fn feature(ui: &mut Ui, cx: &Cx, i: usize, tile: (Target, Icon, Text, Tint), rect: Rect, menu: &Menu, copied: Option<&str>, acts: &mut Vec<Act>) {
+    let (target, icon, title, tint) = tile;
+    let title = title.en();
     let state = layout::target_state(menu, target);
     let (rect, alpha) = super::entering(ui, cx, 1 + i, rect);
     let ctx = ui.ctx().clone();
@@ -325,11 +390,27 @@ fn feature(ui: &mut Ui, cx: &Cx, i: usize, rect: Rect, menu: &Menu, acts: &mut V
             Target::Photo => menu.countdown.is_some(),
             Target::Music => menu.media.as_ref().is_some_and(|m| m.playing && !m.title.is_empty()),
             Target::States => menu.states.iter().any(|s| s.default),
+            Target::Qr => menu.qr.scanning(),
             _ => false,
         };
-    let note = Txt::new(layout::text(menu, Content::TileNote(i as u8)), 12.5).color(if active { theme::ACCENT } else { theme::FG_3 });
+    let note = Txt::new(layout::text(menu, Content::TileNote(layout::note_of(target))), 12.5).color(if active { theme::ACCENT } else { theme::FG_3 });
     widgets::text_truncated(&p, pos2(x, r.bottom() - 24.0), Align2::LEFT_CENTER, &note, r.width() - 2.0 * INSET);
 
+    // The YouTube video playing: its link copied from the card (pressed apart from it), the page not opened.
+    let playing = match target {
+        Target::Music => menu.media.as_ref().and_then(|m| m.video.as_deref()),
+        _ => None,
+    };
+    if let Some(video) = playing {
+        let (glyph, label) = if copied == Some(video) { (icons::CHECK, "Link copied") } else { (icons::COPY, "Copy the video's link") };
+        let br = Rect::from_center_size(pos2(r.right() - INSET - 12.0, chip.center().y), Vec2::splat(36.0));
+        let mut bu = ui.new_child(UiBuilder::new().max_rect(br).id_salt(("orbiters-home-copy-playing", i)));
+        bu.multiply_opacity(alpha);
+        if IconButton::new(glyph, label).id_salt("copy").show_at(&mut bu, br).clicked() {
+            acts.push(Act::Press(Target::CopyPlaying));
+        }
+        return;
+    }
     // On the right: a switch over the card (pressed apart from it), or the way in.
     let switch = match target {
         Target::FastWalk => Some(Target::FastWalk),
@@ -362,7 +443,7 @@ fn said(ui: &mut Ui, cx: &Cx, index: usize, rect: Rect, menu: &Menu) {
     widgets::frame(&p, r, theme::CARD_RADIUS, theme::surface());
     let chip = Rect::from_min_size(r.min + vec2(INSET, 22.0), vec2(36.0, 36.0));
     p.rect_filled(chip, theme::radius(11.0), theme::alpha(theme::ACCENT, 0.12));
-    orb_face(&p, chip.center(), 10.0);
+    n4n0_face(&p, chip.center(), 10.0);
     let caption = match (&menu.heard, menu.heard_private) {
         (None, _) => "N4N0",
         (Some(_), true) => "You said",
@@ -380,7 +461,7 @@ fn said(ui: &mut Ui, cx: &Cx, index: usize, rect: Rect, menu: &Menu) {
 }
 
 /// N4N0 itself, `radius` large: its green dot with its eyes, as the menu's back shows it.
-fn orb_face(p: &Painter, center: Pos2, radius: f32) {
+fn n4n0_face(p: &Painter, center: Pos2, radius: f32) {
     let s = radius / 26.0;
     p.circle_filled(center, radius, theme::ACCENT);
     for side in [-1.0, 1.0] {
@@ -469,9 +550,77 @@ fn youtube(ui: &mut Ui, cx: &Cx, menu: &Menu, picture: &dyn Fn(&str) -> Option<T
             acts.push(Act::Press(Target::Search));
         }
     });
+    // The card dropped from here, out in the world: taken back from the top of the page.
+    card_out(ui, cx, 2, acts);
     match menu.page {
         Page::Results => results(ui, cx, menu, picture, copied, acts),
         _ => suggestions(ui, cx, menu, acts),
+    }
+}
+
+/// The link card out in the world (dropped from the results or the music): its title and link, the time it has left,
+/// and Take back.
+fn card_out(ui: &mut Ui, cx: &Cx, index: usize, acts: &mut Vec<Act>) {
+    let Some(card) = cx.snap.n4n0.card.as_ref() else { return };
+    let left = match card.left {
+        0..60 => "less than a minute left".to_string(),
+        s => format!("{} min left", s.div_ceil(60)),
+    };
+    let sub = format!("In the world, where anyone near can grab it · {left}");
+    section(ui, cx, index, icons::HAND_DEPOSIT, "Your link card is out", Some(&sub), |ui| {
+        let title = if card.title.trim().is_empty() { "Link card" } else { card.title.as_str() };
+        let shown = card.link.strip_prefix("https://").unwrap_or(&card.link);
+        widgets::field(ui, title, Some(shown.strip_prefix("www.").unwrap_or(shown)), 150.0, |ui| {
+            let take = Button::new("Take back").icon(icons::X_CIRCLE).size(Size::Sm).width(150.0).hint("Takes the card out of the world");
+            if take.id_salt("orbiters-home-take-back").show(ui).clicked() {
+                acts.push(Act::Press(Target::TakeBack));
+            }
+        });
+    });
+}
+
+/// Where what plays is, as a bar to drag or click along (where the app lets others move in its timeline), the time at
+/// either end; an app that does not says so under it.
+fn timeline(ui: &mut Ui, media: &Media, acts: &mut Vec<Act>) {
+    let Some(length) = media.duration.filter(|d| *d > 0) else { return };
+    let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), 30.0), Sense::hover());
+    let label_w = 58.0;
+    let bar = Rect::from_min_max(pos2(row.left() + label_w, row.center().y - 3.0), pos2(row.right() - label_w, row.center().y + 3.0));
+    let id = Id::unique("orbiters-home-timeline");
+    let sense = if media.can_seek { Sense::click_and_drag() } else { Sense::hover() };
+    let resp = ui.interact(bar.expand2(vec2(10.0, 12.0)), id, sense);
+    let pointer = resp.interact_pointer_pos().or(resp.hover_pos()).map(|p| ((p.x - bar.left()) / bar.width()).clamp(0.0, 1.0));
+    let held = media.can_seek && (resp.dragged() || resp.is_pointer_button_down_on());
+    let at = media.position.unwrap_or(0).min(length);
+    let fraction = match (held, pointer) {
+        (true, Some(f)) => f,
+        _ => at as f32 / length as f32,
+    };
+    if media.can_seek && (resp.drag_stopped() || resp.clicked()) {
+        if let Some(f) = pointer {
+            acts.push(Act::Seek((f * length as f32).round() as u32));
+        }
+    }
+    if media.can_seek {
+        resp.clone().on_hover_cursor(CursorIcon::PointingHand);
+    }
+    let hover = anim::toggle(ui.ctx(), id.with("hover"), media.can_seek && (resp.hovered() || held), Spring::SNAPPY);
+    let p = ui.painter();
+    p.rect_filled(bar, theme::radius(3.0), theme::white(0.08));
+    let filled = Rect::from_min_max(bar.min, pos2(bar.left() + bar.width() * fraction, bar.max.y));
+    p.rect_filled(filled, theme::radius(3.0), if media.can_seek { theme::ACCENT } else { theme::FG_3 });
+    if media.can_seek {
+        p.circle_filled(pos2(filled.right(), bar.center().y), 4.0 + 3.0 * hover, theme::FG);
+    }
+    let shown_at = if held { (fraction * length as f32).round() as u64 } else { at as u64 };
+    let time = |s: u64| Txt::new(orbiters_n4n0_core::menu::clock(s), 12.0).color(theme::FG_3);
+    widgets::text(p, pos2(row.left(), row.center().y), Align2::LEFT_CENTER, &time(shown_at));
+    widgets::text(p, pos2(row.right(), row.center().y), Align2::RIGHT_CENTER, &time(length as u64));
+    if !media.can_seek {
+        let app = if media.app.is_empty() { "This player" } else { media.app.as_str() };
+        let (note, _) = ui.allocate_exact_size(vec2(ui.available_width(), 18.0), Sense::hover());
+        let txt = Txt::new(format!("{app} lets no app move in its timeline"), 12.0).color(theme::FG_4);
+        widgets::text(ui.painter(), pos2(bar.left(), note.center().y), Align2::LEFT_CENTER, &txt);
     }
 }
 
@@ -498,28 +647,31 @@ fn suggestions(ui: &mut Ui, cx: &Cx, menu: &Menu, acts: &mut Vec<Act>) {
 
 fn results(ui: &mut Ui, cx: &Cx, menu: &Menu, picture: &dyn Fn(&str) -> Option<TextureId>, copied: Option<&str>, acts: &mut Vec<Act>) {
     let sub = layout::text(menu, Content::ResultsTitle);
-    section(ui, cx, 2, icons::YOUTUBE_LOGO, "Results", Some(&sub), |ui| {
+    // As wide as the page: the results go side by side on wide ones.
+    section_up_to(ui, cx, f32::INFINITY, 2, icons::YOUTUBE_LOGO, "Results", Some(&sub), |ui| {
         ui.add_space(4.0);
         if menu.loading() {
-            for i in 0..3 {
-                if i > 0 {
+            row_columns(ui, "orbiters-home-results", ROW_MIN_W, ROW_GAP, 3, |ui, _, first| {
+                if !first {
                     widgets::separator(ui);
                 }
                 placeholder_row(ui);
-            }
+            });
             return;
         }
-        for (i, video) in menu.page_results().iter().enumerate() {
-            if i > 0 {
+        let results = menu.page_results();
+        row_columns(ui, "orbiters-home-results", ROW_MIN_W, ROW_GAP, results.len(), |ui, i, first| {
+            if !first {
                 widgets::separator(ui);
             }
+            let video = &results[i];
             // After its Copy link, the row offers Drop (the avatar's screen shows the card in the world), and says it was
             // copied as long as it does.
             let drop = !layout::target_state(menu, Target::Drop(i as u8)).hidden;
             if let Some(target) = result_row(ui, i, video, picture(&video.id), drop || copied == Some(video.id.as_str()), drop) {
                 acts.push(Act::Press(target));
             }
-        }
+        });
         if menu.has_previous() || menu.has_next() {
             widgets::separator(ui);
             if let Some(target) = pager(ui, menu) {
@@ -658,7 +810,13 @@ fn call(ui: &mut Ui, cx: &Cx, menu: &Menu, acts: &mut Vec<Act>) {
 }
 
 fn photo(ui: &mut Ui, cx: &Cx, menu: &Menu, blocked: Option<&str>, acts: &mut Vec<Act>) {
-    top(ui, cx, "3D picture", &layout::text(menu, Content::PhotoStatus), acts);
+    // What stopped the last picture ("Open the camera before") shows by the button, plainly.
+    let warning = menu.notice.as_deref().filter(|_| menu.countdown.is_none());
+    let sub = match warning {
+        Some(_) => "VRChat's camera flies around what it looks at".to_string(),
+        None => layout::text(menu, Content::PhotoStatus),
+    };
+    top(ui, cx, "3D picture", &sub, acts);
     section(ui, cx, 1, icons::CUBE_FOCUS, "Camera", Some("The timer and the flight stay as chosen"), |ui| {
         let mut timer = menu.photo_timer;
         let timers: Vec<SegOption<u32>> = TIMERS.iter().zip(TIMER_LABELS).map(|(&t, label)| SegOption::new(t, label)).collect();
@@ -703,11 +861,18 @@ fn photo(ui: &mut Ui, cx: &Cx, menu: &Menu, blocked: Option<&str>, acts: &mut Ve
         if take.width(w).show_at(ui, Rect::from_min_size(row.min, vec2(w, 40.0))).clicked() {
             acts.push(Act::Press(Target::Take));
         }
+        if let Some(warning) = warning {
+            let x = row.left() + w + 16.0;
+            let p = ui.painter();
+            widgets::icon(p, pos2(x + 9.0, row.center().y), icons::WARNING, 18.0, theme::WARN);
+            let txt = Txt::new(warning, 14.0).weight(weight::SEMIBOLD).color(theme::WARN);
+            widgets::text_truncated(p, pos2(x + 26.0, row.center().y), Align2::LEFT_CENTER, &txt, (row.right() - x - 26.0).max(40.0));
+        }
         ui.add_space(8.0);
     });
 }
 
-fn music(ui: &mut Ui, cx: &Cx, menu: &Menu, picture: &dyn Fn(&str) -> Option<TextureId>, acts: &mut Vec<Act>) {
+fn music(ui: &mut Ui, cx: &Cx, menu: &Menu, picture: &dyn Fn(&str) -> Option<TextureId>, copied: Option<&str>, acts: &mut Vec<Act>) {
     let media = menu.media.as_ref().filter(|m| !m.title.is_empty());
     let sub = match media {
         Some(_) => layout::text(menu, Content::MediaState),
@@ -715,71 +880,130 @@ fn music(ui: &mut Ui, cx: &Cx, menu: &Menu, picture: &dyn Fn(&str) -> Option<Tex
     };
     top(ui, cx, "Music", &sub, acts);
     let from = media.map(|m| m.app.as_str()).filter(|app| !app.is_empty()).map(|app| format!("From {app}"));
-    section(ui, cx, 1, icons::MUSIC_NOTES, "Now playing", from.as_deref(), |ui| {
-        ui.add_space(14.0);
-        let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), 108.0), Sense::hover());
-        let art = Rect::from_min_size(row.min, vec2(192.0, 108.0));
-        let controls_w = 40.0 + 10.0 + 48.0 + 10.0 + 40.0;
-        {
-            let p = ui.painter();
-            match media.and_then(|m| m.art.as_deref()).and_then(picture) {
-                Some(texture) => thumbnail(p, art, Some(texture), 12.0),
-                None => {
-                    thumbnail(p, art, None, 12.0);
-                    widgets::icon(p, art.center(), icons::MUSIC_NOTES, 30.0, theme::FG_4);
+    let mut m = super::Masonry::new(ui, "home-music");
+    m.add(1, |ui| {
+        section(ui, cx, 1, icons::MUSIC_NOTES, "Now playing", from.as_deref(), |ui| {
+            ui.add_space(14.0);
+            let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), 108.0), Sense::hover());
+            let art = Rect::from_min_size(row.min, vec2(192.0, 108.0));
+            let controls_w = 40.0 + 10.0 + 48.0 + 10.0 + 40.0;
+            {
+                let p = ui.painter();
+                match media.and_then(|m| m.art.as_deref()).and_then(picture) {
+                    Some(texture) => thumbnail(p, art, Some(texture), 12.0),
+                    None => {
+                        thumbnail(p, art, None, 12.0);
+                        widgets::icon(p, art.center(), icons::MUSIC_NOTES, 30.0, theme::FG_4);
+                    }
+                }
+                let x = art.right() + 20.0;
+                let text_w = (row.right() - x - if media.is_some() { controls_w + 24.0 } else { 0.0 }).max(80.0);
+                let lines = [
+                    (Content::MediaTitle, 26.0, Txt::new("", 17.0).weight(weight::SEMIBOLD)),
+                    (Content::MediaArtist, 52.0, Txt::new("", 13.0).color(theme::FG_2)),
+                    (Content::MediaAlbum, 74.0, Txt::new("", 12.5).color(theme::FG_3)),
+                ];
+                for (content, dy, style) in lines {
+                    let line = Txt { text: layout::text(menu, content), ..style };
+                    widgets::text_truncated(p, pos2(x, row.top() + dy), Align2::LEFT_CENTER, &line, text_w);
                 }
             }
-            let x = art.right() + 20.0;
-            let text_w = (row.right() - x - if media.is_some() { controls_w + 24.0 } else { 0.0 }).max(80.0);
-            let lines = [
-                (Content::MediaTitle, 26.0, Txt::new("", 17.0).weight(weight::SEMIBOLD)),
-                (Content::MediaArtist, 52.0, Txt::new("", 13.0).color(theme::FG_2)),
-                (Content::MediaAlbum, 74.0, Txt::new("", 12.5).color(theme::FG_3)),
-            ];
-            for (content, dy, style) in lines {
-                let line = Txt { text: layout::text(menu, content), ..style };
-                widgets::text_truncated(p, pos2(x, row.top() + dy), Align2::LEFT_CENTER, &line, text_w);
-            }
-        }
-        if let Some(m) = media {
-            let (cy, mut x) = (row.center().y, row.right() - controls_w);
-            if icon_button(ui, Rect::from_min_size(pos2(x, cy - 20.0), Vec2::splat(40.0)), icons::SKIP_BACK, "Previous", m.can_previous) {
-                acts.push(Act::Press(Target::MediaPrevious));
-            }
-            x += 50.0;
-            let play = Button::new("")
-                .icon(if m.playing { icons::PAUSE } else { icons::PLAY })
-                .variant(Variant::Primary)
-                .size(Size::Lg)
-                .width(48.0)
-                .enabled(m.can_play_pause)
-                .hint(if m.playing { "Pause" } else { "Play" })
-                .id_salt("orbiters-home-play");
-            if play.show_at(ui, Rect::from_min_size(pos2(x, cy - 24.0), Vec2::splat(48.0))).clicked() {
-                acts.push(Act::Press(Target::MediaPlayPause));
-            }
-            x += 58.0;
-            if icon_button(ui, Rect::from_min_size(pos2(x, cy - 20.0), Vec2::splat(40.0)), icons::SKIP_FORWARD, "Next", m.can_next) {
-                acts.push(Act::Press(Target::MediaNext));
-            }
-        }
-        ui.add_space(14.0);
-        if let Some(volume) = menu.volume {
-            widgets::separator(ui);
-            widgets::field(ui, "Volume", Some("This computer's speakers."), 340.0, |ui| {
-                let mut percent = volume.percent as f32;
-                let format = |v: f32| if volume.muted { "Muted".to_string() } else { format!("{v:.0} %") };
-                if widgets::slider(ui, "orbiters-home-volume", &mut percent, 0.0..=100.0, 1.0, format) {
-                    acts.push(Act::Volume(percent.round() as u8));
+            if let Some(m) = media {
+                let (cy, mut x) = (row.center().y, row.right() - controls_w);
+                // Previous, or back to the start of what has nothing before it.
+                let previous = !layout::target_state(menu, Target::MediaPrevious).hidden;
+                if icon_button(ui, Rect::from_min_size(pos2(x, cy - 20.0), Vec2::splat(40.0)), icons::SKIP_BACK, "Previous", previous) {
+                    acts.push(Act::Press(Target::MediaPrevious));
                 }
-                ui.add_space(6.0);
-                let (glyph, label) = if volume.muted { (icons::SPEAKER_X, "Unmute") } else { (icons::SPEAKER_HIGH, "Mute") };
-                if IconButton::new(glyph, label).show(ui).clicked() {
-                    acts.push(Act::Press(Target::Mute));
+                x += 50.0;
+                let play = Button::new("")
+                    .icon(if m.playing { icons::PAUSE } else { icons::PLAY })
+                    .variant(Variant::Primary)
+                    .size(Size::Lg)
+                    .width(48.0)
+                    .enabled(m.can_play_pause)
+                    .hint(if m.playing { "Pause" } else { "Play" })
+                    .id_salt("orbiters-home-play");
+                if play.show_at(ui, Rect::from_min_size(pos2(x, cy - 24.0), Vec2::splat(48.0))).clicked() {
+                    acts.push(Act::Press(Target::MediaPlayPause));
                 }
-            });
-        }
+                x += 58.0;
+                if icon_button(ui, Rect::from_min_size(pos2(x, cy - 20.0), Vec2::splat(40.0)), icons::SKIP_FORWARD, "Next", m.can_next) {
+                    acts.push(Act::Press(Target::MediaNext));
+                }
+            }
+            if let Some(m) = media.filter(|m| m.duration.is_some_and(|d| d > 0)) {
+                ui.add_space(8.0);
+                timeline(ui, m, acts);
+            }
+            ui.add_space(14.0);
+            // The YouTube video a browser or YouTube's app plays, found on YouTube: its link copied, then dropped as a card,
+            // as a search result's.
+            if let Some((video, link)) = media.and_then(|m| Some((m.video.as_deref()?, m.link()?))) {
+                widgets::separator(ui);
+                let drop = !layout::target_state(menu, Target::DropPlaying).hidden;
+                let was_copied = drop || copied == Some(video);
+                let width = 124.0 + if drop { 8.0 + 96.0 } else { 0.0 };
+                let shown = link.strip_prefix("https://www.").unwrap_or(&link);
+                widgets::field(ui, "On YouTube", Some(shown), width, |ui| {
+                    ui.spacing_mut().item_spacing = vec2(8.0, 0.0);
+                    let (label, glyph) = if was_copied { ("Copied", icons::CHECK) } else { ("Copy link", icons::COPY) };
+                    let copy = Button::new(label).icon(glyph).size(Size::Sm).width(124.0).id_salt("orbiters-home-copy-playing");
+                    if copy.hint("Paste it in a world's video player").show(ui).clicked() {
+                        acts.push(Act::Press(Target::CopyPlaying));
+                    }
+                    if drop {
+                        let hint = "Drop it in the world as a card: whoever grabs it copies the link";
+                        let button = Button::new("Drop").icon(icons::HAND_DEPOSIT).size(Size::Sm).variant(Variant::Primary).width(96.0).hint(hint);
+                        if button.id_salt("orbiters-home-drop-playing").show(ui).clicked() {
+                            acts.push(Act::Press(Target::DropPlaying));
+                        }
+                    }
+                });
+            }
+            if let Some(volume) = menu.volume {
+                widgets::separator(ui);
+                widgets::field(ui, "Volume", Some("This computer's speakers."), 340.0, |ui| {
+                    let mut percent = volume.percent as f32;
+                    let format = |v: f32| if volume.muted { "Muted".to_string() } else { format!("{v:.0} %") };
+                    if widgets::slider(ui, "orbiters-home-volume", &mut percent, 0.0..=100.0, 1.0, format) {
+                        acts.push(Act::Volume(percent.round() as u8));
+                    }
+                    ui.add_space(6.0);
+                    let (glyph, label) = if volume.muted { (icons::SPEAKER_X, "Unmute") } else { (icons::SPEAKER_HIGH, "Mute") };
+                    if IconButton::new(glyph, label).show(ui).clicked() {
+                        acts.push(Act::Press(Target::Mute));
+                    }
+                });
+            }
+        })
     });
+    m.add(2, |ui| card_out(ui, cx, 2, acts));
+    // What the world's video player plays (VRChat's log): watched here from where the world is, or saved.
+    if let Some(video) = &menu.world_video {
+        let title = video.title.clone().unwrap_or_else(|| video.url.clone());
+        m.add(3, |ui| {
+            section(ui, cx, 3, icons::MONITOR_PLAY, "In the world", Some("What the world's video player plays now"), |ui| {
+                widgets::field(ui, &title, Some(&video.url), 260.0, |ui| {
+                    ui.spacing_mut().item_spacing = vec2(8.0, 0.0);
+                    if Button::new("Save").icon(icons::FLOPPY_DISK).size(Size::Sm).show(ui).clicked() {
+                        acts.push(Act::Press(Target::SaveVideo));
+                    }
+                    if Button::new("Watch")
+                        .icon(icons::MONITOR_PLAY)
+                        .variant(Variant::Primary)
+                        .size(Size::Sm)
+                        .hint("Opens it in your browser, where the world's player is")
+                        .show(ui)
+                        .clicked()
+                    {
+                        acts.push(Act::Press(Target::WatchVideo));
+                    }
+                });
+            })
+        });
+    }
+    m.finish(ui);
 }
 
 fn light(ui: &mut Ui, cx: &Cx, menu: &Menu, acts: &mut Vec<Act>) {
@@ -810,6 +1034,203 @@ fn light(ui: &mut Ui, cx: &Cx, menu: &Menu, acts: &mut Vec<Act>) {
                 acts.push(Act::Press(Target::LightLevel(level as u8)));
             }
         });
+    });
+}
+
+/// Tracking smoothing: the switch, each kind of device's strength, and what the driver does now.
+fn tracking(ui: &mut Ui, cx: &Cx, menu: &Menu, acts: &mut Vec<Act>) {
+    let Some(tracking) = menu.tracking.clone() else {
+        top(ui, cx, "Tracking", "Smoother trackers, controllers and headset", acts);
+        return note_card(ui, cx, 1, icons::VIRTUAL_REALITY, "Not on this computer", &layout::text(menu, Content::TrackingNote));
+    };
+    top(ui, cx, "Tracking", &tracking.note, acts);
+    let sub = "Less jitter, a little more lag: SteamVR's prediction is damped and each device's motion eased";
+    section(ui, cx, 1, icons::VIRTUAL_REALITY, "Smooth tracking", Some(sub), |ui| {
+        widgets::field(ui, "Smoothing", Some("Orbiters - N4N0's SteamVR driver: on, off and strengths at once"), 48.0, |ui| {
+            let mut on = tracking.on;
+            if widgets::toggle(ui, "orbiters-home-tracking", &mut on) {
+                acts.push(Act::Press(Target::TrackingSwitch));
+            }
+        });
+        let hints = ["Keep it low: a smoothed headset lags behind your head", "For your hands", "Full-body trackers jitter most"];
+        for (k, kind) in TRACKING_KINDS.iter().enumerate() {
+            widgets::separator(ui);
+            let mut level = tracking.levels[k] as usize;
+            let levels: Vec<SegOption<usize>> = SMOOTHING_LABELS.iter().enumerate().map(|(i, name)| SegOption::new(i, name)).collect();
+            widgets::field(ui, kind, Some(hints[k]), 320.0, |ui| {
+                if widgets::segmented(ui, &format!("orbiters-home-smoothing-{k}"), &mut level, &levels, tracking.on) {
+                    acts.push(Act::Press(Target::Smoothing((k * 4 + level) as u8)));
+                }
+            });
+        }
+    });
+}
+
+/// Suggest features: the idea written here, sent to the Orbiters team.
+fn suggest(ui: &mut Ui, cx: &Cx, menu: &Menu, acts: &mut Vec<Act>) {
+    top(ui, cx, "Suggest a feature", "What should N4N0 do next? The Orbiters team reads every idea", acts);
+    let note = layout::text(menu, Content::SuggestNote);
+    section(ui, cx, 1, icons::CHAT_TEARDROP_TEXT, "Your idea", (!note.is_empty()).then_some(note.as_str()), |ui| {
+        ui.add_space(4.0);
+        let mut text = menu.suggestion.clone();
+        let w = ui.available_width();
+        let frame = egui::Frame::NONE.fill(theme::control()).corner_radius(theme::radius(12.0)).inner_margin(egui::Margin::same(12));
+        frame.show(ui, |ui| {
+            let edit = egui::TextEdit::multiline(&mut text)
+                .id_salt("orbiters-home-suggestion")
+                .hint_text("A feature, a fix, anything N4N0 or Orbiters - N4N0 could do better")
+                .frame(egui::Frame::NONE)
+                .desired_rows(5)
+                .desired_width(w - 24.0)
+                .char_limit(orbiters_n4n0_core::menu::SUGGESTION_MAX)
+                .font(egui::FontId::proportional(14.0));
+            ui.add(edit);
+        });
+        if text != menu.suggestion {
+            acts.push(Act::Suggestion(text.clone()));
+        }
+        ui.add_space(12.0);
+        let ready = !text.trim().is_empty() && !menu.sending;
+        let label = if menu.sending { "Sending…" } else { "Send" };
+        let button = Button::new(label).icon(icons::PAPER_PLANE_TILT).variant(Variant::Primary).enabled(ready);
+        let bw = button.desired_width(ui);
+        let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), 36.0), Sense::hover());
+        if button.show_at(ui, Rect::from_min_size(pos2(row.right() - bw, row.top()), vec2(bw, 36.0))).clicked() {
+            acts.push(Act::Press(Target::SuggestSend));
+        }
+    });
+}
+
+/// The QR code scanner: what it does now (VRChat's stream camera is read while this page shows), how to turn the stream
+/// camera on, and the last link it opened with Copy link and Open again.
+fn qr(ui: &mut Ui, cx: &Cx, menu: &Menu, acts: &mut Vec<Act>) {
+    top(ui, cx, "QR code scanner", "Point VRChat's stream camera at a QR code: its web link opens in your browser", acts);
+    let scanner = &menu.qr;
+    let note = layout::qr_note(scanner);
+    let mut m = super::Masonry::new(ui, "home-qr");
+    m.add(1, |ui| {
+        section(
+            ui,
+            cx,
+            1,
+            icons::QR_CODE,
+            "VRChat's stream camera",
+            Some("Read about three times a second while this page shows, for two minutes at most"),
+            |ui| {
+                use orbiters_n4n0_core::qr::QrPhase;
+                let tone = match scanner.phase {
+                    QrPhase::Looking => Tone::Ok,
+                    QrPhase::Starting => Tone::Info,
+                    QrPhase::NoCamera => Tone::Warn,
+                    QrPhase::Off | QrPhase::Stopped => Tone::Off,
+                };
+                let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), 64.0), Sense::hover());
+                let p = ui.painter();
+                widgets::status_dot(p, pos2(row.left() + 5.0, row.top() + 20.0), tone, scanner.scanning());
+                let state = Txt::new(layout::qr_state(scanner), 15.0).weight(weight::SEMIBOLD);
+                widgets::text(p, pos2(row.left() + 20.0, row.top() + 20.0), Align2::LEFT_CENTER, &state);
+                let room = row.width() - 200.0;
+                widgets::text_truncated(p, pos2(row.left() + 20.0, row.top() + 46.0), Align2::LEFT_CENTER, &Txt::new(&note, 12.5).color(theme::FG_3), room);
+                if !scanner.scanning() {
+                    let button = Button::new("Scan again").icon(icons::QR_CODE).variant(Variant::Primary);
+                    let bw = button.desired_width(ui);
+                    if button.show_at(ui, Rect::from_min_size(pos2(row.right() - bw, row.center().y - 18.0), vec2(bw, 36.0))).clicked() {
+                        acts.push(Act::Press(Target::QrAgain));
+                    }
+                }
+            },
+        )
+    });
+    let link = scanner.link.as_deref();
+    let shown = link.map_or_else(|| "None yet".to_string(), |l| layout::short_link(l, 90));
+    let policy = "Only http and https links open, each once while it stays before the camera";
+    let notice = menu.notice.clone();
+    m.add(2, |ui| {
+        section(ui, cx, 2, icons::LINK_SIMPLE, "Last link opened", Some(notice.as_deref().unwrap_or(policy)), |ui| {
+            widgets::field(ui, &shown, None, 260.0, |ui| {
+                if Button::new("Open again").icon(icons::ARROW_SQUARE_OUT).variant(Variant::Secondary).enabled(link.is_some()).show(ui).clicked() {
+                    acts.push(Act::Press(Target::QrOpen));
+                }
+                ui.add_space(8.0);
+                if Button::new("Copy link").icon(icons::COPY).variant(Variant::Secondary).enabled(link.is_some()).show(ui).clicked() {
+                    acts.push(Act::Press(Target::QrCopy));
+                }
+            });
+        })
+    });
+    m.add(3, |ui| {
+        note_card(
+            ui,
+            cx,
+            3,
+            icons::INFO,
+            "Turning the stream camera on",
+            "In VRChat, open the camera, choose Stream, then switch Spout Stream on in the camera's settings. Settings › Spout sender picks another sender.",
+        )
+    });
+    m.finish(ui);
+}
+
+/// Previous instances: Orbiters' VRChat account invites the player back to one (Invite me), once it is their friend (Add
+/// Orbiters as a friend, with its name and page, shows above the list when Orbiters asked for it).
+fn instances(ui: &mut Ui, cx: &Cx, menu: &Menu, acts: &mut Vec<Act>) {
+    top(ui, cx, "Previous instances", &layout::text(menu, Content::InstancesTitle), acts);
+    let mut index = 1;
+    if let Some(account) = &menu.invite_account {
+        let why = "VRChat lets Orbiters invite only its friends: in VRChat, Social, search the name, Add friend; then Try again";
+        section_up_to(ui, cx, f32::INFINITY, index, icons::USER, "Add Orbiters as a friend", Some(why), |ui| {
+            let link = layout::short_link(&account.link, 70);
+            widgets::field(ui, &account.name, Some(&link), 420.0, |ui| {
+                let again =
+                    Button::new("Try again").icon(icons::PAPER_PLANE_TILT).variant(Variant::Primary).enabled(!menu.invite_waiting && menu.inviting.is_some());
+                if again.show(ui).clicked() {
+                    acts.push(Act::Press(Target::InviteAgain));
+                }
+                ui.add_space(8.0);
+                if Button::new("Open link").icon(icons::ARROW_SQUARE_OUT).variant(Variant::Secondary).show(ui).clicked() {
+                    acts.push(Act::Press(Target::OpenFriendLink));
+                }
+                ui.add_space(8.0);
+                if Button::new("Copy name").icon(icons::COPY).variant(Variant::Secondary).show(ui).clicked() {
+                    acts.push(Act::Press(Target::CopyFriendName));
+                }
+            });
+        });
+        index += 1;
+    }
+    if menu.instances.is_empty() {
+        let text = if menu.instances_ready { "Worlds you join in VRChat show here, newest first." } else { "Reading VRChat's logs…" };
+        return note_card(ui, cx, index, icons::GLOBE, "No instance yet", text);
+    }
+    let sub = "Orbiters' VRChat account invites you back: open the invite in VRChat";
+    // As wide as the page: the instances go side by side on wide ones.
+    section_up_to(ui, cx, f32::INFINITY, index, icons::GLOBE, "Instances you were in", Some(sub), |ui| {
+        ui.add_space(4.0);
+        row_columns(ui, "orbiters-home-instances", ROW_MIN_W, ROW_GAP, menu.page_instances().len(), |ui, i, first| {
+            if !first {
+                widgets::separator(ui);
+            }
+            let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), 60.0), Sense::hover());
+            let invite =
+                Button::new("Invite me").icon(icons::PAPER_PLANE_TILT).size(Size::Sm).enabled(!menu.invite_waiting).id_salt(("orbiters-home-invite", i));
+            let invite_w = invite.desired_width(ui);
+            {
+                let p = ui.painter();
+                let room = r.width() - invite_w - 16.0;
+                let world = Txt::new(layout::text(menu, Content::InstanceWorld(i as u8)), 13.5).weight(weight::MEDIUM);
+                widgets::text_truncated(p, pos2(r.left(), r.center().y - 9.0), Align2::LEFT_CENTER, &world, room);
+                let meta = Txt::new(layout::text(menu, Content::InstanceMeta(i as u8)), 12.0).color(theme::FG_3);
+                widgets::text_truncated(p, pos2(r.left(), r.center().y + 11.0), Align2::LEFT_CENTER, &meta, room);
+            }
+            if invite.show_at(ui, Rect::from_min_size(pos2(r.right() - invite_w, r.center().y - 16.0), vec2(invite_w, 32.0))).clicked() {
+                acts.push(Act::Press(Target::InviteMe(i as u8)));
+            }
+        });
+        if menu.has_previous() || menu.has_next() {
+            if let Some(target) = pager(ui, menu) {
+                acts.push(Act::Press(target));
+            }
+        }
     });
 }
 
@@ -851,8 +1272,8 @@ fn swatches(ui: &mut Ui, chosen: u8) -> Option<u8> {
 mod tests {
     use super::*;
     use crate::backend::{Backend, Ctl};
-    use crate::ipc::OrbCommand;
-    use crate::state::{OrbLight, Snapshot};
+    use crate::ipc::N4n0Command;
+    use crate::state::{N4n0Light, Snapshot};
     use egui::{Event, Modifiers, PointerButton, RawInput};
     use orbiters_ui::toast::Toasts;
     use std::path::PathBuf;
@@ -862,12 +1283,12 @@ mod tests {
     #[derive(Default)]
     struct Recorder {
         patches: Mutex<Vec<serde_json::Value>>,
-        orb: Mutex<Vec<OrbCommand>>,
+        n4n0: Mutex<Vec<N4n0Command>>,
     }
 
     impl Backend for Recorder {
-        fn orb(&self, command: OrbCommand) {
-            self.orb.lock().unwrap().push(command);
+        fn n4n0(&self, command: N4n0Command) {
+            self.n4n0.lock().unwrap().push(command);
         }
         fn patch_settings(&self, patch: serde_json::Value) {
             self.patches.lock().unwrap().push(patch);
@@ -936,7 +1357,7 @@ mod tests {
             let recorder = Arc::new(Recorder::default());
             let ctl: Ctl = recorder.clone();
             let mut snap = Snapshot::new(Settings::default());
-            snap.orb.light = Some(OrbLight { on: true, color: 1, level: 0.6 });
+            snap.n4n0.light = Some(N4n0Light { on: true, color: 1, level: 0.6 });
             Self { ctx, recorder, ctl, snap, toasts: Toasts::default(), state: State::default(), time: 0.0 }
         }
 
@@ -1014,6 +1435,30 @@ mod tests {
     }
 
     #[test]
+    fn the_qr_code_scanner_scans_while_its_page_shows() {
+        let mut h = Harness::new();
+        h.settle();
+        // The third row: suggest, previous instances, the QR code scanner, then what N4N0 says.
+        let qr = pos2(640.0, 490.0);
+        h.press(qr);
+        h.release(qr);
+        assert_eq!(h.page(), Page::Qr);
+        assert!(matches!(h.recorder.n4n0.lock().unwrap().as_slice(), [N4n0Command::Qr { on: true }]));
+        h.settle();
+        // Back home: the scanner stops.
+        let back = pos2(60.0, 64.0);
+        h.press(back);
+        h.release(back);
+        assert_ne!(h.page(), Page::Qr);
+        assert!(matches!(h.recorder.n4n0.lock().unwrap().as_slice(), [N4n0Command::Qr { on: true }, N4n0Command::Qr { on: false }]));
+        h.settle();
+        // Previous instances, beside it, opens its own page.
+        h.press(pos2(397.0, 490.0));
+        h.release(pos2(397.0, 490.0));
+        assert_eq!(h.page(), Page::Instances);
+    }
+
+    #[test]
     fn a_switch_acts_alone_and_shows_its_change_at_once() {
         let mut h = Harness::new();
         h.settle();
@@ -1032,43 +1477,67 @@ mod tests {
         h.press(light);
         h.release(light);
         h.frame(Vec::new());
-        assert!(matches!(h.recorder.orb.lock().unwrap().as_slice(), [OrbCommand::Light { on: false, .. }]));
+        assert!(matches!(h.recorder.n4n0.lock().unwrap().as_slice(), [N4n0Command::Light { on: false, .. }]));
         assert!(!h.menu().light.expect("a light").on, "as switched, though the service still says on");
         assert_eq!(h.page(), Page::Home, "its card did not open the light's page");
     }
 
     #[test]
     fn the_states_page_saves_and_its_default_acts_on_the_press() {
-        use crate::state::{StateView, StatesView};
+        use crate::state::{AvatarView, StateView, StatesView};
         widgets::watch_controls();
         let mut h = Harness::new();
-        h.snap.orb.states = StatesView {
+        let states =
+            vec![StateView { id: "s1".into(), name: "Hoodie on".into(), parameters: 10, pose_parameters: 2, eye_height: Some(1.6), ..Default::default() }];
+        let party = StateView { id: "s9".into(), name: "Party".into(), ..Default::default() };
+        h.snap.n4n0.states = StatesView {
             avatar_id: Some("avtr_a".into()),
             avatar_name: Some("Rexouium".into()),
-            states: vec![StateView {
-                id: "s1".into(),
-                name: "Hoodie on".into(),
-                parameters: 10,
-                pose_parameters: 2,
-                eye_height: Some(1.6),
-                ..Default::default()
-            }],
+            states: states.clone(),
+            avatars: vec![
+                AvatarView { id: "avtr_a".into(), name: Some("Rexouium".into()), worn: true, states },
+                AvatarView { id: "avtr_b".into(), name: Some("Ultirex ✨".into()), worn: false, states: vec![party] },
+            ],
             ..Default::default()
         };
         h.settle();
-        // The States card, the third of the second row: its page on the press.
+        // The States card, the third of the second row: its page on the press, a card per avatar.
         let card = pos2(646.0, 348.0);
         h.press(card);
         assert_eq!(h.page(), Page::States, "open on the press");
         h.release(card);
         h.settle();
+        assert!(widgets::control(&h.ctx, "Set as default").is_none(), "the avatars' cards first");
+        // Another avatar's card: its states, which apply only once it is worn; its default is its own.
+        let (other, _) = widgets::control(&h.ctx, "Ultirex ✨").expect("its card");
+        h.press(other.center());
+        h.release(other.center());
+        h.settle();
+        assert!(matches!(widgets::control(&h.ctx, "Apply"), Some((_, false))), "applied once it is worn");
+        let (default, _) = widgets::control(&h.ctx, "Set as default").expect("drawn");
+        h.press(default.center());
+        assert!(
+            matches!(h.recorder.n4n0.lock().unwrap().last(), Some(N4n0Command::States { action: StateAction::Default { id: Some(id) }, avatar: Some(a) }) if id == "s9" && a == "avtr_b"),
+            "{:?}",
+            h.recorder.n4n0.lock().unwrap()
+        );
+        h.release(default.center());
+        // Back to the cards, then the avatar worn's.
+        let (back, _) = widgets::control(&h.ctx, "States").expect("back to the cards");
+        h.press(back.center());
+        h.release(back.center());
+        h.settle();
+        let (worn, _) = widgets::control(&h.ctx, "Rexouium").expect("its card");
+        h.press(worn.center());
+        h.release(worn.center());
+        h.settle();
         // Set as default is a choice: asked on the press, before the release.
         let (default, _) = widgets::control(&h.ctx, "Set as default").expect("drawn");
         h.press(default.center());
         assert!(
-            matches!(h.recorder.orb.lock().unwrap().last(), Some(OrbCommand::States { action: StateAction::Default { id: Some(id) } }) if id == "s1"),
+            matches!(h.recorder.n4n0.lock().unwrap().last(), Some(N4n0Command::States { action: StateAction::Default { id: Some(id) }, avatar: None }) if id == "s1"),
             "{:?}",
-            h.recorder.orb.lock().unwrap()
+            h.recorder.n4n0.lock().unwrap()
         );
         h.release(default.center());
         h.frame(Vec::new());
@@ -1078,8 +1547,8 @@ mod tests {
         h.press(save.center());
         h.release(save.center());
         assert!(matches!(
-            h.recorder.orb.lock().unwrap().last(),
-            Some(OrbCommand::States { action: StateAction::Save { name: Some(name) } }) if name == "State 2"
+            h.recorder.n4n0.lock().unwrap().last(),
+            Some(N4n0Command::States { action: StateAction::Save { name: Some(name), .. }, avatar: None }) if name == "State 2"
         ));
     }
 }

@@ -11,7 +11,7 @@ use orbiters_contracts::manifest::{ConsentInfo, WorldInfo};
 use orbiters_contracts::performance::calibration::Calibration;
 use orbiters_core::bundle::{self, SessionSummary};
 use orbiters_core::clock;
-use orbiters_core::osc::{Latest, Network, OscEvent, OscService, OscValue, AVATAR_CHANGE, DEPTH_FRAMES_PARAMETER, PARAMETERS_PREFIX};
+use orbiters_core::osc::{Latest, Network, OscEvent, OscService, OscValue, AVATAR_CHANGE, DEPTH_FRAMES_PARAMETER, PARAMETERS_PREFIX, RECORD_PARAMETER};
 use orbiters_core::protocol::{OscSample, PerformanceSpec, SourceSpec, StartCapture, WorkerCommand, WorkerEvent};
 use orbiters_core::reconstruction::Event as ReconstructEvent;
 use orbiters_core::settings::{Settings, WhilePlaying};
@@ -67,13 +67,7 @@ const MAX_LATEST: usize = Latest::MOST;
 fn osc_samples<'a>(address: &'a str, values: &'a [OscValue], at_ns: u64, initial: bool) -> impl Iterator<Item = OscSample> + 'a {
     let several = values.len() > 1;
     values.iter().enumerate().filter_map(move |(i, value)| {
-        Some(OscSample {
-            at_ns,
-            address: address.to_string(),
-            index: if several { Some(u8::try_from(i).ok()?) } else { None },
-            value: value.clone(),
-            initial,
-        })
+        Some(OscSample { at_ns, address: address.to_string(), index: if several { Some(u8::try_from(i).ok()?) } else { None }, value: value.clone(), initial })
     })
 }
 
@@ -126,20 +120,31 @@ pub struct Controller {
     /// The capture kit's toggles as they were before a recording started from the app switched them on (Some while
     /// the app drives them), and when the avatar last (re)loaded, which resets them.
     avatar_before: Mutex<Option<AvatarToggles>>,
+    /// Recording without the wearer, and what is known about the strip.
+    hide: Mutex<hide_self::HideRuntime>,
     avatar_changed_at: Mutex<Option<Instant>>,
     /// The Orbiters account's credential and a sign-in in progress (controller/account.rs).
     account_runtime: Mutex<account::AccountRuntime>,
+    vrchat_login: Mutex<vrchat_login::Runtime>,
     /// What this member added to the Map explorer, and the uploads' numbering (controller/maps.rs).
     maps_mine: Mutex<Option<MapsMine>>,
     upload_serial: AtomicU64,
     /// N4N0, the companion on the avatar (`orbiters_n4n0`; the service's side in controller/n4n0.rs).
     n4n0: orbiters_n4n0::Shared,
+    /// The 3D captures N4N0's menu lists and shares (controller/menu_shares.rs).
+    menu_shares: Mutex<menu_shares::MenuShares>,
     /// VRChat's frame rate per world, gathered for Orbiters (controller/performance.rs).
     performance: Mutex<performance::PerformanceRuntime>,
     /// A 3D picture under way (controller/burst.rs).
     burst: Mutex<burst::BurstRuntime>,
+    /// What My World asked for (controller/world_captures.rs).
+    world_captures: Mutex<world_captures::WorldCapturesRuntime>,
+    /// World feedback: the N4N0 world's lines, the queue to Orbiters, the menus' worlds (controller/world_feedback.rs).
+    world_feedback: Mutex<world_feedback::WorldFeedbackRuntime>,
     /// A scan under way (controller/scan.rs).
     scan: Mutex<scan::ScanRuntime>,
+    /// N4N0's camera rig while recording (controller/rig.rs).
+    rig: Mutex<rig::RigRuntime>,
     /// Calls with VRChat friends (controller/calls.rs).
     calls: Mutex<calls::CallsRuntime>,
     /// Updates of an installed app (controller/update.rs).
@@ -161,6 +166,8 @@ pub struct Controller {
     /// A switch of the kit back on after an avatar change waits (one at a time, for the newest avatar).
     kit_rearm: AtomicBool,
     /// The app quits: no capture worker starts again, nor a capture.
+    /// What tracking smoothing's driver does now (the service's keeper says), for N4N0's Tracking page.
+    tracking_note: Mutex<String>,
     quitting: AtomicBool,
 }
 
@@ -176,7 +183,6 @@ const SAVE_QUIET: Duration = Duration::from_millis(250);
 
 #[derive(Clone, Copy, Debug)]
 struct AvatarToggles {
-    record: bool,
     depth: bool,
 }
 
@@ -225,6 +231,17 @@ fn calibration_file() -> PathBuf {
     orbiters_core::paths::config_dir().join("calibration.json")
 }
 
+/// Talks to Orbiters' development environment (the server on this computer, its account and update feed) or to
+/// orbiters.cc, as the settings' Development environment switch says, whatever the Unity tools are set to.
+pub fn use_environment(development: bool) {
+    orbiters_core::account::choose_server(Some(if development {
+        orbiters_core::account::Server::Development
+    } else {
+        orbiters_core::account::Server::Production
+    }));
+    orbiters_update::set_development(development);
+}
+
 /// The calibration kept; one that cannot be read is kept beside (`calibration.json.bad-<time>`) before the next
 /// calibration replaces it. Tests read none (the person's config folder stays out of them).
 fn read_calibration() -> Option<StoredCalibration> {
@@ -260,18 +277,32 @@ fn calibration_info(stored: &StoredCalibration) -> CalibrationInfo {
 pub type Shared = Arc<Controller>;
 
 mod account;
+mod around;
 mod burst;
 mod calls;
 mod cleanup;
+mod dolly;
+pub(crate) mod hide_self;
 mod maps;
+pub(crate) mod menu_shares;
 mod n4n0;
 mod performance;
+mod rig;
 mod scan;
+pub mod shares;
 pub mod update;
+mod videos;
+pub mod vrchat_data;
+pub mod vrchat_login;
+pub mod vr_audio;
+mod world_captures;
+mod world_feedback;
 pub use account::open_url;
+pub(crate) use maps::{prepare as prepare_upload, Prepared};
 
 impl Controller {
     pub fn new(settings: Settings) -> Shared {
+        use_environment(settings.development);
         let mut snapshot = Snapshot::new(settings);
         let calibration = read_calibration();
         snapshot.steamvr.calibration = calibration.as_ref().map(calibration_info);
@@ -295,17 +326,23 @@ impl Controller {
             reconstruct_queue: Mutex::new(VecDeque::new()),
             camera_before: Mutex::new(None),
             avatar_before: Mutex::new(None),
+            hide: Mutex::new(hide_self::HideRuntime::default()),
             avatar_changed_at: Mutex::new(None),
             account_runtime: Mutex::new(account::AccountRuntime::default()),
+            vrchat_login: Mutex::new(vrchat_login::Runtime::default()),
             maps_mine: Mutex::new(None),
             upload_serial: AtomicU64::new(0),
             n4n0: {
                 let link = Arc::new(n4n0::Link(me.clone()));
                 orbiters_n4n0::N4n0::new(link.clone(), link, crate::device::platform(), n4n0::files())
             },
+            menu_shares: Mutex::new(menu_shares::MenuShares::default()),
             performance: Mutex::new(performance::PerformanceRuntime::default()),
             burst: Mutex::new(burst::BurstRuntime::default()),
+            world_captures: Mutex::new(world_captures::WorldCapturesRuntime::default()),
+            world_feedback: Mutex::new(world_feedback::WorldFeedbackRuntime::default()),
             scan: Mutex::new(scan::ScanRuntime::default()),
+            rig: Mutex::new(rig::RigRuntime::default()),
             calls: Mutex::new(calls::CallsRuntime::default()),
             updates: Mutex::new(update::UpdateRuntime::default()),
             cleanup: Mutex::new(cleanup::CleanupRuntime::default()),
@@ -315,13 +352,33 @@ impl Controller {
             osc_actions: orbiters_n4n0::Actions::default(),
             record_toggle: AtomicU8::new(TOGGLE_NONE),
             kit_rearm: AtomicBool::new(false),
+            tracking_note: Mutex::new(String::new()),
             quitting: AtomicBool::new(false),
         })
+    }
+
+    /// What tracking smoothing's driver does now, as the service's keeper found it.
+    pub fn set_tracking_note(&self, note: String) {
+        *self.tracking_note.lock().unwrap() = note;
+    }
+
+    pub fn tracking_note(&self) -> String {
+        self.tracking_note.lock().unwrap().clone()
     }
 
     /// Starts OSC, the worker and the watchers.
     pub fn start(self: &Shared) {
         self.start_osc();
+        // The computer's keyboard for N4N0's menu keyboard: its keys go to N4N0, off the hook's thread.
+        let (tx, rx) = mpsc::channel();
+        crate::keys::start(tx);
+        let ctl = Arc::downgrade(self);
+        let _ = std::thread::Builder::new().name("keys".into()).spawn(move || {
+            while let Ok(key) = rx.recv() {
+                let Some(ctl) = ctl.upgrade() else { return };
+                ctl.n4n0.key(key);
+            }
+        });
         let c = self.clone();
         std::thread::spawn(move || {
             if let Err(e) = c.ensure_worker() {
@@ -329,8 +386,12 @@ impl Controller {
             }
         });
         spawn_watchers(self.clone());
+        shares::spawn_presence(self.clone());
+        world_captures::spawn(self.clone());
+        world_feedback::spawn(self.clone());
         self.start_account();
-        self.start_orb();
+        self.start_vrchat_login();
+        self.start_n4n0();
         self.start_calls();
         self.start_updates();
     }
@@ -375,7 +436,7 @@ impl Controller {
         }
     }
 
-    fn bump_library(&self) {
+    pub(crate) fn bump_library(&self) {
         let version = self.library_version.fetch_add(1, Ordering::Relaxed) + 1;
         self.broadcast(|| ToClient::Library { version });
     }
@@ -405,6 +466,12 @@ impl Controller {
         let s = {
             let mut s = self.snapshot.lock().unwrap();
             // Copied without its trail (up to 6000 points), which the interface gets thinned to 1500 at most.
+            if !matches!(s.account.state, crate::state::AccountState::SignedIn { .. })
+                || s.account.development != (orbiters_core::account::Server::current() == orbiters_core::account::Server::Development)
+            {
+                self.vrchat_login.lock().unwrap().suspend();
+                s.vrchat_login = vrchat_login::Status::default();
+            }
             let trail = std::mem::take(&mut s.capture.trail);
             let mut copy = s.clone();
             let step = trail.len().div_ceil(1500).max(1);
@@ -579,20 +646,39 @@ impl Controller {
                     changed
                 });
             }
-            WorkerEvent::Started { session_dir, source } => self.update(|s| {
-                // Stopping: a stop came before the worker started, and its Stop follows the Start.
-                if !matches!(s.capture.state, CaptureState::Importing | CaptureState::Stopping) {
-                    s.capture.state = CaptureState::Recording;
+            WorkerEvent::Started { session_dir, source } => {
+                // Worker events run off the UI thread. Save before publishing the new recording.
+                let mut content = orbiters_core::explicit::Content::parameters(
+                    self.osc_values.lock().unwrap().latest.keys().filter(|n| n.starts_with(PARAMETERS_PREFIX)).map(String::as_str),
+                );
+                let world = self.snapshot.lock().unwrap().vrchat.world.clone();
+                content.merge(&orbiters_core::explicit::local_avatar_labels(&world));
+                let avatar = match self.osc_values.lock().unwrap().latest.first(AVATAR_CHANGE) {
+                    Some(OscValue::Text(id)) => Some(id),
+                    _ => None,
                 }
-                s.capture.session_dir = Some(session_dir);
-                s.capture.source = Some(source);
-                s.capture.error = None;
-                s.capture.trail.clear();
-                s.capture.coverage = None;
-            }),
+                .or_else(|| self.snapshot.lock().unwrap().n4n0.avatar_id.clone());
+                content.merge(&orbiters_core::explicit::manifest_content(avatar.as_deref()));
+                if let Err(e) = content.save(&session_dir) {
+                    self.notify(NoticeKind::Error, format!("Could not save capture content flags: {e}"));
+                }
+                self.update(|s| {
+                    // Stopping: a stop came before the worker started, and its Stop follows the Start.
+                    if !matches!(s.capture.state, CaptureState::Importing | CaptureState::Stopping) {
+                        s.capture.state = CaptureState::Recording;
+                    }
+                    s.capture.session_dir = Some(session_dir);
+                    s.capture.source = Some(source);
+                    s.capture.error = None;
+                    s.capture.trail.clear();
+                    s.capture.coverage = None;
+                });
+            }
             // Published with the next stats (four times a second).
             WorkerEvent::Coverage(map) => self.snapshot.lock().unwrap().capture.coverage = Some(map),
+            WorkerEvent::Hips { position, rotation } => self.rig_hips(position, rotation),
             WorkerEvent::Stats(stats) => {
+                let missing_s = stats.strip_missing_s;
                 let over_limit = {
                     let mut s = self.snapshot.lock().unwrap();
                     if let Some(p) = stats.position {
@@ -608,6 +694,7 @@ impl Controller {
                     s.capture.stats = Some(stats);
                     over
                 };
+                self.check_strip(missing_s);
                 // Stats arrive four times a second; that is also the interface's refresh rate while recording.
                 self.publish();
                 if over_limit {
@@ -634,8 +721,20 @@ impl Controller {
                     s.storage.sessions += 1;
                 });
                 self.bump_library();
+                // Frames, but not one with a pose: no capture, whatever a green "saved" would say, and nothing to reconstruct.
+                let nothing = !restarting && manifest.stats.frames > 0 && manifest.stats.keyframes == 0;
+                if nothing {
+                    self.burst.lock().unwrap().recording = false;
+                    self.scan.lock().unwrap().recording = false;
+                    let why = self.snapshot.lock().unwrap().capture.no_strip.unwrap_or_else(|| self.why_no_strip_now());
+                    self.update(|s| s.capture.no_strip = Some(why));
+                    self.notify(
+                        NoticeKind::Error,
+                        format!("No 3D capture: {} frames came, none with the capture strip, so there are no keyframes. {}", manifest.stats.frames, why.message()),
+                    );
+                }
                 self.push_notice(Notice::SessionSaved {
-                    reason,
+                    reason: if nothing { "restarted".into() } else { reason },
                     frames: manifest.stats.frames,
                     keyframes: manifest.stats.keyframes,
                     depth_frames: manifest.stats.depth_frames,
@@ -651,6 +750,7 @@ impl Controller {
                     }
                 }
                 if !restarting {
+                    self.world_import_saved(session.clone());
                     self.burst_saved(session.clone());
                     self.scan_saved(session);
                     self.capture_ended();
@@ -716,7 +816,7 @@ impl Controller {
             mode: settings.capture_mode,
             quality: settings.storage_quality,
             keyframes: settings.keyframes.clone(),
-            world: if importing { None } else { self.current_world() },
+            world: if importing { raw_capture_world(&source) } else { self.current_world() },
             consent: ConsentInfo::default(),
             folder_name: None,
             performance: if importing { PerformanceSpec::default() } else { self.performance_spec(&settings) },
@@ -728,10 +828,13 @@ impl Controller {
             s.capture.trail.clear();
             s.capture.coverage = None;
             s.capture.from_osc = from_osc;
+            s.capture.photo_3d = self.burst.lock().unwrap().recording;
+            s.capture.no_strip = None;
         });
         // Training takes the whole GPU: the game and the recording come first; the run starts over once they are done
         // (stopped once the state says capturing, so the run's exit does not start it again).
         if !importing {
+            crate::upload_prep::pause();
             if let Some(dir) = self.running_reconstruction() {
                 self.stop_reconstruction();
                 self.change_queue(|q| q.push_front(dir));
@@ -742,15 +845,20 @@ impl Controller {
         let record_parameters = !importing && settings.osc.enabled && settings.osc.record_parameters;
         // VRChat only sends values when they change: its OSCQuery tree has the current ones.
         let fetch_started = clock::now_ns();
-        let drive_camera = !importing && settings.osc.enabled && settings.osc.drive_camera && spout;
-        // Started from the app: the capture kit draws only while its record toggle is on (the Action Menu sets it).
-        let drive_avatar = !importing && settings.osc.enabled && spout && (!from_osc || self.avatar_before.lock().unwrap().is_some());
+        // A 3D picture always needs VRChat's camera streaming over Spout; a recording, as the setting says.
+        let drive_camera = !importing && settings.osc.enabled && spout && (settings.osc.drive_camera || self.burst.lock().unwrap().recording);
+        // N4N0's capture kit draws only while its record toggle is on (the app sets it, or N4N0 › Record in the Action
+        // Menu did), with depth frames while its depth toggle is (only the app sets it); the camera rig follows the camera.
+        let drive_avatar = !importing && settings.osc.enabled && spout;
         let vrchat = if record_parameters || drive_camera || drive_avatar { self.vrchat_values() } else { Vec::new() };
         if drive_camera {
             self.open_stream_camera(&vrchat);
         }
         if drive_avatar {
-            self.switch_kit_on(&vrchat, &settings.osc.record_parameter);
+            self.switch_kit_on(&vrchat);
+            self.start_rig();
+            // After the kit's toggle: the avatar's layer only hides while the kit records.
+            self.start_hide_self(&vrchat, drive_camera);
         }
         let sent = {
             let mut osc = self.osc_values.lock().unwrap();
@@ -800,6 +908,9 @@ impl Controller {
     /// kit's toggles back as they were.
     fn put_vrchat_back(&self) {
         self.osc_values.lock().unwrap().forwarding = false;
+        self.stop_rig();
+        // Before the camera, which may close and take the mask's message with it, and the kit, whose toggle ends the hiding.
+        self.restore_hide_self();
         self.restore_camera();
         self.restore_kit();
     }
@@ -831,14 +942,14 @@ impl Controller {
         });
     }
 
-    /// Switches the capture kit's record and depth-frames toggles on (OSC), remembering how they were.
-    fn switch_kit_on(&self, vrchat: &[(String, OscValue)], record_parameter: &str) {
+    /// Switches N4N0's capture kit's record and depth-frames toggles on (OSC), remembering how depth frames were.
+    fn switch_kit_on(&self, vrchat: &[(String, OscValue)]) {
         let on = |name: &str| vrchat.iter().any(|(p, v)| p.strip_prefix(PARAMETERS_PREFIX) == Some(name) && v.truthy());
-        let (record, depth) = (on(record_parameter), on(DEPTH_FRAMES_PARAMETER));
-        self.avatar_before.lock().unwrap().get_or_insert(AvatarToggles { record, depth });
+        let (record, depth) = (on(RECORD_PARAMETER), on(DEPTH_FRAMES_PARAMETER));
+        self.avatar_before.lock().unwrap().get_or_insert(AvatarToggles { depth });
         let _ = self.with_osc(|o| {
             if !record {
-                o.send(&format!("{PARAMETERS_PREFIX}{record_parameter}"), vec![rosc::OscType::Bool(true)])?;
+                o.send(&format!("{PARAMETERS_PREFIX}{RECORD_PARAMETER}"), vec![rosc::OscType::Bool(true)])?;
             }
             if !depth {
                 o.send(&format!("{PARAMETERS_PREFIX}{DEPTH_FRAMES_PARAMETER}"), vec![rosc::OscType::Bool(true)])?;
@@ -847,12 +958,12 @@ impl Controller {
         });
     }
 
-    /// The capture kit's toggles back as they were (first forgotten, so their echo is the person's again).
+    /// The capture kit's toggles back (first forgotten, so their echo is the person's again): record off, as no recording
+    /// runs any more, and depth frames as they were.
     fn restore_kit(&self) {
         let Some(before) = self.avatar_before.lock().unwrap().take() else { return };
-        let record = self.settings().osc.record_parameter;
         let _ = self.with_osc(|o| {
-            o.send(&format!("{PARAMETERS_PREFIX}{record}"), vec![rosc::OscType::Bool(before.record)])?;
+            o.send(&format!("{PARAMETERS_PREFIX}{RECORD_PARAMETER}"), vec![rosc::OscType::Bool(false)])?;
             o.send(&format!("{PARAMETERS_PREFIX}{DEPTH_FRAMES_PARAMETER}"), vec![rosc::OscType::Bool(before.depth)])
         });
     }
@@ -863,8 +974,7 @@ impl Controller {
         let driven = self.avatar_before.lock().unwrap().is_some();
         let reloading = self.avatar_changed_at.lock().unwrap().is_some_and(|t| t.elapsed() < AVATAR_RELOAD_GRACE);
         if driven && !on && reloading && self.is_capturing() {
-            let record = self.settings().osc.record_parameter;
-            self.switch_kit_on(&[], &record);
+            self.switch_kit_on(&[]);
             return;
         }
         let r = if on { self.start_capture(true) } else { self.stop_capture() };
@@ -893,8 +1003,10 @@ impl Controller {
             }
             ctl.kit_rearm.store(false, Ordering::Release);
             if ctl.avatar_before.lock().unwrap().is_some() && ctl.is_capturing() {
-                let record = ctl.with_settings(|s| s.osc.record_parameter.clone());
-                ctl.switch_kit_on(&[], &record);
+                ctl.switch_kit_on(&[]);
+                // The new avatar's rig rests at its hips until told to follow again.
+                ctl.rig_avatar_changed();
+                ctl.hide_self_avatar_changed();
             }
         });
         if spawned.is_err() {
@@ -988,6 +1100,9 @@ impl Controller {
         if in_use != Some(true) {
             return;
         }
+        if self.held_for_vrchat() {
+            crate::upload_prep::pause();
+        }
         let moved = {
             let mut guard = self.reconstruction.lock().unwrap();
             match guard.as_mut() {
@@ -1068,10 +1183,11 @@ impl Controller {
     }
 
     /// What one datagram from VRChat said, on the OSC receiving thread, which never waits for the OSC lock (see
-    /// orb.rs): what it starts goes to the OSC action thread, what it says is kept, under one lock for the whole
+    /// n4n0.rs): what it starts goes to the OSC action thread, what it says is kept, under one lock for the whole
     /// datagram.
     fn on_osc_events(self: &Shared, events: &mut Vec<OscEvent>, at_ns: u64, record_parameter: &str) {
         let mut messages = Vec::with_capacity(events.len());
+        let mut went_off = false;
         for event in events.drain(..) {
             match event {
                 OscEvent::Parameter { name, value } => {
@@ -1090,10 +1206,19 @@ impl Controller {
                     self.n4n0.on_avatar(id.clone());
                     messages.push((AVATAR_CHANGE.to_string(), vec![OscValue::Text(id)]));
                 }
-                OscEvent::Values { address, values } => messages.push((address, values)),
+                OscEvent::Values { address, values } => {
+                    let mask_off = address == hide_self::LOCAL_PLAYER && values.first().is_some_and(|v| !v.truthy());
+                    messages.push((address, values));
+                    if mask_off {
+                        went_off = true;
+                    }
+                }
             }
         }
         self.on_osc(messages, at_ns);
+        if went_off {
+            let _ = self.osc_action(|c| c.local_user_went_off());
+        }
     }
 
     /// Keeps what VRChat said (and passes it to a session recording it). An avatar change forgets the last avatar's
@@ -1126,9 +1251,9 @@ impl Controller {
                 TOGGLE_OFF => false,
                 _ => return,
             };
-            let parameter = c.with_settings(|s| s.osc.record_parameter.clone());
+            let parameter = RECORD_PARAMETER;
             c.update(|s| s.osc.last_event = Some(format!("{parameter} = {}", if on { "on" } else { "off" })));
-            if !c.vrchat_agrees(&parameter, on) {
+            if !c.vrchat_agrees(parameter, on) {
                 eprintln!("{parameter} = {on} came over OSC, but VRChat's avatar does not say so: ignored");
                 return;
             }
@@ -1164,8 +1289,14 @@ impl Controller {
         if self.is_capturing() {
             return Ok(());
         }
-        let name = self.settings().spout_sender;
-        self.start_with(SourceSpec::Spout { name }, false, from_osc)
+        let (name, dolly) = self.with_settings(|s| (s.spout_sender.clone(), s.dolly_streams));
+        // The camera dolly's other streams (experimental): VRChat's own camera is then VRCSender1, whatever else sends.
+        let (name, extra) = if dolly {
+            (if name.is_empty() { dolly::MAIN_SENDER.to_string() } else { name }, dolly::EXTRA_SENDERS.map(String::from).to_vec())
+        } else {
+            (name, Vec::new())
+        };
+        self.start_with(SourceSpec::Spout { name, extra }, false, from_osc)
     }
 
     pub fn start_test_capture(self: &Shared) -> anyhow::Result<()> {
@@ -1258,11 +1389,17 @@ impl Controller {
         };
         self.publish();
         if echo && previous.walk_boost.strength != settings.walk_boost.strength {
-            self.n4n0.send_parameter(orbiters_contracts::orb::params::WALK_BOOST, rosc::OscType::Float(settings.walk_boost.strength));
+            self.n4n0.send_parameter(orbiters_contracts::n4n0::params::WALK_BOOST, rosc::OscType::Float(settings.walk_boost.strength));
         }
         if previous.reconstruct_while_playing != settings.reconstruct_while_playing {
             // Reconstructions held while VRChat runs may start now.
             self.next_reconstruction();
+        }
+        if previous.development != settings.development {
+            // The account thread reads the other server's account within half a second; the updates look there now.
+            use_environment(settings.development);
+            self.update(|s| s.update.state = crate::state::UpdateState::Idle);
+            self.update_action(crate::ipc::UpdateAction::Check);
         }
         let (osc_changed, sessions_changed) = (previous.osc != settings.osc, previous.sessions_dir != settings.sessions_dir);
         self.queue_save(settings);
@@ -1369,7 +1506,7 @@ impl Controller {
         // The service before goes outside the lock: stopping it waits for its receiving thread, which may be calling in.
         let before = self.osc.lock().unwrap().take();
         drop(before);
-        let (enabled, parameter, vrchat_port) = self.with_settings(|s| (s.osc.enabled, s.osc.record_parameter.clone(), s.osc.vrchat_port));
+        let (enabled, parameter, vrchat_port) = self.with_settings(|s| (s.osc.enabled, RECORD_PARAMETER.to_string(), s.osc.vrchat_port));
         if !enabled {
             self.update(|s| s.osc = state::OscStatus { enabled: false, ..Default::default() });
             return;
@@ -1431,14 +1568,19 @@ impl Controller {
         let Some(editor) = editors.first() else {
             anyhow::bail!("Open your Unity project with Mixer to send the splats to it.");
         };
-        crate::mixer_inbox::send_splats(editor, &dir, &title)?;
+        // Mixer reads the PLY itself: an edited capture goes as a copy holding only the splats its 3D view keeps.
+        let sent = crate::mixer_inbox::session_for_mixer(&dir, &crate::mixer_inbox::exports_dir())?;
+        crate::mixer_inbox::send_splats(editor, &sent, &title)?;
         let project = if editor.project_name.is_empty() { "Unity".to_string() } else { editor.project_name.clone() };
-        self.notify(NoticeKind::Success, format!("Sent to Mixer in {project}: the splats appear in its open scene."));
+        let without = if sent != dir { ", without the splats hidden or deleted in its 3D view" } else { "" };
+        self.notify(NoticeKind::Success, format!("Sent to Mixer in {project}{without}: the splats appear in its open scene."));
         Ok(())
     }
 
     /// Trains splats from a session: now when nothing runs and nothing records, else once its turn comes.
     pub fn reconstruct(self: &Shared, dir: PathBuf) -> anyhow::Result<()> {
+        // Splat edits name splats of the result they were made on, so a finished run replaces them with it; every press
+        // that can lose them asks first (pages::reconstruct_again).
         if self.queue_reconstruction(dir)? {
             self.notify(NoticeKind::Info, format!("Waiting its turn: the reconstruction starts {}.", self.reconstruction_waits_for()));
         }
@@ -1466,6 +1608,10 @@ impl Controller {
     /// graphics card (a minute or two there instead of an hour), and the ones held for VRChat start.
     fn vrchat_changed(self: &Shared, running: bool) {
         if running {
+            // Preparing uploads in the background goes on beside VRChat only while SteamVR's frame timing paces it.
+            if !self.snapshot.lock().unwrap().steamvr.running {
+                crate::upload_prep::pause();
+            }
             return;
         }
         let moved = {
@@ -1494,6 +1640,9 @@ impl Controller {
         if !inside(&root, &dir) || !dir.join("manifest.json").is_file() {
             anyhow::bail!("Only sessions inside the sessions folder can be reconstructed.");
         }
+        if orbiters_core::bundle::read_manifest(&dir).is_ok_and(|m| m.stats.frames > 0 && m.stats.keyframes == 0) {
+            anyhow::bail!("This recording has no keyframes: its frames came without the capture strip, so there is nothing to reconstruct.");
+        }
         self.ensure_frames_kept(&dir)?;
         if self.is_capturing() {
             anyhow::bail!("Finish the capture first: reconstruction takes the whole GPU.");
@@ -1504,6 +1653,8 @@ impl Controller {
         if guard.is_some() {
             anyhow::bail!("A reconstruction is already running.");
         }
+        crate::upload_prep::forget(&dir);
+        crate::upload_prep::pause();
         let on_event = {
             let ctl = self.clone();
             move |e| ctl.on_reconstruct_event(e)
@@ -1579,7 +1730,10 @@ impl Controller {
             if self.is_capturing() || self.reconstruction.lock().unwrap().is_some() || self.held_for_vrchat() {
                 return;
             }
-            let Some(dir) = self.change_queue(VecDeque::pop_front) else { return };
+            let Some(dir) = self.change_queue(VecDeque::pop_front) else {
+                self.next_upload_prep();
+                return;
+            };
             match self.start_reconstruction(dir.clone()) {
                 Ok(()) => return,
                 Err(e) => {
@@ -1619,6 +1773,12 @@ impl Controller {
             }),
             ReconstructEvent::Done { report } => {
                 self.mark_reconstruction_told();
+                // Its upload files, prepared once nothing else runs: sharing it is then at once (crate::upload_prep).
+                if let Some(dir) = self.running_reconstruction() {
+                    // What is shared is the result this one replaced: its window offers to update it.
+                    shares::reconstructed(&dir);
+                    crate::upload_prep::queue(dir);
+                }
                 let quality = report.psnr_held_out.map(|p| format!(", {p:.1} dB on views it never saw")).unwrap_or_default();
                 self.notify(
                     NoticeKind::Success,
@@ -1631,6 +1791,38 @@ impl Controller {
                 self.mark_reconstruction_told();
                 self.notify(NoticeKind::Error, format!("Reconstruction failed: {message}"));
             }
+        }
+    }
+
+    /// Prepares the next session waiting for its upload files in the background (crate::upload_prep), on the integrated
+    /// GPU while VRChat runs when reconstructions train there; its exit looks for the next work. Beside VRChat only while
+    /// SteamVR runs: its frame timing paces the steps (orbiters_reconstruct::governor). Without it, nothing does: the
+    /// preparation of a 970k-splat capture made 17 % of a stand-in game's 90 Hz frames late at low queue priority as at
+    /// normal priority (docs/capture-detail-2026-10-29.md), so it waits for VRChat to close (a share prepares at once).
+    fn next_upload_prep(self: &Shared) {
+        let (vrchat, steamvr) = {
+            let s = self.snapshot.lock().unwrap();
+            (s.vrchat.running, s.steamvr.running)
+        };
+        if vrchat && !steamvr {
+            return;
+        }
+        let integrated = self.settings().reconstruct_while_playing == WhilePlaying::IntegratedGpu && vrchat;
+        let log = self.clone();
+        let next = self.clone();
+        let started = crate::upload_prep::start_next(
+            integrated,
+            move |line| {
+                let mut log = log.worker_log.lock().unwrap();
+                log.push_back(format!("prepare upload: {line}"));
+                while log.len() > 400 {
+                    log.pop_front();
+                }
+            },
+            move || next.next_reconstruction(),
+        );
+        if let Err(e) = started {
+            eprintln!("could not start preparing an upload in the background: {e:#}");
         }
     }
 
@@ -1690,6 +1882,15 @@ pub fn session_trail(dir: &Path) -> anyhow::Result<Vec<[f32; 3]>> {
         .collect();
     let step = points.len().div_ceil(2000).max(1);
     Ok(points.into_iter().step_by(step).collect())
+}
+
+/// The world a raw capture being imported shows, when its `capture.json` names one by id (contracts'
+/// Docs/raw-capture.md): its session is then one of that world.
+fn raw_capture_world(source: &SourceSpec) -> Option<orbiters_contracts::manifest::WorldInfo> {
+    let SourceSpec::RawSequence { path, .. } = source else { return None };
+    let text = std::fs::read_to_string(path.join(orbiters_contracts::raw_capture::RAW_FILE)).ok()?;
+    let meta: orbiters_contracts::raw_capture::RawCapture = serde_json::from_str(&text).ok()?;
+    meta.world.filter(|w| w.id.as_deref().is_some_and(|id| id.starts_with("wrld_")))
 }
 
 /// Raw captures in the raw captures folder, newest first.
@@ -1827,6 +2028,8 @@ fn spawn_watchers(ctl: Shared) {
             let history_file = visited::history_file();
             let mut history = visited::History::load(&history_file);
             let mut history_changed = false;
+            // The videos the worlds played, the same way (the Videos page).
+            let mut videos = videos::Videos::load();
             let mut system = sysinfo::System::new();
             let mut tick = 0u64;
             let mut running = false;
@@ -1896,6 +2099,7 @@ fn spawn_watchers(ctl: Shared) {
                 if let Some((name, from, to)) = log.last_read() {
                     history_changed |= history.follow(name, from, to, &events);
                 }
+                videos.step(log.last_read(), &events, tick.is_multiple_of(10));
                 let log_found = log.state.log_file.is_some() || orbiters_core::paths::vrchat_log_dir().is_some();
                 let world = log.caught_up().then(|| {
                     let world = log.state.clone();
@@ -1986,11 +2190,7 @@ fn spawn_watchers(ctl: Shared) {
                     // VRChat sends avatar parameters only to the OSC services it found, and it finds one only from an
                     // answer it hears (the OSC service makes one when it starts and whenever a VRChat starts). Quiet a
                     // while with VRChat running: maybe it missed both, ask again (a VRChat that knows us ignores it).
-                    if running
-                        && !receiving
-                        && vrchat_since.is_some_and(|t| t.elapsed() > OSC_QUIET)
-                        && osc_asked.is_none_or(|t| t.elapsed() > OSC_QUIET)
-                    {
+                    if running && !receiving && vrchat_since.is_some_and(|t| t.elapsed() > OSC_QUIET) && osc_asked.is_none_or(|t| t.elapsed() > OSC_QUIET) {
                         osc_asked = Some(Instant::now());
                         ctl.osc_rediscover();
                     }
@@ -2074,10 +2274,11 @@ mod tests {
         settings.osc.vrchat_port = vrchat.local_addr().unwrap().port();
         let ctl = Controller::new(settings);
         ctl.start_osc_with(false);
-        let record = "/avatar/parameters/OrbitersRecord".to_string();
-        let depth = "/avatar/parameters/OrbitersDepthFrames".to_string();
-        // Depth frames already on (the person's menu choice): only the record toggle is switched.
-        ctl.switch_kit_on(&[(record.clone(), OscValue::Bool(false)), (depth.clone(), OscValue::Bool(true))], "OrbitersRecord");
+        let record = format!("/avatar/parameters/{RECORD_PARAMETER}");
+        let depth = format!("/avatar/parameters/{DEPTH_FRAMES_PARAMETER}");
+        assert_eq!((record.as_str(), depth.as_str()), ("/avatar/parameters/N4N0/Capture/Record", "/avatar/parameters/N4N0/Capture/Depth"));
+        // Depth frames already on: only the record toggle is switched.
+        ctl.switch_kit_on(&[(record.clone(), OscValue::Bool(false)), (depth.clone(), OscValue::Bool(true))]);
         assert_eq!(received(&vrchat, Duration::from_millis(200)), vec![(record.clone(), rosc::OscType::Bool(true))]);
         // Recording, then the avatar reloads (a new world): its reset to off is switched back on, not a stop.
         ctl.update(|s| s.capture.state = CaptureState::Recording);
@@ -2102,7 +2303,7 @@ mod tests {
         let ctl = Controller::new(settings);
         ctl.start_osc_with(false);
         ctl.open_stream_camera(&[(CAMERA_MODE.to_string(), OscValue::Int(1)), (CAMERA_STREAMING.to_string(), OscValue::Bool(false))]);
-        ctl.switch_kit_on(&[], "OrbitersRecord");
+        ctl.switch_kit_on(&[]);
         ctl.osc_values.lock().unwrap().forwarding = true;
         ctl.update(|s| s.capture.state = CaptureState::Starting);
         // Mode 2, record and depth on, then Spout Stream on.
@@ -2115,8 +2316,8 @@ mod tests {
         vec![
             (CAMERA_STREAMING.into(), rosc::OscType::Bool(false)),
             (CAMERA_MODE.into(), rosc::OscType::Int(1)),
-            ("/avatar/parameters/OrbitersRecord".into(), rosc::OscType::Bool(false)),
-            ("/avatar/parameters/OrbitersDepthFrames".into(), rosc::OscType::Bool(false)),
+            ("/avatar/parameters/N4N0/Capture/Record".into(), rosc::OscType::Bool(false)),
+            ("/avatar/parameters/N4N0/Capture/Depth".into(), rosc::OscType::Bool(false)),
         ]
     }
 
@@ -2149,7 +2350,7 @@ mod tests {
         ctl.start_osc_with(false);
         assert!(ctl.start_capture(false).is_err());
         let sent = received(&vrchat, Duration::from_millis(700));
-        assert_eq!(sent.last(), Some(&("/avatar/parameters/OrbitersDepthFrames".into(), rosc::OscType::Bool(false))), "{sent:?}");
+        assert_eq!(sent.last(), Some(&("/avatar/parameters/N4N0/Capture/Depth".into(), rosc::OscType::Bool(false))), "{sent:?}");
         assert!(!sent.contains(&(CAMERA_STREAMING.into(), rosc::OscType::Bool(true))), "{sent:?}");
         assert_eq!(ctl.view().capture.state, CaptureState::Idle);
         ctl.shutdown();
@@ -2274,8 +2475,8 @@ mod tests {
                 let Ok(mut s) = stream else { continue };
                 let mut buf = [0u8; 1024];
                 let n = s.read(&mut buf).unwrap_or(0);
-                let answer = if String::from_utf8_lossy(&buf[..n]).starts_with("GET /avatar/parameters/OrbitersRecord ") {
-                    let body = format!(r#"{{"FULL_PATH":"/avatar/parameters/OrbitersRecord","TYPE":"T","VALUE":[{}]}}"#, record.load(Ordering::Relaxed));
+                let answer = if String::from_utf8_lossy(&buf[..n]).starts_with("GET /avatar/parameters/N4N0/Capture/Record ") {
+                    let body = format!(r#"{{"FULL_PATH":"/avatar/parameters/N4N0/Capture/Record","TYPE":"T","VALUE":[{}]}}"#, record.load(Ordering::Relaxed));
                     format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{body}", body.len())
                 } else {
                     "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n".to_string()
@@ -2301,7 +2502,7 @@ mod tests {
         ctl.record_toggled(false);
         actions_done(&ctl);
         assert!(ctl.is_capturing());
-        assert_eq!(ctl.view().osc.last_event.as_deref(), Some("OrbitersRecord = off"));
+        assert_eq!(ctl.view().osc.last_event.as_deref(), Some("N4N0/Capture/Record = off"));
         // VRChat says off too: the recording stops (no worker in tests: it ends at once).
         record.store(false, Ordering::Relaxed);
         ctl.record_toggled(false);
@@ -2322,7 +2523,7 @@ mod tests {
         }
         hold.send(()).unwrap();
         actions_done(&ctl);
-        assert_eq!(ctl.view().osc.last_event.as_deref(), Some("OrbitersRecord = off"));
+        assert_eq!(ctl.view().osc.last_event.as_deref(), Some("N4N0/Capture/Record = off"));
         // Each "on" acted on would have tried to start (and told that the capture notice waits).
         assert!(ctl.take_notices().is_empty());
     }
@@ -2335,7 +2536,7 @@ mod tests {
         settings.osc.vrchat_port = vrchat.local_addr().unwrap().port();
         let ctl = Controller::new(settings);
         ctl.start_osc_with(false);
-        *ctl.avatar_before.lock().unwrap() = Some(AvatarToggles { record: false, depth: false });
+        *ctl.avatar_before.lock().unwrap() = Some(AvatarToggles { depth: false });
         ctl.update(|s| s.capture.state = CaptureState::Recording);
         for _ in 0..50 {
             ctl.on_avatar_changed();
@@ -2351,12 +2552,12 @@ mod tests {
         let ctl = Controller::new(Settings::default());
         // The avatar's radial moves after the window read its copy of the settings.
         ctl.set_walk_boost(0.9, true);
-        ctl.patch_settings(&serde_json::json!({ "orb": { "wake_word": true }, "walk_boost": { "enabled": true }, "osc": { "vrchat_port": "x" } }));
+        ctl.patch_settings(&serde_json::json!({ "n4n0": { "wake_word": true }, "walk_boost": { "enabled": true }, "osc": { "vrchat_port": "x" } }));
         let s = ctl.settings();
-        assert!(s.orb.wake_word && s.walk_boost.enabled);
+        assert!(s.n4n0.wake_word && s.walk_boost.enabled);
         assert_eq!(s.walk_boost.strength, 0.9, "the radial's change stays");
         assert_eq!(s.osc.vrchat_port, 9000, "a value that does not fit is left out");
-        assert!(ctl.view().settings.orb.wake_word, "published");
+        assert!(ctl.view().settings.n4n0.wake_word, "published");
     }
 
     #[test]

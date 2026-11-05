@@ -1,11 +1,18 @@
 //! `orbiters-desktop --screenshot <out folder> [--sessions <folder>] [--raw <folder>] [--scale <factor>] [--only <name>]
-//! [--height <points>] [--width <points>]`
+//! [--height <points>] [--width <points>] [--extend <frames>] [--sequence <frames>]`
 //! renders the interface offscreen in several states and writes one PNG per state, for visual review without a
 //! window. The controller is not started: the snapshots are made up, the session library is real. `--only e2e`
 //! instead records a real test pattern through the worker, driven by synthetic clicks, with avatar parameters
 //! from a stand-in VRChat (OSC on the loopback interface, current values from its OSCQuery tree). The end-to-end
 //! runs click controls found by their labels where the last frame drew them, and wait on what the app shows or the
-//! controller says (each wait with a time limit), never on fixed coordinates or delays.
+//! controller says (each wait with a time limit), never on fixed coordinates or delays. `--extend` runs each scenario that
+//! many frames past its shot and `--sequence` writes its last frames too (`<name>-<frame>.png`), to check a motion frame
+//! by frame (a window closing back into its card).
+//!
+//! A run never writes this computer's own data ([`sandbox_user_data`]): its settings and caches folders are the run's
+//! own, under the temporary folder, seeded with copies of what scenarios read. It once refreshed the VRChat pictures'
+//! index in the person's cache with the harness's settings, which name no picture folder, so every picture of the
+//! folders the person added (2 TB on Enzo's archive disk) left the index, and the app read them all again.
 
 use crate::app::App;
 use crate::backend::{Ctl, Local};
@@ -17,11 +24,25 @@ use egui::{pos2, vec2, Event, Pos2, RawInput, Rect, Vec2, ViewportId, ViewportIn
 use orbiters_core::protocol::{coverage, CaptureStats, CoverageMap, SpoutSourceInfo};
 use orbiters_core::settings::Settings;
 use orbiters_core::vrchat_log::WorldState;
-use orbiters_orb::menu::Page as MenuPage;
+use orbiters_n4n0_core::menu::Page as MenuPage;
 use orbiters_ui::offscreen::{save_png, Offscreen};
 use orbiters_ui::{toast, widgets};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
+
+mod floating;
+mod gallery_layouts;
+mod gallery_folders;
+mod gallery_assets;
+mod gallery_talk;
+mod projects_panel;
+mod editor;
+mod splat_export;
+mod splats_select;
+mod capture_actions;
+mod vrchat_login;
+mod vr_audio;
+mod worlds_overlay;
 
 struct Scenario {
     name: &'static str,
@@ -70,14 +91,86 @@ struct WorldShot {
     maps: Option<crate::state::MapsMine>,
 }
 
+/// Gives this run settings and caches folders of its own (`orbiters_core::paths::set_roots`, before any path is
+/// asked for), so that nothing it does writes the person's: the VRChat pictures' index and thumbnails, world pages,
+/// project previews and their cards' stills, settings a scenario saves. Seeded with copies of what scenarios read
+/// (the settings folder's files but the settings themselves, the world pages and 3D worlds kept from Orbiters); the
+/// session library, documents and this computer's local data stay the real ones, read only by the scenarios. The
+/// picture folders the person added are not read (the harness's settings name none); `ORBITERS_SCREENSHOT_PICTURE_FOLDERS`
+/// (separated by `;`) names some for the run. The run deletes its sandbox when it ends; those of runs that did not end
+/// (killed) go at a later run once over six hours old.
+fn sandbox_user_data() -> anyhow::Result<(PathBuf, Vec<PathBuf>)> {
+    use orbiters_core::paths;
+    let (real_config, real_cache) = (paths::config_dir(), paths::cache_dir());
+    let base = std::env::temp_dir().join("orbiters-screenshot-sandbox");
+    if let Ok(dir) = std::fs::read_dir(&base) {
+        for e in dir.flatten() {
+            if e.metadata().and_then(|m| m.modified()).is_ok_and(|t| t.elapsed().unwrap_or_default() > Duration::from_secs(6 * 3600)) {
+                let _ = std::fs::remove_dir_all(e.path());
+            }
+        }
+    }
+    let root = base.join(std::process::id().to_string());
+    let _ = std::fs::remove_dir_all(&root);
+    let (config, cache) = (root.join("config"), root.join("cache"));
+    std::fs::create_dir_all(&config)?;
+    std::fs::create_dir_all(&cache)?;
+    fn copy_tree(from: &Path, to: &Path, skip: &[&str]) {
+        let Ok(dir) = std::fs::read_dir(from) else { return };
+        let _ = std::fs::create_dir_all(to);
+        for e in dir.flatten() {
+            let name = e.file_name();
+            if skip.iter().any(|s| name.to_string_lossy().eq_ignore_ascii_case(s)) {
+                continue;
+            }
+            match e.file_type() {
+                Ok(t) if t.is_dir() => copy_tree(&e.path(), &to.join(&name), &[]),
+                Ok(t) if t.is_file() => {
+                    let _ = std::fs::copy(e.path(), to.join(&name));
+                }
+                _ => {}
+            }
+        }
+    }
+    // The settings' `.bad-` copies, the old cache inside the settings folder: not what scenarios read.
+    copy_tree(&real_config, &config, &["settings.json", "cache"]);
+    for sub in ["worlds", "3d-worlds"] {
+        copy_tree(&real_cache.join(sub), &cache.join(sub), &[]);
+    }
+    let folders: Vec<PathBuf> = std::env::var("ORBITERS_SCREENSHOT_PICTURE_FOLDERS")
+        .unwrap_or_default()
+        .split(';')
+        .filter(|s| !s.trim().is_empty())
+        .map(|s| PathBuf::from(s.trim()))
+        .collect();
+    if !folders.is_empty() {
+        Settings { picture_folders: folders.clone(), ..Settings::default() }.save_to(&config.join("settings.json"))?;
+    }
+    paths::set_roots(paths::Roots { config, local_data: paths::local_data_root(), cache, documents: paths::documents_root() })?;
+    Ok((root, folders))
+}
+
 pub fn run(args: &[String]) -> anyhow::Result<()> {
+    let (sandbox, picture_folders) = sandbox_user_data()?;
+    eprintln!("screenshots: settings and caches in {}", sandbox.display());
+    let result = shots(args, picture_folders);
+    // The run's settings and caches go with it: each run copies some 40 MB of world pages, and a day of screenshots by
+    // several agents filled the system disk. `ORBITERS_SCREENSHOT_KEEP_SANDBOX` keeps them (to look at what a run wrote).
+    if std::env::var_os("ORBITERS_SCREENSHOT_KEEP_SANDBOX").is_none() {
+        let _ = std::fs::remove_dir_all(&sandbox);
+    }
+    result
+}
+
+fn shots(args: &[String], picture_folders: Vec<PathBuf>) -> anyhow::Result<()> {
     let out =
         PathBuf::from(args.first().context("usage: --screenshot <out folder> [--sessions <folder>] [--raw <folder>] [--scale <factor>] [--only <name>]")?);
-    let mut settings = Settings::default();
+    let mut settings = Settings { picture_folders, ..Settings::default() };
     let mut scale = 1.0f32;
     let mut height = 820.0f32;
     let mut width = 1280.0f32;
     let mut only: Option<String> = None;
+    let mut frames = Frames::default();
     let mut it = args[1..].iter();
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -87,6 +180,8 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             "--only" => only = Some(it.next().context("--only <name>")?.clone()),
             "--height" => height = it.next().context("--height <points>")?.parse()?,
             "--width" => width = it.next().context("--width <points>")?.parse()?,
+            "--extend" => frames.extend = it.next().context("--extend <frames>")?.parse()?,
+            "--sequence" => frames.sequence = it.next().context("--sequence <frames>")?.parse()?,
             other => anyhow::bail!("unknown option {other}"),
         }
     }
@@ -98,6 +193,33 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
     if only.as_deref() == Some("splats-3d") {
         return splats_3d(&mut Offscreen::new()?, &out, &settings, scale);
     }
+    if only.as_deref() == Some("splats-select") {
+        return splats_select::shots(&mut Offscreen::new()?, &out, &settings, scale);
+    }
+    if only.as_deref() == Some("capture-actions-select") {
+        return capture_actions::select(&mut Offscreen::new()?, &out, &settings, scale);
+    }
+    if only.as_deref() == Some("capture-actions-tint") {
+        return capture_actions::tint(&mut Offscreen::new()?, &out, &settings, scale);
+    }
+    if only.as_deref() == Some("capture-actions") {
+        return capture_actions::walk(&mut Offscreen::new()?, &out, &settings, scale);
+    }
+    if only.as_deref() == Some("splat-export") {
+        return splat_export::shots(&mut Offscreen::new()?, &out, &settings, scale);
+    }
+    if only.as_deref() == Some("splat-export-cpu") {
+        return splat_export::shots_cpu(&out, &settings, scale);
+    }
+    if only.as_deref() == Some("editor-3d") {
+        return editor::three_d(&mut Offscreen::new()?, &out, &settings, scale);
+    }
+    if only.as_deref() == Some("editor-3d-live") {
+        return editor::three_d_live(&mut Offscreen::new()?, &out, &settings, scale);
+    }
+    if only.as_deref() == Some("edit3d-depth") {
+        return editor::three_d_depth(&mut Offscreen::new()?, &out, &settings, scale);
+    }
     if only.as_deref() == Some("e2e-cleanup") {
         return e2e_cleanup(&mut Offscreen::new()?, &out, &settings, scale);
     }
@@ -106,6 +228,12 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
     }
     if only.as_deref() == Some("overlay") {
         return overlay_shots(&out, &settings);
+    }
+    if only.as_deref() == Some("floating") {
+        return floating::shots(&out, &settings);
+    }
+    if only.as_deref() == Some("worlds-overlay") {
+        return worlds_overlay::shots(&out);
     }
 
     let sessions = controller::list_sessions(&settings.sessions_dir);
@@ -140,6 +268,22 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         ..Default::default()
     });
     recording.capture.coverage = Some(sample_coverage(&trail));
+    // Frames coming, none with the strip, as with Local User off on an upload that could not hide itself: the tile says why.
+    let mut no_strip = recording.clone();
+    no_strip.capture.trail.clear();
+    no_strip.capture.coverage = None;
+    no_strip.capture.no_strip = Some(crate::state::NoStrip::MaskOff);
+    no_strip.capture.stats = Some(CaptureStats {
+        frames: 419,
+        strip_ok: 0,
+        strip_failed: 419,
+        fps: 44.0,
+        elapsed_s: 9.5,
+        width: 1920,
+        height: 1080,
+        strip_missing_s: 9.5,
+        ..Default::default()
+    });
     let mut consent = idle.clone();
     consent.settings.consent_acknowledged = false;
     let mut reconstructing = idle.clone();
@@ -164,7 +308,10 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
 
     // Visited worlds: the world with the most captures has a 3D preview shared; in the one with the most pictures, the
     // first two count as shared and the next two as being sent.
-    let visited = crate::worlds::load(&settings.sessions_dir);
+    // The pictures' index is the run's own ([`sandbox_user_data`]: VRChat's own picture folder only, unless
+    // `ORBITERS_SCREENSHOT_PICTURE_FOLDERS` names more); `ORBITERS_SCREENSHOT_NO_PICTURES` leaves it out altogether,
+    // for scenarios that do not show pictures when VRChat's folder is a large one.
+    let visited = if std::env::var_os("ORBITERS_SCREENSHOT_NO_PICTURES").is_some() { Vec::new() } else { crate::worlds::load(&settings.sessions_dir) };
     let captured = visited.iter().max_by_key(|w| (w.reconstructed(), w.sessions.len())).cloned();
     let pictured = visited.iter().max_by_key(|w| w.shots.len()).cloned();
     let signed_in = with_account(&idle, crate::state::AccountState::SignedIn { username: "Desktop Tester".into() }, None);
@@ -216,44 +363,57 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         });
         s
     };
-    let orb_busy = orb_snapshot(&signed_in);
-    let orb_new = {
+    let n4n0_busy = n4n0_snapshot(&signed_in);
+    let n4n0_new = {
         let mut s = with_account(&idle, crate::state::AccountState::SignedOut, None);
         s.vrchat.world.avatar_name = Some("Rexouium".into());
-        s.orb.avatar_id = Some("avtr_7f3c2b1e-0d4a-4a7b-9c55-1f0e9a2b6c11".into());
+        s.n4n0.avatar_id = Some("avtr_7f3c2b1e-0d4a-4a7b-9c55-1f0e9a2b6c11".into());
         s
     };
 
     // Home: N4N0's menu with what the service knows (friends to call, the light on, fast walk on, the avatar's saved
     // states).
     let home = {
-        let mut s = with_calls(&orb_busy, false);
-        s.orb.light = Some(crate::state::OrbLight { on: true, color: 1, level: 0.6 });
+        let mut s = with_calls(&n4n0_busy, false);
+        s.n4n0.light = Some(crate::state::N4n0Light { on: true, color: 1, level: 0.6 });
         s.settings.walk_boost.enabled = true;
-        s.orb.states = sample_states(s.orb.avatar_id.clone());
+        s.n4n0.states = sample_states(s.n4n0.avatar_id.clone());
+        s.n4n0.tracking = Some(orbiters_n4n0::status::TrackingView { on: true, levels: [0, 1, 2], note: "Smoothing your devices now".into() });
+        s.n4n0.versions = "N4N0 1.0.9 · App 0.4.0".into();
+        s.n4n0.world_video = Some(("https://www.youtube.com/watch?v=36YnV9STBqc".into(), Some("Lo-fi beats to relax to".into()), None));
         s
     };
     // The same, its N4N0's screen of version 5: a copied link can be dropped as a card.
     let home_drop = {
         let mut s = home.clone();
-        s.orb.can_drop = true;
+        s.n4n0.can_drop = true;
+        s
+    };
+    // The same with a link card out in the world (Take back).
+    let home_card = {
+        let mut s = home_drop.clone();
+        s.n4n0.card = Some(orbiters_n4n0::status::CardView {
+            title: "1 A.M Study Session 📚 [lofi hip hop]".into(),
+            link: "https://www.youtube.com/watch?v=sample00003".into(),
+            left: 452,
+        });
         s
     };
     // Home as many first see it: VRChat in desktop mode (no fast walk), calls off, no light on this N4N0.
     let home_plain = {
         let mut s = idle.clone();
-        s.orb.desktop_mode = true;
-        s.settings.orb.wake_word = true;
+        s.n4n0.desktop_mode = true;
+        s.settings.n4n0.wake_word = true;
         s
     };
     let home_listening = {
         let mut s = home.clone();
-        s.orb.listening = true;
-        s.orb.panel = Some("Fast walk is on. Say what you want, or tap a tile.".into());
+        s.n4n0.listening = true;
+        s.n4n0.panel = Some("Fast walk is on. Say what you want, or tap a tile.".into());
         s
     };
 
-    let scenarios = vec![
+    let mut scenarios = vec![
         Scenario {
             name: "home",
             page: Page::Home,
@@ -380,6 +540,35 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             home: Some(HomeShot { page: MenuPage::Music, samples: true }),
             library: None,
         },
+        // A browser plays a YouTube video (found there): Home's music card copies its link, the music page offers Drop.
+        Scenario {
+            name: "home-playing-youtube",
+            page: Page::Home,
+            snapshot: home_drop.clone(),
+            frames: 90,
+            splash: false,
+            open_detail: false,
+            toasts: vec![],
+            pointer: None,
+            scroll: 0.0,
+            world: None,
+            home: Some(HomeShot { page: MenuPage::Home, samples: true }),
+            library: None,
+        },
+        Scenario {
+            name: "home-music-youtube",
+            page: Page::Home,
+            snapshot: home_drop.clone(),
+            frames: 90,
+            splash: false,
+            open_detail: false,
+            toasts: vec![],
+            pointer: None,
+            scroll: 0.0,
+            world: None,
+            home: Some(HomeShot { page: MenuPage::Music, samples: true }),
+            library: None,
+        },
         Scenario {
             name: "home-light",
             page: Page::Home,
@@ -392,6 +581,108 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             scroll: 0.0,
             world: None,
             home: Some(HomeShot { page: MenuPage::Light, samples: true }),
+            library: None,
+        },
+        Scenario {
+            name: "update-ready",
+            page: Page::Home,
+            snapshot: {
+                let mut s = home.clone();
+                s.settings.development = true;
+                s.update.enabled = true;
+                s.update.state = crate::state::UpdateState::Ready { version: "0.3.2-dev.2".into(), notes: "Development build 0.3.2-dev.2".into() };
+                s
+            },
+            frames: 90,
+            splash: false,
+            open_detail: false,
+            toasts: vec![],
+            pointer: None,
+            scroll: 0.0,
+            world: None,
+            home: None,
+            library: None,
+        },
+        Scenario {
+            name: "home-qr",
+            page: Page::Home,
+            snapshot: {
+                let mut s = home.clone();
+                s.n4n0.qr = crate::overlay::menu_pages::sample_qr();
+                s
+            },
+            frames: 90,
+            splash: false,
+            open_detail: false,
+            toasts: vec![],
+            pointer: None,
+            scroll: 0.0,
+            world: None,
+            home: Some(HomeShot { page: MenuPage::Qr, samples: true }),
+            library: None,
+        },
+        Scenario {
+            name: "home-instances",
+            page: Page::Home,
+            snapshot: home.clone(),
+            frames: 90,
+            splash: false,
+            open_detail: false,
+            toasts: vec![],
+            pointer: None,
+            scroll: 0.0,
+            world: None,
+            home: Some(HomeShot { page: MenuPage::AddFriend, samples: true }),
+            library: None,
+        },
+        Scenario {
+            name: "home-qr-no-camera",
+            page: Page::Home,
+            snapshot: {
+                let mut s = home.clone();
+                s.n4n0.qr = orbiters_n4n0_core::qr::QrView {
+                    phase: orbiters_n4n0_core::qr::QrPhase::NoCamera,
+                    note: orbiters_n4n0_core::qr::no_camera_note(Some(false)),
+                    ..Default::default()
+                };
+                s
+            },
+            frames: 90,
+            splash: false,
+            open_detail: false,
+            toasts: vec![],
+            pointer: None,
+            scroll: 0.0,
+            world: None,
+            home: Some(HomeShot { page: MenuPage::Qr, samples: true }),
+            library: None,
+        },
+        Scenario {
+            name: "home-tracking",
+            page: Page::Home,
+            snapshot: home.clone(),
+            frames: 90,
+            splash: false,
+            open_detail: false,
+            toasts: vec![],
+            pointer: None,
+            scroll: 0.0,
+            world: None,
+            home: Some(HomeShot { page: MenuPage::Tracking, samples: true }),
+            library: None,
+        },
+        Scenario {
+            name: "home-suggest",
+            page: Page::Home,
+            snapshot: home.clone(),
+            frames: 90,
+            splash: false,
+            open_detail: false,
+            toasts: vec![],
+            pointer: None,
+            scroll: 0.0,
+            world: None,
+            home: Some(HomeShot { page: MenuPage::Suggest, samples: true }),
             library: None,
         },
         Scenario {
@@ -420,6 +711,76 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             scroll: 0.0,
             world: None,
             home: Some(HomeShot { page: MenuPage::States, samples: true }),
+            library: None,
+        },
+        Scenario {
+            name: "home-states-avatar",
+            page: Page::Home,
+            snapshot: home.clone(),
+            frames: 90,
+            splash: false,
+            open_detail: false,
+            toasts: vec![],
+            pointer: None,
+            scroll: 0.0,
+            world: None,
+            home: Some(HomeShot { page: MenuPage::States, samples: true }),
+            library: None,
+        },
+        Scenario {
+            name: "home-states-other",
+            page: Page::Home,
+            snapshot: home.clone(),
+            frames: 90,
+            splash: false,
+            open_detail: false,
+            toasts: vec![],
+            pointer: None,
+            scroll: 0.0,
+            world: None,
+            home: Some(HomeShot { page: MenuPage::States, samples: true }),
+            library: None,
+        },
+        Scenario {
+            name: "home-photo-camera",
+            page: Page::Home,
+            snapshot: home.clone(),
+            frames: 90,
+            splash: false,
+            open_detail: false,
+            toasts: vec![],
+            pointer: None,
+            scroll: 0.0,
+            world: None,
+            home: Some(HomeShot { page: MenuPage::Photo, samples: true }),
+            library: None,
+        },
+        Scenario {
+            name: "home-music-card",
+            page: Page::Home,
+            snapshot: home_card.clone(),
+            frames: 90,
+            splash: false,
+            open_detail: false,
+            toasts: vec![],
+            pointer: None,
+            scroll: 0.0,
+            world: None,
+            home: Some(HomeShot { page: MenuPage::Music, samples: true }),
+            library: None,
+        },
+        Scenario {
+            name: "home-results-card",
+            page: Page::Home,
+            snapshot: home_card.clone(),
+            frames: 90,
+            splash: false,
+            open_detail: false,
+            toasts: vec![],
+            pointer: None,
+            scroll: 0.0,
+            world: None,
+            home: Some(HomeShot { page: MenuPage::Results, samples: true }),
             library: None,
         },
         Scenario {
@@ -493,9 +854,9 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             library: None,
         },
         Scenario {
-            name: "orb-calls",
-            page: Page::Orb,
-            snapshot: with_calls(&orb_busy, true),
+            name: "n4n0-calls",
+            page: Page::N4n0,
+            snapshot: with_calls(&n4n0_busy, true),
             frames: 120,
             splash: false,
             open_detail: false,
@@ -507,9 +868,9 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             library: None,
         },
         Scenario {
-            name: "orb",
-            page: Page::Orb,
-            snapshot: orb_busy.clone(),
+            name: "n4n0",
+            page: Page::N4n0,
+            snapshot: n4n0_busy.clone(),
             frames: 90,
             splash: false,
             open_detail: false,
@@ -520,13 +881,32 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             home: None,
             library: None,
         },
+        // On your avatar: the panel, the menu, the AFK message, Keep my pose and Controller input (an avatar using four).
         Scenario {
-            name: "orb-testing",
-            page: Page::Orb,
+            name: "n4n0-avatar",
+            page: Page::N4n0,
             snapshot: {
-                let mut s = orb_busy.clone();
-                s.orb.test_face = Some(crate::state::OrbFace::Happy);
-                s.orb.test_afk = true;
+                let mut s = n4n0_busy.clone();
+                s.n4n0.input_params = 4;
+                s
+            },
+            frames: 90,
+            splash: false,
+            open_detail: false,
+            toasts: vec![],
+            pointer: None,
+            scroll: 560.0,
+            world: None,
+            home: None,
+            library: None,
+        },
+        Scenario {
+            name: "n4n0-testing",
+            page: Page::N4n0,
+            snapshot: {
+                let mut s = n4n0_busy.clone();
+                s.n4n0.test_face = Some(crate::state::N4n0Face::Happy);
+                s.n4n0.test_afk = true;
                 s
             },
             frames: 120,
@@ -540,9 +920,9 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             library: None,
         },
         Scenario {
-            name: "orb-scrolled",
-            page: Page::Orb,
-            snapshot: orb_busy.clone(),
+            name: "n4n0-scrolled",
+            page: Page::N4n0,
+            snapshot: n4n0_busy.clone(),
             frames: 120,
             splash: false,
             open_detail: false,
@@ -555,9 +935,9 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         },
         // N4N0's menu settings: its keyboard and look.
         Scenario {
-            name: "orb-menu-settings",
-            page: Page::Orb,
-            snapshot: orb_busy,
+            name: "n4n0-menu-settings",
+            page: Page::N4n0,
+            snapshot: n4n0_busy,
             frames: 120,
             splash: false,
             open_detail: false,
@@ -569,9 +949,9 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             library: None,
         },
         Scenario {
-            name: "orb-new",
-            page: Page::Orb,
-            snapshot: orb_new,
+            name: "n4n0-new",
+            page: Page::N4n0,
+            snapshot: n4n0_new,
             frames: 90,
             splash: false,
             open_detail: false,
@@ -618,6 +998,20 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             splash: false,
             open_detail: false,
             toasts: vec![],
+            pointer: None,
+            scroll: 0.0,
+            world: None,
+            home: None,
+            library: None,
+        },
+        Scenario {
+            name: "capture-no-strip",
+            page: Page::Capture,
+            snapshot: no_strip,
+            frames: 120,
+            splash: false,
+            open_detail: false,
+            toasts: vec![(toast::Kind::Warning, crate::state::NoStrip::MaskOff.message())],
             pointer: None,
             scroll: 0.0,
             world: None,
@@ -850,6 +1244,36 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             home: None,
             library: None,
         },
+        // The world's page flying back into its card (closed on frame 120; `--extend`/`--sequence` show it land).
+        Scenario {
+            name: "world-close",
+            page: Page::Worlds,
+            snapshot: signed_in.clone(),
+            frames: 140,
+            splash: false,
+            open_detail: true,
+            toasts: vec![],
+            pointer: None,
+            scroll: 0.0,
+            world: Some(WorldShot { maps: Some(maps.clone()), ..Default::default() }),
+            home: None,
+            library: None,
+        },
+        // A picture shown large shrinking back into its tile (closed on frame 170).
+        Scenario {
+            name: "world-viewer-close",
+            page: Page::Worlds,
+            snapshot: signed_in.clone(),
+            frames: 200,
+            splash: false,
+            open_detail: true,
+            toasts: vec![],
+            pointer: None,
+            scroll: 0.0,
+            world: Some(WorldShot { pictures: true, view: Some(1), maps: Some(maps.clone()), ..Default::default() }),
+            home: None,
+            library: None,
+        },
         // The card flying into the world's page, a sixth of a second in.
         Scenario {
             name: "world-flight",
@@ -1034,6 +1458,63 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             home: None,
             library: Some(LibraryShot::ViewOnly),
         },
+        // The videos the worlds played ([`stage_videos`]): the history by day, a bookmark list, the bookmark picker.
+        Scenario {
+            name: "videos",
+            page: Page::Videos,
+            snapshot: home.clone(),
+            frames: 90,
+            splash: false,
+            open_detail: false,
+            toasts: vec![],
+            pointer: None,
+            scroll: 0.0,
+            world: None,
+            home: None,
+            library: None,
+        },
+        Scenario {
+            name: "videos-scrolled",
+            page: Page::Videos,
+            snapshot: home.clone(),
+            frames: 90,
+            splash: false,
+            open_detail: false,
+            toasts: vec![],
+            pointer: None,
+            scroll: 260.0,
+            world: None,
+            home: None,
+            library: None,
+        },
+        Scenario {
+            name: "videos-list",
+            page: Page::Videos,
+            snapshot: home.clone(),
+            frames: 90,
+            splash: false,
+            open_detail: false,
+            toasts: vec![],
+            pointer: None,
+            scroll: 0.0,
+            world: None,
+            home: None,
+            library: None,
+        },
+        Scenario {
+            name: "videos-picker",
+            page: Page::Videos,
+            snapshot: home.clone(),
+            frames: 90,
+            splash: false,
+            open_detail: false,
+            toasts: vec![],
+            pointer: None,
+            scroll: 0.0,
+            world: None,
+            home: None,
+            library: None,
+        },
         Scenario {
             name: "sessions-scrolled",
             page: Page::Sessions,
@@ -1050,40 +1531,427 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         },
     ];
 
+    // Unity projects and Capture's N4N0 card: every state, the dialogs, and frames in the middle of their motion
+    // (`-mid`: a few frames after the press that starts it). The panel docks on the default window; `--width 1040`
+    // shows the narrow layout (`projects-narrow-detail`, `projects-sheet-*`).
+    for name in [
+        "projects-gallery",
+        "projects-detail",
+        "projects-packages",
+        "projects-narrow-detail",
+        "projects-loading",
+        "projects-scanning",
+        "projects-empty",
+        "projects-panel-loading",
+        "projects-error",
+        "projects-busy",
+        "projects-search",
+        "projects-proposals",
+        "projects-repos",
+        "projects-repos-loading",
+        "projects-repos-mid",
+        "projects-repos-cards",
+        "projects-repos-scrolled",
+        "projects-repos-search",
+        "projects-repos-search-japanese",
+        "projects-repos-search-owner",
+        "projects-repos-nothing",
+        "projects-repos-many",
+        "projects-repos-added",
+        "projects-repos-unreachable",
+        "projects-repos-partly",
+        "projects-repos-bare",
+        "projects-panel-cut",
+        "projects-panel-cut-top",
+        "projects-new",
+        "projects-new-custom",
+        "projects-new-duplicate",
+        "projects-new-copying",
+        "projects-new-mid",
+        "projects-new-open",
+        "projects-installing",
+        "projects-setup",
+        "projects-setup-closed",
+        "projects-setup-done",
+        "projects-setup-declined",
+        "projects-setup-failed",
+        "projects-installed",
+        "projects-setup-from-panel",
+        "projects-sheet-mid",
+        "projects-sheet-open",
+        "projects-switch-mid",
+        "projects-press",
+        "projects-hover",
+        "projects-dropdown",
+        "projects-menu",
+        "projects-avatars",
+        "projects-avatars-loading",
+        "projects-avatars-empty",
+        "projects-avatars-mid",
+        "projects-avatars-open",
+        "projects-choice",
+        "projects-ready",
+        "projects-capture",
+        "projects-crossfade",
+        "projects-resize",
+        "projects-resize-mid",
+        "projects-mixer",
+        "projects-mixer-installed",
+        "projects-mixer-adding",
+        "projects-mixer-open-mid",
+        "projects-mixer-open",
+        "projects-mixer-fold-mid",
+        "projects-new-covers",
+        "projects-new-novcc",
+        "projects-new-loading",
+        "projects-repos-novcc",
+        "projects-icons-live",
+        "projects-repos-crossfade",
+        "projects-repos-live",
+        "projects-commits",
+        "projects-commits-mid",
+        "projects-commits-open",
+        "projects-commits-narrow",
+        "projects-world",
+    ] {
+        let capture = name.starts_with("projects-avatars") || matches!(name, "projects-choice" | "projects-ready" | "projects-capture");
+        let mut snapshot = scenarios[0].snapshot.clone();
+        snapshot.n4n0.avatar_id = Some("avtr_00000000-0000-4000-8000-000000000000".into());
+        snapshot.n4n0.manifest = name == "projects-ready";
+        snapshot.n4n0.prop_sync = (name == "projects-ready").then_some(8);
+        // The development gallery, which has N4N0.
+        snapshot.account.development = true;
+        scenarios.push(Scenario {
+            name,
+            page: if capture { Page::Capture } else { Page::Projects },
+            snapshot,
+            frames: if matches!(name, "projects-icons-live" | "projects-repos-live") {
+                // Real lookups: time for them to land.
+                600
+            } else if name == "projects-resize-mid" {
+                60
+            } else if name == "projects-commits-mid" {
+                // The rows coming in one after the other.
+                12
+            } else if matches!(name, "projects-crossfade" | "projects-new-loading" | "projects-repos-crossfade") {
+                66
+            } else if name.ends_with("-mid") {
+                67
+            } else if name.ends_with("-open") || matches!(name, "projects-dropdown" | "projects-menu" | "projects-setup-from-panel") {
+                100
+            } else {
+                90
+            },
+            splash: false,
+            open_detail: false,
+            toasts: vec![],
+            // The wheel over the panel, not the cards beside it.
+            pointer: (name == "projects-panel-cut-top").then_some(pos2(1050.0, 500.0)),
+            scroll: match name {
+                "projects-proposals" => 560.0,
+                "projects-repos-scrolled" => 5000.0,
+                "projects-repos-added" => 520.0,
+                "projects-panel-cut-top" => 110.0,
+                _ => 0.0,
+            },
+            world: None,
+            home: None,
+            library: None,
+        });
+    }
+    // The selected project's 3D preview (a stand-in scene, or `ORBITERS_PREVIEW_FILE`, one Toolkit wrote): settled,
+    // rising out of the ground, the camera swinging round, turned by a drag, its window growing out of the card and
+    // open (with two scenes), close up and from behind in the open window (materials' look), in the scene's light and
+    // switched to the studio's, a sheet's on narrow windows (`--width 1040`), and the notes of projects without one.
+    for (name, frames) in [
+        ("projects-preview", 200),
+        ("projects-preview-reveal", 30),
+        ("projects-preview-swing", 60),
+        ("projects-preview-turned", 120),
+        ("projects-preview-open-mid", 96),
+        ("projects-preview-open", 230),
+        ("projects-preview-close", 230),
+        ("projects-preview-back", 230),
+        ("projects-preview-scene-light", 230),
+        ("projects-preview-studio-light", 230),
+        ("projects-preview-scenes", 230),
+        ("projects-preview-sheet", 200),
+        ("projects-preview-none", 90),
+        ("projects-preview-no-toolkit", 90),
+        ("projects-preview-old-toolkit", 90),
+        ("projects-preview-building", 90),
+        ("projects-preview-no-scene", 90),
+        ("projects-preview-native", 200),
+        ("projects-preview-native-building", 90),
+        ("projects-preview-native-open", 230),
+        ("projects-preview-native-switch", 200),
+        ("projects-preview-native-switched", 300),
+        ("projects-preview-native-all", 200),
+        ("projects-stills", 120),
+    ] {
+        let mut snapshot = scenarios[0].snapshot.clone();
+        snapshot.account.development = true;
+        scenarios.push(Scenario {
+            name,
+            page: Page::Projects,
+            snapshot,
+            frames,
+            splash: false,
+            open_detail: false,
+            toasts: vec![],
+            pointer: None,
+            scroll: 0.0,
+            world: None,
+            home: None,
+            library: None,
+        });
+    }
+
+    for name in [
+        "gallery-mixed",
+        "gallery-mine",
+        "gallery-shared",
+        "gallery-search",
+        "gallery-owner",
+        "gallery-public",
+        "gallery-grantee",
+        "gallery-friends",
+        "gallery-friends-error",
+        "gallery-explicit",
+        "gallery-error",
+        "gallery-picture",
+        "gallery-progress",
+        "gallery-request",
+        "gallery-instance",
+        "gallery-instance-live",
+        "gallery-instance-closed",
+        "gallery-instance-error",
+        "gallery-empty",
+        "gallery-requests",
+        "gallery-requests-explicit",
+        "gallery-requests-approved",
+        "gallery-requests-error",
+        "gallery-requests-outgoing",
+        "gallery-requests-denied",
+        "gallery-requests-empty",
+        "gallery-requests-opening",
+        "gallery-requests-close",
+        "gallery-instance-close",
+        "gallery-done",
+        "gallery-open",
+        "gallery-open-mid",
+        "gallery-close-mid",
+        "gallery-next",
+        "gallery-next-mid",
+        "gallery-select",
+        "gallery-select-mid",
+        "gallery-drag-lift",
+        "gallery-copied",
+        "gallery-copy-link",
+        "gallery-copy-link-offer",
+        "gallery-edited",
+        "gallery-updating",
+        "gallery-update-replacing",
+        "gallery-updated",
+        "gallery-update-failed",
+        "gallery-reconstructed",
+        "gallery-again-shared",
+        "world-share-window",
+        "world-share-public",
+        "world-share-sending",
+        "world-share-mid",
+        "world-share-open",
+        "world-share-detail",
+        "world-card-menu",
+    ] {
+        scenarios.push(Scenario {
+            name,
+            page: if name.starts_with("world-") { Page::Worlds } else { Page::Sessions },
+            snapshot: scenarios[0].snapshot.clone(),
+            frames: 140,
+            splash: false,
+            open_detail: name == "world-share-detail",
+            toasts: vec![],
+            pointer: None,
+            scroll: 0.0,
+            world: if name == "world-share-detail" { Some(WorldShot::default()) } else { None },
+            home: None,
+            library: None,
+        });
+    }
+    // Events (the hero, the cards, the event's window and Invite me) and the communities' galleries in Photos & captures.
+    for (name, frames) in [
+        ("events", 140),
+        ("events-enter-mid", 10),
+        ("events-empty", 120),
+        ("events-error", 120),
+        ("events-search", 120),
+        ("events-open", 150),
+        ("events-open-mid", 66),
+        ("events-open-card", 150),
+        ("events-close-mid", 156),
+        ("events-loading", 150),
+        ("events-invite-busy", 150),
+        ("events-invite-listed", 150),
+        ("events-invite-friend", 150),
+        ("events-invite-group", 150),
+        ("events-invite-link", 150),
+        ("events-invite-sent", 150),
+        ("events-invite-n4n0", 150),
+        ("events-pictures", 150),
+        ("gallery-community", 140),
+        ("gallery-community-all", 140),
+        ("gallery-community-one", 140),
+        ("gallery-community-open", 150),
+        ("gallery-community-open-mid", 86),
+        ("gallery-community-event", 150),
+        ("gallery-community-event-mid", 86),
+    ] {
+        scenarios.push(Scenario {
+            name,
+            page: if name.starts_with("events") { Page::Events } else { Page::Sessions },
+            snapshot: scenarios[0].snapshot.clone(),
+            frames,
+            splash: false,
+            open_detail: false,
+            toasts: vec![],
+            pointer: None,
+            scroll: 0.0,
+            world: None,
+            home: None,
+            library: None,
+        });
+    }
+    vrchat_login::append(&mut scenarios);
+    editor::append(&mut scenarios);
+    projects_panel::append(&mut scenarios);
+    gallery_layouts::append(&mut scenarios);
+    gallery_folders::append(&mut scenarios);
+    gallery_assets::append(&mut scenarios);
+    gallery_talk::append(&mut scenarios);
+    floating::append(&mut scenarios);
+    vr_audio::append(&mut scenarios);
+
     // Home's music is the overlay's sample song, never what this computer plays.
     crate::media::watcher().stand_in(crate::media::Reading {
         media: Some(crate::overlay::menu_pages::sample_media()),
-        volume: Some(orbiters_orb::menu::Volume { percent: 40, muted: false }),
+        volume: Some(orbiters_n4n0_core::menu::Volume { percent: 40, muted: false }),
         art: Some(std::sync::Arc::new(crate::media::Art { key: crate::overlay::menu_pages::SAMPLE_ART.into(), rgb: crate::overlay::menu_pages::sample_art() })),
     });
 
     let mut gpu = Offscreen::new()?;
     for sc in scenarios {
-        if only.as_deref().is_some_and(|o| o != sc.name) {
+        // `--only a,b,c`: several scenarios in one run (the scenarios are made once).
+        if only.as_deref().is_some_and(|list| list.split(',').all(|o| {
+            o != sc.name
+                && !(o == "vrchat-login" && sc.name.starts_with("vrchat-login-"))
+                && !(o == "editor" && sc.name.starts_with("editor-"))
+                && !(o == "sharing" && (sc.name.starts_with("gallery-") || sc.name.starts_with("world-share")))
+                && !(o == "events" && (sc.name.starts_with("events") || sc.name.starts_with("gallery-community")))
+        })) {
             continue;
         }
         let path = out.join(format!("{}.png", sc.name));
-        render(&mut gpu, &sc, scale, vec2(width, height), &path)?;
+        render(&mut gpu, &sc, scale, vec2(width, height), &path, frames)?;
         println!("{}", path.display());
     }
     Ok(())
 }
 
-fn render(gpu: &mut Offscreen, sc: &Scenario, scale: f32, size: Vec2, path: &std::path::Path) -> anyhow::Result<()> {
+/// Events and the communities' galleries on this frame of their scenario: the fixture staged, a window opened (out of
+/// the hero, a card, a gallery picture or an event gallery's card) on the member's invites the name says.
+fn stage_events(ctx: &egui::Context, app: &mut App, sc: &Scenario, f: u32) {
+    use crate::pages::events::Ask;
+    let dir = sc.snapshot.settings.sessions_dir.clone();
+    if sc.page == Page::Events {
+        if f == 0 {
+            app.events_mut().stage(sc.name, &dir);
+        }
+        let open_at = match sc.name {
+            "events-open-mid" => Some(sc.frames - 6),
+            n if n.starts_with("events-open")
+                || n.starts_with("events-invite")
+                || n == "events-loading"
+                || n == "events-close-mid"
+                || n == "events-pictures" =>
+            {
+                Some(60)
+            }
+            _ => None,
+        };
+        if open_at == Some(f) {
+            let friend = |is: bool| orbiters_core::community::Friend {
+                is_friend: Some(is),
+                accepting: false,
+                account: Some(orbiters_core::community::InviteAccount {
+                    name: Some("OrbitPhotoClub".into()),
+                    vrchat_id: Some("usr_c0ffee00-0000-4000-8000-000000000001".into()),
+                }),
+            };
+            let ask = match sc.name {
+                "events-invite-busy" => Ask::Busy("Signing you up…"),
+                "events-invite-listed" => Ask::Listed { friend: Some(friend(true)) },
+                "events-invite-friend" => Ask::Listed { friend: Some(friend(false)) },
+                "events-invite-group" => Ask::Group,
+                "events-invite-link" => Ask::Link,
+                "events-invite-sent" => Ask::Sent("Invite sent"),
+                "events-invite-n4n0" => Ask::Befriend { name: "Orbiters".into(), link: "https://vrchat.com/home/user/usr_orbiters".into() },
+                _ => Ask::Idle,
+            };
+            let n = usize::from(sc.name == "events-open-card");
+            app.events_mut().open_card(ctx, n, &[("main", ask)], sc.name == "events-loading", sc.name == "events-pictures");
+        }
+        if sc.name == "events-close-mid" && f + 6 == sc.frames {
+            app.events_mut().close_window();
+        }
+        return;
+    }
+    let gallery = app.sessions_mut().gallery_mut();
+    if f == 1 || f == 46 {
+        gallery.stage_community(sc.name, &dir);
+    }
+    let open_at = if sc.name.ends_with("-mid") { sc.frames - 6 } else { 80 };
+    if f == open_at {
+        if sc.name.starts_with("gallery-community-open") {
+            let shown = gallery.shown().to_vec();
+            gallery.community_mut().open_nth(ctx, 0, &shown);
+        }
+        if sc.name.starts_with("gallery-community-event") {
+            gallery.community_mut().open_event(ctx);
+        }
+    }
+}
+
+/// Frames past a scenario's shot, and how many of the last frames are written each.
+#[derive(Clone, Copy, Default)]
+struct Frames {
+    extend: u32,
+    sequence: u32,
+}
+
+fn render(gpu: &mut Offscreen, sc: &Scenario, scale: f32, size: Vec2, path: &std::path::Path, run: Frames) -> anyhow::Result<()> {
     let ctx = egui::Context::default();
     orbiters_ui::install(&ctx);
     let ctl = Controller::new(sc.snapshot.settings.clone());
     ctl.set_snapshot(sc.snapshot.clone());
     let backend: Ctl = std::sync::Arc::new(Local::new(ctl.clone()));
     let mut world_opened = false;
+    let mut share_staged = false;
     let mut library_staged = false;
+    // A press staged on the last frame, released on this one (with its button).
+    let mut release: Option<Pos2> = None;
+    let mut release_button = egui::PointerButton::Primary;
     backend.attach(&ctx);
     let mut app = App::offline(backend);
+    if sc.name == "vrchat-login-entering-password" {
+        app.stage_vrchat_login();
+    }
     app.set_gpu(crate::gpu::Handles::of_offscreen(gpu));
     if !sc.splash {
         app.skip_splash();
     }
-    for f in 0..sc.frames {
+    let total = sc.frames + run.extend;
+    for f in 0..total {
         let t = f as f64 / 60.0;
         let mut input = RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, size)), time: Some(t), ..Default::default() };
         input.viewports.insert(ViewportId::ROOT, ViewportInfo { native_pixels_per_point: Some(scale), focused: Some(true), ..Default::default() });
@@ -1091,7 +1959,7 @@ fn render(gpu: &mut Offscreen, sc: &Scenario, scale: f32, size: Vec2, path: &std
             input.events.push(Event::PointerMoved(p));
         }
         if sc.scroll != 0.0 && f + 30 == sc.frames {
-            input.events.push(Event::PointerMoved(pos2(760.0, 500.0)));
+            input.events.push(Event::PointerMoved(sc.pointer.unwrap_or(pos2(760.0, 500.0))));
             input.events.push(Event::MouseWheel {
                 unit: egui::MouseWheelUnit::Point,
                 delta: vec2(0.0, -sc.scroll),
@@ -1102,11 +1970,146 @@ fn render(gpu: &mut Offscreen, sc: &Scenario, scale: f32, size: Vec2, path: &std
         }
         if f == 0 {
             app.set_page(sc.page, t);
+            if sc.name.starts_with("projects-") {
+                app.projects_mut().stage(&ctx, sc.name);
+            }
+            if sc.name.starts_with("projects-preview") || sc.name == "projects-stills" {
+                app.projects_mut().stage_preview(sc.name);
+            }
+            if sc.page == Page::Videos {
+                stage_videos(&ctx, &mut app, sc.name);
+            }
+        }
+        // What the person does on this frame of a Unity projects scenario: a press where a control was drawn.
+        if let Some(p) = release.take() {
+            input.events.push(Event::PointerButton { pos: p, button: release_button, pressed: false, modifiers: egui::Modifiers::NONE });
+            release_button = egui::PointerButton::Primary;
+        }
+        if sc.name.starts_with("projects-") && f > 0 {
+            use crate::pages::projects::Poke;
+            let poke = app.projects_mut().stage_frame(sc.name, f);
+            match poke.or_else(|| app.projects_mut().stage_preview_frame(sc.name, f)) {
+                Some(Poke::Press(p)) => {
+                    input.events.push(Event::PointerMoved(p));
+                    input.events.push(Event::PointerButton { pos: p, button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::NONE });
+                    release = Some(p);
+                }
+                Some(Poke::Hold(p)) => {
+                    input.events.push(Event::PointerMoved(p));
+                    input.events.push(Event::PointerButton { pos: p, button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::NONE });
+                }
+                Some(Poke::Hover(p)) => input.events.push(Event::PointerMoved(p)),
+                Some(Poke::Context(p)) => {
+                    input.events.push(Event::PointerMoved(p));
+                    input.events.push(Event::PointerButton { pos: p, button: egui::PointerButton::Secondary, pressed: true, modifiers: egui::Modifiers::NONE });
+                    release = Some(p);
+                    release_button = egui::PointerButton::Secondary;
+                }
+                None => {}
+            }
+        }
+        // A Visited worlds card's right-click menu.
+        if sc.name == "world-card-menu" && f == 70 {
+            if let Some(r) = app.worlds_mut().first_card() {
+                let p = r.center();
+                input.events.push(Event::PointerMoved(p));
+                input.events.push(Event::PointerButton { pos: p, button: egui::PointerButton::Secondary, pressed: true, modifiers: egui::Modifiers::NONE });
+                release = Some(p);
+                release_button = egui::PointerButton::Secondary;
+            }
+        }
+        // Unity projects left for Settings and entered again (its pictures must stay drawn).
+        if sc.name == "projects-revisit" && (f == 50 || f == 62) {
+            app.set_page(if f == 50 { Page::Settings } else { Page::Projects }, t);
+        }
+        if sc.page == Page::Sessions && (f == 0 || f == 45) {
+            app.sessions_mut().stage_gallery(&ctx, sc.name);
+        }
+        // A card growing into its window (a twelfth of a second in, or settled), the window landing back on its card,
+        // the requests window growing out of its button.
+        if sc.page == Page::Sessions {
+            let gallery = app.sessions_mut().gallery_mut();
+            match sc.name {
+                "gallery-open" | "gallery-close-mid" | "gallery-next" | "gallery-next-mid" if f == 70 => gallery.open_card(&ctx, 0),
+                "gallery-next" if f == 100 => gallery.step_window(1),
+                "gallery-next-mid" if f + 6 == sc.frames => gallery.step_window(1),
+                "gallery-open-mid" if f + 6 == sc.frames => gallery.open_card(&ctx, 0),
+                "gallery-close-mid" if f + 6 == sc.frames => gallery.close_window(),
+                "gallery-requests-opening" if f + 6 == sc.frames => gallery.open_requests(),
+                "gallery-requests-close" if f == 60 => gallery.open_requests(),
+                "gallery-requests-close" if f == 120 => gallery.close_requests(),
+                "gallery-instance-close" if f == 120 => gallery.close_instance(),
+                // Cards chosen (the bar rising out of the bottom edge, or settled), lifted as a drag out starts (its drag
+                // image written beside the shot), the bar saying what a drag copied; Copy public link just pressed.
+                "gallery-select" | "gallery-drag-lift" if f == 70 => gallery.stage_select(3),
+                "gallery-select-mid" if f + 5 == sc.frames => gallery.stage_select(2),
+                "gallery-drag-lift" if f == 120 => gallery.stage_lift(Some(&path.with_file_name("gallery-drag-image.png"))),
+                "gallery-copied" if f == 70 => gallery.stage_select(2),
+                "gallery-copied" if f == 100 => gallery.stage_copied(&ctx, "Copied 2 pictures"),
+                "gallery-copy-link" if f + 8 == sc.frames => gallery.stage_copied_link(&ctx),
+                _ => {}
+            }
+            // The layouts and a multi-layer picture, on made-up pictures.
+            gallery_layouts::stage(&ctx, gallery, sc.name, f);
+            if let Some(p) = gallery_folders::stage(gallery, sc.name, f, total) {
+                input.events.push(Event::PointerMoved(p));
+                input.events.push(Event::PointerButton { pos: p, button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::NONE });
+                release = Some(p);
+            }
+            gallery_assets::stage(&ctx, gallery, sc.name, f, &sc.snapshot.settings.sessions_dir);
+            gallery_talk::stage(&ctx, gallery, sc.name, f);
+        }
+        // The photo editor over a picture window, its preview made before each frame.
+        if sc.name.starts_with("editor-") {
+            editor::stage(&ctx, &mut app, sc.name, f);
+        }
+        if sc.page == Page::Events || sc.name.starts_with("gallery-community") {
+            stage_events(&ctx, &mut app, sc, f);
+        }
+        // A world card's Share to … or Share publicly, the window growing out of the card (on made-up friends).
+        if matches!(sc.name, "world-share-window" | "world-share-public") && !share_staged && f >= 60 && app.worlds_mut().loaded() {
+            share_staged = true;
+            app.worlds_mut().stage_share_window(&ctx, sc.snapshot.settings.sessions_dir.clone(), sc.name == "world-share-public");
+        }
+        // Sent to a friend: shown at once among who sees it, the files on their way.
+        if sc.name == "world-share-sending" && !share_staged && f >= 60 && app.worlds_mut().loaded() {
+            share_staged = true;
+            app.worlds_mut().stage_share_as(&ctx, sc.snapshot.settings.sessions_dir.clone(), false, "sending");
+        }
+        if sc.name == "world-share-mid" && f == sc.frames - 4 {
+            app.worlds_mut().stage_share_morph(&ctx, true);
+        }
+        if sc.name == "world-share-detail" && f == 90 {
+            app.worlds_mut().stage_detail_share(&ctx);
+        }
+        if sc.name == "world-share-open" && f == 45 {
+            app.worlds_mut().stage_share_morph(&ctx, false);
+        }
+        if sc.name == "world-close" && f == 120 {
+            app.worlds_mut().close_world();
+        }
+        if sc.name == "world-viewer-close" && f == 170 {
+            app.worlds_mut().close_picture();
         }
         // Home made its menu on the first frame.
         if let (Some(shot), 2) = (sc.home, f) {
             if let Some(host) = app.home_mut().menu_host() {
                 stage_home(host, shot);
+                // VRChat's camera was closed when the picture was asked for.
+                if sc.name == "home-photo-camera" {
+                    host.menu.notice = Some(orbiters_n4n0::platform::CAMERA_CLOSED.into());
+                }
+            }
+        }
+        // An avatar's card opened on the States page (once the page opened on the cards).
+        if f == 4 {
+            let opened = match sc.name {
+                "home-states-avatar" => sc.snapshot.n4n0.states.avatar_id.clone(),
+                "home-states-other" => sc.snapshot.n4n0.states.avatars.iter().find(|a| !a.worn).map(|a| a.id.clone()),
+                _ => None,
+            };
+            if let Some(id) = opened {
+                app.home_mut().states_mut().open_avatar(&id);
             }
         }
         if f == 1 {
@@ -1143,7 +2146,10 @@ fn render(gpu: &mut Offscreen, sc: &Scenario, scale: f32, size: Vec2, path: &std
             if sc.open_detail && !world_opened && f >= 45 && app.worlds_mut().loaded() {
                 world_opened = true;
                 let visited = crate::worlds::load(&sc.snapshot.settings.sessions_dir);
-                let pick = if ws.pictures {
+                let pick = if sc.name == "world-close" {
+                    // The first card: it is on screen to land back on.
+                    visited.first()
+                } else if ws.pictures {
                     visited.iter().max_by_key(|w| w.shots.len())
                 } else {
                     visited.iter().max_by_key(|w| (w.reconstructed(), w.sessions.len()))
@@ -1162,7 +2168,8 @@ fn render(gpu: &mut Offscreen, sc: &Scenario, scale: f32, size: Vec2, path: &std
                 }
             }
         }
-        let capture = f + 1 == sc.frames;
+        let shot = f + 1 == sc.frames;
+        let capture = shot || f + run.sequence >= total;
         if capture {
             // What the page still reads (the list, pictures) lands before the shot: a slow disk makes the run
             // longer, not the picture emptier. The frames meanwhile stand at the same time.
@@ -1190,7 +2197,12 @@ fn render(gpu: &mut Offscreen, sc: &Scenario, scale: f32, size: Vec2, path: &std
             capture,
         )?;
         if let Some(image) = image {
-            save_png(path, &image)?;
+            if f + run.sequence >= total {
+                save_png(&path.with_file_name(format!("{}-{f:03}.png", sc.name)), &image)?;
+            }
+            if shot {
+                save_png(path, &image)?;
+            }
         }
         // Background jobs (session list, thumbnails) land between frames.
         std::thread::sleep(Duration::from_millis(3));
@@ -1198,27 +2210,119 @@ fn render(gpu: &mut Offscreen, sc: &Scenario, scale: f32, size: Vec2, path: &std
     Ok(())
 }
 
+/// The Videos page over made-up videos and lists, never this computer's (`videos`: the history; `videos-list`: the
+/// second list; `videos-picker`: the bookmark picker on the first video), YouTube's thumbnails the overlay's samples.
+fn stage_videos(ctx: &egui::Context, app: &mut App, name: &str) {
+    use crate::overlay::menu_pages::{sample_rgba, sample_videos};
+    use orbiters_core::video_history::{Bookmark, Bookmarks, History};
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+    let samples = sample_videos();
+    let mut history = History::default();
+    let yt = |i: usize| format!("https://www.youtube.com/watch?v={}", samples[i].id);
+    let plays: [(String, u64, &str); 9] = [
+        (yt(1), 3 * 86_400, "Japan Shrine"),
+        (yt(4), 3 * 86_400 - 1800, "Japan Shrine"),
+        (yt(2), 86_400 + 3600, "The Black Cat"),
+        ("https://stream.vrcdn.live/live/clubnight.live.ts".into(), 2 * 3600, "The Black Cat"),
+        ("https://vimeo.com/76979871".into(), 9 * 86_400, "Movie Night"),
+        (yt(3), 50 * 60, "Movie Night"),
+        (yt(0), 4 * 3600, "Movie Night"),
+        (yt(0), 2 * 3600 + 600, "Movie Night"),
+        (yt(0), 12 * 60, "Movie Night"),
+    ];
+    for (url, ago, world) in &plays {
+        history.record(url, now - ago, Some("wrld_99123966-6b37-4b5b-9f3c-0a1b2c3d4e5f"), Some(world));
+    }
+    for (i, v) in samples.iter().enumerate() {
+        history.set_title(&yt(i), Some((v.title.clone(), v.channel.clone())));
+    }
+    let mut bookmarks = Bookmarks::default();
+    let mark = |url: String, ago: u64| Bookmark { url, added: now - ago, ..Default::default() };
+    let favourites = bookmarks.create("Favourites");
+    bookmarks.add(&favourites, mark(yt(3), 2 * 86_400));
+    bookmarks.add(&favourites, mark(yt(1), 3600));
+    let movies = bookmarks.create("Movie night");
+    bookmarks.add(&movies, mark("https://vimeo.com/76979871".into(), 8 * 86_400));
+    bookmarks.add(&movies, mark(yt(0), 600));
+    bookmarks.create("Study");
+    let pictures = (0..samples.len())
+        .map(|i| {
+            let (w, h, rgba) = sample_rgba(i);
+            let image = egui::ColorImage::from_rgba_unmultiplied([w, h], &rgba);
+            (samples[i].id.clone(), ctx.load_texture(format!("video-{i}"), image, egui::TextureOptions::LINEAR))
+        })
+        .collect();
+    let list = (name == "videos-list").then_some(1);
+    app.videos_mut().stand_in(history, bookmarks, list, name == "videos-picker", pictures);
+}
+
 /// Home with one of its features' pages open: YouTube with the overlay's sample suggestions or results (their
 /// thumbnails too, nothing fetched) or as it opens; calls, the music and the light as the snapshot and the stand-in
 /// music say.
 fn stage_home(host: &mut crate::menu_host::MenuHost, HomeShot { page, samples }: HomeShot) {
     use crate::overlay::menu_pages::{sample_rgba, sample_suggestions, sample_videos};
-    use orbiters_orb::menu::{Effect, Target};
+    use orbiters_n4n0_core::menu::{Effect, Target};
+    // Where a card can be dropped: a browser plays one of the sample results, found on YouTube (Home's music card copies
+    // its link; the music page shows it copied, offering Drop).
+    if samples && host.menu.can_drop && matches!(page, MenuPage::Home | MenuPage::Music) {
+        let video = &sample_videos()[3];
+        let (w, h, rgba) = sample_rgba(3);
+        host.put_picture(&video.id, egui::ColorImage::from_rgba_unmultiplied([w, h], &rgba));
+        host.menu.media = Some(orbiters_n4n0_core::menu::Media {
+            title: video.title.clone(),
+            artist: video.channel.clone(),
+            app: "Chrome".into(),
+            playing: true,
+            can_play_pause: true,
+            can_next: true,
+            // YouTube's page takes a position (its "seekto"), as Chrome tells Windows.
+            can_seek: true,
+            position: Some(1274),
+            duration: Some(3674),
+            art: Some(video.id.clone()),
+            video: Some(video.id.clone()),
+            ..Default::default()
+        });
+        if page == MenuPage::Music {
+            host.press(Target::Music);
+            host.press(Target::CopyPlaying);
+            return;
+        }
+    }
     let open = match page {
         MenuPage::Home => return,
         MenuPage::Search | MenuPage::Results => Target::YouTube,
         MenuPage::Call => Target::Call,
-        MenuPage::Photo => Target::Photo,
+        // The window shares captures in Photos & captures: its 3D picture page stands for the menu's sharing pages.
+        MenuPage::Photo | MenuPage::History | MenuPage::ShareTo | MenuPage::Explicit => Target::Photo,
         MenuPage::Music => Target::Music,
         MenuPage::Light => Target::Light,
-        MenuPage::States => Target::States,
-        MenuPage::Card => return,
+        MenuPage::States | MenuPage::NewState => Target::States,
+        MenuPage::Tracking => Target::Tracking,
+        MenuPage::Suggest | MenuPage::Type => Target::Suggest,
+        MenuPage::Qr => Target::Qr,
+        MenuPage::Instances | MenuPage::AddFriend => Target::Instances,
+        MenuPage::Feedback | MenuPage::FeedbackLabels | MenuPage::Comments => Target::WorldFeedback,
+        MenuPage::Card | MenuPage::More | MenuPage::Mirror => return,
     };
     host.press(open);
     if !samples {
         return;
     }
     match page {
+        // The sample player's instances (never this computer's), and Orbiters asking to be added as a friend first.
+        MenuPage::Instances | MenuPage::AddFriend => {
+            use orbiters_n4n0_core::menu::{InviteAccount, InviteAnswer};
+            host.menu.set_instances(crate::overlay::menu_pages::sample_instances(), true, "");
+            if page == MenuPage::AddFriend {
+                host.press(Target::InviteMe(0));
+                let account = InviteAccount { name: "Orbiters".into(), link: "https://vrchat.com/home/user/usr_0c5b8f2e-3a41-4d7c-9e2b-5f6a7b8c9d0e".into() };
+                host.menu.invite_answered(InviteAnswer::NeedsFriend {
+                    account,
+                    message: "Add Orbiters' VRChat account as a friend on VRChat first, then try again.".into(),
+                });
+            }
+        }
         MenuPage::Search => {
             if let Some(Effect::Suggest { id, text }) = host.menu.set_query("lofi hi").into_iter().next() {
                 host.menu.suggestions_arrived(id, &text, sample_suggestions());
@@ -1231,7 +2335,7 @@ fn stage_home(host: &mut crate::menu_host::MenuHost, HomeShot { page, samples }:
                     let (w, h, rgba) = sample_rgba(i);
                     host.put_picture(&video.id, egui::ColorImage::from_rgba_unmultiplied([w, h], &rgba));
                 }
-                host.menu.results_arrived(id, orbiters_orb::youtube::Results { videos, continuation: Some("next".into()) }, false);
+                host.menu.results_arrived(id, orbiters_n4n0_core::youtube::Results { videos, continuation: Some("next".into()) }, false);
                 // Where a card can be dropped: the second result's link copied, its row offering Drop.
                 if host.menu.can_drop {
                     host.press(Target::Copy(1));
@@ -1245,7 +2349,10 @@ fn stage_home(host: &mut crate::menu_host::MenuHost, HomeShot { page, samples }:
 /// An offscreen run in real time for the end-to-end flows: a frame about every 16 ms, presses on controls found by
 /// their labels, and waits on what the app or the controller shows, each with a time limit.
 struct Run<'a> {
-    gpu: &'a mut Offscreen,
+    /// What paints the frames shot: the GPU offscreen, or without one ([`Run::cpu`]) the VR overlay's CPU painter
+    /// (orbiters_ui::software), which skips paint callbacks (the 3D view's splats) and needs no GPU at all.
+    gpu: Option<&'a mut Offscreen>,
+    cpu: Option<orbiters_ui::software::Software>,
     ctx: egui::Context,
     app: App,
     scale: f32,
@@ -1254,6 +2361,8 @@ struct Run<'a> {
     release: Option<Pos2>,
     /// Pause between frames (longer while a reconstruction trains).
     pace: Duration,
+    /// The window's size in points.
+    size: Vec2,
 }
 
 impl<'a> Run<'a> {
@@ -1264,7 +2373,19 @@ impl<'a> Run<'a> {
         backend.attach(&ctx);
         let mut app = App::offline(backend);
         app.skip_splash();
-        Self { gpu, ctx, app, scale, start: Instant::now(), release: None, pace: Duration::from_millis(16) }
+        Self { gpu: Some(gpu), cpu: None, ctx, app, scale, start: Instant::now(), release: None, pace: Duration::from_millis(16), size: vec2(1280.0, 820.0) }
+    }
+
+    /// A run painted on the CPU: no GPU, no 3D view.
+    fn cpu(backend: Ctl, scale: f32) -> Run<'static> {
+        let ctx = egui::Context::default();
+        orbiters_ui::install(&ctx);
+        widgets::watch_controls();
+        backend.attach(&ctx);
+        let mut app = App::offline(backend);
+        app.skip_splash();
+        let painter = orbiters_ui::software::Software::new((1280.0 * scale).round() as u32, (820.0 * scale).round() as u32);
+        Run { gpu: None, cpu: Some(painter), ctx, app, scale, start: Instant::now(), release: None, pace: Duration::from_millis(16), size: vec2(1280.0, 820.0) }
     }
 
     fn time(&self) -> f64 {
@@ -1274,22 +2395,33 @@ impl<'a> Run<'a> {
     /// One frame with `events` (and the release of last frame's press); its picture when `capture`.
     fn frame(&mut self, mut events: Vec<Event>, capture: bool) -> anyhow::Result<Option<egui::ColorImage>> {
         let t = self.time();
-        let mut input = RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1280.0, 820.0))), time: Some(t), ..Default::default() };
+        let mut input = RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, self.size)), time: Some(t), ..Default::default() };
         input.viewports.insert(ViewportId::ROOT, ViewportInfo { native_pixels_per_point: Some(self.scale), focused: Some(true), ..Default::default() });
         if let Some(p) = self.release.take() {
             events.insert(0, Event::PointerButton { pos: p, button: egui::PointerButton::Primary, pressed: false, modifiers: Default::default() });
         }
         input.events = events;
         let app = &mut self.app;
-        let image = self.gpu.frame(
-            &self.ctx,
-            input,
-            |ui| {
-                app.logic_offline(ui.ctx());
-                app.draw(ui);
-            },
-            capture,
-        )?;
+        let run_ui = |ui: &mut egui::Ui| {
+            app.logic_offline(ui.ctx());
+            app.draw(ui);
+        };
+        let image = match (self.gpu.as_mut(), self.cpu.as_mut()) {
+            (Some(gpu), _) => gpu.frame(&self.ctx, input, run_ui, capture)?,
+            (None, Some(sw)) => {
+                let mut full = self.ctx.run_ui(input, run_ui);
+                sw.set_textures(&mut full.textures_delta);
+                let ppp = full.pixels_per_point;
+                let image = capture.then(|| {
+                    let (w, h) = sw.size();
+                    let pixels = sw.paint(&self.ctx.tessellate(full.shapes, ppp), ppp, egui::Color32::BLACK);
+                    egui::ColorImage::from_rgba_premultiplied([w as usize, h as usize], pixels)
+                });
+                sw.free_textures(&mut full.textures_delta);
+                image
+            }
+            (None, None) => unreachable!("a run paints on the GPU or the CPU"),
+        };
         std::thread::sleep(self.pace);
         Ok(image)
     }
@@ -1419,7 +2551,7 @@ fn splats_3d(gpu: &mut Offscreen, out: &std::path::Path, settings: &Settings, sc
     anyhow::ensure!(run.app.sessions_mut().open_dir().is_some(), "no session in {}", settings.sessions_dir.display());
     // The detail opens, then the 3D view over it.
     run.wait(1.0)?;
-    run.app.sessions_mut().open_viewer(&ctx, &handles);
+    run.app.sessions_mut().open_viewer(&ctx, &handles, false);
     run.until("the 3D view's splats", 120.0, |run| run.app.sessions_mut().viewer_loaded())?;
     run.wait(0.6)?;
     run.shoot(out, "splats-3d")?;
@@ -1650,46 +2782,46 @@ impl StandInVrchat {
 }
 
 /// N4N0 on an avatar with its prop and menu, a conversation under way, saved videos and the speech models installed.
-fn orb_snapshot(base: &Snapshot) -> Snapshot {
-    use crate::state::{OrbConfirmation, OrbFace, OrbLine, OrbWho, ProcessUsage};
+fn n4n0_snapshot(base: &Snapshot) -> Snapshot {
+    use crate::state::{N4n0Confirmation, N4n0Face, N4n0Line, N4n0Who, ProcessUsage};
     let mut s = base.clone();
     s.vrchat.world.avatar_name = Some("Rexouium".into());
     s.vrchat.world.last_video = Some(orbiters_core::vrchat_log::VideoSeen { url: "https://www.youtube.com/watch?v=36YnV9STBqc".into(), at: None });
-    s.settings.orb.afk_message_enabled = true;
-    s.settings.orb.afk_message = "Getting food, back in 10!".into();
-    s.settings.orb.pins = vec![orbiters_core::settings::Pin { parameter: "Hoodie".into(), value: orbiters_core::osc::OscValue::Bool(true) }];
-    let line = |who, text: &str| OrbLine { who, text: text.into(), at_ms: 0 };
-    let o = &mut s.orb;
+    s.settings.n4n0.afk_message_enabled = true;
+    s.settings.n4n0.afk_message = "Getting food, back in 10!".into();
+    s.settings.n4n0.pins = vec![orbiters_core::settings::Pin { parameter: "Hoodie".into(), value: orbiters_core::osc::OscValue::Bool(true) }];
+    let line = |who, text: &str| N4n0Line { who, text: text.into(), at_ms: 0 };
+    let o = &mut s.n4n0;
     o.avatar_id = Some("avtr_7f3c2b1e-0d4a-4a7b-9c55-1f0e9a2b6c11".into());
     o.prop_sync = Some(8);
     o.manifest = true;
     o.controls = 42;
-    o.face = OrbFace::Talking;
+    o.face = N4n0Face::Talking;
     o.panel = Some("Done, hoodie on. Now go find\nyour friends instead of\ntalking to a floating ball.".into());
     o.lines = vec![
-        line(OrbWho::You, "Nano, mets mon sweat à capuche"),
-        line(OrbWho::Note, "N4N0 set Clothes / Hoodie"),
-        line(OrbWho::Orb, "Done, hoodie on. Now go find your friends instead of talking to a floating ball."),
-        line(OrbWho::You, "Plan a movie night for my community on Saturday at 9 pm"),
-        line(OrbWho::Note, "N4N0: create event draft…"),
-        line(OrbWho::Orb, "Drafted “Movie night” for Saturday 21:00 in Cozy Cinema. Approve it on Orbiters and I'll announce it."),
+        line(N4n0Who::You, "Nano, mets mon sweat à capuche"),
+        line(N4n0Who::Note, "N4N0 set Clothes / Hoodie"),
+        line(N4n0Who::N4n0, "Done, hoodie on. Now go find your friends instead of talking to a floating ball."),
+        line(N4n0Who::You, "Plan a movie night for my community on Saturday at 9 pm"),
+        line(N4n0Who::Note, "N4N0: create event draft…"),
+        line(N4n0Who::N4n0, "Drafted “Movie night” for Saturday 21:00 in Cozy Cinema. Approve it on Orbiters and I'll announce it."),
     ];
-    o.confirmations = vec![OrbConfirmation {
+    o.confirmations = vec![N4n0Confirmation {
         id: "c1".into(),
         title: "Publish “Movie night”".into(),
         summary: "Saturday 21:00 · Cozy Cinema · announced in #events".into(),
         approve_url: "https://orbiters.cc/confirm/c1".into(),
     }];
-    o.quota = Some(orbiters_orb::assistant::Quota { used: 13, limit: 80, resets_at: None, own_key: false });
+    o.quota = Some(orbiters_n4n0_core::assistant::Quota { used: 13, limit: 80, resets_at: None, own_key: false });
     o.voice = crate::state::VoiceStatus { installed: true, running: true, ..Default::default() };
     o.videos = vec![
-        orbiters_orb::videos::SavedVideo {
+        orbiters_n4n0_core::videos::SavedVideo {
             url: "https://www.youtube.com/watch?v=36YnV9STBqc".into(),
             title: Some("Lo-fi beats to sit in a VRChat club to".into()),
             world: Some("The Black Cat".into()),
             saved_utc: "2026-10-20T22:14:03Z".into(),
         },
-        orbiters_orb::videos::SavedVideo {
+        orbiters_n4n0_core::videos::SavedVideo {
             url: "https://youtu.be/pUaeOcyzDrA".into(),
             title: None,
             world: Some("Palm Point - Night".into()),
@@ -1719,17 +2851,33 @@ fn sample_states(avatar: Option<String>) -> crate::state::StatesView {
         pose_parameters,
         eye_height: Some(1.62),
     };
-    StatesView {
-        avatar_id: avatar,
-        avatar_name: Some("Rexouium".into()),
-        states: vec![
-            StateView { eye_height: None, ..state("s1", "Hoodie on", "2026-10-21T19:40:00Z", false, false, false, 46, 12) },
-            state("s2", "Cosy evening", "2026-10-23T21:05:00Z", true, true, false, 46, 12),
-            state("s3", "Tall and sitting", "2026-10-24T18:12:00Z", false, true, true, 46, 12),
-        ],
-        note: None,
-        saving: false,
+    let states = vec![
+        StateView { eye_height: None, ..state("s1", "Hoodie on", "2026-10-21T19:40:00Z", false, false, false, 46, 12) },
+        state("s2", "Cosy evening", "2026-10-23T21:05:00Z", true, true, false, 46, 12),
+        state("s3", "Tall and sitting", "2026-10-24T18:12:00Z", false, true, true, 46, 12),
+    ];
+    // The avatars' cards: the one worn, then others saved in before (one from before names were kept).
+    let mut avatars = vec![
+        crate::state::AvatarView {
+            id: "avtr_2b8e41c7-5f1a-4d90-8e3b-77a1c0d4e9f2".into(),
+            name: Some("Ultirex ✨ Noir".into()),
+            worn: false,
+            states: vec![
+                state("u1", "Club night", "2026-10-22T23:10:00Z", true, false, false, 88, 0),
+                state("u2", "Daytime", "2026-10-20T14:00:00Z", false, false, true, 88, 0),
+            ],
+        },
+        crate::state::AvatarView {
+            id: "avtr_9d04a3e2-1c55-4b7e-a0f1-2e6c8b5d7a13".into(),
+            name: None,
+            worn: false,
+            states: vec![state("o1", "State 1", "2026-09-30T10:00:00Z", false, false, false, 12, 0)],
+        },
+    ];
+    if let Some(id) = &avatar {
+        avatars.insert(0, crate::state::AvatarView { id: id.clone(), name: Some("Rexouium".into()), worn: true, states: states.clone() });
     }
+    StatesView { avatar_id: avatar, avatar_name: Some("Rexouium".into()), states, note: None, saving: false, avatars }
 }
 
 fn with_account(base: &Snapshot, state: crate::state::AccountState, error: Option<&str>) -> Snapshot {
@@ -1831,7 +2979,7 @@ fn spiral() -> Vec<[f32; 3]> {
 struct Still;
 
 impl crate::backend::Backend for Still {
-    fn orb(&self, _command: crate::ipc::OrbCommand) {}
+    fn n4n0(&self, _command: crate::ipc::N4n0Command) {}
 
     fn view(&self) -> std::sync::Arc<Snapshot> {
         std::sync::Arc::new(Snapshot::new(Settings::default()))
@@ -1943,11 +3091,11 @@ fn overlay_shots(out: &std::path::Path, settings: &Settings) -> anyhow::Result<(
         skeleton_frames: 4_050,
         ..Default::default()
     });
-    let mut talking = orb_snapshot(&with_account(&idle, crate::state::AccountState::SignedIn { username: "Desktop Tester".into() }, None));
+    let mut talking = n4n0_snapshot(&with_account(&idle, crate::state::AccountState::SignedIn { username: "Desktop Tester".into() }, None));
     talking.vrchat.running = true;
     let mut listening = talking.clone();
-    listening.orb.listening = true;
-    listening.orb.voice.level = 0.55;
+    listening.n4n0.listening = true;
+    listening.n4n0.voice.level = 0.55;
     let calling = with_calls(&talking, true);
     let mut walking = talking.clone();
     walking.vrchat.world.in_world = true;
@@ -1956,10 +3104,10 @@ fn overlay_shots(out: &std::path::Path, settings: &Settings) -> anyhow::Result<(
     // (name, snapshot, calibration: (T-pose held, started at this time; the last frame is at 1.48 s)).
     type Shot<'a> = (&'a str, &'a Snapshot, Option<(bool, f64)>);
     let shots: [Shot; 9] = [
-        ("overlay-orb-call", &calling, None),
+        ("overlay-n4n0-call", &calling, None),
         ("overlay-walk", &walking, None),
-        ("overlay-orb", &talking, None),
-        ("overlay-orb-listening", &listening, None),
+        ("overlay-n4n0", &talking, None),
+        ("overlay-n4n0-listening", &listening, None),
         ("overlay-idle", &idle, None),
         ("overlay-recording", &recording, None),
         ("overlay-countdown", &idle, Some((true, 0.0))),
@@ -1971,8 +3119,8 @@ fn overlay_shots(out: &std::path::Path, settings: &Settings) -> anyhow::Result<(
         orbiters_ui::install(&ctx);
         let backend: Ctl = std::sync::Arc::new(Still);
         let mut ui_state = OverlayUi::default();
-        if name.starts_with("overlay-orb") {
-            ui_state.page = crate::overlay::ui::Page::Orb;
+        if name.starts_with("overlay-n4n0") {
+            ui_state.page = crate::overlay::ui::Page::N4n0;
         }
         if name == "overlay-walk" {
             ui_state.page = crate::overlay::ui::Page::Walk;
@@ -2037,6 +3185,61 @@ fn overlay_shots(out: &std::path::Path, settings: &Settings) -> anyhow::Result<(
             println!("{}", out.join(format!("{mirror}.png")).display());
         }
     }
+    overlay_menu_shots(out, &talking)
+}
+
+/// N4N0's menu in the play space sharing 3D captures (screen version 12's pages), driven as the overlay drives it: the
+/// service's snapshot followed (the sample captures, then the sample friends), presses as a player makes them, drawn in
+/// the overlay's look. The pictures are the sample thumbnails, never this computer's sessions.
+fn overlay_menu_shots(out: &std::path::Path, snap: &Snapshot) -> anyhow::Result<()> {
+    use crate::menu_host::MenuHost;
+    use crate::overlay::menu_pages::{sample_captures, sample_friends, sample_rgba};
+    use orbiters_n4n0_core::captures::Friends;
+    use orbiters_n4n0_core::menu::Target;
+    let backend: Ctl = std::sync::Arc::new(Still);
+    let mut snap = snap.clone();
+    snap.n4n0.captures = sample_captures();
+    let mut canvas = crate::overlay::Canvas::new(1024, 576);
+    let mut host = MenuHost::new(canvas.ctx().clone());
+    for row in &snap.n4n0.captures.history {
+        let (w, h, rgba) = sample_rgba(row.key.trim_start_matches("sample").parse().unwrap_or(0));
+        host.put_picture(&row.picture_key(), egui::ColorImage::from_rgba_unmultiplied([w, h], &rgba));
+    }
+    host.open(&snap);
+    host.follow(&snap);
+    let press = |host: &mut MenuHost, snap: &Snapshot, target: Target| {
+        let effects = host.press(target);
+        host.effects(effects, snap, &backend);
+    };
+    let mut shoot = |host: &MenuHost, name: &str, hover: Target| -> anyhow::Result<()> {
+        use crate::overlay::menu_ui::{self, Skin, View};
+        use orbiters_n4n0_core::menu::layout::{self, ScreenPage};
+        let hover = layout::cached(ScreenPage::of(&host.menu)).elements.iter().position(|e| e.target == hover);
+        let picture = |id: &str| host.picture(id, false);
+        let view = View { menu: &host.menu, hover, pressed: None, picture: &picture, time: 0.4, skin: Skin::english() };
+        let rgba = canvas.paint(0.4, |p| menu_ui::draw(p, pos2(0.0, 0.0), &view)).to_vec();
+        let path = out.join(format!("{name}.png"));
+        save_png(&path, &over_ground(&rgba, 1024, 576))?;
+        println!("{}", path.display());
+        Ok(())
+    };
+    press(&mut host, &snap, Target::Photo);
+    shoot(&host, "overlay-menu-photo-share", Target::ShareLatestTo)?;
+    press(&mut host, &snap, Target::History);
+    shoot(&host, "overlay-menu-history", Target::SharePublic(3))?;
+    // Share to …: the friends come with the next snapshot, two are chosen.
+    press(&mut host, &snap, Target::ShareTo(0));
+    shoot(&host, "overlay-menu-share-to-loading", Target::FindFriend)?;
+    snap.n4n0.friends = Friends::ready(sample_friends());
+    host.follow(&snap);
+    press(&mut host, &snap, Target::Friend(0));
+    press(&mut host, &snap, Target::Friend(4));
+    shoot(&host, "overlay-menu-share-to", Target::SendShare)?;
+    press(&mut host, &snap, Target::SendShare);
+    snap.n4n0.friends = Friends::None;
+    // The flagged capture's Share publicly: the warning first.
+    press(&mut host, &snap, Target::SharePublic(2));
+    shoot(&host, "overlay-menu-explicit", Target::ShareAnyway)?;
     Ok(())
 }
 
@@ -2060,12 +3263,12 @@ fn over_ground(rgba: &[u8], width: u32, height: u32) -> egui::ColorImage {
 fn with_calls(snap: &Snapshot, ringing: bool) -> Snapshot {
     use crate::state::{CallContact, CallLink, CallPhase, CallView};
     let mut s = snap.clone();
-    s.settings.orb.calls = true;
-    s.orb.calls.link = CallLink::Linked { account: "usr_1339e525-d75d-4832-9104-98dd89287681".into() };
-    s.orb.calls.contacts =
+    s.settings.n4n0.calls = true;
+    s.n4n0.calls.link = CallLink::Linked { account: "usr_1339e525-d75d-4832-9104-98dd89287681".into() };
+    s.n4n0.calls.contacts =
         ["Kiri", "Nova Fox", "Rexouium Fan"].iter().enumerate().map(|(i, n)| CallContact { id: format!("c_{i}"), name: n.to_string() }).collect();
     if ringing {
-        s.orb.calls.call = Some(CallView {
+        s.n4n0.calls.call = Some(CallView {
             name: "Nova Fox".into(),
             phase: CallPhase::Ringing,
             incoming: true,

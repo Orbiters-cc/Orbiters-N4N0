@@ -1,17 +1,17 @@
-//! N4N0's menu (`orbiters_orb::menu`) run where it is drawn: the SteamVR overlay's menu in the play space, and Home,
+//! N4N0's menu (`orbiters_n4n0_core::menu`) run where it is drawn: the SteamVR overlay's menu in the play space, and Home,
 //! the window's main page. `orbiters_n4n0::menu_host` keeps it in step with the tray service and fetches what it
 //! shows; here its pictures are egui textures (with the retro look's green dots), and what it asks goes to the service
 //! over the backend.
 
 use crate::backend::Ctl;
-use crate::ipc::OrbCommand;
+use crate::ipc::N4n0Command;
 use crate::overlay::menu_retro;
 use crate::state::Snapshot;
 use egui::{ColorImage, TextureHandle, TextureId, TextureOptions};
 use orbiters_core::settings::Settings;
 use orbiters_n4n0::menu_host::{self as shared, MenuService, Pictures};
-use orbiters_orb::menu::Effect;
-use orbiters_orb::picture::Rgb;
+use orbiters_n4n0_core::menu::Effect;
+use orbiters_n4n0_core::picture::Rgb;
 use std::sync::Arc;
 
 /// Thumbnails as textures of the context that draws the menu: the picture, and the same as the retro look's green dots
@@ -40,8 +40,8 @@ impl Pictures for Textures {
 struct Service<'a>(&'a Ctl);
 
 impl MenuService for Service<'_> {
-    fn command(&self, command: OrbCommand) {
-        self.0.orb(command);
+    fn command(&self, command: N4n0Command) {
+        self.0.n4n0(command);
     }
 
     fn save_settings(&self, before: &Settings, after: &Settings) {
@@ -69,7 +69,9 @@ impl std::ops::DerefMut for MenuHost {
 impl MenuHost {
     /// A menu drawn by `ctx`, in this computer's language and keyboard, showing this process's music.
     pub fn new(ctx: egui::Context) -> Self {
-        Self(shared::MenuHost::new(Textures { ctx }, Arc::new(crate::device::WindowsLocale), crate::media::watcher().clone()))
+        let host = shared::MenuHost::new(Textures { ctx }, Arc::new(crate::device::WindowsLocale), crate::media::watcher().clone());
+        // The 3D captures' pictures are the sessions' thumbnails, on this computer.
+        Self(host.with_capture_pictures(Arc::new(crate::controller::menu_shares::capture_picture)))
     }
 
     /// Opens the menu on Home with the settings it starts from (keyboard, the 3D picture's timer and length).
@@ -79,7 +81,7 @@ impl MenuHost {
 
     /// Keeps the menu's picture of what the service knows.
     pub fn follow(&mut self, snap: &Snapshot) {
-        self.0.follow(&snap.orb, &snap.settings);
+        self.0.follow(&snap.n4n0, &snap.settings);
     }
 
     /// Does what the menu asked; returns whether it asked to close (its close button, or idle), which the host does.

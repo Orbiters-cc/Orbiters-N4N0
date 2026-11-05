@@ -1,4 +1,4 @@
-//! The device's music and volume, for N4N0's menu and N4N0's assistant (contracts `Docs/orb.md`, Menu): what plays (the
+//! The device's music and volume, for N4N0's menu and N4N0's assistant (contracts `Docs/n4n0.md`, Menu): what plays (the
 //! app that played last: Spotify, a browser, any app that tells the system), its art, and the speakers' volume. A
 //! process reads them on a thread of its own, about once a second, only while something shows them
 //! ([`Watcher::want`]), through its platform's [`MediaBackend`] (Windows' media controls on the desktop; on a phone,
@@ -6,10 +6,14 @@
 //!
 //! A command changes what [`Watcher::reading`] returns at once (play becomes pause, the volume moves), then runs on the
 //! thread; the next reading says what the app really did.
+//!
+//! What a browser or YouTube's app plays is looked up on YouTube ([`Links`]): the media controls give no link, and the
+//! menus offer the video's link to copy and drop as they do a search result's.
 
-use orbiters_orb::menu::{Media, MediaCommand, Volume};
-use orbiters_orb::picture::{self, Rgb};
-use std::collections::VecDeque;
+use orbiters_n4n0_core::menu::{Media, MediaCommand, Volume};
+use orbiters_n4n0_core::picture::{self, Rgb};
+use orbiters_n4n0_core::youtube::{self, Video};
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
@@ -76,18 +80,124 @@ struct State {
     started: bool,
 }
 
+/// How a playing video is searched for: its title and channel (the app's artist) to YouTube's results.
+pub type Search = Arc<dyn Fn(&str, &str) -> anyhow::Result<Vec<Video>> + Send + Sync>;
+
+/// A search that failed is tried again after this.
+const SEARCH_RETRY: Duration = Duration::from_secs(30);
+/// Searches kept (the songs of an evening); past that, the oldest are forgotten.
+const SEARCHES_KEPT: usize = 64;
+
+enum Lookup {
+    Asked,
+    Found(Vec<Video>),
+    Failed(Instant),
+}
+
+/// A playing video: its title and channel.
+type Playing = (String, String);
+
+/// The searches made, and their order (the oldest first, forgotten first).
+#[derive(Default)]
+struct Searches {
+    lookups: HashMap<Playing, Lookup>,
+    order: VecDeque<Playing>,
+}
+
+/// Finds the YouTube video a browser or YouTube's app plays ([`youtube::worth_looking_up`]): Windows' media controls
+/// (and Android's) give its title, its channel as the artist and its length, never its link. YouTube's search for the
+/// title and channel, once per video on a thread of its own, then the result with the same title, channel and length
+/// ([`youtube::find_playing`]). The results stay, so a length that changes (an ad ends, the video starts) is matched
+/// again without another search.
+#[derive(Clone)]
+pub struct Links {
+    search: Search,
+    found: Arc<Mutex<Searches>>,
+}
+
+impl Links {
+    /// Links found with `search`.
+    pub fn new(search: Search) -> Self {
+        Self { search, found: Arc::default() }
+    }
+
+    /// Links found on YouTube itself, without an account ([`youtube::search_playing`]).
+    pub fn youtube() -> Self {
+        Self::new(Arc::new(youtube::search_playing))
+    }
+
+    /// Sets `media`'s video (its id) when it is found, or asks for it.
+    pub fn fill(&self, media: &mut Media) {
+        media.video = None;
+        if !youtube::worth_looking_up(&media.app, &media.title, &media.artist, &media.album) {
+            return;
+        }
+        let key = (media.title.clone(), media.artist.clone());
+        let mut found = self.found.lock().unwrap();
+        match found.lookups.get(&key) {
+            Some(Lookup::Found(results)) => {
+                media.video = youtube::find_playing(results, &media.title, &media.artist, media.duration).map(|v| v.id.clone());
+                return;
+            }
+            Some(Lookup::Asked) => return,
+            Some(Lookup::Failed(at)) if at.elapsed() < SEARCH_RETRY => return,
+            Some(Lookup::Failed(_)) => {}
+            None => {
+                found.order.push_back(key.clone());
+                while found.order.len() > SEARCHES_KEPT {
+                    if let Some(old) = found.order.pop_front() {
+                        found.lookups.remove(&old);
+                    }
+                }
+            }
+        }
+        found.lookups.insert(key.clone(), Lookup::Asked);
+        drop(found);
+        let (search, kept) = (self.search.clone(), self.found.clone());
+        let spawned = std::thread::Builder::new().name("orbiters-media-link".into()).spawn(move || {
+            let lookup = match search(&key.0, &key.1) {
+                Ok(results) => Lookup::Found(results),
+                Err(e) => {
+                    eprintln!("media: YouTube's search for what plays: {e:#}");
+                    Lookup::Failed(Instant::now())
+                }
+            };
+            let mut found = kept.lock().unwrap();
+            // Kept only while still asked for (not forgotten meanwhile).
+            if let Some(slot) = found.lookups.get_mut(&key) {
+                *slot = lookup;
+            }
+        });
+        if spawned.is_err() {
+            self.found.lock().unwrap().lookups.insert((media.title.clone(), media.artist.clone()), Lookup::Failed(Instant::now()));
+        }
+    }
+}
+
 /// A process's media watcher.
 pub struct Watcher {
     state: Arc<(Mutex<State>, Condvar)>,
     /// Told after every reading.
     read: Arc<Condvar>,
     backend: Mutex<Option<MakeBackend>>,
+    links: Links,
 }
 
 impl Watcher {
-    /// A watcher reading through the backend `make` makes (its thread starts at the first [`Watcher::want`] or command).
+    /// A watcher reading through the backend `make` makes (its thread starts at the first [`Watcher::want`] or command),
+    /// looking up on YouTube what a browser or YouTube's app plays.
     pub fn new(make: impl FnOnce() -> Box<dyn MediaBackend> + Send + 'static) -> Self {
-        Self { state: Arc::new((Mutex::new(State::default()), Condvar::new())), read: Arc::new(Condvar::new()), backend: Mutex::new(Some(Box::new(make))) }
+        Self::with_links(make, Links::youtube())
+    }
+
+    /// A watcher finding the videos played with `links`.
+    pub fn with_links(make: impl FnOnce() -> Box<dyn MediaBackend> + Send + 'static, links: Links) -> Self {
+        Self {
+            state: Arc::new((Mutex::new(State::default()), Condvar::new())),
+            read: Arc::new(Condvar::new()),
+            backend: Mutex::new(Some(Box::new(make))),
+            links,
+        }
     }
 
     /// Something shows the music: keep reading it for a few seconds.
@@ -155,6 +265,12 @@ impl Watcher {
                     volume.muted = muted;
                 }
             }
+            // Shown where it goes at once (the next reading says where the app took it).
+            MediaCommand::Seek(at) => {
+                if let Some(media) = reading.media.as_mut() {
+                    media.position = Some(media.duration.map_or(at, |d| at.min(d)));
+                }
+            }
             MediaCommand::Previous | MediaCommand::Next => {}
         }
         state.version += 1;
@@ -169,15 +285,15 @@ impl Watcher {
             return;
         }
         let Some(make) = self.backend.lock().unwrap().take() else { return };
-        let (shared, read) = (self.state.clone(), self.read.clone());
-        if let Err(e) = std::thread::Builder::new().name("orbiters-media".into()).spawn(move || run(shared, read, make)) {
+        let (shared, read, links) = (self.state.clone(), self.read.clone(), self.links.clone());
+        if let Err(e) = std::thread::Builder::new().name("orbiters-media".into()).spawn(move || run(shared, read, make, links)) {
             eprintln!("media: could not start its thread: {e}");
         }
     }
 }
 
 /// A reading after `command` (or none), until nothing wants readings: then it sleeps until something does.
-fn run(shared: Arc<(Mutex<State>, Condvar)>, read: Arc<Condvar>, make: MakeBackend) {
+fn run(shared: Arc<(Mutex<State>, Condvar)>, read: Arc<Condvar>, make: MakeBackend, links: Links) {
     let (lock, wake) = &*shared;
     let mut backend = make();
     loop {
@@ -194,7 +310,10 @@ fn run(shared: Arc<(Mutex<State>, Condvar)>, read: Arc<Condvar>, make: MakeBacke
             }
         }
         let previous = lock.lock().unwrap().reading.clone();
-        let reading = backend.read(&previous);
+        let mut reading = backend.read(&previous);
+        if let Some(media) = reading.media.as_mut() {
+            links.fill(media);
+        }
         {
             let mut state = lock.lock().unwrap();
             // A command that came meanwhile shows its own effect until its reading.
@@ -217,11 +336,20 @@ fn same(a: &Reading, b: &Reading) -> bool {
 }
 
 /// The app's name from its id: `Spotify.exe` → Spotify, `SpotifyAB.SpotifyMusic_zpdnekdrzrea0!Spotify` → Spotify,
-/// `msedge` → Edge.
+/// `msedge` → Edge; an installed web app by its name when known (`Chrome._crx_agimnkijcaahngcdmfeangaknmldooml` →
+/// YouTube), else by its browser's.
 pub fn app_name(id: &str) -> String {
     let id = id.rsplit('!').next().unwrap_or(id);
     let id = id.rsplit(['\\', '/']).next().unwrap_or(id);
     let stem = id.strip_suffix(".exe").or_else(|| id.strip_suffix(".EXE")).unwrap_or(id);
+    if let Some((browser, app)) = stem.split_once("._crx_") {
+        // Chrome's and Edge's ids of the web apps installed from YouTube's and YouTube Music's sites.
+        return match app.get(..32).unwrap_or(app) {
+            "agimnkijcaahngcdmfeangaknmldooml" => "YouTube".into(),
+            "cinhimbnkkaeohfgghhklpknlkffjgod" => "YouTube Music".into(),
+            _ => app_name(browser),
+        };
+    }
     match stem.to_ascii_lowercase().as_str() {
         "msedge" => "Edge".into(),
         "chrome" => "Chrome".into(),
@@ -263,6 +391,57 @@ mod tests {
         assert_eq!(app_name("308046B0AF4A39CB"), "Firefox");
         assert_eq!(app_name("Microsoft.ZuneMusic_8wekyb3d8bbwe!Microsoft.ZuneMusic"), "ZuneMusic");
         assert_eq!(app_name("C:\\Program Files\\foobar2000\\foobar2000.exe"), "Foobar2000");
+        assert_eq!(app_name("Chrome._crx_agimnkijcaahngcdmfeangaknmldooml"), "YouTube");
+        assert_eq!(app_name("MSEdge._crx_cinhimbnkkaeohfgghhklpknlkffjgod"), "YouTube Music");
+        assert_eq!(app_name("MSEdge._crx_abcdefghijklmnopabcdefghijklmnop"), "Edge", "another web app: its browser");
+    }
+
+    /// Media as Chrome gives it on YouTube's page, or Spotify's.
+    struct Playing(&'static str);
+
+    impl MediaBackend for Playing {
+        fn run(&mut self, _command: MediaCommand) -> Result<(), String> {
+            Ok(())
+        }
+
+        fn read(&mut self, _previous: &Reading) -> Reading {
+            let media =
+                Media { title: "Never Gonna Give You Up".into(), artist: "Rick Astley".into(), app: self.0.into(), duration: Some(213), ..Default::default() };
+            Reading { media: Some(media), volume: None, art: None }
+        }
+    }
+
+    #[test]
+    fn what_a_browser_plays_is_found_on_youtube_once() {
+        let searched = Arc::new(Mutex::new(Vec::new()));
+        let asked = searched.clone();
+        let search: Search = Arc::new(move |title: &str, channel: &str| {
+            asked.lock().unwrap().push(format!("{title} | {channel}"));
+            let video = |id: &str, length: &str| Video {
+                id: id.into(),
+                title: "Never Gonna Give You Up".into(),
+                channel: "Rick Astley".into(),
+                duration: Some(length.into()),
+                live: false,
+            };
+            Ok(vec![video("aaaaaaaaaaa", "4:40"), video("dQw4w9WgXcQ", "3:34")])
+        });
+        let watcher = Watcher::with_links(|| Box::new(Playing("Chrome")), Links::new(search.clone()));
+        let mut video = None;
+        for _ in 0..50 {
+            video = watcher.fresh(Duration::from_secs(5)).media.and_then(|m| m.video);
+            if video.is_some() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(video.as_deref(), Some("dQw4w9WgXcQ"), "the result of its length");
+        watcher.fresh(Duration::from_secs(5));
+        assert_eq!(searched.lock().unwrap().as_slice(), &["Never Gonna Give You Up | Rick Astley".to_string()], "searched once");
+        // Spotify's songs are not looked for.
+        let spotify = Watcher::with_links(|| Box::new(Playing("Spotify")), Links::new(search));
+        assert_eq!(spotify.fresh(Duration::from_secs(5)).media.map(|m| m.video), Some(None));
+        assert_eq!(searched.lock().unwrap().len(), 1);
     }
 
     #[test]
@@ -278,8 +457,10 @@ mod tests {
         let (before, _) = watcher.reading();
         watcher.command(MediaCommand::PlayPause);
         watcher.command(MediaCommand::Volume(55));
+        watcher.command(MediaCommand::Seek(42));
         let (after, reading) = watcher.reading();
         assert!(after > before);
+        assert_eq!(reading.media.as_ref().unwrap().position, Some(42), "moved in its timeline at once");
         assert!(!reading.media.unwrap().playing);
         assert_eq!(reading.volume, Some(Volume { percent: 55, muted: false }));
     }

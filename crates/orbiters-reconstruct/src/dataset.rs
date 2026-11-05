@@ -1,14 +1,15 @@
 //! A session as training data: its keyframes (lossless, upright) at the training resolution with their exact
 //! cameras, its depth frames' exact samples with their cameras, and the mask of what is not scene (the capture
 //! strip and, with a capture kit, the skeleton band). A long session keeps to a memory budget ([`Budget`]): past it,
-//! the keyframes and depth frames that look at the world most differently stay ([`spread`]).
+//! the keyframes and depth frames that look at the world most differently stay ([`spread`]). A capture whose avatar
+//! carried the camera rig also has its faces ([`Faces`]): square colour views around the camera's path, with no depth.
 
 use crate::camera::{Camera, Geometry};
 use anyhow::{anyhow, bail, ensure, Context as _};
 use orbiters_contracts::depth::{self, DepthLayout, SAMPLES_X};
 use orbiters_contracts::frame_record::{record_flags, FrameRecord};
 use orbiters_contracts::manifest::{depth_file, DEPTH_DIR, KEYFRAMES_DIR};
-use orbiters_contracts::{qoi, skeleton, strip};
+use orbiters_contracts::{qoi, rig, skeleton, strip};
 use orbiters_core::bundle;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -129,10 +130,23 @@ impl DepthView {
     }
 }
 
+/// The capture rig's faces (contracts' Docs/rig-frames.md): square 90° colour views around the camera's path, all of
+/// one size, at the keyframes' training scale. No depth comes with them, and their mask leaves each face's border (the
+/// world's bloom and aberration at the tile's place in the frame) and its stamp out.
+pub struct Faces {
+    pub views: Vec<View>,
+    pub geometry: Geometry,
+    pub width: u32,
+    pub height: u32,
+    pub mask: Vec<f32>,
+}
+
 pub struct Dataset {
     pub dir: PathBuf,
     pub views: Vec<View>,
     pub depth_views: Vec<DepthView>,
+    /// The rig's faces, when the capture has any.
+    pub faces: Option<Faces>,
     pub width: u32,
     pub height: u32,
     /// How the captured frames map to the training resolution.
@@ -141,6 +155,41 @@ pub struct Dataset {
     pub mask: Vec<f32>,
     /// What the session holds and what loading left out.
     pub loaded: Loaded,
+}
+
+/// How much longer than the session's usual focal length a keyframe's must be for it to be a detail view
+/// ([`detail_views`]). 3D pictures took such views for a while (none reached the capture: 2026-11-04, the desktop's
+/// controller/burst.rs); what is left of them is a person zooming in during a recording, seldom this far.
+pub const DETAIL_ZOOM: f32 = 1.3;
+
+/// Which of keyframes with these focal lengths (any one unit) are detail views: those whose focal length is at least
+/// [`DETAIL_ZOOM`] times the median one, when they are fewer than a third of all. Measured when 3D pictures were to start with
+/// a few frames of VRChat's camera zoomed in on what it aims at, from where it stands, emulated: through
+/// the same 1080p stream they show its subject — the people in the picture — with 2.35 times the pixels a degree of the
+/// other keyframes, all within about a second, while the people hardly move. Measured on the real 3D pictures of
+/// 2026-11-03 (Penthouse Palace), the reconstruction was mushy on the faces because the people moved during the
+/// flight and only the first keyframe saw them as framed; the detail views are what the picture's subject is learnt
+/// from (crate::train: never held out, and a quarter of the colour steps on top of the others'). A session most of whose keyframes are zoomed
+/// in (a user who records zoomed) has none: its usual view is the zoomed one.
+pub fn detail_views(focal_lengths: &[f32]) -> Vec<usize> {
+    let mut sorted: Vec<f32> = focal_lengths.iter().copied().filter(|f| f.is_finite() && *f > 0.0).collect();
+    if sorted.len() < 3 {
+        return Vec::new();
+    }
+    sorted.sort_by(f32::total_cmp);
+    let median = sorted[sorted.len() / 2];
+    let detail: Vec<usize> = (0..focal_lengths.len()).filter(|&i| focal_lengths[i] >= DETAIL_ZOOM * median).collect();
+    if detail.len() * 3 > focal_lengths.len() {
+        return Vec::new();
+    }
+    detail
+}
+
+impl Dataset {
+    /// The keyframes that are detail views ([`detail_views`]), as indices into [`Dataset::views`].
+    pub fn detail_views(&self) -> Vec<usize> {
+        detail_views(&self.views.iter().map(|v| v.camera.fy).collect::<Vec<_>>())
+    }
 }
 
 /// Counts of what [`load`] found and kept.
@@ -155,6 +204,14 @@ pub struct Loaded {
     /// Missing, unreadable, or of another size than the session's keyframes.
     pub keyframes_skipped: usize,
     pub depth_frames_skipped: usize,
+    /// The rig's faces kept as keyframes, those left out to keep to the budget, and those unreadable or of a size no
+    /// frame of the session gives.
+    pub faces: usize,
+    pub faces_over_budget: usize,
+    pub faces_skipped: usize,
+    /// Keyframes and rig faces left out as blown to white ([`leave_out_blown`]).
+    pub keyframes_blown: usize,
+    pub faces_blown: usize,
     /// Why the first skipped keyframe was skipped.
     pub first_problem: Option<String>,
 }
@@ -261,7 +318,10 @@ pub fn load(dir: &Path, max_width: u32, progress: impl FnMut(f32)) -> anyhow::Re
 pub fn load_with(dir: &Path, max_width: u32, budget: Budget, mut progress: impl FnMut(f32)) -> anyhow::Result<Dataset> {
     let manifest = bundle::read_manifest(dir).context("reading the session's manifest")?;
     let records: Vec<FrameRecord> = bundle::read_records(dir).context("reading frames.bin")?.into_iter().filter(|r| r.has(record_flags::STRIP_OK) && posed(r)).collect();
-    let keyframes: Vec<&FrameRecord> = records.iter().filter(|r| r.has(record_flags::KEYFRAME) && r.keyframe_index >= 0).collect();
+    // The rig's faces are keyframes of their own (their records say which face), of another size than the frames'.
+    let face_of = |r: &FrameRecord| if strip::flags::kind(r.strip_flags) == strip::flags::KIND_RIG { strip::flags::face(r.strip_flags) } else { 0 };
+    let pictures = records.iter().filter(|r| r.has(record_flags::KEYFRAME) && r.keyframe_index >= 0);
+    let (face_frames, keyframes): (Vec<&FrameRecord>, Vec<&FrameRecord>) = pictures.partition(|r| face_of(r) != 0);
     let depth_frames: Vec<&FrameRecord> = records.iter().filter(|r| r.has(record_flags::DEPTH) && r.depth_index >= 0).collect();
     // The session's frame size is its keyframes' most common one: after the stream's resolution changed mid-session,
     // the frames of the other size are left out.
@@ -288,19 +348,41 @@ pub fn load_with(dir: &Path, max_width: u32, budget: Budget, mut progress: impl 
     let keep = usize::try_from(budget.depth_samples / per_frame).unwrap_or(usize::MAX).max(MIN_KEPT);
     let depth_chosen: Vec<&FrameRecord> = spread(&depth_sized.iter().map(|r| pose(r)).collect::<Vec<_>>(), keep).into_iter().map(|i| depth_sized[i]).collect();
     loaded.depth_frames_over_budget = depth_sized.len() - depth_chosen.len();
+    // The rig's faces: the size the frames' rig layout gives, at the frames' scale, within what the budget leaves.
+    let rig_layout = rig::RigLayout::new(full_w, full_h);
+    let face_geometry = rig_layout.map(|l| Geometry::new(l.face, l.face, geometry.factor)).filter(|g| g.width() >= 16);
+    let face_sized: Vec<&FrameRecord> = face_frames.iter().copied().filter(|r| face_geometry.is_some_and(|g| (r.width, r.height) == (g.full_width, g.full_height))).collect();
+    loaded.faces_skipped = face_frames.len() - face_sized.len();
+    let face_chosen: Vec<&FrameRecord> = match face_geometry {
+        Some(g) if !face_sized.is_empty() => {
+            let left = budget.keyframe_bytes.saturating_sub(chosen.len() as u64 * w as u64 * h as u64 * 4);
+            let keep = usize::try_from(left / (g.width() as u64 * g.height() as u64 * 4)).unwrap_or(usize::MAX).max(MIN_KEPT);
+            spread(&face_sized.iter().map(|r| pose(r)).collect::<Vec<_>>(), keep).into_iter().map(|i| face_sized[i]).collect()
+        }
+        _ => Vec::new(),
+    };
+    loaded.faces_over_budget = face_sized.len() - face_chosen.len();
 
     // Decoded on as many threads as loading may use (crate::priority); a frame that cannot be read is left out.
     enum Item {
         View(anyhow::Result<View>),
         Depth(Option<DepthView>),
+        Face(anyhow::Result<View>),
     }
-    let decode = |j: usize| match j.checked_sub(chosen.len()) {
-        None => Item::View(load_keyframe(dir, chosen[j], &geometry)),
-        Some(d) => Item::Depth(grid.as_ref().and_then(|g| load_depth(dir, depth_chosen[d], &geometry, g))),
+    let decode = |j: usize| {
+        if j < chosen.len() {
+            Item::View(load_keyframe(dir, chosen[j], &geometry))
+        } else if j < chosen.len() + depth_chosen.len() {
+            Item::Depth(grid.as_ref().and_then(|g| load_depth(dir, depth_chosen[j - chosen.len()], &geometry, g)))
+        } else {
+            let g = face_geometry.as_ref().expect("faces only with their geometry");
+            Item::Face(load_keyframe(dir, face_chosen[j - chosen.len() - depth_chosen.len()], g))
+        }
     };
     let mut views = Vec::with_capacity(chosen.len());
     let mut depth_views = Vec::with_capacity(depth_chosen.len());
-    for item in run_parallel(chosen.len() + depth_chosen.len(), decode, &mut progress) {
+    let mut face_views = Vec::with_capacity(face_chosen.len());
+    for item in run_parallel(chosen.len() + depth_chosen.len() + face_chosen.len(), decode, &mut progress) {
         match item {
             Item::View(Ok(v)) => views.push(v),
             Item::View(Err(e)) => {
@@ -309,8 +391,18 @@ pub fn load_with(dir: &Path, max_width: u32, budget: Budget, mut progress: impl 
             }
             Item::Depth(Some(d)) => depth_views.push(d),
             Item::Depth(None) => loaded.depth_frames_skipped += 1,
+            Item::Face(Ok(v)) => face_views.push(v),
+            Item::Face(Err(_)) => loaded.faces_skipped += 1,
         }
     }
+    loaded.keyframes_blown = leave_out_blown(&mut views);
+    loaded.faces_blown = leave_out_blown(&mut face_views);
+    face_views.sort_by_key(|v| v.keyframe);
+    loaded.faces = face_views.len();
+    let faces = match (rig_layout, face_geometry) {
+        (Some(l), Some(g)) if !face_views.is_empty() => Some(Faces { views: face_views, geometry: g, width: g.width(), height: g.height(), mask: face_mask(&l, &g) }),
+        _ => None,
+    };
     if views.len() < 2 {
         let why = loaded.first_problem.as_deref().map(|p| format!(" ({p})")).unwrap_or_default();
         bail!("Only {} of this session's {} keyframes could be read{why}: reconstruction needs a few views of the world.", views.len(), loaded.keyframes);
@@ -340,7 +432,46 @@ pub fn load_with(dir: &Path, max_width: u32, budget: Budget, mut progress: impl 
             cut(r.x0, r.y0, r.x1, r.y1);
         }
     }
-    Ok(Dataset { dir: dir.to_path_buf(), views, depth_views, width: w, height: h, geometry, mask, loaded })
+    Ok(Dataset { dir: dir.to_path_buf(), views, depth_views, faces, width: w, height: h, geometry, mask, loaded })
+}
+
+/// The share of a keyframe's pixels at white from which it counts as blown out.
+const BLOWN_SHARE: f32 = 0.25;
+/// A session whose typical keyframe is this white already keeps them all: a snowfield or a white room is the world.
+const BLOWN_TYPICAL: f32 = 0.05;
+
+/// The share of an image's pixels at white.
+fn blown_share(image: &[u32]) -> f32 {
+    let white = image.iter().filter(|&&p| (p & 0xff) >= 250 && ((p >> 8) & 0xff) >= 250 && ((p >> 16) & 0xff) >= 250).count();
+    white as f32 / image.len().max(1) as f32
+}
+
+/// Leaves out the views mostly blown to white when the session's others are not, the worst first and at most one view
+/// in ten (at least one), and says how many left. A camera inside or just behind the world's geometry sees that (a
+/// translucent wall or a haze at its near plane), and no scene explains it from elsewhere: training pays for it with
+/// bright fog in front of that camera, seen from everywhere else. One such frame out of 37 turned the wearer into a
+/// white ghost from behind in ちま部屋 2026-11-04 12-14-49, and the views it spoils lie off the camera's path, so scores on
+/// held-out frames hardly move.
+fn leave_out_blown(views: &mut Vec<View>) -> usize {
+    if views.len() < 3 {
+        return 0;
+    }
+    let mut shares: Vec<(f32, i32)> = views.iter().map(|v| (blown_share(&v.image), v.keyframe)).collect();
+    shares.sort_by(|a, b| b.0.total_cmp(&a.0));
+    if shares[shares.len() / 2].0 >= BLOWN_TYPICAL {
+        return 0;
+    }
+    let out: Vec<i32> = shares.iter().take((views.len() / 10).max(1)).filter(|s| s.0 >= BLOWN_SHARE).map(|s| s.1).collect();
+    views.retain(|v| !out.contains(&v.keyframe));
+    out.len()
+}
+
+/// A face's mask at its training resolution: a training pixel is scene when the captured pixels it averages are
+/// (rig::RigLayout::scene_pixel: not in the face's border or its stamp).
+fn face_mask(layout: &rig::RigLayout, g: &Geometry) -> Vec<f32> {
+    let f = g.factor;
+    let scene = |x: u32, y: u32| layout.scene_pixel(x * f, y * f) && layout.scene_pixel(x * f + f - 1, y * f + f - 1);
+    (0..g.height()).flat_map(|y| (0..g.width()).map(move |x| if scene(x, y) { 1.0 } else { 0.0 })).collect()
 }
 
 /// A keyframe at the training resolution with its camera.
@@ -581,6 +712,53 @@ pub(crate) mod fixture {
         std::fs::write(dir.join(FRAMES_FILE), frames).unwrap();
         Session { dir }
     }
+
+    /// Adds `rig_frames` rig frames to `session` (frames of `w × h`): each one's record (kind 2, the rig at [`pose`]
+    /// `k`, no picture) and its six faces' keyframes (random colours, the face's size), numbered after the session's.
+    pub fn add_rig_frames(session: &Session, w: u32, h: u32, rig_frames: usize) {
+        use orbiters_contracts::{rig, strip};
+        let layout = rig::RigLayout::new(w, h).expect("a rig layout");
+        let f = layout.face;
+        let mut frames = std::fs::read(session.dir.join(FRAMES_FILE)).unwrap();
+        let first = std::fs::read_dir(session.dir.join(KEYFRAMES_DIR)).unwrap().count();
+        let mut rng = fastrand::Rng::with_seed(11);
+        let flags = |face: u32| strip::flags::compose(strip::flags::KIND_RIG, 2, 0, face, strip::flags::SOURCE_TEST);
+        let mut keyframe = first;
+        for k in 0..rig_frames {
+            let rig_pose = pose(100 + k);
+            let base = FrameRecord {
+                flags: record_flags::STRIP_OK,
+                frame_index: 1000 + 7 * k as u64,
+                game_time: 10.0 + k as f32 * 0.1,
+                strip_flags: flags(0),
+                camera_to_world: rig_pose,
+                projection: rig::PROJECTION,
+                near: rig::NEAR,
+                far: rig::FAR,
+                width: w,
+                height: h,
+                ..Default::default()
+            };
+            frames.extend_from_slice(&base.to_bytes());
+            for (t, &face) in rig::TILE_FACES.iter().enumerate() {
+                let rgb: Vec<u8> = (0..f * f * 3).map(|_| rng.u8(..)).collect();
+                std::fs::write(session.dir.join(KEYFRAMES_DIR).join(orbiters_core::bundle::keyframe_file(keyframe as i32)), orbiters_contracts::qoi::encode(&rgb, f, f, 3)).unwrap();
+                let r = FrameRecord {
+                    flags: record_flags::STRIP_OK | record_flags::KEYFRAME,
+                    frame_index: base.frame_index + 1 + t as u64,
+                    strip_flags: flags(face),
+                    camera_to_world: rig::face_camera_to_world(&rig_pose, face),
+                    width: f,
+                    height: f,
+                    keyframe_index: keyframe as i32,
+                    ..base
+                };
+                frames.extend_from_slice(&r.to_bytes());
+                keyframe += 1;
+            }
+        }
+        std::fs::write(session.dir.join(FRAMES_FILE), frames).unwrap();
+    }
 }
 
 #[cfg(test)]
@@ -597,8 +775,64 @@ mod tests {
         View { camera: Camera::look([0.0; 3], [0.0, 0.0, 1.0], [0.0, 1.0, 0.0], 1.0, w, h), image: image.collect(), game_time: 0.0, keyframe: 0 }
     }
 
+    #[test]
+    fn detail_views_are_the_few_keyframes_zoomed_in_far() {
+        // A 4 s picture: 37 keyframes at 47.3° (focal length over height 1.143), nine close-ups at 20° (2.836).
+        let mut focals = vec![1.143f32; 37];
+        focals.splice(1..1, [2.836; 9]);
+        assert_eq!(detail_views(&focals), (1..10).collect::<Vec<_>>());
+        // Not a share of a recording zoomed in for most of it (its usual view is the zoomed one), nor a slight zoom.
+        let mut zoomed = vec![1.143f32; 20];
+        zoomed.extend([2.836; 15]);
+        assert!(detail_views(&zoomed).is_empty());
+        let mut slight = vec![1.143f32; 30];
+        slight[4] = 1.143 * 1.25;
+        assert!(detail_views(&slight).is_empty());
+        // Frames of another size (NaN) count for nothing; too few keyframes have none.
+        let mut odd = vec![f32::NAN; 3];
+        odd.extend([1.143, 1.143, 1.143, 2.836]);
+        assert_eq!(detail_views(&odd), vec![6]);
+        assert!(detail_views(&[1.0, 3.0]).is_empty());
+        // A loaded session's views: by their training cameras.
+        let s = fixture::session("detail-views", 160, 90, 12, &[]);
+        let mut d = load_with(&s.dir, 160, Budget::UNLIMITED, |_| {}).unwrap();
+        assert!(d.detail_views().is_empty());
+        for v in &mut d.views[2..4] {
+            v.camera.fx *= 2.35;
+            v.camera.fy *= 2.35;
+        }
+        assert_eq!(d.detail_views(), vec![2, 3]);
+    }
+
     /// A capture size the training factor does not divide: keyframes, cameras, depth-sample positions and the mask
     /// all have the training size (the remainder cropped), and the pixels are the captured ones box-filtered.
+    #[test]
+    fn rig_faces_load_as_views_of_their_own() {
+        use orbiters_contracts::rig;
+        let s = fixture::session("rig-faces", 1280, 720, 6, &[]);
+        fixture::add_rig_frames(&s, 1280, 720, 3);
+        for (max_width, factor) in [(1280, 1), (640, 2)] {
+            let d = load_with(&s.dir, max_width, Budget::UNLIMITED, |_| {}).unwrap();
+            // The frames' keyframes as before: the faces are neither among them nor left out as another size.
+            assert_eq!((d.views.len(), d.width, d.loaded.keyframes_skipped), (6, 1280 / factor, 0));
+            let f = d.faces.as_ref().expect("faces");
+            let side = rig::RigLayout::new(1280, 720).unwrap().face;
+            assert_eq!((f.views.len(), d.loaded.faces, f.geometry.factor), (18, 18, factor));
+            assert_eq!((f.width, f.height), (side / factor, side / factor));
+            // Their cameras: square 90° pinholes along the rig's axes.
+            for v in &f.views {
+                assert_eq!((v.camera.width, v.camera.height), (f.width, f.height));
+                assert!((v.camera.fx - side as f32 / 2.0 / factor as f32).abs() < 1e-3 && (v.camera.fx - v.camera.fy).abs() < 1e-6);
+            }
+            // The mask leaves the border and the stamp out, keeps the middle.
+            let at = |x: u32, y: u32| f.mask[(y * f.width + x) as usize];
+            assert_eq!((at(0, f.height / 2), at(f.width / 2, f.height / 2), at(f.width / 2, f.height - 1)), (0.0, 1.0, 0.0));
+        }
+        // Without faces, nothing changes.
+        let plain = fixture::session("no-rig-faces", 1280, 720, 6, &[]);
+        assert!(load_with(&plain.dir, 1280, Budget::UNLIMITED, |_| {}).unwrap().faces.is_none());
+    }
+
     #[test]
     fn odd_capture_sizes_train_at_one_consistent_size() {
         let (w, h) = (1283u32, 723u32);
@@ -687,6 +921,30 @@ mod tests {
         }
         let e = load_with(&s.dir, 640, Budget::UNLIMITED, |_| {}).err().expect("one keyframe left");
         assert!(format!("{e:#}").contains("Only 1 of this session's 5 keyframes"), "{e:#}");
+    }
+
+    /// A frame mostly blown to white leaves, as long as the session is not a white world: the fog it trains is seen from
+    /// everywhere else. In a white world every frame stays.
+    #[test]
+    fn blown_out_keyframes_are_left_out_unless_the_world_is_white() {
+        let (w, h) = (64u32, 36u32);
+        let white = |s: &fixture::Session, k: i32, share: f32| {
+            let n = (w * h) as usize;
+            let rgb: Vec<u8> = (0..n).flat_map(|i| if (i as f32) < share * n as f32 { [255u8; 3] } else { [40u8; 3] }).collect();
+            std::fs::write(s.dir.join(KEYFRAMES_DIR).join(bundle::keyframe_file(k)), orbiters_contracts::qoi::encode(&rgb, w, h, 3)).unwrap();
+        };
+        let s = fixture::session("blown", w, h, 12, &[]);
+        white(&s, 7, 0.5);
+        // White in a part of the frame is a lamp or a window.
+        white(&s, 3, 0.1);
+        let data = load_with(&s.dir, w, Budget::UNLIMITED, |_| {}).expect("load");
+        assert_eq!(data.loaded.keyframes_blown, 1);
+        assert!(data.views.iter().all(|v| v.keyframe != 7) && data.views.iter().any(|v| v.keyframe == 3));
+
+        let s = fixture::session("blown-world", w, h, 12, &[]);
+        (0..12).for_each(|k| white(&s, k, 0.6));
+        let data = load_with(&s.dir, w, Budget::UNLIMITED, |_| {}).expect("load");
+        assert_eq!((data.loaded.keyframes_blown, data.views.len()), (0, 12));
     }
 
     /// Records may name files the capture never finished writing (CAP-5): a missing keyframe and a damaged or missing

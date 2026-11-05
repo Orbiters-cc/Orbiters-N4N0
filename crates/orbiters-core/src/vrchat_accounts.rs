@@ -1,5 +1,5 @@
 //! The VRChat account signed in on this computer and its friends, as VRCX and VRCNext keep them (read only; their
-//! databases are opened read-only while they run). N4N0's calls use them (contracts `Docs/orb-calls.md`): the account is
+//! databases are opened read-only while they run). N4N0's calls use them (contracts `Docs/n4n0-calls.md`): the account is
 //! offered for the verified link, the friends are matched on Orbiters as hashes. Nothing here signs in to VRChat.
 
 use rusqlite::{Connection, OpenFlags};
@@ -85,6 +85,79 @@ fn vrcnext_friends(dir: &Path) -> BTreeSet<String> {
 pub struct LocalVrchat {
     pub account: Option<(String, Source)>,
     pub friends: BTreeSet<String>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct Friend {
+    pub id: String,
+    pub name: String,
+    pub image: Option<String>,
+}
+
+/// The same account/friend selection as calls, with the display metadata already cached by the local apps.
+pub fn friends(log_account: Option<&str>) -> Vec<Friend> {
+    let local = read(log_account);
+    let mut out: std::collections::BTreeMap<String, Friend> =
+        local.friends.iter().map(|id| (id.clone(), Friend { id: id.clone(), name: id.clone(), image: None })).collect();
+    if let Some((account, _)) = &local.account {
+        if let Some(db) = vrcx_db().and_then(|p| open(&p)) {
+            if vrcx_account(&db).as_ref() == Some(account) {
+                let table = format!("{}_friend_log_current", vrcx_table_prefix(account));
+                if let Ok(mut q) = db.prepare(&format!("SELECT user_id,display_name FROM \"{table}\"")) {
+                    if let Ok(rows) = q.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))) {
+                        for (id, name) in rows.flatten() {
+                            if let Some(f) = out.get_mut(&id) {
+                                f.name = name;
+                            }
+                        }
+                    }
+                }
+                let table = format!("{}_feed_avatar", vrcx_table_prefix(account));
+                if let Ok(mut q)=db.prepare(&format!("SELECT a.user_id,a.current_avatar_thumbnail_image_url FROM \"{table}\" a JOIN (SELECT user_id,MAX(id) AS latest FROM \"{table}\" GROUP BY user_id) b ON a.id=b.latest")) {
+                    if let Ok(rows)=q.query_map([],|r|Ok((r.get::<_,String>(0)?,r.get::<_,Option<String>>(1)?))) {for (id,image) in rows.flatten(){if let Some(f)=out.get_mut(&id){f.image=image.filter(|s|s.starts_with("https://"));}}}
+                }
+            }
+        }
+        if let Some(db) = vrcnext_dir().and_then(|d| open(&d.join("VRCNData.db"))) {
+            if let Ok(mut q) = db.prepare("SELECT user_id,display_name,profile_avatar_img FROM user_tracking WHERE profile_is_friend=1") {
+                if let Ok(rows) = q.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?))) {
+                    for (id, name, image) in rows.flatten() {
+                        if let Some(f) = out.get_mut(&id) {
+                            if !name.is_empty() {
+                                f.name = name;
+                            }
+                            if image.starts_with("https://") {
+                                f.image = Some(image);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let mut out: Vec<_> = out.into_values().collect();
+    out.sort_by_key(|f| f.name.to_lowercase());
+    out
+}
+
+/// Reconstruct the roster at the picture's timestamp from VRCX's recorded joins/leaves, when retained locally.
+pub fn instance_people(location: &str, taken: u64) -> Vec<String> {
+    let Some(db) = vrcx_db().and_then(|p| open(&p)) else { return Vec::new() };
+    let Ok(mut q)=db.prepare("SELECT type,display_name,user_id FROM gamelog_join_leave WHERE location=?1 AND CAST(strftime('%s',created_at) AS INTEGER)<=?2 ORDER BY created_at,id LIMIT 20000") else {return Vec::new()};
+    let mut roster = std::collections::BTreeMap::new();
+    if let Ok(rows) =
+        q.query_map(rusqlite::params![location, taken as i64], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, Option<String>>(2)?)))
+    {
+        for (kind, name, id) in rows.flatten() {
+            let id = id.unwrap_or_else(|| name.clone());
+            if kind == "OnPlayerJoined" {
+                roster.insert(id, name);
+            } else if kind == "OnPlayerLeft" {
+                roster.remove(&id);
+            }
+        }
+    }
+    roster.into_values().collect()
 }
 
 /// Reads VRCX and VRCNext. `log_account`: the local player's id from VRChat's log, used when neither knows it and to

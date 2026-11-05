@@ -1,4 +1,4 @@
-//! N4N0's runtime (contracts `Docs/orb.md`), shared by Orbiters - N4N0 on Windows and the Android app: the companion on
+//! N4N0's runtime (contracts `Docs/n4n0.md`), shared by Orbiters - N4N0 on Windows and the Android app: the companion on
 //! the avatar (its text panel, its face, the AFK message, held and carried parameters, saved videos), its assistant's
 //! turns, its menu on the avatar's projected screen and in the apps' interfaces ([`menu_host`]), the avatar's saved
 //! states, link cards, its ears, and the music it shows.
@@ -9,10 +9,15 @@
 //! where N4N0 keeps its files ([`Files`]). The desktop implements them with Windows' own; TLS, the folders and the
 //! account's credential are `orbiters_core`'s, per platform.
 
+mod captures;
 mod command;
+mod feedback;
+pub mod input;
 pub mod media;
 pub mod menu_host;
+mod mirror;
 pub mod platform;
+mod qr;
 mod runtime;
 mod screen;
 mod states;
@@ -24,8 +29,8 @@ mod tests;
 
 pub use command::Command;
 pub use platform::{
-    language_of, Actions, Browser, CallRequest, Clipboard, Ears, Files, Host, Locale, Mouse, MouseState, NoMouse, Osc, Platform, Scene, Sounds,
-    VoiceEnded, VoiceEvents, VoiceWorker,
+    language_of, Actions, Browser, CallRequest, Clipboard, Ears, Files, Host, Locale, Mouse, MouseState, NoMouse, Osc, Platform, QrEvents, QrScan, QrSeen,
+    Scene, Sounds, VoiceEnded, VoiceEvents, VoiceWorker,
 };
 pub use runtime::{N4n0, Shared, Source};
 pub use status::NoticeKind;

@@ -7,16 +7,29 @@
 //! the reach of the depth frames fogged towards the sky's horizon or cropped; both show as trained again. On the
 //! processor's integrated GPU a moving camera draws fewer pixels, then the view is drawn whole once it stops
 //! ([`MOVING_PIXELS`]): a million splats at 27 frames a second instead of 19 at 1280×780 on an Intel UHD 770.
+//! While the window draws on the graphics card, the splats can draw on the integrated GPU instead, by default while
+//! VRChat runs ([`orbiters_core::settings::ViewGpu`], [`super::splat_worker`]); they move between the two GPUs while
+//! the view is open, once loaded on the other.
+//! Select splats ([`select`]) hides and deletes splats (a leftover avatar, floaters, a menu caught in the capture): they
+//! are not drawn here, and leave every file shared or exported from the capture; the PLY stays as trained.
+//! Export… ([`super::splat_export`]) saves what the view shows as an SPZ, GLB or PLY file for other tools.
 
-use super::Job;
+mod edit3d;
+mod select;
+
+pub use select::{discard_edits, pictures};
+
+use super::splat_worker::{Request, Worker};
+use super::{Cx, Job};
 use crate::gpu::Handles;
+use crate::views::{self, View};
 use eframe::egui_wgpu::{self, wgpu};
 use egui::{pos2, vec2, Align2, Color32, Id, Rect, Sense, Ui, UiBuilder};
-use crate::views::{self, View};
 use orbiters_core::reconstruction;
+use orbiters_core::settings::ViewGpu;
 use orbiters_reconstruct::camera::{normalize, Camera};
-use orbiters_reconstruct::gpu::{Confidence, ConfidenceMode, FarField, FarMode, Gpu, Target};
-use orbiters_reconstruct::ply;
+use orbiters_reconstruct::gaussians::Gaussians;
+use orbiters_reconstruct::gpu::{Confidence, ConfidenceMode, DepthOfField, FarField, FarMode, Gpu, Target};
 use orbiters_reconstruct::sky::SkyMap;
 use orbiters_ui::theme::{self, weight, Txt};
 use orbiters_ui::widgets::{self, Button, IconButton, SegOption, Variant};
@@ -25,15 +38,17 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 /// Behind the splats (encoded sRGB, like the trained colours).
-const BACKGROUND: [f32; 3] = [0.035, 0.035, 0.043];
+pub(super) const BACKGROUND: [f32; 3] = [0.035, 0.035, 0.043];
 
 /// What the loading thread hands over.
 struct Loaded {
-    renderer: Arc<Mutex<Renderer>>,
+    source: Source,
     splats: usize,
     views: Vec<View>,
-    /// The view to start from and how far ahead its subject is.
+    /// The recorded view to start from, where the view opens (looking its way at eye height over the ground: the
+    /// recorded one itself for a shared capture, whose start view is already that) and how far ahead its subject is.
     start: usize,
+    opening: View,
     depth: f32,
     /// Whether the PLY says what the keyframes saw of its splats (what the confidence control needs), and whether any
     /// lies beyond the depth frames' reach (what the far field control needs).
@@ -42,6 +57,40 @@ struct Loaded {
     /// The sky's colour at the horizon (the sky map's band around it, else the sky shell's: orbiters_reconstruct::sky),
     /// else the background's: what fog and haze turn to.
     horizon: [f32; 3],
+    /// The splats hidden, deleted and selected, and what draws them ([`select`]); none for a downloaded `.splat`.
+    edits: Option<select::Edits>,
+}
+
+impl Loaded {
+    /// The marks the splats are drawn with now, and their version (none for a downloaded `.splat`).
+    fn marks(&self) -> Option<(u64, Arc<Vec<u8>>)> {
+        self.edits.as_ref().map(|e| (e.version, e.drawn.clone()))
+    }
+}
+
+/// Where the splats are drawn.
+enum Source {
+    /// On the window's device, through the paint callback.
+    Window(Arc<Mutex<Renderer>>),
+    /// On the processor's integrated GPU, in a thread of its own; the window shows its frames.
+    Integrated(Worker),
+}
+
+impl Source {
+    fn integrated(&self) -> bool {
+        matches!(self, Source::Integrated(_))
+    }
+}
+
+/// Whether the 3D view draws on the integrated GPU now: the window draws on the graphics card of a computer that has
+/// both, and the settings ask for it (by default while VRChat runs).
+pub fn on_integrated(cx: &Cx<'_>) -> bool {
+    let both = cx.gpu.is_some_and(|g| g.adapter.choice && !g.adapter.integrated);
+    both && match cx.snap.settings.view_gpu {
+        ViewGpu::WhilePlaying => cx.snap.vrchat.running,
+        ViewGpu::Always => true,
+        ViewGpu::Never => false,
+    }
 }
 
 /// What the confidence control shows poorly seen splats as.
@@ -63,10 +112,17 @@ struct Renderer {
     /// Frames left to ask whether the last one left splats out: it did not wait for the GPU's count, which comes back
     /// a frame or two later ([`Gpu::needs_redraw`]), and such a frame is drawn again.
     checks: u8,
+    /// Frames drawn into the target (Edit in 3D puts each new one through its layers).
+    drawn: u64,
+    /// The auto focus's distance under its probe as last read back, and whether one is on its way.
+    focus: Option<f32>,
+    probing: bool,
+    /// The version of the marks the GPU draws with ([`Loaded::marks`]).
+    marks: u64,
 }
 
 /// How many frames after a render its count is waited for.
-const REDRAW_CHECKS: u8 = 4;
+pub(super) const REDRAW_CHECKS: u8 = 4;
 
 /// On the processor's integrated GPU, a moving camera draws at most this many pixels, and the view is drawn whole once
 /// it has stood still for [`SHARP_AFTER`] seconds (docs/igpu-experiment.md).
@@ -121,15 +177,65 @@ pub struct Viewer {
     far: FarMode,
     /// The far field's distance: fog's thickness, the crop's soft edge (metres).
     far_distance: f32,
-    /// Drawn by the processor's integrated GPU ([`MOVING_PIXELS`]), and when the camera last moved.
+    /// The window drawn by the processor's integrated GPU ([`MOVING_PIXELS`]), and when the camera last moved.
     integrated: bool,
     moved: f64,
+    /// The window's device, to draw the splats on when they leave the integrated GPU.
+    window: (wgpu::Device, wgpu::Queue),
+    /// The splats loading on the other GPU (true: the integrated one), and a GPU they could not load on (not tried
+    /// again until the other is asked for).
+    moving: Option<(bool, Job<Result<Source, String>>)>,
+    refused: Option<bool>,
+    /// Save this view: the picture of the view being made (and when it was asked, for the shutter's flash), the one
+    /// saved, why it could not be, and the photo editor opened on it.
+    still: Option<Job<Result<PathBuf, String>>>,
+    flashed: f64,
+    saved: Option<PathBuf>,
+    still_error: Option<String>,
+    editor: Option<super::editor::Editor>,
+    /// Edit in 3D ([`edit3d`]).
+    edit3d: edit3d::State,
+    /// Select splats ([`select`]).
+    select: select::State,
+    /// Export… ([`super::splat_export`]): the dialog over the view.
+    export: Option<super::splat_export::Export>,
 }
 
+/// The long side of a view saved as a picture (at least the view's own size).
+const STILL_LONG: f32 = 2560.0;
+
+/// The top bar's controls on the right: Recorded view, and the steps through the recorded views (‹, "View n of m", ›).
+const RESET_W: f32 = 132.0;
+const STEP_W: f32 = 40.0;
+const STEP_LABEL_W: f32 = 112.0;
+
 impl Viewer {
-    pub fn open(ctx: &egui::Context, gpu: &Handles, session: &Path, title: String) -> Self {
-        let (device, queue, dir) = (gpu.device.clone(), gpu.queue.clone(), session.to_path_buf());
-        let loading = Job::spawn(ctx, move || load(&dir, device, queue).map_err(|e| format!("{e:#}")));
+    /// Opens the 3D view of `session`, its splats on the integrated GPU with `integrated` ([`on_integrated`]).
+    pub fn open(ctx: &egui::Context, gpu: &Handles, session: &Path, title: String, integrated: bool) -> Self {
+        Self::open_source(ctx, gpu, session, title, integrated, None)
+    }
+
+    /// Opens the 3D view of `session` directly in Edit in 3D ([`edit3d`]), as soon as its splats are there: a capture's
+    /// Edit in its window. Leaving the mode leaves the 3D view open, one step back.
+    pub fn open_editing(ctx: &egui::Context, gpu: &Handles, session: &Path, title: String, integrated: bool) -> Self {
+        let mut v = Self::open(ctx, gpu, session, title, integrated);
+        v.edit3d.enter_once_loaded();
+        v
+    }
+
+    pub fn open_shared(ctx: &egui::Context, gpu: &Handles, path: &Path, title: String, view: &serde_json::Value, integrated: bool) -> Self {
+        let vector = |key: &str| view.get(key).and_then(|v| serde_json::from_value::<[f32; 3]>(v.clone()).ok()).filter(|v| v.iter().all(|n| n.is_finite()));
+        let flip = |p: [f32; 3]| [p[0], p[1], -p[2]];
+        let position = flip(vector("position").unwrap_or([0.0, 1.6, 0.0]));
+        let target = flip(vector("target").unwrap_or([0.0, 1.6, -3.0]));
+        let forward = normalize([target[0] - position[0], target[1] - position[1], target[2] - position[2]]);
+        Self::open_source(ctx, gpu, path, title, integrated, Some(View { position, forward, fov_y: 60.0f32.to_radians(), time_ns: None, framed: false }))
+    }
+
+    fn open_source(ctx: &egui::Context, gpu: &Handles, session: &Path, title: String, integrated: bool, view: Option<View>) -> Self {
+        let window = (gpu.device.clone(), gpu.queue.clone());
+        let (w, dir, c) = (window.clone(), session.to_path_buf(), ctx.clone());
+        let loading = Job::spawn(ctx, move || load(&dir, &c, w, integrated, view).map_err(|e| format!("{e:#}")));
         Self {
             session: session.to_path_buf(),
             title,
@@ -144,6 +250,17 @@ impl Viewer {
             far_distance: 20.0,
             integrated: gpu.adapter.integrated,
             moved: f64::NEG_INFINITY,
+            window,
+            moving: None,
+            refused: None,
+            still: None,
+            flashed: f64::NEG_INFINITY,
+            saved: None,
+            still_error: None,
+            editor: None,
+            edit3d: edit3d::State::default(),
+            select: select::State::default(),
+            export: None,
         }
     }
 
@@ -151,15 +268,76 @@ impl Viewer {
         self.loaded.is_some()
     }
 
-    /// Draws the viewer over `rect`; returns false once closed.
-    pub fn show(&mut self, ui: &mut Ui, rect: Rect) -> bool {
+    /// Moves the splats to the integrated GPU or the window's, as `integrated` asks, once loaded there (the view stays
+    /// where it is until then).
+    fn place(&mut self, ctx: &egui::Context, integrated: bool) {
+        if self.refused.is_some_and(|r| r != integrated) {
+            self.refused = None;
+        }
+        if let Some((to, job)) = self.moving.as_mut() {
+            let to = *to;
+            if let Some(result) = job.take() {
+                match result {
+                    Ok(source) => {
+                        if let Some(l) = self.loaded.as_mut() {
+                            l.source = source;
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("3D view: {e}");
+                        self.refused = Some(to);
+                    }
+                }
+                self.moving = None;
+            }
+            return;
+        }
+        let Some(l) = self.loaded.as_ref() else { return };
+        if l.source.integrated() != integrated && self.refused != Some(integrated) {
+            let (dir, window, c, marks) = (self.session.clone(), self.window.clone(), ctx.clone(), l.marks());
+            let expected = l.edits.as_ref().map(|e| e.edit.ply);
+            let job = Job::spawn(ctx, move || {
+                // The PLY the view loaded, or none: marks of one PLY never go onto another.
+                let (g, sky) = select::read_again(&dir, expected).map_err(|e| format!("{e:#}"))?;
+                // With the marks as they were; newer ones follow with the next frame (their version differs).
+                source(&c, window, integrated, &g, sky.as_ref(), marks.as_ref().map(|(v, m)| (*v, m.as_slice()))).map_err(|e| format!("{e:#}"))
+            });
+            self.moving = Some((integrated, job));
+        }
+    }
+
+    /// Draws the viewer over `rect`, its splats on the integrated GPU with `integrated` ([`on_integrated`]); returns
+    /// false once closed.
+    pub fn show(&mut self, ui: &mut Ui, rect: Rect, integrated: bool) -> bool {
         let ctx = ui.ctx().clone();
+        // The photo editor on the view saved, over the 3D view (which draws nothing meanwhile).
+        if let Some(e) = self.editor.as_mut() {
+            if e.show(ui, rect) {
+                // A copy saved in Edit in 3D of this capture, asked back there.
+                if let Some((view, edit)) = e.take_3d().filter(|(v, _)| v.capture == self.session) {
+                    self.editor = None;
+                    self.edit3d.reopen(view, edit);
+                }
+                return true;
+            }
+            self.editor = None;
+        }
+        if let Some(r) = self.still.as_mut().and_then(|j| j.take()) {
+            self.still = None;
+            match r {
+                Ok(path) => {
+                    self.saved = Some(path);
+                    self.still_error = None;
+                }
+                Err(e) => self.still_error = Some(e),
+            }
+        }
         if let Some(job) = self.loading.as_mut() {
             if let Some(result) = job.take() {
                 match result {
                     Ok(l) => {
                         self.view = l.start;
-                        self.orbit = l.views.get(l.start).map(|v| Orbit::from_view(v, l.depth));
+                        self.orbit = Some(Orbit::from_view(&l.opening, l.depth));
                         self.loaded = Some(l);
                     }
                     Err(e) => self.error = Some(e),
@@ -167,16 +345,23 @@ impl Viewer {
                 self.loading = None;
             }
         }
+        self.place(&ctx, integrated);
+        self.tend_edits(&ctx);
+        if let Some(open) = edit3d::show(self, ui, rect) {
+            return open;
+        }
         let p = ui.painter().with_clip_rect(rect);
         p.rect_filled(rect, 0.0, Color32::from_rgb(9, 9, 11));
         let id = Id::unique(("splat-viewer", &self.session));
         let resp = ui.interact(rect, id, Sense::click_and_drag());
         let ppp = ctx.pixels_per_point();
         let (w, h) = (((rect.width() * ppp).round() as u32).max(16), ((rect.height() * ppp).round() as u32).max(16));
-        if let (Some(l), Some(orbit)) = (self.loaded.as_ref(), self.orbit.as_mut()) {
+        // Select splats: its tools take the left button's drags (the right one orbits then) and its clicks.
+        let (selecting, tool_drags) = (self.select.on(), self.select.takes_drags());
+        if let (Some(l), Some(orbit)) = (self.loaded.as_mut(), self.orbit.as_mut()) {
             let before = *orbit;
-            steer(ui, &resp, orbit, rect, h);
-            if resp.double_clicked() {
+            steer(ui, &resp, orbit, rect, h, tool_drags);
+            if resp.double_clicked() && !selecting {
                 if let Some(v) = l.views.get(self.view) {
                     *orbit = Orbit::from_view(v, l.depth);
                 }
@@ -185,7 +370,7 @@ impl Viewer {
             if *orbit != before {
                 self.moved = now;
             }
-            let (w, h) = if self.integrated && now - self.moved < SHARP_AFTER {
+            let (w, h) = if (self.integrated || l.source.integrated()) && now - self.moved < SHARP_AFTER {
                 // Drawn whole once it stops.
                 ctx.request_repaint_after(std::time::Duration::from_secs_f64(SHARP_AFTER - (now - self.moved)));
                 within(w, h, MOVING_PIXELS)
@@ -201,13 +386,29 @@ impl Viewer {
             };
             let confidence = mode.map(|mode| Confidence { amount: self.amount, mode }).unwrap_or_default();
             let far = FarField { mode: self.far, distance: self.far_distance, horizon: l.horizon };
-            p.add(egui_wgpu::Callback::new_paint_callback(rect, SplatCallback { renderer: l.renderer.clone(), camera, confidence, far }));
-            let (error, checking) = l.renderer.lock().map(|r| (r.error.clone(), r.checks > 0)).unwrap_or_default();
+            let marks = l.marks();
+            let error = match &mut l.source {
+                Source::Window(renderer) => {
+                    let callback = SplatCallback { renderer: renderer.clone(), camera, confidence, far, dof: DepthOfField::default(), probe: None, marks };
+                    p.add(egui_wgpu::Callback::new_paint_callback(rect, callback));
+                    let (error, checking) = renderer.lock().map(|r| (r.error.clone(), r.checks > 0)).unwrap_or_default();
+                    if checking {
+                        ctx.request_repaint();
+                    }
+                    error
+                }
+                Source::Integrated(worker) => {
+                    // Its thread asks for a repaint with each frame.
+                    if let Some((version, m)) = marks {
+                        worker.set_marks(version, m);
+                    }
+                    worker.ask(Request { camera, confidence, far, dof: DepthOfField::default(), probe: None, marks: worker.marks() });
+                    p.add(egui_wgpu::Callback::new_paint_callback(rect, worker.callback()));
+                    worker.error()
+                }
+            };
             if let Some(e) = error {
                 widgets::text(&p, rect.center(), Align2::CENTER_CENTER, &Txt::new(format!("This view could not be drawn: {e}"), 13.0).color(theme::DANGER));
-            }
-            if checking {
-                ctx.request_repaint();
             }
         } else {
             let (text, color) = match &self.error {
@@ -217,26 +418,41 @@ impl Viewer {
             widgets::text(&p, rect.center(), Align2::CENTER_CENTER, &Txt::new(text, 13.0).color(color));
             ctx.request_repaint_after(std::time::Duration::from_millis(100));
         }
+        self.select_pointer(ui, &resp, rect, &p);
 
         // Top bar: title, counts, views, reset, close.
         let bar = Rect::from_min_size(rect.min + vec2(16.0, 16.0), vec2(rect.width() - 32.0, 44.0));
         let mut open = true;
         let chip = |p: &egui::Painter, r: Rect| p.rect_filled(r, theme::radius(r.height() * 0.5), theme::black(0.55));
-        let title_w = (widgets::text_size(ui, &Txt::new(&self.title, 14.0).weight(weight::SEMIBOLD)).x + 40.0).min(bar.width() * 0.5);
-        let title_r = Rect::from_min_size(bar.min, vec2(title_w, 44.0));
-        chip(&p, title_r);
-        widgets::text_truncated(&p, pos2(title_r.left() + 20.0, title_r.center().y - 7.0), Align2::LEFT_CENTER, &Txt::new(&self.title, 14.0).weight(weight::SEMIBOLD), title_w - 40.0);
+        // Under the title, its splats (those its edits keep of them).
         let sub = match &self.loaded {
-            Some(l) => format!("{} splats", format::integer(l.splats as f64)),
+            Some(l) => match l.edits.as_ref().map(|e| e.hidden() + e.deleted()).filter(|n| *n > 0) {
+                Some(removed) => format!("{} of {} splats", format::integer((l.splats - removed) as f64), format::integer(l.splats as f64)),
+                None => format!("{} splats", format::integer(l.splats as f64)),
+            },
             None => "3D view".into(),
         };
-        widgets::text(&p, pos2(title_r.left() + 20.0, title_r.center().y + 9.0), Align2::LEFT_CENTER, &Txt::new(sub, 11.0).color(theme::FG_3));
+        let sub_t = Txt::new(sub, 11.0).color(theme::FG_3);
+        let title_t = Txt::new(&self.title, 14.0).weight(weight::SEMIBOLD);
+        let title_w = (widgets::text_size(ui, &title_t).x.max(widgets::text_size(ui, &sub_t).x) + 40.0).min(bar.width() * 0.5);
+        let title_r = Rect::from_min_size(bar.min, vec2(title_w, 44.0));
+        chip(&p, title_r);
+        widgets::text_truncated(&p, pos2(title_r.left() + 20.0, title_r.center().y - 7.0), Align2::LEFT_CENTER, &title_t, title_w - 40.0);
+        widgets::text_truncated(&p, pos2(title_r.left() + 20.0, title_r.center().y + 9.0), Align2::LEFT_CENTER, &sub_t, title_w - 40.0);
+        if self.select.on() {
+            let views = self.loaded.as_ref().map_or(0, |l| l.views.len());
+            let controls = bar.right() - 44.0 - 10.0 - RESET_W - if views > 1 { 10.0 + 2.0 * STEP_W + STEP_LABEL_W } else { 0.0 };
+            self.select_bar(ui, &p, title_r, controls);
+        } else {
+            self.save_view(ui, &p, rect, title_r);
+        }
+        self.problem_chip(ui, &p, rect, title_r);
         let close_r = Rect::from_min_size(pos2(bar.right() - 44.0, bar.top()), vec2(44.0, 44.0));
         if IconButton::new(icons::X, "Close the 3D view").size(44.0, 18.0).backdrop(theme::black(0.55)).show_at(ui, close_r).clicked() {
             open = false;
         }
         if let Some(l) = self.loaded.as_ref() {
-            let reset_w = 132.0;
+            let reset_w = RESET_W;
             let reset_r = Rect::from_min_size(pos2(close_r.left() - 10.0 - reset_w, bar.top() + 2.0), vec2(reset_w, 40.0));
             if Button::new("Recorded view").icon(icons::ARROW_COUNTER_CLOCKWISE).variant(Variant::Glass).width(reset_w).show_at(ui, reset_r).clicked() {
                 if let (Some(v), Some(o)) = (l.views.get(self.view), self.orbit.as_mut()) {
@@ -244,13 +460,17 @@ impl Viewer {
                 }
             }
             if l.views.len() > 1 {
-                let step_w = 40.0;
-                let label_w = 112.0;
+                let (step_w, label_w) = (STEP_W, STEP_LABEL_W);
                 let next_r = Rect::from_min_size(pos2(reset_r.left() - 10.0 - step_w, bar.top() + 2.0), vec2(step_w, 40.0));
                 let label_r = Rect::from_min_size(pos2(next_r.left() - label_w, bar.top() + 2.0), vec2(label_w, 40.0));
                 let prev_r = Rect::from_min_size(pos2(label_r.left() - step_w, bar.top() + 2.0), vec2(step_w, 40.0));
                 chip(&p, Rect::from_min_max(prev_r.min, next_r.max));
-                widgets::text(&p, label_r.center(), Align2::CENTER_CENTER, &Txt::new(format!("View {} of {}", self.view + 1, l.views.len()), 12.0).color(theme::FG_2));
+                widgets::text(
+                    &p,
+                    label_r.center(),
+                    Align2::CENTER_CENTER,
+                    &Txt::new(format!("View {} of {}", self.view + 1, l.views.len()), 12.0).color(theme::FG_2),
+                );
                 let mut step = 0i64;
                 if Button::new("‹").variant(Variant::Ghost).width(step_w).show_at(ui, prev_r).clicked() {
                     step = -1;
@@ -265,18 +485,29 @@ impl Viewer {
                     }
                 }
             }
-            let hint = "Drag to orbit · right-drag to pan · scroll to zoom · WASD and QE to fly · double-click for the recorded view";
-            let hint_t = Txt::new(hint, 11.5).color(theme::FG_2);
-            let hs = widgets::text_size(ui, &hint_t);
-            let hint_r = Rect::from_min_size(pos2(rect.left() + 16.0, rect.bottom() - 16.0 - 30.0), vec2(hs.x + 28.0, 30.0));
-            chip(&p, hint_r);
-            widgets::text(&p, hint_r.center(), Align2::CENTER_CENTER, &hint_t);
-            if l.seen {
-                let far = l.far;
-                self.controls(ui, &p, rect, hint_r, far);
+            if self.select.on() {
+                self.select_controls(ui, &p, rect);
+            } else {
+                let hint = "Drag to orbit · right-drag to pan · scroll to zoom · WASD and QE to fly · double-click for the recorded view";
+                let hint_t = Txt::new(hint, 11.5).color(theme::FG_2);
+                let hs = widgets::text_size(ui, &hint_t);
+                let hint_r = Rect::from_min_size(pos2(rect.left() + 16.0, rect.bottom() - 16.0 - 30.0), vec2(hs.x + 28.0, 30.0));
+                chip(&p, hint_r);
+                widgets::text(&p, hint_r.center(), Align2::CENTER_CENTER, &hint_t);
+                if l.seen {
+                    let far = l.far;
+                    self.controls(ui, &p, rect, hint_r, far);
+                }
             }
         }
-        if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+        // Export's dialog over the view (in the tooltip layer, where the gallery draws the view itself).
+        if let Some(e) = self.export.as_mut() {
+            if !e.show(&ctx) {
+                self.export = None;
+            }
+        }
+        // Select splats takes Esc itself (the selection cleared, then the mode left), as Export's dialog does.
+        if !self.select.on() && self.export.is_none() && ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
             open = false;
         }
         open
@@ -324,7 +555,12 @@ impl Viewer {
     /// The display controls in chips at the bottom right (above the hint where the first does not fit beside it): what
     /// poorly seen splats show as and how strongly, and above it, with `far`, the far field and its distance.
     fn controls(&mut self, ui: &mut Ui, p: &egui::Painter, rect: Rect, hint: Rect, far: bool) {
-        let unsure = [SegOption::new(Unsure::Shown, "Show"), SegOption::new(Unsure::Faded, "Fade"), SegOption::new(Unsure::Blurred, "Blur"), SegOption::new(Unsure::Hazed, "Haze")];
+        let unsure = [
+            SegOption::new(Unsure::Shown, "Show"),
+            SegOption::new(Unsure::Faded, "Fade"),
+            SegOption::new(Unsure::Blurred, "Blur"),
+            SegOption::new(Unsure::Hazed, "Haze"),
+        ];
         let percent = |v: f32| format!("{:.0} %", v * 100.0);
         let right = rect.right() - 16.0;
         // Beside the hint when the widest chip fits there.
@@ -347,11 +583,19 @@ fn within(w: u32, h: u32, pixels: u32) -> (u32, u32) {
     (((w as f64 * k) as u32).max(16), ((h as f64 * k) as u32).max(16))
 }
 
-/// Mouse and keyboard to the orbit.
-fn steer(ui: &Ui, resp: &egui::Response, orbit: &mut Orbit, rect: Rect, height_px: u32) {
+/// Mouse and keyboard to the orbit. While a tool takes the left button's drags (`tool`: Select splats' brush, box and
+/// sphere), the right button orbits and the middle one pans.
+fn steer(ui: &Ui, resp: &egui::Response, orbit: &mut Orbit, rect: Rect, height_px: u32, tool: bool) {
     let ctx = ui.ctx();
+    // Its middle drag pans: the wheel button's scrolling (`orbiters_ui::autoscroll`) does not start here.
+    orbiters_ui::autoscroll::keep_middle(ctx, resp.rect);
     let delta = resp.drag_delta();
-    if resp.dragged_by(egui::PointerButton::Primary) {
+    let (orbits, pans) = if tool {
+        (resp.dragged_by(egui::PointerButton::Secondary), resp.dragged_by(egui::PointerButton::Middle))
+    } else {
+        (resp.dragged_by(egui::PointerButton::Primary), resp.dragged_by(egui::PointerButton::Secondary) || resp.dragged_by(egui::PointerButton::Middle))
+    };
+    if orbits {
         orbit.yaw += delta.x * 0.006;
         orbit.pitch = (orbit.pitch - delta.y * 0.006).clamp(-1.54, 1.54);
     }
@@ -360,7 +604,7 @@ fn steer(ui: &Ui, resp: &egui::Response, orbit: &mut Orbit, rect: Rect, height_p
     let cam = orbit.camera(16, height_px.max(16));
     let (right, up, forward) = (cam.r[0], cam.up(), cam.forward());
     let mut moved = [0f32; 3];
-    if resp.dragged_by(egui::PointerButton::Secondary) || resp.dragged_by(egui::PointerButton::Middle) {
+    if pans {
         for k in 0..3 {
             moved[k] += -right[k] * delta.x * per_point + up[k] * delta.y * per_point;
         }
@@ -371,7 +615,8 @@ fn steer(ui: &Ui, resp: &egui::Response, orbit: &mut Orbit, rect: Rect, height_p
             orbit.distance = (orbit.distance * (-scroll * 0.002).exp()).clamp(0.05, 5000.0);
         }
         let (dt, keys) = ctx.input(|i| {
-            let k = |key| if i.key_down(key) { 1.0f32 } else { 0.0 };
+            // Ctrl with a key is a shortcut (Ctrl+A selects all splats), not a flight.
+            let k = |key| if i.key_down(key) && !i.modifiers.command { 1.0f32 } else { 0.0 };
             let fast = if i.modifiers.shift { 3.0 } else { 1.0 };
             (i.stable_dt.min(0.05) * fast, [k(egui::Key::D) - k(egui::Key::A), k(egui::Key::E) - k(egui::Key::Q), k(egui::Key::W) - k(egui::Key::S)])
         });
@@ -388,24 +633,290 @@ fn steer(ui: &Ui, resp: &egui::Response, orbit: &mut Orbit, rect: Rect, height_p
     }
 }
 
-/// Reads the splats, their sky map and the recorded views, and sets the renderer up on the window's device.
-fn load(dir: &Path, device: wgpu::Device, queue: wgpu::Queue) -> anyhow::Result<Loaded> {
-    let result = reconstruction::result_dir(dir);
-    let g = ply::read(&result.join(reconstruction::PLY_FILE))?;
-    let sky_file = result.join(reconstruction::SKY_FILE);
-    let sky = if sky_file.is_file() { Some(SkyMap::read(&sky_file)?) } else { None };
-    let (views, start) = views::recorded(dir)?;
-    // Orbit around what that view looks at.
-    let depth = views::depth_ahead(&g, &views[start]);
-    let mut gpu = Gpu::renderer(device, queue);
+impl Viewer {
+    /// Save this view beside the title, then what became of it under the bar (Edit, Show in its folder).
+    fn save_view(&mut self, ui: &mut Ui, p: &egui::Painter, rect: Rect, title_r: Rect) {
+        let ctx = ui.ctx().clone();
+        let now = ctx.input(|i| i.time);
+        // The shutter.
+        let flash = ((now - self.flashed) / 0.35) as f32;
+        if (0.0..1.0).contains(&flash) {
+            p.rect_filled(rect, 0.0, theme::white(0.3 * (1.0 - flash)));
+            ctx.request_repaint();
+        }
+        let Some(l) = self.loaded.as_ref() else { return };
+        // Whether its splats can be selected (None for a downloaded `.splat`, false while edits wait to be discarded).
+        let selectable = l.edits.as_ref().map(|e| e.problem.is_none());
+        // Whether its last save of edits failed (Export waits for Retry, below).
+        let unsaved = l.edits.as_ref().is_some_and(|e| e.unsaved());
+        let views = l.views.len();
+        let saving = self.still.is_some();
+        let b = Button::new(if saving { "Saving the view…" } else { "Save this view" })
+            .icon(icons::CAMERA)
+            .variant(Variant::Glass)
+            .enabled(!saving)
+            .hint("Saves the picture of this view in Photos & captures, larger than on screen, to edit or share")
+            .id_salt("splat-save-view");
+        let bw = b.desired_width(ui);
+        let save_r = Rect::from_min_size(pos2(title_r.right() + 10.0, title_r.top() + 2.0), vec2(bw, 40.0));
+        if b.show_at(ui, save_r).clicked() && !saving {
+            if let Some(orbit) = self.orbit {
+                let ppp = ctx.pixels_per_point();
+                let (vw, vh) = ((rect.width() * ppp).max(16.0), (rect.height() * ppp).max(16.0));
+                let k = (STILL_LONG / vw.max(vh)).max(1.0);
+                let camera = orbit.camera((vw * k).round() as u32, (vh * k).round() as u32);
+                let mode = match self.unsure {
+                    Unsure::Shown => None,
+                    Unsure::Faded => Some(ConfidenceMode::Fade),
+                    Unsure::Blurred => Some(ConfidenceMode::Blur),
+                    Unsure::Hazed => Some(ConfidenceMode::Haze),
+                };
+                let confidence = mode.map(|mode| Confidence { amount: self.amount, mode }).unwrap_or_default();
+                let far = FarField { mode: self.far, distance: self.far_distance, horizon: l.horizon };
+                let (dir, window, drawn) = (self.session.clone(), self.window.clone(), l.drawn());
+                self.still = Some(Job::spawn(&ctx, move || still(&dir, window, camera, confidence, far, drawn?).map_err(|e| format!("{e:#}"))));
+                self.flashed = now;
+                self.saved = None;
+                self.still_error = None;
+            }
+        }
+        // Edit in 3D beside it.
+        let e = Button::new("Edit in 3D")
+            .icon(icons::SLIDERS_HORIZONTAL)
+            .variant(Variant::Glass)
+            .hint("Edits this view with the photo editor's layers while you keep moving around in 3D")
+            .id_salt("splat-edit-3d");
+        let ew = e.desired_width(ui);
+        let edit_r = Rect::from_min_size(pos2(save_r.right() + 10.0, save_r.top()), vec2(ew, 40.0));
+        if e.show_at(ui, edit_r).clicked() {
+            self.enter_edit(&ctx, rect);
+        }
+        // Select splats beside it, for a capture of this computer (a downloaded `.splat` has no edits).
+        if let Some(can) = selectable {
+            let b = Button::new("Select splats")
+                .icon(icons::CROSSHAIR)
+                .variant(Variant::Glass)
+                .enabled(can)
+                .hint(if can { "Selects splats to hide or delete them (a leftover avatar, floaters): they leave everything shared from this capture" } else { "Discard the edits that could not be applied first" })
+                .id_salt("splat-select");
+            let bw = b.desired_width(ui);
+            let select_r = Rect::from_min_size(pos2(edit_r.right() + 10.0, edit_r.top()), vec2(bw, 40.0));
+            if b.show_at(ui, select_r).clicked() && can {
+                self.enter_select(&ctx);
+            }
+            // Export… beside it: what the view shows, as a file for other tools. Its icon alone (the label its tooltip)
+            // where the whole button would reach the view's controls on the right (a long world name, a narrow window):
+            // Recorded view, the views' steps when there are several, and Close. The file is made from the edits saved
+            // beside the PLY: while the last save failed, it would hold splats this view leaves out, so Export waits for
+            // Retry (in Select splats) as it waits for edits that could not be applied.
+            let ok = can && !unsaved;
+            let b = Button::new("Export…")
+                .icon(icons::UPLOAD_SIMPLE)
+                .variant(Variant::Glass)
+                .enabled(ok)
+                .hint(if !can {
+                    "Discard the edits that could not be applied first"
+                } else if unsaved {
+                    "Its splat edits are not saved: Retry in Select splats first, so that the file leaves out what this view hides"
+                } else {
+                    "Saves what this view shows as an SPZ, GLB or PLY file, for a VRChat splat world, Unity, SuperSplat, Cesium or Blender"
+                })
+                .id_salt("splat-export");
+            let bw = b.desired_width(ui);
+            let controls = rect.right() - 16.0 - 44.0 - 10.0 - RESET_W - if views > 1 { 10.0 + 2.0 * STEP_W + STEP_LABEL_W } else { 0.0 };
+            let x = select_r.right() + 10.0;
+            let (clicked, export_r) = if x + bw + 10.0 <= controls {
+                let r = Rect::from_min_size(pos2(x, edit_r.top()), vec2(bw, 40.0));
+                (b.show_at(ui, r).clicked(), r)
+            } else {
+                let r = Rect::from_min_size(pos2(x, edit_r.top()), vec2(40.0, 40.0));
+                let icon = IconButton::new(icons::UPLOAD_SIMPLE, "Export…").size(40.0, 17.0).backdrop(theme::black(0.55)).id_salt("splat-export-icon");
+                // Dimmed and deaf while it waits, as the whole button is.
+                let mut iu = ui.new_child(UiBuilder::new().max_rect(r).id_salt("splat-export-icon"));
+                if !ok {
+                    iu.disable();
+                }
+                (icon.show_at(&mut iu, r).clicked(), r)
+            };
+            if clicked && ok {
+                self.export = Some(super::splat_export::Export::open(&ctx, &self.session, &self.title, export_r).order(egui::Order::Tooltip));
+            }
+        }
+        // Saved: where, and Edit right after.
+        let (text, tone) = match (&self.saved, &self.still_error) {
+            (Some(_), _) => ("Saved in Photos & captures", theme::ACCENT),
+            (None, Some(_)) => ("This view could not be saved", theme::DANGER),
+            _ => return,
+        };
+        let t = Txt::new(text, 13.0).color(theme::FG);
+        let tw = widgets::text_size(ui, &t).x;
+        let saved = self.saved.clone();
+        let small = orbiters_ui::widgets::Size::Sm;
+        let edit = Button::new("Edit").icon(icons::SLIDERS_HORIZONTAL).variant(Variant::Primary).size(small).id_salt("splat-saved-edit");
+        let folder = Button::new("").icon(icons::FOLDER_OPEN).variant(Variant::Ghost).size(small).hint("Show it in its folder").id_salt("splat-saved-folder");
+        let (ew, fw) = (edit.desired_width(ui), folder.desired_width(ui));
+        let buttons = if saved.is_some() { 12.0 + ew + 4.0 + fw } else { 0.0 };
+        let w = 42.0 + tw + buttons + 8.0 + 30.0 + 8.0;
+        let chip_r = Rect::from_center_size(pos2(rect.center().x, title_r.bottom() + 16.0 + 22.0), vec2(w, 44.0));
+        p.rect_filled(chip_r, theme::radius(22.0), theme::black(0.72));
+        widgets::icon(p, pos2(chip_r.left() + 26.0, chip_r.center().y), if saved.is_some() { icons::CHECK_CIRCLE } else { icons::WARNING }, 16.0, tone);
+        let mut x = chip_r.left() + 42.0;
+        widgets::text(p, pos2(x, chip_r.center().y), Align2::LEFT_CENTER, &t);
+        x += tw + 12.0;
+        if let Some(path) = saved {
+            if edit.show_at(ui, Rect::from_min_size(pos2(x, chip_r.center().y - 16.0), vec2(ew, 32.0))).clicked() {
+                self.editor = Some(super::editor::Editor::open(&ctx, super::editor::Source::picture(path.clone()), self.title.clone()));
+            }
+            x += ew + 4.0;
+            if folder.show_at(ui, Rect::from_min_size(pos2(x, chip_r.center().y - 16.0), vec2(fw, 32.0))).clicked() {
+                if let Err(e) = super::editor::files::reveal(&path) {
+                    self.still_error = Some(e.to_string());
+                }
+            }
+        }
+        let close = Rect::from_center_size(pos2(chip_r.right() - 24.0, chip_r.center().y), vec2(28.0, 28.0));
+        if IconButton::new(icons::X, "Dismiss").size(28.0, 14.0).id_salt("splat-saved-dismiss").show_at(ui, close).clicked() {
+            self.saved = None;
+            self.still_error = None;
+        }
+        if let Some(e) = &self.still_error {
+            widgets::text_truncated(p, pos2(chip_r.center().x, chip_r.bottom() + 14.0), Align2::CENTER_CENTER, &Txt::new(e, 12.0).color(theme::DANGER), rect.width() * 0.6);
+        }
+    }
+}
+
+/// What a picture of the view draws the splats with: the view's marks, for the PLY it loaded.
+#[derive(Clone)]
+struct Drawn {
+    marks: Arc<Vec<u8>>,
+    ply: orbiters_reconstruct::edit::Identity,
+}
+
+impl Loaded {
+    /// What a picture of the view draws (none for a downloaded `.splat`), or why none may be made: while edits that
+    /// could not be applied wait to be discarded, the view shows the splats as trained, and a picture of it would hold
+    /// what they removed.
+    fn drawn(&self) -> Result<Option<Drawn>, String> {
+        match &self.edits {
+            None => Ok(None),
+            Some(e) => match &e.problem {
+                Some(p) => Err(format!("No picture of this view until its splat edits are discarded: {p}")),
+                None => Ok(Some(Drawn { marks: e.drawn.clone(), ply: e.edit.ply })),
+            },
+        }
+    }
+}
+
+/// `camera`'s view of the splats of `dir` (at the camera's size, as `confidence` and `far` show them, without the
+/// splats `drawn` hides or deletes), drawn by a renderer of its own on the window's device, so that the view on screen
+/// carries on; saved as a picture of the capture's world ([`super::editor::files::save_view`]).
+fn still(dir: &Path, window: (wgpu::Device, wgpu::Queue), camera: Camera, confidence: Confidence, far: FarField, drawn: Option<Drawn>) -> anyhow::Result<PathBuf> {
+    let view = shoot(dir, window, camera, confidence, far, &[DepthOfField::default()], drawn)?.pop().expect("one view");
+    super::editor::files::save_view(dir, &view)
+}
+
+/// `camera`'s view of the splats of `dir` as [`still`] draws it, once for each depth of field of `dofs`: RGBA8,
+/// encoded sRGB, opaque. `drawn` holds the marks of the view on screen ([`select::Edits`]): what they hide or delete is
+/// not drawn and what they select is not tinted, only on the PLY they were made for ([`select::read_again`]).
+fn shoot(
+    dir: &Path,
+    window: (wgpu::Device, wgpu::Queue),
+    camera: Camera,
+    confidence: Confidence,
+    far: FarField,
+    dofs: &[DepthOfField],
+    drawn: Option<Drawn>,
+) -> anyhow::Result<Vec<orbiters_ui::photo::Rgba8>> {
+    let (g, sky) = select::read_again(dir, drawn.as_ref().map(|d| d.ply))?;
+    let mut gpu = Gpu::renderer(window.0, window.1);
     gpu.upload(&g);
+    if let Some(d) = &drawn {
+        gpu.set_marks(&d.marks.iter().map(|&m| if m >= 2 { 2 } else { 0 }).collect::<Vec<u8>>());
+    }
     if let Some(map) = &sky {
         gpu.set_sky(Some((map.width, &map.rgb)))?;
     }
+    drop(g);
+    gpu.confidence = confidence;
+    gpu.far = far;
+    let byte = |v: f32| (v.clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
+    let mut out = Vec::with_capacity(dofs.len());
+    for dof in dofs {
+        gpu.dof = *dof;
+        // Drawn again while the GPU's count says the frame left splats out.
+        let mut image = Vec::new();
+        for _ in 0..=REDRAW_CHECKS {
+            gpu.step(&camera, BACKGROUND, Target::None, None)?;
+            image = gpu.read_image()?;
+            if !gpu.needs_redraw() {
+                break;
+            }
+        }
+        let rgba: Vec<u8> = image.iter().flat_map(|p| [byte(p[0]), byte(p[1]), byte(p[2]), 255]).collect();
+        out.push(orbiters_ui::photo::Rgba8::new(camera.width, camera.height, rgba));
+    }
+    Ok(out)
+}
+
+
+/// A renderer of `g` and its sky map on the integrated GPU (with `integrated`) or the window's device, drawing with
+/// `marks` (and their version) from its first frame.
+fn source(ctx: &egui::Context, window: (wgpu::Device, wgpu::Queue), integrated: bool, g: &Gaussians, sky: Option<&SkyMap>, marks: Option<(u64, &[u8])>) -> anyhow::Result<Source> {
+    let renderer = |device: wgpu::Device, queue: wgpu::Queue| -> anyhow::Result<Gpu> {
+        let mut gpu = Gpu::renderer(device, queue);
+        gpu.upload(g);
+        if let Some((_, m)) = marks {
+            gpu.set_marks(m);
+        }
+        if let Some(map) = sky {
+            gpu.set_sky(Some((map.width, &map.rgb)))?;
+        }
+        Ok(gpu)
+    };
+    let version = marks.map_or(0, |(v, _)| v);
+    if integrated {
+        let (device, queue) = crate::gpu::integrated_device()?;
+        let gpu = renderer(device.clone(), queue.clone())?;
+        return Ok(Source::Integrated(Worker::start(ctx, gpu, device, queue, version)));
+    }
+    let gpu = renderer(window.0, window.1)?;
+    Ok(Source::Window(Arc::new(Mutex::new(Renderer { gpu, target: None, last: None, error: None, checks: 0, drawn: 0, focus: None, probing: false, marks: version }))))
+}
+
+/// Reads the splats, their sky map, their edits and the recorded views, and sets the renderer up on the integrated GPU
+/// (with `integrated`, else or when that fails on the window's device).
+fn load(dir: &Path, ctx: &egui::Context, window: (wgpu::Device, wgpu::Queue), integrated: bool, view: Option<View>) -> anyhow::Result<Loaded> {
+    let (g, sky, found) = select::read(dir)?;
+    let shared = view.is_some();
+    let (views, start) = if let Some(v) = view { (vec![v], 0) } else { views::recorded(dir)? };
+    let edits = found.map(|(identity, found)| select::Edits::new(dir, g.len(), identity, found, window.clone()));
+    // The view opens and orbits as it would without what the edits leave out (a removed floater is no subject).
+    let kept;
+    let shown = match edits.as_ref().filter(|e| !e.edit.removes_nothing()) {
+        Some(e) => {
+            let mut k = g.clone();
+            orbiters_reconstruct::edit::apply(&mut k, &e.edit);
+            kept = k;
+            &kept
+        }
+        None => &g,
+    };
+    let opening = if shared { views[start] } else { views::eye_level(dir, shown, &views[start]).0 };
+    // Orbit around what that view looks at.
+    let depth = views::depth_ahead(shown, &opening);
+    let marks = edits.as_ref().map(|e| (e.version, e.drawn.as_slice()));
+    let source = match integrated.then(|| source(ctx, window.clone(), true, &g, sky.as_ref(), marks)) {
+        Some(Ok(s)) => s,
+        Some(Err(e)) => {
+            eprintln!("3D view on the window's GPU, not the integrated one: {e:#}");
+            source(ctx, window, false, &g, sky.as_ref(), marks)?
+        }
+        None => source(ctx, window, false, &g, sky.as_ref(), marks)?,
+    };
     let seen = g.seen.iter().any(|s| s.weight >= 0.0);
     let far = g.seen.iter().any(|s| s.beyond > 0.0);
     let horizon = sky.as_ref().map(SkyMap::horizon).or_else(|| orbiters_reconstruct::sky::horizon(&g)).unwrap_or(BACKGROUND);
-    Ok(Loaded { renderer: Arc::new(Mutex::new(Renderer { gpu, target: None, last: None, error: None, checks: 0 })), splats: g.len(), views, start, depth, seen, far, horizon })
+    Ok(Loaded { source, splats: g.len(), views, start, opening, depth, seen, far, horizon, edits })
 }
 
 const BLIT: &str = r#"
@@ -439,7 +950,7 @@ fn fs_main(v: V) -> @location(0) vec4<f32> {
 "#;
 
 /// The blit pipeline for the renderer's target (created on first use, kept in its callback resources).
-struct Blit {
+pub(super) struct Blit {
     pipeline: wgpu::RenderPipeline,
     layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
@@ -456,10 +967,19 @@ impl Blit {
                 wgpu::BindGroupLayoutEntry {
                     binding: 0,
                     visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture { sample_type: wgpu::TextureSampleType::Float { filterable: true }, view_dimension: wgpu::TextureViewDimension::D2, multisampled: false },
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
                     count: None,
                 },
-                wgpu::BindGroupLayoutEntry { binding: 1, visibility: wgpu::ShaderStages::FRAGMENT, ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering), count: None },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
                 wgpu::BindGroupLayoutEntry {
                     binding: 2,
                     visibility: wgpu::ShaderStages::FRAGMENT,
@@ -468,7 +988,11 @@ impl Blit {
                 },
             ],
         });
-        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("splat blit"), bind_group_layouts: &[Some(&layout)], immediate_size: 0 });
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("splat blit"),
+            bind_group_layouts: &[Some(&layout)],
+            immediate_size: 0,
+        });
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("splat blit"),
             layout: Some(&pipeline_layout),
@@ -499,6 +1023,34 @@ impl Blit {
         });
         Self { pipeline, layout, sampler, params }
     }
+
+    /// The window's, made on first use.
+    pub(super) fn of<'a>(device: &wgpu::Device, resources: &'a mut egui_wgpu::CallbackResources) -> Option<&'a Blit> {
+        if resources.get::<Blit>().is_none() {
+            let target = resources.get::<orbiters_ui::RenderTarget>().copied()?;
+            resources.insert(Blit::new(device, target));
+        }
+        resources.get::<Blit>()
+    }
+
+    /// What draws `view` (an RGBA8 image of encoded sRGB) over the callback's rectangle.
+    pub(super) fn bind_group(&self, device: &wgpu::Device, view: &wgpu::TextureView) -> wgpu::BindGroup {
+        device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("splat blit"),
+            layout: &self.layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(view) },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&self.sampler) },
+                wgpu::BindGroupEntry { binding: 2, resource: self.params.as_entire_binding() },
+            ],
+        })
+    }
+
+    pub(super) fn draw(&self, pass: &mut wgpu::RenderPass<'static>, bind_group: &wgpu::BindGroup) {
+        pass.set_pipeline(&self.pipeline);
+        pass.set_bind_group(0, bind_group, &[]);
+        pass.draw(0..3, 0..1);
+    }
 }
 
 struct SplatCallback {
@@ -506,6 +1058,11 @@ struct SplatCallback {
     camera: Camera,
     confidence: Confidence,
     far: FarField,
+    /// Edit in 3D's depth blur, and its auto focus's pixel.
+    dof: DepthOfField,
+    probe: Option<[f32; 2]>,
+    /// The marks to draw with and their version ([`Loaded::marks`]).
+    marks: Option<(u64, Arc<Vec<u8>>)>,
 }
 
 impl egui_wgpu::CallbackTrait for SplatCallback {
@@ -517,11 +1074,7 @@ impl egui_wgpu::CallbackTrait for SplatCallback {
         _encoder: &mut wgpu::CommandEncoder,
         resources: &mut egui_wgpu::CallbackResources,
     ) -> Vec<wgpu::CommandBuffer> {
-        if resources.get::<Blit>().is_none() {
-            let Some(target) = resources.get::<orbiters_ui::RenderTarget>().copied() else { return Vec::new() };
-            resources.insert(Blit::new(device, target));
-        }
-        let blit = resources.get::<Blit>().expect("inserted");
+        let Some(blit) = Blit::of(device, resources) else { return Vec::new() };
         let mut r = self.renderer.lock().unwrap();
         let size = (self.camera.width, self.camera.height);
         if r.target.as_ref().is_none_or(|t| t.size != size) {
@@ -536,21 +1089,20 @@ impl egui_wgpu::CallbackTrait for SplatCallback {
                 view_formats: &[],
             });
             let view = texture.create_view(&Default::default());
-            let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("splat blit"),
-                layout: &blit.layout,
-                entries: &[
-                    wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&view) },
-                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&blit.sampler) },
-                    wgpu::BindGroupEntry { binding: 2, resource: blit.params.as_entire_binding() },
-                ],
-            });
+            let bind_group = blit.bind_group(device, &view);
             r.target = Some(Presented { size, view, bind_group });
             r.last = None;
         }
-        let changed = r.gpu.confidence != self.confidence || r.gpu.far != self.far;
+        let mut changed = r.gpu.confidence != self.confidence || r.gpu.far != self.far || r.gpu.dof != self.dof || r.gpu.probe != self.probe;
+        if let Some((version, marks)) = self.marks.as_ref().filter(|(v, _)| *v != r.marks) {
+            r.gpu.set_marks(marks);
+            r.marks = *version;
+            changed = true;
+        }
         r.gpu.confidence = self.confidence;
         r.gpu.far = self.far;
+        r.gpu.dof = self.dof;
+        r.gpu.probe = self.probe;
         let moved = r.last != Some(self.camera) || changed;
         let left_out = !moved && r.checks > 0 && {
             r.checks -= 1;
@@ -563,10 +1115,18 @@ impl egui_wgpu::CallbackTrait for SplatCallback {
                     r.gpu.present(&view);
                     r.error = None;
                     r.checks = REDRAW_CHECKS;
+                    r.drawn += 1;
                 }
                 Err(e) => r.error = Some(format!("{e:#}")),
             }
             r.last = Some(self.camera);
+        }
+        // The auto focus's probe as it comes back (never waited for).
+        if self.probe.is_some() || r.probing {
+            if let Some(f) = r.gpu.probed() {
+                r.focus = Some(f);
+            }
+            r.probing = r.gpu.probing();
         }
         Vec::new()
     }
@@ -574,9 +1134,7 @@ impl egui_wgpu::CallbackTrait for SplatCallback {
     fn paint(&self, _info: egui::PaintCallbackInfo, pass: &mut wgpu::RenderPass<'static>, resources: &egui_wgpu::CallbackResources) {
         let (Some(blit), Ok(r)) = (resources.get::<Blit>(), self.renderer.lock()) else { return };
         let Some(t) = r.target.as_ref() else { return };
-        pass.set_pipeline(&blit.pipeline);
-        pass.set_bind_group(0, &t.bind_group, &[]);
-        pass.draw(0..3, 0..1);
+        blit.draw(pass, &t.bind_group);
     }
 }
 

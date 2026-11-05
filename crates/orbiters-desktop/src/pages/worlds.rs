@@ -16,7 +16,7 @@ use orbiters_ui::anim::{self, ease, Spring};
 use orbiters_ui::paint::{self, Gradient};
 use orbiters_ui::theme::{self, weight, Txt};
 use orbiters_ui::widgets::{self, Button, IconButton, Size, Variant};
-use orbiters_ui::{format, icons, logo, toast};
+use orbiters_ui::{format, icons, logo, morph, toast};
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -40,10 +40,29 @@ struct Open {
     handed: Option<(f64, BTreeSet<PathBuf>)>,
     /// The picture shown large, by its index in the world's pictures.
     viewer: Option<usize>,
+    /// The large picture shrinks back into its tile (dropped once it landed there).
+    viewer_closing: bool,
+    /// Bumped on every opening of the large picture (its morph's springs).
+    viewer_serial: u64,
+    /// Each picture's tile as last drawn (by index): the large picture grows out of it and lands back on it.
+    tiles: HashMap<usize, Rect>,
+    /// Reconstruct again's question, over the page ([`super::reconstruct_again`]).
+    again: Option<super::reconstruct_again::Ask>,
 }
 
 #[derive(Default)]
 pub struct State {
+    sharing: Option<super::sharing::Dialog>,
+    share_prepare: Job<Vec<crate::controller::shares::Entry>>,
+    share_public: bool,
+    /// The picture the share window grows out of (a card's, a session row's) and its corner radius.
+    share_origin: Option<(Rect, f32)>,
+    /// Each card's picture as last drawn (by world id).
+    card_thumbs: HashMap<String, Rect>,
+    /// Each card as last drawn (by world id): an open world's card rides its picture's flight near its place.
+    card_homes: HashMap<String, Rect>,
+    /// Screenshots: the share window opens on a fixture state (made-up friends, a share running), never a real share.
+    stage_share: Option<&'static str>,
     loaded: Option<(u64, PathBuf, u64)>,
     list: Job<Vec<VisitedWorld>>,
     worlds: Option<Vec<Arc<VisitedWorld>>>,
@@ -59,6 +78,57 @@ pub struct State {
 }
 
 impl State {
+    fn prepare_share(&mut self, ctx: &egui::Context, root: PathBuf, paths: Vec<PathBuf>, public: bool, server: Server, origin: Option<(Rect, f32)>) {
+        self.share_public = public;
+        self.share_origin = origin;
+        self.share_prepare = Job::spawn(ctx, move || {
+            crate::controller::shares::local_entries(&root, server)
+                .into_iter()
+                .filter(|e| e.local.as_ref().is_some_and(|l| paths.iter().any(|p| p == l.path())))
+                .collect()
+        });
+    }
+    pub fn stage_detail_share(&self, ctx: &egui::Context) {
+        if let Some(s) = self
+            .open
+            .as_ref()
+            .and_then(|o| self.worlds.as_ref()?.iter().find(|w| w.id == o.id))
+            .and_then(|w| w.sessions.iter().find(|s| s.reconstruction.is_some()))
+        {
+            ctx.data_mut(|d| d.insert_temp(Id::unique(("world-session-share", &s.dir)), true));
+        }
+    }
+    /// Opens the share window out of the first card with a 3D view, as Share to … (`public` false) or Share publicly
+    /// would, on a fixture state (screenshots).
+    pub fn stage_share_window(&mut self, ctx: &egui::Context, root: PathBuf, public: bool) {
+        self.stage_share_as(ctx, root, public, if public { "progress" } else { "friends" });
+    }
+
+    /// [`Self::stage_share_window`] on the fixture state `fixture` of the sharing window (`sending`: a friend on its way).
+    pub fn stage_share_as(&mut self, ctx: &egui::Context, root: PathBuf, public: bool, fixture: &'static str) {
+        let Some(w) = self.worlds.as_ref().and_then(|l| l.iter().find(|w| w.reconstructed() > 0)).cloned() else { return };
+        let paths = w.sessions.iter().find(|s| s.reconstruction.is_some()).map(|s| vec![s.dir.clone()]).unwrap_or_default();
+        let origin = self.card_thumbs.get(&w.id).copied();
+        self.stage_share = Some(fixture);
+        self.prepare_share(ctx, root, paths, public, Server::Development, origin.map(|o| (o, 20.0)));
+    }
+
+    pub fn stage_share_morph(&mut self, ctx: &egui::Context, progress: bool) {
+        if let Some(w) = self.worlds.as_ref().and_then(|w| w.iter().find(|w| w.reconstructed() > 0 || !w.shots.is_empty())) {
+            let id = Id::unique(("world-share", &w.id));
+            ctx.data_mut(|d| d.insert_temp(id, true));
+            if progress {
+                let _ = orbiters_ui::anim::spring(ctx, id.with("split"), [0.0], Spring::MORPH);
+            }
+        }
+    }
+
+    /// Screenshots: where the first card shown was drawn.
+    pub fn first_card(&self) -> Option<Rect> {
+        let (_, shown) = self.shown.as_ref()?;
+        let world = self.worlds.as_ref()?.get(*shown.first()?)?;
+        self.card_homes.get(&world.id).copied()
+    }
     pub fn loaded(&mut self) -> bool {
         if let Some(list) = self.list.take() {
             self.worlds = Some(list.into_iter().map(Arc::new).collect());
@@ -69,11 +139,12 @@ impl State {
 
     /// Whether something is still being read (the worlds, pictures): the screenshots wait for it.
     pub fn busy(&self) -> bool {
-        self.list.running() || self.pictures.as_ref().is_some_and(|p| p.loading())
+        self.list.running() || self.pictures.as_ref().is_some_and(|p| p.loading()) || self.share_prepare.running()
     }
 
-    /// Opens a world as if its card was clicked (screenshots).
+    /// Opens a world as if its card was clicked (screenshots): out of its card's picture when it was drawn.
     pub fn open_world(&mut self, ctx: &egui::Context, id: &str, origin: Rect) {
+        let origin = self.card_thumbs.get(id).copied().unwrap_or(origin);
         self.open(ctx, id.to_string(), origin);
     }
 
@@ -87,7 +158,26 @@ impl State {
     /// Shows a picture large (screenshots).
     pub fn view_picture(&mut self, index: usize) {
         if let Some(o) = self.open.as_mut() {
-            o.viewer = Some(index);
+            o.show_large(index);
+        }
+    }
+
+    /// Starts closing the open world's page back into its card (screenshots).
+    /// The world whose page is open (screenshots).
+    pub fn open_world_id(&self) -> Option<&str> {
+        self.open.as_ref().map(|o| o.id.as_str())
+    }
+
+    pub fn close_world(&mut self) {
+        if let Some(o) = self.open.as_mut() {
+            o.closing = true;
+        }
+    }
+
+    /// Starts closing the large picture back into its tile (screenshots).
+    pub fn close_picture(&mut self) {
+        if let Some(o) = self.open.as_mut() {
+            o.viewer_closing = true;
         }
     }
 
@@ -105,7 +195,20 @@ impl State {
             selected: BTreeSet::new(),
             handed: None,
             viewer: None,
+            viewer_closing: false,
+            viewer_serial: 0,
+            tiles: HashMap::new(),
+            again: None,
         });
+    }
+}
+
+impl Open {
+    /// Shows picture `index` large, growing out of its tile.
+    fn show_large(&mut self, index: usize) {
+        self.viewer = Some(index);
+        self.viewer_closing = false;
+        self.viewer_serial += 1;
     }
 }
 
@@ -195,6 +298,27 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
     if state.open.is_some() {
         detail(ui, cx, state, page);
     }
+    if let Some(mut entries) = state.share_prepare.take() {
+        if !entries.is_empty() {
+            let first = entries.remove(0);
+            let mut d = super::sharing::Dialog::new(&ctx, first, !state.share_public);
+            if let Some((origin, radius)) = state.share_origin.take() {
+                d = d.from(origin, radius);
+            }
+            d.extra = entries;
+            if let Some(fixture) = state.stage_share.take() {
+                d.fixture(fixture);
+            } else if state.share_public {
+                d.public(&ctx, if cx.snap.settings.development { Server::Development } else { Server::Production });
+            }
+            state.sharing = Some(d);
+        }
+    }
+    if let Some(d) = state.sharing.as_mut() {
+        if d.show(ui, cx) {
+            state.sharing = None;
+        }
+    }
 }
 
 /// The grid of worlds and its heading; returns the world clicked and its card's picture.
@@ -222,6 +346,8 @@ fn grid(ui: &mut Ui, cx: &mut Cx, state: &mut State, page: Rect, shown: f32, int
         _ => Vec::new(),
     };
     let mut clicked = None;
+    let mut share_clicked: Option<(Vec<PathBuf>, bool, Rect)> = None;
+    let mut menu_picked: Option<(CardAct, Arc<VisitedWorld>)> = None;
     let from = orbiters_ui::blur::next_shape(ui);
     let mut gu = ui.new_child(UiBuilder::new().max_rect(page).id_salt("worlds-grid"));
     gu.multiply_opacity(shown);
@@ -235,7 +361,7 @@ fn grid(ui: &mut Ui, cx: &mut Cx, state: &mut State, page: Rect, shown: f32, int
             }
             let cols = (((w + 16.0) / (270.0 + 16.0)).floor() as usize).max(1);
             let card_w = (w - 16.0 * (cols - 1) as f32) / cols as f32;
-            let card_h = card_w * 9.0 / 16.0 + 96.0;
+            let card_h = card_w * 9.0 / 16.0 + 146.0;
             let count = if state.worlds.is_none() { 6 } else { filtered.len() };
             let rows = count.div_ceil(cols);
             let (area, _) = ui.allocate_exact_size(vec2(w, rows as f32 * (card_h + 16.0) - 16.0), Sense::hover());
@@ -255,12 +381,55 @@ fn grid(ui: &mut Ui, cx: &mut Cx, state: &mut State, page: Rect, shown: f32, int
                 let tex = cover(world, info.as_ref(), THUMB_WIDTH).and_then(|p| state.pictures.as_mut()?.get(&ctx, &p));
                 let open_here = state.open.as_ref().is_some_and(|o| o.id == world.id);
                 let shared = mine_of(&mine, &world.id).is_some_and(|m| m.preview.is_some() || !m.pictures.is_empty());
-                if let Some(cover_r) = world_card(ui, cx, i, world, r, tex.as_ref(), info.as_ref(), shared, if open_here { 0.0 } else { 1.0 }, interactive) {
+                state.card_thumbs.insert(world.id.clone(), Rect::from_min_size(r.min, vec2(r.width(), r.width() * 9.0 / 16.0)));
+                state.card_homes.insert(world.id.clone(), r);
+                let (pressed, resp) = world_card(ui, cx, i, world, r, tex.as_ref(), info.as_ref(), shared, if open_here { 0.0 } else { 1.0 }, interactive);
+                if let Some(cover_r) = pressed {
                     clicked = Some((world.id.clone(), cover_r));
+                }
+                // A right press: what the world offers.
+                let sharable = (world.reconstructed() > 0 || !world.shots.is_empty()) && !state.share_prepare.running();
+                let acts = if interactive && !open_here { card_acts(world, sharable) } else { Vec::new() };
+                let items: Vec<orbiters_ui::popup::Item> = acts.iter().map(|(i, _)| *i).collect();
+                if let Some(k) = orbiters_ui::popup::context_menu(ui, &resp, "world-card", &items) {
+                    let thumb = Rect::from_min_size(r.min, vec2(r.width(), r.width() * 9.0 / 16.0));
+                    match acts[k].1 {
+                        CardAct::Open => clicked = Some((world.id.clone(), thumb)),
+                        CardAct::Share(public) => share_clicked = Some((share_paths(world), public, thumb)),
+                        act => menu_picked = Some((act, world.clone())),
+                    }
+                }
+                // Faded in once the grid takes presses again (after a world's page landed back on its card).
+                let pill = anim::toggle(&ctx, Id::unique(("world-share-shown", &world.id)), !open_here && interactive, Spring::SOFT);
+                if pill > 0.01 && (world.reconstructed() > 0 || !world.shots.is_empty()) {
+                    let mut pu = ui.new_child(UiBuilder::new().max_rect(r).id_salt(("world-share-pill", &world.id)));
+                    pu.multiply_opacity(pill);
+                    if let Some(public) = super::sharing::morph(
+                        &mut pu,
+                        Id::unique(("world-share", &world.id)),
+                        pos2(r.right() - 12.0, r.bottom() - 50.0),
+                        r.width() - 24.0,
+                        !state.share_prepare.running() && interactive && !open_here,
+                    ) {
+                        share_clicked = Some((share_paths(world), public, Rect::from_min_size(r.min, vec2(r.width(), r.width() * 9.0 / 16.0))));
+                    }
                 }
             }
         });
     });
+    if let Some((act, world)) = menu_picked {
+        card_act(&ctx, cx, act, &world);
+    }
+    if let Some((paths, public, origin)) = share_clicked {
+        state.prepare_share(
+            &ctx,
+            cx.snap.settings.sessions_dir.clone(),
+            paths,
+            public,
+            if cx.snap.settings.development { Server::Development } else { Server::Production },
+            Some((origin, 20.0)),
+        );
+    }
     super::under_top(&gu, cx, "worlds", from, grid_top);
 
     let sub = match &state.worlds {
@@ -283,10 +452,17 @@ fn grid(ui: &mut Ui, cx: &mut Cx, state: &mut State, page: Rect, shown: f32, int
         tu.multiply_opacity(head_a);
         super::heading(&tu, head_r, "VRChat", "Visited worlds", Some(&sub));
     }
-    if interactive {
-        let mut su = hu.new_child(UiBuilder::new().max_rect(search_r).id_salt("worlds-search"));
+    // The search and the folder fade back in once the grid takes presses again.
+    let actions = anim::toggle(&ctx, Id::unique("worlds-head-actions"), interactive, Spring::SOFT);
+    if actions > 0.01 {
+        let mut au = hu.new_child(UiBuilder::new().max_rect(page).id_salt("worlds-head-actions"));
+        au.multiply_opacity(actions);
+        if !interactive {
+            au.disable();
+        }
+        let mut su = au.new_child(UiBuilder::new().max_rect(search_r).id_salt("worlds-search"));
         widgets::search_field(&mut su, "worlds-search", &mut state.query, "Search worlds", 224.0);
-        if IconButton::new(icons::IMAGES, "Open VRChat's pictures folder").show_at(&mut hu, folder_r).clicked() {
+        if IconButton::new(icons::IMAGES, "Open VRChat's pictures folder").show_at(&mut au, folder_r).clicked() {
             if let Some(dir) = visited::screenshot_dirs().into_iter().next() {
                 let r = controller::open_path(&dir);
                 cx.run(&ctx, r);
@@ -294,6 +470,80 @@ fn grid(ui: &mut Ui, cx: &mut Cx, state: &mut State, page: Rect, shown: f32, int
         }
     }
     clicked
+}
+
+/// What a card's share offers: its first 3D capture, else its pictures.
+fn share_paths(world: &VisitedWorld) -> Vec<PathBuf> {
+    world
+        .sessions
+        .iter()
+        .find(|s| s.reconstruction.is_some())
+        .map(|s| vec![s.dir.clone()])
+        .unwrap_or_else(|| world.shots.iter().map(|s| s.path.clone()).collect())
+}
+
+/// What a card's right-click menu does.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum CardAct {
+    /// The world's page (as a press on the card).
+    Open,
+    OpenVrchat,
+    /// VRChat's page that launches the world.
+    Launch,
+    CopyId,
+    CopyLink,
+    /// Share to … (`false`) or Share publicly, as the card's share pill.
+    Share(bool),
+    /// The folder of its newest picture.
+    Pictures,
+}
+
+/// The right-click menu of `world`'s card; `sharable`: it has a 3D capture or pictures and no share is being prepared.
+fn card_acts(world: &VisitedWorld, sharable: bool) -> Vec<(orbiters_ui::popup::Item<'static>, CardAct)> {
+    use orbiters_ui::popup::Item;
+    let mut acts = vec![
+        (Item::new("Open the world's page").icon(icons::ARROW_RIGHT), CardAct::Open),
+        (Item::new("Open on VRChat").icon(icons::ARROW_SQUARE_OUT), CardAct::OpenVrchat),
+        (Item::new("Launch in VRChat").icon(icons::PLAY), CardAct::Launch),
+        (Item::new("Copy the world's ID").icon(icons::COPY), CardAct::CopyId),
+        (Item::new("Copy its VRChat link").icon(icons::LINK_SIMPLE), CardAct::CopyLink),
+    ];
+    if sharable {
+        acts.push((Item::new("Share to…").icon(icons::PAPER_PLANE_TILT), CardAct::Share(false)));
+        acts.push((Item::new("Share publicly").icon(icons::GLOBE), CardAct::Share(true)));
+    }
+    if !world.shots.is_empty() {
+        acts.push((Item::new("Show its pictures in Explorer").icon(icons::FOLDER_OPEN), CardAct::Pictures));
+    }
+    acts
+}
+
+fn card_act(ctx: &egui::Context, cx: &mut Cx, act: CardAct, world: &VisitedWorld) {
+    match act {
+        CardAct::OpenVrchat => {
+            let r = controller::open_url(&vrchat_url(&world.id));
+            cx.run(ctx, r);
+        }
+        CardAct::Launch => {
+            let r = controller::open_url(&format!("https://vrchat.com/home/launch?worldId={}", world.id));
+            cx.run(ctx, r);
+        }
+        CardAct::CopyId => {
+            ctx.copy_text(world.id.clone());
+            cx.toasts.push(ctx, toast::Kind::Success, "World ID copied");
+        }
+        CardAct::CopyLink => {
+            ctx.copy_text(vrchat_url(&world.id));
+            cx.toasts.push(ctx, toast::Kind::Success, "Link copied");
+        }
+        CardAct::Pictures => {
+            if let Some(dir) = world.shots.first().and_then(|s| s.path.parent()) {
+                let r = controller::open_path(dir);
+                cx.run(ctx, r);
+            }
+        }
+        CardAct::Open | CardAct::Share(_) => {}
+    }
 }
 
 fn plural(n: usize) -> &'static str {
@@ -304,7 +554,7 @@ fn plural(n: usize) -> &'static str {
     }
 }
 
-/// One card; returns its picture's rect when clicked.
+/// One card; returns its picture's rect when clicked, and its response (its right-click menu).
 #[allow(clippy::too_many_arguments)]
 fn world_card(
     ui: &mut Ui,
@@ -317,10 +567,11 @@ fn world_card(
     shared: bool,
     shown: f32,
     interactive: bool,
-) -> Option<Rect> {
+) -> (Option<Rect>, egui::Response) {
     let ctx = ui.ctx().clone();
     let id = Id::unique(("world-card", &w.id));
-    let resp = ui.interact(rect, id, if interactive { Sense::click() } else { Sense::hover() });
+    let body = Rect::from_min_max(rect.min, pos2(rect.right(), rect.bottom() - 52.0));
+    let resp = ui.interact(body, id, if interactive { Sense::click() } else { Sense::hover() });
     let resp = if interactive { resp.on_hover_cursor(CursorIcon::PointingHand) } else { resp };
     // Entrance: up and in, 35 ms apart.
     let delay = 0.05 + i.min(12) as f64 * 0.035;
@@ -331,7 +582,9 @@ fn world_card(
     let enter = anim::spring_from(&ctx, id.with(("enter", cx.visit)), [0.0], [if elapsed >= delay { 1.0 } else { 0.0 }], Spring::SOFT)[0];
     let hover = anim::toggle(&ctx, id.with("hover"), resp.hovered() && interactive, Spring::SOFT);
     let press = anim::toggle(&ctx, id.with("press"), resp.is_pointer_button_down_on() && interactive, Spring::SNAPPY);
-    let scale = (0.97 + 0.03 * enter) * (1.0 - 0.03 * press);
+    // A share window landing back on its picture bounces it.
+    let landing = morph::bounce(&ctx, Rect::from_min_size(rect.min, vec2(rect.width(), rect.width() * 9.0 / 16.0)));
+    let scale = (0.97 + 0.03 * enter) * (1.0 - 0.03 * press) * landing;
     let r = Rect::from_center_size(rect.center() + vec2(0.0, 20.0 * (1.0 - enter) - 4.0 * hover), rect.size() * scale);
     let mut p = ui.painter().clone();
     p.multiply_opacity(enter.clamp(0.0, 1.0) * shown);
@@ -395,7 +648,7 @@ fn world_card(
         }
         px += pw + 6.0;
     }
-    resp.clicked().then_some(thumb)
+    (resp.clicked().then_some(thumb), resp)
 }
 
 fn empty_state(ui: &mut Ui, cx: &Cx, searching: bool, height: f32) {
@@ -453,15 +706,21 @@ impl Sharing<'_> {
 
 fn detail(ui: &mut Ui, cx: &mut Cx, state: &mut State, page: Rect) {
     let ctx = ui.ctx().clone();
+    // The world's card where the grid last drew it: the page's picture flies out of its picture and back.
+    let home = state.open.as_ref().and_then(|o| state.card_homes.get(&o.id)).copied();
     let Some(o) = state.open.as_mut() else { return };
+    if let Some(h) = home {
+        o.origin = Rect::from_min_size(h.min, vec2(h.width(), h.width() * 9.0 / 16.0));
+    }
     let Some(world) = state.worlds.as_ref().and_then(|l| l.iter().find(|w| w.id == o.id)).cloned() else {
         state.open = None;
         return;
     };
     let id = Id::unique(("world-page", o.serial));
-    let t = anim::spring_from(&ctx, id.with("flight"), [0.0], [if o.closing { 0.0 } else { 1.0 }], Spring::MORPH)[0];
+    let travel = morph::travel(&ctx, id.with("flight"), !o.closing, Spring::MORPH);
+    let t = travel.t;
     o.progress = t;
-    if o.closing && t < 0.02 {
+    if travel.done {
         state.open = None;
         if let Some(p) = state.pictures.as_mut() {
             p.forget_large();
@@ -496,8 +755,8 @@ fn detail(ui: &mut Ui, cx: &mut Cx, state: &mut State, page: Rect) {
     let mut view: Option<usize> = None;
     let mut select_new = false;
     let mut clear = false;
-    let mut share_preview: Option<PathBuf> = None;
-    let mut reconstruct: Option<PathBuf> = None;
+    let mut share_preview: Option<(PathBuf, bool, Rect)> = None;
+    let mut reconstruct: Option<(PathBuf, Rect)> = None;
     let selecting = !o.selected.is_empty();
 
     let from = orbiters_ui::blur::next_shape(ui);
@@ -509,18 +768,8 @@ fn detail(ui: &mut Ui, cx: &mut Cx, state: &mut State, page: Rect) {
                 ui.add_space(cx.top + 8.0);
                 let w = ui.available_width();
 
-                // Back.
-                let (back_row, _) = ui.allocate_exact_size(vec2(w, 32.0), Sense::hover());
-                {
-                    let mut bu = ui.new_child(UiBuilder::new().max_rect(back_row).id_salt("back"));
-                    bu.multiply_opacity(content);
-                    let b = Button::new("Visited worlds").icon(icons::ARROW_LEFT).variant(Variant::Ghost).size(Size::Sm);
-                    let bw = b.desired_width(&bu);
-                    if b.show_at(&mut bu, Rect::from_min_size(back_row.min, vec2(bw, 32.0))).clicked() {
-                        close = true;
-                    }
-                }
-                ui.add_space(12.0);
+                // The back button's place at rest: it floats there, over the scrolling page ([`back_rect`]).
+                ui.add_space(BACK_H + 12.0);
 
                 // The hero flies in from the card.
                 let hero_h = (w * 0.36).clamp(220.0, 340.0);
@@ -539,7 +788,18 @@ fn detail(ui: &mut Ui, cx: &mut Cx, state: &mut State, page: Rect) {
                     ),
                     None => (None, None),
                 };
-                hero(ui, cx, &world, info.as_ref(), flight, small.as_ref(), large.as_ref(), t, content);
+                // Near its card, the card itself rides under the flying picture, which fades out over it as it lands
+                // (in as it leaves); landed, the card bounces.
+                if let Some(home) = home.filter(|_| morph::source_alpha(t) > 0.001) {
+                    let ride = morph::ride(home, o.origin, flight, travel.landing);
+                    let shared = sharing.mine.is_some_and(|m| m.preview.is_some() || !m.pictures.is_empty());
+                    let mut ru = ui.new_child(UiBuilder::new().max_rect(home).id_salt("riding-card"));
+                    ru.multiply_opacity(morph::source_alpha(t));
+                    ru.with_visual_transform(ride, |ru| world_card(ru, cx, 0, &world, home, small.as_ref(), info.as_ref(), shared, 1.0, false));
+                }
+                let mut hu = ui.new_child(UiBuilder::new().max_rect(ui.max_rect()).id_salt("hero"));
+                hu.multiply_opacity(morph::shape_alpha(t));
+                hero(&mut hu, cx, &world, info.as_ref(), flight, small.as_ref(), large.as_ref(), t, content);
                 ui.add_space(20.0);
 
                 let mut cu = ui.new_child(UiBuilder::new().max_rect(ui.available_rect_before_wrap()).id_salt("world-body"));
@@ -624,9 +884,13 @@ fn detail(ui: &mut Ui, cx: &mut Cx, state: &mut State, page: Rect) {
                         continue;
                     }
                     let tex = state.pictures.as_mut().and_then(|p| if s.has_thumbnail { p.get(&ctx, &Picture::Session(s.dir.clone())) } else { None });
-                    match session_row(&mut cu, cx, r.translate(vec2(0.0, dy)), s, tex.as_ref(), &sharing) {
-                        Some(RowAction::Share) => share_preview = Some(s.dir.clone()),
-                        Some(RowAction::Reconstruct) => reconstruct = Some(s.dir.clone()),
+                    let row = r.translate(vec2(0.0, dy));
+                    match session_row(&mut cu, cx, row, s, tex.as_ref(), &sharing) {
+                        Some(RowAction::Share(public)) => share_preview = Some((s.dir.clone(), public, row_thumb(row))),
+                        Some(RowAction::Reconstruct(origin)) => reconstruct = Some((s.dir.clone(), origin)),
+                        Some(RowAction::Stop) => {
+                            cx.ctl.stop_reconstruction();
+                        }
                         Some(RowAction::Unqueue) => cx.ctl.unqueue_reconstruction(s.dir.clone()),
                         None => {}
                     }
@@ -685,6 +949,11 @@ fn detail(ui: &mut Ui, cx: &mut Cx, state: &mut State, page: Rect) {
                             sending: handed || sharing.sending(&shot.path).is_some(),
                             selectable: sharing.blocked.is_none(),
                         };
+                        o.tiles.insert(i, r);
+                        // The large picture stands for its tile while it is out (it lands exactly on it).
+                        if o.viewer == Some(i) {
+                            continue;
+                        }
                         match picture_tile(&mut cu, r, shot, tex.as_ref(), look, i) {
                             Some(TileAction::Toggle) => toggle = Some(shot.path.clone()),
                             Some(TileAction::View) => view = Some(i),
@@ -697,6 +966,20 @@ fn detail(ui: &mut Ui, cx: &mut Cx, state: &mut State, page: Rect) {
     );
     // Its own band: while the card flies open or closed, the grid draws one in the same frame.
     super::under_top(&du, cx, "world", from, page.top() + cx.top);
+
+    // Back: over the page wherever it is scrolled, at the place it has at rest, and under whatever the window draws over
+    // the page (the picture viewer, a share's window, toasts: they are layers above this one). Filled and lifted off what
+    // passes under it, a photo or the page's own text; a ghost button would vanish on photos.
+    {
+        let mut bu = du.new_child(UiBuilder::new().max_rect(page).id_salt("back"));
+        bu.multiply_opacity(content);
+        let b = Button::new("Visited worlds").icon(icons::ARROW_LEFT).variant(Variant::Glass).size(Size::Sm);
+        let r = back_rect(page, cx.top, b.desired_width(&bu));
+        orbiters_ui::paint::shadow(bu.painter(), r, BACK_H * 0.5, vec2(0.0, 4.0), 16.0, 0.0, theme::black(0.4));
+        if b.show_at(&mut bu, r).clicked() {
+            close = true;
+        }
+    }
 
     // Actions gathered while drawing.
     let Some(o) = state.open.as_mut() else { return };
@@ -712,25 +995,34 @@ fn detail(ui: &mut Ui, cx: &mut Cx, state: &mut State, page: Rect) {
         o.selected.clear();
     }
     if let Some(i) = view {
-        o.viewer = Some(i);
+        o.show_large(i);
     }
-    if let Some(dir) = reconstruct {
-        // Waiting its turn: the service says so.
-        if cx.snap.reconstruction.is_none() && !cx.snap.is_capturing() {
-            cx.toasts.push(&ctx, toast::Kind::Info, "Reconstruction started: follow it here or in Sessions.");
-        }
-        cx.ctl.reconstruct(dir);
+    if let Some((dir, origin)) = reconstruct {
+        o.again = super::reconstruct_again::press(&ctx, cx, &dir, &world.name, None, origin);
     }
-    if let Some(dir) = share_preview {
-        cx.ctl.upload_preview(world.id.clone(), world.name.clone(), dir);
+    if let Some((dir, public, origin)) = share_preview {
+        state.share_public = public;
+        state.share_origin = Some((origin, 10.0));
+        let root = cx.snap.settings.sessions_dir.clone();
+        let server = if cx.snap.settings.development { Server::Development } else { Server::Production };
+        state.share_prepare = Job::spawn(&ctx, move || {
+            crate::controller::shares::local_entries(&root, server).into_iter().filter(|e| e.local.as_ref().is_some_and(|l| l.path() == dir)).collect()
+        });
     }
 
     // The bar of the selection, over the page's bottom.
     let bar = action_bar(&ctx, o, &world, &sharing, page);
     if let Some(BarAction::Share) = bar {
         let paths: Vec<PathBuf> = o.selected.iter().cloned().collect();
-        cx.ctl.upload_pictures(world.id.clone(), world.name.clone(), paths);
-        o.handed = Some((anim::time(&ctx), std::mem::take(&mut o.selected)));
+        state.share_public = false;
+        let root = cx.snap.settings.sessions_dir.clone();
+        let server = if cx.snap.settings.development { Server::Development } else { Server::Production };
+        state.share_prepare = Job::spawn(&ctx, move || {
+            crate::controller::shares::local_entries(&root, server)
+                .into_iter()
+                .filter(|e| e.local.as_ref().is_some_and(|l| paths.iter().any(|p| p == l.path())))
+                .collect()
+        });
     }
     if let Some(BarAction::SignIn) = bar {
         if cx.snap.account.state == crate::state::AccountState::SigningIn {
@@ -743,11 +1035,19 @@ fn detail(ui: &mut Ui, cx: &mut Cx, state: &mut State, page: Rect) {
         o.selected.clear();
     }
 
+    // Reconstruct again's question, over the page.
+    let asking = o.again.is_some();
+    if let Some(a) = o.again.as_mut() {
+        if !a.show(&ctx, cx) {
+            o.again = None;
+        }
+    }
+
     if o.viewer.is_some() {
         let fixed: HashSet<PathBuf> = world.shots.iter().filter(|s| sharing.shared(s) || sharing.sending(&s.path).is_some()).map(|s| s.path.clone()).collect();
         let pickable = sharing.blocked.is_none();
         viewer(&ctx, cx, state, &world, &fixed, pickable);
-    } else if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+    } else if !asking && ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
         if let Some(o) = state.open.as_mut() {
             if o.selected.is_empty() {
                 close = true;
@@ -894,16 +1194,50 @@ fn note(ui: &Ui, rect: Rect, glyph: &str, title: &str, text: &str) {
 }
 
 enum RowAction {
-    Share,
-    Reconstruct,
+    Share(bool),
+    /// Reconstruct or Reconstruct again, pressed in this rect.
+    Reconstruct(Rect),
+    Stop,
     Unqueue,
+}
+
+/// The floating back button's height.
+const BACK_H: f32 = 32.0;
+
+#[cfg(test)]
+mod back_tests {
+    use super::*;
+
+    /// Wherever the window is, the button stays on the page's first line under the title bar, whose height the page
+    /// leaves empty at rest; and its place is the page's, not the scrolled content's (nothing here reads a scroll).
+    #[test]
+    fn the_back_button_floats_over_the_pages_first_line() {
+        for (w, h) in [(1040.0, 700.0), (1280.0, 820.0), (3840.0, 2160.0)] {
+            let page = Rect::from_min_size(pos2(0.0, 0.0), vec2(w, h));
+            let r = back_rect(page, 40.0, 150.0);
+            assert_eq!((r.left(), r.top(), r.height()), (32.0, 48.0, BACK_H));
+            assert!(page.contains_rect(r));
+        }
+    }
+}
+
+/// Where the world page's back button floats, `width` wide: the top left of the page under the title bar, where it would
+/// rest as the page's first line. That line stays empty in the scrolling content, so that at rest the button covers none
+/// of it, and everything scrolls on under it after that.
+fn back_rect(page: Rect, top: f32, width: f32) -> Rect {
+    Rect::from_min_size(pos2(page.left() + 32.0, page.top() + top + 8.0), vec2(width, BACK_H))
+}
+
+/// Where a session row's thumbnail sits.
+fn row_thumb(rect: Rect) -> Rect {
+    Rect::from_min_size(pos2(rect.left() + 10.0, rect.top() + 10.0), vec2((rect.height() - 20.0) * 16.0 / 9.0, rect.height() - 20.0))
 }
 
 /// A session recorded in the world: its thumbnail, when, and what can be done with it.
 fn session_row(ui: &mut Ui, cx: &Cx, rect: Rect, s: &SessionSummary, tex: Option<&TextureHandle>, sharing: &Sharing) -> Option<RowAction> {
     let p = ui.painter().clone();
     widgets::frame(&p, rect, 18.0, theme::surface());
-    let thumb = Rect::from_min_size(pos2(rect.left() + 10.0, rect.top() + 10.0), vec2((rect.height() - 20.0) * 16.0 / 9.0, rect.height() - 20.0));
+    let thumb = row_thumb(rect);
     thumb_shape(&p, thumb, theme::radius(10.0), tex, 1.0);
     let x = thumb.right() + 16.0;
     let title = super::local_time(&s.manifest.created_utc);
@@ -936,7 +1270,9 @@ fn session_row(ui: &mut Ui, cx: &Cx, rect: Rect, s: &SessionSummary, tex: Option
     if upload.is_some_and(|u| matches!(u.state, UploadState::Done { .. })) {
         line.push_str(" · shared");
     }
-    let right_w = 196.0;
+    let offer = super::reconstruct_again::offer(&super::reconstruct_again::Facts::of_session(s), cx.snap);
+    use super::reconstruct_again::Offer;
+    let right_w = 330.0;
     widgets::text_truncated(&p, pos2(x, rect.top() + 46.0), Align2::LEFT_CENTER, &Txt::new(line, 12.0).color(theme::FG_3), rect.right() - x - right_w - 16.0);
     widgets::text_truncated(
         &p,
@@ -952,45 +1288,74 @@ fn session_row(ui: &mut Ui, cx: &Cx, rect: Rect, s: &SessionSummary, tex: Option
         p.rect_filled(Rect::from_min_size(bar.min, vec2(bar.width() * f, 3.0)), theme::radius(1.5), theme::ACCENT);
     }
 
-    let b = Rect::from_min_size(pos2(rect.right() - 16.0 - right_w + 16.0, rect.center().y - 20.0), vec2(right_w - 16.0, 40.0));
-    if job.is_some() || upload.is_some_and(|u| u.running()) {
+    if let (Offer::Running { fraction, .. }, Some(j)) = (offer, job) {
+        let bar = Rect::from_min_size(pos2(x, rect.bottom() - 6.0), vec2(rect.right() - x - right_w - 16.0, 3.0));
+        let f = anim::spring_from(ui.ctx(), Id::unique(("row-reconstruct", &j.session_dir)), [0.0], [fraction], Spring::SOFT)[0].clamp(0.0, 1.0);
+        p.rect_filled(bar, theme::radius(1.5), theme::white(0.08));
+        p.rect_filled(Rect::from_min_size(bar.min, vec2(bar.width() * f, 3.0)), theme::radius(1.5), theme::ACCENT);
+    }
+    let b = Rect::from_min_size(pos2(rect.right() - 16.0 - 314.0, rect.center().y - 20.0), vec2(314.0, 40.0));
+    if upload.is_some_and(|u| u.running()) {
         return None;
     }
     // Every row has the same buttons in the same place: the session tells them apart.
     let salt = ("session-row", &s.dir);
-    if waiting {
-        if Button::new("Waiting · cancel").icon(icons::X).variant(Variant::Secondary).width(b.width()).id_salt(salt).show_at(ui, b).clicked() {
-            return Some(RowAction::Unqueue);
+    match offer {
+        Offer::Running { .. } => {
+            if Button::new(offer.label()).icon(icons::X).variant(Variant::Secondary).hint("Stops it: its 3D view stays as it is").width(b.width()).id_salt(salt).show_at(ui, b).clicked() {
+                return Some(RowAction::Stop);
+            }
         }
-    } else if s.reconstruction.is_some() {
-        let replace = sharing.mine.is_some_and(|m| m.preview.is_some());
-        let mut button = Button::new(if replace { "Replace 3D preview" } else { "Share in 3D" })
-            .icon(icons::CLOUD_ARROW_UP)
-            .variant(if replace { Variant::Secondary } else { Variant::Primary })
-            .width(b.width());
-        let hint = if let Some(h) = sharing.blocked {
-            Some(h)
-        } else if !sharing.account {
-            Some("Sign in to Orbiters in Settings to share")
-        } else {
-            None
-        };
-        if let Some(h) = hint {
-            button = button.enabled(false).hint(h);
-        } else {
-            button = button.hint("Public on the Map explorer: everyone in the capture becomes visible to everyone");
+        Offer::Waiting { hint } => {
+            if Button::new(offer.label()).icon(icons::X).variant(Variant::Secondary).hint(hint).width(b.width()).id_salt(salt).show_at(ui, b).clicked() {
+                return Some(RowAction::Unqueue);
+            }
         }
-        if button.id_salt(salt).show_at(ui, b).clicked() {
-            return Some(RowAction::Share);
+        Offer::Start { again: false } | Offer::Blocked { again: false, .. } => {
+            let blocked = match offer {
+                Offer::Blocked { reason, .. } => Some(reason),
+                _ => None,
+            };
+            let mut button = Button::new(offer.label()).icon(icons::MAGIC_WAND).variant(Variant::Secondary).enabled(blocked.is_none()).width(b.width());
+            if let Some(h) = blocked {
+                button = button.hint(h);
+            }
+            if button.id_salt(salt).show_at(ui, b).clicked() && blocked.is_none() {
+                return Some(RowAction::Reconstruct(b));
+            }
         }
-    } else {
-        let blocked = (st.depth_frames == 0).then_some("This session has no depth frames: record with the capture kit's depth frames on");
-        let mut button = Button::new("Reconstruct").icon(icons::MAGIC_WAND).variant(Variant::Secondary).enabled(blocked.is_none()).width(b.width());
-        if let Some(h) = blocked {
-            button = button.hint(h);
-        }
-        if button.id_salt(salt).show_at(ui, b).clicked() {
-            return Some(RowAction::Reconstruct);
+        Offer::Start { again: true } | Offer::Blocked { again: true, .. } => {
+            let blocked = match offer {
+                Offer::Blocked { reason, .. } => Some(reason),
+                _ => None,
+            };
+            let hint = blocked.unwrap_or("Trains a new 3D view from its frames: it replaces this one once it is done");
+            // Beside Share, in the room Share and Share publicly stretch into: it steps aside while they are out.
+            let share_id = Id::unique(("world-session-share", &s.dir));
+            let out = ui.ctx().data(|d| d.get_temp::<bool>(share_id)).unwrap_or(false);
+            let shown = anim::toggle(ui.ctx(), share_id.with("again-shown"), !out, Spring::SNAPPY).clamp(0.0, 1.0);
+            let again = Button::new(offer.label())
+                .icon(icons::MAGIC_WAND)
+                .variant(Variant::Secondary)
+                .enabled(blocked.is_none())
+                .hint(hint)
+                .id_salt(("session-row-again", &s.dir));
+            let share_w = Button::new("Share").icon(icons::CLOUD_ARROW_UP).desired_width(ui);
+            let again_w = again.desired_width(ui);
+            let at = Rect::from_min_size(pos2(b.right() - share_w - 8.0 - again_w, b.top()), vec2(again_w, 40.0));
+            if shown > 0.01 {
+                let mut au = ui.new_child(UiBuilder::new().max_rect(at).id_salt(("session-row-again-at", &s.dir)));
+                au.multiply_opacity(shown);
+                if out {
+                    au.disable();
+                }
+                if again.show_at(&mut au, at).clicked() && blocked.is_none() && !out {
+                    return Some(RowAction::Reconstruct(at));
+                }
+            }
+            if let Some(public) = super::sharing::morph(ui, share_id, pos2(b.right(), b.top()), 304.0, sharing.account) {
+                return Some(RowAction::Share(public));
+            }
         }
     }
     None
@@ -1181,8 +1546,20 @@ fn viewer(ctx: &egui::Context, cx: &mut Cx, state: &mut State, world: &VisitedWo
     }
     let index = index.min(count - 1);
     let shot = &world.shots[index];
-    let id = Id::unique(("picture-viewer", o.serial));
-    let k = anim::spring_from(ctx, id.with("in"), [0.0], [1.0], Spring::SNAPPY)[0];
+    let id = Id::unique(("picture-viewer", o.serial, o.viewer_serial));
+    // The picture flies out of its tile and back (exactly onto the tile's crop, which then bounces).
+    let closing = o.viewer_closing;
+    let travel = morph::travel(ctx, id, !closing, Spring::EXPAND);
+    if travel.done {
+        o.viewer = None;
+        if let Some(p) = state.pictures.as_mut() {
+            p.forget_large();
+        }
+        return;
+    }
+    let t = travel.t;
+    let k = orbiters_ui::viewer::smoothstep(0.5, 0.95, t);
+    let tile = o.tiles.get(&index).copied();
     let window = ctx.content_rect();
     let area = Rect::from_min_max(pos2(window.left(), window.top() + crate::app::TITLE_H), window.max);
     let pictures = state.pictures.as_mut();
@@ -1197,29 +1574,42 @@ fn viewer(ctx: &egui::Context, cx: &mut Cx, state: &mut State, world: &VisitedWo
     let mut close = false;
     let mut toggle = false;
     let selected = o.selected.contains(&shot.path);
-    egui::Area::new(id).order(Order::Foreground).fixed_pos(area.min).show(ctx, |ui| {
+    // While it closes, the page takes presses again.
+    egui::Area::new(id).order(Order::Foreground).fixed_pos(area.min).interactable(!closing).show(ctx, |ui| {
         let (_, backdrop) = ui.allocate_exact_size(area.size(), Sense::click());
         let p = ui.painter().clone();
-        p.rect_filled(area, 0.0, theme::alpha(theme::INK_950, 0.92 * k));
+        p.rect_filled(area, 0.0, theme::alpha(theme::INK_950, 0.92 * morph::smoothstep(0.05, 0.6, t)));
         let stage = area.shrink2(vec2(88.0, 72.0));
         let aspect = if shot.info.height > 0 { shot.info.width as f32 / shot.info.height as f32 } else { 16.0 / 9.0 };
         let (w, h) = if stage.width() / stage.height() > aspect { (stage.height() * aspect, stage.height()) } else { (stage.width(), stage.width() / aspect) };
-        let pic = Rect::from_center_size(stage.center(), vec2(w, h) * (0.96 + 0.04 * k));
+        let target = Rect::from_center_size(stage.center(), vec2(w, h));
+        // From its tile (or, scrolled away, a little smaller in the middle, fading), its crop opening to the whole picture.
+        let from = tile.map(|r| morph::scaled(r, travel.landing)).unwrap_or(Rect::from_center_size(target.center(), target.size() * 0.9));
+        let pic = orbiters_ui::viewer::lerp_rect(from, target, t);
         let mut pp = p.clone();
-        pp.multiply_opacity(k.clamp(0.0, 1.0));
+        pp.multiply_opacity(if tile.is_some() { 1.0 } else { morph::shape_alpha(t) });
+        let radius = theme::TILE_RADIUS + (16.0 - theme::TILE_RADIUS) * t.clamp(0.0, 1.0);
         match large.as_ref().or(small.as_ref()) {
-            Some(t) => {
-                paint::squircle_texture(&pp, pic, [theme::squircle(16.0); 4], t.id(), Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE)
+            Some(tex) => {
+                let size = tex.size_vec2();
+                let whole = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
+                let uv = orbiters_ui::viewer::lerp_rect(cover_uv(from, size.x / size.y.max(1.0), 1.0), whole, t.clamp(0.0, 1.0));
+                paint::squircle_texture(&pp, pic, [theme::squircle(radius); 4], tex.id(), uv, Color32::WHITE)
             }
-            None => widgets::frame(&pp, pic, 16.0, theme::surface_soft()),
+            None => widgets::frame(&pp, pic, radius, theme::surface_soft()),
         }
+        let mut pp = p.clone();
+        pp.multiply_opacity(k);
         if backdrop.clicked() && !pic.contains(backdrop.interact_pointer_pos().unwrap_or_default()) {
             close = true;
         }
         let caption = format!("{} · {}×{} · {} of {count}", super::local_time_unix(shot.info.taken), shot.info.width, shot.info.height, index + 1);
         widgets::text(&pp, pos2(pic.left(), pic.bottom() + 24.0), Align2::LEFT_CENTER, &Txt::new(caption, 12.5).color(theme::FG_2));
         let mut vu = ui.new_child(UiBuilder::new().max_rect(area).id_salt("viewer-actions"));
-        vu.multiply_opacity(k.clamp(0.0, 1.0));
+        vu.multiply_opacity(k);
+        if closing {
+            vu.disable();
+        }
         if count > 1 {
             for (s, glyph, label, x) in
                 [(-1, icons::CARET_LEFT, "Previous picture", area.left() + 24.0 + 22.0), (1, icons::CARET_RIGHT, "Next picture", area.right() - 24.0 - 22.0)]
@@ -1258,17 +1648,19 @@ fn viewer(ctx: &egui::Context, cx: &mut Cx, state: &mut State, world: &VisitedWo
             }
         }
     });
-    ctx.input(|i| {
-        if i.key_pressed(egui::Key::ArrowLeft) {
-            step = -1;
-        }
-        if i.key_pressed(egui::Key::ArrowRight) {
-            step = 1;
-        }
-        if i.key_pressed(egui::Key::Escape) {
-            close = true;
-        }
-    });
+    if !closing {
+        ctx.input(|i| {
+            if i.key_pressed(egui::Key::ArrowLeft) {
+                step = -1;
+            }
+            if i.key_pressed(egui::Key::ArrowRight) {
+                step = 1;
+            }
+            if i.key_pressed(egui::Key::Escape) {
+                close = true;
+            }
+        });
+    }
     let Some(o) = state.open.as_mut() else { return };
     if toggle && !o.selected.remove(&shot.path) {
         o.selected.insert(shot.path.clone());
@@ -1277,9 +1669,6 @@ fn viewer(ctx: &egui::Context, cx: &mut Cx, state: &mut State, world: &VisitedWo
         o.viewer = Some((index as i64 + step).rem_euclid(count as i64) as usize);
     }
     if close {
-        o.viewer = None;
-        if let Some(p) = state.pictures.as_mut() {
-            p.forget_large();
-        }
+        o.viewer_closing = true;
     }
 }

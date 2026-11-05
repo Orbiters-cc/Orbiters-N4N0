@@ -5,7 +5,8 @@
 //! ```text
 //! cargo run --release --example novel -- <session> <splats.ply> <out dir> <keyframe>[,<keyframe>...] [--width N]
 //! ```
-//! A `sky.png` beside the PLY (orbiters_reconstruct::sky::SkyMap) is drawn behind the splats.
+//! A `sky.png` beside the PLY (orbiters_reconstruct::sky::SkyMap) is drawn behind the splats. A VRChat splat tree
+//! (`pc.n4tree`, from `orbiters-reconstruct --vrchat`) in place of the PLY draws its leaves as the file stores them.
 
 use anyhow::Context as _;
 use orbiters_reconstruct::camera::Camera;
@@ -38,7 +39,11 @@ fn main() -> anyhow::Result<()> {
     let (session, splats, out) = (PathBuf::from(session), PathBuf::from(splats), PathBuf::from(out));
     let keys: Vec<i32> = keys.split(',').map(|k| k.trim().parse()).collect::<Result<_, _>>()?;
     let data = dataset::load_with(&session, width, Budget::default(), |_| {})?;
-    let g = ply::read(&splats)?;
+    let g = if splats.extension().is_some_and(|e| e == "n4tree") {
+        orbiters_reconstruct::tree_file::parse(&std::fs::read(&splats)?)?.select_stored(|n| n.leaf)
+    } else {
+        ply::read(&splats)?
+    };
     let mut gpu = gpu::Gpu::new()?;
     gpu.upload(&g);
     let map = splats.with_file_name(orbiters_core::reconstruction::SKY_FILE);

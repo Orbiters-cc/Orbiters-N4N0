@@ -8,7 +8,7 @@ use time::OffsetDateTime;
 /// The notification's line: how N4N0 stands with the Quest.
 pub fn notification_line(s: &Snapshot) -> String {
     match s.link.phase {
-        Phase::Connected => match s.orb.avatar_id.as_deref() {
+        Phase::Connected => match s.n4n0.avatar_id.as_deref() {
             Some(id) => format!("Connected to VRChat · {}", avatar_label(id)),
             None => "Connected to VRChat on the Quest".into(),
         },
@@ -85,7 +85,7 @@ pub fn avatar_label(id: &str) -> String {
 
 /// The avatar line on Home and the States page.
 pub fn avatar_line(s: &Snapshot) -> String {
-    match (s.link.phase, s.orb.avatar_id.as_deref().or(s.orb.states.avatar_id.as_deref())) {
+    match (s.link.phase, s.n4n0.avatar_id.as_deref().or(s.n4n0.states.avatar_id.as_deref())) {
         (_, Some(id)) => avatar_label(id),
         (Phase::Connected, None) => "Reading the avatar…".into(),
         _ => "No avatar yet".into(),
@@ -94,10 +94,10 @@ pub fn avatar_line(s: &Snapshot) -> String {
 
 /// N4N0 on the avatar worn.
 pub fn n4n0_line(s: &Snapshot) -> String {
-    if s.orb.avatar_id.is_none() {
+    if s.n4n0.avatar_id.is_none() {
         return "Waiting for an avatar".into();
     }
-    match (s.orb.prop_sync.is_some(), s.orb.controls) {
+    match (s.n4n0.prop_sync.is_some(), s.n4n0.controls) {
         (true, _) => "On this avatar".into(),
         (false, 0) => "Not on this avatar".into(),
         (false, n) => format!("{n} controls on this avatar"),
@@ -196,7 +196,7 @@ mod tests {
         s.link.phase = Phase::Connected;
         s.link.quest = Some(std::net::Ipv4Addr::new(192, 168, 1, 42));
         assert_eq!(link_detail(&s.link), "On the Quest at 192.168.1.42");
-        s.orb.avatar_id = Some("avtr_1a2b3c4d-5e6f-7a8b-9c0d-112233449f0e".into());
+        s.n4n0.avatar_id = Some("avtr_1a2b3c4d-5e6f-7a8b-9c0d-112233449f0e".into());
         assert_eq!(notification_line(&s), "Connected to VRChat · avtr_1a2b3c4d…9f0e");
         s.link.phase = Phase::NoWifi;
         assert!(link_hint(&s.link).contains("same Wi-Fi"));

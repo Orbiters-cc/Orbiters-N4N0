@@ -1,10 +1,16 @@
 //! Shared logic of Orbiters - N4N0, used by the app and its workers.
 
 pub mod account;
+pub mod assets;
 pub mod bundle;
 pub mod call;
 pub mod cleanup;
 pub mod clock;
+pub mod community;
+mod dpapi;
+pub mod explicit;
+pub mod features;
+pub mod gallery_talk;
 pub mod keyframes;
 pub mod maps;
 pub mod osc;
@@ -14,10 +20,15 @@ pub mod pose;
 pub mod protocol;
 pub mod reconstruction;
 pub mod settings;
+pub mod shares;
+pub mod video_history;
 pub mod visited;
 pub mod voice;
 pub mod vrchat_accounts;
+pub mod vrchat_api;
 pub mod vrchat_log;
+pub mod vrchat_source;
+pub mod world_feedback;
 
 pub use orbiters_contracts as contracts;
 
@@ -146,9 +157,9 @@ pub fn read_text(path: &std::path::Path) -> std::io::Result<Option<String>> {
 }
 
 /// Reads JSON into `T` keeping every field that fits: one that does not (out of range, a value from a newer version,
-/// the wrong type) gets its default, the others keep theirs, one level of nested objects down (`orb.menu` alone
-/// rather than all of `orb`). A UTF-8 byte order mark (some editors add one) is fine. Returns the value and the fields
-/// left out (`"orb.keyboard"`; `"(not JSON)"` when nothing could be read), empty when the text fit as it was.
+/// the wrong type) gets its default, the others keep theirs, one level of nested objects down (`n4n0.menu` alone
+/// rather than all of `n4n0`). A UTF-8 byte order mark (some editors add one) is fine. Returns the value and the fields
+/// left out (`"n4n0.keyboard"`; `"(not JSON)"` when nothing could be read), empty when the text fit as it was.
 pub fn json_lenient<T: serde::de::DeserializeOwned + serde::Serialize + Default>(text: &str) -> (T, Vec<String>) {
     let text = text.strip_prefix('\u{feff}').unwrap_or(text);
     let Ok(input) = serde_json::from_str::<serde_json::Value>(text) else { return (T::default(), vec!["(not JSON)".into()]) };

@@ -16,3 +16,6 @@ anyhow = { workspace = true }
 # System fonts mapped instead of read, and their character maps (skrifa is egui's own font reader).
 memmap2 = "0.9"
 skrifa = "0.44"
+# The photo editor (photo): its pixels worked on every core, its edits saved as JSON.
+rayon = { workspace = true }
+serde = { workspace = true }

@@ -69,6 +69,54 @@ pub fn publish(config: &Config, version: &str, channel: &str, force: bool) -> an
     Ok(())
 }
 
+/// `cargo xtask publish --dev`: makes `target/dist/<version>/` the channel's release in the development environment,
+/// the folder the development server on this computer serves at [`orbiters_update::DEVELOPMENT_FEED`] (the server
+/// repository's `docker-data/downloads/desktop`). The same files, in the same order, as [`publish`]; copied, not
+/// uploaded.
+pub fn publish_dev(config: &Config, version: &str, channel: &str, force: bool) -> anyhow::Result<()> {
+    orbiters_update::set_development(true);
+    let dist = crate::target_dir().join("dist").join(version);
+    let setup = dist.join(format!("OrbitersSetup-{version}.exe"));
+    let release_file = dist.join(format!("{channel}.json"));
+    let bytes = std::fs::read(&release_file).with_context(|| format!("no {} (cargo xtask dist)", release_file.display()))?;
+    let key = orbiters_update::public_key().context("crates/orbiters-update/update-key.pub holds no key (cargo xtask keygen)")?;
+    let release = SignedRelease::open(&bytes, &key, channel)?;
+    anyhow::ensure!(release.version == version, "{} is of version {}, not {version}", release_file.display(), release.version);
+    anyhow::ensure!(
+        std::fs::metadata(&setup).map(|m| m.len()).ok() == Some(release.installer.size) && orbiters_update::sha256_file(&setup)? == release.installer.sha256,
+        "{} is not the setup the release file names (cargo xtask dist again)",
+        setup.display()
+    );
+    if !force {
+        ensure_newer(version, channel)?;
+    }
+    let dir = config.dev_dir();
+    println!("\n== Copying to the development environment: {}", dir.display());
+    let place = |from: &Path, to: &Path| -> anyhow::Result<()> {
+        if let Some(parent) = to.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let part = to.with_file_name(format!("{}.part", to.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()));
+        std::fs::copy(from, &part).with_context(|| format!("{} cannot be written", part.display()))?;
+        std::fs::rename(&part, to).with_context(|| format!("{} cannot be replaced", to.display()))?;
+        Ok(())
+    };
+    let versioned = dir.join(version).join(format!("OrbitersSetup-{version}.exe"));
+    place(&setup, &versioned)?;
+    if channel == orbiters_update::STABLE {
+        place(&setup, &dir.join("OrbitersSetup.exe"))?;
+    }
+    place(&release_file, &dir.join(format!("{channel}.json")))?;
+    match orbiters_update::net::fetch_release(channel, &key) {
+        Ok(seen) if seen.version == version => {
+            println!("\n{} now serves {version} on {channel}.", orbiters_update::release_url(&orbiters_update::feed(), channel))
+        }
+        Ok(seen) => println!("\nCopied, but the development server still serves {} on {channel}.", seen.version),
+        Err(e) => println!("\nCopied, but the development server did not serve it back (is it running on 127.0.0.1:4100?): {e:#}"),
+    }
+    Ok(())
+}
+
 /// Where releases also go: this repository on GitHub, a release per `desktop-v<version>` tag with its setup attached.
 pub const GITHUB_REPO: &str = "Orbiters-cc/Orbiters-N4N0";
 
@@ -90,7 +138,9 @@ pub fn github(version: &str, notes: &str, unsigned: bool) -> anyhow::Result<()> 
         run(Command::new("gh").args(["release", "upload", &tag, "--repo", GITHUB_REPO, "--clobber"]).arg(&setup))?;
     } else {
         run(Command::new("gh")
-            .args(["release", "create", &tag, "--repo", GITHUB_REPO, "--verify-tag", "--title", &format!("Orbiters - N4N0 {version}"), "--notes-file"])
+            .args(["release", "create", &tag, "--repo", GITHUB_REPO, "--verify-tag", "--title", &format!("Orbiters - N4N0 {version}")])
+            .args(version.contains("-dev.").then_some("--prerelease"))
+            .arg("--notes-file")
             .arg(&notes_file)
             .arg(&setup))?;
     }

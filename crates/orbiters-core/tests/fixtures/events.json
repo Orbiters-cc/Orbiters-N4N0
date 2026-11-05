@@ -1,0 +1,125 @@
+{
+ "items": [
+  {
+   "id": "5b2f6c1e-8d41-4c3a-9f0e-0a6b1c2d3e01",
+   "title": "Midnight Photo Walk",
+   "description": "A slow walk through Sunset Studio's rooftops with cameras out. Bring a lens, a pose and a friend: we stop at six spots the club scouted, and the best pictures land in the gallery.",
+   "startsAt": "2026-10-29T20:00:00.000Z",
+   "endsAt": "2026-10-29T22:00:00.000Z",
+   "category": "exploration",
+   "adultOnly": false,
+   "hasBanner": true,
+   "community": {
+    "name": "Orbit Photo Club",
+    "iconUrl": null
+   },
+   "discord": {
+    "name": "Orbit Hideout",
+    "iconUrl": null
+   },
+   "world": {
+    "name": "Sunset Studio",
+    "imageUrl": null
+   },
+   "steps": 2
+  },
+  {
+   "id": "5b2f6c1e-8d41-4c3a-9f0e-0a6b1c2d3e02",
+   "title": "Cinema Night: Spirited Away",
+   "description": "Popcorn, a big screen and Studio Ghibli. Seats open half an hour before the film starts.",
+   "startsAt": "2026-10-29T23:30:00.000Z",
+   "endsAt": "2026-10-30T02:00:00.000Z",
+   "category": "film_media",
+   "adultOnly": false,
+   "hasBanner": true,
+   "community": {
+    "name": "Velvet Cinema",
+    "iconUrl": null
+   },
+   "discord": null,
+   "world": {
+    "name": "Cozy Theater",
+    "imageUrl": null
+   },
+   "steps": 1
+  },
+  {
+   "id": "5b2f6c1e-8d41-4c3a-9f0e-0a6b1c2d3e03",
+   "title": "Avatar Fashion Show — Autumn Collection",
+   "description": "Creators walk their newest outfits down the runway. Vote for your favourite look after the show.",
+   "startsAt": "2026-10-30T19:00:00.000Z",
+   "endsAt": "2026-10-30T21:00:00.000Z",
+   "category": "avatars",
+   "adultOnly": false,
+   "hasBanner": true,
+   "community": {
+    "name": "Orbit Photo Club",
+    "iconUrl": null
+   },
+   "discord": null,
+   "world": {
+    "name": "Runway Hall",
+    "imageUrl": null
+   },
+   "steps": 3
+  },
+  {
+   "id": "5b2f6c1e-8d41-4c3a-9f0e-0a6b1c2d3e04",
+   "title": "Lo-fi Chill & Chat",
+   "description": "Soft beats, warm lights, no agenda.",
+   "startsAt": "2026-10-31T18:00:00.000Z",
+   "endsAt": "2026-10-31T20:30:00.000Z",
+   "category": "hangout",
+   "adultOnly": false,
+   "hasBanner": false,
+   "community": {
+    "name": "Orbit Hideout",
+    "iconUrl": null
+   },
+   "discord": null,
+   "world": null,
+   "steps": 1
+  },
+  {
+   "id": "5b2f6c1e-8d41-4c3a-9f0e-0a6b1c2d3e05",
+   "title": "Neon District Rave",
+   "description": "Three DJs, one skyline. Full-body tracking welcome.",
+   "startsAt": "2026-11-01T21:00:00.000Z",
+   "endsAt": "2026-11-02T01:00:00.000Z",
+   "category": "music",
+   "adultOnly": false,
+   "hasBanner": true,
+   "community": {
+    "name": "Neon District",
+    "iconUrl": null
+   },
+   "discord": null,
+   "world": {
+    "name": "Neon District",
+    "imageUrl": null
+   },
+   "steps": 1
+  },
+  {
+   "id": "5b2f6c1e-8d41-4c3a-9f0e-0a6b1c2d3e06",
+   "title": "Beginner's Unity Workshop: your first world",
+   "description": "From an empty scene to a world you can upload, step by step. Questions welcome.",
+   "startsAt": "2026-11-03T17:00:00.000Z",
+   "endsAt": "2026-11-03T19:00:00.000Z",
+   "category": "education",
+   "adultOnly": false,
+   "hasBanner": true,
+   "community": {
+    "name": "Orbiters",
+    "iconUrl": null
+   },
+   "discord": null,
+   "world": {
+    "name": "Classroom Nine",
+    "imageUrl": null
+   },
+   "steps": 1
+  }
+ ],
+ "nextOffset": null
+}

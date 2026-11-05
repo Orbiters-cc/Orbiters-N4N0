@@ -224,7 +224,8 @@ impl super::Controller {
                     if !ctl.is_capturing() {
                         return false;
                     }
-                    send(super::burst::POSE, p.iter().map(|v| rosc::OscType::Float(*v)).collect());
+                    // N4N0's camera rig follows in the same bundle (controller/rig.rs).
+                    ctl.place_rig(Some((super::burst::POSE.to_string(), p.iter().map(|v| rosc::OscType::Float(*v)).collect())), &p);
                     if let Some(wait) = (tick * (i as u32 + 1)).checked_sub(begin.elapsed()) {
                         std::thread::sleep(wait);
                     }

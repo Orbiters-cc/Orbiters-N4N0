@@ -16,7 +16,7 @@ use orbiters_contracts::manifest::{self as bundle_files, depth_file, SessionMani
 use orbiters_contracts::performance::calibration::Calibration;
 use orbiters_contracts::performance::tracking::Device;
 use orbiters_contracts::performance::{self as perf, audio::TrackKind};
-use orbiters_contracts::{depth, qoi, skeleton, strip};
+use orbiters_contracts::{depth, qoi, rig, skeleton, strip};
 use orbiters_core::bundle::{self, BundleWriter};
 use orbiters_core::clock;
 use orbiters_core::keyframes::{self, KeyframeSelector};
@@ -42,14 +42,10 @@ pub enum Warning {
     Disk,
     /// The frame source (a Spout sender that cannot be opened, frames of a raw capture that cannot be read).
     Source,
-    /// The capture strip, seen once and then for a while not (no camera pose, so no keyframes).
-    Strip,
 }
 
 /// A stretch without the strip shorter than this is a moment's trouble (a fast turn, a flash): not counted.
 const STRIP_GAP_NS: u64 = 1_000_000_000;
-/// A stretch without the strip this long is told while recording.
-const STRIP_GAP_TOLD_NS: u64 = 3_000_000_000;
 
 /// A picture for the encoders: a keyframe (its frame's record waits for it), or a depth frame kept as received.
 struct Picture {
@@ -63,6 +59,20 @@ struct Picture {
     bgra: bool,
     /// The session's thumbnail, made from this picture below the strip (rows from `.1` down).
     thumbnail: Option<(PathBuf, u32)>,
+}
+
+/// A rig frame's face for a record of its own: read with its frame, its picture sent to the encoders once its record is
+/// queued (a picture finished before its record would have nothing to tell).
+struct FaceView {
+    record: FrameRecord,
+    picture: Option<Picture>,
+}
+
+/// An extra stream's state (a camera dolly's stream): the last pose read (game time bits, pose, time) and its keyframes'
+/// choice, as the main stream's.
+struct ExtraStream {
+    previous: Option<(u32, [f32; 12], f32)>,
+    selector: KeyframeSelector,
 }
 
 /// A depth frame for the decoder, upright and tightly packed.
@@ -266,14 +276,16 @@ fn encode(job: Picture, done: &ChanSender<Done>) {
     });
     let thumbnail_failed = job.thumbnail.as_ref().is_some_and(|(path, top)| {
         let row = job.width as usize * 4;
-        let mut rgba = job.data[(*top as usize * row).min(job.data.len())..].to_vec();
+        let bottom = bundle::capture_picture_rect(job.width, job.height).y1.max(*top + 1).min(job.height);
+        let mut rgba = job.data[(*top as usize * row).min(job.data.len())..bottom as usize * row].to_vec();
         if job.bgra {
             for px in rgba.as_chunks_mut::<4>().0 {
                 px.swap(0, 2);
             }
         }
         let (tw, th, small) = bundle::downscale(&rgba, job.width, (rgba.len() / row.max(1)) as u32, 480);
-        write_whole(path, &qoi::encode(&small, tw, th, 3)).is_err()
+        let bytes = qoi::encode(&small, tw, th, 3);
+        write_whole(path, &bytes).and_then(|()| write_whole(&path.with_file_name(bundle::PICTURE_THUMBNAIL_FILE), &bytes)).is_err()
     });
     let _ = done.send(Done::Picture { frame: job.frame, written, thumbnail_failed, buffer: job.data });
 }
@@ -332,6 +344,18 @@ impl Buffers {
         if kept + buffer.capacity() <= Self::KEEP_MOST {
             self.free.push(buffer);
         }
+    }
+}
+
+/// Copies the part `tile` of a frame (top-down, as it shows upright) into `out`, tightly packed and upright.
+fn copy_tile_upright(view: &ImageView, flipped: bool, tile: orbiters_contracts::image::Rect, out: &mut Vec<u8>) {
+    let row = (tile.x1 - tile.x0) as usize * 4;
+    out.clear();
+    out.reserve(row * (tile.y1 - tile.y0) as usize);
+    for y in tile.y0 as usize..tile.y1 as usize {
+        let src = if flipped { view.height as usize - 1 - y } else { y };
+        let at = src * view.stride + tile.x0 as usize * 4;
+        out.extend_from_slice(&view.data[at..at + row]);
     }
 }
 
@@ -446,6 +470,10 @@ pub enum Processed {
 pub struct CaptureSession {
     writer: BundleWriter,
     selector: KeyframeSelector,
+    /// The rig's faces each have keyframes of their own, chosen as the frames' are (by face number - 1).
+    face_selectors: [KeyframeSelector; rig::FACES],
+    /// The faces of the frame being read, until its record is queued.
+    faces_read: Vec<FaceView>,
     /// Keyframes (and `depth-raw/` frames) to encode and write; depth frames to decode and write; what they finished.
     encoder: Workers<Picture>,
     depth: Workers<DepthJob>,
@@ -456,6 +484,8 @@ pub struct CaptureSession {
     /// Records waiting for their files, in frame order.
     pending: VecDeque<Pending>,
     band: skeleton::Decoder,
+    /// The hips the last band gave (world position, rotation), until taken (`take_hips`).
+    hips: Option<([f32; 3], [f32; 4])>,
     areas: Option<Areas>,
     pub stats: CaptureStats,
     /// Session start on the shared clock: every stream's `time_ns` counts from here.
@@ -475,6 +505,9 @@ pub struct CaptureSession {
     frame_index: u64,
     prefer_flipped: bool,
     previous: Option<(u32, [f32; 12], f32)>,
+    /// The extra streams' own (the camera dolly's other cameras, [`FrameAccess::stream`] 1 and on): their last pose,
+    /// for gating, and their keyframe choice. The main stream's are `previous` and `selector`.
+    extra: Vec<ExtraStream>,
     thumbnail_done: bool,
     decode_time_total: f64,
     fps_window: (Instant, u64),
@@ -495,9 +528,8 @@ pub struct CaptureSession {
     latest: Vec<(Warning, String)>,
     /// Why the recording must stop (the disk is full).
     stop: Option<String>,
-    /// When a frame's strip was last read and since when it has not been (after it was once), on the session clock;
-    /// the time without it, in stretches of at least [`STRIP_GAP_NS`]; the latest frame's time. With the capture kit's
-    /// "Near you" reach, the kit is not drawn while the camera sees neither the avatar nor its surroundings.
+    /// When a frame's strip was last read and since when it has not been, on the session clock; the time without it, in
+    /// stretches of at least [`STRIP_GAP_NS`], once it was seen; the latest frame's time.
     strip_first_ns: Option<u64>,
     strip_seen_ns: Option<u64>,
     strip_lost_ns: Option<u64>,
@@ -556,6 +588,7 @@ impl CaptureSession {
         manifest.capture.mode = cmd.mode;
         manifest.capture.quality = cmd.quality;
         manifest.capture.source = match &cmd.source {
+            orbiters_core::protocol::SourceSpec::Spout { extra, .. } if !extra.is_empty() => "spout_streams",
             orbiters_core::protocol::SourceSpec::Spout { .. } => "spout",
             orbiters_core::protocol::SourceSpec::RawSequence { .. } => "raw_sequence",
             orbiters_core::protocol::SourceSpec::TestPattern { .. } => "test",
@@ -574,7 +607,8 @@ impl CaptureSession {
         let (done_tx, done) = unbounded::<Done>();
         let encoder = {
             let done = done_tx.clone();
-            Workers::spawn("encode", threads, threads * 2, move || {
+            // Room for a rig frame's faces besides the frames' keyframes.
+            Workers::spawn("encode", threads, threads * 2 + 2 * rig::FACES, move || {
                 let done = done.clone();
                 Box::new(move |job: Picture| encode(job, &done))
             })
@@ -625,6 +659,8 @@ impl CaptureSession {
         let mut session = Self {
             writer,
             selector: KeyframeSelector::new(cmd.keyframes.clone(), cmd.quality == StorageQuality::Lossless),
+            face_selectors: std::array::from_fn(|_| KeyframeSelector::new(cmd.keyframes.clone(), cmd.quality == StorageQuality::Lossless)),
+            faces_read: Vec::new(),
             encoder,
             depth,
             done,
@@ -632,6 +668,7 @@ impl CaptureSession {
             saver: Saver::spawn(),
             pending: VecDeque::new(),
             band: skeleton::Decoder::new(),
+            hips: None,
             areas: None,
             stats: CaptureStats::default(),
             epoch_ns,
@@ -654,6 +691,7 @@ impl CaptureSession {
             frame_index: 0,
             prefer_flipped: false,
             previous: None,
+            extra: Vec::new(),
             thumbnail_done: false,
             decode_time_total: 0.0,
             raw_depth_kept: 0,
@@ -723,22 +761,12 @@ impl CaptureSession {
         self.warnings.push((kind, message));
     }
 
-    /// A frame without a readable strip at `now`: a stretch without it starts (once the strip was seen), and one long
-    /// enough is told, once a stretch.
+    /// A frame without a readable strip at `now`: a stretch without it starts or goes on, from the recording's first
+    /// frame when no strip came yet (with Local User off in VRChat's camera, or on an avatar without the kit, none ever
+    /// does). The service reads `strip_missing_s` and says why: only it knows VRChat's camera and the avatar.
     fn strip_missed(&mut self, now: u64) {
-        if self.strip_seen_ns.is_none() {
-            return;
-        }
         let lost = *self.strip_lost_ns.get_or_insert(now);
-        let gap = now.saturating_sub(lost);
-        let told = self.stats.strip_missing_s >= STRIP_GAP_TOLD_NS as f32 / 1e9;
-        self.stats.strip_missing_s = gap as f32 / 1e9;
-        if gap >= STRIP_GAP_TOLD_NS && !told {
-            self.warn(
-                Warning::Strip,
-                "No capture strip for a few seconds: no camera pose, so no keyframes. With the capture kit's \"Near you\" reach it is drawn only while the camera sees your avatar or is near it.".into(),
-            );
-        }
+        self.stats.strip_missing_s = now.saturating_sub(lost) as f32 / 1e9;
     }
 
     /// A frame whose strip was read at `now`: a stretch without it ends, counted when long enough.
@@ -855,7 +883,17 @@ impl CaptureSession {
         let t0 = Instant::now();
         self.collect();
         let (width, height) = (frame.width(), frame.height());
+        let stream = frame.stream();
         let capture = &mut self.writer.manifest_mut().capture;
+        if stream > 0 && (capture.width, capture.height) != (width, height) {
+            // An extra stream (a camera dolly's) never sets nor changes the session's size: until the main stream's
+            // first frame, and at another size, its frames are left out.
+            self.stats.extra_other_size += 1;
+            return Ok(Processed::Frame);
+        }
+        if stream > 0 {
+            self.stats.extra_frames += 1;
+        }
         if capture.width == 0 {
             capture.width = width;
             capture.height = height;
@@ -884,6 +922,7 @@ impl CaptureSession {
             self.stats.gated += 1;
         }
         self.pending.push_back(Pending { record, waiting, since: Instant::now() });
+        self.queue_faces();
         self.flush_records();
         self.decode_time_total += t0.elapsed().as_secs_f64();
         read.map(|()| Processed::Frame)
@@ -895,18 +934,35 @@ impl CaptureSession {
         let (width, height) = (record.width, record.height);
         let bytes = width as usize * height as usize * 4;
         let now = record.capture_time_ns;
-        self.last_frame_ns = now;
+        let stream = frame.stream();
+        // The main stream's: what tells the person their camera's strip is read, its camera's place on the map, the
+        // skeleton band, the rig's faces and the thumbnail. Extra streams (a camera dolly's) add views.
+        let main = stream == 0;
+        if !main && self.extra.len() < stream {
+            // The main stream's choice, from scratch.
+            let mut selector = self.selector.clone();
+            selector.reset();
+            self.extra.resize_with(stream, || ExtraStream { previous: None, selector: selector.clone() });
+        }
+        if main {
+            self.last_frame_ns = now;
+        }
         match self.decode_strip(frame)? {
+            Err(e) if !main => {
+                let _ = e;
+            }
             Err(e) => {
                 self.stats.strip_failed += 1;
                 self.stats.last_error = Some(e.to_string());
                 self.strip_missed(now);
             }
             Ok(d) => {
-                self.strip_read(now);
-                self.prefer_flipped = d.flipped;
-                self.stats.flipped = d.flipped;
-                self.stats.strip_ok += 1;
+                if main {
+                    self.strip_read(now);
+                    self.prefer_flipped = d.flipped;
+                    self.stats.flipped = d.flipped;
+                    self.stats.strip_ok += 1;
+                }
                 let p = d.payload;
                 record.flags |= record_flags::STRIP_OK;
                 if d.flipped {
@@ -924,21 +980,27 @@ impl CaptureSession {
                 // The capture kit's skeleton band rides on an avatar's colour frames (depth frames use the whole
                 // picture; the simulator draws none; the test pattern draws one like the kit).
                 let source = strip::flags::source(p.flags);
-                if !p.is_depth_frame() && (source == strip::flags::SOURCE_AVATAR || source == strip::flags::SOURCE_TEST) {
+                if main && !p.is_depth_frame() && !p.is_rig_frame() && (source == strip::flags::SOURCE_AVATAR || source == strip::flags::SOURCE_TEST) {
                     self.read_band(frame, d.flipped, p.time, record.capture_time_ns)?;
                 }
-                let pos = p.position();
-                self.stats.position = Some(pos);
-                self.stats.heading_deg = Some(p.camera_to_world[2].atan2(p.camera_to_world[10]).to_degrees());
+                if main {
+                    let pos = p.position();
+                    self.stats.position = Some(pos);
+                    self.stats.heading_deg = Some(p.camera_to_world[2].atan2(p.camera_to_world[10]).to_degrees());
+                }
 
-                // Gating: a repeated frame (same game time) or an impossible jump (teleport, respawn).
-                let gated = match &self.previous {
+                // Gating: a repeated frame (same game time) or an impossible jump (teleport, respawn). A rig frame's pose
+                // is the rig's, wherever it stands: it is gated on its time only, and leaves the camera's last pose as it was.
+                // Each stream against its own last pose: the camera dolly's cameras stand elsewhere in the same frames.
+                let previous = if main { self.previous } else { self.extra[stream - 1].previous };
+                let gated = match &previous {
                     Some((bits, _, _)) if *bits == p.time.to_bits() => true,
+                    Some(_) if p.is_rig_frame() => false,
                     Some((_, prev_pose, prev_time)) => {
                         let dt = (p.time - prev_time).abs().max(1e-3);
                         let moved = keyframes::translation(&p.camera_to_world, prev_pose);
                         if moved > 3.0 && moved / dt > 40.0 {
-                            self.selector.reset();
+                            self.selector_of(stream).reset();
                             true
                         } else {
                             false
@@ -946,9 +1008,21 @@ impl CaptureSession {
                     }
                     None => false,
                 };
-                self.previous = Some((p.time.to_bits(), p.camera_to_world, p.time));
+                let previous = match previous {
+                    Some((_, pose, time)) if p.is_rig_frame() => Some((p.time.to_bits(), pose, time)),
+                    _ => Some((p.time.to_bits(), p.camera_to_world, p.time)),
+                };
+                if main {
+                    self.previous = previous;
+                } else {
+                    self.extra[stream - 1].previous = previous;
+                }
                 if gated {
                     record.flags |= record_flags::GATED;
+                } else if p.is_rig_frame() && !main {
+                    // The rig's faces are the same in every stream: the main stream's are kept.
+                } else if p.is_rig_frame() {
+                    self.read_faces(frame, &p, d.flipped, record)?;
                 } else if p.is_depth_frame() {
                     self.wait_for(|s| s.depth.has_room() && s.buffers.room(bytes));
                     if self.depth.has_room() && self.buffers.room(bytes) {
@@ -973,7 +1047,7 @@ impl CaptureSession {
                         // The decoder is behind: this one is dropped rather than waited for.
                         self.stats.depth_dropped += 1;
                     }
-                } else if self.selector.clone().consider(&p.camera_to_world, p.time) {
+                } else if self.selector_of(stream).clone().consider_view(&p.camera_to_world, p.projection[1], p.time) {
                     // A keyframe it is (asked on a copy of the selector, which keeps waiting for one until it is taken).
                     self.wait_for(|s| s.encoder.has_room() && s.buffers.room(bytes));
                     if !self.encoder.has_room() || !self.buffers.room(bytes) {
@@ -986,9 +1060,9 @@ impl CaptureSession {
                             copy_upright(&view, d.flipped, &mut data);
                             view.order == PixelOrder::Bgra
                         };
-                        self.selector.consider(&p.camera_to_world, p.time);
+                        self.selector_of(stream).consider_view(&p.camera_to_world, p.projection[1], p.time);
                         // The first keyframe makes the thumbnail, from below the strip and its patches.
-                        let thumbnail = (!self.thumbnail_done).then(|| {
+                        let thumbnail = (main && !self.thumbnail_done).then(|| {
                             let top = self.areas.as_ref().and_then(|a| a.strip).map_or(0, |l| l.reserved.y1.min(height - 1));
                             (self.writer.dir().join(bundle_files::THUMBNAIL_FILE), top)
                         });
@@ -999,7 +1073,11 @@ impl CaptureSession {
                                 record.flags |= record_flags::KEYFRAME;
                                 record.keyframe_index = index;
                                 self.stats.keyframes += 1;
-                                self.thumbnail_done = true;
+                                if main {
+                                    self.thumbnail_done = true;
+                                } else {
+                                    self.stats.extra_keyframes += 1;
+                                }
                                 *waiting += 1;
                             }
                             Err(job) => {
@@ -1012,6 +1090,96 @@ impl CaptureSession {
             }
         }
         Ok(())
+    }
+
+    /// The keyframe choice of stream `stream` (0 the main one).
+    fn selector_of(&mut self, stream: usize) -> &mut KeyframeSelector {
+        if stream == 0 {
+            &mut self.selector
+        } else {
+            &mut self.extra[stream - 1].selector
+        }
+    }
+
+    /// A rig frame's faces (contracts' Docs/rig-frames.md): each one its camera rendered in this frame (its stamp is the
+    /// strip's time) gets a record of its own, the next frame indices after its frame's, with the face's pose and size,
+    /// and its tile as a keyframe when the face's selector takes one. The frame's own record keeps the rig's pose and
+    /// names no picture. The records and pictures wait in `faces_read` for [`Self::queue_faces`].
+    fn read_faces(&mut self, frame: &mut dyn FrameAccess, p: &strip::StripPayload, flipped: bool, record: &FrameRecord) -> anyhow::Result<()> {
+        let Some(layout) = rig::RigLayout::new(record.width, record.height) else { return Ok(()) };
+        let face_bytes = layout.face as usize * layout.face as usize * 4;
+        let wanted: Vec<bool> = rig::TILE_FACES
+            .iter()
+            .map(|&face| self.face_selectors[face as usize - 1].clone().consider(&rig::face_camera_to_world(&p.camera_to_world, face), p.time))
+            .collect();
+        let bytes = face_bytes * wanted.iter().filter(|w| **w).count();
+        self.wait_for(|s| s.buffers.room(bytes));
+        let view = frame.full()?;
+        let Some(faces) = rig::faces(p, &view, flipped) else { return Ok(()) };
+        for (face, wanted) in faces.iter().zip(wanted) {
+            if !face.current(p.time) {
+                self.stats.rig_faces_late += 1;
+                continue;
+            }
+            self.stats.rig_faces += 1;
+            let shift = strip::flags::FACE_SHIFT;
+            let face_record = FrameRecord {
+                frame_index: self.frame_index,
+                flags: record.flags & (record_flags::STRIP_OK | record_flags::FLIPPED),
+                strip_flags: (p.flags & !(strip::flags::FACE_MASK << shift)) | face.face << shift,
+                camera_to_world: face.camera_to_world,
+                width: layout.face,
+                height: layout.face,
+                keyframe_index: -1,
+                depth_index: -1,
+                ..*record
+            };
+            self.frame_index += 1;
+            let picture = (wanted && self.buffers.room(face_bytes)).then(|| {
+                let mut data = self.buffers.take();
+                copy_tile_upright(&view, flipped, face.tile, &mut data);
+                self.buffers.lent(face_bytes);
+                self.face_selectors[face.face as usize - 1].consider(&face.camera_to_world, p.time);
+                Picture {
+                    frame: Some(face_record.frame_index),
+                    path: PathBuf::new(),
+                    data,
+                    width: layout.face,
+                    height: layout.face,
+                    bgra: view.order == PixelOrder::Bgra,
+                    thumbnail: None,
+                }
+            });
+            if wanted && picture.is_none() {
+                self.stats.dropped += 1;
+            }
+            self.faces_read.push(FaceView { record: face_record, picture });
+        }
+        Ok(())
+    }
+
+    /// Queues the faces read with the frame just queued: their records, then their pictures to the encoders.
+    fn queue_faces(&mut self) {
+        for FaceView { mut record, picture } in std::mem::take(&mut self.faces_read) {
+            let mut waiting = 0u8;
+            if let Some(mut picture) = picture {
+                let (index, path) = self.writer.reserve_keyframe();
+                picture.path = path;
+                match self.encoder.send(picture) {
+                    Ok(()) => {
+                        record.flags |= record_flags::KEYFRAME;
+                        record.keyframe_index = index;
+                        self.stats.keyframes += 1;
+                        waiting = 1;
+                    }
+                    Err(job) => {
+                        self.buffers.give(job.data);
+                        self.stats.dropped += 1;
+                    }
+                }
+            }
+            self.pending.push_back(Pending { record, waiting, since: Instant::now() });
+        }
     }
 
     /// For a source that waits (`offline`): until there is `room`, taking what the threads finish meanwhile, or
@@ -1072,10 +1240,20 @@ impl CaptureSession {
                 _ => return Ok(()),
             }
         };
+        // Bone 0 is the hips (HumanBodyBones.Hips).
+        if let Some(rotation) = pose.bones[0] {
+            self.hips = Some((pose.hips, rotation));
+        }
         if let Err(e) = self.skeleton.add(time_ns, &pose) {
             self.warn(Warning::Streams, format!("The skeleton band is not recorded: {e:#}"));
         }
         Ok(())
+    }
+
+    /// Where the avatar's hips were in the last frame whose skeleton band was read, once: the app hangs N4N0's camera
+    /// rig from them (contracts' `Docs/rig-frames.md`).
+    pub fn take_hips(&mut self) -> Option<([f32; 3], [f32; 4])> {
+        self.hips.take()
     }
 
     /// Takes what the threads finished: records get their files, or lose the flags of those that could not be
@@ -1298,10 +1476,11 @@ impl CaptureSession {
         let (strip_missing_ns, strip_since_ns) = self.strip_missing();
         let Self { mut writer, parameters, skeleton, audio, tracking, calibrations, calibrations_written, written, write_errors, .. } = self;
         let mut warnings = Vec::new();
-        // Long stretches without the strip leave parts of the walk without keyframes: how much, and why it happens.
-        if strip_missing_ns >= 5_000_000_000 && strip_missing_ns * 10 >= strip_since_ns {
+        // Long stretches without the strip leave parts of the walk without keyframes: how much. (No strip at all is the
+        // service's to tell, knowing why: the manifest's keyframes say so.)
+        if strip_since_ns > 0 && strip_missing_ns >= 5_000_000_000 && strip_missing_ns * 10 >= strip_since_ns {
             warnings.push(format!(
-                "no camera pose for {:.0} s of {:.0} s: the capture strip was not seen, so those parts have no keyframes. With the capture kit's \"Near you\" reach it is drawn only while the camera sees your avatar or is near it: install it with \"Everywhere\" in Mixer to film anywhere",
+                "no camera pose for {:.0} s of {:.0} s: the capture strip was not seen, so those parts have no keyframes",
                 strip_missing_ns as f64 / 1e9,
                 strip_since_ns as f64 / 1e9
             ));
@@ -1405,6 +1584,35 @@ fn session_calibrations(overlay: &[Calibration], detected: Vec<Calibration>, dev
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn encoded_picture_thumbnail_excludes_both_data_bands() {
+        let dir = std::env::temp_dir().join(format!("orbiters-encoded-thumb-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (width, height) = (1920, 1080);
+        let crop = bundle::capture_picture_rect(width, height);
+        let mut pixels = vec![255; width as usize * height as usize * 4];
+        for p in pixels[crop.y0 as usize * width as usize * 4..crop.y1 as usize * width as usize * 4].chunks_exact_mut(4) {
+            p.copy_from_slice(&[30, 60, 90, 255]); // BGRA input.
+        }
+        let (tx, rx) = bounded(1);
+        encode(
+            Picture {
+                frame: None,
+                path: dir.join("frame.qoi"),
+                data: pixels,
+                width,
+                height,
+                bgra: true,
+                thumbnail: Some((dir.join(bundle_files::THUMBNAIL_FILE), crop.y0)),
+            },
+            &tx,
+        );
+        assert!(matches!(rx.recv().unwrap(), Done::Picture { thumbnail_failed: false, written: Ok(_), .. }));
+        let (w, h, rgba) = bundle::read_thumbnail(&dir).unwrap();
+        assert_eq!((w, h), (480, 196));
+        assert!(rgba.chunks_exact(4).all(|p| p == [90, 60, 30, 255]));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
     use crate::sources::{FrameSource, Next, TestPatternSource, Whole};
     use orbiters_contracts::manifest::{CaptureMode, ConsentInfo};
     use orbiters_contracts::performance::skeleton_frames;
@@ -1429,6 +1637,55 @@ mod tests {
         let src = TestPatternSource::new(1280, 720, 30.0, 4, frames, false);
         let session = CaptureSession::start(&cmd, src.describe(), &src.folder_hint()).unwrap();
         (root, session, src)
+    }
+
+    /// The camera dolly's streams (a multi-stream animation): three more cameras of the same frames, elsewhere. Their
+    /// frames join the session as views of their own, each stream gated and choosing keyframes against its own last
+    /// pose (the same game times in every stream are no repeats); the skeleton band and the camera's place come from
+    /// the main stream only; a stream of another size is left out, never a change of the session's size.
+    #[test]
+    fn the_camera_dollys_streams_join_the_session_as_views_of_their_own() {
+        use crate::sources::MultiSource;
+        let (root, mut session, src) = pattern_session("dolly-streams", 48);
+        let extra: Vec<Box<dyn FrameSource>> = vec![
+            Box::new(TestPatternSource::new(1280, 720, 30.0, 4, 48, false).with_stream(1)),
+            Box::new(TestPatternSource::new(1280, 720, 30.0, 4, 48, false).with_stream(2)),
+            // Another size: left out.
+            Box::new(TestPatternSource::new(960, 540, 30.0, 4, 48, false).with_stream(3)),
+        ];
+        let mut multi = MultiSource::new(Box::new(src), extra);
+        assert!(multi.describe().starts_with("Test pattern 1280x720 + "));
+        let mut streams = [0u32; 4];
+        loop {
+            let next = multi
+                .next(Duration::from_millis(10), &mut |v| {
+                    streams[v.stream()] += 1;
+                    assert_eq!(session.process(v).unwrap(), Processed::Frame);
+                })
+                .unwrap();
+            if matches!(next, Next::End) {
+                break;
+            }
+        }
+        assert_eq!(streams[0], 48, "the main stream whole");
+        let stats = session.refresh_stats().clone();
+        assert_eq!((stats.extra_other_size, stats.gated), (u64::from(streams[3]), 0), "no repeats across streams, the odd size left out");
+        assert_eq!(stats.extra_frames, u64::from(streams[1] + streams[2]));
+        assert!(stats.extra_keyframes >= 4, "views from the other cameras: {}", stats.extra_keyframes);
+        assert_eq!(stats.skeleton_frames, 36, "the band of the main stream's colour frames only");
+        let finished = session.finish();
+        assert!(finished.warnings.is_empty(), "{:?}", finished.warnings);
+        let records = bundle::read_records(&finished.dir).unwrap();
+        assert_eq!(records.len() as u32, streams[0] + streams[1] + streams[2]);
+        assert!(records.windows(2).all(|w| w[1].frame_index == w[0].frame_index + 1), "consecutive frame indices");
+        // Each stream's keyframes carry its own camera's pose.
+        let poses: Vec<[f32; 12]> = records.iter().filter(|r| r.has(record_flags::KEYFRAME)).map(|r| r.camera_to_world).collect();
+        for stream in 0..3 {
+            let t = records.iter().find(|r| r.has(record_flags::KEYFRAME) && r.camera_to_world == TestPatternSource::stream_pose(r.game_time, stream));
+            assert!(t.is_some(), "a keyframe of stream {stream} among {}", poses.len());
+        }
+        assert_eq!(finished.manifest.capture.source, "test");
+        std::fs::remove_dir_all(&root).ok();
     }
 
     /// Keyframes and depth frames that cannot be written are named by no record: the session stays readable whole.
@@ -1589,29 +1846,54 @@ mod tests {
         std::fs::remove_dir_all(&root).ok();
     }
 
-    /// The strip lost while recording (a camera that no longer sees an avatar whose kit has the "Near you" reach): the
-    /// stats say for how long, a long stretch is told once, and the end of the session says how much had no pose.
+    /// The strip lost while recording (a camera that no longer sees an avatar uploaded with an older N4N0, a world's
+    /// depth of field): the stats say for how long, a long stretch is told once, and the end of the session says how
+    /// much had no pose.
+    /// What a recording gets with Local User off in VRChat's camera, or on an avatar without the kit: real frames, none
+    /// with a strip (Enzo's sessions of 2026-11-03 at 22:56, 22:59 and 23:00). The time without it runs from the first frame,
+    /// for the service to tell why, and the session says plainly that it has nothing.
     #[test]
-    fn stretches_without_the_strip_are_told_and_counted() {
+    fn frames_that_never_have_a_strip_are_timed_from_the_first_and_leave_no_keyframes() {
+        let (root, mut session, _) = pattern_session("never-a-strip", 0);
+        let (w, h) = (1280u32, 720u32);
+        let pixels = vec![90u8; (w * h * 4) as usize];
+        let t0 = session.epoch_ns;
+        for i in 0..90u64 {
+            let view = ImageView::new(w, h, (w * 4) as usize, &pixels, PixelOrder::Rgba);
+            let mut frame = crate::sources::Whole { view, seen_ns: t0 + i * 33_000_000 };
+            assert_eq!(session.process(&mut frame).unwrap(), Processed::Frame);
+        }
+        assert!(session.stats.strip_missing_s > 2.9, "{}", session.stats.strip_missing_s);
+        assert_eq!((session.stats.frames, session.stats.strip_ok, session.stats.keyframes), (90, 0, 0));
+        let finished = session.finish();
+        assert_eq!((finished.manifest.stats.frames, finished.manifest.stats.keyframes, finished.manifest.stats.depth_frames), (90, 0, 0));
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn stretches_without_the_strip_are_counted() {
         let (root, mut session, _) = pattern_session("strip-gaps", 0);
         session.take_warnings();
         let s = |seconds: f64| (seconds * 1e9) as u64;
-        // Nothing seen yet (no kit, or not yet in view): nothing is missing.
+        // No strip yet: the service reads how long (Local User off, or an avatar without the kit, never give one).
         session.strip_missed(s(0.5));
-        assert_eq!((session.stats.strip_missing_s, session.strip_missing()), (0.0, (0, 0)));
-        session.strip_read(s(1.0));
+        session.last_frame_ns = s(3.0);
+        session.strip_missed(s(3.0));
+        assert_eq!(session.stats.strip_missing_s, 2.5);
+        session.strip_read(s(3.5));
+        assert_eq!(session.stats.strip_missing_s, 0.0);
+        session.strip_missing_ns = 0;
+        session.strip_first_ns = Some(s(1.0));
         // A blink of half a second is no stretch.
         session.strip_missed(s(2.0));
         session.strip_read(s(2.5));
         assert_eq!(session.strip_missing().0, 0);
-        // Eight seconds without it: told once, past three seconds.
+        // Eight seconds without it, read by the service as they go.
         for tenth in 30..110 {
             session.last_frame_ns = s(tenth as f64 / 10.0);
             session.strip_missed(session.last_frame_ns);
         }
         assert!((session.stats.strip_missing_s - 7.9).abs() < 0.01, "{}", session.stats.strip_missing_s);
-        let told: Vec<_> = session.take_warnings().into_iter().filter(|(k, _)| *k == Warning::Strip).collect();
-        assert_eq!(told.len(), 1, "{told:?}");
         session.strip_read(s(11.0));
         assert_eq!(session.stats.strip_missing_s, 0.0);
         // A stretch still open at the end counts too: 8 s, then 4 of the last 4.
@@ -1678,6 +1960,49 @@ mod tests {
         std::fs::remove_dir_all(&root).ok();
     }
 
+    /// A rig frame's six faces become views of their own: records after their frame's, with the face's pose and size,
+    /// their tiles as keyframes; a face rendered in another frame is left out; the frame's own record names no picture.
+    #[test]
+    fn rig_frames_record_their_faces_as_views() {
+        let (root, mut session, src) = pattern_session("rig", 24);
+        let mut src = src.with_rig(Some(4));
+        while !matches!(src.next(std::time::Duration::from_millis(10), &mut |v| assert_eq!(session.process(v).unwrap(), Processed::Frame)), Ok(Next::End)) {}
+        let (late, faces) = (session.stats.rig_faces_late, session.stats.rig_faces);
+        let finished = session.finish();
+        assert!(finished.warnings.is_empty(), "{:?}", finished.warnings);
+        let records = bundle::read_records(&finished.dir).unwrap();
+        // 24 frames: 6 depth frames (index % 4 == 3), 6 rig frames (the other odd ones), each with 5 current faces.
+        let rig_frames: Vec<_> =
+            records.iter().filter(|r| strip::flags::kind(r.strip_flags) == strip::flags::KIND_RIG && strip::flags::face(r.strip_flags) == 0).collect();
+        assert_eq!(rig_frames.len(), 6);
+        assert_eq!((faces, late), (30, 6));
+        assert_eq!(records.len(), 24 + 30);
+        assert!(records.windows(2).all(|w| w[1].frame_index == w[0].frame_index + 1), "consecutive frame indices");
+        let layout = rig::RigLayout::new(1280, 720).unwrap();
+        for frame in &rig_frames {
+            assert!(!frame.has(record_flags::KEYFRAME) && !frame.has(record_flags::DEPTH));
+            let faces: Vec<_> =
+                records.iter().skip_while(|r| r.frame_index <= frame.frame_index).take_while(|r| strip::flags::face(r.strip_flags) != 0).collect();
+            assert_eq!(faces.iter().map(|r| strip::flags::face(r.strip_flags)).collect::<Vec<_>>(), vec![2, 5, 1, 6, 3]);
+            for r in faces {
+                let face = strip::flags::face(r.strip_flags);
+                assert_eq!((r.width, r.height, r.game_time.to_bits()), (layout.face, layout.face, frame.game_time.to_bits()));
+                assert_eq!(r.camera_to_world, rig::face_camera_to_world(&frame.camera_to_world, face));
+                assert_eq!(r.projection, rig::PROJECTION);
+            }
+        }
+        // Each face's first view is a keyframe: its tile, at the face's size, showing its face's colour.
+        for face in [1u32, 2, 3, 5, 6] {
+            let r = records.iter().find(|r| strip::flags::face(r.strip_flags) == face && r.has(record_flags::KEYFRAME)).unwrap();
+            let (hdr, rgb) = qoi::decode_rgba(&std::fs::read(finished.dir.join("keyframes").join(bundle::keyframe_file(r.keyframe_index))).unwrap()).unwrap();
+            assert_eq!((hdr.width, hdr.height), (layout.face, layout.face));
+            let mid = ((layout.face / 2 * layout.face + 5) * 4) as usize;
+            assert_eq!(rgb[mid], (face * 40) as u8, "face {face}");
+        }
+        assert!(records.iter().all(|r| strip::flags::face(r.strip_flags) != 4));
+        std::fs::remove_dir_all(&root).ok();
+    }
+
     #[test]
     fn test_pattern_session_end_to_end() {
         let root = std::env::temp_dir().join(format!("orbiters-capture-{}", std::process::id()));
@@ -1695,6 +2020,7 @@ mod tests {
         };
         let mut src = TestPatternSource::new(1280, 720, 30.0, 4, 60, false);
         let mut session = CaptureSession::start(&cmd, src.describe(), &src.folder_hint()).unwrap();
+        let mut hips = Vec::new();
         loop {
             let mut outcome = None;
             match src.next(std::time::Duration::from_millis(10), &mut |v| outcome = Some(session.process(v))) {
@@ -1703,7 +2029,11 @@ mod tests {
                 Ok(Next::Timeout) => {}
                 Err(e) => panic!("{e}"),
             }
+            hips.extend(session.take_hips());
         }
+        // Each band's hips, once, for N4N0's camera rig (the app hangs it from them).
+        assert_eq!(hips.len(), 45, "the colour frames' bands");
+        assert!(session.take_hips().is_none(), "taken");
         assert_eq!((session.stats.dropped, session.stats.depth_dropped), (0, 0), "a test pattern waits for the encoders");
         let finished = session.finish();
         assert!(finished.warnings.is_empty(), "{:?}", finished.warnings);
@@ -1729,6 +2059,8 @@ mod tests {
         assert_eq!(manifest.performance.skeleton_frames, 45);
         let frames = skeleton_frames::read(&std::fs::read(dir.join(orbiters_contracts::performance::SKELETON_FILE)).unwrap()).unwrap();
         assert_eq!(frames.len(), 45);
+        let last = frames.last().unwrap();
+        assert_eq!(hips.last().copied(), Some((last.hips, last.rotations[0].unwrap())), "the last band's");
         let colour: Vec<_> = records.iter().filter(|r| !r.has(record_flags::DEPTH)).collect();
         for (frame, record) in frames.iter().zip(&colour) {
             let want = TestPatternSource::skeleton(frame.game_time);

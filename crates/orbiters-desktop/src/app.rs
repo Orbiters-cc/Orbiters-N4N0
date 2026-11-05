@@ -10,7 +10,7 @@ use egui::{pos2, vec2, Align2, CursorIcon, Id, Rect, ResizeDirection, Sense, Ui,
 use orbiters_ui::anim::{self, ease, Spring};
 use orbiters_ui::glow::{self, Mood};
 use orbiters_ui::theme::{self, weight, Txt};
-use orbiters_ui::{icons, logo, toast, widgets};
+use orbiters_ui::{icons, n4n0_logo, toast, widgets};
 use std::sync::Arc;
 
 pub(crate) const TITLE_H: f32 = 40.0;
@@ -33,10 +33,13 @@ pub struct App {
     toasts: toast::Toasts,
     home: pages::home::State,
     capture: pages::capture::State,
+    projects: pages::projects::State,
     sessions: pages::sessions::State,
     worlds: pages::worlds::State,
+    events: pages::events::State,
+    videos: pages::videos::State,
     settings: pages::settings::State,
-    orb: pages::orb::State,
+    n4n0: pages::n4n0::State,
     logo_glitch: Option<(f64, f32)>,
     logo_hovered: bool,
 }
@@ -74,10 +77,13 @@ impl App {
             toasts: toast::Toasts::default(),
             home: Default::default(),
             capture: Default::default(),
+            projects: Default::default(),
             sessions: Default::default(),
             worlds: Default::default(),
+            events: Default::default(),
+            videos: Default::default(),
             settings: Default::default(),
-            orb: Default::default(),
+            n4n0: Default::default(),
             logo_glitch: None,
             logo_hovered: false,
         }
@@ -91,8 +97,8 @@ impl App {
         if self.page == Page::Settings && page != Page::Settings {
             self.settings.stop_mic_test();
         }
-        if self.page == Page::Orb && page != Page::Orb {
-            self.orb.leave(&self.ctl);
+        if self.page == Page::N4n0 && page != Page::N4n0 {
+            self.n4n0.leave(&self.ctl);
         }
         // Home again while a feature's page shows: back to Home itself.
         if page == Page::Home && self.page == Page::Home {
@@ -122,6 +128,22 @@ impl App {
         &mut self.worlds
     }
 
+    pub fn events_mut(&mut self) -> &mut pages::events::State {
+        &mut self.events
+    }
+
+    pub fn videos_mut(&mut self) -> &mut pages::videos::State {
+        &mut self.videos
+    }
+
+    pub fn projects_mut(&mut self) -> &mut pages::projects::State {
+        &mut self.projects
+    }
+
+    pub(crate) fn stage_vrchat_login(&mut self) {
+        self.settings.stage_vrchat(true);
+    }
+
     pub fn toasts_mut(&mut self) -> &mut toast::Toasts {
         &mut self.toasts
     }
@@ -131,6 +153,9 @@ impl App {
         match self.page {
             Page::Sessions => self.sessions.busy(),
             Page::Worlds => self.worlds.busy(),
+            Page::Events => self.events.busy(),
+            Page::Videos => self.videos.busy(),
+            Page::Projects => self.projects.busy(),
             _ => false,
         }
     }
@@ -168,6 +193,10 @@ impl App {
     pub fn draw(&mut self, ui: &mut Ui) {
         let ctx = ui.ctx().clone();
         let snap = self.ctl.view();
+        // This process reads Orbiters too (the Map explorer's public pages): from the environment the service uses.
+        if snap.settings.development != orbiters_update::development() {
+            crate::controller::use_environment(snap.settings.development);
+        }
         let now = anim::time(&ctx);
         let started = *self.started.get_or_insert(now);
         if self.visit == 0 {
@@ -280,8 +309,8 @@ impl App {
         let id = Id::unique("orbiters-sidebar");
         let inner = rect.shrink2(vec2(16.0, 0.0));
 
-        // Logo and name; hovering replays the signal glitch.
-        let logo_rect = Rect::from_min_size(pos2(inner.left() + 8.0, inner.top() + 8.0), logo::size_for_width(36.0));
+        // The N4N0 mark and the app's name; hovering replays the signal glitch.
+        let logo_rect = Rect::from_min_size(pos2(inner.left() + 8.0, inner.top() + 8.0), n4n0_logo::size_for_width(36.0));
         let row = Rect::from_min_size(logo_rect.min, vec2(150.0, logo_rect.height()));
         let hovered = ui.interact(row, id.with("logo"), Sense::hover()).hovered();
         if hovered && !self.logo_hovered {
@@ -289,24 +318,28 @@ impl App {
         }
         self.logo_hovered = hovered;
         let intro = self.sidebar_intro(now);
-        logo::paint(ui.painter(), logo_rect, logo::Look { glitch: self.logo_glitch.or(intro), ..Default::default() });
+        n4n0_logo::paint_glitched(ui.painter(), logo_rect, self.logo_glitch.or(intro));
         let p = ui.painter();
         widgets::text(
             p,
             pos2(logo_rect.right() + 12.0, logo_rect.center().y - 8.0),
             Align2::LEFT_CENTER,
-            &Txt::new("Orbiters", 17.0).weight(weight::SEMIBOLD).tracking(-0.01),
+            &Txt::new("N4N0", 17.0).weight(weight::SEMIBOLD).tracking(0.02),
         );
-        widgets::text(p, pos2(logo_rect.right() + 12.0, logo_rect.center().y + 10.0), Align2::LEFT_CENTER, &Txt::new("N4N0", 11.5).color(theme::FG_3));
+        widgets::text(p, pos2(logo_rect.right() + 12.0, logo_rect.center().y + 10.0), Align2::LEFT_CENTER, &Txt::new("Orbiters", 11.5).color(theme::FG_3));
+        self.update_button(ui, snap, pos2(inner.right(), logo_rect.center().y), id.with("update"));
 
         // Navigation with a pill that slides to the active page.
         let nav_top = logo_rect.bottom() + 28.0;
         let items = [
             (Page::Home, "Home", icons::HOUSE),
-            (Page::Orb, "N4N0", icons::SMILEY),
+            (Page::N4n0, "N4N0", icons::N4N0),
             (Page::Capture, "Capture", icons::APERTURE),
-            (Page::Sessions, "Sessions", icons::FOLDER_OPEN),
+            (Page::Projects, "Unity projects", icons::CUBE),
+            (Page::Sessions, "Photos & captures", icons::IMAGES),
             (Page::Worlds, "Visited worlds", icons::GLOBE),
+            (Page::Events, "Events", icons::CALENDAR_DOTS),
+            (Page::Videos, "Videos", icons::FILM_STRIP),
             (Page::Settings, "Settings", icons::SLIDERS_HORIZONTAL),
         ];
         let item_rect = |i: usize| Rect::from_min_size(pos2(inner.left(), nav_top + i as f32 * 48.0), vec2(inner.width(), 44.0));
@@ -359,33 +392,11 @@ impl App {
             }
         }
 
-        // Status at the bottom.
+        // Status at the bottom: the version, and the development environment when it is the one in use.
         let bottom = inner.bottom() - 16.0;
-        if let UpdateState::Ready { version, .. } = &snap.update.state {
-            // A downloaded update: the version gives way to the restart that installs it.
-            let waiting = snap.update.restart_when_idle;
-            let label = if waiting { "Restarts once done" } else { "Update ready · Restart" };
-            let tip = if waiting {
-                format!("Version {version} installs once {} ends (Settings, About)", snap.busy_with().unwrap_or("the running work"))
-            } else {
-                format!("Version {version}: restart Orbiters - N4N0 to install it")
-            };
-            let txt = Txt::new(label, 11.5).weight(weight::MEDIUM).color(theme::ACCENT);
-            let pill = Rect::from_min_size(pos2(inner.left() + 2.0, bottom - 18.0), vec2(widgets::text_size(ui, &txt).x + 38.0, 24.0));
-            let resp = ui.interact(pill, id.with("update"), Sense::click()).on_hover_text(tip);
-            let resp = if waiting { resp } else { resp.on_hover_cursor(CursorIcon::PointingHand) };
-            let hover = anim::toggle(&ctx, id.with("update-hover"), !waiting && resp.hovered(), Spring::SNAPPY);
-            let p = ui.painter();
-            p.rect_filled(pill, theme::radius(12.0), theme::alpha(theme::ACCENT, 0.12 + 0.08 * hover));
-            widgets::icon(p, pos2(pill.left() + 15.0, pill.center().y), icons::ARROW_COUNTER_CLOCKWISE, 13.0, theme::ACCENT);
-            widgets::text(p, pos2(pill.left() + 27.0, pill.center().y), Align2::LEFT_CENTER, &txt);
-            if !waiting && widgets::pressed(&resp) {
-                self.ctl.updates(UpdateAction::Restart { now: false });
-            }
-        } else {
-            let version = Txt::new(format!("v{}", snap.version), 11.0).color(theme::FG_4);
-            widgets::text(ui.painter(), pos2(inner.left() + 8.0, bottom - 6.0), Align2::LEFT_CENTER, &version);
-        }
+        let version = if snap.settings.development { format!("v{} · development", snap.version) } else { format!("v{}", snap.version) };
+        let version = Txt::new(version, 11.0).color(if snap.settings.development { theme::WARN } else { theme::FG_4 });
+        widgets::text(ui.painter(), pos2(inner.left() + 8.0, bottom - 6.0), Align2::LEFT_CENTER, &version);
         let osc = &snap.osc;
         let osc_tone = if osc.listening {
             if osc.advertising {
@@ -417,6 +428,55 @@ impl App {
         side_status(ui, pos2(inner.left(), bottom - 34.0 - 132.0), "Orbiters", &account_text, account_tone, inner.width());
     }
 
+    /// The Update button beside the name (its right edge at `right_center`), as soon as a newer version is found: a
+    /// progress ring while it downloads, then the green button that restarts into it (or, while a recording or another
+    /// job would be cut short, what it waits for). Nothing while the app is up to date.
+    fn update_button(&mut self, ui: &mut Ui, snap: &Snapshot, right_center: egui::Pos2, id: Id) {
+        let ctx = ui.ctx().clone();
+        let u = &snap.update;
+        let (label, tip, fraction, live) = match &u.state {
+            UpdateState::Downloading { version, fraction } => {
+                ("Update", format!("Downloading version {version}: {:.0} %", fraction * 100.0), Some(*fraction), false)
+            }
+            UpdateState::Ready { version, .. } if u.restart_when_idle => {
+                ("Waiting", format!("Version {version} installs once {} ends (Settings, About)", snap.busy_with().unwrap_or("the running work")), None, false)
+            }
+            UpdateState::Ready { version, notes } => {
+                let first = notes.lines().map(str::trim).find(|l| !l.is_empty()).map(|l| format!("\n{l}")).unwrap_or_default();
+                let tip = match snap.busy_with() {
+                    Some(work) => format!("Version {version} is ready: it installs once {work} ends{first}"),
+                    None => format!("Version {version} is ready: Orbiters - N4N0 restarts to install it{first}"),
+                };
+                ("Update", tip, None, true)
+            }
+            _ => return,
+        };
+        let txt = Txt::new(label, 11.5).weight(weight::SEMIBOLD).color(if live { theme::ON_ACCENT } else { theme::ACCENT });
+        let w = widgets::text_size(ui, &txt).x + 34.0;
+        let pill = Rect::from_min_size(pos2(right_center.x - w, right_center.y - 13.0), vec2(w, 26.0));
+        let resp = ui.interact(pill, id, Sense::click()).on_hover_text(tip);
+        let resp = if live { resp.on_hover_cursor(CursorIcon::PointingHand) } else { resp };
+        let hover = anim::toggle(&ctx, id.with("hover"), live && resp.hovered(), Spring::SNAPPY);
+        let press = anim::toggle(&ctx, id.with("press"), live && resp.is_pointer_button_down_on(), Spring::SNAPPY);
+        let shown = Rect::from_center_size(pill.center(), pill.size() * (1.0 - 0.06 * press));
+        let p = ui.painter();
+        let fill = if live { theme::mix(theme::ACCENT, theme::ACCENT_HOVER, hover) } else { theme::alpha(theme::ACCENT, 0.14) };
+        p.rect_filled(shown, theme::radius(13.0), fill);
+        let at = pos2(shown.left() + 13.0, shown.center().y);
+        match fraction {
+            Some(f) => {
+                orbiters_ui::paint::ring(p, at, 5.0, 2.0, theme::alpha(theme::ACCENT, 0.3));
+                orbiters_ui::paint::arc(p, at, 5.0, -std::f32::consts::FRAC_PI_2, std::f32::consts::TAU * f.clamp(0.0, 1.0), 2.0, theme::ACCENT);
+                ctx.request_repaint_after(std::time::Duration::from_millis(200));
+            }
+            None => widgets::icon(p, at, icons::DOWNLOAD_SIMPLE, 12.5, if live { theme::ON_ACCENT } else { theme::ACCENT }),
+        }
+        widgets::text(p, pos2(shown.left() + 23.0, shown.center().y), Align2::LEFT_CENTER, &txt);
+        if live && widgets::pressed(&resp) {
+            self.ctl.updates(UpdateAction::Restart { now: false });
+        }
+    }
+
     /// The intro glitch of the sidebar logo, once, right after the splash.
     fn sidebar_intro(&self, now: f64) -> Option<(f64, f32)> {
         let since = self.sidebar_since?;
@@ -444,10 +504,13 @@ impl App {
         };
         match self.page {
             Page::Home => pages::home::show(&mut child, &mut cx, &mut self.home),
-            Page::Capture => pages::capture::show(&mut child, &mut cx, &mut self.capture),
-            Page::Orb => pages::orb::show(&mut child, &mut cx, &mut self.orb),
+            Page::Capture => pages::capture::show(&mut child, &mut cx, &mut self.capture, &mut self.projects),
+            Page::Projects => pages::projects::show(&mut child, &mut cx, &mut self.projects),
+            Page::N4n0 => pages::n4n0::show(&mut child, &mut cx, &mut self.n4n0),
             Page::Sessions => pages::sessions::show(&mut child, &mut cx, &mut self.sessions),
             Page::Worlds => pages::worlds::show(&mut child, &mut cx, &mut self.worlds),
+            Page::Events => pages::events::show(&mut child, &mut cx, &mut self.events),
+            Page::Videos => pages::videos::show(&mut child, &mut cx, &mut self.videos),
             Page::Settings => pages::settings::show(&mut child, &mut cx, &mut self.settings),
         }
         if let Some(go) = cx.go {
@@ -456,6 +519,7 @@ impl App {
                     self.set_page(Page::Sessions, anim::time(&ctx));
                     self.sessions.open_storage(false);
                 }
+                pages::Go::Projects => self.set_page(Page::Projects, anim::time(&ctx)),
             }
         }
     }
@@ -497,18 +561,18 @@ fn splash(ctx: &egui::Context, full: Rect, t: f64) {
         let lift = 1.0 + 0.04 * (1.0 - fade);
         let center = full.center() - vec2(0.0, 36.0);
         // Rasterised at its resting size and scaled as it grows: one set of textures, not one per frame's size.
-        let rest = Rect::from_center_size(center, logo::size_for_width(128.0));
+        let rest = Rect::from_center_size(center, n4n0_logo::size_for_width(128.0));
         let logo_rect = Rect::from_center_size(center, rest.size() * scale_k * lift);
         let mut lp = p.clone();
         lp.multiply_opacity(((t / 0.35) as f32).clamp(0.0, 1.0));
-        logo::paint_zoomed(&lp, rest, scale_k * lift, logo::Look { intro_start: Some(start), glitch: Some((start + 0.3, 1.2)) });
+        n4n0_logo::paint_zoomed(&lp, rest, scale_k * lift, Some((start + 0.3, 1.2)));
         let k = ease::segment(t as f32, 0.75, 0.6, ease::out_expo);
         let mut tp = p.clone();
         tp.multiply_opacity(k);
+        // The mark spells N4N0: under it, only who makes it.
         let y = logo_rect.bottom() + 24.0 + 14.0 * (1.0 - k);
-        widgets::text(&tp, pos2(full.center().x, y + 16.0), Align2::CENTER_CENTER, &Txt::new("Orbiters", 28.0).weight(weight::SEMIBOLD).tracking(-0.01));
-        let galley = tp.layout_job(Txt::new("N4N0", 13.0).weight(weight::MEDIUM).tracking(0.32).color(theme::FG_3).job(f32::INFINITY));
-        let at = pos2(full.center().x - galley.size().x * 0.5 + 0.16 * 13.0, y + 44.0 - galley.size().y * 0.5);
+        let galley = tp.layout_job(Txt::new("ORBITERS", 13.0).weight(weight::MEDIUM).tracking(0.32).color(theme::FG_3).job(f32::INFINITY));
+        let at = pos2(full.center().x - galley.size().x * 0.5 + 0.16 * 13.0, y + 6.0 - galley.size().y * 0.5);
         tp.galley(at, galley, theme::FG);
     });
 }
@@ -592,11 +656,20 @@ impl eframe::App for App {
 
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
         self.draw(ui);
+        orbiters_ui::autoscroll::paint(ui.ctx());
+    }
+
+    /// A drag out of the window asked for in the last frame (Photos & captures' cards) runs here, once that frame is on
+    /// screen: Windows' drag loop is modal (`drag_out`).
+    /// Then the mouse wheel's button scrolls what is under it, as in browsers (`orbiters_ui::autoscroll`).
+    fn raw_input_hook(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+        crate::drag_out::run_pending(ctx, raw_input);
+        orbiters_ui::autoscroll::raw_input(ctx, raw_input);
     }
 
     /// The window closes with Talk held: let go of it, or VRChat would stay muted and N4N0 go on listening.
     fn on_exit(&mut self) {
-        self.orb.leave(&self.ctl);
+        self.n4n0.leave(&self.ctl);
     }
 
     fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {

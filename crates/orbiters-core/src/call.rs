@@ -1,5 +1,5 @@
 //! N4N0's calls: the call worker (`orbiters-call`) and its protocol, JSON lines with commands on its stdin
-//! (`{"cmd": …}`) and events on its stdout (`{"event": …}`); the call itself is in contracts `Docs/orb-calls.md`.
+//! (`{"cmd": …}`) and events on its stdout (`{"event": …}`); the call itself is in contracts `Docs/n4n0-calls.md`.
 //!
 //! The service numbers its calls: every command for a call and every event of one carries that number, so a late
 //! event of a call that ended (or of one being replaced) never acts on the next. Candidates are WebRTC's

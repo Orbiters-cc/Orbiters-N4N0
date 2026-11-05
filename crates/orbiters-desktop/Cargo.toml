@@ -10,36 +10,48 @@ name = "orbiters-desktop"
 path = "src/main.rs"
 
 [dependencies]
+orbiters-projects = { workspace = true }
 orbiters-core = { workspace = true }
 orbiters-contracts = { workspace = true }
 orbiters-ui = { workspace = true }
 orbiters-sound = { workspace = true }
-orbiters-orb = { workspace = true }
+orbiters-n4n0-core = { workspace = true }
 orbiters-n4n0 = { workspace = true }
 orbiters-update = { workspace = true, features = ["net"] }
 orbiters-reconstruct = { path = "../orbiters-reconstruct" }
 bytemuck = { workspace = true }
 orbiters-openvr = { workspace = true }
+orbiters-smooth = { path = "../orbiters-smooth" }
 serde = { workspace = true }
 serde_json = { workspace = true }
+sha2 = "0.10"
 uuid = { workspace = true }
 anyhow = { workspace = true }
 time = { workspace = true }
 egui = { workspace = true }
 eframe = { workspace = true }
 png = { workspace = true }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
 rosc = { workspace = true }
 ureq = { version = "3", default-features = false, features = ["json", "native-tls", "gzip"] }
 rfd = "0.17"
 sysinfo = "0.37"
 trash = "5"
 arboard = { version = "3", default-features = false }
+# The QR code scanner (N4N0's menu, More): QR codes in VRChat's stream camera. Pure Rust, MIT or Apache-2.0 (quirc's ISC parts).
+rqrr = { version = "0.11", default-features = false }
 
 [target.'cfg(windows)'.dependencies]
 orbiters-spout = { workspace = true }
-windows = { workspace = true, features = ["Win32_Graphics_Dwm", "Win32_Graphics_Gdi", "Win32_System_Com", "Win32_System_JobObjects", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging", "Media_Control", "Storage_Streams", "Foundation", "Win32_Media_Audio", "Win32_Media_Audio_Endpoints", "Win32_System_Com_StructuredStorage", "Win32_System_Variant"] }
+windows = { workspace = true, features = ["Win32_Graphics_Dwm", "Win32_Graphics_Gdi", "Win32_System_Com", "Win32_System_JobObjects", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging", "Media_Control", "Storage_Streams", "Foundation", "Win32_Media_Audio", "Win32_Media_Audio_Endpoints", "Win32_System_Com_StructuredStorage", "Win32_System_Variant", "Win32_Graphics_Direct3D12"] }
 raw-window-handle = "0.6"
 tray-icon = "0.26"
+
+[dev-dependencies]
+# Draws the QR codes the scanner's tests read.
+qrcode = { version = "0.14", default-features = false }
+# Reads back the SPZ files Export writes (version 3: one gzip stream).
+flate2 = "1"
 
 [target.'cfg(windows)'.build-dependencies]
 winresource = "0.1"

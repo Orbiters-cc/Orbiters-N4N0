@@ -1,8 +1,12 @@
 //! Orbiters - N4N0 capture worker.
 //!
 //! * `orbiters-capture worker` — driven by the app: JSON-lines commands on stdin, events on stdout.
-//! * `orbiters-capture record --source <spout[:name] | raw:<folder> | test> [--out <folder>] [--quality …] [--frames N]`
-//! * `orbiters-capture send-test [--name <sender>] [--width W] [--height H] [--fps F] [--depth-every N] [--seconds S]`
+//! * `orbiters-capture record --source <spout[:name] | raw:<folder> | test> [--extra <sender>,…] [--out <folder>] [--quality …] [--frames N] [--rig]`
+//! * `orbiters-capture send-test [--name <sender>] [--width W] [--height H] [--fps F] [--depth-every N] [--seconds S] [--rig] [--stream K]`
+//!
+//! `--rig`: the test pattern's odd colour frames are capture-rig frames (contracts' Docs/rig-frames.md). `--extra`: more
+//! Spout senders read beside the source, as VRChat's camera dolly streams (`VRCSender2,VRCSender3,VRCSender4`);
+//! `--stream K`: the test pattern seen by another camera, as such a stream (`send-test --name VRCSender2 --stream 1`).
 //! * `orbiters-capture verify <raw capture folder> [--frames N]`
 //! * `orbiters-capture list-sources`
 
@@ -88,7 +92,13 @@ fn check_pattern(width: u32, height: u32, fps: f32) -> anyhow::Result<()> {
 fn open_source(spec: &SourceSpec) -> anyhow::Result<Box<dyn FrameSource>> {
     Ok(match spec {
         #[cfg(windows)]
-        SourceSpec::Spout { name } => Box::new(sources::SpoutSource::new(name)?),
+        SourceSpec::Spout { name, extra } if extra.is_empty() => Box::new(sources::SpoutSource::new(name)?),
+        // VRChat's camera dolly's other streams beside its camera.
+        #[cfg(windows)]
+        SourceSpec::Spout { name, extra } => {
+            let others = extra.iter().map(|n| Ok(Box::new(sources::SpoutSource::new(n)?) as Box<dyn FrameSource>)).collect::<anyhow::Result<Vec<_>>>()?;
+            Box::new(sources::MultiSource::new(Box::new(sources::SpoutSource::new(name)?), others))
+        }
         #[cfg(not(windows))]
         SourceSpec::Spout { .. } => anyhow::bail!("Spout is only available on Windows; use the PipeWire source on Linux"),
         SourceSpec::RawSequence { path, realtime } => Box::new(RawSequenceSource::open(path, *realtime)?),
@@ -103,7 +113,7 @@ fn parse_source(text: &str) -> anyhow::Result<SourceSpec> {
     Ok(if text == "test" {
         SourceSpec::TestPattern { width: 1920, height: 1080, fps: 30.0, depth_every: 4, frames: 300 }
     } else if let Some(name) = text.strip_prefix("spout") {
-        SourceSpec::Spout { name: name.trim_start_matches(':').to_string() }
+        SourceSpec::Spout { name: name.trim_start_matches(':').to_string(), extra: Vec::new() }
     } else if let Some(path) = text.strip_prefix("raw:") {
         SourceSpec::RawSequence { path: PathBuf::from(path), realtime: false }
     } else {
@@ -169,7 +179,10 @@ fn run_session(source: &mut dyn FrameSource, session: &mut CaptureSession, max_f
 }
 
 fn cli_record(args: &[String]) -> anyhow::Result<()> {
-    let source_spec = parse_source(flag(args, "--source").unwrap_or("spout"))?;
+    let mut source_spec = parse_source(flag(args, "--source").unwrap_or("spout"))?;
+    if let (SourceSpec::Spout { extra, .. }, Some(names)) = (&mut source_spec, flag(args, "--extra")) {
+        *extra = names.split(',').map(str::trim).filter(|n| !n.is_empty()).map(String::from).collect();
+    }
     let out = flag(args, "--out").map(PathBuf::from).unwrap_or_else(orbiters_core::paths::default_sessions_dir);
     let cmd = StartCapture {
         source: source_spec.clone(),
@@ -189,7 +202,8 @@ fn cli_record(args: &[String]) -> anyhow::Result<()> {
     };
     let mut source = match &source_spec {
         SourceSpec::TestPattern { width, height, fps, depth_every, frames } => {
-            Box::new(TestPatternSource::new(*width, *height, *fps, *depth_every, *frames, false)) as Box<dyn FrameSource>
+            let pattern = TestPatternSource::new(*width, *height, *fps, *depth_every, *frames, false);
+            Box::new(if args.iter().any(|a| a == "--rig") { pattern.with_rig(None) } else { pattern }) as Box<dyn FrameSource>
         }
         other => open_source(other)?,
     };
@@ -224,6 +238,8 @@ fn cli_send_test(args: &[String]) -> anyhow::Result<()> {
         check_pattern(width, height, fps)?;
         let mut sender = orbiters_spout::Sender::new(name, width, height)?;
         let pattern = TestPatternSource::new(width, height, fps, depth_every, 0, false);
+        let pattern = if args.iter().any(|a| a == "--rig") { pattern.with_rig(None) } else { pattern };
+        let pattern = pattern.with_stream(flag(args, "--stream").and_then(|v| v.parse().ok()).unwrap_or(0));
         eprintln!("sending \"{name}\" {width}x{height} at {fps} fps (Ctrl+C to stop)");
         let start = Instant::now();
         let mut i = 0u32;
@@ -401,6 +417,7 @@ fn run_worker() -> anyhow::Result<()> {
     let mut paused = false;
     let mut last_stats = Instant::now();
     let mut last_coverage = Instant::now();
+    let mut last_hips = Instant::now();
     let listing = Arc::new(AtomicBool::new(false));
 
     loop {
@@ -509,6 +526,13 @@ fn run_worker() -> anyhow::Result<()> {
                     _ => {}
                 }
             }
+            // The hips as often as the app's rig follower looks (controller/rig.rs), the latest read.
+            if last_hips.elapsed() >= Duration::from_millis(30) {
+                if let Some((position, rotation)) = r.session.take_hips() {
+                    out.emit(&WorkerEvent::Hips { position, rotation });
+                    last_hips = Instant::now();
+                }
+            }
             if last_stats.elapsed() >= Duration::from_millis(250) {
                 let described = r.source.describe();
                 if described != r.described {
@@ -557,7 +581,7 @@ mod tests {
     #[test]
     fn a_session_starting_over_starts_as_things_are_now() {
         let mut start = StartCapture {
-            source: SourceSpec::Spout { name: String::new() },
+            source: SourceSpec::Spout { name: String::new(), extra: Vec::new() },
             sessions_dir: PathBuf::from("unused"),
             mode: CaptureMode::RecordOnly,
             quality: StorageQuality::High,

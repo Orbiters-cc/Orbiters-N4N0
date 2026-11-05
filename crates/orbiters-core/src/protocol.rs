@@ -55,8 +55,14 @@ pub struct OscSample {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum SourceSpec {
-    /// A Spout sender; an empty name picks VRChat's sender when present, else the active one.
-    Spout { name: String },
+    /// A Spout sender; an empty name picks VRChat's sender when present, else the active one. `extra` senders are read
+    /// beside it whenever they send (VRChat's camera dolly's other streams, `VRCSender2` to `VRCSender4`): their frames
+    /// carry the capture strip of their own camera and join the session as views of their own.
+    Spout {
+        name: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        extra: Vec<String>,
+    },
     /// A raw capture folder (Mixer's simulator). `realtime` paces frames at the capture's fps.
     RawSequence { path: PathBuf, realtime: bool },
     /// Generated frames with valid strips and depth frames, for checks without VRChat or Unity.
@@ -219,9 +225,20 @@ pub struct CaptureStats {
     pub skeleton_frames: u64,
     /// Depth frames dropped because decoding them fell behind.
     pub depth_dropped: u64,
-    /// Seconds since a frame's strip was last read, while frames keep coming and after it was read once (0 while it
-    /// is read): frames without it have no camera pose, so no keyframe. The capture kit's "Near you" reach draws it
-    /// only while the camera sees the avatar or is near it.
+    /// Faces of the capture rig's frames recorded as views of their own (contracts' Docs/rig-frames.md), and faces left
+    /// out because their camera rendered in another frame than the strip's (or their stamp could not be read).
+    pub rig_faces: u64,
+    pub rig_faces_late: u64,
+    /// Frames from the extra senders (the camera dolly's other streams) and the keyframes they gave; their frames of
+    /// another size than the main stream's, left out.
+    #[serde(default)]
+    pub extra_frames: u64,
+    #[serde(default)]
+    pub extra_keyframes: u64,
+    #[serde(default)]
+    pub extra_other_size: u64,
+    /// Seconds since a frame's strip was last read, or since the first frame when none was yet (0 while it is read):
+    /// frames without it have no camera pose, so no keyframe. The service says why (`controller::hide_self::NoStrip`).
     pub strip_missing_s: f32,
     /// What went wrong that the recording goes on without (a microphone that could not be opened, files that could
     /// not be written), the latest of each kind. The strip's state is in `last_error`. The worker also sends each as
@@ -246,6 +263,12 @@ pub enum WorkerEvent {
         source: String,
     },
     Stats(CaptureStats),
+    /// The avatar's hips as the latest colour frame's skeleton band gave them (world position, and rotation x, y, z,
+    /// w), at most about 30 times a second: where N4N0's camera rig hangs from (contracts' `Docs/rig-frames.md`).
+    Hips {
+        position: [f32; 3],
+        rotation: [f32; 4],
+    },
     /// About once a second while recording: what the depth frames have seen so far.
     Coverage(CoverageMap),
     Stopped {
@@ -305,7 +328,7 @@ mod tests {
     #[test]
     fn json_shapes() {
         let c = WorkerCommand::Start(Box::new(StartCapture {
-            source: SourceSpec::Spout { name: "VRChat".into() },
+            source: SourceSpec::Spout { name: "VRChat".into(), extra: Vec::new() },
             sessions_dir: "C:/s".into(),
             mode: CaptureMode::RecordOnly,
             quality: StorageQuality::High,

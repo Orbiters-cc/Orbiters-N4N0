@@ -14,6 +14,13 @@ every crate built into the programs, and of the native libraries next to them, a
 | AccessKit | MIT OR Apache-2.0 |
 | tray-icon, muda | MIT OR Apache-2.0 |
 | rfd | MIT |
+| vrc-get-vpm (ALCOM's VPM resolver), vrc-get-litedb (shared VCC project database) | MIT |
+| ALCOM 2022.3.22f1 avatar/world project template assets (anatawa12 and contributors, vendored in orbiters-projects/templates) | MIT |
+| reqwest, hyper, tower, rustls (VPM downloads) | MIT OR Apache-2.0, MIT, MIT, Apache-2.0 OR ISC OR MIT |
+| walkdir, winreg (Unity project discovery) | MIT OR Unlicense, MIT |
+| ufbx (bindings and the bundled ufbx C library, Samuli Raivio; FBX and OBJ models of Unity projects' 3D previews), mint | MIT OR Unlicense, MIT |
+| tiff, weezl (TIFF textures of Unity projects' 3D previews) | MIT |
+| exr, lebe, zune-inflate, pulp, raw-cpuid, reborrow, bit_field, num-complex, paste (EXR lightmaps and skies of Unity projects' 3D previews) | BSD-3-Clause, BSD-3-Clause, MIT OR Apache-2.0 OR Zlib, MIT, MIT, MIT, MIT OR Apache-2.0, MIT OR Apache-2.0, MIT OR Apache-2.0 |
 | tiny-skia | BSD-3-Clause |
 | png | MIT OR Apache-2.0 |
 | bytemuck | Zlib OR Apache-2.0 OR MIT |
@@ -31,8 +38,9 @@ every crate built into the programs, and of the native libraries next to them, a
 | sha2 (RustCrypto) | MIT OR Apache-2.0 |
 | socket2 | MIT OR Apache-2.0 |
 | if-addrs | MIT OR BSD-3-Clause |
-| rayon, fastrand (the reconstruction) | MIT OR Apache-2.0, Apache-2.0 OR MIT |
+| rayon, fastrand (the reconstruction; rayon also the photo editor) | MIT OR Apache-2.0, Apache-2.0 OR MIT |
 | zune-jpeg, zune-core (N4N0's thumbnails) | MIT OR Apache-2.0 OR Zlib |
+| ort, ort-sys (ONNX Runtime bindings; the reconstruction's face detector) | MIT OR Apache-2.0 |
 | rosc | MIT OR Apache-2.0 |
 | mdns-sd | Apache-2.0 OR MIT |
 | sysinfo | MIT |
@@ -56,6 +64,12 @@ every crate built into the programs, and of the native libraries next to them, a
 | sherpa-onnx C API (`sherpa-onnx-c-api.dll`, prebuilt by k2-fsa) | Apache-2.0 |
 | ONNX Runtime (`onnxruntime.dll`, Microsoft) | MIT |
 
+## Models distributed with the app
+
+| Model | License |
+|---|---|
+| FacesV1 (`faces-v1-int8.onnx`, next to the reconstruction worker): a YOLOv8m face detector (one class, `face`) trained with Ultralytics 8.0.211 on 2023-11-17 from `yolov8m.pt`; exported to ONNX and its convolutions quantized to int8 by Orbiters. No Ultralytics code ships or runs: ONNX Runtime runs the file. | Published on Civitai under MIT, as its uploader tagged it (reported by Enzo Dutra, 2026-11-04; no link, author or licence text known, and the checkpoint carries none). **Unconfirmed:** weights trained from Ultralytics' pretrained `yolov8m.pt` may fall under Ultralytics' AGPL-3.0 or Enterprise terms whatever the tag says. To be settled before a release outside development. |
+
 ## Models downloaded when the person asks (N4N0's ears), not distributed with the app
 
 | Model | License |
@@ -70,6 +84,8 @@ every crate built into the programs, and of the native libraries next to them, a
 | Phosphor Icons 2.1 (regular and fill), embedded; files from the egui-phosphor crate (MIT OR Apache-2.0) | MIT, see `crates/orbiters-ui/assets/Phosphor-LICENSE.txt` |
 | egui's fallback fonts (epaint_default_fonts): Ubuntu Light, Hack, Noto Emoji, emoji-icon-font | Ubuntu Font Licence 1.0, MIT / Bitstream Vera, SIL Open Font License 1.1, MIT |
 | Segoe UI Variable, Segoe UI, Cascadia Mono, Consolas (Windows) or the system's sans fonts (Linux) | Read from the system at run time, not distributed |
+| The photo editor's text fonts, embedded: Inter ExtraBold (The Inter Project Authors), and the Toolkit photoshoot's set from My Avatar: Bonbon (Cyreal), Creepster (Font Diner), Diplomata (The Diplomata Project Authors), JetBrains Mono (The JetBrains Mono Project Authors), Matemasie (The Matemasie-Font Project Authors), Monoton (Vernon Adams), Pirata One (Rodrigo Fuenzalida, Nicolas Massi), Plaster (Sorkin Type Co) | SIL Open Font License 1.1, see `crates/orbiters-ui/assets/fonts/<family>/OFL.txt` |
+| Fonts installed on the computer, offered to the photo editor's text | Read from the system when used, not distributed |
 
 ## Protocols and formats implemented from their specifications
 
@@ -78,6 +94,6 @@ every crate built into the programs, and of the native libraries next to them, a
 | Spout2 (Lynn Jarvis / leadedge, BSD-2-Clause) | Orbiters - N4N0 implements the Spout2 sender/receiver protocol (shared memory names and layout, access mutex, frame counter) in Rust, written from the published protocol; no Spout2 SDK code is included. Spout is a trademark of its authors. |
 | QOI image format (Dominic Szablewski) | Implemented from the specification (qoiformat.org). |
 | OSC 1.0 and OSCQuery | OSC messages through rosc; the OSCQuery service follows the OSCQuery proposal used by VRChat. |
-| KillFrenzy Avatar Text (KillFrenzy / Evan Tran, MIT) | N4N0's text panel speaks its pointer and sync-value protocol under N4N0's parameter names (contracts `Docs/orb.md`); the sender is written in Rust from the protocol, no KAT code is included. |
+| KillFrenzy Avatar Text (KillFrenzy / Evan Tran, MIT) | N4N0's text panel speaks its pointer and sync-value protocol under N4N0's parameter names (contracts `Docs/n4n0.md`); the sender is written in Rust from the protocol, no KAT code is included. |
 
 VRChat is a trademark of VRChat Inc. Orbiters - N4N0 is not affiliated with or endorsed by VRChat Inc.

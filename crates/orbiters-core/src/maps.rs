@@ -82,10 +82,62 @@ pub struct WorldPage {
     pub previews: usize,
     #[serde(default)]
     pub picture_count: usize,
+    /// The first page of the members' pictures of it (newest first, 48 at most).
+    #[serde(default, deserialize_with = "pictures")]
+    pub pictures: Vec<WorldPicture>,
 }
 
+/// The server's list as its length, or the number a kept copy wrote (the page's `previews` is written as a count: read
+/// strictly as a list, a kept page never read back).
 fn count<'de, D: serde::Deserializer<'de>>(d: D) -> Result<usize, D::Error> {
-    Ok(Vec::<serde::de::IgnoredAny>::deserialize(d)?.len())
+    Ok(match serde_json::Value::deserialize(d)? {
+        serde_json::Value::Array(items) => items.len(),
+        serde_json::Value::Number(n) => n.as_u64().map_or(0, |n| n as usize),
+        _ => 0,
+    })
+}
+
+/// A member's picture of a world on the Map explorer. Its addresses may be relative to the API.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorldPicture {
+    pub id: u64,
+    #[serde(default)]
+    pub url: Option<String>,
+    #[serde(default)]
+    pub thumbnail_url: Option<String>,
+    #[serde(default)]
+    pub width: Option<u32>,
+    #[serde(default)]
+    pub height: Option<u32>,
+    /// RFC 3339.
+    #[serde(default)]
+    pub taken_at: Option<String>,
+    /// Who shared it.
+    #[serde(default)]
+    pub by: Option<String>,
+}
+
+/// The page's pictures, each read on its own: one the server shapes otherwise is left out, never the page. Reads the
+/// server's (`uploader: { name }`) and the kept copy's (`by`).
+fn pictures<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<WorldPicture>, D::Error> {
+    let raw = Option::<Vec<serde_json::Value>>::deserialize(d)?.unwrap_or_default();
+    Ok(raw
+        .into_iter()
+        .filter_map(|v| {
+            let text = |k: &str| v.get(k).and_then(|x| x.as_str()).map(str::to_string);
+            let whole = |k: &str| v.get(k).and_then(|x| x.as_u64()).and_then(|n| u32::try_from(n).ok());
+            Some(WorldPicture {
+                id: v.get("id")?.as_u64()?,
+                url: text("url"),
+                thumbnail_url: text("thumbnailUrl"),
+                width: whole("width"),
+                height: whole("height"),
+                taken_at: text("takenAt"),
+                by: text("by").or_else(|| v.get("uploader").and_then(|u| u.get("name")).and_then(|n| n.as_str()).map(str::to_string)),
+            })
+        })
+        .collect())
 }
 
 /// What this member added to one world.
@@ -131,6 +183,39 @@ pub struct Added {
     pub skipped: usize,
 }
 
+/// Identity returned by an upload, persisted before a subsequent grant request can fail.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Uploaded {
+    #[serde(rename = "type")]
+    pub kind: crate::shares::Kind,
+    pub id: u64,
+    pub visibility: String,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct UploadedPictures {
+    pub added: Vec<Uploaded>,
+    pub skipped: usize,
+}
+
+/// What a 3D preview sends: VRChat's splat trees for PC, Quest and the coarse first view (the server makes the website's
+/// `.splat` from the PC tree's leaves: OrbitersContracts Docs/capture-sharing.md).
+pub struct PreviewFiles {
+    pub vrchat_pc: Vec<u8>,
+    pub vrchat_quest: Vec<u8>,
+    pub vrchat_coarse: Vec<u8>,
+}
+
+impl PreviewFiles {
+    pub fn len(&self) -> u64 {
+        (self.vrchat_pc.len() + self.vrchat_quest.len() + self.vrchat_coarse.len()) as u64
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
 /// One file of a multipart upload.
 pub struct Part {
     pub field: &'static str,
@@ -162,6 +247,89 @@ pub fn world_page_url(server: crate::account::Server, world_id: &str) -> String 
     format!("{}/maps/{}", server.website().trim_end_matches('/'), world_id)
 }
 
+/// A list of VRChat worlds the overlay's world search shows: a search, or one of VRChat's own lists.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum WorldList {
+    /// Worlds whose name matches (trimmed, at most [`SEARCH_MAX`] characters).
+    Search(String),
+    /// VRChat's popular worlds (Orbiters' featured worlds without a VRChat session).
+    Popular,
+    /// The worlds with the most people in them now (VRChat only).
+    Active,
+    /// The signed-in VRChat account's favorite worlds (VRChat only).
+    Favorites,
+}
+
+/// Worlds a page of a [`WorldList`] holds, as the Map explorer pages them.
+pub const FOUND_PAGE: usize = 24;
+/// Pages of a list read at most (VRChat answers deep offsets slowly, and nobody pages that far in a headset).
+pub const FOUND_PAGES: usize = 20;
+/// Characters a search sends at most (the Map explorer keeps 100).
+pub const SEARCH_MAX: usize = 100;
+
+/// Who answered a [`WorldList`]: VRChat through the member's own session, or Orbiters' public Map explorer.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FoundBy {
+    Vrchat,
+    #[default]
+    Orbiters,
+}
+
+/// A world of a [`WorldList`], with what Orbiters knows of it when Orbiters answered (VRChat's answer knows none).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct FoundWorld {
+    pub world: World,
+    /// People in it now, when VRChat said.
+    #[serde(default)]
+    pub occupants: Option<u32>,
+    /// Members' pictures of it on Orbiters.
+    #[serde(default)]
+    pub pictures: usize,
+    /// Orbiters has a 3D preview of it.
+    #[serde(default)]
+    pub preview: bool,
+}
+
+/// A page of a [`WorldList`].
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct FoundWorlds {
+    pub items: Vec<FoundWorld>,
+    /// Another page follows.
+    pub more: bool,
+    pub source: FoundBy,
+}
+
+/// The Map explorer's path for a page of `list` (`maps/search?q=…&page=…`, `maps/featured?page=…`); `None` for the
+/// lists only VRChat has (a member's favorites, the active worlds).
+pub fn found_path(list: &WorldList, page: usize) -> Option<String> {
+    let page = page.min(FOUND_PAGES);
+    match list {
+        WorldList::Search(q) => {
+            let q: String = q.trim().chars().take(SEARCH_MAX).collect();
+            Some(format!("maps/search?q={}&page={page}", crate::vrchat_api::encode(&q)))
+        }
+        WorldList::Popular => Some(format!("maps/featured?page={page}")),
+        WorldList::Active | WorldList::Favorites => None,
+    }
+}
+
+/// A Map explorer answer (`{ items: [world + { preview, pictures, performance }], hasMore, source }`): each item read on
+/// its own, one shaped otherwise left out, never the page.
+pub fn parse_found(json: &str) -> anyhow::Result<FoundWorlds> {
+    let v: serde_json::Value = serde_json::from_str(json)?;
+    let items = v.get("items").and_then(|i| i.as_array()).ok_or_else(|| anyhow::anyhow!("not a list of worlds"))?;
+    let items = items
+        .iter()
+        .filter_map(|item| {
+            let world: World = serde_json::from_value(item.clone()).ok()?;
+            crate::vrchat_log::is_world_id(&world.world_id).then_some(())?;
+            let pictures = item.get("pictures").and_then(|p| p.as_f64()).filter(|n| n.is_finite() && *n >= 0.0).map_or(0, |n| n as usize);
+            Some(FoundWorld { world, occupants: None, pictures, preview: item.get("preview").is_some_and(|p| p.is_object()) })
+        })
+        .collect();
+    Ok(FoundWorlds { items, more: v.get("hasMore").and_then(|m| m.as_bool()).unwrap_or(false), source: FoundBy::Orbiters })
+}
+
 impl Api {
     /// A world's page; `None` when Orbiters does not list it (not public on VRChat). A server without the Map
     /// explorer (its 404 is not Orbiters' JSON error) is an error, not an unlisted world.
@@ -174,6 +342,25 @@ impl Api {
             return Ok(None);
         }
         Ok(Some(Self::json(response)?))
+    }
+
+    /// A page of `list` from the Map explorer (public, no credential: VRChat's search through the website's account, or
+    /// the worlds Orbiters knows while VRChat cannot be asked). The lists only VRChat has are an error saying so.
+    pub fn find_worlds(&self, list: &WorldList, page: usize) -> anyhow::Result<FoundWorlds> {
+        let Some(path) = found_path(list, page) else {
+            anyhow::bail!(match list {
+                WorldList::Favorites => "Sign in to VRChat in Orbiters - N4N0's Settings to see your favorite worlds.",
+                _ => "Sign in to VRChat in Orbiters - N4N0's Settings to see the worlds people are in now.",
+            })
+        };
+        let response = self.agent().get(&self.url(&path)).call()?;
+        let status = response.status().as_u16();
+        let text = response.into_body().with_config().limit(4 << 20).read_to_string()?;
+        if !(200..300).contains(&status) {
+            let message = serde_json::from_str::<serde_json::Value>(&text).ok().and_then(|v| v.get("error")?.as_str().map(str::to_string));
+            return Err(ApiError { status, message: message.unwrap_or_default() }.into());
+        }
+        parse_found(&text)
     }
 
     /// What this member added, per world.
@@ -197,25 +384,92 @@ impl Api {
         Self::json(response)
     }
 
-    /// Adds a 3D preview (`.splat`) with its sky map (a reconstruction's sky.png, when there is one), replacing this
-    /// member's earlier one of the world. `metadata` holds the start view (`{"view":{"position":[…],"target":[…]}}`),
-    /// quality and capture date.
+    pub fn add_shared_pictures(&self, token: &str, world_id: &str, pictures: Vec<Part>, metadata: &serde_json::Value) -> anyhow::Result<UploadedPictures> {
+        let response = self.multipart(token, &format!("maps/worlds/{}/pictures", world_path(world_id)?), &metadata.to_string(), pictures, |_, _| {})?;
+        crate::shares::json(response)
+    }
+
+    /// Adds a 3D preview with its sky map (a reconstruction's sky.png, when there is one), replacing this member's
+    /// earlier one of the world: VRChat's splat trees (OrbitersContracts Docs/splat-tree.md), the PC one also the
+    /// website's `.splat`. `metadata` holds the start view (`{"view":{"position":[…],"target":[…],"floor":…,
+    /// "eyeHeight":…}}`), quality and capture date.
     pub fn add_preview(
         &self,
         token: &str,
         world_id: &str,
-        splat: Vec<u8>,
+        files: PreviewFiles,
         sky: Option<&Path>,
+        picture: Option<Vec<u8>>,
         metadata: &serde_json::Value,
         progress: impl FnMut(u64, u64) + Send + 'static,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<Uploaded> {
         let world_id = world_path(world_id)?;
-        let mut parts = vec![Part::bytes("splat", format!("{world_id}.splat"), "application/octet-stream", splat)];
+        let tree = |field: &'static str, name: &str, bytes: Vec<u8>| Part::bytes(field, format!("{world_id}-{name}.n4tree"), "application/octet-stream", bytes);
+        let mut parts = vec![
+            tree("vrchatPc", "pc", files.vrchat_pc),
+            tree("vrchatQuest", "quest", files.vrchat_quest),
+            tree("vrchatCoarse", "coarse", files.vrchat_coarse),
+        ];
         if let Some(sky) = sky {
             parts.push(Part::file("sky", "sky.png", "image/png", sky)?);
         }
+        // The capture's own 3D view (contracts Docs/capture-sharing.md, Capture picture): its link previews and cards.
+        if let Some(picture) = picture {
+            parts.push(Part::bytes("picture", format!("{world_id}-capture.jpg"), "image/jpeg", picture));
+        }
         let response = self.multipart(token, &format!("maps/worlds/{world_id}/previews"), &metadata.to_string(), parts, progress)?;
-        Self::json::<serde_json::Value>(response).map(|_| ())
+        crate::shares::json(response)
+    }
+
+    /// Replaces the files of the capture `id` (its owner's: contracts Docs/capture-sharing.md, Updating a capture) with a
+    /// complete new set made after its splats were edited: VRChat's three trees under a key of their own, the sky map and
+    /// the capture's picture (the old ones go when these have none), `metadata` as [`Api::add_preview`]'s, naming the
+    /// `revision` replaced. Answers its item at the next revision. Refused as a [`crate::shares::RevisionConflict`] when
+    /// its files are at another revision; any refusal leaves its files as they were.
+    #[allow(clippy::too_many_arguments)]
+    pub fn replace_capture_files(
+        &self,
+        token: &str,
+        id: u64,
+        revision: u64,
+        files: PreviewFiles,
+        sky: Option<&Path>,
+        picture: Option<Vec<u8>>,
+        metadata: &serde_json::Value,
+        progress: impl FnMut(u64, u64) + Send + 'static,
+    ) -> anyhow::Result<crate::shares::Item> {
+        #[derive(serde::Deserialize)]
+        struct Answer {
+            item: crate::shares::Item,
+        }
+        let tree = |field: &'static str, name: &str, bytes: Vec<u8>| Part::bytes(field, format!("capture-{id}-{name}.n4tree"), "application/octet-stream", bytes);
+        let mut parts = vec![
+            tree("vrchatPc", "pc", files.vrchat_pc),
+            tree("vrchatQuest", "quest", files.vrchat_quest),
+            tree("vrchatCoarse", "coarse", files.vrchat_coarse),
+        ];
+        if let Some(sky) = sky {
+            parts.push(Part::file("sky", "sky.png", "image/png", sky)?);
+        }
+        if let Some(picture) = picture {
+            parts.push(Part::bytes("picture", format!("capture-{id}.jpg"), "image/jpeg", picture));
+        }
+        let mut metadata = metadata.clone();
+        anyhow::ensure!(metadata.is_object(), "The capture's details are not an object");
+        metadata["revision"] = serde_json::json!(revision);
+        let response = self.multipart_with("PUT", token, &format!("captures/capture/{id}/files"), &metadata.to_string(), parts, progress)?;
+        Ok(crate::shares::json::<Answer>(response)?.item)
+    }
+
+    /// Gives a capture uploaded without one its picture (a JPEG of its 3D view), or a new one; answers its item.
+    pub fn set_capture_picture(&self, token: &str, id: u64, jpeg: Vec<u8>) -> anyhow::Result<crate::shares::Item> {
+        #[derive(serde::Deserialize)]
+        struct Answer {
+            item: crate::shares::Item,
+        }
+        let parts = vec![Part::bytes("picture", format!("capture-{id}.jpg"), "image/jpeg", jpeg)];
+        let response = self.multipart(token, &format!("captures/capture/{id}/picture"), "{}", parts, |_, _| {})?;
+        Ok(crate::shares::json::<Answer>(response)?.item)
     }
 
     /// A `multipart/form-data` POST with its JSON in a "metadata" field, reporting the bytes sent. The body is made as
@@ -228,8 +482,29 @@ impl Api {
         parts: Vec<Part>,
         progress: impl FnMut(u64, u64) + Send + 'static,
     ) -> anyhow::Result<ureq::http::Response<ureq::Body>> {
+        self.multipart_with("POST", token, path, metadata, parts, progress)
+    }
+
+    /// [`Api::multipart`] with another method (`PUT`: a capture's files replaced).
+    fn multipart_with(
+        &self,
+        method: &str,
+        token: &str,
+        path: &str,
+        metadata: &str,
+        parts: Vec<Part>,
+        progress: impl FnMut(u64, u64) + Send + 'static,
+    ) -> anyhow::Result<ureq::http::Response<ureq::Body>> {
         let boundary = format!("----orbiters-{}", uuid::Uuid::new_v4().simple());
         let mut pieces = vec![Piece::bytes(format!("--{boundary}\r\nContent-Disposition: form-data; name=\"metadata\"\r\n\r\n{metadata}\r\n"))];
+        // These are multipart fields in the sharing contract, alongside the existing metadata JSON.
+        let fields: serde_json::Value = serde_json::from_str(metadata)?;
+        for field in ["visibility", "explicit", "explicitReasons", "acknowledgeExplicit", "instanceId", "sourceKey"] {
+            if let Some(value) = fields.get(field).filter(|v| !v.is_null()) {
+                let value = value.as_str().map(str::to_owned).unwrap_or_else(|| value.to_string());
+                pieces.push(Piece::bytes(format!("--{boundary}\r\nContent-Disposition: form-data; name=\"{field}\"\r\n\r\n{value}\r\n")));
+            }
+        }
         for p in parts {
             let name = p.name.replace(['"', '\r', '\n'], "_");
             let head = format!(
@@ -247,8 +522,9 @@ impl Api {
         let total = pieces.iter().map(Piece::len).sum::<u64>();
         pieces.reverse();
         let reader = Progress { pieces, sent: 0, total, report: Box::new(progress) };
-        self.agent()
-            .post(&self.url(path))
+        let url = self.url(path);
+        let request = if method == "PUT" { self.agent().put(&url) } else { self.agent().post(&url) };
+        request
             .header("Authorization", &format!("Bearer {token}"))
             .header("Content-Type", &format!("multipart/form-data; boundary={boundary}"))
             .header("Content-Length", &total.to_string())
@@ -354,6 +630,20 @@ impl Read for Progress {
 mod tests {
     use super::*;
 
+    /// A capture uploaded without its picture gets one (contracts Docs/capture-sharing.md, Capture picture), against a
+    /// disposable Orbiters server: ORBITERS_TEST_API, ORBITERS_TEST_TOKEN, ORBITERS_TEST_CAPTURE (an id the token's
+    /// member owns) and ORBITERS_TEST_PICTURE (a JPEG).
+    #[test]
+    #[ignore = "needs a disposable Orbiters server"]
+    fn a_capture_gets_its_picture() {
+        let env = |k: &str| std::env::var(k).unwrap();
+        let api = crate::account::Api::at(&env("ORBITERS_TEST_API"));
+        let jpeg = std::fs::read(env("ORBITERS_TEST_PICTURE")).unwrap();
+        let item = api.set_capture_picture(&env("ORBITERS_TEST_TOKEN"), env("ORBITERS_TEST_CAPTURE").parse().unwrap(), jpeg).unwrap();
+        let capture = item.capture.unwrap();
+        assert_eq!(capture.picture_url.as_deref(), Some(format!("/captures/capture/{}/file?part=picture", item.id).as_str()));
+    }
+
     #[test]
     fn reads_a_world_page_and_what_a_member_added() {
         let page: WorldPage = serde_json::from_str(
@@ -363,6 +653,17 @@ mod tests {
         .unwrap();
         assert_eq!(page.world.name, "Palm Point");
         assert_eq!((page.previews, page.picture_count), (2, 7));
+        // Its pictures, each on its own: one without an id is left out, the page still read; the kept copy reads back.
+        let page: WorldPage = serde_json::from_str(
+            r#"{"world":{"worldId":"wrld_a","name":"Palm Point"},"pictureCount":2,"pictures":[
+                {"id":41,"url":"https://files.orbiters.cc/p/41.jpg","thumbnailUrl":"/files/serve/41?thumbnail=true","width":1920,"height":1080,
+                 "takenAt":"2026-10-18T18:37:41.000Z","uploader":{"id":3,"name":"Kana"}},{"url":"no id"}]}"#,
+        )
+        .unwrap();
+        assert_eq!(page.pictures.len(), 1);
+        assert_eq!((page.pictures[0].id, page.pictures[0].by.as_deref(), page.pictures[0].width), (41, Some("Kana"), Some(1920)));
+        let kept: WorldPage = serde_json::from_str(&serde_json::to_string(&page).unwrap()).unwrap();
+        assert_eq!(kept, page);
         let mine: Mine = serde_json::from_str(
             r#"{"worlds":[{"worldId":"wrld_a","preview":{"id":3,"url":"/files/serve/9","splats":600000,"createdAt":"2026-10-20T20:00:00.000Z"},
                "pictures":[{"id":4,"url":"/files/serve/10","sourceHash":"ab12"}]}]}"#,
@@ -376,6 +677,22 @@ mod tests {
         let perf: WorldPerformance =
             serde_json::from_str(r#"{"fps":71.6,"fps_low":40,"ratio":0.8,"minutes":12.0,"members":3,"by_crowd":[{"players":"1-4","fps":80.4}]}"#).unwrap();
         assert_eq!((perf.fps, perf.fps_low, perf.minutes, perf.by_crowd[0].fps), (72, 40, 12, 80));
+    }
+
+    #[test]
+    fn world_lists_go_to_the_map_explorer_where_it_has_them() {
+        assert_eq!(found_path(&WorldList::Search(" Palm Point ".into()), 2).as_deref(), Some("maps/search?q=Palm%20Point&page=2"));
+        assert_eq!(found_path(&WorldList::Popular, 99).as_deref(), Some("maps/featured?page=20"));
+        assert_eq!(found_path(&WorldList::Favorites, 0), None);
+        assert_eq!(found_path(&WorldList::Active, 0), None);
+        let found = parse_found(
+            r#"{"items":[{"worldId":"wrld_4cf554b4-430c-4f8f-b53e-1f294eed230b","name":"Palm Point","pictures":2.0,"preview":null},
+            {"worldId":"wrld_../x","name":"bad"},{"worldId":"wrld_4cf554b4-430c-4f8f-b53e-1f294eed230c"}],"hasMore":false}"#,
+        )
+        .unwrap();
+        assert_eq!(found.items.len(), 1);
+        assert_eq!((found.items[0].pictures, found.items[0].preview, found.more), (2, false, false));
+        assert!(parse_found(r#"{"error":"Type at least two characters."}"#).is_err());
     }
 
     #[test]

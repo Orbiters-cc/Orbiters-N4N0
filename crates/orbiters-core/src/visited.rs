@@ -17,6 +17,8 @@ const MAX_VISITS: usize = 200;
 /// Worlds kept (those visited longest ago go first): a log that names worlds without end cannot grow the file
 /// without end.
 const MAX_WORLDS: usize = 5000;
+/// Instances kept (the newest): N4N0's Previous instances lists them.
+pub const MAX_INSTANCES: usize = 100;
 /// Log bytes one [`History::read_logs_following`] reads at most: a first look at days of logs is spread over several
 /// calls rather than holding up the thread that makes them.
 const READ_BUDGET: u64 = 64 << 20;
@@ -39,6 +41,23 @@ impl WorldVisits {
     }
 }
 
+/// An instance joined (VRChat's location: `wrld_…:<instance>`), and when it was joined last.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InstanceVisit {
+    pub world_id: String,
+    /// What follows the world's id: its number and its tags (`12345~private(usr_…)~region(eu)`).
+    pub instance: String,
+    /// Unix seconds.
+    pub at: u64,
+}
+
+impl InstanceVisit {
+    /// VRChat's location, as an invite names it.
+    pub fn location(&self) -> String {
+        format!("{}:{}", self.world_id, self.instance)
+    }
+}
+
 /// `visited-worlds.json`: every world seen in VRChat's logs, with when.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct History {
@@ -49,6 +68,13 @@ pub struct History {
     /// The world joined last ("Joining or Creating Room" after the join names it).
     #[serde(default)]
     last: Option<String>,
+    /// The instances joined, each once, the one joined last at the end ([`MAX_INSTANCES`] of them).
+    #[serde(default)]
+    pub instances: Vec<InstanceVisit>,
+    /// The instances were read from every log there was (a history from before them is read again once, which adds
+    /// no visit twice).
+    #[serde(default)]
+    instances_read: bool,
     /// The name of the world being joined ("Entering Room" comes right before the join).
     #[serde(skip)]
     entering: Option<String>,
@@ -110,6 +136,32 @@ impl History {
         true
     }
 
+    /// Adds a join of `world_id:instance` at `at` (one entry per instance: joining it again moves it to the end);
+    /// returns whether it changed anything.
+    pub fn record_instance(&mut self, world_id: &str, instance: &str, at: u64) -> bool {
+        if instance.is_empty() {
+            return false;
+        }
+        if let Some(i) = self.instances.iter().position(|v| v.world_id == world_id && v.instance == instance) {
+            if self.instances[i].at >= at {
+                return false;
+            }
+            self.instances.remove(i);
+        }
+        let visit = InstanceVisit { world_id: world_id.to_string(), instance: instance.to_string(), at };
+        let i = self.instances.partition_point(|v| v.at <= at);
+        self.instances.insert(i, visit);
+        if self.instances.len() > MAX_INSTANCES {
+            self.instances.remove(0);
+        }
+        true
+    }
+
+    /// The instances joined, the newest first, with their world's name when known.
+    pub fn recent_instances(&self) -> Vec<(InstanceVisit, Option<String>)> {
+        self.instances.iter().rev().map(|v| (v.clone(), self.worlds.get(&v.world_id).and_then(|w| w.name.clone()))).collect()
+    }
+
     fn name_last(&mut self, name: &str) -> bool {
         let Some(w) = self.last.as_ref().and_then(|id| self.worlds.get_mut(id)) else { return false };
         if w.name.as_deref() == Some(name) {
@@ -138,6 +190,11 @@ impl History {
             .collect();
         // Their names hold the start time: oldest first, so the last world joined is the newest.
         logs.sort();
+        // A history from before instances were kept reads every log there is again, once, for them.
+        if !self.instances_read {
+            self.instances_read = true;
+            self.logs.clear();
+        }
         let mut changed = false;
         let mut budget = READ_BUDGET;
         for (name, path) in &logs {
@@ -193,8 +250,9 @@ impl History {
     // A join reads "Entering Room: <name>", "Joining wrld_…:<instance>", then "Joining or Creating Room: <name>".
     fn observe(&mut self, event: &LogEvent) -> bool {
         match event {
-            LogEvent::Joining { world_id, at: Some(at), .. } => {
+            LogEvent::Joining { world_id, instance, at: Some(at) } => {
                 let mut changed = self.record(world_id, *at);
+                changed |= self.record_instance(world_id, instance, *at);
                 if let Some(name) = self.entering.take() {
                     changed |= self.name_last(&name);
                 }
@@ -235,6 +293,9 @@ fn local_unix(year: i32, month: u8, day: u8, hour: u8, minute: u8, second: u8) -
 /// What a VRChat screenshot says about itself.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct ShotInfo {
+    /// The instance recorded in the picture metadata, when present.
+    #[serde(default)]
+    pub instance: Option<String>,
     pub world_id: Option<String>,
     pub world_name: Option<String>,
     /// Unix seconds: the XMP creation date, else the time in the file name, else the file's.
@@ -253,6 +314,7 @@ pub fn read_shot(path: &Path) -> Option<ShotInfo> {
     }
     let mut info = ShotInfo::default();
     let mut xmp = None;
+    let mut vrcx = None;
     loop {
         let mut head = [0u8; 8];
         if f.read_exact(&mut head).is_err() {
@@ -273,6 +335,9 @@ pub fn read_shot(path: &Path) -> Option<ShotInfo> {
             if let Some(text) = itxt(&data, "XML:com.adobe.xmp") {
                 xmp = Some(text);
             }
+            if let Some(text) = itxt(&data, "Description") {
+                vrcx = serde_json::from_str::<serde_json::Value>(&text).ok();
+            }
         } else if kind == b"IEND" {
             break;
         } else {
@@ -283,6 +348,13 @@ pub fn read_shot(path: &Path) -> Option<ShotInfo> {
         info.world_id = xml_value(x, "vrc:WorldID").filter(|id| id.starts_with("wrld_"));
         info.world_name = xml_value(x, "vrc:WorldDisplayName").filter(|n| !n.is_empty());
         info.taken = xml_value(x, "xmp:CreateDate").and_then(|d| iso_unix(&d)).unwrap_or(0);
+    }
+    if let Some(world) = vrcx.as_ref().filter(|v| v["application"] == "VRCX").and_then(|v| v.get("world")) {
+        if let Some(id) = world["id"].as_str().filter(|id| id.starts_with("wrld_")) {
+            info.world_id = Some(id.to_owned());
+            info.world_name = world["name"].as_str().map(str::to_owned).or(info.world_name);
+            info.instance = world["instanceId"].as_str().filter(|s| !s.is_empty()).map(|s| s.strip_prefix(&format!("{id}:")).unwrap_or(s).to_owned());
+        }
     }
     if info.taken == 0 {
         info.taken = path.file_name().and_then(|n| name_time(&n.to_string_lossy())).unwrap_or_else(|| modified(path));
@@ -349,19 +421,30 @@ fn modified(path: &Path) -> u64 {
 
 /// Where VRChat saves pictures: its `picture_output_folder` setting, else `Pictures/VRChat`.
 pub fn screenshot_dirs() -> Vec<PathBuf> {
+    screenshot_dirs_with(&crate::settings::Settings::load().picture_folders)
+}
+
+/// [`screenshot_dirs`] with `extra` as the member's added folders (the settings as a window has them, before the
+/// tray saved them).
+pub fn screenshot_dirs_with(extra: &[PathBuf]) -> Vec<PathBuf> {
     let mut found = Vec::new();
     if let Some(log) = crate::paths::vrchat_log_dir() {
         let custom = std::fs::read_to_string(log.join("config.json"))
             .ok()
             .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
             .and_then(|v| v.get("picture_output_folder")?.as_str().map(PathBuf::from));
-        if let Some(c) = custom.filter(|c| c.is_dir()) {
+        if let Some(c) = custom {
             found.push(c);
         }
     }
-    if let Some(p) = dirs::picture_dir().map(|p| p.join("VRChat")).filter(|p| p.is_dir()) {
+    if let Some(p) = dirs::picture_dir().map(|p| p.join("VRChat")) {
         if !found.contains(&p) {
             found.push(p);
+        }
+    }
+    for path in extra.iter().cloned() {
+        if path.is_absolute() && !found.iter().any(|p| p.to_string_lossy().eq_ignore_ascii_case(&path.to_string_lossy())) {
+            found.push(path);
         }
     }
     found
@@ -425,25 +508,44 @@ impl ShotIndex {
     /// Walks `dirs` (VRChat sorts pictures in month folders) and reads the new or changed PNGs; returns whether the
     /// index changed.
     pub fn refresh(&mut self, dirs: &[PathBuf]) -> bool {
+        self.refresh_progress(dirs, |_| {})
+    }
+
+    /// Publishes discoveries during traversal; pruning happens only after every folder was checked.
+    pub fn refresh_progress(&mut self, dirs: &[PathBuf], mut publish: impl FnMut(&Self)) -> bool {
+        let mut published = false;
+        let mut last_publish = std::time::Instant::now();
         let mut seen = std::collections::BTreeSet::new();
         let mut changed = false;
+        let mut unavailable = Vec::new();
+        let mut walked = std::collections::BTreeSet::new();
         let mut stack: Vec<(PathBuf, usize)> = dirs.iter().map(|d| (d.clone(), 0)).collect();
         while let Some((dir, depth)) = stack.pop() {
-            let Ok(entries) = std::fs::read_dir(&dir) else { continue };
-            for e in entries.flatten() {
-                let Ok(meta) = e.metadata() else { continue };
+            if !walked.insert(dir.clone()) { continue; }
+            let Ok(entries) = std::fs::read_dir(&dir) else { unavailable.push(dir); continue };
+            let mut entries: Vec<_> = entries.filter_map(|result| match result {
+                Ok(e) => Some(e),
+                Err(_) => { unavailable.push(dir.clone()); None }
+            }).collect();
+            // VRChat names months and pictures chronologically. Read newest pictures first;
+            // push directories oldest first so the traversal stack visits the newest next.
+            entries.sort_by_key(|e| std::cmp::Reverse(e.file_name()));
+            let mut children = Vec::new();
+            for e in entries {
+                let Ok(meta) = e.metadata() else { unavailable.push(e.path()); continue };
+                if e.file_type().is_ok_and(|t| t.is_symlink()) { continue; }
                 let path = e.path();
                 if meta.is_dir() {
-                    if depth < 3 {
-                        stack.push((path, depth + 1));
-                    }
+                    if depth < 64 {
+                        children.push((path, depth + 1));
+                    } else { unavailable.push(path); }
                     continue;
                 }
                 if !path.extension().is_some_and(|x| x.eq_ignore_ascii_case("png")) {
                     continue;
                 }
                 let size = meta.len();
-                let modified = meta.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map_or(0, |d| d.as_secs());
+                let modified = meta.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map_or(0, |d| d.as_nanos().min(u64::MAX as u128) as u64);
                 seen.insert(path.clone());
                 if self.files.get(&path).is_some_and(|f| f.size == size && f.modified == modified) {
                     continue;
@@ -451,12 +553,23 @@ impl ShotIndex {
                 if let Some(info) = read_shot(&path) {
                     self.files.insert(path, ShotEntry { size, modified, info, sha256: None });
                     changed = true;
+                    if !published || last_publish.elapsed() >= std::time::Duration::from_millis(100) {
+                        publish(self);
+                        published = true;
+                        last_publish = std::time::Instant::now();
+                    }
                 }
             }
+            stack.extend(children.into_iter().rev());
         }
         let before = self.files.len();
-        self.files.retain(|p, _| seen.contains(p));
+        self.files.retain(|p, _| seen.contains(p) || (dirs.iter().any(|d| p.starts_with(d)) && unavailable.iter().any(|d| p.starts_with(d))));
         changed | (self.files.len() != before)
+    }
+
+    /// File identities already checked by the folder scan, so thumbnail readers need not wake an archive drive.
+    pub fn fingerprints(&self) -> impl Iterator<Item = (&Path, u64, u64)> {
+        self.files.iter().map(|(path, e)| (path.as_path(), e.size, e.modified))
     }
 
     /// Every screenshot with a world, newest first.
@@ -467,6 +580,15 @@ impl ShotIndex {
             .filter(|(_, e)| e.info.world_id.is_some())
             .map(|(p, e)| Shot { path: p.clone(), size: e.size, info: e.info.clone(), sha256: e.sha256.clone() })
             .collect();
+        out.sort_by(|a, b| b.info.taken.cmp(&a.info.taken).then_with(|| b.path.cmp(&a.path)));
+        out
+    }
+
+    /// Every PNG of the folders, with a world or not, newest first: the layers of VRChat's multi-layer pictures may
+    /// carry no world of their own (their picture does).
+    pub fn every_shot(&self) -> Vec<Shot> {
+        let mut out: Vec<Shot> =
+            self.files.iter().map(|(p, e)| Shot { path: p.clone(), size: e.size, info: e.info.clone(), sha256: e.sha256.clone() }).collect();
         out.sort_by(|a, b| b.info.taken.cmp(&a.info.taken).then_with(|| b.path.cmp(&a.path)));
         out
     }
@@ -508,7 +630,9 @@ pub fn sha256_file(path: &Path) -> std::io::Result<String> {
 mod tests {
     use super::*;
 
-    fn png_with_xmp(xmp: &str) -> Vec<u8> {
+    fn png_with_xmp(xmp: &str) -> Vec<u8> { png_with_text("XML:com.adobe.xmp", xmp) }
+
+    fn png_with_text(keyword: &str, xmp: &str) -> Vec<u8> {
         fn chunk(out: &mut Vec<u8>, kind: &[u8], data: &[u8]) {
             out.extend_from_slice(&(data.len() as u32).to_be_bytes());
             out.extend_from_slice(kind);
@@ -522,11 +646,53 @@ mod tests {
         ihdr.extend_from_slice(&[8, 6, 0, 0, 0]);
         chunk(&mut out, b"IHDR", &ihdr);
         chunk(&mut out, b"IDAT", &[0u8; 64]);
-        let mut itxt = b"XML:com.adobe.xmp\0\0\0\0\0".to_vec();
+        let mut itxt = keyword.as_bytes().to_vec();
+        itxt.extend_from_slice(&[0; 5]);
         itxt.extend_from_slice(xmp.as_bytes());
         chunk(&mut out, b"iTXt", &itxt);
         chunk(&mut out, b"IEND", &[]);
         out
+    }
+
+    #[test]
+    fn vrcx_metadata_keeps_world_and_instance() {
+        let file = std::env::temp_dir().join(format!("orbiters-vrcx-metadata-{}.png", std::process::id()));
+        std::fs::write(&file, png_with_text("Description", r#"{"application":"VRCX","world":{"id":"wrld_test","name":"A world","instanceId":"wrld_test:123~region(eu)"}}"#)).unwrap();
+        let info = read_shot(&file).unwrap();
+        assert_eq!(info.world_id.as_deref(), Some("wrld_test"));
+        assert_eq!(info.world_name.as_deref(), Some("A world"));
+        assert_eq!(info.instance.as_deref(), Some("123~region(eu)"));
+        std::fs::remove_file(file).unwrap();
+    }
+
+    #[test]
+    fn folder_index_retains_offline_but_removes_deleted_and_removed_sources() {
+        let root = std::env::temp_dir().join(format!("orbiters-picture-index-{}", std::process::id()));
+        let folder = root.join("online");
+        let nested = folder.join("1/2/3/4/5");
+        std::fs::create_dir_all(&nested).unwrap();
+        let png = nested.join("picture.png");
+        std::fs::write(&png, png_with_xmp("<vrc:WorldID>wrld_test</vrc:WorldID>")).unwrap();
+        let mut index = ShotIndex::default();
+        assert!(index.refresh(&[folder.clone(), nested.clone()]));
+        assert_eq!(index.every_shot().len(), 1);
+        assert!(!index.refresh(&[folder.clone()]));
+        let file = root.join("index.json");
+        index.save(&file).unwrap();
+        let mut index = ShotIndex::load(&file);
+        let parked = root.join("offline");
+        std::fs::rename(&folder, &parked).unwrap();
+        assert!(!index.refresh(&[folder.clone()]));
+        assert_eq!(index.every_shot().len(), 1);
+        std::fs::rename(&parked, &folder).unwrap();
+        std::fs::remove_file(&png).unwrap();
+        assert!(index.refresh(&[folder.clone()]));
+        assert!(index.every_shot().is_empty());
+        std::fs::write(&png, png_with_xmp("")).unwrap();
+        index.refresh(&[folder]);
+        assert!(index.refresh(&[]));
+        assert!(index.every_shot().is_empty());
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -575,6 +741,56 @@ mod tests {
         println!("{} screenshots with a world in {:?} ({:?})", shots.len(), t.elapsed(), screenshot_dirs());
     }
 
+    #[test]
+    fn progressive_scan_publishes_newest_month_before_older_pictures() {
+        let root = std::env::temp_dir().join(format!("orbiters-progress-{}", std::process::id()));
+        let old = root.join("2024-01");
+        let new = root.join("2026-10");
+        std::fs::create_dir_all(&old).unwrap();
+        std::fs::create_dir_all(&new).unwrap();
+        let newest = new.join("VRChat_2026-10-26_01-14-29.026_3840x2160.png");
+        let older = old.join("VRChat_2024-01-23_20-59-16.428_3840x2160.png");
+        for path in [&newest, &older] {
+            std::fs::write(path, b"\x89PNG\r\n\x1a\n").unwrap();
+        }
+        let mut index = ShotIndex::default();
+        let mut first = None;
+        assert!(index.refresh_progress(&[root.clone()], |partial| {
+            if first.is_none() { first = Some(partial.every_shot()); }
+        }));
+        let first = first.unwrap();
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].path, newest);
+        assert_eq!(index.every_shot().len(), 2);
+        std::fs::remove_file(newest).unwrap();
+        std::fs::remove_file(older).unwrap();
+        std::fs::remove_dir(new).unwrap();
+        std::fs::remove_dir(old).unwrap();
+        std::fs::remove_dir(root).unwrap();
+    }
+
+    #[test]
+    #[ignore = "reads the real archive without changing it"]
+    fn archive_streams_before_scan_finishes() {
+        let root = PathBuf::from("I:/VRChat pics");
+        assert!(root.is_dir());
+        let start = std::time::Instant::now();
+        let mut index = ShotIndex::default();
+        let mut first = None;
+        let mut batches = 0;
+        index.refresh_progress(&[root], |partial| {
+            batches += 1;
+            if first.is_none() {
+                first = Some(start.elapsed());
+                println!("First picture at {:?}: {:?}", first.unwrap(), partial.every_shot()[0].path);
+                assert_eq!(partial.every_shot().len(), 1);
+            }
+        });
+        println!("{} pictures, {} batches, completed in {:?}", index.every_shot().len(), batches, start.elapsed());
+        assert!(index.every_shot().len() > 1);
+        assert!(batches > 1);
+    }
+
     const A: &str = "wrld_99123966-6b37-4b5b-9f3c-0a1b2c3d4e5f";
     const B: &str = "wrld_4cf554b4-430c-4f8f-b53e-1f294eed230b";
 
@@ -609,6 +825,10 @@ mod tests {
         assert_eq!(h.worlds[B].name.as_deref(), Some("B (renamed)"));
         assert_eq!(h.worlds[A].name.as_deref(), Some("A"));
         assert_eq!(h.worlds[A].visits.len(), 2);
+        // Each instance once, the newest first; a script's line is none.
+        let instances: Vec<String> = h.recent_instances().iter().map(|(v, _)| v.location()).collect();
+        assert_eq!(instances, [format!("{A}:3"), format!("{B}:2"), format!("{A}:1~region(eu)")]);
+        assert_eq!(h.recent_instances()[1].1.as_deref(), Some("B (renamed)"));
         assert!(!h.read_logs(&dir));
         let saved = dir.join("visited-worlds.json");
         h.save(&saved).unwrap();
@@ -618,6 +838,42 @@ mod tests {
         let mut again = again;
         assert!(again.read_logs(&dir));
         assert_eq!(again.worlds.len(), 2);
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn instances_are_kept_once_each_newest_last_and_bounded() {
+        let mut h = History::default();
+        assert!(h.record_instance(A, "1~region(eu)", 100));
+        assert!(h.record_instance(B, "2", 200));
+        assert!(!h.record_instance(A, "1~region(eu)", 100), "the same join twice");
+        assert!(!h.record_instance(A, "", 300), "no instance");
+        assert!(h.record_instance(A, "1~region(eu)", 300), "joined again: it moves to the end");
+        assert_eq!(h.instances.iter().map(|v| v.at).collect::<Vec<_>>(), [200, 300]);
+        for i in 0..MAX_INSTANCES as u64 + 5 {
+            h.record_instance(B, &format!("{}", 1000 + i), 1000 + i);
+        }
+        assert_eq!(h.instances.len(), MAX_INSTANCES);
+        assert_eq!(h.instances.last().unwrap().instance, format!("{}", 1000 + MAX_INSTANCES as u64 + 4));
+    }
+
+    #[test]
+    fn a_history_from_before_instances_reads_its_logs_again_once() {
+        let dir = std::env::temp_dir().join(format!("orbiters-visits-instances-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let log = dir.join("output_log_2026-10-18_20-17-45.txt");
+        let text = format!("2026.10.18 20:23:20 Debug      -  [Behaviour] Joining {A}:7~friends(usr_x)
+");
+        std::fs::write(&log, &text).unwrap();
+        // Read up to its end by a version that kept no instances.
+        let old = format!(r#"{{"worlds":{{"{A}":{{"name":"A","visits":[1]}}}},"logs":{{"output_log_2026-10-18_20-17-45.txt":{}}}}}"#, text.len());
+        let mut h: History = serde_json::from_str(&old).unwrap();
+        assert!(h.read_logs(&dir));
+        assert_eq!(h.instances.len(), 1);
+        assert_eq!(h.instances[0].location(), format!("{A}:7~friends(usr_x)"));
+        assert_eq!(h.worlds[A].visits.len(), 2, "the earlier visit and the log's, each once");
+        assert!(!h.read_logs(&dir), "read once");
         std::fs::remove_dir_all(dir).ok();
     }
 

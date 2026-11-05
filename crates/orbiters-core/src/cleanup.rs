@@ -305,7 +305,8 @@ mod tests {
         let manifest = kept_before("manifest.json").unwrap();
         let frames = kept_before(FRAMES_FILE).unwrap_or(0);
         let thumbnail = kept_before(THUMBNAIL_FILE).unwrap();
-        let view = manifest + frames + thumbnail + 10 + 2000 + 400 + 20 + 300 + 300;
+        let picture_thumbnail = kept_before(bundle::PICTURE_THUMBNAIL_FILE).unwrap();
+        let view = manifest + frames + thumbnail + picture_thumbnail + 10 + 2000 + 400 + 20 + 300 + 300;
         // Measured: the capture, plus the run cut short and the previous result (the latest is in place).
         let leftovers = 900 + 1500;
         assert_eq!(measure(&dir, Some("colour.mkv")), Sizes { total: view + CAPTURE + leftovers, capture: CAPTURE + leftovers });
@@ -328,7 +329,7 @@ mod tests {
         assert_eq!((freed, told), (CAPTURE + leftovers, CAPTURE + leftovers));
         let mut left: Vec<String> = fs::read_dir(&dir).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
         left.sort();
-        assert_eq!(left, ["frames.bin", "manifest.json", "notes.txt", "reconstruction", "thumbnail.qoi"]);
+        assert_eq!(left, ["frames.bin", "manifest.json", "notes.txt", "reconstruction", "thumbnail-picture-v2.qoi", "thumbnail.qoi"]);
         for kept in [
             "reconstruction/splats.ply",
             "reconstruction/sky.png",

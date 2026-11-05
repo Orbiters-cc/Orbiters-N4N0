@@ -3,7 +3,9 @@
 //! ([`orbiters_ui::software`], only what changed) and handed to SteamVR as D3D11 textures of a small device on the
 //! headset's GPU (raw pixels without one), only while the dashboard shows the tab and only the part that changed. It
 //! reads the device poses itself for T-pose calibrations, which also put a mirror and two hand targets in the play
-//! space, and runs walk boost and N4N0's menu in the play space.
+//! space, and runs walk boost and N4N0's menu in the play space. The same interface also floats in the play space
+//! beside VRChat, opened by a watch on a wrist and used with the controllers' own lasers ([`floating`]): the dashboard
+//! takes the controllers from VRChat, the floating panel does not.
 //!
 //! It never starts SteamVR: it connects as an overlay application (the kind SteamVR starts for) only after a
 //! background connection, which SteamVR refuses when it is not running, found it running; and it ends when SteamVR
@@ -11,8 +13,10 @@
 
 mod actions;
 pub mod calibration;
+pub mod coverage;
 #[cfg(windows)]
 pub mod eye_picture;
+pub mod floating;
 mod frames;
 mod menu;
 pub mod menu_pages;
@@ -20,9 +24,10 @@ pub mod menu_retro;
 pub mod menu_ui;
 pub mod ui;
 pub mod walk;
+pub mod worlds;
 
 use crate::backend::{Ctl, Remote};
-use crate::ipc::{Client, Endpoint, OrbCommand, Role};
+use crate::ipc::{Client, Endpoint, N4n0Command, Role};
 use anyhow::Context as _;
 use calibration::{MIRROR_PX, MIRROR_WIDTH_M, TARGET_PX, TARGET_WIDTH_M};
 use egui::{pos2, Event, PointerButton, RawInput, Rect, ViewportId, ViewportInfo};
@@ -47,8 +52,9 @@ pub const EXIT_STEAMVR_GONE: i32 = 0x5354;
 const STEAMVR_GONE_AFTER: Duration = Duration::from_secs(5);
 /// The tab's pictures: at most 45 a second, whatever asks for them (the laser moving, the service's news).
 const MIN_FRAME: Duration = Duration::from_millis(22);
-/// A turn of the loop while nothing moves the play space: every turn reads the controllers, as the binding that opens
-/// N4N0's menu (a double press by default) is true for a moment only and SteamVR keeps no press between two reads.
+/// A turn of the loop while nothing moves the play space: every turn reads the controllers, as a binding that opens
+/// N4N0's menu (a double press) is true for a moment only and SteamVR keeps no press between two reads, and the taps
+/// that open it by default are timed from these reads.
 const TURN: Duration = Duration::from_millis(11);
 /// A turn waiting on the compositor is at least this long, should the wait come back at once.
 const SHORTEST_TURN: Duration = Duration::from_millis(3);
@@ -212,6 +218,19 @@ impl Canvas {
         self.painter.set_textures(&mut full.textures_delta);
         let primitives = self.ctx.tessellate(std::mem::take(&mut full.shapes), full.pixels_per_point);
         // Textures egui let go of are freed once painted with (the frame may still draw them).
+        self.painter.paint(&primitives, full.pixels_per_point, egui::Color32::TRANSPARENT);
+        self.painter.free_textures(&mut full.textures_delta);
+        self.painter.pixels()
+    }
+
+    /// The same with a whole `Ui` to draw in (widgets that lay out or animate).
+    pub fn paint_ui(&mut self, time: f64, draw: impl FnMut(&mut egui::Ui)) -> &[u8] {
+        let mut draw = draw;
+        let mut input = RawInput { screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), self.size)), time: Some(time), ..Default::default() };
+        input.viewports.insert(ViewportId::ROOT, ViewportInfo { native_pixels_per_point: Some(1.0), ..Default::default() });
+        let mut full = self.ctx.run_ui(input, |ui| draw(ui));
+        self.painter.set_textures(&mut full.textures_delta);
+        let primitives = self.ctx.tessellate(std::mem::take(&mut full.shapes), full.pixels_per_point);
         self.painter.paint(&primitives, full.pixels_per_point, egui::Color32::TRANSPARENT);
         self.painter.free_textures(&mut full.textures_delta);
         self.painter.pixels()
@@ -477,16 +496,23 @@ struct Teardown<'a> {
     walk: walk::WalkBoost,
     world: World,
     menu: menu::MenuOverlay,
+    coverage: coverage::CoverageOverlayPanel,
+    /// The floating panel, the watch and their lasers (none when SteamVR would not make their overlays).
+    floating: Option<floating::Floating>,
 }
 
 impl Drop for Teardown<'_> {
     fn drop(&mut self) {
         self.state.release(self.backend);
         // Always: the menu may have closed on this turn's effects after its state was reported, unheard yet.
-        self.backend.orb(OrbCommand::MenuState { open: false, dictation: false });
+        self.backend.n4n0(N4n0Command::MenuState { open: false, dictation: false, keyboard: false });
         self.walk.reset(self.steamvr);
         self.world.destroy(self.overlay);
         self.menu.destroy(self.overlay);
+        self.coverage.destroy(self.overlay);
+        if let Some(f) = &self.floating {
+            f.destroy(self.overlay);
+        }
         let _ = self.overlay.destroy(self.main);
     }
 }
@@ -515,13 +541,20 @@ fn session(args: &[String]) -> anyhow::Result<Ended> {
         presenter.show(&overlay, thumb, &icon, 128, 128);
     }
     let mut actions = actions::Actions::load(&steamvr);
-    let walk = walk::WalkBoost::new(actions.walk, actions.failed.clone());
+    let mut walk = walk::WalkBoost::new(actions.walk, actions.failed.clone());
+    walk.set_frame(steamvr.float_property(0, vr::prop::DISPLAY_FREQUENCY).filter(|hz| *hz > 1.0).map(|hz| Duration::from_secs_f32(1.0 / hz)));
+    let mut devices = crate::tracking::DeviceKindsWatch::default();
     let mut state = ui::OverlayUi::default();
     state.walk_unavailable = walk.unavailable().map(str::to_string);
     let world = World::new(&overlay)?;
     let menu = menu::MenuOverlay::new(&overlay, KEY)?;
-    let mut t = Teardown { steamvr: &steamvr, overlay: &overlay, backend: &backend, main, state, walk, world, menu };
+    let coverage = coverage::CoverageOverlayPanel::new(&overlay)?;
+    // The floating panel is an addition: without its overlays the tab and the rest work as before.
+    let floating = floating::Floating::new(&overlay, KEY).map_err(|e| eprintln!("floating panel unavailable: {e}")).ok();
+    let mut t = Teardown { steamvr: &steamvr, overlay: &overlay, backend: &backend, main, state, walk, world, menu, coverage, floating };
     let mut frames = frames::FrameSampler::new(&steamvr);
+    // What of the touchpads and sticks goes to the avatar's input parameters.
+    let mut pads = orbiters_n4n0::input::Pacer::default();
 
     let mut poses = SteamVrPoses { client: &steamvr, described: HashMap::new() };
     let started = Instant::now();
@@ -542,10 +575,10 @@ fn session(args: &[String]) -> anyhow::Result<Ended> {
     let frame_ms = steamvr.float_property(0, vr::prop::DISPLAY_FREQUENCY).filter(|hz| *hz > 1.0).map_or(11, |hz| (1000.0 / hz).ceil() as u32).clamp(4, 50);
     loop {
         let turn = Instant::now();
+        t.menu.worlds.view.input_turn(turn);
         if client.should_close() {
             return Ok(Ended::Closed);
         }
-        let mut play_space_changed = false;
         while let Some(e) = steamvr.poll_event() {
             match e.event_type {
                 vr::event::QUIT => {
@@ -554,25 +587,24 @@ fn session(args: &[String]) -> anyhow::Result<Ended> {
                     steamvr.acknowledge_quit();
                     return Ok(Ended::SteamVrGone);
                 }
-                vr::event::TRACKED_DEVICE_ACTIVATED
-                | vr::event::TRACKED_DEVICE_DEACTIVATED
-                | vr::event::TRACKED_DEVICE_ROLE_CHANGED
-                | vr::event::PROPERTY_CHANGED => poses.forget(&e),
-                vr::event::ROOM_SETUP_STARTING => t.walk.room_setup_started(&steamvr),
-                vr::event::ROOM_SETUP_COMMITTED => {
-                    t.walk.room_setup_ended();
-                    play_space_changed = true;
+                vr::event::TRACKED_DEVICE_ACTIVATED | vr::event::TRACKED_DEVICE_DEACTIVATED | vr::event::TRACKED_DEVICE_ROLE_CHANGED => {
+                    poses.forget(&e);
+                    devices.changed();
                 }
-                vr::event::CHAPERONE_UNIVERSE_CHANGED
-                | vr::event::SEATED_ZERO_POSE_RESET
-                | vr::event::STANDING_ZERO_POSE_RESET
-                | vr::event::CHAPERONE_FLUSH_CACHE => play_space_changed = true,
-                _ => {}
+                vr::event::PROPERTY_CHANGED => poses.forget(&e),
+                _ => {
+                    // A recenter, room setup, another universe: walk boost ends its carry; its own previews' echoes
+                    // change nothing.
+                    if let Some(event) = walk::PlaySpaceEvent::from_event(&e) {
+                        t.walk.play_space_event(&steamvr, event);
+                    }
+                }
             }
         }
-        if play_space_changed {
-            // A recenter or a saved change: walk boost carries on from it rather than writing the old setup back.
-            t.walk.play_space_changed(&steamvr);
+        // Which device is which, for tracking smoothing's strengths: the service asks SteamVR nothing itself while this
+        // overlay runs (its connections, every few seconds, disturbed this one's input and play space).
+        if let Some(kinds) = devices.due(Instant::now(), |i| steamvr.device_class(i)) {
+            backend.steamvr_devices(kinds);
         }
         // Laser-pointer input: SteamVR's mouse coordinates start at the bottom left.
         while let Some(e) = overlay.poll_event(main) {
@@ -628,6 +660,8 @@ fn session(args: &[String]) -> anyhow::Result<Ended> {
         let dashboard = overlay.is_dashboard_visible();
         t.state.tick(now, dashboard, &mut poses, &backend);
         t.world.update(&overlay, &mut presenter, &t.state.calibrator, now);
+        // What the recording has covered, on a hand (never in VRChat's camera: overlay/coverage.rs).
+        t.coverage.update(&overlay, &steamvr, &mut presenter, &snap, now);
         // VRChat has the scene (not a loading screen): its frames count, and walking may be boosted.
         if vrchat_read.is_none_or(|r| r.elapsed() >= Duration::from_millis(100)) {
             vrchat_read = Some(Instant::now());
@@ -644,7 +678,7 @@ fn session(args: &[String]) -> anyhow::Result<Ended> {
             }
         }
         // VRChat's frame times also pace N4N0's projected screen (the owner's steps follow the frame rate).
-        if snap.settings.world_performance || snap.settings.orb.enabled {
+        if snap.settings.world_performance || snap.settings.n4n0.enabled {
             if let Some(chunk) = frames.update(&steamvr, vrchat_scene) {
                 backend.frames(chunk);
             }
@@ -658,7 +692,7 @@ fn session(args: &[String]) -> anyhow::Result<Ended> {
             walking_allowed: vrchat_scene && !dashboard,
             place: place.as_deref(),
             held: t.menu.host.menu.open || t.state.busy() || t.state.calibrator.in_world(now),
-            away: snap.orb.afk,
+            away: snap.n4n0.afk,
             // VRChat's InStation, Seated and VelocityMagnitude tell whether it walks the avatar; without them (VRChat
             // not talking to Orbiters, or not lately) the stick alone says it.
             motion: snap
@@ -669,10 +703,64 @@ fn session(args: &[String]) -> anyhow::Result<Ended> {
             input_read,
         };
         t.walk.update(&steamvr, &moment);
+        // The triggers press where the index fingers point on N4N0's screen (N4N0 reads them only while its menu is open
+        // there): each change goes, nothing else. The floating panel reads them held (read whether N4N0 is on or not).
+        if input_read {
+            let changes = actions.presses(&steamvr);
+            if snap.settings.n4n0.enabled {
+                for (hand, change) in changes.into_iter().enumerate() {
+                    if let Some(down) = change {
+                        backend.n4n0(N4n0Command::Trigger { right: hand == 1, down });
+                    }
+                }
+            }
+        }
+        // The touchpads and sticks reach the avatar's N4N0 input parameters (contracts `Docs/n4n0-input.md`), paced; turned
+        // off (or VRChat gone), they go back to rest once.
+        let pads_wanted = snap.settings.n4n0.enabled && snap.settings.n4n0.controller_input && snap.vrchat.running;
+        let paced = match (pads_wanted, input_read) {
+            (true, true) => actions.pads(&steamvr).and_then(|read| pads.step(Instant::now(), read)),
+            (true, false) => None,
+            (false, _) => pads.stop(),
+        };
+        if let Some(state) = paced {
+            backend.n4n0(N4n0Command::Input { pads: state });
+        }
         let button = input_read && actions.menu_pressed(&steamvr);
-        if t.menu.update(&overlay, &steamvr, &mut presenter, &snap, &backend, button) {
+        // The floating panel, the watch and N4N0's menu, used with the controllers' own lasers beside VRChat
+        // (overlay/floating): first, so that the menu reads this turn's laser events, and the watch opens it now.
+        let mut watch = false;
+        if let Some(floating) = t.floating.as_mut() {
+            let pointables = t.menu.pointables();
+            let menu_open = t.menu.host.menu.open || (snap.n4n0.screen && snap.n4n0.screen_open);
+            let cx = floating::Cx {
+                overlay: &overlay,
+                steamvr: &steamvr,
+                presenter: &mut presenter,
+                snap: &snap,
+                backend: &backend,
+                actions: &actions,
+                input_read,
+                dashboard,
+                menu: &pointables,
+                menu_open,
+            };
+            let turn = floating.update(cx, &mut t.state, &mut poses);
+            if turn.clicked {
+                sounds.click();
+            }
+            watch = turn.toggle_menu;
+            if turn.menu_moved.is_some() || turn.menu_released {
+                let mut head = [Pose::default(); MAX_DEVICES];
+                steamvr.poses(vr::Universe::Standing, &mut head);
+                let head = head[0].pose_is_valid.then_some(head[0].device_to_absolute);
+                t.menu.carry(&overlay, turn.menu_moved, turn.menu_released, head.as_ref());
+            }
+        }
+        if t.menu.update(&overlay, &steamvr, &mut presenter, &snap, &backend, button, watch) {
             sounds.click();
         }
+        t.menu.worlds.view.publish(&overlay);
         if !shown.as_ref().is_some_and(|s| Arc::ptr_eq(s, &snap)) {
             shown = Some(snap.clone());
             next_frame = Some(next_frame.map_or(Instant::now(), |f| f.min(Instant::now())));
@@ -717,15 +805,26 @@ fn session(args: &[String]) -> anyhow::Result<Ended> {
         } else if !visible {
             while_hidden(&mut events);
         }
+        t.menu.worlds.view.publish(&overlay);
         if t.walk.moving() {
             // Walk boost moves the play space once per frame the compositor shows: unsynchronised steps judder.
             if overlay.wait_frame_sync(frame_ms).is_err() {
                 std::thread::sleep(TURN.saturating_sub(turn.elapsed()));
             }
             std::thread::sleep(SHORTEST_TURN.saturating_sub(turn.elapsed()));
+            t.menu.worlds.view.update(&overlay, &steamvr);
         } else {
-            // The rest of a turn costs little when nothing shows.
-            std::thread::sleep(TURN.saturating_sub(turn.elapsed()));
+            // Keep input at its existing cadence. Only displayed 3D content gets short, high-resolution service
+            // slices: a completed texture need not wait through the rest of this turn. No tick-based channel waits.
+            let end = turn + TURN;
+            while Instant::now() < end {
+                let now = Instant::now();
+                let left = end.saturating_duration_since(now);
+                std::thread::sleep(worlds::pacing::service_slice(left, t.menu.worlds.view.wake_after(now)));
+                if t.menu.worlds.view.active() {
+                    t.menu.worlds.view.update(&overlay, &steamvr);
+                }
+            }
         }
     }
 }
@@ -754,8 +853,8 @@ fn thumbnail() -> Option<Vec<u8>> {
     let mut out = None;
     for _ in 0..2 {
         let mut full = ctx.run_ui(input.clone(), |ui| {
-            let size = orbiters_ui::logo::size_for_width(96.0);
-            orbiters_ui::logo::paint(ui.painter(), Rect::from_center_size(pos2(64.0, 64.0), size), orbiters_ui::logo::Look::default());
+            let size = orbiters_ui::n4n0_logo::size_for_width(88.0);
+            orbiters_ui::n4n0_logo::paint(ui.painter(), Rect::from_center_size(pos2(64.0, 64.0), size), orbiters_ui::theme::MARK);
         });
         sw.set_textures(&mut full.textures_delta);
         let primitives = ctx.tessellate(std::mem::take(&mut full.shapes), full.pixels_per_point);

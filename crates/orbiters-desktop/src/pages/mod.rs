@@ -1,15 +1,32 @@
 //! The pages, plus what they share: the page context, background jobs and staggered entrances.
 
 pub mod capture;
+pub mod community;
+pub mod community_talk;
+pub mod editor;
+pub mod events;
 pub mod form;
+pub mod header;
 pub mod home;
 pub mod mic;
-pub mod orb;
+pub mod n4n0;
+pub mod projects;
+pub mod reconstruct_again;
 pub mod sessions;
+pub mod gallery;
+mod gallery_layers;
+mod gallery_layout;
+mod gallery_select;
+pub mod sharing;
+pub mod requests;
 pub mod settings;
+pub mod splat_export;
+pub mod splat_worker;
 pub mod splats;
 pub mod states;
 pub mod storage;
+pub mod videos;
+pub mod vr_audio;
 pub mod worlds;
 
 use crate::backend::Ctl;
@@ -25,9 +42,14 @@ pub enum Page {
     /// N4N0's menu: what the app does, side by side.
     Home,
     Capture,
-    Orb,
+    Projects,
+    N4n0,
     Sessions,
     Worlds,
+    /// Orbiters' events, soonest first, and their windows (Invite me).
+    Events,
+    /// The videos the worlds played, and the bookmark lists.
+    Videos,
     Settings,
 }
 
@@ -54,6 +76,8 @@ pub struct Cx<'a> {
 pub enum Go {
     /// Sessions, its storage popover open.
     FreeSpace,
+    /// Unity projects (Capture's avatar picker, when it has no avatar to offer).
+    Projects,
 }
 
 impl Cx<'_> {
@@ -169,9 +193,92 @@ pub fn heading(ui: &Ui, rect: Rect, caption: &str, title: &str, sub: Option<&str
     }
 }
 
+/// Section cards side by side on wide pages ([`orbiters_ui::layout::section_columns`]), one column on narrow ones. A
+/// card goes to the shortest column the first time it shows at that many columns and keeps that column after, so cards
+/// that grow (a list loading, a sign-in step) never shuffle the others.
+pub struct Masonry {
+    id: Id,
+    top: egui::Pos2,
+    width: f32,
+    columns: Vec<Ui>,
+    /// The column of each card, by its key.
+    placed: Vec<(usize, usize)>,
+}
+
+/// Space between the columns.
+const MASONRY_GAP: f32 = 24.0;
+
+impl Masonry {
+    /// Columns over the rest of `ui`'s width, from its cursor down.
+    pub fn new(ui: &mut Ui, id_salt: &str) -> Self {
+        let id = Id::unique(("orbiters-masonry", id_salt));
+        let width = ui.available_width();
+        let (n, w) = orbiters_ui::layout::section_columns(width, MASONRY_GAP);
+        let top = ui.cursor().min;
+        let columns = (0..n)
+            .map(|c| {
+                let r = Rect::from_min_size(top + vec2(c as f32 * (w + MASONRY_GAP), 0.0), vec2(w, 1.0e6));
+                ui.new_child(UiBuilder::new().max_rect(r).layout(Layout::top_down(egui::Align::Min)).id_salt((id, c)))
+            })
+            .collect();
+        let placed = ui.ctx().data(|d| d.get_temp::<(usize, Vec<(usize, usize)>)>(id)).filter(|(m, _)| *m == n).map(|(_, p)| p).unwrap_or_default();
+        Self { id, top, width, columns, placed }
+    }
+
+    /// Adds the card `key` (its section's index), drawn by `f` in its column.
+    pub fn add<R>(&mut self, key: usize, f: impl FnOnce(&mut Ui) -> R) -> R {
+        let column = match self.placed.iter().find(|(k, _)| *k == key) {
+            Some(&(_, c)) => c.min(self.columns.len() - 1),
+            None => {
+                let c = (0..self.columns.len()).min_by(|&a, &b| self.columns[a].cursor().top().total_cmp(&self.columns[b].cursor().top())).unwrap_or(0);
+                self.placed.push((key, c));
+                c
+            }
+        };
+        f(&mut self.columns[column])
+    }
+
+    /// Takes the columns' height in `ui` and keeps where each card went.
+    pub fn finish(self, ui: &mut Ui) {
+        let bottom = self.columns.iter().map(|c| c.min_rect().bottom()).fold(self.top.y, f32::max);
+        let n = self.columns.len();
+        let id = self.id;
+        let placed = self.placed;
+        ui.ctx().data_mut(|d| d.insert_temp(id, (n, placed)));
+        ui.allocate_exact_size(vec2(self.width, bottom - self.top.y), Sense::hover());
+    }
+}
+
+/// `count` rows of a card side by side when it is wide enough for rows of `min` points (`gap` apart), in reading order:
+/// `row(ui, i, first)` draws row `i` in its column, `first` when it starts its column (no separator above it).
+pub fn row_columns(ui: &mut Ui, id_salt: &str, min: f32, gap: f32, count: usize, mut row: impl FnMut(&mut Ui, usize, bool)) {
+    let width = ui.available_width();
+    let (n, w) = orbiters_ui::layout::columns(width, min, gap);
+    let n = n.min(count.max(1));
+    let w = if n == 1 { width } else { w };
+    let top = ui.cursor().min;
+    let mut columns: Vec<Ui> = (0..n)
+        .map(|c| {
+            let r = Rect::from_min_size(top + vec2(c as f32 * (w + gap), 0.0), vec2(w, 1.0e6));
+            ui.new_child(UiBuilder::new().max_rect(r).layout(Layout::top_down(egui::Align::Min)).id_salt((id_salt, c)))
+        })
+        .collect();
+    for i in 0..count {
+        row(&mut columns[i % n], i, i < n);
+    }
+    let bottom = columns.iter().map(|c| c.min_rect().bottom()).fold(top.y, f32::max);
+    ui.allocate_exact_size(vec2(width, bottom - top.y), Sense::hover());
+}
+
 /// A card section: entrance, gradient icon tile, title and subtitle, then rows; the card is sized to its rows.
 pub fn section(ui: &mut Ui, cx: &Cx, index: usize, glyph: &str, title: &str, subtitle: Option<&str>, body: impl FnOnce(&mut Ui)) {
-    let width = ui.available_width().min(980.0);
+    section_up_to(ui, cx, orbiters_ui::layout::SECTION_ALONE_MAX, index, glyph, title, subtitle, body);
+}
+
+/// A [`section`] at most `max_width` wide (one whose rows go side by side on wide pages).
+#[allow(clippy::too_many_arguments)]
+pub fn section_up_to(ui: &mut Ui, cx: &Cx, max_width: f32, index: usize, glyph: &str, title: &str, subtitle: Option<&str>, body: impl FnOnce(&mut Ui)) {
+    let width = ui.available_width().min(max_width);
     let top_left = ui.cursor().min;
     let (alpha, dy) = widgets::entrance(ui, Id::unique(("orbiters-enter", cx.visit, index)), cx.entered, index);
     let bg = ui.painter().add(Shape::Noop);

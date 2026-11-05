@@ -4,7 +4,7 @@
 
 use orbiters_core::voice::{VoiceCommand, VoiceEvent};
 use orbiters_n4n0::{Browser, Clipboard, Ears, Locale, Mouse, MouseState, Platform, Sounds, VoiceEnded, VoiceEvents, VoiceWorker};
-use orbiters_orb::menu::KeyboardLayout;
+use orbiters_n4n0_core::menu::KeyboardLayout;
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::{Arc, Mutex};
@@ -36,6 +36,11 @@ impl Clipboard for WindowsClipboard {
     fn copy(&self, text: &str) -> Result<(), String> {
         COPIED.lock().unwrap().push(text.to_string());
         Ok(())
+    }
+
+    #[cfg(not(test))]
+    fn paste(&self) -> Option<String> {
+        arboard::Clipboard::new().and_then(|mut c| c.get_text()).ok().filter(|t| !t.is_empty())
     }
 }
 
@@ -112,12 +117,14 @@ impl Mouse for WindowsMouse {
     fn read(&mut self, vrchat: u32) -> MouseState {
         #[cfg(windows)]
         {
+            use windows::Win32::Foundation::{POINT, RECT};
+            use windows::Win32::Graphics::Gdi::ClientToScreen;
             use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LBUTTON, VK_RBUTTON};
             use windows::Win32::UI::WindowsAndMessaging::{
-                GetCursorInfo, GetForegroundWindow, GetSystemMetrics, GetWindowThreadProcessId, CURSORINFO, CURSOR_SHOWING, SM_SWAPBUTTON,
+                GetClientRect, GetCursorInfo, GetForegroundWindow, GetSystemMetrics, GetWindowThreadProcessId, CURSORINFO, CURSOR_SHOWING, SM_SWAPBUTTON,
             };
-            // SAFETY: plain reads of the input state; the process id and the cursor's state are written to locals that
-            // outlive the calls.
+            // SAFETY: plain reads of the input state; the process id, the cursor's state and the window's client area are
+            // written to locals that outlive the calls.
             unsafe {
                 // The left button as the owner set it up (swapped: the physical right one).
                 let button = if GetSystemMetrics(SM_SWAPBUTTON) != 0 { VK_RBUTTON } else { VK_LBUTTON };
@@ -125,9 +132,18 @@ impl Mouse for WindowsMouse {
                 let window = GetForegroundWindow();
                 let mut pid = 0u32;
                 let front = !window.is_invalid() && GetWindowThreadProcessId(window, Some(&mut pid as *mut u32)) != 0 && pid == vrchat;
+                // In mouse-look Unity hides the cursor by giving it no picture (Windows still flags it as showing) and
+                // holds it at the middle of the window: either says the cursor is not there to click with.
                 let cursor = front && {
                     let mut info = CURSORINFO { cbSize: std::mem::size_of::<CURSORINFO>() as u32, ..Default::default() };
-                    GetCursorInfo(&mut info).is_ok() && info.flags.0 & CURSOR_SHOWING.0 != 0
+                    let shown = GetCursorInfo(&mut info).is_ok() && info.flags.0 & CURSOR_SHOWING.0 != 0 && !info.hCursor.is_invalid();
+                    let mut client = RECT::default();
+                    let mut corner = POINT::default();
+                    let held = GetClientRect(window, &mut client).is_ok() && ClientToScreen(window, &mut corner).as_bool() && {
+                        let (cx, cy) = (corner.x + (client.right - client.left) / 2, corner.y + (client.bottom - client.top) / 2);
+                        (info.ptScreenPos.x - cx).abs() <= 2 && (info.ptScreenPos.y - cy).abs() <= 2
+                    };
+                    shown && !held
                 };
                 MouseState { down, front, cursor }
             }

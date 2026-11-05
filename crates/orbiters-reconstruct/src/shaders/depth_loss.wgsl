@@ -35,4 +35,9 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) 
     let p = u32(y) * frame.size.x + u32(x);
     let d = out_color[p].w;
     add(p * 4u + 3u, sign(d - smp.z) / smp.z * frame.loss.y * max(smp.w, 1.0) / max(frame.loss.w, 1.0));
+    if (stats_mode() == STATS_DEPTH) {
+        // The measured depth and the samples at this pixel (common.wgsl stats_mode).
+        add(p * 4u, smp.z);
+        add(p * 4u + 1u, 1.0);
+    }
 }

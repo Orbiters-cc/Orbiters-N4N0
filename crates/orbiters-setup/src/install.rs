@@ -293,6 +293,11 @@ pub fn uninstall(dir: &Path, remove_data: bool, progress: &Progress, silent: boo
         let _ = system::set_start_with_windows(dir, false);
     }
     system::forget_steamvr();
+    // Tracking smoothing's driver, which the app registered for SteamVR once: SteamVR no longer loads it (a DLL a
+    // running SteamVR holds is moved out of the way). Never a reason for the uninstall to fail.
+    if let Err(e) = orbiters_smooth::uninstall() {
+        eprintln!("the smoothing driver: {e:#}");
+    }
     if let Some(link) = system::start_menu_shortcut() {
         let _ = std::fs::remove_file(link);
     }

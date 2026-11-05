@@ -129,7 +129,7 @@ enum Recognizer {
 /// A sentence to transcribe: for N4N0 (answering listen `listen`), or heard for the wake word.
 struct Sentence {
     samples: Vec<f32>,
-    for_orb: bool,
+    for_n4n0: bool,
     listen: u64,
 }
 
@@ -285,7 +285,7 @@ impl Worker {
             // Whoever listened hears nothing: say so instead of waiting.
             if let Some(listen) = self.listen.take() {
                 self.held.clear();
-                emit(&VoiceEvent::Heard { text: String::new(), for_orb: true, seconds: 0.0, decode_ms: 0, listen: listen.id });
+                emit(&VoiceEvent::Heard { text: String::new(), for_n4n0: true, seconds: 0.0, decode_ms: 0, listen: listen.id });
             }
         }
     }
@@ -413,8 +413,8 @@ impl Worker {
                 self.recognizer = Recognizer::Unloaded;
                 emit(&VoiceEvent::Error { message: format!("N4N0's speech recogniser did not load: {e}") });
                 while let Some(s) = self.waiting.pop_front() {
-                    if s.for_orb {
-                        emit(&VoiceEvent::Heard { text: String::new(), for_orb: true, seconds: 0.0, decode_ms: 0, listen: s.listen });
+                    if s.for_n4n0 {
+                        emit(&VoiceEvent::Heard { text: String::new(), for_n4n0: true, seconds: 0.0, decode_ms: 0, listen: s.listen });
                     }
                 }
             }
@@ -481,24 +481,24 @@ impl Worker {
     }
 
     /// A whole sentence: transcribed now, or once the recogniser has loaded.
-    fn sentence(&mut self, samples: Vec<f32>, for_orb: bool, listen: u64) {
+    fn sentence(&mut self, samples: Vec<f32>, for_n4n0: bool, listen: u64) {
         // Less than a quarter of a second holds no word.
         if samples.len() < RATE / 4 {
-            if for_orb {
-                emit(&VoiceEvent::Heard { text: String::new(), for_orb, seconds: samples.len() as f32 / RATE as f32, decode_ms: 0, listen });
+            if for_n4n0 {
+                emit(&VoiceEvent::Heard { text: String::new(), for_n4n0, seconds: samples.len() as f32 / RATE as f32, decode_ms: 0, listen });
             }
             return;
         }
-        let sentence = Sentence { samples, for_orb, listen };
+        let sentence = Sentence { samples, for_n4n0, listen };
         if matches!(self.recognizer, Recognizer::Ready(_)) {
             self.decode(sentence);
             return;
         }
         if self.waiting.len() >= WAITING_MOST {
             // The oldest sentence heard for the wake word goes (one for N4N0 is always answered).
-            match self.waiting.iter().position(|s| !s.for_orb) {
+            match self.waiting.iter().position(|s| !s.for_n4n0) {
                 Some(i) => drop(self.waiting.remove(i)),
-                None if !for_orb => return,
+                None if !for_n4n0 => return,
                 None => {}
             }
         }
@@ -512,14 +512,14 @@ impl Worker {
         let Recognizer::Ready(recognizer) = &self.recognizer else { return };
         self.used_at = Instant::now();
         let seconds = s.samples.len() as f32 / RATE as f32;
-        if !s.for_orb && !self.wake_words.is_empty() && s.samples.len() > PREFIX {
+        if !s.for_n4n0 && !self.wake_words.is_empty() && s.samples.len() > PREFIX {
             let (start, _) = transcribe(recognizer, &s.samples[..PREFIX]);
-            if orbiters_orb::wake::command(&start, &self.wake_words).is_none() {
+            if orbiters_n4n0_core::wake::command(&start, &self.wake_words).is_none() {
                 return;
             }
         }
         let (text, decode_ms) = transcribe(recognizer, &s.samples);
-        emit(&VoiceEvent::Heard { text, for_orb: s.for_orb, seconds, decode_ms, listen: s.listen });
+        emit(&VoiceEvent::Heard { text, for_n4n0: s.for_n4n0, seconds, decode_ms, listen: s.listen });
     }
 
     /// A sentence for N4N0 that never started, or went on too long; a microphone due to open again; a recogniser
@@ -560,7 +560,7 @@ impl Worker {
         } else if (waited > NO_SPEECH && !self.speaking) || waited > LONGEST {
             let id = listen.id;
             self.listen = None;
-            emit(&VoiceEvent::Heard { text: String::new(), for_orb: true, seconds: 0.0, decode_ms: 0, listen: id });
+            emit(&VoiceEvent::Heard { text: String::new(), for_n4n0: true, seconds: 0.0, decode_ms: 0, listen: id });
             self.follow_mic();
         }
         true

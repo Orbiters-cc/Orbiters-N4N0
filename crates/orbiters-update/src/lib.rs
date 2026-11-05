@@ -87,7 +87,24 @@ pub fn feed() -> String {
         .ok()
         .map(|f| f.trim().trim_end_matches('/').to_string())
         .filter(|f| !f.is_empty())
-        .unwrap_or_else(|| DEFAULT_FEED.into())
+        .unwrap_or_else(|| if development() { DEVELOPMENT_FEED } else { DEFAULT_FEED }.into())
+}
+
+/// Where the development environment publishes its builds: the development server on this computer (the server
+/// repository's `docker-data/downloads`, which its backend serves in development).
+pub const DEVELOPMENT_FEED: &str = "http://127.0.0.1:4100/downloads/desktop";
+
+static DEVELOPMENT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Reads releases from [`DEVELOPMENT_FEED`] (on) or [`DEFAULT_FEED`] from now on: the app's Development environment
+/// switch, and `cargo xtask publish --dev`.
+pub fn set_development(on: bool) {
+    DEVELOPMENT.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Whether releases come from the development environment ([`set_development`]).
+pub fn development() -> bool {
+    DEVELOPMENT.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 /// Where a channel's release is published.

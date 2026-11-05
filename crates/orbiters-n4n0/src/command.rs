@@ -1,7 +1,7 @@
 //! What the apps' interfaces ask of N4N0: the window and the SteamVR overlay over the desktop's link, a phone's
 //! screen in its own process.
 
-use crate::status::{OrbFace, StateAction};
+use crate::status::{N4n0Face, StateAction};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -56,18 +56,22 @@ pub enum Command {
     },
     /// Testing: holds N4N0 in a state (`None`: back to what N4N0 is doing).
     TestFace {
-        face: Option<OrbFace>,
+        face: Option<N4n0Face>,
     },
     /// Testing: shows every state in turn, two seconds each.
     TestCycle,
-    /// Testing: acts as if VRChat said the owner is away (the sleeping orb and the AFK message).
+    /// Testing: acts as if VRChat said the owner is away (the sleeping N4N0 and the AFK message).
     TestAfk {
         on: bool,
     },
     /// Testing: acts as if the owner touched N4N0.
     TestTouch,
-    /// Testing: shows or hides the whole orb (`N4N0/Visible`).
+    /// Testing: shows or hides all of N4N0 (`N4N0/Visible`).
     TestVisible {
+        on: bool,
+    },
+    /// Testing: the avatar's screen shows the full pictures' diagnostics (contracts `Docs/n4n0-picture.md`, Diagnostics).
+    TestPictures {
         on: bool,
     },
     /// The overlay's N4N0 menu opened or closed, and whether a sentence N4N0 hears is what to search for (its search
@@ -75,6 +79,9 @@ pub enum Command {
     MenuState {
         open: bool,
         dictation: bool,
+        /// Its keyboard shows: the computer's keyboard types there.
+        #[serde(default)]
+        keyboard: bool,
     },
     /// The SteamVR button for N4N0's menu while the avatar has N4N0's screen: opens the screen, or closes it.
     ToggleScreen,
@@ -83,22 +90,81 @@ pub enum Command {
     Photo3DIn {
         seconds: u32,
     },
-    /// N4N0's light as N4N0's menu set it (its Light page): `N4N0/Light`, its colour and level.
+    /// N4N0's light as N4N0's menu set it (its Light page): `N4N0/Light/On`, its colour and level.
     Light {
         on: bool,
         color: u8,
         level: f32,
     },
-    /// The avatar's saved states: save, apply, the default, rename, delete, what one puts back.
+    /// The avatar's saved states: save, apply, the default, rename, delete, what one puts back. `avatar`: another avatar's
+    /// states than the worn one's (the window's States page: its default, names, options and deletes only).
     States {
         action: StateAction,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        avatar: Option<String>,
     },
-    /// A copied link dropped in the world as a card, which the avatar's screen shows (contracts `Docs/orb.md`, Link card).
+    /// Tracking smoothing as N4N0's menu set it (its Tracking page): on or off, each kind's strength (an index of
+    /// `orbiters_n4n0_core::menu::SMOOTHING_LABELS`: headset, controllers, trackers).
+    Tracking {
+        on: bool,
+        levels: [u8; 3],
+    },
+    /// A feature suggestion for Orbiters from N4N0's menu (`voice`: some of it was said to N4N0).
+    Suggest {
+        text: String,
+        voice: bool,
+    },
+    /// N4N0 listens to the next sentence for the menu (Suggest features' Talk).
+    Dictate,
+    /// Opens a video on the computer (the world's, from the Music page).
+    Watch {
+        link: String,
+    },
+    /// A copied link dropped in the world as a card, which the avatar's screen shows (contracts `Docs/n4n0.md`, Link card).
     Drop {
         link: String,
         title: String,
         /// The thumbnail's key (the video id).
         video: Option<String>,
+    },
+    /// The link card out in the world taken back (as when its time is up): from N4N0's menu, the overlay or the window.
+    TakeBack,
+    /// Orbiters' VRChat account invites the player to this previous instance (`wrld_…:<instance>`; N4N0's menu, More,
+    /// Previous instances): its answer is the status' `invite`.
+    InviteMe {
+        location: String,
+    },
+    /// The QR code scanner reads VRChat's stream camera (`on`: its page opened, Scan again) or no longer (its page closed):
+    /// what it does is the status' `qr`.
+    Qr {
+        on: bool,
+    },
+    /// The overlay's N4N0 menu opened History: the 3D captures listed again (the status' `captures`).
+    Captures,
+    /// The overlay's Share to … opened (`on`) or closed: the VRChat friends read again (the status' `friends`), or
+    /// forgotten.
+    Friends {
+        on: bool,
+    },
+    /// A 3D capture shared from the overlay's menu: how it goes comes in its row of the status' `captures`.
+    ShareCapture {
+        share: orbiters_n4n0_core::captures::ShareAsk,
+    },
+    /// World feedback the overlay's menu asked (read a world's, like, label, comment): what the app knows comes in the
+    /// status' `feedback`.
+    Feedback {
+        ask: orbiters_n4n0_core::feedback::FeedbackAsk,
+    },
+    /// A controller's trigger pulled or let go (the SteamVR overlay reads it): on a screen of version 7 it presses where
+    /// that hand's index finger points.
+    Trigger {
+        right: bool,
+        down: bool,
+    },
+    /// Each hand's touchpad and thumbstick as the SteamVR overlay read them (contracts `Docs/n4n0-input.md`), paced by
+    /// [`crate::input::Pacer`]: the avatar's N4N0 input parameters follow them.
+    Input {
+        pads: crate::input::Pads,
     },
 }
 
@@ -113,12 +179,31 @@ mod tests {
         assert_eq!(json(&Command::Talk { down: true }), r#"{"kind":"talk","down":true}"#);
         assert_eq!(json(&Command::Photo3DIn { seconds: 3 }), r#"{"kind":"photo_3d_in","seconds":3}"#);
         assert_eq!(json(&Command::Photo3D), r#"{"kind":"photo3_d"}"#);
-        assert_eq!(json(&Command::TestFace { face: Some(OrbFace::Happy) }), r#"{"kind":"test_face","face":"happy"}"#);
+        assert_eq!(json(&Command::TestFace { face: Some(N4n0Face::Happy) }), r#"{"kind":"test_face","face":"happy"}"#);
         assert_eq!(
-            json(&Command::States { action: StateAction::Save { name: None } }),
-            r#"{"kind":"states","action":{"do":"save","name":null}}"#
+            json(&Command::States { action: StateAction::Save { name: None, size: true, pose: false, default: false }, avatar: None }),
+            r#"{"kind":"states","action":{"do":"save","name":null,"size":true,"pose":false,"default":false}}"#
         );
         let back: Command = serde_json::from_str(r#"{"kind":"drop","link":"https://x.y/","title":"t","video":null}"#).unwrap();
         assert_eq!(back, Command::Drop { link: "https://x.y/".into(), title: "t".into(), video: None });
+        // Another avatar's states: the avatar named; the worn one's read as before.
+        let other = Command::States { action: StateAction::Delete { id: "s1".into() }, avatar: Some("avtr_b".into()) };
+        assert_eq!(json(&other), r#"{"kind":"states","action":{"do":"delete","id":"s1"},"avatar":"avtr_b"}"#);
+        let worn: Command = serde_json::from_str(r#"{"kind":"states","action":{"do":"delete","id":"s1"}}"#).unwrap();
+        assert_eq!(worn, Command::States { action: StateAction::Delete { id: "s1".into() }, avatar: None });
+        assert_eq!(json(&Command::TakeBack), r#"{"kind":"take_back"}"#);
+        assert_eq!(json(&Command::InviteMe { location: "wrld_a:1".into() }), r#"{"kind":"invite_me","location":"wrld_a:1"}"#);
+        assert_eq!(json(&Command::Qr { on: true }), r#"{"kind":"qr","on":true}"#);
+        assert_eq!(json(&Command::Friends { on: false }), r#"{"kind":"friends","on":false}"#);
+        let share = Command::ShareCapture {
+            share: orbiters_n4n0_core::captures::ShareAsk {
+                key: "C:/s/a".into(),
+                public: false,
+                recipients: vec![orbiters_n4n0_core::captures::Friend { id: "usr_a".into(), name: "A".into() }],
+                acknowledge_explicit: false,
+            },
+        };
+        let back: Command = serde_json::from_str(&json(&share)).unwrap();
+        assert_eq!(back, share);
     }
 }

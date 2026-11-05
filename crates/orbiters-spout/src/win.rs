@@ -605,6 +605,8 @@ pub struct Receiver {
     last_new: Option<Instant>,
     connected_at: Instant,
     interval: Duration,
+    /// When the sender was last looked at for a new frame.
+    last_look: Option<Instant>,
     convert: Vec<u8>,
     /// Why the last copy or mapping failed: the next receive opens the sender again.
     broken: Option<String>,
@@ -624,6 +626,7 @@ impl Receiver {
             last_new: None,
             connected_at: Instant::now(),
             interval: Duration::from_millis(8),
+            last_look: None,
             convert: Vec::new(),
             broken: None,
         })
@@ -887,6 +890,13 @@ impl Receiver {
 
     /// The pause between two looks once a frame is due: 1 ms, growing to 8 ms while none comes (a paused game, a
     /// camera closed), so a quiet sender costs little.
+    /// Whether looking for a new frame is worth it now: one is due, and the sender was not looked at within the pause
+    /// an overdue frame waits. For readers of several senders, which look at each in turn without waiting
+    /// ([`Receiver::receive_with`] with no timeout still looks once).
+    pub fn due(&self) -> bool {
+        self.not_due().is_none() && self.last_look.is_none_or(|t| t.elapsed() >= self.overdue_pause())
+    }
+
     fn overdue_pause(&self) -> Duration {
         let since = self.last_new.unwrap_or(self.connected_at).elapsed().saturating_sub(self.interval / 2);
         (since / 8).clamp(Duration::from_millis(1), Duration::from_millis(8))
@@ -898,6 +908,7 @@ impl Receiver {
             std::thread::sleep(wait.min(deadline.saturating_duration_since(Instant::now())));
         }
         loop {
+            self.last_look = Some(Instant::now());
             let tick = self.conn.as_mut().and_then(|c| c.counter.as_mut()).map_or(Tick::Uncounted, Counter::poll);
             match tick {
                 Tick::New(count) => return Ok(Some(Some(count))),

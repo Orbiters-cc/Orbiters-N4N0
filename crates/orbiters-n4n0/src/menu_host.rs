@@ -1,4 +1,4 @@
-//! N4N0's menu (`orbiters_orb::menu`) run where an interface draws it: the desktop's SteamVR overlay and its window's
+//! N4N0's menu (`orbiters_n4n0_core::menu`) run where an interface draws it: the desktop's SteamVR overlay and its window's
 //! Home, a phone's screen. It keeps the menu in step with N4N0 (listening, fast walk, calls, the light, the 3D picture's
 //! countdown, the avatar's saved states, whether a link can be dropped as a card), fetches YouTube's suggestions,
 //! results and thumbnails itself, reads the music of its process's [`Watcher`], and asks N4N0 for the rest (calls, the
@@ -9,12 +9,12 @@
 use crate::media::Watcher;
 use crate::platform::Locale;
 use crate::screen::{keyboard, photo_length, photo_setting};
-use crate::status::{OrbStatus, StateAction};
+use crate::status::{N4n0Status, StateAction};
 use crate::Command;
 use orbiters_core::settings::Settings;
-use orbiters_orb::menu::{Effect, Light, Menu, Page, Pages, StateRow, SuggestQueue, Target};
-use orbiters_orb::picture::{self, Rgb};
-use orbiters_orb::youtube;
+use orbiters_n4n0_core::menu::{Effect, Light, Menu, Page, Pages, StateRow, SuggestQueue, Target};
+use orbiters_n4n0_core::picture::{self, Rgb};
+use orbiters_n4n0_core::youtube;
 use std::collections::HashMap;
 use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant};
@@ -31,6 +31,10 @@ pub trait Pictures {
     /// What the interface draws of `image`, named `name` (a texture's label).
     fn make(&self, name: &str, image: &Rgb) -> Self::Picture;
 }
+
+/// Reads a 3D capture's picture by its key (`CaptureRow::key`) where the interface runs: the computer's sessions for
+/// the desktop's overlay and window. Called on a thread of its own.
+pub type CapturePictures = Arc<dyn Fn(&str) -> Option<Rgb> + Send + Sync>;
 
 /// What the menu asks of N4N0 and of the app's settings, from where it is drawn.
 pub trait MenuService {
@@ -87,6 +91,18 @@ pub struct MenuHost<P: Pictures> {
     note_seen: Option<u64>,
     /// A link was dropped as a card since the host last looked (the overlay then closes: the card is in the world).
     pub dropped: bool,
+    /// The number of the last suggestion result N4N0 published that this menu saw (the first status sets it).
+    suggestion_seen: Option<u32>,
+    /// The same for the last Invite me's answer.
+    invite_seen: Option<u32>,
+    /// The number of the last key of the computer's keyboard taken (the first status sets it).
+    keys_seen: Option<u32>,
+    /// The number of the last 3D picture note N4N0 published that this menu saw (the first status sets it).
+    photo_note_seen: Option<u32>,
+    /// Where the 3D captures' pictures are read (none: they show as placeholders).
+    capture_pictures: Option<CapturePictures>,
+    /// The worlds' feedback in the last status taken: the app's changes replace the menu's (its own presses show at once).
+    feedback_seen: orbiters_n4n0_core::feedback::FeedbackView,
 }
 
 impl<P: Pictures> MenuHost<P> {
@@ -109,13 +125,25 @@ impl<P: Pictures> MenuHost<P> {
             states_seen: None,
             note_seen: None,
             dropped: false,
+            suggestion_seen: None,
+            invite_seen: None,
+            keys_seen: None,
+            photo_note_seen: None,
+            capture_pictures: None,
+            feedback_seen: Default::default(),
         }
+    }
+
+    /// The same, reading the 3D captures' pictures with `read`.
+    pub fn with_capture_pictures(mut self, read: CapturePictures) -> Self {
+        self.capture_pictures = Some(read);
+        self
     }
 
     /// Opens the menu on Home with the settings it starts from (keyboard, the 3D picture's timer and length). It has
     /// every tile: the interfaces draw every page.
     pub fn open(&mut self, settings: &Settings) {
-        self.menu.layout = keyboard(settings.orb.menu.keyboard, &*self.locale);
+        self.menu.layout = keyboard(settings.n4n0.menu.keyboard, &*self.locale);
         self.menu.photo_timer = settings.photo_3d_timer;
         self.menu.photo_length = photo_length(settings.photo_3d);
         self.menu.pages = Pages::ALL;
@@ -132,11 +160,11 @@ impl<P: Pictures> MenuHost<P> {
     /// Keeps the menu's picture of what N4N0 and the settings say (calls, fast walk, listening, the picture's
     /// countdown), field by field: the menu (its results and suggestions included) is not copied every frame to find a
     /// change.
-    pub fn follow(&mut self, orb: &OrbStatus, settings: &Settings) {
+    pub fn follow(&mut self, n4n0: &N4n0Status, settings: &Settings) {
         let m = &mut self.menu;
-        let mut changed = set(&mut m.listening, orb.listening);
+        let mut changed = set(&mut m.listening, n4n0.listening);
         // What N4N0 says shows on Home too.
-        if let Some(panel) = &orb.panel {
+        if let Some(panel) = &n4n0.panel {
             if m.heard_private || !m.heard.as_deref().is_some_and(|h| h.split_whitespace().eq(panel.split_whitespace())) {
                 m.heard = Some(panel.split_whitespace().collect::<Vec<_>>().join(" "));
                 m.heard_private = false;
@@ -144,8 +172,8 @@ impl<P: Pictures> MenuHost<P> {
             }
         }
         changed |= set(&mut m.fast_walk, settings.walk_boost.enabled);
-        changed |= set(&mut m.desktop_mode, orb.desktop_mode);
-        let said = orb.light.map(|l| Light { on: l.on, color: l.color, level: l.level });
+        changed |= set(&mut m.desktop_mode, n4n0.desktop_mode);
+        let said = n4n0.light.map(|l| Light { on: l.on, color: l.color, level: l.level });
         let light = match self.light_set {
             Some((set, at)) if said != Some(set) && at.elapsed() < LIGHT_ECHO => Some(set),
             _ => {
@@ -154,11 +182,26 @@ impl<P: Pictures> MenuHost<P> {
             }
         };
         changed |= set(&mut m.light, light);
-        changed |= set(&mut m.countdown, orb.photo_countdown);
-        changed |= set(&mut m.can_drop, orb.can_drop);
+        changed |= set(&mut m.countdown, n4n0.photo_countdown);
+        changed |= set(&mut m.can_drop, n4n0.can_drop);
+        // The link card out in the world: Take back.
+        changed |= set(&mut m.card_out, n4n0.card.is_some());
+        // What stopped a 3D picture (VRChat's camera closed), on the 3D picture page.
+        match (&n4n0.photo_note, self.photo_note_seen) {
+            (Some((n, text)), Some(seen)) if *n != seen => {
+                if m.page == Page::Photo {
+                    m.notice = Some(text.clone());
+                    changed = true;
+                }
+                self.photo_note_seen = Some(*n);
+            }
+            (Some((n, _)), None) => self.photo_note_seen = Some(*n),
+            (None, None) => self.photo_note_seen = Some(0),
+            _ => {}
+        }
         // The avatar's saved states (a state saved here shows until N4N0 lists it), and what N4N0 said of the last save
         // or apply, on the States page.
-        let view = &orb.states;
+        let view = &n4n0.states;
         let rows: Vec<StateRow> =
             view.states.iter().map(|s| StateRow { id: s.id.clone(), name: s.name.clone(), default: s.default, pose: s.pose, size: s.size }).collect();
         let listed = (rows, view.avatar_id.is_some());
@@ -179,7 +222,63 @@ impl<P: Pictures> MenuHost<P> {
         }
         changed |= set(&mut m.photo_timer, settings.photo_3d_timer);
         changed |= set(&mut m.photo_length, photo_length(settings.photo_3d));
-        let calls = &orb.calls;
+        // Tracking smoothing, the versions, and how the last suggestion sent from here went.
+        let tracking = n4n0.tracking.as_ref().map(|t| orbiters_n4n0_core::menu::Tracking { on: t.on, levels: t.levels, note: t.note.clone() });
+        changed |= set(&mut m.tracking, tracking);
+        changed |= set(&mut m.tracking_note, n4n0.tracking_note.clone());
+        changed |= set(&mut m.versions, n4n0.versions.clone());
+        let video = n4n0.world_video.as_ref().map(|(url, title, at)| orbiters_n4n0_core::menu::WorldVideo { url: url.clone(), title: title.clone(), at: *at });
+        changed |= set(&mut m.world_video, video);
+        if !n4n0.listening && m.dictating {
+            m.dictation_ended();
+            changed = true;
+        }
+        match (&n4n0.suggestion, self.suggestion_seen) {
+            (Some((n, error)), Some(seen)) if *n != seen => {
+                if m.sending {
+                    m.suggestion_sent(error.clone().map_or(Ok(()), Err));
+                    changed = true;
+                }
+                self.suggestion_seen = Some(*n);
+            }
+            (Some((n, _)), None) => self.suggestion_seen = Some(*n),
+            (None, None) => self.suggestion_seen = Some(0),
+            _ => {}
+        }
+        changed |= set(&mut m.mirror, n4n0.mirror);
+        if m.qr != n4n0.qr {
+            m.qr = n4n0.qr.clone();
+            changed = true;
+        }
+        // The 3D captures (their pictures fetched as they show) and Share to …'s friends.
+        let mut pictures = Vec::new();
+        if m.captures != n4n0.captures {
+            pictures = m.set_captures(n4n0.captures.clone());
+            changed = true;
+        }
+        if m.friends != n4n0.friends {
+            m.set_friends(n4n0.friends.clone());
+            changed = true;
+        }
+        // World feedback: taken when the app's changes (the menu's own presses show at once, before the app has them).
+        if self.feedback_seen != n4n0.feedback {
+            self.feedback_seen = n4n0.feedback.clone();
+            m.set_feedback(n4n0.feedback.clone());
+            changed = true;
+        }
+        match (&n4n0.invite, self.invite_seen) {
+            (Some((n, answer)), Some(seen)) if *n != seen => {
+                if m.invite_waiting {
+                    m.invite_answered(answer.clone());
+                    changed = true;
+                }
+                self.invite_seen = Some(*n);
+            }
+            (Some((n, _)), None) => self.invite_seen = Some(*n),
+            (None, None) => self.invite_seen = Some(0),
+            _ => {}
+        }
+        let calls = &n4n0.calls;
         let (ready, note) = calls.menu_ready();
         let same_contacts = m.contacts.len() == calls.contacts.len() && m.contacts.iter().zip(&calls.contacts).all(|(a, b)| a.id == b.id && a.name == b.name);
         if !same_contacts || m.calls_ready != ready || m.call_note != note {
@@ -196,6 +295,27 @@ impl<P: Pictures> MenuHost<P> {
         if changed {
             self.dirty = true;
         }
+        for effect in pictures {
+            if let Effect::Thumbnails(ids) = effect {
+                self.thumbnails(ids);
+            }
+        }
+    }
+
+    /// The computer's keys N4N0 handed this menu since it last looked (none the first time: those were for an
+    /// earlier menu); what they ask of the host follows from the effects returned.
+    pub fn take_keys(&mut self, n4n0: &N4n0Status) -> Vec<Effect> {
+        let newest = n4n0.keys.last().map_or(0, |(n, _)| *n);
+        let Some(seen) = self.keys_seen.replace(newest) else { return Vec::new() };
+        let mut effects = Vec::new();
+        for (n, key) in &n4n0.keys {
+            // Numbers wrap: the ones after `seen`.
+            if n.wrapping_sub(seen) as i32 > 0 {
+                effects.extend(self.menu.key(key.clone(), || None));
+                self.dirty = true;
+            }
+        }
+        effects
     }
 
     /// The music the menu shows, from this process's media reading (read only while a menu wants it), and its art as a
@@ -229,7 +349,7 @@ impl<P: Pictures> MenuHost<P> {
                     self.suggest.answered(id);
                     match result {
                         Ok(list) => self.menu.suggestions_arrived(id, &text, list),
-                        Err(e) => eprintln!("orb menu: YouTube suggestions: {e:#}"),
+                        Err(e) => eprintln!("N4N0 menu: YouTube suggestions: {e:#}"),
                     }
                 }
                 Done::Results { id, more, result: Ok(results) } => effects.extend(self.menu.results_arrived(id, results, more)),
@@ -251,16 +371,17 @@ impl<P: Pictures> MenuHost<P> {
                 let _ = tx.send(Done::Suggestions { id, text, result });
             });
         }
-        if self.menu.page == Page::Results {
+        if matches!(self.menu.page, Page::Results | Page::History) {
             let now = Instant::now();
-            let retry: Vec<String> = self
-                .menu
-                .page_results()
-                .iter()
+            let shown: Vec<String> = match self.menu.page {
+                Page::Results => self.menu.page_results().iter().map(|v| v.id.clone()).collect(),
+                _ => self.menu.page_captures().iter().map(orbiters_n4n0_core::captures::CaptureRow::picture_key).collect(),
+            };
+            let retry: Vec<String> = shown
+                .into_iter()
                 .filter(
-                    |v| matches!(self.thumbs.get(&v.id), Some(Thumb::Failed { at, tries }) if *tries < THUMB_TRIES && now >= *at + THUMB_RETRY * *tries as u32),
+                    |id| matches!(self.thumbs.get(id), Some(Thumb::Failed { at, tries }) if *tries < THUMB_TRIES && now >= *at + THUMB_RETRY * *tries as u32),
                 )
-                .map(|v| v.id.clone())
                 .collect();
             if !retry.is_empty() {
                 self.thumbnails(retry);
@@ -283,8 +404,13 @@ impl<P: Pictures> MenuHost<P> {
             };
             self.thumbs.insert(id.clone(), Thumb::Loading);
             let tx = self.done_tx.clone();
+            let captures = self.capture_pictures.clone();
             std::thread::spawn(move || {
-                let image = youtube::thumbnail(&id).ok().and_then(|jpeg| picture::rgb_jpeg(&jpeg).ok());
+                // A 3D capture's picture is read where the interface runs; the rest are YouTube's.
+                let image = match id.strip_prefix(orbiters_n4n0_core::captures::PICTURE_PREFIX) {
+                    Some(key) => captures.and_then(|read| read(key)),
+                    None => youtube::thumbnail(&id).ok().and_then(|jpeg| picture::rgb_jpeg(&jpeg).ok()),
+                };
                 let _ = tx.send(Done::Thumbnail { id, tries, image });
             });
         }
@@ -341,12 +467,32 @@ impl<P: Pictures> MenuHost<P> {
                     self.light_set = Some((light, Instant::now()));
                     service.command(Command::Light { on: light.on, color: light.color, level: light.level });
                 }
-                Effect::SaveState { name } => service.command(Command::States { action: StateAction::Save { name: Some(name) } }),
-                Effect::ApplyState { id, .. } => service.command(Command::States { action: StateAction::Apply { id } }),
+                Effect::SaveState { name, size, pose, default } => {
+                    service.command(Command::States { action: StateAction::Save { name: Some(name), size, pose, default }, avatar: None })
+                }
+                Effect::ApplyState { id, .. } => service.command(Command::States { action: StateAction::Apply { id }, avatar: None }),
+                Effect::TakeBack => service.command(Command::TakeBack),
                 Effect::Drop { link, title, video } => {
                     service.command(Command::Drop { link, title, video });
                     self.dropped = true;
                 }
+                Effect::Tracking { on, levels } => service.command(Command::Tracking { on, levels }),
+                Effect::Dictate => service.command(Command::Dictate),
+                Effect::SendSuggestion { text, voice } => service.command(Command::Suggest { text, voice }),
+                Effect::WatchVideo { link } => service.command(Command::Watch { link }),
+                Effect::SaveVideo => service.command(Command::SaveVideo),
+                // This computer's visits, read here (a small file): the service keeps it as VRChat's logs grow.
+                Effect::Instances => self.menu.set_instances(orbiters_n4n0_core::invites::read_rows(), true, ""),
+                Effect::InviteMe { location } => service.command(Command::InviteMe { location }),
+                Effect::CopyText { text } => service.command(Command::CopyText { text }),
+                Effect::OpenLink { link } => service.command(Command::Watch { link }),
+                Effect::QrScan(on) => service.command(Command::Qr { on }),
+                Effect::Captures => service.command(Command::Captures),
+                Effect::Friends(on) => service.command(Command::Friends { on }),
+                Effect::ShareCapture(share) => service.command(Command::ShareCapture { share }),
+                Effect::Feedback(ask) => service.command(Command::Feedback { ask }),
+                // The overlay never shows the camera's picture: its card is greyed out there.
+                Effect::Mirror(_) => {}
                 Effect::Close => close = true,
             }
         }
@@ -375,7 +521,7 @@ impl<P: Pictures> MenuHost<P> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::status::{CallContact, CallLink, CallPhase, CallView, CallsStatus, OrbLight, StateView, StatesNote, StatesView};
+    use crate::status::{CallContact, CallLink, CallPhase, CallView, CallsStatus, N4n0Light, StateView, StatesNote, StatesView};
     use std::sync::Mutex;
 
     /// Pictures as their size and name.
@@ -424,39 +570,65 @@ mod tests {
         h.open(&settings);
         assert!(h.menu.open && h.menu.pages == Pages::ALL);
         h.dirty = false;
-        let mut orb = OrbStatus { listening: true, panel: Some("Hello   there".into()), light: Some(OrbLight { on: true, color: 2, level: 0.5 }), ..Default::default() };
-        orb.calls = CallsStatus {
+        let mut n4n0 = N4n0Status { listening: true, panel: Some("Hello   there".into()), light: Some(N4n0Light { on: true, color: 2, level: 0.5 }), ..Default::default() };
+        n4n0.calls = CallsStatus {
             link: CallLink::Linked { account: "usr_1".into() },
             contacts: vec![CallContact { id: "c1".into(), name: "Ada".into() }],
             call: Some(CallView { name: "Ada".into(), phase: CallPhase::Ringing, incoming: true, connected_at_ms: None, muted: false, mic_level: 0.0, remote_level: 0.0 }),
             ..Default::default()
         };
-        orb.states = StatesView {
+        n4n0.states = StatesView {
             avatar_id: Some("avtr_a".into()),
             states: vec![StateView { id: "s1".into(), name: "Cosy".into(), default: true, ..Default::default() }],
             ..Default::default()
         };
         settings.walk_boost.enabled = true;
-        h.follow(&orb, &settings);
+        h.follow(&n4n0, &settings);
         assert!(h.dirty);
         let m = &h.menu;
         assert!(m.listening && m.fast_walk && m.calls_ready);
         assert_eq!(m.heard.as_deref(), Some("Hello there"));
         assert_eq!(m.light, Some(Light { on: true, color: 2, level: 0.5 }));
         assert_eq!(m.contacts.len(), 1);
-        assert_eq!(m.call, Some(orbiters_orb::menu::Call::Ringing { name: "Ada".into() }));
+        assert_eq!(m.call, Some(orbiters_n4n0_core::menu::Call::Ringing { name: "Ada".into() }));
         // Nothing new: nothing to draw again.
         h.dirty = false;
-        h.follow(&orb, &settings);
+        h.follow(&n4n0, &settings);
         assert!(!h.dirty);
         // An error about the states, on their page, replaces the press's own line.
         h.menu.page = Page::States;
-        orb.states.note = Some(StatesNote { id: 7, text: "VRChat said no".into(), error: true });
-        h.follow(&orb, &settings);
-        h.follow(&orb, &settings);
-        orb.states.note = Some(StatesNote { id: 8, text: "VRChat said no again".into(), error: true });
-        h.follow(&orb, &settings);
+        n4n0.states.note = Some(StatesNote { id: 7, text: "VRChat said no".into(), error: true });
+        h.follow(&n4n0, &settings);
+        h.follow(&n4n0, &settings);
+        n4n0.states.note = Some(StatesNote { id: 8, text: "VRChat said no again".into(), error: true });
+        h.follow(&n4n0, &settings);
         assert_eq!(h.menu.notice.as_deref(), Some("VRChat said no again"));
+    }
+
+    #[test]
+    fn the_card_out_and_a_stopped_picture_show_in_the_menu() {
+        let mut h = host();
+        let settings = Settings::default();
+        h.open(&settings);
+        let service = Recorder::default();
+        // A note from before this menu was opened is not its own.
+        let mut n4n0 = N4n0Status { photo_note: Some((3, "Open the camera before".into())), ..Default::default() };
+        h.follow(&n4n0, &settings);
+        h.press(Target::Photo);
+        h.follow(&n4n0, &settings);
+        assert_eq!(h.menu.notice, None);
+        n4n0.photo_note = Some((4, "Open the camera before".into()));
+        h.follow(&n4n0, &settings);
+        assert_eq!(h.menu.notice.as_deref(), Some("Open the camera before"));
+        // A card out: Take back asks N4N0 to take it back.
+        n4n0.card = Some(crate::status::CardView { title: "t".into(), link: "https://x.y/".into(), left: 500 });
+        h.follow(&n4n0, &settings);
+        assert!(h.menu.card_out);
+        h.press(Target::Back);
+        h.press(Target::Music);
+        let effects = h.press(Target::TakeBack);
+        assert!(!h.effects(effects, &settings, &service));
+        assert!(matches!(service.commands.lock().unwrap().as_slice(), [Command::TakeBack]));
     }
 
     #[test]
@@ -469,12 +641,12 @@ mod tests {
         assert!(!h.effects(vec![Effect::Light(set)], &settings, &service));
         assert!(matches!(service.commands.lock().unwrap().as_slice(), [Command::Light { on: true, color: 3, .. }]));
         // N4N0 still says the light was off: the switch does not jump back.
-        let orb = OrbStatus { light: Some(OrbLight { on: false, color: 0, level: 0.6 }), ..Default::default() };
-        h.follow(&orb, &settings);
+        let n4n0 = N4n0Status { light: Some(N4n0Light { on: false, color: 0, level: 0.6 }), ..Default::default() };
+        h.follow(&n4n0, &settings);
         assert_eq!(h.menu.light, Some(set));
         // Now it says the same: its word again.
-        let orb = OrbStatus { light: Some(OrbLight { on: true, color: 3, level: 1.0 }), ..Default::default() };
-        h.follow(&orb, &settings);
+        let n4n0 = N4n0Status { light: Some(N4n0Light { on: true, color: 3, level: 1.0 }), ..Default::default() };
+        h.follow(&n4n0, &settings);
         assert!(h.light_set.is_none());
     }
 
@@ -488,8 +660,8 @@ mod tests {
             vec![
                 Effect::Copy { link: "https://x.y/".into(), title: "t".into() },
                 Effect::FastWalk(true),
-                Effect::Photo3d { timer: 5, length: orbiters_orb::menu::PhotoLength::Full },
-                Effect::SaveState { name: "State 2".into() },
+                Effect::Photo3d { timer: 5, length: orbiters_n4n0_core::menu::PhotoLength::Full },
+                Effect::SaveState { name: "State 2".into(), size: true, pose: false, default: false },
                 Effect::Drop { link: "https://x.y/".into(), title: "t".into(), video: None },
                 Effect::Close,
             ],
@@ -501,7 +673,7 @@ mod tests {
         assert!(matches!(&commands[..], [
             Command::CopyText { .. },
             Command::Photo3DIn { seconds: 5 },
-            Command::States { action: StateAction::Save { name: Some(n) } },
+            Command::States { action: StateAction::Save { name: Some(n), .. }, avatar: None },
             Command::Drop { .. },
         ] if n == "State 2"), "{commands:?}");
         let saved = service.saved.lock().unwrap();

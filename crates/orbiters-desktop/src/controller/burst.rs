@@ -1,13 +1,29 @@
 //! 3D picture: a short recording during which VRChat's camera (`/usercamera/Pose`, VRChat 2025.3.3 and later) moves
 //! on its own, then comes back where it was. The capture kit stamps every frame with the camera's pose, so the session
 //! reconstructs into splats like any recording; the reconstruction starts as soon as the recording is saved. Three
-//! lengths ([`Photo3dLength`]): a gentle 1 s sweep around what the camera aims at; 4 s that circle the starting point
-//! looking at it (the person taking the picture) then turn in place looking straight up and down and fly 10 m forward,
-//! to each side and up and back; 8 s that add four circles around points 8 m away.
+//! lengths ([`Photo3dLength`]): a gentle 1 s sweep around what the camera aims at; 4 s and 8 s that look around, go around
+//! the people in the picture and through the room, as far as depth shows it goes (controller/around.rs). Without depth frames
+//! to go by, or with the camera dolly's pre-planned paths, the older blind flight: 4 s that circle the starting point looking at
+//! it then turn in place looking straight up and down and fly 10 m forward, to each side and up and back; 8 s that add four
+//! circles around points 8 m away.
+//!
+//! N4N0's camera rig (contracts' Docs/rig-frames.md) follows the camera, from the avatar's hips: on for the flight's room
+//! part and for the whole blind flight (controller/rig.rs), about every other colour frame then carries six more views, one
+//! along each axis around it.
+//!
+//! **VRChat's zoom is never touched.** Close-ups through `/usercamera/Zoom` were tried in 0.3.4-dev.27 and removed: the
+//! slider is a focal length, not a field of view (the projection's P11 is Zoom / 19.7 on the two values ever recorded: 45
+//! gives 47.3°, 20 gives 89°, so "zoomed in to 20" zoomed out, which Enzo saw), each change takes VRChat 0.8 s to finish, and,
+//! worst of all, VRChat takes no `/usercamera/Pose` from the first Zoom message until 0.6 to 0.9 s after the last: in the three
+//! recordings of 2026-11-04 the camera stood still for the whole of the close-ups and of the faces' arcs after them, and for the
+//! first 0.2 to 0.5 s of the flight. Those recordings kept 5 keyframes from that time, all from one place, at
+//! lower resolution than the frame before them, for 1.8 s of everybody's patience (the desktop repository's
+//! docs/3d-picture-angles-2026-11-04.md).
 
-use super::{NoticeKind, Shared};
+use super::{around, NoticeKind, Shared};
 use crate::state::CaptureState;
-use orbiters_core::osc::OscValue;
+use orbiters_contracts::rig;
+use orbiters_core::osc::{OscValue, PARAMETERS_PREFIX};
 use orbiters_core::settings::Photo3dLength;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -23,7 +39,6 @@ const STRAIGHT: f32 = 88.0;
 const RATE_HZ: u32 = 90;
 /// After the recording started, before the camera moves: Spout and the kit's first frames.
 const SETTLE: Duration = Duration::from_millis(700);
-
 /// Eases in and out.
 fn smooth(t: f32) -> f32 {
     t * t * (3.0 - 2.0 * t)
@@ -180,6 +195,102 @@ pub fn path(start: [f32; 6], length: Photo3dLength, focus: f32, rate: u32) -> Ve
     poses
 }
 
+/// What the worker read from the frame the recording started on (`orbiters-reconstruct --find-faces`).
+#[derive(Clone, Debug, Default, PartialEq, serde::Deserialize)]
+pub struct StartFrame {
+    pub width: u32,
+    pub height: u32,
+    /// The strip's projection terms: the frame's exact field of view.
+    pub p00: f32,
+    pub p11: f32,
+    /// The faces' boxes in the frame's pixels: x0, y0, x1, y1, confidence.
+    pub boxes: Vec<[f32; 5]>,
+    /// The hips of the avatar wearing the capture kit, from its skeleton band.
+    pub hips: Option<[f32; 3]>,
+}
+
+/// `/usercamera/Zoom` for a projection's P11, what the camera dolly's paths ask for: 45 gave P11 2.2857 and 20 gave 1.0159 in
+/// the recordings of 2026-11-04, a focal length in other words.
+const ZOOM_PER_P11: f32 = 19.69;
+
+/// Reads the frame the recording started on through the worker (its own process: the app itself carries no detector),
+/// `None` when that fails or takes too long: the picture then goes on without.
+fn read_start_frame(session: &std::path::Path) -> Option<StartFrame> {
+    let file = session.join(orbiters_contracts::manifest::KEYFRAMES_DIR).join("000000.qoi");
+    let begin = Instant::now();
+    while !file.is_file() {
+        if begin.elapsed() > Duration::from_millis(500) {
+            return None;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    // The file may be a moment from whole: the capture writes it on a thread of its own.
+    while begin.elapsed() < Duration::from_millis(READ_START_MS) {
+        let mut command = std::process::Command::new(crate::worker::sibling_exe("orbiters-reconstruct"));
+        command.arg("--find-faces").arg(&file).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::null());
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            // CREATE_NO_WINDOW.
+            command.creation_flags(0x0800_0000);
+        }
+        let mut child = command.spawn().ok()?;
+        loop {
+            match child.try_wait() {
+                Ok(Some(_)) => {
+                    let output = child.wait_with_output().ok()?;
+                    if let Ok(frame) = serde_json::from_slice(&output.stdout) {
+                        return Some(frame);
+                    }
+                    break;
+                }
+                Ok(None) if begin.elapsed() < Duration::from_millis(READ_START_MS) => std::thread::sleep(Duration::from_millis(10)),
+                Ok(None) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return None;
+                }
+                Err(_) => return None,
+            }
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    None
+}
+
+/// How long the picture waits for [`read_start_frame`], milliseconds: the people in it are waiting too. It reads while the
+/// camera makes its opening turn, so nobody waits for the first second of this.
+const READ_START_MS: u64 = 1500;
+/// From a frame's arrival to its record and depth file on disk: frames wait for the keyframes before them to be written.
+const DEPTH_LATENCY: Duration = Duration::from_millis(120);
+/// With fewer depth frames than this after the opening turn (a world's post-processing, a capture kit without them), nothing
+/// tells where the camera can go: the blind flight. About 9 are usual.
+const LEAST_DEPTH_FRAMES: usize = 3;
+/// VRChat's camera at its default zoom, 47.3° vertically, when the start frame could not be read.
+const DEFAULT_P11: f32 = 2.2857;
+
+/// N4N0's camera rig's parameters for a camera pose, with the avatar's hips at `hips`: following it, where it stands
+/// from the hips (each axis over [`rig::REACH_M`]) and its turn from them (over [`rig::YAW_DEG`]), level on upright
+/// hips (`rig::follow_values`). VRChat takes OSC floats from -1 to 1.
+pub fn rig_parameters(pose: &[f32; 6], hips: &super::rig::Hips) -> Vec<(String, Vec<rosc::OscType>)> {
+    let [x, y, z, yaw] = super::rig::values(pose, hips);
+    [
+        (rig::PARAMETER_FOLLOW, rosc::OscType::Bool(true)),
+        (rig::PARAMETER_X, rosc::OscType::Float(x)),
+        (rig::PARAMETER_Y, rosc::OscType::Float(y)),
+        (rig::PARAMETER_Z, rosc::OscType::Float(z)),
+        (rig::PARAMETER_YAW, rosc::OscType::Float(yaw)),
+    ]
+    .into_iter()
+    .map(|(name, value)| (format!("{PARAMETERS_PREFIX}{name}"), vec![value]))
+    .collect()
+}
+
+/// The capture rig on or off.
+pub fn rig_switch(on: bool) -> (String, Vec<rosc::OscType>) {
+    (format!("{PARAMETERS_PREFIX}{}", rig::PARAMETER), vec![rosc::OscType::Bool(on)])
+}
+
 /// What a 3D picture waits for once its recording stops.
 #[derive(Default)]
 pub struct BurstRuntime {
@@ -192,22 +303,47 @@ pub(super) fn floats(values: &[OscValue]) -> Vec<f32> {
 }
 
 impl super::Controller {
+    /// Whether VRChat's camera is open (`/usercamera/Mode` not 0): `None` when VRChat does not say (not found, or before
+    /// 2025.3.3, whose tree has no camera).
+    pub fn camera_open(&self) -> Option<bool> {
+        // VRChat's camera node alone (its tree), else what VRChat sent when it last changed.
+        let mode = self.camera_values().into_iter().find(|(p, _)| p == super::CAMERA_MODE).map(|(_, v)| v);
+        let mode = mode.or_else(|| self.osc_values.lock().unwrap().latest.get(super::CAMERA_MODE).and_then(|(v, _)| v.first().cloned()));
+        match mode {
+            Some(OscValue::Int(mode)) => Some(mode != 0),
+            _ => None,
+        }
+    }
+
+    /// VRChat's camera's values as its OSCQuery tree has them now (`/usercamera/Mode`, `/usercamera/Zoom`…): empty when
+    /// VRChat does not say (not found, or before 2025.3.3, whose tree has no camera).
+    fn camera_values(&self) -> Vec<(String, OscValue)> {
+        let query = self.with_osc(|o| o.vrchat_query()).flatten();
+        query.map(|addr| orbiters_core::osc::vrchat_camera_values(addr, Duration::from_millis(500))).unwrap_or_default()
+    }
+
     /// Takes a 3D picture with VRChat's camera where it stands now.
     pub fn take_3d_picture(self: &Shared) -> anyhow::Result<()> {
         anyhow::ensure!(self.snapshot.lock().unwrap().vrchat.running, "Start VRChat and open its camera first.");
         self.ensure_capture_idle()?;
-        let (pose, focus, smooth) = {
+        let (pose, focus, smooth, eye_height) = {
             let osc = self.osc_values.lock().unwrap();
             let pose = osc.latest.get(POSE).map(|(v, _)| floats(v)).filter(|v| v.len() == 6 && v.iter().any(|f| *f != 0.0));
             let focus = osc.latest.get(FOCAL_DISTANCE).and_then(|(v, _)| floats(v).first().copied()).unwrap_or(2.0).clamp(0.5, 8.0);
             let smooth = osc.latest.get(SMOOTH).and_then(|(v, _)| v.first().map(OscValue::truthy));
-            (pose, focus, smooth)
+            let eye_height = osc.latest.get("/avatar/eyeheight").and_then(|(v, _)| floats(v).first().copied());
+            (pose, focus, smooth, eye_height)
         };
         let length = self.settings().photo_3d;
+        // VRChat's camera must be open: OSC switches its mode once it is (to Stream, for Spout), nothing opens it
+        // (VRChat's `/usercamera/Mode` changes nothing while the camera is closed, and there is no endpoint to open it).
+        anyhow::ensure!(self.camera_open() != Some(false), orbiters_n4n0::platform::CAMERA_CLOSED);
         let Some(pose) = pose else {
             anyhow::bail!("Move VRChat's camera once so Orbiters knows where it is, then try again.");
         };
         let pose: [f32; 6] = pose.try_into().expect("six values");
+        // N4N0's menu and link card stand in front of their owner: while the capture kit records (N4N0/Capture/Record),
+        // the avatar hides them on its owner's client, out of the picture, and shows them again after it.
         self.burst.lock().unwrap().recording = true;
         if let Err(e) = self.start_capture(false) {
             self.burst.lock().unwrap().recording = false;
@@ -223,22 +359,101 @@ impl super::Controller {
                 }
                 std::thread::sleep(Duration::from_millis(50));
             }
+            // The frame the recording started on is read while the camera already looks around: the people wait less.
+            let session = ctl.snapshot.lock().unwrap().capture.session_dir.clone();
+            let picture = matches!(length, Photo3dLength::Standard | Photo3dLength::Full);
+            let reading = session.clone().filter(|_| picture).map(|dir| std::thread::spawn(move || read_start_frame(&dir)));
             std::thread::sleep(SETTLE);
             let send = |address: &str, args: Vec<rosc::OscType>| {
                 let _ = ctl.with_osc(|o| o.send(address, args));
             };
             // Smoothing would trail the swing behind.
             send(SMOOTH, vec![rosc::OscType::Bool(false)]);
-            let tick = Duration::from_secs_f32(1.0 / RATE_HZ as f32);
-            let begin = Instant::now();
-            for (i, p) in path(pose, length, focus, RATE_HZ).into_iter().enumerate() {
-                send(POSE, p.iter().map(|v| rosc::OscType::Float(*v)).collect());
-                let next = tick * (i as u32 + 1);
-                if let Some(wait) = next.checked_sub(begin.elapsed()) {
-                    std::thread::sleep(wait);
+            let camera = |p: &[f32; 6]| (POSE.to_string(), p.iter().map(|v| rosc::OscType::Float(*v)).collect::<Vec<_>>());
+            // Sends poses at the flight's rate; `true` when they were all sent (the recording may stop under them).
+            let fly = |poses: &[[f32; 6]], rig: bool| -> bool {
+                let tick = Duration::from_secs_f32(1.0 / RATE_HZ as f32);
+                let begin = Instant::now();
+                for (i, p) in poses.iter().enumerate() {
+                    if !ctl.is_capturing() {
+                        return false;
+                    }
+                    if rig {
+                        // The camera and the rig in one bundle: VRChat applies them together.
+                        ctl.place_rig(Some(camera(p)), p);
+                    } else {
+                        send(POSE, p.iter().map(|v| rosc::OscType::Float(*v)).collect());
+                    }
+                    if let Some(wait) = (tick * (i as u32 + 1)).checked_sub(begin.elapsed()) {
+                        std::thread::sleep(wait);
+                    }
+                }
+                true
+            };
+            let dolly_wanted = ctl.with_settings(|s| s.dolly_streams);
+            let mut around = false;
+            let frame;
+            if picture && !dolly_wanted {
+                // Where it can go: one turn where it stands, for the depth frames.
+                let mut flying = fly(&around::look(pose, RATE_HZ), false);
+                frame = reading.and_then(|r| r.join().ok()).flatten();
+                let mut seen = around::Seen::default();
+                if let Some(dir) = &session {
+                    let mut live = around::LiveDepth::new(dir);
+                    // Up to what the capture's threads still hold of the turn.
+                    std::thread::sleep(DEPTH_LATENCY);
+                    live.poll(&mut seen);
+                    if seen.frames.len() >= LEAST_DEPTH_FRAMES {
+                        around = true;
+                        let hips = frame.as_ref().and_then(|f| f.hips).or_else(|| ctl.hips_now());
+                        let framing =
+                            frame.as_ref().map_or_else(Default::default, |f| around::Framing { width: f.width, height: f.height, p00: f.p00, p11: f.p11 });
+                        let boxes = frame.as_ref().map_or(&[][..], |f| &f.boxes[..]);
+                        // A wearer hidden from the picture (Local User off, hide_self.rs) has nobody to go and see.
+                        let people = around::people(pose, framing, boxes, hips, eye_height.filter(|_| !ctl.hiding_self()), &seen);
+                        let p11 = frame.as_ref().map_or(DEFAULT_P11, |f| f.p11).max(0.1);
+                        let mut flight = around::Flight::new(pose, p11, RATE_HZ, length, &people);
+                        while let Some(piece) = flying.then(|| flight.next(&seen)).flatten() {
+                            if piece.rig {
+                                // The rig where the camera is, then on: every other colour frame gets its six views.
+                                if let Some(first) = piece.poses.first() {
+                                    ctl.place_rig(None, first);
+                                }
+                                ctl.hold_rig(true);
+                            }
+                            flying = fly(&piece.poses, piece.rig);
+                            live.poll(&mut seen);
+                        }
+                        for line in &flight.log {
+                            eprintln!("3d picture: {line}");
+                        }
+                    }
+                }
+            } else {
+                frame = reading.and_then(|r| r.join().ok()).flatten();
+            }
+            if !around {
+                // The rig on for the blind flight; put back off when VRChat is, whatever ends the recording.
+                ctl.hold_rig(true);
+                let flight = path(pose, length, focus, RATE_HZ);
+                // Experimental (VRC+): the camera dolly flies the camera and three more cameras around it (controller/dolly.rs).
+                let dolly = dolly_wanted && ctl.start_dolly(&flight, frame.as_ref().map_or(DEFAULT_P11, |f| f.p11) * ZOOM_PER_P11, focus);
+                let begin = Instant::now();
+                let tick = Duration::from_secs_f32(1.0 / RATE_HZ as f32);
+                for (i, p) in flight.into_iter().enumerate() {
+                    // The dolly moves the camera itself: the rig only follows.
+                    let camera = (!dolly).then(|| camera(&p));
+                    ctl.place_rig(camera, &p);
+                    if let Some(wait) = (tick * (i as u32 + 1)).checked_sub(begin.elapsed()) {
+                        std::thread::sleep(wait);
+                    }
+                }
+                if dolly {
+                    ctl.stop_dolly();
                 }
             }
             send(POSE, pose.iter().map(|v| rosc::OscType::Float(*v)).collect());
+            ctl.hold_rig(false);
             if let Some(smooth) = smooth.filter(|s| *s) {
                 send(SMOOTH, vec![rosc::OscType::Bool(smooth)]);
             }
@@ -248,6 +463,43 @@ impl super::Controller {
             }
         })?;
         Ok(())
+    }
+
+    /// Hands the flight to VRChat's camera dolly as four paths and plays them (`/dolly/Import`, `/dolly/Play`): false
+    /// when that could not be done (the flight then moves the camera alone).
+    fn start_dolly(&self, flight: &[[f32; 6]], zoom: f32, focus: f32) -> bool {
+        let seconds = flight.len() as f32 / RATE_HZ as f32;
+        let file = match super::dolly::write(&super::dolly::paths(flight, seconds, zoom, focus)) {
+            Ok(file) => file,
+            Err(e) => {
+                self.notify(NoticeKind::Warning, format!("The camera dolly's paths could not be written ({e}): the 3D picture uses the camera alone."));
+                return false;
+            }
+        };
+        let imported = self.with_osc(|o| o.send(super::dolly::IMPORT, vec![rosc::OscType::String(file.display().to_string())]));
+        if !imported.is_some_and(|r| r.is_ok()) {
+            return false;
+        }
+        // VRChat reads the file before it plays.
+        std::thread::sleep(Duration::from_millis(300));
+        self.with_osc(|o| o.send(super::dolly::PLAY, vec![rosc::OscType::Bool(true)])).is_some_and(|r| r.is_ok())
+    }
+
+    /// Stops the dolly's animation and tells what its extra streams gave.
+    fn stop_dolly(&self) {
+        let _ = self.with_osc(|o| o.send(super::dolly::PLAY, vec![rosc::OscType::Bool(false)]));
+        let stats = self.snapshot.lock().unwrap().capture.stats.clone().unwrap_or_default();
+        let message = if stats.extra_frames == 0 {
+            "The camera dolly's other cameras sent nothing: in VRChat set Camera › Dolly › Streaming to Multi (VRC+), then try again.".to_string()
+        } else if stats.extra_keyframes == 0 {
+            format!(
+                "The camera dolly's other cameras sent {} frames, none with your capture kit's strip: VRChat does not draw it in them, so they add nothing.",
+                stats.extra_frames
+            )
+        } else {
+            format!("The camera dolly's other cameras sent {} frames: {} more views for the reconstruction.", stats.extra_frames, stats.extra_keyframes)
+        };
+        self.notify(NoticeKind::Info, message);
     }
 
     /// A recording was saved: a 3D picture's goes on to its reconstruction.
@@ -289,6 +541,41 @@ mod tests {
 
     // At (1, 1.5, 0), facing +X (yaw 90), slightly down.
     const POSE: [f32; 6] = [1.0, 1.5, 0.0, 10.0, 90.0, 0.0];
+
+    #[test]
+    fn the_rig_follows_the_camera_from_the_hips_within_vrchats_range() {
+        // Hips at the world's origin, upright, facing +Z: the values are the camera's world place.
+        let origin: super::super::rig::Hips = ([0.0; 3], [0.0, 0.0, 0.0, 1.0]);
+        let values = |pose: [f32; 6], hips: &super::super::rig::Hips| -> Vec<f32> {
+            rig_parameters(&pose, hips).into_iter().skip(1).map(|(_, v)| if let rosc::OscType::Float(f) = v[0] { f } else { panic!() }).collect()
+        };
+        assert_eq!(
+            rig_parameters(&POSE, &origin).iter().map(|(a, _)| a.as_str()).collect::<Vec<_>>(),
+            [
+                "/avatar/parameters/N4N0/Capture/Follow",
+                "/avatar/parameters/N4N0/Capture/RigX",
+                "/avatar/parameters/N4N0/Capture/RigY",
+                "/avatar/parameters/N4N0/Capture/RigZ",
+                "/avatar/parameters/N4N0/Capture/RigYaw"
+            ]
+        );
+        assert_eq!(rig_parameters(&POSE, &origin)[0].1, vec![rosc::OscType::Bool(true)], "following the camera");
+        let v = values([2048.0, 1.5, -409.6, 10.0, 270.0, 0.0], &origin);
+        assert_eq!(v[0], 0.5);
+        assert!((v[1] * rig::REACH_M - 1.5).abs() < 1e-4 && (v[2] + 0.1).abs() < 1e-6);
+        // 270° is -90°: half a turn left of straight ahead.
+        assert!((v[3] + 0.5).abs() < 1e-6);
+        // Beyond the reach: at its edge.
+        assert_eq!(values([9000.0, 0.0, -9000.0, 0.0, -540.0, 0.0], &origin)[..3], [1.0, 0.0, -1.0]);
+        assert!((values([0.0; 6], &origin)[3]).abs() < 1e-6);
+        // Hips 15 m away, turned 90° (facing +X): the camera 2 m in front of them is 2 m along their +Z, heading 0.
+        let (s, c) = (45f32.to_radians().sin(), 45f32.to_radians().cos());
+        let hips = ([15.0, 1.0, 6.0], [0.0, s, 0.0, c]);
+        let v = values([17.0, 2.5, 6.0, 0.0, 90.0, 0.0], &hips);
+        let m = |k: usize| v[k] * rig::REACH_M;
+        assert!(m(0).abs() < 1e-3 && (m(1) - 1.5).abs() < 1e-3 && (m(2) - 2.0).abs() < 1e-3, "{v:?}");
+        assert!(v[3].abs() < 1e-5, "the hips' heading");
+    }
 
     #[test]
     fn one_second_sweeps_gently() {

@@ -2,3 +2,4 @@
 *.ico binary
 *.icns binary
 *.qoi binary
+*.onnx binary

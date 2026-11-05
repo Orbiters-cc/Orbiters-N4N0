@@ -133,6 +133,99 @@ pub fn fill_squircle(painter: &Painter, rect: Rect, radius: f32, color: Color32)
     painter.add(Shape::mesh(squircle_mesh(rect, radius, color, feather(painter))));
 }
 
+/// The corner radius for a shape `inner` inside a squircle frame, for the two outlines to run side by side: the corner
+/// that leaves the same centre as the frame's. `frame_radius` as given to [`fill_squircle`] (it is limited there to half
+/// the frame's shorter side, and so here); the gap is the one above and below `inner`, its sides being free to sit anywhere
+/// along a row (a segmented control's middle choice).
+pub fn nested_radius(frame: Rect, frame_radius: f32, inner: Rect) -> f32 {
+    let limit = (frame.width() * 0.5).min(frame.height() * 0.5).max(0.0);
+    let gap = (inner.top() - frame.top()).min(frame.bottom() - inner.bottom()).max(0.0);
+    (frame_radius.min(limit) - gap).max(0.0)
+}
+
+/// A highlight inside a squircle frame (a segmented control's chosen half): the same corner shape as the frame's and
+/// concentric with it. A circular corner inside a squircle one never follows it, whatever its radius.
+pub fn fill_nested_squircle(painter: &Painter, frame: Rect, frame_radius: f32, inner: Rect, color: Color32) {
+    fill_squircle(painter, inner, nested_radius(frame, frame_radius, inner), color);
+}
+
+/// Rounds what a scroll area inside a squircle frame cuts off. egui clips to rectangles only, so a list scrolled in a
+/// rounded frame is cut square; this paints over the four corners of `inner` (the rectangle the content is clipped to)
+/// what is outside the frame's shape nested in it ([`nested_radius`]), in `color`, which has to be the frame's fill. Call
+/// it after the content, before anything meant to float over it.
+pub fn round_clipped_corners(painter: &Painter, frame: Rect, frame_radius: f32, inner: Rect, color: Color32) {
+    painter.add(Shape::mesh(clipped_corners_mesh(inner, nested_radius(frame, frame_radius, inner), color, feather(painter) * 0.5)));
+}
+
+/// How far the masks of [`clipped_corners_mesh`] reach past `inner`'s sides: content's anti-aliased edge lies half a pixel
+/// over its rectangle, and would show beside a mask ending right on it.
+const MASK_BLEED: f32 = 1.0;
+
+/// The four corner masks of [`round_clipped_corners`], each a fan from the square corner to the curve (with the frame's
+/// fill on the square corner's side), anti-aliased along the curve only: their other edges lie on the frame's own fill.
+fn clipped_corners_mesh(inner: Rect, radius: f32, color: Color32, f: f32) -> Mesh {
+    let limit = (inner.width() * 0.5).min(inner.height() * 0.5).max(0.0);
+    let r = radius.clamp(0.0, limit);
+    let mut mesh = Mesh::default();
+    if r < 0.5 {
+        return mesh;
+    }
+    let root = |v: f32| v.signum() * v.abs().sqrt();
+    let steps = ((r * 0.5).ceil() as usize).clamp(8, 24);
+    let corners = [
+        (inner.left_top(), pos2(inner.left() + r, inner.top() + r), 180.0f32, vec2(-1.0, -1.0)),
+        (inner.right_top(), pos2(inner.right() - r, inner.top() + r), 270.0, vec2(1.0, -1.0)),
+        (inner.right_bottom(), pos2(inner.right() - r, inner.bottom() - r), 0.0, vec2(1.0, 1.0)),
+        (inner.left_bottom(), pos2(inner.left() + r, inner.bottom() - r), 90.0, vec2(-1.0, 1.0)),
+    ];
+    for (hub, centre, start, out) in corners {
+        // The curve as `squircle_points_corners` draws it, so that it is the frame's shape and not a likeness of it.
+        let curve: Vec<Pos2> = (0..=steps)
+            .map(|i| {
+                let a = (start + 90.0 * i as f32 / steps as f32).to_radians();
+                centre + vec2(root(a.cos()), root(a.sin())) * r
+            })
+            .collect();
+        let base = mesh.vertices.len() as u32;
+        mesh.colored_vertex(hub, color);
+        // The rim the fan goes round: from beside the square corner out along one of its sides, the curve, and back along
+        // the other side. Each side bleeds outwards, stopping short of the square corner itself, which is as far as the
+        // frame's own curve leaves room for.
+        let (first, last) = (curve[0], curve[steps]);
+        let side_a = if (first.x - hub.x).abs() < (first.y - hub.y).abs() { vec2(out.x, 0.0) } else { vec2(0.0, out.y) };
+        let side_b = out - side_a;
+        mesh.colored_vertex(hub + (side_a - side_b) * MASK_BLEED, color);
+        mesh.colored_vertex(first + side_a * MASK_BLEED, color);
+        // The curve's vertices: filled on the corner's side, transparent a feather into what shows.
+        let rim_curve = mesh.vertices.len() as u32;
+        for i in 0..=steps {
+            let (before, after) = (curve[i.saturating_sub(1)], curve[(i + 1).min(steps)]);
+            let tangent = (after - before).normalized();
+            let mut normal = vec2(tangent.y, -tangent.x);
+            if normal.dot(hub - curve[i]) < 0.0 {
+                normal = -normal;
+            }
+            mesh.colored_vertex(curve[i] + normal * f, color);
+            mesh.colored_vertex(curve[i] - normal * f, Color32::TRANSPARENT);
+        }
+        mesh.colored_vertex(last + side_b * MASK_BLEED, color);
+        mesh.colored_vertex(hub + (side_b - side_a) * MASK_BLEED, color);
+        // The fan.
+        let after_curve = rim_curve + 2 * (steps as u32 + 1);
+        let rim: Vec<u32> = [base + 1, base + 2].into_iter().chain((0..=steps as u32).map(|i| rim_curve + 2 * i)).chain([after_curve, after_curve + 1]).collect();
+        for pair in rim.windows(2) {
+            mesh.add_triangle(base, pair[0], pair[1]);
+        }
+        // The feather.
+        for i in 0..steps as u32 {
+            let (a, a_out, b, b_out) = (rim_curve + 2 * i, rim_curve + 2 * i + 1, rim_curve + 2 * i + 2, rim_curve + 2 * i + 3);
+            mesh.add_triangle(a, a_out, b_out);
+            mesh.add_triangle(a, b_out, b);
+        }
+    }
+    mesh
+}
+
 /// The fill of [`fill_squircle`] as a mesh (for shapes set later with `Painter::set`); `feather` in points.
 pub fn squircle_mesh(rect: Rect, radius: f32, color: Color32, feather: f32) -> Mesh {
     convex_mesh(&squircle_points(rect, radius), |_| color, feather * 0.5)
@@ -146,7 +239,19 @@ pub fn stroke_squircle(painter: &Painter, rect: Rect, radius: f32, stroke: egui:
 
 /// A texture (its `uv` part) in a rectangle with squircle corners, anti-aliased at the edge.
 pub fn squircle_texture(painter: &Painter, rect: Rect, radii: [f32; 4], texture: egui::TextureId, uv: Rect, tint: Color32) {
-    let points = squircle_points_corners(rect, radii);
+    texture_in(painter, &squircle_points_corners(rect, radii), rect, texture, uv, tint);
+}
+
+/// A texture (its `uv` part) in the circle inscribed in `rect` (people's pictures), anti-aliased at the edge.
+pub fn circle_texture(painter: &Painter, rect: Rect, texture: egui::TextureId, uv: Rect, tint: Color32) {
+    let (c, r) = (rect.center(), rect.width().min(rect.height()) * 0.5);
+    let steps = ((r * 1.2).ceil() as usize).clamp(16, 64);
+    let points: Vec<Pos2> = (0..steps).map(|i| c + Vec2::angled(std::f32::consts::TAU * i as f32 / steps as f32) * r).collect();
+    texture_in(painter, &points, rect, texture, uv, tint);
+}
+
+/// A texture (its `uv` part, spread over `rect`) inside a convex outline that runs clockwise on screen.
+fn texture_in(painter: &Painter, points: &[Pos2], rect: Rect, texture: egui::TextureId, uv: Rect, tint: Color32) {
     let n = points.len();
     if n < 3 {
         return;
@@ -296,14 +401,77 @@ fn outline_feather(painter: &Painter, points: &[Pos2], color_at: impl Fn(Pos2) -
     painter.add(Shape::mesh(mesh));
 }
 
-/// CSS-like box shadow of a rounded rectangle.
+/// CSS-like box shadow of a rounded rectangle: a gaussian fall-off reaching `blur` points past its edge, made of rings
+/// of the shape grown and shrunk. egui's blurred rectangles crease on shapes thinner than their blur (a hard line along
+/// the middle, streaks under the corners: a tooltip's shadow); here a thin shape's shadow is the blurred box across its
+/// narrower side, lighter in the middle and smooth through it.
 pub fn shadow(painter: &Painter, rect: Rect, radius: f32, offset: Vec2, blur: f32, spread: f32, color: Color32) {
     let r = rect.translate(offset).expand(spread);
-    if r.width() <= 0.0 || r.height() <= 0.0 {
+    if !r.is_finite() || r.width() <= 0.0 || r.height() <= 0.0 || color.a() == 0 {
         return;
     }
-    let shape = egui::epaint::RectShape::filled(r, crate::theme::radius(radius + spread.max(0.0)), color).with_blur_width(blur * 2.0);
-    painter.add(shape);
+    painter.add(Shape::mesh(shadow_mesh(r, radius + spread.max(0.0), blur, color)));
+}
+
+/// Rings of [`shadow`], from inside the shape (or its middle line) to `blur` outside it.
+const SHADOW_RINGS: usize = 12;
+/// Points on each ring's quarter circles.
+const SHADOW_ARC: usize = 7;
+
+fn shadow_mesh(r: Rect, radius: f32, blur: f32, color: Color32) -> Mesh {
+    let blur = blur.max(0.5);
+    let half = 0.5 * r.width().min(r.height());
+    // The blurred box across the narrower side at a signed distance `d` from the edge (outside positive), the kernel a
+    // gaussian of sigma blur / 2 cut at ±blur.
+    let edge = normal_cdf(-2.0);
+    let kernel = |u: f32| ((normal_cdf(2.0 * u / blur) - edge) / (1.0 - 2.0 * edge)).clamp(0.0, 1.0);
+    let value = |d: f32| (kernel(-d) - kernel(-2.0 * half - d)).clamp(0.0, 1.0);
+    let inner = (-blur).max(-half);
+    let n = 4 * (SHADOW_ARC + 1);
+    let mut mesh = Mesh::default();
+    for k in 0..SHADOW_RINGS {
+        let d = inner + (blur - inner) * k as f32 / (SHADOW_RINGS - 1) as f32;
+        let ring = r.expand(d);
+        let cr = (radius + d).clamp(0.0, 0.5 * ring.width().min(ring.height()));
+        let c = color.gamma_multiply(value(d));
+        // Corners clockwise from the bottom right, each a quarter circle (one point when sharp).
+        let centres = [
+            pos2(ring.right() - cr, ring.bottom() - cr),
+            pos2(ring.left() + cr, ring.bottom() - cr),
+            pos2(ring.left() + cr, ring.top() + cr),
+            pos2(ring.right() - cr, ring.top() + cr),
+        ];
+        for (q, centre) in centres.iter().enumerate() {
+            for j in 0..=SHADOW_ARC {
+                let a = (q as f32 + j as f32 / SHADOW_ARC as f32) * TAU / 4.0;
+                mesh.colored_vertex(*centre + Vec2::angled(a) * cr, c);
+            }
+        }
+    }
+    for k in 0..SHADOW_RINGS as u32 - 1 {
+        let (a, b) = (k * n as u32, (k + 1) * n as u32);
+        for i in 0..n as u32 {
+            let j = (i + 1) % n as u32;
+            mesh.add_triangle(a + i, b + i, b + j);
+            mesh.add_triangle(a + i, b + j, a + j);
+        }
+    }
+    // The innermost ring filled (a line, no area, on shapes thinner than twice the blur).
+    let centre = mesh.vertices.len() as u32;
+    mesh.colored_vertex(r.center(), color.gamma_multiply(value(inner)));
+    for i in 0..n as u32 {
+        mesh.add_triangle(centre, i, (i + 1) % n as u32);
+    }
+    mesh
+}
+
+/// The standard normal distribution's cumulative function (Abramowitz and Stegun 7.1.26, within 1.5e-7).
+fn normal_cdf(x: f32) -> f32 {
+    let z = x.abs() / std::f32::consts::SQRT_2;
+    let t = 1.0 / (1.0 + 0.327_591_1 * z);
+    let poly = t * (0.254_829_6 + t * (-0.284_496_74 + t * (1.421_413_7 + t * (-1.453_152 + t * 1.061_405_4))));
+    let erf = 1.0 - poly * (-z * z).exp();
+    0.5 * (1.0 + if x >= 0.0 { erf } else { -erf })
 }
 
 /// A stroked arc with round caps. Angles in radians, 0 = 3 o'clock, positive = clockwise on screen.
@@ -376,6 +544,128 @@ pub fn ring(painter: &Painter, center: Pos2, radius: f32, width: f32, color: Col
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// How far the highlight's outline runs from the frame's, around their top-left corners.
+    fn gaps(frame: Rect, frame_r: f32, inner: Rect, inner_points: &[Pos2]) -> (f32, f32) {
+        let outer = squircle_points(frame, frame_r);
+        let corner = |p: &&Pos2| p.x < inner.left() + nested_radius(frame, frame_r, inner) && p.y < inner.top() + nested_radius(frame, frame_r, inner);
+        let distances: Vec<f32> = inner_points.iter().filter(corner).map(|p| outer.iter().map(|q| p.distance(*q)).fold(f32::MAX, f32::min)).collect();
+        assert!(distances.len() > 4);
+        (distances.iter().copied().fold(f32::MAX, f32::min), distances.iter().copied().fold(0.0, f32::max))
+    }
+
+    #[test]
+    fn a_nested_highlight_follows_its_frames_corner() {
+        // The preview window's light switch: frame 38 high, highlight inset by 4.
+        let frame = Rect::from_min_size(pos2(100.0, 50.0), vec2(240.0, 38.0));
+        let r = crate::theme::squircle(19.0);
+        let inner = Rect::from_min_size(pos2(104.0, 54.0), vec2(116.0, 30.0));
+        assert_eq!(nested_radius(frame, r, inner), 15.0);
+        let (near, far) = gaps(frame, r, inner, &squircle_points(inner, nested_radius(frame, r, inner)));
+        assert!(near >= 3.5 && far <= 5.5, "the gap stays about 4 all the way round the corner: {near}..{far}");
+        // What it was: a circular corner, which pinches the gap at the corner's start and opens it at the diagonal.
+        let (old_near, old_far) = gaps(frame, r, inner, &rounded_rect_points(inner, 15.0));
+        assert!(old_far - old_near > far - near + 1.0, "circle {old_near}..{old_far}, squircle {near}..{far}");
+        // A frame's radius past half its height counts for what is drawn; a square frame leaves nothing to follow.
+        assert_eq!(nested_radius(frame, 500.0, inner), 15.0);
+        assert_eq!(nested_radius(frame, 2.0, inner), 0.0);
+    }
+
+    #[test]
+    fn shadows_fall_off_smoothly_even_on_shapes_thinner_than_their_blur() {
+        let black = Color32::from_black_alpha(200);
+        for (rect, radius, blur) in [
+            (Rect::from_min_size(pos2(10.0, 10.0), vec2(120.0, 28.0)), 14.0, 40.0),
+            (Rect::from_min_size(pos2(0.0, 0.0), vec2(600.0, 400.0)), 24.0, 48.0),
+            (Rect::from_min_size(pos2(5.0, 5.0), vec2(3.0, 3.0)), 0.0, 20.0),
+        ] {
+            let mesh = shadow_mesh(rect, radius, blur, black);
+            assert!(mesh.vertices.iter().all(|v| v.pos.is_finite() && rect.expand(blur + 0.01).contains(v.pos)));
+            assert!(mesh.vertices.iter().all(|v| v.color.a() <= 200));
+            assert!(mesh.indices.iter().all(|&i| (i as usize) < mesh.vertices.len()));
+            // Nothing at its outer edge; the middle darkest.
+            let outer = &mesh.vertices[(SHADOW_RINGS - 1) * 4 * (SHADOW_ARC + 1)..SHADOW_RINGS * 4 * (SHADOW_ARC + 1)];
+            assert!(outer.iter().all(|v| v.color.a() == 0));
+            let centre = mesh.vertices.last().unwrap().color.a();
+            assert!(mesh.vertices.iter().all(|v| v.color.a() <= centre));
+        }
+        // A large shape is fully dark inside, a thin one lighter (its blurred box).
+        assert_eq!(shadow_mesh(Rect::from_min_size(pos2(0.0, 0.0), vec2(600.0, 400.0)), 24.0, 48.0, black).vertices.last().unwrap().color.a(), 200);
+        let thin = shadow_mesh(Rect::from_min_size(pos2(0.0, 0.0), vec2(120.0, 28.0)), 14.0, 40.0, black).vertices.last().unwrap().color.a();
+        assert!(thin > 60 && thin < 180, "{thin}");
+        assert!((normal_cdf(0.0) - 0.5).abs() < 1e-6 && (normal_cdf(1.96) - 0.975).abs() < 1e-3 && (normal_cdf(-1.96) - 0.025).abs() < 1e-3);
+    }
+
+    /// How opaque a mesh of plain triangles is at `p` (the most of any triangle over it).
+    fn coverage(mesh: &Mesh, p: Pos2) -> u8 {
+        let mut most = 0.0f32;
+        for t in mesh.indices.chunks(3) {
+            let [a, b, c] = [t[0], t[1], t[2]].map(|i| mesh.vertices[i as usize]);
+            let d = (b.pos - a.pos).x * (c.pos - a.pos).y - (b.pos - a.pos).y * (c.pos - a.pos).x;
+            if d.abs() < 1e-6 {
+                continue;
+            }
+            let u = ((p - a.pos).x * (c.pos - a.pos).y - (p - a.pos).y * (c.pos - a.pos).x) / d;
+            let v = ((b.pos - a.pos).x * (p - a.pos).y - (b.pos - a.pos).y * (p - a.pos).x) / d;
+            if u >= -1e-4 && v >= -1e-4 && u + v <= 1.0 + 1e-4 {
+                most = most.max(a.color.a() as f32 * (1.0 - u - v) + b.color.a() as f32 * u + c.color.a() as f32 * v);
+            }
+        }
+        most.round() as u8
+    }
+
+    /// Outside (above 1), on (1) or inside (below 1) a squircle of radius `r` in `rect`, `p` being in one of its corners.
+    fn squircle_side(rect: Rect, r: f32, p: Pos2) -> f32 {
+        let centre = pos2(p.x.clamp(rect.left() + r, rect.right() - r), p.y.clamp(rect.top() + r, rect.bottom() - r));
+        ((p.x - centre.x).abs() / r).powi(4) + ((p.y - centre.y).abs() / r).powi(4)
+    }
+
+    /// The side panel's list: a frame of squircle radius 48, the list clipped 8 points inside it (14 on the right, where
+    /// its scroll bar runs).
+    #[test]
+    fn corner_masks_cover_exactly_what_the_frames_shape_leaves_out_and_stay_inside_the_frame() {
+        let frame = Rect::from_min_size(pos2(100.0, 50.0), vec2(400.0, 600.0));
+        let inner = Rect::from_min_max(frame.min + vec2(8.0, 8.0), frame.max - vec2(14.0, 8.0));
+        let r = nested_radius(frame, 48.0, inner);
+        assert_eq!(r, 40.0);
+        let mesh = clipped_corners_mesh(inner, r, Color32::RED, 0.5);
+        // No part of a mask shows outside the frame, whatever is behind it there.
+        for v in &mesh.vertices {
+            if v.color.a() > 0 {
+                assert!(squircle_side(frame, 48.0, v.pos) <= 1.0, "{:?} is outside the frame", v.pos);
+            }
+        }
+        let (mut covered, mut open) = (0, 0);
+        let mut y = inner.top() + 0.25;
+        while y < inner.bottom() {
+            let mut x = inner.left() + 0.25;
+            while x < inner.right() {
+                let p = pos2(x, y);
+                let side = squircle_side(inner, r, p);
+                // Clear of the feather: well outside the shape or inside it.
+                if side > 1.15 {
+                    assert_eq!(coverage(&mesh, p), 255, "content shows at {p:?} outside the frame's shape ({side})");
+                    covered += 1;
+                } else if side < 0.85 {
+                    assert_eq!(coverage(&mesh, p), 0, "a mask covers content at {p:?} ({side})");
+                    open += 1;
+                }
+                x += 1.0;
+            }
+            y += if y - inner.top() > 60.0 && inner.bottom() - y > 60.0 { 20.0 } else { 1.0 };
+        }
+        assert!(covered > 100 && open > 1000, "{covered} {open}");
+        // A hair beside the list's left edge too: a card's soft edge lies there.
+        let beside = pos2(inner.left() - 0.5, inner.bottom() - 10.0);
+        assert_eq!(coverage(&mesh, beside), 255);
+    }
+
+    #[test]
+    fn a_clip_as_far_inside_as_the_frames_radius_has_no_mask() {
+        let frame = Rect::from_min_size(pos2(0.0, 0.0), vec2(400.0, 600.0));
+        let inner = frame.shrink(48.0);
+        assert!(clipped_corners_mesh(inner, nested_radius(frame, 48.0, inner), Color32::RED, 0.5).vertices.is_empty());
+    }
 
     #[test]
     fn outlines_with_meeting_corners_repeat_no_point() {

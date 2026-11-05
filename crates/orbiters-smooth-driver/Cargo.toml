@@ -1,0 +1,15 @@
+[package]
+name = "orbiters-smooth-driver"
+description = "Orbiters - N4N0's SteamVR driver for tracking smoothing (driver_orbiters_smooth.dll): eases the poses every driver gives SteamVR, as the app asks through orbiters-smooth's control block."
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+# SteamVR loads `bin\win64\driver_<name>.dll`; the rlib is for this crate's tests.
+name = "driver_orbiters_smooth"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# The control block only: no JSON, no install helpers inside vrserver.exe.
+orbiters-smooth = { path = "../orbiters-smooth", default-features = false }

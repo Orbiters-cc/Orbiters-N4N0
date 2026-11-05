@@ -3,7 +3,7 @@
 //! and failures come back as notices.
 
 use crate::controller::{self, Notice, NoticeKind};
-use crate::ipc::{Client, OrbCommand, ToService, UpdateAction};
+use crate::ipc::{Client, N4n0Command, ToService, UpdateAction};
 use crate::state::{AccountState, MapsMine, Snapshot};
 use orbiters_contracts::performance::calibration::Calibration;
 use orbiters_core::settings::Settings;
@@ -50,6 +50,14 @@ pub trait Backend: Send + Sync {
     fn reopen_sign_in(&self);
     fn cancel_sign_in(&self);
     fn sign_out(&self);
+    fn vrchat_login(&self, _command: crate::controller::vrchat_login::Command) {}
+    /// Blocking read-only request. Call only from a page job or image loader.
+    fn vrchat_data(&self, _scope: controller::vrchat_data::Scope, _request: controller::vrchat_data::Request) -> controller::vrchat_data::Result {
+        Err("VRChat data is unavailable.".into())
+    }
+    /// Uploads the picture file at `path` as the VRChat picture of `id`, an avatar or world of the signed-in VRChat
+    /// account. Its step and outcome come in the snapshot's `vrchat_login.upload`, the outcome as a notice too.
+    fn vrchat_picture(&self, _scope: controller::vrchat_data::Scope, _id: String, _path: PathBuf) {}
     /// Asks for the worker's log; [`Backend::worker_log`] has it once it arrived.
     fn request_worker_log(&self);
     fn worker_log(&self) -> Option<Vec<String>>;
@@ -60,14 +68,19 @@ pub trait Backend: Send + Sync {
     /// Asks what this member added to the Map explorer; [`Backend::maps`] has it once it arrived.
     fn request_maps(&self);
     fn maps(&self) -> Option<MapsMine>;
+    fn capture_share(&self, _request: controller::shares::Request) {}
+    /// Share to … opened on a 3D capture not uploaded yet: the tray makes its upload files while friends are chosen.
+    fn prepare_share(&self, _session: PathBuf) {}
     /// A T-pose calibration taken in the overlay.
     fn calibrated(&self, calibration: Calibration);
     /// N4N0: a question, the Talk button, the panel, saved videos.
-    fn orb(&self, command: OrbCommand);
+    fn n4n0(&self, command: N4n0Command);
     /// VRChat's frames the overlay saw, for world performance statistics.
     fn frames(&self, chunk: crate::state::FrameChunk);
     /// Whether someone wears the headset (the overlay reads SteamVR's activity level).
     fn headset(&self, in_use: bool);
+    /// What each of SteamVR's device indices is (the overlay reads it), for tracking smoothing's strengths.
+    fn steamvr_devices(&self, _kinds: Vec<crate::tracking::DeviceKind>) {}
     /// Sets the walk boost's strength (0 to 1), saved and sent to the avatar's `N4N0/WalkBoost`.
     fn walk_boost(&self, strength: f32);
     /// Makes VRChat find the OSC service again (it sends avatar parameters only to services it found).
@@ -95,6 +108,12 @@ pub type Ctl = Arc<dyn Backend>;
 pub struct Remote(pub Arc<Client>);
 
 impl Backend for Remote {
+    fn vrchat_data(&self, scope: controller::vrchat_data::Scope, request: controller::vrchat_data::Request) -> controller::vrchat_data::Result {
+        self.0.vrchat_data(scope, request)
+    }
+    fn vrchat_picture(&self, scope: controller::vrchat_data::Scope, id: String, path: PathBuf) {
+        self.0.send(&ToService::VrchatPicture { scope, id, path });
+    }
     fn view(&self) -> Arc<Snapshot> {
         self.0.snapshot()
     }
@@ -187,6 +206,14 @@ impl Backend for Remote {
         self.0.send(&ToService::SignOut);
     }
 
+    fn vrchat_login(&self, command: crate::controller::vrchat_login::Command) {
+        self.0.update_local(|s| {
+            s.vrchat_login.busy = true;
+            s.vrchat_login.error = None;
+        });
+        self.0.send(&ToService::VrchatLogin { command });
+    }
+
     fn request_worker_log(&self) {
         self.0.send(&ToService::WorkerLog);
     }
@@ -211,12 +238,24 @@ impl Backend for Remote {
         self.0.maps()
     }
 
+    fn capture_share(&self, request: controller::shares::Request) {
+        self.0.send(&ToService::CaptureShare { request: Box::new(request) });
+    }
+
+    fn prepare_share(&self, session: PathBuf) {
+        self.0.send(&ToService::PrepareShare { session });
+    }
+
     fn frames(&self, chunk: crate::state::FrameChunk) {
         self.0.send(&ToService::Frames { chunk });
     }
 
     fn headset(&self, in_use: bool) {
         self.0.send(&ToService::Headset { in_use });
+    }
+
+    fn steamvr_devices(&self, kinds: Vec<crate::tracking::DeviceKind>) {
+        self.0.send(&ToService::SteamVrDevices { kinds });
     }
 
     fn walk_boost(&self, strength: f32) {
@@ -231,8 +270,8 @@ impl Backend for Remote {
         self.0.send(&ToService::Calibrated { calibration: Box::new(calibration) });
     }
 
-    fn orb(&self, command: OrbCommand) {
-        self.0.send(&ToService::Orb { command });
+    fn n4n0(&self, command: N4n0Command) {
+        self.0.send(&ToService::N4n0 { command });
     }
 
     fn updates(&self, action: UpdateAction) {
@@ -275,6 +314,12 @@ impl Local {
 }
 
 impl Backend for Local {
+    fn vrchat_data(&self, scope: controller::vrchat_data::Scope, request: controller::vrchat_data::Request) -> controller::vrchat_data::Result {
+        self.ctl.vrchat_data(scope, request)
+    }
+    fn vrchat_picture(&self, scope: controller::vrchat_data::Scope, id: String, path: PathBuf) {
+        self.ctl.vrchat_picture(scope, id, path);
+    }
     fn view(&self) -> Arc<Snapshot> {
         self.ctl.view()
     }
@@ -368,6 +413,10 @@ impl Backend for Local {
         self.report(self.ctl.sign_out());
     }
 
+    fn vrchat_login(&self, command: crate::controller::vrchat_login::Command) {
+        self.ctl.vrchat_command(command);
+    }
+
     fn request_worker_log(&self) {
         *self.log.lock().unwrap() = Some(self.ctl.worker_log());
     }
@@ -392,6 +441,14 @@ impl Backend for Local {
         self.ctl.maps()
     }
 
+    fn capture_share(&self, request: controller::shares::Request) {
+        self.ctl.capture_share(request);
+    }
+
+    fn prepare_share(&self, session: PathBuf) {
+        self.ctl.prepare_share(session);
+    }
+
     fn frames(&self, chunk: crate::state::FrameChunk) {
         self.ctl.frames(chunk);
     }
@@ -412,8 +469,8 @@ impl Backend for Local {
         self.ctl.calibrated(calibration);
     }
 
-    fn orb(&self, command: OrbCommand) {
-        self.ctl.orb_command(command);
+    fn n4n0(&self, command: N4n0Command) {
+        self.ctl.n4n0_command(command);
     }
 
     fn updates(&self, action: UpdateAction) {

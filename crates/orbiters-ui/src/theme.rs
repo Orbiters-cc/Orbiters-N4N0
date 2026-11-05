@@ -61,7 +61,7 @@ pub fn mix(a: Color32, b: Color32, t: f32) -> Color32 {
     a.lerp_to_gamma(b, t.clamp(0.0, 1.0))
 }
 
-/// Card fill (the website's `--orb-surface`: content1 at 92 %).
+/// Card fill (the website's `--n4n0-surface`: content1 at 92 %).
 pub fn surface() -> Color32 {
     alpha(INK_850, 0.92)
 }
@@ -71,7 +71,7 @@ pub fn surface_strong() -> Color32 {
     INK_800
 }
 
-/// A surface inside a card (the website's `--orb-surface-soft`).
+/// A surface inside a card (the website's `--n4n0-surface-soft`).
 pub fn surface_soft() -> Color32 {
     alpha(INK_750, 0.45)
 }
@@ -215,7 +215,9 @@ fn style(style: &mut Style) {
     v.selection.bg_fill = alpha(VIOLET, 0.45);
     v.selection.stroke = Stroke::new(1.0, FG);
     v.text_cursor.stroke = Stroke::new(1.5, CYAN);
-    v.popup_shadow = egui::Shadow { offset: [0, 18], blur: 40, spread: 0, color: black(0.6) };
+    // Tooltips are about 28 points high: egui's blurred rectangles crease and streak under the corners once the blur
+    // passes half the shape's height (its feathering meets in the middle), so popups keep a short shadow.
+    v.popup_shadow = egui::Shadow { offset: [0, 8], blur: 16, spread: 0, color: black(0.5) };
     v.window_shadow = v.popup_shadow;
     for (w, bg) in [
         (&mut v.widgets.noninteractive, Color32::TRANSPARENT),

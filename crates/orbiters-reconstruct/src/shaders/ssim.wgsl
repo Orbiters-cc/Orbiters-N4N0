@@ -168,7 +168,9 @@ fn ssim_gradient(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocatio
         let diff = out_color[p].xyz - tc;
         let lambda = frame.loss.z;
         let k = frame.loss.x / (3.0 * max(frame.loss.w, 1.0));
-        d_pixel[p] = vec4<f32>(k * ((1.0 - lambda) * sign(diff) - lambda * dssim), 0.0);
+        // With birth statistics, the pixel's colour error rides in the depth slot (common.wgsl stats_mode).
+        let error = select(0.0, dot(abs(diff), vec3<f32>(1.0 / 3.0)), stats_mode() == STATS_COLOR);
+        d_pixel[p] = vec4<f32>(k * ((1.0 - lambda) * sign(diff) - lambda * dssim), error);
     } else if (px < w && py < h) {
         d_pixel[u32(py) * frame.size.x + u32(px)] = vec4<f32>(0.0);
     }

@@ -5,11 +5,18 @@
 //!
 //! The boost waits while the stick is not walking: N4N0's menu or the calibration stands in the play space, a setting
 //! of the boost was just changed (the Walk boost radial of VRChat's Action Menu turns with the same stick), VRChat says
-//! the owner is away, and, when VRChat says how it moves the avatar, while it sits in a station or does not walk it. A
-//! recenter, a seated reset, a room setup or another application's saved change becomes the new base of the carry
-//! instead of being written over. The play space goes back where it was when VRChat loads another world (the avatar
-//! respawns anyway), when VRChat closes and when the overlay ends, however it ends; a process killed outside leaves
-//! nothing behind either, as SteamVR goes back to the saved chaperone once the process previewing one is gone.
+//! the owner is away, and, when VRChat says how it moves the avatar, while it sits in a station or does not walk it.
+//!
+//! Like OVR Advanced Settings' space drag, the boost keeps the play space it started from (the base) itself and only
+//! ever writes the base moved by the carry, then shows it: it never reverts the working copy, hides its preview or
+//! reads SteamVR's setup back while its carry shows. SteamVR raises play-space events for each preview (and other
+//! applications' connections raise more); reverting or hiding to look at them put the play space back where it
+//! started, and a carry rebased onto a setup that had it already threw the person by it. So only what a person does
+//! ends a carry, at once, the play space going back to SteamVR's own setup (their new one): a recenter, a seated reset
+//! (not one just after the boost's own preview, which may be its echo), a room setup, another tracking universe. The
+//! play space also goes back when VRChat loads another world (the avatar respawns anyway), when VRChat closes and when
+//! the overlay ends, however it ends; a process killed outside leaves nothing behind either, as SteamVR goes back to
+//! the saved chaperone once the process previewing one is gone.
 
 use super::actions::Walk;
 use orbiters_core::settings::{Follow, Hand, WalkBoostSettings};
@@ -37,7 +44,11 @@ const MOTION_LAG: Duration = Duration::from_millis(500);
 /// VRChat's own walking this long below [`VRCHAT_STILL`] stops the carry (a change of push shows late, briefly).
 const STILL_FOR: Duration = Duration::from_millis(300);
 /// Setups this close (metres, and rotation terms) are the same one: SteamVR may hand its numbers back a little off.
+#[cfg(test)]
 const SAME_SETUP: f32 = 1e-3;
+/// SteamVR raises play-space events for the previews the boost shows: a seated reset this soon after one may be its
+/// echo (the boost moves the seated zero too), never a reason to end the carry.
+const OWN_EVENTS: Duration = Duration::from_millis(1000);
 
 /// How far the stick is pushed (0 to 1, the dead zone removed; 0 for a reading that is not a number).
 pub fn push(stick: [f32; 2]) -> f32 {
@@ -83,7 +94,8 @@ pub struct Setup {
 }
 
 impl Setup {
-    /// The same play space, to a millimetre.
+    /// The same play space, to a millimetre (the tests' measure).
+    #[cfg(test)]
     pub fn close_to(&self, other: &Setup) -> bool {
         let near = |a: &[f32], b: &[f32]| a.len() == b.len() && a.iter().zip(b).all(|(x, y)| (x - y).abs() <= SAME_SETUP);
         let matrix = |a: &Matrix34, b: &Matrix34| near(a.m.as_flattened(), b.m.as_flattened());
@@ -188,6 +200,9 @@ pub struct Gate {
     since: Option<Instant>,
     /// VRChat's own walking (its speed less the boost's) has stayed below walking since then.
     still_since: Option<Instant>,
+    /// Carrying stopped with the stick still pushed: VRChat's reports still count the boost's drag until then, so
+    /// they cannot start it again before.
+    resume_after: Option<Instant>,
 }
 
 impl Gate {
@@ -196,15 +211,19 @@ impl Gate {
     /// (nothing of the boost in its speed yet). Carrying, VRChat's speed counts the boost's drag, `boost` (m/s, the
     /// last frame's): it is taken out once VRChat's reports caught up with it, and carrying stops when what is left
     /// stays below walking a moment (an Action Menu opened mid-walk took the stick, the world froze the avatar) or
-    /// VRChat seats the avatar.
+    /// VRChat seats the avatar. Stopped so, it starts again only once VRChat's reports no longer carry the boost's
+    /// drag (else that drag, reported late, restarted it at once and the boost never stopped, in fits).
     pub fn carries(&mut self, now: Instant, pushed: bool, motion: Option<&Motion>, boost: f32) -> bool {
         let since = |t: Instant| now.saturating_duration_since(t);
-        let carrying = match (pushed, motion, self.since) {
-            (false, _, _) => false,
-            (true, None, _) => true,
-            (true, Some(m), _) if m.in_station => false,
-            (true, Some(m), None) => m.speed >= VRCHAT_WALKS,
-            (true, Some(m), Some(start)) => {
+        if !pushed {
+            *self = Gate::default();
+            return false;
+        }
+        let carrying = match (motion, self.since) {
+            (None, _) => true,
+            (Some(m), _) if m.in_station => false,
+            (Some(m), None) => m.speed >= VRCHAT_WALKS && self.resume_after.is_none_or(|t| now >= t),
+            (Some(m), Some(start)) => {
                 if since(start) < MOTION_LAG || m.speed - boost >= VRCHAT_STILL {
                     self.still_since = None;
                     true
@@ -216,9 +235,46 @@ impl Gate {
         if carrying {
             self.since.get_or_insert(now);
         } else {
-            *self = Gate::default();
+            let resume_after = if self.since.is_some() { Some(now + MOTION_LAG) } else { self.resume_after };
+            *self = Gate { resume_after, ..Gate::default() };
         }
         carrying
+    }
+}
+
+/// SteamVR's play-space events, as walk boost takes them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PlaySpaceEvent {
+    /// `VREvent_StandingZeroPoseReset`: the person recentred (SteamVR saved a new standing zero).
+    StandingReset,
+    /// `VREvent_SeatedZeroPoseReset`.
+    SeatedReset,
+    /// `VREvent_ChaperoneUniverseHasChanged`, with the tracking universe before and after (the same one for the
+    /// boost's own previews).
+    UniverseChanged { from: u64, to: u64 },
+    /// `VREvent_ChaperoneFlushCache`: cached chaperone data to read again (raised for previews too).
+    FlushCache,
+    /// `VREvent_ChaperoneRoomSetupStarting`.
+    RoomSetupStarting,
+    /// `VREvent_ChaperoneRoomSetupCommitted`: room setup, or any application, saved a setup.
+    SetupCommitted,
+}
+
+impl PlaySpaceEvent {
+    /// The event SteamVR raised, if it is one of these.
+    pub fn from_event(e: &vr::Event) -> Option<Self> {
+        Some(match e.event_type {
+            vr::event::STANDING_ZERO_POSE_RESET => Self::StandingReset,
+            vr::event::SEATED_ZERO_POSE_RESET => Self::SeatedReset,
+            vr::event::CHAPERONE_UNIVERSE_CHANGED => {
+                let (from, to) = e.chaperone_universes();
+                Self::UniverseChanged { from, to }
+            }
+            vr::event::CHAPERONE_FLUSH_CACHE => Self::FlushCache,
+            vr::event::ROOM_SETUP_STARTING => Self::RoomSetupStarting,
+            vr::event::ROOM_SETUP_COMMITTED => Self::SetupCommitted,
+            _ => return None,
+        })
     }
 }
 
@@ -257,6 +313,11 @@ pub struct WalkBoost {
     changed: Option<Instant>,
     /// Room setup started then, and was not saved yet.
     room_setup: Option<Instant>,
+    /// When the boost last showed its preview (a seated reset that soon after may be its own).
+    shown_at: Option<Instant>,
+    /// The headset's frame, when known: steps are whole frames of it, so that the loop's timing noise does not
+    /// make some frames move further than others.
+    frame: Option<Duration>,
 }
 
 impl WalkBoost {
@@ -274,7 +335,14 @@ impl WalkBoost {
             seen: None,
             changed: None,
             room_setup: None,
+            shown_at: None,
+            frame: None,
         }
+    }
+
+    /// The headset's frame (from its refresh rate), which steps are counted in.
+    pub fn set_frame(&mut self, frame: Option<Duration>) {
+        self.frame = frame.filter(|f| !f.is_zero() && f.as_secs_f32() <= MAX_STEP_S);
     }
 
     /// Why walk boost cannot work, if it cannot.
@@ -337,7 +405,13 @@ impl WalkBoost {
         frame: impl FnOnce() -> Option<Matrix34>,
         now: Instant,
     ) {
-        let dt = self.last.map_or(0.0, |t| now.saturating_duration_since(t).as_secs_f32()).min(MAX_STEP_S);
+        let mut dt = self.last.map_or(0.0, |t| now.saturating_duration_since(t).as_secs_f32());
+        if let (Some(frame), true) = (self.frame, dt > 0.0) {
+            // Whole frames: the loop waits for each of the compositor's frames while walking, give or take a little.
+            let f = frame.as_secs_f32();
+            dt = (dt / f).round().max(1.0) * f;
+        }
+        let dt = dt.min(MAX_STEP_S);
         self.last = Some(now);
         self.moving = false;
         if self.place.as_deref() != m.place {
@@ -376,6 +450,7 @@ impl WalkBoost {
         }
         play.write(&carried.shifted());
         play.show();
+        self.shown_at = Some(now);
         self.boost = speed * dir[0].hypot(dir[2]);
         self.moving = true;
     }
@@ -399,47 +474,41 @@ impl WalkBoost {
         }
     }
 
-    /// SteamVR's play space may have changed under the boost (a recenter or a seated reset, a room setup or another
-    /// application's change saved): the carry goes on from a new setup instead of writing the old one back.
-    pub fn play_space_changed(&mut self, steamvr: &vr::Client) {
-        if let Ok(mut setup) = steamvr.chaperone_setup() {
-            self.rebase(&mut setup);
-        }
-    }
-
-    /// The same with `play`. What every application sees is read first: the boost's own preview there means nothing
-    /// changed it (the boost's showing raises some of these events), and nothing is touched, so no event loops. Else
-    /// the setup saved beneath, read with the preview hidden for a moment (while one shows, the working copy reverts
-    /// to it, not to the saved one), becomes the base if it is neither the old base nor what the boost showed, and
-    /// the boost shows its carry again at once.
-    pub fn rebase(&mut self, play: &mut dyn PlaySpace) {
-        let Some(carried) = self.carried.as_mut() else { return };
-        play.revert();
-        let Some(live) = play.read() else { return };
-        let shown = carried.shifted();
-        if live.close_to(&shown) || live.close_to(&carried.base) {
-            return;
-        }
-        play.hide();
-        play.revert();
-        if let Some(saved) = play.read() {
-            if !saved.close_to(&carried.base) && !saved.close_to(&shown) {
-                carried.base = saved;
+    /// One of SteamVR's play-space events (see [`WalkBoost::play_space_event_in`]).
+    pub fn play_space_event(&mut self, steamvr: &vr::Client, event: PlaySpaceEvent) {
+        match steamvr.chaperone_setup() {
+            Ok(mut setup) => self.play_space_event_in(&mut setup, event, Instant::now()),
+            Err(_) => {
+                if matches!(event, PlaySpaceEvent::RoomSetupStarting) {
+                    self.carried = None;
+                    self.room_setup = Some(Instant::now());
+                }
             }
         }
-        play.write(&carried.shifted());
-        play.show();
     }
 
-    /// Room setup starts: the play space goes back and stays put until the setup is saved.
-    pub fn room_setup_started(&mut self, steamvr: &vr::Client) {
-        self.reset(steamvr);
-        self.room_setup = Some(Instant::now());
-    }
-
-    /// Room setup was saved: the boost may move the new play space.
-    pub fn room_setup_ended(&mut self) {
-        self.room_setup = None;
+    /// One of SteamVR's play-space events at `now`, with `play`. What a person does ends the carry at once, the play
+    /// space back to SteamVR's own setup (theirs now): a recenter, a seated reset (not within [`OWN_EVENTS`] of the
+    /// boost's own preview: the boost moves the seated zero too, and that may be its echo), another tracking universe,
+    /// room setup (which also holds the boost until it is saved). The rest, raised for every preview the boost shows
+    /// and for other applications, changes nothing: the boost never looks at SteamVR's setup while its carry shows
+    /// (reverting the working copy to look put the play space back where it started, the person's position reset,
+    /// until the next push showed the carry again).
+    pub fn play_space_event_in(&mut self, play: &mut dyn PlaySpace, event: PlaySpaceEvent, now: Instant) {
+        let own_echo = self.shown_at.is_some_and(|t| now.saturating_duration_since(t) < OWN_EVENTS);
+        match event {
+            PlaySpaceEvent::StandingReset => self.put_back(play),
+            PlaySpaceEvent::SeatedReset if !own_echo => self.put_back(play),
+            PlaySpaceEvent::UniverseChanged { from, to } if from != to => self.put_back(play),
+            PlaySpaceEvent::RoomSetupStarting => {
+                self.put_back(play);
+                self.room_setup = Some(now);
+            }
+            // Room setup saved its play space: the boost may move it. Another application's saved change leaves the
+            // carry as it is (it goes back to that setup when the carry ends).
+            PlaySpaceEvent::SetupCommitted => self.room_setup = None,
+            PlaySpaceEvent::SeatedReset | PlaySpaceEvent::UniverseChanged { .. } | PlaySpaceEvent::FlushCache => {}
+        }
     }
 }
 
@@ -515,6 +584,19 @@ mod tests {
         assert!(g.carries(at(100), true, Some(&speed(4.05)), 4.0), "its reports lag the boost at first");
         assert!(g.carries(at(700), true, Some(&speed(4.05)), 4.0), "a moment below walking is not a stop");
         assert!(!g.carries(at(1100), true, Some(&speed(4.05)), 4.0), "the Action Menu took the stick: the boost stops");
+        // VRChat still reports the boost's drag a moment: that does not start it again (it did, the next frame, so the
+        // boost never stopped and went in fits).
+        assert!(!g.carries(at(1110), true, Some(&speed(4.05)), 0.0), "the boost's own drag, reported late");
+        assert!(!g.carries(at(1400), true, Some(&speed(2.0)), 0.0));
+        assert!(!g.carries(at(1650), true, Some(&speed(0.05)), 0.0), "VRChat stands the avatar still: still stopped");
+        assert!(g.carries(at(1700), true, Some(&speed(3.0)), 0.0), "VRChat walks it again: carrying again");
+        // Letting go of the stick forgets the stop: the next push starts at once.
+        let mut g = Gate::default();
+        assert!(g.carries(at(0), true, Some(&speed(3.0)), 0.0));
+        assert!(g.carries(at(1000), true, Some(&speed(4.05)), 4.0));
+        assert!(!g.carries(at(1400), true, Some(&speed(4.05)), 4.0));
+        assert!(!g.carries(at(1410), false, Some(&speed(4.05)), 0.0));
+        assert!(g.carries(at(1420), true, Some(&speed(3.0)), 0.0));
         // Walking: VRChat's own 4 m/s on top of the boost's 4.
         let mut g = Gate::default();
         assert!(g.carries(at(0), true, Some(&speed(3.0)), 0.0));
@@ -524,8 +606,25 @@ mod tests {
         assert!(!Gate::default().carries(at(0), true, Some(&speed(f32::NAN)), 0.0));
     }
 
+    /// How SteamVR's working copy, preview and saved setup relate. Without a headset that cannot be checked, so walk
+    /// boost must hold under each.
+    #[derive(Clone, Copy, Debug, Default, PartialEq)]
+    enum Semantics {
+        /// A preview is a copy of the working copy when shown; reverting the working copy gives the preview while one
+        /// shows (what the boost assumed until now).
+        #[default]
+        Snapshot,
+        /// A shown preview follows the working copy until hidden, and reverting re-reads the saved setup (SteamVR's
+        /// log reads the chaperone file at each revert): reverting while a preview shows puts the play space back.
+        Bound,
+        /// A preview is a copy when shown; reverting gives the saved setup.
+        SnapshotRevertSaved,
+    }
+
+    const EVERY_SEMANTICS: [Semantics; 3] = [Semantics::Snapshot, Semantics::Bound, Semantics::SnapshotRevertSaved];
+
     /// SteamVR's chaperone as walk boost meets it: a saved setup, the preview that shows (the live setup while it
-    /// does: the working copy reverts to it), and the working copy.
+    /// does), and the working copy.
     #[derive(Default)]
     struct Room {
         saved: Setup,
@@ -533,11 +632,17 @@ mod tests {
         working: Setup,
         shows: usize,
         hides: usize,
+        reverts: usize,
+        semantics: Semantics,
     }
 
     impl Room {
         fn new(standing: Matrix34) -> Self {
             Self { saved: Setup { standing, ..Default::default() }, ..Default::default() }
+        }
+
+        fn with(semantics: Semantics) -> Self {
+            Self { semantics, ..Self::new(Matrix34::IDENTITY) }
         }
 
         /// What every application sees.
@@ -548,7 +653,14 @@ mod tests {
 
     impl PlaySpace for Room {
         fn revert(&mut self) {
-            self.working = self.live().clone();
+            self.reverts += 1;
+            self.working = match self.semantics {
+                Semantics::Snapshot => self.live().clone(),
+                Semantics::Bound | Semantics::SnapshotRevertSaved => self.saved.clone(),
+            };
+            if self.semantics == Semantics::Bound && self.preview.is_some() {
+                self.preview = Some(self.working.clone());
+            }
         }
 
         fn read(&mut self) -> Option<Setup> {
@@ -557,6 +669,9 @@ mod tests {
 
         fn write(&mut self, setup: &Setup) {
             self.working = setup.clone();
+            if self.semantics == Semantics::Bound && self.preview.is_some() {
+                self.preview = Some(self.working.clone());
+            }
         }
 
         fn show(&mut self) {
@@ -613,44 +728,133 @@ mod tests {
         assert!(room.preview.is_none() && room.hides == 1 && room.working == room.saved);
     }
 
-    #[test]
-    fn its_own_preview_changes_nothing() {
-        let (s, mut room, mut walk) = (settings(), Room::new(Matrix34::IDENTITY), boost());
-        let t0 = Instant::now();
-        let m = moment(&s, None);
-        walk.step(&mut room, &m, || FORWARD, || Some(yaw(0.0)), t0);
-        walk.step(&mut room, &m, || FORWARD, || Some(yaw(0.0)), t0 + Duration::from_millis(20));
-        let (carried, shows) = (carried_by(&room), room.shows);
-        // An event its own showing raised (SteamVR's working copy reverts to the preview, not to the saved setup):
-        // the play space stays as it is, nothing hidden or shown again, so no event follows.
-        for _ in 0..3 {
-            walk.rebase(&mut room);
+    /// Walks forward `steps` frames of 10 ms from `from` ms; returns the time of the last step.
+    fn walk_for(walk: &mut WalkBoost, room: &mut Room, s: &WalkBoostSettings, t0: Instant, from: u64, steps: u64) -> u64 {
+        let m = moment(s, None);
+        for i in 0..=steps {
+            walk.step(room, &m, || FORWARD, || Some(yaw(0.0)), t0 + Duration::from_millis(from + i * 10));
         }
-        assert!(close(carried_by(&room), carried), "{:?} then {:?}", carried, carried_by(&room));
-        assert_eq!((room.shows, room.hides), (shows, 0));
+        from + steps * 10
+    }
+
+    /// The reset Enzo met (2026-10-26): SteamVR raises play-space events for the boost's own previews, for other
+    /// applications connecting, and when anything saves a setup. The boost reverted the working copy to look at
+    /// them; when the preview follows the working copy that put the play space back where the walk started, and
+    /// left it there until the next push showed the carry again (the position reset, then thrown forward). Now no
+    /// such event touches the play space, under any of SteamVR's possible behaviours, while walking or standing.
+    #[test]
+    fn events_never_move_the_play_space() {
+        let quiet = [PlaySpaceEvent::FlushCache, PlaySpaceEvent::UniverseChanged { from: 7, to: 7 }, PlaySpaceEvent::SetupCommitted];
+        for semantics in EVERY_SEMANTICS {
+            let (s, mut walk, mut room) = (settings(), boost(), Room::with(semantics));
+            let t0 = Instant::now();
+            let mut last = walk_for(&mut walk, &mut room, &s, t0, 0, 10);
+            let mut expected = carried_by(&room);
+            assert!(expected[2] < -0.3, "{semantics:?}: carried {expected:?}");
+            for (round, after) in [5u64, 500, 1200, 2500, 6000].into_iter().enumerate() {
+                let at = last + after;
+                for event in quiet {
+                    walk.play_space_event_in(&mut room, event, t0 + Duration::from_millis(at));
+                    assert!(
+                        close(carried_by(&room), expected),
+                        "{semantics:?}: {event:?} {after} ms after a step moved {expected:?} to {:?}",
+                        carried_by(&room)
+                    );
+                }
+                // A seated reset just after the boost's own preview may be its echo: nothing either.
+                if after < 1000 {
+                    walk.play_space_event_in(&mut room, PlaySpaceEvent::SeatedReset, t0 + Duration::from_millis(at));
+                    assert!(close(carried_by(&room), expected), "{semantics:?}: an echo moved the play space");
+                }
+                assert_eq!((room.hides, room.reverts), (0, 1), "{semantics:?}: reverted once, at the start, and never hidden");
+                // Walking on carries on from where the person is, every round.
+                last = walk_for(&mut walk, &mut room, &s, t0, at + 10, 5);
+                assert!(carried_by(&room)[2] < expected[2] - 0.15, "{semantics:?} round {round}: the walk goes on");
+                expected = carried_by(&room);
+            }
+        }
+    }
+
+    /// A recenter ends the carry at once, the play space back to SteamVR's own new setup: the next push starts from
+    /// it, never thrown by the distance walked before (the old rebase kept the carry on the new setup: a recenter, or
+    /// a setup someone saved with the carry in it, threw the person that far).
+    #[test]
+    fn a_recenter_ends_the_carry_without_throwing_the_person() {
+        for semantics in EVERY_SEMANTICS {
+            for steamvr_drops_the_preview in [true, false] {
+                let (s, mut walk, mut room) = (settings(), boost(), Room::with(semantics));
+                let t0 = Instant::now();
+                let last = walk_for(&mut walk, &mut room, &s, t0, 0, 20);
+                assert!(carried_by(&room)[2] < -0.7);
+                // The person recentres: SteamVR saves a new standing zero.
+                let mut recentred = yaw(90.0);
+                recentred.m[0][3] = 0.4;
+                room.saved.standing = recentred;
+                if steamvr_drops_the_preview {
+                    room.preview = None;
+                }
+                walk.play_space_event_in(&mut room, PlaySpaceEvent::StandingReset, t0 + Duration::from_millis(last + 5));
+                let case = format!("{semantics:?}, preview dropped: {steamvr_drops_the_preview}");
+                assert!(room.preview.is_none(), "{case}: the carry ended");
+                assert!(room.live().close_to(&room.saved), "{case}: the recentred setup is the live one");
+                // The next push starts from the recentred setup: two steps away from it (the first after a pause moves
+                // 50 ms' worth at most, then 10 ms, at 4 m/s), not the 0.8 m walked before on top.
+                walk_for(&mut walk, &mut room, &s, t0, last + 100, 1);
+                let moved = carried_by(&room);
+                let distance = (moved[0] * moved[0] + moved[2] * moved[2]).sqrt();
+                assert!((distance - 0.24).abs() < 1e-3, "{case}: two steps from the new setup, not {distance} m");
+            }
+        }
     }
 
     #[test]
-    fn a_new_saved_setup_becomes_the_base() {
-        let (s, mut room, mut walk) = (settings(), Room::new(Matrix34::IDENTITY), boost());
+    fn a_seated_reset_after_the_walk_another_universe_and_room_setup_end_the_carry() {
+        for semantics in EVERY_SEMANTICS {
+            let (s, mut walk, mut room) = (settings(), boost(), Room::with(semantics));
+            let t0 = Instant::now();
+            let last = walk_for(&mut walk, &mut room, &s, t0, 0, 10);
+            walk.play_space_event_in(&mut room, PlaySpaceEvent::SeatedReset, t0 + Duration::from_millis(last + 1500));
+            assert!(room.preview.is_none() && room.live().close_to(&room.saved), "{semantics:?}: a seated reset, long after");
+
+            let last = walk_for(&mut walk, &mut room, &s, t0, last + 2000, 10);
+            assert!(room.preview.is_some());
+            walk.play_space_event_in(&mut room, PlaySpaceEvent::UniverseChanged { from: 1, to: 2 }, t0 + Duration::from_millis(last + 5));
+            assert!(room.preview.is_none(), "{semantics:?}: another tracking universe");
+
+            // Room setup: back at once, and the boost holds until the new setup is saved.
+            let last = walk_for(&mut walk, &mut room, &s, t0, last + 100, 10);
+            walk.play_space_event_in(&mut room, PlaySpaceEvent::RoomSetupStarting, t0 + Duration::from_millis(last + 5));
+            assert!(room.preview.is_none());
+            let last = walk_for(&mut walk, &mut room, &s, t0, last + 100, 10);
+            assert!(room.preview.is_none() && !walk.moving(), "{semantics:?}: held during room setup");
+            walk.play_space_event_in(&mut room, PlaySpaceEvent::SetupCommitted, t0 + Duration::from_millis(last + 5));
+            walk_for(&mut walk, &mut room, &s, t0, last + 100, 2);
+            assert!(walk.moving() && room.preview.is_some(), "{semantics:?}: saved, the boost moves the new play space");
+        }
+    }
+
+    #[test]
+    fn steps_are_whole_frames() {
+        let (s, mut walk, mut room) = (settings(), boost(), Room::new(Matrix34::IDENTITY));
+        let frame = Duration::from_secs_f32(1.0 / 90.0);
+        walk.set_frame(Some(frame));
         let t0 = Instant::now();
         let m = moment(&s, None);
-        walk.step(&mut room, &m, || FORWARD, || Some(yaw(0.0)), t0);
-        walk.step(&mut room, &m, || FORWARD, || Some(yaw(0.0)), t0 + Duration::from_millis(20));
-        assert!(close(carried_by(&room), [0.0, 0.0, -0.08]));
-        // A recenter saved a new standing zero and SteamVR shows it in place of the preview: the carry goes on from it,
-        // as far as before (20 ms at 4 m/s).
-        room.saved.standing = yaw(90.0);
-        room.preview = None;
-        walk.rebase(&mut room);
-        let expected = Carried { base: room.saved.clone(), offset: [0.0, 0.0, -0.08] }.shifted();
-        assert!(room.live().close_to(&expected), "{:?}", room.live());
-        // Another application's change saved under the preview while it shows: read with the preview hidden.
-        room.saved.standing.m[1][3] = 1.65;
-        room.preview.as_mut().unwrap().standing.m[0][3] += 0.3;
-        walk.rebase(&mut room);
-        assert!((room.live().standing.m[1][3] - 1.65).abs() < 1e-5, "the new saved setup is the base");
-        assert!(room.preview.is_some(), "and the carry shows again");
+        // The loop's turns land a little early or late on the compositor's frames.
+        let mut last = 0.0;
+        for (i, us) in [0u64, 11_900, 21_400, 34_100, 44_000, 67_300].into_iter().enumerate() {
+            walk.step(&mut room, &m, || FORWARD, || Some(yaw(0.0)), t0 + Duration::from_micros(us));
+            let now = -carried_by(&room)[2];
+            let step = now - last;
+            last = now;
+            if i == 0 {
+                continue;
+            }
+            // 4 m/s × 0.5 × 2 = 4 m/s: a whole number of frames' worth each time (one, but two after the late turn).
+            let frames = step / (4.0 * frame.as_secs_f32());
+            assert!((frames - frames.round()).abs() < 1e-3 && frames.round() >= 1.0, "step {i}: {frames} frames");
+        }
+        assert!((last - 4.0 * 6.0 * frame.as_secs_f32()).abs() < 1e-3, "six frames in all: {last}");
     }
 
     #[test]

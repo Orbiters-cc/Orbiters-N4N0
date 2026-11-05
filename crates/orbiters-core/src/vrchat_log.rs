@@ -32,6 +32,10 @@ pub enum LogEvent {
     AvatarSwitched { player: String, avatar: String },
     /// `[Video Playback] Attempting to resolve URL '<url>'`, with the line's time (Unix seconds)
     Video { url: String, at: Option<u64> },
+    /// A line the N4N0 world wrote for Orbiters - N4N0 (`[N4N0-Feedback] {…}`, contracts `Docs/world-feedback.md`), with
+    /// the line's time (Unix seconds): `message` is the whole message, marker included. Any world can write one; what is
+    /// done with it depends on the world the log joined.
+    WorldLine { message: String, at: Option<u64> },
 }
 
 /// A video a video player of the world played.
@@ -110,6 +114,7 @@ impl WorldState {
                 self.avatars.insert(player, avatar);
             }
             LogEvent::Video { url, at } => self.last_video = Some(VideoSeen { url: url.clone(), at: *at }),
+            LogEvent::WorldLine { .. } => {}
         }
     }
 
@@ -139,7 +144,7 @@ impl WorldState {
         out
     }
 
-    /// The instance as Orbiters knows it for N4N0's link cards (contracts `Docs/orb.md`, Link card): the lowercase hex
+    /// The instance as Orbiters knows it for N4N0's link cards (contracts `Docs/n4n0.md`, Link card): the lowercase hex
     /// SHA-256 of `<world id>:<instance>`, as VRChat's log writes them on joining. `None` outside a world: everyone in the
     /// same instance computes the same, and Orbiters never learns the world.
     pub fn instance_hash(&self) -> Option<String> {
@@ -218,6 +223,7 @@ fn message_start(line: &[u8]) -> Option<usize> {
 
 const BEHAVIOUR: &[u8] = b"[Behaviour] ";
 const VIDEO: &[u8] = b"[Video Playback] Attempting to resolve URL '";
+const WORLD_LINE: &[u8] = orbiters_contracts::world_feedback::MARKER.as_bytes();
 
 /// The message of a line in VRChat's own shape ([`message_start`]).
 pub(crate) fn message(line: &[u8]) -> Option<&[u8]> {
@@ -234,7 +240,7 @@ pub fn parse_line(line: &str) -> Option<LogEvent> {
 pub(crate) fn parse_bytes(line: &[u8]) -> Option<LogEvent> {
     let start = message_start(line)?;
     let message = &line[start..];
-    if !message.starts_with(BEHAVIOUR) && !message.starts_with(VIDEO) {
+    if !message.starts_with(BEHAVIOUR) && !message.starts_with(VIDEO) && !message.starts_with(WORLD_LINE) {
         return None;
     }
     // The part before the message is ASCII: the offsets stay where they were.
@@ -244,6 +250,10 @@ pub(crate) fn parse_bytes(line: &[u8]) -> Option<LogEvent> {
 
 /// A message's event; `stamp` is its line's time (`2026.10.18 20:23:20`).
 fn parse_message(message: &str, stamp: &str) -> Option<LogEvent> {
+    if message.starts_with(orbiters_contracts::world_feedback::MARKER) {
+        let fits = message.len() <= orbiters_contracts::world_feedback::MAX_LINE;
+        return fits.then(|| LogEvent::WorldLine { message: message.to_string(), at: crate::visited::log_time(stamp) });
+    }
     if let Some(url) = message.strip_prefix("[Video Playback] Attempting to resolve URL '") {
         let url = url.strip_suffix('\'')?;
         return (!url.is_empty()).then(|| LogEvent::Video { url: url.to_string(), at: crate::visited::log_time(stamp) });
@@ -493,6 +503,24 @@ mod tests {
 
     fn event(message: &str) -> LogEvent {
         parse_line(&line(message)).unwrap_or_else(|| panic!("no event in {message}"))
+    }
+
+    /// The N4N0 world's lines (contracts `Docs/world-feedback.md`, Log lines): at the start of a message of VRChat's own
+    /// shape only, whole, with their time.
+    #[test]
+    fn world_lines_are_read_at_the_start_of_a_message_only() {
+        let message = r#"[N4N0-Feedback] {"v":1,"t":"hello","session":"5f3a9c01","seq":1}"#;
+        match event(message) {
+            LogEvent::WorldLine { message: read, at } => {
+                assert_eq!(read, message);
+                assert!(at.is_some());
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(!matches!(parse_line(&line(&format!("[Behaviour] OnPlayerJoined {message}"))), Some(LogEvent::WorldLine { .. })), "a display name");
+        assert_eq!(parse_line(&format!("   {message}")), None, "a further line of a script's message");
+        let long = format!("[N4N0-Feedback] {}", "x".repeat(orbiters_contracts::world_feedback::MAX_LINE));
+        assert_eq!(parse_line(&line(&long)), None);
     }
 
     #[test]

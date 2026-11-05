@@ -4,6 +4,8 @@
 //! for a few days); and pictures, decoded off the interface thread by a few loaders, with small thumbnails kept on
 //! disk so a library of 4K screenshots opens at once the second time.
 
+mod picture_cache;
+
 use egui::{ColorImage, TextureHandle, TextureOptions};
 use orbiters_contracts::qoi;
 use orbiters_core::account::{Api, Server};
@@ -39,10 +41,126 @@ pub struct VisitedWorld {
     /// Unix seconds of the latest visit, picture or session.
     pub last: u64,
     pub visits: usize,
-    /// Newest first.
+    /// Newest first. A multi-layer picture is one shot (its picture, else its bottom layer), its layers in `layers`.
     pub shots: Vec<Shot>,
+    /// The layers of the shots that have them ([`group_layers`]), by the shot's path.
+    pub layers: HashMap<PathBuf, Vec<Layer>>,
     /// Newest first.
     pub sessions: Vec<SessionSummary>,
+}
+
+/// One file of a VRChat multi-layer picture. VRChat's camera in its Multi Layer mode saves, beside the picture itself,
+/// one PNG per mask turned on, named as the picture with the mask after it: `VRChat_2026-10-29_21-04-11.532_3840x2160.png`
+/// with `…_3840x2160_Environment.png` (the world), `…_Player.png` (the people, transparent around them) and `…_UI.png`
+/// (transparent). Photos & captures shows them as one picture ([`crate::controller::shares::Entry::layers`]).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Layer {
+    pub path: PathBuf,
+    /// VRChat's name for it, as its file has it ("Environment", "Player", "UI"): shown as is.
+    pub name: String,
+    /// Its size in pixels (the picture's).
+    pub width: u32,
+    pub height: u32,
+    /// What Orbiters has of it when it was shared on its own (this account's upload record; the listing fills it).
+    #[serde(default)]
+    pub shared: Option<orbiters_core::shares::Item>,
+}
+
+impl Layer {
+    /// Saved with transparency (every layer but the world): shown over a checkerboard.
+    pub fn transparent(&self) -> bool {
+        !self.name.eq_ignore_ascii_case("Environment")
+    }
+
+    /// How it is shown: with its transparency, at most `width` wide.
+    pub fn picture(&self, width: u32) -> Picture {
+        Picture::Layer { path: self.path.clone(), width }
+    }
+
+    /// Back to front: the world, the people, other masks, the interface on top.
+    fn depth(&self) -> u8 {
+        match self.name.to_ascii_lowercase().as_str() {
+            "environment" => 0,
+            "player" => 1,
+            "ui" => 3,
+            _ => 2,
+        }
+    }
+}
+
+/// A VRChat picture's file name as the name its files share and, for one of a multi-layer picture's layers, the layer:
+/// `VRChat_2026-10-29_21-04-11.532_3840x2160.png` is the picture, `…_3840x2160_Player.png` its Player layer, and
+/// `…_3840x2160_wrld_….png` (VRCX's renamed copy, with the world in its name) the picture too. None for other names
+/// (VRChat's old ones put the size first and had no layers).
+pub fn shot_name(file: &str) -> Option<(&str, Option<&str>)> {
+    let stem = file.strip_suffix(".png").or_else(|| file.strip_suffix(".PNG"))?;
+    let rest = stem.strip_prefix("VRChat_")?;
+    // The time (`2026-10-29_21-04-11.532`), then the size (`3840x2160`).
+    let time = rest.get(..23)?.as_bytes();
+    let separators = [(4, b'-'), (7, b'-'), (10, b'_'), (13, b'-'), (16, b'-'), (19, b'.')];
+    let fits = time.iter().enumerate().all(|(i, c)| separators.iter().find(|(at, _)| *at == i).map_or(c.is_ascii_digit(), |(_, s)| c == s));
+    if !fits || rest.as_bytes().get(23) != Some(&b'_') {
+        return None;
+    }
+    let after = &rest[24..];
+    let size = &after[..after.find('_').unwrap_or(after.len())];
+    let digits = |s: &str| !s.is_empty() && s.bytes().all(|c| c.is_ascii_digit());
+    if !size.split_once('x').is_some_and(|(w, h)| digits(w) && digits(h)) {
+        return None;
+    }
+    let base = &stem[.."VRChat_".len() + 24 + size.len()];
+    match after[size.len()..].strip_prefix('_').map(|s| s.split("_wrld_").next().unwrap_or(s)) {
+        None => Some((base, None)),
+        Some(s) if s.starts_with("wrld_") => Some((base, None)),
+        Some(s) if !s.is_empty() && s.len() <= 32 && s.bytes().all(|c| c.is_ascii_alphabetic()) => Some((base, Some(s))),
+        // Something else after the size (`_2`, a copy): a picture of its own.
+        Some(_) => None,
+    }
+}
+
+/// The files of each multi-layer picture as one shot and its layers (back to front), the other pictures as they are,
+/// in the order given. A picture's files share its timestamp and size across the configured folders; the shot is the picture itself,
+/// else (deleted) its bottom layer, and it takes the world any of them has (VRChat may write it in one only). A layer
+/// alone is a shot of its own whose one layer is itself, so that it shows as a layer still.
+pub fn group_layers(shots: Vec<Shot>) -> Vec<(Shot, Vec<Layer>)> {
+    // Each picture's files: the picture, and its layers by name.
+    let mut sets: Vec<(Option<Shot>, Vec<(Layer, Shot)>)> = Vec::new();
+    let mut at: HashMap<String, usize> = HashMap::new();
+    for shot in shots {
+        let file = shot.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let Some((base, layer)) = shot_name(&file) else {
+            sets.push((Some(shot), Vec::new()));
+            continue;
+        };
+        let key = base.to_ascii_lowercase();
+        let layer = layer.map(str::to_owned);
+        let i = *at.entry(key).or_insert_with(|| {
+            sets.push((None, Vec::new()));
+            sets.len() - 1
+        });
+        match layer {
+            Some(name) => {
+                let l = Layer { path: shot.path.clone(), name, width: shot.info.width, height: shot.info.height, shared: None };
+                sets[i].1.push((l, shot));
+            }
+            None if sets[i].0.is_none() => sets[i].0 = Some(shot),
+            // A second file named as the picture (VRCX's copy beside VRChat's): a picture of its own.
+            None => sets.push((Some(shot), Vec::new())),
+        }
+    }
+    sets.into_iter()
+        .filter_map(|(picture, mut layers)| {
+            layers.sort_by(|a, b| a.0.depth().cmp(&b.0.depth()).then_with(|| a.0.name.cmp(&b.0.name)));
+            let world = picture.iter().chain(layers.iter().map(|(_, s)| s)).find(|s| s.info.world_id.is_some()).map(|s| s.info.clone());
+            let mut face = picture.or_else(|| layers.first().map(|(_, s)| s.clone()))?;
+            if let Some(w) = world.filter(|_| face.info.world_id.is_none()) {
+                face.info.world_id = w.world_id;
+                face.info.world_name = w.world_name;
+                face.info.instance = w.instance;
+            }
+            Some((face, layers.into_iter().map(|(l, _)| l).collect()))
+        })
+        .collect()
 }
 
 impl VisitedWorld {
@@ -53,16 +171,24 @@ impl VisitedWorld {
 
 /// Every world visited, pictured or recorded, the latest first.
 pub fn load(sessions_dir: &Path) -> Vec<VisitedWorld> {
-    let history = visited::History::load(&visited::history_file());
-    let index_file = visited::shot_index_file();
+    let file = visited::shot_index_file();
     let index = {
         let _one = shot_index_lock();
-        let mut index = visited::ShotIndex::load(&index_file);
-        if index.refresh(&visited::screenshot_dirs()) {
-            let _ = index.save(&index_file);
-        }
+        let mut index = visited::ShotIndex::load(&file);
+        if index.refresh(&visited::screenshot_dirs()) { let _ = index.save(&file); }
         index
     };
+    picture_cache::set_index(&index);
+    from_index(sessions_dir, index, false)
+}
+
+/// Photos & captures can show the cached listing while an archive is being checked, including pictures with no world.
+pub fn load_gallery(sessions_dir: &Path, folders: &[PathBuf]) -> Vec<VisitedWorld> {
+    from_index(sessions_dir, picture_index(&visited::shot_index_file(), visited::screenshot_dirs_with(folders)), true)
+}
+
+fn from_index(sessions_dir: &Path, index: visited::ShotIndex, unplaced: bool) -> Vec<VisitedWorld> {
+    let history = visited::History::load(&visited::history_file());
     let mut worlds: BTreeMap<String, VisitedWorld> = BTreeMap::new();
     fn entry<'a>(worlds: &'a mut BTreeMap<String, VisitedWorld>, id: &str) -> &'a mut VisitedWorld {
         worlds.entry(id.to_string()).or_insert_with(|| VisitedWorld {
@@ -71,6 +197,7 @@ pub fn load(sessions_dir: &Path) -> Vec<VisitedWorld> {
             last: 0,
             visits: 0,
             shots: Vec::new(),
+            layers: HashMap::new(),
             sessions: Vec::new(),
         })
     }
@@ -82,12 +209,16 @@ pub fn load(sessions_dir: &Path) -> Vec<VisitedWorld> {
             w.name = n.clone();
         }
     }
-    for shot in index.shots() {
-        let Some(id) = shot.info.world_id.clone() else { continue };
+    for (shot, layers) in group_layers(index.every_shot()) {
+        if shot.info.world_id.is_none() && !unplaced { continue; }
+        let id = shot.info.world_id.clone().unwrap_or_default();
         let w = entry(&mut worlds, &id);
         w.last = w.last.max(shot.info.taken);
         if w.name.is_empty() {
             w.name = shot.info.world_name.clone().unwrap_or_default();
+        }
+        if !layers.is_empty() {
+            w.layers.insert(shot.path.clone(), layers);
         }
         w.shots.push(shot);
     }
@@ -105,11 +236,43 @@ pub fn load(sessions_dir: &Path) -> Vec<VisitedWorld> {
     for w in &mut out {
         w.sessions.sort_by_key(|s| std::cmp::Reverse(s.modified));
         if w.name.is_empty() {
-            w.name = "Unnamed world".into();
+            w.name = if w.id.is_empty() { "Pictures without a world" } else { "Unnamed world" }.into();
         }
     }
     out.sort_by(|a, b| b.last.cmp(&a.last).then_with(|| a.name.cmp(&b.name)));
     out
+}
+
+/// Changes when the background folder scan finishes. Pages may keep showing their cached listing meanwhile.
+pub fn picture_revision() -> u64 {
+    PICTURE_REVISION.load(std::sync::atomic::Ordering::Acquire)
+}
+static PICTURE_REVISION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+static LIVE_PICTURES: Mutex<Option<visited::ShotIndex>> = Mutex::new(None);
+
+fn picture_index(file: &Path, dirs: Vec<PathBuf>) -> visited::ShotIndex {
+    static SCANNING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    let index = LIVE_PICTURES.lock().unwrap_or_else(|e| e.into_inner()).clone()
+        .unwrap_or_else(|| visited::ShotIndex::load(file));
+    picture_cache::set_index(&index);
+    if !SCANNING.swap(true, std::sync::atomic::Ordering::AcqRel) {
+        let file = file.to_path_buf();
+        std::thread::spawn(move || {
+            let _one = shot_index_lock();
+            let mut current = visited::ShotIndex::load(&file);
+            let publish = |index: &visited::ShotIndex| {
+                *LIVE_PICTURES.lock().unwrap_or_else(|e| e.into_inner()) = Some(index.clone());
+                PICTURE_REVISION.fetch_add(1, std::sync::atomic::Ordering::Release);
+            };
+            if current.refresh_progress(&dirs, publish) {
+                let _ = current.save(&file);
+                publish(&current);
+            }
+            SCANNING.store(false, std::sync::atomic::Ordering::Release);
+        });
+    }
+    index
 }
 
 /// The SHA-256 of each screenshot (computed once, then kept in the index): Orbiters knows the pictures this member
@@ -122,7 +285,8 @@ pub fn hashes(paths: Vec<PathBuf>) -> HashMap<PathBuf, String> {
         let _ = index.save(&index_file);
     }
     let wanted: HashSet<&PathBuf> = paths.iter().collect();
-    index.shots().into_iter().filter(|s| wanted.contains(&s.path)).filter_map(|s| Some((s.path, s.sha256?))).collect()
+    // Layers without a world of their own are shared too.
+    index.every_shot().into_iter().filter(|s| wanted.contains(&s.path)).filter_map(|s| Some((s.path, s.sha256?))).collect()
 }
 
 /// World pages, their pictures and thumbnails: made again when missing, so they live on this computer only
@@ -244,12 +408,27 @@ impl Infos {
 /// A picture to show.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Picture {
+    /// A session-scoped profile image. Never persisted in the public world image cache.
+    Profile { scope: crate::controller::vrchat_data::Scope, url: String },
+    /// A protected sharing-contract picture, fetched with the current environment's account on a loader thread.
+    Capture { development: bool, id: u64, large: bool },
     /// A screenshot, at most `width` wide.
     Shot { path: PathBuf, size: u64, width: u32 },
+    /// A layer of a multi-layer picture ([`Layer`]), at most `width` wide, with its transparency.
+    Layer { path: PathBuf, width: u32 },
     /// A session's thumbnail.
     Session(PathBuf),
     /// A world's picture on VRChat (as Orbiters lists it): its thumbnail, or the full picture when `large`.
     Remote { world_id: String, url: String, large: bool },
+    /// An event's cover on Orbiters, read with the account's credential when signed in (members-only covers need it).
+    EventCover { development: bool, id: String },
+    /// Another picture a few pixels wide, to draw large and soft as its light (behind an event, its window).
+    Glow(Box<Picture>),
+    /// A picture of a community gallery on Orbiters: its preview, or the full picture when `large` (kept in memory).
+    /// `id` is its placement (0: a picture that is not a gallery's, such as an author's); an empty `url` or one that
+    /// does not load (Discord's links expire) is renewed by Orbiters with the member's credential. `asset`: the asset
+    /// whose showcase gallery it is in (0: a community gallery's), where its link is renewed.
+    Gallery { development: bool, asset: u64, id: u64, url: String, large: bool },
 }
 
 enum Slot {
@@ -280,14 +459,21 @@ pub struct Pictures {
     done: Arc<Mutex<Vec<Loaded>>>,
     /// When the pictures were last trimmed to [`KEEP_BYTES`] (egui's clock).
     trimmed: f64,
+    stopped: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl Pictures {
     pub fn new(ctx: &egui::Context) -> Self {
+        Self::with_backend(ctx, None)
+    }
+    pub fn with_backend(ctx: &egui::Context, backend: Option<crate::backend::Ctl>) -> Self {
         let queue: Arc<(Mutex<Vec<Picture>>, std::sync::Condvar)> = Arc::default();
         let done: Arc<Mutex<Vec<Loaded>>> = Arc::default();
+        let stopped = Arc::new(std::sync::atomic::AtomicBool::new(false));
         for i in 0..3 {
             let (queue, done, ctx) = (queue.clone(), done.clone(), ctx.clone());
+            let backend = backend.clone();
+            let stopped = stopped.clone();
             std::thread::Builder::new()
                 .name(format!("pictures-{i}"))
                 .spawn(move || {
@@ -297,19 +483,34 @@ impl Pictures {
                             let (lock, ready) = &*queue;
                             let mut q = lock.lock().unwrap();
                             while q.is_empty() {
+                                if stopped.load(std::sync::atomic::Ordering::Acquire) {
+                                    return;
+                                }
                                 q = ready.wait(q).unwrap();
+                            }
+                            if stopped.load(std::sync::atomic::Ordering::Acquire) {
+                                return;
                             }
                             q.pop()
                         };
                         let Some(picture) = next else { continue };
-                        let image = decode(&api, keep, &picture);
+                        let image = if let Picture::Profile { scope, url } = &picture {
+                            use crate::controller::vrchat_data::{Request, Response};
+                            backend
+                                .as_ref()
+                                .and_then(|b| b.vrchat_data(scope.clone(), Request::Image { url: url.clone() }).ok())
+                                .and_then(|r| if let Response::Image(bytes) = r { decode_image(&bytes) } else { None })
+                                .map(|(w, h, rgba)| ColorImage::from_rgba_unmultiplied([w as usize, h as usize], &rgba))
+                        } else {
+                            decode(&api, keep, &picture)
+                        };
                         done.lock().unwrap().push((picture, image));
                         ctx.request_repaint();
                     }
                 })
                 .expect("picture loader");
         }
-        Self { slots: HashMap::new(), queue, done, trimmed: f64::NEG_INFINITY }
+        Self { slots: HashMap::new(), queue, done, trimmed: f64::NEG_INFINITY, stopped }
     }
 
     /// The picture as a texture once decoded; asks for it the first time (and again to bring it forward while it
@@ -394,12 +595,31 @@ impl Pictures {
 
     /// Lets go of the large pictures (the viewer closed).
     pub fn forget_large(&mut self) {
-        self.slots.retain(|p, _| !matches!(p, Picture::Shot { width, .. } if *width > THUMB_WIDTH));
+        self.slots.retain(|p, _| !matches!(p, Picture::Shot { width, .. } | Picture::Layer { width, .. } if *width > THUMB_WIDTH));
+    }
+}
+
+impl Drop for Pictures {
+    fn drop(&mut self) {
+        let (lock, ready) = &*self.queue;
+        let mut queue = lock.lock().unwrap();
+        queue.clear();
+        self.stopped.store(true, std::sync::atomic::Ordering::Release);
+        ready.notify_all();
+    }
+}
+
+/// A picture on this computer (a screenshot, from its kept thumbnail, or a session's thumbnail) decoded on the calling
+/// thread, for the drag image of Photos & captures' cards; None for pictures from the network.
+pub fn decode_local(picture: &Picture) -> Option<ColorImage> {
+    match picture {
+        Picture::Shot { .. } | Picture::Layer { .. } | Picture::Session(_) => decode(&Api::new(Server::Production), true, picture),
+        _ => None,
     }
 }
 
 /// Thumbnails are this wide (kept on disk).
-pub const THUMB_WIDTH: u32 = 480;
+pub const THUMB_WIDTH: u32 = 560;
 
 fn key(p: &Picture) -> u64 {
     let mut h = std::collections::hash_map::DefaultHasher::new();
@@ -409,30 +629,91 @@ fn key(p: &Picture) -> u64 {
 
 fn decode(api: &Api, keep: bool, picture: &Picture) -> Option<ColorImage> {
     match picture {
+        Picture::Profile { .. } => None, // Requires the service backend, handled by the loader.
+        Picture::Capture { development, id, large } => {
+            let server = if *development { Server::Development } else { Server::Production };
+            let account = orbiters_core::account::read(server)?;
+            let api = Api::new(server);
+            let r =
+                api.agent().get(&api.url(&format!("captures/picture/{id}/file"))).header("Authorization", &format!("Bearer {}", account.token)).call().ok()?;
+            if !r.status().is_success() {
+                return None;
+            }
+            let bytes = r.into_body().with_config().limit(32 << 20).read_to_vec().ok()?;
+            let image = image::load_from_memory(&bytes).ok()?.thumbnail(if *large { 2048 } else { 560 }, if *large { 4096 } else { 1120 }).to_rgba8();
+            Some(ColorImage::from_rgba_unmultiplied([image.width() as usize, image.height() as usize], image.as_raw()))
+        }
+        Picture::EventCover { development, id } => {
+            let server = if *development { Server::Development } else { Server::Production };
+            let api = Api::new(server);
+            let mut request = api.agent().get(&api.event_banner_url(id).ok()?);
+            if let Some(account) = orbiters_core::account::read(server) {
+                request = request.header("Authorization", &format!("Bearer {}", account.token));
+            }
+            let r = request.call().ok()?;
+            if !r.status().is_success() {
+                return None;
+            }
+            let bytes = r.into_body().with_config().limit(16 << 20).read_to_vec().ok()?;
+            let image = image::load_from_memory(&bytes).ok()?.thumbnail(1600, 900).to_rgba8();
+            Some(ColorImage::from_rgba_unmultiplied([image.width() as usize, image.height() as usize], image.as_raw()))
+        }
+        Picture::Glow(inner) => {
+            let full = decode(api, keep, inner)?;
+            let [w, h] = full.size;
+            let rgba: Vec<u8> = full.pixels.iter().flat_map(|c| c.to_array()).collect();
+            let full = image::RgbaImage::from_raw(w as u32, h as u32, rgba)?;
+            let (tw, th) = if w >= h { (16, (16 * h / w.max(1)).max(1) as u32) } else { ((16 * w / h.max(1)).max(1) as u32, 16) };
+            let small = image::imageops::thumbnail(&full, tw, th);
+            Some(ColorImage::from_rgba_premultiplied([small.width() as usize, small.height() as usize], small.as_raw()))
+        }
+        Picture::Gallery { development, asset, id, url, large } => {
+            let given = (!url.is_empty()).then(|| api.image(url).ok()).flatten();
+            let bytes = match given {
+                Some(b) => b,
+                None if *id != 0 => {
+                    let server = if *development { Server::Development } else { Server::Production };
+                    let account = orbiters_core::account::read(server)?;
+                    let renewed = Api::new(server).picture_source(&account.token, *asset, *id, !url.is_empty()).ok()?;
+                    let url = if *large { renewed.full_url.or(renewed.src) } else { renewed.src }?;
+                    api.image(&url).ok()?
+                }
+                None => return None,
+            };
+            let image = image::load_from_memory(&bytes).ok()?.thumbnail(if *large { 2048 } else { 560 }, if *large { 4096 } else { 1120 }).to_rgba8();
+            Some(ColorImage::from_rgba_unmultiplied([image.width() as usize, image.height() as usize], image.as_raw()))
+        }
         Picture::Session(dir) => {
             let (w, h, rgba) = bundle::read_thumbnail(dir)?;
             Some(ColorImage::from_rgba_unmultiplied([w as usize, h as usize], &rgba))
         }
         Picture::Shot { path, width, .. } => {
-            let cached = (*width <= THUMB_WIDTH).then(|| cache_dir().join("thumbs").join(format!("{:016x}.qoi", key(picture))));
-            // A thumbnail is at most THUMB_WIDTH wide (and, a picture standing up, four times as tall): a file saying it
-            // is bigger is not one, and is made again rather than given its memory.
-            let most = u64::from(THUMB_WIDTH) * u64::from(THUMB_WIDTH) * 4;
-            if let Some((h, rgba)) = cached.as_ref().and_then(|c| std::fs::read(c).ok()).and_then(|d| qoi::decode_rgba_max(&d, most).ok()) {
+            if let Some((h, rgba)) = picture_cache::read(picture, path, *width) {
                 return Some(ColorImage::from_rgba_unmultiplied([h.width as usize, h.height as usize], &rgba));
             }
+            let before = picture_cache::stamp(path);
             let (w, h, rgba) = decode_png(&std::fs::read(path).ok()?)?;
             let (tw, th, rgb) = bundle::downscale(&rgba, w, h, *width);
-            if let Some(c) = cached {
-                let _ = std::fs::create_dir_all(c.parent()?);
-                let _ = orbiters_core::write_atomic(&c, &qoi::encode(&rgb, tw, th, 3));
-            }
+            picture_cache::write(picture, path, *width, before, &qoi::encode(&rgb, tw, th, 3));
             Some(ColorImage::from_rgb([tw as usize, th as usize], &rgb))
+        }
+        Picture::Layer { path, width } => {
+            if let Some((h, rgba)) = picture_cache::read(picture, path, *width) {
+                return Some(ColorImage::from_rgba_premultiplied([h.width as usize, h.height as usize], &rgba));
+            }
+            let before = picture_cache::stamp(path);
+            let (w, h, rgba) = decode_png(&std::fs::read(path).ok()?)?;
+            let (tw, th, rgba) = downscale_premultiplied(&rgba, w, h, *width);
+            if tw == 0 {
+                return None;
+            }
+            picture_cache::write(picture, path, *width, before, &qoi::encode(&rgba, tw, th, 4));
+            Some(ColorImage::from_rgba_premultiplied([tw as usize, th as usize], &rgba))
         }
         Picture::Remote { world_id, url, large } => {
             let file = cache_dir().join("worlds").join(format!("{world_id}{}.png", if *large { "-large" } else { "" }));
             // One kept that cannot be read (cut short) is fetched again.
-            let kept = keep.then(|| std::fs::read(&file).ok()).flatten().and_then(|b| decode_png(&b));
+            let kept = keep.then(|| std::fs::read(&file).ok()).flatten().and_then(|b| decode_image(&b));
             let (w, h, rgba) = match kept {
                 Some(picture) => picture,
                 None => {
@@ -441,12 +722,53 @@ fn decode(api: &Api, keep: bool, picture: &Picture) -> Option<ColorImage> {
                         let _ = std::fs::create_dir_all(file.parent()?);
                         let _ = orbiters_core::write_atomic(&file, &b);
                     }
-                    decode_png(&b)?
+                    decode_image(&b)?
                 }
             };
             Some(ColorImage::from_rgba_unmultiplied([w as usize, h as usize], &rgba))
         }
     }
+}
+
+/// A picture with transparency at most `max_width` wide (a box filter in whole steps, as [`bundle::downscale`]),
+/// premultiplied by its alpha: an edge keeps its colour instead of darkening toward the transparent black around it.
+fn downscale_premultiplied(rgba: &[u8], width: u32, height: u32, max_width: u32) -> (u32, u32, Vec<u8>) {
+    if width == 0 || height == 0 || (rgba.len() as u64) < u64::from(width) * u64::from(height) * 4 {
+        return (0, 0, Vec::new());
+    }
+    let factor = width.div_ceil(max_width.max(1)).max(1);
+    let (tw, th) = ((width / factor).max(1), (height / factor).max(1));
+    let n = factor * factor;
+    let mut out = vec![0u8; (tw * th * 4) as usize];
+    for ty in 0..th {
+        for tx in 0..tw {
+            let mut acc = [0u32; 4];
+            for dy in 0..factor {
+                let y = (ty * factor + dy).min(height - 1);
+                for dx in 0..factor {
+                    let x = (tx * factor + dx).min(width - 1);
+                    let i = ((y * width + x) * 4) as usize;
+                    let a = u32::from(rgba[i + 3]);
+                    for c in 0..3 {
+                        acc[c] += u32::from(rgba[i + c]) * a;
+                    }
+                    acc[3] += a;
+                }
+            }
+            let o = ((ty * tw + tx) * 4) as usize;
+            for c in 0..3 {
+                out[o + c] = (acc[c] / (255 * n)) as u8;
+            }
+            out[o + 3] = (acc[3] / n) as u8;
+        }
+    }
+    (tw, th, out)
+}
+
+/// Remote thumbnails may be JPEG or WebP as well as PNG.
+fn decode_image(bytes: &[u8]) -> Option<(u32, u32, Vec<u8>)> {
+    let image = image::load_from_memory(bytes).ok()?.to_rgba8();
+    Some((image.width(), image.height(), image.into_raw()))
 }
 
 /// A PNG as RGBA.
@@ -470,6 +792,153 @@ pub fn decode_png(bytes: &[u8]) -> Option<(u32, u32, Vec<u8>)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn shot(path: &str, world: Option<&str>, taken: u64) -> Shot {
+        let info = visited::ShotInfo {
+            instance: None,
+            world_id: world.map(str::to_owned),
+            world_name: world.map(|w| format!("{w} name")),
+            taken,
+            width: 1920,
+            height: 1080,
+        };
+        Shot { path: PathBuf::from(path), size: 100, info, sha256: None }
+    }
+
+    fn names(grouped: &[(Shot, Vec<Layer>)]) -> Vec<(String, Vec<String>)> {
+        grouped
+            .iter()
+            .map(|(s, l)| (s.path.file_name().unwrap().to_string_lossy().into_owned(), l.iter().map(|l| l.name.clone()).collect()))
+            .collect()
+    }
+
+    /// Set ORBITERS_PICTURE_BENCH to a disposable folder containing representative PNGs.
+    #[test]
+    #[ignore]
+    fn picture_folder_benchmark() {
+        let root = PathBuf::from(std::env::var("ORBITERS_PICTURE_BENCH").expect("benchmark folder"));
+        let mut index = visited::ShotIndex::default();
+        let start = std::time::Instant::now();
+        index.refresh(&[root.clone()]);
+        println!("listing: {:?}, {} pictures", start.elapsed(), index.every_shot().len());
+        let saved = root.join("benchmark-index.json");
+        index.save(&saved).unwrap();
+        let start = std::time::Instant::now();
+        let index = visited::ShotIndex::load(&saved);
+        picture_cache::set_index(&index);
+        println!("cached listing: {:?}", start.elapsed());
+        let pictures: Vec<_> = index.every_shot().into_iter().take(8)
+            .map(|s| Picture::Shot { path: s.path, size: s.size, width: 560 }).collect();
+        for pass in 0..2 {
+            let start = std::time::Instant::now();
+            for p in &pictures { assert!(decode_local(p).is_some()); }
+            println!("thumbnails pass {pass}: {:?} for {}", start.elapsed(), pictures.len());
+        }
+    }
+
+    #[test]
+    fn vrchat_names_say_their_picture_and_layer() {
+        let base = "VRChat_2026-10-29_21-04-11.532_3840x2160";
+        assert_eq!(shot_name(&format!("{base}.png")), Some((base, None)));
+        assert_eq!(shot_name(&format!("{base}_Player.png")), Some((base, Some("Player"))));
+        assert_eq!(shot_name(&format!("{base}_Environment.PNG")), Some((base, Some("Environment"))));
+        assert_eq!(shot_name(&format!("{base}_UI.png")), Some((base, Some("UI"))));
+        // VRCX's copy with the world in its name is the picture; a layer it renamed so too is still the layer.
+        assert_eq!(shot_name(&format!("{base}_wrld_4432ea9b-729c-46e3-8eaf-846aa0a37fdd.png")), Some((base, None)));
+        assert_eq!(shot_name(&format!("{base}_Player_wrld_4432ea9b-729c-46e3-8eaf-846aa0a37fdd.png")), Some((base, Some("Player"))));
+        // Not layers: a numbered copy, VRChat's old names (size first), other files, a broken time.
+        assert_eq!(shot_name(&format!("{base}_2.png")), None);
+        assert_eq!(shot_name("VRChat_1920x1080_2021-04-10_03-32-22.312.png"), None);
+        assert_eq!(shot_name("holiday.png"), None);
+        assert_eq!(shot_name("VRChat_2026-10-29_21-04-1x.532_3840x2160_Player.png"), None);
+        assert_eq!(shot_name(&format!("{base}.jpg")), None);
+    }
+
+    #[test]
+    fn a_multi_layer_picture_is_one_shot_with_its_layers_back_to_front() {
+        let dir = "C:/Pictures/VRChat/2026-10/";
+        let base = "VRChat_2026-10-29_21-04-11.532_1920x1080";
+        // Newest first, as the index lists them: the layers in any order, their world on the picture only.
+        let shots = vec![
+            shot(&format!("{dir}{base}_UI.png"), None, 100),
+            shot(&format!("{dir}{base}.png"), Some("wrld_a"), 100),
+            shot(&format!("{dir}{base}_Player.png"), None, 100),
+            shot(&format!("{dir}{base}_Environment.png"), None, 100),
+            shot(&format!("{dir}VRChat_2026-10-29_21-00-00.001_1920x1080.png"), Some("wrld_a"), 90),
+        ];
+        let grouped = group_layers(shots);
+        assert_eq!(
+            names(&grouped),
+            vec![
+                (format!("{base}.png"), vec!["Environment".to_string(), "Player".into(), "UI".into()]),
+                ("VRChat_2026-10-29_21-00-00.001_1920x1080.png".into(), vec![]),
+            ]
+        );
+        let (face, layers) = &grouped[0];
+        assert_eq!(face.info.world_id.as_deref(), Some("wrld_a"));
+        assert!(!layers[0].transparent() && layers[1].transparent() && layers[2].transparent());
+        assert_eq!((layers[1].width, layers[1].height), (1920, 1080));
+    }
+
+    #[test]
+    fn partial_sets_keep_what_is_there() {
+        let base = "C:/P/VRChat_2026-10-29_21-04-11.532_1920x1080";
+        // The picture and its Player layer only.
+        let grouped = group_layers(vec![shot(&format!("{base}.png"), Some("wrld_a"), 5), shot(&format!("{base}_Player.png"), Some("wrld_a"), 5)]);
+        assert_eq!(names(&grouped), vec![("VRChat_2026-10-29_21-04-11.532_1920x1080.png".to_string(), vec!["Player".to_string()])]);
+        // The picture deleted: the world layer is the shot, both layers listed, the world taken from the one that has it.
+        let grouped = group_layers(vec![shot(&format!("{base}_Player.png"), Some("wrld_b"), 5), shot(&format!("{base}_Environment.png"), None, 5)]);
+        assert_eq!(names(&grouped), vec![("VRChat_2026-10-29_21-04-11.532_1920x1080_Environment.png".to_string(), vec!["Environment".to_string(), "Player".into()])]);
+        assert_eq!(grouped[0].0.info.world_id.as_deref(), Some("wrld_b"));
+    }
+
+    #[test]
+    fn a_lone_layer_is_a_shot_of_its_own_and_still_a_layer() {
+        let path = "C:/P/VRChat_2026-10-29_21-04-11.532_1920x1080_Player.png";
+        let grouped = group_layers(vec![shot(path, Some("wrld_a"), 5)]);
+        assert_eq!(grouped.len(), 1);
+        assert_eq!(grouped[0].0.path, PathBuf::from(path));
+        assert_eq!(grouped[0].1.iter().map(|l| l.path.clone()).collect::<Vec<_>>(), vec![PathBuf::from(path)]);
+    }
+
+    #[test]
+    fn the_same_time_and_size_groups_across_archive_folders() {
+        let shots = vec![
+            // Another millisecond, another picture.
+            shot("C:/P/VRChat_2026-10-29_21-04-11.533_1920x1080.png", Some("wrld_a"), 5),
+            shot("C:/P/VRChat_2026-10-29_21-04-11.532_1920x1080.png", Some("wrld_a"), 5),
+            shot("C:/P/VRChat_2026-10-29_21-04-11.532_1920x1080_Player.png", None, 5),
+            // Layers moved to another archive folder still belong to the picture.
+            shot("C:/Q/VRChat_2026-10-29_21-04-11.532_1920x1080_UI.png", None, 5),
+            // Another size is another shot.
+            shot("C:/P/VRChat_2026-10-29_21-04-11.532_3840x2160_UI.png", None, 5),
+            // VRCX's renamed copy beside VRChat's own: two pictures, the layers go to the first.
+            shot("C:/P/VRChat_2026-10-29_21-04-11.532_1920x1080_wrld_4432ea9b-729c-46e3-8eaf-846aa0a37fdd.png", Some("wrld_a"), 5),
+            shot("C:/R/holiday.png", None, 5),
+        ];
+        let grouped = group_layers(shots);
+        assert_eq!(
+            names(&grouped),
+            vec![
+                ("VRChat_2026-10-29_21-04-11.533_1920x1080.png".to_string(), vec![]),
+                ("VRChat_2026-10-29_21-04-11.532_1920x1080.png".into(), vec!["Player".into(), "UI".into()]),
+                ("VRChat_2026-10-29_21-04-11.532_3840x2160_UI.png".into(), vec!["UI".into()]),
+                ("VRChat_2026-10-29_21-04-11.532_1920x1080_wrld_4432ea9b-729c-46e3-8eaf-846aa0a37fdd.png".into(), vec![]),
+                ("holiday.png".into(), vec![]),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_layer_keeps_its_transparency_when_shrunk() {
+        // Half transparent red beside clear black: shrunk premultiplied, the red stays red (not darkened by the black).
+        let rgba = [255, 0, 0, 255, 0, 0, 0, 0, 255, 0, 0, 255, 0, 0, 0, 0];
+        let (w, h, out) = downscale_premultiplied(&rgba, 2, 2, 1);
+        assert_eq!((w, h), (1, 1));
+        assert_eq!(out, [127, 0, 0, 127]);
+        let image = ColorImage::from_rgba_premultiplied([1, 1], &out);
+        assert_eq!(image.pixels[0].to_srgba_unmultiplied()[0], 255);
+    }
 
     #[test]
     fn session_sizes_are_kept_until_the_session_changes() {

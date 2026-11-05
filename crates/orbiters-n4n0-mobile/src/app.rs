@@ -15,9 +15,9 @@ use orbiters_core::osc::{
     self, Discovery, LanVrchat, Latest, Network, OscEvent, OscService, OscValue, Ports, Sighting, AVATAR_CHANGE, PARAMETERS_PREFIX, VRCHAT_OSC_PORT,
 };
 use orbiters_core::settings::Settings;
-use orbiters_n4n0::status::{OrbStatus, StateAction};
+use orbiters_n4n0::status::{N4n0Status, StateAction};
 use orbiters_n4n0::{Actions, Command, Files, Host, N4n0, NoticeKind, Osc, Scene, Shared};
-use orbiters_orb::text::Message;
+use orbiters_n4n0_core::text::Message;
 use std::collections::HashMap;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
@@ -98,7 +98,7 @@ pub struct Notice {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Snapshot {
     pub link: Link,
-    pub orb: OrbStatus,
+    pub n4n0: N4n0Status,
     pub account: AccountState,
     pub account_error: Option<String>,
     /// GoGoLoco's pose and the avatar's size follow to the next avatar (N4N0's carried parameters).
@@ -205,11 +205,13 @@ static CORE: OnceLock<Arc<Core>> = OnceLock::new();
 /// Force-silent N4N0 settings: no assistant, no AFK message on the panel, no wake word, no calls. The phone app has no
 /// microphone and N4N0 never speaks into VRChat's chatbox; these keep whatever an older file said from turning any on.
 pub fn silenced(mut s: Settings) -> Settings {
-    s.orb.assistant = false;
-    s.orb.wake_word = false;
-    s.orb.afk_message_enabled = false;
-    s.orb.calls = false;
-    s.orb.menu.wake_word = false;
+    s.n4n0.assistant = false;
+    s.n4n0.wake_word = false;
+    s.n4n0.afk_message_enabled = false;
+    s.n4n0.calls = false;
+    s.n4n0.menu.wake_word = false;
+    // No controllers on a phone: nothing to pass on to the avatar.
+    s.n4n0.controller_input = false;
     s.world_performance = false;
     s.walk_boost.enabled = false;
     s.osc.enabled = true;
@@ -232,7 +234,7 @@ impl Core {
     pub fn start(config: Config, phone: Arc<dyn Phone>, settings_file: PathBuf, prefs_file: PathBuf, files: Files, run: bool) -> Arc<Core> {
         let settings = silenced(Settings::load_from(&settings_file));
         let prefs = Prefs::load_from(&prefs_file);
-        let carry = !settings.orb.carry_parameters.is_empty();
+        let carry = !settings.n4n0.carry_parameters.is_empty();
         let core = Arc::new(Core {
             config,
             phone: phone.clone(),
@@ -330,7 +332,7 @@ impl Core {
                     self.notify("Connect to VRChat on the Quest first.", true);
                     return;
                 }
-                self.n4n0().command(Command::States { action });
+                self.n4n0().command(Command::States { action, avatar: None });
             }
             Action::QuestAddress(quest) => {
                 {
@@ -358,7 +360,7 @@ impl Core {
             }
             Action::SetCarry(on) => {
                 self.change_settings(|s| {
-                    s.orb.carry_parameters = if on { orbiters_core::settings::OrbSettings::default().carry_parameters } else { Vec::new() }
+                    s.n4n0.carry_parameters = if on { orbiters_core::settings::N4n0Settings::default().carry_parameters } else { Vec::new() }
                 });
                 self.update(|s| s.carry = on);
             }
@@ -486,7 +488,7 @@ impl Core {
             OscValue::Text(id) => Some(id),
             _ => None,
         });
-        let known = self.snapshot().orb.avatar_id;
+        let known = self.snapshot().n4n0.avatar_id;
         if let Some(id) = worn.filter(|id| known.as_ref() != Some(id)) {
             eprintln!("VRChat changed avatar meanwhile: {id}");
             // As when VRChat says so (`on_osc_events`): N4N0 reads what follows, then those values go.
@@ -936,7 +938,7 @@ impl Host for Bridge {
     fn update_settings(&self, change: &mut dyn FnMut(&mut Settings)) {
         self.with(|c| {
             c.change_settings(|s| change(s));
-            let carry = !c.settings.lock().unwrap().orb.carry_parameters.is_empty();
+            let carry = !c.settings.lock().unwrap().n4n0.carry_parameters.is_empty();
             c.update(|s| s.carry = carry);
         });
     }
@@ -951,8 +953,8 @@ impl Host for Bridge {
         .unwrap_or_default()
     }
 
-    fn publish(&self, status: OrbStatus) {
-        self.with(|c| c.update(|s| s.orb = status));
+    fn publish(&self, status: N4n0Status) {
+        self.with(|c| c.update(|s| s.n4n0 = status));
     }
 
     fn notify(&self, kind: NoticeKind, message: String) {
@@ -1042,18 +1044,18 @@ mod tests {
     fn n4n0_stays_silent_whatever_the_file_says() {
         let d = dir("silent");
         let mut loud = Settings::default();
-        loud.orb.assistant = true;
-        loud.orb.afk_message_enabled = true;
-        loud.orb.wake_word = true;
-        loud.orb.calls = true;
+        loud.n4n0.assistant = true;
+        loud.n4n0.afk_message_enabled = true;
+        loud.n4n0.wake_word = true;
+        loud.n4n0.calls = true;
         loud.save_to(&d.join("settings.json")).unwrap();
         let core = core_in(&d);
         let s = core.settings.lock().unwrap().clone();
-        assert!(!s.orb.assistant && !s.orb.afk_message_enabled && !s.orb.wake_word && !s.orb.calls);
-        assert!(s.orb.enabled, "N4N0's helpers (carried parameters, states) still run");
+        assert!(!s.n4n0.assistant && !s.n4n0.afk_message_enabled && !s.n4n0.wake_word && !s.n4n0.calls);
+        assert!(s.n4n0.enabled, "N4N0's helpers (carried parameters, states) still run");
         // N4N0 asking to change them cannot turn them back on.
-        Bridge(Arc::downgrade(&core)).update_settings(&mut |s| s.orb.assistant = true);
-        assert!(!core.settings.lock().unwrap().orb.assistant);
+        Bridge(Arc::downgrade(&core)).update_settings(&mut |s| s.n4n0.assistant = true);
+        assert!(!core.settings.lock().unwrap().n4n0.assistant);
         let _ = std::fs::remove_dir_all(d);
     }
 
@@ -1064,9 +1066,9 @@ mod tests {
         assert!(core.snapshot().carry, "GoGoLoco's pose and size follow by default");
         core.act_now(Action::SetCarry(false));
         assert!(!core.snapshot().carry);
-        assert!(Settings::load_from(&d.join("settings.json")).orb.carry_parameters.is_empty());
+        assert!(Settings::load_from(&d.join("settings.json")).n4n0.carry_parameters.is_empty());
         core.act_now(Action::SetCarry(true));
-        assert_eq!(Settings::load_from(&d.join("settings.json")).orb.carry_parameters, orbiters_core::settings::OrbSettings::default().carry_parameters);
+        assert_eq!(Settings::load_from(&d.join("settings.json")).n4n0.carry_parameters, orbiters_core::settings::N4n0Settings::default().carry_parameters);
         let quest = Ipv4Addr::new(192, 168, 1, 42);
         core.act_now(Action::QuestAddress(Some(quest)));
         assert_eq!(core.snapshot().quest_typed, Some(quest));
@@ -1082,7 +1084,7 @@ mod tests {
     fn states_wait_for_vrchat() {
         let d = dir("states");
         let core = core_in(&d);
-        core.act_now(Action::States(StateAction::Save { name: Some("Dance".into()) }));
+        core.act_now(Action::States(StateAction::Save { name: Some("Dance".into()), size: false, pose: false, default: false }));
         let notice = core.snapshot().notice.expect("told why nothing happened");
         assert!(notice.error && notice.text.contains("Connect"), "{notice:?}");
         let _ = std::fs::remove_dir_all(d);
@@ -1157,15 +1159,15 @@ mod tests {
         *core.osc.lock().unwrap() = Some(Running { service, key: (Ipv4Addr::LOCALHOST, Some(quest_ip)), interface: "lo".into() });
         core.update(|s| s.link.phase = Phase::Connected);
         core.n4n0().start();
-        wait_for("the avatar", || core.snapshot().orb.states.avatar_id.as_deref() == Some("avtr_test"));
+        wait_for("the avatar", || core.snapshot().n4n0.states.avatar_id.as_deref() == Some("avtr_test"));
 
-        core.act_now(Action::States(StateAction::Save { name: Some("Hoodie on".into()) }));
-        wait_for("the saved state", || core.snapshot().orb.states.states.iter().any(|s| s.name == "Hoodie on" && s.parameters == 2));
+        core.act_now(Action::States(StateAction::Save { name: Some("Hoodie on".into()), size: false, pose: false, default: false }));
+        wait_for("the saved state", || core.snapshot().n4n0.states.states.iter().any(|s| s.name == "Hoodie on" && s.parameters == 2));
         let file = std::fs::read_to_string(d.join("avatar-states.json")).unwrap();
         assert!(file.contains("Hoodie on") && file.contains("avtr_test"), "{file}");
-        let id = core.snapshot().orb.states.states[0].id.clone();
+        let id = core.snapshot().n4n0.states.states[0].id.clone();
         core.act_now(Action::States(StateAction::Default { id: Some(id.clone()) }));
-        wait_for("the default", || core.snapshot().orb.states.states[0].default);
+        wait_for("the default", || core.snapshot().n4n0.states.states[0].default);
 
         // The hoodie came off: applying puts it back on the Quest.
         *tree.lock().unwrap() = avatar_tree(false);
@@ -1402,10 +1404,10 @@ mod tests {
         let core = core_in(&d);
         let query = fake_query(Arc::new(Mutex::new(avatar_tree(true))));
         core.n4n0().start();
-        core.update(|s| s.orb.avatar_id = None);
+        core.update(|s| s.n4n0.avatar_id = None);
         core.catch_up_avatar(query);
         // `avatar_tree` wears avtr_test; N4N0's status says so once it heard of it, and the states follow.
-        wait_for("the switch", || core.snapshot().orb.avatar_id.as_deref() == Some("avtr_test"));
+        wait_for("the switch", || core.snapshot().n4n0.avatar_id.as_deref() == Some("avtr_test"));
         // Asked again: the same avatar, nothing to do (and nothing panics on an unreachable VRChat).
         core.catch_up_avatar(query);
         core.catch_up_avatar(SocketAddr::from((Ipv4Addr::LOCALHOST, 9)));

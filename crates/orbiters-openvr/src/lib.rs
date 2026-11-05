@@ -145,6 +145,8 @@ impl ControllerRole {
 pub mod prop {
     pub const TRACKING_SYSTEM_NAME: i32 = 1000;
     pub const MODEL_NUMBER: i32 = 1001;
+    /// The headset's: from a vsync to its picture lighting the displays.
+    pub const SECONDS_FROM_VSYNC_TO_PHOTONS: i32 = 2001;
     pub const DISPLAY_FREQUENCY: i32 = 2002;
     pub const SERIAL_NUMBER: i32 = 1002;
     pub const MANUFACTURER_NAME: i32 = 1005;
@@ -223,6 +225,14 @@ impl Default for Event {
 }
 
 impl Event {
+    /// A mouse event as SteamVR's laser sends one (`MOUSE_MOVE`, `MOUSE_BUTTON_DOWN`, `MOUSE_BUTTON_UP`,
+    /// `FOCUS_LEAVE`): `VREvent_Mouse_t` x, y (mouse scale units, origin bottom left) and button (1: left), for an
+    /// overlay this process points at with lasers of its own ([`Overlay::inject_event`]).
+    pub fn mouse_event(event_type: u32, x: f32, y: f32, button: u32) -> Self {
+        let data = [x.to_bits() as u64 | (y.to_bits() as u64) << 32, button as u64, 0, 0, 0, 0];
+        Self { event_type, device: 0, age_seconds: 0.0, data }
+    }
+
     /// `VREvent_Mouse_t`: x, y (overlay mouse scale units, origin bottom left), button (1 left, 2 right, 4 middle).
     pub fn mouse(&self) -> (f32, f32, u32) {
         let w = self.words();
@@ -233,6 +243,11 @@ impl Event {
     pub fn scroll(&self) -> (f32, f32) {
         let w = self.words();
         (f32::from_bits(w[0]), f32::from_bits(w[1]))
+    }
+
+    /// `VREvent_Chaperone_t`: the tracking universe before and after (`ChaperoneUniverseHasChanged`).
+    pub fn chaperone_universes(&self) -> (u64, u64) {
+        (self.data[0], self.data[1])
     }
 
     fn words(&self) -> [u32; 12] {
@@ -462,6 +477,38 @@ impl Client {
         unsafe { entry::<F>(self.system, 12)(universe as i32, 0.0, out.as_mut_ptr(), MAX_DEVICES as u32) }
     }
 
+    /// Poses of all devices as SteamVR predicts them `seconds` from now (when a picture made now lights the displays).
+    pub fn predicted_poses(&self, universe: Universe, seconds: f32, out: &mut [Pose; MAX_DEVICES]) {
+        type F = unsafe extern "system" fn(i32, f32, *mut Pose, u32);
+        // SAFETY: IVRSystem_026 entry 12 is GetDeviceToAbsoluteTrackingPose.
+        unsafe { entry::<F>(self.system, 12)(universe as i32, seconds, out.as_mut_ptr(), MAX_DEVICES as u32) }
+    }
+
+    /// Where `eye` sits in the headset's space (half the lens distance to its side, any canting).
+    pub fn eye_to_head(&self, eye: compositor::Eye) -> Matrix34 {
+        type F = unsafe extern "system" fn(i32) -> Matrix34;
+        // SAFETY: entry 5 is GetEyeToHeadTransform (HmdMatrix34_t returned by value).
+        unsafe { entry::<F>(self.system, 5)(eye as i32) }
+    }
+
+    /// `eye`'s field of view as the tangents of its sides (left, right, top, bottom; top is negative, y pointing down).
+    pub fn projection_raw(&self, eye: compositor::Eye) -> [f32; 4] {
+        type F = unsafe extern "system" fn(i32, *mut f32, *mut f32, *mut f32, *mut f32);
+        let mut t = [0f32; 4];
+        let [l, r, top, b] = &mut t;
+        // SAFETY: entry 2 is GetProjectionRaw; the four out parameters are valid.
+        unsafe { entry::<F>(self.system, 2)(eye as i32, l, r, top, b) };
+        t
+    }
+
+    /// Seconds since the headset's last vsync, when SteamVR knows it.
+    pub fn time_since_vsync(&self) -> Option<f32> {
+        type F = unsafe extern "system" fn(*mut f32, *mut u64) -> bool;
+        let (mut seconds, mut frame) = (0f32, 0u64);
+        // SAFETY: entry 6 is GetTimeSinceLastVsync; both out parameters are valid.
+        unsafe { entry::<F>(self.system, 6)(&mut seconds, &mut frame) }.then_some(seconds)
+    }
+
     pub fn device_class(&self, device: u32) -> DeviceClass {
         type F = unsafe extern "system" fn(u32) -> i32;
         // SAFETY: entry 20 is GetTrackedDeviceClass.
@@ -582,7 +629,7 @@ impl Client {
     // ------------------------------------------------------------------------------------------------ IVROverlay
 
     pub fn overlay(&self) -> Option<Overlay<'_>> {
-        self.overlay.map(|table| Overlay { table, _client: self })
+        self.overlay.map(|table| Overlay { table, _client: self, injected: Default::default() })
     }
 }
 
@@ -600,12 +647,17 @@ pub type OverlayHandle = u64;
 pub struct Overlay<'a> {
     table: *const usize,
     _client: &'a Client,
+    /// Events this process made for its own overlays (its own lasers' mouse), handed out by [`Overlay::poll_event`]
+    /// before SteamVR's.
+    injected: std::cell::RefCell<std::collections::VecDeque<(OverlayHandle, Event)>>,
 }
 
 /// `VROverlayFlags` used here (bit masks).
 pub mod overlay_flag {
     pub const NO_DASHBOARD_TAB: i32 = 1 << 3;
     pub const SEND_VR_DISCRETE_SCROLL_EVENTS: i32 = 1 << 6;
+    /// The texture's left half goes to the left eye, its right half to the right one.
+    pub const SIDE_BY_SIDE_PARALLEL: i32 = 1 << 10;
     /// SteamVR's laser works on the overlay whenever it is shown, dashboard open or not (a menu in the play space).
     pub const MAKE_OVERLAYS_INTERACTIVE_IF_VISIBLE: i32 = 1 << 16;
     pub const SEND_VR_SMOOTH_SCROLL_EVENTS: i32 = 1 << 17;
@@ -699,11 +751,24 @@ impl Overlay<'_> {
         overlay_result(unsafe { entry::<F>(self.table, 47)(timeout_ms) })
     }
 
+    /// The next event for `handle`: first those [`Overlay::inject_event`] queued for it, then SteamVR's.
     pub fn poll_event(&self, handle: OverlayHandle) -> Option<Event> {
+        {
+            let mut injected = self.injected.borrow_mut();
+            if let Some(i) = injected.iter().position(|(h, _)| *h == handle) {
+                return injected.remove(i).map(|(_, e)| e);
+            }
+        }
         type F = unsafe extern "system" fn(u64, *mut Event, u32) -> bool;
         let mut e = Event::default();
         // SAFETY: entry 48 is PollNextOverlayEvent.
         unsafe { entry::<F>(self.table, 48)(handle, &mut e, std::mem::size_of::<Event>() as u32) }.then_some(e)
+    }
+
+    /// Queues `event` for `handle`, as SteamVR's laser would send it: the overlays this process points at with its own
+    /// lasers (no SteamVR input method, so SteamVR never takes the controllers for them) read the same events.
+    pub fn inject_event(&self, handle: OverlayHandle, event: Event) {
+        self.injected.borrow_mut().push_back((handle, event));
     }
 
     /// Laser-pointer mouse input (`VROverlayInputMethod_Mouse`).
@@ -753,6 +818,14 @@ impl Overlay<'_> {
         type F = unsafe extern "system" fn(u64, f32) -> i32;
         // SAFETY: entry 16 is SetOverlayAlpha.
         overlay_result(unsafe { entry::<F>(self.table, 16)(handle, alpha) })
+    }
+
+    /// How wide a texel is against its height (1: square). The overlay's height is its width × the texture's height
+    /// over its width, divided by this: a picture of a fixed size stretched to any length (a laser's beam).
+    pub fn set_texel_aspect(&self, handle: OverlayHandle, aspect: f32) -> Result<(), i32> {
+        type F = unsafe extern "system" fn(u64, f32) -> i32;
+        // SAFETY: entry 18 is SetOverlayTexelAspect (openvr_capi.h: after SetOverlayAlpha 16, GetOverlayAlpha 17).
+        overlay_result(unsafe { entry::<F>(self.table, 18)(handle, aspect) })
     }
 
     /// Uploads RGBA pixels (top row first). SteamVR copies them; it flickers when called every frame.
@@ -828,6 +901,10 @@ mod tests {
         e.data[0] = (0.25f32.to_bits() as u64) | ((0.75f32.to_bits() as u64) << 32);
         e.data[1] = 1;
         assert_eq!(e.mouse(), (0.25, 0.75, 1));
+        // One made for an overlay this process points at reads back as SteamVR's would.
+        let made = Event::mouse_event(event::MOUSE_BUTTON_DOWN, 512.5, 3.0, 1);
+        assert_eq!((made.event_type, made.mouse()), (event::MOUSE_BUTTON_DOWN, (512.5, 3.0, 1)));
+        assert_eq!(made.data, Event { data: [(512.5f32.to_bits() as u64) | ((3.0f32.to_bits() as u64) << 32), 1, 0, 0, 0, 0], ..Default::default() }.data);
     }
 
     #[test]

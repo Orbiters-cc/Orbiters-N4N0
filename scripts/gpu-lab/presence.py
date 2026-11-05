@@ -35,7 +35,12 @@ SCENARIOS = {
     "splats-still": "splats-still",
     "scroll-full-screen": "scroll --size 2560x1440",
     "splats-full-screen": "splats --size 2560x1440",
+    # The window on the graphics card, the 3D view's splats on the integrated GPU (settings::ViewGpu).
+    "splats-view-integrated": "splats --view-gpu always",
+    "splats-view-integrated-full-screen": "splats --view-gpu always --size 2560x1440",
 }
+# Cases whose window is on the graphics card only.
+CARD_ONLY = {"splats-view-integrated", "splats-view-integrated-full-screen"}
 OVERLAYS = {
     "overlay-full": "--rate 45",
     "overlay-button": "--rate 45 --rect 400,300,640,360",
@@ -75,7 +80,7 @@ def main():
     os.makedirs(a.out, exist_ok=True)
     cases = []
     for c in a.cases.split(","):
-        cases += [(c, None)] if c in OVERLAYS else [(c, g) for g in GPUS]
+        cases += [(c, None)] if c in OVERLAYS else [(c, "graphics-card")] if c in CARD_ONLY else [(c, g) for g in GPUS]
     blocks = []
     rep = 0
     while rep < a.reps:

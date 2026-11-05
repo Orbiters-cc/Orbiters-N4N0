@@ -44,6 +44,10 @@ pub enum ToClient {
     Maps {
         mine: MapsMine,
     },
+    VrchatData {
+        id: String,
+        result: crate::controller::vrchat_data::Result,
+    },
     /// Come to the front.
     Show,
     /// Close (the app quits, or another window replaced this one).
@@ -71,7 +75,7 @@ pub enum ToService {
         settings: Box<Settings>,
     },
     /// Changes only these settings: a JSON object of the changed fields, a section as an object of its own changed
-    /// fields (`{"orb": {"wake_word": true}}`), merged into the service's settings as they are ([`Settings::patched`]).
+    /// fields (`{"n4n0": {"wake_word": true}}`), merged into the service's settings as they are ([`Settings::patched`]).
     /// A window's copy of the settings may lag the service's (the avatar's radial moved meanwhile): saved whole, it
     /// would put back what changed in between.
     PatchSettings {
@@ -106,6 +110,21 @@ pub enum ToService {
     ReopenSignIn,
     CancelSignIn,
     SignOut,
+    VrchatLogin {
+        command: crate::controller::vrchat_login::Command,
+    },
+    VrchatData {
+        id: String,
+        scope: crate::controller::vrchat_data::Scope,
+        request: crate::controller::vrchat_data::Request,
+    },
+    /// A new picture on VRChat for an avatar or world of the signed-in VRChat account, from a picture file
+    /// (`Controller::vrchat_picture`; its progress in the snapshot).
+    VrchatPicture {
+        scope: crate::controller::vrchat_data::Scope,
+        id: String,
+        path: PathBuf,
+    },
     /// Shares pictures of a world on the Map explorer.
     UploadPictures {
         world_id: String,
@@ -120,13 +139,20 @@ pub enum ToService {
     },
     /// Asks what this member added to the Map explorer (answered with `ToClient::Maps`).
     Maps,
+    CaptureShare {
+        request: Box<crate::controller::shares::Request>,
+    },
+    /// Share to … opened on a 3D capture not uploaded yet: its upload files are made while friends are chosen.
+    PrepareShare {
+        session: PathBuf,
+    },
     /// A T-pose calibration taken in the overlay (`time_ns` is a shared-clock reading).
     Calibrated {
         calibration: Box<Calibration>,
     },
     /// N4N0: a question, the Talk button, the panel, saved videos.
-    Orb {
-        command: OrbCommand,
+    N4n0 {
+        command: N4n0Command,
     },
     /// Make VRChat find the OSC service again (it sends avatar parameters only to services it found).
     OscReconnect,
@@ -137,6 +163,10 @@ pub enum ToService {
     /// Someone put the headset on or took it off (SteamVR's activity level, read by the overlay).
     Headset {
         in_use: bool,
+    },
+    /// What each of SteamVR's device indices is (read by the overlay), for tracking smoothing's strengths.
+    SteamVrDevices {
+        kinds: Vec<crate::tracking::DeviceKind>,
     },
     /// The overlay changed the walk boost's strength (also sent to the avatar's `N4N0/WalkBoost`).
     WalkBoost {
@@ -162,7 +192,7 @@ pub enum UpdateAction {
 }
 
 /// What the window and the overlay ask of N4N0 (`orbiters_n4n0::Command`, the phone app's too).
-pub use orbiters_n4n0::Command as OrbCommand;
+pub use orbiters_n4n0::Command as N4n0Command;
 
 /// Longest Hello a client may send, and how long it has to send it. Any local process can connect: before it proves
 /// it was started by the service, it must not make the service read without end.
@@ -297,6 +327,7 @@ pub struct Client {
     library: AtomicU64,
     worker_log: Mutex<Option<Vec<String>>>,
     maps: Mutex<Option<MapsMine>>,
+    vrchat_data: Mutex<std::collections::HashMap<String, std::sync::mpsc::Sender<crate::controller::vrchat_data::Result>>>,
     show: AtomicBool,
     close: AtomicBool,
     connected: AtomicBool,
@@ -330,6 +361,7 @@ impl Client {
             library: AtomicU64::new(0),
             worker_log: Mutex::new(None),
             maps: Mutex::new(None),
+            vrchat_data: Mutex::default(),
             show: AtomicBool::new(false),
             close: AtomicBool::new(false),
             connected: AtomicBool::new(true),
@@ -348,6 +380,11 @@ impl Client {
                     ToClient::Library { version } => c.library.store(version, Ordering::Relaxed),
                     ToClient::WorkerLog { lines } => *c.worker_log.lock().unwrap() = Some(lines),
                     ToClient::Maps { mine } => *c.maps.lock().unwrap() = Some(mine),
+                    ToClient::VrchatData { id, result } => {
+                        if let Some(tx) = c.vrchat_data.lock().unwrap().remove(&id) {
+                            let _ = tx.send(result);
+                        }
+                    }
                     ToClient::Show => c.show.store(true, Ordering::Relaxed),
                     ToClient::Close => c.close.store(true, Ordering::Relaxed),
                 }
@@ -355,6 +392,7 @@ impl Client {
             }
             // The service is gone: close too.
             c.connected.store(false, Ordering::Relaxed);
+            c.vrchat_data.lock().unwrap().clear();
             c.close.store(true, Ordering::Relaxed);
             c.repaint(false);
         })?;
@@ -417,6 +455,20 @@ impl Client {
         self.maps.lock().unwrap().clone()
     }
 
+    pub fn vrchat_data(
+        &self,
+        scope: crate::controller::vrchat_data::Scope,
+        request: crate::controller::vrchat_data::Request,
+    ) -> crate::controller::vrchat_data::Result {
+        let id = uuid::Uuid::new_v4().to_string();
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.vrchat_data.lock().unwrap().insert(id.clone(), tx);
+        self.send(&ToService::VrchatData { id: id.clone(), scope, request });
+        let result = rx.recv_timeout(Duration::from_secs(120)).unwrap_or_else(|_| Err("VRChat data request timed out. Please try again.".into()));
+        self.vrchat_data.lock().unwrap().remove(&id);
+        result
+    }
+
     pub fn take_show(&self) -> bool {
         self.show.swap(false, Ordering::Relaxed)
     }
@@ -431,6 +483,49 @@ mod tests {
     use super::*;
     use crate::controller::NoticeKind;
     use std::net::TcpListener;
+
+    #[test]
+    fn vrchat_data_replies_are_correlated_and_pending_requests_are_removed() {
+        use crate::controller::vrchat_data::{Request, Response, Scope};
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let endpoint = Endpoint { port: listener.local_addr().unwrap().port(), token: "data-test".into() };
+        let snapshot = Snapshot::new(Settings::default());
+        let scope = Scope::of(&snapshot);
+        let server = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut writer = stream;
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            write_line(&mut writer, &ToClient::Snapshot { snapshot: Box::new(snapshot) }).unwrap();
+            let mut replies = Vec::new();
+            for _ in 0..2 {
+                line.clear();
+                reader.read_line(&mut line).unwrap();
+                match serde_json::from_str::<ToService>(&line).unwrap() {
+                    ToService::VrchatData { id, request, .. } => {
+                        let result = match request {
+                            Request::Image { .. } => Ok(Response::Image(vec![1, 2, 3])),
+                            _ => Err("rate limited".into()),
+                        };
+                        replies.push(ToClient::VrchatData { id, result });
+                    }
+                    other => panic!("{other:?}"),
+                }
+            }
+            for reply in replies.into_iter().rev() {
+                write_line(&mut writer, &reply).unwrap();
+            }
+        });
+        let client = Client::connect(&endpoint, Role::Window).unwrap();
+        let c = client.clone();
+        let s = scope.clone();
+        let image = std::thread::spawn(move || c.vrchat_data(s, Request::Image { url: "https://assets.vrchat.com/image".into() }));
+        assert!(matches!(client.vrchat_data(scope, Request::Friends), Err(e) if e == "rate limited"));
+        assert!(matches!(image.join().unwrap(), Ok(Response::Image(bytes)) if bytes == [1, 2, 3]));
+        server.join().unwrap();
+        assert!(client.vrchat_data.lock().unwrap().is_empty());
+    }
 
     #[test]
     fn link_carries_snapshots_notices_and_commands() {

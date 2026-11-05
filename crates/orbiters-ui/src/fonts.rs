@@ -9,7 +9,7 @@ use egui::epaint::text::{Blob, FontTweak, VariationCoords};
 use egui::{FallbackRequest, FontData, FontDefinitions, FontFamily, FontInsert, FontPriority, InsertFontFamily};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 /// Phosphor Icons (MIT), regular and fill.
@@ -240,6 +240,7 @@ fn system_file(name: &str) -> Option<Blob> {
 /// Which CJK font comes first for kana and Chinese characters: the one of this computer's language. Elsewhere the
 /// Simplified Chinese font, which also has kana: a Japanese or Chinese name then reads in one font, not two.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
 enum Cjk {
     Japanese,
     Simplified,
@@ -263,6 +264,34 @@ fn cjk_for_locale(locale: &str) -> Cjk {
 fn cjk() -> Cjk {
     static CJK: OnceLock<Cjk> = OnceLock::new();
     *CJK.get_or_init(|| cjk_for_locale(&user_locale()))
+}
+
+/// The CJK font a text's language asked for over the locale's ([`prefer_language`]): 0 none, else 1 + the [`Cjk`].
+static PREFERRED: AtomicU8 = AtomicU8::new(0);
+
+/// Texts in `language` (a BCP 47 tag: `ja`, `ko`, `zh-TW`) draw kana and Chinese characters in that language's font,
+/// whatever this computer's locale: N4N0's menu in Japanese on a French computer gets Yu Gothic (or Meiryo), not
+/// Microsoft YaHei, whose kanji are Chinese forms. Any other language goes back to the locale's choice. Letters a
+/// context already drew keep the face it found for them; call this before drawing.
+pub fn prefer_language(language: &str) {
+    PREFERRED.store(language_cjk(language).map_or(0, |c| 1 + c as u8), Ordering::Relaxed);
+}
+
+/// The CJK font a language's texts want (none for other languages).
+fn language_cjk(language: &str) -> Option<Cjk> {
+    let l = language.to_ascii_lowercase();
+    (l.starts_with("ja") || l.starts_with("ko") || l.starts_with("zh")).then(|| cjk_for_locale(&l))
+}
+
+/// The CJK font to try first now: the one a language asked for, else the locale's.
+fn preferred_cjk(locale: Cjk) -> Cjk {
+    match PREFERRED.load(Ordering::Relaxed) {
+        1 => Cjk::Japanese,
+        2 => Cjk::Simplified,
+        3 => Cjk::Traditional,
+        4 => Cjk::Korean,
+        _ => locale,
+    }
 }
 
 /// The user's locale name ("ja-JP").
@@ -356,7 +385,12 @@ type Weights = [Face; 3];
 mod table {
     use super::Weights;
     // The UI cuts of the collections (Yu Gothic UI, Microsoft YaHei UI, Microsoft JhengHei UI), then older fonts.
-    pub const JAPANESE: &[Weights] = &[[("YuGothM.ttc", 1), ("YuGothB.ttc", 2), ("YuGothB.ttc", 1)], [("msgothic.ttc", 1); 3]];
+    pub const JAPANESE: &[Weights] = &[
+        [("YuGothM.ttc", 1), ("YuGothB.ttc", 2), ("YuGothB.ttc", 1)],
+        // Meiryo UI, where Windows' optional Japanese fonts are installed.
+        [("meiryo.ttc", 2), ("meiryob.ttc", 2), ("meiryob.ttc", 2)],
+        [("msgothic.ttc", 1); 3],
+    ];
     pub const SIMPLIFIED: &[Weights] = &[[("msyh.ttc", 1), ("msyhbd.ttc", 1), ("msyhbd.ttc", 1)], [("simsun.ttc", 0); 3]];
     pub const TRADITIONAL: &[Weights] = &[[("msjh.ttc", 1), ("msjhbd.ttc", 1), ("msjhbd.ttc", 1)], [("mingliu.ttc", 0); 3]];
     pub const KOREAN: &[Weights] = &[[("malgun.ttf", 0), ("malgunbd.ttf", 0), ("malgunbd.ttf", 0)], [("gulim.ttc", 0); 3]];
@@ -466,7 +500,7 @@ impl SystemFallback {
             700 => 2,
             _ => 0,
         };
-        for family in candidates(script(c), self.cjk) {
+        for family in candidates(script(c), preferred_cjk(self.cjk)) {
             for weights in family {
                 // A missing bold file falls back to the regular one.
                 let mut tries = vec![weights[column]];
@@ -541,6 +575,20 @@ mod tests {
         ] {
             assert_eq!(cjk_for_locale(locale), cjk, "{locale}");
         }
+    }
+
+    #[test]
+    fn a_language_puts_its_cjk_font_first() {
+        assert_eq!(language_cjk("ja"), Some(Cjk::Japanese));
+        assert_eq!(language_cjk("zh-TW"), Some(Cjk::Traditional));
+        assert_eq!(language_cjk("zh"), Some(Cjk::Simplified));
+        assert_eq!(language_cjk("ko-KR"), Some(Cjk::Korean));
+        assert_eq!(language_cjk("fr"), None);
+        // Japanese only: the other tests here look for faces in Japanese or the locale's order.
+        prefer_language("ja");
+        assert_eq!(preferred_cjk(Cjk::Simplified), Cjk::Japanese);
+        prefer_language("en");
+        assert_eq!(preferred_cjk(Cjk::Simplified), Cjk::Simplified);
     }
 
     #[test]

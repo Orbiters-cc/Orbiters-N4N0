@@ -23,6 +23,33 @@ fn slot10(s0: vec4<f32>, s1: vec2<f32>, s2: vec4<f32>, k: u32) -> f32 {
 // One past the last entry any pixel of the tile blended (backward starts there).
 var<workgroup> tile_last: atomic<u32>;
 
+// A pixel's loss gradients as they enter α (dc, dz) and its share of the colour and depth slots (g2), with the birth
+// statistics a step may record in them (common.wgsl stats_mode): on a colour step d_pixel.w is the pixel's colour error
+// (g2.w sums error × α·T, no depth gradient); on a depth step d_pixel.xy are the measured depth and samples at the pixel
+// (g2.x sums α·T × the entry's relative distance from it, g2.y α·T, no colour gradient). Without them, as ever.
+struct StatGrads {
+    dc: vec3<f32>,
+    dz: f32,
+    g2: vec4<f32>,
+}
+
+fn stat_grads(dp: vec4<f32>, w: f32, depth: f32) -> StatGrads {
+    var out: StatGrads;
+    out.dc = dp.xyz;
+    out.dz = dp.w;
+    out.g2 = dp * w;
+    let mode = stats_mode();
+    if (mode == STATS_COLOR) {
+        out.dz = 0.0;
+    } else if (mode == STATS_DEPTH) {
+        out.dc = vec3<f32>(0.0);
+        let measured = dp.x / max(dp.y, 1.0);
+        let sampled = dp.y > 0.0;
+        out.g2 = vec4<f32>(select(0.0, w * abs(depth - measured) / max(measured, 1e-6), sampled), select(0.0, w, sampled), 0.0, dp.w * w);
+    }
+    return out;
+}
+
 struct Sum10 {
     total: f32,
     slot: u32,
@@ -134,8 +161,9 @@ fn backward(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_ind
             if (hit) {
                 let tb = t / (1.0 - alpha);
                 let w = alpha * tb;
-                g2 = dp * w;
-                let d_alpha = dot(dp.xyz, col - acc_c) * tb + dp.w * (bb.z - acc_d) * tb;
+                let st = stat_grads(dp, w, bb.z);
+                g2 = st.g2;
+                let d_alpha = dot(st.dc, col - acc_c) * tb + st.dz * (bb.z - acc_d) * tb;
                 acc_c = alpha * col + (1.0 - alpha) * acc_c;
                 acc_d = alpha * bb.z + (1.0 - alpha) * acc_d;
                 t = tb;

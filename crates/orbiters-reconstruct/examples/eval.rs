@@ -56,6 +56,12 @@ fn main() -> anyhow::Result<()> {
     let g = ply::read(&splats)?;
     let mut gpu = gpu::Gpu::new()?;
     gpu.upload(&g);
+    // The sky map beside the PLY (orbiters_reconstruct::sky::SkyMap), drawn behind the splats as every viewer does.
+    let map = splats.with_file_name(orbiters_core::reconstruction::SKY_FILE);
+    if map.is_file() {
+        let sky = orbiters_reconstruct::sky::SkyMap::read(&map)?;
+        gpu.set_sky(Some((sky.width, &sky.rgb)))?;
+    }
     gpu.set_mask(data.width, data.height, &data.mask)?;
     if let Some(dir) = &out {
         std::fs::create_dir_all(dir)?;
@@ -70,7 +76,7 @@ fn main() -> anyhow::Result<()> {
         .or_else(|| reconstruction::read_report(&session));
     let reported = report.map(|r| r.held_out_keyframes).unwrap_or_default();
     let held: Vec<usize> = if reported.is_empty() {
-        train::held_out(data.views.len(), train::Settings::default().hold_out_every)
+        train::held_out_views(data, train::Settings::default().hold_out_every)
     } else {
         let found: Vec<usize> = reported.iter().filter_map(|&k| data.views.iter().position(|v| v.keyframe == k)).collect();
         if found.len() < reported.len() {

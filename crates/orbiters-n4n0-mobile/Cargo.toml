@@ -8,7 +8,7 @@ publish.workspace = true
 [dependencies]
 orbiters-core = { workspace = true }
 orbiters-n4n0 = { workspace = true }
-orbiters-orb = { workspace = true }
+orbiters-n4n0-core = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 anyhow = { workspace = true }

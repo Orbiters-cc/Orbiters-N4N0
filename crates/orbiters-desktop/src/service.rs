@@ -4,7 +4,7 @@
 //! overlay process runs while SteamVR does.
 
 use crate::controller::{self, Controller, NoticeKind};
-use crate::ipc::{self, Endpoint, OrbCommand, Role, ToClient, ToService};
+use crate::ipc::{self, Endpoint, N4n0Command, Role, ToClient, ToService};
 use crate::mailbox::Mailbox;
 use crate::single;
 use orbiters_core::settings::Settings;
@@ -46,6 +46,8 @@ pub struct Service {
     overlay: Mutex<Option<(Child, Instant, Option<u32>)>>,
     /// The SteamVR (its `vrserver` process id, 0 unknown) whose start of the app was looked at ([`Service::keep_steamvr_start`]).
     steamvr_start_seen: Mutex<Option<u32>>,
+    /// Tracking smoothing's driver, kept in step with the settings ([`Service::keep_tracking`]).
+    smoothing: Mutex<crate::tracking::Smoothing>,
     quitting: AtomicBool,
     #[cfg(windows)]
     main_thread: u32,
@@ -106,6 +108,45 @@ impl Service {
         *self.steamvr_start_seen.lock().unwrap() = Some(session);
         if let Some(startup) = crate::startup::reconcile(&client, &snap.settings.startup) {
             self.ctl.update_settings(|s| s.startup = startup);
+        }
+    }
+
+    /// Tracking smoothing as the settings say: the driver registered for SteamVR, on or off, each device's strength;
+    /// what it does now goes to N4N0's Tracking page. Run every keeper turn, at once when the settings change
+    /// (`follow_tracking`) and when the overlay says which device is which.
+    fn keep_tracking(&self) {
+        if self.quitting.load(Ordering::Relaxed) {
+            return;
+        }
+        let snap = self.ctl.view();
+        let world = crate::tracking::World {
+            settings: &snap.settings.tracking,
+            steamvr: snap.steamvr.running,
+            steamvr_pid: snap.steamvr.pid,
+            overlay: snap.steamvr.overlay,
+        };
+        let note = self.smoothing.lock().unwrap().keep(&world);
+        self.ctl.set_tracking_note(note);
+    }
+
+    /// Smoothing's settings reach the driver the moment they change (it reads them on SteamVR's next frame), not at
+    /// the keeper's next turn: every published state is looked at, the tracking settings compared.
+    fn follow_tracking(self: &Arc<Self>) {
+        let mailbox = Mailbox::new(false);
+        self.ctl.subscribe(mailbox.clone());
+        let mut seen = None;
+        while let Some((_, snapshot)) = mailbox.take() {
+            if self.quitting.load(Ordering::Relaxed) {
+                return;
+            }
+            let Some(snapshot) = snapshot else { continue };
+            if seen.as_ref() != Some(&snapshot.settings.tracking) {
+                let first = seen.is_none();
+                seen = Some(snapshot.settings.tracking.clone());
+                if !first {
+                    self.keep_tracking();
+                }
+            }
         }
     }
 
@@ -228,6 +269,20 @@ impl Service {
             ToService::ReopenSignIn => report(ctl.reopen_sign_in()),
             ToService::CancelSignIn => ctl.cancel_sign_in(),
             ToService::SignOut => report(ctl.sign_out()),
+            ToService::VrchatLogin { command } => ctl.vrchat_command(command),
+            ToService::VrchatData { id, scope, request } => {
+                let mailbox = self.links.lock().unwrap().iter().find(|l| l.id == link).map(|l| l.mailbox.clone());
+                if let Some(mailbox) = mailbox {
+                    let ctl = ctl.clone();
+                    std::thread::spawn(move || {
+                        let result = ctl.vrchat_data(scope, request);
+                        mailbox.post(ToClient::VrchatData { id, result });
+                    });
+                }
+            }
+            // Only the window picks picture files; the upload runs on a thread of its own.
+            ToService::VrchatPicture { scope, id, path } if role == Role::Window => ctl.vrchat_picture(scope, id, path),
+            ToService::VrchatPicture { .. } => {}
             ToService::StopReconstruction => {
                 ctl.stop_reconstruction();
             }
@@ -240,14 +295,20 @@ impl Service {
             }
             ToService::UploadPictures { world_id, world_name, paths } => report(ctl.upload_pictures(world_id, world_name, paths)),
             ToService::UploadPreview { world_id, world_name, session } => report(ctl.upload_preview(world_id, world_name, session)),
+            ToService::CaptureShare { request } => ctl.capture_share(*request),
+            ToService::PrepareShare { session } => ctl.prepare_share(session),
             ToService::Maps => ctl.refresh_maps(),
             ToService::Calibrated { calibration } => ctl.calibrated(*calibration),
             ToService::Frames { chunk } => ctl.frames(chunk),
             ToService::Headset { in_use } => ctl.set_headset(Some(in_use)),
+            ToService::SteamVrDevices { kinds } => {
+                self.smoothing.lock().unwrap().set_kinds(kinds);
+                self.keep_tracking();
+            }
             ToService::WalkBoost { strength } => ctl.set_walk_boost(strength, false),
             // Which Talk button is held matters: the service lets it go when that window or overlay goes away.
-            ToService::Orb { command: OrbCommand::Talk { down } } => ctl.orb_app_talk(down, role == Role::Overlay),
-            ToService::Orb { command } => ctl.orb_command(command),
+            ToService::N4n0 { command: N4n0Command::Talk { down } } => ctl.n4n0_app_talk(down, role == Role::Overlay),
+            ToService::N4n0 { command } => ctl.n4n0_command(command),
             ToService::OscReconnect => ctl.osc_rediscover(),
             ToService::Updates { action } => ctl.update_action(action),
             ToService::Quit => self.quit(),
@@ -311,7 +372,7 @@ impl Service {
         }
         if !still_there {
             // What it held (a Talk button, the overlay's open menu) ends with it.
-            self.ctl.orb_link_closed(role == Role::Overlay);
+            self.ctl.n4n0_link_closed(role == Role::Overlay);
         }
         // Without a tray (Linux for now) nothing would bring the window back: closing it quits.
         if role == Role::Window && cfg!(not(windows)) {
@@ -391,6 +452,7 @@ pub fn run(hidden: bool) -> anyhow::Result<()> {
         window: Mutex::new(None),
         overlay: Mutex::new(None),
         steamvr_start_seen: Mutex::new(None),
+        smoothing: Mutex::new(Default::default()),
         quitting: AtomicBool::new(false),
         #[cfg(windows)]
         main_thread: unsafe { windows::Win32::System::Threading::GetCurrentThreadId() },
@@ -430,8 +492,16 @@ pub fn run(hidden: bool) -> anyhow::Result<()> {
     std::thread::Builder::new().name("overlay-keeper".into()).spawn(move || loop {
         svc.keep_overlay();
         svc.keep_steamvr_start();
+        svc.keep_tracking();
         std::thread::sleep(Duration::from_secs(2));
     })?;
+    let svc = service.clone();
+    std::thread::Builder::new().name("smoothing".into()).spawn(move || svc.follow_tracking())?;
+    // Windows' default sound devices while SteamVR runs (Settings, "When SteamVR starts").
+    let ctl = service.ctl.clone();
+    std::thread::Builder::new().name("vr-audio".into()).spawn(move || controller::vr_audio::run(ctl))?;
+    // In desktop mode, a recording's coverage in a corner of the screen (in VR the SteamVR overlay shows it).
+    crate::coverage_window::start(service.ctl.clone());
 
     #[cfg(windows)]
     tray_loop(&service)?;
@@ -527,9 +597,9 @@ mod tests {
 
     #[test]
     fn a_settings_patch_reaches_the_service_as_a_patch() {
-        let line = r#"{"type":"patch_settings","patch":{"orb":{"wake_word":true}}}"#;
+        let line = r#"{"type":"patch_settings","patch":{"n4n0":{"wake_word":true}}}"#;
         match serde_json::from_str::<ToService>(line).unwrap() {
-            ToService::PatchSettings { patch } => assert_eq!(patch["orb"]["wake_word"], true),
+            ToService::PatchSettings { patch } => assert_eq!(patch["n4n0"]["wake_word"], true),
             other => panic!("{other:?}"),
         }
     }

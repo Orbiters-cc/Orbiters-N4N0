@@ -43,9 +43,10 @@ impl Handles {
         Self { device: rs.device.clone(), queue: rs.queue.clone(), textures: rs.renderer.clone(), adapter: Adapter::of(&rs.adapter, &rs.available_adapters) }
     }
 
-    /// An offscreen renderer's (screenshots), shown as if the computer had both kinds of GPU.
+    /// An offscreen renderer's (screenshots), shown as a window on the graphics card of a computer with both kinds of
+    /// GPU, as most draw (Settings then shows every GPU choice).
     pub fn of_offscreen(gpu: &orbiters_ui::offscreen::Offscreen) -> Self {
-        let adapter = Adapter { choice: true, ..Adapter::of(gpu.adapter(), &[]) };
+        let adapter = Adapter { choice: true, integrated: false, ..Adapter::of(gpu.adapter(), &[]) };
         Self { device: gpu.device().clone(), queue: gpu.queue().clone(), textures: gpu.textures().clone(), adapter }
     }
 }
@@ -101,6 +102,25 @@ pub fn options(gpu: WindowGpu) -> WgpuConfiguration {
         }
     });
     WgpuConfiguration { wgpu_setup: setup.into(), ..Default::default() }
+}
+
+/// A device on the processor's integrated GPU for the 3D view's splats while the window draws on the graphics card
+/// (`settings::ViewGpu`), with the window's limits and small memory blocks.
+pub fn integrated_device() -> anyhow::Result<(wgpu::Device, wgpu::Queue)> {
+    use anyhow::Context as _;
+    let backends = wgpu::Backends::from_env().unwrap_or(if cfg!(windows) { wgpu::Backends::DX12 } else { wgpu::Backends::VULKAN });
+    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor { backends, ..wgpu::InstanceDescriptor::new_without_display_handle() });
+    use orbiters_reconstruct::gpu::block_on;
+    let adapter = block_on(instance.enumerate_adapters(backends))
+        .into_iter()
+        .find(|a| a.get_info().device_type == wgpu::DeviceType::IntegratedGpu)
+        .context("no integrated GPU")?;
+    let gpu = adapter.limits();
+    let base = wgpu::Limits { max_buffer_size: gpu.max_buffer_size, max_storage_buffer_binding_size: gpu.max_storage_buffer_binding_size, ..wgpu::Limits::default() };
+    let desc = wgpu::DeviceDescriptor { label: Some("orbiters 3D view"), required_limits: limits(base), memory_hints: wgpu::MemoryHints::MemoryUsage, ..Default::default() };
+    let (device, queue) = block_on(adapter.request_device(&desc)).map_err(|e| anyhow::anyhow!("{}: {e}", adapter.get_info().name))?;
+    report_errors(&device);
+    Ok((device, queue))
 }
 
 /// Limits for egui: big enough textures, and a D3D12 view heap for thousands of bind groups instead of the default

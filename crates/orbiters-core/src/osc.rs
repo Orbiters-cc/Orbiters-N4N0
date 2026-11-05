@@ -87,9 +87,17 @@ pub enum OscEvent {
 
 pub const PARAMETERS_PREFIX: &str = "/avatar/parameters/";
 pub const AVATAR_CHANGE: &str = "/avatar/change";
-/// The capture kit's depth-frames toggle (Mixer's `CaptureKit.DepthParameter`); its record toggle is the record
-/// parameter of the settings.
-pub const DEPTH_FRAMES_PARAMETER: &str = "OrbitersDepthFrames";
+/// The avatar's name as set in its SDK (newer VRChat versions): in VRChat's OSCQuery tree, which carries it whole in
+/// UTF-8 (its UDP messages may not yet), read once the avatar changed.
+pub const AVATAR_NAME: &str = "/avatar/name";
+/// N4N0's capture kit (contracts' `n4n0::params::CAPTURE_*`, `Docs/rig-frames.md`): its record toggle (N4N0 › Record
+/// in the Action Menu, or the app while it records), whose changes start and stop recording, and its depth-frames
+/// toggle. [`CAPTURE_PARAMETERS`] are all of N4N0's capture parameters, the camera rig's included: the app's own.
+pub const RECORD_PARAMETER: &str = crate::contracts::n4n0::params::CAPTURE_RECORD;
+pub const DEPTH_FRAMES_PARAMETER: &str = crate::contracts::n4n0::params::CAPTURE_DEPTH;
+pub const CAPTURE_PARAMETERS: [&str; 9] = crate::contracts::n4n0::params::CAPTURE;
+/// Flipped while recording without the wearer: an avatar uploaded before it could be built has no such parameter.
+pub const HIDE_SELF_PARAMETER: &str = crate::contracts::n4n0::params::CAPTURE_HIDE_SELF;
 
 /// What VRChat sent last for each address (all of a message's arguments, and when, on the shared clock): a session's
 /// initial values, N4N0's carried parameters, the camera's mode. An avatar change forgets the last avatar's parameters

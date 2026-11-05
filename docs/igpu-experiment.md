@@ -14,6 +14,27 @@ runs. It now draws one frame per change from the service instead of two, and at 
 news while it is behind VRChat (0.5 % from the integrated GPU, nothing measurable from the graphics card, where 30 a
 second took 1.7 % and 0.6 %).
 
+## Follow-up: only the 3D view on the integrated GPU (0.3.1)
+
+The window stays on the graphics card and the 3D view's splats draw on the UHD 770 in a thread of their own
+(`pages/splat_worker.rs`): each frame is read back and uploaded to a texture on the RTX 4080, which the window shows
+(1.6 MB a frame while the camera moves, 0.4 Mpx at most there). Same blocks as below (`presence.py --cases
+splats,splats-view-integrated`, 3 repetitions, 2026-10-25), orbiting New Generation (970k splats) in the default
+1280×820 window:
+
+| Case | Window frames a second | 3D view frames a second | Change of the load's frames |
+|---|---|---|---|
+| Window and 3D view on the RTX 4080 | 60 | 60 | −12.1 % (−12.1, −11.3, −12.3) |
+| Window and 3D view on the UHD 770 | 27 | 27 | −1.6 % (−1.6, −1.1, −2.1) |
+| Window on the RTX 4080, 3D view on the UHD 770 | 60 | 28 | −2.2 % (−2.2, −2.5, −2.0) |
+
+The 3D view on the integrated GPU costs the game about what the whole window there does, and the window around it
+stays at 60 frames a second (the bench orbits every frame, so the window draws 60 a second: part of the 2.2 % is
+the interface's own frames). Since 0.3.1 Settings, Interface, *3D view on the integrated GPU* chooses *While VRChat
+runs* (default: without a game there is nothing to spare the graphics card for, and the RTX 4080 draws 60 frames a
+second of it), *Always* or *Never*; the view moves between the GPUs while open when VRChat starts or closes. The
+GPU bench takes `--view-gpu always`.
+
 ## Machine
 
 Intel Core i7-12700K with UHD Graphics 770 (no monitor on it), NVIDIA RTX 4080 16 GB driving the 2560×1440 monitor

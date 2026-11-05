@@ -34,7 +34,8 @@ pub fn control(ctx: &egui::Context, label: &str) -> Option<(Rect, bool)> {
     drawn.0.get(label).filter(|(_, _, p)| p + 1 >= pass).map(|(r, enabled, _)| (*r, *enabled))
 }
 
-pub(crate) fn note_control(ctx: &egui::Context, label: &str, rect: Rect, enabled: bool) {
+/// Notes where a control labelled `label` was drawn, for [`control`] (an automated run only).
+pub fn note_control(ctx: &egui::Context, label: &str, rect: Rect, enabled: bool) {
     if !WATCH.load(Ordering::Relaxed) {
         return;
     }
@@ -44,13 +45,32 @@ pub(crate) fn note_control(ctx: &egui::Context, label: &str, rect: Rect, enabled
     });
 }
 
-/// Paints a Phosphor glyph centred on `center`.
+/// Paints a Phosphor glyph centred on `center` (or N4N0's face, [`icons::N4N0`], its mark, [`icons::N4N0_MARK`], or
+/// Blender's logo, [`icons::BLENDER`]).
 pub fn icon(painter: &Painter, center: Pos2, glyph: &str, size: f32, color: Color32) {
+    if glyph == icons::N4N0 {
+        return crate::n4n0_face::icon(painter, center, size, color);
+    }
+    if glyph == icons::N4N0_MARK {
+        return crate::n4n0_logo::glyph(painter, center, size, color);
+    }
+    if glyph == icons::BLENDER {
+        return crate::blender_logo::glyph(painter, center, size, color);
+    }
     painter.text(center, Align2::CENTER_CENTER, glyph, FontId::new(size, fonts::icons()), color);
 }
 
-/// Paints the filled variant of a Phosphor glyph.
+/// Paints the filled variant of a Phosphor glyph (N4N0's face and mark are filled already).
 pub fn icon_fill(painter: &Painter, center: Pos2, glyph: &str, size: f32, color: Color32) {
+    if glyph == icons::N4N0 {
+        return crate::n4n0_face::icon(painter, center, size, color);
+    }
+    if glyph == icons::N4N0_MARK {
+        return crate::n4n0_logo::glyph(painter, center, size, color);
+    }
+    if glyph == icons::BLENDER {
+        return crate::blender_logo::glyph(painter, center, size, color);
+    }
     painter.text(center, Align2::CENTER_CENTER, glyph, FontId::new(size, fonts::icons_fill()), color);
 }
 
@@ -81,6 +101,23 @@ pub fn pressed(resp: &Response) -> bool {
         resp.ctx.data_mut(|d| d.insert_temp(press_id(), true));
     }
     down
+}
+
+/// Activate on pointer down, with keyboard/accessibility click fallback. Suppress the matching pointer-up click.
+pub fn activated(resp: &Response) -> bool {
+    let key = resp.id.with("activated-on-down");
+    if pressed(resp) {
+        resp.ctx.data_mut(|d| d.insert_temp(key, true));
+        true
+    } else if resp.clicked() {
+        let down = resp.ctx.data_mut(|d| d.remove_temp::<bool>(key).unwrap_or(false));
+        !down || !resp.ctx.input(|i| i.pointer.primary_released())
+    } else {
+        if !resp.ctx.input(|i| i.pointer.primary_down()) {
+            resp.ctx.data_mut(|d| d.remove_temp::<bool>(key));
+        }
+        false
+    }
 }
 
 fn press_id() -> egui::Id {
@@ -152,6 +189,8 @@ pub enum Variant {
     Ghost,
     Danger,
     Glass,
+    /// Going ahead despite a warning (sharing something flagged explicit): amber, like [`Variant::Danger`] is red.
+    Warn,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -267,7 +306,8 @@ impl<'a> Button<'a> {
         let ctx = ui.ctx();
         let hover = anim::toggle(ctx, resp.id.with("hover"), self.enabled && resp.hovered(), Spring::SNAPPY);
         let press = anim::toggle(ctx, resp.id.with("press"), self.enabled && resp.is_pointer_button_down_on(), Spring::SNAPPY);
-        let scale = 1.0 - 0.04 * press;
+        // A dialog landing back on it bounces it.
+        let scale = (1.0 - 0.04 * press) * crate::morph::bounce(ctx, rect);
         let bg = Rect::from_center_size(rect.center(), rect.size() * scale);
         let mut painter = ui.painter().clone();
         if !self.enabled {
@@ -295,6 +335,10 @@ impl<'a> Button<'a> {
             Variant::Glass => {
                 painter.rect_filled(bg, theme::radius(r), theme::mix(theme::surface_strong(), theme::INK_700, hover));
                 theme::FG
+            }
+            Variant::Warn => {
+                painter.rect_filled(bg, theme::radius(r), theme::alpha(theme::WARN, 0.16 + 0.08 * hover));
+                theme::WARN
             }
         };
         let txt = Txt::new(self.label, size).weight(weight::MEDIUM).color(fg);
@@ -373,7 +417,7 @@ impl<'a> IconButton<'a> {
         let ctx = ui.ctx();
         let hover = anim::toggle(ctx, resp.id.with("hover"), resp.hovered(), Spring::SNAPPY);
         let press = anim::toggle(ctx, resp.id.with("press"), resp.is_pointer_button_down_on(), Spring::SNAPPY);
-        let r = Rect::from_center_size(rect.center(), rect.size() * (1.0 - 0.12 * press));
+        let r = Rect::from_center_size(rect.center(), rect.size() * (1.0 - 0.12 * press) * crate::morph::bounce(ctx, rect));
         let p = ui.painter();
         if let Some(c) = self.backdrop {
             p.circle_filled(r.center(), r.width() * 0.5, c);
@@ -577,14 +621,22 @@ pub fn slider(
 pub fn text_field(ui: &mut Ui, id_salt: impl egui::AsIdSalt, value: &mut String, hint: &str, width: f32, mono: bool) -> Response {
     let id = ui.scope_id().with(id_salt);
     let (rect, _) = ui.allocate_exact_size(vec2(width, 36.0), Sense::hover());
-    field_frame(ui, rect, id, value, hint, Well { mono, leading: None, radius: 12.0 })
+    field_frame(ui, rect, id, value, hint, Well { mono, leading: None, radius: 12.0, clear: false })
 }
 
 /// Search field: pill with a magnifier.
 pub fn search_field(ui: &mut Ui, id_salt: impl egui::AsIdSalt, value: &mut String, hint: &str, width: f32) -> Response {
     let id = ui.scope_id().with(id_salt);
     let (rect, _) = ui.allocate_exact_size(vec2(width, 40.0), Sense::hover());
-    field_frame(ui, rect, id, value, hint, Well { mono: false, leading: Some(icons::MAGNIFYING_GLASS), radius: 20.0 })
+    field_frame(ui, rect, id, value, hint, Well { mono: false, leading: Some(icons::MAGNIFYING_GLASS), radius: 20.0, clear: false })
+}
+
+/// A [`search_field`] with an × at its end while something is typed: it empties the field (a change, like typing) and
+/// leaves the focus there to type the next thing.
+pub fn search_field_clearable(ui: &mut Ui, id_salt: impl egui::AsIdSalt, value: &mut String, hint: &str, width: f32) -> Response {
+    let id = ui.scope_id().with(id_salt);
+    let (rect, _) = ui.allocate_exact_size(vec2(width, 40.0), Sense::hover());
+    field_frame(ui, rect, id, value, hint, Well { mono: false, leading: Some(icons::MAGNIFYING_GLASS), radius: 20.0, clear: true })
 }
 
 /// Look of a text well.
@@ -592,10 +644,12 @@ struct Well<'a> {
     mono: bool,
     leading: Option<&'a str>,
     radius: f32,
+    /// Room for an × at its end, shown while there is text.
+    clear: bool,
 }
 
 fn field_frame(ui: &mut Ui, rect: Rect, id: Id, value: &mut String, hint: &str, well: Well<'_>) -> Response {
-    let Well { mono, leading, radius } = well;
+    let Well { mono, leading, radius, clear } = well;
     let focused = ui.memory(|m| m.has_focus(id));
     let ring = anim::toggle(ui.ctx(), id.with("ring"), focused, Spring::SNAPPY);
     let p = ui.painter().clone();
@@ -609,6 +663,9 @@ fn field_frame(ui: &mut Ui, rect: Rect, id: Id, value: &mut String, hint: &str, 
         icon(&p, pos2(rect.left() + 18.0, rect.center().y), glyph, 15.0, theme::FG_4);
         inner.min.x = rect.left() + 34.0;
     }
+    if clear {
+        inner.max.x = rect.right() - 38.0;
+    }
     let font = if mono { FontId::new(12.0, egui::FontFamily::Monospace) } else { theme::font(13.0, weight::REGULAR) };
     let edit = egui::TextEdit::singleline(value)
         .id(id)
@@ -619,7 +676,16 @@ fn field_frame(ui: &mut Ui, rect: Rect, id: Id, value: &mut String, hint: &str, 
         .desired_width(inner.width())
         .margin(egui::Margin::ZERO)
         .align(egui::Align2::LEFT_CENTER);
-    ui.put(inner, edit)
+    let mut resp = ui.put(inner, edit);
+    if clear && !value.is_empty() {
+        let x = Rect::from_center_size(pos2(rect.right() - 22.0, rect.center().y), vec2(28.0, 28.0));
+        if activated(&IconButton::new(icons::X, "Clear").size(28.0, 13.0).id_salt(id.with("clear")).show_at(ui, x)) {
+            value.clear();
+            resp.mark_changed();
+            resp.request_focus();
+        }
+    }
+    resp
 }
 
 /// Status chip of the capture page: tinted icon tile, caption and a value that slides when it changes.
@@ -828,4 +894,226 @@ pub fn entrance(ui: &Ui, id: Id, start: f64, index: usize) -> (f32, f32) {
     }
     let v = anim::spring_from(ctx, id, [0.0], [target], Spring::SOFT)[0];
     (v.clamp(0.0, 1.0), 18.0 * (1.0 - v))
+}
+
+/// A colour of its own for each name, for people without a picture (one of the theme's accents).
+pub fn name_color(name: &str) -> Color32 {
+    let palette = [theme::CYAN, theme::VIOLET, theme::INDIGO, theme::BLUE, theme::PURPLE, theme::ACCENT, theme::WARN, theme::REC];
+    let hash = name.bytes().fold(2_166_136_261u32, |h, b| (h ^ b as u32).wrapping_mul(16_777_619));
+    palette[hash as usize % palette.len()]
+}
+
+/// A person in the circle inscribed in `rect`: their picture (cropped to fill it), else their initial on their own
+/// colour ([`name_color`]).
+pub fn avatar(painter: &Painter, rect: Rect, picture: Option<&egui::TextureHandle>, name: &str) {
+    match picture {
+        Some(t) => {
+            let size = t.size_vec2();
+            let (ia, ta) = (size.x / size.y.max(1.0), rect.width() / rect.height().max(1.0));
+            let (w, h) = if ta > ia { (1.0, ia / ta) } else { (ta / ia, 1.0) };
+            paint::circle_texture(painter, rect, t.id(), Rect::from_center_size(pos2(0.5, 0.5), vec2(w, h)), Color32::WHITE);
+        }
+        None => {
+            let c = name_color(name);
+            painter.circle_filled(rect.center(), rect.width().min(rect.height()) * 0.5, theme::alpha(c, 0.2));
+            let initial = name.chars().find(|c| c.is_alphanumeric()).map(|c| c.to_uppercase().to_string()).unwrap_or_else(|| "?".into());
+            text(painter, rect.center(), Align2::CENTER_CENTER, &Txt::new(initial, rect.height() * 0.42).weight(weight::SEMIBOLD).color(c));
+        }
+    }
+}
+
+/// A count on a control (requests waiting): a green pill centred on `center`; returns its rect.
+pub fn count_badge(painter: &Painter, center: Pos2, count: usize) -> Rect {
+    let t = Txt::new(if count > 99 { "99+".to_string() } else { count.to_string() }, 10.5).weight(weight::BOLD).color(theme::ON_ACCENT);
+    let w = painter.layout_job(t.job(f32::INFINITY)).size().x;
+    let r = Rect::from_center_size(center, vec2((w + 10.0).max(18.0), 18.0));
+    painter.rect_filled(r, theme::radius(9.0), theme::ACCENT);
+    text(painter, r.center(), Align2::CENTER_CENTER, &t);
+    r
+}
+
+/// Height of a [`Chip`].
+pub const CHIP_H: f32 = 32.0;
+
+/// A rounded chip: a person (their picture or initial) or an icon, a label, then a check while it is chosen or an ×
+/// that removes it. Choosing acts on press, like the other selection controls.
+pub struct Chip<'a> {
+    label: &'a str,
+    glyph: Option<&'a str>,
+    tone: Option<Color32>,
+    person: Option<Option<&'a egui::TextureHandle>>,
+    selected: bool,
+    removable: bool,
+    enabled: bool,
+    id_salt: Option<IdSalt>,
+}
+
+/// What happened to a [`Chip`] this frame.
+pub struct ChipResponse {
+    pub response: Response,
+    /// Pressed, anywhere but its ×.
+    pub pressed: bool,
+    /// Its × was pressed.
+    pub removed: bool,
+}
+
+impl<'a> Chip<'a> {
+    pub fn new(label: &'a str) -> Self {
+        Self { label, glyph: None, tone: None, person: None, selected: false, removable: false, enabled: true, id_salt: None }
+    }
+
+    pub fn icon(mut self, glyph: &'a str) -> Self {
+        self.glyph = Some(glyph);
+        self
+    }
+
+    /// The icon's colour (a status: green for public).
+    pub fn tone(mut self, c: Color32) -> Self {
+        self.tone = Some(c);
+        self
+    }
+
+    /// A person's chip: their picture when there is one, else their initial.
+    pub fn person(mut self, picture: Option<&'a egui::TextureHandle>) -> Self {
+        self.person = Some(picture);
+        self
+    }
+
+    pub fn selected(mut self, s: bool) -> Self {
+        self.selected = s;
+        self
+    }
+
+    /// An × at its end ([`ChipResponse::removed`]).
+    pub fn removable(mut self, r: bool) -> Self {
+        self.removable = r;
+        self
+    }
+
+    pub fn enabled(mut self, e: bool) -> Self {
+        self.enabled = e;
+        self
+    }
+
+    /// What tells it from other chips with the same label in one place.
+    pub fn id_salt(mut self, salt: impl egui::AsIdSalt) -> Self {
+        self.id_salt = Some(IdSalt::new(salt));
+        self
+    }
+
+    fn label_txt(&self) -> Txt {
+        Txt::new(self.label, 12.5).weight(weight::MEDIUM)
+    }
+
+    fn lead(&self) -> f32 {
+        if self.person.is_some() {
+            36.0
+        } else if self.glyph.is_some() {
+            32.0
+        } else {
+            14.0
+        }
+    }
+
+    fn trail(&self) -> f32 {
+        if self.removable || self.selected {
+            32.0
+        } else {
+            14.0
+        }
+    }
+
+    /// Its width with its label whole.
+    pub fn width(&self, ui: &Ui) -> f32 {
+        self.lead() + text_size(ui, &self.label_txt()).x + self.trail()
+    }
+
+    pub fn show_at(self, ui: &mut Ui, rect: Rect) -> ChipResponse {
+        let key = self.id_salt.unwrap_or_else(|| IdSalt::new((self.label, self.glyph)));
+        let id = ui.scope_id().with("chip").with_salt(key);
+        let resp = ui.interact(rect, id, if self.enabled { Sense::click() } else { Sense::hover() });
+        let x_zone = Rect::from_min_max(pos2(rect.right() - 30.0, rect.top()), rect.max);
+        let over_x = self.removable && resp.interact_pointer_pos().or(resp.hover_pos()).is_some_and(|p| x_zone.contains(p));
+        let act = self.enabled && activated(&resp);
+        note_control(ui.ctx(), self.label, rect, self.enabled);
+        let ctx = ui.ctx();
+        let hover = anim::toggle(ctx, id.with("hover"), self.enabled && resp.hovered() && !over_x, Spring::SNAPPY);
+        let x_hover = anim::toggle(ctx, id.with("x-hover"), self.enabled && resp.hovered() && over_x, Spring::SNAPPY);
+        let press = anim::toggle(ctx, id.with("press"), self.enabled && resp.is_pointer_button_down_on() && !over_x, Spring::SNAPPY);
+        let sel = anim::toggle(ctx, id.with("selected"), self.selected, Spring::BOUNCY);
+        let k = sel.clamp(0.0, 1.0);
+        let r = Rect::from_center_size(rect.center(), rect.size() * (1.0 - 0.04 * press));
+        let mut p = ui.painter().clone();
+        if !self.enabled {
+            p.multiply_opacity(0.45);
+        }
+        let idle = theme::mix(theme::control(), theme::INK_600, hover);
+        let chosen = theme::alpha(theme::ACCENT, 0.16 + 0.06 * hover);
+        p.rect_filled(r, theme::radius(r.height() * 0.5), theme::mix(idle, chosen, k));
+        let fg = theme::mix(theme::mix(theme::FG_2, theme::FG, hover), theme::FG, k);
+        if let Some(picture) = self.person {
+            let a = Rect::from_center_size(pos2(r.left() + 16.0, r.center().y), vec2(24.0, 24.0));
+            avatar(&p, a, picture, self.label);
+            if k > 0.01 {
+                p.circle_stroke(a.center(), 12.75, Stroke::new(1.5, theme::alpha(theme::ACCENT, k)));
+            }
+        } else if let Some(g) = self.glyph {
+            icon(&p, pos2(r.left() + 19.0, r.center().y), g, 14.0, self.tone.unwrap_or(fg));
+        }
+        let label_max = r.width() - self.lead() - self.trail() + 2.0;
+        text_truncated(&p, pos2(r.left() + self.lead(), r.center().y), Align2::LEFT_CENTER, &self.label_txt().color(fg), label_max.max(8.0));
+        let end = pos2(r.right() - 16.0, r.center().y);
+        if self.removable {
+            p.circle_filled(end, 10.0, theme::white(0.1 * x_hover));
+            icon(&p, end, icons::X, 12.0, theme::mix(theme::FG_3, theme::FG, x_hover));
+        } else if k > 0.01 {
+            let mut cp = p.clone();
+            cp.multiply_opacity(k);
+            icon(&cp, end + vec2(0.0, 4.0 * (1.0 - sel)), icons::CHECK, 13.0, theme::ACCENT);
+        }
+        let resp = if self.enabled { resp.on_hover_cursor(CursorIcon::PointingHand) } else { resp };
+        ChipResponse { pressed: act && !over_x, removed: act && over_x, response: resp }
+    }
+}
+
+/// Where items of `widths` go when they wrap in rows `max_w` wide, `gap` apart both ways, rows `row_h` high: each
+/// item's top-left offset, and the height they take (0 for none).
+pub fn flow(widths: &[f32], max_w: f32, row_h: f32, gap: f32) -> (Vec<Vec2>, f32) {
+    let mut out = Vec::with_capacity(widths.len());
+    let (mut x, mut y) = (0.0f32, 0.0f32);
+    for &w in widths {
+        let w = w.min(max_w);
+        if x > 0.0 && x + w > max_w {
+            x = 0.0;
+            y += row_h + gap;
+        }
+        out.push(vec2(x, y));
+        x += w + gap;
+    }
+    let h = if widths.is_empty() { 0.0 } else { y + row_h };
+    (out, h)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn chips_wrap_in_rows() {
+        let (at, h) = flow(&[100.0, 120.0, 90.0, 300.0], 260.0, 32.0, 8.0);
+        assert_eq!(at, vec![vec2(0.0, 0.0), vec2(108.0, 0.0), vec2(0.0, 40.0), vec2(0.0, 80.0)]);
+        assert_eq!(h, 112.0);
+        // Wider than a row: alone on its own, cut to the row.
+        let (at, h) = flow(&[500.0, 50.0], 260.0, 32.0, 8.0);
+        assert_eq!(at, vec![vec2(0.0, 0.0), vec2(0.0, 40.0)]);
+        assert_eq!(h, 72.0);
+        assert_eq!(flow(&[], 260.0, 32.0, 8.0).1, 0.0);
+    }
+
+    #[test]
+    fn names_keep_their_colour() {
+        assert_eq!(name_color("Alex"), name_color("Alex"));
+        let colours: std::collections::HashSet<_> = ["Alex", "Mika", "Robin", "Sora", "Taylor", "Kasumi"].iter().map(|n| name_color(n).to_array()).collect();
+        assert!(colours.len() >= 3, "{colours:?}");
+    }
 }

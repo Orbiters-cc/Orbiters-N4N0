@@ -132,11 +132,11 @@ pub enum VoiceEvent {
     Level {
         level: f32,
     },
-    /// A transcribed sentence: the one N4N0 listened for (`for_orb`, answering listen `listen`), or one heard while the
+    /// A transcribed sentence: the one N4N0 listened for (`for_n4n0`, answering listen `listen`), or one heard while the
     /// wake word is on (`listen` 0). An empty text for N4N0 means nothing was said.
     Heard {
         text: String,
-        for_orb: bool,
+        for_n4n0: bool,
         seconds: f32,
         decode_ms: u32,
         #[serde(default)]
@@ -178,7 +178,7 @@ mod tests {
         assert_eq!(serde_json::from_str::<VoiceCommand>(r#"{"type":"wake_word","on":true}"#).unwrap(), VoiceCommand::WakeWord { on: true, words: vec![] });
         let m = VoiceCommand::Mic { mic: Some("{0.0.1.00000000}.{abc}".into()) };
         assert_eq!(serde_json::from_str::<VoiceCommand>(&m.to_line()).unwrap(), m);
-        let e = VoiceEvent::Heard { text: "Nano, mets mon sweat".into(), for_orb: false, seconds: 1.5, decode_ms: 120, listen: 0 };
+        let e = VoiceEvent::Heard { text: "Nano, mets mon sweat".into(), for_n4n0: false, seconds: 1.5, decode_ms: 120, listen: 0 };
         assert_eq!(serde_json::from_str::<VoiceEvent>(&e.to_line()).unwrap(), e);
         let l = VoiceCommand::Listen { hold: true, id: 7 };
         assert_eq!(serde_json::from_str::<VoiceCommand>(&l.to_line()).unwrap(), l);

@@ -129,6 +129,8 @@ fn in_job(job: Option<&CleanupJob>, dir: &Path) -> bool {
 /// The storage popover's state.
 pub struct Popover {
     serial: u64,
+    /// Shrinking back into its button (dropped once [`PopoverAction::Gone`]).
+    pub closing: bool,
     /// The captures without a 3D view go too: a choice of its own, off when the popover opens.
     whole: bool,
     confirming: bool,
@@ -136,18 +138,23 @@ pub struct Popover {
 
 impl Popover {
     pub fn new(serial: u64) -> Self {
-        Self { serial, whole: false, confirming: false }
+        Self { serial, closing: false, whole: false, confirming: false }
     }
 
     /// Opens on its confirmation, with the captures without a 3D view chosen too (screenshots).
     pub fn confirming(serial: u64) -> Self {
-        Self { serial, whole: true, confirming: true }
+        Self { serial, closing: false, whole: true, confirming: true }
     }
 }
 
 pub enum PopoverAction {
     Close,
-    CleanUp { trim: Vec<PathBuf>, delete: Vec<PathBuf> },
+    /// Closed and back in its button: drop it.
+    Gone,
+    CleanUp {
+        trim: Vec<PathBuf>,
+        delete: Vec<PathBuf>,
+    },
 }
 
 const POPOVER_W: f32 = 440.0;
@@ -157,7 +164,6 @@ const POPOVER_W: f32 = 440.0;
 /// service deletes, how far it got. Closes on a click elsewhere.
 pub fn popover(ctx: &egui::Context, snap: &Snapshot, p: &mut Popover, ov: &Overview, anchor: Rect) -> Option<PopoverAction> {
     let id = Id::unique(("storage-popover", p.serial));
-    let k = anim::spring_from(ctx, id.with("in"), [0.0], [1.0], Spring::BOUNCY)[0];
     let job = snap.cleanup.as_ref();
     let whole = p.whole && !ov.unviewed.is_empty();
     let freeing = ov.trim_bytes + if whole { ov.unviewed_bytes } else { 0 };
@@ -169,14 +175,19 @@ pub fn popover(ctx: &egui::Context, snap: &Snapshot, p: &mut Popover, ov: &Overv
     };
     let h = 20.0 + 60.0 + 26.0 + body_h + 20.0;
     let base = Rect::from_min_size(pos2(anchor.right() - POPOVER_W, anchor.bottom() + 8.0), vec2(POPOVER_W, h));
-    // Grows from its top-right corner.
-    let rect =
-        Rect::from_min_max(base.right_top() + (base.left_top() - base.right_top()) * (0.96 + 0.04 * k), base.right_top() + vec2(0.0, h * (0.96 + 0.04 * k)))
-            .translate(vec2(0.0, -8.0 * (1.0 - k)));
+    // Grows from its top-right corner, and back into it.
+    let pop = orbiters_ui::popup::popover(ctx, id, anchor, base, !p.closing);
+    if pop.gone {
+        return Some(PopoverAction::Gone);
+    }
+    let rect = pop.rect;
     let mut action = None;
-    let area = egui::Area::new(id).order(Order::Foreground).fixed_pos(rect.min).show(ctx, |ui| {
+    let area = egui::Area::new(id).order(Order::Foreground).fixed_pos(rect.min).interactable(!p.closing).show(ctx, |ui| {
         ui.set_min_size(rect.size());
-        ui.multiply_opacity(k.clamp(0.0, 1.0));
+        ui.multiply_opacity(pop.opacity);
+        if p.closing {
+            ui.disable();
+        }
         let painter = ui.painter().clone();
         widgets::panel(&painter, rect, 16.0);
         let x = rect.left() + 20.0;

@@ -8,11 +8,11 @@ use crate::backend::Ctl;
 use crate::ipc::UpdateAction;
 use crate::state::{AccountState, Snapshot, UpdateState};
 use egui::{pos2, vec2, Align2, Id, Layout, Rect, Sense, Ui, UiBuilder};
-use orbiters_core::settings::{WhilePlaying, WindowGpu};
+use orbiters_core::settings::{CoverageOverlay, RigViews, ViewGpu, WhilePlaying, WindowGpu};
 use orbiters_ui::anim::{self, Spring};
 use orbiters_ui::theme::{self, weight, Txt};
 use orbiters_ui::widgets::{self, Button, SegOption, Size, Variant};
-use orbiters_ui::{format, icons, logo, toast};
+use orbiters_ui::{format, icons, toast};
 use std::path::PathBuf;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -23,6 +23,7 @@ enum Folder {
 
 #[derive(Default)]
 pub struct State {
+    vrchat: VrchatForm,
     /// The Spout sender and the record parameter as typed, until saved.
     texts: Texts,
     log_open: bool,
@@ -38,12 +39,17 @@ pub struct State {
     /// The start with SteamVR as switched, until the settings say so, and SteamVR being told meanwhile.
     steamvr_shown: Option<bool>,
     steamvr_job: Option<(bool, Job<Result<bool, String>>)>,
+    /// "When SteamVR starts": Windows' sound devices in VR.
+    vr_audio: super::vr_audio::State,
 }
 
 impl State {
     /// Ends the mic test (leaving the page).
     pub fn stop_mic_test(&mut self) {
         self.mic = MicTest::default();
+        self.vr_audio.stop();
+        self.vrchat.password.clear();
+        self.vrchat.code.clear();
     }
 }
 
@@ -106,9 +112,11 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
             ui.spacing_mut().item_spacing = vec2(0.0, 20.0);
             super::block(ui, cx, 0, 72.0, |ui, rect| super::heading(ui, rect, "Preferences", "Settings", None));
             let snap = cx.snap;
-            account(ui, cx, &mut state.confirm_sign_out);
+            let mut m = super::Masonry::new(ui, "settings");
+            m.add(1, |ui| account(ui, cx, &mut state.confirm_sign_out));
+            m.add(10, |ui| vrchat_account(ui, cx, &mut state.vrchat));
 
-            section(ui, cx, 2, icons::GAUGE, "Capture", Some("How frames become a session"), |ui| {
+            m.add(2, |ui| section(ui, cx, 2, icons::GAUGE, "Capture", Some("How frames become a session"), |ui| {
                 let kf = &mut draft.keyframes;
                 widgets::field(ui, "Keyframe distance", Some("A new lossless keyframe after the camera moves this far."), 284.0, |ui| {
                     apply |= widgets::slider(ui, "kf-distance", &mut kf.min_translation, 0.05..=2.0, 0.05, |v| format!("{v:.2} m"));
@@ -163,7 +171,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
                         apply |= widgets::segmented(ui, "while-playing", &mut draft.reconstruct_while_playing, &places, true);
                     },
                 );
-            });
+            }));
 
             let st = &snap.storage;
             let mut free_space = false;
@@ -173,7 +181,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
                 st.sessions,
                 st.free_bytes.map(|f| format!(" · {} free on the drive", format::bytes(f as f64))).unwrap_or_default()
             );
-            section(ui, cx, 3, icons::HARD_DRIVE, "Storage", Some(&storage_sub), |ui| {
+            m.add(3, |ui| section(ui, cx, 3, icons::HARD_DRIVE, "Storage", Some(&storage_sub), |ui| {
                 let used_gb = st.used_bytes as f64 / 1e9;
                 let limit = draft.storage_limit_gb;
                 let usage = if limit > 0.0 { (used_gb / limit).min(1.0) as f32 } else { 0.0 };
@@ -211,14 +219,14 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
                     }
                 });
                 widgets::separator(ui);
-                if folder_field(ui, "Sessions folder", None, &draft.sessions_dir) {
+                if folder_field(ui, "Captures folder", None, &draft.sessions_dir) {
                     state.picker = Some((Folder::Sessions, pick(&ctx, &draft.sessions_dir)));
                 }
                 widgets::separator(ui);
                 if folder_field(ui, "Raw captures folder", Some("Where Mixer's capture simulator writes."), &draft.raw_captures_dir) {
                     state.picker = Some((Folder::Raw, pick(&ctx, &draft.raw_captures_dir)));
                 }
-            });
+            }));
             if free_space {
                 cx.go = Some(super::Go::FreeSpace);
             }
@@ -229,11 +237,11 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
             } else {
                 osc.error.clone().unwrap_or_else(|| "Off".into())
             };
-            section(ui, cx, 4, icons::BROADCAST, "VRChat and OSC", Some(&osc_sub), |ui| {
+            m.add(4, |ui| section(ui, cx, 4, icons::BROADCAST, "VRChat and OSC", Some(&osc_sub), |ui| {
                 widgets::field(
                     ui,
                     "Action Menu control",
-                    Some("Start and stop recording from your avatar's Action Menu (OSCQuery, works next to VRCFT and other OSC apps)."),
+                    Some("Start and stop recording with N4N0 › Record in your avatar's Action Menu, and let N4N0 and its capture kit hear Orbiters (OSCQuery, works next to VRCFT and other OSC apps)."),
                     48.0,
                     |ui| {
                         apply |= widgets::toggle(ui, "osc", &mut draft.osc.enabled);
@@ -250,12 +258,32 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
                     },
                 );
                 widgets::separator(ui);
-                widgets::field(ui, "Record parameter", Some("Bool avatar parameter that toggles recording."), 270.0, |ui| {
-                    if let Some(text) = form::text_row(ui, &mut state.texts, "record-parameter", &base.osc.record_parameter, "OrbitersRecord", 192.0, true) {
-                        draft.osc.record_parameter = text;
-                        apply = true;
-                    }
-                });
+                let every = [
+                    SegOption::new(RigViews::Off, "Off"),
+                    SegOption::new(RigViews::Every2s, "2 s"),
+                    SegOption::new(RigViews::Every3s, "3 s"),
+                    SegOption::new(RigViews::Every5s, "5 s"),
+                ];
+                widgets::field(
+                    ui,
+                    "Six more views while recording",
+                    Some("This often, N4N0's camera rig takes six views around your camera (left, front, right, back, up, down) wherever it has not yet, so the reconstruction sees what you did not film. VRChat draws the world six more times for those moments; 3D pictures and scans take theirs all along."),
+                    // As wide as its four small segments, so that the description keeps the row.
+                    180.0,
+                    |ui| {
+                        apply |= widgets::segmented(ui, "rig-views", &mut draft.rig_views, &every, true);
+                    },
+                );
+                widgets::separator(ui);
+                widgets::field(
+                    ui,
+                    "Camera dolly streams (experimental)",
+                    Some("VRC+: a 3D picture flies four cameras with VRChat's camera dolly, one left, one right and one above yours, all looking where yours does, and recordings also read the dolly's other streams. In VRChat, set Camera › Dolly › Streaming to Multi once."),
+                    48.0,
+                    |ui| {
+                        apply |= widgets::toggle(ui, "dolly-streams", &mut draft.dolly_streams);
+                    },
+                );
                 widgets::separator(ui);
                 let log_desc = snap.vrchat.world.log_file.as_ref().map(|p| p.display().to_string()).unwrap_or_else(|| {
                     if snap.vrchat.log_found {
@@ -279,7 +307,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
                         apply |= widgets::toggle(ui, "world-performance", &mut draft.world_performance);
                     },
                 );
-            });
+            }));
 
             let vr = &snap.steamvr;
             let perf_sub = match (&vr.calibration, vr.running) {
@@ -288,7 +316,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
                 (None, true) => "SteamVR is running: calibrate in the Orbiters tab of its dashboard".into(),
                 (None, false) => "What a session records besides the frames".into(),
             };
-            section(ui, cx, 5, icons::PERSON_ARMS_SPREAD, "Performance", Some(&perf_sub), |ui| {
+            m.add(5, |ui| section(ui, cx, 5, icons::PERSON_ARMS_SPREAD, "Performance", Some(&perf_sub), |ui| {
                 widgets::field(
                     ui,
                     "Face and avatar parameters",
@@ -351,6 +379,39 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
                 widgets::separator(ui);
                 widgets::field(
                     ui,
+                    "Orbiters watch",
+                    Some("The N4N0 mark on a wrist in VR, shown as you turn the wrist to look at it. Point at it with the other hand and pull the trigger once: N4N0's menu opens before you (or on your avatar's N4N0 screen), used with your controllers' lasers while VRChat keeps them; pull again to close it. Grip it to move it. The Orbiters panel floats beside you from the SteamVR tab's Float button."),
+                    48.0,
+                    |ui| {
+                        apply |= widgets::toggle(ui, "floating-watch", &mut draft.floating.watch);
+                    },
+                );
+                if draft.floating.watch {
+                    widgets::separator(ui);
+                    use orbiters_core::settings::Hand;
+                    let wrists = [SegOption::new(Hand::Left, "Left wrist"), SegOption::new(Hand::Right, "Right wrist")];
+                    widgets::field(ui, "Watch on", None, 220.0, |ui| {
+                        apply |= widgets::segmented(ui, "floating-watch-hand", &mut draft.floating.watch_hand, &wrists, true);
+                    });
+                }
+                widgets::separator(ui);
+                let hands = [
+                    SegOption::new(CoverageOverlay::Off, "Off"),
+                    SegOption::new(CoverageOverlay::LeftHand, "Left hand"),
+                    SegOption::new(CoverageOverlay::RightHand, "Right hand"),
+                ];
+                widgets::field(
+                    ui,
+                    "Coverage while recording",
+                    Some("In VR, the camera path and what it has covered float above a controller while you record, as on the Capture page. SteamVR shows it in your headset only: never in VRChat's camera or the recording."),
+                    300.0,
+                    |ui| {
+                        apply |= widgets::segmented(ui, "coverage-overlay", &mut draft.coverage_overlay, &hands, true);
+                    },
+                );
+                widgets::separator(ui);
+                widgets::field(
+                    ui,
                     "Walk boost",
                     Some("In VR, your play space moves along with your walking stick, so you walk faster in VRChat. Also in the SteamVR tab and N4N0's menu."),
                     48.0,
@@ -365,9 +426,9 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
                         apply |= widgets::slider(ui, "walk-strength", &mut draft.walk_boost.strength, 0.0..=1.0, 0.05, |v| format!("+{:.0} %", v * max));
                     });
                 }
-            });
+            }));
 
-            section(ui, cx, 6, icons::POWER, "Start", Some("Orbiters - N4N0 opening on its own, in the tray"), |ui| {
+            m.add(6, |ui| section(ui, cx, 6, icons::POWER, "Start", Some("Orbiters - N4N0 opening on its own, in the tray"), |ui| {
                 let mut windows = state.windows_start.unwrap_or(false);
                 widgets::field(ui, "Start with Windows", Some("Waits in the tray, ready when VRChat starts."), 48.0, |ui| {
                     if widgets::toggle(ui, "start-windows", &mut windows) && state.windows_job.is_none() {
@@ -389,28 +450,41 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
                         state.steamvr_job = Some((steamvr, Job::spawn(&ctx, move || crate::startup::set_start_with_steamvr(steamvr))));
                     }
                 });
-            });
+            }));
+            m.add(9, |ui| apply |= super::vr_audio::show(ui, cx, 9, &mut state.vr_audio, &mut draft.vr_audio));
 
-            section(ui, cx, 7, icons::SPARKLE, "Interface", None, |ui| {
+            m.add(7, |ui| section(ui, cx, 7, icons::SPARKLE, "Interface", None, |ui| {
                 widgets::field(ui, "Reduce motion", Some("Calmer transitions and a still background."), 48.0, |ui| {
                     apply |= widgets::toggle(ui, "reduce-motion", &mut draft.reduce_motion);
                 });
                 widgets::separator(ui);
                 if let Some(gpu) = cx.gpu.map(|g| &g.adapter).filter(|a| a.choice) {
                     let gpus = [
-                        SegOption::new(WindowGpu::IntegratedGpu, "Integrated GPU").hint("The processor's GPU draws; the graphics card only shows the frames"),
-                        SegOption::new(WindowGpu::GraphicsCard, "Graphics card").hint("Smoother 3D views, on the GPU VRChat plays on"),
+                        SegOption::new(WindowGpu::IntegratedGpu, "Integrated GPU").hint("The processor's GPU draws; the graphics card copies each frame to show it"),
+                        SegOption::new(WindowGpu::GraphicsCard, "Graphics card").hint("Costs a game less than copying the frames from the integrated GPU"),
                     ];
                     let now = if (draft.window_gpu == WindowGpu::IntegratedGpu) == gpu.integrated {
                         format!("Now on the {}.", gpu.name)
                     } else {
                         format!("On the {} until the window opens again.", gpu.name)
                     };
-                    let note = format!("The integrated GPU keeps the 3D view off VRChat's graphics card, which only shows the window; the graphics card draws it all faster. {now}");
+                    let note = format!("The graphics card draws the window for less than it costs to copy it there from the integrated GPU. {now}");
                     widgets::field(ui, "Window graphics", Some(&note), 260.0, |ui| {
                         apply |= widgets::segmented(ui, "window-gpu", &mut draft.window_gpu, &gpus, true);
                     });
                     widgets::separator(ui);
+                    if !gpu.integrated {
+                        let views = [
+                            SegOption::new(ViewGpu::WhilePlaying, "While VRChat runs"),
+                            SegOption::new(ViewGpu::Always, "Always"),
+                            SegOption::new(ViewGpu::Never, "Never"),
+                        ];
+                        let note = "The 3D view's splats draw on the integrated GPU and only their pictures reach the graphics card: orbiting costs a game little, at about half the frame rate.";
+                        widgets::field(ui, "3D view on the integrated GPU", Some(note), 340.0, |ui| {
+                            apply |= widgets::segmented(ui, "view-gpu", &mut draft.view_gpu, &views, true);
+                        });
+                        widgets::separator(ui);
+                    }
                 }
                 widgets::field(ui, "Capture notice", Some("The consent reminder shown before the first capture."), 120.0, |ui| {
                     if Button::new("Show again").variant(Variant::Ghost).size(Size::Sm).show(ui).clicked() {
@@ -418,15 +492,15 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
                         apply = true;
                     }
                 });
-            });
+            }));
 
             let mut want_log = false;
             let mut quit = false;
-            section(ui, cx, 8, icons::INFO, "About", None, |ui| {
+            m.add(8, |ui| section(ui, cx, 8, icons::INFO, "About", None, |ui| {
                 ui.add_space(8.0);
                 let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), 64.0), Sense::hover());
-                let lr = Rect::from_min_size(pos2(row.left(), row.center().y - 21.0), logo::size_for_width(48.0));
-                logo::paint(ui.painter(), lr, logo::Look::default());
+                let lr = Rect::from_min_size(pos2(row.left(), row.center().y - 21.0), orbiters_ui::n4n0_logo::size_for_width(48.0));
+                orbiters_ui::n4n0_logo::paint(ui.painter(), lr, theme::MARK);
                 let x = lr.right() + 16.0;
                 let p = ui.painter();
                 widgets::text(
@@ -461,6 +535,15 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
                 }
                 widgets::separator(ui);
                 updates(ui, cx.ctl, snap);
+                widgets::separator(ui);
+                let note = if draft.development {
+                    "On: the Orbiters server running on this computer, its account and its builds of Orbiters - N4N0 as updates."
+                } else {
+                    "For testing development builds: the Orbiters server running on this computer instead of orbiters.cc, with its own account and updates."
+                };
+                widgets::field(ui, "Development environment", Some(note), 48.0, |ui| {
+                    apply |= widgets::toggle(ui, "development", &mut draft.development);
+                });
                 if state.log_open {
                     let lines = cx.ctl.worker_log().unwrap_or_default();
                     let k = anim::spring_from(ui.ctx(), Id::unique("worker-log-open"), [0.0], [1.0], Spring::SOFT)[0].clamp(0.0, 1.0);
@@ -477,7 +560,8 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
                     });
                     ui.add_space(12.0);
                 }
-            });
+            }));
+            m.finish(ui);
             if want_log {
                 state.log_open = !state.log_open;
                 if state.log_open {
@@ -636,6 +720,308 @@ fn account(ui: &mut Ui, cx: &Cx, confirm_sign_out: &mut bool) {
     });
 }
 
+/// Secrets are transient UI state, never part of Settings or the snapshot.
+#[derive(Default)]
+struct VrchatForm {
+    username: String,
+    password: String,
+    code: String,
+    method: Option<orbiters_core::vrchat_api::TwoFactor>,
+    /// The password shown as typed (its eye).
+    show_password: bool,
+    pending: bool,
+    pending_revision: u64,
+    saw_busy: bool,
+    picture: Option<(String, u64, egui::TextureHandle)>,
+}
+
+impl State {
+    /// Synthetic offline data for the screenshot runner; never uses the person's account or credential store.
+    pub(crate) fn stage_vrchat(&mut self, entering: bool) {
+        if entering {
+            self.vrchat.username = "DesktopTester".into();
+            self.vrchat.password = "screenshot-only".into();
+        }
+    }
+}
+
+fn vrchat_pressed(response: egui::Response) -> bool {
+    response.enabled() && (response.clicked() || (response.is_pointer_button_down_on() && response.ctx.input(|i| i.pointer.primary_pressed())))
+}
+
+/// The same flat well as widgets::text_field, with egui's password masking and an eye that shows what was typed.
+fn vrchat_password(ui: &mut Ui, password: &mut String, width: f32, shown: &mut bool) -> egui::Response {
+    let id = ui.scope_id().with("vrchat-password");
+    let (rect, _) = ui.allocate_exact_size(vec2(width, 36.0), Sense::hover());
+    ui.painter().rect_filled(rect, theme::radius(12.0), theme::INK_750);
+    let ring = anim::toggle(ui.ctx(), id.with("ring"), ui.memory(|m| m.has_focus(id)), Spring::SNAPPY);
+    if ring > 0.01 {
+        ui.painter().rect_stroke(rect, theme::radius(12.0), egui::Stroke::new(2.0, theme::alpha(theme::ACCENT, 0.8 * ring)), egui::StrokeKind::Outside);
+    }
+    let eye = Rect::from_center_size(pos2(rect.right() - 20.0, rect.center().y), vec2(28.0, 28.0));
+    let label = if *shown { "Hide the password" } else { "Show the password" };
+    if vrchat_pressed(
+        widgets::IconButton::new(if *shown { icons::EYE_SLASH } else { icons::KEY }, label).size(28.0, 14.0).id_salt("vrchat-eye").show_at(ui, eye),
+    ) {
+        *shown = !*shown;
+    }
+    ui.put(
+        Rect::from_min_max(pos2(rect.left() + 12.0, rect.top()), pos2(eye.left() - 4.0, rect.bottom())),
+        egui::TextEdit::singleline(password)
+            .id(id)
+            .password(!*shown)
+            .frame(egui::Frame::NONE)
+            .font(theme::font(13.0, weight::REGULAR))
+            .text_color(theme::FG)
+            .hint_text(egui::RichText::new("VRChat password").color(theme::FG_4))
+            .margin(egui::Margin::ZERO)
+            .align(Align2::LEFT_CENTER),
+    )
+}
+
+/// Six cells for a six-digit code (an authenticator's, an email's): digits only, each popping in as it is typed, the
+/// next cell ringed in green while the field has the keys.
+fn code_cells(ui: &mut Ui, code: &mut String) -> egui::Response {
+    let id = ui.scope_id().with("vrchat-code-cells");
+    let (cell, gap, h) = (44.0, 8.0, 50.0);
+    let w = 6.0 * cell + 5.0 * gap;
+    let (rect, _) = ui.allocate_exact_size(vec2(w, h), Sense::hover());
+    // The text edit takes the keys (and clicks) over the cells; its own text, caret and selection stay unseen.
+    let resp = {
+        let mut eu = ui.new_child(UiBuilder::new().max_rect(rect).id_salt("vrchat-code-edit"));
+        let v = eu.visuals_mut();
+        v.text_cursor.stroke = egui::Stroke::NONE;
+        v.selection.bg_fill = egui::Color32::TRANSPARENT;
+        v.selection.stroke = egui::Stroke::NONE;
+        eu.put(
+            rect,
+            egui::TextEdit::singleline(code)
+                .id(id)
+                .frame(egui::Frame::NONE)
+                .text_color(egui::Color32::TRANSPARENT)
+                .font(theme::font(13.0, weight::REGULAR))
+                .char_limit(6)
+                .margin(egui::Margin::ZERO)
+                .desired_width(w),
+        )
+    };
+    code.retain(|c| c.is_ascii_digit());
+    let ctx = ui.ctx().clone();
+    let focused = ui.memory(|m| m.has_focus(id));
+    let n = code.chars().count();
+    let p = ui.painter();
+    for i in 0..6 {
+        let r = Rect::from_min_size(pos2(rect.left() + i as f32 * (cell + gap), rect.top()), vec2(cell, h));
+        let next = focused && i == n.min(5);
+        let ring = anim::toggle(&ctx, id.with(("ring", i)), next, Spring::SNAPPY);
+        let filled = anim::toggle(&ctx, id.with(("filled", i)), i < n, Spring::SOFT);
+        p.rect_filled(r, theme::radius(12.0), theme::mix(theme::INK_750, theme::INK_700, filled));
+        if ring > 0.01 {
+            p.rect_stroke(r, theme::radius(12.0), egui::Stroke::new(2.0, theme::alpha(theme::ACCENT, 0.85 * ring)), egui::StrokeKind::Outside);
+        }
+        if let Some(c) = code.chars().nth(i) {
+            let k = anim::spring_from(&ctx, id.with(("digit", i, c)), [0.55], [1.0], Spring::BOUNCY)[0];
+            widgets::text(p, r.center(), Align2::CENTER_CENTER, &Txt::new(c.to_string(), 22.0 * k.clamp(0.4, 1.3)).weight(weight::SEMIBOLD));
+        } else if next && anim::is_live(&ctx) {
+            // A caret that blinks where the next digit goes.
+            let t = anim::time(&ctx);
+            if (t * 1.6).fract() < 0.6 {
+                p.rect_filled(Rect::from_center_size(r.center(), vec2(2.0, 20.0)), theme::radius(1.0), theme::FG_2);
+            }
+            ctx.request_repaint_after(std::time::Duration::from_millis(120));
+        }
+    }
+    resp.on_hover_cursor(egui::CursorIcon::Text)
+}
+
+/// The signed-in account: picture with a presence ring, name, how it is kept; Sign out on the right.
+fn vrchat_identity(ui: &mut Ui, name: &str, picture: Option<&egui::TextureHandle>, busy: bool) -> bool {
+    let w = ui.available_width();
+    let (row, _) = ui.allocate_exact_size(vec2(w, 72.0), Sense::hover());
+    let p = ui.painter().clone();
+    let a = Rect::from_center_size(pos2(row.left() + 28.0, row.center().y), vec2(52.0, 52.0));
+    p.circle_stroke(a.center(), 29.0, egui::Stroke::new(2.0, theme::alpha(theme::ACCENT, 0.9)));
+    widgets::avatar(&p, a, picture, name);
+    let dot = a.center() + vec2(19.0, 19.0);
+    p.circle_filled(dot, 7.0, theme::surface_strong());
+    p.circle_filled(dot, 5.0, theme::ACCENT);
+    let x = a.right() + 18.0;
+    widgets::text_truncated(&p, pos2(x, row.center().y - 10.0), Align2::LEFT_CENTER, &Txt::new(name, 16.0).weight(weight::SEMIBOLD), w - 220.0);
+    widgets::icon(&p, pos2(x + 6.0, row.center().y + 12.0), icons::LOCK_SIMPLE, 12.0, theme::FG_3);
+    widgets::text_truncated(
+        &p,
+        pos2(x + 18.0, row.center().y + 12.0),
+        Align2::LEFT_CENTER,
+        &Txt::new("Connected · the session stays encrypted on this computer", 12.0).color(theme::FG_3),
+        w - 240.0,
+    );
+    let b = Button::new(if busy { "Signing out…" } else { "Sign out" }).icon(icons::SIGN_OUT).variant(Variant::Secondary).size(Size::Sm).enabled(!busy);
+    let bw = b.desired_width(ui);
+    vrchat_pressed(b.show_at(ui, Rect::from_min_size(pos2(row.right() - bw, row.center().y - 16.0), vec2(bw, 32.0))))
+}
+
+fn vrchat_account(ui: &mut Ui, cx: &Cx, state: &mut VrchatForm) {
+    use crate::controller::vrchat_login::{Command, Recovery};
+    use orbiters_core::vrchat_api::{Secret, TwoFactor};
+    let status = &cx.snap.vrchat_login;
+    if !status.allowed || !matches!(cx.snap.account.state, AccountState::SignedIn { .. }) {
+        *state = VrchatForm::default();
+        return;
+    }
+    if status.busy {
+        state.saw_busy = true;
+    }
+    if (state.saw_busy && !status.busy) || (state.pending && state.pending_revision != status.revision) {
+        state.pending = false;
+        state.saw_busy = false;
+    }
+    let busy = status.busy || state.pending;
+    let subtitle = if let Some(user) = &status.user {
+        format!("Signed in as {}", user.display_name)
+    } else if !status.methods.is_empty() {
+        "Two-factor authentication: one more step".into()
+    } else {
+        "Your own account, kept on this computer".into()
+    };
+    let mut command = None;
+    section(ui, cx, 10, icons::VIRTUAL_REALITY, "VRChat account", Some(&subtitle), |ui| {
+        ui.add_space(6.0);
+        if let Some(user) = &status.user {
+            if let Some(picture) = &status.picture {
+                if state.picture.as_ref().is_none_or(|(id, revision, _)| id != &user.id || *revision != status.revision) {
+                    let image = egui::ColorImage::from_rgba_unmultiplied([picture.width as usize, picture.height as usize], &picture.rgba);
+                    let texture = ui.ctx().load_texture(format!("vrchat-account-{}", user.id), image, egui::TextureOptions::LINEAR);
+                    state.picture = Some((user.id.clone(), status.revision, texture));
+                }
+            } else {
+                state.picture = None;
+            }
+            if vrchat_identity(ui, &user.display_name, state.picture.as_ref().map(|(_, _, t)| t), busy) {
+                command = Some(Command::SignOut);
+            }
+        } else {
+            state.picture = None;
+            ui.add_enabled_ui(!busy, |ui| {
+                if status.methods.is_empty() {
+                    widgets::field(ui, "Username", Some("Your VRChat login name or email, not your display name."), 300.0, |ui| {
+                        widgets::text_field(ui, "vrchat-username", &mut state.username, "VRChat username or email", 300.0, false);
+                    });
+                    widgets::separator(ui);
+                    let mut enter = false;
+                    widgets::field(ui, "Password", Some("Sent to VRChat only, never to Orbiters."), 300.0, |ui| {
+                        let response = vrchat_password(ui, &mut state.password, 300.0, &mut state.show_password);
+                        enter = response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                    });
+                    widgets::separator(ui);
+                    ui.add_space(14.0);
+                    let ready = !state.username.trim().is_empty() && !state.password.is_empty();
+                    let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), 40.0), Sense::hover());
+                    let note = "Instead of Orbiters' shared account: friends, instances and pictures come from yours.";
+                    widgets::icon(ui.painter(), pos2(row.left() + 7.0, row.center().y), icons::SHIELD_CHECK, 14.0, theme::FG_3);
+                    widgets::text_truncated(
+                        ui.painter(),
+                        pos2(row.left() + 22.0, row.center().y),
+                        Align2::LEFT_CENTER,
+                        &Txt::new(note, 12.0).color(theme::FG_3),
+                        row.width() - 230.0,
+                    );
+                    let b = Button::new(if busy { "Signing in…" } else { "Sign in to VRChat" }).icon(icons::SIGN_IN).variant(Variant::Primary).enabled(ready);
+                    let bw = b.desired_width(ui);
+                    if (vrchat_pressed(b.show_at(ui, Rect::from_min_size(pos2(row.right() - bw, row.top()), vec2(bw, 40.0)))) || enter) && ready {
+                        command = Some(Command::SignIn { username: state.username.clone(), password: Secret(std::mem::take(&mut state.password)) });
+                    }
+                } else {
+                    let method = state.method.get_or_insert(status.methods[0]);
+                    if !status.methods.contains(method) {
+                        *method = status.methods[0];
+                    }
+                    if status.methods.len() > 1 {
+                        let before = *method;
+                        let options: Vec<_> = status
+                            .methods
+                            .iter()
+                            .map(|m| {
+                                SegOption::new(
+                                    *m,
+                                    match m {
+                                        TwoFactor::Totp => "Authenticator app",
+                                        TwoFactor::Email => "Email",
+                                        TwoFactor::Recovery => "Recovery code",
+                                    },
+                                )
+                            })
+                            .collect();
+                        widgets::segmented(ui, "vrchat-factor-method", method, &options, false);
+                        if *method != before {
+                            state.code.clear();
+                        }
+                        ui.add_space(6.0);
+                    }
+                    let hint = match method {
+                        TwoFactor::Totp => "The six digits your authenticator app shows for VRChat now.",
+                        TwoFactor::Email => "VRChat emailed you six digits: check your inbox and spam folder.",
+                        TwoFactor::Recovery => "One of the recovery codes you saved when you turned two-factor authentication on.",
+                    };
+                    let mut enter = false;
+                    let six = *method != TwoFactor::Recovery;
+                    widgets::field(ui, method.label(), Some(hint), if six { 304.0 } else { 300.0 }, |ui| {
+                        let response = if six {
+                            code_cells(ui, &mut state.code)
+                        } else {
+                            widgets::text_field(ui, "vrchat-factor-code", &mut state.code, "xxxx-xxxx", 300.0, true)
+                        };
+                        enter = response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                    });
+                    widgets::separator(ui);
+                    ui.add_space(14.0);
+                    let ready = if six { state.code.chars().count() == 6 } else { !state.code.trim().is_empty() };
+                    let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), 40.0), Sense::hover());
+                    let verify =
+                        Button::new(if busy { "Verifying…" } else { "Verify and sign in" }).icon(icons::SHIELD_CHECK).variant(Variant::Primary).enabled(ready);
+                    let cancel = Button::new("Cancel").variant(Variant::Ghost);
+                    let (vw, cw) = (verify.desired_width(ui), cancel.desired_width(ui));
+                    if (vrchat_pressed(verify.show_at(ui, Rect::from_min_size(pos2(row.right() - vw, row.top()), vec2(vw, 40.0)))) || enter) && ready {
+                        command = Some(Command::Verify { method: *method, code: Secret(std::mem::take(&mut state.code)) });
+                    }
+                    if vrchat_pressed(cancel.show_at(ui, Rect::from_min_size(pos2(row.right() - vw - 8.0 - cw, row.top()), vec2(cw, 40.0)))) {
+                        command = Some(Command::Cancel);
+                    }
+                }
+            });
+        }
+        if busy {
+            ui.add_space(12.0);
+            super::sharing::working(ui, "Waiting for VRChat…");
+        }
+        if let Some(error) = &status.error {
+            ui.add_space(12.0);
+            orbiters_ui::feedback::banner(ui, Id::unique(("vrchat-login-error", error)), widgets::Tone::Danger, error, false);
+            let retry = match status.recovery {
+                Recovery::Resume => Some(("Retry the saved session", icons::ARROW_CLOCKWISE, Command::Resume)),
+                Recovery::RemoveSavedSession => Some(("Remove the saved session", icons::TRASH, Command::SignOut)),
+                Recovery::None => None,
+            };
+            if let Some((label, glyph, retry)) = retry {
+                ui.add_space(10.0);
+                let b = Button::new(label).icon(glyph).variant(Variant::Secondary).size(Size::Sm).enabled(!busy);
+                let bw = b.desired_width(ui);
+                let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), 32.0), Sense::hover());
+                if vrchat_pressed(b.show_at(ui, Rect::from_min_size(r.min, vec2(bw, 32.0)))) {
+                    command = Some(retry);
+                }
+            }
+        }
+        ui.add_space(4.0);
+    });
+    if let Some(command) = command {
+        state.pending = true;
+        state.pending_revision = status.revision;
+        state.saw_busy = false;
+        state.code.clear();
+        cx.ctl.vrchat_login(command);
+        orbiters_ui::anim::request_frame(ui.ctx());
+    }
+}
 /// Folder row: label, path, Change button. True when Change was clicked.
 fn folder_field(ui: &mut Ui, label: &str, description: Option<&str>, value: &std::path::Path) -> bool {
     let shown = value.display().to_string();

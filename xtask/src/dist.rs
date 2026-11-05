@@ -20,6 +20,12 @@ use std::process::Command;
 const PROGRAMS: [&str; 5] = ["orbiters-desktop", "orbiters-capture", "orbiters-reconstruct", "orbiters-voice", "orbiters-call"];
 /// The libraries they load, beside them in `target/release` (sherpa-onnx's prebuilt ones, which its build copies there).
 const LIBRARIES: [&str; 3] = ["onnxruntime.dll", "onnxruntime_providers_shared.dll", "sherpa-onnx-c-api.dll"];
+/// The reconstruction's face detector (orbiters_reconstruct::portraits), from the repository; the worker finds it beside
+/// itself, and without it trains as it did. See THIRD_PARTY_NOTICES.md.
+const FACE_MODEL: &str = "crates/orbiters-reconstruct/assets/faces-v1-int8.onnx";
+/// Tracking smoothing's SteamVR driver (`orbiters-smooth-driver`), which the app installs for SteamVR when it is
+/// switched on.
+const DRIVER: &str = "driver_orbiters_smooth.dll";
 /// The licences, from the repository's root.
 const DOCUMENTS: [&str; 3] = ["LICENSE.md", "THIRD_PARTY_LICENSES.md", "THIRD_PARTY_NOTICES.md"];
 /// The C runtime the programs link to, shipped beside them (Microsoft allows it, app-local).
@@ -31,7 +37,8 @@ const SETUP_TRIPLE: &str = "x86_64-pc-windows-msvc";
 const TIMESTAMP: &str = "http://timestamp.acs.microsoft.com";
 
 pub struct Options {
-    /// Without Authenticode signatures (a local test build): Windows' SmartScreen warns about such a setup.
+    /// Without Authenticode signatures (until Azure Artifact Signing is set up): Windows' SmartScreen warns about such
+    /// a setup when it is downloaded by hand; installed apps update to it as to any release the release key signed.
     pub unsigned: bool,
     pub channel: String,
     pub notes: String,
@@ -45,8 +52,10 @@ pub fn dist(config: &Config, options: &Options) -> anyhow::Result<PathBuf> {
     let target = crate::target_dir();
     let signer = Signer::new(config)?;
     anyhow::ensure!(signer.is_some() || options.unsigned, "{}", SIGNING_HELP);
-    // A test build (unsigned, or another build's programs) gets no release file: `publish` cannot put it out.
-    let test = options.unsigned || options.programs.is_some();
+    // A test build (another build's programs) gets no release file: `publish` cannot put it out. A setup without
+    // Authenticode signatures still gets one: installed apps trust a release for the release key's signature, and
+    // only a setup downloaded by hand meets SmartScreen.
+    let test = options.programs.is_some();
     let key = if test { None } else { Some(crate::private_key(config)?) };
 
     let dist = target.join("dist").join(&version);
@@ -68,6 +77,7 @@ pub fn dist(config: &Config, options: &Options) -> anyhow::Result<PathBuf> {
             for program in PROGRAMS {
                 build.args(["-p", program]);
             }
+            build.args(["-p", "orbiters-smooth-driver"]);
             run(&mut build)?;
             target.join("release")
         }
@@ -82,6 +92,10 @@ pub fn dist(config: &Config, options: &Options) -> anyhow::Result<PathBuf> {
     for library in LIBRARIES {
         copy(&bin.join(library), &stage.join(library))?;
     }
+    let face_model = crate::root().join(FACE_MODEL);
+    copy(&face_model, &stage.join(face_model.file_name().expect("a file")))?;
+    copy(&bin.join(DRIVER), &stage.join(DRIVER))?;
+    ours.push(stage.join(DRIVER));
     copy(&vcruntime(config)?, &stage.join(VCRUNTIME))?;
     for document in DOCUMENTS {
         copy(&crate::root().join(document), &stage.join(document))?;
@@ -209,7 +223,8 @@ fn version_key(name: &str) -> Vec<u32> {
 
 const SIGNING_HELP: &str = "Signing is not set up (Azure Artifact Signing): set signing_dlib and signing_metadata in \
 ~/.orbiters-release/config.json (or ORBITERS_SIGNING_DLIB and ORBITERS_SIGNING_METADATA), sign in with `az login`, \
-and see docs/releasing.md. `--unsigned` makes a test build that is never to be published.";
+and see docs/releasing.md. `--unsigned` builds without Authenticode signatures (SmartScreen warns about a setup \
+downloaded by hand).";
 
 /// Authenticode signatures through Azure Artifact Signing (signtool with its plug-in; the account signed in with
 /// `az login` or another Azure credential).

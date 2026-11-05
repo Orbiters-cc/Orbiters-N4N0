@@ -20,7 +20,9 @@ fn color(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups)
     let target_c = vec3<f32>(f32(packed & 255u), f32((packed >> 8u) & 255u), f32((packed >> 16u) & 255u)) / 255.0;
     let diff = out_color[p].xyz - target_c;
     let k = m * frame.loss.x / (3.0 * max(frame.loss.w, 1.0));
-    d_pixel[p] = vec4<f32>(sign(diff) * k, 0.0);
+    // With birth statistics, the pixel's colour error rides in the depth slot (common.wgsl stats_mode).
+    let error = select(0.0, m * dot(abs(diff), vec3<f32>(1.0 / 3.0)), stats_mode() == STATS_COLOR);
+    d_pixel[p] = vec4<f32>(sign(diff) * k, error);
 }
 
 var<workgroup> s_error: array<vec2<f32>, 256>;

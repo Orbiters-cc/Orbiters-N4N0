@@ -97,6 +97,11 @@ impl BundleWriter {
 
     pub fn append_record(&mut self, record: &FrameRecord) -> anyhow::Result<()> {
         self.frames.write_all(&record.to_bytes())?;
+        // A 3D picture's flight reads the depth frames as they come (the desktop's controller/around.rs): at about ten a
+        // second, this write is nothing beside the depth file just written for each.
+        if record.has(record_flags::DEPTH) {
+            self.frames.flush()?;
+        }
         let s = &mut self.manifest.stats;
         s.frames += 1;
         s.bytes += RECORD_SIZE as u64;
@@ -152,8 +157,13 @@ impl BundleWriter {
 
     /// Writes the session thumbnail (a downscaled copy of the first keyframe).
     pub fn write_thumbnail(&self, rgba: &[u8], width: u32, height: u32) -> anyhow::Result<()> {
-        let (tw, th, small) = downscale(rgba, width, height, 480);
-        fs::write(self.dir.join(manifest::THUMBNAIL_FILE), qoi::encode(&small, tw, th, 3))?;
+        anyhow::ensure!(width > 0 && height > 0 && u64::from(width) * u64::from(height) * 4 <= rgba.len() as u64, "Invalid thumbnail dimensions.");
+        let crop = capture_picture_rect(width, height);
+        let row = width as usize * 4;
+        let (tw, th, small) = downscale(&rgba[crop.y0 as usize * row..crop.y1 as usize * row], width, crop.y1 - crop.y0, 480);
+        let bytes = qoi::encode(&small, tw, th, 3);
+        fs::write(self.dir.join(manifest::THUMBNAIL_FILE), &bytes)?;
+        crate::write_atomic(&self.dir.join(PICTURE_THUMBNAIL_FILE), &bytes)?;
         Ok(())
     }
 
@@ -238,6 +248,14 @@ pub struct SessionSummary {
     /// rather than hide its gigabytes. `None` for a session read as it should be.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub damaged: Option<String>,
+}
+
+impl SessionSummary {
+    /// Frames came and none had a camera pose (the capture strip): this recording cannot become a 3D view. (Local User
+    /// off in VRChat's camera, or an avatar without N4N0's capture kit.)
+    pub fn has_no_keyframes(&self) -> bool {
+        self.manifest.stats.frames > 0 && self.manifest.stats.keyframes == 0
+    }
 }
 
 /// A session's manifest. One written by another version (a field it does not know the shape of) keeps every field
@@ -376,18 +394,103 @@ pub fn read_records_counted(dir: &Path) -> anyhow::Result<(Vec<FrameRecord>, usi
 /// standing up, four times as tall). A file saying it is larger is not one, and gets no memory.
 const THUMBNAIL_PIXELS: u64 = 480 * 480 * 4;
 
+/// Versioned display cache: old session thumbnails include the bottom skeleton band.
+pub const PICTURE_THUMBNAIL_FILE: &str = "thumbnail-picture-v2.qoi";
+
+/// Scene rows between the capture strip (including its reference patches) and skeleton band.
+/// Layouts are computed at the ORIGINAL frame size, before any thumbnail downscaling.
+pub fn capture_picture_rect(width: u32, height: u32) -> crate::contracts::image::Rect {
+    let top = crate::contracts::strip::StripLayout::new(width, height).map_or(0, |l| l.reserved.y1);
+    let bottom = crate::contracts::skeleton::BandLayout::new(width, height).map_or(height, |l| l.reserved().y0);
+    let (top, bottom) = if top < bottom { (top, bottom) } else { (0, height) };
+    crate::contracts::image::Rect { x0: 0, y0: top, x1: width, y1: bottom }
+}
+
 /// The session thumbnail as top-down RGBA: (width, height, pixels).
 pub fn read_thumbnail(dir: &Path) -> Option<(u32, u32, Vec<u8>)> {
+    let cached = dir.join(PICTURE_THUMBNAIL_FILE);
+    if let Some((h, rgba)) = fs::read(&cached).ok().and_then(|data| qoi::decode_rgba_max(&data, THUMBNAIL_PIXELS).ok()) {
+        return Some((h.width, h.height, rgba));
+    }
     let data = fs::read(dir.join(manifest::THUMBNAIL_FILE)).ok()?;
     let (h, rgba) = qoi::decode_rgba_max(&data, THUMBNAIL_PIXELS).ok()?;
-    Some((h.width, h.height, rgba))
+    let manifest: Option<SessionManifest> = fs::read(dir.join(manifest::MANIFEST_FILE)).ok().and_then(|b| serde_json::from_slice(&b).ok());
+    let (top, bottom) = manifest.filter(|m| m.capture.width > 0 && m.capture.height > 0).map_or((0, h.height), |m| {
+        let (w, height) = (m.capture.width, m.capture.height);
+        let crop = capture_picture_rect(w, height);
+        // Capture's encoder already omitted the top strip; BundleWriter's old thumbnails held the full frame.
+        // Compare aspect ratios to identify which rows the cached image represents, with rounding tolerance.
+        let expected_height = |rows: u32| f64::from(rows) * f64::from(h.width) / f64::from(w);
+        let full_error = (expected_height(height) - f64::from(h.height)).abs();
+        let below_error = (expected_height(height - crop.y0) - f64::from(h.height)).abs();
+        let original_top = if below_error < full_error { crop.y0 } else { 0 };
+        let rows = height - original_top;
+        let top = (u64::from(crop.y0 - original_top) * u64::from(h.height)).div_ceil(u64::from(rows)) as u32;
+        let bottom = (u64::from(crop.y1 - original_top) * u64::from(h.height) / u64::from(rows)) as u32;
+        if top < bottom {
+            (top, bottom)
+        } else {
+            (0, h.height)
+        }
+    });
+    let row = h.width as usize * 4;
+    let rgba = rgba[top as usize * row..bottom as usize * row].to_vec();
+    let height = bottom - top;
+    let _ = crate::write_atomic(&cached, &qoi::encode(&rgba, h.width, height, 4));
+    Some((h.width, height, rgba))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn picture_crop_uses_original_capture_layouts() {
+        use crate::contracts::image::Rect;
+        assert_eq!(capture_picture_rect(1920, 1080), Rect { x0: 0, y0: 240, x1: 1920, y1: 1026 });
+        assert_eq!(capture_picture_rect(3840, 2160), Rect { x0: 0, y0: 480, x1: 3840, y1: 2106 });
+        assert_eq!(capture_picture_rect(1280, 720), Rect { x0: 0, y0: 150, x1: 1280, y1: 618 });
+        assert_eq!(capture_picture_rect(64, 32), Rect { x0: 0, y0: 0, x1: 64, y1: 32 });
+    }
+
+    #[test]
+    fn stale_picture_thumbnails_crop_both_full_and_already_top_cropped_frames() {
+        let root = std::env::temp_dir().join(format!("orbiters-thumb-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let mut m = SessionManifest::default();
+        m.capture.width = 1920;
+        m.capture.height = 1080;
+        fs::write(root.join(manifest::MANIFEST_FILE), serde_json::to_vec(&m).unwrap()).unwrap();
+        for (height, top) in [(270, 60), (210, 0)] {
+            let mut pixels = vec![255; 480 * height * 4];
+            for row in top..(height - 14) {
+                pixels[row * 480 * 4..(row + 1) * 480 * 4].fill(80);
+            }
+            fs::write(root.join(manifest::THUMBNAIL_FILE), qoi::encode(&pixels, 480, height as u32, 4)).unwrap();
+            let (w, h, rgba) = read_thumbnail(&root).unwrap();
+            assert_eq!((w, h), (480, 196));
+            assert!(rgba.iter().all(|v| *v == 80));
+            assert_eq!(read_thumbnail(&root).unwrap().2, rgba, "the versioned cache is not cropped again");
+            fs::remove_file(root.join(PICTURE_THUMBNAIL_FILE)).unwrap();
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
     use crate::contracts::manifest::SessionManifest;
     use std::time::Duration;
+
+    #[test]
+    fn a_depth_frames_record_can_be_read_while_recording() {
+        let root = std::env::temp_dir().join(format!("orbiters-bundle-live-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let mut w = BundleWriter::create(&root, "Live", SessionManifest::new("id-5".into(), crate::now_utc_iso(), "0.1.0")).unwrap();
+        let dir = w.dir().to_path_buf();
+        let on_disk = || fs::read(dir.join(manifest::FRAMES_FILE)).unwrap().len();
+        w.append_record(&FrameRecord { frame_index: 0, flags: record_flags::STRIP_OK, ..Default::default() }).unwrap();
+        assert_eq!(on_disk(), 0, "a colour frame waits in the buffer");
+        w.append_record(&FrameRecord { frame_index: 1, flags: record_flags::STRIP_OK | record_flags::DEPTH, depth_index: 0, ..Default::default() }).unwrap();
+        assert_eq!(on_disk(), 2 * RECORD_SIZE, "a depth frame's record is there for a 3D picture's flight, and those before it");
+        w.finish().unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn a_damaged_session_is_listed_and_its_good_records_read() {
@@ -445,6 +548,7 @@ mod tests {
         big[4..8].copy_from_slice(&4000u32.to_be_bytes());
         big[8..12].copy_from_slice(&4000u32.to_be_bytes());
         fs::write(dir.join(manifest::THUMBNAIL_FILE), big).unwrap();
+        fs::remove_file(dir.join(PICTURE_THUMBNAIL_FILE)).unwrap();
         assert!(read_thumbnail(&dir).is_none());
         // A second session with the same name gets a numbered folder.
         let w2 = BundleWriter::create(&root, "World: test", SessionManifest::default()).unwrap();

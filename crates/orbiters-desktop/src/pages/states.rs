@@ -1,16 +1,20 @@
-//! Home's States page: N4N0's saved states of the avatar worn (controller/states.rs). Save how the avatar is now under a
-//! name; for each saved state, apply it, make it the default (put back after each world join and each switch to the
-//! avatar), rename or delete it, and choose whether it puts the GoGoLoco pose and the avatar's size back too.
+//! Home's States page: N4N0's saved states (controller/states.rs), a card per avatar (its name as set in its SDK, which
+//! VRChat's OSCQuery gives, how many states it keeps and its default), the avatar worn first. A card opens that
+//! avatar's states: save how the avatar worn is now under a name; for each saved state, apply it (the avatar worn's
+//! only), make it the default (put back after each world join and each switch to the avatar), rename or delete it, and
+//! choose whether it puts the GoGoLoco pose and the avatar's size back too.
 //!
 //! What a press asks shows at once: the page keeps it over the service's list until the list says the same (or a few
 //! seconds passed, when the service refused it and says why). Switches and the default act on the pointer's press,
 //! buttons on its release with the press shown at once, as on the rest of Home.
 
 use super::{block, section, Cx};
-use crate::state::{StateAction, StateView, StatesView};
-use egui::{pos2, vec2, Align2, Key, Rect, Sense, Ui};
-use orbiters_orb::menu::{next_state_name, StateRow};
-use orbiters_ui::anim;
+use crate::overlay::menu_ui;
+use crate::state::{AvatarView, StateAction, StateView, StatesView};
+use egui::{pos2, vec2, Align2, CursorIcon, Id, Key, Rect, Sense, Ui};
+use orbiters_n4n0_core::menu::layout::Tint;
+use orbiters_n4n0_core::menu::{next_state_name, StateRow};
+use orbiters_ui::anim::{self, Spring};
 use orbiters_ui::icons;
 use orbiters_ui::theme::{self, weight, Txt};
 use orbiters_ui::widgets::{self, Button, Size, Variant};
@@ -19,23 +23,38 @@ use orbiters_ui::widgets::{self, Button, Size, Variant};
 const PENDING_FOR: f64 = 4.0;
 /// A first press on Delete waits this long for the second.
 const CONFIRM_FOR: f64 = 3.0;
+/// The avatars' cards: their height, the room between them, their insets (Home's cards').
+const CARD_H: f32 = 128.0;
+const GAP: f32 = 16.0;
+const INSET: f32 = 24.0;
+/// The cards' width at most, as Home's.
+const MAX_W: f32 = 980.0;
 
 /// What the page asks of Home.
 pub enum Out {
     /// Back to Home itself.
     Home,
-    /// Asked of the service.
-    Action(StateAction),
+    /// Asked of the service, for another avatar's states than the worn one's (`Some` of its id).
+    Action(StateAction, Option<String>),
+}
+
+/// Whose states an action is for: the avatar's id, and whether it is the avatar worn.
+#[derive(Clone)]
+struct Whose {
+    id: String,
+    worn: bool,
 }
 
 #[derive(Default)]
 pub struct StatesPage {
+    /// The avatar whose states show (`None`: the avatars' cards).
+    open: Option<String>,
     /// The name typed for the next save.
     name: String,
     /// The state being renamed, and the name being typed (focused once).
     renaming: Option<(String, String, bool)>,
-    /// What was asked and the service's list does not say yet, since when.
-    pending: Vec<(StateAction, f64)>,
+    /// What was asked and the service's list does not say yet: for which avatar, since when.
+    pending: Vec<(String, StateAction, f64)>,
     /// The state whose Delete was pressed once, and when (a second press deletes).
     confirm: Option<(String, f64)>,
     /// The service's last note shown as a toast.
@@ -43,13 +62,27 @@ pub struct StatesPage {
 }
 
 impl StatesPage {
-    /// What `view` lists once what was asked here is applied over it (and what the list already says is dropped).
-    fn shown(&mut self, view: &StatesView, now: f64) -> Vec<StateView> {
-        self.pending.retain(|(action, at)| now - at < PENDING_FOR && !done(action, &view.states));
-        let mut states = view.states.clone();
-        for (action, _) in &self.pending {
+    /// Back to the avatars' cards (the page is entered anew).
+    pub fn show_cards(&mut self) {
+        self.open = None;
+        self.renaming = None;
+        self.confirm = None;
+    }
+
+    /// Opens avatar `id`'s states (the screenshot review).
+    pub fn open_avatar(&mut self, id: &str) {
+        self.show_cards();
+        self.open = Some(id.to_string());
+    }
+
+    /// What `states` (avatar `id`'s, as the service lists them) are once what was asked here for that avatar is applied
+    /// over them (and what the list already says is dropped).
+    fn shown(&mut self, id: &str, states: &[StateView], now: f64) -> Vec<StateView> {
+        self.pending.retain(|(avatar, action, at)| now - at < PENDING_FOR && (avatar != id || !done(action, states)));
+        let mut states = states.to_vec();
+        for (_, action, _) in self.pending.iter().filter(|(avatar, _, _)| avatar == id) {
             match action {
-                StateAction::Save { name } => {
+                StateAction::Save { name, .. } => {
                     let rows: Vec<StateRow> = states.iter().map(|s| StateRow { name: s.name.clone(), ..Default::default() }).collect();
                     let name = name.clone().unwrap_or_else(|| next_state_name(&rows));
                     states.push(StateView { name, ..Default::default() });
@@ -76,12 +109,12 @@ impl StatesPage {
         states
     }
 
-    /// Something asked: kept until the service's list says it, and sent.
-    fn ask(&mut self, action: StateAction, now: f64, out: &mut Vec<Out>) {
+    /// Something asked of `whose` states: kept until the service's list says it, and sent.
+    fn ask(&mut self, whose: &Whose, action: StateAction, now: f64, out: &mut Vec<Out>) {
         if !matches!(action, StateAction::Apply { .. }) {
-            self.pending.push((action.clone(), now));
+            self.pending.push((whose.id.clone(), action.clone(), now));
         }
-        out.push(Out::Action(action));
+        out.push(Out::Action(action, (!whose.worn).then(|| whose.id.clone())));
     }
 }
 
@@ -89,7 +122,7 @@ impl StatesPage {
 fn done(action: &StateAction, states: &[StateView]) -> bool {
     let find = |id: &str| states.iter().find(|s| s.id == id);
     match action {
-        StateAction::Save { name } => name.as_ref().is_some_and(|n| states.iter().any(|s| s.name == *n)),
+        StateAction::Save { name, .. } => name.as_ref().is_some_and(|n| states.iter().any(|s| s.name == *n)),
         StateAction::Default { id: Some(id) } => find(id).is_some_and(|s| s.default),
         StateAction::Default { id: None } => states.iter().all(|s| !s.default),
         StateAction::Rename { id, name } => find(id).is_none_or(|s| s.name == *name),
@@ -99,11 +132,40 @@ fn done(action: &StateAction, states: &[StateView]) -> bool {
     }
 }
 
-/// The page: its heading, saving, then the saved states.
+/// An avatar's name, or what stands for it when VRChat never gave one (an avatar saved before names were kept).
+fn avatar_name(avatar: &AvatarView) -> String {
+    match avatar.name.as_deref().map(str::trim).filter(|n| !n.is_empty()) {
+        Some(name) => name.to_string(),
+        None if avatar.worn => "This avatar".to_string(),
+        None => format!("Avatar {}", short_id(&avatar.id)),
+    }
+}
+
+/// An avatar's id shortened for a title: `avtr_1a2b3c4d…`.
+fn short_id(id: &str) -> String {
+    let short: String = id.chars().take(13).collect();
+    if short.len() < id.len() {
+        format!("{short}…")
+    } else {
+        short
+    }
+}
+
+/// "3 saved states", "1 saved state", "Nothing saved yet".
+fn count(n: usize) -> String {
+    match n {
+        0 => "Nothing saved yet".into(),
+        1 => "1 saved state".into(),
+        n => format!("{n} saved states"),
+    }
+}
+
+/// The page: the avatars' cards, or one avatar's states.
 pub fn show(ui: &mut Ui, cx: &mut Cx, page: &mut StatesPage, out: &mut Vec<Out>) {
     let now = anim::time(ui.ctx());
-    let view = cx.snap.orb.states.clone();
-    // What the service said of the last save or apply: a toast, once (what went wrong comes as the service's own toast).
+    let view = cx.snap.n4n0.states.clone();
+    // What the service said of the last save, apply or change: a toast, once (what went wrong comes as the service's own
+    // toast).
     if let Some(note) = &view.note {
         if page.note_seen.is_some_and(|seen| seen != note.id) && !note.error {
             cx.toasts.push(ui.ctx(), orbiters_ui::toast::Kind::Success, note.text.clone());
@@ -112,16 +174,28 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, page: &mut StatesPage, out: &mut Vec<Out>)
     } else {
         page.note_seen.get_or_insert(0);
     }
-    let states = page.shown(&view, now);
     if page.confirm.as_ref().is_some_and(|(_, at)| now - at >= CONFIRM_FOR) {
         page.confirm = None;
     }
-    let avatar = view.avatar_name.clone().unwrap_or_else(|| "This avatar".into());
-    let sub = match (&view.avatar_id, states.len()) {
-        (None, _) => "VRChat's avatar is not known yet".to_string(),
-        (Some(_), 0) => format!("{avatar}: nothing saved yet"),
-        (Some(_), 1) => format!("{avatar}: 1 saved state"),
-        (Some(_), n) => format!("{avatar}: {n} saved states"),
+    // An avatar whose card went (its last state deleted, no longer worn) shows the cards again.
+    let opened = page.open.as_ref().and_then(|id| view.avatars.iter().find(|a| a.id == *id)).cloned();
+    match opened {
+        Some(avatar) => avatar_page(ui, cx, page, &view, &avatar, now, out),
+        None => {
+            page.open = None;
+            cards_page(ui, cx, page, &view, out);
+        }
+    }
+}
+
+/// The avatars' cards: the avatar worn first, then the others, the one saved in last first.
+fn cards_page(ui: &mut Ui, cx: &mut Cx, page: &mut StatesPage, view: &StatesView, out: &mut Vec<Out>) {
+    let total: usize = view.avatars.iter().map(|a| a.states.len()).sum();
+    let avatars = view.avatars.len();
+    let sub = match (view.avatar_id.is_some(), avatars) {
+        (false, 0) => "VRChat's avatar is not known yet".to_string(),
+        (true, 1) => format!("Your avatar · {}", count(total).to_lowercase()),
+        (_, n) => format!("{n} avatar{} · {}", if n == 1 { "" } else { "s" }, count(total).to_lowercase()),
     };
     block(ui, cx, 0, 116.0, |ui, rect| {
         let back = Button::new("Home").icon(icons::ARROW_LEFT).variant(Variant::Ghost).size(Size::Sm);
@@ -131,20 +205,103 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, page: &mut StatesPage, out: &mut Vec<Out>)
         }
         super::heading(ui, Rect::from_min_max(pos2(rect.left(), rect.top() + 44.0), rect.max), "N4N0 menu", "States", Some(&sub));
     });
-    if view.avatar_id.is_none() {
-        let text = "Start VRChat with OSC on: the states shown are those of the avatar you wear. A state keeps every parameter of it \
-                    that OSC can set, and its size; applying one puts them back.";
+    if view.avatars.is_empty() {
+        let text = "Start VRChat with OSC on: the avatar you wear gets a card here, named as in its SDK. A state keeps every \
+                    parameter of it that OSC can set, and its size; applying one puts them back.";
         return note(ui, cx, 1, icons::BOOKMARKS_SIMPLE, "No avatar yet", text);
     }
-    save_card(ui, cx, page, &states, view.saving, now, out);
+    let w = ui.available_width().min(MAX_W);
+    let cols = if w >= 900.0 {
+        3
+    } else if w >= 560.0 {
+        2
+    } else {
+        1
+    };
+    let card_w = (w - GAP * (cols - 1) as f32) / cols as f32;
+    let rows = view.avatars.len().div_ceil(cols);
+    let (area, _) = ui.allocate_exact_size(vec2(w, rows as f32 * (CARD_H + GAP) - GAP), Sense::hover());
+    for (i, avatar) in view.avatars.iter().enumerate() {
+        let at = area.min + vec2((i % cols) as f32 * (card_w + GAP), (i / cols) as f32 * (CARD_H + GAP));
+        if avatar_card(ui, cx, 1 + i, Rect::from_min_size(at, vec2(card_w, CARD_H)), avatar) {
+            page.open_avatar(&avatar.id);
+        }
+    }
+}
+
+/// An avatar's card: its chip, its name, how many states it keeps and its default, "Wearing now" on the worn one, the
+/// way in. Whether it was pressed.
+fn avatar_card(ui: &mut Ui, cx: &Cx, index: usize, rect: Rect, avatar: &AvatarView) -> bool {
+    let (rect, alpha) = super::entering(ui, cx, index, rect);
+    let ctx = ui.ctx().clone();
+    let id = Id::unique(("orbiters-states-avatar", &avatar.id));
+    let resp = ui.interact(rect, id, Sense::click());
+    widgets::note_control(&ctx, &avatar_name(avatar), rect, true);
+    let pressed = widgets::pressed(&resp);
+    let hover = anim::toggle(&ctx, id.with("hover"), resp.hovered(), Spring::SOFT);
+    let press = anim::toggle(&ctx, id.with("press"), resp.is_pointer_button_down_on(), Spring::SNAPPY);
+    resp.on_hover_cursor(CursorIcon::PointingHand);
+    let r = Rect::from_center_size(rect.center(), rect.size() * (1.0 - 0.025 * press));
+    let mut p = ui.painter().clone();
+    p.multiply_opacity(alpha);
+    widgets::frame(&p, r, theme::CARD_RADIUS, theme::mix(theme::surface(), theme::INK_800, hover));
+    // The chip in the States tile's colour; the avatar worn's in the accent.
+    let tint = if avatar.worn { theme::ACCENT } else { menu_ui::tint(Tint::Pink) };
+    let chip = Rect::from_min_size(r.min + vec2(INSET, 22.0), vec2(36.0, 36.0));
+    p.rect_filled(chip, theme::radius(11.0), theme::alpha(tint, 0.12));
+    widgets::icon(&p, chip.center(), if avatar.worn { icons::PERSON } else { icons::USER_CIRCLE }, 17.0, tint);
+    if avatar.worn {
+        let pill = Txt::new("Wearing now", 11.5).weight(weight::SEMIBOLD).color(theme::ACCENT);
+        let pw = widgets::text_size(ui, &pill).x + 20.0;
+        let pr = Rect::from_min_size(pos2(r.right() - INSET - pw, chip.center().y - 10.0), vec2(pw, 20.0));
+        p.rect_filled(pr, theme::radius(10.0), theme::alpha(theme::ACCENT, 0.14));
+        widgets::text(&p, pr.center(), Align2::CENTER_CENTER, &pill);
+    } else {
+        widgets::icon(&p, pos2(r.right() - INSET - 8.0, chip.center().y), icons::CARET_RIGHT, 16.0, theme::mix(theme::FG_4, theme::FG_2, hover));
+    }
+    let x = r.left() + INSET;
+    let room = r.width() - 2.0 * INSET;
+    let name = Txt::new(avatar_name(avatar), 15.5).weight(weight::SEMIBOLD);
+    widgets::text_truncated(&p, pos2(x, r.bottom() - 46.0), Align2::LEFT_CENTER, &name, room);
+    let default = avatar.states.iter().find(|s| s.default).map(|s| format!(" · Default: {}", s.name)).unwrap_or_default();
+    let note = Txt::new(format!("{}{default}", count(avatar.states.len())), 12.5).color(if default.is_empty() { theme::FG_3 } else { theme::ACCENT });
+    widgets::text_truncated(&p, pos2(x, r.bottom() - 24.0), Align2::LEFT_CENTER, &note, room);
+    pressed
+}
+
+/// One avatar's states: saving (the avatar worn), then its states, the newest first.
+fn avatar_page(ui: &mut Ui, cx: &mut Cx, page: &mut StatesPage, view: &StatesView, avatar: &AvatarView, now: f64, out: &mut Vec<Out>) {
+    let whose = Whose { id: avatar.id.clone(), worn: avatar.worn };
+    let states = page.shown(&avatar.id, &avatar.states, now);
+    let sub = if avatar.worn {
+        format!("Wearing now · {}", count(states.len()).to_lowercase())
+    } else {
+        format!("{} · wear it in VRChat to apply them", count(states.len()))
+    };
+    let mut back_to_cards = false;
+    block(ui, cx, 0, 116.0, |ui, rect| {
+        let back = Button::new("States").icon(icons::ARROW_LEFT).variant(Variant::Ghost).size(Size::Sm).id_salt("orbiters-states-cards");
+        let w = back.desired_width(ui);
+        back_to_cards = back.show_at(ui, Rect::from_min_size(rect.min, vec2(w, 32.0))).clicked();
+        super::heading(ui, Rect::from_min_max(pos2(rect.left(), rect.top() + 44.0), rect.max), "States", &avatar_name(avatar), Some(&sub));
+    });
+    if back_to_cards {
+        page.show_cards();
+        return;
+    }
+    let mut index = 1;
+    if avatar.worn {
+        save_card(ui, cx, page, &whose, &states, view.saving, now, out);
+        index += 1;
+    }
     if states.is_empty() {
         let text = "Save keeps how the avatar is now: its toggles, sliders and outfits. Make one the default and it is put back \
                     after each world join, and each time you switch to this avatar.";
-        return note(ui, cx, 2, icons::BOOKMARKS_SIMPLE, "Nothing saved for this avatar", text);
+        return note(ui, cx, index, icons::BOOKMARKS_SIMPLE, "Nothing saved for this avatar", text);
     }
     // The newest first.
     for (i, state) in states.iter().enumerate().rev() {
-        state_card(ui, cx, 2 + states.len() - 1 - i, page, state, now, out);
+        state_card(ui, cx, index + states.len() - 1 - i, page, &whose, state, now, out);
     }
 }
 
@@ -158,8 +315,9 @@ fn note(ui: &mut Ui, cx: &Cx, index: usize, glyph: &str, title: &str, text: &str
     });
 }
 
-/// Saving how the avatar is now: a name (or the next "State n"), and Save.
-fn save_card(ui: &mut Ui, cx: &Cx, page: &mut StatesPage, states: &[StateView], saving: bool, now: f64, out: &mut Vec<Out>) {
+/// Saving how the avatar worn is now: a name (or the next "State n"), and Save.
+#[allow(clippy::too_many_arguments)]
+fn save_card(ui: &mut Ui, cx: &Cx, page: &mut StatesPage, whose: &Whose, states: &[StateView], saving: bool, now: f64, out: &mut Vec<Out>) {
     let rows: Vec<StateRow> = states.iter().map(|s| StateRow { name: s.name.clone(), ..Default::default() }).collect();
     let placeholder = next_state_name(&rows);
     let sub = "Every parameter OSC can set, GoGoLoco's pose and the avatar's size (N4N0's own stay out)";
@@ -178,14 +336,15 @@ fn save_card(ui: &mut Ui, cx: &Cx, page: &mut StatesPage, states: &[StateView], 
             let name = page.name.trim().to_string();
             let name = if name.is_empty() { placeholder.clone() } else { name };
             page.name.clear();
-            page.ask(StateAction::Save { name: Some(name) }, now, out);
+            page.ask(whose, StateAction::Save { name: Some(name), size: true, pose: false, default: false }, now, out);
         }
         ui.add_space(8.0);
     });
 }
 
 /// One saved state: what it puts back, its default, and its buttons.
-fn state_card(ui: &mut Ui, cx: &Cx, index: usize, page: &mut StatesPage, state: &StateView, now: f64, out: &mut Vec<Out>) {
+#[allow(clippy::too_many_arguments)]
+fn state_card(ui: &mut Ui, cx: &Cx, index: usize, page: &mut StatesPage, whose: &Whose, state: &StateView, now: f64, out: &mut Vec<Out>) {
     let saving = state.id.is_empty();
     let when = if saving { "Saving…".to_string() } else { super::local_time(&state.saved_utc) };
     let others = state.parameters.saturating_sub(state.pose_parameters);
@@ -211,7 +370,7 @@ fn state_card(ui: &mut Ui, cx: &Cx, index: usize, page: &mut StatesPage, state: 
             }
             let mut on = state.pose;
             if widgets::toggle(ui, ("orbiters-state-pose", &id), &mut on) {
-                page.ask(StateAction::Options { id: id.clone(), pose: on, size: state.size }, now, out);
+                page.ask(whose, StateAction::Options { id: id.clone(), pose: on, size: state.size }, now, out);
             }
         });
         widgets::separator(ui);
@@ -225,16 +384,16 @@ fn state_card(ui: &mut Ui, cx: &Cx, index: usize, page: &mut StatesPage, state: 
             }
             let mut on = state.size;
             if widgets::toggle(ui, ("orbiters-state-size", &id), &mut on) {
-                page.ask(StateAction::Options { id: id.clone(), pose: state.pose, size: on }, now, out);
+                page.ask(whose, StateAction::Options { id: id.clone(), pose: state.pose, size: on }, now, out);
             }
         });
         widgets::separator(ui);
         ui.add_space(14.0);
         let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), 40.0), Sense::hover());
         if renaming {
-            rename_row(ui, row, page, &id, now, out);
+            rename_row(ui, row, page, whose, &id, now, out);
         } else {
-            buttons_row(ui, row, page, state, saving, now, out);
+            buttons_row(ui, row, page, whose, state, saving, now, out);
         }
         ui.add_space(8.0);
     });
@@ -251,14 +410,19 @@ fn default_pill(ui: &Ui, left_top: egui::Pos2) {
     widgets::text(p, pos2(r.left() + 22.0, r.center().y), Align2::LEFT_CENTER, &txt);
 }
 
-/// Apply, the default, Rename and Delete.
-fn buttons_row(ui: &mut Ui, row: Rect, page: &mut StatesPage, state: &StateView, saving: bool, now: f64, out: &mut Vec<Out>) {
+/// Apply (the avatar worn's states only), the default, Rename and Delete.
+#[allow(clippy::too_many_arguments)]
+fn buttons_row(ui: &mut Ui, row: Rect, page: &mut StatesPage, whose: &Whose, state: &StateView, saving: bool, now: f64, out: &mut Vec<Out>) {
     let id = state.id.clone();
     let mut x = row.left();
-    let apply = Button::new("Apply").icon(icons::ARROW_COUNTER_CLOCKWISE).variant(Variant::Primary).enabled(!saving).id_salt(("orbiters-state-apply", &id));
+    let apply = Button::new("Apply").icon(icons::ARROW_COUNTER_CLOCKWISE).variant(Variant::Primary).enabled(!saving && whose.worn);
+    let mut apply = apply.id_salt(("orbiters-state-apply", &id));
+    if !whose.worn {
+        apply = apply.hint("Wear this avatar in VRChat to apply its states");
+    }
     let w = apply.desired_width(ui).max(104.0);
     if apply.width(w).show_at(ui, Rect::from_min_size(pos2(x, row.top()), vec2(w, 40.0))).clicked() {
-        page.ask(StateAction::Apply { id: id.clone() }, now, out);
+        page.ask(whose, StateAction::Apply { id: id.clone() }, now, out);
     }
     x += w + 8.0;
     // The default is a choice: it acts on the press, as the switches do.
@@ -273,7 +437,7 @@ fn buttons_row(ui: &mut Ui, row: Rect, page: &mut StatesPage, state: &StateView,
     let rect = Rect::from_min_size(pos2(x, row.top()), vec2(w, 40.0));
     let resp = default.show_at(ui, rect);
     if !saving && widgets::pressed(&resp) {
-        page.ask(StateAction::Default { id: (!state.default).then(|| id.clone()) }, now, out);
+        page.ask(whose, StateAction::Default { id: (!state.default).then(|| id.clone()) }, now, out);
     }
     if state.default {
         ui.painter().rect_stroke(rect, theme::radius(20.0), egui::Stroke::new(1.5, theme::alpha(theme::ACCENT, 0.55)), egui::StrokeKind::Inside);
@@ -286,7 +450,7 @@ fn buttons_row(ui: &mut Ui, row: Rect, page: &mut StatesPage, state: &StateView,
     if delete.show_at(ui, Rect::from_min_size(pos2(row.right() - dw, row.top()), vec2(dw, 40.0))).clicked() {
         if confirming {
             page.confirm = None;
-            page.ask(StateAction::Delete { id: id.clone() }, now, out);
+            page.ask(whose, StateAction::Delete { id: id.clone() }, now, out);
         } else {
             page.confirm = Some((id.clone(), now));
             ui.ctx().request_repaint_after(std::time::Duration::from_secs_f64(CONFIRM_FOR));
@@ -300,7 +464,8 @@ fn buttons_row(ui: &mut Ui, row: Rect, page: &mut StatesPage, state: &StateView,
 }
 
 /// Renaming: the name in a field, Save and Cancel (Enter saves, Escape cancels).
-fn rename_row(ui: &mut Ui, row: Rect, page: &mut StatesPage, id: &str, now: f64, out: &mut Vec<Out>) {
+#[allow(clippy::too_many_arguments)]
+fn rename_row(ui: &mut Ui, row: Rect, page: &mut StatesPage, whose: &Whose, id: &str, now: f64, out: &mut Vec<Out>) {
     let Some((_, name, focus)) = page.renaming.as_mut() else { return };
     let buttons_w = 96.0 + 8.0 + 96.0;
     let field = Rect::from_min_size(row.min + vec2(0.0, 2.0), vec2((row.width() - buttons_w - 12.0).min(420.0), 36.0));
@@ -320,7 +485,7 @@ fn rename_row(ui: &mut Ui, row: Rect, page: &mut StatesPage, id: &str, now: f64,
         let name = name.trim().to_string();
         page.renaming = None;
         if !name.is_empty() {
-            page.ask(StateAction::Rename { id: id.to_string(), name }, now, out);
+            page.ask(whose, StateAction::Rename { id: id.to_string(), name }, now, out);
         }
     } else if cancelled || escape {
         page.renaming = None;
@@ -331,40 +496,52 @@ fn rename_row(ui: &mut Ui, row: Rect, page: &mut StatesPage, id: &str, now: f64,
 mod tests {
     use super::*;
 
-    fn view(states: &[(&str, &str, bool)]) -> StatesView {
-        StatesView {
-            avatar_id: Some("avtr_a".into()),
-            states: states
-                .iter()
-                .map(|(id, name, default)| StateView { id: id.to_string(), name: name.to_string(), default: *default, ..Default::default() })
-                .collect(),
-            ..Default::default()
-        }
+    fn states(states: &[(&str, &str, bool)]) -> Vec<StateView> {
+        states.iter().map(|(id, name, default)| StateView { id: id.to_string(), name: name.to_string(), default: *default, ..Default::default() }).collect()
     }
 
     #[test]
     fn what_was_asked_shows_at_once_until_the_service_says_it() {
         let mut page = StatesPage::default();
         let mut out = Vec::new();
-        let before = view(&[("s1", "Hoodie on", false), ("s2", "Cosy", true)]);
-        page.ask(StateAction::Default { id: Some("s1".into()) }, 0.0, &mut out);
-        page.ask(StateAction::Rename { id: "s2".into(), name: "Cosy evening".into() }, 0.0, &mut out);
-        page.ask(StateAction::Save { name: Some("State 3".into()) }, 0.0, &mut out);
-        page.ask(StateAction::Apply { id: "s1".into() }, 0.0, &mut out);
+        let worn = Whose { id: "avtr_a".into(), worn: true };
+        let before = states(&[("s1", "Hoodie on", false), ("s2", "Cosy", true)]);
+        page.ask(&worn, StateAction::Default { id: Some("s1".into()) }, 0.0, &mut out);
+        page.ask(&worn, StateAction::Rename { id: "s2".into(), name: "Cosy evening".into() }, 0.0, &mut out);
+        page.ask(&worn, StateAction::Save { name: Some("State 3".into()), size: true, pose: false, default: false }, 0.0, &mut out);
+        page.ask(&worn, StateAction::Apply { id: "s1".into() }, 0.0, &mut out);
         assert_eq!(out.len(), 4, "all of it sent");
-        let shown = page.shown(&before, 0.5);
+        assert!(out.iter().all(|o| matches!(o, Out::Action(_, None))), "the avatar worn's: no avatar named");
+        let shown = page.shown("avtr_a", &before, 0.5);
         let rows: Vec<(&str, &str, bool)> = shown.iter().map(|s| (s.id.as_str(), s.name.as_str(), s.default)).collect();
         assert_eq!(rows, vec![("s1", "Hoodie on", true), ("s2", "Cosy evening", false), ("", "State 3", false)], "the service has not answered yet");
+        // Another avatar's list is not this one's.
+        assert_eq!(page.shown("avtr_b", &before, 0.5).len(), 2);
         // The service says the default and the name: those are its own now; the save is not listed yet.
-        let after = view(&[("s1", "Hoodie on", true), ("s2", "Cosy evening", false)]);
-        assert_eq!(page.shown(&after, 1.0).len(), 3);
+        let after = states(&[("s1", "Hoodie on", true), ("s2", "Cosy evening", false)]);
+        assert_eq!(page.shown("avtr_a", &after, 1.0).len(), 3);
         assert_eq!(page.pending.len(), 1, "only the save waits");
-        let saved = view(&[("s1", "Hoodie on", true), ("s2", "Cosy evening", false), ("s3", "State 3", false)]);
-        assert_eq!(page.shown(&saved, 1.5).len(), 3);
+        let saved = states(&[("s1", "Hoodie on", true), ("s2", "Cosy evening", false), ("s3", "State 3", false)]);
+        assert_eq!(page.shown("avtr_a", &saved, 1.5).len(), 3);
         assert!(page.pending.is_empty());
         // A delete the service refused shows again once the wait is over.
-        page.ask(StateAction::Delete { id: "s3".into() }, 2.0, &mut out);
-        assert_eq!(page.shown(&saved, 2.1).len(), 2);
-        assert_eq!(page.shown(&saved, 2.0 + PENDING_FOR).len(), 3, "the service's list has the last word");
+        page.ask(&worn, StateAction::Delete { id: "s3".into() }, 2.0, &mut out);
+        assert_eq!(page.shown("avtr_a", &saved, 2.1).len(), 2);
+        assert_eq!(page.shown("avtr_a", &saved, 2.0 + PENDING_FOR).len(), 3, "the service's list has the last word");
+    }
+
+    #[test]
+    fn another_avatar_s_states_are_asked_for_by_its_id_and_named_without_a_name() {
+        let mut page = StatesPage::default();
+        let mut out = Vec::new();
+        let other = Whose { id: "avtr_b".into(), worn: false };
+        page.ask(&other, StateAction::Delete { id: "s1".into() }, 0.0, &mut out);
+        assert!(matches!(&out[..], [Out::Action(StateAction::Delete { .. }, Some(id))] if id == "avtr_b"));
+        assert!(page.shown("avtr_b", &states(&[("s1", "Party", false)]), 0.1).is_empty());
+        let unnamed = AvatarView { id: "avtr_0123456789abcdef".into(), name: None, worn: false, states: Vec::new() };
+        assert_eq!(avatar_name(&unnamed), "Avatar avtr_01234567…");
+        assert_eq!(avatar_name(&AvatarView { worn: true, ..unnamed.clone() }), "This avatar");
+        assert_eq!(avatar_name(&AvatarView { name: Some("Ultirex ✨".into()), ..unnamed }), "Ultirex ✨");
+        assert_eq!((count(0).as_str(), count(1).as_str(), count(3).as_str()), ("Nothing saved yet", "1 saved state", "3 saved states"));
     }
 }

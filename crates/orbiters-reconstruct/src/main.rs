@@ -3,6 +3,9 @@
 //! ```text
 //! orbiters-reconstruct <session folder> [--width N] [--iterations N] [--budget N] [--robust T] [--gpu integrated|fastest]
 //!     [--regularise-unseen] [--adam-restart] [--filter-3d S] [--cleanup]
+//!     [--sources opacity|gradient|error|confidence] [--sources-by-opacity] [--split footprint|long-axis|long-axis-on-depth]
+//!     [--noise λ | --no-noise] [--no-noise-gate] [--noise-visible] [--noise-dead-max share] [--depth-births share]
+//!     [--nested-forward | --flat-forward] [--gpu-profile]
 //! ```
 //!
 //! Prints one [`Event`] per line on stdout for the app and writes the session's `reconstruction/` folder: the splats
@@ -35,7 +38,10 @@ struct Args {
     session: PathBuf,
     width: u32,
     settings: train::Settings,
+    /// `--budget`: the most Gaussians whatever the session (else train::budget_for picks it).
+    budget: Option<usize>,
     device: gpu::DeviceOptions,
+    portrait_boxes: Option<PathBuf>,
 }
 
 fn args() -> anyhow::Result<Args> {
@@ -43,16 +49,20 @@ fn args() -> anyhow::Result<Args> {
     let mut session = None;
     let mut width = 1920;
     let mut settings = train::Settings::default();
+    let mut budget = None;
     let mut device = gpu::DeviceOptions::default();
+    let mut portrait_boxes = None;
     while let Some(a) = it.next() {
         let mut number = |name: &str| -> anyhow::Result<u64> { it.next().with_context(|| format!("{name} needs a value"))?.parse().with_context(|| format!("{name} takes a number")) };
         match a.as_str() {
             "--width" => width = number("--width")? as u32,
             "--iterations" => settings.iterations = number("--iterations")? as u32,
-            "--budget" => settings.budget = number("--budget")? as usize,
+            "--budget" => budget = Some(number("--budget")? as usize),
             "--robust" => settings.robust = it.next().context("--robust needs a value")?.parse().context("--robust takes a number (0–1)")?,
             // Lab A/Bs: the regularisers on every Gaussian every step (orbiters_reconstruct::train::Settings).
             "--regularise-unseen" => settings.regularise_unseen = true,
+            // Colours within 0–1 at every step, what the splat files hold.
+            "--clamp-colors" => settings.clamp_colors = true,
             // Adam's bias correction per Gaussian from its restart, rather than from the run's first step.
             "--adam-restart" => settings.adam_restart = true,
             // Mip-Splatting's 3D filter's scale (0, the default: none; its own is orbiters_reconstruct::cpu::FILTER_3D).
@@ -61,6 +71,47 @@ fn args() -> anyhow::Result<Args> {
             "--cleanup" => settings.cleanup = true,
             // The sky map's width (orbiters_reconstruct::sky::SkyMap; 0: the shell of discs).
             "--sky-map" => settings.sky_map = number("--sky-map")? as u32,
+            // Lab A/Bs of the set's size (orbiters_reconstruct::train::Settings): fading what no training pixel sees
+            // (every N steps, 0: never; at what blending weight) and the share of the steps relocation runs in.
+            "--fade-every" => settings.fade_unseen_every = number("--fade-every")? as u32,
+            "--unseen-weight" => settings.unseen_weight = it.next().context("--unseen-weight needs a value")?.parse().context("--unseen-weight takes a number")?,
+            "--relocate-until" => settings.relocate_until = it.next().context("--relocate-until needs a value")?.parse().context("--relocate-until takes a number (0–1)")?,
+            "--fade-to-the-end" => settings.fade_until_rising = false,
+            // Lab A/Bs of where relocation places Gaussians (orbiters_reconstruct::train::{Sources, Split}): which live
+            // ones it copies, how a copy splits its source, the SGLD noise on the means (on by default: λ 5e5, spared on
+            // measured depth, only in rounds at most a quarter dead; --no-noise, --no-noise-gate, --noise-dead-max 0 for
+            // every round, --noise-visible: only what the step shows) and the share of the moves born at measured depth.
+            "--sources" => {
+                settings.sources = match it.next().as_deref() {
+                    Some("opacity") => train::Sources::Opacity,
+                    Some("gradient") => train::Sources::Gradient,
+                    Some("error") => train::Sources::Error,
+                    Some("confidence") => train::Sources::Confidence,
+                    _ => bail!("--sources takes opacity, gradient, error or confidence"),
+                }
+            }
+            "--split" => {
+                settings.split = match it.next().as_deref() {
+                    Some("footprint") => train::Split::Footprint,
+                    Some("long-axis") => train::Split::LongAxis,
+                    Some("long-axis-on-depth") => train::Split::LongAxisOnDepth,
+                    _ => bail!("--split takes footprint, long-axis or long-axis-on-depth"),
+                }
+            }
+            "--sources-by-opacity" => settings.sources_by_opacity = true,
+            "--noise" => settings.noise = it.next().context("--noise needs a value")?.parse().context("--noise takes a number")?,
+            "--noise-gate" => settings.noise_gate = true,
+            "--no-noise" => settings.noise = 0.0,
+            "--no-noise-gate" => settings.noise_gate = false,
+            "--noise-visible" => settings.noise_visible = true,
+            "--noise-dead-max" => settings.noise_dead_max = it.next().context("--noise-dead-max needs a value")?.parse().context("--noise-dead-max takes a share (0–1)")?,
+            // A 3D picture's detail views' share of the colour steps (orbiters_reconstruct::dataset::detail_views,
+            // train::Settings::detail_share, a quarter by default; 0: trained as any keyframe).
+            "--detail-share" => settings.detail_share = it.next().context("--detail-share needs a value")?.parse().context("--detail-share takes a share (0–1)")?,
+            "--portrait-steps" => settings.portrait_steps = number("--portrait-steps")? as u32,
+            "--portrait-moment" => settings.portrait_moment = it.next().context("--portrait-moment needs a value")?.parse().context("--portrait-moment takes seconds")?,
+            "--portrait-boxes" => portrait_boxes = Some(PathBuf::from(it.next().context("--portrait-boxes needs a file")?)),
+            "--depth-births" => settings.depth_births = it.next().context("--depth-births needs a value")?.parse().context("--depth-births takes a number (0–1)")?,
             "--gpu" => {
                 device.low_power = match it.next().as_deref() {
                     Some("integrated") => true,
@@ -68,11 +119,17 @@ fn args() -> anyhow::Result<Args> {
                     _ => bail!("--gpu takes integrated or fastest"),
                 }
             }
+            // Lab: GPU timestamps around every pass of the whole run, printed as one `gpu_profile {json}` line on
+            // stderr at the end (per section: milliseconds and passes summed over all steps). The timestamps are read
+            // back after each step, which waits for it: the run is slower, the shares are what to read.
+            "--gpu-profile" => device.profile = true,
+            "--nested-forward" => settings.nested_forward = true,
+            "--flat-forward" => settings.nested_forward = false,
             _ if a.starts_with("--") => bail!("unknown option {a}"),
             _ => session = Some(PathBuf::from(a)),
         }
     }
-    Ok(Args { session: session.context("usage: orbiters-reconstruct <session folder> [--width N] [--iterations N] [--budget N] [--robust T] [--gpu integrated|fastest]")?, width, settings, device })
+    Ok(Args { portrait_boxes, session: session.context("usage: orbiters-reconstruct <session folder> [--width N] [--iterations N] [--budget N] [--robust T] [--gpu integrated|fastest]")?, width, settings, budget, device })
 }
 
 fn rgb8(img: &[[f32; 4]]) -> Vec<u8> {
@@ -100,11 +157,26 @@ fn run(args: Args) -> anyhow::Result<Report> {
         eprintln!("{line}");
     }
     let data = &prepared.data;
-    let held_out = train::held_out(data.views.len(), args.settings.hold_out_every);
+    let held_out = train::held_out_views(data, args.settings.hold_out_every);
     let mut gpu = device.join().map_err(|_| anyhow::anyhow!("the GPU device's thread panicked"))??;
     let dev = gpu.device.clone();
     let mut settings = args.settings.clone();
-    if orbiters_reconstruct::priority::vrchat() && !gpu.integrated {
+    // The faces in its keyframes, for the extra training they get (orbiters_reconstruct::portraits).
+    if let Some(file) = &args.portrait_boxes {
+        settings.portraits = orbiters_reconstruct::portraits::from_lab_file(file, data)?;
+    } else if settings.portrait_steps > 0 {
+        let found = timing::section("1b faces", None, || orbiters_reconstruct::portraits::find(data));
+        if found.ran {
+            eprintln!("faces: {} heads ({} known still), {} of {} boxes in {} keyframes kept, {:.2} s", found.heads, found.still, found.portraits.len(), found.detections, found.keyframes, found.seconds);
+        }
+        settings.portraits = found.portraits;
+    }
+    // As many Gaussians as the session's views can tell apart (train::budget_for), within the graphics memory the GPU
+    // has free (beside VRChat, what it leaves).
+    let views = data.views.len() + data.faces.as_ref().map_or(0, |f| f.views.len());
+    settings.budget = args.budget.unwrap_or_else(|| train::budget_for(views));
+    eprintln!("budget: {} Gaussians for {views} views", settings.budget);
+    if !gpu.integrated {
         fit_memory(&gpu, &mut settings);
     }
     stage(Stage::Seeding, 0.0);
@@ -122,6 +194,12 @@ fn run(args: Args) -> anyhow::Result<Report> {
         init::add_from_rays(&mut seeded, data, few - from_depth, &held_out, settings.seed);
         eprintln!("depth seeded {from_depth} Gaussians: {} more along the keyframes' rays", seeded.len() - from_depth);
         settings.starved = true;
+    }
+    // What only the capture rig's faces saw has no depth: seeds along their rays, a tenth of the seeding budget.
+    if let Some(faces) = &data.faces {
+        let before = seeded.len();
+        init::add_from_face_rays(&mut seeded, data, budget / 10, settings.seed ^ 0xFACE);
+        eprintln!("the rig's {} faces: {} seeds along their rays", faces.views.len(), seeded.len() - before);
     }
     // The texels of the sky map that seeding saw (sky::SkyMap::fill keeps them).
     let mut sky_seen = Vec::new();
@@ -211,11 +289,16 @@ fn run(args: Args) -> anyhow::Result<Report> {
     timing::section("7 replace", None, || replace(dir, &partial))?;
     timing::add("0 run", run_start.elapsed());
     timing::print();
+    if let Some(p) = &gpu.profiler {
+        let (span, steps) = p.span.get();
+        let sections: serde_json::Map<String, serde_json::Value> = p.totals.borrow().iter().map(|(k, (ms, n))| (k.to_string(), serde_json::json!({"ms": ms, "passes": n}))).collect();
+        eprintln!("gpu_profile {}", serde_json::json!({"steps": steps, "span_ms": span, "sections": sections, "gaussians": report.gaussians, "iterations": report.iterations, "seconds": report.seconds}));
+    }
     Ok(report)
 }
 
-/// Lowers `settings.budget` until a run fits the graphics memory the GPU has free (beside VRChat), leaving 1 GB for
-/// VRChat's own growth (avatars loading in), but never under 200,000 Gaussians.
+/// Lowers `settings.budget` until a run fits the graphics memory the GPU has free (beside VRChat, what it leaves),
+/// leaving 1 GB for other programs' growth (VRChat's avatars loading in), but never under 200,000 Gaussians.
 fn fit_memory(gpu: &gpu::Gpu, settings: &mut train::Settings) {
     const LEFT: u64 = 1 << 30;
     const FEWEST: usize = 200_000;
@@ -227,7 +310,7 @@ fn fit_memory(gpu: &gpu::Gpu, settings: &mut train::Settings) {
     let fixed = gpu.training_memory(0);
     let fits = (settings.budget as f64 * free.saturating_sub(LEFT + fixed) as f64 / need.saturating_sub(fixed).max(1) as f64) as usize;
     let budget = fits.clamp(FEWEST.min(settings.budget), settings.budget);
-    eprintln!("graphics memory: {} MB free beside VRChat ({} MB needed): {budget} Gaussians instead of {}", free >> 20, need >> 20, settings.budget);
+    eprintln!("graphics memory: {} MB free ({} MB needed): {budget} Gaussians instead of {}", free >> 20, need >> 20, settings.budget);
     settings.budget = budget;
 }
 
@@ -287,6 +370,18 @@ fn replace(dir: &Path, partial: &Path) -> anyhow::Result<()> {
 /// previous ones; renders of keyframes the new run did not hold out are deleted where possible.
 fn replace_files(out: &Path, partial: &Path) -> anyhow::Result<()> {
     retry(|| std::fs::rename(partial.join(rec::PLY_FILE), out.join(rec::PLY_FILE))).with_context(|| format!("{} is open in another program: close it and reconstruct again", out.join(rec::PLY_FILE).display()))?;
+    // The previous splats' edits and the worker's pictures kept aside for them go with them (a folder moved as a whole
+    // takes them along): edits name splats of the PLY they were made on, and a picture kept aside belongs to its PLY.
+    retry(|| match std::fs::remove_file(out.join(rec::EDIT_FILE)) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
+        _ => Ok(()),
+    })
+    .with_context(|| format!("{} is open in another program: close it and reconstruct again", out.join(rec::EDIT_FILE).display()))?;
+    for e in std::fs::read_dir(out).into_iter().flatten().flatten() {
+        if rec::is_trained_preview_file(&e.file_name().to_string_lossy()) {
+            let _ = retry(|| std::fs::remove_file(e.path()));
+        }
+    }
     // The sky map goes with the splats it was trained with: a result without one leaves none behind.
     let sky = out.join(rec::SKY_FILE);
     if partial.join(rec::SKY_FILE).exists() {
@@ -312,27 +407,97 @@ fn replace_files(out: &Path, partial: &Path) -> anyhow::Result<()> {
 }
 
 /// `orbiters-reconstruct --web-preview <splats.ply> <out.splat> [--max N]`: the reconstruction as a web preview
-/// (orbiters_reconstruct::web), started from the scene's centre.
+/// (orbiters_reconstruct::web), started from the scene's centre, without the splats its edits hide or delete.
 fn web_preview(args: &[String]) -> anyhow::Result<()> {
     let (Some(ply_path), Some(out)) = (args.first(), args.get(1)) else { bail!("usage: orbiters-reconstruct --web-preview <splats.ply> <out.splat> [--max N]") };
     let max = match args.get(2).map(String::as_str) {
         Some("--max") => args.get(3).context("--max N")?.parse()?,
         _ => orbiters_reconstruct::web::DEFAULT_MAX,
     };
-    let g = ply::read(std::path::Path::new(ply_path))?;
+    // Without what the 3D view hid or deleted (orbiters_reconstruct::edit, the edit beside the PLY).
+    let (g, removed, _) = orbiters_reconstruct::edit::read_edited(std::path::Path::new(ply_path))?;
     let n = g.len().max(1) as f32;
     let centre = g.means.iter().fold([0.0f32; 3], |a, m| [a[0] + m[0] / n, a[1] + m[1] / n, a[2] + m[2] / n]);
     let web = orbiters_reconstruct::web::splat_file(&g, max, centre);
     std::fs::write(out, &web.bytes)?;
-    println!("{} of {} splats, {:.1} MB", web.count, g.len(), web.bytes.len() as f64 / 1e6);
+    println!("{} of {} splats ({removed} left out by its edits), {:.1} MB", web.count, g.len(), web.bytes.len() as f64 / 1e6);
+    Ok(())
+}
+
+/// `orbiters-reconstruct --vrchat <session folder> <out folder> [--untuned] [--before] [--rank area|contribution|seen]
+/// [--refit <steps>] [--cameras <n>] [--rank-cameras <n>] [--decoded] [--tight] [--tune-steps <n>]
+/// [--drawn-at <pc>,<quest>] [--refit-width <n>] [--pc-appearance]`: the reconstruction's files for VRChat worlds
+/// (orbiters_reconstruct::tree_tune; the lab switches are tree_tune::ExportOptions'): pc.n4tree, quest.n4tree and
+/// coarse.n4tree, without the splats its edits hide or delete (orbiters_reconstruct::edit).
+fn vrchat(args: &[String]) -> anyhow::Result<()> {
+    let usage = "usage: orbiters-reconstruct --vrchat <session folder> <out folder> [--untuned] [--before] [--rank area|contribution|seen] [--refit <steps>] [--cameras <n>] [--rank-cameras <n>] [--decoded] [--tight] [--tune-steps <n>] [--drawn-at <pc px>,<quest px>] [--refit-width <n>] [--pc-appearance]";
+    let (Some(session), Some(out)) = (args.first(), args.get(1)) else { bail!(usage) };
+    let mut options = orbiters_reconstruct::tree_tune::ExportOptions::default();
+    let mut untuned = false;
+    let mut it = args[2..].iter();
+    while let Some(a) = it.next() {
+        let mut value = || it.next().with_context(|| format!("{a} needs a value"));
+        match a.as_str() {
+            "--untuned" => untuned = true,
+            "--before" => options = orbiters_reconstruct::tree_tune::ExportOptions::before(),
+            "--rank" => options.rank = orbiters_reconstruct::tree_tune::Rank::parse(value()?)?,
+            "--refit" => options.refit_steps = value()?.parse()?,
+            "--cameras" => options.cameras = value()?.parse()?,
+            "--rank-cameras" => options.rank_cameras = value()?.parse()?,
+            "--tune-steps" => options.tune_steps = value()?.parse()?,
+            "--drawn-at" => {
+                let v: Vec<f32> = value()?.split(',').map(str::parse).collect::<Result<_, _>>()?;
+                options.drawn_at = [v[0], *v.get(1).unwrap_or(&v[0])];
+            }
+            "--decoded" => options.decoded = true,
+            "--refit-width" => options.refit_width = value()?.parse()?,
+            "--pc-appearance" => options.pc_appearance = true,
+            "--tight" => options.tight = true,
+            _ => bail!("unknown argument {a}; {usage}"),
+        }
+    }
+    let session = std::path::Path::new(session);
+    let (g, removed, _) = orbiters_reconstruct::edit::read_edited(&rec::result_dir(session).join(rec::PLY_FILE))?;
+    if removed > 0 {
+        eprintln!("{removed} splats left out by its edits");
+    }
+    let cameras = orbiters_reconstruct::tree_tune::session_cameras(session)?;
+    let mut gpu = if untuned { None } else { Some(gpu::Gpu::new()?) };
+    let start = std::time::Instant::now();
+    let files = orbiters_reconstruct::tree_tune::vrchat_files_with(&g, &cameras, gpu.as_mut(), fastrand::u32(..), &options, |p| eprintln!("{:.0} %", p * 100.0))?;
+    let out = std::path::Path::new(out);
+    std::fs::create_dir_all(out)?;
+    for (name, bytes) in [("pc.n4tree", &files.pc), ("quest.n4tree", &files.quest), ("coarse.n4tree", &files.coarse)] {
+        std::fs::write(out.join(name), bytes)?;
+    }
+    println!(
+        "{} splats, {} cameras: PC {} ({:.1} MB), Quest {} ({:.1} MB), coarse {} in {:.1} s",
+        g.len(),
+        cameras.len(),
+        files.splats[0],
+        files.pc.len() as f64 / 1e6,
+        files.splats[1],
+        files.quest.len() as f64 / 1e6,
+        files.splats[2],
+        start.elapsed().as_secs_f32()
+    );
     Ok(())
 }
 
 fn main() {
     orbiters_core::panic_log::install();
     let all: Vec<String> = std::env::args().skip(1).collect();
-    if all.first().map(String::as_str) == Some("--web-preview") {
-        if let Err(e) = web_preview(&all[1..]) {
+    let tool: Option<fn(&[String]) -> anyhow::Result<()>> = match all.first().map(String::as_str) {
+        Some("--mesh") => Some(orbiters_reconstruct::mesh::cli),
+        Some("--web-preview") => Some(web_preview),
+        Some("--vrchat") => Some(vrchat),
+        Some("--find-faces") => Some(orbiters_reconstruct::portraits::find_faces_cli),
+        Some("--export-gltf") => Some(orbiters_reconstruct::export::gltf_cli),
+        Some("--export-spz") => Some(orbiters_reconstruct::export::spz_cli),
+        _ => None,
+    };
+    if let Some(tool) = tool {
+        if let Err(e) = tool(&all[1..]) {
             eprintln!("{e:#}");
             std::process::exit(1);
         }
@@ -430,6 +595,31 @@ mod tests {
         drop(held);
         assert_eq!((read(&dir, rec::PLY_FILE), read(&dir, rec::REPORT_FILE)), ("newer".into(), "r2".into()));
         recover(&dir);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The previous splats' edits and the worker's picture kept aside for them go with them, whether the folder moves
+    /// whole or file by file (a viewer holding a render open): a new result never meets an old result's edits.
+    #[cfg(windows)]
+    #[test]
+    fn the_splat_edits_go_with_their_splats() {
+        use std::os::windows::fs::OpenOptionsExt;
+        const SHARE_READ: u32 = 1;
+        let dir = session("edits");
+        let trained = rec::trained_preview_file(0x1234);
+        for held_open in [false, true] {
+            result(&dir, rec::DIR, "old", "r0");
+            std::fs::write(rec::dir(&dir).join(rec::EDIT_FILE), "edits of old").unwrap();
+            std::fs::write(rec::dir(&dir).join(&trained), "old's own picture").unwrap();
+            result(&dir, rec::PARTIAL_DIR, "new", "r1");
+            let held = held_open.then(|| std::fs::OpenOptions::new().read(true).share_mode(SHARE_READ).open(rec::dir(&dir).join(rec::PREVIEW_FILE)).unwrap());
+            replace(&dir, &dir.join(rec::PARTIAL_DIR)).expect("replaced");
+            drop(held);
+            assert_eq!(read(&dir, rec::PLY_FILE), "new");
+            assert!(!rec::dir(&dir).join(rec::EDIT_FILE).exists(), "held open: {held_open}");
+            assert!(!rec::dir(&dir).join(&trained).exists(), "held open: {held_open}");
+            recover(&dir);
+        }
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

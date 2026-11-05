@@ -74,6 +74,47 @@ pub struct CaptureStatus {
     /// What the running capture's depth frames have seen so far, with hints.
     #[serde(default)]
     pub coverage: Option<CoverageMap>,
+    /// The running capture is a 3D picture (its camera flies on its own: no coverage to follow).
+    #[serde(default)]
+    pub photo_3d: bool,
+    /// Why frames come without the capture strip, while they do and after a recording that never had it.
+    #[serde(default)]
+    pub no_strip: Option<NoStrip>,
+}
+
+/// Why frames come without the capture strip: no camera pose, so no keyframes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum NoStrip {
+    /// VRChat's camera has Local User off, which culls the capture kit with the avatar.
+    MaskOff,
+    /// The worn avatar has no capture kit.
+    NoKit,
+    /// The kit and the mask are on: a world's depth of field or motion blur, or an old upload.
+    NotDrawn,
+    /// VRChat does not say (OSC is off, or it did not answer).
+    Unknown,
+}
+
+impl NoStrip {
+    /// The sentence the person reads, once a stretch.
+    pub fn message(self) -> &'static str {
+        match self {
+            Self::MaskOff => "VRChat's camera has Local User off, which hides your avatar from the camera and N4N0's capture kit with it, so there is no camera pose and there are no keyframes. Turn Local User on in the camera's Mask menu.",
+            Self::NoKit => "The avatar you are wearing has no N4N0 capture kit, so there is no camera pose and there are no keyframes. Wear an avatar with N4N0, or add N4N0 to this one in My Avatar and upload it.",
+            Self::NotDrawn => "N4N0's capture kit and Local User are on, but the capture strip is not in the picture, so there are no keyframes. A world's depth of field or motion blur can wipe it. If it never shows, update N4N0 in My Avatar and upload the avatar again.",
+            Self::Unknown => "No capture strip in the picture, so there is no camera pose and there are no keyframes. Check that you wear an avatar with N4N0 and that Local User is on in the camera's Mask menu.",
+        }
+    }
+
+    /// The few words the page's tile has room for.
+    pub fn short(self) -> &'static str {
+        match self {
+            Self::MaskOff => "Local User is off",
+            Self::NoKit => "no capture kit on this avatar",
+            Self::NotDrawn => "the world may wipe it",
+            Self::Unknown => "no camera pose",
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -296,8 +337,8 @@ pub struct MapsMine {
 
 // N4N0's part of the snapshot, shared with the phone app (`orbiters_n4n0::status`).
 pub use orbiters_n4n0::status::{
-    CallContact, CallLink, CallPhase, CallView, CallsStatus, OrbConfirmation, OrbFace, OrbLight, OrbLine, OrbStatus, OrbWho, ProcessUsage, StateAction,
-    StateView, StatesView, VoiceStatus,
+    AvatarView, CallContact, CallLink, CallPhase, CallView, CallsStatus, N4n0Confirmation, N4n0Face, N4n0Light, N4n0Line, N4n0Status, N4n0Who, ProcessUsage,
+    StateAction, StateView, StatesView, VoiceStatus,
 };
 
 /// VRChat's frames the SteamVR overlay saw, about ten seconds of them (contracts `Docs/world-performance.md`).
@@ -371,14 +412,19 @@ pub struct Snapshot {
     pub reconstruct_queue: Vec<PathBuf>,
     #[serde(default)]
     pub account: AccountStatus,
+    pub vrchat_login: crate::controller::vrchat_login::Status,
     pub uploads: Vec<UploadStatus>,
+    pub capture_shares: Vec<crate::controller::shares::ShareJob>,
     #[serde(default)]
-    pub orb: OrbStatus,
+    pub n4n0: N4n0Status,
     #[serde(default)]
     pub update: UpdateStatus,
     /// Space being freed in the library.
     #[serde(default)]
     pub cleanup: Option<CleanupJob>,
+    /// What "When SteamVR starts" last did to Windows' sound devices (Settings).
+    #[serde(default)]
+    pub vr_audio: crate::controller::vr_audio::Status,
 }
 
 impl Snapshot {
@@ -404,6 +450,8 @@ impl Snapshot {
                 trail: Vec::new(),
                 from_osc: false,
                 coverage: None,
+                photo_3d: false,
+                no_strip: None,
             },
             storage: StorageStatus { sessions_dir: settings.sessions_dir.clone(), limit_gb: settings.storage_limit_gb, ..Default::default() },
             settings,
@@ -412,10 +460,13 @@ impl Snapshot {
             reconstruction: None,
             reconstruct_queue: Vec::new(),
             account: AccountStatus::default(),
+            vrchat_login: Default::default(),
             uploads: Vec::new(),
-            orb: OrbStatus::default(),
+            capture_shares: Vec::new(),
+            n4n0: N4n0Status::default(),
             update: UpdateStatus::default(),
             cleanup: None,
+            vr_audio: Default::default(),
         }
     }
 
@@ -430,11 +481,11 @@ impl Snapshot {
             Some("the recording")
         } else if self.reconstruction.is_some() || !self.reconstruct_queue.is_empty() {
             Some("the reconstruction")
-        } else if self.orb.calls.call.is_some() {
+        } else if self.n4n0.calls.call.is_some() {
             Some("the call")
-        } else if self.uploads.iter().any(UploadStatus::running) {
+        } else if self.uploads.iter().any(UploadStatus::running) || self.capture_shares.iter().any(|j| j.outcome.is_none()) {
             Some("the upload")
-        } else if self.orb.voice.downloading.is_some() {
+        } else if self.n4n0.voice.downloading.is_some() {
             Some("the speech models' download")
         } else if self.cleanup.is_some() {
             Some("the clean-up")

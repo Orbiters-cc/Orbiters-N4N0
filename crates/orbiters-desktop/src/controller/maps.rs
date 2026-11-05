@@ -303,7 +303,11 @@ fn prepare_once(session: &Path, device: orbiters_reconstruct::gpu::DeviceOptions
     }
     drop(stage);
     // Names this upload in its three trees, so a world can tell when a slot's files have been replaced.
-    let trees = orbiters_reconstruct::tree_tune::vrchat_files(&g, &cameras, gpu.as_mut(), key, |_| {})?;
+    // What a preparation stopped by a capture finished goes on (crate::upload_prep::PartialFile): only for tuned trees of
+    // this very result, whose splat edits its fingerprint holds.
+    let mut kept = fingerprint.as_ref().filter(|f| gpu.is_some() && f.generation() == Some(generation.as_str())).map(|f| crate::upload_prep::PartialFile::new(&result, f));
+    let options = orbiters_reconstruct::tree_tune::ExportOptions::default();
+    let trees = orbiters_reconstruct::tree_tune::vrchat_files_kept(&g, &cameras, gpu.as_mut(), key, &options, kept.as_mut().map(|k| k as &mut dyn orbiters_reconstruct::tree_tune::Keep), |_| {})?;
     if let Some(gpu) = &gpu {
         if let Some(p) = &gpu.profiler {
             eprintln!("upload preparation GPU span: {:?}; passes: {:?}", p.span.get(), p.totals.borrow());

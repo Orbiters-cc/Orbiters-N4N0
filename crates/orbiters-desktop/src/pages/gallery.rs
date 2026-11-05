@@ -187,6 +187,11 @@ impl State {
         }
     }
 
+    /// Screenshots: the middle of the `n`th card, where a pointer would press it.
+    pub fn stage_card_centre(&self, n: usize) -> Option<egui::Pos2> {
+        self.shown.get(n).and_then(|e| self.cards.get(&e.key)).map(|r| r.center())
+    }
+
     /// Screenshots: a card's menu opened as a right press on the `n`th card would (at its middle).
     pub fn stage_menu(&mut self, ctx: &egui::Context, n: usize) {
         if let Some(e) = self.shown.get(n) {
@@ -1178,6 +1183,8 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) -> bool {
 /// What a card's menu does: the actions of the item's window, the selection and the group, at hand on its card.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Menu {
+    /// Reconstruct again, with or without the wearer (orbiters_core::picture::wearer_row).
+    ReconstructWearer(orbiters_core::picture::WearerRow),
     Open,
     Edit,
     SharePublicly,
@@ -1205,7 +1212,7 @@ fn again_row(o: Offer, ready: bool) -> Option<(Menu, String, &'static str, Optio
     match o {
         Offer::Start { .. } => Some((Menu::Reconstruct, o.label().into(), icons::MAGIC_WAND, None)),
         Offer::Blocked { short, .. } => ready.then(|| (Menu::Reconstruct, o.label().into(), icons::MAGIC_WAND, Some(short))),
-        Offer::Running { fraction, .. } => Some((Menu::StopReconstruct, format!("Stop reconstruction · {:.0}%", fraction * 100.0), icons::X, None)),
+        Offer::Running { fraction, .. } | Offer::Paused { fraction, .. } => Some((Menu::StopReconstruct, format!("Stop reconstruction · {:.0}%", fraction * 100.0), icons::X, None)),
         Offer::Waiting { .. } => Some((Menu::Unqueue, o.label().into(), icons::X, None)),
     }
 }
@@ -1273,6 +1280,20 @@ fn card_menu(ui: &Ui, resp: &egui::Response, e: &Entry, select: &super::gallery_
             if e.ready {
                 acts.push((Menu::Export, "Export…".into(), icons::UPLOAD_SIMPLE));
                 reconstruct(&mut acts);
+                // Read at the right press and kept with the card: a menu is built every frame, for every card.
+                if let Some(controller::Local::Session(dir)) = &e.local {
+                    let row_id = resp.id.with("wearer-row");
+                    let ctx = ui.ctx();
+                    if ctx.input(|i| i.pointer.button_pressed(egui::PointerButton::Secondary)) && resp.contains_pointer() {
+                        let row = orbiters_core::picture::wearer_row(dir);
+                        ctx.data_mut(|d| d.insert_temp(row_id, row));
+                    }
+                    if let Some(Some(row)) = ctx.data(|d| d.get_temp::<Option<orbiters_core::picture::WearerRow>>(row_id)) {
+                        if matches!(again::offer_of(e, cx.snap), Some(Offer::Start { .. })) {
+                            acts.push((Menu::ReconstructWearer(row), row.label().into(), if row.takes_out() { icons::USER_MINUS } else { icons::USER_PLUS }));
+                        }
+                    }
+                }
             }
             acts.push((Menu::Copy, copy("Copy its picture"), icons::COPY));
             acts.push((Menu::Folder, "Open its folder".into(), icons::FOLDER_OPEN));
@@ -1399,6 +1420,16 @@ fn act_menu(ctx: &egui::Context, cx: &mut Cx, state: &mut State, entries: &[Entr
         Menu::Reconstruct => {
             if let Some(controller::Local::Session(dir)) = &e.local {
                 state.again = again::press(ctx, cx, dir, &e.world_name, e.remote.as_ref(), thumb);
+            }
+        }
+        Menu::ReconstructWearer(row) => {
+            if let Some(controller::Local::Session(dir)) = &e.local {
+                match (orbiters_core::picture::WearerChoice { take_out: row.takes_out() }).save(dir) {
+                    Ok(()) => state.again = again::press(ctx, cx, dir, &e.world_name, e.remote.as_ref(), thumb),
+                    Err(e) => {
+                        cx.run(ctx, Err(e));
+                    }
+                }
             }
         }
         Menu::StopReconstruct => {
@@ -1656,15 +1687,8 @@ fn card(ui: &mut Ui, cx: &Cx, i: usize, e: &Entry, rect: Rect, look: &CardLook<'
         x += super::gallery_layers::badge(&p, ui, pos2(x, thumb.top() + 12.0), icons::STACK, &layers, false) + 6.0;
     }
     if let Some(j) = job {
-        super::sessions::badge(
-            &p,
-            ui,
-            pos2(x, thumb.top() + 12.0),
-            &format!("Reconstructing {:.0}%", super::sessions::overall_progress(j) * 100.0),
-            theme::black(0.55),
-            theme::ACCENT,
-            false,
-        );
+        let (label, color) = super::sessions::job_badge(j, cx.snap);
+        super::sessions::badge(&p, ui, pos2(x, thumb.top() + 12.0), &label, theme::black(0.55), color, false);
     } else if queued {
         super::sessions::badge(&p, ui, pos2(x, thumb.top() + 12.0), "Waiting to reconstruct", theme::black(0.55), theme::FG_2, false);
     } else if look.updating {
@@ -1694,7 +1718,7 @@ fn card(ui: &mut Ui, cx: &Cx, i: usize, e: &Entry, rect: Rect, look: &CardLook<'
         let f = anim::spring_from(&ctx, id.with("reconstruct"), [0.0], [super::sessions::overall_progress(j)], Spring::SOFT)[0].clamp(0.0, 1.0);
         let round = if tile { 1.5 } else { 0.0 };
         p.rect_filled(bar, round, theme::white(0.08));
-        p.rect_filled(Rect::from_min_size(bar.min, vec2(bar.width() * f, 3.0)), round, theme::ACCENT);
+        p.rect_filled(Rect::from_min_size(bar.min, vec2(bar.width() * f, 3.0)), round, super::sessions::job_bar(j));
     }
 
     // Kind and time, then who sees it or who it is from.
@@ -1703,6 +1727,10 @@ fn card(ui: &mut Ui, cx: &Cx, i: usize, e: &Entry, rect: Rect, look: &CardLook<'
         kind.as_str()
     } else if e.is_picture() {
         "VRChat picture"
+    } else if e.picture_mode == Some(orbiters_core::settings::PictureMode::World) {
+        "3D picture of the world"
+    } else if e.picture_mode == Some(orbiters_core::settings::PictureMode::People) {
+        "3D picture of people"
     } else if e.ready {
         "3D capture"
     } else if e.no_keyframes {

@@ -191,6 +191,8 @@ pub enum Variant {
     Glass,
     /// Going ahead despite a warning (sharing something flagged explicit): amber, like [`Variant::Danger`] is red.
     Warn,
+    /// The one way out of something running, which has to be found at a glance: solid red.
+    Stop,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -331,6 +333,10 @@ impl<'a> Button<'a> {
             Variant::Danger => {
                 painter.rect_filled(bg, theme::radius(r), theme::alpha(theme::DANGER, 0.15 + 0.07 * hover));
                 theme::DANGER
+            }
+            Variant::Stop => {
+                painter.rect_filled(bg, theme::radius(r), theme::mix(theme::DANGER, theme::FG, 0.12 * hover));
+                theme::INK_900
             }
             Variant::Glass => {
                 painter.rect_filled(bg, theme::radius(r), theme::mix(theme::surface_strong(), theme::INK_700, hover));

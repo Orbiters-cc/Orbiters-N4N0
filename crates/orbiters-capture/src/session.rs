@@ -44,6 +44,14 @@ pub enum Warning {
     Source,
 }
 
+/// A session's rig faces so far, when not one of them could be read: what to tell the person. A face camera that does not project as
+/// its frame's strip says draws no stamp (contracts' Docs/rig-frames.md, for an upload whose cameras' physical properties did not reach
+/// VRChat), and a 3D picture without its faces loses what it shows away from the camera's path, 5.9 dB on views of the rig
+/// (reports/rig-pixels.md). Thirty faces is five rig frames: a few late cameras at the start of the rig are normal.
+fn rig_faces_unread(read: u64, late: u64) -> Option<&'static str> {
+    (read == 0 && late >= 30).then_some("N4N0's rig pictures cannot be read in this recording, so the 3D picture will look worse from anywhere but the camera's path. Upload the avatar again; if this stays, the cameras of its rig are not working in VRChat.")
+}
+
 /// A stretch without the strip shorter than this is a moment's trouble (a fast turn, a flash): not counted.
 const STRIP_GAP_NS: u64 = 1_000_000_000;
 
@@ -1117,8 +1125,9 @@ impl CaptureSession {
     /// and its tile as a keyframe when the face's selector takes one. The frame's own record keeps the rig's pose and
     /// names no picture. The records and pictures wait in `faces_read` for [`Self::queue_faces`].
     fn read_faces(&mut self, frame: &mut dyn FrameAccess, p: &strip::StripPayload, flipped: bool, record: &FrameRecord) -> anyhow::Result<()> {
-        let Some(layout) = rig::RigLayout::new(record.width, record.height) else { return Ok(()) };
-        let face_bytes = layout.face as usize * layout.face as usize * 4;
+        // The layout the frame's strip names: an avatar uploaded with an older Toolkit keeps drawing the square one.
+        let Some(layout) = rig::RigLayout::of_strip(record.width, record.height, &p.projection) else { return Ok(()) };
+        let face_bytes = layout.tile_width as usize * layout.tile_height as usize * 4;
         let wanted: Vec<bool> = rig::TILE_FACES
             .iter()
             .map(|&face| self.face_selectors[face as usize - 1].clone().consider(&rig::face_camera_to_world(&p.camera_to_world, face), p.time))
@@ -1139,8 +1148,9 @@ impl CaptureSession {
                 flags: record.flags & (record_flags::STRIP_OK | record_flags::FLIPPED),
                 strip_flags: (p.flags & !(strip::flags::FACE_MASK << shift)) | face.face << shift,
                 camera_to_world: face.camera_to_world,
-                width: layout.face,
-                height: layout.face,
+                projection: face.projection,
+                width: layout.tile_width,
+                height: layout.tile_height,
                 keyframe_index: -1,
                 depth_index: -1,
                 ..*record
@@ -1155,8 +1165,8 @@ impl CaptureSession {
                     frame: Some(face_record.frame_index),
                     path: PathBuf::new(),
                     data,
-                    width: layout.face,
-                    height: layout.face,
+                    width: layout.tile_width,
+                    height: layout.tile_height,
                     bgra: view.order == PixelOrder::Bgra,
                     thumbnail: None,
                 }
@@ -1165,6 +1175,9 @@ impl CaptureSession {
                 self.stats.dropped += 1;
             }
             self.faces_read.push(FaceView { record: face_record, picture });
+        }
+        if let Some(message) = rig_faces_unread(self.stats.rig_faces, self.stats.rig_faces_late) {
+            self.warn(Warning::Pictures, message.into());
         }
         Ok(())
     }
@@ -2004,20 +2017,47 @@ mod tests {
             assert_eq!(faces.iter().map(|r| strip::flags::face(r.strip_flags)).collect::<Vec<_>>(), vec![2, 5, 1, 6, 3]);
             for r in faces {
                 let face = strip::flags::face(r.strip_flags);
-                assert_eq!((r.width, r.height, r.game_time.to_bits()), (layout.face, layout.face, frame.game_time.to_bits()));
+                assert_eq!((r.width, r.height, r.game_time.to_bits()), (layout.tile_width, layout.tile_height, frame.game_time.to_bits()));
                 assert_eq!(r.camera_to_world, rig::face_camera_to_world(&frame.camera_to_world, face));
-                assert_eq!(r.projection, rig::PROJECTION);
+                assert_eq!(r.projection, layout.generation.projection());
             }
         }
         // Each face's first view is a keyframe: its tile, at the face's size, showing its face's colour.
         for face in [1u32, 2, 3, 5, 6] {
             let r = records.iter().find(|r| strip::flags::face(r.strip_flags) == face && r.has(record_flags::KEYFRAME)).unwrap();
             let (hdr, rgb) = qoi::decode_rgba(&std::fs::read(finished.dir.join("keyframes").join(bundle::keyframe_file(r.keyframe_index))).unwrap()).unwrap();
-            assert_eq!((hdr.width, hdr.height), (layout.face, layout.face));
-            let mid = ((layout.face / 2 * layout.face + 5) * 4) as usize;
+            assert_eq!((hdr.width, hdr.height), (layout.tile_width, layout.tile_height));
+            let mid = ((layout.tile_height / 2 * layout.tile_width + 5) * 4) as usize;
             assert_eq!(rgb[mid], (face * 40) as u8, "face {face}");
         }
         assert!(records.iter().all(|r| strip::flags::face(r.strip_flags) != 4));
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// Faces that all come without a stamp are told about, once a few rig frames have shown it is no moment's trouble.
+    #[test]
+    fn rig_faces_none_of_which_can_be_read_are_told() {
+        assert!(rig_faces_unread(0, 29).is_none());
+        assert!(rig_faces_unread(0, 30).is_some());
+        assert!(rig_faces_unread(1, 3000).is_none());
+    }
+
+    /// A rig frame from an avatar uploaded with an older Toolkit: its strip names the square layout, and its faces are read
+    /// and stored as what they are, 90° squares of their tile's size.
+    #[test]
+    fn an_older_uploads_rig_frames_keep_their_layout() {
+        let (root, mut session, src) = pattern_session("rig-square", 24);
+        let mut src = src.with_old_rig();
+        while !matches!(src.next(std::time::Duration::from_millis(10), &mut |v| assert_eq!(session.process(v).unwrap(), Processed::Frame)), Ok(Next::End)) {}
+        assert_eq!((session.stats.rig_faces, session.stats.rig_faces_late), (36, 0));
+        let finished = session.finish();
+        let records = bundle::read_records(&finished.dir).unwrap();
+        let layout = rig::RigLayout::of_generation(1280, 720, rig::Generation::Square).unwrap();
+        let faces: Vec<_> = records.iter().filter(|r| strip::flags::face(r.strip_flags) != 0).collect();
+        assert_eq!(faces.len(), 36);
+        for r in faces {
+            assert_eq!((r.width, r.height, r.projection), (layout.tile_width, layout.tile_height, rig::SQUARE_PROJECTION));
+        }
         std::fs::remove_dir_all(&root).ok();
     }
 

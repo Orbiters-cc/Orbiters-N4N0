@@ -71,6 +71,8 @@ pub enum Offer {
     Blocked { again: bool, reason: &'static str, short: &'static str },
     /// It runs: how far it got as a whole, and what it is doing.
     Running { fraction: f32, stage: &'static str },
+    /// It paused with this much kept, and goes on by itself: why and when, as a sentence.
+    Paused { fraction: f32, why: &'static str },
     /// It waits its turn, and for what.
     Waiting { hint: &'static str },
 }
@@ -81,14 +83,14 @@ impl Offer {
         match self {
             Offer::Start { again: true } | Offer::Blocked { again: true, .. } => "Reconstruct again",
             Offer::Start { again: false } | Offer::Blocked { again: false, .. } => "Reconstruct",
-            Offer::Running { .. } => "Stop reconstruction",
+            Offer::Running { .. } | Offer::Paused { .. } => "Stop reconstruction",
             Offer::Waiting { .. } => "Waiting · cancel",
         }
     }
 
     /// The new result is on its way: what is shared or exported now would be the one going away.
     pub fn running(self) -> bool {
-        matches!(self, Offer::Running { .. })
+        matches!(self, Offer::Running { .. } | Offer::Paused { .. })
     }
 }
 
@@ -102,6 +104,9 @@ pub const RECORDING: &str = "It is still being recorded: stop the capture first"
 /// whatever else became of the capture.
 pub fn offer(f: &Facts<'_>, snap: &Snapshot) -> Offer {
     if let Some(j) = snap.reconstruction.as_ref().filter(|j| j.session_dir == f.dir) {
+        if j.paused {
+            return Offer::Paused { fraction: super::sessions::overall_progress(j), why: super::sessions::pause_why(snap) };
+        }
         return Offer::Running { fraction: super::sessions::overall_progress(j), stage: super::sessions::stage_label(j.stage) };
     }
     if snap.reconstruct_queue.iter().any(|d| d == f.dir) {
@@ -362,6 +367,7 @@ mod tests {
             size_bytes: 0,
             capture_bytes: 0,
             trimmed: false,
+            picture: None,
             modified: 0,
             reconstruction: None,
             damaged: None,

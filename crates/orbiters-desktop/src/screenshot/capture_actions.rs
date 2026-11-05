@@ -57,7 +57,7 @@ fn drag(run: &mut Run<'_>, from: Pos2, to: Pos2) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn key(run: &mut Run<'_>, key: egui::Key) -> anyhow::Result<()> {
+pub(super) fn key(run: &mut Run<'_>, key: egui::Key) -> anyhow::Result<()> {
     let modifiers = Default::default();
     run.frame(vec![Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers }], false)?;
     run.frame(vec![Event::Key { key, physical_key: None, pressed: false, repeat: false, modifiers }], false)?;
@@ -137,7 +137,7 @@ fn select_walk(run: &mut Run<'_>, out: &Path, name: &str) -> anyhow::Result<()> 
 }
 
 /// The controller on this library, what the app talks to it through, and the offscreen GPU's handles.
-fn library(settings: &Settings, gpu: &mut Offscreen) -> (crate::controller::Shared, Ctl, crate::gpu::Handles) {
+pub(super) fn library(settings: &Settings, gpu: &mut Offscreen) -> (crate::controller::Shared, Ctl, crate::gpu::Handles) {
     let ctl = Controller::new(settings.clone());
     let sessions = controller::list_sessions(&settings.sessions_dir);
     ctl.set_snapshot(idle_snapshot(settings, &sessions));
@@ -251,7 +251,7 @@ fn named(settings: &Settings, end: &str) -> anyhow::Result<PathBuf> {
 }
 
 /// Opens the window of the capture in `dir` as a click on its card would.
-fn open_window(run: &mut Run<'_>, dir: &Path) -> anyhow::Result<usize> {
+pub(super) fn open_window(run: &mut Run<'_>, dir: &Path) -> anyhow::Result<usize> {
     let mine = |e: &Entry| matches!(&e.local, Some(OnThisComputer::Session(d)) if d == dir);
     run.until("the capture's card", 60.0, |run| {
         let g = run.app.sessions_mut().gallery_mut();
@@ -264,13 +264,13 @@ fn open_window(run: &mut Run<'_>, dir: &Path) -> anyhow::Result<usize> {
     Ok(n)
 }
 
-fn close_window(run: &mut Run<'_>) -> anyhow::Result<()> {
+pub(super) fn close_window(run: &mut Run<'_>) -> anyhow::Result<()> {
     run.click("Close", 10.0)?;
     run.wait(1.0)
 }
 
 /// Whether the control `label` is there and takes clicks.
-fn on(run: &Run<'_>, label: &str) -> Option<bool> {
+pub(super) fn on(run: &Run<'_>, label: &str) -> Option<bool> {
     widgets::control(&run.ctx, label).map(|(_, enabled)| enabled)
 }
 
@@ -291,6 +291,57 @@ fn wheel(run: &mut Run<'_>, at: Pos2, down: f32) -> anyhow::Result<()> {
     run.frame(vec![Event::PointerMoved(at)], false)?;
     run.frame(vec![Event::MouseWheel { unit: egui::MouseWheelUnit::Point, delta: vec2(0.0, -down), phase: egui::TouchPhase::Move, modifiers: egui::Modifiers::NONE, source: egui::MouseWheelSource::Wheel }], false)?;
     run.wait(0.8)
+}
+
+/// `--only capture-wearer`: a capture that shows its wearer, on the real view and the real worker. A disposable library in
+/// `--sessions` with one session whose name ends in `22-25-19` and whose result from before shows them. Its window offers
+/// Reconstruct without my avatar; the press runs the worker; the window follows the new result, says what was done and offers the
+/// way back; the card's menu says the same.
+pub(super) fn wearer(gpu: &mut Offscreen, out: &Path, settings: &Settings, scale: f32) -> anyhow::Result<()> {
+    use orbiters_core::picture::{WearerChoice, WEARER_FILE};
+    let dir = named(settings, "22-25-19")?;
+    let _ = std::fs::remove_file(dir.join(WEARER_FILE));
+    let (ctl, backend, handles) = library(settings, gpu);
+    let mut run = Run::new(gpu, backend, scale);
+    run.app.set_gpu(handles);
+    let t = run.time();
+    run.app.set_page(Page::Sessions, t);
+    run.until("the session list", 30.0, |run| run.app.sessions_mut().loaded())?;
+    run.wait(1.0)?;
+    run.size = vec2(1280.0, 820.0);
+    let n = open_window(&mut run, &dir)?;
+    run.wait(0.8)?;
+    run.shoot(out, "wearer-window-before")?;
+    let report = || reconstruction::read_report(&dir);
+    anyhow::ensure!(report().is_some_and(|r| r.wearer.is_none()), "a result that shows its wearer to begin with");
+    anyhow::ensure!(on(&run, "Reconstruct without my avatar") == Some(true), "its window offers to take them out");
+    run.click("Reconstruct without my avatar", 10.0)?;
+    run.wait(1.0)?;
+    anyhow::ensure!(WearerChoice::read(&dir) == Some(WearerChoice { take_out: true }), "the choice is kept with the session");
+    // Something to lose asks first; nothing to lose starts at once.
+    if on(&run, "Reconstruct again") == Some(true) && ctl.view().reconstruction.is_none() && ctl.view().reconstruct_queue.is_empty() {
+        run.click("Reconstruct again", 10.0)?;
+    }
+    run.until("the reconstruction to start", 15.0, |_| ctl.view().reconstruction.is_some())?;
+    run.pace = Duration::from_millis(60);
+    run.until("the new result", 900.0, |_| ctl.view().reconstruction.is_none() && report().is_some_and(|r| r.wearer.is_some()))?;
+    run.pace = Duration::ZERO;
+    run.wait(2.0)?;
+    let r = report().context("its report")?;
+    println!("{:?}, wearer_not_found {}", r.wearer, r.wearer_not_found);
+    run.shoot(out, "wearer-window-after")?;
+    anyhow::ensure!(on(&run, "Reconstruct with my avatar") == Some(true), "the way back, once the result has come");
+    close_window(&mut run)?;
+    let ctx = run.ctx.clone();
+    // As a right press on its card.
+    let at = run.app.sessions_mut().gallery_mut().stage_card_centre(n).context("its card")?;
+    run.frame(vec![Event::PointerMoved(at)], false)?;
+    run.frame(vec![Event::PointerButton { pos: at, button: egui::PointerButton::Secondary, pressed: true, modifiers: Default::default() }], false)?;
+    run.frame(vec![Event::PointerButton { pos: at, button: egui::PointerButton::Secondary, pressed: false, modifiers: Default::default() }], false)?;
+    let _ = ctx;
+    run.wait(0.8)?;
+    run.shoot(out, "wearer-card-menu")?;
+    Ok(())
 }
 
 pub(super) fn walk(gpu: &mut Offscreen, out: &Path, settings: &Settings, scale: f32) -> anyhow::Result<()> {

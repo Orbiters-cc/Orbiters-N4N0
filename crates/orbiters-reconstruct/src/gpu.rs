@@ -506,6 +506,9 @@ pub struct Gpu {
     uniforms: RefCell<HashMap<(&'static str, usize), wgpu::Buffer>>,
     /// The steps' bind groups by pipeline and buffers, kept until one of those buffers is replaced.
     binds: RefCell<HashMap<BindKey, wgpu::BindGroup>>,
+    /// Asked to pause, the long rounds of renders outside the steps stop between two views, failing with
+    /// crate::checkpoint::Interrupted (crate::train::train_from starts them again).
+    pub pause: Option<Arc<crate::checkpoint::Pause>>,
 }
 
 /// A bind group's pipeline and its (binding, buffer) entries.
@@ -1157,6 +1160,7 @@ impl Gpu {
             reserved: 0,
             uniforms: Default::default(),
             binds: Default::default(),
+            pause: None,
         }
     }
 
@@ -1261,6 +1265,79 @@ impl Gpu {
         pass.set_pipeline(pipeline);
         pass.set_bind_group(0, bind, &[]);
         pass.dispatch_workgroups_indirect(&self.total_out, 8);
+    }
+
+    /// Whether a pause was asked for, as the failure the rounds of renders stop with.
+    pub fn stop_if_paused(&self) -> anyhow::Result<()> {
+        if self.pause.as_ref().is_some_and(|p| p.asked()) {
+            return Err(crate::checkpoint::Interrupted.into());
+        }
+        Ok(())
+    }
+
+    /// Everything the steps carry from one to the next on the device, once all of them have run: the parameters as they
+    /// are packed there, each Gaussian's own restart slot too (crate::gaussians::RESTART_SLOT, which an upload zeroes),
+    /// the Adam moments and the statistics since the last relocation round. The gradient sums are not part of it: the
+    /// backward pass clears them with each step.
+    pub fn training_state(&self) -> anyhow::Result<crate::checkpoint::TrainingBuffers> {
+        let s = self.splats.as_ref().context("nothing uploaded")?;
+        let n = self.count;
+        Ok(crate::checkpoint::TrainingBuffers {
+            params: self.read(&s.params, n * PACKED)?,
+            m1: self.read(&s.m1, n * PACKED)?,
+            m2: self.read(&s.m2, n * PACKED)?,
+            stats: self.read(&s.stats, n * 8)?,
+        })
+    }
+
+    /// Puts back what [`Gpu::training_state`] read: the next step goes on as if the device had never gone.
+    pub fn restore_training(&mut self, state: &crate::checkpoint::TrainingBuffers) {
+        self.wait_readbacks();
+        self.estimates.clear();
+        if let Err(e) = self.caught(|gpu| {
+            let n = state.params.len() / PACKED;
+            if gpu.splats.as_ref().is_none_or(|s| s.cap < n) {
+                gpu.splats = Some(gpu.splat_buffers(n));
+                gpu.forget_binds();
+            }
+            let s = gpu.splats.as_ref().expect("allocated");
+            gpu.queue.write_buffer(&s.params, 0, bytemuck::cast_slice(&state.params));
+            gpu.queue.write_buffer(&s.m1, 0, bytemuck::cast_slice(&state.m1));
+            gpu.queue.write_buffer(&s.m2, 0, bytemuck::cast_slice(&state.m2));
+            gpu.queue.write_buffer(&s.stats, 0, bytemuck::cast_slice(&state.stats));
+            let unknown = Seen::UNKNOWN;
+            let seen = vec![[unknown.weight, unknown.views as f32, unknown.sectors as f32, unknown.rate, unknown.beyond, 0.0, 0.0, 0.0]; n];
+            gpu.queue.write_buffer(&s.seen, 0, bytemuck::cast_slice(&seen));
+            gpu.queue.write_buffer(&s.marks, 0, &vec![0u8; n.div_ceil(4) * 4]);
+            let mut enc = gpu.device.create_command_encoder(&Default::default());
+            enc.clear_buffer(&s.grad2d, 0, None);
+            enc.clear_buffer(&s.filter, 0, None);
+            gpu.queue.submit([enc.finish()]);
+            gpu.count = n;
+            Ok(())
+        }) {
+            self.errors.lock().unwrap_or_else(|p| p.into_inner()).get_or_insert_with(|| format!("{e:#}"));
+        }
+    }
+
+    /// The sky map's texels and Adam moments, or `None` without a map trained on this device.
+    pub fn sky_learning(&self) -> anyhow::Result<Option<crate::checkpoint::SkyLearningState>> {
+        let Some((s, l)) = self.sky.as_ref().and_then(|s| Some((s, s.learning.as_ref()?))) else { return Ok(None) };
+        let n = s.width as usize * (s.width as usize / 2);
+        Ok(Some(crate::checkpoint::SkyLearningState { width: s.width, texels: self.read(&s.texels, n)?, m1: self.read(&l.m1, n)?, m2: self.read(&l.m2, n)? }))
+    }
+
+    /// Puts back what [`Gpu::sky_learning`] read.
+    pub fn restore_sky_learning(&mut self, state: Option<&crate::checkpoint::SkyLearningState>) -> anyhow::Result<()> {
+        let Some(state) = state else { return Ok(()) };
+        let rgb: Vec<[f32; 3]> = state.texels.iter().map(|t| [t[0], t[1], t[2]]).collect();
+        self.set_sky(Some((state.width, &rgb)))?;
+        let s = self.sky.as_ref().expect("just set");
+        let l = s.learning.as_ref().context("a sky map's learning on a device that does not train")?;
+        self.queue.write_buffer(&s.texels, 0, bytemuck::cast_slice(&state.texels));
+        self.queue.write_buffer(&l.m1, 0, bytemuck::cast_slice(&state.m1));
+        self.queue.write_buffer(&l.m2, 0, bytemuck::cast_slice(&state.m2));
+        Ok(())
     }
 
     /// Uploads a new set of Gaussians (Adam moments and statistics start at zero).
@@ -2464,6 +2541,7 @@ impl Gpu {
         let view = storage(&self.device, "seen in a view", (n * 4) as u64);
         let out = storage(&self.device, "seen", (n * 16) as u64);
         for cam in cams {
+            self.stop_if_paused()?;
             self.caught(|gpu| gpu.run(cam, background, Target::None, None, Some(&view)))?;
             let t = self.training()?;
             let s = self.splats.as_ref().context("no Gaussians")?;
@@ -2534,7 +2612,10 @@ impl Gpu {
             let seen = storage(&self.device, "seen", (n * 4) as u64);
             self.visibility_pipelined = pipelined;
             let overflows = self.overflows;
-            let round = cams.iter().try_for_each(|cam| self.caught(|gpu| gpu.run(cam, background, Target::None, None, Some(&seen)).map(|_| ())));
+            let round = cams.iter().try_for_each(|cam| {
+                self.stop_if_paused()?;
+                self.caught(|gpu| gpu.run(cam, background, Target::None, None, Some(&seen)).map(|_| ()))
+            });
             self.wait_readbacks();
             if let Err(e) = round {
                 out = Some(Err(e));
@@ -2785,6 +2866,43 @@ mod tests {
         eprintln!("fused Adam against a CPU Adam step: {off} of {compared} moved parameters off by over 1 %; {unshown_moved} moved by momentum alone");
         assert!(unshown_moved > 100, "the zoomed view showed every Gaussian");
         assert!(compared > 10_000 && off * 1000 < compared, "{off} of {compared}");
+    }
+
+    /// A paused run's state comes back whole on another device: parameters, each Gaussian's restart slot, moments,
+    /// statistics, and the sky map's texels and moments; and the steps go on from it.
+    #[test]
+    fn a_devices_training_state_comes_back_on_another_device() {
+        let (w, h) = (64, 48);
+        let (g, cam) = scene(400, w, h, 7);
+        let target = vec![0xff40_8040u32; (w * h) as usize];
+        let lr = LearningRates { means: 1e-3, log_scales: 0.005, rotations: 0.001, opacity: 0.05, colors: 0.0025 };
+        let color = || Target::Color { rgba: &target, scene_pixels: (w * h) as f32, weight: 1.0, ssim: 0.2, robust: 0.0 };
+        let Some(mut a) = devices().into_iter().next() else { return };
+        a.upload(&g);
+        a.set_mask(w, h, &vec![1.0; (w * h) as usize]).unwrap();
+        a.set_sky(Some((8, &vec![[0.25, 0.5, 0.75]; 32]))).unwrap();
+        for _ in 0..20 {
+            a.step(&cam, [0.0; 3], color(), Some(lr)).unwrap();
+        }
+        let state = a.training_state().unwrap();
+        let sky = a.sky_learning().unwrap().expect("a sky map");
+        let step = a.step;
+        assert!(state.m2.iter().any(|v| *v != 0.0), "the steps left moments");
+        drop(a);
+        let Some(mut b) = devices().into_iter().next() else { return };
+        b.restore_training(&state);
+        b.restore_sky_learning(Some(&sky)).unwrap();
+        b.step = step;
+        b.set_mask(w, h, &vec![1.0; (w * h) as usize]).unwrap();
+        let again = b.training_state().unwrap();
+        assert_eq!((&again.params, &again.m1, &again.m2, &again.stats), (&state.params, &state.m1, &state.m2, &state.stats));
+        let sky_again = b.sky_learning().unwrap().expect("a sky map");
+        assert_eq!((sky_again.width, &sky_again.m1, &sky_again.m2), (sky.width, &sky.m1, &sky.m2));
+        let before = b.score(&cam, [0.0; 3], &target).unwrap();
+        for _ in 0..20 {
+            b.step(&cam, [0.0; 3], color(), Some(lr)).unwrap();
+        }
+        assert!(b.score(&cam, [0.0; 3], &target).unwrap() > before, "and it goes on learning");
     }
 
     #[test]

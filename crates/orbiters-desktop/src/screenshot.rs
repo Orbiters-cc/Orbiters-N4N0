@@ -40,8 +40,10 @@ mod editor;
 mod splat_export;
 mod splats_select;
 mod capture_actions;
+mod pause_resume;
 mod vrchat_login;
 mod vr_audio;
+mod vrchat_bridge;
 mod worlds_overlay;
 
 /// What the interface shows of a VRChat on the network, as a Mac sees it.
@@ -227,6 +229,12 @@ fn shots(args: &[String], picture_folders: Vec<PathBuf>) -> anyhow::Result<()> {
     if only.as_deref() == Some("capture-actions-tint") {
         return capture_actions::tint(&mut Offscreen::new()?, &out, &settings, scale);
     }
+    if only.as_deref() == Some("capture-wearer") {
+        return capture_actions::wearer(&mut Offscreen::new()?, &out, &settings, scale);
+    }
+    if only.as_deref() == Some("pause-resume") {
+        return pause_resume::walk(&mut Offscreen::new()?, &out, &settings, scale);
+    }
     if only.as_deref() == Some("capture-actions") {
         return capture_actions::walk(&mut Offscreen::new()?, &out, &settings, scale);
     }
@@ -294,6 +302,25 @@ fn shots(args: &[String], picture_folders: Vec<PathBuf>) -> anyhow::Result<()> {
     });
     recording.capture.coverage = Some(sample_coverage(&trail));
     // Frames coming, none with the strip, as with Local User off on an upload that could not hide itself: the tile says why.
+    // The two 3D pictures under way, the avatar hidden or not, and what stays on the page after the second.
+    let mut picture_world = recording.clone();
+    picture_world.capture.photo_3d = true;
+    picture_world.capture.picture = Some(orbiters_core::settings::PictureMode::World);
+    picture_world.capture.coverage = None;
+    picture_world.capture.left_out = crate::state::LeftOut { wearer: orbiters_core::picture::Left::Out, others: orbiters_core::picture::Left::Out, why: None };
+    let mut picture_people = picture_world.clone();
+    picture_people.capture.picture = Some(orbiters_core::settings::PictureMode::People);
+    picture_people.capture.left_out = Default::default();
+    let cannot: &'static str = Box::leak(crate::controller::hide_self::cannot_hide_text(Some("The 1MB Ultirex"), Some("Orbiters Toolkit 0.4.11")).into_boxed_str());
+    let mut picture_world_shows = picture_world.clone();
+    picture_world_shows.capture.left_out = crate::state::LeftOut { wearer: orbiters_core::picture::Left::InPicture, others: orbiters_core::picture::Left::Out, why: Some(cannot.to_string()) };
+    let mut idle_after = idle.clone();
+    idle_after.capture.left_out = picture_world_shows.capture.left_out.clone();
+    // The worn avatar in a project the fixture has, and in none: Update the Toolkit, and its polite no.
+    let mut toolkit_project = idle_after.clone();
+    toolkit_project.n4n0.avatar_id = Some("avtr_00000000-0000-4000-8000-000000000001".into());
+    let mut toolkit_elsewhere = idle_after.clone();
+    toolkit_elsewhere.n4n0.avatar_id = Some("avtr_4f3b5bc4-0000-4000-8000-000000000000".into());
     let mut no_strip = recording.clone();
     no_strip.capture.trail.clear();
     no_strip.capture.coverage = None;
@@ -322,8 +349,18 @@ fn shots(args: &[String], picture_folders: Vec<PathBuf>) -> anyhow::Result<()> {
         psnr: Some(33.2),
         seconds: 41.0,
         integrated: true,
+        ..crate::state::ReconstructionJob::new(s.dir.clone(), true)
     });
     let job = reconstructing.reconstruction.clone();
+    // Paused by a capture, with what it did kept: what the worker's checkpoint leaves on show. What the real worker leaves
+    // is `--only pause-resume`.
+    let mut paused = reconstructing.clone();
+    paused.capture.state = crate::state::CaptureState::Recording;
+    if let Some(j) = paused.reconstruction.as_mut() {
+        j.integrated = false;
+        j.floor = crate::pages::sessions::overall_progress(j);
+        j.paused = true;
+    }
     let waiting = |base: &Snapshot| {
         let mut s = base.clone();
         s.reconstruction = sessions.get(1).zip(job.clone()).map(|(r, j)| crate::state::ReconstructionJob { session_dir: r.dir.clone(), ..j });
@@ -1086,6 +1123,90 @@ fn shots(args: &[String], picture_folders: Vec<PathBuf>) -> anyhow::Result<()> {
             library: None,
         },
         Scenario {
+            name: "capture-picture-people",
+            page: Page::Capture,
+            snapshot: picture_people,
+            frames: 120,
+            splash: false,
+            open_detail: false,
+            toasts: vec![],
+            pointer: None,
+            scroll: 0.0,
+            world: None,
+            home: None,
+            library: None,
+        },
+        Scenario {
+            name: "capture-picture-world",
+            page: Page::Capture,
+            snapshot: picture_world,
+            frames: 120,
+            splash: false,
+            open_detail: false,
+            toasts: vec![],
+            pointer: None,
+            scroll: 0.0,
+            world: None,
+            home: None,
+            library: None,
+        },
+        Scenario {
+            name: "capture-picture-world-shows",
+            page: Page::Capture,
+            snapshot: picture_world_shows,
+            frames: 120,
+            splash: false,
+            open_detail: false,
+            toasts: vec![(toast::Kind::Info, cannot)],
+            pointer: None,
+            scroll: 0.0,
+            world: None,
+            home: None,
+            library: None,
+        },
+        Scenario {
+            name: "capture-toolkit-project",
+            page: Page::Capture,
+            snapshot: toolkit_project,
+            frames: 120,
+            splash: false,
+            open_detail: false,
+            toasts: vec![],
+            pointer: None,
+            scroll: 0.0,
+            world: None,
+            home: None,
+            library: None,
+        },
+        Scenario {
+            name: "capture-toolkit-elsewhere",
+            page: Page::Capture,
+            snapshot: toolkit_elsewhere,
+            frames: 120,
+            splash: false,
+            open_detail: false,
+            toasts: vec![],
+            pointer: None,
+            scroll: 0.0,
+            world: None,
+            home: None,
+            library: None,
+        },
+        Scenario {
+            name: "capture-idle-after",
+            page: Page::Capture,
+            snapshot: idle_after,
+            frames: 120,
+            splash: false,
+            open_detail: false,
+            toasts: vec![],
+            pointer: None,
+            scroll: 0.0,
+            world: None,
+            home: None,
+            library: None,
+        },
+        Scenario {
             name: "capture-no-strip",
             page: Page::Capture,
             snapshot: no_strip,
@@ -1176,6 +1297,20 @@ fn shots(args: &[String], picture_folders: Vec<PathBuf>) -> anyhow::Result<()> {
             name: "session-waiting",
             page: Page::Sessions,
             snapshot: waiting(&idle),
+            frames: 150,
+            splash: false,
+            open_detail: true,
+            toasts: vec![],
+            pointer: None,
+            scroll: 0.0,
+            world: None,
+            home: None,
+            library: None,
+        },
+        Scenario {
+            name: "session-reconstruction-paused",
+            page: Page::Sessions,
+            snapshot: paused,
             frames: 150,
             splash: false,
             open_detail: true,
@@ -1912,6 +2047,7 @@ fn shots(args: &[String], picture_folders: Vec<PathBuf>) -> anyhow::Result<()> {
     gallery_talk::append(&mut scenarios);
     floating::append(&mut scenarios);
     vr_audio::append(&mut scenarios);
+    vrchat_bridge::append(&mut scenarios);
 
     // Home's music is the overlay's sample song, never what this computer plays.
     crate::media::watcher().stand_in(crate::media::Reading {
@@ -2051,7 +2187,7 @@ fn render(gpu: &mut Offscreen, sc: &Scenario, scale: f32, size: Vec2, path: &std
         }
         if f == 0 {
             app.set_page(sc.page, t);
-            if sc.name.starts_with("projects-") {
+            if sc.name.starts_with("projects-") || sc.name.starts_with("capture-toolkit") {
                 app.projects_mut().stage(&ctx, sc.name);
             }
             if sc.name.starts_with("projects-preview") || sc.name == "projects-stills" {
@@ -3308,6 +3444,15 @@ fn overlay_menu_shots(out: &std::path::Path, snap: &Snapshot) -> anyhow::Result<
     };
     press(&mut host, &snap, Target::Photo);
     shoot(&host, "overlay-menu-photo-share", Target::ShareLatestTo)?;
+    // The two pictures as buttons: one hovered; greyed out while a timer counts; what stopped or warns about a picture.
+    use orbiters_n4n0_core::menu::PhotoMode;
+    shoot(&host, "overlay-menu-photo-two-hover", Target::TakeOf(PhotoMode::World))?;
+    host.menu.countdown = Some(3);
+    shoot(&host, "overlay-menu-photo-two-countdown", Target::Back)?;
+    host.menu.countdown = None;
+    host.menu.notice = Some("Your avatar is in this picture: see Capture".into());
+    shoot(&host, "overlay-menu-photo-two-notice", Target::Back)?;
+    host.menu.notice = None;
     press(&mut host, &snap, Target::History);
     shoot(&host, "overlay-menu-history", Target::SharePublic(3))?;
     // Share to …: the friends come with the next snapshot, two are chosen.

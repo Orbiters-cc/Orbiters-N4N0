@@ -27,6 +27,8 @@ pub enum CapturePhase {
     Waiting,
     /// Its 3D view being made, this far.
     Making { percent: u8 },
+    /// Its 3D view being made, paused this far (a capture or VRChat has the GPU), and continuing by itself.
+    Paused { percent: u8 },
     /// Its 3D view is made: it can be shared.
     #[default]
     Ready,
@@ -102,6 +104,7 @@ impl CaptureRow {
             CapturePhase::Saving => "Saving…".into(),
             CapturePhase::Waiting => "Waiting for 3D view".into(),
             CapturePhase::Making { percent } => format!("3D view · {percent} %"),
+            CapturePhase::Paused { percent } => format!("3D view paused · {percent} %"),
             CapturePhase::NoView => "No 3D view yet".into(),
             CapturePhase::Ready if self.public || self.people > 0 => whom(self.public, self.people),
             CapturePhase::Ready => "Ready to share".into(),
@@ -204,6 +207,8 @@ mod tests {
 
     #[test]
     fn a_capture_says_where_its_view_and_its_shares_are() {
+        let paused = CaptureRow { key: "s".into(), phase: CapturePhase::Paused { percent: 42 }, ..Default::default() };
+        assert!(paused.state().contains("paused") && paused.state().contains("42"), "{}", paused.state());
         let mut row = CaptureRow { key: "s".into(), phase: CapturePhase::Making { percent: 42 }, ..Default::default() };
         assert_eq!(row.state(), "3D view · 42 %");
         assert!(row.shareable(), "a share waits for its view");

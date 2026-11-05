@@ -54,6 +54,8 @@ struct Detail {
     preview: Option<(String, Thumb)>,
     /// A reconstruction of this session was running last frame.
     reconstructing: bool,
+    /// What can be asked about its wearer (orbiters_core::picture::wearer_row), read once per result.
+    wearer_row: Option<Option<orbiters_core::picture::WearerRow>>,
 }
 
 /// What the area under the stats shows.
@@ -199,6 +201,7 @@ impl State {
             view: if reconstructed { View::Splats } else { View::Path },
             preview: None,
             reconstructing: false,
+            wearer_row: None,
         });
     }
 }
@@ -566,18 +569,61 @@ pub(super) fn stage_label(stage: Stage) -> &'static str {
 }
 
 /// The whole run's progress: reading and seeding are short, training is most of it.
+///
+/// A pause's progress stays: a run going on from one reads the session again, and that never shows as going back.
 pub(crate) fn overall_progress(j: &ReconstructionJob) -> f32 {
-    match j.stage {
+    let now = match j.stage {
         Stage::Loading => 0.05 * j.progress,
         Stage::Seeding => 0.05,
         Stage::Training => 0.06 + 0.92 * j.progress,
         Stage::Saving => 0.98,
+    };
+    now.max(j.floor)
+}
+
+/// Why a paused reconstruction waits and when it goes on, as a sentence.
+pub(crate) fn pause_why(snap: &crate::state::Snapshot) -> &'static str {
+    if snap.is_capturing() {
+        "A capture needs the graphics card. It continues when the capture ends."
+    } else if snap.vrchat.running && snap.settings.reconstruct_while_playing == orbiters_core::settings::WhilePlaying::AfterVrchat {
+        "VRChat is running. It continues once VRChat closes or the headset has been off a minute."
+    } else {
+        "It continues in a moment."
+    }
+}
+
+/// [`pause_why`] in the few words a card's badge has room for.
+pub(crate) fn pause_short(snap: &crate::state::Snapshot) -> &'static str {
+    if snap.is_capturing() {
+        "continues after the capture"
+    } else if snap.vrchat.running && snap.settings.reconstruct_while_playing == orbiters_core::settings::WhilePlaying::AfterVrchat {
+        "continues when VRChat closes"
+    } else {
+        "continues in a moment"
+    }
+}
+
+/// What a card's badge says of a run on show.
+pub(crate) fn job_badge(j: &ReconstructionJob, snap: &crate::state::Snapshot) -> (String, Color32) {
+    if j.paused {
+        (format!("Paused {:.0}% · {}", overall_progress(j) * 100.0, pause_short(snap)), theme::FG_2)
+    } else {
+        (format!("Reconstructing {:.0}%", overall_progress(j) * 100.0), theme::ACCENT)
+    }
+}
+
+/// The colour of a run's progress bar: an accent while it moves, quiet while it waits.
+pub(crate) fn job_bar(j: &ReconstructionJob) -> Color32 {
+    if j.paused {
+        theme::FG_3
+    } else {
+        theme::ACCENT
     }
 }
 
 /// The reconstruction: its preview (a render of a keyframe it never trained on) with its scores, or the run's
 /// progress over the previous result.
-fn splats_view(ui: &Ui, rect: Rect, tex: Option<&TextureHandle>, report: Option<&Report>, job: Option<&ReconstructionJob>) {
+fn splats_view(ui: &Ui, rect: Rect, tex: Option<&TextureHandle>, report: Option<&Report>, job: Option<&ReconstructionJob>, why: &str) {
     let p = ui.painter().with_clip_rect(rect.intersect(ui.clip_rect()));
     widgets::frame(&p, rect, theme::TILE_RADIUS, theme::surface_soft());
     if let Some(t) = tex {
@@ -588,14 +634,24 @@ fn splats_view(ui: &Ui, rect: Rect, tex: Option<&TextureHandle>, report: Option<
     }
     if let Some(j) = job {
         let c = rect.center();
-        widgets::text(&p, pos2(c.x, c.y - 26.0), Align2::CENTER_CENTER, &Txt::new(stage_label(j.stage), 15.0).weight(weight::SEMIBOLD));
+        let title = if j.paused {
+            "Paused"
+        } else if j.resuming {
+            "Continuing from where it paused"
+        } else {
+            stage_label(j.stage)
+        };
+        widgets::text(&p, pos2(c.x, c.y - 26.0), Align2::CENTER_CENTER, &Txt::new(title, 15.0).weight(weight::SEMIBOLD));
         let bar = Rect::from_center_size(c, vec2((rect.width() * 0.6).min(360.0), 6.0));
         let f = anim::spring_from(ui.ctx(), Id::unique(("splats-progress", &j.session_dir)), [0.0], [overall_progress(j)], Spring::SOFT)[0].clamp(0.0, 1.0);
         p.rect_filled(bar, theme::radius(3.0), theme::white(0.08));
         if f > 0.001 {
-            p.rect_filled(Rect::from_min_size(bar.min, vec2((bar.width() * f).max(6.0), 6.0)), theme::radius(3.0), theme::ACCENT);
+            p.rect_filled(Rect::from_min_size(bar.min, vec2((bar.width() * f).max(6.0), 6.0)), theme::radius(3.0), job_bar(j));
         }
-        let detail = if j.stage == Stage::Training && j.iteration > 0 {
+        let detail = if j.paused {
+            let splats = if j.gaussians > 0 { format!(" · {} splats", format::integer(j.gaussians as f64)) } else { String::new() };
+            format!("{:.0}%{splats}, kept", overall_progress(j) * 100.0)
+        } else if j.stage == Stage::Training && j.iteration > 0 {
             let left = j.seconds as f64 / j.iteration as f64 * j.iterations.saturating_sub(j.iteration) as f64;
             let quality = j.psnr.map(|q| format!(" · {q:.1} dB")).unwrap_or_default();
             let on = if j.integrated { " · on the integrated GPU" } else { "" };
@@ -604,6 +660,9 @@ fn splats_view(ui: &Ui, rect: Rect, tex: Option<&TextureHandle>, report: Option<
             format!("{:.0}%", overall_progress(j) * 100.0)
         };
         widgets::text(&p, pos2(c.x, c.y + 24.0), Align2::CENTER_CENTER, &Txt::new(detail, 12.0).color(theme::FG_3));
+        if j.paused {
+            widgets::text(&p, pos2(c.x, c.y + 44.0), Align2::CENTER_CENTER, &Txt::new(why, 12.0).color(theme::FG_2));
+        }
         return;
     }
     let Some(r) = report else { return };
@@ -674,7 +733,7 @@ fn session_card(ui: &mut Ui, cx: &Cx, i: usize, s: &SessionSummary, rect: Rect, 
     let job = cx.snap.reconstruction.as_ref().filter(|j| j.session_dir == s.dir);
     let cleaning = cx.snap.cleanup.as_ref().is_some_and(|j| j.of(&s.dir).is_some());
     let splats = match job {
-        Some(j) => Some((format!("Reconstructing {:.0}%", overall_progress(j) * 100.0), theme::ACCENT)),
+        Some(j) => Some(job_badge(j, cx.snap)),
         None if cx.snap.reconstruct_queue.contains(&s.dir) => Some(("Waiting to reconstruct".to_string(), theme::FG_2)),
         None if cleaning => Some(("Freeing space".to_string(), theme::FG_2)),
         None => s.reconstruction.as_ref().map(|_| ("Splats".to_string(), theme::ACCENT)),
@@ -687,6 +746,13 @@ fn session_card(ui: &mut Ui, cx: &Cx, i: usize, s: &SessionSummary, rect: Rect, 
         badge(&p, ui, pos2(thumb.right() - 12.0, thumb.top() + 12.0), "No keyframes", theme::alpha(theme::DANGER, 0.2), theme::DANGER, true);
     } else if s.manifest.consent.own_world {
         badge(&p, ui, pos2(thumb.right() - 12.0, thumb.top() + 12.0), "Own world", theme::alpha(theme::OK, 0.2), theme::OK, true);
+    } else if let Some(picture) = &s.picture {
+        // What the 3D picture is of.
+        let (label, tint) = match picture.mode {
+            orbiters_core::settings::PictureMode::People => ("People", theme::VIOLET),
+            orbiters_core::settings::PictureMode::World => ("World", theme::ACCENT),
+        };
+        badge(&p, ui, pos2(thumb.right() - 12.0, thumb.top() + 12.0), label, theme::black(0.55), tint, true);
     }
 
     let x = r.left() + 16.0;
@@ -997,6 +1063,10 @@ fn detail(ctx: &egui::Context, cx: &mut Cx, state: &mut State, page: Rect) {
         if job.is_some() && !d.reconstructing {
             d.view = View::Splats;
         }
+        if d.reconstructing && job.is_none() {
+            // A new result: what can be asked about its wearer may have changed.
+            d.wearer_row = None;
+        }
         d.reconstructing = job.is_some();
         let splats = job.is_some() || session.reconstruction.is_some();
         if !splats {
@@ -1019,7 +1089,7 @@ fn detail(ctx: &egui::Context, cx: &mut Cx, state: &mut State, page: Rect) {
             }
             View::Splats => {
                 let tex = preview(ctx, d, &session);
-                splats_view(&cu, map, tex.as_ref(), session.reconstruction.as_ref(), job);
+                splats_view(&cu, map, tex.as_ref(), session.reconstruction.as_ref(), job, pause_why(cx.snap));
                 if session.reconstruction.is_some() && job.is_none() && cx.gpu.is_some() {
                     let r = Rect::from_min_size(pos2(map.left() + 10.0, map.top() + 12.0), vec2(124.0, 36.0));
                     if Button::new("View in 3D")
@@ -1075,6 +1145,11 @@ fn detail(ctx: &egui::Context, cx: &mut Cx, state: &mut State, page: Rect) {
                         cx.ctl.stop_reconstruction();
                     }
                 }
+                Offer::Paused { why, .. } => {
+                    if Button::new(offer.label()).icon(icons::X).variant(Variant::Secondary).hint(why).width(side.width()).show_at(&mut cu, full(y)).clicked() {
+                        cx.ctl.stop_reconstruction();
+                    }
+                }
                 Offer::Waiting { hint } => {
                     if Button::new(offer.label()).icon(icons::X).variant(Variant::Secondary).hint(hint).width(side.width()).show_at(&mut cu, full(y)).clicked() {
                         cx.ctl.unqueue_reconstruction(session.dir.clone());
@@ -1102,6 +1177,37 @@ fn detail(ctx: &egui::Context, cx: &mut Cx, state: &mut State, page: Rect) {
             }
         }
         y += 52.0;
+        // With or without the wearer (orbiters_core::picture::wearer_row), once there is a result to redo.
+        if matches!(offer, super::reconstruct_again::Offer::Start { .. }) {
+            let dir = &session.dir;
+            if let Some(row) = *d.wearer_row.get_or_insert_with(|| orbiters_core::picture::wearer_row(dir)) {
+                let b = Button::new(row.label()).icon(if row.takes_out() { icons::USER_MINUS } else { icons::USER_PLUS }).variant(Variant::Ghost).width(side.width()).id_salt("wearer-row").hint(if row.takes_out() {
+                    "A new 3D view with the avatar you wore taken out: what stood behind it comes from other frames, where they saw it. Anyone touching your avatar comes out with it"
+                } else {
+                    "A new 3D view with the avatar you wore left in it"
+                });
+                if b.show_at(&mut cu, full(y)).clicked() {
+                    match (orbiters_core::picture::WearerChoice { take_out: row.takes_out() }).save(&session.dir) {
+                        Ok(()) => {
+                            d.again = super::reconstruct_again::press(ctx, cx, &session.dir, &title(&session), None, full(y));
+                            d.view = View::Splats;
+                            d.wearer_row = None;
+                        }
+                        Err(e) => {
+                            cx.run(ctx, Err(e));
+                        }
+                    }
+                }
+                y += 52.0;
+            }
+        }
+        // What was done about the wearer, in its own words.
+        if let Some(line) = session.reconstruction.as_ref().and_then(orbiters_core::picture::wearer_line) {
+            let job = cu.painter().layout_job(Txt::new(line, 12.0).color(theme::FG_3).line_height(17.0).job(side.width() - 8.0));
+            let h = job.size().y;
+            cu.painter().galley(pos2(side.left() + 4.0, y), job, theme::FG_3);
+            y += h + 12.0;
+        }
         // Send to Mixer, and beside it Export… (what its 3D view shows, as a file for other tools).
         let ready = session.reconstruction.is_some() && job.is_none();
         let mut export = Button::new("Export…").icon(icons::UPLOAD_SIMPLE).enabled(ready).id_salt("detail-export");

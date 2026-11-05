@@ -172,6 +172,10 @@ pub enum ToService {
     WalkBoost {
         strength: f32,
     },
+    /// The VRChat bridge: Stop, Pause, Resume, a new token.
+    Bridge {
+        command: crate::bridge::Command,
+    },
     /// Updates of an installed app (controller/update.rs).
     Updates {
         action: UpdateAction,

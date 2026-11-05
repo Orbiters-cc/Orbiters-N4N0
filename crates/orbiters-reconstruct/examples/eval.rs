@@ -94,9 +94,9 @@ fn main() -> anyhow::Result<()> {
         let (f, t, s) = match &prepared.undo {
             Some(u) => {
                 let captured = dataset::keyframe_image(&data.dir, data.views[i].keyframe, &data.geometry)?;
-                metrics::metrics(&aberration::aberrate(&img, w, h, u.intensity, u.factor), &captured, &u.mask, w, h)
+                metrics::metrics(&aberration::aberrate(&img, w, h, u.intensity, u.factor), &captured, &orbiters_reconstruct::wearer::scene(&u.mask, &data.views[i].image), w, h)
             }
-            None => metrics::metrics(&img, &data.views[i].image, &data.mask, w, h),
+            None => metrics::metrics(&img, &data.views[i].image, &orbiters_reconstruct::wearer::scene(&data.mask, &data.views[i].image), w, h),
         };
         println!("  keyframe {:>4}: PSNR {f:.2} dB, trimmed-90% {t:.2} dB, SSIM {s:.4}", data.views[i].keyframe);
         rows.push(serde_json::json!({ "keyframe": data.views[i].keyframe, "psnr": f, "psnr_trimmed90": t, "ssim": s }));

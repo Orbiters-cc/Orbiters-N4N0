@@ -299,6 +299,7 @@ fn session_entry(s: &SessionSummary, world: &str, world_name: &str, remote: Opti
         content: Content::read(&s.dir),
         ready: s.reconstruction.is_some(),
         no_keyframes: s.has_no_keyframes(),
+        picture_mode: s.picture.map(|p| p.mode),
         no_depth: s.manifest.stats.depth_frames == 0,
         trimmed: s.trimmed,
         result: s.reconstruction.as_ref().map(|r| r.created_utc.clone()),
@@ -400,7 +401,7 @@ fn status(
                 let read = snapshot.capture.stats.as_ref().map(|st| st.frames as f32).filter(|_| frames > 0);
                 ("importing", read.map(|n| (n / frames as f32).min(1.0)))
             } else if let Some(job) = running {
-                ("reconstructing", Some(if job.iterations > 0 { job.iteration as f32 / job.iterations as f32 } else { 0.0 }))
+                (if job.paused { "paused" } else { "reconstructing" }, Some(if job.iterations > 0 { job.iteration as f32 / job.iterations as f32 } else { 0.0 }))
             } else if snapshot.reconstruct_queue.iter().any(|d| same_path(d, dir)) {
                 ("waiting", None)
             } else if s.reconstruction.is_some() {

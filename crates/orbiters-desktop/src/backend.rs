@@ -48,6 +48,8 @@ pub trait Backend: Send + Sync {
     /// Signs in to Orbiters (the account the Unity tools share) through the browser: Connect on the page it opens.
     fn sign_in(&self);
     fn reopen_sign_in(&self);
+    /// What Settings asks of the VRChat bridge.
+    fn bridge_command(&self, _command: crate::bridge::Command) {}
     fn cancel_sign_in(&self);
     fn sign_out(&self);
     fn vrchat_login(&self, _command: crate::controller::vrchat_login::Command) {}
@@ -196,6 +198,10 @@ impl Backend for Remote {
 
     fn reopen_sign_in(&self) {
         self.0.send(&ToService::ReopenSignIn);
+    }
+
+    fn bridge_command(&self, command: crate::bridge::Command) {
+        self.0.send(&ToService::Bridge { command });
     }
 
     fn cancel_sign_in(&self) {
@@ -403,6 +409,10 @@ impl Backend for Local {
 
     fn reopen_sign_in(&self) {
         self.report(self.ctl.reopen_sign_in());
+    }
+
+    fn bridge_command(&self, command: crate::bridge::Command) {
+        self.ctl.bridge_command(command);
     }
 
     fn cancel_sign_in(&self) {

@@ -524,6 +524,8 @@ pub struct TestPatternSource {
     /// Odd colour frames are rig frames (contracts' Docs/rig-frames.md), the rig where the camera is; `late_face` (a
     /// face number) is stamped with the previous frame's time, as when its camera renders after VRChat's.
     pub rig: bool,
+    /// The layout its rig frames are drawn in: an avatar uploaded with an older Toolkit draws the square one.
+    pub rig_generation: rig::Generation,
     pub late_face: Option<u32>,
     /// Another camera of the same frames (a camera dolly's stream): the same game times, the camera elsewhere on the
     /// circle ([`TestPatternSource::stream_pose`]).
@@ -535,7 +537,7 @@ pub struct TestPatternSource {
 
 impl TestPatternSource {
     pub fn new(width: u32, height: u32, fps: f32, depth_every: u32, frames: u32, paced: bool) -> Self {
-        Self { width, height, fps, depth_every, frames, rig: false, late_face: None, stream: 0, index: 0, started: None, paced }
+        Self { width, height, fps, depth_every, frames, rig: false, rig_generation: rig::Generation::Fill, late_face: None, stream: 0, index: 0, started: None, paced }
     }
 
     /// The same frames seen by camera `stream` (0 the main one).
@@ -556,12 +558,19 @@ impl TestPatternSource {
         self
     }
 
+    /// The same, drawn as an avatar uploaded with an older Toolkit draws them.
+    pub fn with_old_rig(mut self) -> Self {
+        self.rig = true;
+        self.rig_generation = rig::Generation::Square;
+        self
+    }
+
     /// Face `face`'s render at `t`: its own colour, a lighter square in the middle, the stamp.
-    pub fn face_render(face: u32, t: f32) -> RgbaImage {
+    pub fn face_render(face: u32, t: f32, generation: rig::Generation) -> RgbaImage {
         let mut img = RgbaImage::new(128, 128);
         img.fill_rect(0, 0, 128, 128, [(face * 40) as u8, 120, 200 - (face * 20) as u8]);
         img.fill_rect(40, 40, 48, 48, [230, 220, 200]);
-        rig::draw_stamp(&mut img, t);
+        rig::draw_stamp(&mut img, t, generation);
         img
     }
 
@@ -605,9 +614,9 @@ impl TestPatternSource {
             let faces: [RgbaImage; rig::FACES] = std::array::from_fn(|i| {
                 let face = i as u32 + 1;
                 let stamped = if self.late_face == Some(face) { t - 1.0 / self.fps.max(1.0) } else { t };
-                Self::face_render(face, stamped)
+                Self::face_render(face, stamped, self.rig_generation)
             });
-            if rig::encode(&mut img, &rig::payload(pose, t, w, h, 0, strip::flags::SOURCE_TEST), &faces).is_some() {
+            if rig::encode(&mut img, &rig::payload_of(self.rig_generation, pose, t, w, h, 0, strip::flags::SOURCE_TEST), &faces).is_some() {
                 return img;
             }
         }

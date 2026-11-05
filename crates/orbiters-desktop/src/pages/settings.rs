@@ -43,6 +43,8 @@ pub struct State {
     vr_audio: super::vr_audio::State,
     /// VRChat on the network, where it does not run on this computer.
     network: super::network::State,
+    /// Experimental: the VRChat bridge.
+    experimental: super::experimental::State,
 }
 
 impl State {
@@ -117,10 +119,14 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
             let mut m = super::Masonry::new(ui, "settings");
             m.add(1, |ui| account(ui, cx, &mut state.confirm_sign_out));
             m.add(10, |ui| vrchat_account(ui, cx, &mut state.vrchat));
+            // Only for an account the server says has it: nobody else sees a trace of it.
+            if snap.bridge.allowed {
+                m.add(11, |ui| apply |= super::experimental::show(ui, cx, 11, &mut state.experimental, &mut draft.experimental));
+            }
             // What VRChat on this very computer gives (Spout, its log, SteamVR) has no settings where it cannot run.
             let vrchat_here = orbiters_core::osc::VRCHAT_RUNS_HERE;
             if !vrchat_here {
-                m.add(11, |ui| apply |= super::network::card(ui, cx, 11, &mut state.network, &mut draft));
+                m.add(12, |ui| apply |= super::network::card(ui, cx, 12, &mut state.network, &mut draft));
             }
 
             if vrchat_here {

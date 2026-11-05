@@ -239,6 +239,9 @@ pub struct SessionSummary {
     /// Its keyframes are gone ([`crate::cleanup::trimmed`]): with a reconstruction, its capture files were deleted to
     /// keep only its 3D view, and it is not reconstructed again.
     pub trimmed: bool,
+    /// What it is a 3D picture of ([`crate::picture`]): `None` for a recording, or a picture from before the two modes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub picture: Option<crate::picture::Picture>,
     /// Seconds since the Unix epoch of the manifest's last change.
     pub modified: u64,
     /// The latest finished reconstruction.
@@ -363,6 +366,7 @@ pub fn list_sessions(root: &Path) -> Vec<SessionSummary> {
             size_bytes: sizes.total,
             capture_bytes: sizes.capture,
             trimmed: crate::cleanup::trimmed(&dir),
+            picture: crate::picture::Picture::read(&dir),
             reconstruction: crate::reconstruction::read_report(&dir),
             dir,
             manifest,

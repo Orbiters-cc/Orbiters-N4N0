@@ -225,19 +225,22 @@ pub enum Pages {
     Feedback,
     /// From version 14: the screen mirror, and More with its card among seven.
     Mirror,
+    /// From version 15: the 3D picture page with its two pictures as buttons.
+    TwoPictures,
 }
 
 impl Pages {
     /// Every page: the overlay's and the window's.
-    pub const ALL: Pages = Pages::Mirror;
+    pub const ALL: Pages = Pages::TwoPictures;
 
     /// The pages of a screen of `version` (`None`: a screen from before `N4N0/Screen/Version`).
     pub fn of_screen(version: Option<i32>) -> Pages {
         use orbiters_contracts::n4n0::{
             SCREEN_FEEDBACK, SCREEN_MIRROR, SCREEN_MUSIC_LIGHT, SCREEN_QR, SCREEN_SHARE, SCREEN_SIMPLE, SCREEN_STATES_CARDS, SCREEN_TEN_TILES,
-            SCREEN_TIMELINE,
+            SCREEN_TIMELINE, SCREEN_TWO_PICTURES,
         };
         match version {
+            Some(v) if v >= SCREEN_TWO_PICTURES => Pages::TwoPictures,
             Some(v) if v >= SCREEN_MIRROR => Pages::Mirror,
             Some(v) if v >= SCREEN_FEEDBACK => Pages::Feedback,
             Some(v) if v >= SCREEN_SHARE => Pages::Share,
@@ -294,6 +297,11 @@ impl Pages {
     /// More has the screen mirror (and its page).
     pub fn mirror(self) -> bool {
         self >= Pages::Mirror
+    }
+
+    /// The 3D picture page has its two pictures as buttons.
+    pub fn two_pictures(self) -> bool {
+        self >= Pages::TwoPictures
     }
 }
 
@@ -427,6 +435,23 @@ impl PhotoLength {
     }
 }
 
+/// What a 3D picture is of (Orbiters - N4N0's `PictureMode`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum PhotoMode {
+    #[default]
+    People,
+    World,
+}
+
+impl PhotoMode {
+    pub fn other(self) -> Self {
+        match self {
+            PhotoMode::People => PhotoMode::World,
+            PhotoMode::World => PhotoMode::People,
+        }
+    }
+}
+
 /// What the computer plays, as Windows' media controls tell it (the app playing last, or playing now).
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Media {
@@ -551,6 +576,10 @@ pub enum Target {
     Timer(u8),
     Length(u8),
     Take,
+    /// Take a 3D picture of this, which becomes the mode the page's Take takes (the window's two buttons).
+    TakeOf(PhotoMode),
+    /// The other mode for Take (the line under it, on the screens whose page has one button).
+    PhotoMode,
     // Music.
     MediaPrevious,
     MediaPlayPause,
@@ -701,11 +730,13 @@ pub enum Effect {
     Photo3d {
         timer: u32,
         length: PhotoLength,
+        mode: PhotoMode,
     },
-    /// Keep the picked timer and length.
+    /// Keep the picked timer, length and mode.
     PhotoChoice {
         timer: u32,
         length: PhotoLength,
+        mode: PhotoMode,
     },
     /// Tell the computer's media controls or its volume.
     Media(MediaCommand),
@@ -826,6 +857,7 @@ pub struct Menu {
     pub call_note: String,
     pub photo_timer: u32,
     pub photo_length: PhotoLength,
+    pub photo_mode: PhotoMode,
     /// Seconds left before the 3D picture starts.
     pub countdown: Option<u32>,
     /// A short line for the person: what was copied, what failed. Shown until the next change of page.
@@ -1532,14 +1564,14 @@ impl Menu {
             Target::Timer(i) => match TIMERS.get(i as usize) {
                 Some(&timer) => {
                     self.photo_timer = timer;
-                    vec![Effect::PhotoChoice { timer, length: self.photo_length }]
+                    vec![Effect::PhotoChoice { timer, length: self.photo_length, mode: self.photo_mode }]
                 }
                 None => Vec::new(),
             },
             Target::Length(i) => match PhotoLength::ALL.get(i as usize) {
                 Some(&length) => {
                     self.photo_length = length;
-                    vec![Effect::PhotoChoice { timer: self.photo_timer, length }]
+                    vec![Effect::PhotoChoice { timer: self.photo_timer, length, mode: self.photo_mode }]
                 }
                 None => Vec::new(),
             },
@@ -1547,7 +1579,18 @@ impl Menu {
                 if self.countdown.is_some() {
                     return Vec::new();
                 }
-                vec![Effect::Photo3d { timer: self.photo_timer, length: self.photo_length }]
+                vec![Effect::Photo3d { timer: self.photo_timer, length: self.photo_length, mode: self.photo_mode }]
+            }
+            Target::TakeOf(mode) => {
+                if self.countdown.is_some() {
+                    return Vec::new();
+                }
+                self.photo_mode = mode;
+                vec![Effect::Photo3d { timer: self.photo_timer, length: self.photo_length, mode }]
+            }
+            Target::PhotoMode => {
+                self.photo_mode = self.photo_mode.other();
+                vec![Effect::PhotoChoice { timer: self.photo_timer, length: self.photo_length, mode: self.photo_mode }]
             }
             // What the music page shows changes at once; the computer follows.
             Target::MediaPlayPause => match self.media.as_mut() {
@@ -2728,9 +2771,14 @@ mod tests {
         assert_eq!(menu.press(Target::Answer), vec![Effect::Answer]);
         menu.press(Target::Back);
         menu.press(Target::Photo);
-        assert_eq!(menu.press(Target::Timer(3)), vec![Effect::PhotoChoice { timer: 10, length: PhotoLength::Quick }]);
-        assert_eq!(menu.press(Target::Length(2)), vec![Effect::PhotoChoice { timer: 10, length: PhotoLength::Full }]);
-        assert_eq!(menu.press(Target::Take), vec![Effect::Photo3d { timer: 10, length: PhotoLength::Full }]);
+        assert_eq!(menu.press(Target::Timer(3)), vec![Effect::PhotoChoice { timer: 10, length: PhotoLength::Quick, mode: PhotoMode::People }]);
+        assert_eq!(menu.press(Target::Length(2)), vec![Effect::PhotoChoice { timer: 10, length: PhotoLength::Full, mode: PhotoMode::People }]);
+        assert_eq!(menu.press(Target::Take), vec![Effect::Photo3d { timer: 10, length: PhotoLength::Full, mode: PhotoMode::People }]);
+        // The line under Take changes what it takes; the window's two buttons take what they say, and it stays chosen.
+        assert_eq!(menu.press(Target::PhotoMode), vec![Effect::PhotoChoice { timer: 10, length: PhotoLength::Full, mode: PhotoMode::World }]);
+        assert_eq!(menu.press(Target::Take), vec![Effect::Photo3d { timer: 10, length: PhotoLength::Full, mode: PhotoMode::World }]);
+        assert_eq!(menu.press(Target::TakeOf(PhotoMode::People)), vec![Effect::Photo3d { timer: 10, length: PhotoLength::Full, mode: PhotoMode::People }]);
+        assert_eq!(menu.photo_mode, PhotoMode::People);
         menu.countdown = Some(8);
         assert!(menu.press(Target::Take).is_empty(), "one picture at a time");
     }

@@ -38,6 +38,9 @@ pub fn is_trained_preview_file(name: &str) -> bool {
 /// rewritten, and applied wherever the splats leave the app (the VRChat trees, the web preview, the pictures). A new
 /// reconstruction replaces the folder and its edits with it: they name splats of the PLY they were made on.
 pub const EDIT_FILE: &str = "splat-edits.bin";
+/// Where a paused run stands (orbiters_reconstruct::checkpoint): one file beside the result, in the session folder,
+/// deleted when the run ends or is stopped. What is written to replace it goes beside it, under this name and more.
+pub const CHECKPOINT_FILE: &str = "reconstruction.checkpoint";
 /// Renders of every held-out keyframe, named after the keyframe (`000004.qoi`).
 pub const HELD_OUT_DIR: &str = "held-out";
 
@@ -68,6 +71,31 @@ pub struct Report {
     /// Depth samples the frames carry, and of those unknown after validation (the decoder's included).
     pub depth_samples: Option<usize>,
     pub depth_unknown: Option<usize>,
+    /// The wearer of the capture kit, taken out of this result because they should not be in it and their avatar could not
+    /// hide itself. `None`: nothing of the kind was done.
+    #[serde(default)]
+    pub wearer: Option<WearerOut>,
+    /// They should have gone and nothing of them was found to take out.
+    #[serde(default)]
+    pub wearer_not_found: bool,
+}
+
+/// What taking the wearer out did: numbers for the gallery's line and for whoever checks it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WearerOut {
+    /// Share of the views' pixels that showed them.
+    pub pixel_share: f32,
+    /// Views (keyframes and rig faces) they were in, of all.
+    pub views: usize,
+    pub views_total: usize,
+    /// Depth samples on them, of those that hit something.
+    pub depth_samples: usize,
+    pub depth_hits: usize,
+    /// Gaussians that still lay where they stood at the end of training, and floor patched under their feet (a guess, from
+    /// the floor's colour around).
+    pub gaussians_left: usize,
+    pub floor_patched: usize,
 }
 
 /// Where a run puts its result (the worker writes here). Readers take [`result_dir`].
@@ -145,6 +173,24 @@ pub enum Event {
         psnr: Option<f32>,
         seconds: f32,
     },
+    /// Asked to pause, it goes on from where the checkpoint of an earlier pause left it (or, if that checkpoint cannot
+    /// be read after all, starts over: [`Stage::Seeding`] follows).
+    Resumed {
+        iteration: u32,
+        iterations: u32,
+        gaussians: usize,
+        psnr: Option<f32>,
+        seconds: f32,
+    },
+    /// A pause has taken it off the GPU: its memory is free, what is left is writing the checkpoint.
+    Pausing,
+    /// It stopped for a pause, and exits. `kept`: a checkpoint stands to go on from (else it starts over, which costs
+    /// little before its steps have begun); `message` says why not when that loses progress.
+    Paused {
+        kept: bool,
+        #[serde(default)]
+        message: Option<String>,
+    },
     Done {
         report: Report,
     },
@@ -180,6 +226,9 @@ mod tests {
         assert!(line.starts_with("{\"event\":\"progress\""), "{line}");
         assert_eq!(serde_json::from_str::<Event>(&line).unwrap(), e);
         let s: Event = serde_json::from_str(r#"{"event":"stage","stage":"seeding"}"#).unwrap();
+        for e in [Event::Pausing, Event::Paused { kept: true, message: None }, Event::Resumed { iteration: 5, iterations: 9, gaussians: 7, psnr: None, seconds: 1.0 }] {
+            assert_eq!(Event::from_line(&e.to_line()), Some(e));
+        }
         assert_eq!(s, Event::Stage { stage: Stage::Seeding, progress: 0.0 });
         // A report with a number written as null (NaN) still ends the run.
         let done = Event::Done { report: Report { gaussians: 5, psnr_train: f32::NAN, ..Default::default() } }.to_line();

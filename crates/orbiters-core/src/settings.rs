@@ -34,6 +34,8 @@ pub struct Settings {
     pub walk_boost: WalkBoostSettings,
     /// How long a 3D picture's camera flight lasts (more seconds, more of the place seen).
     pub photo_3d: Photo3dLength,
+    /// What a 3D picture is of, the last one chosen: what N4N0's menu and the Action Menu take, which have one button.
+    pub photo_3d_mode: PictureMode,
     /// Seconds before a 3D picture taken from N4N0's menu starts (0: at once).
     pub photo_3d_timer: u32,
     /// Where reconstructions train while VRChat runs.
@@ -70,6 +72,17 @@ pub struct Settings {
     pub picture_folders: Vec<PathBuf>,
     /// Windows' default sound output and input while SteamVR runs (`docs/vr-audio-devices.md`).
     pub vr_audio: VrAudioSettings,
+    /// What this person turned on among the experimental features. A feature here only ever narrows what the server
+    /// grants (`crate::features`): turning one on in this file does nothing for an account that does not have it.
+    pub experimental: ExperimentalSettings,
+}
+
+/// The experimental features (Settings, Experimental), all off until chosen.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ExperimentalSettings {
+    /// The MCP bridge to VRChat, for an agent to start and control the game (`docs/vrchat-bridge.md`).
+    pub vrchat_bridge: bool,
 }
 
 /// The sound devices Windows uses by default while SteamVR runs: set for all three of Windows' roles (console,
@@ -236,6 +249,18 @@ pub enum Photo3dLength {
     #[default]
     Standard,
     Full,
+}
+
+/// What a 3D picture is of (`crate::picture`): the flight's time, who is left out of the picture, and what training
+/// spends its steps on.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PictureMode {
+    /// Most of the flight around the people in the picture.
+    #[default]
+    People,
+    /// Most of the flight through the place, the avatars left out of the picture.
+    World,
 }
 
 /// How often N4N0's camera rig takes its six views during a recording (the app's own flights, 3D pictures and scans,
@@ -542,6 +567,7 @@ impl Default for Settings {
             world_performance: false,
             walk_boost: WalkBoostSettings::default(),
             photo_3d: Photo3dLength::default(),
+            photo_3d_mode: PictureMode::default(),
             photo_3d_timer: 0,
             reconstruct_while_playing: WhilePlaying::default(),
             window_gpu: WindowGpu::default(),
@@ -556,6 +582,7 @@ impl Default for Settings {
             photos_layout: GalleryLayout::default(),
             picture_folders: Vec::new(),
             vr_audio: VrAudioSettings::default(),
+            experimental: ExperimentalSettings::default(),
         }
     }
 }

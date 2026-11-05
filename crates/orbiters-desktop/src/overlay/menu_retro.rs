@@ -284,6 +284,11 @@ pub fn element_place(e: &Element) -> Option<Place> {
     e.label.and(element_metrics(e))
 }
 
+/// A wide tile's note under its title.
+fn note_place(e: &Element) -> Place {
+    Place { room: e.rect.w as f32 - 132.0, size: 18.0 }
+}
+
 /// The room and size of what is written on an element of its look, its icon sized from it too (none for looks that
 /// write nothing).
 fn element_metrics(e: &Element) -> Option<Place> {
@@ -339,6 +344,7 @@ pub fn places() -> Vec<(Text, Place)> {
         let l = layout::cached(page);
         out.extend(l.labels.iter().map(|label| (label.text, label_place(label))));
         out.extend(l.elements.iter().filter_map(|e| Some((e.label?, element_place(e)?))));
+        out.extend(l.elements.iter().filter_map(|e| Some((e.note?, note_place(e)))));
         out.extend(l.icons.iter().map(|(r, _, _)| rect(*r, Pos2::ZERO)).filter(|r| r.width() > 120.0).map(|r| (Text::RetroModel, model_place(r))));
         out.extend(l.pictures.iter().map(|pic| (Text::RetroNoSignal, no_signal_place(rect(pic.rect, Pos2::ZERO)))));
     }
@@ -398,6 +404,11 @@ fn element(p: &Painter, e: &Element, origin: Pos2, ink: Ink, skin: &Skin) {
                 let fitted = fit(p, mono(title, place.size, ink.text), place.room);
                 let at = r.min + if wide { vec2(116.0, super::menu_ui::wide_title_y(r.height(), 38.0)) } else { vec2(24.0, r.height() - 96.0) };
                 widgets::text(p, at + vec2(0.0, fitted.dy), Align2::LEFT_TOP, &fitted.txt);
+            }
+            if let Some(note) = e.note {
+                let place = note_place(e);
+                let fitted = fit(p, mono(skin.text(note), place.size, pal.style(layout::Style::Secondary)), place.room);
+                widgets::text(p, r.min + vec2(116.0, super::menu_ui::wide_title_y(r.height(), 38.0) + 38.0 + fitted.dy), Align2::LEFT_TOP, &fitted.txt);
             }
             // A level bar in the top right corner: the tile's own instrument.
             segments(p, pos2(r.max.x - 66.0, r.min.y + 14.0), 4, 2, vec2(9.0, 6.0), 3.0, pal);

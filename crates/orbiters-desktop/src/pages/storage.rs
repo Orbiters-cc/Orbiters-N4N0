@@ -608,6 +608,7 @@ mod tests {
             size_bytes: size,
             capture_bytes: capture,
             trimmed: reconstructed && capture == 0,
+            picture: None,
             modified: 0,
             reconstruction: reconstructed.then(Report::default),
             damaged: None,

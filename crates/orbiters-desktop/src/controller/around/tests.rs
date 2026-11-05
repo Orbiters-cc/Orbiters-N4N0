@@ -5,7 +5,7 @@
 
 use super::*;
 use orbiters_core::keyframes::KeyframeSelector;
-use orbiters_core::settings::KeyframeSettings;
+use orbiters_core::settings::{KeyframeSettings, Settings};
 use std::collections::HashSet;
 
 const P11: f32 = 2.2857;
@@ -111,7 +111,11 @@ fn after_look(room: &Room, start: Pose) -> Seen {
 
 /// Flies a whole flight, a piece at a time, each piece adding the depth frames it would have shown.
 fn fly(room: &Room, start: Pose, length: Photo3dLength, people: &[Person], seen: &mut Seen) -> Vec<Piece> {
-    let mut flight = Flight::new(start, P11, RATE, length, people);
+    fly_for(room, start, length, PictureMode::People, people, seen)
+}
+
+fn fly_for(room: &Room, start: Pose, length: Photo3dLength, mode: PictureMode, people: &[Person], seen: &mut Seen) -> Vec<Piece> {
+    let mut flight = Flight::new(start, P11, RATE, length, mode, people, true);
     let mut pieces = Vec::new();
     while let Some(piece) = flight.next(seen) {
         for p in piece.poses.iter().step_by(11) {
@@ -328,7 +332,7 @@ fn people_together_are_one_subject_and_time_is_shared_out() {
     // Every second of the picture is spent.
     for (length, total) in [(Photo3dLength::Standard, 4.0), (Photo3dLength::Full, 8.0)] {
         for n in 0..4 {
-            let s = Split::of(length, n);
+            let s = Split::of(length, PictureMode::People, n);
             assert!((s.people + s.room + LOOK_S - total).abs() < 1e-4, "{length:?}, {n}: {s:?}");
             assert_eq!(s.people == 0.0, n == 0);
         }
@@ -406,11 +410,16 @@ fn dump_flight() {
     let room = room();
     let out = std::env::var("ORBITERS_FLIGHT_DUMP").expect("ORBITERS_FLIGHT_DUMP");
     let mut all = serde_json::Map::new();
-    for (name, length) in [("4s", Photo3dLength::Standard), ("8s", Photo3dLength::Full)] {
+    for (name, length, mode) in [
+        ("people-4s", Photo3dLength::Standard, PictureMode::People),
+        ("world-4s", Photo3dLength::Standard, PictureMode::World),
+        ("people-8s", Photo3dLength::Full, PictureMode::People),
+        ("world-8s", Photo3dLength::Full, PictureMode::World),
+    ] {
         let mut seen = after_look(&room, START);
         let people = start_people(&seen);
         let lookp = look(START, RATE);
-        let pieces = fly(&room, START, length, &people, &mut seen);
+        let pieces = fly_for(&room, START, length, mode, &people, &mut seen);
         let mut list = vec![serde_json::json!({"rig": false, "kind": "look", "poses": lookp})];
         list.extend(pieces.iter().map(|p| serde_json::json!({"rig": p.rig, "poses": p.poses})));
         all.insert(
@@ -418,5 +427,236 @@ fn dump_flight() {
             serde_json::json!({"people": people.iter().map(|p| serde_json::json!({"head": p.head, "ground": p.ground})).collect::<Vec<_>>(), "pieces": list}),
         );
     }
+    all.insert("voxels".to_string(), serde_json::json!(room.voxels.iter().map(|v| [v.0, v.1, v.2]).collect::<Vec<_>>()));
     std::fs::write(out, serde_json::to_string(&all).unwrap()).unwrap();
+}
+
+fn seconds_of(pieces: &[Piece]) -> f32 {
+    pieces.iter().map(|p| p.poses.len()).sum::<usize>() as f32 / RATE as f32
+}
+
+fn poses_of(pieces: &[Piece]) -> Vec<Pose> {
+    pieces.iter().flat_map(|p| p.poses.clone()).collect()
+}
+
+fn ends_home(poses: &[Pose], start: Pose) {
+    let last = poses.last().expect("a flight");
+    for k in [0, 1, 2, 3, 5] {
+        assert!((last[k] - start[k]).abs() < 1e-3, "{last:?}");
+    }
+    assert!(((last[4] - start[4]) / 360.0 - ((last[4] - start[4]) / 360.0).round()).abs() < 1e-3, "{last:?}");
+}
+
+/// How much of the place the depth frames have seen: voxels of 15 cm with a surface measured in them.
+fn surface_seen(seen: &Seen) -> usize {
+    seen.frames.iter().flat_map(|f| (0..BINS_X * BINS_Y).filter_map(|bin| f.surface_point(bin))).map(voxel).collect::<HashSet<_>>().len()
+}
+
+/// What the rig's faces add to what the main views saw, in voxels of surface: the six axes around each place, about every other
+/// colour frame where the rig is on. Its faces are wider than the main view drawn here (90° against 47°), so this counts low.
+fn surface_with_rig(room: &Room, pieces: &[Piece], seen: &Seen) -> usize {
+    let mut all = seen.clone();
+    for piece in pieces.iter().filter(|p| p.rig) {
+        for p in piece.poses.iter().step_by(22) {
+            for (pitch, yaw) in [(0.0, 0.0), (0.0, 90.0), (0.0, 180.0), (0.0, 270.0), (85.0, 0.0), (-85.0, 0.0)] {
+                all.frames.push(draw_frame(&room.voxels, &[p[0], p[1], p[2], pitch, yaw, 0.0]));
+            }
+        }
+    }
+    surface_seen(&all)
+}
+
+#[test]
+fn the_seconds_go_where_the_picture_is_of() {
+    let split = |length, mode, groups| Split::of(length, mode, groups);
+    use Photo3dLength::{Full, Standard};
+    use PictureMode::{People, World};
+    assert_eq!(split(Standard, People, 1), Split { people: 2.9, room: 4.0 - LOOK_S - 2.9 });
+    assert_eq!(split(Full, People, 2), Split { people: 5.8, room: 8.0 - LOOK_S - 5.8 });
+    // Nobody in a picture of people: its seconds are the room's, as in a picture of the world.
+    assert_eq!(split(Standard, People, 0), split(Standard, World, 0));
+    for groups in 0..4 {
+        assert_eq!(split(Standard, World, groups), Split { people: 0.0, room: 4.0 - LOOK_S });
+        assert_eq!(split(Full, World, groups), Split { people: 0.0, room: 8.0 - LOOK_S });
+    }
+    assert_eq!(split(Photo3dLength::Quick, People, 1).people, 0.0);
+}
+
+/// World mode over the real room: nobody is flown around whoever stands there, no wall is entered, and it ends on the very pose.
+#[test]
+fn a_picture_of_the_world_goes_around_nobody_enters_no_wall_and_comes_home() {
+    let room = room();
+    for length in [Photo3dLength::Standard, Photo3dLength::Full] {
+        let mut seen = after_look(&room, START);
+        let people = start_people(&seen);
+        let head = people[0].head;
+        let pieces = fly_for(&room, START, length, PictureMode::World, &people, &mut seen);
+        let poses = poses_of(&pieces);
+        assert!(pieces.iter().all(|p| p.rig), "the rig all the way, alone in the instance");
+        let wanted = if length == Photo3dLength::Full { 8.0 } else { 4.0 } - LOOK_S;
+        assert!(seconds_of(&pieces) <= wanted + 0.2 && seconds_of(&pieces) >= 0.7 * wanted, "{length:?}: {} s of {wanted}", seconds_of(&pieces));
+        let mut from = START;
+        for p in &poses {
+            assert!(length_of(p, &from) < 0.7 && (p[4] - from[4]).abs() < 30.0 && (p[3] - from[3]).abs() < 30.0, "{from:?} -> {p:?}");
+            from = *p;
+        }
+        let inside: Vec<&Pose> = poses.iter().filter(|p| in_something(&room.voxels, place(p), head)).collect();
+        assert!(inside.is_empty(), "{length:?}: {} of {} poses inside something: {:?}", inside.len(), poses.len(), inside.first());
+        ends_home(&poses, START);
+    }
+}
+
+/// The main views alone see about as much of this tight room either way: a sweep around a person looks across it too. What World
+/// adds is the rig all the way, and nobody in the picture; what People adds is the seconds around them.
+#[test]
+fn a_picture_of_the_world_sees_more_of_the_place_and_one_of_people_more_of_them() {
+    let room = room();
+    for length in [Photo3dLength::Standard, Photo3dLength::Full] {
+        let mut seen = after_look(&room, START);
+        let people = start_people(&seen);
+        let them = fly_for(&room, START, length, PictureMode::People, &people, &mut seen);
+        let of_them = (surface_seen(&seen), surface_with_rig(&room, &them, &seen));
+        let mut seen = after_look(&room, START);
+        let world = fly_for(&room, START, length, PictureMode::World, &people, &mut seen);
+        let of_world = (surface_seen(&seen), surface_with_rig(&room, &world, &seen));
+        let around = |pieces: &[Piece]| pieces.iter().filter(|p| !p.rig).map(|p| p.poses.len()).sum::<usize>() as f32 / RATE as f32;
+        let wanted = if length == Photo3dLength::Full { 4.0 } else { 2.2 };
+        assert!(around(&them) > wanted, "{length:?}: {} s around him, more than the {wanted} s of one split for all", around(&them));
+        assert_eq!(around(&world), 0.0);
+        println!("{length:?}: voxels of surface seen, main views and with the rig: {of_world:?} in World, {of_them:?} in People");
+        assert!(of_world.0 * 10 > of_them.0 * 9, "{length:?}: {of_world:?} in World, {of_them:?} in People");
+        assert!(of_world.1 > of_them.1, "{length:?}: {of_world:?} in World, {of_them:?} in People");
+    }
+}
+
+/// Among other players the rig stays off: its cameras have no mask for them. Nothing else changes.
+#[test]
+fn among_other_players_a_picture_of_the_world_flies_without_the_rig() {
+    let room = room();
+    let mut seen = after_look(&room, START);
+    let mut flight = Flight::new(START, P11, RATE, Photo3dLength::Standard, PictureMode::World, &[], false);
+    let mut pieces = Vec::new();
+    while let Some(piece) = flight.next(&seen) {
+        for p in piece.poses.iter().step_by(11) {
+            seen.add(draw_frame(&room.voxels, p));
+        }
+        pieces.push(piece);
+    }
+    assert!(pieces.iter().all(|p| !p.rig));
+    ends_home(&poses_of(&pieces), START);
+}
+
+#[test]
+fn a_picture_of_the_world_flies_nowhere_no_depth_has_seen() {
+    let start: Pose = [0.0, 1.6, 0.0, 0.0, 0.0, 0.0];
+    let mut flight = Flight::new(start, P11, RATE, Photo3dLength::Full, PictureMode::World, &[], true);
+    let pieces: Vec<Piece> = std::iter::from_fn(|| flight.next(&Seen::default())).collect();
+    assert!(pieces.iter().flat_map(|p| &p.poses).all(|p| length_of(p, &start) < 1e-3), "it only turns where it stands");
+}
+
+/// What a recording of Enzo's says: its depth frames, what stood where, and the wearer.
+struct Recorded {
+    room: Room,
+    start: Pose,
+    hips: Option<V>,
+    eye_height: Option<f32>,
+}
+
+fn recorded(dir: &Path) -> Option<Recorded> {
+    use orbiters_contracts::performance::{self, parameters, skeleton_frames};
+    let bytes = std::fs::read(dir.join(FRAMES_FILE)).ok()?;
+    let (mut start, mut first_ns, mut layout, mut moved) = (None::<Pose>, None, None::<DepthLayout>, false);
+    let mut start_frames = Vec::new();
+    let mut voxels = HashSet::new();
+    for chunk in bytes.chunks_exact(RECORD_SIZE) {
+        let Ok(r) = FrameRecord::from_bytes(chunk) else { continue };
+        if !r.has(record_flags::STRIP_OK) {
+            continue;
+        }
+        let m = r.camera_to_world;
+        if start.is_none() {
+            let (f, flat) = ([m[2], m[6], m[10]], (m[2] * m[2] + m[10] * m[10]).sqrt());
+            start = Some([m[3], m[7], m[11], (-f[1]).atan2(flat).to_degrees(), f[0].atan2(f[2]).to_degrees(), 0.0]);
+            first_ns = Some(r.capture_time_ns);
+        }
+        if !r.has(record_flags::DEPTH) || r.depth_index < 0 {
+            continue;
+        }
+        let Ok(data) = std::fs::read(dir.join(DEPTH_DIR).join(orbiters_core::bundle::depth_file(r.depth_index))) else { continue };
+        let Ok(file) = depth_file::read_for_frame(&data, r.width, r.height) else { continue };
+        if layout.as_ref().is_none_or(|l| (l.width, l.height) != (r.width, r.height)) {
+            layout = DepthLayout::new(r.width, r.height);
+        }
+        let Some(frame) = layout.as_ref().and_then(|l| SeenFrame::new(&m, &r.projection, l, &file.codes)) else { continue };
+        for bin in 0..BINS_X * BINS_Y {
+            if let Some(p) = frame.surface_point(bin) {
+                voxels.insert(voxel(p));
+            }
+        }
+        // What this flight knew after its opening turn: what the camera saw from where it started, up to its first move.
+        if !moved && length(sub(frame.eye, place(&start.unwrap_or_default()))) < 0.05 {
+            start_frames.push(frame);
+        } else {
+            moved = true;
+        }
+    }
+    let t0 = first_ns?;
+    let hips = skeleton_frames::read(&std::fs::read(dir.join(performance::SKELETON_FILE)).ok()?).ok().and_then(|frames| {
+        frames.iter().filter(|f| f.hips.iter().all(|v| v.is_finite())).min_by_key(|f| f.time_ns.abs_diff(t0)).map(|f| f.hips)
+    });
+    let table: parameters::Table = serde_json::from_slice(&std::fs::read(dir.join(performance::PARAMETERS_TABLE)).ok()?).ok()?;
+    let eye = table.parameters.iter().find(|p| p.name == "/avatar/eyeheight").map(|p| p.id);
+    let changes = parameters::read(&std::fs::read(dir.join(performance::PARAMETERS_FILE)).ok()?).ok()?;
+    let eye_height = eye.and_then(|id| changes.iter().find(|c| c.id == id).map(|c| c.value.as_f32()));
+    Some(Recorded { room: Room { start_frames, voxels }, start: start?, hips, eye_height })
+}
+
+/// Both pictures over Enzo's own recordings of 2026-11-04: his Documents folder, so not a regular test. `cargo test -- --ignored
+/// flights_over_his_recordings --nocapture` prints reports/capture-modes.md's table. Each recording's own depth frames say what
+/// stands where; what they never saw counts as free, so entering a wall here means entering one a depth frame saw.
+#[test]
+#[ignore = "reads Enzo's recordings"]
+fn flights_over_his_recordings() {
+    let sessions = Settings::default().sessions_dir;
+    let mut names: Vec<String> = std::fs::read_dir(&sessions).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).filter(|n| n.contains("2026-11-04")).collect();
+    names.sort();
+    println!("| Recording | Length | Picture | Depth frames at the look | Seconds | Around people | Surface voxels seen | With the rig | Rig | Inside something | Home |");
+    println!("|---|---|---|---|---|---|---|---|---|---|---|");
+    let mut flown = 0;
+    let only = std::env::var("ORBITERS_TEST_SESSION").ok();
+    for name in names {
+        if only.as_ref().is_some_and(|o| !name.contains(o.as_str())) {
+            continue;
+        }
+        let Some(rec) = recorded(&sessions.join(&name)) else { continue };
+        let framing = Framing { width: 1920, height: 1080, p00: P00, p11: P11 };
+        for length in [Photo3dLength::Standard, Photo3dLength::Full] {
+            for mode in [PictureMode::People, PictureMode::World] {
+                let mut seen = Seen::default();
+                for f in &rec.room.start_frames {
+                    seen.add(f.clone());
+                }
+                if seen.frames.len() < 3 {
+                    println!("| {name} | {length:?} | {mode:?} | {} | blind flight: under 3 depth frames | | | | | |", seen.frames.len());
+                    continue;
+                }
+                let at_look = seen.frames.len();
+                let people = people(rec.start, framing, &[], rec.hips, rec.eye_height, &seen);
+                let pieces = fly_for(&rec.room, rec.start, length, mode, &people, &mut seen);
+                let poses = poses_of(&pieces);
+                let head = people.first().map_or([f32::MAX; 3], |p| p.head);
+                let inside = poses.iter().filter(|p| in_something(&rec.room.voxels, place(p), head)).count();
+                let around = pieces.iter().filter(|p| !p.rig).map(|p| p.poses.len()).sum::<usize>() as f32 / RATE as f32;
+                println!("| {name} | {length:?} | {mode:?} | {at_look} | {:.2} | {around:.2} | {} | {} | {} | {inside} | yes |", seconds_of(&pieces), surface_seen(&seen), surface_with_rig(&rec.room, &pieces, &seen), pieces.iter().any(|p| p.rig));
+                ends_home(&poses, rec.start);
+                let wanted = if length == Photo3dLength::Full { 8.0 } else { 4.0 } - LOOK_S;
+                assert!(seconds_of(&pieces) <= wanted + 0.7, "{name} {length:?} {mode:?}: {} s", seconds_of(&pieces));
+                if mode == PictureMode::World {
+                    assert_eq!(around, 0.0, "{name}: nobody flown around");
+                }
+                flown += 1;
+            }
+        }
+    }
+    assert!(flown > 0);
 }

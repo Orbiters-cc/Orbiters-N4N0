@@ -122,6 +122,21 @@ pub struct CaptureStatus {
     /// Why frames come without the capture strip, while they do and after a recording that never had it.
     #[serde(default)]
     pub no_strip: Option<NoStrip>,
+    /// What the running or last 3D picture is of: `None` for a recording.
+    #[serde(default)]
+    pub picture: Option<orbiters_core::settings::PictureMode>,
+    /// Who the running or last capture left out, and what the person should know about it.
+    #[serde(default)]
+    pub left_out: LeftOut,
+}
+
+/// Who a capture left out of the picture.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LeftOut {
+    pub wearer: orbiters_core::picture::Left,
+    pub others: orbiters_core::picture::Left,
+    /// Why somebody is in the picture after all, and what to do about it.
+    pub why: Option<String>,
 }
 
 /// Why frames come without the capture strip: no camera pose, so no keyframes.
@@ -310,11 +325,31 @@ pub struct ReconstructionJob {
     pub seconds: f32,
     /// On the integrated GPU, while VRChat runs (settings' `reconstruct_while_playing`).
     pub integrated: bool,
+    /// Paused: its worker has gone or is going, a checkpoint holds where it stood, and it goes on by itself once what it
+    /// gave way to is over.
+    #[serde(default)]
+    pub paused: bool,
+    /// Going on from a pause: reading the session again, before its next step.
+    #[serde(default)]
+    pub resuming: bool,
+    /// The share of the whole run a pause kept: what it shows never falls under this while it reads the session again.
+    #[serde(default)]
+    pub floor: f32,
 }
 
 impl ReconstructionJob {
     pub fn new(session_dir: PathBuf, integrated: bool) -> Self {
-        Self { session_dir, stage: Stage::Loading, progress: 0.0, iteration: 0, iterations: 0, gaussians: 0, psnr: None, seconds: 0.0, integrated }
+        Self { session_dir, stage: Stage::Loading, progress: 0.0, iteration: 0, iterations: 0, gaussians: 0, psnr: None, seconds: 0.0, integrated, paused: false, resuming: false, floor: 0.0 }
+    }
+
+    /// Where a checkpoint says a paused run stands.
+    pub fn at(&mut self, iteration: u32, iterations: u32, gaussians: usize, psnr: Option<f32>, seconds: f32) {
+        self.iteration = iteration;
+        self.iterations = iterations;
+        self.gaussians = gaussians;
+        self.psnr = psnr.or(self.psnr);
+        self.seconds = seconds;
+        self.progress = iteration as f32 / iterations.max(1) as f32;
     }
 }
 
@@ -469,6 +504,9 @@ pub struct Snapshot {
     /// What "When SteamVR starts" last did to Windows' sound devices (Settings).
     #[serde(default)]
     pub vr_audio: crate::controller::vr_audio::Status,
+    /// The experimental VRChat bridge (`crate::bridge`): only filled in for an account the server says has it.
+    #[serde(default)]
+    pub bridge: crate::bridge::Status,
 }
 
 impl Snapshot {
@@ -498,6 +536,8 @@ impl Snapshot {
                 coverage: None,
                 photo_3d: false,
                 no_strip: None,
+                picture: None,
+                left_out: LeftOut::default(),
             },
             storage: StorageStatus { sessions_dir: settings.sessions_dir.clone(), limit_gb: settings.storage_limit_gb, ..Default::default() },
             settings,
@@ -513,6 +553,7 @@ impl Snapshot {
             update: UpdateStatus::default(),
             cleanup: None,
             vr_audio: Default::default(),
+            bridge: Default::default(),
         }
     }
 

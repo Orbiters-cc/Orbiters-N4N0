@@ -9,6 +9,7 @@ pub mod clock;
 pub mod community;
 mod dpapi;
 pub mod explicit;
+pub mod picture;
 pub mod features;
 pub mod gallery_talk;
 pub mod keyframes;

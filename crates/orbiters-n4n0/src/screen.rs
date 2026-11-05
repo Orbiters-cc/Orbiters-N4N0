@@ -26,7 +26,7 @@ use orbiters_n4n0_core::menu::layout::{Content, ScreenPage};
 use orbiters_n4n0_core::menu::pictures::{self as full, Lane, Synced};
 use orbiters_n4n0_core::menu::screen::{self, Audience, Flags, Frame, Picture, LOCAL_VALUES};
 use orbiters_n4n0_core::menu::touch::{self, Gesture, Ray, Touch, LOST_GRACE};
-use orbiters_n4n0_core::menu::{self, layout, Card, Effect, KeyboardLayout, Menu, Page, Pages, PhotoLength, SuggestQueue};
+use orbiters_n4n0_core::menu::{self, layout, Card, Effect, KeyboardLayout, Menu, Page, Pages, PhotoLength, PhotoMode, SuggestQueue};
 use orbiters_n4n0_core::text::{Message, TextSender};
 use orbiters_n4n0_core::youtube;
 use std::collections::{HashMap, VecDeque};
@@ -1071,6 +1071,22 @@ pub fn photo_length(length: orbiters_core::settings::Photo3dLength) -> PhotoLeng
     }
 }
 
+pub fn photo_mode(mode: orbiters_core::settings::PictureMode) -> PhotoMode {
+    use orbiters_core::settings::PictureMode as M;
+    match mode {
+        M::People => PhotoMode::People,
+        M::World => PhotoMode::World,
+    }
+}
+
+pub fn mode_setting(mode: PhotoMode) -> orbiters_core::settings::PictureMode {
+    use orbiters_core::settings::PictureMode as M;
+    match mode {
+        PhotoMode::People => M::People,
+        PhotoMode::World => M::World,
+    }
+}
+
 pub fn photo_setting(length: PhotoLength) -> orbiters_core::settings::Photo3dLength {
     use orbiters_core::settings::Photo3dLength as L;
     match length {
@@ -1112,6 +1128,7 @@ impl N4n0 {
             s.menu.layout = keyboard;
             s.menu.photo_timer = settings.photo_3d_timer;
             s.menu.photo_length = photo_length(settings.photo_3d);
+            s.menu.photo_mode = photo_mode(settings.photo_3d_mode);
             s.menu.open();
             s.owner.forget();
             s.last_activity = Instant::now();
@@ -1342,19 +1359,29 @@ impl N4n0 {
         }
     }
 
+    /// Something the person must read about a 3D picture under way ("your avatar is in it, and why"): `text` as a toast, and
+    /// on the menus' line, which is short, `line` ([`orbiters_n4n0_core::menu::layout`]: 40 characters on a screen's page).
+    pub fn photo_note(self: &Shared, text: String, line: &str) {
+        self.photo_line(line);
+        self.notify(NoticeKind::Warning, text);
+        self.publish();
+    }
+
     /// What stopped a 3D picture: a toast, and the 3D picture page's line on the screen's menu and, through the status
     /// (numbered), on the overlay's and the window's.
     fn photo_stopped(self: &Shared, text: String) {
-        {
-            let mut rt = self.n4n0.lock().unwrap();
-            if rt.screen.menu.open && rt.screen.menu.page == orbiters_n4n0_core::menu::Page::Photo {
-                rt.screen.menu.notice = Some(text.clone());
-            }
-            let number = rt.screen.photo_note.as_ref().map_or(1, |(n, _)| n.wrapping_add(1));
-            rt.screen.photo_note = Some((number, text.clone()));
-        }
+        self.photo_line(&text);
         self.notify(NoticeKind::Warning, text);
         self.publish();
+    }
+
+    fn photo_line(self: &Shared, text: &str) {
+        let mut rt = self.n4n0.lock().unwrap();
+        if rt.screen.menu.open && rt.screen.menu.page == orbiters_n4n0_core::menu::Page::Photo {
+            rt.screen.menu.notice = Some(text.to_string());
+        }
+        let number = rt.screen.photo_note.as_ref().map_or(1, |(n, _)| n.wrapping_add(1));
+        rt.screen.photo_note = Some((number, text.to_string()));
     }
 
     /// A 3D picture in `seconds` (now when 0); the menus count down. VRChat's camera closed (OSC cannot open it) is said
@@ -1571,11 +1598,12 @@ impl N4n0 {
                     let n = self.clone();
                     std::thread::spawn(move || n.host.call(CallRequest::End));
                 }
-                Effect::PhotoChoice { timer, length } | Effect::Photo3d { timer, length } => {
+                Effect::PhotoChoice { timer, length, mode } | Effect::Photo3d { timer, length, mode } => {
                     let take = matches!(effect, Effect::Photo3d { .. });
                     self.update_settings(|s| {
                         s.photo_3d_timer = timer;
                         s.photo_3d = photo_setting(length);
+                        s.photo_3d_mode = mode_setting(mode);
                     });
                     if take {
                         self.photo_3d_in(timer);

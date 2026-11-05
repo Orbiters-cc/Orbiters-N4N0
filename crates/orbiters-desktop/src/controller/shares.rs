@@ -78,6 +78,9 @@ pub struct Entry {
     /// A recording whose frames never had the capture strip: no keyframes, nothing to make a 3D view from.
     #[serde(default)]
     pub no_keyframes: bool,
+    /// What it is a 3D picture of (`picture.json`): `None` for a recording, or what is not a session here.
+    #[serde(default)]
+    pub picture_mode: Option<orbiters_core::settings::PictureMode>,
     /// A session recorded without depth frames: it cannot be reconstructed.
     #[serde(default)]
     pub no_depth: bool,
@@ -357,6 +360,7 @@ impl Entry {
     pub fn set_session(&mut self, s: SessionState) {
         self.ready = s.ready;
         self.no_keyframes = s.no_keyframes;
+        self.picture_mode = s.picture_mode;
         self.no_depth = s.no_depth;
         self.trimmed = s.trimmed;
         self.result = s.result;
@@ -441,6 +445,7 @@ pub fn local_entries_with_folders(root: &Path, server: Server, folders: &[PathBu
                 content: Content::read(&s.dir),
                 ready: s.reconstruction.is_some(),
                 no_keyframes: s.has_no_keyframes(),
+                picture_mode: s.picture.map(|p| p.mode),
                 no_depth: s.manifest.stats.depth_frames == 0,
                 trimmed: s.trimmed,
                 result: s.reconstruction.as_ref().map(|r| r.created_utc.clone()),
@@ -483,6 +488,7 @@ pub fn local_entries_with_folders(root: &Path, server: Server, folders: &[PathBu
                 content,
                 ready: true,
                 no_keyframes: false,
+                picture_mode: None,
                 no_depth: false,
                 trimmed: false,
                 result: None,
@@ -518,6 +524,7 @@ pub fn remote_entry(item: Item) -> Entry {
         content: Content { explicit: item.explicit, explicit_reasons: item.explicit_reasons.clone() },
         ready: true,
         no_keyframes: false,
+        picture_mode: None,
         no_depth: false,
         trimmed: false,
         result: None,
@@ -645,6 +652,7 @@ pub(crate) fn shared_line(public: bool, friends: usize) -> Option<String> {
 pub struct SessionState {
     pub ready: bool,
     pub no_keyframes: bool,
+    pub picture_mode: Option<orbiters_core::settings::PictureMode>,
     pub no_depth: bool,
     pub trimmed: bool,
     pub result: Option<String>,
@@ -662,6 +670,7 @@ pub fn session_state(dir: &Path, server: Server) -> Option<SessionState> {
     Some(SessionState {
         ready: report.is_some(),
         no_keyframes: manifest.stats.frames > 0 && manifest.stats.keyframes == 0,
+        picture_mode: orbiters_core::picture::Picture::read(dir).map(|p| p.mode),
         no_depth: manifest.stats.depth_frames == 0,
         trimmed: orbiters_core::cleanup::trimmed(dir),
         edits: report.as_ref().map(|_| orbiters_reconstruct::edit::generation(&orbiters_core::reconstruction::result_dir(dir)).map_err(|e| e.to_string())),

@@ -350,6 +350,7 @@ mod tests {
             content: Default::default(),
             ready,
             no_keyframes: false,
+            picture_mode: None,
             no_depth: false,
             trimmed: false,
             result: None,

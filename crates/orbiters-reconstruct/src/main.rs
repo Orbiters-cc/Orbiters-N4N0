@@ -161,6 +161,11 @@ fn run(args: Args) -> anyhow::Result<Report> {
     let mut gpu = device.join().map_err(|_| anyhow::anyhow!("the GPU device's thread panicked"))??;
     let dev = gpu.device.clone();
     let mut settings = args.settings.clone();
+    // A picture of the world has no faces to spend steps on (orbiters_core::picture).
+    if !orbiters_core::picture::Picture::trains_faces(dir) {
+        settings.portrait_steps = 0;
+        eprintln!("a picture of the world: no steps on faces");
+    }
     // The faces in its keyframes, for the extra training they get (orbiters_reconstruct::portraits).
     if let Some(file) = &args.portrait_boxes {
         settings.portraits = orbiters_reconstruct::portraits::from_lab_file(file, data)?;

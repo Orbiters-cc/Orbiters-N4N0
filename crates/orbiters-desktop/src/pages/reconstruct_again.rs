@@ -362,6 +362,7 @@ mod tests {
             size_bytes: 0,
             capture_bytes: 0,
             trimmed: false,
+            picture: None,
             modified: 0,
             reconstruction: None,
             damaged: None,

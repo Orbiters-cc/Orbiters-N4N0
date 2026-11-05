@@ -23,8 +23,19 @@
 //! 3. **Room**: the rig on, hops between the places farthest from where the camera has been, each straight line checked
 //!    against depth, then home: the exact pose it started from. VRChat's zoom is never touched.
 //!
-//! The split ([`Split`]): of a 4 s flight 0.7 s look, 2.2 s people, 1.1 s room; of an 8 s flight 0.7 s look, 4 s people, 3.3 s
-//! room. Before: 0 s planned on people.
+//! Two pictures, and the split of their seconds ([`Split`]). **People:** of a 4 s flight 0.7 s look, 2.9 s people, 0.4 s room; of
+//! an 8 s flight 0.7 s look, 5.8 s people, 1.5 s room. **World:** the look, then only the place: 3.3 s and 7.3 s, nobody flown
+//! around. Why these: on a real ring around a still avatar (docs/3d-picture-angles-2026-11-04.md), going from views of one
+//! side to views 13° apart gave the body 5 dB from the sides, and from 13° to 4° apart another 0.6 dB and the room around it 1.5 dB.
+//! A person gains most from every angle covered, so People gives them what the room had, at 6° between colour frames (the first
+//! version, one split for all, had 2.2 s and 4 s).
+//!
+//! A picture of the world goes in a ring around the middle of what the opening turn saw ([`middle_of`]), looking across it, then
+//! turns where it is looking up (and down: [`TILTED_TURNS`]), which is what tells it the floor and the ceiling and whether the
+//! 8 s picture's rings above and below ([`RINGS`]) can fly, then hops as above, filling in what lies closer together
+//! ([`WORLD_LEAST_NEW_M`]). Hops alone saw half the surface the sweeps around a person did on Enzo's recordings of 2026-11-04 (Dia
+//! de Muertos), and rings looking outward saw little more: a wall a metre away fills the frame. Looking across, every frame sees
+//! the far side of the place, from places metres apart, which is what depth and colour need of it.
 //!
 //! The flight's rig stays off around people, so every colour frame is a whole 1080p picture of them, with six times the pixels
 //! per degree of the rig's faces (420 px over 90° against 1234 px focal length). A sweep needs no pauses: every frame
@@ -35,7 +46,7 @@ use super::dolly::axes;
 use orbiters_contracts::depth::{self, DepthLayout};
 use orbiters_contracts::frame_record::{record_flags, FrameRecord, RECORD_SIZE};
 use orbiters_contracts::manifest::{depth_file, DEPTH_DIR, FRAMES_FILE};
-use orbiters_core::settings::Photo3dLength;
+use orbiters_core::settings::{Photo3dLength, PictureMode};
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 
@@ -561,9 +572,11 @@ const MOST_TURN: f32 = 720.0;
 const TRANSIT_SPEED: f32 = 8.0;
 const LEAST_TRANSIT_S: f32 = 0.06;
 
-/// A sweep's geometry for a group.
+/// A sweep's geometry for a group, or for a ring around a place looking outward.
 struct Sweep {
     group: Group,
+    /// A ring: the camera looks across the middle at the far side, and nothing need show.
+    across: bool,
     radius: f32,
     eye_y: f32,
     /// What it frames: the height of the body's middle, of the top of what must show, of the bottom, and whether it is to
@@ -585,7 +598,13 @@ impl Sweep {
             Kind::Above => (0.9 * fit(group.height) + group.spread, group.head[1] + rise, middle),
         };
         let radius = radius.max(NEAREST_M + group.spread);
-        Self { group, radius, eye_y, middle: aim, crown: group.ground + group.height, floor: group.ground, whole: kind != Kind::Close, p11 }
+        Self { group, across: false, radius, eye_y, middle: aim, crown: group.ground + group.height, floor: group.ground, whole: kind != Kind::Close, p11 }
+    }
+
+    /// A ring around `center` at the height `eye_y`, looking across it and `tilt` degrees down.
+    fn ring(center: V, eye_y: f32, tilt: f32, p11: f32) -> Self {
+        let group = Group { head: center, ground: eye_y, height: 0.0, spread: 0.0 };
+        Self { group, across: true, radius: RING_M, eye_y, middle: eye_y - tilt.to_radians().tan() * RING_M, crown: eye_y, floor: eye_y, whole: false, p11 }
     }
 
     /// The camera's place at an angle and a radius.
@@ -611,10 +630,31 @@ impl Sweep {
         [self.group.head[0], y, self.group.head[2]]
     }
 
+    /// What the camera looks at from `radius`, `walked` degrees in: its subject, or on a ring, the middle.
+    fn aim_at(&self, radius: f32, walked: f32) -> V {
+        if self.across {
+            return [self.group.head[0], self.middle, self.group.head[2]];
+        }
+        self.aim(radius, walked)
+    }
+
     /// The largest radius at this angle the camera can stand and see from, or what stops it. The line of sight stops short
     /// of the person: they are the surface it ends on.
     fn radius_at(&self, seen: &Seen, angle: f32) -> Result<f32, Clear> {
         let mut unknown = false;
+        if self.across {
+            let middle = [self.group.head[0], self.eye_y, self.group.head[2]];
+            for share in RADII {
+                let r = self.radius * share;
+                let e = self.eye(angle, r);
+                match (seen.eye_clear(e), seen.line_clear(middle, e, FLIGHT_MARGIN)) {
+                    (Clear::Free, Clear::Free) => return Ok(r),
+                    (Clear::Surface, _) | (_, Clear::Surface) => {}
+                    _ => unknown = true,
+                }
+            }
+            return Err(if unknown { Clear::Unknown } else { Clear::Surface });
+        }
         let nearest = NEAREST_M + self.group.spread;
         for share in RADII {
             let r = self.radius * share;
@@ -700,7 +740,7 @@ impl Sweep {
     /// The poses of a route over `seconds`, from `from`: an eased move to its first place, then a steady sweep.
     fn poses(&self, route: &[(f32, f32)], from: Pose, seconds: f32, rate: u32) -> Vec<Pose> {
         let lens: f32 = route.windows(2).map(|w| (w[1].0 - w[0].0).abs()).sum();
-        let begin = looking_at(self.eye(route[0].0, route[0].1), self.aim(route[0].1, 0.0), from[4], from[5]);
+        let begin = looking_at(self.eye(route[0].0, route[0].1), self.aim_at(route[0].1, 0.0), from[4], from[5]);
         let mut poses = ease(from, begin, transit_seconds(from, begin), rate);
         let last = poses.last().copied().unwrap_or(from);
         let spent = poses.len() as f32 / rate as f32;
@@ -718,7 +758,7 @@ impl Sweep {
             let piece = (b.0 - a.0).abs().max(1e-3);
             let t = ((target - walk.1) / piece).clamp(0.0, 1.0);
             let (angle, radius) = (a.0 + (b.0 - a.0) * t, a.1 + (b.1 - a.1) * t);
-            let pose = looking_at(self.eye(angle, radius), self.aim(radius, target), yaw, from[5]);
+            let pose = looking_at(self.eye(angle, radius), self.aim_at(radius, target), yaw, from[5]);
             yaw = pose[4];
             poses.push(pose);
         }
@@ -774,6 +814,21 @@ pub fn look(start: Pose, rate: u32) -> Vec<Pose> {
         .collect()
 }
 
+/// The pitches of a picture of the world's further turns, degrees: a positive one looks down.
+const TILTED_TURNS: [f32; 2] = [-40.0, 40.0];
+
+/// A whole turn where the camera is, its pitch going to `pitch` and back: it ends on the pose it began with, a turn later.
+fn turn_tilted(from: Pose, pitch: f32, rate: u32) -> Vec<Pose> {
+    let n = ((LOOK_S * rate as f32).round() as usize).max(1);
+    (1..=n)
+        .map(|i| {
+            let t = i as f32 / n as f32;
+            let tilt = if i == n { 0.0 } else { (std::f32::consts::PI * t).sin() };
+            [from[0], from[1], from[2], from[3] + (pitch - from[3]) * tilt, from[4] + 360.0 * t, from[5]]
+        })
+        .collect()
+}
+
 /// How a flight spends its seconds after the opening turn.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Split {
@@ -783,16 +838,16 @@ pub struct Split {
 
 impl Split {
     /// [`LOOK_S`] plus these make the picture's length. Around people first: they hold their pose for the first seconds best.
-    pub fn of(length: Photo3dLength, groups: usize) -> Self {
+    pub fn of(length: Photo3dLength, mode: PictureMode, groups: usize) -> Self {
         let total = match length {
             Photo3dLength::Quick => 1.0,
             Photo3dLength::Standard => 4.0,
             Photo3dLength::Full => 8.0,
         } - LOOK_S;
-        let people = match (length, groups) {
-            (_, 0) | (Photo3dLength::Quick, _) => 0.0,
-            (Photo3dLength::Standard, _) => 2.2,
-            (Photo3dLength::Full, _) => 4.0,
+        let people = match (mode, length, groups) {
+            (PictureMode::World, _, _) | (_, _, 0) | (_, Photo3dLength::Quick, _) => 0.0,
+            (_, Photo3dLength::Standard, _) => 2.9,
+            (_, Photo3dLength::Full, _) => 5.8,
         };
         Self { people, room: total - people }
     }
@@ -821,7 +876,12 @@ pub struct Piece {
 
 enum Task {
     Sweep(Group, Kind, f32),
+    /// A ring around where the camera started: how far it rises, how far down it looks, seconds.
+    Ring(f32, f32, f32),
     Room,
+    /// A picture of the world's further turn where it is, looking up or down: a level turn says little about the ceiling and the
+    /// floor.
+    TurnTilted(f32),
 }
 
 /// A flight after its opening turn, planned a piece at a time: each piece is planned from what depth has shown up to then.
@@ -840,17 +900,32 @@ pub struct Flight {
     turn: f32,
     /// The room's hops tilt alternately up and down, degrees.
     tilt: f32,
+    /// The rig goes with the room's hops (not with a picture of the world among other players: its cameras would show them).
+    room_rig: bool,
+    /// What the picture is of.
+    mode: PictureMode,
     pub log: Vec<String>,
 }
 
 impl Flight {
-    pub fn new(start: Pose, p11: f32, rate: u32, length: Photo3dLength, people: &[Person]) -> Self {
-        let groups = groups(people);
-        let split = Split::of(length, groups.len());
+    pub fn new(start: Pose, p11: f32, rate: u32, length: Photo3dLength, mode: PictureMode, people: &[Person], room_rig: bool) -> Self {
+        // A picture of the world goes around nobody, whoever its first frame shows.
+        let groups = if mode == PictureMode::World { Vec::new() } else { groups(people) };
+        let split = Split::of(length, mode, groups.len());
         let mut tasks = VecDeque::new();
         for g in &groups {
             for (kind, seconds) in sweeps_of(split.people / groups.len() as f32) {
                 tasks.push_back(Task::Sweep(*g, kind, seconds));
+            }
+        }
+        if mode == PictureMode::World && length != Photo3dLength::Quick {
+            let full = length == Photo3dLength::Full;
+            tasks.push_back(Task::Ring(RINGS[0].0, RINGS[0].1, RING_S));
+            for &pitch in if full { &TILTED_TURNS[..] } else { &TILTED_TURNS[..1] } {
+                tasks.push_back(Task::TurnTilted(pitch));
+            }
+            for &(rise, tilt) in if full { &RINGS[1..] } else { &RINGS[..0] } {
+                tasks.push_back(Task::Ring(rise, tilt, RING_S));
             }
         }
         tasks.push_back(Task::Room);
@@ -865,6 +940,8 @@ impl Flight {
             been: vec![place(&start)],
             turn: 1.0,
             tilt: ROOM_TILT,
+            room_rig,
+            mode,
             log: Vec::new(),
         }
     }
@@ -880,12 +957,29 @@ impl Flight {
                     };
                     return Some(self.flew(poses, false));
                 }
+                Task::Ring(rise, tilt, seconds) => {
+                    let ring = Sweep::ring(middle_of(seen, place(&self.start)), self.start[1] + rise, tilt, self.p11);
+                    let Some(route) = ring.route(seen, place(&self.at), self.turn) else {
+                        self.log.push(format!("no ring {rise} m up: depth shows no way"));
+                        continue;
+                    };
+                    self.turn = -self.turn;
+                    let poses = ring.poses(&route, self.at, seconds, self.rate);
+                    let rig = self.room_rig;
+                    return Some(self.flew(poses, rig));
+                }
+                Task::TurnTilted(pitch) => {
+                    let poses = turn_tilted(self.at, pitch, self.rate);
+                    let rig = self.room_rig;
+                    return Some(self.flew(poses, rig));
+                }
                 Task::Room => {
                     let (poses, home) = self.hop(seen, self.total - self.flown);
                     if !home {
                         self.tasks.push_front(Task::Room);
                     }
-                    return Some(self.flew(poses, true));
+                    let rig = self.room_rig;
+                    return Some(self.flew(poses, rig));
                 }
             }
         }
@@ -923,14 +1017,20 @@ impl Flight {
     /// `seconds`: what is left of the flight. Also tells whether this is the way home for good.
     fn hop(&mut self, seen: &Seen, seconds: f32) -> (Vec<Pose>, bool) {
         let (from, home) = (self.at, self.start);
+        let world = self.mode == PictureMode::World;
+        let speed = if world { WORLD_SPEED } else { ROOM_SPEED };
         let back = |to: V| (length(sub(to, place(&home))) / TRANSIT_SPEED).max(LEAST_HOME_S);
-        let hop_of = |at: V, to: V| (length(sub(to, at)) / ROOM_SPEED).max(ROOM_LEAST_HOP_S);
-        let new_places: Vec<(V, f32)> = room_places(home)
+        let hop_of = |at: V, to: V| (length(sub(to, at)) / speed).max(ROOM_LEAST_HOP_S);
+        let places: Vec<(V, f32)> = room_places(home)
             .into_iter()
             .filter(|p| seen.eye_clear(*p) == Clear::Free && seen.line_clear(*p, place(&home), FLIGHT_MARGIN) == Clear::Free)
             .map(|p| (p, self.been.iter().map(|b| length(sub(p, *b))).fold(f32::MAX, f32::min)))
-            .filter(|(_, apart)| *apart >= ROOM_LEAST_NEW_M)
             .collect();
+        // A picture of the world has nobody waiting for it to end, and nothing better to do with its seconds than fill in
+        // what lies between the places it went to.
+        let far_apart = places.iter().filter(|(p, apart)| *apart >= ROOM_LEAST_NEW_M && hop_of(place(&from), *p) + back(*p) <= seconds).count() > 0;
+        let least_new = if world && !far_apart { WORLD_LEAST_NEW_M } else { ROOM_LEAST_NEW_M };
+        let new_places: Vec<(V, f32)> = places.into_iter().filter(|(_, apart)| *apart >= least_new).collect();
         let farthest = |list: &mut dyn Iterator<Item = &(V, f32)>| list.copied().max_by(|a, b| a.1.total_cmp(&b.1));
         let in_reach = farthest(
             &mut new_places
@@ -956,6 +1056,48 @@ impl Flight {
     }
 }
 
+/// A picture of the world's speed on its hops: half as many again views a metre, for the people-free seconds it has.
+const WORLD_SPEED: f32 = 8.0;
+/// How far a ring goes from the middle at most, metres: nearer where the place is smaller.
+const RING_M: f32 = 3.5;
+/// How long a ring takes, seconds: 240° a second, 6° between colour frames.
+const RING_S: f32 = 1.5;
+/// A picture of the world's rings: how far each rises, and how far down it looks, degrees. An 8 s picture has them all.
+const RINGS: [(f32, f32); 3] = [(0.0, 5.0), (1.0, 20.0), (-0.7, -10.0)];
+/// A surface farther than this from the camera says nothing of the place it stands in, metres.
+const MIDDLE_WITHIN_M: f32 = 12.0;
+/// The middle may be this far from where the camera stands at most, metres: a ring around the far end of a street shows the
+/// camera's own surroundings no better.
+const MIDDLE_MOST_M: f32 = 4.0;
+
+/// The middle of what depth has shown around `at`: sideways, the median of the surfaces measured near it. A ring around this
+/// sees across a room from all sides, where one around the camera in a corner would be half a ring.
+fn middle_of(seen: &Seen, at: V) -> V {
+    let (mut xs, mut zs) = (Vec::new(), Vec::new());
+    for f in &seen.frames {
+        for p in (0..f.bins.len()).filter_map(|bin| f.surface_point(bin)) {
+            if flat(p, at) < MIDDLE_WITHIN_M {
+                xs.push(p[0]);
+                zs.push(p[2]);
+            }
+        }
+    }
+    if xs.is_empty() {
+        return at;
+    }
+    xs.sort_by(f32::total_cmp);
+    zs.sort_by(f32::total_cmp);
+    let middle = [xs[xs.len() / 2], at[1], zs[zs.len() / 2]];
+    let away = flat(middle, at);
+    if away <= MIDDLE_MOST_M {
+        middle
+    } else {
+        lerp(at, middle, MIDDLE_MOST_M / away)
+    }
+}
+
+/// A picture of the world, out of far places, fills in places at least this far from where it has been, metres.
+const WORLD_LEAST_NEW_M: f32 = 0.75;
 /// The hops' speed, metres a second, and the shortest one, seconds. The older flight's 10 m in 0.6 s kept every frame sharp:
 /// VRChat's camera draws no motion blur.
 const ROOM_SPEED: f32 = 12.0;
@@ -988,7 +1130,7 @@ fn room_places(start: Pose) -> Vec<V> {
 /// The whole flight at once when nothing new will be learnt: for what cannot be asked piece by piece (tests).
 #[cfg(test)]
 pub fn plan(start: Pose, p11: f32, rate: u32, length: Photo3dLength, people: &[Person], seen: &Seen) -> Vec<Piece> {
-    let mut flight = Flight::new(start, p11, rate, length, people);
+    let mut flight = Flight::new(start, p11, rate, length, PictureMode::People, people, true);
     std::iter::from_fn(|| flight.next(seen)).collect()
 }
 

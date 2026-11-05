@@ -198,6 +198,7 @@ impl State {
                     content: Default::default(),
                     ready: true,
                     no_keyframes: false,
+                    picture_mode: None,
                     no_depth: false,
                     trimmed: false,
                     result: None,

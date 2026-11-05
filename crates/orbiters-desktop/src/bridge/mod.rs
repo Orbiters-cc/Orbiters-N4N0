@@ -132,6 +132,8 @@ pub(crate) struct Run {
     /// The VRChat the bridge started: only that one is ever acted on. A VRChat somebody else started is theirs.
     pub pid: Option<u32>,
     pub going: Option<Going>,
+    /// The bridge itself is closing the game: its going away is no news.
+    pub closing: bool,
     /// The last time an instance was made.
     pub last_instance: Option<Instant>,
     pub pictures: Vec<PictureRecord>,

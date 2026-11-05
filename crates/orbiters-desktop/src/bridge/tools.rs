@@ -377,7 +377,7 @@ impl Bridge {
             }
         }
         // The game this bridge started went away by itself.
-        if run.going.as_ref().is_none_or(|g| g.started) && run.pid.is_some() && run.pid != seen.pid {
+        if !run.closing && run.going.as_ref().is_none_or(|g| g.started) && run.pid.is_some() && run.pid != seen.pid {
             let running = run.going.is_some();
             run.pid = None;
             if running {
@@ -698,16 +698,23 @@ impl Bridge {
 
     fn close_and_wait(&self, pid: u32, call: &Call) -> Result<(), Failure> {
         let window = self.window(pid)?;
-        self.game.close(&window)?;
-        let closed = self.wait_until(CLOSE_LIMIT, call, || !self.game.seen().running)?;
-        if !closed {
+        self.run.lock().unwrap().closing = true;
+        let closed = self.game.close(&window).and_then(|()| self.wait_until(CLOSE_LIMIT, call, || !self.game.seen().running));
+        {
+            // In one step with what it says: the listener's next look finds either the game ours or nothing to tell.
+            let mut run = self.run.lock().unwrap();
+            run.closing = false;
+            if matches!(closed, Ok(true)) {
+                run.pid = None;
+            }
+        }
+        if !closed? {
             return Err(Failure::new(
                 "close_timeout",
                 format!("VRChat did not close within {} s.", CLOSE_LIMIT.as_secs()),
                 "It may show a dialog: look with screenshot. It is not forced, so tell the person if it stays.",
             ));
         }
-        self.run.lock().unwrap().pid = None;
         Ok(())
     }
 

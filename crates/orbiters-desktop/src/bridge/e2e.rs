@@ -845,6 +845,7 @@ fn tour(client: &Client, game: &LabGame) {
     assert!(state["pictures"].as_array().unwrap().iter().all(|p| p["reconstruction"]["state"] == "done"), "{state}");
     assert_eq!(state["pictures"][5]["world_name"], "Lab World B");
     assert_eq!(game.closes(), 2, "once going to the next world, once at the end");
+    assert!(state["bridge"]["last_event"].is_null(), "closing it was the agent's own doing, no news: {state}");
 }
 
 #[test]

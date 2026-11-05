@@ -130,7 +130,7 @@ Only a real run can tell these (nothing below has run against VRChat):
 3. `POST /instances` answers as the community specification says, with the session's account.
 4. `/input/*` moves the avatar without the focus; how fast `LookLeft` and `LookRight` turn (90°/s is a guess).
 5. `SendInput` reaches the game: scan codes for keys, `esc` opening the menu, the pointer landing where the pixels say, clicks registering.
-6. Windows Graphics Capture and `PrintWindow` on the game's window (Easy Anti-Cheat running), and whether the yellow capture border shows.
+6. Windows Graphics Capture and `PrintWindow` on the game's window (Easy Anti-Cheat running): whether the yellow capture border shows, how long a screenshot takes with the game filling the GPU, and whether it shows what is on screen now (on a busy machine, the fake window's took up to 6.5 s, and sometimes showed the state before the last key).
 7. Whether the game gets the foreground on arrival. `go_to_world` asks for it when nobody has touched the computer for 30 s, and says if Windows refused (`foreground: false`); then no menu can be opened and the camera stays closed until the person clicks the game.
 8. Whether VRChat says `/usercamera/Pose` after a turn with the camera open, and whether the camera works in desktop mode for a 3D picture as it does in VR, Stream mode and Spout included.
 9. Raw Input hearing the keyboard and mouse beside the game (and nothing else on this computer pausing it: anything that injects input counts as the person).

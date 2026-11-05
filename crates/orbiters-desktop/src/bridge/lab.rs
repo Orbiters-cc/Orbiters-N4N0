@@ -721,7 +721,8 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         flag.clone(),
         dir.join("keys.dat"),
         Duration::from_secs(1),
-        Duration::from_secs(4),
+        // Long enough for a loaded machine: the real one is half an hour, and a server's no ends it at once all the same.
+        Duration::from_secs(30),
         Box::new(|_| {}),
         Box::new(|_| Some(super::person::Listener::none())),
     );

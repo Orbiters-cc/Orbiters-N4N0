@@ -25,7 +25,7 @@ use orbiters_n4n0_core::menu::layout::{self, ScreenPage, MAX_ELEMENTS, MAX_SLOTS
 use orbiters_n4n0_core::menu::strings::{Strings, Text};
 use orbiters_n4n0_core::menu::theme::Theme;
 use orbiters_n4n0_core::menu::{
-    screen, Call, Card, Contact, InstanceRow, InviteAccount, InviteAnswer, KeyboardLayout, Keys, Light, Media, Menu, Page, Pages, PhotoLength, StateRow, Target, Tracking,
+    screen, Call, Card, Contact, InstanceRow, InviteAccount, InviteAnswer, KeyboardLayout, Keys, Light, Media, Menu, Page, Pages, PhotoLength, PhotoMode, StateRow, Target, Tracking,
     Volume, WorldVideo,
 };
 use orbiters_n4n0_core::picture;
@@ -439,7 +439,11 @@ fn samples() -> Vec<(ScreenPage, Menu, Option<usize>, Option<usize>)> {
     let hovered = |page: ScreenPage, target: Target| layout::cached(page).elements.iter().position(|e| e.target == target);
     let mut photo = share();
     photo.press(Target::Photo);
-    out.push((ScreenPage::PhotoShare, photo, hovered(ScreenPage::PhotoShare, Target::ShareLatest), None));
+    // A screen of versions 12 to 14 keeps its one Take and the line that changes it.
+    let mut older = photo.clone();
+    older.pages = Pages::Mirror;
+    out.push((ScreenPage::PhotoShare, older, hovered(ScreenPage::PhotoShare, Target::ShareLatest), None));
+    out.push((ScreenPage::PhotoTwo, photo, hovered(ScreenPage::PhotoTwo, Target::TakeOf(PhotoMode::World)), None));
     let mut history = share();
     history.press(Target::Photo);
     history.press(Target::History);
@@ -809,7 +813,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         let flags = screen::Flags { listening: menu.listening, loading: menu.loading(), ..Default::default() };
         let bank = screen::Frame::new(&menu, hover, pressed, flags, 72, &pictures).bank;
         std::fs::write(out.join(format!("bank-{}.bin", page.name())), &bank[..screen::bank_bytes(72)])?;
-        if matches!(page, ScreenPage::Results | ScreenPage::Music | ScreenPage::Card | ScreenPage::HomeSimple | ScreenPage::History | ScreenPage::PhotoShare) {
+        if matches!(page, ScreenPage::Results | ScreenPage::Music | ScreenPage::Card | ScreenPage::HomeSimple | ScreenPage::History | ScreenPage::PhotoShare | ScreenPage::PhotoTwo) {
             let bank = screen::Frame::new(&menu, hover, pressed, flags, 128, &pictures).bank;
             std::fs::write(out.join(format!("bank-{}-128.bin", page.name())), &bank[..screen::bank_bytes(128)])?;
         }

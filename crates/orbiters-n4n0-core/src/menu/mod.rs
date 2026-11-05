@@ -225,19 +225,22 @@ pub enum Pages {
     Feedback,
     /// From version 14: the screen mirror, and More with its card among seven.
     Mirror,
+    /// From version 15: the 3D picture page with its two pictures as buttons.
+    TwoPictures,
 }
 
 impl Pages {
     /// Every page: the overlay's and the window's.
-    pub const ALL: Pages = Pages::Mirror;
+    pub const ALL: Pages = Pages::TwoPictures;
 
     /// The pages of a screen of `version` (`None`: a screen from before `N4N0/Screen/Version`).
     pub fn of_screen(version: Option<i32>) -> Pages {
         use orbiters_contracts::n4n0::{
             SCREEN_FEEDBACK, SCREEN_MIRROR, SCREEN_MUSIC_LIGHT, SCREEN_QR, SCREEN_SHARE, SCREEN_SIMPLE, SCREEN_STATES_CARDS, SCREEN_TEN_TILES,
-            SCREEN_TIMELINE,
+            SCREEN_TIMELINE, SCREEN_TWO_PICTURES,
         };
         match version {
+            Some(v) if v >= SCREEN_TWO_PICTURES => Pages::TwoPictures,
             Some(v) if v >= SCREEN_MIRROR => Pages::Mirror,
             Some(v) if v >= SCREEN_FEEDBACK => Pages::Feedback,
             Some(v) if v >= SCREEN_SHARE => Pages::Share,
@@ -294,6 +297,11 @@ impl Pages {
     /// More has the screen mirror (and its page).
     pub fn mirror(self) -> bool {
         self >= Pages::Mirror
+    }
+
+    /// The 3D picture page has its two pictures as buttons.
+    pub fn two_pictures(self) -> bool {
+        self >= Pages::TwoPictures
     }
 }
 

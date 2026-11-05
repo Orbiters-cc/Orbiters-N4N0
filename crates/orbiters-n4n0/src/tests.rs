@@ -47,6 +47,8 @@ pub(crate) struct TestHost {
     calls: Mutex<Vec<CallRequest>>,
     ringing: Mutex<bool>,
     photos: AtomicUsize,
+    /// What each 3D picture was of, as the settings said when it started.
+    taken: Mutex<Vec<orbiters_core::settings::PictureMode>>,
     /// VRChat's camera open, as the stand-in VRChat says (`None`: it does not say).
     camera: Mutex<Option<bool>>,
     capturing: Mutex<bool>,
@@ -215,6 +217,7 @@ impl Host for TestHost {
 
     fn photo_3d(&self) -> anyhow::Result<()> {
         anyhow::ensure!(*self.camera.lock().unwrap() != Some(false), crate::platform::CAMERA_CLOSED);
+        self.taken.lock().unwrap().push(self.settings.lock().unwrap().photo_3d_mode);
         self.photos.fetch_add(1, Ordering::Relaxed);
         Ok(())
     }
@@ -1541,6 +1544,106 @@ fn a_3d_picture_with_vrchat_s_camera_closed_says_open_the_camera_before() {
     *t.camera.lock().unwrap() = Some(true);
     n.command(Command::Photo3DIn { seconds: 5 });
     assert!(until(|| t.view().photo_countdown.is_some()));
+}
+
+/// The Action Menu's two pictures (`N4N0/Photo3DPeople`, `N4N0/Photo3DWorld`): a press takes that picture, whatever was last
+/// chosen, at the length chosen, and letting go takes none. The one button of an avatar uploaded before them takes the
+/// last one chosen and changes nothing.
+#[test]
+fn the_action_menu_s_two_buttons_take_their_own_picture_and_the_old_one_the_last_chosen() {
+    use orbiters_core::settings::{Photo3dLength, PictureMode};
+    let settings = Settings { photo_3d: Photo3dLength::Full, photo_3d_mode: PictureMode::People, ..Default::default() };
+    let (t, n) = n4n0(settings);
+    n.n4n0.lock().unwrap().params = [params::PHOTO_3D, params::PHOTO_3D_PEOPLE, params::PHOTO_3D_WORLD].into_iter().map(String::from).collect();
+    let press = |name: &str| {
+        let before = t.photos.load(Ordering::Relaxed);
+        n.on_parameter(name, &OscValue::Bool(true));
+        assert!(until(|| t.photos.load(Ordering::Relaxed) == before + 1), "{name} takes a picture");
+        n.on_parameter(name, &OscValue::Bool(false));
+        std::thread::sleep(Duration::from_millis(50));
+        assert_eq!(t.photos.load(Ordering::Relaxed), before + 1, "{name}: letting go takes none");
+        *t.taken.lock().unwrap().last().unwrap()
+    };
+    assert_eq!(press(params::PHOTO_3D_WORLD), PictureMode::World);
+    assert_eq!(t.settings.lock().unwrap().photo_3d_mode, PictureMode::World, "the last chosen");
+    assert_eq!(press(params::PHOTO_3D), PictureMode::World, "the old button: the last chosen");
+    assert_eq!(press(params::PHOTO_3D_PEOPLE), PictureMode::People);
+    assert_eq!(press(params::PHOTO_3D), PictureMode::People);
+    assert_eq!(t.settings.lock().unwrap().photo_3d, Photo3dLength::Full, "the length stays as chosen");
+}
+
+/// Another OSC app cannot press a picture on an avatar without the buttons, once the avatar's parameters are known: an
+/// avatar with only the old button, or none.
+#[test]
+fn the_two_picture_buttons_count_only_on_an_avatar_that_has_them() {
+    let (t, n) = n4n0(Settings::default());
+    n.n4n0.lock().unwrap().params = [params::PHOTO_3D].into_iter().map(String::from).collect();
+    n.on_parameter(params::PHOTO_3D_PEOPLE, &OscValue::Bool(true));
+    n.on_parameter(params::PHOTO_3D_WORLD, &OscValue::Bool(true));
+    std::thread::sleep(Duration::from_millis(100));
+    assert_eq!(t.photos.load(Ordering::Relaxed), 0);
+    assert_eq!(t.settings.lock().unwrap().photo_3d_mode, Default::default(), "and chooses nothing");
+}
+
+/// VRChat's camera closed: a press on either button says so where the other 3D picture presses do, and takes nothing.
+#[test]
+fn the_two_picture_buttons_say_when_vrchat_s_camera_is_closed() {
+    let (t, n) = n4n0(Settings::default());
+    *t.camera.lock().unwrap() = Some(false);
+    n.on_parameter(params::PHOTO_3D_WORLD, &OscValue::Bool(true));
+    assert!(until(|| t.view().photo_note.as_ref().is_some_and(|(_, text)| text == crate::platform::CAMERA_CLOSED)));
+    assert_eq!(t.photos.load(Ordering::Relaxed), 0);
+}
+
+/// The avatar's own screen, by its version: from 15 a press where a picture's button is drawn takes that picture; a screen
+/// of 14 keeps its one Take and the line that changes it, whose press takes nothing.
+#[test]
+fn a_screen_takes_what_its_own_page_shows() {
+    use orbiters_core::settings::PictureMode;
+    use orbiters_n4n0_core::menu::layout::{self, ScreenPage};
+    use orbiters_n4n0_core::menu::Target;
+    // A press at (x, y) of the page the screen shows, as a finger's goes (menu::touch), and what comes of it.
+    let press = |n: &Shared, x: f32, y: f32| {
+        let effects = {
+            let mut rt = n.n4n0.lock().unwrap();
+            let menu = &mut rt.screen.menu;
+            let (_, target) = layout::hit_pointable(layout::cached(ScreenPage::of(menu)), menu, x, y).expect("something to press there");
+            menu.press(target)
+        };
+        n.screen_effects(effects);
+    };
+    let on_screen = |version: i32, id: &str| {
+        let mut tree = card_tree(id);
+        put_node(&mut tree, &parameter(params::SCREEN_VERSION), "i", json!(version), 3);
+        let (t, n, _vrchat) = n4n0_on_avatar(tree);
+        n.menu_open(false);
+        assert!(until(|| n.n4n0.lock().unwrap().screen.menu.open));
+        let mut rt = n.n4n0.lock().unwrap();
+        rt.screen.menu.press(Target::Photo);
+        assert_eq!(rt.screen.menu.page, orbiters_n4n0_core::menu::Page::Photo);
+        drop(rt);
+        (t, n)
+    };
+
+    let (t, n) = on_screen(contract::SCREEN_TWO_PICTURES, "avtr_two_pictures");
+    assert_eq!(ScreenPage::of(&n.n4n0.lock().unwrap().screen.menu), ScreenPage::PhotoTwo);
+    assert!(t.taken.lock().unwrap().is_empty());
+    press(&n, 300.0, 280.0);
+    assert!(until(|| t.taken.lock().unwrap().last() == Some(&PictureMode::World)), "the world's button");
+    press(&n, 300.0, 150.0);
+    assert!(until(|| t.taken.lock().unwrap().last() == Some(&PictureMode::People)), "the people's button");
+    assert_eq!(t.taken.lock().unwrap().len(), 2);
+    n.shutdown();
+
+    let (t, n) = on_screen(contract::SCREEN_MIRROR, "avtr_one_take");
+    assert_eq!(ScreenPage::of(&n.n4n0.lock().unwrap().screen.menu), ScreenPage::PhotoShare);
+    press(&n, 200.0, 512.0);
+    assert!(until(|| t.settings.lock().unwrap().photo_3d_mode == PictureMode::World), "the line changes the picture");
+    std::thread::sleep(Duration::from_millis(100));
+    assert_eq!(t.photos.load(Ordering::Relaxed), 0, "and takes none");
+    press(&n, 300.0, 430.0);
+    assert!(until(|| t.taken.lock().unwrap().last() == Some(&PictureMode::World)), "Take takes the one the line says");
+    n.shutdown();
 }
 
 #[test]

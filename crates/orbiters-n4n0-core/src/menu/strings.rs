@@ -80,6 +80,11 @@ texts! {
     PhotoTimer = "photo.timer" => "Timer",
     PhotoFlight = "photo.flight" => "Camera flight",
     PhotoTake = "photo.take" => "Take 3D picture",
+    /// The two pictures as buttons (from screen version 15), each with what it does.
+    PhotoPeople = "photo.people" => "3D picture of people",
+    PhotoPeopleNote = "photo.peopleNote" => "Goes around the people here",
+    PhotoWorld = "photo.world" => "3D picture of the world",
+    PhotoWorldNote = "photo.worldNote" => "Goes through the place, avatars left out",
     /// The timer's choices ([`super::TIMERS`] in order).
     PhotoTimerOff = "photo.timerOff" => "Off",
     PhotoTimer3 = "photo.timer3" => "3 s",

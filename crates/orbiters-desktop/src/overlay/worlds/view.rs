@@ -403,7 +403,15 @@ impl View {
             return;
         }
         self.trace.start();
-        let Some(luid) = steamvr.dxgi_adapter_index().and_then(super::interop::luid_of_index) else {
+        #[cfg(windows)]
+        let found = steamvr.dxgi_adapter_index().and_then(super::interop::luid_of_index);
+        // SteamVR runs on Windows only here: the overlay's textures are shared through Direct3D.
+        #[cfg(not(windows))]
+        let found: Option<u64> = {
+            let _ = steamvr;
+            None
+        };
+        let Some(luid) = found else {
             self.error = Some("SteamVR did not say which graphics card the headset uses.".into());
             return;
         };

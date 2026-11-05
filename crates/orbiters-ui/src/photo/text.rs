@@ -130,7 +130,16 @@ fn font_dirs() -> Vec<PathBuf> {
     dirs
 }
 
-#[cfg(not(windows))]
+#[cfg(target_os = "macos")]
+fn font_dirs() -> Vec<PathBuf> {
+    let mut dirs: Vec<PathBuf> = ["/System/Library/Fonts", "/Library/Fonts"].iter().map(PathBuf::from).collect();
+    if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+        dirs.push(home.join("Library/Fonts"));
+    }
+    dirs
+}
+
+#[cfg(all(not(windows), not(target_os = "macos")))]
 fn font_dirs() -> Vec<PathBuf> {
     let mut dirs = vec![PathBuf::from("/usr/share/fonts"), PathBuf::from("/usr/local/share/fonts")];
     if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {

@@ -1,6 +1,9 @@
 //! Fonts. Windows 11 has Segoe UI Variable: every weight through its `wght` axis and optical sizes through
-//! `opsz`, so headings get the Display cut and labels the Text cut. Elsewhere the first common sans family found
-//! (static weights when there is no variable file). Cascadia Mono or Consolas for IDs, and the Phosphor icons.
+//! `opsz`, so headings get the Display cut and labels the Text cut. macOS has no Segoe UI, so the app brings its own:
+//! Orbiters Sans, Selawik (Microsoft's open font with Segoe UI's letter widths) as a variable font with Segoe UI's
+//! line heights ([`SANS`]), and the same Cascadia Mono as Windows 11, so a page lays out as it does on Windows.
+//! Elsewhere the first common sans family found (static weights when there is no variable file). Cascadia Mono or
+//! Consolas for IDs, and the Phosphor icons.
 //! Letters none of them has (Japanese, Chinese, Korean, Thai, Arabic… in world and friend names) come from the
 //! system's own font for their script, opened the first time such a letter shows up. Every file is opened once per
 //! process, mapped rather than read, and shared by all its egui contexts (the VR overlay runs five).
@@ -15,6 +18,13 @@ use std::sync::{Arc, Mutex, OnceLock};
 /// Phosphor Icons (MIT), regular and fill.
 pub const PHOSPHOR: &[u8] = include_bytes!("../assets/Phosphor.ttf");
 pub const PHOSPHOR_FILL: &[u8] = include_bytes!("../assets/Phosphor-Fill.ttf");
+
+/// The text font on macOS: `scripts/fonts/orbiters_sans.py` makes it from Selawik's sources (SIL Open Font License).
+#[cfg(target_os = "macos")]
+const SANS: &[u8] = include_bytes!("../assets/OrbitersSans-VF.ttf");
+/// Cascadia Mono (SIL Open Font License), as Windows 11 ships it.
+#[cfg(target_os = "macos")]
+const MONO: &[u8] = include_bytes!("../assets/CascadiaMono.ttf");
 
 const WEIGHTS: [u16; 4] = [400, 500, 600, 700];
 
@@ -129,8 +139,8 @@ fn open(path: &Path) -> Option<Blob> {
     open.entry(path.to_path_buf())
         .or_insert_with(|| {
             let file = std::fs::File::open(path).ok()?;
-            // SAFETY: a font file is not changed while it is in use (Windows does not replace an open font file), and
-            // egui only ever reads the bytes.
+            // SAFETY: a font file is not changed while it is in use (Windows does not replace an open font file, and macOS's
+            // sealed system volume holds its own), and egui only ever reads the bytes.
             match unsafe { memmap2::Mmap::map(&file) } {
                 Ok(map) => Some(Arc::new(map) as Blob),
                 Err(_) => std::fs::read(path).ok().map(|bytes| Arc::new(bytes) as Blob),
@@ -167,7 +177,7 @@ fn system_file(name: &str) -> Option<Blob> {
     open(&windows_fonts().join(name))
 }
 
-#[cfg(not(windows))]
+#[cfg(all(not(windows), not(target_os = "macos")))]
 fn font_dirs() -> Vec<PathBuf> {
     let mut dirs = vec![PathBuf::from("/usr/share/fonts"), PathBuf::from("/usr/local/share/fonts")];
     if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
@@ -177,8 +187,25 @@ fn font_dirs() -> Vec<PathBuf> {
     dirs
 }
 
+/// The system's fonts (with their supplement, and the folder PingFang lives in), then those the person added.
+#[cfg(target_os = "macos")]
+fn font_dirs() -> Vec<PathBuf> {
+    let mut dirs: Vec<PathBuf> = [
+        "/System/Library/Fonts",
+        "/System/Library/PrivateFrameworks/FontServices.framework/Versions/A/Resources/Reserved",
+        "/Library/Fonts",
+    ]
+    .iter()
+    .map(PathBuf::from)
+    .collect();
+    if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+        dirs.push(home.join("Library/Fonts"));
+    }
+    dirs
+}
+
 /// First file (in `names` order) found under the font folders (walked once per process).
-#[cfg(not(windows))]
+#[cfg(all(not(windows), not(target_os = "macos")))]
 fn find_file(names: &[&str]) -> Option<PathBuf> {
     fn walk(dir: &Path, depth: u32, out: &mut Vec<PathBuf>) {
         let Ok(entries) = std::fs::read_dir(dir) else { return };
@@ -204,7 +231,17 @@ fn find_file(names: &[&str]) -> Option<PathBuf> {
     names.iter().find_map(|n| files.iter().find(|p| p.file_name().is_some_and(|f| f.eq_ignore_ascii_case(n))).cloned())
 }
 
-#[cfg(not(windows))]
+#[cfg(target_os = "macos")]
+fn find_sans() -> Option<Sans> {
+    Some(Sans::Variable(Arc::new(SANS) as Blob))
+}
+
+#[cfg(target_os = "macos")]
+fn find_mono() -> Option<Blob> {
+    Some(Arc::new(MONO) as Blob)
+}
+
+#[cfg(all(not(windows), not(target_os = "macos")))]
 fn find_sans() -> Option<Sans> {
     let variable =
         ["InterVariable.ttf", "Inter[opsz,wght].ttf", "Inter-VariableFont_opsz,wght.ttf", "NotoSans[wdth,wght].ttf", "NotoSans-VariableFont_wdth,wght.ttf"];
@@ -225,14 +262,23 @@ fn find_sans() -> Option<Sans> {
     None
 }
 
-#[cfg(not(windows))]
+#[cfg(all(not(windows), not(target_os = "macos")))]
 fn find_mono() -> Option<Blob> {
     find_file(&["CascadiaMono.ttf", "JetBrainsMono-Regular.ttf", "DejaVuSansMono.ttf", "NotoSansMono-Regular.ttf", "LiberationMono-Regular.ttf"])
         .and_then(|p| open(&p))
 }
 
+/// A system font file by its file name. The file system finds it however its name is normalized (Hiragino's names
+/// are decomposed on disk), which comparing the names listed in a folder would not.
+#[cfg(target_os = "macos")]
+fn system_file(name: &str) -> Option<Blob> {
+    let mut dirs = font_dirs();
+    dirs.insert(1, PathBuf::from("/System/Library/Fonts/Supplemental"));
+    dirs.into_iter().map(|dir| dir.join(name)).find(|path| path.is_file()).and_then(|path| open(&path))
+}
+
 /// A system font file by its file name, wherever it is under the font folders.
-#[cfg(not(windows))]
+#[cfg(all(not(windows), not(target_os = "macos")))]
 fn system_file(name: &str) -> Option<Blob> {
     find_file(&[name]).and_then(|p| open(&p))
 }
@@ -310,7 +356,33 @@ fn user_locale() -> String {
     String::from_utf16_lossy(&name[..(n - 1) as usize])
 }
 
-#[cfg(not(windows))]
+/// The user's locale name, from the system (an app started from the Finder has no `LANG`).
+#[cfg(target_os = "macos")]
+pub fn user_locale() -> String {
+    use std::ffi::{c_char, c_void, CStr};
+    #[link(name = "CoreFoundation", kind = "framework")]
+    extern "C" {
+        fn CFLocaleCopyCurrent() -> *const c_void;
+        fn CFLocaleGetIdentifier(locale: *const c_void) -> *const c_void;
+        fn CFStringGetCString(string: *const c_void, buffer: *mut c_char, size: isize, encoding: u32) -> u8;
+        fn CFRelease(object: *const c_void);
+    }
+    const UTF8: u32 = 0x0800_0100;
+    let mut buffer = [0 as c_char; 128];
+    // SAFETY: the locale is ours to release; its identifier is borrowed from it for the copy into a buffer of the size given.
+    unsafe {
+        let locale = CFLocaleCopyCurrent();
+        if locale.is_null() {
+            return String::new();
+        }
+        let copied = CFStringGetCString(CFLocaleGetIdentifier(locale), buffer.as_mut_ptr(), buffer.len() as isize, UTF8) != 0;
+        let name = if copied { CStr::from_ptr(buffer.as_ptr()).to_string_lossy().replace('_', "-") } else { String::new() };
+        CFRelease(locale);
+        name
+    }
+}
+
+#[cfg(all(not(windows), not(target_os = "macos")))]
 fn user_locale() -> String {
     ["LC_ALL", "LC_CTYPE", "LANG"].iter().find_map(|v| std::env::var(v).ok().filter(|s| !s.is_empty())).unwrap_or_default()
 }
@@ -419,7 +491,52 @@ mod table {
     pub const SYMBOLS: &[Weights] = &[[("seguisym.ttf", 0); 3]];
 }
 
-#[cfg(not(windows))]
+#[cfg(target_os = "macos")]
+mod table {
+    use super::Weights;
+    // Hiragino for Japanese as the system does; PingFang UI (its Text cuts) and Heiti for Chinese. PingFang's file holds
+    // one weight per face that is not a static file on every macOS, so the bolder columns ask Heiti's Medium when it is missing.
+    pub const JAPANESE: &[Weights] = &[[("ヒラギノ角ゴシック W4.ttc", 0), ("ヒラギノ角ゴシック W6.ttc", 0), ("ヒラギノ角ゴシック W7.ttc", 0)], [("PingFangUI.ttc", 4); 3]];
+    pub const SIMPLIFIED: &[Weights] =
+        &[[("PingFangUI.ttc", 0); 3], [("Hiragino Sans GB.ttc", 0), ("Hiragino Sans GB.ttc", 2), ("Hiragino Sans GB.ttc", 2)], [("STHeiti Medium.ttc", 1); 3]];
+    pub const TRADITIONAL: &[Weights] = &[[("PingFangUI.ttc", 1); 3], [("STHeiti Light.ttc", 0), ("STHeiti Medium.ttc", 0), ("STHeiti Medium.ttc", 0)]];
+    pub const KOREAN: &[Weights] = &[[("AppleSDGothicNeo.ttc", 0), ("AppleSDGothicNeo.ttc", 4), ("AppleSDGothicNeo.ttc", 6)]];
+    pub const THAI: &[Weights] = &[[("ThonburiUI.ttc", 0); 3], [("Thonburi.ttc", 0), ("Thonburi.ttc", 1), ("Thonburi.ttc", 1)]];
+    pub const LAO: &[Weights] = &[[("Lao MN.ttc", 0), ("Lao MN.ttc", 1), ("Lao MN.ttc", 1)], [("Lao Sangam MN.ttf", 0); 3]];
+    pub const KHMER: &[Weights] = &[[("Khmer MN.ttc", 0), ("Khmer MN.ttc", 1), ("Khmer MN.ttc", 1)], [("Khmer Sangam MN.ttf", 0); 3]];
+    /// San Francisco: every Latin, Greek and Cyrillic letter Orbiters Sans lacks, then Arabic, Hebrew, Armenian and
+    /// Georgian in the system's own cuts, and Arial Unicode for the rest.
+    pub const SEGOE: &[Weights] = &[
+        [("SFNS.ttf", 0); 3],
+        [("SFArabic.ttf", 0); 3],
+        [("SFHebrew.ttf", 0); 3],
+        [("SFArmenian.ttf", 0); 3],
+        [("SFGeorgian.ttf", 0); 3],
+        [("Arial Unicode.ttf", 0); 3],
+    ];
+    pub const INDIC: &[Weights] = &[
+        [("Kohinoor.ttc", 0), ("Kohinoor.ttc", 2), ("Kohinoor.ttc", 3)],
+        // Bangla, Devanagari, Gujarati, Gurmukhi, Kannada, Malayalam, Odia, Tamil, Telugu.
+        [("SFIndia.ttc", 0); 3],
+        [("SFIndia.ttc", 1); 3],
+        [("SFIndia.ttc", 2); 3],
+        [("SFIndia.ttc", 3); 3],
+        [("SFIndia.ttc", 4); 3],
+        [("SFIndia.ttc", 5); 3],
+        [("SFIndia.ttc", 6); 3],
+        [("SFIndia.ttc", 7); 3],
+        [("SFIndia.ttc", 8); 3],
+    ];
+    pub const ETHIOPIC: &[Weights] = &[[("KefaIII.ttf", 0); 3], [("Kefa.ttc", 0); 3]];
+    pub const MYANMAR: &[Weights] = &[[("NotoSansMyanmar.ttc", 6), ("NotoSansMyanmar.ttc", 7), ("NotoSansMyanmar.ttc", 1)]];
+    pub const TIBETAN: &[Weights] = &[[("Kailasa.ttc", 0), ("Kailasa.ttc", 1), ("Kailasa.ttc", 1)]];
+    pub const MONGOLIAN: &[Weights] = &[[("NotoSansMongolian-Regular.ttf", 0); 3]];
+    pub const CHEROKEE: &[Weights] = &[[("PlantagenetCherokee.ttf", 0); 3]];
+    pub const YI: &[Weights] = &[[("NotoSansYi-Regular.ttf", 0); 3]];
+    pub const SYMBOLS: &[Weights] = &[[("Apple Symbols.ttf", 0); 3], [("Arial Unicode.ttf", 0); 3]];
+}
+
+#[cfg(all(not(windows), not(target_os = "macos")))]
 mod table {
     use super::Weights;
     // Noto's CJK collection holds Japanese, Korean, Simplified and Traditional Chinese in that order.
@@ -597,6 +714,34 @@ mod tests {
         assert_eq!(family(650.0), FontFamily::Name("w600".into()));
         assert_eq!(family(f32::NAN), FontFamily::Proportional);
         assert_eq!(icons(), FontFamily::Name("icons".into()));
+    }
+
+    /// The Mac's fonts draw what Orbiters Sans lacks, in every script names show up in.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_mac_s_fonts_draw_other_scripts() {
+        let fallback = SystemFallback { cjk: Cjk::Japanese };
+        for c in ['猫', 'ね', '한', 'ไ', 'ع', 'א', 'ह', 'ሰ', 'д', 'α', 'ệ', '✓', '→'] {
+            let (name, data) = fallback.face(c, 400).unwrap_or_else(|| panic!("no face for {c}"));
+            assert!(covers(&data, c), "{c} in {name}");
+        }
+        assert!(fallback.face('ね', 700).is_some_and(|(n, _)| n.contains("W7")), "bold Japanese comes from a bold cut");
+        assert!(matches!(found().sans, Some(Sans::Variable(_))) && found().mono.is_some(), "the interface's own fonts are in the program");
+    }
+
+    /// The bundled text font carries the letters and punctuation the interface writes, with Segoe UI's line height.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn orbiters_sans_is_the_interface_s_font() {
+        use skrifa::{instance::Size, MetadataProvider as _};
+        let font = skrifa::FontRef::new(SANS).unwrap();
+        for c in "AZaz09éèêàçñßœ·…—–’“”‹›•€™".chars() {
+            assert!(font.charmap().map(c).is_some(), "{c}");
+        }
+        let m = font.metrics(Size::new(2048.0), skrifa::instance::LocationRef::default());
+        assert_eq!((m.ascent, m.descent), (2210.0, -514.0));
+        let axes: Vec<_> = font.axes().iter().map(|a| a.tag().to_string()).collect();
+        assert_eq!(axes, ["wght"]);
     }
 
     /// With Windows' fonts at hand: Japanese, Korean and Thai letters get a face that draws them, bold in bold text,

@@ -1,3 +1,7 @@
 # `cargo xtask <command>`: Orbiters desktop's release tooling (xtask/, docs/releasing.md).
 [alias]
 xtask = "run --package xtask --"
+
+# audiopus_sys's Opus still says `cmake_minimum_required(VERSION 2.8)`, which CMake 4 refuses unless told which policies to use.
+[env]
+CMAKE_POLICY_VERSION_MINIMUM = "3.5"

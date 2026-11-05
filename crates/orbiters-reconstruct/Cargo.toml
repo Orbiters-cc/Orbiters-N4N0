@@ -18,8 +18,6 @@ serde_json = { workspace = true }
 anyhow = { workspace = true }
 bytemuck = { workspace = true }
 wgpu = "30"
-# wgpu-hal's: the Vulkan device's queue priority and the memory budget (crate::gpu).
-ash = "0.38"
 fastrand = "2"
 # The face detector (crate::portraits), through the ONNX Runtime the voice worker ships, beside the programs.
 ort = { version = "=2.0.0-rc.10", default-features = false, features = ["load-dynamic", "std"] }
@@ -33,6 +31,10 @@ png = { workspace = true }
 [target.'cfg(windows)'.dependencies]
 windows = { workspace = true }
 sysinfo = "0.37"
+
+[target.'cfg(not(target_vendor = "apple"))'.dependencies]
+# wgpu-hal's: the Vulkan device's queue priority and the memory budget (crate::gpu).
+ash = "0.38"
 
 [dev-dependencies]
 half = "2.7"

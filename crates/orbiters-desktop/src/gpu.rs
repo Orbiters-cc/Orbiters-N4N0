@@ -76,7 +76,13 @@ impl Adapter {
 pub fn options(gpu: WindowGpu) -> WgpuConfiguration {
     let mut setup = WgpuSetupCreateNew::without_display_handle();
     if wgpu::Backends::from_env().is_none() {
-        setup.instance_descriptor.backends = if cfg!(windows) { wgpu::Backends::DX12 } else { wgpu::Backends::VULKAN | wgpu::Backends::GL };
+        setup.instance_descriptor.backends = if cfg!(windows) {
+            wgpu::Backends::DX12
+        } else if cfg!(target_os = "macos") {
+            wgpu::Backends::METAL
+        } else {
+            wgpu::Backends::VULKAN | wgpu::Backends::GL
+        };
     }
     let kind = match gpu {
         WindowGpu::IntegratedGpu => wgpu::DeviceType::IntegratedGpu,
@@ -108,7 +114,13 @@ pub fn options(gpu: WindowGpu) -> WgpuConfiguration {
 /// (`settings::ViewGpu`), with the window's limits and small memory blocks.
 pub fn integrated_device() -> anyhow::Result<(wgpu::Device, wgpu::Queue)> {
     use anyhow::Context as _;
-    let backends = wgpu::Backends::from_env().unwrap_or(if cfg!(windows) { wgpu::Backends::DX12 } else { wgpu::Backends::VULKAN });
+    let backends = wgpu::Backends::from_env().unwrap_or(if cfg!(windows) {
+        wgpu::Backends::DX12
+    } else if cfg!(target_os = "macos") {
+        wgpu::Backends::METAL
+    } else {
+        wgpu::Backends::VULKAN
+    });
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor { backends, ..wgpu::InstanceDescriptor::new_without_display_handle() });
     use orbiters_reconstruct::gpu::block_on;
     let adapter = block_on(instance.enumerate_adapters(backends))

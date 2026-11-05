@@ -701,6 +701,12 @@ pub fn depth_key(depth: f32, bits: u32) -> u32 {
 ///
 /// # Safety
 /// `desc` must be what the adapter supports (as for [`wgpu::Adapter::request_device`]).
+#[cfg(target_vendor = "apple")]
+unsafe fn low_priority_device(_: &wgpu::Adapter, _: &wgpu::DeviceDescriptor<'_>) -> anyhow::Result<(wgpu::Device, wgpu::Queue)> {
+    anyhow::bail!("Metal has no queue priorities")
+}
+
+#[cfg(not(target_vendor = "apple"))]
 unsafe fn low_priority_device(adapter: &wgpu::Adapter, desc: &wgpu::DeviceDescriptor<'_>) -> anyhow::Result<(wgpu::Device, wgpu::Queue)> {
     use ash::vk;
     let open = {
@@ -889,6 +895,14 @@ impl Gpu {
 
     /// Graphics memory this device's adapter has free now, bytes (`VK_EXT_memory_budget`: the device-local heaps'
     /// budget less their usage, which counts every process's): None on other APIs or without the extension.
+    #[cfg(target_vendor = "apple")]
+    pub fn free_memory(&self) -> Option<u64> {
+        None
+    }
+
+    /// Graphics memory this device's adapter has free now, bytes (`VK_EXT_memory_budget`: the device-local heaps'
+    /// budget less their usage, which counts every process's): None on other APIs or without the extension.
+    #[cfg(not(target_vendor = "apple"))]
     pub fn free_memory(&self) -> Option<u64> {
         let adapter = self.wgpu_adapter.as_ref()?;
         // SAFETY: read-only queries of the adapter's physical device.

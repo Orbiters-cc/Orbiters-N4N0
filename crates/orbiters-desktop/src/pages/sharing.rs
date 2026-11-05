@@ -104,6 +104,8 @@ pub struct Dialog {
     /// Reconstruct again's question over the window ([`again`]), and where its button was drawn last.
     again: Option<again::Ask>,
     again_button: Rect,
+    /// What can be asked about this result's wearer and what was done about them, read once per result (its creation time).
+    wearer: Option<(Option<String>, Option<orbiters_core::picture::WearerRow>, Option<&'static str>)>,
     /// Edit on a 3D capture: its 3D view to open in Edit in 3D (it takes the window's GPU, known when it is drawn).
     edit_3d: bool,
     /// The library as last seen, and its session read again when that changes: a reconstruction that finished while the
@@ -190,6 +192,7 @@ impl Dialog {
             export_button: Rect::NOTHING,
             again: None,
             again_button: Rect::NOTHING,
+            wearer: None,
             edit_3d: false,
             library: None,
             session_job: Job::default(),
@@ -1255,6 +1258,33 @@ impl Dialog {
             ui.add_space(14.0);
             feedback::banner(ui, Id::unique(("capture-hidden", &self.entry.key)), Tone::Warn, "Hidden by a moderator: it can no longer be shared.", false);
         }
+        // A result the wearer was taken out of says so, and any result of this computer can be made again with or without them.
+        if let (true, true, Some(controller::Local::Session(dir))) = (mine, self.entry.ready, &self.entry.local) {
+            if self.wearer.as_ref().is_none_or(|(of, _, _)| *of != self.entry.result) {
+                let line = orbiters_core::reconstruction::read_report(dir).as_ref().and_then(orbiters_core::picture::wearer_line);
+                self.wearer = Some((self.entry.result.clone(), orbiters_core::picture::wearer_row(dir), line));
+            }
+            let (_, row, line) = self.wearer.clone().expect("just read");
+            if let Some(line) = line {
+                ui.add_space(14.0);
+                feedback::banner(ui, Id::unique(("capture-wearer", &self.entry.key)), Tone::Info, line, false);
+            }
+            if let Some(row) = row.filter(|_| matches!(offer, Some(Offer::Start { .. }))) {
+                ui.add_space(8.0);
+                let b = Button::new(row.label()).icon(if row.takes_out() { icons::USER_MINUS } else { icons::USER_PLUS }).variant(Variant::Ghost).size(Size::Sm).id_salt("capture-wearer-row").hint(if row.takes_out() {
+                    "A new 3D view with the avatar you wore taken out: what stood behind it comes from other frames, where they saw it. Anyone touching your avatar comes out with it"
+                } else {
+                    "A new 3D view with the avatar you wore left in it"
+                });
+                let bw = b.desired_width(ui);
+                let (r, _) = ui.allocate_exact_size(vec2(w, 32.0), Sense::hover());
+                let at = Rect::from_min_size(r.min, vec2(bw.min(w), 32.0));
+                if pressed(b.show_at(ui, at)) {
+                    self.again_button = at;
+                    *act = Some(Act::ReconstructWearer(row));
+                }
+            }
+        }
         if edited && !updating && self.error.is_none() {
             let shared = item.as_ref().is_some_and(|i| i.public || !i.grants.is_empty());
             ui.add_space(14.0);
@@ -1740,6 +1770,16 @@ impl Dialog {
                     self.again = again::press(ctx, cx, &path, &self.entry.world_name, self.entry.remote.as_ref(), self.again_button);
                 }
             }
+            Act::ReconstructWearer(row) => {
+                if let Some(controller::Local::Session(path)) = self.entry.local.clone() {
+                    match (orbiters_core::picture::WearerChoice { take_out: row.takes_out() }).save(&path) {
+                        Ok(()) => self.again = again::press(ctx, cx, &path, &self.entry.world_name, self.entry.remote.as_ref(), self.again_button),
+                        Err(e) => {
+                            cx.run(ctx, Err(e));
+                        }
+                    }
+                }
+            }
             Act::StopReconstruct => {
                 cx.ctl.stop_reconstruction();
             }
@@ -1843,6 +1883,7 @@ enum Act {
     Download,
     View3d,
     Reconstruct,
+    ReconstructWearer(orbiters_core::picture::WearerRow),
     StopReconstruct,
     Unqueue,
     Folder,

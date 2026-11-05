@@ -877,6 +877,17 @@ fn a_picture_without_the_capture_kit_says_so() {
 }
 
 #[test]
+fn an_answer_does_not_wait_for_the_look_at_its_socket() {
+    let (_game, _bridge, _server, client) = lab("latency");
+    // The watcher's look takes up to its read timeout of 200 ms: ten answers must not each pay for it.
+    let begin = Instant::now();
+    for _ in 0..10 {
+        client.state();
+    }
+    assert!(begin.elapsed() < Duration::from_millis(1500), "{:?}", begin.elapsed());
+}
+
+#[test]
 fn one_action_at_a_time() {
     let (game, _bridge, _server, client) = lab("one");
     arrive(&client);

@@ -490,11 +490,14 @@ impl LabWindow {
     #[cfg(windows)]
     fn show_menu(window: &GameWindow, open: bool) {
         use windows::Win32::Foundation::HWND;
-        use windows::Win32::Graphics::Gdi::InvalidateRect;
+        use windows::Win32::Graphics::Gdi::{InvalidateRect, UpdateWindow};
         window::MENU_OPEN.store(open, Ordering::Relaxed);
         // SAFETY: asks a window of this process to paint again; one gone meanwhile only makes this fail.
         unsafe {
-            let _ = InvalidateRect(Some(HWND(window.handle as *mut _)), None, true);
+            let handle = HWND(window.handle as *mut _);
+            let _ = InvalidateRect(Some(handle), None, true);
+            // Painted before the key's call answers: a screenshot right after it shows the menu.
+            let _ = UpdateWindow(handle);
         }
     }
 

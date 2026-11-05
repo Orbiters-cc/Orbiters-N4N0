@@ -12,7 +12,7 @@ use std::io::{Read, Write};
 use std::time::{Duration, Instant};
 
 /// A screenshot's limit, in the child and for waiting on it.
-const SHOT_LIMIT: Duration = Duration::from_secs(8);
+const SHOT_LIMIT: Duration = Duration::from_secs(15);
 
 /// Top-down BGRA.
 pub struct Bgra {

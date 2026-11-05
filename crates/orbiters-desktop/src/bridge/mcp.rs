@@ -473,7 +473,8 @@ fn call_tool(shared: &Shared, message: &Value, stream: &TcpStream) -> Value {
     let args = message["params"].get("arguments").cloned().unwrap_or_else(|| json!({}));
     let gone = Arc::new(AtomicBool::new(false));
     let finished = Arc::new(AtomicBool::new(false));
-    let watcher = stream.try_clone().ok().map(|socket| {
+    // It only looks, and ends at its next look once the call is over: the answer does not wait for that.
+    if let Ok(socket) = stream.try_clone() {
         let (gone, finished) = (gone.clone(), finished.clone());
         std::thread::spawn(move || {
             let mut byte = [0u8; 1];
@@ -492,15 +493,12 @@ fn call_tool(shared: &Shared, message: &Value, stream: &TcpStream) -> Value {
                     }
                 }
             }
-        })
-    });
+        });
+    }
     let call = shared.bridge.begin_call(gone.clone());
     let answer = shared.bridge.call(name, &args, &call);
     shared.bridge.end_call();
     finished.store(true, Ordering::Relaxed);
-    if let Some(watcher) = watcher {
-        let _ = watcher.join();
-    }
     tool_result(answer)
 }
 

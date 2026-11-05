@@ -100,7 +100,7 @@ the part that must be this service's own (the checks before anything else) is mo
   being private or the focus goes. A sweep brings up anything past its time. If the app itself dies, `--bridge-guard`, told what is down on its standard input,
   brings it up when that input ends. `bridge/input.rs`, `bridge/guard.rs`.
 - **Restraint with VRChat's API.** The session's own limiter (one request a second per family, 429 backoff across accounts), and at most one world every 30 s.
-- **The GPU rules stand.** Reconstructions wait for VRChat as ever, and do not slip into the moments the game is closed between two worlds.
+- **The GPU rules stand.** Reconstructions follow Settings' "Reconstruct while VRChat runs" as ever (the default, Graphics card, trains beside the game and gives way to its frames). Set to wait for VRChat, they do not slip into the moments the game is closed between two worlds.
 
 What it uses: startup arguments, OSC, ordinary window input, window capture, the game's log, and VRChat's API with the session the app already holds.
 
@@ -136,13 +136,13 @@ Only a real run can tell these (nothing below has run against VRChat):
 9. Raw Input hearing the keyboard and mouse beside the game (and nothing else on this computer pausing it: anything that injects input counts as the person).
 10. How long `WM_CLOSE` takes to close the game, and whether it asks anything.
 
-With VRChat closed, signed in to VRChat in Settings, an avatar with the capture kit, turn the bridge on in Settings, run the command it gives you, restart Claude Code and paste:
+With VRChat closed, signed in to VRChat in Settings, "Reconstruct while VRChat runs" on After VRChat if the tour should have the graphics card to itself, an avatar with the capture kit, turn the bridge on in Settings, run the command it gives you, restart Claude Code and paste:
 
 > Use the orbiters-vrchat MCP server. Read bridge://guide. Then go to two worlds of your choice from my favorites, take one 4 second 3D picture in each, close VRChat, wait for the
 > reconstructions, and tell me what happened at each step, including what you had to try twice.
 
 What should happen: VRChat opens in a window at about 1280 × 720, in a private instance (the instance's name shows `~private(` in Settings' log and in `get_state`). The agent opens the menu with Esc,
-clicks the camera, closes the menu, turns a little, walks, the camera flies, and N4N0 records. The game restarts into the second world. At the end it closes, and reconstructions start.
+clicks the camera, closes the menu, turns a little, walks, the camera flies, and N4N0 records. The game restarts into the second world. At the end it closes, and the reconstructions finish (with "After VRChat" in Settings, they start then).
 
 What to look at: did it stay out of your way until you touched something? Touch the mouse: it should pause at once, and go on 30 s later. Press `Ctrl+Alt+F12`: paused until pressed again. Press Stop: the
 avatar stops at once and the port closes. Compare `turn 90` with the picture, and tell me the real rate. If a step fails, the agent's text and Settings' Recent actions say which: send those.

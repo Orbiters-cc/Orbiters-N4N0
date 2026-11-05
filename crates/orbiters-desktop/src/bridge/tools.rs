@@ -42,7 +42,7 @@ You drive VRChat on this computer, in desktop mode, through this bridge. A perso
 7. Walk somewhere worth a picture with `walk` and `turn`, looking with `screenshot` between moves. `turn` is approximate: judge by the pictures. `walk` tells you if the avatar did not seem to move.\n\
 8. `take_3d_picture` with `length_s` 1, 4 or 8. It waits for the recording to be saved and gives the `session`. Take a few from different places: 4 or 8 seconds in the open, 1 second for a close look.\n\
 9. `go_to_world` with the next world, and so on.\n\
-10. `close_vrchat` at the end. Reconstructions wait for VRChat to close: only then do they start. Then `wait_for` with `until: reconstructions_done`, as many times as it takes, and report each session's `reconstruction` from `get_state`.\n\n\
+10. `close_vrchat` at the end. Reconstructions follow the app's own setting: they run beside VRChat, or wait for it to close (`get_state`'s `reconstructions` and each picture's `reconstruction` say which). Then `wait_for` with `until: reconstructions_done`, as many times as it takes, and report each session's `reconstruction` from `get_state`.\n\n\
 ## When to give up on a world\n\n\
 Move on to the next world, and say so at the end, when:\n\
 - `go_to_world` or `wait_for` fails with `start_timeout`, or the world does not load within about four minutes;\n\
@@ -96,7 +96,7 @@ pub fn list() -> Value {
         {
             "name": "close_vrchat",
             "title": "Close VRChat",
-            "description": "Closes the VRChat this bridge started, as its window's close button does, and waits for it to go. Call it at the end of a run: reconstructions start once VRChat is closed. Refused while a picture records.",
+            "description": "Closes the VRChat this bridge started, as its window's close button does, and waits for it to go. Call it at the end of a run: reconstructions that wait for VRChat start once it is closed. Refused while a picture records.",
             "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false },
             "annotations": acts,
         },
@@ -105,7 +105,7 @@ pub fn list() -> Value {
             "title": "Wait for something",
             "description": "Waits, up to timeout_s, for something that takes long, and returns `done` with the state. Call it again when `done` is false and it still makes sense.",
             "inputSchema": { "type": "object", "properties": {
-                "until": { "type": "string", "enum": ["in_world", "closed", "picture_saved", "reconstructions_done", "not_paused"], "description": "in_world: go_to_world arrived, or its failure. closed: VRChat is gone. picture_saved: the last recording is saved. reconstructions_done: none running or waiting (only ever true once VRChat is closed). not_paused: the person left the computer alone." },
+                "until": { "type": "string", "enum": ["in_world", "closed", "picture_saved", "reconstructions_done", "not_paused"], "description": "in_world: go_to_world arrived, or its failure. closed: VRChat is gone. picture_saved: the last recording is saved. reconstructions_done: none running or waiting (with the app set to wait for VRChat, only true once it is closed). not_paused: the person left the computer alone." },
                 "timeout_s": { "type": "number", "minimum": 1, "maximum": 50, "description": "Default 45." },
             }, "required": ["until"], "additionalProperties": false },
             "annotations": read_only,
@@ -175,7 +175,7 @@ pub fn list() -> Value {
         {
             "name": "take_3d_picture",
             "title": "Take a 3D picture",
-            "description": "Takes a 3D picture with VRChat's camera where it stands: the camera flies by itself for the time asked while the app records it, then the recording is saved and queued for reconstruction. Needs the camera open (see the guide). Blocks up to wait_s, then returns the `session` and its state; if it is still recording, call wait_for with until picture_saved. `no_keyframes` means the worn avatar has no capture kit: nothing can be reconstructed from it. Reconstructions wait until VRChat is closed.",
+            "description": "Takes a 3D picture with VRChat's camera where it stands: the camera flies by itself for the time asked while the app records it, then the recording is saved and queued for reconstruction. Needs the camera open (see the guide). Blocks up to wait_s, then returns the `session` and its state; if it is still recording, call wait_for with until picture_saved. `no_keyframes` means the worn avatar has no capture kit: nothing can be reconstructed from it. Reconstructions follow the app's setting, and may wait until VRChat is closed: `reconstruction` says.",
             "inputSchema": { "type": "object", "properties": {
                 "length_s": { "type": "integer", "enum": [1, 4, 8], "description": "1: a gentle sweep around what the camera aims at. 4 and 8: flights around the place. Default 4." },
                 "mode": { "type": "string", "enum": ["default", "people", "world"], "description": "What the picture is of. This build has one way of taking pictures: anything but default is noted and otherwise ignored." },
@@ -726,7 +726,7 @@ impl Bridge {
         Ok(Answer::Data(json!({
             "closed": true,
             "reconstructions_waiting": seen.queue.len(),
-            "next": "Reconstructions start now: call wait_for with until reconstructions_done, as many times as it takes.",
+            "next": "Reconstructions waiting for VRChat start now: call wait_for with until reconstructions_done, as many times as it takes.",
         })))
     }
 
@@ -1051,7 +1051,7 @@ impl Bridge {
             "keyframes": files.keyframes,
             "reconstruction": self.reconstruction_of(&session, &seen),
             "note": mode_note,
-            "next": if saved { "Take another, or go on. Reconstructions run once VRChat is closed." } else { "Still recording: call wait_for with until picture_saved." },
+            "next": if saved { "Take another, or go on. Its reconstruction follows the app's setting: `reconstruction` says where it stands." } else { "Still recording: call wait_for with until picture_saved." },
         })))
     }
 }

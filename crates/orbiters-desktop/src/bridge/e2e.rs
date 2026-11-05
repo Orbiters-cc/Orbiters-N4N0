@@ -226,7 +226,7 @@ fn only_an_account_the_server_says_has_it_with_the_setting_on_gets_a_listener() 
     assert!(until(Duration::from_secs(5), || k.listening()));
     k.flag.signed_in.store(false, Ordering::Relaxed);
     assert!(until(Duration::from_millis(1500), || !k.listening()), "signed out closes it");
-    assert!(!k.allowed());
+    assert!(until(Duration::from_secs(1), || !k.allowed()), "and Settings hears of it");
     k.keeper.shutdown();
 }
 

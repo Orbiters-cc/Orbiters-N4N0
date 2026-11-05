@@ -82,24 +82,25 @@ pub fn show(ui: &mut Ui, cx: &Cx, index: usize, state: &mut State, draft: &mut E
         }
 
         // The way back, first and hard to miss.
-        let stop = Button::new("Stop: take back control").icon(icons::PROHIBIT).variant(Variant::Danger).size(Size::Lg).width(width).show(ui);
+        let stop = Button::new("Stop: take back control").icon(icons::PROHIBIT).variant(Variant::Stop).size(Size::Lg).width(width).show(ui);
         if stop.clicked() {
             cx.ctl.bridge_command(Command::Stop);
         }
-        ui.add_space(4.0);
+        ui.add_space(8.0);
 
+        // What it is doing now, with the way to hold it.
         let (line, color) = status_line(cx);
         let hold = status.paused == Some(Paused::Held);
-        widgets::field(ui, "Now", None, 140.0, |ui| {
-            let label = if hold { "Resume" } else { "Pause" };
-            if Button::new(label).icon(if hold { icons::PLAY } else { icons::PAUSE }).variant(Variant::Secondary).size(Size::Sm).show(ui).clicked() {
-                cx.ctl.bridge_command(if hold { Command::Resume } else { Command::Pause });
-            }
-        });
-        let shown = ui.painter().layout_job(Txt::new(line, 12.5).color(color).line_height(18.0).job(width));
-        let (rect, _) = ui.allocate_exact_size(shown.size(), Sense::hover());
-        ui.painter().galley(rect.min, shown, color);
-        ui.add_space(14.0);
+        let shown = ui.painter().layout_job(Txt::new(line, 13.5).weight(weight::MEDIUM).color(color).job(width - 180.0));
+        let (row, _) = ui.allocate_exact_size(vec2(width, shown.size().y.max(36.0) + 16.0), Sense::hover());
+        ui.painter().circle_filled(egui::pos2(row.left() + 5.0, row.center().y), 4.0, color);
+        ui.painter().galley(egui::pos2(row.left() + 20.0, row.center().y - shown.size().y * 0.5), shown, color);
+        let mut controls = ui.new_child(egui::UiBuilder::new().max_rect(row).layout(egui::Layout::right_to_left(egui::Align::Center)));
+        let label = if hold { "Resume" } else { "Pause" };
+        if Button::new(label).icon(if hold { icons::PLAY } else { icons::PAUSE }).variant(Variant::Secondary).size(Size::Sm).show(&mut controls).clicked() {
+            cx.ctl.bridge_command(if hold { Command::Resume } else { Command::Pause });
+        }
+        ui.add_space(8.0);
         widgets::separator(ui);
 
         let address = status.address.clone().unwrap_or_default();
@@ -148,7 +149,10 @@ pub fn show(ui: &mut Ui, cx: &Cx, index: usize, state: &mut State, draft: &mut E
             }
             for line in &status.log {
                 let color = if line.ok { theme::FG_2 } else { theme::WARN };
-                let text = format!("{}  {}", super::local_time_unix(line.at), line.text);
+                // Today's actions: the time says enough.
+                let when = super::local_time_unix(line.at);
+                let time = when.rsplit(", ").next().unwrap_or(&when);
+                let text = format!("{time}  {}", line.text);
                 let g = ui.painter().layout_job(Txt::new(text, 11.5).mono().color(color).line_height(17.0).job(width - 24.0));
                 let (r, _) = ui.allocate_exact_size(g.size(), Sense::hover());
                 ui.painter().galley(r.min, g, color);

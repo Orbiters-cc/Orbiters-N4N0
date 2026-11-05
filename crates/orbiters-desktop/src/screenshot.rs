@@ -3361,6 +3361,15 @@ fn overlay_menu_shots(out: &std::path::Path, snap: &Snapshot) -> anyhow::Result<
     };
     press(&mut host, &snap, Target::Photo);
     shoot(&host, "overlay-menu-photo-share", Target::ShareLatestTo)?;
+    // The two pictures as buttons: one hovered; greyed out while a timer counts; what stopped or warns about a picture.
+    use orbiters_n4n0_core::menu::PhotoMode;
+    shoot(&host, "overlay-menu-photo-two-hover", Target::TakeOf(PhotoMode::World))?;
+    host.menu.countdown = Some(3);
+    shoot(&host, "overlay-menu-photo-two-countdown", Target::Back)?;
+    host.menu.countdown = None;
+    host.menu.notice = Some("Your avatar is in this picture: see Capture".into());
+    shoot(&host, "overlay-menu-photo-two-notice", Target::Back)?;
+    host.menu.notice = None;
     press(&mut host, &snap, Target::History);
     shoot(&host, "overlay-menu-history", Target::SharePublic(3))?;
     // Share to …: the friends come with the next snapshot, two are chosen.

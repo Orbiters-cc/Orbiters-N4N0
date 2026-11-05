@@ -286,6 +286,8 @@ pub fn glyph(icon: Icon) -> &'static str {
         Icon::Aim => icons::CROSSHAIR,
         Icon::Minus => icons::MINUS,
         Icon::Stop => icons::POWER,
+        Icon::People => icons::USERS,
+        Icon::World => icons::GLOBE_HEMISPHERE_WEST,
         // Drawn as the N4N0 mark (`orbiters_ui::n4n0_logo`), never as a glyph.
         Icon::Mark => icons::STACK,
     }
@@ -381,6 +383,11 @@ pub fn element_place(e: &Element) -> Option<Place> {
     e.label.and(element_metrics(e))
 }
 
+/// A wide tile's note under its title.
+fn note_place(e: &Element) -> Place {
+    Place { room: e.rect.w as f32 - 132.0, size: 22.0 }
+}
+
 /// The room and size of what is written on an element of its look, its icon sized from it too (none for looks that
 /// write nothing).
 fn element_metrics(e: &Element) -> Option<Place> {
@@ -419,6 +426,7 @@ pub fn places() -> Vec<(Text, Place)> {
         let l = layout::cached(page);
         out.extend(l.labels.iter().map(|label| (label.text, label_place(label))));
         out.extend(l.elements.iter().filter_map(|e| Some((e.label?, element_place(e)?))));
+        out.extend(l.elements.iter().filter_map(|e| Some((e.note?, note_place(e)))));
         if page == ScreenPage::Mirror {
             out.extend(l.pictures.iter().map(|pic| (Text::MirrorPlaceholder, mirror_placeholder_place(pic.rect.w as f32))));
         }
@@ -488,6 +496,11 @@ fn element(p: &Painter, e: &Element, origin: Pos2, skin: &Skin) {
                 // A wide tile under 136 high (More's eight cards) has its title higher, over its note.
                 let at = r.min + if wide { vec2(116.0, wide_title_y(r.height(), 40.0)) } else { vec2(24.0, r.height() - 92.0) };
                 widgets::text(p, at + vec2(0.0, fitted.dy), Align2::LEFT_TOP, &fitted.txt);
+            }
+            if let Some(note) = e.note {
+                let place = note_place(e);
+                let fitted = fit(p, Txt::new(skin.text(note), place.size).color(pal.muted), place.room);
+                widgets::text(p, r.min + vec2(116.0, wide_title_y(r.height(), 40.0) + 38.0 + fitted.dy), Align2::LEFT_TOP, &fitted.txt);
             }
         }
         // A countdown's or a timeline's segment: its colour is all of it; a text area is its panel, its text slots over it.

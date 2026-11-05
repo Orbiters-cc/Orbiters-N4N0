@@ -6,7 +6,7 @@
 
 use super::strings::{self, Text};
 use super::{
-    Call, KeyboardLayout, Keys, Menu, Page, Pages, Target, Typing, CAPTURES_PER_PAGE, CONTACTS_PER_PAGE, FRIENDS_PER_PAGE, INSTANCES_PER_PAGE,
+    Call, KeyboardLayout, Keys, Menu, Page, Pages, PhotoMode, Target, Typing, CAPTURES_PER_PAGE, CONTACTS_PER_PAGE, FRIENDS_PER_PAGE, INSTANCES_PER_PAGE,
     RESULTS_PER_PAGE, STATES_PER_PAGE, TIMELINE_STEPS, TIMERS, TRACKING_KINDS,
 };
 use crate::captures::{CaptureRow, Friends, Sharing};
@@ -92,10 +92,13 @@ pub enum ScreenPage {
     Mirror = 38,
     /// More with seven cards, the screen mirror among them (from version 14).
     MoreMirror = 39,
+    /// The 3D picture with its two pictures as buttons, then the last capture as [`ScreenPage::PhotoShare`] has it (from
+    /// version 15).
+    PhotoTwo = 40,
 }
 
 impl ScreenPage {
-    pub const ALL: [ScreenPage; 39] = [
+    pub const ALL: [ScreenPage; 40] = [
         ScreenPage::Home,
         ScreenPage::SearchQwerty,
         ScreenPage::SearchAzerty,
@@ -135,6 +138,7 @@ impl ScreenPage {
         ScreenPage::MoreFeedback,
         ScreenPage::Mirror,
         ScreenPage::MoreMirror,
+        ScreenPage::PhotoTwo,
     ];
 
     /// The page picture's file stem and the overlay screenshot's name.
@@ -179,6 +183,7 @@ impl ScreenPage {
             ScreenPage::MoreFeedback => "more-feedback",
             ScreenPage::Mirror => "mirror",
             ScreenPage::MoreMirror => "more-mirror",
+            ScreenPage::PhotoTwo => "photo-two",
         }
     }
 
@@ -189,7 +194,7 @@ impl ScreenPage {
             Pages::Six => ScreenPage::HomeSix,
             Pages::Seven => ScreenPage::HomeSeven,
             Pages::Ten | Pages::Timeline => ScreenPage::HomeTen,
-            Pages::Simple | Pages::Qr | Pages::Share | Pages::Feedback | Pages::Mirror => ScreenPage::HomeQuiet,
+            Pages::Simple | Pages::Qr | Pages::Share | Pages::Feedback | Pages::Mirror | Pages::TwoPictures => ScreenPage::HomeQuiet,
         }
     }
 
@@ -222,6 +227,7 @@ impl ScreenPage {
             Page::Mirror => ScreenPage::Mirror,
             Page::More if menu.pages.mirror() => ScreenPage::MoreMirror,
             Page::More if menu.pages.feedback() => ScreenPage::MoreFeedback,
+            Page::Photo if menu.pages.two_pictures() => ScreenPage::PhotoTwo,
             Page::Photo if menu.pages.share() => ScreenPage::PhotoShare,
             Page::More if menu.pages.qr() => ScreenPage::MoreQr,
             Page::More => ScreenPage::More,
@@ -406,6 +412,9 @@ pub enum Icon {
     Aim,
     Minus,
     Stop,
+    /// A 3D picture of the people here, and of the world.
+    People,
+    World,
 }
 
 /// Home's features in their order (the first four as on the four-tile Home, the first six as on the six-tile one), each
@@ -528,7 +537,7 @@ pub fn home_tiles(pages: Pages) -> &'static [(Target, Icon, Text, Tint)] {
         Pages::Four => &HOME_TILES[..4],
         Pages::Six => &HOME_TILES[..6],
         Pages::Seven => &HOME_TILES[..7],
-        Pages::Ten | Pages::Timeline | Pages::Simple | Pages::Qr | Pages::Share | Pages::Feedback | Pages::Mirror => &HOME_TILES,
+        Pages::Ten | Pages::Timeline | Pages::Simple | Pages::Qr | Pages::Share | Pages::Feedback | Pages::Mirror | Pages::TwoPictures => &HOME_TILES,
     }
 }
 
@@ -564,6 +573,9 @@ pub struct Element {
     pub label: Option<Text>,
     /// Home tiles: the icon tile's colour.
     pub tint: Option<Tint>,
+    /// A wide tile: what never changes under its title, on the page's picture (a [`Label`] would be under the tile, and a
+    /// [`Slot`] takes the screen's text bytes and has no translation).
+    pub note: Option<Text>,
 }
 
 impl Element {
@@ -801,7 +813,7 @@ pub fn hit_pointable(layout: &Layout, menu: &Menu, x: f32, y: f32) -> Option<(us
 }
 
 fn element(target: Target, rect: Rect, look: Look) -> Element {
-    Element { target, rect, look, icon: None, label: None, tint: None }
+    Element { target, rect, look, icon: None, label: None, tint: None, note: None }
 }
 
 fn with(mut e: Element, icon: Option<Icon>, label: Option<Text>) -> Element {
@@ -1340,6 +1352,45 @@ pub fn layout(page: ScreenPage) -> Layout {
             // Clear of the last capture's column (from 672).
             slots.add(100, 504, 40, 28, Style::Accent, Content::PhotoStatus);
             elements.push(with(element(Target::PhotoMode, Rect::new(100, 488, 444, 56), Look::Row), None, None));
+            slots.add(672, 320, 22, 28, Style::Primary, Content::LastWorld);
+            slots.add(672, 352, 26, 24, Style::Accent, Content::LastState);
+            for i in 0..LAST_NOTE_LINES as u8 {
+                slots.add(672, 384 + i as u16 * 24, LAST_NOTE_COLUMNS as u8, 20, Style::Secondary, Content::LastNote(i));
+            }
+        }
+        ScreenPage::PhotoTwo => {
+            // The two pictures large, as on the Capture page and the window's Home, what they take with under them, and the
+            // last capture's column as page 30 has it. Each button takes its picture: nothing here says which is chosen.
+            elements.push(round(Target::Back, 32, Icon::Back));
+            elements.push(with(element(Target::History, Rect::new(820, 28, 172, 48), Look::KeyDark), Some(Icon::History), Some(Text::HistoryOpen)));
+            for (i, (mode, icon, title, note, tint)) in [
+                (PhotoMode::People, Icon::People, Text::PhotoPeople, Text::PhotoPeopleNote, Tint::Violet),
+                (PhotoMode::World, Icon::World, Text::PhotoWorld, Text::PhotoWorldNote, Tint::Green),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                let mut card = with(element(Target::TakeOf(mode), Rect::new(32, 96 + i as u16 * 124, 612, 112), Look::Tile), Some(icon), Some(title));
+                card.tint = Some(tint);
+                card.note = Some(note);
+                elements.push(card);
+            }
+            // A label and its chips on one line: the four timers and three flights share their columns.
+            for (i, label) in strings::TIMERS.into_iter().enumerate() {
+                elements.push(with(element(Target::Timer(i as u8), Rect::new(240 + i as u16 * 104, 348, 92, 52), Look::Chip), None, Some(label)));
+            }
+            for (i, label) in strings::FLIGHTS.into_iter().enumerate() {
+                elements.push(with(element(Target::Length(i as u8), Rect::new(240 + i as u16 * 104, 412, 92, 52), Look::Chip), None, Some(label)));
+            }
+            elements.push(with(element(Target::ShareLatest, Rect::new(672, 436, 320, 56), Look::Accent), Some(Icon::Public), Some(Text::SharePublic)));
+            elements.push(with(element(Target::ShareLatestTo, Rect::new(672, 500, 320, 56), Look::KeyDark), Some(Icon::Friends), Some(Text::ShareTo)));
+            labels.push(Label { x: 104, y: 34, size: 32, text: Text::PhotoTitle, style: Style::Primary, bold: true, width: 700 });
+            labels.push(Label { x: 32, y: 360, size: 24, text: Text::PhotoTimer, style: Style::Secondary, bold: false, width: 204 });
+            labels.push(Label { x: 32, y: 424, size: 24, text: Text::PhotoFlight, style: Style::Secondary, bold: false, width: 204 });
+            labels.push(Label { x: 672, y: 100, size: 20, text: Text::ShareLast, style: Style::Secondary, bold: false, width: 320 });
+            pictures.push(Picture { rect: Rect::new(672, 128, 320, 180), result: 0 });
+            // What stops or warns about a picture, and a timer's count: clear of the last capture's column.
+            slots.add(32, 488, 43, 28, Style::Accent, Content::PhotoStatus);
             slots.add(672, 320, 22, 28, Style::Primary, Content::LastWorld);
             slots.add(672, 352, 26, 24, Style::Accent, Content::LastState);
             for i in 0..LAST_NOTE_LINES as u8 {
@@ -1887,8 +1938,10 @@ pub fn text_for(menu: &Menu, content: Content, public: bool) -> String {
             Some(n) => format!("Starting in {n}… hold still"),
             None => match &menu.notice {
                 Some(notice) => notice.clone(),
+                // The two pictures are buttons: nothing to say until something happens.
+                None if menu.pages.two_pictures() => String::new(),
                 // Shorter beside the last capture (from screen version 12).
-                // Which of the two Take takes, and how to change it: the line itself is the button, the screen's picture of
+                // Which of the two Take takes, and how to change it: the line itself is the button, the older pictures of
                 // this page having room for one Take.
                 None => match menu.photo_mode {
                     super::PhotoMode::People => "Of the people here. Tap: of the world".into(),
@@ -2398,7 +2451,7 @@ pub fn target_state(menu: &Menu, target: Target) -> State {
         Target::Contact(i) => i as usize >= menu.page_contacts().len() || menu.call.is_some(),
         Target::Previous => !menu.has_previous(),
         Target::Next => !menu.has_next(),
-        Target::Take | Target::TakeOf(_) => menu.countdown.is_some(),
+        Target::Take => menu.countdown.is_some(),
         Target::MediaPlayPause => !menu.media.as_ref().is_some_and(|m| m.can_play_pause),
         // Previous, or back to the start of what has nothing before it.
         Target::MediaPrevious => !menu.media.as_ref().is_some_and(|m| m.can_previous || (m.can_seek && m.duration.is_some())),
@@ -2444,6 +2497,8 @@ pub fn target_state(menu: &Menu, target: Target) -> State {
     };
     let unavailable = match target {
         Target::FastWalk => menu.desktop_mode,
+        // A timer is counting: both stay, greyed out, over the line that counts (hiding them would empty the page).
+        Target::TakeOf(_) => menu.countdown.is_some(),
         Target::DraftSave => !menu.states_ready,
         Target::TrackingSwitch | Target::Smoothing(_) => menu.tracking.is_none(),
         Target::SuggestSend => menu.sending || menu.suggestion.trim().is_empty(),
@@ -2474,6 +2529,62 @@ pub fn timeline_lit(media: &super::Media, i: u8) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// From screen version 15 the page has the two pictures as buttons, a press taking that picture, and no line to press:
+    /// a press anywhere on the line's old place is nothing. Older screens keep the picture that they have.
+    #[test]
+    fn the_two_pictures_are_buttons_on_the_new_page_and_stay_a_line_on_older_ones() {
+        use super::super::{Effect, Page, PhotoLength, PhotoMode};
+        let shows = |version: i32| {
+            let mut menu = Menu::new(KeyboardLayout::Qwerty, 0, PhotoLength::Standard);
+            menu.pages = Pages::of_screen(Some(version));
+            menu.page = Page::Photo;
+            ScreenPage::of(&menu)
+        };
+        assert_eq!(shows(11), ScreenPage::Photo);
+        assert_eq!(shows(12), ScreenPage::PhotoShare);
+        assert_eq!(shows(14), ScreenPage::PhotoShare);
+        assert_eq!(shows(15), ScreenPage::PhotoTwo);
+        assert_eq!(ScreenPage::PhotoTwo as u8, 40, "the page's byte, and the slice and row of its picture");
+
+        let l = layout(ScreenPage::PhotoTwo);
+        assert!(!l.elements.iter().any(|e| matches!(e.target, Target::Take | Target::PhotoMode)), "one Take and its line are gone");
+        assert_eq!(hit(&l, 300.0, 150.0).map(|(_, t)| t), Some(Target::TakeOf(PhotoMode::People)));
+        assert_eq!(hit(&l, 300.0, 280.0).map(|(_, t)| t), Some(Target::TakeOf(PhotoMode::World)));
+        assert_eq!(hit(&l, 300.0, 500.0), None, "the status line presses nothing");
+
+        // Pressing takes that picture with the timer and the flight as they are, whatever was last chosen.
+        let mut menu = Menu::new(KeyboardLayout::Qwerty, 0, PhotoLength::Standard);
+        menu.open = true;
+        menu.pages = Pages::ALL;
+        menu.page = Page::Photo;
+        menu.photo_timer = 5;
+        menu.photo_length = PhotoLength::Full;
+        for (mode, y) in [(PhotoMode::World, 280.0), (PhotoMode::People, 150.0), (PhotoMode::World, 280.0)] {
+            let (element, target) = hit_pointable(&l, &menu, 300.0, y).expect("a button there");
+            assert_eq!(l.elements[element].target, target);
+            assert_eq!(menu.press(target), vec![Effect::Photo3d { timer: 5, length: PhotoLength::Full, mode }]);
+            assert_eq!(menu.photo_mode, mode, "the Action Menu's old button takes this one next");
+        }
+
+        // Nothing in the line until there is something to say, which then fits.
+        let slot = l.slots.iter().find(|s| s.content == Content::PhotoStatus).expect("the line");
+        assert_eq!(text(&menu, Content::PhotoStatus), "");
+        menu.notice = Some("The 40 characters a menu's line may have.".chars().take(40).collect());
+        assert!(text(&menu, Content::PhotoStatus).chars().count() <= slot.cols as usize);
+        menu.notice = None;
+
+        // While a timer counts both stay, greyed out, and take no press; the line counts.
+        menu.countdown = Some(3);
+        for mode in [PhotoMode::People, PhotoMode::World] {
+            let e = l.elements.iter().find(|e| e.target == Target::TakeOf(mode)).unwrap();
+            let s = state(&menu, e);
+            assert!(s.unavailable && !s.hidden && !s.pointable(), "{mode:?}");
+        }
+        assert_eq!(hit_pointable(&l, &menu, 300.0, 150.0), None);
+        assert_eq!(text(&menu, Content::PhotoStatus), "Starting in 3… hold still");
+        assert_eq!(menu.press(Target::TakeOf(PhotoMode::World)), Vec::new());
+    }
 
     /// The line under Take is what chooses the picture on a screen whose page has one Take, and it fits both pages' slots.
     #[test]
@@ -2645,7 +2756,8 @@ mod tests {
         assert_eq!(Pages::of_screen(Some(12)), Pages::Share);
         assert_eq!(Pages::of_screen(Some(13)), Pages::Feedback);
         assert_eq!(Pages::of_screen(Some(14)), Pages::Mirror);
-        assert_eq!(Pages::of_screen(Some(15)), Pages::Mirror);
+        assert_eq!(Pages::of_screen(Some(15)), Pages::TwoPictures);
+        assert_eq!(Pages::of_screen(Some(16)), Pages::TwoPictures);
         let mut menu = Menu { pages: Pages::Seven, ..Default::default() };
         menu.open();
         assert_eq!(ScreenPage::of(&menu), ScreenPage::HomeSeven);

@@ -68,6 +68,8 @@ picture, and the gallery's tile says People or World.
 Three big buttons: 3D picture of people, 3D picture of the world, Record. Under them, quietly, the picture's length, Scan and Test pattern, then what
 was already there. While something runs, its card takes their place: what it is, who is hidden or why not, and Stop.
 
-Home's 3D picture page and the overlay's card have the same two pictures. **N4N0's own screen** draws a page baked into the avatar's upload, with one
-Take: the line under it says which picture it takes and a press on it changes that, which needs no upload. The **Action Menu**'s one button takes the
-last one chosen.
+Home's 3D picture page and the overlay's card have the same two pictures. So does **N4N0's own screen** from version 15 (page 40), and
+the **Action Menu** of an avatar uploaded with Toolkit's next version: **3D picture of people** and **3D picture of the world**, local
+parameters with no synced bit. Older uploads keep what their upload baked: a screen of versions 12 to 14 has one Take with a line under it that a press
+changes, and the old Action Menu's one button takes the last one chosen. The Action Menu holds eight controls, so with both Walk boost and Light those two
+share a More submenu.

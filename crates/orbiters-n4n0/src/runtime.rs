@@ -23,7 +23,7 @@ use orbiters_contracts::avatar::{self, AvatarManifest, Tag};
 use orbiters_contracts::n4n0::{self as contract, params};
 use orbiters_core::account::{Api, Server};
 use orbiters_core::osc::{OscValue, AVATAR_CHANGE, AVATAR_NAME, CAPTURE_PARAMETERS, PARAMETERS_PREFIX};
-use orbiters_core::settings::{N4n0Settings, Pin, Settings};
+use orbiters_core::settings::{N4n0Settings, PictureMode, Pin, Settings};
 use orbiters_n4n0_core::assistant::{self, AssistantError, Display, Event, Input, Quota, Request, ToolCall, ToolResult};
 use orbiters_n4n0_core::context::{self, Moment, NAME_CHARS, URL_CHARS};
 use orbiters_n4n0_core::controls::{Controls, Setting};
@@ -1088,6 +1088,8 @@ impl N4n0 {
                 | params::CALL_END
                 | params::CALL_PICK
                 | params::PHOTO_3D
+                | params::PHOTO_3D_PEOPLE
+                | params::PHOTO_3D_WORLD
                 | params::WALK_BOOST
         );
         if trigger && !self.avatar_has(name) {
@@ -1140,6 +1142,13 @@ impl N4n0 {
                 if value.truthy() {
                     // Starting reads VRChat's current values, as the record toggle's does: on the action queue.
                     self.queue(|n| n.photo_3d_now());
+                }
+            }
+            // The Action Menu's two pictures: each takes its own, at the length chosen, and is the one chosen from then on.
+            params::PHOTO_3D_PEOPLE | params::PHOTO_3D_WORLD => {
+                if value.truthy() {
+                    let mode = if name == params::PHOTO_3D_WORLD { PictureMode::World } else { PictureMode::People };
+                    self.queue(move |n| n.photo_3d_of(mode));
                 }
             }
             params::WALK_BOOST => {
@@ -1664,10 +1673,7 @@ impl N4n0 {
             Command::EndCall => self.host.call(CallRequest::End),
             Command::MuteCall { on } => self.host.call(CallRequest::Mute(on)),
             Command::Photo3D => self.photo_3d_now(),
-            Command::Photo3DOf { mode } => {
-                self.update_settings(|s| s.photo_3d_mode = mode);
-                self.photo_3d_now();
-            }
+            Command::Photo3DOf { mode } => self.photo_3d_of(mode),
             Command::TestCycle => {
                 let mut rt = self.n4n0.lock().unwrap();
                 rt.test_cycle = Some(Instant::now());

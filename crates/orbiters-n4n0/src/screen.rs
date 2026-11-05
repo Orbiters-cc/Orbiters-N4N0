@@ -913,7 +913,7 @@ impl ScreenRuntime {
             for p in &Frame::layout(&self.menu).pictures {
                 let slot = match page {
                     // The captures' pictures take the results' slots (screens from version 12).
-                    ScreenPage::Results | ScreenPage::History | ScreenPage::PhotoShare | ScreenPage::Explicit => p.result as usize,
+                    ScreenPage::Results | ScreenPage::History | ScreenPage::PhotoShare | ScreenPage::PhotoTwo | ScreenPage::Explicit => p.result as usize,
                     ScreenPage::Music => SLOT_MUSIC,
                     _ => continue,
                 };
@@ -1357,6 +1357,12 @@ impl N4n0 {
         if let Err(e) = self.host.photo_3d() {
             self.photo_stopped(e.to_string());
         }
+    }
+
+    /// A 3D picture of `mode` now, which is also the one every menu's single button takes next.
+    pub(crate) fn photo_3d_of(self: &Shared, mode: orbiters_core::settings::PictureMode) {
+        self.update_settings(|s| s.photo_3d_mode = mode);
+        self.photo_3d_now();
     }
 
     /// Something the person must read about a 3D picture under way ("your avatar is in it, and why"): `text` as a toast, and

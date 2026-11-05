@@ -42,6 +42,8 @@ struct Args {
     budget: Option<usize>,
     device: gpu::DeviceOptions,
     portrait_boxes: Option<PathBuf>,
+    /// `--wearer`: whether the wearer leaves this session (else as the session says).
+    wearer: orbiters_reconstruct::prepare::WearerOut,
 }
 
 fn args() -> anyhow::Result<Args> {
@@ -52,10 +54,20 @@ fn args() -> anyhow::Result<Args> {
     let mut budget = None;
     let mut device = gpu::DeviceOptions::default();
     let mut portrait_boxes = None;
+    let mut wearer = orbiters_reconstruct::prepare::WearerOut::Auto;
     while let Some(a) = it.next() {
         let mut number = |name: &str| -> anyhow::Result<u64> { it.next().with_context(|| format!("{name} needs a value"))?.parse().with_context(|| format!("{name} takes a number")) };
         match a.as_str() {
             "--width" => width = number("--width")? as u32,
+            // Lab: the wearer leaves or stays whatever the session says (orbiters_reconstruct::wearer).
+            "--wearer" => {
+                wearer = match it.next().as_deref() {
+                    Some("auto") => orbiters_reconstruct::prepare::WearerOut::Auto,
+                    Some("keep") => orbiters_reconstruct::prepare::WearerOut::Keep,
+                    Some("remove") => orbiters_reconstruct::prepare::WearerOut::Remove,
+                    _ => bail!("--wearer takes auto, keep or remove"),
+                }
+            }
             "--iterations" => settings.iterations = number("--iterations")? as u32,
             "--budget" => budget = Some(number("--budget")? as usize),
             "--robust" => settings.robust = it.next().context("--robust needs a value")?.parse().context("--robust takes a number (0–1)")?,
@@ -129,7 +141,7 @@ fn args() -> anyhow::Result<Args> {
             _ => session = Some(PathBuf::from(a)),
         }
     }
-    Ok(Args { portrait_boxes, session: session.context("usage: orbiters-reconstruct <session folder> [--width N] [--iterations N] [--budget N] [--robust T] [--gpu integrated|fastest]")?, width, settings, budget, device })
+    Ok(Args { portrait_boxes, session: session.context("usage: orbiters-reconstruct <session folder> [--width N] [--iterations N] [--budget N] [--robust T] [--gpu integrated|fastest]")?, width, settings, budget, device, wearer })
 }
 
 fn rgb8(img: &[[f32; 4]]) -> Vec<u8> {
@@ -152,7 +164,7 @@ fn run(args: Args) -> anyhow::Result<Report> {
     let device = std::thread::spawn(move || timing::section("2 device", None, || gpu::Gpu::with_options(device_options)));
     // Within the memory budget; depth that says nothing becomes unknown, the world's chromatic aberration leaves the
     // keyframes.
-    let prepared = timing::section("1 prepare", None, || prepare::prepare(dir, &prepare::Options { width: args.width, ..Default::default() }, |p| stage(Stage::Loading, p)))?;
+    let prepared = timing::section("1 prepare", None, || prepare::prepare(dir, &prepare::Options { width: args.width, wearer: args.wearer, ..Default::default() }, |p| stage(Stage::Loading, p)))?;
     for line in prepared.describe() {
         eprintln!("{line}");
     }
@@ -161,6 +173,7 @@ fn run(args: Args) -> anyhow::Result<Report> {
     let mut gpu = device.join().map_err(|_| anyhow::anyhow!("the GPU device's thread panicked"))??;
     let dev = gpu.device.clone();
     let mut settings = args.settings.clone();
+    settings.wearer = prepared.wearer.as_ref().map(|(volume, _)| std::sync::Arc::new(volume.clone())).filter(|v| !v.is_empty());
     // A picture of the world has no faces to spend steps on (orbiters_core::picture).
     if !orbiters_core::picture::Picture::trains_faces(dir) {
         settings.portrait_steps = 0;
@@ -176,6 +189,11 @@ fn run(args: Args) -> anyhow::Result<Report> {
         }
         settings.portraits = found.portraits;
     }
+    // The wearer's own face, in a session they left, gets no steps: its pixels train on nothing.
+    settings.portraits.retain(|p| {
+        let (x, y) = ((((p.x0 + p.x1) / 2.0) as u32).min(data.width - 1), (((p.y0 + p.y1) / 2.0) as u32).min(data.height - 1));
+        !orbiters_reconstruct::wearer::is_out(data.views[p.view].image[(y * data.width + x) as usize])
+    });
     // As many Gaussians as the session's views can tell apart (train::budget_for), within the graphics memory the GPU
     // has free (beside VRChat, what it leaves).
     let views = data.views.len() + data.faces.as_ref().map_or(0, |f| f.views.len());
@@ -289,6 +307,8 @@ fn run(args: Args) -> anyhow::Result<Report> {
         chromatic_aberration: prepared.undo.as_ref().map(|u| u.intensity),
         depth_samples: prepared.depth.as_ref().map(|f| f.samples),
         depth_unknown: prepared.depth.as_ref().map(|f| f.unknown_samples),
+        wearer: prepared.wearer.as_ref().map(|(_, s)| rec::WearerOut { pixel_share: s.pixel_share, views: s.views, views_total: s.views_total, depth_samples: s.depth_samples, depth_hits: s.depth_hits, gaussians_left: outcome.wearer_left, floor_patched: outcome.floor_patched }),
+        wearer_not_found: prepared.wearer_not_found,
     };
     std::fs::write(partial.join(rec::REPORT_FILE), serde_json::to_string_pretty(&report)?)?;
     timing::section("7 replace", None, || replace(dir, &partial))?;

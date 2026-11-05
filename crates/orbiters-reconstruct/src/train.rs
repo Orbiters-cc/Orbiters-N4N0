@@ -210,6 +210,9 @@ pub struct Settings {
     pub portrait_steps: u32,
     /// How quickly a later view of a face counts for less among them, seconds (crate::portraits::Picker); 0: all alike.
     pub portrait_moment: f32,
+    /// What the wearer filled, when they left this session (crate::wearer): what lies in it when training ends goes, and the
+    /// floor they stood on is patched.
+    pub wearer: Option<std::sync::Arc<crate::wearer::Volume>>,
 }
 
 /// Which live Gaussians a relocation round copies onto the dead and new slots (crate::train::plan_relocation), from
@@ -306,6 +309,7 @@ impl Default for Settings {
             portraits: Vec::new(),
             portrait_steps: crate::portraits::STEPS,
             portrait_moment: crate::portraits::MOMENT,
+            wearer: None,
         }
     }
 }
@@ -334,6 +338,9 @@ pub struct Outcome {
     pub held_out: Vec<usize>,
     pub psnr_train: f32,
     pub seconds: f32,
+    /// Gaussians that left with the wearer's volume, and floor patched where they stood (crate::wearer).
+    pub wearer_left: usize,
+    pub floor_patched: usize,
 }
 
 /// The keyframes a run holds out (never trained on; they score the result): every `every`-th, from the middle of the
@@ -461,9 +468,12 @@ pub fn evaluate(gpu: &mut Gpu, data: &Dataset, views: &[usize], background: [f32
         return Ok(None);
     }
     let mut sum = 0.0;
+    let mut masks = crate::wearer::LossMask::new(data);
     for &i in views {
+        masks.show(gpu, data.width, data.height, &data.mask, &data.views[i].image)?;
         sum += gpu.score(&data.views[i].camera, background, &data.views[i].image)?;
     }
+    masks.settle(gpu, data)?;
     Ok(Some(sum / views.len() as f32))
 }
 
@@ -499,9 +509,9 @@ pub fn score_held_out(
                     let psnr = match captured {
                         Some((u, captured)) => {
                             let seen = crate::aberration::aberrate(img, data.width as usize, data.height as usize, u.intensity, u.factor);
-                            psnr(&seen, &captured, &u.mask)
+                            psnr(&seen, &captured, &crate::wearer::scene(&u.mask, &data.views[*i].image))
                         }
-                        None => psnr(img, &data.views[*i].image, &data.mask),
+                        None => psnr(img, &data.views[*i].image, &crate::wearer::scene(&data.mask, &data.views[*i].image)),
                     };
                     ensure!(psnr.is_finite(), "keyframe {} has no scene pixel to score", data.views[*i].keyframe);
                     each(*i, img)?;
@@ -626,6 +636,8 @@ pub fn train(data: &Dataset, gpu: &mut Gpu, init: Gaussians, settings: &Settings
     };
     let mut sub_grid: Vec<u32> = Vec::new();
     let mut mask_phase = None;
+    // A session the wearer left: each colour step's own pixels (crate::wearer::LossMask); otherwise nothing changes.
+    let mut wearer_masks = crate::wearer::LossMask::new(data);
     // The keyframes on the device when its memory has room for them beside the set (with a GB to spare): steps then
     // upload no pixels.
     const LEFT: u64 = 1 << 30;
@@ -697,6 +709,7 @@ pub fn train(data: &Dataset, gpu: &mut Gpu, init: Gaussians, settings: &Settings
                 tile_target[j * t..(j + 1) * t].copy_from_slice(&v.image[row..row + t]);
                 tile_mask[j * t..(j + 1) * t].copy_from_slice(&data.mask[row..row + t]);
             }
+            crate::wearer::leave_out_of(&mut tile_mask, &tile_target);
             gpu.set_mask(tile, tile, &tile_mask)?;
             let robust = if progress >= settings.robust_from { settings.robust } else { 0.0 };
             let sky_lr = std::mem::replace(&mut gpu.sky_lr, 0.0);
@@ -719,6 +732,7 @@ pub fn train(data: &Dataset, gpu: &mut Gpu, init: Gaussians, settings: &Settings
             let v = &f.views[rng.usize(..f.views.len())];
             let robust = if progress >= settings.robust_from { settings.robust } else { 0.0 };
             let sky_lr = std::mem::replace(&mut gpu.sky_lr, 0.0);
+            wearer_masks.show(gpu, f.width, f.height, &f.mask, &v.image)?;
             let stepped = gpu.step(&v.camera, settings.background, Target::Color { rgba: &v.image, scene_pixels: face_pixels, weight: 1.0, ssim: settings.ssim, robust }, Some(lr));
             gpu.sky_lr = sky_lr;
             stepped?
@@ -746,6 +760,7 @@ pub fn train(data: &Dataset, gpu: &mut Gpu, init: Gaussians, settings: &Settings
                     let row = ((stride * j + oy) * data.width) as usize;
                     sub_grid.extend((0..*w).map(|i| img[row + (stride * i + ox) as usize]));
                 }
+                wearer_masks.show(gpu, *w, *h, mask, &sub_grid)?;
                 let full = gpu.filter_2d;
                 gpu.filter_2d = [full[0] / (f * f), full[1] / (f * f)];
                 let stepped = gpu.step(&cam, settings.background, Target::Color { rgba: &sub_grid, scene_pixels: *scene, weight: 1.0, ssim: settings.ssim, robust }, Some(lr));
@@ -755,6 +770,9 @@ pub fn train(data: &Dataset, gpu: &mut Gpu, init: Gaussians, settings: &Settings
                 if resident && level == 0 {
                     gpu.resident_target = Some(v);
                 }
+                if level == 0 {
+                    wearer_masks.show(gpu, data.width, data.height, &data.mask, rgba)?;
+                }
                 gpu.step(camera, settings.background, Target::Color { rgba, scene_pixels: pixels, weight: 1.0, ssim: settings.ssim, robust }, Some(lr))?
             }
         };
@@ -762,6 +780,7 @@ pub fn train(data: &Dataset, gpu: &mut Gpu, init: Gaussians, settings: &Settings
             let _sync = crate::timing::on().then(|| dev.poll(wgpu::PollType::wait_indefinitely()));
             let fade_start = Instant::now();
             let _cpu = crate::priority::CpuWork::start();
+            wearer_masks.settle(gpu, data)?;
             // The faces' views count: what only they see is not unseen.
             let cams: Vec<Camera> = train_views.iter().map(|&i| data.views[i].camera).chain(face_cams.iter().copied()).collect();
             let seen = gpu.visibility(&cams, settings.background, settings.unseen_weight)?;
@@ -873,9 +892,16 @@ pub fn train(data: &Dataset, gpu: &mut Gpu, init: Gaussians, settings: &Settings
         eprintln!("governor: {:.1} s waiting for VRChat's frames, {} back-offs", g.waited.as_secs_f32(), g.backoffs);
     }
     // The result keeps the filter in its scales and opacities: the PLY renders what training rendered.
+    wearer_masks.settle(gpu, data)?;
     let mut g = gpu.download_params()?;
     g.fuse_filter();
     g.retain(&live(&g));
+    let (mut wearer_left, mut floor_patched) = (0, 0);
+    if let Some(volume) = &settings.wearer {
+        wearer_left = volume.retain_outside(&mut g) + crate::wearer::leave_out_unseen(data, &held_out, volume, &mut g);
+        floor_patched = crate::wearer::patch_floor(volume, &mut g);
+        eprintln!("the wearer's volume: {wearer_left} Gaussians left; the floor they stood on: {floor_patched} patched");
+    }
     ensure!(!g.is_empty(), "training left no Gaussian that shows anywhere");
     if settings.sky_fill {
         // The sky shell's far field, as the measurements took it: beyond half the shell's distance from the cameras.
@@ -906,7 +932,7 @@ pub fn train(data: &Dataset, gpu: &mut Gpu, init: Gaussians, settings: &Settings
     let sample: Vec<usize> = train_views.iter().copied().step_by((train_views.len() / 8).max(1)).collect();
     let psnr_train = evaluate(gpu, data, &sample, settings.background)?.unwrap_or(0.0);
     crate::timing::add("4f train end (download, seen, cleanup, train score)", end_start.elapsed());
-    Ok(Outcome { gaussians: g, iterations, held_out, psnr_train, seconds: start.elapsed().as_secs_f32() })
+    Ok(Outcome { gaussians: g, iterations, held_out, psnr_train, seconds: start.elapsed().as_secs_f32(), wearer_left, floor_patched })
 }
 
 /// Keyframes at a coarser resolution: images box-filtered by 2 or 4 from the training resolution, their cameras, and

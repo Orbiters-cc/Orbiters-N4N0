@@ -44,6 +44,31 @@ mod vrchat_login;
 mod vr_audio;
 mod worlds_overlay;
 
+/// What the interface shows of a VRChat on the network, as a Mac sees it.
+fn network_snapshot(base: &crate::state::Snapshot, link: crate::state::LanLink) -> crate::state::Snapshot {
+    use orbiters_core::lan::FoundVrchat;
+    use std::net::Ipv4Addr;
+    let quest = FoundVrchat { name: "VRChat-Client-A1B2C3".into(), device: Some("Quest-3".into()), ip: Ipv4Addr::new(192, 168, 1, 23), query_port: 49152, osc_port: Some(9000) };
+    let pc = FoundVrchat { name: "VRChat-Client-D4E5F6".into(), device: Some("DESKTOP-4F2K".into()), ip: Ipv4Addr::new(192, 168, 1, 40), query_port: 51120, osc_port: None };
+    let mut snapshot = base.clone();
+    let connected = link == crate::state::LanLink::Connected;
+    snapshot.lan = crate::state::LanStatus {
+        link,
+        found: match link {
+            crate::state::LanLink::Looking => Vec::new(),
+            crate::state::LanLink::Connected => vec![quest.clone()],
+            _ => vec![quest.clone(), pc],
+        },
+        peer: connected.then_some(quest.ip),
+        peer_label: connected.then(|| quest.label()),
+        this_computer: Some(Ipv4Addr::new(192, 168, 1, 134)),
+    };
+    snapshot.vrchat.running = connected;
+    snapshot.vrchat.remote = connected;
+    snapshot.vrchat.world = Default::default();
+    snapshot
+}
+
 struct Scenario {
     name: &'static str,
     page: Page,
@@ -418,6 +443,62 @@ fn shots(args: &[String], picture_folders: Vec<PathBuf>) -> anyhow::Result<()> {
             name: "home",
             page: Page::Home,
             snapshot: home.clone(),
+            frames: 90,
+            splash: false,
+            open_detail: false,
+            toasts: vec![],
+            pointer: None,
+            scroll: 0.0,
+            world: None,
+            home: None,
+            library: None,
+        },
+        Scenario {
+            name: "network-looking",
+            page: Page::Home,
+            snapshot: network_snapshot(&home, crate::state::LanLink::Looking),
+            frames: 90,
+            splash: false,
+            open_detail: false,
+            toasts: vec![],
+            pointer: None,
+            scroll: 0.0,
+            world: None,
+            home: None,
+            library: None,
+        },
+        Scenario {
+            name: "network-several",
+            page: Page::Home,
+            snapshot: network_snapshot(&home, crate::state::LanLink::Choose),
+            frames: 90,
+            splash: false,
+            open_detail: false,
+            toasts: vec![],
+            pointer: None,
+            scroll: 0.0,
+            world: None,
+            home: None,
+            library: None,
+        },
+        Scenario {
+            name: "network-connected",
+            page: Page::Home,
+            snapshot: network_snapshot(&home, crate::state::LanLink::Connected),
+            frames: 90,
+            splash: false,
+            open_detail: false,
+            toasts: vec![],
+            pointer: None,
+            scroll: 0.0,
+            world: None,
+            home: None,
+            library: None,
+        },
+        Scenario {
+            name: "network-settings",
+            page: Page::Settings,
+            snapshot: network_snapshot(&home, crate::state::LanLink::Connected),
             frames: 90,
             splash: false,
             open_detail: false,
@@ -2650,7 +2731,9 @@ fn e2e_cleanup(gpu: &mut Offscreen, out: &std::path::Path, settings: &Settings, 
         before.iter().find(|s| s.reconstruction.is_some() && !s.trimmed && s.capture_bytes > 0).context("no reconstructed session with capture files")?.clone();
     run.app.sessions_mut().open_where(&ctx, Rect::from_min_size(pos2(264.0, 160.0), vec2(300.0, 265.0)), |s| s.dir == one.dir);
     run.click("Keep only the 3D view", 20.0)?;
-    run.until("what would go", 20.0, |run| !run.app.page_busy())?;
+    // The dialog once it knows what would go: the gallery's own jobs need not have ended.
+    let delete = format!("Delete {}", orbiters_ui::format::bytes(one.capture_bytes as f64));
+    run.until("what would go", 20.0, |run| orbiters_ui::widgets::control(&run.ctx, &delete).is_some())?;
     run.wait(0.6)?;
     run.shoot(out, "e2e-trim-asking")?;
     run.click(&format!("Delete {}", orbiters_ui::format::bytes(one.capture_bytes as f64)), 10.0)?;

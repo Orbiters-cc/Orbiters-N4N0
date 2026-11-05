@@ -426,7 +426,7 @@ pub fn write_sidecar(png: &Path, saved: &Saved) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Shows `path` selected in its folder (Explorer), or opens its folder.
+/// Shows `path` selected in its folder (Explorer, Finder), or opens its folder.
 pub fn reveal(path: &Path) -> anyhow::Result<()> {
     #[cfg(windows)]
     {
@@ -434,7 +434,12 @@ pub fn reveal(path: &Path) -> anyhow::Result<()> {
         std::process::Command::new("explorer").raw_arg(format!("/select,\"{}\"", path.display())).spawn()?;
         Ok(())
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open").arg("-R").arg(path).spawn()?;
+        Ok(())
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
     {
         crate::controller::open_path(path.parent().unwrap_or(path))
     }

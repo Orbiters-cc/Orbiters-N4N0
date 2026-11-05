@@ -99,7 +99,9 @@ fn open_source(spec: &SourceSpec) -> anyhow::Result<Box<dyn FrameSource>> {
             let others = extra.iter().map(|n| Ok(Box::new(sources::SpoutSource::new(n)?) as Box<dyn FrameSource>)).collect::<anyhow::Result<Vec<_>>>()?;
             Box::new(sources::MultiSource::new(Box::new(sources::SpoutSource::new(name)?), others))
         }
-        #[cfg(not(windows))]
+        #[cfg(target_os = "macos")]
+        SourceSpec::Spout { .. } => anyhow::bail!("VRChat's camera reaches this app through Spout, which only Windows has: a Mac opens and reconstructs captures but does not record them"),
+        #[cfg(not(any(windows, target_os = "macos")))]
         SourceSpec::Spout { .. } => anyhow::bail!("Spout is only available on Windows; use the PipeWire source on Linux"),
         SourceSpec::RawSequence { path, realtime } => Box::new(RawSequenceSource::open(path, *realtime)?),
         SourceSpec::TestPattern { width, height, fps, depth_every, frames } => {
@@ -576,6 +578,35 @@ mod tests {
     use super::*;
     use orbiters_contracts::manifest::WorldInfo;
     use orbiters_contracts::performance::calibration::Calibration;
+
+    /// What the app's import does with a Mixer simulator capture, from its files to a session and `verify`, on the test
+    /// pattern saved as such a capture: no platform's folders or GPU in the way.
+    #[test]
+    fn a_raw_capture_records_a_session_and_verifies() {
+        use orbiters_contracts::{qoi, raw_capture};
+        let root = std::env::temp_dir().join(format!("orbiters-raw-session-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let (raw, out) = (root.join("raw"), root.join("sessions"));
+        std::fs::create_dir_all(raw.join(raw_capture::FRAMES_DIR)).unwrap();
+        let (w, h, frames) = (640, 360, 12);
+        let meta = raw_capture::RawCapture { format: raw_capture::RAW_FORMAT.into(), version: raw_capture::RAW_VERSION, width: w, height: h, fps: 30.0, frame_count: frames, depth_every: 4, ..Default::default() };
+        std::fs::write(raw.join(raw_capture::RAW_FILE), serde_json::to_vec(&meta).unwrap()).unwrap();
+        let pattern = TestPatternSource::new(w, h, 30.0, 4, frames, false);
+        for i in 0..frames {
+            let frame = pattern.render(i);
+            std::fs::write(raw.join(raw_capture::FRAMES_DIR).join(raw_capture::frame_file(i)), qoi::encode(&frame.data, w, h, 4)).unwrap();
+        }
+        let source = format!("raw:{}", raw.display());
+        let args: Vec<String> = ["--source", source.as_str(), "--out", out.to_str().unwrap(), "--name", "raw import"].map(String::from).into();
+        cli_record(&args).expect("record");
+        let session = out.join("raw import");
+        let manifest = orbiters_core::bundle::read_manifest(&session).expect("the session's manifest");
+        assert_eq!((manifest.stats.frames, manifest.stats.strip_ok), (u64::from(frames), u64::from(frames)));
+        assert_eq!(manifest.stats.depth_frames, 3, "every fourth frame");
+        let report = verify::verify(&raw, None).expect("verify");
+        assert_eq!((report.frames, report.strip_ok, report.strip_failed), (frames, frames, 0));
+        std::fs::remove_dir_all(&root).ok();
+    }
 
     /// A session starting over at a new frame size starts as things are now, not as they were when the first one did.
     #[test]

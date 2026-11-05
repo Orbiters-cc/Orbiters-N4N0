@@ -450,7 +450,18 @@ fn free_space(dir: &Path) -> Option<u64> {
     (ok != 0).then_some(available)
 }
 
-#[cfg(not(windows))]
+/// Free bytes on the disk holding `dir`.
+#[cfg(target_os = "macos")]
+fn free_space(dir: &Path) -> Option<u64> {
+    use std::os::unix::ffi::OsStrExt;
+    let path = std::ffi::CString::new(dir.as_os_str().as_bytes()).ok()?;
+    let mut stats: libc::statfs = unsafe { std::mem::zeroed() };
+    // SAFETY: a NUL-terminated path and an out-parameter.
+    let failed = unsafe { libc::statfs(path.as_ptr(), &mut stats) };
+    (failed == 0).then(|| stats.f_bavail * u64::from(stats.f_bsize))
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
 fn free_space(_dir: &Path) -> Option<u64> {
     None
 }
@@ -1584,6 +1595,13 @@ fn session_calibrations(overlay: &[Calibration], detected: Vec<Calibration>, dev
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// On a Mac too a recording stops before the disk is full.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_macs_disk_says_how_much_room_it_has() {
+        assert!(free_space(&std::env::temp_dir()).is_some_and(|free| free > 0));
+    }
+
     #[test]
     fn encoded_picture_thumbnail_excludes_both_data_bands() {
         let dir = std::env::temp_dir().join(format!("orbiters-encoded-thumb-{}", uuid::Uuid::new_v4()));

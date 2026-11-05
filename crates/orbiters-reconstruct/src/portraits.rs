@@ -23,10 +23,16 @@ use std::path::{Path, PathBuf};
 /// The side of the square tiles a portrait step trains on, in training pixels.
 pub const TILE: u32 = 512;
 
-/// The detector's file, beside the worker. Without it (or without ONNX Runtime beside it) a session trains as before.
+/// The detector's file, beside the worker (in a Mac's app bundle, in its Resources: [`data_file`]). Without it (or without
+/// ONNX Runtime beside the worker) a session trains as before.
 pub const MODEL_FILE: &str = "faces-v1-int8.onnx";
 /// The ONNX Runtime the voice worker already ships.
+#[cfg(windows)]
 const RUNTIME_FILE: &str = "onnxruntime.dll";
+#[cfg(target_vendor = "apple")]
+const RUNTIME_FILE: &str = "libonnxruntime.dylib";
+#[cfg(not(any(windows, target_vendor = "apple")))]
+const RUNTIME_FILE: &str = "libonnxruntime.so";
 /// The detector's fixed input: 16:9 frames fit it with a thin grey band above and below (a stride's multiple: YOLOv8's
 /// 32 pixels), which takes 60 % of the time a square 640 × 640 input takes for the same boxes.
 const INPUT_W: usize = 640;
@@ -222,11 +228,29 @@ fn beside_worker(file: &str) -> Option<PathBuf> {
     Some(std::env::current_exe().ok()?.parent()?.join(file))
 }
 
+/// A file of data the worker reads: beside it, as on Windows and in a build's folder, or in a Mac's app bundle in
+/// `Contents/Resources` (`Contents/MacOS`, where the worker is, may hold only code for the bundle to pass codesign).
+fn data_file(file: &str) -> Option<PathBuf> {
+    let beside = beside_worker(file)?;
+    if cfg!(target_os = "macos") && !beside.is_file() {
+        let resources = in_resources(&beside)?;
+        if resources.is_file() {
+            return Some(resources);
+        }
+    }
+    Some(beside)
+}
+
+/// `Contents/MacOS/<file>`'s namesake in `Contents/Resources`.
+fn in_resources(beside: &Path) -> Option<PathBuf> {
+    Some(beside.parent()?.parent()?.join("Resources").join(beside.file_name()?))
+}
+
 impl Detector {
     /// The detector beside the worker (`ORBITERS_FACES_MODEL` and `ORBITERS_ONNXRUNTIME` name others in the lab). `None`,
     /// said once on the log, when either file is missing or does not load: faces then get no extra training, nothing else changes.
     pub fn load(threads: usize) -> Option<Self> {
-        let model = std::env::var_os("ORBITERS_FACES_MODEL").map(PathBuf::from).or_else(|| beside_worker(MODEL_FILE))?;
+        let model = std::env::var_os("ORBITERS_FACES_MODEL").map(PathBuf::from).or_else(|| data_file(MODEL_FILE))?;
         let runtime = std::env::var_os("ORBITERS_ONNXRUNTIME").map(PathBuf::from).or_else(|| beside_worker(RUNTIME_FILE))?;
         if !model.is_file() || !runtime.is_file() {
             eprintln!("no face detector: {} or {} is missing", model.display(), runtime.display());
@@ -629,6 +653,12 @@ mod tests {
         assert_eq!(steps_for(9, STEPS), 3600);
         assert_eq!(steps_for(40, STEPS), STEPS);
         assert_eq!(steps_for(9, 0), 0);
+    }
+
+    #[test]
+    fn a_bundles_data_files_are_in_its_resources() {
+        let found = in_resources(Path::new("/Applications/Orbiters.app/Contents/MacOS/faces-v1-int8.onnx"));
+        assert_eq!(found, Some(PathBuf::from("/Applications/Orbiters.app/Contents/Resources/faces-v1-int8.onnx")));
     }
 
     #[test]

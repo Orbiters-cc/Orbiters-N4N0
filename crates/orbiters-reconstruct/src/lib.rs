@@ -2,6 +2,8 @@
 //! exact poses and exact depth samples train a set of 3D Gaussians on the GPU; the result is a splat PLY.
 
 pub mod aberration;
+#[cfg(target_vendor = "apple")]
+pub mod apple;
 pub mod births;
 pub mod camera;
 pub mod cleanup;

@@ -480,9 +480,9 @@ fn run(
             Err(e) => format!("{what} could not be opened again ({e:#}): tried again shortly."),
             Ok((name, Ended::Lost(e))) => format!("{what} went away ({name}: {e}): recorded again as soon as it comes back."),
             Ok((_, Ended::DefaultChanged)) => {
-                eprintln!("audio: Windows' default microphone changed");
+                eprintln!("audio: the system's default microphone changed");
                 pause = Duration::ZERO;
-                format!("{what} follows Windows' default microphone, which changed.")
+                format!("{what} follows {} default microphone, which changed.", if cfg!(target_os = "macos") { "the Mac's" } else { "Windows'" })
             }
             Ok((_, Ended::Refused(e))) => {
                 // The writer stopped (the disk): its error ends this track.

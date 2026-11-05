@@ -36,6 +36,12 @@ sysinfo = "0.37"
 # wgpu-hal's: the Vulkan device's queue priority and the memory budget (crate::gpu).
 ash = "0.38"
 
+[target.'cfg(target_vendor = "apple")'.dependencies]
+# wgpu-hal's: how much the Metal device may still use (crate::gpu).
+objc2-metal = { version = "0.3", default-features = false, features = ["std", "MTLDevice", "MTLResource", "MTLAllocation"] }
+# The system's memory (crate::apple) and the threads' quality of service (crate::priority).
+libc = "0.2"
+
 [dev-dependencies]
 half = "2.7"
-naga = { version = "30", features = ["wgsl-in", "hlsl-out", "spv-out"] }
+naga = { version = "30", features = ["wgsl-in", "hlsl-out", "spv-out", "msl-out"] }

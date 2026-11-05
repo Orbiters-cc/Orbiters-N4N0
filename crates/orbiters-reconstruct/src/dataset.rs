@@ -254,7 +254,11 @@ fn physical_memory() -> Option<u64> {
         system.refresh_memory();
         Some(system.total_memory()).filter(|m| *m > 0)
     }
-    #[cfg(not(windows))]
+    #[cfg(target_vendor = "apple")]
+    {
+        crate::apple::physical_memory()
+    }
+    #[cfg(not(any(windows, target_vendor = "apple")))]
     {
         None
     }

@@ -123,7 +123,14 @@ fn nothing(ed: &mut Editor, ui: &mut Ui) {
         }
     }
     ui.add_space(14.0);
-    paragraph(ui, "Ctrl+Z undoes, Ctrl+Shift+Z redoes, Delete removes the chosen layer. Hold the eye at the top to see the picture as it was.");
+    paragraph(
+        ui,
+        if cfg!(target_os = "macos") {
+            "Cmd+Z undoes, Cmd+Shift+Z redoes, Delete removes the chosen layer. Hold the eye at the top to see the picture as it was."
+        } else {
+            "Ctrl+Z undoes, Ctrl+Shift+Z redoes, Delete removes the chosen layer. Hold the eye at the top to see the picture as it was."
+        },
+    );
 }
 
 fn crop(ed: &mut Editor, ui: &mut Ui) {
@@ -132,7 +139,11 @@ fn crop(ed: &mut Editor, ui: &mut Ui) {
         icons::CROP,
         theme::ACCENT,
         "Crop and rotate",
-        "Drag the frame's corners or edges, or the picture under it; the wheel zooms. The dials under the picture straighten it and set its perspective upright; AUTO levels it by its own lines.",
+        if cfg!(target_os = "macos") {
+            "Drag the frame's corners or edges, or the picture under it; a pinch or two fingers zoom. The dials under the picture straighten it and set its perspective upright; AUTO levels it by its own lines."
+        } else {
+            "Drag the frame's corners or edges, or the picture under it; the wheel zooms. The dials under the picture straighten it and set its perspective upright; AUTO levels it by its own lines."
+        },
     );
     let full = ed.loaded.as_ref().map_or((16, 9), |l| l.full);
     let g = &mut ed.doc.geometry;

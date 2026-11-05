@@ -22,7 +22,7 @@ pub enum RecState {
 pub const SIZE: f32 = 252.0;
 
 /// The button's label for automated runs ([`crate::widgets::control`]).
-pub const LABEL: &str = "Record";
+pub const LABEL: &str = "The record button";
 
 #[derive(Clone, Copy, Default)]
 struct Spin {

@@ -574,7 +574,8 @@ impl Editor {
         let (undo, redo, delete, escape) = ctx.input_mut(|i| {
             let redo = i.consume_key(egui::Modifiers::COMMAND | egui::Modifiers::SHIFT, egui::Key::Z) || i.consume_key(egui::Modifiers::COMMAND, egui::Key::Y);
             let undo = i.consume_key(egui::Modifiers::COMMAND, egui::Key::Z);
-            let delete = !typing && i.key_pressed(egui::Key::Delete);
+            // A Mac keyboard's delete key sends Backspace.
+            let delete = !typing && (i.key_pressed(egui::Key::Delete) || (cfg!(target_os = "macos") && i.key_pressed(egui::Key::Backspace)));
             let escape = i.key_pressed(egui::Key::Escape);
             (undo, redo, delete, escape)
         });
@@ -629,7 +630,7 @@ impl Editor {
         let c = pos2(bar.center().x, mid);
         let can_undo = !self.history.past.is_empty() || self.doc != self.history.committed;
         let can_redo = !self.history.future.is_empty();
-        for (i, glyph, label, enabled) in [(-1.0, icons::ARROW_U_UP_LEFT, "Undo (Ctrl+Z)", can_undo), (0.0, icons::EYE, "Hold to see the original", true), (1.0, icons::ARROW_U_UP_RIGHT, "Redo (Ctrl+Shift+Z)", can_redo)] {
+        for (i, glyph, label, enabled) in [(-1.0, icons::ARROW_U_UP_LEFT, if cfg!(target_os = "macos") { "Undo (Cmd+Z)" } else { "Undo (Ctrl+Z)" }, can_undo), (0.0, icons::EYE, "Hold to see the original", true), (1.0, icons::ARROW_U_UP_RIGHT, if cfg!(target_os = "macos") { "Redo (Cmd+Shift+Z)" } else { "Redo (Ctrl+Shift+Z)" }, can_redo)] {
             let r = Rect::from_center_size(c + vec2(i * 46.0, 0.0), vec2(40.0, 40.0));
             let mut bu = ui.new_child(UiBuilder::new().max_rect(r).id_salt(("editor-history", label)));
             if !enabled {

@@ -23,7 +23,7 @@ const TICK: Duration = Duration::from_secs(2);
 
 /// `<local data>/Orbiters/World captures`.
 pub fn root() -> PathBuf {
-    orbiters_core::paths::local_data_root().join("World captures")
+    orbiters_core::paths::shared_with_unity_root().join("World captures")
 }
 
 #[derive(Debug, Deserialize)]

@@ -180,12 +180,13 @@ impl Failure {
         match self {
             Failure::Edits(why) => format!("{why} Discard them to export every splat as trained: Select splats in its 3D view can remove them again."),
             Failure::NoRoom { needed, free, folder } => format!(
-                "Not enough room: the {} takes {}, and {} has {} left, with {} to leave free for Windows and other programs. Choose another place, or free up space there.",
+                "Not enough room: the {} takes {}, and {} has {} left, with {} to leave free for {} and other programs. Choose another place, or free up space there.",
                 format.label(),
                 mb(needed.saturating_sub(ROOM_KEPT)),
                 folder.display(),
                 mb(*free),
-                mb(ROOM_KEPT)
+                mb(ROOM_KEPT),
+                if cfg!(target_os = "macos") { "macOS" } else { "Windows" },
             ),
             Failure::NotWritable { folder, why } => format!("N4N0 cannot write in {}: {why}. Choose another place.", folder.display()),
             Failure::OwnFiles => {
@@ -294,6 +295,10 @@ pub fn export_with(session: &Path, format: Format, dest: &Path, progress: &Progr
     let name = dest.file_name().ok_or_else(|| Failure::Failed(format!("{} is not a file name", dest.display())))?;
     if std::fs::canonicalize(&folder).ok().zip(std::fs::canonicalize(session).ok()).is_some_and(|(a, b)| a.starts_with(b)) {
         return Err(Failure::OwnFiles);
+    }
+    // A rename replaces a read-only file on a Mac, where Windows refuses: the file in the way stays there too.
+    if cfg!(not(windows)) && std::fs::metadata(dest).is_ok_and(|m| m.permissions().readonly()) {
+        return Err(Failure::NotWritable { folder, why: "that place is read-only or protected" });
     }
     let bytes = read(&ply, progress)?;
     progress.set(Step::Making, 0.0);
@@ -419,7 +424,8 @@ fn failure(e: &std::io::Error, folder: &Path, needed: u64, free_space: &dyn Fn(&
     let folder = folder.to_path_buf();
     // ERROR_HANDLE_DISK_FULL, ERROR_DISK_FULL; ERROR_SHARING_VIOLATION, ERROR_LOCK_VIOLATION; ERROR_ACCESS_DENIED,
     // ERROR_WRITE_PROTECT; ERROR_FILE_NOT_FOUND, ERROR_PATH_NOT_FOUND, ERROR_NOT_READY.
-    match (e.raw_os_error(), e.kind()) {
+    let windows_code = if cfg!(windows) { e.raw_os_error() } else { None };
+    match (windows_code, e.kind()) {
         (Some(39 | 112), _) | (_, K::StorageFull) => Failure::NoRoom { needed, free: free_space(&folder).unwrap_or(0), folder },
         (Some(32 | 33), _) => Failure::NotWritable { folder, why: "a file of that name is open in another program" },
         (Some(5 | 19), _) | (_, K::PermissionDenied | K::ReadOnlyFilesystem) => Failure::NotWritable { folder, why: "that place is read-only or protected" },
@@ -636,12 +642,24 @@ pub(crate) mod tests {
         assert_eq!(parts(), 0);
 
         // Windows' own codes for a disk filling during the write, and for a file of that name open in another program.
-        for code in [39, 112] {
-            let f = failure(&std::io::Error::from_raw_os_error(code), &out, ROOM_KEPT + 100, &|_| Some(5));
-            assert_eq!(f, Failure::NoRoom { needed: ROOM_KEPT + 100, free: 5, folder: out.clone() });
+        if cfg!(windows) {
+            for code in [39, 112] {
+                let f = failure(&std::io::Error::from_raw_os_error(code), &out, ROOM_KEPT + 100, &|_| Some(5));
+                assert_eq!(f, Failure::NoRoom { needed: ROOM_KEPT + 100, free: 5, folder: out.clone() });
+            }
+            let open = failure(&std::io::Error::from_raw_os_error(32), &out, 0, &|_| None);
+            assert!(open.elsewhere() && open.message(Format::Spz).contains("open in another program"), "{open:?}");
         }
-        let open = failure(&std::io::Error::from_raw_os_error(32), &out, 0, &|_| None);
-        assert!(open.elsewhere() && open.message(Format::Spz).contains("open in another program"), "{open:?}");
+        // Elsewhere the same numbers mean something else (32 a broken pipe, 5 an input/output error), and the system's
+        // error kinds say what happened: no room (ENOSPC), read-only (EACCES).
+        if cfg!(unix) {
+            let f = failure(&std::io::Error::from_raw_os_error(28), &out, ROOM_KEPT + 100, &|_| Some(5));
+            assert_eq!(f, Failure::NoRoom { needed: ROOM_KEPT + 100, free: 5, folder: out.clone() });
+            let denied = failure(&std::io::Error::from_raw_os_error(13), &out, 0, &|_| None);
+            assert!(denied.elsewhere() && denied.message(Format::Spz).contains("read-only"), "{denied:?}");
+            let pipe = failure(&std::io::Error::from_raw_os_error(32), &out, 0, &|_| None);
+            assert!(matches!(pipe, Failure::Failed(_)), "{pipe:?}");
+        }
         remove(&dir);
     }
 

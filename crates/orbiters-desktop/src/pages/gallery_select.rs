@@ -411,7 +411,7 @@ impl Selection {
             if outcome == Outcome::Copied {
                 self.said = Some((copied(order, &self.handed), now));
             } else if outcome == Outcome::Failed {
-                self.said = Some(("Windows could not start the drag".into(), now));
+                self.said = Some((format!("{} could not start the drag", crate::words::SYSTEM), now));
             }
             self.carried.clear();
             self.started = false;

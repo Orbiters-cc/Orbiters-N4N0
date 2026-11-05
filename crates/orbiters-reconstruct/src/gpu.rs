@@ -1,12 +1,15 @@
-//! The splatting kernels on the GPU (wgpu: Direct3D 12 or Vulkan on Windows, Vulkan on Linux) and the buffers they
-//! work on. One forward + backward + Adam step per call. Training steps are pipelined: the host never waits for a step,
-//! the sort is sized from intersection counts read back a few steps later and dispatched over the count the GPU wrote
-//! itself. Images and parameters are read back only when asked. A step's small parameter blocks live in buffers it
+//! The splatting kernels on the GPU (wgpu: Direct3D 12 or Vulkan on Windows, Vulkan on Linux, Metal on a Mac) and the
+//! buffers they work on. One forward + backward + Adam step per call. Training steps are pipelined: the host never
+//! waits for a step, the sort is sized from intersection counts read back a few steps later and dispatched over the
+//! count the GPU wrote itself. Images and parameters are read back only when asked. A step's small parameter blocks live in buffers it
 //! rewrites and its bind groups are kept while their buffers live, so a step creates neither.
 //!
 //! GPU errors come back as errors: every readback and step checks for one (a training device keeps the first, so a
 //! run stops at it), and a renderer on someone else's device catches its own in error scopes instead of reaching that
-//! device's handler.
+//! device's handler. On Metal this covers what wgpu validates only: wgpu-hal 30 does not read a command buffer's status,
+//! so one the system stopped goes unheard. A single dispatch of 26 s ran to its end on an M3 (tests/bench.rs,
+//! `how_long_a_dispatch_may_run`), far past the longest pass here, and [`Gpu::free_memory`] keeps runs within Metal's
+//! recommended working set.
 
 use crate::camera::Camera;
 use crate::cpu;
@@ -841,7 +844,8 @@ impl Gpu {
             features |= wgpu::Features::TIMESTAMP_QUERY;
         }
         let desc = wgpu::DeviceDescriptor { label: Some("orbiters-reconstruct"), required_features: features, required_limits: adapter.limits(), ..Default::default() };
-        let low = if options.low_priority {
+        // Metal has no queue priorities and no game shares a Mac's GPU, so there is nothing to say about it.
+        let low = if options.low_priority && !cfg!(target_vendor = "apple") {
             // SAFETY: the callback only adds a supported extension and a queue priority (low_priority_device).
             match unsafe { low_priority_device(&adapter, &desc) } {
                 Ok(d) => Some(d),
@@ -893,11 +897,21 @@ impl Gpu {
         gpu
     }
 
-    /// Graphics memory this device's adapter has free now, bytes (`VK_EXT_memory_budget`: the device-local heaps'
-    /// budget less their usage, which counts every process's): None on other APIs or without the extension.
+    /// Memory this device can still use, bytes, on a training device: what Metal recommends it keeps to, less what it
+    /// has allocated (this process's, Metal does not tell another's), and never more than the system has left, since
+    /// the GPU and every program share the same RAM. Metal's own figure does not follow how full the RAM is: 12.1 GB on
+    /// a 16 GB M3, whatever the others use.
     #[cfg(target_vendor = "apple")]
     pub fn free_memory(&self) -> Option<u64> {
-        None
+        use objc2_metal::MTLDevice as _;
+        self.wgpu_adapter.as_ref()?;
+        // SAFETY: read-only queries of the device.
+        let left = unsafe {
+            let hal = self.device.as_hal::<wgpu::hal::api::Metal>()?;
+            let raw = hal.raw_device();
+            raw.recommendedMaxWorkingSetSize().saturating_sub(raw.currentAllocatedSize() as u64)
+        };
+        Some(crate::apple::available_memory().map_or(left, |system| system.min(left)))
     }
 
     /// Graphics memory this device's adapter has free now, bytes (`VK_EXT_memory_budget`: the device-local heaps'
@@ -2665,6 +2679,27 @@ mod tests {
                     let written = naga::back::hlsl::Writer::new(&mut out, &options, &pipeline).write(&module, &info, None);
                     assert!(written.is_ok(), "{}::{entry}: HLSL {:?}", k.name, written.err());
                 }
+            }
+        }
+    }
+
+    /// Every kernel a Mac builds translates to Metal's language (the Mac itself compiles them in every test here that
+    /// makes a device; this says so on any computer): no FixedPoint, Metal has no 64-bit atomic adds. MSL 3.0: f32
+    /// atomics need it.
+    #[test]
+    fn every_kernel_translates_for_metal() {
+        let mut sources: Vec<(String, KernelSource)> = kernel_sources(None, 0).into_iter().map(|k| ("viewer".to_string(), k)).collect();
+        for sums in [GradientSums::Float, GradientSums::CompareAndSwap] {
+            sources.extend(kernel_sources(Some(sums), 0).into_iter().map(|k| (format!("{sums:?}"), k)));
+        }
+        for (kind, k) in &sources {
+            let module = naga::front::wgsl::parse_str(&k.code).unwrap_or_else(|e| panic!("{}: {}", k.name, e.emit_to_string(&k.code)));
+            let info = naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::all()).validate(&module).unwrap_or_else(|e| panic!("{}: {e:?}", k.name));
+            for entry in k.entries {
+                let options = naga::back::msl::Options { lang_version: (3, 0), fake_missing_bindings: true, ..Default::default() };
+                let pipeline = naga::back::msl::PipelineOptions { entry_point: Some((naga::ShaderStage::Compute, (*entry).into())), ..Default::default() };
+                let written = naga::back::msl::write_string(&module, &info, &options, &pipeline);
+                assert!(written.is_ok(), "{kind} {}::{entry}: MSL {:?}", k.name, written.err());
             }
         }
     }

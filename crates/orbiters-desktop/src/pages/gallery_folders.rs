@@ -134,14 +134,26 @@ impl State {
             let ui = &mut inner;
             ui.heading("Picture folders");
             ui.add_space(8.0);
-            ui.label("VRChat's picture folder is always included. Add archives to keep them in your library.");
+            ui.label(if cfg!(target_os = "macos") {
+                "Pictures/VRChat is always included. Add the folders that hold your VRChat pictures to keep them in your library."
+            } else {
+                "VRChat's picture folder is always included. Add archives to keep them in your library."
+            });
             ui.add_space(12.0);
             egui::ScrollArea::vertical().max_height(190.0).show(ui, |ui| {
                 for (path, online) in &self.folders {
                     ui.horizontal(|ui| {
                         ui.vertical(|ui| {
                             ui.label(path.to_string_lossy());
-                            ui.weak(if *online { "Available" } else { "Offline: showing remembered pictures" });
+                            // VRChat does not run on a Mac, so its folder not being there says nothing of a disk gone away.
+                            let added = cx.snap.settings.picture_folders.contains(path);
+                            ui.weak(if *online {
+                                "Available"
+                            } else if cfg!(target_os = "macos") && !added {
+                                "Not made yet: what you save here will show up"
+                            } else {
+                                "Offline: showing remembered pictures"
+                            });
                         });
                         if cx.snap.settings.picture_folders.contains(path) && Button::new("Remove").variant(Variant::Ghost).show(ui).clicked() {
                             let folders: Vec<_> = cx.snap.settings.picture_folders.iter().filter(|p| *p != path).collect();

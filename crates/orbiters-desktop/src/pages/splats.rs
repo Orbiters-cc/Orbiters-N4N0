@@ -24,7 +24,7 @@ use super::{Cx, Job};
 use crate::gpu::Handles;
 use crate::views::{self, View};
 use eframe::egui_wgpu::{self, wgpu};
-use egui::{pos2, vec2, Align2, Color32, Id, Rect, Sense, Ui, UiBuilder};
+use egui::{pos2, vec2, Align2, Color32, Id, Rect, Sense, Ui, UiBuilder, Vec2};
 use orbiters_core::reconstruction;
 use orbiters_core::settings::ViewGpu;
 use orbiters_reconstruct::camera::{normalize, Camera};
@@ -126,6 +126,8 @@ pub(super) const REDRAW_CHECKS: u8 = 4;
 
 /// On the processor's integrated GPU, a moving camera draws at most this many pixels, and the view is drawn whole once
 /// it has stood still for [`SHARP_AFTER`] seconds (docs/igpu-experiment.md).
+/// A Mac's GPU counts as integrated here too, rightly: a window on its display has about four million pixels, and 510,687
+/// splats took about 170 ms a frame at that size on an M3, about 35 ms within these.
 const MOVING_PIXELS: u32 = 400_000;
 const SHARP_AFTER: f64 = 0.25;
 
@@ -488,7 +490,11 @@ impl Viewer {
             if self.select.on() {
                 self.select_controls(ui, &p, rect);
             } else {
-                let hint = "Drag to orbit · right-drag to pan · scroll to zoom · WASD and QE to fly · double-click for the recorded view";
+                let hint = if cfg!(target_os = "macos") {
+                    "Drag or two fingers to orbit · Shift and two fingers to pan · pinch to zoom · WASD and QE to fly · double-click for the recorded view"
+                } else {
+                    "Drag to orbit · right-drag to pan · scroll to zoom · WASD and QE to fly · double-click for the recorded view"
+                };
                 let hint_t = Txt::new(hint, 11.5).color(theme::FG_2);
                 let hs = widgets::text_size(ui, &hint_t);
                 let hint_r = Rect::from_min_size(pos2(rect.left() + 16.0, rect.bottom() - 16.0 - 30.0), vec2(hs.x + 28.0, 30.0));
@@ -583,8 +589,45 @@ fn within(w: u32, h: u32, pixels: u32) -> (u32, u32) {
     (((w as f64 * k) as u32).max(16), ((h as f64 * k) as u32).max(16))
 }
 
+/// What a frame's two fingers on a Mac's trackpad, or its mouse wheel, ask of the orbit, in points.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct Gestures {
+    orbit: Vec2,
+    pan: Vec2,
+    wheel: f32,
+}
+
+/// A MacBook has no middle button and a trackpad's two fingers rest on two axes, so there they orbit as a drag does, and
+/// with Shift pan as a right-drag does. A pinch zooms, and so do two fingers with Cmd ([`egui::InputState::zoom_delta`]
+/// has both, so they do not count here). A wheel still zooms. The glide the system adds after the fingers leave moves
+/// nothing: a view moved by hand stops where the hand did.
+fn gestures(events: &[egui::Event], height: f32) -> Gestures {
+    let mut g = Gestures::default();
+    for e in events {
+        let egui::Event::MouseWheel { unit, delta, source, modifiers, .. } = e else { continue };
+        if modifiers.command {
+            continue;
+        }
+        match source {
+            egui::MouseWheelSource::Momentum => {}
+            egui::MouseWheelSource::Trackpad if modifiers.shift => g.pan += *delta,
+            egui::MouseWheelSource::Trackpad => g.orbit += *delta,
+            egui::MouseWheelSource::Wheel | egui::MouseWheelSource::Unknown => {
+                g.wheel += delta.y
+                    * match unit {
+                        egui::MouseWheelUnit::Point => 1.0,
+                        // What egui scrolls by a line.
+                        egui::MouseWheelUnit::Line => 40.0,
+                        egui::MouseWheelUnit::Page => height,
+                    };
+            }
+        }
+    }
+    g
+}
+
 /// Mouse and keyboard to the orbit. While a tool takes the left button's drags (`tool`: Select splats' brush, box and
-/// sphere), the right button orbits and the middle one pans.
+/// sphere), the right button orbits and the middle one pans. On a Mac, its trackpad too ([`gestures`]).
 fn steer(ui: &Ui, resp: &egui::Response, orbit: &mut Orbit, rect: Rect, height_px: u32, tool: bool) {
     let ctx = ui.ctx();
     // Its middle drag pans: the wheel button's scrolling (`orbiters_ui::autoscroll`) does not start here.
@@ -610,12 +653,24 @@ fn steer(ui: &Ui, resp: &egui::Response, orbit: &mut Orbit, rect: Rect, height_p
         }
     }
     if resp.hovered() {
-        let scroll = ctx.input(|i| i.smooth_scroll_delta.y);
-        if scroll != 0.0 {
-            orbit.distance = (orbit.distance * (-scroll * 0.002).exp()).clamp(0.05, 5000.0);
+        if cfg!(target_os = "macos") {
+            let (g, zoom) = ctx.input(|i| (gestures(&i.events, rect.height()), i.zoom_delta()));
+            orbit.yaw += g.orbit.x * 0.006;
+            orbit.pitch = (orbit.pitch - g.orbit.y * 0.006).clamp(-1.54, 1.54);
+            for k in 0..3 {
+                moved[k] += -right[k] * g.pan.x * per_point + up[k] * g.pan.y * per_point;
+            }
+            if g.wheel != 0.0 || zoom != 1.0 {
+                orbit.distance = (orbit.distance / zoom.max(0.01) * (-g.wheel * 0.002).exp()).clamp(0.05, 5000.0);
+            }
+        } else {
+            let scroll = ctx.input(|i| i.smooth_scroll_delta.y);
+            if scroll != 0.0 {
+                orbit.distance = (orbit.distance * (-scroll * 0.002).exp()).clamp(0.05, 5000.0);
+            }
         }
         let (dt, keys) = ctx.input(|i| {
-            // Ctrl with a key is a shortcut (Ctrl+A selects all splats), not a flight.
+            // Ctrl (Cmd on a Mac) with a key is a shortcut (Ctrl+A selects all splats), not a flight.
             let k = |key| if i.key_down(key) && !i.modifiers.command { 1.0f32 } else { 0.0 };
             let fast = if i.modifiers.shift { 3.0 } else { 1.0 };
             (i.stable_dt.min(0.05) * fast, [k(egui::Key::D) - k(egui::Key::A), k(egui::Key::E) - k(egui::Key::Q), k(egui::Key::W) - k(egui::Key::S)])
@@ -1140,6 +1195,25 @@ impl egui_wgpu::CallbackTrait for SplatCallback {
 
 #[cfg(test)]
 mod tests {
+    use super::{gestures, vec2, Gestures};
+
+    #[test]
+    fn two_fingers_orbit_and_with_shift_pan_while_a_wheel_zooms() {
+        let wheel = |unit, delta, source, modifiers| egui::Event::MouseWheel { unit, delta, phase: egui::TouchPhase::Move, source, modifiers };
+        let (point, line) = (egui::MouseWheelUnit::Point, egui::MouseWheelUnit::Line);
+        let (shift, cmd, none) = (egui::Modifiers::SHIFT, egui::Modifiers::COMMAND, egui::Modifiers::NONE);
+        let g = gestures(&[wheel(point, vec2(3.0, 4.0), egui::MouseWheelSource::Trackpad, none), wheel(point, vec2(1.0, 1.0), egui::MouseWheelSource::Trackpad, none)], 800.0);
+        assert_eq!(g, Gestures { orbit: vec2(4.0, 5.0), ..Default::default() });
+        let g = gestures(&[wheel(point, vec2(3.0, 4.0), egui::MouseWheelSource::Trackpad, shift)], 800.0);
+        assert_eq!(g, Gestures { pan: vec2(3.0, 4.0), ..Default::default() });
+        // A wheel zooms, by what egui scrolls a line.
+        let g = gestures(&[wheel(line, vec2(0.0, 2.0), egui::MouseWheelSource::Wheel, none)], 800.0);
+        assert_eq!(g, Gestures { wheel: 80.0, ..Default::default() });
+        // The glide after the fingers leave moves nothing, and Cmd with two fingers is egui's zoom, not a move.
+        assert_eq!(gestures(&[wheel(point, vec2(9.0, 9.0), egui::MouseWheelSource::Momentum, none)], 800.0), Gestures::default());
+        assert_eq!(gestures(&[wheel(point, vec2(9.0, 9.0), egui::MouseWheelSource::Trackpad, cmd)], 800.0), Gestures::default());
+    }
+
     #[test]
     fn a_moving_view_on_the_integrated_gpu_keeps_its_aspect_within_its_pixels() {
         assert_eq!(super::within(640, 390, 400_000), (640, 390), "small enough already");

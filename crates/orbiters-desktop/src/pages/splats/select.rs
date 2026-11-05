@@ -12,7 +12,8 @@
 //! out a sphere around it. Shift adds to the selection, Ctrl takes away; Grow and Shrink widen or narrow it by its
 //! neighbours, Invert swaps it with the rest. While a tool takes the drags, the right button orbits and the middle one
 //! pans. Keys: H hides, Delete deletes, Alt+H shows all, Ctrl+A selects all, Ctrl+I inverts, Ctrl+Z and Ctrl+Shift+Z
-//! undo and redo, 1 to 4 pick a tool, Esc clears the selection and then leaves.
+//! undo and redo, 1 to 4 pick a tool, Esc clears the selection and then leaves. On a Mac Ctrl is Cmd, Alt is Option, the
+//! delete key deletes and two fingers on a trackpad do what the right and middle buttons do ([`super::gestures`]).
 //!
 //! The capture's picture (its card, its uploads' link previews, a drag out of the app) is drawn again without what is
 //! removed once the selection is left or the view closed ([`redraw_picture`], from the camera the worker drew it
@@ -490,6 +491,16 @@ impl Tool {
     }
 
     fn hint(self) -> &'static str {
+        // A trackpad has no middle button, and its right button is a two-finger press: two fingers orbit and pan there
+        // (super::gestures).
+        #[cfg(target_os = "macos")]
+        return match self {
+            Tool::Pick => "Click a splat to select it · Shift adds, Cmd takes away · drag or two fingers to orbit, Shift and two fingers to pan",
+            Tool::Brush => "Paint over what to select · Shift adds, Cmd takes away · two fingers to orbit, Shift and two fingers to pan",
+            Tool::Box => "Drag a box: it selects at every depth · Shift adds, Cmd takes away · two fingers to orbit",
+            Tool::Sphere => "Press on a surface and drag out the sphere · Shift adds, Cmd takes away · two fingers to orbit",
+        };
+        #[cfg(not(target_os = "macos"))]
         match self {
             Tool::Pick => "Click a splat to select it · Shift adds, Ctrl takes away · drag to orbit, right-drag to pan",
             Tool::Brush => "Paint over what to select · Shift adds, Ctrl takes away · right-drag to orbit, middle-drag to pan",
@@ -1060,8 +1071,8 @@ impl Viewer {
         let chip_r = Rect::from_min_size(pos2(x, title_r.top()), vec2(92.0, 44.0));
         p.rect_filled(chip_r, theme::radius(22.0), theme::black(0.55));
         for (glyph, label, enabled, undo) in [
-            (icons::ARROW_U_UP_LEFT, "Undo (Ctrl+Z)", e.history.can_undo(), true),
-            (icons::ARROW_U_UP_RIGHT, "Redo (Ctrl+Shift+Z)", e.history.can_redo(), false),
+            (icons::ARROW_U_UP_LEFT, if cfg!(target_os = "macos") { "Undo (Cmd+Z)" } else { "Undo (Ctrl+Z)" }, e.history.can_undo(), true),
+            (icons::ARROW_U_UP_RIGHT, if cfg!(target_os = "macos") { "Redo (Cmd+Shift+Z)" } else { "Redo (Ctrl+Shift+Z)" }, e.history.can_redo(), false),
         ] {
             let r = Rect::from_center_size(pos2(x + 24.0, chip_r.center().y), vec2(36.0, 36.0));
             let mut bu = ui.new_child(UiBuilder::new().max_rect(r).id_salt(("splat-select-history", label)));
@@ -1129,9 +1140,9 @@ impl Viewer {
         // What works on the whole capture, at the right: its width says how much room the tools have.
         type Act = (&'static str, &'static str, &'static str, bool, Whole);
         let whole: [Act; 4] = [
-            (icons::CIRCLE_HALF, "Invert", "Selects everything else (Ctrl+I)", true, Whole::Invert),
-            (icons::SQUARES_FOUR, "Select all", "Selects every splat drawn (Ctrl+A)", true, Whole::SelectAll),
-            (icons::EYE, "Show all", "Shows every hidden splat again (Alt+H)", hidden > 0, Whole::ShowAll),
+            (icons::CIRCLE_HALF, "Invert", if cfg!(target_os = "macos") { "Selects everything else (Cmd+I)" } else { "Selects everything else (Ctrl+I)" }, true, Whole::Invert),
+            (icons::SQUARES_FOUR, "Select all", if cfg!(target_os = "macos") { "Selects every splat drawn (Cmd+A)" } else { "Selects every splat drawn (Ctrl+A)" }, true, Whole::SelectAll),
+            (icons::EYE, "Show all", if cfg!(target_os = "macos") { "Shows every hidden splat again (Option+H)" } else { "Shows every hidden splat again (Alt+H)" }, hidden > 0, Whole::ShowAll),
             (icons::ARROW_COUNTER_CLOCKWISE, "Restore all", "Brings back every hidden and deleted splat: the capture as reconstructed", hidden + deleted > 0, Whole::RestoreAll),
         ];
         let buttons: Vec<Button> = whole

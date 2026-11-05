@@ -112,7 +112,10 @@ pub(super) fn shots(gpu: &mut Offscreen, out: &Path, settings: &Settings, scale:
     for _ in 0..3 {
         let before = counts(&mut run)[0];
         run.click("Grow", 10.0)?;
-        run.until("the selection to grow", 20.0, |run| counts(run)[0] > before)?;
+        // A thin test pattern may have nothing beside what was picked.
+        if run.until("the selection to grow", 5.0, |run| counts(run)[0] > before).is_err() {
+            break;
+        }
     }
     run.wait(0.3)?;
     run.shoot(out, "splats-select-grow")?;

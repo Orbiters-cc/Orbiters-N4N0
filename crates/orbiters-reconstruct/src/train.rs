@@ -627,10 +627,11 @@ pub fn train(data: &Dataset, gpu: &mut Gpu, init: Gaussians, settings: &Settings
     let mut sub_grid: Vec<u32> = Vec::new();
     let mut mask_phase = None;
     // The keyframes on the device when its memory has room for them beside the set (with a GB to spare): steps then
-    // upload no pixels.
+    // upload no pixels. Not on a Mac, whose GPU reads the RAM they are in already: the second copy saved nothing there
+    // (500 steps at 1080p on an M3: 74.3 s with it, 74.0 and 75.9 s without) and took their whole size from everything else.
     const LEFT: u64 = 1 << 30;
     let keyframe_bytes: u64 = data.views.iter().map(|v| v.image.len() as u64 * 4).sum();
-    let resident = gpu.free_memory().is_some_and(|free| free >= gpu.training_memory(settings.budget) + keyframe_bytes + LEFT);
+    let resident = !cfg!(target_vendor = "apple") && gpu.free_memory().is_some_and(|free| free >= gpu.training_memory(settings.budget) + keyframe_bytes + LEFT);
     if resident {
         let images: Vec<&[u32]> = data.views.iter().map(|v| v.image.as_slice()).collect();
         gpu.set_keyframes(&images);

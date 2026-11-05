@@ -22,3 +22,7 @@ uuid = { workspace = true }
 
 [target.'cfg(windows)'.dependencies]
 orbiters-spout = { workspace = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# The disk's free space (session.rs).
+libc = "0.2"

@@ -176,7 +176,9 @@ fn run(args: Args) -> anyhow::Result<Report> {
     let views = data.views.len() + data.faces.as_ref().map_or(0, |f| f.views.len());
     settings.budget = args.budget.unwrap_or_else(|| train::budget_for(views));
     eprintln!("budget: {} Gaussians for {views} views", settings.budget);
-    if !gpu.integrated {
+    // A Mac's GPU counts as integrated but is its only one: it shares its memory with every program, so a large session
+    // keeps within what they leave as it does beside VRChat.
+    if !gpu.integrated || cfg!(target_vendor = "apple") {
         fit_memory(&gpu, &mut settings);
     }
     stage(Stage::Seeding, 0.0);
@@ -486,6 +488,7 @@ fn vrchat(args: &[String]) -> anyhow::Result<()> {
 
 fn main() {
     orbiters_core::panic_log::install();
+    orbiters_core::leave_with_parent();
     let all: Vec<String> = std::env::args().skip(1).collect();
     let tool: Option<fn(&[String]) -> anyhow::Result<()>> = match all.first().map(String::as_str) {
         Some("--mesh") => Some(orbiters_reconstruct::mesh::cli),

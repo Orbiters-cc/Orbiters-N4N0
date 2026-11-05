@@ -11,10 +11,20 @@
 //! [`VRCHAT_LOADING_THREADS`] threads. The thread that feeds the GPU runs at time-critical priority while it trains
 //! ([`Feeding`]) and VRChat is closed, at the normal level while VRChat runs (a time-critical thread would get ahead of
 //! VRChat's own), and at the normal level for long CPU work between steps ([`CpuWork`]: relocation, evaluation). On
-//! other systems this does nothing: their schedulers share by weight and never starve a process.
+//! a Mac the feeding thread asks for the user-initiated quality of service ([`qos`]) instead, for the same reason: with
+//! a load average over 100 from compiles, 300 steps took 28.0 s for 26.5 s of GPU time. It stays below the window's
+//! user-interactive thread. On other systems this does nothing: their schedulers share by weight and never starve a
+//! process.
 
 /// Most keyframe-decoding threads while VRChat runs.
 pub const VRCHAT_LOADING_THREADS: usize = 4;
+
+/// The calling thread's quality of service on a Mac (best effort: a thread that cannot change it runs as before).
+#[cfg(target_vendor = "apple")]
+fn qos(class: libc::qos_class_t) {
+    // SAFETY: it changes only the calling thread, with a class of the system's own list.
+    let _ = unsafe { libc::pthread_set_qos_class_self_np(class, 0) };
+}
 
 #[cfg(windows)]
 mod imp {
@@ -141,6 +151,8 @@ pub struct Feeding(());
 impl Feeding {
     pub fn start() -> Self {
         FEEDING.set(true);
+        #[cfg(target_vendor = "apple")]
+        qos(libc::qos_class_t::QOS_CLASS_USER_INITIATED);
         let f = Self(());
         f.follow();
         f
@@ -158,6 +170,8 @@ impl Drop for Feeding {
         FEEDING.set(false);
         #[cfg(windows)]
         imp::set_thread(windows::Win32::System::Threading::THREAD_PRIORITY_NORMAL);
+        #[cfg(target_vendor = "apple")]
+        qos(libc::qos_class_t::QOS_CLASS_DEFAULT);
     }
 }
 
@@ -168,6 +182,8 @@ impl CpuWork {
     pub fn start() -> Self {
         #[cfg(windows)]
         imp::set_thread(windows::Win32::System::Threading::THREAD_PRIORITY_NORMAL);
+        #[cfg(target_vendor = "apple")]
+        qos(libc::qos_class_t::QOS_CLASS_DEFAULT);
         Self(())
     }
 }
@@ -177,6 +193,10 @@ impl Drop for CpuWork {
         #[cfg(windows)]
         if FEEDING.get() {
             imp::set_thread(feeding_level());
+        }
+        #[cfg(target_vendor = "apple")]
+        if FEEDING.get() {
+            qos(libc::qos_class_t::QOS_CLASS_USER_INITIATED);
         }
     }
 }

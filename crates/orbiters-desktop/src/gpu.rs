@@ -5,7 +5,9 @@
 //! device stays off VRChat's graphics card (which still copies each frame, to show it on the monitor it drives), or
 //! the graphics card; without that kind of GPU, on the adapter that drives the primary display. DX12 says every
 //! adapter can present to a window, so there is nothing to test beforehand. On Windows it loads only the DX12 drivers
-//! (no Vulkan or OpenGL probing), and it reports GPU errors instead of closing ([`report_errors`]).
+//! (no Vulkan or OpenGL probing), and it reports GPU errors instead of closing ([`report_errors`]). An Apple silicon Mac
+//! has one GPU, which Metal calls integrated: both kinds resolve to it, [`Adapter::choice`] stays false so Settings
+//! offers no choice, and the 3D view never asks for a second device ([`integrated_device`]).
 
 use eframe::egui_wgpu::{WgpuConfiguration, WgpuSetupCreateNew};
 use eframe::wgpu;
@@ -46,7 +48,8 @@ impl Handles {
     /// An offscreen renderer's (screenshots), shown as a window on the graphics card of a computer with both kinds of
     /// GPU, as most draw (Settings then shows every GPU choice).
     pub fn of_offscreen(gpu: &orbiters_ui::offscreen::Offscreen) -> Self {
-        let adapter = Adapter { choice: true, integrated: false, ..Adapter::of(gpu.adapter(), &[]) };
+        // A Mac has one GPU, in the window as here.
+        let adapter = if cfg!(target_os = "macos") { Adapter::of(gpu.adapter(), &[]) } else { Adapter { choice: true, integrated: false, ..Adapter::of(gpu.adapter(), &[]) } };
         Self { device: gpu.device().clone(), queue: gpu.queue().clone(), textures: gpu.textures().clone(), adapter }
     }
 }

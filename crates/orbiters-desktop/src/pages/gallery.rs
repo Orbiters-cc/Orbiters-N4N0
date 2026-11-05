@@ -1810,6 +1810,8 @@ fn empty_state(ui: &mut Ui, cx: &Cx, filter: Filter, searching: bool, height: f3
         )
     } else if filter == Filter::Shared {
         ("Nothing shared with you yet", "When friends share a picture or a 3D capture with you, it shows up here.")
+    } else if cfg!(target_os = "macos") {
+        ("Your moments belong here", "VRChat and N4N0's captures come from a PC. Add the folder with your VRChat pictures through Manage folders, or copy captures into your Sessions folder, and they show up here together.")
     } else {
         ("Your moments belong here", "VRChat pictures and N4N0's 3D captures show up here together, grouped by the instance you took them in.")
     };

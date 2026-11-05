@@ -9,6 +9,7 @@ use anyhow::{anyhow, bail, ensure, Context as _};
 use orbiters_contracts::depth::{self, DepthLayout, SAMPLES_X};
 use orbiters_contracts::frame_record::{record_flags, FrameRecord};
 use orbiters_contracts::manifest::{depth_file, DEPTH_DIR, KEYFRAMES_DIR};
+use orbiters_contracts::image::Rect;
 use orbiters_contracts::{qoi, rig, skeleton, strip};
 use orbiters_core::bundle;
 use std::path::{Path, PathBuf};
@@ -130,15 +131,31 @@ impl DepthView {
     }
 }
 
-/// The capture rig's faces (contracts' Docs/rig-frames.md): square 90° colour views around the camera's path, all of
-/// one size, at the keyframes' training scale. No depth comes with them, and their mask leaves each face's border (the
-/// world's bloom and aberration at the tile's place in the frame) and its stamp out.
+/// The capture rig's faces (contracts' Docs/rig-frames.md): colour views around the camera's path at the keyframes'
+/// training scale, each with its own camera. No depth comes with them. A rig frame's layout may give its faces more than
+/// one size, and a session from an older upload another size again: each record says its own.
 pub struct Faces {
     pub views: Vec<View>,
+    /// The sizes among `views`, and what is scene in each.
+    pub sizes: Vec<FaceSize>,
+}
+
+/// One size of a session's rig faces.
+pub struct FaceSize {
     pub geometry: Geometry,
     pub width: u32,
     pub height: u32,
+    /// 1 where a face's pixel is scene: not its border (the world's bloom and aberration at the tile's place in the frame)
+    /// and not its stamp.
     pub mask: Vec<f32>,
+    pub scene_pixels: f32,
+}
+
+impl Faces {
+    /// What is scene in a view of this size, `None` when no face has that size.
+    pub fn size_of(&self, camera: &Camera) -> Option<&FaceSize> {
+        self.sizes.iter().find(|s| (s.width, s.height) == (camera.width, camera.height))
+    }
 }
 
 pub struct Dataset {
@@ -209,6 +226,9 @@ pub struct Loaded {
     pub faces: usize,
     pub faces_over_budget: usize,
     pub faces_skipped: usize,
+    /// How much the world's vignette darkened the rig's faces at the corners of the frame, undone as they were loaded
+    /// ([`undo_faces_vignette`]), in percent of the frame's middle. 0 when it did not.
+    pub faces_vignette: u32,
     /// Keyframes and rig faces left out as blown to white ([`leave_out_blown`]).
     pub keyframes_blown: usize,
     pub faces_blown: usize,
@@ -348,18 +368,18 @@ pub fn load_with(dir: &Path, max_width: u32, budget: Budget, mut progress: impl 
     let keep = usize::try_from(budget.depth_samples / per_frame).unwrap_or(usize::MAX).max(MIN_KEPT);
     let depth_chosen: Vec<&FrameRecord> = spread(&depth_sized.iter().map(|r| pose(r)).collect::<Vec<_>>(), keep).into_iter().map(|i| depth_sized[i]).collect();
     loaded.depth_frames_over_budget = depth_sized.len() - depth_chosen.len();
-    // The rig's faces: the size the frames' rig layout gives, at the frames' scale, within what the budget leaves.
-    let rig_layout = rig::RigLayout::new(full_w, full_h);
-    let face_geometry = rig_layout.map(|l| Geometry::new(l.face, l.face, geometry.factor)).filter(|g| g.width() >= 16);
-    let face_sized: Vec<&FrameRecord> = face_frames.iter().copied().filter(|r| face_geometry.is_some_and(|g| (r.width, r.height) == (g.full_width, g.full_height))).collect();
+    // The rig's faces: each record gives its face's size and projection (contracts' rig::RigLayout, of whichever layout
+    // the avatar's upload draws), at the frames' scale, within what the budget leaves.
+    let face_geometry = |r: &FrameRecord| Geometry::new(r.width, r.height, geometry.factor);
+    let face_sized: Vec<&FrameRecord> = face_frames.iter().copied().filter(|r| face_geometry(r).width() >= 16 && face_geometry(r).height() >= 16).collect();
     loaded.faces_skipped = face_frames.len() - face_sized.len();
-    let face_chosen: Vec<&FrameRecord> = match face_geometry {
-        Some(g) if !face_sized.is_empty() => {
-            let left = budget.keyframe_bytes.saturating_sub(chosen.len() as u64 * w as u64 * h as u64 * 4);
-            let keep = usize::try_from(left / (g.width() as u64 * g.height() as u64 * 4)).unwrap_or(usize::MAX).max(MIN_KEPT);
-            spread(&face_sized.iter().map(|r| pose(r)).collect::<Vec<_>>(), keep).into_iter().map(|i| face_sized[i]).collect()
-        }
-        _ => Vec::new(),
+    let face_chosen: Vec<&FrameRecord> = if face_sized.is_empty() {
+        Vec::new()
+    } else {
+        let bytes: u64 = face_sized.iter().map(|r| face_geometry(r).width() as u64 * face_geometry(r).height() as u64 * 4).sum::<u64>() / face_sized.len() as u64;
+        let left = budget.keyframe_bytes.saturating_sub(chosen.len() as u64 * w as u64 * h as u64 * 4);
+        let keep = usize::try_from(left / bytes.max(1)).unwrap_or(usize::MAX).max(MIN_KEPT);
+        spread(&face_sized.iter().map(|r| pose(r)).collect::<Vec<_>>(), keep).into_iter().map(|i| face_sized[i]).collect()
     };
     loaded.faces_over_budget = face_sized.len() - face_chosen.len();
 
@@ -375,8 +395,8 @@ pub fn load_with(dir: &Path, max_width: u32, budget: Budget, mut progress: impl 
         } else if j < chosen.len() + depth_chosen.len() {
             Item::Depth(grid.as_ref().and_then(|g| load_depth(dir, depth_chosen[j - chosen.len()], &geometry, g)))
         } else {
-            let g = face_geometry.as_ref().expect("faces only with their geometry");
-            Item::Face(load_keyframe(dir, face_chosen[j - chosen.len() - depth_chosen.len()], g))
+            let r = face_chosen[j - chosen.len() - depth_chosen.len()];
+            Item::Face(load_keyframe(dir, r, &face_geometry(r)))
         }
     };
     let mut views = Vec::with_capacity(chosen.len());
@@ -397,12 +417,21 @@ pub fn load_with(dir: &Path, max_width: u32, budget: Budget, mut progress: impl 
     }
     loaded.keyframes_blown = leave_out_blown(&mut views);
     loaded.faces_blown = leave_out_blown(&mut face_views);
+    loaded.faces_vignette = (undo_faces_vignette(&mut face_views, &records, &geometry) * 100.0).round() as u32;
     face_views.sort_by_key(|v| v.keyframe);
     loaded.faces = face_views.len();
-    let faces = match (rig_layout, face_geometry) {
-        (Some(l), Some(g)) if !face_views.is_empty() => Some(Faces { views: face_views, geometry: g, width: g.width(), height: g.height(), mask: face_mask(&l, &g) }),
-        _ => None,
-    };
+    let faces = (!face_views.is_empty()).then(|| {
+        let mut sizes: Vec<FaceSize> = Vec::new();
+        for r in &face_chosen {
+            let g = face_geometry(r);
+            if !sizes.iter().any(|s| (s.width, s.height) == (g.width(), g.height())) {
+                let mask = face_mask(&g);
+                let scene_pixels = mask.iter().filter(|m| **m > 0.5).count() as f32;
+                sizes.push(FaceSize { geometry: g, width: g.width(), height: g.height(), mask, scene_pixels });
+            }
+        }
+        Faces { views: face_views, sizes }
+    });
     if views.len() < 2 {
         let why = loaded.first_problem.as_deref().map(|p| format!(" ({p})")).unwrap_or_default();
         bail!("Only {} of this session's {} keyframes could be read{why}: reconstruction needs a few views of the world.", views.len(), loaded.keyframes);
@@ -466,11 +495,122 @@ fn leave_out_blown(views: &mut Vec<View>) -> usize {
     out.len()
 }
 
+/// Bins of the distance from the frame's middle, [`undo_faces_vignette`]'s curve.
+const VIGNETTE_BINS: usize = 32;
+/// The largest distance from the frame's middle, `√2` in units of half the frame's width and height.
+const VIGNETTE_REACH: f32 = std::f32::consts::SQRT_2;
+/// Below this much at the corners, the curve is left alone: what the stamps' medians can tell from nothing.
+const VIGNETTE_MIN: f32 = 0.02;
+
+/// The world's vignette, measured from the rig's own stamps and undone in its faces. Faces are drawn before the world's
+/// post-processing, so its vignette darkens them by where their tile stands in the frame, not by what they show. Tiles that fill
+/// the frame reach its corners: 18 % darker in Calling all villains and 11 % in Kitty Lounge of 2026-11-04, nothing in Dia de
+/// Muertos or Rainy Skyline. Emulated on those two, faces trained with it lost 0.33 dB on held-out views of the rig (0.44 and
+/// 0.21; three runs each, noise about 0.3) where the same frames undone lost nothing. Each stamp's `on` blocks are one grey, linear 0.3, at a known place in the
+/// frame: in every rig frame they measure the world's vignette along two rows across the frame's whole width, whatever the
+/// world looks like. The median of a session's blocks by distance from the frame's middle is its curve (spread 2 % of its value at the
+/// far end on real faces, against 0.11 to 0.18 of effect, and it agrees with the darkening found by comparing keyframes to their
+/// renders). The curve is divided out in the same coded sRGB the block was read in: a vignette is a factor on linear light, and sRGB's
+/// gamma keeps a factor one across every level, near enough. A session whose curve stays under [`VIGNETTE_MIN`] is left as it was.
+/// Returns the darkening at the frame's corners.
+fn undo_faces_vignette(views: &mut [View], records: &[FrameRecord], geometry: &Geometry) -> f32 {
+    use std::collections::HashMap;
+    let face_record: HashMap<i32, &FrameRecord> = records.iter().filter(|r| r.has(record_flags::KEYFRAME) && r.keyframe_index >= 0 && strip::flags::face(r.strip_flags) != 0).map(|r| (r.keyframe_index, r)).collect();
+    // A face's frame: the rig frame's own record, of the same game time.
+    let frames: HashMap<u32, (u32, u32)> =
+        records.iter().filter(|r| strip::flags::kind(r.strip_flags) == strip::flags::KIND_RIG && strip::flags::face(r.strip_flags) == 0).map(|r| (r.game_time.to_bits(), (r.width, r.height))).collect();
+    // A face's place in its frame, when its record and that frame's layout agree: (the tile, its size at the views' scale).
+    let place = |v: &View| -> Option<(rig::RigLayout, usize, u32, Rect)> {
+        let r = face_record.get(&v.keyframe)?;
+        let (w, h) = *frames.get(&r.game_time.to_bits())?;
+        let layout = rig::RigLayout::of_strip(w, h, &r.projection)?;
+        ((layout.tile_width, layout.tile_height) == (r.width, r.height)).then_some(())?;
+        let t = rig::TILE_FACES.iter().position(|&f| f == strip::flags::face(r.strip_flags))?;
+        Some((layout, t, r.game_time.to_bits(), layout.tile(t)))
+    };
+    let distance = |x: f32, y: f32, w: u32, h: u32| {
+        let (cx, cy) = (2.0 * x / w as f32 - 1.0, 2.0 * y / h as f32 - 1.0);
+        (cx * cx + cy * cy).sqrt()
+    };
+    let bin = |d: f32| ((d / VIGNETTE_REACH * VIGNETTE_BINS as f32) as usize).min(VIGNETTE_BINS - 1);
+    let f = geometry.factor;
+    let luma = |p: u32| ((p & 0xff) + ((p >> 8) & 0xff) + ((p >> 16) & 0xff)) as f32 / (3.0 * 255.0);
+    let mut levels: Vec<Vec<f32>> = vec![Vec::new(); VIGNETTE_BINS];
+    for v in views.iter() {
+        let Some((layout, _, bits, tile)) = place(v) else { continue };
+        let (tw, th) = (layout.tile_width, layout.tile_height);
+        let width = v.camera.width;
+        for block in 1..rig::STAMP_BLOCKS {
+            if !rig::stamp_block_on(bits, block) {
+                continue;
+            }
+            let c = rig::stamp_cell(tw, th, layout.generation, block);
+            let (x0, x1, y0, y1) = (c.x0 / f, (c.x1 / f).max(c.x0 / f + 1), c.y0 / f, (c.y1 / f).max(c.y0 / f + 1));
+            if x1 > width || y1 > v.camera.height {
+                continue;
+            }
+            let (mut sum, mut n) = (0.0f32, 0u32);
+            for y in y0..y1 {
+                for x in x0..x1 {
+                    sum += luma(v.image[(y * width + x) as usize]);
+                    n += 1;
+                }
+            }
+            let d = distance(tile.x0 as f32 + (c.x0 + c.x1) as f32 / 2.0, tile.y0 as f32 + (c.y0 + c.y1) as f32 / 2.0, layout.width, layout.height);
+            levels[bin(d)].push(sum / n as f32);
+        }
+    }
+    let mut medians: Vec<Option<f32>> = levels
+        .iter_mut()
+        .map(|l| {
+            (l.len() >= 8).then(|| {
+                l.sort_by(f32::total_cmp);
+                l[l.len() / 2]
+            })
+        })
+        .collect();
+    let Some(first) = medians.iter().position(Option::is_some) else { return 0.0 };
+    let reference = medians[first].unwrap_or(0.0);
+    if reference < 0.1 {
+        return 0.0;
+    }
+    // Falling with the distance, nothing over 1: what bleeds into a block is not the world's vignette. Bins with no block take the
+    // nearest measured below them (the corners' from the last row's far end).
+    let mut factor = [1.0f32; VIGNETTE_BINS];
+    let mut last = 1.0f32;
+    for (i, m) in medians.iter_mut().enumerate() {
+        if let Some(m) = m {
+            last = last.min(*m / reference);
+        }
+        factor[i] = last;
+    }
+    let corners = 1.0 - factor[VIGNETTE_BINS - 1];
+    if corners < VIGNETTE_MIN {
+        return 0.0;
+    }
+    for v in views.iter_mut() {
+        let Some((layout, _, _, tile)) = place(v) else { continue };
+        let width = v.camera.width;
+        for y in 0..v.camera.height {
+            for x in 0..width {
+                let d = distance(tile.x0 as f32 + (x * f + f / 2) as f32, tile.y0 as f32 + (y * f + f / 2) as f32, layout.width, layout.height);
+                let at = (d / VIGNETTE_REACH * VIGNETTE_BINS as f32 - 0.5).clamp(0.0, VIGNETTE_BINS as f32 - 1.0);
+                let (i, t) = (at as usize, at.fract());
+                let k = factor[i] * (1.0 - t) + factor[(i + 1).min(VIGNETTE_BINS - 1)] * t;
+                let p = &mut v.image[(y * width + x) as usize];
+                let channel = |c: u32| ((((*p >> c) & 0xff) as f32 / k + 0.5) as u32).min(255) << c;
+                *p = (*p & 0xff00_0000) | channel(0) | channel(8) | channel(16);
+            }
+        }
+    }
+    corners
+}
+
 /// A face's mask at its training resolution: a training pixel is scene when the captured pixels it averages are
-/// (rig::RigLayout::scene_pixel: not in the face's border or its stamp).
-fn face_mask(layout: &rig::RigLayout, g: &Geometry) -> Vec<f32> {
-    let f = g.factor;
-    let scene = |x: u32, y: u32| layout.scene_pixel(x * f, y * f) && layout.scene_pixel(x * f + f - 1, y * f + f - 1);
+/// (rig::scene_pixel: not in the face's border or its stamp).
+fn face_mask(g: &Geometry) -> Vec<f32> {
+    let (f, w, h) = (g.factor, g.full_width, g.full_height);
+    let scene = |x: u32, y: u32| rig::scene_pixel(w, h, x * f, y * f) && rig::scene_pixel(w, h, x * f + f - 1, y * f + f - 1);
     (0..g.height()).flat_map(|y| (0..g.width()).map(move |x| if scene(x, y) { 1.0 } else { 0.0 })).collect()
 }
 
@@ -713,12 +853,13 @@ pub(crate) mod fixture {
         Session { dir }
     }
 
-    /// Adds `rig_frames` rig frames to `session` (frames of `w × h`): each one's record (kind 2, the rig at [`pose`]
-    /// `k`, no picture) and its six faces' keyframes (random colours, the face's size), numbered after the session's.
-    pub fn add_rig_frames(session: &Session, w: u32, h: u32, rig_frames: usize) {
+    /// Adds `rig_frames` rig frames to `session` (frames of `w × h`) as an avatar of `generation` draws them: each one's
+    /// record (kind 2, the rig at [`pose`] `k`, no picture) and its six faces' keyframes (random colours, the face's size),
+    /// numbered after the session's.
+    pub fn add_rig_frames(session: &Session, w: u32, h: u32, rig_frames: usize, generation: orbiters_contracts::rig::Generation) {
         use orbiters_contracts::{rig, strip};
-        let layout = rig::RigLayout::new(w, h).expect("a rig layout");
-        let f = layout.face;
+        let layout = rig::RigLayout::of_generation(w, h, generation).expect("a rig layout");
+        let (fw, fh) = (layout.tile_width, layout.tile_height);
         let mut frames = std::fs::read(session.dir.join(FRAMES_FILE)).unwrap();
         let first = std::fs::read_dir(session.dir.join(KEYFRAMES_DIR)).unwrap().count();
         let mut rng = fastrand::Rng::with_seed(11);
@@ -732,7 +873,7 @@ pub(crate) mod fixture {
                 game_time: 10.0 + k as f32 * 0.1,
                 strip_flags: flags(0),
                 camera_to_world: rig_pose,
-                projection: rig::PROJECTION,
+                projection: generation.projection(),
                 near: rig::NEAR,
                 far: rig::FAR,
                 width: w,
@@ -741,15 +882,16 @@ pub(crate) mod fixture {
             };
             frames.extend_from_slice(&base.to_bytes());
             for (t, &face) in rig::TILE_FACES.iter().enumerate() {
-                let rgb: Vec<u8> = (0..f * f * 3).map(|_| rng.u8(..)).collect();
-                std::fs::write(session.dir.join(KEYFRAMES_DIR).join(orbiters_core::bundle::keyframe_file(keyframe as i32)), orbiters_contracts::qoi::encode(&rgb, f, f, 3)).unwrap();
+                let rgb: Vec<u8> = (0..fw * fh * 3).map(|_| rng.u8(..)).collect();
+                std::fs::write(session.dir.join(KEYFRAMES_DIR).join(orbiters_core::bundle::keyframe_file(keyframe as i32)), orbiters_contracts::qoi::encode(&rgb, fw, fh, 3)).unwrap();
                 let r = FrameRecord {
                     flags: record_flags::STRIP_OK | record_flags::KEYFRAME,
                     frame_index: base.frame_index + 1 + t as u64,
                     strip_flags: flags(face),
                     camera_to_world: rig::face_camera_to_world(&rig_pose, face),
-                    width: f,
-                    height: f,
+                    projection: generation.projection(),
+                    width: fw,
+                    height: fh,
                     keyframe_index: keyframe as i32,
                     ..base
                 };
@@ -810,27 +952,181 @@ mod tests {
     fn rig_faces_load_as_views_of_their_own() {
         use orbiters_contracts::rig;
         let s = fixture::session("rig-faces", 1280, 720, 6, &[]);
-        fixture::add_rig_frames(&s, 1280, 720, 3);
+        fixture::add_rig_frames(&s, 1280, 720, 3, rig::Generation::Fill);
+        let l = rig::RigLayout::new(1280, 720).unwrap();
         for (max_width, factor) in [(1280, 1), (640, 2)] {
             let d = load_with(&s.dir, max_width, Budget::UNLIMITED, |_| {}).unwrap();
             // The frames' keyframes as before: the faces are neither among them nor left out as another size.
             assert_eq!((d.views.len(), d.width, d.loaded.keyframes_skipped), (6, 1280 / factor, 0));
             let f = d.faces.as_ref().expect("faces");
-            let side = rig::RigLayout::new(1280, 720).unwrap().face;
-            assert_eq!((f.views.len(), d.loaded.faces, f.geometry.factor), (18, 18, factor));
-            assert_eq!((f.width, f.height), (side / factor, side / factor));
-            // Their cameras: square 90° pinholes along the rig's axes.
+            assert_eq!((f.views.len(), d.loaded.faces, f.sizes.len()), (18, 18, 1));
+            let size = &f.sizes[0];
+            assert_eq!((size.geometry.factor, size.width, size.height), (factor, l.tile_width / factor, l.tile_height / factor));
+            // Their cameras: the faces' projection stretched over the tile, along the rig's axes.
             for v in &f.views {
-                assert_eq!((v.camera.width, v.camera.height), (f.width, f.height));
-                assert!((v.camera.fx - side as f32 / 2.0 / factor as f32).abs() < 1e-3 && (v.camera.fx - v.camera.fy).abs() < 1e-6);
+                assert_eq!((v.camera.width, v.camera.height), (size.width, size.height));
+                assert!(f.size_of(&v.camera).is_some());
+                let (fx, fy) = (rig::PROJECTION[0] * l.tile_width as f32 / 2.0 / factor as f32, rig::PROJECTION[1] * l.tile_height as f32 / 2.0 / factor as f32);
+                assert!((v.camera.fx - fx).abs() < 1e-2 && (v.camera.fy - fy).abs() < 1e-2, "{} {}", v.camera.fx, v.camera.fy);
             }
             // The mask leaves the border and the stamp out, keeps the middle.
-            let at = |x: u32, y: u32| f.mask[(y * f.width + x) as usize];
-            assert_eq!((at(0, f.height / 2), at(f.width / 2, f.height / 2), at(f.width / 2, f.height - 1)), (0.0, 1.0, 0.0));
+            let at = |x: u32, y: u32| size.mask[(y * size.width + x) as usize];
+            assert_eq!((at(0, size.height / 2), at(size.width / 2, size.height / 2), at(size.width / 2, size.height - 1)), (0.0, 1.0, 0.0));
+            assert!(size.scene_pixels > 0.9 * (size.width * size.height) as f32);
         }
         // Without faces, nothing changes.
         let plain = fixture::session("no-rig-faces", 1280, 720, 6, &[]);
         assert!(load_with(&plain.dir, 1280, Budget::UNLIMITED, |_| {}).unwrap().faces.is_none());
+    }
+
+    /// A session recorded before the layout filled the frame still reconstructs: its records give the square faces' size
+    /// and projection, as they were stored.
+    #[test]
+    fn a_session_of_square_faces_still_loads() {
+        use orbiters_contracts::rig;
+        let s = fixture::session("rig-faces-square", 1920, 1080, 6, &[]);
+        fixture::add_rig_frames(&s, 1920, 1080, 2, rig::Generation::Square);
+        let d = load_with(&s.dir, 1920, Budget::UNLIMITED, |_| {}).unwrap();
+        let f = d.faces.as_ref().expect("faces");
+        assert_eq!((f.views.len(), d.loaded.faces_skipped, f.sizes.len()), (12, 0, 1));
+        assert_eq!((f.sizes[0].width, f.sizes[0].height), (420, 420));
+        // 90° square pinholes, the mask as it always was: the 3 px border, the stamp's 7 rows.
+        for v in &f.views {
+            assert!((v.camera.fx - 210.0).abs() < 1e-3 && (v.camera.fy - 210.0).abs() < 1e-3);
+        }
+        let at = |x: u32, y: u32| f.sizes[0].mask[(y * 420 + x) as usize];
+        assert_eq!((at(2, 200), at(3, 200), at(200, 412), at(200, 413)), (0.0, 1.0, 1.0, 0.0));
+    }
+
+    /// A world's vignette: a rig frame's faces with their stamps, every pixel darkened by the place of its tile in the frame. Reading
+    /// the stamps gives the curve back, and the same scene comes back the same in every tile.
+    #[test]
+    fn the_stamps_measure_the_worlds_vignette_and_it_is_undone() {
+        use orbiters_contracts::{image::RgbaImage, rig};
+        let (w, h) = (1920u32, 1080u32);
+        let layout = rig::RigLayout::new(w, h).unwrap();
+        let vignette = |x: f32, y: f32| {
+            let (cx, cy) = (2.0 * x / w as f32 - 1.0, 2.0 * y / h as f32 - 1.0);
+            1.0 - 0.1 * (cx * cx + cy * cy)
+        };
+        let s = fixture::session("rig-faces-vignette", w, h, 6, &[]);
+        fixture::add_rig_frames(&s, w, h, 30, rig::Generation::Fill);
+        let records = bundle::read_records(&s.dir).unwrap();
+        let scene = 160u8;
+        for r in records.iter().filter(|r| strip::flags::face(r.strip_flags) != 0 && r.has(record_flags::KEYFRAME)) {
+            let t = rig::TILE_FACES.iter().position(|&f| f == strip::flags::face(r.strip_flags)).unwrap();
+            let tile = layout.tile(t);
+            let mut img = RgbaImage::new(layout.tile_width, layout.tile_height);
+            img.fill_rect(0, 0, layout.tile_width, layout.tile_height, [scene; 3]);
+            rig::draw_stamp(&mut img, r.game_time, rig::Generation::Fill);
+            let mut rgb = Vec::new();
+            for y in 0..img.height {
+                for x in 0..img.width {
+                    let k = vignette(tile.x0 as f32 + x as f32 + 0.5, tile.y0 as f32 + y as f32 + 0.5);
+                    rgb.extend(img.get(x, y)[..3].iter().map(|c| (*c as f32 * k + 0.5) as u8));
+                }
+            }
+            std::fs::write(s.dir.join(KEYFRAMES_DIR).join(bundle::keyframe_file(r.keyframe_index)), qoi::encode(&rgb, img.width, img.height, 3)).unwrap();
+        }
+        let d = load_with(&s.dir, w, Budget::UNLIMITED, |_| {}).unwrap();
+        // The corners' 20 %: measured along the bottom row's far ends, 0.2 at most.
+        assert!((17..=23).contains(&d.loaded.faces_vignette), "{}", d.loaded.faces_vignette);
+        let f = d.faces.as_ref().unwrap();
+        // The scene in a far corner of a bottom tile and in the middle of the top one, as one level again.
+        for v in &f.views {
+            let at = |x: u32, y: u32| (v.image[(y * v.camera.width + x) as usize] & 0xff) as f32;
+            for (x, y) in [(10, 10), (320, 200), (630, 400)] {
+                assert!((at(x, y) - scene as f32).abs() <= 4.0, "keyframe {}: {} at ({x}, {y})", v.keyframe, at(x, y));
+            }
+        }
+    }
+
+    /// A world with no vignette: its faces are as they were read.
+    #[test]
+    fn no_vignette_leaves_the_faces_as_they_are() {
+        use orbiters_contracts::{image::RgbaImage, rig};
+        let (w, h) = (1920u32, 1080u32);
+        let layout = rig::RigLayout::new(w, h).unwrap();
+        let s = fixture::session("rig-faces-no-vignette", w, h, 6, &[]);
+        fixture::add_rig_frames(&s, w, h, 12, rig::Generation::Fill);
+        let records = bundle::read_records(&s.dir).unwrap();
+        for r in records.iter().filter(|r| strip::flags::face(r.strip_flags) != 0 && r.has(record_flags::KEYFRAME)) {
+            let mut img = RgbaImage::new(layout.tile_width, layout.tile_height);
+            img.fill_rect(0, 0, layout.tile_width, layout.tile_height, [160; 3]);
+            rig::draw_stamp(&mut img, r.game_time, rig::Generation::Fill);
+            let rgb: Vec<u8> = img.data.as_chunks::<4>().0.iter().flat_map(|p| [p[0], p[1], p[2]]).collect();
+            std::fs::write(s.dir.join(KEYFRAMES_DIR).join(bundle::keyframe_file(r.keyframe_index)), qoi::encode(&rgb, img.width, img.height, 3)).unwrap();
+        }
+        let d = load_with(&s.dir, w, Budget::UNLIMITED, |_| {}).unwrap();
+        assert_eq!(d.loaded.faces_vignette, 0);
+        for v in &d.faces.as_ref().unwrap().views {
+            assert!(v.image[..(v.camera.width * 400) as usize].iter().all(|p| p & 0xff == 160));
+        }
+    }
+
+    /// A session holding both (the avatar re-uploaded and worn again in one recording): each face with its own size and mask.
+    #[test]
+    fn a_session_of_both_layouts_keeps_each_faces_size() {
+        use orbiters_contracts::rig;
+        let s = fixture::session("rig-faces-both", 1920, 1080, 6, &[]);
+        fixture::add_rig_frames(&s, 1920, 1080, 1, rig::Generation::Square);
+        fixture::add_rig_frames(&s, 1920, 1080, 1, rig::Generation::Fill);
+        let d = load_with(&s.dir, 1920, Budget::UNLIMITED, |_| {}).unwrap();
+        let f = d.faces.as_ref().expect("faces");
+        assert_eq!((f.views.len(), f.sizes.len()), (12, 2));
+        for v in &f.views {
+            let size = f.size_of(&v.camera).expect("its size");
+            assert_eq!(size.mask.len(), (v.camera.width * v.camera.height) as usize);
+        }
+    }
+
+    /// The whole way: a synthetic rig frame is drawn as the shader draws it, read as the capture reads it, and a point of
+    /// the world lands in the stored face where the reconstruction's camera says.
+    #[test]
+    fn a_world_point_lands_where_the_training_camera_says() {
+        use orbiters_contracts::{image::RgbaImage, rig, strip};
+        let (w, h, time) = (1920u32, 1080u32, 12.5f32);
+        let rig_pose = fixture::pose(3);
+        let origin = [rig_pose[3], rig_pose[7], rig_pose[11]];
+        // A point in the world, in front of each face in turn: the render's own pixel for it is painted white.
+        for (t, &face) in rig::TILE_FACES.iter().enumerate() {
+            let camera = rig::face_camera_to_world(&rig_pose, face);
+            let projection = rig::PROJECTION;
+            let (ax, ay, depth) = (0.27f32, -0.19f32, 6.0f32);
+            let world: [f32; 3] = std::array::from_fn(|i| origin[i] + depth * (ax * camera[4 * i] + ay * camera[4 * i + 1] + camera[4 * i + 2]));
+            // The render's picture: the face camera's uv of the point, 640 × 420.
+            let (rw, rh) = rig::FACE_RENDER;
+            let u = 0.5 + 0.5 * projection[0] * ax;
+            let v = 0.5 + 0.5 * projection[1] * ay;
+            let (px, py) = ((u * rw as f32) as u32, ((1.0 - v) * rh as f32) as u32);
+            let pictures: [RgbaImage; rig::FACES] = std::array::from_fn(|i| {
+                let mut img = RgbaImage::new(rw, rh);
+                img.fill_rect(0, 0, rw, rh, [30, 40, 50]);
+                if i as u32 + 1 == face {
+                    img.set(px, py, [255, 255, 255]);
+                }
+                rig::draw_stamp(&mut img, time, rig::Generation::Fill);
+                img
+            });
+            let mut frame = RgbaImage::new(w, h);
+            let payload = rig::payload(rig_pose, time, w, h, 2, strip::flags::SOURCE_TEST);
+            rig::encode(&mut frame, &payload, &pictures).unwrap();
+            // Read as the capture reads it.
+            let view = frame.view();
+            let decoded = strip::decode(&view).unwrap();
+            let faces = rig::faces(&decoded.payload, &view, decoded.flipped).unwrap();
+            let f = faces[t];
+            assert!(f.current(time) && f.face == face);
+            let tile = f.tile;
+            let found = (tile.y0..tile.y1).flat_map(|y| (tile.x0..tile.x1).map(move |x| (x, y))).find(|&(x, y)| frame.get(x, y)[0] == 255).expect("the point's pixel");
+            // The training camera of that stored face (crate::camera, the record's pose and projection).
+            let g = Geometry::new(tile.x1 - tile.x0, tile.y1 - tile.y0, 1);
+            let cam = g.camera(&f.camera_to_world, &f.projection);
+            let (cx, cy, z) = cam.project(world).expect("in front");
+            assert!((z - depth).abs() < 1e-3, "face {face}: depth {z}");
+            let (sx, sy) = ((found.0 - tile.x0) as f32, (found.1 - tile.y0) as f32);
+            assert!((cx - sx).abs() <= 1.0 && (cy - sy).abs() <= 1.0, "face {face}: the camera says ({cx}, {cy}), the pixel is at ({sx}, {sy})");
+        }
     }
 
     #[test]

@@ -74,7 +74,13 @@ pub fn add_from_rays(g: &mut Gaussians, data: &Dataset, count: usize, held_out: 
 /// The same along the rig's faces' rays (crate::dataset::Faces): what only they see has no depth to seed it.
 pub fn add_from_face_rays(g: &mut Gaussians, data: &Dataset, count: usize, seed: u64) {
     if let Some(f) = &data.faces {
-        rays(g, &f.views.iter().collect::<Vec<_>>(), &f.mask, f.width, f.height, count, seed);
+        // Each size's share of the seeds is its share of the faces' scene pixels.
+        let total: f32 = f.views.iter().filter_map(|v| f.size_of(&v.camera)).map(|s| s.scene_pixels).sum();
+        for size in &f.sizes {
+            let views: Vec<&View> = f.views.iter().filter(|v| (v.camera.width, v.camera.height) == (size.width, size.height)).collect();
+            let share = views.len() as f32 * size.scene_pixels / total.max(1.0);
+            rays(g, &views, &size.mask, size.width, size.height, (count as f32 * share).round() as usize, seed ^ (size.width as u64) << 16);
+        }
     }
 }
 

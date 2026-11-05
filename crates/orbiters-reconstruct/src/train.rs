@@ -567,10 +567,8 @@ pub fn train(data: &Dataset, gpu: &mut Gpu, init: Gaussians, settings: &Settings
     let scene_pixels = data.mask.iter().filter(|m| **m > 0.5).count() as f32;
     ensure!(scene_pixels > 0.0, "the capture strip and the skeleton band cover all of these {}×{} keyframes: nothing to train on", data.width, data.height);
     let depth_views: Vec<usize> = (0..data.depth_views.len()).filter(|&i| data.depth_views[i].valid() > 0).collect();
-    // The rig's faces, when they have scene pixels and a size of their own (their mask is kept per size).
-    let faces = data.faces.as_ref().filter(|f| !f.views.is_empty() && (f.width, f.height) != (data.width, data.height));
-    let face_pixels = faces.map_or(0.0, |f| f.mask.iter().filter(|m| **m > 0.5).count() as f32);
-    let faces = faces.filter(|_| face_pixels > 0.0);
+    // The rig's faces, when they have scene pixels and sizes of their own (their mask is kept per size).
+    let faces = data.faces.as_ref().filter(|f| !f.views.is_empty() && f.sizes.iter().all(|s| s.scene_pixels > 0.0 && (s.width, s.height) != (data.width, data.height)));
     let face_cams: Vec<Camera> = faces.map_or_else(Vec::new, |f| f.views.iter().map(|v| v.camera).collect());
     let face_steps = face_share(face_cams.len(), data.views.len(), settings.face_share);
     let extent = extent(data);
@@ -594,8 +592,8 @@ pub fn train(data: &Dataset, gpu: &mut Gpu, init: Gaussians, settings: &Settings
         gpu.set_mask(l.width, l.height, &l.mask)?;
     }
     gpu.set_mask(data.width, data.height, &data.mask)?;
-    if let Some(f) = faces {
-        gpu.set_mask(f.width, f.height, &f.mask)?;
+    for s in faces.iter().flat_map(|f| &f.sizes) {
+        gpu.set_mask(s.width, s.height, &s.mask)?;
     }
     gpu.regularise_unseen = settings.regularise_unseen;
     gpu.clamp_colors = settings.clamp_colors;
@@ -719,7 +717,8 @@ pub fn train(data: &Dataset, gpu: &mut Gpu, init: Gaussians, settings: &Settings
             let v = &f.views[rng.usize(..f.views.len())];
             let robust = if progress >= settings.robust_from { settings.robust } else { 0.0 };
             let sky_lr = std::mem::replace(&mut gpu.sky_lr, 0.0);
-            let stepped = gpu.step(&v.camera, settings.background, Target::Color { rgba: &v.image, scene_pixels: face_pixels, weight: 1.0, ssim: settings.ssim, robust }, Some(lr));
+            let scene_pixels = f.size_of(&v.camera).map_or(0.0, |s| s.scene_pixels);
+            let stepped = gpu.step(&v.camera, settings.background, Target::Color { rgba: &v.image, scene_pixels, weight: 1.0, ssim: settings.ssim, robust }, Some(lr));
             gpu.sky_lr = sky_lr;
             stepped?
         } else {

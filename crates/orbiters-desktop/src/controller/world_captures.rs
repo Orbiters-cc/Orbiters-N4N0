@@ -400,7 +400,7 @@ fn status(
                 let read = snapshot.capture.stats.as_ref().map(|st| st.frames as f32).filter(|_| frames > 0);
                 ("importing", read.map(|n| (n / frames as f32).min(1.0)))
             } else if let Some(job) = running {
-                ("reconstructing", Some(if job.iterations > 0 { job.iteration as f32 / job.iterations as f32 } else { 0.0 }))
+                (if job.paused { "paused" } else { "reconstructing" }, Some(if job.iterations > 0 { job.iteration as f32 / job.iterations as f32 } else { 0.0 }))
             } else if snapshot.reconstruct_queue.iter().any(|d| same_path(d, dir)) {
                 ("waiting", None)
             } else if s.reconstruction.is_some() {

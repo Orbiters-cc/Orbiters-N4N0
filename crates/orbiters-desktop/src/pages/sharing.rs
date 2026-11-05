@@ -1027,18 +1027,20 @@ impl Dialog {
         // reconstruction: how far it got.
         let offer = again::offer_of(&self.entry, cx.snap);
         let rebuilt = match offer {
-            Some(Offer::Running { fraction, .. }) => Some(fraction),
+            Some(Offer::Running { fraction, .. } | Offer::Paused { fraction, .. }) => Some(fraction),
             _ => None,
         };
         let running = anim::toggle(ui.ctx(), Id::unique(("capture-window-busy", &self.entry.key)), busy || rebuilt.is_some(), Spring::SOFT).clamp(0.0, 1.0);
         if running > 0.01 {
             let bar = Rect::from_min_max(pos2(picture.left(), picture.bottom() - 3.0), picture.max);
             let bp = p.with_clip_rect(bar.intersect(p.clip_rect()));
-            bp.rect_filled(bar, 0.0, theme::alpha(theme::ACCENT, 0.18 * running));
+            // A paused run's bar stands still and quiet.
+            let tone = if matches!(offer, Some(Offer::Paused { .. })) && !busy { theme::FG_3 } else { theme::ACCENT };
+            bp.rect_filled(bar, 0.0, theme::alpha(tone, 0.18 * running));
             let sent = sent_part(self.stage).filter(|_| busy).or(rebuilt);
             let shown = anim::spring(ui.ctx(), Id::unique(("capture-window-sent", &self.entry.key)), [sent.unwrap_or(0.0)], Spring::SOFT)[0].clamp(0.0, 1.0);
             if sent.is_some() {
-                bp.rect_filled(Rect::from_min_size(bar.min, vec2(bar.width() * shown, 3.0)), theme::radius(1.5), theme::alpha(theme::ACCENT, running));
+                bp.rect_filled(Rect::from_min_size(bar.min, vec2(bar.width() * shown, 3.0)), theme::radius(1.5), theme::alpha(tone, running));
             } else {
                 let k = ((anim::time(ui.ctx()) * 0.8) % 1.0) as f32;
                 let w = bar.width() * 0.35;
@@ -1098,11 +1100,12 @@ impl Dialog {
         }
         // Beside what shows its 3D view, what makes it again: while it has one, and while a run goes on (a capture without
         // one has Reconstruct to share among its actions).
-        if let Some(o) = offer.filter(|o| self.entry.ready || matches!(o, Offer::Running { .. } | Offer::Waiting { .. })) {
+        if let Some(o) = offer.filter(|o| self.entry.ready || matches!(o, Offer::Running { .. } | Offer::Paused { .. } | Offer::Waiting { .. })) {
             let (glyph, hint, pressed_does) = match o {
                 Offer::Start { .. } => (icons::MAGIC_WAND, "Trains a new 3D view from its frames: it replaces this one once it is done", Some(Act::Reconstruct)),
                 Offer::Blocked { reason, .. } => (icons::MAGIC_WAND, reason, None),
                 Offer::Running { .. } => (icons::X, "Stops it: the 3D view stays as it is", Some(Act::StopReconstruct)),
+                Offer::Paused { .. } => (icons::X, "Stops it, and what it has done so far goes: the 3D view stays as it is", Some(Act::StopReconstruct)),
                 Offer::Waiting { hint } => (icons::X, hint, Some(Act::Unqueue)),
             };
             let b = Button::new(o.label()).icon(glyph).variant(Variant::Glass).size(Size::Sm).enabled(pressed_does.is_some()).hint(hint).id_salt("capture-window-again");
@@ -1150,6 +1153,7 @@ impl Dialog {
                 let (label, can, hint) = match offer {
                     Some(Offer::Blocked { reason, .. }) => ("Reconstruct to share", false, Some(reason)),
                     Some(Offer::Running { .. } | Offer::Waiting { .. }) => ("Reconstructing…", false, None),
+                    Some(Offer::Paused { .. }) => ("Reconstruction paused", false, None),
                     _ => ("Reconstruct to share", true, None),
                 };
                 let mut b = Button::new(label).icon(icons::MAGIC_WAND).variant(Variant::Primary).enabled(can);
@@ -1318,6 +1322,12 @@ impl Dialog {
                 working_part(ui, &format!("{stage} · {:.0}%", fraction * 100.0), Some(fraction));
                 ui.add_space(6.0);
                 paragraph(ui, "You can close this window: it carries on. Its 3D view stays as it is until the new one is ready.", 11.5, theme::FG_4, w);
+            }
+            Some(Offer::Paused { fraction, why }) => {
+                ui.add_space(14.0);
+                paused_part(ui, &format!("Paused · {:.0}% kept", fraction * 100.0), fraction);
+                ui.add_space(6.0);
+                paragraph(ui, why, 11.5, theme::FG_3, w);
             }
             Some(Offer::Waiting { hint }) => {
                 ui.add_space(14.0);
@@ -1893,6 +1903,20 @@ fn working_part(ui: &mut Ui, text: &str, part: Option<f32>) {
         p.with_clip_rect(filled.intersect(p.clip_rect())).rect_filled(r, theme::radius(14.0), theme::alpha(theme::ACCENT, 0.12));
     }
     feedback::spinner(p, pos2(r.left() + 22.0, r.center().y), 7.0, 2.0, theme::ACCENT);
+    widgets::text_truncated(p, pos2(r.left() + 40.0, r.center().y), Align2::LEFT_CENTER, &Txt::new(text, 12.5).weight(weight::MEDIUM), w - 56.0);
+}
+
+/// [`working_part`] of what stands still: quiet, and no spinner.
+fn paused_part(ui: &mut Ui, text: &str, part: f32) {
+    let w = ui.available_width();
+    let (r, _) = ui.allocate_exact_size(vec2(w, 40.0), Sense::hover());
+    let p = ui.painter();
+    widgets::frame(p, r, 14.0, theme::white(0.04));
+    let id = ui.scope_id().with("paused-part");
+    let k = anim::spring(ui.ctx(), id, [part], Spring::SOFT)[0].clamp(0.0, 1.0);
+    let filled = Rect::from_min_size(r.min, vec2(r.width() * k, r.height()));
+    p.with_clip_rect(filled.intersect(p.clip_rect())).rect_filled(r, theme::radius(14.0), theme::white(0.08));
+    widgets::icon(p, pos2(r.left() + 22.0, r.center().y), icons::PAUSE, 14.0, theme::FG_2);
     widgets::text_truncated(p, pos2(r.left() + 40.0, r.center().y), Align2::LEFT_CENTER, &Txt::new(text, 12.5).weight(weight::MEDIUM), w - 56.0);
 }
 

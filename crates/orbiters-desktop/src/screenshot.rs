@@ -40,6 +40,7 @@ mod editor;
 mod splat_export;
 mod splats_select;
 mod capture_actions;
+mod pause_resume;
 mod vrchat_login;
 mod vr_audio;
 mod worlds_overlay;
@@ -202,6 +203,9 @@ fn shots(args: &[String], picture_folders: Vec<PathBuf>) -> anyhow::Result<()> {
     if only.as_deref() == Some("capture-actions-tint") {
         return capture_actions::tint(&mut Offscreen::new()?, &out, &settings, scale);
     }
+    if only.as_deref() == Some("pause-resume") {
+        return pause_resume::walk(&mut Offscreen::new()?, &out, &settings, scale);
+    }
     if only.as_deref() == Some("capture-actions") {
         return capture_actions::walk(&mut Offscreen::new()?, &out, &settings, scale);
     }
@@ -297,8 +301,18 @@ fn shots(args: &[String], picture_folders: Vec<PathBuf>) -> anyhow::Result<()> {
         psnr: Some(33.2),
         seconds: 41.0,
         integrated: true,
+        ..crate::state::ReconstructionJob::new(s.dir.clone(), true)
     });
     let job = reconstructing.reconstruction.clone();
+    // Paused by a capture, with what it did kept: what the worker's checkpoint leaves on show. What the real worker leaves
+    // is `--only pause-resume`.
+    let mut paused = reconstructing.clone();
+    paused.capture.state = crate::state::CaptureState::Recording;
+    if let Some(j) = paused.reconstruction.as_mut() {
+        j.integrated = false;
+        j.floor = crate::pages::sessions::overall_progress(j);
+        j.paused = true;
+    }
     let waiting = |base: &Snapshot| {
         let mut s = base.clone();
         s.reconstruction = sessions.get(1).zip(job.clone()).map(|(r, j)| crate::state::ReconstructionJob { session_dir: r.dir.clone(), ..j });
@@ -1095,6 +1109,20 @@ fn shots(args: &[String], picture_folders: Vec<PathBuf>) -> anyhow::Result<()> {
             name: "session-waiting",
             page: Page::Sessions,
             snapshot: waiting(&idle),
+            frames: 150,
+            splash: false,
+            open_detail: true,
+            toasts: vec![],
+            pointer: None,
+            scroll: 0.0,
+            world: None,
+            home: None,
+            library: None,
+        },
+        Scenario {
+            name: "session-reconstruction-paused",
+            page: Page::Sessions,
+            snapshot: paused,
             frames: 150,
             splash: false,
             open_detail: true,

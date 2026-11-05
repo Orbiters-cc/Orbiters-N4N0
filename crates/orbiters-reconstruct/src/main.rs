@@ -5,19 +5,26 @@
 //!     [--regularise-unseen] [--adam-restart] [--filter-3d S] [--cleanup]
 //!     [--sources opacity|gradient|error|confidence] [--sources-by-opacity] [--split footprint|long-axis|long-axis-on-depth]
 //!     [--noise λ | --no-noise] [--no-noise-gate] [--noise-visible] [--noise-dead-max share] [--depth-births share]
-//!     [--nested-forward | --flat-forward] [--gpu-profile]
+//!     [--nested-forward | --flat-forward] [--gpu-profile] [--resume] [--pause-at step,…] [--pause-in loading|seeding|finish|saving]
 //! ```
 //!
 //! Prints one [`Event`] per line on stdout for the app and writes the session's `reconstruction/` folder: the splats
 //! (PLY), the report, a preview and a render of every held-out keyframe. The folder is replaced only once everything
 //! is written, and never left half deleted ([`replace`]).
+//!
+//! A line `pause` on stdin pauses it (orbiters_reconstruct::checkpoint): it frees the GPU, writes where it stood into the
+//! session's folder and exits; `--resume` goes on from there. Without `--resume` a run starts over and leaves no
+//! checkpoint of an earlier one. `--pause-at` and `--pause-in` are the lab's pauses at chosen points of a run: steps, or
+//! shares of the steps under 1 (each start goes on until the next one).
 
 use anyhow::{bail, Context as _};
 use orbiters_contracts::qoi;
 use orbiters_core::reconstruction::{self as rec, Event, Report, Stage};
+use orbiters_reconstruct::checkpoint::{self, Extras, Interrupted, Lab, LabStage, Pause};
 use orbiters_reconstruct::{gpu, init, ply, prepare, sky, timing, train};
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 /// Where the previous result waits while the new one moves into place (`reconstruction.old`).
 const BACKUP_DIR: &str = "reconstruction.old";
@@ -42,6 +49,9 @@ struct Args {
     budget: Option<usize>,
     device: gpu::DeviceOptions,
     portrait_boxes: Option<PathBuf>,
+    /// Goes on from a paused run's checkpoint, when it has one that still fits.
+    resume: bool,
+    lab: Lab,
 }
 
 fn args() -> anyhow::Result<Args> {
@@ -52,6 +62,8 @@ fn args() -> anyhow::Result<Args> {
     let mut budget = None;
     let mut device = gpu::DeviceOptions::default();
     let mut portrait_boxes = None;
+    let mut resume = false;
+    let mut lab = Lab::default();
     while let Some(a) = it.next() {
         let mut number = |name: &str| -> anyhow::Result<u64> { it.next().with_context(|| format!("{name} needs a value"))?.parse().with_context(|| format!("{name} takes a number")) };
         match a.as_str() {
@@ -125,25 +137,111 @@ fn args() -> anyhow::Result<Args> {
             "--gpu-profile" => device.profile = true,
             "--nested-forward" => settings.nested_forward = true,
             "--flat-forward" => settings.nested_forward = false,
+            "--resume" => resume = true,
+            "--pause-at" => {
+                lab.at = it.next().context("--pause-at needs steps")?.split(',').map(str::parse).collect::<Result<_, _>>().context("--pause-at takes numbers")?;
+            }
+            "--pause-in" => lab.stage = Some(LabStage::parse(&it.next().context("--pause-in needs a stage")?)?),
             _ if a.starts_with("--") => bail!("unknown option {a}"),
             _ => session = Some(PathBuf::from(a)),
         }
     }
-    Ok(Args { portrait_boxes, session: session.context("usage: orbiters-reconstruct <session folder> [--width N] [--iterations N] [--budget N] [--robust T] [--gpu integrated|fastest]")?, width, settings, budget, device })
+    Ok(Args { resume, lab, portrait_boxes, session: session.context("usage: orbiters-reconstruct <session folder> [--width N] [--iterations N] [--budget N] [--robust T] [--gpu integrated|fastest]")?, width, settings, budget, device })
 }
 
 fn rgb8(img: &[[f32; 4]]) -> Vec<u8> {
     img.iter().flat_map(|p| [0, 1, 2].map(|c| (p[c].clamp(0.0, 1.0) * 255.0 + 0.5) as u8)).collect()
 }
 
-fn run(args: Args) -> anyhow::Result<Report> {
+/// How a run ended without failing.
+enum Ended {
+    Done(Report),
+    Paused,
+}
+
+/// Leaves before anything worth keeping exists (reading the session, seeding: seconds of the CPU, started over): a
+/// checkpoint from an earlier pause stays where it is.
+fn leave_early(session: &Path) -> ! {
+    emit(&Event::Paused { kept: checkpoint::exists(session), message: None });
+    std::process::exit(0);
+}
+
+/// The settings a checkpoint must have been made with. The GPU is not among them: a run on the integrated GPU goes on
+/// on the graphics card and back.
+fn settings_key(args: &Args) -> String {
+    format!("{:?} width {} budget {:?} boxes {:?}", args.settings, args.width, args.budget, args.portrait_boxes)
+}
+
+/// Pauses: the device goes first, which frees the graphics memory, then what the run keeps is written. At the disk's
+/// normal priority: Windows' background mode made a 480 MB checkpoint crawl at 1.3 MB/s for six minutes beside other
+/// programs' disk use, and the run cannot go on until it is written (0.7 s for 604 MB otherwise).
+fn leave(session: &Path, key: &str, state: train::Start, extras: &Extras, gpu: gpu::Gpu, dev: wgpu::Device, pause: &Pause) -> anyhow::Result<Ended> {
+    pause.ask();
+    let read_back = pause.since_asked();
+    drop(gpu);
+    drop(dev);
+    let freed = pause.since_asked();
+    emit(&Event::Pausing);
+    let writing = std::time::Instant::now();
+    let _ = std::fs::remove_dir_all(session.join(rec::PARTIAL_DIR));
+    let (kept, message) = match checkpoint::write(session, key, &state, extras) {
+        Ok(bytes) => {
+            eprintln!("checkpoint: {} MB; since asked: state read back {:.3} s, device gone {:.3} s; written in {:.3} s", bytes >> 20, read_back.as_secs_f32(), freed.as_secs_f32(), writing.elapsed().as_secs_f32());
+            (true, None)
+        }
+        Err(e) => {
+            // A checkpoint from an earlier pause stays: the run goes on from there.
+            eprintln!("no checkpoint: {e:#}");
+            (checkpoint::exists(session), Some(format!("{e:#}")))
+        }
+    };
+    emit(&Event::Paused { kept, message });
+    Ok(Ended::Paused)
+}
+
+fn run(args: Args) -> anyhow::Result<Ended> {
     let run_start = std::time::Instant::now();
     let dir = &args.session;
     // Above normal while VRChat is closed, out of its way while it runs (orbiters_reconstruct::priority).
     orbiters_reconstruct::priority::govern();
     // A swap an earlier run stopped in the middle of: its previous result is back in place first.
     recover(dir);
+    let pause = Arc::new(Pause::default());
+    {
+        let session = dir.clone();
+        checkpoint::listen(pause.clone(), move || leave_early(&session));
+    }
+    let lab = &args.lab;
+    let early_lab = |stage: LabStage| {
+        if lab.stage == Some(stage) {
+            leave_early(dir);
+        }
+    };
     stage(Stage::Loading, 0.0);
+    early_lab(LabStage::Loading);
+    let key = checkpoint::key(dir, &settings_key(&args))?;
+    // What a killed writer left; then what it finished, when asked for and still of this run.
+    checkpoint::sweep(dir);
+    let header = if args.resume {
+        checkpoint::matching_header(dir, &key)
+    } else {
+        checkpoint::discard(dir);
+        None
+    };
+    if let Some(h) = &header {
+        eprintln!("going on from step {} of {} ({} Gaussians, {:.1} s trained)", h.iteration, h.iterations, h.gaussians, h.seconds);
+        emit(&Event::Resumed { iteration: h.iteration, iterations: h.iterations, gaussians: h.gaussians, psnr: h.psnr, seconds: h.seconds });
+    }
+    // Read beside the session's frames: both are mostly the disk.
+    let body = header.clone().map(|h| {
+        let session = dir.clone();
+        std::thread::spawn(move || {
+            let start = std::time::Instant::now();
+            let body = checkpoint::read_body(&session, &h);
+            eprintln!("checkpoint read in {:.3} s", start.elapsed().as_secs_f32());
+            body
+        })
+    });
     // Training gives way to VRChat on its graphics card: the queue asks for low priority (nothing else waits on it when
     // the GPU is free), the budget fits the graphics memory VRChat leaves, and with SteamVR the frame-timing governor
     // paces the steps (orbiters_reconstruct::governor, joined by train::train while VRChat runs). The device and its
@@ -161,76 +259,156 @@ fn run(args: Args) -> anyhow::Result<Report> {
     let mut gpu = device.join().map_err(|_| anyhow::anyhow!("the GPU device's thread panicked"))??;
     let dev = gpu.device.clone();
     let mut settings = args.settings.clone();
-    // The faces in its keyframes, for the extra training they get (orbiters_reconstruct::portraits).
-    if let Some(file) = &args.portrait_boxes {
-        settings.portraits = orbiters_reconstruct::portraits::from_lab_file(file, data)?;
-    } else if settings.portrait_steps > 0 {
-        let found = timing::section("1b faces", None, || orbiters_reconstruct::portraits::find(data));
-        if found.ran {
-            eprintln!("faces: {} heads ({} known still), {} of {} boxes in {} keyframes kept, {:.2} s", found.heads, found.still, found.portraits.len(), found.detections, found.keyframes, found.seconds);
+    // A checkpoint that cannot be read costs what it held, no more: the run starts over.
+    let restored = match body.map(|b| b.join().map_err(|_| anyhow::anyhow!("reading the checkpoint panicked"))?).transpose() {
+        Ok(found) => found,
+        Err(e) => {
+            eprintln!("the paused run's checkpoint is not used ({e:#}): starting over");
+            checkpoint::discard(dir);
+            None
         }
-        settings.portraits = found.portraits;
-    }
-    // As many Gaussians as the session's views can tell apart (train::budget_for), within the graphics memory the GPU
-    // has free (beside VRChat, what it leaves).
-    let views = data.views.len() + data.faces.as_ref().map_or(0, |f| f.views.len());
-    settings.budget = args.budget.unwrap_or_else(|| train::budget_for(views));
-    eprintln!("budget: {} Gaussians for {views} views", settings.budget);
-    if !gpu.integrated {
-        fit_memory(&gpu, &mut settings);
-    }
-    stage(Stage::Seeding, 0.0);
-    let budget = settings.budget * 2 / 3;
-    let mut seeded = timing::section("3 seeding", None, || orbiters_reconstruct::priority::on_loading_threads(|| init::from_depth(data, budget, &held_out, |p| stage(Stage::Seeding, p))));
-    // Depth frames that say too little (bloom beyond what decoders take out, extreme post-processing, no depth frames
-    // at all): seeds along the keyframes' rays make up a tenth of the seeding budget, and the set may grow while many
-    // are dead.
-    let few = budget / 10;
-    if seeded.len() < few {
-        if seeded.is_empty() {
-            eprintln!("{}", prepared.nothing_to_seed());
+    };
+    let (from, extras) = match restored {
+        Some(cp) => {
+            settings.portraits = cp.extras.portraits.clone();
+            settings.starved = cp.extras.starved;
+            settings.sky_fill = cp.extras.sky_fill;
+            // The budget it had, as far as the graphics memory free now holds it (beside VRChat, it may be less), and
+            // never under the set it has.
+            settings.budget = cp.extras.budget;
+            if !gpu.integrated {
+                fit_memory(&gpu, &mut settings);
+            }
+            let held = match &cp.start {
+                train::Start::Steps(s) => s.gaussians,
+                train::Start::Trained(t) => t.gaussians.len(),
+                train::Start::Seeds(g) => g.len(),
+            };
+            settings.budget = settings.budget.max(held);
+            if let Some((width, rgb)) = &cp.extras.trained_sky {
+                gpu.set_sky(Some((*width, rgb)))?;
+            }
+            (cp.start, cp.extras)
         }
-        let from_depth = seeded.len();
-        init::add_from_rays(&mut seeded, data, few - from_depth, &held_out, settings.seed);
-        eprintln!("depth seeded {from_depth} Gaussians: {} more along the keyframes' rays", seeded.len() - from_depth);
-        settings.starved = true;
-    }
-    // What only the capture rig's faces saw has no depth: seeds along their rays, a tenth of the seeding budget.
-    if let Some(faces) = &data.faces {
-        let before = seeded.len();
-        init::add_from_face_rays(&mut seeded, data, budget / 10, settings.seed ^ 0xFACE);
-        eprintln!("the rig's {} faces: {} seeds along their rays", faces.views.len(), seeded.len() - before);
-    }
-    // The texels of the sky map that seeding saw (sky::SkyMap::fill keeps them).
-    let mut sky_seen = Vec::new();
-    if settings.sky_map > 0 {
-        // The sky as a map, which completes the sky itself: the shell's discs give way to it where the parallax test
-        // found true sky (orbiters_reconstruct::sky). A capture none of whose pixels saw the sky keeps the shell.
-        let (map, found) = timing::section("3 sky seed", None, || sky::seed_map(data, settings.sky_map, &held_out));
-        if found.pixels > 0 {
-            settings.sky_fill = false;
-            let left = sky::give_way(&mut seeded, &found, train::camera_centre(data));
-            eprintln!(
-                "sky map: {} across from {} sky pixels, {} texels seen; {} of the {} 5.6° cells seen from both halves of the walk differ between them; {left} of the shell's discs leave for the map",
-                map.width, found.pixels, found.texels_seen, found.cells_parallax, found.cells_tested
-            );
-            gpu.set_sky(Some((map.width, &map.rgb)))?;
-            sky_seen = found.texels;
-        } else {
-            eprintln!("sky map: no keyframe pixel saw the sky: the shell of discs stays");
+        None => {
+            // The faces in its keyframes, for the extra training they get (orbiters_reconstruct::portraits).
+            if let Some(file) = &args.portrait_boxes {
+                settings.portraits = orbiters_reconstruct::portraits::from_lab_file(file, data)?;
+            } else if settings.portrait_steps > 0 {
+                let found = timing::section("1b faces", None, || orbiters_reconstruct::portraits::find(data));
+                if found.ran {
+                    eprintln!("faces: {} heads ({} known still), {} of {} boxes in {} keyframes kept, {:.2} s", found.heads, found.still, found.portraits.len(), found.detections, found.keyframes, found.seconds);
+                }
+                settings.portraits = found.portraits;
+            }
+            // As many Gaussians as the session's views can tell apart (train::budget_for), within the graphics memory the GPU
+            // has free (beside VRChat, what it leaves).
+            let views = data.views.len() + data.faces.as_ref().map_or(0, |f| f.views.len());
+            settings.budget = args.budget.unwrap_or_else(|| train::budget_for(views));
+            eprintln!("budget: {} Gaussians for {views} views", settings.budget);
+            if !gpu.integrated {
+                fit_memory(&gpu, &mut settings);
+            }
+            stage(Stage::Seeding, 0.0);
+            early_lab(LabStage::Seeding);
+            let budget = settings.budget * 2 / 3;
+            let mut seeded = timing::section("3 seeding", None, || orbiters_reconstruct::priority::on_loading_threads(|| init::from_depth(data, budget, &held_out, |p| stage(Stage::Seeding, p))));
+            // Depth frames that say too little (bloom beyond what decoders take out, extreme post-processing, no depth frames
+            // at all): seeds along the keyframes' rays make up a tenth of the seeding budget, and the set may grow while many
+            // are dead.
+            let few = budget / 10;
+            if seeded.len() < few {
+                if seeded.is_empty() {
+                    eprintln!("{}", prepared.nothing_to_seed());
+                }
+                let from_depth = seeded.len();
+                init::add_from_rays(&mut seeded, data, few - from_depth, &held_out, settings.seed);
+                eprintln!("depth seeded {from_depth} Gaussians: {} more along the keyframes' rays", seeded.len() - from_depth);
+                settings.starved = true;
+            }
+            // What only the capture rig's faces saw has no depth: seeds along their rays, a tenth of the seeding budget.
+            if let Some(faces) = &data.faces {
+                let before = seeded.len();
+                init::add_from_face_rays(&mut seeded, data, budget / 10, settings.seed ^ 0xFACE);
+                eprintln!("the rig's {} faces: {} seeds along their rays", faces.views.len(), seeded.len() - before);
+            }
+            // The texels of the sky map that seeding saw (sky::SkyMap::fill keeps them).
+            let mut sky_seen = Vec::new();
+            if settings.sky_map > 0 {
+                // The sky as a map, which completes the sky itself: the shell's discs give way to it where the parallax test
+                // found true sky (orbiters_reconstruct::sky). A capture none of whose pixels saw the sky keeps the shell.
+                let (map, found) = timing::section("3 sky seed", None, || sky::seed_map(data, settings.sky_map, &held_out));
+                if found.pixels > 0 {
+                    settings.sky_fill = false;
+                    let left = sky::give_way(&mut seeded, &found, train::camera_centre(data));
+                    eprintln!(
+                        "sky map: {} across from {} sky pixels, {} texels seen; {} of the {} 5.6° cells seen from both halves of the walk differ between them; {left} of the shell's discs leave for the map",
+                        map.width, found.pixels, found.texels_seen, found.cells_parallax, found.cells_tested
+                    );
+                    gpu.set_sky(Some((map.width, &map.rgb)))?;
+                    sky_seen = found.texels;
+                } else {
+                    eprintln!("sky map: no keyframe pixel saw the sky: the shell of discs stays");
+                }
+            }
+            if seeded.is_empty() {
+                bail!("{}", prepared.nothing_to_seed());
+            }
+            let extras = Extras { budget: settings.budget, starved: settings.starved, sky_fill: settings.sky_fill, portraits: settings.portraits.clone(), sky_seen, trained_sky: None };
+            (train::Start::Seeds(seeded), extras)
         }
-    }
-    if seeded.is_empty() {
-        bail!("{}", prepared.nothing_to_seed());
-    }
-    stage(Stage::Training, 0.0);
-    let outcome = timing::section("4 train", Some(&dev), || {
-        train::train(data, &mut gpu, seeded, &settings, |p| {
+    };
+    let mut extras = extras;
+    let done_share = match &from {
+        train::Start::Steps(s) => s.iteration as f32 / s.iterations.max(1) as f32,
+        train::Start::Trained(_) => 1.0,
+        train::Start::Seeds(_) => 0.0,
+    };
+    // From here on a pause has something to keep.
+    pause.begin_steps();
+    stage(Stage::Training, done_share);
+    let control = train::Control { pause: Some(&pause), lab: Some(lab) };
+    let ran = timing::section("4 train", Some(&dev), || {
+        train::train_from(data, &mut gpu, from, &settings, control, |p| {
             emit(&Event::Progress { iteration: p.iteration, iterations: p.iterations, gaussians: p.gaussians, intersections: p.intersections, psnr: p.psnr, seconds: p.seconds });
         })
     })?;
-
+    // What training left of the sky map: the texels it moved, and those seeding saw. Read here, so that a pause from here on
+    // keeps the map as training left it (its Adam moments are gone once the map is completed).
+    let sky_after = |gpu: &gpu::Gpu, seen: &[bool]| -> anyhow::Result<Option<(u32, Vec<[f32; 3]>, Vec<bool>)>> {
+        let Some((width, rgb)) = gpu.sky()? else { return Ok(None) };
+        let trained = gpu.sky_trained()?.unwrap_or_default();
+        let known = (0..rgb.len()).map(|t| trained.get(t).copied().unwrap_or(false) || seen.get(t).copied().unwrap_or(false)).collect();
+        Ok(Some((width, rgb, known)))
+    };
+    let outcome = match ran {
+        train::Ran::Finished(outcome) => outcome,
+        train::Ran::Paused(state) => {
+            if matches!(state, train::Start::Trained(_)) {
+                if let Some((width, rgb, known)) = sky_after(&gpu, &extras.sky_seen)? {
+                    extras.trained_sky = Some((width, rgb));
+                    extras.sky_seen = known;
+                }
+            }
+            return leave(dir, &key, state, &extras, gpu, dev, &pause);
+        }
+    };
+    let trained_sky = sky_after(&gpu, &extras.sky_seen)?;
+    lab.entering(LabStage::Saving, Some(&pause));
     stage(Stage::Saving, 0.0);
+    // Paused from here on: the final set and the map as training left it stay, what is below starts over (seconds).
+    let paused_after_steps = |outcome: train::Outcome, extras: &mut Extras, psnr: Option<f32>| {
+        if let Some((width, rgb, known)) = trained_sky.clone() {
+            extras.trained_sky = Some((width, rgb));
+            extras.sky_seen = known;
+        }
+        train::Start::Trained(Box::new(checkpoint::TrainedState { gaussians: outcome.gaussians, iterations: outcome.iterations, seconds: outcome.seconds, psnr }))
+    };
+    if pause.asked() {
+        eprintln!("pausing while saving");
+        let state = paused_after_steps(outcome, &mut extras, None);
+        return leave(dir, &key, state, &extras, gpu, dev, &pause);
+    }
     let partial = dir.join(rec::PARTIAL_DIR);
     if partial.exists() {
         std::fs::remove_dir_all(&partial).with_context(|| format!("clearing {}", partial.display()))?;
@@ -238,11 +416,9 @@ fn run(args: Args) -> anyhow::Result<Report> {
     std::fs::create_dir_all(partial.join(rec::HELD_OUT_DIR))?;
     timing::section("5 ply", None, || ply::write(&partial.join(rec::PLY_FILE), &outcome.gaussians))?;
     let sky_start = std::time::Instant::now();
-    if let Some((width, rgb)) = gpu.sky()? {
+    if let Some((width, rgb, known)) = trained_sky.clone() {
         // What neither seeding nor training saw takes the sky's colour at its elevation, carried smoothly on from what
         // they saw (sky::SkyMap::fill): the map as viewers draw it, and as the held-out keyframes are scored.
-        let trained = gpu.sky_trained()?.unwrap_or_default();
-        let known: Vec<bool> = (0..rgb.len()).map(|t| trained.get(t).copied().unwrap_or(false) || sky_seen.get(t).copied().unwrap_or(false)).collect();
         let mut map = sky::SkyMap { width, rgb };
         map.fill(&known);
         gpu.set_sky(Some((map.width, &map.rgb)))?;
@@ -260,9 +436,17 @@ fn run(args: Args) -> anyhow::Result<Report> {
     };
     // The first held-out keyframe's render is the preview.
     let preview = outcome.held_out.first().copied();
-    let psnr_held_out = timing::section("6 score held out", Some(&dev), || {
+    let scored = timing::section("6 score held out", Some(&dev), || {
         train::score_held_out(&mut gpu, data, prepared.undo.as_ref(), &outcome.held_out, settings.background, |i, img| write(i, img, Some(i) == preview))
-    })?;
+    });
+    let psnr_held_out = match scored {
+        Err(e) if e.is::<Interrupted>() => {
+            eprintln!("pausing while scoring");
+            let state = paused_after_steps(outcome, &mut extras, None);
+            return leave(dir, &key, state, &extras, gpu, dev, &pause);
+        }
+        scored => scored?,
+    };
     if outcome.held_out.is_empty() {
         write(0, &train::render(&mut gpu, &data.views[0].camera, settings.background)?, true)?;
     }
@@ -287,6 +471,8 @@ fn run(args: Args) -> anyhow::Result<Report> {
     };
     std::fs::write(partial.join(rec::REPORT_FILE), serde_json::to_string_pretty(&report)?)?;
     timing::section("7 replace", None, || replace(dir, &partial))?;
+    // The run is over: what it could have gone on from goes (a pause asked this late changes nothing).
+    checkpoint::discard(dir);
     timing::add("0 run", run_start.elapsed());
     timing::print();
     if let Some(p) = &gpu.profiler {
@@ -294,7 +480,7 @@ fn run(args: Args) -> anyhow::Result<Report> {
         let sections: serde_json::Map<String, serde_json::Value> = p.totals.borrow().iter().map(|(k, (ms, n))| (k.to_string(), serde_json::json!({"ms": ms, "passes": n}))).collect();
         eprintln!("gpu_profile {}", serde_json::json!({"steps": steps, "span_ms": span, "sections": sections, "gaussians": report.gaussians, "iterations": report.iterations, "seconds": report.seconds}));
     }
-    Ok(report)
+    Ok(Ended::Done(report))
 }
 
 /// Lowers `settings.budget` until a run fits the graphics memory the GPU has free (beside VRChat, what it leaves),
@@ -503,9 +689,21 @@ fn main() {
         }
         return;
     }
-    match args().and_then(run) {
-        Ok(report) => emit(&Event::Done { report }),
+    let args = match args() {
+        Ok(args) => args,
         Err(e) => {
+            emit(&Event::Error { message: format!("{e:#}") });
+            std::process::exit(1);
+        }
+    };
+    let session = args.session.clone();
+    match run(args) {
+        Ok(Ended::Done(report)) => emit(&Event::Done { report }),
+        // It said so as it left.
+        Ok(Ended::Paused) => {}
+        Err(e) => {
+            // A run that failed goes again from the start: a checkpoint could be what made it fail.
+            checkpoint::discard(&session);
             emit(&Event::Error { message: format!("{e:#}") });
             std::process::exit(1);
         }

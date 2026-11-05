@@ -4,6 +4,7 @@
 pub mod aberration;
 pub mod births;
 pub mod camera;
+pub mod checkpoint;
 pub mod cleanup;
 pub mod cpu;
 pub mod dataset;

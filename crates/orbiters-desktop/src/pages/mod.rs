@@ -5,6 +5,7 @@ pub mod community;
 pub mod community_talk;
 pub mod editor;
 pub mod events;
+pub mod experimental;
 pub mod form;
 pub mod header;
 pub mod home;

@@ -4074,6 +4074,7 @@ version = "0.3.4-dev.32"
 dependencies = [
  "anyhow",
  "arboard",
+ "base64 0.22.1",
  "bytemuck",
  "eframe",
  "egui",

@@ -72,6 +72,17 @@ pub struct Settings {
     pub picture_folders: Vec<PathBuf>,
     /// Windows' default sound output and input while SteamVR runs (`docs/vr-audio-devices.md`).
     pub vr_audio: VrAudioSettings,
+    /// What this person turned on among the experimental features. A feature here only ever narrows what the server
+    /// grants (`crate::features`): turning one on in this file does nothing for an account that does not have it.
+    pub experimental: ExperimentalSettings,
+}
+
+/// The experimental features (Settings, Experimental), all off until chosen.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ExperimentalSettings {
+    /// The MCP bridge to VRChat, for an agent to start and control the game (`docs/vrchat-bridge.md`).
+    pub vrchat_bridge: bool,
 }
 
 /// The sound devices Windows uses by default while SteamVR runs: set for all three of Windows' roles (console,
@@ -568,6 +579,7 @@ impl Default for Settings {
             photos_layout: GalleryLayout::default(),
             picture_folders: Vec::new(),
             vr_audio: VrAudioSettings::default(),
+            experimental: ExperimentalSettings::default(),
         }
     }
 }

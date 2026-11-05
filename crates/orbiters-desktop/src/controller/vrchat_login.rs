@@ -107,7 +107,7 @@ impl Runtime {
     }
 }
 impl Controller {
-    fn vrchat_identity(&self) -> Option<(Api, String)> {
+    pub(super) fn vrchat_identity(&self) -> Option<(Api, String)> {
         let snap = self.view();
         if !matches!(snap.account.state, AccountState::SignedIn { .. }) || snap.account.development != (Server::current() == Server::Development) {
             return None;

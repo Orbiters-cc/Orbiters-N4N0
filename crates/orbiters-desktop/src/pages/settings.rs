@@ -41,6 +41,8 @@ pub struct State {
     steamvr_job: Option<(bool, Job<Result<bool, String>>)>,
     /// "When SteamVR starts": Windows' sound devices in VR.
     vr_audio: super::vr_audio::State,
+    /// Experimental: the VRChat bridge.
+    experimental: super::experimental::State,
 }
 
 impl State {
@@ -115,6 +117,10 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
             let mut m = super::Masonry::new(ui, "settings");
             m.add(1, |ui| account(ui, cx, &mut state.confirm_sign_out));
             m.add(10, |ui| vrchat_account(ui, cx, &mut state.vrchat));
+            // Only for an account the server says has it: nobody else sees a trace of it.
+            if snap.bridge.allowed {
+                m.add(11, |ui| apply |= super::experimental::show(ui, cx, 11, &mut state.experimental, &mut draft.experimental));
+            }
 
             m.add(2, |ui| section(ui, cx, 2, icons::GAUGE, "Capture", Some("How frames become a session"), |ui| {
                 let kf = &mut draft.keyframes;

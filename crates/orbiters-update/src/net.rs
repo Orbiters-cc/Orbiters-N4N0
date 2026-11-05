@@ -192,7 +192,8 @@ mod tests {
             installer: Artifact { url: "1.2.3/OrbitersSetup-1.2.3.exe".into(), sha256: hex(&Sha256::digest(&setup)), size: setup.len() as u64 },
         };
         let signed = serde_json::to_vec(&SignedRelease::sign(&release, &private).unwrap()).unwrap();
-        let base = serve(vec![("/desktop/stable.json", signed), ("/desktop/1.2.3/OrbitersSetup-1.2.3.exe", setup.clone())]);
+        let feed_file = if crate::PLATFORM_FOLDER.is_empty() { "/desktop/stable.json" } else { "/desktop/macos/stable.json" };
+        let base = serve(vec![(feed_file, signed), ("/desktop/1.2.3/OrbitersSetup-1.2.3.exe", setup.clone())]);
         // The only test here that reads the feed.
         std::env::set_var("ORBITERS_UPDATE_FEED", format!("{base}/desktop"));
 

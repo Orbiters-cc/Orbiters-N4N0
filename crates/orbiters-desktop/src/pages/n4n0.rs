@@ -469,7 +469,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
                 widgets::field(ui, "Microphone", Some("The one N4N0 listens to."), 0.0, |_| {});
                 ui.horizontal_wrapped(|ui| {
                     ui.spacing_mut().item_spacing = vec2(8.0, 8.0);
-                    if source_chip(ui, "Windows default", draft.n4n0.mic_device.is_empty()).clicked() {
+                    if source_chip(ui, crate::words::DEFAULT_MIC, draft.n4n0.mic_device.is_empty()).clicked() {
                         draft.n4n0.mic_device.clear();
                         apply = true;
                     }

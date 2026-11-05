@@ -107,9 +107,28 @@ pub fn development() -> bool {
     DEVELOPMENT.load(std::sync::atomic::Ordering::Relaxed)
 }
 
+/// The folder of the feed a platform's releases are in: a Mac's programs are not Windows', and an installed app of either
+/// must never hear of the other's. Windows' stay at the feed's root, where its apps have always looked.
+pub const PLATFORM_FOLDER: &str = if cfg!(target_os = "macos") { "macos/" } else { "" };
+
 /// Where a channel's release is published.
 pub fn release_url(feed: &str, channel: &str) -> String {
-    format!("{}/{channel}.json", feed.trim_end_matches('/'))
+    format!("{}/{PLATFORM_FOLDER}{channel}.json", feed.trim_end_matches('/'))
+}
+
+/// The application on the Mac, as the disk image and the update archive hold it.
+pub const MAC_APP: &str = "Orbiters - N4N0.app";
+/// The Mac application's bundle identifier.
+pub const MAC_BUNDLE_ID: &str = "cc.orbiters.n4n0";
+
+/// What a Mac release is downloaded as to update an install: the application, zipped with its signature whole.
+pub fn mac_archive_name(version: &str) -> String {
+    format!("Orbiters-N4N0-{version}-macos-arm64.zip")
+}
+
+/// What a person downloads to install it by hand.
+pub fn mac_disk_image_name(version: &str) -> String {
+    format!("Orbiters-N4N0-{version}-macos-arm64.dmg")
 }
 
 /// One release of a channel.
@@ -258,6 +277,14 @@ impl InstallRecord {
     /// setup (a development build, an unpacked copy), which then never updates itself.
     pub fn of_this_program() -> Option<(PathBuf, Self)> {
         let dir = std::env::current_exe().ok()?.parent()?.to_path_buf();
+        // On the Mac the install is the application itself: `Contents/MacOS` holds only code, the record is among its
+        // resources, and an update replaces the whole of it.
+        if cfg!(target_os = "macos") {
+            let contents = dir.parent()?;
+            let bundle = contents.parent()?;
+            let record = Self::read(&contents.join("Resources"))?;
+            return bundle.extension().is_some_and(|e| e == "app").then(|| (bundle.to_path_buf(), record));
+        }
         let record = Self::read(&dir)?;
         Some((dir, record))
     }
@@ -275,8 +302,11 @@ pub fn updates_dir() -> PathBuf {
     dirs::data_local_dir().unwrap_or_else(std::env::temp_dir).join("Orbiters").join("Desktop").join("updates")
 }
 
-/// The file a release's setup is downloaded to.
+/// The file a release's setup is downloaded to (on the Mac, its archive).
 pub fn setup_file(version: &str) -> PathBuf {
+    if cfg!(target_os = "macos") {
+        return updates_dir().join(mac_archive_name(version));
+    }
     updates_dir().join(format!("OrbitersSetup-{version}.exe"))
 }
 
@@ -304,7 +334,8 @@ pub fn hex(bytes: &[u8]) -> String {
 /// outside it (absolute, a drive, `..`), which no payload or record may hold.
 pub fn inside(dir: &Path, relative: &str) -> Option<PathBuf> {
     let rel = Path::new(relative);
-    let normal = !relative.is_empty() && rel.components().all(|c| matches!(c, Component::Normal(_)));
+    // A drive is only a prefix to Windows' paths: elsewhere `C:/x` would pass as a folder called `C:`.
+    let normal = !relative.is_empty() && !relative.contains(':') && rel.components().all(|c| matches!(c, Component::Normal(_)));
     normal.then(|| dir.join(rel))
 }
 
@@ -380,7 +411,7 @@ mod tests {
         assert_eq!(a.resolve("https://orbiters.cc/downloads/desktop/"), "https://orbiters.cc/downloads/desktop/1.2.3/OrbitersSetup-1.2.3.exe");
         let b = Artifact { url: "https://cdn.example/x.exe".into(), ..a };
         assert_eq!(b.resolve("https://orbiters.cc/downloads/desktop"), "https://cdn.example/x.exe");
-        assert_eq!(release_url("https://orbiters.cc/downloads/desktop/", STABLE), "https://orbiters.cc/downloads/desktop/stable.json");
+        assert_eq!(release_url("https://orbiters.cc/downloads/desktop/", STABLE), format!("https://orbiters.cc/downloads/desktop/{PLATFORM_FOLDER}stable.json"));
     }
 
     #[test]

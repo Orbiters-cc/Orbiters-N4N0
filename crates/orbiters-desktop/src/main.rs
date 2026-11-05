@@ -18,6 +18,10 @@ mod drag_out;
 mod gpu;
 mod ipc;
 mod keys;
+#[cfg(target_os = "macos")]
+mod mac;
+#[cfg(target_os = "macos")]
+mod mac_update;
 mod mailbox;
 mod media;
 mod menu_host;
@@ -39,6 +43,7 @@ mod upload_prep;
 mod views;
 mod worlds;
 mod window;
+mod words;
 mod worker;
 
 fn main() -> anyhow::Result<()> {
@@ -66,6 +71,8 @@ fn main() -> anyhow::Result<()> {
         Some("--prepare-upload") => upload_prep::run(&args[1..]),
         #[cfg(windows)]
         Some("--eye-picture") => overlay::eye_picture::run(&args[1..]),
+        #[cfg(target_os = "macos")]
+        Some("--apply-update") => mac_update::run(&args[1..]),
         Some("--quit") => {
             single::signal(single::Request::Quit);
             Ok(())

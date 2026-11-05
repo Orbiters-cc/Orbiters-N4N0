@@ -27,7 +27,11 @@ pub fn starts_with_windows() -> bool {
     {
         orbiters_update::windows_start::program().is_some()
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "macos")]
+    {
+        mac::is_set()
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
     {
         false
     }
@@ -39,10 +43,97 @@ pub fn set_start_with_windows(on: bool) -> anyhow::Result<()> {
     {
         orbiters_update::windows_start::set(&std::env::current_exe()?, on)
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "macos")]
+    {
+        mac::set(on)
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
     {
         let _ = on;
         anyhow::bail!("starting with the system is for Windows only")
+    }
+}
+
+/// Starting at login on the Mac: a launch agent of the person's own (`~/Library/LaunchAgents`, no administrator rights)
+/// that runs the app in the menu bar.
+#[cfg(target_os = "macos")]
+pub mod mac {
+    use std::path::{Path, PathBuf};
+
+    const LABEL: &str = "cc.orbiters.n4n0";
+
+    fn agent_file() -> anyhow::Result<PathBuf> {
+        Ok(std::env::var_os("HOME").map(PathBuf::from).ok_or_else(|| anyhow::anyhow!("no home folder"))?.join("Library/LaunchAgents").join(format!("{LABEL}.plist")))
+    }
+
+    fn escape(text: &str) -> String {
+        text.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
+    }
+
+    /// The launch agent that starts `exe` at login, in the menu bar.
+    pub fn agent(exe: &Path) -> String {
+        format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>{LABEL}</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>{}</string>
+        <string>--hidden</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>ProcessType</key>
+    <string>Interactive</string>
+    <key>LimitLoadToSessionType</key>
+    <string>Aqua</string>
+</dict>
+</plist>
+"#,
+            escape(&exe.to_string_lossy())
+        )
+    }
+
+    pub fn is_set() -> bool {
+        agent_file().is_ok_and(|p| p.is_file())
+    }
+
+    pub fn set(on: bool) -> anyhow::Result<()> {
+        let path = agent_file()?;
+        if on {
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::write(&path, agent(&std::env::current_exe()?))?;
+        } else if let Err(e) = std::fs::remove_file(&path) {
+            anyhow::ensure!(e.kind() == std::io::ErrorKind::NotFound, "{}: {e}", path.display());
+        }
+        Ok(())
+    }
+
+    /// An app that moved or was updated elsewhere keeps its start: the agent names the program running now.
+    pub fn follow_this_program() {
+        if !is_set() {
+            return;
+        }
+        let (Ok(path), Ok(exe)) = (agent_file(), std::env::current_exe()) else { return };
+        let wanted = agent(&exe);
+        if std::fs::read_to_string(&path).ok().as_deref() != Some(wanted.as_str()) {
+            let _ = std::fs::write(&path, wanted);
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        #[test]
+        fn the_agent_names_the_program_in_the_menu_bar() {
+            let text = super::agent(std::path::Path::new("/Applications/Orbiters & co.app/Contents/MacOS/orbiters-desktop"));
+            assert!(text.contains("<string>/Applications/Orbiters &amp; co.app/Contents/MacOS/orbiters-desktop</string>"));
+            assert!(text.contains("<string>--hidden</string>") && text.contains("<key>RunAtLoad</key>"));
+        }
     }
 }
 

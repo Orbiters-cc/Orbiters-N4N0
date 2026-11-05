@@ -63,6 +63,19 @@ the world, your avatar, how many people were there and the names of their avatar
 graphics card, processor and headset (contracts `Docs/world-performance.md`). The Map explorer shows which worlds run
 well.
 
+## On a Mac
+
+Orbiters - N4N0 runs on Macs with Apple silicon, with the same window. VRChat has no Mac version, so what needs it on the
+same computer has nothing to read there (Spout, SteamVR, VRChat's log: recording, 3D pictures, the QR code scanner, fast
+walk, tracking, the SteamVR overlay, world view). Everything else works: Unity projects, Photos & captures and their
+reconstruction, the 3D view and the editors, Visited worlds and Events through your account, calls, N4N0 and its menu, and
+OSC with a **VRChat on another device of the network**.
+
+That VRChat is found by itself: a Quest, a Pico or an Android phone on the same Wi-Fi, with OSC on in VRChat's Action Menu
+(Options › OSC › Enabled), shows up in Home and Settings within seconds, and the only one found is connected at once
+(several: you choose; some routers keep devices from finding each other: type its address). A PC needs one launch option,
+which the same card writes out for you to copy: `--osc=9000:<this Mac's address>:9001`.
+
 ## Layout
 
 | Path | What it is |
@@ -76,7 +89,7 @@ well.
 | `crates/orbiters-n4n0` | N4N0's runtime, shared with the Android app: the panel, faces and helpers, the assistant's turns, N4N0's menu on the avatar's screen and the menu host the interfaces run, saved states, link cards, its ears, the music watcher; what each platform does its own way behind small traits (the app, OSC, clipboard, browser, sounds, language, ears, mouse, music, files) |
 | `crates/orbiters-voice` | N4N0's ears, a worker process (`orbiters-voice`): the microphone while N4N0 listens, Silero VAD and NVIDIA Parakeet through sherpa-onnx, on the CPU; it also installs the speech models |
 | `crates/orbiters-call` | N4N0's calls, a worker process (`orbiters-call`): WebRTC voice (webrtc-rs, Opus) between two Orbiters - N4N0 apps, through Cloudflare Realtime TURN when needed (contracts `Docs/n4n0-calls.md`) |
-| `crates/orbiters-audio` | Microphones and a process's sound through WASAPI, for the capture worker and the voice worker |
+| `crates/orbiters-audio` | Microphones and a process's sound through WASAPI (microphones through Core Audio on a Mac), for the capture worker and the voice worker |
 | `crates/orbiters-core` | Shared logic: settings, session bundles, keyframes, VRChat log, OSC/OSCQuery (this computer's VRChat, or a Quest's over the Wi-Fi), worker protocols; TLS, folders and the account's store per platform |
 | `crates/orbiters-projects` | Unity discovery, shared VCC/ALCOM project storage and VPM packages, avatar inventory and Toolkit setup requests ([Unity projects](docs/unity-projects.md)) |
 | `crates/orbiters-spout` | Spout2 receiver and test sender (Direct3D 11), protocol-compatible with the Spout2 SDK |
@@ -94,6 +107,9 @@ git submodule update --init
 cargo build --release -p orbiters-desktop -p orbiters-capture -p orbiters-reconstruct -p orbiters-voice -p orbiters-call
 target/release/orbiters-desktop
 ```
+
+On a Mac: Xcode's command line tools and CMake (`brew install cmake`); the same `cargo build` command makes the programs,
+and `cargo xtask dist` the application and its disk image ([Releasing](docs/releasing.md)).
 
 Building `orbiters-voice` downloads sherpa-onnx's prebuilt shared libraries (about 8 MB, from k2-fsa's GitHub
 releases) and places `sherpa-onnx-c-api.dll` and `onnxruntime.dll` next to it; ship them with it. The speech models

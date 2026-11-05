@@ -12,6 +12,7 @@ pub mod explicit;
 pub mod features;
 pub mod gallery_talk;
 pub mod keyframes;
+pub mod lan;
 pub mod maps;
 pub mod osc;
 pub mod panic_log;
@@ -31,6 +32,27 @@ pub mod vrchat_source;
 pub mod world_feedback;
 
 pub use orbiters_contracts as contracts;
+
+/// Ends this worker when the service that started it goes, even killed or crashed. On Windows the service's job object
+/// does this; the Mac has no such thing, so a worker watches for it: its
+/// parent changes when the service is gone. A worker left behind would keep the GPU or the microphone.
+pub fn leave_with_parent() {
+    #[cfg(target_os = "macos")]
+    {
+        extern "C" {
+            fn getppid() -> i32;
+        }
+        // SAFETY: getppid takes nothing and cannot fail.
+        let parent = unsafe { getppid() };
+        let _ = std::thread::Builder::new().name("parent".into()).spawn(move || loop {
+            std::thread::sleep(std::time::Duration::from_secs(2));
+            // SAFETY: as above.
+            if unsafe { getppid() } != parent {
+                std::process::exit(0);
+            }
+        });
+    }
+}
 
 /// Version of the app and its workers (they must match: the shell refuses a worker of another version).
 pub const APP_VERSION: &str = env!("CARGO_PKG_VERSION");

@@ -18,7 +18,7 @@ mdns-sd = { workspace = true }
 flate2 = { workspace = true }
 if-addrs = "0.15"
 memchr = "2"
-socket2 = "0.6"
+socket2 = { version = "0.6", features = ["all"] }
 sha2 = "0.10"
 base64 = "0.22"
 rusqlite = { version = "0.40", features = ["bundled"] }
@@ -26,6 +26,11 @@ ureq = { version = "3", default-features = false, features = ["json", "gzip", "m
 
 [target.'cfg(windows)'.dependencies]
 windows = { workspace = true, features = ["Win32_Security_Cryptography"] }
+
+# The session store's key in the login keychain, and its AES-GCM (`dpapi`; ring is already built for the releases' signatures).
+[target.'cfg(target_os = "macos")'.dependencies]
+security-framework = "3"
+ring = "0.17"
 
 # TLS (`http_tls`): Windows' own through native TLS on the desktop; rustls with ring on Android, where native TLS would
 # mean OpenSSL. Crates that reach the web through this one take its TLS.

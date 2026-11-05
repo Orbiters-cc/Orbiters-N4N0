@@ -483,6 +483,9 @@ pub struct OscSettings {
     /// While recording from Spout, open VRChat's camera in Stream mode with Spout Stream on (OSC), and put it back
     /// as it was afterwards.
     pub drive_camera: bool,
+    /// Which VRChat on the network the app talks with, where VRChat does not run on this computer
+    /// ([`crate::osc::VRCHAT_RUNS_HERE`]).
+    pub remote: crate::lan::Wanted,
 }
 
 /// What a session records besides the frames (avatar parameters are under [`OscSettings`]).
@@ -515,7 +518,7 @@ impl Default for KeyframeSettings {
 
 impl Default for OscSettings {
     fn default() -> Self {
-        Self { enabled: true, vrchat_port: 9000, record_parameters: true, drive_camera: true }
+        Self { enabled: true, vrchat_port: 9000, record_parameters: true, drive_camera: true, remote: Default::default() }
     }
 }
 

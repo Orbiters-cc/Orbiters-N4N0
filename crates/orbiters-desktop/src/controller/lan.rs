@@ -1,0 +1,208 @@
+//! VRChat on the network, where it does not run on this computer ([`orbiters_core::osc::VRCHAT_RUNS_HERE`]): a thread
+//! keeps the list of those found, chooses the one to talk with ([`orbiters_core::lan::choose`]), and keeps the OSC service
+//! on the network that VRChat is on, on the port a PC's launch options name when it can have it.
+
+use super::{NoticeKind, Shared};
+use crate::state::{LanLink, LanStatus};
+use orbiters_core::lan::{self, Choice, LanBrowser};
+use orbiters_core::osc::{Discovery, LanVrchat, Network, Ports};
+use std::net::Ipv4Addr;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
+
+const EVERY: Duration = Duration::from_millis(500);
+/// Sends nothing and answers nothing for this long: no longer connected.
+const QUIET_NS: u64 = 60_000_000_000;
+/// Keeps the service's own browsing from binding to one VRChat while several are there and none is chosen.
+const NO_NAME: &str = "VRChat-Client-none-chosen";
+
+/// What the controller keeps for this.
+#[derive(Default)]
+pub(super) struct Runtime {
+    look: AtomicBool,
+    settings: AtomicBool,
+    alive: AtomicBool,
+}
+
+impl Runtime {
+    /// Looks on the network again at its next turn (Look again).
+    pub(super) fn look_again(&self) {
+        self.look.store(true, Ordering::Relaxed);
+    }
+
+    /// OSC's settings changed: acted on at its next turn.
+    pub(super) fn settings_changed(&self) {
+        self.settings.store(true, Ordering::Relaxed);
+    }
+
+    /// A VRChat on the network answers or sends.
+    pub(super) fn alive(&self) -> bool {
+        self.alive.load(Ordering::Relaxed)
+    }
+}
+
+/// What a running OSC service was started for. VRChat's input port is not part of it: a port learned later reaches the
+/// running service, which VRChat knows, without restarting it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Running {
+    here: Ipv4Addr,
+    peer: Option<Ipv4Addr>,
+    /// No VRChat is to be taken on its own: several are there.
+    asked: bool,
+}
+
+/// What the link is, from what is chosen and heard.
+fn link(choice: &Choice, here: Option<Ipv4Addr>, heard: bool) -> LanLink {
+    match (here, choice) {
+        (None, _) => LanLink::NoNetwork,
+        (_, Choice::Nobody) => LanLink::Looking,
+        (_, Choice::Ask) => LanLink::Choose,
+        (_, _) if heard => LanLink::Connected,
+        (_, Choice::Found(found)) if found.osc_port.is_some() => LanLink::Connected,
+        _ => LanLink::Waiting,
+    }
+}
+
+impl super::Controller {
+    /// Starts the thread, on a computer VRChat does not run on.
+    pub(super) fn start_lan(self: &Shared) {
+        if orbiters_core::osc::VRCHAT_RUNS_HERE {
+            return;
+        }
+        let ctl = std::sync::Arc::downgrade(self);
+        let _ = std::thread::Builder::new().name("vrchat-network".into()).spawn(move || {
+            let mut browser: Option<LanBrowser> = None;
+            let mut running: Option<Running> = None;
+            loop {
+                {
+                    let Some(ctl) = ctl.upgrade() else { return };
+                    if ctl.quitting.load(Ordering::Relaxed) {
+                        return;
+                    }
+                    ctl.keep_lan(&mut browser, &mut running);
+                }
+                std::thread::sleep(EVERY);
+            }
+        });
+    }
+
+    /// One turn: the list, the choice, the service, what the interface shows.
+    fn keep_lan(self: &Shared, browser: &mut Option<LanBrowser>, running: &mut Option<Running>) {
+        let (enabled, wanted) = self.with_settings(|s| (s.osc.enabled, s.osc.remote.clone()));
+        let settings_changed = self.lan.settings.swap(false, Ordering::Relaxed);
+        if !enabled {
+            *browser = None;
+            *running = None;
+            self.lan.alive.store(false, Ordering::Relaxed);
+            let service = self.osc.lock().unwrap().take();
+            drop(service);
+            self.update_if(|s| {
+                let changed = s.lan != LanStatus::default();
+                s.lan = LanStatus::default();
+                changed
+            });
+            return;
+        }
+        if browser.is_none() {
+            match LanBrowser::start() {
+                Ok(started) => *browser = Some(started),
+                Err(e) => eprintln!("looking for VRChat on the network: {e:#}"),
+            }
+        }
+        if self.lan.look.swap(false, Ordering::Relaxed) {
+            if let Some(browser) = browser.as_ref() {
+                browser.look_again();
+            }
+        }
+        let found = browser.as_ref().map(LanBrowser::found).unwrap_or_default();
+        let choice = lan::choose(&wanted, &found);
+        let peer = choice.ip();
+        let here = lan::this_address(peer);
+
+        // Remembered, so that it is the one next time: under another name, or among others.
+        if let Choice::Found(vrchat) = &choice {
+            if wanted.typed.is_none() && (wanted.name != vrchat.name || wanted.ip != Some(vrchat.ip)) {
+                let first = wanted.ip != Some(vrchat.ip);
+                let (name, ip, label) = (vrchat.name.clone(), vrchat.ip, vrchat.label());
+                self.update_settings(|s| {
+                    s.osc.remote.name = name;
+                    s.osc.remote.ip = Some(ip);
+                });
+                if first {
+                    self.notify(NoticeKind::Success, format!("Connected to {label}."));
+                }
+            }
+        }
+
+        let wanted_service = here.map(|here| Running { here, peer, asked: choice == Choice::Ask });
+        if wanted_service.as_ref() != running.as_ref() || (settings_changed && wanted_service.is_some()) {
+            // The service before goes first: the new one wants its port (and stopping waits for its receiving thread,
+            // outside the lock).
+            let before = self.osc.lock().unwrap().take();
+            drop(before);
+            match &wanted_service {
+                Some(next) => {
+                    let vrchat = LanVrchat { ip: next.peer, name: next.asked.then(|| NO_NAME.to_string()), osc_port: choice.osc_port() };
+                    let network = Network::Lan { ip: next.here, vrchat };
+                    self.start_osc_on(network, Discovery::Mdns, Ports { osc: lan::OSC_PORT, query: 0 });
+                }
+                None => self.update(|s| s.osc = crate::state::OscStatus { enabled: true, ..Default::default() }),
+            }
+            *running = wanted_service;
+        } else if let Some(peer) = peer {
+            self.with_osc(|o| {
+                let target = std::net::SocketAddr::from((peer, choice.osc_port()));
+                if o.vrchat_target() != Some(target) {
+                    o.choose_vrchat(peer, choice.osc_port());
+                }
+            });
+        }
+
+        let heard = {
+            let osc = self.osc.lock().unwrap();
+            let received = osc.as_ref().and_then(|o| o.last_received_ns());
+            let answers = osc.as_ref().is_some_and(|o| o.vrchat_query().is_some());
+            answers || received.is_some_and(|t| orbiters_core::clock::now_ns().saturating_sub(t) < QUIET_NS)
+        };
+        let link = link(&choice, here, heard);
+        if self.lan.alive.swap(link == LanLink::Connected, Ordering::Relaxed) != (link == LanLink::Connected) {
+            eprintln!("VRChat on the network: {link:?} {}", peer.map(|p| p.to_string()).unwrap_or_default());
+        }
+        let label = match &choice {
+            Choice::Found(vrchat) => Some(vrchat.label()),
+            Choice::Typed(ip) | Choice::Last(ip) => Some(format!("VRChat at {ip}")),
+            Choice::Nobody | Choice::Ask => None,
+        };
+        let status = LanStatus { link, found, peer, peer_label: label, this_computer: here };
+        self.update_if(|s| {
+            let changed = s.lan != status;
+            s.lan = status;
+            changed
+        });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use orbiters_core::lan::FoundVrchat;
+
+    fn found(osc_port: Option<u16>) -> Choice {
+        Choice::Found(FoundVrchat { name: "VRChat-Client-A".into(), device: None, ip: Ipv4Addr::new(192, 168, 1, 5), query_port: 4000, osc_port })
+    }
+
+    #[test]
+    fn the_link_says_what_is_going_on() {
+        let here = Some(Ipv4Addr::new(192, 168, 1, 20));
+        assert_eq!(link(&Choice::Nobody, None, false), LanLink::NoNetwork);
+        assert_eq!(link(&found(Some(9000)), None, true), LanLink::NoNetwork, "without a network, nothing else counts");
+        assert_eq!(link(&Choice::Nobody, here, false), LanLink::Looking);
+        assert_eq!(link(&Choice::Ask, here, false), LanLink::Choose);
+        // A headset answers over the network; a PC only by what it sends.
+        assert_eq!(link(&found(Some(9000)), here, false), LanLink::Connected);
+        assert_eq!(link(&found(None), here, false), LanLink::Waiting);
+        assert_eq!(link(&found(None), here, true), LanLink::Connected);
+        assert_eq!(link(&Choice::Typed(Ipv4Addr::new(10, 0, 0, 2)), here, false), LanLink::Waiting);
+        assert_eq!(link(&Choice::Last(Ipv4Addr::new(10, 0, 0, 2)), here, true), LanLink::Connected);
+    }
+}

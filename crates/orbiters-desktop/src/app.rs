@@ -55,6 +55,8 @@ impl App {
         ctl.attach(&cc.egui_ctx);
         #[cfg(windows)]
         round_corners(cc);
+        #[cfg(target_os = "macos")]
+        crate::mac::install_window_menu(ctl.clone());
         let mut app = Self::offline(ctl);
         app.windowed = true;
         app.gpu = cc.wgpu_render_state.as_ref().map(crate::gpu::Handles::of_window);
@@ -235,7 +237,8 @@ impl App {
         if splash_on {
             splash(&ctx, full, splash_t);
         }
-        if self.windowed {
+        // The Mac's window has edges of its own (window.rs).
+        if self.windowed && cfg!(not(target_os = "macos")) {
             resize_handles(ui, full);
         }
     }
@@ -273,7 +276,13 @@ impl App {
         );
 
         // Window buttons, platform order.
-        let close = if cfg!(windows) { "Close (Orbiters keeps running in the tray)" } else { "Quit" };
+        let close = if cfg!(windows) {
+            "Close (Orbiters keeps running in the tray)"
+        } else if cfg!(target_os = "macos") {
+            "Close (Orbiters keeps running in the menu bar)"
+        } else {
+            "Quit"
+        };
         let buttons = [(icons::MINUS, "Minimize", 15.0, false), (icons::SQUARE, "Maximize", 12.0, false), (icons::X, close, 16.0, true)];
         for (i, (glyph, label, size, danger)) in buttons.into_iter().enumerate() {
             let b = Rect::from_min_size(pos2(rect.right() - 4.0 - 44.0 * (3 - i) as f32, rect.top() + 4.0), vec2(44.0, 32.0));
@@ -414,8 +423,12 @@ impl App {
         } else {
             "OSC off".into()
         };
-        let vrchat_text = if snap.vrchat.running { snap.vrchat.world.world_name.clone().unwrap_or_else(|| "Running".into()) } else { "Not running".into() };
-        let vrchat_tone = if snap.vrchat.running { widgets::Tone::Ok } else { widgets::Tone::Off };
+        let (vrchat_text, vrchat_tone) = if orbiters_core::osc::VRCHAT_RUNS_HERE {
+            let text = if snap.vrchat.running { snap.vrchat.world.world_name.clone().unwrap_or_else(|| "Running".into()) } else { "Not running".into() };
+            (text, if snap.vrchat.running { widgets::Tone::Ok } else { widgets::Tone::Off })
+        } else {
+            pages::network::sidebar_status(&snap.lan)
+        };
         side_status(ui, pos2(inner.left(), bottom - 34.0 - 44.0), "Action Menu", &osc_text, osc_tone, inner.width());
         side_status(ui, pos2(inner.left(), bottom - 34.0 - 88.0), "VRChat", &vrchat_text, vrchat_tone, inner.width());
         let (account_text, account_tone) = match &snap.account.state {
@@ -647,7 +660,7 @@ impl eframe::App for App {
             bring_to_front(ctx);
         }
         let focused = ctx.input(|i| i.viewport().focused.unwrap_or(true));
-        self.ctl.set_background(!focused && self.ctl.view().vrchat.running);
+        self.ctl.set_background(!focused && self.ctl.view().vrchat.runs_here());
         if self.ctl.should_close() {
             ctx.send_viewport_cmd(ViewportCommand::Close);
         }

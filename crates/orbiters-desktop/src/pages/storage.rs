@@ -415,7 +415,11 @@ fn goes(p: &Painter, rect: Rect, glyph: &str, label: &str, detail: &str, bytes: 
     p.galley(pos2(x, top + 18.0), g, theme::FG_3);
 }
 
-const NOTE: &str = "Deleted for good: not moved to the recycle bin, which would free nothing. This cannot be undone.";
+const NOTE: &str = if cfg!(target_os = "macos") {
+    "Deleted for good: not moved to the Trash, which would free nothing. This cannot be undone."
+} else {
+    "Deleted for good: not moved to the recycle bin, which would free nothing. This cannot be undone."
+};
 
 fn note_height(ctx: &egui::Context) -> f32 {
     ctx.fonts_mut(|f| f.layout_job(Txt::new(NOTE, 12.0).color(theme::FG_3).line_height(18.0).job(POPOVER_W - 40.0)).size().y)

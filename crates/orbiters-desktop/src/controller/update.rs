@@ -105,6 +105,14 @@ pub fn pending_setup() -> Option<(PathBuf, PathBuf)> {
 
 /// Starts `setup` to update the install in `dir` once this app has quit, then start it again (`hidden`: in the tray,
 /// as it was). Not in the service's job: it outlives the app.
+#[cfg(target_os = "macos")]
+pub fn start_setup(setup: &Path, dir: &Path, hidden: bool) -> std::io::Result<()> {
+    crate::mac_update::start(setup, dir, hidden)
+}
+
+/// Starts `setup` to update the install in `dir` once this app has quit, then start it again (`hidden`: in the tray,
+/// as it was). Not in the service's job: it outlives the app.
+#[cfg(not(target_os = "macos"))]
 pub fn start_setup(setup: &Path, dir: &Path, hidden: bool) -> std::io::Result<()> {
     let mut cmd = std::process::Command::new(setup);
     cmd.arg("--update").arg("--dir").arg(dir).arg("--relaunch");

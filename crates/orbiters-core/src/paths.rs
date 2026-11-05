@@ -97,7 +97,21 @@ fn config_dir_in(roots: Option<&Roots>) -> PathBuf {
 /// Where Unity editors running Mixer take requests ("Send to Mixer"): `%LOCALAPPDATA%/Orbiters/Mixer/inbox`, one
 /// folder per editor process.
 pub fn mixer_inbox_dir() -> PathBuf {
-    local_data_root().join("Mixer").join("inbox")
+    shared_with_unity_root().join("Mixer").join("inbox")
+}
+
+/// What Unity's Orbiters tools and this app both read and write (`Environment.SpecialFolder.LocalApplicationData` to them,
+/// contracts `Docs/avatar-manifest.md`). It is [`local_data_root`] but on a Mac: Unity's Mono has no Mac branch for it and
+/// answers `~/.local/share`, where `dirs` answers `~/Library/Application Support`, and both sides must find the same files.
+pub fn shared_with_unity_root() -> PathBuf {
+    #[cfg(target_os = "macos")]
+    if roots().is_none() {
+        let data = std::env::var_os("XDG_DATA_HOME").filter(|v| !v.is_empty()).map(PathBuf::from).or_else(|| dirs::home_dir().map(|home| home.join(".local").join("share")));
+        if let Some(data) = data {
+            return data.join("Orbiters");
+        }
+    }
+    local_data_root()
 }
 
 /// `%LOCALAPPDATA%/Orbiters` (`~/.local/share/Orbiters` on Linux): data shared by the Orbiters apps and tools on
@@ -128,7 +142,7 @@ fn cache_dir_in(roots: Option<&Roots>) -> PathBuf {
 
 /// Avatar manifests Orbiters Toolkit writes while the VRChat SDK builds an avatar (contracts `Docs/avatar-manifest.md`).
 pub fn avatars_dir() -> PathBuf {
-    local_data_root().join("Avatars")
+    shared_with_unity_root().join("Avatars")
 }
 
 /// Speech models N4N0 downloads when the person asks for them.

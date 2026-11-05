@@ -95,6 +95,8 @@ pub struct Controller {
     published: Mutex<Arc<Snapshot>>,
     worker: Mutex<Option<WorkerHandle>>,
     osc: Mutex<Option<OscService>>,
+    /// VRChat on the network, where it does not run on this computer.
+    lan: lan::Runtime,
     osc_values: Mutex<OscValues>,
     worker_log: Mutex<VecDeque<String>>,
     notices: Mutex<Vec<Notice>>,
@@ -283,6 +285,7 @@ mod calls;
 mod cleanup;
 mod dolly;
 pub(crate) mod hide_self;
+mod lan;
 mod maps;
 pub(crate) mod menu_shares;
 mod n4n0;
@@ -312,6 +315,7 @@ impl Controller {
             snapshot: Mutex::new(snapshot),
             worker: Mutex::new(None),
             osc: Mutex::new(None),
+            lan: Default::default(),
             osc_values: Mutex::new(OscValues::default()),
             worker_log: Mutex::new(VecDeque::new()),
             notices: Mutex::new(Vec::new()),
@@ -369,6 +373,7 @@ impl Controller {
     /// Starts OSC, the worker and the watchers.
     pub fn start(self: &Shared) {
         self.start_osc();
+        self.start_lan();
         // The computer's keyboard for N4N0's menu keyboard: its keys go to N4N0, off the hook's thread.
         let (tx, rx) = mpsc::channel();
         crate::keys::start(tx);
@@ -1499,6 +1504,7 @@ impl Controller {
     /// sends no avatar parameter, so nothing on the avatar reaches N4N0 (Talk, a hand on N4N0, N4N0's screen).
     pub fn osc_rediscover(&self) {
         self.with_osc(|o| o.rediscover());
+        self.lan.look_again();
     }
 
     /// Starts OSC; without `advertise` nothing listens beyond the loopback interface (tests).
@@ -1506,16 +1512,30 @@ impl Controller {
         // The service before goes outside the lock: stopping it waits for its receiving thread, which may be calling in.
         let before = self.osc.lock().unwrap().take();
         drop(before);
-        let (enabled, parameter, vrchat_port) = self.with_settings(|s| (s.osc.enabled, RECORD_PARAMETER.to_string(), s.osc.vrchat_port));
+        let (enabled, vrchat_port) = self.with_settings(|s| (s.osc.enabled, s.osc.vrchat_port));
         if !enabled {
             self.update(|s| s.osc = state::OscStatus { enabled: false, ..Default::default() });
             return;
         }
+        // Where VRChat runs elsewhere, the network's keeper starts it, once it knows on which of this computer's networks
+        // (`lan`); a change of settings reaches it there.
+        if !orbiters_core::osc::VRCHAT_RUNS_HERE && advertise {
+            self.lan.settings_changed();
+            return;
+        }
+        let network = Network::Loopback { vrchat_port };
+        let discovery = if advertise { orbiters_core::osc::Discovery::Mdns } else { orbiters_core::osc::Discovery::Off };
+        self.start_osc_on(network, discovery, orbiters_core::osc::Ports::default());
+    }
+
+    /// Starts OSC for the VRChat `network` says, replacing any that runs.
+    fn start_osc_on(self: &Shared, network: Network, discovery: orbiters_core::osc::Discovery, ports: orbiters_core::osc::Ports) {
+        let parameter = RECORD_PARAMETER.to_string();
         let ctl = self.clone();
         let wanted = vec![parameter.clone()];
         // Starting a recording reads VRChat's current values over HTTP: the record toggle is acted on on the action
         // thread, in order (`record_toggled`).
-        let result = OscService::start_batched("Orbiters - N4N0", &wanted, Network::Loopback { vrchat_port }, advertise, move |events, at_ns| {
+        let result = OscService::start_with("Orbiters - N4N0", &wanted, network, discovery, ports, move |events, at_ns| {
             ctl.on_osc_events(events, at_ns, &parameter);
         });
         match result {
@@ -1601,7 +1621,7 @@ impl Controller {
     /// Reconstructions wait for VRChat to close (settings' `reconstruct_while_playing`), or for a break: the headset off
     /// for a minute.
     fn held_for_vrchat(&self) -> bool {
-        self.settings().reconstruct_while_playing == WhilePlaying::AfterVrchat && self.snapshot.lock().unwrap().vrchat.running && !self.headset_on_break()
+        self.settings().reconstruct_while_playing == WhilePlaying::AfterVrchat && self.snapshot.lock().unwrap().vrchat.runs_here() && !self.headset_on_break()
     }
 
     /// VRChat started or closed. Once it closes, a reconstruction training on the integrated GPU starts again on the
@@ -1647,8 +1667,8 @@ impl Controller {
         if self.is_capturing() {
             anyhow::bail!("Finish the capture first: reconstruction takes the whole GPU.");
         }
-        let integrated = self.settings().reconstruct_while_playing == WhilePlaying::IntegratedGpu && self.snapshot.lock().unwrap().vrchat.running;
-        let on_break = self.settings().reconstruct_while_playing == WhilePlaying::AfterVrchat && self.snapshot.lock().unwrap().vrchat.running;
+        let integrated = self.settings().reconstruct_while_playing == WhilePlaying::IntegratedGpu && self.snapshot.lock().unwrap().vrchat.runs_here();
+        let on_break = self.settings().reconstruct_while_playing == WhilePlaying::AfterVrchat && self.snapshot.lock().unwrap().vrchat.runs_here();
         let mut guard = self.reconstruction.lock().unwrap();
         if guard.is_some() {
             anyhow::bail!("A reconstruction is already running.");
@@ -1802,7 +1822,7 @@ impl Controller {
     fn next_upload_prep(self: &Shared) {
         let (vrchat, steamvr) = {
             let s = self.snapshot.lock().unwrap();
-            (s.vrchat.running, s.steamvr.running)
+            (s.vrchat.runs_here(), s.steamvr.running)
         };
         if vrchat && !steamvr {
             return;
@@ -1859,7 +1879,7 @@ impl Controller {
             anyhow::bail!("Only session folders inside the sessions folder can be removed.");
         }
         anyhow::ensure!(!self.cleaning(dir), "This session is being cleaned up: try again once that is done.");
-        trash::delete(dir)?;
+        move_to_bin(dir)?;
         refresh_storage(self);
         self.bump_library();
         Ok(())
@@ -1915,6 +1935,22 @@ pub fn list_raw_captures(root: &Path) -> Vec<RawCaptureSummary> {
     }
     out.sort_by(|a, b| b.created_utc.cmp(&a.created_utc));
     out
+}
+
+/// To the recycle bin or the Trash. On the Mac through the file manager API and not the `trash` crate's default, which
+/// scripts the Finder (a permission prompt for an app's first file, and the Finder's sound).
+fn move_to_bin(dir: &Path) -> Result<(), trash::Error> {
+    #[cfg(target_os = "macos")]
+    {
+        use trash::macos::{DeleteMethod, TrashContextExtMacos};
+        let mut bin = trash::TrashContext::default();
+        bin.set_delete_method(DeleteMethod::NsFileManager);
+        bin.delete(dir)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        trash::delete(dir)
+    }
 }
 
 /// Opens a folder in the platform's file manager.
@@ -2055,11 +2091,18 @@ fn spawn_watchers(ctl: Shared) {
                     let steamvr_pid = named(&["vrserver.exe", "vrserver"]);
                     let steamvr = steamvr_pid.is_some();
                     let was = running;
-                    running = pid.is_some();
+                    // A VRChat on the network counts as running, for N4N0 and the interface; `remote` says it costs
+                    // this computer nothing.
+                    let remote = pid.is_none() && ctl.lan.alive();
+                    running = pid.is_some() || remote;
                     vrchat_since = if running { vrchat_since.or(Some(Instant::now())) } else { None };
                     let mut started = None;
                     ctl.update_if(|s| {
-                        let c = s.vrchat.running != running || s.vrchat.pid != pid || s.steamvr.running != steamvr || s.steamvr.pid != steamvr_pid;
+                        let c = s.vrchat.running != running
+                            || s.vrchat.remote != remote
+                            || s.vrchat.pid != pid
+                            || s.steamvr.running != steamvr
+                            || s.steamvr.pid != steamvr_pid;
                         // VRChat started (or restarted) while a session records its sound: the worker follows it.
                         let recording = matches!(s.capture.state, CaptureState::Recording | CaptureState::Paused);
                         if pid.is_some() && s.vrchat.pid != pid && recording && s.settings.performance.record_game_audio {
@@ -2071,6 +2114,7 @@ fn spawn_watchers(ctl: Shared) {
                             s.vrchat.motion = None;
                         }
                         s.vrchat.running = running;
+                        s.vrchat.remote = remote;
                         s.vrchat.pid = pid;
                         s.steamvr.running = steamvr;
                         s.steamvr.pid = steamvr_pid;
@@ -2079,7 +2123,7 @@ fn spawn_watchers(ctl: Shared) {
                     if let Some(pid) = started {
                         let _ = ctl.send_if_running(&WorkerCommand::GameAudio { pid });
                     }
-                    if was != running {
+                    if was != running && !remote {
                         ctl.vrchat_changed(running);
                     }
                     // A minute into a break from the headset, what waited for VRChat to close starts.

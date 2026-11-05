@@ -47,6 +47,16 @@ windows = { workspace = true, features = ["Win32_Graphics_Dwm", "Win32_Graphics_
 raw-window-handle = "0.6"
 tray-icon = "0.26"
 
+[target.'cfg(target_os = "macos")'.dependencies]
+tray-icon = "0.26"
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", features = ["NSArray", "NSString", "NSURL", "NSGeometry", "NSNotification", "NSObject", "NSProcessInfo", "NSRunLoop", "NSDate"] }
+objc2-app-kit = { version = "0.3", features = [
+    "NSApplication", "NSRunningApplication", "NSResponder", "NSEvent", "NSWindow", "NSView", "NSGraphics", "NSImage", "NSImageRep", "NSBitmapImageRep",
+    "NSDragging", "NSDraggingItem", "NSDraggingSession", "NSPasteboard", "NSPasteboardItem", "objc2-core-foundation",
+] }
+objc2-core-foundation = { version = "0.3", features = ["CFCGTypes"] }
+
 [dev-dependencies]
 # Draws the QR codes the scanner's tests read.
 qrcode = { version = "0.14", default-features = false }

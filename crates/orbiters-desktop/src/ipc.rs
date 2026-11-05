@@ -340,6 +340,17 @@ pub struct Client {
 /// 30 a second, while recording or with N4N0's menu open): docs/igpu-experiment.md.
 pub const BACKGROUND_PACE: Duration = Duration::from_millis(200);
 
+/// The window closes on its next frame, but the Mac draws no frame for a window on a sleeping display or behind others,
+/// and such a window would outlive the app: past a moment for that frame, the process just ends.
+fn leave_soon() {
+    // Tests make links that close: their process stays.
+    #[cfg(all(target_os = "macos", not(test)))]
+    let _ = std::thread::Builder::new().name("leaving".into()).spawn(|| {
+        std::thread::sleep(Duration::from_secs(3));
+        std::process::exit(0);
+    });
+}
+
 impl Client {
     /// Connects, says hello, and waits for the first snapshot (so the first frame has real data).
     pub fn connect(endpoint: &Endpoint, role: Role) -> anyhow::Result<Arc<Self>> {
@@ -386,7 +397,10 @@ impl Client {
                         }
                     }
                     ToClient::Show => c.show.store(true, Ordering::Relaxed),
-                    ToClient::Close => c.close.store(true, Ordering::Relaxed),
+                    ToClient::Close => {
+                        c.close.store(true, Ordering::Relaxed);
+                        leave_soon();
+                    }
                 }
                 c.repaint(news);
             }
@@ -395,6 +409,7 @@ impl Client {
             c.vrchat_data.lock().unwrap().clear();
             c.close.store(true, Ordering::Relaxed);
             c.repaint(false);
+            leave_soon();
         })?;
         Ok(client)
     }

@@ -97,3 +97,16 @@ every crate built into the programs, and of the native libraries next to them, a
 | KillFrenzy Avatar Text (KillFrenzy / Evan Tran, MIT) | N4N0's text panel speaks its pointer and sync-value protocol under N4N0's parameter names (contracts `Docs/n4n0.md`); the sender is written in Rust from the protocol, no KAT code is included. |
 
 VRChat is a trademark of VRChat Inc. Orbiters - N4N0 is not affiliated with or endorsed by VRChat Inc.
+
+## Fonts on macOS
+
+The Mac build carries two fonts of its own, since macOS has no Segoe UI:
+
+- **Orbiters Sans** (`crates/orbiters-ui/assets/OrbitersSans-VF.ttf`), a modified version of
+  [Selawik](https://github.com/microsoft/Selawik), Copyright 2015 Microsoft Corporation, with Reserved Font Name Selawik,
+  licensed under the SIL Open Font License 1.1. Built from Selawik's sources as a variable font with Segoe UI's vertical
+  metrics, under another name as the licence asks (`scripts/fonts/orbiters_sans.py`).
+- **Cascadia Mono** (`crates/orbiters-ui/assets/CascadiaMono.ttf`), Copyright 2019 Microsoft Corporation, with Reserved
+  Font Name Cascadia Code, licensed under the SIL Open Font License 1.1, unmodified.
+
+The SIL Open Font License 1.1: https://openfontlicense.org

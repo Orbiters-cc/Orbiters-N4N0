@@ -1,5 +1,11 @@
 # Working on Orbiters - N4N0
 
+- **Windows and macOS (Apple silicon only) are both shipped.** Whatever VRChat gives on the same computer (Spout, SteamVR,
+  its log) has nothing to read on a Mac (`orbiters_core::osc::VRCHAT_RUNS_HERE`), and a new feature that needs it is hidden
+  there; one that goes over OSC talks with the VRChat on the network (`orbiters_core::lan`). Native code goes behind
+  `cfg(target_os = "macos")` beside the `cfg(windows)` path. `cargo xtask` on a Mac makes the Mac's release:
+  `target/dist/<version>/Orbiters-N4N0-<version>-macos-arm64.dmg` is the build to give (see `docs/releasing.md`).
+
 - **Every version bump gets a GitHub release.** `cargo xtask bump <version>`, commit and push, then
   `cargo xtask release` (with `--unsigned` until Azure Artifact Signing is set up; see `docs/releasing.md`). It tags
   `desktop-v<version>` and attaches `OrbitersSetup-<version>.exe` to

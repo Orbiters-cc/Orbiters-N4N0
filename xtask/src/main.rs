@@ -17,6 +17,7 @@
 //! `github` also run on their own (`publish` or `github` again after a cut upload). See docs/releasing.md.
 
 mod dist;
+mod macos;
 mod pe;
 mod publish;
 
@@ -81,6 +82,11 @@ pub struct Config {
     /// `docker-data/downloads/desktop` beside this one), served by the development server at
     /// `orbiters_update::DEVELOPMENT_FEED`.
     pub dev_dir: Option<PathBuf>,
+    /// The Mac: the identity to sign with, `-` for ad hoc (`ORBITERS_MACOS_IDENTITY`; the best one the keychain has).
+    pub macos_identity: Option<String>,
+    /// The Mac: the `xcrun notarytool store-credentials` profile that notarizes Developer ID builds
+    /// (`ORBITERS_MACOS_NOTARY_PROFILE`; none: they are not notarized).
+    pub macos_notary_profile: Option<String>,
 }
 
 impl Config {
@@ -104,6 +110,8 @@ impl Config {
         config.remote_dir = text("ORBITERS_RELEASE_DIR").or(config.remote_dir);
         config.setup_target_dir = path("ORBITERS_SETUP_TARGET_DIR").or(config.setup_target_dir);
         config.dev_dir = path("ORBITERS_DEV_DOWNLOADS").or(config.dev_dir);
+        config.macos_identity = text("ORBITERS_MACOS_IDENTITY").or(config.macos_identity);
+        config.macos_notary_profile = text("ORBITERS_MACOS_NOTARY_PROFILE").or(config.macos_notary_profile);
         Ok(config)
     }
 
@@ -236,6 +244,7 @@ fn run_command(args: &[String]) -> anyhow::Result<()> {
         Some("keygen") => keygen(&Config::load()?, flag(rest, "--force")),
         Some("bump") if flag(rest, "--dev") => bump(&next_dev_version(&workspace_version()?)?),
         Some("bump") => bump(rest.first().context("cargo xtask bump <version>")?),
+        Some("dist") if cfg!(target_os = "macos") => macos::dist(&Config::load()?, &macos::Options { channel, notes: notes()? }).map(drop),
         Some("dist") => {
             let programs = value(rest, "--programs").map(PathBuf::from);
             let options = dist::Options { unsigned: flag(rest, "--unsigned"), channel, notes: notes()?, programs };
@@ -374,7 +383,11 @@ fn release_dev(config: &Config, channel: &str, notes: String, allow_dirty: bool)
     orbiters_update::set_development(true);
     publish::ensure_newer(&version, channel)?;
     let notes = if notes.is_empty() { format!("Development build {version} ({})", git(&["rev-parse", "--short", "HEAD"]).unwrap_or_default()) } else { notes };
-    let dist = dist::dist(config, &dist::Options { unsigned: true, channel: channel.into(), notes: notes.clone(), programs: None })?;
+    let dist = if cfg!(target_os = "macos") {
+        macos::dist(config, &macos::Options { channel: channel.into(), notes: notes.clone() })?
+    } else {
+        dist::dist(config, &dist::Options { unsigned: true, channel: channel.into(), notes: notes.clone(), programs: None })?
+    };
     publish::publish_dev(config, &version, channel, false)?;
     // Every build Enzo is to try is also on GitHub's releases (a pre-release), tagged on the pushed commit.
     let tag = format!("desktop-v{version}");

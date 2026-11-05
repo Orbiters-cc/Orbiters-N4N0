@@ -11,6 +11,10 @@
 //! and are announced with it, messages go to the Quest's input port, and only that Quest is heard. The Quest takes no
 //! launch options, so it finds the phone only through these announcements: the app holds Android's multicast lock
 //! while the service runs, and starts it again when the Wi-Fi changes (another address).
+//!
+//! A phone whose system keeps mDNS to itself (iOS: multicast takes an entitlement Apple grants, Bonjour does not) uses
+//! [`Discovery::Platform`]: the system's Bonjour registers the services and browses, the app hands what it sees to
+//! [`OscService::saw`], and the answers VRChat takes also go to the chosen VRChat directly ([`announce`]).
 
 use rosc::{OscMessage, OscPacket, OscType};
 use serde::{Deserialize, Serialize};
@@ -18,7 +22,7 @@ use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream, UdpSocket};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{mpsc, Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -495,8 +499,44 @@ pub struct LanVrchat {
 /// The input port VRChat listens on unless told otherwise.
 pub const VRCHAT_OSC_PORT: u16 = 9000;
 
+/// Whether VRChat can run on this computer. It has no Mac version: there the app talks with VRChat on another device of
+/// the network ([`crate::lan`]), and what needs VRChat on the same computer (Spout, SteamVR, its log) has nothing to read.
+pub const VRCHAT_RUNS_HERE: bool = !cfg!(target_os = "macos");
+
+/// How a service and VRChat find each other.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Discovery {
+    /// They do not: the address is known another way (tests, a known port).
+    #[default]
+    Off,
+    /// This process does it all over mDNS: it browses (mdns-sd) and multicasts the answers VRChat takes.
+    Mdns,
+    /// The system's Bonjour registers the services and browses, for an app that cannot use multicast freely: the app
+    /// hands what it sees to [`OscService::saw`]. The answers VRChat takes are still made here: they go to the chosen
+    /// VRChat directly, and over multicast where the system lets them.
+    Platform,
+}
+
+/// What the system's Bonjour saw of a VRChat OSCQuery service ([`Discovery::Platform`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Sighting {
+    /// `name` (`VRChat-Client-ABCDEF`) is announced at `addresses`, on `port`.
+    Found { name: String, addresses: Vec<Ipv4Addr>, port: u16 },
+    /// `name` is said to be gone.
+    Gone { name: String },
+}
+
+/// The ports a service would like (0: any the system gives). A service asked for ports taken gets others: VRChat only
+/// sends to the ports it found, so an app that must start its services again keeps them when it can.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Ports {
+    pub osc: u16,
+    pub query: u16,
+}
+
 /// Where messages to VRChat go, and whose datagrams the services take: VRChat's input port on this machine (loopback),
 /// or the VRChat chosen on the network (LAN), once known.
+#[derive(Debug)]
 struct Route {
     lan: bool,
     /// Where messages to VRChat go (`None`: no VRChat chosen on the network yet).
@@ -573,7 +613,7 @@ impl Heard {
 }
 
 /// An address of the local network (private or link-local), where a Quest on the same Wi-Fi is.
-fn on_lan(ip: Ipv4Addr) -> bool {
+pub(crate) fn on_lan(ip: Ipv4Addr) -> bool {
     ip.is_private() || ip.is_link_local()
 }
 
@@ -605,6 +645,8 @@ pub struct OscService {
     /// The address the services are announced with (see [`OscService::advertise`]).
     /// What VRChat is told about these services ([`loopback_answer`]), while advertised.
     announcement: Option<Announcement>,
+    /// Where what the system's Bonjour sees goes ([`Discovery::Platform`]).
+    sightings: Option<mpsc::Sender<Sighting>>,
     /// VRChat's own OSCQuery service, found over mDNS.
     vrchat_query: Arc<Mutex<Option<SocketAddr>>>,
     /// When the last packet came in ([`crate::clock::now_ns`]; 0: none yet).
@@ -618,6 +660,11 @@ fn udp_socket(bind: SocketAddr) -> std::io::Result<UdpSocket> {
     let socket = socket2::Socket::new(socket2::Domain::IPV4, socket2::Type::DGRAM, Some(socket2::Protocol::UDP))?;
     if let Err(e) = socket.set_recv_buffer_size(4 << 20) {
         eprintln!("OSC receive buffer: {e}");
+    }
+    // macOS refuses a datagram larger than the send buffer, 9 KB by default: a big bundle would never leave.
+    #[cfg(target_vendor = "apple")]
+    if let Err(e) = socket.set_send_buffer_size(1 << 16) {
+        eprintln!("OSC send buffer: {e}");
     }
     socket.bind(&bind.into())?;
     Ok(socket.into())
@@ -648,6 +695,18 @@ impl OscService {
         parameters: &[String],
         network: Network,
         advertise: bool,
+        on_events: impl FnMut(&mut Vec<OscEvent>, u64) + Send + 'static,
+    ) -> anyhow::Result<Self> {
+        Self::start_with(name, parameters, network, if advertise { Discovery::Mdns } else { Discovery::Off }, Ports::default(), on_events)
+    }
+
+    /// [`OscService::start_batched`], found the way `discovery` says, on the `ports` it would like.
+    pub fn start_with(
+        name: &str,
+        parameters: &[String],
+        network: Network,
+        discovery: Discovery,
+        ports: Ports,
         mut on_events: impl FnMut(&mut Vec<OscEvent>, u64) + Send + 'static,
     ) -> anyhow::Result<Self> {
         // On this machine both listen on 127.0.0.1 alone: VRChat sends OSC and asks OSCQuery at the address the
@@ -660,11 +719,23 @@ impl OscService {
             Network::Lan { ip, .. } => *ip,
         };
         let route = Arc::new(Route::of(&network));
-        let udp = udp_socket(SocketAddr::from((bound, 0)))?;
+        let udp = udp_socket(SocketAddr::from((bound, ports.osc))).or_else(|e| {
+            if ports.osc == 0 {
+                return Err(e);
+            }
+            eprintln!("OSC port {} is taken ({e}): another one", ports.osc);
+            udp_socket(SocketAddr::from((bound, 0)))
+        })?;
         // Woken at once when the service stops (see `Drop`); the timeout only in case that wake-up is lost.
         udp.set_read_timeout(Some(Duration::from_secs(1)))?;
         let osc_port = udp.local_addr()?.port();
-        let http = TcpListener::bind(SocketAddr::from((bound, 0)))?;
+        let http = TcpListener::bind(SocketAddr::from((bound, ports.query))).or_else(|e| {
+            if ports.query == 0 {
+                return Err(e);
+            }
+            eprintln!("OSCQuery port {} is taken ({e}): another one", ports.query);
+            TcpListener::bind(SocketAddr::from((bound, 0)))
+        })?;
         let query_port = http.local_addr()?.port();
         let stop = Arc::new(AtomicBool::new(false));
         let vrchat_query = Arc::new(Mutex::new(None));
@@ -680,7 +751,17 @@ impl OscService {
                 let mut buf = vec![0u8; 65536];
                 let mut events = Vec::new();
                 while !stop.load(Ordering::Relaxed) {
-                    let Ok((n, from)) = udp.recv_from(&mut buf) else { continue };
+                    let (n, from) = match udp.recv_from(&mut buf) {
+                        Ok(got) => got,
+                        Err(e) => {
+                            // Not the read timeout: a socket the system took back (a phone's app that was suspended)
+                            // fails at once, every time, until the service is started again.
+                            if !matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) {
+                                std::thread::sleep(Duration::from_millis(100));
+                            }
+                            continue;
+                        }
+                    };
                     if n == 0 || !heard.datagram(from.ip()) || !nesting_within_limit(&buf[..n]) {
                         continue;
                     }
@@ -733,50 +814,81 @@ impl OscService {
             })?);
         }
 
-        let (mdns, announcement) = if advertise {
+        let (mdns, announcement, sightings) = if discovery != Discovery::Off {
             let instance = format!("{}-{}", name.replace(' ', "-"), osc_port);
+            // Directly to the chosen VRChat too, where the system's Bonjour stands in for multicast.
+            let direct = (discovery == Discovery::Platform).then(|| route.clone());
             let announcement = match &network {
                 Network::Loopback { .. } => {
-                    Announcement { interface: primary_ipv4(), host: HOST.to_string(), address: Ipv4Addr::LOCALHOST, instance, osc_port, query_port }
+                    Announcement { interface: primary_ipv4(), host: HOST.to_string(), address: Ipv4Addr::LOCALHOST, instance, osc_port, query_port, direct }
                 }
                 // Its own host name: another app's answers on the network (the desktop's, at 127.0.0.1) never stand for
                 // this device's.
-                Network::Lan { ip, .. } => {
-                    Announcement { interface: Some(*ip), host: format!("{}.local", instance.to_ascii_lowercase()), address: *ip, instance, osc_port, query_port }
-                }
+                Network::Lan { ip, .. } => Announcement {
+                    interface: Some(*ip),
+                    host: format!("{}.local", instance.to_ascii_lowercase()),
+                    address: *ip,
+                    instance,
+                    osc_port,
+                    query_port,
+                    direct,
+                },
             };
             // A VRChat already running finds the services from these answers at once (and again, in case one is lost).
             announce_later(announcement.clone(), &[300, 3500, 3500]);
-            // mdns-sd only browses: for VRChat's own service, and to answer for these again whenever a VRChat starts.
-            match mdns_sd::ServiceDaemon::new() {
-                Ok(d) => {
-                    match d.browse("_oscjson._tcp.local.") {
-                        Ok(events) => {
-                            let (stop, found, a, route) = (stop.clone(), vrchat_query.clone(), announcement.clone(), route.clone());
-                            let wanted = match &network {
-                                Network::Loopback { .. } => None,
-                                Network::Lan { vrchat, .. } => Some(vrchat.clone()),
-                            };
-                            threads.push(
-                                std::thread::Builder::new()
-                                    .name("oscquery-browse".into())
-                                    .spawn(move || watch_vrchat(events, &stop, &found, &a, wanted.as_ref(), &route))?,
-                            );
+            let wanted = match &network {
+                Network::Loopback { .. } => None,
+                Network::Lan { vrchat, .. } => Some(vrchat.clone()),
+            };
+            if discovery == Discovery::Platform {
+                // The system browses, and what it saw comes in through `saw`.
+                let (tx, rx) = mpsc::channel::<Sighting>();
+                let (stop, found, a, route) = (stop.clone(), vrchat_query.clone(), announcement.clone(), route.clone());
+                let next = move || match rx.recv_timeout(Duration::from_millis(250)) {
+                    Ok(sighting) => Some(Some(sighting)),
+                    Err(mpsc::RecvTimeoutError::Timeout) => Some(None),
+                    Err(mpsc::RecvTimeoutError::Disconnected) => None,
+                };
+                threads.push(std::thread::Builder::new().name("oscquery-browse".into()).spawn(move || watch_vrchat(next, &stop, &found, &a, wanted.as_ref(), &route))?);
+                (None, Some(announcement), Some(tx))
+            } else {
+                // mdns-sd only browses: for VRChat's own service, and to answer for these again whenever a VRChat starts.
+                match mdns_sd::ServiceDaemon::new() {
+                    Ok(d) => {
+                        match d.browse("_oscjson._tcp.local.") {
+                            Ok(events) => {
+                                let (stop, found, a, route) = (stop.clone(), vrchat_query.clone(), announcement.clone(), route.clone());
+                                let next = move || match events.recv_timeout(Duration::from_millis(250)) {
+                                    Ok(mdns_sd::ServiceEvent::ServiceResolved(info)) => Some(Some(Sighting::Found {
+                                        name: info.get_fullname().to_string(),
+                                        addresses: info.get_addresses_v4().into_iter().collect(),
+                                        port: info.get_port(),
+                                    })),
+                                    Ok(mdns_sd::ServiceEvent::ServiceRemoved(_, name)) => Some(Some(Sighting::Gone { name })),
+                                    Ok(_) | Err(mdns_sd::RecvTimeoutError::Timeout) => Some(None),
+                                    Err(_) => None,
+                                };
+                                threads.push(
+                                    std::thread::Builder::new()
+                                        .name("oscquery-browse".into())
+                                        .spawn(move || watch_vrchat(next, &stop, &found, &a, wanted.as_ref(), &route))?,
+                                );
+                            }
+                            Err(e) => eprintln!("OSCQuery browse failed: {e}"),
                         }
-                        Err(e) => eprintln!("OSCQuery browse failed: {e}"),
+                        (Some(d), Some(announcement), None)
                     }
-                    (Some(d), Some(announcement))
-                }
-                Err(e) => {
-                    eprintln!("OSCQuery browsing failed: {e}");
-                    (None, Some(announcement))
+                    Err(e) => {
+                        eprintln!("OSCQuery browsing failed: {e}");
+                        (None, Some(announcement), None)
+                    }
                 }
             }
         } else {
-            (None, None)
+            (None, None, None)
         };
 
-        Ok(Self { sender: udp, osc_port, query_port, bound, route, stop, mdns, announcement, vrchat_query, last_received, threads })
+        Ok(Self { sender: udp, osc_port, query_port, bound, route, stop, mdns, announcement, sightings, vrchat_query, last_received, threads })
     }
 
     /// Where the OSC socket listens (127.0.0.1, or this device's address on the network, and [`OscService::osc_port`]).
@@ -809,6 +921,18 @@ impl OscService {
         if let Some(a) = &self.announcement {
             announce_later(a.clone(), &[300, 3500]);
         }
+    }
+
+    /// What the system's Bonjour saw ([`Discovery::Platform`]; nothing otherwise).
+    pub fn saw(&self, sighting: Sighting) {
+        if let Some(tx) = &self.sightings {
+            let _ = tx.send(sighting);
+        }
+    }
+
+    /// Stops without telling VRChat the services are gone, for an app about to start them again on the same ports.
+    pub fn stop_quietly(mut self) {
+        self.announcement = None;
     }
 
     /// When VRChat (or anything else on this machine) last sent a packet ([`crate::clock::now_ns`]).
@@ -858,7 +982,7 @@ impl OscService {
 
 /// The address this machine reaches the network from (no packet is sent: connecting a UDP socket only picks the
 /// route), or `None` offline.
-fn primary_ipv4() -> Option<std::net::Ipv4Addr> {
+pub(crate) fn primary_ipv4() -> Option<std::net::Ipv4Addr> {
     let socket = UdpSocket::bind("0.0.0.0:0").ok()?;
     socket.connect("192.0.2.1:9").ok()?;
     match socket.local_addr().ok()?.ip() {
@@ -878,6 +1002,8 @@ struct Announcement {
     address: Ipv4Addr,
     osc_port: u16,
     query_port: u16,
+    /// [`Discovery::Platform`]: the answers go to the chosen VRChat directly too, and multicast is only tried.
+    direct: Option<Arc<Route>>,
 }
 
 /// The host name the desktop's answers give the services.
@@ -927,18 +1053,62 @@ fn answer(service: &str, instance: &str, host: &str, address: Ipv4Addr, port: u1
     out
 }
 
-/// Multicasts the answers for both services ([`answer`]) from the mDNS port, on the announcement's interface.
-fn announce(a: &Announcement, ttl: u32) -> std::io::Result<()> {
+/// A socket on the mDNS port, for the answers to go out from: VRChat's discovery may well hold to mDNS's rule that an
+/// answer comes from that port.
+fn mdns_socket(interface: Option<Ipv4Addr>) -> std::io::Result<socket2::Socket> {
     let socket = socket2::Socket::new(socket2::Domain::IPV4, socket2::Type::DGRAM, Some(socket2::Protocol::UDP))?;
     socket.set_reuse_address(true)?;
+    // Apple's mDNSResponder holds the port with SO_REUSEPORT, which only others asking for it can share.
+    #[cfg(target_vendor = "apple")]
+    socket.set_reuse_port(true)?;
     socket.bind(&SocketAddr::from(([0, 0, 0, 0], 5353)).into())?;
-    if let Some(ip) = a.interface {
+    if let Some(ip) = interface {
         socket.set_multicast_if_v4(&ip)?;
     }
     socket.set_multicast_loop_v4(true)?;
+    Ok(socket)
+}
+
+/// The answers for both services ([`answer`]), for one way out.
+fn answers(a: &Announcement, ttl: u32) -> [Vec<u8>; 2] {
+    [
+        answer("_oscjson._tcp.local", &a.instance, &a.host, a.address, a.query_port, ttl),
+        answer("_osc._udp.local", &a.instance, &a.host, a.address, a.osc_port, ttl),
+    ]
+}
+
+/// Multicasts the answers for both services ([`answer`]) from the mDNS port, on the announcement's interface.
+///
+/// [`Discovery::Platform`] differs: multicast may be refused (iOS asks for an entitlement), so it is only tried, and
+/// the answers go straight to the chosen VRChat's mDNS port. The system's Bonjour answers VRChat's own query when VRChat
+/// starts; these are for a VRChat that started first, and for one on a network that hides mDNS.
+fn announce(a: &Announcement, ttl: u32) -> std::io::Result<()> {
     let group: socket2::SockAddr = SocketAddr::from(([224, 0, 0, 251], 5353)).into();
-    socket.send_to(&answer("_oscjson._tcp.local", &a.instance, &a.host, a.address, a.query_port, ttl), &group)?;
-    socket.send_to(&answer("_osc._udp.local", &a.instance, &a.host, a.address, a.osc_port, ttl), &group)?;
+    let Some(route) = &a.direct else {
+        let socket = mdns_socket(a.interface)?;
+        for answer in answers(a, ttl) {
+            socket.send_to(&answer, &group)?;
+        }
+        return Ok(());
+    };
+    let socket = match mdns_socket(a.interface) {
+        Ok(socket) => socket,
+        // The mDNS port is the system's: from another one, which VRChat may or may not take.
+        Err(_) => {
+            let socket = socket2::Socket::new(socket2::Domain::IPV4, socket2::Type::DGRAM, Some(socket2::Protocol::UDP))?;
+            if let Some(ip) = a.interface {
+                let _ = socket.set_multicast_if_v4(&ip);
+            }
+            socket
+        }
+    };
+    let peer = route.peer();
+    for answer in answers(a, ttl) {
+        let _ = socket.send_to(&answer, &group);
+        if let Some(peer) = peer {
+            socket.send_to(&answer, &SocketAddr::from((peer, 5353)).into())?;
+        }
+    }
     Ok(())
 }
 
@@ -993,6 +1163,14 @@ fn lan_vrchat_address(addresses: &[Ipv4Addr], port: u16, wanted: Option<Ipv4Addr
         None => *addresses.iter().find(|a| on_lan(**a) && !a.is_loopback())?,
     };
     Some(SocketAddr::from((ip, port)))
+}
+
+/// `addresses` with those sharing the most leading bits with `own` first: a host announced with several (a link-local one,
+/// another interface's) is reached on the network this device is on. The order is kept otherwise.
+fn nearest_first(mut addresses: Vec<Ipv4Addr>, own: Ipv4Addr) -> Vec<Ipv4Addr> {
+    addresses.sort_by_key(|a| (u32::from(*a) ^ u32::from(own)).leading_zeros());
+    addresses.reverse();
+    addresses
 }
 
 /// Whether VRChat's OSCQuery service answers at `addr`: its HOST_INFO, within a second, has an OSC port and VRChat's
@@ -1098,7 +1276,7 @@ fn named(full: &str, name: Option<&str>) -> bool {
 /// input port the `route` takes. A VRChat that starts while the services run looks for them only as it starts, before
 /// it could hear them: when its own service shows up, they are announced again ([`announce`]) so that it finds them.
 fn watch_vrchat(
-    events: mdns_sd::Receiver<mdns_sd::ServiceEvent>,
+    mut next: impl FnMut() -> Option<Option<Sighting>>,
     stop: &AtomicBool,
     found: &Mutex<Option<SocketAddr>>,
     announcement: &Announcement,
@@ -1110,24 +1288,26 @@ fn watch_vrchat(
     let mut checked = Instant::now();
     while !stop.load(Ordering::Relaxed) {
         let before = services.current();
-        match events.recv_timeout(Duration::from_millis(250)) {
-            Ok(mdns_sd::ServiceEvent::ServiceResolved(info)) if info.get_fullname().starts_with("VRChat-Client-") => {
-                let addresses: Vec<Ipv4Addr> = info.get_addresses_v4().into_iter().collect();
+        match next() {
+            // A short name from the system's Bonjour, a full one from mdns-sd.
+            Some(Some(Sighting::Found { name, addresses, port })) if name.starts_with("VRChat-Client-") => {
                 let addr = match lan {
-                    None => vrchat_address(&addresses, info.get_port(), &mut local),
-                    Some(wanted) if named(info.get_fullname(), wanted.name.as_deref()) => lan_vrchat_address(&addresses, info.get_port(), wanted.ip),
+                    None => vrchat_address(&addresses, port, &mut local),
+                    Some(wanted) if named(&name, wanted.name.as_deref()) => {
+                        lan_vrchat_address(&nearest_first(addresses, announcement.address), port, wanted.ip)
+                    }
                     Some(_) => None,
                 };
                 let Some(addr) = addr else { continue };
-                if services.announced(info.get_fullname(), addr, is_vrchat_client) {
+                if services.announced(&name, addr, is_vrchat_client) {
                     checked = Instant::now();
                     // After VRChat's discovery is up (it announced itself), twice, and once more later.
                     announce_later(announcement.clone(), &[2000, 3500, 10000]);
                 }
             }
-            Ok(mdns_sd::ServiceEvent::ServiceRemoved(_, name)) => services.removed(&name, is_vrchat_client),
-            Ok(_) | Err(mdns_sd::RecvTimeoutError::Timeout) => {}
-            Err(_) => return,
+            Some(Some(Sighting::Gone { name })) => services.removed(&name, is_vrchat_client),
+            Some(_) => {}
+            None => return,
         }
         if checked.elapsed() >= RECHECK {
             checked = Instant::now();
@@ -1167,6 +1347,96 @@ impl Drop for OscService {
                 let _ = t.join();
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod platform_tests {
+    use super::*;
+
+    /// A stand-in for a VRChat's OSCQuery service: answers HOST_INFO as VRChat, with `osc_port`.
+    fn vrchat(osc_port: u16) -> SocketAddr {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { continue };
+                let mut buf = [0u8; 1024];
+                let _ = stream.read(&mut buf);
+                let body = serde_json::json!({ "NAME": "VRChat-Client-TEST", "OSC_PORT": osc_port }).to_string();
+                let _ = stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes());
+            }
+        });
+        addr
+    }
+
+    fn lan_service(ports: Ports) -> OscService {
+        let network = Network::Lan { ip: Ipv4Addr::LOCALHOST, vrchat: LanVrchat { osc_port: VRCHAT_OSC_PORT, ..Default::default() } };
+        OscService::start_with("Test", &[], network, Discovery::Platform, ports, |_, _| {}).unwrap()
+    }
+
+    /// `next` as the mdns-sd and system-Bonjour paths both drive it. (127.0.0.1 is no address of the local network, so
+    /// the name's check is what is exercised here; the choice itself is `lan_vrchat_address`'s tests.)
+    #[test]
+    fn what_the_system_sees_reaches_the_watcher_and_others_are_ignored() {
+        let service = lan_service(Ports::default());
+        let addr = vrchat(9123);
+        service.saw(Sighting::Found { name: "Some-Other-Service".into(), addresses: vec![Ipv4Addr::new(192, 168, 1, 9)], port: addr.port() });
+        service.saw(Sighting::Gone { name: "VRChat-Client-NOT-KNOWN".into() });
+        std::thread::sleep(Duration::from_millis(100));
+        assert_eq!(service.vrchat_query(), None, "neither is a VRChat that answered");
+    }
+
+    #[test]
+    fn a_host_with_several_addresses_is_reached_on_this_device_s_network() {
+        let ip = |s: &str| s.parse::<Ipv4Addr>().unwrap();
+        let addresses = vec![ip("127.0.0.1"), ip("169.254.150.121"), ip("10.0.0.9"), ip("192.168.1.134")];
+        let sorted = nearest_first(addresses, ip("192.168.1.20"));
+        assert_eq!(sorted[0], ip("192.168.1.134"));
+        // And it is what gets chosen, loopback never.
+        assert_eq!(lan_vrchat_address(&sorted, 5000, None), Some(SocketAddr::from((ip("192.168.1.134"), 5000))));
+        assert_eq!(
+            lan_vrchat_address(&nearest_first(vec![ip("127.0.0.1"), ip("169.254.1.1")], ip("192.168.1.20")), 5000, None),
+            Some(SocketAddr::from((ip("169.254.1.1"), 5000)))
+        );
+    }
+
+    #[test]
+    fn ports_asked_for_are_kept_and_taken_ones_replaced() {
+        let first = lan_service(Ports::default());
+        let wanted = Ports { osc: first.osc_port, query: first.query_port };
+        // Taken: others, and no failure.
+        let second = lan_service(wanted);
+        assert_ne!((second.osc_port, second.query_port), (wanted.osc, wanted.query));
+        drop(second);
+        // Free again, on purpose without a goodbye: the same ones.
+        first.stop_quietly();
+        let again = lan_service(wanted);
+        assert_eq!((again.osc_port, again.query_port), (wanted.osc, wanted.query));
+    }
+
+    /// The answers reach the chosen VRChat directly, in the shape VRChat takes, with this service's ports.
+    #[test]
+    fn answers_go_directly_to_the_chosen_vrchat() {
+        let route = Arc::new(Route { lan: true, target: Mutex::new(None), peer: Mutex::new(None) });
+        let a = Announcement {
+            interface: None,
+            instance: "Test-4242".into(),
+            host: "test-4242.local".into(),
+            address: Ipv4Addr::new(192, 168, 1, 20),
+            osc_port: 4242,
+            query_port: 4243,
+            direct: Some(route),
+        };
+        let [query, osc] = answers(&a, ANSWER_TTL);
+        let text = |b: &[u8]| String::from_utf8_lossy(b).to_string();
+        assert!(text(&query).contains("_oscjson"), "{query:?}");
+        assert!(text(&osc).contains("_osc"), "{osc:?}");
+        assert!(query.windows(2).any(|w| w == 4243u16.to_be_bytes()), "the query port is in the SRV record");
+        assert!(osc.windows(2).any(|w| w == 4242u16.to_be_bytes()), "the OSC port is in the SRV record");
+        assert!(query.windows(4).any(|w| w == [192, 168, 1, 20]), "the phone's address is in the A record");
+        // No chosen VRChat and a socket that may not multicast: nothing fails.
+        announce(&a, ANSWER_TTL).unwrap();
     }
 }
 
@@ -1380,7 +1650,7 @@ mod tests {
         let got = Arc::new(Mutex::new(Vec::new()));
         let sink = got.clone();
         let svc = OscService::start("Orbiters - N4N0 test", &[], Network::Loopback { vrchat_port: 9 }, false, move |e, at| sink.lock().unwrap().push((e, at))).unwrap();
-        let client = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let client = udp_socket(SocketAddr::from(([127, 0, 0, 1], 0))).unwrap();
         let deep = nested_bundles(3000, &message);
         assert!(deep.len() < 65_000);
         client.send_to(&deep, ("127.0.0.1", svc.osc_port)).unwrap();
@@ -1584,6 +1854,8 @@ mod tests {
     }
 
     /// A stand-in Quest on the loopback range: its own address (127.0.0.2 and so on stand for the devices of a Wi-Fi).
+    /// macOS has only 127.0.0.1 unless an administrator aliases others: the tests that need them do not run there.
+    #[cfg_attr(target_vendor = "apple", allow(dead_code))]
     fn device(last: u8) -> UdpSocket {
         let socket = UdpSocket::bind((Ipv4Addr::new(127, 0, 0, last), 0)).unwrap();
         socket.set_read_timeout(Some(Duration::from_millis(500))).unwrap();
@@ -1591,6 +1863,7 @@ mod tests {
     }
 
     /// An HTTP request to the service's OSCQuery from `from`; its answer (empty when it was refused).
+    #[cfg_attr(target_vendor = "apple", allow(dead_code))]
     fn ask_from(from: Ipv4Addr, to: SocketAddr, path: &str) -> String {
         let socket = socket2::Socket::new(socket2::Domain::IPV4, socket2::Type::STREAM, Some(socket2::Protocol::TCP)).unwrap();
         socket.bind(&SocketAddr::from((from, 0)).into()).unwrap();
@@ -1603,6 +1876,7 @@ mod tests {
         answer
     }
 
+    #[cfg(not(target_vendor = "apple"))]
     #[test]
     fn on_the_network_only_the_chosen_vrchat_is_heard_and_messages_go_to_it() {
         // The phone at 127.0.0.1, its Quest at 127.0.0.2, another device at 127.0.0.3.
@@ -1651,6 +1925,7 @@ mod tests {
         assert!(started.elapsed() < Duration::from_millis(900), "{:?}", started.elapsed());
     }
 
+    #[cfg(not(target_vendor = "apple"))]
     #[test]
     fn on_the_network_nothing_is_heard_nor_sent_until_a_vrchat_is_chosen() {
         let quest = device(4);

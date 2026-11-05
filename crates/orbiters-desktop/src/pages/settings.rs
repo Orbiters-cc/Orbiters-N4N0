@@ -41,6 +41,8 @@ pub struct State {
     steamvr_job: Option<(bool, Job<Result<bool, String>>)>,
     /// "When SteamVR starts": Windows' sound devices in VR.
     vr_audio: super::vr_audio::State,
+    /// VRChat on the network, where it does not run on this computer.
+    network: super::network::State,
 }
 
 impl State {
@@ -83,7 +85,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
     if let Some(result) = state.windows_job.as_mut().and_then(Job::take) {
         state.windows_job = None;
         if let Err(e) = result {
-            cx.toasts.push(&ctx, toast::Kind::Error, format!("The start with Windows did not change: {e}"));
+            cx.toasts.push(&ctx, toast::Kind::Error, format!("The start with {} did not change: {e}", crate::words::SYSTEM));
             state.windows_start = Some(crate::startup::starts_with_windows());
         }
     }
@@ -115,7 +117,13 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
             let mut m = super::Masonry::new(ui, "settings");
             m.add(1, |ui| account(ui, cx, &mut state.confirm_sign_out));
             m.add(10, |ui| vrchat_account(ui, cx, &mut state.vrchat));
+            // What VRChat on this very computer gives (Spout, its log, SteamVR) has no settings where it cannot run.
+            let vrchat_here = orbiters_core::osc::VRCHAT_RUNS_HERE;
+            if !vrchat_here {
+                m.add(11, |ui| apply |= super::network::card(ui, cx, 11, &mut state.network, &mut draft));
+            }
 
+            if vrchat_here {
             m.add(2, |ui| section(ui, cx, 2, icons::GAUGE, "Capture", Some("How frames become a session"), |ui| {
                 let kf = &mut draft.keyframes;
                 widgets::field(ui, "Keyframe distance", Some("A new lossless keyframe after the camera moves this far."), 284.0, |ui| {
@@ -172,6 +180,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
                     },
                 );
             }));
+            }
 
             let st = &snap.storage;
             let mut free_space = false;
@@ -247,6 +256,9 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
                         apply |= widgets::toggle(ui, "osc", &mut draft.osc.enabled);
                     },
                 );
+                if !vrchat_here {
+                    return;
+                }
                 widgets::separator(ui);
                 widgets::field(
                     ui,
@@ -309,6 +321,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
                 );
             }));
 
+            if vrchat_here {
             let vr = &snap.steamvr;
             let perf_sub = match (&vr.calibration, vr.running) {
                 (Some(c), _) => format!("Calibrated: eyes at {:.2} m, hands {:.2} m apart", c.head_height_m, c.arm_span_m),
@@ -334,7 +347,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
                     ui.add_space(4.0);
                     ui.horizontal_wrapped(|ui| {
                         ui.spacing_mut().item_spacing = vec2(8.0, 8.0);
-                        if source_chip(ui, "Windows default", draft.performance.mic_device.is_empty()).clicked() {
+                        if source_chip(ui, crate::words::DEFAULT_MIC, draft.performance.mic_device.is_empty()).clicked() {
                             draft.performance.mic_device.clear();
                             apply = true;
                         }
@@ -427,15 +440,25 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
                     });
                 }
             }));
+            }
 
-            m.add(6, |ui| section(ui, cx, 6, icons::POWER, "Start", Some("Orbiters - N4N0 opening on its own, in the tray"), |ui| {
+            let start_sub = format!("Orbiters - N4N0 opening on its own, in the {}", crate::words::TRAY);
+            m.add(6, |ui| section(ui, cx, 6, icons::POWER, "Start", Some(&start_sub), |ui| {
                 let mut windows = state.windows_start.unwrap_or(false);
-                widgets::field(ui, "Start with Windows", Some("Waits in the tray, ready when VRChat starts."), 48.0, |ui| {
+                let (start_label, start_note) = if vrchat_here {
+                    ("Start with Windows", "Waits in the tray, ready when VRChat starts.")
+                } else {
+                    ("Start at login", "Waits in the menu bar, ready to talk with VRChat on your network.")
+                };
+                widgets::field(ui, start_label, Some(start_note), 48.0, |ui| {
                     if widgets::toggle(ui, "start-windows", &mut windows) && state.windows_job.is_none() {
                         state.windows_start = Some(windows);
                         state.windows_job = Some(Job::spawn(&ctx, move || crate::startup::set_start_with_windows(windows).map_err(|e| e.to_string())));
                     }
                 });
+                if !vrchat_here {
+                    return;
+                }
                 widgets::separator(ui);
                 let startup = &snap.settings.startup;
                 let mut steamvr = state.steamvr_shown.unwrap_or(startup.steamvr);
@@ -451,7 +474,9 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
                     }
                 });
             }));
-            m.add(9, |ui| apply |= super::vr_audio::show(ui, cx, 9, &mut state.vr_audio, &mut draft.vr_audio));
+            if vrchat_here {
+                m.add(9, |ui| apply |= super::vr_audio::show(ui, cx, 9, &mut state.vr_audio, &mut draft.vr_audio));
+            }
 
             m.add(7, |ui| section(ui, cx, 7, icons::SPARKLE, "Interface", None, |ui| {
                 widgets::field(ui, "Reduce motion", Some("Calmer transitions and a still background."), 48.0, |ui| {

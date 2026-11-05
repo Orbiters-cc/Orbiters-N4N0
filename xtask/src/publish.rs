@@ -24,9 +24,33 @@ pub fn ensure_newer(version: &str, channel: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// What a release gives installed apps and people: the file its release names, in the channel's feed; the one people
+/// download, and the name that always means the latest (Windows' setup is both).
+struct Files {
+    installer: std::path::PathBuf,
+    /// Published under `<version>/`, beside the installer.
+    download: Option<std::path::PathBuf>,
+    /// The stable channel's name for the latest, in the feed's folder.
+    latest: String,
+}
+
+fn release_files(version: &str) -> Files {
+    let dist = crate::target_dir().join("dist").join(version);
+    if cfg!(target_os = "macos") {
+        Files {
+            installer: dist.join(orbiters_update::mac_archive_name(version)),
+            download: Some(dist.join(orbiters_update::mac_disk_image_name(version))),
+            latest: "Orbiters-N4N0-macos-arm64.dmg".into(),
+        }
+    } else {
+        Files { installer: dist.join(format!("OrbitersSetup-{version}.exe")), download: None, latest: "OrbitersSetup.exe".into() }
+    }
+}
+
 pub fn publish(config: &Config, version: &str, channel: &str, force: bool) -> anyhow::Result<()> {
     let dist = crate::target_dir().join("dist").join(version);
-    let setup = dist.join(format!("OrbitersSetup-{version}.exe"));
+    let files = release_files(version);
+    let setup = files.installer.clone();
     let release_file = dist.join(format!("{channel}.json"));
     let bytes = std::fs::read(&release_file).with_context(|| format!("no {} (cargo xtask dist)", release_file.display()))?;
 
@@ -44,16 +68,22 @@ pub fn publish(config: &Config, version: &str, channel: &str, force: bool) -> an
     }
 
     let host = config.host();
-    let remote = config.remote_dir();
-    let versioned = format!("{remote}/{version}/OrbitersSetup-{version}.exe");
+    let remote = format!("{}/{}", config.remote_dir(), orbiters_update::PLATFORM_FOLDER).trim_end_matches('/').to_string();
+    let file_name = |p: &Path| p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let versioned = format!("{remote}/{version}/{}", file_name(&setup));
     println!("\n== Uploading to {host}:{remote}");
     ssh(&host, &format!("mkdir -p {}", quote(&format!("{remote}/{version}"))))?;
     upload(&host, &setup, &versioned, Some(&release.installer.sha256))?;
+    let mut download = versioned.clone();
+    if let Some(image) = &files.download {
+        download = format!("{remote}/{version}/{}", file_name(image));
+        upload(&host, image, &download, None)?;
+    }
     if channel == orbiters_update::STABLE {
-        let latest = format!("{remote}/OrbitersSetup.exe");
+        let latest = format!("{remote}/{}", files.latest);
         ssh(
             &host,
-            &format!("cp -f {} {} && mv -f {} {}", quote(&versioned), quote(&format!("{latest}.part")), quote(&format!("{latest}.part")), quote(&latest)),
+            &format!("cp -f {} {} && mv -f {} {}", quote(&download), quote(&format!("{latest}.part")), quote(&format!("{latest}.part")), quote(&latest)),
         )?;
     }
     upload(&host, &release_file, &format!("{remote}/{channel}.json"), None)?;
@@ -76,8 +106,14 @@ pub fn publish(config: &Config, version: &str, channel: &str, force: bool) -> an
 pub fn publish_dev(config: &Config, version: &str, channel: &str, force: bool) -> anyhow::Result<()> {
     orbiters_update::set_development(true);
     let dist = crate::target_dir().join("dist").join(version);
-    let setup = dist.join(format!("OrbitersSetup-{version}.exe"));
+    let files = release_files(version);
+    let setup = files.installer.clone();
     let release_file = dist.join(format!("{channel}.json"));
+    // A Mac without the release key makes no release file: its build goes on GitHub only.
+    if cfg!(target_os = "macos") && !release_file.exists() {
+        println!("\nNo release file (this computer has no release key): nothing for the development environment's feed.");
+        return Ok(());
+    }
     let bytes = std::fs::read(&release_file).with_context(|| format!("no {} (cargo xtask dist)", release_file.display()))?;
     let key = orbiters_update::public_key().context("crates/orbiters-update/update-key.pub holds no key (cargo xtask keygen)")?;
     let release = SignedRelease::open(&bytes, &key, channel)?;
@@ -101,10 +137,14 @@ pub fn publish_dev(config: &Config, version: &str, channel: &str, force: bool) -
         std::fs::rename(&part, to).with_context(|| format!("{} cannot be replaced", to.display()))?;
         Ok(())
     };
-    let versioned = dir.join(version).join(format!("OrbitersSetup-{version}.exe"));
+    let dir = dir.join(orbiters_update::PLATFORM_FOLDER);
+    let versioned = dir.join(version).join(setup.file_name().expect("a file"));
     place(&setup, &versioned)?;
+    if let Some(image) = &files.download {
+        place(image, &dir.join(version).join(image.file_name().expect("a file")))?;
+    }
     if channel == orbiters_update::STABLE {
-        place(&setup, &dir.join("OrbitersSetup.exe"))?;
+        place(files.download.as_ref().unwrap_or(&setup), &dir.join(&files.latest))?;
     }
     place(&release_file, &dir.join(format!("{channel}.json")))?;
     match orbiters_update::net::fetch_release(channel, &key) {
@@ -124,25 +164,36 @@ pub const GITHUB_REPO: &str = "Orbiters-cc/Orbiters-N4N0";
 /// GitHub's CLI (`gh`, signed in). For a version released there already, its setup is replaced.
 pub fn github(version: &str, notes: &str, unsigned: bool) -> anyhow::Result<()> {
     let tag = format!("desktop-v{version}");
-    let setup = crate::target_dir().join("dist").join(version).join(format!("OrbitersSetup-{version}.exe"));
-    anyhow::ensure!(setup.is_file(), "no {} (cargo xtask dist)", setup.display());
+    let assets: Vec<std::path::PathBuf> =
+        if cfg!(target_os = "macos") { crate::macos::release_assets(version) } else { vec![crate::target_dir().join("dist").join(version).join(format!("OrbitersSetup-{version}.exe"))] };
+    for asset in &assets {
+        anyhow::ensure!(asset.is_file(), "no {} (cargo xtask dist)", asset.display());
+    }
+    let setup = assets[0].clone();
     let mut body = if notes.trim().is_empty() { format!("Orbiters - N4N0 {version}.") } else { notes.trim().to_string() };
-    body.push_str(&format!("\n\nInstall: download `OrbitersSetup-{version}.exe` below and run it (for you only, no administrator rights)."));
-    if unsigned {
-        body.push_str(" It is not code-signed yet: Windows SmartScreen warns about it (More info, then Run anyway).");
+    if cfg!(target_os = "macos") {
+        body.push_str(&format!(
+            "\n\nInstall on a Mac with Apple silicon: open `{}` below and drag the app to Applications.",
+            orbiters_update::mac_disk_image_name(version)
+        ));
+    } else {
+        body.push_str(&format!("\n\nInstall: download `OrbitersSetup-{version}.exe` below and run it (for you only, no administrator rights)."));
+        if unsigned {
+            body.push_str(" It is not code-signed yet: Windows SmartScreen warns about it (More info, then Run anyway).");
+        }
     }
     let notes_file = setup.with_file_name("github-notes.md");
     std::fs::write(&notes_file, &body)?;
     let exists = Command::new("gh").args(["release", "view", &tag, "--repo", GITHUB_REPO]).output().is_ok_and(|o| o.status.success());
     if exists {
-        run(Command::new("gh").args(["release", "upload", &tag, "--repo", GITHUB_REPO, "--clobber"]).arg(&setup))?;
+        run(Command::new("gh").args(["release", "upload", &tag, "--repo", GITHUB_REPO, "--clobber"]).args(&assets))?;
     } else {
         run(Command::new("gh")
             .args(["release", "create", &tag, "--repo", GITHUB_REPO, "--verify-tag", "--title", &format!("Orbiters - N4N0 {version}")])
             .args(version.contains("-dev.").then_some("--prerelease"))
             .arg("--notes-file")
             .arg(&notes_file)
-            .arg(&setup))?;
+            .args(&assets))?;
     }
     let _ = std::fs::remove_file(&notes_file);
     println!("\nhttps://github.com/{GITHUB_REPO}/releases/tag/{tag}");

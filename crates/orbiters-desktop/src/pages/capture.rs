@@ -33,7 +33,10 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, _state: &mut State, projects: &mut super::
             header(ui, cx);
             chips(ui, cx, projects);
             grid(ui, cx);
-            performance(ui, cx);
+            // What a session records besides the frames: chosen where recording happens.
+            if orbiters_core::osc::VRCHAT_RUNS_HERE {
+                performance(ui, cx);
+            }
             camera_path(ui, cx);
         });
     });
@@ -95,7 +98,9 @@ fn header(ui: &mut Ui, cx: &mut Cx) {
                 widgets::text_truncated(p, pos2(rect.left(), sub_y), Align2::LEFT_CENTER, &Txt::new(id, 12.0).mono().color(theme::FG_3), rect.width() * 0.7);
             }
             None => {
-                let hint = if snap.vrchat.running {
+                let hint = if !orbiters_core::osc::VRCHAT_RUNS_HERE {
+                    "Recording happens where VRChat runs: its camera comes over Spout, on Windows. Here you open, reconstruct and share captures."
+                } else if snap.vrchat.running {
                     "VRChat is running; join a world to tag captures with it."
                 } else {
                     "Start VRChat and enable Spout streaming on the Stream camera."
@@ -113,6 +118,10 @@ fn header(ui: &mut Ui, cx: &mut Cx) {
             let w = b.desired_width(ui);
             let r = Rect::from_min_size(pos2(rect.right() - w, rect.bottom() - 34.0), vec2(w, 32.0));
             test = b.show_at(ui, r).clicked();
+            // VRChat's camera flies only for a recording here.
+            if !orbiters_core::osc::VRCHAT_RUNS_HERE {
+                return;
+            }
             // A second of VRChat's camera swinging around what it looks at, reconstructed.
             let b3 = Button::new("3D picture")
                 .icon(icons::CUBE_FOCUS)
@@ -172,26 +181,35 @@ fn chips(ui: &mut Ui, cx: &mut Cx, projects: &mut super::projects::State) {
     let osc = &snap.osc;
     let storage = &snap.storage;
     let chips = [
-        (
-            icons::MONITOR_PLAY,
-            "VRChat",
-            if snap.vrchat.running {
-                if world.in_world {
-                    "In a world".to_string()
+        if orbiters_core::osc::VRCHAT_RUNS_HERE {
+            (
+                icons::MONITOR_PLAY,
+                "VRChat",
+                if snap.vrchat.running {
+                    if world.in_world {
+                        "In a world".to_string()
+                    } else {
+                        "Running".into()
+                    }
                 } else {
-                    "Running".into()
-                }
-            } else {
-                "Not running".into()
-            },
-            if snap.vrchat.running { Tone::Ok } else { Tone::Off },
-        ),
-        (
-            icons::BROADCAST,
-            "Spout source",
-            source.map(|s| format!("{} · {}×{}", s.name, s.width, s.height)).unwrap_or_else(|| "VRChat's camera: Stream mode, Spout Stream on".into()),
-            if source.is_some() { Tone::Ok } else { Tone::Warn },
-        ),
+                    "Not running".into()
+                },
+                if snap.vrchat.running { Tone::Ok } else { Tone::Off },
+            )
+        } else {
+            let (text, tone) = super::network::sidebar_status(&snap.lan);
+            (icons::MONITOR_PLAY, "VRChat", text, tone)
+        },
+        if orbiters_core::osc::VRCHAT_RUNS_HERE {
+            (
+                icons::BROADCAST,
+                "Spout source",
+                source.map(|s| format!("{} · {}×{}", s.name, s.width, s.height)).unwrap_or_else(|| "VRChat's camera: Stream mode, Spout Stream on".into()),
+                if source.is_some() { Tone::Ok } else { Tone::Warn },
+            )
+        } else {
+            (icons::BROADCAST, "Recording", "Where VRChat runs".into(), Tone::Off)
+        },
         (
             icons::SPARKLE,
             "Action Menu",
@@ -296,7 +314,8 @@ fn recorder(ui: &mut Ui, cx: &mut Cx, card: Rect) {
     // The button.
     let button_rect = Rect::from_center_size(pos2(card.center().x, card.top() + 68.0 + record::SIZE * 0.5), Vec2::splat(record::SIZE));
     let health = c.stats.as_ref().map(|s| if s.frames > 0 { s.strip_ok as f32 / s.frames as f32 } else { 1.0 }).unwrap_or(1.0);
-    let rb = RecordButton { state: rec_state(c.state), disabled: !consent || c.state == CaptureState::Importing, health };
+    // Recording reads VRChat's camera over Spout: nothing to read here, the test pattern aside (its own button).
+    let rb = RecordButton { state: rec_state(c.state), disabled: !consent || c.state == CaptureState::Importing || (!orbiters_core::osc::VRCHAT_RUNS_HERE && !recording), health };
     let (_, toggled) = rb.show_at(&mut ui, button_rect);
     if toggled {
         if snap.is_capturing() {
@@ -308,6 +327,7 @@ fn recorder(ui: &mut Ui, cx: &mut Cx, card: Rect) {
 
     // What the button does now.
     let title = match c.state {
+        CaptureState::Idle if !orbiters_core::osc::VRCHAT_RUNS_HERE => "Record on the computer that runs VRChat",
         CaptureState::Idle => "Start recording",
         CaptureState::Starting => "Starting…",
         CaptureState::Recording | CaptureState::Paused => "Stop recording",
@@ -315,6 +335,7 @@ fn recorder(ui: &mut Ui, cx: &mut Cx, card: Rect) {
         CaptureState::Importing => "Importing…",
     };
     let sub = match c.state {
+        CaptureState::Idle if !orbiters_core::osc::VRCHAT_RUNS_HERE => "Its captures open here, in Photos & captures".to_string(),
         CaptureState::Idle if snap.osc.listening => "or use the Record toggle in your Action Menu".to_string(),
         CaptureState::Idle => "Spout frames are decoded and saved as a session".to_string(),
         // Nothing comes before VRChat's camera streams (the worker names the sender once it is connected).

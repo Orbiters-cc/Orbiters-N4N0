@@ -1,5 +1,10 @@
-# Takes fontmake's variable Selawik to the interface's font: renamed (Selawik is an OFL Reserved Font Name, so a built
-# version may not carry it) with Segoe UI's vertical metrics, so lines are as tall as on Windows.
+# Takes fontmake's variable Selawik to the interface's font on macOS: renamed (Selawik is an OFL Reserved Font Name, so a
+# built version may not carry it) with Segoe UI's vertical metrics, so lines are as tall as on Windows.
+#
+#   pip install fontmake fonttools
+#   curl -LO "https://raw.githubusercontent.com/microsoft/Selawik/master/Source%20files/Glyphs/selawik.glyphs"
+#   fontmake -g selawik.glyphs -o variable --output-dir out --flatten-components
+#   python scripts/fonts/orbiters_sans.py out/Selawik-VF.ttf crates/orbiters-ui/assets/OrbitersSans-VF.ttf
 import sys
 from fontTools.ttLib import TTFont
 src, dst = sys.argv[1:3]

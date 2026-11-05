@@ -370,7 +370,8 @@ mod tests {
         m.list(vec![entry(&dir, false)]);
         let row = |m: &MenuShares, snap: &Snapshot| m.view(snap).history[0].clone();
         assert_eq!(row(&m, &snap).phase, CapturePhase::NoView);
-        snap.capture.session_dir = Some(PathBuf::from(r"C:\Sessions\2026-10-29_10-00-00"));
+        // The same folder written another way, on the system whose paths have two ways.
+        snap.capture.session_dir = Some(if cfg!(windows) { PathBuf::from(r"C:\Sessions\2026-10-29_10-00-00") } else { dir.clone() });
         snap.capture.state = CaptureState::Recording;
         assert_eq!(row(&m, &snap).phase, CapturePhase::Recording);
         snap.capture.state = CaptureState::Idle;

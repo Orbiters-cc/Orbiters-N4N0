@@ -22,6 +22,43 @@ reconstruction, a call or an upload is running, the restart waits for it to end,
 **Restart now**. A downloaded update that was never installed is installed the next time the app starts. The update
 replaces the files in place, then starts the app again: no old versions are kept beside it.
 
+## On a Mac
+
+The same commands, run on a Mac, make and publish the Mac's release:
+
+```sh
+cargo xtask bump --dev              # or a version
+git commit -am "Orbiters - N4N0 0.3.4-dev.32" && git push
+cargo xtask release --dev
+```
+
+`dist` writes in `target/dist/<version>/`: `Orbiters - N4N0.app`, `Orbiters-N4N0-<version>-macos-arm64.dmg` (the
+application and a link to Applications, what people download), `Orbiters-N4N0-<version>-macos-arm64.zip` (what installed
+apps update with) and, when this computer has the release key, the signed `<channel>.json` that names the zip. `github`
+attaches the disk image and the zip to the version's release, beside Windows' setup if it is already there (it does not
+replace it), and Windows' `github` does the same the other way around.
+
+Mac releases are in the feed's `macos/` folder (`<feed>/macos/<channel>.json`, the files under
+`macos/<version>/`): an app only ever hears of its own platform's. They need nothing more from the server: Caddy already
+serves `docker-data/downloads` as files. `xtask publish` uploads them with SSH as Windows' are.
+
+**Signing.** `dist` signs with the best identity the keychain has, or `macos_identity` in the settings (`-`: ad hoc):
+
+| Identity | What people see |
+|---|---|
+| Developer ID Application, notarized (`macos_notary_profile`, from `xcrun notarytool store-credentials`) | The app opens normally, anywhere. **Needs Apple's Developer Program; the only one to give the public.** |
+| Apple Development | Gatekeeper blocks it where it was downloaded by hand, until allowed in System Settings › Privacy & Security › Open Anyway. Permissions and the keychain survive updates, since the signature's identity stays. |
+| Ad hoc | The same, and macOS asks for the microphone, the local network and the keychain again after each update. |
+
+**The release key** is the same as Windows' (installed apps trust `update-key.pub`), so a Mac makes a signed release only
+once it holds a copy (`~/.orbiters-release/update-signing-key`). Without it, `dist` says so and makes no release file:
+`release --dev` then puts the files on GitHub only, and installed Macs do not hear of it.
+
+**The update itself.** The app downloads the zip in the background and checks its size and SHA-256 against the signed
+release. Restart to update starts a copy of the program outside the application (`--apply-update`, `mac_update.rs`): it
+waits for the app to quit, unpacks the zip beside it, checks its bundle identifier and code signature, swaps the
+applications with two renames (the old one goes back if the second fails) and opens the app again.
+
 ## What each command does
 
 | Command | What it does |
@@ -108,6 +145,8 @@ Without an Authenticode signature, Windows' SmartScreen warns about the setup ("
 | `host` | `ORBITERS_RELEASE_HOST` | `blackorbit@orbiters` (the server over Tailscale SSH) |
 | `remote_dir` | `ORBITERS_RELEASE_DIR` | `/home/blackorbit/Orbiters/server/docker-data/downloads/desktop` |
 | `setup_target_dir` | `ORBITERS_SETUP_TARGET_DIR` | the target folder (the static setup needs about 1.1 GB of its own) |
+| `macos_identity` | `ORBITERS_MACOS_IDENTITY` | the best identity the keychain has (`-`: ad hoc) |
+| `macos_notary_profile` | `ORBITERS_MACOS_NOTARY_PROFILE` | none: Developer ID builds are not notarized |
 
 ### The server
 

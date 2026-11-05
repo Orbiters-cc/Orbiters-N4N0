@@ -30,6 +30,48 @@ pub struct VrchatStatus {
     /// walks the avatar itself.
     #[serde(default)]
     pub motion: Option<AvatarMotion>,
+    /// It runs on another device of the network ([`LanStatus`]): it takes nothing of this computer's GPU or processor.
+    #[serde(default)]
+    pub remote: bool,
+}
+
+impl VrchatStatus {
+    /// Whether a VRChat runs on this very computer: what shares its GPU, and what its log, Spout and sound come from.
+    pub fn runs_here(&self) -> bool {
+        self.running && !self.remote
+    }
+}
+
+/// How the app stands with VRChat on the network.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LanLink {
+    /// Not looking: VRChat runs on this computer, or OSC is off.
+    #[default]
+    Off,
+    /// This computer is on no local network.
+    NoNetwork,
+    /// No VRChat found yet.
+    Looking,
+    /// Several found: the person chooses.
+    Choose,
+    /// A VRChat is chosen but neither answers nor sends anything.
+    Waiting,
+    /// VRChat answers or sends.
+    Connected,
+}
+
+/// VRChat on the network, where VRChat does not run on this computer.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct LanStatus {
+    pub link: LanLink,
+    /// Every VRChat on the network now.
+    pub found: Vec<orbiters_core::lan::FoundVrchat>,
+    /// The one talked with: its address, and what to call it.
+    pub peer: Option<std::net::Ipv4Addr>,
+    pub peer_label: Option<String>,
+    /// This computer's address on that network, for what a PC's launch options must say.
+    pub this_computer: Option<std::net::Ipv4Addr>,
 }
 
 /// What VRChat's own avatar parameters (`InStation`, `Seated`, `VelocityMagnitude`) say of its moving. The speed is
@@ -402,6 +444,8 @@ pub struct Snapshot {
     /// Microphones the worker can record.
     pub mics: Vec<AudioDeviceInfo>,
     pub osc: OscStatus,
+    #[serde(default)]
+    pub lan: LanStatus,
     pub capture: CaptureStatus,
     pub settings: Settings,
     pub storage: StorageStatus,
@@ -437,10 +481,12 @@ impl Snapshot {
                 world: WorldState::default(),
                 log_found: orbiters_core::paths::vrchat_log_dir().is_some(),
                 motion: None,
+                remote: false,
             },
             sources: Vec::new(),
             mics: Vec::new(),
             osc: OscStatus { enabled: settings.osc.enabled, ..Default::default() },
+            lan: LanStatus::default(),
             capture: CaptureStatus {
                 state: CaptureState::Idle,
                 session_dir: None,

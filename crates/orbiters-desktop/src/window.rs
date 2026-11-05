@@ -24,15 +24,24 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             eprintln!("could not remove {}: {why}", path.display());
         }
     });
+    #[cfg(target_os = "macos")]
+    crate::mac::stay_awake();
     let backend: Ctl = Arc::new(Remote(Client::connect(&endpoint, Role::Window)?));
+    let viewport = egui::ViewportBuilder::default()
+        .with_title("Orbiters - N4N0")
+        .with_app_id("orbiters-desktop")
+        .with_inner_size([1280.0, 820.0])
+        .with_min_inner_size([1040.0, 700.0])
+        .with_icon(app::window_icon());
+    // The app draws its own title bar. On Windows and elsewhere, a window without decorations. On the Mac such a window
+    // would lose its rounded corners, shadow and edges: a titled window keeps them, with its title bar's every part
+    // hidden under the app's.
+    #[cfg(not(target_os = "macos"))]
+    let viewport = viewport.with_decorations(false);
+    #[cfg(target_os = "macos")]
+    let viewport = viewport.with_fullsize_content_view(true).with_titlebar_shown(false).with_title_shown(false).with_titlebar_buttons_shown(false);
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_title("Orbiters - N4N0")
-            .with_app_id("orbiters-desktop")
-            .with_decorations(false)
-            .with_inner_size([1280.0, 820.0])
-            .with_min_inner_size([1040.0, 700.0])
-            .with_icon(app::window_icon()),
+        viewport,
         renderer: eframe::Renderer::Wgpu,
         centered: true,
         // The GPU the settings choose: by default the integrated one, which keeps the 3D view off the game's graphics card.

@@ -55,19 +55,41 @@ pub fn copy_files(files: &[PathBuf]) -> Result<(), String> {
     {
         win::copy(files)
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "macos")]
+    {
+        mac::copy(files)
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
     {
         let _ = files;
         Err("Copying files is for Windows".into())
     }
 }
 
+/// How a drag that ran on its own ended (the Mac's is not modal), for [`run_pending`] to tell egui.
+#[cfg(target_os = "macos")]
+static ENDED: Mutex<Option<(Outcome, Option<egui::Pos2>)>> = Mutex::new(None);
+
 /// Runs the drag asked for, if any (modal: returns once dropped or cancelled), then gives egui the button's release.
 pub fn run_pending(ctx: &egui::Context, raw: &mut egui::RawInput) {
+    // The Mac's drag runs inside AppKit's event loop once started, and ends here on a later frame: the button's release
+    // went to it, and the frames in between see the cards as lifted.
+    #[cfg(target_os = "macos")]
+    {
+        if let Some(drag) = PENDING.lock().unwrap_or_else(|e| e.into_inner()).take() {
+            if let Err(e) = mac::drag(&drag, ctx.clone()) {
+                eprintln!("the drag could not start: {e}");
+                *ENDED.lock().unwrap_or_else(|e| e.into_inner()) = Some((Outcome::Failed, None));
+            }
+        }
+    }
+    #[cfg(target_os = "macos")]
+    let Some((outcome, inside)) = ENDED.lock().unwrap_or_else(|e| e.into_inner()).take() else { return };
+    #[cfg(not(target_os = "macos"))]
     let Some(drag) = PENDING.lock().unwrap_or_else(|e| e.into_inner()).take() else { return };
     #[cfg(windows)]
     let (outcome, inside) = win::drag(&drag, ctx.pixels_per_point());
-    #[cfg(not(windows))]
+    #[cfg(not(any(windows, target_os = "macos")))]
     let (outcome, inside) = (Outcome::Failed, None::<egui::Pos2>);
     let pos = inside.or_else(|| ctx.input(|i| i.pointer.latest_pos()));
     if let Some(pos) = pos {
@@ -80,6 +102,181 @@ pub fn run_pending(ctx: &egui::Context, raw: &mut egui::RawInput) {
     }
     *LAST.lock().unwrap_or_else(|e| e.into_inner()) = Some(outcome);
     ctx.request_repaint();
+}
+
+/// AppKit's drag and drop: each file a file URL on the dragging pasteboard, as the Finder hands them out, offered as a
+/// copy only, with the picture the page made under the cursor.
+#[cfg(target_os = "macos")]
+mod mac {
+    use super::{Drag, Image, Outcome, ENDED};
+    use objc2::rc::Retained;
+    use objc2::runtime::{AnyObject, NSObject, NSObjectProtocol, ProtocolObject};
+    use objc2::{define_class, msg_send, AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly};
+    use objc2_app_kit::{
+        NSApplication, NSBitmapImageRep, NSDeviceRGBColorSpace, NSDragOperation, NSDraggingContext, NSDraggingItem, NSDraggingSession, NSDraggingSource, NSEvent,
+        NSEventModifierFlags, NSEventType, NSImage, NSPasteboard, NSPasteboardWriting, NSView,
+    };
+    use objc2_foundation::{NSArray, NSPoint, NSRect, NSSize, NSString, NSURL};
+    use std::cell::OnceCell;
+    use std::path::PathBuf;
+
+    struct Ivars {
+        /// To wake the window when the drag ends, and to read where the pointer is in points.
+        ctx: OnceCell<egui::Context>,
+    }
+
+    define_class!(
+        #[unsafe(super(NSObject))]
+        #[thread_kind = MainThreadOnly]
+        #[name = "OrbitersDragSource"]
+        #[ivars = Ivars]
+        struct Source;
+
+        unsafe impl NSObjectProtocol for Source {}
+
+        unsafe impl NSDraggingSource for Source {
+            /// A copy only: a drop never moves the originals.
+            #[unsafe(method(draggingSession:sourceOperationMaskForDraggingContext:))]
+            fn operations(&self, _: &NSDraggingSession, _: NSDraggingContext) -> NSDragOperation {
+                NSDragOperation::Copy
+            }
+
+            #[unsafe(method(draggingSession:endedAtPoint:operation:))]
+            fn ended(&self, _: &NSDraggingSession, _: NSPoint, operation: NSDragOperation) {
+                let outcome = if operation.is_empty() { Outcome::Cancelled } else { Outcome::Copied };
+                *ENDED.lock().unwrap_or_else(|e| e.into_inner()) = Some((outcome, None));
+                if let Some(ctx) = self.ivars().ctx.get() {
+                    ctx.request_repaint();
+                }
+            }
+        }
+    );
+
+    impl Source {
+        fn new(mtm: MainThreadMarker, ctx: egui::Context) -> Retained<Self> {
+            let cell = OnceCell::new();
+            let _ = cell.set(ctx);
+            let this = Self::alloc(mtm).set_ivars(Ivars { ctx: cell });
+            // SAFETY: NSObject's init, on a freshly allocated object.
+            unsafe { msg_send![super(this), init] }
+        }
+    }
+
+    fn urls(files: &[PathBuf]) -> Vec<Retained<NSURL>> {
+        files.iter().filter_map(|file| file.to_str()).map(|path| NSURL::fileURLWithPath(&NSString::from_str(path))).collect()
+    }
+
+    /// The picture as an image of `points` size, its straight RGBA kept as it is.
+    fn image(picture: &Image, points: NSSize) -> Option<Retained<NSImage>> {
+        // SAFETY: a bitmap the system allocates for this size (no planes handed in), filled below within its size.
+        unsafe {
+            let rep = NSBitmapImageRep::initWithBitmapDataPlanes_pixelsWide_pixelsHigh_bitsPerSample_samplesPerPixel_hasAlpha_isPlanar_colorSpaceName_bytesPerRow_bitsPerPixel(
+                NSBitmapImageRep::alloc(),
+                std::ptr::null_mut(),
+                picture.width as isize,
+                picture.height as isize,
+                8,
+                4,
+                true,
+                false,
+                NSDeviceRGBColorSpace,
+                (picture.width * 4) as isize,
+                32,
+            )?;
+            let data = rep.bitmapData();
+            if data.is_null() {
+                return None;
+            }
+            // The bitmap is premultiplied, as AppKit keeps them.
+            for (i, px) in picture.rgba.chunks_exact(4).enumerate() {
+                let alpha = u32::from(px[3]);
+                let out = data.add(i * 4);
+                *out = (u32::from(px[0]) * alpha / 255) as u8;
+                *out.add(1) = (u32::from(px[1]) * alpha / 255) as u8;
+                *out.add(2) = (u32::from(px[2]) * alpha / 255) as u8;
+                *out.add(3) = px[3];
+            }
+            let image = NSImage::initWithSize(NSImage::alloc(), points);
+            image.addRepresentation(&rep);
+            Some(image)
+        }
+    }
+
+    /// Starts the drag. The session runs on its own in AppKit's event loop, and tells [`ENDED`] how it went.
+    pub fn drag(drag: &Drag, ctx: egui::Context) -> Result<(), String> {
+        let mtm = MainThreadMarker::new().ok_or("not on the window's thread")?;
+        let app = NSApplication::sharedApplication(mtm);
+        let window = app.keyWindow().or_else(|| app.mainWindow()).ok_or("no window")?;
+        let view: Retained<NSView> = window.contentView().ok_or("no view")?;
+        let urls = urls(&drag.files);
+        if urls.is_empty() {
+            return Err("no files".into());
+        }
+        let at_window = window.mouseLocationOutsideOfEventStream();
+        let at_view = view.convertPoint_fromView(at_window, None);
+        let ppp = f64::from(ctx.pixels_per_point()).max(1.0);
+        let picture = drag.image.as_ref().and_then(|p| {
+            let points = NSSize::new(f64::from(p.width) / ppp, f64::from(p.height) / ppp);
+            Some((image(p, points)?, points, p.cursor))
+        });
+        // The picture on the first item, with the pointer on the point of it the page said; the others under it, as a pile.
+        let mut items = Vec::with_capacity(urls.len());
+        for (i, url) in urls.iter().enumerate() {
+            let writer: &ProtocolObject<dyn NSPasteboardWriting> = ProtocolObject::from_ref(&**url);
+            let item = NSDraggingItem::initWithPasteboardWriter(NSDraggingItem::alloc(), writer);
+            let contents: Option<&AnyObject> = picture.as_ref().filter(|_| i == 0).map(|(image, ..)| -> &AnyObject { image.as_ref() });
+            let frame = match &picture {
+                Some((_, points, cursor)) => {
+                    let (x, y) = (f64::from(cursor[0]) / ppp, f64::from(cursor[1]) / ppp);
+                    // AppKit's view coordinates go up from the bottom unless the view is flipped.
+                    let top = if view.isFlipped() { at_view.y - y } else { at_view.y - points.height + y };
+                    NSRect::new(NSPoint::new(at_view.x - x, top), *points)
+                }
+                None => NSRect::new(NSPoint::new(at_view.x - 16.0, at_view.y - 16.0), NSSize::new(32.0, 32.0)),
+            };
+            // SAFETY: the contents are an image (or nothing, for the pile under it).
+            unsafe { item.setDraggingFrame_contents(frame, contents) };
+            items.push(item);
+        }
+        let items = NSArray::from_retained_slice(&items);
+        // The mouse-down this drag continues: AppKit asks for one, and winit's frame runs outside any event.
+        let event = NSEvent::mouseEventWithType_location_modifierFlags_timestamp_windowNumber_context_eventNumber_clickCount_pressure(
+            NSEventType::LeftMouseDown,
+            at_window,
+            NSEventModifierFlags::empty(),
+            app.currentEvent().map_or(0.0, |e| e.timestamp()),
+            window.windowNumber(),
+            None,
+            0,
+            1,
+            1.0,
+        )
+        .ok_or("no event")?;
+        let source = Source::new(mtm, ctx);
+        let session = view.beginDraggingSessionWithItems_event_source(&items, &event, ProtocolObject::from_ref(&*source));
+        session.setAnimatesToStartingPositionsOnCancelOrFail(true);
+        // It lives as long as AppKit may call it: until the process goes, a few bytes per drag.
+        std::mem::forget(source);
+        Ok(())
+    }
+
+    /// The files on the clipboard as the Finder's Copy leaves them.
+    pub fn copy(files: &[PathBuf]) -> Result<(), String> {
+        let _ = MainThreadMarker::new().ok_or("not on the window's thread")?;
+        let urls = urls(files);
+        if urls.is_empty() {
+            return Err("no files".into());
+        }
+        let board = NSPasteboard::generalPasteboard();
+        board.clearContents();
+        let writers: Vec<&ProtocolObject<dyn NSPasteboardWriting>> = urls.iter().map(|url| ProtocolObject::from_ref(&**url)).collect();
+        if board.writeObjects(&NSArray::from_slice(&writers)) {
+            Ok(())
+        } else {
+            Err("The clipboard did not take the files".into())
+        }
+    }
+
 }
 
 #[cfg(windows)]

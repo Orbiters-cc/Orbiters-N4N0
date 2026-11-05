@@ -42,7 +42,14 @@ const COPIED_FOR: f64 = 2.0;
 /// The window's features: every Home tile, then previous instances and the QR code scanner (More's, on the avatar's
 /// screen).
 fn features() -> impl Iterator<Item = (Target, Icon, Text, Tint)> {
-    HOME_TILES.into_iter().chain(MORE_CARDS_QR.into_iter().filter(|t| matches!(t.0, Target::Instances | Target::Qr)))
+    HOME_TILES.into_iter().chain(MORE_CARDS_QR.into_iter().filter(|t| matches!(t.0, Target::Instances | Target::Qr))).filter(|t| available(t.0))
+}
+
+/// Whether a feature can work here. Where VRChat does not run on this computer, these need it on the same computer:
+/// fast walk moves SteamVR's play space, Tracking smooths SteamVR's devices, and a 3D picture and the QR code scanner read
+/// VRChat's camera over Spout. Everything else goes over OSC or the web.
+fn available(target: Target) -> bool {
+    orbiters_core::osc::VRCHAT_RUNS_HERE || !matches!(target, Target::FastWalk | Target::Photo | Target::Tracking | Target::Qr)
 }
 
 /// What a press asks of the menu, done once the page is drawn.
@@ -79,6 +86,8 @@ pub struct State {
     copied: Option<(String, f64)>,
     /// The States page's own state (what was asked and not yet seen, a name being typed).
     states: super::states::StatesPage,
+    /// VRChat on the network, shown here until one is connected.
+    network: super::network::State,
     /// What going back to Home asked of the menu's host from outside a frame (the sidebar's Home: the QR code scanner
     /// stops), done at the next one.
     pending: Vec<Effect>,
@@ -126,7 +135,7 @@ fn go_home(host: &mut MenuHost) -> Vec<Effect> {
 pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
     let ctx = ui.ctx().clone();
     let snap = cx.snap;
-    let State { host, shown, since, opened, focus, copied, states, pending } = state;
+    let State { host, shown, since, opened, focus, copied, states, pending, network } = state;
     let host = host.get_or_insert_with(|| {
         let mut host = MenuHost::new(ctx.clone());
         host.open(snap);
@@ -183,7 +192,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
                 // World feedback is given from the world's window (Visited worlds) and the menus, not from this Home; the
                 // screen mirror shows only on the avatar's screen.
                 Page::Home | Page::Card | Page::More | Page::Feedback | Page::FeedbackLabels | Page::Comments | Page::Mirror => {
-                    home(ui, cx, menu, &idle, copied_id, &mut acts)
+                    home(ui, cx, menu, &idle, copied_id, network, &mut acts)
                 }
                 Page::Instances | Page::AddFriend => instances(ui, cx, menu, &mut acts),
                 Page::Search | Page::Results => youtube(ui, cx, menu, &picture, focus, copied_id, &mut acts),
@@ -288,7 +297,7 @@ fn idle_line(settings: &Settings) -> String {
     }
 }
 
-fn home(ui: &mut Ui, cx: &Cx, menu: &Menu, idle: &str, copied: Option<&str>, acts: &mut Vec<Act>) {
+fn home(ui: &mut Ui, cx: &mut Cx, menu: &Menu, idle: &str, copied: Option<&str>, network: &mut super::network::State, acts: &mut Vec<Act>) {
     block(ui, cx, 0, 72.0, |ui, rect| {
         let p = ui.painter();
         widgets::text(p, pos2(rect.left(), rect.top() + 7.0), Align2::LEFT_CENTER, &Txt::caps("N4N0 menu"));
@@ -303,6 +312,11 @@ fn home(ui: &mut Ui, cx: &Cx, menu: &Menu, idle: &str, copied: Option<&str>, act
             widgets::text_truncated(p, pos2(rect.left(), y), Align2::LEFT_CENTER, &Txt::new(idle, 13.0).color(theme::FG_3), rect.width() * 0.6);
         }
     });
+
+    // Until a VRChat on the network is connected, the first thing to do: most of what follows goes through it.
+    if !orbiters_core::osc::VRCHAT_RUNS_HERE && !matches!(cx.snap.lan.link, crate::state::LanLink::Connected | crate::state::LanLink::Off) {
+        super::network::card_saving(ui, cx, 1, network);
+    }
 
     let w = ui.available_width();
     let cols = home_columns(w);
@@ -1406,12 +1420,25 @@ mod tests {
         Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::NONE }
     }
 
+    /// The middle of a feature's card on the default window: four to a row, wherever the features this computer has put it.
+    fn card_of(target: Target) -> Pos2 {
+        let at = features().position(|t| t.0 == target).expect("a feature here");
+        pos2(147.0 + 250.0 * (at % 4) as f32, 204.0 + 144.0 * (at / 4) as f32)
+    }
+
+    #[test]
+    fn a_mac_shows_no_feature_that_needs_vrchat_on_it() {
+        let hidden = [Target::FastWalk, Target::Photo, Target::Tracking, Target::Qr];
+        assert_eq!(features().any(|t| hidden.contains(&t.0)), orbiters_core::osc::VRCHAT_RUNS_HERE);
+        assert!(features().any(|t| t.0 == Target::States) && features().any(|t| t.0 == Target::Light), "what goes over OSC stays");
+    }
+
     #[test]
     fn a_card_opens_its_page_on_the_press_and_home_comes_back() {
         let mut h = Harness::new();
         h.settle();
-        // YouTube's card, the second of the first row: its page on the press, and the search field takes the keys.
-        let youtube = pos2(397.0, 204.0);
+        // YouTube's card: its page on the press, and the search field takes the keys.
+        let youtube = card_of(Target::YouTube);
         h.press(youtube);
         assert_eq!(h.page(), Page::Search, "open on the press, before the release");
         h.release(youtube);
@@ -1423,8 +1450,9 @@ mod tests {
         h.settle();
 
         // The light's card (away from its switch) opens the light's page; its Home button comes back on the release.
-        h.press(pos2(400.0, 380.0));
-        h.release(pos2(400.0, 380.0));
+        let light = card_of(Target::Light) + vec2(0.0, 32.0);
+        h.press(light);
+        h.release(light);
         assert_eq!(h.page(), Page::Light);
         h.settle();
         let back = pos2(60.0, 64.0);
@@ -1434,6 +1462,7 @@ mod tests {
         assert_eq!(h.page(), Page::Home);
     }
 
+    #[cfg(not(target_os = "macos"))]
     #[test]
     fn the_qr_code_scanner_scans_while_its_page_shows() {
         let mut h = Harness::new();
@@ -1458,6 +1487,7 @@ mod tests {
         assert_eq!(h.page(), Page::Instances);
     }
 
+    #[cfg(not(target_os = "macos"))]
     #[test]
     fn a_switch_acts_alone_and_shows_its_change_at_once() {
         let mut h = Harness::new();
@@ -1501,8 +1531,8 @@ mod tests {
             ..Default::default()
         };
         h.settle();
-        // The States card, the third of the second row: its page on the press, a card per avatar.
-        let card = pos2(646.0, 348.0);
+        // The States card: its page on the press, a card per avatar.
+        let card = card_of(Target::States);
         h.press(card);
         assert_eq!(h.page(), Page::States, "open on the press");
         h.release(card);

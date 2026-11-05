@@ -249,7 +249,7 @@ impl Service {
             ToService::Trash { dir } => {
                 let r = ctl.trash_session(&dir);
                 if r.is_ok() {
-                    ctl.notify(NoticeKind::Success, "Session moved to the recycle bin.");
+                    ctl.notify(NoticeKind::Success, format!("Session moved to the {}.", crate::words::BIN));
                 }
                 report(r);
             }
@@ -375,7 +375,7 @@ impl Service {
             self.ctl.n4n0_link_closed(role == Role::Overlay);
         }
         // Without a tray (Linux for now) nothing would bring the window back: closing it quits.
-        if role == Role::Window && cfg!(not(windows)) {
+        if role == Role::Window && cfg!(not(any(windows, target_os = "macos"))) {
             self.quit();
         }
     }
@@ -431,6 +431,9 @@ pub fn run(hidden: bool) -> anyhow::Result<()> {
             Err(e) => eprintln!("the update could not start: {e}"),
         }
     }
+
+    #[cfg(target_os = "macos")]
+    crate::startup::mac::follow_this_program();
 
     let settings = Settings::load();
     let _ = std::fs::create_dir_all(&settings.sessions_dir);
@@ -505,10 +508,21 @@ pub fn run(hidden: bool) -> anyhow::Result<()> {
 
     #[cfg(windows)]
     tray_loop(&service)?;
-    #[cfg(not(windows))]
+    // AppKit keeps the main thread until the process ends: this thread ends it once the service has quit.
+    #[cfg(target_os = "macos")]
+    {
+        std::thread::Builder::new().name("leaving".into()).spawn(move || {
+            let _ = quit_rx.recv();
+            std::thread::sleep(Duration::from_millis(300));
+            crate::mac::leave(move || drop(_instance));
+        })?;
+        crate::mac::run_service(service.clone())?;
+    }
+    #[cfg(all(not(windows), not(target_os = "macos")))]
     let _ = quit_rx.recv();
 
     // Let the windows read their Close before the process goes.
+    #[cfg(not(target_os = "macos"))]
     std::thread::sleep(Duration::from_millis(300));
     Ok(())
 }

@@ -50,13 +50,18 @@ serves `docker-data/downloads` as files. `xtask publish` uploads them with SSH a
 | Apple Development | Gatekeeper blocks it where it was downloaded by hand, until allowed in System Settings › Privacy & Security › Open Anyway. Permissions and the keychain survive updates, since the signature's identity stays. |
 | Ad hoc | The same, and macOS asks for the microphone, the local network and the keychain again after each update. |
 
+The keychain asks for the signing key at each file unless told **Always Allow** once. `dist` first signs a small file to see
+whether it gets an answer within a minute; without one, nobody being at the screen, it signs ad hoc and says so, rather than
+wait (unless `macos_identity` names an identity: then it stops with an error). `cargo xtask dist` and `cargo xtask github`
+again later replace the release's files with properly signed ones.
+
 **The release key** is the same as Windows' (installed apps trust `update-key.pub`), so a Mac makes a signed release only
 once it holds a copy (`~/.orbiters-release/update-signing-key`). Without it, `dist` says so and makes no release file:
 `release --dev` then puts the files on GitHub only, and installed Macs do not hear of it.
 
 **The update itself.** The app downloads the zip in the background and checks its size and SHA-256 against the signed
-release. Restart to update starts a copy of the program outside the application (`--apply-update`, `mac_update.rs`): it
-waits for the app to quit, unpacks the zip beside it, checks its bundle identifier and code signature, swaps the
+release. Restart to update starts the program again (`--apply-update`, `mac_update.rs`), from inside the application it
+replaces, since macOS kills a copy of a hardened program elsewhere: it waits for the app to quit, unpacks the zip beside it, checks its bundle identifier and code signature, swaps the
 applications with two renames (the old one goes back if the second fails) and opens the app again.
 
 ## What each command does

@@ -15,6 +15,7 @@ use anyhow::Context as _;
 use orbiters_update::{mac_archive_name, mac_disk_image_name, Artifact, InstallRecord, Release, SignedRelease, MAC_APP, MAC_BUNDLE_ID, PRODUCT};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::{Duration, Instant};
 
 const PROGRAMS: [&str; 5] = ["orbiters-desktop", "orbiters-capture", "orbiters-reconstruct", "orbiters-voice", "orbiters-call"];
 /// The speech libraries beside the programs in `target/release` (sherpa-onnx's prebuilt ones, which its build copies
@@ -202,6 +203,51 @@ fn check_libraries(macos: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// How long the keychain gets to answer whether a key may sign: a question nobody is there to answer would wait for ever.
+const SIGNING_PROBE: Duration = Duration::from_secs(60);
+/// And how long one file may take once it does, questions included.
+const SIGNING_LIMIT: Duration = Duration::from_secs(600);
+
+/// Runs `cmd` for at most `limit`: whether it succeeded in time. One still running by then is ended.
+fn run_within(cmd: &mut Command, limit: Duration) -> anyhow::Result<bool> {
+    let mut child = cmd.stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn().with_context(|| format!("{} could not start", cmd.get_program().to_string_lossy()))?;
+    let started = Instant::now();
+    loop {
+        if let Some(status) = child.try_wait()? {
+            return Ok(status.success());
+        }
+        if started.elapsed() >= limit {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Ok(false);
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+}
+
+/// The identity to sign with now. One chosen for being in the keychain must answer: its key asks for permission, and the build
+/// may be running with nobody at the screen. One named in the settings is what was asked for, and it either signs or stops the
+/// build.
+fn answering(chosen: Identity, named: bool, dist: &Path) -> anyhow::Result<Identity> {
+    if chosen == Identity::AdHoc || named {
+        return Ok(chosen);
+    }
+    let probe = dist.join("signing-probe");
+    std::fs::write(&probe, [0u8; 64])?;
+    let answered = run_within(Command::new("codesign").args(["--force", "--sign", chosen.name()]).arg(&probe), SIGNING_PROBE)?;
+    std::fs::remove_file(&probe)?;
+    if answered {
+        return Ok(chosen);
+    }
+    println!(
+        "\nThe keychain did not answer for {} within {} s, nobody being there to allow it: signing AD HOC instead.\n\
+         `cargo xtask dist` and `cargo xtask github` again at the screen (Always Allow) replace this with a signed build.\n",
+        chosen.name(),
+        SIGNING_PROBE.as_secs()
+    );
+    Ok(Identity::AdHoc)
+}
+
 /// Signs one piece of code.
 fn sign(identity: &Identity, entitlements: &Path, file: &Path, is_main: bool) -> anyhow::Result<()> {
     let mut cmd = Command::new("codesign");
@@ -218,7 +264,9 @@ fn sign(identity: &Identity, entitlements: &Path, file: &Path, is_main: bool) ->
     if is_main {
         cmd.args(["--identifier", MAC_BUNDLE_ID]);
     }
-    run(cmd.arg(file))
+    println!("> signing {}", file.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default());
+    anyhow::ensure!(run_within(cmd.arg(file), SIGNING_LIMIT)?, "{} was not signed: refused, or nobody allowed the key in time", file.display());
+    Ok(())
 }
 
 pub fn dist(config: &Config, options: &Options) -> anyhow::Result<PathBuf> {
@@ -284,7 +332,7 @@ pub fn dist(config: &Config, options: &Options) -> anyhow::Result<PathBuf> {
 
     println!("\n== Signing");
     let listed = output(Command::new("security").args(["find-identity", "-v", "-p", "codesigning"])).unwrap_or_default();
-    let identity = Identity::choose(config.macos_identity.as_deref(), &listed);
+    let identity = answering(Identity::choose(config.macos_identity.as_deref(), &listed), config.macos_identity.is_some(), &dist)?;
     println!("With {}: {}", identity.name(), identity.describe());
     let entitlements = dist.join("entitlements.plist");
     std::fs::write(&entitlements, ENTITLEMENTS)?;
@@ -322,10 +370,10 @@ pub fn dist(config: &Config, options: &Options) -> anyhow::Result<PathBuf> {
         .arg(&staging)
         .arg(&image))?;
     std::fs::remove_dir_all(&staging)?;
-    if identity != Identity::AdHoc {
-        sign_image(&identity, &image)?;
-    }
+    // The image's own signature only matters to the notary: the application inside carries its signature, and each signing
+    // is one more question from the keychain.
     if let (Identity::DeveloperId(_), Some(profile)) = (&identity, &config.macos_notary_profile) {
+        sign_image(&identity, &image)?;
         run(Command::new("xcrun").args(["notarytool", "submit", "--wait", "--keychain-profile", profile]).arg(&image))?;
         run(Command::new("xcrun").args(["stapler", "staple"]).arg(&image))?;
     }
@@ -368,7 +416,8 @@ pub fn dist(config: &Config, options: &Options) -> anyhow::Result<PathBuf> {
 }
 
 fn sign_image(identity: &Identity, image: &Path) -> anyhow::Result<()> {
-    run(Command::new("codesign").args(["--force", "--sign", identity.name()]).arg(image))
+    anyhow::ensure!(run_within(Command::new("codesign").args(["--force", "--sign", identity.name()]).arg(image), SIGNING_LIMIT)?, "{} was not signed", image.display());
+    Ok(())
 }
 
 /// The library file under `name`, which sherpa-onnx's build may leave as a versioned file with links to it.
@@ -397,6 +446,15 @@ mod tests {
         assert_eq!(Identity::choose(None, one), Identity::AppleDevelopment("Apple Development: someone (TEAM)".into()));
         assert_eq!(Identity::choose(None, "     0 valid identities found"), Identity::AdHoc);
         assert_eq!(Identity::choose(Some("-"), both), Identity::AdHoc);
+    }
+
+    #[test]
+    fn a_command_is_given_its_time_and_no_more() {
+        assert!(run_within(Command::new("/usr/bin/true").arg(""), Duration::from_secs(10)).unwrap());
+        assert!(!run_within(Command::new("/usr/bin/false").arg(""), Duration::from_secs(10)).unwrap());
+        let started = Instant::now();
+        assert!(!run_within(Command::new("/bin/sleep").arg("30"), Duration::from_millis(300)).unwrap(), "one that does not end in time counts as not done");
+        assert!(started.elapsed() < Duration::from_secs(5), "and is ended, not waited for");
     }
 
     #[test]

@@ -173,7 +173,7 @@ pub fn github(version: &str, notes: &str, unsigned: bool) -> anyhow::Result<()> 
     let mut body = if notes.trim().is_empty() { format!("Orbiters - N4N0 {version}.") } else { notes.trim().to_string() };
     if cfg!(target_os = "macos") {
         body.push_str(&format!(
-            "\n\nInstall on a Mac with Apple silicon: open `{}` below and drag the app to Applications.",
+            "\n\nInstall on a Mac with Apple silicon: open `{}` below and drag the app to Applications. It is not notarized yet: the first time, macOS refuses to open it; then allow it in System Settings, Privacy & Security, Open Anyway.",
             orbiters_update::mac_disk_image_name(version)
         ));
     } else {

@@ -1,7 +1,9 @@
 //! Installing an update on the Mac, where the setup's work falls to the app: an update is the whole application, zipped.
-//! A copy of this program outside the application waits for the app to quit, unpacks the archive beside it, checks it
-//! (the application it should be, its code signature whole), swaps it in with a rename, putting the old one back if that
-//! fails, and opens it again. The archive was checked against the signed release's size and SHA-256 before it got here.
+//! This program, started again from inside the application it replaces, waits for the app to quit, unpacks the archive beside
+//! it, checks it (the application it should be, its code signature whole), swaps it in with a rename, putting the old one back
+//! if that fails, and opens it again. A running program may lose its files: the system keeps them until it ends. A copy
+//! elsewhere would not do, since macOS kills a copy of a hardened program outside its application. The archive was checked
+//! against the signed release's size and SHA-256 before it got here.
 
 use anyhow::Context as _;
 use orbiters_update::{MAC_APP, MAC_BUNDLE_ID};
@@ -12,25 +14,15 @@ use std::time::{Duration, Instant};
 /// The app gets this long to finish and quit (a reconstruction is stopped, a call hung up).
 const QUIT_WAIT: Duration = Duration::from_secs(120);
 
-/// Starts the copy of this program that installs `archive` over the application at `bundle` once this app has quit, and
-/// opens it again (`hidden`: in the menu bar, as it was).
+/// Starts this program again to install `archive` over the application at `bundle` once this app has quit, and open it again
+/// (`hidden`: in the menu bar, as it was).
 pub fn start(archive: &Path, bundle: &Path, hidden: bool) -> std::io::Result<()> {
-    let helper = helper_path();
-    if let Some(parent) = helper.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let _ = std::fs::remove_file(&helper);
-    std::fs::copy(std::env::current_exe()?, &helper)?;
-    let mut cmd = Command::new(&helper);
+    let mut cmd = Command::new(std::env::current_exe()?);
     cmd.arg("--apply-update").arg(archive).arg(bundle).arg(std::process::id().to_string()).arg(if hidden { "hidden" } else { "window" });
     cmd.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
     // Its own process group: nothing that ends this app ends it.
     std::os::unix::process::CommandExt::process_group(&mut cmd, 0);
     cmd.spawn().map(drop)
-}
-
-fn helper_path() -> PathBuf {
-    orbiters_update::updates_dir().join("orbiters-updater")
 }
 
 /// `--apply-update <archive> <application> <the app's process> <hidden|window>`.
@@ -50,7 +42,6 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         open.args(["--args", "--hidden"]);
     }
     open.status().context("open")?;
-    let _ = std::fs::remove_file(helper_path());
     Ok(())
 }
 

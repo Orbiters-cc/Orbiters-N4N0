@@ -315,6 +315,7 @@ pub fn dist(config: &Config, options: &Options) -> anyhow::Result<PathBuf> {
     let staging = dist.join("image");
     std::fs::create_dir_all(&staging)?;
     run(Command::new("ditto").arg(&app).arg(staging.join(MAC_APP)))?;
+    #[cfg(unix)]
     std::os::unix::fs::symlink("/Applications", staging.join("Applications"))?;
     run(Command::new("hdiutil")
         .args(["create", "-quiet", "-volname", "Orbiters - N4N0", "-fs", "HFS+", "-format", "UDZO", "-ov", "-srcfolder"])

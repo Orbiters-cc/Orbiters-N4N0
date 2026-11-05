@@ -6,7 +6,6 @@
 use super::game::{Failure, GameWindow};
 use super::input::{Input, MouseButton};
 
-#[cfg(windows)]
 pub use imp::*;
 
 /// `SendInput`'s scale for absolute positions: 0 to 65535 across the virtual desktop.

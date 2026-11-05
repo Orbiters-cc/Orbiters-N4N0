@@ -1,4 +1,4 @@
-//! Sound devices (WASAPI shared mode on Windows): [`Output`] plays sounds on the default output, [`MicMonitor`]
+//! Sound devices (WASAPI shared mode on Windows, audio queues on macOS): [`Output`] plays sounds on the default output, [`MicMonitor`]
 //! sends a microphone straight to it (the settings' mic test) and [`Duplex`] carries a call's sound both ways.
 //! [`Output`] opens the default output for each run of sounds; all three follow a default output that changes while
 //! they play (SteamVR switching to the headset) and open again a device that went away. [`Duplex`] also follows the
@@ -13,7 +13,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::Duration;
 
-/// The rate everything is rendered and played at (Windows converts to the device's own).
+/// The rate everything is rendered and played at (the system converts to the device's own).
 pub const RATE: u32 = 48_000;
 /// How long a start waits for its devices.
 const START_WAIT: Duration = Duration::from_secs(3);
@@ -139,7 +139,7 @@ pub struct MicMonitor {
 }
 
 impl MicMonitor {
-    /// `device`: a microphone id from the capture worker's list, `None` for Windows' default. Waits up to 3 s for
+    /// `device`: a microphone id from the capture worker's list, `None` for the system's default. Waits up to 3 s for
     /// the devices; fails when the microphone or the output cannot open.
     pub fn start(device: Option<String>) -> anyhow::Result<Self> {
         let running = Running::start("mic-monitor", move |shared| {
@@ -690,7 +690,234 @@ mod imp {
     }
 }
 
-#[cfg(not(windows))]
+#[cfg(target_os = "macos")]
+mod imp {
+    use super::{mix, Buffering, Command, Playout, Shared, RATE};
+    use crate::coreaudio::{self as ca, Capture, Flow, Render, Turn};
+    use std::collections::VecDeque;
+    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::sync::{mpsc, Arc, Mutex};
+    use std::time::{Duration, Instant};
+
+    /// How often the default devices are looked at, and a failed device tried again.
+    const CHECK_EVERY: Duration = Duration::from_secs(1);
+    /// The output player lets its device go after this much quiet (opening it again costs the next click some time).
+    const OUTPUT_IDLE: Duration = Duration::from_secs(15);
+    /// How much sound the microphone holds for this thread (a run of 10 ms buffers).
+    const MIC_HOLD: Duration = Duration::from_millis(40);
+
+    /// Outputs opened since the start, and an output that stands in for the system's default: a test moves the player
+    /// between real devices without changing anything of the person's.
+    #[cfg(test)]
+    pub static RENDERS_OPENED: AtomicU32 = AtomicU32::new(0);
+    #[cfg(test)]
+    pub static DEFAULT_OUTPUT: Mutex<Option<String>> = Mutex::new(None);
+
+    fn default_output() -> Option<String> {
+        #[cfg(test)]
+        if let Some(uid) = DEFAULT_OUTPUT.lock().unwrap().clone() {
+            return Some(uid);
+        }
+        ca::default_uid(Flow::Output)
+    }
+
+    fn open_render(turn: &Arc<Turn>) -> Result<Render, String> {
+        let uid = default_output().ok_or("this computer has no sound output")?;
+        #[cfg(test)]
+        RENDERS_OPENED.fetch_add(1, Ordering::Relaxed);
+        Render::open(&uid, turn)
+    }
+
+    /// The microphone `device`, else the default one, started. A person's refusal comes first: see
+    /// [`ca::microphone_access`].
+    fn open_capture(device: Option<&str>, turn: &Arc<Turn>) -> Result<Capture, String> {
+        let uid = match device {
+            Some(uid) => uid.to_string(),
+            None => ca::default_uid(Flow::Input).ok_or("this computer has no microphone")?,
+        };
+        let mut capture = Capture::open(&uid, RATE, MIC_HOLD, turn)?;
+        capture.start()?;
+        Ok(capture)
+    }
+
+    /// Hands what the microphone has to `on_mic`, noting its peak in `level`.
+    fn drain(capture: &mut Capture, on_mic: &mut dyn FnMut(&[f32]), level: &AtomicU32) -> Result<(), String> {
+        let handed: Result<(), std::convert::Infallible> = capture.drain(|samples, _| {
+            let peak = samples.iter().fold(0.0f32, |m, v| m.max(v.abs()));
+            // Non-negative floats order like their bits.
+            level.fetch_max(peak.min(1.0).to_bits(), Ordering::Relaxed);
+            on_mic(samples);
+            Ok(())
+        })?;
+        match handed {
+            Ok(()) => Ok(()),
+            Err(never) => match never {},
+        }
+    }
+
+    pub fn output(rx: mpsc::Receiver<Command>) {
+        ca::audio_priority();
+        let mut voices: Vec<(Arc<super::Sound>, usize)> = Vec::new();
+        // Idle: wait for a sound, then play until a while after the last one ended.
+        while let Ok(Command::Play(sound)) = rx.recv() {
+            voices.push((sound, 0));
+            let mut failures = 0;
+            loop {
+                match play(&rx, &mut voices) {
+                    // Quiet a while: the device goes.
+                    Ok(true) => break,
+                    // Another default output (or the device went away): the sounds go on there, where they were.
+                    Ok(false) => failures = 0,
+                    Err(e) => {
+                        failures += 1;
+                        if failures >= 2 {
+                            eprintln!("sound output: {e}");
+                            voices.clear();
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Plays `voices` and what comes in on the default output: true once quiet for [`OUTPUT_IDLE`], false when the
+    /// default output changed.
+    fn play(rx: &mpsc::Receiver<Command>, voices: &mut Vec<(Arc<super::Sound>, usize)>) -> Result<bool, String> {
+        let turn = Arc::new(Turn::default());
+        let mut render = open_render(&turn)?;
+        render.feed(&mut |out| mix(voices, out))?;
+        let mut quiet_since = None::<Instant>;
+        let mut checked = Instant::now();
+        loop {
+            turn.wait(Duration::from_millis(100));
+            while let Ok(Command::Play(s)) = rx.try_recv() {
+                voices.push((s, 0));
+            }
+            render.feed(&mut |out| mix(voices, out))?;
+            if voices.is_empty() {
+                let since = *quiet_since.get_or_insert_with(Instant::now);
+                if since.elapsed() > OUTPUT_IDLE {
+                    return Ok(true);
+                }
+            } else {
+                quiet_since = None;
+            }
+            if checked.elapsed() >= CHECK_EVERY {
+                checked = Instant::now();
+                if !ca::alive(&render.uid) || default_output().is_some_and(|id| id != render.uid) {
+                    return Ok(false);
+                }
+            }
+        }
+    }
+
+    /// The microphone (`device`, else the default one) to `on_mic`, `playback` to the default output, until stopped.
+    /// The output follows the default device; a device that fails or goes away is opened again every second. When
+    /// `lenient` (a call), a chosen microphone that cannot open gives way to the default one and a missing device
+    /// does not stop the start; otherwise (the mic test) both must open.
+    pub fn run(device: Option<&str>, shared: &Shared, on_mic: &mut dyn FnMut(&[f32]), playback: &Mutex<VecDeque<f32>>, buffering: Buffering, lenient: bool) {
+        ca::audio_priority();
+        let turn = Arc::new(Turn::default());
+        let mut playout = Playout::new(buffering);
+        // The microphone asked for (`None` once the default one stands in for it).
+        let mut mic_choice = device.map(str::to_string);
+        let mut mic_trouble = None::<String>;
+        let mut out_trouble = None::<String>;
+        let open_mic = |choice: &mut Option<String>, trouble: &mut Option<String>| -> Option<Capture> {
+            // macOS's leave is not about one microphone: the chosen one stays chosen for when it comes.
+            if let Err(e) = ca::microphone_access() {
+                *trouble = Some(e);
+                return None;
+            }
+            match open_capture(choice.as_deref(), &turn) {
+                Ok(c) => {
+                    *trouble = None;
+                    Some(c)
+                }
+                Err(e) if lenient && choice.is_some() => {
+                    // The chosen microphone is not there: the default one, for the rest of the call.
+                    *choice = None;
+                    let fallback = open_capture(None, &turn);
+                    *trouble = Some(match &fallback {
+                        Ok(_) => format!("the chosen microphone could not be opened ({e}); the default one is used"),
+                        Err(e2) => format!("no microphone could be opened ({e2}): the other side hears nothing"),
+                    });
+                    fallback.ok()
+                }
+                Err(e) => {
+                    *trouble = Some(format!("the microphone could not be opened ({e})"));
+                    None
+                }
+            }
+        };
+        let mut capture = open_mic(&mut mic_choice, &mut mic_trouble);
+        let mut render = match open_render(&turn) {
+            Ok(r) => Some(r),
+            Err(e) => {
+                out_trouble = Some(format!("the sound output could not be opened ({e})"));
+                None
+            }
+        };
+        if !lenient && (capture.is_none() || render.is_none()) {
+            shared.fail(mic_trouble.or(out_trouble).unwrap_or_default());
+            return;
+        }
+        let mut speak = |render: &mut Option<Render>, trouble: &mut Option<String>| {
+            let failed = render.as_mut().and_then(|r| r.feed(&mut |out| playout.fill(&mut playback.lock().unwrap(), out)).err());
+            if let Some(e) = failed {
+                *render = None;
+                *trouble = Some(format!("the sound output stopped ({e}); opening it again"));
+            }
+        };
+        // Silence (or what already waits) goes out at once: the output starts with the call.
+        speak(&mut render, &mut out_trouble);
+        shared.trouble(mic_trouble.clone().or(out_trouble.clone()));
+        if !shared.ready() {
+            return;
+        }
+        let mut checked = Instant::now();
+        while !shared.stopped() {
+            // Either device's turn, whichever comes first: a microphone that stalls never silences the speaker.
+            if capture.is_none() && render.is_none() {
+                std::thread::sleep(Duration::from_millis(50));
+            } else {
+                turn.wait(Duration::from_millis(50));
+            }
+            let heard = capture.as_mut().and_then(|c| drain(c, on_mic, &shared.level).err());
+            if let Some(e) = heard {
+                capture = None;
+                mic_trouble = Some(format!("the microphone stopped ({e}); opening it again"));
+            }
+            speak(&mut render, &mut out_trouble);
+            if checked.elapsed() < CHECK_EVERY {
+                continue;
+            }
+            checked = Instant::now();
+            // A default device that changed is followed; a device that failed or went away is tried again.
+            let default_mic = mic_choice.is_none().then(|| ca::default_uid(Flow::Input)).flatten();
+            if capture.is_none() || capture.as_ref().is_some_and(|c| !ca::alive(&c.uid) || default_mic.as_ref().is_some_and(|d| *d != c.uid)) {
+                drop(capture.take());
+                capture = open_mic(&mut mic_choice, &mut mic_trouble);
+            }
+            let default_out = default_output();
+            if render.is_none() || render.as_ref().is_some_and(|r| !ca::alive(&r.uid) || default_out.as_ref().is_some_and(|d| *d != r.uid)) {
+                drop(render.take());
+                match open_render(&turn) {
+                    Ok(r) => {
+                        render = Some(r);
+                        out_trouble = None;
+                        speak(&mut render, &mut out_trouble);
+                    }
+                    Err(e) => out_trouble = Some(format!("the sound output could not be opened ({e})")),
+                }
+            }
+            shared.trouble(mic_trouble.clone().or(out_trouble.clone()));
+        }
+    }
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
 mod imp {
     use super::{Buffering, Command, Shared};
     use std::collections::VecDeque;
@@ -850,5 +1077,274 @@ mod tests {
         // A start that fails says why.
         let failed = Running::start("test-fail", |shared| shared.fail("no device".into()));
         assert_eq!(failed.err().map(|e| e.to_string()).as_deref(), Some("no device"));
+    }
+
+    /// What a device asked for while it played quiet for `seconds`.
+    #[cfg(target_os = "macos")]
+    struct Pulled {
+        /// From the open to the first buffer it played and gave back: what a first sound waits.
+        first_back: Duration,
+        /// Frames a second it asked for after that.
+        rate: f32,
+        /// The waits between the turns it gave after that, the longest and the median.
+        longest: Duration,
+        median: Duration,
+    }
+
+    #[cfg(target_os = "macos")]
+    fn pulls(uid: &str, seconds: f32) -> Pulled {
+        use crate::coreaudio::{Render, Turn};
+        use std::time::Instant;
+        let turn = Arc::new(Turn::default());
+        let opened = Instant::now();
+        let mut render = Render::open(uid, &turn).unwrap();
+        let mut first_back = None::<Instant>;
+        let mut frames = 0usize;
+        let mut waits = Vec::new();
+        let mut last = Instant::now();
+        let mut filled = 0;
+        while opened.elapsed().as_secs_f32() < seconds {
+            let mut asked = 0usize;
+            render
+                .feed(&mut |out| {
+                    asked += out.len() / 2;
+                    out.fill(0.0);
+                })
+                .unwrap();
+            filled += 1;
+            // The first feed fills the device whole: what comes after it is what it played.
+            if filled > 1 && asked > 0 {
+                let now = Instant::now();
+                if first_back.is_none() {
+                    first_back = Some(now);
+                } else {
+                    frames += asked;
+                    waits.push(now - last);
+                }
+                last = now;
+            }
+            turn.wait(Duration::from_millis(100));
+        }
+        waits.sort();
+        let first = first_back.expect("the device played");
+        Pulled {
+            first_back: first - opened,
+            rate: frames as f32 / first.elapsed().as_secs_f32(),
+            longest: waits.last().copied().unwrap_or_default(),
+            median: waits.get(waits.len() / 2).copied().unwrap_or_default(),
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_device_that_is_not_there_is_said_and_nothing_starts() {
+        use crate::coreaudio::{Capture, Render, Turn};
+        let turn = Arc::new(Turn::default());
+        assert!(Render::open("orbiters-no-such-device", &turn).err().is_some_and(|e| e.contains("is not there")));
+        assert!(Capture::open("orbiters-no-such-device", 16_000, Duration::from_millis(100), &turn).err().is_some_and(|e| e.contains("is not there")));
+        assert!(crate::coreaudio::device("orbiters-no-such-device").is_none());
+        assert!(!crate::coreaudio::alive("orbiters-no-such-device"));
+    }
+
+    /// This computer's devices, read only:
+    /// `cargo test -p orbiters-sound lists_this_computers -- --ignored --nocapture`.
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore]
+    fn lists_this_computers_devices() {
+        use crate::coreaudio::{alive, default_uid, devices, mic_access, output_volume, rate_of, Flow};
+        for flow in [Flow::Output, Flow::Input] {
+            let default = default_uid(flow);
+            for d in devices(flow) {
+                let mark = if default.as_deref() == Some(d.uid.as_str()) { "default " } else { "" };
+                println!("{flow:?}: {mark}{} [{}] at {:?} Hz, alive {}", d.name, d.uid, rate_of(&d.uid), alive(&d.uid));
+            }
+        }
+        println!("volume: {:?}", output_volume());
+        println!("microphone access: {:?}", mic_access());
+    }
+
+    /// Plays silence on the default output and measures that it asks for 48 kHz in real time, whatever the device's own
+    /// rate: `cargo test -p orbiters-sound the_default_output_runs -- --ignored --nocapture`.
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore]
+    fn the_default_output_runs() {
+        use crate::coreaudio::{default_uid, rate_of, running, Flow};
+        let uid = default_uid(Flow::Output).expect("a default output");
+        println!("{uid} at {:?} Hz, running before: {:?}", rate_of(&uid), running(&uid));
+        let probe = {
+            let uid = uid.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_secs(1));
+                running(&uid)
+            })
+        };
+        let pulled = pulls(&uid, 3.0);
+        println!(
+            "first buffer back after {:?}; then {:.0} frames a second at {RATE}; turns {:?} apart, {:?} at most",
+            pulled.first_back, pulled.rate, pulled.median, pulled.longest
+        );
+        println!("running while playing: {:?}", probe.join().unwrap());
+        assert!((pulled.rate - RATE as f32).abs() < RATE as f32 * 0.02, "{}", pulled.rate);
+    }
+
+    /// The interface sounds' player on the default output with a sound you hear, then its stand-in default moved to
+    /// another real device and back with a long quiet sound under way, as when the person changes output while something
+    /// plays. Nothing of the person's default changes (eqMac and the like would take it back at once):
+    /// `cargo test -p orbiters-sound the_player_follows -- --ignored --nocapture`.
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore]
+    fn the_player_follows_the_default_output() {
+        use crate::coreaudio::{default_uid, devices, Flow};
+        let output = Output::new();
+        let opened = || imp::RENDERS_OPENED.load(Ordering::Relaxed);
+        let before = opened();
+        let click = Arc::new(crate::synth::render(&crate::sounds::ROCKER, RATE));
+        output.play(&click);
+        std::thread::sleep(Duration::from_millis(600));
+        assert_eq!(opened(), before + 1, "the device opened for the sound");
+        output.play(&click);
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(opened(), before + 1, "and stays open for the next one");
+        let was = default_uid(Flow::Output).expect("a default output");
+        let Some(other) = devices(Flow::Output).into_iter().find(|d| d.uid != was) else {
+            println!("no other output to move to");
+            return;
+        };
+        println!("from {was} to {}", other.uid);
+        output.play(&Arc::new(Sound { rate: RATE, frames: vec![[0.0; 2]; RATE as usize * 5] }));
+        *imp::DEFAULT_OUTPUT.lock().unwrap() = Some(other.uid.clone());
+        std::thread::sleep(Duration::from_millis(1400));
+        assert_eq!(opened(), before + 2, "the player moved to the other device within a second or so");
+        *imp::DEFAULT_OUTPUT.lock().unwrap() = None;
+        std::thread::sleep(Duration::from_millis(1400));
+        assert_eq!(opened(), before + 3, "and back");
+        println!("outputs opened: {}", opened() - before);
+    }
+
+    /// Sets the default output's volume and mute to what they are now, which changes nothing you hear, and reads them
+    /// back: `cargo test -p orbiters-sound the_volume_takes -- --ignored --nocapture`.
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore]
+    fn the_volume_takes_what_it_already_has() {
+        use crate::coreaudio::{output_volume, set_output_mute, set_output_volume};
+        let Some((volume, muted)) = output_volume() else {
+            println!("this output has no volume of its own");
+            return;
+        };
+        println!("set volume: {:?}", set_output_volume(volume));
+        println!("set mute: {:?}", set_output_mute(muted));
+        println!("was {:?}, is {:?}", (volume, muted), output_volume());
+        assert_eq!(output_volume().map(|(_, m)| m), Some(muted));
+        assert!((output_volume().unwrap().0 - volume).abs() < 0.02);
+    }
+
+    /// Opens the default microphone's queue at each rate the app asks for and measures that it keeps time, once macOS
+    /// lets this process's app use the microphone (it says so otherwise):
+    /// `cargo test -p orbiters-sound the_microphone_queue -- --ignored --nocapture`.
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore]
+    fn the_microphone_queue_keeps_time() {
+        use crate::coreaudio::{default_uid, mic_access, rate_of, running, Capture, Flow, Turn};
+        use std::time::Instant;
+        let uid = default_uid(Flow::Input).expect("a default microphone");
+        println!("{uid} at {:?} Hz, access {:?}", rate_of(&uid), mic_access());
+        for rate in [16_000u32, 48_000] {
+            let turn = Arc::new(Turn::default());
+            let opened = Instant::now();
+            let mut capture = match Capture::open(&uid, rate, Duration::from_millis(100), &turn) {
+                Ok(capture) => capture,
+                Err(e) => {
+                    println!("not opened: {e}");
+                    return;
+                }
+            };
+            capture.start().unwrap();
+            let mut first = None::<Instant>;
+            let (mut frames, mut peak, mut packets) = (0usize, 0f32, 0usize);
+            let mut times = Vec::new();
+            while opened.elapsed() < Duration::from_secs(2) {
+                turn.wait(Duration::from_millis(100));
+                let handed: Result<(), ()> = capture
+                    .drain(|samples, stamp| {
+                        if first.is_some() {
+                            frames += samples.len();
+                        }
+                        first.get_or_insert_with(Instant::now);
+                        packets += 1;
+                        peak = samples.iter().fold(peak, |m, v| m.max(v.abs()));
+                        if times.len() < 5 {
+                            times.push((samples.len(), stamp.age_ns.map(|a| a / 1000)));
+                        }
+                        Ok(())
+                    })
+                    .unwrap();
+                handed.unwrap();
+            }
+            let first = first.expect("the queue gave something");
+            let measured = frames as f32 / first.elapsed().as_secs_f32();
+            println!("at {rate} Hz: first packet after {:?}, {packets} packets, {measured:.0} frames a second, loudest {peak}", first - opened);
+            println!("first packets (frames, age in us): {times:?}");
+            println!("device running: {:?}", running(&uid));
+            assert!((measured - rate as f32).abs() < rate as f32 * 0.05, "{measured}");
+        }
+    }
+
+    /// A call's sound as the call worker starts it, with silence for the other side: it must play the queue in real time
+    /// with or without a microphone, and say what is missing:
+    /// `cargo test -p orbiters-sound the_call_sound -- --ignored --nocapture`.
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore]
+    fn the_call_sound_plays_its_queue_in_real_time() {
+        use std::time::Instant;
+        let speaker = Arc::new(Mutex::new(VecDeque::new()));
+        let heard = Arc::new(Mutex::new(0usize));
+        let (counted, kept) = (heard.clone(), speaker.clone());
+        let started = Instant::now();
+        let duplex = Duplex::start(None, move |samples: &[f32]| *counted.lock().unwrap() += samples.len(), kept).unwrap();
+        println!("started in {:?}; trouble: {:?}", started.elapsed(), duplex.error());
+        // The network: quiet as time passes, in packets of about 20 ms.
+        let run = Instant::now();
+        let mut sent = 0usize;
+        while run.elapsed() < Duration::from_secs(3) {
+            let due = (run.elapsed().as_secs_f64() * RATE as f64) as usize;
+            speaker.lock().unwrap().extend(std::iter::repeat_n(0.0f32, due - sent));
+            sent = due;
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let left = speaker.lock().unwrap().len();
+        let played = sent.saturating_sub(left);
+        let rate = played as f32 / run.elapsed().as_secs_f32();
+        println!(
+            "sent {sent} samples, {left} wait: {rate:.0} played a second; the microphone gave {} samples; trouble: {:?}",
+            heard.lock().unwrap(),
+            duplex.error()
+        );
+        assert!(left < RATE as usize * 3 / 10, "the queue stays short: {left}");
+        assert!((rate - RATE as f32).abs() < RATE as f32 * 0.1, "{rate}");
+    }
+
+    /// The mic test as Settings starts it, with its level: the microphone you hear on the output, so it stays short:
+    /// `cargo test -p orbiters-sound the_mic_monitor -- --ignored --nocapture`.
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore]
+    fn the_mic_monitor_runs_or_says_why_not() {
+        match MicMonitor::start(None) {
+            Ok(monitor) => {
+                let mut peak = 0.0f32;
+                for _ in 0..30 {
+                    std::thread::sleep(Duration::from_millis(100));
+                    peak = peak.max(monitor.take_level());
+                }
+                println!("the monitor ran; loudest sample {peak}, trouble {:?}", monitor.error());
+            }
+            Err(e) => println!("the monitor did not start: {e:#}"),
+        }
     }
 }

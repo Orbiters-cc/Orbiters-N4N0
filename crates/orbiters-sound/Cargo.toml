@@ -10,3 +10,8 @@ anyhow = { workspace = true }
 
 [target.'cfg(windows)'.dependencies]
 windows = { workspace = true, features = ["Win32_Media_Audio", "Win32_System_Com", "Win32_System_Com_StructuredStorage", "Win32_System_Variant"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# AVCaptureDevice: whether macOS lets this app use the microphone.
+objc2 = "0.6"
+block2 = "0.6"

@@ -9,6 +9,9 @@
 //!
 //! Each call opens COM on its thread (multithreaded) and blocks briefly (a few milliseconds; [`play_test`] about two
 //! seconds): call them from a worker thread, never the interface's.
+//!
+//! On macOS the devices are Core Audio's (`orbiters_sound::coreaudio`), for the microphone pickers and the tests of a
+//! device. Nothing sets a default there: setting them is for SteamVR, which does not run on a Mac.
 
 pub use orbiters_core::settings::AudioEndpoint;
 
@@ -305,7 +308,43 @@ mod imp {
     }
 }
 
-#[cfg(not(windows))]
+#[cfg(target_os = "macos")]
+mod imp {
+    use super::{AudioEndpoint, Flow, Role};
+    use orbiters_sound::coreaudio as ca;
+
+    fn flow_of(flow: Flow) -> ca::Flow {
+        match flow {
+            Flow::Output => ca::Flow::Output,
+            Flow::Input => ca::Flow::Input,
+        }
+    }
+
+    fn endpoint(device: ca::DeviceInfo) -> AudioEndpoint {
+        AudioEndpoint { id: device.uid, name: device.name }
+    }
+
+    pub fn list(flow: Flow) -> Result<Vec<AudioEndpoint>, &'static str> {
+        Ok(ca::devices(flow_of(flow)).into_iter().map(endpoint).collect())
+    }
+
+    /// macOS has one default for each direction, whatever the role.
+    pub fn defaults(flow: Flow) -> [Option<AudioEndpoint>; 3] {
+        let default = ca::default_uid(flow_of(flow)).and_then(|uid| ca::device(&uid)).map(endpoint);
+        [default.clone(), default.clone(), default]
+    }
+
+    pub fn set_default(_: &str, _: Role) -> Result<(), &'static str> {
+        Err("the default devices change for SteamVR only, which does not run on a Mac")
+    }
+
+    pub fn play_test(id: &str) -> Result<(), String> {
+        let sound = orbiters_sound::render(&orbiters_sound::sounds::REVEAL, orbiters_sound::RATE);
+        ca::play_on(id, &sound)
+    }
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
 mod imp {
     use super::{AudioEndpoint, Flow, Role};
 
@@ -341,5 +380,22 @@ mod tests {
             println!("defaults (console, multimedia, communications): {:#?}", defaults(flow));
             assert!(devices.iter().all(|d| !d.id.is_empty() && !d.name.is_empty()));
         }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_mac_changes_no_default_and_its_lists_read() {
+        for flow in [Flow::Output, Flow::Input] {
+            let devices = list(flow).unwrap();
+            assert!(devices.iter().all(|d| !d.id.is_empty() && !d.name.is_empty()));
+            let [console, multimedia, communications] = defaults(flow);
+            assert_eq!(console, multimedia);
+            assert_eq!(console, communications);
+            if let Some(default) = console {
+                assert!(devices.contains(&default), "the default is among the devices");
+            }
+        }
+        assert!(set_default("anything", Role::Console).is_err());
+        assert!(play_test("orbiters-no-such-device").is_err());
     }
 }

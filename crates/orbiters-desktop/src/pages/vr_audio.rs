@@ -13,9 +13,19 @@ use orbiters_ui::widgets::{self, Button, Size};
 
 type Listed = (Result<Vec<AudioEndpoint>, String>, Result<Vec<AudioEndpoint>, String>);
 
+/// What the section says: on Windows as written, elsewhere without naming a system. SteamVR runs on Windows only, so
+/// elsewhere the choices wait for a computer where it does.
+fn words(windows: &'static str, elsewhere: &'static str) -> &'static str {
+    if cfg!(windows) {
+        windows
+    } else {
+        elsewhere
+    }
+}
+
 #[derive(Default)]
 pub struct State {
-    /// Windows' outputs and inputs, as last listed.
+    /// The system's outputs and inputs, as last listed.
     outputs: Vec<AudioEndpoint>,
     inputs: Vec<AudioEndpoint>,
     error: Option<String>,
@@ -56,7 +66,7 @@ pub fn show(ui: &mut Ui, cx: &Cx, index: usize, state: &mut State, draft: &mut V
 
     let subtitle = match &cx.snap.vr_audio.last {
         Some(e) => format!("{} {}", e.text, when(e.utc_ms)),
-        None => "Windows' sound devices while SteamVR runs".to_string(),
+        None => words("Windows' sound devices while SteamVR runs", "The sound devices while SteamVR runs, on a computer where it does").to_string(),
     };
     let mut apply = false;
     section(ui, cx, index, icons::SPEAKER_HIGH, "When SteamVR starts", Some(&subtitle), |ui| {
@@ -65,7 +75,10 @@ pub fn show(ui: &mut Ui, cx: &Cx, index: usize, state: &mut State, draft: &mut V
         widgets::field(
             ui,
             "Output in VR",
-            Some("The speakers or headphones Windows makes every app's default when SteamVR starts, set again over its first seconds as Virtual Desktop and SteamVR put their own."),
+            Some(words(
+                "The speakers or headphones Windows makes every app's default when SteamVR starts, set again over its first seconds as Virtual Desktop and SteamVR put their own.",
+                "The speakers or headphones that become every app's default when SteamVR starts.",
+            )),
             96.0,
             |ui| {
                 let label = if testing { "Playing…" } else { "Test" };
@@ -83,7 +96,11 @@ pub fn show(ui: &mut Ui, cx: &Cx, index: usize, state: &mut State, draft: &mut V
             caption(ui, &format!("The test did not play: {e}"), theme::DANGER);
         }
         widgets::separator(ui);
-        widgets::field(ui, "Input in VR", Some("The microphone Windows makes every app's default when SteamVR starts."), 0.0, |_| {});
+        let input = words(
+            "The microphone Windows makes every app's default when SteamVR starts.",
+            "The microphone that becomes every app's default when SteamVR starts.",
+        );
+        widgets::field(ui, "Input in VR", Some(input), 0.0, |_| {});
         apply |= choices(ui, &mut draft.input, &state.inputs);
         if let Some(input) = &draft.input {
             ui.add_space(4.0);
@@ -93,13 +110,17 @@ pub fn show(ui: &mut Ui, cx: &Cx, index: usize, state: &mut State, draft: &mut V
             state.mic = MicTest::default();
         }
         if let Some(e) = &state.error {
-            caption(ui, &format!("Windows did not list its sound devices: {e}"), theme::DANGER);
+            let unlisted = words("Windows did not list its sound devices", "The sound devices could not be listed");
+            caption(ui, &format!("{unlisted}: {e}"), theme::DANGER);
         }
         widgets::separator(ui);
         widgets::field(
             ui,
             "Put back the devices before",
-            Some("When SteamVR closes, the output and input Windows had before it started come back."),
+            Some(words(
+                "When SteamVR closes, the output and input Windows had before it started come back.",
+                "When SteamVR closes, the output and input from before it started come back.",
+            )),
             48.0,
             |ui| {
                 apply |= widgets::toggle(ui, "vr-audio-restore", &mut draft.restore);

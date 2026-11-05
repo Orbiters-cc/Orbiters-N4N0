@@ -1,8 +1,10 @@
-//! Sound in through WASAPI: a microphone, or what a process and its children play (process loopback, Windows 11).
-//! [`capture`] hands every packet to its caller with the QueryPerformanceCounter time of its first frame on the
-//! shared clock ([`orbiters_core::clock`]), as interleaved float samples; [`capture_packets`] also tells what the
-//! device said about each packet, and why the capture ended. The capture worker writes them to session tracks; the
-//! voice worker listens to them for N4N0.
+//! Sound in: a microphone, or what a process and its children play (process loopback, Windows 11). WASAPI on Windows;
+//! on macOS Core Audio's audio queues (`orbiters_sound::coreaudio`), which have no process's sound to give: there is no
+//! VRChat on a Mac, and [`capture_packets`] says so as it says any other source it cannot open.
+//! [`capture`] hands every packet to its caller with the time of its first frame on the shared clock
+//! ([`orbiters_core::clock`]), as interleaved float samples; [`capture_packets`] also tells what the device said about
+//! each packet, and why the capture ended. The capture worker writes them to session tracks; the voice worker listens
+//! to them for N4N0.
 
 use std::sync::atomic::AtomicBool;
 use std::time::Duration;
@@ -10,7 +12,7 @@ use std::time::Duration;
 /// Where the sound comes from.
 #[derive(Clone, Debug, PartialEq)]
 pub enum AudioSource {
-    /// A capture endpoint by id; `None` is the Windows default microphone.
+    /// A capture endpoint by id; `None` is the system's default microphone.
     Mic(Option<String>),
     /// What a process and its children play.
     Process(u32),
@@ -50,13 +52,13 @@ pub struct Packet<'a> {
 /// How [`capture_packets`] captures.
 #[derive(Clone, Debug)]
 pub struct Options {
-    /// A sample rate Windows converts to (`None`: a microphone's own, 48 kHz for a process).
+    /// A sample rate the system converts to (`None`: a microphone's own, 48 kHz for a process).
     pub rate: Option<u32>,
     /// How much sound the device holds for a reader that is late: longer survives a busy machine.
     pub buffer: Duration,
-    /// The capture thread runs in Windows' multimedia class "Audio" (MMCSS), which keeps it on time under load.
+    /// The capture thread runs in the system's audio class (MMCSS's "Audio" on Windows), which keeps it on time under load.
     pub pro_audio: bool,
-    /// For the default microphone (`AudioSource::Mic(None)`): end with [`Ended::DefaultChanged`] once Windows'
+    /// For the default microphone (`AudioSource::Mic(None)`): end with [`Ended::DefaultChanged`] once the system's
     /// default microphone is another one.
     pub follow_default: bool,
 }
@@ -74,13 +76,13 @@ pub enum Ended {
     Stopped,
     /// The device went away or failed (headset unplugged, Bluetooth reconnecting, the process closed).
     Lost(String),
-    /// Windows' default microphone changed.
+    /// The system's default microphone changed.
     DefaultChanged,
     /// The packet callback returned an error.
     Refused(String),
 }
 
-/// Captures `source` until `stop`. `rate` asks for a sample rate Windows converts to (`None`: a microphone's own,
+/// Captures `source` until `stop`. `rate` asks for a sample rate the system converts to (`None`: a microphone's own,
 /// 48 kHz for a process); a microphone comes mono, a process stereo. `ready` gets the source's name and the format
 /// once the device opened, before the first packet (an error from it ends the capture); `packet` gets each packet's
 /// time (ns, shared clock), its frames, and its samples unless the packet is silent. A device that goes away
@@ -113,7 +115,7 @@ pub fn capture_packets(
     imp::capture_packets(source, options, stop, ready, packet)
 }
 
-/// The id of Windows' default microphone, `None` when there is none.
+/// The id of the system's default microphone, `None` when there is none.
 pub fn default_mic_id() -> Option<String> {
     imp::default_mic_id()
 }
@@ -355,7 +357,176 @@ mod imp {
     }
 }
 
-#[cfg(not(windows))]
+#[cfg(target_os = "macos")]
+mod imp {
+    use super::{AudioSource, Device, Ended, Format, Options, Packet};
+    use orbiters_sound::coreaudio::{self as ca, Capture, Flow, Turn};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    /// How often a capture looks whether its device is still there and whether the default changed.
+    const CHECK_EVERY: Duration = Duration::from_secs(1);
+    /// A packet this much later than the one before ended was preceded by a loss (the reader was late).
+    const LATE_BY: f64 = 0.05;
+
+    pub fn list_mics() -> Vec<Device> {
+        let default = ca::default_uid(Flow::Input);
+        ca::devices(Flow::Input).into_iter().map(|d| Device { default: default.as_deref() == Some(d.uid.as_str()), id: d.uid, name: d.name }).collect()
+    }
+
+    pub fn default_mic_id() -> Option<String> {
+        ca::default_uid(Flow::Input)
+    }
+
+    /// Whether sound was lost between a packet of `seconds` that started at `before` and one that starts at `at_ns`.
+    fn lost(previous: Option<(u64, f64)>, at_ns: u64) -> bool {
+        previous.is_some_and(|(before, seconds)| at_ns.saturating_sub(before) as f64 / 1e9 > seconds + LATE_BY)
+    }
+
+    pub fn capture_packets(
+        source: &AudioSource,
+        options: &Options,
+        stop: &AtomicBool,
+        mut ready: impl FnMut(&str, Format) -> anyhow::Result<()>,
+        mut packet: impl FnMut(&Packet<'_>) -> anyhow::Result<()>,
+    ) -> anyhow::Result<(String, Ended)> {
+        let AudioSource::Mic(id) = source else {
+            anyhow::bail!("a program's sound cannot be recorded on macOS");
+        };
+        let uid = match id {
+            Some(uid) => uid.clone(),
+            None => ca::default_uid(Flow::Input).ok_or_else(|| anyhow::anyhow!("this computer has no microphone"))?,
+        };
+        let device = ca::device(&uid).ok_or_else(|| anyhow::anyhow!("the microphone {uid} is not there"))?;
+        // A voice: mono at the device's rate (or the one asked for).
+        let rate = options.rate.unwrap_or_else(|| ca::rate_of(&uid).unwrap_or(48_000.0).round() as u32);
+        let turn = Arc::new(Turn::default());
+        let mut capture = Capture::open(&uid, rate, options.buffer, &turn).map_err(anyhow::Error::msg)?;
+        ready(&device.name, Format { rate, channels: 1 })?;
+        capture.start().map_err(anyhow::Error::msg)?;
+        if options.pro_audio {
+            ca::audio_priority();
+        }
+        let follow = id.is_none() && options.follow_default;
+        let mut previous: Option<(u64, f64)> = None;
+        let mut checked = Instant::now();
+        let ended = loop {
+            if stop.load(Ordering::Relaxed) {
+                break Ended::Stopped;
+            }
+            if checked.elapsed() >= CHECK_EVERY {
+                checked = Instant::now();
+                if !ca::alive(&uid) {
+                    break Ended::Lost(format!("{} went away", device.name));
+                }
+                if follow && ca::default_uid(Flow::Input).is_some_and(|d| d != uid) {
+                    break Ended::DefaultChanged;
+                }
+            }
+            turn.wait(Duration::from_millis(100));
+            let drained = capture.drain(|samples, stamp| {
+                // How old it is against the shared clock, which keeps counting while the computer sleeps: the device's
+                // clock does not.
+                let now = orbiters_core::clock::now_ns();
+                let at_ns = stamp.age_ns.map_or(now, |age| now.saturating_sub(age));
+                let frames = samples.len() as u32;
+                let discontinuity = lost(previous, at_ns);
+                previous = Some((at_ns, frames as f64 / rate as f64));
+                packet(&Packet { at_ns, frames, samples: Some(samples), discontinuity, timestamp_error: false })
+            });
+            match drained {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => break Ended::Refused(format!("{e:#}")),
+                Err(e) => break Ended::Lost(e),
+            }
+        };
+        Ok((device.name, ended))
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn a_process_s_sound_is_said_to_be_unavailable() {
+            let stop = AtomicBool::new(false);
+            let e = capture_packets(&AudioSource::Process(1), &Options::default(), &stop, |_, _| Ok(()), |_| Ok(())).unwrap_err();
+            assert!(e.to_string().contains("cannot be recorded"), "{e}");
+        }
+
+        #[test]
+        fn a_gap_in_the_times_is_a_loss() {
+            let tenth = 0.1;
+            assert!(!lost(None, 0));
+            assert!(!lost(Some((0, tenth)), 100_000_000), "the next packet follows");
+            assert!(!lost(Some((0, tenth)), 120_000_000), "a little late is the device's rhythm");
+            assert!(lost(Some((0, tenth)), 200_000_000), "a tenth of a second is missing");
+        }
+
+        /// Records the default microphone at 16 kHz for two seconds, as the voice worker asks, and tells what came:
+        /// `cargo test -p orbiters-audio records_this_computer -- --ignored --nocapture`. macOS attributes the process to
+        /// the app it was started from: where that app was refused, this says so and nothing is recorded.
+        #[test]
+        #[ignore]
+        fn records_this_computers_default_microphone() {
+            println!("microphones: {:#?}", list_mics());
+            println!("access: {:?}", ca::mic_access());
+            let stop = AtomicBool::new(false);
+            let started = Instant::now();
+            let mut count = 0usize;
+            let mut frames = 0u64;
+            let mut peak = 0f32;
+            let mut losses = 0;
+            let mut first: Option<u64> = None;
+            let mut last = 0u64;
+            let mut steps = Vec::new();
+            let result = capture_packets(
+                &AudioSource::Mic(None),
+                &Options { rate: Some(16_000), ..Options::default() },
+                &stop,
+                |name, format| {
+                    println!("opened {name} as {format:?} after {:?}", started.elapsed());
+                    Ok(())
+                },
+                |p| {
+                    count += 1;
+                    frames += p.frames as u64;
+                    peak = samples_peak(p.samples).max(peak);
+                    losses += i32::from(p.discontinuity);
+                    if first.is_none() {
+                        first = Some(p.at_ns);
+                        println!("first packet {:?} after the start", started.elapsed());
+                    }
+                    if count <= 8 {
+                        steps.push((p.frames, p.at_ns.saturating_sub(last) as f64 / 1e6));
+                    }
+                    last = p.at_ns;
+                    let now = orbiters_core::clock::now_ns();
+                    assert!(p.at_ns <= now && now - p.at_ns < 2_000_000_000, "the packet's time is on the shared clock");
+                    if started.elapsed() > Duration::from_secs(2) {
+                        anyhow::bail!("enough");
+                    }
+                    Ok(())
+                },
+            );
+            println!("{result:?}");
+            println!("access now: {:?}", ca::mic_access());
+            let seconds = first.map_or(0.0, |f| last.saturating_sub(f) as f64 / 1e9);
+            println!(
+                "{count} packets, {frames} frames over {seconds:.3} s of packet times: {:.0} Hz; loudest {peak}; losses {losses}",
+                frames as f64 / seconds.max(1e-6)
+            );
+            println!("first packets (frames, ms since the one before): {steps:?}");
+        }
+
+        fn samples_peak(samples: Option<&[f32]>) -> f32 {
+            samples.unwrap_or_default().iter().fold(0.0, |m, v| m.max(v.abs()))
+        }
+    }
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
 mod imp {
     use super::{AudioSource, Device, Ended, Format, Options, Packet};
     use std::sync::atomic::AtomicBool;

@@ -807,6 +807,7 @@ fn transcribe_files(files: &[String]) -> anyhow::Result<()> {
 
 fn main() {
     orbiters_core::panic_log::install();
+    orbiters_core::leave_with_parent();
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.first().map(String::as_str) == Some("transcribe") {
         if let Err(e) = transcribe_files(&args[1..]) {

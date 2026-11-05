@@ -1,4 +1,4 @@
-//! "Test microphone": hear a microphone on this PC's output and see its level (settings, and N4N0's "hear yourself").
+//! "Test microphone": hear a microphone on this computer's output and see its level (settings, and N4N0's "hear yourself").
 
 use super::Job;
 use egui::{pos2, vec2, Align2, Rect, Sense, Ui};
@@ -77,11 +77,27 @@ pub fn mic_test(ui: &mut Ui, test: &mut MicTest, device: &str) {
     }
     let (note, color) = match (&test.error, active) {
         (Some(e), _) => (format!("The microphone did not start: {e}"), theme::DANGER),
-        (None, true) => ("You hear your microphone on this PC's sound output: wear headphones to avoid feedback.".to_string(), theme::FG_3),
+        (None, true) => {
+            let computer = if cfg!(target_os = "macos") { "this Mac's" } else { "this PC's" };
+            (format!("You hear your microphone on {computer} sound output: wear headphones to avoid feedback."), theme::FG_3)
+        }
         (None, false) => ("Hear yourself to check the microphone and its level.".to_string(), theme::FG_3),
     };
-    let (caption, _) = ui.allocate_exact_size(vec2(ui.available_width(), 16.0), Sense::hover());
-    widgets::text_truncated(ui.painter(), pos2(caption.left(), caption.center().y), Align2::LEFT_CENTER, &Txt::new(note, 11.5).color(color), caption.width());
+    if cfg!(target_os = "macos") && test.error.is_some() {
+        // Where macOS wants the microphone turned on is long, and is the point: it wraps rather than being cut.
+        let galley = ui.painter().layout_job(Txt::new(note, 11.5).color(color).job(ui.available_width()));
+        let (caption, _) = ui.allocate_exact_size(galley.size(), Sense::hover());
+        ui.painter().galley(caption.min, galley, color);
+    } else {
+        let (caption, _) = ui.allocate_exact_size(vec2(ui.available_width(), 16.0), Sense::hover());
+        widgets::text_truncated(
+            ui.painter(),
+            pos2(caption.left(), caption.center().y),
+            Align2::LEFT_CENTER,
+            &Txt::new(note, 11.5).color(color),
+            caption.width(),
+        );
+    }
     if active {
         ctx.request_repaint_after(std::time::Duration::from_millis(33));
     }

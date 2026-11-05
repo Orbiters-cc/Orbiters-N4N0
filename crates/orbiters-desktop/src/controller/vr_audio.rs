@@ -9,7 +9,7 @@
 //!
 //! A device is found by its id, else by its name (a driver installed again gives its devices new ids). The logic is
 //! [`Keeper`], over [`Devices`] (Windows' in [`crate::audio_devices`], a fake one in the tests); [`run`] is the
-//! service's thread.
+//! service's thread. SteamVR does not run on a Mac, so nothing here does either.
 
 use super::{Controller, Shared};
 use crate::audio_devices::{AudioEndpoint, Flow, Role, ROLES};
@@ -410,6 +410,9 @@ impl Controller {
 
 /// The service's thread: a turn every second while it watches the defaults closely, every two otherwise.
 pub fn run(ctl: Shared) {
+    if cfg!(target_os = "macos") {
+        return;
+    }
     let path = saved_file();
     let mut keeper = Keeper::new(Windows, load(&path));
     ctl.set_vr_audio(Status { last: keeper.saved.last.clone() });

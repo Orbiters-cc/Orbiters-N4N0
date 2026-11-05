@@ -1,6 +1,7 @@
-//! This computer, as N4N0 sees it (`orbiters_n4n0::Platform`): Windows' clipboard, the default browser, the press sound
-//! through WASAPI, the person's language and keyboard, the mouse for VRChat's desktop mode, the music Windows' media
-//! controls tell, and N4N0's ears in a worker process of their own (`orbiters-voice`, below normal priority).
+//! This computer, as N4N0 sees it (`orbiters_n4n0::Platform`): the clipboard, the default browser, the press sound, the
+//! person's language and keyboard, the mouse for VRChat's desktop mode (Windows only: VRChat does not run on a Mac), the
+//! music the system tells, and N4N0's ears in a worker process of their own (`orbiters-voice`, below normal priority on
+//! Windows). The names say Windows for where they began; these are this computer's on macOS too.
 
 use orbiters_core::voice::{VoiceCommand, VoiceEvent};
 use orbiters_n4n0::{Browser, Clipboard, Ears, Locale, Mouse, MouseState, Platform, Sounds, VoiceEnded, VoiceEvents, VoiceWorker};
@@ -19,7 +20,7 @@ pub fn platform() -> Platform {
         locale: Box::new(WindowsLocale),
         ears: Box::new(VoiceProcess),
         media: crate::media::watcher().clone(),
-        mouse: Some(Box::new(WindowsMouse)),
+        mouse: (!cfg!(target_os = "macos")).then(|| Box::new(WindowsMouse) as Box<dyn Mouse>),
     }
 }
 
@@ -80,8 +81,17 @@ impl Sounds for PressSound {
 pub struct WindowsLocale;
 
 impl Locale for WindowsLocale {
-    /// This computer's language (`fr-FR`): Windows' user locale, else `LANG`.
+    /// This computer's language (`fr-FR`): the system's locale for the person, else `LANG`.
     fn locale(&self) -> String {
+        #[cfg(target_os = "macos")]
+        {
+            // `en-US@rg=frzzzz` when the region differs from the language's: the part a language tag is.
+            let locale = orbiters_ui::fonts::user_locale();
+            let locale = locale.split('@').next().unwrap_or_default();
+            if !locale.is_empty() {
+                return locale.to_string();
+            }
+        }
         #[cfg(windows)]
         {
             use windows::Win32::Globalization::GetUserDefaultLocaleName;
@@ -106,7 +116,127 @@ impl Locale for WindowsLocale {
                 return KeyboardLayout::Azerty;
             }
         }
+        #[cfg(target_os = "macos")]
+        if mac_keyboard::layout().is_some_and(|layout| mac_keyboard::is_azerty(&layout)) {
+            return KeyboardLayout::Azerty;
+        }
         KeyboardLayout::Qwerty
+    }
+}
+
+/// The keyboard on a Mac.
+#[cfg(target_os = "macos")]
+mod mac_keyboard {
+    use std::ffi::{c_char, c_void, CStr, CString};
+
+    #[link(name = "CoreFoundation", kind = "framework")]
+    extern "C" {
+        fn CFStringCreateWithCString(allocator: *const c_void, text: *const c_char, encoding: u32) -> *const c_void;
+        fn CFStringGetCString(text: *const c_void, buffer: *mut c_char, size: isize, encoding: u32) -> u8;
+        fn CFGetTypeID(object: *const c_void) -> usize;
+        fn CFStringGetTypeID() -> usize;
+        fn CFRelease(object: *const c_void);
+        fn CFPreferencesAppSynchronize(application: *const c_void) -> u8;
+        fn CFPreferencesCopyAppValue(key: *const c_void, application: *const c_void) -> *const c_void;
+    }
+
+    const UTF8: u32 = 0x0800_0100;
+
+    fn cf_string(text: &str) -> Option<*const c_void> {
+        let text = CString::new(text).ok()?;
+        // SAFETY: a valid C string, copied; the caller releases the copy.
+        let string = unsafe { CFStringCreateWithCString(std::ptr::null(), text.as_ptr(), UTF8) };
+        (!string.is_null()).then_some(string)
+    }
+
+    /// The keyboard layout in use (`com.apple.keylayout.French`), from the preferences macOS keeps it in. Text Input
+    /// Sources would say the same but belong to the main thread, and this is asked from others.
+    pub fn layout() -> Option<String> {
+        let key = cf_string("AppleCurrentKeyboardLayoutInputSourceID")?;
+        let domain = cf_string("com.apple.HIToolbox")?;
+        let mut buffer = [0 as c_char; 256];
+        // SAFETY: the strings are ours to release, and the value is ours once copied; the buffer is of the size given.
+        unsafe {
+            // The person may have changed it since this process last looked.
+            CFPreferencesAppSynchronize(domain);
+            let value = CFPreferencesCopyAppValue(key, domain);
+            let text = if !value.is_null()
+                && CFGetTypeID(value) == CFStringGetTypeID()
+                && CFStringGetCString(value, buffer.as_mut_ptr(), buffer.len() as isize, UTF8) != 0
+            {
+                Some(CStr::from_ptr(buffer.as_ptr()).to_string_lossy().into_owned())
+            } else {
+                None
+            };
+            if !value.is_null() {
+                CFRelease(value);
+            }
+            CFRelease(key);
+            CFRelease(domain);
+            text
+        }
+    }
+
+    /// AZERTY for French and Belgian layouts, as on Windows (Swiss French is QWERTZ, Canadian French is QWERTY).
+    pub fn is_azerty(layout: &str) -> bool {
+        matches!(layout.rsplit('.').next().unwrap_or(layout), "French" | "French-PC" | "French-numerical" | "Belgian" | "ABC-AZERTY")
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn french_and_belgian_layouts_are_azerty() {
+            for layout in [
+                "com.apple.keylayout.French",
+                "com.apple.keylayout.French-PC",
+                "com.apple.keylayout.French-numerical",
+                "com.apple.keylayout.Belgian",
+                "com.apple.keylayout.ABC-AZERTY",
+            ] {
+                assert!(is_azerty(layout), "{layout}");
+            }
+            for layout in [
+                "com.apple.keylayout.US",
+                "com.apple.keylayout.ABC",
+                "com.apple.keylayout.SwissFrench",
+                "com.apple.keylayout.Canadian-CSA",
+                "com.apple.keylayout.German",
+            ] {
+                assert!(!is_azerty(layout), "{layout}");
+            }
+        }
+
+        /// The keyboard and language of this computer, from another thread than the main one, and the real clipboard
+        /// the same way (what it held is put back when it held text):
+        /// `cargo test -p orbiters-desktop reads_this_mac -- --ignored --nocapture`.
+        #[test]
+        #[ignore]
+        fn reads_this_mac() {
+            use orbiters_n4n0::Locale as _;
+            std::thread::spawn(|| {
+                println!("layout: {:?}", layout());
+                println!(
+                    "locale: {} of {}; keyboard {:?}",
+                    super::super::WindowsLocale.locale(),
+                    orbiters_ui::fonts::user_locale(),
+                    super::super::WindowsLocale.keyboard()
+                );
+                let mut clipboard = arboard::Clipboard::new().unwrap();
+                let held = clipboard.get_text();
+                println!("the clipboard holds text: {}", held.is_ok());
+                if let Ok(held) = held {
+                    clipboard.set_text("orbiters clipboard test").unwrap();
+                    assert_eq!(arboard::Clipboard::new().unwrap().get_text().unwrap(), "orbiters clipboard test");
+                    clipboard.set_text(held.clone()).unwrap();
+                    assert_eq!(clipboard.get_text().unwrap(), held);
+                    println!("copied, read back and put back from a thread that is not the main one");
+                }
+            })
+            .join()
+            .unwrap();
+        }
     }
 }
 

@@ -372,6 +372,7 @@ async fn serve(no_sound: bool) {
 
 fn main() {
     orbiters_core::panic_log::install();
+    orbiters_core::leave_with_parent();
     let args: Vec<String> = std::env::args().skip(1).collect();
     static LOG: Log = Log;
     if log::set_logger(&LOG).is_ok() {

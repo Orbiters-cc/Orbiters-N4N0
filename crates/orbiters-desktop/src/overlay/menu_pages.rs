@@ -818,6 +818,18 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             std::fs::write(out.join(format!("bank-{}-128.bin", page.name())), &bank[..screen::bank_bytes(128)])?;
         }
     }
+    // The two pictures as buttons while a timer counts: greyed out, for review and the screen's shader.
+    {
+        let mut menu = samples().into_iter().find(|s| s.0 == ScreenPage::PhotoTwo).map(|s| s.1).expect("the 3D picture sample");
+        menu.countdown = Some(3);
+        let none = |_: &str| -> Option<TextureId> { None };
+        let rgba = paint(&mut canvas, |p| menu_ui::draw(p, pos2(0.0, 0.0), &View { menu: &menu, hover: None, pressed: None, picture: &none, time: 0.4, skin }));
+        write_png(&out.join("menu-photo-two-countdown.png"), WIDTH, HEIGHT, &unpremultiply(&rgba))?;
+        let flags = screen::Flags { listening: menu.listening, loading: menu.loading(), ..Default::default() };
+        let none = |_: &str| -> Option<screen::Picture> { None };
+        let bank = screen::Frame::new(&menu, None, None, flags, 72, &none).bank;
+        std::fs::write(out.join("bank-photo-two-countdown.bin"), &bank[..screen::bank_bytes(72)])?;
+    }
     // The overlay's world feedback popping (the screen keeps its picture): a like and a label just given, a few frames
     // in, for review only.
     for (target, ms) in [(Target::Like, 90u64), (Target::Like, 200), (Target::Like, 420), (Target::TopLabel(3), 120)] {

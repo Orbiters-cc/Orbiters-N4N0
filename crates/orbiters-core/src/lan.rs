@@ -292,6 +292,7 @@ pub struct LanBrowser {
 impl LanBrowser {
     /// Starts looking.
     pub fn start() -> anyhow::Result<Self> {
+        anyhow::ensure!(!crate::osc::no_network_listening(), "nothing listens on the network in this test run");
         let daemon = mdns_sd::ServiceDaemon::new()?;
         let events = daemon.browse(SERVICE)?;
         let found = Arc::<Mutex<Vec<FoundVrchat>>>::default();
@@ -488,6 +489,9 @@ mod tests {
     /// A stand-in VRChat answering on this computer's address is found, whichever process announces it.
     #[test]
     fn a_vrchat_announced_on_the_network_is_listed_with_its_input_port() {
+        if crate::osc::no_network_listening() {
+            return;
+        }
         let Some(ip) = this_address(None) else { return };
         let listener = std::net::TcpListener::bind((ip, 0)).unwrap();
         let port = listener.local_addr().unwrap().port();

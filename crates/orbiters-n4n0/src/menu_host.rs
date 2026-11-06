@@ -446,6 +446,8 @@ impl<P: Pictures> MenuHost<P> {
                 }
                 Effect::Thumbnails(ids) => self.thumbnails(ids),
                 Effect::Copy { link, .. } => service.command(Command::CopyText { text: link }),
+                // No Stay here on the overlay's menu: what stays is the avatar's screen.
+                Effect::StayHere(_) => {}
                 Effect::FastWalk(on) => {
                     let mut changed = settings.clone();
                     changed.walk_boost.enabled = on;

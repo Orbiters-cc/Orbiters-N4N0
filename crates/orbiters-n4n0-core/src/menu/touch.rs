@@ -13,9 +13,13 @@
 use orbiters_contracts::n4n0;
 use std::time::{Duration, Instant};
 
-/// How long a finger may go unfound (a fit rejected on a mix of new and old readings, a hand moving fast) before it
+/// How long a finger may go unfound (a reading VRChat's broad phase dropped for a few frames, a hand moving fast) before it
 /// counts as gone: shorter gaps change nothing, so they never let go of a press nor start another.
-pub const LOST_GRACE: Duration = Duration::from_millis(100);
+pub const LOST_GRACE: Duration = Duration::from_millis(250);
+/// How long the direction a finger last pointed along stands in for a sender VRChat stopped reporting, the other one of
+/// that hand still reported: a blink of a sender (`Docs/n4n0.md`, Pointing, why the contacts have a room of their own) leaves the
+/// ray where the hand is, and an avatar uploaded before that room keeps most of its presses.
+pub const DIRECTION_KEPT: Duration = Duration::from_millis(1200);
 
 /// The screen's size.
 pub const WIDTH: f64 = 0.48;
@@ -39,8 +43,260 @@ pub const RECEIVERS: [[f64; 3]; 4] = [
 pub const PRESS_DEPTH: f64 = -0.012;
 /// It lets go once this far in front again.
 pub const RELEASE_DEPTH: f64 = -0.025;
+/// A finger that reached the face without coming from in front may press once it is this far in front. Nearer to the face
+/// than the release: a poke that went in beside the screen, or while the screen moved, asks for 6 mm back and not 13.
+pub const ARM_DEPTH: f64 = -0.018;
 /// Nearer than this it hovers.
 pub const HOVER_DEPTH: f64 = -0.08;
+/// The tip of a finger reaching through the screen still points along a line that meets it: the ray lasts this far past the
+/// face, 5 cm, not 1. The screen hangs 0.45 m before the eyes, so a hand reaches through it without meaning anything.
+pub const RAY_PAST_FACE: f64 = 0.05;
+/// How far a reading of a sender may disagree with a position before it is no position: readings of one frame agree within
+/// 5 microns (measured on real recordings, `reports/menu-hands.md`), and two frames of a moving hand by centimetres.
+const SAME_FRAME: f64 = 0.003;
+/// A contact's largest radius, whatever its scale: VRChat clamps it (`ContactBase`: `maxSize` 6, half of it the radius).
+const LARGEST_CONTACT_RADIUS: f64 = 3.0;
+
+/// The owner's senders and receivers as they are now, in the screen's own space. The screen's size scales the receivers and
+/// not the senders, so the senders look smaller on a larger screen; the avatar's scale changes nothing, until the receivers
+/// reach VRChat's largest contact, which then measures less far than they should.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Geometry {
+    /// The fingertips' and aims' receivers' radius.
+    pub reach: f64,
+    /// The senders' radius.
+    pub sender: f64,
+    /// From the tip to the aim, along the finger.
+    pub aim: f64,
+}
+
+impl Geometry {
+    /// The prop as built, at the screen's size 1.
+    pub const BUILT: Geometry = Geometry { reach: REACH, sender: n4n0::POINT_RADIUS, aim: n4n0::AIM_DISTANCE };
+
+    /// `size`: how many times its own the screen is (0.6 to 1.8). `eye_height`: `/avatar/eyeheight` in metres, when known.
+    pub fn of(size: f64, eye_height: Option<f64>) -> Geometry {
+        let size = if size > 0.0 { size } else { 1.0 };
+        let scale = eye_height.filter(|h| *h > 0.0).map_or(1.0, |h| h / 1.6) * size;
+        Geometry { reach: REACH.min(LARGEST_CONTACT_RADIUS / scale), sender: n4n0::POINT_RADIUS / size, aim: n4n0::AIM_DISTANCE / size }
+    }
+}
+
+/// What a sender's four readings say.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Sender {
+    /// Found.
+    Found,
+    /// All four at 0: VRChat reports no contact at all, out of reach or dropped by its broad phase (never a fit's fault).
+    Silent,
+    /// Two or three at 0: too far from the receivers on one side to tell where.
+    Partial,
+    /// They do not fit one position: readings of two frames, or the screen moved between them.
+    Mixed,
+}
+
+impl Sender {
+    pub fn name(self) -> &'static str {
+        match self {
+            Sender::Found => "found",
+            Sender::Silent => "silent",
+            Sender::Partial => "partial",
+            Sender::Mixed => "mixed",
+        }
+    }
+}
+
+/// Why a hand's two readings give no point on the page.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Guard {
+    Tip(Sender),
+    Aim(Sender),
+    /// The two are found, and not as far apart as the finger is long: not one pose.
+    WrongLength,
+    /// The tip is further than [`RAY_PAST_FACE`] past the screen's face.
+    TipPast,
+    /// The finger points away from the screen, or along it.
+    Parallel,
+}
+
+impl Guard {
+    pub fn name(self) -> String {
+        match self {
+            Guard::Tip(s) => format!("tip {}", s.name()),
+            Guard::Aim(s) => format!("aim {}", s.name()),
+            Guard::WrongLength => "wrong length".into(),
+            Guard::TipPast => "tip past the face".into(),
+            Guard::Parallel => "points away or along".into(),
+        }
+    }
+}
+
+/// A sender's centre from its four readings, its radius known. Subtracting the squared distances gives three linear
+/// equations in the centre alone, with the same matrix wherever the hand is: no root to choose and no place where it
+/// degrades. The free radius this replaces was singular on a surface through the space right behind the screen, where a
+/// finger's aim point passes at 10 to 30 cm from the screen, and it turned 5 microns of noise into 11 mm there.
+fn found(proximity: [f32; 4], geometry: &Geometry) -> Result<[f64; 3], Sender> {
+    if proximity.iter().any(|p| !p.is_finite()) {
+        return Err(Sender::Mixed);
+    }
+    let zero = proximity.iter().filter(|p| **p <= 0.0).count();
+    match zero {
+        4 => return Err(Sender::Silent),
+        2 | 3 => return Err(Sender::Partial),
+        _ => {}
+    }
+    let d = proximity.map(|p| geometry.reach * (1.0 - p as f64) + geometry.sender);
+    let at = if zero == 0 {
+        let c0 = RECEIVERS[0];
+        let square = |a: [f64; 3]| a[0] * a[0] + a[1] * a[1] + a[2] * a[2];
+        let matrix = [1, 2, 3].map(|i| [0, 1, 2].map(|axis| RECEIVERS[i][axis] - c0[axis]));
+        solve(matrix, [1, 2, 3].map(|i| (square(RECEIVERS[i]) - square(c0) - d[i] * d[i] + d[0] * d[0]) * 0.5)).ok_or(Sender::Mixed)?
+    } else {
+        // Out of reach of one receiver: three spheres meet at two mirrored points; it is the one out of reach of the fourth.
+        let out = proximity.iter().position(|p| *p <= 0.0).unwrap_or(0);
+        three(out, d, geometry)?
+    };
+    let fits = RECEIVERS.iter().zip(d).enumerate().filter(|(i, _)| zero == 0 || proximity[*i] > 0.0).all(|(i, (c, distance))| {
+        let along = ((at[0] - c[0]).powi(2) + (at[1] - c[1]).powi(2) + (at[2] - c[2]).powi(2)).sqrt();
+        // At a receiver's very centre its reading stops at 1 and says only "this near".
+        (along - distance).abs() <= SAME_FRAME || (proximity[i] >= 1.0 && along <= distance + SAME_FRAME)
+    });
+    if fits {
+        Ok(at)
+    } else {
+        Err(Sender::Mixed)
+    }
+}
+
+/// Where three spheres meet (all but receiver `out`), on the side where receiver `out` is out of reach.
+fn three(out: usize, d: [f64; 4], geometry: &Geometry) -> Result<[f64; 3], Sender> {
+    let dot = |a: [f64; 3], b: [f64; 3]| a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+    let minus = |a: [f64; 3], b: [f64; 3]| [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
+    let cross = |a: [f64; 3], b: [f64; 3]| [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+    let kept: Vec<usize> = (0..4).filter(|i| *i != out).collect();
+    let (p, q, r) = (RECEIVERS[kept[0]], RECEIVERS[kept[1]], RECEIVERS[kept[2]]);
+    let (du, dv) = (minus(q, p), minus(r, p));
+    let normal = cross(du, dv);
+    let n2 = dot(normal, normal);
+    if n2 < 1e-12 {
+        return Err(Sender::Mixed);
+    }
+    let (a, b, c) = (d[kept[0]], d[kept[1]], d[kept[2]]);
+    let (s, t) = ((a * a - b * b + dot(du, du)) * 0.5, (a * a - c * c + dot(dv, dv)) * 0.5);
+    // In the plane of the three: p + u du + v dv, with u du·du + v du·dv = s and u du·dv + v dv·dv = t.
+    let (uu, uv, vv) = (dot(du, du), dot(du, dv), dot(dv, dv));
+    let det = uu * vv - uv * uv;
+    if det.abs() < 1e-12 {
+        return Err(Sender::Mixed);
+    }
+    let (u, v) = ((s * vv - t * uv) / det, (t * uu - s * uv) / det);
+    let base = [0, 1, 2].map(|i| du[i] * u + dv[i] * v);
+    let height2 = a * a - dot(base, base);
+    if height2 < -SAME_FRAME {
+        return Err(Sender::Mixed);
+    }
+    let height = height2.max(0.0).sqrt() / n2.sqrt();
+    let candidates = [1.0, -1.0].map(|side: f64| [0, 1, 2].map(|i| p[i] + base[i] + normal[i] * height * side));
+    let c0 = RECEIVERS[out];
+    let beyond = |x: [f64; 3]| dot(minus(x, c0), minus(x, c0)).sqrt() - geometry.reach - geometry.sender;
+    let first_beyond = beyond(candidates[0]);
+    let second_beyond = beyond(candidates[1]);
+    match (first_beyond >= -SAME_FRAME, second_beyond >= -SAME_FRAME) {
+        (true, false) => Ok(candidates[0]),
+        (false, true) => Ok(candidates[1]),
+        // Either side would do: the person stands in front of the screen.
+        (true, true) => Ok(if candidates[0][2] <= candidates[1][2] { candidates[0] } else { candidates[1] }),
+        (false, false) => Err(Sender::Mixed),
+    }
+}
+
+/// Where the screen's middle is from the owner's eyes, in a frame at the eyes that looks along the line of sight and stays level:
+/// right, up, ahead, in metres at 1.6 m eye height, what `N4N0/Screen/PlaceX` to `Z` say (`Docs/n4n0.md`, What others see). `size`:
+/// how many times its own the screen is. `None` when the eyes or the gaze point are not found. The screen stands upright, so its
+/// up is the world's: the level frame needs nothing the head's roll could spoil.
+pub fn place_from_eyes(eyes: [f32; 4], gaze: [f32; 4], size: f64) -> Option<[f64; 3]> {
+    let size = if size > 0.0 { size } else { 1.0 };
+    let geometry = Geometry { reach: RADIUS, sender: 0.01 / size, aim: 0.0 };
+    let (e, g) = (found(eyes, &geometry).ok()?, found(gaze, &geometry).ok()?);
+    let delta = [g[0] - e[0], g[1] - e[1], g[2] - e[2]];
+    let length = (delta[0] * delta[0] + delta[1] * delta[1] + delta[2] * delta[2]).sqrt();
+    if length < 1e-4 {
+        return None;
+    }
+    let ahead = delta.map(|v| v / length);
+    // right = up x ahead, up being the screen's own.
+    let side = (ahead[2] * ahead[2] + ahead[0] * ahead[0]).sqrt();
+    if side < 0.05 {
+        return None;
+    }
+    let right = [ahead[2] / side, 0.0, -ahead[0] / side];
+    let up = [ahead[1] * right[2] - ahead[2] * right[1], ahead[2] * right[0] - ahead[0] * right[2], ahead[0] * right[1] - ahead[1] * right[0]];
+    let middle = e.map(|v| -v);
+    let dot = |a: [f64; 3], b: [f64; 3]| a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+    Some([dot(middle, right) * size, dot(middle, up) * size, dot(middle, ahead) * size])
+}
+
+/// The owner's fingertip from its four readings, on the page and in depth, what a touch reads.
+pub fn fingertip(proximity: [f32; 4], geometry: &Geometry) -> Result<Finger, Sender> {
+    let [x, y, depth] = found(proximity, geometry)?;
+    let (x, y) = on_page(x, y);
+    Ok(Finger { x, y, depth })
+}
+
+/// A hand's two senders at a reading.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Reading {
+    pub tip: Sender,
+    pub aim: Sender,
+    /// Where the finger points on the page, or why it is not known.
+    pub point: Result<(f32, f32), Guard>,
+    /// The point stands on one sender and the direction the finger last pointed along.
+    pub kept: bool,
+}
+
+/// A hand's senders over time: the direction it last pointed along, to ride out a sender VRChat stops reporting.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Pointer {
+    along: Option<([f64; 3], Instant)>,
+}
+
+impl Pointer {
+    pub fn read(&mut self, tip: [f32; 4], aim: [f32; 4], geometry: &Geometry, now: Instant) -> Reading {
+        let (t, a) = (found(tip, geometry), found(aim, geometry));
+        let (tip_state, aim_state) = (t.err().unwrap_or(Sender::Found), a.err().unwrap_or(Sender::Found));
+        let kept = self.along.filter(|(_, at)| now.duration_since(*at) <= DIRECTION_KEPT).map(|(d, _)| d);
+        let (from, to, standing) = match (t, a, kept) {
+            (Ok(t), Ok(a), _) => (t, a, false),
+            (Ok(t), Err(_), Some(d)) => (t, [0, 1, 2].map(|i| t[i] + d[i] * geometry.aim), true),
+            (Err(_), Ok(a), Some(d)) => ([0, 1, 2].map(|i| a[i] - d[i] * geometry.aim), a, true),
+            (Err(s), _, _) => return Reading { tip: tip_state, aim: aim_state, point: Err(Guard::Tip(s)), kept: false },
+            (_, Err(s), _) => return Reading { tip: tip_state, aim: aim_state, point: Err(Guard::Aim(s)), kept: false },
+        };
+        let delta = [to[0] - from[0], to[1] - from[1], to[2] - from[2]];
+        let length = (delta[0] * delta[0] + delta[1] * delta[1] + delta[2] * delta[2]).sqrt();
+        let guard = if (length - geometry.aim).abs() > SAME_FRAME * 2.0 {
+            Some(Guard::WrongLength)
+        } else if delta[2] / length < 0.02 {
+            Some(Guard::Parallel)
+        } else if from[2] > RAY_PAST_FACE {
+            Some(Guard::TipPast)
+        } else {
+            None
+        };
+        // A pose of the two senders together: the direction from now on, pointing at the screen or not.
+        if !standing && guard != Some(Guard::WrongLength) {
+            self.along = Some((delta.map(|v| v / length), now));
+        }
+        let point = match guard {
+            Some(g) => Err(g),
+            None => {
+                let k = -from[2] / delta[2];
+                Ok(on_page(from[0] + delta[0] * k, from[1] + delta[1] * k))
+            }
+        };
+        Reading { tip: tip_state, aim: aim_state, point, kept: standing }
+    }
+}
 
 /// Where a finger is.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -58,22 +314,6 @@ pub fn locate(proximity: [f32; 4], radius: f64) -> Option<Finger> {
     let [x, y, depth] = point(proximity, radius, [0.0, 0.0, -0.05])?;
     let (x, y) = on_page(x, y);
     Some(Finger { x, y, depth })
-}
-
-/// Where an index finger points (screen version 7), in pixels: its fingertip and the point [`n4n0::AIM_DISTANCE`] along it,
-/// found from their receivers ([`REACH`]), and where the line from the tip through that point meets the screen's plane.
-/// `None` when either is not found, the finger points away from the screen or along it, or the tip is past the screen.
-pub fn aimed(tip: [f32; 4], aim: [f32; 4]) -> Option<(f32, f32)> {
-    let t = point(tip, REACH, [0.0, 0.0, -0.2])?;
-    let a = point(aim, REACH, [0.0, 0.0, 0.0])?;
-    let along = [a[0] - t[0], a[1] - t[1], a[2] - t[2]];
-    let length = (along[0] * along[0] + along[1] * along[1] + along[2] * along[2]).sqrt();
-    // Two points this near (the receivers found one sender twice) or a line along the screen tell nothing.
-    if length < n4n0::AIM_DISTANCE * 0.25 || along[2] / length < 0.02 || t[2] > 0.01 {
-        return None;
-    }
-    let k = -t[2] / along[2];
-    Some(on_page(t[0] + along[0] * k, t[1] + along[1] * k))
 }
 
 /// A point of the screen's plane on the page, in pixels.
@@ -104,10 +344,11 @@ fn looked_at(eyes: Option<[f64; 3]>, gaze: [f64; 3]) -> Option<(f32, f32)> {
     Some(on_page(c[0] + (gaze[0] - c[0]) * t, c[1] + (gaze[1] - c[1]) * t))
 }
 
-/// A contact's centre from four surface distances. Subtracting the squared distance equations makes the centre
-/// linear in the unknown sender radius; substituting it back gives a quadratic. Unlike an iterative fit, this also
-/// finds hands beside the screen where the initial guess's Jacobian is singular or converges to the wrong root.
-/// `start` selects the nearer solution if both satisfy the physical radius and residual limits.
+/// A contact's centre from four surface distances when its radius is not known: everyone else's fingertips, and the eyes
+/// and gaze point whose radius the desktop mode's lookup does not depend on. Subtracting the squared distance equations
+/// makes the centre linear in the unknown sender radius; substituting it back gives a quadratic. `start` selects the
+/// nearer solution if both satisfy the physical radius and residual limits. The owner's fingers use [`found`] instead:
+/// their radius is known, and this has a surface where the two roots meet and noise turns into centimetres.
 fn point(proximity: [f32; 4], radius: f64, start: [f64; 3]) -> Option<[f64; 3]> {
     if proximity.iter().any(|&p| !(p > 0.0 && p <= 1.0)) {
         return None;
@@ -144,7 +385,8 @@ fn point(proximity: [f32; 4], radius: f64, start: [f64; 3]) -> Option<[f64; 3]> 
     radii
         .into_iter()
         .filter_map(|r| {
-            if !(-0.01..0.06).contains(&r) {
+            // A contact has no negative radius: 2 mm of slack for noise, not the 10 it had, which let the wrong root win.
+            if !(-0.002..0.06).contains(&r) {
                 return None;
             }
             let p = [0, 1, 2].map(|i| base[i] + slope[i] * r);
@@ -194,16 +436,19 @@ fn solve<const N: usize>(mut a: [[f64; N]; N], mut b: [f64; N]) -> Option<[f64; 
     Some(x)
 }
 
-/// A hand's touch: hovering, pressing, letting go. A press needs the finger seen in front of the screen first (a hand
-/// that comes in from the side or from behind presses nothing until it is seen in front again), lasts while the finger
-/// stays at or past the face however deep it goes, and ends only once it is back in front.
+/// A hand's touch: hovering, pressing, letting go. A press needs the finger seen in front of the screen, over it, at the
+/// reading before (a hand that comes in from the side or from behind presses nothing until it is seen in front again; a
+/// fast poke, nearer than [`HOVER_DEPTH`] only for that one reading, presses), lasts while the finger stays at or past the
+/// face however deep it goes, and ends only once it is back in front.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Touch {
     pressing: bool,
     pub finger: Option<Finger>,
-    /// The finger's last reading was in front of the screen's face, over it: what may press next.
+    /// The finger's last reading was in front of the screen's face, over it, at whatever distance: what may press next.
+    armed: bool,
+    /// The last reading was near enough to hover (what a short gap keeps showing).
     hovering: bool,
-    /// The finger reached the face without coming from in front: it presses nothing until it is clearly in front again.
+    /// The finger reached the face without coming from in front: it presses nothing until it is back at [`ARM_DEPTH`].
     blocked: bool,
     /// Since when the finger is not found.
     lost_since: Option<Instant>,
@@ -233,7 +478,8 @@ impl Ray {
         if self.lost_since.is_some_and(|since| now.duration_since(since) >= LOST_GRACE) {
             *self = Ray { trigger: self.trigger, ..Ray::default() };
         }
-        let pulled = trigger && !self.trigger && self.over;
+        // A pull counts when the ray pointed at the page, or was lost a moment ago: the reading that comes back says where.
+        let pulled = trigger && !self.trigger && (self.over || self.lost_since.is_some());
         self.trigger = trigger;
         self.pending_pull = trigger && (self.pending_pull || pulled);
         let Some((x, y)) = aim else { return self.unfound(now) };
@@ -285,8 +531,9 @@ impl Ray {
 }
 
 /// What a hand does when its fingertip and its ray both say something: a touch's press or hold first, then the ray's,
-/// then a touch's hover (the fingertip is right at the screen), then the ray's hover.
-pub fn either(touch: Option<Gesture>, ray: Option<Gesture>) -> Option<Gesture> {
+/// then the ray's hover where its dot is drawn and what the trigger would press, then a touch's hover. `poking`: the
+/// fingertip is so near the face ([`RELEASE_DEPTH`]) that what is under it is about to be pressed, and what shows is that.
+pub fn either(touch: Option<Gesture>, ray: Option<Gesture>, poking: bool) -> Option<Gesture> {
     let pressing = |g: &Option<Gesture>| matches!(g, Some(Gesture::Press { .. } | Gesture::Hold { .. }));
     if pressing(&touch) {
         return touch;
@@ -294,12 +541,14 @@ pub fn either(touch: Option<Gesture>, ray: Option<Gesture>) -> Option<Gesture> {
     if pressing(&ray) {
         return ray;
     }
-    if matches!(touch, Some(Gesture::Hover { .. })) {
+    if poking && matches!(touch, Some(Gesture::Hover { .. })) {
         return touch;
     }
-    match (touch, ray) {
-        (_, Some(g)) => Some(g),
-        (g, None) => g,
+    match (ray, touch) {
+        (Some(Gesture::Hover { x, y }), _) => Some(Gesture::Hover { x, y }),
+        (_, Some(Gesture::Hover { x, y })) => Some(Gesture::Hover { x, y }),
+        (Some(g), _) => Some(g),
+        (None, g) => g,
     }
 }
 
@@ -319,7 +568,13 @@ pub enum Gesture {
 impl Touch {
     /// The hand's new proximities to receivers of `radius`, read at `now`.
     pub fn update(&mut self, proximity: [f32; 4], radius: f64, now: Instant) -> Gesture {
-        let Some(f) = locate(proximity, radius) else { return self.unfound(now) };
+        self.feed(locate(proximity, radius), true, now)
+    }
+
+    /// The finger as found (`None`: not found), at `now`. `still`: the screen is not moving by itself: a screen that glides
+    /// onto a resting finger is no press, and arms nothing until it stops.
+    pub fn feed(&mut self, finger: Option<Finger>, still: bool, now: Instant) -> Gesture {
+        let Some(f) = finger else { return self.unfound(now) };
         self.lost_since = None;
         self.finger = Some(f);
         let inside = f.x >= 0.0 && f.y >= 0.0 && f.x < super::layout::WIDTH as f32 && f.y < super::layout::HEIGHT as f32;
@@ -332,26 +587,39 @@ impl Touch {
         }
         if f.depth > PRESS_DEPTH {
             // At the face or past it. A press only when the finger came from in front, over the screen.
-            if inside && self.hovering && !self.blocked {
+            if inside && self.armed && !self.blocked && still {
                 self.pressing = true;
+                self.armed = false;
                 self.hovering = false;
                 return Gesture::Press { x: f.x, y: f.y };
             }
             self.blocked = true;
+            self.armed = false;
             self.hovering = false;
             return if inside && f.depth <= 0.08 { Gesture::Hover { x: f.x, y: f.y } } else { Gesture::Away };
         }
         // In front of the face: hovering when over the screen and near enough. A blocked finger is free once it is
-        // clearly back in front.
-        if f.depth < RELEASE_DEPTH {
+        // back in front.
+        if f.depth < ARM_DEPTH {
             self.blocked = false;
         }
+        self.armed = inside && still;
         self.hovering = inside && f.depth >= HOVER_DEPTH;
         if self.hovering {
             Gesture::Hover { x: f.x, y: f.y }
         } else {
             Gesture::Away
         }
+    }
+
+    /// The fingertip is so near the face that what is under it is about to be pressed.
+    pub fn poking(&self) -> bool {
+        self.finger.is_some_and(|f| f.depth >= RELEASE_DEPTH)
+    }
+
+    /// The touch refuses a press until the finger is back in front ([`ARM_DEPTH`]): for the readout of what stops a press.
+    pub fn blocked(&self) -> bool {
+        self.blocked
     }
 
     /// No new reading came: a finger unfound for [`LOST_GRACE`] is gone (`Some(Away)`), the touch starting afresh.
@@ -381,6 +649,11 @@ impl Touch {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Where a finger points by the two readings alone.
+    fn aimed(tip: [f32; 4], aim: [f32; 4]) -> Option<(f32, f32)> {
+        Pointer::default().read(tip, aim, &Geometry::BUILT, Instant::now()).point.ok()
+    }
 
     /// A touch read by receivers of the eyes' and everyone else's radius.
     trait At {
@@ -460,7 +733,7 @@ mod tests {
         // From behind, coming through.
         assert!(!matches!(touch.update_at(read([0.0, 0.0, 0.05], 0.01), clock.next()), Gesture::Press { .. }));
         assert!(!matches!(touch.update_at(read([0.0, 0.0, -0.005], 0.01), clock.next()), Gesture::Press { .. }));
-        assert!(!matches!(touch.update_at(read([0.0, 0.0, -0.018], 0.01), clock.next()), Gesture::Press { .. }), "not clearly out yet");
+        assert!(!matches!(touch.update_at(read([0.0, 0.0, -0.016], 0.01), clock.next()), Gesture::Press { .. }), "not clearly out yet");
         assert!(!matches!(touch.update_at(read([0.0, 0.0, -0.005], 0.01), clock.next()), Gesture::Press { .. }));
         // Clearly in front, then in: a press.
         assert!(matches!(touch.update_at(read([0.0, 0.0, -0.04], 0.01), clock.next()), Gesture::Hover { .. }));
@@ -649,11 +922,156 @@ mod tests {
         let hover = Some(Gesture::Hover { x: 1.0, y: 1.0 });
         let press = Some(Gesture::Press { x: 2.0, y: 2.0 });
         let ray_hover = Some(Gesture::Hover { x: 3.0, y: 3.0 });
-        assert_eq!(either(press, ray_hover), press);
-        assert_eq!(either(hover, Some(Gesture::Press { x: 3.0, y: 3.0 })), Some(Gesture::Press { x: 3.0, y: 3.0 }), "a trigger press over a near finger");
-        assert_eq!(either(hover, ray_hover), hover, "the fingertip at the screen");
-        assert_eq!(either(Some(Gesture::Away), ray_hover), ray_hover);
-        assert_eq!(either(Some(Gesture::Away), None), Some(Gesture::Away));
-        assert_eq!(either(None, None), None);
+        assert_eq!(either(press, ray_hover, false), press);
+        assert_eq!(either(hover, Some(Gesture::Press { x: 3.0, y: 3.0 }), false), Some(Gesture::Press { x: 3.0, y: 3.0 }), "a trigger press over a near finger");
+        assert_eq!(either(hover, ray_hover, true), hover, "the fingertip at the screen");
+        assert_eq!(either(hover, ray_hover, false), ray_hover, "the dot it draws is what the trigger would press");
+        assert_eq!(either(hover, Some(Gesture::Away), false), hover, "pointing off the page with the fingertip over it");
+        assert_eq!(either(Some(Gesture::Away), ray_hover, false), ray_hover);
+        assert_eq!(either(Some(Gesture::Away), None, false), Some(Gesture::Away));
+        assert_eq!(either(None, None, false), None);
+    }
+
+    /// What the receivers read for a finger of the prop as built, with `noise` metres of error on each reading.
+    fn reads(f: [f64; 3], g: &Geometry, noise: f64, seed: &mut u64) -> [f32; 4] {
+        let mut out = [0f32; 4];
+        for (o, c) in out.iter_mut().zip(RECEIVERS) {
+            *seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            let wobble = ((*seed >> 33) as f64 / (1u64 << 31) as f64 - 0.5) * 2.0 * noise;
+            let d = ((f[0] - c[0]).powi(2) + (f[1] - c[1]).powi(2) + (f[2] - c[2]).powi(2)).sqrt() - g.sender + wobble;
+            *o = (1.0 - d / g.reach).clamp(0.0, 1.0) as f32;
+        }
+        out
+    }
+
+    /// Every target of the screen from a fingertip 0 to 50 cm from it, from where each hand is, with what real readings carry
+    /// (5 microns, `reports/menu-hands.md`): always found, and within 3 pixels of where the finger points. The free radius this
+    /// replaced lost or moved up to 9 % of these near the surface where its two roots meet, right behind the screen.
+    #[test]
+    fn every_target_is_found_at_any_distance_within_half_a_metre() {
+        let g = Geometry::BUILT;
+        let mut seed = 7u64;
+        for shoulder in [[-0.2, -0.3, -0.45], [0.2, -0.3, -0.45], [0.0, 0.1, -0.5], [-0.5, 0.0, -0.3], [0.5, 0.0, -0.3]] {
+            for tenth in 0..=10 {
+                let dist = 0.5 * tenth as f64 / 10.0;
+                for py in 0..18 {
+                    for px in 0..32 {
+                        let target = [(px as f64 + 0.5) / 32.0 * WIDTH - WIDTH / 2.0, HEIGHT / 2.0 - (py as f64 + 0.5) / 18.0 * HEIGHT, 0.0];
+                        let delta: [f64; 3] = [0, 1, 2].map(|i| target[i] - shoulder[i]);
+                        let length = delta.iter().map(|v| v * v).sum::<f64>().sqrt();
+                        let along = delta.map(|v| v / length);
+                        let tip = [0, 1, 2].map(|i| target[i] - along[i] * dist);
+                        let aim = [0, 1, 2].map(|i| tip[i] + along[i] * g.aim);
+                        let r = Pointer::default().read(reads(tip, &g, 5e-6, &mut seed), reads(aim, &g, 5e-6, &mut seed), &g, Instant::now());
+                        let (x, y) = r.point.unwrap_or_else(|e| panic!("lost at {dist} m, {px} {py}: {e:?}"));
+                        let (wx, wy) = on_page(target[0], target[1]);
+                        assert!((x - wx).abs() < 3.0 && (y - wy).abs() < 3.0, "{dist} m, {px} {py}: {x} {y} vs {wx} {wy}");
+                        assert!(!r.kept);
+                    }
+                }
+            }
+        }
+    }
+
+    /// The reading at the singular place of the real recording (After The Rain, 3.0 s: the aim point 11 cm from the receiver
+    /// behind the screen, the hand still): the free radius said -9 mm and put it 11 mm from where the known radius does.
+    #[test]
+    fn the_aim_near_the_receiver_behind_the_screen_is_where_it_is() {
+        let g = Geometry::BUILT;
+        let mut seed = 11u64;
+        for aim in [[0.026, -0.1, 0.17], [0.03, -0.104, 0.184], [0.0, 0.0, 0.17], [0.0, 0.01, 0.152], [-0.289, 0.184, 0.002], [0.289, 0.185, -0.001]] {
+            let [x, y, z] = found(reads(aim, &g, 5e-6, &mut seed), &g).unwrap_or_else(|e| panic!("{aim:?}: {e:?}"));
+            assert!((x - aim[0]).abs() < 2e-4 && (y - aim[1]).abs() < 2e-4 && (z - aim[2]).abs() < 2e-4, "{aim:?}: {x} {y} {z}");
+        }
+    }
+
+    /// An example of a reading of two frames: the fit took it for a place the finger never was. It is no place now.
+    #[test]
+    fn readings_of_two_frames_are_no_position() {
+        let g = Geometry::BUILT;
+        let mut seed = 3u64;
+        let before = reads([0.15, -0.08, -0.04], &g, 0.0, &mut seed);
+        let after = reads([0.15, -0.08, -0.02], &g, 0.0, &mut seed);
+        assert!(found(before, &g).is_ok() && found(after, &g).is_ok());
+        assert_eq!(found([before[0], before[1], before[2], after[3]], &g), Err(Sender::Mixed));
+        assert_eq!(found([after[0], after[1], after[2], before[3]], &g), Err(Sender::Mixed));
+    }
+
+    /// VRChat's broad phase drops a whole sender (all four readings at 0): the other one and the direction the finger last
+    /// pointed along keep the ray going for a moment, said as kept, and the guard names which went.
+    #[test]
+    fn a_silent_sender_rides_on_the_other_one_for_a_moment_and_is_named() {
+        let g = Geometry::BUILT;
+        let mut seed = 5u64;
+        let t0 = Instant::now();
+        let tip = [0.1, -0.1, -0.2];
+        let along = [-0.05f64, 0.1, 0.2817];
+        let length = along.iter().map(|v| v * v).sum::<f64>().sqrt();
+        let aim = [0, 1, 2].map(|i| tip[i] + along[i] / length * g.aim);
+        let mut p = Pointer::default();
+        assert_eq!(p.read([0.0; 4], reads(aim, &g, 0.0, &mut seed), &g, t0).point, Err(Guard::Tip(Sender::Silent)), "nothing known of its direction yet");
+        let both = p.read(reads(tip, &g, 0.0, &mut seed), reads(aim, &g, 0.0, &mut seed), &g, t0).point.unwrap();
+        let r = p.read(reads(tip, &g, 0.0, &mut seed), [0.0; 4], &g, t0 + Duration::from_millis(30));
+        assert_eq!((r.tip, r.aim, r.kept), (Sender::Found, Sender::Silent, true));
+        let kept = r.point.unwrap();
+        assert!((kept.0 - both.0).abs() < 2.0 && (kept.1 - both.1).abs() < 2.0, "{kept:?} {both:?}");
+        let r = p.read([0.0; 4], reads(aim, &g, 0.0, &mut seed), &g, t0 + Duration::from_millis(60));
+        assert_eq!((r.tip, r.aim, r.kept), (Sender::Silent, Sender::Found, true));
+        assert!(r.point.is_ok());
+        let r = p.read(reads(tip, &g, 0.0, &mut seed), [0.0; 4], &g, t0 + DIRECTION_KEPT * 2);
+        assert_eq!(r.point, Err(Guard::Aim(Sender::Silent)), "too long ago");
+        assert_eq!(p.read([0.0; 4], [0.0; 4], &g, t0).point, Err(Guard::Tip(Sender::Silent)));
+    }
+
+    /// Out of the receiver behind the screen's reach, the three others still say where the finger is: the beam's reach is 2.5 m.
+    #[test]
+    fn a_fingertip_out_of_one_receiver_s_reach_is_still_found() {
+        let g = Geometry::BUILT;
+        let mut seed = 9u64;
+        for tip in [[0.0, 0.0, -1.5], [0.2, -0.1, -1.46], [-0.1, 0.1, -1.49]] {
+            let read = reads(tip, &g, 0.0, &mut seed);
+            assert_eq!(read[3], 0.0, "{tip:?}");
+            let [x, y, z] = found(read, &g).unwrap_or_else(|e| panic!("{tip:?}: {e:?}"));
+            assert!((x - tip[0]).abs() < 1e-3 && (y - tip[1]).abs() < 1e-3 && (z - tip[2]).abs() < 1e-3, "{tip:?}: {x} {y} {z}");
+        }
+        assert_eq!(found(reads([0.0, 0.0, -3.0], &g, 0.0, &mut seed), &g), Err(Sender::Silent));
+    }
+
+    /// The screen's size scales the receivers, not the senders; an avatar large enough reaches VRChat's largest contact.
+    #[test]
+    fn the_geometry_follows_the_screen_s_size_and_vrchat_s_largest_contact() {
+        assert_eq!(Geometry::of(1.0, None), Geometry::BUILT);
+        let g = Geometry::of(1.8, Some(1.6));
+        assert_eq!(g.reach, REACH, "1.6 m x 1.8 is under 3 m");
+        assert!((g.sender - n4n0::POINT_RADIUS / 1.8).abs() < 1e-9 && (g.aim - n4n0::AIM_DISTANCE / 1.8).abs() < 1e-9);
+        let big = Geometry::of(1.8, Some(1.8));
+        assert!((big.reach - 3.0 / (1.8 / 1.6 * 1.8)).abs() < 1e-9, "1.6 m x 1.125 x 1.8 is clamped to 3 m: {big:?}");
+        let mut seed = 1u64;
+        let target = [0.1, 0.05, -0.2];
+        let [x, y, z] = found(reads(target, &big, 0.0, &mut seed), &big).unwrap();
+        assert!((x - target[0]).abs() < 1e-3 && (y - target[1]).abs() < 1e-3 && (z - target[2]).abs() < 1e-3);
+    }
+
+    /// A poke between two readings presses; a hand that was in front does not need to be seen hovering first.
+    #[test]
+    fn a_fast_poke_presses_and_the_way_back_is_short() {
+        let g = Geometry::BUILT;
+        let mut seed = 2u64;
+        let mut touch = Touch::default();
+        let mut clock = Clock(Instant::now());
+        let mut at = |touch: &mut Touch, z: f64, still: bool, clock: &mut Clock| {
+            touch.feed(fingertip(reads([0.0, 0.0, z], &g, 0.0, &mut seed), &g).ok(), still, clock.next())
+        };
+        assert_eq!(at(&mut touch, -0.25, true, &mut clock), Gesture::Away);
+        assert!(matches!(at(&mut touch, -0.005, true, &mut clock), Gesture::Press { .. }), "from a quarter of a metre in one reading");
+        assert!(matches!(at(&mut touch, -0.02, true, &mut clock), Gesture::Hold { .. }));
+        assert!(matches!(at(&mut touch, -0.04, true, &mut clock), Gesture::Hover { .. }));
+        // A screen that glides onto a resting finger presses nothing, and the finger is not blocked for long.
+        assert!(matches!(at(&mut touch, -0.04, false, &mut clock), Gesture::Hover { .. }));
+        assert!(matches!(at(&mut touch, -0.005, false, &mut clock), Gesture::Hover { .. }));
+        assert!(touch.blocked());
+        assert!(matches!(at(&mut touch, -0.019, true, &mut clock), Gesture::Hover { .. }));
+        assert!(!touch.blocked(), "6 mm back");
+        assert!(matches!(at(&mut touch, -0.005, true, &mut clock), Gesture::Press { .. }));
     }
 }

@@ -1220,6 +1220,11 @@ impl Controller {
                     messages.push((AVATAR_CHANGE.to_string(), vec![OscValue::Text(id)]));
                 }
                 OscEvent::Values { address, values } => {
+                    if address == orbiters_n4n0_core::states::EYE_HEIGHT {
+                        if let Some(OscValue::Float(height)) = values.first() {
+                            self.n4n0.on_eye_height(*height);
+                        }
+                    }
                     let mask_off = address == hide_self::LOCAL_PLAYER && values.first().is_some_and(|v| !v.truthy());
                     messages.push((address, values));
                     if mask_off {

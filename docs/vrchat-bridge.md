@@ -132,7 +132,7 @@ R=C:/Users/Enzo/.orbiters-build/sota/bridge-live-run; I="C:/Users/Enzo/AppData/L
 mkdir -p $R; for f in "$I"/*; do b=$(basename "$f"); [ "$b" = install.json ] || cp -n "$f" $R/; done
 cp C:/Users/Enzo/.orbiters-build/sota/target-desktop/release/orbiters-desktop.exe $R/   # after deskcargo.sh build --release
 "$I/orbiters-desktop.exe" --quit                # a clean stop of Enzo's service: only one instance runs
-(cd $R && nohup ./orbiters-desktop.exe --hidden > service.log 2>&1 &)
+(cd $R && nohup ./orbiters-desktop.exe --hidden > service.log 2>&1 &)   # this folder: Windows' firewall already allows the program at this path
 
 # 2. Drive it. By hand, over the real transport; the token is read from the app's file and never printed:
 python scripts/bridge-live.py get_state
@@ -152,6 +152,12 @@ rm -rf C:/Users/Enzo/.orbiters-build/sota/bench/vrchat.lock
 tasklist | grep -iE 'vrchat|orbiters'   # nothing of yours left
 ```
 
+Keep the service in that folder, and **do not run it with `ORBITERS_NO_NETWORK_LISTENING`:** that switch is for test programs, and it turns off the mDNS that finds VRChat's OSCQuery. Tried on 2026-11-06: `osc_answers` false, camera and capture kit unknown, so no picture. A program at a new path makes Windows' firewall ask, in a prompt that takes the foreground from the game until a person answers it (`focus_game` then says Windows refused). A build that needs this checks with the `screenshot`'s `foreground`, and `Get-NetFirewallApplicationFilter` lists the rules.
+
+The agents have no tool that changes avatars, on purpose. `get_state` says `avatar.capture_kit`; a test with an avatar that has no kit needs the person to change it, or their word that the test side may, over VRChat's `/avatar/change`, and put it back.
+
+`cargo test replay_a_session -- --ignored --nocapture` (`SESSION`, `AT`, `HIPS`, `EYE`) prints what a real session's depth frames said along a line, frame by frame: how to ask why a flight went somewhere.
+
 A screenshot takes 0.3 to 0.5 s with the game at 60 to 80 frames a second, so it is fine to look often. For an overlay or a menu of the app's own in VRChat: a picture shows the game's window only, and what a desktop VRChat draws. Anything of yours that injects input or moves the mouse counts as the person and pauses the agent for 30 s. **Look before every click:** see the shop below.
 
 ## What the real game showed (2026-11-06, Windows, VRChat in desktop mode, Easy Anti-Cheat running)
@@ -169,7 +175,16 @@ A screenshot takes 0.3 to 0.5 s with the game at 60 to 80 frames a second, so it
 - **The flight flies in desktop mode:** VRChat takes `/usercamera/Pose` at 90 Hz, its viewfinder went with it, Spout streamed at 41 frames a second (`VRCSender1`, 1920 × 1080) and the app turned Spout on and off by itself.
 - **The menu has a shop.** A banner on the first page opens a page with a Purchase button, and a click that landed on the wrong page went there. No purchase happened, and Esc closed it. Nothing but the agent's own looking can guard this: the guide and the tool's description say so.
 
-**Not yet seen, as the avatar worn had no capture kit** (`Orbit v4`, no `N4N0/*` parameters, 0 keyframes of 418 frames): keyframes, depth and the flight planned around them, whether it stays inside, HideSelf on a real avatar, and a reconstruction from a desktop-mode picture. The first thing to do with an avatar that has the kit.
+**With a kit avatar on** (three more runs that day, from `claude -p`; Toolkit 0.4.11, so no hide layer):
+
+- **The whole loop works:** a trending world, a private instance, 8 s of World picture, 1,104 frames, 561 keyframes (75 colour, 486 rig faces), 97 depth frames, and 852,000 splats in 37 s beside the game at 38.3 dB on views it never saw, in "everyone is asleep except you". Turned views hold up. The recording takes about 9 s.
+- **Software removal works** on the real avatar: 15 % of the pixels of 246 of 561 views left out, 16 Gaussians left in the volume. Small dark marks stay on the floor at the feet.
+- **The person's items are in the picture.** VRChat's items follow their owner (`[VRCItems] Item prop_… spawned by usr_…`): Enzo's Ghost Companion floated 0.7 m from the hips. What floats free inside the wearer's envelope now goes with them (`orbiters_reconstruct::wearer`). One following further away than that stays.
+- **Closed doors and glass can write no depth,** so depth reads sky through them. A flight left the building through one, 7 m away, and the frames trained the city and a blue-lit door into the corridor. Sky now vouches only up to the surfaces around it. That fix is proved by replaying that flight's depth and by a later run elsewhere that stayed inside, not by flying at that door again.
+- **A wearer in the depth closed a corridor behind the camera.** One who leaves the picture afterwards is no obstacle now, and the camera may pass through them: such a view has no pixel left, and is not held out, as it once ended the whole reconstruction.
+- **In a narrow place** the rings find no way (`no ring 0 m up: depth shows no way`), and the flight spends its time on hops.
+- **Reconstructions run beside the game with the default setting,** at low priority, and may be done before the game closes. One that fails says `failed` and why in `get_state`.
+- **The person's own input pauses a running game's agent:** seen once, and it went on 30 s later. The hotkey and Stop have not been tried on the real game.
 
 ## Trying it on the real game
 

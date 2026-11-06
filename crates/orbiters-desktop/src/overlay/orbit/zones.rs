@@ -44,12 +44,12 @@ pub const QM_ICONS_X: [f32; 7] = [-132.0, -88.0, -44.0, 0.0, 44.0, 88.0, 132.0];
 
 /// Where the ring starts and ends, in hundredths of the wheel's radius: just off VRChat's rim, a band about as deep as VRChat's own slices are long.
 pub const RING_INNER: f32 = 106.0;
-pub const RING_OUTER: f32 = 178.0;
+pub const RING_OUTER: f32 = 172.0;
 /// The ring that blooms outside it.
-pub const BLOOM_INNER: f32 = 182.0;
-pub const BLOOM_OUTER: f32 = 244.0;
+pub const BLOOM_INNER: f32 = 176.0;
+pub const BLOOM_OUTER: f32 = 238.0;
 /// The music's controls need less depth.
-pub const BLOOM_SHORT: f32 = 224.0;
+pub const BLOOM_SHORT: f32 = 218.0;
 /// What separates two cells, and the cells' corners, in those units.
 const RING_GAP: f32 = 3.5;
 const RING_CORNER: f32 = 9.0;
@@ -276,9 +276,9 @@ impl Zone {
         }
         let r = |x0: f32, y0: f32, x1: f32, y1: f32| Rect::from_min_max(pos2(x0, y0), pos2(x1, y1));
         match self {
-            Zone::WheelCaption => r(-220.0, -242.0, 220.0, -186.0),
+            Zone::WheelCaption => r(-220.0, -236.0, 220.0, -180.0),
             Zone::WheelVeil => r(-103.0, -103.0, 103.0, 103.0),
-            Zone::WheelHide => r(130.0, -160.0, 160.0, -130.0),
+            Zone::WheelHide => r(126.0, -156.0, 156.0, -126.0),
             // As tall as My Profile and as wide, beside it.
             Zone::QmWing => r(362.0, -150.0, 524.0, 186.0),
             Zone::QmStrip => r(-262.0, 266.0, 262.0, 322.0),
@@ -566,6 +566,7 @@ mod tests {
         let small = place(Zone::WheelWorlds, vec2(960.0, 540.0)).unwrap();
         let large = place(Zone::WheelWorlds, vec2(1920.0, 1080.0)).unwrap();
         assert!((large.rect.width() / small.rect.width() - 2.0).abs() < 0.02);
-        assert!((large.logical() - small.logical()).length() < 1.5, "the same drawing");
+        // Within what whole pixels round away: a pixel is 1.33 units in the small window, on each side.
+        assert!((large.logical() - small.logical()).length() < 2.7, "the same drawing");
     }
 }

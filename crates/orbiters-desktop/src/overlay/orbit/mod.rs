@@ -237,18 +237,22 @@ pub struct Pressed {
     pub worlds: bool,
 }
 
-/// Newest captures, read off the folder on a thread of their own as listing takes a moment: asked once for each change of the library.
+/// Every capture, the newest first, listed off the folder on a thread of its own as listing takes a moment, once for each change of the library. Their pictures come one by one as the gallery
+/// reaches them, and go again once it is far past them: it can hold any number of captures.
 #[derive(Default)]
 struct Recents {
     loaded: Vec<LoadedRecent>,
     seen: Option<u64>,
     rx: Option<mpsc::Receiver<Vec<LoadedRecent>>>,
+    /// What reads pictures: what to read, and what it read.
+    reader: Option<(mpsc::Sender<PathBuf>, mpsc::Receiver<(PathBuf, Option<ColorImage>)>)>,
 }
 
 struct LoadedRecent {
     dir: PathBuf,
     title: String,
     image: Option<ColorImage>,
+    asked: bool,
     has_view: bool,
     picture: bool,
     modified: u64,
@@ -258,7 +262,13 @@ impl Recents {
     fn follow(&mut self, version: u64, sessions: PathBuf) -> bool {
         let mut changed = false;
         if let Some(rx) = &self.rx {
-            if let Ok(list) = rx.try_recv() {
+            if let Ok(mut list) = rx.try_recv() {
+                // What was read already stays.
+                for old in self.loaded.drain(..).filter(|o| o.asked) {
+                    if let Some(new) = list.iter_mut().find(|n: &&mut LoadedRecent| n.dir == old.dir) {
+                        (new.image, new.asked) = (old.image, old.asked);
+                    }
+                }
                 self.loaded = list;
                 self.rx = None;
                 changed = true;
@@ -273,17 +283,59 @@ impl Recents {
                 list.sort_by_key(|s| std::cmp::Reverse(s.modified));
                 let loaded = list
                     .into_iter()
-                    .take(7)
                     .map(|s| {
-                        let image = orbiters_core::bundle::read_thumbnail(&s.dir).map(|(w, h, rgba)| ColorImage::from_rgba_unmultiplied([w as usize, h as usize], &rgba));
                         let title = s.manifest.world.as_ref().and_then(|w| w.name.clone()).filter(|n| !n.is_empty()).unwrap_or_else(|| "Capture".to_string());
-                        LoadedRecent { dir: s.dir, title, image, has_view: s.reconstruction.is_some(), picture: s.picture.is_some(), modified: s.modified }
+                        LoadedRecent { dir: s.dir, title, image: None, asked: false, has_view: s.reconstruction.is_some(), picture: s.picture.is_some(), modified: s.modified }
                     })
                     .collect();
                 let _ = tx.send(loaded);
             });
         }
         changed
+    }
+
+    /// The pictures that came. Says whether any did.
+    fn pictures_came(&mut self) -> bool {
+        let Some((_, got)) = &self.reader else { return false };
+        let mut any = false;
+        while let Ok((dir, image)) = got.try_recv() {
+            if let Some(recent) = self.loaded.iter_mut().find(|r| r.dir == dir && r.asked) {
+                recent.image = image;
+                any = true;
+            }
+        }
+        any
+    }
+
+    /// Asks for the pictures from `first` to `last` not here yet.
+    fn ask(&mut self, first: usize, last: usize) {
+        let reader = self.reader.get_or_insert_with(|| {
+            let (ask, asked) = mpsc::channel::<PathBuf>();
+            let (give, got) = mpsc::channel();
+            let _ = std::thread::Builder::new().name("orbit-pictures".into()).spawn(move || {
+                for dir in asked {
+                    let image = orbiters_core::bundle::read_thumbnail(&dir).map(|(w, h, rgba)| ColorImage::from_rgba_unmultiplied([w as usize, h as usize], &rgba));
+                    if give.send((dir, image)).is_err() {
+                        return;
+                    }
+                }
+            });
+            (ask, got)
+        });
+        for recent in self.loaded.iter_mut().skip(first).take(last.saturating_sub(first) + 1).filter(|r| !r.asked) {
+            recent.asked = true;
+            let _ = reader.0.send(recent.dir.clone());
+        }
+    }
+
+    /// Lets go of the pictures outside `first` to `last`.
+    fn keep(&mut self, first: usize, last: usize) {
+        for (i, recent) in self.loaded.iter_mut().enumerate() {
+            if (i < first || i > last) && recent.asked && recent.image.is_some() {
+                recent.image = None;
+                recent.asked = false;
+            }
+        }
     }
 }
 
@@ -340,6 +392,8 @@ pub struct Panels {
     note: PictureNote,
     /// A 3D picture is being taken: its end is said.
     was_flying: bool,
+    /// Where the gallery is going to, as its wheel said.
+    gallery_to: f32,
     /// The page of the Instances sheet, and the worlds' pictures so far.
     visited_page: usize,
     visit_pictures: HashMap<String, egui::TextureId>,
@@ -381,6 +435,7 @@ impl Panels {
             takeover: None,
             note: PictureNote::default(),
             was_flying: false,
+            gallery_to: 0.0,
             visited_page: 0,
             visit_pictures: HashMap::new(),
             open: None,
@@ -493,6 +548,8 @@ impl Panels {
         }
         self.facts.sheet = Some(sheet);
         self.facts.sheet_title = title.to_string();
+        self.facts.gallery_scroll = 0.0;
+        self.gallery_to = 0.0;
         if self.takeover.is_none() {
             self.takeover = Some(Panel::new(place, self.sharp, 0, !snap.settings.reduce_motion));
         }
@@ -568,6 +625,13 @@ impl Panels {
         }
     }
 
+    /// The mouse's wheel, in notches, up positive: moves the gallery, when it shows.
+    pub fn wheel(&mut self, notches: f32) {
+        if self.facts.sheet == Some(Sheet::Pictures) {
+            self.gallery_to = (self.gallery_to - notches * 180.0).clamp(0.0, panels::gallery_max_scroll(&self.facts));
+        }
+    }
+
     /// A number key on the wheel: as a press on that cell, clockwise from the top.
     pub fn press_cell(&mut self, cell: usize, snap: &Snapshot) -> Pressed {
         const CELLS: [Zone; 6] = [Zone::WheelWorlds, Zone::WheelYouTube, Zone::WheelPlaying, Zone::WheelAll, Zone::WheelInstances, Zone::WheelPictures];
@@ -598,6 +662,24 @@ impl Panels {
             }
         }
         self.follow_note(snap);
+        // The gallery's pictures: those it shows and the next few, and it lets go of those far behind.
+        if self.recents.pictures_came() {
+            if let Some(panel) = self.takeover.as_mut() {
+                panel.dirty = true;
+            }
+        }
+        if self.facts.sheet == Some(Sheet::Pictures) {
+            if let Some(panel) = self.takeover.as_mut() {
+                let shown = || panel.items.iter().filter_map(|i| if let panels::Look::Capture(n) = i.look { Some(n) } else { None });
+                if let (Some(first), Some(last)) = (shown().min(), shown().max()) {
+                    self.recents.ask(first, last + 6);
+                    self.recents.keep(first.saturating_sub(36), last + 36);
+                    let here: std::collections::HashSet<String> = self.recents.loaded.iter().filter(|r| r.image.is_some()).map(|r| r.dir.to_string_lossy().to_string()).collect();
+                    let art = self.art.as_ref().map(|a| a.0.clone());
+                    panel.pictures.retain(|k, _| here.contains(k) || art.as_ref() == Some(k));
+                }
+            }
+        }
         // N4N0's menu is what plays and its controls go through: open, drawn or not.
         if !self.stage.host.menu.open {
             self.stage.host.open(snap);
@@ -662,7 +744,7 @@ impl Panels {
             countdown: snap.n4n0.photo_countdown,
             picture_flying: snap.capture.photo_3d && !matches!(snap.capture.state, CaptureState::Idle),
             // Their pictures are looked up per part, in `paint`.
-            recent: self.recents.loaded.iter().map(|r| Recent { dir: r.dir.clone(), title: r.title.clone(), state: recent_state(r, snap, now), progress: progress(&r.dir), picture: None }).collect(),
+            recent: self.recents.loaded.iter().filter(|_| self.facts.sheet == Some(Sheet::Pictures)).map(|r| Recent { dir: r.dir.clone(), title: r.title.clone(), state: recent_state(r, snap, now), progress: progress(&r.dir), picture: None }).collect(),
             reconstructing: snap.reconstruction.as_ref().map(|j| j.progress.clamp(0.0, 1.0)),
             waiting: snap.reconstruct_queue.len(),
             desktop: snap.n4n0.desktop_mode || !snap.steamvr.running,
@@ -679,6 +761,11 @@ impl Panels {
             vr_close: self.sharp > 1.0,
             picture_mode: self.facts.picture_mode,
             hint: self.facts.hint,
+            gallery_scroll: self.facts.gallery_scroll,
+            gallery_layout: snap.settings.photos_layout,
+            volume: menu.volume.as_ref().map(|v| (v.percent, v.muted)),
+            music_times: menu.media.as_ref().and_then(|m| Some((m.position?, m.duration?))),
+            world_video: menu.world_video.as_ref().map(|v| v.title.clone().unwrap_or_else(|| v.url.clone())),
             digits: self.open == Some(Around::Wheel) && self.takeover.is_none() && (snap.n4n0.desktop_mode || !snap.steamvr.running),
             beside_wing: self.open == Some(Around::QuickMenu),
             worlds_visited: visited.0,
@@ -877,6 +964,17 @@ impl Panels {
                     host.effects(effects, snap, &self.backend);
                 }
             }
+            Action::Volume(up) => {
+                let host = &mut self.stage.host;
+                let effects = host.press(if up { Target::VolumeUp } else { Target::VolumeDown });
+                host.effects(effects, snap, &self.backend);
+            }
+            Action::Mute => {
+                let host = &mut self.stage.host;
+                let effects = host.press(Target::Mute);
+                host.effects(effects, snap, &self.backend);
+            }
+            Action::GalleryScroll(on) => self.wheel(if on { -2.0 } else { 2.0 }),
             Action::InstancesPage(next) => {
                 self.visited_page = if next { self.visited_page + 1 } else { self.visited_page.saturating_sub(1) };
             }
@@ -1014,6 +1112,10 @@ impl Panels {
                             recent.picture = Some(panel.pictures.entry(name).or_insert_with(|| ctx.load_texture("recent", image.clone(), TextureOptions::LINEAR)).id());
                         }
                     }
+                    if let (Some((key, image)), Sheet::All) = (&art, sheet) {
+                        let ctx = stage.canvas.ctx();
+                        facts.art = Some(panel.pictures.entry(key.clone()).or_insert_with(|| ctx.load_texture("art", image.clone(), TextureOptions::LINEAR)).id());
+                    }
                     let (hover, pressed) = (panel.hover, panel.pressed);
                     stage.canvas.paint(time, |p| panels::paint_sheet(p, sheet, &facts, hover, pressed));
                     stage.canvas_to(panel, &mut show);
@@ -1058,6 +1160,14 @@ impl Panels {
         }
         for panel in self.list.iter_mut().chain(self.takeover.iter_mut()) {
             panel.appear.step(dt);
+        }
+        // The gallery glides to where its wheel sent it. Only its page paints.
+        let off = self.gallery_to - self.facts.gallery_scroll;
+        if off != 0.0 {
+            self.facts.gallery_scroll = if off.abs() < 0.5 { self.gallery_to } else { self.facts.gallery_scroll + off * (1.0 - (-dt * 18.0).exp()) };
+            if let Some(panel) = self.takeover.as_mut() {
+                panel.dirty = true;
+            }
         }
     }
 }

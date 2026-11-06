@@ -187,6 +187,10 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         for (down, _) in MOUSE.with(|m| std::mem::take(&mut *m.borrow_mut())) {
             press(&mut panels, down, &snap, &mut windows, &clicks);
         }
+        let wheel = WHEEL.swap(0, std::sync::atomic::Ordering::Relaxed);
+        if wheel != 0 {
+            panels.wheel(wheel as f32 / 120.0);
+        }
         if let Some(cell) = keys.digit(open == Some(Around::Wheel) && !panels.sheet_open()) {
             if panels.press_cell(cell, &snap).clicked {
                 clicks.play();
@@ -662,9 +666,16 @@ thread_local! {
 }
 
 /// The panels' window procedure: takes the mouse's button, and never the focus. That it answers at all is what keeps the click from the game.
+/// The mouse wheel's movement since last read, in Windows' units (120 a notch): from our windows' messages, or the pointer's hook.
+static WHEEL: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
+
 unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     match message {
         WM_MOUSEACTIVATE => LRESULT(MA_NOACTIVATE as isize),
+        windows::Win32::UI::WindowsAndMessaging::WM_MOUSEWHEEL => {
+            WHEEL.fetch_add(((wparam.0 >> 16) & 0xffff) as u16 as i16 as i32, std::sync::atomic::Ordering::Relaxed);
+            LRESULT(0)
+        }
         WM_LBUTTONDOWN => {
             MOUSE.with(|m| m.borrow_mut().push((true, hwnd.0 as isize)));
             LRESULT(0)
@@ -974,7 +985,11 @@ pub mod pointer {
                     UPS.fetch_add(1, Ordering::Relaxed);
                     return LRESULT(1);
                 }
-                WM_RBUTTONDOWN | WM_RBUTTONUP | WM_MBUTTONDOWN | WM_MBUTTONUP | WM_MOUSEWHEEL => return LRESULT(1),
+                WM_MOUSEWHEEL => {
+                    WHEEL.fetch_add((info.mouseData >> 16) as u16 as i16 as i32, Ordering::Relaxed);
+                    return LRESULT(1);
+                }
+                WM_RBUTTONDOWN | WM_RBUTTONUP | WM_MBUTTONDOWN | WM_MBUTTONUP => return LRESULT(1),
                 _ => {}
             }
         }
@@ -983,7 +998,7 @@ pub mod pointer {
     }
 
     /// Where it starts from the wheel's centre: on the first cell.
-    const START: Vec2 = vec2(0.0, -143.0);
+    const START: Vec2 = vec2(0.0, -140.0);
     /// The pointer's picture, in pixels.
     const PX: u32 = 24;
 

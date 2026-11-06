@@ -286,8 +286,8 @@ impl Zone {
             // As tall as My Profile and as wide, beside it.
             Zone::QmWing => r(354.0, -150.0, 516.0, 186.0),
             Zone::QmCaption => r(196.0, -206.0, 516.0, -154.0),
-            // The whole Quick Menu: its sticker and FPS line over it, its tab row under it.
-            Zone::SheetBack => r(-352.0, -246.0, 352.0, 246.0),
+            // The whole Quick Menu: its sticker and FPS line over it, its tab row and the badge under it.
+            Zone::SheetBack => r(-352.0, -246.0, 352.0, 262.0),
             // N4N0's pages' own shape, 704 wide.
             Zone::Takeover => r(-352.0, -198.0, 352.0, 198.0),
             _ => unreachable!("the rings' cells return above"),
@@ -526,7 +526,7 @@ mod tests {
     fn the_sheet_covers_the_quick_menu_with_one_edge_and_the_page_keeps_its_shape() {
         let back = Zone::SheetBack.units();
         // Its main panel, wings, tab row, FPS line and the sticker on top.
-        for rect in [Rect::from_min_max(pos2(-351.0, -240.0), pos2(351.0, 243.0))] {
+        for rect in [Rect::from_min_max(pos2(-351.0, -240.0), pos2(351.0, 258.0))] {
             assert!(back.contains_rect(rect), "{rect:?}");
         }
         let page = Zone::Takeover.units();

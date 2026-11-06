@@ -129,6 +129,8 @@ pub struct Facts {
     pub music_by: String,
     /// Its picture, as a texture of the canvas being painted.
     pub art: Option<TextureId>,
+    /// The avatar worn has no capture kit, as VRChat's parameters say: a 3D picture cannot be taken, and the buttons say so.
+    pub no_kit: bool,
     /// A 3D picture's timer, in seconds.
     pub timer: u32,
     /// What the caption says with nothing pointed at (a key to hold).
@@ -213,7 +215,7 @@ pub fn items(zone: Zone, size: Vec2, facts: &Facts) -> Vec<Item> {
         Zone::WheelHide => vec![Item { action: Action::Hide, rect: whole, look: Look::Close }],
         Zone::QmWing => wing(w, h, facts),
         Zone::SheetBack => {
-            let head = 48.0;
+            let head = 56.0;
             let mut out = vec![Item { action: Action::CloseSheet, rect: r(w - 40.0, 9.0, 30.0, 30.0), look: Look::Close }];
             if facts.music.is_some() {
                 // The foot: what plays, whichever page shows.
@@ -331,6 +333,7 @@ pub fn hit(items: &[Item], p: Pos2) -> Option<usize> {
 pub fn caption(action: Action, facts: &Facts) -> Option<(String, String)> {
     let (a, b): (String, String) = match action {
         Action::Worlds => ("Worlds in 3D".into(), "Search any world. Walk in those with a 3D capture.".into()),
+        Action::Picture(_) if facts.no_kit => ("This avatar has no capture kit".into(), "Add N4N0 to it in Orbiters, My Avatar, to take 3D pictures with it.".into()),
         Action::Picture(mode) => {
             if let Some(s) = facts.countdown {
                 (format!("3D picture in {s}"), "VRChat's camera opens, then flies around by itself.".into())
@@ -547,7 +550,7 @@ pub fn paint(p: &Painter, zone: Zone, size: Vec2, facts: &Facts, hover: Option<u
             text(p, pos2(46.0, 24.0), Align2::LEFT_CENTER, "Orbiters", 14.0, weight::SEMIBOLD, look::MUTED);
             text(p, pos2(112.0, 24.0), Align2::LEFT_CENTER, &facts.sheet_title, 18.0, weight::SEMIBOLD, look::LABEL);
             // The foot: what plays, whichever page shows.
-            let y = size.y - 24.0;
+            let y = size.y - 32.0;
             if let Some((title, playing)) = &facts.music {
                 widgets::icon(p, pos2(26.0, y), icons::MUSIC_NOTES, 18.0, look::ACCENT);
                 let font = theme::font(13.0, weight::SEMIBOLD);
@@ -793,7 +796,7 @@ fn picture_button(p: &Painter, _zone: Zone, shape: Shaped, rect: Rect, mode: Pho
     let mine = facts.picture_mode == Some(mode);
     let busy = facts.countdown.is_some() || facts.picture_flying;
     let lit = mine && busy;
-    let dim = busy && !mine;
+    let dim = (busy && !mine) || facts.no_kit;
     match shape.ring {
         Some((ring, center)) => {
             if lit {
@@ -833,6 +836,7 @@ fn picture_button(p: &Painter, _zone: Zone, shape: Shaped, rect: Rect, mode: Pho
         }
     }
     let (glyph, of) = if mode == PhotoMode::People { (icons::USERS, "of people") } else { (icons::GLOBE_HEMISPHERE_WEST, "of this world") };
+    let of = if facts.no_kit { "needs the capture kit" } else { of };
     let (size, line, big, small) = if large { (54.0, 24.0, 19.0, 15.0) } else { (28.0, 13.5, 12.0, 10.5) };
     let top = at.y - (size + 4.0 + line * 2.0) / 2.0;
     let icon_at = pos2(at.x, top + size / 2.0);

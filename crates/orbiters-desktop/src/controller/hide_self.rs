@@ -208,7 +208,7 @@ fn avatar_support(vrchat: &[(String, OscValue)]) -> (Option<bool>, bool) {
 
 impl super::Controller {
     /// Whether the avatar worn has N4N0's capture kit, as VRChat's tree says: `None` when it does not say.
-    pub(super) fn worn_avatar_has_kit(&self) -> Option<bool> {
+    pub(crate) fn worn_avatar_has_kit(&self) -> Option<bool> {
         avatar_support(&self.vrchat_values()).0
     }
 

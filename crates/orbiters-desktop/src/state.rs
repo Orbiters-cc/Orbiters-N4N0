@@ -521,12 +521,16 @@ pub struct Snapshot {
     /// What the panels around VRChat's menus last said of themselves.
     #[serde(default)]
     pub orbit: OrbitStatus,
+    /// Whether the avatar worn has N4N0's capture kit, as VRChat's parameters say: `None` when they do not say.
+    #[serde(default)]
+    pub worn_kit: Option<bool>,
 }
 
 impl Snapshot {
     pub fn new(settings: Settings) -> Self {
         Self {
             orbit: OrbitStatus::default(),
+            worn_kit: None,
             version: orbiters_core::APP_VERSION.into(),
             vrchat: VrchatStatus {
                 running: false,

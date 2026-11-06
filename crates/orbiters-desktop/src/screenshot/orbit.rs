@@ -408,6 +408,7 @@ pub(super) fn shots(out: &Path) -> anyhow::Result<()> {
     qm_scene("orbit-sheet-all-vr", out, hd, &Facts { desktop: false, can_call: true, can_states: true, can_light: true, sheet: Some(Sheet::All), sheet_title: "All tools".into(), ..idle.clone() }, None, Some(Sheet::All))?;
     qm_scene("orbit-sheet-pictures", out, hd, &Facts { sheet: Some(Sheet::Pictures), sheet_title: "3D pictures".into(), ..idle.clone() }, None, Some(Sheet::Pictures))?;
     qm_scene("orbit-sheet-countdown", out, hd, &Facts { sheet: Some(Sheet::Pictures), sheet_title: "3D pictures".into(), ..counting.clone() }, None, Some(Sheet::Pictures))?;
+    qm_scene("orbit-sheet-pictures-busy", out, hd, &Facts { sheet: Some(Sheet::Pictures), sheet_title: "3D pictures".into(), ..busy.clone() }, None, Some(Sheet::Pictures))?;
     let _ = Target::Close;
     Ok(())
 }

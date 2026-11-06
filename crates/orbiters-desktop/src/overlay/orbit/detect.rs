@@ -8,7 +8,7 @@
 //!
 //! - **The wheel:** a disc of one colour at the exact place its geometry gives ([`super::zones::wheel`]), its edge against the world
 //!   all the way round, and the bright line of its rim against its own inside. On frames of 10 window sizes in 2 worlds the edge shows at 100% of
-//!   its angles, the rim's line at 94 to 97% and the ring inside it is one colour at 78 to 96%, whatever hovers or which page; on everything else
+//!   its angles, the rim's line at 67 to 97% and the ring inside it is one colour at 66 to 96%, whatever hovers or which page; on everything else
 //!   (no menu, Quick Menu, Main Menu) they hold at 70% and 30% at most. The rim's line is what a dark forest cannot hide: at first the edge alone
 //!   was asked for, with a stronger difference, and the wheel over that forest was missed at 1280 x 720 (88%). The colour itself is not looked at: VRChat lets people
 //!   choose it.
@@ -82,11 +82,11 @@ const WHEEL_RIM: [f32; 2] = [0.985, 1.0];
 const WHEEL_BRIGHTER: f32 = 6.0;
 /// How near a ring's sample keeps to the ring's middle colour, to count as that colour.
 const WHEEL_SAME: f32 = 36.0;
-/// The share of the rim that must stand out from the world, of the ring that must be one colour, and of the rim's line brighter than the disc (a highlighted slice takes
-/// a sixth of it away).
+/// The share of the rim that must stand out from the world, of the ring that must be one colour, and of the rim's line brighter than the disc. A highlighted slice takes its share of the
+/// last two away: a third in a page of three slices, measured at 66% and 67%, which at 70% closed the ring under an open wheel. Anything else holds the line at 30% at most, and the edge at 70%.
 pub const WHEEL_EDGE: f32 = 0.85;
-pub const WHEEL_UNIFORM: f32 = 0.7;
-pub const WHEEL_LINE: f32 = 0.7;
+pub const WHEEL_UNIFORM: f32 = 0.45;
+pub const WHEEL_LINE: f32 = 0.45;
 
 /// How the wheel's place looks: (share of the rim that stands out from the world, share of the ring inside it of one colour, share of the rim's line brighter than the disc).
 pub fn wheel_scores(part: &Part, client: Vec2) -> (f32, f32, f32) {

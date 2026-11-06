@@ -1099,6 +1099,14 @@ impl Controller {
         self.update(|s| s.orbit = status);
     }
 
+    /// Reads again whether the avatar worn has the capture kit, for what offers 3D pictures. Published only when it changed.
+    pub fn follow_worn_kit(self: &Shared) {
+        let kit = if self.view().vrchat.running { self.worn_avatar_has_kit() } else { None };
+        if self.view().worn_kit != kit {
+            self.update(|s| s.worn_kit = kit);
+        }
+    }
+
     pub fn set_overlay_connected(self: &Shared, connected: bool) {
         self.update_if(|s| {
             let changed = s.steamvr.overlay != connected;

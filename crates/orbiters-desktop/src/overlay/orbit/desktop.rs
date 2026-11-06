@@ -680,6 +680,14 @@ impl PanelWindow {
         self.stale = false;
     }
 
+    /// Above every other window of ours.
+    fn raise(&self) {
+        // SAFETY: a live window.
+        unsafe {
+            let _ = SetWindowPos(self.hwnd, Some(HWND_TOPMOST), 0, 0, 0, 0, SWP_NOSIZE | windows::Win32::UI::WindowsAndMessaging::SWP_NOMOVE | SWP_NOACTIVATE | SWP_NOOWNERZORDER);
+        }
+    }
+
     fn hide(&mut self) {
         if self.shown {
             // SAFETY: a live window.
@@ -744,10 +752,18 @@ impl Windows {
         });
         let showing: Vec<(Zone, POINT, u8)> = panels.all().filter(|p| p.painted && p.shown).map(|p| placed_at(p, origin)).collect();
         // In the order they lie: what comes into view goes above what shows, so the sheet's page stays over its back.
+        let mut raise = false;
         for (zone, at, alpha) in &showing {
             if let Some(window) = self.list.get_mut(zone) {
+                // One coming into view goes on top: those after it in order go on top of it again.
+                let was_up = window.shown;
                 if window.stale || !window.shown || window.at != *at || window.alpha != *alpha {
                     window.place(*at, *alpha);
+                }
+                if !was_up {
+                    raise = true;
+                } else if raise {
+                    window.raise();
                 }
             }
         }

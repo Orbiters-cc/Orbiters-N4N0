@@ -207,6 +207,7 @@ impl Service {
         if self.quitting.load(Ordering::Relaxed) {
             return;
         }
+        self.ctl.follow_worn_kit();
         let snap = self.ctl.view();
         if !crate::overlay::orbit::wanted_on_desktop(&snap) {
             return;

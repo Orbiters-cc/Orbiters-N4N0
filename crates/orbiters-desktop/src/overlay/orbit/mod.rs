@@ -433,6 +433,11 @@ impl Panels {
         self.takeover.is_some()
     }
 
+    /// Whether a part shows now, the sheet aside: the Quick Menu's caption lies behind it.
+    fn caption_shown(&self) -> bool {
+        self.takeover.is_none()
+    }
+
     /// The mouse points at the parts rather than at VRChat's wheel: the veil comes over the wheel. Nothing changes for what is not on the wheel.
     pub fn set_pointing(&mut self, pointing: bool, live: bool) {
         for panel in self.list.iter_mut().filter(|p| p.zone == Zone::WheelVeil) {
@@ -624,6 +629,7 @@ impl Panels {
             music: menu.media.as_ref().map(|m| (m.title.clone(), m.playing)),
             music_by: menu.media.as_ref().map_or(String::new(), |m| m.artist.clone()),
             art: None,
+            no_kit: snap.worn_kit == Some(false),
             timer: snap.settings.photo_3d_timer,
             can_call: menu.calls_ready,
             can_states: menu.states_ready,
@@ -778,6 +784,8 @@ impl Panels {
             }
             Action::All => self.open_sheet(Sheet::All, "All tools", snap),
             Action::Pictures => self.open_sheet(Sheet::Pictures, "3D pictures", snap),
+            // It says why not, under the pointer.
+            Action::Picture(_) if self.facts.no_kit => out.clicked = false,
             Action::Picture(mode) => {
                 self.facts.picture_mode = Some(mode);
                 for panel in self.list.iter_mut().chain(self.takeover.iter_mut()) {
@@ -975,6 +983,10 @@ impl Panels {
 
     /// Moves each part's spring on.
     pub fn step_springs(&mut self, dt: f32) {
+        let caption = self.caption_shown();
+        for panel in self.list.iter_mut().filter(|p| p.zone == Zone::QmCaption) {
+            panel.shown = caption;
+        }
         for panel in self.list.iter_mut().chain(self.takeover.iter_mut()) {
             panel.appear.step(dt);
             panel.step_pop(dt);

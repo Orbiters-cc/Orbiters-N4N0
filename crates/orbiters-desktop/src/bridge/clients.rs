@@ -9,12 +9,14 @@
 //! command line of `claude mcp add` for the half second that runs, where only this user's own programs and administrators could
 //! read it: Claude Code takes a header no other way short of writing its file by hand.
 //!
-//! **Why Codex's file is edited.** `codex mcp add` takes a URL and `--bearer-token-env-var`, and nothing else for a token. An
-//! environment variable is no good here: set for this user, it reaches only programs started after it, so a terminal or an
-//! editor already open would start Codex without it, and the server would fail with nothing to say why. So `codex mcp add` makes the
-//! entry, leaving the rest of the file as it was, and the one line it has no flag for goes under that entry:
-//! `http_headers = { Authorization = "Bearer …" }`, the key any other header in that file has. `codex mcp get --json` then reads
-//! it back, and `codex mcp remove` takes the entry away with its line.
+//! **Why Codex's file is edited by hand, the one exception.** `codex mcp add` takes a URL and `--bearer-token-env-var`, and nothing
+//! else for a token. An environment variable is no good here: set for this user, it reaches only programs started after it, so a
+//! terminal or an editor already open would start Codex without it, and the server would fail with nothing to say why. A header
+//! means a line in its file anyway, and Codex's own `mcp add` and `mcp remove` turned out to rewrite all of its servers: on Enzo's
+//! file (0.166.0, 2026-11-06) they dropped a marker comment another tool keeps there, every `enabled = true` and `args = []`, and
+//! reordered environment variables. So the entry is one block at the end of the file, and taking it away takes that block away,
+//! with every other byte as it was. Codex still decides: `codex mcp get --json` reads back what it understood, and a change it
+//! does not show is a failure.
 //!
 //! **Staying right.** A token made anew, or the port moving because another program has it, changes what a client must
 //! present. The keeper asks for [`Registrations::repair`] each time the bridge opens and after a new token: an entry with old values is
@@ -205,38 +207,50 @@ pub fn parse_codex_get(said: &str) -> Result<Entry, String> {
     })
 }
 
-/// `config` (a Codex `config.toml`) with `token` as the `Authorization` header of the entry `codex mcp add` just made, and every
-/// other byte of the file as it was: people keep comments in there, and other tools mark blocks of it.
-pub fn with_codex_header(config: &str, token: &str) -> Result<String, String> {
+/// `config` (a Codex `config.toml`) without the bridge's entry. Only its own lines go: a comment there may be another tool's.
+pub fn without_codex_entry(config: &str) -> String {
     let table = format!("[mcp_servers.{SERVER_NAME}]");
-    let mut at = 0;
-    let mut found = None;
+    let inner = format!("[mcp_servers.{SERVER_NAME}.");
+    let mut kept = String::with_capacity(config.len());
+    let mut ours = false;
+    let mut pending_blank = String::new();
     for line in config.split_inclusive('\n') {
-        if line.trim() == table {
-            found = Some((at + line.len(), if line.ends_with("\r\n") { "\r\n" } else { "\n" }));
-            break;
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') {
+            ours = trimmed == table || trimmed.starts_with(&inner);
+            if ours {
+                // The empty line that set it apart goes with it.
+                pending_blank.clear();
+                continue;
+            }
         }
-        at += line.len();
-    }
-    let Some((after, newline)) = found else {
-        return Err("Codex's settings do not have the entry it just said it added.".into());
-    };
-    // A last line without its end would run into what comes here.
-    let end_of_table_line = if config[..after].ends_with('\n') { "" } else { newline };
-    let (head, tail) = config.split_at(after);
-    // An older line of its own is replaced, up to the next table.
-    let mut kept = String::with_capacity(tail.len());
-    let mut in_table = true;
-    for line in tail.split_inclusive('\n') {
-        if line.trim_start().starts_with('[') {
-            in_table = false;
-        }
-        if in_table && line.trim_start().starts_with("http_headers") {
+        if ours && !trimmed.starts_with('#') {
             continue;
         }
+        if trimmed.is_empty() {
+            pending_blank.push_str(line);
+            continue;
+        }
+        kept.push_str(&pending_blank);
+        pending_blank.clear();
         kept.push_str(line);
     }
-    Ok(format!("{head}{end_of_table_line}http_headers = {{ Authorization = \"Bearer {token}\" }}{newline}{kept}"))
+    kept.push_str(&pending_blank);
+    kept
+}
+
+/// `config` with the bridge's entry at its end, in place of any it had, and every other byte as it was. Line ends as the file has them.
+pub fn with_codex_entry(config: &str, address: &str, token: &str) -> String {
+    let mut text = without_codex_entry(config);
+    let newline = if text.contains("\r\n") { "\r\n" } else { "\n" };
+    if !text.is_empty() && !text.ends_with('\n') {
+        text.push_str(newline);
+    }
+    if !text.is_empty() {
+        text.push_str(newline);
+    }
+    text.push_str(&format!("[mcp_servers.{SERVER_NAME}]{newline}url = \"{address}\"{newline}http_headers = {{ Authorization = \"Bearer {token}\" }}{newline}"));
+    text
 }
 
 /// What a command said.
@@ -330,7 +344,10 @@ impl ClaudeCli {
 
     fn run(&self, args: &[&str]) -> Result<Ran, String> {
         let exe = self.program().ok_or("Claude Code is not installed on this computer.")?;
-        let environment = self.config_dir.iter().map(|d| ("CLAUDE_CONFIG_DIR", d.as_os_str())).collect::<Vec<_>>();
+        let mut environment = self.config_dir.iter().map(|d| ("CLAUDE_CONFIG_DIR", d.as_os_str())).collect::<Vec<_>>();
+        // `mcp get` connects to say how it went: 30 s by default when something else holds the old port and never answers, measured,
+        // twice for a repair. The bridge answers at once, so a short wait says the same.
+        environment.push(("MCP_TIMEOUT", std::ffi::OsStr::new("5000")));
         run(&exe, args, home().as_deref(), &environment, COMMAND_LIMIT)
     }
 }
@@ -430,38 +447,34 @@ impl ClientCli for CodexCli {
     }
 
     fn add(&self, address: &str, token: &str) -> Result<(), String> {
-        let ran = self.run(&["mcp", "add", SERVER_NAME, "--url", address])?;
-        if !ran.success {
-            return Err(complaint(&format!("{}\n{}", ran.err, ran.out), token));
-        }
-        let written = (|| {
-            let file = self.config_file().ok_or("Codex's settings file was not found.")?;
-            let config = std::fs::read_to_string(&file).map_err(|e| format!("Codex's settings could not be read: {e}"))?;
-            let changed = with_codex_header(&config, token)?;
-            // Beside it and renamed over it, so that a Codex reading it finds either whole file; made in the same folder, it
-            // gets that folder's permissions, as the file it replaces had.
-            let temporary = file.with_extension("toml.orbiters-tmp");
-            std::fs::write(&temporary, changed).map_err(|e| format!("Codex's settings could not be written: {e}"))?;
-            std::fs::rename(&temporary, &file).map_err(|e| {
-                let _ = std::fs::remove_file(&temporary);
-                format!("Codex's settings could not be written: {e}")
-            })
-        })();
-        if let Err(why) = written {
-            // Not left half done: an entry without its token would fail in every session.
-            let _ = self.remove();
-            return Err(why);
-        }
-        Ok(())
+        self.change_config(|config| with_codex_entry(config, address, token))
     }
 
     fn remove(&self) -> Result<(), String> {
-        let ran = self.run(&["mcp", "remove", SERVER_NAME])?;
-        if ran.success {
-            Ok(())
-        } else {
-            Err(complaint(&format!("{}\n{}", ran.err, ran.out), ""))
+        self.change_config(without_codex_entry)
+    }
+}
+
+impl CodexCli {
+    /// Changes its settings file: beside it and renamed over it, so that a Codex reading it finds either whole file; made in the same
+    /// folder, it gets that folder's permissions, as the file it replaces had. Nothing to change writes nothing.
+    fn change_config(&self, change: impl FnOnce(&str) -> String) -> Result<(), String> {
+        let file = self.config_file().ok_or("Codex's settings file was not found.")?;
+        let config = match std::fs::read_to_string(&file) {
+            Ok(config) => config,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+            Err(e) => return Err(format!("Codex's settings could not be read: {e}")),
+        };
+        let changed = change(&config);
+        if changed == config {
+            return Ok(());
         }
+        let temporary = file.with_extension("toml.orbiters-tmp");
+        std::fs::write(&temporary, changed).map_err(|e| format!("Codex's settings could not be written: {e}"))?;
+        std::fs::rename(&temporary, &file).map_err(|e| {
+            let _ = std::fs::remove_file(&temporary);
+            format!("Codex's settings could not be written: {e}")
+        })
     }
 }
 
@@ -790,23 +803,32 @@ mod tests {
     }
 
     #[test]
-    fn the_header_goes_under_the_entry_and_the_rest_of_the_file_stays() {
-        let config = "# mine\nmodel = \"x\"\n\n[mcp_servers.orbiters-vrchat]\nurl = \"u\"\n\n[mcp_servers.other]\nhttp_headers = { A = \"b\" }\n# <<< block\n";
-        let done = with_codex_header(config, "tok").unwrap();
+    fn codexs_entry_comes_and_goes_with_every_other_byte_as_it_was() {
+        // As Enzo's file has it: what Codex's own `mcp add` took away from it is the point of this.
+        let config = "# mine\nmodel = \"x\"\n\n[mcp_servers.other]\nenabled = true\nargs = []\nhttp_headers = { A = \"b\" }\n\n# <<< a tool's block <<<\n[mcp_servers.heroui]\nargs = [ \"-y\" ]\n";
+        let added = with_codex_entry(config, "http://a/mcp", "tok");
         assert_eq!(
-            done,
-            "# mine\nmodel = \"x\"\n\n[mcp_servers.orbiters-vrchat]\nhttp_headers = { Authorization = \"Bearer tok\" }\nurl = \"u\"\n\n[mcp_servers.other]\nhttp_headers = { A = \"b\" }\n# <<< block\n"
+            added,
+            format!("{config}\n[mcp_servers.orbiters-vrchat]\nurl = \"http://a/mcp\"\nhttp_headers = {{ Authorization = \"Bearer tok\" }}\n")
         );
-        // Written twice: one line, the new one.
-        let again = with_codex_header(&done, "new").unwrap();
-        assert_eq!(again.matches("Authorization").count(), 1);
-        assert!(again.contains("Bearer new") && !again.contains("Bearer tok"));
-        assert!(again.contains("[mcp_servers.other]\nhttp_headers = { A = \"b\" }"), "another server's stay");
-        // Line ends as the file has them, and an entry on its last line.
-        let windows = with_codex_header("[mcp_servers.orbiters-vrchat]\r\nurl = \"u\"\r\n", "tok").unwrap();
-        assert_eq!(windows, "[mcp_servers.orbiters-vrchat]\r\nhttp_headers = { Authorization = \"Bearer tok\" }\r\nurl = \"u\"\r\n");
-        assert!(with_codex_header("[mcp_servers.orbiters-vrchat]", "tok").unwrap().contains("]\nhttp_headers"));
-        assert!(with_codex_header("model = \"x\"\n", "tok").is_err(), "no entry, no guess");
+        assert_eq!(without_codex_entry(&added), config, "byte for byte");
+        // Written twice: one entry, the new one.
+        let again = with_codex_entry(&added, "http://b/mcp", "new");
+        assert_eq!(again.matches("orbiters-vrchat").count(), 1);
+        assert!(again.contains("Bearer new") && again.contains("http://b/mcp") && !again.contains("Bearer tok"));
+        assert_eq!(without_codex_entry(&again), config);
+        // Line ends as the file has them, and a file without an end to its last line.
+        let windows = with_codex_entry("a = 1\r\n", "u", "t");
+        assert_eq!(windows, "a = 1\r\n\r\n[mcp_servers.orbiters-vrchat]\r\nurl = \"u\"\r\nhttp_headers = { Authorization = \"Bearer t\" }\r\n");
+        assert!(with_codex_entry("a = 1", "u", "t").starts_with("a = 1\n\n[mcp_servers"));
+        // No file yet.
+        assert!(with_codex_entry("", "u", "t").starts_with("[mcp_servers.orbiters-vrchat]"));
+        // In the form Codex writes when it rewrites the file: its headers in a table of their own, in the middle.
+        let rewritten = "[mcp_servers.orbiters-vrchat]\nurl = \"u\"\n\n[mcp_servers.orbiters-vrchat.http_headers]\nAuthorization = \"Bearer t\"\n\n# kept\n[mcp_servers.z]\nurl = \"z\"\n";
+        assert_eq!(without_codex_entry(rewritten), "# kept\n[mcp_servers.z]\nurl = \"z\"\n");
+        // Another server whose name starts the same stays.
+        let similar = "[mcp_servers.orbiters-vrchat-2]\nurl = \"z\"\n";
+        assert_eq!(without_codex_entry(similar), similar);
     }
 
     #[test]
@@ -964,7 +986,8 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("orbiters-clients-{}", uuid::Uuid::new_v4().simple()));
         std::fs::create_dir_all(dir.join("codex")).unwrap();
         std::fs::create_dir_all(dir.join("claude")).unwrap();
-        std::fs::write(dir.join("codex").join("config.toml"), "# mine\nmodel = \"x\"\n\n[mcp_servers.other]\nurl = \"http://x/mcp\"\n# <<< block\n").unwrap();
+        let before = "# mine\nmodel = \"x\"\n\n[mcp_servers.other]\nenabled = true\nurl = \"http://x/mcp\"\n\n# <<< block\n[mcp_servers.another]\nargs = [ \"-y\" ]\ncommand = \"npx\"\n";
+        std::fs::write(dir.join("codex").join("config.toml"), before).unwrap();
         let clis: Vec<Arc<dyn ClientCli>> = vec![Arc::new(ClaudeCli { config_dir: Some(dir.join("claude")) }), Arc::new(CodexCli { home: Some(dir.join("codex")) })];
         for cli in clis {
             let name = cli.client().name();
@@ -992,9 +1015,7 @@ mod tests {
             assert_eq!(this.statuses()[0].registration, Registration::NotAdded, "{name}");
             assert_eq!(cli.read().unwrap(), None, "{name}");
         }
-        let config = std::fs::read_to_string(dir.join("codex").join("config.toml")).unwrap();
-        assert!(config.contains("# mine") && config.contains("# <<< block") && config.contains("[mcp_servers.other]"), "{config}");
-        assert!(!config.contains("orbiters-vrchat") && !config.contains("Bearer"), "{config}");
+        assert_eq!(std::fs::read_to_string(dir.join("codex").join("config.toml")).unwrap(), before, "Codex's file, byte for byte");
         let _ = std::fs::remove_dir_all(dir);
     }
 }

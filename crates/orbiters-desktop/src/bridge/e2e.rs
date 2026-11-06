@@ -3,6 +3,7 @@
 //! records keyboard and mouse input, and its window (real, found, captured and closed through the real calls) is off every
 //! screen and never activated.
 
+use super::clients::{Change, Client as Agent, ClientCli, Entry, Registration, Registrations};
 use super::input::{Hold, Input};
 use super::keeper::{Flag, Keeper};
 use super::lab::{Behaviour, LabFlag, LabGame, LabWindow, StandIn, CAMERA_ICON, LAB_USER, LAB_WORLD_A, LAB_WORLD_B};
@@ -192,6 +193,77 @@ impl Keeping {
     fn allowed(&self) -> bool {
         self.status.lock().unwrap().allowed
     }
+}
+
+/// A client's list of servers, as a real client's command would change it.
+#[derive(Default)]
+struct FakeClient(Mutex<Option<Entry>>);
+
+impl ClientCli for FakeClient {
+    fn client(&self) -> Agent {
+        Agent::ClaudeCode
+    }
+    fn installed(&self) -> bool {
+        true
+    }
+    fn read(&self) -> Result<Option<Entry>, String> {
+        Ok(self.0.lock().unwrap().clone())
+    }
+    fn add(&self, address: &str, token: &str) -> Result<(), String> {
+        *self.0.lock().unwrap() = Some(Entry { address: Some(address.into()), token: Some(token.into()), ..Default::default() });
+        Ok(())
+    }
+    fn remove(&self) -> Result<(), String> {
+        *self.0.lock().unwrap() = None;
+        Ok(())
+    }
+}
+
+#[test]
+fn settings_buttons_reach_the_client_and_a_new_token_or_an_open_keeps_it_right() {
+    let k = keeping("clients", Duration::from_secs(60));
+    let fake = Arc::new(FakeClient::default());
+    k.keeper.registrations.set(Registrations::new(vec![fake.clone()], Box::new(|_, _| {}))).ok().expect("first");
+    assert!(until(Duration::from_secs(5), || k.listening()));
+    let state = || k.status.lock().unwrap().clients.first().cloned();
+    let registration = || state().map(|c| c.registration);
+
+    // A look, and what Settings shows.
+    k.keeper.command(Command::CheckClients);
+    assert!(until(Duration::from_secs(5), || registration() == Some(Registration::NotAdded)), "{:?}", state());
+
+    // The one click.
+    k.keeper.command(Command::Client { client: Agent::ClaudeCode, change: Change::Add });
+    assert!(until(Duration::from_secs(5), || registration() == Some(Registration::Added)), "{:?}", state());
+    let added = fake.0.lock().unwrap().clone().unwrap();
+    assert_eq!(added.token.as_deref(), Some(TOKEN));
+    assert_eq!(added.address, Some(format!("http://127.0.0.1:{}/mcp", k.keeper.port().unwrap())));
+
+    // A new token: the entry follows, and the row says what still needs doing.
+    k.keeper.command(Command::NewToken);
+    assert!(until(Duration::from_secs(5), || fake.0.lock().unwrap().as_ref().is_some_and(|e| e.token.as_deref() != Some(TOKEN))), "{:?}", state());
+    assert!(until(Duration::from_secs(5), || registration() == Some(Registration::Added) && state().is_some_and(|c| !c.busy)), "{:?}", state());
+    assert!(state().unwrap().note.unwrap().contains("session already open"));
+    assert_eq!(fake.0.lock().unwrap().as_ref().unwrap().token, k.status.lock().unwrap().token, "the one the bridge now wants");
+
+    // The address changed behind its back, as a port moved by another program does: the next opening fixes it.
+    fake.0.lock().unwrap().as_mut().unwrap().address = Some("http://127.0.0.1:1/mcp".into());
+    k.flag.enabled.store(false, Ordering::Relaxed);
+    assert!(until(Duration::from_secs(5), || !k.listening()));
+    k.flag.enabled.store(true, Ordering::Relaxed);
+    assert!(until(Duration::from_secs(5), || k.listening()));
+    let port = k.keeper.port().unwrap();
+    assert!(
+        until(Duration::from_secs(5), || fake.0.lock().unwrap().as_ref().is_some_and(|e| e.address == Some(format!("http://127.0.0.1:{port}/mcp")))),
+        "{:?}",
+        state()
+    );
+
+    // And the way back.
+    assert!(until(Duration::from_secs(5), || state().is_some_and(|c| !c.busy)));
+    k.keeper.command(Command::Client { client: Agent::ClaudeCode, change: Change::Remove });
+    assert!(until(Duration::from_secs(5), || registration() == Some(Registration::NotAdded)), "{:?}", state());
+    assert!(fake.0.lock().unwrap().is_none());
 }
 
 #[test]

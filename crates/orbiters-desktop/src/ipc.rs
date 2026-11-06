@@ -21,6 +21,8 @@ use std::time::{Duration, Instant};
 pub enum Role {
     Window,
     Overlay,
+    /// The panels around VRChat's menus in desktop mode (`overlay::orbit::desktop`).
+    Orbit,
 }
 
 /// Service → client.
@@ -65,6 +67,12 @@ pub enum ToService {
     },
     StartCapture,
     StopCapture,
+    /// The Orbiters window to the front.
+    ShowWindow,
+    /// What the panels around VRChat's menus last said of themselves, for Settings.
+    Orbit {
+        status: crate::state::OrbitStatus,
+    },
     Pause {
         paused: bool,
     },

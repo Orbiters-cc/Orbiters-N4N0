@@ -44,6 +44,8 @@ pub struct Service {
     window: Mutex<Option<(Child, Instant)>>,
     /// The overlay process we started, when, and for which SteamVR (its `vrserver` process id).
     overlay: Mutex<Option<(Child, Instant, Option<u32>)>>,
+    /// The process of the panels around VRChat's menus in desktop mode, and when it started.
+    orbit: Mutex<Option<(Child, Instant)>>,
     /// The SteamVR (its `vrserver` process id, 0 unknown) whose start of the app was looked at ([`Service::keep_steamvr_start`]).
     steamvr_start_seen: Mutex<Option<u32>>,
     /// Tracking smoothing's driver, kept in step with the settings ([`Service::keep_tracking`]).
@@ -198,6 +200,41 @@ impl Service {
         }
     }
 
+    /// Starts the panels around VRChat's menus in desktop mode while VRChat runs without SteamVR, in a process of their own: a Direct3D
+    /// device and Windows Graphics Capture have no place in the service, and whatever happens to them the game and the service go on.
+    /// It ends by itself when they are no longer wanted.
+    fn keep_orbit(&self) {
+        if self.quitting.load(Ordering::Relaxed) {
+            return;
+        }
+        let snap = self.ctl.view();
+        if !crate::overlay::orbit::wanted_on_desktop(&snap) {
+            return;
+        }
+        let mut orbit = self.orbit.lock().unwrap();
+        if let Some((child, started)) = orbit.as_mut() {
+            let running = matches!(child.try_wait(), Ok(None));
+            // One that ended on its own may start again, not at once: whatever made it end must not spin.
+            if running || started.elapsed() < Duration::from_secs(10) {
+                return;
+            }
+        }
+        let mut cmd = Command::new(&self.exe);
+        cmd.arg("--orbit-desktop").args(self.endpoint.args()).stdin(Stdio::null());
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+        }
+        match cmd.spawn() {
+            Ok(child) => {
+                crate::worker::keep_with_service(&child);
+                *orbit = Some((child, Instant::now()));
+            }
+            Err(e) => eprintln!("could not start the panels around VRChat's menus: {e}"),
+        }
+    }
+
     /// Closes every window, stops the worker (it finishes a running session) and leaves.
     pub fn quit(&self) {
         if self.quitting.swap(true, Ordering::Relaxed) {
@@ -281,6 +318,8 @@ impl Service {
                 }
             }
             // Only the window picks picture files; the upload runs on a thread of its own.
+            ToService::ShowWindow => self.show_window(false),
+            ToService::Orbit { status } => self.ctl.set_orbit_status(status),
             ToService::VrchatPicture { scope, id, path } if role == Role::Window => ctl.vrchat_picture(scope, id, path),
             ToService::VrchatPicture { .. } => {}
             ToService::StopReconstruction => {
@@ -359,6 +398,7 @@ impl Service {
         match role {
             Role::Window => *self.window.lock().unwrap() = None,
             Role::Overlay => self.ctl.set_overlay_connected(true),
+            Role::Orbit => {}
         }
         // Lines of a bounded length: a client cannot make the service hold an endless one.
         while let Ok(Some(line)) = ipc::read_line_capped(&mut reader, MAX_COMMAND) {
@@ -372,9 +412,14 @@ impl Service {
         if role == Role::Overlay && !still_there {
             self.ctl.set_overlay_connected(false);
         }
-        if !still_there {
+        if !still_there && role != Role::Orbit {
             // What it held (a Talk button, the overlay's open menu) ends with it.
             self.ctl.n4n0_link_closed(role == Role::Overlay);
+        }
+        if role == Role::Orbit {
+            // Its panels' Talk, should it have gone while held: the service never saw that let go.
+            self.ctl.n4n0_command(crate::ipc::N4n0Command::Talk { down: false });
+            self.ctl.n4n0_command(crate::ipc::N4n0Command::MenuState { open: false, dictation: false, keyboard: false });
         }
         // Without a tray (Linux for now) nothing would bring the window back: closing it quits.
         if role == Role::Window && cfg!(not(any(windows, target_os = "macos"))) {
@@ -457,6 +502,7 @@ pub fn run(hidden: bool) -> anyhow::Result<()> {
         unauthenticated: AtomicUsize::new(0),
         window: Mutex::new(None),
         overlay: Mutex::new(None),
+        orbit: Mutex::new(None),
         steamvr_start_seen: Mutex::new(None),
         smoothing: Mutex::new(Default::default()),
         quitting: AtomicBool::new(false),
@@ -497,6 +543,7 @@ pub fn run(hidden: bool) -> anyhow::Result<()> {
     let svc = service.clone();
     std::thread::Builder::new().name("overlay-keeper".into()).spawn(move || loop {
         svc.keep_overlay();
+        svc.keep_orbit();
         svc.keep_steamvr_start();
         svc.keep_tracking();
         std::thread::sleep(Duration::from_secs(2));

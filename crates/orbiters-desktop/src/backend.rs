@@ -19,6 +19,10 @@ pub trait Backend: Send + Sync {
     fn attach(&self, ctx: &egui::Context);
     fn start_capture(&self);
     fn stop_capture(&self);
+    /// The Orbiters window to the front.
+    fn show_window(&self) {}
+    /// What the panels around VRChat's menus say of themselves, for Settings.
+    fn orbit_status(&self, _status: crate::state::OrbitStatus) {}
     fn pause_capture(&self, paused: bool);
     fn start_test_capture(&self);
     /// VRChat's camera flies around where it stands, at three heights, then the recording is reconstructed.
@@ -110,6 +114,12 @@ pub type Ctl = Arc<dyn Backend>;
 pub struct Remote(pub Arc<Client>);
 
 impl Backend for Remote {
+    fn show_window(&self) {
+        self.0.send(&ToService::ShowWindow);
+    }
+    fn orbit_status(&self, status: crate::state::OrbitStatus) {
+        self.0.send(&ToService::Orbit { status });
+    }
     fn vrchat_data(&self, scope: controller::vrchat_data::Scope, request: controller::vrchat_data::Request) -> controller::vrchat_data::Result {
         self.0.vrchat_data(scope, request)
     }

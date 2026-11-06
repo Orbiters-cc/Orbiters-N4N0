@@ -70,6 +70,11 @@ pub struct MenuOverlay {
     pub worlds: super::worlds::Worlds,
 }
 
+/// Whether N4N0's menu lives on the avatar's N4N0 screen: it has one, and Settings does not ask for it to float.
+pub fn on_avatar_screen(snap: &Snapshot) -> bool {
+    snap.n4n0.screen && snap.settings.orbit.display != orbiters_core::settings::MenuDisplay::Floating
+}
+
 /// A toggling request this soon after the menu closed is the close it meant, already done.
 const TOGGLE_AFTER_CLOSE: Duration = Duration::from_millis(500);
 
@@ -229,14 +234,14 @@ impl MenuOverlay {
         let asked = self.request_seen.is_some_and(|seen| seen != request);
         self.request_seen = Some(request);
         if (button && snap.settings.n4n0.menu.button) || watch {
-            if snap.n4n0.screen {
+            if on_avatar_screen(snap) {
                 backend.n4n0(N4n0Command::ToggleScreen);
             } else if self.host.menu.open {
                 self.close(overlay);
             } else {
                 self.open(overlay, steamvr, snap);
             }
-        } else if asked && !snap.n4n0.screen {
+        } else if asked && !on_avatar_screen(snap) {
             let just_closed = self.closed_at.is_some_and(|t| t.elapsed() < TOGGLE_AFTER_CLOSE);
             if self.host.menu.open && snap.n4n0.menu_toggle {
                 self.close(overlay);
@@ -244,7 +249,7 @@ impl MenuOverlay {
                 self.open(overlay, steamvr, snap);
             }
         }
-        if snap.n4n0.screen && self.host.menu.open {
+        if on_avatar_screen(snap) && self.host.menu.open {
             // The avatar now has N4N0's screen: the menu lives there.
             self.close(overlay);
         }

@@ -22,6 +22,7 @@ mod menu;
 pub mod menu_pages;
 pub mod menu_retro;
 pub mod menu_ui;
+pub mod orbit;
 pub mod ui;
 pub mod walk;
 pub mod worlds;
@@ -193,14 +194,23 @@ impl Presenter {
 pub struct Canvas {
     ctx: egui::Context,
     painter: Software,
+    /// In points.
     size: egui::Vec2,
+    /// Pixels a point.
+    zoom: f32,
 }
 
 impl Canvas {
     pub fn new(width: u32, height: u32) -> Self {
         let ctx = egui::Context::default();
         orbiters_ui::install(&ctx);
-        Self { ctx, painter: Software::new(width, height), size: egui::vec2(width as f32, height as f32) }
+        Self { ctx, painter: Software::new(width, height), size: egui::vec2(width as f32, height as f32), zoom: 1.0 }
+    }
+
+    /// One of `width` x `height` pixels drawn at `zoom` pixels a point (a panel that scales with what it stands beside: text
+    /// stays crisp).
+    pub fn zoomed(width: u32, height: u32, zoom: f32) -> Self {
+        Self { size: egui::vec2(width as f32, height as f32) / zoom, zoom, ..Self::new(width, height) }
     }
 
     /// The canvas's egui context (textures it paints are loaded through it).
@@ -213,7 +223,7 @@ impl Canvas {
     pub fn paint(&mut self, time: f64, draw: impl FnMut(&egui::Painter)) -> &[u8] {
         let mut draw = draw;
         let mut input = RawInput { screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), self.size)), time: Some(time), ..Default::default() };
-        input.viewports.insert(ViewportId::ROOT, ViewportInfo { native_pixels_per_point: Some(1.0), ..Default::default() });
+        input.viewports.insert(ViewportId::ROOT, ViewportInfo { native_pixels_per_point: Some(self.zoom), ..Default::default() });
         let mut full = self.ctx.run_ui(input, |ui| draw(ui.painter()));
         self.painter.set_textures(&mut full.textures_delta);
         let primitives = self.ctx.tessellate(std::mem::take(&mut full.shapes), full.pixels_per_point);
@@ -227,7 +237,7 @@ impl Canvas {
     pub fn paint_ui(&mut self, time: f64, draw: impl FnMut(&mut egui::Ui)) -> &[u8] {
         let mut draw = draw;
         let mut input = RawInput { screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), self.size)), time: Some(time), ..Default::default() };
-        input.viewports.insert(ViewportId::ROOT, ViewportInfo { native_pixels_per_point: Some(1.0), ..Default::default() });
+        input.viewports.insert(ViewportId::ROOT, ViewportInfo { native_pixels_per_point: Some(self.zoom), ..Default::default() });
         let mut full = self.ctx.run_ui(input, |ui| draw(ui));
         self.painter.set_textures(&mut full.textures_delta);
         let primitives = self.ctx.tessellate(std::mem::take(&mut full.shapes), full.pixels_per_point);
@@ -499,6 +509,8 @@ struct Teardown<'a> {
     coverage: coverage::CoverageOverlayPanel,
     /// The floating panel, the watch and their lasers (none when SteamVR would not make their overlays).
     floating: Option<floating::Floating>,
+    /// The panels around VRChat's menus (none when SteamVR would not make their overlays).
+    orbit: Option<orbit::vr::OrbitVr>,
 }
 
 impl Drop for Teardown<'_> {
@@ -512,6 +524,9 @@ impl Drop for Teardown<'_> {
         self.coverage.destroy(self.overlay);
         if let Some(f) = &self.floating {
             f.destroy(self.overlay);
+        }
+        if let Some(o) = &self.orbit {
+            o.destroy(self.overlay);
         }
         let _ = self.overlay.destroy(self.main);
     }
@@ -551,7 +566,8 @@ fn session(args: &[String]) -> anyhow::Result<Ended> {
     let coverage = coverage::CoverageOverlayPanel::new(&overlay)?;
     // The floating panel is an addition: without its overlays the tab and the rest work as before.
     let floating = floating::Floating::new(&overlay, KEY).map_err(|e| eprintln!("floating panel unavailable: {e}")).ok();
-    let mut t = Teardown { steamvr: &steamvr, overlay: &overlay, backend: &backend, main, state, walk, world, menu, coverage, floating };
+    let orbit = orbit::vr::OrbitVr::new(&overlay, KEY, backend.clone()).map_err(|e| eprintln!("panels around VRChat's menus unavailable: {e}")).ok();
+    let mut t = Teardown { steamvr: &steamvr, overlay: &overlay, backend: &backend, main, state, walk, world, menu, coverage, floating, orbit };
     let mut frames = frames::FrameSampler::new(&steamvr);
     // What of the touchpads and sticks goes to the avatar's input parameters.
     let mut pads = orbiters_n4n0::input::Pacer::default();
@@ -732,7 +748,7 @@ fn session(args: &[String]) -> anyhow::Result<Ended> {
         let mut watch = false;
         if let Some(floating) = t.floating.as_mut() {
             let pointables = t.menu.pointables();
-            let menu_open = t.menu.host.menu.open || (snap.n4n0.screen && snap.n4n0.screen_open);
+            let menu_open = t.menu.host.menu.open || (menu::on_avatar_screen(&snap) && snap.n4n0.screen_open);
             let cx = floating::Cx {
                 overlay: &overlay,
                 steamvr: &steamvr,
@@ -755,6 +771,26 @@ fn session(args: &[String]) -> anyhow::Result<Ended> {
                 steamvr.poses(vr::Universe::Standing, &mut head);
                 let head = head[0].pose_is_valid.then_some(head[0].device_to_absolute);
                 t.menu.carry(&overlay, turn.menu_moved, turn.menu_released, head.as_ref());
+            }
+        }
+        // The panels around VRChat's menus, and whose trigger VRChat does not get from the next read on.
+        if let Some(orbit) = t.orbit.as_mut() {
+            let since = steamvr.time_since_vsync().unwrap_or(0.0);
+            let frame = frame_ms as f32 / 1000.0;
+            let cx = orbit::vr::Cx {
+                overlay: &overlay,
+                steamvr: &steamvr,
+                presenter: &mut presenter,
+                snap: &snap,
+                backend: &backend,
+                actions: &mut actions,
+                input_read,
+                dashboard,
+                in_game: vrchat_scene,
+                prediction: (frame - since).clamp(0.0, 0.05),
+            };
+            if orbit.update(cx) {
+                sounds.click();
             }
         }
         if t.menu.update(&overlay, &steamvr, &mut presenter, &snap, &backend, button, watch) {

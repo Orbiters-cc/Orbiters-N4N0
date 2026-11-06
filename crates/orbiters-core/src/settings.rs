@@ -60,6 +60,8 @@ pub struct Settings {
     /// The floating Orbiters panel in the play space (the SteamVR tab's interface without SteamVR's dashboard, so
     /// VRChat keeps the controllers) and the watch on a wrist that opens N4N0's menu.
     pub floating: FloatingSettings,
+    /// How the Orbiters menu appears in VRChat: around VRChat's own menus, or one of the older ways.
+    pub orbit: OrbitSettings,
     /// Experimental, VRC+: recordings also read VRChat's camera dolly's other streams (Spout `VRCSender2` to
     /// `VRCSender4`), and a 3D picture flies four cameras with the dolly (multi-stream) instead of moving the camera
     /// alone. The person sets the dolly's Streaming to Multi once in VRChat.
@@ -137,6 +139,59 @@ pub enum CoverageOverlay {
     #[default]
     LeftHand,
     RightHand,
+}
+
+/// How the Orbiters menu appears while VRChat runs (Settings, VRChat menus).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MenuDisplay {
+    /// Panels around VRChat's Action Menu wheel and Quick Menu, appearing and going with them.
+    #[default]
+    AroundVrchat,
+    /// N4N0's menu floating in the play space, opened by the watch or the binding, even with an avatar that has N4N0's
+    /// screen.
+    Floating,
+    /// N4N0's menu on the avatar's N4N0 screen when it has one, floating otherwise.
+    AvatarScreen,
+}
+
+/// The panels around VRChat's own menus (`overlay::orbit`).
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct OrbitSettings {
+    pub display: MenuDisplay,
+    /// Panels around the Action Menu's wheel.
+    pub wheel: bool,
+    /// Panels around the Quick Menu.
+    pub quick_menu: bool,
+    /// How large the panels are in VR against where they are measured to be, one of [`OrbitSettings::VR_SIZES`]: VRChat
+    /// scales its menus with things only the headset shows.
+    pub vr_size: f32,
+}
+
+impl OrbitSettings {
+    pub const VR_SIZES: [f32; 3] = [0.8, 1.0, 1.25];
+
+    /// The wheel's panels are wanted.
+    pub fn around_wheel(&self) -> bool {
+        self.display == MenuDisplay::AroundVrchat && self.wheel
+    }
+
+    /// The Quick Menu's panels are wanted.
+    pub fn around_quick_menu(&self) -> bool {
+        self.display == MenuDisplay::AroundVrchat && self.quick_menu
+    }
+
+    /// Any of the panels are wanted.
+    pub fn any(&self) -> bool {
+        self.around_wheel() || self.around_quick_menu()
+    }
+}
+
+impl Default for OrbitSettings {
+    fn default() -> Self {
+        Self { display: MenuDisplay::AroundVrchat, wheel: true, quick_menu: true, vr_size: 1.0 }
+    }
 }
 
 /// The floating Orbiters panel (the SteamVR overlay): the dashboard tab's interface on a panel in the play space, used
@@ -578,6 +633,7 @@ impl Default for Settings {
             rig_views: RigViews::default(),
             coverage_overlay: CoverageOverlay::default(),
             floating: FloatingSettings::default(),
+            orbit: OrbitSettings::default(),
             dolly_streams: false,
             photos_layout: GalleryLayout::default(),
             picture_folders: Vec::new(),

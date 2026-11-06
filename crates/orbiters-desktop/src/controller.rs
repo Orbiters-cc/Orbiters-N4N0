@@ -1094,6 +1094,11 @@ impl Controller {
     }
 
     /// The overlay process connected or left (with it, whether the headset is worn is unknown).
+    /// What the panels around VRChat's menus say of themselves, for Settings.
+    pub fn set_orbit_status(self: &Shared, status: crate::state::OrbitStatus) {
+        self.update(|s| s.orbit = status);
+    }
+
     pub fn set_overlay_connected(self: &Shared, connected: bool) {
         self.update_if(|s| {
             let changed = s.steamvr.overlay != connected;

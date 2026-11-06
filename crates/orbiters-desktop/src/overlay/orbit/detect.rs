@@ -1,0 +1,444 @@
+//! Knowing that VRChat's wheel or Quick Menu is open, in desktop mode, without touching the game.
+//!
+//! **What VRChat says about it: nothing.** OSC reports no menu state, and the log says nothing when a menu opens (only a page
+//! of a selected user leaves a line, late). Keys say only that someone pressed Esc or R, and the game may have ignored them
+//! (typing in the chatbox, a loading screen, the Main Menu in front). So a key only makes this look, and what is on the screen
+//! decides: **Windows Graphics Capture of VRChat's own window**, small parts of each frame, while a key has just been pressed
+//! or a menu shows. Between those no capture runs at all.
+//!
+//! - **The wheel:** a disc of one colour at the exact place its geometry gives ([`super::zones::wheel`]), its edge against the world
+//!   all the way round. On the frames of 10 window sizes the rim differs from outside at 100% of its angles and the ring inside
+//!   it is one colour at 78 to 96%, whatever hovers or which page; on everything else (no menu, Quick Menu, Main Menu) the rim holds
+//!   at 65% at most. The colour itself is not looked at: VRChat lets people choose it.
+//! - **The Quick Menu:** its row of icons, on every page of it and on nothing else, compared in shape (normalised correlation, so any
+//!   theme or brightness) with what they look like. 4 or more of the 7 at 0.5 or better: on 18 frames of it at 10 window
+//!   sizes and 4 pages, 5 to 7; on every other frame 0.
+//!
+//! Once open, two looks in a row without it close the panels: about 200 ms at most after it went. And it takes two looks in a row to
+//! open: a frame caught mid-animation opens nothing. When frames stop coming (a hitch, a loading screen) nothing can be said, and the
+//! panels go: **a wrong "open" is worse than a late one.**
+
+use super::zones::{self, Around};
+use egui::{pos2, vec2, Rect, Vec2};
+use std::time::{Duration, Instant};
+
+/// A part of a frame in window pixels: top-down BGRA, `stride` bytes a row.
+#[derive(Clone, Copy)]
+pub struct Part<'a> {
+    pub x0: u32,
+    pub y0: u32,
+    pub width: u32,
+    pub height: u32,
+    pub stride: u32,
+    pub bgra: &'a [u8],
+}
+
+impl Part<'_> {
+    /// The colour at window pixel (x, y), blended between pixels (BGR). Off the part: the nearest.
+    fn at(&self, x: f32, y: f32) -> [f32; 3] {
+        let fx = (x - self.x0 as f32).clamp(0.0, self.width as f32 - 1.001);
+        let fy = (y - self.y0 as f32).clamp(0.0, self.height as f32 - 1.001);
+        let (ix, iy) = (fx as usize, fy as usize);
+        let (ax, ay) = (fx - ix as f32, fy - iy as f32);
+        let px = |x: usize, y: usize| -> [f32; 3] {
+            let i = y * self.stride as usize + x * 4;
+            self.bgra.get(i..i + 3).map_or([0.0; 3], |p| [p[0] as f32, p[1] as f32, p[2] as f32])
+        };
+        let (a, b, c, d) = (px(ix, iy), px(ix + 1, iy), px(ix, iy + 1), px(ix + 1, iy + 1));
+        std::array::from_fn(|i| (a[i] * (1.0 - ax) + b[i] * ax) * (1.0 - ay) + (c[i] * (1.0 - ax) + d[i] * ax) * ay)
+    }
+
+    fn grey(&self, x: f32, y: f32) -> f32 {
+        let c = self.at(x, y);
+        (c[0] + c[1] + c[2]) / 3.0
+    }
+}
+
+/// What of a frame is looked at: the wheel's box and the icons' row, in window pixels, inside the window.
+pub fn parts(client: Vec2) -> [Rect; 2] {
+    let window = Rect::from_min_size(pos2(0.0, 0.0), client);
+    let (center, radius) = zones::wheel(client);
+    let wheel = Rect::from_center_size(center, Vec2::splat(radius * 2.0 * WHEEL_OUTSIDE + 4.0)).intersect(window);
+    let (center, unit) = zones::quick_menu(client);
+    let reach = ICON_HALF + SHIFTS.iter().fold(0.0f32, |a, s| a.max(s.abs())) + 1.0;
+    let row = Rect::from_min_max(
+        center + vec2(zones::QM_ICONS_X[0] - reach, zones::QM_ICONS_Y - reach) * unit,
+        center + vec2(zones::QM_ICONS_X[6] + reach, zones::QM_ICONS_Y + reach) * unit,
+    )
+    .intersect(window);
+    [wheel, row]
+}
+
+const WHEEL_ANGLES: usize = 96;
+/// Where the disc's own ring and the world outside it are sampled, in radii.
+const WHEEL_INSIDE: f32 = 0.955;
+const WHEEL_OUTSIDE: f32 = 1.07;
+/// Sum of three channels' differences that counts as a different colour.
+const WHEEL_DIFFERENT: f32 = 30.0;
+/// How near a ring's sample keeps to the ring's middle colour, to count as that colour.
+const WHEEL_SAME: f32 = 36.0;
+/// The share of the rim that must stand out from the world, and of the ring that must be one colour.
+pub const WHEEL_EDGE: f32 = 0.9;
+pub const WHEEL_UNIFORM: f32 = 0.7;
+
+/// How the wheel's place looks: (share of the rim that stands out from the world, share of the ring inside it of one colour).
+pub fn wheel_scores(part: &Part, client: Vec2) -> (f32, f32) {
+    let (center, radius) = zones::wheel(client);
+    let ring = |r: f32| -> [[f32; 3]; WHEEL_ANGLES] {
+        std::array::from_fn(|i| {
+            let (s, c) = (i as f32 / WHEEL_ANGLES as f32 * std::f32::consts::TAU).sin_cos();
+            part.at(center.x + radius * r * c, center.y + radius * r * s)
+        })
+    };
+    let (inside, outside) = (ring(WHEEL_INSIDE), ring(WHEEL_OUTSIDE));
+    let differ = |a: &[f32; 3], b: &[f32; 3]| (a[0] - b[0]).abs() + (a[1] - b[1]).abs() + (a[2] - b[2]).abs();
+    let edge = inside.iter().zip(&outside).filter(|(a, b)| differ(a, b) > WHEEL_DIFFERENT).count() as f32 / WHEEL_ANGLES as f32;
+    let middle: [f32; 3] = std::array::from_fn(|c| {
+        let mut channel: [f32; WHEEL_ANGLES] = std::array::from_fn(|i| inside[i][c]);
+        channel.sort_by(f32::total_cmp);
+        channel[WHEEL_ANGLES / 2]
+    });
+    let uniform = inside.iter().filter(|a| differ(a, &middle) < WHEEL_SAME).count() as f32 / WHEEL_ANGLES as f32;
+    (edge, uniform)
+}
+
+pub fn wheel_seen(part: &Part, client: Vec2) -> bool {
+    let (edge, uniform) = wheel_scores(part, client);
+    edge >= WHEEL_EDGE && uniform >= WHEEL_UNIFORM
+}
+
+/// The icons' pictures: 7 of 24 x 24 grey bytes, averaged over real frames where each is not the selected page.
+const ICONS: &[u8; 7 * ICON_PATCH * ICON_PATCH] = include_bytes!("qm_icons.bin");
+pub const ICON_PATCH: usize = 24;
+/// Half an icon's box, in the Quick Menu's units.
+pub const ICON_HALF: f32 = 15.0;
+/// Each frame's row is tried at these small shifts too (units): the scale's fit is within 1%, which is a few pixels that far down.
+const SHIFTS: [f32; 3] = [-4.0, 0.0, 4.0];
+pub const ICON_MATCH: f32 = 0.5;
+pub const ICONS_NEEDED: usize = 4;
+
+/// One icon's box from a frame, sampled to the template's size.
+pub fn icon_patch(part: &Part, client: Vec2, icon: usize, dx: f32, dy: f32) -> [f32; ICON_PATCH * ICON_PATCH] {
+    let (center, unit) = zones::quick_menu(client);
+    let at = center + vec2(zones::QM_ICONS_X[icon] + dx, zones::QM_ICONS_Y + dy) * unit;
+    std::array::from_fn(|i| {
+        let (x, y) = (i % ICON_PATCH, i / ICON_PATCH);
+        let g = |v: usize| ((v as f32 + 0.5) / ICON_PATCH as f32 * 2.0 - 1.0) * ICON_HALF * unit;
+        part.grey(at.x + g(x), at.y + g(y))
+    })
+}
+
+fn correlation(a: &[f32; ICON_PATCH * ICON_PATCH], b: &[u8]) -> f32 {
+    let n = (ICON_PATCH * ICON_PATCH) as f32;
+    let (ma, mb) = (a.iter().sum::<f32>() / n, b.iter().map(|v| *v as f32).sum::<f32>() / n);
+    let (mut ab, mut aa, mut bb) = (0.0, 0.0, 0.0);
+    for (x, y) in a.iter().zip(b) {
+        let (x, y) = (x - ma, *y as f32 - mb);
+        ab += x * y;
+        aa += x * x;
+        bb += y * y;
+    }
+    // A flat patch is no icon, whatever the rounding makes of it.
+    if aa < n * 4.0 || bb < n {
+        return 0.0;
+    }
+    ab / (aa * bb).sqrt()
+}
+
+/// How many of the row's icons are there, at the shift that finds most.
+pub fn icons_found(part: &Part, client: Vec2) -> usize {
+    let mut best = 0;
+    for dy in SHIFTS {
+        for dx in SHIFTS {
+            let found = (0..zones::QM_ICONS_X.len())
+                .filter(|&i| {
+                    let template = &ICONS[i * ICON_PATCH * ICON_PATCH..(i + 1) * ICON_PATCH * ICON_PATCH];
+                    correlation(&icon_patch(part, client, i, dx, dy), template) >= ICON_MATCH
+                })
+                .count();
+            best = best.max(found);
+        }
+    }
+    best
+}
+
+pub fn quick_menu_seen(part: &Part, client: Vec2) -> bool {
+    icons_found(part, client) >= ICONS_NEEDED
+}
+
+/// What a look at a frame found.
+pub fn look(wheel: &Part, row: &Part, client: Vec2) -> Option<Around> {
+    // The wheel first: it is cheaper, and the Quick Menu's row is not under it when it shows.
+    if wheel_seen(wheel, client) {
+        Some(Around::Wheel)
+    } else if quick_menu_seen(row, client) {
+        Some(Around::QuickMenu)
+    } else {
+        None
+    }
+}
+
+/// How long after a key a menu may take to show. VRChat's menus show within 300 ms of it on 60 frames a second (seen in the frames);
+/// a hitch can take longer, and then the panels are late, not wrong.
+pub const LOOK_AFTER_KEY: Duration = Duration::from_millis(1500);
+/// Looks in a row it takes to say a menu opened, or went.
+pub const LOOKS_TO_OPEN: u32 = 2;
+pub const LOOKS_TO_CLOSE: u32 = 2;
+/// With no new frame for this long nothing can be said, and open panels go (a frame of VRChat's comes at least every 100 ms at 10 frames a
+/// second).
+pub const NO_FRAME: Duration = Duration::from_millis(600);
+
+/// What VRChat's menus seem to be doing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Seen {
+    /// Nothing to look for: no capture runs.
+    Resting,
+    /// A key was just pressed: looking, nothing shows yet.
+    Looking,
+    Open(Around),
+}
+
+/// From keys and frames to what shows (tested without any window). `key`, `frame` and `reset` are told as they happen.
+#[derive(Debug)]
+pub struct Watcher {
+    seen: Seen,
+    until: Option<Instant>,
+    candidate: Option<Around>,
+    hits: u32,
+    misses: u32,
+    last_frame: Option<Instant>,
+}
+
+impl Default for Watcher {
+    fn default() -> Self {
+        Self { seen: Seen::Resting, until: None, candidate: None, hits: 0, misses: 0, last_frame: None }
+    }
+}
+
+impl Watcher {
+    pub fn seen(&self) -> Seen {
+        self.seen
+    }
+
+    /// Whether the capture should run: there is something to look for.
+    pub fn wants_frames(&self) -> bool {
+        self.seen != Seen::Resting
+    }
+
+    /// Esc or R was pressed with the game in front.
+    pub fn key(&mut self, now: Instant) {
+        self.until = Some(now + LOOK_AFTER_KEY);
+        self.last_frame.get_or_insert(now);
+        if self.seen == Seen::Resting {
+            self.seen = Seen::Looking;
+            self.candidate = None;
+            self.hits = 0;
+        }
+    }
+
+    /// A new frame's look. Returns what is seen now.
+    pub fn frame(&mut self, found: Option<Around>, now: Instant) -> Seen {
+        self.last_frame = Some(now);
+        match self.seen {
+            Seen::Resting => {}
+            Seen::Looking => {
+                if found.is_some() && found == self.candidate {
+                    self.hits += 1;
+                } else {
+                    self.candidate = found;
+                    self.hits = u32::from(found.is_some());
+                }
+                if self.hits >= LOOKS_TO_OPEN {
+                    self.seen = Seen::Open(found.expect("hits count a found menu"));
+                    self.misses = 0;
+                    self.until = None;
+                }
+            }
+            Seen::Open(menu) => {
+                if found == Some(menu) {
+                    self.misses = 0;
+                } else {
+                    self.misses += 1;
+                    if self.misses >= LOOKS_TO_CLOSE {
+                        // Gone, or become the other one: look again if that was a key's doing.
+                        self.candidate = found;
+                        self.hits = u32::from(found.is_some());
+                        self.seen = if found.is_some() { Seen::Looking } else { Seen::Resting };
+                        self.until = found.is_some().then_some(now + LOOK_AFTER_KEY);
+                        if self.until.is_none() {
+                            self.last_frame = None;
+                        }
+                    }
+                }
+            }
+        }
+        self.tick(now)
+    }
+
+    /// Time passing: a look that found nothing ends; frames that stopped close what shows.
+    pub fn tick(&mut self, now: Instant) -> Seen {
+        match self.seen {
+            Seen::Resting => {}
+            Seen::Looking => {
+                if self.until.is_none_or(|u| now >= u) {
+                    self.reset();
+                }
+            }
+            Seen::Open(_) => {
+                if self.last_frame.is_none_or(|f| now.duration_since(f) >= NO_FRAME) {
+                    self.reset();
+                }
+            }
+        }
+        self.seen
+    }
+
+    /// The game went behind another window, closed, or the setting went off: nothing shows, nothing is looked for.
+    pub fn reset(&mut self) {
+        *self = Self::default();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    /// Real frames: `testdata/<what>_<width>x<height>_<x0>_<y0>.png`, the part of a real VRChat frame at that window size that
+    /// a look reads (see `scripts/orbit-fixtures.py`), and whether it shows a menu by its first word: wheel, qm or none.
+    fn frames() -> Vec<(String, Vec2, Vec<u8>, u32, u32, u32, u32)> {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/overlay/orbit/testdata");
+        let mut out = Vec::new();
+        for entry in std::fs::read_dir(dir).expect("the real frames") {
+            let path = entry.unwrap().path();
+            let name = path.file_stem().unwrap().to_string_lossy().to_string();
+            let fields: Vec<&str> = name.split('_').collect();
+            let size: Vec<f32> = fields[fields.len() - 3].split('x').map(|v| v.parse().unwrap()).collect();
+            let (x0, y0): (u32, u32) = (fields[fields.len() - 2].parse().unwrap(), fields[fields.len() - 1].parse().unwrap());
+            let image = image::open(&path).unwrap().to_rgba8();
+            let (w, h) = image.dimensions();
+            let bgra: Vec<u8> = image.pixels().flat_map(|p| [p[2], p[1], p[0], p[3]]).collect();
+            out.push((name, vec2(size[0], size[1]), bgra, x0, y0, w, h));
+        }
+        out.sort_by(|a, b| a.0.cmp(&b.0));
+        out
+    }
+
+    #[test]
+    fn real_frames_say_what_they_show() {
+        let frames = frames();
+        assert!(frames.len() >= 40, "{}", frames.len());
+        for (name, client, bgra, x0, y0, width, height) in &frames {
+            let part = Part { x0: *x0, y0: *y0, width: *width, height: *height, stride: width * 4, bgra };
+            let kind = name.split(['-', '_']).next().unwrap();
+            let row = name.contains("-row");
+            if row {
+                let found = icons_found(&part, *client);
+                match kind {
+                    "qm" => assert!(found >= ICONS_NEEDED, "{name}: {found} icons"),
+                    _ => assert!(found < ICONS_NEEDED, "{name}: {found} icons on a frame without it"),
+                }
+            } else {
+                let (edge, uniform) = wheel_scores(&part, *client);
+                match kind {
+                    "wheel" => assert!(edge >= WHEEL_EDGE && uniform >= WHEEL_UNIFORM, "{name}: {edge} {uniform}"),
+                    _ => assert!(!(edge >= WHEEL_EDGE && uniform >= WHEEL_UNIFORM), "{name}: {edge} {uniform} on a frame without it"),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn looks_take_only_small_parts_of_a_frame() {
+        let client = vec2(1920.0, 1080.0);
+        let [wheel, row] = parts(client);
+        let share = (wheel.area() + row.area()) / (client.x * client.y);
+        assert!(share < 0.12, "{share}");
+    }
+
+    fn at(t0: Instant, ms: u64) -> Instant {
+        t0 + Duration::from_millis(ms)
+    }
+
+    #[test]
+    fn a_key_alone_opens_nothing_and_ends_without_a_menu() {
+        let t0 = Instant::now();
+        let mut w = Watcher::default();
+        assert_eq!(w.seen(), Seen::Resting);
+        assert!(!w.wants_frames(), "no capture at rest");
+        w.key(t0);
+        assert_eq!(w.seen(), Seen::Looking);
+        assert!(w.wants_frames());
+        for ms in (0..1400).step_by(100) {
+            assert_eq!(w.frame(None, at(t0, ms)), Seen::Looking, "at {ms}");
+        }
+        assert_eq!(w.tick(at(t0, 1600)), Seen::Resting);
+        assert!(!w.wants_frames());
+    }
+
+    #[test]
+    fn it_takes_two_looks_in_a_row_to_open_and_one_frame_is_no_menu() {
+        let t0 = Instant::now();
+        let mut w = Watcher::default();
+        w.key(t0);
+        assert_eq!(w.frame(Some(Around::Wheel), at(t0, 50)), Seen::Looking);
+        assert_eq!(w.frame(None, at(t0, 100)), Seen::Looking, "only one, then nothing");
+        assert_eq!(w.frame(Some(Around::QuickMenu), at(t0, 150)), Seen::Looking);
+        assert_eq!(w.frame(Some(Around::Wheel), at(t0, 200)), Seen::Looking, "two different ones");
+        assert_eq!(w.frame(Some(Around::Wheel), at(t0, 250)), Seen::Open(Around::Wheel));
+    }
+
+    #[test]
+    fn it_goes_when_the_menu_goes_without_a_key() {
+        let t0 = Instant::now();
+        let mut w = Watcher::default();
+        w.key(t0);
+        w.frame(Some(Around::QuickMenu), at(t0, 50));
+        assert_eq!(w.frame(Some(Around::QuickMenu), at(t0, 100)), Seen::Open(Around::QuickMenu));
+        // It stays open long after the key, and through one bad frame.
+        assert_eq!(w.frame(Some(Around::QuickMenu), at(t0, 9000)), Seen::Open(Around::QuickMenu));
+        assert_eq!(w.frame(None, at(t0, 9100)), Seen::Open(Around::QuickMenu));
+        assert_eq!(w.frame(Some(Around::QuickMenu), at(t0, 9200)), Seen::Open(Around::QuickMenu));
+        // No key: the menu closed on its own.
+        assert_eq!(w.frame(None, at(t0, 9300)), Seen::Open(Around::QuickMenu));
+        assert_eq!(w.frame(None, at(t0, 9400)), Seen::Resting);
+        assert!(!w.wants_frames(), "the capture stops");
+    }
+
+    #[test]
+    fn when_frames_stop_nothing_shows() {
+        let t0 = Instant::now();
+        let mut w = Watcher::default();
+        w.key(t0);
+        w.frame(Some(Around::Wheel), at(t0, 50));
+        w.frame(Some(Around::Wheel), at(t0, 100));
+        assert_eq!(w.tick(at(t0, 500)), Seen::Open(Around::Wheel));
+        assert_eq!(w.tick(at(t0, 100) + NO_FRAME), Seen::Resting, "stay away when not sure");
+    }
+
+    #[test]
+    fn one_menu_can_become_the_other() {
+        let t0 = Instant::now();
+        let mut w = Watcher::default();
+        w.key(t0);
+        w.frame(Some(Around::Wheel), at(t0, 50));
+        w.frame(Some(Around::Wheel), at(t0, 100));
+        w.key(at(t0, 2000));
+        assert_eq!(w.frame(Some(Around::QuickMenu), at(t0, 2100)), Seen::Open(Around::Wheel));
+        assert_eq!(w.frame(Some(Around::QuickMenu), at(t0, 2200)), Seen::Looking, "the wheel's panels go first");
+        assert_eq!(w.frame(Some(Around::QuickMenu), at(t0, 2300)), Seen::Open(Around::QuickMenu));
+    }
+
+    #[test]
+    fn behind_another_window_everything_rests() {
+        let t0 = Instant::now();
+        let mut w = Watcher::default();
+        w.key(t0);
+        w.frame(Some(Around::Wheel), at(t0, 50));
+        w.frame(Some(Around::Wheel), at(t0, 100));
+        w.reset();
+        assert_eq!(w.seen(), Seen::Resting);
+        assert!(!w.wants_frames());
+        assert_eq!(w.frame(Some(Around::Wheel), at(t0, 200)), Seen::Resting, "frames still in the pipe open nothing");
+    }
+}

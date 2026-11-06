@@ -397,12 +397,20 @@ pub struct Client {
     compositor_table: Table,
     chaperone_setup_table: Table,
     applications_table: Table,
+    settings_table: Table,
     _library: platform::Library,
 }
 
 // SteamVR's client interfaces may be called from any thread; the pointers stay valid until `Cleanup`. A client is
 // used by one thread at a time (not `Sync`: its tables fill on first use).
 unsafe impl Send for Client {}
+
+/// SteamVR's section and key of the developer setting "Experimental overlay input overrides" (openvr.h,
+/// `k_pch_SteamVR_AllowGlobalActionSetPriority`): without it an action set at [`input::OVERLAY_GLOBAL_PRIORITY_MIN`] blocks
+/// nothing.
+pub const STEAMVR_SECTION: &std::ffi::CStr = c"steamvr";
+pub const GLOBAL_PRIORITY_KEY: &std::ffi::CStr = c"globalActionSetPriority";
+const SETTINGS_GET_BOOL: usize = 5;
 
 pub const SYSTEM_VERSION: &str = "IVRSystem_026";
 pub const OVERLAY_VERSION: &str = "IVROverlay_028";
@@ -438,6 +446,7 @@ impl Client {
             compositor_table: OnceCell::new(),
             chaperone_setup_table: OnceCell::new(),
             applications_table: OnceCell::new(),
+            settings_table: OnceCell::new(),
             _library: library,
         };
         client.system = client.interface(SYSTEM_VERSION)?;
@@ -466,6 +475,29 @@ impl Client {
     /// `version`'s function table from `cell`, looked up the first time only.
     fn table(&self, cell: &Table, version: &'static str) -> Result<*const usize, Error> {
         cell.get_or_init(|| self.interface(version)).clone()
+    }
+
+    // ---------------------------------------------------------------------------------------------- IVRSettings
+
+    /// A SteamVR setting's value, `None` when it could not be read.
+    pub fn setting_bool(&self, section: &std::ffi::CStr, key: &std::ffi::CStr) -> Option<bool> {
+        type F = unsafe extern "system" fn(*const i8, *const i8, *mut i32) -> bool;
+        let table = self.table(&self.settings_table, "IVRSettings_003").ok()?;
+        let mut error = 0;
+        // SAFETY: IVRSettings_003's table in order: GetSettingsErrorNameFromEnum 0, SetBool 1, SetInt32 2, SetFloat 3,
+        // SetString 4, GetBool 5; NUL-terminated names.
+        let value = unsafe { entry::<F>(table, SETTINGS_GET_BOOL)(section.as_ptr(), key.as_ptr(), &mut error) };
+        (error == 0).then_some(value)
+    }
+
+    /// Sets a SteamVR setting; whether it took.
+    pub fn set_setting_bool(&self, section: &std::ffi::CStr, key: &std::ffi::CStr, value: bool) -> bool {
+        type F = unsafe extern "system" fn(*const i8, *const i8, bool, *mut i32);
+        let Ok(table) = self.table(&self.settings_table, "IVRSettings_003") else { return false };
+        let mut error = 0;
+        // SAFETY: IVRSettings_003 entry 1 is SetBool; NUL-terminated names.
+        unsafe { entry::<F>(table, 1)(section.as_ptr(), key.as_ptr(), value, &mut error) };
+        error == 0
     }
 
     // ------------------------------------------------------------------------------------------------ IVRSystem

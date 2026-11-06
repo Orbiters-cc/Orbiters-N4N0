@@ -6,7 +6,7 @@
 use super::clients::{Change, Client as Agent, ClientCli, Entry, Registration, Registrations};
 use super::input::{Hold, Input};
 use super::keeper::{Flag, Keeper};
-use super::lab::{Behaviour, LabFlag, LabGame, LabWindow, StandIn, CAMERA_ICON, LAB_USER, LAB_WORLD_A, LAB_WORLD_B};
+use super::lab::{Behaviour, LabFlag, LabGame, LabWindow, StandIn, AVATAR_NOT_ALLOWED, CAMERA_ICON, LAB_USER, LAB_WORLD_A, LAB_WORLD_B};
 use super::mcp::{Server, LEGACY, MODERN};
 use super::person::{Heard, Listener};
 use super::{Bridge, Command, Status, Timing};
@@ -957,6 +957,45 @@ fn an_avatar_without_the_capture_kit_is_said_on_arrival_and_nothing_records() {
     assert!(failure["next"].as_str().unwrap().contains("Do not change the avatar"), "{failure}");
     assert_eq!(client.state()["recording"]["state"], "idle", "nothing recorded");
     assert_eq!(client.state()["pictures"].as_array().unwrap().len(), 0);
+}
+
+#[test]
+fn an_avatar_is_worn_when_asked_and_says_so_when_vrchat_does_not_take_it() {
+    const WITH_KIT: &str = "avtr_4f3b5bc4-87f0-4872-bc7e-22c5c071fdcf";
+    let (game, bridge, _server, client) = lab("wear");
+    game.set_behaviour(|b| b.kit = false);
+    arrive(&client);
+
+    // What is not an id goes nowhere, whatever it is.
+    client.fails("wear_avatar", json!({ "avatar_id": "/avatar/parameters/x" }), "not_an_avatar");
+
+    // VRChat stays silent on one this account may not wear: the answer says it did not change, in the time asked.
+    let refused = client.tool("wear_avatar", json!({ "avatar_id": AVATAR_NOT_ALLOWED, "timeout_s": 1 })).unwrap();
+    assert_eq!(refused["changed"], false, "{refused}");
+    assert_eq!(refused["avatar"]["capture_kit"], false);
+    assert!(refused["next"].as_str().unwrap().contains("tell the person"), "{refused}");
+
+    // One it may: the kit follows, and with it a 3D picture is allowed again.
+    let worn = client.tool("wear_avatar", json!({ "avatar_id": WITH_KIT })).unwrap();
+    assert_eq!(worn["changed"], true, "{worn}");
+    assert_eq!(worn["avatar"]["capture_kit"], true);
+    assert!(worn["avatar"]["name"].as_str().unwrap().contains(WITH_KIT));
+    assert_eq!(client.state()["avatar"]["capture_kit"], true);
+
+    // The person at the computer wins here as everywhere.
+    bridge.hold(true);
+    client.fails("wear_avatar", json!({ "avatar_id": WITH_KIT }), "paused_held");
+    bridge.hold(false);
+}
+
+#[test]
+fn a_public_instance_changes_no_avatar() {
+    let (game, _bridge, _server, client) = lab("wear-public");
+    game.set_behaviour(|b| b.land_in = Some("12345~region(eu)".to_string()));
+    let _ = client.tool("go_to_world", json!({ "world_id": LAB_WORLD_A }));
+    assert!(until(Duration::from_secs(3), || client.state()["place"]["in_world"] == true));
+    client.fails("wear_avatar", json!({ "avatar_id": "avtr_4f3b5bc4-87f0-4872-bc7e-22c5c071fdcf" }), "not_private_instance");
+    assert!(client.state()["avatar"]["name"] == "Lab Avatar", "unchanged");
 }
 
 #[test]

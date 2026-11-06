@@ -9,6 +9,23 @@ pub const INPUT_VERSION: &str = "IVRInput_011";
 
 pub type ActionSetHandle = u64;
 pub type ActionHandle = u64;
+/// A device path (`/user/hand/left`) for an action set restricted to it.
+pub type InputSourceHandle = u64;
+
+/// `k_nActionSetOverlayGlobalPriorityMin` (openvr.h, "Experimental global action set priority"): an overlay
+/// application's action set at or above this takes the inputs it binds from the scene application while it is active.
+/// It only works with SteamVR's developer setting "Experimental overlay input overrides" ([`crate::GLOBAL_PRIORITY_KEY`]);
+/// `..Max` is 0x01FFFFFF and nothing may be at or above 0x02000000.
+pub const OVERLAY_GLOBAL_PRIORITY_MIN: i32 = 0x0100_0000;
+
+/// An action set made active this frame, for one device or all, at a priority.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ActiveSet {
+    pub set: ActionSetHandle,
+    /// Only for this device (`0`: all).
+    pub device: InputSourceHandle,
+    pub priority: i32,
+}
 
 /// `VRActiveActionSet_t` (32 bytes).
 #[derive(Clone, Copy, Debug, Default)]
@@ -109,6 +126,16 @@ impl Input<'_> {
         Ok(handle)
     }
 
+    /// A device path's handle (`/user/hand/left`), for a set restricted to it.
+    pub fn input_source(&self, path: &str) -> Result<InputSourceHandle, i32> {
+        type F = unsafe extern "system" fn(*const i8, *mut u64) -> i32;
+        let path = c(path)?;
+        let mut handle = 0;
+        // SAFETY: entry 3 is GetInputSourceHandle.
+        result(unsafe { entry::<F>(self.table, 3)(path.as_ptr(), &mut handle) })?;
+        Ok(handle)
+    }
+
     /// Reads the actions of `set` for this frame (call before reading them).
     pub fn update(&self, set: ActionSetHandle) -> Result<(), i32> {
         self.update_sets(&[set])
@@ -116,6 +143,13 @@ impl Input<'_> {
 
     /// Reads the actions of every set in `sets` for this frame (once a frame, all of them together).
     pub fn update_sets(&self, sets: &[ActionSetHandle]) -> Result<(), i32> {
+        let sets: Vec<ActiveSet> = sets.iter().map(|&set| ActiveSet { set, ..Default::default() }).collect();
+        self.update_active(&sets)
+    }
+
+    /// The same with each set's device and priority. What it asks holds only until the next call, and SteamVR forgets
+    /// it when this process goes: nothing here can stay blocked after a crash.
+    pub fn update_active(&self, sets: &[ActiveSet]) -> Result<(), i32> {
         type F = unsafe extern "system" fn(*mut ActiveActionSet, u32, u32) -> i32;
         if sets.is_empty() {
             return Ok(());
@@ -129,8 +163,10 @@ impl Input<'_> {
             many.resize(sets.len(), ActiveActionSet::default());
             &mut many
         };
-        for (a, &s) in active.iter_mut().zip(sets) {
-            a.action_set = s;
+        for (a, s) in active.iter_mut().zip(sets) {
+            a.action_set = s.set;
+            a.restricted_to_device = s.device;
+            a.priority = s.priority;
         }
         // SAFETY: entry 4 is UpdateActionState; `active.len()` sets of the given size.
         result(unsafe { entry::<F>(self.table, 4)(active.as_mut_ptr(), std::mem::size_of::<ActiveActionSet>() as u32, active.len() as u32) })

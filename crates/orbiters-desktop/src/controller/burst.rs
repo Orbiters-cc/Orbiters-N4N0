@@ -352,7 +352,8 @@ impl super::Controller {
             (pose, focus, smooth, eye_height)
         };
         // VRChat's camera must be open: OSC switches its mode once it is (to Stream, for Spout), nothing opens it
-        // (VRChat's `/usercamera/Mode` changes nothing while the camera is closed, and there is no endpoint to open it).
+        // (VRChat's `/usercamera/Mode` changes nothing while the camera is closed, measured again 2026-11-06: it only stores what
+        // the tree then says, no camera shows and a recording gets no frame; there is no endpoint to open it).
         anyhow::ensure!(self.camera_open() != Some(false), orbiters_n4n0::platform::CAMERA_CLOSED);
         let Some(pose) = pose else {
             anyhow::bail!("Move VRChat's camera once so Orbiters knows where it is, then try again.");

@@ -1546,6 +1546,36 @@ fn a_3d_picture_with_vrchat_s_camera_closed_says_open_the_camera_before() {
     assert!(until(|| t.view().photo_countdown.is_some()));
 }
 
+/// Around VRChat's menus on the desktop: opening a menu closes the camera, and nothing opens it but those menus. So the picture waits for it.
+#[test]
+fn a_3d_picture_can_wait_for_vrchat_s_camera_and_be_called_off() {
+    use crate::status::PhotoWait;
+    let (t, n) = n4n0(Settings::default());
+    *t.camera.lock().unwrap() = Some(false);
+    n.command(Command::Photo3DWhenCamera { seconds: 5 });
+    assert!(until(|| t.view().photo_wait == Some(PhotoWait::Camera)));
+    assert!(t.view().photo_note.is_none(), "waiting is nothing wrong");
+    assert!(t.view().photo_countdown.is_none());
+
+    // Pressed again: called off, and the camera opening later starts nothing.
+    n.command(Command::Photo3DWhenCamera { seconds: 5 });
+    assert!(until(|| t.view().photo_wait.is_none()));
+    *t.camera.lock().unwrap() = Some(true);
+    std::thread::sleep(std::time::Duration::from_millis(400));
+    assert!(t.view().photo_countdown.is_none());
+
+    // Asked again: the camera opens, the countdown starts by itself.
+    *t.camera.lock().unwrap() = Some(false);
+    n.command(Command::Photo3DWhenCamera { seconds: 5 });
+    assert!(until(|| t.view().photo_wait == Some(PhotoWait::Camera)));
+    *t.camera.lock().unwrap() = Some(true);
+    assert!(until(|| t.view().photo_countdown.is_some() && t.view().photo_wait.is_none()));
+    // During a countdown a press changes nothing.
+    n.command(Command::Photo3DWhenCamera { seconds: 5 });
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    assert!(t.view().photo_wait.is_none() && t.view().photo_countdown.is_some());
+}
+
 /// The Action Menu's two pictures (`N4N0/Photo3DPeople`, `N4N0/Photo3DWorld`): a press takes that picture, whatever was last
 /// chosen, at the length chosen, and letting go takes none. The one button of an avatar uploaded before them takes the
 /// last one chosen and changes nothing.

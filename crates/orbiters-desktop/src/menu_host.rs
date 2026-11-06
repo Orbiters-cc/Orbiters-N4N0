@@ -18,10 +18,18 @@ use std::sync::Arc;
 /// (crisp, so drawn with nearest pixels).
 pub struct Textures {
     ctx: egui::Context,
+    /// A copy of what was fetched, by name: other canvases (a panel's own context) make their textures from it.
+    images: Arc<std::sync::Mutex<std::collections::HashMap<String, ColorImage>>>,
 }
 
 impl Textures {
     fn of(&self, name: &str, image: ColorImage) -> (TextureHandle, TextureHandle) {
+        if let Ok(mut images) = self.images.lock() {
+            if images.len() > 64 {
+                images.clear();
+            }
+            images.insert(name.to_string(), image.clone());
+        }
         let dots = menu_retro::dots(&image, 1);
         (self.ctx.load_texture(name, image, TextureOptions::LINEAR), self.ctx.load_texture(format!("{name}-dots"), dots, TextureOptions::NEAREST))
     }
@@ -69,7 +77,7 @@ impl std::ops::DerefMut for MenuHost {
 impl MenuHost {
     /// A menu drawn by `ctx`, in this computer's language and keyboard, showing this process's music.
     pub fn new(ctx: egui::Context) -> Self {
-        let host = shared::MenuHost::new(Textures { ctx }, Arc::new(crate::device::WindowsLocale), crate::media::watcher().clone());
+        let host = shared::MenuHost::new(Textures { ctx, images: Default::default() }, Arc::new(crate::device::WindowsLocale), crate::media::watcher().clone());
         // The 3D captures' pictures are the sessions' thumbnails, on this computer.
         Self(host.with_capture_pictures(Arc::new(crate::controller::menu_shares::capture_picture)))
     }
@@ -87,6 +95,11 @@ impl MenuHost {
     /// Does what the menu asked; returns whether it asked to close (its close button, or idle), which the host does.
     pub fn effects(&mut self, effects: Vec<Effect>, snap: &Snapshot, backend: &Ctl) -> bool {
         self.0.effects(effects, &snap.settings, &Service(backend))
+    }
+
+    /// A fetched picture's pixels by its name, for a canvas of another context.
+    pub fn image(&self, key: &str) -> Option<ColorImage> {
+        self.0.pictures().images.lock().ok()?.get(key).cloned()
     }
 
     /// A thumbnail by its key once loaded, as the look draws it (`retro`: its green dots).

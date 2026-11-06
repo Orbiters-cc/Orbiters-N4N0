@@ -87,6 +87,7 @@ pub const INFO: &str = "\u{E2CE}";
 pub const KEY: &str = "\u{E2D6}";
 pub const KEYBOARD: &str = "\u{E2D8}";
 pub const LIGHTBULB: &str = "\u{E2DC}";
+pub const LIST: &str = "\u{E2F0}";
 pub const LINK_SIMPLE: &str = "\u{E2E6}";
 pub const LIST_CHECKS: &str = "\u{EADC}";
 pub const LOCK_SIMPLE: &str = "\u{E308}";

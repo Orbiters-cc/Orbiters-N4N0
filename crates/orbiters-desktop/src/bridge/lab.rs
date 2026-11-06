@@ -25,6 +25,8 @@ pub const LAB_WORLD_A: &str = "wrld_4cf554b4-430c-4f8f-b53e-1f294eed230b";
 pub const LAB_WORLD_B: &str = "wrld_7281543e-6888-4676-896a-fdd090552fc4";
 /// Where the fake menu's camera icon is, in window pixels.
 pub const CAMERA_ICON: (u32, u32) = (150, 150);
+/// An avatar this lab's account may not wear.
+pub const AVATAR_NOT_ALLOWED: &str = "avtr_00000000-0000-4000-8000-000000000000";
 
 /// What the fake game does when asked, for tests of its failures.
 #[derive(Clone, Debug)]
@@ -85,6 +87,7 @@ struct State {
     /// Where the pointer is.
     pointer: Option<(u32, u32)>,
     injected: Vec<Input>,
+    worn: Option<String>,
     released: Vec<Input>,
     menu_open: bool,
     camera_open: bool,
@@ -321,7 +324,7 @@ impl Game for LabGame {
             instance: world.instance.clone().filter(|_| running),
             in_world: world.in_world && running,
             local_player: (running && state.player_from.is_none_or(|from| Instant::now() >= from)).then(|| "Lab Agent".to_string()),
-            avatar_name: running.then(|| "Lab Avatar".to_string()),
+            avatar_name: running.then(|| state.worn.as_ref().map_or_else(|| "Lab Avatar".to_string(), |id| format!("Lab Avatar {id}"))),
             others: 0,
             vrchat_user: Some((LAB_USER.to_string(), "Lab Agent".to_string())),
             desktop_mode: running.then_some(true),
@@ -420,6 +423,16 @@ impl Game for LabGame {
         if address.starts_with("/input/Look") || address.starts_with("/input/Move") {
             let mut state = self.state.lock().unwrap();
             state.pose_known = state.pose_known || state.camera_open;
+        }
+        Ok(())
+    }
+
+    fn wear(&self, avatar_id: &str) -> Result<(), Failure> {
+        let mut state = self.state.lock().unwrap();
+        // VRChat only changes to an avatar this account may wear, and says nothing when it may not.
+        if avatar_id != AVATAR_NOT_ALLOWED {
+            state.worn = Some(avatar_id.to_string());
+            state.behaviour.kit = true;
         }
         Ok(())
     }

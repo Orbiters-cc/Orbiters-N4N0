@@ -94,6 +94,11 @@ pub enum Command {
     Photo3DIn {
         seconds: u32,
     },
+    /// A 3D picture after `seconds` from when VRChat's camera is ready: pressed again while it waits, it is called off.
+    #[serde(rename = "photo_3d_when_camera")]
+    Photo3DWhenCamera {
+        seconds: u32,
+    },
     /// N4N0's light as N4N0's menu set it (its Light page): `N4N0/Light/On`, its colour and level.
     Light {
         on: bool,

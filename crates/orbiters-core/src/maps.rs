@@ -256,6 +256,8 @@ pub enum WorldList {
     Popular,
     /// The worlds with the most people in them now (VRChat only).
     Active,
+    /// What is hot right now: VRChat's own measure of a world's recent activity, `sort=heat` (VRChat only).
+    Trending,
     /// The signed-in VRChat account's favorite worlds (VRChat only).
     Favorites,
 }
@@ -309,7 +311,7 @@ pub fn found_path(list: &WorldList, page: usize) -> Option<String> {
             Some(format!("maps/search?q={}&page={page}", crate::vrchat_api::encode(&q)))
         }
         WorldList::Popular => Some(format!("maps/featured?page={page}")),
-        WorldList::Active | WorldList::Favorites => None,
+        WorldList::Active | WorldList::Trending | WorldList::Favorites => None,
     }
 }
 

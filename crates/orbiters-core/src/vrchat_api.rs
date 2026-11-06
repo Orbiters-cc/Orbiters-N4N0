@@ -338,7 +338,7 @@ fn instance_open(v: &serde_json::Value) -> Option<bool> {
 }
 
 /// The API path of a page of a world list, one more world asked than a page holds (its being there says another page
-/// follows): `GET /worlds?search=…&sort=relevance`, `/worlds?sort=popularity&order=descending`, `/worlds/active`,
+/// follows): `GET /worlds?search=…&sort=relevance`, `/worlds?sort=popularity&order=descending`, `/worlds?sort=heat&order=descending`, `/worlds/active`,
 /// `/worlds/favorites` (public worlds only but for the account's own favorites).
 pub fn world_list_path(list: &crate::maps::WorldList, page: usize) -> String {
     use crate::maps::{WorldList, FOUND_PAGE, FOUND_PAGES};
@@ -349,6 +349,7 @@ pub fn world_list_path(list: &crate::maps::WorldList, page: usize) -> String {
             format!("/worlds?search={}&sort=relevance&releaseStatus=public&n={n}&offset={offset}", encode(&q))
         }
         WorldList::Popular => format!("/worlds?sort=popularity&order=descending&releaseStatus=public&n={n}&offset={offset}"),
+        WorldList::Trending => format!("/worlds?sort=heat&order=descending&releaseStatus=public&n={n}&offset={offset}"),
         WorldList::Active => format!("/worlds/active?n={n}&offset={offset}"),
         WorldList::Favorites => format!("/worlds/favorites?n={n}&offset={offset}"),
     }
@@ -1459,6 +1460,7 @@ pub(crate) mod tests {
         );
         assert_eq!(world_list_path(&WorldList::Popular, 0), "/worlds?sort=popularity&order=descending&releaseStatus=public&n=25&offset=0");
         assert_eq!(world_list_path(&WorldList::Active, 2), "/worlds/active?n=25&offset=48");
+        assert_eq!(world_list_path(&WorldList::Trending, 0), "/worlds?sort=heat&order=descending&releaseStatus=public&n=25&offset=0");
         assert_eq!(world_list_path(&WorldList::Favorites, 999), "/worlds/favorites?n=25&offset=480", "paging stops at 20 pages");
         let long = "x".repeat(300);
         assert!(world_list_path(&WorldList::Search(long), 0).contains(&format!("search={}&", "x".repeat(100))));

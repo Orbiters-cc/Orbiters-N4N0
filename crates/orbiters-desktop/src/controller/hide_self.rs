@@ -207,6 +207,11 @@ fn avatar_support(vrchat: &[(String, OscValue)]) -> (Option<bool>, bool) {
 }
 
 impl super::Controller {
+    /// Whether the avatar worn has N4N0's capture kit, as VRChat's tree says: `None` when it does not say.
+    pub(super) fn worn_avatar_has_kit(&self) -> Option<bool> {
+        avatar_support(&self.vrchat_values()).0
+    }
+
     /// The mask as VRChat last said it: what it sent since, else what its tree said at the start.
     fn local_user(&self) -> Option<bool> {
         let heard = self.osc_values.lock().unwrap().latest.get(LOCAL_PLAYER).and_then(|(v, _)| v.first().map(OscValue::truthy));

@@ -2,6 +2,7 @@
 //! which an account without it never sees a trace of: the section is drawn only when the service says the server said yes.
 
 use super::{section, Cx};
+use crate::bridge::clients::{Change, Client, ClientStatus, Old, Registration};
 use crate::bridge::person::{Paused, HOTKEY};
 use crate::bridge::Command;
 use egui::{vec2, Sense, Ui};
@@ -17,6 +18,8 @@ const TERMS: &str = "VRChat's Terms of Service forbid using the platform with \"
 pub struct State {
     /// Which copy button was just pressed, and when.
     copied: Option<(&'static str, f64)>,
+    /// The visit of the page whose look at the agents was asked for.
+    checked: Option<u64>,
 }
 
 /// A button that copies `text`, and says so for a moment.
@@ -31,15 +34,76 @@ fn copy_button(ui: &mut Ui, state: &mut State, key: &'static str, label: &str, t
     }
 }
 
-/// Claude Code's command for this address and token.
-pub fn claude_command(address: &str, token: &str) -> String {
-    format!("claude mcp add --transport http orbiters-vrchat {address} --header \"Authorization: Bearer {token}\"")
+/// What a client's row says, and which buttons it has.
+struct Row {
+    text: String,
+    color: egui::Color32,
+    /// The main button's words, when it has one.
+    add: Option<String>,
+    remove: bool,
 }
 
-/// The same as a project's `.mcp.json`.
-pub fn claude_json(address: &str, token: &str) -> String {
-    let config = serde_json::json!({ "mcpServers": { "orbiters-vrchat": { "type": "http", "url": address, "headers": { "Authorization": format!("Bearer {token}") } } } });
-    serde_json::to_string_pretty(&config).unwrap_or_default()
+/// A client's state in words. Only what the client said, and only buttons that can work.
+fn row_of(status: &ClientStatus, listening: bool) -> Row {
+    let name = status.client.name();
+    let row = |text: String, color, add: Option<String>, remove| Row { text, color, add, remove };
+    let update = || Some("Update".to_string());
+    match &status.registration {
+        Registration::Unknown => row("Looking\u{2026}".into(), theme::FG_3, None, false),
+        Registration::NotInstalled => row("Not installed on this computer.".into(), theme::FG_3, None, false),
+        Registration::NotAdded if listening => row("Not added yet. New sessions get it the moment you add it.".into(), theme::FG_2, Some(format!("Add to {name}")), false),
+        Registration::NotAdded => row("Not added.".into(), theme::FG_3, None, false),
+        Registration::Added if listening => row("Added. New sessions have it.".into(), theme::OK, None, true),
+        Registration::Added => row("Added. It answers while the bridge is on.".into(), theme::FG_2, None, true),
+        Registration::Outdated(Old::Token) => row("Added with an old token, so it cannot connect.".into(), theme::WARN, update(), true),
+        Registration::Outdated(Old::Address) => row("Added with an old address, so it cannot connect.".into(), theme::WARN, update(), true),
+        Registration::Outdated(Old::Everything) => row("Added with an old address and token, so it cannot connect.".into(), theme::WARN, update(), true),
+        Registration::NotConnecting(why) => row(format!("Added, and it says it cannot connect: {why}"), theme::WARN, update(), true),
+        Registration::Unreadable(why) => row(format!("It did not say what it has: {why}"), theme::WARN, None, false),
+    }
+}
+
+/// One agent's row: what it has, its one click, and the way back.
+fn client_row(ui: &mut Ui, cx: &Cx, status: &ClientStatus, listening: bool) {
+    let row = row_of(status, listening);
+    let width = ui.available_width();
+    let text_width = width - 240.0;
+    let said = ui.painter().layout_job(Txt::new(row.text, 12.5).color(row.color).line_height(18.0).job(text_width));
+    let note_color = if status.failed { theme::WARN } else { theme::FG_3 };
+    let noted = status.note.as_deref().map(|n| ui.painter().layout_job(Txt::new(n, 12.0).color(note_color).line_height(17.0).job(text_width)));
+    let body = 20.0 + said.size().y + noted.as_ref().map_or(0.0, |n| n.size().y + 2.0);
+    let (rect, _) = ui.allocate_exact_size(vec2(width, body.max(40.0) + 20.0), Sense::hover());
+    let mut y = rect.center().y - body * 0.5;
+    widgets::text(ui.painter(), egui::pos2(rect.left(), y + 9.0), egui::Align2::LEFT_CENTER, &Txt::new(status.client.name(), 13.5).weight(weight::MEDIUM));
+    y += 20.0;
+    let said_height = said.size().y;
+    ui.painter().galley(egui::pos2(rect.left(), y), said, row.color);
+    y += said_height + 2.0;
+    if let Some(noted) = noted {
+        ui.painter().galley(egui::pos2(rect.left(), y), noted, note_color);
+    }
+    let mut buttons = ui.new_child(egui::UiBuilder::new().max_rect(rect).layout(egui::Layout::right_to_left(egui::Align::Center)));
+    if status.busy {
+        Button::new("Working\u{2026}").variant(Variant::Secondary).size(Size::Sm).enabled(false).show(&mut buttons);
+        return;
+    }
+    let command = |change| Command::Client { client: status.client, change };
+    if row.remove && Button::new("Remove").variant(Variant::Ghost).size(Size::Sm).show(&mut buttons).clicked() {
+        cx.ctl.bridge_command(command(Change::Remove));
+    }
+    if row.remove && row.add.is_some() {
+        buttons.add_space(8.0);
+    }
+    if let Some(add) = row.add {
+        if Button::new(&add).variant(Variant::Primary).size(Size::Sm).show(&mut buttons).clicked() {
+            cx.ctl.bridge_command(command(Change::Add));
+        }
+    }
+}
+
+/// The agents, in a fixed order.
+fn clients(status: &crate::bridge::Status) -> Vec<&ClientStatus> {
+    [Client::ClaudeCode, Client::Codex].iter().filter_map(|c| status.clients.iter().find(|s| s.client == *c)).collect()
 }
 
 /// What the bridge is doing, in a sentence.
@@ -74,10 +138,23 @@ pub fn show(ui: &mut Ui, cx: &Cx, index: usize, state: &mut State, draft: &mut E
         ui.painter().galley(egui::pos2(rect.left() + 50.0, rect.top() + 12.0), text, theme::FG_2);
         ui.add_space(12.0);
 
+        // What the agents have is asked once a visit: it may have changed in a terminal.
+        if state.checked != Some(cx.visit) {
+            state.checked = Some(cx.visit);
+            cx.ctl.bridge_command(Command::CheckClients);
+        }
+
         if let Some(problem) = &status.problem {
             widgets::field(ui, "It stays closed", Some(problem), 0.0, |_| {});
         }
         if !status.listening {
+            // Off: an agent that has it can still be cleaned up, and nothing is offered that could not answer.
+            for client in clients(status) {
+                if matches!(client.registration, Registration::Added | Registration::Outdated(_) | Registration::NotConnecting(_)) {
+                    client_row(ui, cx, client, false);
+                    widgets::separator(ui);
+                }
+            }
             return;
         }
 
@@ -103,29 +180,23 @@ pub fn show(ui: &mut Ui, cx: &Cx, index: usize, state: &mut State, draft: &mut E
         ui.add_space(8.0);
         widgets::separator(ui);
 
+        // One click, per agent.
+        for client in clients(status) {
+            client_row(ui, cx, client, true);
+            widgets::separator(ui);
+        }
+
         let address = status.address.clone().unwrap_or_default();
         let token = status.token.clone().unwrap_or_default();
         widgets::field(ui, "Address", Some(&address), 100.0, |ui| copy_button(ui, state, "address", "Copy", &address));
         widgets::separator(ui);
-        widgets::field(ui, "Token", Some("What a client must present. Whoever has it can drive VRChat here, so keep it to yourself."), 240.0, |ui| {
+        widgets::field(ui, "Token", Some("For any other MCP client, with the address above. Whoever has it can drive VRChat here, so keep it to yourself. A new one also updates the agents above."), 240.0, |ui| {
             copy_button(ui, state, "token", "Copy", &token);
             ui.add_space(8.0);
             if Button::new("New token").icon(icons::ARROW_CLOCKWISE).variant(Variant::Ghost).size(Size::Sm).show(ui).clicked() {
                 cx.ctl.bridge_command(Command::NewToken);
             }
         });
-        widgets::separator(ui);
-        widgets::field(
-            ui,
-            "For Claude Code",
-            Some("The command to run once, or the same for a project's .mcp.json. Then paste docs/vrchat-bridge.md's prompt, or use the prompt world_tour."),
-            240.0,
-            |ui| {
-                copy_button(ui, state, "json", "Copy .mcp.json", &claude_json(&address, &token));
-                ui.add_space(8.0);
-                copy_button(ui, state, "command", "Copy command", &claude_command(&address, &token));
-            },
-        );
         widgets::separator(ui);
         let hotkey = if status.hotkey_taken {
             format!("{HOTKEY} is taken by another program: your own input and Stop still work.")
@@ -167,14 +238,28 @@ pub fn show(ui: &mut Ui, cx: &Cx, index: usize, state: &mut State, draft: &mut E
 mod tests {
     use super::*;
 
+    fn status(registration: Registration) -> ClientStatus {
+        ClientStatus { client: Client::Codex, registration, busy: false, note: None, failed: false }
+    }
+
     #[test]
-    fn claude_codes_config_has_the_address_and_token() {
-        let command = claude_command("http://127.0.0.1:47615/mcp", "abc");
-        assert_eq!(command, "claude mcp add --transport http orbiters-vrchat http://127.0.0.1:47615/mcp --header \"Authorization: Bearer abc\"");
-        let json: serde_json::Value = serde_json::from_str(&claude_json("http://127.0.0.1:47615/mcp", "abc")).unwrap();
-        let server = &json["mcpServers"]["orbiters-vrchat"];
-        assert_eq!(server["type"], "http");
-        assert_eq!(server["url"], "http://127.0.0.1:47615/mcp");
-        assert_eq!(server["headers"]["Authorization"], "Bearer abc");
+    fn each_state_offers_only_what_can_work() {
+        let row = |r, listening| row_of(&status(r), listening);
+        let not_installed = row(Registration::NotInstalled, true);
+        assert!(not_installed.text.contains("not installed") || not_installed.text.contains("Not installed"));
+        assert!(not_installed.add.is_none() && !not_installed.remove);
+        assert_eq!(row(Registration::NotAdded, true).add.as_deref(), Some("Add to Codex"));
+        assert!(row(Registration::NotAdded, false).add.is_none(), "nothing would answer it");
+        let added = row(Registration::Added, true);
+        assert!(added.add.is_none() && added.remove);
+        for old in [Old::Token, Old::Address, Old::Everything] {
+            let outdated = row(Registration::Outdated(old), true);
+            assert_eq!(outdated.add.as_deref(), Some("Update"));
+            assert!(outdated.remove && outdated.text.contains("old"));
+        }
+        let failing = row(Registration::NotConnecting("HTTP 401".into()), true);
+        assert!(failing.text.contains("HTTP 401") && failing.add.is_some() && failing.remove);
+        let unreadable = row(Registration::Unreadable("broken".into()), true);
+        assert!(unreadable.text.contains("broken") && unreadable.add.is_none() && !unreadable.remove);
     }
 }

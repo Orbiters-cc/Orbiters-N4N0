@@ -2,6 +2,7 @@
 //! paused) and as everybody else sees it (not at all). Synthetic: nothing listens, and the token is a stand-in.
 
 use super::{Page, Scenario};
+use crate::bridge::clients::{Client, ClientStatus, Old, Registration};
 use crate::bridge::person::Paused;
 use crate::bridge::{ClientSeen, LogLine, Status};
 use crate::state::{AccountState, Snapshot};
@@ -22,6 +23,10 @@ fn log() -> Vec<LogLine> {
         line(260, true, "3D picture of 8 s"),
         line(120, true, "walk forward 2.5 s"),
     ]
+}
+
+fn client(client: Client, registration: Registration) -> ClientStatus {
+    ClientStatus { client, registration, busy: false, note: None, failed: false }
 }
 
 fn scenario(name: &'static str, snapshot: Snapshot) -> Scenario {
@@ -52,18 +57,52 @@ pub(super) fn append(scenarios: &mut Vec<Scenario>) {
         client: Some(ClientSeen { name: "claude-code".into(), connected: true }),
         acting: true,
         log: log(),
+        clients: vec![client(Client::ClaudeCode, Registration::Added), client(Client::Codex, Registration::NotAdded)],
         ..Default::default()
     };
 
     // The owner, the switch off: the section and what it means, nothing listening.
     let mut off = base.clone();
     off.bridge = Status { allowed: true, ..Default::default() };
-    scenarios.push(scenario("settings-experimental-owner-off", off));
+    scenarios.push(scenario("settings-experimental-owner-off", off.clone()));
 
     let mut on = base.clone();
     on.settings.experimental.vrchat_bridge = true;
     on.bridge = running.clone();
     scenarios.push(scenario("settings-experimental-owner", on.clone()));
+
+    // Each state an agent's row can be in.
+    let mut states = |name, claude: ClientStatus, codex: ClientStatus| {
+        let mut shot = on.clone();
+        shot.bridge.clients = vec![claude, codex];
+        shot.bridge.client = None;
+        shot.bridge.acting = false;
+        scenarios.push(scenario(name, shot));
+    };
+    states("settings-experimental-agents-new", client(Client::ClaudeCode, Registration::NotAdded), client(Client::Codex, Registration::NotInstalled));
+    states(
+        "settings-experimental-agents-added",
+        ClientStatus { note: Some("A new Claude Code session has it; one already open has to be restarted.".into()), ..client(Client::ClaudeCode, Registration::Added) },
+        client(Client::Codex, Registration::Added),
+    );
+    states("settings-experimental-agents-old", client(Client::ClaudeCode, Registration::Outdated(Old::Token)), client(Client::Codex, Registration::Outdated(Old::Address)));
+    states(
+        "settings-experimental-agents-failing",
+        client(Client::ClaudeCode, Registration::NotConnecting("Server rejected the configured Authorization header (HTTP 401).".into())),
+        ClientStatus {
+            note: Some("It was not added: Codex's settings could not be written: Access is denied.".into()),
+            failed: true,
+            ..client(Client::Codex, Registration::NotAdded)
+        },
+    );
+    states(
+        "settings-experimental-agents-busy",
+        ClientStatus { busy: true, ..client(Client::ClaudeCode, Registration::NotAdded) },
+        client(Client::Codex, Registration::Unreadable("It did not answer within 45 s.".into())),
+    );
+    let mut off_added = off;
+    off_added.bridge.clients = vec![client(Client::ClaudeCode, Registration::Added), client(Client::Codex, Registration::Outdated(Old::Token))];
+    scenarios.push(scenario("settings-experimental-agents-off", off_added));
 
     let mut paused = on.clone();
     paused.bridge.paused = Some(Paused::Person { resumes_in_s: 0 });

@@ -39,6 +39,10 @@ pub struct Behaviour {
     pub launch_fails: bool,
     /// The worn avatar has the capture kit.
     pub kit: bool,
+    /// VRChat's tree says so; off, it only shows in what was recorded.
+    pub tree_says_kit: bool,
+    /// How long after the world's load the player exists: VRChat says it is joining long before.
+    pub player_after: Duration,
     /// How long a recording takes.
     pub record: Duration,
     /// How long a reconstruction takes.
@@ -55,6 +59,8 @@ impl Default for Behaviour {
             never_arrives: false,
             launch_fails: false,
             kit: true,
+            tree_says_kit: true,
+            player_after: Duration::ZERO,
             record: Duration::from_millis(300),
             reconstruct: Duration::from_millis(200),
             focus_works: false,
@@ -71,6 +77,10 @@ struct State {
     /// A VRChat somebody else started: no window of ours.
     foreign: bool,
     foreground: bool,
+    /// When the player exists in the world it is loading.
+    player_from: Option<Instant>,
+    /// Where the pointer is.
+    pointer: Option<(u32, u32)>,
     injected: Vec<Input>,
     released: Vec<Input>,
     menu_open: bool,
@@ -98,6 +108,9 @@ pub struct Heard {
 }
 
 pub struct LabGame {
+    /// Called as input goes out, for what must be true by then.
+    #[allow(clippy::type_complexity)]
+    pub(crate) sending: Mutex<Option<Box<dyn Fn() + Send>>>,
     dir: PathBuf,
     state: Mutex<State>,
     watcher: Mutex<LogWatcher>,
@@ -139,6 +152,7 @@ impl LabGame {
             }
         });
         Arc::new(Self {
+            sending: Mutex::default(),
             dir: dir.to_path_buf(),
             state: Mutex::new(State { capture_state: "idle".into(), ..Default::default() }),
             watcher: Mutex::new(LogWatcher::new(Some(dir.to_path_buf()))),
@@ -303,7 +317,8 @@ impl Game for LabGame {
             world_name: world.world_name.clone().filter(|_| running),
             instance: world.instance.clone().filter(|_| running),
             in_world: world.in_world && running,
-            local_player: running.then(|| "Lab Agent".to_string()),
+            local_player: (running && state.player_from.is_none_or(|from| Instant::now() >= from)).then(|| "Lab Agent".to_string()),
+            avatar_name: running.then(|| "Lab Avatar".to_string()),
             others: 0,
             vrchat_user: Some((LAB_USER.to_string(), "Lab Agent".to_string())),
             desktop_mode: running.then_some(true),
@@ -350,6 +365,7 @@ impl Game for LabGame {
         let window = LabWindow::open(&self.title).ok_or_else(|| Failure::new("start_failed", "The fake window did not open.", "This is the lab."))?;
         state.window = Some(window);
         state.pid = Some(std::process::id());
+        state.player_from = Some(Instant::now() + state.behaviour.load + state.behaviour.player_after);
         state.joining = (!state.behaviour.never_arrives).then(|| (Instant::now() + state.behaviour.load, plan.world_id.clone(), plan.instance.clone()));
         drop(state);
         self.new_log();
@@ -409,13 +425,20 @@ impl Game for LabGame {
         Some(self.osc_also.unwrap_or(self.osc_in))
     }
 
+    fn capture_kit(&self) -> Option<bool> {
+        let state = self.state.lock().unwrap();
+        state.behaviour.tree_says_kit.then_some(state.behaviour.kit)
+    }
+
     fn inject(&self, window: &GameWindow, input: &[Input]) -> Result<(), Failure> {
+        if let Some(sending) = self.sending.lock().unwrap().as_ref() {
+            sending();
+        }
         let mut state = self.state.lock().unwrap();
         if !state.foreground && !super::win::is_foreground(window.handle) {
             return Err(Failure::new("not_foreground", "VRChat is not the foreground window, so no keyboard or mouse input was sent.", "Call focus_game."));
         }
         // Recorded, never sent: this computer's input belongs to the person at it.
-        let mut pointer = None;
         for event in input {
             state.injected.push(*event);
             match *event {
@@ -423,9 +446,9 @@ impl Game for LabGame {
                     state.menu_open = !state.menu_open;
                     LabWindow::show_menu(window, state.menu_open);
                 }
-                Input::MoveTo { x, y } => pointer = Some((x, y)),
+                Input::MoveTo { x, y } => state.pointer = Some((x, y)),
                 Input::Button { button: MouseButton::Left, down: true } => {
-                    let near = pointer.is_some_and(|(x, y): (u32, u32)| x.abs_diff(CAMERA_ICON.0) < 40 && y.abs_diff(CAMERA_ICON.1) < 40);
+                    let near = state.pointer.is_some_and(|(x, y): (u32, u32)| x.abs_diff(CAMERA_ICON.0) < 40 && y.abs_diff(CAMERA_ICON.1) < 40);
                     if state.menu_open && near {
                         state.camera_open = true;
                     }

@@ -1089,6 +1089,22 @@ mod tests {
         assert_eq!(lamp_lost, 0, "of {lamp_all}");
     }
 
+    /// A camera inside the wearer sees nothing but them: that view can be trained on, and has nothing to score.
+    #[test]
+    fn a_view_that_shows_only_the_wearer_is_not_held_out() {
+        let scene = Scene { boxes: vec![body_box()] };
+        let mut data = dataset(&scene);
+        let before = crate::train::held_out_views(&data, 2);
+        let gone = before[1];
+        for p in &mut data.views[gone].image {
+            *p &= 0x00ff_ffff;
+        }
+        assert!(data.views[gone].image.iter().all(|p| is_out(*p)));
+        let after = crate::train::held_out_views(&data, 2);
+        assert!(!after.contains(&gone), "{after:?}");
+        assert!(after.len() + 1 >= before.len());
+    }
+
     /// How close someone may stand: at a hand's width from the body they stay whole; touching, they go with it, as far as the
     /// envelope: depth has no seam between two bodies, and nothing else tells them apart (reports/wearer-out.md).
     #[test]

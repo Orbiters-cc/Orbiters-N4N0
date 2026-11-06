@@ -358,10 +358,13 @@ pub fn held_out(views: usize, every: usize) -> Vec<usize> {
 /// The keyframes a run on `data` holds out: every `every`-th of those that are not detail views
 /// (crate::dataset::detail_views), which a run always trains on: they are the only views of a 3D picture's subject at
 /// their resolution and moment, and held out they would leave it as mushy as before. A session without detail views
-/// holds out what [`held_out`] says.
+/// holds out what [`held_out`] says. A view with no scene pixel at all has nothing to score: a camera that flew through a wearer
+/// who leaves the picture has all of its pixels out, and held out it ended the whole reconstruction ("no scene pixel to score",
+/// the second real 3D picture of 2026-11-06).
 pub fn held_out_views(data: &Dataset, every: usize) -> Vec<usize> {
     let detail = data.detail_views();
-    let others: Vec<usize> = (0..data.views.len()).filter(|i| detail.binary_search(i).is_err()).collect();
+    let scored = |i: usize| crate::wearer::scene(&data.mask, &data.views[i].image).iter().any(|m| *m > 0.0);
+    let others: Vec<usize> = (0..data.views.len()).filter(|i| detail.binary_search(i).is_err() && scored(*i)).collect();
     held_out(others.len(), every).into_iter().map(|j| others[j]).collect()
 }
 

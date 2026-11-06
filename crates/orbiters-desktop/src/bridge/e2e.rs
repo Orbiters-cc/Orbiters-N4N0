@@ -960,6 +960,26 @@ fn an_avatar_without_the_capture_kit_is_said_on_arrival_and_nothing_records() {
 }
 
 #[test]
+fn a_reconstruction_that_fails_says_so_to_the_agent() {
+    let (game, _bridge, _server, client) = lab("recon-fails");
+    game.set_behaviour(|b| {
+        b.reconstruct = Duration::from_millis(50);
+        b.reconstruct_fails = Some("no scene pixel to score".into());
+    });
+    arrive(&client);
+    game.set_foreground(true);
+    client.tool("press", json!({ "input": "esc" })).unwrap();
+    client.tool("mouse", json!({ "action": "click", "x": CAMERA_ICON.0, "y": CAMERA_ICON.1 })).unwrap();
+    client.tool("turn", json!({ "degrees": 5 })).unwrap();
+    client.tool("take_3d_picture", json!({ "length_s": 1, "wait_s": 20 })).unwrap();
+    client.tool("close_vrchat", json!({})).unwrap();
+    let done = until(Duration::from_secs(10), || client.state()["pictures"][0]["reconstruction"]["state"] == "failed");
+    let state = client.state();
+    assert!(done, "{state}");
+    assert_eq!(state["pictures"][0]["reconstruction"]["message"], "no scene pixel to score");
+}
+
+#[test]
 fn the_bridges_own_input_is_never_taken_for_the_person() {
     let (game, bridge, _server, client) = lab("own-input");
     arrive(&client);

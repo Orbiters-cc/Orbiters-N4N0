@@ -49,7 +49,7 @@ You drive VRChat on this computer, in desktop mode, through this bridge. A perso
 7. Before opening the camera, walk somewhere worth a picture with `walk` and `turn`, looking with `screenshot` between moves: with the camera or a menu open the avatar does not move (`speed_seen` 0), and the picture starts where the camera opens. `press` `esc` closes the camera again. `turn` is approximate: judge by the pictures. `walk` tells you if the avatar did not seem to move.\n\
 8. `take_3d_picture` with `length_s` 1, 4 or 8. It waits for the recording to be saved and gives the `session`. Take a few from different places: 4 or 8 seconds in the open, 1 second for a close look.\n\
 9. `go_to_world` with the next world, and so on.\n\
-10. `close_vrchat` at the end. Reconstructions follow the app's own setting: they run beside VRChat, or wait for it to close (`get_state`'s `reconstructions` and each picture's `reconstruction` say which). Then `wait_for` with `until: reconstructions_done`, as many times as it takes, and report each session's `reconstruction` from `get_state`.\n\n\
+10. `close_vrchat` at the end. Reconstructions follow the app's own setting: they run beside VRChat, or wait for it to close (`get_state`'s `reconstructions` and each picture's `reconstruction` say which). Then `wait_for` with `until: reconstructions_done`, as many times as it takes, and report each session's `reconstruction` from `get_state`, which says `failed` and why when one did not finish.\n\n\
 ## When to give up on a world\n\n\
 Move on to the next world, and say so at the end, when:\n\
 - `go_to_world` or `wait_for` fails with `start_timeout`, or the world does not load within about four minutes;\n\
@@ -450,6 +450,16 @@ impl Bridge {
         let paused = self.paused();
         let picture_list: Vec<Value> = pictures.iter().map(|p| self.picture_json(p, &seen)).collect();
         let next = Self::next_step(&seen, &paused, started_by_bridge, private, going.is_some(), camera_open, capture_kit);
+        // Once saved the file knows: the live count stops at its last report (296 of 700 frames in the first real picture, which
+        // the agent noticed and could not explain).
+        let mut recording = seen.capture.clone();
+        if matches!(recording.state.as_str(), "idle" | "") {
+            if let Some(session) = &recording.session {
+                let files = self.game.picture_files(session);
+                recording.frames = files.frames;
+                recording.keyframes = files.keyframes;
+            }
+        }
         json!({
             "bridge": {
                 "paused": paused,
@@ -477,7 +487,7 @@ impl Bridge {
             },
             "avatar": { "name": seen.avatar_name, "capture_kit": capture_kit },
             "camera": { "open": camera_open, "pose_known": seen.camera_pose_known },
-            "recording": seen.capture,
+            "recording": recording,
             "reconstructions": {
                 "running": seen.reconstruction,
                 "waiting": seen.queue.iter().map(|p| file_name(p)).collect::<Vec<_>>(),
@@ -551,8 +561,12 @@ impl Bridge {
         if let Some(position) = seen.queue.iter().position(|d| d == session) {
             return json!({ "state": "waiting", "position": position, "starts": seen.queue_waits_for });
         }
-        if self.game.picture_files(session).reconstructed {
+        let files = self.game.picture_files(session);
+        if files.reconstructed {
             return json!({ "state": "done" });
+        }
+        if let Some(message) = files.failed {
+            return json!({ "state": "failed", "message": message, "next": "Tell the person: this picture has no result, and the app has already told them why." });
         }
         json!({ "state": "none" })
     }

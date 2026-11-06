@@ -132,6 +132,8 @@ pub struct Controller {
     bridge: Mutex<Option<Arc<crate::bridge::keeper::Keeper>>>,
     /// The bridge restarts VRChat between two worlds: the moments it is closed start no reconstruction.
     bridge_holds_reconstructions: AtomicBool,
+    /// Why a session's last reconstruction failed, for the VRChat bridge: a toast reaches no agent.
+    reconstruction_failures: Mutex<std::collections::HashMap<PathBuf, String>>,
     /// What this member added to the Map explorer, and the uploads' numbering (controller/maps.rs).
     maps_mine: Mutex<Option<MapsMine>>,
     upload_serial: AtomicU64,
@@ -354,6 +356,7 @@ impl Controller {
             vrchat_login: Mutex::new(vrchat_login::Runtime::default()),
             bridge: Mutex::new(None),
             bridge_holds_reconstructions: AtomicBool::new(false),
+            reconstruction_failures: Mutex::default(),
             maps_mine: Mutex::new(None),
             upload_serial: AtomicU64::new(0),
             n4n0: {
@@ -2029,6 +2032,9 @@ impl Controller {
                 self.bump_library();
             }
             ReconstructEvent::Error { message } => {
+                if let Some(session) = self.snapshot.lock().unwrap().reconstruction.as_ref().map(|job| job.session_dir.clone()) {
+                    self.reconstruction_failures.lock().unwrap().insert(session, message.clone());
+                }
                 self.mark_reconstruction_over();
                 self.notify(NoticeKind::Error, format!("Reconstruction failed: {message}"));
             }

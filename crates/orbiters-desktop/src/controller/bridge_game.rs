@@ -267,6 +267,7 @@ impl Game for RealGame {
             frames: stats.as_ref().map_or(0, |s| s.frames),
             keyframes: stats.as_ref().map_or(0, |s| s.keyframes),
             reconstructed: orbiters_core::reconstruction::read_report(session).is_some(),
+            failed: self.ctl().ok().and_then(|ctl| ctl.reconstruction_failures.lock().unwrap().get(session).cloned()),
         }
     }
 

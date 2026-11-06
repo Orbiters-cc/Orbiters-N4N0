@@ -137,6 +137,8 @@ pub struct PictureFiles {
     pub keyframes: u64,
     /// A finished reconstruction's result is there.
     pub reconstructed: bool,
+    /// Why its last reconstruction failed.
+    pub failed: Option<String>,
 }
 
 /// An OSC value for VRChat: buttons are ints (1 pressed, 0 released), axes floats from -1 to 1.

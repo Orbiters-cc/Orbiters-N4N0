@@ -49,6 +49,8 @@ pub struct Behaviour {
     pub record: Duration,
     /// How long a reconstruction takes.
     pub reconstruct: Duration,
+    /// It ends in this failure.
+    pub reconstruct_fails: Option<String>,
     /// Asking Windows for the foreground works. Off, the real check on the fake window says no, as it is never activated.
     pub focus_works: bool,
 }
@@ -65,6 +67,7 @@ impl Default for Behaviour {
             player_after: Duration::ZERO,
             record: Duration::from_millis(300),
             reconstruct: Duration::from_millis(200),
+            reconstruct_fails: None,
             focus_works: false,
         }
     }
@@ -499,7 +502,9 @@ impl Game for LabGame {
     fn picture_files(&self, session: &Path) -> PictureFiles {
         let state = self.state.lock().unwrap();
         let (frames, keyframes) = state.pictures.get(session).copied().unwrap_or_default();
-        PictureFiles { frames, keyframes, reconstructed: state.done.iter().any(|d| d == session) }
+        let done = state.done.iter().any(|d| d == session);
+        let failed = state.behaviour.reconstruct_fails.clone();
+        PictureFiles { frames, keyframes, reconstructed: done && failed.is_none(), failed: failed.filter(|_| done) }
     }
 
     fn hold_reconstructions(&self, hold: bool) {

@@ -135,6 +135,8 @@ pub struct Facts {
     pub timer: u32,
     /// What the caption says with nothing pointed at (a key to hold).
     pub hint: Option<(&'static str, &'static str)>,
+    /// What stopped a 3D picture: it goes before anything else the caption or the sheet's foot would say, for a few seconds.
+    pub note: Option<(String, String)>,
     /// What is pointed at.
     pub pointed: Option<Action>,
     /// What the sheet shows, and the page's name.
@@ -336,7 +338,7 @@ pub fn caption(action: Action, facts: &Facts) -> Option<(String, String)> {
         Action::Picture(_) if facts.no_kit => ("This avatar has no capture kit".into(), "Add N4N0 to it in Orbiters, My Avatar, to take 3D pictures with it.".into()),
         Action::Picture(mode) => {
             if let Some(s) = facts.countdown {
-                (format!("3D picture in {s}"), "VRChat's camera opens, then flies around by itself.".into())
+                (format!("3D picture in {s}"), "VRChat's camera then flies around by itself.".into())
             } else if facts.picture_flying {
                 ("3D picture in progress".into(), "The camera is flying. Stay where you are for a moment.".into())
             } else if mode == PhotoMode::People {
@@ -551,7 +553,13 @@ pub fn paint(p: &Painter, zone: Zone, size: Vec2, facts: &Facts, hover: Option<u
             text(p, pos2(112.0, 24.0), Align2::LEFT_CENTER, &facts.sheet_title, 18.0, weight::SEMIBOLD, look::LABEL);
             // The foot: what plays, whichever page shows.
             let y = size.y - 32.0;
-            if let Some((title, playing)) = &facts.music {
+            if let Some((first, second)) = &facts.note {
+                // The caption is behind the sheet: what stopped the picture is said here.
+                widgets::icon(p, pos2(26.0, y), icons::WARNING, 18.0, theme::WARN);
+                let font = theme::font(13.0, weight::SEMIBOLD);
+                let text = fit(p, &format!("{first}. {second}"), &font, size.x - 200.0);
+                p.text(pos2(46.0, y), Align2::LEFT_CENTER, text, font, look::LABEL);
+            } else if let Some((title, playing)) = &facts.music {
                 widgets::icon(p, pos2(26.0, y), icons::MUSIC_NOTES, 18.0, look::ACCENT);
                 let font = theme::font(13.0, weight::SEMIBOLD);
                 let name = fit(p, title, &font, size.x - 200.0);
@@ -897,7 +905,7 @@ fn draw_capture(p: &Painter, shape: Shaped, rect: Rect, n: usize, facts: &Facts,
 
 /// The words about what is pointed at, or what to do first, in a pill as wide as they are. Nothing to say: nothing shows.
 fn draw_caption(p: &Painter, rect: Rect, facts: &Facts) {
-    let words = facts.pointed.and_then(|a| caption(a, facts)).or_else(|| facts.hint.map(|(a, b)| (a.to_string(), b.to_string())));
+    let words = facts.note.clone().or_else(|| facts.pointed.and_then(|a| caption(a, facts))).or_else(|| facts.hint.map(|(a, b)| (a.to_string(), b.to_string())));
     let Some((first, second)) = words else { return };
     let big = theme::font(13.0, weight::BOLD);
     let small = theme::font(11.0, weight::MEDIUM);

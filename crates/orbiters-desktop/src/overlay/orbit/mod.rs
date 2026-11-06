@@ -361,6 +361,8 @@ pub struct Panels {
     backend: Ctl,
     stage: Stage,
     list: Vec<Panel>,
+    /// What stopped a 3D picture, said for a moment.
+    note: PictureNote,
     /// The page on the sheet (its back is in `list`).
     pub takeover: Option<Panel>,
     open: Option<Around>,
@@ -397,6 +399,7 @@ impl Panels {
             stage: Stage::new([1, 1], false),
             list: Vec::new(),
             takeover: None,
+            note: PictureNote::default(),
             open: None,
             recents: Recents::default(),
             facts: Facts::default(),
@@ -452,6 +455,11 @@ impl Panels {
 
     /// What is open: parts for it in the places `places` gives, or none. Hide lasts until the menu closes. Whatever was held lets go.
     pub fn set_open(&mut self, around: Option<Around>, places: Vec<Placed>, snap: &Snapshot) {
+        // A note from while these panels were away is old news.
+        if around.is_none() {
+            self.note = PictureNote::default();
+            self.facts.note = None;
+        }
         if around != self.open {
             self.hidden = false;
             self.facts.pointed = None;
@@ -570,6 +578,12 @@ impl Panels {
                 panel.dirty = true;
             }
         }
+        if let Some(note) = self.note.follow(&snap.n4n0.photo_note, Instant::now()) {
+            self.facts.note = note;
+            for panel in self.list.iter_mut().chain(self.takeover.iter_mut()) {
+                panel.dirty = true;
+            }
+        }
         // N4N0's menu is what plays and its controls go through: open, drawn or not.
         if !self.stage.host.menu.open {
             self.stage.host.open(snap);
@@ -637,6 +651,7 @@ impl Panels {
             vr_close: self.sharp > 1.0,
             picture_mode: self.facts.picture_mode,
             hint: self.facts.hint,
+            note: self.facts.note.clone(),
             pointed: self.facts.pointed,
             sheet: self.facts.sheet,
             sheet_title: self.facts.sheet_title.clone(),
@@ -1029,9 +1044,68 @@ impl Drop for Panels {
     }
 }
 
+/// How long what stopped a 3D picture stays said.
+const NOTE_FOR: Duration = Duration::from_secs(8);
+
+/// Says what stopped a 3D picture when the service says so, which comes numbered: the press itself shows nothing happening, and this is why.
+#[derive(Debug, Default)]
+struct PictureNote {
+    seen: Option<u32>,
+    until: Option<Instant>,
+}
+
+impl PictureNote {
+    /// What the note becomes now, when that changes. A note from before these panels came up is old news.
+    fn follow(&mut self, said: &Option<(u32, String)>, now: Instant) -> Option<Option<(String, String)>> {
+        let number = said.as_ref().map_or(0, |(n, _)| *n);
+        let first = self.seen.is_none();
+        if self.seen != Some(number) {
+            self.seen = Some(number);
+            if let (false, Some((_, text))) = (first, said) {
+                self.until = Some(now + NOTE_FOR);
+                return Some(Some(note_words(text)));
+            }
+        }
+        if self.until.is_some_and(|until| now >= until) {
+            self.until = None;
+            return Some(None);
+        }
+        None
+    }
+}
+
+/// The note in the caption's two lines. VRChat's camera closed is the common one, and has a way out.
+fn note_words(text: &str) -> (String, String) {
+    if text == orbiters_n4n0::platform::CAMERA_CLOSED {
+        ("Open VRChat's camera first".into(), "Quick Menu, the camera icon, Stream Camera. Then press this again.".into())
+    } else {
+        ("3D picture".into(), text.to_string())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_picture_that_cannot_start_says_why_for_a_moment() {
+        let t0 = Instant::now();
+        let mut note = PictureNote::default();
+        let closed = |n| Some((n, orbiters_n4n0::platform::CAMERA_CLOSED.to_string()));
+        // What was said before these panels came up is not repeated.
+        assert_eq!(note.follow(&closed(3), t0), None);
+        assert_eq!(note.follow(&closed(3), t0 + Duration::from_secs(60)), None);
+        // A press, the service refuses: said at once, with the way out.
+        let said = note.follow(&closed(4), t0).expect("a change").expect("words");
+        assert!(said.0.contains("camera") && said.1.contains("Stream Camera"), "{said:?}");
+        assert_eq!(note.follow(&closed(4), t0 + Duration::from_secs(1)), None, "said once");
+        // Then it goes by itself, and only once.
+        assert_eq!(note.follow(&closed(4), t0 + NOTE_FOR), Some(None));
+        assert_eq!(note.follow(&closed(4), t0 + NOTE_FOR + Duration::from_secs(1)), None);
+        // Another reason says itself.
+        let said = note.follow(&Some((5, "Your avatar is in it".into())), t0).expect("a change").expect("words");
+        assert_eq!(said.1, "Your avatar is in it");
+    }
 
     #[test]
     fn a_part_comes_on_a_spring_and_settles_home() {

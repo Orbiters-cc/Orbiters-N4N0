@@ -12,6 +12,7 @@
 //!   the game's process, reads none of its memory, injects nothing, and does nothing around Easy Anti-Cheat.
 
 pub mod capture;
+pub mod clients;
 // It drives a real game window through Windows; the bridge does nothing where VRChat does not run.
 #[cfg(all(test, windows))]
 mod e2e;
@@ -93,12 +94,18 @@ pub struct Status {
     pub problem: Option<String>,
     /// The hotkey was taken by another program: the person's input and Stop still work.
     pub hotkey_taken: bool,
+    /// The agents it can be added to, and what each of them has.
+    pub clients: Vec<clients::ClientStatus>,
 }
 
 /// What Settings asks of the service.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Command {
+    /// Adds the bridge to an agent, updates what it has, or takes it away.
+    Client { client: clients::Client, change: clients::Change },
+    /// Settings is shown: what the agents have is asked again.
+    CheckClients,
     /// Takes control back at once: releases input, ends what runs, and turns the bridge off.
     Stop,
     /// Pauses the agent until resumed.
@@ -332,7 +339,9 @@ impl Bridge {
             let _ = self.game.osc(address, rest);
         }
         if let Some(up) = hold.up() {
+            self.own_input_sent();
             self.game.release(&[up]);
+            self.own_input_sent();
         }
         self.tell_guard(format!("up {}", hold.guard_line()));
     }
@@ -400,8 +409,7 @@ impl Bridge {
                 self.game.osc(address, osc.unwrap_or(OscArg::Int(1)))?;
             }
             if let (Some(key), Some(window)) = (key, window) {
-                self.game.inject(window, &[*key])?;
-                self.own_input_sent();
+                self.send_own(window, &[*key])?;
             }
         }
         let mut looked = begin;
@@ -429,7 +437,17 @@ impl Bridge {
         Ok(begin.elapsed())
     }
 
-    /// Our own input just went out (see [`person::OwnInput`]).
+    /// Sends input into the game as our own. Said before as well as after: the raw input of `SendInput` wakes the thread that
+    /// hears the person at once, and told only afterwards, that thread took the bridge's own click for the person's, and paused it
+    /// for 30 s after each click and key in the first run on the real game (2026-11-06).
+    pub(crate) fn send_own(&self, window: &game::GameWindow, input: &[Input]) -> Result<(), Failure> {
+        self.own_input_sent();
+        let sent = self.game.inject(window, input);
+        self.own_input_sent();
+        sent
+    }
+
+    /// Our own input is going out, or just went (see [`person::OwnInput`]).
     pub(crate) fn own_input_sent(&self) {
         #[cfg(windows)]
         // SAFETY: a plain query.

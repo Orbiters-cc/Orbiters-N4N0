@@ -3,6 +3,7 @@
 //! records keyboard and mouse input, and its window (real, found, captured and closed through the real calls) is off every
 //! screen and never activated.
 
+use super::clients::{Change, Client as Agent, ClientCli, Entry, Registration, Registrations};
 use super::input::{Hold, Input};
 use super::keeper::{Flag, Keeper};
 use super::lab::{Behaviour, LabFlag, LabGame, LabWindow, StandIn, CAMERA_ICON, LAB_USER, LAB_WORLD_A, LAB_WORLD_B};
@@ -192,6 +193,77 @@ impl Keeping {
     fn allowed(&self) -> bool {
         self.status.lock().unwrap().allowed
     }
+}
+
+/// A client's list of servers, as a real client's command would change it.
+#[derive(Default)]
+struct FakeClient(Mutex<Option<Entry>>);
+
+impl ClientCli for FakeClient {
+    fn client(&self) -> Agent {
+        Agent::ClaudeCode
+    }
+    fn installed(&self) -> bool {
+        true
+    }
+    fn read(&self) -> Result<Option<Entry>, String> {
+        Ok(self.0.lock().unwrap().clone())
+    }
+    fn add(&self, address: &str, token: &str) -> Result<(), String> {
+        *self.0.lock().unwrap() = Some(Entry { address: Some(address.into()), token: Some(token.into()), ..Default::default() });
+        Ok(())
+    }
+    fn remove(&self) -> Result<(), String> {
+        *self.0.lock().unwrap() = None;
+        Ok(())
+    }
+}
+
+#[test]
+fn settings_buttons_reach_the_client_and_a_new_token_or_an_open_keeps_it_right() {
+    let k = keeping("clients", Duration::from_secs(60));
+    let fake = Arc::new(FakeClient::default());
+    k.keeper.registrations.set(Registrations::new(vec![fake.clone()], Box::new(|_, _| {}))).ok().expect("first");
+    assert!(until(Duration::from_secs(5), || k.listening()));
+    let state = || k.status.lock().unwrap().clients.first().cloned();
+    let registration = || state().map(|c| c.registration);
+
+    // A look, and what Settings shows.
+    k.keeper.command(Command::CheckClients);
+    assert!(until(Duration::from_secs(5), || registration() == Some(Registration::NotAdded)), "{:?}", state());
+
+    // The one click.
+    k.keeper.command(Command::Client { client: Agent::ClaudeCode, change: Change::Add });
+    assert!(until(Duration::from_secs(5), || registration() == Some(Registration::Added)), "{:?}", state());
+    let added = fake.0.lock().unwrap().clone().unwrap();
+    assert_eq!(added.token.as_deref(), Some(TOKEN));
+    assert_eq!(added.address, Some(format!("http://127.0.0.1:{}/mcp", k.keeper.port().unwrap())));
+
+    // A new token: the entry follows, and the row says what still needs doing.
+    k.keeper.command(Command::NewToken);
+    assert!(until(Duration::from_secs(5), || fake.0.lock().unwrap().as_ref().is_some_and(|e| e.token.as_deref() != Some(TOKEN))), "{:?}", state());
+    assert!(until(Duration::from_secs(5), || registration() == Some(Registration::Added) && state().is_some_and(|c| !c.busy)), "{:?}", state());
+    assert!(state().unwrap().note.unwrap().contains("session already open"));
+    assert_eq!(fake.0.lock().unwrap().as_ref().unwrap().token, k.status.lock().unwrap().token, "the one the bridge now wants");
+
+    // The address changed behind its back, as a port moved by another program does: the next opening fixes it.
+    fake.0.lock().unwrap().as_mut().unwrap().address = Some("http://127.0.0.1:1/mcp".into());
+    k.flag.enabled.store(false, Ordering::Relaxed);
+    assert!(until(Duration::from_secs(5), || !k.listening()));
+    k.flag.enabled.store(true, Ordering::Relaxed);
+    assert!(until(Duration::from_secs(5), || k.listening()));
+    let port = k.keeper.port().unwrap();
+    assert!(
+        until(Duration::from_secs(5), || fake.0.lock().unwrap().as_ref().is_some_and(|e| e.address == Some(format!("http://127.0.0.1:{port}/mcp")))),
+        "{:?}",
+        state()
+    );
+
+    // And the way back.
+    assert!(until(Duration::from_secs(5), || state().is_some_and(|c| !c.busy)));
+    k.keeper.command(Command::Client { client: Agent::ClaudeCode, change: Change::Remove });
+    assert!(until(Duration::from_secs(5), || registration() == Some(Registration::NotAdded)), "{:?}", state());
+    assert!(fake.0.lock().unwrap().is_none());
 }
 
 #[test]
@@ -864,9 +936,75 @@ fn the_whole_loop_runs_unattended() {
 }
 
 #[test]
+fn an_avatar_without_the_capture_kit_is_said_on_arrival_and_nothing_records() {
+    let (game, _bridge, _server, client) = lab("no-kit-known");
+    game.set_behaviour(|b| b.kit = false);
+    let arrived = arrive(&client);
+    assert_eq!(arrived["avatar"]["capture_kit"], false, "{arrived}");
+    assert!(arrived["next"].as_str().unwrap().contains("capture kit"), "{arrived}");
+    let state = client.state();
+    assert_eq!(state["avatar"]["capture_kit"], false);
+    assert!(state["next"].as_str().unwrap().contains("capture kit"), "{state}");
+    game.set_foreground(true);
+    client.tool("press", json!({ "input": "esc" })).unwrap();
+    client.tool("mouse", json!({ "action": "click", "x": CAMERA_ICON.0, "y": CAMERA_ICON.1 })).unwrap();
+    client.tool("turn", json!({ "degrees": 5 })).unwrap();
+    let failure = client.fails("take_3d_picture", json!({ "length_s": 8 }), "no_capture_kit");
+    assert!(failure["next"].as_str().unwrap().contains("Do not change the avatar"), "{failure}");
+    assert_eq!(client.state()["recording"]["state"], "idle", "nothing recorded");
+    assert_eq!(client.state()["pictures"].as_array().unwrap().len(), 0);
+}
+
+#[test]
+fn the_bridges_own_input_is_never_taken_for_the_person() {
+    let (game, bridge, _server, client) = lab("own-input");
+    arrive(&client);
+    game.set_foreground(true);
+    // The thread that hears the person wakes the moment `SendInput` runs: by then it must know the input is ours.
+    bridge.own_input.sent(0);
+    let told = bridge.clone();
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let saw = seen.clone();
+    *game.sending.lock().unwrap() = Some(Box::new(move || saw.lock().unwrap().push(told.own_input.last())));
+    client.tool("press", json!({ "input": "esc" })).unwrap();
+    client.tool("mouse", json!({ "action": "move", "x": 10, "y": 10 })).unwrap();
+    client.tool("mouse", json!({ "action": "click", "x": 10, "y": 10 })).unwrap();
+    client.tool("mouse", json!({ "action": "look", "dx": 1, "dy": 0 })).unwrap();
+    let seen = seen.lock().unwrap();
+    assert!(seen.len() >= 5, "{seen:?}");
+    assert!(seen.iter().all(|at| *at != 0), "said before each: {seen:?}");
+}
+
+#[test]
+fn a_click_rests_on_its_place_before_it_presses() {
+    let (game, _bridge, _server, client) = lab("click-order");
+    arrive(&client);
+    game.set_foreground(true);
+    client.tool("mouse", json!({ "action": "click", "x": 20, "y": 30 })).unwrap();
+    let sent = game.injected();
+    assert!(matches!(sent[0], Input::MoveTo { x: 20, y: 30 }), "{sent:?}");
+    assert!(matches!(sent[1], Input::Button { down: true, .. }), "{sent:?}");
+}
+
+#[test]
+fn arriving_waits_for_the_world_to_have_loaded() {
+    let (game, _bridge, _server, client) = lab("loading");
+    // The game says it is joining, and the player does not exist yet.
+    game.set_behaviour(|b| b.player_after = Duration::from_millis(1500));
+    let begin = Instant::now();
+    let arrived = arrive(&client);
+    assert_eq!(arrived["arrived"], true, "{arrived}");
+    assert!(begin.elapsed() >= Duration::from_millis(1400), "too early: {:?}", begin.elapsed());
+}
+
+#[test]
 fn a_picture_without_the_capture_kit_says_so() {
     let (game, _bridge, _server, client) = lab("no-kit");
-    game.set_behaviour(|b| b.kit = false);
+    // VRChat's tree does not say, so it only shows in what was recorded.
+    game.set_behaviour(|b| {
+        b.kit = false;
+        b.tree_says_kit = false;
+    });
     arrive(&client);
     game.set_foreground(true);
     client.tool("press", json!({ "input": "esc" })).unwrap();

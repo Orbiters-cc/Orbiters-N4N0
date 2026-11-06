@@ -39,28 +39,29 @@ Settings shows no section, and nothing listens.
 
 ## Turning it on
 
-Settings, Experimental, VRChat bridge. It then shows the address and the token, a command and a `.mcp.json` for Claude Code, whether a
-client is connected, the recent actions, and a large Stop. For Claude Code:
+Settings, Experimental, VRChat bridge. It then shows Stop, whether a client is connected, a row per agent, the address and token for any other client, and the recent actions.
 
-```
-claude mcp add --transport http orbiters-vrchat http://127.0.0.1:47615/mcp --header "Authorization: Bearer <token>"
-```
+**One click per agent.** Claude Code and Codex each have a row showing what that client itself answers, from `bridge/clients.rs`: not installed on this computer (nothing offered), not added (**Add to Claude Code**, **Add to Codex**), added (Remove), added with an old address or token (**Update**, Remove), added and it says it cannot connect, with its words. A new session of that client has the bridge with nothing else to do; one already open has to be restarted, and the row says so.
 
-Needed as well: signed in to VRChat in Settings (private instances are made with that session); the same account in the game; OSC on in
-VRChat's Action Menu, Options, OSC; an avatar with N4N0's capture kit (else a recording has no keyframes).
+- **Claude Code:** `claude mcp add --scope user --transport http orbiters-vrchat <address> --header "Authorization: Bearer <token>"`, read back with `claude mcp get`, whose status comes from really connecting.
+- **Codex:** one block at the end of `~/.codex/config.toml`, read back with `codex mcp get --json`: `[mcp_servers.orbiters-vrchat]`, `url`, and `http_headers = { Authorization = "Bearer <token>" }`. The exception to using a client's own command, for two measured reasons: `codex mcp add` has no flag for a header, only `--bearer-token-env-var`, and an environment variable never reaches a terminal or editor already open, so the server would fail in those with nothing to say why; and on Enzo's file (Codex 0.166.0) `codex mcp add` rewrote all of its servers, dropping a marker comment another tool keeps there, every `enabled = true` and `args = []`, and reordering environment variables. Remove takes the block away, byte for byte, and any `codex mcp` command of the person's own may rewrite the file as it pleases: the entry survives that, in the form Codex writes it.
+- **The token** lands only in those two files of this user's profile, where each client keeps its other servers' credentials (`icacls`: this user, administrators, system; Codex's also its own sandbox's group). No shell runs, so it is in no history; it is on `claude mcp add`'s command line for the half second that runs, visible only to this user's programs and administrators.
+- **New token, moved port:** every time the bridge opens and after New token, an entry with old values is rewritten by the client's own commands, and Settings and the log say so. A session already open keeps what it read until it restarts.
+
+Needed as well: signed in to VRChat in Settings (private instances are made with that session); the same account in the game; OSC on in VRChat's Action Menu, Options, OSC; **an avatar with N4N0's capture kit** (else a recording has no keyframes: `get_state`'s `avatar.capture_kit` says so as soon as the game has arrived, and `take_3d_picture` refuses).
 
 ## The tools
 
 | Tool | What for |
 | --- | --- |
 | `get_state` | Everything readable, and `next`: what to do now. |
-| `find_worlds` | World ids: search, visited, favorites, popular, active. |
+| `find_worlds` | World ids: search, visited, favorites, trending (VRChat's `sort=heat`), popular, active. |
 | `go_to_world` | A new private instance of a world, and VRChat started in it (closing the last one). |
 | `close_vrchat` | Closes the game the bridge started. Reconstructions then run. |
 | `wait_for` | Waits for arrival, closing, a saved picture, reconstructions, the end of a pause. |
 | `screenshot` | VRChat's window as a JPEG, with timestamp, sizes and scale. |
 | `walk` | Over OSC, at most 10 s a call. Says the speed VRChat reported. |
-| `turn` | Over OSC, about so many degrees, and says it is approximate. |
+| `turn` | Over OSC, about so many degrees at 165°/s (measured), and says it is approximate. |
 | `press` | One input for a short time: `jump`, `quick_menu`, axes over OSC; a short list of keys. |
 | `mouse` | Moves the pointer or clicks in the window, or looks (relative). |
 | `focus_game` | Asks Windows to bring the game forward: Windows may say no. |
@@ -121,28 +122,63 @@ and mouse input instead of sending it, and "having the foreground" is a switch f
 - `node scripts/bridge-lab.mjs <orbiters-desktop.exe> <folder with @modelcontextprotocol/sdk>`: the same from MCP's official client against `--bridge-lab`, including killing the
   process mid-walk and hearing the guard release it.
 
+## Running it live
+
+For an agent that has to look at the real game (its brief must allow it). VRChat's folder lock first, as the shared rules say: `mkdir C:/Users/Enzo/.orbiters-build/sota/bench/vrchat.lock`, name and time in `info`, `rm -rf` it at the end. If `tasklist` shows VRChat and you hold no lock, it is Enzo's: wait.
+
+```bash
+# 1. Your build as the tray service, beside the install's helpers. Same settings, same account, same port and token.
+R=C:/Users/Enzo/.orbiters-build/sota/bridge-live-run; I="C:/Users/Enzo/AppData/Local/Programs/Orbiters - N4N0"
+mkdir -p $R; for f in "$I"/*; do b=$(basename "$f"); [ "$b" = install.json ] || cp -n "$f" $R/; done
+cp C:/Users/Enzo/.orbiters-build/sota/target-desktop/release/orbiters-desktop.exe $R/   # after deskcargo.sh build --release
+"$I/orbiters-desktop.exe" --quit                # a clean stop of Enzo's service: only one instance runs
+(cd $R && nohup ./orbiters-desktop.exe --hidden > service.log 2>&1 &)
+
+# 2. Drive it. By hand, over the real transport; the token is read from the app's file and never printed:
+python scripts/bridge-live.py get_state
+python scripts/bridge-live.py find_worlds '{"source":"trending"}'
+python scripts/bridge-live.py go_to_world '{"world_id":"wrld_..."}'     # arrives when the world has loaded: 33 s from the cache
+python scripts/bridge-live.py screenshot '{}' shot.jpg                  # LOOK at it, every time
+python scripts/bridge-live.py press '{"input":"esc"}'
+python scripts/bridge-live.py mouse '{"action":"click","x":640,"y":620}'
+python scripts/bridge-live.py close_vrchat
+#    Or as an agent would: Settings' row adds it for every new session.
+claude -p "Use the orbiters-vrchat MCP server. Read bridge://guide. ..." --allowedTools "mcp__orbiters-vrchat" --model sonnet
+
+# 3. Put it back.
+$R/orbiters-desktop.exe --quit
+"$I/orbiters-desktop.exe" --hidden &    # and without --hidden if the window was open
+rm -rf C:/Users/Enzo/.orbiters-build/sota/bench/vrchat.lock
+tasklist | grep -iE 'vrchat|orbiters'   # nothing of yours left
+```
+
+A screenshot takes 0.3 to 0.5 s with the game at 60 to 80 frames a second, so it is fine to look often. For an overlay or a menu of the app's own in VRChat: a picture shows the game's window only, and what a desktop VRChat draws. Anything of yours that injects input or moves the mouse counts as the person and pauses the agent for 30 s. **Look before every click:** see the shop below.
+
+## What the real game showed (2026-11-06, Windows, VRChat in desktop mode, Easy Anti-Cheat running)
+
+- **Steam passes everything.** `steam.exe -applaunch 438100` gives the game `--no-vr -screen-fullscreen 0 -screen-width 1280 -screen-height 720` and the `vrchat://launch` link, and asks nothing. Enzo's own launch option comes after them. A window of exactly 1280 × 720 client pixels, into the private instance, not Home.
+- **`POST /instances`** answers as the specification says: `~private(<me>)~region(eu)`, and the log's join matches. 15 s from start to `Joining`, 33 s to a loaded world in the cache.
+- **Foreground:** yes on arrival, each time.
+- **`WM_CLOSE`:** 3.2 to 3.6 s, asks nothing. Easy Anti-Cheat's service stays a moment.
+- **Screenshots:** Windows Graphics Capture works on the game, 0.3 to 0.5 s each, and shows the present. No yellow border in the picture.
+- **`SendInput` works:** Esc by scan code, pointer exact to the pixel. **Menu clicks need the pointer to rest first:** a press 80 ms after arriving was usually ignored, one after about 500 ms held each time, so `click` rests that long.
+- **Windows reports our own input without a device** (`hDevice` null), as assumed, but the person's listener woke on it before the sender had said it was ours: every click paused the agent for 30 s. It says so before sending now.
+- **Walking over OSC works without the focus, only with no menu and no camera open:** `speed_seen` 2.0 m/s, about 4 m in 2 s. With the camera or a menu open `/input/*` and the keyboard do nothing at all (`speed_seen` 0). So: walk first, open the camera last. Esc closes the camera too.
+- **Turning:** about 165°/s by holding `LookRight`, not 90.
+- **The camera opens in desktop mode:** Esc, the camera icon in the menu's bottom row, Stream Camera. The panel stays on the screen.
+- **The flight flies in desktop mode:** VRChat takes `/usercamera/Pose` at 90 Hz, its viewfinder went with it, Spout streamed at 41 frames a second (`VRCSender1`, 1920 × 1080) and the app turned Spout on and off by itself.
+- **The menu has a shop.** A banner on the first page opens a page with a Purchase button, and a click that landed on the wrong page went there. No purchase happened, and Esc closed it. Nothing but the agent's own looking can guard this: the guide and the tool's description say so.
+
+**Not yet seen, as the avatar worn had no capture kit** (`Orbit v4`, no `N4N0/*` parameters, 0 keyframes of 418 frames): keyframes, depth and the flight planned around them, whether it stays inside, HideSelf on a real avatar, and a reconstruction from a desktop-mode picture. The first thing to do with an avatar that has the kit.
+
 ## Trying it on the real game
 
-Only a real run can tell these (nothing below has run against VRChat):
-
-1. Steam passes the arguments, the game starts windowed at 1280 × 720 without VR, and the log follows it in. Enzo's Steam launch options (`--no-vr profile=3` in the logs) stay in force.
-2. `vrchat://launch` as an argument through Steam takes it into the instance rather than Home.
-3. `POST /instances` answers as the community specification says, with the session's account.
-4. `/input/*` moves the avatar without the focus; how fast `LookLeft` and `LookRight` turn (90°/s is a guess).
-5. `SendInput` reaches the game: scan codes for keys, `esc` opening the menu, the pointer landing where the pixels say, clicks registering.
-6. Windows Graphics Capture and `PrintWindow` on the game's window (Easy Anti-Cheat running): whether the yellow capture border shows, how long a screenshot takes with the game filling the GPU, and whether it shows what is on screen now (on a busy machine, the fake window's took up to 6.5 s, and sometimes showed the state before the last key).
-7. Whether the game gets the foreground on arrival. `go_to_world` asks for it when nobody has touched the computer for 30 s, and says if Windows refused (`foreground: false`); then no menu can be opened and the camera stays closed until the person clicks the game.
-8. Whether VRChat says `/usercamera/Pose` after a turn with the camera open, and whether the camera works in desktop mode for a 3D picture as it does in VR, Stream mode and Spout included.
-9. Raw Input hearing the keyboard and mouse beside the game (and nothing else on this computer pausing it: anything that injects input counts as the person).
-10. How long `WM_CLOSE` takes to close the game, and whether it asks anything.
-
-With VRChat closed, signed in to VRChat in Settings, "Reconstruct while VRChat runs" on After VRChat if the tour should have the graphics card to itself, an avatar with the capture kit, turn the bridge on in Settings, run the command it gives you, restart Claude Code and paste:
+With VRChat closed, signed in to VRChat in Settings, an avatar with the capture kit on, turn the bridge on in Settings, press Add to Claude Code, start a new Claude Code session and paste:
 
 > Use the orbiters-vrchat MCP server. Read bridge://guide. Then go to two worlds of your choice from my favorites, take one 4 second 3D picture in each, close VRChat, wait for the
 > reconstructions, and tell me what happened at each step, including what you had to try twice.
 
-What should happen: VRChat opens in a window at about 1280 × 720, in a private instance (the instance's name shows `~private(` in Settings' log and in `get_state`). The agent opens the menu with Esc,
-clicks the camera, closes the menu, turns a little, walks, the camera flies, and N4N0 records. The game restarts into the second world. At the end it closes, and the reconstructions finish (with "After VRChat" in Settings, they start then).
+What should happen: VRChat opens in a window at 1280 × 720, in a private instance (the instance's name shows `~private(` in Settings' log and in `get_state`). The agent walks somewhere, opens the camera through Esc and the menu, the camera flies, and N4N0 records. The game restarts into the second world. At the end it closes, and the reconstructions finish (with "After VRChat" in Settings, they start then).
 
 What to look at: did it stay out of your way until you touched something? Touch the mouse: it should pause at once, and go on 30 s later. Press `Ctrl+Alt+F12`: paused until pressed again. Press Stop: the
-avatar stops at once and the port closes. Compare `turn 90` with the picture, and tell me the real rate. If a step fails, the agent's text and Settings' Recent actions say which: send those.
+avatar stops at once and the port closes. If a step fails, the agent's text and Settings' Recent actions say which: send those.

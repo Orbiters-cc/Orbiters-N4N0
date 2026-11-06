@@ -71,6 +71,12 @@ impl OwnInput {
         self.0.store(tick_ms, Ordering::Relaxed);
     }
 
+    /// When ours last went out, for tests.
+    #[cfg(test)]
+    pub fn last(&self) -> u32 {
+        self.0.load(Ordering::Relaxed)
+    }
+
     /// Whether Windows' last input (at `last_input_ms`, its tick count) is someone else's: newer than the last of ours by
     /// more than the moment ours takes to count, the tick count wrapping around every 49 days.
     pub fn someone_else(&self, last_input_ms: u32, seen_before_ms: u32) -> bool {

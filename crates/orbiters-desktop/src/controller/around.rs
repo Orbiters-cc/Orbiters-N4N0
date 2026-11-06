@@ -101,6 +101,34 @@ pub struct SeenFrame {
     projection: [f32; 4],
     /// The nearest surface in each bin (eye depth, metres): infinity when only sky was seen, NaN when nothing was read.
     bins: Vec<f32>,
+    /// For a bin of sky, the nearest surface around it ([`rims_of`]): how far that sky vouches for.
+    rims: Vec<f32>,
+}
+
+/// How many bins around a bin of sky are looked at for what surrounds it: about 11°, a hole of 2.2 m at 7 m.
+const RIM_BINS: usize = 8;
+
+/// Each bin's nearest surface within [`RIM_BINS`], for those that read sky. Depth has no surface where a world's material writes
+/// none: glass, and on Rainy Skyline, a closed door. "Sky" in a hole in a wall says nothing of what lies past that wall, and the
+/// flight of 2026-11-06 went through such a door 7 m away, out of the building into the night, and came back with the city in its
+/// frames. Real open sky has no rim close by, or one far off.
+fn rims_of(bins: &[f32]) -> Vec<f32> {
+    let mut rims = vec![f32::INFINITY; bins.len()];
+    for (bin, rim) in rims.iter_mut().enumerate() {
+        if !bins[bin].is_infinite() {
+            continue;
+        }
+        let (x, y) = (bin % BINS_X, bin / BINS_X);
+        for ny in y.saturating_sub(RIM_BINS)..(y + RIM_BINS + 1).min(BINS_Y) {
+            for nx in x.saturating_sub(RIM_BINS)..(x + RIM_BINS + 1).min(BINS_X) {
+                let z = bins[ny * BINS_X + nx];
+                if z.is_finite() && z < *rim {
+                    *rim = z;
+                }
+            }
+        }
+    }
+    rims
 }
 
 impl SeenFrame {
@@ -148,7 +176,9 @@ impl SeenFrame {
             })
             .collect();
         let m = camera_to_world;
-        Some(Self { eye: [m[3], m[7], m[11]], right: [m[0], m[4], m[8]], up: [m[1], m[5], m[9]], forward: [m[2], m[6], m[10]], projection: *projection, bins })
+        let bins: Vec<f32> = bins;
+        let rims = rims_of(&bins);
+        Some(Self { eye: [m[3], m[7], m[11]], right: [m[0], m[4], m[8]], up: [m[1], m[5], m[9]], forward: [m[2], m[6], m[10]], projection: *projection, bins, rims })
     }
 
     /// A frame's bins as they stand (test data).
@@ -156,7 +186,8 @@ impl SeenFrame {
     pub fn from_bins(camera_to_world: &[f32; 12], projection: &[f32; 4], bins: Vec<f32>) -> Self {
         let m = camera_to_world;
         assert_eq!(bins.len(), BINS_X * BINS_Y);
-        Self { eye: [m[3], m[7], m[11]], right: [m[0], m[4], m[8]], up: [m[1], m[5], m[9]], forward: [m[2], m[6], m[10]], projection: *projection, bins }
+        let rims = rims_of(&bins);
+        Self { eye: [m[3], m[7], m[11]], right: [m[0], m[4], m[8]], up: [m[1], m[5], m[9]], forward: [m[2], m[6], m[10]], projection: *projection, bins, rims }
     }
 
     /// The bin a place falls in, its eye depth: `None` behind the camera or outside the frame.
@@ -181,6 +212,13 @@ impl SeenFrame {
         let surface = self.bins[bin];
         if surface.is_nan() {
             Clear::Unknown
+        } else if surface.is_infinite() {
+            // Sky: free up to what surrounds it, and past that nobody knows.
+            if z < self.rims[bin] - margin {
+                Clear::Free
+            } else {
+                Clear::Unknown
+            }
         } else if z < surface - margin {
             Clear::Free
         } else if z <= surface + margin {
@@ -210,12 +248,43 @@ impl SeenFrame {
 #[derive(Clone, Debug, Default)]
 pub struct Seen {
     pub frames: Vec<SeenFrame>,
+    /// A wearer who stays in the frames and leaves the picture afterwards (crate wearer): no obstacle.
+    pub left_out: Option<LeftOut>,
+}
+
+/// Where a wearer stands who is in the depth now and will not be in the picture. In the corridor of the first real picture
+/// (2026-11-06, 1.7 m wide) their body closed the way behind the camera: the flight went the other way, twice, and half the place
+/// stayed unseen. A wearer the avatar hides is in no depth, and flights around them already go there.
+#[derive(Clone, Copy, Debug)]
+pub struct LeftOut {
+    pub hips: V,
+    pub eye_height: f32,
+}
+
+impl LeftOut {
+    /// Wide enough for arms held close and narrow enough to leave the walls of a corridor: in eye heights.
+    const RADIUS: f32 = 0.35;
+    const BELOW: f32 = 0.7;
+    const ABOVE: f32 = 0.9;
+
+    fn holds(&self, p: V) -> bool {
+        flat(p, self.hips) < Self::RADIUS * self.eye_height && p[1] > self.hips[1] - Self::BELOW * self.eye_height && p[1] < self.hips[1] + Self::ABOVE * self.eye_height
+    }
 }
 
 impl Seen {
     /// A frame's evidence, unless a frame from the same place looking the same way already gave it: the picture's pause
     /// makes dozens of those, whose votes would all be one.
-    pub fn add(&mut self, frame: SeenFrame) {
+    pub fn add(&mut self, mut frame: SeenFrame) {
+        if let Some(wearer) = self.left_out {
+            // As if that bin read nothing: what is behind the wearer is unknown from here, and other frames say what it is.
+            for bin in 0..frame.bins.len() {
+                if frame.surface_point(bin).is_some_and(|p| wearer.holds(p)) {
+                    frame.bins[bin] = f32::NAN;
+                }
+            }
+            frame.rims = rims_of(&frame.bins);
+        }
         let same = |f: &SeenFrame| length(sub(f.eye, frame.eye)) < 0.02 && dot(f.forward, frame.forward) > 0.9995 && dot(f.up, frame.up) > 0.9995;
         if !self.frames.iter().any(same) {
             self.frames.push(frame);

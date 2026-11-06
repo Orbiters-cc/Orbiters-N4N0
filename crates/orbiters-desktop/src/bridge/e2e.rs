@@ -931,6 +931,10 @@ fn the_whole_loop_runs_unattended() {
     let mut status = Status::default();
     bridge.status_into(&mut status);
     assert!(status.log.iter().any(|l| l.text.contains("3D picture") && l.ok), "the log tells what it did");
+    let state = client.state();
+    let last = state["pictures"].as_array().unwrap().last().unwrap().clone();
+    assert_eq!(state["recording"]["frames"], last["frames"], "the saved recording's own numbers: {state}");
+    assert_eq!(state["recording"]["keyframes"], last["keyframes"], "{state}");
     assert_eq!(status.client.as_ref().map(|c| c.name.as_str()), Some("e2e"));
     assert_eq!(status.client.map(|c| c.connected), Some(true));
 }
@@ -953,6 +957,26 @@ fn an_avatar_without_the_capture_kit_is_said_on_arrival_and_nothing_records() {
     assert!(failure["next"].as_str().unwrap().contains("Do not change the avatar"), "{failure}");
     assert_eq!(client.state()["recording"]["state"], "idle", "nothing recorded");
     assert_eq!(client.state()["pictures"].as_array().unwrap().len(), 0);
+}
+
+#[test]
+fn a_reconstruction_that_fails_says_so_to_the_agent() {
+    let (game, _bridge, _server, client) = lab("recon-fails");
+    game.set_behaviour(|b| {
+        b.reconstruct = Duration::from_millis(50);
+        b.reconstruct_fails = Some("no scene pixel to score".into());
+    });
+    arrive(&client);
+    game.set_foreground(true);
+    client.tool("press", json!({ "input": "esc" })).unwrap();
+    client.tool("mouse", json!({ "action": "click", "x": CAMERA_ICON.0, "y": CAMERA_ICON.1 })).unwrap();
+    client.tool("turn", json!({ "degrees": 5 })).unwrap();
+    client.tool("take_3d_picture", json!({ "length_s": 1, "wait_s": 20 })).unwrap();
+    client.tool("close_vrchat", json!({})).unwrap();
+    let done = until(Duration::from_secs(10), || client.state()["pictures"][0]["reconstruction"]["state"] == "failed");
+    let state = client.state();
+    assert!(done, "{state}");
+    assert_eq!(state["pictures"][0]["reconstruction"]["message"], "no scene pixel to score");
 }
 
 #[test]

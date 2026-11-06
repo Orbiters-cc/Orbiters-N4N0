@@ -306,7 +306,7 @@ fn a_poster_is_nobody_and_a_small_or_weak_face_too() {
         }
     }
     let start: Pose = [0.0, 1.5, 0.0, 0.0, 0.0, 0.0];
-    let seen = Seen { frames: vec![draw_frame(&voxels, &start)] };
+    let seen = Seen { frames: vec![draw_frame(&voxels, &start)] , ..Seen::default() };
     let framing = Framing { width: 1920, height: 1080, p00: P00, p11: P11 };
     let poster = [860.0, 440.0, 1060.0, 640.0, 0.84];
     assert!(people(start, framing, &[poster], None, None, &seen).is_empty(), "flat on the wall");
@@ -398,7 +398,7 @@ fn a_depth_frame_says_free_surface_or_nothing() {
     assert_eq!(f.at([0.0, 1.5, 4.5], 0.2), Clear::Unknown, "behind it");
     assert_eq!(f.at([0.0, 1.5, -1.0], 0.2), Clear::Unknown, "behind the camera");
     assert_eq!(f.at([50.0, 1.5, 1.0], 0.2), Clear::Unknown, "outside the frame");
-    let seen = Seen { frames: vec![f.clone(), draw_frame(&voxels, &[0.0, 1.5, 5.0, 0.0, 180.0, 0.0])] };
+    let seen = Seen { frames: vec![f.clone(), draw_frame(&voxels, &[0.0, 1.5, 5.0, 0.0, 180.0, 0.0])] , ..Seen::default() };
     assert_eq!(seen.at([0.0, 1.5, 3.0], 0.2), Clear::Surface, "a surface wins");
     assert_eq!(seen.at([0.0, 1.5, 4.5], 0.2), Clear::Free, "the other side sees it");
 }
@@ -483,6 +483,63 @@ fn the_seconds_go_where_the_picture_is_of() {
 }
 
 /// World mode over the real room: nobody is flown around whoever stands there, no wall is entered, and it ends on the very pose.
+/// What depth had of the closed door of Rainy Skyline's corridor on 2026-11-06: a wall 7 m away with a hole of sky in it. The flight
+/// went through. Open sky, with nothing around it, still lets it go far.
+#[test]
+fn sky_in_a_hole_in_a_wall_vouches_for_nothing_past_the_wall() {
+    let looking_along_z: [f32; 12] = [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0];
+    let projection = [P00, P11, 0.0, 0.0];
+    let mut wall = vec![7.0; BINS_X * BINS_Y];
+    for y in BINS_Y / 2 - 3..BINS_Y / 2 + 3 {
+        for x in BINS_X / 2 - 3..BINS_X / 2 + 3 {
+            wall[y * BINS_X + x] = f32::INFINITY;
+        }
+    }
+    let door = SeenFrame::from_bins(&looking_along_z, &projection, wall);
+    assert_eq!(door.at([0.0, 0.0, 5.0], 0.2), Clear::Free, "this side of the door");
+    assert_eq!(door.at([0.0, 0.0, 8.0], 0.2), Clear::Unknown, "past it");
+    assert_eq!(door.at([0.0, 0.0, 30.0], 0.2), Clear::Unknown);
+    assert_eq!(door.at([1.8, 0.0, 7.0], 0.2), Clear::Surface, "the wall");
+
+    let open = SeenFrame::from_bins(&looking_along_z, &projection, vec![f32::INFINITY; BINS_X * BINS_Y]);
+    assert_eq!(open.at([0.0, 0.0, 30.0], 0.2), Clear::Free, "open sky");
+
+    // Only the ground below: a street, whose far end nothing closes.
+    let mut street = vec![f32::INFINITY; BINS_X * BINS_Y];
+    for bin in street.iter_mut().skip(BINS_X * (BINS_Y - 3)) {
+        *bin = 4.0;
+    }
+    let street = SeenFrame::from_bins(&looking_along_z, &projection, street);
+    assert_eq!(street.at([0.0, 2.0, 12.0], 0.2), Clear::Free, "high up, far from the ground in the frame");
+}
+
+#[test]
+fn a_wearer_who_will_be_taken_out_stands_in_no_flights_way() {
+    let room = room();
+    let frame = room.start_frames[0].clone();
+    // A point this frame measured a surface on, and a wearer standing right there.
+    let (bin, point) = (0..frame.bins.len()).find_map(|bin| frame.surface_point(bin).map(|p| (bin, p))).expect("a surface");
+    let wearer = LeftOut { hips: point, eye_height: EYE_HEIGHT };
+    let mut seen = Seen::default();
+    seen.add(frame.clone());
+    assert_eq!(seen.at(point, FLIGHT_MARGIN), Clear::Surface, "as an obstacle");
+    let mut without = Seen { left_out: Some(wearer), ..Seen::default() };
+    without.add(frame.clone());
+    assert!(without.frames[0].bins[bin].is_nan(), "that bin read nothing now");
+    assert_ne!(without.at(point, 0.01), Clear::Surface, "no obstacle");
+    // Everything else the frame saw stays.
+    let (mut kept, mut gone) = (0, 0);
+    for b in 0..frame.bins.len() {
+        let Some(p) = frame.surface_point(b) else { continue };
+        if flat(p, point) > LeftOut::RADIUS * EYE_HEIGHT {
+            kept += usize::from(without.frames[0].bins[b] == frame.bins[b]);
+            gone += usize::from(without.frames[0].bins[b] != frame.bins[b]);
+        }
+    }
+    assert!(kept > 100, "{kept}");
+    assert_eq!(gone, 0);
+}
+
 #[test]
 fn a_picture_of_the_world_goes_around_nobody_enters_no_wall_and_comes_home() {
     let room = room();
@@ -659,4 +716,31 @@ fn flights_over_his_recordings() {
         }
     }
     assert!(flown > 0);
+}
+
+/// What a real session's depth frames said along a line as they came: `S` surface, `F` free, `.` unknown. For a flight that went
+/// somewhere it should not have: `SESSION=<folder> AT=x,y,z,x,y,z HIPS=x,y,z EYE=h cargo test replay_a_session -- --ignored --nocapture`.
+#[test]
+#[ignore = "reads a real session"]
+fn replay_a_session() {
+    let nums = |name: &str| -> Vec<f32> { std::env::var(name).unwrap().split(',').map(|v| v.parse().unwrap()).collect() };
+    let dir = std::path::PathBuf::from(std::env::var("SESSION").unwrap());
+    let (line, hips, eye) = (nums("AT"), nums("HIPS"), nums("EYE")[0]);
+    let mut live = LiveDepth::new(&dir);
+    let mut all = Seen::default();
+    live.poll(&mut all);
+    let mut seen = Seen { left_out: Some(LeftOut { hips: [hips[0], hips[1], hips[2]], eye_height: eye }), ..Seen::default() };
+    let (a, b) = ([line[0], line[1], line[2]], [line[3], line[4], line[5]]);
+    let steps = 40;
+    for (k, frame) in all.frames.iter().enumerate() {
+        seen.add(frame.clone());
+        let text: String = (0..=steps)
+            .map(|i| match seen.at(lerp(a, b, i as f32 / steps as f32), FLIGHT_MARGIN) {
+                Clear::Surface => 'S',
+                Clear::Free => 'F',
+                Clear::Unknown => '.',
+            })
+            .collect();
+        println!("{k:3} eye {:6.2} {:6.2} {:5.2} forward {:5.2} {:5.2} {:5.2} {text}", frame.eye[0], frame.eye[1], frame.eye[2], frame.forward[0], frame.forward[1], frame.forward[2]);
+    }
 }

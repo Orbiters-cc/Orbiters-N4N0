@@ -227,19 +227,22 @@ pub enum Pages {
     Mirror,
     /// From version 15: the 3D picture page with its two pictures as buttons.
     TwoPictures,
+    /// From version 16: Stay here on Home.
+    StayHere,
 }
 
 impl Pages {
     /// Every page: the overlay's and the window's.
-    pub const ALL: Pages = Pages::TwoPictures;
+    pub const ALL: Pages = Pages::StayHere;
 
     /// The pages of a screen of `version` (`None`: a screen from before `N4N0/Screen/Version`).
     pub fn of_screen(version: Option<i32>) -> Pages {
         use orbiters_contracts::n4n0::{
             SCREEN_FEEDBACK, SCREEN_MIRROR, SCREEN_MUSIC_LIGHT, SCREEN_QR, SCREEN_SHARE, SCREEN_SIMPLE, SCREEN_STATES_CARDS, SCREEN_TEN_TILES,
-            SCREEN_TIMELINE, SCREEN_TWO_PICTURES,
+            SCREEN_STAY_HERE, SCREEN_TIMELINE, SCREEN_TWO_PICTURES,
         };
         match version {
+            Some(v) if v >= SCREEN_STAY_HERE => Pages::StayHere,
             Some(v) if v >= SCREEN_TWO_PICTURES => Pages::TwoPictures,
             Some(v) if v >= SCREEN_MIRROR => Pages::Mirror,
             Some(v) if v >= SCREEN_FEEDBACK => Pages::Feedback,
@@ -302,6 +305,11 @@ impl Pages {
     /// The 3D picture page has its two pictures as buttons.
     pub fn two_pictures(self) -> bool {
         self >= Pages::TwoPictures
+    }
+
+    /// Home has Stay here.
+    pub fn stay_here(self) -> bool {
+        self >= Pages::StayHere
     }
 }
 
@@ -548,6 +556,8 @@ pub enum Target {
     Back,
     // Home's tiles.
     FastWalk,
+    /// N4N0's menu stays where it is in the world, whatever its owner does, or follows the view again (screen version 16).
+    StayHere,
     YouTube,
     Call,
     Photo,
@@ -721,6 +731,8 @@ pub enum Effect {
         title: String,
     },
     FastWalk(bool),
+    /// The screen stays where it is, or follows the view again.
+    StayHere(bool),
     CallContact {
         id: String,
     },
@@ -847,6 +859,11 @@ pub struct Menu {
     /// N4N0 listens to the person.
     pub listening: bool,
     pub fast_walk: bool,
+    /// The screen stays where it is (`N4N0/Screen/Pinned`, as the avatar says; the Action Menu sets it too).
+    pub pinned: bool,
+    /// This menu shows on the avatar's screen, which is what Stay here keeps in place (no button in the overlay, whose
+    /// menu always comes to the headset).
+    pub on_screen: bool,
     /// VRChat runs in desktop mode: fast walk (a move of SteamVR's play space) is greyed out, "Only in VR".
     pub desktop_mode: bool,
     pub contacts: Vec<Contact>,
@@ -1146,6 +1163,10 @@ impl Menu {
                 };
                 self.go(to);
                 Vec::new()
+            }
+            Target::StayHere => {
+                self.pinned = !self.pinned;
+                vec![Effect::StayHere(self.pinned)]
             }
             Target::FastWalk if self.desktop_mode => Vec::new(),
             Target::FastWalk => {

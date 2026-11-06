@@ -174,6 +174,8 @@ pub(crate) struct N4n0Runtime {
     screen_thumbnail: Option<usize>,
     /// The screen's version (`N4N0/Screen/Version`; older screens lack it): from 3, Home has six tiles.
     screen_version: Option<i32>,
+    /// `/avatar/eyeheight`, metres.
+    eye_height: Option<f32>,
     /// N4N0's light (the Light option), as the avatar holds it: `None` when its N4N0 has none.
     pub(crate) light: Option<orbiters_n4n0_core::menu::Light>,
     /// The screen's size last sent to this avatar (`N4N0/Screen/Size`, times its own size).
@@ -277,6 +279,7 @@ impl N4n0Runtime {
         self.screen_version = None;
         self.screen.menu.pages = Pages::Four;
         self.screen.pointing = false;
+        self.screen.place_sync = false;
         self.screen.avatar(false, false, None, contract::thumbnail::SIZES[0]);
         self.screen.set_gaze(false);
         // VRChat loaded the avatar again (another avatar, another world): no card of the last load is out.
@@ -334,6 +337,7 @@ impl N4n0Runtime {
         }));
         at(self.pending_at.map(|t| t + CONFIRM_FOR));
         at(self.screen.next_due(now));
+        at(self.screen.fingers_waiting().then_some(now));
         at(self.states.next_due());
         at(self.qr.next_due());
         at(self.input.next_due());
@@ -770,6 +774,7 @@ impl N4n0 {
             }
             // The screen's size as Settings say (screens of version 7), again after each avatar change.
             let size = settings.screen_size;
+            rt.screen.geometry = orbiters_n4n0_core::menu::touch::Geometry::of(size as f64, rt.eye_height.map(f64::from));
             if rt.params.contains(params::SCREEN_SIZE) && rt.size_sent != Some(size) {
                 rt.size_sent = Some(size);
                 let (small, large) = contract::SCREEN_SIZES;
@@ -988,7 +993,11 @@ impl N4n0 {
                 && !name.starts_with(local::GAZE_PREFIX)
                 && name != params::SCREEN_REPLACE
                 && name != params::SCREEN_THUMBNAIL_BYTES
-                && name != params::SCREEN_VERSION)
+                && name != params::SCREEN_VERSION
+                && name != params::SCREEN_PINNED
+                && name != params::SCREEN_PLACED
+                && name != params::SCREEN_HELD_LEFT
+                && name != params::SCREEN_HELD_RIGHT)
     }
 
     /// VRChat's mode, the avatar's `N4N0/Screen/Replace` or `N4N0/Screen/ThumbnailBytes` (on the OSC receiving thread):
@@ -1003,6 +1012,7 @@ impl N4n0 {
             rt.screen_version = int_value(value);
             rt.screen.menu.pages = Pages::of_screen(rt.screen_version);
             rt.screen.pointing = pointing(rt.screen_version);
+            rt.screen.place_sync = rt.screen_version.is_some_and(|v| v >= contract::SCREEN_STAY_HERE);
         } else {
             rt.screen_replace = Some(value.truthy());
         }
@@ -1057,6 +1067,11 @@ impl N4n0 {
     /// An avatar parameter VRChat sent, on the OSC receiving thread: what it says is recorded here, what it starts
     /// (listening, N4N0's menu, the walk boost) is done on the app's OSC action queue, in order, and what goes to
     /// Orbiters on threads of its own. Face tracking's flood (`v2/…`, `FT/…`) is the app's to keep away.
+    /// `/avatar/eyeheight` as VRChat says it (on the OSC receiving thread): the screen's contacts in metres.
+    pub fn on_eye_height(self: &Shared, height: f32) {
+        self.n4n0.lock().unwrap().eye_height = Some(height);
+    }
+
     pub fn on_parameter(self: &Shared, name: &str, value: &OscValue) {
         if name == params::VR_MODE || name == params::SCREEN_REPLACE || name == params::SCREEN_THUMBNAIL_BYTES || name == params::SCREEN_VERSION {
             self.screen_choice(name, value);
@@ -1251,6 +1266,7 @@ impl N4n0 {
         // Where N4N0's menu goes: VRChat's mode (an int, 1 in VR), and N4N0/Screen/Replace.
         let vr_mode = flag(params::VR_MODE);
         let replace = screen_replace(flag(params::SCREEN_REPLACE), manifest.as_ref());
+        let pinned = flag(params::SCREEN_PINNED).unwrap_or(false);
         let thumbnail = thumbnail_bytes(
             parameters.iter().find(|(a, _)| a[PARAMETERS_PREFIX.len()..] == *params::SCREEN_THUMBNAIL_BYTES).and_then(|(_, v)| int_value(v)),
             manifest.as_ref(),
@@ -1333,10 +1349,12 @@ impl N4n0 {
                 rt.screen_present = rt.params.contains(orbiters_n4n0_core::menu::screen::local::POINTER) || manifest_screen;
                 rt.screen_sync = sync;
                 rt.screen_replace = replace;
+                rt.screen.menu.pinned = pinned;
                 rt.screen_thumbnail = thumbnail;
                 rt.screen_version = screen_version;
                 rt.screen.menu.pages = Pages::of_screen(screen_version);
                 rt.screen.pointing = pointing(screen_version);
+                rt.screen.place_sync = screen_version.is_some_and(|v| v >= contract::SCREEN_STAY_HERE);
                 rt.light = light;
                 if vr_mode.is_some() {
                     rt.vr_mode = vr_mode;

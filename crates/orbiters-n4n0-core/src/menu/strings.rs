@@ -53,6 +53,7 @@ texts! {
     HomeFastWalk = "home.fastWalk" => "Fast walk",
     HomeYouTube = "home.youtube" => "YouTube",
     HomeCall = "home.call" => "Call",
+    HomeStay = "home.stayHere" => "Stay here",
     HomePhoto = "home.photo" => "3D picture",
     HomeMusic = "home.music" => "Music",
     HomeLight = "home.light" => "Light",

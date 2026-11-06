@@ -82,7 +82,7 @@ pub(super) fn append(scenarios: &mut Vec<Scenario>) {
     states("settings-experimental-agents-new", client(Client::ClaudeCode, Registration::NotAdded), client(Client::Codex, Registration::NotInstalled));
     states(
         "settings-experimental-agents-added",
-        ClientStatus { note: Some("Added. A new Claude Code session has it; one already open has to be restarted.".into()), ..client(Client::ClaudeCode, Registration::Added) },
+        ClientStatus { note: Some("A new Claude Code session has it; one already open has to be restarted.".into()), ..client(Client::ClaudeCode, Registration::Added) },
         client(Client::Codex, Registration::Added),
     );
     states("settings-experimental-agents-old", client(Client::ClaudeCode, Registration::Outdated(Old::Token)), client(Client::Codex, Registration::Outdated(Old::Address)));

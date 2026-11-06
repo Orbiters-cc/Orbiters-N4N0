@@ -639,7 +639,7 @@ impl Registrations {
                         note: Some(if before.is_some() {
                             format!("Updated. Restart any {name} session already open.")
                         } else {
-                            format!("Added. A new {name} session has it; one already open has to be restarted.")
+                            format!("A new {name} session has it; one already open has to be restarted.")
                         }),
                         failed: false,
                     },

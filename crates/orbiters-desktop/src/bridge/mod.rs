@@ -339,7 +339,9 @@ impl Bridge {
             let _ = self.game.osc(address, rest);
         }
         if let Some(up) = hold.up() {
+            self.own_input_sent();
             self.game.release(&[up]);
+            self.own_input_sent();
         }
         self.tell_guard(format!("up {}", hold.guard_line()));
     }
@@ -407,8 +409,7 @@ impl Bridge {
                 self.game.osc(address, osc.unwrap_or(OscArg::Int(1)))?;
             }
             if let (Some(key), Some(window)) = (key, window) {
-                self.game.inject(window, &[*key])?;
-                self.own_input_sent();
+                self.send_own(window, &[*key])?;
             }
         }
         let mut looked = begin;
@@ -436,7 +437,17 @@ impl Bridge {
         Ok(begin.elapsed())
     }
 
-    /// Our own input just went out (see [`person::OwnInput`]).
+    /// Sends input into the game as our own. Said before as well as after: the raw input of `SendInput` wakes the thread that
+    /// hears the person at once, and told only afterwards, that thread took the bridge's own click for the person's, and paused it
+    /// for 30 s after each click and key in the first run on the real game (2026-11-06).
+    pub(crate) fn send_own(&self, window: &game::GameWindow, input: &[Input]) -> Result<(), Failure> {
+        self.own_input_sent();
+        let sent = self.game.inject(window, input);
+        self.own_input_sent();
+        sent
+    }
+
+    /// Our own input is going out, or just went (see [`person::OwnInput`]).
     pub(crate) fn own_input_sent(&self) {
         #[cfg(windows)]
         // SAFETY: a plain query.

@@ -20,8 +20,15 @@ const LONGEST_WAIT_S: f64 = 50.0;
 /// How long a closing game may take.
 const CLOSE_LIMIT: Duration = Duration::from_secs(30);
 /// How fast the avatar turns with `/input/LookLeft` and `Right`, about, degrees a second. Not VRChat's number: it publishes
-/// none, and it depends on the look settings. See `turn`'s description, and the real-run script of `docs/vrchat-bridge.md`.
-const TURN_RATE: f64 = 90.0;
+/// none, and it depends on the look settings. Measured on Enzo's VRChat on 2026-11-06, in desktop mode: holding it 1 s turned
+/// about 170 degrees, and 2 s about 325, judged by the screenshots of a straight corridor.
+const TURN_RATE: f64 = 165.0;
+/// How long the pointer rests on what it is to click, and how long the button stays down. VRChat's menus ignored presses 80 ms
+/// after the pointer came (and, worse, the next click then landed on a page that had not changed); after some 500 ms they all held.
+const CLICK_HOVER: Duration = Duration::from_millis(500);
+const CLICK_HOLD: Duration = Duration::from_millis(100);
+/// What an avatar without the kit means for a picture.
+const NO_KIT: &str = "The avatar worn has no N4N0 capture kit, so a recording would have no camera poses and no keyframes, and nothing to reconstruct.";
 
 /// A tool's answer.
 pub enum Answer {
@@ -37,23 +44,23 @@ You drive VRChat on this computer, in desktop mode, through this bridge. A perso
 2. `find_worlds` for world ids (`source`: search, visited, favorites, trending, popular or active), unless you were given them.\n\
 3. `go_to_world` with a `world_id`. It makes a private instance of your own, starts VRChat in it (closing the last one first), brings it to the foreground, and waits. If `arrived` is false, call `wait_for` with `until: in_world`.\n\
 4. `screenshot` to see where you are. A dark picture is the loading screen: wait a little.\n\
-5. Open VRChat's camera, which only the menus can do: `press` `esc`, `screenshot`, then `mouse` `click` on the camera icon, `screenshot` again, and `press` `esc` to close the menu. `get_state` says `camera.open`. Keep the camera in Stream mode as the app sets it; leave its other settings alone.\n\
+5. Open VRChat's camera, which only the menus can do: `press` `esc`, `screenshot`, `mouse` `click` on the camera icon in the menu's bottom row (about 640, 620 at 1280 by 720), `screenshot`, and `click` on the Stream Camera tile (about 597, 345). The menu closes and the camera's panel stays on the screen. `get_state` says `camera.open`. Leave the camera's settings alone: the app sets Stream and Spout itself when it records. **Look at a screenshot after every click, and before the next one:** a click can miss, its page may not have changed, and the same spot on the page you are really on may be a shop banner. If the page is not what you expected, `press` `esc` closes everything: start again.\n\
 6. If `camera.pose_known` is false, `turn` by a few degrees: VRChat says where its camera is when it moves.\n\
-7. Walk somewhere worth a picture with `walk` and `turn`, looking with `screenshot` between moves. `turn` is approximate: judge by the pictures. `walk` tells you if the avatar did not seem to move.\n\
+7. Before opening the camera, walk somewhere worth a picture with `walk` and `turn`, looking with `screenshot` between moves: with the camera or a menu open the avatar does not move (`speed_seen` 0), and the picture starts where the camera opens. `press` `esc` closes the camera again. `turn` is approximate: judge by the pictures. `walk` tells you if the avatar did not seem to move.\n\
 8. `take_3d_picture` with `length_s` 1, 4 or 8. It waits for the recording to be saved and gives the `session`. Take a few from different places: 4 or 8 seconds in the open, 1 second for a close look.\n\
 9. `go_to_world` with the next world, and so on.\n\
 10. `close_vrchat` at the end. Reconstructions follow the app's own setting: they run beside VRChat, or wait for it to close (`get_state`'s `reconstructions` and each picture's `reconstruction` say which). Then `wait_for` with `until: reconstructions_done`, as many times as it takes, and report each session's `reconstruction` from `get_state`.\n\n\
 ## When to give up on a world\n\n\
 Move on to the next world, and say so at the end, when:\n\
 - `go_to_world` or `wait_for` fails with `start_timeout`, or the world does not load within about four minutes;\n\
-- a picture comes back with `no_keyframes`: if it happens in two worlds, the avatar has no capture kit, so stop the whole run and tell the person;\n\
+- a picture comes back with `no_keyframes`: if it happens in two worlds, stop the whole run and tell the person;\n\
 - after about ten moves you cannot find a place to stand, or the spawn is a closed room;\n\
 - somebody else appears (`place.others_here` above 0): go elsewhere rather than picture them.\n\n\
-Stop the whole run and tell the person when: `stopped` (they took control back); `not_private_instance` twice; `not_started_by_bridge`; `vrchat_not_signed_in`; `vr_mode`.\n\n\
+Stop the whole run and tell the person when: `no_capture_kit` (`avatar.capture_kit` false in `get_state` says it as soon as you arrive: nothing can be reconstructed with that avatar, and you may not change it); `stopped` (they took control back); `not_private_instance` twice; `not_started_by_bridge`; `vrchat_not_signed_in`; `vr_mode`.\n\n\
 ## While the person is at the computer\n\n\
 `paused_by_person`: they are using the computer. Wait for as long as `retry_after_s` says with `wait_for` (`until: not_paused`), and go on when it clears; do not fight it. `paused_held`: they pressed the hotkey or Pause, and it lasts until they resume.\n\n\
 ## What you must not do\n\n\
-Do not open the chatbox, send chat, invites or friend requests, change avatars, or touch the safety settings, even though a click could reach some of them. Do not press anything in another person's menu. The keys and inputs you can press are limited on purpose. Only private instances you own are possible: there is no way to join others, and none to try.\n";
+Do not open the chatbox, send chat, invites or friend requests, change avatars, buy anything, or touch the safety settings, even though a click can reach them: VRChat's menus show a shop with Purchase buttons, a banner on the first page leads there, and a click has no way back. Never click what you have not just seen. Do not press anything in another person's menu. The keys and inputs you can press are limited on purpose. Only private instances you own are possible: there is no way to join others, and none to try.\n";
 
 fn number(args: &Value, key: &str, default: f64) -> f64 {
     args[key].as_f64().unwrap_or(default)
@@ -122,7 +129,7 @@ pub fn list() -> Value {
         {
             "name": "walk",
             "title": "Walk",
-            "description": "Walks for a time, over OSC, which needs no window focus. Blocks until done. `speed_seen` is the avatar's speed as VRChat reported it, when it did: 0 or nothing while walking means blocked, seated, or a menu open. How far that is depends on the world; judge by screenshot. At most 10 s a call, so that a lost connection never leaves the avatar walking.",
+            "description": "Walks for a time, over OSC, which needs no window focus. Blocks until done. `speed_seen` is the avatar's speed as VRChat reported it, when it did: 0 or nothing while walking means blocked, seated, or a menu or the camera open (press esc closes them). How far that is depends on the world; judge by screenshot. At most 10 s a call, so that a lost connection never leaves the avatar walking.",
             "inputSchema": { "type": "object", "properties": {
                 "direction": { "type": "string", "enum": ["forward", "backward", "left", "right"], "description": "Relative to where the avatar faces. Left and right sidestep." },
                 "seconds": { "type": "number", "exclusiveMinimum": 0, "maximum": 10 },
@@ -133,10 +140,10 @@ pub fn list() -> Value {
         {
             "name": "turn",
             "title": "Turn",
-            "description": "Turns the avatar by about so many degrees, over OSC, which needs no window focus. Approximate: it holds VRChat's look input for degrees / rate seconds, and the real speed depends on VRChat's settings, so compare screenshots, and pass rate_deg_per_s once you know better. Positive turns right, negative left.",
+            "description": "Turns the avatar by about so many degrees, over OSC, which needs no window focus. Approximate: it holds VRChat's look input for degrees / rate seconds, and the real speed depends on VRChat's settings, so compare screenshots, and pass rate_deg_per_s once you know better. With a menu or the camera open it does nothing. Positive turns right, negative left.",
             "inputSchema": { "type": "object", "properties": {
                 "degrees": { "type": "number", "minimum": -360, "maximum": 360 },
-                "rate_deg_per_s": { "type": "number", "exclusiveMinimum": 0, "description": "Default 90." },
+                "rate_deg_per_s": { "type": "number", "exclusiveMinimum": 0, "description": "Default 165." },
             }, "required": ["degrees"], "additionalProperties": false },
             "annotations": acts,
         },
@@ -154,7 +161,7 @@ pub fn list() -> Value {
         {
             "name": "mouse",
             "title": "Use the mouse",
-            "description": "Mouse input, needing VRChat to be the foreground window. move puts the pointer over a point of the window (x, y in window pixels); click does that and clicks (with a menu open: while the game has the mouse, a click only uses what the avatar faces). look moves the mouse by dx, dy counts, which is how to look up and down with no menu open. Click only what you can see in a recent screenshot, and only the camera and menus you need: not chat, invites, friends, avatars or safety.",
+            "description": "Mouse input, needing VRChat to be the foreground window. move puts the pointer over a point of the window (x, y in window pixels); click does that and clicks (with a menu open: while the game has the mouse, a click only uses what the avatar faces). look moves the mouse by dx, dy counts, which is how to look up and down with no menu open. Click only what you see in the screenshot you just took, and only the camera and menus you need: not chat, invites, friends, avatars, the shop or safety. It takes about 0.6 s: the pointer rests first, or VRChat's menus ignore the press.",
             "inputSchema": { "type": "object", "properties": {
                 "action": { "type": "string", "enum": ["move", "click", "look"] },
                 "x": { "type": "integer", "minimum": 0 },
@@ -362,7 +369,10 @@ impl Bridge {
                 if run.pid.is_none() && seen.pid.is_some() {
                     run.pid = seen.pid;
                 }
+                // Not at "Joining": the world is still loading for 20 s and more then (22 s for a world already in the cache, on
+                // the first real run), and the player only exists once it loaded.
                 let arrived = seen.in_world
+                    && seen.local_player.is_some()
                     && seen.pid.is_some()
                     && seen.world_id.as_deref() == Some(&going.world_id)
                     && seen.instance.as_deref().is_some_and(|i| same_instance(i, &going.instance));
@@ -423,10 +433,11 @@ impl Bridge {
         let started_by_bridge = ours.is_some() && ours == seen.pid;
         let window = seen.pid.filter(|_| started_by_bridge).and_then(|pid| self.game.window(pid));
         let camera_open = if started_by_bridge { self.game.camera_open() } else { None };
+        let capture_kit = if started_by_bridge && seen.local_player.is_some() { self.game.capture_kit() } else { None };
         let private = seen.vrchat_user.as_ref().zip(seen.instance.as_deref()).is_some_and(|((me, _), i)| seen.in_world && private_instance_of(i, me));
         let paused = self.paused();
         let picture_list: Vec<Value> = pictures.iter().map(|p| self.picture_json(p, &seen)).collect();
-        let next = Self::next_step(&seen, &paused, started_by_bridge, private, going.is_some(), camera_open);
+        let next = Self::next_step(&seen, &paused, started_by_bridge, private, going.is_some(), camera_open, capture_kit);
         json!({
             "bridge": {
                 "paused": paused,
@@ -452,6 +463,7 @@ impl Bridge {
                 "private": private,
                 "others_here": seen.others,
             },
+            "avatar": { "name": seen.avatar_name, "capture_kit": capture_kit },
             "camera": { "open": camera_open, "pose_known": seen.camera_pose_known },
             "recording": seen.capture,
             "reconstructions": {
@@ -465,7 +477,7 @@ impl Bridge {
     }
 
     /// What to do now, for a model that just read the state.
-    fn next_step(seen: &Seen, paused: &Option<Paused>, started_by_bridge: bool, private: bool, going: bool, camera_open: Option<bool>) -> String {
+    fn next_step(seen: &Seen, paused: &Option<Paused>, started_by_bridge: bool, private: bool, going: bool, camera_open: Option<bool>, capture_kit: Option<bool>) -> String {
         if paused.is_some() {
             return "The person took over: call wait_for with until not_paused.".into();
         }
@@ -494,8 +506,11 @@ impl Bridge {
         if seen.capture.state != "idle" {
             return "A recording is under way: call wait_for with until picture_saved.".into();
         }
+        if capture_kit == Some(false) {
+            return format!("{NO_KIT} Tell the person: only they can change the avatar, and you may not. Look around if that helps them, then close_vrchat.");
+        }
         if camera_open != Some(true) {
-            return "Open VRChat's camera: press esc, screenshot, click its icon with mouse, screenshot, press esc to close the menu.".into();
+            return "Open VRChat's camera: press esc, screenshot, click the camera icon in the menu's bottom row, screenshot, click Stream Camera.".into();
         }
         if !seen.camera_pose_known {
             return "turn by a few degrees: VRChat says where its camera is when it moves.".into();
@@ -647,14 +662,18 @@ impl Bridge {
         }
         Self::in_private_instance(&seen)?;
         let foreground = self.forward_on_arrival(&seen);
+        let capture_kit = self.game.capture_kit();
         Ok(json!({
             "arrived": true,
+            "avatar": { "name": seen.avatar_name, "capture_kit": capture_kit },
             "world_id": seen.world_id,
             "world_name": seen.world_name,
             "instance": seen.instance,
             "private": true,
             "foreground": foreground,
-            "next": if foreground {
+            "next": if capture_kit == Some(false) {
+                "The avatar worn has no capture kit, so a 3D picture would have nothing to reconstruct: stop and tell the person. Only they can change the avatar."
+            } else if foreground {
                 "Look with screenshot. The camera must be opened in each new start of VRChat."
             } else {
                 "Look with screenshot. Windows did not give VRChat the focus, so keys and the mouse are refused until focus_game works or the person clicks it; walk and turn work without it. The camera must be opened in each new start of VRChat, which takes the mouse."
@@ -931,8 +950,7 @@ impl Bridge {
         match action {
             "move" => {
                 let (x, y) = inside()?;
-                self.game.inject(&window, &[Input::MoveTo { x, y }])?;
-                self.own_input_sent();
+                self.send_own(&window, &[Input::MoveTo { x, y }])?;
                 Ok(Answer::Data(json!({ "moved_to": [x, y] })))
             }
             "click" => {
@@ -943,14 +961,17 @@ impl Bridge {
                     Some("middle") => MouseButton::Middle,
                     _ => return Err(Failure::new("bad_arguments", "button must be left, right or middle.", "Pass one of those, or none.")),
                 };
+                // The pointer first, and time for the game to see it there: VRChat's menus only take a press on what the pointer has
+                // been over for a moment, so that with both in one go the first click on anything only highlighted it.
+                self.send_own(&window, &[Input::MoveTo { x, y }])?;
+                std::thread::sleep(CLICK_HOVER);
                 let hold = Hold::Button(button);
-                self.held.press(hold.clone(), Instant::now() + Duration::from_millis(200));
+                self.held.press(hold.clone(), Instant::now() + CLICK_HOLD * 5);
                 self.tell_guard(format!("down {}", hold.guard_line()));
-                let sent = self.game.inject(&window, &[Input::MoveTo { x, y }, Input::Button { button, down: true }]);
+                let sent = self.send_own(&window, &[Input::Button { button, down: true }]);
                 if sent.is_ok() {
-                    self.own_input_sent();
-                    // Long enough for a game that samples its input each frame.
-                    std::thread::sleep(Duration::from_millis(60));
+                    // Long enough for a game that samples its input each frame, at the frame rates it has with a capture running.
+                    std::thread::sleep(CLICK_HOLD);
                 }
                 if self.held.lift(&hold) {
                     self.lift_now(&hold);
@@ -969,8 +990,7 @@ impl Bridge {
                         "Pass mouse counts: how far that turns depends on VRChat's sensitivity.",
                     ));
                 }
-                self.game.inject(&window, &[Input::MoveBy { dx, dy }])?;
-                self.own_input_sent();
+                self.send_own(&window, &[Input::MoveBy { dx, dy }])?;
                 Ok(Answer::Data(json!({ "looked": [dx, dy] })))
             }
             _ => Err(Failure::new("bad_arguments", "action must be move, click or look.", "Pass one of those.")),
@@ -1006,11 +1026,19 @@ impl Bridge {
         if !matches!(seen.capture.state.as_str(), "idle" | "") {
             return Err(Failure::new("picture_under_way", "A recording is under way.", "Call wait_for with until picture_saved first."));
         }
+        // Before any recording: without the kit there are no camera poses, and all of it would be for nothing.
+        if self.game.capture_kit() == Some(false) {
+            return Err(Failure::new(
+                "no_capture_kit",
+                format!("{NO_KIT} ({})", seen.avatar_name.as_deref().unwrap_or("its name is not known")),
+                "Stop the run and tell the person to wear an avatar with N4N0's capture kit. Do not change the avatar yourself.",
+            ));
+        }
         if self.game.camera_open() != Some(true) {
             return Err(Failure::new(
                 "camera_closed",
                 "VRChat's camera is not open, and nothing but its menu opens it.",
-                "press esc, screenshot, click the camera's icon with mouse, screenshot, press esc. If get_state still says camera.open is not true, OSC may be off: in VRChat's Action Menu (r), Options, OSC, turn it on.",
+                "press esc, screenshot, click the camera icon in the menu's bottom row, screenshot, click Stream Camera. If get_state still says camera.open is not true, OSC may be off: in VRChat's Action Menu (r), Options, OSC, turn it on.",
             ));
         }
         if !seen.camera_pose_known {

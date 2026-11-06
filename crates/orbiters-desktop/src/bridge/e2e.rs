@@ -864,9 +864,75 @@ fn the_whole_loop_runs_unattended() {
 }
 
 #[test]
+fn an_avatar_without_the_capture_kit_is_said_on_arrival_and_nothing_records() {
+    let (game, _bridge, _server, client) = lab("no-kit-known");
+    game.set_behaviour(|b| b.kit = false);
+    let arrived = arrive(&client);
+    assert_eq!(arrived["avatar"]["capture_kit"], false, "{arrived}");
+    assert!(arrived["next"].as_str().unwrap().contains("capture kit"), "{arrived}");
+    let state = client.state();
+    assert_eq!(state["avatar"]["capture_kit"], false);
+    assert!(state["next"].as_str().unwrap().contains("capture kit"), "{state}");
+    game.set_foreground(true);
+    client.tool("press", json!({ "input": "esc" })).unwrap();
+    client.tool("mouse", json!({ "action": "click", "x": CAMERA_ICON.0, "y": CAMERA_ICON.1 })).unwrap();
+    client.tool("turn", json!({ "degrees": 5 })).unwrap();
+    let failure = client.fails("take_3d_picture", json!({ "length_s": 8 }), "no_capture_kit");
+    assert!(failure["next"].as_str().unwrap().contains("Do not change the avatar"), "{failure}");
+    assert_eq!(client.state()["recording"]["state"], "idle", "nothing recorded");
+    assert_eq!(client.state()["pictures"].as_array().unwrap().len(), 0);
+}
+
+#[test]
+fn the_bridges_own_input_is_never_taken_for_the_person() {
+    let (game, bridge, _server, client) = lab("own-input");
+    arrive(&client);
+    game.set_foreground(true);
+    // The thread that hears the person wakes the moment `SendInput` runs: by then it must know the input is ours.
+    bridge.own_input.sent(0);
+    let told = bridge.clone();
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let saw = seen.clone();
+    *game.sending.lock().unwrap() = Some(Box::new(move || saw.lock().unwrap().push(told.own_input.last())));
+    client.tool("press", json!({ "input": "esc" })).unwrap();
+    client.tool("mouse", json!({ "action": "move", "x": 10, "y": 10 })).unwrap();
+    client.tool("mouse", json!({ "action": "click", "x": 10, "y": 10 })).unwrap();
+    client.tool("mouse", json!({ "action": "look", "dx": 1, "dy": 0 })).unwrap();
+    let seen = seen.lock().unwrap();
+    assert!(seen.len() >= 5, "{seen:?}");
+    assert!(seen.iter().all(|at| *at != 0), "said before each: {seen:?}");
+}
+
+#[test]
+fn a_click_rests_on_its_place_before_it_presses() {
+    let (game, _bridge, _server, client) = lab("click-order");
+    arrive(&client);
+    game.set_foreground(true);
+    client.tool("mouse", json!({ "action": "click", "x": 20, "y": 30 })).unwrap();
+    let sent = game.injected();
+    assert!(matches!(sent[0], Input::MoveTo { x: 20, y: 30 }), "{sent:?}");
+    assert!(matches!(sent[1], Input::Button { down: true, .. }), "{sent:?}");
+}
+
+#[test]
+fn arriving_waits_for_the_world_to_have_loaded() {
+    let (game, _bridge, _server, client) = lab("loading");
+    // The game says it is joining, and the player does not exist yet.
+    game.set_behaviour(|b| b.player_after = Duration::from_millis(1500));
+    let begin = Instant::now();
+    let arrived = arrive(&client);
+    assert_eq!(arrived["arrived"], true, "{arrived}");
+    assert!(begin.elapsed() >= Duration::from_millis(1400), "too early: {:?}", begin.elapsed());
+}
+
+#[test]
 fn a_picture_without_the_capture_kit_says_so() {
     let (game, _bridge, _server, client) = lab("no-kit");
-    game.set_behaviour(|b| b.kit = false);
+    // VRChat's tree does not say, so it only shows in what was recorded.
+    game.set_behaviour(|b| {
+        b.kit = false;
+        b.tree_says_kit = false;
+    });
     arrive(&client);
     game.set_foreground(true);
     client.tool("press", json!({ "input": "esc" })).unwrap();

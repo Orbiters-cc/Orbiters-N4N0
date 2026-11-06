@@ -106,6 +106,8 @@ impl Game for RealGame {
             instance: world.instance.clone(),
             in_world: world.in_world,
             local_player: world.local_player.clone(),
+            // The avatar's first switch comes before the log says who the player is: then only the list by player has it.
+            avatar_name: world.avatar_name.clone().or_else(|| world.local_player.as_ref().and_then(|me| world.avatars.get(me).cloned())),
             others: world.others(),
             vrchat_user: snap.vrchat_login.user.as_ref().map(|u| (u.id.clone(), u.display_name.clone())),
             desktop_mode: if snap.vrchat.running { self.desktop_mode(world.log_file.as_ref()) } else { None },
@@ -133,6 +135,10 @@ impl Game for RealGame {
 
     fn camera_open(&self) -> Option<bool> {
         self.ctl().ok()?.camera_open()
+    }
+
+    fn capture_kit(&self) -> Option<bool> {
+        self.ctl().ok()?.worn_avatar_has_kit()
     }
 
     fn create_private_instance(&self, world: &str, region: &str) -> Result<String, Failure> {

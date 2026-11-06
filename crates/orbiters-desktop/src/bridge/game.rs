@@ -75,6 +75,8 @@ pub struct Seen {
     pub others: usize,
     /// The VRChat account signed in in Orbiters - N4N0's Settings (the one instances are made with): id and name.
     pub vrchat_user: Option<(String, String)>,
+    /// The avatar worn, as the game's log names it.
+    pub avatar_name: Option<String>,
     /// Started without VR, as the game's own log says; `None` until it said.
     pub desktop_mode: Option<bool>,
     /// VRChat's OSC answers (its OSCQuery service was found).
@@ -183,6 +185,8 @@ pub trait Game: Send + Sync {
     fn seen(&self) -> Seen;
     /// Whether VRChat's camera is open, `None` when VRChat does not say. Apart from [`Game::seen`] as it asks VRChat.
     fn camera_open(&self) -> Option<bool>;
+    /// Whether the avatar worn has N4N0's capture kit: `None` when VRChat does not say. Reads VRChat's tree: not for every tick.
+    fn capture_kit(&self) -> Option<bool>;
     /// A new private instance of `world`, owned by the signed-in VRChat account. Only ever that kind: nothing here can
     /// name another instance, or make a public, friends or group one.
     fn create_private_instance(&self, world: &str, region: &str) -> Result<String, Failure>;

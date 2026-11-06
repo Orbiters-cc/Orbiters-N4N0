@@ -100,6 +100,7 @@ pub enum Find {
     Favorites,
     Popular,
     Active,
+    Trending,
 }
 
 /// A world an agent can pick.

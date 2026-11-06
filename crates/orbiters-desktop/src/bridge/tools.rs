@@ -34,7 +34,7 @@ pub const GUIDE: &str = "# Taking 3D pictures from world to world\n\n\
 You drive VRChat on this computer, in desktop mode, through this bridge. A person may be at the computer: they always win, and the bridge will tell you when they took over.\n\n\
 ## The loop\n\n\
 1. `get_state`. Its `next` says what to do. If `vrchat.running` is true and `vrchat.started_by_bridge` false, that VRChat is the person's: do nothing to it and tell them.\n\
-2. `find_worlds` for world ids (`source`: search, visited, favorites, popular or active), unless you were given them.\n\
+2. `find_worlds` for world ids (`source`: search, visited, favorites, trending, popular or active), unless you were given them.\n\
 3. `go_to_world` with a `world_id`. It makes a private instance of your own, starts VRChat in it (closing the last one first), brings it to the foreground, and waits. If `arrived` is false, call `wait_for` with `until: in_world`.\n\
 4. `screenshot` to see where you are. A dark picture is the loading screen: wait a little.\n\
 5. Open VRChat's camera, which only the menus can do: `press` `esc`, `screenshot`, then `mouse` `click` on the camera icon, `screenshot` again, and `press` `esc` to close the menu. `get_state` says `camera.open`. Keep the camera in Stream mode as the app sets it; leave its other settings alone.\n\
@@ -76,7 +76,7 @@ pub fn list() -> Value {
             "title": "Find worlds",
             "description": "Lists worlds to go to, with their ids for go_to_world. Use it when you were not given world ids. VRChat's API is rate limited: search for what you need rather than paging through everything.",
             "inputSchema": { "type": "object", "properties": {
-                "source": { "type": "string", "enum": ["search", "visited", "favorites", "popular", "active"], "description": "search: by name, needs query. visited: where this account has been, latest first. favorites: this account's favorite worlds. popular and active: VRChat's lists." },
+                "source": { "type": "string", "enum": ["search", "visited", "favorites", "trending", "popular", "active"], "description": "search: by name, needs query. visited: where this account has been, latest first. favorites: this account's favorite worlds. trending: what is hot right now. popular: most played of all time. active: most people in them now." },
                 "query": { "type": "string", "description": "Words in the world's name, for source search." },
                 "page": { "type": "integer", "minimum": 0, "description": "From 0." },
             }, "required": ["source"], "additionalProperties": false },
@@ -544,7 +544,8 @@ impl Bridge {
             Some("favorites") => Find::Favorites,
             Some("popular") => Find::Popular,
             Some("active") => Find::Active,
-            _ => return Err(Failure::new("bad_arguments", "source must be search, visited, favorites, popular or active.", "Pass one of those.")),
+            Some("trending") => Find::Trending,
+            _ => return Err(Failure::new("bad_arguments", "source must be search, visited, favorites, trending, popular or active.", "Pass one of those.")),
         };
         let worlds = self.game.find_worlds(&find, page)?;
         Ok(Answer::Data(json!({ "worlds": worlds, "page": page })))

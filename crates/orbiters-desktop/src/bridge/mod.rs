@@ -12,6 +12,7 @@
 //!   the game's process, reads none of its memory, injects nothing, and does nothing around Easy Anti-Cheat.
 
 pub mod capture;
+pub mod clients;
 // It drives a real game window through Windows; the bridge does nothing where VRChat does not run.
 #[cfg(all(test, windows))]
 mod e2e;
@@ -93,12 +94,18 @@ pub struct Status {
     pub problem: Option<String>,
     /// The hotkey was taken by another program: the person's input and Stop still work.
     pub hotkey_taken: bool,
+    /// The agents it can be added to, and what each of them has.
+    pub clients: Vec<clients::ClientStatus>,
 }
 
 /// What Settings asks of the service.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Command {
+    /// Adds the bridge to an agent, updates what it has, or takes it away.
+    Client { client: clients::Client, change: clients::Change },
+    /// Settings is shown: what the agents have is asked again.
+    CheckClients,
     /// Takes control back at once: releases input, ends what runs, and turns the bridge off.
     Stop,
     /// Pauses the agent until resumed.

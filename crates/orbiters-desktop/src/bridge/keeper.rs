@@ -3,6 +3,7 @@
 //! The answer lives in this process's memory only, and nothing in a settings file can stand in for it: a person editing a
 //! file can turn it off, and can never turn it on for an account the server does not say has it.
 
+use super::clients::{Change, Client, Registrations, Wanted};
 use super::mcp::Server;
 use super::person::Listener;
 use super::{Bridge, Command, Status};
@@ -10,7 +11,7 @@ use orbiters_core::features::Grant;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 /// How often the server is asked again while it says yes.
@@ -110,6 +111,10 @@ pub struct Keeper {
     published: Box<dyn Fn(Status) + Send + Sync>,
     /// How to hear the person: Raw Input for real, nothing in tests (`None` from it fails closed).
     hear: Hear,
+    /// The agents the bridge can be added to: the real ones in the service, none in the lab and in tests.
+    pub(crate) registrations: OnceLock<Arc<Registrations>>,
+    /// The bridge just opened, or its token changed: what the agents have is looked at, and fixed.
+    repair_due: AtomicBool,
 }
 
 /// How to hear the person: `None` when that cannot be done.
@@ -134,12 +139,29 @@ impl Keeper {
             generation: AtomicU64::new(0),
             published,
             hear,
+            registrations: OnceLock::new(),
+            repair_due: AtomicBool::new(false),
         })
     }
 
     /// The real one: the file in the settings folder, and Raw Input.
     pub fn for_service(bridge: Arc<Bridge>, flag: Arc<dyn Flag>, published: Box<dyn Fn(Status) + Send + Sync>) -> Arc<Self> {
-        Self::new(bridge, flag, Keys::file(), ASK_EVERY, PROOF_LASTS, published, Box::new(super::hear_person))
+        let keeper = Self::new(bridge.clone(), flag, Keys::file(), ASK_EVERY, PROOF_LASTS, published, Box::new(super::hear_person));
+        let _ = keeper.registrations.set(Registrations::real(Box::new(move |ok, line| bridge.log(ok, line))));
+        keeper
+    }
+
+    /// What an agent's entry should say now.
+    fn wanted(&self) -> Wanted {
+        let open = self.inner.lock().unwrap().open.as_ref().map(|o| o.server.port());
+        let keys = Keys::load_or_create(&self.keys_file);
+        Wanted { address: address_of(open.unwrap_or(keys.port)), token: keys.token, listening: open.is_some() }
+    }
+
+    fn clients(&self, act: impl FnOnce(&Arc<Registrations>, Wanted)) {
+        if let Some(registrations) = self.registrations.get() {
+            act(registrations, self.wanted());
+        }
     }
 
     /// Runs on a thread of its own for the life of the process.
@@ -194,6 +216,9 @@ impl Keeper {
             inner.problem = None;
         }
         drop(inner);
+        if self.repair_due.swap(false, Ordering::Relaxed) {
+            self.clients(|clients, wanted| clients.repair(wanted));
+        }
         self.publish();
     }
 
@@ -224,6 +249,8 @@ impl Keeper {
                 inner.open = Some(Open { server, _listener: listener, hotkey_taken, token: keys.token });
                 inner.problem = None;
                 self.bridge.log(true, format!("Listening on 127.0.0.1:{}.", keys.port));
+                // Whatever moved since an agent was told, it is told now.
+                self.repair_due.store(true, Ordering::Relaxed);
             }
             Err(e) => {
                 self.bridge.stop_guard();
@@ -260,11 +287,19 @@ impl Keeper {
                 keys.save(&self.keys_file);
                 let mut inner = self.inner.lock().unwrap();
                 if inner.open.is_some() {
-                    self.close(&mut inner, "A new token: clients have to be given it again.");
+                    self.close(&mut inner, "A new token: the agents it was added to are updated, others have to be given it again.");
                 }
+                // Also while closed: nothing else would ever tell them.
+                self.repair_due.store(true, Ordering::Relaxed);
             }
+            Command::Client { client, change } => self.change_client(client, change),
+            Command::CheckClients => self.clients(|clients, wanted| clients.check(wanted)),
         }
         self.tick();
+    }
+
+    fn change_client(&self, client: Client, change: Change) {
+        self.clients(|clients, wanted| clients.change(client, change, wanted));
     }
 
     /// Ends it all when the app quits.
@@ -286,16 +321,24 @@ impl Keeper {
             status.problem = inner.problem.clone();
             if let Some(open) = inner.open.as_ref() {
                 status.listening = true;
-                status.address = Some(format!("http://127.0.0.1:{}/mcp", open.server.port()));
+                status.address = Some(address_of(open.server.port()));
                 status.token = Some(open.token.clone());
                 status.hotkey_taken = open.hotkey_taken;
             }
         }
         if status.allowed {
             self.bridge.status_into(&mut status);
+            if let Some(registrations) = self.registrations.get() {
+                status.clients = registrations.statuses();
+            }
         }
         (self.published)(status);
     }
+}
+
+/// The address a client is given.
+fn address_of(port: u16) -> String {
+    format!("http://127.0.0.1:{port}/mcp")
 }
 
 #[cfg(test)]

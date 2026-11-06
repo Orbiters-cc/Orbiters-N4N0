@@ -157,6 +157,7 @@ impl Game for RealGame {
             Find::Favorites => WorldList::Favorites,
             Find::Popular => WorldList::Popular,
             Find::Active => WorldList::Active,
+            Find::Trending => WorldList::Trending,
         };
         let found = ctl.vrchat_source().worlds(&list, page).map_err(|e| api_failure(e, "finding worlds"))?;
         Ok(found

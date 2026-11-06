@@ -212,6 +212,17 @@ impl MenuOverlay {
         }
     }
 
+    /// The 3D worlds panel now, in the menu's place: asked for from the panels around VRChat's menus.
+    pub fn open_worlds(&mut self, overlay: &vr::Overlay, steamvr: &vr::Client, snap: &Snapshot) {
+        if !self.host.menu.open {
+            self.open(overlay, steamvr, snap);
+        }
+        self.worlds.open_panel(self.host.menu.layout);
+        self.canvas.invalidate();
+        self.host.dirty = true;
+        self.last_activity = Instant::now();
+    }
+
     fn close(&mut self, overlay: &vr::Overlay) {
         // (The menu's own close, idle or its button, closed `menu` already: this hides the overlay.)
         self.closed_at = Some(Instant::now());

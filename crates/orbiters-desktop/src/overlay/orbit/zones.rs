@@ -1,15 +1,18 @@
-//! Where VRChat's menus are in its window, measured from the real game on 2026-11-06, and where Orbiters' panels go around them, in the menu's own units so that
+//! Where VRChat's menus are in its window, measured from the real game on 2026-11-06, and where Orbiters' parts go around them, in the menu's own units so that
 //! one set of numbers serves every window size (and, as metres, the headset's plane: [`super::vr`]).
 //!
 //! **The wheel** scales with the window's height alone. At 1280 x 720, 1920 x 1080, 960 x 540, 1000 x 900, 1000 x 1000, 800 x 800, 900 x 720, 1100 x 800, 1400 x 1050
 //! and 1700 x 600 its centre is 0.1556 of the height right of the window's middle and 0.1583 below it, and its radius 0.139 of the height: all ten came out with an
 //! unbroken rim (`detect::wheel_seen` on those frames). So 2.46 radii are free below it in any window, and sideways at any shape from square up.
 //!
-//! **Around the wheel the panels are a second wheel** (Enzo, seeing boxes around it: "more circular [...] so it feels more like an extension of it"): one ring, concentric
-//! with VRChat's, its cells cut on the same angles as VRChat's slices (every 30 degrees, which holds its spokes at 30, 90 and 150), each a [`Ring`] of its own.
+//! **Around the wheel Orbiters is a second wheel:** one ring of six equal cells, each as wide as a slice of VRChat's and on the same angles, so that VRChat's spokes run on
+//! through its gaps (Enzo: "more circular [...] so it feels more like an extension of it"; the first judges: capture must not own it). A cell can bloom a second, outer ring
+//! ([`Group`]): the 3D pictures' choices, the music's controls.
 //!
 //! **The Quick Menu** is a canvas that scales with the height down to 16:9 and, narrower than that, somewhat less: `height / 720 * min(1, aspect / (16/9)) ^ 0.28` (fitted
 //! on 900 x 720, 1000 x 900, 800 x 800: within 1%), centred on the window's width and at 0.55 of its height. Its units here are pixels of a 1280 x 720 window from that centre.
+//! Orbiters is **one wing docked to My Profile's outer edge**, of its height and width, as VRChat's own wings are. Where the window has no room for it, it lies in My Profile's
+//! place, as another wing would.
 
 use egui::{pos2, vec2, Pos2, Rect, Vec2};
 
@@ -39,14 +42,19 @@ pub fn quick_menu(client: Vec2) -> (Pos2, f32) {
 pub const QM_ICONS_Y: f32 = 224.0;
 pub const QM_ICONS_X: [f32; 7] = [-132.0, -88.0, -44.0, 0.0, 44.0, 88.0, 132.0];
 
-/// Where the ring starts and ends, in hundredths of the wheel's radius: just off VRChat's rim, and as far as the window allows at any size.
-pub const RING_INNER: f32 = 108.0;
-pub const RING_OUTER: f32 = 240.0;
+/// Where the ring starts and ends, in hundredths of the wheel's radius: just off VRChat's rim, a band about as deep as VRChat's own slices are long.
+pub const RING_INNER: f32 = 106.0;
+pub const RING_OUTER: f32 = 202.0;
+/// The ring that blooms outside it.
+pub const BLOOM_INNER: f32 = 206.0;
+pub const BLOOM_OUTER: f32 = 292.0;
+/// The music's controls need less depth.
+pub const BLOOM_SHORT: f32 = 262.0;
 /// What separates two cells, and the cells' corners, in those units.
 const RING_GAP: f32 = 3.5;
-const RING_CORNER: f32 = 10.0;
+const RING_CORNER: f32 = 9.0;
 
-/// A cell of the ring: from and to, in degrees clockwise from straight up, and its radii.
+/// A cell of a ring: from and to, in degrees clockwise from straight up, and its radii.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Ring {
     pub from: f32,
@@ -66,19 +74,27 @@ impl Ring {
         Self { from, to, inner: RING_INNER, outer: RING_OUTER }
     }
 
+    const fn bloom(from: f32, to: f32) -> Self {
+        Self { from, to, inner: BLOOM_INNER, outer: BLOOM_OUTER }
+    }
+
+    const fn short(from: f32, to: f32) -> Self {
+        Self { from, to, inner: BLOOM_INNER, outer: BLOOM_SHORT }
+    }
+
     pub fn middle(&self) -> f32 {
         (self.from + self.to) / 2.0
     }
 
     /// Where its content centres: a little outside its middle radius, where it is wider.
     pub fn anchor(&self) -> Vec2 {
-        polar(self.inner + (self.outer - self.inner) * 0.54, self.middle())
+        polar(self.inner + (self.outer - self.inner) * 0.52, self.middle())
     }
 
     /// How wide it is across, at its anchor.
     pub fn room(&self) -> f32 {
-        let radius = self.inner + (self.outer - self.inner) * 0.54;
-        2.0 * radius * ((self.to - self.from) / 2.0).to_radians().sin() - RING_GAP - 10.0
+        let radius = self.inner + (self.outer - self.inner) * 0.52;
+        2.0 * radius * ((self.to - self.from) / 2.0).to_radians().sin() - RING_GAP - 12.0
     }
 
     /// The rectangle holding it.
@@ -116,60 +132,84 @@ impl Ring {
     }
 }
 
-/// The panels. Those around the wheel are the ring's cells, clockwise from straight up after the two 3D pictures which meet there; those around the Quick Menu are named
-/// for the yellow zones Enzo drew.
+/// A second ring blooming out of a cell.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Group {
+    Pictures,
+    Playing,
+}
+
+impl Group {
+    /// The cell it blooms from.
+    pub fn parent(self) -> Zone {
+        match self {
+            Group::Pictures => Zone::WheelPictures,
+            Group::Playing => Zone::WheelPlaying,
+        }
+    }
+
+    pub fn cells(self) -> &'static [Zone] {
+        match self {
+            Group::Pictures => &[Zone::BloomPeople, Zone::BloomWorld, Zone::BloomRecord, Zone::BloomRecent],
+            Group::Playing => &[Zone::BloomPrevious, Zone::BloomPlay, Zone::BloomNext],
+        }
+    }
+}
+
+/// Orbiters' parts. Around the wheel: the ring's cells clockwise from straight up. Around the Quick Menu: its wing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Zone {
-    /// The largest cells, on top, where the eyes go first: a 3D picture of people, of the world.
-    WheelPeople,
-    WheelWorld,
-    WheelRecord,
-    /// Fast walk in VR, YouTube in desktop mode (where there is no fast walk).
-    WheelWalk,
-    WheelMusic,
-    WheelTalk,
-    /// All of N4N0's menu.
-    WheelMore,
-    /// Recent captures, the newest beside the 3D pictures.
-    WheelRecent0,
-    WheelRecent1,
-    WheelRecent2,
+    /// Straight up, where the eyes go first: 3D world search.
+    WheelWorlds,
+    WheelYouTube,
+    WheelPlaying,
+    /// Everything Orbiters has, on one sheet.
+    WheelAll,
+    WheelInstances,
+    /// 3D pictures: its second ring holds what it takes.
+    WheelPictures,
+    BloomPeople,
+    BloomWorld,
+    BloomRecord,
+    BloomRecent,
+    BloomPrevious,
+    BloomPlay,
+    BloomNext,
     /// What is pointed at, in words, above the ring. Nothing presses here.
     WheelCaption,
-    /// In VR only: the panels' close, for when VRChat's wheel closed without its button.
+    /// A dark veil over VRChat's own wheel while the mouse points at the ring: only one menu then looks active. Nothing presses here.
+    WheelVeil,
+    /// In VR only: the ring's close, for when VRChat's wheel closed without its button.
     WheelHide,
-    /// The tall band left of the Quick Menu: recent captures.
-    QmLeft,
-    /// The tall band right of it: N4N0's pages.
-    QmRight,
-    /// Over it: what Orbiters is doing, and recording.
-    QmAbove,
-    /// Under its corners: a 3D picture of people, of the world.
-    QmLowerLeft,
-    QmLowerRight,
-    /// Under its row of icons: a strip of single actions.
-    QmUnder,
-    /// What is pointed at, in words, over all that.
+    /// The one wing docked to the Quick Menu.
+    QmWing,
+    /// What is pointed at, in words, right above the wing.
     QmCaption,
-    /// In front of the Quick Menu's own surface, when more room is needed. Input to VRChat is blocked while pointing here.
+    /// The sheet's back: covers the Quick Menu with one clean edge, with a head and a foot.
+    SheetBack,
+    /// The page on the sheet. Input to VRChat is blocked while pointing here.
     Takeover,
 }
 
 impl Zone {
-    pub const WHEEL: [Zone; 11] = [
-        Zone::WheelPeople,
-        Zone::WheelWorld,
-        Zone::WheelRecord,
-        Zone::WheelWalk,
-        Zone::WheelMusic,
-        Zone::WheelTalk,
-        Zone::WheelMore,
-        Zone::WheelRecent2,
-        Zone::WheelRecent1,
-        Zone::WheelRecent0,
+    pub const WHEEL: [Zone; 15] = [
+        Zone::WheelVeil,
+        Zone::WheelWorlds,
+        Zone::WheelYouTube,
+        Zone::WheelPlaying,
+        Zone::WheelAll,
+        Zone::WheelInstances,
+        Zone::WheelPictures,
+        Zone::BloomPeople,
+        Zone::BloomWorld,
+        Zone::BloomRecord,
+        Zone::BloomRecent,
+        Zone::BloomPrevious,
+        Zone::BloomPlay,
+        Zone::BloomNext,
         Zone::WheelCaption,
     ];
-    pub const QUICK_MENU: [Zone; 7] = [Zone::QmLeft, Zone::QmRight, Zone::QmAbove, Zone::QmLowerLeft, Zone::QmLowerRight, Zone::QmUnder, Zone::QmCaption];
+    pub const QUICK_MENU: [Zone; 2] = [Zone::QmWing, Zone::QmCaption];
 
     /// The zones around a menu.
     pub fn around(around: Around) -> &'static [Zone] {
@@ -179,7 +219,7 @@ impl Zone {
         }
     }
 
-    /// Which menu it is around.
+    /// Which menu its place is measured from.
     pub fn menu(self) -> Around {
         if Self::WHEEL.contains(&self) || self == Zone::WheelHide {
             Around::Wheel
@@ -188,26 +228,48 @@ impl Zone {
         }
     }
 
-    /// Its cell, when it is one of the ring's.
+    /// Its cell, when it is one of a ring's.
     pub fn ring(self) -> Option<Ring> {
         Some(match self {
-            Zone::WheelPeople => Ring::cell(-60.0, 0.0),
-            Zone::WheelWorld => Ring::cell(0.0, 60.0),
-            Zone::WheelRecord => Ring::cell(60.0, 90.0),
-            Zone::WheelWalk => Ring::cell(90.0, 120.0),
-            Zone::WheelMusic => Ring::cell(120.0, 150.0),
-            Zone::WheelTalk => Ring::cell(150.0, 180.0),
-            Zone::WheelMore => Ring::cell(180.0, 210.0),
-            Zone::WheelRecent2 => Ring::cell(210.0, 240.0),
-            Zone::WheelRecent1 => Ring::cell(240.0, 270.0),
-            Zone::WheelRecent0 => Ring::cell(270.0, 300.0),
+            Zone::WheelWorlds => Ring::cell(-30.0, 30.0),
+            Zone::WheelYouTube => Ring::cell(30.0, 90.0),
+            Zone::WheelPlaying => Ring::cell(90.0, 150.0),
+            Zone::WheelAll => Ring::cell(150.0, 210.0),
+            Zone::WheelInstances => Ring::cell(210.0, 270.0),
+            Zone::WheelPictures => Ring::cell(270.0, 330.0),
+            // On the left, so as to stay clear of the caption over the ring.
+            Zone::BloomPeople => Ring::bloom(288.0, 312.0),
+            Zone::BloomWorld => Ring::bloom(264.0, 288.0),
+            Zone::BloomRecord => Ring::bloom(240.0, 264.0),
+            Zone::BloomRecent => Ring::bloom(216.0, 240.0),
+            Zone::BloomPrevious => Ring::short(90.0, 110.0),
+            Zone::BloomPlay => Ring::short(110.0, 130.0),
+            Zone::BloomNext => Ring::short(130.0, 150.0),
             _ => return None,
         })
     }
 
+    /// The second ring it belongs to.
+    pub fn group(self) -> Option<Group> {
+        match self {
+            Zone::BloomPeople | Zone::BloomWorld | Zone::BloomRecord | Zone::BloomRecent => Some(Group::Pictures),
+            Zone::BloomPrevious | Zone::BloomPlay | Zone::BloomNext => Some(Group::Playing),
+            _ => None,
+        }
+    }
+
+    /// The second ring it opens, when it is a cell that blooms.
+    pub fn blooms(self) -> Option<Group> {
+        match self {
+            Zone::WheelPictures => Some(Group::Pictures),
+            Zone::WheelPlaying => Some(Group::Playing),
+            _ => None,
+        }
+    }
+
     /// Nothing is pressed here: the pointer and a click pass through to what is under it.
     pub fn passes_clicks(self) -> bool {
-        matches!(self, Zone::WheelCaption | Zone::QmCaption)
+        matches!(self, Zone::WheelCaption | Zone::QmCaption | Zone::WheelVeil)
     }
 
     /// Its place in the menu's units from the menu's centre, y down: around the wheel in hundredths of its radius (a 1280 x 720 window's pixels, nearly), around the Quick
@@ -218,29 +280,27 @@ impl Zone {
         }
         let r = |x0: f32, y0: f32, x1: f32, y1: f32| Rect::from_min_max(pos2(x0, y0), pos2(x1, y1));
         match self {
-            Zone::WheelCaption => r(-200.0, -306.0, 200.0, -248.0),
-            Zone::WheelHide => r(182.0, -226.0, 212.0, -196.0),
-            Zone::QmLeft => r(-470.0, -190.0, -362.0, 170.0),
-            Zone::QmRight => r(362.0, -190.0, 470.0, 170.0),
-            Zone::QmAbove => r(-86.0, -296.0, 188.0, -242.0),
-            Zone::QmLowerLeft => r(-362.0, 196.0, -250.0, 316.0),
-            Zone::QmLowerRight => r(250.0, 196.0, 362.0, 316.0),
-            Zone::QmUnder => r(-190.0, 248.0, 190.0, 316.0),
-            Zone::QmCaption => r(-86.0, -356.0, 300.0, -302.0),
-            // As wide as the Quick Menu with its wings, N4N0's menu's own shape.
-            Zone::Takeover => r(-351.0, -198.0, 351.0, 197.0),
-            _ => unreachable!("the ring's cells return above"),
+            Zone::WheelCaption => r(-220.0, -264.0, 220.0, -208.0),
+            Zone::WheelVeil => r(-103.0, -103.0, 103.0, 103.0),
+            Zone::WheelHide => r(150.0, -190.0, 182.0, -158.0),
+            // As tall as My Profile and as wide, beside it.
+            Zone::QmWing => r(354.0, -150.0, 516.0, 186.0),
+            Zone::QmCaption => r(196.0, -206.0, 516.0, -154.0),
+            // The whole Quick Menu: its sticker and FPS line over it, its tab row under it.
+            Zone::SheetBack => r(-352.0, -246.0, 352.0, 246.0),
+            // N4N0's pages' own shape, 704 wide.
+            Zone::Takeover => r(-352.0, -198.0, 352.0, 198.0),
+            _ => unreachable!("the rings' cells return above"),
         }
     }
 
-    /// The smallest it can be (in units) and still hold what it holds: cut further than this by the window's edge, it does not show. A cell of the ring, cut, would no
-    /// longer be one: it shows whole or not at all.
-    pub fn smallest(self) -> Vec2 {
-        let u = self.units().size();
-        if self.ring().is_some() {
-            u
-        } else {
-            u * 0.72
+    /// Where it lies where its first place does not fit: the wing in My Profile's place.
+    fn fallback(self) -> Option<Rect> {
+        let r = |x0: f32, y0: f32, x1: f32, y1: f32| Rect::from_min_max(pos2(x0, y0), pos2(x1, y1));
+        match self {
+            Zone::QmWing => Some(r(190.0, -150.0, 352.0, 186.0)),
+            Zone::QmCaption => Some(r(32.0, -206.0, 352.0, -154.0)),
+            _ => None,
         }
     }
 }
@@ -286,19 +346,23 @@ pub fn frame(around: Around, client: Vec2) -> (Pos2, f32) {
     }
 }
 
-/// One zone in a window: `None` when the window's edge leaves too little of it.
+/// One zone in a window: `None` when nothing of it fits whole. Every part shows whole or not at all: a cell cut by the window's edge would no longer be a cell.
 pub fn place(zone: Zone, client: Vec2) -> Option<Placed> {
     let (center, unit) = frame(zone.menu(), client);
-    let units = zone.units();
-    let rect = Rect::from_min_max(center + units.min.to_vec2() * unit, center + units.max.to_vec2() * unit);
     let window = Rect::from_min_size(pos2(0.0, 0.0), client).shrink(EDGE);
-    let cut = rect.intersect(window);
-    let smallest = zone.smallest() * unit;
-    if !cut.is_positive() || cut.width() + 0.5 < smallest.x || cut.height() + 0.5 < smallest.y {
-        return None;
-    }
+    let at = |units: Rect| Rect::from_min_max(center + units.min.to_vec2() * unit, center + units.max.to_vec2() * unit);
+    let first = at(zone.units());
+    let rect = if window.contains_rect(first) {
+        first
+    } else {
+        let second = at(zone.fallback()?);
+        if !window.contains_rect(second) {
+            return None;
+        }
+        second
+    };
     // Whole pixels: a layered window has no other, and text stays crisp.
-    let rect = Rect::from_min_max(cut.min.round(), cut.max.round());
+    let rect = Rect::from_min_max(rect.min.round(), rect.max.round());
     Some(Placed { zone, rect, center, unit })
 }
 
@@ -330,6 +394,8 @@ mod tests {
         (1700.0, 600.0),
     ];
 
+    const CELLS: [Zone; 6] = [Zone::WheelWorlds, Zone::WheelYouTube, Zone::WheelPlaying, Zone::WheelAll, Zone::WheelInstances, Zone::WheelPictures];
+
     #[test]
     fn the_menus_are_where_the_game_drew_them() {
         // (window, wheel's centre, its radius), read off the real frames.
@@ -345,23 +411,26 @@ mod tests {
     }
 
     #[test]
-    fn the_ring_goes_all_the_way_round_with_nothing_twice() {
-        let cells: Vec<Ring> = Zone::WHEEL.iter().filter_map(|z| z.ring()).collect();
-        let covered: f32 = cells.iter().map(|c| c.to - c.from).sum();
-        assert_eq!(covered, 360.0, "a whole ring");
-        // Every angle at the ring's middle is on one cell, or in a gap between two.
+    fn six_equal_cells_on_vrchat_s_own_slices_all_the_way_round() {
+        let cells: Vec<Ring> = CELLS.iter().filter_map(|z| z.ring()).collect();
+        assert_eq!(cells.iter().map(|c| c.to - c.from).sum::<f32>(), 360.0, "a whole ring");
+        assert!(cells.iter().all(|c| c.to - c.from == 60.0), "none larger than another");
+        // VRChat's spokes (at 30, 90 and 150, each way) run on through its gaps.
+        for spoke in [30.0f32, 90.0, 150.0, 210.0, 270.0, 330.0] {
+            for r in [120.0, 150.0, 190.0] {
+                assert!(cells.iter().all(|c| !c.contains(polar(r, spoke))), "{spoke} at {r}");
+            }
+        }
+        // Worlds straight up, centred on VRChat's top slice.
+        assert_eq!(Zone::WheelWorlds.ring().unwrap().middle(), 0.0);
         for t in 0..1440 {
             let p = polar((RING_INNER + RING_OUTER) / 2.0, t as f32 / 4.0);
-            let on = cells.iter().filter(|c| c.contains(p)).count();
-            assert!(on <= 1, "two cells at {t}");
+            assert!(cells.iter().filter(|c| c.contains(p)).count() <= 1, "two cells at {t}");
         }
-        // VRChat's spokes (at 30, 90 and 150, each way) run on into its gaps, or into the middle of a double cell.
-        for spoke in [30.0f32, 90.0, 150.0, 210.0, 270.0, 330.0] {
-            let p = polar(180.0, spoke);
-            let on_a_gap = cells.iter().all(|c| !c.contains(p));
-            let in_a_cell_cut_there = cells.iter().any(|c| c.contains(p) && (c.to - c.from) > 30.0);
-            assert!(on_a_gap || in_a_cell_cut_there, "{spoke}");
-        }
+    }
+
+    #[test]
+    fn nothing_covers_vrchat_s_wheel_but_the_veil() {
         for (w, h) in SIZES {
             let (center, radius) = wheel(vec2(w, h));
             for placed in layout(Around::Wheel, vec2(w, h)) {
@@ -374,89 +443,118 @@ mod tests {
     }
 
     #[test]
-    fn a_cell_has_a_soft_edge_rounded_corners_and_keeps_to_its_shape() {
-        let cell = Zone::WheelRecord.ring().unwrap();
-        let middle = polar((cell.inner + cell.outer) / 2.0, cell.middle());
-        assert_eq!(cell.coverage(middle, 1.0), 1.0);
-        assert_eq!(cell.coverage(polar(cell.outer + 5.0, cell.middle()), 1.0), 0.0, "past its outer edge");
-        assert_eq!(cell.coverage(polar(cell.inner - 5.0, cell.middle()), 1.0), 0.0, "on the wheel's side");
-        // Its very corner is rounded away.
-        assert_eq!(cell.coverage(polar(cell.outer - 0.5, cell.from + 0.8), 1.0), 0.0);
-        // The edge is soft over a pixel.
-        let edge = cell.coverage(polar(cell.outer, cell.middle()), 1.0);
-        assert!((edge - 0.5).abs() < 0.01, "{edge}");
-        // Its bounds hold it, across an axis too.
-        let across = Zone::WheelMore.ring().unwrap();
-        let bounds = across.bounds();
-        for t in 0..60 {
-            for r in [across.inner, across.outer] {
-                let at = polar(r, across.from + t as f32 / 2.0).to_pos2();
-                assert!(bounds.expand(0.01).contains(at));
+    fn the_second_rings_stay_off_each_other_and_off_the_caption() {
+        let caption = Zone::WheelCaption.units();
+        for group in [Group::Pictures, Group::Playing] {
+            assert!(group.cells().iter().all(|z| z.group() == Some(group)));
+            assert_eq!(group.parent().blooms(), Some(group));
+            for zone in group.cells() {
+                let ring = zone.ring().unwrap();
+                assert!(ring.inner >= RING_OUTER, "{zone:?} is outside the first ring");
+                // None of it under the caption.
+                for t in 0..=10 {
+                    for r in [ring.inner, ring.outer] {
+                        let p = polar(r, ring.from + (ring.to - ring.from) * t as f32 / 10.0).to_pos2();
+                        assert!(!caption.contains(p), "{zone:?} under the caption at {p:?}");
+                    }
+                }
             }
         }
     }
 
     #[test]
-    fn the_quick_menu_panels_stay_off_it_and_off_each_other() {
-        for (w, h) in SIZES {
-            let placed = layout(Around::QuickMenu, vec2(w, h));
-            for (i, a) in placed.iter().enumerate() {
-                for b in &placed[i + 1..] {
-                    assert!(!a.rect.shrink(1.0).intersects(b.rect.shrink(1.0)), "{w}x{h}: {:?} and {:?}", a.zone, b.zone);
-                }
-                assert!(a.rect.left() >= 0.0 && a.rect.top() >= 0.0 && a.rect.right() <= w && a.rect.bottom() <= h, "{w}x{h}: {:?} leaves the window", a.zone);
+    fn a_cell_has_a_soft_edge_rounded_corners_and_keeps_to_its_shape() {
+        let cell = Zone::WheelAll.ring().unwrap();
+        let middle = polar((cell.inner + cell.outer) / 2.0, cell.middle());
+        assert_eq!(cell.coverage(middle, 1.0), 1.0);
+        assert_eq!(cell.coverage(polar(cell.outer + 5.0, cell.middle()), 1.0), 0.0, "past its outer edge");
+        assert_eq!(cell.coverage(polar(cell.inner - 5.0, cell.middle()), 1.0), 0.0, "on the wheel's side");
+        assert_eq!(cell.coverage(polar(cell.outer - 0.5, cell.from + 0.8), 1.0), 0.0, "its very corner is rounded away");
+        let edge = cell.coverage(polar(cell.outer, cell.middle()), 1.0);
+        assert!((edge - 0.5).abs() < 0.01, "{edge}");
+        // Its bounds hold it, across an axis too.
+        let bounds = cell.bounds();
+        for t in 0..120 {
+            for r in [cell.inner, cell.outer] {
+                assert!(bounds.expand(0.01).contains(polar(r, cell.from + t as f32 / 2.0).to_pos2()));
             }
         }
-        // Off its main panel, its wings, its row of icons and its safety and microphone buttons.
+    }
+
+    #[test]
+    fn the_wing_docks_where_there_is_room_and_takes_my_profile_s_place_where_there_is_none() {
+        // Off the Quick Menu's main panel, its wings, its row of icons and its safety button.
         let keep_off = [
             Rect::from_min_max(pos2(-188.0, -204.0), pos2(188.0, 204.0)),
             Rect::from_min_max(pos2(-351.0, -150.0), pos2(351.0, 186.0)),
             Rect::from_min_max(pos2(-242.0, 204.0), pos2(242.0, 242.0)),
         ];
-        for z in Zone::QUICK_MENU {
-            for k in keep_off {
-                assert!(!z.units().intersects(k), "{z:?} on {k:?}");
-            }
+        for k in keep_off {
+            assert!(!Zone::QmWing.units().intersects(k), "the wing on {k:?}");
+        }
+        let (_, unit) = quick_menu(vec2(1280.0, 720.0));
+        let docked = place(Zone::QmWing, vec2(1280.0, 720.0)).unwrap();
+        assert!((docked.rect.left() - (640.0 + 354.0 * unit)).abs() < 1.0);
+        for (w, h) in SIZES {
+            let wing = place(Zone::QmWing, vec2(w, h)).expect("it always has a place");
+            let (center, unit) = quick_menu(vec2(w, h));
+            assert!(wing.rect.left() >= center.x + 188.0 * unit, "{w}x{h}: not on the main panel");
+            assert!(wing.rect.right() <= w && wing.rect.bottom() <= h, "{w}x{h}");
+            assert!(place(Zone::QmCaption, vec2(w, h)).is_some(), "{w}x{h}");
         }
     }
 
     #[test]
-    fn a_common_window_shows_every_panel_and_a_narrow_one_drops_what_does_not_fit() {
-        for (w, h) in [(1280.0, 720.0), (1920.0, 1080.0), (2560.0, 1440.0), (960.0, 540.0), (1700.0, 600.0), (1000.0, 900.0), (800.0, 800.0)] {
-            assert_eq!(layout(Around::Wheel, vec2(w, h)).len(), Zone::WHEEL.len(), "the whole ring at {w}x{h}");
+    fn the_whole_ring_fits_every_window_from_square_up_and_narrower_shows_whole_cells_only() {
+        for (w, h) in SIZES {
+            let cells = layout(Around::Wheel, vec2(w, h));
+            for zone in CELLS {
+                assert!(cells.iter().any(|p| p.zone == zone), "{zone:?} at {w}x{h}");
+            }
         }
-        for (w, h) in [(1280.0, 720.0), (1920.0, 1080.0), (2560.0, 1440.0), (960.0, 540.0)] {
-            assert_eq!(layout(Around::QuickMenu, vec2(w, h)).len(), Zone::QUICK_MENU.len(), "{w}x{h}");
-        }
-        let narrow = layout(Around::QuickMenu, vec2(800.0, 800.0));
-        assert!(!narrow.iter().any(|p| p.zone == Zone::QmLeft), "the bands have no room beside the wings");
-        assert!(narrow.iter().any(|p| p.zone == Zone::QmUnder));
-        assert!(place(Zone::Takeover, vec2(1280.0, 720.0)).is_some() && place(Zone::Takeover, vec2(800.0, 800.0)).is_some());
-        // Narrower than square, a cell cut by the window's edge does not show at all.
+        // The second rings are there in common windows.
+        assert_eq!(layout(Around::Wheel, vec2(1280.0, 720.0)).len(), Zone::WHEEL.len());
+        // Narrower than square, what would be cut does not show.
         let tall = layout(Around::Wheel, vec2(560.0, 800.0));
         assert!(tall.len() < Zone::WHEEL.len());
         for p in tall {
-            assert!((p.logical() - p.zone.units().size()).length() < 2.0 || p.zone.ring().is_none(), "{:?}", p.zone);
+            assert!((p.logical() - p.zone.units().size()).length() < 2.0, "{:?}", p.zone);
+        }
+    }
+
+    #[test]
+    fn the_sheet_covers_the_quick_menu_with_one_edge_and_the_page_keeps_its_shape() {
+        let back = Zone::SheetBack.units();
+        // Its main panel, wings, tab row, FPS line and the sticker on top.
+        for rect in [Rect::from_min_max(pos2(-351.0, -240.0), pos2(351.0, 243.0))] {
+            assert!(back.contains_rect(rect), "{rect:?}");
+        }
+        let page = Zone::Takeover.units();
+        assert!(back.contains_rect(page));
+        assert!((page.width() / page.height() - 1024.0 / 576.0).abs() < 0.01);
+        assert!(!Zone::QmWing.units().intersects(back), "the wing stays beside it as tabs");
+        for (w, h) in SIZES {
+            assert!(place(Zone::SheetBack, vec2(w, h)).is_some() && place(Zone::Takeover, vec2(w, h)).is_some(), "{w}x{h}");
+        }
+    }
+
+    #[test]
+    fn a_click_is_on_a_cell_s_shape_and_never_on_words_or_the_veil() {
+        let p = place(Zone::WheelPlaying, vec2(1280.0, 720.0)).unwrap();
+        let corners = [p.rect.left_top(), p.rect.right_top(), p.rect.left_bottom(), p.rect.right_bottom()];
+        assert!(corners.iter().any(|c| !p.contains(*c)));
+        assert!(p.contains(p.center + p.zone.ring().unwrap().anchor() * p.unit));
+        for zone in [Zone::WheelCaption, Zone::WheelVeil, Zone::QmCaption] {
+            let placed = place(zone, vec2(1280.0, 720.0)).unwrap();
+            assert!(!placed.contains(placed.rect.center()), "{zone:?}");
         }
     }
 
     #[test]
     fn panels_scale_with_the_menu() {
-        let small = place(Zone::WheelPeople, vec2(960.0, 540.0)).unwrap();
-        let large = place(Zone::WheelPeople, vec2(1920.0, 1080.0)).unwrap();
+        let small = place(Zone::WheelWorlds, vec2(960.0, 540.0)).unwrap();
+        let large = place(Zone::WheelWorlds, vec2(1920.0, 1080.0)).unwrap();
         assert!((large.rect.width() / small.rect.width() - 2.0).abs() < 0.02);
         assert!((large.logical() - small.logical()).length() < 1.5, "the same drawing");
-    }
-
-    #[test]
-    fn a_click_is_on_a_cell_s_shape_not_on_its_rectangle_and_never_on_a_caption() {
-        let p = place(Zone::WheelMusic, vec2(1280.0, 720.0)).unwrap();
-        // A corner of its rectangle, off its arc.
-        let corners = [p.rect.left_top(), p.rect.right_top(), p.rect.left_bottom(), p.rect.right_bottom()];
-        assert!(corners.iter().any(|c| !p.contains(*c)));
-        let anchor = p.center + p.zone.ring().unwrap().anchor() * p.unit;
-        assert!(p.contains(anchor));
-        let caption = place(Zone::WheelCaption, vec2(1280.0, 720.0)).unwrap();
-        assert!(!caption.contains(caption.rect.center()));
     }
 }

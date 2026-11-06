@@ -50,10 +50,11 @@ const PAGE_FADE: f64 = 0.22;
 const MORPH: f64 = 0.42;
 const CARD_STAGGER: f64 = 0.035;
 
-const CARD: Color32 = theme::INK_900;
-const SURFACE: Color32 = theme::INK_800;
-const RAISED: Color32 = theme::INK_750;
-const RAISED2: Color32 = theme::INK_700;
+// VRChat's own panel colours, sampled from its Quick Menu: the panel reads as part of it.
+const CARD: Color32 = Color32::from_rgb(15, 21, 27);
+const SURFACE: Color32 = Color32::from_rgb(22, 45, 51);
+const RAISED: Color32 = Color32::from_rgb(28, 58, 64);
+const RAISED2: Color32 = Color32::from_rgb(36, 74, 80);
 
 /// How the results are ordered: as listed (newest first), by likes, or by how smoothly VRChat runs there (the
 /// website's "Smoothest first": the share of the headset's refresh rate, then frames a second; unmeasured last).

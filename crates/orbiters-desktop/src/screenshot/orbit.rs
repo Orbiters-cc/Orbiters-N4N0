@@ -3,13 +3,11 @@
 //! reports/orbit-overlays (captured over the bridge).
 
 use super::over_ground;
-use crate::overlay::menu_ui::{self, Skin, View};
 use crate::overlay::orbit::panels::{self, Facts, Recent};
 use crate::overlay::floating::space::Quad;
 use crate::overlay::orbit::zones::{self, Around, Placed, Zone};
 use crate::overlay::Canvas;
 use egui::{pos2, vec2, Color32, ColorImage, TextureOptions, Vec2};
-use orbiters_n4n0_core::menu::{KeyboardLayout, Menu, PhotoLength};
 use orbiters_ui::offscreen::save_png;
 use std::path::{Path, PathBuf};
 
@@ -258,6 +256,7 @@ pub(super) fn vr_shots(out: &Path, refs: &Path) -> anyhow::Result<()> {
     use crate::overlay::floating::space;
     use crate::overlay::orbit::vr;
     use orbiters_n4n0_core::menu::{PhotoMode, Target};
+    use panels::{Action, Sheet};
     let head = space::from_axes([1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0], [0.0, 1.6, 0.0]);
     let eyes = [0.0, 1.6, 0.0];
     let size = [1600, 1200];
@@ -268,7 +267,6 @@ pub(super) fn vr_shots(out: &Path, refs: &Path) -> anyhow::Result<()> {
         let (center, radius) = zones::wheel(client);
         let reach = radius * 1.03;
         let (disc, disc_px) = cut(&wheel_frame, egui::Rect::from_center_size(center, Vec2::splat(reach * 2.0)), |p| reach - (p.to_pos2() - center).length() + 0.5);
-        // The Quick Menu's main panel, wings and row of icons, in its units around its centre.
         let (qc, unit) = zones::quick_menu(client);
         let parts = [(-188.0, -204.0, 188.0, 204.0), (-351.0, -150.0, 351.0, 186.0), (-242.0, 204.0, 242.0, 242.0), (-188.0, -240.0, 188.0, -204.0)];
         let qm_units = egui::Rect::from_min_max(pos2(-352.0, -240.0), pos2(352.0, 243.0));
@@ -277,13 +275,11 @@ pub(super) fn vr_shots(out: &Path, refs: &Path) -> anyhow::Result<()> {
             let u = (p.to_pos2() - qc) / unit;
             if parts.iter().any(|(a, b, c, d)| u.x >= *a && u.x <= *c && u.y >= *b && u.y <= *d) { 1.0 } else { 0.0 }
         });
-        let tint = Some([7, 55, 58]);
-        let recent: Vec<Recent> = recent();
-        let facts = Facts { recent, timer: 3, n4n0: true, desktop: false, tint, fast_walk: false, music: Some(("The Weeknd - Moth to a Flame".into(), true)), ..Default::default() };
-        // The wheel: on a right hand low before the eyes; the other hand's laser on its cells.
+        let facts = Facts { recent: recent(), timer: 3, n4n0: true, desktop: false, tint: Some([7, 55, 58]), vr_close: true, music: Some(("The Weeknd - Moth to a Flame".into(), true)), can_call: true, can_states: true, can_light: true, ..Default::default() };
+        // The wheel on a hand, where a person looks at it; the other hand's laser on its cells.
         let grip = space::from_axes([1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0], [0.03, 1.56, -0.40]);
         let plane = vr::wheel_plane(&grip, &head, 1.0).expect("a plane");
-        let wheel_scene = |facts: &Facts, hover: Option<Zone>, laser_on: bool, name: &str| -> anyhow::Result<()> {
+        let wheel_scene = |facts: &Facts, hover: Option<Zone>, bloom: Option<zones::Group>, name: &str| -> anyhow::Result<()> {
             let mut eye = Eye::new(size, &ground, eyes);
             let unit_m = plane.unit;
             let disc_quad = Quad { transform: plane.frame, width: 2.06 * 100.0 * unit_m, height: 2.06 * 100.0 * unit_m };
@@ -292,6 +288,9 @@ pub(super) fn vr_shots(out: &Path, refs: &Path) -> anyhow::Result<()> {
             list.push(Zone::WheelHide);
             let mut end = None;
             for zone in list {
+                if zone == Zone::WheelVeil || zone.group().is_some_and(|g| Some(g) != bloom) {
+                    continue;
+                }
                 let placed = zones::in_units(zone);
                 let hovered = hover == Some(zone);
                 let (pixels, px) = sharp_picture(&placed, facts, hovered.then_some(0), 2.0);
@@ -302,84 +301,56 @@ pub(super) fn vr_shots(out: &Path, refs: &Path) -> anyhow::Result<()> {
                     end = Some(space::apply(&plane.frame, [at.x * unit_m, -at.y * unit_m, 0.01]));
                 }
             }
-            if let (true, Some(end)) = (laser_on, end) {
+            if let Some(end) = end {
                 eye.laser([-0.30, 1.12, -0.25], end);
             }
             eye.save(out, name)
         };
-        wheel_scene(&facts, None, false, &format!("vr-wheel-{world}"))?;
         let pointing = |a| Facts { pointed: Some(a), ..facts.clone() };
-        wheel_scene(&pointing(panels::Action::FastWalk), Some(Zone::WheelWalk), true, &format!("vr-wheel-{world}-point-walk"))?;
-        wheel_scene(&pointing(panels::Action::Picture(PhotoMode::World)), Some(Zone::WheelWorld), true, &format!("vr-wheel-{world}-point-picture"))?;
-        // The countdown on the button, as it is drawn.
-        let counting = Facts { countdown: Some(2), picture_mode: Some(PhotoMode::People), pointed: Some(panels::Action::Picture(PhotoMode::People)), ..facts.clone() };
-        wheel_scene(&counting, None, false, &format!("vr-wheel-{world}-countdown"))?;
-        // The Quick Menu where it opens before the eyes.
+        let bloom = zones::Group::Pictures;
+        wheel_scene(&facts, None, None, &format!("vr-wheel-{world}"))?;
+        wheel_scene(&pointing(Action::Worlds), Some(Zone::WheelWorlds), None, &format!("vr-wheel-{world}-point-worlds"))?;
+        wheel_scene(&pointing(Action::Pictures), Some(Zone::WheelPictures), Some(bloom), &format!("vr-wheel-{world}-point-pictures"))?;
+        wheel_scene(&pointing(Action::Picture(PhotoMode::World)), Some(Zone::BloomWorld), Some(bloom), &format!("vr-wheel-{world}-point-picture"))?;
+        wheel_scene(&pointing(Action::PlayPause), Some(Zone::BloomPlay), Some(zones::Group::Playing), &format!("vr-wheel-{world}-point-playing"))?;
+        let counting = Facts { countdown: Some(2), picture_mode: Some(PhotoMode::People), pointed: Some(Action::Picture(PhotoMode::People)), ..facts.clone() };
+        wheel_scene(&counting, None, Some(bloom), &format!("vr-wheel-{world}-countdown"))?;
+        // The Quick Menu where it opens before the eyes, the wing beside it.
         let plane = vr::quick_menu_plane(&head, 1.0);
-        let qm_scene = |facts: &Facts, hover: Option<(Zone, usize)>, takeover: bool, name: &str| -> anyhow::Result<()> {
+        let qm_scene = |facts: &Facts, hover: Option<usize>, sheet: Option<Sheet>, name: &str| -> anyhow::Result<()> {
             let mut eye = Eye::new(size, &ground, eyes);
-            let center_units = zones::Placed { zone: Zone::QmAbove, rect: qm_units, center: pos2(0.0, 0.0), unit: 1.0 };
+            let center_units = zones::Placed { zone: Zone::SheetBack, rect: qm_units, center: pos2(0.0, 0.0), unit: 1.0 };
             eye.quad(&plane.quad(&center_units, 0.0, 0.0), &qm, qm_px, 1.0);
             let mut end = None;
             for zone in Zone::QUICK_MENU {
                 let placed = zones::in_units(zone);
-                let hovered = hover.filter(|(z, _)| *z == zone);
-                let (pixels, px) = sharp_picture(&placed, facts, hovered.map(|(_, i)| i), 2.0);
-                let quad = plane.quad(&placed, 0.0, 0.004);
-                eye.quad(&quad, &pixels, px, 1.0);
-                if let Some((_, i)) = hovered {
+                let hovered = hover.filter(|_| zone == Zone::QmWing);
+                let (pixels, px) = sharp_picture(&placed, facts, hovered, 2.0);
+                eye.quad(&plane.quad(&placed, 0.0, 0.004), &pixels, px, 1.0);
+                if let Some(i) = hovered {
                     let item = panels::items(zone, placed.logical(), facts)[i].rect.center().to_vec2() + placed.rect.min.to_vec2();
                     end = Some(space::apply(&plane.frame, [item.x * plane.unit, -item.y * plane.unit, 0.01]));
                 }
             }
-            if takeover {
-                let placed = zones::in_units(Zone::Takeover);
-                let px = [1404u32, 790u32];
-                let mut canvas = Canvas::zoomed(px[0], px[1], px[0] as f32 / orbiters_n4n0_core::menu::layout::WIDTH as f32);
-                let mut menu = Menu::new(KeyboardLayout::Qwerty, 5, PhotoLength::Standard);
-                menu.pages = orbiters_n4n0_core::menu::Pages::Timeline;
-                menu.open();
-                menu.press(Target::YouTube);
-                let none = |_: &str| -> Option<egui::TextureId> { None };
-                let view = View { menu: &menu, hover: None, pressed: None, picture: &none, time: 0.0, skin: Skin::english() };
-                for _ in 0..2 {
-                    canvas.paint(0.0, |p| menu_ui::draw(p, pos2(0.0, 0.0), &view));
-                }
-                eye.quad(&plane.quad(&placed, 0.0, 0.02), canvas.pixels(), px, 1.0);
+            if let Some(sheet) = sheet {
+                let back = zones::in_units(Zone::SheetBack);
+                let (pixels, px) = sharp_picture(&back, facts, None, 2.0);
+                eye.quad(&plane.quad(&back, 0.0, 0.016), &pixels, px, 1.0);
+                let page = zones::in_units(Zone::Takeover);
+                let px = [1408u32, 792u32];
+                let pixels = sheet_picture(sheet, facts, px);
+                eye.quad(&plane.quad(&page, 0.0, 0.02), &pixels, px, 1.0);
             }
             if let Some(end) = end {
                 eye.laser([0.26, 1.05, -0.25], end);
             }
             eye.save(out, name)
         };
-        qm_scene(&facts, None, false, &format!("vr-qm-{world}"))?;
-        qm_scene(&pointing(panels::Action::Page(Target::YouTube)), Some((Zone::QmRight, 0)), false, &format!("vr-qm-{world}-point-youtube"))?;
-        qm_scene(&pointing(panels::Action::Picture(PhotoMode::People)), Some((Zone::QmLowerLeft, 0)), false, &format!("vr-qm-{world}-point-picture"))?;
-        qm_scene(&facts, None, true, &format!("vr-takeover-{world}"))?;
-        // Pages of N4N0's menu the live run did not reach, on the real desktop frame: drawn as the takeover draws them.
-        let shot = image::open(refs.join(format!("qm-{world}-1920x1080.png")))?.to_rgba8();
-        let place = zones::place(Zone::Takeover, client).expect("it fits");
-        for (name, steps) in [("home", vec![]), ("more", vec![Target::More]), ("instances", vec![Target::More, Target::Instances])] {
-            let px = [place.rect.width() as u32, place.rect.height() as u32];
-            let mut canvas = Canvas::zoomed(px[0], px[1], px[0] as f32 / orbiters_n4n0_core::menu::layout::WIDTH as f32);
-            let mut menu = Menu::new(KeyboardLayout::Qwerty, 5, PhotoLength::Standard);
-            menu.pages = orbiters_n4n0_core::menu::Pages::ALL;
-            menu.desktop_mode = true;
-            menu.open();
-            for target in steps {
-                menu.press(target);
-            }
-            let none = |_: &str| -> Option<egui::TextureId> { None };
-            let view = View { menu: &menu, hover: None, pressed: None, picture: &none, time: 0.0, skin: Skin::english() };
-            for _ in 0..2 {
-                canvas.paint(0.0, |p| menu_ui::draw(p, pos2(0.0, 0.0), &view));
-            }
-            let mut image = shot.as_raw().clone();
-            blit(&mut image, 1920, canvas.pixels(), px, place.rect.min);
-            let path = out.join(format!("takeover-{world}-1920x1080-{name}.png"));
-            save_png(&path, &egui::ColorImage::from_rgba_premultiplied([1920, 1080], &image))?;
-            println!("{}", path.display());
-        }
+        qm_scene(&facts, None, None, &format!("vr-qm-{world}"))?;
+        qm_scene(&pointing(Action::Worlds), Some(0), None, &format!("vr-qm-{world}-point-worlds"))?;
+        qm_scene(&Facts { sheet: Some(Sheet::All), sheet_title: "All tools".into(), ..facts.clone() }, None, Some(Sheet::All), &format!("vr-sheet-{world}-all"))?;
+        qm_scene(&Facts { sheet: Some(Sheet::Pictures), sheet_title: "3D pictures".into(), ..facts.clone() }, None, Some(Sheet::Pictures), &format!("vr-sheet-{world}-pictures"))?;
+        let _ = Target::Close;
     }
     Ok(())
 }
@@ -406,62 +377,95 @@ fn sharp_picture(placed: &Placed, facts: &Facts, hover: Option<usize>, sharp: f3
 }
 
 pub(super) fn shots(out: &Path) -> anyhow::Result<()> {
+    use orbiters_n4n0_core::menu::{PhotoMode, Target};
+    use panels::{Action, Sheet};
     let hd = vec2(1280.0, 720.0);
-    let tint = Some([7, 55, 58]);
-    let idle = Facts { recent: recent(), timer: 3, n4n0: true, desktop: true, tint, hint: Some(("Hold Left Alt to use these", "Your mouse then points here instead of at the wheel.")), ..Default::default() };
-    let empty = Facts { timer: 3, n4n0: true, tint, ..Default::default() };
-    let busy = Facts {
-        recording: true,
-        recording_seconds: Some(83),
-        capture_busy: true,
-        reconstructing: Some(0.42),
-        waiting: 2,
-        fast_walk: true,
-        music: Some(("Midnight City".into(), true)),
-        ..idle.clone()
-    };
-    let counting = Facts { countdown: Some(2), picture_mode: Some(orbiters_n4n0_core::menu::PhotoMode::People), hint: None, ..idle.clone() };
-    let pointing = |action| Facts { pointed: Some(action), hint: None, ..idle.clone() };
-    for (around, tag) in [(Around::Wheel, "wheel"), (Around::QuickMenu, "qm")] {
-        scene(&format!("orbit-{tag}-idle"), out, around, hd, &idle, None)?;
-        scene(&format!("orbit-{tag}-empty"), out, around, hd, &empty, None)?;
-        scene(&format!("orbit-{tag}-busy"), out, around, hd, &busy, None)?;
-        scene(&format!("orbit-{tag}-countdown"), out, around, hd, &counting, None)?;
-        scene(&format!("orbit-{tag}-1080"), out, around, vec2(1920.0, 1080.0), &busy, None)?;
-        scene(&format!("orbit-{tag}-540"), out, around, vec2(960.0, 540.0), &idle, None)?;
-        scene(&format!("orbit-{tag}-narrow"), out, around, vec2(800.0, 800.0), &idle, None)?;
-    }
-    let people = panels::Action::Picture(orbiters_n4n0_core::menu::PhotoMode::People);
-    let world = panels::Action::Picture(orbiters_n4n0_core::menu::PhotoMode::World);
-    scene("orbit-wheel-hover", out, Around::Wheel, hd, &pointing(people), Some((Zone::WheelPeople, 0, false)))?;
-    scene("orbit-wheel-pressed", out, Around::Wheel, hd, &pointing(world), Some((Zone::WheelWorld, 0, true)))?;
-    scene("orbit-wheel-recent", out, Around::Wheel, hd, &pointing(panels::Action::Page(orbiters_n4n0_core::menu::Target::History)), Some((Zone::WheelRecent1, 0, false)))?;
-    scene("orbit-qm-hover", out, Around::QuickMenu, hd, &pointing(panels::Action::Page(orbiters_n4n0_core::menu::Target::Music)), Some((Zone::QmRight, 2, false)))?;
-    scene("orbit-qm-picture", out, Around::QuickMenu, hd, &pointing(world), Some((Zone::QmLowerRight, 0, false)))?;
-    // N4N0's menu in front of the Quick Menu.
-    for (tag, client) in [("orbit-takeover", hd), ("orbit-takeover-1080", vec2(1920.0, 1080.0))] {
-        let (w, h) = (client.x as u32, client.y as u32);
-        let mut ground = Canvas::new(w, h);
-        stand_in_menu(Around::QuickMenu, client, &mut ground);
-        let mut image = ground.pixels().to_vec();
-        for placed in zones::layout(Around::QuickMenu, client) {
-            let (pixels, px) = picture(&placed, &idle, None, None);
-            blit(&mut image, w, &pixels, px, placed.rect.min);
-        }
-        let placed = zones::place(Zone::Takeover, client).expect("it fits");
-        let px = [placed.rect.width() as u32, placed.rect.height() as u32];
-        let mut canvas = Canvas::zoomed(px[0], px[1], px[0] as f32 / orbiters_n4n0_core::menu::layout::WIDTH as f32);
-        let mut menu = Menu::new(KeyboardLayout::Qwerty, 5, PhotoLength::Standard);
-        menu.open();
-        let none = |_: &str| -> Option<egui::TextureId> { None };
-        let view = View { menu: &menu, hover: Some(2), pressed: None, picture: &none, time: 0.0, skin: Skin::english() };
-        for _ in 0..2 {
-            canvas.paint(0.0, |p| menu_ui::draw(p, pos2(0.0, 0.0), &view));
-        }
-        blit(&mut image, w, canvas.pixels(), px, placed.rect.min);
-        let path = out.join(format!("{tag}.png"));
-        save_png(&path, &over_ground(&image, w, h))?;
-        println!("{}", path.display());
-    }
+    let idle = Facts { recent: recent(), timer: 3, n4n0: true, desktop: true, tint: Some([7, 55, 58]), music: Some(("The Weeknd - Moth to a Flame".into(), true)), ..Default::default() };
+    let hint = Some(("Hold Left Alt to use this ring", "Your mouse then points here instead of at VRChat's wheel."));
+    let empty = Facts { recent: Vec::new(), music: None, ..idle.clone() };
+    let busy = Facts { recording: true, recording_seconds: Some(83), capture_busy: true, reconstructing: Some(0.42), waiting: 2, ..idle.clone() };
+    let counting = Facts { countdown: Some(2), picture_mode: Some(PhotoMode::People), pointed: Some(Action::Picture(PhotoMode::People)), ..idle.clone() };
+    let pointing = |a| Facts { pointed: Some(a), ..idle.clone() };
+    let bloom = zones::Group::Pictures;
+    let playing = zones::Group::Playing;
+    wheel_scene("orbit-wheel-idle", out, hd, &Facts { hint, ..idle.clone() }, None, None, false)?;
+    wheel_scene("orbit-wheel-empty", out, hd, &Facts { hint, ..empty.clone() }, None, None, false)?;
+    wheel_scene("orbit-wheel-busy", out, hd, &busy, None, Some(bloom), true)?;
+    wheel_scene("orbit-wheel-countdown", out, hd, &counting, None, Some(bloom), true)?;
+    wheel_scene("orbit-wheel-point-worlds", out, hd, &pointing(Action::Worlds), Some((Zone::WheelWorlds, 0)), None, true)?;
+    wheel_scene("orbit-wheel-point-pictures", out, hd, &pointing(Action::Pictures), Some((Zone::WheelPictures, 0)), Some(bloom), true)?;
+    wheel_scene("orbit-wheel-point-people", out, hd, &pointing(Action::Picture(PhotoMode::People)), Some((Zone::BloomPeople, 0)), Some(bloom), true)?;
+    wheel_scene("orbit-wheel-point-playing", out, hd, &pointing(Action::PlayPause), Some((Zone::BloomPlay, 0)), Some(playing), true)?;
+    wheel_scene("orbit-wheel-1080", out, vec2(1920.0, 1080.0), &Facts { hint, ..idle.clone() }, None, None, false)?;
+    wheel_scene("orbit-wheel-540", out, vec2(960.0, 540.0), &Facts { hint, ..idle.clone() }, None, None, false)?;
+    wheel_scene("orbit-wheel-narrow", out, vec2(800.0, 800.0), &Facts { hint, ..idle.clone() }, None, None, false)?;
+    qm_scene("orbit-qm-idle", out, hd, &idle, None, None)?;
+    qm_scene("orbit-qm-empty", out, hd, &empty, None, None)?;
+    qm_scene("orbit-qm-busy", out, hd, &busy, None, None)?;
+    qm_scene("orbit-qm-point", out, hd, &pointing(Action::Worlds), Some(0), None)?;
+    qm_scene("orbit-qm-narrow", out, vec2(800.0, 800.0), &idle, None, None)?;
+    qm_scene("orbit-sheet-all", out, hd, &Facts { sheet: Some(Sheet::All), sheet_title: "All tools".into(), ..idle.clone() }, None, Some(Sheet::All))?;
+    qm_scene("orbit-sheet-all-vr", out, hd, &Facts { desktop: false, can_call: true, can_states: true, can_light: true, sheet: Some(Sheet::All), sheet_title: "All tools".into(), ..idle.clone() }, None, Some(Sheet::All))?;
+    qm_scene("orbit-sheet-pictures", out, hd, &Facts { sheet: Some(Sheet::Pictures), sheet_title: "3D pictures".into(), ..idle.clone() }, None, Some(Sheet::Pictures))?;
+    qm_scene("orbit-sheet-countdown", out, hd, &Facts { sheet: Some(Sheet::Pictures), sheet_title: "3D pictures".into(), ..counting.clone() }, None, Some(Sheet::Pictures))?;
+    let _ = Target::Close;
     Ok(())
+}
+
+/// A stand-in of the wheel with the ring round it: `hover` on a zone, `bloom` open, the veil while `pointing`.
+fn wheel_scene(name: &str, out: &Path, client: Vec2, facts: &Facts, hover: Option<(Zone, usize)>, bloom: Option<zones::Group>, pointing: bool) -> anyhow::Result<()> {
+    let (w, h) = (client.x as u32, client.y as u32);
+    let mut ground = Canvas::new(w, h);
+    stand_in_menu(Around::Wheel, client, &mut ground);
+    let mut image = ground.pixels().to_vec();
+    for placed in zones::layout(Around::Wheel, client) {
+        if placed.zone.group().is_some_and(|g| Some(g) != bloom) || (placed.zone == Zone::WheelVeil && !pointing) {
+            continue;
+        }
+        let hovered = hover.filter(|(z, _)| *z == placed.zone).map(|(_, i)| i);
+        let (pixels, px) = picture(&placed, facts, hovered, None);
+        blit(&mut image, w, &pixels, px, placed.rect.min);
+    }
+    let path = out.join(format!("{name}.png"));
+    save_png(&path, &over_ground(&image, w, h))?;
+    println!("{}", path.display());
+    Ok(())
+}
+
+/// A stand-in of the Quick Menu with the wing beside it, and a sheet in front when one is open.
+fn qm_scene(name: &str, out: &Path, client: Vec2, facts: &Facts, hover: Option<usize>, sheet: Option<panels::Sheet>) -> anyhow::Result<()> {
+    let (w, h) = (client.x as u32, client.y as u32);
+    let mut ground = Canvas::new(w, h);
+    stand_in_menu(Around::QuickMenu, client, &mut ground);
+    let mut image = ground.pixels().to_vec();
+    for placed in zones::layout(Around::QuickMenu, client) {
+        let hovered = hover.filter(|_| placed.zone == Zone::QmWing);
+        let (pixels, px) = picture(&placed, facts, hovered, None);
+        blit(&mut image, w, &pixels, px, placed.rect.min);
+    }
+    if let Some(sheet) = sheet {
+        let back = zones::place(Zone::SheetBack, client).expect("it fits");
+        let (pixels, px) = picture(&back, facts, None, None);
+        blit(&mut image, w, &pixels, px, back.rect.min);
+        let page = zones::place(Zone::Takeover, client).expect("it fits");
+        let pixels = sheet_picture(sheet, facts, [page.rect.width() as u32, page.rect.height() as u32]);
+        blit(&mut image, w, &pixels, [page.rect.width() as u32, page.rect.height() as u32], page.rect.min);
+    }
+    let path = out.join(format!("{name}.png"));
+    save_png(&path, &over_ground(&image, w, h))?;
+    println!("{}", path.display());
+    Ok(())
+}
+
+fn sheet_picture(sheet: panels::Sheet, facts: &Facts, px: [u32; 2]) -> Vec<u8> {
+    let mut canvas = Canvas::zoomed(px[0], px[1], px[0] as f32 / 1024.0);
+    let textures: Vec<_> = (0..4).map(|i| canvas.ctx().load_texture("recent", stand_in(i), TextureOptions::LINEAR)).collect();
+    let mut facts = facts.clone();
+    for (recent, texture) in facts.recent.iter_mut().zip(&textures) {
+        recent.picture = Some(texture.id());
+    }
+    for _ in 0..2 {
+        canvas.paint(0.0, |p| panels::paint_sheet(p, sheet, &facts, None, None));
+    }
+    canvas.pixels().to_vec()
 }

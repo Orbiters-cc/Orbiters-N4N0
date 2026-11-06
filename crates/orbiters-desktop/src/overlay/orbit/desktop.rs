@@ -73,7 +73,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
     let backend: Ctl = Arc::new(crate::backend::Remote(client.clone()));
     let mut game = Game::default();
     let mut windows = Windows::default();
-    let mut panels = Panels::new(backend.clone(), 1.0);
+    let mut panels = Panels::new(backend.clone(), 1.0, true);
     let mut watcher = Watcher::default();
     let mut capture: Option<Capture> = None;
     let mut keys = Keys::default();
@@ -150,6 +150,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         let origin = client_origin(window);
         let places = open.map_or_else(Vec::new, |menu| zones::layout(menu, size));
         panels.takeover_place = zones::place(Zone::Takeover, size);
+        panels.back_place = zones::place(Zone::SheetBack, size);
         panels.set_open(open, places, &snap);
         if panels.is_empty() {
             pointer.stop();
@@ -160,14 +161,16 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         panels.follow(&snap, backend.library_version());
         panels.menu_turn(&snap);
         panels.step_springs(dt);
-        // The pointer: Windows' with the Quick Menu; ours while Alt is held with the wheel, which holds Windows'.
+        // The pointer: Windows' with the Quick Menu; ours while Alt is held with the wheel, which holds Windows'. A sheet opened from the wheel keeps it, with no key held.
         let cursor = cursor_at();
-        pointer.follow(open == Some(Around::Wheel) && alt_held(), origin, size, window);
+        let sheet_on_wheel = open == Some(Around::Wheel) && panels.sheet_open();
+        pointer.follow(open == Some(Around::Wheel) && (alt_held() || sheet_on_wheel), origin, size, window, sheet_on_wheel);
+        panels.set_pointing(pointer.active() && !panels.sheet_open(), !snap.settings.reduce_motion);
         let at = pointer.at().unwrap_or(pos2(cursor.0 as f32, cursor.1 as f32));
         let on = (open != Some(Around::Wheel) || pointer.at().is_some()).then(|| hit(&panels, at - origin.to_vec2())).flatten();
         panels.hover(on);
         // With the wheel open, the mouse is VRChat's until Alt is held: what nobody can guess is said in the caption.
-        panels.set_hint((open == Some(Around::Wheel) && !pointer.active()).then_some(("Hold Left Alt to use these", "Your mouse then points here instead of at the wheel.")));
+        panels.set_hint((open == Some(Around::Wheel) && !pointer.active()).then_some(("Hold Left Alt to use this ring", "Your mouse then points here instead of at VRChat's wheel.")));
         // The press: what Windows gave our windows (pointer over them) and what the hook kept from the game.
         for (down, _) in MOUSE.with(|m| std::mem::take(&mut *m.borrow_mut())) {
             press(&mut panels, down, &snap, &mut windows, &clicks);
@@ -232,7 +235,7 @@ fn hit(panels: &Panels, p: Pos2) -> Option<(usize, Pos2)> {
     let all: Vec<&Panel> = panels.all().collect();
     (0..all.len()).rev().find_map(|i| {
         let panel = all[i];
-        panel.placed.contains(p).then(|| {
+        (panel.shown && panel.placed.contains(p)).then(|| {
             let uv = (p - panel.placed.rect.min) / panel.placed.rect.size();
             (i, panel.to_logical([uv.x, uv.y]))
         })
@@ -743,15 +746,18 @@ impl Windows {
             };
             window.picture(panel.pixels(), changed);
         });
-        let showing: Vec<(Zone, POINT, u8)> = panels.all().filter(|p| p.painted).map(|p| placed_at(p, origin)).collect();
-        for (zone, window) in &mut self.list {
-            match showing.iter().find(|(z, _, _)| z == zone) {
-                Some((_, at, alpha)) => {
-                    if window.stale || !window.shown || window.at != *at || window.alpha != *alpha {
-                        window.place(*at, *alpha);
-                    }
+        let showing: Vec<(Zone, POINT, u8)> = panels.all().filter(|p| p.painted && p.shown).map(|p| placed_at(p, origin)).collect();
+        // In the order they lie: what comes into view goes above what shows, so the sheet's page stays over its back.
+        for (zone, at, alpha) in &showing {
+            if let Some(window) = self.list.get_mut(zone) {
+                if window.stale || !window.shown || window.at != *at || window.alpha != *alpha {
+                    window.place(*at, *alpha);
                 }
-                None => window.hide(),
+            }
+        }
+        for (zone, window) in &mut self.list {
+            if !showing.iter().any(|(z, _, _)| z == zone) {
+                window.hide();
             }
         }
     }
@@ -815,8 +821,8 @@ pub mod pointer {
         unsafe { CallNextHookEx(None, code, wparam, lparam) }
     }
 
-    /// Where it starts from the wheel's centre: on the first 3D picture button, what most people come here for.
-    const START: Vec2 = vec2(-87.0, -150.0);
+    /// Where it starts from the wheel's centre: on the first cell.
+    const START: Vec2 = vec2(0.0, -155.0);
     /// The pointer's picture, in pixels.
     const PX: u32 = 24;
 
@@ -842,11 +848,12 @@ pub mod pointer {
         }
 
         /// A turn: `wanted` says Alt is held with the wheel open.
-        pub fn follow(&mut self, wanted: bool, origin: Pos2, client: Vec2, game: HWND) {
+        pub fn follow(&mut self, wanted: bool, origin: Pos2, client: Vec2, game: HWND, keep: bool) {
             if !wanted {
                 self.stop();
                 return;
             }
+            let _ = keep;
             if self.thread.is_none() {
                 let (center, radius) = zones::wheel(client);
                 let start = self.at.unwrap_or(origin + center.to_vec2() + START * radius / 100.0);

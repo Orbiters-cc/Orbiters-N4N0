@@ -1,12 +1,12 @@
-//! The Orbiters menu around VRChat's own menus: panels around the Action Menu's wheel and the Quick Menu, showing as they open and gone as
-//! they close, so that 3D pictures, recording, recent captures and N4N0's pages are right where the person already is (docs/orbit-overlays.md).
+//! The Orbiters menu around VRChat's own menus: a second ring around the Action Menu's wheel and one wing docked to the Quick Menu, showing as they open and gone as they close, so that
+//! world search, YouTube, previous instances, what plays and 3D pictures are right where the person already is (docs/orbit-overlays.md).
 //!
-//! The same panels are drawn for both modes: a borderless topmost window each in desktop mode ([`desktop`]), a SteamVR overlay each in VR ([`vr`]).
-//! What is common is here: [`Panels`] paints them and does what they are pressed for; [`zones`] says where they go, [`panels`] what they hold,
-//! [`detect`] how a menu is known to be open on the desktop, [`block`] how the trigger is taken from VRChat in VR.
+//! The same parts are drawn for both modes: a borderless topmost window each in desktop mode ([`desktop`]), a SteamVR overlay each in VR ([`vr`]). What is common is here: [`Panels`] paints
+//! them and does what they are pressed for; [`zones`] says where they go, [`panels`] what they hold, [`detect`] how a menu is known to be open on the desktop, [`block`] how the trigger
+//! is taken from VRChat in VR.
 //!
-//! **Nothing here touches the game**: no injection, no reading of its memory, ordinary windows and overlays, its own window's picture through Windows
-//! Graphics Capture only while a menu is showing or a key has just asked for one. Closed, nothing is painted, and no window or overlay shows.
+//! **Nothing here touches the game**: no injection, no reading of its memory, ordinary windows and overlays, its own window's picture through Windows Graphics Capture only while a menu is
+//! showing or a key has just asked for one. Closed, nothing is painted, and no window or overlay shows.
 
 pub mod block;
 pub mod detect;
@@ -16,29 +16,42 @@ pub mod panels;
 pub mod vr;
 pub mod zones;
 
-use super::menu_retro;
 use super::menu_ui::{self, Skin, View};
+use super::menu_retro;
+use super::worlds::Worlds;
 use super::Canvas;
 use crate::backend::Ctl;
 use crate::ipc::N4n0Command;
 use crate::menu_host::MenuHost;
 use crate::state::{CaptureState, Snapshot};
-use egui::{pos2, vec2, ColorImage, Pos2, TextureHandle, TextureId, TextureOptions, Vec2};
+use egui::{pos2, vec2, Color32, ColorImage, Pos2, TextureHandle, TextureId, TextureOptions, Vec2};
 use orbiters_core::settings::MenuLook;
 use orbiters_n4n0_core::menu::layout::{self, ScreenPage};
-use panels::{Action, Facts, Item, Recent};
+use orbiters_n4n0_core::menu::theme::{Colors, Theme};
+use orbiters_n4n0_core::menu::{Page, Target};
+use panels::{Action, Facts, Item, Recent, Sheet};
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::mpsc;
-use std::time::Instant;
-use zones::{Around, Placed, Zone};
+use std::sync::{mpsc, OnceLock};
+use std::time::{Duration, Instant};
+use zones::{Around, Group, Placed, Zone};
 
 /// Whether the desktop's panels are wanted: VRChat runs without SteamVR, on this computer, and the setting says so.
 pub fn wanted_on_desktop(snap: &Snapshot) -> bool {
     orbiters_core::osc::VRCHAT_RUNS_HERE && snap.vrchat.running && !snap.vrchat.remote && !snap.steamvr.running && snap.settings.orbit.any()
 }
 
-/// A panel's appearing: a spring from nothing to its place, a little past it. Each turn moves the window or overlay and its alpha, no new picture.
+/// N4N0's pages in VRChat's colours, sampled from its Quick Menu: on a sheet here they read as another page of it. The app's mint stays on what is the main action.
+pub fn skin() -> &'static Skin {
+    static SKIN: OnceLock<Skin> = OnceLock::new();
+    SKIN.get_or_init(|| {
+        let base = Theme::MODERN.colors;
+        let colors = Colors { background: [14, 19, 25], surface: [22, 47, 53], text: [232, 244, 246], muted: [140, 176, 184], accent: [52, 185, 205], ..base };
+        Skin::new(&Theme { colors, ..Theme::MODERN }, orbiters_n4n0_core::menu::strings::Strings::english().clone())
+    })
+}
+
+/// A part's appearing: a spring from nothing to its place, a little past it. Each turn moves the window or overlay and its alpha, no new picture.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Appear {
     position: f32,
@@ -49,10 +62,10 @@ pub struct Appear {
 
 /// The spring's stiffness and damping: settled in about 300 ms, about 6% past its place on the way.
 const SPRING: (f32, f32) = (320.0, 24.0);
-/// How far a panel comes from, toward the menu's centre, in units.
-pub const APPEAR_FROM: f32 = 22.0;
-/// Between one panel's start and the next's.
-const APPEAR_STAGGER: f32 = 0.016;
+/// How far a part comes from, toward the menu's centre, in units.
+pub const APPEAR_FROM: f32 = 26.0;
+/// Between one part's start and the next's: the bloom goes round the wheel.
+const APPEAR_STAGGER: f32 = 0.022;
 
 impl Appear {
     pub fn new(order: usize, live: bool) -> Self {
@@ -102,7 +115,7 @@ pub const POP: f32 = 7.0;
 /// Its own spring: quicker than appearing, a little past.
 const POP_SPRING: (f32, f32) = (620.0, 30.0);
 
-/// One panel: where it is and its picture.
+/// One part: where it is and its picture.
 pub struct Panel {
     pub zone: Zone,
     pub placed: Placed,
@@ -111,7 +124,7 @@ pub struct Panel {
     /// Its size in the units its content is drawn in.
     pub logical: Vec2,
     canvas: Canvas,
-    /// The picture as the platform takes it: the canvas's, with the wheel's bite cut out.
+    /// The picture as the platform takes it: the canvas's, cut to its shape.
     out: Vec<u8>,
     /// Its shape as a cell of the ring, one byte a pixel, multiplied into each picture.
     mask: Option<Vec<u8>>,
@@ -125,8 +138,10 @@ pub struct Panel {
     pub appear: Appear,
     /// A shown picture: the platform has it.
     pub painted: bool,
-    /// Textures for recent captures, by folder.
-    pictures: HashMap<PathBuf, TextureHandle>,
+    /// It shows now (a second ring's cell only while it is bloomed, the veil only while the mouse points here).
+    pub shown: bool,
+    /// Textures of pictures, by name.
+    pictures: HashMap<String, TextureHandle>,
 }
 
 impl Panel {
@@ -137,6 +152,7 @@ impl Panel {
         let logical = if placed.zone == Zone::Takeover { vec2(layout::WIDTH as f32, layout::HEIGHT as f32) } else { placed.logical() };
         let zoom = px[0] as f32 / logical.x;
         let mask = placed.zone.ring().map(|ring| panels::cell_mask(ring, px, zoom));
+        let shown = placed.zone.group().is_none() && placed.zone != Zone::WheelVeil;
         Self {
             zone: placed.zone,
             placed,
@@ -152,6 +168,7 @@ impl Panel {
             dirty: true,
             appear: Appear::new(order, live),
             painted: false,
+            shown,
             pictures: HashMap::new(),
         }
     }
@@ -205,13 +222,50 @@ impl Panel {
     }
 }
 
-/// What a press on a panel asks of the platform beyond the service.
+/// How long a second ring stays open after the pointer left it and its cell: a hand crossing the gap must not close it.
+pub const BLOOM_GRACE: Duration = Duration::from_millis(350);
+
+/// Which second ring is open: the pointer on a cell that blooms opens it at once; it stays while the pointer is on it or its cell, and a moment after.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Bloom {
+    open: Option<Group>,
+    left: Option<Instant>,
+}
+
+impl Bloom {
+    pub fn open(&self) -> Option<Group> {
+        self.open
+    }
+
+    /// The pointer is on `on` now.
+    pub fn step(&mut self, on: Option<Zone>, now: Instant) -> Option<Group> {
+        let wanted = on.and_then(|z| z.blooms().or(z.group()));
+        if let Some(group) = wanted {
+            self.open = Some(group);
+            self.left = None;
+        } else if self.open.is_some() {
+            match self.left {
+                Some(at) if now.duration_since(at) >= BLOOM_GRACE => {
+                    self.open = None;
+                    self.left = None;
+                }
+                None => self.left = Some(now),
+                _ => {}
+            }
+        }
+        self.open
+    }
+}
+
+/// What a press asks of the platform beyond the service.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Pressed {
     /// A press happened (the click's sound).
     pub clicked: bool,
-    /// The panels go for this opening.
+    /// The parts go for this opening.
     pub hide: bool,
+    /// In VR: the 3D worlds panel, which lives with N4N0's menu there.
+    pub worlds: bool,
 }
 
 /// Newest captures, read off the folder on a thread of their own as listing takes a moment: asked once for each change of the library.
@@ -228,6 +282,7 @@ struct LoadedRecent {
     image: Option<ColorImage>,
     has_view: bool,
     picture: bool,
+    modified: u64,
 }
 
 impl Recents {
@@ -249,11 +304,11 @@ impl Recents {
                 list.sort_by_key(|s| std::cmp::Reverse(s.modified));
                 let loaded = list
                     .into_iter()
-                    .take(4)
+                    .take(7)
                     .map(|s| {
                         let image = orbiters_core::bundle::read_thumbnail(&s.dir).map(|(w, h, rgba)| ColorImage::from_rgba_unmultiplied([w as usize, h as usize], &rgba));
                         let title = s.manifest.world.as_ref().and_then(|w| w.name.clone()).filter(|n| !n.is_empty()).unwrap_or_else(|| "Capture".to_string());
-                        LoadedRecent { dir: s.dir, title, image, has_view: s.reconstruction.is_some(), picture: s.picture.is_some() }
+                        LoadedRecent { dir: s.dir, title, image, has_view: s.reconstruction.is_some(), picture: s.picture.is_some(), modified: s.modified }
                     })
                     .collect();
                 let _ = tx.send(loaded);
@@ -263,71 +318,105 @@ impl Recents {
     }
 }
 
-/// What the state of a recent capture reads as.
-fn recent_state(r: &LoadedRecent, snap: &Snapshot) -> String {
+/// How long ago, in a word.
+fn ago(seconds: u64) -> String {
+    match seconds {
+        0..=89 => "just now".into(),
+        90..=3599 => format!("{} min ago", seconds / 60),
+        3600..=86399 => format!("{} h ago", seconds / 3600),
+        _ => format!("{} d ago", seconds / 86400),
+    }
+}
+
+/// What a recent capture reads as.
+fn recent_state(r: &LoadedRecent, snap: &Snapshot, now: u64) -> String {
     let kind = if r.picture { "3D picture" } else { "Recording" };
     if let Some(job) = snap.reconstruction.as_ref().filter(|j| j.session_dir == r.dir) {
-        return format!("Reconstructing {:.0}%", job.progress.clamp(0.0, 1.0) * 100.0);
+        return format!("Making 3D {:.0}%", job.progress.clamp(0.0, 1.0) * 100.0);
     }
     if snap.reconstruct_queue.contains(&r.dir) {
         return format!("{kind}, waiting");
     }
     if r.has_view {
-        format!("{kind}, ready")
+        format!("{kind}, {}", ago(now.saturating_sub(r.modified)))
     } else {
         kind.to_string()
     }
 }
 
-/// The panels of whichever menu is open, and what they do. The platform says what is open, where the pointer is and when it presses; it takes the pictures.
+/// What the sheet's page is drawn on: its canvas, and what draws there, as their textures are that canvas's own. Made anew when the window's size changes the canvas's.
+struct Stage {
+    canvas: Canvas,
+    host: MenuHost,
+    worlds: Option<Worlds>,
+    px: [u32; 2],
+    retro: bool,
+}
+
+impl Stage {
+    fn new(px: [u32; 2], with_worlds: bool) -> Self {
+        let canvas = Canvas::zoomed(px[0], px[1], px[0] as f32 / layout::WIDTH as f32);
+        let host = MenuHost::new(canvas.ctx().clone());
+        let worlds = with_worlds.then(|| Worlds::alone(canvas.ctx().clone()));
+        Self { canvas, host, worlds, px, retro: false }
+    }
+}
+
+/// The parts of whichever menu is open, and what they do. The platform says what is open, where the pointer is and when it presses; it takes the pictures.
 pub struct Panels {
     backend: Ctl,
-    /// N4N0's menu, as drawn in front of the Quick Menu and for what it does (a 3D picture, fast walk). Its pictures are textures of `menu_ctx`.
-    host: MenuHost,
-    menu_ctx: egui::Context,
+    stage: Stage,
     list: Vec<Panel>,
+    /// The page on the sheet (its back is in `list`).
     pub takeover: Option<Panel>,
     open: Option<Around>,
     recents: Recents,
     pub facts: Facts,
     /// Pixels of picture a placed pixel.
     sharp: f32,
+    /// World search is the platform's in VR (where its 3D view lives), here on the desktop.
+    worlds_here: bool,
     /// The person's Hide: nothing shows for this opening.
     hidden: bool,
     /// Talk is held.
     talking: bool,
     started: Instant,
-    /// Where the takeover's menu looks retro.
-    retro: bool,
-    menu_opened: bool,
-    /// Where N4N0's menu goes when pressed for (the platform's: the window's, or the headset's plane).
+    bloom: Bloom,
+    /// Where the sheet's back and its page go.
+    pub back_place: Option<Placed>,
     pub takeover_place: Option<Placed>,
-    /// What the service was last told of the takeover (open, dictation, keyboard).
+    /// On the desktop's search page the on-screen keyboard was asked for.
+    show_keys: bool,
+    /// What the service was last told of the sheet (open, dictation, keyboard).
     reported: Option<(bool, bool, bool)>,
+    /// What plays's picture as last made, by its name: panels make their own textures of it.
+    art: Option<(String, ColorImage)>,
 }
 
+/// Where on the page the keyboard starts (N4N0's search page: `layout::KEY_ROWS_Y`, a little over its first row).
+const KEYS_TOP: f32 = 300.0;
+
 impl Panels {
-    pub fn new(backend: Ctl, sharp: f32) -> Self {
-        let menu_ctx = egui::Context::default();
-        orbiters_ui::install(&menu_ctx);
-        let host = MenuHost::new(menu_ctx.clone());
+    pub fn new(backend: Ctl, sharp: f32, worlds_here: bool) -> Self {
         Self {
             backend,
-            host,
-            menu_ctx,
+            stage: Stage::new([1, 1], false),
             list: Vec::new(),
             takeover: None,
             open: None,
             recents: Recents::default(),
             facts: Facts::default(),
             sharp,
+            worlds_here,
             hidden: false,
             talking: false,
             started: Instant::now(),
-            retro: false,
-            menu_opened: false,
+            bloom: Bloom::default(),
+            back_place: None,
             takeover_place: None,
+            show_keys: false,
             reported: None,
+            art: None,
         }
     }
 
@@ -335,42 +424,59 @@ impl Panels {
         self.open
     }
 
-    pub fn panels(&self) -> &[Panel] {
-        &self.list
-    }
-
-    pub fn panels_mut(&mut self) -> &mut [Panel] {
-        &mut self.list
-    }
-
     /// Nothing shows.
     pub fn is_empty(&self) -> bool {
         self.list.is_empty() && self.takeover.is_none()
     }
 
-    /// Every panel and the takeover in front (last).
+    /// Every part, the sheet's last: its page in front.
     pub fn all(&self) -> impl Iterator<Item = &Panel> {
         self.list.iter().chain(self.takeover.iter())
     }
 
-    /// What is open: panels for it in the places `places` gives, or none. Hide lasts until the menu closes. Whatever was held lets go.
+    /// The sheet is open.
+    pub fn sheet_open(&self) -> bool {
+        self.takeover.is_some()
+    }
+
+    /// The mouse points at the parts rather than at VRChat's wheel: the veil comes over the wheel. Nothing changes for what is not on the wheel.
+    pub fn set_pointing(&mut self, pointing: bool, live: bool) {
+        for panel in self.list.iter_mut().filter(|p| p.zone == Zone::WheelVeil) {
+            if panel.shown != pointing {
+                panel.shown = pointing;
+                if pointing {
+                    panel.appear = Appear::new(0, live);
+                }
+            }
+        }
+    }
+
+    /// What is open: parts for it in the places `places` gives, or none. Hide lasts until the menu closes. Whatever was held lets go.
     pub fn set_open(&mut self, around: Option<Around>, places: Vec<Placed>, snap: &Snapshot) {
         if around != self.open {
             self.hidden = false;
             self.facts.tint = None;
             self.facts.pointed = None;
+            self.facts.sheet = None;
             self.release();
             self.takeover = None;
             self.open = around;
             self.list.clear();
+            self.bloom = Bloom::default();
+            self.show_keys = false;
         }
         if self.hidden || around.is_none() {
             self.list.clear();
             self.takeover = None;
+            self.facts.sheet = None;
             return;
         }
-        // Moved or another size: the panels of a size stay as they are, those changed are made anew.
         let live = !snap.settings.reduce_motion;
+        // Opened from the wheel, the sheet is all that shows: its cut-off cells would stick out from under it.
+        let places: Vec<Placed> = if self.takeover.is_some() && around == Some(Around::Wheel) { Vec::new() } else { places };
+        let back = self.takeover.is_some().then_some(self.back_place).flatten();
+        let places: Vec<Placed> = places.into_iter().chain(back).collect();
+        // Moved or another size: the parts of a size stay as they are, those changed are made anew.
         let unchanged = self.list.len() == places.len() && self.list.iter().zip(&places).all(|(a, b)| a.placed == *b);
         if !unchanged {
             let first = self.list.is_empty();
@@ -391,29 +497,69 @@ impl Panels {
                 })
                 .collect();
         }
-        if !self.menu_opened {
-            // The menu's logic is what a 3D picture or fast walk goes through: it wants to be open, on its Home, whether it is drawn or not.
-            self.host.open(snap);
-            self.menu_opened = true;
-        }
     }
 
-    /// A menu's page in front of the Quick Menu.
-    fn open_page(&mut self, target: orbiters_n4n0_core::menu::Target, place: Option<Placed>, snap: &Snapshot) {
-        let Some(place) = place else { return };
-        self.host.open(snap);
-        // `Close` stands for its Home, where it opens.
-        if target != orbiters_n4n0_core::menu::Target::Close {
-            let effects = self.host.press(target);
-            self.host.effects(effects, snap, &self.backend);
+    /// Opens `sheet` on the sheet, with `title`.
+    fn open_sheet(&mut self, sheet: Sheet, title: &str, snap: &Snapshot) {
+        let Some(place) = self.takeover_place else { return };
+        let size = place.rect.size() * self.sharp;
+        let px = [size.x.round() as u32, size.y.round() as u32];
+        if self.stage.px != px || (self.worlds_here && self.stage.worlds.is_none()) {
+            self.stage = Stage::new(px, self.worlds_here);
         }
-        let mut panel = Panel::new(place, self.sharp, 0, !snap.settings.reduce_motion);
-        panel.canvas = Canvas::zoomed(panel.px[0], panel.px[1], panel.px[0] as f32 / panel.logical.x);
-        self.takeover = Some(panel);
-        self.host.dirty = true;
+        self.facts.sheet = Some(sheet);
+        self.facts.sheet_title = title.to_string();
+        if self.takeover.is_none() {
+            self.takeover = Some(Panel::new(place, self.sharp, 0, !snap.settings.reduce_motion));
+        }
+        self.stage.host.dirty = true;
+        if let Some(panel) = self.takeover.as_mut() {
+            panel.dirty = true;
+            panel.hover = None;
+            panel.items = panels::sheet_items(sheet, &self.facts);
+        }
+        for panel in &mut self.list {
+            panel.dirty = true;
+        }
+        self.stage.canvas.invalidate();
     }
 
-    /// Follows the service's state: the panels' facts, recent captures, N4N0's menu in front of the Quick Menu when it is. Returns whether anything is to be painted.
+    fn close_sheet(&mut self) {
+        self.takeover = None;
+        self.facts.sheet = None;
+        self.facts.sheet_title.clear();
+        self.list.retain(|p| p.zone != Zone::SheetBack);
+        for panel in &mut self.list {
+            panel.dirty = true;
+        }
+        self.show_keys = false;
+    }
+
+    /// A page of N4N0's menu on the sheet, from its Home as the menu starts there.
+    fn open_page(&mut self, target: Target, snap: &Snapshot) {
+        let title = match target {
+            Target::YouTube => "YouTube",
+            Target::Instances => "Previous instances",
+            Target::Music => "Now playing",
+            Target::History => "Your captures",
+            Target::Call => "Call",
+            Target::States => "Saved looks",
+            Target::Light => "Light",
+            Target::Tracking => "Smooth tracking",
+            Target::WorldFeedback => "World feedback",
+            Target::Qr => "QR code",
+            Target::Suggest => "Suggest",
+            _ => "",
+        };
+        self.open_sheet(Sheet::Menu, title, snap);
+        let host = &mut self.stage.host;
+        let _ = host.menu.close();
+        host.open(snap);
+        let effects = host.press(target);
+        host.effects(effects, snap, &self.backend);
+    }
+
+    /// Follows the service's state: the parts' facts, recent captures, what is on the sheet.
     pub fn follow(&mut self, snap: &Snapshot, library: u64) {
         if self.open.is_none() {
             return;
@@ -422,40 +568,80 @@ impl Panels {
             for panel in &mut self.list {
                 panel.dirty = true;
             }
+            if let Some(panel) = self.takeover.as_mut() {
+                panel.dirty = true;
+            }
         }
-        self.host.follow(snap);
-        self.host.follow_media();
+        // N4N0's menu is what plays and its controls go through: open, drawn or not.
+        if !self.stage.host.menu.open {
+            self.stage.host.open(snap);
+        }
+        self.stage.host.follow(snap);
+        self.stage.host.follow_media();
+        // What plays's picture, for the panels' own textures.
+        let key = self.stage.host.menu.media.as_ref().and_then(|m| m.art.clone());
+        if self.art.as_ref().map(|(k, _)| k) != key.as_ref() {
+            self.art = key.and_then(|k| self.stage.host.image(&k).map(|i| (k, i)));
+            if self.art.is_some() {
+                for panel in &mut self.list {
+                    panel.dirty = true;
+                }
+            }
+        }
         let facts = self.facts_of(snap);
         if facts != self.facts {
             self.facts = facts;
             for panel in &mut self.list {
                 panel.dirty = true;
             }
+            if let Some(panel) = self.takeover.as_mut() {
+                panel.dirty = true;
+            }
+        }
+        // The menu going back to its Home, or to its own More, means back to All tools here: those two pages do not show.
+        if self.facts.sheet == Some(Sheet::Menu) && matches!(self.stage.host.menu.page, Page::Home | Page::More) {
+            self.open_sheet(Sheet::All, "All tools", snap);
+        }
+        if let Some(worlds) = self.stage.worlds.as_mut() {
+            worlds.update_alone(snap, &self.backend);
+            if self.facts.sheet == Some(Sheet::Worlds) && !worlds.open {
+                self.close_sheet();
+            }
         }
     }
 
     fn facts_of(&self, snap: &Snapshot) -> Facts {
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
         let progress = |dir: &PathBuf| snap.reconstruction.as_ref().filter(|j| j.session_dir == *dir).map(|j| j.progress.clamp(0.0, 1.0));
         let recording = matches!(snap.capture.state, CaptureState::Recording | CaptureState::Paused) && !snap.capture.photo_3d;
+        let menu = &self.stage.host.menu;
         Facts {
             recording,
             recording_seconds: recording.then(|| snap.capture.stats.as_ref().map_or(0, |s| s.elapsed_s as u32)),
             capture_busy: !matches!(snap.capture.state, CaptureState::Idle),
             countdown: snap.n4n0.photo_countdown,
             picture_flying: snap.capture.photo_3d && !matches!(snap.capture.state, CaptureState::Idle),
-            // Their pictures are looked up per panel, in `paint`.
-            recent: self.recents.loaded.iter().map(|r| Recent { dir: r.dir.clone(), title: r.title.clone(), state: recent_state(r, snap), progress: progress(&r.dir), picture: None }).collect(),
+            // Their pictures are looked up per part, in `paint`.
+            recent: self.recents.loaded.iter().map(|r| Recent { dir: r.dir.clone(), title: r.title.clone(), state: recent_state(r, snap, now), progress: progress(&r.dir), picture: None }).collect(),
             reconstructing: snap.reconstruction.as_ref().map(|j| j.progress.clamp(0.0, 1.0)),
             waiting: snap.reconstruct_queue.len(),
             desktop: snap.n4n0.desktop_mode || !snap.steamvr.running,
             fast_walk: snap.settings.walk_boost.enabled,
             n4n0: snap.settings.n4n0.enabled,
-            music: self.host.menu.media.as_ref().map(|m| (m.title.clone(), m.playing)),
+            music: menu.media.as_ref().map(|m| (m.title.clone(), m.playing)),
+            music_by: menu.media.as_ref().map_or(String::new(), |m| m.artist.clone()),
+            art: None,
             timer: snap.settings.photo_3d_timer,
+            can_call: menu.calls_ready,
+            can_states: menu.states_ready,
+            can_light: menu.light.is_some(),
+            vr_close: self.sharp > 1.0,
             picture_mode: self.facts.picture_mode,
             tint: self.facts.tint,
             hint: self.facts.hint,
             pointed: self.facts.pointed,
+            sheet: self.facts.sheet,
+            sheet_title: self.facts.sheet_title.clone(),
         }
     }
 
@@ -485,14 +671,30 @@ impl Panels {
         }
     }
 
-    /// A pointer on a panel (`on`: its index in [`Panels::all`], and where in units), or on none.
+    /// A pointer on a part (`on`: its index in [`Panels::all`], and where in units), or on none.
     pub fn hover(&mut self, on: Option<(usize, Pos2)>) {
         let count = self.list.len();
+        let (sheet, show_keys, desktop) = (self.facts.sheet, self.show_keys, self.facts.desktop);
+        let mut worlds_hover = None;
+        let mut on_zone = None;
         for (i, panel) in self.list.iter_mut().chain(self.takeover.iter_mut()).enumerate() {
             let hover = on.filter(|(at, _)| *at == i).and_then(|(_, p)| {
+                on_zone = Some(panel.zone);
                 if i == count {
-                    let page = layout::cached(ScreenPage::of(&self.host.menu));
-                    layout::hit_pointable(page, &self.host.menu, p.x, p.y).map(|(element, _)| element)
+                    match sheet {
+                        Some(Sheet::Menu) => {
+                            if desktop && !show_keys && self.stage.host.menu.shows_keyboard() && p.y >= KEYS_TOP {
+                                return None;
+                            }
+                            let page = layout::cached(ScreenPage::of(&self.stage.host.menu));
+                            layout::hit_pointable(page, &self.stage.host.menu, p.x, p.y).map(|(element, _)| element)
+                        }
+                        Some(Sheet::Worlds) => {
+                            worlds_hover = Some((p.x, p.y));
+                            None
+                        }
+                        _ => panels::hit(&panel.items, p),
+                    }
                 } else {
                     panels::hit(&panel.items, p)
                 }
@@ -501,12 +703,34 @@ impl Panels {
                 panel.hover = hover;
                 panel.dirty = true;
                 if i == count {
-                    self.host.dirty = true;
+                    self.stage.host.dirty = true;
                 }
             }
         }
+        if sheet == Some(Sheet::Worlds) {
+            if let Some(worlds) = self.stage.worlds.as_mut() {
+                worlds.hover_alone(worlds_hover);
+            }
+        }
+        // A second ring blooms from its cell.
+        let was = self.bloom.open();
+        let group = self.bloom.step(on_zone, Instant::now());
+        let live = !self.facts.desktop || group.is_some();
+        for panel in &mut self.list {
+            if let Some(of) = panel.zone.group() {
+                let show = group == Some(of);
+                if panel.shown != show {
+                    panel.shown = show;
+                    if show {
+                        let order = of.cells().iter().position(|z| *z == panel.zone).unwrap_or(0);
+                        panel.appear = Appear::new(order, live);
+                    }
+                }
+            }
+        }
+        let _ = was;
         // The caption says what is pointed at.
-        let pointed = self.list.iter().find_map(|p| p.hover.and_then(|i| p.items.get(i)).map(|item| item.action));
+        let pointed = self.list.iter().find_map(|p| p.hover.and_then(|i| p.items.get(i)).map(|item| item.action)).or_else(|| self.takeover.as_ref().filter(|_| matches!(sheet, Some(Sheet::All | Sheet::Pictures))).and_then(|p| p.hover.and_then(|i| p.items.get(i)).map(|item| item.action)));
         if pointed != self.facts.pointed {
             self.facts.pointed = pointed;
             self.caption_dirty();
@@ -516,42 +740,70 @@ impl Panels {
     /// The pointer's button went down on what it hovers.
     pub fn press(&mut self, snap: &Snapshot) -> Pressed {
         let mut out = Pressed::default();
-        // In front of everything, N4N0's own menu takes it.
-        if let Some(panel) = self.takeover.as_mut() {
-            if let Some(element) = panel.hover {
-                let page = layout::cached(ScreenPage::of(&self.host.menu));
-                if let Some(e) = page.elements.get(element) {
-                    panel.pressed = Some(element);
-                    out.clicked = true;
-                    let effects = self.host.press(e.target);
-                    if self.host.effects(effects, snap, &self.backend) || !self.host.menu.open {
-                        self.takeover = None;
-                        self.host.open(snap);
+        // In front of everything, what the sheet shows takes it.
+        match self.facts.sheet {
+            Some(Sheet::Worlds) => {
+                if let Some(worlds) = self.stage.worlds.as_mut() {
+                    if worlds.press_alone() {
+                        out.clicked = true;
+                        return out;
                     }
-                    self.host.dirty = true;
                 }
-                return out;
             }
+            Some(Sheet::Menu) => {
+                if let Some(panel) = self.takeover.as_mut() {
+                    if let Some(element) = panel.hover {
+                        let host = &mut self.stage.host;
+                        let page = layout::cached(ScreenPage::of(&host.menu));
+                        if let Some(e) = page.elements.get(element) {
+                            panel.pressed = Some(element);
+                            out.clicked = true;
+                            let effects = host.press(e.target);
+                            let closing = host.effects(effects, snap, &self.backend) || !host.menu.open;
+                            host.dirty = true;
+                            if closing {
+                                let _ = host;
+                                self.close_sheet();
+                            }
+                        }
+                        return out;
+                    }
+                }
+            }
+            _ => {}
         }
         let mut action = None;
-        for panel in &mut self.list {
+        for panel in self.list.iter_mut().chain(self.takeover.iter_mut()) {
             if let Some(i) = panel.hover {
                 panel.pressed = Some(i);
                 panel.dirty = true;
-                action = Some(panel.items[i].action);
+                action = panel.items.get(i).map(|item| item.action);
                 break;
             }
         }
         let Some(action) = action else { return out };
         out.clicked = action != Action::Idle;
         match action {
+            Action::Worlds => {
+                if self.worlds_here {
+                    self.open_sheet(Sheet::Worlds, "Worlds in 3D", snap);
+                    if let Some(worlds) = self.stage.worlds.as_mut() {
+                        worlds.open_panel(self.stage.host.menu.layout);
+                    }
+                } else {
+                    out.worlds = true;
+                }
+            }
+            Action::All => self.open_sheet(Sheet::All, "All tools", snap),
+            Action::Pictures => self.open_sheet(Sheet::Pictures, "3D pictures", snap),
             Action::Picture(mode) => {
                 self.facts.picture_mode = Some(mode);
-                for panel in &mut self.list {
+                for panel in self.list.iter_mut().chain(self.takeover.iter_mut()) {
                     panel.dirty = true;
                 }
-                let effects = self.host.press(orbiters_n4n0_core::menu::Target::TakeOf(mode));
-                self.host.effects(effects, snap, &self.backend);
+                let host = &mut self.stage.host;
+                let effects = host.press(Target::TakeOf(mode));
+                host.effects(effects, snap, &self.backend);
             }
             Action::Record => {
                 if self.facts.recording {
@@ -560,16 +812,21 @@ impl Panels {
                     self.backend.start_capture();
                 }
             }
-            Action::Page(target) => {
-                self.open_page(target, self.takeover_place, snap);
-            }
+            Action::Page(target) => self.open_page(target, snap),
             Action::FastWalk => {
-                let effects = self.host.press(orbiters_n4n0_core::menu::Target::FastWalk);
-                self.host.effects(effects, snap, &self.backend);
+                let host = &mut self.stage.host;
+                let effects = host.press(Target::FastWalk);
+                host.effects(effects, snap, &self.backend);
             }
-            Action::PlayPause => {
-                let effects = self.host.press(orbiters_n4n0_core::menu::Target::MediaPlayPause);
-                self.host.effects(effects, snap, &self.backend);
+            Action::PlayPause | Action::Previous | Action::Next => {
+                let target = match action {
+                    Action::Previous => Target::MediaPrevious,
+                    Action::Next => Target::MediaNext,
+                    _ => Target::MediaPlayPause,
+                };
+                let host = &mut self.stage.host;
+                let effects = host.press(target);
+                host.effects(effects, snap, &self.backend);
             }
             Action::Talk => {
                 if self.facts.n4n0 {
@@ -578,6 +835,7 @@ impl Panels {
                 }
             }
             Action::OpenApp => self.backend.show_window(),
+            Action::CloseSheet => self.close_sheet(),
             Action::Hide => {
                 self.hidden = true;
                 out.hide = true;
@@ -598,13 +856,17 @@ impl Panels {
                 panel.dirty = true;
             }
         }
-        self.host.dirty = true;
+        if let Some(worlds) = self.stage.worlds.as_mut() {
+            worlds.release_alone();
+        }
+        self.stage.host.dirty = true;
     }
 
     /// Paints what changed and hands each new picture to `show`, with the part that changed. Nothing changed: nothing happens, at no cost.
     pub fn paint(&mut self, snap: &Snapshot, mut show: impl FnMut(&Panel, [u32; 4])) {
         let time = self.started.elapsed().as_secs_f64();
         let live = !snap.settings.reduce_motion;
+        let art = self.art.clone();
         for panel in &mut self.list {
             if !panel.dirty {
                 continue;
@@ -613,14 +875,19 @@ impl Panels {
             panel.dirty = false;
             panel.items = panels::items(panel.zone, panel.logical, &self.facts);
             let mut facts = self.facts.clone();
-            if matches!(panel.zone, Zone::WheelRecent0 | Zone::WheelRecent1 | Zone::WheelRecent2 | Zone::QmLeft) {
-                // Recent captures' pictures: textures of this panel's own canvas.
+            if matches!(panel.zone, Zone::BloomRecent) {
                 for (recent, loaded) in facts.recent.iter_mut().zip(&self.recents.loaded) {
                     if let Some(image) = &loaded.image {
                         let ctx = panel.canvas.ctx();
-                        let texture = panel.pictures.entry(loaded.dir.clone()).or_insert_with(|| ctx.load_texture("recent", image.clone(), TextureOptions::LINEAR));
-                        recent.picture = Some(texture.id());
+                        let name = loaded.dir.to_string_lossy().to_string();
+                        recent.picture = Some(panel.pictures.entry(name).or_insert_with(|| ctx.load_texture("recent", image.clone(), TextureOptions::LINEAR)).id());
                     }
+                }
+            }
+            if matches!(panel.zone, Zone::WheelPlaying | Zone::QmWing) {
+                if let Some((key, image)) = &art {
+                    let ctx = panel.canvas.ctx();
+                    facts.art = Some(panel.pictures.entry(key.clone()).or_insert_with(|| ctx.load_texture("art", image.clone(), TextureOptions::LINEAR)).id());
                 }
             }
             orbiters_ui::anim::set_live(panel.canvas.ctx(), live);
@@ -633,68 +900,130 @@ impl Panels {
             // What loads on a first frame (the mark's pictures) shows on the second.
             panel.dirty = first;
         }
-        if self.takeover.is_some() {
-            let retro_now = snap.settings.n4n0.menu.look == MenuLook::Retro;
-            if retro_now != self.retro {
-                self.retro = retro_now;
-                self.host.dirty = true;
+        if self.takeover.is_none() {
+            return;
+        }
+        let sheet = self.facts.sheet;
+        let stage = &mut self.stage;
+        let panel = self.takeover.as_mut().expect("just looked");
+        let retro_now = snap.settings.n4n0.menu.look == MenuLook::Retro;
+        if retro_now != stage.retro {
+            stage.retro = retro_now;
+            stage.host.dirty = true;
+        }
+        match sheet {
+            Some(Sheet::Worlds) => {
+                if let Some(worlds) = stage.worlds.as_mut() {
+                    if worlds.wants_paint() || !panel.painted {
+                        worlds.paint(&mut stage.canvas);
+                        stage.canvas_to(panel, &mut show);
+                    }
+                }
             }
-            let animating = self.host.menu.listening || self.host.menu.popping().is_some();
-            if self.host.dirty || animating {
-                self.host.dirty = false;
-                let (host, retro) = (&self.host, self.retro);
-                if let Some(panel) = self.takeover.as_mut() {
-                    let (hover, pressed) = (panel.hover, panel.pressed);
+            Some(Sheet::Menu) => {
+                let animating = stage.host.menu.listening || stage.host.menu.popping().is_some();
+                if stage.host.dirty || animating || !panel.painted {
+                    stage.host.dirty = false;
+                    let (hover, pressed, retro) = (panel.hover, panel.pressed, stage.retro);
+                    let host = &stage.host;
                     let picture = |id: &str| -> Option<TextureId> { host.picture(id, retro) };
-                    let skin = Skin::english();
-                    let view = View { menu: &host.menu, hover, pressed, picture: &picture, time, skin };
-                    panel.canvas.paint(time, |p| {
+                    let view = View { menu: &host.menu, hover, pressed, picture: &picture, time, skin: skin() };
+                    let cover = self.facts.desktop && !self.show_keys && host.menu.shows_keyboard();
+                    stage.canvas.paint(time, |p| {
                         if retro {
                             menu_retro::draw(p, pos2(0.0, 0.0), &view);
                         } else {
                             menu_ui::draw(p, pos2(0.0, 0.0), &view);
                         }
+                        if cover {
+                            type_hint(p);
+                        }
                     });
-                    if let Some(changed) = panel.take_picture() {
-                        panel.painted = true;
-                        show(panel, changed);
-                    }
+                    stage.canvas_to(panel, &mut show);
                 }
             }
+            Some(sheet) => {
+                if panel.dirty || !panel.painted {
+                    let first = !panel.painted;
+                    panel.dirty = false;
+                    panel.items = panels::sheet_items(sheet, &self.facts);
+                    let mut facts = self.facts.clone();
+                    for (recent, loaded) in facts.recent.iter_mut().zip(&self.recents.loaded) {
+                        if let Some(image) = &loaded.image {
+                            let ctx = stage.canvas.ctx();
+                            let name = loaded.dir.to_string_lossy().to_string();
+                            recent.picture = Some(panel.pictures.entry(name).or_insert_with(|| ctx.load_texture("recent", image.clone(), TextureOptions::LINEAR)).id());
+                        }
+                    }
+                    let (hover, pressed) = (panel.hover, panel.pressed);
+                    stage.canvas.paint(time, |p| panels::paint_sheet(p, sheet, &facts, hover, pressed));
+                    stage.canvas_to(panel, &mut show);
+                    panel.dirty = first;
+                }
+            }
+            None => {}
         }
     }
 
-    /// Takes the menu's own business for a turn while it is in front of the Quick Menu: what it fetches, what comes back, and telling the service
-    /// (it listens, and keys go to the keyboard page).
+    /// Takes the menu's own business for a turn while it is on the sheet: what it fetches, what comes back, and telling the service: only its keyboard needs it to know (keys go to the
+    /// keyboard page). Opening a page does not start N4N0 listening: that is what Ask N4N0 is for.
     pub fn menu_turn(&mut self, snap: &Snapshot) {
-        let state = self.takeover.is_some().then(|| (true, self.host.menu.takes_speech(), self.host.menu.shows_keyboard())).unwrap_or((false, false, false));
+        let on_sheet = self.facts.sheet == Some(Sheet::Menu);
+        let keyboard = (on_sheet && self.stage.host.menu.shows_keyboard()) || (self.facts.sheet == Some(Sheet::Worlds) && self.stage.worlds.as_ref().is_some_and(|w| w.typing()));
+        let state = (keyboard, false, keyboard);
         if self.reported.unwrap_or((false, false, false)) != state {
             self.reported = Some(state);
             self.backend.n4n0(N4n0Command::MenuState { open: state.0, dictation: state.1, keyboard: state.2 });
         }
-        if self.takeover.is_none() {
-            return;
+        if let Some(worlds) = self.stage.worlds.as_mut().filter(|w| w.open) {
+            worlds.keys(&snap.n4n0.keys);
         }
-        let mut effects = self.host.take_keys(&snap.n4n0);
-        effects.extend(self.host.poll());
-        if self.host.effects(effects, snap, &self.backend) {
-            self.takeover = None;
-            self.host.open(snap);
+        let host = &mut self.stage.host;
+        let mut effects = if on_sheet { host.take_keys(&snap.n4n0) } else { Vec::new() };
+        effects.extend(host.poll());
+        if host.effects(effects, snap, &self.backend) && on_sheet {
+            self.close_sheet();
         }
     }
 
-    /// Whether any picture is due or any panel still moving.
+    /// Whether any picture is due or any part still moving.
     pub fn busy(&self) -> bool {
-        self.all().any(|p| p.dirty || !p.appear.settled()) || self.host.dirty
+        self.all().any(|p| p.dirty || !p.appear.settled()) || self.stage.host.dirty
     }
 
-    /// Moves each panel's spring on.
+    /// Moves each part's spring on.
     pub fn step_springs(&mut self, dt: f32) {
         for panel in self.list.iter_mut().chain(self.takeover.iter_mut()) {
             panel.appear.step(dt);
             panel.step_pop(dt);
         }
     }
+}
+
+impl Stage {
+    /// What the canvas painted, to the page on the sheet.
+    fn canvas_to(&mut self, panel: &mut Panel, show: &mut impl FnMut(&Panel, [u32; 4])) {
+        if let Some(changed) = self.canvas.damage() {
+            let [w, h] = panel.px;
+            let pixels = self.canvas.pixels();
+            for y in changed[1]..changed[3].min(h) {
+                let (a, b) = ((y * w + changed[0]) as usize * 4, (y * w + changed[2].min(w)) as usize * 4);
+                panel.out[a..b].copy_from_slice(&pixels[a..b]);
+            }
+            panel.painted = true;
+            show(panel, changed);
+        }
+    }
+}
+
+/// Over the keyboard of N4N0's search page on a desktop, where a real one is under the hands: what to do instead.
+fn type_hint(p: &egui::Painter) {
+    use orbiters_ui::{icons, theme, widgets};
+    let area = egui::Rect::from_min_max(pos2(0.0, KEYS_TOP), pos2(layout::WIDTH as f32, layout::HEIGHT as f32));
+    p.rect_filled(area, 0.0, Color32::from_rgb(14, 19, 25));
+    widgets::icon(p, area.center() - vec2(0.0, 26.0), icons::KEYBOARD, 56.0, panels::look::TEAL);
+    p.text(area.center() + vec2(0.0, 24.0), egui::Align2::CENTER_CENTER, "Type on your keyboard", theme::font(22.0, theme::weight::BOLD), panels::look::LABEL);
+    p.text(area.center() + vec2(0.0, 54.0), egui::Align2::CENTER_CENTER, "Enter searches, Esc goes back", theme::font(15.0, theme::weight::MEDIUM), panels::look::MUTED);
 }
 
 impl Drop for Panels {
@@ -711,7 +1040,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_panel_comes_on_a_spring_and_settles_home() {
+    fn a_part_comes_on_a_spring_and_settles_home() {
         let mut a = Appear::new(0, true);
         assert_eq!(a.position(), 0.0);
         let (mut most, mut t) = (0.0f32, 0.0);
@@ -726,7 +1055,7 @@ mod tests {
     }
 
     #[test]
-    fn panels_start_one_after_another_and_at_once_with_less_motion() {
+    fn parts_start_one_after_another_and_at_once_with_less_motion() {
         let mut later = Appear::new(5, true);
         later.step(0.016);
         assert_eq!(later.position(), 0.0, "its turn has not come");
@@ -742,5 +1071,38 @@ mod tests {
             assert!(a.position().is_finite() && a.position() < 1.3);
         }
         assert!(a.settled());
+    }
+
+    #[test]
+    fn a_second_ring_blooms_stays_while_pointed_at_and_goes_a_moment_after() {
+        let t0 = Instant::now();
+        let at = |ms: u64| t0 + Duration::from_millis(ms);
+        let mut b = Bloom::default();
+        assert_eq!(b.step(Some(Zone::WheelWorlds), at(0)), None, "a cell that does not bloom");
+        assert_eq!(b.step(Some(Zone::WheelPictures), at(10)), Some(Group::Pictures), "at once");
+        assert_eq!(b.step(Some(Zone::BloomWorld), at(100)), Some(Group::Pictures), "on its cells");
+        // Crossing the gap between two cells does not close it.
+        assert_eq!(b.step(None, at(200)), Some(Group::Pictures));
+        assert_eq!(b.step(Some(Zone::BloomPeople), at(300)), Some(Group::Pictures));
+        assert_eq!(b.step(None, at(400)), Some(Group::Pictures));
+        assert_eq!(b.step(None, at(400) + BLOOM_GRACE), None, "gone");
+        // Another cell that blooms takes over at once.
+        assert_eq!(b.step(Some(Zone::WheelPictures), at(2000)), Some(Group::Pictures));
+        assert_eq!(b.step(Some(Zone::WheelPlaying), at(2100)), Some(Group::Playing));
+    }
+
+    #[test]
+    fn how_long_ago_reads_in_a_word() {
+        assert_eq!(ago(10), "just now");
+        assert_eq!(ago(600), "10 min ago");
+        assert_eq!(ago(7200), "2 h ago");
+        assert_eq!(ago(200_000), "2 d ago");
+    }
+
+    #[test]
+    fn n4n0_s_pages_take_vrchat_s_colours_and_keep_the_rest() {
+        let s = skin();
+        assert_eq!(s.palette.card, Color32::from_rgb(14, 19, 25));
+        assert_eq!(s.palette.surface, Color32::from_rgb(22, 47, 53));
     }
 }

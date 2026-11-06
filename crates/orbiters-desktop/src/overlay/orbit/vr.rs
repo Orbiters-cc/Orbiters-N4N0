@@ -182,6 +182,15 @@ pub struct Cx<'a, 'o> {
     pub prediction: f32,
 }
 
+/// What a turn asks of the overlay's loop.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Turn {
+    /// A press happened (for the click's sound).
+    pub clicked: bool,
+    /// Worlds in 3D was pressed: the panel with its 3D view lives with N4N0's menu here.
+    pub worlds: bool,
+}
+
 pub struct OrbitVr {
     key: String,
     panels: Panels,
@@ -209,7 +218,7 @@ impl OrbitVr {
         let now = Instant::now();
         Ok(Self {
             key: format!("{key}.orbit"),
-            panels: Panels::new(backend, 2.0),
+            panels: Panels::new(backend, 2.0, false),
             buttons: MenuButtons::default(),
             block: Block::default(),
             stuck: Stuck::start(),
@@ -254,8 +263,8 @@ impl OrbitVr {
         }
     }
 
-    /// A turn of the overlay's loop. Returns whether a press happened (for the click's sound).
-    pub fn update(&mut self, mut cx: Cx<'_, '_>) -> bool {
+    /// A turn of the overlay's loop.
+    pub fn update(&mut self, mut cx: Cx<'_, '_>) -> Turn {
         let now = Instant::now();
         let dt = now.duration_since(self.last_turn).as_secs_f32();
         self.last_turn = now;
@@ -268,7 +277,7 @@ impl OrbitVr {
             }
             self.buttons.reset();
             self.stuck.beat(false);
-            return false;
+            return Turn::default();
         }
         if self.told.is_none() || !self.overrides_asked {
             self.overrides(&cx);
@@ -291,7 +300,7 @@ impl OrbitVr {
                 self.close(&mut cx);
             }
             self.stuck.beat(false);
-            return false;
+            return Turn::default();
         }
         let mut poses = [Pose::default(); MAX_DEVICES];
         cx.steamvr.predicted_poses(Universe::Standing, cx.prediction, &mut poses);
@@ -302,7 +311,7 @@ impl OrbitVr {
             // Lost the headset's pose: nothing to place by, nothing shown.
             self.close(&mut cx);
             self.stuck.beat(false);
-            return false;
+            return Turn::default();
         };
         // The planes: the wheel rides its hand, the Quick Menu stays where it opened.
         if self.panels.open_menu() != menu {
@@ -322,11 +331,12 @@ impl OrbitVr {
             places.push(zones::in_units(Zone::WheelHide));
         }
         self.panels.takeover_place = Some(zones::in_units(Zone::Takeover));
+        self.panels.back_place = Some(zones::in_units(Zone::SheetBack));
         self.panels.set_open(menu, places, cx.snap);
         if self.panels.is_empty() {
             self.close(&mut cx);
             self.stuck.beat(false);
-            return false;
+            return Turn::default();
         }
         self.panels.follow(cx.snap, cx.backend.library_version());
         self.panels.menu_turn(cx.snap);
@@ -335,7 +345,7 @@ impl OrbitVr {
         // Where everything is this turn.
         let Some(plane) = plane.or(self.plane) else {
             self.stuck.beat(false);
-            return false;
+            return Turn::default();
         };
         if self.panels.takeover.is_some() && self.takeover_plane.is_none() {
             self.takeover_plane = Some(if menu == Some(Around::QuickMenu) { plane } else { quick_menu_plane(&head, settings.vr_size) });
@@ -347,9 +357,14 @@ impl OrbitVr {
             .panels
             .all()
             .map(|p| {
-                let takeover = p.zone == Zone::Takeover;
-                let on = if takeover { self.takeover_plane.unwrap_or(plane) } else { plane };
-                (on.quad(&p.placed, -p.outward(), if takeover { TAKEOVER_NEAR_M } else { NEAR_M }), p.placed)
+                let sheet = matches!(p.zone, Zone::Takeover | Zone::SheetBack);
+                let on = if sheet { self.takeover_plane.unwrap_or(plane) } else { plane };
+                let near = match p.zone {
+                    Zone::Takeover => TAKEOVER_NEAR_M,
+                    Zone::SheetBack => TAKEOVER_NEAR_M - 0.004,
+                    _ => NEAR_M,
+                };
+                (on.quad(&p.placed, -p.outward(), near), p.placed)
             })
             .collect();
 
@@ -363,7 +378,8 @@ impl OrbitVr {
             }
             lasers[i].and_then(|tip| {
                 let (o, d) = space::ray(&tip);
-                laser_on(&quads, o, d)
+                let shown: Vec<(Quad, Placed)> = quads.iter().zip(self.panels.all()).map(|(q, p)| if p.shown { *q } else { (Quad { width: 0.0, height: 0.0, ..q.0 }, q.1) }).collect();
+                laser_on(&shown, o, d)
             })
         });
         let hands: [HandNow; 2] = std::array::from_fn(|i| HandNow { on_panel: hits[i].is_some(), trigger: triggers[i] });
@@ -386,13 +402,14 @@ impl OrbitVr {
             (panel, logical)
         });
         self.panels.hover(pointer);
-        let mut clicked = false;
+        let mut turn = Turn::default();
         if let Some(h) = self.active {
             let (down, was) = (triggers[h], self.trigger_was[h]);
             // Only a press that began blocked is the panels'.
             if down && !was && blocked_before[h] {
                 let pressed = self.panels.press(cx.snap);
-                clicked |= pressed.clicked;
+                turn.clicked |= pressed.clicked;
+                turn.worlds |= pressed.worlds;
                 if pressed.hide {
                     self.buttons.unsure();
                 }
@@ -419,7 +436,7 @@ impl OrbitVr {
         // Pictures, then each overlay where it goes.
         self.show(&mut cx, &quads);
         self.last_shown = true;
-        clicked
+        turn
     }
 
     fn show(&mut self, cx: &mut Cx<'_, '_>, quads: &[(Quad, Placed)]) {
@@ -438,7 +455,11 @@ impl OrbitVr {
         });
         let shown: Vec<Zone> = self.panels.all().map(|p| p.zone).collect();
         for ((quad, _), panel) in quads.iter().zip(self.panels.all()) {
-            if let Some(handle) = self.handles.get(&panel.zone).filter(|_| panel.painted) {
+            if let Some(handle) = self.handles.get(&panel.zone) {
+                if !panel.painted || !panel.shown {
+                    let _ = cx.overlay.hide(*handle);
+                    continue;
+                }
                 let _ = cx.overlay.set_width_in_meters(*handle, quad.width);
                 let _ = cx.overlay.set_transform_absolute(*handle, &quad.transform);
                 let _ = cx.overlay.set_alpha(*handle, panel.appear.alpha());
@@ -563,13 +584,13 @@ mod tests {
         let eyes = space::position(&head);
         assert!(space::dot(space::axis(&plane.frame, 2), space::sub(eyes, space::position(&plane.frame))) > 0.0, "it faces the eyes");
         assert!(space::axis(&plane.frame, 1)[1] > 0.5, "upright");
-        let top = plane.quad(&zones::in_units(Zone::WheelPeople), 0.0, NEAR_M);
+        let top = plane.quad(&zones::in_units(Zone::WheelWorlds), 0.0, NEAR_M);
         let center = space::position(&plane.frame);
-        assert!(space::position(&top.transform)[1] > center[1], "the 3D picture's cell above the wheel's centre");
+        assert!(space::position(&top.transform)[1] > center[1], "the top cell above the wheel's centre");
         // It keeps its share of the wheel.
-        assert!((top.width / WHEEL_RADIUS_M - zones::Zone::WheelPeople.units().width() / 100.0).abs() < 0.01);
+        assert!((top.width / WHEEL_RADIUS_M - zones::Zone::WheelWorlds.units().width() / 100.0).abs() < 0.01);
         // Larger in Settings, larger here.
-        assert!((wheel_plane(&grip, &head, 1.25).unwrap().quad(&zones::in_units(Zone::WheelPeople), 0.0, 0.0).width / top.width - 1.25).abs() < 0.01);
+        assert!((wheel_plane(&grip, &head, 1.25).unwrap().quad(&zones::in_units(Zone::WheelWorlds), 0.0, 0.0).width / top.width - 1.25).abs() < 0.01);
         assert!(OrbitSettings::VR_SIZES.contains(&1.25));
     }
 
@@ -577,7 +598,7 @@ mod tests {
     fn a_laser_finds_the_nearest_panel_and_only_on_its_shape() {
         let head = space::from_axes([1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0], [0.0, 1.6, 0.0]);
         let plane = quick_menu_plane(&head, 1.0);
-        let placed = zones::in_units(Zone::WheelMusic);
+        let placed = zones::in_units(Zone::WheelPlaying);
         let quad = plane.quad(&placed, 0.0, 0.0);
         let quads = [(quad, placed)];
         let eyes = space::position(&head);
@@ -593,9 +614,10 @@ mod tests {
         assert!(shoot([1.2, 0.5]).is_none());
         // Whatever is nearer in front wins: the takeover over the panels.
         let front = zones::in_units(Zone::Takeover);
-        let under = zones::in_units(Zone::QmUnder);
-        let quads = [(plane.quad(&under, 0.0, 0.0), under), (plane.quad(&front, 0.0, TAKEOVER_NEAR_M), front)];
-        let target = space::position(&quads[1].0.transform);
-        assert_eq!(laser_on(&quads, eyes, space::unit(space::sub(target, eyes)).unwrap()).map(|h| h.0), Some(1));
+        let under = zones::in_units(Zone::QmWing);
+        let back = zones::in_units(Zone::SheetBack);
+        let quads = [(plane.quad(&under, 0.0, 0.0), under), (plane.quad(&back, 0.0, TAKEOVER_NEAR_M - 0.004), back), (plane.quad(&front, 0.0, TAKEOVER_NEAR_M), front)];
+        let target = space::position(&quads[2].0.transform);
+        assert_eq!(laser_on(&quads, eyes, space::unit(space::sub(target, eyes)).unwrap()).map(|h| h.0), Some(2));
     }
 }

@@ -789,8 +789,12 @@ fn session(args: &[String]) -> anyhow::Result<Ended> {
                 in_game: vrchat_scene,
                 prediction: (frame - since).clamp(0.0, 0.05),
             };
-            if orbit.update(cx) {
+            let turn = orbit.update(cx);
+            if turn.clicked {
                 sounds.click();
+            }
+            if turn.worlds {
+                t.menu.open_worlds(&overlay, &steamvr, &snap);
             }
         }
         if t.menu.update(&overlay, &steamvr, &mut presenter, &snap, &backend, button, watch) {

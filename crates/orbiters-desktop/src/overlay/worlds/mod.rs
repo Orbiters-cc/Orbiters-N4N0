@@ -238,6 +238,189 @@ impl Worlds {
         })
     }
 
+    /// The panel alone, for the desktop's panels around VRChat's menus (`overlay::orbit`): no SteamVR, no pill, no bar, nothing shown around the person. Its lists, a world's page
+    /// and its feedback work as ever; a capture opens in the Orbiters window instead ([`Worlds::mouse_alone`]).
+    pub fn alone(ctx: egui::Context) -> Self {
+        Self {
+            open: false,
+            panel: Panel::default(),
+            catalog: Catalog::default(),
+            source: Source::current(),
+            view: View::new("cc.orbiters.desktop.orbit"),
+            download: None,
+            current: None,
+            error: None,
+            captures: cache::Memory::with_default_budget(),
+            chip: 0,
+            chip_canvas: Canvas::new(1, 1),
+            chip_shown: false,
+            chip_hover: false,
+            chip_pressed: false,
+            chip_drawn: None,
+            chip_placed: None,
+            bar: 0,
+            bar_canvas: Canvas::new(1, 1),
+            bar_shown: false,
+            bar_hover: None,
+            bar_pressed: None,
+            bar_drawn: None,
+            bar_painted: None,
+            bar_placed: None,
+            open_asked: false,
+            deferred: Vec::new(),
+            feedback: FeedbackView::default(),
+            feedback_seen: FeedbackView::default(),
+            outbox: Vec::new(),
+            asked: None,
+            facts: HashMap::new(),
+            facts_pending: false,
+            me: None,
+            infos: crate::worlds::Infos::new(&ctx),
+            pictures: crate::worlds::Pictures::new(&ctx),
+            finder: finder::Finder::default(),
+            visited: finder::Visited::default(),
+            found_seen: (0, 0),
+            backend: None,
+            scope: None,
+            vrchat: false,
+            region: "us",
+            typed: (String::new(), Instant::now()),
+            searched: String::new(),
+            search_now: false,
+            picked: None,
+            said: mpsc::channel(),
+            ctx,
+            epoch: Instant::now(),
+            keys_seen: None,
+            last_paint: None,
+        }
+    }
+
+    /// A turn of [`Worlds::alone`]: what the panel asked of the app, the app's feedback, the lists.
+    pub fn update_alone(&mut self, snap: &Snapshot, backend: &Ctl) {
+        if snap.n4n0.feedback != self.feedback_seen {
+            self.feedback_seen = snap.n4n0.feedback.clone();
+            self.feedback = snap.n4n0.feedback.clone();
+            self.panel.dirty = true;
+        }
+        let me = snap.vrchat_login.user.as_ref().map(|u| u.display_name.clone()).filter(|n| !n.trim().is_empty());
+        if me != self.me {
+            self.me = me;
+            self.panel.dirty = true;
+        }
+        if self.backend.is_none() {
+            self.backend = Some(backend.clone());
+        }
+        let scope = Scope::of(snap);
+        if self.scope.as_ref() != Some(&scope) {
+            if self.scope.is_some() {
+                self.finder.clear();
+            }
+            self.scope = Some(scope);
+            self.vrchat = snap.vrchat_login.allowed && snap.vrchat_login.user.is_some();
+            self.panel.dirty = true;
+        }
+        self.region = finder::region(snap.vrchat.world.instance.as_deref());
+        while let Ok(said) = self.said.1.try_recv() {
+            let time = self.time();
+            self.panel.say(said, time);
+            self.panel.dirty = true;
+        }
+        let deferred = std::mem::take(&mut self.deferred);
+        if !deferred.is_empty() {
+            let entries = self.entries();
+            self.act_alone(deferred, &entries);
+        }
+        self.find();
+        let seen = (self.finder.version(), self.visited.state().1);
+        if seen != self.found_seen {
+            self.found_seen = seen;
+            self.panel.dirty = true;
+        }
+        self.ask_feedback();
+        for ask in self.outbox.drain(..) {
+            backend.n4n0(N4n0Command::Feedback { ask });
+        }
+    }
+
+    /// The same as [`Worlds::act`] with no SteamVR: nothing can be shown around the person, so a capture opens in the Orbiters window, and what only the view has does nothing.
+    fn act_alone(&mut self, actions: Vec<Action>, entries: &[Entry]) {
+        for action in actions {
+            match action {
+                Action::Show(_) => {
+                    if let Some(backend) = &self.backend {
+                        backend.show_window();
+                    }
+                    let time = self.time();
+                    self.panel.say("Opened in the Orbiters window, where it shows in 3D", time);
+                }
+                Action::Hide | Action::Recenter | Action::SeeThrough(_) | Action::Quality(_) | Action::Open => {}
+                Action::Leave => self.open = false,
+                Action::Refresh => {
+                    self.catalog.refresh(&self.source);
+                    self.finder.retry();
+                }
+                Action::Search => self.search_now = true,
+                Action::Join(world) => self.join(world),
+                Action::OpenWeb(world) => {
+                    let Some(link) = finder::web_link(&world) else { continue };
+                    let tx = self.said.0.clone();
+                    let _ = std::thread::Builder::new().name("3d-worlds-web".into()).spawn(move || {
+                        let said = match crate::controller::open_url(&link) {
+                            Ok(()) => "Its page opened in the computer's browser".to_string(),
+                            Err(e) => format!("The browser did not open: {e}"),
+                        };
+                        let _ = tx.send(said);
+                    });
+                }
+                Action::Feedback(ask) => {
+                    self.apply(&ask);
+                    self.outbox.push(ask);
+                }
+            }
+        }
+        let _ = entries;
+        self.panel.dirty = true;
+    }
+
+    /// The pointer on the panel of [`Worlds::alone`] at (x, y) in its own units, from its top left.
+    pub fn hover_alone(&mut self, at: Option<(f32, f32)>) {
+        let entries = self.entries();
+        let status = self.status();
+        let (no_thumb, no_picture) = (|_: &Entry| -> Option<TextureId> { None }, |_: u64, _: bool| -> Option<TextureId> { None });
+        let picked = self.picked().cloned();
+        let d = Data { entries: &entries, picked: picked.as_ref(), status: &status, feedback: &self.feedback, facts: &self.facts, thumb: &no_thumb, picture: &no_picture, now: unix_now() };
+        let hover = at.and_then(|(x, y)| self.panel.hit(&d, x, y));
+        if hover != self.panel.hover {
+            self.panel.hover = hover;
+            self.panel.dirty = true;
+        }
+    }
+
+    /// A press where the pointer is on the panel of [`Worlds::alone`]. Returns whether something was hit.
+    pub fn press_alone(&mut self) -> bool {
+        let entries = self.entries();
+        let status = self.status();
+        let time = self.time();
+        let (no_thumb, no_picture) = (|_: &Entry| -> Option<TextureId> { None }, |_: u64, _: bool| -> Option<TextureId> { None });
+        let picked = self.picked().cloned();
+        let Some(target) = self.panel.hover else { return false };
+        self.panel.pressed = Some(target);
+        let actions = {
+            let d = Data { entries: &entries, picked: picked.as_ref(), status: &status, feedback: &self.feedback, facts: &self.facts, thumb: &no_thumb, picture: &no_picture, now: unix_now() };
+            self.panel.press(target, &d, time)
+        };
+        self.keep_picked(&entries);
+        self.act_alone(actions, &entries);
+        true
+    }
+
+    /// The press of [`Worlds::press_alone`] let go.
+    pub fn release_alone(&mut self) {
+        self.panel.pressed = None;
+        self.panel.dirty = true;
+    }
+
     /// The pill and the bar while they show, for the controllers' lasers: each overlay, where it is and its pixels
     /// (their mouse events count in those, from the bottom left).
     pub fn pointables(&self) -> Vec<super::floating::Pointable> {

@@ -18,6 +18,15 @@ pub enum CaptureState {
     Importing,
 }
 
+/// What the panels around VRChat's menus can do now: for Settings to tell the person.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct OrbitStatus {
+    /// What is in the way, in words, none when they can show (desktop: exclusive full screen; VR: no trigger block).
+    pub note: Option<String>,
+    /// SteamVR's "Experimental overlay input overrides": `None` where it is not known (no SteamVR).
+    pub steamvr_overrides: Option<bool>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct VrchatStatus {
     pub running: bool,
@@ -509,11 +518,19 @@ pub struct Snapshot {
     /// The experimental VRChat bridge (`crate::bridge`): only filled in for an account the server says has it.
     #[serde(default)]
     pub bridge: crate::bridge::Status,
+    /// What the panels around VRChat's menus last said of themselves.
+    #[serde(default)]
+    pub orbit: OrbitStatus,
+    /// Whether the avatar worn has N4N0's capture kit, as VRChat's parameters say: `None` when they do not say.
+    #[serde(default)]
+    pub worn_kit: Option<bool>,
 }
 
 impl Snapshot {
     pub fn new(settings: Settings) -> Self {
         Self {
+            orbit: OrbitStatus::default(),
+            worn_kit: None,
             version: orbiters_core::APP_VERSION.into(),
             vrchat: VrchatStatus {
                 running: false,

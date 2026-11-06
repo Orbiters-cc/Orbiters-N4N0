@@ -99,6 +99,16 @@ pub struct ProcessUsage {
 }
 
 /// N4N0, the companion on the avatar.
+/// What a 3D picture asked for from around VRChat's menus still waits for. On the desktop these menus cannot be used with the camera open, as opening one closes
+/// it and R does nothing over it: so the picture is asked for first, and starts when the camera is ready.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PhotoWait {
+    /// VRChat's camera to be opened.
+    Camera,
+    /// The camera to move once: VRChat only says where it is when it moves.
+    Move,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct N4n0Status {
     /// The avatar VRChat loaded.
@@ -162,6 +172,9 @@ pub struct N4n0Status {
     /// Seconds before the 3D picture a menu's timer started.
     #[serde(default)]
     pub photo_countdown: Option<u32>,
+    /// A 3D picture is asked for, and waits for this.
+    #[serde(default)]
+    pub photo_wait: Option<PhotoWait>,
     /// N4N0's light, when the avatar's N4N0 has one (the Light option).
     #[serde(default)]
     pub light: Option<N4n0Light>,

@@ -404,6 +404,7 @@ impl N4n0Runtime {
             menu_toggle: self.screen.menu_toggle,
             dictation: self.screen.dictation.clone(),
             photo_countdown: self.screen.countdown(Instant::now()),
+            photo_wait: self.screen.photo_wait,
             light: self.light.map(|l| N4n0Light { on: l.on, color: l.color, level: l.level }),
             states: self.states.view(self.avatar_id.as_deref(), self.avatar_name.as_deref()),
             can_drop: self.screen.card_ready(),
@@ -1722,6 +1723,7 @@ impl N4n0 {
             }
             Command::ToggleScreen => self.menu_open(true),
             Command::Photo3DIn { seconds } => self.photo_3d_in(seconds),
+            Command::Photo3DWhenCamera { seconds } => self.photo_3d_when_camera(seconds),
             Command::Light { on, color, level } => {
                 if let Err(e) = self.set_light(orbiters_n4n0_core::menu::Light { on, color, level }) {
                     self.notify(NoticeKind::Warning, e);

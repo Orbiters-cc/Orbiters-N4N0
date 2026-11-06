@@ -91,6 +91,21 @@ fn api_failure(error: anyhow::Error, doing: &str) -> Failure {
     }
 }
 
+impl RealGame {
+    fn send_osc(&self, address: &str, arg: rosc::OscType) -> Result<(), Failure> {
+        let ctl = self.ctl()?;
+        match ctl.with_osc(|o| o.send(address, vec![arg])) {
+            Some(Ok(())) => Ok(()),
+            Some(Err(e)) => Err(Failure::new(
+                "osc_failed",
+                format!("OSC to VRChat failed: {e}"),
+                "Check get_state's osc_answers: OSC must be on in VRChat's Action Menu (r), Options, OSC.",
+            )),
+            None => Err(Failure::new("osc_off", "OSC is off in Orbiters - N4N0.", "Tell the person to turn it on in its Settings.")),
+        }
+    }
+}
+
 impl Game for RealGame {
     fn seen(&self) -> Seen {
         let Ok(ctl) = self.ctl() else { return Seen::default() };
@@ -204,20 +219,15 @@ impl Game for RealGame {
     }
 
     fn osc(&self, address: &str, value: OscArg) -> Result<(), Failure> {
-        let ctl = self.ctl()?;
         let arg = match value {
             OscArg::Int(i) => rosc::OscType::Int(i),
             OscArg::Float(f) => rosc::OscType::Float(f),
         };
-        match ctl.with_osc(|o| o.send(address, vec![arg])) {
-            Some(Ok(())) => Ok(()),
-            Some(Err(e)) => Err(Failure::new(
-                "osc_failed",
-                format!("OSC to VRChat failed: {e}"),
-                "Check get_state's osc_answers: OSC must be on in VRChat's Action Menu (r), Options, OSC.",
-            )),
-            None => Err(Failure::new("osc_off", "OSC is off in Orbiters - N4N0.", "Tell the person to turn it on in its Settings.")),
-        }
+        self.send_osc(address, arg)
+    }
+
+    fn wear(&self, avatar_id: &str) -> Result<(), Failure> {
+        self.send_osc(orbiters_core::osc::AVATAR_CHANGE, rosc::OscType::String(avatar_id.to_string()))
     }
 
     fn osc_target(&self) -> Option<std::net::SocketAddr> {
@@ -350,7 +360,7 @@ impl Controller {
     }
 
     /// Whether VRChat told where its camera is: a 3D picture starts from there.
-    fn camera_pose_known(&self) -> bool {
+    pub(super) fn camera_pose_known(&self) -> bool {
         let osc = self.osc_values.lock().unwrap();
         osc.latest.get(super::burst::POSE).is_some_and(|(values, _)| {
             let floats = super::burst::floats(values);

@@ -115,6 +115,10 @@ pub trait Host: Send + Sync + 'static {
     fn camera_open(&self) -> Option<bool> {
         None
     }
+    /// Whether VRChat has said where its camera is, which a 3D picture needs: it only says when the camera moves.
+    fn camera_pose_known(&self) -> bool {
+        true
+    }
     /// Starts reading VRChat's stream camera for QR codes (N4N0's menu, More, QR code scanner): downscaled frames decoded
     /// a few times a second on a thread of its own, what it sees told to `events`. Dropping the scan stops it. A device
     /// without VRChat's camera says why it cannot.

@@ -31,6 +31,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 mod floating;
+mod orbit;
 mod gallery_layouts;
 mod gallery_folders;
 mod gallery_assets;
@@ -261,6 +262,12 @@ fn shots(args: &[String], picture_folders: Vec<PathBuf>) -> anyhow::Result<()> {
     }
     if only.as_deref() == Some("overlay") {
         return overlay_shots(&out, &settings);
+    }
+    if only.as_deref() == Some("orbit") {
+        return orbit::shots(&out);
+    }
+    if let Some(refs) = only.as_deref().and_then(|o| o.strip_prefix("orbit-vr=")) {
+        return orbit::vr_shots(&out, std::path::Path::new(refs));
     }
     if only.as_deref() == Some("floating") {
         return floating::shots(&out, &settings);

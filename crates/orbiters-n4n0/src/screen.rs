@@ -251,6 +251,9 @@ pub(crate) struct ScreenRuntime {
     pub dictation: Option<(u32, String)>,
     /// When the 3D picture starts (a menu's timer).
     pub photo_at: Option<Instant>,
+    /// A 3D picture is asked for, and waits for this; which asking it is.
+    pub photo_wait: Option<crate::status::PhotoWait>,
+    pub(crate) photo_wait_id: u32,
     /// What stopped the last 3D picture ("Open the camera before"), numbered: every menu shows it on its 3D picture page.
     pub(crate) photo_note: Option<(u32, String)>,
     /// A press held on the music's timeline, by each hand (the left, the right, everyone else's) and by looking and
@@ -386,6 +389,8 @@ impl Default for ScreenRuntime {
             menu_toggle: false,
             dictation: None,
             photo_at: None,
+            photo_wait: None,
+            photo_wait_id: 0,
             photo_note: None,
             dragging: [None; 4],
             overlay_asked: None,
@@ -1652,6 +1657,65 @@ impl N4n0 {
             }
             n.n4n0.lock().unwrap().screen.photo_at = Some(Instant::now() + Duration::from_secs(seconds as u64));
             n.publish();
+        });
+    }
+
+    /// A 3D picture `seconds` after VRChat's camera is ready, for the menus that cannot be used with it open. Pressed again while it waits, it is called off.
+    pub(crate) fn photo_3d_when_camera(self: &Shared, seconds: u32) {
+        use crate::status::PhotoWait;
+        let id = {
+            let mut rt = self.n4n0.lock().unwrap();
+            let s = &mut rt.screen;
+            s.photo_wait_id = s.photo_wait_id.wrapping_add(1);
+            if s.photo_wait.take().is_some() {
+                drop(rt);
+                self.publish();
+                return;
+            }
+            if s.photo_at.is_some() {
+                return;
+            }
+            s.photo_wait = Some(PhotoWait::Camera);
+            s.photo_wait_id
+        };
+        self.publish();
+        let n = self.clone();
+        std::thread::spawn(move || {
+            // How long it waits for the camera to be opened.
+            const PHOTO_WAIT: Duration = Duration::from_secs(90);
+            let until = Instant::now() + PHOTO_WAIT;
+            loop {
+                let wait = if n.host.camera_open() == Some(false) {
+                    Some(PhotoWait::Camera)
+                } else if !n.host.camera_pose_known() {
+                    Some(PhotoWait::Move)
+                } else {
+                    None
+                };
+                let late = Instant::now() >= until;
+                let changed = {
+                    let mut rt = n.n4n0.lock().unwrap();
+                    let s = &mut rt.screen;
+                    // Called off, or asked anew.
+                    if s.photo_wait_id != id || s.photo_wait.is_none() {
+                        return;
+                    }
+                    let next = if late { None } else { wait };
+                    let changed = s.photo_wait != next;
+                    s.photo_wait = next;
+                    changed
+                };
+                if late && wait.is_some() {
+                    return n.photo_stopped("The 3D picture was called off: VRChat's camera was not opened.".to_string());
+                }
+                if changed {
+                    n.publish();
+                }
+                if wait.is_none() {
+                    return n.photo_3d_in(seconds);
+                }
+                std::thread::sleep(Duration::from_millis(250));
+            }
         });
     }
 

@@ -7,7 +7,7 @@
 //! SteamVR gives the same inputs to VRChat as well. Every set is read once a frame, together.
 
 use orbiters_n4n0::input::{Pad, Pads};
-use orbiters_openvr::input::{ActionHandle, ActionSetHandle};
+use orbiters_openvr::input::{ActionHandle, ActionSetHandle, ActiveSet, OVERLAY_GLOBAL_PRIORITY_MIN};
 use orbiters_openvr::{self as vr};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -53,10 +53,16 @@ const ACTIONS: &str = r#"{
     { "name": "/actions/panel/in/laser_left", "type": "pose" },
     { "name": "/actions/panel/in/laser_right", "type": "pose" },
     { "name": "/actions/panel/in/grab_left", "type": "boolean" },
-    { "name": "/actions/panel/in/grab_right", "type": "boolean" }
+    { "name": "/actions/panel/in/grab_right", "type": "boolean" },
+    { "name": "/actions/orbit/in/menu_left", "type": "boolean" },
+    { "name": "/actions/orbit/in/menu_right", "type": "boolean" },
+    { "name": "/actions/orbit_block/in/trigger_left", "type": "boolean" },
+    { "name": "/actions/orbit_block/in/trigger_right", "type": "boolean" },
+    { "name": "/actions/orbit_block/in/pull_left", "type": "vector1" },
+    { "name": "/actions/orbit_block/in/pull_right", "type": "vector1" }
   ],
   "action_sets": [ { "name": "/actions/walk", "usage": "leftright" }, { "name": "/actions/menu", "usage": "leftright" }, { "name": "/actions/avatar", "usage": "leftright" },
-    { "name": "/actions/panel", "usage": "leftright" } ],
+    { "name": "/actions/panel", "usage": "leftright" }, { "name": "/actions/orbit", "usage": "leftright" }, { "name": "/actions/orbit_block", "usage": "leftright" } ],
   "localization": [ { "language_tag": "en_US", "/actions/walk": "Walk boost",
     "/actions/walk/in/move_left": "Walking stick (left hand)", "/actions/walk/in/move_right": "Walking stick (right hand)",
     "/actions/menu": "N4N0's menu", "/actions/menu/in/open": "Open N4N0's menu (a press)",
@@ -73,7 +79,12 @@ const ACTIONS: &str = r#"{
     "/actions/avatar/in/stick_right_click": "Stick pressed (right hand)",
     "/actions/panel": "Orbiters panel",
     "/actions/panel/in/laser_left": "Laser (left hand)", "/actions/panel/in/laser_right": "Laser (right hand)",
-    "/actions/panel/in/grab_left": "Grab the Orbiters panel (left hand)", "/actions/panel/in/grab_right": "Grab the Orbiters panel (right hand)" } ]
+    "/actions/panel/in/grab_left": "Grab the Orbiters panel (left hand)", "/actions/panel/in/grab_right": "Grab the Orbiters panel (right hand)",
+    "/actions/orbit": "Panels around VRChat's menus",
+    "/actions/orbit/in/menu_left": "VRChat's menu button (left hand)", "/actions/orbit/in/menu_right": "VRChat's menu button (right hand)",
+    "/actions/orbit_block": "Trigger on the panels (taken from VRChat while pointing at them)",
+    "/actions/orbit_block/in/trigger_left": "Press on a panel (left hand)", "/actions/orbit_block/in/trigger_right": "Press on a panel (right hand)",
+    "/actions/orbit_block/in/pull_left": "Trigger's pull (left hand)", "/actions/orbit_block/in/pull_right": "Trigger's pull (right hand)" } ]
 }"#;
 
 /// How each controller opens N4N0's menu by default (its left hand), never with a stick's click: clicking a stick
@@ -134,9 +145,11 @@ fn bindings(controller: &str, input: &str, mode: &str) -> String {
     };
     let avatar = avatar_sources(controller).join(", ");
     let panel = panel_bindings(controller);
+    let orbit = orbit_bindings(controller);
+    let orbit_block = orbit_block_bindings();
     format!(
         r#"{{ "controller_type": "{controller}", "name": "Orbiters", "description": "Walk boost's sticks; {opens} N4N0's menu; the triggers press on N4N0's screen and the Orbiters panel; the touchpads and sticks reach the avatar; the grips move the Orbiters panel",
-  "bindings": {{ "/actions/walk": {{ "sources": [ {}, {} ] }}, "/actions/menu": {{ "sources": [ {menu}, {}, {} ] }}, "/actions/avatar": {{ "sources": [ {avatar} ] }}, "/actions/panel": {panel} }} }}"#,
+  "bindings": {{ "/actions/walk": {{ "sources": [ {}, {} ] }}, "/actions/menu": {{ "sources": [ {menu}, {}, {} ] }}, "/actions/avatar": {{ "sources": [ {avatar} ] }}, "/actions/panel": {panel}, "/actions/orbit": {orbit}, "/actions/orbit_block": {orbit_block} }} }}"#,
         source("left"),
         source("right"),
         press("left"),
@@ -157,6 +170,39 @@ fn panel_bindings(controller: &str) -> String {
     let grab =
         |hand: &str| format!(r#"{{ "path": "/user/hand/{hand}/input/grip", "mode": "{mode}", "inputs": {{ "{input}": {{ "output": "/actions/panel/in/grab_{hand}" }} }} }}"#);
     format!(r#"{{ "poses": [ {}, {} ], "sources": [ {}, {} ] }}"#, laser("left"), laser("right"), grab("left"), grab("right"))
+}
+
+/// VRChat's menu button as its own default bindings have it (`VRChat_Data/StreamingAssets/SteamVR/bindings_*.json`, its `Menu` action): what the panels' guess at
+/// its menus follows. Read alongside VRChat, taking nothing from it.
+fn menu_button(controller: &str, hand: &str) -> &'static str {
+    match controller {
+        "knuckles" => "b",
+        "vive_controller" | "holographic_controller" => "application_menu",
+        _ => {
+            if hand == "left" {
+                "y"
+            } else {
+                "b"
+            }
+        }
+    }
+}
+
+/// Each hand's menu button for the panels around VRChat's menus.
+fn orbit_bindings(controller: &str) -> String {
+    let source = |hand: &str| {
+        let button = menu_button(controller, hand);
+        format!(r#"{{ "path": "/user/hand/{hand}/input/{button}", "mode": "button", "inputs": {{ "click": {{ "output": "/actions/orbit/in/menu_{hand}" }} }} }}"#)
+    };
+    format!(r#"{{ "sources": [ {}, {} ] }}"#, source("left"), source("right"))
+}
+
+/// Each hand's trigger, whole: this set made active at SteamVR's overlay priority takes that source from VRChat (`overlay::orbit::block`).
+fn orbit_block_bindings() -> String {
+    let source = |hand: &str| {
+        format!(r#"{{ "path": "/user/hand/{hand}/input/trigger", "mode": "trigger", "inputs": {{ "click": {{ "output": "/actions/orbit_block/in/trigger_{hand}" }}, "pull": {{ "output": "/actions/orbit_block/in/pull_{hand}" }} }} }}"#)
+    };
+    format!(r#"{{ "sources": [ {}, {} ] }}"#, source("left"), source("right"))
 }
 
 /// The controllers' touchpads (with a force sensor or not) and sticks (their input path) for the avatar's input; the
@@ -250,10 +296,23 @@ pub struct Actions {
     pads: Option<[HandPads; 2]>,
     /// Each hand's laser (its tip's pose) and grip for the floating panel (left, right).
     panel: Option<([ActionHandle; 2], [ActionHandle; 2])>,
+    /// VRChat's menu button of each hand, the set that takes the trigger from VRChat, each hand's device and trigger in it.
+    orbit: Option<Orbit>,
+    /// Hands whose trigger is taken from VRChat from the next read on.
+    blocked: [bool; 2],
     sets: Vec<ActionSetHandle>,
     /// The manifest could not be loaded: why (said once).
     pub failed: Option<String>,
     menu_down: bool,
+}
+
+/// The panels around VRChat's menus' actions.
+#[derive(Clone, Copy, Debug)]
+struct Orbit {
+    menu: [ActionHandle; 2],
+    block: ActionSetHandle,
+    hands: [orbiters_openvr::input::InputSourceHandle; 2],
+    triggers: [ActionHandle; 2],
 }
 
 impl Actions {
@@ -288,10 +347,17 @@ impl Actions {
                 [input.action("/actions/panel/in/laser_left").map_err(fail)?, input.action("/actions/panel/in/laser_right").map_err(fail)?],
                 [input.action("/actions/panel/in/grab_left").map_err(fail)?, input.action("/actions/panel/in/grab_right").map_err(fail)?],
             );
-            Ok((walk, menu, presses, (avatar, pads), panel))
+            let orbit_set = input.action_set("/actions/orbit").map_err(fail)?;
+            let orbit = Orbit {
+                menu: [input.action("/actions/orbit/in/menu_left").map_err(fail)?, input.action("/actions/orbit/in/menu_right").map_err(fail)?],
+                block: input.action_set("/actions/orbit_block").map_err(fail)?,
+                hands: [input.input_source("/user/hand/left").map_err(fail)?, input.input_source("/user/hand/right").map_err(fail)?],
+                triggers: [input.action("/actions/orbit_block/in/trigger_left").map_err(fail)?, input.action("/actions/orbit_block/in/trigger_right").map_err(fail)?],
+            };
+            Ok((walk, menu, presses, (avatar, pads), panel, (orbit_set, orbit)))
         })();
         match loaded {
-            Ok((walk, menu, presses, (avatar, pads), (panel, lasers, grabs))) => Self {
+            Ok((walk, menu, presses, (avatar, pads), (panel, lasers, grabs), (orbit_set, orbit))) => Self {
                 walk: Some(walk),
                 menu: Some(menu),
                 taps: Taps::default(),
@@ -299,13 +365,15 @@ impl Actions {
                 press_down: [false; 2],
                 pads: Some(pads),
                 panel: Some((lasers, grabs)),
-                sets: vec![walk.set, menu.0, avatar, panel],
+                orbit: Some(orbit),
+                blocked: [false; 2],
+                sets: vec![walk.set, menu.0, avatar, panel, orbit_set],
                 failed: None,
                 menu_down: false,
             },
             Err(e) => {
                 eprintln!("SteamVR actions unavailable: {e}");
-                Self { walk: None, menu: None, taps: Taps::default(), presses: None, press_down: [false; 2], pads: None, panel: None, sets: Vec::new(), failed: Some(e), menu_down: false }
+                Self { walk: None, menu: None, taps: Taps::default(), presses: None, press_down: [false; 2], pads: None, panel: None, orbit: None, blocked: [false; 2], sets: Vec::new(), failed: Some(e), menu_down: false }
             }
         }
     }
@@ -315,7 +383,29 @@ impl Actions {
         if self.sets.is_empty() {
             return false;
         }
-        steamvr.input().is_ok_and(|input| input.update_sets(&self.sets).is_ok())
+        let Ok(input) = steamvr.input() else { return false };
+        let mut active: Vec<ActiveSet> = self.sets.iter().map(|&set| ActiveSet { set, ..Default::default() }).collect();
+        if let Some(orbit) = self.orbit {
+            active.extend(blocked_sets(orbit.block, orbit.hands, self.blocked));
+        }
+        input.update_active(&active).is_ok()
+    }
+
+    /// Which hands' triggers VRChat does not get from the next read on (`overlay::orbit::block`). Said anew at each read: it ends by not being said.
+    pub fn set_block(&mut self, blocked: [bool; 2]) {
+        self.blocked = blocked;
+    }
+
+    /// VRChat's menu button of each hand, held.
+    pub fn orbit_menu_buttons(&self, steamvr: &vr::Client) -> [bool; 2] {
+        let (Some(orbit), Ok(input)) = (self.orbit, steamvr.input()) else { return [false; 2] };
+        orbit.menu.map(|action| input.digital(action).is_ok_and(|d| d.active && d.state))
+    }
+
+    /// Each hand's trigger held. A hand blocked reads it from the set that takes it (it takes it from this application's lower sets too).
+    pub fn orbit_triggers(&self, steamvr: &vr::Client, blocked: [bool; 2]) -> [bool; 2] {
+        let (Some(orbit), Ok(input)) = (self.orbit, steamvr.input()) else { return self.press_down };
+        std::array::from_fn(|hand| if blocked[hand] { input.digital(orbit.triggers[hand]).is_ok_and(|d| d.active && d.state) } else { self.press_down[hand] })
     }
 
     /// What opens N4N0's menu was done since the last read: `open` pressed (its rising edge; `changed` also catches a
@@ -386,6 +476,11 @@ impl Actions {
         let (Some((_, grabs)), Ok(input)) = (self.panel, steamvr.input()) else { return [false; 2] };
         grabs.map(|action| input.digital(action).is_ok_and(|d| d.active && d.state))
     }
+}
+
+/// The set that takes a trigger from VRChat, for each hand blocked and that hand only: the other keeps its trigger.
+fn blocked_sets(set: ActionSetHandle, hands: [orbiters_openvr::input::InputSourceHandle; 2], blocked: [bool; 2]) -> Vec<ActiveSet> {
+    (0..2).filter(|&hand| blocked[hand]).map(|hand| ActiveSet { set, device: hands[hand], priority: OVERLAY_GLOBAL_PRIORITY_MIN + 1 }).collect()
 }
 
 /// Two quick taps on a touch sensor (a thumbrest, a trackpad touched without pressing it): what opens N4N0's menu
@@ -472,7 +567,7 @@ mod tests {
             }
         }
         let manifest: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-        assert_eq!(manifest["actions"].as_array().unwrap().len(), 24);
+        assert_eq!(manifest["actions"].as_array().unwrap().len(), 30);
         // Every controller has the floating panel's lasers (each hand's tip) and grips.
         for (controller, _, _) in CONTROLLERS {
             let value: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(dir.join(format!("bindings_{controller}.json"))).unwrap()).unwrap();
@@ -554,6 +649,34 @@ mod tests {
             }
             assert!(value["description"].as_str().unwrap().contains(&format!("left {}", if input == "x" { "X button" } else { input })), "{controller}");
         }
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn the_trigger_is_taken_from_vrchat_only_for_the_hand_pointing_and_above_scene_priority() {
+        let sets = blocked_sets(7, [11, 22], [false, true]);
+        assert_eq!(sets, vec![ActiveSet { set: 7, device: 22, priority: OVERLAY_GLOBAL_PRIORITY_MIN + 1 }]);
+        assert!(sets[0].priority >= 0x0100_0000 && sets[0].priority < 0x0200_0000, "openvr.h's overlay global range");
+        assert!(blocked_sets(7, [11, 22], [false, false]).is_empty(), "free: nothing said");
+        assert_eq!(blocked_sets(7, [11, 22], [true, true]).len(), 2);
+    }
+
+    #[test]
+    fn every_controller_binds_vrchat_s_menu_button_and_its_whole_trigger() {
+        let dir = std::env::temp_dir().join(format!("orbiters-actions-orbit-{}", std::process::id()));
+        write_manifest(&dir).unwrap();
+        for (controller, _, _) in CONTROLLERS {
+            let value: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(dir.join(format!("bindings_{controller}.json"))).unwrap()).unwrap();
+            let menu = value["bindings"]["/actions/orbit"]["sources"].as_array().unwrap();
+            assert_eq!(menu.len(), 2, "{controller}");
+            assert!(menu[0]["path"].as_str().unwrap().starts_with("/user/hand/left/input/"));
+            let block = value["bindings"]["/actions/orbit_block"]["sources"].as_array().unwrap();
+            assert_eq!(block[1]["path"], "/user/hand/right/input/trigger", "{controller}");
+            assert_eq!(block[1]["inputs"]["click"]["output"], "/actions/orbit_block/in/trigger_right");
+            assert_eq!(block[1]["inputs"]["pull"]["output"], "/actions/orbit_block/in/pull_right");
+        }
+        // As VRChat's own bindings have them.
+        assert_eq!((menu_button("knuckles", "left"), menu_button("oculus_touch", "left"), menu_button("oculus_touch", "right"), menu_button("vive_controller", "right")), ("b", "y", "b", "application_menu"));
         std::fs::remove_dir_all(dir).ok();
     }
 

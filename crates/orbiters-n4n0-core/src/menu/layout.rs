@@ -95,10 +95,13 @@ pub enum ScreenPage {
     /// The 3D picture with its two pictures as buttons, then the last capture as [`ScreenPage::PhotoShare`] has it (from
     /// version 15).
     PhotoTwo = 40,
+    /// The simple Home with Stay here beside its close button (from version 16), with what plays and without.
+    HomeSimpleStay = 41,
+    HomeQuietStay = 42,
 }
 
 impl ScreenPage {
-    pub const ALL: [ScreenPage; 40] = [
+    pub const ALL: [ScreenPage; 42] = [
         ScreenPage::Home,
         ScreenPage::SearchQwerty,
         ScreenPage::SearchAzerty,
@@ -139,6 +142,8 @@ impl ScreenPage {
         ScreenPage::Mirror,
         ScreenPage::MoreMirror,
         ScreenPage::PhotoTwo,
+        ScreenPage::HomeSimpleStay,
+        ScreenPage::HomeQuietStay,
     ];
 
     /// The page picture's file stem and the overlay screenshot's name.
@@ -184,6 +189,8 @@ impl ScreenPage {
             ScreenPage::Mirror => "mirror",
             ScreenPage::MoreMirror => "more-mirror",
             ScreenPage::PhotoTwo => "photo-two",
+            ScreenPage::HomeSimpleStay => "home-simple-stay",
+            ScreenPage::HomeQuietStay => "home-quiet-stay",
         }
     }
 
@@ -195,12 +202,15 @@ impl ScreenPage {
             Pages::Seven => ScreenPage::HomeSeven,
             Pages::Ten | Pages::Timeline => ScreenPage::HomeTen,
             Pages::Simple | Pages::Qr | Pages::Share | Pages::Feedback | Pages::Mirror | Pages::TwoPictures => ScreenPage::HomeQuiet,
+            Pages::StayHere => ScreenPage::HomeQuietStay,
         }
     }
 
     /// The Home `menu` shows: the simple one has what plays at its bottom, when something does.
     pub fn home_of(menu: &Menu) -> ScreenPage {
-        if menu.pages.simple() && plays(menu) {
+        if menu.pages.stay_here() && plays(menu) {
+            ScreenPage::HomeSimpleStay
+        } else if menu.pages.simple() && plays(menu) {
             ScreenPage::HomeSimple
         } else {
             ScreenPage::home(menu.pages)
@@ -537,7 +547,7 @@ pub fn home_tiles(pages: Pages) -> &'static [(Target, Icon, Text, Tint)] {
         Pages::Four => &HOME_TILES[..4],
         Pages::Six => &HOME_TILES[..6],
         Pages::Seven => &HOME_TILES[..7],
-        Pages::Ten | Pages::Timeline | Pages::Simple | Pages::Qr | Pages::Share | Pages::Feedback | Pages::Mirror | Pages::TwoPictures => &HOME_TILES,
+        Pages::Ten | Pages::Timeline | Pages::Simple | Pages::Qr | Pages::Share | Pages::Feedback | Pages::Mirror | Pages::TwoPictures | Pages::StayHere => &HOME_TILES,
     }
 }
 
@@ -810,6 +820,33 @@ pub fn hit(layout: &Layout, x: f32, y: f32) -> Option<(usize, Target)> {
 /// available now (a hidden button lets the row under it take the press: a result's Drop before its link is copied).
 pub fn hit_pointable(layout: &Layout, menu: &Menu, x: f32, y: f32) -> Option<(usize, Target)> {
     layout.elements.iter().enumerate().rev().find(|(_, e)| e.rect.contains(x, y) && state(menu, e).pointable()).map(|(i, e)| (i, e.target))
+}
+
+/// How far from a button a finger still takes it, in pixels (13 mm on the screen): a hand trembles more than that at arm's
+/// length, and a Back button is 56 pixels wide.
+pub const HIT_SLOP: f32 = 28.0;
+
+/// What a finger at (`x`, `y`) takes: what is exactly there, else the nearest button within [`HIT_SLOP`]. What it hovers and
+/// what it presses are the same, so the highlight says what a press would do; rows beside each other share their border as
+/// they always did, because the exact hit comes first.
+pub fn hit_near(layout: &Layout, menu: &Menu, x: f32, y: f32) -> Option<(usize, Target)> {
+    if let Some(hit) = hit_pointable(layout, menu, x, y) {
+        return Some(hit);
+    }
+    let distance = |r: &Rect| {
+        let dx = (r.x as f32 - x).max(x - (r.x as f32 + r.w as f32)).max(0.0);
+        let dy = (r.y as f32 - y).max(y - (r.y as f32 + r.h as f32)).max(0.0);
+        (dx * dx + dy * dy).sqrt()
+    };
+    layout
+        .elements
+        .iter()
+        .enumerate()
+        .filter(|(_, e)| state(menu, e).pointable())
+        .map(|(i, e)| (distance(&e.rect), i, e.target))
+        .filter(|(d, ..)| *d <= HIT_SLOP)
+        .min_by(|a, b| a.0.total_cmp(&b.0))
+        .map(|(_, i, target)| (i, target))
 }
 
 fn element(target: Target, rect: Rect, look: Look) -> Element {
@@ -1244,10 +1281,10 @@ pub fn layout(page: ScreenPage) -> Layout {
             }
             slots.add(32, 420, 60, 24, Style::Accent, Content::SuggestNote);
         }
-        ScreenPage::HomeSimple | ScreenPage::HomeQuiet => {
+        ScreenPage::HomeSimple | ScreenPage::HomeQuiet | ScreenPage::HomeSimpleStay | ScreenPage::HomeQuietStay => {
             // Three large tiles (YouTube, 3D capture, More), three buttons under them (fast walk, calls, states), and at
             // the bottom what the computer plays; with nothing playing the tiles and buttons take its place.
-            let quiet = page == ScreenPage::HomeQuiet;
+            let quiet = matches!(page, ScreenPage::HomeQuiet | ScreenPage::HomeQuietStay);
             let (tile_h, buttons_y, buttons_h) = if quiet { (340, 452, 100) } else { (216, 328, 72) };
             for (i, &(target, icon, title, tint)) in SIMPLE_TILES.iter().enumerate() {
                 let mut tile = with(element(target, Rect::new(32 + i as u16 * 324, 96, 312, tile_h), Look::Tile), Some(icon), Some(title));
@@ -1260,6 +1297,10 @@ pub fn layout(page: ScreenPage) -> Layout {
                 elements.push(with(element(target, Rect::new(32 + i as u16 * 324, buttons_y, 312, buttons_h), Look::Chip), Some(icon), Some(label)));
             }
             elements.push(round(Target::Close, 936, Icon::Close));
+            // Switched on while the screen stays where it is: its ring is the state at a glance, on every page that has it.
+            if matches!(page, ScreenPage::HomeSimpleStay | ScreenPage::HomeQuietStay) {
+                elements.push(with(element(Target::StayHere, Rect::new(812, 28, 116, 48), Look::Chip), None, Some(Text::HomeStay)));
+            }
             icons.push((Rect::new(32, 24, 56, 56), Icon::Microphone, Some(Tint::Green)));
             icons.push((Rect::new(104, 28, 56, 48), Icon::Mark, None));
             slots.add(208, 28, 48, 24, Style::Accent, Content::Status);
@@ -2419,6 +2460,7 @@ pub fn state_for(menu: &Menu, element: &Element, _public: bool) -> State {
 pub fn target_state(menu: &Menu, target: Target) -> State {
     let on = match target {
         Target::FastWalk => menu.fast_walk,
+        Target::StayHere => menu.pinned,
         Target::Timer(i) => TIMERS.get(i as usize) == Some(&menu.photo_timer),
         Target::Length(i) => super::PhotoLength::ALL.get(i as usize) == Some(&menu.photo_length),
         Target::Light | Target::LightSwitch => menu.light.is_some_and(|l| l.on),
@@ -2446,6 +2488,8 @@ pub fn target_state(menu: &Menu, target: Target) -> State {
         _ => false,
     };
     let hidden = match target {
+        // What stays is the avatar's screen: the overlay's menu always comes to the headset.
+        Target::StayHere => !menu.on_screen,
         Target::Suggestion(i) => menu.shown_suggestions().nth(i as usize).is_none(),
         Target::Copy(i) => i as usize >= menu.page_results().len(),
         Target::Contact(i) => i as usize >= menu.page_contacts().len() || menu.call.is_some(),
@@ -2757,7 +2801,8 @@ mod tests {
         assert_eq!(Pages::of_screen(Some(13)), Pages::Feedback);
         assert_eq!(Pages::of_screen(Some(14)), Pages::Mirror);
         assert_eq!(Pages::of_screen(Some(15)), Pages::TwoPictures);
-        assert_eq!(Pages::of_screen(Some(16)), Pages::TwoPictures);
+        assert_eq!(Pages::of_screen(Some(16)), Pages::StayHere);
+        assert_eq!(Pages::of_screen(Some(17)), Pages::StayHere);
         let mut menu = Menu { pages: Pages::Seven, ..Default::default() };
         menu.open();
         assert_eq!(ScreenPage::of(&menu), ScreenPage::HomeSeven);

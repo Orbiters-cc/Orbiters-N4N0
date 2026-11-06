@@ -203,6 +203,8 @@ pub trait Game: Send + Sync {
     /// The window's own picture (never the desktop), at most `max_width` wide.
     fn capture(&self, window: &GameWindow, max_width: u32) -> Result<Shot, Failure>;
     fn osc(&self, address: &str, value: OscArg) -> Result<(), Failure>;
+    /// Asks VRChat to wear an avatar, over OSC.
+    fn wear(&self, avatar_id: &str) -> Result<(), Failure>;
     /// Where OSC goes, for the guard that releases input when this process dies.
     fn osc_target(&self) -> Option<std::net::SocketAddr>;
     /// Sends keyboard and mouse input to `window`, refused unless it is the foreground window at this very moment.

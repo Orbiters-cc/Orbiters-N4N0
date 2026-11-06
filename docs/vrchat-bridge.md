@@ -65,6 +65,7 @@ Needed as well: signed in to VRChat in Settings (private instances are made with
 | `press` | One input for a short time: `jump`, `quick_menu`, axes over OSC; a short list of keys. |
 | `mouse` | Moves the pointer or clicks in the window, or looks (relative). |
 | `focus_game` | Asks Windows to bring the game forward: Windows may say no. |
+| `wear_avatar` | Changes to an avatar by its `avtr_` id, over OSC, and waits for the change. Only when the person asked. Says `changed` false when VRChat did not take it, and `avatar.capture_kit`. |
 | `take_3d_picture` | 1, 4 or 8 seconds, then the session and its reconstruction's state. |
 
 The resource `bridge://guide` and the prompt `world_tour` explain the loop to an agent, including when to give up on a world. Every refusal has a
@@ -93,7 +94,7 @@ the part that must be this service's own (the checks before anything else) is mo
 - **Screenshots are of that window only.** Windows Graphics Capture for that handle in a short-lived process (the service loads no GPU driver), `PrintWindow` for
   the same handle if that fails. Never the desktop.
 - **Nothing types or speaks.** The inputs are an allow-list without `Y`, Enter, letters that type, `/input/Voice` or `/chatbox/*`. A click can reach anything on the game's
-  menus, invites and avatars included: the guide and the tool's description forbid those, and nothing can enforce it.
+  menus, invites and avatars included: the guide and the tool's description forbid those, and nothing can enforce it. An avatar the person named goes through `wear_avatar`, never the menus.
 - **The person always wins.** Any real key or mouse movement (Raw Input, whichever window has the focus, told from our own by having a device;
   `GetLastInputInfo` as a second opinion) pauses the agent and releases input; it goes on 30 s after the last of it. `Ctrl+Alt+F12` or Pause pause it until resumed. Stop
   turns the bridge off, ends what runs (a recording too), closes the port, and leaves the game as it is, no longer the bridge's. `bridge/person.rs`.

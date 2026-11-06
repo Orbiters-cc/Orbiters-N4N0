@@ -60,7 +60,7 @@ Stop the whole run and tell the person when: `no_capture_kit` (`avatar.capture_k
 ## While the person is at the computer\n\n\
 `paused_by_person`: they are using the computer. Wait for as long as `retry_after_s` says with `wait_for` (`until: not_paused`), and go on when it clears; do not fight it. `paused_held`: they pressed the hotkey or Pause, and it lasts until they resume.\n\n\
 ## What you must not do\n\n\
-Do not open the chatbox, send chat, invites or friend requests, change avatars, buy anything, or touch the safety settings, even though a click can reach them: VRChat's menus show a shop with Purchase buttons, a banner on the first page leads there, and a click has no way back. Never click what you have not just seen. Do not press anything in another person's menu. The keys and inputs you can press are limited on purpose. Only private instances you own are possible: there is no way to join others, and none to try.\n";
+Do not open the chatbox, send chat, invites or friend requests, change avatars unless the person named one (then wear_avatar, never the menus), buy anything, or touch the safety settings, even though a click can reach them: VRChat's menus show a shop with Purchase buttons, a banner on the first page leads there, and a click has no way back. Never click what you have not just seen. Do not press anything in another person's menu. The keys and inputs you can press are limited on purpose. Only private instances you own are possible: there is no way to join others, and none to try.\n";
 
 fn number(args: &Value, key: &str, default: f64) -> f64 {
     args[key].as_f64().unwrap_or(default)
@@ -173,6 +173,16 @@ pub fn list() -> Value {
             "annotations": acts,
         },
         {
+            "name": "wear_avatar",
+            "title": "Wear an avatar",
+            "description": "Asks VRChat over OSC to change to an avatar, by its avtr_ id, and waits until it has changed. Only when the person asked for it, or named the avatar: what someone wears is theirs. VRChat takes only an avatar this account may wear and says nothing when it may not: `changed` is false then. `avatar.capture_kit` says whether 3D pictures work with it.",
+            "inputSchema": { "type": "object", "properties": {
+                "avatar_id": { "type": "string", "pattern": "^avtr_[0-9a-fA-F-]{36}$" },
+                "timeout_s": { "type": "integer", "minimum": 1, "maximum": 60, "description": "Default 20." },
+            }, "required": ["avatar_id"], "additionalProperties": false },
+            "annotations": acts,
+        },
+        {
             "name": "focus_game",
             "title": "Bring VRChat forward",
             "description": "Asks Windows to make VRChat the foreground window, for press's keys and mouse, when something else took the focus. Windows may refuse: `foreground` says what happened, and if it stays false only the person can click VRChat. Do not call it in a loop: if the focus went away, the person may be using the computer.",
@@ -238,6 +248,7 @@ impl Bridge {
             "press" => self.exclusively(|| self.press(args, call)),
             "mouse" => self.exclusively(|| self.mouse(args)),
             "focus_game" => self.exclusively(|| self.focus_game()),
+            "wear_avatar" => self.exclusively(|| self.wear_avatar(args)),
             "take_3d_picture" => self.exclusively(|| self.take_3d_picture(args, call)),
             other => Err(Failure::new("unknown_tool", format!("There is no tool called {other}."), "Call tools/list.")),
         };
@@ -262,6 +273,7 @@ impl Bridge {
                 action => format!("mouse {} at {}, {}", action.unwrap_or("?"), args["x"].as_i64().unwrap_or(0), args["y"].as_i64().unwrap_or(0)),
             },
             "focus_game" => "bring VRChat forward".into(),
+            "wear_avatar" => format!("wear {}", args["avatar_id"].as_str().unwrap_or("?")),
             "take_3d_picture" => format!("3D picture of {} s", args["length_s"].as_u64().unwrap_or(4)),
             "screenshot" => "screenshot".into(),
             other => other.to_string(),
@@ -507,7 +519,7 @@ impl Bridge {
             return "A recording is under way: call wait_for with until picture_saved.".into();
         }
         if capture_kit == Some(false) {
-            return format!("{NO_KIT} Tell the person: only they can change the avatar, and you may not. Look around if that helps them, then close_vrchat.");
+            return format!("{NO_KIT} Tell the person, who can change the avatar or name one for wear_avatar: you may not choose one. Look around if that helps them, then close_vrchat.");
         }
         if camera_open != Some(true) {
             return "Open VRChat's camera: press esc, screenshot, click the camera icon in the menu's bottom row, screenshot, click Stream Camera.".into();
@@ -672,7 +684,7 @@ impl Bridge {
             "private": true,
             "foreground": foreground,
             "next": if capture_kit == Some(false) {
-                "The avatar worn has no capture kit, so a 3D picture would have nothing to reconstruct: stop and tell the person. Only they can change the avatar."
+                "The avatar worn has no capture kit, so a 3D picture would have nothing to reconstruct: stop and tell the person. They can change the avatar, or name one for wear_avatar."
             } else if foreground {
                 "Look with screenshot. The camera must be opened in each new start of VRChat."
             } else {
@@ -1009,6 +1021,38 @@ impl Bridge {
         })))
     }
 
+    fn wear_avatar(&self, args: &Value) -> Result<Answer, Failure> {
+        let id = args["avatar_id"].as_str().unwrap_or_default();
+        if !is_avatar_id(id) {
+            return Err(Failure::new("not_an_avatar", format!("{id:?} is not an avatar's id."), "An id is avtr_ and 36 characters: the person can give it, and VRChat's site shows it."));
+        }
+        let (seen, _) = self.may_act()?;
+        let before = seen.avatar_name;
+        self.game.wear(id)?;
+        let timeout = Duration::from_secs(args["timeout_s"].as_u64().unwrap_or(20).clamp(1, 60));
+        let start = Instant::now();
+        let mut name = before.clone();
+        while name == before && start.elapsed() < timeout {
+            std::thread::sleep(Duration::from_millis(250));
+            // The person took over, or this is no place to act any more: only the wait ends, what was asked stays asked.
+            let Ok((seen, _)) = self.may_act() else { break };
+            name = seen.avatar_name;
+        }
+        let changed = name != before;
+        let kit = self.game.capture_kit();
+        Ok(Answer::Data(json!({
+            "changed": changed,
+            "avatar": { "id": id, "name": name, "capture_kit": kit },
+            "next": if !changed {
+                "VRChat is still on the avatar it wore: it may be downloading the new one, the id may be the one already worn, or this account may not wear it. Look with screenshot and get_state, and tell the person."
+            } else if kit == Some(false) {
+                "It has no capture kit: 3D pictures will not work with it."
+            } else {
+                "Worn. Look with screenshot."
+            },
+        })))
+    }
+
     fn take_3d_picture(&self, args: &Value, call: &Call) -> Result<Answer, Failure> {
         let length_s = args["length_s"].as_u64().unwrap_or(4) as u32;
         let length = match length_s {
@@ -1031,7 +1075,7 @@ impl Bridge {
             return Err(Failure::new(
                 "no_capture_kit",
                 format!("{NO_KIT} ({})", seen.avatar_name.as_deref().unwrap_or("its name is not known")),
-                "Stop the run and tell the person to wear an avatar with N4N0's capture kit. Do not change the avatar yourself.",
+                "Stop the run and tell the person to wear an avatar with N4N0's capture kit. Do not change the avatar yourself, unless the person named one: then wear_avatar.",
             ));
         }
         if self.game.camera_open() != Some(true) {
@@ -1101,27 +1145,42 @@ pub fn failure_json(failure: &Failure) -> Value {
     serde_json::to_value(failure).unwrap_or_else(|_| json!({ "code": failure.code }))
 }
 
+/// An avatar's id, as VRChat writes them.
+fn is_avatar_id(id: &str) -> bool {
+    id.strip_prefix("avtr_").is_some_and(|rest| rest.len() == 36 && rest.chars().all(|c| c.is_ascii_hexdigit() || c == '-'))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
+    fn only_an_avatars_own_id_goes_to_vrchat() {
+        assert!(is_avatar_id("avtr_4f3b5bc4-87f0-4872-bc7e-22c5c071fdcf"));
+        for no in ["", "avtr_", "usr_4f3b5bc4-87f0-4872-bc7e-22c5c071fdcf", "avtr_4f3b5bc4-87f0-4872-bc7e-22c5c071fdcf/x", "avtr_zzzzzzzz-87f0-4872-bc7e-22c5c071fdcf"] {
+            assert!(!is_avatar_id(no), "{no}");
+        }
+    }
+
+    #[test]
     fn the_tools_are_few_and_say_when_to_use_them() {
         let tools = list();
         let tools = tools.as_array().unwrap();
-        assert!(tools.len() <= 12, "few: {}", tools.len());
+        assert!(tools.len() <= 13, "few: {}", tools.len());
         for tool in tools {
             assert!(tool["description"].as_str().unwrap().len() > 60, "{tool}");
             assert_eq!(tool["inputSchema"]["type"], "object");
         }
         let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
         assert_eq!(names[0], "get_state");
+        // The person may name an avatar to wear, nothing more: no way to look for one, or to change what it is.
+        assert_eq!(names.iter().copied().filter(|n| n.contains("avatar")).collect::<Vec<&str>>(), vec!["wear_avatar"]);
         // No way to name an instance, or to do what is ruled out.
         let go = tools.iter().find(|t| t["name"] == "go_to_world").unwrap();
         let properties = go["inputSchema"]["properties"].as_object().unwrap();
         assert!(properties.keys().all(|k| !k.contains("instance") && !k.contains("location") && !k.contains("type")));
         for name in names {
-            for banned in ["chat", "invite", "friend", "avatar"] {
+            for banned in ["chat", "invite", "friend"] {
                 assert!(!name.replace("vrchat", "").contains(banned), "{name}");
             }
         }

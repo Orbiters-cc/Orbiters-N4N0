@@ -16,8 +16,8 @@
 //!   theme or brightness) with what they look like. 4 or more of the 7 at 0.5 or better: on 18 frames of it at 10 window
 //!   sizes and 4 pages, 5 to 7; on every other frame 0.
 //!
-//! Once open, two looks in a row without it close the panels: about 200 ms at most after it went. And it takes two looks in a row to
-//! open: a frame caught mid-animation opens nothing. When frames stop coming (a hitch, a loading screen) nothing can be said, and the
+//! Once open, looks without it close the panels: two frames in a row just after Esc or R, else three looks in a row, about 180 ms, as a
+//! sub-page's slide lasts that long. And it takes two frames in a row to open: a frame caught mid-animation opens nothing. When frames stop coming (a hitch, a loading screen) nothing can be said, and the
 //! panels go: **a wrong "open" is worse than a late one.**
 
 use super::zones::{self, Around};
@@ -112,6 +112,12 @@ pub fn wheel_scores(part: &Part, client: Vec2) -> (f32, f32, f32) {
     (edge, uniform, line)
 }
 
+/// The wheel's rim is in place, whatever is inside it yet. VRChat shows nothing for about 200 ms after R, then the rim is there at about 235 ms and all the rest
+/// at about 300: right after R this is reason enough to start, and the whole of it must follow within [`TO_CONFIRM`].
+pub fn wheel_coming(part: &Part, client: Vec2) -> bool {
+    wheel_scores(part, client).0 >= WHEEL_EDGE
+}
+
 pub fn wheel_seen(part: &Part, client: Vec2) -> bool {
     let (edge, uniform, line) = wheel_scores(part, client);
     edge >= WHEEL_EDGE && uniform >= WHEEL_UNIFORM && line >= WHEEL_LINE
@@ -194,9 +200,28 @@ pub const LOOK_AFTER_KEY: Duration = Duration::from_millis(1500);
 /// Looks in a row it takes to say a menu opened, or went.
 pub const LOOKS_TO_OPEN: u32 = 2;
 pub const LOOKS_TO_CLOSE: u32 = 2;
+/// A look while a menu shows and no key was pressed: three of them, about 180 ms, ride out a sub-page's slide. Just after a key the looks come at each new frame, so
+/// that the panels follow VRChat's own menu at once.
+pub const LOOK_EVERY: Duration = Duration::from_millis(60);
+/// Looks in a row it takes to say a menu went with no key pressed: its sub-pages slide through frames that do not look like it.
+pub const LOOKS_TO_CLOSE_UNASKED: u32 = 3;
 /// With no new frame for this long nothing can be said, and open panels go (a frame of VRChat's comes at least every 100 ms at 10 frames a
 /// second).
 pub const NO_FRAME: Duration = Duration::from_millis(600);
+
+/// How long a menu may still look like itself after the key that closes it: VRChat's own closing lasts about 80 ms for the wheel and 200 ms for the Quick
+/// Menu. Past this, a menu that still shows did not close, and its panels come back.
+pub const STILL_GOING: Duration = Duration::from_millis(350);
+
+/// How long a wheel opened on its rim alone has to be seen whole.
+pub const TO_CONFIRM: Duration = Duration::from_millis(400);
+
+/// The keys that open and close VRChat's menus on the desktop.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MenuKey {
+    Esc,
+    R,
+}
 
 /// What VRChat's menus seem to be doing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -217,11 +242,17 @@ pub struct Watcher {
     hits: u32,
     misses: u32,
     last_frame: Option<Instant>,
+    /// The menu a key just closed, and until when frames of it are its closing.
+    going: Option<(Around, Instant)>,
+    /// R was just pressed with nothing showing: the wheel's rim alone is enough to start.
+    early: bool,
+    /// Opened on the rim alone: by when the whole wheel must have been seen.
+    confirm_by: Option<Instant>,
 }
 
 impl Default for Watcher {
     fn default() -> Self {
-        Self { seen: Seen::Resting, until: None, candidate: None, hits: 0, misses: 0, last_frame: None }
+        Self { seen: Seen::Resting, until: None, candidate: None, hits: 0, misses: 0, last_frame: None, going: None, early: false, confirm_by: None }
     }
 }
 
@@ -235,8 +266,34 @@ impl Watcher {
         self.seen != Seen::Resting
     }
 
-    /// Esc or R was pressed with the game in front.
-    pub fn key(&mut self, now: Instant) {
+    /// How long since the last look before the next: none just after a key, which is when a menu opens or closes.
+    pub fn look_every(&self, now: Instant) -> Duration {
+        match self.seen {
+            Seen::Open(_) if !self.until.is_some_and(|u| now < u) => LOOK_EVERY,
+            _ => Duration::ZERO,
+        }
+    }
+
+    /// A key pressed with the game in front, and what it does. Esc closes whichever shows, R the wheel: the panels go at that very moment rather than after
+    /// VRChat's own closing. R over the Quick Menu closes nothing.
+    pub fn pressed(&mut self, key: MenuKey, now: Instant) {
+        self.key(now);
+        self.going = None;
+        self.early = key == MenuKey::R;
+        if let Seen::Open(menu) = self.seen {
+            self.early = false;
+            if key == MenuKey::Esc || menu == Around::Wheel {
+                self.going = Some((menu, now + STILL_GOING));
+                self.seen = Seen::Looking;
+                self.candidate = None;
+                self.hits = 0;
+                self.confirm_by = None;
+            }
+        }
+    }
+
+    /// A key was pressed with the game in front.
+    fn key(&mut self, now: Instant) {
         self.until = Some(now + LOOK_AFTER_KEY);
         self.last_frame.get_or_insert(now);
         if self.seen == Seen::Resting {
@@ -248,10 +305,18 @@ impl Watcher {
 
     /// A new frame's look. Returns what is seen now.
     pub fn frame(&mut self, found: Option<Around>, now: Instant) -> Seen {
+        self.frame_coming(found, false, now)
+    }
+
+    /// A new frame's look, with whether the wheel's rim is in place ([`wheel_coming`]).
+    pub fn frame_coming(&mut self, found: Option<Around>, coming: bool, now: Instant) -> Seen {
         self.last_frame = Some(now);
         match self.seen {
             Seen::Resting => {}
             Seen::Looking => {
+                let found = found.filter(|f| !self.going.is_some_and(|(menu, until)| menu == *f && now < until));
+                let on_rim = found.is_none() && coming && self.early;
+                let found = if on_rim { Some(Around::Wheel) } else { found };
                 if found.is_some() && found == self.candidate {
                     self.hits += 1;
                 } else {
@@ -262,19 +327,24 @@ impl Watcher {
                     self.seen = Seen::Open(found.expect("hits count a found menu"));
                     self.misses = 0;
                     self.until = None;
+                    self.early = false;
+                    self.confirm_by = on_rim.then_some(now + TO_CONFIRM);
                 }
             }
             Seen::Open(menu) => {
                 if found == Some(menu) {
                     self.misses = 0;
-                } else {
+                    self.confirm_by = None;
+                } else if self.confirm_by.is_none() {
                     self.misses += 1;
-                    if self.misses >= LOOKS_TO_CLOSE {
-                        // Gone, or become the other one: look again if that was a key's doing.
+                    let asked = self.until.is_some_and(|u| now < u);
+                    if self.misses >= if asked { LOOKS_TO_CLOSE } else { LOOKS_TO_CLOSE_UNASKED } {
+                        // Gone, or become the other one. After a key it goes on looking for what is left of that key's time: if the menu was still
+                        // there it comes back, and the next menu does not need a new capture.
                         self.candidate = found;
                         self.hits = u32::from(found.is_some());
-                        self.seen = if found.is_some() { Seen::Looking } else { Seen::Resting };
-                        self.until = found.is_some().then_some(now + LOOK_AFTER_KEY);
+                        self.seen = if found.is_some() || asked { Seen::Looking } else { Seen::Resting };
+                        self.until = if found.is_some() { Some(now + LOOK_AFTER_KEY) } else { self.until.filter(|_| asked) };
                         if self.until.is_none() {
                             self.last_frame = None;
                         }
@@ -295,7 +365,7 @@ impl Watcher {
                 }
             }
             Seen::Open(_) => {
-                if self.last_frame.is_none_or(|f| now.duration_since(f) >= NO_FRAME) {
+                if self.last_frame.is_none_or(|f| now.duration_since(f) >= NO_FRAME) || self.confirm_by.is_some_and(|by| now >= by) {
                     self.reset();
                 }
             }
@@ -355,7 +425,10 @@ mod tests {
                     "wheel" => {
                         assert!(seen, "{name}: {edge} {uniform} {line}");
                     }
-                    _ => assert!(!seen, "{name}: {edge} {uniform} {line} on a frame without it"),
+                    _ => {
+                        assert!(!seen, "{name}: {edge} {uniform} {line} on a frame without it");
+                        assert!(!wheel_coming(&part, *client) || kind == "qm", "{name}: a rim at {edge} where there is none");
+                    }
                 }
             }
         }
@@ -412,10 +485,172 @@ mod tests {
         assert_eq!(w.frame(Some(Around::QuickMenu), at(t0, 9000)), Seen::Open(Around::QuickMenu));
         assert_eq!(w.frame(None, at(t0, 9100)), Seen::Open(Around::QuickMenu));
         assert_eq!(w.frame(Some(Around::QuickMenu), at(t0, 9200)), Seen::Open(Around::QuickMenu));
-        // No key: the menu closed on its own.
+        // No key: the menu closed on its own, or a sub-page slides, which takes more looks.
         assert_eq!(w.frame(None, at(t0, 9300)), Seen::Open(Around::QuickMenu));
-        assert_eq!(w.frame(None, at(t0, 9400)), Seen::Resting);
+        assert_eq!(w.frame(None, at(t0, 9360)), Seen::Open(Around::QuickMenu));
+        assert_eq!(w.frame(None, at(t0, 9420)), Seen::Resting);
         assert!(!w.wants_frames(), "the capture stops");
+    }
+
+    #[test]
+    fn a_key_makes_it_follow_at_each_frame_and_only_then() {
+        let t0 = Instant::now();
+        let mut w = Watcher::default();
+        w.key(t0);
+        assert_eq!(w.look_every(at(t0, 10)), Duration::ZERO, "opening");
+        w.frame(Some(Around::Wheel), at(t0, 200));
+        // Two frames in a row are enough, and they come a frame apart.
+        assert_eq!(w.frame(Some(Around::Wheel), at(t0, 216)), Seen::Open(Around::Wheel));
+        assert_eq!(w.look_every(at(t0, 217)), LOOK_EVERY, "open, and nothing asked");
+        // A key that does not close it by itself: two frames after the menu starts to go.
+        w.key(at(t0, 5000));
+        assert_eq!(w.look_every(at(t0, 5001)), Duration::ZERO);
+        assert_eq!(w.frame(None, at(t0, 5050)), Seen::Open(Around::Wheel));
+        assert_eq!(w.frame(None, at(t0, 5066)), Seen::Looking, "gone, with the capture kept for the next menu");
+        assert_eq!(w.look_every(at(t0, 5067)), Duration::ZERO);
+        assert!(w.wants_frames());
+        // That time runs out, as any look does.
+        assert_eq!(w.tick(at(t0, 6600)), Seen::Resting);
+        assert!(!w.wants_frames());
+    }
+
+    #[test]
+    fn the_key_that_closes_a_menu_takes_the_panels_at_once_through_its_closing() {
+        for (menu, key) in [(Around::Wheel, MenuKey::R), (Around::Wheel, MenuKey::Esc), (Around::QuickMenu, MenuKey::Esc)] {
+            let t0 = Instant::now();
+            let mut w = Watcher::default();
+            w.pressed(key, t0);
+            w.frame(Some(menu), at(t0, 50));
+            assert_eq!(w.frame(Some(menu), at(t0, 66)), Seen::Open(menu));
+            // The panels go with the key, with no look at all.
+            w.pressed(key, at(t0, 5000));
+            assert_eq!(w.tick(at(t0, 5000)), Seen::Looking, "{menu:?}");
+            // VRChat's menu still looks like itself for a while: that opens nothing.
+            for ms in [5016, 5032, 5048, 5100, 5200, 5300] {
+                assert_eq!(w.frame(Some(menu), at(t0, ms)), Seen::Looking, "{menu:?} at {ms}");
+            }
+            // Gone: the capture stays for what is left of the key's time, then rests.
+            assert_eq!(w.frame(None, at(t0, 5340)), Seen::Looking);
+            assert_eq!(w.tick(at(t0, 6600)), Seen::Resting);
+        }
+    }
+
+    #[test]
+    fn right_after_r_the_wheels_rim_starts_it_and_the_whole_of_it_must_follow() {
+        let t0 = Instant::now();
+        let mut w = Watcher::default();
+        w.pressed(MenuKey::R, t0);
+        assert_eq!(w.frame_coming(None, false, at(t0, 200)), Seen::Looking);
+        assert_eq!(w.frame_coming(None, true, at(t0, 220)), Seen::Looking, "one frame is no wheel");
+        assert_eq!(w.frame_coming(None, true, at(t0, 236)), Seen::Open(Around::Wheel));
+        // Not whole yet: that is its opening, no reason to go.
+        assert_eq!(w.frame_coming(None, true, at(t0, 260)), Seen::Open(Around::Wheel));
+        assert_eq!(w.frame_coming(None, true, at(t0, 280)), Seen::Open(Around::Wheel));
+        assert_eq!(w.frame_coming(None, true, at(t0, 296)), Seen::Open(Around::Wheel));
+        assert_eq!(w.frame_coming(Some(Around::Wheel), true, at(t0, 310)), Seen::Open(Around::Wheel));
+        // Whole once: from now on as any wheel, a long time on.
+        assert_eq!(w.frame(None, at(t0, 800)), Seen::Open(Around::Wheel));
+        assert_eq!(w.frame(Some(Around::Wheel), at(t0, 860)), Seen::Open(Around::Wheel));
+    }
+
+    #[test]
+    fn a_rim_that_never_becomes_a_wheel_goes_again() {
+        let t0 = Instant::now();
+        let mut w = Watcher::default();
+        w.pressed(MenuKey::R, t0);
+        w.frame_coming(None, true, at(t0, 220));
+        assert_eq!(w.frame_coming(None, true, at(t0, 236)), Seen::Open(Around::Wheel));
+        assert_eq!(w.frame_coming(None, false, at(t0, 300)), Seen::Open(Around::Wheel));
+        assert_eq!(w.frame_coming(None, false, at(t0, 236) + TO_CONFIRM), Seen::Resting);
+    }
+
+    #[test]
+    fn only_r_with_nothing_showing_can_start_on_the_rim() {
+        let t0 = Instant::now();
+        // Esc opens no wheel.
+        let mut w = Watcher::default();
+        w.pressed(MenuKey::Esc, t0);
+        w.frame_coming(None, true, at(t0, 100));
+        assert_eq!(w.frame_coming(None, true, at(t0, 116)), Seen::Looking);
+        // R over the Quick Menu opens no wheel.
+        let mut w = Watcher::default();
+        w.pressed(MenuKey::Esc, t0);
+        w.frame(Some(Around::QuickMenu), at(t0, 50));
+        w.frame(Some(Around::QuickMenu), at(t0, 66));
+        w.frame(Some(Around::QuickMenu), at(t0, 500));
+        w.pressed(MenuKey::R, at(t0, 510));
+        w.frame_coming(Some(Around::QuickMenu), true, at(t0, 530));
+        assert_eq!(w.frame_coming(Some(Around::QuickMenu), true, at(t0, 546)), Seen::Open(Around::QuickMenu));
+        // The wheel R just closed: its rim stays through its closing, and opens nothing.
+        let mut w = Watcher::default();
+        w.pressed(MenuKey::R, t0);
+        w.frame(Some(Around::Wheel), at(t0, 50));
+        w.frame(Some(Around::Wheel), at(t0, 66));
+        w.frame(Some(Around::Wheel), at(t0, 500));
+        w.pressed(MenuKey::R, at(t0, 510));
+        w.frame_coming(None, true, at(t0, 530));
+        assert_eq!(w.frame_coming(None, true, at(t0, 546)), Seen::Looking);
+    }
+
+    #[test]
+    fn a_menu_the_key_did_not_close_comes_back() {
+        let t0 = Instant::now();
+        let mut w = Watcher::default();
+        w.pressed(MenuKey::Esc, t0);
+        w.frame(Some(Around::QuickMenu), at(t0, 50));
+        w.frame(Some(Around::QuickMenu), at(t0, 66));
+        w.pressed(MenuKey::Esc, at(t0, 5000));
+        w.frame(Some(Around::QuickMenu), at(t0, 5340));
+        w.frame(Some(Around::QuickMenu), at(t0, 5356));
+        assert_eq!(w.frame(Some(Around::QuickMenu), at(t0, 5372)), Seen::Open(Around::QuickMenu));
+    }
+
+    #[test]
+    fn r_over_the_quick_menu_closes_nothing_and_esc_over_the_wheel_can_bring_it() {
+        let t0 = Instant::now();
+        let mut w = Watcher::default();
+        w.pressed(MenuKey::Esc, t0);
+        w.frame(Some(Around::QuickMenu), at(t0, 50));
+        w.frame(Some(Around::QuickMenu), at(t0, 66));
+        w.frame(Some(Around::QuickMenu), at(t0, 2990));
+        w.pressed(MenuKey::R, at(t0, 3000));
+        assert_eq!(w.tick(at(t0, 3000)), Seen::Open(Around::QuickMenu));
+        assert_eq!(w.frame(Some(Around::QuickMenu), at(t0, 3016)), Seen::Open(Around::QuickMenu));
+
+        let mut w = Watcher::default();
+        w.pressed(MenuKey::R, t0);
+        w.frame(Some(Around::Wheel), at(t0, 50));
+        w.frame(Some(Around::Wheel), at(t0, 66));
+        w.pressed(MenuKey::Esc, at(t0, 3000));
+        // Another menu is no closing of this one.
+        w.frame(Some(Around::QuickMenu), at(t0, 3100));
+        assert_eq!(w.frame(Some(Around::QuickMenu), at(t0, 3116)), Seen::Open(Around::QuickMenu));
+    }
+
+    #[test]
+    fn a_key_pressed_again_at_once_reopens_through_the_closing() {
+        let t0 = Instant::now();
+        let mut w = Watcher::default();
+        w.pressed(MenuKey::R, t0);
+        w.frame(Some(Around::Wheel), at(t0, 50));
+        w.frame(Some(Around::Wheel), at(t0, 66));
+        w.pressed(MenuKey::R, at(t0, 3000));
+        w.pressed(MenuKey::R, at(t0, 3100));
+        w.frame(Some(Around::Wheel), at(t0, 3300));
+        assert_eq!(w.frame(Some(Around::Wheel), at(t0, 3316)), Seen::Open(Around::Wheel));
+    }
+
+    #[test]
+    fn a_slice_pressed_right_after_opening_keeps_the_panels_through_its_slide() {
+        let t0 = Instant::now();
+        let mut w = Watcher::default();
+        w.key(t0);
+        w.frame(Some(Around::Wheel), at(t0, 200));
+        w.frame(Some(Around::Wheel), at(t0, 216));
+        // Well inside the time of the key that opened it: the slide of a sub-page is not taken for a close.
+        assert_eq!(w.frame(None, at(t0, 300)), Seen::Open(Around::Wheel));
+        assert_eq!(w.frame(None, at(t0, 360)), Seen::Open(Around::Wheel));
+        assert_eq!(w.frame(Some(Around::Wheel), at(t0, 420)), Seen::Open(Around::Wheel));
     }
 
     #[test]

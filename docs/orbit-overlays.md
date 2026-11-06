@@ -14,7 +14,7 @@ VRChat says nothing: OSC reports no menu state, its log nothing when a menu open
 | --- | --- | --- |
 | What starts it | Esc or R, read with `GetAsyncKeyState` while VRChat is in front | VRChat's menu button of either hand, through the overlay's own actions, as VRChat's bindings have it |
 | What decides | **VRChat's window's picture** (Windows Graphics Capture, while looking or open only): the wheel's disc at its exact place, the Quick Menu's row of icons by shape | Nothing further: short press the Quick Menu, held the wheel |
-| It closes when | The picture no longer shows it, two looks in a row (about 200 ms), or no new frame for 600 ms | The button, a world change, the dashboard, VRChat losing the scene, 90 s with no laser on a panel |
+| It closes when | The picture no longer shows it, two frames in a row just after Esc or R, else three looks in a row (about 180 ms, a sub-page's slide lasts that long), or no new frame for 600 ms | The button, a world change, the dashboard, VRChat losing the scene, 90 s with no laser on a panel |
 | Can it be wrong? | Late, not wrong: a gamepad or OSC opening it has no key to start the looking, so nothing shows | **Yes:** VRChat's menu closing by another way leaves the panels until they time out. After that the next press counts as closing |
 
 An eye picture could settle VR the way the window's does (`orbiters_openvr::mirror`), once a menu has been measured in a headset.

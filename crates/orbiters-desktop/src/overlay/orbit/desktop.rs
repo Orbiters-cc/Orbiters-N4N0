@@ -11,7 +11,7 @@
 //!   mouse's movement and buttons from the game and moves a pointer of ours ([`pointer`]). Let go, the mouse is VRChat's again as it was.
 //! - **Tab frees nothing**: it is VRChat's own.
 
-use super::detect::{self, Part, Seen, Watcher};
+use super::detect::{self, Part, Seen, MenuKey, Watcher};
 use super::zones::{self, Around, Placed, Zone};
 use super::{Panel, Panels};
 use crate::backend::Ctl;
@@ -57,10 +57,9 @@ use windows::Win32::UI::WindowsAndMessaging::{
 const REST: Duration = Duration::from_millis(33);
 /// With something showing: the pointer follows at about 120 a second, each panel at most once a frame.
 const TURN: Duration = Duration::from_millis(8);
-/// A look at the game's frames while looking or open: at most this often. Two looks close: about 200 ms.
-const LOOK_EVERY: Duration = Duration::from_millis(90);
 /// VRChat's main window's class.
 const UNITY_CLASS: &str = "UnityWndClass";
+
 
 pub fn run(args: &[String]) -> anyhow::Result<()> {
     let endpoint = Endpoint::from_args(args).context("--orbit-desktop needs --service <port> <token>")?;
@@ -75,6 +74,8 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
     let mut windows = Windows::default();
     let mut panels = Panels::new(backend.clone(), 1.0, true);
     let mut watcher = Watcher::default();
+    // Ready before any key: making it takes more than 100 ms, as long as VRChat takes to show a menu.
+    let mut gpu = Gpu::new().map_err(|e| eprintln!("capture: {e}")).ok();
     let mut capture: Option<Capture> = None;
     let mut keys = Keys::default();
     let mut pointer = pointer::Pointer::default();
@@ -114,22 +115,29 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             std::thread::sleep(REST);
             continue;
         };
-        if keys.pressed() {
-            watcher.key(turn);
+        if let Some(key) = keys.pressed() {
+            watcher.pressed(key, turn);
         }
         if watcher.wants_frames() {
             if capture.is_none() {
-                capture = Capture::new(window).map_err(|e| eprintln!("capture: {e}")).ok();
+                if gpu.is_none() {
+                    gpu = Gpu::new().map_err(|e| eprintln!("capture: {e}")).ok();
+                }
+                capture = gpu.as_ref().and_then(|g| Capture::new(window, g).map_err(|e| eprintln!("capture: {e}")).ok());
+                // A device lost (a driver's update, say) is made again next time.
+                if capture.is_none() {
+                    gpu = None;
+                }
             }
             if let Some(c) = capture.as_mut() {
                 // New frames, at the pace of the looks.
-                if last_look.is_none_or(|t: Instant| turn.duration_since(t) >= LOOK_EVERY) {
+                if last_look.is_none_or(|t: Instant| turn.duration_since(t) >= watcher.look_every(turn)) {
                     last_look = Some(turn);
                     let client_size = client_size(window);
                     let found = c.look(window, client_size);
-                    if let Some(found) = found {
+                    if let Some((found, coming)) = found {
                         frames_seen.count(turn);
-                        watcher.frame(found, turn);
+                        watcher.frame_coming(found, coming, turn);
                     }
                 }
             }
@@ -179,7 +187,10 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         if !pointer.active() && !button_down() && panels.all().any(|p| p.pressed.is_some()) {
             panels.release();
         }
-        windows.show(&mut panels, &snap, origin);
+        // What came into view lies over everything of ours, the pointer included: it goes back on top.
+        if windows.show(&mut panels, &snap, origin) {
+            pointer.raise();
+        }
         let wait = TURN.saturating_sub(turn.elapsed());
         std::thread::sleep(wait);
     }
@@ -196,7 +207,7 @@ pub fn bench(args: &[String]) -> anyhow::Result<()> {
     }
     // SAFETY: a plain query by name.
     let game = unsafe { windows::Win32::UI::WindowsAndMessaging::FindWindowW(w!("UnityWndClass"), w!("VRChat")) }.context("no VRChat window")?;
-    let capture = Capture::new(game).map_err(|e| anyhow::anyhow!(e))?;
+    let capture = Capture::new(game, &Gpu::new().map_err(|e| anyhow::anyhow!(e))?).map_err(|e| anyhow::anyhow!(e))?;
     let (begin, mut mark, mut frames) = (Instant::now(), Instant::now(), 0u32);
     while begin.elapsed().as_secs_f32() < seconds {
         while let Ok(frame) = capture.pool.TryGetNextFrame() {
@@ -381,13 +392,16 @@ struct Keys {
 }
 
 impl Keys {
-    fn pressed(&mut self) -> bool {
-        let mut any = false;
-        for (was, key) in self.was.iter_mut().zip([VK_ESCAPE.0 as i32, 0x52]) {
+    /// The key just pressed, Esc before R when both were.
+    fn pressed(&mut self) -> Option<MenuKey> {
+        let mut any = None;
+        for (was, (code, key)) in self.was.iter_mut().zip([(VK_ESCAPE.0 as i32, MenuKey::Esc), (0x52, MenuKey::R)]) {
             // SAFETY: a plain query.
-            let state = unsafe { GetAsyncKeyState(key) } as u16;
+            let state = unsafe { GetAsyncKeyState(code) } as u16;
             let down = state & 0x8000 != 0;
-            any |= (down && !*was) || state & 1 != 0;
+            if (down && !*was) || state & 1 != 0 {
+                any = any.or(Some(key));
+            }
             *was = down;
         }
         any
@@ -434,13 +448,17 @@ struct Capture {
     buffers: [Vec<u8>; 2],
 }
 
-impl Capture {
-    fn new(window: HWND) -> Result<Self, String> {
+/// The Direct3D device captures use, kept for as long as the process lasts: it holds nothing and does nothing between captures.
+#[derive(Clone)]
+struct Gpu {
+    device: ID3D11Device,
+    context: ID3D11DeviceContext,
+    winrt: IDirect3DDevice,
+}
+
+impl Gpu {
+    fn new() -> Result<Self, String> {
         let text = |what: &str, e: windows::core::Error| format!("{what}: {}", e.message());
-        let interop = windows::core::factory::<GraphicsCaptureItem, IGraphicsCaptureItemInterop>().map_err(|e| text("capture item", e))?;
-        // SAFETY: a window handle; asking for one that is gone only fails.
-        let item: GraphicsCaptureItem = unsafe { interop.CreateForWindow(window) }.map_err(|e| text("capture item", e))?;
-        let size = item.Size().map_err(|e| text("size", e))?;
         let (mut device, mut context): (Option<ID3D11Device>, Option<ID3D11DeviceContext>) = (None, None);
         // SAFETY: the outputs are valid.
         unsafe { D3D11CreateDevice(None, D3D_DRIVER_TYPE_HARDWARE, HMODULE::default(), D3D11_CREATE_DEVICE_BGRA_SUPPORT, None, D3D11_SDK_VERSION, Some(&mut device), None, Some(&mut context)) }
@@ -449,6 +467,18 @@ impl Capture {
         let dxgi: IDXGIDevice = device.cast().map_err(|e| text("DXGI", e))?;
         // SAFETY: the DXGI device is alive for the call.
         let winrt: IDirect3DDevice = unsafe { CreateDirect3D11DeviceFromDXGIDevice(&dxgi) }.and_then(|d| d.cast()).map_err(|e| text("device", e))?;
+        Ok(Self { device, context, winrt })
+    }
+}
+
+impl Capture {
+    fn new(window: HWND, gpu: &Gpu) -> Result<Self, String> {
+        let text = |what: &str, e: windows::core::Error| format!("{what}: {}", e.message());
+        let Gpu { device, context, winrt } = gpu.clone();
+        let interop = windows::core::factory::<GraphicsCaptureItem, IGraphicsCaptureItemInterop>().map_err(|e| text("capture item", e))?;
+        // SAFETY: a window handle; asking for one that is gone only fails.
+        let item: GraphicsCaptureItem = unsafe { interop.CreateForWindow(window) }.map_err(|e| text("capture item", e))?;
+        let size = item.Size().map_err(|e| text("size", e))?;
         let pool = Direct3D11CaptureFramePool::CreateFreeThreaded(&winrt, DirectXPixelFormat::B8G8R8A8UIntNormalized, 2, size).map_err(|e| text("frame pool", e))?;
         let session = pool.CreateCaptureSession(&item).map_err(|e| text("session", e))?;
         // No pointer in the picture, and Windows' yellow border off: this looks at the game, nobody is shown being recorded.
@@ -459,7 +489,7 @@ impl Capture {
     }
 
     /// The newest frame's look: `None` when no new frame came. The window's title bar and borders are in the frame, its client area counted from its own corner.
-    fn look(&mut self, window: HWND, client: Vec2) -> Option<Option<Around>> {
+    fn look(&mut self, window: HWND, client: Vec2) -> Option<(Option<Around>, bool)> {
         let mut newest = None;
         while let Ok(frame) = self.pool.TryGetNextFrame() {
             newest = Some(frame);
@@ -505,7 +535,7 @@ impl Capture {
             let (x0, y0, width, height, stride) = read[i]?;
             Some(Part { x0, y0, width, height, stride, bgra: &self.buffers[i] })
         };
-        Some(detect::look(&part(0)?, &part(1)?, client))
+        Some((detect::look(&part(0)?, &part(1)?, client), detect::wheel_coming(&part(0)?, client)))
     }
 
     fn staging_for(&mut self, i: usize, width: u32, height: u32) -> Option<ID3D11Texture2D> {
@@ -727,8 +757,8 @@ impl Windows {
         }
     }
 
-    /// New pictures, then every panel where its spring has it.
-    fn show(&mut self, panels: &mut Panels, snap: &Snapshot, origin: Pos2) {
+    /// New pictures, then every panel where its spring has it. Says whether one came into view, which then lies over all others.
+    fn show(&mut self, panels: &mut Panels, snap: &Snapshot, origin: Pos2) -> bool {
         let list = &mut self.list;
         panels.paint(snap, |panel, changed| {
             let [w, h] = panel.px;
@@ -751,28 +781,34 @@ impl Windows {
             window.picture(panel.pixels(), changed);
         });
         let showing: Vec<(Zone, POINT, u8)> = panels.all().filter(|p| p.painted && p.shown).map(|p| placed_at(p, origin)).collect();
-        // In the order they lie: what comes into view goes above what shows, so the sheet's page stays over its back.
-        let mut raise = false;
-        for (zone, at, alpha) in &showing {
-            if let Some(window) = self.list.get_mut(zone) {
-                // One coming into view goes on top: those after it in order go on top of it again.
-                let was_up = window.shown;
-                if window.stale || !window.shown || window.at != *at || window.alpha != *alpha {
-                    window.place(*at, *alpha);
-                }
-                if !was_up {
-                    raise = true;
-                } else if raise {
-                    window.raise();
-                }
-            }
-        }
+        let came_up = place_in_order(&mut self.list, &showing);
         for (zone, window) in &mut self.list {
             if !showing.iter().any(|(z, _, _)| z == zone) {
                 window.hide();
             }
         }
+        came_up
     }
+}
+
+/// Places the windows in the order they lie: what comes into view goes above what shows, so the sheet's page stays over its back. Says whether one came into view.
+fn place_in_order(list: &mut HashMap<Zone, PanelWindow>, showing: &[(Zone, POINT, u8)]) -> bool {
+    let mut raise = false;
+    for (zone, at, alpha) in showing {
+        if let Some(window) = list.get_mut(zone) {
+            // One coming into view goes on top: those after it in order go on top of it again.
+            let was_up = window.shown;
+            if window.stale || !window.shown || window.at != *at || window.alpha != *alpha {
+                window.place(*at, *alpha);
+            }
+            if !was_up {
+                raise = true;
+            } else if raise {
+                window.raise();
+            }
+        }
+    }
+    raise
 }
 
 /// Where the panel's window goes and its alpha as its spring has them: it comes from the menu's side.
@@ -929,6 +965,13 @@ pub mod pointer {
             }
         }
 
+        /// Back above every window of ours, as what it points at must never cover it.
+        pub fn raise(&self) {
+            if let Some(w) = self.window.as_ref().filter(|w| w.shown) {
+                w.raise();
+            }
+        }
+
         /// Alt let go, the wheel gone, anything: the mouse is VRChat's again at once.
         pub fn stop(&mut self) {
             if let Some((id, handle)) = self.thread.take() {
@@ -976,5 +1019,55 @@ pub mod pointer {
             p.add(egui::Shape::convex_polygon(body.to_vec(), orbiters_ui::theme::ACCENT, egui::Stroke::new(1.4, orbiters_ui::theme::INK_950)));
         });
         canvas.pixels().to_vec()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Those of ours that show, as they lie, top first.
+    fn from_the_top(ours: &[HWND]) -> Vec<HWND> {
+        unsafe extern "system" fn each(hwnd: HWND, list: LPARAM) -> windows::core::BOOL {
+            // SAFETY: the Vec given to EnumWindows below, alive for the call.
+            unsafe { (*(list.0 as *mut Vec<HWND>)).push(hwnd) };
+            true.into()
+        }
+        let mut all: Vec<HWND> = Vec::new();
+        // SAFETY: the callback only pushes to that Vec.
+        let _ = unsafe { EnumWindows(Some(each), LPARAM(&mut all as *mut Vec<HWND> as isize)) };
+        // SAFETY: a plain question about a window.
+        all.retain(|h| ours.contains(h) && unsafe { windows::Win32::UI::WindowsAndMessaging::IsWindowVisible(*h) }.as_bool());
+        all
+    }
+
+    /// Fully clear pictures: these real windows are never seen, wherever the tests run.
+    fn clear_window() -> PanelWindow {
+        let mut window = PanelWindow::new(8, 8, false).expect("a window");
+        window.picture(&[0u8; 8 * 8 * 4], [0, 0, 8, 8]);
+        window
+    }
+
+    #[test]
+    fn what_comes_into_view_says_so_and_the_pointer_goes_back_over_it() {
+        let at = POINT { x: 0, y: 0 };
+        let mut list = HashMap::new();
+        list.insert(Zone::WheelWorlds, clear_window());
+        list.insert(Zone::BloomPeople, clear_window());
+        let mut pointer = clear_window();
+        let (ring, bloom, arrow) = (list[&Zone::WheelWorlds].hwnd, list[&Zone::BloomPeople].hwnd, pointer.hwnd);
+
+        // The ring, with the pointer put up over it.
+        assert!(place_in_order(&mut list, &[(Zone::WheelWorlds, at, 255)]));
+        pointer.place(at, 255);
+        assert_eq!(from_the_top(&[ring, bloom, arrow]), [arrow, ring]);
+        // Nothing new: nothing to raise, nothing moves.
+        assert!(!place_in_order(&mut list, &[(Zone::WheelWorlds, at, 255)]));
+
+        // The second ring blooms: it lands over the pointer, as Enzo saw, and is said to have.
+        assert!(place_in_order(&mut list, &[(Zone::WheelWorlds, at, 255), (Zone::BloomPeople, at, 255)]));
+        assert_eq!(from_the_top(&[bloom, arrow])[0], bloom, "what the raise below is for");
+        pointer.raise();
+        assert_eq!(from_the_top(&[ring, bloom, arrow]), [arrow, bloom, ring]);
     }
 }

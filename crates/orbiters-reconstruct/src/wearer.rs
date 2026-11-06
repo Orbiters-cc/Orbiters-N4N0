@@ -19,6 +19,9 @@
 //! 3. The body grows out from a core (the column between the hips and the eyes, which no world may enter) through what the
 //!    world did not claim, across gaps up to a voxel wide. Whatever does not join it stays: a chair or another player a hand's
 //!    width away is not the wearer, whatever the envelope says. Someone holding on to the wearer does join, up to the envelope.
+//! 4. What floats free inside the envelope goes with them ([`FLOATING_ABOVE`]): nothing holds it up, so it is no chair and no
+//!    other player, and it is there because the wearer is. On 2026-11-06 that was Enzo's own Ghost Companion, a VRChat item he
+//!    spawns in every world, following him at 0.7 m from the hips: 209 voxels, touching nothing, in the middle of a picture of the world.
 //!
 //! **Taking it out** ([`remove`]): depth samples on the body say nothing from then on (no seeds, no depth targets:
 //! [`DepthView::unknown`](crate::dataset::DepthView)). A keyframe's or a rig face's pixels that show it get alpha 0
@@ -57,6 +60,12 @@ const ENVELOPE_RADIUS: f32 = 0.7;
 const SHELL: f32 = 0.25;
 /// The body's top above the floor, eye heights: ears and hair over the eyes.
 const ENVELOPE_TOP: f32 = 1.45;
+/// A part of what the world did not claim floats when its lowest voxel is this many eye heights above the floor, it touches no
+/// surface of the world, and it has at least [`FLOATING_LEAST`] voxels: less is a depth sample torn off an edge. A lamp on a post
+/// reaches the floor, one on a wall touches the wall; one hanging in the air within reach of the wearer, or something floating that
+/// the wearer stands next to in a world, goes with them.
+const FLOATING_ABOVE: f32 = 0.25;
+const FLOATING_LEAST: usize = 20;
 /// The core: within the first of these many eye heights of the hips' axis that holds [`CORE_VOXELS`], between these heights
 /// above the floor. The body is sure to be there, and no world may enter it, even along an arm that reaches past the envelope.
 /// A surface is what depth sees: a stout avatar has none near the axis (a box 0.15 m around it shows nothing within 0.14 m).
@@ -398,6 +407,33 @@ fn find_body(samples: &[(u32, [f32; 3], [f32; 3])], hips: [f32; 3], eye: f32) ->
             }
         }
     }
+
+    // What floats free beside them.
+    let mut looked: HashSet<Key> = HashSet::new();
+    let mut floating: Vec<Key> = Vec::new();
+    for k in &ordered {
+        if world.contains(k) || body.contains(k) || !looked.insert(*k) {
+            continue;
+        }
+        let mut part = vec![*k];
+        let (mut next, mut touches_world, mut lowest) = (0, false, f32::MAX);
+        while next < part.len() {
+            let at = part[next];
+            next += 1;
+            lowest = lowest.min(cells[&at].mean()[1]);
+            for n in neighbours(at) {
+                if world.contains(&n) {
+                    touches_world = true;
+                } else if !body.contains(&n) && cells.contains_key(&n) && looked.insert(n) {
+                    part.push(n);
+                }
+            }
+        }
+        if !touches_world && part.len() >= FLOATING_LEAST && lowest > floor + FLOATING_ABOVE * eye {
+            floating.extend(part);
+        }
+    }
+    body.extend(floating);
     Found { body, world, floor: floor_at }
 }
 
@@ -1015,6 +1051,42 @@ mod tests {
         assert!(volume.contains([0.0, 1.5, 1.85]));
         assert!(!volume.contains([0.75, 1.0, 1.8]));
         assert!(!volume.contains([0.0, 0.0, 3.0]));
+    }
+
+    /// Something floating beside the wearer goes with them (Enzo's Ghost Companion, 2026-11-06); a lamp on a post stays, as what
+    /// holds it reaches the floor.
+    #[test]
+    fn what_floats_beside_the_wearer_goes_and_what_stands_there_stays() {
+        let floating = ([0.5, 1.1, 1.7], [0.75, 1.45, 1.95]);
+        let post = ([-0.75, 0.0, 2.3], [-0.65, 1.3, 2.4]);
+        let lamp = ([-0.85, 1.3, 2.2], [-0.55, 1.55, 2.5]);
+        let scene = Scene { boxes: vec![body_box(), floating, post, lamp] };
+        let mut data = dataset(&scene);
+        let (volume, stats) = remove(&mut data, &track()).expect("found");
+        assert!(stats.depth_samples > 0, "{stats:?}");
+        assert!(volume.contains([0.6, 1.3, 1.7]), "the floating thing's front");
+        assert!(!volume.contains([-0.7, 1.45, 2.2]), "the lamp");
+        let (mut floating_kept, mut floating_all, mut lamp_lost, mut lamp_all) = (0, 0, 0, 0);
+        for d in &data.depth_views {
+            for i in 0..d.depth.len() {
+                if d.depth[i] <= 0.0 {
+                    continue;
+                }
+                let [u, v] = d.grid.pixels[i];
+                let p = d.camera.unproject(u, v, d.depth[i]);
+                let inside = |b: ([f32; 3], [f32; 3])| (0..3).all(|a| p[a] > b.0[a] - 1e-3 && p[a] < b.1[a] + 1e-3);
+                if inside(floating) {
+                    floating_all += 1;
+                    floating_kept += usize::from(!d.is_unknown(i));
+                } else if inside(lamp) {
+                    lamp_all += 1;
+                    lamp_lost += usize::from(d.is_unknown(i));
+                }
+            }
+        }
+        assert!(floating_all > 100 && lamp_all > 100, "{floating_all} {lamp_all}");
+        assert_eq!(floating_kept, 0, "of {floating_all}");
+        assert_eq!(lamp_lost, 0, "of {lamp_all}");
     }
 
     /// How close someone may stand: at a hand's width from the body they stay whole; touching, they go with it, as far as the

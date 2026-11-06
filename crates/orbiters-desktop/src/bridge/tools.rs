@@ -438,6 +438,16 @@ impl Bridge {
         let paused = self.paused();
         let picture_list: Vec<Value> = pictures.iter().map(|p| self.picture_json(p, &seen)).collect();
         let next = Self::next_step(&seen, &paused, started_by_bridge, private, going.is_some(), camera_open, capture_kit);
+        // Once saved the file knows: the live count stops at its last report (296 of 700 frames in the first real picture, which
+        // the agent noticed and could not explain).
+        let mut recording = seen.capture.clone();
+        if matches!(recording.state.as_str(), "idle" | "") {
+            if let Some(session) = &recording.session {
+                let files = self.game.picture_files(session);
+                recording.frames = files.frames;
+                recording.keyframes = files.keyframes;
+            }
+        }
         json!({
             "bridge": {
                 "paused": paused,
@@ -465,7 +475,7 @@ impl Bridge {
             },
             "avatar": { "name": seen.avatar_name, "capture_kit": capture_kit },
             "camera": { "open": camera_open, "pose_known": seen.camera_pose_known },
-            "recording": seen.capture,
+            "recording": recording,
             "reconstructions": {
                 "running": seen.reconstruction,
                 "waiting": seen.queue.iter().map(|p| file_name(p)).collect::<Vec<_>>(),

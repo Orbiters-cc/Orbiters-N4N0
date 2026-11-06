@@ -210,12 +210,42 @@ impl SeenFrame {
 #[derive(Clone, Debug, Default)]
 pub struct Seen {
     pub frames: Vec<SeenFrame>,
+    /// A wearer who stays in the frames and leaves the picture afterwards (crate wearer): no obstacle.
+    pub left_out: Option<LeftOut>,
+}
+
+/// Where a wearer stands who is in the depth now and will not be in the picture. In the corridor of the first real picture
+/// (2026-11-06, 1.7 m wide) their body closed the way behind the camera: the flight went the other way, twice, and half the place
+/// stayed unseen. A wearer the avatar hides is in no depth, and flights around them already go there.
+#[derive(Clone, Copy, Debug)]
+pub struct LeftOut {
+    pub hips: V,
+    pub eye_height: f32,
+}
+
+impl LeftOut {
+    /// Wide enough for arms held close and narrow enough to leave the walls of a corridor: in eye heights.
+    const RADIUS: f32 = 0.35;
+    const BELOW: f32 = 0.7;
+    const ABOVE: f32 = 0.9;
+
+    fn holds(&self, p: V) -> bool {
+        flat(p, self.hips) < Self::RADIUS * self.eye_height && p[1] > self.hips[1] - Self::BELOW * self.eye_height && p[1] < self.hips[1] + Self::ABOVE * self.eye_height
+    }
 }
 
 impl Seen {
     /// A frame's evidence, unless a frame from the same place looking the same way already gave it: the picture's pause
     /// makes dozens of those, whose votes would all be one.
-    pub fn add(&mut self, frame: SeenFrame) {
+    pub fn add(&mut self, mut frame: SeenFrame) {
+        if let Some(wearer) = self.left_out {
+            // As if that bin read nothing: what is behind the wearer is unknown from here, and other frames say what it is.
+            for bin in 0..frame.bins.len() {
+                if frame.surface_point(bin).is_some_and(|p| wearer.holds(p)) {
+                    frame.bins[bin] = f32::NAN;
+                }
+            }
+        }
         let same = |f: &SeenFrame| length(sub(f.eye, frame.eye)) < 0.02 && dot(f.forward, frame.forward) > 0.9995 && dot(f.up, frame.up) > 0.9995;
         if !self.frames.iter().any(same) {
             self.frames.push(frame);

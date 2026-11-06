@@ -455,18 +455,13 @@ fn run(args: Args) -> anyhow::Result<Ended> {
     }
     timing::add("5 sky fill", sky_start.elapsed());
     // One render of each held-out keyframe: its preview and its score (the device holds the result).
-    let write = |i: usize, img: &[[f32; 4]], preview: bool| -> anyhow::Result<()> {
+    let write = |i: usize, img: &[[f32; 4]]| -> anyhow::Result<()> {
         let encoded = qoi::encode(&rgb8(img), data.width, data.height, 3);
-        if preview {
-            std::fs::write(partial.join(rec::PREVIEW_FILE), &encoded)?;
-        }
         std::fs::write(partial.join(rec::HELD_OUT_DIR).join(format!("{:06}.qoi", data.views[i].keyframe)), &encoded)?;
         Ok(())
     };
-    // The first held-out keyframe's render is the preview.
-    let preview = outcome.held_out.first().copied();
     let scored = timing::section("6 score held out", Some(&dev), || {
-        train::score_held_out(&mut gpu, data, prepared.undo.as_ref(), &outcome.held_out, settings.background, |i, img| write(i, img, Some(i) == preview))
+        train::score_held_out(&mut gpu, data, prepared.undo.as_ref(), &outcome.held_out, settings.background, write)
     });
     let psnr_held_out = match scored {
         Err(e) if e.is::<Interrupted>() => {
@@ -476,9 +471,10 @@ fn run(args: Args) -> anyhow::Result<Ended> {
         }
         scored => scored?,
     };
-    if outcome.held_out.is_empty() {
-        write(0, &train::render(&mut gpu, &data.views[0].camera, settings.background)?, true)?;
-    }
+    // The preview is the first keyframe's view, what the person framed. It was the first held-out keyframe's, and a 3D picture's
+    // first seconds turn every way: on 2026-11-06 it showed a bare wall and an eye of what floated in front of it.
+    let preview = train::render(&mut gpu, &data.views[0].camera, settings.background)?;
+    std::fs::write(partial.join(rec::PREVIEW_FILE), qoi::encode(&rgb8(&preview), data.width, data.height, 3))?;
     let report = Report {
         gaussians: outcome.gaussians.len(),
         iterations: outcome.iterations,

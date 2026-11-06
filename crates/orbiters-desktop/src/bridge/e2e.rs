@@ -931,6 +931,10 @@ fn the_whole_loop_runs_unattended() {
     let mut status = Status::default();
     bridge.status_into(&mut status);
     assert!(status.log.iter().any(|l| l.text.contains("3D picture") && l.ok), "the log tells what it did");
+    let state = client.state();
+    let last = state["pictures"].as_array().unwrap().last().unwrap().clone();
+    assert_eq!(state["recording"]["frames"], last["frames"], "the saved recording's own numbers: {state}");
+    assert_eq!(state["recording"]["keyframes"], last["keyframes"], "{state}");
     assert_eq!(status.client.as_ref().map(|c| c.name.as_str()), Some("e2e"));
     assert_eq!(status.client.map(|c| c.connected), Some(true));
 }

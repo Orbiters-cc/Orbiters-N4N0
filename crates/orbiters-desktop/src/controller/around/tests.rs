@@ -306,7 +306,7 @@ fn a_poster_is_nobody_and_a_small_or_weak_face_too() {
         }
     }
     let start: Pose = [0.0, 1.5, 0.0, 0.0, 0.0, 0.0];
-    let seen = Seen { frames: vec![draw_frame(&voxels, &start)] };
+    let seen = Seen { frames: vec![draw_frame(&voxels, &start)] , ..Seen::default() };
     let framing = Framing { width: 1920, height: 1080, p00: P00, p11: P11 };
     let poster = [860.0, 440.0, 1060.0, 640.0, 0.84];
     assert!(people(start, framing, &[poster], None, None, &seen).is_empty(), "flat on the wall");
@@ -398,7 +398,7 @@ fn a_depth_frame_says_free_surface_or_nothing() {
     assert_eq!(f.at([0.0, 1.5, 4.5], 0.2), Clear::Unknown, "behind it");
     assert_eq!(f.at([0.0, 1.5, -1.0], 0.2), Clear::Unknown, "behind the camera");
     assert_eq!(f.at([50.0, 1.5, 1.0], 0.2), Clear::Unknown, "outside the frame");
-    let seen = Seen { frames: vec![f.clone(), draw_frame(&voxels, &[0.0, 1.5, 5.0, 0.0, 180.0, 0.0])] };
+    let seen = Seen { frames: vec![f.clone(), draw_frame(&voxels, &[0.0, 1.5, 5.0, 0.0, 180.0, 0.0])] , ..Seen::default() };
     assert_eq!(seen.at([0.0, 1.5, 3.0], 0.2), Clear::Surface, "a surface wins");
     assert_eq!(seen.at([0.0, 1.5, 4.5], 0.2), Clear::Free, "the other side sees it");
 }
@@ -483,6 +483,33 @@ fn the_seconds_go_where_the_picture_is_of() {
 }
 
 /// World mode over the real room: nobody is flown around whoever stands there, no wall is entered, and it ends on the very pose.
+#[test]
+fn a_wearer_who_will_be_taken_out_stands_in_no_flights_way() {
+    let room = room();
+    let frame = room.start_frames[0].clone();
+    // A point this frame measured a surface on, and a wearer standing right there.
+    let (bin, point) = (0..frame.bins.len()).find_map(|bin| frame.surface_point(bin).map(|p| (bin, p))).expect("a surface");
+    let wearer = LeftOut { hips: point, eye_height: EYE_HEIGHT };
+    let mut seen = Seen::default();
+    seen.add(frame.clone());
+    assert_eq!(seen.at(point, FLIGHT_MARGIN), Clear::Surface, "as an obstacle");
+    let mut without = Seen { left_out: Some(wearer), ..Seen::default() };
+    without.add(frame.clone());
+    assert!(without.frames[0].bins[bin].is_nan(), "that bin read nothing now");
+    assert_ne!(without.at(point, 0.01), Clear::Surface, "no obstacle");
+    // Everything else the frame saw stays.
+    let (mut kept, mut gone) = (0, 0);
+    for b in 0..frame.bins.len() {
+        let Some(p) = frame.surface_point(b) else { continue };
+        if flat(p, point) > LeftOut::RADIUS * EYE_HEIGHT {
+            kept += usize::from(without.frames[0].bins[b] == frame.bins[b]);
+            gone += usize::from(without.frames[0].bins[b] != frame.bins[b]);
+        }
+    }
+    assert!(kept > 100, "{kept}");
+    assert_eq!(gone, 0);
+}
+
 #[test]
 fn a_picture_of_the_world_goes_around_nobody_enters_no_wall_and_comes_home() {
     let room = room();

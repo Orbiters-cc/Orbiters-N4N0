@@ -16,7 +16,7 @@ use super::super::floating::space::{self, Quad, V3};
 use super::super::Presenter;
 use super::block::{Block, HandNow, Stuck};
 use super::zones::{self, Around, Placed, Zone};
-use super::{Panels, APPEAR_FROM};
+use super::Panels;
 use crate::backend::Ctl;
 use crate::state::{OrbitStatus, Snapshot};
 use egui::Pos2;
@@ -131,8 +131,14 @@ impl Plane {
     /// Where a panel's quad is, at `back` units toward the plane's centre (its spring).
     pub fn quad(&self, placed: &Placed, back: f32, near: f32) -> Quad {
         let c = placed.rect.center();
-        let length = (c.x * c.x + c.y * c.y).sqrt().max(1.0);
-        let (x, y) = (c.x - c.x / length * back, c.y - c.y / length * back);
+        let way = placed.zone.ring().map_or_else(
+            || {
+                let length = (c.x * c.x + c.y * c.y).sqrt().max(1.0);
+                egui::vec2(c.x / length, c.y / length)
+            },
+            |ring| zones::polar(1.0, ring.middle()),
+        );
+        let (x, y) = (c.x - way.x * back, c.y - way.y * back);
         Quad { transform: space::offset(&self.frame, [x * self.unit, -y * self.unit, near]), width: placed.rect.width() * self.unit, height: placed.rect.height() * self.unit }
     }
 }
@@ -310,7 +316,11 @@ impl OrbitVr {
             _ => None,
         };
         self.plane = plane;
-        let places: Vec<Placed> = menu.map_or_else(Vec::new, |m| Zone::around(m).iter().map(|z| zones::in_units(*z)).collect());
+        let mut places: Vec<Placed> = menu.map_or_else(Vec::new, |m| Zone::around(m).iter().map(|z| zones::in_units(*z)).collect());
+        // Here VRChat's wheel can close unseen: the ring has its own close.
+        if menu == Some(Around::Wheel) {
+            places.push(zones::in_units(Zone::WheelHide));
+        }
         self.panels.takeover_place = Some(zones::in_units(Zone::Takeover));
         self.panels.set_open(menu, places, cx.snap);
         if self.panels.is_empty() {
@@ -339,7 +349,7 @@ impl OrbitVr {
             .map(|p| {
                 let takeover = p.zone == Zone::Takeover;
                 let on = if takeover { self.takeover_plane.unwrap_or(plane) } else { plane };
-                (on.quad(&p.placed, (1.0 - p.appear.position()) * APPEAR_FROM, if takeover { TAKEOVER_NEAR_M } else { NEAR_M }), p.placed)
+                (on.quad(&p.placed, -p.outward(), if takeover { TAKEOVER_NEAR_M } else { NEAR_M }), p.placed)
             })
             .collect();
 
@@ -553,21 +563,21 @@ mod tests {
         let eyes = space::position(&head);
         assert!(space::dot(space::axis(&plane.frame, 2), space::sub(eyes, space::position(&plane.frame))) > 0.0, "it faces the eyes");
         assert!(space::axis(&plane.frame, 1)[1] > 0.5, "upright");
-        let top = plane.quad(&zones::in_units(Zone::WheelTop), 0.0, NEAR_M);
+        let top = plane.quad(&zones::in_units(Zone::WheelPeople), 0.0, NEAR_M);
         let center = space::position(&plane.frame);
-        assert!(space::position(&top.transform)[1] > center[1], "the top panel above the wheel's centre");
-        // It keeps its share of the wheel: 2.57 radii wide.
-        assert!((top.width / WHEEL_RADIUS_M - 2.57).abs() < 0.01);
+        assert!(space::position(&top.transform)[1] > center[1], "the 3D picture's cell above the wheel's centre");
+        // It keeps its share of the wheel.
+        assert!((top.width / WHEEL_RADIUS_M - zones::Zone::WheelPeople.units().width() / 100.0).abs() < 0.01);
         // Larger in Settings, larger here.
-        assert!((wheel_plane(&grip, &head, 1.25).unwrap().quad(&zones::in_units(Zone::WheelTop), 0.0, 0.0).width / top.width - 1.25).abs() < 0.01);
+        assert!((wheel_plane(&grip, &head, 1.25).unwrap().quad(&zones::in_units(Zone::WheelPeople), 0.0, 0.0).width / top.width - 1.25).abs() < 0.01);
         assert!(OrbitSettings::VR_SIZES.contains(&1.25));
     }
 
     #[test]
-    fn a_laser_finds_the_nearest_panel_and_not_the_wheels_bite() {
+    fn a_laser_finds_the_nearest_panel_and_only_on_its_shape() {
         let head = space::from_axes([1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0], [0.0, 1.6, 0.0]);
         let plane = quick_menu_plane(&head, 1.0);
-        let placed = zones::in_units(Zone::WheelLowerRight);
+        let placed = zones::in_units(Zone::WheelMusic);
         let quad = plane.quad(&placed, 0.0, 0.0);
         let quads = [(quad, placed)];
         let eyes = space::position(&head);
@@ -575,12 +585,16 @@ mod tests {
             let target = space::apply(&quad.transform, [(uv[0] - 0.5) * quad.width, (0.5 - uv[1]) * quad.height, 0.0]);
             laser_on(&quads, eyes, space::unit(space::sub(target, eyes)).unwrap())
         };
-        assert!(shoot([0.9, 0.9]).is_some());
-        assert!(shoot([0.02, 0.02]).is_none(), "the corner the wheel takes is VRChat's");
+        // Its middle is on it; of its rectangle's corners, one at least is off its arc.
+        let anchor = placed.zone.ring().unwrap().anchor().to_pos2();
+        let uv = (anchor - placed.rect.min) / placed.rect.size();
+        assert!(shoot([uv.x, uv.y]).is_some());
+        assert!([[0.02, 0.02], [0.98, 0.02], [0.02, 0.98], [0.98, 0.98]].iter().any(|c| shoot(*c).is_none()));
         assert!(shoot([1.2, 0.5]).is_none());
         // Whatever is nearer in front wins: the takeover over the panels.
         let front = zones::in_units(Zone::Takeover);
-        let quads = [(quad, placed), (plane.quad(&front, 0.0, TAKEOVER_NEAR_M), front)];
+        let under = zones::in_units(Zone::QmUnder);
+        let quads = [(plane.quad(&under, 0.0, 0.0), under), (plane.quad(&front, 0.0, TAKEOVER_NEAR_M), front)];
         let target = space::position(&quads[1].0.transform);
         assert_eq!(laser_on(&quads, eyes, space::unit(space::sub(target, eyes)).unwrap()).map(|h| h.0), Some(1));
     }

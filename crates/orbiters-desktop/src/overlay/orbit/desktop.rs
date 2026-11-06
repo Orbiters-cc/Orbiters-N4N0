@@ -13,7 +13,7 @@
 
 use super::detect::{self, Part, Seen, Watcher};
 use super::zones::{self, Around, Placed, Zone};
-use super::{Panel, Panels, APPEAR_FROM};
+use super::{Panel, Panels};
 use crate::backend::Ctl;
 use crate::ipc::{Client, Endpoint, Role};
 use crate::state::{OrbitStatus, Snapshot};
@@ -82,6 +82,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
     let mut last_turn = Instant::now();
     let mut last_look = None::<Instant>;
     let mut frames_seen = FrameRate::default();
+    let clicks = Clicks::start();
     loop {
         let turn = Instant::now();
         let dt = turn.duration_since(last_turn).as_secs_f32();
@@ -126,9 +127,12 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
                     last_look = Some(turn);
                     let client_size = client_size(window);
                     let found = c.look(window, client_size);
-                    if let Some(found) = found {
+                    if let Some((found, tint)) = found {
                         frames_seen.count(turn);
                         watcher.frame(found, turn);
+                        if found == Some(Around::Wheel) {
+                            panels.set_tint(tint);
+                        }
                     }
                 }
             }
@@ -162,28 +166,58 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         let at = pointer.at().unwrap_or(pos2(cursor.0 as f32, cursor.1 as f32));
         let on = (open != Some(Around::Wheel) || pointer.at().is_some()).then(|| hit(&panels, at - origin.to_vec2())).flatten();
         panels.hover(on);
+        // With the wheel open, the mouse is VRChat's until Alt is held: what nobody can guess is said in the caption.
+        panels.set_hint((open == Some(Around::Wheel) && !pointer.active()).then_some(("Hold Left Alt to use these", "Your mouse then points here instead of at the wheel.")));
         // The press: what Windows gave our windows (pointer over them) and what the hook kept from the game.
         for (down, _) in MOUSE.with(|m| std::mem::take(&mut *m.borrow_mut())) {
-            press(&mut panels, down, &snap, &mut windows);
+            press(&mut panels, down, &snap, &mut windows, &clicks);
         }
         for down in pointer.take_buttons() {
-            press(&mut panels, down, &snap, &mut windows);
+            press(&mut panels, down, &snap, &mut windows, &clicks);
         }
         // A button let go off a panel never reaches its window: what is held ends with it.
         if !pointer.active() && !button_down() && panels.all().any(|p| p.pressed.is_some()) {
             panels.release();
         }
-        let live = snap.settings.reduce_motion;
-        let _ = live;
         windows.show(&mut panels, &snap, origin);
         let wait = TURN.saturating_sub(turn.elapsed());
         std::thread::sleep(wait);
     }
 }
 
-fn press(panels: &mut Panels, down: bool, snap: &Snapshot, windows: &mut Windows) {
+/// `--orbit-bench <seconds>`: counts VRChat's frames through a capture of its window that only counts (what the panels' cost is measured with: run the same in each
+/// state and compare). Prints frames a second, one line per 5 s. A tool for the report, not used by anything.
+pub fn bench(args: &[String]) -> anyhow::Result<()> {
+    let seconds: f32 = args.first().and_then(|a| a.parse().ok()).unwrap_or(20.0);
+    // SAFETY: at the start of the process.
+    unsafe {
+        let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+        let _ = RoInitialize(RO_INIT_MULTITHREADED);
+    }
+    // SAFETY: a plain query by name.
+    let game = unsafe { windows::Win32::UI::WindowsAndMessaging::FindWindowW(w!("UnityWndClass"), w!("VRChat")) }.context("no VRChat window")?;
+    let capture = Capture::new(game).map_err(|e| anyhow::anyhow!(e))?;
+    let (begin, mut mark, mut frames) = (Instant::now(), Instant::now(), 0u32);
+    while begin.elapsed().as_secs_f32() < seconds {
+        while let Ok(frame) = capture.pool.TryGetNextFrame() {
+            drop(frame);
+            frames += 1;
+        }
+        if mark.elapsed() >= Duration::from_secs(5) {
+            println!("{:.1}", frames as f32 / mark.elapsed().as_secs_f32());
+            (mark, frames) = (Instant::now(), 0);
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    Ok(())
+}
+
+fn press(panels: &mut Panels, down: bool, snap: &Snapshot, windows: &mut Windows, clicks: &Clicks) {
     if down {
         let pressed = panels.press(snap);
+        if pressed.clicked {
+            clicks.play();
+        }
         if pressed.hide {
             panels.set_open(panels.open_menu(), Vec::new(), snap);
             windows.hide_all();
@@ -254,6 +288,30 @@ fn pump() {
         while PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() {
             let _ = TranslateMessage(&msg);
             DispatchMessageW(&msg);
+        }
+    }
+}
+
+/// The app's click, computed on a thread at the start, so that the first press already has it.
+struct Clicks {
+    output: orbiters_sound::Output,
+    click: Arc<std::sync::OnceLock<Arc<orbiters_sound::Sound>>>,
+}
+
+impl Clicks {
+    fn start() -> Self {
+        let click = Arc::new(std::sync::OnceLock::new());
+        let slot = click.clone();
+        let _ = std::thread::Builder::new().name("orbit-click".into()).spawn(move || {
+            use orbiters_sound::{render, sounds, RATE};
+            let _ = slot.set(Arc::new(render(&sounds::ROCKER, RATE)));
+        });
+        Self { output: orbiters_sound::Output::new(), click }
+    }
+
+    fn play(&self) {
+        if let Some(s) = self.click.get() {
+            self.output.play(s);
         }
     }
 }
@@ -401,7 +459,7 @@ impl Capture {
     }
 
     /// The newest frame's look: `None` when no new frame came. The window's title bar and borders are in the frame, its client area counted from its own corner.
-    fn look(&mut self, window: HWND, client: Vec2) -> Option<Option<Around>> {
+    fn look(&mut self, window: HWND, client: Vec2) -> Option<(Option<Around>, [u8; 3])> {
         let mut newest = None;
         while let Ok(frame) = self.pool.TryGetNextFrame() {
             newest = Some(frame);
@@ -447,7 +505,8 @@ impl Capture {
             let (x0, y0, width, height, stride) = read[i]?;
             Some(Part { x0, y0, width, height, stride, bgra: &self.buffers[i] })
         };
-        Some(detect::look(&part(0)?, &part(1)?, client))
+        let (wheel, row) = (part(0)?, part(1)?);
+        Some((detect::look(&wheel, &row, client), detect::wheel_color(&wheel, client)))
     }
 
     fn staging_for(&mut self, i: usize, width: u32, height: u32) -> Option<ID3D11Texture2D> {
@@ -662,14 +721,15 @@ impl Windows {
         let list = &mut self.list;
         panels.paint(snap, |panel, changed| {
             let [w, h] = panel.px;
+            let clicks = !panel.zone.passes_clicks();
             let window = list.entry(panel.zone).and_modify(|window| {
                 if window.size.cx != w as i32 || window.size.cy != h as i32 {
-                    *window = PanelWindow::new(w, h, true).expect("a window was made before");
+                    *window = PanelWindow::new(w, h, clicks).expect("a window was made before");
                 }
             });
             let window = match window {
                 std::collections::hash_map::Entry::Occupied(e) => e.into_mut(),
-                std::collections::hash_map::Entry::Vacant(e) => match PanelWindow::new(w, h, true) {
+                std::collections::hash_map::Entry::Vacant(e) => match PanelWindow::new(w, h, clicks) {
                     Ok(made) => e.insert(made),
                     Err(err) => {
                         eprintln!("panel window: {err}");
@@ -696,9 +756,8 @@ impl Windows {
 /// Where the panel's window goes and its alpha as its spring has them: it comes from the menu's side.
 fn placed_at(panel: &Panel, origin: Pos2) -> (Zone, POINT, u8) {
     let Placed { rect, center, unit, .. } = panel.placed;
-    let outward = (rect.center() - center).normalized();
-    let back = (1.0 - panel.appear.position()) * APPEAR_FROM * unit;
-    let at = origin + rect.min.to_vec2() - outward * back;
+    let way = panel.zone.ring().map_or((rect.center() - center).normalized(), |ring| zones::polar(1.0, ring.middle()));
+    let at = origin + rect.min.to_vec2() + way * panel.outward() * unit;
     (panel.zone, POINT { x: at.x.round() as i32, y: at.y.round() as i32 }, (panel.appear.alpha() * 255.0) as u8)
 }
 
@@ -752,8 +811,8 @@ pub mod pointer {
         unsafe { CallNextHookEx(None, code, wparam, lparam) }
     }
 
-    /// Where it starts from the panels' middle: left of the wheel, over what is largest.
-    const START: Vec2 = vec2(-150.0, -40.0);
+    /// Where it starts from the wheel's centre: on the first 3D picture button, what most people come here for.
+    const START: Vec2 = vec2(-87.0, -150.0);
     /// The pointer's picture, in pixels.
     const PX: u32 = 24;
 

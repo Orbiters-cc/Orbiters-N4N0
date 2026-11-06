@@ -102,6 +102,25 @@ pub fn wheel_scores(part: &Part, client: Vec2) -> (f32, f32) {
     (edge, uniform)
 }
 
+/// The wheel's own colour, RGB, from the ring just inside its rim: what the panels' ring takes after.
+pub fn wheel_color(part: &Part, client: Vec2) -> [u8; 3] {
+    let (center, radius) = zones::wheel(client);
+    let mut channels = [[0.0f32; WHEEL_ANGLES]; 3];
+    for i in 0..WHEEL_ANGLES {
+        let (s, c) = (i as f32 / WHEEL_ANGLES as f32 * std::f32::consts::TAU).sin_cos();
+        let at = part.at(center.x + radius * WHEEL_INSIDE * c, center.y + radius * WHEEL_INSIDE * s);
+        for (channel, value) in channels.iter_mut().zip(at) {
+            channel[i] = value;
+        }
+    }
+    let middle = |c: usize| {
+        let mut v = channels[c];
+        v.sort_by(f32::total_cmp);
+        v[WHEEL_ANGLES / 2] as u8
+    };
+    [middle(2), middle(1), middle(0)]
+}
+
 pub fn wheel_seen(part: &Part, client: Vec2) -> bool {
     let (edge, uniform) = wheel_scores(part, client);
     edge >= WHEEL_EDGE && uniform >= WHEEL_UNIFORM
@@ -341,7 +360,12 @@ mod tests {
             } else {
                 let (edge, uniform) = wheel_scores(&part, *client);
                 match kind {
-                    "wheel" => assert!(edge >= WHEEL_EDGE && uniform >= WHEEL_UNIFORM, "{name}: {edge} {uniform}"),
+                    "wheel" => {
+                        assert!(edge >= WHEEL_EDGE && uniform >= WHEEL_UNIFORM, "{name}: {edge} {uniform}");
+                        // Enzo's wheel is teal.
+                        let [r, g, b] = wheel_color(&part, *client);
+                        assert!(g > r + 20 && b > r + 20, "{name}: {r} {g} {b}");
+                    }
                     _ => assert!(!(edge >= WHEEL_EDGE && uniform >= WHEEL_UNIFORM), "{name}: {edge} {uniform} on a frame without it"),
                 }
             }

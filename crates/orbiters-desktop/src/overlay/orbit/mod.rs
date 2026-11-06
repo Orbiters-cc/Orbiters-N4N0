@@ -97,6 +97,11 @@ impl Appear {
     }
 }
 
+/// How far a cell of the ring comes out under the pointer, in units.
+pub const POP: f32 = 7.0;
+/// Its own spring: quicker than appearing, a little past.
+const POP_SPRING: (f32, f32) = (620.0, 30.0);
+
 /// One panel: where it is and its picture.
 pub struct Panel {
     pub zone: Zone,
@@ -108,8 +113,10 @@ pub struct Panel {
     canvas: Canvas,
     /// The picture as the platform takes it: the canvas's, with the wheel's bite cut out.
     out: Vec<u8>,
-    /// Where the wheel's bite is in its pixels.
-    bite: Option<(Pos2, f32)>,
+    /// Its shape as a cell of the ring, one byte a pixel, multiplied into each picture.
+    mask: Option<Vec<u8>>,
+    /// How far it has come out under the pointer, 0 to 1 and its speed. A press pushes it back in.
+    pop: (f32, f32),
     pub items: Vec<Item>,
     pub hover: Option<usize>,
     pub pressed: Option<usize>,
@@ -129,7 +136,7 @@ impl Panel {
         let px = [size.x.round().max(1.0) as u32, size.y.round().max(1.0) as u32];
         let logical = if placed.zone == Zone::Takeover { vec2(layout::WIDTH as f32, layout::HEIGHT as f32) } else { placed.logical() };
         let zoom = px[0] as f32 / logical.x;
-        let bite = placed.zone.bite().map(|b| (((placed.center - placed.rect.min) * sharp).to_pos2(), b * placed.unit * sharp));
+        let mask = placed.zone.ring().map(|ring| panels::cell_mask(ring, px, zoom));
         Self {
             zone: placed.zone,
             placed,
@@ -137,7 +144,8 @@ impl Panel {
             logical,
             canvas: Canvas::zoomed(px[0], px[1], zoom),
             out: vec![0; px[0] as usize * px[1] as usize * 4],
-            bite,
+            mask,
+            pop: (0.0, 0.0),
             items: Vec::new(),
             hover: None,
             pressed: None,
@@ -153,7 +161,7 @@ impl Panel {
         &self.out
     }
 
-    /// Takes what the canvas painted: the changed part, cut where the wheel bites. Returns it (x0, y0, x1, y1).
+    /// Takes what the canvas painted: the changed part, cut to the panel's shape. Returns it (x0, y0, x1, y1).
     fn take_picture(&mut self) -> Option<[u32; 4]> {
         let changed = self.canvas.damage()?;
         let [w, h] = self.px;
@@ -162,10 +170,33 @@ impl Panel {
             let (a, b) = ((y * w + changed[0]) as usize * 4, (y * w + changed[2].min(w)) as usize * 4);
             self.out[a..b].copy_from_slice(&pixels[a..b]);
         }
-        if let Some((center, radius)) = self.bite {
-            panels::bite(&mut self.out, self.px, center, radius, changed);
+        if let Some(mask) = &self.mask {
+            panels::apply_mask(&mut self.out, mask, self.px, changed);
         }
         Some(changed)
+    }
+
+    /// How far from its place it is now, in units along the way out from the menu's centre: its spring coming, and the pointer's pop.
+    pub fn outward(&self) -> f32 {
+        let live = self.placed.zone.ring().is_some();
+        -(1.0 - self.appear.position()) * APPEAR_FROM + if live { self.pop.0 * POP } else { 0.0 }
+    }
+
+    fn step_pop(&mut self, dt: f32) {
+        let target = if self.pressed.is_some() {
+            -0.35
+        } else if self.hover.is_some() {
+            1.0
+        } else {
+            0.0
+        };
+        let mut left = dt.min(0.05);
+        while left > 0.0 {
+            let h = left.min(0.003);
+            self.pop.1 += (POP_SPRING.0 * (target - self.pop.0) - POP_SPRING.1 * self.pop.1) * h;
+            self.pop.0 += self.pop.1 * h;
+            left -= h;
+        }
     }
 
     /// `uv` over the panel (0 to 1 from its top left) in the units its content is drawn in.
@@ -326,6 +357,8 @@ impl Panels {
     pub fn set_open(&mut self, around: Option<Around>, places: Vec<Placed>, snap: &Snapshot) {
         if around != self.open {
             self.hidden = false;
+            self.facts.tint = None;
+            self.facts.pointed = None;
             self.release();
             self.takeover = None;
             self.open = around;
@@ -369,8 +402,11 @@ impl Panels {
     fn open_page(&mut self, target: orbiters_n4n0_core::menu::Target, place: Option<Placed>, snap: &Snapshot) {
         let Some(place) = place else { return };
         self.host.open(snap);
-        let effects = self.host.press(target);
-        self.host.effects(effects, snap, &self.backend);
+        // `Close` stands for its Home, where it opens.
+        if target != orbiters_n4n0_core::menu::Target::Close {
+            let effects = self.host.press(target);
+            self.host.effects(effects, snap, &self.backend);
+        }
         let mut panel = Panel::new(place, self.sharp, 0, !snap.settings.reduce_motion);
         panel.canvas = Canvas::zoomed(panel.px[0], panel.px[1], panel.px[0] as f32 / panel.logical.x);
         self.takeover = Some(panel);
@@ -399,6 +435,7 @@ impl Panels {
     }
 
     fn facts_of(&self, snap: &Snapshot) -> Facts {
+        let progress = |dir: &PathBuf| snap.reconstruction.as_ref().filter(|j| j.session_dir == *dir).map(|j| j.progress.clamp(0.0, 1.0));
         let recording = matches!(snap.capture.state, CaptureState::Recording | CaptureState::Paused) && !snap.capture.photo_3d;
         Facts {
             recording,
@@ -407,7 +444,7 @@ impl Panels {
             countdown: snap.n4n0.photo_countdown,
             picture_flying: snap.capture.photo_3d && !matches!(snap.capture.state, CaptureState::Idle),
             // Their pictures are looked up per panel, in `paint`.
-            recent: self.recents.loaded.iter().map(|r| Recent { dir: r.dir.clone(), title: r.title.clone(), state: recent_state(r, snap), picture: None }).collect(),
+            recent: self.recents.loaded.iter().map(|r| Recent { dir: r.dir.clone(), title: r.title.clone(), state: recent_state(r, snap), progress: progress(&r.dir), picture: None }).collect(),
             reconstructing: snap.reconstruction.as_ref().map(|j| j.progress.clamp(0.0, 1.0)),
             waiting: snap.reconstruct_queue.len(),
             desktop: snap.n4n0.desktop_mode || !snap.steamvr.running,
@@ -415,6 +452,36 @@ impl Panels {
             n4n0: snap.settings.n4n0.enabled,
             music: self.host.menu.media.as_ref().map(|m| (m.title.clone(), m.playing)),
             timer: snap.settings.photo_3d_timer,
+            picture_mode: self.facts.picture_mode,
+            tint: self.facts.tint,
+            hint: self.facts.hint,
+            pointed: self.facts.pointed,
+        }
+    }
+
+    /// VRChat's wheel's colour as read from its window: the ring takes after it. Once for an opening, so that nothing flickers.
+    pub fn set_tint(&mut self, tint: [u8; 3]) {
+        if self.facts.tint.is_none() {
+            self.facts.tint = Some(tint);
+            for panel in &mut self.list {
+                panel.dirty = true;
+            }
+        }
+    }
+
+    /// What the caption says with nothing pointed at.
+    pub fn set_hint(&mut self, hint: Option<(&'static str, &'static str)>) {
+        if self.facts.hint != hint {
+            self.facts.hint = hint;
+            self.caption_dirty();
+        }
+    }
+
+    fn caption_dirty(&mut self) {
+        for panel in &mut self.list {
+            if panel.zone.passes_clicks() {
+                panel.dirty = true;
+            }
         }
     }
 
@@ -437,6 +504,12 @@ impl Panels {
                     self.host.dirty = true;
                 }
             }
+        }
+        // The caption says what is pointed at.
+        let pointed = self.list.iter().find_map(|p| p.hover.and_then(|i| p.items.get(i)).map(|item| item.action));
+        if pointed != self.facts.pointed {
+            self.facts.pointed = pointed;
+            self.caption_dirty();
         }
     }
 
@@ -473,6 +546,10 @@ impl Panels {
         out.clicked = action != Action::Idle;
         match action {
             Action::Picture(mode) => {
+                self.facts.picture_mode = Some(mode);
+                for panel in &mut self.list {
+                    panel.dirty = true;
+                }
                 let effects = self.host.press(orbiters_n4n0_core::menu::Target::TakeOf(mode));
                 self.host.effects(effects, snap, &self.backend);
             }
@@ -536,7 +613,7 @@ impl Panels {
             panel.dirty = false;
             panel.items = panels::items(panel.zone, panel.logical, &self.facts);
             let mut facts = self.facts.clone();
-            if matches!(panel.zone, Zone::WheelLeft | Zone::QmLeft) {
+            if matches!(panel.zone, Zone::WheelRecent0 | Zone::WheelRecent1 | Zone::WheelRecent2 | Zone::QmLeft) {
                 // Recent captures' pictures: textures of this panel's own canvas.
                 for (recent, loaded) in facts.recent.iter_mut().zip(&self.recents.loaded) {
                     if let Some(image) = &loaded.image {
@@ -615,6 +692,7 @@ impl Panels {
     pub fn step_springs(&mut self, dt: f32) {
         for panel in self.list.iter_mut().chain(self.takeover.iter_mut()) {
             panel.appear.step(dt);
+            panel.step_pop(dt);
         }
     }
 }

@@ -67,6 +67,8 @@ fn main() -> anyhow::Result<()> {
         Some("--overlay") => overlay::run(&args[1..]),
         #[cfg(windows)]
         Some("--orbit-desktop") => overlay::orbit::desktop::run(&args[1..]),
+        #[cfg(windows)]
+        Some("--orbit-bench") => overlay::orbit::desktop::bench(&args[1..]),
         Some("--n4n0-menu") => overlay::menu_pages::run(&args[1..]),
         Some("--world-view") => overlay::worlds::shots::run(&args[1..]),
         Some("--world-timing") => overlay::worlds::timing_lab::run(&args[1..]),

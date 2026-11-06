@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 fn recent() -> Vec<Recent> {
     [("Sky Dream", "3D picture, ready"), ("Rainy Skyline", "Reconstructing 42%"), ("Pacific Dreams (Night)", "Recording, waiting"), ("After The Rain", "3D picture, ready")]
         .iter()
-        .map(|(title, state)| Recent { dir: PathBuf::from(title), title: title.to_string(), state: state.to_string(), picture: None })
+        .map(|(title, state)| Recent { dir: PathBuf::from(title), title: title.to_string(), state: state.to_string(), progress: state.contains('%').then_some(0.42), picture: None })
         .collect()
 }
 
@@ -47,9 +47,9 @@ fn picture(placed: &Placed, facts: &Facts, hover: Option<usize>, pressed: Option
         canvas.paint(0.0, |p| panels::paint(p, placed.zone, logical, &facts, hover, pressed));
     }
     let mut out = canvas.pixels().to_vec();
-    if let Some(b) = placed.zone.bite() {
-        let center = ((placed.center - placed.rect.min)).to_pos2();
-        panels::bite(&mut out, px, center, b * placed.unit, [0, 0, px[0], px[1]]);
+    if let Some(ring) = placed.zone.ring() {
+        let mask = panels::cell_mask(ring, px, px[0] as f32 / logical.x);
+        panels::apply_mask(&mut out, &mask, px, [0, 0, px[0], px[1]]);
     }
     (out, px)
 }
@@ -77,6 +77,10 @@ fn stand_in_menu(around: Around, client: Vec2, canvas: &mut Canvas) {
     canvas.paint(0.0, |p| match around {
         Around::Wheel => {
             p.circle_filled(center, 100.0 * unit, Color32::from_rgb(7, 55, 58));
+            for t in 0..6 {
+                let way = zones::polar(100.0 * unit, 30.0 + t as f32 * 60.0);
+                p.line_segment([center, center + way], egui::Stroke::new(1.0, Color32::from_rgb(15, 87, 92)));
+            }
             p.circle_filled(center, 48.0 * unit, Color32::from_rgb(22, 34, 43));
         }
         Around::QuickMenu => {
@@ -111,8 +115,9 @@ fn scene(name: &str, out: &Path, around: Around, client: Vec2, facts: &Facts, ho
 
 pub(super) fn shots(out: &Path) -> anyhow::Result<()> {
     let hd = vec2(1280.0, 720.0);
-    let idle = Facts { recent: recent(), timer: 3, n4n0: true, desktop: true, ..Default::default() };
-    let empty = Facts { timer: 3, n4n0: true, ..Default::default() };
+    let tint = Some([7, 55, 58]);
+    let idle = Facts { recent: recent(), timer: 3, n4n0: true, desktop: true, tint, hint: Some(("Hold Left Alt to use these", "Your mouse then points here instead of at the wheel.")), ..Default::default() };
+    let empty = Facts { timer: 3, n4n0: true, tint, ..Default::default() };
     let busy = Facts {
         recording: true,
         recording_seconds: Some(83),
@@ -123,7 +128,8 @@ pub(super) fn shots(out: &Path) -> anyhow::Result<()> {
         music: Some(("Midnight City".into(), true)),
         ..idle.clone()
     };
-    let counting = Facts { countdown: Some(2), ..idle.clone() };
+    let counting = Facts { countdown: Some(2), picture_mode: Some(orbiters_n4n0_core::menu::PhotoMode::People), hint: None, ..idle.clone() };
+    let pointing = |action| Facts { pointed: Some(action), hint: None, ..idle.clone() };
     for (around, tag) in [(Around::Wheel, "wheel"), (Around::QuickMenu, "qm")] {
         scene(&format!("orbit-{tag}-idle"), out, around, hd, &idle, None)?;
         scene(&format!("orbit-{tag}-empty"), out, around, hd, &empty, None)?;
@@ -133,9 +139,13 @@ pub(super) fn shots(out: &Path) -> anyhow::Result<()> {
         scene(&format!("orbit-{tag}-540"), out, around, vec2(960.0, 540.0), &idle, None)?;
         scene(&format!("orbit-{tag}-narrow"), out, around, vec2(800.0, 800.0), &idle, None)?;
     }
-    scene("orbit-wheel-hover", out, Around::Wheel, hd, &idle, Some((Zone::WheelTop, 0, false)))?;
-    scene("orbit-wheel-pressed", out, Around::Wheel, hd, &idle, Some((Zone::WheelTop, 1, true)))?;
-    scene("orbit-qm-hover", out, Around::QuickMenu, hd, &idle, Some((Zone::QmRight, 2, false)))?;
+    let people = panels::Action::Picture(orbiters_n4n0_core::menu::PhotoMode::People);
+    let world = panels::Action::Picture(orbiters_n4n0_core::menu::PhotoMode::World);
+    scene("orbit-wheel-hover", out, Around::Wheel, hd, &pointing(people), Some((Zone::WheelPeople, 0, false)))?;
+    scene("orbit-wheel-pressed", out, Around::Wheel, hd, &pointing(world), Some((Zone::WheelWorld, 0, true)))?;
+    scene("orbit-wheel-recent", out, Around::Wheel, hd, &pointing(panels::Action::Page(orbiters_n4n0_core::menu::Target::History)), Some((Zone::WheelRecent1, 0, false)))?;
+    scene("orbit-qm-hover", out, Around::QuickMenu, hd, &pointing(panels::Action::Page(orbiters_n4n0_core::menu::Target::Music)), Some((Zone::QmRight, 2, false)))?;
+    scene("orbit-qm-picture", out, Around::QuickMenu, hd, &pointing(world), Some((Zone::QmLowerRight, 0, false)))?;
     // N4N0's menu in front of the Quick Menu.
     for (tag, client) in [("orbit-takeover", hd), ("orbit-takeover-1080", vec2(1920.0, 1080.0))] {
         let (w, h) = (client.x as u32, client.y as u32);

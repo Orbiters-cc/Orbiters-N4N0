@@ -16,6 +16,7 @@ pub mod input;
 pub mod media;
 pub mod menu_host;
 mod mirror;
+mod pointer_log;
 pub mod platform;
 mod qr;
 mod runtime;

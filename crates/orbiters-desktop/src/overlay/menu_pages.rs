@@ -398,10 +398,23 @@ fn samples() -> Vec<(ScreenPage, Menu, Option<usize>, Option<usize>)> {
     let mut home = simple();
     home.fast_walk = true;
     home.heard = Some("Done, hoodie on. Now go find your friends.".into());
+    // A screen of versions 10 to 15 keeps its Home; from version 16 it has Stay here.
+    let mut stay = home.clone();
+    stay.on_screen = true;
+    stay.pages = Pages::ALL;
+    home.pages = Pages::TwoPictures;
+    let hovered_stay = layout::cached(ScreenPage::HomeSimpleStay).elements.iter().position(|e| e.target == Target::StayHere);
+    out.push((ScreenPage::HomeSimpleStay, stay, hovered_stay, None));
     out.push((ScreenPage::HomeSimple, home, Some(1), None));
     let mut quiet = simple();
     quiet.media = None;
     quiet.listening = true;
+    let mut pinned = quiet.clone();
+    pinned.on_screen = true;
+    pinned.pages = Pages::ALL;
+    pinned.pinned = true;
+    quiet.pages = Pages::TwoPictures;
+    out.push((ScreenPage::HomeQuietStay, pinned, Some(0), None));
     out.push((ScreenPage::HomeQuiet, quiet, Some(0), None));
     let mut more = simple();
     more.press(Target::More);

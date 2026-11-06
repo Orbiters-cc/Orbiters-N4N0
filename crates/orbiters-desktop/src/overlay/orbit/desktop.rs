@@ -127,12 +127,9 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
                     last_look = Some(turn);
                     let client_size = client_size(window);
                     let found = c.look(window, client_size);
-                    if let Some((found, tint)) = found {
+                    if let Some(found) = found {
                         frames_seen.count(turn);
                         watcher.frame(found, turn);
-                        if found == Some(Around::Wheel) {
-                            panels.set_tint(tint);
-                        }
                     }
                 }
             }
@@ -462,7 +459,7 @@ impl Capture {
     }
 
     /// The newest frame's look: `None` when no new frame came. The window's title bar and borders are in the frame, its client area counted from its own corner.
-    fn look(&mut self, window: HWND, client: Vec2) -> Option<(Option<Around>, [u8; 3])> {
+    fn look(&mut self, window: HWND, client: Vec2) -> Option<Option<Around>> {
         let mut newest = None;
         while let Ok(frame) = self.pool.TryGetNextFrame() {
             newest = Some(frame);
@@ -508,8 +505,7 @@ impl Capture {
             let (x0, y0, width, height, stride) = read[i]?;
             Some(Part { x0, y0, width, height, stride, bgra: &self.buffers[i] })
         };
-        let (wheel, row) = (part(0)?, part(1)?);
-        Some((detect::look(&wheel, &row, client), detect::wheel_color(&wheel, client)))
+        Some(detect::look(&part(0)?, &part(1)?, client))
     }
 
     fn staging_for(&mut self, i: usize, width: u32, height: u32) -> Option<ID3D11Texture2D> {

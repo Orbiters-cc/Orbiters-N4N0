@@ -275,7 +275,7 @@ pub(super) fn vr_shots(out: &Path, refs: &Path) -> anyhow::Result<()> {
             let u = (p.to_pos2() - qc) / unit;
             if parts.iter().any(|(a, b, c, d)| u.x >= *a && u.x <= *c && u.y >= *b && u.y <= *d) { 1.0 } else { 0.0 }
         });
-        let facts = Facts { recent: recent(), timer: 3, n4n0: true, desktop: false, tint: Some([7, 55, 58]), vr_close: true, music: Some(("The Weeknd - Moth to a Flame".into(), true)), can_call: true, can_states: true, can_light: true, ..Default::default() };
+        let facts = Facts { recent: recent(), timer: 3, n4n0: true, desktop: false, vr_close: true, music: Some(("The Weeknd - Moth to a Flame".into(), true)), can_call: true, can_states: true, can_light: true, ..Default::default() };
         // The wheel on a hand, where a person looks at it; the other hand's laser on its cells.
         let grip = space::from_axes([1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0], [0.03, 1.56, -0.40]);
         let plane = vr::wheel_plane(&grip, &head, 1.0).expect("a plane");
@@ -380,7 +380,7 @@ pub(super) fn shots(out: &Path) -> anyhow::Result<()> {
     use orbiters_n4n0_core::menu::{PhotoMode, Target};
     use panels::{Action, Sheet};
     let hd = vec2(1280.0, 720.0);
-    let idle = Facts { recent: recent(), timer: 3, n4n0: true, desktop: true, tint: Some([7, 55, 58]), music: Some(("The Weeknd - Moth to a Flame".into(), true)), ..Default::default() };
+    let idle = Facts { recent: recent(), timer: 3, n4n0: true, desktop: true, music: Some(("The Weeknd - Moth to a Flame".into(), true)), ..Default::default() };
     let hint = Some(("Hold Left Alt to use this ring", "Your mouse then points here instead of at VRChat's wheel."));
     let empty = Facts { recent: Vec::new(), music: None, ..idle.clone() };
     let busy = Facts { recording: true, recording_seconds: Some(83), capture_busy: true, reconstructing: Some(0.42), waiting: 2, ..idle.clone() };

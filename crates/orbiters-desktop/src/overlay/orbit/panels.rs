@@ -2,41 +2,45 @@
 //! desktop's windows and the headset's overlays draw and hit the same things. [`items`] says where everything is and [`paint`] draws it: nothing else decides a place, so what
 //! the pointer hits is what is drawn.
 //!
-//! **VRChat's own look** ([`look`]): the colours are sampled from its real frames, tile edges and teal icons as its Quick Menu has them, the ring in the wheel's own radial
-//! fade and bright rim. The app's mint is kept for what is under way (a countdown, a filled state), never to favour one feature over another.
+//! **Orbiters' own look** ([`look`], Enzo: "the UI shouldn't look exactly the same as the VRChat UI, that could even be a problem [...] it should just not look too much out of place [...]
+//! Ideally it would fit the Orbiters design system and look a bit more modern than the VRChat default UI"): its filled surfaces with no outlines, its radii and line icons, its mint for
+//! what is pointed at, chosen or under way, its mark where it speaks for itself. What it takes from VRChat is scale, placement, density and a cool dark temperature, so that it sits
+//! well beside it without being taken for a part of it.
 //!
 //! **For someone who has never heard of any of this:** each thing says what it does in its own words, and [`caption`] says in a sentence what is pointed at, near it. What
 //! cannot work here is not offered ([`Facts`]' `can_*`): no dead pages.
 
 use super::zones::{self, Ring, Zone};
 use egui::epaint::{Mesh, RectShape, Vertex, WHITE_UV};
-use egui::{pos2, vec2, Align2, Color32, FontId, Painter, Pos2, Rect, Shape, Stroke, StrokeKind, TextureId, Vec2};
+use egui::{pos2, vec2, Align2, Color32, FontId, Painter, Pos2, Rect, Shape, Stroke, TextureId, Vec2};
 use orbiters_n4n0_core::menu::{PhotoMode, Target};
 use orbiters_ui::theme::{self, weight};
 use orbiters_ui::{icons, widgets};
 use std::path::PathBuf;
 
-/// VRChat's colours, sampled from real frames of its Quick Menu and wheel (2026-11-06).
+/// Orbiters' colours, at a cool dark temperature that sits beside VRChat's teal without copying it.
 pub mod look {
     use egui::Color32;
-    /// Its panels' fill.
-    pub const PANEL: Color32 = Color32::from_rgba_premultiplied(14, 19, 25, 246);
-    /// Its wing's header band.
-    pub const HEADER: Color32 = Color32::from_rgb(26, 31, 40);
-    /// Its tiles.
-    pub const TILE: Color32 = Color32::from_rgb(22, 47, 53);
-    /// Its tiles' edge.
-    pub const EDGE: Color32 = Color32::from_rgb(38, 82, 90);
-    /// Its teal: icons, titles, a hovered edge.
-    pub const TEAL: Color32 = Color32::from_rgb(52, 185, 205);
-    /// A selected tab.
-    pub const SELECTED: Color32 = Color32::from_rgb(0, 132, 139);
-    /// Its labels.
-    pub const LABEL: Color32 = Color32::from_rgb(232, 244, 246);
-    pub const MUTED: Color32 = Color32::from_rgb(140, 176, 184);
-    /// The wheel's slice colour, when it could not be read.
-    pub const WHEEL: [u8; 3] = [7, 55, 58];
-    pub const RADIUS: f32 = 6.0;
+    /// A panel's fill: Orbiters' ink, a little cool.
+    pub const PANEL: Color32 = Color32::from_rgba_premultiplied(15, 16, 20, 248);
+    pub const OPAQUE: Color32 = Color32::from_rgb(15, 16, 20);
+    /// A band at a panel's head.
+    pub const HEADER: Color32 = Color32::from_rgb(22, 24, 29);
+    /// A tile.
+    pub const TILE: Color32 = Color32::from_rgb(31, 33, 39);
+    pub const TILE_HOVER: Color32 = Color32::from_rgb(46, 49, 57);
+    pub const TILE_DOWN: Color32 = Color32::from_rgb(58, 62, 72);
+    /// What is pointed at, chosen, or under way: the app's mint.
+    pub const ACCENT: Color32 = orbiters_ui::theme::ACCENT;
+    pub const ON_ACCENT: Color32 = orbiters_ui::theme::ON_ACCENT;
+    pub const LABEL: Color32 = orbiters_ui::theme::FG;
+    pub const MUTED: Color32 = orbiters_ui::theme::FG_2;
+    /// A cell of the ring, near the wheel and at its outer edge.
+    pub const CELL_NEAR: Color32 = Color32::from_rgb(38, 41, 48);
+    pub const CELL_FAR: Color32 = Color32::from_rgb(22, 24, 29);
+    /// A panel's corners, as the app's cards and tiles have them.
+    pub const RADIUS: f32 = orbiters_ui::theme::CARD_RADIUS * 0.8;
+    pub const TILE_RADIUS: f32 = orbiters_ui::theme::TILE_RADIUS * 0.8;
 }
 
 /// What pressing something does.
@@ -127,8 +131,6 @@ pub struct Facts {
     pub art: Option<TextureId>,
     /// A 3D picture's timer, in seconds.
     pub timer: u32,
-    /// VRChat's wheel's own colour (RGB), when it was read: the ring takes after it.
-    pub tint: Option<[u8; 3]>,
     /// What the caption says with nothing pointed at (a key to hold).
     pub hint: Option<(&'static str, &'static str)>,
     /// What is pointed at.
@@ -196,7 +198,7 @@ pub fn items(zone: Zone, size: Vec2, facts: &Facts) -> Vec<Item> {
         Zone::WheelWorlds => cell(Action::Worlds, icons::GLOBE_HEMISPHERE_WEST, "Worlds in 3D", true),
         Zone::WheelYouTube => cell(Action::Page(Target::YouTube), icons::YOUTUBE_LOGO, "YouTube", false),
         Zone::WheelPlaying => vec![Item { action: Action::PlayPause, rect: whole, look: Look::Playing }],
-        Zone::WheelAll => cell(Action::All, icons::DOTS_THREE, "All tools", false),
+        Zone::WheelAll => cell(Action::All, icons::N4N0_MARK, "All tools", false),
         Zone::WheelInstances => cell(Action::Page(Target::Instances), icons::CLOCK, "Instances", false),
         Zone::WheelPictures => cell(Action::Pictures, icons::CUBE, "3D pictures", false),
         Zone::BloomPeople => vec![Item { action: Action::Picture(PhotoMode::People), rect: whole, look: Look::Picture(PhotoMode::People) }],
@@ -328,7 +330,7 @@ pub fn hit(items: &[Item], p: Pos2) -> Option<usize> {
 /// What the caption says of what is pointed at, in words for someone who has never seen any of this: a title and what it does.
 pub fn caption(action: Action, facts: &Facts) -> Option<(String, String)> {
     let (a, b): (String, String) = match action {
-        Action::Worlds => ("Worlds in 3D".into(), "Search any world. Those with a 3D capture, you can walk in before going.".into()),
+        Action::Worlds => ("Worlds in 3D".into(), "Search any world. Walk in those with a 3D capture.".into()),
         Action::Picture(mode) => {
             if let Some(s) = facts.countdown {
                 (format!("3D picture in {s}"), "VRChat's camera opens, then flies around by itself.".into())
@@ -455,11 +457,14 @@ fn shaped(zone: Zone, rect: Rect) -> Shaped {
     }
 }
 
-/// A cell in the wheel's own material: its slice colour fading outward as VRChat's does, more of it toward the wheel. `lift` lightens it (under the pointer).
-fn ring_fill(p: &Painter, ring: Ring, center: Pos2, tint: [u8; 3], lift: f32) {
-    let base = Color32::from_rgb(tint[0], tint[1], tint[2]);
-    let (near, far) = (theme::mix(base, Color32::from_rgb(40, 200, 205), 0.14 + lift * 0.5), theme::mix(base, Color32::from_rgb(40, 200, 205), lift * 0.42));
-    let far = theme::mix(far, Color32::BLACK, 0.12 * (1.0 - lift));
+/// A cell of the ring: Orbiters' surface, a little lighter toward the wheel. `lift` takes it toward the accent (under the pointer).
+fn ring_fill(p: &Painter, ring: Ring, center: Pos2, lift: f32) {
+    let toward = |c: Color32| theme::mix(c, look::ACCENT, lift * 0.42);
+    let (near, far) = (toward(look::CELL_NEAR), toward(look::CELL_FAR));
+    ring_mesh(p, ring, center, near, far);
+}
+
+fn ring_mesh(p: &Painter, ring: Ring, center: Pos2, near: Color32, far: Color32) {
     let mut mesh = Mesh::default();
     let (a0, a1) = (ring.from - 2.0, ring.to + 2.0);
     let (steps_a, steps_r) = (((a1 - a0) / 3.0) as u32 + 1, 6u32);
@@ -481,13 +486,14 @@ fn ring_fill(p: &Painter, ring: Ring, center: Pos2, tint: [u8; 3], lift: f32) {
     p.add(Shape::mesh(mesh));
 }
 
-/// The bright line VRChat's wheel has at its rim, along a cell's outer edge.
-fn ring_rim(p: &Painter, ring: Ring, center: Pos2, tint: [u8; 3], strong: bool) {
-    let base = Color32::from_rgb(tint[0], tint[1], tint[2]);
-    let color = theme::mix(base, Color32::from_rgb(120, 225, 230), if strong { 0.95 } else { 0.42 });
+/// The accent along a cell's outer edge, under the pointer.
+fn ring_rim(p: &Painter, ring: Ring, center: Pos2, on: bool) {
+    if !on {
+        return;
+    }
     let steps = 24;
-    let line: Vec<Pos2> = (0..=steps).map(|i| center + zones::polar(ring.outer - 1.2, ring.from + (ring.to - ring.from) * i as f32 / steps as f32)).collect();
-    p.add(Shape::line(line, Stroke::new(if strong { 2.2 } else { 1.6 }, color)));
+    let line: Vec<Pos2> = (0..=steps).map(|i| center + zones::polar(ring.outer - 2.0, ring.from + (ring.to - ring.from) * i as f32 / steps as f32)).collect();
+    p.add(Shape::line(line, Stroke::new(3.0, look::ACCENT)));
 }
 
 /// An arc along a cell's outer edge, for what is under way: `fraction` of the way across it.
@@ -511,10 +517,6 @@ fn cell_edge(p: &Painter, ring: Ring, center: Pos2, width: f32, color: Color32) 
     p.add(Shape::closed_line(line, Stroke::new(width, color)));
 }
 
-fn tint_of(facts: &Facts) -> [u8; 3] {
-    facts.tint.unwrap_or(look::WHEEL)
-}
-
 /// Draws a part (in units, its corner at the painter's origin): its fill and everything on it.
 pub fn paint(p: &Painter, zone: Zone, size: Vec2, facts: &Facts, hover: Option<usize>, pressed: Option<usize>) {
     let panel = Rect::from_min_size(pos2(0.0, 0.0), size);
@@ -522,38 +524,32 @@ pub fn paint(p: &Painter, zone: Zone, size: Vec2, facts: &Facts, hover: Option<u
         Zone::WheelVeil => {
             // A dark veil over VRChat's wheel, and whose turn it is at its hub.
             let c = panel.center();
-            p.circle_filled(c, size.x / 2.0, Color32::from_rgba_premultiplied(5, 12, 14, 178));
+            p.circle_filled(c, size.x / 2.0, Color32::from_rgba_premultiplied(7, 8, 10, 184));
             widgets::icon(p, c - vec2(0.0, 6.0), icons::N4N0_MARK, 30.0, look::LABEL);
             text(p, c + vec2(0.0, 18.0), Align2::CENTER_CENTER, "Pointing here", 10.0, weight::SEMIBOLD, look::LABEL);
             return;
         }
         Zone::QmWing => {
             p.rect_filled(panel, theme::radius(look::RADIUS), look::PANEL);
-            let header = Rect::from_min_size(pos2(0.0, 0.0), vec2(size.x, 36.0));
-            p.rect_filled(header, egui::CornerRadius { nw: look::RADIUS as u8, ne: look::RADIUS as u8, sw: 0, se: 0 }, look::HEADER);
-            widgets::icon(p, pos2(19.0, 18.0), icons::LIST, 20.0, look::TEAL);
-            bold(p, pos2(36.0, 18.0), Align2::LEFT_CENTER, "Orbiters", 15.0, look::LABEL);
+            widgets::icon(p, pos2(21.0, 18.0), icons::N4N0_MARK, 18.0, look::LABEL);
+            text(p, pos2(36.0, 18.0), Align2::LEFT_CENTER, "Orbiters", 14.0, weight::SEMIBOLD, look::LABEL);
             if facts.recording {
                 // Only while it runs: what it does, in the header.
                 p.circle_filled(pos2(size.x - 52.0, 18.0), 4.5, theme::REC);
                 text(p, pos2(size.x - 8.0, 18.0), Align2::RIGHT_CENTER, &clock(facts.recording_seconds.unwrap_or(0)), 11.5, weight::SEMIBOLD, look::LABEL);
             } else if let Some(done) = facts.reconstructing {
-                text(p, pos2(size.x - 8.0, 18.0), Align2::RIGHT_CENTER, &format!("3D {:.0}%", done * 100.0), 11.5, weight::SEMIBOLD, look::TEAL);
-            } else if !facts.vr_close {
-                widgets::icon(p, pos2(size.x - 18.0, 18.0), icons::N4N0_MARK, 15.0, look::TEAL);
+                text(p, pos2(size.x - 8.0, 18.0), Align2::RIGHT_CENTER, &format!("3D {:.0}%", done * 100.0), 11.5, weight::SEMIBOLD, look::ACCENT);
             }
         }
         Zone::SheetBack => {
-            p.rect_filled(panel, theme::radius(look::RADIUS + 2.0), Color32::from_rgb(14, 19, 25));
-            let head = Rect::from_min_size(pos2(0.0, 0.0), vec2(size.x, 48.0));
-            p.rect_filled(head, egui::CornerRadius { nw: (look::RADIUS + 2.0) as u8, ne: (look::RADIUS + 2.0) as u8, sw: 0, se: 0 }, look::HEADER);
-            widgets::icon(p, pos2(26.0, 24.0), icons::LIST, 22.0, look::TEAL);
-            bold(p, pos2(46.0, 24.0), Align2::LEFT_CENTER, "Orbiters", 15.0, look::TEAL);
-            bold(p, pos2(122.0, 24.0), Align2::LEFT_CENTER, &facts.sheet_title, 18.0, look::LABEL);
+            p.rect_filled(panel, theme::radius(look::RADIUS + 2.0), look::OPAQUE);
+            widgets::icon(p, pos2(28.0, 24.0), icons::N4N0_MARK, 20.0, look::LABEL);
+            text(p, pos2(46.0, 24.0), Align2::LEFT_CENTER, "Orbiters", 14.0, weight::SEMIBOLD, look::MUTED);
+            text(p, pos2(112.0, 24.0), Align2::LEFT_CENTER, &facts.sheet_title, 18.0, weight::SEMIBOLD, look::LABEL);
             // The foot: what plays, whichever page shows.
             let y = size.y - 24.0;
             if let Some((title, playing)) = &facts.music {
-                widgets::icon_fill(p, pos2(26.0, y), icons::MUSIC_NOTES, 18.0, look::TEAL);
+                widgets::icon(p, pos2(26.0, y), icons::MUSIC_NOTES, 18.0, look::ACCENT);
                 let font = theme::font(13.0, weight::SEMIBOLD);
                 let name = fit(p, title, &font, size.x - 200.0);
                 p.text(pos2(46.0, y), Align2::LEFT_CENTER, name, font, if *playing { look::LABEL } else { look::MUTED });
@@ -569,25 +565,24 @@ pub fn paint(p: &Painter, zone: Zone, size: Vec2, facts: &Facts, hover: Option<u
 /// Draws a sheet's page (in N4N0's page's units): native to these menus, in VRChat's manner.
 pub fn paint_sheet(p: &Painter, sheet: Sheet, facts: &Facts, hover: Option<usize>, pressed: Option<usize>) {
     let page = Rect::from_min_size(pos2(0.0, 0.0), vec2(1024.0, 576.0));
-    p.rect_filled(page, 0.0, Color32::from_rgb(14, 19, 25));
+    p.rect_filled(page, 0.0, look::OPAQUE);
     for (i, item) in sheet_items(sheet, facts).iter().enumerate() {
         draw(p, Zone::Takeover, item, facts, hover == Some(i), pressed == Some(i));
     }
 }
 
-/// A tile as VRChat's: filled, edged, brighter under the pointer.
+/// A tile: filled, no edge, lighter under the pointer, the accent when chosen.
 fn tile_back(p: &Painter, rect: Rect, hovered: bool, pressed: bool, selected: bool) {
     let fill = if selected {
-        look::SELECTED
+        look::ACCENT
     } else if pressed {
-        theme::mix(look::TILE, look::TEAL, 0.5)
+        look::TILE_DOWN
     } else if hovered {
-        theme::mix(look::TILE, look::TEAL, 0.25)
+        look::TILE_HOVER
     } else {
         look::TILE
     };
-    p.rect_filled(rect, theme::radius(look::RADIUS), fill);
-    p.rect_stroke(rect, theme::radius(look::RADIUS), Stroke::new(1.5, if hovered || selected { look::TEAL } else { look::EDGE }), StrokeKind::Inside);
+    p.rect_filled(rect, theme::radius(look::TILE_RADIUS), fill);
 }
 
 fn is_selected(item: &Item, facts: &Facts) -> bool {
@@ -602,40 +597,45 @@ fn is_selected(item: &Item, facts: &Facts) -> bool {
 fn draw(p: &Painter, zone: Zone, item: &Item, facts: &Facts, hovered: bool, pressed: bool) {
     let rect = item.rect;
     let shape = shaped(zone, rect);
-    let tint = tint_of(facts);
     match item.look {
         Look::Blank => {}
         Look::Cell { icon, label, badge: has_badge } => {
             let (ring, center) = shape.ring.expect("a cell is on a ring");
-            ring_fill(p, ring, center, tint, if pressed { 0.65 } else if hovered { 0.38 } else { 0.0 });
-            ring_rim(p, ring, center, tint, hovered);
+            ring_fill(p, ring, center, if pressed { 0.65 } else if hovered { 0.38 } else { 0.0 });
+            ring_rim(p, ring, center, hovered);
             let size = 36.0;
             let top = shape.at.y - (size + 4.0 + 15.0) / 2.0;
             let at = pos2(shape.at.x, top + size / 2.0);
             if icon == icons::N4N0_MARK {
                 widgets::icon(p, at, icon, size, look::LABEL);
             } else {
-                widgets::icon_fill(p, at, icon, size, look::LABEL);
+                widgets::icon(p, at, icon, size, look::LABEL);
             }
             if has_badge {
-                badge(p, at, size, look::TEAL, Color32::from_rgb(4, 24, 28));
+                badge(p, at, size, look::ACCENT, look::ON_ACCENT);
             }
             bold(p, pos2(shape.at.x, top + size + 4.0 + 7.5), Align2::CENTER_CENTER, label, 14.0, look::LABEL);
         }
         Look::Tile { icon, label, badge: has_badge } => {
             let selected = is_selected(item, facts);
             tile_back(p, rect, hovered, pressed, selected);
-            let ink = if selected { look::LABEL } else { look::TEAL };
+            let ink = if selected {
+                look::ON_ACCENT
+            } else if hovered {
+                look::ACCENT
+            } else {
+                look::LABEL
+            };
             let size = (rect.height() * 0.42).clamp(18.0, 32.0);
             let top = rect.center().y - (size + 3.0 + 11.0) / 2.0;
             let at = pos2(rect.center().x, top + size / 2.0);
             if icon == icons::N4N0_MARK {
                 widgets::icon(p, at, icon, size, ink);
             } else {
-                widgets::icon_fill(p, at, icon, size, ink);
+                widgets::icon(p, at, icon, size, ink);
             }
             if has_badge {
-                badge(p, at, size, look::TEAL, Color32::from_rgb(4, 24, 28));
+                badge(p, at, size, look::ACCENT, look::ON_ACCENT);
             }
             let font_size = {
                 let mut s = 11.0;
@@ -644,19 +644,17 @@ fn draw(p: &Painter, zone: Zone, item: &Item, facts: &Facts, hovered: bool, pres
                 }
                 s
             };
-            bold(p, pos2(rect.center().x, top + size + 3.0 + 5.5), Align2::CENTER_CENTER, label, font_size, look::LABEL);
+            let words = theme::font(font_size, weight::SEMIBOLD);
+            p.text(pos2(rect.center().x, top + size + 3.0 + 5.5), Align2::CENTER_CENTER, label, words, if selected { look::ON_ACCENT } else { look::LABEL });
         }
         Look::Wide { icon, label, line, badge: has_badge } => {
             tile_back(p, rect, hovered, pressed, false);
             let size = 38.0;
             let at = pos2(rect.left() + 36.0, rect.center().y);
-            if icon == icons::N4N0_MARK {
-                widgets::icon(p, at, icon, size - 8.0, look::TEAL);
-            } else {
-                widgets::icon_fill(p, at, icon, size, look::TEAL);
-            }
+            let ink = if hovered { look::ACCENT } else { look::LABEL };
+            widgets::icon(p, at, icon, if icon == icons::N4N0_MARK { size - 8.0 } else { size }, ink);
             if has_badge {
-                badge(p, at, size, look::TEAL, Color32::from_rgb(4, 24, 28));
+                badge(p, at, size, look::ACCENT, look::ON_ACCENT);
             }
             let x = rect.left() + 66.0;
             let room = rect.right() - x - 8.0;
@@ -674,17 +672,17 @@ fn draw(p: &Painter, zone: Zone, item: &Item, facts: &Facts, hovered: bool, pres
                 p.text(pos2(x, rect.center().y + 20.0), Align2::LEFT_CENTER, two, small, look::MUTED);
             }
         }
-        Look::Picture(mode) => picture_button(p, zone, shape, rect, mode, facts, hovered, pressed, tint),
+        Look::Picture(mode) => picture_button(p, zone, shape, rect, mode, facts, hovered, pressed),
         Look::Record => {
             let label = if facts.recording { "Stop" } else { "Record" };
             let dim = facts.capture_busy && !facts.recording;
             if let Some((ring, center)) = shape.ring {
                 if facts.recording {
-                    ring_fill(p, ring, center, [120, 28, 44], if hovered { 0.1 } else { 0.0 });
+                    ring_mesh(p, ring, center, theme::mix(theme::REC, Color32::BLACK, 0.35), theme::mix(theme::REC, Color32::BLACK, 0.6));
                 } else {
-                    ring_fill(p, ring, center, tint, if pressed { 0.65 } else if hovered { 0.38 } else { 0.0 });
+                    ring_fill(p, ring, center, if pressed { 0.65 } else if hovered { 0.38 } else { 0.0 });
                 }
-                ring_rim(p, ring, center, tint, hovered);
+                ring_rim(p, ring, center, hovered);
             } else {
                 tile_back(p, rect, hovered, pressed, false);
             }
@@ -709,21 +707,21 @@ fn draw(p: &Painter, zone: Zone, item: &Item, facts: &Facts, hovered: bool, pres
             let (name, playing) = facts.music.clone().unwrap_or_default();
             let glyph = if playing { icons::PAUSE } else if none { icons::MUSIC_NOTES } else { icons::PLAY };
             if let Some((ring, center)) = shape.ring {
-                ring_fill(p, ring, center, tint, if pressed { 0.65 } else if hovered && !none { 0.38 } else { 0.0 });
+                ring_fill(p, ring, center, if pressed { 0.65 } else if hovered && !none { 0.38 } else { 0.0 });
                 if let (Some(id), false) = (facts.art, none) {
                     p.add(RectShape::filled(rect, 0.0, Color32::from_rgb(120, 130, 132)).with_texture(id, cover_uv(rect.size())));
                     p.rect_filled(rect, 0.0, Color32::from_black_alpha(90));
-                    cell_edge(p, ring, center, 3.0, Color32::from_rgb(tint[0], tint[1], tint[2]));
+                    cell_edge(p, ring, center, 3.0, look::CELL_FAR);
                 }
-                ring_rim(p, ring, center, tint, hovered);
+                ring_rim(p, ring, center, hovered);
                 let ink = if none { look::MUTED } else { look::LABEL };
                 let size = 26.0;
-                widgets::icon_fill(p, shape.at - vec2(0.0, 22.0), glyph, size, ink);
+                widgets::icon(p, shape.at - vec2(0.0, 22.0), glyph, size, ink);
                 let font = theme::font(12.5, weight::BOLD);
                 if none {
                     p.text(shape.at + vec2(0.0, 5.0), Align2::CENTER_CENTER, "Nothing playing", font, look::MUTED);
                 } else {
-                    let (one, two) = two_lines(p, &name, &font, shape.room * 0.8);
+                    let (one, two) = two_lines(p, &name, &font, shape.room * 0.66);
                     p.text(shape.at + vec2(0.0, 5.0), Align2::CENTER_CENTER, one, font.clone(), ink);
                     if let Some(two) = two {
                         p.text(shape.at + vec2(0.0, 21.0), Align2::CENTER_CENTER, two, font, ink);
@@ -736,9 +734,9 @@ fn draw(p: &Painter, zone: Zone, item: &Item, facts: &Facts, hovered: bool, pres
                 if let (Some(id), false) = (facts.art, none) {
                     p.add(RectShape::filled(art, theme::radius(4.0), Color32::WHITE).with_texture(id, cover_uv(art.size())));
                 } else {
-                    p.rect_filled(art, theme::radius(4.0), theme::mix(look::TILE, Color32::BLACK, 0.3));
+                    p.rect_filled(art, theme::radius(4.0), look::HEADER);
                 }
-                widgets::icon_fill(p, art.center(), glyph, side * 0.5, if none { look::MUTED } else { look::LABEL });
+                widgets::icon(p, art.center(), glyph, side * 0.5, if none { look::MUTED } else { look::LABEL });
                 let x = art.right() + 7.0;
                 let room = rect.right() - x - 5.0;
                 let font = theme::font(10.5, weight::BOLD);
@@ -755,35 +753,43 @@ fn draw(p: &Painter, zone: Zone, item: &Item, facts: &Facts, hovered: bool, pres
         }
         Look::Transport(glyph) => {
             if let Some((ring, center)) = shape.ring {
-                ring_fill(p, ring, center, tint, if pressed { 0.65 } else if hovered { 0.38 } else { 0.0 });
-                ring_rim(p, ring, center, tint, hovered);
-                widgets::icon_fill(p, shape.at, glyph, 24.0, look::LABEL);
+                ring_fill(p, ring, center, if pressed { 0.65 } else if hovered { 0.38 } else { 0.0 });
+                ring_rim(p, ring, center, hovered);
+                widgets::icon(p, shape.at, glyph, 24.0, look::LABEL);
             } else {
-                p.circle_filled(rect.center(), rect.width() / 2.0, if hovered { theme::mix(look::TILE, look::TEAL, 0.3) } else { look::TILE });
-                widgets::icon_fill(p, rect.center(), glyph, rect.width() * 0.5, look::LABEL);
+                p.circle_filled(rect.center(), rect.width() / 2.0, if hovered { look::TILE_HOVER } else { look::TILE });
+                widgets::icon(p, rect.center(), glyph, rect.width() * 0.5, look::LABEL);
             }
         }
         Look::Talk => {
             let on = pressed && facts.n4n0;
             tile_back(p, rect, hovered, false, on);
-            let color = if on { look::LABEL } else if facts.n4n0 { look::TEAL } else { theme::FG_4 };
+            let color = if on {
+                look::ON_ACCENT
+            } else if !facts.n4n0 {
+                theme::FG_4
+            } else if hovered {
+                look::ACCENT
+            } else {
+                look::LABEL
+            };
             let size = (rect.height() * 0.42).clamp(18.0, 32.0);
             let top = rect.center().y - (size + 3.0 + 11.0) / 2.0;
-            widgets::icon_fill(p, pos2(rect.center().x, top + size / 2.0), icons::MICROPHONE, size, color);
-            bold(p, pos2(rect.center().x, top + size + 3.0 + 5.5), Align2::CENTER_CENTER, if on { "Listening" } else { "Ask N4N0" }, 11.0, if facts.n4n0 { look::LABEL } else { theme::FG_4 });
+            widgets::icon(p, pos2(rect.center().x, top + size / 2.0), icons::MICROPHONE, size, color);
+            p.text(pos2(rect.center().x, top + size + 3.0 + 5.5), Align2::CENTER_CENTER, if on { "Listening" } else { "Ask N4N0" }, theme::font(11.0, weight::SEMIBOLD), if on { look::ON_ACCENT } else if facts.n4n0 { look::LABEL } else { theme::FG_4 });
         }
         Look::Close => {
-            p.circle_filled(rect.center(), rect.width() / 2.0, if hovered { theme::mix(look::TILE, look::TEAL, 0.35) } else { look::TILE });
+            p.circle_filled(rect.center(), rect.width() / 2.0, if hovered { look::TILE_HOVER } else { look::TILE });
             widgets::icon(p, rect.center(), icons::X, rect.width() * 0.55, look::LABEL);
         }
         Look::Caption => draw_caption(p, rect, facts),
-        Look::Capture(n) => draw_capture(p, shape, rect, n, facts, hovered, pressed, tint),
+        Look::Capture(n) => draw_capture(p, shape, rect, n, facts, hovered, pressed),
     }
 }
 
 /// A 3D picture's button: says "3D picture" on itself, a 3D badge on its icon, and what of. Under way, it is the countdown.
 #[allow(clippy::too_many_arguments)]
-fn picture_button(p: &Painter, _zone: Zone, shape: Shaped, rect: Rect, mode: PhotoMode, facts: &Facts, hovered: bool, pressed: bool, tint: [u8; 3]) {
+fn picture_button(p: &Painter, _zone: Zone, shape: Shaped, rect: Rect, mode: PhotoMode, facts: &Facts, hovered: bool, pressed: bool) {
     let mine = facts.picture_mode == Some(mode);
     let busy = facts.countdown.is_some() || facts.picture_flying;
     let lit = mine && busy;
@@ -793,8 +799,8 @@ fn picture_button(p: &Painter, _zone: Zone, shape: Shaped, rect: Rect, mode: Pho
             if lit {
                 p.rect_filled(rect, 0.0, theme::ACCENT);
             } else {
-                ring_fill(p, ring, center, tint, if pressed { 0.65 } else if hovered { 0.38 } else { 0.0 });
-                ring_rim(p, ring, center, tint, hovered);
+                ring_fill(p, ring, center, if pressed { 0.65 } else if hovered { 0.38 } else { 0.0 });
+                ring_rim(p, ring, center, hovered);
             }
         }
         None => {
@@ -821,7 +827,7 @@ fn picture_button(p: &Painter, _zone: Zone, shape: Shaped, rect: Rect, mode: Pho
             return;
         }
         if facts.picture_flying {
-            widgets::icon_fill(p, at - vec2(0.0, 11.0), icons::CUBE, if large { 44.0 } else { 26.0 }, ink);
+            widgets::icon(p, at - vec2(0.0, 11.0), icons::CUBE, if large { 44.0 } else { 26.0 }, ink);
             text(p, at + vec2(0.0, if large { 28.0 } else { 14.0 }), Align2::CENTER_CENTER, "Flying…", if large { 20.0 } else { 12.0 }, weight::SEMIBOLD, ink);
             return;
         }
@@ -830,22 +836,22 @@ fn picture_button(p: &Painter, _zone: Zone, shape: Shaped, rect: Rect, mode: Pho
     let (size, line, big, small) = if large { (54.0, 24.0, 19.0, 15.0) } else { (28.0, 13.5, 12.0, 10.5) };
     let top = at.y - (size + 4.0 + line * 2.0) / 2.0;
     let icon_at = pos2(at.x, top + size / 2.0);
-    widgets::icon_fill(p, icon_at, glyph, size, ink);
-    badge(p, icon_at, size, if dim { theme::INK_600 } else { look::TEAL }, Color32::from_rgb(4, 24, 28));
+    widgets::icon(p, icon_at, glyph, size, ink);
+    badge(p, icon_at, size, if dim { theme::INK_600 } else { look::ACCENT }, look::ON_ACCENT);
     bold(p, pos2(at.x, top + size + 4.0 + line / 2.0), Align2::CENTER_CENTER, "3D picture", big, label);
     text(p, pos2(at.x, top + size + 4.0 + line * 1.5), Align2::CENTER_CENTER, of, small, weight::SEMIBOLD, if lit || dim { label } else { look::MUTED });
 }
 
 /// A recent capture: a whole picture, its name and age under it; on the ring, its cell filled by it.
 #[allow(clippy::too_many_arguments)]
-fn draw_capture(p: &Painter, shape: Shaped, rect: Rect, n: usize, facts: &Facts, hovered: bool, pressed: bool, tint: [u8; 3]) {
+fn draw_capture(p: &Painter, shape: Shaped, rect: Rect, n: usize, facts: &Facts, hovered: bool, pressed: bool) {
     match shape.ring {
         Some((ring, center)) => {
-            ring_fill(p, ring, center, tint, if hovered { 0.38 } else { 0.0 });
+            ring_fill(p, ring, center, if hovered { 0.38 } else { 0.0 });
             let Some(recent) = facts.recent.get(n) else {
-                widgets::icon_fill(p, shape.at - vec2(0.0, 12.0), icons::CUBE, 24.0, look::MUTED);
+                widgets::icon(p, shape.at - vec2(0.0, 12.0), icons::CUBE, 24.0, look::MUTED);
                 text(p, shape.at + vec2(0.0, 14.0), Align2::CENTER_CENTER, "No captures", 11.0, weight::SEMIBOLD, look::MUTED);
-                ring_rim(p, ring, center, tint, hovered);
+                ring_rim(p, ring, center, hovered);
                 return;
             };
             if let Some(id) = recent.picture {
@@ -855,7 +861,7 @@ fn draw_capture(p: &Painter, shape: Shaped, rect: Rect, n: usize, facts: &Facts,
             let band = Rect::from_center_size(shape.at + vec2(0.0, 16.0), vec2(rect.width(), 22.0));
             p.rect_filled(band, 0.0, Color32::from_black_alpha(165));
             text(p, band.center(), Align2::CENTER_CENTER, "Latest", 11.0, weight::BOLD, look::LABEL);
-            cell_edge(p, ring, center, 4.0, if hovered { look::TEAL } else { Color32::from_rgb(tint[0], tint[1], tint[2]) });
+            cell_edge(p, ring, center, 4.0, if hovered { look::ACCENT } else { look::CELL_FAR });
             if let Some(done) = recent.progress {
                 progress_arc(p, ring, center, done, theme::ACCENT);
             }
@@ -869,8 +875,8 @@ fn draw_capture(p: &Painter, shape: Shaped, rect: Rect, n: usize, facts: &Facts,
                     p.add(RectShape::filled(picture, theme::radius(4.0), Color32::WHITE).with_texture(id, cover_uv(picture.size())));
                 }
                 None => {
-                    p.rect_filled(picture, theme::radius(4.0), theme::mix(look::TILE, Color32::BLACK, 0.3));
-                    widgets::icon_fill(p, picture.center(), icons::CUBE, picture.height() * 0.4, look::MUTED);
+                    p.rect_filled(picture, theme::radius(4.0), look::HEADER);
+                    widgets::icon(p, picture.center(), icons::CUBE, picture.height() * 0.4, look::MUTED);
                 }
             }
             let font = theme::font(14.0, weight::BOLD);
@@ -897,7 +903,6 @@ fn draw_caption(p: &Painter, rect: Rect, facts: &Facts) {
     let width = p.layout_no_wrap(first.clone(), big.clone(), Color32::WHITE).size().x.max(p.layout_no_wrap(second.clone(), small.clone(), Color32::WHITE).size().x) + 24.0;
     let pill = Rect::from_center_size(rect.center(), vec2(width, rect.height() - 8.0));
     p.rect_filled(pill, theme::radius(look::RADIUS + 2.0), look::PANEL);
-    p.rect_stroke(pill, theme::radius(look::RADIUS + 2.0), Stroke::new(1.0, look::EDGE), StrokeKind::Inside);
     p.text(pill.center() - vec2(0.0, 9.0), Align2::CENTER_CENTER, first, big, look::LABEL);
     p.text(pill.center() + vec2(0.0, 9.0), Align2::CENTER_CENTER, second, small, look::MUTED);
 }

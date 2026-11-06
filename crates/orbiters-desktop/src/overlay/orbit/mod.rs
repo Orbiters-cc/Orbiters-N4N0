@@ -24,15 +24,14 @@ use crate::backend::Ctl;
 use crate::ipc::N4n0Command;
 use crate::menu_host::MenuHost;
 use crate::state::{CaptureState, Snapshot};
-use egui::{pos2, vec2, Color32, ColorImage, Pos2, TextureHandle, TextureId, TextureOptions, Vec2};
+use egui::{pos2, vec2, ColorImage, Pos2, TextureHandle, TextureId, TextureOptions, Vec2};
 use orbiters_core::settings::MenuLook;
 use orbiters_n4n0_core::menu::layout::{self, ScreenPage};
-use orbiters_n4n0_core::menu::theme::{Colors, Theme};
 use orbiters_n4n0_core::menu::{Page, Target};
 use panels::{Action, Facts, Item, Recent, Sheet};
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::{mpsc, OnceLock};
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
 use zones::{Around, Group, Placed, Zone};
 
@@ -41,14 +40,9 @@ pub fn wanted_on_desktop(snap: &Snapshot) -> bool {
     orbiters_core::osc::VRCHAT_RUNS_HERE && snap.vrchat.running && !snap.vrchat.remote && !snap.steamvr.running && snap.settings.orbit.any()
 }
 
-/// N4N0's pages in VRChat's colours, sampled from its Quick Menu: on a sheet here they read as another page of it. The app's mint stays on what is the main action.
+/// N4N0's pages in Orbiters' own look: the design system's, as everywhere else in the app.
 pub fn skin() -> &'static Skin {
-    static SKIN: OnceLock<Skin> = OnceLock::new();
-    SKIN.get_or_init(|| {
-        let base = Theme::MODERN.colors;
-        let colors = Colors { background: [14, 19, 25], surface: [22, 47, 53], text: [232, 244, 246], muted: [140, 176, 184], accent: [52, 185, 205], ..base };
-        Skin::new(&Theme { colors, ..Theme::MODERN }, orbiters_n4n0_core::menu::strings::Strings::english().clone())
-    })
+    Skin::english()
 }
 
 /// A part's appearing: a spring from nothing to its place, a little past it. Each turn moves the window or overlay and its alpha, no new picture.
@@ -455,7 +449,6 @@ impl Panels {
     pub fn set_open(&mut self, around: Option<Around>, places: Vec<Placed>, snap: &Snapshot) {
         if around != self.open {
             self.hidden = false;
-            self.facts.tint = None;
             self.facts.pointed = None;
             self.facts.sheet = None;
             self.release();
@@ -637,21 +630,10 @@ impl Panels {
             can_light: menu.light.is_some(),
             vr_close: self.sharp > 1.0,
             picture_mode: self.facts.picture_mode,
-            tint: self.facts.tint,
             hint: self.facts.hint,
             pointed: self.facts.pointed,
             sheet: self.facts.sheet,
             sheet_title: self.facts.sheet_title.clone(),
-        }
-    }
-
-    /// VRChat's wheel's colour as read from its window: the ring takes after it. Once for an opening, so that nothing flickers.
-    pub fn set_tint(&mut self, tint: [u8; 3]) {
-        if self.facts.tint.is_none() {
-            self.facts.tint = Some(tint);
-            for panel in &mut self.list {
-                panel.dirty = true;
-            }
         }
     }
 
@@ -1020,8 +1002,8 @@ impl Stage {
 fn type_hint(p: &egui::Painter) {
     use orbiters_ui::{icons, theme, widgets};
     let area = egui::Rect::from_min_max(pos2(0.0, KEYS_TOP), pos2(layout::WIDTH as f32, layout::HEIGHT as f32));
-    p.rect_filled(area, 0.0, Color32::from_rgb(14, 19, 25));
-    widgets::icon(p, area.center() - vec2(0.0, 26.0), icons::KEYBOARD, 56.0, panels::look::TEAL);
+    p.rect_filled(area, 0.0, panels::look::OPAQUE);
+    widgets::icon(p, area.center() - vec2(0.0, 26.0), icons::KEYBOARD, 56.0, panels::look::LABEL);
     p.text(area.center() + vec2(0.0, 24.0), egui::Align2::CENTER_CENTER, "Type on your keyboard", theme::font(22.0, theme::weight::BOLD), panels::look::LABEL);
     p.text(area.center() + vec2(0.0, 54.0), egui::Align2::CENTER_CENTER, "Enter searches, Esc goes back", theme::font(15.0, theme::weight::MEDIUM), panels::look::MUTED);
 }
@@ -1099,10 +1081,4 @@ mod tests {
         assert_eq!(ago(200_000), "2 d ago");
     }
 
-    #[test]
-    fn n4n0_s_pages_take_vrchat_s_colours_and_keep_the_rest() {
-        let s = skin();
-        assert_eq!(s.palette.card, Color32::from_rgb(14, 19, 25));
-        assert_eq!(s.palette.surface, Color32::from_rgb(22, 47, 53));
-    }
 }

@@ -1090,7 +1090,7 @@ fn orbit_settings(ui: &mut egui::Ui, snap: &Snapshot, orbit: &mut orbiters_core:
     let mut apply = false;
     let ways = [SegOption::new(MenuDisplay::AroundVrchat, "Around VRChat's menus"), SegOption::new(MenuDisplay::Floating, "Floating"), SegOption::new(MenuDisplay::AvatarScreen, "Avatar's screen")];
     let said = match orbit.display {
-        MenuDisplay::AroundVrchat => "Panels appear around VRChat's Action Menu wheel and Quick Menu as they open, and go when they close: 3D pictures, recording, recent captures, N4N0's pages. In desktop mode they are windows over VRChat's; hold Left Alt to point at them while the wheel has the mouse.",
+        MenuDisplay::AroundVrchat => "Panels appear around VRChat's Action Menu wheel and Quick Menu as they open, and go when they close: worlds in 3D, YouTube, previous instances, what plays, 3D pictures and all of N4N0's tools. In desktop mode they are windows over VRChat's; hold Left Alt to point at them while the wheel has the mouse.",
         MenuDisplay::Floating => "N4N0's menu floats before you in VR, opened by the watch on your wrist or its controller binding, even with an avatar that has N4N0's screen. No panels around VRChat's menus.",
         MenuDisplay::AvatarScreen => "N4N0's menu shows on your avatar's N4N0 screen when it has one, and floats before you when it does not. No panels around VRChat's menus.",
     };

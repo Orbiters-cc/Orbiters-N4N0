@@ -369,6 +369,17 @@ fn progress_arc(p: &Painter, ring: Ring, center: Pos2, fraction: f32, color: Col
     }
 }
 
+/// A line round a cell, a little inside its edge: a picture filling it keeps the cell's shape against any world.
+fn cell_edge(p: &Painter, ring: Ring, center: Pos2, width: f32, color: Color32) {
+    let inset = width / 2.0;
+    let (r0, r1) = (ring.inner + inset, ring.outer - inset);
+    let steps = 16;
+    let at = |r: f32, t: f32| center + zones::polar(r, ring.from + (ring.to - ring.from) * t);
+    let mut line: Vec<Pos2> = (0..=steps).map(|i| at(r1, i as f32 / steps as f32)).collect();
+    line.extend((0..=steps).rev().map(|i| at(r0, i as f32 / steps as f32)));
+    p.add(Shape::closed_line(line, Stroke::new(width, color)));
+}
+
 /// Draws a panel (in units, its corner at the painter's origin): its fill and everything on it.
 pub fn paint(p: &Painter, zone: Zone, size: Vec2, facts: &Facts, hover: Option<usize>, pressed: Option<usize>) {
     let panel = Rect::from_min_size(pos2(0.0, 0.0), size);
@@ -570,7 +581,8 @@ fn draw_capture(p: &Painter, shape: Shaped, rect: Rect, n: usize, facts: &Facts,
             } else {
                 widgets::icon(p, shape.at - vec2(0.0, 14.0), icons::CUBE, 26.0, theme::FG_4);
             }
-            let band = Rect::from_center_size(shape.at + vec2(0.0, 22.0), vec2(rect.width(), 30.0));
+            // Where the cell is widest: on the diagonal ones it narrows soon below its middle.
+            let band = Rect::from_center_size(shape.at + vec2(0.0, 7.0), vec2(rect.width(), 30.0));
             p.rect_filled(band, 0.0, theme::black(0.62));
             let font = theme::font(10.5, weight::SEMIBOLD);
             let name = fit(p, &recent.title, &font, shape.room);
@@ -578,6 +590,8 @@ fn draw_capture(p: &Painter, shape: Shaped, rect: Rect, n: usize, facts: &Facts,
             let font = theme::font(9.0, weight::REGULAR);
             let state = fit(p, &recent.state, &font, shape.room);
             p.text(band.center() + vec2(0.0, 6.5), Align2::CENTER_CENTER, state, font, theme::FG_2);
+            // Its edge in the ring's colour, the accent's under the pointer.
+            cell_edge(p, ring, center, 7.0, if hovered { theme::ACCENT } else { plain });
             if let Some(done) = recent.progress {
                 progress_arc(p, ring, center, done, theme::ACCENT);
             }

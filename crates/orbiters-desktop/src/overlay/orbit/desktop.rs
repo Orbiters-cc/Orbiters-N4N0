@@ -604,6 +604,8 @@ struct PanelWindow {
     shown: bool,
     at: POINT,
     alpha: u8,
+    /// New pixels are in its bitmap, not yet on the screen: `UpdateLayeredWindow` is what shows them, moved or not.
+    stale: bool,
 }
 
 impl PanelWindow {
@@ -635,7 +637,7 @@ impl PanelWindow {
                 }
             };
             SelectObject(dc, bitmap.into());
-            Ok(Self { hwnd, dc, bitmap, bits: bits.cast(), size: SIZE { cx: width as i32, cy: height as i32 }, shown: false, at: POINT::default(), alpha: 0 })
+            Ok(Self { hwnd, dc, bitmap, bits: bits.cast(), size: SIZE { cx: width as i32, cy: height as i32 }, shown: false, at: POINT::default(), alpha: 0, stale: true })
         }
     }
 
@@ -645,6 +647,7 @@ impl PanelWindow {
         if rgba.len() < w * h * 4 {
             return;
         }
+        self.stale = true;
         // SAFETY: the DIB section holds w x h 32-bit pixels for as long as the window lives.
         let out = unsafe { std::slice::from_raw_parts_mut(self.bits, w * h * 4) };
         for y in changed[1] as usize..(changed[3] as usize).min(h) {
@@ -675,6 +678,7 @@ impl PanelWindow {
         self.shown = true;
         self.at = at;
         self.alpha = alpha;
+        self.stale = false;
     }
 
     fn hide(&mut self) {
@@ -743,7 +747,7 @@ impl Windows {
         for (zone, window) in &mut self.list {
             match showing.iter().find(|(z, _, _)| z == zone) {
                 Some((_, at, alpha)) => {
-                    if !window.shown || window.at != *at || window.alpha != *alpha {
+                    if window.stale || !window.shown || window.at != *at || window.alpha != *alpha {
                         window.place(*at, *alpha);
                     }
                 }

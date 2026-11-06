@@ -7,9 +7,11 @@
 //! or a menu shows. Between those no capture runs at all.
 //!
 //! - **The wheel:** a disc of one colour at the exact place its geometry gives ([`super::zones::wheel`]), its edge against the world
-//!   all the way round. On the frames of 10 window sizes the rim differs from outside at 100% of its angles and the ring inside
-//!   it is one colour at 78 to 96%, whatever hovers or which page; on everything else (no menu, Quick Menu, Main Menu) the rim holds
-//!   at 65% at most. The colour itself is not looked at: VRChat lets people choose it.
+//!   all the way round, and the bright line of its rim against its own inside. On frames of 10 window sizes in 2 worlds the edge shows at 100% of
+//!   its angles, the rim's line at 94 to 97% and the ring inside it is one colour at 78 to 96%, whatever hovers or which page; on everything else
+//!   (no menu, Quick Menu, Main Menu) they hold at 70% and 30% at most. The rim's line is what a dark forest cannot hide: at first the edge alone
+//!   was asked for, with a stronger difference, and the wheel over that forest was missed at 1280 x 720 (88%). The colour itself is not looked at: VRChat lets people
+//!   choose it.
 //! - **The Quick Menu:** its row of icons, on every page of it and on nothing else, compared in shape (normalised correlation, so any
 //!   theme or brightness) with what they look like. 4 or more of the 7 at 0.5 or better: on 18 frames of it at 10 window
 //!   sizes and 4 pages, 5 to 7; on every other frame 0.
@@ -74,15 +76,20 @@ const WHEEL_ANGLES: usize = 96;
 const WHEEL_INSIDE: f32 = 0.955;
 const WHEEL_OUTSIDE: f32 = 1.07;
 /// Sum of three channels' differences that counts as a different colour.
-const WHEEL_DIFFERENT: f32 = 30.0;
+const WHEEL_DIFFERENT: f32 = 15.0;
+/// Where the rim's bright line is, in radii, and how much brighter than the disc inside it (one channel's worth).
+const WHEEL_RIM: [f32; 2] = [0.985, 1.0];
+const WHEEL_BRIGHTER: f32 = 6.0;
 /// How near a ring's sample keeps to the ring's middle colour, to count as that colour.
 const WHEEL_SAME: f32 = 36.0;
-/// The share of the rim that must stand out from the world, and of the ring that must be one colour.
-pub const WHEEL_EDGE: f32 = 0.9;
+/// The share of the rim that must stand out from the world, of the ring that must be one colour, and of the rim's line brighter than the disc (a highlighted slice takes
+/// a sixth of it away).
+pub const WHEEL_EDGE: f32 = 0.85;
 pub const WHEEL_UNIFORM: f32 = 0.7;
+pub const WHEEL_LINE: f32 = 0.7;
 
-/// How the wheel's place looks: (share of the rim that stands out from the world, share of the ring inside it of one colour).
-pub fn wheel_scores(part: &Part, client: Vec2) -> (f32, f32) {
+/// How the wheel's place looks: (share of the rim that stands out from the world, share of the ring inside it of one colour, share of the rim's line brighter than the disc).
+pub fn wheel_scores(part: &Part, client: Vec2) -> (f32, f32, f32) {
     let (center, radius) = zones::wheel(client);
     let ring = |r: f32| -> [[f32; 3]; WHEEL_ANGLES] {
         std::array::from_fn(|i| {
@@ -99,7 +106,10 @@ pub fn wheel_scores(part: &Part, client: Vec2) -> (f32, f32) {
         channel[WHEEL_ANGLES / 2]
     });
     let uniform = inside.iter().filter(|a| differ(a, &middle) < WHEEL_SAME).count() as f32 / WHEEL_ANGLES as f32;
-    (edge, uniform)
+    let grey = |c: &[f32; 3]| (c[0] + c[1] + c[2]) / 3.0;
+    let (near, on) = (ring(WHEEL_RIM[0]), ring(WHEEL_RIM[1]));
+    let line = (0..WHEEL_ANGLES).filter(|&i| grey(&near[i]).max(grey(&on[i])) - grey(&inside[i]) > WHEEL_BRIGHTER).count() as f32 / WHEEL_ANGLES as f32;
+    (edge, uniform, line)
 }
 
 /// The wheel's own colour, RGB, from the ring just inside its rim: what the panels' ring takes after.
@@ -122,8 +132,8 @@ pub fn wheel_color(part: &Part, client: Vec2) -> [u8; 3] {
 }
 
 pub fn wheel_seen(part: &Part, client: Vec2) -> bool {
-    let (edge, uniform) = wheel_scores(part, client);
-    edge >= WHEEL_EDGE && uniform >= WHEEL_UNIFORM
+    let (edge, uniform, line) = wheel_scores(part, client);
+    edge >= WHEEL_EDGE && uniform >= WHEEL_UNIFORM && line >= WHEEL_LINE
 }
 
 /// The icons' pictures: 7 of 24 x 24 grey bytes, averaged over real frames where each is not the selected page.
@@ -358,15 +368,16 @@ mod tests {
                     _ => assert!(found < ICONS_NEEDED, "{name}: {found} icons on a frame without it"),
                 }
             } else {
-                let (edge, uniform) = wheel_scores(&part, *client);
+                let (edge, uniform, line) = wheel_scores(&part, *client);
+                let seen = edge >= WHEEL_EDGE && uniform >= WHEEL_UNIFORM && line >= WHEEL_LINE;
                 match kind {
                     "wheel" => {
-                        assert!(edge >= WHEEL_EDGE && uniform >= WHEEL_UNIFORM, "{name}: {edge} {uniform}");
+                        assert!(seen, "{name}: {edge} {uniform} {line}");
                         // Enzo's wheel is teal.
                         let [r, g, b] = wheel_color(&part, *client);
                         assert!(g > r + 20 && b > r + 20, "{name}: {r} {g} {b}");
                     }
-                    _ => assert!(!(edge >= WHEEL_EDGE && uniform >= WHEEL_UNIFORM), "{name}: {edge} {uniform} on a frame without it"),
+                    _ => assert!(!seen, "{name}: {edge} {uniform} {line} on a frame without it"),
                 }
             }
         }

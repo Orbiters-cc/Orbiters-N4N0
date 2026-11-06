@@ -1171,6 +1171,10 @@ impl Panel {
         }
         if results.is_empty() {
             self.empty(p, d, shown, state(Target::Retry));
+        } else if !self.searching(d) && self.section == Section::Captures && results.len() <= 3 {
+            // Few worlds have a capture yet: the free space says what these are, and where the others are.
+            text(p, pos2(512.0, 452.0), Align2::CENTER_CENTER, Txt::new("Worlds members captured in 3D: open one to walk in it", 19.0).weight(weight::SEMIBOLD).color(fade(theme::FG, shown)));
+            text(p, pos2(512.0, 484.0), Align2::CENTER_CENTER, Txt::new("Search any world above, or look through Popular: those with a capture carry the 3D mark", 16.0).color(fade(theme::FG_3, shown)));
         }
     }
 

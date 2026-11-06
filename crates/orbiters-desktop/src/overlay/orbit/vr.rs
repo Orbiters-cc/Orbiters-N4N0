@@ -327,7 +327,7 @@ impl OrbitVr {
         self.plane = plane;
         let mut places: Vec<Placed> = menu.map_or_else(Vec::new, |m| Zone::around(m).iter().map(|z| zones::in_units(*z)).collect());
         // Here VRChat's wheel can close unseen: the ring has its own close.
-        if menu == Some(Around::Wheel) {
+        if menu == Some(Around::Wheel) && !self.panels.sheet_open() {
             places.push(zones::in_units(Zone::WheelHide));
         }
         self.panels.takeover_place = Some(zones::in_units(Zone::Takeover));

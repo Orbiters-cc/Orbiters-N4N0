@@ -2345,6 +2345,15 @@ impl Menu {
         self.instance_page = self.instance_page.min(pages - 1);
     }
 
+    /// Invite me, to a given instance, from what lists them otherwise than this menu's page.
+    pub fn invite_to(&mut self, location: String, world: &str) -> Vec<Effect> {
+        if self.invite_waiting {
+            return Vec::new();
+        }
+        self.notice = Some(format!("Asking Orbiters to invite you to {world}…"));
+        self.ask_invite(location)
+    }
+
     fn ask_invite(&mut self, location: String) -> Vec<Effect> {
         self.inviting = Some(location.clone());
         self.invite_waiting = true;

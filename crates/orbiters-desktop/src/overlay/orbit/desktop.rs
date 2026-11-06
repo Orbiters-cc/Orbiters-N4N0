@@ -78,6 +78,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
     let mut gpu = Gpu::new().map_err(|e| eprintln!("capture: {e}")).ok();
     let mut capture: Option<Capture> = None;
     let mut keys = Keys::default();
+    let mut hints = Hints::default();
     let mut pill = Pill::default();
     let mut pointer = pointer::Pointer::default();
     let mut said: Option<OrbitStatus> = None;
@@ -180,10 +181,16 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         let on = (open != Some(Around::Wheel) || pointer.at().is_some()).then(|| hit(&panels, at - origin.to_vec2())).flatten();
         panels.hover(on);
         // With the wheel open, the mouse is VRChat's until Alt is held: what nobody can guess is said in the caption.
-        panels.set_hint((open == Some(Around::Wheel) && !pointer.active()).then_some(("Hold Left Alt to use this ring", "Your mouse then points here instead of at VRChat's wheel.")));
+        hints.follow(open, pointer.active());
+        panels.set_hint(hints.now(open, pointer.active()));
         // The press: what Windows gave our windows (pointer over them) and what the hook kept from the game.
         for (down, _) in MOUSE.with(|m| std::mem::take(&mut *m.borrow_mut())) {
             press(&mut panels, down, &snap, &mut windows, &clicks);
+        }
+        if let Some(cell) = keys.digit(open == Some(Around::Wheel) && !panels.sheet_open()) {
+            if panels.press_cell(cell, &snap).clicked {
+                clicks.play();
+            }
         }
         for down in pointer.take_buttons() {
             press(&mut panels, down, &snap, &mut windows, &clicks);
@@ -198,6 +205,42 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         }
         let wait = TURN.saturating_sub(turn.elapsed());
         std::thread::sleep(wait);
+    }
+}
+
+/// What the caption says with nothing pointed at, which someone who has seen it often enough no longer needs in full.
+#[derive(Default)]
+struct Hints {
+    /// How often Left Alt was used on the ring, and how often the Quick Menu opened, since this started.
+    pointed: u32,
+    openings: u32,
+    was_open: Option<Around>,
+    was_pointing: bool,
+}
+
+impl Hints {
+    /// How many times the full words show.
+    const FULL: u32 = 3;
+
+    fn follow(&mut self, open: Option<Around>, pointing: bool) {
+        if open != self.was_open && open == Some(Around::QuickMenu) {
+            self.openings += 1;
+        }
+        if pointing && !self.was_pointing {
+            self.pointed += 1;
+        }
+        (self.was_open, self.was_pointing) = (open, pointing);
+    }
+
+    fn now(&self, open: Option<Around>, pointing: bool) -> Option<(&'static str, &'static str)> {
+        match open {
+            Some(Around::Wheel) if pointing => None,
+            Some(Around::Wheel) if self.pointed < Self::FULL => Some(("Hold Left Alt to point at this ring, or press 1 to 6", "Your mouse then points here instead of at VRChat's wheel.")),
+            Some(Around::Wheel) => Some(("Left Alt to point, 1 to 6 to pick", "")),
+            // Says what this is, and that it is not VRChat's.
+            Some(Around::QuickMenu) if self.openings <= Self::FULL => Some(("Orbiters, beside VRChat's menu", "Worlds in 3D, videos, instances and 3D pictures.")),
+            _ => None,
+        }
     }
 }
 
@@ -394,6 +437,7 @@ impl Game {
 #[derive(Default)]
 struct Keys {
     was: [bool; 2],
+    digits: [bool; 6],
 }
 
 impl Keys {
@@ -410,6 +454,24 @@ impl Keys {
             *was = down;
         }
         any
+    }
+
+    /// A number from 1 to 6 just pressed, as an index, when `live`. A key still down from before it was live counts for nothing.
+    fn digit(&mut self, live: bool) -> Option<usize> {
+        if !live {
+            self.digits = [true; 6];
+            return None;
+        }
+        let mut pressed = None;
+        for (i, was) in self.digits.iter_mut().enumerate() {
+            // SAFETY: a plain query.
+            let down = unsafe { GetAsyncKeyState(0x31 + i as i32) } as u16 & 0x8000 != 0;
+            if down && !*was {
+                pressed = pressed.or(Some(i));
+            }
+            *was = down;
+        }
+        pressed
     }
 
     /// A press while something else is in front is not for VRChat.
@@ -921,7 +983,7 @@ pub mod pointer {
     }
 
     /// Where it starts from the wheel's centre: on the first cell.
-    const START: Vec2 = vec2(0.0, -155.0);
+    const START: Vec2 = vec2(0.0, -143.0);
     /// The pointer's picture, in pixels.
     const PX: u32 = 24;
 

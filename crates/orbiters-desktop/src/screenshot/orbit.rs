@@ -294,7 +294,7 @@ pub(super) fn vr_shots(out: &Path, refs: &Path) -> anyhow::Result<()> {
                 let placed = zones::in_units(zone);
                 let hovered = hover == Some(zone);
                 let (pixels, px) = sharp_picture(&placed, facts, hovered.then_some(0), 2.0);
-                let quad = plane.quad(&placed, if hovered { -crate::overlay::orbit::POP } else { 0.0 }, 0.004);
+                let quad = plane.quad(&placed, 0.0, 0.004);
                 eye.quad(&quad, &pixels, px, 1.0);
                 if hovered {
                     let at = zone.ring().map_or(placed.rect.center().to_vec2(), |r| r.anchor());
@@ -312,7 +312,7 @@ pub(super) fn vr_shots(out: &Path, refs: &Path) -> anyhow::Result<()> {
         wheel_scene(&pointing(Action::Worlds), Some(Zone::WheelWorlds), None, &format!("vr-wheel-{world}-point-worlds"))?;
         wheel_scene(&pointing(Action::Pictures), Some(Zone::WheelPictures), Some(bloom), &format!("vr-wheel-{world}-point-pictures"))?;
         wheel_scene(&pointing(Action::Picture(PhotoMode::World)), Some(Zone::BloomWorld), Some(bloom), &format!("vr-wheel-{world}-point-picture"))?;
-        wheel_scene(&pointing(Action::PlayPause), Some(Zone::BloomPlay), Some(zones::Group::Playing), &format!("vr-wheel-{world}-point-playing"))?;
+        wheel_scene(&pointing(Action::PlayPause), Some(Zone::BloomNext), Some(zones::Group::Playing), &format!("vr-wheel-{world}-point-playing"))?;
         let counting = Facts { countdown: Some(2), picture_mode: Some(PhotoMode::People), pointed: Some(Action::Picture(PhotoMode::People)), ..facts.clone() };
         wheel_scene(&counting, None, Some(bloom), &format!("vr-wheel-{world}-countdown"))?;
         // The Quick Menu where it opens before the eyes, the wing beside it.
@@ -395,7 +395,7 @@ pub(super) fn shots(out: &Path) -> anyhow::Result<()> {
     wheel_scene("orbit-wheel-point-worlds", out, hd, &pointing(Action::Worlds), Some((Zone::WheelWorlds, 0)), None, true)?;
     wheel_scene("orbit-wheel-point-pictures", out, hd, &pointing(Action::Pictures), Some((Zone::WheelPictures, 0)), Some(bloom), true)?;
     wheel_scene("orbit-wheel-point-people", out, hd, &pointing(Action::Picture(PhotoMode::People)), Some((Zone::BloomPeople, 0)), Some(bloom), true)?;
-    wheel_scene("orbit-wheel-point-playing", out, hd, &pointing(Action::PlayPause), Some((Zone::BloomPlay, 0)), Some(playing), true)?;
+    wheel_scene("orbit-wheel-point-playing", out, hd, &pointing(Action::PlayPause), Some((Zone::WheelPlaying, 0)), Some(playing), true)?;
     wheel_scene("orbit-wheel-1080", out, vec2(1920.0, 1080.0), &Facts { hint, ..idle.clone() }, None, None, false)?;
     wheel_scene("orbit-wheel-540", out, vec2(960.0, 540.0), &Facts { hint, ..idle.clone() }, None, None, false)?;
     wheel_scene("orbit-wheel-narrow", out, vec2(800.0, 800.0), &Facts { hint, ..idle.clone() }, None, None, false)?;

@@ -1189,6 +1189,14 @@ impl Worlds {
         out
     }
 
+    /// A world's thumbnail, from its id alone, once it is here: for what lists worlds outside this panel.
+    pub fn world_thumbnail(&mut self, world_id: &str) -> Option<TextureId> {
+        self.facts_for(world_id);
+        let url = self.facts.get(world_id).and_then(|f| f.thumbnail.clone())?;
+        let picture = crate::worlds::Picture::Remote { world_id: world_id.to_string(), url, large: false };
+        self.pictures.get(&self.ctx, &picture).map(|t| t.id())
+    }
+
     /// The selected capture's world's pictures on the pictures page: the page's thumbnails, the one shown whole.
     fn world_pictures(&mut self, entries: &[Entry]) -> HashMap<(u64, bool), TextureId> {
         let mut out = HashMap::new();

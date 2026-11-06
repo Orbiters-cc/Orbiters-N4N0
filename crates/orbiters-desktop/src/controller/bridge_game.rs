@@ -360,7 +360,7 @@ impl Controller {
     }
 
     /// Whether VRChat told where its camera is: a 3D picture starts from there.
-    fn camera_pose_known(&self) -> bool {
+    pub(super) fn camera_pose_known(&self) -> bool {
         let osc = self.osc_values.lock().unwrap();
         osc.latest.get(super::burst::POSE).is_some_and(|(values, _)| {
             let floats = super::burst::floats(values);

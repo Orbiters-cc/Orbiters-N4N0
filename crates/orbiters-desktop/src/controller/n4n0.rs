@@ -125,6 +125,10 @@ impl Host for Link {
         self.with(|c| c.camera_open()).flatten()
     }
 
+    fn camera_pose_known(&self) -> bool {
+        self.with(|c| c.camera_pose_known()).unwrap_or(true)
+    }
+
     /// A video's link opened in the default browser (http or https only).
     fn watch(&self, link: &str) -> Result<(), String> {
         super::open_url(link).map_err(|e| e.to_string())

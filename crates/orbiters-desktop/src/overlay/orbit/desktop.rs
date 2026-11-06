@@ -78,6 +78,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
     let mut gpu = Gpu::new().map_err(|e| eprintln!("capture: {e}")).ok();
     let mut capture: Option<Capture> = None;
     let mut keys = Keys::default();
+    let mut pill = Pill::default();
     let mut pointer = pointer::Pointer::default();
     let mut said: Option<OrbitStatus> = None;
     let mut last_turn = Instant::now();
@@ -104,6 +105,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         // Only with VRChat itself in front, or a panel's window: anything else in front and it all goes at once.
         let in_front = found.filter(|h| !exclusive && foreground_is(*h, &windows));
         let Some(window) = in_front else {
+            pill.show(None, pos2(0.0, 0.0), vec2(0.0, 0.0));
             if watcher.wants_frames() || !panels.is_empty() || capture.is_some() {
                 watcher.reset();
                 capture = None;
@@ -157,12 +159,15 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         panels.takeover_place = zones::place(Zone::Takeover, size);
         panels.back_place = zones::place(Zone::SheetBack, size);
         panels.set_open(open, places, &snap);
+        panels.follow_note(&snap);
         if panels.is_empty() {
             pointer.stop();
             windows.hide_all();
+            pill.show(panels.away_words(&snap), origin, size);
             std::thread::sleep(if watcher.wants_frames() { TURN } else { REST });
             continue;
         }
+        pill.show(None, origin, size);
         panels.follow(&snap, backend.library_version());
         panels.menu_turn(&snap);
         panels.step_springs(dt);
@@ -817,6 +822,52 @@ fn placed_at(panel: &Panel, origin: Pos2) -> (Zone, POINT, u8) {
     let way = panel.zone.ring().map_or((rect.center() - center).normalized(), |ring| zones::polar(1.0, ring.middle()));
     let at = origin + rect.min.to_vec2() + way * panel.outward() * unit;
     (panel.zone, POINT { x: at.x.round() as i32, y: at.y.round() as i32 }, (panel.appear.alpha() * 255.0) as u8)
+}
+
+// --------------------------------------------------------------------------------------------- the pill with no menu up
+
+/// Says what a 3D picture is doing while no menu is up: with VRChat's camera open on the desktop none can be, so nothing else can say it. It lets clicks through,
+/// and is only there while it has something to say. The camera records its own stream, not this window.
+#[derive(Default)]
+struct Pill {
+    window: Option<PanelWindow>,
+    canvas: Option<crate::overlay::Canvas>,
+    words: Option<(String, String)>,
+    px: [u32; 2],
+}
+
+impl Pill {
+    /// The caption's size, in its units, and how far under the window's top.
+    const SIZE: Vec2 = vec2(560.0, 56.0);
+    const TOP: f32 = 96.0;
+
+    fn show(&mut self, words: Option<(String, String)>, origin: Pos2, client: Vec2) {
+        let Some(said) = words else {
+            if let Some(window) = self.window.as_mut() {
+                window.hide();
+            }
+            self.words = None;
+            return;
+        };
+        let zoom = (client.y / 720.0).max(0.5);
+        let px = [(Self::SIZE.x * zoom).ceil() as u32, (Self::SIZE.y * zoom).ceil() as u32];
+        if self.px != px || self.window.is_none() {
+            self.window = PanelWindow::new(px[0], px[1], false).map_err(|e| eprintln!("pill window: {e}")).ok();
+            self.canvas = Some(crate::overlay::Canvas::zoomed(px[0], px[1], zoom));
+            self.px = px;
+            self.words = None;
+        }
+        let (Some(window), Some(canvas)) = (self.window.as_mut(), self.canvas.as_mut()) else { return };
+        if self.words.as_ref() != Some(&said) {
+            let pixels = canvas.paint(0.0, |p| super::panels::draw_words(p, egui::Rect::from_min_size(pos2(0.0, 0.0), Self::SIZE), &said.0, &said.1));
+            window.picture(pixels, [0, 0, px[0], px[1]]);
+            self.words = Some(said);
+        }
+        let at = POINT { x: (origin.x + (client.x - px[0] as f32) / 2.0) as i32, y: (origin.y + Self::TOP * zoom) as i32 };
+        if window.stale || !window.shown || window.at.x != at.x || window.at.y != at.y {
+            window.place(at, 255);
+        }
+    }
 }
 
 // --------------------------------------------------------------------------------------------- the pointer while the wheel has the mouse

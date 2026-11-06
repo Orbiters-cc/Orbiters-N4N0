@@ -27,7 +27,7 @@ use crate::state::{CaptureState, Snapshot};
 use egui::{pos2, vec2, ColorImage, Pos2, TextureHandle, TextureId, TextureOptions, Vec2};
 use orbiters_core::settings::MenuLook;
 use orbiters_n4n0_core::menu::layout::{self, ScreenPage};
-use orbiters_n4n0_core::menu::{Page, Target};
+use orbiters_n4n0_core::menu::{Effect, Page, Target};
 use panels::{Action, Facts, Item, Recent, Sheet};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -455,11 +455,6 @@ impl Panels {
 
     /// What is open: parts for it in the places `places` gives, or none. Hide lasts until the menu closes. Whatever was held lets go.
     pub fn set_open(&mut self, around: Option<Around>, places: Vec<Placed>, snap: &Snapshot) {
-        // A note from while these panels were away is old news.
-        if around.is_none() {
-            self.note = PictureNote::default();
-            self.facts.note = None;
-        }
         if around != self.open {
             self.hidden = false;
             self.facts.pointed = None;
@@ -566,6 +561,21 @@ impl Panels {
     }
 
     /// Follows the service's state: the parts' facts, recent captures, what is on the sheet.
+    /// What stopped a 3D picture: said whether a menu is up or not, as with the camera open none can be.
+    pub fn follow_note(&mut self, snap: &Snapshot) {
+        if let Some(note) = self.note.follow(&snap.n4n0.photo_note, Instant::now()) {
+            self.facts.note = note;
+            for panel in self.list.iter_mut().chain(self.takeover.iter_mut()) {
+                panel.dirty = true;
+            }
+        }
+    }
+
+    /// What to say with no menu up, in the pill over the game.
+    pub fn away_words(&self, snap: &Snapshot) -> Option<(String, String)> {
+        away_words(snap, &self.facts.note)
+    }
+
     pub fn follow(&mut self, snap: &Snapshot, library: u64) {
         if self.open.is_none() {
             return;
@@ -578,12 +588,7 @@ impl Panels {
                 panel.dirty = true;
             }
         }
-        if let Some(note) = self.note.follow(&snap.n4n0.photo_note, Instant::now()) {
-            self.facts.note = note;
-            for panel in self.list.iter_mut().chain(self.takeover.iter_mut()) {
-                panel.dirty = true;
-            }
-        }
+        self.follow_note(snap);
         // N4N0's menu is what plays and its controls go through: open, drawn or not.
         if !self.stage.host.menu.open {
             self.stage.host.open(snap);
@@ -652,6 +657,7 @@ impl Panels {
             picture_mode: self.facts.picture_mode,
             hint: self.facts.hint,
             note: self.facts.note.clone(),
+            picture_wait: snap.n4n0.photo_wait,
             pointed: self.facts.pointed,
             sheet: self.facts.sheet,
             sheet_title: self.facts.sheet_title.clone(),
@@ -807,8 +813,21 @@ impl Panels {
                     panel.dirty = true;
                 }
                 let host = &mut self.stage.host;
-                let effects = host.press(Target::TakeOf(mode));
+                let mut effects = host.press(Target::TakeOf(mode));
+                // On the desktop the camera cannot be open under these menus, so the picture is asked for and waits for it.
+                let mut waits = None;
+                if self.facts.desktop {
+                    for effect in &mut effects {
+                        if let Effect::Photo3d { timer, length, mode } = *effect {
+                            waits = Some(timer);
+                            *effect = Effect::PhotoChoice { timer, length, mode };
+                        }
+                    }
+                }
                 host.effects(effects, snap, &self.backend);
+                if let Some(seconds) = waits {
+                    self.backend.n4n0(crate::ipc::N4n0Command::Photo3DWhenCamera { seconds });
+                }
             }
             Action::Record => {
                 if self.facts.recording {
@@ -1044,6 +1063,17 @@ impl Drop for Panels {
     }
 }
 
+/// What must be said with no menu up: a 3D picture under way or waiting, or what stopped one. With VRChat's camera open on the desktop no menu can be.
+fn away_words(snap: &Snapshot, note: &Option<(String, String)>) -> Option<(String, String)> {
+    if let Some(seconds) = snap.n4n0.photo_countdown {
+        return Some((format!("3D picture in {seconds}"), "VRChat's camera then flies around by itself.".into()));
+    }
+    if snap.capture.photo_3d && !matches!(snap.capture.state, CaptureState::Idle) {
+        return Some(("3D picture in progress".into(), "The camera is flying. Stay where you are for a moment.".into()));
+    }
+    note.clone().or_else(|| snap.n4n0.photo_wait.map(panels::wait_words))
+}
+
 /// How long what stopped a 3D picture stays said.
 const NOTE_FOR: Duration = Duration::from_secs(8);
 
@@ -1086,6 +1116,22 @@ fn note_words(text: &str) -> (String, String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn with_no_menu_up_the_pill_says_what_a_picture_is_doing_and_otherwise_nothing() {
+        use orbiters_n4n0::status::PhotoWait;
+        let mut snap = Snapshot::new(Default::default());
+        assert_eq!(away_words(&snap, &None), None, "nothing to say: nothing shows");
+        snap.n4n0.photo_wait = Some(PhotoWait::Camera);
+        assert!(away_words(&snap, &None).unwrap().0.contains("open VRChat's camera"));
+        snap.n4n0.photo_wait = Some(PhotoWait::Move);
+        assert!(away_words(&snap, &None).unwrap().0.contains("move the camera"));
+        // What stopped it goes before waiting; a countdown goes before anything.
+        let note = Some(("a".to_string(), "b".to_string()));
+        assert_eq!(away_words(&snap, &note).unwrap().0, "a");
+        snap.n4n0.photo_countdown = Some(3);
+        assert_eq!(away_words(&snap, &note).unwrap().0, "3D picture in 3");
+    }
 
     #[test]
     fn a_picture_that_cannot_start_says_why_for_a_moment() {

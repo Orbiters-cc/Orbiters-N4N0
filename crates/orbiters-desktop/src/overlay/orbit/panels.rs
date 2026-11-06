@@ -135,6 +135,8 @@ pub struct Facts {
     pub timer: u32,
     /// What the caption says with nothing pointed at (a key to hold).
     pub hint: Option<(&'static str, &'static str)>,
+    /// A 3D picture is asked for and waits for this: said like a note, for as long as it waits.
+    pub picture_wait: Option<orbiters_n4n0::status::PhotoWait>,
     /// What stopped a 3D picture: it goes before anything else the caption or the sheet's foot would say, for a few seconds.
     pub note: Option<(String, String)>,
     /// What is pointed at.
@@ -553,8 +555,8 @@ pub fn paint(p: &Painter, zone: Zone, size: Vec2, facts: &Facts, hover: Option<u
             text(p, pos2(112.0, 24.0), Align2::LEFT_CENTER, &facts.sheet_title, 18.0, weight::SEMIBOLD, look::LABEL);
             // The foot: what plays, whichever page shows.
             let y = size.y - 32.0;
-            if let Some((first, second)) = &facts.note {
-                // The caption is behind the sheet: what stopped the picture is said here.
+            if let Some((first, second)) = &said_now(facts) {
+                // The caption is behind the sheet: what stopped the picture, or what it waits for, is said here.
                 widgets::icon(p, pos2(26.0, y), icons::WARNING, 18.0, theme::WARN);
                 let font = theme::font(13.0, weight::SEMIBOLD);
                 let text = fit(p, &format!("{first}. {second}"), &font, size.x - 200.0);
@@ -905,13 +907,31 @@ fn draw_capture(p: &Painter, shape: Shaped, rect: Rect, n: usize, facts: &Facts,
 
 /// The words about what is pointed at, or what to do first, in a pill as wide as they are. Nothing to say: nothing shows.
 fn draw_caption(p: &Painter, rect: Rect, facts: &Facts) {
-    let words = facts.note.clone().or_else(|| facts.pointed.and_then(|a| caption(a, facts))).or_else(|| facts.hint.map(|(a, b)| (a.to_string(), b.to_string())));
+    let words = said_now(facts).or_else(|| facts.pointed.and_then(|a| caption(a, facts))).or_else(|| facts.hint.map(|(a, b)| (a.to_string(), b.to_string())));
     let Some((first, second)) = words else { return };
+    draw_words(p, rect, &first, &second);
+}
+
+/// What goes before anything else the caption would say: what stopped a 3D picture, or what one waits for.
+fn said_now(facts: &Facts) -> Option<(String, String)> {
+    facts.note.clone().or_else(|| facts.picture_wait.map(wait_words))
+}
+
+/// What a 3D picture waits for, in the caption's two lines.
+pub fn wait_words(wait: orbiters_n4n0::status::PhotoWait) -> (String, String) {
+    match wait {
+        orbiters_n4n0::status::PhotoWait::Camera => ("Now open VRChat's camera".into(), "Quick Menu, the camera icon, Stream Camera: the 3D picture then starts by itself.".into()),
+        orbiters_n4n0::status::PhotoWait::Move => ("Now move the camera a little".into(), "Orbiters must see where it is: the 3D picture then starts by itself.".into()),
+    }
+}
+
+/// Two lines in a pill as wide as they are.
+pub fn draw_words(p: &Painter, rect: Rect, first: &str, second: &str) {
     let big = theme::font(13.0, weight::BOLD);
     let small = theme::font(11.0, weight::MEDIUM);
     let room = rect.width() - 24.0;
-    let first = fit(p, &first, &big, room);
-    let second = fit(p, &second, &small, room);
+    let first = fit(p, first, &big, room);
+    let second = fit(p, second, &small, room);
     let width = p.layout_no_wrap(first.clone(), big.clone(), Color32::WHITE).size().x.max(p.layout_no_wrap(second.clone(), small.clone(), Color32::WHITE).size().x) + 24.0;
     let pill = Rect::from_center_size(rect.center(), vec2(width, rect.height() - 8.0));
     p.rect_filled(pill, theme::radius(look::RADIUS + 2.0), look::PANEL);

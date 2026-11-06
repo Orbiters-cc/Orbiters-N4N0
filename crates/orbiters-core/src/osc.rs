@@ -853,7 +853,7 @@ impl OscService {
                 (None, Some(announcement), Some(tx))
             } else {
                 // mdns-sd only browses: for VRChat's own service, and to answer for these again whenever a VRChat starts.
-                match mdns_sd::ServiceDaemon::new() {
+                match no_network_listening().then(|| mdns_sd::Error::Msg("no network listening in this test run".into())).map_or_else(mdns_sd::ServiceDaemon::new, Err) {
                     Ok(d) => {
                         match d.browse("_oscjson._tcp.local.") {
                             Ok(events) => {
@@ -978,6 +978,14 @@ impl OscService {
         self.sender.send_to(&bytes, to)?;
         Ok(())
     }
+}
+
+/// Whether this process must not listen on the network (`ORBITERS_NO_NETWORK_LISTENING`, set by the agents' test runs). On
+/// Windows, the first time a program listens beyond loopback, its firewall asks the person in a window that takes the
+/// foreground; a test program is named by a hash of its build, so each new one asks again, and while the prompt is up no game
+/// or agent gets the focus. mDNS is what listens: a test run has nothing to find on the network anyway.
+pub(crate) fn no_network_listening() -> bool {
+    std::env::var_os("ORBITERS_NO_NETWORK_LISTENING").is_some()
 }
 
 /// The address this machine reaches the network from (no packet is sent: connecting a UDP socket only picks the

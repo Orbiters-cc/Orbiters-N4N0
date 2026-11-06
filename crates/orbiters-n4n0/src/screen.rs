@@ -19,13 +19,14 @@ use crate::media::Watcher;
 use crate::platform::{CallRequest, Locale, Mouse, NoMouse};
 use crate::runtime::{N4n0, N4n0Runtime, Shared, Source};
 use crate::status::{CallsStatus, CardView, NoticeKind};
-use orbiters_contracts::n4n0::{self, thumbnail};
+use orbiters_contracts::n4n0::{self, params, thumbnail};
+use rosc::OscType;
 use orbiters_core::account::{Api, Server};
 use orbiters_core::osc::OscValue;
 use orbiters_n4n0_core::menu::layout::{Content, ScreenPage};
 use orbiters_n4n0_core::menu::pictures::{self as full, Lane, Synced};
 use orbiters_n4n0_core::menu::screen::{self, Audience, Flags, Frame, Picture, LOCAL_VALUES};
-use orbiters_n4n0_core::menu::touch::{self, Gesture, Ray, Touch, LOST_GRACE};
+use orbiters_n4n0_core::menu::touch::{self, Geometry, Gesture, Pointer, Ray, Touch, LOST_GRACE};
 use orbiters_n4n0_core::menu::{self, layout, Card, Effect, KeyboardLayout, Menu, Page, Pages, PhotoLength, PhotoMode, SuggestQueue};
 use orbiters_n4n0_core::text::{Message, TextSender};
 use orbiters_n4n0_core::youtube;
@@ -61,6 +62,27 @@ const GAZE_POLL: Duration = Duration::from_millis(15);
 const CLICK_AFTER_OPEN: Duration = Duration::from_millis(500);
 /// A click presses what the gaze rested on this long, not what it crossed mid-turn.
 const GAZE_REST: Duration = Duration::from_millis(150);
+/// One frame's eight contact values arrive as eight messages over a millisecond or so, each waking the N4N0 thread: a reading
+/// waits for them to stop, so it never takes four of this frame and four of the last for one pose.
+const FRAME_SETTLE: Duration = if cfg!(test) { Duration::ZERO } else { Duration::from_micros(1500) };
+/// A trigger presses where the ray was this long before: pulling a trigger jerks the hand, and the finger meant what it rested on.
+const PRESS_LOOKBACK: Duration = Duration::from_millis(70);
+/// How far a pull may move the dot, in pixels (3 cm on the screen); further, the hand was on its way somewhere.
+const PULL_JERK: f32 = 64.0;
+/// How long the screen stays busy after a hand left it, so that it does not set off the moment the hand drops.
+const BUSY_AFTER: Duration = Duration::from_millis(800);
+/// A fingertip this near, over the screen, counts as a hand at the screen even without pointing at it.
+const BUSY_DEPTH: f64 = -0.15;
+/// After the owner's screen came to rest: how long before its place is sent, before everyone else's screen goes there, and how
+/// long that says so (VRChat's parameters arrive 0.1 to 1 s apart).
+const PLACE_AFTER_REST: Duration = Duration::from_millis(400);
+const SETTLE_AFTER_PLACE: Duration = Duration::from_millis(600);
+const SETTLE_HELD: Duration = Duration::from_millis(1200);
+/// A place that goes on changing is sent this often, for whoever arrives later.
+const PLACE_EVERY: Duration = Duration::from_secs(1);
+/// A place that held still this long gets `Settle` again every so often, for whoever arrived since.
+const PLACE_QUIET: Duration = Duration::from_secs(3);
+const SETTLE_AGAIN: Duration = Duration::from_secs(30);
 /// Two grabs closer than this are one (both hands, a hand brushing it twice).
 const GRAB_AGAIN: Duration = Duration::from_millis(1500);
 
@@ -149,6 +171,37 @@ pub(crate) struct ScreenRuntime {
     trigger: [bool; 2],
     pulled: [bool; 2],
     rays: [Ray; 2],
+    /// Each hand's senders over time, and how they are read now (the screen's size, the avatar's height).
+    pointers: [Pointer; 2],
+    pub(crate) geometry: Geometry,
+    /// When a finger's value last arrived, for [`FRAME_SETTLE`].
+    finger_heard: Option<Instant>,
+    /// Where each hand pointed lately, for [`PRESS_LOOKBACK`]; what each hand and everyone else's hover.
+    aimed: [VecDeque<(Instant, f32, f32)>; 2],
+    hand_hover: [Option<usize>; 3],
+    /// What the fingers did, for a live test to read.
+    pub(crate) pointer_log: crate::pointer_log::PointerLog,
+    /// The menu was open at the last step, as far as the readout told.
+    log_open: bool,
+    /// The avatar's screen takes `N4N0/Screen/Busy`, the place floats and `Settle` (screen version 16).
+    pub(crate) place_sync: bool,
+    /// `N4N0/Screen/Placed` and the hands on its handle, as VRChat says: the screen at rest, a touch then may press.
+    pub(crate) placed: bool,
+    pub(crate) held: [bool; 2],
+    /// Since when a hand last was at the screen, what `N4N0/Screen/Busy` was last sent as.
+    busy_at: Option<Instant>,
+    busy_sent: Option<bool>,
+    /// The eyes' and the gaze point's readings for the place, new since the last step.
+    sight_new: bool,
+    /// When the screen came to rest (place not sent yet); the floats last sent, when; when `Settle` goes on and off.
+    rest_at: Option<Instant>,
+    place_sent: Option<[i32; 3]>,
+    place_sent_at: Option<Instant>,
+    settle_on_at: Option<Instant>,
+    settle_off_at: Option<Instant>,
+    /// When the floats last changed, and when everyone's screen was last told to settle.
+    place_changed_at: Option<Instant>,
+    settled_at: Option<Instant>,
     /// Everyone else's fingertips near the touch points (version 7), new since the last step, and their touch.
     others: [f32; 4],
     others_touched: bool,
@@ -281,6 +334,26 @@ impl Default for ScreenRuntime {
             trigger: [false; 2],
             pulled: [false; 2],
             rays: [Ray::default(); 2],
+            pointers: [Pointer::default(); 2],
+            geometry: Geometry::BUILT,
+            finger_heard: None,
+            aimed: Default::default(),
+            hand_hover: [None; 3],
+            pointer_log: Default::default(),
+            log_open: false,
+            place_sync: false,
+            placed: true,
+            held: [false; 2],
+            busy_at: None,
+            busy_sent: None,
+            sight_new: false,
+            rest_at: None,
+            place_sent: None,
+            place_sent_at: None,
+            settle_on_at: None,
+            settle_off_at: None,
+            place_changed_at: None,
+            settled_at: None,
             others: [0.0; 4],
             others_touched: false,
             others_touch: Touch::default(),
@@ -676,9 +749,11 @@ impl ScreenRuntime {
         } else {
             return false;
         };
-        if let Some(i) = rest.parse::<usize>().ok().filter(|i| *i < 4 && self.gaze) {
+        // Kept in VR too from screen version 16, where they say where the screen is from the eyes for everyone else.
+        if let Some(i) = rest.parse::<usize>().ok().filter(|i| *i < 4 && (self.gaze || self.place_sync)) {
             values[i] = value;
-            self.gazed = true;
+            self.gazed = self.gaze;
+            self.sight_new = true;
         }
         true
     }
@@ -751,29 +826,71 @@ impl ScreenRuntime {
             self.touched = [false; 2];
             self.pulled = [false; 2];
             self.others_touched = false;
+            self.aimed = Default::default();
+            self.hand_hover = [None; 3];
+            self.log_open = false;
             return;
         }
+        if !self.log_open {
+            self.log_open = true;
+            let page = ScreenPage::of(&self.menu).name();
+            self.pointer_log.opened(page, &self.geometry, self.pointing);
+        }
+        // A frame's values are still arriving: this reading waits for the last of them (next_due comes back for it).
+        if self.finger_heard.is_some_and(|at| now.saturating_duration_since(at) < FRAME_SETTLE) && (self.touched[0] || self.touched[1] || self.pulled[0] || self.pulled[1]) {
+            return;
+        }
+        let mut gestures = false;
         for hand in 0..3 {
-            if !self.menu.open { break; }
+            if !self.menu.open {
+                break;
+            }
+            let pull = hand < 2 && self.pulled[hand] && self.trigger[hand];
             let touched = if hand < 2 {
                 std::mem::take(&mut self.touched[hand]) | std::mem::take(&mut self.pulled[hand])
             } else {
                 std::mem::take(&mut self.others_touched)
             };
+            let mut by_touch = false;
+            let mut guard = None;
             let gesture = match (hand, self.pointing, touched) {
                 (2, false, _) => None,
                 (2, true, true) => Some(self.others_touch.update(self.others, touch::RADIUS, now)),
                 (2, true, false) => self.others_touch.tick(now),
                 // The fingertip touching, and the ray it points along with its trigger.
                 (_, true, true) => {
-                    let touch = self.touch[hand].update(self.proximity[hand], touch::REACH, now);
-                    let ray = self.rays[hand].update(touch::aimed(self.proximity[hand], self.aim[hand]), self.trigger[hand], now);
-                    touch::either(Some(touch), Some(ray))
+                    let reading = self.pointers[hand].read(self.proximity[hand], self.aim[hand], &self.geometry, now);
+                    self.pointer_log.reading(hand, &reading, now);
+                    guard = reading.point.err();
+                    if let Ok((x, y)) = reading.point {
+                        let aimed = &mut self.aimed[hand];
+                        aimed.push_back((now, x, y));
+                        while aimed.front().is_some_and(|(at, ..)| now.saturating_duration_since(*at) > PRESS_LOOKBACK * 4) {
+                            aimed.pop_front();
+                        }
+                    }
+                    let finger = touch::fingertip(self.proximity[hand], &self.geometry).ok();
+                    let still = self.placed && !self.held[0] && !self.held[1];
+                    let touch = self.touch[hand].feed(finger, still, now);
+                    by_touch = matches!(touch, Gesture::Press { .. });
+                    let ray = self.rays[hand].update(reading.point.ok(), self.trigger[hand], now);
+                    touch::either(Some(touch), Some(ray), self.touch[hand].poking())
                 }
-                (_, true, false) => touch::either(self.touch[hand].tick(now), self.rays[hand].tick(now)),
+                (_, true, false) => touch::either(self.touch[hand].tick(now), self.rays[hand].tick(now), self.touch[hand].poking()),
                 (_, false, true) => Some(self.touch[hand].update(self.proximity[hand], touch::RADIUS, now)),
                 (_, false, false) => self.touch[hand].tick(now),
             };
+            gestures |= gesture.is_some();
+            if pull && !matches!(gesture, Some(Gesture::Press { .. })) {
+                let why = match (guard, gesture) {
+                    (Some(g), _) => format!("nothing yet, {}", g.name()),
+                    (None, Some(Gesture::Hold { .. })) => "nothing, a touch holds this hand".to_string(),
+                    (None, Some(Gesture::Away)) => "nothing, it points off the page".to_string(),
+                    (None, Some(Gesture::Hover { x, y })) => format!("nothing, it was not over the page a moment ago (now at {x:.0}, {y:.0})"),
+                    (None, _) => "nothing, no reading".to_string(),
+                };
+                self.pointer_log.pull(hand, &why);
+            }
             let layout = Frame::layout(&self.menu);
             match gesture {
                 None => {}
@@ -781,16 +898,31 @@ impl ScreenRuntime {
                     self.last_activity = now;
                     self.holding[hand] = true;
                     self.dragging[hand] = None;
-                    if let Some((index, target)) = layout::hit_pointable(layout, &self.menu, x, y) {
+                    let hit = self.press_target(hand, by_touch, x, y, now);
+                    if hand < 2 {
+                        self.aimed[hand].clear();
+                    }
+                    let who = match (hand, by_touch) {
+                        (0, true) => "left touch",
+                        (0, false) => "left trigger",
+                        (1, true) => "right touch",
+                        (1, false) => "right trigger",
+                        _ => "someone else's touch",
+                    };
+                    if let Some((index, target)) = hit {
+                        self.pointer_log.press(who, x, y, &format!("{target:?} on {}", ScreenPage::of(&self.menu).name()));
                         self.pressed = Some((index, now));
                         self.presses = self.presses.wrapping_add(1);
                         self.dragging[hand] = menu::timeline_segment(target);
+                        self.hand_hover[hand] = Some(index);
                         effects.extend(self.menu.press(target));
+                    } else {
+                        self.pointer_log.press(who, x, y, &format!("nothing there on {}", ScreenPage::of(&self.menu).name()));
                     }
                 }
                 Some(Gesture::Hold { x, y }) => {
-                    let hit = layout::hit_pointable(layout, &self.menu, x, y);
-                    self.hover = hit.map(|(i, _)| i);
+                    let hit = layout::hit_near(layout, &self.menu, x, y);
+                    self.hand_hover[hand] = hit.map(|(i, _)| i);
                     // Held and moved along the music's timeline: the music follows, a segment at a time.
                     if let (Some(from), Some((index, target))) = (self.dragging[hand], hit) {
                         let (on, more) = self.menu.drag(from, target);
@@ -805,17 +937,127 @@ impl ScreenRuntime {
                 Some(Gesture::Hover { x, y }) => {
                     self.holding[hand] = false;
                     self.dragging[hand] = None;
-                    self.hover = layout::hit_pointable(layout, &self.menu, x, y).map(|(i, _)| i);
+                    self.hand_hover[hand] = layout::hit_near(layout, &self.menu, x, y).map(|(i, _)| i);
                 }
                 Some(Gesture::Away) => {
                     self.dragging[hand] = None;
                     self.holding[hand] = false;
-                    if !self.holding.iter().any(|h| *h) {
-                        self.hover = None;
-                    }
+                    self.hand_hover[hand] = None;
                 }
             }
         }
+        // One hand's Away does not wipe what the other one points at: a hand holding a press first, then the owner's, right
+        // before left, the way they were read, then everyone else's.
+        if gestures {
+            let holding = (0..3).find(|hand| self.holding[*hand] && self.hand_hover[*hand].is_some());
+            self.hover = holding.and_then(|hand| self.hand_hover[hand]).or(self.hand_hover[1]).or(self.hand_hover[0]).or(self.hand_hover[2]);
+        }
+    }
+
+    /// What a press at (`x`, `y`) takes. A trigger: what the ray rested on a moment before the pull jerked the hand, else what is
+    /// there. A touch: what is under the fingertip. Either takes the nearest button within [`layout::HIT_SLOP`].
+    fn press_target(&self, hand: usize, by_touch: bool, x: f32, y: f32, now: Instant) -> Option<(usize, menu::Target)> {
+        let layout = Frame::layout(&self.menu);
+        if hand < 2 && !by_touch {
+            // Only the small move of a pull: a hand on its way somewhere goes by what it reached.
+            let before = self.aimed[hand].iter().rev().find(|(at, ..)| now.saturating_duration_since(*at) >= PRESS_LOOKBACK);
+            let rested = before.filter(|(_, bx, by)| (bx - x).hypot(by - y) <= PULL_JERK);
+            if let Some(hit) = rested.and_then(|(_, bx, by)| layout::hit_near(layout, &self.menu, *bx, *by)) {
+                return Some(hit);
+            }
+        }
+        layout::hit_near(layout, &self.menu, x, y)
+    }
+
+    /// `N4N0/Screen/Busy` as it should go now, once it changes (screen version 16): a hand points at the screen or its fingertip is
+    /// near it, so a screen that would glide after its owner waits: it never moves under a hand about to press.
+    fn busy_step(&mut self, now: Instant) -> Option<bool> {
+        if !self.place_sync {
+            return None;
+        }
+        let near = |t: &Touch| t.finger.is_some_and(|f| f.depth >= BUSY_DEPTH && f.depth <= 0.1 && f.x >= 0.0 && f.y >= 0.0 && f.x < 1024.0 && f.y < 576.0);
+        let inside = |r: &Ray| r.at.is_some_and(|(x, y)| x >= 0.0 && y >= 0.0 && x < 1024.0 && y < 576.0);
+        let active = self.menu.open && (self.holding.iter().any(|h| *h) || self.touch.iter().any(near) || self.rays.iter().any(inside));
+        if active {
+            self.busy_at = Some(now);
+        }
+        let busy = self.busy_at.is_some_and(|at| now.saturating_duration_since(at) < BUSY_AFTER);
+        (self.busy_sent != Some(busy)).then(|| {
+            self.busy_sent = Some(busy);
+            busy
+        })
+    }
+
+    /// What VRChat says of the screen's place: at rest or not, a hand on its handle.
+    pub(crate) fn placed_value(&mut self, placed: Option<bool>, held: Option<(usize, bool)>, now: Instant) {
+        let before = self.placed && !self.held[0] && !self.held[1];
+        if let Some(p) = placed {
+            self.placed = p;
+        }
+        if let Some((hand, h)) = held {
+            self.held[hand] = h;
+        }
+        let at_rest = self.placed && !self.held[0] && !self.held[1];
+        if at_rest && !before {
+            self.rest_at = Some(now);
+        } else if !at_rest {
+            self.rest_at = None;
+        }
+    }
+
+    /// Where the screen is from the eyes, for everyone else's screen (screen version 16): the three floats while it rests, then
+    /// `Settle` for a moment so that theirs goes there. Sent on: a place that changes while the owner walks, for whoever arrives later.
+    fn place_step(&mut self, now: Instant, out: &mut Vec<Message>) {
+        use orbiters_contracts::n4n0::SCREEN_PLACE_RANGE;
+        if !self.place_sync {
+            return;
+        }
+        if let Some(off) = self.settle_off_at.filter(|at| now >= *at) {
+            let _ = off;
+            self.settle_off_at = None;
+            out.push((crate::runtime::parameter(params::SCREEN_SETTLE), OscType::Bool(false)));
+        }
+        if let Some(on) = self.settle_on_at.filter(|at| now >= *at) {
+            let _ = on;
+            self.settle_on_at = None;
+            self.settle_off_at = Some(now + SETTLE_HELD);
+            out.push((crate::runtime::parameter(params::SCREEN_SETTLE), OscType::Bool(true)));
+            self.pointer_log.note("place: Settle on");
+        }
+        if !self.available || !self.menu.open || !self.placed || self.held[0] || self.held[1] || !std::mem::take(&mut self.sight_new) {
+            return;
+        }
+        // Now and then again while the place holds still, for whoever arrived later: a glide of nothing for everyone else.
+        let quiet = self.place_changed_at.is_some_and(|at| now.saturating_duration_since(at) >= PLACE_QUIET);
+        if quiet && self.settled_at.is_some_and(|at| now.saturating_duration_since(at) >= SETTLE_AGAIN) {
+            self.rest_at = self.rest_at.or(Some(now - PLACE_AFTER_REST));
+        }
+        let rested = self.rest_at.is_some_and(|at| now.saturating_duration_since(at) >= PLACE_AFTER_REST);
+        let due = rested || self.place_sent_at.is_none_or(|at| now.saturating_duration_since(at) >= PLACE_EVERY);
+        if !due {
+            return;
+        }
+        let Some(place) = touch::place_from_eyes(self.eye, self.gaze_point, self.geometry_size()) else { return };
+        let steps = place.map(|v| (v / SCREEN_PLACE_RANGE * 127.0).round().clamp(-127.0, 127.0) as i32);
+        if self.place_sent != Some(steps) {
+            self.place_sent = Some(steps);
+            self.place_sent_at = Some(now);
+            self.place_changed_at = Some(now);
+            for (name, step) in [params::SCREEN_PLACE_X, params::SCREEN_PLACE_Y, params::SCREEN_PLACE_Z].into_iter().zip(steps) {
+                out.push((crate::runtime::parameter(name), OscType::Float(step as f32 / 127.0)));
+            }
+        }
+        if rested {
+            self.rest_at = None;
+            self.settle_on_at = Some(now + SETTLE_AFTER_PLACE);
+            self.settled_at = Some(now);
+            self.pointer_log.note(&format!("place: at rest, {:.2} {:.2} {:.2} from the eyes", place[0], place[1], place[2]));
+        }
+    }
+
+    /// How many times its own the screen is, as [`Self::geometry`] was made from it.
+    fn geometry_size(&self) -> f64 {
+        orbiters_contracts::n4n0::AIM_DISTANCE / self.geometry.aim
     }
 
     /// A hand's trigger, pulled or let go (screen version 7: it presses where the finger points).
@@ -825,6 +1067,11 @@ impl ScreenRuntime {
             self.trigger[hand] = down;
             self.pulled[hand] = true;
         }
+    }
+
+    /// A reading is waiting for the last values of its frame.
+    pub(crate) fn fingers_waiting(&self) -> bool {
+        self.menu.open && (self.touched[0] || self.touched[1])
     }
 
     /// The point along an index finger near the screen: one of its four receivers (`N4N0/Screen/Aim/L0` â€¦).
@@ -839,6 +1086,7 @@ impl ScreenRuntime {
         if let Some(i) = chars.as_str().parse::<usize>().ok().filter(|i| *i < 4) {
             self.aim[hand][i] = value;
             self.touched[hand] = true;
+            self.finger_heard = Some(Instant::now());
         }
         true
     }
@@ -865,6 +1113,7 @@ impl ScreenRuntime {
         if let Some(i) = chars.as_str().parse::<usize>().ok().filter(|i| *i < 4) {
             self.proximity[hand][i] = value;
             self.touched[hand] = true;
+            self.finger_heard = Some(Instant::now());
         }
         true
     }
@@ -1592,6 +1841,7 @@ impl N4n0 {
                     }
                 }
                 Effect::FastWalk(on) => self.update_settings(|s| s.walk_boost.enabled = on),
+                Effect::StayHere(on) => self.send_parameter(params::SCREEN_PINNED, OscType::Bool(on)),
                 Effect::CallContact { id } => {
                     let n = self.clone();
                     std::thread::spawn(move || n.host.call(CallRequest::Contact(id)));
@@ -1692,6 +1942,13 @@ impl N4n0 {
             if rt.screen.menu.open {
                 rt.wake();
             }
+        } else if name == params::SCREEN_PINNED {
+            self.n4n0.lock().unwrap().screen.menu.pinned = value.truthy();
+        } else if name == params::SCREEN_PLACED {
+            self.n4n0.lock().unwrap().screen.placed_value(Some(value.truthy()), None, Instant::now());
+        } else if name == params::SCREEN_HELD_LEFT || name == params::SCREEN_HELD_RIGHT {
+            let hand = (name == params::SCREEN_HELD_RIGHT) as usize;
+            self.n4n0.lock().unwrap().screen.placed_value(None, Some((hand, value.truthy())), Instant::now());
         } else if let (true, OscValue::Float(v)) = (name.starts_with(screen::local::EYE_PREFIX) || name.starts_with(screen::local::GAZE_PREFIX), value) {
             // Read at the N4N0 thread's next step, a few milliseconds away while looking points: no wake for each.
             self.n4n0.lock().unwrap().screen.gaze_value(name, *v);
@@ -1856,6 +2113,11 @@ pub(crate) fn tick(
     let presses = s.presses;
     s.point_and_touch(now, &mut followups.effects);
     s.look_and_click(vrchat, now, &mut followups.effects);
+    s.menu.on_screen = s.place_sync;
+    if let Some(busy) = s.busy_step(now) {
+        out.push((crate::runtime::parameter(params::SCREEN_BUSY), OscType::Bool(busy)));
+    }
+    s.place_step(now, &mut out);
     followups.pressed |= s.presses != presses;
     if s.pressed.is_some_and(|(_, at)| now.duration_since(at) > PRESS_SHOWN && !s.holding.iter().any(|h| *h) && !s.clicking) {
         s.pressed = None;
@@ -2110,6 +2372,261 @@ mod tests {
         s.pointing = true;
         s.menu.open();
         s
+    }
+
+    /// A press replayed from what VRChat really sent: the newest recording's contact values, message by message.
+    struct Replay {
+        lines: Vec<(u64, String, f32)>,
+        next: usize,
+    }
+
+    impl Replay {
+        fn rain() -> Self {
+            let lines = include_str!("pointer-rain.txt")
+                .lines()
+                .filter(|l| !l.starts_with('#'))
+                .map(|l| {
+                    let mut f = l.split(' ');
+                    let at: f64 = f.next().unwrap().parse().unwrap();
+                    let name = format!("N4N0/Screen/{}", f.next().unwrap());
+                    let value: f32 = f.next().unwrap().parse().unwrap();
+                    ((at * 1000.0) as u64, name, value)
+                })
+                .collect();
+            Replay { lines, next: 0 }
+        }
+
+        /// Everything up to `until_ms`, reading whenever a frame's messages (2 ms apart at most) are over.
+        fn run(&mut self, s: &mut ScreenRuntime, t0: Instant, until_ms: u64) {
+            while self.next < self.lines.len() && self.lines[self.next].0 <= until_ms * 1000 {
+                let (at, name, value) = &self.lines[self.next];
+                assert!(s.touch_point(name, *value) || s.aim_point(name, *value), "{name}");
+                let last = self.lines.get(self.next + 1).is_none_or(|(next, ..)| next - at > 2000);
+                self.next += 1;
+                if last {
+                    s.point_and_touch(t0 + Duration::from_micros(*at), &mut Vec::new());
+                }
+            }
+        }
+    }
+
+    /// Real geometry in, a press out: the right hand of the newest recording rests its ray on the page (1.25 s to 1.70 s into
+    /// the recording, 0.30 s to 0.75 s here) and a trigger pull there takes what it points at.
+    #[test]
+    fn a_trigger_pull_on_the_real_recording_presses_what_the_right_hand_points_at() {
+        let mut s = ScreenRuntime::default();
+        s.avatar(true, true, Some(8), 72);
+        s.pointing = true;
+        s.menu.pages = Pages::of_screen(Some(14));
+        s.menu.open();
+        let t0 = Instant::now();
+        let mut replay = Replay::rain();
+        replay.run(&mut s, t0, 400);
+        assert_eq!(ScreenPage::of(&s.menu), ScreenPage::HomeQuiet);
+        let hovered = s.hover.expect("the ray of the recording is over the page");
+        let wanted = Frame::layout(&s.menu).elements[hovered].target;
+        s.trigger(true, true);
+        replay.run(&mut s, t0, 460);
+        assert_eq!(s.presses, 1, "{:?}", s.pointer_log.lines);
+        assert_ne!(s.menu.page, Page::Home, "{wanted:?} opened its page");
+        assert!(s.pointer_log.lines.iter().any(|l| l.contains("right trigger press") && l.contains(&format!("{wanted:?}"))), "{:?}", s.pointer_log.lines);
+    }
+
+    /// The same recording's left hand: VRChat's broad phase keeps its aim and drops its fingertip the whole time, the beam shows
+    /// and the app can do nothing: the readout says which sender went, which is what a live test needs to see.
+    #[test]
+    fn the_real_recording_s_left_hand_says_its_fingertip_is_silent() {
+        let mut s = ScreenRuntime::default();
+        s.avatar(true, true, Some(8), 72);
+        s.pointing = true;
+        s.menu.pages = Pages::of_screen(Some(14));
+        s.menu.open();
+        let t0 = Instant::now();
+        let mut replay = Replay::rain();
+        replay.run(&mut s, t0, 600);
+        s.trigger(false, true);
+        replay.run(&mut s, t0, 660);
+        assert_eq!(s.presses, 0);
+        let lines = &s.pointer_log.lines;
+        assert!(lines.iter().any(|l| l.contains("left: tip silent, aim found")), "{lines:?}");
+        assert!(lines.iter().any(|l| l.contains("left trigger: nothing yet, tip silent")), "{lines:?}");
+    }
+
+    /// One hand pointing away does not wipe what the other points at: the left hand's highlight went at every frame the right
+    /// hand reported anything, and its dot was over a button nothing showed as hovered.
+    #[test]
+    fn the_left_hand_hovers_while_the_right_points_away() {
+        let mut s = pointing();
+        let (x, y) = youtube_tile();
+        let t0 = Instant::now();
+        for i in 0..5u64 {
+            point(&mut s, false, [-0.2, -0.15, -0.45], on_screen(x, y));
+            point(&mut s, true, [0.25, -0.3, -0.2], [0.25, -0.3, 0.5 + i as f64 * 0.01]);
+            s.point_and_touch(t0 + Duration::from_millis(30 * i), &mut Vec::new());
+            assert!(s.hover.is_some(), "frame {i}");
+        }
+    }
+
+    /// A little off a small button still takes it, as what is highlighted says; the Back button at the top left is 56 pixels wide.
+    #[test]
+    fn a_ray_just_beside_the_back_button_takes_it_and_shows_it() {
+        let mut s = pointing();
+        s.menu.pages = Pages::of_screen(Some(14));
+        s.menu.press(menu::Target::More);
+        let back = Frame::layout(&s.menu).elements.iter().find(|e| e.target == menu::Target::Back).unwrap().rect;
+        let t0 = Instant::now();
+        let (x, y) = (back.x as f32 + back.w as f32 + 20.0, back.y as f32 + back.h as f32 / 2.0);
+        point(&mut s, true, [0.2, -0.15, -0.3], on_screen(x, y));
+        s.point_and_touch(t0, &mut Vec::new());
+        assert_eq!(s.hover.map(|i| Frame::layout(&s.menu).elements[i].target), Some(menu::Target::Back));
+        s.trigger(true, true);
+        s.point_and_touch(t0 + Duration::from_millis(30), &mut Vec::new());
+        assert_eq!(s.menu.page, Page::Home);
+    }
+
+    /// The pull's jerk does not move the press off the button the ray rested on; a hand that travelled goes by where it arrived.
+    #[test]
+    fn a_trigger_presses_what_the_ray_rested_on_before_the_pull() {
+        let (x, y) = youtube_tile();
+        let next = layout::cached(ScreenPage::Home).elements.iter().find(|e| e.target == menu::Target::Call).unwrap().rect;
+        let t0 = Instant::now();
+        let ms = |n: u64| t0 + Duration::from_millis(n);
+        // Resting on YouTube, then the pull moves the dot 50 pixels up to the next tile's border and over it.
+        let mut s = pointing();
+        let edge = (next.x as f32 + next.w as f32 / 2.0, next.y as f32 + 4.0);
+        let rest = (edge.0, edge.1 - 30.0);
+        let _ = (x, y);
+        for i in 0..4u64 {
+            point(&mut s, true, [0.2, -0.15, -0.35], on_screen(rest.0, rest.1));
+            s.point_and_touch(ms(i * 30), &mut Vec::new());
+        }
+        let resting = s.hover;
+        point(&mut s, true, [0.2, -0.15, -0.35], on_screen(edge.0, edge.1 + 10.0));
+        s.trigger(true, true);
+        s.point_and_touch(ms(120), &mut Vec::new());
+        assert_eq!(s.pressed.map(|(i, _)| i), resting, "what it rested on");
+    }
+
+    /// Stay here says so to the avatar, shows on, takes what the Action Menu set, and only exists where the screen can stay.
+    #[test]
+    fn stay_here_is_on_home_and_follows_the_avatar() {
+        let mut s = pointing();
+        s.menu.pages = Pages::of_screen(Some(16));
+        s.menu.on_screen = true;
+        assert_eq!(ScreenPage::of(&s.menu), ScreenPage::HomeQuietStay);
+        let l = Frame::layout(&s.menu);
+        let (index, e) = l.elements.iter().enumerate().find(|(_, e)| e.target == menu::Target::StayHere).expect("the button");
+        assert!(!layout::state(&s.menu, e).on);
+        let t0 = Instant::now();
+        point(&mut s, true, [0.2, 0.0, -0.3], on_screen(e.rect.x as f32 + 40.0, e.rect.y as f32 + 20.0));
+        s.point_and_touch(t0, &mut Vec::new());
+        assert_eq!(s.hover, Some(index));
+        s.trigger(true, true);
+        let mut effects = Vec::new();
+        s.point_and_touch(t0 + Duration::from_millis(30), &mut effects);
+        assert_eq!(effects, vec![Effect::StayHere(true)]);
+        assert!(layout::state(&s.menu, e).on, "its ring shows at once");
+        assert_eq!(s.menu.page, Page::Home, "the menu stays on Home");
+        s.menu.on_screen = false;
+        assert!(layout::state(&s.menu, e).hidden, "the overlay's menu has none");
+    }
+
+    /// A hand at the screen holds it still: `N4N0/Screen/Busy` says so, and goes off a moment after the hand left.
+    #[test]
+    fn a_hand_at_the_screen_keeps_it_from_moving() {
+        let mut s = pointing();
+        s.place_sync = true;
+        let t0 = Instant::now();
+        assert_eq!(s.busy_step(t0), Some(false));
+        point(&mut s, true, [0.2, 0.0, -0.3], on_screen(400.0, 300.0));
+        s.point_and_touch(t0, &mut Vec::new());
+        assert_eq!(s.busy_step(t0), Some(true));
+        assert_eq!(s.busy_step(t0 + Duration::from_millis(100)), None);
+        point(&mut s, true, [0.2, 0.0, -0.3], [3.0, 0.0, -0.1]);
+        s.point_and_touch(t0 + Duration::from_millis(200), &mut Vec::new());
+        assert_eq!(s.busy_step(t0 + Duration::from_millis(300)), None, "a moment after the hand left");
+        assert_eq!(s.busy_step(t0 + Duration::from_millis(1200)), Some(false));
+        // A screen of an older N4N0 has no such thing.
+        let mut old = pointing();
+        assert_eq!(old.busy_step(t0), None);
+    }
+
+    /// A screen that glides onto a resting finger presses nothing; once at rest the same finger presses by moving in.
+    #[test]
+    fn a_screen_moving_under_a_finger_presses_nothing() {
+        let mut s = pointing();
+        let (x, y) = youtube_tile();
+        let at = on_screen(x, y);
+        let t0 = Instant::now();
+        let ms = |n: u64| t0 + Duration::from_millis(n);
+        s.placed_value(Some(false), None, t0);
+        for (i, z) in [-0.05, -0.03, -0.015, -0.005].into_iter().enumerate() {
+            point(&mut s, true, [at[0], at[1], z], [at[0], at[1], 1.0]);
+            s.point_and_touch(ms(i as u64 * 30), &mut Vec::new());
+        }
+        assert_eq!(s.presses, 0);
+        s.placed_value(Some(true), None, ms(150));
+        for (i, z) in [-0.05, -0.005].into_iter().enumerate() {
+            point(&mut s, true, [at[0], at[1], z], [at[0], at[1], 1.0]);
+            s.point_and_touch(ms(200 + i as u64 * 30), &mut Vec::new());
+        }
+        assert_eq!(s.presses, 1);
+    }
+
+    /// Where the screen is from the eyes goes to everyone else, then Settle puts their screen there; a place that drifts as
+    /// the owner walks away from a screen that stays is sent, and moves nobody's screen.
+    #[test]
+    fn the_screen_s_place_goes_to_everyone_else_when_it_rests() {
+        let mut s = pointing();
+        s.place_sync = true;
+        let t0 = Instant::now();
+        let ms = |n: u64| t0 + Duration::from_millis(n);
+        s.placed_value(Some(false), None, t0);
+        s.placed_value(Some(true), None, ms(10));
+        // The eyes 0.45 m before the middle and 0.06 m above it, looking at it.
+        let reading = |at: [f64; 3], radius: f64| {
+            touch::RECEIVERS.map(|c| {
+                let d = ((at[0] - c[0]).powi(2) + (at[1] - c[1]).powi(2) + (at[2] - c[2]).powi(2)).sqrt() - 0.01;
+                (1.0 - d / radius).clamp(0.0, 1.0) as f32
+            })
+        };
+        let sight = |s: &mut ScreenRuntime, eyes: [f64; 3]| {
+            for (i, v) in reading(eyes, touch::RADIUS).into_iter().enumerate() {
+                assert!(s.gaze_value(&format!("{}{i}", screen::local::EYE_PREFIX), v));
+            }
+            let along = [-eyes[0], -eyes[1], -eyes[2]];
+            let l = (along[0] * along[0] + along[1] * along[1] + along[2] * along[2]).sqrt();
+            let gaze = [0, 1, 2].map(|i| eyes[i] + along[i] / l * 0.38);
+            for (i, v) in reading(gaze, touch::RADIUS).into_iter().enumerate() {
+                assert!(s.gaze_value(&format!("{}{i}", screen::local::GAZE_PREFIX), v));
+            }
+        };
+        let sent = |out: &[Message], name: &str| out.iter().find(|(n, _)| n.ends_with(name)).map(|(_, v)| v.clone());
+        let mut out = Vec::new();
+        sight(&mut s, [0.0, 0.06, -0.45]);
+        s.place_step(ms(100), &mut out);
+        let first = out.clone();
+        assert!(sent(&first, "PlaceZ").is_some(), "known at once, for whoever arrives");
+        out.clear();
+        sight(&mut s, [0.0, 0.06, -0.45]);
+        s.place_step(ms(500), &mut out);
+        assert!(sent(&out, "Settle").is_none());
+        out.clear();
+        s.place_step(ms(1200), &mut out);
+        assert_eq!(sent(&out, "Settle"), Some(OscType::Bool(true)), "{out:?}");
+        out.clear();
+        s.place_step(ms(2500), &mut out);
+        assert_eq!(sent(&out, "Settle"), Some(OscType::Bool(false)));
+        let OscType::Float(z) = sent(&first, "PlaceZ").unwrap() else { panic!() };
+        assert!((z as f64 * orbiters_contracts::n4n0::SCREEN_PLACE_RANGE - 0.454).abs() < 0.02, "{z}");
+        // The owner stepped back from the screen that stays: the float says so, Settle stays off.
+        out.clear();
+        sight(&mut s, [0.0, 0.06, -0.6]);
+        s.place_step(ms(4000), &mut out);
+        let OscType::Float(z) = sent(&out, "PlaceZ").expect("sent") else { panic!() };
+        assert!((z as f64 * orbiters_contracts::n4n0::SCREEN_PLACE_RANGE - 0.603).abs() < 0.02, "{z}");
+        s.place_step(ms(6000), &mut out);
+        assert!(sent(&out, "Settle").is_none());
     }
 
     #[test]

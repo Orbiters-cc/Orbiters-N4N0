@@ -33,6 +33,7 @@ pub mod texture;
 pub mod world;
 pub mod yaml;
 
+use orbiters_i18n::tr;
 use crate::preview;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -346,7 +347,7 @@ pub fn list(project: &Path) -> Vec<Slot> {
                 path: project.join(&h.path),
                 rel: h.path.clone(),
                 guid: h.guid.clone(),
-                name: if h.name.is_empty() { "Scene".into() } else { h.name.clone() },
+                name: if h.name.is_empty() { tr("Scene").into() } else { h.name.clone() },
                 modified: e.modified,
                 last_open: false,
                 in_build: false,
@@ -461,7 +462,7 @@ pub fn build_scene(project: &Path, scene: &SceneInfo, limits: &Limits) -> Result
     };
     match result {
         Ok(b) => {
-            write_atomic(&preview_path, &b.bytes).map_err(|e| format!("could not keep it: {e}"))?;
+            write_atomic(&preview_path, &b.bytes).map_err(|e| tr!("could not keep it: {error}", error = e))?;
             let _ = write_atomic(&dir.join(format!("{}.json", scene.guid)), &serde_json::to_vec_pretty(&record).unwrap_or_default());
             let meta = std::fs::metadata(&preview_path).map_err(|e| e.to_string())?;
             trim(&cache_root());

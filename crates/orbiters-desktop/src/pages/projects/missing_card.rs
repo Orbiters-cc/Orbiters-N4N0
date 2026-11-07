@@ -3,6 +3,7 @@
 //! catalog, the person's repositories turned off, Orbiters listings), shows which repository will be added for which
 //! package (and the packages nobody provides, or not at the version needed) and, confirmed, adds them and runs the
 //! change that failed again; the card goes once it succeeds.
+use orbiters_i18n::tr;
 use super::state::{Modal, Outcome, State};
 use crate::pages::Job;
 use egui::{pos2, vec2, Align2, Id, Rect, Sense, Shape, Ui, UiBuilder};
@@ -61,9 +62,7 @@ pub(super) fn show(ui: &mut Ui, state: &mut State, salt: &str) -> bool {
         card.lookup = Some(r);
     }
     let (packages, lookup, looking) = (card.packages.clone(), card.lookup.clone(), card.looking() || card.fixture_looking);
-    let retrying = state.action.running() && state.action_label.starts_with("Adding");
-    let fixture_retrying = state.fixture_action.as_deref().is_some_and(|l| l.starts_with("Adding"));
-    let retrying = retrying || fixture_retrying;
+    let retrying = state.adding_repositories && state.running();
     let w = ui.available_width();
     let top_left = ui.cursor().min;
     let bg = ui.painter().add(Shape::Noop);
@@ -71,29 +70,29 @@ pub(super) fn show(ui: &mut Ui, state: &mut State, salt: &str) -> bool {
     let mut cu = ui.new_child(UiBuilder::new().max_rect(inner).layout(egui::Layout::top_down(egui::Align::Min)).id_salt(("missing-card", salt)));
     cu.spacing_mut().item_spacing = vec2(8.0, 6.0);
     let n = packages.len();
-    para(&mut cu, Txt::new(if n == 1 { "A package this project needs is in none of your repositories" } else { "Packages this project needs are in none of your repositories" }, 13.0).weight(weight::SEMIBOLD).line_height(19.0));
+    para(&mut cu, Txt::new(if n == 1 { tr("A package this project needs is in none of your repositories") } else { tr("Packages this project needs are in none of your repositories") }, 13.0).weight(weight::SEMIBOLD).line_height(19.0));
     let names: Vec<String> = packages.iter().map(label).collect();
     para(&mut cu, Txt::new(names.join(" · "), 12.0).color(theme::FG_2).line_height(17.0));
     let mut act: Option<Act> = None;
     let busy = state.acting().is_some() && !retrying;
     if retrying {
-        status(&mut cu, state.acting().unwrap_or("Adding the repositories…"));
+        status(&mut cu, state.acting().unwrap_or(tr("Adding the repositories…")));
     } else if looking {
-        status(&mut cu, "Looking for their repositories…");
+        status(&mut cu, tr("Looking for their repositories…"));
     } else {
         match &lookup {
             None => {
                 cu.add_space(2.0);
-                let b = Button::new("Add their repositories").icon(icons::PLUS).variant(Variant::Primary).size(Size::Sm).enabled(!busy).id_salt(("missing-find", salt));
-                let resp = b.show(&mut cu).on_hover_text("Finds which repositories have these packages (Orbiters' Known VPM first) and shows them before adding");
+                let b = Button::new(tr("Add their repositories")).icon(icons::PLUS).variant(Variant::Primary).size(Size::Sm).enabled(!busy).id_salt(("missing-find", salt));
+                let resp = b.show(&mut cu).on_hover_text(tr("Finds which repositories have these packages (Orbiters' Known VPM first) and shows them before adding"));
                 state.anchors.insert("missing-find".into(), resp.rect);
                 if widgets::activated(&resp) {
                     act = Some(Act::Find);
                 }
             }
             Some(Err(e)) => {
-                para(&mut cu, Txt::new(format!("Their repositories could not be looked up: {e}"), 12.0).color(theme::FG_2).line_height(17.0));
-                if widgets::activated(&Button::new("Try again").variant(Variant::Secondary).size(Size::Sm).id_salt(("missing-again", salt)).show(&mut cu)) {
+                para(&mut cu, Txt::new(tr!("Their repositories could not be looked up: {error}", error = e), 12.0).color(theme::FG_2).line_height(17.0));
+                if widgets::activated(&Button::new(tr("Try again")).variant(Variant::Secondary).size(Size::Sm).id_salt(("missing-again", salt)).show(&mut cu)) {
                     act = Some(Act::Find);
                 }
             }
@@ -104,28 +103,28 @@ pub(super) fn show(ui: &mut Ui, state: &mut State, salt: &str) -> bool {
                     addition(&mut cu, a);
                 }
                 for l in &lookup.not_listed {
-                    let has = if l.versions.is_empty() { "no version".to_string() } else { l.versions.join(", ") };
-                    line(&mut cu, icons::WARNING, theme::WARN, &format!("{}: {} lists {has}, not this version", label(&l.package), l.repository));
+                    let has = if l.versions.is_empty() { tr("no version").to_string() } else { l.versions.join(", ") };
+                    line(&mut cu, icons::WARNING, theme::WARN, &tr!("{package}: {repository} lists {has}, not this version", package = label(&l.package), repository = l.repository, has = has));
                 }
                 for m in &lookup.not_provided {
-                    line(&mut cu, icons::X_CIRCLE, theme::DANGER, &format!("{}: no repository Orbiters knows provides it", label(m)));
+                    line(&mut cu, icons::X_CIRCLE, theme::DANGER, &tr!("{package}: no repository Orbiters knows provides it", package = label(m)));
                 }
                 cu.add_space(4.0);
                 cu.horizontal(|ui| {
                     if additions.is_empty() {
-                        let resp = Button::new("Package repos").icon(icons::PLUS).variant(Variant::Secondary).size(Size::Sm).id_salt(("missing-repos", salt)).show(ui);
+                        let resp = Button::new(tr("Package repos")).icon(icons::PLUS).variant(Variant::Secondary).size(Size::Sm).id_salt(("missing-repos", salt)).show(ui);
                         if widgets::activated(&resp) {
                             act = Some(Act::Repos(resp.rect));
                         }
                     } else {
                         let n = additions.len();
-                        let text = if n == 1 { "Add it and retry".to_string() } else { format!("Add {n} repositories and retry") };
+                        let text = if n == 1 { tr("Add it and retry").to_string() } else { tr!("Add {n} repositories and retry", n = n) };
                         let resp = Button::new(&text).icon(icons::PLUS).variant(Variant::Primary).size(Size::Sm).enabled(!busy).id_salt(("missing-add", salt)).show(ui);
                         state.anchors.insert("missing-add".into(), resp.rect);
                         if widgets::activated(&resp) {
                             act = Some(Act::Add(additions.clone()));
                         }
-                        if widgets::activated(&Button::new("Cancel").variant(Variant::Ghost).size(Size::Sm).id_salt(("missing-cancel", salt)).show(ui)) {
+                        if widgets::activated(&Button::new(tr("Cancel")).variant(Variant::Ghost).size(Size::Sm).id_salt(("missing-cancel", salt)).show(ui)) {
                             act = Some(Act::Cancel);
                         }
                     }
@@ -140,7 +139,7 @@ pub(super) fn show(ui: &mut Ui, state: &mut State, salt: &str) -> bool {
     widgets::icon(p, pos2(rect.left() + 24.0, rect.top() + 21.5), icons::WARNING, 16.0, theme::DANGER);
     let x = Rect::from_center_size(pos2(rect.right() - 22.0, rect.top() + 21.5), vec2(28.0, 28.0));
     let mut xu = ui.new_child(UiBuilder::new().max_rect(x).id_salt(("missing-dismiss", salt)));
-    if !retrying && widgets::activated(&IconButton::new(icons::X, "Dismiss").size(28.0, 14.0).id_salt(("missing-x", salt)).show_at(&mut xu, x)) {
+    if !retrying && widgets::activated(&IconButton::new(icons::X, tr("Dismiss")).size(28.0, 14.0).id_salt(("missing-x", salt)).show_at(&mut xu, x)) {
         act = Some(Act::Dismiss);
     }
     ui.allocate_exact_size(vec2(w, h), Sense::hover());
@@ -191,14 +190,14 @@ fn status(ui: &mut Ui, text: &str) {
 fn addition(ui: &mut Ui, a: &missing::Addition) {
     let w = ui.available_width();
     let pkgs: Vec<String> = a.packages.iter().map(|(n, v)| format!("{n} {v}")).collect();
-    let body = Txt::new(format!("for {}", pkgs.join(", ")), 11.5).color(theme::FG_3).line_height(16.0);
+    let body = Txt::new(tr!("for {packages}", packages = pkgs.join(", ")), 11.5).color(theme::FG_3).line_height(16.0);
     let galley = ui.painter().layout_job(body.job(w - 40.0));
     let h = 22.0 + galley.size().y + 10.0;
     let (r, _) = ui.allocate_exact_size(vec2(w, h), Sense::hover());
     let p = ui.painter();
     widgets::frame(p, r, 10.0, theme::black(0.22));
     widgets::icon(p, pos2(r.left() + 16.0, r.top() + 16.0), if a.turn_on.is_some() { icons::EYE } else { icons::PLUS }, 13.0, theme::ACCENT);
-    let verb = if a.turn_on.is_some() { "Turn on" } else { "Add" };
+    let verb = if a.turn_on.is_some() { tr("Turn on") } else { tr("Add") };
     let name = widgets::text_truncated(
         p,
         pos2(r.left() + 30.0, r.top() + 16.0),
@@ -224,14 +223,15 @@ fn add_and_retry(ctx: &egui::Context, state: &mut State, additions: Vec<missing:
     let Some(card) = state.missing.as_ref() else { return };
     let (path, change) = (card.path.clone(), card.change.clone());
     let n = additions.len();
-    let label = if n == 1 { format!("Adding {}…", additions[0].name) } else { format!("Adding {n} repositories…") };
+    let label = if n == 1 { tr!("Adding {name}…", name = additions[0].name) } else { tr!("Adding {n} repositories…", n = n) };
     state.last_change = Some((path.clone(), change.clone()));
+    state.adding_repositories = true;
     state.task(ctx, &label, move || {
         let root = orbiters_projects::vcc_dir();
         orbiters_projects::runtime()?.block_on(async {
             missing::add(&root, &additions).await?;
             vpm::change(&root, &path, change).await
         })?;
-        Ok(Outcome::Changed(if n == 1 { "Repository added: the packages are installed".into() } else { format!("{n} repositories added: the packages are installed") }))
+        Ok(Outcome::Changed(if n == 1 { tr("Repository added: the packages are installed").into() } else { tr!("{n} repositories added: the packages are installed", n = n) }))
     });
 }

@@ -14,6 +14,7 @@
 //! The dialog follows its content's height with a spring, which would make it jump about with every key pressed: the
 //! section keeps the room the whole list would take in the window, however few cards the query leaves.
 
+use orbiters_i18n::{mark, tr, tr_n};
 use super::art::{self, glyph};
 use super::state::State;
 use egui::{pos2, vec2, Align2, Color32, Id, Key, Modifiers, Rect, Sense, Ui, UiBuilder};
@@ -46,7 +47,7 @@ const FLOW_GAP: f32 = 12.0;
 const SKELETONS: usize = 6;
 /// Seconds after a scroll before a card under the pointer says more about itself.
 const HINT_AFTER_SCROLL: f32 = 0.8;
-const SEARCH_HINT: &str = "Search packages, repositories, owners and descriptions";
+const SEARCH_HINT: &str = mark("Search packages, repositories, owners and descriptions");
 
 /// How far apart rows are.
 const PITCH: f32 = CARD_H + GAP;
@@ -88,9 +89,9 @@ fn section_height(shown: f32, whole: f32, view_h: f32, at_least: f32) -> f32 {
 pub(super) fn section(ui: &mut Ui, state: &mut State) -> bool {
     let loading = state.catalog_job.running();
     if state.suggestions.total() == 0 && !loading {
-        art::caps(ui, "Suggested");
+        art::caps(ui, tr("Suggested"));
         if state.catalog.errors.is_empty() {
-            widgets::text(ui.painter(), ui.cursor().min + vec2(0.0, 10.0), Align2::LEFT_CENTER, &Txt::new("No suggestion right now.", 12.5).color(theme::FG_3));
+            widgets::text(ui.painter(), ui.cursor().min + vec2(0.0, 10.0), Align2::LEFT_CENTER, &Txt::new(tr("No suggestion right now."), 12.5).color(theme::FG_3));
             ui.add_space(20.0);
             return false;
         }
@@ -144,7 +145,7 @@ pub(super) fn section(ui: &mut Ui, state: &mut State) -> bool {
         state.repo_query.clear();
         bu.memory_mut(|m| m.request_focus(field_id));
     }
-    let field = widgets::search_field_clearable(&mut bu, "repo-search", &mut state.repo_query, SEARCH_HINT, w);
+    let field = widgets::search_field_clearable(&mut bu, "repo-search", &mut state.repo_query, tr(SEARCH_HINT), w);
     let in_field = field.has_focus();
     ctx.data_mut(|d| d.insert_temp(id.with("in-field"), in_field));
     if state.fixture {
@@ -234,19 +235,19 @@ fn cell(left: f32, top: f32, i: usize, cols: usize, card_w: f32) -> Rect {
 fn heading(ui: &mut Ui, state: &State, loading: bool) {
     let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), CAPS_H), Sense::hover());
     let p = ui.painter();
-    widgets::text(p, r.left_center(), Align2::LEFT_CENTER, &Txt::caps("Suggested"));
+    widgets::text(p, r.left_center(), Align2::LEFT_CENTER, &Txt::caps(tr("Suggested")));
     let (total, shown) = (state.suggestions.total(), state.suggestions.hits().len());
-    let working = state.acting().map(str::to_string).or_else(|| (loading && total == 0).then(|| "Loading…".to_string()));
+    let working = state.acting().map(str::to_string).or_else(|| (loading && total == 0).then(|| tr("Loading…").to_string()));
     if let Some(label) = working {
         let t = Txt::new(label, 11.5).color(theme::FG_2);
-        let tr = widgets::text_truncated(p, r.right_center(), Align2::RIGHT_CENTER, &t, r.width() - 110.0);
-        feedback::spinner(p, pos2(tr.left() - 11.0, r.center().y), 5.0, 1.6, theme::ACCENT);
+        let title_end = widgets::text_truncated(p, r.right_center(), Align2::RIGHT_CENTER, &t, r.width() - 110.0);
+        feedback::spinner(p, pos2(title_end.left() - 11.0, r.center().y), 5.0, 1.6, theme::ACCENT);
         return;
     }
     let count = if state.suggestions.searching() {
-        format!("{shown} of {total}")
+        tr!("{shown} of {total}", shown = shown, total = total)
     } else {
-        format!("{total} {}", if total == 1 { "repository" } else { "repositories" })
+        tr_n("{count} repository", "{count} repositories", total as u64)
     };
     widgets::text(
         p,
@@ -315,11 +316,11 @@ fn card(ui: &mut Ui, state: &mut State, suggestions: &Suggestions, hit: &Hit, r:
     let mut pressed = false;
     let mut button_left = r.right() - PAD;
     if adding {
-        let t = widgets::text(&p, pos2(button_left, foot_y), Align2::RIGHT_CENTER, &Txt::new("Adding…", 12.0).color(theme::FG_2));
+        let t = widgets::text(&p, pos2(button_left, foot_y), Align2::RIGHT_CENTER, &Txt::new(tr("Adding…"), 12.0).color(theme::FG_2));
         feedback::spinner(&p, pos2(t.left() - 13.0, foot_y), 6.5, 2.0, theme::ACCENT);
         button_left = t.left() - 24.0;
     } else {
-        let b = Button::new(if added { "Added" } else { "Add" })
+        let b = Button::new(if added { tr("Added") } else { tr("Add") })
             .icon(if added { orbiters_ui::icons::CHECK } else { orbiters_ui::icons::PLUS })
             .size(Size::Sm)
             .enabled(!added && !busy)
@@ -337,9 +338,8 @@ fn card(ui: &mut Ui, state: &mut State, suggestions: &Suggestions, hit: &Hit, r:
     }
     if let Some(n) = l.package_total() {
         let label = match n {
-            0 => "No packages".to_string(),
-            1 => "1 package".to_string(),
-            n => format!("{n} packages"),
+            0 => tr("No packages").to_string(),
+            n => tr_n("{count} package", "{count} packages", n as u64),
         };
         widgets::icon(&p, pos2(left + 6.5, foot_y), glyph::PACKAGE, 13.0, theme::FG_4);
         widgets::text_truncated(&p, pos2(left + 18.0, foot_y), Align2::LEFT_CENTER, &Txt::new(label, 11.5).color(theme::FG_3), button_left - 8.0 - left - 18.0);
@@ -356,7 +356,7 @@ fn card(ui: &mut Ui, state: &mut State, suggestions: &Suggestions, hit: &Hit, r:
 fn card_hint(l: &Listing) -> String {
     let mut hint = l.name.clone();
     if !l.owner.is_empty() {
-        hint.push_str(&format!(" by {}", l.owner));
+        hint = tr!("{name} by {owner}", name = l.name, owner = l.owner);
     }
     if !l.description.is_empty() {
         hint.push_str(&format!("\n{}", l.description));
@@ -366,11 +366,9 @@ fn card_hint(l: &Listing) -> String {
         const NAMED: usize = 6;
         let names: Vec<&str> =
             l.packages.iter().take(NAMED).map(|p| if p.display_name.is_empty() { p.name.as_str() } else { p.display_name.as_str() }).collect();
-        hint.push_str(&format!("\n\n{}", names.join(", ")));
         let more = l.package_total().unwrap_or(0).saturating_sub(NAMED);
-        if more > 0 {
-            hint.push_str(&format!(" and {more} more"));
-        }
+        let listed = if more > 0 { tr!("{names} and {more} more", names = names.join(", "), more = more) } else { names.join(", ") };
+        hint.push_str(&format!("\n\n{listed}"));
     }
     hint
 }
@@ -401,17 +399,17 @@ fn nothing_found(ui: &mut Ui, state: &mut State, area: Rect) {
         &p,
         pos2(c, top + 68.0),
         Align2::CENTER_CENTER,
-        &Txt::new(format!("Nothing matches “{query}”"), 14.5).weight(weight::SEMIBOLD),
+        &Txt::new(tr!("Nothing matches “{query}”", query = query), 14.5).weight(weight::SEMIBOLD),
         area.width() - 48.0,
     );
     widgets::text_truncated(
         &p,
         pos2(c, top + 90.0),
         Align2::CENTER_CENTER,
-        &Txt::new("Try fewer words, or the name of a package, a repository or its owner.", 12.5).color(theme::FG_3),
+        &Txt::new(tr("Try fewer words, or the name of a package, a repository or its owner."), 12.5).color(theme::FG_3),
         area.width() - 48.0,
     );
-    let b = Button::new("Clear the search").icon(orbiters_ui::icons::X).size(Size::Sm).id_salt("repo-search-clear");
+    let b = Button::new(tr("Clear the search")).icon(orbiters_ui::icons::X).size(Size::Sm).id_salt("repo-search-clear");
     let bw = b.desired_width(ui);
     let br = Rect::from_center_size(pos2(c, top + 128.0), vec2(bw, 32.0));
     if state.fixture {
@@ -432,16 +430,16 @@ fn unreachable(ui: &mut Ui, state: &mut State) -> bool {
     let top = r.top() + 20.0;
     art::tile(&p, Rect::from_center_size(pos2(c, top + 22.0), vec2(44.0, 44.0)), orbiters_ui::icons::WARNING, theme::WARN);
     let title =
-        widgets::text(&p, pos2(c, top + 62.0), Align2::CENTER_CENTER, &Txt::new("Orbiters' suggestions could not be loaded", 14.5).weight(weight::SEMIBOLD));
+        widgets::text(&p, pos2(c, top + 62.0), Align2::CENTER_CENTER, &Txt::new(tr("Orbiters' suggestions could not be loaded"), 14.5).weight(weight::SEMIBOLD));
     widgets::text_truncated(
         &p,
         pos2(c, top + 84.0),
         Align2::CENTER_CENTER,
-        &Txt::new("Your repositories still work, and you can add one by its address above.", 12.5).color(theme::FG_3),
+        &Txt::new(tr("Your repositories still work, and you can add one by its address above."), 12.5).color(theme::FG_3),
         w - 48.0,
     );
     let _ = ui.interact(title, Id::unique("repo-cards-unreachable"), Sense::hover()).on_hover_text(state.catalog.errors.join("\n"));
-    let b = Button::new("Try again").icon(orbiters_ui::icons::ARROW_COUNTER_CLOCKWISE).size(Size::Sm).id_salt("catalog-retry");
+    let b = Button::new(tr("Try again")).icon(orbiters_ui::icons::ARROW_COUNTER_CLOCKWISE).size(Size::Sm).id_salt("catalog-retry");
     let bw = b.desired_width(ui);
     widgets::activated(&b.show_at(ui, Rect::from_center_size(pos2(c, top + 122.0), vec2(bw, 32.0))))
 }
@@ -456,7 +454,7 @@ fn partly_loaded(ui: &mut Ui, state: &mut State, view: Rect, shift: f32) -> bool
     let p = nu.painter().clone();
     widgets::frame(&p, r, 14.0, theme::alpha(Tone::Warn.color(), 0.1));
     widgets::icon(&p, pos2(r.left() + 24.0, r.center().y), orbiters_ui::icons::WARNING, 16.0, Tone::Warn.color());
-    let b = Button::new("Try again")
+    let b = Button::new(tr("Try again"))
         .icon(orbiters_ui::icons::ARROW_COUNTER_CLOCKWISE)
         .variant(Variant::Ghost)
         .size(Size::Sm)
@@ -467,7 +465,7 @@ fn partly_loaded(ui: &mut Ui, state: &mut State, view: Rect, shift: f32) -> bool
         &p,
         pos2(r.left() + 44.0, r.center().y),
         Align2::LEFT_CENTER,
-        &Txt::new("Some suggestions could not be loaded.", 13.0),
+        &Txt::new(tr("Some suggestions could not be loaded."), 13.0),
         r.width() - 44.0 - bw - 20.0,
     );
     widgets::activated(&b.show_at(&mut nu, Rect::from_min_size(pos2(r.right() - 10.0 - bw, r.center().y - 16.0), vec2(bw, 32.0))))
@@ -479,9 +477,9 @@ impl State {
         self.modal = Some(super::state::Modal::Repos);
         let catalog = match name {
             "projects-repos-unreachable" => {
-                network::Catalog { errors: vec!["vpm/known: connection refused".into(), "vpm/public: connection refused".into()], ..Default::default() }
+                network::Catalog { errors: vec!["vpm/known: connection refused".into(), "vpm/public: connection refused".into()], ..Default::default() } // i18n: not shown (sample catalog data of a screenshot scene)
             }
-            "projects-repos-partly" => network::Catalog { errors: vec!["vpm/public: connection refused".into()], ..fixture_catalog() },
+            "projects-repos-partly" => network::Catalog { errors: vec!["vpm/public: connection refused".into()], ..fixture_catalog() }, // i18n: not shown (sample catalog data of a screenshot scene)
             // The server's answer until owners, descriptions and packages land.
             "projects-repos-bare" => {
                 let mut c = fixture_catalog();
@@ -514,7 +512,7 @@ impl State {
                     let mut r = template.clone();
                     r.builtin = false;
                     r.id = format!("extra-{i}");
-                    r.name = format!("Extra repository {i}");
+                    r.name = format!("Extra repository {i}"); // i18n: not shown (sample catalog data of a screenshot scene)
                     r.url = format!("https://extra{i}.example.com/index.json");
                     self.view.repos.push(r);
                 }
@@ -526,7 +524,7 @@ impl State {
                 (r.url, r.builtin, r.id) = (added.clone(), false, "added".into());
                 self.view.repos.push(r);
                 self.repo_adding = Some(self.suggestions.listing(&self.suggestions.hits()[2]).url.clone());
-                self.fixture_action = Some("Adding the repository…".into());
+                self.fixture_action = Some(tr("Adding the repository…").into());
             }
             _ => {}
         }
@@ -555,27 +553,27 @@ pub(super) fn fixture_catalog() -> network::Catalog {
     type Fixture<'a> = (&'a str, &'a str, &'a str, &'a str, usize, &'a [(&'a str, &'a str)]);
     let real: &[Fixture] = &[
         (
-            "32ba VPM repository",
+            "32ba VPM repository", // i18n: not shown (sample catalog data of a screenshot scene)
             "32ba",
             "https://vpm.32ba.net/index.json",
-            "Small editor tools for lighting, baking and scene cleanup.",
+            "Small editor tools for lighting, baking and scene cleanup.", // i18n: not shown (sample catalog data of a screenshot scene)
             6,
-            &[("net.32ba.lightprobe", "LightProbe Helper")],
+            &[("net.32ba.lightprobe", "LightProbe Helper")], // i18n: not shown (sample catalog data of a screenshot scene)
         ),
         (
-            "AAO: Avatar Optimizer",
+            "AAO: Avatar Optimizer", // i18n: not shown (sample catalog data of a screenshot scene)
             "anatawa12",
             "https://vpm.anatawa12.com/vpm.json",
-            "Non-destructive optimization: merges meshes, removes unused blendshapes and bones.",
+            "Non-destructive optimization: merges meshes, removes unused blendshapes and bones.", // i18n: not shown (sample catalog data of a screenshot scene)
             3,
-            &[("com.anatawa12.avatar-optimizer", "AAO Avatar Optimizer")],
+            &[("com.anatawa12.avatar-optimizer", "AAO Avatar Optimizer")], // i18n: not shown (sample catalog data of a screenshot scene)
         ),
-        ("AITSYS VCC", "AITSYS", "https://vcc.aitsys.dev/index.json", "", 12, &[("dev.aitsys.lens", "Lens Setup"), ("dev.aitsys.udon", "Udon Extras")]),
+        ("AITSYS VCC", "AITSYS", "https://vcc.aitsys.dev/index.json", "", 12, &[("dev.aitsys.lens", "Lens Setup"), ("dev.aitsys.udon", "Udon Extras")]), // i18n: not shown (sample catalog data of a screenshot scene)
         (
             "AjisaiFlow",
             "lighfu",
             "https://lighfu.github.io/vpm/index.json",
-            "Dressing and weight transfer helpers for Japanese avatar outfits.",
+            "Dressing and weight transfer helpers for Japanese avatar outfits.", // i18n: not shown (sample catalog data of a screenshot scene)
             4,
             &[("com.lighfu.ajisai", "AjisaiFlow")],
         ),
@@ -585,32 +583,32 @@ pub(super) fn fixture_catalog() -> network::Catalog {
             "https://vpm.noctlab.com/vpm.json",
             "夜の撮影ワールド向けのシェーダーとライティングツール集です。",
             5,
-            &[("com.noctlab.shader", "NoctLab Shader")],
+            &[("com.noctlab.shader", "NoctLab Shader")], // i18n: not shown (sample catalog data of a screenshot scene)
         ),
-        ("Akiiray VPM Repository", "Akiiray", "https://akiiray.github.io/vpm-repository/index.json", "", 1, &[("com.akiiray.gesture", "Gesture Bits")]),
+        ("Akiiray VPM Repository", "Akiiray", "https://akiiray.github.io/vpm-repository/index.json", "", 1, &[("com.akiiray.gesture", "Gesture Bits")]), // i18n: not shown (sample catalog data of a screenshot scene)
         (
             "bd_",
             "bdunderscore",
             "https://vpm.nadena.dev/vpm.json",
-            "Non-destructive avatar assembly tools.",
+            "Non-destructive avatar assembly tools.", // i18n: not shown (sample catalog data of a screenshot scene)
             4,
-            &[("nadena.dev.modular-avatar", "Modular Avatar"), ("nadena.dev.ndmf", "Non-Destructive Modular Framework")],
+            &[("nadena.dev.modular-avatar", "Modular Avatar"), ("nadena.dev.ndmf", "Non-Destructive Modular Framework")], // i18n: not shown (sample catalog data of a screenshot scene)
         ),
         (
             "VRCFury",
             "VRCFury",
             "https://vcc.vrcfury.com",
-            "Non-destructive tools that merge props, toggles and gestures at build time.",
+            "Non-destructive tools that merge props, toggles and gestures at build time.", // i18n: not shown (sample catalog data of a screenshot scene)
             1,
             &[("com.vrcfury.vrcfury", "VRCFury")],
         ),
         (
-            "Poiyomi",
-            "Poiyomi",
+            "Poiyomi", // i18n: not shown (sample catalog data of a screenshot scene)
+            "Poiyomi", // i18n: not shown (sample catalog data of a screenshot scene)
             "https://poiyomi.github.io/vpm/index.json",
-            "Poiyomi Toon, the shader most avatars are made with, free and Pro.",
+            "Poiyomi Toon, the shader most avatars are made with, free and Pro.", // i18n: not shown (sample catalog data of a screenshot scene)
             2,
-            &[("com.poiyomi.toon", "Poiyomi Toon"), ("com.poiyomi.pro", "Poiyomi Pro")],
+            &[("com.poiyomi.toon", "Poiyomi Toon"), ("com.poiyomi.pro", "Poiyomi Pro")], // i18n: not shown (sample catalog data of a screenshot scene)
         ),
         (
             "lilToon",
@@ -624,7 +622,7 @@ pub(super) fn fixture_catalog() -> network::Catalog {
             "すずりょぐのアバターツール",
             "suzuryg",
             "https://suzuryg.github.io/vpm-repos/vpm.json",
-            "表情メニューをまとめて作れる FaceEmo など、アバター改変をもっと楽にする道具を公開しています。長い説明文は二行で切られます。",
+            "表情メニューをまとめて作れる FaceEmo など、アバター改変をもっと楽にする道具を公開しています。長い説明文は二行で切られます。", // i18n: not shown (sample catalog data of a screenshot scene)
             3,
             &[("jp.suzuryg.face-emo", "FaceEmo")],
         ),
@@ -637,10 +635,10 @@ pub(super) fn fixture_catalog() -> network::Catalog {
             &[("jp.example.kisekae", "着せ替えアシスタント")],
         ),
         (
-            "ReinaS' Packages",
+            "ReinaS' Packages", // i18n: not shown (sample catalog data of a screenshot scene)
             "ReinaS",
             "https://vpm.rs64.net/vpm.json",
-            "TexTransTool: edit an avatar's textures without touching their files.",
+            "TexTransTool: edit an avatar's textures without touching their files.", // i18n: not shown (sample catalog data of a screenshot scene)
             2,
             &[("net.rs64.tex-trans-tool", "TexTransTool")],
         ),
@@ -648,25 +646,25 @@ pub(super) fn fixture_catalog() -> network::Catalog {
             "Orbiters",
             "Orbiters",
             "https://orbiters.cc/vpm/orbiters/index.json",
-            "My Avatar, Toolkit, Mixer and more for Unity and VRChat.",
+            "My Avatar, Toolkit, Mixer and more for Unity and VRChat.", // i18n: not shown (sample catalog data of a screenshot scene)
             7,
-            &[("orbiters.toolkit", "Toolkit"), ("orbiters.myavatar", "My Avatar"), ("orbiters.mixer", "Mixer")],
+            &[("orbiters.toolkit", "Toolkit"), ("orbiters.myavatar", "My Avatar"), ("orbiters.mixer", "Mixer")], // i18n: not shown (sample catalog data of a screenshot scene)
         ),
         (
-            "Gesture Manager",
+            "Gesture Manager", // i18n: not shown (sample catalog data of a screenshot scene)
             "BlackStartx",
             "https://blackstartx.github.io/vcc/index.json",
-            "Test Avatar 3.0 gestures and menus in the editor's play mode.",
+            "Test Avatar 3.0 gestures and menus in the editor's play mode.", // i18n: not shown (sample catalog data of a screenshot scene)
             1,
-            &[("vrchat.blackstartx.gesture-manager", "Gesture Manager")],
+            &[("vrchat.blackstartx.gesture-manager", "Gesture Manager")], // i18n: not shown (sample catalog data of a screenshot scene)
         ),
         (
-            "Pumkin's Avatar Tools",
+            "Pumkin's Avatar Tools", // i18n: not shown (sample catalog data of a screenshot scene)
             "rurre",
             "https://rurre.github.io/vpm/index.json",
-            "Copy components between avatars, reset poses and fix what breaks.",
+            "Copy components between avatars, reset poses and fix what breaks.", // i18n: not shown (sample catalog data of a screenshot scene)
             2,
-            &[("io.github.rurre.pumkintools", "Pumkin's Avatar Tools")],
+            &[("io.github.rurre.pumkintools", "Pumkin's Avatar Tools")], // i18n: not shown (sample catalog data of a screenshot scene)
         ),
     ];
     let mut known: Vec<Listing> = real
@@ -684,11 +682,11 @@ pub(super) fn fixture_catalog() -> network::Catalog {
     known.extend((known.len()..330).map(|i| {
         let id = format!("com.creator{i}.tools");
         Listing {
-            name: format!("Creator {i} VPM"),
+            name: format!("Creator {i} VPM"), // i18n: not shown (sample catalog data of a screenshot scene)
             url: format!("https://creator{i}.github.io/vpm/index.json"),
-            description: if i % 7 == 0 { String::new() } else { format!("Avatar and world helpers, number {i} of the many on the server.") },
+            description: if i % 7 == 0 { String::new() } else { format!("Avatar and world helpers, number {i} of the many on the server.") }, // i18n: not shown (sample catalog data of a screenshot scene)
             owner: if i % 5 == 0 { String::new() } else { format!("creator{i}") },
-            packages: vec![network::ListingPackage { name: id, display_name: format!("Creator Tools {i}") }],
+            packages: vec![network::ListingPackage { name: id, display_name: format!("Creator Tools {i}") }], // i18n: not shown (sample catalog data of a screenshot scene)
             package_count: Some(1 + i % 12),
             ..Default::default()
         }

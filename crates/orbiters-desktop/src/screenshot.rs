@@ -42,6 +42,7 @@ mod splat_export;
 mod splats_select;
 mod capture_actions;
 mod pause_resume;
+mod language_live;
 mod vrchat_login;
 mod vr_audio;
 mod vrchat_bridge;
@@ -257,6 +258,9 @@ fn shots(args: &[String], picture_folders: Vec<PathBuf>) -> anyhow::Result<()> {
     }
     if only.as_deref() == Some("capture-wearer") {
         return capture_actions::wearer(&mut Offscreen::new()?, &out, &settings, scale);
+    }
+    if only.as_deref() == Some("language-live") {
+        return language_live::walk(&mut Offscreen::new()?, &out, &settings, scale);
     }
     if only.as_deref() == Some("pause-resume") {
         return pause_resume::walk(&mut Offscreen::new()?, &out, &settings, scale);

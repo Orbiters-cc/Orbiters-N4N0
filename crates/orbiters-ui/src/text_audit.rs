@@ -11,6 +11,7 @@ use std::sync::Mutex;
 static ON: AtomicBool = AtomicBool::new(false);
 static PENDING: Mutex<BTreeSet<Finding>> = Mutex::new(BTreeSet::new());
 static REPORT: Mutex<Vec<String>> = Mutex::new(Vec::new());
+static SEEN: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::new());
 
 /// How far past its box text may lie before it counts, in points.
 const SLACK: f32 = 1.5;
@@ -37,6 +38,11 @@ pub fn record(shapes: &[ClippedShape]) {
     if on() {
         let found = audit(shapes);
         PENDING.lock().unwrap_or_else(|e| e.into_inner()).extend(found);
+        let (mut boxes, mut texts) = (Vec::new(), Vec::new());
+        for clipped in shapes {
+            flatten(&clipped.shape, clipped.clip_rect, &mut boxes, &mut texts);
+        }
+        SEEN.lock().unwrap_or_else(|e| e.into_inner()).extend(texts.iter().filter(|(t, _)| !is_icon(t)).map(|(t, _)| t.galley.job.text.clone()));
     }
 }
 
@@ -49,6 +55,11 @@ pub fn end_scene(scene: &str) {
             report.push(format!("{scene}\t{}\t{}\t{}", f.kind, f.by, f.text.replace(['\n', '\t'], " ")));
         }
     }
+}
+
+/// Every text drawn since this was last asked: what a run can hold against the language it should be in.
+pub fn take_seen() -> BTreeSet<String> {
+    std::mem::take(&mut *SEEN.lock().unwrap_or_else(|e| e.into_inner()))
 }
 
 /// The report: scene, kind, how far, text, tab separated.

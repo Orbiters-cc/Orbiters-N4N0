@@ -1728,7 +1728,8 @@ impl State {
             let total = (gb * 1e9) as u64;
             self.sizes.insert(p.path.clone(), size::Size { total, library: total / 10 * 6, files: 40_000 + 23_000 * i as u64 });
         }
-        let first = self.scan.projects[0].path.clone();
+        // Nothing listed in this scene.
+        let Some(first) = self.scan.projects.first().map(|p| p.path.clone()) else { return };
         let world = self.scan.projects.iter().find(|p| p.kind == discovery::Kind::Worlds).map(|p| p.path.clone());
         if let Some(w) = self.scan.projects.iter_mut().find(|p| p.kind == discovery::Kind::Worlds) {
             for a in &mut w.worlds {

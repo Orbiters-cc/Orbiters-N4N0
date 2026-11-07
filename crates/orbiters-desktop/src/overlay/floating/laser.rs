@@ -57,8 +57,8 @@ impl Lasers {
         let mut beams = [0; 2];
         let mut dots = [0; 2];
         for (i, side) in ["left", "right"].into_iter().enumerate() {
-            beams[i] = overlay.create(&format!("{key}.laser.{side}"), &format!("Orbiters laser ({side} hand)")).map_err(|c| fail("laser", c))?;
-            dots[i] = overlay.create(&format!("{key}.laser-dot.{side}"), &format!("Orbiters laser's dot ({side} hand)")).map_err(|c| fail("laser dot", c))?;
+            beams[i] = overlay.create(&format!("{key}.laser.{side}"), &format!("Orbiters laser ({side} hand)")).map_err(|c| fail("laser", c))?; // i18n: not shown (a name for SteamVR)
+            dots[i] = overlay.create(&format!("{key}.laser-dot.{side}"), &format!("Orbiters laser's dot ({side} hand)")).map_err(|c| fail("laser dot", c))?; // i18n: not shown (a name for SteamVR)
             let _ = overlay.set_width_in_meters(beams[i], BEAM_WIDTH_M);
             let _ = overlay.set_width_in_meters(dots[i], DOT_WIDTH_M);
             for h in [beams[i], dots[i]] {

@@ -668,7 +668,7 @@ fn too_long(strings: &Strings) -> Vec<String> {
         .into_iter()
         .filter_map(|(t, max)| {
             let n = strings.given(t)?.chars().count();
-            (n > max).then(|| format!("{:?} has {n} characters, more than its {max}: it is drawn smaller to fit", t.key()))
+            (n > max).then(|| format!("{:?} has {n} characters, more than its {max}: it is drawn smaller to fit", t.key())) // i18n: not shown (a warning for whoever writes a translation file)
         })
         .collect()
 }
@@ -699,7 +699,7 @@ pub fn screen_colors(theme: &Theme) -> String {
     for (i, (name, value)) in colours.iter().enumerate() {
         out += &format!("    \"{name}\": \"{value}\"{}\n", if i + 1 < colours.len() { "," } else { "" });
     }
-    out += &format!("  }},\n  \"glow\": {}\n}}\n", theme.screen.glow);
+    out += &format!("  }},\n  \"glow\": {}\n}}\n", theme.screen.glow); // i18n: not shown (a JSON file)
     out
 }
 
@@ -751,7 +751,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         return Ok(());
     }
     let skin = &Skin::standard(strings);
-    for (retro, name) in [(false, "N4N0 screen pages.png"), (true, "N4N0 screen pages retro.png")] {
+    for (retro, name) in [(false, "N4N0 screen pages.png"), (true, "N4N0 screen pages retro.png")] { // i18n: not shown (file names)
         let path = out.join(name);
         write_png(&path, WIDTH, HEIGHT * SLICES as u32, &noting_shrunk(|| page_pictures(retro, skin)))?;
         println!("{}", path.display());
@@ -810,7 +810,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         // Orbiters Toolkit's pictures of the two looks, for the Look option on N4N0's card in My Avatar: the newest
         // Home, half size.
         if page == ScreenPage::HomeTen {
-            for (picture, name) in [(&modern, "N4N0 preview.png"), (&rgba, "N4N0 preview retro.png")] {
+            for (picture, name) in [(&modern, "N4N0 preview.png"), (&rgba, "N4N0 preview retro.png")] { // i18n: not shown (file names)
                 let path = out.join(name);
                 write_png(&path, WIDTH / 2, HEIGHT / 2, &half(&unpremultiply(picture), WIDTH as usize, HEIGHT as usize))?;
                 println!("{}", path.display());

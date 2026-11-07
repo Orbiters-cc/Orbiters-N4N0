@@ -13,6 +13,7 @@ use super::{Canvas, Presenter, KEY};
 use crate::state::{CaptureState, Snapshot};
 use egui::{pos2, vec2, Align2, Id, Rect, Ui};
 use orbiters_core::settings::CoverageOverlay;
+use orbiters_i18n::{mark, tr};
 use orbiters_openvr::{self as vr, overlay_flag, ControllerRole, Matrix34};
 use orbiters_ui::theme::{self, Txt};
 use orbiters_ui::widgets::{self, Tone};
@@ -48,11 +49,11 @@ pub fn paint_panel(ui: &mut Ui, rect: Rect, snap: &Snapshot) {
     let c = &snap.capture;
     let pad = 18.0;
     let top = rect.top() + 26.0;
-    let (label, tone) = if c.state == CaptureState::Paused { ("PAUSED", Tone::Warn) } else { ("REC", Tone::Rec) };
+    let (label, tone) = if c.state == CaptureState::Paused { (tr("PAUSED"), Tone::Warn) } else { (tr("REC"), Tone::Rec) };
     widgets::status_dot(&p, pos2(rect.left() + pad + 6.0, top), tone, c.state == CaptureState::Recording);
     let elapsed = c.stats.as_ref().map(|s| format::duration(s.elapsed_s)).unwrap_or_default();
     widgets::text(&p, pos2(rect.left() + pad + 20.0, top), Align2::LEFT_CENTER, &Txt::new(format!("{label}  {elapsed}"), 18.0).color(theme::FG));
-    widgets::text(&p, pos2(rect.right() - pad, top), Align2::RIGHT_CENTER, &Txt::caps("Camera path").color(theme::FG_3));
+    widgets::text(&p, pos2(rect.right() - pad, top), Align2::RIGHT_CENTER, &Txt::caps(tr("Camera path")).color(theme::FG_3));
     let hint_h = 50.0;
     let map = Rect::from_min_max(pos2(rect.left() + pad, rect.top() + 48.0), pos2(rect.right() - pad, rect.bottom() - pad - hint_h));
     let coverage = c.coverage.as_ref().map(|m| trail::Coverage {
@@ -64,6 +65,7 @@ pub fn paint_panel(ui: &mut Ui, rect: Rect, snap: &Snapshot) {
         cells: &m.cells,
         obstacle: orbiters_core::protocol::coverage::OBSTACLE,
     });
+    let empty = tr("Your camera's path appears here");
     trail::show_with(
         ui,
         map,
@@ -72,7 +74,7 @@ pub fn paint_panel(ui: &mut Ui, rect: Rect, snap: &Snapshot) {
             points: &c.trail,
             heading: c.stats.as_ref().and_then(|s| s.heading_deg),
             live: c.state == CaptureState::Recording,
-            empty_text: "Your camera's path appears here",
+            empty_text: empty,
         },
         coverage.as_ref(),
     );
@@ -86,11 +88,11 @@ pub fn paint_panel(ui: &mut Ui, rect: Rect, snap: &Snapshot) {
         None => {
             let y = hints.top() + 14.0;
             let mut x = hints.left();
-            widgets::text(&p, pos2(x, y), Align2::LEFT_CENTER, &Txt::new("Seen from", 15.0).color(theme::FG_3));
+            widgets::text(&p, pos2(x, y), Align2::LEFT_CENTER, &Txt::new(tr("Seen from"), 15.0).color(theme::FG_3));
             x += 80.0;
-            for (directions, label) in [(1u8, "1–2 directions"), (3, "3–5"), (6, "6 or more")] {
+            for (directions, label) in [(1u8, mark("1–2 directions")), (3, mark("3–5")), (6, mark("6 or more"))] {
                 p.rect_filled(Rect::from_center_size(pos2(x + 6.0, y), vec2(12.0, 12.0)), 3.0, theme::alpha(trail::coverage_colour(directions), 0.7));
-                let r = widgets::text(&p, pos2(x + 18.0, y), Align2::LEFT_CENTER, &Txt::new(label, 15.0).color(theme::FG_3));
+                let r = widgets::text(&p, pos2(x + 18.0, y), Align2::LEFT_CENTER, &Txt::new(tr(label), 15.0).color(theme::FG_3));
                 x = r.right() + 16.0;
             }
         }
@@ -110,7 +112,7 @@ pub struct CoverageOverlayPanel {
 impl CoverageOverlayPanel {
     pub fn new(overlay: &vr::Overlay) -> anyhow::Result<Self> {
         let handle =
-            overlay.create(&format!("{KEY}.coverage"), "Orbiters coverage").map_err(|c| anyhow::anyhow!("coverage overlay: SteamVR overlay error {c}"))?;
+            overlay.create(&format!("{KEY}.coverage"), "Orbiters coverage").map_err(|c| anyhow::anyhow!("coverage overlay: SteamVR overlay error {c}"))?; // i18n: not shown (a name for SteamVR)
         let _ = overlay.set_width_in_meters(handle, WIDTH_M);
         // Painted premultiplied, as the menu.
         let _ = overlay.set_flag(handle, overlay_flag::IS_PREMULTIPLIED, true);

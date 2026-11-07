@@ -1,0 +1,60 @@
+# Sample content for `--n4n0-menu` (menu_pages.rs), the review pictures of N4N0's menu pages. None of it is the app's own wording: it is what a
+# player would bring (names, world and video titles, song, comments, what they said and what N4N0's assistant answered, state names) or what
+# the service writes live (a note, a version line, a message), so it stays as written in every language. The service's own texts are
+# translated where they are written, in the area that covers that code.
+lofi hip hop
+lofi hip hop radio
+lofi hip hop beats to study
+lofi hits
+lofi hindi
+lofi hip hop radio 📚 beats to relax/study to
+Lofi Girl
+Best of lofi hip hop 2021 ✨ [beats to relax/study to]
+Chillhop Radio - jazzy & lofi hip hop beats 🐾
+Chillhop Music
+1 A.M Study Session 📚 [lofi hip hop]
+Why the rush? - lo-fi beats for work/study / cat jazz
+chill chill journal
+Midnight City
+Hurry Up, We're Dreaming
+Spotify
+Kasumi
+Lyra Nightfall
+Bob the Builder
+Ana
+put my hoodie on
+lofi hi
+play some music
+Done, hoodie on. Now go find your friends instead of talking to a floating ball.
+Smoothing your devices now
+N4N0 1.0.9 · App 0.4.0
+A dance mode where N4N0 bounces to the music the world plays
+Party outfit
+A dance mode where N4N0 bounces to the music the world plays, with a switch on its card
+Done, hoodie on. Now go find your friends.
+Add Orbiters' VRChat account as a friend on VRChat first, then try again.
+Enzo
+The mirror room upstairs is perfect for photos, and the lighting at sunset is unreal.
+Great place for meetups! The video player works with every link we tried.
+Cozy. Wish the pens were near the spawn.
+We held our build club here, everyone loved the rooftop.
+The Black Cat
+Japan Shrine
+Palm Point - Night
+Club Orion
+Movie Night
+Midnight Rooftops
+The Great Pug
+Mika
+Zephyr
+Juniper
+Orion
+Exoplanet Journey
+New Generation
+Popcorn Palace
+VRC Volleyball
+VRChat Home
+Hoodie on
+Cosy evening
+Tall and sitting
+State 4

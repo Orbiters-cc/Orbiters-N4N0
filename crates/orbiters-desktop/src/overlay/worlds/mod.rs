@@ -18,8 +18,11 @@ pub mod cache;
 pub mod catalog;
 pub mod small_hint;
 
+/// With this few captures, the list of them goes on with popular worlds.
+const FEW_CAPTURES: usize = 3;
+
 /// How much of a hole's width a capture lying in it fills: its top and foot are cut by the hole, as captures are wider than tall.
-pub const SMALL_FILLS_HOLE: f32 = 0.98;
+pub const SMALL_FILLS_HOLE: f32 = 0.74;
 mod diagnostics;
 pub mod finder;
 #[cfg(windows)]
@@ -173,6 +176,7 @@ pub struct Worlds {
     /// What says how to handle what shows small; it has been used; a new opening of the menu asks it back for the next capture.
     hint: Option<small_hint::SmallHint>,
     backdrop: Option<small_hint::Backdrop>,
+    plate: Option<small_hint::Plate>,
     hide_chip: Option<small_hint::HideChip>,
     small_place: Option<(vr::Matrix34, f32)>,
     /// Where each hand's tool is and which way it points, and its trigger, now and a turn ago.
@@ -272,6 +276,7 @@ impl Worlds {
             alone: false,
             key: key.to_string(),
             hint: None,
+            plate: None,
             hide_chip: None,
             small_rays: [None; 2],
             small_triggers: [false; 2],
@@ -343,6 +348,7 @@ impl Worlds {
             alone: true,
             key: String::new(),
             hint: None,
+            plate: None,
             hide_chip: None,
             small_rays: [None; 2],
             small_triggers: [false; 2],
@@ -512,6 +518,9 @@ impl Worlds {
         if let Some(chip) = self.hide_chip.take() {
             chip.destroy(overlay);
         }
+        if let Some(plate) = self.plate.take() {
+            plate.destroy(overlay);
+        }
         let _ = overlay.destroy(self.chip);
         let _ = overlay.destroy(self.bar);
     }
@@ -544,6 +553,12 @@ impl Worlds {
         let captures = self.captures();
         let feedback = |w: &str| self.catalog.feedback(w);
         match self.shown() {
+            // Few so far: worlds to look at after them, rather than free space.
+            Shown::Captures if captures.len() <= FEW_CAPTURES => {
+                let listed = self.finder.list(&WorldList::Popular);
+                let first: Vec<&Entry> = captures.iter().collect();
+                finder::merge(&captures, &first, &listed.items, None, &feedback)
+            }
             Shown::Captures => captures,
             Shown::Visited => {
                 let (worlds, ..) = self.visited.worlds();
@@ -625,7 +640,11 @@ impl Worlds {
         if !self.open {
             return;
         }
-        match self.shown() {
+        let shown = match self.shown() {
+            Shown::Captures if self.captures().len() <= FEW_CAPTURES => Shown::List(WorldList::Popular),
+            shown => shown,
+        };
+        match shown {
             Shown::Captures => {}
             Shown::Visited => self.visited.refresh(),
             Shown::List(list) => {
@@ -685,6 +704,14 @@ impl Worlds {
     fn update_hint(&mut self, overlay: &vr::Overlay, steamvr: &vr::Client, presenter: &mut Presenter, snap: &Snapshot) {
         let small = self.view.small_now().copied();
         self.hint_used |= small.is_some_and(|s| s.zoomed);
+        // The plate it stands on.
+        let plate = self.view.small_plate();
+        if plate.is_some() && self.plate.is_none() {
+            self.plate = small_hint::Plate::new(overlay, &self.key).map_err(|e| eprintln!("{e:#}")).ok();
+        }
+        if let Some(on) = self.plate.as_mut() {
+            on.update(overlay, presenter, plate);
+        }
         // The dark pane behind it in a panel's hole.
         let pane = small.filter(|s| s.docked).and(self.small_place).map(|(at, radius)| (at, radius * 2.0 / SMALL_FILLS_HOLE + 0.012));
         if pane.is_some() && self.backdrop.is_none() {

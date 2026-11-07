@@ -271,6 +271,8 @@ pub(super) fn vr_shots(out: &Path, refs: &Path) -> anyhow::Result<()> {
     for world in ["forest", "dream"] {
         let read = |name: &str| -> anyhow::Result<image::RgbImage> { Ok(image::open(refs.join(format!("ref-{name}-{world}.jpg")))?.to_rgb8()) };
         let (ground, wheel_frame, qm_frame) = (read("world")?, read("wheel")?, read("qm")?);
+        // Only the small view's, to try it on captures.
+        let only_small = std::env::var_os("ORBIT_ONLY_SMALL").is_some();
         let client = vec2(1920.0, 1080.0);
         let (center, radius) = zones::wheel(client);
         let reach = radius * 1.03;
@@ -317,6 +319,7 @@ pub(super) fn vr_shots(out: &Path, refs: &Path) -> anyhow::Result<()> {
         };
         let pointing = |a| Facts { pointed: Some(a), ..facts.clone() };
         let bloom = zones::Group::Pictures;
+        if !only_small {
         wheel_scene(&facts, None, None, &format!("vr-wheel-{world}"))?;
         wheel_scene(&pointing(Action::Worlds), Some(Zone::WheelWorlds), None, &format!("vr-wheel-{world}-point-worlds"))?;
         wheel_scene(&pointing(Action::Pictures), Some(Zone::WheelPictures), Some(bloom), &format!("vr-wheel-{world}-point-pictures"))?;
@@ -325,6 +328,7 @@ pub(super) fn vr_shots(out: &Path, refs: &Path) -> anyhow::Result<()> {
         let counting = Facts { countdown: Some(2), picture_mode: Some(PhotoMode::People), pointed: Some(Action::Picture(PhotoMode::People)), ..facts.clone() };
         wheel_scene(&counting, None, Some(bloom), &format!("vr-wheel-{world}-countdown"))?;
         // The Quick Menu where it opens before the eyes, the wing beside it.
+        }
         let held = space::before_eyes(&head, 0.5, 0.08);
         let plane = vr::quick_menu_plane(&vr::grip_holding(&held, &tune.quick_menu(1)), 1, &tune, 1.0);
         let qm_scene = |facts: &Facts, hover: Option<usize>, sheet: Option<Sheet>, name: &str| -> anyhow::Result<()> {
@@ -356,17 +360,22 @@ pub(super) fn vr_shots(out: &Path, refs: &Path) -> anyhow::Result<()> {
             }
             eye.save(out, name)
         };
+        if !only_small {
         qm_scene(&facts, None, None, &format!("vr-qm-{world}"))?;
         qm_scene(&pointing(Action::Worlds), Some(0), None, &format!("vr-qm-{world}-point-worlds"))?;
         qm_scene(&Facts { sheet: Some(Sheet::All), sheet_title: "All tools".into(), ..facts.clone() }, None, Some(Sheet::All), &format!("vr-sheet-{world}-all"))?;
         qm_scene(&Facts { sheet: Some(Sheet::Pictures), sheet_title: "Pictures".into(), ..facts.clone() }, None, Some(Sheet::Pictures), &format!("vr-sheet-{world}-pictures"))?;
+        }
         let _ = Target::Close;
         // A real capture standing small, drawn by the view's own renderer: in the hole of a world's side panel (the panel's picture
         // beside the frames, `panel-small-docked.png` of --world-view), then in a hand with what says how to zoom it.
-        if let (true, Ok(session)) = (world == "forest", std::env::var("ORBIT_SESSION")) {
+        let sessions = std::env::var("ORBIT_SESSION").unwrap_or_default();
+        for (which, session) in sessions.split(';').filter(|s| !s.is_empty() && world == "forest").enumerate() {
             use crate::overlay::worlds::{catalog, render, small_hint, stereo};
-            let full = catalog::read_local(Path::new(&session), &Default::default())?;
+            let names = if which == 0 { String::new() } else { format!("-{which}") };
+            let full = catalog::read_local(Path::new(session), &Default::default())?;
             let capture = full.around_subject();
+            println!("{session}: reach {} of {} splats {} showing", capture.small_reach(), full.gaussians.len(), capture.within(capture.small_reach()));
             let (_adapter, device, queue) = render::device(None)?;
             let mut renderer = render::FaceRenderer::new(device, queue);
             renderer.load(&capture)?;
@@ -378,6 +387,9 @@ pub(super) fn vr_shots(out: &Path, refs: &Path) -> anyhow::Result<()> {
                 let camera = stereo::eye_camera(&head, tangents, w, h, &small.placement(capture.view.eye()));
                 renderer.render_view(&camera, capture.within(small.reach()))
             };
+            let plate_side = 1024u32;
+            let plate_pixels = small_hint::plate_pixels(plate_side);
+            let below = capture.view.eye()[1] - capture.view.ground();
             let panel = image::open(refs.join("panel-small-docked.png"))?.to_rgba8();
             let panel_px = [panel.width(), panel.height()];
             let mut panel_pixels = panel.into_raw();
@@ -395,15 +407,17 @@ pub(super) fn vr_shots(out: &Path, refs: &Path) -> anyhow::Result<()> {
             let at = space::compose(&page_quad.transform, &there);
             let radius = hole.width() / 1024.0 * page_quad.width / 2.0 * crate::overlay::worlds::SMALL_FILLS_HOLE;
             let dock = stereo::SmallDock::behind(&capture.view, &at, radius);
-            let small = stereo::Small::new(&capture.view, &head, capture.small_reach()).at_dock(&dock).zoomed_in(0.7);
+            let small = stereo::Small::new(&capture.view, &head, capture.small_reach()).at_dock(&dock);
             // Docked.
-            let worlds = Facts { sheet: Some(Sheet::Worlds), sheet_title: "Worlds in 3D".into(), view_showing: true, view_small: true, sheet_hole: Some(egui::Rect::from_min_max(pos2(hole.min.x * 0.6875, hole.min.y * 0.6875 + 52.0), pos2(hole.max.x * 0.6875, hole.max.y * 0.6875 + 52.0))), ..facts.clone() };
+            let worlds = Facts { sheet: Some(Sheet::Worlds), sheet_title: "Worlds in 3D".into(), view_showing: true, view_small: true, sheet_hole: Some(egui::Rect::from_min_max(pos2(hole.min.x * 0.6875, hole.min.y * 0.6875 + panels::SHEET_HEAD), pos2(hole.max.x * 0.6875, hole.max.y * 0.6875 + panels::SHEET_HEAD))), ..facts.clone() };
             let center_units = zones::Placed { zone: Zone::SheetBack, rect: qm_units, center: pos2(0.0, 0.0), unit: 1.0 };
             let mut eye = Eye::new(size, &ground, eyes);
             eye.quad(&plane.quad(&center_units, 0.0, 0.0), &qm, qm_px, 1.0);
-            // The dark pane behind it.
-            let pane = vec![[32u8, 36, 46, 255]; 4].concat();
-            eye.quad(&Quad { transform: at, width: hole.width() / 1024.0 * page_quad.width + 0.012, height: hole.height() / 576.0 * page_quad.height + 0.012 }, &pane, [2, 2], 1.0);
+            // The dark pane behind it, then its plate.
+            let pane = small_hint::backdrop_pixels();
+            eye.quad(&Quad { transform: at, width: hole.width() / 1024.0 * page_quad.width + 0.012, height: hole.height() / 576.0 * page_quad.height + 0.012 }, &pane, small_hint::BACKDROP_PX, 1.0);
+            let (plate_at, plate_w) = small.plate(below);
+            eye.quad(&Quad { transform: plate_at, width: plate_w, height: plate_w }, &plate_pixels, [plate_side; 2], 1.0);
             eye.over(&model(&small)?);
             for zone in Zone::QUICK_MENU {
                 let placed = zones::in_units(zone);
@@ -414,11 +428,13 @@ pub(super) fn vr_shots(out: &Path, refs: &Path) -> anyhow::Result<()> {
             let (pixels, px) = sharp_picture(&back, &worlds, None, 2.0);
             eye.quad(&plane.quad(&back, 0.0, 0.016), &pixels, px, 1.0);
             eye.quad(&page_quad, &panel_pixels, panel_px, 1.0);
-            eye.save(out, "vr-small-in-the-panel")?;
-            // In a hand, with what says how to zoom it.
+            eye.save(out, &format!("vr-small-in-the-panel{names}"))?;
+            // In a hand, with what says how to zoom it, and its Hide.
             let mut held = stereo::Small::new(&capture.view, &head, capture.small_reach());
-            held.anchor = [0.02, 1.42, -0.58];
+            held.anchor = [0.0, 1.4, -0.62];
             let mut eye = Eye::new(size, &ground, eyes);
+            let (plate_at, plate_w) = held.plate(below);
+            eye.quad(&Quad { transform: plate_at, width: plate_w, height: plate_w }, &plate_pixels, [plate_side; 2], 1.0);
             eye.over(&model(&held)?);
             let hint_px = small_hint::PX;
             let mut canvas = Canvas::new(hint_px[0], hint_px[1]);
@@ -429,7 +445,13 @@ pub(super) fn vr_shots(out: &Path, refs: &Path) -> anyhow::Result<()> {
             let hint_frame = small_hint::facing(up, space::position(&head));
             let hint_w = small_hint::WIDTH_M;
             eye.quad(&Quad { transform: hint_frame, width: hint_w, height: hint_w * hint_px[1] as f32 / hint_px[0] as f32 }, canvas.pixels(), hint_px, 1.0);
-            eye.save(out, "vr-small-in-a-hand")?;
+            let mut canvas = Canvas::new(small_hint::CHIP_PX[0], small_hint::CHIP_PX[1]);
+            for _ in 0..2 {
+                canvas.paint(0.0, |p| small_hint::paint_chip(p, false));
+            }
+            let chip = small_hint::chip_place(held.anchor, held.radius(), space::position(&head));
+            eye.quad(&Quad { transform: chip, width: small_hint::CHIP_WIDTH_M, height: small_hint::CHIP_WIDTH_M * small_hint::CHIP_PX[1] as f32 / small_hint::CHIP_PX[0] as f32 }, canvas.pixels(), small_hint::CHIP_PX, 1.0);
+            eye.save(out, &format!("vr-small-in-a-hand{names}"))?;
         }
     }
     Ok(())

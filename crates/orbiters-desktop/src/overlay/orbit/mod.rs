@@ -816,7 +816,7 @@ impl Panels {
         };
         // Where the person was has a sheet of its own here, on the menu's own list and invites.
         if target == Target::Instances {
-            self.open_sheet(Sheet::Instances, "Previous instances", snap);
+            self.open_sheet(Sheet::Instances, "Instances", snap);
         } else {
             self.open_sheet(Sheet::Menu, title, snap);
         }
@@ -852,9 +852,9 @@ impl Panels {
         if let Some(sheet) = self.facts.sheet.filter(|_| self.facts.opened.is_none()) {
             let max = panels::max_scroll(sheet, &self.facts);
             let to = self.gallery_to - notches * 180.0;
-            self.gallery_to = to.clamp(0.0, max);
-            if self.elastic && to != self.gallery_to {
-                self.throw = (to - self.gallery_to).signum() * WHEEL_KICK;
+            self.gallery_to = panels::snap_scroll(sheet, &self.facts, to.clamp(0.0, max));
+            if self.elastic && to != to.clamp(0.0, max) {
+                self.throw = (to - to.clamp(0.0, max)).signum() * WHEEL_KICK;
             }
         }
     }
@@ -881,7 +881,7 @@ impl Panels {
         };
         // The sheet's back has the same hole as the page on it: page units to its own, the page lying 52 under its top.
         let hole = self.stage.worlds.as_ref().filter(|_| self.facts.sheet == Some(Sheet::Worlds)).and_then(|w| w.small_hole());
-        let hole = hole.map(|h| egui::Rect::from_min_max(pos2(h.min.x * 0.6875, h.min.y * 0.6875 + 52.0), pos2(h.max.x * 0.6875, h.max.y * 0.6875 + 52.0)));
+        let hole = hole.map(|h| egui::Rect::from_min_max(pos2(h.min.x * 0.6875, h.min.y * 0.6875 + panels::SHEET_HEAD), pos2(h.max.x * 0.6875, h.max.y * 0.6875 + panels::SHEET_HEAD)));
         if showing != self.facts.view_showing || said != self.facts.view_said || status.small != self.facts.view_small || hole != self.facts.sheet_hole {
             self.facts.view_showing = showing;
             self.facts.view_said = said;
@@ -936,7 +936,8 @@ impl Panels {
             return;
         }
         self.elastic = !snap.settings.reduce_motion;
-        let in_gallery = self.facts.sheet == Some(Sheet::Pictures);
+        // All tools shows the newest of them too.
+        let in_gallery = matches!(self.facts.sheet, Some(Sheet::Pictures | Sheet::All));
         let listed = in_gallery && self.recents.follow((library, crate::worlds::picture_revision()), snap.settings.sessions_dir.clone(), snap.settings.picture_folders.clone());
         let arranged = in_gallery && self.recents.arrange(self.facts.gallery_filter, snap.settings.photos_layout);
         if listed || arranged {
@@ -954,7 +955,10 @@ impl Panels {
                 panel.dirty = true;
             }
         }
-        if self.facts.sheet == Some(Sheet::Pictures) {
+        if self.facts.sheet == Some(Sheet::All) {
+            self.recents.ask(0, 0);
+            self.recents.keep(0, 0);
+        } else if self.facts.sheet == Some(Sheet::Pictures) {
             if let Some(panel) = self.takeover.as_mut() {
                 let shown = || panel.items.iter().filter_map(|i| if let panels::Look::Capture(n) | panels::Look::BigPicture(n) = i.look { Some(n) } else { None });
                 if let (Some(first), Some(last)) = (shown().min(), shown().max()) {
@@ -1037,7 +1041,7 @@ impl Panels {
             self.open_sheet(Sheet::Menu, "Add Orbiters as a friend", snap);
         }
         if let Some(worlds) = self.stage.worlds.as_mut() {
-            if self.facts.sheet == Some(Sheet::Instances) {
+            if matches!(self.facts.sheet, Some(Sheet::Instances | Sheet::All)) {
                 let shown = panels::visits_shown(self.facts.gallery_scroll);
                 for visit in self.facts.worlds_visited.iter().skip(shown.start).take(shown.len()) {
                     if !self.visit_pictures.contains_key(&visit.world_id) {
@@ -1059,7 +1063,7 @@ impl Panels {
         let progress = |dir: &PathBuf| snap.reconstruction.as_ref().filter(|j| j.session_dir == *dir).map(|j| j.progress.clamp(0.0, 1.0));
         let recording = matches!(snap.capture.state, CaptureState::Recording | CaptureState::Paused) && !snap.capture.photo_3d;
         let menu = &self.stage.host.menu;
-        let visited = if self.facts.sheet == Some(Sheet::Instances) { visited_worlds(&menu.instances, now, &self.visit_pictures) } else { Vec::new() };
+        let visited = if matches!(self.facts.sheet, Some(Sheet::Instances | Sheet::All)) { visited_worlds(&menu.instances, now, &self.visit_pictures) } else { Vec::new() };
         Facts {
             recording,
             recording_seconds: recording.then(|| snap.capture.stats.as_ref().map_or(0, |s| s.elapsed_s as u32)),
@@ -1085,6 +1089,8 @@ impl Panels {
             view_said: self.facts.view_said.clone(),
             view_small: self.facts.view_small,
             sheet_hole: self.facts.sheet_hole,
+            hint_band: self.list.iter().any(|p| p.zone == Zone::SheetHint),
+            hero_pictures: Vec::new(),
             reconstructing: snap.reconstruction.as_ref().map(|j| j.progress.clamp(0.0, 1.0)),
             waiting: snap.reconstruct_queue.len(),
             desktop: snap.n4n0.desktop_mode || !snap.steamvr.running,
@@ -1538,6 +1544,15 @@ impl Panels {
                 self.pressed_late = drag.action;
             }
             self.throw = drag.throw(Instant::now());
+            // Let go with no throw: to rest as well. Past an end it comes back by itself.
+            if drag.moved && !drag.bar && self.throw == 0.0 {
+                if let Some(sheet) = self.facts.sheet {
+                    let (at, max) = (self.facts.gallery_scroll, panels::max_scroll(sheet, &self.facts));
+                    if at >= 0.0 && at <= max {
+                        self.gallery_to = panels::snap_scroll(sheet, &self.facts, at);
+                    }
+                }
+            }
         }
         for panel in self.list.iter_mut().chain(self.takeover.iter_mut()) {
             if panel.pressed.take().is_some() {
@@ -1628,6 +1643,19 @@ impl Panels {
                     panel.dirty = false;
                     panel.items = panels::sheet_items(sheet, &self.facts);
                     let mut facts = self.facts.clone();
+                    if sheet == Sheet::All {
+                        // What All tools' large tiles hold, for real.
+                        if let Some(id) = facts.worlds_visited.first().and_then(|v| v.picture) {
+                            facts.hero_pictures.push((Action::Page(Target::Instances), id));
+                        }
+                        if let Some(loaded) = self.recents.tile(0).filter(|r| r.image.is_some()) {
+                            let ctx = stage.canvas.ctx();
+                            let name = loaded.key.to_string_lossy().to_string();
+                            let image = loaded.image.as_ref().expect("just looked");
+                            let id = panel.pictures.entry(name).or_insert_with(|| ctx.load_texture("recent", image.clone(), TextureOptions::LINEAR)).id();
+                            facts.hero_pictures.push((Action::Pictures, id));
+                        }
+                    }
                     if sheet == Sheet::Pictures {
                         let ctx = stage.canvas.ctx();
                         for item in &panel.items {
@@ -1698,7 +1726,14 @@ impl Panels {
         if self.drag.is_none() && self.facts.opened.is_none() {
             let max = self.facts.sheet.map_or(0.0, |sheet| panels::max_scroll(sheet, &self.facts));
             let was = self.facts.gallery_scroll;
+            let moving = self.throw != 0.0;
             (self.facts.gallery_scroll, self.throw, self.gallery_to) = scroll_step(was, self.throw, self.gallery_to, max, dt, self.elastic);
+            // Come to rest: with its first row whole.
+            if moving && self.throw == 0.0 {
+                if let Some(sheet) = self.facts.sheet {
+                    self.gallery_to = panels::snap_scroll(sheet, &self.facts, self.facts.gallery_scroll);
+                }
+            }
             if self.facts.gallery_scroll != was {
                 if let Some(panel) = self.takeover.as_mut() {
                     panel.dirty = true;
@@ -2226,7 +2261,7 @@ mod tests {
         let mut snap = Snapshot::new(Default::default());
         assert_eq!(away_words(&snap, &None), None, "nothing to say: nothing shows");
         snap.n4n0.photo_wait = Some(PhotoWait::Camera);
-        assert!(away_words(&snap, &None).unwrap().0.contains("Open VRChat's camera"));
+        assert!(away_words(&snap, &None).unwrap().0.contains("Open VRChat's Stream Camera"));
         snap.n4n0.photo_wait = Some(PhotoWait::Move);
         assert!(away_words(&snap, &None).unwrap().0.contains("Move VRChat's camera"));
         // What stopped it goes before waiting; a countdown goes before anything.

@@ -19,6 +19,7 @@ use super::texture;
 use super::yaml::{self, Ref, Value};
 use super::Limits;
 use anyhow::{ensure, Context as _};
+use orbiters_i18n::tr;
 use image::RgbaImage;
 use std::path::{Path, PathBuf};
 
@@ -70,16 +71,16 @@ pub fn read(path: &Path, file_id: i64, assets: &Assets, limits: &Limits, files: 
     if super::serialized::is_serialized(&bytes) {
         let file = SerializedFile::parse(&bytes)?;
         let value_of = |id: i64, class: i32| -> anyhow::Result<Value> {
-            let o = file.objects().iter().find(|o| o.id == id && o.class == class).or_else(|| file.objects().iter().find(|o| class == 156 && o.class == class)).context("an object the file does not have")?;
+            let o = file.objects().iter().find(|o| o.id == id && o.class == class).or_else(|| file.objects().iter().find(|o| class == 156 && o.class == class)).with_context(|| tr("an object the file does not have"))?;
             let at = usize::try_from(file.data_offset + o.start)?;
-            file.value(o, bytes.get(at..at + o.size as usize).context("an object past the file's end")?)
+            file.value(o, bytes.get(at..at + o.size as usize).with_context(|| tr("an object past the file's end"))?)
         };
         return parse(&value_of(file_id, 156)?, &|id| value_of(id, 28).ok(), assets, files);
     }
     let text = String::from_utf8_lossy(&bytes).into_owned();
-    ensure!(yaml::is_text(&text), "neither Unity text nor Unity's binary format");
+    ensure!(yaml::is_text(&text), "{}", tr("neither Unity text nor Unity's binary format"));
     let docs = yaml::documents(&text);
-    let doc = docs.iter().find(|d| d.class == 156 && d.id == file_id).or_else(|| docs.iter().find(|d| d.class == 156)).context("no terrain data in it")?;
+    let doc = docs.iter().find(|d| d.class == 156 && d.id == file_id).or_else(|| docs.iter().find(|d| d.class == 156)).with_context(|| tr("no terrain data in it"))?;
     parse(&doc.parse(), &|id| docs.iter().find(|d| d.class == 28 && d.id == id).map(|d| d.parse()), assets, files)
 }
 
@@ -87,13 +88,13 @@ fn parse(v: &Value, sub: &dyn Fn(i64) -> Option<Value>, assets: &Assets, files: 
     let h = v.get("m_Heightmap");
     // `m_Resolution` since Unity 2019, `m_Width` before.
     let resolution = h.get("m_Resolution").as_i64().or_else(|| h.get("m_Width").as_i64()).unwrap_or(0).max(0) as usize;
-    ensure!((2..=8193).contains(&resolution), "a heightmap of {resolution} samples on a side");
+    ensure!((2..=8193).contains(&resolution), "{}", tr!("a heightmap of {resolution} samples on a side", resolution = resolution));
     let raw = bytes_of(h.get("m_Heights"), 2);
-    ensure!(raw.len() >= resolution * resolution * 2, "{} heights for {resolution} samples on a side", raw.len() / 2);
+    ensure!(raw.len() >= resolution * resolution * 2, "{}", tr!("{count} heights for {resolution} samples on a side", count = raw.len() / 2, resolution = resolution));
     let heights: Vec<f32> = raw.chunks_exact(2).take(resolution * resolution).map(|c| (i16::from_le_bytes([c[0], c[1]]).max(0) as f32) / 32766.0).collect();
     let scale = h.get("m_Scale").vec3().unwrap_or([1.0; 3]);
     let size = [scale[0] * (resolution - 1) as f32, scale[1], scale[2] * (resolution - 1) as f32];
-    ensure!(size.iter().all(|s| s.is_finite() && *s >= 0.0 && *s < 1e6), "a terrain of size {size:?}");
+    ensure!(size.iter().all(|s| s.is_finite() && *s >= 0.0 && *s < 1e6), "{}", tr!("a terrain of size {size}", size = format!("{size:?}")));
 
     let splat = v.get("m_SplatDatabase");
     let mut layers = Vec::new();

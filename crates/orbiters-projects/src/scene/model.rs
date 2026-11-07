@@ -19,6 +19,7 @@
 
 use super::Limits;
 use anyhow::{bail, Context as _};
+use orbiters_i18n::tr;
 use std::collections::HashMap;
 use std::path::Path;
 
@@ -223,9 +224,9 @@ impl ImportSettings {
 
 /// Loads a model as Unity imports it.
 pub fn load(path: &Path, settings: &ImportSettings, limits: &Limits) -> anyhow::Result<Model> {
-    let size = std::fs::metadata(path).with_context(|| format!("reading {}", path.display()))?.len();
-    anyhow::ensure!(size <= limits.max_model_bytes, "{} is {} MB, more than a preview reads", file_name(path), size >> 20);
-    limits.check("loading the models")?; // i18n: not shown (what a time-limit error says it was doing)
+    let size = std::fs::metadata(path).with_context(|| tr!("reading {name}", name = path.display()))?.len();
+    anyhow::ensure!(size <= limits.max_model_bytes, "{}", tr!("{name} is {size} MB, more than a preview reads", name = file_name(path), size = size >> 20));
+    limits.check(tr("loading the models"))?;
     let deadline = limits.deadline;
     let cancel = limits.cancel.clone();
     let progress = move |_: &ufbx::Progress| {
@@ -254,12 +255,12 @@ pub fn load(path: &Path, settings: &ImportSettings, limits: &Limits) -> anyhow::
         progress_interval_hint: 1 << 20,
         ..Default::default()
     };
-    let path_str = path.to_str().context("a model path that is not Unicode")?;
+    let path_str = path.to_str().with_context(|| tr("a model path that is not Unicode"))?;
     let scene = match ufbx::load_file(path_str, opts) {
         Ok(s) => s,
         Err(e) => {
-            limits.check("loading the models")?; // i18n: not shown (what a time-limit error says it was doing)
-            bail!("{} could not be read: {}", file_name(path), e.description);
+            limits.check(tr("loading the models"))?;
+            bail!("{}", tr!("{name} could not be read: {reason}", name = file_name(path), reason = e.description));
         }
     };
     let unit = settings.global_scale as f64 * if settings.use_file_scale { scene.settings.unit_meters.max(1e-6) } else { 1.0 };
@@ -392,7 +393,7 @@ fn convert(scene: &ufbx::Scene, settings: &ImportSettings, unit: f32, limits: &L
     }
     while let Some((node, parent, path)) = stack.pop() {
         if nodes.len() >= limits.max_nodes {
-            bail!("the model has more than {} nodes", limits.max_nodes);
+            bail!("{}", tr!("the model has more than {count} nodes", count = limits.max_nodes));
         }
         let index = nodes.len();
         let t = &node.local_transform;
@@ -452,9 +453,9 @@ fn convert(scene: &ufbx::Scene, settings: &ImportSettings, unit: f32, limits: &L
         if mesh.num_triangles == 0 {
             continue;
         }
-        limits.check("reading the models' meshes")?; // i18n: not shown (what a time-limit error says it was doing)
+        limits.check(tr("reading the models' meshes"))?;
         triangles += mesh.num_triangles;
-        anyhow::ensure!(triangles <= limits.max_model_triangles, "the model has more than {} triangles", limits.max_model_triangles);
+        anyhow::ensure!(triangles <= limits.max_model_triangles, "{}", tr!("the model has more than {count} triangles", count = limits.max_model_triangles));
         let (m, used) = mesh_of(node, mesh, settings, unit, &node_index)?;
         let slots: Vec<usize> = used
             .iter()

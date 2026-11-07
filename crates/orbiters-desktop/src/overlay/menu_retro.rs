@@ -540,7 +540,7 @@ fn slot(p: &Painter, s: &layout::Slot, text: &str, origin: Pos2, pal: &RetroPale
     };
 }
 
-/// A picture, already turned into green dots ([`dots`]), in its brackets.
+/// A picture, already turned green ([`phosphor`]), in its brackets.
 fn picture(p: &Painter, r: Rect, texture: Option<TextureId>, skin: &Skin) {
     match texture {
         Some(id) => {
@@ -619,26 +619,17 @@ pub fn draw_back(p: &Painter, origin: Pos2, skin: &Skin) {
     hatch(p, Rect::from_center_size(pos2(c.x, c.y + 100.0), vec2(360.0, 10.0)), 8.0, Stroke::new(1.5, pal.dim));
 }
 
-/// A thumbnail as the retro look shows it (contracts `Docs/n4n0.md`, Retro look): its light, levels stretched, as 96 × 54
-/// green dots in four steps with an ordered 4 × 4 dither, each dot square with a dark gap, `scale` pixels apart (in the
-/// phosphor's own colours).
-pub fn dots(image: &ColorImage, scale: usize) -> ColorImage {
-    let (w, h) = (orbiters_n4n0_core::menu::retro::DOTS_X, orbiters_n4n0_core::menu::retro::DOTS_Y);
-    let light = orbiters_n4n0_core::menu::retro::lights(image.size[0], image.size[1], |x, y| {
-        let c = image.pixels[y * image.size[0] + x];
-        [c.r(), c.g(), c.b()]
-    });
+/// A thumbnail as the retro look shows it here: in the phosphor's own colours, at all the resolution it has. The avatar's screen has 96 × 54 dots and draws them itself (contracts
+/// `Docs/n4n0.md`, Retro look); on a page this size they cannot be read.
+pub fn phosphor(image: &ColorImage) -> ColorImage {
     let steps = [BASE.bg, BASE.dim, BASE.line, BASE.hot];
-    let mut out = ColorImage::filled([w * scale, h * scale], BASE.bg);
-    for y in 0..h {
-        for x in 0..w {
-            let level = orbiters_n4n0_core::menu::retro::step(light[y * w + x], x, y);
-            for dy in 0..scale.saturating_sub(1).max(1) {
-                for dx in 0..scale.saturating_sub(1).max(1) {
-                    out.pixels[(y * scale + dy) * w * scale + x * scale + dx] = steps[level];
-                }
-            }
-        }
-    }
-    out
+    let pixels = super::orbit::retro::lights(image).map(|light| {
+        let at = light * (steps.len() - 1) as f32;
+        let below = (at as usize).min(steps.len() - 2);
+        let part = at - below as f32;
+        let mix = |a: u8, b: u8| (a as f32 + (b as f32 - a as f32) * part) as u8;
+        let (a, b) = (steps[below], steps[below + 1]);
+        Color32::from_rgb(mix(a.r(), b.r()), mix(a.g(), b.g()), mix(a.b(), b.b()))
+    });
+    ColorImage { size: image.size, source_size: image.source_size, pixels: pixels.collect() }
 }

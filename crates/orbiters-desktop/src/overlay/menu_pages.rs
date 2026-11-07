@@ -762,12 +762,12 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
 
     let mut canvas = Canvas::new(WIDTH, HEIGHT);
     let thumbs: Vec<TextureHandle> = (0..PICTURES).map(|i| sample_thumbnail(canvas.ctx(), i)).collect();
-    // The same pictures as the retro look's green dots.
+    // The same pictures in the retro look's green.
     let dots: Vec<TextureHandle> = (0..PICTURES)
         .map(|i| {
             let (w, h, rgba) = sample_rgba(i);
-            let image = menu_retro::dots(&ColorImage::from_rgba_unmultiplied([w, h], &rgba), 1);
-            canvas.ctx().load_texture(format!("dots{i}"), image, TextureOptions::NEAREST)
+            let image = menu_retro::phosphor(&ColorImage::from_rgba_unmultiplied([w, h], &rgba));
+            canvas.ctx().load_texture(format!("dots{i}"), image, TextureOptions::LINEAR)
         })
         .collect();
     let art = sample_art();
@@ -775,7 +775,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         let rgba: Vec<u8> = art.pixels.as_chunks::<3>().0.iter().flat_map(|&[r, g, b]| [r, g, b, 255]).collect();
         ColorImage::from_rgba_unmultiplied([art.width, art.height], &rgba)
     };
-    let art_dots = canvas.ctx().load_texture("art-dots", menu_retro::dots(&art_image, 1), TextureOptions::NEAREST);
+    let art_dots = canvas.ctx().load_texture("art-dots", menu_retro::phosphor(&art_image), TextureOptions::LINEAR);
     let art_texture = canvas.ctx().load_texture(SAMPLE_ART, art_image, TextureOptions::LINEAR);
     for (retro, name) in [(false, "menu-back.png"), (true, "menu-back-retro.png")] {
         let rgba = paint(&mut canvas, |p| if retro { menu_retro::draw_back(p, pos2(0.0, 0.0), skin) } else { menu_ui::draw_back(p, pos2(0.0, 0.0), skin) });

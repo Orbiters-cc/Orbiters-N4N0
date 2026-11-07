@@ -2,6 +2,7 @@
 //! `desktop.rs` reads it for its menus, ten looks a second and nothing between them. Dropped, it costs nothing. The picture goes no further than the reading of it.
 
 use super::camera_track::{self, Found};
+use orbiters_i18n::mark;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -14,8 +15,37 @@ pub struct Seen {
     pub at: Instant,
 }
 
+/// How the reading goes.
+#[derive(Clone, Copy, Debug, Default)]
+struct Health {
+    /// Opening the window's capture fails.
+    cannot_open: bool,
+    /// When a frame came, and when the camera's panel was last on one.
+    framed: Option<Instant>,
+    found: Option<Instant>,
+}
+
+/// How long something has to go on before it is said: a panel out of sight for a moment says nothing.
+const QUIET_FOR: std::time::Duration = std::time::Duration::from_secs(5);
+
+fn trouble(health: &Health, began: Instant, now: Instant) -> Option<&'static str> {
+    let long = |since: Option<Instant>| now.duration_since(since.unwrap_or(began)) >= QUIET_FOR;
+    if health.cannot_open {
+        return Some(mark("Orbiters cannot read VRChat's window, so it cannot find the camera there."));
+    }
+    if long(health.framed) {
+        return Some(mark("VRChat's window shows no picture, so the camera cannot be found on it. It must not be minimized."));
+    }
+    if long(health.found) {
+        return Some(mark("VRChat's camera is open, but its panel is not on VRChat's window now. The tiles come when it is in view."));
+    }
+    None
+}
+
 /// Reads the window until dropped.
 pub struct CameraWatch {
+    health: Arc<Mutex<Health>>,
+    began: Instant,
     seen: Arc<Mutex<Option<Seen>>>,
     stop: Arc<AtomicBool>,
 }
@@ -23,9 +53,16 @@ pub struct CameraWatch {
 impl CameraWatch {
     pub fn start() -> Self {
         let (seen, stop) = (Arc::new(Mutex::new(None)), Arc::new(AtomicBool::new(false)));
-        let (s, st) = (seen.clone(), stop.clone());
-        let _ = std::thread::Builder::new().name("camera panel".into()).spawn(move || run(&s, &st)); // i18n: not shown (a thread's name)
-        Self { seen, stop }
+        let health = Arc::new(Mutex::new(Health::default()));
+        let (s, st, h) = (seen.clone(), stop.clone(), health.clone());
+        let _ = std::thread::Builder::new().name("camera panel".into()).spawn(move || run(&s, &st, &h)); // i18n: not shown (a thread's name)
+        Self { health, began: Instant::now(), seen, stop }
+    }
+
+    /// Why no tile can show, as far as reading the window goes: for Settings, which translates it.
+    pub fn problem(&self) -> Option<&'static str> {
+        let health = *self.health.lock().unwrap_or_else(|e| e.into_inner());
+        trouble(&health, self.began, Instant::now())
     }
 
     /// The last look's result, once.
@@ -41,24 +78,28 @@ impl Drop for CameraWatch {
 }
 
 #[cfg(not(windows))]
-fn run(_: &Mutex<Option<Seen>>, _: &AtomicBool) {}
+fn run(_: &Mutex<Option<Seen>>, _: &AtomicBool, _: &Mutex<Health>) {}
 
 #[cfg(windows)]
-fn run(seen: &Mutex<Option<Seen>>, stop: &AtomicBool) {
+fn run(seen: &Mutex<Option<Seen>>, stop: &AtomicBool, health: &Mutex<Health>) {
     use std::time::Duration;
+    let told = |what: &dyn Fn(&mut Health)| what(&mut health.lock().unwrap_or_else(|e| e.into_inner()));
     let mut said = false;
     while !stop.load(Ordering::Relaxed) {
         // VRChat may not be there, or its window may go: looked for again.
         match imp::Frames::open() {
             Ok(mut frames) => {
                 said = false;
+                told(&|h| h.cannot_open = false);
                 while !stop.load(Ordering::Relaxed) && frames.alive() {
                     if let Some((bgra, width, height, stride, left, top, client)) = frames.next() {
+                        told(&|h| h.framed = Some(Instant::now()));
                         // Only what is the game's: the frame's title bar and borders are not.
                         let start = top as usize * stride + left as usize * 4;
                         if let Some(game) = bgra.get(start..) {
                             let _ = (width, height);
                             if let Some(found) = camera_track::find(game, client[0] as usize, client[1] as usize, stride) {
+                                told(&|h| h.found = Some(Instant::now()));
                                 *seen.lock().unwrap_or_else(|e| e.into_inner()) = Some(Seen { found, size: [client[0] as f32, client[1] as f32], at: Instant::now() });
                             }
                         }
@@ -70,9 +111,32 @@ fn run(seen: &Mutex<Option<Seen>>, stop: &AtomicBool) {
                 if !std::mem::replace(&mut said, true) {
                     eprintln!("camera panel: {e}");
                 }
+                told(&|h| h.cannot_open = true);
             }
         }
         std::thread::sleep(Duration::from_millis(500));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    /// Settings says why, and a panel out of sight for a moment says nothing.
+    #[test]
+    fn what_keeps_the_tiles_away_is_said() {
+        let began = Instant::now();
+        let at = |s: u64| began + Duration::from_secs(s);
+        let mut health = Health::default();
+        assert_eq!(trouble(&health, began, at(1)), None, "it has only just begun");
+        assert!(trouble(&health, began, at(6)).is_some_and(|said| said.contains("minimized")), "no frame at all");
+        health.framed = Some(at(6));
+        assert!(trouble(&health, began, at(7)).is_some_and(|said| said.contains("not on VRChat's window")));
+        health.found = Some(at(7));
+        assert_eq!(trouble(&health, began, at(8)), None, "seen");
+        health.cannot_open = true;
+        assert!(trouble(&health, began, at(8)).is_some_and(|said| said.contains("cannot read")));
     }
 }
 

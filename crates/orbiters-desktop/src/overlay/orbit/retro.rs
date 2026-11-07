@@ -232,47 +232,23 @@ fn brackets(out: &mut Vec<Shape>, r: Rect, length: f32, stroke: Stroke) {
     }
 }
 
-/// A picture in the retro menu's dots: its ordered dither, in four steps with a dark gap between dots, as squares whatever its shape. In greys.
-/// A small one has fewer: a dot under a few pixels only makes a shimmer.
-pub fn dots(image: &ColorImage) -> ColorImage {
-    use orbiters_n4n0_core::menu::retro::{step, DOTS_X, LOW, SPAN};
-    let [width, height] = image.size;
-    let across = if width >= 640 { DOTS_X } else { DOTS_X * 2 / 3 };
-    let down = (across * height / width.max(1)).clamp(1, 256);
-    const SCALE: usize = 3;
-    let steps = [GROUND, DOT_DIM, LINE, HOT];
-    let mut out = ColorImage::filled([across * SCALE, down * SCALE], GROUND);
-    let mut lights = Vec::with_capacity(across * down);
-    for dy in 0..down {
-        let (y0, y1) = (dy * height / down, ((dy + 1) * height / down).max(dy * height / down + 1).min(height));
-        for dx in 0..across {
-            let (x0, x1) = (dx * width / across, ((dx + 1) * width / across).max(dx * width / across + 1).min(width));
-            let (mut sum, mut count) = (0.0, 0.0);
-            for y in y0..y1 {
-                for c in &image.pixels[y * width + x0..y * width + x1] {
-                    sum += 0.299 * c.r() as f32 + 0.587 * c.g() as f32 + 0.114 * c.b() as f32;
-                    count += 1.0;
-                }
-            }
-            lights.push(sum / f32::max(count, 1.0) / 255.0);
-        }
-    }
-    // Four steps have no light to waste: a dim picture is opened up to them, though not as far as to make a dark one bright.
-    let mut sorted = lights.clone();
-    sorted.sort_unstable_by(f32::total_cmp);
-    let low = sorted[sorted.len() / 20].min(0.25);
-    let high = sorted[sorted.len() * 97 / 100].max(0.6);
-    for dy in 0..down {
-        for dx in 0..across {
-            let light = LOW + SPAN * (lights[dy * across + dx] - low) / (high - low);
-            let shade = steps[step(light, dx, dy)];
-            for y in 0..SCALE - 1 {
-                let row = (dy * SCALE + y) * across * SCALE + dx * SCALE;
-                out.pixels[row..row + SCALE - 1].fill(shade);
-            }
-        }
-    }
-    out
+/// How light each pixel of a picture is, 0 to 1, opened up so a dim picture does not lose its shadows in a green ramp. Every pixel: N4N0's 96 x 54 dots are for the avatar's screen, which
+/// has no more, and here they made pictures unreadable (Enzo: "you can keep them green monochrome, but give them more resolution").
+pub fn lights(image: &ColorImage) -> impl Iterator<Item = f32> + '_ {
+    let light = |c: &Color32| (0.299 * c.r() as f32 + 0.587 * c.g() as f32 + 0.114 * c.b() as f32) / 255.0;
+    // Where its light lies, from a sample: a live view comes through here on every frame.
+    let step = (image.pixels.len() / 4096).max(1);
+    let mut sample: Vec<f32> = image.pixels.iter().step_by(step).map(light).collect();
+    sample.sort_unstable_by(f32::total_cmp);
+    let at = |share: f32| sample.get((sample.len() as f32 * share) as usize).copied().unwrap_or(0.0);
+    let (low, high) = (at(0.02).min(0.25), at(0.98).max(0.35));
+    image.pixels.iter().map(move |c| ((light(c) - low) / (high - low)).clamp(0.0, 1.0).powf(0.75))
+}
+
+/// A picture for the retro look's Fully monochrome: in greys, which the look puts through its one colour.
+pub fn phosphor(image: &ColorImage) -> ColorImage {
+    let pixels = lights(image).map(|l| Color32::from_gray((20.0 + l * 235.0) as u8)).collect();
+    ColorImage { size: image.size, source_size: image.source_size, pixels }
 }
 
 #[cfg(test)]
@@ -287,16 +263,24 @@ mod tests {
         assert_eq!(cut_corners(rect, CornerRadius::same(4), 6.0).len(), 8);
     }
 
-    /// Light stays in order, a dark picture is mostly ground, and a tall picture's dots stay square.
+    /// All the resolution it has, as Enzo asked: a line one pixel wide survives. Light stays in order, and a dim picture still spans the range.
     #[test]
-    fn pictures_in_dots_keep_their_light_and_their_shape() {
-        let flat = |shade: u8, size: [usize; 2]| ColorImage::filled(size, Color32::from_gray(shade));
-        let lit = |image: &ColorImage| image.pixels.iter().filter(|c| **c != GROUND).count();
-        let (dark, mid, bright) = (dots(&flat(10, [320, 180])), dots(&flat(120, [320, 180])), dots(&flat(245, [320, 180])));
-        assert!(lit(&dark) < lit(&mid) && lit(&mid) <= lit(&bright));
-        assert_eq!(dark.size, [64 * 3, 36 * 3]);
-        assert_eq!(dots(&flat(120, [960, 540])).size, [96 * 3, 54 * 3], "as many as N4N0's own");
-        assert_eq!(dots(&flat(120, [180, 320])).size, [64 * 3, 113 * 3]);
+    fn a_retro_picture_keeps_its_resolution_and_its_light() {
+        let (w, h) = (64usize, 32usize);
+        let mut pixels = vec![Color32::from_gray(60); w * h];
+        for y in 0..h {
+            pixels[y * w + 20] = Color32::from_gray(200);
+        }
+        let done = phosphor(&ColorImage { size: [w, h], source_size: egui::vec2(w as f32, h as f32), pixels });
+        assert_eq!(done.size, [w, h], "not one pixel fewer");
+        let (line, beside) = (done.pixels[5 * w + 20].r(), done.pixels[5 * w + 21].r());
+        assert!(line > beside + 80, "the line stands out against what is beside it: {line} {beside}");
+        // A dim picture opens up.
+        let mut ramp: Vec<Color32> = (0..w * h).map(|i| Color32::from_gray((i * 60 / (w * h)) as u8)).collect();
+        ramp[0] = Color32::BLACK;
+        let done = phosphor(&ColorImage { size: [w, h], source_size: egui::vec2(w as f32, h as f32), pixels: ramp });
+        assert!(done.pixels[w * h - 1].r() > 150, "{}", done.pixels[w * h - 1].r());
+        assert!(done.pixels[w * h - 1].r() > done.pixels[w * h / 2].r() && done.pixels[w * h / 2].r() > done.pixels[1].r());
     }
 
     /// In capitals, wherever a capital has the same bytes; other letters are left, not broken.

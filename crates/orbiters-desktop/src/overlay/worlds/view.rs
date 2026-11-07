@@ -13,6 +13,7 @@
 use super::catalog::Capture;
 use super::pacing::{Kind, Pacer};
 use super::render::FaceRenderer;
+use super::stereo::TurnStick;
 use super::stereo::{self, Cube, Placement, PlayCamera, V3};
 use orbiters_openvr::{self as vr, compositor::Eye, overlay_flag, Pose, Universe, MAX_DEVICES};
 use orbiters_i18n::{tr, tr_ctx};
@@ -143,6 +144,25 @@ pub struct Job {
     pub count: usize,
     /// The shared fence value the GPU waits for first.
     pub wait: u64,
+}
+
+/// How long the device and shaders stay with nothing shown, for the next capture to need no getting ready.
+const IDLE_KEEPS_GPU: Duration = Duration::from_secs(300);
+
+/// VRChat's setting for how it turns: `VRC_INPUT_COMFORT_TURNING`, on for steps. It is read when a capture shows; if it cannot be read, smoothly, VRChat's default.
+#[cfg(windows)]
+fn vrchat_turns_in_steps() -> Option<bool> {
+    use windows::core::HSTRING;
+    use windows::Win32::System::Registry::{RegGetValueW, HKEY_CURRENT_USER, RRF_RT_REG_DWORD};
+    let (mut value, mut size) = (0u32, 4u32);
+    // SAFETY: the buffer and its size are valid for the call, and the type asked for is that size.
+    let status = unsafe { RegGetValueW(HKEY_CURRENT_USER, &HSTRING::from("Software\\VRChat\\VRChat"), &HSTRING::from("VRC_INPUT_COMFORT_TURNING_h2182102264"), RRF_RT_REG_DWORD, None, Some(&mut value as *mut u32 as *mut _), Some(&mut size)) };
+    status.is_ok().then_some(value != 0)
+}
+
+#[cfg(not(windows))]
+fn vrchat_turns_in_steps() -> Option<bool> {
+    None
 }
 
 /// Draws a batch on `renderer`: into the faces' pictures, then copied to `targets` (face × 2 + slot).
@@ -349,6 +369,13 @@ pub struct View {
     settling: bool,
     wait: u64,
     alpha: f32,
+    /// A capture has shown on this device, and since when nothing has.
+    gpu_ready: bool,
+    idle_since: Option<Instant>,
+    /// VRChat's turning stick, for what shows around the person; and how VRChat turns.
+    turning: TurnStick,
+    turn_read: Option<Instant>,
+    steps_turn: bool,
     /// It lies across a menu, and how far it has gone for that.
     covered: bool,
     covered_by: f32,
@@ -409,6 +436,11 @@ impl View {
             settling: false,
             wait: 0,
             alpha: 0.0,
+            gpu_ready: false,
+            idle_since: None,
+            turning: TurnStick::default(),
+            turn_read: None,
+            steps_turn: false,
             covered: false,
             covered_by: 0.0,
             see_through: false,
@@ -432,6 +464,11 @@ impl View {
     /// Whether the capture is still on its way to the GPU.
     pub fn preparing(&self) -> bool {
         matches!(self.phase, Phase::Loading)
+    }
+
+    /// It is getting ready with no capture having shown on this device yet: its shaders are being made.
+    pub fn first_time(&self) -> bool {
+        !self.gpu_ready
     }
 
     pub fn quality(&self) -> Quality {
@@ -470,6 +507,10 @@ impl View {
 
     /// Shows `capture`, its start view over where the head stands now (play space).
     pub fn show(&mut self, overlay: &vr::Overlay, steamvr: &vr::Client, capture: Arc<Capture>) {
+        self.idle_since = None;
+        self.turning = TurnStick::default();
+        self.turn_read = None;
+        self.steps_turn = vrchat_turns_in_steps().unwrap_or(false);
         self.error = None;
         self.pacer = Pacer::default();
         self.motion = None;
@@ -588,10 +629,25 @@ impl View {
         self.small.as_ref().filter(|_| matches!(self.phase, Phase::Shown { .. }))
     }
 
-    /// Where the plate under what shows small lies.
-    pub fn small_plate(&self) -> Option<(vr::Matrix34, f32)> {
-        let (small, capture) = (self.small_now()?, self.capture.as_ref()?);
-        Some(small.plate(capture.view.eye()[1] - capture.view.ground()))
+    /// VRChat's turning stick (-1 to 1), for what shows around the person: the capture turns about the head, as the world does in VRChat. Enzo: "so I can turn around and look around in
+    /// the same way as I would in vrchat and not feel stuck". What shows small has its own hand.
+    pub fn turn_stick(&mut self, stick: f32, steamvr: &vr::Client) {
+        let now = Instant::now();
+        let seconds = self.turn_read.map_or(0.0, |t| now.duration_since(t).as_secs_f32()).min(0.1);
+        self.turn_read = Some(now);
+        if self.small.is_some() || !matches!(self.phase, Phase::Shown { .. }) {
+            return;
+        }
+        let by = self.turning.step(stick, seconds, self.steps_turn);
+        if by == 0.0 {
+            return;
+        }
+        if let Some(placement) = self.placement {
+            self.placement = Some(stereo::turned_about(&placement, stereo::position(&head_pose(steamvr, 0.0)), by));
+            if self.steps_turn {
+                self.renew();
+            }
+        }
     }
 
     /// What shows small goes back to its place in the panel.
@@ -704,6 +760,20 @@ impl View {
             self.begin(sorted, true);
         }
         let now = Instant::now();
+        if matches!(self.phase, Phase::Off) {
+            if self.idle_since.is_some_and(|t| t.elapsed() >= IDLE_KEEPS_GPU) {
+                self.idle_since = None;
+                // The device, the splats and the textures go with the thread.
+                self.thread = None;
+                self.gpu_ready = false;
+                #[cfg(windows)]
+                {
+                    self.d3d11 = None;
+                }
+                self.width = 0;
+            }
+            return;
+        }
         match self.phase {
             Phase::Off => return,
             Phase::Leaving { since } => {
@@ -715,13 +785,10 @@ impl View {
                     self.full = None;
                     self.small = None;
                     self.small_coming = None;
-                    // The device, the splats and the textures go with the thread.
-                    self.thread = None;
-                    #[cfg(windows)]
-                    {
-                        self.d3d11 = None;
-                    }
-                    self.width = 0;
+                    // The next one opens around the person, whatever this one was (Enzo: immersive is the default); Small here asks for itself.
+                    self.small_on = false;
+                    // The device and its shaders stay for the next capture, which then needs no getting ready (Enzo). They go after a while with nothing shown: see `IDLE_KEEPS_GPU`.
+                    self.idle_since = Some(Instant::now());
                     self.cubes = [None; 2];
                     self.switching = None;
                     self.in_flight = None;
@@ -1017,7 +1084,10 @@ impl View {
                         }
                     }
                 }
-                Answer::Loaded => self.loaded = true,
+                Answer::Loaded => {
+                    self.loaded = true;
+                    self.gpu_ready = true;
+                }
                 Answer::Rendered { id, cube_index, work, eyes, count, ms, ready, redraw } => {
                     if self.in_flight == Some(id) {
                         self.in_flight = None;

@@ -26,6 +26,9 @@ pub struct OrbitStatus {
     pub note: Option<String>,
     /// SteamVR's "Experimental overlay input overrides": `None` where it is not known (no SteamVR).
     pub steamvr_overrides: Option<bool>,
+    /// Why the tiles around VRChat's camera cannot show, in words, as `note`.
+    #[serde(default)]
+    pub camera_note: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

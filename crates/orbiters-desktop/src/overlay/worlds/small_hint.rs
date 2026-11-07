@@ -231,7 +231,7 @@ impl HideChip {
     }
 }
 
-/// Where a view's X lies, facing `eye`: floating just above it. `plate` is the plate's middle.
+/// Where a view's X lies, facing `eye`: floating just above it.
 pub fn chip_place(middle: V3, radius: f32, eye: V3, over_the_hint: bool) -> vr::Matrix34 {
     let over = if over_the_hint { hint_place(middle, radius)[1] - middle[1] + WIDTH_M * PX[1] as f32 / PX[0] as f32 / 2.0 + 0.04 } else { radius + 0.05 };
     facing(stereo::add(middle, [0.0, over, 0.0]), eye)
@@ -307,87 +307,6 @@ impl SmallHint {
             let _ = overlay.show(self.handle);
         }
         self.shown = Some(stage);
-    }
-
-    pub fn destroy(&self, overlay: &vr::Overlay) {
-        let _ = overlay.destroy(self.handle);
-    }
-}
-
-/// The plate a capture standing small stands on, under it: a soft shadow, a dark disc, a clean rim where the capture ends. It is
-/// in the room, tipped as the capture is, so that it gives the capture its shape from any side.
-pub struct Plate {
-    handle: vr::OverlayHandle,
-    pixels: Vec<u8>,
-    painted: bool,
-    shown: bool,
-}
-
-/// The plate's picture, premultiplied, `side` pixels square.
-pub fn plate_pixels(side: u32) -> Vec<u8> {
-    let mut pixels = Vec::with_capacity((side * side * 4) as usize);
-    let rim = stereo::SMALL_PLATE_RIM;
-    let smooth = |a: f32, b: f32, x: f32| {
-        let t = ((x - a) / (b - a)).clamp(0.0, 1.0);
-        t * t * (3.0 - 2.0 * t)
-    };
-    for y in 0..side {
-        for x in 0..side {
-            let (u, v) = ((x as f32 + 0.5) / side as f32 * 2.0 - 1.0, (y as f32 + 0.5) / side as f32 * 2.0 - 1.0);
-            let at = u.hypot(v);
-            // From the edge in: shadow, then the disc under the capture, a little lighter in its middle.
-            let shadow = 0.6 * (1.0 - smooth(rim, 1.0, at));
-            let disc = 1.0 - smooth(rim - 0.006, rim + 0.002, at);
-            let ring = (1.0 - ((at - rim).abs() / 0.012).clamp(0.0, 1.0)).powf(0.7);
-            let (mut r, mut g, mut b, mut a) = (0.0f32, 0.0f32, 0.0f32, shadow);
-            if disc > 0.0 {
-                let light = (1.0 - at / rim).clamp(0.0, 1.0) * 0.5;
-                let (dr, dg, db) = (0.09 + 0.05 * light, 0.1 + 0.055 * light, 0.125 + 0.07 * light);
-                let da = 0.94;
-                r = r * (1.0 - disc) + dr * da * disc;
-                g = g * (1.0 - disc) + dg * da * disc;
-                b = b * (1.0 - disc) + db * da * disc;
-                a = a * (1.0 - disc) + da * disc;
-            }
-            // Its rim, Orbiters' own green, soft on the disc.
-            let (rr, rg, rb) = (0.18, 0.95, 0.56);
-            r = r * (1.0 - ring) + rr * ring;
-            g = g * (1.0 - ring) + rg * ring;
-            b = b * (1.0 - ring) + rb * ring;
-            a = a * (1.0 - ring) + ring;
-            pixels.extend_from_slice(&[(r * 255.0) as u8, (g * 255.0) as u8, (b * 255.0) as u8, (a * 255.0) as u8]);
-        }
-    }
-    pixels
-}
-
-impl Plate {
-    const SIDE: u32 = 512;
-
-    pub fn new(overlay: &vr::Overlay, key: &str) -> anyhow::Result<Self> {
-        let handle = overlay.create(&format!("{key}.small-plate"), "Under a small 3D view").map_err(|c| anyhow::anyhow!("the small view's plate: {c:?}"))?; // i18n: not shown (the overlay's name in SteamVR)
-        let _ = overlay.set_flag(handle, vr::overlay_flag::IS_PREMULTIPLIED, true);
-        // Over a panel's pane, under the capture.
-        let _ = overlay.set_sort_order(handle, 1);
-        Ok(Self { handle, pixels: plate_pixels(Self::SIDE), painted: false, shown: false })
-    }
-
-    pub(super) fn update(&mut self, overlay: &vr::Overlay, presenter: &mut Presenter, place: Option<(vr::Matrix34, f32)>) {
-        let Some((at, width)) = place else {
-            if std::mem::take(&mut self.shown) {
-                let _ = overlay.hide(self.handle);
-            }
-            return;
-        };
-        if !self.painted {
-            self.painted = true;
-            presenter.show_part(overlay, self.handle, &self.pixels, Self::SIDE, Self::SIDE, [0, 0, Self::SIDE, Self::SIDE]);
-        }
-        let _ = overlay.set_width_in_meters(self.handle, width);
-        let _ = overlay.set_transform_absolute(self.handle, &at);
-        if !std::mem::replace(&mut self.shown, true) {
-            let _ = overlay.show(self.handle);
-        }
     }
 
     pub fn destroy(&self, overlay: &vr::Overlay) {

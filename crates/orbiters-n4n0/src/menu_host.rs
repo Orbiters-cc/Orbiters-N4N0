@@ -80,6 +80,8 @@ pub struct MenuHost<P: Pictures> {
     done_rx: mpsc::Receiver<Done>,
     /// The media reading the menu shows (its version: [`Watcher::reading`]).
     media_seen: u64,
+    /// What play or pause was last asked to become, and when.
+    play_asked: Option<(bool, Instant)>,
     /// The light as last set here, and when: what N4N0 says replaces it once it says the same (or after
     /// [`LIGHT_ECHO`]), so a switch does not jump back while N4N0 is told.
     light_set: Option<(Light, Instant)>,
@@ -122,6 +124,7 @@ impl<P: Pictures> MenuHost<P> {
             done_tx,
             done_rx,
             media_seen: 0,
+            play_asked: None,
             light_set: None,
             dirty: true,
             states_seen: None,
@@ -157,7 +160,12 @@ impl<P: Pictures> MenuHost<P> {
     /// A press on `target`: what it does follows from the effects it returns.
     pub fn press(&mut self, target: Target) -> Vec<Effect> {
         self.dirty = true;
-        self.menu.press(target)
+        let effects = self.menu.press(target);
+        // It switched on the press itself: what the app says a moment later, still the old state, does not switch it back.
+        if matches!(target, Target::MediaPlayPause) {
+            self.play_asked = self.menu.media.as_ref().map(|m| (m.playing, Instant::now()));
+        }
+        effects
     }
 
     /// Keeps the menu's picture of what N4N0 and the settings say (calls, fast walk, listening, the picture's
@@ -336,7 +344,11 @@ impl<P: Pictures> MenuHost<P> {
             return;
         }
         self.media_seen = version;
-        self.menu.media = reading.media;
+        let mut read = reading.media;
+        if let Some(media) = read.as_mut() {
+            media.playing = settled_playing(media.playing, &mut self.play_asked, Instant::now());
+        }
+        self.menu.media = read;
         self.menu.volume = reading.volume;
         if let Some(art) = reading.art {
             if !matches!(self.thumbs.get(&art.key), Some(Thumb::Ready(..))) {
@@ -529,9 +541,36 @@ impl<P: Pictures> MenuHost<P> {
     }
 }
 
+/// How long an app gets to do what it was asked before what it says is believed over what was asked.
+const MEDIA_CATCHES_UP: Duration = Duration::from_millis(2500);
+
+/// Whether something plays, from what the app says now and what was last asked: what was asked, until the app agrees or has had its time.
+fn settled_playing(read: bool, asked: &mut Option<(bool, Instant)>, now: Instant) -> bool {
+    let Some((playing, at)) = *asked else { return read };
+    if read == playing || now.duration_since(at) >= MEDIA_CATCHES_UP {
+        *asked = None;
+        return read;
+    }
+    playing
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Enzo: the state must switch on the press itself. A read of the old state does not flip it back; the app is believed once it agrees, or has had its time.
+    #[test]
+    fn play_and_pause_show_what_was_asked_until_the_app_has_caught_up() {
+        let t = Instant::now();
+        let mut asked = Some((false, t));
+        assert!(!settled_playing(true, &mut asked, t + Duration::from_millis(900)));
+        assert!(asked.is_some());
+        assert!(!settled_playing(false, &mut asked, t + Duration::from_millis(1000)), "it agrees");
+        assert!(asked.is_none());
+        assert!(settled_playing(true, &mut asked, t + Duration::from_millis(1100)), "and from then on it is believed");
+        let mut asked = Some((false, t));
+        assert!(settled_playing(true, &mut asked, t + MEDIA_CATCHES_UP), "it had its time");
+    }
     use crate::status::{CallContact, CallLink, CallPhase, CallView, CallsStatus, N4n0Light, StateView, StatesNote, StatesView};
     use std::sync::Mutex;
 

@@ -407,9 +407,6 @@ pub(super) fn vr_shots(out: &Path, refs: &Path) -> anyhow::Result<()> {
                 let camera = stereo::eye_camera(&head, tangents, w, h, &small.placement(capture.view.eye()));
                 renderer.render_view(&camera, capture.within(small.reach()))
             };
-            let plate_side = 1024u32;
-            let plate_pixels = small_hint::plate_pixels(plate_side);
-            let below = capture.view.eye()[1] - capture.view.ground();
             let panel = image::open(refs.join("panel-small-docked.png"))?.to_rgba8();
             let panel_px = [panel.width(), panel.height()];
             let mut panel_pixels = panel.into_raw();
@@ -436,8 +433,6 @@ pub(super) fn vr_shots(out: &Path, refs: &Path) -> anyhow::Result<()> {
             // The dark pane behind it, then its plate.
             let pane = small_hint::backdrop_pixels();
             eye.quad(&Quad { transform: at, width: hole.width() / 1024.0 * page_quad.width + 0.012, height: hole.height() / 576.0 * page_quad.height + 0.012 }, &pane, small_hint::BACKDROP_PX, 1.0);
-            let (plate_at, plate_w) = small.plate(below);
-            eye.quad(&Quad { transform: plate_at, width: plate_w, height: plate_w }, &plate_pixels, [plate_side; 2], 1.0);
             eye.over(&model(&small)?);
             for zone in Zone::QUICK_MENU {
                 let placed = zones::in_units(zone);
@@ -453,8 +448,6 @@ pub(super) fn vr_shots(out: &Path, refs: &Path) -> anyhow::Result<()> {
             let mut held = stereo::Small::new(&capture.view, &head, capture.small_reach());
             held.anchor = [0.0, 1.45, -0.62];
             let mut eye = Eye::new(size, &ground, eyes);
-            let (plate_at, plate_w) = held.plate(below);
-            eye.quad(&Quad { transform: plate_at, width: plate_w, height: plate_w }, &plate_pixels, [plate_side; 2], 1.0);
             eye.over(&model(&held)?);
             let hint_px = small_hint::PX;
             let mut canvas = Canvas::new(hint_px[0], hint_px[1]);

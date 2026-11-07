@@ -94,7 +94,7 @@ A press on a world opens its details on a side panel beside the list, which narr
 
 ## A sheet's head
 
-Where no wing lies beside it (from the wheel, in a narrow window, with its tiles hidden), its tools are tabs (`head_tabs`): from any sheet to any other. Beside the wing they would only repeat it, and the head says the sheet's name. On a screen they have their names, and while the head has something to say, icons but for the open one. In a headset they are named or are not there.
+Where no wing lies beside it (from the wheel, in a narrow window, with its tiles hidden), its tools are tabs (`head_tabs`): from any sheet to any other. Beside the wing they would only repeat it, and the head says the sheet's name. All tools has no tabs anywhere, as its large tiles are the same things: on a screen its head holds its accessories instead (`head_tools`), and the large tiles have the page; while the head has something to say, it says that. A headset has more accessories than a head has room for: they stay on the page. On a screen they have their names, and while the head has something to say, icons but for the open one. In a headset they are named or are not there.
 
 ## VRChat's tooltips under a sheet
 

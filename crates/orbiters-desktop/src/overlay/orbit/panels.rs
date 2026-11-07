@@ -421,6 +421,8 @@ pub enum Look {
     NewTalk,
     /// A world the person was in: its picture, name and last time.
     Visit(usize),
+    /// One of All tools' accessories, in its head.
+    HeadTool { icon: &'static str, label: &'static str, tint: Color32 },
     /// One of the tools, in a sheet's head: from any sheet to any other, with or without the wing.
     HeadTab { icon: &'static str, label: &'static str, on: bool },
     /// Over the Instances sheet's rows: what they offer, once.
@@ -509,6 +511,7 @@ pub fn items(zone: Zone, size: Vec2, facts: &Facts) -> Vec<Item> {
         Zone::SheetBack => {
             let mut out = vec![Item { action: Action::CloseSheet, rect: r(w - 40.0, 7.0, 30.0, 30.0), look: Look::Close }];
             out.extend(head_tabs(facts).0);
+            out.extend(head_tools(facts, w));
             // While a capture shows around the person: it is one press from gone, wherever on the sheet.
             if facts.view_showing {
                 out.push(Item { action: Action::HideView, rect: r(w - 40.0 - 8.0 - 96.0, 7.0, 96.0, 30.0), look: Look::HideView });
@@ -532,6 +535,68 @@ pub fn items(zone: Zone, size: Vec2, facts: &Facts) -> Vec<Item> {
     }
 }
 
+/// All tools' accessories, and only what can work here.
+fn accessories(facts: &Facts) -> Vec<(Action, &'static str, &'static str)> {
+    let mut small: Vec<(Action, &'static str, &'static str)> = vec![(Action::Talk, icons::MICROPHONE, "Ask N4N0")];
+    if facts.can_states {
+        small.push((Action::Page(Target::States), icons::BOOKMARKS_SIMPLE, "Saved looks"));
+    }
+    if facts.can_light {
+        small.push((Action::Page(Target::Light), icons::LIGHTBULB, "Light"));
+    }
+    if !facts.desktop {
+        small.push((Action::FastWalk, icons::PERSON_SIMPLE_RUN, "Fast walk"));
+        small.push((Action::Page(Target::Tracking), icons::VIRTUAL_REALITY, "Smooth tracking"));
+    }
+    if facts.can_call {
+        small.push((Action::Page(Target::Call), icons::PHONE, "Call"));
+    }
+    small.push((Action::Page(Target::WorldFeedback), icons::HEART, "World feedback"));
+    small.push((Action::Page(Target::Qr), icons::QR_CODE, "QR code"));
+    small.push((Action::Page(Target::Suggest), icons::CHAT_TEARDROP_TEXT, "Suggest"));
+    small.push((Action::OpenApp, icons::N4N0_MARK, "Open Orbiters"));
+    small
+}
+
+/// On a screen All tools' head holds its accessories: tabs there would only repeat the large tiles under them, and the page has the room this leaves. A headset has more of them than
+/// a head has room for, and says in its head what is pointed at.
+fn head_holds_tools(facts: &Facts) -> bool {
+    facts.desktop && !facts.view_showing && facts.sheet == Some(Sheet::All)
+}
+
+/// All tools' accessories along its head, from `HEAD_TOOLS_FROM`: as wide as their names, sharing what is left. While the head has something to say, it says that, for that long.
+fn head_tools(facts: &Facts, width: f32) -> Vec<Item> {
+    if !head_holds_tools(facts) || status_now(facts).is_some() {
+        return Vec::new();
+    }
+    const GAP: f32 = 4.0;
+    let tools = accessories(facts);
+    let wide = |label: &str| 37.0 + head_name(label).chars().count() as f32 * 7.5;
+    let room = width - 48.0 - HEAD_TOOLS_FROM - GAP * (tools.len() as f32 - 1.0);
+    let extra = ((room - tools.iter().map(|t| wide(t.2)).sum::<f32>()) / tools.len() as f32).max(0.0);
+    let mut x = HEAD_TOOLS_FROM;
+    tools
+        .into_iter()
+        .map(|(action, icon, label)| {
+            let w = wide(label) + extra;
+            let item = Item { action, rect: r(x, 7.0, w, 30.0), look: Look::HeadTool { icon, label, tint: tool_tint(action) } };
+            x += w + GAP;
+            item
+        })
+        .collect()
+}
+
+const HEAD_TOOLS_FROM: f32 = 40.0;
+
+/// A tool's name in the head, where a long one would be cut: pointed at, the band says it in full.
+fn head_name(label: &str) -> &str {
+    match label {
+        "World feedback" => "Feedback",
+        "Open Orbiters" => "Orbiters",
+        other => other,
+    }
+}
+
 /// The tools along a sheet's head, where the wing is not beside it, and where they end. Their names where there is room; with something else to say in the head, on a screen, icons but for the one that is open.
 fn head_tabs(facts: &Facts) -> (Vec<Item>, f32) {
     const TABS: [(Action, &str, &str, f32); 6] = [
@@ -542,8 +607,8 @@ fn head_tabs(facts: &Facts) -> (Vec<Item>, f32) {
         (Action::Talk, icons::MICROPHONE, "Ask", 62.0),
         (Action::All, icons::SQUARES_FOUR, "All tools", 90.0),
     ];
-    // The wing has them, right beside the sheet: where it shows, they would only say it again.
-    if facts.beside_wing && !facts.strip_caption && !facts.tiles_hidden {
+    // The wing has them, right beside the sheet: where it shows, they would only say it again. All tools has them, as large tiles, right under them.
+    if (facts.beside_wing && !facts.strip_caption && !facts.tiles_hidden) || facts.sheet == Some(Sheet::All) {
         return (Vec::new(), 10.0);
     }
     let busy = facts.view_showing || status_now(facts).is_some();
@@ -606,31 +671,14 @@ fn sheet_page_items(sheet: Sheet, facts: &Facts) -> Vec<Item> {
         Sheet::All => {
             let (x0, y0, gap) = (24.0, 10.0, 12.0);
             let width = 1024.0 - x0 * 2.0;
-            // The accessories, small, and only what can work here: a line of icons and names.
-            let mut small: Vec<(Action, &'static str, &'static str)> = vec![(Action::Talk, icons::MICROPHONE, "Ask N4N0")];
-            if facts.can_states {
-                small.push((Action::Page(Target::States), icons::BOOKMARKS_SIMPLE, "Saved looks"));
-            }
-            if facts.can_light {
-                small.push((Action::Page(Target::Light), icons::LIGHTBULB, "Light"));
-            }
-            if !facts.desktop {
-                small.push((Action::FastWalk, icons::PERSON_SIMPLE_RUN, "Fast walk"));
-                small.push((Action::Page(Target::Tracking), icons::VIRTUAL_REALITY, "Smooth tracking"));
-            }
-            if facts.can_call {
-                small.push((Action::Page(Target::Call), icons::PHONE, "Call"));
-            }
-            small.push((Action::Page(Target::WorldFeedback), icons::HEART, "World feedback"));
-            small.push((Action::Page(Target::Qr), icons::QR_CODE, "QR code"));
-            small.push((Action::Page(Target::Suggest), icons::CHAT_TEARDROP_TEXT, "Suggest"));
-            small.push((Action::OpenApp, icons::N4N0_MARK, "Open Orbiters"));
+            // On a screen the accessories are in the sheet's head, and the large ones have the page.
+            let small = if head_holds_tools(facts) { Vec::new() } else { accessories(facts) };
             // In two rows, whatever there is: they are read, and aimed at.
             let per_row = small.len().div_ceil(2).max(3);
             let (small_h, small_gap) = (50.0, 8.0);
             let small_rows = small.len().div_ceil(per_row) as f32;
-            let block = small_rows * small_h + (small_rows - 1.0) * small_gap;
-            let free = 576.0 - y0 * 2.0 - gap * 2.0 - block;
+            let block = if small.is_empty() { 0.0 } else { small_rows * small_h + (small_rows - 1.0) * small_gap + gap };
+            let free = 576.0 - y0 * 2.0 - gap - block;
             let (first_h, second_h) = (free * 0.56, free * 0.44);
             // Worlds in 3D largest, then what people come for; what plays with all its controls, there, with no page of its own.
             let first_w = (width - gap * 2.0) * 0.42;
@@ -1361,7 +1409,10 @@ pub fn paint(p: &Painter, zone: Zone, size: Vec2, facts: &Facts, hover: Option<u
             top_light(p, panel);
             // The tools along it say which page this is; a page of N4N0's own says so after them.
             let (tabs, mut x) = head_tabs(facts);
-            if !tabs.iter().any(|t| matches!(t.look, Look::HeadTab { on: true, .. })) {
+            let tools = !head_tools(facts, size.x).is_empty();
+            if tools {
+                widgets::icon(p, pos2(21.0, 22.0), glyph, 21.0, tint);
+            } else if !tabs.iter().any(|t| matches!(t.look, Look::HeadTab { on: true, .. })) {
                 widgets::icon(p, pos2(x + 10.0, 22.0), glyph, 21.0, tint);
                 x += 28.0;
                 text(p, pos2(x, 22.0), Align2::LEFT_CENTER, &facts.sheet_title, 18.0, weight::SEMIBOLD, look::LABEL);
@@ -1377,7 +1428,7 @@ pub fn paint(p: &Painter, zone: Zone, size: Vec2, facts: &Facts, hover: Option<u
                 p.text(pos2(from, if second.is_empty() { 22.0 } else { 14.0 }), Align2::LEFT_CENTER, fit(p, &first, &big, room), big, look::ACCENT);
                 p.text(pos2(from, 31.0), Align2::LEFT_CENTER, fit(p, &second, &small, room), small, look::LABEL);
             // What is pointed at is said in one place: where the band under the tabs is up, there.
-            } else if let Some((first, second)) = facts.pointed.filter(|_| !facts.hint_band && matches!(facts.sheet, Some(Sheet::All | Sheet::Pictures))).and_then(|a| caption(a, facts)) {
+            } else if let Some((first, second)) = facts.pointed.filter(|_| !tools && !facts.hint_band && matches!(facts.sheet, Some(Sheet::All | Sheet::Pictures))).and_then(|a| caption(a, facts)) {
                 // What a small tile does, which it does not say itself.
                 let room = size.x - 50.0 - if facts.view_showing { 206.0 } else { 0.0 } - from;
                 let big = theme::font(13.0, weight::BOLD);
@@ -1884,10 +1935,20 @@ fn draw(p: &Painter, zone: Zone, item: &Item, facts: &Facts, hovered: bool, pres
         }
         Look::VideoCopy(i) => {
             let clip = p.with_clip_rect(Rect::from_min_max(pos2(0.0, RESULTS_TOP), pos2(1024.0, 576.0)));
+            // The main one, in the accent. Copied says so on it, lighter still: the accent alone would not show the change.
             let copied = facts.video_copied == Some(i);
             let radius = theme::radius(rect.height() / 2.0);
-            clip.rect_filled(rect, radius, if copied { look::ACCENT } else if pressed { look::TILE_DOWN } else if hovered { look::TILE_HOVER } else { look::TILE });
-            clip.text(rect.center(), Align2::CENTER_CENTER, if copied { "Copied" } else { "Copy link" }, theme::font(16.0, weight::SEMIBOLD), if copied { look::ON_ACCENT } else { look::LABEL });
+            let fill = if copied {
+                theme::mix(look::ACCENT, Color32::WHITE, 0.6)
+            } else if pressed {
+                theme::mix(look::ACCENT, Color32::BLACK, 0.25)
+            } else if hovered {
+                theme::mix(look::ACCENT, Color32::WHITE, 0.15)
+            } else {
+                look::ACCENT
+            };
+            clip.rect_filled(rect, radius, fill);
+            clip.text(rect.center(), Align2::CENTER_CENTER, if copied { "Copied" } else { "Copy link" }, theme::font(16.0, weight::BOLD), look::ON_ACCENT);
         }
         Look::Timeline => {
             let Some((at, of)) = facts.music_times.filter(|t| t.1 > 0) else { return };
@@ -1926,10 +1987,8 @@ fn draw(p: &Painter, zone: Zone, item: &Item, facts: &Facts, hovered: bool, pres
         }
         Look::VideoDrop => {
             let clip = p.with_clip_rect(Rect::from_min_max(pos2(0.0, RESULTS_TOP), pos2(1024.0, 576.0)));
-            // First of the two, without shouting over the videos: filled under the pointer.
-            let on = hovered || pressed;
-            clip.rect_filled(rect, theme::radius(rect.height() / 2.0), if pressed { theme::mix(look::ACCENT, Color32::BLACK, 0.25) } else if on { look::ACCENT } else { theme::mix(look::TILE, look::ACCENT, 0.3) });
-            clip.text(rect.center(), Align2::CENTER_CENTER, "Drop in world", theme::font(16.0, weight::BOLD), if on { look::ON_ACCENT } else { look::LABEL });
+            clip.rect_filled(rect, theme::radius(rect.height() / 2.0), if pressed { look::TILE_DOWN } else if hovered { look::TILE_HOVER } else { look::TILE });
+            clip.text(rect.center(), Align2::CENTER_CENTER, "Drop in world", theme::font(16.0, weight::SEMIBOLD), look::LABEL);
         }
         Look::BackToPictures => {
             p.rect_filled(rect, theme::radius(rect.height() / 2.0), if hovered { theme::alpha(theme::INK_900, 0.98) } else { theme::alpha(theme::INK_900, 0.8) });
@@ -1982,6 +2041,16 @@ fn draw(p: &Painter, zone: Zone, item: &Item, facts: &Facts, hovered: bool, pres
         }
         Look::Heading(name) => {
             text(p, pos2(rect.left() + 2.0, rect.center().y), Align2::LEFT_CENTER, name, 16.0, weight::BOLD, look::LABEL);
+        }
+        Look::HeadTool { icon, label, tint } => {
+            let radius = theme::radius(rect.height() / 2.0);
+            p.rect_filled(rect, radius, if pressed { theme::mix(look::TILE, tint, 0.26) } else if hovered { theme::mix(look::TILE, tint, 0.2) } else { look::TILE });
+            if hovered {
+                p.rect_stroke(rect.shrink(0.75), radius, Stroke::new(1.5, tint), egui::StrokeKind::Middle);
+            }
+            widgets::icon(p, pos2(rect.left() + 16.0, rect.center().y), icon, 17.0, tint);
+            let font = theme::font(13.0, weight::SEMIBOLD);
+            p.text(pos2(rect.left() + 29.0, rect.center().y), Align2::LEFT_CENTER, fit(p, head_name(label), &font, rect.width() - 35.0), font, Color32::WHITE);
         }
         Look::HeadTab { icon, label, on } => {
             let radius = theme::radius(rect.height() / 2.0);
@@ -2709,8 +2778,19 @@ mod tests {
                 })
                 .collect()
         };
-        let desktop = Facts { desktop: true, ..facts() };
-        let on = names(&desktop);
+        let desktop = Facts { desktop: true, sheet: Some(Sheet::All), ..facts() };
+        let mut on = names(&desktop);
+        // On a screen the accessories are in the head, and the tabs are not: the large tiles have them.
+        let head = items(Zone::SheetBack, vec2(704.0, 445.5), &desktop);
+        on.extend(head.iter().filter_map(|i| if let Look::HeadTool { label, .. } = i.look { Some(label) } else { None }));
+        assert!(!head.iter().any(|i| matches!(i.look, Look::HeadTab { .. })));
+        for tool in head.iter().filter(|i| matches!(i.look, Look::HeadTool { .. })) {
+            assert!(tool.rect.right() <= 704.0 - 44.0, "clear of the close: {:?}", tool.rect);
+            // Room for its whole name, a character at most this wide.
+            if let Look::HeadTool { label, .. } = tool.look {
+                assert!(tool.rect.width() - 37.0 >= head_name(label).chars().count() as f32 * 7.5, "{label}");
+            }
+        }
         for absent in ["Call", "Saved looks", "Light", "Fast walk", "Smooth tracking"] {
             assert!(!on.contains(&absent), "{absent} on a desktop with none of it");
         }

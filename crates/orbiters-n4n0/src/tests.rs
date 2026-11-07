@@ -762,6 +762,124 @@ fn a_new_conversation_stops_what_is_arriving() {
     t.shutdown(&n);
 }
 
+/// What the panel holds after everything VRChat received lately.
+fn panel_after(vrchat: &UdpSocket, wait: Duration, cells: &mut Page) -> usize {
+    let sent = received(vrchat, wait);
+    orbiters_n4n0_core::text::apply(cells, 8, &sent);
+    sent.iter().filter(|(a, v)| *a == parameter(params::TEXT_POINTER) && matches!(v, OscType::Int(p) if *p > 0 && *p != POINTER_CLEAR)).count()
+}
+
+/// Enzo: the answer grows on the avatar's panel too. A slow server, one word every 450 ms: the panel holds the first words
+/// long before the answer is whole, then exactly the answer, in OSC as VRChat receives it.
+#[test]
+fn a_slow_answer_grows_on_the_panel_over_osc() {
+    let (t, n, vrchat) = n4n0_with_vrchat();
+    let slowly = |text: &str| format!("{}\0\0", delta(text));
+    let done = format!("event: done\ndata: {}\n\n", json!({ "messages": [], "tool_calls": [] }));
+    let (base, _) = orbiters(vec![format!("{}{}{}{}{}{}{done}", slowly("Hello "), slowly("from "), slowly("the "), slowly("slow "), slowly("server "), slowly("today."))]);
+    t.sign_in(base, "orbit-test");
+    let mut cells: Page = [0; TEXT_LENGTH];
+    n.ask("Say hello".into(), "typed");
+    let asked = Instant::now();
+    let mut first_words = None;
+    while t.view().thinking || asked.elapsed() < Duration::from_millis(300) {
+        panel_after(&vrchat, Duration::from_millis(100), &mut cells);
+        if first_words.is_none() && first_row(&cells).starts_with("Hello") {
+            first_words = Some(asked.elapsed());
+        }
+        assert!(asked.elapsed() < Duration::from_secs(10), "never ended");
+    }
+    let answered = asked.elapsed();
+    let first = first_words.expect("the panel showed words before the answer was whole");
+    println!("slow server: first words on the panel after {first:?}, the answer whole after {answered:?}");
+    assert!(first + Duration::from_secs(1) < answered, "first words after {first:?}, whole after {answered:?}");
+    panel_after(&vrchat, Duration::from_millis(1500), &mut cells);
+    assert_eq!(first_row(&cells), "Hello from the slow server");
+    assert_eq!(contract::page_text(&cells).lines().nth(1).unwrap_or_default().trim_end(), "today.");
+    t.shutdown(&n);
+}
+
+/// A server far faster than OSC, a whole page in one burst, many deltas: the panel goes at its own pace, a block a step, no
+/// faster, the whole answer's first page exactly, and a shorter final answer than what had arrived leaves nothing behind.
+#[test]
+fn a_bursty_answer_keeps_to_the_panel_s_pace_and_ends_exactly() {
+    let (t, n, vrchat) = n4n0_with_vrchat();
+    let words: Vec<String> = (0..40).map(|i| format!("word{i}")).collect();
+    let burst: String = words.iter().map(|w| format!("event: text\ndata: {}\n\n", json!({ "delta": format!("{w} ") }))).collect();
+    let done = format!("event: done\ndata: {}\n\n", json!({ "messages": [], "tool_calls": [] }));
+    let (base, _) = orbiters(vec![format!("{burst}\0{done}")]);
+    t.sign_in(base, "orbit-test");
+    let mut cells: Page = [0; TEXT_LENGTH];
+    n.ask("Count".into(), "typed");
+    let start = Instant::now();
+    let blocks = panel_after(&vrchat, Duration::from_secs(5), &mut cells);
+    let per_second = blocks as f32 / start.elapsed().as_secs_f32();
+    println!("bursty server: {blocks} blocks in {:?}: {per_second:.2} a second, at the step of 300 ms at most 3.33", start.elapsed());
+    assert!(per_second <= 1000.0 / contract::DEFAULT_STEP_MS as f32, "{per_second} blocks a second");
+    let answer = words.join(" ");
+    let expected = contract::pages(&answer)[0];
+    panel_after(&vrchat, Duration::from_secs(5), &mut cells);
+    assert_eq!(cells, expected, "the first page, exactly");
+    t.shutdown(&n);
+
+    // Words arriving, then the turn's whole answer much shorter than them: every cell is the short answer's.
+    let (t, n, vrchat) = n4n0_with_vrchat();
+    let long = "This first round goes on for quite a while with very many words that reach far down the panel ";
+    let tool = format!("event: done\ndata: {}\n\n", json!({ "messages": [], "tool_calls": [{ "id": "call_1", "name": "set_avatar_control", "input": { "control": "hoodie", "on": true } }] }));
+    let (base, _) = orbiters(vec![format!("{}{tool}", delta(long)), format!("{}event: done\ndata: {}\n\n", delta("Done."), json!({ "messages": [], "tool_calls": [] }))]);
+    t.sign_in(base, "orbit-test");
+    let mut cells: Page = [0; TEXT_LENGTH];
+    n.ask("Hoodie".into(), "typed");
+    assert!(status_when(&t, |s| !s.thinking).lines.iter().any(|l| l.text == "Done."));
+    let (start, wanted) = (Instant::now(), contract::pages("Done.")[0]);
+    while cells != wanted {
+        assert!(start.elapsed() < Duration::from_secs(10), "{:?}", contract::page_text(&cells));
+        panel_after(&vrchat, Duration::from_millis(100), &mut cells);
+    }
+    t.shutdown(&n);
+}
+
+/// N4N0's menu open: it stands where the panel would show, and its presses and pages use the same channel. An answer arriving
+/// leaves the panel out of it: the channel stays the screen's, and the answer comes whole on the menu at the end, as before.
+#[test]
+fn an_answer_arriving_leaves_the_open_menu_the_channel() {
+    let (t, n, _vrchat) = n4n0_on_avatar(menu_tree("avtr_menu", true));
+    n.on_parameter(params::MENU, &OscValue::Bool(true));
+    assert!(until(|| menu_is_open(&n)));
+    let done = format!("event: done\ndata: {}\n\n", json!({ "messages": [], "tool_calls": [] }));
+    let (base, _) = orbiters(vec![format!("{}{}{}{done}", delta("Some "), delta("words "), delta("arriving."))]);
+    t.sign_in(base, "orbit-test");
+    n.ask("Hello".into(), "typed");
+    let start = Instant::now();
+    while t.view().thinking || start.elapsed() < Duration::from_millis(100) {
+        {
+            let rt = n.n4n0.lock().unwrap();
+            let panel = rt.sender.as_ref().expect("the prop's panel");
+            assert!(!panel.busy() && !panel.wants_step(Instant::now() + Duration::from_secs(1)), "the panel takes no turn on the channel while the menu is open");
+        }
+        assert!(start.elapsed() < Duration::from_secs(8), "never ended");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(until(|| n.n4n0.lock().unwrap().screen.answer_showing()), "whole, on the menu");
+    t.shutdown(&n);
+
+    // The menu opened with words already on the panel: they leave the panel for the menu at its next step, and no more follow.
+    let (t, n, _vrchat) = n4n0_on_avatar(menu_tree("avtr_menu", true));
+    let done = format!("event: done\ndata: {}\n\n", json!({ "messages": [], "tool_calls": [] }));
+    let (base, _) = orbiters(vec![format!("{}\0\0\0{}\0\0\0{}{done}", delta("Some words "), delta("arriving "), delta("slowly."))]);
+    t.sign_in(base, "orbit-test");
+    n.ask("Hello".into(), "typed");
+    assert!(until(|| n.n4n0.lock().unwrap().sender.as_ref().is_some_and(TextSender::streaming)));
+    n.on_parameter(params::MENU, &OscValue::Bool(true));
+    assert!(until(|| menu_is_open(&n)));
+    assert!(until(|| !n.n4n0.lock().unwrap().sender.as_ref().is_some_and(TextSender::busy)), "off the panel");
+    while t.view().thinking {
+        assert!(!n.n4n0.lock().unwrap().sender.as_ref().is_some_and(TextSender::streaming), "and it stays off");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    t.shutdown(&n);
+}
+
 #[test]
 fn the_wake_word_starts_a_turn_and_other_sentences_stay_here() {
     let mut settings = Settings::default();

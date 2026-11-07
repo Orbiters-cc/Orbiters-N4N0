@@ -431,6 +431,12 @@ impl Default for ScreenRuntime {
 }
 
 impl ScreenRuntime {
+    /// N4N0's answer is on the menu's Home, or waits to be (tests).
+    #[cfg(test)]
+    pub(crate) fn answer_showing(&self) -> bool {
+        !self.answer.is_empty() || self.answer_next.is_some()
+    }
+
     /// The avatar changed, or where the menu shows: whether the menu shows on its screen (`available`), whether it has
     /// one at all (`present`: a dropped card shows there), with `sync` text values and thumbnails of `thumbnail` bytes
     /// (its memory is unknown again). The same avatar looked at again changes nothing.

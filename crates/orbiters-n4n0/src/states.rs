@@ -270,7 +270,7 @@ impl N4n0 {
     /// The avatar's nodes of VRChat's OSCQuery tree (empty when VRChat or its tree is not found), read without the OSC
     /// lock.
     fn vrchat_nodes(&self) -> anyhow::Result<Vec<TreeNode>> {
-        let query = self.osc.vrchat_query().flatten().ok_or_else(|| anyhow::anyhow!("VRChat's OSCQuery service was not found"))?;
+        let query = self.osc.vrchat_query().flatten().ok_or_else(|| anyhow::anyhow!("{}", tr_latin("VRChat's OSCQuery service was not found")))?;
         orbiters_core::osc::vrchat_nodes(query, TREE_TIMEOUT)
     }
 

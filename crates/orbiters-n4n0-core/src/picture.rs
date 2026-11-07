@@ -18,9 +18,9 @@ fn decode(bytes: &[u8]) -> anyhow::Result<(usize, usize, Vec<u8>)> {
     // Thumbnails are a few hundred pixels; anything far larger is not one.
     let options = DecoderOptions::default().jpeg_set_out_colorspace(ColorSpace::RGB).set_max_width(4096).set_max_height(4096);
     let mut decoder = JpegDecoder::new_with_options(ZCursor::new(bytes), options);
-    let pixels = decoder.decode().map_err(|e| anyhow::anyhow!("not a JPEG picture: {e:?}"))?;
-    let (width, height) = decoder.dimensions().ok_or_else(|| anyhow::anyhow!("a JPEG without a size"))?;
-    anyhow::ensure!(width > 0 && height > 0 && pixels.len() >= width * height * 3, "a JPEG without pixels");
+    let pixels = decoder.decode().map_err(|e| anyhow::anyhow!("not a JPEG picture: {e:?}"))?; // i18n: not shown
+    let (width, height) = decoder.dimensions().ok_or_else(|| anyhow::anyhow!("a JPEG without a size"))?; // i18n: not shown
+    anyhow::ensure!(width > 0 && height > 0 && pixels.len() >= width * height * 3, "a JPEG without pixels"); // i18n: not shown
     Ok((width, height, pixels))
 }
 
@@ -33,17 +33,17 @@ pub fn rgb_jpeg(bytes: &[u8]) -> anyhow::Result<Rgb> {
 pub fn rgb_png(bytes: &[u8]) -> anyhow::Result<Rgb> {
     let mut decoder = png::Decoder::new(std::io::Cursor::new(bytes));
     decoder.set_transformations(png::Transformations::EXPAND | png::Transformations::STRIP_16);
-    let mut reader = decoder.read_info().map_err(|e| anyhow::anyhow!("not a PNG picture: {e}"))?;
+    let mut reader = decoder.read_info().map_err(|e| anyhow::anyhow!("not a PNG picture: {e}"))?; // i18n: not shown
     let (width, height) = (reader.info().width as usize, reader.info().height as usize);
-    anyhow::ensure!(width > 0 && height > 0 && width <= 4096 && height <= 4096, "a PNG of {width} × {height}");
-    let mut buffer = vec![0u8; reader.output_buffer_size().ok_or_else(|| anyhow::anyhow!("a PNG too large"))?];
-    let frame = reader.next_frame(&mut buffer).map_err(|e| anyhow::anyhow!("a broken PNG: {e}"))?;
+    anyhow::ensure!(width > 0 && height > 0 && width <= 4096 && height <= 4096, "a PNG of {width} × {height}"); // i18n: not shown
+    let mut buffer = vec![0u8; reader.output_buffer_size().ok_or_else(|| anyhow::anyhow!("a PNG too large"))?]; // i18n: not shown
+    let frame = reader.next_frame(&mut buffer).map_err(|e| anyhow::anyhow!("a broken PNG: {e}"))?; // i18n: not shown
     let channels = match frame.color_type {
         png::ColorType::Grayscale => 1,
         png::ColorType::GrayscaleAlpha => 2,
         png::ColorType::Rgb => 3,
         png::ColorType::Rgba => 4,
-        png::ColorType::Indexed => anyhow::bail!("a PNG left indexed"),
+        png::ColorType::Indexed => anyhow::bail!("a PNG left indexed"), // i18n: not shown
     };
     let mut pixels = Vec::with_capacity(width * height * 3);
     for row in buffer.chunks(frame.line_size).take(height) {

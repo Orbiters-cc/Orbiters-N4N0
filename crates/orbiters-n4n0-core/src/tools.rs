@@ -201,7 +201,7 @@ pub fn parse(name: &str, input: &Value) -> Result<Action, String> {
                 Some("volume_down") => (None, Some(-10)),
                 Some("mute") => (Some(MediaCommand::Mute(true)), None),
                 Some("unmute") => (Some(MediaCommand::Mute(false)), None),
-                Some(other) => return Err(format!("control_media has no action \"{other}\".")),
+                Some(other) => return Err(format!("control_media has no action \"{other}\".")), // i18n: not shown
             };
             Action::Media { command, volume_change }
         }
@@ -217,7 +217,7 @@ pub fn parse(name: &str, input: &Value) -> Result<Action, String> {
             };
             Action::Light { on: flag(input, "on"), color, level: number(input, "brightness").map(|v| v.clamp(0.0, 1.0)) }
         }
-        other => return Err(format!("Orbiters - N4N0 has no tool \"{other}\".")),
+        other => return Err(format!("Orbiters - N4N0 has no tool \"{other}\".")), // i18n: not shown
     })
 }
 

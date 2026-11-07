@@ -1053,7 +1053,7 @@ impl N4n0 {
     /// Sets N4N0's light (N4N0's menu, the assistant): its three parameters, when the avatar's N4N0 has a light.
     pub(crate) fn set_light(self: &Shared, light: orbiters_n4n0_core::menu::Light) -> Result<(), String> {
         if !self.avatar_has(params::LIGHT) {
-            return Err("This avatar's N4N0 has no light: turn Light on for it in My Avatar (N4N0's card), then upload.".into());
+            return Err(tr("This avatar's N4N0 has no light: turn Light on for it in My Avatar (N4N0's card), then upload.").into());
         }
         let color = light.color.min(contract::LIGHT_COLORS.len() as u8 - 1);
         let level = light.level.clamp(0.0, 1.0);
@@ -1875,7 +1875,7 @@ impl N4n0 {
                         break Ok(());
                     }
                     if rounds == MAX_ROUNDS {
-                        break Err(anyhow::anyhow!("N4N0 went round in circles: ask again."));
+                        break Err(anyhow::anyhow!("{}", tr("N4N0 went round in circles: ask again.")));
                     }
                     rounds += 1;
                     tools_run.policy.next_round();
@@ -2081,7 +2081,7 @@ impl N4n0 {
             Action::FindControls { query } => {
                 let found: Vec<orbiters_n4n0_core::controls::Control> = self.n4n0.lock().unwrap().controls.search(&query, 25).into_iter().cloned().collect();
                 if found.is_empty() {
-                    return Err(format!("No control of this avatar matches {}.", context::quoted(&query, NAME_CHARS)));
+                    return Err(format!("No control of this avatar matches {}.", context::quoted(&query, NAME_CHARS))); // i18n: not shown
                 }
                 let latest = self.osc_latest(found.iter().filter_map(|c| c.target()).map(|t| format!("{PARAMETERS_PREFIX}{t}")));
                 let list: Vec<Value> = found
@@ -2190,7 +2190,7 @@ impl N4n0 {
                 let Some(now) =
                     now.or_else(|| self.avatar_has(params::LIGHT).then_some(orbiters_n4n0_core::menu::Light { on: false, color: 0, level: LIGHT_LEVEL_DEFAULT }))
                 else {
-                    return Err("This avatar's N4N0 has no light: the owner can turn Light on for it in My Avatar (N4N0's card), then upload.".into());
+                    return Err("This avatar's N4N0 has no light: the owner can turn Light on for it in My Avatar (N4N0's card), then upload.".into()); // i18n: not shown
                 };
                 // A colour or a brightness alone turns it on, as in N4N0's menu.
                 let light = orbiters_n4n0_core::menu::Light {
@@ -2219,7 +2219,7 @@ impl N4n0 {
     /// Takes a picture with VRChat's camera, opening it in photo mode first when it is closed (and closing it after).
     fn photo(self: &Shared, delay_seconds: u32) -> Result<Value, String> {
         if self.host.capturing() {
-            return Err("VRChat's camera is recording for Orbiters - N4N0 right now.".into());
+            return Err(mark("VRChat's camera is recording for Orbiters - N4N0 right now.").into());
         }
         // The camera as VRChat last said (it sends its mode when it changes): put back as it was after the picture.
         let before = self.osc_latest(["/usercamera/Mode".to_string()]).remove("/usercamera/Mode").and_then(|v| match v {
@@ -2227,7 +2227,7 @@ impl N4n0 {
             _ => None,
         });
         if before == Some(2) {
-            return Err("VRChat's camera is streaming: a picture would stop the stream. Switch it to photo mode first.".into());
+            return Err(mark("VRChat's camera is streaming: a picture would stop the stream. Switch it to photo mode first.").into());
         }
         let now = Instant::now();
         let open = if before == Some(1) { Duration::ZERO } else { Duration::from_millis(800) };
@@ -2267,7 +2267,7 @@ impl N4n0 {
         }
         let (list, loaded) = Videos::read(&self.files.videos);
         if let videos::Loaded::Unreadable(e) = loaded {
-            return Err(format!("N4N0's saved videos could not be read ({e}): nothing is saved, so the list stays whole."));
+            return Err(tr!("N4N0's saved videos could not be read ({error}): nothing is saved, so the list stays whole.", error = e));
         }
         let mut rt = self.n4n0.lock().unwrap();
         rt.videos = list;

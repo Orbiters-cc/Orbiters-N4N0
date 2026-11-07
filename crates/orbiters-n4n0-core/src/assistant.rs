@@ -3,6 +3,7 @@
 
 use anyhow::Context as _;
 use orbiters_core::account::Api;
+use orbiters_i18n::tr;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::io::{BufRead, BufReader};
@@ -162,7 +163,7 @@ pub fn send(api: &Api, token: &str, request: &Request, cancel: &AtomicBool, mut 
         .header("Authorization", &format!("Bearer {token}"))
         .header("Accept", "text/event-stream")
         .send_json(request)
-        .context("Orbiters could not be reached")?;
+        .with_context(|| tr("Orbiters could not be reached"))?;
     let status = response.status().as_u16();
     let json = response.headers().get("content-type").and_then(|v| v.to_str().ok()).is_some_and(|t| t.starts_with("application/json"));
     let mut body = response.into_body();
@@ -172,7 +173,7 @@ pub fn send(api: &Api, token: &str, request: &Request, cancel: &AtomicBool, mut 
     }
     if json {
         let text = body.with_config().limit(8 << 20).read_to_string()?;
-        let done: Done = serde_json::from_str(&text).context("unexpected answer from Orbiters")?;
+        let done: Done = serde_json::from_str(&text).with_context(|| tr("unexpected answer from Orbiters"))?;
         if done.messages.is_none() {
             // An error object answered as a success: its words when it has some.
             return Err(error_from(status, &text).into());
@@ -193,7 +194,7 @@ pub fn read_events(reader: impl BufRead, cancel: &AtomicBool, on_event: &mut imp
         if cancel.load(Ordering::Relaxed) {
             anyhow::bail!("cancelled");
         }
-        let line = line.context("the answer stopped")?;
+        let line = line.with_context(|| tr("the answer stopped"))?;
         if line.is_empty() {
             if !data.is_empty() || !event.is_empty() {
                 if let Some(done) = dispatch(&event, &data, on_event)? {
@@ -217,7 +218,7 @@ pub fn read_events(reader: impl BufRead, cancel: &AtomicBool, on_event: &mut imp
             return Ok(done);
         }
     }
-    anyhow::bail!("the answer ended before it was complete")
+    anyhow::bail!("{}", tr("the answer ended before it was complete"))
 }
 
 fn dispatch(event: &str, data: &str, on_event: &mut impl FnMut(Event)) -> anyhow::Result<Option<Done>> {
@@ -238,8 +239,8 @@ fn dispatch(event: &str, data: &str, on_event: &mut impl FnMut(Event)) -> anyhow
             }
         }
         "done" => {
-            let done: Done = serde_json::from_value(value).context("unexpected end of answer")?;
-            anyhow::ensure!(done.messages.is_some(), "the answer ended without the conversation");
+            let done: Done = serde_json::from_value(value).with_context(|| tr("unexpected end of answer"))?;
+            anyhow::ensure!(done.messages.is_some(), "{}", tr("the answer ended without the conversation"));
             return Ok(Some(done));
         }
         "error" => return Err(error_from(200, data).into()),

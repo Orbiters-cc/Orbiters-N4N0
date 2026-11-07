@@ -1560,7 +1560,7 @@ impl N4n0 {
             };
             let result = match n.host.account() {
                 Some((api, token)) => orbiters_n4n0_core::suggestions::send(&api, &token, &text, &about).map_err(|e| format!("{e:#}")),
-                None => Err("Sign in to Orbiters in Orbiters - N4N0 first (Settings)".to_string()),
+                None => Err(signed_out_message()),
             };
             {
                 let mut rt = n.n4n0.lock().unwrap();

@@ -140,17 +140,17 @@ impl Theme {
     /// anything malformed refuses the whole file.
     pub fn parse(json: &str) -> Result<(Theme, Vec<String>), String> {
         let value: Value = serde_json::from_str(json).map_err(|e| tr!("not JSON: {error}", error = e))?;
-        let Value::Object(top) = value else { return Err("not a theme file: its JSON is not an object".into()) };
+        let Value::Object(top) = value else { return Err(tr("not a theme file: its JSON is not an object").into()) };
         match top.get("schema") {
             Some(Value::Number(n)) if n.as_u64() == Some(SCHEMA) => {}
-            Some(Value::Number(n)) => return Err(format!("\"schema\" {n} is not one this Orbiters - N4N0 reads (it reads {SCHEMA})")),
-            Some(_) => return Err(format!("\"schema\" must be the number {SCHEMA}")),
-            None => return Err(format!("no \"schema\" (it must be {SCHEMA})")),
+            Some(Value::Number(n)) => return Err(tr!("\"schema\" {found} is not one this Orbiters - N4N0 reads (it reads {supported})", found = n, supported = SCHEMA)),
+            Some(_) => return Err(tr!("\"schema\" must be the number {supported}", supported = SCHEMA)),
+            None => return Err(tr!("no \"schema\" (it must be {supported})", supported = SCHEMA)),
         }
         let style = match top.get("style").and_then(Value::as_str) {
             Some("modern") => MenuLook::Modern,
             Some("retro") => MenuLook::Retro,
-            _ => return Err("\"style\" must be \"modern\" or \"retro\"".into()),
+            _ => return Err(tr("\"style\" must be \"modern\" or \"retro\"").into()),
         };
         let mut theme = Theme::base(style);
         let mut warnings = Vec::new();
@@ -158,7 +158,7 @@ impl Theme {
             warnings.push(tr!("unknown field {field} ignored", field = format!("{field:?}")));
         }
         if let Some(colors) = top.get("colors") {
-            let Value::Object(colors) = colors else { return Err("\"colors\" must be an object of colours (\"#RRGGBB\")".into()) };
+            let Value::Object(colors) = colors else { return Err(tr("\"colors\" must be an object of colours (\"#RRGGBB\")").into()) };
             for (name, value) in colors {
                 let Some(slot) = theme.colors.get_mut(name) else {
                     warnings.push(tr!("unknown colour \"colors\".{name} ignored", name = format!("{name:?}")));
@@ -172,7 +172,7 @@ impl Theme {
             }
         }
         if let Some(screen) = top.get("screen") {
-            let Value::Object(screen) = screen else { return Err("\"screen\" must be an object (\"tint\", \"edge\", \"glow\")".into()) };
+            let Value::Object(screen) = screen else { return Err(tr("\"screen\" must be an object (\"tint\", \"edge\", \"glow\")").into()) };
             for (name, value) in screen {
                 match name.as_str() {
                     "tint" => theme.screen.tint = color(value).ok_or(tr("\"screen\".\"tint\" must be a colour \"#RRGGBB\" or \"#RRGGBBAA\""))?,

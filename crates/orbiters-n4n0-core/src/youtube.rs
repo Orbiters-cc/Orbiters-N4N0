@@ -3,6 +3,7 @@
 //! `/search`, as the website itself calls it) and each result's thumbnail. Read only: the menu copies a result's link
 //! so it can be pasted into a world's video player.
 
+use orbiters_i18n::tr;
 use serde_json::{json, Value};
 use std::sync::OnceLock;
 use std::time::Duration;
@@ -398,7 +399,7 @@ fn decode(bytes: Vec<u8>, charset: &str) -> String {
 fn read(mut response: ureq::http::Response<ureq::Body>, limit: u64) -> anyhow::Result<String> {
     let status = response.status().as_u16();
     if status != 200 {
-        anyhow::bail!("YouTube answered {status}");
+        anyhow::bail!("{}", tr!("YouTube answered {status}", status = status));
     }
     let charset = response
         .headers()
@@ -446,7 +447,7 @@ fn post(body: &Value) -> anyhow::Result<Results> {
 /// Videos for `query`. Blocking, 8 s at most.
 pub fn search(query: &str, language: &str) -> anyhow::Result<Results> {
     if query.trim().is_empty() {
-        anyhow::bail!("nothing to search for");
+        anyhow::bail!("{}", tr("nothing to search for"));
     }
     post(&search_body(query, language))
 }
@@ -460,7 +461,7 @@ pub fn more(token: &str, language: &str) -> anyhow::Result<Results> {
 pub fn thumbnail(id: &str) -> anyhow::Result<Vec<u8>> {
     let mut response = agent().get(&thumbnail_url(id)).config().timeout_global(Some(Duration::from_secs(6))).build().call()?;
     if response.status().as_u16() != 200 {
-        anyhow::bail!("no thumbnail ({})", response.status().as_u16());
+        anyhow::bail!("{}", tr!("no thumbnail ({status})", status = response.status().as_u16()));
     }
     Ok(response.body_mut().with_config().limit(1024 * 1024).read_to_vec()?)
 }

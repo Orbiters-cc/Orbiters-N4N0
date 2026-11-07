@@ -421,7 +421,7 @@ impl Drop for FakeWorker {
 
 impl Ears for FakeEars {
     fn spawn(&self, events: VoiceEvents, ended: VoiceEnded) -> anyhow::Result<Box<dyn VoiceWorker>> {
-        anyhow::ensure!(*self.allowed.lock().unwrap(), "N4N0's voice worker was not found (tests)");
+        anyhow::ensure!(*self.allowed.lock().unwrap(), "N4N0's voice worker was not found (tests)"); // i18n: not shown
         let state = FakeWorkerState {
             commands: Default::default(),
             events: Arc::new(Mutex::new(Some(events))),

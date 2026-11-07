@@ -535,7 +535,7 @@
   "{scene}: no 3D preview, {why}.\n\n{hint}": "{scene} : pas d’aperçu 3D, {why}.\n\n{hint}",
   "{shown} of {total}": "{shown} sur {total}",
   "{size} so far · {files}": "{size} jusqu’ici · {files}",
-  "{tool} · saved {when}": "{tool} · enregistré {when}",
+  "{tool} · saved {when}": "{tool} · sauvé {when}",
   "{total} on disk in {files} files.": "{total} sur le disque dans {files} fichiers.",
   "{total} on disk in {files} files. Library takes {library} of it: Unity makes it again from the project when it is missing.": "{total} sur le disque dans {files} fichiers. Library en prend {library} : Unity la recrée à partir du projet si elle manque.",
   "{total} · Library {library}": "{total} · Library {library}",

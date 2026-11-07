@@ -93,8 +93,9 @@ impl MenuButtons {
                 if on_wheel {
                     self.open = Open::Closed;
                 } else if held < HOLD {
-                    // As VRChat must, this waits for the release: only then is it known not to be the wheel's. A wheel on the other hand gives way to it.
-                    self.open = if matches!(self.open, Open::QuickMenu(_)) { Open::Closed } else { Open::QuickMenu(hand) };
+                    // As VRChat must, this waits for the release: only then is it known not to be the wheel's. A wheel on the other hand gives way to it, and so does a Quick Menu
+                    // on the other hand (Enzo: "if the left quick menu is open, opening the right quick menu closes the left").
+                    self.open = if self.open == Open::QuickMenu(hand) { Open::Closed } else { Open::QuickMenu(hand) };
                 }
                 self.press = None;
             }
@@ -126,9 +127,16 @@ fn mirrored(on_hand: &Matrix34) -> Matrix34 {
     space::from_axes(space::cross(y, z), y, z, flip(space::position(on_hand)))
 }
 
-/// Where VRChat's menus are on the hand, and how large. VRChat says nowhere, and only a headset can show it. These are the estimates until `orbit-vr-tune.json` in the app's data folder says
-/// otherwise, read live. With `align` on in it, the hand not holding the menu grabs the parts by its grip and lays them on VRChat's menu: letting go saves that, for that hand and,
-/// mirrored, for the other until it has its own. Holding the other grip too, the distance between the hands scales them.
+/// The wheel on the right hand and the Quick Menu on each, as Enzo laid the parts on VRChat's own in his headset on 2026-11-07. The wheel lies flat on the controller's top, its first slice
+/// toward where it points, and the left hand's is its mirror image. Measured to the plane's middle, so the right hand's Quick Menu is taken back by the 886 units (0.797 m) he had moved it so that
+/// the wing lies on its left, which [`quick_menu_places`] does: it then comes within 1 cm of the left hand's mirror image.
+const WHEEL_RIGHT: Saved = [1.000_019, -0.001_379, -0.004_553, 0.000_158, 0.004_526, -0.011_102, 0.999_986, -0.017_823, -0.001_471, -0.999_988, -0.011_089, -0.062_023];
+const QM_LEFT: Saved = [0.971_491, -0.236_440, -0.017_445, 0.158_526, -0.023_072, -0.167_546, 0.985_601, -0.027_001, -0.235_958, -0.957_100, -0.168_225, -0.126_699];
+const QM_RIGHT: Saved = [0.969_537, 0.244_993, 0.003_284, -0.157_4, 0.034_260, -0.148_824, 0.988_287, -0.034_1, 0.242_606, -0.958_053, -0.152_679, -0.128_4];
+
+/// Where VRChat's menus are on the hand, and how large: VRChat says nowhere, and only a headset can show it. `orbit-vr-tune.json` in the app's data folder can change any of it, read live. With
+/// `align` on in it, the hand not holding the menu grabs the parts by its grip and lays them on VRChat's menu: letting go saves that, for that hand and, mirrored, for the other until it has its
+/// own. Holding the other grip too, the distance between the hands scales them. It is how the values below were measured, and how to measure them again if VRChat moves its menus.
 #[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 pub struct Tune {
@@ -152,7 +160,7 @@ pub struct Tune {
 
 impl Default for Tune {
     fn default() -> Self {
-        Self { align: false, wheel_on: [None; 2], qm_on: [None; 2], wheel_tilt: 45.0, wheel_ahead: 0.06, wheel_up: 0.0, wheel_radius: 0.09, qm_tilt: 40.0, qm_ahead: 0.18, qm_up: 0.14, qm_unit: 0.0009 }
+        Self { align: false, wheel_on: [None, Some(WHEEL_RIGHT)], qm_on: [Some(QM_LEFT), Some(QM_RIGHT)], wheel_tilt: 0.0, wheel_ahead: 0.062, wheel_up: -0.018, wheel_radius: 0.101_8, qm_tilt: 10.0, qm_ahead: 0.127, qm_up: -0.03, qm_unit: 0.0009 }
     }
 }
 
@@ -212,6 +220,22 @@ struct Aligning {
     held: Matrix34,
     /// With the other grip too: how far apart the hands were, and the size then.
     scaling: Option<(f32, f32)>,
+}
+
+/// The Quick Menu's parts on this hand. The wing lies on the side of the menu away from the hand that holds it: on the right hand it is on the left (as Enzo laid it there). The sheet is not one of
+/// these: it stays on the menu.
+pub fn quick_menu_places(hand: usize) -> Vec<Placed> {
+    Zone::around(Around::QuickMenu)
+        .iter()
+        .map(|zone| {
+            let mut placed = zones::in_units(*zone);
+            if hand == 1 {
+                let rect = placed.rect;
+                placed.rect = egui::Rect::from_min_max(egui::pos2(-rect.right(), rect.top()), egui::pos2(-rect.left(), rect.bottom()));
+            }
+            placed
+        })
+        .collect()
 }
 
 /// The sheet opened from the wheel: it stays where it opened, before the eyes, with no menu of VRChat's under it to ride with.
@@ -515,7 +539,11 @@ impl OrbitVr {
         self.plane = plane.or(self.plane);
         let grips = if self.tune.align && cx.input_read { cx.actions.grabs(cx.steamvr) } else { [false; 2] };
         self.align(open, grips, &devices, &poses, settings.vr_size);
-        let mut places: Vec<Placed> = menu.map_or_else(Vec::new, |m| Zone::around(m).iter().map(|z| zones::in_units(*z)).collect());
+        let mut places: Vec<Placed> = match (menu, open) {
+            (Some(Around::QuickMenu), Open::QuickMenu(hand)) => quick_menu_places(hand),
+            (Some(m), _) => Zone::around(m).iter().map(|z| zones::in_units(*z)).collect(),
+            (None, _) => Vec::new(),
+        };
         // Here VRChat's wheel can close unseen: the ring has its own close.
         if menu == Some(Around::Wheel) && !self.panels.sheet_open() {
             places.push(zones::in_units(Zone::WheelHide));
@@ -556,6 +584,32 @@ impl OrbitVr {
                     _ => NEAR_M,
                 };
                 (on.quad(&p.placed, -p.outward(), near), p.placed)
+            })
+            .collect();
+
+        // On the hand, each part is told where it is from the hand, not in the room: SteamVR then moves it with the controller's own pose as it draws, at the very last moment, whatever this
+        // loop is doing. Set in the room, it lagged the hand by a loop's turn, which looked detached from VRChat's menu when the hand shook (Enzo).
+        let riding: Option<(u32, Matrix34, f32)> = match open {
+            _ if self.aligning.is_some() => None,
+            Open::Wheel(hand) => devices[hand].map(|d| (d, self.tune.wheel(hand), self.tune.wheel_radius * settings.vr_size / 100.0)),
+            Open::QuickMenu(hand) => devices[hand].map(|d| (d, self.tune.quick_menu(hand), self.tune.qm_unit * settings.vr_size)),
+            Open::Closed => None,
+        };
+        let on_hand: Vec<Option<(u32, Matrix34)>> = self
+            .panels
+            .all()
+            .map(|p| {
+                let sheet = matches!(p.zone, Zone::Takeover | Zone::SheetBack);
+                // A sheet from the wheel stays in the room.
+                if sheet && self.takeover_plane.is_some() {
+                    return None;
+                }
+                let near = match p.zone {
+                    Zone::Takeover => TAKEOVER_NEAR_M,
+                    Zone::SheetBack => TAKEOVER_NEAR_M - 0.004,
+                    _ => NEAR_M,
+                };
+                riding.map(|(device, frame, unit)| (device, Plane { frame, unit }.quad(&p.placed, -p.outward(), near).transform))
             })
             .collect();
 
@@ -626,12 +680,12 @@ impl OrbitVr {
 
         turn.worlds = self.panels.world_relay(cx.world_status.clone());
         // Pictures, then each overlay where it goes.
-        self.show(&mut cx, &quads);
+        self.show(&mut cx, &quads, &on_hand);
         self.last_shown = true;
         turn
     }
 
-    fn show(&mut self, cx: &mut Cx<'_, '_>, quads: &[(Quad, Placed)]) {
+    fn show(&mut self, cx: &mut Cx<'_, '_>, quads: &[(Quad, Placed)], on_hand: &[Option<(u32, Matrix34)>]) {
         let (overlay, presenter) = (cx.overlay, &mut *cx.presenter);
         let (handles, key) = (&mut self.handles, &self.key);
         self.panels.paint(cx.snap, |panel, changed| {
@@ -646,14 +700,17 @@ impl OrbitVr {
             }
         });
         let shown: Vec<Zone> = self.panels.all().map(|p| p.zone).collect();
-        for ((quad, _), panel) in quads.iter().zip(self.panels.all()) {
+        for (((quad, _), panel), riding) in quads.iter().zip(self.panels.all()).zip(on_hand) {
             if let Some(handle) = self.handles.get(&panel.zone) {
                 if !panel.painted || !panel.shown {
                     let _ = cx.overlay.hide(*handle);
                     continue;
                 }
                 let _ = cx.overlay.set_width_in_meters(*handle, quad.width);
-                let _ = cx.overlay.set_transform_absolute(*handle, &quad.transform);
+                let _ = match riding {
+                    Some((device, transform)) => cx.overlay.set_transform_device_relative(*handle, *device, transform),
+                    None => cx.overlay.set_transform_absolute(*handle, &quad.transform),
+                };
                 let _ = cx.overlay.set_alpha(*handle, panel.appear.alpha());
                 if !cx.overlay.is_visible(*handle) {
                     let _ = cx.overlay.show(*handle);
@@ -738,9 +795,13 @@ mod tests {
         // The Quick Menu from the other hand over a wheel: it takes the wheel's place.
         assert_eq!(run(&mut b, t0, &[(0, 2200, 2900)], 3000), Open::Wheel(0));
         assert_eq!(run(&mut b, t0, &[(1, 3100, 3200)], 3300), Open::QuickMenu(1));
+        // Enzo: a Quick Menu opened on the other hand closes the first, and is the one open: the next press there closes it.
+        assert_eq!(run(&mut b, t0, &[(0, 3400, 3500)], 3600), Open::QuickMenu(0));
+        assert_eq!(run(&mut b, t0, &[(1, 3700, 3800)], 3900), Open::QuickMenu(1));
+        assert_eq!(run(&mut b, t0, &[(1, 4000, 4100)], 4200), Open::Closed);
         // A wheel on the other hand takes the place of the first.
-        assert_eq!(run(&mut b, t0, &[(0, 3400, 4100)], 4200), Open::Wheel(0));
-        assert_eq!(run(&mut b, t0, &[(1, 4300, 5000)], 5100), Open::Wheel(1));
+        assert_eq!(run(&mut b, t0, &[(0, 4300, 5000)], 5100), Open::Wheel(0));
+        assert_eq!(run(&mut b, t0, &[(1, 5200, 5900)], 6000), Open::Wheel(1));
     }
 
     /// Enzo: walking closes VRChat's menu, and left the parts inside out.
@@ -796,15 +857,21 @@ mod tests {
         let tune = Tune::default();
         for plane_of in [wheel_plane as fn(&Matrix34, usize, &Tune, f32) -> Plane, quick_menu_plane] {
             let (a, b) = (plane_of(&grip(), 1, &tune, 1.0), plane_of(&turned(&grip(), 90.0), 1, &tune, 1.0));
-            // A quarter turn of the hand, a quarter turn of the plane.
-            assert!(space::dot(space::axis(&a.frame, 0), space::axis(&b.frame, 0)).abs() < 0.001, "it turned with the hand");
+            // Turning the hand turns the plane just as much: seen from the hand, nothing moved.
+            let seen = |p: &Plane, g: &Matrix34| space::compose(&space::inverse(g), &p.frame);
+            let (from_a, from_b) = (seen(&a, &grip()), seen(&b, &turned(&grip(), 90.0)));
+            for i in 0..3 {
+                for j in 0..4 {
+                    assert!((from_a.m[i][j] - from_b.m[i][j]).abs() < 0.001, "it turned with the hand");
+                }
+            }
             // And it stays as far from the hand, wherever the hand is.
             let distance = |p: &Plane, g: &Matrix34| space::length(space::sub(space::position(&p.frame), space::position(g)));
             assert!((distance(&a, &grip()) - distance(&b, &turned(&grip(), 90.0))).abs() < 0.001);
             // A proper frame: its axes square, its +Z what they make.
             let (x, y, z) = (space::axis(&a.frame, 0), space::axis(&a.frame, 1), space::axis(&a.frame, 2));
-            assert!(space::dot(x, y).abs() < 0.001 && space::dot(y, z).abs() < 0.001);
-            assert!(space::length(space::sub(space::cross(x, y), z)) < 0.001, "right-handed: not a mirror image");
+            assert!(space::dot(x, y).abs() < 0.01 && space::dot(y, z).abs() < 0.01);
+            assert!(space::length(space::sub(space::cross(x, y), z)) < 0.01, "right-handed: not a mirror image");
         }
     }
 
@@ -828,7 +895,7 @@ mod tests {
     #[test]
     fn a_plane_laid_on_a_hand_is_kept_and_mirrored_on_the_other() {
         let laid = space::from_axes([0.6, 0.0, 0.8], [0.0, 1.0, 0.0], [-0.8, 0.0, 0.6], [0.05, 0.1, -0.2]);
-        let mut tune = Tune::default();
+        let mut tune = Tune { wheel_on: [None; 2], ..Tune::default() };
         tune.wheel_on[1] = Some(to_saved(&laid));
         let right = tune.wheel(1);
         assert_eq!(right.m, laid.m);
@@ -837,10 +904,31 @@ mod tests {
         assert!((space::position(&left)[1] - 0.1).abs() < 0.001);
         let (x, y, z) = (space::axis(&left, 0), space::axis(&left, 1), space::axis(&left, 2));
         assert!(space::length(space::sub(space::cross(x, y), z)) < 0.001, "still not a mirror image of a picture");
+        // The measured Quick Menus are nearly each other's mirror image, as they should be.
+        let (qm_left, qm_right) = (Tune::default().quick_menu(0), mirrored(&Tune::default().quick_menu(1)));
+        assert!(space::length(space::sub(space::position(&qm_left), space::position(&qm_right))) < 0.01);
+        for axis in 0..3 {
+            assert!(space::dot(space::axis(&qm_left, axis), space::axis(&qm_right, axis)) > 0.99, "{axis}");
+        }
         // Its own, once it has one; and the Quick Menu is apart from all this.
         tune.wheel_on[0] = Some(to_saved(&laid));
         assert_eq!(tune.wheel(0).m, laid.m);
         assert_eq!(tune.quick_menu(1).m, Tune::default().quick_menu(1).m);
+    }
+
+    /// As Enzo laid them.
+    #[test]
+    fn the_wheel_lies_flat_on_the_controller_and_the_wing_on_the_side_away_from_the_hand() {
+        let wheel = Tune::default().wheel(1);
+        assert!(space::axis(&wheel, 2)[1] > 0.99, "its face is the controller's top");
+        assert!(space::axis(&wheel, 1)[2] < -0.99, "its first slice toward where it points");
+        let wheel_left = Tune::default().wheel(0);
+        assert!(space::axis(&wheel_left, 2)[1] > 0.99 && space::axis(&wheel_left, 1)[2] < -0.99, "the same on the other hand");
+        let wing = |hand: usize| quick_menu_places(hand).into_iter().find(|p| p.zone == Zone::QmWing).unwrap().rect;
+        assert!(wing(0).left() > 0.0 && wing(1).right() < 0.0);
+        assert_eq!(wing(0).width(), wing(1).width());
+        // The sheet is not moved: it stays on the menu, whichever hand.
+        assert!(quick_menu_places(1).iter().all(|p| !matches!(p.zone, Zone::Takeover | Zone::SheetBack)));
     }
 
     #[test]

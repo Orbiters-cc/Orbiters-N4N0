@@ -5,6 +5,7 @@
 
 use crate::backend::Ctl;
 use orbiters_core::settings::Settings;
+use orbiters_i18n::tr;
 use orbiters_ui::widgets::{self, Button, Size};
 use std::collections::HashMap;
 
@@ -50,7 +51,7 @@ impl Texts {
 /// Enter pressed in the field.
 pub fn text_row(ui: &mut egui::Ui, texts: &mut Texts, key: &'static str, saved: &str, hint: &str, width: f32, mono: bool) -> Option<String> {
     let mut text = texts.shown(key, saved);
-    let save = Button::new("Save").size(Size::Sm).enabled(texts.changed(key)).show(ui).clicked();
+    let save = Button::new(tr("Save")).size(Size::Sm).enabled(texts.changed(key)).show(ui).clicked();
     ui.add_space(8.0);
     let field = widgets::text_field(ui, key, &mut text, hint, width, mono);
     let enter = field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));

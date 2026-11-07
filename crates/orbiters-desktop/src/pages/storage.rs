@@ -9,6 +9,7 @@ use crate::state::{CaptureState, CleanupJob, Snapshot};
 use egui::{pos2, vec2, Align2, Id, Order, Painter, Rect, Sense, Ui, UiBuilder};
 use orbiters_core::bundle::SessionSummary;
 use orbiters_core::cleanup::{self, Part};
+use orbiters_i18n::{mark, tr, tr_ctx, tr_n};
 use orbiters_ui::anim::{self, Spring};
 use orbiters_ui::theme::{self, weight, Txt};
 use orbiters_ui::widgets::{self, Button, Variant};
@@ -192,15 +193,18 @@ pub fn popover(ctx: &egui::Context, snap: &Snapshot, p: &mut Popover, ov: &Overv
         widgets::panel(&painter, rect, 16.0);
         let x = rect.left() + 20.0;
         let w = rect.width() - 40.0;
-        widgets::text(&painter, pos2(x, rect.top() + 30.0), Align2::LEFT_CENTER, &Txt::new("Storage", 13.5).weight(weight::SEMIBOLD));
+        widgets::text(&painter, pos2(x, rect.top() + 30.0), Align2::LEFT_CENTER, &Txt::new(tr("Storage"), 13.5).weight(weight::SEMIBOLD));
         widgets::text(
             &painter,
             pos2(rect.right() - 20.0, rect.top() + 30.0),
             Align2::RIGHT_CENTER,
             &Txt::new(format::bytes(ov.total as f64), 13.5).weight(weight::SEMIBOLD),
         );
-        let free = snap.storage.free_bytes.map(|f| format!(" · {} free on the drive", format::bytes(f as f64))).unwrap_or_default();
-        let sub = format!("{} of captures and 3D pictures{free}", plural(ov.sessions, "session", "sessions"));
+        let held = tr_n("{count} session of captures and 3D pictures", "{count} sessions of captures and 3D pictures", ov.sessions as u64);
+        let sub = match snap.storage.free_bytes {
+            Some(f) => tr!("{held} · {size} free on the drive", held = held, size = format::bytes(f as f64)),
+            None => held,
+        };
         widgets::text_truncated(&painter, pos2(x, rect.top() + 50.0), Align2::LEFT_CENTER, &Txt::new(sub, 12.0).color(theme::FG_3), w);
         let bar = Rect::from_min_size(pos2(x, rect.top() + 72.0), vec2(w, 10.0));
         stacked_bar(ui, id.with("bar"), bar, ov, whole);
@@ -212,15 +216,18 @@ pub fn popover(ctx: &egui::Context, snap: &Snapshot, p: &mut Popover, ov: &Overv
         if p.confirming {
             let mut y = top;
             let unviewed: Vec<&str> = ov.unviewed.iter().map(|(_, t)| t.as_str()).collect();
-            let trim_detail =
-                format!("{}: frames, depth and sound. Their 3D views stay.", plural(ov.trim.len(), "reconstructed capture", "reconstructed captures"));
+            let trim_detail = tr_n(
+                "{count} reconstructed capture: frames, depth and sound. Its 3D view stays.",
+                "{count} reconstructed captures: frames, depth and sound. Their 3D views stay.",
+                ov.trim.len() as u64,
+            );
             if ov.trim_bytes > 0 {
-                goes(&painter, Rect::from_min_size(pos2(x, y), vec2(w, 64.0)), icons::BROOM, "Capture files", &trim_detail, ov.trim_bytes);
+                goes(&painter, Rect::from_min_size(pos2(x, y), vec2(w, 64.0)), icons::BROOM, tr("Capture files"), &trim_detail, ov.trim_bytes);
                 y += 72.0;
             }
             if whole {
                 let names = names(&unviewed);
-                let label = format!("{} without a 3D view, whole", plural(ov.unviewed.len(), "capture", "captures"));
+                let label = tr_n("{count} capture without a 3D view, whole", "{count} captures without a 3D view, whole", ov.unviewed.len() as u64);
                 goes(&painter, Rect::from_min_size(pos2(x, y), vec2(w, 64.0)), icons::TRASH, &label, &names, ov.unviewed_bytes);
                 y += 72.0;
             }
@@ -228,10 +235,10 @@ pub fn popover(ctx: &egui::Context, snap: &Snapshot, p: &mut Popover, ov: &Overv
             y += note(&painter, pos2(x, y), w) + 20.0;
             let cancel = Rect::from_min_size(pos2(x, y), vec2((w - 8.0) * 0.4, 40.0));
             let confirm = Rect::from_min_max(pos2(cancel.right() + 8.0, y), pos2(x + w, y + 40.0));
-            if Button::new("Cancel").variant(Variant::Ghost).width(cancel.width()).show_at(ui, cancel).clicked() {
+            if Button::new(tr("Cancel")).variant(Variant::Ghost).width(cancel.width()).show_at(ui, cancel).clicked() {
                 p.confirming = false;
             }
-            let label = format!("Delete {}", format::bytes(freeing as f64));
+            let label = tr!("Delete {size}", size = format::bytes(freeing as f64));
             if Button::new(&label).icon(icons::TRASH).variant(Variant::Danger).width(confirm.width()).id_salt("storage-delete").show_at(ui, confirm).clicked() {
                 let delete = if whole { ov.unviewed.iter().map(|(d, _)| d.clone()).collect() } else { Vec::new() };
                 action = Some(PopoverAction::CleanUp { trim: ov.trim.clone(), delete });
@@ -241,31 +248,31 @@ pub fn popover(ctx: &egui::Context, snap: &Snapshot, p: &mut Popover, ov: &Overv
         // What each part is, counted; a part with nothing in it says so.
         let rows = [
             match ov.trim.len() {
-                0 => (theme::ACCENT, "Capture files that can go".to_string(), "None now", 0),
+                0 => (theme::ACCENT, tr("Capture files that can go").to_string(), tr("None now"), 0),
                 n => (
                     theme::ACCENT,
-                    format!("Capture files of {}", plural(n, "reconstructed capture", "reconstructed captures")),
-                    "Frames, depth and sound: only reconstructing again needs them",
+                    tr_n("Capture files of {count} reconstructed capture", "Capture files of {count} reconstructed captures", n as u64),
+                    tr("Frames, depth and sound: only reconstructing again needs them"),
                     ov.trim_bytes,
                 ),
             },
             match ov.unviewed.len() {
-                0 => (theme::WARN, "Captures without a 3D view".to_string(), "None", 0),
+                0 => (theme::WARN, tr("Captures without a 3D view").to_string(), tr_ctx("nothing in it", "None"), 0),
                 n => (
                     theme::WARN,
-                    format!("{} without a 3D view", plural(n, "capture", "captures")),
-                    "Not reconstructed: they go whole, only if you choose",
+                    tr_n("{count} capture without a 3D view", "{count} captures without a 3D view", n as u64),
+                    tr("Not reconstructed: they go whole, only if you choose"),
                     ov.unviewed_bytes,
                 ),
             },
             // Sessions in use (recorded, reconstructed) stay with the views for now.
             match (ov.views, ov.busy_bytes) {
-                (0, 0) => (theme::FG_4, "3D views".to_string(), "None yet", 0),
-                (0, busy) => (theme::FG_4, "In use".to_string(), "Being recorded or reconstructed: they stay", busy),
+                (0, 0) => (theme::FG_4, tr("3D views").to_string(), tr("None yet"), 0),
+                (0, busy) => (theme::FG_4, tr("In use").to_string(), tr("Being recorded or reconstructed: they stay"), busy),
                 (n, _) => (
                     theme::FG_4,
-                    format!("3D views of {}", plural(n, "capture", "captures")),
-                    "Splats, previews and camera paths: they stay",
+                    tr_n("3D view of {count} capture", "3D views of {count} captures", n as u64),
+                    tr("Splats, previews and camera paths: they stay"),
                     ov.view_bytes + ov.busy_bytes,
                 ),
             },
@@ -298,13 +305,13 @@ pub fn popover(ctx: &egui::Context, snap: &Snapshot, p: &mut Popover, ov: &Overv
         if !ov.unviewed.is_empty() {
             widgets::separator(&mut ui.new_child(UiBuilder::new().max_rect(Rect::from_min_size(pos2(x, y - 6.0), vec2(w, 1.0)))));
             let row = Rect::from_min_size(pos2(x, y + 6.0), vec2(w, 48.0));
-            let label = format!("Also delete the {} without a 3D view", plural(ov.unviewed.len(), "capture", "captures"));
+            let label = tr_n("Also delete the {count} capture without a 3D view", "Also delete the {count} captures without a 3D view", ov.unviewed.len() as u64);
             widgets::text_truncated(&painter, pos2(row.left(), row.top() + 14.0), Align2::LEFT_CENTER, &Txt::new(label, 13.0).weight(weight::MEDIUM), w - 64.0);
             widgets::text_truncated(
                 &painter,
                 pos2(row.left(), row.top() + 33.0),
                 Align2::LEFT_CENTER,
-                &Txt::new(format!("{}: nothing of them stays", format::bytes(ov.unviewed_bytes as f64)), 11.5).color(theme::FG_3),
+                &Txt::new(tr!("{size}: nothing of them stays", size = format::bytes(ov.unviewed_bytes as f64)), 11.5).color(theme::FG_3),
                 w - 64.0,
             );
             let mut sw = ui.new_child(
@@ -314,13 +321,13 @@ pub fn popover(ctx: &egui::Context, snap: &Snapshot, p: &mut Popover, ov: &Overv
             y += 64.0;
         }
         let button = Rect::from_min_size(pos2(x, y + 12.0), vec2(w, 40.0));
-        let label = if freeing > 0 { format!("Free {}", format::bytes(freeing as f64)) } else { "Nothing to free".to_string() };
+        let label = if freeing > 0 { tr!("Free {size}", size = format::bytes(freeing as f64)) } else { tr("Nothing to free").to_string() };
         let mut free_button = Button::new(&label).icon(icons::BROOM).variant(Variant::Primary).enabled(freeing > 0).width(w).id_salt("storage-free");
         if freeing == 0 {
             free_button = free_button.hint(if ov.unviewed.is_empty() {
-                "No reconstructed capture has capture files left"
+                tr("No reconstructed capture has capture files left")
             } else {
-                "No reconstructed capture has capture files left: the captures without a 3D view can go, if you choose them above"
+                tr("No reconstructed capture has capture files left: the captures without a 3D view can go, if you choose them above")
             });
         }
         if free_button.show_at(ui, button).clicked() {
@@ -370,29 +377,33 @@ fn stacked_bar(ui: &Ui, id: Id, rect: Rect, ov: &Overview, whole: bool) {
 fn running(ui: &Ui, id: Id, rect: Rect, job: &CleanupJob) {
     let p = ui.painter();
     let left = job.trim.len() + job.delete.len() + usize::from(job.current.is_some());
-    widgets::text(p, pos2(rect.left(), rect.top() + 10.0), Align2::LEFT_CENTER, &Txt::new("Freeing space…", 13.0).weight(weight::MEDIUM));
-    let of = if job.total > 0 { format!(" of {}", format::bytes(job.total as f64)) } else { String::new() };
+    widgets::text(p, pos2(rect.left(), rect.top() + 10.0), Align2::LEFT_CENTER, &Txt::new(tr("Freeing space…"), 13.0).weight(weight::MEDIUM));
+    let freed = if job.total > 0 {
+        tr!("{freed} of {total}", freed = format::bytes(job.freed as f64), total = format::bytes(job.total as f64))
+    } else {
+        format::bytes(job.freed as f64)
+    };
     widgets::text(
         p,
         pos2(rect.right(), rect.top() + 10.0),
         Align2::RIGHT_CENTER,
-        &Txt::new(format!("{}{of}", format::bytes(job.freed as f64)), 13.0).color(theme::FG_2),
+        &Txt::new(freed, 13.0).color(theme::FG_2),
     );
     let bar = Rect::from_min_size(pos2(rect.left(), rect.top() + 32.0), vec2(rect.width(), 6.0));
     let f = anim::spring_from(ui.ctx(), id.with("job"), [0.0], [job.fraction()], Spring::SOFT)[0].clamp(0.0, 1.0);
     p.rect_filled(bar, theme::radius(3.0), theme::white(0.08));
     p.rect_filled(Rect::from_min_size(bar.min, vec2((bar.width() * f).max(6.0), 6.0)), theme::radius(3.0), theme::ACCENT);
     let doing = match &job.current {
-        Some((dir, true)) => format!("Deleting {}", format::folder_name(dir)),
-        Some((dir, false)) => format!("Keeping only the 3D view of {}", format::folder_name(dir)),
-        None => "Starting".to_string(),
+        Some((dir, true)) => tr!("Deleting {name}", name = format::folder_name(dir)),
+        Some((dir, false)) => tr!("Keeping only the 3D view of {name}", name = format::folder_name(dir)),
+        None => tr("Starting").to_string(),
     };
     widgets::text_truncated(p, pos2(rect.left(), rect.top() + 58.0), Align2::LEFT_CENTER, &Txt::new(doing, 12.0).color(theme::FG_3), rect.width());
     widgets::text_truncated(
         p,
         pos2(rect.left(), rect.top() + 80.0),
         Align2::LEFT_CENTER,
-        &Txt::new(format!("{} · it goes on with the window closed", plural(left, "session left", "sessions left")), 12.0).color(theme::FG_4),
+        &Txt::new(tr_n("{count} session left · it goes on with the window closed", "{count} sessions left · it goes on with the window closed", left as u64), 12.0).color(theme::FG_4),
         rect.width(),
     );
 }
@@ -415,19 +426,22 @@ fn goes(p: &Painter, rect: Rect, glyph: &str, label: &str, detail: &str, bytes: 
     p.galley(pos2(x, top + 18.0), g, theme::FG_3);
 }
 
-const NOTE: &str = if cfg!(target_os = "macos") {
-    "Deleted for good: not moved to the Trash, which would free nothing. This cannot be undone."
-} else {
-    "Deleted for good: not moved to the recycle bin, which would free nothing. This cannot be undone."
-};
+/// The note every confirmation ends with, in the language now (read where it is drawn).
+fn note_text() -> &'static str {
+    tr(if cfg!(target_os = "macos") {
+        mark("Deleted for good: not moved to the Trash, which would free nothing. This cannot be undone.")
+    } else {
+        mark("Deleted for good: not moved to the recycle bin, which would free nothing. This cannot be undone.")
+    })
+}
 
 fn note_height(ctx: &egui::Context) -> f32 {
-    ctx.fonts_mut(|f| f.layout_job(Txt::new(NOTE, 12.0).color(theme::FG_3).line_height(18.0).job(POPOVER_W - 40.0)).size().y)
+    ctx.fonts_mut(|f| f.layout_job(Txt::new(note_text(), 12.0).color(theme::FG_3).line_height(18.0).job(POPOVER_W - 40.0)).size().y)
 }
 
 /// The note every confirmation ends with; returns its height.
 fn note(p: &Painter, at: egui::Pos2, width: f32) -> f32 {
-    let g = p.layout_job(Txt::new(NOTE, 12.0).color(theme::FG_3).line_height(18.0).job(width));
+    let g = p.layout_job(Txt::new(note_text(), 12.0).color(theme::FG_3).line_height(18.0).job(width));
     let h = g.size().y;
     p.galley(at, g, theme::FG_3);
     h
@@ -443,10 +457,6 @@ fn names(titles: &[&str]) -> String {
         }
     }
     counted.iter().map(|(n, c)| if *c > 1 { format!("{n} ×{c}") } else { n.to_string() }).collect::<Vec<_>>().join(", ")
-}
-
-fn plural(n: usize, one: &str, many: &str) -> String {
-    format!("{n} {}", if n == 1 { one } else { many })
 }
 
 /// The confirmation of a session's "Keep only the 3D view", over its detail.
@@ -485,11 +495,11 @@ fn parts(files: &[cleanup::Entry]) -> Vec<(Part, u64, u64)> {
 fn part_words(part: Part, count: u64) -> (&'static str, String, &'static str) {
     let n = format::integer(count as f64);
     match part {
-        Part::Keyframes => ("Keyframes", format!("{n} lossless pictures"), icons::CUBE),
-        Part::Depth => ("Depth frames", format!("{n} files"), icons::CPU),
-        Part::Video => ("Video", "the frames between the keyframes".into(), icons::FILM_STRIP),
-        Part::Performance => ("Sound, parameters and tracking", format!("{n} files"), icons::WAVEFORM),
-        Part::Leftovers => ("Unfinished reconstructions", "runs cut short, the result before the last".into(), icons::STACK),
+        Part::Keyframes => (tr("Keyframes"), tr!("{count} lossless pictures", count = n), icons::CUBE),
+        Part::Depth => (tr("Depth frames"), tr!("{count} files", count = n), icons::CPU),
+        Part::Video => (tr("Video"), tr("the frames between the keyframes").into(), icons::FILM_STRIP),
+        Part::Performance => (tr("Sound, parameters and tracking"), tr!("{count} files", count = n), icons::WAVEFORM),
+        Part::Leftovers => (tr("Unfinished reconstructions"), tr("runs cut short, the result before the last").into(), icons::STACK),
     }
 }
 
@@ -505,8 +515,8 @@ pub fn trim_dialog(ui: &mut Ui, d: &mut TrimDialog, over: Rect, capture_bytes: u
     let bytes = parts.as_ref().map_or(capture_bytes, |p| p.iter().map(|(_, _, b)| b).sum());
     let rows = parts.as_ref().map_or(2, |p| p.len().max(1));
     let w = 420.0f32.min(over.width() - 48.0);
-    let note_h = ui.painter().layout_job(Txt::new(NOTE, 12.0).line_height(18.0).job(w - 48.0)).size().y;
-    let lead = "The splats, their preview and the camera path stay: it can still be viewed, sent to Mixer and shared, not reconstructed again.";
+    let note_h = ui.painter().layout_job(Txt::new(note_text(), 12.0).line_height(18.0).job(w - 48.0)).size().y;
+    let lead = tr("The splats, their preview and the camera path stay: it can still be viewed, sent to Mixer and shared, not reconstructed again.");
     let lead_h = ui.painter().layout_job(Txt::new(lead, 12.5).line_height(19.0).job(w - 48.0)).size().y;
     let h = 24.0 + 36.0 + 14.0 + lead_h + 16.0 + rows as f32 * 52.0 + 4.0 + note_h + 20.0 + 40.0 + 24.0;
     let p = ui.painter().clone();
@@ -519,7 +529,7 @@ pub fn trim_dialog(ui: &mut Ui, d: &mut TrimDialog, over: Rect, capture_bytes: u
     let tile = Rect::from_min_size(dialog.min + vec2(24.0, 24.0), vec2(36.0, 36.0));
     dp.rect_filled(tile, theme::radius(12.0), theme::alpha(theme::ACCENT, 0.12));
     widgets::icon(&dp, tile.center(), icons::BROOM, 18.0, theme::ACCENT);
-    widgets::text(&dp, pos2(tile.right() + 12.0, tile.center().y), Align2::LEFT_CENTER, &Txt::new("Keep only the 3D view?", 16.0).weight(weight::SEMIBOLD));
+    widgets::text(&dp, pos2(tile.right() + 12.0, tile.center().y), Align2::LEFT_CENTER, &Txt::new(tr("Keep only the 3D view?"), 16.0).weight(weight::SEMIBOLD));
     let x = dialog.left() + 24.0;
     let iw = dialog.width() - 48.0;
     let mut y = tile.bottom() + 14.0;
@@ -535,7 +545,7 @@ pub fn trim_dialog(ui: &mut Ui, d: &mut TrimDialog, over: Rect, capture_bytes: u
             }
         }
         Some(_) => {
-            widgets::text(&dp, pos2(x, y + 20.0), Align2::LEFT_CENTER, &Txt::new("No capture files are left in this session.", 12.5).color(theme::FG_3));
+            widgets::text(&dp, pos2(x, y + 20.0), Align2::LEFT_CENTER, &Txt::new(tr("No capture files are left in this session."), 12.5).color(theme::FG_3));
             y += 52.0;
         }
         None => {
@@ -553,10 +563,10 @@ pub fn trim_dialog(ui: &mut Ui, d: &mut TrimDialog, over: Rect, capture_bytes: u
     let cancel = Rect::from_min_size(pos2(x, y), vec2((iw - 8.0) * 0.4, 40.0));
     let confirm = Rect::from_min_max(pos2(cancel.right() + 8.0, y), pos2(x + iw, y + 40.0));
     let mut answer = None;
-    if Button::new("Cancel").variant(Variant::Ghost).width(cancel.width()).id_salt("trim-cancel").show_at(&mut bu, cancel).clicked() {
+    if Button::new(tr("Cancel")).variant(Variant::Ghost).width(cancel.width()).id_salt("trim-cancel").show_at(&mut bu, cancel).clicked() {
         answer = Some(false);
     }
-    let label = format!("Delete {}", format::bytes(bytes as f64));
+    let label = tr!("Delete {size}", size = format::bytes(bytes as f64));
     let ready = parts.as_ref().is_some_and(|p| !p.is_empty());
     if Button::new(&label)
         .icon(icons::TRASH)
@@ -583,7 +593,7 @@ pub fn trim_dialog(ui: &mut Ui, d: &mut TrimDialog, over: Rect, capture_bytes: u
 /// a session that still has its frames).
 pub fn view_only(p: &Painter, rect: Rect, cleaning: bool) {
     p.rect_filled(rect, theme::radius(rect.height() * 0.5), theme::surface_soft());
-    let (glyph, text) = if cleaning { (icons::BROOM, "Deleting its capture files…") } else { (icons::CUBE_FOCUS, "3D view only: capture files deleted") };
+    let (glyph, text) = if cleaning { (icons::BROOM, tr("Deleting its capture files…")) } else { (icons::CUBE_FOCUS, tr("3D view only: capture files deleted")) };
     let t = Txt::new(text, 13.0).weight(weight::MEDIUM).color(theme::FG_3);
     let tw = p.layout_job(t.job(f32::INFINITY)).size().x;
     let x = rect.center().x - (tw + 15.0 + 8.0) * 0.5;

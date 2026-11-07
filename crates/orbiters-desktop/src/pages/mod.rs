@@ -35,6 +35,7 @@ pub mod worlds;
 use crate::backend::Ctl;
 use crate::state::Snapshot;
 use egui::{pos2, vec2, Align2, Id, Layout, Rect, Sense, Shape, Ui, UiBuilder};
+use orbiters_i18n::{tr, tr_ctx};
 use orbiters_ui::blur;
 use orbiters_ui::theme::{self, weight, Txt};
 use orbiters_ui::{toast, widgets};
@@ -309,13 +310,28 @@ pub fn section_up_to(ui: &mut Ui, cx: &Cx, max_width: f32, index: usize, glyph: 
 /// Inner margins of every page.
 pub const PAD_X: f32 = 32.0;
 
-/// An ISO 8601 UTC time ("2026-10-20T01:55:12Z") in local time: "20 Oct 2026, 01:55".
+/// An ISO 8601 UTC time ("2026-10-20T01:55:12Z") in local time: "20 Oct 2026, 01:55". Each language puts the day, month and year in its
+/// own order, but the date and the time always stay apart by ", " (the pages of the gallery and community split them there to show the time alone).
 pub fn local_time(iso: &str) -> String {
     use time::format_description::well_known::Rfc3339;
     let Ok(t) = time::OffsetDateTime::parse(iso, &Rfc3339) else { return iso.to_string() };
     let t = time::UtcOffset::current_local_offset().map(|o| t.to_offset(o)).unwrap_or(t);
-    let months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-    format!("{} {} {}, {:02}:{:02}", t.day(), months[t.month() as usize - 1], t.year(), t.hour(), t.minute())
+    // The whole date is one text, so each language puts day, month and year in its own order (Japanese: 2026年10月20日, 01:55).
+    let month = match t.month() as u8 {
+        1 => tr_ctx("month", "Jan"),
+        2 => tr_ctx("month", "Feb"),
+        3 => tr_ctx("month", "Mar"),
+        4 => tr_ctx("month", "Apr"),
+        5 => tr_ctx("month", "May"),
+        6 => tr_ctx("month", "Jun"),
+        7 => tr_ctx("month", "Jul"),
+        8 => tr_ctx("month", "Aug"),
+        9 => tr_ctx("month", "Sep"),
+        10 => tr_ctx("month", "Oct"),
+        11 => tr_ctx("month", "Nov"),
+        _ => tr_ctx("month", "Dec"),
+    };
+    tr!("{day} {month} {year}, {time}", day = t.day(), month = month, year = t.year(), time = format!("{:02}:{:02}", t.hour(), t.minute()))
 }
 
 /// Unix seconds in local time, as [`local_time`].

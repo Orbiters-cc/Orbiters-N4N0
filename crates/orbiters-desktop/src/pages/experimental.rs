@@ -7,12 +7,13 @@ use crate::bridge::person::{Paused, HOTKEY};
 use crate::bridge::Command;
 use egui::{vec2, Sense, Ui};
 use orbiters_core::settings::ExperimentalSettings;
+use orbiters_i18n::{mark, tr};
 use orbiters_ui::icons;
 use orbiters_ui::theme::{self, weight, Txt};
 use orbiters_ui::widgets::{self, Button, Size, Variant};
 
 /// What VRChat's Terms say of this, plainly, right where it is turned on. Their Effective Date was October 23, 2026.
-const TERMS: &str = "VRChat's Terms of Service forbid using the platform with \"automated means\" not provided by VRChat, or \"in a manner inconsistent with individual human usage\" (section 13.2). This bridge is that. VRChat can suspend or terminate your account for it. Nothing here hides it from VRChat.";
+const TERMS: &str = mark("VRChat's Terms of Service forbid using the platform with \"automated means\" not provided by VRChat, or \"in a manner inconsistent with individual human usage\" (section 13.2). This bridge is that. VRChat can suspend or terminate your account for it. Nothing here hides it from VRChat.");
 
 #[derive(Default)]
 pub struct State {
@@ -26,7 +27,7 @@ pub struct State {
 fn copy_button(ui: &mut Ui, state: &mut State, key: &'static str, label: &str, text: &str) {
     let now = ui.input(|i| i.time);
     let just = state.copied.is_some_and(|(k, at)| k == key && now - at < 1.5);
-    let shown = if just { "Copied" } else { label };
+    let shown = if just { tr("Copied") } else { label };
     if Button::new(shown).icon(if just { icons::CHECK } else { icons::COPY }).variant(Variant::Secondary).size(Size::Sm).show(ui).clicked() {
         ui.ctx().copy_text(text.to_string());
         state.copied = Some((key, now));
@@ -47,19 +48,19 @@ struct Row {
 fn row_of(status: &ClientStatus, listening: bool) -> Row {
     let name = status.client.name();
     let row = |text: String, color, add: Option<String>, remove| Row { text, color, add, remove };
-    let update = || Some("Update".to_string());
+    let update = || Some(tr("Update").to_string());
     match &status.registration {
-        Registration::Unknown => row("Looking\u{2026}".into(), theme::FG_3, None, false),
-        Registration::NotInstalled => row("Not installed on this computer.".into(), theme::FG_3, None, false),
-        Registration::NotAdded if listening => row("Not added yet. New sessions get it the moment you add it.".into(), theme::FG_2, Some(format!("Add to {name}")), false),
-        Registration::NotAdded => row("Not added.".into(), theme::FG_3, None, false),
-        Registration::Added if listening => row("Added. New sessions have it.".into(), theme::OK, None, true),
-        Registration::Added => row("Added. It answers while the bridge is on.".into(), theme::FG_2, None, true),
-        Registration::Outdated(Old::Token) => row("Added with an old token, so it cannot connect.".into(), theme::WARN, update(), true),
-        Registration::Outdated(Old::Address) => row("Added with an old address, so it cannot connect.".into(), theme::WARN, update(), true),
-        Registration::Outdated(Old::Everything) => row("Added with an old address and token, so it cannot connect.".into(), theme::WARN, update(), true),
-        Registration::NotConnecting(why) => row(format!("Added, and it says it cannot connect: {why}"), theme::WARN, update(), true),
-        Registration::Unreadable(why) => row(format!("It did not say what it has: {why}"), theme::WARN, None, false),
+        Registration::Unknown => row(tr("Looking…").into(), theme::FG_3, None, false),
+        Registration::NotInstalled => row(tr("Not installed on this computer.").into(), theme::FG_3, None, false),
+        Registration::NotAdded if listening => row(tr("Not added yet. New sessions get it the moment you add it.").into(), theme::FG_2, Some(tr!("Add to {name}", name = name)), false),
+        Registration::NotAdded => row(tr("Not added.").into(), theme::FG_3, None, false),
+        Registration::Added if listening => row(tr("Added. New sessions have it.").into(), theme::OK, None, true),
+        Registration::Added => row(tr("Added. It answers while the bridge is on.").into(), theme::FG_2, None, true),
+        Registration::Outdated(Old::Token) => row(tr("Added with an old token, so it cannot connect.").into(), theme::WARN, update(), true),
+        Registration::Outdated(Old::Address) => row(tr("Added with an old address, so it cannot connect.").into(), theme::WARN, update(), true),
+        Registration::Outdated(Old::Everything) => row(tr("Added with an old address and token, so it cannot connect.").into(), theme::WARN, update(), true),
+        Registration::NotConnecting(why) => row(tr!("Added, and it says it cannot connect: {why}", why = why), theme::WARN, update(), true),
+        Registration::Unreadable(why) => row(tr!("It did not say what it has: {why}", why = why), theme::WARN, None, false),
     }
 }
 
@@ -84,11 +85,11 @@ fn client_row(ui: &mut Ui, cx: &Cx, status: &ClientStatus, listening: bool) {
     }
     let mut buttons = ui.new_child(egui::UiBuilder::new().max_rect(rect).layout(egui::Layout::right_to_left(egui::Align::Center)));
     if status.busy {
-        Button::new("Working\u{2026}").variant(Variant::Secondary).size(Size::Sm).enabled(false).show(&mut buttons);
+        Button::new(tr("Working…")).variant(Variant::Secondary).size(Size::Sm).enabled(false).show(&mut buttons);
         return;
     }
     let command = |change| Command::Client { client: status.client, change };
-    if row.remove && Button::new("Remove").variant(Variant::Ghost).size(Size::Sm).show(&mut buttons).clicked() {
+    if row.remove && Button::new(tr("Remove")).variant(Variant::Ghost).size(Size::Sm).show(&mut buttons).clicked() {
         cx.ctl.bridge_command(command(Change::Remove));
     }
     if row.remove && row.add.is_some() {
@@ -110,12 +111,12 @@ fn clients(status: &crate::bridge::Status) -> Vec<&ClientStatus> {
 fn status_line(cx: &Cx) -> (String, egui::Color32) {
     let status = &cx.snap.bridge;
     match (&status.paused, &status.client) {
-        (Some(Paused::Person { .. }), _) => ("Paused: you are using the computer. The agent goes on 30 seconds after you stop.".into(), theme::WARN),
-        (Some(Paused::Held), _) => (format!("Paused until you resume (here, or {HOTKEY})."), theme::WARN),
-        (None, Some(client)) if status.acting => (format!("{} is acting now.", client.name), theme::OK),
-        (None, Some(client)) if client.connected => (format!("{} is connected.", client.name), theme::OK),
-        (None, Some(client)) => (format!("{} was here, and is not connected now.", client.name), theme::FG_2),
-        (None, None) => ("Waiting for an MCP client. No client has connected.".into(), theme::FG_2),
+        (Some(Paused::Person { .. }), _) => (tr("Paused: you are using the computer. The agent goes on 30 seconds after you stop.").into(), theme::WARN),
+        (Some(Paused::Held), _) => (tr!("Paused until you resume (here, or {hotkey}).", hotkey = HOTKEY), theme::WARN),
+        (None, Some(client)) if status.acting => (tr!("{name} is acting now.", name = client.name), theme::OK),
+        (None, Some(client)) if client.connected => (tr!("{name} is connected.", name = client.name), theme::OK),
+        (None, Some(client)) => (tr!("{name} was here, and is not connected now.", name = client.name), theme::FG_2),
+        (None, None) => (tr("Waiting for an MCP client. No client has connected.").into(), theme::FG_2),
     }
 }
 
@@ -123,15 +124,15 @@ fn status_line(cx: &Cx) -> (String, egui::Color32) {
 pub fn show(ui: &mut Ui, cx: &Cx, index: usize, state: &mut State, draft: &mut ExperimentalSettings) -> bool {
     let mut changed = false;
     let status = &cx.snap.bridge;
-    section(ui, cx, index, icons::FLASK, "Experimental", Some("Offered to this account by Orbiters, and not finished"), |ui| {
-        let note = "Lets an agent such as Claude Code start VRChat in desktop mode, go from private instance to private instance, look around and take 3D pictures, through a service on this computer only. Your own keyboard or mouse pauses it.";
-        widgets::field(ui, "VRChat bridge", Some(note), 48.0, |ui| {
+    section(ui, cx, index, icons::FLASK, tr("Experimental"), Some(tr("Offered to this account by Orbiters, and not finished")), |ui| {
+        let note = tr("Lets an agent such as Claude Code start VRChat in desktop mode, go from private instance to private instance, look around and take 3D pictures, through a service on this computer only. Your own keyboard or mouse pauses it.");
+        widgets::field(ui, tr("VRChat bridge"), Some(note), 48.0, |ui| {
             changed |= widgets::toggle(ui, "vrchat-bridge", &mut draft.vrchat_bridge);
         });
 
         // The risk, in a filled note: on or off, this is what the switch above means.
         let width = ui.available_width();
-        let text = ui.painter().layout_job(Txt::new(TERMS, 12.0).color(theme::FG_2).line_height(18.0).job(width - 70.0));
+        let text = ui.painter().layout_job(Txt::new(tr(TERMS), 12.0).color(theme::FG_2).line_height(18.0).job(width - 70.0));
         let (rect, _) = ui.allocate_exact_size(vec2(width, text.size().y + 24.0), Sense::hover());
         widgets::frame(ui.painter(), rect, 12.0, theme::WARN.gamma_multiply(0.09));
         widgets::icon(ui.painter(), egui::pos2(rect.left() + 26.0, rect.top() + 21.0), icons::WARNING, 17.0, theme::WARN);
@@ -145,7 +146,7 @@ pub fn show(ui: &mut Ui, cx: &Cx, index: usize, state: &mut State, draft: &mut E
         }
 
         if let Some(problem) = &status.problem {
-            widgets::field(ui, "It stays closed", Some(problem), 0.0, |_| {});
+            widgets::field(ui, tr("It stays closed"), Some(problem), 0.0, |_| {});
         }
         if !status.listening {
             // Off: an agent that has it can still be cleaned up, and nothing is offered that could not answer.
@@ -159,7 +160,7 @@ pub fn show(ui: &mut Ui, cx: &Cx, index: usize, state: &mut State, draft: &mut E
         }
 
         // The way back, first and hard to miss.
-        let stop = Button::new("Stop: take back control").icon(icons::PROHIBIT).variant(Variant::Stop).size(Size::Lg).width(width).show(ui);
+        let stop = Button::new(tr("Stop: take back control")).icon(icons::PROHIBIT).variant(Variant::Stop).size(Size::Lg).width(width).show(ui);
         if stop.clicked() {
             cx.ctl.bridge_command(Command::Stop);
         }
@@ -173,7 +174,7 @@ pub fn show(ui: &mut Ui, cx: &Cx, index: usize, state: &mut State, draft: &mut E
         ui.painter().circle_filled(egui::pos2(row.left() + 5.0, row.center().y), 4.0, color);
         ui.painter().galley(egui::pos2(row.left() + 20.0, row.center().y - shown.size().y * 0.5), shown, color);
         let mut controls = ui.new_child(egui::UiBuilder::new().max_rect(row).layout(egui::Layout::right_to_left(egui::Align::Center)));
-        let label = if hold { "Resume" } else { "Pause" };
+        let label = if hold { tr("Resume") } else { tr("Pause") };
         if Button::new(label).icon(if hold { icons::PLAY } else { icons::PAUSE }).variant(Variant::Secondary).size(Size::Sm).show(&mut controls).clicked() {
             cx.ctl.bridge_command(if hold { Command::Resume } else { Command::Pause });
         }
@@ -188,25 +189,25 @@ pub fn show(ui: &mut Ui, cx: &Cx, index: usize, state: &mut State, draft: &mut E
 
         let address = status.address.clone().unwrap_or_default();
         let token = status.token.clone().unwrap_or_default();
-        widgets::field(ui, "Address", Some(&address), 100.0, |ui| copy_button(ui, state, "address", "Copy", &address));
+        widgets::field(ui, tr("Address"), Some(&address), 100.0, |ui| copy_button(ui, state, "address", tr("Copy"), &address));
         widgets::separator(ui);
-        widgets::field(ui, "Token", Some("For any other MCP client, with the address above. Whoever has it can drive VRChat here, so keep it to yourself. A new one also updates the agents above."), 240.0, |ui| {
-            copy_button(ui, state, "token", "Copy", &token);
+        widgets::field(ui, tr("Token"), Some(tr("For any other MCP client, with the address above. Whoever has it can drive VRChat here, so keep it to yourself. A new one also updates the agents above.")), 240.0, |ui| {
+            copy_button(ui, state, "token", tr("Copy"), &token);
             ui.add_space(8.0);
-            if Button::new("New token").icon(icons::ARROW_CLOCKWISE).variant(Variant::Ghost).size(Size::Sm).show(ui).clicked() {
+            if Button::new(tr("New token")).icon(icons::ARROW_CLOCKWISE).variant(Variant::Ghost).size(Size::Sm).show(ui).clicked() {
                 cx.ctl.bridge_command(Command::NewToken);
             }
         });
         widgets::separator(ui);
         let hotkey = if status.hotkey_taken {
-            format!("{HOTKEY} is taken by another program: your own input and Stop still work.")
+            tr!("{hotkey} is taken by another program: your own input and Stop still work.", hotkey = HOTKEY)
         } else {
-            format!("{HOTKEY} pauses it until pressed again.")
+            tr!("{hotkey} pauses it until pressed again.", hotkey = HOTKEY)
         };
-        widgets::field(ui, "Taking over", Some(&format!("Any key or mouse movement of yours pauses it and releases what it held. {hotkey}")), 0.0, |_| {});
+        widgets::field(ui, tr("Taking over"), Some(&tr!("Any key or mouse movement of yours pauses it and releases what it held. {hotkey}", hotkey = hotkey)), 0.0, |_| {});
         widgets::separator(ui);
         ui.add_space(12.0);
-        widgets::text(ui.painter(), ui.cursor().min + vec2(0.0, 7.0), egui::Align2::LEFT_CENTER, &Txt::new("Recent actions", 13.5).weight(weight::MEDIUM));
+        widgets::text(ui.painter(), ui.cursor().min + vec2(0.0, 7.0), egui::Align2::LEFT_CENTER, &Txt::new(tr("Recent actions"), 13.5).weight(weight::MEDIUM));
         ui.add_space(24.0);
         let height = 170.0;
         let (rect, _) = ui.allocate_exact_size(vec2(width, height), Sense::hover());
@@ -214,7 +215,7 @@ pub fn show(ui: &mut Ui, cx: &Cx, index: usize, state: &mut State, draft: &mut E
         let mut inside = ui.new_child(egui::UiBuilder::new().max_rect(rect.shrink(12.0)).id_salt("bridge-log"));
         egui::ScrollArea::vertical().id_salt("bridge-log-scroll").stick_to_bottom(true).auto_shrink([false, false]).show(&mut inside, |ui| {
             if status.log.is_empty() {
-                let g = ui.painter().layout_job(Txt::new("Nothing yet.", 11.5).mono().color(theme::FG_3).line_height(17.0).job(width - 24.0));
+                let g = ui.painter().layout_job(Txt::new(tr("Nothing yet."), 11.5).mono().color(theme::FG_3).line_height(17.0).job(width - 24.0));
                 let (r, _) = ui.allocate_exact_size(g.size(), Sense::hover());
                 ui.painter().galley(r.min, g, theme::FG_3);
             }

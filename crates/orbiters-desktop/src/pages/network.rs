@@ -6,6 +6,7 @@ use crate::state::{LanLink, LanStatus};
 use egui::{vec2, Align2, Sense, Ui};
 use orbiters_core::lan::{self, FoundVrchat};
 use orbiters_core::settings::Settings;
+use orbiters_i18n::tr;
 use orbiters_ui::theme::{self, Txt};
 use orbiters_ui::widgets::{self, Button, Size, Tone, Variant};
 use orbiters_ui::{icons, toast};
@@ -21,12 +22,12 @@ pub struct State {
 pub fn sidebar_status(lan: &LanStatus) -> (String, Tone) {
     let short = || lan.peer_label.as_deref().map(|l| l.trim_start_matches("VRChat on ").trim_start_matches("VRChat at ").to_string()).unwrap_or_default();
     match lan.link {
-        LanLink::Off => ("OSC off".into(), Tone::Off),
-        LanLink::NoNetwork => ("No local network".into(), Tone::Warn),
-        LanLink::NotAllowed => ("Allow the local network".into(), Tone::Warn),
-        LanLink::Looking => ("Looking on the network".into(), Tone::Off),
-        LanLink::Choose => (format!("{} found: choose one", lan.found.len()), Tone::Warn),
-        LanLink::Waiting => (format!("Waiting for {}", short()), Tone::Warn),
+        LanLink::Off => (tr("OSC off").into(), Tone::Off),
+        LanLink::NoNetwork => (tr("No local network").into(), Tone::Warn),
+        LanLink::NotAllowed => (tr("Allow the local network").into(), Tone::Warn),
+        LanLink::Looking => (tr("Looking on the network").into(), Tone::Off),
+        LanLink::Choose => (tr!("{count} found: choose one", count = lan.found.len()), Tone::Warn),
+        LanLink::Waiting => (tr!("Waiting for {label}", label = short()), Tone::Warn),
         LanLink::Connected => (short(), Tone::Ok),
     }
 }
@@ -35,15 +36,15 @@ pub fn sidebar_status(lan: &LanStatus) -> (String, Tone) {
 pub fn summary(lan: &LanStatus) -> String {
     let label = lan.peer_label.as_deref().unwrap_or("VRChat");
     match lan.link {
-        LanLink::Off => "OSC is off: turn on Action Menu control below".into(),
-        LanLink::NoNetwork => "This Mac is on no local network".into(),
-        LanLink::NotAllowed => "macOS keeps this app off your local network".into(),
-        LanLink::Looking => "Looking on your network…".into(),
-        LanLink::Choose => "Several found: choose one".into(),
-        LanLink::Waiting => format!("Waiting for {label}"),
+        LanLink::Off => tr("OSC is off: turn on Action Menu control below").into(),
+        LanLink::NoNetwork => tr("This Mac is on no local network").into(),
+        LanLink::NotAllowed => tr("macOS keeps this app off your local network").into(),
+        LanLink::Looking => tr("Looking on your network…").into(),
+        LanLink::Choose => tr("Several found: choose one").into(),
+        LanLink::Waiting => tr!("Waiting for {label}", label = label),
         LanLink::Connected => match lan.peer {
-            Some(ip) if !label.contains(&ip.to_string()) => format!("Connected to {label} · {ip}"),
-            _ => format!("Connected to {label}"),
+            Some(ip) if !label.contains(&ip.to_string()) => tr!("Connected to {label} · {ip}", label = label, ip = ip),
+            _ => tr!("Connected to {label}", label = label),
         },
     }
 }
@@ -55,8 +56,8 @@ fn parse_address(text: &str) -> Option<Ipv4Addr> {
 
 fn describe(found: &FoundVrchat) -> String {
     match found.osc_port {
-        Some(port) => format!("{} · input port {port}", found.ip),
-        None => format!("{} · does not answer over the network yet: on a PC, see below", found.ip),
+        Some(port) => tr!("{address} · input port {port}", address = found.ip, port = port),
+        None => tr!("{address} · does not answer over the network yet: on a PC, see below", address = found.ip),
     }
 }
 
@@ -70,11 +71,11 @@ pub fn card(ui: &mut Ui, cx: &mut Cx, index: usize, state: &mut State, draft: &m
     let mut copied = None;
     let mut refused = None;
     let mut open_privacy = false;
-    section(ui, cx, index, icons::BROADCAST, "VRChat on your network", Some(&subtitle), |ui| {
+    section(ui, cx, index, icons::BROADCAST, tr("VRChat on your network"), Some(&subtitle), |ui| {
         if lan.link == LanLink::NotAllowed {
-            let why = "Answer macOS's question if it is on the screen, or turn on Orbiters - N4N0 in System Settings › Privacy & Security › Local Network. VRChat cannot be found or reached until then.";
-            widgets::field(ui, "Allow the local network", Some(why), 150.0, |ui| {
-                if Button::new("Open Settings").icon(icons::ARROW_SQUARE_OUT).variant(Variant::Primary).size(Size::Sm).show(ui).clicked() {
+            let why = tr("Answer macOS's question if it is on the screen, or turn on Orbiters - N4N0 in System Settings › Privacy & Security › Local Network. VRChat cannot be found or reached until then.");
+            widgets::field(ui, tr("Allow the local network"), Some(why), 150.0, |ui| {
+                if Button::new(tr("Open Settings")).icon(icons::ARROW_SQUARE_OUT).variant(Variant::Primary).size(Size::Sm).show(ui).clicked() {
                     open_privacy = true;
                 }
             });
@@ -84,10 +85,10 @@ pub fn card(ui: &mut Ui, cx: &mut Cx, index: usize, state: &mut State, draft: &m
             let chosen = lan.peer == Some(found.ip);
             widgets::field(ui, &found.label(), Some(&describe(found)), 120.0, |ui| {
                 if chosen {
-                    let (text, color) = if lan.link == LanLink::Connected { ("Connected", theme::OK) } else { ("Waiting", theme::WARN) };
+                    let (text, color) = if lan.link == LanLink::Connected { (tr("Connected"), theme::OK) } else { (tr("Waiting"), theme::WARN) };
                     let (r, _) = ui.allocate_exact_size(vec2(100.0, 20.0), Sense::hover());
                     widgets::text(ui.painter(), r.right_center(), Align2::RIGHT_CENTER, &Txt::new(text, 12.0).color(color));
-                } else if Button::new("Connect").variant(Variant::Primary).size(Size::Sm).id_salt(&found.name).show(ui).clicked() {
+                } else if Button::new(tr("Connect")).variant(Variant::Primary).size(Size::Sm).id_salt(&found.name).show(ui).clicked() {
                     draft.osc.remote = lan::Wanted { typed: None, name: found.name.clone(), ip: Some(found.ip) };
                     changed = true;
                 }
@@ -95,9 +96,9 @@ pub fn card(ui: &mut Ui, cx: &mut Cx, index: usize, state: &mut State, draft: &m
             widgets::separator(ui);
         }
         if let Some(typed) = draft.osc.remote.typed {
-            let (text, _) = (format!("{typed}: only this address is talked with."), ());
-            widgets::field(ui, "Address you typed", Some(&text), 150.0, |ui| {
-                if Button::new("Find it by itself").variant(Variant::Ghost).size(Size::Sm).show(ui).clicked() {
+            let text = tr!("{typed}: only this address is talked with.", typed = typed);
+            widgets::field(ui, tr("Address you typed"), Some(&text), 150.0, |ui| {
+                if Button::new(tr("Find it by itself")).variant(Variant::Ghost).size(Size::Sm).show(ui).clicked() {
                     draft.osc.remote = lan::Wanted::default();
                     changed = true;
                 }
@@ -105,9 +106,9 @@ pub fn card(ui: &mut Ui, cx: &mut Cx, index: usize, state: &mut State, draft: &m
             widgets::separator(ui);
         }
         if lan.found.is_empty() || lan.link != LanLink::Connected {
-            let standalone = "On a Quest, a Pico or an Android phone: same Wi-Fi as this Mac, then in VRChat's Action Menu, Options › OSC › Enabled. It shows up here by itself.";
-            widgets::field(ui, "VRChat on a headset or a phone", Some(standalone), 140.0, |ui| {
-                if Button::new("Look again").icon(icons::ARROW_COUNTER_CLOCKWISE).size(Size::Sm).show(ui).clicked() {
+            let standalone = tr("On a Quest, a Pico or an Android phone: same Wi-Fi as this Mac, then in VRChat's Action Menu, Options › OSC › Enabled. It shows up here by itself.");
+            widgets::field(ui, tr("VRChat on a headset or a phone"), Some(standalone), 140.0, |ui| {
+                if Button::new(tr("Look again")).icon(icons::ARROW_COUNTER_CLOCKWISE).size(Size::Sm).show(ui).clicked() {
                     look_again = true;
                 }
             });
@@ -115,18 +116,18 @@ pub fn card(ui: &mut Ui, cx: &mut Cx, index: usize, state: &mut State, draft: &m
         }
         if let Some(ip) = lan.this_computer {
             let option = lan::launch_option(ip, snap.osc.port.unwrap_or(lan::OSC_PORT));
-            let text = format!("Add this to VRChat's launch options on Steam, then start it, so that it sends here: {option}");
-            widgets::field(ui, "VRChat on another PC", Some(&text), 110.0, |ui| {
-                if Button::new("Copy").icon(icons::COPY).size(Size::Sm).show(ui).clicked() {
+            let text = tr!("Add this to VRChat's launch options on Steam, then start it, so that it sends here: {option}", option = option);
+            widgets::field(ui, tr("VRChat on another PC"), Some(&text), 110.0, |ui| {
+                if Button::new(tr("Copy")).icon(icons::COPY).size(Size::Sm).show(ui).clicked() {
                     copied = Some(option.clone());
                 }
             });
             widgets::separator(ui);
         }
-        widgets::field(ui, "Enter its address", Some("When it is not found by itself (some routers keep devices from finding each other)."), 300.0, |ui| {
+        widgets::field(ui, tr("Enter its address"), Some(tr("When it is not found by itself (some routers keep devices from finding each other).")), 300.0, |ui| {
             ui.spacing_mut().item_spacing = vec2(8.0, 0.0);
             let can = parse_address(&state.typed).is_some();
-            let pressed = Button::new("Connect").size(Size::Sm).enabled(can).id_salt("connect-typed").show(ui).clicked();
+            let pressed = Button::new(tr("Connect")).size(Size::Sm).enabled(can).id_salt("connect-typed").show(ui).clicked();
             let field = widgets::text_field(ui, "vrchat-address", &mut state.typed, "192.168.1.23", 180.0, true);
             let entered = field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
             if pressed || entered {
@@ -136,7 +137,7 @@ pub fn card(ui: &mut Ui, cx: &mut Cx, index: usize, state: &mut State, draft: &m
                         state.typed.clear();
                         changed = true;
                     }
-                    None if entered && !state.typed.trim().is_empty() => refused = Some(format!("{} is not an address like 192.168.1.23.", state.typed.trim())),
+                    None if entered && !state.typed.trim().is_empty() => refused = Some(tr!("{typed} is not an address like 192.168.1.23.", typed = state.typed.trim())),
                     None => {}
                 }
             }
@@ -149,12 +150,12 @@ pub fn card(ui: &mut Ui, cx: &mut Cx, index: usize, state: &mut State, draft: &m
     if open_privacy {
         // System Settings' page, by the address macOS gives it.
         if let Err(e) = std::process::Command::new("/usr/bin/open").arg("x-apple.systempreferences:com.apple.preference.security?Privacy_LocalNetwork").spawn() {
-            cx.toasts.push(&ctx, toast::Kind::Error, format!("System Settings did not open: {e}"));
+            cx.toasts.push(&ctx, toast::Kind::Error, tr!("System Settings did not open: {error}", error = e));
         }
     }
     if let Some(option) = copied {
         ctx.copy_text(option);
-        cx.toasts.push(&ctx, toast::Kind::Success, "Copied.");
+        cx.toasts.push(&ctx, toast::Kind::Success, tr("Copied."));
     }
     if let Some(message) = refused {
         cx.toasts.push(&ctx, toast::Kind::Error, message);

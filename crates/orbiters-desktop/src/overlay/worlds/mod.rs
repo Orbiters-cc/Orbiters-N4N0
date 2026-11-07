@@ -305,7 +305,7 @@ impl Worlds {
     pub fn alone(ctx: egui::Context) -> Self {
         Self {
             open: false,
-            panel: Panel::default(),
+            panel: { let mut panel = Panel::default(); panel.on_sheet = true; panel },
             catalog: Catalog::default(),
             source: Source::current(),
             view: View::new("cc.orbiters.desktop.orbit"),
@@ -488,9 +488,11 @@ impl Worlds {
     }
 
     /// The mouse's wheel over what turns on the side panel.
-    pub fn wheel_alone(&self, notches: f32) {
+    pub fn wheel_alone(&mut self, notches: f32) {
         if let (Some((_, view)), Some(panel::Target::Hero)) = (&self.live, self.panel.hover) {
             view.zoom(notches);
+        } else {
+            self.panel.scroll_by(-notches * 120.0);
         }
     }
 
@@ -579,7 +581,7 @@ impl Worlds {
         let time = self.time();
         let picked = self.picked().cloned();
         // On a headset's endless list a press waits: it may be a drag of the list.
-        if let Some((_, y)) = self.live_pointer.filter(|at| self.panel.vr_list_on(&status) && panel::Panel::vr_list_holds(at.0, at.1)) {
+        if let Some((_, y)) = self.live_pointer.filter(|at| self.panel.vr_list_on(&status) && self.panel.vr_list_holds(&status, at.0, at.1)) {
             if matches!(self.panel.hover, None | Some(panel::Target::Card(_))) {
                 self.panel.pressed = self.panel.hover;
                 self.panel.vr_press(y, self.panel.hover, time);
@@ -988,6 +990,7 @@ impl Worlds {
             see_through: self.view.see_through,
             small: self.view.small_on(),
             small_taken: self.view.small_now().is_some_and(|s| s.taken),
+            small_held: self.view.small_now().is_some_and(|s| s.held_by().is_some()),
             small_docked: self.view.small_now().is_some_and(|s| s.docked),
             small_near: self.view.small_now().is_some_and(|s| s.near),
             headset: !self.alone,
@@ -1042,6 +1045,37 @@ impl Worlds {
         let status = self.status();
         let time = self.time();
         self.panel.open(&status, time);
+    }
+
+    /// Whether what moves on it moves, or is simply there.
+    pub fn set_moves(&mut self, moves: bool) {
+        self.panel.moves = moves;
+    }
+
+    /// Back to it on a sheet: as it was left. Only its list is read again.
+    pub fn come_back(&mut self, layout: KeyboardLayout) {
+        self.catalog.refresh(&self.source);
+        self.open = true;
+        self.panel.layout = layout;
+        self.panel.dirty = true;
+    }
+
+    /// The head's Back, if there is somewhere to go within this panel. Its own does not show on a sheet.
+    pub fn back_within(&mut self) -> bool {
+        if !self.panel.goes_back_within() {
+            return false;
+        }
+        let entries = self.entries();
+        let status = self.status();
+        let picked = self.picked().cloned();
+        let time = self.time();
+        self.press_target(panel::Target::Back, &entries, &status, picked.as_ref(), time);
+        true
+    }
+
+    /// The stick on its list.
+    pub fn scroll_by(&mut self, by: f32) {
+        self.panel.scroll_by(by);
     }
 
     /// One turn: what the panel asked of the app, the app's feedback, the capture view and its download, the pill or
@@ -1317,6 +1351,8 @@ impl Worlds {
             vr::event::MOUSE_MOVE => {
                 let (x, y, _) = e.mouse();
                 let hover = self.panel.hit(&data(&self.feedback, &self.facts), x, height - y);
+                self.panel.vr_drag(height - y, time);
+                let hover = if self.panel.vr_dragging() { None } else { hover };
                 if hover != self.panel.hover {
                     self.panel.hover = hover;
                     self.panel.dirty = true;
@@ -1326,7 +1362,13 @@ impl Worlds {
             vr::event::MOUSE_BUTTON_DOWN => {
                 let (x, y, _) = e.mouse();
                 let d = data(&self.feedback, &self.facts);
-                let Some(target) = self.panel.hit(&d, x, height - y) else { return false };
+                let hit = self.panel.hit(&d, x, height - y);
+                if self.panel.vr_list_on(&status) && self.panel.vr_list_holds(&status, x, height - y) && matches!(hit, None | Some(panel::Target::Card(_))) {
+                    self.panel.pressed = hit;
+                    self.panel.vr_press(height - y, hit, time);
+                    return true;
+                }
+                let Some(target) = hit else { return false };
                 // The press shows at once; what it does follows.
                 self.panel.pressed = Some(target);
                 let actions = self.panel.press(target, &d, time);
@@ -1335,6 +1377,12 @@ impl Worlds {
                 true
             }
             vr::event::MOUSE_BUTTON_UP | vr::event::FOCUS_LEAVE => {
+                if let Some(target) = self.panel.vr_release(time).filter(|_| e.event_type == vr::event::MOUSE_BUTTON_UP) {
+                    let d = data(&self.feedback, &self.facts);
+                    let actions = self.panel.press(target, &d, time);
+                    self.keep_picked(&entries);
+                    self.act(actions, &entries, overlay, steamvr);
+                }
                 self.panel.pressed = None;
                 if e.event_type == vr::event::FOCUS_LEAVE {
                     self.panel.hover = None;
@@ -1601,12 +1649,17 @@ impl Worlds {
         let d = Data { entries, picked: self.picked(), status, feedback: &self.feedback, facts: &self.facts, thumb: &no_thumb, picture: &no_picture, now: 0 };
         let (shown, cards): (Vec<&Entry>, bool) = match self.panel.page {
             panel::Page::Typing => (self.panel.results(&d).into_iter().take(panel::PER_ROW).collect(), true),
-            panel::Page::Browse => (self.panel.results(&d).into_iter().skip(self.panel.results_page * panel::PER_PAGE).take(panel::PER_PAGE).collect(), true),
+            panel::Page::Browse => {
+                let results = self.panel.results(&d);
+                let window = self.panel.list_window(status.headset, results.len());
+                (results[window].to_vec(), true)
+            }
             panel::Page::Filter => (Vec::new(), true),
             // The list beside the side panel, and the world on it.
             panel::Page::Detail => {
-                let first = self.panel.results_page * panel::PER_PAGE;
-                let mut list: Vec<&Entry> = self.panel.results(&d).into_iter().skip(first).take(panel::PER_PAGE).collect();
+                let results = self.panel.results(&d);
+                let window = self.panel.list_window(status.headset, results.len());
+                let mut list: Vec<&Entry> = results[window].to_vec();
                 if let Some(e) = self.panel.entry(&d).filter(|e| !list.iter().any(|l| l.id == e.id)) {
                     list.push(e);
                 }

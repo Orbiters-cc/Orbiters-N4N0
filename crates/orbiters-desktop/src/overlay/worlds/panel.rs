@@ -228,6 +228,8 @@ pub struct Status {
     pub small: bool,
     /// What shows small: a hand took it from its place; it lies in its place in the panel; a hand is near enough to take it.
     pub small_taken: bool,
+    /// A hand holds it now: its stick zooms it.
+    pub small_held: bool,
     pub small_docked: bool,
     pub small_near: bool,
     /// There is a headset to show anything in.
@@ -461,6 +463,15 @@ pub struct Panel {
     pub page: Page,
     pub query: String,
     pub results_page: usize,
+    /// On a sheet, whose head has the way back: this panel's own does not show.
+    pub on_sheet: bool,
+    /// Whether things move, or are simply there (Reduce motion).
+    pub moves: bool,
+    /// When the side panel last started to come or go.
+    side_at: f64,
+    /// A row and how many in it, as the list last measured, and for what.
+    list_step: std::cell::Cell<(f32, usize)>,
+    list_headset: std::cell::Cell<bool>,
     /// How far down a headset's endless list of worlds is, the hand on it, how fast it was thrown, and how far it can go now.
     vr_scroll: f32,
     vr_hold: Option<VrHold>,
@@ -588,6 +599,48 @@ fn vr_card_rect(i: usize) -> Rect {
     Rect::from_min_size(pos2(24.0 + col * 212.0, VR_LIST_TOP + 4.0 + row * VR_ROW), vec2(204.0, 148.0))
 }
 
+/// The same with no side panel beside it: four columns under the search and the filters.
+fn vr_wide_card_rect(i: usize) -> Rect {
+    let (col, row) = ((i % 4) as f32, (i / 4) as f32);
+    Rect::from_min_size(pos2(24.0 + col * 248.0, WIDE_LIST_TOP + 4.0 + row * 190.0), vec2(240.0, 182.0))
+}
+
+const WIDE_LIST_TOP: f32 = 142.0;
+
+/// What a list is like in each place it shows: its first card's top, its columns, its row's height.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct ListShape {
+    top: f32,
+    bottom: f32,
+    right: f32,
+    columns: usize,
+    row: f32,
+}
+
+/// How far a side panel has come out at `seconds` after it started: on the same spring as what expands elsewhere in the app ([`orbiters_ui::anim::Spring::EXPAND`]), with its few percent past the end.
+fn side_spring(seconds: f64) -> f32 {
+    let spring = orbiters_ui::anim::Spring::EXPAND;
+    let t = seconds.max(0.0) as f32;
+    let natural = (spring.stiffness / spring.mass).sqrt();
+    let ratio = spring.damping / (2.0 * (spring.stiffness * spring.mass).sqrt());
+    let damped = natural * (1.0 - ratio * ratio).max(1e-3).sqrt();
+    1.0 - (-ratio * natural * t).exp() * ((damped * t).cos() + ratio * natural / damped * (damped * t).sin())
+}
+
+/// `draw` on `p`, moved by `by` and as solid as `alpha`, whatever it draws.
+fn slid(p: &Painter, by: egui::Vec2, alpha: f32, draw: impl FnOnce(&Painter)) {
+    let mut there = p.clone();
+    there.set_opacity(alpha.clamp(0.0, 1.0));
+    let layer = p.layer_id();
+    let start = p.ctx().graphics_mut(|g| g.entry(layer).next_idx());
+    draw(&there);
+    p.ctx().graphics_mut(|g| {
+        let list = g.entry(layer);
+        let end = list.next_idx();
+        list.transform_range(start, end, egui::emath::TSTransform::from_translation(by));
+    });
+}
+
 const VR_LIST_TOP: f32 = 92.0;
 const VR_LIST_BOTTOM: f32 = 564.0;
 const VR_ROW: f32 = 156.0;
@@ -709,8 +762,6 @@ fn draw_live(p: &Painter, hero: Rect, live: &Live) {
 /// Beside the side panel: the row of what is browsed gets narrower, and the field and its pages.
 const SIDE_SORT: Rect = Rect { min: Pos2 { x: 540.0, y: 96.0 }, max: Pos2 { x: 592.0, y: 136.0 } };
 const SIDE_FILTER: Rect = Rect { min: Pos2 { x: 600.0, y: 96.0 }, max: Pos2 { x: 652.0, y: 136.0 } };
-const SIDE_PREVIOUS: Pos2 = Pos2 { x: 572.0, y: 52.0 };
-const SIDE_NEXT: Pos2 = Pos2 { x: 628.0, y: 52.0 };
 
 /// `color` over `outer`, rounded by `outer_radius`, but for `hole`, rounded by `hole_radius`, where what is behind shows.
 pub fn fill_around(p: &Painter, outer: Rect, outer_radius: f32, hole: Rect, hole_radius: f32, color: Color32) {
@@ -784,13 +835,68 @@ impl Panel {
     }
 
     /// Pages of `n` results: one more while the list has more to read (its next page is read once there).
-    /// A headset's list goes on as far as there are worlds, with no pages: Enzo, "infinite scroll creates less friction".
-    pub fn vr_list_on(&self, status: &Status) -> bool {
-        self.page == Page::Detail && status.headset
+    /// A list goes on as far as there are worlds, with no pages, wherever it shows: Enzo, "infinite scroll creates less friction".
+    pub fn vr_list_on(&self, _status: &Status) -> bool {
+        matches!(self.page, Page::Browse | Page::Detail)
     }
 
-    pub fn vr_list_holds(x: f32, y: f32) -> bool {
-        (24.0..VR_LIST_RIGHT + 8.0).contains(&x) && (VR_LIST_TOP..VR_LIST_BOTTOM).contains(&y)
+    /// Its shape here.
+    fn list_shape(&self, headset: bool) -> ListShape {
+        match (self.page == Page::Detail, headset) {
+            (true, true) => ListShape { top: VR_LIST_TOP, bottom: VR_LIST_BOTTOM, right: VR_LIST_RIGHT + 8.0, columns: 2, row: VR_ROW },
+            (false, true) => ListShape { top: WIDE_LIST_TOP, bottom: HEIGHT, right: WIDTH - 8.0, columns: 4, row: 190.0 },
+            (true, false) => ListShape { top: 142.0, bottom: HEIGHT - 4.0, right: 660.0, columns: 2, row: 136.0 },
+            (false, false) => ListShape { top: 142.0, bottom: HEIGHT - 4.0, right: WIDTH - 8.0, columns: PER_ROW, row: 200.0 },
+        }
+    }
+
+    /// Whether a press at this place is on the list, which may turn out a drag of it.
+    pub fn vr_list_holds(&self, status: &Status, x: f32, y: f32) -> bool {
+        let shape = self.list_shape(status.headset);
+        (24.0..shape.right).contains(&x) && (shape.top..shape.bottom).contains(&y)
+    }
+
+    /// Where a result lies before it is scrolled: in a headset, on its way between the two shapes while the side panel comes and goes, so the page changes its layout and no other page comes.
+    fn list_card(&self, i: usize, headset: bool, time: f64) -> Rect {
+        let (narrow, wide) = if headset { (vr_card_rect(i), vr_wide_card_rect(i)) } else { (side_card_rect_flowing(i), card_rect(i)) };
+        let out = self.side_out(time);
+        let mix = |a: f32, b: f32| a + (b - a) * out;
+        Rect::from_min_max(pos2(mix(wide.min.x, narrow.min.x), mix(wide.min.y, narrow.min.y)), pos2(mix(wide.max.x, narrow.max.x), mix(wide.max.y, narrow.max.y)))
+    }
+
+    /// How far the side panel is out, 0 to 1 and a little past it.
+    fn side_out(&self, time: f64) -> f32 {
+        let open = self.page == Page::Detail;
+        if !self.moves {
+            return if open { 1.0 } else { 0.0 };
+        }
+        let along = side_spring(time - self.side_at);
+        if open { along } else { 1.0 - along }
+    }
+
+    /// Which results may show now, to read their pictures.
+    pub fn list_window(&self, headset: bool, count: usize) -> std::ops::Range<usize> {
+        let shape = self.list_shape(headset);
+        let first = ((self.vr_scroll / shape.row).floor().max(0.0) as usize) * shape.columns;
+        let rows = ((shape.bottom - shape.top) / shape.row).ceil() as usize + 1;
+        first.min(count)..(first + rows * shape.columns).min(count)
+    }
+
+    /// The search field: from the page's edge on a sheet, whose head has the way back.
+    fn field_here(&self) -> Rect {
+        let field = field_rect();
+        if self.on_sheet { Rect::from_min_max(pos2(32.0, field.min.y), field.max) } else { field }
+    }
+
+    /// Whether a Back here stays on this panel: what was opened from what it opened on.
+    pub fn goes_back_within(&self) -> bool {
+        self.page != Page::Browse
+    }
+
+    /// The list moved by so much, by a stick or a wheel.
+    pub fn scroll_by(&mut self, by: f32) {
+        self.vr_throw = 0.0;
+        self.vr_scroll_to(self.vr_scroll + by);
     }
 
     /// Back to the start of a list: another section, another search.
@@ -803,7 +909,8 @@ impl Panel {
     fn vr_scroll_to(&mut self, to: f32) {
         self.vr_scroll = to.clamp(0.0, self.vr_most.get());
         // What is near the end asks for what follows it, as a page near the end did.
-        self.results_page = ((self.vr_scroll / VR_ROW) as usize * 2) / PER_PAGE;
+        let (row, columns) = self.list_step.get();
+        self.results_page = ((self.vr_scroll / row.max(1.0)) as usize * columns.max(1)) / PER_PAGE;
         self.dirty = true;
     }
 
@@ -860,10 +967,13 @@ impl Panel {
         self.dirty = true;
     }
 
-    /// How far a headset's list of `n` goes, with a row more when more are coming.
-    fn vr_measure(&self, n: usize, more: bool) {
-        let rows = n.div_ceil(2) + usize::from(more);
-        self.vr_most.set((VR_LIST_TOP + 4.0 + rows as f32 * VR_ROW - VR_LIST_BOTTOM).max(0.0));
+    /// How far a list of `n` goes, with a row more when more are coming.
+    fn vr_measure(&self, n: usize, more: bool, headset: bool) {
+        let shape = self.list_shape(headset);
+        let rows = n.div_ceil(shape.columns) + usize::from(more);
+        self.vr_most.set((shape.top + 4.0 + rows as f32 * shape.row - shape.bottom).max(0.0));
+        self.list_step.set((shape.row, shape.columns));
+        self.list_headset.set(headset);
     }
 
     fn pages(&self, d: &Data, n: usize) -> usize {
@@ -909,6 +1019,16 @@ impl Panel {
 
     fn go(&mut self, page: Page, time: f64) {
         if page != self.page {
+            // To and from the side panel the page stays and its layout changes, with where the list is scrolled to kept in step.
+            if (page == Page::Detail) != (self.page == Page::Detail) && matches!(page, Page::Browse | Page::Detail) && matches!(self.page, Page::Browse | Page::Detail) {
+                self.side_at = time;
+                let headset = self.list_headset.get();
+                let was = self.list_shape(headset);
+                let first = (self.vr_scroll / was.row) as usize * was.columns;
+                self.page = page;
+                let now = self.list_shape(headset);
+                self.vr_scroll = (first / now.columns) as f32 * now.row;
+            }
             self.page = page;
             self.page_at = time;
         }
@@ -952,6 +1072,7 @@ impl Panel {
         let since = time - self.page_at;
         since < PAGE_FADE + CARD_STAGGER * PER_PAGE as f64 + 0.1
             || time - self.selected_at < 0.3
+            || (self.moves && time - self.side_at < 0.7)
             || status.small_docked
             || status.stage.is_some()
             || status.fetching
@@ -987,7 +1108,7 @@ impl Panel {
         let results = self.results(d);
         if side && d.status.headset {
             out.push((Target::CloseSide, vr_list_head(1)));
-            self.vr_measure(results.len(), d.status.list.more || self.loading(d));
+            self.vr_measure(results.len(), d.status.list.more || self.loading(d), true);
             // What shows of those in view is what can be pressed.
             let list = Rect::from_min_max(pos2(0.0, VR_LIST_TOP), pos2(VR_LIST_RIGHT + 8.0, VR_LIST_BOTTOM));
             for i in 0..results.len() {
@@ -998,13 +1119,7 @@ impl Panel {
             }
             return;
         }
-        out.push((Target::Field, if side { side_field_rect() } else { field_rect() }));
-        let pages = self.pages(d, results.len());
-        if pages > 1 {
-            let (previous, next) = if side { (SIDE_PREVIOUS, SIDE_NEXT) } else { (pos2(900.0, 52.0), pos2(964.0, 52.0)) };
-            out.push((Target::Previous, Rect::from_center_size(previous, vec2(56.0, 56.0))));
-            out.push((Target::Next, Rect::from_center_size(next, vec2(56.0, 56.0))));
-        }
+        out.push((Target::Field, if side { side_field_rect() } else { self.field_here() }));
         if self.searching(d) {
             out.push((Target::Has3d, ONLY_3D));
         } else {
@@ -1017,8 +1132,7 @@ impl Panel {
         if self.filtered() && !side {
             out.push((Target::ClearFilters, CLEAR));
         }
-        let first = self.results_page.min(pages - 1) * PER_PAGE;
-        if let Some(n) = self.few_leading(d, &results) {
+        if let Some(n) = self.few_leading(d, &results).filter(|_| !d.status.headset) {
             let (rects, heading) = few_rects(results.len(), n, side);
             for (i, rect) in rects.into_iter().enumerate() {
                 if let Some(rect) = rect {
@@ -1033,8 +1147,16 @@ impl Panel {
                 out.push((Target::Section(Section::Popular), Rect::from_min_size(pos2(right - 132.0, heading - 6.0), vec2(132.0, 34.0))));
             }
         } else {
-            for (i, _) in results.iter().enumerate().skip(first).take(PER_PAGE) {
-                out.push((Target::Card(i), if side { side_card_rect(i - first) } else { card_rect(i - first) }));
+            // As far as there are worlds: what shows of those in view is what can be pressed.
+            self.vr_measure(results.len(), d.status.list.more || self.loading(d), d.status.headset);
+            let shape = self.list_shape(d.status.headset);
+            let list = Rect::from_min_max(pos2(0.0, shape.top), pos2(WIDTH, shape.bottom));
+            for i in 0..results.len() {
+                let rect = if d.status.headset { vr_wide_card_rect(i) } else if side { side_card_rect_flowing(i) } else { card_rect(i) };
+                let rect = rect.translate(vec2(0.0, -self.vr_scroll)).intersect(list);
+                if rect.is_positive() {
+                    out.push((Target::Card(i), rect));
+                }
             }
         }
         if !results.is_empty() && self.few_captures(d) {
@@ -1059,11 +1181,11 @@ impl Panel {
 
     /// Where each pressable thing is now.
     pub fn targets(&self, d: &Data) -> Vec<(Target, Rect)> {
-        let mut out = vec![(Target::Back, Rect::from_center_size(pos2(60.0, 52.0), vec2(56.0, 56.0)))];
+        let mut out = if self.on_sheet { Vec::new() } else { vec![(Target::Back, Rect::from_center_size(pos2(60.0, 52.0), vec2(56.0, 56.0)))] };
         match self.page {
             Page::Browse => self.browse_targets(d, &mut out, false),
             Page::Typing => {
-                out.push((Target::Field, field_rect()));
+                out.push((Target::Field, self.field_here()));
                 out.push((Target::Done, Rect::from_min_size(pos2(824.0, 24.0), vec2(168.0, 56.0))));
                 for (i, _) in self.results(d).iter().enumerate().take(PER_ROW) {
                     out.push((Target::Card(i), compact_rect(i)));
@@ -1534,7 +1656,7 @@ impl Panel {
             Page::Browse => self.browse(p, d, &targets, time, shown),
             Page::Typing => {
                 let results = self.results(d);
-                field(p, field_rect(), &self.query, tr("Search VRChat worlds"), icons::MAGNIFYING_GLASS, true, state(Target::Field), time, 1.0);
+                field(p, self.field_here(), &self.query, tr("Search VRChat worlds"), icons::MAGNIFYING_GLASS, true, state(Target::Field), time, 1.0);
                 let (h, pr) = state(Target::Done);
                 pill_button(p, Rect::from_min_size(pos2(824.0, 24.0), vec2(168.0, 56.0)), Some(icons::MAGNIFYING_GLASS), tr("Done"), orbit_look::accent(), orbit_look::on_accent(), h, pr, 1.0);
                 for (t, rect) in &targets {
@@ -1559,7 +1681,13 @@ impl Panel {
             }
             Page::Detail => {
                 self.browse(p, d, &targets, time, 1.0);
-                self.side_panel(p, d, time, &targets);
+                // It comes out beside the list, which makes it room: the page changes its layout, and no other page comes (Enzo).
+                let out = self.side_out(time);
+                if out >= 0.999 && (out - 1.0).abs() < 0.001 {
+                    self.side_panel(p, d, time, &targets);
+                } else {
+                    slid(p, vec2((1.0 - out) * 70.0, 0.0), out, |there| self.side_panel(there, d, time, &targets));
+                }
             }
             Page::Filter | Page::Labels | Page::Comments | Page::Compose(_) | Page::Pictures => self.draw_page(p, d, time, &targets, shown),
         }
@@ -1594,11 +1722,13 @@ impl Panel {
             // What else is behind it.
             widgets::icon(p, pos2(head.max.x - 58.0, head.center().y), icons::MAGNIFYING_GLASS, 23.0, theme::FG_2);
             widgets::icon(p, pos2(head.max.x - 26.0, head.center().y), icons::SLIDERS_HORIZONTAL, 23.0, theme::FG_2);
-            let list = p.with_clip_rect(Rect::from_min_max(pos2(0.0, VR_LIST_TOP), pos2(VR_LIST_RIGHT + 8.0, VR_LIST_BOTTOM)));
+            // While it is on its way to its two columns, it still has their room.
+            let right = if self.side_out(time) < 0.995 { WIDTH } else { VR_LIST_RIGHT + 8.0 };
+            let list = p.with_clip_rect(Rect::from_min_max(pos2(0.0, VR_LIST_TOP), pos2(right, VR_LIST_BOTTOM)));
             for (t, _) in targets {
                 if let Target::Card(i) = *t {
                     let (h, pr) = state(*t);
-                    vr_card(&list, vr_card_rect(i).translate(vec2(0.0, -self.vr_scroll)), results[i], d, h, pr, self.selected == Some(results[i].id));
+                    vr_card(&list, self.list_card(i, true, time).translate(vec2(0.0, -self.vr_scroll)), results[i], d, h, pr, self.selected == Some(results[i].id));
                 }
             }
             if results.is_empty() {
@@ -1620,7 +1750,7 @@ impl Panel {
             }
             return;
         }
-        field(p, if side { side_field_rect() } else { field_rect() }, &self.query, tr("Search VRChat worlds"), icons::MAGNIFYING_GLASS, false, state(Target::Field), time, 1.0);
+        field(p, if side { side_field_rect() } else { self.field_here() }, &self.query, tr("Search VRChat worlds"), icons::MAGNIFYING_GLASS, false, state(Target::Field), time, 1.0);
         // How many, at the field's end (while what is typed leaves room).
         if !side && self.query.chars().count() <= 28 && !results.is_empty() {
             // How many of what the filter that is on shows.
@@ -1629,20 +1759,7 @@ impl Panel {
                 None if results.len() == 1 || !d.status.list.more => tr_n("{count} world", "{count} worlds", results.len() as u64),
                 None => tr!("{count}+ worlds", count = results.len()),
             };
-            text(p, pos2(field_rect().max.x - 28.0, field_rect().center().y), Align2::RIGHT_CENTER, orbit_look::txt(count, 16.0).color(theme::FG_4));
-        }
-        let pages = self.pages(d, results.len());
-        let current = self.results_page.min(pages - 1);
-        if pages > 1 {
-            let (previous, next) = if side { (SIDE_PREVIOUS, SIDE_NEXT) } else { (pos2(900.0, 52.0), pos2(964.0, 52.0)) };
-            let (h, pr) = state(Target::Previous);
-            round_button(p, previous, icons::CARET_LEFT, h, pr, 1.0);
-            let (h, pr) = state(Target::Next);
-            round_button(p, next, icons::CARET_RIGHT, h, pr, 1.0);
-            let of = if d.status.list.more { format!("{}/{}+", current + 1, pages - 1) } else { format!("{}/{}", current + 1, pages) };
-            if !side {
-                text(p, pos2(860.0, 52.0), Align2::RIGHT_CENTER, orbit_look::txt(of, 17.0).color(theme::FG_3));
-            }
+            text(p, pos2(self.field_here().max.x - 28.0, self.field_here().center().y), Align2::RIGHT_CENTER, orbit_look::txt(count, 16.0).color(theme::FG_4));
         }
         // What is browsed (searching: every world, 3D only), the order, the labels kept to.
         if self.searching(d) {
@@ -1733,24 +1850,47 @@ impl Panel {
                 pill_button(p, rect, Some(glyph), label, if h { RAISED2 } else { RAISED }, theme::FG, h, pr, 1.0);
             }
         }
-        if !results.is_empty() && current * PER_PAGE >= results.len() {
-            text(p, pos2(if side { 340.0 } else { 512.0 }, 330.0), Align2::CENTER_CENTER, orbit_look::txt(tr("Finding more worlds…"), 19.0).color(fade(theme::FG_3, shown)));
-        }
+        // The list, as far down as it goes, and its way through.
+        let shape = self.list_shape(d.status.headset);
+        let list = p.with_clip_rect(Rect::from_min_max(pos2(0.0, shape.top), pos2(WIDTH, shape.bottom)));
         for (t, rect) in targets {
             if let Target::Card(i) = *t {
-                let slot = i - current * PER_PAGE;
-                let appear = ease_out((time - self.page_at - slot as f64 * CARD_STAGGER) / PAGE_FADE);
-                let lift = (1.0 - appear) * 18.0;
                 let (h, pr) = state(*t);
-                if side {
-                    compact_card(p, *rect, results[i], d, h, pr, 1.0);
-                    // The one whose details these are.
+                if d.status.headset {
+                    vr_card(&list, self.list_card(i, true, time).translate(vec2(0.0, -self.vr_scroll)), results[i], d, h, pr, self.selected == Some(results[i].id));
+                } else if self.few_leading(d, &results).is_some() {
+                    let lift = (1.0 - ease_out((time - self.page_at) / PAGE_FADE)) * 18.0;
+                    if side {
+                        compact_card(p, *rect, results[i], d, h, pr, 1.0);
+                    } else {
+                        card(p, rect.translate(vec2(0.0, lift)), results[i], d, h, pr, shown);
+                    }
+                } else if side {
+                    let whole = side_card_rect_flowing(i).translate(vec2(0.0, -self.vr_scroll));
+                    compact_card(&list, whole, results[i], d, h, pr, 1.0);
                     if self.selected == Some(results[i].id) {
-                        p.rect_stroke(*rect, CornerRadius::same(18), Stroke::new(2.5, orbit_look::accent()), StrokeKind::Inside);
+                        list.rect_stroke(whole, CornerRadius::same(18), Stroke::new(2.5, orbit_look::accent()), StrokeKind::Inside);
                     }
                 } else {
-                    card(p, rect.translate(vec2(0.0, lift)), results[i], d, h, pr, appear);
+                    card(&list, card_rect(i).translate(vec2(0.0, -self.vr_scroll)), results[i], d, h, pr, shown);
                 }
+            }
+        }
+        if !results.is_empty() && self.few_leading(d, &results).is_none() {
+            if d.status.list.more || self.loading(d) {
+                // Under the last of them, as they keep coming.
+                let next = results.len().next_multiple_of(shape.columns);
+                let y = (if d.status.headset { vr_wide_card_rect(next) } else if side { side_card_rect_flowing(next) } else { card_rect(next) }).min.y + 40.0 - self.vr_scroll;
+                if y < shape.bottom {
+                    text(&list, pos2((shape.right + 24.0) / 2.0, y), Align2::CENTER_CENTER, orbit_look::txt(tr("Finding more worlds…"), 19.0).color(fade(theme::FG_3, shown)));
+                }
+            }
+            let most = self.vr_most.get();
+            if most > 0.0 {
+                let track = shape.bottom - shape.top;
+                let high = (track * track / (track + most)).max(48.0);
+                let y = shape.top + (track - high) * (self.vr_scroll / most);
+                p.rect_filled(Rect::from_min_size(pos2(shape.right - 5.0, y), vec2(4.0, high)), CornerRadius::same(2), theme::white(0.3));
             }
         }
         if side {
@@ -2055,6 +2195,11 @@ const CARD_THUMB: f32 = 124.0;
 fn side_card_rect(slot: usize) -> Rect {
     let (col, row) = ((slot % 2) as f32, (slot / 2) as f32);
     Rect::from_min_size(pos2(32.0 + col * 316.0, 148.0 + row * 136.0), vec2(304.0, 124.0))
+}
+
+/// A result beside a side panel on a screen, as far down as there are.
+fn side_card_rect_flowing(i: usize) -> Rect {
+    side_card_rect(i)
 }
 
 fn compact_rect(i: usize) -> Rect {
@@ -2521,8 +2666,8 @@ mod tests {
     /// Enzo: "infinite scroll creates less friction". A press stays a press; a drag moves the list and presses nothing; a throw coasts and stops at the end.
     #[test]
     fn a_headsets_list_of_worlds_is_endless() {
-        let mut panel = Panel::default();
-        panel.vr_measure(40, true);
+        let mut panel = Panel { page: Page::Detail, ..Default::default() };
+        panel.vr_measure(40, true, true);
         assert_eq!(panel.vr_most.get(), VR_LIST_TOP + 4.0 + 21.0 * VR_ROW - VR_LIST_BOTTOM);
         // A press, with a hand's tremble.
         panel.vr_press(200.0, Some(Target::Card(3)), 0.0);
@@ -2777,7 +2922,7 @@ mod tests {
         // Searching: 3D only instead of the sections, and a page more while the list has more.
         let targets: Vec<Target> = panel.targets(&d).into_iter().map(|(t, _)| t).collect();
         assert!(targets.contains(&Target::Has3d) && !targets.contains(&Target::Section(Section::Popular)));
-        assert!(targets.contains(&Target::Next), "3 results and more to read: two pages");
+        assert!(!targets.contains(&Target::Next), "more to read comes as the list goes on: no pages");
         assert_eq!(panel.results(&d).len(), 3, "found by the search, whatever its name");
         panel.press(Target::Has3d, &d, 1.0);
         assert!(panel.results(&d).iter().all(|e| e.capture));

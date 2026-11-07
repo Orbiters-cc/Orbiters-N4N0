@@ -895,7 +895,7 @@ fn session(args: &[String]) -> anyhow::Result<Ended> {
                     grabs[hand] = false;
                 }
                 if input_log.due(Duration::from_secs(1)) {
-                    vr_log::line(&format!("small input: read {} sticks {:?} moves {:?} grips {grabs:?} menu hand {menu_hand:?}", read.is_some(), sticks, moves));
+                    vr_log::line(&format!("small input: read {} sticks {:?} moves {:?} grips {grabs:?} menu hand {menu_hand:?}", read.is_some(), sticks, moves)); // i18n: not shown (a log's line)
                 }
                 t.menu.worlds.small_input(lasers, grabs, sticks, moves);
                 t.menu.worlds.small_tools(lasers, actions.orbit_triggers(&steamvr, [false; 2]));
@@ -908,7 +908,7 @@ fn session(args: &[String]) -> anyhow::Result<Ended> {
                 let turned = t.menu.worlds.turn_stick(stick, &steamvr);
                 let every = if turned != 0.0 || stick.abs() > 0.2 { Duration::from_millis(250) } else { Duration::from_secs(2) };
                 if input_log.due(every) {
-                    vr_log::line(&format!("turn: read {} hand {hand} stick x {stick:.2} turned {:.4} rad steps {} menu up {menu_up}", read.is_some(), turned, t.menu.worlds.view.turns_in_steps()));
+                    vr_log::line(&format!("turn: read {} hand {hand} stick x {stick:.2} turned {:.4} rad steps {} menu up {menu_up}", read.is_some(), turned, t.menu.worlds.view.turns_in_steps())); // i18n: not shown (a log's line)
                 }
             }
         }

@@ -5,14 +5,15 @@ use super::*;
 use orbiters_i18n::{tr, Language};
 
 const ROW_SOUND: usize = 2;
-const ROW_LANGUAGE: usize = 3;
-const ROW_THEME: usize = 4;
-const ROW_COLOUR: usize = 5;
-const ROW_PICTURES: usize = 6;
+const ROW_MICS: usize = 3;
+const ROW_LANGUAGE: usize = 4;
+const ROW_THEME: usize = 5;
+const ROW_COLOUR: usize = 6;
+const ROW_PICTURES: usize = 7;
 
 /// Where a row starts, and where its controls do.
 fn settings_row(i: usize) -> f32 {
-    12.0 + i as f32 * 78.0
+    8.0 + i as f32 * 70.0
 }
 const SETTINGS_X: f32 = 276.0;
 const SETTINGS_HIGH: f32 = 58.0;
@@ -57,6 +58,7 @@ pub(super) fn settings_items(facts: &Facts) -> Vec<Item> {
     };
     stepper(ROW_SOUND, Pick::Sound(false), Pick::Sound(true), Look::SoundName);
     stepper(ROW_LANGUAGE, Pick::Language(false), Pick::Language(true), Look::LanguageName);
+    out.push(Item { action: Action::Page(Target::Microphones), rect: r(SETTINGS_X, settings_row(ROW_MICS) + 4.0, 1000.0 - SETTINGS_X, SETTINGS_HIGH), look: Look::MicsOpen });
     for i in 0..SWATCHES.len() {
         out.push(Item { action: Action::Set(Pick::Swatch(i)), rect: r(SETTINGS_X + i as f32 * 60.0, settings_row(ROW_COLOUR) + 6.0, 54.0, 54.0), look: Look::Swatch(i) });
     }
@@ -71,6 +73,7 @@ pub(super) fn draw_settings(p: &Painter, facts: &Facts) {
         (0, tr("Layout"), tr("Where the tiles lie on the Quick Menu")),
         (1, tr("Tiles in VR"), tr("How they follow your hand")),
         (ROW_SOUND, tr("Sound in VR"), tr("The output Windows uses when SteamVR starts")),
+        (ROW_MICS, tr("Microphones"), tr("What each hears, and which is used")),
         (ROW_LANGUAGE, tr("Language"), tr("Of Orbiters - N4N0 and your Orbiters account")),
         (ROW_THEME, tr("Theme"), tr("How these menus look")),
         (ROW_COLOUR, tr("Colour"), if retro { tr("The one colour of everything") } else { tr("The accent of every button") }),

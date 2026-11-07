@@ -627,7 +627,7 @@ impl View {
         let small = self.small.as_ref().map(|s| format!("docked {} taken {} held {:?} reach {:.2} radius {:.3} anchor {:?} middle moved {:?}", s.docked, s.taken(), s.held_by(), s.reach(), s.radius(), s.anchor, s.moved_by()));
         let place = self.small_place.map(|(at, radius)| (stereo::position(&at), radius));
         format!(
-            "view: phase {} alpha {:.2} faces visible {visible}/{total} faces submitted {} loaded {} in flight {} cube {:?} small [{}] hole's place {place:?} error {:?}",
+            "view: phase {} alpha {:.2} faces visible {visible}/{total} faces submitted {} loaded {} in flight {} cube {:?} small [{}] hole's place {place:?} error {:?}", // i18n: not shown (a log's line)
             match self.phase { Phase::Off => "off", Phase::Loading => "loading", Phase::Shown { .. } => "shown", Phase::Leaving { .. } => "leaving" },
             self.alpha,
             self.published,

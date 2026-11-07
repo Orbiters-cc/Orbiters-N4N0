@@ -21,6 +21,9 @@ use orbiters_core::settings::{MenuLook, OrbitLayout, OrbitSettings, VrMotion};
 use std::path::PathBuf;
 
 mod settings_sheet;
+mod mic_sheet;
+pub use mic_sheet::MicTile;
+use mic_sheet::{draw_mics, mic_items};
 mod tracking_sheet;
 pub use tracking_sheet::{smoothing_at, Smoothed};
 use tracking_sheet::{draw_smoothing_bar, draw_tracking, tracking_caption, tracking_items};
@@ -151,6 +154,8 @@ pub enum Action {
     Pictures,
     /// Fast walk on or off.
     FastWalk,
+    /// The link of what plays: to the clipboard, and into the world as a card. N4N0's menu's own, `Target::CopyPlaying` and `Target::DropPlaying`.
+    PlayingLink(Target),
     /// What the computer plays.
     PlayPause,
     Previous,
@@ -189,6 +194,10 @@ pub enum Action {
     /// The computer's volume up or down, and muted or not.
     Volume(bool),
     Mute,
+    /// A microphone made Windows' default.
+    MicDefault(usize),
+    /// Back to the last screen.
+    Back,
     /// The sheet goes.
     CloseSheet,
     /// The parts go for this opening of VRChat's menu.
@@ -198,7 +207,7 @@ pub enum Action {
 }
 
 /// What is on the sheet.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Sheet {
     All,
     Pictures,
@@ -216,6 +225,8 @@ pub enum Sheet {
     Settings,
     /// Tracking smoothing, in milliseconds.
     Tracking,
+    /// Microphones: what each hears, and which is used for what.
+    Mics,
 }
 
 /// What can be chosen on the sheet of settings.
@@ -234,6 +245,11 @@ pub enum Pick {
     Sound(bool),
     /// The next place in the language picker, or the one before.
     Language(bool),
+    /// Your voice in recordings, on or off.
+    VoiceOn(bool),
+    /// The next microphone for that, or the one before; and for N4N0.
+    VoiceMic(bool),
+    N4n0Mic(bool),
     /// Tracking smoothing on or off.
     Smoothing(bool),
     /// Along a smoothing slider.
@@ -470,6 +486,12 @@ pub struct Facts {
     pub beside_wing: bool,
     /// The Quick Menu's parts are in a strip under it: its caption lies under that.
     pub strip_caption: bool,
+    /// The page of microphones: each and how much it hears, the settings' list by id and name, and what is chosen.
+    pub mics: Vec<MicTile>,
+    pub mic_choices: Vec<(String, String)>,
+    pub voice_on: bool,
+    pub voice_mic: String,
+    pub n4n0_mic: String,
     /// What the sheet of settings shows: as chosen, and the sound device for VR, by name.
     pub orbit: OrbitSettings,
     pub vr_output: Option<String>,
@@ -490,6 +512,10 @@ pub struct Facts {
     pub sheet: Option<Sheet>,
     pub sheet_title: String,
     /// Calls can be made here, a state chosen, a light set.
+    /// What plays has a link to copy, and it was copied where a card can be dropped.
+    pub can_copy_playing: bool,
+    pub can_drop_playing: bool,
+    pub playing_link_copied: bool,
     pub can_call: bool,
     pub can_states: bool,
     pub can_light: bool,
@@ -518,6 +544,16 @@ pub struct Item {
 /// What an item is drawn as.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Look {
+    /// A microphone and how much it hears.
+    MicTile(usize),
+    /// The microphone chosen for your voice, or for N4N0.
+    MicName(bool),
+    /// Opens the page of microphones, from Settings.
+    MicsOpen,
+    /// Copy link, in the accent, or Drop link.
+    PlayingLink { copy: bool },
+    /// The head's way back.
+    HeadBack,
     /// A smoothing slider.
     SmoothingBar(Smoothed),
     /// What plays in a strip's tile: its picture, its play or pause.
@@ -658,7 +694,7 @@ pub fn items(zone: Zone, size: Vec2, facts: &Facts) -> Vec<Item> {
         Zone::SheetHint => Vec::new(),
         Zone::SheetPeek => vec![Item { action: Action::Peek, rect: whole, look: Look::PeekWord }],
         Zone::SheetBack => {
-            let mut out = vec![Item { action: Action::CloseSheet, rect: r(w - 40.0, 7.0, 30.0, 30.0), look: Look::Close }];
+            let mut out = vec![Item { action: Action::CloseSheet, rect: r(w - 40.0, 7.0, 30.0, 30.0), look: Look::Close }, Item { action: Action::Back, rect: r(BACK_AT, 7.0, 30.0, 30.0), look: Look::HeadBack }];
             out.extend(head_tabs(facts).0);
             // While a capture shows around the person: it is one press from gone, wherever on the sheet.
             if facts.view_showing {
@@ -707,6 +743,9 @@ fn accessories(facts: &Facts) -> Vec<(Action, &'static str, &'static str)> {
     small
 }
 
+/// Where every sheet has its Back.
+const BACK_AT: f32 = 8.0;
+
 /// The tools along a sheet's head, where the wing is not beside it, and where they end. Their names where there is room; with something else to say in the head, on a screen, icons but for the one that is open.
 fn head_tabs(facts: &Facts) -> (Vec<Item>, f32) {
     const TABS: [(Action, &str, &str, f32); 6] = [
@@ -735,7 +774,8 @@ fn head_tabs(facts: &Facts) -> (Vec<Item>, f32) {
     // A page that is none of them says its name after them: on a screen they make it room, as small icons. In a headset they are named, and the name has what is left.
     let unnamed = !TABS.iter().any(|t| open(t.0));
     let compact = busy || (unnamed && facts.desktop);
-    let mut x = 10.0;
+    // After the Back, which is in this place on every sheet.
+    let mut x = BACK_AT + 30.0 + 6.0;
     let mut out = Vec::new();
     for (action, icon, label, wide) in TABS {
         let on = open(action);
@@ -916,6 +956,7 @@ fn sheet_page_items(sheet: Sheet, facts: &Facts) -> Vec<Item> {
         }
         Sheet::Settings => settings_items(facts),
         Sheet::Tracking => tracking_items(facts),
+        Sheet::Mics => mic_items(facts),
         Sheet::Menu | Sheet::Worlds => Vec::new(),
     }
 }
@@ -1190,6 +1231,11 @@ fn minutes(seconds: u32) -> String {
 }
 
 /// What plays's controls, on its panel on All tools: nothing about it needs a page of its own.
+pub(super) use mic_sheet::mic_after;
+
+const PLAYING_LINK_W: f32 = 118.0;
+const PLAYING_LINK_H: f32 = 36.0;
+
 fn now_playing_controls(panel: Rect, facts: &Facts) -> Vec<Item> {
     let mut out = Vec::new();
     let x = panel.left() + panel.height();
@@ -1204,6 +1250,14 @@ fn now_playing_controls(panel: Rect, facts: &Facts) -> Vec<Item> {
     }
     if facts.music_times.is_some_and(|t| t.1 > 0) {
         out.push(Item { action: if facts.can_seek { Action::Timeline } else { Action::Idle }, rect: timeline_rect(panel), look: Look::Timeline });
+    }
+    // In its corner, off what it says: its link once it is known, and what puts it in the world once it is copied.
+    if facts.can_copy_playing {
+        let copy = Rect::from_min_size(pos2(panel.right() - 12.0 - PLAYING_LINK_W, panel.top() + 10.0), vec2(PLAYING_LINK_W, PLAYING_LINK_H));
+        out.push(Item { action: Action::PlayingLink(Target::CopyPlaying), rect: copy, look: Look::PlayingLink { copy: true } });
+        if facts.can_drop_playing {
+            out.push(Item { action: Action::PlayingLink(Target::DropPlaying), rect: copy.translate(vec2(-PLAYING_LINK_W - 6.0, 0.0)), look: Look::PlayingLink { copy: false } });
+        }
     }
     if let Some((_, muted)) = facts.volume {
         let right = panel.right() - 16.0;
@@ -1347,6 +1401,7 @@ fn sheet_says(facts: &Facts) -> &'static str {
         Some(Sheet::Talk) => tr("Press the button, and ask N4N0 anything."),
         Some(Sheet::Settings) => tr("How these menus lie, move, sound and look."),
         Some(Sheet::Tracking) => tr("Less jitter, a little more lag, in milliseconds."),
+        Some(Sheet::Mics) => tr("Speak: the one that moves is the one hearing you."),
         Some(Sheet::All) => tr("Everything Orbiters can do from here."),
         _ => tr("Orbiters, beside VRChat's menu."),
     }
@@ -1361,6 +1416,7 @@ fn sheet_mark(facts: &Facts) -> (&'static str, Color32) {
         Some(Sheet::Results) => (icons::YOUTUBE_LOGO, tool_tint(Action::Page(Target::YouTube))),
         Some(Sheet::Talk) => (icons::MICROPHONE, look::LABEL),
         Some(Sheet::Settings) => (icons::GEAR_SIX, look::LABEL),
+        Some(Sheet::Mics) => (icons::MICROPHONE, look::LABEL),
         Some(Sheet::Tracking) => (icons::VIRTUAL_REALITY, tool_tint(Action::Page(Target::Tracking))),
         Some(Sheet::All) => (icons::SQUARES_FOUR, look::LABEL),
         Some(Sheet::Menu) if facts.sheet_title == "YouTube" => (icons::YOUTUBE_LOGO, tool_tint(Action::Page(Target::YouTube))),
@@ -1457,6 +1513,10 @@ pub fn caption(action: Action, facts: &Facts) -> Option<(String, String)> {
         Action::Talk if facts.n4n0 => (tr("Ask N4N0").into(), tr("Your assistant in VRChat: talk to it, and see all it said.").into()),
         Action::Talk => (tr("Ask N4N0").into(), tr("Turn N4N0 on in Orbiters first.").into()),
         Action::OpenApp => (tr("Open Orbiters").into(), tr("The full app, on your computer.").into()),
+        Action::Back => (tr("Back").into(), tr("To the last screen.").into()),
+        Action::MicDefault(_) => (tr("Your microphones").into(), tr("Press one to make it Windows' default.").into()),
+        Action::PlayingLink(Target::DropPlaying) => (tr("Drop link").into(), tr("A card of it in the world, for anyone to take.").into()),
+        Action::PlayingLink(_) => (tr("Copy link").into(), tr("The link of what plays, to paste anywhere.").into()),
         Action::CloseSheet => (tr("Close").into(), tr("Back to VRChat's menu.").into()),
         Action::Hide => (tr_ctx("menu tiles", "Hide").into(), tr("Hides these until VRChat's menu opens again.").into()),
         Action::Idle => return None,
@@ -1715,6 +1775,9 @@ pub fn paint_sheet(p: &Painter, sheet: Sheet, facts: &Facts, hover: Option<usize
     }
     if sheet == Sheet::Settings {
         draw_settings(p, facts);
+    }
+    if sheet == Sheet::Mics {
+        draw_mics(p, facts);
     }
     if sheet == Sheet::Tracking {
         draw_tracking(p, facts);
@@ -2078,6 +2141,30 @@ fn draw(p: &Painter, zone: Zone, item: &Item, facts: &Facts, hovered: bool, pres
                 }
             }
         }
+        Look::MicTile(i) => mic_sheet::draw_tile(p, rect, facts.mics.get(i), hovered, pressed),
+        Look::MicName(voice) => draw_stepper_name(p, rect, icons::MICROPHONE, mic_sheet::chosen_name(facts, voice)),
+        Look::MicsOpen => {
+            p.rect_filled(rect, look::radius(14.0), if hovered { look::TILE_HOVER } else { look::TILE });
+            widgets::icon(p, pos2(rect.left() + 30.0, rect.center().y), icons::MICROPHONE, 24.0, look::LABEL);
+            let font = look::font(19.0, weight::SEMIBOLD);
+            p.text(pos2(rect.left() + 56.0, rect.center().y), Align2::LEFT_CENTER, fit(p, tr("Your microphones"), &font, rect.width() - 100.0), font, look::LABEL);
+            widgets::icon(p, pos2(rect.right() - 28.0, rect.center().y), icons::CARET_RIGHT, 22.0, look::LABEL);
+        }
+        Look::PlayingLink { copy } => {
+            let drawn = if pressed { rect.shrink(1.5) } else { rect };
+            let radius = look::radius(drawn.height() / 2.0);
+            // Copy link is in the accent, as Enzo asked of it elsewhere.
+            let (fill, ink) = if copy { (look::accent(), look::ON_ACCENT) } else { (if hovered { look::TILE_HOVER } else { look::TILE }, look::LABEL) };
+            p.rect_filled(drawn, radius, if copy && hovered { theme::mix(fill, Color32::WHITE, 0.12) } else { fill });
+            let words = match (copy, facts.can_drop_playing || facts.playing_link_copied) {
+                (true, true) => tr("Link copied"),
+                (true, false) => tr("Copy link"),
+                (false, _) => tr("Drop link"),
+            };
+            widgets::icon(p, pos2(drawn.left() + 18.0, drawn.center().y), if copy { icons::LINK_SIMPLE } else { icons::HAND_GRABBING }, 16.0, ink);
+            let font = look::font(13.5, weight::SEMIBOLD);
+            p.text(pos2(drawn.left() + 30.0, drawn.center().y), Align2::LEFT_CENTER, fit(p, words, &font, drawn.width() - 38.0), font, ink);
+        }
         Look::NowPlaying => {
             let tint = theme::VIOLET;
             let radius = look::radius(look::TILE_RADIUS + 4.0);
@@ -2097,11 +2184,14 @@ fn draw(p: &Painter, zone: Zone, item: &Item, facts: &Facts, hovered: bool, pres
             let x = rect.left() + rect.height();
             let room = rect.right() - x - 14.0;
             let font = look::font(13.0, weight::SEMIBOLD);
-            p.text(pos2(x, rect.top() + 20.0), Align2::LEFT_CENTER, tr("Now playing on this computer"), font, tint);
+            // Its label gives way to the link's buttons in the corner; its title is under them.
+            let buttons = if facts.can_drop_playing { PLAYING_LINK_W * 2.0 + 6.0 } else if facts.can_copy_playing { PLAYING_LINK_W } else { 0.0 };
+            p.text(pos2(x, rect.top() + 20.0), Align2::LEFT_CENTER, fit(p, tr("Now playing on this computer"), &font, room - buttons - 8.0), font, tint);
             match &facts.music {
                 Some((title, _)) => {
                     let font = look::font(23.0, weight::BOLD);
-                    p.text(pos2(x, rect.top() + 44.0), Align2::LEFT_CENTER, fit(p, title, &font, room), font, look::LABEL);
+                    // Clear of the link's buttons in the corner.
+                    p.text(pos2(x, rect.top() + 44.0), Align2::LEFT_CENTER, fit(p, title, &font, room - buttons), font, look::LABEL);
                     let font = look::font(15.5, weight::MEDIUM);
                     p.text(pos2(x, rect.top() + 68.0), Align2::LEFT_CENTER, fit(p, &facts.music_by, &font, room), font, look::MUTED);
                 }
@@ -2579,6 +2669,10 @@ fn draw(p: &Painter, zone: Zone, item: &Item, facts: &Facts, hovered: bool, pres
             let left = rect.center().x - (wide + 22.0) / 2.0;
             widgets::icon(p, pos2(left + 8.0, rect.center().y), if facts.hidden { icons::EYE } else { icons::EYE_SLASH }, 16.0, look::LABEL);
             p.text(pos2(left + 22.0, rect.center().y), Align2::LEFT_CENTER, words, font, look::LABEL);
+        }
+        Look::HeadBack => {
+            p.circle_filled(rect.center(), rect.width() / 2.0, if pressed { look::TILE_DOWN } else if hovered { look::TILE_HOVER } else { look::TILE });
+            widgets::icon(p, rect.center(), icons::ARROW_LEFT, rect.width() * 0.6, look::LABEL);
         }
         Look::Close => {
             p.circle_filled(rect.center(), rect.width() / 2.0, if hovered { look::TILE_HOVER } else { look::TILE });

@@ -2538,6 +2538,7 @@ pub fn target_state(menu: &Menu, target: Target) -> State {
         Target::StateApply(i) => i as usize >= menu.page_states().len(),
         Target::StateMark(i) => !menu.page_states().get(i as usize).is_some_and(|s| s.default),
         Target::StateSave => !menu.states_ready,
+        Target::Back => menu.back_on_the_sheet,
         Target::WatchVideo | Target::SaveVideo => menu.world_video.is_none() || !menu.pages.ten(),
         // The YouTube video the computer plays, once found; its Drop once its link was copied, where cards drop.
         Target::CopyPlaying => !menu.pages.ten() || menu.media.as_ref().is_none_or(|m| m.video.is_none()),

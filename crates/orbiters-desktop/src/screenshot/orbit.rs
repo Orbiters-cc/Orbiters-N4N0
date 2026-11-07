@@ -43,7 +43,9 @@ fn picture(placed: &Placed, facts: &Facts, hover: Option<usize>, pressed: Option
     for _ in 0..2 {
         canvas.paint(0.0, |p| panels::paint(p, placed.zone, logical, &facts, hover, pressed));
     }
-    let mut out = canvas.pixels().to_vec();
+    let from = canvas.pixels().to_vec();
+    let mut out = from.clone();
+    panels::finish_picture(&mut out, &from, px, px[0] as f32 / logical.x, [0, 0, px[0], px[1]]);
     if let Some(ring) = placed.zone.ring() {
         let mask = panels::cell_mask(ring, px, px[0] as f32 / logical.x);
         panels::apply_mask(&mut out, &mask, px, [0, 0, px[0], px[1]]);
@@ -524,6 +526,7 @@ pub(super) fn shots(out: &Path) -> anyhow::Result<()> {
     .collect();
     qm_scene("orbit-sheet-results", out, hd, &Facts { sheet: Some(Sheet::Results), sheet_title: "YouTube".into(), videos, videos_for: "rain sounds".into(), beside_wing: true, ..idle.clone() }, None, Some(Sheet::Results))?;
     results_over_the_game(out, hd, &idle)?;
+    settings_scenes(out, hd, &idle)?;
     qm_scene("orbit-sheet-talk", out, hd, &Facts { sheet: Some(Sheet::Talk), sheet_title: "Ask N4N0".into(), talk_lines: lines.clone(), beside_wing: true, ..idle.clone() }, None, Some(Sheet::Talk))?;
     qm_scene("orbit-sheet-talk-listening", out, hd, &Facts { sheet: Some(Sheet::Talk), sheet_title: "Ask N4N0".into(), talk_lines: lines, talk: crate::overlay::orbit::panels::TalkNow::Listening(0.6), beside_wing: true, ..idle.clone() }, None, Some(Sheet::Talk))?;
     qm_scene("orbit-sheet-countdown", out, hd, &Facts { sheet: Some(Sheet::Pictures), sheet_title: "Pictures".into(), ..counting.clone() }, None, Some(Sheet::Pictures))?;
@@ -558,7 +561,7 @@ fn qm_scene(name: &str, out: &Path, client: Vec2, facts: &Facts, hover: Option<u
     let mut ground = Canvas::new(w, h);
     stand_in_menu(Around::QuickMenu, client, &mut ground);
     let mut image = ground.pixels().to_vec();
-    for placed in zones::layout(Around::QuickMenu, client) {
+    for placed in zones::layout_as(Around::QuickMenu, client, facts.orbit.layout == orbiters_core::settings::OrbitLayout::Strip) {
         let hovered = hover.filter(|_| placed.zone == Zone::WingWorlds).map(|_| 0);
         let (pixels, px) = picture(&placed, facts, hovered, None);
         blit(&mut image, w, &pixels, px, placed.rect.min);
@@ -574,6 +577,29 @@ fn qm_scene(name: &str, out: &Path, client: Vec2, facts: &Facts, hover: Option<u
     let path = out.join(format!("{name}.png"));
     save_png(&path, &over_ground(&image, w, h))?;
     println!("{}", path.display());
+    Ok(())
+}
+
+/// The sheet of settings, and what it chooses: another accent, the retro look of one colour and with its pictures in theirs, the strip.
+fn settings_scenes(out: &Path, client: Vec2, idle: &Facts) -> anyhow::Result<()> {
+    use orbiters_core::settings::{MenuLook, OrbitLayout, OrbitSettings};
+    use panels::Sheet;
+    let sheet = |orbit: OrbitSettings, which: Sheet, title: &str| Facts { orbit, sheet: Some(which), sheet_title: title.into(), beside_wing: true, vr_output: Some("Speakers (Realtek Audio)".into()), ..idle.clone() };
+    let plain = OrbitSettings::default();
+    qm_scene("orbit-settings", out, client, &sheet(plain, Sheet::Settings, "Settings"), None, Some(Sheet::Settings))?;
+    let pink = OrbitSettings { accent: panels::SWATCHES[4], ..plain };
+    panels::set_style(&pink);
+    qm_scene("orbit-settings-accent", out, client, &sheet(pink, Sheet::Settings, "Settings"), None, Some(Sheet::Settings))?;
+    let mono = OrbitSettings { theme: MenuLook::Retro, ..plain };
+    panels::set_style(&mono);
+    qm_scene("orbit-settings-retro", out, client, &sheet(mono, Sheet::Settings, "Settings"), None, Some(Sheet::Settings))?;
+    qm_scene("orbit-retro-mono", out, client, &sheet(mono, Sheet::Pictures, "Pictures"), None, Some(Sheet::Pictures))?;
+    let colour = OrbitSettings { theme: MenuLook::Retro, retro_color: panels::SWATCHES[7], retro_pictures: true, ..plain };
+    panels::set_style(&colour);
+    qm_scene("orbit-retro-colour", out, client, &sheet(colour, Sheet::Pictures, "Pictures"), None, Some(Sheet::Pictures))?;
+    panels::set_style(&plain);
+    let strip = OrbitSettings { layout: OrbitLayout::Strip, ..plain };
+    qm_scene("orbit-strip", out, client, &Facts { orbit: strip, strip_caption: true, hint: Some(("Your tools", "Worlds in 3D, videos, instances and 3D pictures.")), ..idle.clone() }, None, None)?;
     Ok(())
 }
 
@@ -634,5 +660,8 @@ fn sheet_picture(sheet: panels::Sheet, facts: &Facts, px: [u32; 2]) -> Vec<u8> {
     for _ in 0..2 {
         canvas.paint(0.0, |p| panels::paint_sheet(p, sheet, &facts, None, None));
     }
-    canvas.pixels().to_vec()
+    let from = canvas.pixels().to_vec();
+    let mut out = from.clone();
+    panels::finish_picture(&mut out, &from, px, px[0] as f32 / 1024.0, [0, 0, px[0], px[1]]);
+    out
 }

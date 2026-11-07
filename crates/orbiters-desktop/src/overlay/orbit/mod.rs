@@ -175,6 +175,8 @@ impl Panel {
             let (a, b) = ((y * w + changed[0]) as usize * 4, (y * w + changed[2].min(w)) as usize * 4);
             self.out[a..b].copy_from_slice(&pixels[a..b]);
         }
+        let zoom = self.px[0] as f32 / self.logical.x;
+        panels::finish_picture(&mut self.out, pixels, self.px, zoom, changed);
         if let Some(mask) = &self.mask {
             panels::apply_mask(&mut self.out, mask, self.px, changed);
         }
@@ -639,6 +641,11 @@ pub struct Panels {
     /// What play or pause was last asked, and when; the place held along what plays; where it was let go; where it was moved to, and when.
     play_asked: Option<(bool, Instant)>,
     seeking: Option<f32>,
+    /// The sound devices to choose from on the sheet of settings, and those on their way.
+    audio_outputs: Vec<orbiters_core::settings::AudioEndpoint>,
+    audio_outputs_coming: Option<mpsc::Receiver<Vec<orbiters_core::settings::AudioEndpoint>>>,
+    /// What was last taken as how the parts look.
+    style_seen: Option<(orbiters_core::settings::OrbitSettings, Option<String>)>,
     /// A capture turning on the sheet, on the desktop: its view, its newest picture not painted yet, what it has been painted with, and the hand on it.
     sheet_view: Option<sheet_view::SheetView>,
     view_frame: Option<sheet_view::Frame>,
@@ -708,6 +715,9 @@ impl Panels {
             talk_had: 0,
             play_asked: None,
             seeking: None,
+            audio_outputs: Vec::new(),
+            audio_outputs_coming: None,
+            style_seen: None,
             sheet_view: None,
             view_frame: None,
             view_state: None,
@@ -1042,6 +1052,25 @@ impl Panels {
                 host.effects(vec![Effect::Media(orbiters_n4n0_core::menu::MediaCommand::Seek(seconds))], snap, &self.backend);
             }
         }
+        // What is chosen in Settings: from now on, all of it painted again.
+        let style = (snap.settings.orbit, snap.settings.vr_audio.output.as_ref().map(|e| e.name.clone()));
+        if self.style_seen.as_ref() != Some(&style) {
+            panels::set_style(&style.0);
+            self.style_seen = Some(style);
+            for panel in self.list.iter_mut().chain(self.takeover.iter_mut()) {
+                panel.dirty = true;
+                panel.canvas.invalidate();
+            }
+            self.stage.canvas.invalidate();
+            self.stage.host.dirty = true;
+            if let Some(worlds) = self.stage.worlds.as_mut() {
+                worlds.repaint();
+            }
+        }
+        if let Some(listed) = self.audio_outputs_coming.as_ref().and_then(|rx| rx.try_recv().ok()) {
+            self.audio_outputs = listed;
+            self.audio_outputs_coming = None;
+        }
         // A world's capture turning on its side panel: the same.
         if self.open.is_none() || self.facts.sheet != Some(Sheet::Worlds) {
             if let Some(worlds) = self.stage.worlds.as_mut() {
@@ -1221,6 +1250,8 @@ impl Panels {
             world_video_picture: if self.facts.sheet == Some(Sheet::All) { menu.world_video.as_ref().and_then(|v| orbiters_n4n0_core::videos::youtube_id(&v.url)).and_then(|id| self.stage.host.picture(&id, false)) } else { None },
             strip_caption: self.list.iter().any(|p| p.zone == Zone::QmStrip),
             tiles_hidden: self.hidden,
+            orbit: snap.settings.orbit,
+            vr_output: snap.settings.vr_audio.output.as_ref().map(|e| e.name.clone()),
             // Only what is on the page: they change as it is made and as time goes, and there may be tens of thousands.
             recent_words: self
                 .takeover
@@ -1525,6 +1556,35 @@ impl Panels {
         self.gallery_dirty();
     }
 
+    /// Something chosen on the sheet of settings: saved as any setting is, in a field or two of its own, and seen at once.
+    fn set(&mut self, pick: panels::Pick, snap: &Snapshot) {
+        use orbiters_core::settings::MenuLook;
+        let retro = snap.settings.orbit.theme == MenuLook::Retro;
+        let colour = |c: [u8; 3]| if retro { serde_json::json!({ "orbit": { "retro_color": c } }) } else { serde_json::json!({ "orbit": { "accent": c } }) };
+        let patch = match pick {
+            panels::Pick::Layout(layout) => serde_json::json!({ "orbit": { "layout": layout } }),
+            panels::Pick::Motion(motion) => serde_json::json!({ "orbit": { "vr_motion": motion } }),
+            panels::Pick::Theme(theme) => serde_json::json!({ "orbit": { "theme": theme } }),
+            panels::Pick::Pictures(keep) => serde_json::json!({ "orbit": { "retro_pictures": keep } }),
+            panels::Pick::Swatch(i) => colour(panels::SWATCHES[i]),
+            panels::Pick::Hue => {
+                let Some(p) = self.sheet_pointer else { return };
+                colour(panels::hue_at(p.x))
+            }
+            panels::Pick::Sound(after) => {
+                let now = snap.settings.vr_audio.output.as_ref();
+                let at = now.and_then(|e| self.audio_outputs.iter().position(|o| o.id == e.id || o.name == e.name));
+                let count = self.audio_outputs.len() + 1;
+                // Leaving it as it is, then each device, round.
+                let place = at.map_or(0, |i| i + 1);
+                let next = if after { (place + 1) % count } else { (place + count - 1) % count };
+                let output = next.checked_sub(1).and_then(|i| self.audio_outputs.get(i));
+                serde_json::json!({ "vr_audio": { "output": output } })
+            }
+        };
+        self.backend.patch_settings(patch);
+    }
+
     /// What a press on `action` does.
     fn act(&mut self, action: Action, snap: &Snapshot, out: &mut Pressed) {
         out.clicked = action != Action::Idle;
@@ -1691,6 +1751,16 @@ impl Panels {
                 host.effects(effects, snap, &self.backend);
             }
             Action::OpenApp => self.backend.show_window(),
+            Action::Settings => {
+                self.open_sheet(Sheet::Settings, "Settings", snap);
+                // The sound devices there are, read off this thread: it is COM, and may take a moment.
+                let (tx, rx) = mpsc::channel();
+                self.audio_outputs_coming = Some(rx);
+                let _ = std::thread::Builder::new().name("orbit-sound-devices".into()).spawn(move || {
+                    let _ = tx.send(crate::audio_devices::list(crate::audio_devices::Flow::Output).unwrap_or_default());
+                });
+            }
+            Action::Set(pick) => self.set(pick, snap),
             Action::CloseSheet => self.close_sheet(),
             Action::Hide => {
                 self.hidden = true;
@@ -1943,6 +2013,8 @@ impl Stage {
                 let (a, b) = ((y * w + changed[0]) as usize * 4, (y * w + changed[2].min(w)) as usize * 4);
                 panel.out[a..b].copy_from_slice(&pixels[a..b]);
             }
+            let zoom = panel.px[0] as f32 / panel.logical.x;
+            panels::finish_picture(&mut panel.out, pixels, panel.px, zoom, changed);
             panel.painted = true;
             show(panel, changed);
         }

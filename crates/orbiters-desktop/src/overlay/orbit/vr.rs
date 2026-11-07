@@ -337,6 +337,13 @@ enum Placing {
     At(Matrix34),
 }
 
+/// The Quick Menu's parts as a row under its tabs, its words under that: wherever the hand, it is on neither side.
+pub fn strip_places() -> Vec<Placed> {
+    let mut words = zones::in_units(Zone::QmCaption);
+    words.rect = egui::Rect::from_min_max(egui::pos2(-262.0, 326.0), egui::pos2(262.0, 364.0));
+    vec![zones::in_units(Zone::QmStrip), words]
+}
+
 /// The Quick Menu's parts on this hand. The wing lies on the side of the menu away from the hand that holds it: on the right hand it is on the left (as Enzo laid it there). The sheet is not one of
 /// these: it stays on the menu.
 pub fn quick_menu_places(hand: usize) -> Vec<Placed> {
@@ -690,6 +697,7 @@ impl OrbitVr {
         let grips = if self.tune.align && cx.input_read { cx.actions.grabs(cx.steamvr) } else { [false; 2] };
         self.align(open, grips, &devices, &poses, settings.vr_size);
         let mut places: Vec<Placed> = match (menu, open) {
+            (Some(Around::QuickMenu), Open::QuickMenu(_)) if settings.layout == orbiters_core::settings::OrbitLayout::Strip => strip_places(),
             (Some(Around::QuickMenu), Open::QuickMenu(hand)) => quick_menu_places(hand),
             (Some(m), _) => Zone::around(m).iter().map(|z| zones::in_units(*z)).collect(),
             (None, _) => Vec::new(),

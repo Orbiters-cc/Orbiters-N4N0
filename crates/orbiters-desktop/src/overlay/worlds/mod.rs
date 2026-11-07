@@ -454,6 +454,11 @@ impl Worlds {
         self.panel.dirty = true;
     }
 
+    /// All of it painted again: how it looks changed.
+    pub fn repaint(&mut self) {
+        self.panel.dirty = true;
+    }
+
     /// What turns on the side panel goes, with all it holds.
     pub fn stop_live(&mut self) {
         if self.live.take().is_some() {

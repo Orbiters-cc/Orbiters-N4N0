@@ -94,7 +94,11 @@ A press on a world opens its details on a side panel beside the list, which narr
 
 ## A sheet's head
 
-Where no wing lies beside it (from the wheel, in a narrow window, with its tiles hidden), its tools are tabs (`head_tabs`): from any sheet to any other. Beside the wing they would only repeat it, and the head says the sheet's name. All tools has no tabs anywhere, as its large tiles are the same things: on a screen its head holds its accessories instead (`head_tools`), and the large tiles have the page; while the head has something to say, it says that. A headset has more accessories than a head has room for: they stay on the page. On a screen they have their names, and while the head has something to say, icons but for the open one. In a headset they are named or are not there.
+Where no wing lies beside it (from the wheel, in a narrow window, with its tiles hidden), its tools are tabs (`head_tabs`): from any sheet to any other. Beside the wing they would only repeat it, and the head says the sheet's name. All tools has no tabs anywhere, as its large tiles are the same things. Who comes to it has the main features on the wing already and came for the rest: the accessories have two full rows of tiles that say what they do, and the main features stay the largest.
+
+## The sheet of settings
+
+Opened from All tools: where the tiles lie (`OrbitLayout`: the wing, or the strip under the tabs, which the narrow window has anyway), whether they spring, the output Windows uses when SteamVR starts (`vr_audio.output`, the same setting as the app's page), and the look (`OrbitSettings::theme`). Modern takes an accent (`look::accent()`, for everything of these parts and the world's panel). Retro takes one colour: `finish_picture` puts what was painted through a ramp of it, with the retro menu's monospace type and hard corners, and leaves pictures alone if they keep their colours (`keep_colour`, called where a picture is drawn). It is not N4N0's retro drawing: there is no line work, capitals or dot grid, and N4N0's own pages follow their own setting's drawing, under the ramp. The colours to choose from always keep theirs. All saved as any setting is, by a patch.
 
 ## VRChat's tooltips under a sheet
 

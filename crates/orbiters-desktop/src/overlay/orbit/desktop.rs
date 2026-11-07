@@ -156,7 +156,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         };
         let size = client_size(window);
         let origin = client_origin(window);
-        let places = open.map_or_else(Vec::new, |menu| zones::layout(menu, size));
+        let places = open.map_or_else(Vec::new, |menu| zones::layout_as(menu, size, snap.settings.orbit.layout == orbiters_core::settings::OrbitLayout::Strip));
         panels.takeover_place = zones::place(Zone::Takeover, size);
         panels.back_place = zones::place(Zone::SheetBack, size);
         panels.hint_place = zones::place(Zone::SheetHint, size);

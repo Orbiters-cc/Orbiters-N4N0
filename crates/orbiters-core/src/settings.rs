@@ -165,6 +165,17 @@ pub enum VrMotion {
     Matched,
 }
 
+/// Where the panels around the Quick Menu lie.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OrbitLayout {
+    /// A wing of tiles beside it.
+    #[default]
+    Wing,
+    /// A row of tiles under its tabs.
+    Strip,
+}
+
 /// The panels around VRChat's own menus (`overlay::orbit`).
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -181,6 +192,16 @@ pub struct OrbitSettings {
     /// How smoothly what is rigid follows the hand on the Quick Menu, and on the wheel: the time constants of their filters, in milliseconds. Enzo, in the headset: VRChat's own are about 35 ms and 20 ms. VRChat's menu moves as if smoothed, which no delay matched (Enzo: "even at 1.5 frames ahead").
     pub vr_smoothing_quick_menu_ms: f32,
     pub vr_smoothing_wheel_ms: f32,
+    /// Where they lie around the Quick Menu.
+    pub layout: OrbitLayout,
+    /// How they look: Orbiters' own, or as N4N0's retro menu.
+    pub theme: MenuLook,
+    /// The modern look's accent.
+    pub accent: [u8; 3],
+    /// The retro look's one colour.
+    pub retro_color: [u8; 3],
+    /// The retro look leaves pictures in their colours.
+    pub retro_pictures: bool,
 }
 
 impl OrbitSettings {
@@ -204,7 +225,7 @@ impl OrbitSettings {
 
 impl Default for OrbitSettings {
     fn default() -> Self {
-        Self { display: MenuDisplay::AvatarScreen, wheel: true, quick_menu: true, vr_size: 1.0, vr_motion: VrMotion::Springy, vr_smoothing_quick_menu_ms: 35.0, vr_smoothing_wheel_ms: 20.0 }
+        Self { layout: OrbitLayout::Wing, theme: MenuLook::Modern, accent: [0x00, 0xda, 0x6d], retro_color: [0x2b, 0xe3, 0x6a], retro_pictures: false, display: MenuDisplay::AvatarScreen, wheel: true, quick_menu: true, vr_size: 1.0, vr_motion: VrMotion::Springy, vr_smoothing_quick_menu_ms: 35.0, vr_smoothing_wheel_ms: 20.0 }
     }
 }
 

@@ -28,6 +28,7 @@ use orbiters_core::maps::{FoundBy, WorldPage, WorldPerformance, WorldPicture};
 use orbiters_n4n0_core::feedback::{CommentRow, FeedbackAsk, FeedbackView, LabelCount, WorldFeedback};
 use orbiters_n4n0_core::menu::KeyboardLayout;
 use orbiters_ui::theme::{self, weight, Txt};
+use super::super::orbit::panels::look as orbit_look;
 use orbiters_ui::{icons, widgets};
 use std::collections::HashMap;
 
@@ -428,7 +429,7 @@ impl<'a> Data<'a> {
 /// How smoothly VRChat runs there, as the website says it (share of the headset's refresh rate).
 pub fn verdict(p: &WorldPerformance) -> (&'static str, Color32) {
     if p.ratio >= 0.85 {
-        ("smooth", theme::ACCENT)
+        ("smooth", orbit_look::accent())
     } else if p.ratio >= 0.6 {
         ("fair", theme::WARN)
     } else {
@@ -575,17 +576,17 @@ fn vr_card(p: &Painter, rect: Rect, entry: &Entry, d: &Data, hover: bool, presse
     picture(p, thumb, (d.thumb)(entry), &entry.world_id, CornerRadius { nw: 16, ne: 16, sw: 0, se: 0 }, 1.0);
     let status = d.status;
     let chip = if status.current == Some(entry.id) {
-        Some((if !status.shown { "Loading" } else if status.small { "Small" } else { "Around you" }, if status.shown { theme::ACCENT } else { theme::WARN }))
+        Some((if !status.shown { "Loading" } else if status.small { "Small" } else { "Around you" }, if status.shown { orbit_look::accent() } else { theme::WARN }))
     } else if entry.capture {
-        Some(("3D", theme::ACCENT))
+        Some(("3D", orbit_look::accent()))
     } else {
         None
     };
     if let Some((word, tint)) = chip {
-        let galley = p.layout_job(Txt::new(word, 16.5).weight(weight::BOLD).color(theme::ON_ACCENT).job(f32::INFINITY));
+        let galley = p.layout_job(Txt::new(word, 16.5).weight(weight::BOLD).color(orbit_look::on_accent()).job(f32::INFINITY));
         let back = Rect::from_min_size(thumb.min + vec2(8.0, 8.0), vec2(galley.size().x + 18.0, 28.0));
         p.rect_filled(back, CornerRadius::same(14), tint);
-        p.galley(pos2(back.min.x + 9.0, back.center().y - galley.size().y / 2.0), galley, theme::ON_ACCENT);
+        p.galley(pos2(back.min.x + 9.0, back.center().y - galley.size().y / 2.0), galley, orbit_look::on_accent());
     }
     // Its whole name, on two lines where it takes them: worlds are told apart by it.
     let mut name = Txt::new(entry.name.clone(), 18.5).weight(weight::SEMIBOLD).color(theme::FG).job(rect.width() - 18.0);
@@ -593,7 +594,7 @@ fn vr_card(p: &Painter, rect: Rect, entry: &Entry, d: &Data, hover: bool, presse
     let galley = p.layout_job(name);
     p.galley(pos2(rect.min.x + 9.0, rect.max.y - 28.0 - galley.size().y / 2.0), galley, theme::FG);
     if selected {
-        p.rect_stroke(rect, CornerRadius::same(16), Stroke::new(3.0, theme::ACCENT), StrokeKind::Inside);
+        p.rect_stroke(rect, CornerRadius::same(16), Stroke::new(3.0, orbit_look::accent()), StrokeKind::Inside);
     }
 }
 
@@ -660,8 +661,9 @@ fn draw_live(p: &Painter, hero: Rect, live: &Live) {
     let points: Vec<Pos2> = live.plate.iter().map(|uv| pos2(hero.left() + uv[0] * hero.width(), hero.top() + uv[1] * hero.height())).collect();
     if points.len() > 2 {
         inside.add(egui::Shape::convex_polygon(points.clone(), Color32::from_rgb(25, 28, 34), Stroke::NONE));
-        inside.add(egui::Shape::closed_line(points, Stroke::new(2.0, theme::alpha(theme::ACCENT, 0.85))));
+        inside.add(egui::Shape::closed_line(points, Stroke::new(2.0, theme::alpha(orbit_look::accent(), 0.85))));
     }
+    super::super::orbit::panels::keep_colour(p, hero);
     p.add(egui::epaint::RectShape::filled(hero, corner, Color32::WHITE).with_texture(id, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0))));
     let txt = Txt::new("Drag to turn it", 14.5).weight(weight::MEDIUM).color(Color32::WHITE);
     let galley = p.layout_job(txt.job(f32::INFINITY));
@@ -1421,7 +1423,7 @@ impl Panel {
                 let results = self.results(d);
                 field(p, field_rect(), &self.query, "Search VRChat worlds", true, state(Target::Field), time, 1.0);
                 let (h, pr) = state(Target::Done);
-                pill_button(p, Rect::from_min_size(pos2(824.0, 24.0), vec2(168.0, 56.0)), Some(icons::MAGNIFYING_GLASS), "Done", theme::ACCENT, theme::ON_ACCENT, h, pr, 1.0);
+                pill_button(p, Rect::from_min_size(pos2(824.0, 24.0), vec2(168.0, 56.0)), Some(icons::MAGNIFYING_GLASS), "Done", orbit_look::accent(), orbit_look::on_accent(), h, pr, 1.0);
                 for (t, rect) in &targets {
                     if let Target::Card(i) = *t {
                         let (h, pr) = state(*t);
@@ -1529,7 +1531,7 @@ impl Panel {
         // What is browsed (searching: every world, 3D only), the order, the labels kept to.
         if self.searching(d) {
             let (h, pr) = state(Target::Has3d);
-            let (bg, fg) = if self.has_3d { (theme::alpha(theme::ACCENT, 0.18), theme::ACCENT) } else { (if h { RAISED } else { SURFACE }, theme::FG_2) };
+            let (bg, fg) = if self.has_3d { (theme::alpha(orbit_look::accent(), 0.18), orbit_look::accent()) } else { (if h { RAISED } else { SURFACE }, theme::FG_2) };
             chip_button(p, ONLY_3D, icons::CUBE, "3D only", bg, fg, pr, 1.0);
             let from = match d.status.list.source {
                 Some(FoundBy::Vrchat) => "Every VRChat world, from your VRChat account",
@@ -1546,7 +1548,7 @@ impl Panel {
             }
         }
         let (h, pr) = state(Target::Sort(self.sort.next()));
-        let (bg, fg) = if self.sort != Sort::Newest { (theme::alpha(theme::ACCENT, 0.18), theme::ACCENT) } else { (if h { RAISED } else { SURFACE }, theme::FG_2) };
+        let (bg, fg) = if self.sort != Sort::Newest { (theme::alpha(orbit_look::accent(), 0.18), orbit_look::accent()) } else { (if h { RAISED } else { SURFACE }, theme::FG_2) };
         if side {
             chip_button(p, SIDE_SORT, self.sort.icon(), "", bg, fg, pr, 1.0);
         } else {
@@ -1570,7 +1572,7 @@ impl Panel {
             "Filter by label".to_string()
         };
         let lit = !self.labels.is_empty() || self.official || self.has_3d && !self.searching(d);
-        let (bg, fg) = if lit { (theme::alpha(theme::ACCENT, 0.18), theme::ACCENT) } else { (if h { RAISED } else { SURFACE }, theme::FG_2) };
+        let (bg, fg) = if lit { (theme::alpha(orbit_look::accent(), 0.18), orbit_look::accent()) } else { (if h { RAISED } else { SURFACE }, theme::FG_2) };
         if side {
             chip_button(p, SIDE_FILTER, icons::TAG, "", bg, fg, pr, 1.0);
         } else {
@@ -1596,15 +1598,15 @@ impl Panel {
                 p.rect_filled(slot, CornerRadius::same(20), if h { RAISED } else { SURFACE });
                 if side {
                     text(p, slot.center() - vec2(0.0, 13.0), Align2::CENTER_CENTER, Txt::new("Other worlds", 18.0).weight(weight::SEMIBOLD).color(theme::FG));
-                    text(p, slot.center() + vec2(0.0, 15.0), Align2::CENTER_CENTER, Txt::new("See them all \u{203a}", 16.0).weight(weight::SEMIBOLD).color(if h { theme::FG } else { theme::ACCENT }));
+                    text(p, slot.center() + vec2(0.0, 15.0), Align2::CENTER_CENTER, Txt::new("See them all \u{203a}", 16.0).weight(weight::SEMIBOLD).color(if h { theme::FG } else { orbit_look::accent() }));
                 } else {
-                    widgets::icon(p, slot.center() - vec2(0.0, 46.0), icons::GLOBE_HEMISPHERE_WEST, 40.0, theme::ACCENT);
+                    widgets::icon(p, slot.center() - vec2(0.0, 46.0), icons::GLOBE_HEMISPHERE_WEST, 40.0, orbit_look::accent());
                     text(p, slot.center() + vec2(0.0, 2.0), Align2::CENTER_CENTER, Txt::new("Other worlds", 20.0).weight(weight::SEMIBOLD).color(theme::FG));
                     text(p, slot.center() + vec2(0.0, 30.0), Align2::CENTER_CENTER, Txt::new("Every popular one, or search for any", 15.5).color(theme::FG_2));
-                    text(p, slot.center() + vec2(0.0, 60.0), Align2::CENTER_CENTER, Txt::new("See them all \u{203a}", 16.0).weight(weight::SEMIBOLD).color(if h { theme::FG } else { theme::ACCENT }));
+                    text(p, slot.center() + vec2(0.0, 60.0), Align2::CENTER_CENTER, Txt::new("See them all \u{203a}", 16.0).weight(weight::SEMIBOLD).color(if h { theme::FG } else { orbit_look::accent() }));
                 }
             } else {
-                text(p, pos2(if side { 652.0 } else { 992.0 }, heading + 11.0), Align2::RIGHT_CENTER, Txt::new("See them all \u{203a}", 15.5).weight(weight::SEMIBOLD).color(if h { theme::FG } else { theme::ACCENT }));
+                text(p, pos2(if side { 652.0 } else { 992.0 }, heading + 11.0), Align2::RIGHT_CENTER, Txt::new("See them all \u{203a}", 15.5).weight(weight::SEMIBOLD).color(if h { theme::FG } else { orbit_look::accent() }));
             }
         }
         // Few captures yet: the free space goes on to the worlds that are there.
@@ -1628,7 +1630,7 @@ impl Panel {
                     compact_card(p, *rect, results[i], d, h, pr, 1.0);
                     // The one whose details these are.
                     if self.selected == Some(results[i].id) {
-                        p.rect_stroke(*rect, CornerRadius::same(18), Stroke::new(2.5, theme::ACCENT), StrokeKind::Inside);
+                        p.rect_stroke(*rect, CornerRadius::same(18), Stroke::new(2.5, orbit_look::accent()), StrokeKind::Inside);
                     }
                 } else {
                     card(p, rect.translate(vec2(0.0, lift)), results[i], d, h, pr, appear);
@@ -1712,20 +1714,20 @@ impl Panel {
             // Through the hole: the capture. What says it can be taken lies on it, and brightens as a hand comes near.
             let near = status.small_near;
             let beat = if near { 0.65 + 0.35 * ((time * 6.0).sin() as f32 * 0.5 + 0.5) } else { 0.6 + 0.2 * ((time * 2.0).sin() as f32 * 0.5 + 0.5) };
-            p.rect_stroke(h, CornerRadius::same(14), Stroke::new(if near { 3.0 } else { 1.5 }, fade(theme::ACCENT, beat)), StrokeKind::Outside);
+            p.rect_stroke(h, CornerRadius::same(14), Stroke::new(if near { 3.0 } else { 1.5 }, fade(orbit_look::accent(), beat)), StrokeKind::Outside);
             let arm = 22.0;
             for (corner, x, y) in [(h.left_top(), 1.0, 1.0), (h.right_top(), -1.0, 1.0), (h.left_bottom(), 1.0, -1.0), (h.right_bottom(), -1.0, -1.0)] {
                 let at = corner + vec2(x * 7.0, y * 7.0);
-                let stroke = Stroke::new(if near { 4.0 } else { 3.0 }, fade(theme::ACCENT, beat));
+                let stroke = Stroke::new(if near { 4.0 } else { 3.0 }, fade(orbit_look::accent(), beat));
                 p.line_segment([at, at + vec2(x * arm, 0.0)], stroke);
                 p.line_segment([at, at + vec2(0.0, y * arm)], stroke);
             }
             let words = if near { "Close your grip" } else { "Grip to take it" };
             // Right under the hole, off the capture, and with nothing around it: this is done with a hand, and is no button for a laser.
-            let ink = if near { theme::ACCENT } else { theme::FG };
+            let ink = if near { orbit_look::accent() } else { theme::FG };
             let galley = p.layout_job(Txt::new(words, 21.0).weight(weight::BOLD).color(ink).job(f32::INFINITY));
             let left = VR_GRIP.max.x - galley.size().x - 34.0;
-            widgets::icon(p, pos2(left + 13.0, VR_GRIP.center().y), icons::HAND_GRABBING, 27.0, theme::ACCENT);
+            widgets::icon(p, pos2(left + 13.0, VR_GRIP.center().y), icons::HAND_GRABBING, 27.0, orbit_look::accent());
             p.galley(pos2(left + 34.0, VR_GRIP.center().y - galley.size().y / 2.0), galley, ink);
         } else {
             let hero = if vr { VR_HERO } else { SIDE_HERO };
@@ -1743,7 +1745,7 @@ impl Panel {
                 let (dot, label) = if let Some(e) = &status.error {
                     (theme::DANGER, e.clone())
                 } else if status.shown && status.stage.is_none() {
-                    (theme::ACCENT, if taken { "In your hand".to_string() } else if status.small { "Before you".to_string() } else { "Around you now".to_string() })
+                    (orbit_look::accent(), if taken { "In your hand".to_string() } else if status.small { "Before you".to_string() } else { "Around you now".to_string() })
                 } else {
                     (theme::WARN, status.stage.clone().unwrap_or_else(|| "Getting ready".into()))
                 };
@@ -1754,7 +1756,7 @@ impl Panel {
                 if let Some(f) = status.download {
                     let track = Rect::from_min_size(pos2(hero.min.x, hero.max.y - 4.0), vec2(hero.width(), 4.0));
                     p.rect_filled(track, CornerRadius::same(2), fade(theme::white(0.12), rest));
-                    p.rect_filled(Rect::from_min_size(track.min, vec2(track.width() * f, 4.0)), CornerRadius::same(2), fade(theme::ACCENT, rest));
+                    p.rect_filled(Rect::from_min_size(track.min, vec2(track.width() * f, 4.0)), CornerRadius::same(2), fade(orbit_look::accent(), rest));
                 }
             } else if !entry.capture {
                 let line = match (entry.occupants.filter(|n| *n > 0), entry.preview) {
@@ -1812,15 +1814,15 @@ impl Panel {
                     // On a screen it opens the Orbiters window, and says so.
                     let (glyph, label) = if !status.headset { (icons::CUBE, "See it in 3D") } else { (icons::CUBE, "Around me") };
                     let lit = !(current && status.small);
-                    pill_button(p, *rect, Some(glyph), label, if lit { theme::ACCENT } else { RAISED2 }, if lit { theme::ON_ACCENT } else { theme::FG }, h, pr, rest);
+                    pill_button(p, *rect, Some(glyph), label, if lit { orbit_look::accent() } else { RAISED2 }, if lit { orbit_look::on_accent() } else { theme::FG }, h, pr, rest);
                 }
                 // It shows here already: what a press adds is walking around in it.
-                Target::Walk => pill_button(p, *rect, Some(icons::ARROW_SQUARE_OUT), "Walk around it, in Orbiters", theme::ACCENT, theme::ON_ACCENT, h, pr, rest),
+                Target::Walk => pill_button(p, *rect, Some(icons::ARROW_SQUARE_OUT), "Walk around it, in Orbiters", orbit_look::accent(), orbit_look::on_accent(), h, pr, rest),
                 Target::ShowSmall => {
                     let lit = current && status.small;
-                    pill_button(p, *rect, Some(icons::HAND_GRABBING), "Small here", if lit { theme::ACCENT } else { RAISED2 }, if lit { theme::ON_ACCENT } else { theme::FG }, h, pr, rest);
+                    pill_button(p, *rect, Some(icons::HAND_GRABBING), "Small here", if lit { orbit_look::accent() } else { RAISED2 }, if lit { orbit_look::on_accent() } else { theme::FG }, h, pr, rest);
                 }
-                Target::SmallBack => pill_button(p, *rect, Some(icons::ARROW_U_UP_LEFT), "Back here", theme::ACCENT, theme::ON_ACCENT, h, pr, rest),
+                Target::SmallBack => pill_button(p, *rect, Some(icons::ARROW_U_UP_LEFT), "Back here", orbit_look::accent(), orbit_look::on_accent(), h, pr, rest),
                 Target::Join => {
                     let (glyph, label) = if status.list.vrchat { (icons::ENVELOPE_SIMPLE, "Invite me") } else { (icons::PLAY, "Go there") };
                     if entry.capture && vr {
@@ -1828,7 +1830,7 @@ impl Panel {
                     } else if entry.capture {
                         icon_button(p, *rect, glyph, false, label, RAISED2, theme::FG, h, pr, rest);
                     } else {
-                        pill_button(p, *rect, Some(glyph), label, theme::ACCENT, theme::ON_ACCENT, h, pr, rest);
+                        pill_button(p, *rect, Some(glyph), label, orbit_look::accent(), orbit_look::on_accent(), h, pr, rest);
                     }
                 }
                 Target::OpenWeb if vr => pill_button(p, *rect, Some(icons::ARROW_SQUARE_OUT), "Web page", RAISED, theme::FG, h, pr, rest),
@@ -1854,7 +1856,7 @@ impl Panel {
                         pill_button(p, *rect, Some(icons::CUBE), &label, RAISED, theme::FG, h, pr, rest);
                         continue;
                     }
-                    text(p, pos2(rect.max.x, rect.center().y), Align2::RIGHT_CENTER, Txt::new(label, 15.5).weight(weight::SEMIBOLD).color(fade(if h { theme::FG } else { theme::ACCENT }, rest)));
+                    text(p, pos2(rect.max.x, rect.center().y), Align2::RIGHT_CENTER, Txt::new(label, 15.5).weight(weight::SEMIBOLD).color(fade(if h { theme::FG } else { orbit_look::accent() }, rest)));
                 }
                 _ => {}
             }
@@ -2056,7 +2058,7 @@ fn segment(p: &Painter, rect: Rect, label: &str, on: bool, hover: bool, pressed:
 fn label_chip(p: &Painter, rect: Rect, name: &str, count: Option<u32>, mine: bool, hover: bool, pressed: bool, alpha: f32) {
     let rect = if pressed { rect.shrink(1.5) } else { rect };
     let (bg, fg, sub) = if mine {
-        (theme::ACCENT, theme::ON_ACCENT, theme::alpha(theme::ON_ACCENT, 0.7))
+        (orbit_look::accent(), orbit_look::on_accent(), theme::alpha(orbit_look::on_accent(), 0.7))
     } else {
         (if hover { RAISED2 } else { RAISED }, theme::FG, theme::FG_3)
     };
@@ -2094,7 +2096,7 @@ fn key_cap(p: &Painter, rect: Rect, label: &str, glyph: Option<&str>, bg: Color3
 fn field(p: &Painter, rect: Rect, typed: &str, hint: &str, active: bool, (hover, _): (bool, bool), time: f64, alpha: f32) {
     p.rect_filled(rect, CornerRadius::same(28), fade(if hover && !active { RAISED } else { SURFACE }, alpha));
     if active {
-        p.rect_stroke(rect, CornerRadius::same(28), Stroke::new(2.0, fade(theme::ACCENT, alpha)), StrokeKind::Inside);
+        p.rect_stroke(rect, CornerRadius::same(28), Stroke::new(2.0, fade(orbit_look::accent(), alpha)), StrokeKind::Inside);
     }
     let glyph = if hint.starts_with("Search") { icons::MAGNIFYING_GLASS } else { icons::PENCIL_SIMPLE };
     widgets::icon(p, pos2(rect.min.x + 34.0, rect.center().y), glyph, 22.0, fade(theme::FG_3, alpha));
@@ -2123,7 +2125,7 @@ fn field(p: &Painter, rect: Rect, typed: &str, hint: &str, active: bool, (hover,
     p.galley(pos2(at.x, at.y - galley.size().y / 2.0), galley, theme::FG);
     if active && (time * 2.0).fract() < 0.6 {
         let x = at.x + if typed.is_empty() { 0.0 } else { width + 2.0 };
-        p.line_segment([pos2(x, rect.center().y - height / 2.0), pos2(x, rect.center().y + height / 2.0)], Stroke::new(2.0, fade(theme::ACCENT, alpha)));
+        p.line_segment([pos2(x, rect.center().y - height / 2.0), pos2(x, rect.center().y + height / 2.0)], Stroke::new(2.0, fade(orbit_look::accent(), alpha)));
     }
 }
 
@@ -2150,6 +2152,7 @@ fn cover(p: &Painter, rect: Rect, id: TextureId, aspect: f32, corner: CornerRadi
         let u = ratio / aspect;
         Rect::from_min_max(pos2(0.5 - u / 2.0, 0.0), pos2(0.5 + u / 2.0, 1.0))
     };
+    super::super::orbit::panels::keep_colour(p, rect);
     p.add(RectShape::filled(rect, corner, fade(Color32::WHITE, alpha)).with_texture(id, uv));
 }
 
@@ -2209,23 +2212,23 @@ fn card(p: &Painter, rect: Rect, entry: &Entry, d: &Data, hover: bool, pressed: 
     picture(p, thumb, (d.thumb)(entry), &entry.world_id, top_only, alpha);
     if status.current == Some(entry.id) {
         let label = if status.shown { "Around you" } else { "Loading" };
-        let tint = if status.shown { theme::ACCENT } else { theme::WARN };
-        let txt = Txt::new(label, 14.0).weight(weight::SEMIBOLD).color(fade(theme::ON_ACCENT, alpha));
+        let tint = if status.shown { orbit_look::accent() } else { theme::WARN };
+        let txt = Txt::new(label, 14.0).weight(weight::SEMIBOLD).color(fade(orbit_look::on_accent(), alpha));
         let galley = p.layout_job(txt.job(f32::INFINITY));
         let chip = Rect::from_min_size(thumb.min + vec2(12.0, 12.0), vec2(galley.size().x + 22.0, 26.0));
         p.rect_filled(chip, CornerRadius::same(13), fade(tint, alpha));
-        p.galley(pos2(chip.min.x + 11.0, chip.center().y - galley.size().y / 2.0), galley, theme::ON_ACCENT);
+        p.galley(pos2(chip.min.x + 11.0, chip.center().y - galley.size().y / 2.0), galley, orbit_look::on_accent());
     } else if entry.capture {
         // A 3D capture: shown around the person from here.
-        let txt = Txt::new("3D", 15.5).weight(weight::SEMIBOLD).color(fade(theme::ON_ACCENT, alpha));
+        let txt = Txt::new("3D", 15.5).weight(weight::SEMIBOLD).color(fade(orbit_look::on_accent(), alpha));
         let galley = p.layout_job(txt.job(f32::INFINITY));
         let chip = Rect::from_min_size(thumb.min + vec2(12.0, 12.0), vec2(galley.size().x + 44.0, 26.0));
-        p.rect_filled(chip, CornerRadius::same(13), fade(theme::ACCENT, alpha));
-        widgets::icon(p, pos2(chip.min.x + 16.0, chip.center().y), icons::CUBE, 15.0, fade(theme::ON_ACCENT, alpha));
-        p.galley(pos2(chip.min.x + 30.0, chip.center().y - galley.size().y / 2.0), galley, theme::ON_ACCENT);
+        p.rect_filled(chip, CornerRadius::same(13), fade(orbit_look::accent(), alpha));
+        widgets::icon(p, pos2(chip.min.x + 16.0, chip.center().y), icons::CUBE, 15.0, fade(orbit_look::on_accent(), alpha));
+        p.galley(pos2(chip.min.x + 30.0, chip.center().y - galley.size().y / 2.0), galley, orbit_look::on_accent());
     }
     if entry.official {
-        widgets::icon(p, pos2(thumb.max.x - 22.0, thumb.min.y + 24.0), icons::SEAL_CHECK, 22.0, fade(theme::ACCENT, alpha));
+        widgets::icon(p, pos2(thumb.max.x - 22.0, thumb.min.y + 24.0), icons::SEAL_CHECK, 22.0, fade(orbit_look::accent(), alpha));
     }
     // Its likes and how smoothly it runs, on the picture's foot.
     let likes = d.likes(entry);
@@ -2271,13 +2274,13 @@ fn compact_card(p: &Painter, rect: Rect, entry: &Entry, d: &Data, hover: bool, p
         text_cut(p, pos2(x, rect.min.y + 62.0), width, Txt::new(a.to_string(), 16.0).color(fade(theme::FG_3, alpha)));
     }
     if status.current == Some(entry.id) {
-        p.circle_filled(pos2(x + 6.0, rect.min.y + 88.0), 5.0, fade(if status.shown { theme::ACCENT } else { theme::WARN }, alpha));
+        p.circle_filled(pos2(x + 6.0, rect.min.y + 88.0), 5.0, fade(if status.shown { orbit_look::accent() } else { theme::WARN }, alpha));
         text(p, pos2(x + 18.0, rect.min.y + 88.0), Align2::LEFT_CENTER, Txt::new(if !status.shown { "Loading" } else if status.small { "Small" } else { "Around you" }, 15.5).color(fade(theme::FG_2, alpha)));
     } else {
         let mut at = x;
         if entry.capture {
-            widgets::icon(p, pos2(at + 7.0, rect.min.y + 88.0), icons::CUBE, 15.0, fade(theme::ACCENT, alpha));
-            text(p, pos2(at + 20.0, rect.min.y + 88.0), Align2::LEFT_CENTER, Txt::new("3D", 14.0).weight(weight::SEMIBOLD).color(fade(theme::ACCENT, alpha)));
+            widgets::icon(p, pos2(at + 7.0, rect.min.y + 88.0), icons::CUBE, 15.0, fade(orbit_look::accent(), alpha));
+            text(p, pos2(at + 20.0, rect.min.y + 88.0), Align2::LEFT_CENTER, Txt::new("3D", 14.0).weight(weight::SEMIBOLD).color(fade(orbit_look::accent(), alpha)));
             at += 50.0;
         }
         if d.likes(entry) > 0 {
@@ -2299,7 +2302,7 @@ pub fn draw_chip(p: &Painter, status: &Status, name: Option<&str>, hover: bool, 
     let (glyph, label, tint) = match name {
         Some(n) if showing => {
             let n: String = n.chars().take(24).collect();
-            (icons::CUBE_FOCUS, if status.shown { n } else { format!("Loading {n}") }, theme::ACCENT)
+            (icons::CUBE_FOCUS, if status.shown { n } else { format!("Loading {n}") }, orbit_look::accent())
         }
         _ => (icons::CUBE, "3D worlds".to_string(), theme::FG),
     };

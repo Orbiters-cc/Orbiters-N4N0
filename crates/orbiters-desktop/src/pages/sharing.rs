@@ -1427,7 +1427,10 @@ impl Dialog {
         let p = ui.painter().clone();
         let kind = if self.entry.is_picture() { tr("VRChat picture") } else { tr("3D capture") };
         let date = super::local_time(&controller::iso(self.entry.taken));
-        let line = Txt::new(format!("{kind} · {date}"), 12.5).color(theme::FG_3);
+        let full = Txt::new(format!("{kind} · {date}"), 12.5).color(theme::FG_3);
+        // "Only on this computer" whole after it: where a language's words leave no room, the date goes without the kind, which the window's title says.
+        let local = widgets::text_size(ui, &Txt::new(tr("Only on this computer"), 12.5).weight(weight::MEDIUM)).x + 28.0;
+        let line = if item.is_none() && widgets::text_size(ui, &full).x + local > max_w { Txt::new(date.clone(), 12.5).color(theme::FG_3) } else { full };
         let r = widgets::text_truncated(&p, at, Align2::LEFT_CENTER, &line, max_w);
         let x = r.right() + 10.0;
         let (glyph, label, color) = match item {

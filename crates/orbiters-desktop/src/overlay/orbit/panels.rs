@@ -2157,7 +2157,7 @@ fn draw(p: &Painter, zone: Zone, item: &Item, facts: &Facts, hovered: bool, pres
             let (fill, ink) = if copy { (look::accent(), look::ON_ACCENT) } else { (if hovered { look::TILE_HOVER } else { look::TILE }, look::LABEL) };
             p.rect_filled(drawn, radius, if copy && hovered { theme::mix(fill, Color32::WHITE, 0.12) } else { fill });
             let words = match (copy, facts.can_drop_playing || facts.playing_link_copied) {
-                (true, true) => tr("Link copied"),
+                (true, true) => tr_ctx("tile", "Link copied"),
                 (true, false) => tr("Copy link"),
                 (false, _) => tr("Drop link"),
             };

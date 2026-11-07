@@ -172,7 +172,7 @@
   "Take a 3D picture, record a scene, see your captures.": "Tire uma foto 3D, grave uma cena, veja suas capturas.",
   "Talk to N4N0": "Falar com o N4N0",
   "Talk with a friend, wherever they are in VRChat.": "Converse com um amigo, onde quer que ele esteja no VRChat.",
-  "Tell the Orbiters team what you would like.": "Diga à equipe do Orbiters o que você gostaria.",
+  "Tell the Orbiters team what you would like.": "Diga ao Orbiters o que você gostaria.",
   "The 3D picture starts as soon as Orbiters sees where it is.": "A foto 3D começa assim que o Orbiters vê onde a câmera está.",
   "The 3D picture stopped": "A foto 3D parou",
   "The camera is flying. Stay where you are for a moment.": "A câmera está voando. Fique onde está por um momento.",
@@ -229,7 +229,7 @@
   "Your pictures and 3D captures": "Suas fotos e capturas 3D",
   "Your pictures and 3D captures.": "Suas fotos e capturas 3D.",
   "Your tools": "Suas ferramentas",
-  "Your voice in recordings": "Sua voz nas gravações",
+  "Your voice in recordings": "Sua voz ao gravar",
   "gallery filter\u0004All": "Tudo",
   "gallery filter\u0004Show": "Mostrar",
   "lamp\u0004Light": "Luz",
@@ -257,5 +257,6 @@
   "“Tell people I'll be back soon”": "“Diga às pessoas que já volto”",
   "“Turn your light on, in blue”": "“Acenda sua luz, em azul”",
   "your voice\u0004Recorded": "Gravada",
-  "your voice\u0004Left out": "Excluída"
+  "your voice\u0004Left out": "Excluída",
+  "tile\u0004Link copied": "Link copiado"
 }

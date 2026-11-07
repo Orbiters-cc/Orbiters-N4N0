@@ -172,13 +172,13 @@
   "Take a 3D picture, record a scene, see your captures.": "Toma una foto 3D, graba una escena, mira tus capturas.",
   "Talk to N4N0": "Hablar con N4N0",
   "Talk with a friend, wherever they are in VRChat.": "Habla con un amigo, esté donde esté en VRChat.",
-  "Tell the Orbiters team what you would like.": "Cuéntale al equipo de Orbiters qué te gustaría.",
+  "Tell the Orbiters team what you would like.": "Dile a Orbiters qué te gustaría.",
   "The 3D picture starts as soon as Orbiters sees where it is.": "La foto 3D empieza en cuanto Orbiters ve dónde está la cámara.",
   "The 3D picture stopped": "La foto 3D se detuvo",
   "The camera is flying. Stay where you are for a moment.": "La cámara está volando. Quédate donde estás un momento.",
   "The camera's tiles, right now": "Los mosaicos de la cámara, ahora mismo",
   "The capture around you goes.": "La captura que te rodea desaparece.",
-  "The full app, on your computer.": "La aplicación completa, en tu computadora.",
+  "The full app, on your computer.": "La app completa, en tu computadora.",
   "The link of what plays, to paste anywhere.": "El enlace de lo que se reproduce, para pegarlo donde quieras.",
   "The next track on your computer.": "La pista siguiente en tu computadora.",
   "The previous track on your computer.": "La pista anterior en tu computadora.",
@@ -229,7 +229,7 @@
   "Your pictures and 3D captures": "Tus fotos y capturas 3D",
   "Your pictures and 3D captures.": "Tus fotos y capturas 3D.",
   "Your tools": "Tus herramientas",
-  "Your voice in recordings": "Tu voz en las grabaciones",
+  "Your voice in recordings": "Tu voz al grabar",
   "gallery filter\u0004All": "Todo",
   "gallery filter\u0004Show": "Mostrar",
   "lamp\u0004Light": "Luz",
@@ -257,5 +257,6 @@
   "“Tell people I'll be back soon”": "“Dile a la gente que vuelvo pronto”",
   "“Turn your light on, in blue”": "“Enciende tu luz, en azul”",
   "your voice\u0004Recorded": "Grabada",
-  "your voice\u0004Left out": "Excluida"
+  "your voice\u0004Left out": "Excluida",
+  "tile\u0004Link copied": "Copiado"
 }

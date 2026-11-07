@@ -399,6 +399,16 @@ pub struct Panels {
     videos_had: usize,
     /// How many lines the conversation had.
     talk_had: usize,
+    /// What play or pause was last asked, and when; the place held along what plays; where it was let go; where it was moved to, and when.
+    play_asked: Option<(bool, Instant)>,
+    seeking: Option<f32>,
+    seek_late: Option<f32>,
+    seek_asked: Option<(u32, Instant)>,
+    /// How fast the list was thrown, in its units a second.
+    throw: f32,
+    /// The invite asked for last, and when; the result whose link was copied, and when.
+    invited: Option<(String, Instant)>,
+    copied: Option<(usize, Instant)>,
     /// A press on a list, which may yet be a drag; where the pointer is on the sheet; and what it turned out to press.
     drag: Option<Drag>,
     sheet_pointer: Option<Pos2>,
@@ -447,6 +457,13 @@ impl Panels {
             videos_asked: None,
             videos_had: 0,
             talk_had: 0,
+            play_asked: None,
+            seeking: None,
+            seek_late: None,
+            seek_asked: None,
+            throw: 0.0,
+            invited: None,
+            copied: None,
             drag: None,
             sheet_pointer: None,
             pressed_late: None,
@@ -564,6 +581,7 @@ impl Panels {
         self.facts.sheet_title = title.to_string();
         self.facts.gallery_scroll = 0.0;
         self.gallery_to = 0.0;
+        self.throw = 0.0;
         if self.takeover.is_none() {
             self.takeover = Some(Panel::new(place, self.sharp, 0, !snap.settings.reduce_motion));
         }
@@ -655,6 +673,13 @@ impl Panels {
 
     /// VR: the panel on the sheet relays to the overlay's own 3D worlds, whose view `status` says what it does. What it asked since last time.
     pub(in crate::overlay) fn world_relay(&mut self, status: super::worlds::panel::Status) -> Vec<super::worlds::Relayed> {
+        let showing = status.current.is_some();
+        if showing != self.facts.view_showing {
+            self.facts.view_showing = showing;
+            for panel in self.list.iter_mut().chain(self.takeover.iter_mut()) {
+                panel.dirty = true;
+            }
+        }
         self.stage.worlds.as_mut().map_or_else(Vec::new, |worlds| worlds.relay_to(status))
     }
 
@@ -676,6 +701,15 @@ impl Panels {
     }
 
     pub fn follow(&mut self, snap: &Snapshot, library: u64) {
+        // Along what plays, now it was let go.
+        if let Some(fraction) = self.seek_late.take() {
+            let host = &mut self.stage.host;
+            if let Some(of) = host.menu.media.as_ref().and_then(|m| m.duration) {
+                let seconds = (fraction * of as f32) as u32;
+                self.seek_asked = Some((seconds, Instant::now()));
+                host.effects(vec![Effect::Media(orbiters_n4n0_core::menu::MediaCommand::Seek(seconds))], snap, &self.backend);
+            }
+        }
         // What a press in a list turned out to press, now it was let go without moving.
         if let Some(action) = self.pressed_late.take() {
             self.act(action, snap, &mut Pressed::default());
@@ -809,7 +843,7 @@ impl Panels {
             desktop: snap.n4n0.desktop_mode || !snap.steamvr.running,
             fast_walk: snap.settings.walk_boost.enabled,
             n4n0: snap.settings.n4n0.enabled,
-            music: menu.media.as_ref().map(|m| (m.title.clone(), m.playing)),
+            music: menu.media.as_ref().map(|m| (m.title.clone(), shown_playing(m.playing, self.play_asked, Instant::now()))),
             music_by: menu.media.as_ref().map_or(String::new(), |m| m.artist.clone()),
             art: None,
             no_kit: snap.worn_kit == Some(false),
@@ -820,6 +854,20 @@ impl Panels {
             vr_close: self.sharp > 1.0,
             picture_mode: self.facts.picture_mode,
             hint: self.facts.hint,
+            view_showing: self.facts.view_showing,
+            invite_chip: self.invited.as_ref().filter(|(_, at)| at.elapsed() < Duration::from_secs(6)).map(|(place, _)| {
+                let state = if menu.invite_waiting {
+                    panels::InviteChip::Asking
+                } else {
+                    match menu.invite_went {
+                        Some(true) => panels::InviteChip::Sent,
+                        Some(false) => panels::InviteChip::Failed,
+                        None => panels::InviteChip::Asking,
+                    }
+                };
+                (place.clone(), state)
+            }),
+            video_copied: self.copied.filter(|(_, at)| at.elapsed() < Duration::from_secs(2)).map(|(i, _)| i),
             videos: if self.facts.sheet == Some(Sheet::Results) {
                 menu.results
                     .iter()
@@ -841,7 +889,17 @@ impl Panels {
             gallery_scroll: self.facts.gallery_scroll,
             gallery_layout: snap.settings.photos_layout,
             volume: menu.volume.as_ref().map(|v| (v.percent, v.muted)),
-            music_times: menu.media.as_ref().and_then(|m| Some((m.position?, m.duration?))),
+            music_times: menu.media.as_ref().and_then(|m| {
+                let of = m.duration?;
+                // Under the pointer it is where the pointer is; just moved, where it was moved to until the app says so too.
+                let at = self
+                    .seeking
+                    .map(|f| (f * of as f32) as u32)
+                    .or(self.seek_asked.filter(|(_, at)| at.elapsed() < MEDIA_CATCHES_UP).map(|(s, _)| s))
+                    .or(m.position)?;
+                Some((at, of))
+            }),
+            can_seek: menu.media.as_ref().is_some_and(|m| m.can_seek),
             world_video: menu.world_video.as_ref().map(|v| v.title.clone().unwrap_or_else(|| v.url.clone())),
             digits: self.open == Some(Around::Wheel) && self.takeover.is_none() && (snap.n4n0.desktop_mode || !snap.steamvr.running),
             beside_wing: self.open == Some(Around::QuickMenu),
@@ -878,8 +936,19 @@ impl Panels {
         let mut worlds_hover = None;
         let mut on_zone = None;
         self.sheet_pointer = on.filter(|(at, _)| *at == count).map(|(_, p)| p);
+        if let (Some(_), Some(p)) = (self.seeking, self.sheet_pointer) {
+            self.seeking = panels::timeline_fraction(&self.facts, p.x).or(self.seeking);
+        }
         if let (Some(drag), Some(p), Some(sheet)) = (self.drag.as_mut(), self.sheet_pointer, self.facts.sheet) {
-            if let Some(to) = drag.follow(p.y, panels::max_scroll(sheet, &self.facts)) {
+            let now = Instant::now();
+            let to = if drag.bar {
+                let to = panels::scroll_from_bar(sheet, &self.facts, p.y);
+                drag.measure(to, now);
+                Some(to)
+            } else {
+                drag.follow(p.y, panels::max_scroll(sheet, &self.facts), now)
+            };
+            if let Some(to) = to {
                 self.gallery_to = to;
                 self.facts.gallery_scroll = to;
                 if let Some(panel) = self.takeover.as_mut() {
@@ -995,13 +1064,28 @@ impl Panels {
         }
         // A list's own empty space can be dragged too.
         if look.is_none() && self.sheet_pointer.is_some() && matches!(self.facts.sheet, Some(Sheet::Pictures | Sheet::Instances | Sheet::Results | Sheet::Talk)) {
-            self.drag = Some(Drag { from: None, scroll: self.facts.gallery_scroll, action: None, moved: false });
+            self.throw = 0.0;
+            self.drag = Some(Drag::new(self.facts.gallery_scroll, None, false));
+            return out;
+        }
+        // Along what plays: where it is held, and moved there when let go.
+        if action == Some(Action::Timeline) {
+            if let Some(p) = self.sheet_pointer {
+                self.seeking = panels::timeline_fraction(&self.facts, p.x);
+            }
+            return out;
+        }
+        // The scroll bar goes where the pointer is.
+        if action == Some(Action::ScrollBar) {
+            self.throw = 0.0;
+            self.drag = Some(Drag::new(self.facts.gallery_scroll, None, true));
             return out;
         }
         // In a list a press waits: it may be a drag, of the list and not of what it began on.
         if let (Some(sheet), Some(look)) = (self.facts.sheet, look) {
             if panels::scrolls_with_a_drag(sheet, &look) {
-                self.drag = Some(Drag { from: None, scroll: self.facts.gallery_scroll, action, moved: false });
+                self.throw = 0.0;
+                self.drag = Some(Drag::new(self.facts.gallery_scroll, action, false));
                 return out;
             }
         }
@@ -1064,6 +1148,7 @@ impl Panels {
                     location.map(|l| (l, w.name.clone()))
                 });
                 if let Some((location, name)) = asked {
+                    self.invited = Some((location.clone(), Instant::now()));
                     let host = &mut self.stage.host;
                     let effects = host.menu.invite_to(location, &name);
                     host.effects(effects, snap, &self.backend);
@@ -1091,9 +1176,16 @@ impl Panels {
                     _ => Target::MediaPlayPause,
                 };
                 let host = &mut self.stage.host;
+                // What it was asked to become stays said until what is read catches up.
+                if target == Target::MediaPlayPause {
+                    if let Some(media) = host.menu.media.as_ref().filter(|m| m.can_play_pause) {
+                        self.play_asked = Some((!shown_playing(media.playing, self.play_asked, Instant::now()), Instant::now()));
+                    }
+                }
                 let effects = host.press(target);
                 host.effects(effects, snap, &self.backend);
             }
+            Action::Timeline => {}
             Action::Talk => {
                 if self.facts.n4n0 {
                     self.open_sheet(Sheet::Talk, "Ask N4N0", snap);
@@ -1107,7 +1199,16 @@ impl Panels {
                 }
             }
             Action::NewConversation => self.backend.n4n0(N4n0Command::NewConversation),
+            Action::HideView => {
+                if let Some(worlds) = self.stage.worlds.as_mut() {
+                    worlds.hide_view();
+                }
+            }
+            Action::ScrollBar => {}
             Action::Video(i) | Action::VideoDrop(i) => {
+                if matches!(action, Action::Video(_)) {
+                    self.copied = Some((i, Instant::now()));
+                }
                 // The menu's page of results is what its rows press on.
                 let host = &mut self.stage.host;
                 host.menu.result_page = i / orbiters_n4n0_core::menu::RESULTS_PER_PAGE;
@@ -1133,10 +1234,14 @@ impl Panels {
 
     /// The pointer's button went up.
     pub fn release(&mut self) {
+        if let Some(fraction) = self.seeking.take() {
+            self.seek_late = Some(fraction);
+        }
         if let Some(drag) = self.drag.take() {
             if !drag.moved {
                 self.pressed_late = drag.action;
             }
+            self.throw = drag.throw(Instant::now());
         }
         for panel in self.list.iter_mut().chain(self.takeover.iter_mut()) {
             if panel.pressed.take().is_some() {
@@ -1283,6 +1388,16 @@ impl Panels {
         for panel in self.list.iter_mut().chain(self.takeover.iter_mut()) {
             panel.appear.step(dt);
         }
+        // A list thrown goes on, slowing, until it stops or meets its end.
+        if self.throw != 0.0 {
+            let max = self.facts.sheet.map_or(0.0, |sheet| panels::max_scroll(sheet, &self.facts));
+            let to = self.gallery_to + self.throw * dt;
+            self.gallery_to = to.clamp(0.0, max);
+            self.throw *= (-dt * THROW_SLOWS).exp();
+            if self.throw.abs() < 30.0 || to != self.gallery_to {
+                self.throw = 0.0;
+            }
+        }
         // The gallery glides to where its wheel sent it. Only its page paints.
         let off = self.gallery_to - self.facts.gallery_scroll;
         if off != 0.0 {
@@ -1411,6 +1526,20 @@ fn visited_worlds(rows: &[orbiters_n4n0_core::menu::InstanceRow], now: u64, pict
     worlds
 }
 
+/// How long an app gets to do what it was asked before what it says is believed over what was asked: the computer's music is read once a second, and it read the old state just after a press.
+const MEDIA_CATCHES_UP: Duration = Duration::from_millis(2500);
+
+/// Whether what plays shows as playing: what was just asked (Enzo: "the play / pause button doesn't switch state correctly"), else what the app says.
+fn shown_playing(read: bool, asked: Option<(bool, Instant)>, now: Instant) -> bool {
+    asked.filter(|(_, at)| now.duration_since(*at) < MEDIA_CATCHES_UP).map_or(read, |(playing, _)| playing)
+}
+
+/// How fast a list thrown slows down: by e every this fraction of a second's inverse.
+const THROW_SLOWS: f32 = 2.2;
+
+/// The fastest a list can be thrown, in its units a second.
+const MAX_THROW: f32 = 6000.0;
+
 /// A press on a list: it scrolls if the pointer moves, and presses what it was on if not.
 #[derive(Clone, Copy, Debug)]
 struct Drag {
@@ -1418,17 +1547,51 @@ struct Drag {
     scroll: f32,
     action: Option<Action>,
     moved: bool,
+    /// On the scroll bar, which goes where the pointer is rather than by how far it moved.
+    bar: bool,
+    /// How fast the list goes now, in its units a second, for throwing it; where it was last, and when.
+    speed: f32,
+    last: Option<(Instant, f32)>,
 }
 
 impl Drag {
     /// How far the pointer goes before it is a drag and no press, in the page's units.
     const SLOP: f32 = 12.0;
 
+    fn new(scroll: f32, action: Option<Action>, bar: bool) -> Self {
+        Self { from: None, scroll, action, moved: bar, bar, speed: 0.0, last: None }
+    }
+
     /// The pointer at `y`: where the list goes, when it goes.
-    fn follow(&mut self, y: f32, max: f32) -> Option<f32> {
+    fn follow(&mut self, y: f32, max: f32, now: Instant) -> Option<f32> {
         let from = *self.from.get_or_insert(y);
         self.moved |= (y - from).abs() > Self::SLOP;
-        self.moved.then(|| (self.scroll + from - y).clamp(0.0, max))
+        let to = self.moved.then(|| (self.scroll + from - y).clamp(0.0, max))?;
+        self.measure(to, now);
+        Some(to)
+    }
+
+    /// How fast it goes: the last moments' speed, as what counts in a throw is how it left the hand.
+    fn measure(&mut self, to: f32, now: Instant) {
+        if let Some((at, was)) = self.last {
+            let dt = now.duration_since(at).as_secs_f32();
+            if dt > 0.001 {
+                self.speed += ((to - was) / dt - self.speed) * (dt / 0.06).min(1.0);
+                self.last = Some((now, to));
+            }
+        } else {
+            self.last = Some((now, to));
+        }
+    }
+
+    /// What it was thrown at when let go, in its units a second: a hand at rest throws nothing.
+    fn throw(&self, now: Instant) -> f32 {
+        let fresh = self.last.is_some_and(|(at, _)| now.duration_since(at) < Duration::from_millis(120));
+        if !self.moved || self.bar || !fresh || self.speed.abs() < 200.0 {
+            0.0
+        } else {
+            self.speed.clamp(-MAX_THROW, MAX_THROW)
+        }
     }
 }
 
@@ -1478,14 +1641,49 @@ mod tests {
     /// Enzo: "when I grab a tile to scroll down, it just opens it".
     #[test]
     fn a_press_that_moves_scrolls_and_one_that_stays_presses() {
-        let mut drag = Drag { from: None, scroll: 100.0, action: Some(Action::Pictures), moved: false };
-        assert_eq!(drag.follow(300.0, 1000.0), None, "where it starts");
-        assert_eq!(drag.follow(305.0, 1000.0), None, "a hand's shake is still a press");
+        let t = Instant::now();
+        let mut drag = Drag::new(100.0, Some(Action::Pictures), false);
+        assert_eq!(drag.follow(300.0, 1000.0, t), None, "where it starts");
+        assert_eq!(drag.follow(305.0, 1000.0, t), None, "a hand's shake is still a press");
         assert!(!drag.moved);
-        assert_eq!(drag.follow(250.0, 1000.0), Some(150.0), "up the page, on down the list");
+        assert_eq!(drag.follow(250.0, 1000.0, t), Some(150.0), "up the page, on down the list");
         assert!(drag.moved);
-        assert_eq!(drag.follow(305.0, 1000.0), Some(95.0), "moved once, a drag for good");
-        assert_eq!(drag.follow(900.0, 1000.0), Some(0.0), "not past the top");
+        assert_eq!(drag.follow(305.0, 1000.0, t), Some(95.0), "moved once, a drag for good");
+        assert_eq!(drag.follow(900.0, 1000.0, t), Some(0.0), "not past the top");
+    }
+
+    #[test]
+    fn play_and_pause_show_what_was_asked_until_the_app_has_caught_up() {
+        let t = Instant::now();
+        // Pressed to pause: a read of the old state does not flip it back.
+        let asked = Some((false, t));
+        assert!(!shown_playing(true, asked, t + Duration::from_millis(900)));
+        // After a while the app is believed, whichever it says.
+        assert!(shown_playing(true, asked, t + MEDIA_CATCHES_UP));
+        assert!(shown_playing(true, None, t));
+        assert!(!shown_playing(false, None, t));
+    }
+
+    /// Enzo: "be able to throw the scrolling so we can go faster".
+    #[test]
+    fn a_list_let_go_while_moving_is_thrown_and_one_let_go_at_rest_is_not() {
+        let t = Instant::now();
+        let at = |ms: u64| t + Duration::from_millis(ms);
+        let mut drag = Drag::new(0.0, None, false);
+        drag.follow(500.0, 9000.0, at(0));
+        for (i, ms) in (10..=100).step_by(10).enumerate() {
+            drag.follow(500.0 - 20.0 * (i as f32 + 1.0), 9000.0, at(ms));
+        }
+        let thrown = drag.throw(at(105));
+        assert!(thrown > 1000.0, "down the list, about 2000 a second: {thrown}");
+        // Held still a moment before letting go: nothing.
+        assert_eq!(drag.throw(at(400)), 0.0);
+        // A press that never moved, or the bar: nothing.
+        assert_eq!(Drag::new(0.0, None, false).throw(at(0)), 0.0);
+        let mut bar = Drag::new(0.0, None, true);
+        bar.measure(0.0, at(0));
+        bar.measure(800.0, at(50));
+        assert_eq!(bar.throw(at(60)), 0.0);
     }
 
     #[test]

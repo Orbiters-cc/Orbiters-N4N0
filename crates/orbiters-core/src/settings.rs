@@ -161,7 +161,7 @@ pub enum VrMotion {
     /// Each tile around VRChat's menus a little behind the hand on its own spring: never in step with VRChat's menu, on purpose, on any computer.
     #[default]
     Springy,
-    /// Rigid, behind the hand by [`OrbitSettings::vr_delay_frames`] of VRChat's frames, as what opens in front of VRChat's menu always is.
+    /// Rigid, following the hand as smoothly as [`OrbitSettings::vr_smoothing_ms`] says, as what opens in front of VRChat's menu always is.
     Matched,
 }
 
@@ -178,8 +178,8 @@ pub struct OrbitSettings {
     /// scales its menus with things only the headset shows.
     pub vr_size: f32,
     pub vr_motion: VrMotion,
-    /// How far behind the hand what is rigid lies, in VRChat's frames as they are measured, so that it follows the frame rate of each computer. Enzo's test: 0 is ahead of VRChat, 1 behind it.
-    pub vr_delay_frames: f32,
+    /// How smoothly what is rigid follows the hand: the time constant of its filter, in milliseconds. VRChat's menu moves as if smoothed, which no delay matched (Enzo: "even at 1.5 frames ahead").
+    pub vr_smoothing_ms: f32,
 }
 
 impl OrbitSettings {
@@ -203,7 +203,7 @@ impl OrbitSettings {
 
 impl Default for OrbitSettings {
     fn default() -> Self {
-        Self { display: MenuDisplay::AvatarScreen, wheel: true, quick_menu: true, vr_size: 1.0, vr_motion: VrMotion::Springy, vr_delay_frames: 0.3 }
+        Self { display: MenuDisplay::AvatarScreen, wheel: true, quick_menu: true, vr_size: 1.0, vr_motion: VrMotion::Springy, vr_smoothing_ms: 30.0 }
     }
 }
 

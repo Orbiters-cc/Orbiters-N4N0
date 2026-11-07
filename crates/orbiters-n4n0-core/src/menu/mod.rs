@@ -930,6 +930,8 @@ pub struct Menu {
     /// `instances_note` says why there are none), and the page of them shown (from 0).
     pub instances: Vec<InstanceRow>,
     pub instances_ready: bool,
+    /// How the last invite went, once answered: for what shows it on the button pressed.
+    pub invite_went: Option<bool>,
     pub instances_note: String,
     pub instance_page: usize,
     /// The location an Invite me was asked for (Try again on Add Orbiters as a friend asks it again), and whether
@@ -2360,6 +2362,7 @@ impl Menu {
     }
 
     fn ask_invite(&mut self, location: String) -> Vec<Effect> {
+        self.invite_went = None;
         self.inviting = Some(location.clone());
         self.invite_waiting = true;
         vec![Effect::InviteMe { location }]
@@ -2368,6 +2371,7 @@ impl Menu {
     /// Orbiters answered the last Invite me: sent, the page says so; its account to befriend first, Add Orbiters as a
     /// friend shows; failed, why.
     pub fn invite_answered(&mut self, answer: InviteAnswer) {
+        self.invite_went = Some(matches!(answer, InviteAnswer::Sent));
         self.invite_waiting = false;
         match answer {
             InviteAnswer::Sent => {

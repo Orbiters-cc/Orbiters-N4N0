@@ -30,6 +30,7 @@ pub mod look {
     pub const TILE: Color32 = Color32::from_rgb(29, 35, 40);
     pub const TILE_HOVER: Color32 = Color32::from_rgb(38, 50, 54);
     pub const TILE_DOWN: Color32 = Color32::from_rgb(50, 66, 70);
+    pub const ACCENT_SOFT: Color32 = Color32::from_rgb(20, 66, 46);
     /// What is pointed at, chosen, or under way: the app's mint.
     pub const ACCENT: Color32 = orbiters_ui::theme::ACCENT;
     pub const ON_ACCENT: Color32 = orbiters_ui::theme::ON_ACCENT;
@@ -68,6 +69,12 @@ pub enum Action {
     Talk,
     /// The Orbiters window.
     OpenApp,
+    /// Moves in what plays: where is the pointer's.
+    Timeline,
+    /// The 3D view goes.
+    HideView,
+    /// The scroll bar: where it is grabbed.
+    ScrollBar,
     /// Starts or stops listening to the person.
     TalkToggle,
     /// N4N0 forgets this conversation.
@@ -115,6 +122,14 @@ pub struct VideoTile {
     pub channel: String,
     pub duration: Option<String>,
     pub picture: Option<TextureId>,
+}
+
+/// An invite, as its button shows it right away.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InviteChip {
+    Asking,
+    Sent,
+    Failed,
 }
 
 /// Where talking with N4N0 stands: what its button shows, so that it is clear as day.
@@ -192,11 +207,17 @@ pub struct Facts {
     /// How far the sheet's list is scrolled, in its page's units, and the layout the app's own gallery uses.
     pub gallery_scroll: f32,
     pub gallery_layout: orbiters_core::settings::GalleryLayout,
-    /// The computer's volume, and whether it is muted; where what plays is and how long it lasts.
+    /// The computer's volume, and whether it is muted; where what plays is and how long it lasts; whether the app playing it lets others move in it.
     pub volume: Option<(u8, bool)>,
     pub music_times: Option<(u32, u32)>,
+    pub can_seek: bool,
     /// What the world's video player has.
     pub world_video: Option<String>,
+    /// A capture shows in 3D around the person, asked from here.
+    pub view_showing: bool,
+    /// Which instance was last asked for and how that is going, on the button pressed. Which result's link was just copied.
+    pub invite_chip: Option<(String, InviteChip)>,
+    pub video_copied: Option<usize>,
     /// YouTube's results, and what was searched.
     pub videos: Vec<VideoTile>,
     pub videos_for: String,
@@ -248,8 +269,15 @@ pub enum Look {
     Heading(&'static str),
     /// A YouTube result.
     Video(usize),
-    /// A small button on a YouTube result.
+    /// A small button on a YouTube result: its link, the `n`-th's, or dropping it.
+    VideoCopy(usize),
     VideoDrop,
+    /// Where in what plays this is, to press and drag along when the app lets it.
+    Timeline,
+    /// The bar that shows where in a list this is, and takes the pointer.
+    ScrollBar,
+    /// Hides the 3D view.
+    HideView,
     /// The back button of YouTube's results.
     Back,
     /// The one button that talks to N4N0.
@@ -335,8 +363,12 @@ pub fn items(zone: Zone, size: Vec2, facts: &Facts) -> Vec<Item> {
         Zone::QmStrip => strip(w, h),
         Zone::SheetBack => {
             let mut out = vec![Item { action: Action::CloseSheet, rect: r(w - 40.0, 11.0, 30.0, 30.0), look: Look::Close }];
+            // While a capture shows around the person: it is one press from gone, wherever on the sheet.
+            if facts.view_showing {
+                out.push(Item { action: Action::HideView, rect: r(w - 40.0 - 8.0 - 96.0, 11.0, 96.0, 30.0), look: Look::HideView });
+            }
             // All tools has what plays on its page.
-            if facts.music.is_some() && !facts.beside_wing && status_now(facts).is_none() && facts.sheet != Some(Sheet::All) {
+            if facts.music.is_some() && !facts.beside_wing && !facts.view_showing && status_now(facts).is_none() && facts.sheet != Some(Sheet::All) {
                 // Alone, from the wheel: what plays, in its head.
                 let (y, b) = (13.0, 26.0);
                 out.push(Item { action: Action::Next, rect: r(w - 48.0 - b, y, b, b), look: Look::Transport(icons::SKIP_FORWARD) });
@@ -369,6 +401,14 @@ fn strip(w: f32, h: f32) -> Vec<Item> {
 
 /// What the sheet's page holds, in N4N0's page's units (1024 x 576).
 pub fn sheet_items(sheet: Sheet, facts: &Facts) -> Vec<Item> {
+    let mut items = sheet_page_items(sheet, facts);
+    if let Some((top, track, _)) = scroll_bar(sheet, facts) {
+        items.push(Item { action: Action::ScrollBar, rect: r(1024.0 - 22.0, top, 22.0, track), look: Look::ScrollBar });
+    }
+    items
+}
+
+fn sheet_page_items(sheet: Sheet, facts: &Facts) -> Vec<Item> {
     match sheet {
         Sheet::All => {
             let (x0, y0, gap) = (24.0, 10.0, 12.0);
@@ -433,7 +473,8 @@ pub fn sheet_items(sheet: Sheet, facts: &Facts) -> Vec<Item> {
                 }
                 let rect = r(24.0 + c * (width + 12.0), y, width, height);
                 out.push(Item { action: Action::Video(i), rect, look: Look::Video(i) });
-                out.push(Item { action: Action::VideoDrop(i), rect: r(rect.right() - 72.0, rect.bottom() - 40.0, 64.0, 32.0), look: Look::VideoDrop });
+                out.push(Item { action: Action::VideoDrop(i), rect: r(rect.right() - 58.0, rect.bottom() - 32.0, 58.0, 30.0), look: Look::VideoDrop });
+                out.push(Item { action: Action::Video(i), rect: r(rect.right() - 58.0 - 6.0 - 92.0, rect.bottom() - 32.0, 92.0, 30.0), look: Look::VideoCopy(i) });
             }
             out.push(Item { action: Action::ResultsBack, rect: r(24.0, 8.0, 44.0, 44.0), look: Look::Back });
             out
@@ -554,9 +595,46 @@ pub fn max_scroll(sheet: Sheet, facts: &Facts) -> f32 {
     }
 }
 
+/// The scroll bar of a sheet's list, when it has one: where its track starts, how long it is, how long its knob is.
+pub fn scroll_bar(sheet: Sheet, facts: &Facts) -> Option<(f32, f32, f32)> {
+    let max = max_scroll(sheet, facts);
+    (max > 0.0).then(|| {
+        let top = match sheet {
+            Sheet::Pictures => GALLERY_TOP,
+            Sheet::Results => RESULTS_TOP,
+            Sheet::Talk => TALK_TOP,
+            _ => 8.0,
+        };
+        let track = 576.0 - top - 8.0;
+        (top, track, (track * track / (track + max)).max(36.0))
+    })
+}
+
+/// Where the list goes with the scroll bar's knob held at `y`.
+pub fn scroll_from_bar(sheet: Sheet, facts: &Facts, y: f32) -> f32 {
+    scroll_bar(sheet, facts).map_or(0.0, |(top, track, knob)| ((y - top - knob / 2.0) / (track - knob).max(1.0)).clamp(0.0, 1.0) * max_scroll(sheet, facts))
+}
+
 /// Whether a press on this is the start of a drag as much as a press: what lies in a list that scrolls. It only acts if let go without moving.
 pub fn scrolls_with_a_drag(sheet: Sheet, look: &Look) -> bool {
-    matches!(sheet, Sheet::Pictures | Sheet::Instances | Sheet::Results) && matches!(look, Look::Capture(_) | Look::Visit(_) | Look::Chip { .. } | Look::Video(_) | Look::VideoDrop)
+    matches!(sheet, Sheet::Pictures | Sheet::Instances | Sheet::Results) && matches!(look, Look::Capture(_) | Look::Visit(_) | Look::Chip { .. } | Look::Video(_) | Look::VideoDrop | Look::VideoCopy(_))
+}
+
+/// Where what plays's timeline lies on its panel, tall enough for a laser to find.
+fn timeline_rect(panel: Rect) -> Rect {
+    let x = panel.left() + panel.height();
+    Rect::from_min_max(pos2(x, panel.top() + 86.0), pos2(panel.right() - 14.0, panel.top() + 112.0))
+}
+
+/// How far along what plays the pointer at `x` is, 0 to 1: `None` where there is no timeline to press.
+pub fn timeline_fraction(facts: &Facts, x: f32) -> Option<f32> {
+    let rect = sheet_items(Sheet::All, facts).into_iter().find(|i| matches!(i.look, Look::Timeline))?.rect;
+    Some(((x - rect.left()) / rect.width().max(1.0)).clamp(0.0, 1.0))
+}
+
+/// `seconds` as a clock's digits.
+fn minutes(seconds: u32) -> String {
+    format!("{}:{:02}", seconds / 60, seconds % 60)
 }
 
 /// What plays's controls, on its panel on All tools: nothing about it needs a page of its own.
@@ -569,6 +647,9 @@ fn now_playing_controls(panel: Rect, facts: &Facts) -> Vec<Item> {
         out.push(Item { action: Action::Previous, rect: r(x, y - 46.0, 46.0, 46.0), look: Look::Transport(icons::SKIP_BACK) });
         out.push(Item { action: Action::PlayPause, rect: r(x + 54.0, y - 54.0, 54.0, 54.0), look: Look::Transport(glyph) });
         out.push(Item { action: Action::Next, rect: r(x + 116.0, y - 46.0, 46.0, 46.0), look: Look::Transport(icons::SKIP_FORWARD) });
+    }
+    if facts.music_times.is_some_and(|t| t.1 > 0) {
+        out.push(Item { action: if facts.can_seek { Action::Timeline } else { Action::Idle }, rect: timeline_rect(panel), look: Look::Timeline });
     }
     if let Some((_, muted)) = facts.volume {
         let right = panel.right() - 16.0;
@@ -652,6 +733,9 @@ pub fn caption(action: Action, facts: &Facts) -> Option<(String, String)> {
             _ => ("Talk to N4N0".into(), "Press, speak, and press again.".into()),
         },
         Action::NewConversation => ("New conversation".into(), "N4N0 starts over.".into()),
+        Action::HideView => ("Hide 3D".into(), "The capture around you goes.".into()),
+        Action::Timeline => ("Move in what plays".into(), "Press or drag along it.".into()),
+        Action::ScrollBar => ("Scroll".into(), "Hold and move it.".into()),
         Action::Video(i) => (facts.videos.get(i).map_or(String::new(), |v| v.title.clone()), "Press to copy its link, for the world's video player.".into()),
         Action::VideoDrop(_) => ("Drop it in the world".into(), "A card with its link, that whoever grabs it can use.".into()),
         Action::ResultsBack => ("Back".into(), "To the search.".into()),
@@ -901,22 +985,6 @@ pub fn paint_sheet(p: &Painter, sheet: Sheet, facts: &Facts, hover: Option<usize
     for (i, item) in sheet_items(sheet, facts).iter().enumerate() {
         draw(p, Zone::Takeover, item, facts, hover == Some(i), pressed == Some(i));
     }
-    // Where in the list this is.
-    let max = max_scroll(sheet, facts);
-    if max > 0.0 {
-        {
-            let top = match sheet {
-                Sheet::Pictures => GALLERY_TOP,
-                Sheet::Results => RESULTS_TOP,
-                Sheet::Talk => TALK_TOP,
-                _ => 8.0,
-            };
-            let track = 576.0 - top - 8.0;
-            let length = (track * track / (track + max)).max(36.0);
-            let y = top + (track - length) * (facts.gallery_scroll / max).clamp(0.0, 1.0);
-            p.rect_filled(Rect::from_min_size(pos2(1024.0 - 13.0, y), vec2(5.0, length)), theme::radius(2.5), Color32::from_white_alpha(70));
-        }
-    }
 }
 
 /// The conversation with N4N0, newest at the foot, the person's lines to the right.
@@ -1165,11 +1233,6 @@ fn draw(p: &Painter, zone: Zone, item: &Item, facts: &Facts, hovered: bool, pres
                     p.text(pos2(x, rect.top() + 78.0), Align2::LEFT_CENTER, fit(p, "What your computer plays shows here, with its controls.", &font, room), font, look::MUTED);
                 }
             }
-            if let Some((at, of)) = facts.music_times.filter(|t| t.1 > 0) {
-                let bar = Rect::from_min_size(pos2(x, rect.top() + 94.0), vec2(room, 4.0));
-                p.rect_filled(bar, theme::radius(2.0), Color32::from_white_alpha(36));
-                p.rect_filled(Rect::from_min_size(bar.min, vec2(room * (at as f32 / of as f32).clamp(0.0, 1.0), 4.0)), theme::radius(2.0), tint);
-            }
             // The level between its minus and its plus.
             if let Some((percent, muted)) = facts.volume {
                 let right = rect.right() - 16.0;
@@ -1242,15 +1305,48 @@ fn draw(p: &Painter, zone: Zone, item: &Item, facts: &Facts, hovered: bool, pres
                 clip.rect_filled(chip, theme::radius(6.0), Color32::from_black_alpha(190));
                 clip.text(chip.center(), Align2::CENTER_CENTER, duration, font, look::LABEL);
             }
-            let room = rect.width() - 84.0;
             let font = theme::font(17.0, weight::BOLD);
-            clip.text(pos2(rect.left() + 2.0, picture.bottom() + 18.0), Align2::LEFT_CENTER, fit(&clip, &video.title, &font, room), font, look::LABEL);
+            clip.text(pos2(rect.left() + 2.0, picture.bottom() + 15.0), Align2::LEFT_CENTER, fit(&clip, &video.title, &font, rect.width() - 4.0), font, look::LABEL);
             let font = theme::font(14.0, weight::MEDIUM);
-            clip.text(pos2(rect.left() + 2.0, picture.bottom() + 42.0), Align2::LEFT_CENTER, fit(&clip, &video.channel, &font, room), font, look::MUTED);
+            clip.text(pos2(rect.left() + 2.0, picture.bottom() + 45.0), Align2::LEFT_CENTER, fit(&clip, &video.channel, &font, rect.width() - 164.0), font, look::MUTED);
+        }
+        Look::VideoCopy(i) => {
+            let clip = p.with_clip_rect(Rect::from_min_max(pos2(0.0, RESULTS_TOP), pos2(1024.0, 576.0)));
+            let copied = facts.video_copied == Some(i);
+            let radius = theme::radius(rect.height() / 2.0);
+            clip.rect_filled(rect, radius, if copied { look::ACCENT } else if pressed { look::TILE_DOWN } else if hovered { look::TILE_HOVER } else { look::OPAQUE });
+            clip.rect_stroke(rect, radius, Stroke::new(1.5, look::ACCENT), egui::StrokeKind::Inside);
+            clip.text(rect.center(), Align2::CENTER_CENTER, if copied { "Copied" } else { "Copy link" }, theme::font(14.0, weight::SEMIBOLD), if copied { look::ON_ACCENT } else { look::ACCENT });
+        }
+        Look::Timeline => {
+            let Some((at, of)) = facts.music_times.filter(|t| t.1 > 0) else { return };
+            let done = (at as f32 / of as f32).clamp(0.0, 1.0);
+            let tall = if (hovered || pressed) && facts.can_seek { 6.0 } else { 4.0 };
+            let bar = Rect::from_center_size(rect.center() - vec2(0.0, 2.0), vec2(rect.width() - 80.0, tall)).translate(vec2(-40.0, 0.0));
+            p.rect_filled(bar, theme::radius(tall / 2.0), Color32::from_white_alpha(36));
+            p.rect_filled(Rect::from_min_size(bar.min, vec2(bar.width() * done, tall)), theme::radius(tall / 2.0), theme::VIOLET);
+            if facts.can_seek {
+                p.circle_filled(pos2(bar.left() + bar.width() * done, bar.center().y), if hovered || pressed { 9.0 } else { 6.0 }, look::LABEL);
+            }
+            text(p, pos2(rect.right(), bar.center().y), Align2::RIGHT_CENTER, &format!("{} / {}", minutes(at), minutes(of)), 13.0, weight::MEDIUM, look::MUTED);
+        }
+        Look::ScrollBar => {
+            let Some(sheet) = facts.sheet else { return };
+            let Some((top, track, knob)) = scroll_bar(sheet, facts) else { return };
+            let max = max_scroll(sheet, facts);
+            let y = top + (track - knob) * (facts.gallery_scroll / max).clamp(0.0, 1.0);
+            let (width, alpha) = if hovered || pressed { (10.0, 170) } else { (6.0, 80) };
+            p.rect_filled(Rect::from_min_size(pos2(rect.center().x - width / 2.0, y), vec2(width, knob)), theme::radius(width / 2.0), Color32::from_white_alpha(alpha));
+        }
+        Look::HideView => {
+            let radius = theme::radius(rect.height() / 2.0);
+            p.rect_filled(rect, radius, if hovered { look::ACCENT_SOFT } else { look::TILE });
+            p.rect_stroke(rect, radius, Stroke::new(1.5, look::ACCENT), egui::StrokeKind::Inside);
+            p.text(rect.center(), Align2::CENTER_CENTER, "Hide 3D", theme::font(13.0, weight::SEMIBOLD), look::ACCENT);
         }
         Look::VideoDrop => {
             let clip = p.with_clip_rect(Rect::from_min_max(pos2(0.0, RESULTS_TOP), pos2(1024.0, 576.0)));
-            clip.rect_filled(rect, theme::radius(rect.height() / 2.0), if hovered { look::TILE_HOVER } else { look::TILE });
+            clip.rect_filled(rect, theme::radius(rect.height() / 2.0), if pressed { look::TILE_DOWN } else if hovered { look::TILE_HOVER } else { look::TILE });
             clip.text(rect.center(), Align2::CENTER_CENTER, "Drop", theme::font(14.0, weight::SEMIBOLD), look::LABEL);
         }
         Look::Back => {
@@ -1320,12 +1416,20 @@ fn draw(p: &Painter, zone: Zone, item: &Item, facts: &Facts, hovered: bool, pres
             } else {
                 facts.worlds_visited.get(group).and_then(|v| v.earlier.get(visit - 1)).map_or(String::new(), |e| e.1.clone())
             };
+            // What it did shows on it, at once: from the press, not when the answer comes.
+            let visit_place = facts.worlds_visited.get(group).and_then(|v| if primary { Some(v.location.as_str()) } else { v.earlier.get(visit - 1).map(|e| e.0.as_str()) });
+            let state = facts.invite_chip.as_ref().filter(|(at, _)| Some(at.as_str()) == visit_place).map(|(_, state)| *state);
             let radius = theme::radius(rect.height() / 2.0);
-            p.rect_filled(rect, radius, if pressed { look::TILE_DOWN } else if hovered { look::TILE_HOVER } else { look::OPAQUE });
-            let edge = if primary || hovered { look::ACCENT } else { theme::INK_600 };
+            let (fill, ink, edge, words): (Color32, Color32, Color32, String) = match state {
+                Some(InviteChip::Asking) => (theme::mix(look::OPAQUE, look::ACCENT, 0.3), look::LABEL, look::ACCENT, "Asking…".to_string()),
+                Some(InviteChip::Sent) => (look::ACCENT, look::ON_ACCENT, look::ACCENT, "Invited".to_string()),
+                Some(InviteChip::Failed) => (theme::mix(look::OPAQUE, theme::DANGER, 0.3), look::LABEL, theme::DANGER, "Failed".to_string()),
+                None => (if pressed { theme::mix(look::OPAQUE, look::ACCENT, 0.35) } else if hovered { look::TILE_HOVER } else { look::OPAQUE }, if primary { look::ACCENT } else { look::LABEL }, if primary || hovered { look::ACCENT } else { theme::INK_600 }, words),
+            };
+            p.rect_filled(rect, radius, fill);
             p.rect_stroke(rect, radius, Stroke::new(1.5, edge), egui::StrokeKind::Inside);
             let font = theme::font(if primary { 16.0 } else { 14.0 }, weight::SEMIBOLD);
-            p.text(rect.center(), Align2::CENTER_CENTER, fit(p, &words, &font, rect.width() - 12.0), font, if primary { look::ACCENT } else { look::LABEL });
+            p.text(rect.center(), Align2::CENTER_CENTER, fit(p, &words, &font, rect.width() - 12.0), font, ink);
         }
         Look::Playing => {
             let none = facts.music.is_none();
@@ -1762,6 +1866,15 @@ mod tests {
             assert!(items.iter().any(|i| i.action == action), "{action:?}");
         }
         assert!(!items.iter().any(|i| i.action == Action::Page(Target::Music)));
+        // Its timeline takes the pointer only when the app playing it lets it: a press then says where.
+        let playing = Facts { music: Some(("A song".into(), true)), music_times: Some((30, 120)), ..facts.clone() };
+        assert!(sheet_items(Sheet::All, &playing).iter().any(|i| matches!(i.look, Look::Timeline) && i.action == Action::Idle));
+        assert_eq!(timeline_fraction(&Facts { can_seek: true, ..playing.clone() }, 0.0), Some(0.0));
+        let movable = Facts { can_seek: true, ..playing };
+        let rect = sheet_items(Sheet::All, &movable).into_iter().find(|i| matches!(i.look, Look::Timeline)).unwrap();
+        assert_eq!(rect.action, Action::Timeline);
+        assert!((timeline_fraction(&movable, rect.rect.center().x).unwrap() - 0.5).abs() < 0.001);
+        assert_eq!(timeline_fraction(&Facts { music_times: None, ..movable }, 300.0), None);
     }
 
     #[test]
@@ -1820,6 +1933,7 @@ mod tests {
         let max = max_scroll(Sheet::Results, &facts);
         assert!(tiles(&Facts { gallery_scroll: max, ..facts.clone() }).contains(&199), "the last can be reached");
         assert!(scrolls_with_a_drag(Sheet::Results, &Look::Video(0)));
+        assert!(scrolls_with_a_drag(Sheet::Results, &Look::VideoCopy(0)));
         assert!(!scrolls_with_a_drag(Sheet::Results, &Look::Back), "its back acts at once");
         // Its Drop lies on top of its tile, for the pointer too.
         let items = sheet_items(Sheet::Results, &facts);
@@ -1855,6 +1969,40 @@ mod tests {
         // What stopped a picture goes before it.
         let stopped = Facts { note: Some(("a".into(), "b".into())), ..facts };
         assert_eq!(said_now(&stopped).unwrap().0, "a");
+    }
+
+    /// Enzo: "be able to grab the scrolling bar too".
+    #[test]
+    fn a_list_that_scrolls_has_a_bar_to_grab_and_it_reaches_both_ends() {
+        let facts = Facts { recent: (0..120).map(|i| Recent { dir: PathBuf::from(format!("s{i}")), title: String::new(), state: String::new(), progress: None, picture: None }).collect(), sheet: Some(Sheet::Pictures), desktop: true, ..facts() };
+        let bar = sheet_items(Sheet::Pictures, &facts).into_iter().find(|i| i.action == Action::ScrollBar).expect("a bar");
+        assert!(bar.rect.right() <= 1024.0 && bar.rect.left() >= 1000.0, "off the tiles");
+        assert_eq!(scroll_from_bar(Sheet::Pictures, &facts, 0.0), 0.0);
+        assert_eq!(scroll_from_bar(Sheet::Pictures, &facts, 576.0), max_scroll(Sheet::Pictures, &facts));
+        // A few captures have none.
+        let few = Facts { recent: facts.recent[..2].to_vec(), ..facts.clone() };
+        assert!(!sheet_items(Sheet::Pictures, &few).iter().any(|i| i.action == Action::ScrollBar));
+    }
+
+    /// Enzo: "I don't see a copy link button anymore".
+    #[test]
+    fn a_youtube_result_says_it_copies_its_link_and_shows_when_it_did() {
+        let video = VideoTile { title: "V".into(), channel: "C".into(), duration: None, picture: None };
+        let facts = Facts { videos: vec![video], desktop: true, ..facts() };
+        let items = sheet_items(Sheet::Results, &facts);
+        let copy = items.iter().find(|i| matches!(i.look, Look::VideoCopy(0))).expect("a button");
+        assert_eq!(copy.action, Action::Video(0));
+        assert_eq!(items[hit(&items, copy.rect.center()).unwrap()].action, Action::Video(0));
+        let drop = items.iter().find(|i| i.action == Action::VideoDrop(0)).unwrap();
+        assert!(!copy.rect.intersects(drop.rect));
+    }
+
+    /// While a capture shows there is a way to hide it from any sheet.
+    #[test]
+    fn a_sheet_has_hide_3d_while_a_capture_shows() {
+        let size = Zone::SheetBack.units().size();
+        assert!(!items(Zone::SheetBack, size, &facts()).iter().any(|i| i.action == Action::HideView));
+        assert!(items(Zone::SheetBack, size, &Facts { view_showing: true, ..facts() }).iter().any(|i| i.action == Action::HideView));
     }
 
     #[test]

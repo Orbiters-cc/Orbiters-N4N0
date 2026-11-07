@@ -77,6 +77,13 @@ impl MenuButtons {
         }
     }
 
+    /// VRChat's camera opened: its wheel goes then (Enzo).
+    pub fn camera_opened(&mut self) {
+        if matches!(self.open, Open::Wheel(_)) {
+            self.open = Open::Closed;
+        }
+    }
+
     pub fn step(&mut self, down: [bool; 2], now: Instant) -> Open {
         for hand in 0..2 {
             if down[hand] && !self.down[hand] && self.press.is_none() {
@@ -94,9 +101,13 @@ impl MenuButtons {
                 if on_wheel {
                     self.open = Open::Closed;
                 } else if held < HOLD {
-                    // As VRChat must, this waits for the release: only then is it known not to be the wheel's. A wheel on the other hand gives way to it, and so does a Quick Menu
-                    // on the other hand (Enzo: "if the left quick menu is open, opening the right quick menu closes the left").
-                    self.open = if self.open == Open::QuickMenu(hand) { Open::Closed } else { Open::QuickMenu(hand) };
+                    // As VRChat must, this waits for the release: only then is it known not to be the wheel's. With a wheel open on either hand it only closes the wheel, and it
+                    // takes another press for the Quick Menu (Enzo). A Quick Menu on the other hand gives way to it ("opening the right quick menu closes the left").
+                    self.open = match self.open {
+                        Open::Wheel(_) => Open::Closed,
+                        open if open == Open::QuickMenu(hand) => Open::Closed,
+                        _ => Open::QuickMenu(hand),
+                    };
                 }
                 self.press = None;
             }
@@ -269,44 +280,35 @@ impl Jelly {
     }
 }
 
-/// A tile's own character, from -1 to 1: the same each time, different from its neighbours'.
-fn character(zone: Zone) -> f32 {
-    let mut order = Zone::WHEEL.iter().position(|z| *z == zone).or_else(|| Zone::QUICK_MENU.iter().position(|z| *z == zone)).unwrap_or(0) as f32;
-    order = (order * 2.399_963).sin();
-    order
+/// A tile's character now, from -1 to 1. It keeps changing, slowly, each tile on its own course, so that its springiness is never something to recognise (Enzo).
+fn character(zone: Zone, seconds: f32) -> f32 {
+    let order = Zone::WHEEL.iter().position(|z| *z == zone).or_else(|| Zone::QUICK_MENU.iter().position(|z| *z == zone)).unwrap_or(0) as f32;
+    let slow = (seconds * (0.23 + 0.09 * (order * 1.7).sin().abs()) + order * 2.4).sin();
+    let quick = (seconds * (0.71 + 0.23 * (order * 0.9).cos().abs()) + order * 4.1).sin();
+    slow * 0.65 + quick * 0.35
 }
 
-/// Where a hand was at `at`, from what it was at the last moments, the oldest first: between the two nearest. `None` with nothing to go by.
-fn hand_at(history: &std::collections::VecDeque<(Instant, Matrix34)>, at: Instant) -> Option<Matrix34> {
-    let after = history.iter().position(|(t, _)| *t >= at);
-    match after {
-        None => history.back().map(|(_, m)| *m),
-        Some(0) => history.front().map(|(_, m)| *m),
-        Some(i) => {
-            let ((t0, a), (t1, b)) = (history[i - 1], history[i]);
-            let span = t1.duration_since(t0).as_secs_f32();
-            let k = if span > 0.0 { at.duration_since(t0).as_secs_f32() / span } else { 1.0 };
-            let lerp = |x: [f32; 3], y: [f32; 3]| space::add(x, space::scale(space::sub(y, x), k));
-            let frame = space::from_axes(lerp(space::axis(&a, 0), space::axis(&b, 0)), lerp(space::axis(&a, 1), space::axis(&b, 1)), lerp(space::axis(&a, 2), space::axis(&b, 2)), lerp(space::position(&a), space::position(&b)));
-            space::orthonormal(&frame)
+/// How a rigid part follows the hand: smoothly, as VRChat's menu seems to. A delay did not match it (Enzo: 1.5 frames was still ahead, and it jerked), as a delay has every jitter of the hand in it.
+#[derive(Clone, Copy, Debug)]
+pub struct Smooth {
+    at: V3,
+    axes: [V3; 3],
+}
+
+impl Smooth {
+    pub fn at(pose: &Matrix34) -> Self {
+        Self { at: space::position(pose), axes: [space::axis(pose, 0), space::axis(pose, 1), space::axis(pose, 2)] }
+    }
+
+    /// `dt` further toward `pose`, with this time constant in seconds. Where it is now.
+    pub fn step(&mut self, pose: &Matrix34, constant: f32, dt: f32) -> Matrix34 {
+        let k = if constant <= 0.0 { 1.0 } else { 1.0 - (-dt / constant).exp() };
+        self.at = space::add(self.at, space::scale(space::sub(space::position(pose), self.at), k));
+        for (i, axis) in self.axes.iter_mut().enumerate() {
+            *axis = space::add(*axis, space::scale(space::sub(space::axis(pose, i), *axis), k));
         }
+        space::orthonormal(&space::from_axes(self.axes[0], self.axes[1], self.axes[2], self.at)).unwrap_or(*pose)
     }
-}
-
-/// A place on the hand, moved so that it shows where it was `behind` ago: from the controller still, as SteamVR draws, so that no delay costs what setting it in the room costs. With no
-/// delay it is the place itself. The first way of delaying set it in the room, which trailed by a frame whatever was asked: 0.05 frames looked like 1 to Enzo, and 0 was too early.
-fn behind_the_hand(on_hand: &Matrix34, now: &Matrix34, then: &Matrix34) -> Matrix34 {
-    space::compose(&space::compose(&space::inverse(now), then), on_hand)
-}
-
-/// VRChat's own time between frames from the compositor's last ones: the middle one, as a hitch says nothing of the rate. `None`: nothing to go by.
-fn game_frame_seconds(intervals_ms: &mut [f32]) -> Option<f32> {
-    let mut known: Vec<f32> = intervals_ms.iter().copied().filter(|ms| *ms > 1.0 && *ms < 200.0).collect();
-    if known.is_empty() {
-        return None;
-    }
-    known.sort_by(f32::total_cmp);
-    Some(known[known.len() / 2] / 1000.0)
 }
 
 /// How a part is told where it is.
@@ -314,10 +316,8 @@ fn game_frame_seconds(intervals_ms: &mut [f32]) -> Option<f32> {
 enum Placing {
     /// In the room, where the quad says.
     Room,
-    /// In the room, somewhere else than the quad: on its spring.
+    /// In the room, somewhere else than the quad: smoothed, or on its spring.
     At(Matrix34),
-    /// From the controller, by SteamVR as it draws.
-    Hand(u32, Matrix34),
 }
 
 /// The Quick Menu's parts on this hand. The wing lies on the side of the menu away from the hand that holds it: on the right hand it is on the left (as Enzo laid it there). The sheet is not one of
@@ -438,11 +438,12 @@ pub struct OrbitVr {
     aligning: Option<Aligning>,
     /// Each part on its spring.
     jelly: HashMap<Zone, Jelly>,
-    /// Where each hand was over the last moments.
-    hand_was: [std::collections::VecDeque<(Instant, Matrix34)>; 2],
-    /// VRChat's time between frames, as last read, and when.
-    game_frame: f32,
-    game_frame_read: Instant,
+    /// The hand holding the menu, smoothed; when this began, for the springs' changing characters; whether this asked for a capture in 3D, which goes when the menu goes; whether the camera
+    /// was open.
+    smooth: Option<(usize, Smooth)>,
+    born: Instant,
+    showed_view: bool,
+    camera_was: Option<bool>,
     /// Since when the left stick has been pushed far enough to walk.
     walking_since: Option<Instant>,
     buttons: MenuButtons,
@@ -475,9 +476,10 @@ impl OrbitVr {
             tune_read: now,
             aligning: None,
             jelly: HashMap::new(),
-            hand_was: Default::default(),
-            game_frame: 1.0 / 45.0,
-            game_frame_read: now,
+            smooth: None,
+            born: now,
+            showed_view: false,
+            camera_was: None,
             walking_since: None,
             buttons: MenuButtons::default(),
             block: Block::default(),
@@ -616,6 +618,12 @@ impl OrbitVr {
                 self.buttons.walking();
             }
         }
+        // VRChat's wheel goes when its camera opens.
+        let camera = cx.snap.camera_open_said;
+        if camera == Some(true) && self.camera_was == Some(false) {
+            self.buttons.camera_opened();
+        }
+        self.camera_was = camera;
         let open = self.buttons.open();
         let menu = match open {
             Open::QuickMenu(_) if settings.around_quick_menu() => Some(Around::QuickMenu),
@@ -627,7 +635,12 @@ impl OrbitVr {
                 self.close(&mut cx);
             }
             self.stuck.beat(false);
-            return Turn::default();
+            // A capture shown from these menus goes with them (Enzo). One shown from N4N0's own menu is not theirs to hide.
+            let mut turn = Turn::default();
+            if std::mem::take(&mut self.showed_view) {
+                turn.worlds.push(super::super::worlds::Relayed::View(super::super::worlds::panel::Action::Hide));
+            }
+            return turn;
         }
         let mut poses = [Pose::default(); MAX_DEVICES];
         cx.steamvr.predicted_poses(Universe::Standing, cx.prediction, &mut poses);
@@ -703,33 +716,25 @@ impl OrbitVr {
             })
             .collect();
 
-        // How the parts on the hand follow it (Enzo: "both options"). Exact, SteamVR moves each with the controller's own pose as it draws. VRChat's menu is drawn from a pose taken a frame
-        // before that, by how long a frame takes on this computer: so a delay is in VRChat's own frames, read as it runs, and a spring is in step with nothing, on purpose.
-        if now.duration_since(self.game_frame_read) >= Duration::from_millis(500) {
-            self.game_frame_read = now;
-            if let Ok(compositor) = cx.steamvr.compositor() {
-                let mut timings = [vr::compositor::FrameTiming::default(); 16];
-                let n = compositor.frame_timings(&mut timings);
-                let mut intervals: Vec<f32> = timings[..n].iter().map(|t| t.client_frame_interval_ms).collect();
-                self.game_frame = game_frame_seconds(&mut intervals).unwrap_or(self.game_frame);
-            }
-        }
+        // How the parts on the hand follow it (Enzo: "both options"). The pose asked for lies ahead of now by what placing an overlay in the room takes to show, so that with no smoothing nothing
+        // trails, and every move of the slider is then that much softer, with no jitter: what is told to SteamVR is where it lies, and it goes there at the next frame.
         let hand_now = match open {
             Open::Wheel(hand) | Open::QuickMenu(hand) => devices[hand].map(|d| (hand, d)),
             Open::Closed => None,
         };
         let on_this_hand = hand_now.map(|(hand, _)| if menu == Some(Around::Wheel) { (self.tune.wheel(hand), self.tune.wheel_radius * settings.vr_size / 100.0) } else { (self.tune.quick_menu(hand), self.tune.qm_unit * settings.vr_size) });
         let springy = settings.vr_motion == VrMotion::Springy && !cx.snap.settings.reduce_motion;
-        // Where the hand holding the menu was, and where it is drawn from.
-        let behind = settings.vr_delay_frames.max(0.0) * self.game_frame;
-        let late = hand_now.and_then(|(hand, device)| {
-            let pose = poses[device as usize].device_to_absolute;
-            let history = &mut self.hand_was[hand];
-            history.push_back((now, pose));
-            while history.front().is_some_and(|(t, _)| now.duration_since(*t) > Duration::from_millis(300)) {
-                history.pop_front();
-            }
-            hand_at(history, now.checked_sub(Duration::from_secs_f32(behind))?).map(|then| (pose, then))
+        let seconds = now.duration_since(self.born).as_secs_f32();
+        let mut ahead = [Pose::default(); MAX_DEVICES];
+        cx.steamvr.predicted_poses(Universe::Standing, cx.prediction + 2.0 * cx.frame, &mut ahead);
+        // The hand holding the menu, where it is shown from.
+        let hand_shown = hand_now.map(|(hand, device)| {
+            let pose = ahead[device as usize].device_to_absolute;
+            let smooth = match &mut self.smooth {
+                Some((was, smooth)) if *was == hand => smooth,
+                held => &mut held.insert((hand, Smooth::at(&pose))).1,
+            };
+            (pose, smooth.step(&pose, settings.vr_smoothing_ms.max(0.0) / 1000.0, dt))
         });
         let jelly = &mut self.jelly;
         let aligning = self.aligning.is_some();
@@ -744,31 +749,29 @@ impl OrbitVr {
                 if aligning || (sheet && from_wheel) {
                     return Placing::Room;
                 }
-                let (Some((_, device)), Some((frame, unit))) = (hand_now, on_this_hand) else { return Placing::Room };
-                // What lies in front of VRChat's menu keeps with it. What lies around it can dance (Enzo).
-                if springy && !sheet {
-                    let c = p.placed.rect.center();
-                    let soft = (c.x.hypot(c.y) * unit / 0.25).min(1.0);
-                    let state = jelly.entry(p.zone).or_insert_with(|| Jelly::at(&quad.transform));
-                    return Placing::At(state.step(&quad.transform, soft, character(p.zone), dt));
-                }
+                let (Some((sharp, smooth)), Some((frame, unit))) = (hand_shown, on_this_hand) else { return Placing::Room };
                 let near = match p.zone {
                     Zone::Takeover => TAKEOVER_NEAR_M,
                     Zone::SheetBack => TAKEOVER_NEAR_M - 0.004,
                     _ => NEAR_M,
                 };
                 let on_hand = Plane { frame, unit }.quad(&p.placed, -p.outward(), near).transform;
-                match &late {
-                    Some((now, then)) if behind > 0.0 => Placing::Hand(device, behind_the_hand(&on_hand, now, then)),
-                    _ => Placing::Hand(device, on_hand),
+                // What lies in front of VRChat's menu keeps with it. What lies around it can dance (Enzo).
+                if springy && !sheet {
+                    let target = space::compose(&sharp, &on_hand);
+                    let c = p.placed.rect.center();
+                    let soft = (c.x.hypot(c.y) * unit / 0.25).min(1.0);
+                    let state = jelly.entry(p.zone).or_insert_with(|| Jelly::at(&target));
+                    return Placing::At(state.step(&target, soft, character(p.zone, seconds), dt));
                 }
+                Placing::At(space::compose(&smooth, &on_hand))
             })
             .collect();
         if hand_now.is_none() || !springy {
             self.jelly.clear();
         }
         if hand_now.is_none() {
-            self.hand_was = Default::default();
+            self.smooth = None;
         }
 
         // Who points at what.
@@ -837,6 +840,13 @@ impl OrbitVr {
         }
 
         turn.worlds = self.panels.world_relay(cx.world_status.clone());
+        for asked in &turn.worlds {
+            match asked {
+                super::super::worlds::Relayed::Show(_) => self.showed_view = true,
+                super::super::worlds::Relayed::View(super::super::worlds::panel::Action::Hide) => self.showed_view = false,
+                super::super::worlds::Relayed::View(_) => {}
+            }
+        }
         // Pictures, then each overlay where it goes.
         self.show(&mut cx, &quads, &placing);
         self.last_shown = true;
@@ -866,7 +876,6 @@ impl OrbitVr {
                 }
                 let _ = cx.overlay.set_width_in_meters(*handle, quad.width);
                 let _ = match place {
-                    Placing::Hand(device, transform) => cx.overlay.set_transform_device_relative(*handle, *device, transform),
                     Placing::At(transform) => cx.overlay.set_transform_absolute(*handle, transform),
                     Placing::Room => cx.overlay.set_transform_absolute(*handle, &quad.transform),
                 };
@@ -952,9 +961,10 @@ mod tests {
         // Then the Quick Menu opens with its first press, and closes with its second.
         assert_eq!(run(&mut b, t0, &[(1, 1600, 1700)], 1800), Open::QuickMenu(1));
         assert_eq!(run(&mut b, t0, &[(1, 1900, 2000)], 2100), Open::Closed);
-        // The Quick Menu from the other hand over a wheel: it takes the wheel's place.
+        // Enzo: a press with a wheel open closes it, whichever hand, and it takes another for the Quick Menu.
         assert_eq!(run(&mut b, t0, &[(0, 2200, 2900)], 3000), Open::Wheel(0));
-        assert_eq!(run(&mut b, t0, &[(1, 3100, 3200)], 3300), Open::QuickMenu(1));
+        assert_eq!(run(&mut b, t0, &[(1, 3100, 3200)], 3300), Open::Closed);
+        assert_eq!(run(&mut b, t0, &[(1, 3310, 3390)], 3400), Open::QuickMenu(1));
         // Enzo: a Quick Menu opened on the other hand closes the first, and is the one open: the next press there closes it.
         assert_eq!(run(&mut b, t0, &[(0, 3400, 3500)], 3600), Open::QuickMenu(0));
         assert_eq!(run(&mut b, t0, &[(1, 3700, 3800)], 3900), Open::QuickMenu(1));
@@ -1120,52 +1130,70 @@ mod tests {
         assert!(x > y, "{x} {y}");
     }
 
-    /// Enzo: "this delay is not hardcoded in VRChat but more of a real lag, so it would change for each people".
+    /// Enzo: "the vrchat one might actually have some smoothing to it".
     #[test]
-    fn vrchat_s_frame_time_is_read_as_it_runs() {
-        // The middle of what the compositor saw, as a hitch says nothing of the rate.
-        assert_eq!(game_frame_seconds(&mut [27.0, 27.0, 400.0, 0.0, 27.0, 90.0, 27.0]), Some(0.027));
-        assert_eq!(game_frame_seconds(&mut [0.0, 0.0]), None);
+    fn a_rigid_part_follows_the_hand_softly_and_a_shake_is_no_jitter() {
+        let start = grip();
+        // No smoothing: where the hand is.
+        let mut none = Smooth::at(&start);
+        let to = moved(&start, 0.03);
+        assert!(space::length(space::sub(space::position(&none.step(&to, 0.0, 0.011)), space::position(&to))) < 0.0001);
+        // Smoothing: on the way there, and there in the end, never past it.
+        let mut soft = Smooth::at(&start);
+        let first = space::position(&soft.step(&to, 0.03, 0.011))[0] - space::position(&start)[0];
+        assert!(first > 0.0 && first < 0.03, "{first}");
+        let mut most = first;
+        for _ in 0..100 {
+            most = most.max(space::position(&soft.step(&to, 0.03, 0.011))[0] - space::position(&start)[0]);
+        }
+        assert!((most - 0.03).abs() < 0.0005 && most <= 0.03 + 0.0001, "{most}");
+        // A hand shaking 1 cm at 15 Hz moves it far less than that.
+        let mut shaken = Smooth::at(&start);
+        let (mut low, mut high) = (f32::MAX, f32::MIN);
+        for i in 0..200 {
+            let t = i as f32 * 0.011;
+            let x = space::position(&shaken.step(&moved(&start, 0.01 * (t * 15.0 * std::f32::consts::TAU).sin()), 0.03, 0.011))[0];
+            if i > 100 {
+                (low, high) = (low.min(x), high.max(x));
+            }
+        }
+        assert!(high - low < 0.008, "{}", high - low);
+        // A longer constant, softer still.
+        let (mut a, mut b) = (Smooth::at(&start), Smooth::at(&start));
+        let (x, y) = (space::position(&a.step(&to, 0.02, 0.011))[0], space::position(&b.step(&to, 0.1, 0.011))[0]);
+        assert!(x > y);
     }
 
-    /// Enzo: 0 frames too early, 1 too late, and 0.05 no different from 1. A small delay must be a small move.
+    /// Enzo: "constantly vary so [...] we don't start to spot the individual springyness of each tile".
     #[test]
-    fn a_delay_moves_a_part_by_what_the_hand_moved_in_that_time_and_no_delay_not_at_all() {
+    fn a_tile_s_springiness_keeps_changing_and_differs_from_its_neighbours() {
+        let at = |zone: Zone, t: f32| character(zone, t);
+        for zone in Zone::WING {
+            let values: Vec<f32> = (0..200).map(|i| at(zone, i as f32 * 0.25)).collect();
+            assert!(values.iter().all(|v| v.abs() <= 1.0));
+            let (low, high) = values.iter().fold((f32::MAX, f32::MIN), |(l, h), v| (l.min(*v), h.max(*v)));
+            assert!(high - low > 0.8, "{zone:?} changes: {low} {high}");
+        }
+        for t in [0.0, 3.0, 17.0] {
+            for (i, a) in Zone::WING.iter().enumerate() {
+                for b in &Zone::WING[i + 1..] {
+                    assert!((at(*a, t) - at(*b, t)).abs() > 0.0001, "{a:?} {b:?} at {t}");
+                }
+            }
+        }
+    }
+
+    /// Enzo: "when I open the camera, the wheel menu disappears".
+    #[test]
+    fn the_camera_opening_closes_the_wheel_and_not_the_quick_menu() {
         let t0 = Instant::now();
-        let at = |x: f32| moved(&grip(), x);
-        let history: std::collections::VecDeque<(Instant, Matrix34)> = (0..10).map(|i| (t0 + Duration::from_millis(i * 10), at(i as f32 * 0.01))).collect();
-        // Between two samples, where the hand was.
-        let then = hand_at(&history, t0 + Duration::from_millis(45)).unwrap();
-        assert!((space::position(&then)[0] - space::position(&at(0.045))[0]).abs() < 0.0001);
-        // Before and after what is kept, the nearest.
-        assert_eq!(hand_at(&history, t0 - Duration::from_millis(0)).unwrap().m, at(0.0).m);
-        assert_eq!(hand_at(&history, t0 + Duration::from_secs(9)).unwrap().m, at(0.09).m);
-        let on_hand = Tune::default().quick_menu(0);
-        let now = at(0.09);
-        // No delay: the place itself, exactly.
-        let none = behind_the_hand(&on_hand, &now, &now);
-        for i in 0..3 {
-            for j in 0..4 {
-                assert!((none.m[i][j] - on_hand.m[i][j]).abs() < 0.0001);
-            }
-        }
-        // Shown from the hand as it is now, it lands where the hand was: 3 cm behind for a hand that moved 3 cm, and nothing jumps at a small delay.
-        let small = behind_the_hand(&on_hand, &now, &at(0.089));
-        let shown = |m: &Matrix34| space::position(&space::compose(&now, m));
-        let gap = space::length(space::sub(shown(&small), shown(&on_hand)));
-        assert!((gap - 0.001).abs() < 0.0001, "{gap}");
-        let large = behind_the_hand(&on_hand, &now, &at(0.06));
-        assert!((space::length(space::sub(shown(&large), shown(&on_hand))) - 0.03).abs() < 0.0001);
-    }
-
-    #[test]
-    fn no_two_tiles_of_the_wing_have_the_same_character() {
-        for (i, a) in Zone::WING.iter().enumerate() {
-            assert!(character(*a).abs() <= 1.0);
-            for b in &Zone::WING[i + 1..] {
-                assert!((character(*a) - character(*b)).abs() > 0.02, "{a:?} {b:?}");
-            }
-        }
+        let mut b = fresh(t0);
+        assert_eq!(run(&mut b, t0, &[(1, 100, 900)], 1000), Open::Wheel(1));
+        b.camera_opened();
+        assert_eq!(b.open(), Open::Closed);
+        assert_eq!(run(&mut b, t0, &[(1, 1100, 1200)], 1300), Open::QuickMenu(1), "and the next press is the Quick Menu's");
+        b.camera_opened();
+        assert_eq!(b.open(), Open::QuickMenu(1));
     }
 
     /// As Enzo laid them.

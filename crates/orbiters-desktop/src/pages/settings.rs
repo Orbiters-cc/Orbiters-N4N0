@@ -1121,8 +1121,8 @@ fn orbit_settings(ui: &mut egui::Ui, snap: &Snapshot, orbit: &mut orbiters_core:
         apply |= widgets::segmented(ui, "orbit-vr-motion", &mut orbit.vr_motion, &motions, true);
     });
     widgets::separator(ui);
-    widgets::field(ui, "Delay behind your hand", Some("For what opens in front of VRChat's menu, always, and for the tiles with Match VRChat. Move it while shaking your hand in the headset, until it stays with VRChat's menu. In VRChat's frames, so it follows your frame rate."), 300.0, |ui| {
-        apply |= widgets::slider(ui, "orbit-vr-delay", &mut orbit.vr_delay_frames, 0.0..=1.5, 0.05, |v| if v == 0.0 { "None".into() } else { format!("{v:.2} frames") });
+    widgets::field(ui, "Smoothing", Some("How softly what is rigid follows your hand: what opens in front of VRChat's menu, always, and the tiles with Match VRChat. Move it while shaking your hand in the headset, until it stays with VRChat's menu."), 300.0, |ui| {
+        apply |= widgets::slider(ui, "orbit-vr-smoothing", &mut orbit.vr_smoothing_ms, 0.0..=150.0, 5.0, |v| if v == 0.0 { "None".into() } else { format!("{v:.0} ms") });
     });
     let now = if !orbiters_core::osc::VRCHAT_RUNS_HERE {
         Some("VRChat runs on another computer here, so nothing can appear around its menus.".to_string())

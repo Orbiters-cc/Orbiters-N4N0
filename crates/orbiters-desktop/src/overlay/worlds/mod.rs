@@ -627,6 +627,13 @@ impl Worlds {
         std::mem::take(&mut self.relayed)
     }
 
+    /// The 3D view goes: from a button that is not on this panel.
+    pub fn hide_view(&mut self) {
+        if self.relay.is_some() {
+            self.relayed.push(Relayed::View(Action::Hide));
+        }
+    }
+
     /// What a panel on a sheet asked: as if pressed on this one.
     pub fn from_elsewhere(&mut self, asked: Vec<Relayed>) {
         for ask in asked {

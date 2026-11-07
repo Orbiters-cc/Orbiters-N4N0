@@ -1108,6 +1108,14 @@ impl Controller {
         if self.view().worn_kit != kit {
             self.update(|s| s.worn_kit = kit);
         }
+        // What VRChat sent when it last changed: no asking, this comes round often.
+        let camera = self.osc_values.lock().unwrap().latest.get(CAMERA_MODE).and_then(|(v, _)| match v.first() {
+            Some(OscValue::Int(mode)) => Some(*mode != 0),
+            _ => None,
+        });
+        if self.view().camera_open_said != camera {
+            self.update(|s| s.camera_open_said = camera);
+        }
     }
 
     pub fn set_overlay_connected(self: &Shared, connected: bool) {

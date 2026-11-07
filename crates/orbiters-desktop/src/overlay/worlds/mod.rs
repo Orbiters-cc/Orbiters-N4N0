@@ -557,7 +557,10 @@ impl Worlds {
             Shown::Captures if captures.len() <= FEW_CAPTURES => {
                 let listed = self.finder.list(&WorldList::Popular);
                 let first: Vec<&Entry> = captures.iter().collect();
-                finder::merge(&captures, &first, &listed.items, None, &feedback)
+                let mut out = finder::merge(&captures, &first, &listed.items, None, &feedback);
+                // Under their heading, a few: Popular has the rest.
+                out.truncate(captures.len() + panel::FEW_MORE);
+                out
             }
             Shown::Captures => captures,
             Shown::Visited => {
@@ -749,7 +752,8 @@ impl Worlds {
         let small = self.view.small_now().copied().filter(|s| s.taken && !s.docked);
         let eye = stereo::position(&view::head_pose(steamvr, 0.0));
         let wanted = small.map(|s| {
-            let place = small_hint::chip_place(s.anchor, s.radius(), eye);
+            let plate = self.view.small_plate().map_or(s.anchor, |(at, _)| stereo::position(&at));
+            let place = small_hint::chip_place(plate, s.radius(), eye);
             // The hand holding it does not press what lies under it.
             let holding = s.held_by();
             let pointed = (0..2).any(|h| Some(h) != holding && self.small_rays[h].is_some_and(|(tip, along)| small_hint::on_chip(&place, tip, along)));

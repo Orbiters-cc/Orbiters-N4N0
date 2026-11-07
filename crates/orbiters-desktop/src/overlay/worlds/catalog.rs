@@ -609,7 +609,8 @@ impl Capture {
             heights.sort_by(f32::total_cmp);
             // A ceiling is a layer far denser than what stands under it: no one sees in through it.
             let ceiling = ceiling_in(&heights, (view.eye()[1] - ground).max(0.8));
-            let top = ceiling.map_or(heights[heights.len() * 9 / 10] * 1.15, |c| c - 0.15).max(1.6);
+            // The ragged top of what stands, where it fades out in the capture, is cut off clean.
+            let top = ceiling.map_or(heights[heights.len() * 9 / 10], |c| (c - 0.15).min(heights[heights.len() * 9 / 10])).max(1.2);
             let tall = heights.iter().copied().filter(|h| *h <= top).max_by(f32::total_cmp).unwrap_or(top).min(top);
             let share = standing.len() as f32 / inside.len() as f32;
             // Much that stands up, that stands high against how wide the plate is, seen from close enough to tell what it is.
@@ -624,6 +625,10 @@ impl Capture {
                 best = SmallFrame { middle, reach: reach * 1.3, ground, top: ground + top };
             }
         }
+        // What lies across it overhead is no part of a stage, however thin or fuzzy: it stops under the first such layer.
+        if let Some(slab) = slab_over(&points, &best, (view.eye()[1] - ground).max(0.8) * 0.7) {
+            best.top = best.top.min(slab);
+        }
         best
     }
 
@@ -636,12 +641,20 @@ impl Capture {
         let position = flip(frame.middle);
         let view = StartView { position, target: stereo::add(position, forward), floor: Some(frame.ground), eye_height: None };
         let g = &self.gaussians;
-        let across = |i: usize| (g.means[i][0] - frame.middle[0]).hypot(g.means[i][2] - frame.middle[2]);
-        let mut order: Vec<(f32, usize)> = (0..g.len())
-            // Nor the huge soft splats that stood for far things: up close, on a small stage, they are smears.
-            .filter(|&i| g.is_finite(i) && g.means[i][1] > frame.ground - 0.25 && g.means[i][1] < frame.top && g.log_scales[i].iter().all(|s| s.exp() < 0.25))
-            .map(|i| (across(i), i))
+        let largest = |i: usize| g.log_scales[i].iter().copied().fold(f32::MIN, f32::max).exp();
+        // How far it reaches, its size counted: at any zoom what lies at the rim is what stays inside it.
+        let across = |i: usize| (g.means[i][0] - frame.middle[0]).hypot(g.means[i][2] - frame.middle[2]) + largest(i) * 1.5;
+        // Nor the soft splats that stood for far things: up close, on a small stage, they are smears.
+        // Flat patches are floors and walls, and may be larger than what is round.
+        let most = (frame.reach * 0.05).clamp(0.04, 0.25);
+        let flat = |i: usize| g.log_scales[i].iter().copied().fold(f32::MAX, f32::min).exp() < largest(i) * 0.3;
+        // Over where the camera was, no: there a large flat patch is a piece of ceiling, whatever was found of the rest of it.
+        let camera = frame.ground + (self.view.eye()[1] - frame.ground).max(0.8);
+        let kept: Vec<usize> = (0..g.len())
+            .filter(|&i| g.is_finite(i) && g.means[i][1] > frame.ground - 0.25 && g.means[i][1] < frame.top && g.opacity_logits[i] > -2.0 && largest(i) < if flat(i) && g.means[i][1] < camera { most * 3.0 } else { most })
             .collect();
+        let kept = away_from_floaters(g, kept, frame.reach / 14.0);
+        let mut order: Vec<(f32, usize)> = kept.into_iter().map(|i| (across(i), i)).collect();
         order.sort_by(|a, b| a.0.total_cmp(&b.0));
         let mut sorted = Gaussians::default();
         for &(_, i) in &order {
@@ -675,6 +688,59 @@ pub struct SmallFrame {
     pub ground: f32,
     /// Where it stops going up: under a ceiling, or over what stands highest.
     pub top: f32,
+}
+
+/// Where something lying across all of what shows starts, above `from` over the ground, if anything does: a thin layer that covers a good part of its round.
+fn slab_over(points: &[V3], frame: &SmallFrame, from: f32) -> Option<f32> {
+    const CELLS: usize = 20;
+    const COVERS: f32 = 0.22;
+    let layer = (frame.reach * 0.035).max(0.05);
+    let cell = frame.reach * 2.0 / CELLS as f32;
+    let round = (CELLS * CELLS) as f32 * std::f32::consts::FRAC_PI_4;
+    let layers = (((frame.top - frame.ground - from) / layer).ceil().max(0.0) as usize).min(200);
+    let mut filled: Vec<std::collections::HashSet<(i32, i32)>> = vec![Default::default(); layers];
+    for p in points {
+        let (dx, dz) = (p[0] - frame.middle[0], p[2] - frame.middle[2]);
+        if dx.hypot(dz) > frame.reach {
+            continue;
+        }
+        let at = (p[1] - frame.ground - from) / layer;
+        if at >= 0.0 && (at as usize) < layers {
+            filled[at as usize].insert(((dx / cell).floor() as i32, (dz / cell).floor() as i32));
+        }
+    }
+    // With a little room under it: its fuzz hangs lower than itself.
+    filled.iter().position(|cells| cells.len() as f32 / round > COVERS).map(|i| frame.ground + from + (i as f32 - 2.0) * layer)
+}
+
+/// Of the splats `kept`, those with others around them: what floats on its own in the air of a capture is an error of its training.
+fn away_from_floaters(g: &Gaussians, kept: Vec<usize>, cell: f32) -> Vec<usize> {
+    let at = |i: usize| {
+        let m = g.means[i];
+        ((m[0] / cell).floor() as i32, (m[1] / cell).floor() as i32, (m[2] / cell).floor() as i32)
+    };
+    let mut count: HashMap<(i32, i32, i32), u32> = HashMap::with_capacity(kept.len() / 4);
+    for &i in &kept {
+        *count.entry(at(i)).or_default() += 1;
+    }
+    kept.into_iter()
+        .filter(|&i| {
+            let (x, y, z) = at(i);
+            let own = count.get(&(x, y, z)).copied().unwrap_or(0);
+            if own >= 4 {
+                return true;
+            }
+            let mut around = 0;
+            for dx in -1..=1 {
+                for dy in -1..=1 {
+                    for dz in -1..=1 {
+                        around += count.get(&(x + dx, y + dy, z + dz)).copied().unwrap_or(0);
+                    }
+                }
+            }
+            around >= 3
+        })
+        .collect()
 }
 
 /// How high a ceiling lies, of `heights` above the ground (sorted): the first thin layer above where the camera was holding far
@@ -800,6 +866,25 @@ mod tests {
     ],"feedback":{"WRLD_HOME":{"likes":41,"labels":{"mirror":9,"meetup":12,"pens":9,"gone":0},"comments":7,
         "recent":[{"by":"Kana","text":"The mirror room is perfect for photos.","at":"2026-10-29T21:04:00Z"},{"text":"no author"},{"by":"x"}]},
         "wrld_dawn":"not an object"}}"#;
+
+    /// Round 4's judges: "a ceiling slab still crosses the room".
+    #[test]
+    fn a_slab_overhead_and_what_floats_alone_are_left_out() {
+        let closed = scene(Some(2.3));
+        let frame = closed.small_frame();
+        assert!(frame.top < 2.3, "{frame:?}");
+        let small = closed.around_subject();
+        assert!(small.gaussians.means.iter().all(|m| m[1] < 2.3));
+        // A lone splat in the air goes; a crowd stays.
+        let mut g = Gaussians::default();
+        splat(&mut g, 5.0, 5.0, 5.0);
+        for i in 0..50 {
+            splat(&mut g, i as f32 * 0.01, 0.0, 0.0);
+        }
+        let kept = away_from_floaters(&g, (0..g.len()).collect(), 0.1);
+        assert_eq!(kept.len(), 50);
+        assert!(!kept.contains(&0));
+    }
 
     fn splat(g: &mut Gaussians, x: f32, y: f32, z: f32) {
         g.push([x, y, z], [-3.5; 3], [1.0, 0.0, 0.0, 0.0], 3.0, [0.5; 3]);

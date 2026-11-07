@@ -605,10 +605,10 @@ fn route(method: &str, target: &str, host: &str, in_world: bool) -> Result<(), (
     let path = target.split('?').next().unwrap_or_default();
     let hosts = [format!("127.0.0.1:{}", contract::PORT), format!("localhost:{}", contract::PORT)];
     if !hosts.iter().any(|h| h.eq_ignore_ascii_case(host)) {
-        return Err((421, "Misdirected Request"));
+        return Err((421, "Misdirected Request")); // i18n: not shown (the HTTP reason phrase of the status line a world's page reads)
     }
     if method != "GET" || path != contract::PATH || !in_world {
-        return Err((404, "Not Found"));
+        return Err((404, "Not Found")); // i18n: not shown (the HTTP reason phrase of the status line a world's page reads)
     }
     Ok(())
 }

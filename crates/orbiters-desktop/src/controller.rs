@@ -557,7 +557,7 @@ impl Controller {
 
     fn ensure_worker(self: &Shared) -> anyhow::Result<()> {
         // A late OSC echo or a queued start while the app quits starts no worker.
-        anyhow::ensure!(!self.quitting.load(Ordering::Relaxed), "Orbiters - N4N0 is quitting.");
+        anyhow::ensure!(!self.quitting.load(Ordering::Relaxed), "{}", tr("Orbiters - N4N0 is quitting."));
         let mut guard = self.worker.lock().unwrap();
         if let Some(w) = guard.as_mut() {
             if w.alive() {
@@ -616,15 +616,15 @@ impl Controller {
     /// the values' lock, which must not wait for a process to start. Gone meanwhile (the app quits): an error.
     fn send_if_running(&self, cmd: &WorkerCommand) -> anyhow::Result<()> {
         let mut guard = self.worker.lock().unwrap();
-        guard.as_mut().ok_or_else(|| anyhow::anyhow!("the capture worker is not running"))?.send(cmd)
+        guard.as_mut().ok_or_else(|| anyhow::anyhow!("{}", tr("the capture worker is not running")))?.send(cmd)
     }
 
     /// A 3D picture or a scan records a session of its own: none may run, nor still be being saved.
     pub(super) fn ensure_capture_idle(&self) -> anyhow::Result<()> {
         match self.snapshot.lock().unwrap().capture.state {
             CaptureState::Idle => Ok(()),
-            CaptureState::Stopping => anyhow::bail!("The last recording is still being saved: try again in a moment."),
-            _ => anyhow::bail!("A recording is under way: stop it first."),
+            CaptureState::Stopping => anyhow::bail!("{}", tr("The last recording is still being saved: try again in a moment.")),
+            _ => anyhow::bail!("{}", tr("A recording is under way: stop it first.")),
         }
     }
 
@@ -835,11 +835,11 @@ impl Controller {
     }
 
     fn start_with(self: &Shared, source: SourceSpec, importing: bool, from_osc: bool) -> anyhow::Result<()> {
-        anyhow::ensure!(!self.quitting.load(Ordering::Relaxed), "Orbiters - N4N0 is quitting.");
+        anyhow::ensure!(!self.quitting.load(Ordering::Relaxed), "{}", tr("Orbiters - N4N0 is quitting."));
         let settings = self.settings();
         let spout = matches!(source, SourceSpec::Spout { .. });
         if !importing && !settings.consent_acknowledged {
-            anyhow::bail!("Please read and accept the capture notice first (Capture page).");
+            anyhow::bail!("{}", tr("Please read and accept the capture notice first (Capture page)."));
         }
         if self.snapshot.lock().unwrap().capture.state == CaptureState::Stopping {
             // The last session is still being saved: this one starts once it is (`capture_ended`).
@@ -1170,7 +1170,7 @@ impl Controller {
         let query = self.with_osc(|o| o.vrchat_query());
         let result = match query {
             None => return Vec::new(),
-            Some(None) => Err(anyhow::anyhow!("VRChat's OSCQuery service was not found")),
+            Some(None) => Err(anyhow::anyhow!("VRChat's OSCQuery service was not found")), // i18n: not shown (logged as "current OSC values")
             Some(Some(addr)) => orbiters_core::osc::vrchat_values(addr, Duration::from_secs(1)),
         };
         let mut values = result.unwrap_or_else(|e| {
@@ -1348,7 +1348,7 @@ impl Controller {
 
     pub fn import_raw_capture(self: &Shared, dir: PathBuf) -> anyhow::Result<()> {
         if self.is_capturing() {
-            anyhow::bail!("Finish the current capture first.");
+            anyhow::bail!("{}", tr("Finish the current capture first."));
         }
         self.start_with(SourceSpec::RawSequence { path: dir, realtime: false }, true, false)
     }
@@ -1633,11 +1633,11 @@ impl Controller {
     /// Sends a session's splats to the Unity editor that runs Mixer (the most recently loaded one when several do).
     pub fn send_to_mixer(&self, dir: PathBuf, title: String) -> anyhow::Result<()> {
         if bundle::read_manifest(&dir).is_err() || orbiters_core::reconstruction::read_report(&dir).is_none() {
-            anyhow::bail!("This session has no reconstruction to send.");
+            anyhow::bail!("{}", tr("This session has no reconstruction to send."));
         }
         let editors = crate::mixer_inbox::endpoints(&orbiters_core::paths::mixer_inbox_dir(), crate::mixer_inbox::process_alive);
         let Some(editor) = editors.first() else {
-            anyhow::bail!("Open your Unity project with Mixer to send the splats to it.");
+            anyhow::bail!("{}", tr("Open your Unity project with Mixer to send the splats to it."));
         };
         // Mixer reads the PLY itself: an edited capture goes as a copy holding only the splats its 3D view keeps.
         let sent = crate::mixer_inbox::session_for_mixer(&dir, &crate::mixer_inbox::exports_dir())?;
@@ -1818,19 +1818,19 @@ impl Controller {
     fn start_reconstruction(self: &Shared, dir: PathBuf) -> anyhow::Result<()> {
         let root = self.settings().sessions_dir;
         if !inside(&root, &dir) || !dir.join("manifest.json").is_file() {
-            anyhow::bail!("Only sessions inside the sessions folder can be reconstructed.");
+            anyhow::bail!("{}", tr("Only sessions inside the sessions folder can be reconstructed."));
         }
         if orbiters_core::bundle::read_manifest(&dir).is_ok_and(|m| m.stats.frames > 0 && m.stats.keyframes == 0) {
-            anyhow::bail!("This recording has no keyframes: its frames came without the capture strip, so there is nothing to reconstruct.");
+            anyhow::bail!("{}", tr("This recording has no keyframes: its frames came without the capture strip, so there is nothing to reconstruct."));
         }
         self.ensure_frames_kept(&dir)?;
         if self.is_capturing() {
-            anyhow::bail!("Finish the capture first: reconstruction takes the whole GPU.");
+            anyhow::bail!("{}", tr("Finish the capture first: reconstruction takes the whole GPU."));
         }
         let integrated = self.settings().reconstruct_while_playing == WhilePlaying::IntegratedGpu && self.snapshot.lock().unwrap().vrchat.runs_here();
         let mut guard = self.reconstruction.lock().unwrap();
         if guard.is_some() {
-            anyhow::bail!("A reconstruction is already running.");
+            anyhow::bail!("{}", tr("A reconstruction is already running."));
         }
         crate::upload_prep::forget(&dir);
         crate::upload_prep::pause();
@@ -1883,7 +1883,7 @@ impl Controller {
     pub fn queue_reconstruction(self: &Shared, dir: PathBuf) -> anyhow::Result<bool> {
         let root = self.settings().sessions_dir;
         if !inside(&root, &dir) || !dir.join("manifest.json").is_file() {
-            anyhow::bail!("Only sessions inside the sessions folder can be reconstructed.");
+            anyhow::bail!("{}", tr("Only sessions inside the sessions folder can be reconstructed."));
         }
         self.ensure_frames_kept(&dir)?;
         let running = self.running_reconstruction();
@@ -2130,10 +2130,11 @@ impl Controller {
 
     /// A session reconstructs from its frames: not one whose capture files were deleted, nor one being cleaned up.
     fn ensure_frames_kept(&self, dir: &Path) -> anyhow::Result<()> {
-        anyhow::ensure!(!self.cleaning(dir), "Its capture files are being deleted.");
+        anyhow::ensure!(!self.cleaning(dir), "{}", tr("Its capture files are being deleted."));
         anyhow::ensure!(
             !(orbiters_core::cleanup::trimmed(dir) && orbiters_core::cleanup::has_view(dir)),
-            "Only its 3D view is kept: its capture files were deleted."
+            "{}",
+            tr("Only its 3D view is kept: its capture files were deleted.")
         );
         Ok(())
     }
@@ -2142,9 +2143,9 @@ impl Controller {
     pub fn trash_session(self: &Shared, dir: &Path) -> anyhow::Result<()> {
         let root = self.settings().sessions_dir;
         if !inside(&root, dir) || !dir.join("manifest.json").is_file() {
-            anyhow::bail!("Only session folders inside the sessions folder can be removed.");
+            anyhow::bail!("{}", tr("Only session folders inside the sessions folder can be removed."));
         }
-        anyhow::ensure!(!self.cleaning(dir), "This session is being cleaned up: try again once that is done.");
+        anyhow::ensure!(!self.cleaning(dir), "{}", tr("This session is being cleaned up: try again once that is done."));
         // Waiting or paused, it no longer goes on.
         self.unqueue_reconstruction(dir);
         move_to_bin(dir)?;

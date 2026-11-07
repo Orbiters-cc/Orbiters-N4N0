@@ -87,14 +87,14 @@ static PICTURE_CACHE: std::sync::Mutex<()> = std::sync::Mutex::new(());
 impl Controller {
     pub fn vrchat_data(&self, scope: Scope, request: Request) -> Result {
         if scope != Scope::of(&self.view()) {
-            return Err("The account changed. Please try again.".into());
+            return Err(tr("The account changed. Please try again.").into());
         }
         let _pictures = matches!(&request, Request::Avatars { .. } | Request::Worlds { .. }).then(|| PICTURE_CACHE.lock().unwrap_or_else(|e| e.into_inner()));
         let source = self.vrchat_source();
         let result = (|| -> anyhow::Result<Response> {
             Ok(match request {
                 Request::Avatars { ids } => {
-                    anyhow::ensure!(ids.len() <= 8, "Too many avatar thumbnails requested.");
+                    anyhow::ensure!(ids.len() <= 8, "{}", tr("Too many avatar thumbnails requested."));
                     let mut pictures = Vec::new();
                     let mut missing = Vec::new();
                     let mut errors = Vec::new();
@@ -142,7 +142,7 @@ impl Controller {
                     Response::Avatars { pictures, errors }
                 }
                 Request::Worlds { ids } => {
-                    anyhow::ensure!(ids.len() <= 8, "Too many world thumbnails requested.");
+                    anyhow::ensure!(ids.len() <= 8, "{}", tr("Too many world thumbnails requested."));
                     // Kept a day: a world's thumbnail changes with its uploads.
                     let cache = orbiters_projects::data_dir().join("world-thumbnails");
                     let mut pictures = Vec::new();
@@ -168,18 +168,18 @@ impl Controller {
                 Request::Instance { world, instance } => Response::Instance(source.instance_alive(&world, &instance)?),
                 Request::Image { url } => Response::Image(source.image(&url)?),
                 Request::Owned { ids } => {
-                    anyhow::ensure!(ids.len() <= OWNED_BATCH, "Too many avatars and worlds asked about.");
+                    anyhow::ensure!(ids.len() <= OWNED_BATCH, "{}", tr("Too many avatars and worlds asked about."));
                     Response::Owned(source.owned(&ids)?)
                 }
                 Request::WorldList { list, page } => {
-                    anyhow::ensure!(page <= orbiters_core::maps::FOUND_PAGES, "That page of worlds is too far.");
+                    anyhow::ensure!(page <= orbiters_core::maps::FOUND_PAGES, "{}", tr("That page of worlds is too far."));
                     if let orbiters_core::maps::WorldList::Search(q) = &list {
-                        anyhow::ensure!(q.trim().chars().count() >= 2, "Type at least two characters.");
+                        anyhow::ensure!(q.trim().chars().count() >= 2, "{}", tr("Type at least two characters."));
                     }
                     Response::Worlds(source.worlds(&list, page)?)
                 }
                 Request::InviteSelf { world, instance } => {
-                    anyhow::ensure!(orbiters_core::vrchat_log::is_world_id(&world) && public_instance(&instance), "Not a public instance of a world.");
+                    anyhow::ensure!(orbiters_core::vrchat_log::is_world_id(&world) && public_instance(&instance), "{}", tr("Not a public instance of a world."));
                     source.invite_self(&world, &instance)?;
                     Response::Invited
                 }
@@ -187,7 +187,7 @@ impl Controller {
         })()
         .map_err(|e| e.to_string());
         if scope != Scope::of(&self.view()) {
-            return Err("The account changed. Please try again.".into());
+            return Err(tr("The account changed. Please try again.").into());
         }
         result
     }
@@ -263,12 +263,12 @@ impl Controller {
             }
         });
         if spawned.is_err() {
-            finish(self, Err("The upload could not start.".into()));
+            finish(self, Err(tr("The upload could not start.").into()));
         }
     }
     fn replace_picture(&self, scope: &Scope, serial: u64, id: &str, path: &Path) -> anyhow::Result<()> {
         let png = read_picture(path)?;
-        anyhow::ensure!(*scope == Scope::of(&self.view()), "The account changed. Please try again.");
+        anyhow::ensure!(*scope == Scope::of(&self.view()), "{}", tr("The account changed. Please try again."));
         self.vrchat_source().replace_image(id, &png, |step| {
             self.update_if(|s| match s.vrchat_login.upload.as_mut().filter(|u| u.serial == serial) {
                 Some(u) => {
@@ -285,11 +285,11 @@ impl Controller {
 
 /// Reads a picked picture file (at most 50 MB) and makes it VRChat's ([`prepare_picture`]).
 fn read_picture(path: &Path) -> anyhow::Result<Vec<u8>> {
-    let meta = std::fs::metadata(path).map_err(|_| anyhow::anyhow!("The picture file could not be found."))?;
-    anyhow::ensure!(meta.is_file(), "Pick a picture file.");
-    anyhow::ensure!(meta.len() > 0, "That file is empty.");
-    anyhow::ensure!(meta.len() <= PICTURE_FILE_LIMIT, "That picture is over 50 MB. Pick a smaller one.");
-    prepare_picture(&std::fs::read(path).map_err(|_| anyhow::anyhow!("The picture file could not be read."))?)
+    let meta = std::fs::metadata(path).map_err(|_| anyhow::anyhow!("{}", tr("The picture file could not be found.")))?;
+    anyhow::ensure!(meta.is_file(), "{}", tr("Pick a picture file."));
+    anyhow::ensure!(meta.len() > 0, "{}", tr("That file is empty."));
+    anyhow::ensure!(meta.len() <= PICTURE_FILE_LIMIT, "{}", tr("That picture is over 50 MB. Pick a smaller one."));
+    prepare_picture(&std::fs::read(path).map_err(|_| anyhow::anyhow!("{}", tr("The picture file could not be read.")))?)
 }
 
 /// A picture made VRChat's ([`fit_picture`]), as a PNG.
@@ -308,7 +308,7 @@ pub(crate) fn prepare_picture(bytes: &[u8]) -> anyhow::Result<Vec<u8>> {
 /// own camera pictures), where bars would show as part of the picture.
 pub(crate) fn fit_picture(bytes: &[u8]) -> anyhow::Result<image::RgbImage> {
     use image::ImageDecoder as _;
-    let not_a_picture = || anyhow::anyhow!("That file is not a picture VRChat can show (PNG, JPEG, WebP or GIF).");
+    let not_a_picture = || anyhow::anyhow!("{}", tr("That file is not a picture VRChat can show (PNG, JPEG, WebP or GIF)."));
     let mut reader = image::ImageReader::new(std::io::Cursor::new(bytes)).with_guessed_format()?;
     if reader.format().is_none() {
         return Err(not_a_picture());
@@ -322,7 +322,7 @@ pub(crate) fn fit_picture(bytes: &[u8]) -> anyhow::Result<image::RgbImage> {
     let mut picture = image::DynamicImage::from_decoder(decoder).map_err(|_| not_a_picture())?;
     picture.apply_orientation(orientation);
     let (w, h) = (picture.width(), picture.height());
-    anyhow::ensure!(w >= PICTURE_MIN && h >= PICTURE_MIN, "That picture is {w} × {h} pixels: pick one of at least {PICTURE_MIN} on each side.");
+    anyhow::ensure!(w >= PICTURE_MIN && h >= PICTURE_MIN, "{}", tr!("That picture is {w} × {h} pixels: pick one of at least {min} on each side.", w = w, h = h, min = PICTURE_MIN));
     let (tw, th) = PICTURE_SIZE;
     let fitted = picture.resize_to_fill(tw, th, image::imageops::FilterType::Lanczos3).to_rgba8();
     Ok(image::RgbImage::from_fn(tw, th, |x, y| {

@@ -58,7 +58,7 @@ All tools' large cards hold real content: the newest three captures, the last th
 
 ## A capture live on a desktop sheet
 
-`SheetView` runs on its own thread: it reads the capture, frames it as the small view does (`Capture::around_subject`, `Small`), and draws it with `FaceRenderer::render_view` into a picture the sheet paints, with its plate as a line under it. By itself it sways around the view the capture was taken from (a capture is mostly taken from one side), a drag takes it anywhere, the mouse's wheel zooms. It holds the 3D view's budget (`pacing::DUTY`) and at most 20 frames a second, draws nothing while nothing moves, and sizes its picture by what the last ones cost (960, 720 or 540 wide). The view, its GPU device and its memory go with its thread when it is closed. Reduce motion: it does not sway. If it cannot show, the capture's own picture stays, and says so. Only on the desktop: in a headset a capture stands around the person.
+`SheetView` runs on its own thread: it reads the capture, frames it as the small view does (`Capture::around_subject`, `Small`), and draws it with `FaceRenderer::render_view` into a picture the sheet paints, with its plate as a line under it. By itself it sways around the view the capture was taken from (a capture is mostly taken from one side), a drag takes it anywhere, the mouse's wheel zooms. It holds the 3D view's budget (`pacing::DUTY`) and at most 20 frames a second, draws nothing while nothing moves, and sizes its picture by what the last ones cost (960, 720 or 540 wide). The view, its GPU device and its memory go with its thread when it is closed. Reduce motion: it does not sway. If it cannot show, the capture's own picture stays, and says so. Only on the desktop: in a headset a capture stands around the person. The same view turns on a world's side panel (`Worlds::start_live`, `panel::Live`): See it in 3D starts it there, at its smallest size, the next world pressed follows, and it goes with the panel. Its button is then Walk around it, in Orbiters, as on the gallery's sheet, which also steps from capture to capture.
 
 ## The gallery
 
@@ -94,7 +94,11 @@ A press on a world opens its details on a side panel beside the list, which narr
 
 ## A sheet's head
 
-Its tools are tabs (`head_tabs`): from any sheet to any other, also from the wheel, where no wing lies beside it (there the mouse is VRChat's until Left Alt is held). On a screen they have their names. In a headset, and while the head has something to say, icons but for the open one, which leaves room for it.
+Where no wing lies beside it (from the wheel, in a narrow window, with its tiles hidden), its tools are tabs (`head_tabs`): from any sheet to any other. Beside the wing they would only repeat it, and the head says the sheet's name. All tools has no tabs anywhere, as its large tiles are the same things. Who comes to it has the main features on the wing already and came for the rest: the accessories have two full rows of tiles that say what they do, and the main features stay the largest.
+
+## The sheet of settings
+
+Opened from All tools: where the tiles lie (`OrbitLayout`: the wing, or the strip under the tabs, which the narrow window has anyway), whether they spring, the output Windows uses when SteamVR starts (`vr_audio.output`, the same setting as the app's page), and the look (`OrbitSettings::theme`). Modern takes an accent (`look::accent()`, for everything of these parts and the world's panel). Retro takes one colour: `finish_picture` puts what was painted through a ramp of it, with the retro menu's monospace type and hard corners, and leaves pictures alone if they keep their colours (`keep_colour`, called where a picture is drawn). It is not N4N0's retro drawing: there is no line work, capitals or dot grid, and N4N0's own pages follow their own setting's drawing, under the ramp. The colours to choose from always keep theirs. All saved as any setting is, by a patch.
 
 ## VRChat's tooltips under a sheet
 

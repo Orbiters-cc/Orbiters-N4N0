@@ -156,7 +156,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         };
         let size = client_size(window);
         let origin = client_origin(window);
-        let places = open.map_or_else(Vec::new, |menu| zones::layout(menu, size));
+        let places = open.map_or_else(Vec::new, |menu| zones::layout_as(menu, size, snap.settings.orbit.layout == orbiters_core::settings::OrbitLayout::Strip));
         panels.takeover_place = zones::place(Zone::Takeover, size);
         panels.back_place = zones::place(Zone::SheetBack, size);
         panels.hint_place = zones::place(Zone::SheetHint, size);
@@ -246,7 +246,7 @@ impl Hints {
             Some(Around::Wheel) if self.pointed < Self::FULL => Some(("Hold Left Alt, then click a tool", "Or press its number")),
             Some(Around::Wheel) => Some(("Left Alt to click, or a number", "")),
             // Says what this is, and that it is not VRChat's.
-            Some(Around::QuickMenu) if self.openings <= Self::FULL => Some(("Orbiters' own menu", "Worlds in 3D, videos, instances and 3D pictures.")),
+            Some(Around::QuickMenu) if self.openings <= Self::FULL => Some(("Your tools", "Worlds in 3D, videos, instances and 3D pictures.")),
             _ => None,
         }
     }

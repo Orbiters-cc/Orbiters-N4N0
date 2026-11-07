@@ -8,6 +8,7 @@ use egui::epaint::{Mesh, Vertex, WHITE_UV};
 use egui::{pos2, vec2, Align2, Color32, Painter, Pos2, Rect, Shape};
 use orbiters_openvr as vr;
 use orbiters_ui::theme::{self, weight};
+use super::super::orbit::panels::look as orbit_look;
 use orbiters_ui::{icons, widgets};
 use std::time::Instant;
 
@@ -106,11 +107,11 @@ pub fn joystick(p: &Painter, base: Pos2, push: f32) {
 }
 
 fn words(p: &Painter, at: Pos2, glyph: &str, first: &str, second: &str, on: f32) {
-    let lit = mix(theme::FG_3, theme::ACCENT, on);
+    let lit = mix(theme::FG_3, orbit_look::accent(), on);
     let text = mix(theme::FG_2, Color32::WHITE, on);
     let row = Rect::from_min_size(at - vec2(8.0, 10.0), vec2(226.0, 84.0));
     if on > 0.01 {
-        p.rect_filled(row, theme::radius(18.0), theme::alpha(theme::ACCENT, 0.18 * on));
+        p.rect_filled(row, theme::radius(18.0), theme::alpha(orbit_look::accent(), 0.18 * on));
     }
     widgets::icon(p, at + vec2(16.0, 32.0), glyph, 30.0, lit);
     p.text(at + vec2(42.0, 18.0), Align2::LEFT_CENTER, first, theme::font(30.0, weight::BOLD), text);
@@ -141,23 +142,23 @@ pub fn paint(p: &Painter, stage: Stage, seconds: f32) {
             words(p, pos2(208.0, 126.0), icons::CARET_DOWN, "Pull down", "to zoom out", down);
             // Off the stick, the way it goes: in time with the words that light up.
             if up > 0.0 {
-                widgets::icon(p, pos2(104.0, 60.0), icons::CARET_UP, 46.0, theme::alpha(theme::ACCENT, up));
+                widgets::icon(p, pos2(104.0, 60.0), icons::CARET_UP, 46.0, theme::alpha(orbit_look::accent(), up));
             }
             if down > 0.0 {
-                widgets::icon(p, pos2(166.0, 196.0), icons::CARET_DOWN, 46.0, theme::alpha(theme::ACCENT, down));
+                widgets::icon(p, pos2(166.0, 196.0), icons::CARET_DOWN, 46.0, theme::alpha(orbit_look::accent(), down));
             }
         }
         Stage::Grip { near } => {
             let card = Rect::from_center_size(page.center() + vec2(0.0, 30.0), vec2(PX[0] as f32 - 4.0, 140.0));
             p.rect_filled(card, theme::radius(30.0), theme::alpha(theme::INK_900, 0.95));
             if near {
-                p.rect_filled(card, theme::radius(30.0), theme::alpha(theme::ACCENT, 0.24));
-                p.rect_stroke(card.shrink(1.5), theme::radius(28.0), egui::Stroke::new(3.0, theme::ACCENT), egui::StrokeKind::Inside);
+                p.rect_filled(card, theme::radius(30.0), theme::alpha(orbit_look::accent(), 0.24));
+                p.rect_stroke(card.shrink(1.5), theme::radius(28.0), egui::Stroke::new(3.0, orbit_look::accent()), egui::StrokeKind::Inside);
             }
             tail(p, card);
             let phase = (seconds / 1.3).fract() * std::f32::consts::TAU;
             let beat = if near { 1.0 + 0.1 * phase.sin() } else { 1.0 + 0.05 * phase.sin() };
-            widgets::icon(p, card.left_center() + vec2(66.0, 0.0), icons::HAND_GRABBING, 66.0 * beat, if near { Color32::WHITE } else { theme::ACCENT });
+            widgets::icon(p, card.left_center() + vec2(66.0, 0.0), icons::HAND_GRABBING, 66.0 * beat, if near { Color32::WHITE } else { orbit_look::accent() });
             let (first, second) = if near { ("Close your grip", "It comes with your hand") } else { ("Grip to take it", "With either hand") };
             p.text(card.left_center() + vec2(122.0, -20.0), Align2::LEFT_CENTER, first, theme::font(32.0, weight::BOLD), Color32::WHITE);
             p.text(card.left_center() + vec2(122.0, 22.0), Align2::LEFT_CENTER, second, theme::font(22.0, weight::MEDIUM), theme::FG_2);
@@ -172,9 +173,9 @@ pub const CHIP_WIDTH_M: f32 = 0.115;
 /// [`HideChip`]'s picture.
 pub fn paint_chip(p: &Painter, pointed: bool) {
     let page = Rect::from_min_size(Pos2::ZERO, vec2(CHIP_PX[0] as f32, CHIP_PX[1] as f32)).shrink(2.0);
-    p.rect_filled(page, theme::radius(page.height() / 2.0), if pointed { theme::ACCENT } else { theme::INK_750 });
-    p.rect_stroke(page.shrink(1.0), theme::radius(page.height() / 2.0 - 1.0), egui::Stroke::new(2.5, if pointed { theme::ACCENT } else { Color32::from_white_alpha(120) }), egui::StrokeKind::Inside);
-    let ink = if pointed { theme::ON_ACCENT } else { Color32::WHITE };
+    p.rect_filled(page, theme::radius(page.height() / 2.0), if pointed { orbit_look::accent() } else { theme::INK_750 });
+    p.rect_stroke(page.shrink(1.0), theme::radius(page.height() / 2.0 - 1.0), egui::Stroke::new(2.5, if pointed { orbit_look::accent() } else { Color32::from_white_alpha(120) }), egui::StrokeKind::Inside);
+    let ink = if pointed { orbit_look::on_accent() } else { Color32::WHITE };
     widgets::icon(p, page.left_center() + vec2(46.0, 0.0), icons::EYE_SLASH, 38.0, ink);
     p.text(page.left_center() + vec2(78.0, 0.0), Align2::LEFT_CENTER, "Hide 3D", theme::font(38.0, weight::BOLD), ink);
 }

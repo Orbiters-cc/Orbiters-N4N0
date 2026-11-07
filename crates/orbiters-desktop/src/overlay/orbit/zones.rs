@@ -296,9 +296,9 @@ impl Zone {
             Zone::WingTalk => wing_tile(0.0, 2.0),
             Zone::WingAll => wing_tile(1.0, 2.0),
             Zone::WingPlaying => r(362.0, 132.0, 524.0, 186.0),
-            Zone::QmStrip => r(-300.0, 266.0, 300.0, 322.0),
-            // On the wing: from its own left edge, right over its name, clear of what VRChat has over its menu.
-            Zone::QmCaption => r(362.0, -204.0, 632.0, -154.0),
+            Zone::QmStrip => r(-300.0, 266.0, 300.0, 318.0),
+            // On the wing, as wide as it, right over its name: its words wrap, and it is as high as they take.
+            Zone::QmCaption => r(362.0, -262.0, 524.0, -154.0),
             // The Quick Menu's panels and the FPS line over them, ending where its main panel ends: its tab row and badge stay VRChat's.
             // Clear of what VRChat has over its menu, down over its main panel's foot.
             Zone::SheetBack => r(-352.0, -240.0, 352.0, 205.5),
@@ -393,6 +393,27 @@ pub fn place(zone: Zone, client: Vec2) -> Option<Placed> {
 /// A zone in its menu's own units, no window to fit in: in the headset, where a plane says what a unit is ([`super::vr`]).
 pub fn in_units(zone: Zone) -> Placed {
     Placed { zone, rect: zone.units(), center: pos2(0.0, 0.0), unit: 1.0 }
+}
+
+/// In a window as wide as 16:9 there is no room under the strip for its words: beside VRChat's tab row, right over the strip's end.
+const STRIP_CAPTION_BESIDE: Rect = Rect { min: pos2(250.0, 210.0), max: pos2(524.0, 262.0) };
+
+/// The strip's words, under it, or where else they fit.
+fn strip_caption(client: Vec2) -> Option<Placed> {
+    let (center, unit) = frame(Around::QuickMenu, client);
+    let window = Rect::from_min_size(pos2(0.0, 0.0), client).shrink(EDGE);
+    let at = |units: Rect| Rect::from_min_max(center + units.min.to_vec2() * unit, center + units.max.to_vec2() * unit);
+    [Zone::QmCaption.fallback()?, STRIP_CAPTION_BESIDE].into_iter().map(at).find(|r| window.contains_rect(*r)).map(|rect| Placed { zone: Zone::QmCaption, rect: Rect::from_min_max(rect.min.round(), rect.max.round()), center, unit })
+}
+
+/// Every zone that fits around a menu, the Quick Menu's as chosen: the strip when `strip`, and in any case where the wing does not fit.
+pub fn layout_as(around: Around, client: Vec2, strip: bool) -> Vec<Placed> {
+    if strip && around == Around::QuickMenu {
+        if let Some(row) = place(Zone::QmStrip, client) {
+            return std::iter::once(row).chain(strip_caption(client)).collect();
+        }
+    }
+    layout(around, client)
 }
 
 /// Every zone that fits around a menu.
@@ -584,6 +605,22 @@ mod tests {
         for (w, h) in SIZES {
             assert!(place(Zone::SheetBack, vec2(w, h)).is_some() && place(Zone::Takeover, vec2(w, h)).is_some(), "{w}x{h}");
         }
+    }
+
+    /// Enzo: the strip as a layout of its own. It has to fit the windows most people have, its words too.
+    #[test]
+    fn the_strip_can_be_chosen_in_a_wide_window_as_well() {
+        for (w, h) in [(1280.0, 720.0), (1920.0, 1080.0), (2560.0, 1440.0), (1000.0, 900.0)] {
+            let parts = layout_as(Around::QuickMenu, vec2(w, h), true);
+            assert!(parts.iter().any(|p| p.zone == Zone::QmStrip), "{w}x{h}");
+            assert!(parts.iter().any(|p| p.zone == Zone::QmCaption), "{w}x{h}: its words");
+            assert!(!parts.iter().any(|p| Zone::WING.contains(&p.zone)), "{w}x{h}: no wing with it");
+            let window = Rect::from_min_size(pos2(0.0, 0.0), vec2(w, h));
+            assert!(parts.iter().all(|p| window.contains_rect(p.rect)), "{w}x{h}");
+            let (row, words) = (parts.iter().find(|p| p.zone == Zone::QmStrip).unwrap(), parts.iter().find(|p| p.zone == Zone::QmCaption).unwrap());
+            assert!(!row.rect.intersects(words.rect), "{w}x{h}");
+        }
+        assert!(layout_as(Around::QuickMenu, vec2(1920.0, 1080.0), false).iter().any(|p| p.zone == Zone::WingWorlds));
     }
 
     #[test]

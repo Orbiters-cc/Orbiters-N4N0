@@ -117,11 +117,13 @@ fn bar_button(p: &Painter, rect: Rect, glyph: &str, label: &str, bg: Color32, fg
     let rect = if pressed { rect.shrink(2.0) } else { rect };
     let bg = if hover { theme::mix(bg, Color32::WHITE, 0.08) } else { bg };
     p.rect_filled(rect, CornerRadius::same((rect.height() / 2.0) as u8), fade(bg, alpha));
-    let galley = p.layout_job(orbit_look::txt(label, 17.0).weight(weight::SEMIBOLD).color(fade(fg, alpha)).job_truncated(rect.width() - 46.0));
-    let total = 28.0 + galley.size().x;
+    let (galley, with_icon) = button_label(p, orbit_look::txt(label, 17.0).weight(weight::SEMIBOLD).color(fade(fg, alpha)), rect.width() - 46.0, rect.width() - 20.0);
+    let total = if with_icon { 28.0 } else { 0.0 } + galley.size().x;
     let left = rect.center().x - total / 2.0;
-    widgets::icon(p, pos2(left + 10.0, rect.center().y), glyph, 21.0, fade(fg, alpha));
-    p.galley(pos2(left + 28.0, rect.center().y - galley.size().y / 2.0), galley, fade(fg, alpha));
+    if with_icon {
+        widgets::icon(p, pos2(left + 10.0, rect.center().y), glyph, 21.0, fade(fg, alpha));
+    }
+    p.galley(pos2(left + if with_icon { 28.0 } else { 0.0 }, rect.center().y - galley.size().y / 2.0), galley, fade(fg, alpha));
 }
 
 #[cfg(test)]

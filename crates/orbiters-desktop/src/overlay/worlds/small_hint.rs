@@ -178,7 +178,14 @@ pub fn paint_chip(p: &Painter, pointed: bool) {
     p.rect_stroke(page.shrink(1.0), theme::radius(page.height() / 2.0 - 1.0), egui::Stroke::new(2.5, if pointed { orbit_look::accent() } else { Color32::from_white_alpha(120) }), egui::StrokeKind::Inside);
     let ink = if pointed { orbit_look::on_accent() } else { Color32::WHITE };
     widgets::icon(p, page.left_center() + vec2(46.0, 0.0), icons::EYE_SLASH, 38.0, ink);
-    p.text(page.left_center() + vec2(78.0, 0.0), Align2::LEFT_CENTER, tr("Hide 3D"), theme::font(38.0, weight::BOLD), ink);
+    // Where the words go, in the size that holds them: a translation can be longer than English.
+    let room = page.max.x - (page.left_center().x + 78.0) - 16.0;
+    let mut size = 38.0;
+    let width = p.layout_no_wrap(tr("Hide 3D").to_string(), theme::font(size, weight::BOLD), ink).size().x;
+    if width > room {
+        size = (size * room / width).max(size * 0.7);
+    }
+    p.text(page.left_center() + vec2(78.0, 0.0), Align2::LEFT_CENTER, tr("Hide 3D"), theme::font(size, weight::BOLD), ink);
 }
 
 pub struct HideChip {
@@ -486,6 +493,14 @@ pub fn shots(out: &std::path::Path) -> anyhow::Result<()> {
             canvas.paint(seconds as f64, |p| paint(p, stage, seconds));
         }
         super::shots::write_png(&out.join(format!("small-hint-{name}.png")), PX[0], PX[1], canvas.pixels())?;
+    }
+    // The Hide under a view taken in a hand, away from and pointed at.
+    for (name, pointed) in [("hide", false), ("hide-pointed", true)] {
+        let mut canvas = Canvas::new(CHIP_PX[0], CHIP_PX[1]);
+        for _ in 0..2 {
+            canvas.paint(0.0, |p| paint_chip(p, pointed));
+        }
+        super::shots::write_png(&out.join(format!("small-hint-{name}.png")), CHIP_PX[0], CHIP_PX[1], canvas.pixels())?;
     }
     Ok(())
 }

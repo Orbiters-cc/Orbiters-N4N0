@@ -31,8 +31,22 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
     let out = PathBuf::from(args.first().context("--world-view <out> <capture> [--sky <sky.jpg>]")?);
     std::fs::create_dir_all(&out)?;
     let panel_only = args.iter().any(|a| a == "--panel-only");
+    // In any language, and where its text no longer fits (as `--screenshot` has them): `--language <tag>`, `--text-report <file>`.
+    let option = |name: &str| args.iter().position(|a| a == name).and_then(|i| args.get(i + 1));
+    if let Some(tag) = option("--language") {
+        let language = orbiters_i18n::normalize(tag).with_context(|| format!("{tag} is not a language of the website"))?;
+        orbiters_i18n::pin_language(language);
+        orbiters_ui::fonts::prefer_language(language.tag());
+    }
+    let report = option("--text-report").map(PathBuf::from);
+    if report.is_some() {
+        orbiters_ui::text_audit::turn_on();
+    }
     super::panel::shots(&out)?;
     super::small_hint::shots(&out)?;
+    if let Some(report) = &report {
+        std::fs::write(report, orbiters_ui::text_audit::report()).with_context(|| format!("writing {}", report.display()))?;
+    }
     if panel_only {
         return Ok(());
     }
@@ -634,6 +648,8 @@ fn load(file: &Path, sky: Option<&Path>, view: Option<StartView>) -> anyhow::Res
 }
 
 pub fn write_png(path: &Path, w: u32, h: u32, rgba: &[u8]) -> anyhow::Result<()> {
+    // What the text report found while this picture was painted belongs to it.
+    orbiters_ui::text_audit::end_scene(&path.file_stem().unwrap_or_default().to_string_lossy());
     let file = std::fs::File::create(path).with_context(|| format!("writing {}", path.display()))?;
     let mut encoder = png::Encoder::new(std::io::BufWriter::new(file), w, h);
     encoder.set_color(png::ColorType::Rgba);

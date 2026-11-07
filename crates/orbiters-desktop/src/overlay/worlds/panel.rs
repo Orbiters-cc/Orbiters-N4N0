@@ -71,7 +71,7 @@ pub enum Sort {
 impl Sort {
     pub fn label(self) -> &'static str {
         match self {
-            Sort::Newest => tr("Newest"),
+            Sort::Newest => tr_ctx("sorting", "Newest"),
             Sort::Liked => tr("Most liked"),
             Sort::Smooth => tr("Smoothest"),
         }
@@ -556,7 +556,7 @@ fn small_action(p: &Painter, rect: Rect, glyph: &str, filled: bool, count: u64, 
     if !number.is_empty() {
         text(p, pos2(at + icon * 0.7, line), Align2::LEFT_CENTER, orbit_look::txt(number, count).weight(weight::SEMIBOLD).color(fade(fg, alpha)));
     }
-    text(p, pos2(rect.center().x, rect.min.y + rect.height() * 0.75), Align2::CENTER_CENTER, orbit_look::txt(word, said).weight(weight::MEDIUM).color(fade(theme::FG, alpha)));
+    text(p, pos2(rect.center().x, rect.min.y + rect.height() * 0.75), Align2::CENTER_CENTER, fitted(p, orbit_look::txt(word, said).weight(weight::MEDIUM).color(fade(theme::FG, alpha)), rect.width() - 10.0));
 }
 
 /// A headset's page, on its own and not a smaller screen's: what is read at arm's length with a moving hand. Six worlds as pictures with their names, and beside them a wide panel:
@@ -803,7 +803,7 @@ impl Panel {
         match self.sort {
             Sort::Newest if self.searching(d) => tr("Best match"),
             Sort::Newest => match self.section {
-                Section::Captures => tr("Newest"),
+                Section::Captures => tr_ctx("sorting", "Newest"),
                 Section::Visited => tr("Latest"),
                 Section::Popular | Section::Active | Section::Favorites => tr_ctx("sorting", "Top"),
             },
@@ -2004,6 +2004,32 @@ fn keys(layout: KeyboardLayout, punctuation: bool) -> Vec<(Target, Rect)> {
     out
 }
 
+/// A button's label set in the room it has: as it is where it fits beside its icon; else without the icon where it fits alone; else smaller (to 70% at
+/// most), and cut at its end if that is still too long. These buttons were drawn for English, and a translation can be a third longer; English
+/// itself fits as drawn, so none of this changes it.
+fn button_label(p: &Painter, txt: Txt, room_with_icon: f32, room_alone: f32) -> (std::sync::Arc<egui::Galley>, bool) {
+    let natural = p.layout_job(txt.job(f32::INFINITY));
+    let width = natural.size().x;
+    if width <= room_with_icon {
+        return (natural, true);
+    }
+    if width <= room_alone {
+        return (natural, false);
+    }
+    let mut smaller = txt.clone();
+    smaller.size = (txt.size * room_alone / width).max(txt.size * 0.7);
+    (p.layout_job(smaller.job_truncated(room_alone)), false)
+}
+
+/// `txt` at the size where `room` holds it: its own where it fits, else smaller (to 70% at most).
+fn fitted(p: &Painter, mut txt: Txt, room: f32) -> Txt {
+    let width = p.layout_job(txt.job(f32::INFINITY)).size().x;
+    if width > room {
+        txt.size = (txt.size * room / width).max(txt.size * 0.7);
+    }
+    txt
+}
+
 fn text(p: &Painter, at: Pos2, align: Align2, txt: Txt) {
     let galley = p.layout_job(txt.job(f32::INFINITY));
     let rect = align.anchor_size(at, galley.size());
@@ -2027,11 +2053,12 @@ fn pill_button(p: &Painter, rect: Rect, glyph: Option<&str>, label: &str, bg: Co
     let bg = if hover { theme::mix(bg, Color32::WHITE, 0.08) } else { bg };
     p.rect_filled(rect, CornerRadius::same((rect.height() / 2.0) as u8), fade(bg, alpha));
     let label_txt = orbit_look::txt(label, 20.0).weight(weight::SEMIBOLD).color(fade(fg, alpha));
-    let galley = p.layout_job(label_txt.job_truncated((rect.width() - 40.0).max(10.0)));
-    let icon_w = if glyph.is_some() { 30.0 } else { 0.0 };
+    let room = (rect.width() - 40.0).max(10.0);
+    let (galley, with_icon) = button_label(p, label_txt, room, if glyph.is_some() { (rect.width() - 24.0).max(10.0) } else { room });
+    let icon_w = if glyph.is_some() && with_icon { 30.0 } else { 0.0 };
     let total = icon_w + galley.size().x;
     let left = rect.center().x - total / 2.0;
-    if let Some(g) = glyph {
+    if let Some(g) = glyph.filter(|_| with_icon) {
         widgets::icon(p, pos2(left + 11.0, rect.center().y), g, 22.0, fade(fg, alpha));
     }
     p.galley(pos2(left + icon_w, rect.center().y - galley.size().y / 2.0), galley, fade(fg, alpha));
@@ -2044,16 +2071,19 @@ fn icon_button(p: &Painter, rect: Rect, glyph: &str, filled: bool, label: &str, 
     let bg = if hover { theme::mix(bg, Color32::WHITE, 0.08) } else { bg };
     p.rect_filled(rect, CornerRadius::same((rect.height() / 2.0) as u8), fade(bg, alpha));
     let txt = orbit_look::txt(label, 18.0).weight(weight::SEMIBOLD).color(fade(fg, alpha));
-    let galley = p.layout_job(txt.job_truncated((rect.width() - 52.0).max(10.0)));
-    let total = if label.is_empty() { 22.0 } else { 30.0 + galley.size().x };
+    let (galley, with_icon) = button_label(p, txt, (rect.width() - 52.0).max(10.0), (rect.width() - 24.0).max(10.0));
+    let with_icon = with_icon || label.is_empty();
+    let total = if label.is_empty() { 22.0 } else if with_icon { 30.0 + galley.size().x } else { galley.size().x };
     let left = rect.center().x - total / 2.0;
     let at = pos2(left + 11.0, rect.center().y);
-    if filled {
-        widgets::icon_fill(p, at, glyph, 22.0, fade(fg, alpha));
-    } else {
-        widgets::icon(p, at, glyph, 22.0, fade(fg, alpha));
+    if with_icon {
+        if filled {
+            widgets::icon_fill(p, at, glyph, 22.0, fade(fg, alpha));
+        } else {
+            widgets::icon(p, at, glyph, 22.0, fade(fg, alpha));
+        }
     }
-    p.galley(pos2(left + 30.0, rect.center().y - galley.size().y / 2.0), galley, fade(fg, alpha));
+    p.galley(pos2(left + if with_icon { 30.0 } else { 0.0 }, rect.center().y - galley.size().y / 2.0), galley, fade(fg, alpha));
 }
 
 /// A small rounded chip with an icon and a label (a filter, Clear).
@@ -2360,6 +2390,36 @@ fn straight(rgba: &[u8]) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use orbiters_i18n::{in_language, Language};
+
+    /// What a person reads follows the language; what is saved in a picture's name and in files, and what the code decides by, does not.
+    #[test]
+    fn the_panel_speaks_the_language_chosen_and_keeps_the_names_it_saves_in_english() {
+        let at = "2026-10-12T18:30:00Z";
+        assert_eq!(short_date(at).as_deref(), Some("12 Oct 2026"));
+        in_language(Language::Ja, || assert_eq!(short_date(at).as_deref(), Some("2026年10月12日")));
+        in_language(Language::Fr, || {
+            assert_eq!(short_date(at).as_deref(), Some("12 oct. 2026"));
+            assert_eq!(label_name("mirror"), "Miroir", "the labels come with the contract's own names");
+            assert_eq!(Quality::High.shown_label(), "Net");
+            assert_eq!(Quality::High.label(), "Sharp", "the name kept in pictures stays English");
+            assert_eq!(Sort::Liked.label(), "Plus aimés");
+            assert_eq!(Section::Captures.label(true), "Captures 3D");
+        });
+        assert_eq!(label_name("mirror"), "Mirror");
+        assert_eq!(Quality::High.shown_label(), "Sharp");
+        // The popular/featured name is the one the list is, whatever it is called.
+        in_language(Language::PtBr, || assert_eq!(Section::Popular.label(false), "Destaques"));
+    }
+
+    /// A line with values in it (megabytes read) keeps them and takes the language's order, spacing and unit.
+    #[test]
+    fn the_status_line_of_a_download_is_said_in_the_language_chosen() {
+        let say = |read: &str, total: &str| tr!("Downloading {read} of {total} MB", read = read, total = total);
+        assert_eq!(say("1.5", "3.0"), "Downloading 1.5 of 3.0 MB");
+        in_language(Language::Fr, || assert_eq!(say("1.5", "3.0"), "Téléchargement\u{a0}: 1.5 sur 3.0 Mo"));
+        in_language(Language::Ja, || assert_eq!(say("1.5", "3.0"), "ダウンロード中 1.5 / 3.0 MB"));
+    }
 
     /// Round 5's judges: beside the panel, the list lost its fifth world.
     #[test]

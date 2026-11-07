@@ -16,6 +16,7 @@ use super::super::floating::space::{self, Quad, V3};
 use super::super::Presenter;
 use super::block::{Block, HandNow, Stuck};
 use super::zones::{self, Around, Placed, Zone};
+use orbiters_core::settings::VrMotion;
 use super::Panels;
 use crate::backend::Ctl;
 use crate::state::{OrbitStatus, Snapshot};
@@ -222,6 +223,77 @@ struct Aligning {
     scaling: Option<(f32, f32)>,
 }
 
+/// A tile on its spring: where it is and how fast it goes, and how it is turned. Enzo: "a bit of a spring effect as it moves".
+#[derive(Clone, Copy, Debug)]
+pub struct Jelly {
+    at: V3,
+    speed: V3,
+    axes: [V3; 3],
+}
+
+/// How far a tile can trail, in metres: a hand flung about does not leave the menu behind.
+const JELLY_REACH_M: f32 = 0.05;
+
+impl Jelly {
+    pub fn at(target: &Matrix34) -> Self {
+        Self { at: space::position(target), speed: [0.0; 3], axes: [space::axis(target, 0), space::axis(target, 1), space::axis(target, 2)] }
+    }
+
+    /// `dt` further toward `target`, `soft` from 0 (near the hand, firm) to 1 (far out on it, looser). Where it is now.
+    pub fn step(&mut self, target: &Matrix34, soft: f32, dt: f32) -> Matrix34 {
+        // A little bounce, as the Quick Menu's own parts have when they appear: past the mark once, and settled in a fraction of a second.
+        let stiff = 520.0 - 240.0 * soft.clamp(0.0, 1.0);
+        let damp = 2.0 * 0.5 * stiff.sqrt();
+        let goal = space::position(target);
+        let mut left = dt.min(0.05);
+        while left > 0.0 {
+            let h = left.min(0.004);
+            let off = space::sub(goal, self.at);
+            self.speed = space::add(self.speed, space::scale(space::sub(space::scale(off, stiff), space::scale(self.speed, damp)), h));
+            self.at = space::add(self.at, space::scale(self.speed, h));
+            left -= h;
+        }
+        let off = space::sub(self.at, goal);
+        let far = space::length(off);
+        if far > JELLY_REACH_M {
+            self.at = space::add(goal, space::scale(off, JELLY_REACH_M / far));
+        }
+        // It turns toward the hand's turn the same way, without the bounce.
+        let turn = 1.0 - (-(30.0 - 12.0 * soft) * dt).exp();
+        for (i, axis) in self.axes.iter_mut().enumerate() {
+            *axis = space::add(*axis, space::scale(space::sub(space::axis(target, i), *axis), turn));
+        }
+        let frame = space::from_axes(self.axes[0], self.axes[1], self.axes[2], self.at);
+        space::orthonormal(&frame).unwrap_or(*target)
+    }
+}
+
+/// How far back from now the pose is that lies `delay_frames` of VRChat's frames behind the hand, from when it will show, `until_shown` from now. What SteamVR is asked for.
+fn pose_seconds(until_shown: f32, delay_frames: f32, game_frame: f32) -> f32 {
+    until_shown - delay_frames.max(0.0) * game_frame
+}
+
+/// VRChat's own time between frames from the compositor's last ones: the middle one, as a hitch says nothing of the rate. `None`: nothing to go by.
+fn game_frame_seconds(intervals_ms: &mut [f32]) -> Option<f32> {
+    let mut known: Vec<f32> = intervals_ms.iter().copied().filter(|ms| *ms > 1.0 && *ms < 200.0).collect();
+    if known.is_empty() {
+        return None;
+    }
+    known.sort_by(f32::total_cmp);
+    Some(known[known.len() / 2] / 1000.0)
+}
+
+/// How a part is told where it is.
+#[derive(Clone, Copy)]
+enum Placing {
+    /// In the room, where the quad says.
+    Room,
+    /// In the room, somewhere else than the quad: late, or on its spring.
+    At(Matrix34),
+    /// From the controller, by SteamVR as it draws.
+    Hand(u32, Matrix34),
+}
+
 /// The Quick Menu's parts on this hand. The wing lies on the side of the menu away from the hand that holds it: on the right hand it is on the left (as Enzo laid it there). The sheet is not one of
 /// these: it stays on the menu.
 pub fn quick_menu_places(hand: usize) -> Vec<Placed> {
@@ -310,6 +382,8 @@ pub struct Cx<'a, 'o> {
     pub dashboard: bool,
     /// VRChat has the scene.
     pub in_game: bool,
+    /// How long a frame of the headset's is, in seconds.
+    pub frame: f32,
     /// What the panel on the sheet shows of the 3D view, which lives with the overlay's own 3D worlds.
     pub(in crate::overlay) world_status: super::super::worlds::panel::Status,
     pub prediction: f32,
@@ -331,6 +405,11 @@ pub struct OrbitVr {
     tune_seen: Option<std::time::SystemTime>,
     tune_read: Instant,
     aligning: Option<Aligning>,
+    /// Each part on its spring.
+    jelly: HashMap<Zone, Jelly>,
+    /// VRChat's time between frames, as last read, and when.
+    game_frame: f32,
+    game_frame_read: Instant,
     /// Since when the left stick has been pushed far enough to walk.
     walking_since: Option<Instant>,
     buttons: MenuButtons,
@@ -362,6 +441,9 @@ impl OrbitVr {
             tune_seen: None,
             tune_read: now,
             aligning: None,
+            jelly: HashMap::new(),
+            game_frame: 1.0 / 45.0,
+            game_frame_read: now,
             walking_since: None,
             buttons: MenuButtons::default(),
             block: Block::default(),
@@ -587,31 +669,64 @@ impl OrbitVr {
             })
             .collect();
 
-        // On the hand, each part is told where it is from the hand, not in the room: SteamVR then moves it with the controller's own pose as it draws, at the very last moment, whatever this
-        // loop is doing. Set in the room, it lagged the hand by a loop's turn, which looked detached from VRChat's menu when the hand shook (Enzo).
-        let riding: Option<(u32, Matrix34, f32)> = match open {
-            _ if self.aligning.is_some() => None,
-            Open::Wheel(hand) => devices[hand].map(|d| (d, self.tune.wheel(hand), self.tune.wheel_radius * settings.vr_size / 100.0)),
-            Open::QuickMenu(hand) => devices[hand].map(|d| (d, self.tune.quick_menu(hand), self.tune.qm_unit * settings.vr_size)),
+        // How the parts on the hand follow it (Enzo: "both options"). Exact, SteamVR moves each with the controller's own pose as it draws. VRChat's menu is drawn from a pose taken a frame
+        // before that, by how long a frame takes on this computer: so a delay is in VRChat's own frames, read as it runs, and a spring is in step with nothing, on purpose.
+        if now.duration_since(self.game_frame_read) >= Duration::from_millis(500) {
+            self.game_frame_read = now;
+            if let Ok(compositor) = cx.steamvr.compositor() {
+                let mut timings = [vr::compositor::FrameTiming::default(); 16];
+                let n = compositor.frame_timings(&mut timings);
+                let mut intervals: Vec<f32> = timings[..n].iter().map(|t| t.client_frame_interval_ms).collect();
+                self.game_frame = game_frame_seconds(&mut intervals).unwrap_or(self.game_frame);
+            }
+        }
+        let hand_now = match open {
+            Open::Wheel(hand) | Open::QuickMenu(hand) => devices[hand].map(|d| (hand, d)),
             Open::Closed => None,
         };
-        let on_hand: Vec<Option<(u32, Matrix34)>> = self
+        let on_this_hand = hand_now.map(|(hand, _)| if menu == Some(Around::Wheel) { (self.tune.wheel(hand), self.tune.wheel_radius * settings.vr_size / 100.0) } else { (self.tune.quick_menu(hand), self.tune.qm_unit * settings.vr_size) });
+        let springy = settings.vr_motion == VrMotion::Springy && !cx.snap.settings.reduce_motion;
+        let late = (!springy && settings.vr_delay_frames > 0.0).then(|| {
+            let mut poses = [Pose::default(); MAX_DEVICES];
+            cx.steamvr.predicted_poses(Universe::Standing, pose_seconds(cx.prediction + cx.frame, settings.vr_delay_frames, self.game_frame), &mut poses);
+            poses
+        });
+        let jelly = &mut self.jelly;
+        let aligning = self.aligning.is_some();
+        let from_wheel = self.takeover_plane.is_some();
+        let placing: Vec<Placing> = self
             .panels
             .all()
-            .map(|p| {
+            .zip(&quads)
+            .map(|(p, (quad, _))| {
                 let sheet = matches!(p.zone, Zone::Takeover | Zone::SheetBack);
-                // A sheet from the wheel stays in the room.
-                if sheet && self.takeover_plane.is_some() {
-                    return None;
+                // A sheet from the wheel stays in the room. What is being laid on VRChat's menu goes with the other hand.
+                if aligning || (sheet && from_wheel) {
+                    return Placing::Room;
+                }
+                let (Some((_, device)), Some((frame, unit))) = (hand_now, on_this_hand) else { return Placing::Room };
+                if springy {
+                    // A sheet and its page as one; the tiles the further out, the looser.
+                    let c = p.placed.rect.center();
+                    let soft = if sheet { 0.3 } else { (c.x.hypot(c.y) * unit / 0.25).min(1.0) };
+                    let state = jelly.entry(p.zone).or_insert_with(|| Jelly::at(&quad.transform));
+                    return Placing::At(state.step(&quad.transform, soft, dt));
                 }
                 let near = match p.zone {
                     Zone::Takeover => TAKEOVER_NEAR_M,
                     Zone::SheetBack => TAKEOVER_NEAR_M - 0.004,
                     _ => NEAR_M,
                 };
-                riding.map(|(device, frame, unit)| (device, Plane { frame, unit }.quad(&p.placed, -p.outward(), near).transform))
+                let on_hand = Plane { frame, unit }.quad(&p.placed, -p.outward(), near).transform;
+                match &late {
+                    Some(poses) => Placing::At(space::compose(&poses[device as usize].device_to_absolute, &on_hand)),
+                    None => Placing::Hand(device, on_hand),
+                }
             })
             .collect();
+        if hand_now.is_none() || !springy {
+            self.jelly.clear();
+        }
 
         // Who points at what.
         let lasers = if cx.input_read { cx.actions.lasers(cx.steamvr, cx.prediction) } else { [None; 2] };
@@ -680,12 +795,12 @@ impl OrbitVr {
 
         turn.worlds = self.panels.world_relay(cx.world_status.clone());
         // Pictures, then each overlay where it goes.
-        self.show(&mut cx, &quads, &on_hand);
+        self.show(&mut cx, &quads, &placing);
         self.last_shown = true;
         turn
     }
 
-    fn show(&mut self, cx: &mut Cx<'_, '_>, quads: &[(Quad, Placed)], on_hand: &[Option<(u32, Matrix34)>]) {
+    fn show(&mut self, cx: &mut Cx<'_, '_>, quads: &[(Quad, Placed)], placing: &[Placing]) {
         let (overlay, presenter) = (cx.overlay, &mut *cx.presenter);
         let (handles, key) = (&mut self.handles, &self.key);
         self.panels.paint(cx.snap, |panel, changed| {
@@ -700,16 +815,17 @@ impl OrbitVr {
             }
         });
         let shown: Vec<Zone> = self.panels.all().map(|p| p.zone).collect();
-        for (((quad, _), panel), riding) in quads.iter().zip(self.panels.all()).zip(on_hand) {
+        for (((quad, _), panel), place) in quads.iter().zip(self.panels.all()).zip(placing) {
             if let Some(handle) = self.handles.get(&panel.zone) {
                 if !panel.painted || !panel.shown {
                     let _ = cx.overlay.hide(*handle);
                     continue;
                 }
                 let _ = cx.overlay.set_width_in_meters(*handle, quad.width);
-                let _ = match riding {
-                    Some((device, transform)) => cx.overlay.set_transform_device_relative(*handle, *device, transform),
-                    None => cx.overlay.set_transform_absolute(*handle, &quad.transform),
+                let _ = match place {
+                    Placing::Hand(device, transform) => cx.overlay.set_transform_device_relative(*handle, *device, transform),
+                    Placing::At(transform) => cx.overlay.set_transform_absolute(*handle, transform),
+                    Placing::Room => cx.overlay.set_transform_absolute(*handle, &quad.transform),
                 };
                 let _ = cx.overlay.set_alpha(*handle, panel.appear.alpha());
                 if !cx.overlay.is_visible(*handle) {
@@ -740,6 +856,7 @@ impl OrbitVr {
         }
         self.plane = None;
         self.takeover_plane = None;
+        self.jelly.clear();
         self.active = None;
         self.trigger_was = [true; 2];
         self.last_shown = false;
@@ -914,6 +1031,62 @@ mod tests {
         tune.wheel_on[0] = Some(to_saved(&laid));
         assert_eq!(tune.wheel(0).m, laid.m);
         assert_eq!(tune.quick_menu(1).m, Tune::default().quick_menu(1).m);
+    }
+
+    fn moved(m: &Matrix34, by: f32) -> Matrix34 {
+        space::from_axes(space::axis(m, 0), space::axis(m, 1), space::axis(m, 2), space::add(space::position(m), [by, 0.0, 0.0]))
+    }
+
+    #[test]
+    fn a_tile_on_its_spring_trails_the_hand_goes_past_a_little_and_settles() {
+        let start = grip();
+        let mut tile = Jelly::at(&start);
+        // At rest it stays exactly there.
+        let still = tile.step(&start, 0.5, 0.011);
+        assert!(space::length(space::sub(space::position(&still), space::position(&start))) < 0.0001);
+        // The hand jumps 3 cm: it trails, then passes it a little, then settles.
+        let to = moved(&start, 0.03);
+        let first = space::position(&tile.step(&to, 0.5, 0.011))[0] - space::position(&start)[0];
+        assert!(first > 0.0 && first < 0.03, "it trails: {first}");
+        let (mut most, mut end) = (first, first);
+        for _ in 0..120 {
+            end = space::position(&tile.step(&to, 0.5, 0.011))[0] - space::position(&start)[0];
+            most = most.max(end);
+        }
+        assert!(most > 0.03, "a little bounce: {most}");
+        assert!(most < 0.042, "a little: {most}");
+        assert!((end - 0.03).abs() < 0.0005, "settled: {end}");
+    }
+
+    #[test]
+    fn a_hand_flung_about_does_not_leave_a_tile_behind_and_far_tiles_are_looser() {
+        let start = grip();
+        let (mut firm, mut loose) = (Jelly::at(&start), Jelly::at(&start));
+        let to = moved(&start, 2.0);
+        let trail = |at: &Matrix34| space::length(space::sub(space::position(at), space::position(&to)));
+        let (mut a, mut b) = (0.0, 0.0);
+        for _ in 0..3 {
+            a = trail(&firm.step(&to, 0.0, 0.011));
+            b = trail(&loose.step(&to, 1.0, 0.011));
+        }
+        assert!(a <= JELLY_REACH_M + 0.0001 && b <= JELLY_REACH_M + 0.0001, "{a} {b}");
+        // A hand's small move, to see the difference within reach.
+        let near = moved(&start, 0.02);
+        let (mut firm, mut loose) = (Jelly::at(&start), Jelly::at(&start));
+        let (x, y) = (space::position(&firm.step(&near, 0.0, 0.02))[0], space::position(&loose.step(&near, 1.0, 0.02))[0]);
+        assert!(x > y, "{x} {y}");
+    }
+
+    /// Enzo: "this delay is not hardcoded in VRChat but more of a real lag, so it would change for each people".
+    #[test]
+    fn the_delay_follows_vrchat_s_own_frame_rate() {
+        let until_shown = 0.015;
+        assert!((pose_seconds(until_shown, 1.0, 1.0 / 90.0) - (until_shown - 0.0111)).abs() < 0.0001);
+        assert!((pose_seconds(until_shown, 1.0, 1.0 / 30.0) - (until_shown - 0.0333)).abs() < 0.0001, "a slower computer, further behind");
+        assert_eq!(pose_seconds(until_shown, 0.0, 1.0 / 30.0), until_shown);
+        // The rate: the middle of what the compositor saw, as a hitch says nothing of it.
+        assert_eq!(game_frame_seconds(&mut [27.0, 27.0, 400.0, 0.0, 27.0, 90.0, 27.0]), Some(0.027));
+        assert_eq!(game_frame_seconds(&mut [0.0, 0.0]), None);
     }
 
     /// As Enzo laid them.

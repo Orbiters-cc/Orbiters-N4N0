@@ -787,6 +787,7 @@ fn session(args: &[String]) -> anyhow::Result<Ended> {
                 input_read,
                 dashboard,
                 in_game: vrchat_scene,
+                frame,
                 world_status: t.menu.worlds.view_status(),
                 prediction: (frame - since).clamp(0.0, 0.05),
             };

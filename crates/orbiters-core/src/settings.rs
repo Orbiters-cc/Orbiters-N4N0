@@ -154,6 +154,17 @@ pub enum MenuDisplay {
     Floating,
 }
 
+/// How the panels around VRChat's menus follow the hand in VR. VRChat draws its menu from a pose taken a frame ago, so it trails the hand by what depends on each computer's frame rate.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VrMotion {
+    /// Each tile a little behind the hand on its own spring: never in step with VRChat's menu, on purpose, on any computer.
+    #[default]
+    Springy,
+    /// Rigid, behind the hand by [`OrbitSettings::vr_delay_frames`] of VRChat's frames.
+    Matched,
+}
+
 /// The panels around VRChat's own menus (`overlay::orbit`).
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -166,6 +177,9 @@ pub struct OrbitSettings {
     /// How large the panels are in VR against where they are measured to be, one of [`OrbitSettings::VR_SIZES`]: VRChat
     /// scales its menus with things only the headset shows.
     pub vr_size: f32,
+    pub vr_motion: VrMotion,
+    /// With [`VrMotion::Matched`]: how far behind the hand, in VRChat's frames, measured as it runs, so that it follows the frame rate of each computer. 0: on the hand exactly, which is ahead of VRChat.
+    pub vr_delay_frames: f32,
 }
 
 impl OrbitSettings {
@@ -189,7 +203,7 @@ impl OrbitSettings {
 
 impl Default for OrbitSettings {
     fn default() -> Self {
-        Self { display: MenuDisplay::AvatarScreen, wheel: true, quick_menu: true, vr_size: 1.0 }
+        Self { display: MenuDisplay::AvatarScreen, wheel: true, quick_menu: true, vr_size: 1.0, vr_motion: VrMotion::Springy, vr_delay_frames: 1.0 }
     }
 }
 

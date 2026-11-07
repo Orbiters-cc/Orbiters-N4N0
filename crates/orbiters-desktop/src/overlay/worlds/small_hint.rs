@@ -61,21 +61,21 @@ fn mix(a: Color32, b: Color32, t: f32) -> Color32 {
 pub fn joystick(p: &Painter, base: Pos2, push: f32) {
     const HEIGHT: f32 = 92.0;
     let elevation = 26f32.to_radians();
-    let tilt = push * 30f32.to_radians();
+    let tilt = push * 46f32.to_radians();
     // The top of its stem, projected: away goes up the picture, and smaller; towards comes down, and larger.
     let top = base - vec2(0.0, HEIGHT * (tilt.cos() * elevation.cos() + tilt.sin() * elevation.sin()));
     let near = 1.0 - 0.14 * push;
     // Its housing: a shadow, a rim catching the light, a dark well.
     ellipse(p, base + vec2(0.0, 12.0), vec2(82.0, 30.0), Color32::from_black_alpha(90));
     ellipse(p, base + vec2(0.0, 6.0), vec2(78.0, 28.0), Color32::from_rgb(20, 23, 30));
-    ellipse(p, base, vec2(78.0, 28.0), Color32::from_rgb(64, 70, 84));
-    ellipse(p, base + vec2(0.0, 1.5), vec2(72.0, 25.0), Color32::from_rgb(30, 33, 42));
-    ellipse(p, base + vec2(0.0, 3.0), vec2(60.0, 20.0), Color32::from_rgb(14, 16, 21));
+    ellipse(p, base, vec2(78.0, 28.0), Color32::from_rgb(112, 118, 134));
+    ellipse(p, base + vec2(0.0, 1.5), vec2(72.0, 25.0), Color32::from_rgb(70, 75, 88));
+    ellipse(p, base + vec2(0.0, 3.0), vec2(60.0, 20.0), Color32::from_rgb(46, 50, 60));
     // Its rubber boot, leaning with the stem.
     let lean = (top.y - (base.y - HEIGHT * elevation.cos())) * 0.1;
     for i in 0..6 {
         let t = i as f32 / 5.0;
-        let c = mix(Color32::from_rgb(26, 29, 37), Color32::from_rgb(52, 57, 70), t);
+        let c = mix(Color32::from_rgb(64, 69, 82), Color32::from_rgb(104, 110, 124), t);
         ellipse(p, base + vec2(0.0, -2.0 - t * 15.0 + lean * t), vec2(38.0 - t * 18.0, 14.0 - t * 7.0), c);
     }
     // The stem, lit from the left.
@@ -84,25 +84,25 @@ pub fn joystick(p: &Painter, base: Pos2, push: f32) {
     shaded_quad(
         p,
         [top - vec2(narrow, -4.0), top + vec2(narrow, 4.0), foot + vec2(wide, 0.0), foot - vec2(wide, 0.0)],
-        Color32::from_rgb(82, 90, 106),
-        Color32::from_rgb(112, 121, 138),
-        Color32::from_rgb(38, 42, 52),
+        Color32::from_rgb(150, 158, 174),
+        Color32::from_rgb(200, 206, 218),
+        Color32::from_rgb(92, 98, 112),
     );
     // Its cap: a side, then a face rounded by rings of light towards its upper left.
     let (rx, ry) = (38.0 * near, 22.0 * near * (0.86 + 0.14 * push));
     let side = 11.0 * near;
-    ellipse(p, top + vec2(0.0, side), vec2(rx, ry), Color32::from_rgb(28, 31, 40));
+    ellipse(p, top + vec2(0.0, side), vec2(rx, ry), Color32::from_rgb(96, 102, 116));
     for i in 0..6 {
         let t = i as f32 / 5.0;
-        ellipse(p, top + vec2(0.0, side * (1.0 - t)), vec2(rx, ry), mix(Color32::from_rgb(34, 37, 47), Color32::from_rgb(58, 63, 77), t));
+        ellipse(p, top + vec2(0.0, side * (1.0 - t)), vec2(rx, ry), mix(Color32::from_rgb(110, 116, 130), Color32::from_rgb(150, 156, 170), t));
     }
     for i in 0..10 {
         let t = i as f32 / 9.0;
-        let color = mix(Color32::from_rgb(72, 79, 96), Color32::from_rgb(142, 152, 172), t * t);
+        let color = mix(Color32::from_rgb(176, 182, 196), Color32::from_rgb(244, 246, 250), t * t);
         ellipse(p, top + vec2(-5.0 * near * t, -2.5 * near * t), vec2(rx * (1.0 - t * 0.62), ry * (1.0 - t * 0.62)), color);
     }
     // Its dished top's grip.
-    ellipse(p, top + vec2(0.0, 1.0), vec2(rx * 0.42, ry * 0.42), Color32::from_rgba_unmultiplied(30, 33, 42, 60));
+    ellipse(p, top + vec2(0.0, 1.0), vec2(rx * 0.42, ry * 0.42), Color32::from_rgba_unmultiplied(70, 76, 90, 70));
 }
 
 fn words(p: &Painter, at: Pos2, glyph: &str, first: &str, second: &str, on: f32) {
@@ -132,13 +132,20 @@ pub fn paint(p: &Painter, stage: Stage, seconds: f32) {
             p.rect_filled(card, theme::radius(30.0), theme::alpha(theme::INK_900, 0.95));
             tail(p, card);
             let push = stick_at(seconds);
-            joystick(p, pos2(104.0, 180.0), push);
+            joystick(p, pos2(104.0, 186.0), push);
             let which = if hand == 0 { "Left stick" } else { "Right stick" };
             p.text(pos2(104.0, 28.0), Align2::CENTER_CENTER, which, theme::font(19.0, weight::SEMIBOLD), theme::FG_2);
             let up = ((push - 0.2) / 0.8).clamp(0.0, 1.0);
             let down = ((-push - 0.2) / 0.8).clamp(0.0, 1.0);
             words(p, pos2(208.0, 26.0), icons::CARET_UP, "Push up", "to zoom in", up);
             words(p, pos2(208.0, 126.0), icons::CARET_DOWN, "Pull down", "to zoom out", down);
+            // Off the stick, the way it goes: in time with the words that light up.
+            if up > 0.0 {
+                widgets::icon(p, pos2(104.0, 60.0), icons::CARET_UP, 46.0, theme::alpha(theme::ACCENT, up));
+            }
+            if down > 0.0 {
+                widgets::icon(p, pos2(166.0, 196.0), icons::CARET_DOWN, 46.0, theme::alpha(theme::ACCENT, down));
+            }
         }
         Stage::Grip { near } => {
             let card = Rect::from_center_size(page.center() + vec2(0.0, 30.0), vec2(PX[0] as f32 - 4.0, 140.0));

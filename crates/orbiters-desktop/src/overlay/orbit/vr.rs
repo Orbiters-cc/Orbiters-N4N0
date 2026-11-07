@@ -220,14 +220,19 @@ fn on_hand(tilt: f32, ahead: f32, up: f32) -> Matrix34 {
     space::from_axes([1.0, 0.0, 0.0], [0.0, sin, -cos], [0.0, cos, sin], [0.0, up, -ahead])
 }
 
-/// How far a wing's tile stands off a sheet up beside it, in menu units: the sheet is nearer the eyes, and would seem to run into it.
-const WING_OFF_A_SHEET: f32 = 18.0;
+/// How far a wing's tile stands off VRChat's panels, in menu units, at least a tile's gap; and off a sheet up beside it, which is nearer the eyes and would seem to run into it.
+const WING_OFF_ITS_PANEL: f32 = 12.0;
+const WING_OFF_A_SHEET: f32 = 22.0;
+/// How far a sheet lies over where it does on a screen: nearer the eyes, its foot would seem to reach VRChat's tab row.
+const SHEET_OVER_THE_TABS: f32 = 9.0;
 
-/// A wing's tile off a sheet, on the side it lies.
+/// Where a part lies in a headset, from where it does on a screen.
 pub fn clear_of_sheet(mut placed: Placed, sheet_up: bool) -> Placed {
-    if sheet_up && Zone::WING.contains(&placed.zone) {
+    if Zone::WING.contains(&placed.zone) || placed.zone == Zone::QmCaption {
         let side = if placed.rect.center().x < 0.0 { -1.0 } else { 1.0 };
-        placed.rect = placed.rect.translate(egui::vec2(side * WING_OFF_A_SHEET, 0.0));
+        placed.rect = placed.rect.translate(egui::vec2(side * if sheet_up { WING_OFF_A_SHEET } else { WING_OFF_ITS_PANEL }, 0.0));
+    } else if matches!(placed.zone, Zone::Takeover | Zone::SheetBack) {
+        placed.rect = placed.rect.translate(egui::vec2(0.0, -SHEET_OVER_THE_TABS));
     }
     placed
 }
@@ -961,11 +966,12 @@ mod tests {
     fn a_wing_stands_off_a_sheet_and_only_a_wing() {
         let place = |zone, x: f32| Placed { zone, rect: egui::Rect::from_min_size(egui::pos2(x, 0.0), egui::vec2(80.0, 80.0)), center: egui::Pos2::ZERO, unit: 1.0 };
         let right = place(Zone::WingWorlds, 400.0);
-        assert!(clear_of_sheet(right, true).rect.left() > 400.0);
-        assert_eq!(clear_of_sheet(right, false).rect, right.rect);
+        let (with, without) = (clear_of_sheet(right, true).rect.left(), clear_of_sheet(right, false).rect.left());
+        assert!(with > without && without >= 400.0 + 6.0, "at least a tile's gap: {with} {without}");
         assert!(clear_of_sheet(place(Zone::WingWorlds, -480.0), true).rect.left() < -480.0);
         let sheet = place(Zone::Takeover, 0.0);
-        assert_eq!(clear_of_sheet(sheet, true).rect, sheet.rect);
+        assert_eq!(clear_of_sheet(sheet, true).rect.left(), sheet.rect.left());
+        assert!(clear_of_sheet(sheet, true).rect.top() < sheet.rect.top(), "clear of VRChat's tab row");
     }
 
     fn at(t0: Instant, ms: u64) -> Instant {

@@ -240,11 +240,13 @@ impl Hints {
 
     fn now(&self, open: Option<Around>, pointing: bool) -> Option<(&'static str, &'static str)> {
         match open {
+            // Now the ring takes the mouse: it said so, it says so.
+            Some(Around::Wheel) if pointing && self.pointed <= Self::FULL => Some(("Click a tool", "")),
             Some(Around::Wheel) if pointing => None,
-            Some(Around::Wheel) if self.pointed < Self::FULL => Some(("Press 1 to 6 to pick", "Or hold Left Alt to point")),
-            Some(Around::Wheel) => Some(("1 to 6 to pick, Left Alt to point", "")),
+            Some(Around::Wheel) if self.pointed < Self::FULL => Some(("Hold Left Alt, then click a tool", "Or press its number")),
+            Some(Around::Wheel) => Some(("Left Alt to click, or a number", "")),
             // Says what this is, and that it is not VRChat's.
-            Some(Around::QuickMenu) if self.openings <= Self::FULL => Some(("Orbiters, beside VRChat's menu", "Worlds in 3D, videos, instances and 3D pictures.")),
+            Some(Around::QuickMenu) if self.openings <= Self::FULL => Some(("Orbiters' own menu", "Worlds in 3D, videos, instances and 3D pictures.")),
             _ => None,
         }
     }
@@ -443,7 +445,7 @@ impl Game {
 #[derive(Default)]
 struct Keys {
     was: [bool; 2],
-    digits: [bool; 6],
+    digits: [bool; 9],
 }
 
 impl Keys {
@@ -462,10 +464,10 @@ impl Keys {
         any
     }
 
-    /// A number from 1 to 6 just pressed, as an index, when `live`. A key still down from before it was live counts for nothing.
+    /// A number from 1 to 9 just pressed, as an index, when `live`. A key still down from before it was live counts for nothing.
     fn digit(&mut self, live: bool) -> Option<usize> {
         if !live {
-            self.digits = [true; 6];
+            self.digits = [true; 9];
             return None;
         }
         let mut pressed = None;

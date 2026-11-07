@@ -659,6 +659,7 @@ impl Capture {
             .filter(|&i| g.is_finite(i) && g.means[i][1] > frame.ground - 0.25 && g.means[i][1] < frame.top && g.opacity_logits[i] > -2.0 && largest(i) < if flat(i) && g.means[i][1] < camera { most * 3.0 } else { most })
             .collect();
         let kept = away_from_floaters(g, kept, frame.reach / 14.0);
+        let kept = what_holds_together(g, kept, frame.reach / 12.0);
         let mut order: Vec<(f32, usize)> = kept.into_iter().map(|i| (across(i), i)).collect();
         order.sort_by(|a, b| a.0.total_cmp(&b.0));
         let mut sorted = Gaussians::default();
@@ -719,6 +720,49 @@ fn slab_over(points: &[V3], frame: &SmallFrame, from: f32) -> Option<f32> {
 }
 
 /// Of the splats `kept`, those with others around them: what floats on its own in the air of a capture is an error of its training.
+/// What hangs together with the scene: splats in cells joined, cell by cell, to a large part of it. Fragments of a reconstruction hanging apart in the air go; whatever stands
+/// on the same floor or against the same wall, however thin, stays, and so does a part apart that is large (the share of the largest part [`KEEPS_APART`] says).
+fn what_holds_together(g: &Gaussians, kept: Vec<usize>, cell: f32) -> Vec<usize> {
+    const KEEPS_APART: usize = 12;
+    let at = |i: usize| {
+        let m = g.means[i];
+        ((m[0] / cell).floor() as i32, (m[1] / cell).floor() as i32, (m[2] / cell).floor() as i32)
+    };
+    let mut part_of: HashMap<(i32, i32, i32), (u32, usize)> = HashMap::with_capacity(kept.len() / 8);
+    for &i in &kept {
+        part_of.entry(at(i)).or_insert((u32::MAX, 0)).1 += 1;
+    }
+    let cells: Vec<(i32, i32, i32)> = part_of.keys().copied().collect();
+    let mut sizes: Vec<usize> = Vec::new();
+    for start in cells {
+        if part_of[&start].0 != u32::MAX {
+            continue;
+        }
+        let part = sizes.len() as u32;
+        let mut size = 0;
+        let mut stack = vec![start];
+        part_of.get_mut(&start).expect("just listed").0 = part;
+        while let Some((x, y, z)) = stack.pop() {
+            size += part_of[&(x, y, z)].1;
+            for dx in -1..=1 {
+                for dy in -1..=1 {
+                    for dz in -1..=1 {
+                        if let Some(next) = part_of.get_mut(&(x + dx, y + dy, z + dz)) {
+                            if next.0 == u32::MAX {
+                                next.0 = part;
+                                stack.push((x + dx, y + dy, z + dz));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        sizes.push(size);
+    }
+    let least = sizes.iter().copied().max().unwrap_or(0) / KEEPS_APART;
+    kept.into_iter().filter(|&i| sizes[part_of[&at(i)].0 as usize] >= least).collect()
+}
+
 fn away_from_floaters(g: &Gaussians, kept: Vec<usize>, cell: f32) -> Vec<usize> {
     let at = |i: usize| {
         let m = g.means[i];
@@ -947,6 +991,28 @@ mod tests {
         assert!((small.view.yaw() - closed.view.yaw()).abs() < 1e-4);
         assert_eq!(small.small_reach(), frame.reach);
         assert_eq!(small.view.ground(), frame.ground);
+    }
+
+    /// Round 7's judges: loose fragments around the small view. They go, and a thin thing joined to the rest does not.
+    #[test]
+    fn what_hangs_apart_from_a_capture_goes_and_what_is_joined_to_it_stays() {
+        let mut g = Gaussians::default();
+        // A floor, and on it a thin post.
+        for i in 0..100 {
+            for j in 0..100 {
+                splat(&mut g, i as f32 * 0.04, 0.0, j as f32 * 0.04);
+            }
+        }
+        for i in 0..50 {
+            splat(&mut g, 2.0, i as f32 * 0.04, 2.0);
+        }
+        let solid = g.len();
+        // A fragment in the air, far from them.
+        for i in 0..40 {
+            splat(&mut g, 7.0 + i as f32 * 0.002, 3.0, 7.0);
+        }
+        let kept = what_holds_together(&g, (0..g.len()).collect(), 0.3);
+        assert_eq!(kept.len(), solid);
     }
 
     #[test]

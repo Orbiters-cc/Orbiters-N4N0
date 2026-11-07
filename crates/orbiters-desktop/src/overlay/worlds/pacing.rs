@@ -7,7 +7,8 @@ use std::time::{Duration, Instant};
 
 pub const MAX_INTERVAL: Duration = Duration::from_millis(250);
 const RECOVER: Duration = Duration::from_millis(500);
-const DUTY: f64 = 0.40;
+/// What share of the time a displayed capture may spend drawing.
+pub const DUTY: f64 = 0.40;
 
 /// The same high-resolution sleep slice is used by the overlay and the windowless timing experiment.
 pub fn service_slice(left: Duration, wake: Option<Duration>) -> Duration {

@@ -48,8 +48,6 @@ pub const RING_OUTER: f32 = 172.0;
 /// The ring that blooms outside it.
 pub const BLOOM_INNER: f32 = 176.0;
 pub const BLOOM_OUTER: f32 = 238.0;
-/// The music's controls need less depth.
-pub const BLOOM_SHORT: f32 = 218.0;
 /// What separates two cells, and the cells' corners, in those units.
 const RING_GAP: f32 = 3.5;
 const RING_CORNER: f32 = 9.0;
@@ -76,10 +74,6 @@ impl Ring {
 
     const fn bloom(from: f32, to: f32) -> Self {
         Self { from, to, inner: BLOOM_INNER, outer: BLOOM_OUTER }
-    }
-
-    const fn short(from: f32, to: f32) -> Self {
-        Self { from, to, inner: BLOOM_INNER, outer: BLOOM_SHORT }
     }
 
     pub fn middle(&self) -> f32 {
@@ -246,13 +240,12 @@ impl Zone {
             Zone::WheelAll => Ring::cell(150.0, 210.0),
             Zone::WheelInstances => Ring::cell(210.0, 270.0),
             Zone::WheelPictures => Ring::cell(270.0, 330.0),
-            // On the left, so as to stay clear of the caption over the ring.
-            // Around its parent, as far towards the top as the caption over the wheel leaves room.
-            Zone::BloomPeople => Ring::bloom(303.0, 333.0),
-            Zone::BloomWorld => Ring::bloom(273.0, 303.0),
-            Zone::BloomRecord => Ring::bloom(243.0, 273.0),
-            Zone::BloomPrevious => Ring::short(90.0, 120.0),
-            Zone::BloomNext => Ring::short(120.0, 150.0),
+            // One arc beside its parent, of one depth, as the ring is: short of the top, where the caption right over the ring lies.
+            Zone::BloomPeople => Ring::bloom(285.0, 315.0),
+            Zone::BloomWorld => Ring::bloom(255.0, 285.0),
+            Zone::BloomRecord => Ring::bloom(225.0, 255.0),
+            Zone::BloomPrevious => Ring::bloom(90.0, 120.0),
+            Zone::BloomNext => Ring::bloom(120.0, 150.0),
             _ => return None,
         })
     }
@@ -288,10 +281,11 @@ impl Zone {
         }
         let r = |x0: f32, y0: f32, x1: f32, y1: f32| Rect::from_min_max(pos2(x0, y0), pos2(x1, y1));
         match self {
-            Zone::WheelCaption => r(-220.0, -270.0, 220.0, -214.0),
+            // Right over the ring: what to do with it is said where the eyes are.
+            Zone::WheelCaption => r(-220.0, -234.0, 220.0, -178.0),
             Zone::WheelVeil => r(-109.0, -109.0, 109.0, 109.0),
-            // Off the ring, in the free corner past its seam, and no smaller than a thumb's worth of laser.
-            Zone::WheelHide => r(118.0, -182.0, 202.0, -150.0),
+            // On the ring's edge, its upper right, as a thumb's worth of laser: it belongs to the ring and shows it.
+            Zone::WheelHide => r(84.0, -176.0, 196.0, -134.0),
             // As tall as My Profile and as wide, beside it.
             // As tall as My Profile and as wide, beside it.
             Zone::WingName => r(362.0, -150.0, 524.0, -120.0),
@@ -303,7 +297,8 @@ impl Zone {
             Zone::WingAll => wing_tile(1.0, 2.0),
             Zone::WingPlaying => r(362.0, 132.0, 524.0, 186.0),
             Zone::QmStrip => r(-300.0, 266.0, 300.0, 322.0),
-            Zone::QmCaption => r(200.0, -206.0, 524.0, -154.0),
+            // On the wing: from its own left edge, right over its name, clear of what VRChat has over its menu.
+            Zone::QmCaption => r(362.0, -204.0, 632.0, -154.0),
             // The Quick Menu's panels and the FPS line over them, ending where its main panel ends: its tab row and badge stay VRChat's.
             // Clear of what VRChat has over its menu, down over its main panel's foot.
             Zone::SheetBack => r(-352.0, -240.0, 352.0, 205.5),
@@ -319,7 +314,7 @@ impl Zone {
     fn fallback(self) -> Option<Rect> {
         let r = |x0: f32, y0: f32, x1: f32, y1: f32| Rect::from_min_max(pos2(x0, y0), pos2(x1, y1));
         match self {
-            Zone::QmCaption => Some(r(-262.0, 324.0, 262.0, 364.0)),
+            Zone::QmCaption => Some(r(-262.0, 326.0, 262.0, 364.0)),
             _ => None,
         }
     }

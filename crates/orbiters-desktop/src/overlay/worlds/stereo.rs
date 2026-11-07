@@ -44,7 +44,7 @@ fn mat_vec(m: &[[f32; 3]; 3], v: V3) -> V3 {
     [dot(m[0], v), dot(m[1], v), dot(m[2], v)]
 }
 
-fn mat_mul(a: &[[f32; 3]; 3], b: &[[f32; 3]; 3]) -> [[f32; 3]; 3] {
+pub fn mat_mul(a: &[[f32; 3]; 3], b: &[[f32; 3]; 3]) -> [[f32; 3]; 3] {
     let mut out = [[0f32; 3]; 3];
     for (i, row) in out.iter_mut().enumerate() {
         for (j, v) in row.iter_mut().enumerate() {

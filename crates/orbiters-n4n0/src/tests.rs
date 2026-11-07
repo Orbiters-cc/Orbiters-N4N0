@@ -683,7 +683,7 @@ fn status_when(t: &TestHost, until: impl Fn(&N4n0Status) -> bool) -> N4n0Status 
 }
 
 fn delta(text: &str) -> String {
-    format!("event: text\ndata: {}\n\n\0", json!({ "delta": text }))
+    format!("event: text\ndata: {}\n\n\0", json!({ "delta": text })) // i18n: not shown
 }
 
 fn the_answers(status: &N4n0Status) -> Vec<(String, bool)> {

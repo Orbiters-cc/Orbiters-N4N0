@@ -23,7 +23,7 @@
 //! it, with none of the boost's carry in it. So its show puts the person back where the walk began, at once, and the
 //! boost's next step showed the old base plus the whole carry, throwing them forward again and undoing what that drag
 //! did (Enzo, 2026-11-07, "random positions resets and it starts to move me all over the place": his Advanced Settings
-//! drags with Y, B and the right thumbrest, and its log has writes right after each of his walks). So the boost reads
+//! drags with Y, B and the right thumbrest, and its log has writes within 2 s of the end of 4 of his 5 walks that day). So the boost reads
 //! the play space everyone sees each frame while it carries ([`PlaySpace::live_standing`]; reading changes nothing). What
 //! it did not show itself is another application's: the carry is over, without touching the play space, and the boost
 //! holds until that application has been quiet a moment ([`OTHER_APP_QUIET`]). A walk always starts from the play space
@@ -1220,7 +1220,7 @@ mod tests {
         last
     }
 
-    /// The reset Enzo met (2026-11-07), as his logs tell it: OVR Advanced Settings wrote the play space right after his
+    /// The reset Enzo met (2026-11-07), as his logs suggest: OVR Advanced Settings wrote the play space right after most of his
     /// walks (its Space Drag on Y, B and the right thumbrest), its show has none of the carry, so he went back where the
     /// walk began, and the next push threw him forward by all of it. That throw is what must never happen again.
     #[test]

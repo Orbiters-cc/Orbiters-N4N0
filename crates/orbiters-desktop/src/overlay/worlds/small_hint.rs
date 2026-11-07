@@ -25,7 +25,7 @@ const STICK_FRAME_S: f32 = 1.0 / 36.0;
 /// Where it stands against the words' middle: in the part of their page left for it.
 /// How far round it someone may go before it turns to follow them, in radians.
 const STICK_TURNS_BY: f32 = 0.7;
-const STICK_AT: [f32; 2] = [-(WIDTH_M - stick3d::WIDTH_M) / 2.0 + 0.004, -0.012];
+pub const STICK_AT: [f32; 2] = [-(WIDTH_M - stick3d::WIDTH_M) / 2.0 + 0.004, -0.012];
 
 /// What it says.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -119,6 +119,11 @@ pub struct HideChip {
 }
 
 impl HideChip {
+    /// For `vr-test.log`.
+    pub fn report(&self) -> String {
+        format!("X {:?}", self.shown) // i18n: not shown (a log's line)
+    }
+
     pub fn new(overlay: &vr::Overlay, key: &str) -> anyhow::Result<Self> {
         let handle = overlay.create(&format!("{key}.small-hide"), "Hide a small 3D view").map_err(|c| anyhow::anyhow!("the small view's Hide: {c:?}"))?; // i18n: not shown (the overlay's name in SteamVR)
         let _ = overlay.set_width_in_meters(handle, CHIP_WIDTH_M);
@@ -284,6 +289,11 @@ impl SmallHint {
     pub fn destroy(&self, overlay: &vr::Overlay) {
         let _ = overlay.destroy(self.handle);
         let _ = overlay.destroy(self.stick);
+    }
+
+    /// For `vr-test.log`.
+    pub fn report(&self) -> String {
+        format!("hint {:?} stick shown {}", self.shown, self.stick_shown) // i18n: not shown (a log's line)
     }
 }
 

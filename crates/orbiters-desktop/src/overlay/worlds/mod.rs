@@ -183,6 +183,7 @@ pub struct Worlds {
     hint: Option<small_hint::SmallHint>,
     backdrop: Option<small_hint::Backdrop>,
     small_logged: super::vr_log::Every,
+    eye_frames_kept: u32,
     hide_chip: Option<small_hint::HideChip>,
     small_place: Option<(vr::Matrix34, f32)>,
     /// Where each hand's tool is and which way it points, and its trigger, now and a turn ago.
@@ -294,13 +295,31 @@ impl Worlds {
             small_triggers_were: [false; 2],
             backdrop: None,
             small_logged: Default::default(),
+            eye_frames_kept: 0,
             small_place: None,
             hint_used: false,
             menu_boxes: Vec::new(),
         })
     }
 
-    /// The panel alone, for the desktop's panels around VRChat's menus (`overlay::orbit`): no SteamVR, no pill, no bar, nothing shown around the person. Its lists, a world's page
+    /// What the left eye shows now, half size, into `vr-test-frames` in the logs' folder: what the compositor really shows at a panel's hole.
+fn keep_an_eye_frame(steamvr: &vr::Client, n: u32) {
+    let Ok(compositor) = steamvr.compositor() else { return };
+    let Ok(reader) = orbiters_openvr::mirror::EyeReader::new(steamvr.dxgi_adapter_index()) else { return };
+    match reader.read(&compositor, vr::compositor::Eye::Left) {
+        Ok(picture) => {
+            let dir = orbiters_core::paths::logs_dir().join("vr-test-frames");
+            let _ = std::fs::create_dir_all(&dir);
+            if let Some(image) = image::RgbaImage::from_raw(picture.width, picture.height, picture.rgba) {
+                let half = image::imageops::resize(&image, picture.width / 2, picture.height / 2, image::imageops::FilterType::Triangle);
+                let _ = half.save(dir.join(format!("small-in-its-hole-{n}.png")));
+            }
+        }
+        Err(e) => super::vr_log::line(&format!("eye frame: {e}")), // i18n: not shown (a log's line)
+    }
+}
+
+/// The panel alone, for the desktop's panels around VRChat's menus (`overlay::orbit`): no SteamVR, no pill, no bar, nothing shown around the person. Its lists, a world's page
     /// and its feedback work as ever; a capture opens in the Orbiters window instead ([`Worlds::mouse_alone`]).
     pub fn alone(ctx: egui::Context) -> Self {
         Self {
@@ -371,6 +390,7 @@ impl Worlds {
             small_triggers_were: [false; 2],
             backdrop: None,
             small_logged: Default::default(),
+            eye_frames_kept: 0,
             small_place: None,
             hint_used: false,
             menu_boxes: Vec::new(),
@@ -857,7 +877,14 @@ impl Worlds {
         self.hint_used |= small.is_some_and(|s| s.zoomed);
         // Across a menu it stays: the menu is drawn over it by sort order (Enzo's diagram: menu, 3D view, backdrop, game). It never fades for that, which made it vanish.
         if self.small_logged.due(std::time::Duration::from_secs(1)) && self.view.small() {
-            super::vr_log::line(&self.view.report(overlay));
+            let hint = self.hint.as_ref().map_or("no hint".to_string(), |h| h.report());
+            let chip = self.hide_chip.as_ref().map_or("no X".to_string(), |c| c.report());
+            super::vr_log::line(&format!("{} | {hint} | {chip} | menus up {} | hint used {}", self.view.report(overlay), self.menu_boxes.len(), self.hint_used)); // i18n: not shown (a log's line)
+            // And three times a session, what the eye itself shows while it lies in a hole: what no render can say. Kept in the logs' folder of this computer only.
+            if small.is_some_and(|s| s.docked) && self.eye_frames_kept < 3 {
+                self.eye_frames_kept += 1;
+                Self::keep_an_eye_frame(steamvr, self.eye_frames_kept);
+            }
         }
         // The dark pane behind it in a panel's hole.
         let pane = small.filter(|s| s.docked).and(self.small_place).map(|(at, radius)| (at, radius * 2.0 / SMALL_FILLS_HOLE + 0.012));

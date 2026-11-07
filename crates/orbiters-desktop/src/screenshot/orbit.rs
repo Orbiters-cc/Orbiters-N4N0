@@ -458,6 +458,28 @@ pub(super) fn vr_shots(out: &Path, refs: &Path) -> anyhow::Result<()> {
             let hint_frame = small_hint::facing(up, space::position(&head));
             let hint_w = small_hint::WIDTH_M;
             eye.quad(&Quad { transform: hint_frame, width: hint_w, height: hint_w * hint_px[1] as f32 / hint_px[0] as f32 }, canvas.pixels(), hint_px, 1.0);
+            // Its stick, as the left eye sees it from where it is: what the headset gets is a picture for each eye.
+            {
+                use crate::overlay::worlds::stick3d;
+                let middle = space::add(space::add(space::position(&hint_frame), space::scale(space::axis(&hint_frame, 0), small_hint::STICK_AT[0])), space::scale(space::axis(&hint_frame, 1), small_hint::STICK_AT[1]));
+                let mut there = hint_frame;
+                for (i, row) in there.m.iter_mut().enumerate() {
+                    row[3] = middle[i];
+                }
+                let own = |eye: [f32; 3]| {
+                    let d = space::sub(eye, middle);
+                    [space::dot(d, space::axis(&there, 0)), space::dot(d, space::axis(&there, 1)), space::dot(d, space::axis(&there, 2))]
+                };
+                let left = space::position(&head);
+                let pair = stick3d::picture([own(left), own(left)], 0.85, crate::overlay::orbit::panels::look::accent());
+                let (w, h) = (stick3d::EYE_PX[0] as usize, stick3d::EYE_PX[1] as usize);
+                let mut one = Vec::with_capacity(w * h * 4);
+                for y in 0..h {
+                    one.extend_from_slice(&pair[y * w * 2 * 4..y * w * 2 * 4 + w * 4]);
+                }
+                eprintln!("stick: eye {:?} solid {} middle {:?}", own(left), one.chunks_exact(4).filter(|p| p[3] > 20).count(), middle);
+                eye.quad(&Quad { transform: there, width: stick3d::WIDTH_M, height: stick3d::HEIGHT_M }, &one, stick3d::EYE_PX, 1.0);
+            }
             let mut canvas = Canvas::new(small_hint::CHIP_PX[0], small_hint::CHIP_PX[1]);
             for _ in 0..2 {
                 canvas.paint(0.0, |p| small_hint::paint_chip(p, false));

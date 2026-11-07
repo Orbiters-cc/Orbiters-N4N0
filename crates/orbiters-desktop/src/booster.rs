@@ -130,6 +130,7 @@ pub fn line_words(line: Line, limit: Limit) -> &'static str {
         Line::Limit | Line::Watching => limit_line(limit),
         Line::Testing => tr("Testing for about a minute"),
         Line::Kept => tr("Kept: more real frames"),
+        Line::GainNotKept => tr("More real frames when tested, put back: this step doesn't keep it"),
         Line::NoGain => tr("No gain measured, put back"),
         Line::TooMuchChanging => tr("Too much was changing to tell."),
         Line::NotTaken => tr("VRChat didn't take this change while running."),
@@ -146,7 +147,7 @@ pub fn line_words(line: Line, limit: Limit) -> &'static str {
 /// What a comparison compared.
 pub fn kind_name(kind: Kind) -> &'static str {
     match kind {
-        Kind::Programs => tr("Other programs lowered"),
+        Kind::Programs => tr("Other programs in efficiency mode"),
         Kind::Sharpness => tr("Lower sharpness"),
         Kind::PanelQuality => tr("Lighter 3D panels"),
         Kind::ReconstructionHold => tr("3D pictures waiting"),
@@ -181,7 +182,8 @@ pub fn before_after(c: &Comparison) -> BeforeAfter {
         _ => orbiters_i18n::tr!("Before {before} · After {after}", before = before, after = after),
     };
     let said = match c.verdict {
-        Verdict::Kept => tr("Same world, tested twice"),
+        Verdict::Kept if c.kept => tr("Same world, tested twice"),
+        Verdict::Kept => tr("Same world, tested twice. Put back: this step doesn't keep it."),
         Verdict::NoGain => tr("No gain measured, put back"),
         Verdict::TooMuchChanging => tr("Too much was changing to tell."),
         Verdict::NotTaken => tr("VRChat didn't take this change while running."),
@@ -268,7 +270,7 @@ pub fn changed_now(snap: &Snapshot) -> Vec<String> {
         });
     }
     for (name, count) in &booster.lowered {
-        out.push(orbiters_i18n::tr!("{name} lowered ({count}), it was Normal", name = name, count = count));
+        out.push(orbiters_i18n::tr!("{name} in efficiency mode ({count}), it was off", name = name, count = count));
     }
     if wants.pace_panels {
         out.push(tr("Orbiters' panels: 30 pictures a second, it was 45").to_string());
@@ -316,6 +318,7 @@ mod tests {
             before_late_gpu: 0.0,
             after_late_gpu: 0.0,
             stalls_at_switch: 0,
+            kept: verdict == Verdict::Kept,
         }
     }
 
@@ -325,6 +328,8 @@ mod tests {
         let kept = before_after(&comparison(Verdict::Kept));
         assert_eq!(kept.figures, "Before 36 · After 41 (+5)");
         assert_eq!(kept.said, "Same world, tested twice");
+        let told = before_after(&Comparison { kept: false, ..comparison(Verdict::Kept) });
+        assert!(told.said.contains("Put back"), "M2: a gain that wasn't kept is not called kept");
         let none = before_after(&comparison(Verdict::NoGain));
         assert_eq!(none.figures, "Before 36 · After 41");
         assert_eq!(none.said, "No gain measured, put back");
@@ -386,7 +391,7 @@ mod tests {
         snap.booster.lowered = vec![("chrome".to_string(), 12)];
         let said = changed_now(&snap);
         assert_eq!(said[0], "SteamVR's resolution: 0.85, it was Auto");
-        assert_eq!(said[1], "chrome lowered (12), it was Normal");
+        assert_eq!(said[1], "chrome in efficiency mode (12), it was off");
     }
 
     /// Nothing of this says official, approved, safe or optimized, in any stop or line: words the design forbids.
@@ -397,6 +402,7 @@ mod tests {
             Line::Limit,
             Line::Testing,
             Line::Kept,
+            Line::GainNotKept,
             Line::NoGain,
             Line::TooMuchChanging,
             Line::NotTaken,

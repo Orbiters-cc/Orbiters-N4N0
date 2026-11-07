@@ -181,7 +181,7 @@ pub(super) fn booster_items(facts: &Facts) -> Vec<Item> {
 fn test_buttons(b: &BoosterFacts) -> Vec<(BoosterPick, &'static str, &'static str)> {
     let mut row = vec![
         (BoosterPick::Test(Kind::Sharpness), icons::EYE, tr("Test sharpness anyway")),
-        (BoosterPick::Test(Kind::Programs), icons::GAUGE, tr("Test lowering programs")),
+        (BoosterPick::Test(Kind::Programs), icons::GAUGE, tr("Test efficiency mode for programs")),
     ];
     if b.panel_3d {
         row.push((BoosterPick::Test(Kind::PanelQuality), icons::CUBE, tr("Test lighter 3D panels")));

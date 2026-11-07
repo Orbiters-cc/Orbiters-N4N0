@@ -1413,6 +1413,7 @@ fn shots(args: &[String], picture_folders: Vec<PathBuf>) -> anyhow::Result<()> {
                     before_late_gpu: 0.0,
                     after_late_gpu: 0.0,
                     stalls_at_switch: 0,
+                    kept: true,
                 }];
                 s
             },

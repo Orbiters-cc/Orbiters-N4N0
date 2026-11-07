@@ -100,29 +100,32 @@ pub fn store_for_user(restorer: &Path) -> Store {
     Store::new(&crate::data_dir(), Box::new(RunOnce::for_user(restorer)))
 }
 
-/// Everything that can be restored without SteamVR running: programs' priorities and, while SteamVR is closed, its file.
+/// Everything that can be restored without SteamVR running: programs' efficiency mode and, while SteamVR is closed, its file.
+/// Programs are checked against a list of the system taken when this is made, before anything is opened.
 pub struct Offline<'a> {
     os: &'a mut dyn ProcessOs,
+    list: Vec<programs::Seen>,
     settings: Option<SettingsFile<'a>>,
 }
 
 impl<'a> Offline<'a> {
     pub fn new(os: &'a mut dyn ProcessOs, settings_path: Option<PathBuf>, closed: &'a dyn Fn() -> bool) -> Self {
-        Self { os, settings: settings_path.map(|path| SettingsFile { path, closed }) }
+        let list = os.list();
+        Self { os, list, settings: settings_path.map(|path| SettingsFile { path, closed }) }
     }
 }
 
 impl Access for Offline<'_> {
     fn read(&mut self, target: &Target) -> Read {
         match target {
-            Target::Process { pid, created, name } => programs::read_class(self.os, *pid, *created, name),
+            Target::Process { pid, created, name } => programs::read_state(self.os, &self.list, *pid, *created, name),
             Target::SteamVr { .. } => self.settings.as_mut().map_or(Read::Unreachable, |s| s.read(target)),
         }
     }
 
     fn write(&mut self, target: &Target, value: &Value) -> bool {
         match (target, value) {
-            (Target::Process { pid, created, name }, Value::Int(class)) => programs::set_class(self.os, *pid, *created, name, *class),
+            (Target::Process { pid, created, name }, Value::Int(state)) => programs::set_state(self.os, &self.list, *pid, *created, name, *state, false),
             (Target::Process { .. }, _) => false,
             (Target::SteamVr { .. }, _) => self.settings.as_mut().is_some_and(|s| s.write(target, value)),
         }
@@ -133,11 +136,16 @@ impl Access for Offline<'_> {
 /// overlay, which restores it live as the first thing it does.
 pub fn recover_for_user(store: &Store) -> Result<Restored, Unreadable> {
     let closed = || !programs::steamvr_running(&programs::scan());
+    let settings = vrsettings::settings_path_for_user();
+    // What a write killed midway left beside SteamVR's file, once nothing can be writing it.
+    if let Some(path) = settings.as_ref().filter(|_| closed()) {
+        let mut temp = path.as_os_str().to_owned();
+        temp.push(".orbiters-tmp");
+        let _ = std::fs::remove_file(PathBuf::from(temp));
+    }
     let mut os = RealOs;
-    let mut access = Offline::new(&mut os, vrsettings::settings_path_for_user(), &closed);
-    let done = store.restore(&mut access, &|_| true, &mut |_| {});
-    let _ = store.rearm();
-    done
+    let mut access = Offline::new(&mut os, settings, &closed);
+    store.restore(&mut access, &|_| true, &mut |_| {})
 }
 
 /// What is still owed that only a SteamVR closing can settle.
@@ -148,7 +156,10 @@ pub fn owed_to_steamvr(entries: &[Entry]) -> bool {
 /// What the app or the restorer does at a sign-in: recovery, and arming the next try if something could not be done now.
 /// Whether everything came back.
 pub fn run_restorer(store: &Store) -> bool {
-    match recover_for_user(store) {
+    let done = recover_for_user(store);
+    // RunOnce was used up by running this.
+    let _ = store.rearm();
+    match done {
         Ok(restored) => restored.waiting.is_empty(),
         Err(Unreadable) => false,
     }
@@ -292,10 +303,13 @@ mod tests {
     fn an_uninstall_with_steamvr_closed_open_or_silent() {
         struct Nothing;
         impl ProcessOs for Nothing {
+            fn list(&mut self) -> Vec<programs::Seen> {
+                Vec::new()
+            }
             fn open(&mut self, _: u32) -> Option<programs::Opened> {
                 None
             }
-            fn set_class(&mut self, _: u32, _: i64) -> bool {
+            fn set_state(&mut self, _: u32, _: u64, _: &str, _: i64) -> bool {
                 false
             }
         }
@@ -313,7 +327,7 @@ mod tests {
                 .unwrap();
             (store, path)
         };
-        let scale = |path: &Path| vrsettings::read_value(&std::fs::read_to_string(path).unwrap(), "steamvr", "supersampleScale");
+        let scale = |path: &Path| vrsettings::read_value(&std::fs::read_to_string(path).unwrap(), "steamvr", "supersampleScale").unwrap();
         // Closed: back at once, without waiting.
         let dir = Scratch::new("uninstall-closed");
         let (store, path) = owed(&dir.0);
@@ -367,10 +381,13 @@ mod tests {
         let store = Store::new(&dir.0, Box::new(crate::journal::NotArmed));
         struct Nothing;
         impl ProcessOs for Nothing {
+            fn list(&mut self) -> Vec<programs::Seen> {
+                Vec::new()
+            }
             fn open(&mut self, _: u32) -> Option<programs::Opened> {
                 None
             }
-            fn set_class(&mut self, _: u32, _: i64) -> bool {
+            fn set_state(&mut self, _: u32, _: u64, _: &str, _: i64) -> bool {
                 false
             }
         }
@@ -386,8 +403,8 @@ mod tests {
         let mut entries = store.entries().unwrap();
         entries.push(Entry {
             target: Target::Process { pid: 1234, created: 99, name: "chrome".into() },
-            original: Value::Int(programs::NORMAL_PRIORITY),
-            written: Value::Int(programs::BELOW_NORMAL_PRIORITY),
+            original: Value::Int(programs::SYSTEM_DECIDES),
+            written: Value::Int(programs::EFFICIENCY),
             stage: crate::journal::Stage::Applied,
             at: String::new(),
             app_version: String::new(),

@@ -21,6 +21,7 @@ pub mod guided;
 pub mod journal;
 pub mod log;
 pub mod programs;
+pub mod steamvr;
 pub mod system;
 pub mod trial;
 pub mod vrchat_read;

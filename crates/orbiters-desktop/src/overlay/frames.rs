@@ -16,6 +16,8 @@ pub struct FrameSampler {
     /// The FPS booster's frames since the last turn, and the last one it was given.
     fresh: Vec<orbiters_booster::frames::Frame>,
     fresh_through: Option<u32>,
+    /// VRChat had the scene at the last read: the frames of a time out of it (a loading screen) are not given as its own.
+    fresh_scene: bool,
     intervals: Vec<f32>,
     since: Instant,
     polled: Option<Instant>,
@@ -30,6 +32,7 @@ impl FrameSampler {
             last_frame: None,
             fresh: Vec::new(),
             fresh_through: None,
+            fresh_scene: false,
             intervals: Vec::new(),
             since: Instant::now(),
             polled: None,
@@ -59,7 +62,12 @@ impl FrameSampler {
         let newest = timings[..n].iter().map(|t| t.frame_index).max();
         // The newest frame may still be presented again, and a frame presented again is what "filled in" counts: each goes
         // to the booster once a newer one came, when its count is final.
-        if let Some(newest) = newest.filter(|_| vrchat_scene) {
+        let back_in_scene = vrchat_scene && !self.fresh_scene;
+        self.fresh_scene = vrchat_scene;
+        if let Some(newest) = newest.filter(|_| back_in_scene) {
+            // What the compositor still holds is from before: a loading screen's frames, not the scene's.
+            self.fresh_through = Some(newest.saturating_sub(1));
+        } else if let Some(newest) = newest.filter(|_| vrchat_scene) {
             // The count starting over: another application has the scene now.
             let through = self.fresh_through.filter(|last| *last < newest.saturating_add(1000));
             for t in timings[..n].iter().filter(|t| t.frame_index < newest && through.is_none_or(|last| t.frame_index > last)) {

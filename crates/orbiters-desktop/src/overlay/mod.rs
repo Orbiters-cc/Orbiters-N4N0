@@ -582,11 +582,13 @@ struct Teardown<'a> {
     orbit: Option<orbit::vr::OrbitVr>,
     /// The FPS booster: its frame logger, and what it changed in SteamVR.
     booster: booster::Host,
+    /// SteamVR's server ended without a quit: nothing is restored through it, as nothing can be read from it.
+    steamvr_gone: bool,
 }
 
 impl Drop for Teardown<'_> {
     fn drop(&mut self) {
-        self.booster.teardown(self.steamvr);
+        self.booster.teardown(self.steamvr_gone);
         self.state.release(self.backend);
         // Always: the menu may have closed on this turn's effects after its state was reported, unheard yet.
         self.backend.n4n0(N4n0Command::MenuState { open: false, dictation: false, keyboard: false });
@@ -646,7 +648,7 @@ fn session(args: &[String]) -> anyhow::Result<Ended> {
     let floating = floating::Floating::new(&overlay, KEY).map_err(|e| eprintln!("floating panel unavailable: {e}")).ok();
     let orbit = orbit::vr::OrbitVr::new(&overlay, KEY, backend.clone()).map_err(|e| eprintln!("panels around VRChat's menus unavailable: {e}")).ok();
     let boost = booster::Host::new(&steamvr);
-    let mut t = Teardown { steamvr: &steamvr, overlay: &overlay, backend: &backend, main, state, walk, world, menu, coverage, floating, orbit, booster: boost };
+    let mut t = Teardown { steamvr: &steamvr, overlay: &overlay, backend: &backend, main, state, walk, world, menu, coverage, floating, orbit, booster: boost, steamvr_gone: false };
     let mut frames = frames::FrameSampler::new(&steamvr);
     // What of the touchpads and sticks goes to the avatar's input parameters.
     let mut pads = orbiters_n4n0::input::Pacer::default();
@@ -750,6 +752,7 @@ fn session(args: &[String]) -> anyhow::Result<Ended> {
             steamvr_seen = Instant::now();
         }
         if server.ended() || steamvr_seen.elapsed() > STEAMVR_GONE_AFTER {
+            t.steamvr_gone = true;
             return Ok(Ended::SteamVrGone);
         }
         // The calibration runs whether the tab is drawn or not (the dashboard is closed while the pose is held).

@@ -16,6 +16,8 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 pub const LOG_NAME: &str = "fps-booster.jsonl";
+/// Days of raw frames kept: one file a day there were comparisons.
+const RAW_DAYS_KEPT: usize = 7;
 const ROTATE_AT: u64 = 20 * 1024 * 1024;
 /// How far real frames may be from what the compositor's own counts imply.
 const SELF_CHECK_LIMIT: f32 = 0.10;
@@ -103,6 +105,9 @@ impl Logger {
         let date = crate::now_text();
         let path = self.dir.join(format!("fps-frames-{}.csv", date.split('T').next().unwrap_or("")));
         let new = !path.exists();
+        if new {
+            self.forget_old_raw_files();
+        }
         let mut file = std::io::BufWriter::new(std::fs::OpenOptions::new().append(true).create(true).open(path)?);
         if new {
             writeln!(
@@ -129,6 +134,35 @@ impl Logger {
             )?;
         }
         file.flush()
+    }
+}
+
+impl Logger {
+    /// Only the last days of raw frames stay: these files have no other limit.
+    fn forget_old_raw_files(&self) {
+        let Ok(read) = std::fs::read_dir(&self.dir) else { return };
+        let mut raw: Vec<std::path::PathBuf> = read.flatten().map(|e| e.path()).filter(|p| is_raw_file(p)).collect();
+        // Named by date, so by name is by age.
+        raw.sort();
+        let extra = raw.len().saturating_sub(RAW_DAYS_KEPT - 1);
+        for old in raw.into_iter().take(extra) {
+            let _ = std::fs::remove_file(old);
+        }
+    }
+}
+
+fn is_raw_file(path: &Path) -> bool {
+    path.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with("fps-frames-") && n.ends_with(".csv"))
+}
+
+/// Removes the booster's own logs from `dir`, and nothing else there: what an uninstall that removes data does.
+pub fn remove_logs(dir: &Path) {
+    let Ok(read) = std::fs::read_dir(dir) else { return };
+    for path in read.flatten().map(|e| e.path()) {
+        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or_default().to_string();
+        if name == LOG_NAME || name == format!("{LOG_NAME}.1") || name == "fps-test-report.txt" || is_raw_file(&path) {
+            let _ = std::fs::remove_file(path);
+        }
     }
 }
 
@@ -293,6 +327,26 @@ Sat Nov 07 2026 19:20:33.280 [Info] - ##########################################
         let text = serde_json::to_string(&line).unwrap();
         assert!(!text.contains("usr_") && !text.contains("wrld_"));
         assert!(text.contains("\"people\":12"));
+    }
+
+    /// F9: a week of raw frames at most, and an uninstall that removes data takes the booster's logs and only those.
+    #[test]
+    fn raw_frames_are_bounded_and_the_logs_can_go() {
+        let dir = Scratch::new("bounded");
+        for day in 1..=9 {
+            std::fs::write(dir.0.join(format!("fps-frames-2026-10-{day:02}.csv")), "x").unwrap();
+        }
+        std::fs::write(dir.0.join("overlay-stalls.log"), "someone else's").unwrap();
+        let logger = Logger::new(dir.0.clone());
+        logger.write_raw(&[Frame { index: 1, ..Frame::default() }], Kind::Programs).unwrap();
+        let raw = std::fs::read_dir(&dir.0).unwrap().flatten().filter(|e| is_raw_file(&e.path())).count();
+        assert_eq!(raw, RAW_DAYS_KEPT);
+        assert!(!dir.0.join("fps-frames-2026-10-01.csv").exists(), "the oldest went");
+        let mut logger = logger;
+        logger.write(&serde_json::json!({ "a": 1 }));
+        remove_logs(&dir.0);
+        let left: Vec<String> = std::fs::read_dir(&dir.0).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+        assert_eq!(left, vec!["overlay-stalls.log".to_string()]);
     }
 
     #[test]

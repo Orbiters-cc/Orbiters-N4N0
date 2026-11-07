@@ -100,6 +100,8 @@ pub enum Line {
     Limit,
     Testing,
     Kept,
+    /// More real frames, measured, and put back all the same: the slider isn't on a step that keeps it.
+    GainNotKept,
     NoGain,
     TooMuchChanging,
     NotTaken,
@@ -343,14 +345,16 @@ impl Engine {
 
     fn finish_trial(&mut self, inputs: &Inputs) {
         let Some(trial) = self.trial.take() else { return };
-        let Some(result) = trial.finish() else {
+        let Some(mut result) = trial.finish() else {
             self.abandon(trial.kind, inputs.now);
             return;
         };
+        result.kept = result.verdict == Verdict::Kept && trial.keep_if_better;
         self.comparisons.retain(|c| c.kind != result.kind);
         self.comparisons.insert(0, result);
         let line = match result.verdict {
-            Verdict::Kept => Line::Kept,
+            Verdict::Kept if result.kept => Line::Kept,
+            Verdict::Kept => Line::GainNotKept,
             Verdict::NoGain => Line::NoGain,
             Verdict::TooMuchChanging => Line::TooMuchChanging,
             Verdict::NotTaken => Line::NotTaken,
@@ -892,6 +896,8 @@ mod tests {
         run.run(66.0);
         let report = run.report();
         assert_eq!(report.comparisons[0].verdict, Verdict::Kept);
+        assert!(!report.comparisons[0].kept, "M2: it gained, and was put back");
+        assert_eq!(report.line, Line::GainNotKept);
         assert_eq!(run.wants.sharpness, 1.0, "it told, and the slider is still Off");
     }
 

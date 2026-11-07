@@ -123,9 +123,13 @@ fn main() {
     let raw: Vec<String> = std::env::args().skip(1).collect();
     // What an uninstall left to do at the next sign-in, from a copy of this program: no window, and nothing else.
     if raw.first().map(String::as_str) == Some(orbiters_booster::system::RESTORE_ARGUMENT) {
-        let store = orbiters_booster::system::store_for_user(&orbiters_booster::system::restorer_copy_path());
-        if orbiters_booster::system::run_restorer(&store) {
-            store.remove_if_empty();
+        let copy = orbiters_booster::system::restorer_copy_path();
+        let store = orbiters_booster::system::store_for_user(&copy);
+        if orbiters_booster::system::run_restorer(&store) && store.remove_if_empty() {
+            // Nothing owed any more: this copy goes too, once it has ended.
+            if std::env::current_exe().ok().is_some_and(|me| me.to_string_lossy().eq_ignore_ascii_case(&copy.to_string_lossy())) {
+                system::delete_after_exit(&copy);
+            }
         }
         return;
     }

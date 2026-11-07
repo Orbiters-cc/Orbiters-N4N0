@@ -1,38 +1,31 @@
 //! The FPS booster in the overlay: where SteamVR's frames are, and the only process that talks to SteamVR. It runs the
-//! frame logger at every level, Off included, and acts on SteamVR's settings by the journal: the one thing that changes there
-//! is `steamvr.supersampleScale` with its manual override, through SteamVR's public interface. No window into VRChat, and
-//! nothing written of its own.
+//! frame logger at every level, Off included, and decides. The one thing it changes is SteamVR's `supersampleScale` with its
+//! manual override, through SteamVR's public interface, by `orbiters_booster::steamvr::Sharpness`.
+//!
+//! Nothing of that runs on the overlay's own turn, which reads the controllers: the journal waits on a lock another process may
+//! hold and flushes to disk, so SteamVR's settings and the journal are on a thread of their own ([`Worker`]), as the log is.
+//! The turn only says what it wants and hears back what came of it.
 
 use crate::backend::Ctl;
 use crate::booster::OverlayReport;
 use crate::state::Snapshot;
-use orbiters_booster::engine::{Engine, Inputs, LeftAlone, Request, ValueWatch, Wants};
+use orbiters_booster::engine::{Engine, Inputs, LeftAlone, Request, Wants};
 use orbiters_booster::frames::Frame;
-use orbiters_booster::journal::{Access, Applied, Change, Read, Store, Target, Value};
 use orbiters_booster::log::{BlockLine, Logger, SteamVrRead};
+use orbiters_booster::steamvr::{self, SettingsApi, Sharpness};
 use orbiters_booster::{vrsettings, Level};
 use orbiters_openvr::compositor::FrameTiming;
 use orbiters_openvr::{self as vr};
 use std::ffi::CString;
-use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-const SECTION: &str = "steamvr";
-const MANUAL_OVERRIDE: &str = "supersampleManualOverride";
-const SCALE: &str = "supersampleScale";
-const AUTO_SECTION: &str = "GpuSpeed";
-const AUTO_SCALE: &str = "gpuSpeedRenderTargetScale";
 /// VRChat's Steam app key, for what SteamVR keeps per application: read for the log only.
 const VRCHAT_APP: &str = "steam.app.438100";
 /// Owned values are looked at this often: a change by hand is let go of at once, not at the end.
 const CHECK_OWNED: Duration = Duration::from_secs(5);
 const REPORT_EVERY: Duration = Duration::from_secs(1);
-/// Lower than this, whatever it was, nothing goes.
-const SHARPNESS_FLOOR: f32 = 0.7;
-/// Nor below this share of what it was.
-const SHARPNESS_FLOOR_OF: f32 = 0.7;
 
 /// How often Orbiters' own panels may draw: `MIN_FRAME` in `overlay/mod.rs`, and N4N0's menu, read it. 30 a second on a PC
 /// short of graphics card, 45 otherwise. Too small a saving to measure, so nothing ever claims it.
@@ -68,82 +61,91 @@ fn cstring(text: &str) -> CString {
     CString::new(text).unwrap_or_default()
 }
 
-/// SteamVR's settings, live. It answers a key not set with its default, so whether a key is there at all comes from its file.
-struct Live<'a> {
-    client: &'a vr::Client,
-    file: Option<PathBuf>,
-    /// Taken away this session: its file may not say so yet.
-    removed: Vec<String>,
-}
+/// SteamVR's settings, with its error codes, for the booster's thread.
+struct Api(vr::SettingsHandle);
 
-impl Live<'_> {
-    fn in_file(&self, section: &str, key: &str) -> Option<bool> {
-        let text = std::fs::read_to_string(self.file.as_ref()?).ok()?;
-        Some(vrsettings::read_value(&text, section, key) != Value::Absent)
+impl SettingsApi for Api {
+    fn get_bool(&self, section: &str, key: &str) -> Result<bool, i32> {
+        self.0.get_bool(&cstring(section), &cstring(key))
     }
-
-    fn read_value(&self, section: &str, key: &str) -> Value {
-        let (section, key_c) = (cstring(section), cstring(key));
-        if key == MANUAL_OVERRIDE {
-            return self.client.setting_bool(&section, &key_c).map_or(Value::Absent, Value::Bool);
-        }
-        // Unset is told by the error code, and is not 0.
-        self.client.setting_float(&section, &key_c).map_or(Value::Absent, Value::Float)
+    fn get_float(&self, section: &str, key: &str) -> Result<f32, i32> {
+        self.0.get_float(&cstring(section), &cstring(key))
+    }
+    fn set_bool(&self, section: &str, key: &str, value: bool) -> Result<(), i32> {
+        self.0.set_bool(&cstring(section), &cstring(key), value)
+    }
+    fn set_float(&self, section: &str, key: &str, value: f32) -> Result<(), i32> {
+        self.0.set_float(&cstring(section), &cstring(key), value)
+    }
+    fn remove(&self, section: &str, key: &str) -> Result<(), i32> {
+        self.0.remove(&cstring(section), &cstring(key))
     }
 }
 
-impl Access for Live<'_> {
-    fn read(&mut self, target: &Target) -> Read {
-        let Target::SteamVr { section, key } = target else { return Read::Unreachable };
-        Read::Value(self.read_value(section, key))
-    }
-
-    fn write(&mut self, target: &Target, value: &Value) -> bool {
-        let Target::SteamVr { section, key } = target else { return false };
-        let (section_c, key_c) = (cstring(section), cstring(key));
-        match value {
-            Value::Absent => {
-                let done = self.client.remove_setting(&section_c, &key_c);
-                if done {
-                    self.removed.push(key.clone());
-                }
-                done
-            }
-            Value::Bool(b) => self.client.set_setting_bool(&section_c, &key_c, *b),
-            Value::Float(f) => self.client.set_setting_float(&section_c, &key_c, *f),
-            Value::Int(_) => false,
-        }
-    }
-
-    fn absent_now(&mut self, target: &Target) -> bool {
-        let Target::SteamVr { section, key } = target else { return false };
-        self.removed.contains(key) || self.in_file(section, key) == Some(false)
-    }
-
-    fn original(&mut self, target: &Target) -> Read {
-        let Target::SteamVr { section, key } = target else { return Read::Unreachable };
-        // The key not there in the file is what was here: absent, not the default SteamVR answers with.
-        if self.in_file(section, key) == Some(false) {
-            return Read::Value(Value::Absent);
-        }
-        Read::Value(self.read_value(section, key))
-    }
+fn sharpness() -> Option<Sharpness> {
+    Some(Sharpness::new(crate::controller::booster_store()?, vrsettings::settings_path_for_user()))
 }
 
-fn is_steamvr(e: &orbiters_booster::journal::Entry) -> bool {
-    matches!(e.target, Target::SteamVr { .. })
-}
-
-fn the_store() -> Option<Store> {
-    crate::controller::booster_store()
-}
-
-/// The very first thing a new overlay does: what the last one left comes back, before anything else can change anything.
+/// The very first thing a new overlay does, before anything else can change anything: what the last one left comes back, if
+/// SteamVR answers. At start, so on this thread: nothing else waits on it yet.
 pub fn recover_first(client: &vr::Client) {
-    let Some(store) = the_store() else { return };
-    let mut live = Live { client, file: vrsettings::settings_path_for_user(), removed: Vec::new() };
-    let _ = store.restore(&mut live, &is_steamvr, &mut |_| {});
-    let _ = store.rearm();
+    if let (Some(mut sharpness), Some(handle)) = (sharpness(), client.settings_handle()) {
+        sharpness.recover(&Api(handle));
+    }
+}
+
+/// What the booster's SteamVR thread is asked.
+enum Job {
+    Factor(f32),
+    Check {
+        watching: bool,
+    },
+    /// The session ends: restore live, unless SteamVR is gone.
+    End {
+        steamvr_gone: bool,
+    },
+}
+
+/// What it says back.
+enum Heard {
+    Left(LeftAlone),
+    Shown(Option<(Option<f32>, f32)>),
+}
+
+/// The thread that holds the journal's SteamVR side. The client it came from outlives it: [`Host::teardown`] waits for it.
+struct Worker {
+    jobs: mpsc::Sender<Job>,
+    heard: mpsc::Receiver<Heard>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Worker {
+    fn start(handle: vr::SettingsHandle) -> Option<Self> {
+        let mut sharpness = sharpness()?;
+        let (jobs, inbox) = mpsc::channel::<Job>();
+        let (tell, heard) = mpsc::channel::<Heard>();
+        let thread = std::thread::Builder::new()
+            .name("fps-booster-steamvr".into())
+            .spawn(move || {
+                let api = Api(handle);
+                for job in inbox {
+                    let left = match job {
+                        Job::Factor(factor) => sharpness.follow(&api, factor),
+                        Job::Check { watching } => sharpness.check(&api, watching),
+                        Job::End { steamvr_gone } => {
+                            sharpness.teardown(&api, steamvr_gone);
+                            return;
+                        }
+                    };
+                    if let Some(left) = left {
+                        let _ = tell.send(Heard::Left(left));
+                    }
+                    let _ = tell.send(Heard::Shown(sharpness.shown()));
+                }
+            })
+            .ok()?;
+        Some(Self { jobs, heard, thread: Some(thread) })
+    }
 }
 
 /// What the log's thread is asked: writing is off the overlay's turn, which reads the controllers.
@@ -180,10 +182,9 @@ fn start_log() -> mpsc::Sender<LogJob> {
 /// The booster's part of the overlay's turn.
 pub struct Host {
     engine: Engine,
-    store: Option<Store>,
+    worker: Option<Worker>,
     log: mpsc::Sender<LogJob>,
     began: Instant,
-    settings_file: Option<PathBuf>,
     refresh_hz: f32,
     streamer: bool,
     answered: u64,
@@ -192,11 +193,9 @@ pub struct Host {
     world_hash: u64,
     last_report: Option<Instant>,
     last_check: Option<Instant>,
-    /// What SteamVR's sharpness was before the booster, and the factor in force now.
-    base: Option<(Option<f32>, f32)>,
-    factor: f32,
-    watch: ValueWatch,
-    removed: Vec<String>,
+    /// The factor last asked of the worker, and what it says is in force.
+    asked: f32,
+    shown: Option<(Option<f32>, f32)>,
     session_frames: f64,
     session_seconds: f64,
     vrchat_was_running: bool,
@@ -207,10 +206,9 @@ impl Host {
         let system = client.string_property(0, vr::prop::TRACKING_SYSTEM_NAME).unwrap_or_default().to_lowercase();
         Self {
             engine: Engine::new(),
-            store: the_store(),
+            worker: client.settings_handle().and_then(Worker::start),
             log: start_log(),
             began: Instant::now(),
-            settings_file: vrsettings::settings_path_for_user(),
             refresh_hz: client.float_property(0, vr::prop::DISPLAY_FREQUENCY).filter(|hz| *hz > 1.0).unwrap_or(0.0),
             streamer: system.contains("virtualdesktop") || system.contains("alvr"),
             answered: 0,
@@ -219,18 +217,16 @@ impl Host {
             world_hash: 0,
             last_report: None,
             last_check: None,
-            base: None,
-            factor: 1.0,
-            watch: ValueWatch::default(),
-            removed: Vec::new(),
+            asked: 1.0,
+            shown: None,
             session_frames: 0.0,
             session_seconds: 0.0,
             vrchat_was_running: false,
         }
     }
 
-    /// One turn, with the frames read since the last. Whether a 3D panel shows and what is held there: said by the caller, as
-    /// what is here does not know it.
+    /// One turn, with the frames read since the last. Whether a 3D panel shows: said by the caller, as what is here does not
+    /// know it.
     #[allow(clippy::too_many_arguments)]
     pub fn update(&mut self, client: &vr::Client, backend: &Ctl, snap: &Snapshot, frames: &[Frame], scene: bool, dashboard: bool, panel_3d: bool) -> Wants {
         let world = &snap.vrchat.world;
@@ -269,9 +265,18 @@ impl Host {
             // Test builds' "Simulate crash": nothing tidies up, as in a real one, and the next overlay restores first.
             std::process::abort();
         }
+        self.hear();
         let wants = self.engine.tick(&inputs, request);
-        self.follow_sharpness(client, wants.sharpness);
-        self.check_owned(client, scene, snap.settings.booster.level);
+        if let Some(worker) = &self.worker {
+            if (wants.sharpness - self.asked).abs() > 0.0005 {
+                self.asked = wants.sharpness;
+                let _ = worker.jobs.send(Job::Factor(wants.sharpness));
+            }
+            if self.last_check.is_none_or(|at| at.elapsed() >= CHECK_OWNED) {
+                self.last_check = Some(Instant::now());
+                let _ = worker.jobs.send(Job::Check { watching: scene && snap.settings.booster.level >= Level::Picture });
+            }
+        }
         PANEL_PACE_MS.store(if wants.pace_panels { SLOW_PACE_MS } else { NORMAL_PACE_MS }, Ordering::Relaxed);
         self.write_log(client, snap, &inputs, &wants);
         self.self_check_at_session_end(snap);
@@ -280,7 +285,7 @@ impl Host {
             let report = OverlayReport {
                 report: self.engine.report(&inputs, &wants),
                 streamer: self.streamer,
-                sharpness: self.base.filter(|_| self.factor < 1.0).map(|(was, base)| (was, (base * self.factor).max(floor_of(base)))),
+                sharpness: self.shown,
                 answered: self.answered,
                 panel_3d,
             };
@@ -289,106 +294,35 @@ impl Host {
         wants
     }
 
-    fn live<'a>(&mut self, client: &'a vr::Client) -> Live<'a> {
-        Live { client, file: self.settings_file.clone(), removed: std::mem::take(&mut self.removed) }
-    }
-
-    /// What it is before the booster: what SteamVR's own Auto chose counts as the base when no manual value is set.
-    fn base_now(client: &vr::Client) -> (Option<f32>, f32) {
-        let manual = client.setting_bool(&cstring(SECTION), &cstring(MANUAL_OVERRIDE)).unwrap_or(false);
-        let scale = client.setting_float(&cstring(SECTION), &cstring(SCALE));
-        if manual {
-            let scale = scale.unwrap_or(1.0);
-            return (Some(scale), scale);
-        }
-        (None, client.setting_float(&cstring(AUTO_SECTION), &cstring(AUTO_SCALE)).unwrap_or(1.0))
-    }
-
-    fn follow_sharpness(&mut self, client: &vr::Client, factor: f32) {
-        if (factor - self.factor).abs() < 0.001 {
-            return;
-        }
-        let Some(store) = self.store.take() else { return };
-        if factor >= 0.999 {
-            let mut live = self.live(client);
-            let got = store.restore(&mut live, &is_steamvr, &mut |_| {});
-            self.removed = live.removed;
-            if got.is_ok_and(|g| !g.kept.is_empty()) {
-                self.engine.leave_sharpness_alone(LeftAlone::HandChanged);
-            }
-            self.base = None;
-            self.factor = 1.0;
-            self.watch.forget_last();
-        } else {
-            let (_, base) = *self.base.get_or_insert_with(|| Self::base_now(client));
-            let target = (base * factor).max(floor_of(base));
-            if target < base {
-                let scale = Target::SteamVr { section: SECTION.into(), key: SCALE.into() };
-                let manual = Target::SteamVr { section: SECTION.into(), key: MANUAL_OVERRIDE.into() };
-                let changes = [
-                    Change { target: manual, value: Value::Bool(true), leave_with: Some(scale.clone()) },
-                    Change { target: scale, value: Value::Float(target), leave_with: None },
-                ];
-                let mut live = self.live(client);
-                let got = store.apply(&mut live, &changes, &mut |_| {});
-                self.removed = live.removed;
-                match got {
-                    Ok(results) if results.iter().any(|r| *r == Applied::ChangedSince) => self.engine.leave_sharpness_alone(LeftAlone::HandChanged),
-                    Ok(results) if results.iter().all(|r| matches!(r, Applied::Done | Applied::AlreadySo)) => {
-                        self.factor = factor;
-                        self.watch.forget_last();
-                    }
-                    // Refused, or nothing could be recorded: nothing is in force, and it is not tried again here.
-                    _ => {
-                        self.base = None;
-                        self.engine.leave_sharpness_alone(LeftAlone::Refused);
-                    }
+    /// What the worker said since the last turn.
+    fn hear(&mut self) {
+        let Some(worker) = &self.worker else { return };
+        while let Ok(heard) = worker.heard.try_recv() {
+            match heard {
+                Heard::Left(why) => {
+                    self.engine.leave_sharpness_alone(why);
+                    // The engine wants 1.0 from now on: asked again, so that whatever is owed is restored.
+                    self.asked = f32::NAN;
                 }
-            }
-        }
-        self.store = Some(store);
-    }
-
-    /// Every few seconds, the value the booster owns, or the one it might come to own: a change without it is someone's.
-    fn check_owned(&mut self, client: &vr::Client, scene: bool, level: Level) {
-        if self.last_check.is_some_and(|at| at.elapsed() < CHECK_OWNED) {
-            return;
-        }
-        self.last_check = Some(Instant::now());
-        if self.factor < 1.0 {
-            let Some(store) = self.store.take() else { return };
-            let mut live = self.live(client);
-            let kept = store.release_changed(&mut live, &is_steamvr);
-            self.removed = live.removed;
-            if kept.is_ok_and(|k| !k.is_empty()) {
-                self.factor = 1.0;
-                self.base = None;
-                self.engine.leave_sharpness_alone(LeftAlone::HandChanged);
-            }
-            self.store = Some(store);
-        } else if scene && level >= Level::Picture {
-            let value = client.setting_float(&cstring(SECTION), &cstring(SCALE));
-            if value.is_some_and(|v| self.watch.see(v)) {
-                self.engine.leave_sharpness_alone(LeftAlone::AnotherApp);
+                Heard::Shown(shown) => self.shown = shown,
             }
         }
     }
 
     fn write_log(&mut self, client: &vr::Client, snap: &Snapshot, inputs: &Inputs, wants: &Wants) {
-        let raw = self.engine.take_raw_if_any();
-        if let Some((frames, kind)) = raw {
+        if let Some((frames, kind)) = self.engine.take_raw_if_any() {
             let _ = self.log.send(LogJob::Raw(frames, kind));
         }
         let Some(block) = self.engine.take_block() else { return };
         self.session_frames += block.summary.frames as f64;
         self.session_seconds += block.summary.seconds as f64;
         let report = self.engine.report(inputs, wants);
-        let (section, app) = (cstring(SECTION), cstring(VRCHAT_APP));
+        let (section, app) = (cstring(steamvr::SECTION), cstring(VRCHAT_APP));
         let steamvr = SteamVrRead {
             disable_async: client.setting_bool(&section, &cstring("disableAsync")),
             motion_smoothing: client.setting_bool(&section, &cstring("motionSmoothing")),
-            supersample_manual_override: client.setting_bool(&section, &cstring(MANUAL_OVERRIDE)),
-            supersample_scale: client.setting_float(&section, &cstring(SCALE)),
+            supersample_manual_override: client.setting_bool(&section, &cstring(steamvr::MANUAL_OVERRIDE)),
+            supersample_scale: client.setting_float(&section, &cstring(steamvr::SCALE)),
             app_resolution_scale: client.setting_float(&app, &cstring("resolutionScale")),
         };
         let line = BlockLine {
@@ -425,18 +359,18 @@ impl Host {
         self.vrchat_was_running = running;
     }
 
-    /// The session is ending, cleanly: everything comes back before it does.
-    pub fn teardown(&mut self, client: &vr::Client) {
+    /// The session ends. With SteamVR still there, everything comes back before it does; with SteamVR gone (a crash, its
+    /// server ended), nothing is restored through it, and what is owed stays in the journal for its file and the next overlay.
+    /// Waits for the worker, whose SteamVR handle must not outlive the client.
+    pub fn teardown(&mut self, steamvr_gone: bool) {
         PANEL_PACE_MS.store(NORMAL_PACE_MS, Ordering::Relaxed);
-        let Some(store) = self.store.take() else { return };
-        let mut live = self.live(client);
-        let _ = store.restore(&mut live, &is_steamvr, &mut |_| {});
-        let _ = store.rearm();
+        if let Some(mut worker) = self.worker.take() {
+            let _ = worker.jobs.send(Job::End { steamvr_gone });
+            if let Some(thread) = worker.thread.take() {
+                let _ = thread.join();
+            }
+        }
     }
-}
-
-fn floor_of(base: f32) -> f32 {
-    (base * SHARPNESS_FLOOR_OF).max(SHARPNESS_FLOOR)
 }
 
 #[cfg(test)]
@@ -468,12 +402,5 @@ mod tests {
         assert_eq!((f.time_s, f.interval_ms, f.total_gpu_ms), (2.5, 14.0, 9.0));
         assert_eq!((f.app_gpu_ms(), f.app_cpu_ms()), (7.0, 11.0));
         assert_eq!((f.compositor_gpu_ms, f.compositor_cpu_ms), (0.5, 0.7));
-    }
-
-    #[test]
-    fn sharpness_has_a_floor() {
-        assert_eq!(floor_of(1.0), 0.7);
-        assert_eq!(floor_of(2.0), 1.4);
-        assert_eq!(floor_of(0.5), 0.7, "from a low value, the booster has nothing to take");
     }
 }

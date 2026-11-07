@@ -223,22 +223,36 @@ impl Store {
 
     /// The file, or its previous copy if that is malformed. No journal at all is an empty one.
     fn load(&self) -> Result<Vec<Entry>, Unreadable> {
-        // `None`: there, and not to be trusted. `Some(None)`: not there.
-        let read = |path: &Path| -> Option<Option<Vec<Entry>>> {
+        enum Found {
+            Entries(Vec<Entry>),
+            Missing,
+            Malformed,
+            /// Written by a newer app: not to be read, and its older copy is older than it, so not that either.
+            Newer,
+        }
+        let read = |path: &Path| -> Found {
             let text = match std::fs::read_to_string(path) {
                 Ok(text) => text,
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Some(None),
-                Err(_) => return None,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Found::Missing,
+                Err(_) => return Found::Malformed,
             };
-            let file: File = serde_json::from_str(&text).ok()?;
-            (file.version <= VERSION).then_some(Some(file.entries))
+            if let Ok(version) = serde_json::from_str::<serde_json::Value>(&text).map(|v| v["version"].as_u64().unwrap_or(0)) {
+                if version > VERSION as u64 {
+                    return Found::Newer;
+                }
+            }
+            match serde_json::from_str::<File>(&text) {
+                Ok(file) => Found::Entries(file.entries),
+                Err(_) => Found::Malformed,
+            }
         };
         match read(&self.path) {
-            Some(Some(entries)) => Ok(entries),
+            Found::Entries(entries) => Ok(entries),
+            Found::Newer => Err(Unreadable),
             // The file itself is gone or malformed: the copy is at worst old, and the table above is safe on old entries.
             first => match read(&backup_of(&self.path)) {
-                Some(Some(entries)) => Ok(entries),
-                Some(None) if first.is_some() => Ok(Vec::new()),
+                Found::Entries(entries) => Ok(entries),
+                Found::Missing if matches!(first, Found::Missing) => Ok(Vec::new()),
                 _ => Err(Unreadable),
             },
         }
@@ -267,6 +281,8 @@ impl Store {
         let mut entries = self.load()?;
         let mut results = vec![Applied::Refused; changes.len()];
         let mut todo = Vec::new();
+        // What an entry that already existed was before this call: put back as it was if this step does not happen.
+        let mut before: Vec<Option<(Value, Stage)>> = vec![None; changes.len()];
         let now = crate::now_text();
         for (i, change) in changes.iter().enumerate() {
             let current = match access.read(&change.target) {
@@ -275,7 +291,9 @@ impl Store {
             };
             match entries.iter_mut().find(|e| e.target == change.target) {
                 Some(entry) => {
-                    if !current.same(&entry.written) && !current.same(&entry.original) {
+                    // Back to its original after it was applied, or anything else: the person's, not to be changed again.
+                    let put_back = entry.stage == Stage::Applied && current.same(&entry.original) && !current.same(&entry.written);
+                    if put_back || (!current.same(&entry.written) && !current.same(&entry.original)) {
                         results[i] = Applied::ChangedSince;
                         continue;
                     }
@@ -284,6 +302,7 @@ impl Store {
                         continue;
                     }
                     // Applying twice never overwrites the first original.
+                    before[i] = Some((entry.written, entry.stage));
                     entry.written = change.value;
                     entry.stage = Stage::Intended;
                 }
@@ -315,8 +334,17 @@ impl Store {
         self.save(&entries).map_err(|_| Unreadable)?;
         probe(Step::Intended);
         if !self.armed.arm() {
-            // Nothing is applied that could not come back after a power loss.
-            entries.retain(|e| !todo.iter().any(|&i| changes[i].target == e.target));
+            // Nothing is applied that could not come back after a power loss. Only what this call added goes: an entry
+            // that existed is still owed, and goes back to what it said.
+            for &i in &todo {
+                let Some(at) = entries.iter().position(|e| e.target == changes[i].target) else { continue };
+                match before[i] {
+                    Some((written, stage)) => (entries[at].written, entries[at].stage) = (written, stage),
+                    None => {
+                        entries.remove(at);
+                    }
+                }
+            }
             let _ = self.save(&entries);
             self.follow_arming(&entries);
             return Ok(results);
@@ -331,11 +359,25 @@ impl Store {
                 probe(Step::ReadBack);
                 entries[at].stage = Stage::Applied;
                 results[i] = Applied::Done;
-            } else {
-                // What it was before, should the write have half taken, and no entry for what never was.
-                let original = entries[at].original;
-                let _ = access.write(&change.target, &original);
-                entries.remove(at);
+                continue;
+            }
+            // Undone: to what an existing entry said, or to the original. The entry goes only once that is read back as so:
+            // a write that half took and a read that failed (SteamVR dying mid-switch) leave it owed.
+            let back_to = before[i].map_or(entries[at].original, |(written, _)| written);
+            // Whether the undo's own write took or not, what counts is what is there now.
+            let _ = access.write(&change.target, &back_to);
+            let undone = match access.read(&change.target) {
+                Read::Value(now) => now.same(&back_to) || (back_to == Value::Absent && access.absent_now(&change.target)),
+                Read::Gone => true,
+                Read::Unreachable => false,
+            };
+            match (undone, before[i]) {
+                (true, None) => {
+                    entries.remove(at);
+                }
+                (true, Some((written, stage))) => (entries[at].written, entries[at].stage) = (written, stage),
+                // What is there now is not known: owed as the change, which the restore table settles either way.
+                (false, _) => {}
             }
         }
         let saved = self.save(&entries);
@@ -353,6 +395,7 @@ impl Store {
             return Ok(Restored::default());
         }
         let mut out = Restored::default();
+        let entries_before = entries.clone();
         let verdicts = verdicts(&entries, access, which);
         let mut left = Vec::with_capacity(entries.len());
         for (entry, verdict) in entries.into_iter().zip(verdicts) {
@@ -378,6 +421,10 @@ impl Store {
                 }
                 Verdict::Gone => out.gone.push(entry.target),
             }
+        }
+        // Nothing settled: nothing written. A value that can never be restored must not rewrite the journal at each try.
+        if left == entries_before {
+            return Ok(out);
         }
         let saved = self.save(&left);
         self.follow_arming(&left);
@@ -503,7 +550,7 @@ pub fn replace_durably(path: &Path, bytes: &[u8], backup: bool, probe: Option<fn
         std::fs::create_dir_all(dir)?;
     }
     let mut temp = path.as_os_str().to_owned();
-    temp.push(".tmp");
+    temp.push(".orbiters-tmp");
     let temp = PathBuf::from(temp);
     {
         let mut file = std::fs::File::create(&temp)?;
@@ -829,6 +876,115 @@ pub(crate) mod tests {
         assert_eq!(std::fs::read(store.path()).unwrap(), b"{ half a fi", "kept as it was");
     }
 
+    /// F8: a journal from a newer app, beside an older copy: neither is read, and the older one is never saved over it.
+    #[test]
+    fn a_newer_journal_is_not_replaced_by_its_older_copy() {
+        let dir = Scratch::new("newer-bak");
+        let store = store(&dir.0);
+        let mut access = FileAccess::new(dir.0.join("settings.json"));
+        store.apply(&mut access, &[change("scale", Value::Float(1.0))], &mut |_| {}).unwrap();
+        store.apply(&mut access, &[change("scale", Value::Float(0.9))], &mut |_| {}).unwrap();
+        let newer = format!("{{\"version\":{},\"entries\":[],\"more\":1}}", VERSION + 1);
+        std::fs::write(store.path(), &newer).unwrap();
+        assert_eq!(store.entries(), Err(Unreadable));
+        assert_eq!(store.restore(&mut access, &|_| true, &mut |_| {}), Err(Unreadable));
+        assert_eq!(store.apply(&mut access, &[change("other", Value::Bool(true))], &mut |_| {}), Err(Unreadable));
+        assert_eq!(std::fs::read_to_string(store.path()).unwrap(), newer, "untouched");
+    }
+
+    /// F1: the second step of a change can't arm recovery. The first step is still in force, and its entry, with its
+    /// original, stays.
+    #[test]
+    fn a_step_that_cannot_arm_keeps_the_step_before() {
+        use std::sync::atomic::AtomicBool;
+        use std::sync::Arc;
+        #[derive(Clone)]
+        struct Failing(Arc<AtomicBool>);
+        impl Armed for Failing {
+            fn arm(&self) -> bool {
+                !self.0.load(Ordering::SeqCst)
+            }
+            fn disarm(&self) {}
+        }
+        let fail = Arc::new(AtomicBool::new(false));
+        let dir = Scratch::new("arm-step");
+        let store = Store::new(&dir.0, Box::new(Failing(fail.clone())));
+        let mut access = FileAccess::new(dir.0.join("settings.json"));
+        access.set("scale", Value::Float(1.4));
+        store.apply(&mut access, &[change("scale", Value::Float(1.19))], &mut |_| {}).unwrap();
+        fail.store(true, Ordering::SeqCst);
+        assert_eq!(store.apply(&mut access, &[change("scale", Value::Float(1.0))], &mut |_| {}).unwrap(), vec![Applied::Refused]);
+        let entries = store.entries().unwrap();
+        assert_eq!(entries.len(), 1, "step 1 is still owed");
+        assert_eq!((entries[0].original, entries[0].written, entries[0].stage), (Value::Float(1.4), Value::Float(1.19), Stage::Applied));
+        assert_eq!(access.values()["scale"], Value::Float(1.19));
+        store.restore(&mut access, &|_| true, &mut |_| {}).unwrap();
+        assert_eq!(access.values()["scale"], Value::Float(1.4));
+    }
+
+    /// F1: the write took, the read back and the undo both failed (SteamVR dying mid-switch). The value is still there, so
+    /// the entry is too, and it comes back once the target answers.
+    #[test]
+    fn a_change_whose_undo_failed_stays_owed() {
+        struct Dying {
+            inner: FileAccess,
+            writes: u32,
+        }
+        impl Access for Dying {
+            fn read(&mut self, target: &Target) -> Read {
+                if self.writes >= 1 {
+                    return Read::Unreachable;
+                }
+                self.inner.read(target)
+            }
+            fn write(&mut self, target: &Target, value: &Value) -> bool {
+                self.writes += 1;
+                self.writes == 1 && self.inner.write(target, value)
+            }
+        }
+        let dir = Scratch::new("dying");
+        let store = store(&dir.0);
+        let mut dying = Dying { inner: FileAccess::new(dir.0.join("settings.json")), writes: 0 };
+        dying.inner.set("scale", Value::Float(1.4));
+        assert_eq!(store.apply(&mut dying, &[change("scale", Value::Float(1.19))], &mut |_| {}).unwrap(), vec![Applied::Refused]);
+        assert_eq!(store.entries().unwrap().len(), 1, "still owed");
+        let mut access = FileAccess::new(dir.0.join("settings.json"));
+        assert_eq!(access.values()["scale"], Value::Float(1.19), "the value it left");
+        store.restore(&mut access, &|_| true, &mut |_| {}).unwrap();
+        assert_eq!(access.values()["scale"], Value::Float(1.4));
+    }
+
+    /// F2: a value that can't be restored now doesn't make every try rewrite the journal.
+    #[test]
+    fn a_restore_that_settles_nothing_writes_nothing() {
+        static SAVES: AtomicU32 = AtomicU32::new(0);
+        let dir = Scratch::new("no-rewrite");
+        let mut store = store(&dir.0);
+        let mut access = FileAccess::new(dir.0.join("settings.json"));
+        store.apply(&mut access, &[change("scale", Value::Float(1.0))], &mut |_| {}).unwrap();
+        store.probe_save = Some(|_| {
+            SAVES.fetch_add(1, Ordering::SeqCst);
+        });
+        access.reachable = false;
+        for _ in 0..5 {
+            assert_eq!(store.restore(&mut access, &|_| true, &mut |_| {}).unwrap().waiting.len(), 1);
+        }
+        assert_eq!(SAVES.load(Ordering::SeqCst), 0);
+    }
+
+    /// M6: put back to its original by someone after it was applied: the person's, not changed again.
+    #[test]
+    fn a_value_put_back_by_hand_is_not_changed_again() {
+        let dir = Scratch::new("put-back-by-hand");
+        let store = store(&dir.0);
+        let mut access = FileAccess::new(dir.0.join("settings.json"));
+        access.set("scale", Value::Float(1.4));
+        store.apply(&mut access, &[change("scale", Value::Float(1.19))], &mut |_| {}).unwrap();
+        access.set("scale", Value::Float(1.4));
+        assert_eq!(store.apply(&mut access, &[change("scale", Value::Float(1.19))], &mut |_| {}).unwrap(), vec![Applied::ChangedSince]);
+        assert_eq!(access.values()["scale"], Value::Float(1.4));
+    }
+
     #[test]
     fn a_newer_format_is_not_guessed_at() {
         let dir = Scratch::new("newer");
@@ -879,10 +1035,11 @@ pub(crate) mod tests {
         let mut access = FileAccess::new(dir.0.join("settings.json"));
         store.apply(&mut access, &[change("scale", Value::Float(1.0))], &mut |_| {}).unwrap();
         assert!(armed.armed.load(Ordering::SeqCst));
-        // RunOnce is used up when Windows runs it: what restores arms it again while something is still owed.
+        // RunOnce is used up when Windows runs it: what restores at sign-in arms it again while something is still owed.
         armed.armed.store(false, Ordering::SeqCst);
         access.reachable = false;
         store.restore(&mut access, &|_| true, &mut |_| {}).unwrap();
+        store.rearm().unwrap();
         assert!(armed.armed.load(Ordering::SeqCst), "armed again");
         access.reachable = true;
         store.restore(&mut access, &|_| true, &mut |_| {}).unwrap();

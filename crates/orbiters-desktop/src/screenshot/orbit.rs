@@ -827,6 +827,7 @@ fn sample_comparison(verdict: orbiters_booster::trial::Verdict) -> orbiters_boos
         before_late_gpu: 0.0,
         after_late_gpu: 0.0,
         stalls_at_switch: 0,
+        kept: true,
     }
 }
 

@@ -350,6 +350,10 @@ pub fn uninstall(dir: &Path, remove_data: bool, progress: &Progress, silent: boo
         // The FPS booster's reminder of what to change back by hand. Its journal is not touched here: `finish_booster` removed it if nothing is owed.
         let _ = std::fs::remove_file(orbiters_booster::data_dir().join("to-put-back.json"));
         let _ = std::fs::remove_dir(orbiters_booster::data_dir());
+        // Its frame logs, written at every level and Off by default: large, and nobody else's.
+        if let Some(local) = dirs::data_local_dir() {
+            orbiters_booster::log::remove_logs(&local.join("Orbiters").join("logs"));
+        }
         // The shared Orbiters folders, once nothing else of Orbiters' is left in them.
         for root in [dirs::config_dir(), dirs::data_local_dir()].into_iter().flatten() {
             let _ = std::fs::remove_dir(root.join("Orbiters"));
@@ -369,6 +373,9 @@ fn finish_booster(progress: &Progress, silent: bool) {
     let restorer = booster::restorer_copy_path();
     let store = booster::store_for_user(&restorer);
     if !store.has_entries() {
+        // Used and nothing owed: its empty journal and copy go, or the data folders could never be removed.
+        store.remove_if_empty();
+        booster::remove_restorer_copy();
         return;
     }
     progress.set(0.1, tr("Putting back what the FPS booster changed…"));

@@ -71,6 +71,10 @@ pub struct Comparison {
     pub after_late_gpu: f32,
     /// Frames over twice the budget just after the switches, which the averages leave out: never hidden.
     pub stalls_at_switch: u32,
+    /// The change stayed in force after it. A comparison asked for at a step that doesn't include it, or of something only
+    /// told about, gains and is still put back: its words must not say "kept".
+    #[serde(default)]
+    pub kept: bool,
 }
 
 /// Which of the two is in force now.
@@ -169,10 +173,11 @@ pub fn judge(kind: Kind, a: [Summary; 2], b: [Summary; 2], stalls_at_switch: u32
         let after = mean(b, |s| s.app_gpu.median);
         before <= 0.0 || after <= before * (1.0 - GPU_MUST_FALL)
     };
-    let verdict = if kind == Kind::Sharpness && !gpu_responded {
-        Verdict::NotTaken
-    } else if !agree {
+    // Disagreeing blocks without the change say nothing of anything, VRChat's taking a change included.
+    let verdict = if !agree {
         Verdict::TooMuchChanging
+    } else if kind == Kind::Sharpness && !gpu_responded {
+        Verdict::NotTaken
     } else if (gained_frames || fewer_stalls) && other_fine {
         Verdict::Kept
     } else {
@@ -192,6 +197,7 @@ pub fn judge(kind: Kind, a: [Summary; 2], b: [Summary; 2], stalls_at_switch: u32
         before_late_gpu: mean(a, |s| s.late_gpu_share),
         after_late_gpu: mean(b, |s| s.late_gpu_share),
         stalls_at_switch,
+        kept: false,
     }
 }
 
@@ -264,6 +270,13 @@ mod tests {
         assert_eq!(judge(Kind::Sharpness, a, b, 0).verdict, Verdict::NotTaken);
         let b = [block(40.0, 0.0, 0.0, 0.0, 8.0), block(40.0, 0.0, 0.0, 0.0, 8.0)];
         assert_eq!(judge(Kind::Sharpness, a, b, 0).verdict, Verdict::Kept);
+    }
+
+    /// M3: with the blocks without the change disagreeing, that is what is said, not that VRChat didn't take it.
+    #[test]
+    fn too_much_changing_comes_before_not_taken() {
+        let got = judge(Kind::Sharpness, [plain(30.0), plain(36.0)], [plain(36.0), plain(36.0)], 0);
+        assert_eq!(got.verdict, Verdict::TooMuchChanging);
     }
 
     #[test]

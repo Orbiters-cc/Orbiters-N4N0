@@ -3,7 +3,7 @@
 //! own: its connections disturbed the overlay's input ("asks SteamVR nothing itself", `overlay/mod.rs`).
 //!
 //! Every second it compares what the overlay wants with what is so. The overlay gone means nothing is wanted: priorities come
-//! back then. A service that itself is killed leaves programs lowered until its next start or until they exit, and that gap
+//! back then. A service that itself is killed leaves programs in efficiency mode until its next start or until they exit, and that gap
 //! is real and is said in `docs/fps-booster.md`.
 
 use super::Shared;
@@ -21,6 +21,8 @@ use std::time::{Duration, Instant};
 const REPORT_GONE_AFTER: Duration = Duration::from_secs(5);
 /// How often other programs are looked at while VRChat runs here with SteamVR.
 const SCAN_EVERY: Duration = Duration::from_secs(5);
+/// How often a SteamVR value still owed is tried again through its file while SteamVR stays closed.
+const OFFLINE_EVERY: Duration = Duration::from_secs(60);
 /// How often what is lowered is looked at again, for programs that started since.
 const RELOWER_EVERY: Duration = Duration::from_secs(10);
 
@@ -176,6 +178,8 @@ impl super::Controller {
         let store = store();
         if let Some(store) = &store {
             let unreadable = system::recover_for_user(store).is_err();
+            // RunOnce may have been used up at sign-in: armed again while anything is owed.
+            let _ = store.rearm();
             self.update_if(|s| {
                 let changed = s.booster.journal_unreadable != unreadable;
                 s.booster.journal_unreadable = unreadable;
@@ -194,6 +198,7 @@ impl super::Controller {
         let mut lowered_any = true; // The start may have found some: looked at once.
         let mut last_limits: Option<Instant> = None;
         let mut stopping_prep = false;
+        let (mut steamvr_was_closed, mut last_offline) = (false, None);
         let mut holding = false;
         let cores = programs::core_count();
         loop {
@@ -209,7 +214,6 @@ impl super::Controller {
 
             // Who is running, without opening any of them, only while it can matter.
             let due = here && snap.steamvr.running && last_seen.as_ref().is_none_or(|(at, _)| at.elapsed() >= SCAN_EVERY);
-            let mut seen_now = None;
             if due {
                 let seen = programs::scan();
                 if let Some((at, before)) = &last_seen {
@@ -221,17 +225,16 @@ impl super::Controller {
                         changed
                     });
                 }
-                seen_now = Some(seen.clone());
                 last_seen = Some((Instant::now(), seen));
             } else if !here {
                 last_seen = None;
             }
 
-            // Priorities: lowered as the overlay wants, looked at again for what started since; all back otherwise.
+            // Efficiency mode: set as the overlay wants, looked at again for what started since; all back otherwise.
             if wants.lower_programs && here {
                 if last_lower.is_none_or(|at| at.elapsed() >= RELOWER_EVERY) {
-                    let seen = seen_now.take().unwrap_or_else(programs::scan);
-                    let _ = programs::lower(&store, &mut os, &seen);
+                    // It lists the system afresh itself, and opens nothing it did not find there.
+                    let _ = programs::lower(&store, &mut os);
                     last_lower = Some(Instant::now());
                     lowered_any = true;
                     self.booster_note_lowered(&store);
@@ -268,7 +271,13 @@ impl super::Controller {
             holding = hold;
 
             // A SteamVR value still owed, once SteamVR is gone: there is no overlay to restore it now.
-            if !snap.steamvr.running && store.entries().is_ok_and(|e| system::owed_to_steamvr(&e)) {
+            // Tried when SteamVR has just closed, then once a minute: a value that can't be put back must not have the journal
+            // and the registry rewritten every second.
+            let closed_now = !snap.steamvr.running;
+            let due = closed_now && (closed_now != steamvr_was_closed || last_offline.is_none_or(|at: Instant| at.elapsed() >= OFFLINE_EVERY));
+            steamvr_was_closed = closed_now;
+            if due && store.entries().is_ok_and(|e| system::owed_to_steamvr(&e)) {
+                last_offline = Some(Instant::now());
                 let _ = system::recover_for_user(&store);
             }
 
@@ -373,7 +382,7 @@ impl TestLoad {
         let setup = exe.parent()?.join(if cfg!(windows) { "orbiters-setup.exe" } else { "orbiters-setup" });
         let dir = std::env::temp_dir().join("orbiters-booster-test-load");
         std::fs::create_dir_all(&dir).ok()?;
-        let copy = dir.join("node.exe");
+        let copy = dir.join("blender.exe");
         std::fs::copy(&setup, &copy).ok()?;
         let stop_file = dir.join("running");
         std::fs::write(&stop_file, "").ok()?;

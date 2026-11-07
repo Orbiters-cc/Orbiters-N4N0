@@ -37,14 +37,19 @@ pub fn compositor_log_for_user() -> Option<PathBuf> {
 }
 
 /// The value of a key in the file's text. `Absent` is a key not there, which a read through SteamVR cannot tell from a
-/// default.
-pub fn read_value(text: &str, section: &str, key: &str) -> Value {
-    let Ok(root) = serde_json::from_str::<serde_json::Value>(text.trim_start_matches('\u{feff}')) else { return Value::Absent };
-    match root.get(section).and_then(|s| s.get(key)) {
-        Some(serde_json::Value::Bool(b)) => Value::Bool(*b),
-        Some(serde_json::Value::Number(n)) if n.is_i64() => Value::Int(n.as_i64().unwrap_or(0)),
-        Some(serde_json::Value::Number(n)) => Value::Float(n.as_f64().unwrap_or(0.0) as f32),
-        _ => Value::Absent,
+/// default. `None`: the file isn't JSON, or the key holds something no booster value is (text, a list, null). Nothing can be
+/// concluded from those, so they are never taken for absent.
+pub fn read_value(text: &str, section: &str, key: &str) -> Option<Value> {
+    let root = serde_json::from_str::<serde_json::Value>(text.trim_start_matches('\u{feff}')).ok()?;
+    let root = root.as_object()?;
+    let Some(section) = root.get(section) else { return Some(Value::Absent) };
+    let section = section.as_object()?;
+    match section.get(key) {
+        None => Some(Value::Absent),
+        Some(serde_json::Value::Bool(b)) => Some(Value::Bool(*b)),
+        Some(serde_json::Value::Number(n)) if n.is_i64() => Some(Value::Int(n.as_i64().unwrap_or(0))),
+        Some(serde_json::Value::Number(n)) => Some(Value::Float(n.as_f64()? as f32)),
+        Some(_) => None,
     }
 }
 
@@ -297,18 +302,22 @@ impl SettingsFile<'_> {
 impl Access for SettingsFile<'_> {
     fn read(&mut self, target: &Target) -> Read {
         let Target::SteamVr { section, key } = target else { return Read::Unreachable };
+        // Not one of the booster's two keys: whatever a journal says, it goes untouched.
+        if !crate::steamvr::owned(section, key) {
+            return Read::Gone;
+        }
         if !(self.closed)() {
             return Read::Unreachable;
         }
-        match Self::text(&self.path) {
-            Ok(text) => Read::Value(read_value(&text, section, key)),
-            Err(()) => Read::Unreachable,
+        match Self::text(&self.path).ok().and_then(|text| read_value(&text, section, key)) {
+            Some(value) => Read::Value(value),
+            None => Read::Unreachable,
         }
     }
 
     fn write(&mut self, target: &Target, value: &Value) -> bool {
         let Target::SteamVr { section, key } = target else { return false };
-        if !(self.closed)() {
+        if !crate::steamvr::owned(section, key) || !(self.closed)() {
             return false;
         }
         let Ok(text) = Self::text(&self.path) else { return false };
@@ -351,13 +360,13 @@ mod tests {
     fn a_new_key_goes_in_with_every_other_byte_kept() {
         let got = edit_text(FILE, "steamvr", "motionSmoothing", &Value::Bool(false)).unwrap();
         assert_eq!(got, FILE.replace("\"disableAsync\" : true", "\"motionSmoothing\" : false,\n      \"disableAsync\" : true"));
-        assert_eq!(read_value(&got, "steamvr", "motionSmoothing"), Value::Bool(false));
+        assert_eq!(read_value(&got, "steamvr", "motionSmoothing"), Some(Value::Bool(false)));
         // In a section with nothing in it, and in one not there.
         let got = edit_text(FILE, "last", "k", &Value::Int(3)).unwrap();
-        assert_eq!(read_value(&got, "last", "k"), Value::Int(3));
+        assert_eq!(read_value(&got, "last", "k"), Some(Value::Int(3)));
         let got = edit_text(FILE, "new", "k", &Value::Int(3)).unwrap();
-        assert_eq!(read_value(&got, "new", "k"), Value::Int(3));
-        assert_eq!(read_value(&got, "steamvr", "disableAsync"), Value::Bool(true));
+        assert_eq!(read_value(&got, "new", "k"), Some(Value::Int(3)));
+        assert_eq!(read_value(&got, "steamvr", "disableAsync"), Some(Value::Bool(true)));
         // And there and back is the same file.
         let there = edit_text(FILE, "steamvr", "motionSmoothing", &Value::Bool(false)).unwrap();
         assert_eq!(edit_text(&there, "steamvr", "motionSmoothing", &Value::Absent).unwrap(), FILE);
@@ -371,7 +380,7 @@ mod tests {
         assert!(got.starts_with('\u{feff}'));
         assert!(got.contains("1.3899999856948853"));
         assert!(got.find("GpuSpeed").unwrap() < got.find("steamvr").unwrap());
-        assert_eq!(read_value(&got, "steamvr", "supersampleScale"), Value::Float(1.0));
+        assert_eq!(read_value(&got, "steamvr", "supersampleScale"), Some(Value::Float(1.0)));
     }
 
     #[test]
@@ -382,9 +391,9 @@ mod tests {
 
     #[test]
     fn absent_is_told_from_a_value() {
-        assert_eq!(read_value(FILE, "steamvr", "supersampleManualOverride"), Value::Bool(true));
-        assert_eq!(read_value(FILE, "steamvr", "nope"), Value::Absent);
-        assert_eq!(read_value(FILE, "nope", "nope"), Value::Absent);
+        assert_eq!(read_value(FILE, "steamvr", "supersampleManualOverride"), Some(Value::Bool(true)));
+        assert_eq!(read_value(FILE, "steamvr", "nope"), Some(Value::Absent));
+        assert_eq!(read_value(FILE, "nope", "nope"), Some(Value::Absent));
     }
 
     #[test]
@@ -401,7 +410,9 @@ mod tests {
     fn a_value_owed_comes_back_through_the_file_only_once_steamvr_is_closed() {
         let dir = Scratch::new("offline");
         let path = dir.0.join("steamvr.vrsettings");
-        std::fs::write(&path, FILE).unwrap();
+        // Auto: no manual override in it.
+        let auto = FILE.replace("      \"supersampleManualOverride\" : true,\n", "");
+        std::fs::write(&path, &auto).unwrap();
         let store = Store::new(&dir.0, Box::new(NotArmed));
         let open = || false;
         let closed = || true;
@@ -414,22 +425,57 @@ mod tests {
                         value: Value::Float(1.19),
                         leave_with: None,
                     },
-                    crate::journal::Change { target: setting("motionSmoothing"), value: Value::Bool(true), leave_with: None },
+                    crate::journal::Change { target: setting("supersampleManualOverride"), value: Value::Bool(true), leave_with: None },
                 ],
                 &mut |_| {},
             )
             .unwrap();
         let changed = std::fs::read_to_string(&path).unwrap();
-        assert!(changed.contains("1.19") && changed.contains("motionSmoothing"));
+        assert!(changed.contains("1.19") && changed.contains("supersampleManualOverride"));
         let waited = store.restore(&mut SettingsFile { path: path.clone(), closed: &open }, &|_| true, &mut |_| {}).unwrap();
         assert_eq!(waited.waiting.len(), 2);
         assert_eq!(std::fs::read_to_string(&path).unwrap(), changed, "not touched while SteamVR runs");
         let back = store.restore(&mut SettingsFile { path: path.clone(), closed: &closed }, &|_| true, &mut |_| {}).unwrap();
         assert_eq!(back.back.len(), 2);
         let now = std::fs::read_to_string(&path).unwrap();
-        assert!(!now.contains("motionSmoothing"), "absent again");
-        assert_eq!(read_value(&now, "steamvr", "supersampleScale"), Value::Float(1.4));
-        assert_eq!(now, FILE.replace("1.399999976158142", "1.4"), "every other byte as it was");
+        assert!(!now.contains("supersampleManualOverride"), "absent again");
+        assert_eq!(read_value(&now, "steamvr", "supersampleScale"), Some(Value::Float(1.4)));
+        assert_eq!(now, auto.replace("1.399999976158142", "1.4"), "every other byte as it was");
+    }
+
+    /// F5: a file damaged by a power loss, or a key holding something else, says nothing: the entries stay owed and nobody is
+    /// told they changed anything.
+    #[test]
+    fn a_damaged_file_is_not_taken_for_absent_keys() {
+        assert_eq!(read_value("{ \"steamvr\" : { \"supersampleScale\" : 1.1", "steamvr", "supersampleScale"), None);
+        assert_eq!(read_value("{ \"steamvr\" : { \"supersampleScale\" : \"1.1\" } }", "steamvr", "supersampleScale"), None);
+        assert_eq!(read_value("{ \"steamvr\" : { \"supersampleScale\" : null } }", "steamvr", "supersampleScale"), None);
+        assert_eq!(read_value("[]", "steamvr", "supersampleScale"), None);
+        let dir = Scratch::new("damaged");
+        let path = dir.0.join("steamvr.vrsettings");
+        std::fs::write(&path, FILE).unwrap();
+        let store = Store::new(&dir.0, Box::new(NotArmed));
+        let closed = || true;
+        let change = |key: &str, value| crate::journal::Change { target: setting(key), value, leave_with: None };
+        store.apply(&mut SettingsFile { path: path.clone(), closed: &closed }, &[change("supersampleScale", Value::Float(1.19))], &mut |_| {}).unwrap();
+        std::fs::write(&path, &FILE[..FILE.len() / 2]).unwrap();
+        let got = store.restore(&mut SettingsFile { path: path.clone(), closed: &closed }, &|_| true, &mut |_| {}).unwrap();
+        assert!(got.kept.is_empty() && got.back.is_empty(), "{got:?}");
+        assert_eq!(got.waiting.len(), 1);
+        assert_eq!(store.entries().unwrap().len(), 1);
+    }
+
+    /// F6: only the booster's two keys, whatever a journal says.
+    #[test]
+    fn the_file_is_never_written_for_another_key() {
+        let dir = Scratch::new("other-key-file");
+        let path = dir.0.join("steamvr.vrsettings");
+        std::fs::write(&path, FILE).unwrap();
+        let closed = || true;
+        let mut file = SettingsFile { path: path.clone(), closed: &closed };
+        assert_eq!(file.read(&setting("disableAsync")), Read::Gone);
+        assert!(!file.write(&setting("disableAsync"), &Value::Absent));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), FILE);
     }
 
     #[test]

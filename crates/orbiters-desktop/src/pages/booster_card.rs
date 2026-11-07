@@ -176,7 +176,7 @@ fn details(ui: &mut Ui, cx: &Cx) {
         if button(ui, tr("Test sharpness anyway"), "booster-test-sharpness") {
             ctl.booster(Command::Overlay(Request::TestAnyway(Kind::Sharpness)));
         }
-        if button(ui, tr("Test lowering programs"), "booster-test-programs") {
+        if button(ui, tr("Test efficiency mode for programs"), "booster-test-programs") {
             ctl.booster(Command::Overlay(Request::TestAnyway(Kind::Programs)));
         }
         if status.overlay.panel_3d && button(ui, tr("Test lighter 3D panels"), "booster-test-panels") {

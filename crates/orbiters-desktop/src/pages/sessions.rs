@@ -7,7 +7,9 @@ use crate::controller::{self, RawCaptureSummary};
 use crate::state::ReconstructionJob;
 use egui::{pos2, vec2, Align2, Color32, ColorImage, CornerRadius, CursorIcon, Id, Order, Rect, Sense, TextureHandle, TextureOptions, Ui, UiBuilder};
 use orbiters_core::bundle::{self, SessionSummary};
+use orbiters_contracts::manifest::StorageQuality;
 use orbiters_core::reconstruction::{self, Report, Stage};
+use orbiters_i18n::{fill, tr, tr_n};
 use orbiters_ui::anim::{self, ease, Spring};
 use orbiters_ui::paint::{self, Gradient};
 use orbiters_ui::theme::{self, weight, Txt};
@@ -209,7 +211,7 @@ impl State {
 pub(super) fn title(s: &SessionSummary) -> String {
     s.manifest.world.as_ref().and_then(|w| w.name.clone()).filter(|n| !n.is_empty()).unwrap_or_else(|| {
         if s.manifest.capture.source_name.is_empty() {
-            "Session".into()
+            tr("Session").into()
         } else {
             s.manifest.capture.source_name.clone()
         }
@@ -232,7 +234,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
     }
     show_library(ui, cx, state);
     // Back to Photos & captures, where the heading's caption would be (as a world's page goes back to its list).
-    let back = Button::new("Photos & captures").icon(icons::ARROW_LEFT).variant(Variant::Ghost).size(widgets::Size::Sm);
+    let back = Button::new(tr("Photos & captures")).icon(icons::ARROW_LEFT).variant(Variant::Ghost).size(widgets::Size::Sm);
     let r = Rect::from_min_size(pos2(ui.max_rect().left() + super::PAD_X - 14.0, ui.max_rect().top() + cx.top - 1.0), vec2(back.desired_width(ui), 30.0));
     if back.id_salt("back-to-gallery").show_at(ui, r).clicked() {
         state.manage = false;
@@ -275,13 +277,13 @@ fn show_library(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
     let head = Rect::from_min_size(pos2(page.left() + super::PAD_X, page.top() + cx.top + 8.0), vec2(page.width() - super::PAD_X * 2.0, 72.0));
     let actions_y = head.bottom() - 40.0;
     let folder_r = Rect::from_min_size(pos2(head.right() - 36.0, actions_y + 2.0), vec2(36.0, 36.0));
-    let import_btn = Button::new("Import raw capture").icon(icons::DOWNLOAD_SIMPLE);
+    let import_btn = Button::new(tr("Import raw capture")).icon(icons::DOWNLOAD_SIMPLE);
     let import_w = import_btn.desired_width(ui);
     let import_r = Rect::from_min_size(pos2(folder_r.left() - 8.0 - import_w, actions_y), vec2(import_w, 40.0));
     // What the library takes and freeing it; while the service deletes, how far it got (one width for both).
-    let freeing = cx.snap.cleanup.as_ref().map(|j| format!("Freeing… {:.0}%", j.fraction() * 100.0));
-    let space_label = freeing.as_deref().unwrap_or("Free up space");
-    let space_w = Button::new("Free up space").icon(icons::BROOM).desired_width(ui).max(Button::new("Freeing… 100%").icon(icons::BROOM).desired_width(ui));
+    let freeing = cx.snap.cleanup.as_ref().map(|j| tr!("Freeing… {percent}%", percent = format!("{:.0}", j.fraction() * 100.0)));
+    let space_label = freeing.as_deref().unwrap_or(tr("Free up space"));
+    let space_w = Button::new(tr("Free up space")).icon(icons::BROOM).desired_width(ui).max(Button::new(&tr!("Freeing… {percent}%", percent = 100)).icon(icons::BROOM).desired_width(ui));
     let space_r = Rect::from_min_size(pos2(import_r.left() - 8.0 - space_w, actions_y), vec2(space_w, 40.0));
     let search_r = Rect::from_min_size(pos2(space_r.left() - 8.0 - 224.0, actions_y), vec2(224.0, 40.0));
 
@@ -345,22 +347,22 @@ fn show_library(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
 
     let total: u64 = state.sessions.as_ref().map(|l| l.iter().map(|s| s.size_bytes).sum()).unwrap_or(0);
     let sub = match &state.sessions {
-        Some(l) => format!("{} session{} · {}", l.len(), if l.len() == 1 { "" } else { "s" }, format::bytes(total as f64)),
-        None => "Loading…".into(),
+        Some(l) => fill(&tr_n("{count} session · {size}", "{count} sessions · {size}", l.len() as u64), &[("size", &format::bytes(total as f64))]),
+        None => tr("Loading…").into(),
     };
     let (head_r, head_a) = super::entering(ui, cx, 0, head);
     {
         let mut hu = ui.new_child(UiBuilder::new().max_rect(head_r).id_salt("sessions-head"));
         hu.multiply_opacity(head_a);
         // No caption: the way back to Photos & captures stands there.
-        super::heading(&hu, head_r, "", "Capture files", Some(&sub));
+        super::heading(&hu, head_r, "", tr("Capture files"), Some(&sub));
     }
     {
         let mut su = ui.new_child(UiBuilder::new().max_rect(search_r).id_salt("sessions-search"));
-        widgets::search_field(&mut su, "sessions-search", &mut state.query, "Search worlds", 224.0);
+        widgets::search_field(&mut su, "sessions-search", &mut state.query, tr("Search worlds"), 224.0);
     }
     let space =
-        Button::new(space_label).icon(icons::BROOM).width(space_w).id_salt("free-up-space").hint("What the captures and 3D pictures take, and freeing it");
+        Button::new(space_label).icon(icons::BROOM).width(space_w).id_salt("free-up-space").hint(tr("What the captures and 3D pictures take, and freeing it"));
     if space.show_at(ui, space_r).clicked() {
         if let Some(i) = state.import.as_mut() {
             i.closing = true;
@@ -386,7 +388,7 @@ fn show_library(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
             state.import = Some(Import { serial: state.serial, closing: false, raws: Job::spawn(&ctx, move || controller::list_raw_captures(&dir)) });
         }
     }
-    if IconButton::new(icons::FOLDER_OPEN, "Open the captures folder").show_at(ui, folder_r).clicked() {
+    if IconButton::new(icons::FOLDER_OPEN, tr("Open the captures folder")).show_at(ui, folder_r).clicked() {
         let r = controller::open_path(&cx.snap.settings.sessions_dir);
         cx.run(&ctx, r);
     }
@@ -561,10 +563,10 @@ fn preview(ctx: &egui::Context, d: &mut Detail, s: &SessionSummary) -> Option<Te
 
 pub(super) fn stage_label(stage: Stage) -> &'static str {
     match stage {
-        Stage::Loading => "Reading frames",
-        Stage::Seeding => "Seeding splats from depth",
-        Stage::Training => "Training splats",
-        Stage::Saving => "Saving",
+        Stage::Loading => tr("Reading frames"),
+        Stage::Seeding => tr("Seeding splats from depth"),
+        Stage::Training => tr("Training splats"),
+        Stage::Saving => tr("Saving"),
     }
 }
 
@@ -584,31 +586,31 @@ pub(crate) fn overall_progress(j: &ReconstructionJob) -> f32 {
 /// Why a paused reconstruction waits and when it goes on, as a sentence.
 pub(crate) fn pause_why(snap: &crate::state::Snapshot) -> &'static str {
     if snap.is_capturing() {
-        "A capture needs the graphics card. It continues when the capture ends."
+        tr("A capture needs the graphics card. It continues when the capture ends.")
     } else if snap.vrchat.running && snap.settings.reconstruct_while_playing == orbiters_core::settings::WhilePlaying::AfterVrchat {
-        "VRChat is running. It continues once VRChat closes or the headset has been off a minute."
+        tr("VRChat is running. It continues once VRChat closes or the headset has been off a minute.")
     } else {
-        "It continues in a moment."
+        tr("It continues in a moment.")
     }
 }
 
 /// [`pause_why`] in the few words a card's badge has room for.
 pub(crate) fn pause_short(snap: &crate::state::Snapshot) -> &'static str {
     if snap.is_capturing() {
-        "continues after the capture"
+        tr("continues after the capture")
     } else if snap.vrchat.running && snap.settings.reconstruct_while_playing == orbiters_core::settings::WhilePlaying::AfterVrchat {
-        "continues when VRChat closes"
+        tr("continues when VRChat closes")
     } else {
-        "continues in a moment"
+        tr("continues in a moment")
     }
 }
 
 /// What a card's badge says of a run on show.
 pub(crate) fn job_badge(j: &ReconstructionJob, snap: &crate::state::Snapshot) -> (String, Color32) {
     if j.paused {
-        (format!("Paused {:.0}% · {}", overall_progress(j) * 100.0, pause_short(snap)), theme::FG_2)
+        (tr!("Paused {percent}% · {reason}", percent = format!("{:.0}", overall_progress(j) * 100.0), reason = pause_short(snap)), theme::FG_2)
     } else {
-        (format!("Reconstructing {:.0}%", overall_progress(j) * 100.0), theme::ACCENT)
+        (tr!("Reconstructing {percent}%", percent = format!("{:.0}", overall_progress(j) * 100.0)), theme::ACCENT)
     }
 }
 
@@ -635,9 +637,9 @@ fn splats_view(ui: &Ui, rect: Rect, tex: Option<&TextureHandle>, report: Option<
     if let Some(j) = job {
         let c = rect.center();
         let title = if j.paused {
-            "Paused"
+            tr("Paused")
         } else if j.resuming {
-            "Continuing from where it paused"
+            tr("Continuing from where it paused")
         } else {
             stage_label(j.stage)
         };
@@ -649,13 +651,24 @@ fn splats_view(ui: &Ui, rect: Rect, tex: Option<&TextureHandle>, report: Option<
             p.rect_filled(Rect::from_min_size(bar.min, vec2((bar.width() * f).max(6.0), 6.0)), theme::radius(3.0), job_bar(j));
         }
         let detail = if j.paused {
-            let splats = if j.gaussians > 0 { format!(" · {} splats", format::integer(j.gaussians as f64)) } else { String::new() };
-            format!("{:.0}%{splats}, kept", overall_progress(j) * 100.0)
+            let percent = format!("{:.0}", overall_progress(j) * 100.0);
+            if j.gaussians > 0 {
+                tr!("{percent}% · {count} splats, kept", percent = percent, count = format::integer(j.gaussians as f64))
+            } else {
+                tr!("{percent}%, kept", percent = percent)
+            }
         } else if j.stage == Stage::Training && j.iteration > 0 {
+            // A list of facts, each its own text: the order and the dots between them are the same in every language.
             let left = j.seconds as f64 / j.iteration as f64 * j.iterations.saturating_sub(j.iteration) as f64;
-            let quality = j.psnr.map(|q| format!(" · {q:.1} dB")).unwrap_or_default();
-            let on = if j.integrated { " · on the integrated GPU" } else { "" };
-            format!("{} splats{quality} · {} left{on}", format::integer(j.gaussians as f64), format::duration(left))
+            let mut facts = vec![tr!("{count} splats", count = format::integer(j.gaussians as f64))];
+            if let Some(q) = j.psnr {
+                facts.push(tr!("{quality} dB", quality = format!("{q:.1}")));
+            }
+            facts.push(tr!("{time} left", time = format::duration(left)));
+            if j.integrated {
+                facts.push(tr("on the integrated GPU").to_string());
+            }
+            facts.join(" · ")
         } else {
             format!("{:.0}%", overall_progress(j) * 100.0)
         };
@@ -666,9 +679,13 @@ fn splats_view(ui: &Ui, rect: Rect, tex: Option<&TextureHandle>, report: Option<
         return;
     }
     let Some(r) = report else { return };
-    badge(&p, ui, pos2(rect.left() + 12.0, rect.bottom() - 12.0 - 22.0), "A view it never trained on", theme::black(0.55), theme::FG_2, false);
-    let quality = r.psnr_held_out.map(|q| format!(" · {q:.1} dB")).unwrap_or_default();
-    let line = format!("{} splats{quality} · {}", format::integer(r.gaussians as f64), format::duration(r.seconds as f64));
+    badge(&p, ui, pos2(rect.left() + 12.0, rect.bottom() - 12.0 - 22.0), tr("A view it never trained on"), theme::black(0.55), theme::FG_2, false);
+    let mut facts = vec![tr!("{count} splats", count = format::integer(r.gaussians as f64))];
+    if let Some(q) = r.psnr_held_out {
+        facts.push(tr!("{quality} dB", quality = format!("{q:.1}")));
+    }
+    facts.push(format::duration(r.seconds as f64));
+    let line = facts.join(" · ");
     badge(&p, ui, pos2(rect.right() - 12.0, rect.bottom() - 12.0 - 22.0), &line, theme::black(0.55), theme::FG_2, true);
 }
 
@@ -734,23 +751,23 @@ fn session_card(ui: &mut Ui, cx: &Cx, i: usize, s: &SessionSummary, rect: Rect, 
     let cleaning = cx.snap.cleanup.as_ref().is_some_and(|j| j.of(&s.dir).is_some());
     let splats = match job {
         Some(j) => Some(job_badge(j, cx.snap)),
-        None if cx.snap.reconstruct_queue.contains(&s.dir) => Some(("Waiting to reconstruct".to_string(), theme::FG_2)),
-        None if cleaning => Some(("Freeing space".to_string(), theme::FG_2)),
-        None => s.reconstruction.as_ref().map(|_| ("Splats".to_string(), theme::ACCENT)),
+        None if cx.snap.reconstruct_queue.contains(&s.dir) => Some((tr("Waiting to reconstruct").to_string(), theme::FG_2)),
+        None if cleaning => Some((tr("Freeing space").to_string(), theme::FG_2)),
+        None => s.reconstruction.as_ref().map(|_| (tr("Splats").to_string(), theme::ACCENT)),
     };
     if let Some((label, color)) = splats {
         badge(&p, ui, pos2(thumb.left() + 12.0 + w + 6.0, thumb.top() + 12.0), &label, theme::black(0.55), color, false);
     }
     if s.has_no_keyframes() {
         // Frames came, none with a camera pose: this cannot become a 3D view, whatever else it holds.
-        badge(&p, ui, pos2(thumb.right() - 12.0, thumb.top() + 12.0), "No keyframes", theme::alpha(theme::DANGER, 0.2), theme::DANGER, true);
+        badge(&p, ui, pos2(thumb.right() - 12.0, thumb.top() + 12.0), tr("No keyframes"), theme::alpha(theme::DANGER, 0.2), theme::DANGER, true);
     } else if s.manifest.consent.own_world {
-        badge(&p, ui, pos2(thumb.right() - 12.0, thumb.top() + 12.0), "Own world", theme::alpha(theme::OK, 0.2), theme::OK, true);
+        badge(&p, ui, pos2(thumb.right() - 12.0, thumb.top() + 12.0), tr("Own world"), theme::alpha(theme::OK, 0.2), theme::OK, true);
     } else if let Some(picture) = &s.picture {
         // What the 3D picture is of.
         let (label, tint) = match picture.mode {
-            orbiters_core::settings::PictureMode::People => ("People", theme::VIOLET),
-            orbiters_core::settings::PictureMode::World => ("World", theme::ACCENT),
+            orbiters_core::settings::PictureMode::People => (tr("People"), theme::VIOLET),
+            orbiters_core::settings::PictureMode::World => (tr("World"), theme::ACCENT),
         };
         badge(&p, ui, pos2(thumb.right() - 12.0, thumb.top() + 12.0), label, theme::black(0.55), tint, true);
     }
@@ -763,7 +780,7 @@ fn session_card(ui: &mut Ui, cx: &Cx, i: usize, s: &SessionSummary, rect: Rect, 
     let py = thumb.bottom() + 68.0;
     // A session reduced to its 3D view has no frames left to count.
     let pills = if s.trimmed && s.reconstruction.is_some() {
-        vec![(Some(icons::CUBE_FOCUS), "3D view only".to_string()), (None, format::bytes(s.size_bytes as f64))]
+        vec![(Some(icons::CUBE_FOCUS), tr("3D view only").to_string()), (None, format::bytes(s.size_bytes as f64))]
     } else {
         vec![
             (Some(icons::STACK), format::integer(st.frames as f64)),
@@ -811,9 +828,9 @@ fn empty_state(ui: &mut Ui, cx: &Cx, searching: bool, height: f32) {
     let lr = Rect::from_center_size(rect.center() + vec2(0.0, -44.0 + bob), logo::size_for_width(70.0));
     logo::paint(&p, lr, logo::Look::default());
     let (title, text) = if searching {
-        ("No session matches", "Try another world name.")
+        (tr("No session matches"), tr("Try another world name."))
     } else {
-        ("No sessions yet", "Record in VRChat from the Capture page, or import a raw capture from Mixer's simulator.")
+        (tr("No sessions yet"), tr("Record in VRChat from the Capture page, or import a raw capture from Mixer's simulator."))
     };
     widgets::text(&p, rect.center() + vec2(0.0, 18.0), Align2::CENTER_CENTER, &Txt::new(title, 17.0).weight(weight::SEMIBOLD));
     let g = p.layout_job({
@@ -852,12 +869,12 @@ fn import_popover(ctx: &egui::Context, cx: &mut Cx, state: &mut State, anchor: R
         }
         let p = ui.painter().clone();
         widgets::panel(&p, rect, 16.0);
-        widgets::text(&p, pos2(rect.left() + 20.0, rect.top() + 26.0), Align2::LEFT_CENTER, &Txt::new("Raw captures", 13.5).weight(weight::SEMIBOLD));
+        widgets::text(&p, pos2(rect.left() + 20.0, rect.top() + 26.0), Align2::LEFT_CENTER, &Txt::new(tr("Raw captures"), 13.5).weight(weight::SEMIBOLD));
         widgets::text_truncated(
             &p,
             pos2(rect.left() + 20.0, rect.top() + 46.0),
             Align2::LEFT_CENTER,
-            &Txt::new("Frames from Mixer's capture simulator, replayed through the Spout decoder.", 12.0).color(theme::FG_3),
+            &Txt::new(tr("Frames from Mixer's capture simulator, replayed through the Spout decoder."), 12.0).color(theme::FG_3),
             width - 40.0,
         );
         let list = Rect::from_min_size(pos2(rect.left() + 8.0, rect.top() + 70.0), vec2(width - 16.0, list_h));
@@ -867,7 +884,7 @@ fn import_popover(ctx: &egui::Context, cx: &mut Cx, state: &mut State, anchor: R
                 shimmer_card(ui, r);
             }
             Some(raws) if raws.is_empty() => {
-                widgets::text(&p, list.center(), Align2::CENTER_CENTER, &Txt::new("No raw captures in the raw captures folder yet.", 12.5).color(theme::FG_4));
+                widgets::text(&p, list.center(), Align2::CENTER_CENTER, &Txt::new(tr("No raw captures in the raw captures folder yet."), 12.5).color(theme::FG_4));
             }
             Some(raws) => {
                 let mut lu = ui.new_child(UiBuilder::new().max_rect(list).id_salt("raws"));
@@ -891,13 +908,15 @@ fn import_popover(ctx: &egui::Context, cx: &mut Cx, state: &mut State, anchor: R
                             &Txt::new(&r.name, 13.0).weight(weight::MEDIUM),
                             row.right() - x - 12.0,
                         );
-                        let mut info = format!("{} frames · {}×{}", r.frames, r.width, r.height);
+                        // Facts, each its own text, with the same dots between them in every language.
+                        let mut facts = vec![tr!("{count} frames", count = r.frames), format!("{}×{}", r.width, r.height)];
                         if r.depth_every > 0 {
-                            info.push_str(&format!(" · depth every {}", r.depth_every));
+                            facts.push(tr!("depth every {n}", n = r.depth_every));
                         }
                         if r.has_ground_truth {
-                            info.push_str(" · ground truth");
+                            facts.push(tr("ground truth").to_string());
                         }
+                        let info = facts.join(" · ");
                         widgets::text_truncated(
                             &p,
                             pos2(x, row.center().y + 10.0),
@@ -921,7 +940,7 @@ fn import_popover(ctx: &egui::Context, cx: &mut Cx, state: &mut State, anchor: R
     }
     if let Some(r) = start {
         cx.ctl.import_raw_capture(r.dir.clone());
-        cx.toasts.push(ctx, toast::Kind::Info, format!("Importing {}…", r.name));
+        cx.toasts.push(ctx, toast::Kind::Info, tr!("Importing {name}…", name = r.name));
         close = true;
     }
     if close {
@@ -1031,7 +1050,7 @@ fn detail(ctx: &egui::Context, cx: &mut Cx, state: &mut State, page: Rect) {
         let mut cu = ui.new_child(UiBuilder::new().max_rect(rect).id_salt(("detail-body", d.serial)));
         cu.multiply_opacity(content);
         let close_r = Rect::from_min_size(pos2(thumb.right() - 16.0 - 36.0, thumb.top() + 16.0), vec2(36.0, 36.0));
-        if IconButton::new(icons::X, "Close").size(36.0, 18.0).backdrop(theme::black(0.4)).show_at(&mut cu, close_r).clicked() {
+        if IconButton::new(icons::X, tr("Close")).size(36.0, 18.0).backdrop(theme::black(0.4)).show_at(&mut cu, close_r).clicked() {
             close = true;
         }
 
@@ -1042,15 +1061,15 @@ fn detail(ctx: &egui::Context, cx: &mut Cx, state: &mut State, page: Rect) {
         let side = Rect::from_min_max(pos2(main.right() + 20.0, body.top()), body.max);
         let st = &session.manifest.stats;
         let minis = [
-            (icons::CLOCK, "Duration", format::duration(st.duration_s), None),
+            (icons::CLOCK, tr("Duration"), format::duration(st.duration_s), None),
             (
                 icons::STACK,
-                "Frames",
+                tr("Frames"),
                 format::integer(st.frames as f64),
-                Some(format!("{} decoded", format::percent(st.strip_ok as f64, st.frames.max(1) as f64))),
+                Some(tr!("{percent} decoded", percent = format::percent(st.strip_ok as f64, st.frames.max(1) as f64))),
             ),
-            (icons::CUBE, "Keyframes", format::integer(st.keyframes as f64), None),
-            (icons::CPU, "Depth frames", format::integer(st.depth_frames as f64), None),
+            (icons::CUBE, tr("Keyframes"), format::integer(st.keyframes as f64), None),
+            (icons::CPU, tr("Depth frames"), format::integer(st.depth_frames as f64), None),
         ];
         let mw = (main.width() - 36.0) / 4.0;
         for (i, (glyph, label, value, sub)) in minis.iter().enumerate() {
@@ -1083,7 +1102,7 @@ fn detail(ctx: &egui::Context, cx: &mut Cx, state: &mut State, page: Rect) {
                         points: &points,
                         heading: None,
                         live: false,
-                        empty_text: if d.trail.running() { "Reading the camera path…" } else { "No camera path in this session" },
+                        empty_text: if d.trail.running() { tr("Reading the camera path…") } else { tr("No camera path in this session") },
                     },
                 );
             }
@@ -1092,7 +1111,7 @@ fn detail(ctx: &egui::Context, cx: &mut Cx, state: &mut State, page: Rect) {
                 splats_view(&cu, map, tex.as_ref(), session.reconstruction.as_ref(), job, pause_why(cx.snap));
                 if session.reconstruction.is_some() && job.is_none() && cx.gpu.is_some() {
                     let r = Rect::from_min_size(pos2(map.left() + 10.0, map.top() + 12.0), vec2(124.0, 36.0));
-                    if Button::new("View in 3D")
+                    if Button::new(tr("View in 3D"))
                         .icon(icons::CUBE_FOCUS)
                         .variant(Variant::Glass)
                         .size(widgets::Size::Sm)
@@ -1108,17 +1127,24 @@ fn detail(ctx: &egui::Context, cx: &mut Cx, state: &mut State, page: Rect) {
         if splats {
             let bar = Rect::from_min_max(pos2(map.left() + 10.0, map.top() + 10.0), pos2(map.right() - 10.0, map.top() + 50.0));
             let mut bu = cu.new_child(UiBuilder::new().max_rect(bar).layout(egui::Layout::right_to_left(egui::Align::Min)).id_salt("view-switch"));
-            widgets::segmented(&mut bu, "view", &mut d.view, &[SegOption::new(View::Path, "Path"), SegOption::new(View::Splats, "Splats")], true);
+            widgets::segmented(&mut bu, "view", &mut d.view, &[SegOption::new(View::Path, tr("Path")), SegOption::new(View::Splats, tr("Splats"))], true);
         }
 
         let c = &session.manifest.capture;
         let rows = [
-            ("Captured", super::local_time(&session.manifest.created_utc)),
-            ("Source", if c.source_name.is_empty() { c.source.clone() } else { c.source_name.clone() }),
-            ("Resolution", if c.width > 0 { format!("{}×{}", c.width, c.height) } else { "–".into() }),
-            ("Quality", format!("{:?}", c.quality).to_lowercase()),
-            ("Size", format::bytes(session.size_bytes as f64)),
-            ("Format", format!("session v{} · contracts {}", session.manifest.version, session.manifest.contracts_version)),
+            (tr("Captured"), super::local_time(&session.manifest.created_utc)),
+            (tr("Source"), if c.source_name.is_empty() { c.source.clone() } else { c.source_name.clone() }),
+            (tr("Resolution"), if c.width > 0 { format!("{}×{}", c.width, c.height) } else { "–".into() }),
+            (
+                tr("Quality"),
+                match c.quality {
+                    StorageQuality::Lossless => tr("lossless").to_string(),
+                    StorageQuality::High => tr("high").to_string(),
+                    StorageQuality::Compact => tr("compact").to_string(),
+                },
+            ),
+            (tr("Size"), format::bytes(session.size_bytes as f64)),
+            (tr("Format"), tr!("session v{version} · contracts {contracts}", version = session.manifest.version, contracts = session.manifest.contracts_version)),
         ];
         let info = Rect::from_min_size(side.min, vec2(side.width(), 16.0 * 2.0 + rows.len() as f32 * 22.0));
         widgets::card(&cp, info, 16.0);
@@ -1182,9 +1208,9 @@ fn detail(ctx: &egui::Context, cx: &mut Cx, state: &mut State, page: Rect) {
             let dir = &session.dir;
             if let Some(row) = *d.wearer_row.get_or_insert_with(|| orbiters_core::picture::wearer_row(dir)) {
                 let b = Button::new(row.label()).icon(if row.takes_out() { icons::USER_MINUS } else { icons::USER_PLUS }).variant(Variant::Ghost).width(side.width()).id_salt("wearer-row").hint(if row.takes_out() {
-                    "A new 3D view with the avatar you wore taken out: what stood behind it comes from other frames, where they saw it. Anyone touching your avatar comes out with it"
+                    tr("A new 3D view with the avatar you wore taken out: what stood behind it comes from other frames, where they saw it. Anyone touching your avatar comes out with it")
                 } else {
-                    "A new 3D view with the avatar you wore left in it"
+                    tr("A new 3D view with the avatar you wore left in it")
                 });
                 if b.show_at(&mut cu, full(y)).clicked() {
                     match (orbiters_core::picture::WearerChoice { take_out: row.takes_out() }).save(&session.dir) {
@@ -1210,18 +1236,18 @@ fn detail(ctx: &egui::Context, cx: &mut Cx, state: &mut State, page: Rect) {
         }
         // Send to Mixer, and beside it Export… (what its 3D view shows, as a file for other tools).
         let ready = session.reconstruction.is_some() && job.is_none();
-        let mut export = Button::new("Export…").icon(icons::UPLOAD_SIMPLE).enabled(ready).id_salt("detail-export");
+        let mut export = Button::new(tr("Export…")).icon(icons::UPLOAD_SIMPLE).enabled(ready).id_salt("detail-export");
         export = export.hint(if session.reconstruction.is_none() {
-            "Reconstruct first: the file holds its splats"
+            tr("Reconstruct first: the file holds its splats")
         } else {
-            "Saves what its 3D view shows as an SPZ, GLB or PLY file, for a VRChat splat world, Unity, SuperSplat, Cesium or Blender"
+            tr("Saves what its 3D view shows as an SPZ, GLB or PLY file, for a VRChat splat world, Unity, SuperSplat, Cesium or Blender")
         });
         let export_w = export.desired_width(&cu);
         let send_r = Rect::from_min_size(pos2(side.left(), y), vec2(side.width() - 8.0 - export_w, 40.0));
         let export_r = Rect::from_min_max(pos2(send_r.right() + 8.0, y), pos2(side.right(), y + 40.0));
-        let mut send = Button::new("Send to Mixer").icon(icons::SPARKLE).enabled(ready).width(send_r.width());
+        let mut send = Button::new(tr("Send to Mixer")).icon(icons::SPARKLE).enabled(ready).width(send_r.width());
         if session.reconstruction.is_none() {
-            send = send.hint("Reconstruct first: Mixer gets the splats");
+            send = send.hint(tr("Reconstruct first: Mixer gets the splats"));
         }
         if send.show_at(&mut cu, send_r).clicked() {
             cx.ctl.send_to_mixer(session.dir.clone(), title(&session));
@@ -1240,10 +1266,10 @@ fn detail(ctx: &egui::Context, cx: &mut Cx, state: &mut State, page: Rect) {
             let mut bu = cu.new_child(UiBuilder::new().max_rect(side).id_salt("confirm"));
             bu.multiply_opacity(((k - 0.9) * 10.0).clamp(0.0, 1.0));
             let cancel = Rect::from_min_size(pos2(side.left(), y), vec2(side.width() - w - 8.0, 40.0));
-            if Button::new("Cancel").variant(Variant::Ghost).width(cancel.width()).id_salt("trash-cancel").show_at(&mut bu, cancel).clicked() {
+            if Button::new(tr("Cancel")).variant(Variant::Ghost).width(cancel.width()).id_salt("trash-cancel").show_at(&mut bu, cancel).clicked() {
                 d.confirm_trash = false;
             }
-            if Button::new("Confirm")
+            if Button::new(tr("Confirm"))
                 .icon(icons::TRASH)
                 .variant(Variant::Danger)
                 .width(w)
@@ -1255,22 +1281,22 @@ fn detail(ctx: &egui::Context, cx: &mut Cx, state: &mut State, page: Rect) {
         } else {
             if can_trim {
                 let keep = Rect::from_min_size(pos2(side.left(), y), vec2(side.width() - 96.0, 40.0));
-                let hint = format!("Deletes its capture files ({}) for good; the splats stay", format::bytes(session.capture_bytes as f64));
-                if Button::new("Keep only the 3D view").icon(icons::BROOM).width(keep.width()).hint(&hint).show_at(&mut cu, keep).clicked() {
+                let hint = tr!("Deletes its capture files ({size}) for good; the splats stay", size = format::bytes(session.capture_bytes as f64));
+                if Button::new(tr("Keep only the 3D view")).icon(icons::BROOM).width(keep.width()).hint(&hint).show_at(&mut cu, keep).clicked() {
                     d.trim = Some(TrimDialog::new(ctx, session.dir.clone(), serial));
                     asked = true;
                 }
                 let folder = Rect::from_min_size(pos2(bin.left() - 48.0, y), vec2(40.0, 40.0));
-                if IconButton::new(icons::FOLDER_OPEN, "Open folder").size(40.0, 17.0).show_at(&mut cu, folder).clicked() {
+                if IconButton::new(icons::FOLDER_OPEN, tr("Open folder")).size(40.0, 17.0).show_at(&mut cu, folder).clicked() {
                     open_folder = true;
                 }
             } else {
                 let open_r = Rect::from_min_size(pos2(side.left(), y), vec2(side.width() - 48.0, 40.0));
-                if Button::new("Open folder").icon(icons::FOLDER_OPEN).width(open_r.width()).show_at(&mut cu, open_r).clicked() {
+                if Button::new(tr("Open folder")).icon(icons::FOLDER_OPEN).width(open_r.width()).show_at(&mut cu, open_r).clicked() {
                     open_folder = true;
                 }
             }
-            if IconButton::new(icons::TRASH, "Move to the recycle bin").size(40.0, 17.0).danger().show_at(&mut cu, bin).clicked() {
+            if IconButton::new(icons::TRASH, tr("Move to the recycle bin")).size(40.0, 17.0).danger().show_at(&mut cu, bin).clicked() {
                 d.confirm_trash = true;
             }
         }

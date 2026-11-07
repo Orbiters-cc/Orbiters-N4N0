@@ -1,0 +1,10 @@
+# The files this area covers: every text in them is wrapped and translated (tests/coverage.rs).
+crates/orbiters-desktop/src/pages/capture.rs
+crates/orbiters-desktop/src/pages/home.rs
+crates/orbiters-desktop/src/pages/splats/select.rs
+crates/orbiters-desktop/src/pages/sessions.rs
+crates/orbiters-desktop/src/pages/splats.rs
+crates/orbiters-desktop/src/pages/splat_export.rs
+crates/orbiters-desktop/src/pages/reconstruct_again.rs
+crates/orbiters-desktop/src/pages/splats/edit3d.rs
+crates/orbiters-desktop/src/pages/splat_worker.rs

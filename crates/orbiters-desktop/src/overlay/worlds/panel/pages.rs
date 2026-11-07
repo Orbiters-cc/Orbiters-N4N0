@@ -3,6 +3,7 @@
 
 use super::super::super::orbit::panels::look as orbit_look;
 use super::*;
+use orbiters_i18n::{tr, tr_n};
 
 /// A label of the list on the labels page (three across).
 fn label_rect(i: usize) -> Rect {
@@ -127,40 +128,39 @@ impl Panel {
         let name = entry.map(|e| e.name.as_str());
         match self.page {
             Page::Filter => {
-                self.title(p, "Filter", None, 730.0, shown);
+                self.title(p, tr("Filter"), None, 730.0, shown);
                 for (t, rect) in targets {
                     let (h, pr) = state(*t);
                     match *t {
-                        Target::ClearFilters => pill_button(p, *rect, None, "Clear", RAISED, theme::FG, h, pr, shown),
-                        Target::Done => pill_button(p, *rect, None, "Done", theme::ACCENT, theme::ON_ACCENT, h, pr, shown),
+                        Target::ClearFilters => pill_button(p, *rect, None, tr("Clear"), RAISED, theme::FG, h, pr, shown),
+                        Target::Done => pill_button(p, *rect, None, tr("Done"), theme::ACCENT, theme::ON_ACCENT, h, pr, shown),
                         Target::FilterOfficial => {
                             let n = d.entries.iter().filter(|e| e.official).count() as u32;
-                            label_chip(p, *rect, "Shared by its author", Some(n), self.official, h, pr, shown);
+                            label_chip(p, *rect, tr("Shared by its author"), Some(n), self.official, h, pr, shown);
                         }
                         Target::Has3d => {
                             let n = d.entries.iter().filter(|e| e.capture).count() as u32;
-                            label_chip(p, *rect, "Has a 3D capture", Some(n), self.has_3d, h, pr, shown);
+                            label_chip(p, *rect, tr("Has a 3D capture"), Some(n), self.has_3d, h, pr, shown);
                         }
                         Target::FilterLabel(i) => {
                             let Some(l) = contract::labels().get(i as usize) else { continue };
                             // How many listed worlds have it.
                             let n = d.entries.iter().filter(|e| d.label_count(e, &l.id) > 0).count() as u32;
-                            label_chip(p, *rect, l.name("en"), Some(n), self.labels.contains(&l.id), h, pr, shown);
+                            label_chip(p, *rect, l.name(language_tag()), Some(n), self.labels.contains(&l.id), h, pr, shown);
                         }
                         _ => {}
                     }
                 }
-                text(p, pos2(32.0, 538.0), Align2::LEFT_CENTER, orbit_look::txt("Every label picked: worlds members gave them all", 15.0).color(fade(theme::FG_3, shown)));
+                text(p, pos2(32.0, 538.0), Align2::LEFT_CENTER, orbit_look::txt(tr("Every label picked: worlds members gave them all"), 15.0).color(fade(theme::FG_3, shown)));
                 let n = self.results(d).len();
                 let line = match n {
-                    0 => "No world matches".to_string(),
-                    1 => "1 world matches".to_string(),
-                    n => format!("{n} worlds match"),
+                    0 => tr("No world matches").to_string(),
+                    n => tr_n("{count} world matches", "{count} worlds match", n as u64),
                 };
                 text(p, pos2(992.0, 538.0), Align2::RIGHT_CENTER, orbit_look::txt(line, 16.0).color(fade(theme::FG_3, shown)));
             }
             Page::Labels => {
-                self.title(p, "Labels", name, 990.0, shown);
+                self.title(p, tr("Labels"), name, 990.0, shown);
                 let Some(e) = entry else { return };
                 let wf = d.world_feedback(e);
                 for (t, rect) in targets {
@@ -168,15 +168,15 @@ impl Panel {
                         let Some(l) = contract::labels().get(i as usize) else { continue };
                         let (h, pr) = state(*t);
                         let count = wf.label(&l.id).map_or(0, |c| c.count);
-                        label_chip(p, *rect, l.name("en"), Some(count), wf.has(&l.id), h, pr, shown);
+                        label_chip(p, *rect, l.name(language_tag()), Some(count), wf.has(&l.id), h, pr, shown);
                     }
                 }
                 let hint = if !d.feedback.signed_in {
-                    contract::Refusal::SignIn.text().to_string()
+                    tr("Sign in to Orbiters - N4N0 to give feedback.").to_string() // the contract's Refusal::SignIn.text(), which a test below keeps equal
                 } else if wf.loading {
-                    "Reading this world's feedback from Orbiters…".to_string()
+                    tr("Reading this world's feedback from Orbiters…").to_string()
                 } else {
-                    "Press a label to give it, again to take it back. AI world asks why.".to_string()
+                    tr("Press a label to give it, again to take it back. AI world asks why.").to_string()
                 };
                 let (line, tint) = match self.note(time).map(str::to_string).or_else(|| wf.error.clone()) {
                     Some(n) => (n, theme::WARN),
@@ -185,18 +185,18 @@ impl Panel {
                 text_cut(p, pos2(32.0, 492.0), 960.0, orbit_look::txt(line, 16.0).color(fade(tint, shown)));
                 if let Some(reason) = wf.justification.as_ref().filter(|_| wf.has("ai-world")) {
                     let reason = reason.split_whitespace().collect::<Vec<_>>().join(" ");
-                    text_cut(p, pos2(32.0, 524.0), 960.0, orbit_look::txt(format!("Your reason: {reason}"), 15.0).color(fade(theme::FG_4, shown)));
+                    text_cut(p, pos2(32.0, 524.0), 960.0, orbit_look::txt(tr!("Your reason: {reason}", reason = reason), 15.0).color(fade(theme::FG_4, shown)));
                 }
             }
             Page::Comments => {
                 let Some(e) = entry else { return };
                 let wf = d.world_feedback(e);
-                self.title(p, &format!("Comments · {}", wf.comment_count), Some(&e.name), 730.0, shown);
+                self.title(p, &tr!("Comments · {count}", count = wf.comment_count), Some(&e.name), 730.0, shown);
                 let (page, pages) = self.comment_rows(&wf);
                 for (t, rect) in targets {
                     let (h, pr) = state(*t);
                     match *t {
-                        Target::WriteComment => pill_button(p, *rect, Some(icons::PENCIL_SIMPLE), "Write a comment", theme::ACCENT, theme::ON_ACCENT, h, pr, shown),
+                        Target::WriteComment => pill_button(p, *rect, Some(icons::PENCIL_SIMPLE), tr("Write a comment"), theme::ACCENT, theme::ON_ACCENT, h, pr, shown),
                         Target::Previous => round_button(p, rect.center(), icons::CARET_LEFT, h, pr, shown),
                         Target::Next => round_button(p, rect.center(), icons::CARET_RIGHT, h, pr, shown),
                         _ => {}
@@ -210,12 +210,12 @@ impl Panel {
                     let appear = ease_out((time - self.page_at - i as f64 * CARD_STAGGER) / PAGE_FADE);
                     let row = row.translate(vec2(0.0, (1.0 - appear) * 12.0));
                     p.rect_filled(row, CornerRadius::same(20), fade(SURFACE, appear));
-                    let by = if c.by.is_empty() { "Someone" } else { c.by.as_str() };
+                    let by = if c.mine { tr("You") } else if c.by.is_empty() { tr("Someone") } else { c.by.as_str() };
                     let face = pos2(row.min.x + 38.0, row.min.y + 34.0);
                     p.circle_filled(face, 20.0, fade(theme::alpha(widgets::name_color(by), 0.3), appear));
                     let initial: String = by.chars().next().map(|c| c.to_uppercase().collect()).unwrap_or_default();
                     text(p, face, Align2::CENTER_CENTER, orbit_look::txt(initial, 18.0).weight(weight::SEMIBOLD).color(fade(theme::FG, appear)));
-                    let when = if c.id == 0 && c.mine { "sending…".to_string() } else { orbiters_n4n0_core::feedback::ago(d.now.saturating_sub(c.at)) };
+                    let when = if c.id == 0 && c.mine { tr("sending…").to_string() } else { orbiters_n4n0_core::feedback::ago(d.now.saturating_sub(c.at)) };
                     let width = if c.mine { 740.0 } else { 860.0 };
                     text_cut(p, pos2(row.min.x + 72.0, row.min.y + 12.0), width, orbit_look::txt(format!("{by} · {when}"), 15.0).weight(weight::MEDIUM).color(fade(theme::FG_3, appear)));
                     let mut job = orbit_look::txt(c.text.split_whitespace().collect::<Vec<_>>().join(" "), 17.0).color(fade(theme::FG, appear)).line_height(23.0).job(width);
@@ -225,15 +225,15 @@ impl Panel {
                         let target = Target::DeleteComment(c.id);
                         let (h, pr) = state(target);
                         let asking = self.confirm.is_some_and(|(id, at)| id == c.id && time - at < CONFIRM_FOR);
-                        let (bg, fg, label) = if asking { (theme::DANGER, theme::ON_ACCENT, "Delete?") } else { (RAISED, theme::FG_2, "Delete") };
+                        let (bg, fg, label) = if asking { (theme::DANGER, theme::ON_ACCENT, tr("Delete?")) } else { (RAISED, theme::FG_2, tr("Delete")) };
                         icon_button(p, delete_rect(row), icons::TRASH, false, label, bg, fg, h, pr, appear);
                     }
                 }
                 if wf.comments.is_empty() {
                     let (title, line) = if wf.loading && wf.comment_count > 0 {
-                        ("Reading the comments…", "From Orbiters")
+                        (tr("Reading the comments…"), tr("From Orbiters"))
                     } else {
-                        ("No comment yet", "Write the first one: what is there to do, who it is for")
+                        (tr("No comment yet"), tr("Write the first one: what is there to do, who it is for"))
                     };
                     widgets::icon(p, pos2(512.0, 230.0), icons::CHAT_CIRCLE_TEXT, 44.0, fade(theme::FG_4, shown));
                     text(p, pos2(512.0, 286.0), Align2::CENTER_CENTER, orbit_look::txt(title, 24.0).weight(weight::SEMIBOLD).color(fade(theme::FG, shown)));
@@ -243,28 +243,31 @@ impl Panel {
                 if let Some(note) = note {
                     text_cut(p, pos2(32.0, 530.0), 380.0, orbit_look::txt(note, 15.0).color(fade(theme::WARN, shown)));
                 } else if wf.comment_count as usize > wf.comments.len() && !wf.comments.is_empty() {
-                    let line = format!("The newest {} of {}", wf.comments.len(), wf.comment_count);
+                    let line = tr!("The newest {shown} of {total}", shown = wf.comments.len(), total = wf.comment_count);
                     text(p, pos2(32.0, 540.0), Align2::LEFT_CENTER, orbit_look::txt(line, 15.0).color(fade(theme::FG_4, shown)));
                 }
             }
             Page::Compose(compose) => {
-                let hint = if compose == Compose::Comment { "Write a comment" } else { "Say why" };
-                field(p, field_rect(), &self.draft, hint, true, state(Target::Field), time, 1.0);
+                let hint = if compose == Compose::Comment { tr("Write a comment") } else { tr("Say why") };
+                field(p, field_rect(), &self.draft, hint, icons::PENCIL_SIMPLE, true, state(Target::Field), time, 1.0);
                 let (valid, prompt, count) = match compose {
                     Compose::Comment => {
                         let n = self.draft.trim().chars().count();
-                        let prompt = format!("Your comment on {}", name.unwrap_or("this world"));
-                        (n > 0, prompt, format!("{n} of {} characters", contract::max_comment()))
+                        let prompt = match name {
+                            Some(world) => tr!("Your comment on {world}", world = world),
+                            None => tr("Your comment on this world").to_string(),
+                        };
+                        (n > 0, prompt, tr!("{count} of {max} characters", count = n, max = contract::max_comment()))
                     }
                     Compose::Reason => {
                         let (have, need) = words(&self.draft);
                         let label = contract::labels().iter().find(|l| l.justify.is_some());
-                        let prompt = label.and_then(|l| l.question("en")).unwrap_or("Why do you think so?").to_string();
-                        (have >= need, prompt, format!("{have} of {need} words · public, beside the label"))
+                        let prompt = label.and_then(|l| l.question(language_tag())).unwrap_or_else(|| tr("Why do you think so?")).to_string();
+                        (have >= need, prompt, tr!("{have} of {need} words · public, beside the label", have = have, need = need))
                     }
                 };
                 let (h, pr) = state(Target::Done);
-                let label = if compose == Compose::Comment { "Send" } else { "Done" };
+                let label = if compose == Compose::Comment { tr("Send") } else { tr("Done") };
                 let (bg, fg) = if valid { (theme::ACCENT, theme::ON_ACCENT) } else { (RAISED, theme::FG_3) };
                 pill_button(p, SEND, Some(icons::PAPER_PLANE_TILT), label, bg, fg, h, pr, 1.0);
                 text_cut(p, pos2(36.0, 96.0), 952.0, orbit_look::txt(prompt, 19.0).weight(weight::SEMIBOLD).color(fade(theme::FG, shown)));
@@ -283,15 +286,15 @@ impl Panel {
                 let Some(e) = entry else { return };
                 let facts = d.facts_of(e);
                 let count = facts.map_or(e.pictures as usize, |f| f.picture_count.max(e.pictures as usize));
-                self.title(p, &format!("Pictures · {count}"), Some(&e.name), 840.0, shown);
+                self.title(p, &tr!("Pictures · {count}", count = count), Some(&e.name), 840.0, shown);
                 let Some(f) = facts else {
-                    text(p, pos2(512.0, 300.0), Align2::CENTER_CENTER, orbit_look::txt("Loading the pictures…", 19.0).color(fade(theme::FG_3, shown)));
+                    text(p, pos2(512.0, 300.0), Align2::CENTER_CENTER, orbit_look::txt(tr("Loading the pictures…"), 19.0).color(fade(theme::FG_3, shown)));
                     return;
                 };
                 if f.pictures.is_empty() {
                     widgets::icon(p, pos2(512.0, 250.0), icons::IMAGES, 44.0, fade(theme::FG_4, shown));
-                    text(p, pos2(512.0, 306.0), Align2::CENTER_CENTER, orbit_look::txt("No picture of this world yet", 24.0).weight(weight::SEMIBOLD).color(fade(theme::FG, shown)));
-                    text(p, pos2(512.0, 340.0), Align2::CENTER_CENTER, orbit_look::txt("Members share theirs from Orbiters - N4N0's Worlds page", 17.0).color(fade(theme::FG_3, shown)));
+                    text(p, pos2(512.0, 306.0), Align2::CENTER_CENTER, orbit_look::txt(tr("No picture of this world yet"), 24.0).weight(weight::SEMIBOLD).color(fade(theme::FG, shown)));
+                    text(p, pos2(512.0, 340.0), Align2::CENTER_CENTER, orbit_look::txt(tr("Members share theirs from Orbiters - N4N0's Worlds page"), 17.0).color(fade(theme::FG_3, shown)));
                     return;
                 }
                 let caption = |w: &WorldPicture| {
@@ -317,11 +320,15 @@ impl Panel {
                         Some(id) => cover(p, rect, id, aspect, CornerRadius::same(16), shown),
                         None => {
                             p.rect_filled(rect, CornerRadius::same(16), fade(SURFACE, shown));
-                            text(p, rect.center(), Align2::CENTER_CENTER, orbit_look::txt("Loading…", 18.0).color(fade(theme::FG_3, shown)));
+                            text(p, rect.center(), Align2::CENTER_CENTER, orbit_look::txt(tr("Loading…"), 18.0).color(fade(theme::FG_3, shown)));
                         }
                     }
-                    let line = format!("{}  ·  {} of {}", caption(w), i + 1, f.pictures.len());
-                    text(p, pos2(512.0, 552.0), Align2::CENTER_CENTER, orbit_look::txt(line.trim_start_matches(" ·").trim().to_string(), 16.0).color(fade(theme::FG_3, shown)));
+                    let place = tr!("{number} of {total}", number = i + 1, total = f.pictures.len());
+                    let line = match caption(w) {
+                        caption if caption.is_empty() => place,
+                        caption => format!("{caption}  ·  {place}"),
+                    };
+                    text(p, pos2(512.0, 552.0), Align2::CENTER_CENTER, orbit_look::txt(line, 16.0).color(fade(theme::FG_3, shown)));
                     return;
                 }
                 let pages = f.pictures.len().div_ceil(PICTURES_PER_PAGE).max(1);
@@ -359,11 +366,22 @@ impl Panel {
                     text(p, pos2(860.0, 52.0), Align2::RIGHT_CENTER, orbit_look::txt(format!("{}/{}", current + 1, pages), 17.0).color(theme::FG_3));
                 }
                 if f.picture_count > f.pictures.len() {
-                    let line = format!("The newest {} of {}: all of them on orbiters.cc", f.pictures.len(), f.picture_count);
+                    let line = tr!("The newest {shown} of {total}: all of them on orbiters.cc", shown = f.pictures.len(), total = f.picture_count);
                     text(p, pos2(512.0, 552.0), Align2::CENTER_CENTER, orbit_look::txt(line, 15.0).color(fade(theme::FG_4, shown)));
                 }
             }
             Page::Browse | Page::Typing | Page::Detail => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The sign-in line is written out here (a text the catalogs can be checked against); the contract's own sentence is the one it must equal.
+    #[test]
+    fn the_sign_in_line_is_the_contracts_refusal() {
+        assert_eq!(tr("Sign in to Orbiters - N4N0 to give feedback."), contract::Refusal::SignIn.text());
     }
 }

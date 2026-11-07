@@ -9,6 +9,7 @@
 
 use super::catalog::{Aggregate, Entry};
 use orbiters_core::maps::{FoundBy, FoundWorld, FoundWorlds, World, WorldList};
+use orbiters_i18n::tr;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -35,12 +36,12 @@ impl Section {
     /// Its name (`vrchat`: signed in to VRChat; Orbiters' featured worlds stand in for VRChat's popular ones otherwise).
     pub fn label(self, vrchat: bool) -> &'static str {
         match self {
-            Section::Captures => "3D captures",
-            Section::Popular if vrchat => "Popular",
-            Section::Popular => "Featured",
-            Section::Active => "Active now",
-            Section::Favorites => "Favorites",
-            Section::Visited => "Visited",
+            Section::Captures => tr("3D captures"),
+            Section::Popular if vrchat => tr("Popular"),
+            Section::Popular => tr("Featured"),
+            Section::Active => tr("Active now"),
+            Section::Favorites => tr("Favorites"),
+            Section::Visited => tr("Visited"),
         }
     }
 
@@ -299,7 +300,7 @@ fn visited_worlds(history: &orbiters_core::visited::History) -> Vec<VisitedWorld
         .iter()
         .filter(|(id, _)| orbiters_core::vrchat_log::is_world_id(id))
         .map(|(id, v)| {
-            (id.clone(), v.name.clone().filter(|n| !n.trim().is_empty()).unwrap_or_else(|| "Unnamed world".into()), v.last().unwrap_or(0), v.visits.len())
+            (id.clone(), v.name.clone().filter(|n| !n.trim().is_empty()).unwrap_or_else(|| tr("Unnamed world").into()), v.last().unwrap_or(0), v.visits.len())
         })
         .collect();
     worlds.sort_by(|a, b| b.2.cmp(&a.2).then_with(|| a.1.cmp(&b.1)));

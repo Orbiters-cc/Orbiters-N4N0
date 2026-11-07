@@ -5,6 +5,7 @@
 
 use super::*;
 use crate::overlay::Canvas;
+use orbiters_i18n::{tr};
 use orbiters_n4n0_core::feedback::FeedbackView;
 
 /// Stand-in captures: names, authors, splats, a sky, likes and labels for everyone.
@@ -107,7 +108,7 @@ fn stand_in_facts(entries: &[Entry]) -> HashMap<String, Facts> {
 /// The member's own feedback on VRChat Home (liked, two labels, a comment of theirs), read from Orbiters.
 fn stand_in_feedback(signed_in: bool) -> FeedbackView {
     let comments = vec![
-        CommentRow { id: 381, by: "You".into(), text: "Came here for the mirror, stayed for the music.".into(), at: 1_793_300_000, mine: true },
+        CommentRow { id: 381, by: "You".into(), text: "Came here for the mirror, stayed for the music.".into(), at: 1_793_300_000, mine: true }, // i18n: not shown (data: the page writes a mine comment's author with tr)
         CommentRow { id: 377, by: "Kana".into(), text: "The mirror room is perfect for photos, and the lights at night are lovely.".into(), at: 1_793_250_000, mine: false },
         CommentRow { id: 370, by: "Mei".into(), text: "Quiet in the morning, busy after 9 pm. Great to meet new people.".into(), at: 1_792_900_000, mine: false },
         CommentRow { id: 352, by: "Roofy.".into(), text: "Pens by the stage.".into(), at: 1_792_500_000, mine: false },
@@ -224,15 +225,18 @@ pub fn shots(out: &std::path::Path) -> anyhow::Result<()> {
     let none = Panel { page: Page::Typing, query: "zzz".into(), ..base.clone() };
     paint("typing-none", &entries, &none, &idle, &feedback, 5.2)?;
     let detail = Panel { page: Page::Detail, selected: Some(10), ..base.clone() };
-    let downloading = Status { current: Some(10), download: Some(0.42), stage: Some("Downloading 13.8 of 32.9 MB".into()), ..Default::default() };
+    // What the real download writes: megabytes read and in all, with a decimal.
+    let megabytes = ("13.8", "32.9");
+    let downloading = Status { current: Some(10), download: Some(0.42), stage: Some(tr!("Downloading {read} of {total} MB", read = megabytes.0, total = megabytes.1)), ..Default::default() };
     paint("loading", &entries, &detail, &downloading, &feedback, 5.0)?;
-    let shown = Status { current: Some(10), shown: true, stats: Some("786k splats · 6.4 ms a batch · 1024 px".into()), ..Default::default() };
+    let batch = ("786k", "6.4");
+    let shown = Status { current: Some(10), shown: true, stats: Some(tr!("{count} splats · {ms} ms a batch · {pixels} px", count = batch.0, ms = batch.1, pixels = 1024)), ..Default::default() };
     let detail_shown = paint("shown", &entries, &detail, &shown, &feedback, 5.0)?;
     let liking = Panel { hover: Some(Target::Like), ..detail.clone() };
     paint("shown-like-hover", &entries, &liking, &shown, &feedback, 5.0)?;
     // Not read yet: the listing's numbers, what the member gave unknown.
     paint("shown-reading", &entries, &detail, &shown, &FeedbackView { signed_in: true, ..Default::default() }, 5.0)?;
-    let signed_out = Panel { note: Some((contract::Refusal::SignIn.text().into(), 4.0)), ..detail.clone() };
+    let signed_out = Panel { note: Some((tr("Sign in to Orbiters - N4N0 to give feedback.").into(), 4.0)), ..detail.clone() };
     paint("shown-signed-out", &entries, &signed_out, &shown, &stand_in_feedback(false), 5.0)?;
     // The card growing into the page, a third of the way and nearly there.
     let mut morph = Panel { page: Page::Browse, ..base.clone() };
@@ -241,7 +245,8 @@ pub fn shots(out: &std::path::Path) -> anyhow::Result<()> {
         morph.press(Target::Card(1), &d, 10.0);
     }
     paint("morph-1", &entries, &morph, &downloading, &feedback, 10.0 + 0.07)?;
-    paint("morph-2", &entries, &morph, &Status { current: Some(11), download: Some(0.1), stage: Some("Downloading 3.3 of 33.1 MB".into()), ..Default::default() }, &feedback, 10.0 + 0.2)?;
+    let early = ("3.3", "33.1");
+    paint("morph-2", &entries, &morph, &Status { current: Some(11), download: Some(0.1), stage: Some(tr!("Downloading {read} of {total} MB", read = early.0, total = early.1)), ..Default::default() }, &feedback, 10.0 + 0.2)?;
     // A capture standing small, seen through the side panel's hole; a hand near it; taken; a world's panel in a headset.
     let mut docked = Status { current: Some(10), shown: true, small: true, small_docked: true, headset: true, ..Default::default() };
     docked.list.vrchat = true;
@@ -249,17 +254,17 @@ pub fn shots(out: &std::path::Path) -> anyhow::Result<()> {
     paint("small-near", &entries, &detail, &Status { small_near: true, ..docked.clone() }, &feedback, 5.0)?;
     paint("small-taken", &entries, &detail, &Status { small_docked: false, small_taken: true, ..docked.clone() }, &feedback, 5.0)?;
     paint("side-headset", &entries, &detail, &Status { headset: true, ..Default::default() }, &feedback, 5.0)?;
-    let failed = Status { listing_error: Some("Orbiters could not be reached (timed out)".into()), ..Default::default() };
+    let failed = Status { listing_error: Some("Orbiters could not be reached (timed out)".into()), ..Default::default() }; // i18n: not shown (a stand-in server error, English like the real ones)
     paint("offline", &[], &base, &failed, &FeedbackView::default(), 5.0)?;
     let not_current = Panel { page: Page::Detail, selected: Some(12), ..base.clone() };
     paint("detail", &entries, &not_current, &shown, &feedback, 5.0)?;
     let labels = Panel { page: Page::Labels, selected: Some(10), hover: Some(Target::Label(2)), ..base.clone() };
     paint("labels", &entries, &labels, &shown, &feedback, 5.0)?;
-    let reason = Panel { page: Page::Compose(Compose::Reason), selected: Some(10), draft: "The thumbnail and the textures look generated".into(), ..base.clone() };
+    let reason = Panel { page: Page::Compose(Compose::Reason), selected: Some(10), draft: "The thumbnail and the textures look generated".into(), ..base.clone() }; // i18n: not shown (a typed draft)
     paint("reason", &entries, &reason, &shown, &feedback, 5.2)?;
     let comments = Panel { page: Page::Comments, selected: Some(10), confirm: Some((381, 4.0)), ..base.clone() };
     paint("comments", &entries, &comments, &shown, &feedback, 5.0)?;
-    let comment = Panel { page: Page::Compose(Compose::Comment), selected: Some(10), draft: "Lovely at sunset, ".into(), ..base.clone() };
+    let comment = Panel { page: Page::Compose(Compose::Comment), selected: Some(10), draft: "Lovely at sunset, ".into(), ..base.clone() }; // i18n: not shown (a typed draft)
     paint("comment", &entries, &comment, &shown, &feedback, 5.2)?;
     let pictures_page = Panel { page: Page::Pictures, selected: Some(10), hover: Some(Target::Picture(1)), ..base.clone() };
     paint("pictures", &entries, &pictures_page, &shown, &feedback, 5.0)?;
@@ -310,7 +315,7 @@ pub fn shots(out: &std::path::Path) -> anyhow::Result<()> {
         e.visited = Some((now - 3_600 * (i as u64 * 7 + 2), 1 + i * 3));
     }
     paint("browse-visited", &visited, &Panel { section: Section::Visited, ..Default::default() }, &listed, &feedback, 5.0)?;
-    let failed_list = Status { list: ListStatus { vrchat: true, error: Some("VRChat asks to wait 20 s before searching again".into()), ..vrchat(FoundBy::Vrchat) }, ..Default::default() };
+    let failed_list = Status { list: ListStatus { vrchat: true, error: Some("VRChat asks to wait 20 s before searching again".into()), ..vrchat(FoundBy::Vrchat) }, ..Default::default() }; // i18n: not shown (VRChat's own English answer)
     paint("search-failed", &[], &search, &failed_list, &feedback, 5.0)?;
     // A world without a capture: its page, with Launch VRChat (signed out of VRChat) or Invite me.
     let rooftop = popular.iter().find(|e| e.name == "Midnight Rooftop").cloned().expect("stand-in");
@@ -320,7 +325,7 @@ pub fn shots(out: &std::path::Path) -> anyhow::Result<()> {
     let rooftop_list = [rooftop.clone()];
     let page = Panel { page: Page::Detail, selected: Some(rooftop.id), ..Default::default() };
     paint("world", &rooftop_list, &page, &signed_out, &stand_in_feedback(true), 5.0)?;
-    let invited = Panel { note: Some(("Invite sent: accept it in VRChat's notifications".into(), 4.5)), hover: Some(Target::Join), ..page.clone() };
+    let invited = Panel { note: Some((tr("Invite sent: accept it in VRChat's notifications").into(), 4.5)), hover: Some(Target::Join), ..page.clone() };
     paint("world-invite", &rooftop_list, &invited, &listed, &stand_in_feedback(true), 5.0)?;
     // The chip under N4N0's menu (no capture).
     let mut chip_canvas = Canvas::new(CHIP_PX[0], CHIP_PX[1]);
@@ -331,7 +336,8 @@ pub fn shots(out: &std::path::Path) -> anyhow::Result<()> {
     // The bar, whatever the panel shows: loading, shown, See VRChat on with Sharp hovered, an error.
     let mut bar_canvas = Canvas::new(BAR_PX[0], BAR_PX[1]);
     let see = Status { see_through: true, quality: Quality::High, ..shown.clone() };
-    let broken = Status { current: Some(10), error: Some("Could not download it: Orbiters answered 503".into()), ..Default::default() };
+    let answer = "Orbiters answered 503"; // i18n: not shown (a stand-in server answer, English like the real one)
+    let broken = Status { current: Some(10), error: Some(tr!("Could not download it: {text}", text = answer)), ..Default::default() };
     let mut bars = HashMap::new();
     for (name, status, hover) in [
         ("loading", &downloading, None),

@@ -25,6 +25,11 @@ impl Client {
 }
 
 impl ChaperoneSetup<'_> {
+    /// The client it came from: its poses are read for the play space everyone sees.
+    pub fn client(&self) -> &Client {
+        self._client
+    }
+
     /// Drops the working copy's changes: it is the saved (live) setup again.
     pub fn revert_working_copy(&self) {
         type F = unsafe extern "system" fn();

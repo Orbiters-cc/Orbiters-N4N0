@@ -17,11 +17,27 @@
 //! play space also goes back when VRChat loads another world (the avatar respawns anyway), when VRChat closes and when
 //! the overlay ends, however it ends; a process killed outside leaves nothing behind either, as SteamVR goes back to
 //! the saved chaperone once the process previewing one is gone.
+//!
+//! SteamVR's working copy belongs to each application, and the preview that shows is whichever application showed one
+//! last. OVR Advanced Settings shows its own at every step of its Space Drag and Space Turn: the play space as it knows
+//! it, with none of the boost's carry in it. So its show puts the person back where the walk began, at once, and the
+//! boost's next step showed the old base plus the whole carry, throwing them forward again and undoing what that drag
+//! did (Enzo, 2026-11-07, "random positions resets and it starts to move me all over the place": his Advanced Settings
+//! drags with Y, B and the right thumbrest, and its log has writes right after each of his walks). So the boost reads
+//! the play space everyone sees each frame while it carries ([`PlaySpace::live_standing`]; reading changes nothing). What
+//! it did not show itself is another application's: the carry is over, without touching the play space, and the boost
+//! holds until that application has been quiet a moment ([`OTHER_APP_QUIET`]). A walk always starts from the play space
+//! as it is then. The person is put back once, by that application, and never thrown; nothing here can keep the distance
+//! walked through such a show, as the other application writes a whole play space that lacks it.
+//!
+//! `walk-boost.log` in the logs folder says when a walk starts and stops and why, and what another application did.
 
 use super::actions::Walk;
 use orbiters_core::settings::{Follow, Hand, WalkBoostSettings};
 use orbiters_openvr::chaperone::{ChaperoneSetup, Quad};
+use super::floating::space::{compose, inverse};
 use orbiters_openvr::{self as vr, Matrix34, Pose, Universe, MAX_DEVICES};
+use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
 /// VRChat's running speed (m/s), reached with the stick pushed all the way.
@@ -49,6 +65,30 @@ const SAME_SETUP: f32 = 1e-3;
 /// SteamVR raises play-space events for the previews the boost shows: a seated reset this soon after one may be its
 /// echo (the boost moves the seated zero too), never a reason to end the carry.
 const OWN_EVENTS: Duration = Duration::from_millis(1000);
+/// Two readings of where a universe sits this close (metres, and rotation terms) are the same place. Another
+/// application's show further off than this is a jump a person sees; one closer changes nothing they would notice.
+const SAME_PLACE: f32 = 0.02;
+const SAME_TURN: f32 = 0.01;
+/// What the boost showed may be what every application sees this late.
+const SHOWN_LATE: Duration = Duration::from_secs(1);
+/// After another application moved the play space, the boost waits until it has not for this long: both showing in
+/// turn would be the person flickering between the two places.
+const OTHER_APP_QUIET: Duration = Duration::from_millis(400);
+/// The reading of the play space is trusted once it was seen following the boost's own shows, within this long of
+/// walking. A reading that does not follow them says nothing, and the boost goes without it (see [`Reading`]).
+const READING_TRIAL: Duration = Duration::from_secs(2);
+/// The walk boost's page says for this long that another application moved the play space.
+const TAKEN_SAID_FOR: Duration = Duration::from_secs(30);
+
+/// Whether two matrices place a universe at the same spot, the same way round.
+fn same_place(a: &Matrix34, b: &Matrix34) -> bool {
+    (0..3).all(|r| (a.m[r][3] - b.m[r][3]).abs() <= SAME_PLACE && (0..3).all(|c| (a.m[r][c] - b.m[r][c]).abs() <= SAME_TURN))
+}
+
+/// How far apart two matrices place a universe, in metres.
+fn distance(a: &Matrix34, b: &Matrix34) -> f32 {
+    (0..3).map(|r| (a.m[r][3] - b.m[r][3]).powi(2)).sum::<f32>().sqrt()
+}
 
 /// How far the stick is pushed (0 to 1, the dead zone removed; 0 for a reading that is not a number).
 pub fn push(stick: [f32; 2]) -> f32 {
@@ -94,6 +134,22 @@ pub struct Setup {
 }
 
 impl Setup {
+    /// This setup with its standing universe where it is `live`: the seated universe moves with it, and the walls stay
+    /// where they are in the room. What another application's preview adds (its Space Drag) so stays under the walk.
+    fn at_live(&self, live: &Matrix34) -> Setup {
+        if same_place(&self.standing, live) {
+            return self.clone();
+        }
+        let moved = compose(live, &inverse(&self.standing));
+        let to_new_standing = compose(&inverse(live), &self.standing);
+        let corner = |c: [f32; 3]| [0, 1, 2].map(|r| to_new_standing.m[r][0] * c[0] + to_new_standing.m[r][1] * c[1] + to_new_standing.m[r][2] * c[2] + to_new_standing.m[r][3]);
+        Setup {
+            standing: *live,
+            seated: self.seated.as_ref().map(|s| compose(&moved, s)),
+            bounds: self.bounds.iter().map(|q| Quad { corners: q.corners.map(corner) }).collect(),
+        }
+    }
+
     /// The same play space, to a millimetre (the tests' measure).
     #[cfg(test)]
     pub fn close_to(&self, other: &Setup) -> bool {
@@ -114,6 +170,9 @@ impl Setup {
 pub struct Carried {
     pub base: Setup,
     pub offset: [f32; 3],
+    /// The base is another application's preview, not SteamVR's own setup: putting it back shows it, as hiding would
+    /// take that application's offset away too.
+    pub over_other: bool,
 }
 
 impl Carried {
@@ -153,6 +212,9 @@ pub trait PlaySpace {
     fn show(&mut self);
     /// The preview hidden: the saved setup is the live one again.
     fn hide(&mut self);
+    /// Where the standing universe sits in the raw tracking space for every application right now, whoever's preview
+    /// that is (`None` while the headset is not tracked). It only reads, and leaves the working copy alone.
+    fn live_standing(&mut self) -> Option<Matrix34>;
 }
 
 impl PlaySpace for ChaperoneSetup<'_> {
@@ -181,6 +243,16 @@ impl PlaySpace for ChaperoneSetup<'_> {
 
     fn hide(&mut self) {
         self.hide_working_set_preview();
+    }
+
+    fn live_standing(&mut self) -> Option<Matrix34> {
+        // The headset in both spaces: what separates them is the play space every application is given. Its poses are
+        // the very ones VRChat reads, so a preview that moves it is seen here, whoever showed it.
+        let client = self.client();
+        let (mut standing, mut raw) = ([Pose::default(); MAX_DEVICES], [Pose::default(); MAX_DEVICES]);
+        client.poses(Universe::Standing, &mut standing);
+        client.poses(Universe::Raw, &mut raw);
+        (standing[0].pose_is_valid && raw[0].pose_is_valid).then(|| compose(&raw[0].device_to_absolute, &inverse(&standing[0].device_to_absolute)))
     }
 }
 
@@ -296,6 +368,51 @@ pub struct Moment<'a> {
     pub input_read: bool,
 }
 
+/// Whether [`PlaySpace::live_standing`] follows what the boost shows. It should (it is what applications are given), but
+/// a headset's driver may place its raw space otherwise, and that cannot be checked without one: until seen following,
+/// the boost does not act on the reading, and if it never does, it goes on without it, as it did before there was one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Reading {
+    /// Since when walking far enough to tell, if yet.
+    Unproven(Option<Instant>),
+    Follows,
+    Unrelated,
+}
+
+/// `walk-boost.log` in the logs folder: what the boost did, to read after a headset session (tests keep it in memory).
+#[derive(Default)]
+struct Log {
+    #[cfg(test)]
+    said: Vec<String>,
+}
+
+impl Log {
+    #[cfg(test)]
+    fn say(&mut self, what: String) {
+        self.said.push(what);
+    }
+
+    /// One line, with the time as SteamVR's own logs give it. The boost says little: a walk's start and end at most.
+    #[cfg(not(test))]
+    fn say(&mut self, what: String) {
+        use std::io::Write;
+        let dir = orbiters_core::paths::logs_dir();
+        let path = dir.join("walk-boost.log");
+        if std::fs::metadata(&path).is_ok_and(|m| m.len() > 1 << 20) {
+            let _ = std::fs::rename(&path, dir.join("walk-boost.previous.log"));
+        }
+        let t = time::OffsetDateTime::now_local().unwrap_or_else(|_| time::OffsetDateTime::now_utc());
+        let _ = std::fs::create_dir_all(&dir);
+        if let Ok(mut file) = std::fs::OpenOptions::new().append(true).create(true).open(&path) {
+            let _ = writeln!(file, "{} {:02}:{:02}:{:02}.{:03} {what}", t.date(), t.hour(), t.minute(), t.second(), t.millisecond());
+        }
+    }
+}
+
+fn length(v: &[f32; 3]) -> f32 {
+    (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt()
+}
+
 pub struct WalkBoost {
     actions: Option<Walk>,
     carried: Option<Carried>,
@@ -318,6 +435,21 @@ pub struct WalkBoost {
     /// The headset's frame, when known: steps are whole frames of it, so that the loop's timing noise does not
     /// make some frames move further than others.
     frame: Option<Duration>,
+    /// What the boost showed lately (and the base, first), to tell it from another application's show.
+    shown: VecDeque<(Instant, Matrix34)>,
+    /// A preview of the boost's may still show: a recenter hides it, even when the carry already went.
+    showing: bool,
+    reading: Reading,
+    /// Another application moved the play space: where to last, and the boost holds until then at least.
+    other_app: Option<(Matrix34, Instant)>,
+    /// When it last did so while the boost carried.
+    taken_at: Option<Instant>,
+    /// Its preview is the one that shows, as far as the boost saw: reverting may not tell, as SteamVR may hand over either
+    /// the preview or its own setup.
+    other_showing: bool,
+    /// Since when the play space moves in this run of frames, for the log.
+    run: Option<Instant>,
+    log: Log,
 }
 
 impl WalkBoost {
@@ -337,6 +469,14 @@ impl WalkBoost {
             room_setup: None,
             shown_at: None,
             frame: None,
+            shown: VecDeque::new(),
+            showing: false,
+            reading: Reading::Unproven(None),
+            other_app: None,
+            taken_at: None,
+            other_showing: false,
+            run: None,
+            log: Log::default(),
         }
     }
 
@@ -355,17 +495,80 @@ impl WalkBoost {
         self.moving
     }
 
-    /// The boost is on and nothing holds it back.
-    fn active(&self, m: &Moment, now: Instant) -> bool {
+    /// Another application moved the play space lately, and the distance walked went with it: its page says so.
+    pub fn taken_lately(&self, now: Instant) -> bool {
+        self.taken_at.is_some_and(|t| now.saturating_duration_since(t) < TAKEN_SAID_FOR)
+    }
+
+    /// What holds the boost back, if anything, in words for the log.
+    fn held_back(&self, m: &Moment, now: Instant) -> Option<&'static str> {
         let since = |t: Instant| now.saturating_duration_since(t);
-        self.actions.is_some()
-            && m.settings.enabled
-            && m.settings.strength > 0.0
-            && m.walking_allowed
-            && !m.held
-            && !m.away
-            && self.changed.is_none_or(|t| since(t) >= MENU_QUIET)
-            && self.room_setup.is_none_or(|t| since(t) >= ROOM_SETUP)
+        if self.actions.is_none() {
+            Some("no controls")
+        } else if !m.settings.enabled || m.settings.strength <= 0.0 {
+            Some("turned off")
+        } else if !m.walking_allowed {
+            Some("VRChat's scene not in front (dashboard, loading)")
+        } else if m.held {
+            Some("a menu or the calibration stands in the play space")
+        } else if m.away {
+            Some("away")
+        } else if self.changed.is_some_and(|t| since(t) < MENU_QUIET) {
+            Some("a setting just changed")
+        } else if self.room_setup.is_some_and(|t| since(t) < ROOM_SETUP) {
+            Some("room setup")
+        } else if self.other_app.is_some() {
+            Some("another application moves the play space")
+        } else {
+            None
+        }
+    }
+
+    /// Reads the play space everyone sees: whether it still is what the boost showed. When it is not, another
+    /// application showed its own: the carry is over and nothing here touches the play space, which is that
+    /// application's now. While it goes on moving it, the boost keeps waiting.
+    fn watch_others(&mut self, play: &mut dyn PlaySpace, now: Instant) {
+        if self.reading == Reading::Unrelated || (self.carried.is_none() && self.other_app.is_none()) {
+            return;
+        }
+        let Some(live) = play.live_standing() else { return };
+        if let Some((place, until)) = self.other_app {
+            if !same_place(&place, &live) {
+                self.other_app = Some((live, now + OTHER_APP_QUIET));
+            } else if now >= until {
+                self.other_app = None;
+            }
+            return;
+        }
+        let Some(carried) = &self.carried else { return };
+        let keep = self.shown.len().saturating_sub(1);
+        let late = self.shown.iter().take(keep).take_while(|(at, _)| now.saturating_duration_since(*at) > SHOWN_LATE).count();
+        self.shown.drain(..late);
+        let ours = self.shown.iter().any(|(_, m)| same_place(m, &live));
+        let carried_far = length(&carried.offset) > SAME_PLACE * 10.0;
+        if let Reading::Unproven(since) = self.reading {
+            if ours && carried_far && !same_place(&carried.base.standing, &live) {
+                self.reading = Reading::Follows;
+            } else if carried_far {
+                let since = since.unwrap_or(now);
+                self.reading = if now.saturating_duration_since(since) < READING_TRIAL {
+                    Reading::Unproven(Some(since))
+                } else {
+                    self.log.say(format!("the play space read from the headset's poses does not follow the walk's shows: another application's will not be noticed (read {:?})", live.m));
+                    Reading::Unrelated
+                };
+            }
+            return;
+        }
+        if !ours {
+            let (carried, back) = (length(&carried.offset), distance(&carried.base.standing, &live));
+            self.log.say(format!("another application showed its own play space: {carried:.2} m walked are gone, it is {back:.2} m from where the walk began"));
+            self.carried = None;
+            self.shown.clear();
+            self.taken_at = Some(now);
+            self.other_showing = true;
+            self.other_app = Some((live, now + OTHER_APP_QUIET));
+        }
     }
 
     /// One frame: reads the stick and carries the person further.
@@ -417,6 +620,7 @@ impl WalkBoost {
         if self.place.as_deref() != m.place {
             // Another world or instance (or VRChat closed): the play space goes back while the avatar respawns.
             self.place = m.place.map(str::to_string);
+            self.say_put_back("another world, or VRChat closed");
             self.put_back(play);
         }
         let seen = (m.settings.enabled, m.settings.strength);
@@ -424,51 +628,145 @@ impl WalkBoost {
             self.changed = Some(now);
         }
         self.seen = Some(seen);
-        let stick = if self.active(m, now) && m.input_read { stick() } else { None };
+        self.watch_others(play, now);
+        match self.advance(play, m, stick, frame, dt, now) {
+            Ok(()) => {
+                if self.run.is_none() {
+                    self.run = Some(now);
+                    let carried = self.carried.as_ref().map_or(0.0, |c| length(&c.offset));
+                    self.log.say(format!("walking: {carried:.2} m from where the carry began"));
+                }
+            }
+            Err(why) => {
+                if let Some(start) = self.run.take() {
+                    let carried = self.carried.as_ref().map_or(0.0, |c| length(&c.offset));
+                    let lasted = now.saturating_duration_since(start).as_secs_f32();
+                    self.log.say(format!("stopped after {lasted:.2} s, {carried:.2} m from where the carry began: {why}"));
+                }
+            }
+        }
+    }
+
+    /// A step further, or why not.
+    fn advance(
+        &mut self,
+        play: &mut dyn PlaySpace,
+        m: &Moment,
+        stick: impl FnOnce() -> Option<[f32; 2]>,
+        frame: impl FnOnce() -> Option<Matrix34>,
+        dt: f32,
+        now: Instant,
+    ) -> Result<(), &'static str> {
+        let held = self.held_back(m, now);
+        let stick = if held.is_none() && m.input_read { stick() } else { None };
         let pushed = stick.is_some_and(|s| push(s) > 0.0);
         let carries = self.gate.carries(now, pushed, m.motion.as_ref(), std::mem::take(&mut self.boost));
-        let Some(stick) = stick.filter(|_| carries && dt > 0.0) else { return };
-        let Some(frame) = frame() else { return };
+        if let Some(why) = held {
+            return Err(why);
+        }
+        if !m.input_read {
+            return Err("the controllers could not be read");
+        }
+        let Some(stick) = stick else { return Err("the stick is not active") };
+        if !pushed {
+            return Err("the stick was let go");
+        }
+        if !carries {
+            return Err("VRChat does not walk the avatar");
+        }
+        if dt <= 0.0 {
+            return Err("the first frame");
+        }
+        let Some(frame) = frame() else { return Err("forward is not tracked") };
         let dir = direction(stick, &frame);
         if dir == [0.0; 3] {
-            return;
+            return Err("no way forward");
         }
         let speed = RUN_SPEED * m.settings.strength.clamp(0.0, 1.0) * WalkBoostSettings::MAX_EXTRA;
         let step = dir.map(|d| d * speed * dt);
         if !step.iter().all(|s| s.is_finite()) {
-            return;
+            return Err("a step that is not a number");
         }
         if self.carried.is_none() {
-            // No preview of the boost's shows now: the working copy reverts to the saved setup.
+            // No preview of the boost's shows now: the working copy reverts to SteamVR's own setup or to another
+            // application's preview. The walk starts from what everyone sees, whichever that is.
             play.revert();
-            let Some(base) = play.read() else { return };
-            self.carried = Some(Carried { base, offset: [0.0; 3] });
+            let Some(own) = play.read() else { return Err("SteamVR gave no setup") };
+            let live = if self.reading == Reading::Follows { play.live_standing() } else { None };
+            let base = live.map_or_else(|| own.clone(), |live| own.at_live(&live));
+            let over_other = self.other_showing || !same_place(&own.standing, &base.standing);
+            if over_other {
+                self.log.say(format!("the walk starts on another application's play space, {:.2} m from SteamVR's own setup", distance(&own.standing, &base.standing)));
+            }
+            self.shown.clear();
+            self.shown.push_back((now, base.standing));
+            self.carried = Some(Carried { base, offset: [0.0; 3], over_other });
         }
         let carried = self.carried.as_mut().expect("set above");
         for (o, s) in carried.offset.iter_mut().zip(step) {
             *o += s;
         }
-        play.write(&carried.shifted());
+        let setup = carried.shifted();
+        play.write(&setup);
         play.show();
+        self.shown.push_back((now, setup.standing));
+        self.showing = true;
         self.shown_at = Some(now);
         self.boost = speed * dir[0].hypot(dir[2]);
         self.moving = true;
+        Ok(())
+    }
+
+    fn say_put_back(&mut self, why: &str) {
+        if let Some(carried) = &self.carried {
+            let walked = length(&carried.offset);
+            self.log.say(format!("back where the carry began, {walked:.2} m ago: {why}"));
+        }
     }
 
     /// Puts the play space back where it was.
     pub fn reset(&mut self, steamvr: &vr::Client) {
         match steamvr.chaperone_setup() {
-            Ok(mut setup) => self.put_back(&mut setup),
+            Ok(mut setup) => {
+                self.say_put_back("the overlay ends");
+                self.put_back(&mut setup);
+            }
             // Nothing can be put back without the interface (SteamVR drops the preview with this process).
             Err(_) => self.carried = None,
         }
     }
 
-    /// The same with `play`: the preview hidden first, so that the working copy reverts to the saved setup.
+    /// The same with `play`: the preview hidden first, so that the working copy reverts to the saved setup; or, when the
+    /// walk began on another application's preview, that one shown again. A carry another application already ended
+    /// leaves nothing to put back, and its preview stays.
     pub fn put_back(&mut self, play: &mut dyn PlaySpace) {
         self.moving = false;
         self.boost = 0.0;
-        if self.carried.take().is_some() {
+        self.shown.clear();
+        if let Some(carried) = self.carried.take() {
+            self.showing = false;
+            if carried.over_other {
+                play.write(&carried.base);
+                play.show();
+            } else {
+                play.hide();
+                play.revert();
+            }
+        }
+    }
+
+    /// What a person did to the play space itself (a recenter, room setup): SteamVR's own setup is theirs now, and no
+    /// preview of the boost's stays over it, even one whose carry another application seemed to end a moment ago (the
+    /// recentred play space, read before SteamVR's event came).
+    fn let_go(&mut self, play: &mut dyn PlaySpace, why: &str) {
+        self.say_put_back(why);
+        self.moving = false;
+        self.boost = 0.0;
+        self.shown.clear();
+        self.carried = None;
+        self.other_app = None;
+        self.other_showing = false;
+        if std::mem::take(&mut self.showing) {
             play.hide();
             play.revert();
         }
@@ -481,6 +779,7 @@ impl WalkBoost {
             Err(_) => {
                 if matches!(event, PlaySpaceEvent::RoomSetupStarting) {
                     self.carried = None;
+                    self.showing = false;
                     self.room_setup = Some(Instant::now());
                 }
             }
@@ -497,11 +796,11 @@ impl WalkBoost {
     pub fn play_space_event_in(&mut self, play: &mut dyn PlaySpace, event: PlaySpaceEvent, now: Instant) {
         let own_echo = self.shown_at.is_some_and(|t| now.saturating_duration_since(t) < OWN_EVENTS);
         match event {
-            PlaySpaceEvent::StandingReset => self.put_back(play),
-            PlaySpaceEvent::SeatedReset if !own_echo => self.put_back(play),
-            PlaySpaceEvent::UniverseChanged { from, to } if from != to => self.put_back(play),
+            PlaySpaceEvent::StandingReset => self.let_go(play, "a recenter"),
+            PlaySpaceEvent::SeatedReset if !own_echo => self.let_go(play, "a seated reset"),
+            PlaySpaceEvent::UniverseChanged { from, to } if from != to => self.let_go(play, "another tracking universe"),
             PlaySpaceEvent::RoomSetupStarting => {
-                self.put_back(play);
+                self.let_go(play, "room setup");
                 self.room_setup = Some(now);
             }
             // Room setup saved its play space: the boost may move it. Another application's saved change leaves the
@@ -543,7 +842,7 @@ mod tests {
     fn carrying_moves_tracking_and_keeps_the_walls_in_the_room() {
         let standing = yaw(30.0);
         let wall = Quad { corners: [[1.0, 0.0, 1.0], [1.0, 2.0, 1.0], [1.0, 2.0, -1.0], [1.0, 0.0, -1.0]] };
-        let carried = Carried { base: Setup { standing, seated: None, bounds: vec![wall] }, offset: [0.5, 0.0, -2.0] };
+        let carried = Carried { base: Setup { standing, seated: None, bounds: vec![wall] }, offset: [0.5, 0.0, -2.0], over_other: false };
         let Setup { standing: moved, bounds, .. } = carried.shifted();
         // A device fixed in the room (raw p) reads `offset` further in the standing universe.
         let raw = [0.3, 1.2, 0.4];
@@ -634,6 +933,12 @@ mod tests {
         hides: usize,
         reverts: usize,
         semantics: Semantics,
+        /// The preview that shows is another application's: this one's working copy has no hold on it.
+        theirs: bool,
+        /// The headset is not tracked: the play space cannot be read.
+        untracked: bool,
+        /// What the reading is off by, for a driver whose raw space is not the one the setup is given in.
+        reading_off: f32,
     }
 
     impl Room {
@@ -658,7 +963,7 @@ mod tests {
                 Semantics::Snapshot => self.live().clone(),
                 Semantics::Bound | Semantics::SnapshotRevertSaved => self.saved.clone(),
             };
-            if self.semantics == Semantics::Bound && self.preview.is_some() {
+            if self.semantics == Semantics::Bound && self.preview.is_some() && !self.theirs {
                 self.preview = Some(self.working.clone());
             }
         }
@@ -669,19 +974,40 @@ mod tests {
 
         fn write(&mut self, setup: &Setup) {
             self.working = setup.clone();
-            if self.semantics == Semantics::Bound && self.preview.is_some() {
+            if self.semantics == Semantics::Bound && self.preview.is_some() && !self.theirs {
                 self.preview = Some(self.working.clone());
             }
         }
 
         fn show(&mut self) {
             self.preview = Some(self.working.clone());
+            self.theirs = false;
             self.shows += 1;
         }
 
         fn hide(&mut self) {
             self.preview = None;
+            self.theirs = false;
             self.hides += 1;
+        }
+
+        fn live_standing(&mut self) -> Option<Matrix34> {
+            let mut live = self.live().standing;
+            live.m[0][3] += self.reading_off;
+            (!self.untracked).then_some(live)
+        }
+    }
+
+    impl Room {
+        /// OVR Advanced Settings' Space Drag at one tick: its own working copy shown, the saved setup moved by what it
+        /// was dragged, with nothing of the boost's carry.
+        fn other_app_shows(&mut self, dragged: [f32; 3]) {
+            let mut theirs = self.saved.clone();
+            for (row, d) in theirs.standing.m.iter_mut().zip(dragged) {
+                row[3] -= d;
+            }
+            self.preview = Some(theirs);
+            self.theirs = true;
         }
     }
 
@@ -881,5 +1207,225 @@ mod tests {
         let still = Moment { motion: Some(Motion { in_station: false, speed: 0.0 }), ..moment(&s, None) };
         walk.step(&mut room, &still, || FORWARD, || Some(yaw(0.0)), at(1630));
         assert!(!walk.moving());
+    }
+
+    fn metres(v: [f32; 3]) -> f32 {
+        length(&v)
+    }
+
+    /// A first walk with the play space read back, so that the reading is known to follow.
+    fn proven(walk: &mut WalkBoost, room: &mut Room, s: &WalkBoostSettings, t0: Instant) -> u64 {
+        let last = walk_for(walk, room, s, t0, 0, 30);
+        assert_eq!(walk.reading, Reading::Follows);
+        last
+    }
+
+    /// The reset Enzo met (2026-11-07), as his logs tell it: OVR Advanced Settings wrote the play space right after his
+    /// walks (its Space Drag on Y, B and the right thumbrest), its show has none of the carry, so he went back where the
+    /// walk began, and the next push threw him forward by all of it. That throw is what must never happen again.
+    #[test]
+    fn another_application_s_show_puts_the_person_back_once_and_the_next_push_starts_from_there() {
+        for semantics in EVERY_SEMANTICS {
+            let (s, mut walk, mut room) = (settings(), boost(), Room::with(semantics));
+            let t0 = Instant::now();
+            let last = proven(&mut walk, &mut room, &s, t0);
+            let last = walk_for(&mut walk, &mut room, &s, t0, last + 10, 200);
+            assert!(metres(carried_by(&room)) > 8.0, "{semantics:?}: {:?}", carried_by(&room));
+            // The other application shows its play space: back, by its doing.
+            room.other_app_shows([0.0; 3]);
+            let idle = moment(&s, None);
+            walk.step(&mut room, &idle, || None, || None, t0 + Duration::from_millis(last + 10));
+            assert!(walk.carried.is_none() && walk.taken_lately(t0 + Duration::from_millis(last + 10)));
+            assert!(room.theirs && room.hides == 0, "{semantics:?}: its preview stays as it is");
+            // Pushing at once: the boost holds until it has been quiet a moment, and shows nothing over it.
+            let shows = room.shows;
+            let at = walk_for(&mut walk, &mut room, &s, t0, last + 20, 5);
+            assert!(!walk.moving() && room.shows == shows && room.theirs, "{semantics:?}: no fight over the play space");
+            // Then a walk from there, a step away: not the 8 m walked before.
+            walk_for(&mut walk, &mut room, &s, t0, at + 500, 1);
+            assert!(walk.moving());
+            assert!(metres(carried_by(&room)) < 0.5, "{semantics:?}: thrown {:?}", carried_by(&room));
+        }
+    }
+
+    /// A drag that goes on while the stick is pushed: nobody flickers between the two, and the boost waits for it.
+    #[test]
+    fn a_drag_under_way_is_not_fought_and_what_it_did_stays_under_the_next_walk() {
+        for semantics in EVERY_SEMANTICS {
+            let (s, mut walk, mut room) = (settings(), boost(), Room::with(semantics));
+            let t0 = Instant::now();
+            let mut at = proven(&mut walk, &mut room, &s, t0) + 10;
+            let m = moment(&s, None);
+            let mut dragged = 0.0;
+            for _ in 0..60 {
+                dragged += 0.03;
+                room.other_app_shows([dragged, 0.0, 0.0]);
+                walk.step(&mut room, &m, || FORWARD, || Some(yaw(0.0)), t0 + Duration::from_millis(at));
+                assert!(!walk.moving() && room.theirs, "{semantics:?}: the boost keeps out of it");
+                assert!((carried_by(&room)[0] - dragged).abs() < 1e-3, "{semantics:?}: the drag is what shows");
+                at += 10;
+            }
+            // Let go of the drag: after a quiet moment the walk starts on top of what it did.
+            walk.step(&mut room, &m, || None, || None, t0 + Duration::from_millis(at + 500));
+            assert!(walk.other_app.is_none(), "{semantics:?}: quiet");
+            walk_for(&mut walk, &mut room, &s, t0, at + 600, 1);
+            let moved = carried_by(&room);
+            assert!(walk.moving() && (moved[0] - dragged).abs() < 1e-3, "{semantics:?}: the drag is kept: {moved:?}");
+            assert!(moved[2] < -0.05 && moved[2] > -0.5, "{semantics:?}: a step ahead of it: {moved:?}");
+            // And the end of that walk gives the drag back, not SteamVR's setup without it.
+            walk.step(&mut room, &moment(&s, Some("wrld_2")), || None, || None, t0 + Duration::from_millis(at + 700));
+            assert!((carried_by(&room)[0] - dragged).abs() < 1e-3 && carried_by(&room)[2].abs() < 1e-3, "{semantics:?}: {:?}", carried_by(&room));
+        }
+    }
+
+    /// The boost's own shows, read back a little late, are its own.
+    #[test]
+    fn its_own_shows_read_late_are_its_own() {
+        struct Late(Room, VecDeque<Matrix34>);
+        impl PlaySpace for Late {
+            fn revert(&mut self) {
+                self.0.revert()
+            }
+            fn read(&mut self) -> Option<Setup> {
+                self.0.read()
+            }
+            fn write(&mut self, setup: &Setup) {
+                self.0.write(setup)
+            }
+            fn show(&mut self) {
+                self.0.show();
+                self.1.push_back(self.0.live().standing);
+            }
+            fn hide(&mut self) {
+                self.0.hide()
+            }
+            fn live_standing(&mut self) -> Option<Matrix34> {
+                // Ten frames behind.
+                if self.1.len() > 10 {
+                    self.1.pop_front();
+                }
+                Some(self.1.front().copied().unwrap_or(self.0.live().standing))
+            }
+        }
+        let (s, mut walk, mut late) = (settings(), boost(), Late(Room::new(Matrix34::IDENTITY), VecDeque::new()));
+        let t0 = Instant::now();
+        let m = moment(&s, None);
+        for i in 0..500 {
+            walk.step(&mut late, &m, || FORWARD, || Some(yaw(0.0)), t0 + Duration::from_millis(i * 10));
+            assert!(walk.taken_at.is_none(), "frame {i}");
+        }
+        assert_eq!(walk.reading, Reading::Follows);
+        assert!(metres(carried_by(&late.0)) > 19.0);
+    }
+
+    /// A reading that does not follow what is shown tells nothing: the boost carries on as it would without one, and
+    /// never takes its own walk for another application's.
+    #[test]
+    fn a_reading_that_does_not_follow_is_left_alone() {
+        let (s, mut walk, mut room) = (settings(), boost(), Room::new(Matrix34::IDENTITY));
+        room.reading_off = 3.0;
+        let t0 = Instant::now();
+        walk_for(&mut walk, &mut room, &s, t0, 0, 400);
+        assert_eq!(walk.reading, Reading::Unrelated);
+        assert!(walk.taken_at.is_none() && walk.moving());
+        assert_eq!(room.reverts, 1, "one carry all along");
+        assert!(walk.log.said.iter().any(|l| l.contains("does not follow")), "{:?}", walk.log.said);
+    }
+
+    /// No reading while the headset is not tracked: nothing is decided on it, and a walk held up by that goes on.
+    #[test]
+    fn tracking_lost_a_moment_decides_nothing() {
+        let (s, mut walk, mut room) = (settings(), boost(), Room::new(Matrix34::IDENTITY));
+        let t0 = Instant::now();
+        let last = proven(&mut walk, &mut room, &s, t0);
+        let before = carried_by(&room);
+        room.untracked = true;
+        for i in 1..=30u64 {
+            walk.step(&mut room, &moment(&s, None), || FORWARD, || None, t0 + Duration::from_millis(last + i * 10));
+            assert!(!walk.moving(), "no way forward without tracking");
+        }
+        assert!(walk.carried.is_some() && close(carried_by(&room), before), "it stays where it is");
+        room.untracked = false;
+        walk_for(&mut walk, &mut room, &s, t0, last + 310, 1);
+        let moved = metres(carried_by(&room)) - metres(before);
+        assert!(walk.moving() && moved > 0.0 && moved < 0.3, "on from there: {moved}");
+    }
+
+    /// A recenter read as a move of the play space before SteamVR's event says what it is: its preview still goes.
+    #[test]
+    fn a_recenter_seen_before_its_event_still_hides_the_preview() {
+        let (s, mut walk, mut room) = (settings(), boost(), Room::new(Matrix34::IDENTITY));
+        let t0 = Instant::now();
+        let last = proven(&mut walk, &mut room, &s, t0);
+        room.other_app_shows([0.4, 0.0, 0.0]);
+        walk.step(&mut room, &moment(&s, None), || None, || None, t0 + Duration::from_millis(last + 10));
+        assert!(walk.carried.is_none());
+        walk.play_space_event_in(&mut room, PlaySpaceEvent::StandingReset, t0 + Duration::from_millis(last + 20));
+        assert!(room.preview.is_none() && walk.other_app.is_none(), "SteamVR's own setup, and free to walk");
+    }
+
+    /// A long walk with all that comes with it, at 90, 60, 45 and 30 frames a second: stalls, tracking lost, the stick
+    /// let go, the avatar stopped by VRChat, recenters, another world and another application's drags. Between two frames
+    /// the play space moves one step at most, unless another application or a person moved it at that very moment.
+    #[test]
+    fn a_long_walk_never_jumps() {
+        /// A small repeatable noise (xorshift).
+        fn noise(state: &mut u64) -> u64 {
+            *state ^= *state << 13;
+            *state ^= *state >> 7;
+            *state ^= *state << 17;
+            *state
+        }
+        for semantics in EVERY_SEMANTICS {
+            let s = WalkBoostSettings { enabled: true, strength: 1.0, ..Default::default() };
+            let (mut walk, mut room, mut state) = (boost(), Room::with(semantics), 0x9E37_79B9_7F4A_7C15u64);
+            walk.set_frame(Some(Duration::from_secs_f32(1.0 / 90.0)));
+            let t0 = Instant::now();
+            let (mut ms, mut last, mut jumps_by_others, mut walked) = (0.0f64, carried_by(&room), 0, 0.0);
+            let mut push_for = 0u32;
+            let mut heading = 0.0f32;
+            // Half an hour of frames.
+            while ms < 30.0 * 60.0 * 1000.0 {
+                let roll = noise(&mut state) % 10_000;
+                // The frame rate falls and comes back; now and then a long stall.
+                let frame_ms = [11.1, 16.7, 22.2, 33.3][(ms / 60_000.0) as usize % 4] + if roll == 0 { 400.0 } else { 0.0 };
+                ms += frame_ms;
+                let now = t0 + Duration::from_micros((ms * 1000.0) as u64);
+                if push_for == 0 && noise(&mut state) % 40 == 0 {
+                    push_for = (noise(&mut state) % 400) as u32;
+                }
+                push_for = push_for.saturating_sub(1);
+                heading += (noise(&mut state) % 7) as f32 - 3.0;
+                let stick = (push_for > 0).then_some([0.0, 1.0]);
+                let tracked = noise(&mut state) % 500 != 0;
+                room.untracked = !tracked;
+                // Another application's drag, a recenter, another world: all may move the play space in one go.
+                let event = noise(&mut state) % 20_000;
+                let mut moved_by_someone = false;
+                if event < 3 {
+                    room.other_app_shows([0.1 * event as f32, 0.0, 0.0]);
+                    moved_by_someone = true;
+                } else if event == 3 {
+                    walk.play_space_event_in(&mut room, PlaySpaceEvent::StandingReset, now);
+                    moved_by_someone = true;
+                }
+                let place = if event == 4 { "wrld_2" } else { "wrld_1" };
+                moved_by_someone |= walk.place.as_deref() != Some(place);
+                let speed = (noise(&mut state) % 8) as f32;
+                let m = Moment { place: Some(place), motion: Some(Motion { in_station: false, speed }), ..moment(&s, None) };
+                walk.step(&mut room, &m, || stick, || tracked.then(|| yaw(heading)), now);
+                let at = carried_by(&room);
+                let jump = metres([at[0] - last[0], at[1] - last[1], at[2] - last[2]]);
+                // 8 m/s for 50 ms at most.
+                assert!(moved_by_someone || jump <= 0.4 + 1e-2, "{semantics:?} at {ms} ms: a jump of {jump} m");
+                if moved_by_someone {
+                    jumps_by_others += 1;
+                } else {
+                    walked += jump;
+                }
+                last = at;
+            }
+            assert!(walked > 1000.0 && jumps_by_others > 50, "{semantics:?}: walked {walked} m with {jumps_by_others} moves by others");
+        }
     }
 }

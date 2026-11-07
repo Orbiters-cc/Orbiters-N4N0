@@ -761,6 +761,7 @@ fn session(args: &[String]) -> anyhow::Result<Ended> {
             input_read,
         };
         t.walk.update(&steamvr, &moment);
+        t.state.walk_taken = t.walk.taken_lately(Instant::now());
         // The triggers press where the index fingers point on N4N0's screen (N4N0 reads them only while its menu is open
         // there): each change goes, nothing else. The floating panel reads them held (read whether N4N0 is on or not).
         if input_read {

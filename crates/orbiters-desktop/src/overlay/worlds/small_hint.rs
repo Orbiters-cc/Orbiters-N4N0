@@ -12,9 +12,9 @@ use orbiters_ui::{icons, widgets};
 use std::time::Instant;
 
 pub const PX: [u32; 2] = [448, 256];
-pub const WIDTH_M: f32 = 0.24;
-/// How high above what it speaks of it floats, past its top.
-const ABOVE_M: f32 = 0.09;
+pub const WIDTH_M: f32 = 0.28;
+/// How high above what it speaks of it floats.
+const ABOVE_M: f32 = 0.015;
 const FRAME_S: f32 = 1.0 / 45.0;
 /// One push up and pull down, in seconds.
 const CYCLE_S: f32 = 2.6;
@@ -24,8 +24,8 @@ const CYCLE_S: f32 = 2.6;
 pub enum Stage {
     /// Grip to take it; `near`: a hand is near enough.
     Grip { near: bool },
-    /// That hand's stick, up and down.
-    Stick,
+    /// That hand's stick, up and down: 0 the left, 1 the right.
+    Stick { hand: usize },
 }
 
 /// How far the stick is pushed `seconds` in: up positive, resting a moment at each end and in the middle.
@@ -108,43 +108,137 @@ pub fn joystick(p: &Painter, base: Pos2, push: f32) {
 fn words(p: &Painter, at: Pos2, glyph: &str, first: &str, second: &str, on: f32) {
     let lit = mix(theme::FG_3, theme::ACCENT, on);
     let text = mix(theme::FG_2, Color32::WHITE, on);
-    let row = Rect::from_min_size(at - vec2(10.0, 8.0), vec2(214.0, 70.0));
+    let row = Rect::from_min_size(at - vec2(8.0, 10.0), vec2(226.0, 84.0));
     if on > 0.01 {
-        p.rect_filled(row, theme::radius(16.0), theme::alpha(theme::ACCENT, 0.16 * on));
+        p.rect_filled(row, theme::radius(18.0), theme::alpha(theme::ACCENT, 0.18 * on));
     }
-    widgets::icon(p, at + vec2(14.0, 27.0), glyph, 26.0, lit);
-    p.text(at + vec2(38.0, 16.0), Align2::LEFT_CENTER, first, theme::font(23.0, weight::SEMIBOLD), text);
-    p.text(at + vec2(38.0, 41.0), Align2::LEFT_CENTER, second, theme::font(17.0, weight::MEDIUM), theme::FG_3);
+    widgets::icon(p, at + vec2(16.0, 32.0), glyph, 30.0, lit);
+    p.text(at + vec2(42.0, 18.0), Align2::LEFT_CENTER, first, theme::font(30.0, weight::BOLD), text);
+    p.text(at + vec2(42.0, 49.0), Align2::LEFT_CENTER, second, theme::font(22.0, weight::SEMIBOLD), mix(theme::FG_2, Color32::WHITE, on));
+}
+
+/// A tail from the card's foot towards what it speaks of.
+fn tail(p: &Painter, card: Rect) {
+    let middle = card.center_bottom();
+    p.add(Shape::convex_polygon(vec![middle + vec2(-18.0, -1.0), middle + vec2(18.0, -1.0), middle + vec2(0.0, 18.0)], theme::alpha(theme::INK_900, 0.95), egui::Stroke::NONE));
 }
 
 /// The hint on a page of [`PX`], `seconds` into its animation.
 pub fn paint(p: &Painter, stage: Stage, seconds: f32) {
     let page = Rect::from_min_size(Pos2::ZERO, vec2(PX[0] as f32, PX[1] as f32));
     match stage {
-        Stage::Stick => {
-            p.rect_filled(page.shrink(2.0), theme::radius(30.0), theme::alpha(theme::INK_900, 0.93));
+        Stage::Stick { hand } => {
+            let card = Rect::from_min_max(page.min + vec2(2.0, 2.0), page.max - vec2(2.0, 20.0));
+            p.rect_filled(card, theme::radius(30.0), theme::alpha(theme::INK_900, 0.95));
+            tail(p, card);
             let push = stick_at(seconds);
-            joystick(p, pos2(118.0, 196.0), push);
+            joystick(p, pos2(104.0, 180.0), push);
+            let which = if hand == 0 { "Left stick" } else { "Right stick" };
+            p.text(pos2(104.0, 28.0), Align2::CENTER_CENTER, which, theme::font(19.0, weight::SEMIBOLD), theme::FG_2);
             let up = ((push - 0.2) / 0.8).clamp(0.0, 1.0);
             let down = ((-push - 0.2) / 0.8).clamp(0.0, 1.0);
-            words(p, pos2(226.0, 40.0), icons::CARET_UP, "Push up", "Zoom in", up);
-            words(p, pos2(226.0, 150.0), icons::CARET_DOWN, "Pull down", "Zoom out", down);
+            words(p, pos2(208.0, 26.0), icons::CARET_UP, "Push up", "to zoom in", up);
+            words(p, pos2(208.0, 126.0), icons::CARET_DOWN, "Pull down", "to zoom out", down);
         }
         Stage::Grip { near } => {
-            let card = Rect::from_center_size(page.center(), vec2(PX[0] as f32 - 4.0, 124.0));
+            let card = Rect::from_center_size(page.center() + vec2(0.0, 30.0), vec2(PX[0] as f32 - 4.0, 140.0));
             p.rect_filled(card, theme::radius(30.0), theme::alpha(theme::INK_900, 0.95));
             if near {
                 p.rect_filled(card, theme::radius(30.0), theme::alpha(theme::ACCENT, 0.24));
                 p.rect_stroke(card.shrink(1.5), theme::radius(28.0), egui::Stroke::new(3.0, theme::ACCENT), egui::StrokeKind::Inside);
             }
+            tail(p, card);
             let phase = (seconds / 1.3).fract() * std::f32::consts::TAU;
             let beat = if near { 1.0 + 0.1 * phase.sin() } else { 1.0 + 0.05 * phase.sin() };
-            widgets::icon(p, card.left_center() + vec2(66.0, 0.0), icons::HAND_GRABBING, 60.0 * beat, if near { Color32::WHITE } else { theme::ACCENT });
-            let (first, second) = if near { ("Close your grip", "It comes with your hand") } else { ("Grip to take it", "Reach for it with either hand") };
-            p.text(card.left_center() + vec2(120.0, -16.0), Align2::LEFT_CENTER, first, theme::font(26.0, weight::SEMIBOLD), Color32::WHITE);
-            p.text(card.left_center() + vec2(120.0, 18.0), Align2::LEFT_CENTER, second, theme::font(18.0, weight::MEDIUM), theme::FG_2);
+            widgets::icon(p, card.left_center() + vec2(66.0, 0.0), icons::HAND_GRABBING, 66.0 * beat, if near { Color32::WHITE } else { theme::ACCENT });
+            let (first, second) = if near { ("Close your grip", "It comes with your hand") } else { ("Grip to take it", "With either hand") };
+            p.text(card.left_center() + vec2(122.0, -20.0), Align2::LEFT_CENTER, first, theme::font(32.0, weight::BOLD), Color32::WHITE);
+            p.text(card.left_center() + vec2(122.0, 22.0), Align2::LEFT_CENTER, second, theme::font(22.0, weight::MEDIUM), theme::FG_2);
         }
     }
+}
+
+/// The small Hide under a view taken in a hand, so that it can go where it is, with no menu to reopen.
+pub const CHIP_PX: [u32; 2] = [224, 72];
+pub const CHIP_WIDTH_M: f32 = 0.11;
+
+/// [`HideChip`]'s picture.
+pub fn paint_chip(p: &Painter, pointed: bool) {
+    let page = Rect::from_min_size(Pos2::ZERO, vec2(CHIP_PX[0] as f32, CHIP_PX[1] as f32)).shrink(2.0);
+    p.rect_filled(page, theme::radius(page.height() / 2.0), if pointed { theme::ACCENT } else { theme::alpha(theme::INK_900, 0.92) });
+    let ink = if pointed { theme::ON_ACCENT } else { Color32::WHITE };
+    widgets::icon(p, page.left_center() + vec2(36.0, 0.0), icons::EYE_SLASH, 30.0, ink);
+    p.text(page.left_center() + vec2(62.0, 0.0), Align2::LEFT_CENTER, "Hide 3D", theme::font(28.0, weight::SEMIBOLD), ink);
+}
+
+pub struct HideChip {
+    handle: vr::OverlayHandle,
+    canvas: Canvas,
+    shown: Option<bool>,
+}
+
+impl HideChip {
+    pub fn new(overlay: &vr::Overlay, key: &str) -> anyhow::Result<Self> {
+        let handle = overlay.create(&format!("{key}.small-hide"), "Hide a small 3D view").map_err(|c| anyhow::anyhow!("the small view's Hide: {c:?}"))?;
+        let _ = overlay.set_width_in_meters(handle, CHIP_WIDTH_M);
+        let _ = overlay.set_flag(handle, vr::overlay_flag::IS_PREMULTIPLIED, true);
+        let _ = overlay.set_sort_order(handle, 2);
+        Ok(Self { handle, canvas: Canvas::new(CHIP_PX[0], CHIP_PX[1]), shown: None })
+    }
+
+    /// Where it shows, and whether a hand points at it; or nowhere.
+    pub(super) fn update(&mut self, overlay: &vr::Overlay, presenter: &mut Presenter, at: Option<(vr::Matrix34, bool)>) {
+        let Some((place, pointed)) = at else {
+            if self.shown.take().is_some() {
+                let _ = overlay.hide(self.handle);
+            }
+            return;
+        };
+        if self.shown != Some(pointed) {
+            if self.shown.is_none() {
+                self.canvas.invalidate();
+            }
+            for _ in 0..2 {
+                self.canvas.paint(0.0, |p| paint_chip(p, pointed));
+            }
+            if let Some(changed) = self.canvas.damage() {
+                presenter.show_part(overlay, self.handle, self.canvas.pixels(), CHIP_PX[0], CHIP_PX[1], changed);
+            }
+        }
+        let _ = overlay.set_transform_absolute(self.handle, &place);
+        if self.shown.is_none() {
+            let _ = overlay.show(self.handle);
+        }
+        self.shown = Some(pointed);
+    }
+
+    pub fn destroy(&self, overlay: &vr::Overlay) {
+        let _ = overlay.destroy(self.handle);
+    }
+}
+
+/// Where a view's Hide lies, facing `eye`, and whether a laser (its origin and direction) or a hand's tip is on it.
+pub fn chip_place(at: V3, radius: f32, eye: V3) -> vr::Matrix34 {
+    facing(stereo::add(at, [0.0, -(radius * 0.45 + 0.05), 0.0]), eye)
+}
+
+/// Whether a tool at `tip`, pointing along `along`, is on a chip at `place`: its ray within a generous margin, or itself close by.
+pub fn on_chip(place: &vr::Matrix34, tip: V3, along: V3) -> bool {
+    let middle = stereo::position(place);
+    if stereo::length(stereo::sub(tip, middle)) < 0.09 {
+        return true;
+    }
+    let normal = stereo::axis(place, 2);
+    let facing = stereo::dot(along, normal);
+    if facing.abs() < 1e-3 {
+        return false;
+    }
+    let distance = stereo::dot(stereo::sub(middle, tip), normal) / facing;
+    if distance <= 0.0 {
+        return false;
+    }
+    let hit = stereo::sub(stereo::add(tip, stereo::scale(along, distance)), middle);
+    stereo::dot(hit, stereo::axis(place, 0)).abs() <= CHIP_WIDTH_M * 0.8 && stereo::dot(hit, stereo::axis(place, 1)).abs() <= CHIP_WIDTH_M * 0.4
 }
 
 /// Its overlay.
@@ -167,7 +261,7 @@ impl SmallHint {
     }
 
     /// Shows what is wanted, above where what it speaks of is and how far that reaches, facing `head`; or nothing.
-    pub fn update(&mut self, overlay: &vr::Overlay, presenter: &mut Presenter, head: &vr::Matrix34, wanted: Option<(Stage, V3, f32)>, moves: bool) {
+    pub(super) fn update(&mut self, overlay: &vr::Overlay, presenter: &mut Presenter, head: &vr::Matrix34, wanted: Option<(Stage, V3, f32)>, moves: bool) {
         let Some((stage, at, radius)) = wanted else {
             if self.shown.take().is_some() {
                 let _ = overlay.hide(self.handle);
@@ -188,8 +282,7 @@ impl SmallHint {
                 presenter.show_part(overlay, self.handle, self.canvas.pixels(), PX[0], PX[1], changed);
             }
         }
-        let place = stereo::add(at, [0.0, radius + ABOVE_M, 0.0]);
-        let _ = overlay.set_transform_absolute(self.handle, &facing(place, stereo::position(head)));
+        let _ = overlay.set_transform_absolute(self.handle, &facing(hint_place(at, radius), stereo::position(head)));
         if self.shown.is_none() {
             let _ = overlay.show(self.handle);
         }
@@ -224,14 +317,14 @@ impl Backdrop {
                 // Lightest in its middle, as a lit stage.
                 let (u, v) = (x as f32 / (Self::PX[0] - 1) as f32 * 2.0 - 1.0, y as f32 / (Self::PX[1] - 1) as f32 * 2.0 - 1.0);
                 let light = (1.0 - (u * u + v * v) * 0.5).clamp(0.0, 1.0);
-                pixels.extend_from_slice(&[(14.0 + 18.0 * light) as u8, (16.0 + 20.0 * light) as u8, (20.0 + 26.0 * light) as u8, 255]);
+                pixels.extend_from_slice(&[(26.0 + 44.0 * light) as u8, (30.0 + 48.0 * light) as u8, (38.0 + 58.0 * light) as u8, 255]);
             }
         }
         Ok(Self { handle, pixels, painted: false, shown: false })
     }
 
     /// At `place` (the middle of the hole), `width` across; or nowhere.
-    pub fn update(&mut self, overlay: &vr::Overlay, presenter: &mut Presenter, place: Option<(vr::Matrix34, f32)>) {
+    pub(super) fn update(&mut self, overlay: &vr::Overlay, presenter: &mut Presenter, place: Option<(vr::Matrix34, f32)>) {
         let Some((at, width)) = place else {
             if std::mem::take(&mut self.shown) {
                 let _ = overlay.hide(self.handle);
@@ -254,6 +347,12 @@ impl Backdrop {
     }
 }
 
+/// Where the hint's middle lies, for what it speaks of at `at` reaching `radius`: just over its middle, as most captures are flatter than they are wide, its tail towards it.
+pub fn hint_place(at: V3, radius: f32) -> V3 {
+    let height = WIDTH_M * PX[1] as f32 / PX[0] as f32;
+    stereo::add(at, [0.0, radius * 0.42 + height / 2.0 + ABOVE_M, 0.0])
+}
+
 /// Upright at `place`, its face towards `eye`.
 pub fn facing(place: V3, eye: V3) -> vr::Matrix34 {
     let to = stereo::sub(eye, place);
@@ -267,9 +366,9 @@ pub fn facing(place: V3, eye: V3) -> vr::Matrix34 {
 /// For the offline review: `small-hint-<what>.png`.
 pub fn shots(out: &std::path::Path) -> anyhow::Result<()> {
     let stages = [
-        ("stick-up", Stage::Stick, CYCLE_S * 0.25),
-        ("stick-middle", Stage::Stick, 0.0),
-        ("stick-down", Stage::Stick, CYCLE_S * 0.75),
+        ("stick-up", Stage::Stick { hand: 1 }, CYCLE_S * 0.25),
+        ("stick-middle", Stage::Stick { hand: 0 }, 0.0),
+        ("stick-down", Stage::Stick { hand: 1 }, CYCLE_S * 0.75),
         ("grip", Stage::Grip { near: false }, 0.0),
         ("grip-near", Stage::Grip { near: true }, 0.0),
     ];
@@ -293,6 +392,23 @@ mod tests {
         assert_eq!(stick_at(CYCLE_S * 0.75), -1.0);
         assert_eq!(stick_at(CYCLE_S * 0.2), 1.0, "a moment at the top");
         assert!(stick_at(0.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn its_hide_is_found_by_a_laser_with_room_to_spare_or_by_a_hand_near_it() {
+        let place = chip_place([0.0, 1.4, -0.6], 0.3, [0.0, 1.6, 0.0]);
+        let middle = stereo::position(&place);
+        // From the chest, straight at it.
+        let tip = [0.0, 1.0, -0.2];
+        let along = stereo::sub(middle, tip);
+        let along = stereo::scale(along, 1.0 / stereo::length(along));
+        assert!(on_chip(&place, tip, along));
+        // A little off is still on it, well off is not, and pointing away is not.
+        assert!(on_chip(&place, stereo::add(tip, [0.05, 0.0, 0.0]), along));
+        assert!(!on_chip(&place, stereo::add(tip, [0.3, 0.0, 0.0]), along));
+        assert!(!on_chip(&place, tip, stereo::scale(along, -1.0)));
+        // A hand there needs no aim.
+        assert!(on_chip(&place, stereo::add(middle, [0.03, 0.0, 0.0]), [0.0, 1.0, 0.0]));
     }
 
     #[test]

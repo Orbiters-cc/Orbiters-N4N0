@@ -159,6 +159,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         let places = open.map_or_else(Vec::new, |menu| zones::layout(menu, size));
         panels.takeover_place = zones::place(Zone::Takeover, size);
         panels.back_place = zones::place(Zone::SheetBack, size);
+        panels.hint_place = zones::place(Zone::SheetHint, size);
         panels.set_open(open, places, &snap);
         panels.follow_note(&snap);
         if panels.is_empty() {

@@ -395,7 +395,7 @@ pub(super) fn vr_shots(out: &Path, refs: &Path) -> anyhow::Result<()> {
             let at = space::compose(&page_quad.transform, &there);
             let radius = hole.width() / 1024.0 * page_quad.width / 2.0 * crate::overlay::worlds::SMALL_FILLS_HOLE;
             let dock = stereo::SmallDock::behind(&capture.view, &at, radius);
-            let small = stereo::Small::new(&capture.view, &head, capture.small_reach()).at_dock(&dock);
+            let small = stereo::Small::new(&capture.view, &head, capture.small_reach()).at_dock(&dock).zoomed_in(0.7);
             // Docked.
             let worlds = Facts { sheet: Some(Sheet::Worlds), sheet_title: "Worlds in 3D".into(), view_showing: true, view_small: true, sheet_hole: Some(egui::Rect::from_min_max(pos2(hole.min.x * 0.6875, hole.min.y * 0.6875 + 52.0), pos2(hole.max.x * 0.6875, hole.max.y * 0.6875 + 52.0))), ..facts.clone() };
             let center_units = zones::Placed { zone: Zone::SheetBack, rect: qm_units, center: pos2(0.0, 0.0), unit: 1.0 };
@@ -408,7 +408,7 @@ pub(super) fn vr_shots(out: &Path, refs: &Path) -> anyhow::Result<()> {
             for zone in Zone::QUICK_MENU {
                 let placed = zones::in_units(zone);
                 let (pixels, px) = sharp_picture(&placed, &worlds, None, 2.0);
-                eye.quad(&plane.quad(&placed, 0.0, 0.004), &pixels, px, 1.0);
+                eye.quad(&plane.quad(&placed, 0.0, 0.016), &pixels, px, 1.0);
             }
             let back = zones::in_units(Zone::SheetBack);
             let (pixels, px) = sharp_picture(&back, &worlds, None, 2.0);
@@ -417,15 +417,15 @@ pub(super) fn vr_shots(out: &Path, refs: &Path) -> anyhow::Result<()> {
             eye.save(out, "vr-small-in-the-panel")?;
             // In a hand, with what says how to zoom it.
             let mut held = stereo::Small::new(&capture.view, &head, capture.small_reach());
-            held.anchor = [0.02, 1.46, -0.70];
+            held.anchor = [0.02, 1.42, -0.58];
             let mut eye = Eye::new(size, &ground, eyes);
             eye.over(&model(&held)?);
             let hint_px = small_hint::PX;
             let mut canvas = Canvas::new(hint_px[0], hint_px[1]);
             for _ in 0..2 {
-                canvas.paint(0.0, |p| small_hint::paint(p, small_hint::Stage::Stick, 0.65));
+                canvas.paint(0.0, |p| small_hint::paint(p, small_hint::Stage::Stick { hand: 1 }, 0.65));
             }
-            let up = [held.anchor[0], held.anchor[1] + held.radius() + 0.09, held.anchor[2]];
+            let up = small_hint::hint_place(held.anchor, held.radius());
             let hint_frame = small_hint::facing(up, space::position(&head));
             let hint_w = small_hint::WIDTH_M;
             eye.quad(&Quad { transform: hint_frame, width: hint_w, height: hint_w * hint_px[1] as f32 / hint_px[0] as f32 }, canvas.pixels(), hint_px, 1.0);
@@ -486,6 +486,19 @@ pub(super) fn shots(out: &Path) -> anyhow::Result<()> {
     qm_scene("orbit-sheet-all-vr", out, hd, &Facts { desktop: false, can_call: true, can_states: true, can_light: true, sheet: Some(Sheet::All), sheet_title: "All tools".into(), ..idle.clone() }, None, Some(Sheet::All))?;
     qm_scene("orbit-sheet-pictures", out, hd, &Facts { sheet: Some(Sheet::Pictures), sheet_title: "Pictures".into(), ..idle.clone() }, None, Some(Sheet::Pictures))?;
     let lines = vec![(true, "What's the weather like in Paris?".to_string()), (false, "It is 14 degrees and raining in Paris, with clear skies expected by this evening.".to_string()), (true, "Find a world with rain".to_string()), (false, "After The Rain has a 3D capture you can walk in. Open Worlds in 3D to see it.".to_string())];
+    // YouTube's results, stand-in pictures and names: a search needs typing, which no test does in the game.
+    let videos: Vec<panels::VideoTile> = [
+        ("Rain on a forest cabin, 8 hours", "Quiet Hours", "8:00:12"),
+        ("Lo-fi beats for late-night worlds", "Night Radio", "1:12:03"),
+        ("Moth to a Flame (official video)", "The Weeknd", "3:54"),
+        ("Why VR worlds feel so big", "Spatial Notes", "14:21"),
+        ("Ambient synth for building things", "Slow Machines", "58:40"),
+        ("A walk through a rainy city at night", "Wander", "22:09"),
+    ]
+    .iter()
+    .map(|(title, channel, duration)| panels::VideoTile { title: title.to_string(), channel: channel.to_string(), duration: Some(duration.to_string()), picture: None })
+    .collect();
+    qm_scene("orbit-sheet-results", out, hd, &Facts { sheet: Some(Sheet::Results), sheet_title: "YouTube".into(), videos, videos_for: "rain sounds".into(), beside_wing: true, ..idle.clone() }, None, Some(Sheet::Results))?;
     qm_scene("orbit-sheet-talk", out, hd, &Facts { sheet: Some(Sheet::Talk), sheet_title: "Ask N4N0".into(), talk_lines: lines.clone(), beside_wing: true, ..idle.clone() }, None, Some(Sheet::Talk))?;
     qm_scene("orbit-sheet-talk-listening", out, hd, &Facts { sheet: Some(Sheet::Talk), sheet_title: "Ask N4N0".into(), talk_lines: lines, talk: crate::overlay::orbit::panels::TalkNow::Listening(0.6), beside_wing: true, ..idle.clone() }, None, Some(Sheet::Talk))?;
     qm_scene("orbit-sheet-countdown", out, hd, &Facts { sheet: Some(Sheet::Pictures), sheet_title: "Pictures".into(), ..counting.clone() }, None, Some(Sheet::Pictures))?;
@@ -544,6 +557,9 @@ fn sheet_picture(sheet: panels::Sheet, facts: &Facts, px: [u32; 2]) -> Vec<u8> {
     let textures: Vec<_> = (0..4).map(|i| canvas.ctx().load_texture("recent", stand_in(i), TextureOptions::LINEAR)).collect();
     let mut facts = facts.clone();
     facts.recent_pictures = textures.iter().enumerate().map(|(n, texture)| (n, texture.id())).collect();
+    for (n, video) in facts.videos.iter_mut().enumerate() {
+        video.picture = Some(textures[n % textures.len()].id());
+    }
     for _ in 0..2 {
         canvas.paint(0.0, |p| panels::paint_sheet(p, sheet, &facts, None, None));
     }

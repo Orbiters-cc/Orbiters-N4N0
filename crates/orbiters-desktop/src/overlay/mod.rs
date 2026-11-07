@@ -799,7 +799,9 @@ fn session(args: &[String]) -> anyhow::Result<Ended> {
             t.menu.worlds.small_place(turn.small_place);
             if t.menu.worlds.small_showing() {
                 let sticks = actions.pads(&steamvr).map_or([0.0; 2], |pads| [pads.sticks[0].y, pads.sticks[1].y]);
-                t.menu.worlds.small_input(actions.lasers(&steamvr, 0.0), actions.grabs(&steamvr), sticks);
+                let lasers = actions.lasers(&steamvr, 0.0);
+                t.menu.worlds.small_input(lasers, actions.grabs(&steamvr), sticks);
+                t.menu.worlds.small_tools(lasers, actions.orbit_triggers(&steamvr, [false; 2]));
             }
         }
         if t.menu.update(&overlay, &steamvr, &mut presenter, &snap, &backend, button, watch) {

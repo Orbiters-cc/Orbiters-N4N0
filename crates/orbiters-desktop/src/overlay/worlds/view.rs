@@ -48,6 +48,8 @@ const FADE_IN: Duration = Duration::from_millis(450);
 const FADE_OUT: Duration = Duration::from_millis(350);
 /// The overlays' alpha with "See VRChat" on.
 pub const SEE_THROUGH_ALPHA: f32 = 0.55;
+/// In a panel's hole a capture shows less of itself, larger: there is not much room for a whole scene.
+const SMALL_CLOSER_IN_A_HOLE: f32 = 0.7;
 
 /// How sharp the faces are: pixels per eye across a face.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
@@ -660,7 +662,7 @@ impl View {
             self.small_coming = None;
             let mut small = stereo::Small::new(&sorted.view, &head_pose(steamvr, 0.0), sorted.small_reach());
             if let Some((at, radius)) = self.small_place {
-                small = small.at_dock(&stereo::SmallDock::behind(&sorted.view, &at, radius));
+                small = small.at_dock(&stereo::SmallDock::behind(&sorted.view, &at, radius)).zoomed_in(SMALL_CLOSER_IN_A_HOLE);
             }
             self.placement = Some(small.placement(sorted.view.eye()));
             self.small = Some(small);

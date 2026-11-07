@@ -471,27 +471,35 @@ const SIDE_LEFT: f32 = 676.0;
 const SIDE_RIGHT: f32 = 1000.0;
 /// Its picture; where a capture standing small is seen through it.
 pub const SIDE_HERO: Rect = Rect { min: Pos2 { x: SIDE_LEFT, y: 24.0 }, max: Pos2 { x: SIDE_RIGHT, y: 206.0 } };
-const SIDE_CLOSE: Rect = Rect { min: Pos2 { x: 958.0, y: 32.0 }, max: Pos2 { x: 992.0, y: 66.0 } };
+/// Hides it: a tab on its edge, far from the sheet's own X.
+const SIDE_CLOSE: Rect = Rect { min: Pos2 { x: 654.0, y: 256.0 }, max: Pos2 { x: 674.0, y: 320.0 } };
 const SMALL_BACK: Rect = Rect { min: Pos2 { x: 862.0, y: 162.0 }, max: Pos2 { x: 992.0, y: 198.0 } };
-const SHOW: Rect = Rect { min: Pos2 { x: SIDE_LEFT, y: 290.0 }, max: Pos2 { x: 835.0, y: 334.0 } };
-const SHOW_SMALL: Rect = Rect { min: Pos2 { x: 841.0, y: 290.0 }, max: Pos2 { x: SIDE_RIGHT, y: 334.0 } };
-const SHOW_WHOLE: Rect = Rect { min: Pos2 { x: SIDE_LEFT, y: 290.0 }, max: Pos2 { x: SIDE_RIGHT, y: 334.0 } };
-const LIKE: Rect = Rect { min: Pos2 { x: SIDE_LEFT, y: 342.0 }, max: Pos2 { x: 835.0, y: 382.0 } };
-const COMMENTS: Rect = Rect { min: Pos2 { x: 841.0, y: 342.0 }, max: Pos2 { x: SIDE_RIGHT, y: 382.0 } };
-const PICTURES: Rect = Rect { min: Pos2 { x: SIDE_LEFT, y: 478.0 }, max: Pos2 { x: 835.0, y: 518.0 } };
-const OTHER: Rect = Rect { min: Pos2 { x: 841.0, y: 478.0 }, max: Pos2 { x: SIDE_RIGHT, y: 518.0 } };
-const TEASER: Rect = Rect { min: Pos2 { x: SIDE_LEFT, y: 524.0 }, max: Pos2 { x: SIDE_RIGHT, y: 556.0 } };
+/// What to do with it first; then going there; then its four small tiles.
+const SHOW: Rect = Rect { min: Pos2 { x: SIDE_LEFT, y: 296.0 }, max: Pos2 { x: 835.0, y: 340.0 } };
+const SHOW_SMALL: Rect = Rect { min: Pos2 { x: 841.0, y: 296.0 }, max: Pos2 { x: SIDE_RIGHT, y: 340.0 } };
+const SHOW_WHOLE: Rect = Rect { min: Pos2 { x: SIDE_LEFT, y: 296.0 }, max: Pos2 { x: SIDE_RIGHT, y: 340.0 } };
+const GO: Rect = Rect { min: Pos2 { x: SIDE_LEFT, y: 346.0 }, max: Pos2 { x: 835.0, y: 386.0 } };
+const WEB: Rect = Rect { min: Pos2 { x: 841.0, y: 346.0 }, max: Pos2 { x: SIDE_RIGHT, y: 386.0 } };
+const WEB_WHOLE: Rect = Rect { min: Pos2 { x: SIDE_LEFT, y: 346.0 }, max: Pos2 { x: SIDE_RIGHT, y: 386.0 } };
+const OTHER: Rect = Rect { min: Pos2 { x: 868.0, y: 506.0 }, max: Pos2 { x: SIDE_RIGHT, y: 530.0 } };
+const TEASER: Rect = Rect { min: Pos2 { x: SIDE_LEFT, y: 534.0 }, max: Pos2 { x: SIDE_RIGHT, y: 558.0 } };
+const LIKE: Rect = small_tile(0);
+const COMMENTS: Rect = small_tile(1);
+const PICTURES: Rect = small_tile(2);
+const LABELS: Rect = small_tile(3);
+
+/// One of the four small tiles under what to do.
+const fn small_tile(i: usize) -> Rect {
+    let width = (SIDE_RIGHT - SIDE_LEFT - 18.0) / 4.0;
+    let x = SIDE_LEFT + i as f32 * (width + 6.0);
+    Rect { min: Pos2 { x, y: 394.0 }, max: Pos2 { x: x + width, y: 434.0 } }
+}
+
 /// Beside the side panel: the row of what is browsed gets narrower, and the field and its pages.
 const SIDE_SORT: Rect = Rect { min: Pos2 { x: 540.0, y: 96.0 }, max: Pos2 { x: 592.0, y: 136.0 } };
 const SIDE_FILTER: Rect = Rect { min: Pos2 { x: 600.0, y: 96.0 }, max: Pos2 { x: 652.0, y: 136.0 } };
 const SIDE_PREVIOUS: Pos2 = Pos2 { x: 572.0, y: 52.0 };
 const SIDE_NEXT: Pos2 = Pos2 { x: 628.0, y: 52.0 };
-
-/// The labels given most, on the side panel.
-const TOP_LABELS: usize = 2;
-fn top_label_rect(k: usize) -> Rect {
-    Rect::from_min_size(pos2(SIDE_LEFT + k as f32 * 124.0, 390.0), vec2(if k < TOP_LABELS { 118.0 } else { 76.0 }, 30.0))
-}
 
 /// `color` over `outer`, rounded by `outer_radius`, but for `hole`, rounded by `hole_radius`, where what is behind shows.
 pub fn fill_around(p: &Painter, outer: Rect, outer_radius: f32, hole: Rect, hole_radius: f32, color: Color32) {
@@ -660,6 +668,21 @@ impl Panel {
             || self.note.as_ref().is_some_and(|(_, at)| time - at < NOTE_FOR + 0.1)
     }
 
+    /// Showing the captures, of which there are few.
+    fn few_captures(&self, d: &Data) -> bool {
+        !self.searching(d) && self.section == Section::Captures && !self.filtered() && self.results(d).len() <= 3
+    }
+
+    /// Where else to go from few captures.
+    fn few_targets(&self, side: bool) -> [(Section, &'static str, Rect); 2] {
+        let (x, width) = if side { (106.0, 220.0) } else { (272.0, 232.0) };
+        let (y, gap) = if side { (472.0, 8.0) } else { (486.0, 16.0) };
+        [
+            (Section::Popular, icons::GLOBE_HEMISPHERE_WEST, Rect::from_min_size(pos2(x, y), vec2(width, 52.0))),
+            (Section::Active, icons::USERS, Rect::from_min_size(pos2(x + width + gap, y), vec2(width, 52.0))),
+        ]
+    }
+
     /// The browse page's pressable things, at full width or beside the side panel.
     fn browse_targets(&self, d: &Data, out: &mut Vec<(Target, Rect)>, side: bool) {
         let results = self.results(d);
@@ -685,6 +708,11 @@ impl Panel {
         let first = self.results_page.min(pages - 1) * PER_PAGE;
         for (i, _) in results.iter().enumerate().skip(first).take(PER_PAGE) {
             out.push((Target::Card(i), if side { side_card_rect(i - first) } else { card_rect(i - first) }));
+        }
+        if !results.is_empty() && self.few_captures(d) {
+            for (s, _, rect) in self.few_targets(side) {
+                out.push((Target::Section(s), rect));
+            }
         }
         if results.is_empty() && self.failure(d).is_some() && !side {
             out.push((Target::Retry, Rect::from_center_size(pos2(512.0, 420.0), vec2(200.0, 56.0))));
@@ -736,24 +764,25 @@ impl Panel {
                     out.push((Target::Show, SHOW));
                     out.push((Target::ShowSmall, SHOW_SMALL));
                 }
+                // Going there, from a capture as from any world; else its page on VRChat alone.
+                let web = super::finder::web_link(&e.world_id).is_some();
+                if e.capture {
+                    out.push((Target::Join, if web { GO } else { WEB_WHOLE }));
+                    if web {
+                        out.push((Target::OpenWeb, WEB));
+                    }
+                } else if web {
+                    out.push((Target::OpenWeb, WEB_WHOLE));
+                }
                 out.push((Target::Like, LIKE));
                 out.push((Target::Comments, COMMENTS));
                 out.push((Target::Comments, TEASER));
-                let wf = d.world_feedback(e);
-                let top = wf.top();
-                for (k, l) in top.iter().take(TOP_LABELS).enumerate() {
-                    if let Some(i) = contract::labels().iter().position(|x| x.id == l.id) {
-                        out.push((Target::Label(i as u8), top_label_rect(k)));
-                    }
-                }
-                out.push((Target::Labels, top_label_rect(top.len().min(TOP_LABELS))));
                 if d.facts_of(e).is_some_and(|f| f.picture_count > 0) || e.pictures > 0 {
                     out.push((Target::Pictures, PICTURES));
                 }
+                out.push((Target::Labels, LABELS));
                 if !d.others(e).is_empty() {
                     out.push((Target::Other, OTHER));
-                } else if super::finder::web_link(&e.world_id).is_some() {
-                    out.push((Target::OpenWeb, OTHER));
                 }
             }
             Page::Filter | Page::Labels | Page::Comments | Page::Compose(_) | Page::Pictures => self.page_targets(d, &mut out),
@@ -1271,6 +1300,14 @@ impl Panel {
             p.circle_filled(CLEAR.center(), if pr { 18.0 } else { 20.0 }, if h { RAISED } else { SURFACE });
             widgets::icon(p, CLEAR.center(), icons::X, 18.0, theme::FG_2);
         }
+        // Few captures yet: the free space goes on to the worlds that are there.
+        if !results.is_empty() && self.few_captures(d) {
+            for (i, (s, glyph, rect)) in self.few_targets(side).into_iter().enumerate() {
+                let (h, pr) = state(Target::Section(s));
+                let label = if i == 0 { "Popular worlds" } else { "Active now" };
+                pill_button(p, rect, Some(glyph), label, if h { RAISED2 } else { RAISED }, theme::FG, h, pr, 1.0);
+            }
+        }
         if !results.is_empty() && current * PER_PAGE >= results.len() {
             text(p, pos2(if side { 340.0 } else { 512.0 }, 330.0), Align2::CENTER_CENTER, Txt::new("Finding more worlds…", 19.0).color(fade(theme::FG_3, shown)));
         }
@@ -1294,16 +1331,16 @@ impl Panel {
         if side {
             if results.is_empty() {
                 text(p, pos2(340.0, 330.0), Align2::CENTER_CENTER, Txt::new("Nothing else here", 18.0).color(theme::FG_3));
-            } else if !self.searching(d) && self.section == Section::Captures && results.len() <= 3 {
-                text(p, pos2(340.0, 452.0), Align2::CENTER_CENTER, Txt::new("Few worlds have a capture yet", 17.0).weight(weight::MEDIUM).color(theme::FG_2));
-                text(p, pos2(340.0, 480.0), Align2::CENTER_CENTER, Txt::new("Search any world, or look through Popular", 15.0).color(theme::FG_3));
+            } else if self.few_captures(d) {
+                text(p, pos2(340.0, 420.0), Align2::CENTER_CENTER, Txt::new("Few worlds have a 3D capture yet", 17.0).weight(weight::MEDIUM).color(theme::FG_2));
+                text(p, pos2(340.0, 448.0), Align2::CENTER_CENTER, Txt::new("Search any world above, or look through these", 15.0).color(theme::FG_3));
             }
         } else if results.is_empty() {
             self.empty(p, d, shown, state(Target::Retry));
-        } else if !self.searching(d) && self.section == Section::Captures && results.len() <= 3 {
+        } else if self.few_captures(d) {
             // Few worlds have a capture yet: the free space says what these are, and where the others are.
-            text(p, pos2(512.0, 452.0), Align2::CENTER_CENTER, Txt::new("Worlds members captured in 3D: open one to walk in it", 19.0).weight(weight::SEMIBOLD).color(fade(theme::FG, shown)));
-            text(p, pos2(512.0, 484.0), Align2::CENTER_CENTER, Txt::new("Search any world above, or look through Popular: those with a capture carry the 3D mark", 16.0).color(fade(theme::FG_3, shown)));
+            text(p, pos2(512.0, 424.0), Align2::CENTER_CENTER, Txt::new("Worlds people captured in 3D: open one to walk in it", 19.0).weight(weight::MEDIUM).color(fade(theme::FG, shown)));
+            text(p, pos2(512.0, 456.0), Align2::CENTER_CENTER, Txt::new("Few have one yet. Search any world above, or look through these", 16.0).color(fade(theme::FG_3, shown)));
         }
     }
 
@@ -1415,27 +1452,26 @@ impl Panel {
                 text_cut(p, pos2(hero.min.x + 16.0, foot.center().y), hero.width() - 32.0, Txt::new(line, 15.0).color(fade(theme::FG_2, rest)));
             }
         }
-        // Its way out, over the picture.
+        // Its way out, on its edge.
         let (h, pr) = state(Target::CloseSide);
-        let close = SIDE_CLOSE;
-        p.circle_filled(close.center(), if pr { 15.0 } else { 17.0 }, if h { theme::black(0.9) } else { theme::black(0.62) });
-        widgets::icon(p, close.center(), icons::X, 17.0, theme::FG);
-        // Its name and who made it.
+        let tab = if pr { SIDE_CLOSE.shrink(1.0) } else { SIDE_CLOSE };
+        p.rect_filled(tab, CornerRadius::same(10), if h { RAISED2 } else { RAISED });
+        widgets::icon(p, tab.center(), icons::CARET_RIGHT, 16.0, theme::FG_2);
+        // Its name, as long as it is; who made it.
         let (x, width) = (SIDE_LEFT, SIDE_RIGHT - SIDE_LEFT);
-        let title = Txt::new(entry.name.clone(), 22.0).weight(weight::SEMIBOLD).color(fade(theme::FG, rest));
-        let galley = p.layout_job(title.job_truncated(width));
-        p.galley(pos2(x, 214.0), galley, theme::FG);
+        let mut title = Txt::new(entry.name.clone(), 21.0).weight(weight::SEMIBOLD).color(fade(theme::FG, rest)).job(width);
+        title.wrap.max_rows = 2;
+        let galley = p.layout_job(title);
+        let two_rows = galley.size().y > 34.0;
+        p.galley(pos2(x, if two_rows { 212.0 } else { 224.0 }), galley, theme::FG);
         let facts = d.facts_of(entry);
         let mut under = Vec::new();
         if let Some(author) = d.author(entry) {
             under.push(format!("by {author}"));
         }
-        if entry.capture {
-            under.push(format!("{} splats", short_count(entry.splats as u64)));
-            if !entry.official {
-                if let Some(u) = &entry.uploader {
-                    under.push(format!("3D by {u}"));
-                }
+        if entry.capture && !entry.official {
+            if let Some(u) = &entry.uploader {
+                under.push(format!("3D by {u}"));
             }
         } else if let Some((last, visits)) = entry.visited {
             under.push(if visits == 1 { "Visited once".to_string() } else { format!("Visited {visits} times") });
@@ -1443,88 +1479,77 @@ impl Panel {
                 under.push(format!("last {}", orbiters_n4n0_core::feedback::ago(d.now.saturating_sub(last))));
             }
         }
-        text_cut(p, pos2(x, 256.0), width, Txt::new(under.join(" · "), 15.0).color(fade(theme::FG_3, rest)));
-        // What it can be seen as.
+        text_cut(p, pos2(x, 273.0), width, Txt::new(under.join(" \u{b7} "), 16.0).color(fade(theme::FG_2, rest)));
+        // What it can be seen as, and the rest.
         let wf = d.world_feedback(entry);
-        let on = |r: Rect| r;
-        let (h, pr) = state(Target::Like);
-        let (bg, fg) = if wf.liked { (theme::alpha(theme::REC, 0.22), theme::REC) } else { (RAISED, theme::FG) };
-        let likes = if wf.likes == 1 { "1 like".to_string() } else { format!("{} likes", short_count(wf.likes as u64)) };
-        icon_button(p, on(LIKE), icons::HEART, wf.liked, &likes, bg, fg, h, pr, rest * if wf.loading { 0.75 } else { 1.0 });
-        let (h, pr) = state(Target::Comments);
-        let comments = match wf.comment_count {
-            0 => "Comment".to_string(),
-            1 => "1 comment".to_string(),
-            n => format!("{n} comments"),
-        };
-        icon_button(p, on(COMMENTS), icons::CHAT_CIRCLE_TEXT, false, &comments, RAISED, theme::FG, h, pr, rest);
         for (t, rect) in targets {
             let (h, pr) = state(*t);
             match *t {
-                Target::Label(i) => {
-                    let Some(l) = contract::labels().get(i as usize) else { continue };
-                    let count = wf.label(&l.id).map_or(0, |c| c.count);
-                    label_chip(p, on(*rect), l.name("en"), Some(count), wf.has(&l.id), h, pr, rest);
-                }
-                Target::Labels => {
-                    let r = on(*rect);
-                    let r = if pr { r.shrink(1.5) } else { r };
-                    p.rect_filled(r, CornerRadius::same(15), fade(if h { RAISED2 } else { RAISED }, rest));
-                    widgets::icon(p, pos2(r.min.x + 18.0, r.center().y), icons::PLUS, 16.0, fade(theme::FG_2, rest));
-                    text(p, pos2(r.min.x + 32.0, r.center().y), Align2::LEFT_CENTER, Txt::new("Labels", 15.0).weight(weight::MEDIUM).color(fade(theme::FG_2, rest)));
-                }
                 Target::Show => {
                     let label = if !status.headset { "See it in 3D" } else { "Around me" };
-                    pill_button(p, on(*rect), Some(icons::CUBE), label, theme::ACCENT, theme::ON_ACCENT, h, pr, rest);
+                    pill_button(p, *rect, Some(icons::CUBE), label, theme::ACCENT, theme::ON_ACCENT, h, pr, rest);
                 }
-                Target::ShowSmall => pill_button(p, on(*rect), Some(icons::HAND_GRABBING), "Small here", if current { theme::ACCENT } else { RAISED2 }, if current { theme::ON_ACCENT } else { theme::FG }, h, pr, rest),
+                Target::ShowSmall => pill_button(p, *rect, Some(icons::HAND_GRABBING), "Small here", if current { theme::ACCENT } else { RAISED2 }, if current { theme::ON_ACCENT } else { theme::FG }, h, pr, rest),
                 Target::SmallBack => pill_button(p, *rect, Some(icons::ARROW_U_UP_LEFT), "Back here", theme::ACCENT, theme::ON_ACCENT, h, pr, rest),
                 Target::Join => {
-                    let (glyph, label) = if status.list.vrchat { (icons::ENVELOPE_SIMPLE, "Invite me") } else { (icons::PLAY, "Launch VRChat") };
-                    pill_button(p, on(*rect), Some(glyph), label, theme::ACCENT, theme::ON_ACCENT, h, pr, rest);
+                    let (glyph, label) = if status.list.vrchat { (icons::ENVELOPE_SIMPLE, "Invite me") } else { (icons::PLAY, "Go there") };
+                    if entry.capture {
+                        icon_button(p, *rect, glyph, false, label, RAISED2, theme::FG, h, pr, rest);
+                    } else {
+                        pill_button(p, *rect, Some(glyph), label, theme::ACCENT, theme::ON_ACCENT, h, pr, rest);
+                    }
                 }
-                Target::OpenWeb => icon_button(p, on(*rect), icons::ARROW_SQUARE_OUT, false, "On VRChat", RAISED, theme::FG, h, pr, rest),
+                Target::OpenWeb => icon_button(p, *rect, icons::ARROW_SQUARE_OUT, false, "On vrchat.com", RAISED, theme::FG, h, pr, rest),
+                Target::Like => {
+                    let (bg, fg) = if wf.liked { (theme::alpha(theme::REC, 0.22), theme::REC) } else { (RAISED, theme::FG) };
+                    icon_button(p, *rect, icons::HEART, wf.liked, &short_count(wf.likes as u64), bg, fg, h, pr, rest * if wf.loading { 0.75 } else { 1.0 });
+                }
+                Target::Comments if *rect == COMMENTS => icon_button(p, *rect, icons::CHAT_CIRCLE_TEXT, false, &wf.comment_count.to_string(), RAISED, theme::FG, h, pr, rest),
                 Target::Pictures => {
                     let n = facts.map_or(entry.pictures as usize, |f| f.picture_count.max(entry.pictures as usize));
-                    icon_button(p, on(*rect), icons::IMAGES, false, &format!("Pictures · {n}"), RAISED, theme::FG, h, pr, rest);
+                    icon_button(p, *rect, icons::IMAGES, false, &short_count(n as u64), RAISED, theme::FG, h, pr, rest);
+                }
+                Target::Labels => {
+                    let given = wf.top().len();
+                    icon_button(p, *rect, icons::TAG, false, &given.to_string(), RAISED, theme::FG, h, pr, rest);
                 }
                 Target::Other => {
                     let n = d.others(entry).len();
-                    let label = if n == 1 { "1 more".to_string() } else { format!("{n} more") };
-                    icon_button(p, on(*rect), icons::STACK, false, &label, RAISED, theme::FG, h, pr, rest);
+                    let label = if n == 1 { "1 more capture \u{203a}".to_string() } else { format!("{n} more \u{203a}") };
+                    text(p, pos2(rect.max.x, rect.center().y), Align2::RIGHT_CENTER, Txt::new(label, 14.0).weight(weight::SEMIBOLD).color(fade(if h { theme::FG } else { theme::ACCENT }, rest)));
                 }
                 _ => {}
             }
         }
-        // How smoothly VRChat runs there, or as much of the world's description as fits.
-        let mut y = 428.0;
+        // As much of the world's description as fits.
+        let description = if entry.description.trim().is_empty() { facts.and_then(|f| f.description.as_deref()).unwrap_or("") } else { entry.description.as_str() };
+        if !description.trim().is_empty() {
+            let mut job = Txt::new(description.split_whitespace().collect::<Vec<_>>().join(" "), 15.0).color(fade(theme::FG_2, rest)).job(width);
+            job.wrap.max_rows = 3;
+            p.galley(pos2(x, 441.0), p.layout_job(job), theme::FG_2);
+        }
+        // How smoothly VRChat runs there.
         if let Some(perf) = d.performance(entry) {
             let (word, tint) = verdict(perf);
-            chip(p, pos2(x, y), icons::GAUGE, &format!("{} fps · {word}", perf.fps), tint, rest);
-            y += 28.0;
-        }
-        let description = if entry.description.trim().is_empty() { facts.and_then(|f| f.description.as_deref()).unwrap_or("") } else { entry.description.as_str() };
-        let lines = ((474.0 - y) / 21.0).floor() as usize;
-        if !description.trim().is_empty() && lines > 0 {
-            let mut job = Txt::new(description.split_whitespace().collect::<Vec<_>>().join(" "), 15.0).color(fade(theme::FG_3, rest)).job(width);
-            job.wrap.max_rows = lines;
-            p.galley(pos2(x, y), p.layout_job(job), theme::FG_3);
+            chip(p, pos2(x, 505.0), icons::GAUGE, &format!("{} fps \u{b7} {word}", perf.fps), tint, rest);
         }
         // Why a press did nothing, what Orbiters refused, what went wrong with the capture; else the newest comment.
         let note = self.note(time).map(str::to_string).or_else(|| wf.error.clone()).or_else(|| status.error.clone().filter(|_| !current));
-        let (h, _) = state(Target::Comments);
+        let teaser_hover = self.hover == Some(Target::Comments);
         if let Some(note) = note {
             text_cut(p, pos2(x, TEASER.center().y), width, Txt::new(note, 14.0).color(fade(theme::WARN, rest)));
         } else {
             let teaser = TEASER;
-            p.rect_filled(teaser, CornerRadius::same(14), fade(if h { RAISED } else { CARD }, rest));
-            widgets::icon(p, pos2(teaser.min.x + 18.0, teaser.center().y), icons::QUOTES, 15.0, fade(theme::FG_4, rest));
+            if teaser_hover {
+                p.rect_filled(teaser, CornerRadius::same(12), fade(RAISED, rest));
+            }
+            widgets::icon(p, pos2(teaser.min.x + 12.0, teaser.center().y), icons::QUOTES, 15.0, fade(theme::FG_3, rest));
             let line = match wf.comments.first() {
                 Some(c) => format!("{}: {}", if c.by.is_empty() { "Someone" } else { c.by.as_str() }, c.text.split_whitespace().collect::<Vec<_>>().join(" ")),
-                None if wf.loading && wf.comment_count > 0 => "Reading the comments…".to_string(),
+                None if wf.loading && wf.comment_count > 0 => "Reading the comments\u{2026}".to_string(),
                 None => "No comment yet: be the first".to_string(),
             };
-            text_cut(p, pos2(teaser.min.x + 34.0, teaser.center().y), teaser.width() - 46.0, Txt::new(line, 14.0).color(fade(theme::FG_3, rest)));
+            text_cut(p, pos2(teaser.min.x + 28.0, teaser.center().y), teaser.width() - 34.0, Txt::new(line, 14.0).color(fade(theme::FG_2, rest)));
         }
     }
 }

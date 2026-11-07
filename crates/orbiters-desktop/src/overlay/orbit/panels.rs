@@ -600,7 +600,11 @@ pub fn items(zone: Zone, size: Vec2, facts: &Facts) -> Vec<Item> {
         Zone::BloomRecord => vec![Item { action: Action::Record, rect: whole, look: Look::Record }],
         Zone::BloomPrevious => vec![Item { action: Action::Previous, rect: whole, look: Look::Transport(icons::SKIP_BACK) }],
         Zone::BloomNext => vec![Item { action: Action::Next, rect: whole, look: Look::Transport(icons::SKIP_FORWARD) }],
-        Zone::WheelCaption | Zone::QmCaption => vec![Item { action: Action::Idle, rect: whole, look: Look::Caption }],
+        Zone::WheelCaption | Zone::QmCaption | Zone::CameraCaption => vec![Item { action: Action::Idle, rect: whole, look: Look::Caption }],
+        // Enzo: what takes a picture or reads a code, at the camera that does it.
+        Zone::CameraPeople => tile(Action::Picture(PhotoMode::People), icons::USERS, "3D of people", false),
+        Zone::CameraWorld => tile(Action::Picture(PhotoMode::World), icons::GLOBE_HEMISPHERE_WEST, "3D of world", false),
+        Zone::CameraQr => tile(Action::Page(Target::Qr), icons::QR_CODE, "QR code", false),
         Zone::WheelVeil => vec![Item { action: Action::Idle, rect: whole, look: Look::Blank }],
         Zone::WheelHide => vec![Item { action: Action::Hide, rect: whole, look: Look::HideWord }],
         // The wing's tiles, each a part of its own.

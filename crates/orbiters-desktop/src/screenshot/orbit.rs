@@ -100,7 +100,7 @@ fn stand_in_menu(around: Around, client: Vec2, canvas: &mut Canvas) {
             }
             p.circle_filled(center, 48.0 * unit, Color32::from_rgb(22, 34, 43));
         }
-        Around::QuickMenu => {
+        Around::QuickMenu | Around::Camera => {
             let r = |x0: f32, y0: f32, x1: f32, y1: f32| egui::Rect::from_min_max(center + vec2(x0, y0) * unit, center + vec2(x1, y1) * unit);
             p.rect_filled(r(-351.0, -150.0, 351.0, 186.0), 8.0, Color32::from_rgb(25, 34, 42));
             p.rect_filled(r(-188.0, -204.0, 188.0, 204.0), 8.0, Color32::from_rgb(22, 34, 43));
@@ -602,12 +602,48 @@ fn qm_scene(name: &str, out: &Path, client: Vec2, facts: &Facts, hover: Option<u
     Ok(())
 }
 
+/// The tiles around VRChat's camera, found by the tracker on Enzo's own picture of it, twice as large as a real window would show it: where they land, in pixels. The tracker reads the picture; nothing here is placed by hand.
+fn camera_scene(out: &Path, facts: &Facts) -> anyhow::Result<()> {
+    use crate::overlay::orbit::camera_track::{self, PANEL_CHEVRON, PANEL_X};
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/overlay/orbit/testdata_camera/camera-panel-752x417.jpg");
+    let picture = image::open(path)?.to_rgba8();
+    let (w, h) = (picture.width() * 2, picture.height() * 2);
+    let ground = image::imageops::resize(&picture, w, h, image::imageops::FilterType::Triangle);
+    let mut bgra = ground.as_raw().clone();
+    for p in bgra.chunks_exact_mut(4) {
+        p.swap(0, 2);
+    }
+    let found = camera_track::find(&bgra, w as usize, h as usize, w as usize * 4).ok_or_else(|| anyhow::anyhow!("no panel found"))?;
+    let (down, right) = (found.down, [found.down[1], -found.down[0]]);
+    let v = [found.chevron[0] - found.x[0], found.chevron[1] - found.x[1]];
+    let unit = (v[0] * down[0] + v[1] * down[1]) / (PANEL_CHEVRON[1] - PANEL_X[1]);
+    let center = egui::pos2(found.x[0] + (right[0] * -PANEL_X[0] + down[0] * -PANEL_X[1]) * unit, found.x[1] + (right[1] * -PANEL_X[0] + down[1] * -PANEL_X[1]) * unit);
+    let mut image = ground.as_raw().clone();
+    let facts = Facts { pointed: Some(panels::Action::Picture(orbiters_n4n0_core::menu::PhotoMode::People)), ..facts.clone() };
+    for zone in Zone::CAMERA {
+        let units = zone.units();
+        let rect = egui::Rect::from_min_max(center + units.min.to_vec2() * unit, center + units.max.to_vec2() * unit);
+        let placed = Placed { zone, rect: egui::Rect::from_min_max(rect.min.round(), rect.max.round()), center, unit };
+        let (pixels, px) = picture_of(&placed, &facts);
+        blit(&mut image, w, &pixels, px, placed.rect.min);
+    }
+    let path = out.join("orbit-camera-tiles.png");
+    save_png(&path, &over_ground(&image, w, h))?;
+    println!("{}", path.display());
+    Ok(())
+}
+
+fn picture_of(placed: &Placed, facts: &Facts) -> (Vec<u8>, [u32; 2]) {
+    picture(placed, facts, None, None)
+}
+
 /// The sheet of settings, and what it chooses: another accent, the retro look of one colour and with its pictures in theirs, the strip.
 fn settings_scenes(out: &Path, client: Vec2, idle: &Facts) -> anyhow::Result<()> {
     use orbiters_core::settings::{MenuLook, OrbitLayout, OrbitSettings};
     use panels::Sheet;
     let sheet = |orbit: OrbitSettings, which: Sheet, title: &str| Facts { orbit, sheet: Some(which), sheet_title: title.into(), beside_wing: true, vr_output: Some("Speakers (Realtek Audio)".into()), ..idle.clone() };
     let plain = OrbitSettings::default();
+    camera_scene(out, idle)?;
     qm_scene("orbit-settings", out, client, &sheet(plain, Sheet::Settings, "Settings"), None, Some(Sheet::Settings))?;
     let pink = OrbitSettings { accent: panels::SWATCHES[4], ..plain };
     panels::set_style(&pink);

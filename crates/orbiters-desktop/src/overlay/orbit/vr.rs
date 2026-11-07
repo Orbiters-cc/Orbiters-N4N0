@@ -457,6 +457,48 @@ pub struct Turn {
     pub(in crate::overlay) small_place: Option<(Matrix34, f32)>,
 }
 
+/// How old a frame of the window is when a look reads it. Not measured in a headset: VRChat's window shows, and the capture hands on, about this late.
+const CAMERA_FRAME_AGE: Duration = Duration::from_millis(45);
+/// How long the panel stays where it was with no look seeing it (a hand over it, a white world behind its X), and how many looks in a row it takes to show.
+const CAMERA_LOST_AFTER: Duration = Duration::from_millis(800);
+const CAMERA_LOOKS_TO_SHOW: u32 = 2;
+
+impl OrbitVr {
+    /// Where VRChat's camera panel is now, while it is being watched and was seen.
+    fn camera_turn(&mut self, steamvr: &vr::Client, prediction: f32, now: Instant, dt: f32) -> Option<Plane> {
+        let watch = self.camera_watch.as_ref()?;
+        let mut poses = [Pose::default(); MAX_DEVICES];
+        steamvr.predicted_poses(Universe::Standing, prediction, &mut poses);
+        if poses[0].pose_is_valid {
+            self.camera_heads.push_back((now, poses[0].device_to_absolute));
+            while self.camera_heads.len() > 60 {
+                self.camera_heads.pop_front();
+            }
+        }
+        if let Some(seen) = watch.take() {
+            let then = seen.at.checked_sub(CAMERA_FRAME_AGE).unwrap_or(seen.at);
+            let head = self.camera_heads.iter().min_by_key(|(at, _)| if *at > then { *at - then } else { then - *at }).map(|(_, h)| *h);
+            if let Some(head) = head {
+                let eye_on_head = steamvr.eye_to_head(vr::compositor::Eye::Left);
+                let mirror = super::camera_track::Mirror { tangents: steamvr.projection_raw(vr::compositor::Eye::Left), aspect: seen.size[0] / seen.size[1].max(1.0) };
+                let (frame, unit) = super::camera_track::panel_in_room(&seen.found, seen.size, &mirror, &space::compose(&head, &eye_on_head));
+                self.camera_follow.seen(frame, unit);
+                self.camera_seen = Some(now);
+                self.camera_looks = self.camera_looks.saturating_add(1);
+            }
+        }
+        if self.camera_seen.is_none_or(|at| now.duration_since(at) > CAMERA_LOST_AFTER) {
+            self.camera_follow.clear();
+            self.camera_looks = 0;
+            return None;
+        }
+        if self.camera_looks < CAMERA_LOOKS_TO_SHOW {
+            return None;
+        }
+        self.camera_follow.step(dt).map(|(frame, unit)| Plane { frame, unit })
+    }
+}
+
 pub struct OrbitVr {
     key: String,
     panels: Panels,
@@ -482,6 +524,13 @@ pub struct OrbitVr {
     /// Where the Quick Menu opened; where a page opened from the wheel goes.
     plane: Option<Plane>,
     takeover_plane: Option<Plane>,
+    /// VRChat's camera panel: what reads its window while its camera is open, where it was last seen, and how many looks in a row saw it.
+    camera_watch: Option<super::camera_frames::CameraWatch>,
+    camera_follow: super::camera_track::Follow,
+    camera_seen: Option<Instant>,
+    camera_looks: u32,
+    /// The head lately, for where it was when a look's frame was taken.
+    camera_heads: std::collections::VecDeque<(Instant, Matrix34)>,
     trigger_was: [bool; 2],
     pointing_since: Instant,
     last_turn: Instant,
@@ -516,6 +565,11 @@ impl OrbitVr {
             handles: HashMap::new(),
             plane: None,
             takeover_plane: None,
+            camera_watch: None,
+            camera_follow: Default::default(),
+            camera_seen: None,
+            camera_looks: 0,
+            camera_heads: Default::default(),
             trigger_was: [true; 2],
             pointing_since: now,
             last_turn: now,
@@ -653,9 +707,19 @@ impl OrbitVr {
         }
         self.camera_was = camera;
         let open = self.buttons.open();
+        // VRChat's camera panel, seen on its window while it says its camera is open, with neither of its menus up.
+        let camera_wanted = settings.camera_tiles && open == Open::Closed && camera == Some(true);
+        if camera_wanted != self.camera_watch.is_some() {
+            self.camera_watch = camera_wanted.then(super::camera_frames::CameraWatch::start);
+            self.camera_follow.clear();
+            self.camera_seen = None;
+            self.camera_looks = 0;
+        }
+        let camera_plane = self.camera_turn(cx.steamvr, cx.prediction, now, dt);
         let menu = match open {
             Open::QuickMenu(_) if settings.around_quick_menu() => Some(Around::QuickMenu),
             Open::Wheel(_) if settings.around_wheel() => Some(Around::Wheel),
+            Open::Closed if camera_plane.is_some() => Some(Around::Camera),
             _ => None,
         };
         if menu.is_none() && self.panels.is_empty() {
@@ -691,6 +755,7 @@ impl OrbitVr {
         }
         let plane = match (menu, open) {
             (Some(Around::Wheel), Open::Wheel(hand)) => devices[hand].map(|d| wheel_plane(&poses[d as usize].device_to_absolute, hand, &self.tune, settings.vr_size)),
+            (Some(Around::Camera), _) => camera_plane,
             (Some(Around::QuickMenu), Open::QuickMenu(hand)) => devices[hand].map(|d| quick_menu_plane(&poses[d as usize].device_to_absolute, hand, &self.tune, settings.vr_size)),
             _ => None,
         };
@@ -731,7 +796,14 @@ impl OrbitVr {
         if self.panels.takeover.is_some() && self.takeover_plane.is_none() && menu == Some(Around::Wheel) {
             self.takeover_plane = Some(sheet_plane(&head, settings.vr_size));
         }
-        if self.panels.takeover.is_none() || menu != Some(Around::Wheel) {
+        // From the camera, beside it: a code is read through it, so it must stay in view.
+        if self.panels.takeover.is_some() && self.takeover_plane.is_none() && menu == Some(Around::Camera) {
+            let sheet = sheet_plane(&head, settings.vr_size);
+            let left = -(301.0 * plane.unit + 360.0 * sheet.unit);
+            let beside = Matrix34 { m: [[1.0, 0.0, 0.0, left], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0]] };
+            self.takeover_plane = Some(Plane { frame: space::compose(&plane.frame, &beside), unit: sheet.unit });
+        }
+        if self.panels.takeover.is_none() || !matches!(menu, Some(Around::Wheel | Around::Camera)) {
             self.takeover_plane = None;
         }
         let sheet_up = self.panels.takeover.is_some();
@@ -889,7 +961,11 @@ impl OrbitVr {
         // VRChat's own menu, as far as it reaches round its plane, and each part of ours that shows. What is in a sheet's hole is told apart where it is used.
         turn.menus_up = quads.iter().zip(self.panels.all()).filter(|(_, p)| p.shown).map(|((q, _), _)| super::super::worlds::stereo::MenuBox { place: q.transform, width: q.width, height: q.height }).collect();
         if let Some(plane) = self.plane.as_ref() {
-            let (width, height) = if menu == Some(Around::Wheel) { (218.0, 218.0) } else { (704.0, 524.0) };
+            let (width, height) = match menu {
+                Some(Around::Wheel) => (218.0, 218.0),
+                Some(Around::Camera) => (super::camera_track::PANEL_SIZE[0], super::camera_track::PANEL_SIZE[1]),
+                _ => (704.0, 524.0),
+            };
             turn.menus_up.push(super::super::worlds::stereo::MenuBox { place: plane.frame, width: width * plane.unit, height: height * plane.unit });
         }
         turn.small_place = self.panels.small_place_on_sheet().and_then(|hole| {

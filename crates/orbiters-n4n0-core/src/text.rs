@@ -3,9 +3,20 @@
 //! arrive late see it whole.
 
 use orbiters_contracts::n4n0::{self, params, Page, POINTER_CLEAR, TEXT_LENGTH};
+use orbiters_i18n::{in_language, language, Language};
 use rosc::OscType;
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
+
+/// Runs `f`, a `tr!` or `tr_n` of a text, as the avatar's own screen needs it: that screen draws from a 256-glyph atlas with the accents of French,
+/// Spanish and Portuguese and no Japanese (`contracts/Docs/n4n0.md`, Glyphs), so in Japanese its text stays English, as `tr_latin` gives for a text without values.
+pub fn latin<R>(f: impl FnOnce() -> R) -> R {
+    if language() == Language::Ja {
+        in_language(Language::En, f)
+    } else {
+        f()
+    }
+}
 
 /// One OSC message to VRChat: an avatar parameter (full address) and its value.
 pub type Message = (String, OscType);
@@ -106,7 +117,7 @@ fn greek(c: char) -> Option<&'static str> {
         'Ε' | 'Έ' => "E",
         'Ζ' => "Z",
         'Η' | 'Ή' => "I",
-        'Θ' => "Th",
+        'Θ' => "Th", // i18n: not shown
         'Ι' | 'Ί' | 'Ϊ' => "I",
         'Κ' => "K",
         'Λ' => "L",
@@ -120,8 +131,8 @@ fn greek(c: char) -> Option<&'static str> {
         'Τ' => "T",
         'Υ' | 'Ύ' | 'Ϋ' => "Y",
         'Φ' => "F",
-        'Χ' => "Ch",
-        'Ψ' => "Ps",
+        'Χ' => "Ch", // i18n: not shown
+        'Ψ' => "Ps", // i18n: not shown
         'Ω' | 'Ώ' => "O",
         _ => return None,
     })

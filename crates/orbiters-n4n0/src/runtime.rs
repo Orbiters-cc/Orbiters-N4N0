@@ -24,12 +24,13 @@ use orbiters_contracts::n4n0::{self as contract, params};
 use orbiters_core::account::{Api, Server};
 use orbiters_core::osc::{OscValue, AVATAR_CHANGE, AVATAR_NAME, CAPTURE_PARAMETERS, PARAMETERS_PREFIX};
 use orbiters_core::settings::{N4n0Settings, PictureMode, Pin, Settings};
+use orbiters_i18n::{mark, tr, tr_latin};
 use orbiters_n4n0_core::assistant::{self, AssistantError, Display, Event, Input, Quota, Request, ToolCall, ToolResult};
 use orbiters_n4n0_core::context::{self, Moment, NAME_CHARS, URL_CHARS};
 use orbiters_n4n0_core::controls::{Controls, Setting};
 use orbiters_n4n0_core::menu::Pages;
 use orbiters_n4n0_core::policy::{self, TurnPolicy, Verdict};
-use orbiters_n4n0_core::text::{Message, TextSender};
+use orbiters_n4n0_core::text::{latin, Message, TextSender};
 use orbiters_n4n0_core::tools::{self, Action, Mood};
 use orbiters_n4n0_core::videos::{self, SavedVideo, Videos};
 use rosc::OscType;
@@ -639,11 +640,14 @@ impl N4n0 {
             match loaded {
                 videos::Loaded::Whole => {}
                 videos::Loaded::Partial(kept) => {
-                    let kept = kept.map(|p| format!(": the file as it was is kept as {}", p.display())).unwrap_or_default();
-                    rt.line(N4n0Who::Note, format!("Some saved videos could not be read{kept}."));
+                    let said = match kept {
+                        Some(p) => tr!("Some saved videos could not be read: the file as it was is kept as {path}.", path = p.display()),
+                        None => tr("Some saved videos could not be read.").to_string(),
+                    };
+                    rt.line(N4n0Who::Note, said);
                 }
                 videos::Loaded::Unreadable(e) => {
-                    rt.line(N4n0Who::Error, format!("N4N0's saved videos could not be read ({e}): they stay as they are until they can be."));
+                    rt.line(N4n0Who::Error, tr!("N4N0's saved videos could not be read ({error}): they stay as they are until they can be.", error = e));
                     rt.videos_unreadable = Some(e);
                 }
             }
@@ -726,9 +730,10 @@ impl N4n0 {
             rt.vrchat_running = vrchat;
             rt.tracking = smoothing.map(|note| TrackingView { on: tracking.enabled, levels: tracking.levels, note });
             if rt.tracking.is_none() {
-                rt.tracking_note = "Smoothing SteamVR's tracking needs Orbiters - N4N0 on the computer running SteamVR".into();
+                // Kept in English: the menus draw it through `tr`.
+                rt.tracking_note = mark("Smoothing SteamVR's tracking needs Orbiters - N4N0 on the computer running SteamVR").into();
             }
-            rt.versions = format!("N4N0 {} · App {app_version}", rt.n4n0_version.as_deref().unwrap_or("?"));
+            rt.versions = latin(|| tr!("N4N0 {version} · App {app_version}", version = rt.n4n0_version.as_deref().unwrap_or("?"), app_version = app_version));
             if let Some(seen) = &seen_video {
                 if !rt.video_titles.contains_key(&seen.url) {
                     rt.video_titles.insert(seen.url.clone(), None);
@@ -867,7 +872,7 @@ impl N4n0 {
             self.voice_cancel();
         }
         if !expired.is_empty() {
-            self.add_line(N4n0Who::Note, format!("Not done (no answer came): {}", expired.join("; ")));
+            self.add_line(N4n0Who::Note, tr!("Not done (no answer came): {what}", what = expired.join("; ")));
         }
         let screen_changed = followups.changed();
         self.screen_followups(followups);
@@ -1492,8 +1497,8 @@ impl N4n0 {
         }
         if !rt.voice_hint_shown {
             rt.voice_hint_shown = true;
-            rt.line(N4n0Who::Note, "N4N0 cannot hear yet: install its speech models in Orbiters - N4N0 › N4N0.");
-            rt.show("I can't hear you yet: install my ears in Orbiters - N4N0 > N4N0.");
+            rt.line(N4n0Who::Note, tr("N4N0 cannot hear yet: install its speech models in Orbiters - N4N0 › N4N0."));
+            rt.show(tr_latin("I can't hear you yet: install my ears in Orbiters - N4N0 > N4N0."));
         }
         false
     }
@@ -1561,11 +1566,11 @@ impl N4n0 {
             Some(false) | None => {
                 let what: Vec<String> = pending.into_iter().map(|p| p.what).collect();
                 let mut rt = self.n4n0.lock().unwrap();
-                rt.line(N4n0Who::Note, format!("Not done: {}", what.join("; ")));
-                let why = if reply.is_some() { "said no" } else { "asked something else" };
-                rt.notes.push(format!("Since your last answer the owner {why}: Orbiters - N4N0 did not {}.", what.join(", nor ")));
+                rt.line(N4n0Who::Note, tr!("Not done: {what}", what = what.join("; ")));
+                let why = if reply.is_some() { "said no" } else { "asked something else" }; // i18n: not shown
+                rt.notes.push(format!("Since your last answer the owner {why}: Orbiters - N4N0 did not {}.", what.join(", nor "))); // i18n: not shown
                 if reply.is_some() {
-                    rt.show("OK, I won't.");
+                    rt.show(tr_latin("OK, I won't."));
                 }
                 drop(rt);
                 self.publish();
@@ -1585,14 +1590,14 @@ impl N4n0 {
         }
         let mut rt = self.n4n0.lock().unwrap();
         if !done.is_empty() {
-            rt.line(N4n0Who::Note, format!("Done: {}", done.join("; ")));
-            rt.notes.push(format!("Since your last answer the owner said yes, and Orbiters - N4N0 did: {}.", done.join(", ")));
+            rt.line(N4n0Who::Note, tr!("Done: {what}", what = done.join("; ")));
+            rt.notes.push(format!("Since your last answer the owner said yes, and Orbiters - N4N0 did: {}.", done.join(", "))); // i18n: not shown
         }
         if !failed.is_empty() {
-            rt.line(N4n0Who::Error, format!("Not done: {}", failed.join("; ")));
-            rt.notes.push(format!("Since your last answer the owner said yes, but Orbiters - N4N0 could not: {}.", failed.join(", ")));
+            rt.line(N4n0Who::Error, tr!("Not done: {what}", what = failed.join("; ")));
+            rt.notes.push(format!("Since your last answer the owner said yes, but Orbiters - N4N0 could not: {}.", failed.join(", "))); // i18n: not shown
         }
-        rt.show(if failed.is_empty() { "Done." } else { "I couldn't do it: see Orbiters - N4N0." });
+        rt.show(if failed.is_empty() { tr_latin("Done.") } else { tr_latin("I couldn't do it: see Orbiters - N4N0.") });
         drop(rt);
         self.publish();
     }
@@ -1609,7 +1614,7 @@ impl N4n0 {
                     rt.sender.is_some()
                 };
                 if !shown {
-                    self.notify(NoticeKind::Info, "This avatar has no N4N0 prop: add it from My Avatar's gallery.");
+                    self.notify(NoticeKind::Info, tr("This avatar has no N4N0 prop: add it from My Avatar's gallery."));
                 }
             }
             Command::HidePanel => self.hide_panel(),
@@ -1630,7 +1635,7 @@ impl N4n0 {
             Command::SaveVideo => {
                 let n = self.clone();
                 std::thread::spawn(move || match n.save_video() {
-                    Ok(video) => n.add_line(N4n0Who::Note, format!("Saved {}", video.title.as_deref().unwrap_or(&video.url))),
+                    Ok(video) => n.add_line(N4n0Who::Note, tr!("Saved {title}", title = video.title.as_deref().unwrap_or(&video.url))),
                     Err(e) => n.notify(NoticeKind::Warning, e),
                 });
             }
@@ -1640,7 +1645,7 @@ impl N4n0 {
                     Err(e) => self.notify(NoticeKind::Error, e),
                     Ok(Some(list)) => {
                         if let Err(e) = list.save(&self.files.videos) {
-                            self.notify(NoticeKind::Error, format!("Could not save the video list: {e}"));
+                            self.notify(NoticeKind::Error, tr!("Could not save the video list: {error}", error = e));
                         }
                     }
                     Ok(None) => {}
@@ -1650,7 +1655,7 @@ impl N4n0 {
                 if let Err(e) = self.device.clipboard.copy(&text) {
                     self.notify(NoticeKind::Error, e);
                 } else {
-                    self.notify(NoticeKind::Success, "Copied: paste it in VRChat.");
+                    self.notify(NoticeKind::Success, tr("Copied: paste it in VRChat."));
                 }
             }
             Command::OpenLink { url } => {
@@ -1777,13 +1782,13 @@ impl N4n0 {
             return;
         }
         if !self.with_settings(|s| s.n4n0.enabled && s.n4n0.assistant) {
-            self.add_line(N4n0Who::Note, "N4N0's assistant is off: turn it on in Orbiters - N4N0 › N4N0.");
+            self.add_line(N4n0Who::Note, tr("N4N0's assistant is off: turn it on in Orbiters - N4N0 › N4N0."));
             return;
         }
         let Some((api, token)) = self.host.account() else {
             let mut rt = self.n4n0.lock().unwrap();
-            rt.line(N4n0Who::Error, "Sign in to Orbiters to talk to N4N0.");
-            rt.show("Sign in to Orbiters - N4N0 to talk to me.");
+            rt.line(N4n0Who::Error, tr("Sign in to Orbiters to talk to N4N0."));
+            rt.show(tr_latin("Sign in to Orbiters - N4N0 to talk to me."));
             drop(rt);
             self.publish();
             return;
@@ -1791,7 +1796,7 @@ impl N4n0 {
         let (id, cancel) = {
             let mut rt = self.n4n0.lock().unwrap();
             if rt.turn.is_some() {
-                rt.line(N4n0Who::Note, "N4N0 is still answering the last one.");
+                rt.line(N4n0Who::Note, tr("N4N0 is still answering the last one."));
                 drop(rt);
                 self.publish();
                 return;
@@ -1848,11 +1853,11 @@ impl N4n0 {
                 }
                 Event::Confirmation(c) => {
                     let mut rt = self.n4n0.lock().unwrap();
-                    rt.line(N4n0Who::Note, format!("Waiting for your approval on Orbiters: {}", if c.title.is_empty() { &c.summary } else { &c.title }));
+                    rt.line(N4n0Who::Note, tr!("Waiting for your approval on Orbiters: {what}", what = if c.title.is_empty() { &c.summary } else { &c.title }));
                     rt.confirmations.retain(|x| x.id != c.id);
                     rt.confirmations.push(N4n0Confirmation { id: c.id, title: c.title, summary: c.summary, approve_url: c.approve_url });
                     drop(rt);
-                    self.notify(NoticeKind::Info, "N4N0 prepared something that needs your approval: see Orbiters - N4N0 › N4N0.");
+                    self.notify(NoticeKind::Info, tr("N4N0 prepared something that needs your approval: see Orbiters - N4N0 › N4N0."));
                 }
             });
             match done {
@@ -1904,10 +1909,11 @@ impl N4n0 {
                     rt.pending = tools_run.waiting;
                     rt.pending_at = Some(Instant::now());
                     rt.line(N4n0Who::Note, question.clone());
+                    let title = tr("N4N0 asks");
                     rt.confirmations.push(N4n0Confirmation {
                         id: format!("n4n0-{n}"),
-                        title: "N4N0 asks".into(),
-                        summary: format!("{question} (or say yes or no)"),
+                        title: title.into(),
+                        summary: format!("{question} (or say yes or no)"), // i18n: not shown
                         approve_url: format!("{LOCAL_APPROVAL}{n}"),
                     });
                 }
@@ -1920,11 +1926,13 @@ impl N4n0 {
                 // Nothing of the turn stays in the conversation (calls without results would refuse every next turn),
                 // nor waits for a yes; what its tools did is told at the next turn.
                 if !tools_run.done.is_empty() {
-                    rt.notes.push(format!("Your last answer did not arrive; before that, Orbiters - N4N0 did: {}.", tools_run.done.join(", ")));
+                    rt.notes.push(format!("Your last answer did not arrive; before that, Orbiters - N4N0 did: {}.", tools_run.done.join(", "))); // i18n: not shown
                 }
-                let message = e.downcast_ref::<AssistantError>().map(|a| a.message.clone()).unwrap_or_else(|| format!("N4N0 could not answer: {e:#}"));
-                rt.line(N4n0Who::Error, message.clone());
-                rt.show(&message);
+                let from_server = e.downcast_ref::<AssistantError>().map(|a| a.message.clone());
+                let message = from_server.clone().unwrap_or_else(|| tr!("N4N0 could not answer: {error}", error = format!("{e:#}")));
+                rt.line(N4n0Who::Error, message);
+                // The panel on the avatar has no Japanese.
+                rt.show(&from_server.unwrap_or_else(|| latin(|| tr!("N4N0 could not answer: {error}", error = format!("{e:#}")))));
             }
         }
         drop(rt);
@@ -2059,7 +2067,7 @@ impl N4n0 {
                 let plan = rt.controls.plan(&found, setting)?;
                 rt.send_now(plan.now);
                 rt.send_at(Instant::now() + BUTTON_RELEASE, plan.later);
-                rt.line(N4n0Who::Note, format!("N4N0 set {}", found.path_text()));
+                rt.line(N4n0Who::Note, tr!("N4N0 set {control}", control = found.path_text()));
                 Ok(json!({ "done": true, "control": found.path_text() }))
             }
             Action::SetParameter { name, value } => {
@@ -2067,7 +2075,7 @@ impl N4n0 {
                 let found = rt.controls.find(&name)?.clone();
                 let plan = rt.controls.plan(&found, Setting::Value(value))?;
                 rt.send_now(plan.now);
-                rt.line(N4n0Who::Note, format!("N4N0 set {}", found.path_text()));
+                rt.line(N4n0Who::Note, tr!("N4N0 set {control}", control = found.path_text()));
                 Ok(json!({ "done": true, "parameter": found.path_text() }))
             }
             Action::FindControls { query } => {
@@ -2100,7 +2108,7 @@ impl N4n0 {
                 let pin = if release {
                     None
                 } else {
-                    let value = plan.now.first().and_then(|(_, arg)| osc_value(arg)).ok_or("Nothing to hold.")?;
+                    let value = plan.now.first().and_then(|(_, arg)| osc_value(arg)).ok_or("Nothing to hold.")?; // i18n: not shown
                     self.n4n0.lock().unwrap().send_now(plan.now);
                     Some(Pin { parameter: target.clone(), value })
                 };
@@ -2108,7 +2116,7 @@ impl N4n0 {
                     s.n4n0.pins.retain(|p| p.parameter != target);
                     s.n4n0.pins.extend(pin);
                 });
-                self.add_line(N4n0Who::Note, if release { format!("N4N0 let go of {target}") } else { format!("N4N0 holds {target}") });
+                self.add_line(N4n0Who::Note, if release { tr!("N4N0 let go of {target}", target = target) } else { tr!("N4N0 holds {target}", target = target) });
                 Ok(json!({ "done": true, "held": !release, "parameter": target }))
             }
             Action::TakePhoto { delay_seconds } => self.photo(delay_seconds),
@@ -2129,7 +2137,7 @@ impl N4n0 {
             }
             Action::CopyToClipboard { text } => {
                 self.device.clipboard.copy(&text)?;
-                self.add_line(N4n0Who::Note, format!("N4N0 copied: {}", context::data(&text, 200)));
+                self.add_line(N4n0Who::Note, tr!("N4N0 copied: {text}", text = context::data(&text, 200)));
                 Ok(json!({ "copied": true }))
             }
             Action::SetAfkMessage { text, enabled } => {
@@ -2168,7 +2176,7 @@ impl N4n0 {
                     })
                 });
                 if let Some(command) = command {
-                    self.add_line(N4n0Who::Note, format!("N4N0: music {}", media_word(command)));
+                    self.add_line(N4n0Who::Note, media_line(command));
                 }
                 Ok(json!({
                     "playing": playing,
@@ -2192,7 +2200,7 @@ impl N4n0 {
                 };
                 self.set_light(light)?;
                 let name = contract::LIGHT_COLORS.get(light.color as usize).map_or("", |c| c.0);
-                self.add_line(N4n0Who::Note, if light.on { format!("N4N0's light: {name}") } else { "N4N0's light: off".into() });
+                self.add_line(N4n0Who::Note, if light.on { tr!("N4N0's light: {color}", color = orbiters_n4n0_core::menu::layout::light_color(light.color)) } else { tr("N4N0's light: off").to_string() });
                 Ok(json!({ "on": light.on, "color": name.to_lowercase(), "brightness": light.level }))
             }
             Action::Mood { mood } => {
@@ -2232,20 +2240,20 @@ impl N4n0 {
         if before != Some(1) {
             rt.send_at(shot + Duration::from_millis(1500), [("/usercamera/Mode".to_string(), OscType::Int(before.unwrap_or(0)))]);
         }
-        rt.line(N4n0Who::Note, if delay_seconds > 0 { format!("N4N0 takes a picture in {delay_seconds} s") } else { "N4N0 takes a picture".to_string() });
+        rt.line(N4n0Who::Note, if delay_seconds > 0 { tr!("N4N0 takes a picture in {seconds} s", seconds = delay_seconds) } else { tr("N4N0 takes a picture").to_string() });
         Ok(json!({ "done": true, "in_seconds": delay_seconds }))
     }
 
     /// Saves the video the world played last (VRChat's log), with its title when YouTube gives it.
     fn save_video(self: &Shared) -> Result<SavedVideo, String> {
         let world = self.host.world();
-        let seen = world.last_video.ok_or("No video played in this world yet.")?;
+        let seen = world.last_video.ok_or("No video played in this world yet.")?; // i18n: not shown
         let title = videos::youtube_title(&seen.url);
         let video = SavedVideo { url: seen.url, title, world: world.world_name, saved_utc: orbiters_core::now_utc_iso() };
         // Written outside the N4N0's lock: the screen's steps (every 14 ms) never wait for the disk.
         let list = self.videos_writable().map(|mut rt| rt.videos.add(video.clone()).then(|| rt.videos.clone()))?;
         if let Some(list) = list {
-            list.save(&self.files.videos).map_err(|e| format!("Could not save the video list: {e}"))?;
+            list.save(&self.files.videos).map_err(|e| format!("Could not save the video list: {e}"))?; // i18n: not shown
         }
         self.publish();
         Ok(video)
@@ -2294,19 +2302,19 @@ pub(crate) fn thumbnail_bytes(tree: Option<i32>, manifest: Option<&AvatarManifes
     usize::try_from(value).ok().filter(|n| contract::thumbnail::SIZES.contains(n))
 }
 
-/// What a music command did, for the conversation's note.
-fn media_word(command: orbiters_n4n0_core::menu::MediaCommand) -> String {
+/// What a music command did, as the conversation's note says it (a whole line each: languages order the words differently).
+fn media_line(command: orbiters_n4n0_core::menu::MediaCommand) -> String {
     use orbiters_n4n0_core::menu::MediaCommand;
     match command {
-        MediaCommand::PlayPause => "played or paused".into(),
-        MediaCommand::Play => "played".into(),
-        MediaCommand::Pause => "paused".into(),
-        MediaCommand::Next => "skipped to the next".into(),
-        MediaCommand::Previous => "went back".into(),
-        MediaCommand::Seek(at) => format!("moved to {}", orbiters_n4n0_core::menu::clock(at as u64)),
-        MediaCommand::Volume(v) => format!("volume at {v} %"),
-        MediaCommand::Mute(true) => "muted".into(),
-        MediaCommand::Mute(false) => "unmuted".into(),
+        MediaCommand::PlayPause => tr("N4N0: music played or paused").into(),
+        MediaCommand::Play => tr("N4N0: music played").into(),
+        MediaCommand::Pause => tr("N4N0: music paused").into(),
+        MediaCommand::Next => tr("N4N0: music skipped to the next").into(),
+        MediaCommand::Previous => tr("N4N0: music went back").into(),
+        MediaCommand::Seek(at) => tr!("N4N0: music moved to {time}", time = orbiters_n4n0_core::menu::clock(at as u64)),
+        MediaCommand::Volume(v) => tr!("N4N0: music volume at {percent} %", percent = v),
+        MediaCommand::Mute(true) => tr("N4N0: music muted").into(),
+        MediaCommand::Mute(false) => tr("N4N0: music unmuted").into(),
     }
 }
 

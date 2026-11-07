@@ -2,6 +2,7 @@
 //! often. The desktop reads VRChat's stream camera and decodes the codes; what a code may open, the same link not opened
 //! again, and when scanning stops are decided here, the same for every menu.
 
+use orbiters_i18n::mark;
 use serde::{Deserialize, Serialize};
 use std::time::{Duration, Instant};
 
@@ -53,8 +54,8 @@ impl QrView {
 /// What the scanner tells the menus while VRChat's camera sends no picture: where it stands and what to do.
 pub fn no_camera_note(camera_open: Option<bool>) -> String {
     match camera_open {
-        Some(false) => "Open VRChat's camera, choose Stream, then turn Spout Stream on in its settings".into(),
-        _ => "No picture from VRChat's camera: choose Stream and turn Spout Stream on in its settings".into(),
+        Some(false) => mark("Open VRChat's camera, choose Stream, then turn Spout Stream on in its settings").into(),
+        _ => mark("No picture from VRChat's camera: choose Stream and turn Spout Stream on in its settings").into(),
     }
 }
 
@@ -63,15 +64,15 @@ pub fn no_camera_note(camera_open: Option<bool>) -> String {
 pub fn web_link(text: &str) -> Result<String, &'static str> {
     let text = text.trim();
     if text.len() > MAX_LINK {
-        return Err("The link is too long");
+        return Err(mark("The link is too long"));
     }
-    let (scheme, rest) = text.split_once("://").ok_or("Not a web link")?;
+    let (scheme, rest) = text.split_once("://").ok_or(mark("Not a web link"))?;
     let scheme = scheme.to_ascii_lowercase();
     if scheme != "http" && scheme != "https" {
-        return Err("Not a web link");
+        return Err(mark("Not a web link"));
     }
     if rest.chars().any(|c| c.is_whitespace() || c.is_control()) {
-        return Err("Not a web link");
+        return Err(mark("Not a web link"));
     }
     let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
     if authority.contains('@') {

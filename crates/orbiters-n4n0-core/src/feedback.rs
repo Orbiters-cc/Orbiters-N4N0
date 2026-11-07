@@ -4,6 +4,7 @@
 //! sends (through the same queue as the N4N0 world's lines); what the menus show of it is decided here.
 
 use orbiters_contracts::world_feedback::{self as contract, Label};
+use orbiters_i18n::{tr, tr_n};
 use serde::{Deserialize, Serialize};
 
 /// Labels the World feedback page shows, the most given first.
@@ -191,48 +192,43 @@ pub fn label_index(id: &str) -> Option<u8> {
 /// What a world's line under its name says: why it is there.
 pub fn why_text(why: Why, now: u64) -> String {
     match why {
-        Why::Here => "The world you are in".into(),
-        Why::Capture => "The world of your last 3D capture".into(),
-        Why::Instance { at } => format!("You were here {}", ago(now.saturating_sub(at))),
+        Why::Here => tr("The world you are in").into(),
+        Why::Capture => tr("The world of your last 3D capture").into(),
+        Why::Instance { at } => tr!("You were here {when}", when = ago(now.saturating_sub(at))),
     }
 }
 
 /// `5 min ago`, `3 h ago`, `2 days ago`.
 pub fn ago(seconds: u64) -> String {
     match seconds {
-        0..=59 => "just now".into(),
-        60..=3599 => format!("{} min ago", seconds / 60),
-        3600..=86_399 => format!("{} h ago", seconds / 3600),
-        86_400..=172_799 => "yesterday".into(),
-        _ => format!("{} days ago", seconds / 86_400),
+        0..=59 => tr("just now").into(),
+        60..=3599 => tr!("{minutes} min ago", minutes = seconds / 60),
+        3600..=86_399 => tr!("{hours} h ago", hours = seconds / 3600),
+        86_400..=172_799 => tr("yesterday").into(),
+        _ => tr!("{days} days ago", days = seconds / 86_400),
     }
 }
 
 /// `now`, `5 min`, `3 h`, `2 d`: [`ago`] where room is short.
 pub fn ago_short(seconds: u64) -> String {
     match seconds {
-        0..=59 => "now".into(),
-        60..=3599 => format!("{} min", seconds / 60),
-        3600..=86_399 => format!("{} h", seconds / 3600),
-        _ => format!("{} d", seconds / 86_400),
+        0..=59 => tr("now").into(),
+        60..=3599 => tr!("{minutes} min", minutes = seconds / 60),
+        3600..=86_399 => tr!("{hours} h", hours = seconds / 3600),
+        _ => tr!("{days} d", days = seconds / 86_400),
     }
 }
 
 /// `1 like`, `12 likes`.
 pub fn likes_text(n: u32) -> String {
-    if n == 1 {
-        "1 like".into()
-    } else {
-        format!("{n} likes")
-    }
+    tr_n("{count} like", "{count} likes", n as u64)
 }
 
 /// `No comment yet`, `1 comment`, `7 comments`.
 pub fn comments_text(n: u32) -> String {
     match n {
-        0 => "No comment yet".into(),
-        1 => "1 comment".into(),
-        n => format!("{n} comments"),
+        0 => tr("No comment yet").into(),
+        n => tr_n("{count} comment", "{count} comments", n as u64),
     }
 }
 

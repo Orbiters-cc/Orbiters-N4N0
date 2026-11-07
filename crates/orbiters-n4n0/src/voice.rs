@@ -10,6 +10,7 @@ use crate::platform::VoiceWorker;
 use crate::runtime::{N4n0, Shared, Source};
 use crate::status::{NoticeKind, N4n0Who, VoiceStatus};
 use orbiters_core::voice::{self, VoiceCommand, VoiceEvent};
+use orbiters_i18n::tr;
 use std::time::{Duration, Instant};
 
 /// The app gives up on a sentence after this (the worker ends its own sooner).
@@ -29,7 +30,7 @@ const CANCELLED_KEPT: usize = 32;
 const DLL_NOT_FOUND: u32 = 0xC000_0135;
 /// What the worker says before it loads the recogniser: a worker that stops with this as its last line stopped while
 /// loading the models.
-const LOADING_LINE: &str = "loading the speech recogniser";
+const LOADING_LINE: &str = "loading the speech recogniser"; // i18n: not shown
 
 /// A running worker, and what it was started with.
 struct Worker {
@@ -96,15 +97,22 @@ impl VoiceRuntime {
         let damaged = self.load_crashes >= 2;
         self.repair |= damaged;
         let message = if code.map(|c| c as u32) == Some(DLL_NOT_FOUND) {
-            "N4N0's ears could not start: a library they need is missing next to Orbiters - N4N0 (onnxruntime.dll or sherpa-onnx-c-api.dll). Reinstall Orbiters - N4N0.".to_string()
+            tr("N4N0's ears could not start: a library they need is missing next to Orbiters - N4N0 (onnxruntime.dll or sherpa-onnx-c-api.dll). Reinstall Orbiters - N4N0.").to_string()
         } else if damaged {
-            "N4N0's ears stopped twice while loading the speech models: they may be damaged. Install them again on the N4N0 page.".to_string()
+            tr("N4N0's ears stopped twice while loading the speech models: they may be damaged. Install them again on the N4N0 page.").to_string()
         } else {
-            let code = code.map(|c| format!(" (exit code {:#x})", c as u32)).unwrap_or_default();
-            let after = if self.crashes >= CRASHES_MOST { " They stay off until you press Talk." } else { "" };
-            match last {
-                Some(line) => format!("N4N0's ears stopped{code}: {line}.{after}"),
-                None => format!("N4N0's ears stopped{code}.{after}"),
+            // Whole sentences: where the code and the worker's last line go differs by language.
+            let code = code.map(|c| format!("{:#x}", c as u32));
+            let stopped = match (&code, last) {
+                (Some(code), Some(line)) => tr!("N4N0's ears stopped (exit code {code}): {line}.", code = code, line = line),
+                (None, Some(line)) => tr!("N4N0's ears stopped: {line}.", line = line),
+                (Some(code), None) => tr!("N4N0's ears stopped (exit code {code}).", code = code),
+                (None, None) => tr("N4N0's ears stopped.").to_string(),
+            };
+            if self.crashes >= CRASHES_MOST {
+                format!("{stopped} {}", tr("They stay off until you press Talk."))
+            } else {
+                stopped
             }
         };
         (message, damaged)
@@ -262,7 +270,7 @@ impl N4n0 {
             }
             Err(e) => {
                 drop(rt);
-                self.notify(NoticeKind::Error, format!("Could not start the download: {e:#}"));
+                self.notify(NoticeKind::Error, tr!("Could not start the download: {error}", error = format!("{e:#}")));
             }
         }
     }
@@ -353,7 +361,7 @@ impl N4n0 {
                     v.error = None;
                     v.repair = false;
                 });
-                self.notify(NoticeKind::Success, "N4N0 can hear now.");
+                self.notify(NoticeKind::Success, tr("N4N0 can hear now."));
             }
             VoiceEvent::Error { message } => {
                 self.n4n0.lock().unwrap().line(N4n0Who::Error, message.clone());

@@ -26,9 +26,9 @@ impl Kind {
             Kind::Toggle => "toggle",
             Kind::Button => "button",
             Kind::Submenu => "submenu",
-            Kind::Radial => "radial 0-1",
-            Kind::TwoAxis => "two-axis puppet",
-            Kind::FourAxis => "four-axis puppet",
+            Kind::Radial => "radial 0-1", // i18n: not shown
+            Kind::TwoAxis => "two-axis puppet", // i18n: not shown
+            Kind::FourAxis => "four-axis puppet", // i18n: not shown
             Kind::Parameter => "parameter",
         }
     }
@@ -326,7 +326,7 @@ impl Controls {
 
     /// The messages that apply `setting` to `control`.
     pub fn plan(&self, control: &Control, setting: Setting) -> Result<Plan, String> {
-        let name = control.target().ok_or_else(|| format!("\"{}\" sets no parameter.", control.path_text()))?;
+        let name = control.target().ok_or_else(|| format!("\"{}\" sets no parameter.", control.path_text()))?; // i18n: not shown
         let address = format!("{PARAMETERS_PREFIX}{name}");
         let message = |v: f32| (address.clone(), self.typed(name, v));
         Ok(match (control.kind, setting) {
@@ -368,7 +368,7 @@ impl Controls {
             out.push_str(&line);
         }
         if left > 0 {
-            out.push_str(&format!("… and {left} more (find_avatar_controls searches them)\n"));
+            out.push_str(&format!("… and {left} more (find_avatar_controls searches them)\n")); // i18n: not shown
         }
         out
     }

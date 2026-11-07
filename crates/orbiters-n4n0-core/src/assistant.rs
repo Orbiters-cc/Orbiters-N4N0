@@ -146,9 +146,9 @@ fn error_from(status: u16, body: &str) -> AssistantError {
         .to_string()
     });
     let message = text("message").or_else(|| text("error")).unwrap_or_else(|| match code.as_str() {
-        "unauthorized" => "Sign in to Orbiters again to talk to N4N0.".to_string(),
-        "rate_limited" | "quota_exhausted" => "N4N0 needs a break: try again in a moment.".to_string(),
-        _ => format!("N4N0's assistant is not available right now ({status})."),
+        "unauthorized" => "Sign in to Orbiters again to talk to N4N0.".to_string(), // i18n: not shown
+        "rate_limited" | "quota_exhausted" => "N4N0 needs a break: try again in a moment.".to_string(), // i18n: not shown
+        _ => format!("N4N0's assistant is not available right now ({status})."), // i18n: not shown
     });
     AssistantError { code, message }
 }

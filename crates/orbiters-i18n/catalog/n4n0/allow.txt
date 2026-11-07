@@ -1,0 +1,16 @@
+# Names that are the same in every language, and texts the program compares: not translated.
+# Parameter names VRChat sends (matched against what the avatar holds).
+Viseme
+Voice
+Upright
+Grounded
+Seated
+Earmuffs
+# The names of the apps playing media (matched in lower case to tell browsers and YouTube's apps).
+YouTube Music
+Edge
+Chrome
+Firefox
+Brave
+Opera
+Media Player

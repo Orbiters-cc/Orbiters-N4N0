@@ -23,6 +23,7 @@ use orbiters_contracts::n4n0::{self, params, thumbnail};
 use rosc::OscType;
 use orbiters_core::account::{Api, Server};
 use orbiters_core::osc::OscValue;
+use orbiters_i18n::{mark, tr, tr_latin};
 use orbiters_n4n0_core::menu::layout::{Content, ScreenPage};
 use orbiters_n4n0_core::menu::pictures::{self as full, Lane, Synced};
 use orbiters_n4n0_core::menu::screen::{self, Audience, Flags, Frame, Picture, LOCAL_VALUES};
@@ -33,6 +34,11 @@ use orbiters_n4n0_core::youtube;
 use std::collections::{HashMap, VecDeque};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
+
+/// What the menu says when no Orbiters account is signed in to ask for an invite (the same words as `invites::send` gives).
+fn signed_out_message() -> String {
+    tr_latin("Sign in to Orbiters in Orbiters - N4N0 first (Settings)").into()
+}
 
 /// The owner's screen takes a step at most this often, and at least this often: VRChat's animator reads one block a
 /// frame, and two steps in one frame lose the first. Paced at two of VRChat's frames as the SteamVR overlay measures
@@ -888,11 +894,11 @@ impl ScreenRuntime {
             gestures |= gesture.is_some();
             if pull && !matches!(gesture, Some(Gesture::Press { .. })) {
                 let why = match (guard, gesture) {
-                    (Some(g), _) => format!("nothing yet, {}", g.name()),
-                    (None, Some(Gesture::Hold { .. })) => "nothing, a touch holds this hand".to_string(),
-                    (None, Some(Gesture::Away)) => "nothing, it points off the page".to_string(),
-                    (None, Some(Gesture::Hover { x, y })) => format!("nothing, it was not over the page a moment ago (now at {x:.0}, {y:.0})"),
-                    (None, _) => "nothing, no reading".to_string(),
+                    (Some(g), _) => format!("nothing yet, {}", g.name()), // i18n: not shown
+                    (None, Some(Gesture::Hold { .. })) => "nothing, a touch holds this hand".to_string(), // i18n: not shown
+                    (None, Some(Gesture::Away)) => "nothing, it points off the page".to_string(), // i18n: not shown
+                    (None, Some(Gesture::Hover { x, y })) => format!("nothing, it was not over the page a moment ago (now at {x:.0}, {y:.0})"), // i18n: not shown
+                    (None, _) => "nothing, no reading".to_string(), // i18n: not shown
                 };
                 self.pointer_log.pull(hand, &why);
             }
@@ -908,11 +914,11 @@ impl ScreenRuntime {
                         self.aimed[hand].clear();
                     }
                     let who = match (hand, by_touch) {
-                        (0, true) => "left touch",
-                        (0, false) => "left trigger",
-                        (1, true) => "right touch",
-                        (1, false) => "right trigger",
-                        _ => "someone else's touch",
+                        (0, true) => "left touch", // i18n: not shown
+                        (0, false) => "left trigger", // i18n: not shown
+                        (1, true) => "right touch", // i18n: not shown
+                        (1, false) => "right trigger", // i18n: not shown
+                        _ => "someone else's touch", // i18n: not shown
                     };
                     if let Some((index, target)) = hit {
                         self.pointer_log.press(who, x, y, &format!("{target:?} on {}", ScreenPage::of(&self.menu).name()));
@@ -922,7 +928,7 @@ impl ScreenRuntime {
                         self.hand_hover[hand] = Some(index);
                         effects.extend(self.menu.press(target));
                     } else {
-                        self.pointer_log.press(who, x, y, &format!("nothing there on {}", ScreenPage::of(&self.menu).name()));
+                        self.pointer_log.press(who, x, y, &format!("nothing there on {}", ScreenPage::of(&self.menu).name())); // i18n: not shown
                     }
                 }
                 Some(Gesture::Hold { x, y }) => {
@@ -1027,7 +1033,7 @@ impl ScreenRuntime {
             self.settle_on_at = None;
             self.settle_off_at = Some(now + SETTLE_HELD);
             out.push((crate::runtime::parameter(params::SCREEN_SETTLE), OscType::Bool(true)));
-            self.pointer_log.note("place: Settle on");
+            self.pointer_log.note("place: Settle on"); // i18n: not shown
         }
         if !self.available || !self.menu.open || !self.placed || self.held[0] || self.held[1] || !std::mem::take(&mut self.sight_new) {
             return;
@@ -1056,7 +1062,7 @@ impl ScreenRuntime {
             self.rest_at = None;
             self.settle_on_at = Some(now + SETTLE_AFTER_PLACE);
             self.settled_at = Some(now);
-            self.pointer_log.note(&format!("place: at rest, {:.2} {:.2} {:.2} from the eyes", place[0], place[1], place[2]));
+            self.pointer_log.note(&format!("place: at rest, {:.2} {:.2} {:.2} from the eyes", place[0], place[1], place[2])); // i18n: not shown
         }
     }
 
@@ -1130,7 +1136,7 @@ impl ScreenRuntime {
         if self.picture_state_logged != Some(state) {
             self.picture_state_logged = Some(state);
             picture_log(&format!(
-                "full pictures {} (screen version {version:?}, the menu on it {}, on the avatar {}, {:?} text values, {} B thumbnails)",
+                "full pictures {} (screen version {version:?}, the menu on it {}, on the avatar {}, {:?} text values, {} B thumbnails)", // i18n: not shown
                 if on { "on" } else { "off" },
                 self.available,
                 self.present,
@@ -1197,14 +1203,14 @@ impl ScreenRuntime {
         let summary: Vec<(usize, usize)> = wanted.iter().map(|(slot, stream)| (*slot, stream.len())).collect();
         if summary != self.picture_logged {
             picture_log(&format!(
-                "slots wanted (slot, stream bytes): {summary:?}; everyone's lane {}",
-                if self.picture_everyone.is_some() { "on" } else { "off (the text channel cannot reach the picture pointers)" }
+                "slots wanted (slot, stream bytes): {summary:?}; everyone's lane {}", // i18n: not shown
+                if self.picture_everyone.is_some() { "on" } else { "off (the text channel cannot reach the picture pointers)" } // i18n: not shown
             ));
             self.picture_logged = summary;
         }
         if self.picture_log_at.is_none_or(|t| now >= t) {
             if self.picture_sent != [0; 2] {
-                picture_log(&format!("chunks sent in the last 10 s: {} to the owner, {} to everyone", self.picture_sent[0], self.picture_sent[1]));
+                picture_log(&format!("chunks sent in the last 10 s: {} to the owner, {} to everyone", self.picture_sent[0], self.picture_sent[1])); // i18n: not shown
                 self.picture_sent = [0; 2];
             }
             self.picture_log_at = Some(now + std::time::Duration::from_secs(10));
@@ -1223,7 +1229,7 @@ impl ScreenRuntime {
         if wants && now >= self.picture_next {
             if self.picture_send != Some(true) {
                 self.picture_send = Some(true);
-                picture_log("N4N0/Picture/Send on");
+                picture_log("N4N0/Picture/Send on"); // i18n: not shown
                 out.push(full::local_send(true));
             }
             if let Some(chunk) = self.picture_owner.next_chunk() {
@@ -1234,7 +1240,7 @@ impl ScreenRuntime {
         } else if !wants && now >= self.picture_next {
             if self.picture_send != Some(false) {
                 self.picture_send = Some(false);
-                picture_log("N4N0/Picture/Send off (every chunk went its rounds)");
+                picture_log("N4N0/Picture/Send off (every chunk went its rounds)"); // i18n: not shown
                 out.push(full::local_send(false));
             }
             if !wanted.is_empty() && self.picture_repair.is_none() {
@@ -1567,8 +1573,8 @@ impl N4n0 {
                 }
             }
             match result {
-                Ok(()) => n.notify(NoticeKind::Info, "Your suggestion reached Orbiters: thank you!".to_string()),
-                Err(e) => n.notify(NoticeKind::Warning, format!("The suggestion was not sent: {e}")),
+                Ok(()) => n.notify(NoticeKind::Info, tr("Your suggestion reached Orbiters: thank you!")),
+                Err(e) => n.notify(NoticeKind::Warning, tr!("The suggestion was not sent: {error}", error = e)),
             }
             n.publish();
         });
@@ -1582,7 +1588,7 @@ impl N4n0 {
         let _ = std::thread::Builder::new().name("n4n0-invite".into()).spawn(move || {
             let answer = match n.host.account() {
                 Some((api, token)) => orbiters_n4n0_core::invites::send(&api, &token, &location),
-                None => InviteAnswer::Failed { message: "Sign in to Orbiters in Orbiters - N4N0 first (Settings)".into() },
+                None => InviteAnswer::Failed { message: signed_out_message() },
             };
             {
                 let mut rt = n.n4n0.lock().unwrap();
@@ -1595,11 +1601,11 @@ impl N4n0 {
                 }
             }
             match &answer {
-                InviteAnswer::Sent => n.notify(NoticeKind::Success, "Orbiters invited you: open the invite in VRChat's notifications.".to_string()),
+                InviteAnswer::Sent => n.notify(NoticeKind::Success, tr("Orbiters invited you: open the invite in VRChat's notifications.")),
                 InviteAnswer::NeedsFriend { account, .. } => {
-                    n.notify(NoticeKind::Info, format!("Add {} as a friend on VRChat, then try again.", account.name))
+                    n.notify(NoticeKind::Info, tr!("Add {name} as a friend on VRChat, then try again.", name = account.name))
                 }
-                InviteAnswer::Failed { message } => n.notify(NoticeKind::Warning, format!("No invite: {message}")),
+                InviteAnswer::Failed { message } => n.notify(NoticeKind::Warning, tr!("No invite: {message}", message = message)),
             }
             n.publish();
         });
@@ -1631,7 +1637,9 @@ impl N4n0 {
     /// (numbered), on the overlay's and the window's.
     fn photo_stopped(self: &Shared, text: String) {
         self.photo_line(&text);
-        self.notify(NoticeKind::Warning, text);
+        // The reasons are English texts of this crate, keys of the catalog: the toast says them in the language now, and the menu
+        // translates the line it drew from them as it draws it.
+        self.notify(NoticeKind::Warning, tr(&text));
         self.publish();
     }
 
@@ -1706,7 +1714,7 @@ impl N4n0 {
                     changed
                 };
                 if late && wait.is_some() {
-                    return n.photo_stopped("The 3D picture was called off: VRChat's camera was not opened.".to_string());
+                    return n.photo_stopped(mark("The 3D picture was called off: VRChat's camera was not opened.").to_string());
                 }
                 if changed {
                     n.publish();
@@ -1732,7 +1740,7 @@ impl N4n0 {
         };
         if taken {
             self.device.sounds.press();
-            self.notify(NoticeKind::Info, "Card taken back: it is gone from the world.".to_string());
+            self.notify(NoticeKind::Info, tr("Card taken back: it is gone from the world."));
         }
         self.publish();
     }
@@ -1742,14 +1750,14 @@ impl N4n0 {
     /// From N4N0's menu on the screen, the overlay's or the window's Home.
     pub(crate) fn card_drop(self: &Shared, link: String, title: String, video: Option<String>) {
         if !orbiters_n4n0_core::drops::copyable(&link) {
-            self.notify(NoticeKind::Warning, "Only web links can be dropped as cards.");
+            self.notify(NoticeKind::Warning, tr("Only web links can be dropped as cards."));
             return;
         }
         let fetch = {
             let mut rt = self.n4n0.lock().unwrap();
             if !rt.screen.card_ready() {
                 drop(rt);
-                self.notify(NoticeKind::Info, "This avatar's N4N0 cannot drop cards: update N4N0 in My Avatar, then upload the avatar again.");
+                self.notify(NoticeKind::Info, tr("This avatar's N4N0 cannot drop cards: update N4N0 in My Avatar, then upload the avatar again."));
                 return;
             }
             let now = Instant::now();
@@ -1770,11 +1778,11 @@ impl N4n0 {
                 let n = self.clone();
                 std::thread::spawn(move || {
                     if let Err(e) = orbiters_n4n0_core::drops::post(&api, &token, &instance, &link, &title) {
-                        n.notify(NoticeKind::Warning, format!("People around cannot copy your card's link: {e:#}"));
+                        n.notify(NoticeKind::Warning, tr!("People around cannot copy your card's link: {error}", error = format!("{e:#}")));
                     }
                 });
             }
-            (None, Some(_)) => self.notify(NoticeKind::Info, "Sign in to Orbiters so that people around can copy your card's link too."),
+            (None, Some(_)) => self.notify(NoticeKind::Info, tr("Sign in to Orbiters so that people around can copy your card's link too.")),
             _ => {}
         }
         self.publish();
@@ -1793,8 +1801,8 @@ impl N4n0 {
         let n = self.clone();
         std::thread::spawn(move || match orbiters_n4n0_core::drops::latest(&api, &instance) {
             Ok(Some(card)) => n.card_copied(&card.link, &card.title),
-            Ok(None) => n.notify(NoticeKind::Info, "That card is gone: its link can no longer be copied."),
-            Err(e) => n.notify(NoticeKind::Warning, format!("Could not copy the card's link: {e:#}")),
+            Ok(None) => n.notify(NoticeKind::Info, tr("That card is gone: its link can no longer be copied.")),
+            Err(e) => n.notify(NoticeKind::Warning, tr!("Could not copy the card's link: {error}", error = format!("{e:#}"))),
         });
     }
 
@@ -1803,11 +1811,11 @@ impl N4n0 {
         match self.device.clipboard.copy(link) {
             Ok(()) => {
                 self.device.sounds.press();
-                let what = match title.trim() {
-                    "" => "the card's link".to_string(),
-                    title => format!("\"{}\"", layout::ellipsis(title, 60)),
+                let message = match title.trim() {
+                    "" => tr("Copied the card's link: paste it in VRChat.").to_string(),
+                    title => tr!("Copied \"{title}\": paste it in VRChat.", title = layout::ellipsis(title, 60)),
                 };
-                self.notify(NoticeKind::Success, format!("Copied {what}: paste it in VRChat."));
+                self.notify(NoticeKind::Success, message);
             }
             Err(e) => self.notify(NoticeKind::Error, e),
         }
@@ -2071,7 +2079,7 @@ pub(crate) fn tick(
     let rows = (rt.screen.states_seen.as_ref() != Some(&states_key) || rt.screen.menu.saving()).then(|| rt.states.rows(rt.avatar_id.as_deref()));
     let s = &mut rt.screen;
     if let Some(rows) = rows {
-        s.menu.set_states(rows, states_key.1.is_some(), "VRChat's avatar is not known yet");
+        s.menu.set_states(rows, states_key.1.is_some(), orbiters_i18n::mark("VRChat's avatar is not known yet"));
         s.states_seen = Some(states_key);
     }
     // The light as the avatar holds it; whether a copied link drops as a card here; the music while the menu shows it

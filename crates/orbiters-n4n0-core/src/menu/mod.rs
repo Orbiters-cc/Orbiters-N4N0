@@ -18,7 +18,9 @@ pub mod touch;
 
 use crate::captures::{CaptureRow, CapturesView, Friend, Friends, ShareAsk};
 use crate::feedback::{FeedbackAsk, FeedbackView, Subject, WorldFeedback, COMMENTS_PER_PAGE};
+use crate::text::latin;
 use crate::youtube::{Results, Video};
+use orbiters_i18n::{mark, tr, tr_latin, tr_n};
 use std::time::{Duration, Instant};
 
 /// Results on a page of the list.
@@ -331,21 +333,21 @@ impl InstanceRow {
         let has = |tag: &str| tags.split('~').any(|t| t.starts_with(tag));
         if has("group(") {
             return match tags.split('~').find_map(|t| t.strip_prefix("groupAccessType(")).map(|t| t.trim_end_matches(')')) {
-                Some("public") => "Group Public",
-                Some("plus") => "Group+",
-                _ => "Group",
+                Some("public") => mark("Group Public"),
+                Some("plus") => mark("Group+"),
+                _ => mark("Group"),
             };
         }
         if has("private(") {
-            return if has("canRequestInvite") { "Invite+" } else { "Invite" };
+            return if has("canRequestInvite") { mark("Invite+") } else { mark("Invite") };
         }
         if has("friends(") {
-            return "Friends";
+            return mark("Friends");
         }
         if has("hidden(") {
-            return "Friends+";
+            return mark("Friends+");
         }
-        "Public"
+        mark("Public")
     }
 
     /// Its region (`EU`, `JP`, `US W`, `US E`), when the location says.
@@ -1076,7 +1078,7 @@ impl Menu {
         self.go(Page::States);
         // The page with the new one shows.
         self.state_page = (self.states.len() - 1) / STATES_PER_PAGE;
-        self.notice = Some(format!("Saved as \"{name}\""));
+        self.notice = Some(latin(|| tr!("Saved as \"{name}\"", name = name)));
         vec![Effect::SaveState { name, size: draft.size, pose: draft.pose, default: draft.default }]
     }
 
@@ -1087,9 +1089,9 @@ impl Menu {
             Ok(()) => {
                 self.suggestion.clear();
                 self.suggestion_voice = false;
-                self.notice = Some("Thank you! Your suggestion reached Orbiters".into());
+                self.notice = Some(tr_latin("Thank you! Your suggestion reached Orbiters").into());
             }
-            Err(e) => self.notice = Some(format!("Not sent: {}", cut(&e, 60))),
+            Err(e) => self.notice = Some(latin(|| tr!("Not sent: {error}", error = cut(&e, 60)))),
         }
     }
 
@@ -1223,7 +1225,7 @@ impl Menu {
                     let effect = Effect::Copy { link: video.link(), title: video.title.clone() };
                     self.copied = Some(video.id.clone());
                     // The row now offers Drop, where the display can drop it.
-                    let notice = if self.can_drop { "Link copied: paste it, or Drop it" } else { "Link copied: paste it in the video player" };
+                    let notice = if self.can_drop { tr_latin("Link copied: paste it, or Drop it") } else { tr_latin("Link copied: paste it in the video player") };
                     self.notice = Some(notice.into());
                     vec![effect]
                 }
@@ -1232,7 +1234,7 @@ impl Menu {
             Target::Drop(i) => match self.page_results().get(i as usize) {
                 Some(video) if self.can_drop && self.copied.as_deref() == Some(video.id.as_str()) => {
                     let effect = Effect::Drop { link: video.link(), title: video.title.clone(), video: Some(video.id.clone()) };
-                    self.notice = Some("Dropped: grab the card to copy its link".into());
+                    self.notice = Some(tr_latin("Dropped: grab the card to copy its link").into());
                     vec![effect]
                 }
                 _ => Vec::new(),
@@ -1245,7 +1247,7 @@ impl Menu {
                 // A state saved here but not yet listed by the host has no id: nothing to apply yet.
                 Some(state) if !state.id.is_empty() => {
                     let effect = Effect::ApplyState { id: state.id.clone(), name: state.name.clone() };
-                    self.notice = Some(format!("Applied \"{}\"", state.name));
+                    self.notice = Some(latin(|| tr!("Applied \"{name}\"", name = state.name)));
                     vec![effect]
                 }
                 _ => Vec::new(),
@@ -1325,25 +1327,25 @@ impl Menu {
             }
             Target::SuggestTalk => {
                 self.dictating = true;
-                self.notice = Some("Listening: say your idea".into());
+                self.notice = Some(tr_latin("Listening: say your idea").into());
                 vec![Effect::Dictate]
             }
             Target::SuggestSend if !self.sending && !self.suggestion.trim().is_empty() => {
                 self.sending = true;
-                self.notice = Some("Sending…".into());
+                self.notice = Some(tr_latin("Sending…").into());
                 vec![Effect::SendSuggestion { text: self.suggestion.trim().to_string(), voice: self.suggestion_voice }]
             }
             Target::SuggestSend => Vec::new(),
             Target::WatchVideo => match &self.world_video {
                 Some(video) => {
                     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
-                    self.notice = Some("Opened on the computer".into());
+                    self.notice = Some(tr_latin("Opened on the computer").into());
                     vec![Effect::WatchVideo { link: watch_link(video, now) }]
                 }
                 None => Vec::new(),
             },
             Target::SaveVideo if self.world_video.is_some() => {
-                self.notice = Some("Saved in N4N0's videos".into());
+                self.notice = Some(tr_latin("Saved in N4N0's videos").into());
                 vec![Effect::SaveVideo]
             }
             Target::SaveVideo => Vec::new(),
@@ -1351,7 +1353,7 @@ impl Menu {
             Target::CopyPlaying => match self.media.as_ref().and_then(|m| Some((m.link()?, m.title.clone(), m.video.clone()?))) {
                 Some((link, title, video)) => {
                     self.copied = Some(video);
-                    let notice = if self.can_drop { "Link copied: paste it, or Drop it" } else { "Link copied: paste it in the video player" };
+                    let notice = if self.can_drop { tr_latin("Link copied: paste it, or Drop it") } else { tr_latin("Link copied: paste it in the video player") };
                     self.notice = Some(notice.into());
                     vec![Effect::Copy { link, title }]
                 }
@@ -1359,7 +1361,7 @@ impl Menu {
             },
             Target::DropPlaying => match self.media.as_ref().and_then(|m| Some((m.link()?, m.title.clone(), m.video.clone()?))) {
                 Some((link, title, video)) if self.can_drop && self.copied.as_deref() == Some(video.as_str()) => {
-                    self.notice = Some("Dropped: grab the card to copy its link".into());
+                    self.notice = Some(tr_latin("Dropped: grab the card to copy its link").into());
                     vec![Effect::Drop { link, title, video: Some(video) }]
                 }
                 _ => Vec::new(),
@@ -1369,7 +1371,7 @@ impl Menu {
             Target::Timeline(i) | Target::Seek(i) => self.seek(i),
             Target::TakeBack if self.card_out => {
                 self.card_out = false;
-                self.notice = Some("Card taken back".into());
+                self.notice = Some(tr_latin("Card taken back").into());
                 vec![Effect::TakeBack]
             }
             Target::TakeBack => Vec::new(),
@@ -1385,14 +1387,15 @@ impl Menu {
             Target::InviteMe(i) => match self.page_instances().get(i as usize) {
                 Some(row) if !self.invite_waiting => {
                     let location = row.location.clone();
-                    self.notice = Some(format!("Asking Orbiters to invite you to {}…", if row.world.is_empty() { "this instance" } else { &row.world }));
+                    let world = if row.world.is_empty() { tr_latin("this instance") } else { row.world.as_str() };
+                    self.notice = Some(latin(|| tr!("Asking Orbiters to invite you to {world}…", world = world)));
                     self.ask_invite(location)
                 }
                 _ => Vec::new(),
             },
             Target::InviteAgain => match self.inviting.clone() {
                 Some(location) if !self.invite_waiting => {
-                    self.notice = Some("Asking Orbiters again…".into());
+                    self.notice = Some(tr_latin("Asking Orbiters again…").into());
                     self.ask_invite(location)
                 }
                 _ => Vec::new(),
@@ -1400,7 +1403,7 @@ impl Menu {
             Target::CopyFriendName => match &self.invite_account {
                 Some(account) => {
                     let text = account.name.clone();
-                    self.notice = Some(format!("Copied \"{text}\": search it in VRChat's Social menu"));
+                    self.notice = Some(latin(|| tr!("Copied \"{text}\": search it in VRChat's Social menu", text = text)));
                     vec![Effect::CopyText { text }]
                 }
                 None => Vec::new(),
@@ -1414,7 +1417,7 @@ impl Menu {
             Target::QrCopy => match &self.qr.link {
                 Some(link) => {
                     let text = link.clone();
-                    self.notice = Some("Link copied".into());
+                    self.notice = Some(tr_latin("Link copied").into());
                     vec![Effect::CopyText { text }]
                 }
                 None => Vec::new(),
@@ -1422,7 +1425,7 @@ impl Menu {
             Target::QrOpen => match &self.qr.link {
                 Some(link) => {
                     let link = link.clone();
-                    self.notice = Some("Opened again on the computer".into());
+                    self.notice = Some(tr_latin("Opened again on the computer").into());
                     vec![Effect::OpenLink { link }]
                 }
                 None => Vec::new(),
@@ -1430,7 +1433,7 @@ impl Menu {
             Target::OpenFriendLink => match &self.invite_account {
                 Some(account) => {
                     let link = account.link.clone();
-                    self.notice = Some("Opened on the computer: send the friend request there".into());
+                    self.notice = Some(tr_latin("Opened on the computer: send the friend request there").into());
                     vec![Effect::OpenLink { link }]
                 }
                 None => Vec::new(),
@@ -1465,7 +1468,7 @@ impl Menu {
                     self.chosen.remove(at);
                     self.notice = None;
                 } else if self.chosen.len() >= crate::captures::RECIPIENTS_MAX {
-                    self.notice = Some(format!("At most {} friends at a time", crate::captures::RECIPIENTS_MAX));
+                    self.notice = Some(latin(|| tr!("At most {count} friends at a time", count = crate::captures::RECIPIENTS_MAX)));
                 } else {
                     self.chosen.push(friend);
                     self.notice = None;
@@ -1482,14 +1485,14 @@ impl Menu {
                 let n = recipients.len();
                 self.asked = Some((key.clone(), self.sharing_of(&key)));
                 self.go(self.share_from);
-                self.notice = Some(if n == 1 { "Sharing with 1 friend…".into() } else { format!("Sharing with {n} friends…") });
+                self.notice = Some(latin(|| tr_n("Sharing with {count} friend…", "Sharing with {count} friends…", n as u64)));
                 vec![Effect::ShareCapture(ShareAsk { key, public: false, recipients, acknowledge_explicit: false })]
             }
             Target::ShareAnyway if self.page == Page::Explicit => {
                 let Some(key) = self.sharing.clone() else { return Vec::new() };
                 self.asked = Some((key.clone(), self.sharing_of(&key)));
                 self.go(self.share_from);
-                self.notice = Some("Sharing publicly…".into());
+                self.notice = Some(tr_latin("Sharing publicly…").into());
                 vec![Effect::ShareCapture(ShareAsk { key, public: true, recipients: Vec::new(), acknowledge_explicit: true })]
             }
             Target::CancelShare if self.page == Page::Explicit => {
@@ -1568,7 +1571,7 @@ impl Menu {
                 let entry = self.feedback.world_mut(&world);
                 entry.comments.retain(|c| c.id != id);
                 entry.comment_count = entry.comment_count.saturating_sub(1);
-                self.notice = Some("Comment deleted".into());
+                self.notice = Some(tr_latin("Comment deleted").into());
                 vec![Effect::Feedback(FeedbackAsk::Uncomment { world, comment: id })]
             }
             Target::WorldFeedback | Target::Labels | Target::Comments | Target::CommentCard(_) => Vec::new(),
@@ -1686,8 +1689,8 @@ impl Menu {
         let Some(media) = self.media.as_mut() else { return Vec::new() };
         let Some(duration) = media.duration.filter(|d| *d > 0) else { return Vec::new() };
         if !media.can_seek {
-            let app = if media.app.is_empty() { "This player" } else { media.app.as_str() };
-            self.notice = Some(format!("{app} lets no app move in its timeline"));
+            let app = if media.app.is_empty() { tr_latin("This player") } else { media.app.as_str() };
+            self.notice = Some(latin(|| tr!("{app} lets no app move in its timeline", app = app)));
             return Vec::new();
         }
         let at = (duration as u64 * (i as u64).min(TIMELINE_STEPS as u64 - 1) / TIMELINE_STEPS as u64) as u32;
@@ -1852,7 +1855,7 @@ impl Menu {
             self.result_page += 1;
         }
         if self.results.is_empty() {
-            self.notice = Some(format!("Nothing found for \"{}\"", self.results_for));
+            self.notice = Some(latin(|| tr!("Nothing found for \"{query}\"", query = self.results_for)));
         }
         self.thumbnails()
     }
@@ -1865,7 +1868,7 @@ impl Menu {
         self.searching = false;
         self.loading_more = false;
         self.turning = false;
-        self.notice = Some(format!("YouTube did not answer: {}", cut(error, 60)));
+        self.notice = Some(latin(|| tr!("YouTube did not answer: {error}", error = cut(error, 60))));
     }
 
     /// The results of the page shown.
@@ -2153,7 +2156,7 @@ impl Menu {
                 // Why it failed, where the page says what was just done; done, its row says so.
                 Some(Sharing::Failed { message }) => {
                     self.asked = None;
-                    self.notice = Some(format!("Not shared: {message}"));
+                    self.notice = Some(latin(|| tr!("Not shared: {message}", message = message)));
                 }
                 Some(_) | None => {
                     self.asked = None;
@@ -2187,7 +2190,7 @@ impl Menu {
             return self.capture_thumbnails();
         }
         self.asked = Some((key.clone(), self.sharing_of(&key)));
-        self.notice = Some("Sharing publicly…".into());
+        self.notice = Some(tr_latin("Sharing publicly…").into());
         vec![Effect::ShareCapture(ShareAsk { key, public: true, recipients: Vec::new(), acknowledge_explicit: false })]
     }
 
@@ -2257,7 +2260,7 @@ impl Menu {
     }
 
     fn sign_in_first(&mut self) -> Vec<Effect> {
-        self.notice = Some("Sign in to Orbiters - N4N0 to give feedback".into());
+        self.notice = Some(tr_latin("Sign in to Orbiters - N4N0 to give feedback").into());
         Vec::new()
     }
 
@@ -2299,7 +2302,7 @@ impl Menu {
                 if let Some(i) = crate::feedback::label_index(&id) {
                     self.popped = Some((Target::LabelChip(i), Instant::now()));
                 }
-                self.notice = Some(format!("{} given, with your reason", label.name("en")));
+                self.notice = Some(latin(|| tr!("{label} given, with your reason", label = label.name(orbiters_i18n::language().tag()))));
                 vec![Effect::Feedback(FeedbackAsk::Label { world, label: id, on: true, text: Some(text) })]
             }
             Err(refusal) => {
@@ -2319,12 +2322,13 @@ impl Menu {
             Ok(text) => {
                 let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
                 let entry = self.feedback.world_mut(&world);
-                entry.comments.insert(0, crate::feedback::CommentRow { id: 0, by: "You".into(), text: text.clone(), at: now, mine: true });
+                let you = tr_latin("You");
+                entry.comments.insert(0, crate::feedback::CommentRow { id: 0, by: you.into(), text: text.clone(), at: now, mine: true });
                 entry.comment_count += 1;
                 self.comment_page = 0;
                 self.typed.clear();
                 self.go(Page::Comments);
-                self.notice = Some("Sending your comment…".into());
+                self.notice = Some(tr_latin("Sending your comment…").into());
                 vec![Effect::Feedback(FeedbackAsk::Comment { world, text })]
             }
             Err(refusal) => {
@@ -2357,7 +2361,7 @@ impl Menu {
         if self.invite_waiting {
             return Vec::new();
         }
-        self.notice = Some(format!("Asking Orbiters to invite you to {world}…"));
+        self.notice = Some(latin(|| tr!("Asking Orbiters to invite you to {world}…", world = world)));
         self.ask_invite(location)
     }
 
@@ -2379,7 +2383,7 @@ impl Menu {
                     self.go(Page::Instances);
                 }
                 self.invite_account = None;
-                self.notice = Some("Invite sent: open it in VRChat's notifications".into());
+                self.notice = Some(tr_latin("Invite sent: open it in VRChat's notifications").into());
             }
             InviteAnswer::NeedsFriend { account, message } => {
                 self.invite_account = Some(account);
@@ -2388,7 +2392,7 @@ impl Menu {
                 }
                 self.notice = Some(cut(&message, 80));
             }
-            InviteAnswer::Failed { message } => self.notice = Some(format!("Not invited: {}", cut(&message, 60))),
+            InviteAnswer::Failed { message } => self.notice = Some(latin(|| tr!("Not invited: {error}", error = cut(&message, 60)))),
         }
     }
 
@@ -2446,7 +2450,7 @@ pub fn cut(text: &str, max: usize) -> String {
 pub fn next_state_name(states: &[StateRow]) -> String {
     let mut n = states.len() + 1;
     loop {
-        let name = format!("State {n}");
+        let name = latin(|| tr!("State {number}", number = n));
         if !states.iter().any(|s| s.name.trim().eq_ignore_ascii_case(&name)) {
             return name;
         }

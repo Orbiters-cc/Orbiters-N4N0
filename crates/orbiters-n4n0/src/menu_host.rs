@@ -213,7 +213,7 @@ impl<P: Pictures> MenuHost<P> {
             view.states.iter().map(|s| StateRow { id: s.id.clone(), name: s.name.clone(), default: s.default, pose: s.pose, size: s.size }).collect();
         let listed = (rows, view.avatar_id.is_some());
         if self.states_seen.as_ref() != Some(&listed) || m.saving() {
-            m.set_states(listed.0.clone(), listed.1, "VRChat's avatar is not known yet");
+            m.set_states(listed.0.clone(), listed.1, orbiters_i18n::mark("VRChat's avatar is not known yet"));
             self.states_seen = Some(listed);
             changed = true;
         }

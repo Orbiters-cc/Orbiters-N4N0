@@ -292,7 +292,7 @@ const SAME_LENGTH: u32 = 3;
 /// or one of YouTube's own apps.
 pub fn may_play_youtube(app: &str) -> bool {
     let app = app.to_ascii_lowercase();
-    app.contains("youtube") || ["chrome", "edge", "firefox", "brave", "opera", "opera gx", "vivaldi", "arc", "chromium", "zen"].contains(&app.as_str())
+    app.contains("youtube") || ["chrome", "edge", "firefox", "brave", "opera", "opera gx", "vivaldi", "arc", "chromium", "zen"].contains(&app.as_str()) // i18n: not shown
 }
 
 /// Whether what an app plays (`title`, `artist`, `album`, from `app`) is worth looking up on YouTube: one of YouTube's

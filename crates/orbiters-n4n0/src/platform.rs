@@ -68,7 +68,9 @@ pub trait QrScan: Send {}
 
 /// What every menu, the overlay, the window and a toast say when a 3D picture is asked for with VRChat's camera closed:
 /// OSC cannot open it (VRChat's `/usercamera/Mode` switches the camera's mode once it is open, nothing opens it).
-pub const CAMERA_CLOSED: &str = "Open the camera before";
+///
+/// Code compares with this English text (`contains`, `==`), so it stays English; where it is drawn it goes through `tr`.
+pub const CAMERA_CLOSED: &str = orbiters_i18n::mark("Open the camera before");
 
 /// The app N4N0 runs in: its settings, what it knows of VRChat, where N4N0's state goes, the Orbiters account, the
 /// order of what OSC messages ask for, and the features that are the app's own (calls, 3D pictures, the walk boost),

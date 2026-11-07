@@ -9,6 +9,7 @@
 //! `menu-themes/modern.json` and `retro.json`). A colour a theme leaves out is its style's base one.
 
 use orbiters_core::settings::MenuLook;
+use orbiters_i18n::tr;
 use serde_json::Value;
 use std::path::Path;
 
@@ -138,7 +139,7 @@ impl Theme {
     /// Reads a theme file's JSON: colours it leaves out are its style's base ones; names it does not know are warnings;
     /// anything malformed refuses the whole file.
     pub fn parse(json: &str) -> Result<(Theme, Vec<String>), String> {
-        let value: Value = serde_json::from_str(json).map_err(|e| format!("not JSON: {e}"))?;
+        let value: Value = serde_json::from_str(json).map_err(|e| tr!("not JSON: {error}", error = e))?;
         let Value::Object(top) = value else { return Err("not a theme file: its JSON is not an object".into()) };
         match top.get("schema") {
             Some(Value::Number(n)) if n.as_u64() == Some(SCHEMA) => {}
@@ -154,18 +155,18 @@ impl Theme {
         let mut theme = Theme::base(style);
         let mut warnings = Vec::new();
         for field in top.keys().filter(|k| !matches!(k.as_str(), "schema" | "style" | "colors" | "screen" | "name")) {
-            warnings.push(format!("unknown field {field:?} ignored"));
+            warnings.push(tr!("unknown field {field} ignored", field = format!("{field:?}")));
         }
         if let Some(colors) = top.get("colors") {
             let Value::Object(colors) = colors else { return Err("\"colors\" must be an object of colours (\"#RRGGBB\")".into()) };
             for (name, value) in colors {
                 let Some(slot) = theme.colors.get_mut(name) else {
-                    warnings.push(format!("unknown colour \"colors\".{name:?} ignored"));
+                    warnings.push(tr!("unknown colour \"colors\".{name} ignored", name = format!("{name:?}")));
                     continue;
                 };
-                let [r, g, b, a] = color(value).ok_or_else(|| format!("\"colors\".{name:?} must be a colour \"#RRGGBB\""))?;
+                let [r, g, b, a] = color(value).ok_or_else(|| tr!("\"colors\".{name} must be a colour \"#RRGGBB\"", name = format!("{name:?}")))?;
                 if a != 255 {
-                    warnings.push(format!("\"colors\".{name:?}: its alpha is ignored (the menu's colours are opaque)"));
+                    warnings.push(tr!("\"colors\".{name}: its alpha is ignored (the menu's colours are opaque)", name = format!("{name:?}")));
                 }
                 *slot = [r, g, b];
             }
@@ -174,12 +175,12 @@ impl Theme {
             let Value::Object(screen) = screen else { return Err("\"screen\" must be an object (\"tint\", \"edge\", \"glow\")".into()) };
             for (name, value) in screen {
                 match name.as_str() {
-                    "tint" => theme.screen.tint = color(value).ok_or("\"screen\".\"tint\" must be a colour \"#RRGGBB\" or \"#RRGGBBAA\"")?,
-                    "edge" => theme.screen.edge = color(value).ok_or("\"screen\".\"edge\" must be a colour \"#RRGGBB\" or \"#RRGGBBAA\"")?,
+                    "tint" => theme.screen.tint = color(value).ok_or(tr("\"screen\".\"tint\" must be a colour \"#RRGGBB\" or \"#RRGGBBAA\""))?,
+                    "edge" => theme.screen.edge = color(value).ok_or(tr("\"screen\".\"edge\" must be a colour \"#RRGGBB\" or \"#RRGGBBAA\""))?,
                     "glow" => {
-                        theme.screen.glow = value.as_f64().filter(|g| (0.0..=2.0).contains(g)).ok_or("\"screen\".\"glow\" must be a number from 0 to 2")? as f32
+                        theme.screen.glow = value.as_f64().filter(|g| (0.0..=2.0).contains(g)).ok_or(tr("\"screen\".\"glow\" must be a number from 0 to 2"))? as f32
                     }
-                    _ => warnings.push(format!("unknown field \"screen\".{name:?} ignored")),
+                    _ => warnings.push(tr!("unknown field \"screen\".{name} ignored", name = format!("{name:?}"))),
                 }
             }
         }
@@ -204,7 +205,7 @@ impl Theme {
         }
         let glow = if self.screen.glow.fract() == 0.0 { format!("{}", self.screen.glow as i32) } else { format!("{}", self.screen.glow) };
         out += &format!(
-            "  }},\n  \"screen\": {{\n    \"tint\": \"{}\",\n    \"edge\": \"{}\",\n    \"glow\": {glow}\n  }}\n}}\n",
+            "  }},\n  \"screen\": {{\n    \"tint\": \"{}\",\n    \"edge\": \"{}\",\n    \"glow\": {glow}\n  }}\n}}\n", // i18n: not shown
             hex(&self.screen.tint),
             hex(&self.screen.edge)
         );

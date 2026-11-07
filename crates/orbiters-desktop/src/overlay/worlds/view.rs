@@ -375,10 +375,11 @@ pub struct View {
     /// VRChat's turning stick, for what shows around the person; and how VRChat turns.
     turning: TurnStick,
     turn_read: Option<Instant>,
+    turned_smoothly: bool,
     steps_turn: bool,
     /// It lies across a menu, and how far it has gone for that.
-    covered: bool,
-    covered_by: f32,
+    /// Faces handed to the compositor: `vr-test.log`.
+    published: u64,
     pub see_through: bool,
     unseen_turn: usize,
     last_unseen: Option<Instant>,
@@ -440,9 +441,9 @@ impl View {
             idle_since: None,
             turning: TurnStick::default(),
             turn_read: None,
+            turned_smoothly: false,
             steps_turn: false,
-            covered: false,
-            covered_by: 0.0,
+            published: 0,
             see_through: false,
             unseen_turn: 0,
             last_unseen: None,
@@ -609,14 +610,33 @@ impl View {
         self.placement = Some(small.placement(capture.view.eye()));
     }
 
-    /// What shows small lies across a menu, or no longer does. An overlay shows over VRChat's menus whatever its distance, so it goes while it does.
-    pub fn set_covered(&mut self, covered: bool) {
-        self.covered = covered;
+    /// Whether VRChat turns in steps here.
+    pub fn turns_in_steps(&self) -> bool {
+        self.steps_turn
     }
 
-    /// Whether it is away for that.
-    pub fn covered(&self) -> bool {
-        self.covered
+    /// What this submits now, for `vr-test.log`: what a render cannot say of a headset.
+    pub fn report(&self, overlay: &vr::Overlay) -> String {
+        let (mut visible, mut total) = (0, 0);
+        if let Some(handles) = &self.handles {
+            for h in handles.iter().flatten() {
+                total += 1;
+                visible += overlay.is_visible(*h) as u32;
+            }
+        }
+        let small = self.small.as_ref().map(|s| format!("docked {} taken {} held {:?} reach {:.2} radius {:.3} anchor {:?} middle moved {:?}", s.docked, s.taken(), s.held_by(), s.reach(), s.radius(), s.anchor, s.moved_by()));
+        let place = self.small_place.map(|(at, radius)| (stereo::position(&at), radius));
+        format!(
+            "view: phase {} alpha {:.2} faces visible {visible}/{total} faces submitted {} loaded {} in flight {} cube {:?} small [{}] hole's place {place:?} error {:?}",
+            match self.phase { Phase::Off => "off", Phase::Loading => "loading", Phase::Shown { .. } => "shown", Phase::Leaving { .. } => "leaving" },
+            self.alpha,
+            self.published,
+            self.loaded,
+            self.in_flight.is_some(),
+            self.cubes[self.active].map(|c| c.center),
+            small.unwrap_or_default(),
+            self.error,
+        )
     }
 
     /// Where a panel has a place for what shows small, and how large it is, or that it has none.
@@ -631,23 +651,29 @@ impl View {
 
     /// VRChat's turning stick (-1 to 1), for what shows around the person: the capture turns about the head, as the world does in VRChat. Enzo: "so I can turn around and look around in
     /// the same way as I would in vrchat and not feel stuck". What shows small has its own hand.
-    pub fn turn_stick(&mut self, stick: f32, steamvr: &vr::Client) {
+    pub fn turn_stick(&mut self, stick: f32, steamvr: &vr::Client) -> f32 {
         let now = Instant::now();
         let seconds = self.turn_read.map_or(0.0, |t| now.duration_since(t).as_secs_f32()).min(0.1);
         self.turn_read = Some(now);
         if self.small.is_some() || !matches!(self.phase, Phase::Shown { .. }) {
-            return;
+            return 0.0;
         }
         let by = self.turning.step(stick, seconds, self.steps_turn);
         if by == 0.0 {
-            return;
+            // Smoothly, only what is looked at was drawn anew: now all of it, from where it stopped.
+            if std::mem::take(&mut self.turned_smoothly) {
+                self.renew();
+            }
+            return 0.0;
         }
+        self.turned_smoothly = !self.steps_turn;
         if let Some(placement) = self.placement {
             self.placement = Some(stereo::turned_about(&placement, stereo::position(&head_pose(steamvr, 0.0)), by));
             if self.steps_turn {
                 self.renew();
             }
         }
+        by
     }
 
     /// What shows small goes back to its place in the panel.
@@ -800,12 +826,6 @@ impl View {
             }
             Phase::Loading => {}
             Phase::Shown { since } => {
-                // Quickly, and not in a blink, should a hand wave it past a menu's edge.
-                let wanted = if self.covered { 1.0 } else { 0.0 };
-                self.covered_by += (wanted - self.covered_by) * 0.3;
-                if (wanted - self.covered_by).abs() < 0.01 {
-                    self.covered_by = wanted;
-                }
                 let t = (since.elapsed().as_secs_f32() / FADE_IN.as_secs_f32()).min(1.0);
                 let eased = 1.0 - (1.0 - t).powi(3);
                 self.set_alpha(overlay, eased * self.alpha_scale());
@@ -941,11 +961,10 @@ impl View {
     }
 
     fn alpha_scale(&self) -> f32 {
-        let away = 1.0 - self.covered_by;
         if self.see_through {
-            SEE_THROUGH_ALPHA * away
+            SEE_THROUGH_ALPHA
         } else {
-            away
+            1.0
         }
     }
 
@@ -1154,6 +1173,7 @@ impl View {
             self.wait = side.handed_over();
             if self.switching == Some(cube_index) {
                 for f in 0..6 {
+                    self.published += 1;
                     let _ = overlay.set_alpha(handles[cube_index][f], self.alpha);
                     let _ = overlay.show(handles[cube_index][f]);
                 }

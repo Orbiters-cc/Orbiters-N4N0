@@ -17,6 +17,7 @@
 pub mod cache;
 pub mod catalog;
 pub mod small_hint;
+pub mod stick3d;
 
 /// With this few captures, the list of them goes on with popular worlds.
 const FEW_CAPTURES: usize = 3;
@@ -181,6 +182,7 @@ pub struct Worlds {
     /// What says how to handle what shows small; it has been used; a new opening of the menu asks it back for the next capture.
     hint: Option<small_hint::SmallHint>,
     backdrop: Option<small_hint::Backdrop>,
+    small_logged: super::vr_log::Every,
     hide_chip: Option<small_hint::HideChip>,
     small_place: Option<(vr::Matrix34, f32)>,
     /// Where each hand's tool is and which way it points, and its trigger, now and a turn ago.
@@ -291,6 +293,7 @@ impl Worlds {
             small_triggers: [false; 2],
             small_triggers_were: [false; 2],
             backdrop: None,
+            small_logged: Default::default(),
             small_place: None,
             hint_used: false,
             menu_boxes: Vec::new(),
@@ -367,6 +370,7 @@ impl Worlds {
             small_triggers: [false; 2],
             small_triggers_were: [false; 2],
             backdrop: None,
+            small_logged: Default::default(),
             small_place: None,
             hint_used: false,
             menu_boxes: Vec::new(),
@@ -840,12 +844,10 @@ impl Worlds {
     fn update_hint(&mut self, overlay: &vr::Overlay, steamvr: &vr::Client, presenter: &mut Presenter, snap: &Snapshot) {
         let small = self.view.small_now().copied();
         self.hint_used |= small.is_some_and(|s| s.zoomed);
-        // Across a menu: away, what stands with it too. In a panel's hole it is meant to be there.
-        let eye = stereo::position(&view::head_pose(steamvr, 0.0));
-        // Brought back to its hole, it must show to be let go there.
-        let home = self.small_place.is_some_and(|(at, _)| small.is_some_and(|s| stereo::length(stereo::sub(stereo::position(&at), s.anchor)) <= stereo::SMALL_DOCKS_WITHIN_M * 2.0));
-        let covered = !home && small.is_some_and(|s| !s.docked && self.menu_boxes.iter().any(|m| stereo::shows_over(eye, s.anchor, s.radius(), m)));
-        self.view.set_covered(covered);
+        // Across a menu it stays: the menu is drawn over it by sort order (Enzo's diagram: menu, 3D view, backdrop, game). It never fades for that, which made it vanish.
+        if self.small_logged.due(std::time::Duration::from_secs(1)) && self.view.small() {
+            super::vr_log::line(&self.view.report(overlay));
+        }
         // The dark pane behind it in a panel's hole.
         let pane = small.filter(|s| s.docked).and(self.small_place).map(|(at, radius)| (at, radius * 2.0 / SMALL_FILLS_HOLE + 0.012));
         if pane.is_some() && self.backdrop.is_none() {
@@ -854,7 +856,7 @@ impl Worlds {
         if let Some(backdrop) = self.backdrop.as_mut() {
             backdrop.update(overlay, presenter, pane);
         }
-        let wanted = small.filter(|s| !self.hint_used && !s.docked && !covered).map(|s| {
+        let wanted = small.filter(|s| !self.hint_used && !s.docked).map(|s| {
             let stage = match s.held_by() {
                 Some(hand) => small_hint::Stage::Stick { hand },
                 None => small_hint::Stage::Grip { near: s.near },
@@ -874,7 +876,9 @@ impl Worlds {
             }
         }
         if let Some(hint) = self.hint.as_mut() {
-            hint.update(overlay, presenter, &view::head_pose(steamvr, 0.0), wanted, !snap.settings.reduce_motion);
+            let head = view::head_pose(steamvr, 0.0);
+            let eyes = [vr::compositor::Eye::Left, vr::compositor::Eye::Right].map(|eye| stereo::position(&stereo::compose(&head, &steamvr.eye_to_head(eye))));
+            hint.update(overlay, presenter, &head, eyes, wanted, !snap.settings.reduce_motion);
         }
     }
 
@@ -941,8 +945,8 @@ impl Worlds {
     }
 
     /// VRChat's turning stick, for what shows around the person.
-    pub fn turn_stick(&mut self, stick: f32, steamvr: &vr::Client) {
-        self.view.turn_stick(stick, steamvr);
+    pub fn turn_stick(&mut self, stick: f32, steamvr: &vr::Client) -> f32 {
+        self.view.turn_stick(stick, steamvr)
     }
 
     /// The hands, for what shows small.

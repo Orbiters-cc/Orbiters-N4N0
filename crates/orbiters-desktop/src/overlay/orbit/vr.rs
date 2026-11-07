@@ -477,6 +477,8 @@ pub struct Cx<'a, 'o> {
 pub struct Turn {
     /// A press happened (for the click's sound).
     pub clicked: bool,
+    /// The hand holding VRChat's menu, whose grip means nothing to what lies in a panel's hole.
+    pub menu_hand: Option<usize>,
     /// What the panel on the sheet asked of the 3D view. The sheet has its own panel, so nothing else opens beside it, and N4N0's menu stays out of this.
     pub(in crate::overlay) worlds: Vec<super::super::worlds::Relayed>,
     /// The menus up now: what a capture must not show over. None with no menu.
@@ -607,6 +609,7 @@ pub struct OrbitVr {
     camera_watch: Option<CameraWatch>,
     camera_follow: super::camera_track::Follow,
     camera_side: camera_track::Side,
+    hole_logged: super::super::vr_log::Every,
     camera_seen: Option<Instant>,
     camera_looks: u32,
     /// The head lately, for where it was when a look's frame was taken.
@@ -651,6 +654,7 @@ impl OrbitVr {
             pointers: [None; 2],
             camera_follow: Default::default(),
             camera_side: Default::default(),
+            hole_logged: Default::default(),
             camera_seen: None,
             camera_looks: 0,
             camera_heads: Default::default(),
@@ -1072,6 +1076,13 @@ impl OrbitVr {
             let there = Matrix34 { m: [[1.0, 0.0, 0.0, x], [0.0, 1.0, 0.0, y], [0.0, 0.0, 1.0, 0.0]] };
             Some((space::compose(&frame, &there), hole.width() / 1024.0 * quad.width / 2.0 * super::super::worlds::SMALL_FILLS_HOLE))
         });
+        turn.menu_hand = match open {
+            Open::Wheel(hand) | Open::QuickMenu(hand) => Some(hand),
+            Open::Closed => None,
+        };
+        if self.hole_logged.due(Duration::from_secs(1)) && cx.world_status.small {
+            super::super::vr_log::line(&format!("panel: {} small place {:?} world panel status small {} docked {} shown {} stage {:?}", self.panels.hole_report(), turn.small_place.map(|(at, r)| ([at.m[0][3], at.m[1][3], at.m[2][3]], r)), cx.world_status.small, cx.world_status.small_docked, cx.world_status.shown, cx.world_status.stage));
+        }
         // Pictures, then each overlay where it goes.
         self.show(&mut cx, &quads, &placing);
         self.last_shown = true;

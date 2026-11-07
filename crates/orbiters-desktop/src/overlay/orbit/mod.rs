@@ -1149,6 +1149,28 @@ impl Panels {
         asked
     }
 
+    /// What is submitted at the hole a capture shows through, read back: how solid the sheet's page and its back are at its middle and just outside it. Both must be 0 at its middle.
+    pub(in crate::overlay) fn hole_report(&self) -> String {
+        let sample = |panel: Option<&Panel>, at: Pos2| -> Option<u8> {
+            let panel = panel?;
+            let zoom = panel.px[0] as f32 / panel.logical.x;
+            let (x, y) = ((at.x * zoom) as usize, (at.y * zoom) as usize);
+            panel.pixels().get((y * panel.px[0] as usize + x) * 4 + 3).copied()
+        };
+        let page = self.takeover.as_ref();
+        let back = self.list.iter().find(|p| p.zone == Zone::SheetBack);
+        let hole = self.stage.worlds.as_ref().and_then(|w| w.small_hole());
+        let back_hole = self.facts.sheet_hole;
+        format!(
+            "page hole {hole:?} alpha at its middle {:?} outside {:?}; back hole {back_hole:?} alpha at its middle {:?} outside {:?}; sheet {:?}",
+            hole.and_then(|h| sample(page, h.center())),
+            hole.and_then(|h| sample(page, pos2(h.center().x, h.max.y + 8.0))),
+            back_hole.and_then(|h| sample(back, h.center())),
+            back_hole.and_then(|h| sample(back, pos2(h.center().x, h.max.y + 8.0))),
+            self.facts.sheet,
+        )
+    }
+
     /// Where on the sheet's page a capture standing small may lie.
     pub(in crate::overlay) fn small_place_on_sheet(&self) -> Option<egui::Rect> {
         self.stage.worlds.as_ref().filter(|_| self.facts.sheet == Some(Sheet::Worlds)).and_then(|w| w.small_place_on_panel())

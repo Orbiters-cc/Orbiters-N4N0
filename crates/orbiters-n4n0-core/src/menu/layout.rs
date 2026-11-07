@@ -1712,6 +1712,10 @@ pub fn picture_key_for(menu: &Menu, picture: &Picture, public: bool) -> Option<S
     }
 }
 
+/// The cells a Previous instances row's line under its world has, and a History row's.
+const INSTANCE_META_COLUMNS: usize = 32;
+const CAPTURE_META_COLUMNS: usize = 33;
+
 /// A tile's note on Home.
 fn tile_note(menu: &Menu, tile: u8) -> String {
     match tile {
@@ -2282,7 +2286,14 @@ fn world_name(capture: &CaptureRow) -> String {
 /// A History row's line under its world: when it was taken, then where it stands.
 fn capture_meta(capture: &CaptureRow) -> String {
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
-    format!("{} · {}", ago(now.saturating_sub(capture.taken)), capture.state())
+    let seconds = now.saturating_sub(capture.taken);
+    let long = format!("{} · {}", ago(seconds), capture.state());
+    // The long time ("2 h ago") gives way to the short one where a language needs more room than the row has.
+    if long.chars().count() <= CAPTURE_META_COLUMNS {
+        long
+    } else {
+        format!("{} · {}", feedback::ago_short(seconds), capture.state())
+    }
 }
 
 /// What the last capture's state means on the 3D picture page, in a sentence or two.
@@ -2334,11 +2345,19 @@ pub fn qr_note(qr: &crate::qr::QrView) -> String {
 /// A previous instance's line under its world: who may join it, its region, when it was joined.
 fn instance_meta(row: &super::InstanceRow) -> String {
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+    let seconds = now.saturating_sub(row.at);
     let mut parts = vec![tr(row.kind()).to_string()];
     if let Some(region) = row.region() {
         parts.push(region.to_string());
     }
-    parts.push(ago(now.saturating_sub(row.at)));
+    parts.push(ago(seconds));
+    let long = parts.join(" · ");
+    // The long time ("2 h ago") gives way to the short one where a language needs more room than the row has.
+    if long.chars().count() <= INSTANCE_META_COLUMNS {
+        return long;
+    }
+    parts.pop();
+    parts.push(feedback::ago_short(seconds));
     parts.join(" · ")
 }
 
@@ -3038,5 +3057,201 @@ mod tests {
         menu.heard = Some("Voilà ton sweat".into());
         menu.heard_private = false;
         assert_eq!(text_for(&menu, Content::Heard, true), "\"Voilà ton sweat\"");
+    }
+
+    /// Menus with something in each place, for the language tests below.
+    fn menus_with_something_everywhere() -> Vec<Menu> {
+        use super::super::{Call, Contact, InstanceRow, Light, Media, StateRow, Tracking, Volume};
+        use crate::captures::{CapturePhase, CaptureRow, Sharing};
+        let base = || {
+            let mut menu = Menu::new(KeyboardLayout::Qwerty, 3, super::super::PhotoLength::Standard);
+            menu.pages = Pages::ALL;
+            menu.open();
+            menu
+        };
+        let taken = now().saturating_sub(7200);
+        let capture = |phase: CapturePhase, sharing: Sharing| CaptureRow { key: "k".into(), world: "Moonlit Garden".into(), taken, phase, sharing, ..Default::default() };
+        let mut out = vec![base()];
+        let mut calling = base();
+        calling.contacts = (0..9).map(|i| Contact { id: format!("u{i}"), name: format!("Friend {i}") }).collect();
+        calling.calls_ready = true;
+        calling.call = Some(Call::Ringing { name: "Lyra Nightfall".into() });
+        out.push(calling.clone());
+        calling.call = Some(Call::Connected { name: "Lyra Nightfall".into(), seconds: 75, muted: true });
+        out.push(calling.clone());
+        calling.call = Some(Call::Calling { name: "Lyra Nightfall".into() });
+        out.push(calling);
+        let mut playing = base();
+        playing.media = Some(Media { title: "Midnight City".into(), artist: "M83".into(), app: "Spotify".into(), playing: true, position: Some(83), duration: Some(243), ..Default::default() });
+        playing.volume = Some(Volume { percent: 40, muted: false });
+        playing.light = Some(Light { on: true, color: 2, level: 0.62 });
+        playing.tracking = Some(Tracking { on: true, levels: [1, 1, 1], note: String::new() });
+        playing.fast_walk = true;
+        out.push(playing);
+        let mut stated = base();
+        stated.states = (0..4).map(|i| StateRow { id: format!("s{i}"), name: format!("State {i}"), default: i == 0, pose: i % 2 == 0, size: i < 2 }).collect();
+        stated.states_ready = true;
+        stated.draft.size = true;
+        stated.draft.pose = true;
+        stated.draft.default = true;
+        out.push(stated);
+        let mut shared = base();
+        shared.instances_ready = true;
+        shared.instances = ["~group(g)~groupAccessType(public)~region(us)", "~private(u)~canRequestInvite~region(jp)", "~friends(u)", "~hidden(u)~region(eu)", ""]
+            .into_iter()
+            .map(|tags| InstanceRow { location: format!("wrld_x:1{tags}"), world: "Moonlit Garden".into(), at: taken })
+            .collect();
+        let sharings = [Sharing::Idle, Sharing::Waiting { public: true, people: 0 }, Sharing::Busy { public: false, people: 3 }, Sharing::Done { public: true, people: 0 }, Sharing::Done { public: true, people: 12 }, Sharing::Done { public: false, people: 1 }, Sharing::Explicit, Sharing::Failed { message: "x".into() }];
+        let phases = [CapturePhase::Recording, CapturePhase::Saving, CapturePhase::Waiting, CapturePhase::Making { percent: 42 }, CapturePhase::Paused { percent: 42 }, CapturePhase::NoView, CapturePhase::Ready];
+        shared.captures.listed = true;
+        shared.captures.history = phases.iter().map(|p| capture(*p, Sharing::Idle)).chain(sharings.iter().map(|s| capture(CapturePhase::Ready, s.clone()))).collect();
+        shared.captures.latest = shared.captures.history.first().cloned();
+        out.push(shared.clone());
+        shared.captures.latest = shared.captures.history.last().cloned();
+        out.push(shared);
+        // The other things a tile's note can say.
+        let mut alone = base();
+        alone.photo_timer = 0;
+        alone.desktop_mode = true;
+        alone.light = Some(Light { on: false, color: 0, level: 0.5 });
+        alone.tracking = Some(Tracking { on: false, levels: [0, 0, 0], note: String::new() });
+        alone.contacts = vec![Contact { id: "u".into(), name: "Lyra".into() }];
+        alone.calls_ready = true;
+        out.push(alone.clone());
+        alone.countdown = Some(5);
+        alone.sending = true;
+        alone.calls_ready = false;
+        alone.call_note = "Sign in to Orbiters to call friends".into();
+        alone.states_ready = false;
+        alone.states_note = "VRChat's avatar is not known yet".into();
+        alone.instances_ready = false;
+        alone.qr.phase = crate::qr::QrPhase::Looking;
+        alone.mirror = crate::mirror::MirrorView { phase: crate::mirror::Phase::Aiming { seconds: 3 }, zoom: 2, reach: crate::mirror::Reach::Screen };
+        out.push(alone.clone());
+        alone.qr.phase = crate::qr::QrPhase::NoCamera;
+        alone.qr.note = "No picture from VRChat's camera: choose Stream and turn Spout Stream on in its settings".into();
+        alone.mirror = crate::mirror::MirrorView { phase: crate::mirror::Phase::Placed, zoom: 2, reach: crate::mirror::Reach::Overlay };
+        out.push(alone.clone());
+        alone.mirror.reach = crate::mirror::Reach::NoMirror;
+        alone.qr.phase = crate::qr::QrPhase::Stopped;
+        out.push(alone);
+        // Every notice the menu makes by itself, as it is said at the time.
+        for notice in ["Link copied: paste it, or Drop it", "Saved as \"Party\"", "Sharing with 3 friends…", "Thank you! Your suggestion reached Orbiters", "Not invited: x", "Comment deleted", "This player lets no app move in its timeline", "Sign in to Orbiters - N4N0 to give feedback", "Opened on the computer: send the friend request there"] {
+            let mut menu = base();
+            menu.notice = Some(notice.to_string());
+            out.push(menu);
+        }
+        out
+    }
+
+    /// Every slot of every page, in menus with something in each place, in each language: the avatar's screen holds Latin letters only (English in
+    /// Japanese), no `{name}` is left unfilled, and a translation is not cut where the English is not.
+    #[test]
+    fn the_slots_follow_the_language_and_fit_where_english_does() {
+        use orbiters_i18n::{in_language, Language};
+        let mut cut = Vec::new();
+        for (m, menu) in menus_with_something_everywhere().iter().enumerate() {
+            for page in ScreenPage::ALL {
+                for (i, slot) in cached(page).slots.iter().enumerate() {
+                    let english = in_language(Language::En, || slot_text(menu, slot));
+                    for language in Language::TRANSLATED {
+                        let said = in_language(language, || slot_text(menu, slot));
+                        assert!(!said.contains('{'), "{language:?} {page:?} {i}: {said:?}");
+                        if language == Language::Ja {
+                            assert_eq!(said, english, "Japanese keeps the avatar's screen in Latin letters: {page:?} {i}");
+                        }
+                        let (mine, theirs) = (said.matches('?').count(), english.matches('?').count());
+                        assert!(mine <= theirs, "{language:?} {page:?} {i}: a character the atlas does not hold, {said:?}");
+                        if said.ends_with('…') && !english.ends_with('…') {
+                            cut.push(format!("menu {m} {page:?} slot {i} ({} columns) {language:?}: {said:?} (English {english:?})", slot.cols));
+                        }
+                    }
+                }
+            }
+        }
+        assert!(cut.is_empty(), "{} texts are cut in a language and not in English:\n{}", cut.len(), cut.join("\n"));
+    }
+
+    /// Texts that go on several lines (a page's sentence cut between words) have lines enough for each language, or the end of the sentence is lost.
+    #[test]
+    fn the_sentences_that_wrap_have_the_lines_they_need() {
+        use crate::captures::{CapturePhase, CaptureRow, Sharing};
+        use orbiters_i18n::{in_language, Language};
+        let lines_of = |content: fn(u8) -> Content| (0..8u8).filter(|i| ScreenPage::ALL.iter().any(|p| cached(*p).slots.iter().any(|s| s.content == content(*i)))).count();
+        let (last_lines, qr_lines, why_lines, warning_lines) = (lines_of(Content::LastNote), lines_of(Content::QrNote), lines_of(Content::ExplicitWhy), lines_of(Content::ExplicitLine));
+        assert_eq!((last_lines, qr_lines, why_lines, warning_lines), (2, 3, 2, 2), "the pages' lines: if a page changes, so do these");
+        let sharings = [Sharing::Idle, Sharing::Waiting { public: true, people: 0 }, Sharing::Busy { public: true, people: 0 }, Sharing::Done { public: true, people: 1 }, Sharing::Done { public: false, people: 1 }, Sharing::Explicit];
+        let phases = [CapturePhase::Recording, CapturePhase::Waiting, CapturePhase::Ready];
+        for language in Language::TRANSLATED {
+            in_language(language, || {
+                use crate::text::latin;
+                let mut checks: Vec<(String, usize, usize)> = Vec::new();
+                // What the text needs in this language, against the lines the page has (or the English, where it already needs more).
+                let mut add = |text: &dyn Fn() -> String, columns: usize, room: usize| {
+                    let mine = latin(|| text());
+                    let english = in_language(Language::En, || super::super::pieces(&text(), columns).len());
+                    let needs = super::super::pieces(&mine, columns).len();
+                    checks.push((mine, needs, room.max(english)));
+                };
+                for sharing in &sharings {
+                    for phase in phases {
+                        for explicit in [false, true] {
+                            let capture = CaptureRow { sharing: sharing.clone(), phase, explicit, ..Default::default() };
+                            add(&|| last_note(Some(&capture)), LAST_NOTE_COLUMNS, last_lines);
+                        }
+                    }
+                }
+                add(&|| last_note(None), LAST_NOTE_COLUMNS, last_lines);
+                for phase in [crate::qr::QrPhase::Off, crate::qr::QrPhase::Looking] {
+                    let qr = crate::qr::QrView { phase, ..Default::default() };
+                    add(&|| qr_note(&qr), QR_NOTE_COLUMNS, qr_lines);
+                }
+                for note in [crate::qr::no_camera_note(Some(false)), crate::qr::no_camera_note(None)] {
+                    add(&|| tr(&note).to_string(), QR_NOTE_COLUMNS, qr_lines);
+                }
+                add(&|| tr(crate::captures::EXPLICIT_WARNING).to_string(), EXPLICIT_COLUMNS, warning_lines);
+                add(&|| tr("Orbiters flagged it when it was shared").to_string(), EXPLICIT_WHY_COLUMNS, why_lines);
+                let wrong: Vec<String> = checks.into_iter().filter(|(_, n, room)| n > room).map(|(t, n, room)| format!("{t:?}: {n} lines for {room}")).collect();
+                assert!(wrong.is_empty(), "{language:?}:\n{}", wrong.join("\n"));
+            });
+        }
+    }
+
+    /// The same texts on a page that draws them with a real font (the window's Home): in the language, with no value left unfilled.
+    #[test]
+    fn the_window_reads_the_texts_in_the_language() {
+        use orbiters_i18n::{in_language, Language};
+        let menus = menus_with_something_everywhere();
+        let all: Vec<Content> = ScreenPage::ALL.iter().flat_map(|p| cached(*p).slots.iter().map(|s| s.content)).collect();
+        for menu in &menus {
+            for content in &all {
+                for language in Language::TRANSLATED {
+                    let said = in_language(language, || text_for(menu, *content, false));
+                    assert!(!said.contains('{'), "{language:?} {content:?}: {said:?}");
+                }
+            }
+        }
+        let menu = &menus[1];
+        in_language(Language::Ja, || assert_eq!(text(menu, Content::TileNote(2)), "Lyra Nightfallから着信"));
+        in_language(Language::Fr, || assert_eq!(text(menu, Content::TileNote(2)), "Lyra Nightfall appelle"));
+        in_language(Language::En, || assert_eq!(text(menu, Content::TileNote(2)), "Lyra Nightfall calls"));
+    }
+
+    /// A count takes the plural of its language: French and Portuguese say 0 in the singular, Japanese has one form.
+    #[test]
+    fn counts_take_their_languages_plural() {
+        use orbiters_i18n::{in_language, Language};
+        let mut menu = Menu::default();
+        menu.states_ready = true;
+        let said = |language, menu: &Menu| in_language(language, || text(menu, Content::StatesTitle));
+        assert_eq!(said(Language::En, &menu), "Nothing saved for this avatar");
+        menu.states = vec![super::super::StateRow::default(); 2];
+        assert_eq!(said(Language::En, &menu), "2 saved for this avatar");
+        assert_eq!(said(Language::Fr, &menu), "2 enregistrés pour cet avatar");
+        assert_eq!(said(Language::Es, &menu), "2 guardados para este avatar");
+        assert_eq!(said(Language::PtBr, &menu), "2 salvos para este avatar");
+        assert_eq!(said(Language::Ja, &menu), "このアバターで2件保存済み");
+        menu.states = vec![super::super::StateRow::default()];
+        assert_eq!(said(Language::Fr, &menu), "1 enregistré pour cet avatar");
     }
 }

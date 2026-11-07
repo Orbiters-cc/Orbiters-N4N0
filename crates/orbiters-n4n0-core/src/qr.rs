@@ -76,7 +76,7 @@ pub fn web_link(text: &str) -> Result<String, &'static str> {
     }
     let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
     if authority.contains('@') {
-        return Err("The link hides where it goes");
+        return Err(mark("The link hides where it goes"));
     }
     // The host, without its port (digits only); an IPv6 address in brackets.
     let digits = |port: &str| port.bytes().all(|b| b.is_ascii_digit());
@@ -84,17 +84,17 @@ pub fn web_link(text: &str) -> Result<String, &'static str> {
         Some(inner) => match inner.split_once(']') {
             Some((host, "")) => host,
             Some((host, port)) if port.strip_prefix(':').is_some_and(digits) => host,
-            _ => return Err("Not a web link"),
+            _ => return Err(mark("Not a web link")),
         },
         None => match authority.rsplit_once(':') {
             Some((host, port)) if digits(port) => host,
-            Some(_) => return Err("Not a web link"),
+            Some(_) => return Err(mark("Not a web link")),
             None => authority,
         },
     };
     let name = |c: char| c.is_alphanumeric() || matches!(c, '-' | '.' | '_') || (authority.starts_with('[') && c == ':');
     if host.is_empty() || host.starts_with('.') || host.starts_with('-') || !host.chars().all(name) {
-        return Err("Not a web link");
+        return Err(mark("Not a web link"));
     }
     Ok(format!("{scheme}://{rest}"))
 }

@@ -1089,7 +1089,7 @@ impl Menu {
             Ok(()) => {
                 self.suggestion.clear();
                 self.suggestion_voice = false;
-                self.notice = Some(tr_latin("Thank you! Your suggestion reached Orbiters").into());
+                self.notice = Some(mark("Thank you! Your suggestion reached Orbiters").into());
             }
             Err(e) => self.notice = Some(latin(|| tr!("Not sent: {error}", error = cut(&e, 60)))),
         }
@@ -1225,7 +1225,7 @@ impl Menu {
                     let effect = Effect::Copy { link: video.link(), title: video.title.clone() };
                     self.copied = Some(video.id.clone());
                     // The row now offers Drop, where the display can drop it.
-                    let notice = if self.can_drop { tr_latin("Link copied: paste it, or Drop it") } else { tr_latin("Link copied: paste it in the video player") };
+                    let notice = if self.can_drop { mark("Link copied: paste it, or Drop it") } else { mark("Link copied: paste it in the video player") };
                     self.notice = Some(notice.into());
                     vec![effect]
                 }
@@ -1234,7 +1234,7 @@ impl Menu {
             Target::Drop(i) => match self.page_results().get(i as usize) {
                 Some(video) if self.can_drop && self.copied.as_deref() == Some(video.id.as_str()) => {
                     let effect = Effect::Drop { link: video.link(), title: video.title.clone(), video: Some(video.id.clone()) };
-                    self.notice = Some(tr_latin("Dropped: grab the card to copy its link").into());
+                    self.notice = Some(mark("Dropped: grab the card to copy its link").into());
                     vec![effect]
                 }
                 _ => Vec::new(),
@@ -1327,25 +1327,25 @@ impl Menu {
             }
             Target::SuggestTalk => {
                 self.dictating = true;
-                self.notice = Some(tr_latin("Listening: say your idea").into());
+                self.notice = Some(mark("Listening: say your idea").into());
                 vec![Effect::Dictate]
             }
             Target::SuggestSend if !self.sending && !self.suggestion.trim().is_empty() => {
                 self.sending = true;
-                self.notice = Some(tr_latin("Sending…").into());
+                self.notice = Some(mark("Sending…").into());
                 vec![Effect::SendSuggestion { text: self.suggestion.trim().to_string(), voice: self.suggestion_voice }]
             }
             Target::SuggestSend => Vec::new(),
             Target::WatchVideo => match &self.world_video {
                 Some(video) => {
                     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
-                    self.notice = Some(tr_latin("Opened on the computer").into());
+                    self.notice = Some(mark("Opened on the computer").into());
                     vec![Effect::WatchVideo { link: watch_link(video, now) }]
                 }
                 None => Vec::new(),
             },
             Target::SaveVideo if self.world_video.is_some() => {
-                self.notice = Some(tr_latin("Saved in N4N0's videos").into());
+                self.notice = Some(mark("Saved in N4N0's videos").into());
                 vec![Effect::SaveVideo]
             }
             Target::SaveVideo => Vec::new(),
@@ -1353,7 +1353,7 @@ impl Menu {
             Target::CopyPlaying => match self.media.as_ref().and_then(|m| Some((m.link()?, m.title.clone(), m.video.clone()?))) {
                 Some((link, title, video)) => {
                     self.copied = Some(video);
-                    let notice = if self.can_drop { tr_latin("Link copied: paste it, or Drop it") } else { tr_latin("Link copied: paste it in the video player") };
+                    let notice = if self.can_drop { mark("Link copied: paste it, or Drop it") } else { mark("Link copied: paste it in the video player") };
                     self.notice = Some(notice.into());
                     vec![Effect::Copy { link, title }]
                 }
@@ -1361,7 +1361,7 @@ impl Menu {
             },
             Target::DropPlaying => match self.media.as_ref().and_then(|m| Some((m.link()?, m.title.clone(), m.video.clone()?))) {
                 Some((link, title, video)) if self.can_drop && self.copied.as_deref() == Some(video.as_str()) => {
-                    self.notice = Some(tr_latin("Dropped: grab the card to copy its link").into());
+                    self.notice = Some(mark("Dropped: grab the card to copy its link").into());
                     vec![Effect::Drop { link, title, video: Some(video) }]
                 }
                 _ => Vec::new(),
@@ -1371,7 +1371,7 @@ impl Menu {
             Target::Timeline(i) | Target::Seek(i) => self.seek(i),
             Target::TakeBack if self.card_out => {
                 self.card_out = false;
-                self.notice = Some(tr_latin("Card taken back").into());
+                self.notice = Some(mark("Card taken back").into());
                 vec![Effect::TakeBack]
             }
             Target::TakeBack => Vec::new(),
@@ -1395,7 +1395,7 @@ impl Menu {
             },
             Target::InviteAgain => match self.inviting.clone() {
                 Some(location) if !self.invite_waiting => {
-                    self.notice = Some(tr_latin("Asking Orbiters again…").into());
+                    self.notice = Some(mark("Asking Orbiters again…").into());
                     self.ask_invite(location)
                 }
                 _ => Vec::new(),
@@ -1417,7 +1417,7 @@ impl Menu {
             Target::QrCopy => match &self.qr.link {
                 Some(link) => {
                     let text = link.clone();
-                    self.notice = Some(tr_latin("Link copied").into());
+                    self.notice = Some(mark("Link copied").into());
                     vec![Effect::CopyText { text }]
                 }
                 None => Vec::new(),
@@ -1425,7 +1425,7 @@ impl Menu {
             Target::QrOpen => match &self.qr.link {
                 Some(link) => {
                     let link = link.clone();
-                    self.notice = Some(tr_latin("Opened again on the computer").into());
+                    self.notice = Some(mark("Opened again on the computer").into());
                     vec![Effect::OpenLink { link }]
                 }
                 None => Vec::new(),
@@ -1433,7 +1433,7 @@ impl Menu {
             Target::OpenFriendLink => match &self.invite_account {
                 Some(account) => {
                     let link = account.link.clone();
-                    self.notice = Some(tr_latin("Opened on the computer: send the friend request there").into());
+                    self.notice = Some(mark("Opened on the computer: send the friend request there").into());
                     vec![Effect::OpenLink { link }]
                 }
                 None => Vec::new(),
@@ -1492,7 +1492,7 @@ impl Menu {
                 let Some(key) = self.sharing.clone() else { return Vec::new() };
                 self.asked = Some((key.clone(), self.sharing_of(&key)));
                 self.go(self.share_from);
-                self.notice = Some(tr_latin("Sharing publicly…").into());
+                self.notice = Some(mark("Sharing publicly…").into());
                 vec![Effect::ShareCapture(ShareAsk { key, public: true, recipients: Vec::new(), acknowledge_explicit: true })]
             }
             Target::CancelShare if self.page == Page::Explicit => {
@@ -1571,7 +1571,7 @@ impl Menu {
                 let entry = self.feedback.world_mut(&world);
                 entry.comments.retain(|c| c.id != id);
                 entry.comment_count = entry.comment_count.saturating_sub(1);
-                self.notice = Some(tr_latin("Comment deleted").into());
+                self.notice = Some(mark("Comment deleted").into());
                 vec![Effect::Feedback(FeedbackAsk::Uncomment { world, comment: id })]
             }
             Target::WorldFeedback | Target::Labels | Target::Comments | Target::CommentCard(_) => Vec::new(),
@@ -2190,7 +2190,7 @@ impl Menu {
             return self.capture_thumbnails();
         }
         self.asked = Some((key.clone(), self.sharing_of(&key)));
-        self.notice = Some(tr_latin("Sharing publicly…").into());
+        self.notice = Some(mark("Sharing publicly…").into());
         vec![Effect::ShareCapture(ShareAsk { key, public: true, recipients: Vec::new(), acknowledge_explicit: false })]
     }
 
@@ -2260,7 +2260,7 @@ impl Menu {
     }
 
     fn sign_in_first(&mut self) -> Vec<Effect> {
-        self.notice = Some(tr_latin("Sign in to Orbiters - N4N0 to give feedback").into());
+        self.notice = Some(mark("Sign in to Orbiters - N4N0 to give feedback").into());
         Vec::new()
     }
 
@@ -2328,7 +2328,7 @@ impl Menu {
                 self.comment_page = 0;
                 self.typed.clear();
                 self.go(Page::Comments);
-                self.notice = Some(tr_latin("Sending your comment…").into());
+                self.notice = Some(mark("Sending your comment…").into());
                 vec![Effect::Feedback(FeedbackAsk::Comment { world, text })]
             }
             Err(refusal) => {
@@ -2383,7 +2383,7 @@ impl Menu {
                     self.go(Page::Instances);
                 }
                 self.invite_account = None;
-                self.notice = Some(tr_latin("Invite sent: open it in VRChat's notifications").into());
+                self.notice = Some(mark("Invite sent: open it in VRChat's notifications").into());
             }
             InviteAnswer::NeedsFriend { account, message } => {
                 self.invite_account = Some(account);

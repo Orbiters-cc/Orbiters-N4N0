@@ -119,11 +119,14 @@ impl StartView {
 }
 
 /// Where a capture stands in the play space: renderer coordinates (Unity's) to SteamVR's standing ones,
-/// `p ↦ rotation · p + offset` (a reflection: Unity is left-handed).
+/// `p ↦ size · rotation · p + offset` (a reflection: Unity is left-handed). Seen from an eye, a capture at a size is the
+/// same picture as the capture at its own size seen from the eye's place divided by that size, all of it nearer or
+/// farther by the same factor: only the camera's translation knows of it.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Placement {
     pub rotation: [[f32; 3]; 3],
     pub offset: V3,
+    pub size: f32,
 }
 
 impl Placement {
@@ -143,20 +146,116 @@ impl Placement {
         let eye = view.eye();
         let ground_point = [eye[0], view.ground(), eye[2]];
         let anchor = [h[0], 0.0, h[2]];
-        Self { rotation, offset: sub(anchor, mat_vec(&rotation, ground_point)) }
+        Self { rotation, offset: sub(anchor, mat_vec(&rotation, ground_point)), size: 1.0 }
     }
 
     #[cfg(test)]
     pub fn apply(&self, p: V3) -> V3 {
-        add(mat_vec(&self.rotation, p), self.offset)
+        add(scale(mat_vec(&self.rotation, p), self.size), self.offset)
     }
 
     /// A play-space point back in the capture's coordinates (the rotation is orthonormal).
     #[cfg(test)]
     pub fn invert(&self, q: V3) -> V3 {
-        let d = sub(q, self.offset);
+        let d = scale(sub(q, self.offset), 1.0 / self.size);
         let r = &self.rotation;
         [r[0][0] * d[0] + r[1][0] * d[1] + r[2][0] * d[2], r[0][1] * d[0] + r[1][1] * d[1] + r[2][1] * d[2], r[0][2] * d[0] + r[1][2] * d[1] + r[2][2] * d[2]]
+    }
+}
+
+/// How far from its middle a capture standing small reaches, in the room.
+pub const SMALL_RADIUS_M: f32 = 0.3;
+/// How much further than that a hand can take hold of it.
+const SMALL_REACH_M: f32 = 0.15;
+/// How much a full stick zooms a second, and how far a thumb's rest does nothing.
+const SMALL_ZOOM_PER_S: f32 = 1.4;
+const SMALL_STICK_REST: f32 = 0.25;
+/// How far it can zoom: from a town to a table.
+const SMALL_SIZES: (f32, f32) = (0.002, 0.6);
+
+/// A capture standing small before the person, as Enzo asked: "a small element in front of us that we can grab with the
+/// other hand, zoom using the joystick (up / down)". It stays as large in the room however it zooms: closer, it shows
+/// less of the capture, larger. What is farther from its middle than it reaches is not drawn.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Small {
+    pub rotation: [[f32; 3]; 3],
+    /// Where its middle is, in the room.
+    pub anchor: V3,
+    pub size: f32,
+    held: Option<SmallHold>,
+    grips: [bool; 2],
+}
+
+/// The hand holding it, and it as that hand holds it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct SmallHold {
+    hand: usize,
+    rotation: [[f32; 3]; 3],
+    anchor: V3,
+}
+
+fn rotation_of(m: &Matrix34) -> [[f32; 3]; 3] {
+    [[m.m[0][0], m.m[0][1], m.m[0][2]], [m.m[1][0], m.m[1][1], m.m[1][2]], [m.m[2][0], m.m[2][1], m.m[2][2]]]
+}
+
+fn transposed(m: &[[f32; 3]; 3]) -> [[f32; 3]; 3] {
+    [[m[0][0], m[1][0], m[2][0]], [m[0][1], m[1][1], m[2][1]], [m[0][2], m[1][2], m[2][2]]]
+}
+
+impl Small {
+    /// Half a metre before `head`, at its chest, turned as the capture would be around it, showing `reach` metres of
+    /// the capture around its middle.
+    pub fn new(view: &StartView, head: &Matrix34, reach: f32) -> Self {
+        let rotation = Placement::at(view, head).rotation;
+        let back = axis(head, 2);
+        let level = length([back[0], 0.0, back[2]]).max(1e-3);
+        let ahead = [-back[0] / level, 0.0, -back[2] / level];
+        let anchor = add(add(position(head), scale(ahead, 0.55)), [0.0, -0.15, 0.0]);
+        Self { rotation, anchor, size: (SMALL_RADIUS_M / reach.max(0.01)).clamp(SMALL_SIZES.0, SMALL_SIZES.1), held: None, grips: [false; 2] }
+    }
+
+    /// Where a capture whose middle is `middle` stands.
+    pub fn placement(&self, middle: V3) -> Placement {
+        Placement { rotation: self.rotation, offset: sub(self.anchor, scale(mat_vec(&self.rotation, middle), self.size)), size: self.size }
+    }
+
+    /// How far from its middle it shows the capture, in the capture's metres.
+    pub fn reach(&self) -> f32 {
+        SMALL_RADIUS_M / self.size
+    }
+
+    pub fn held(&self) -> bool {
+        self.held.is_some()
+    }
+
+    /// One frame of the hands: their poses, grips and sticks' up and down. A grip closing near it takes it; it follows
+    /// that hand until the grip opens; that hand's stick zooms it.
+    pub fn step(&mut self, hands: [Option<Matrix34>; 2], grips: [bool; 2], sticks: [f32; 2], seconds: f32) {
+        let was = std::mem::replace(&mut self.grips, grips);
+        if let Some(hold) = self.held {
+            if !grips[hold.hand] || hands[hold.hand].is_none() {
+                self.held = None;
+            }
+        }
+        if self.held.is_none() {
+            for hand in 0..2 {
+                let Some(pose) = hands[hand].as_ref().filter(|_| grips[hand] && !was[hand]) else { continue };
+                if length(sub(position(pose), self.anchor)) <= SMALL_RADIUS_M + SMALL_REACH_M {
+                    let inverse = transposed(&rotation_of(pose));
+                    self.held = Some(SmallHold { hand, rotation: mat_mul(&inverse, &self.rotation), anchor: mat_vec(&inverse, sub(self.anchor, position(pose))) });
+                    break;
+                }
+            }
+        }
+        let Some(hold) = self.held else { return };
+        let Some(pose) = hands[hold.hand].as_ref() else { return };
+        let turned = rotation_of(pose);
+        self.rotation = mat_mul(&turned, &hold.rotation);
+        self.anchor = add(mat_vec(&turned, hold.anchor), position(pose));
+        let stick = sticks[hold.hand];
+        if stick.abs() > SMALL_STICK_REST {
+            self.size = (self.size * (stick * SMALL_ZOOM_PER_S * seconds).exp()).clamp(SMALL_SIZES.0, SMALL_SIZES.1);
+        }
     }
 }
 
@@ -233,7 +332,7 @@ impl Cube {
         // World (play space) to camera rows: right, down, forward; then the capture into the play space.
         let rows = [right, down, normal];
         let r = mat_mul(&rows, &placement.rotation);
-        let t = mat_vec(&rows, sub(placement.offset, eye));
+        let t = scale(mat_vec(&rows, sub(placement.offset, eye)), 1.0 / placement.size);
         Camera { r, t, fx: focal, fy: focal, cx: mid + dot(rel, right) * per_metre, cy: mid + dot(rel, down) * per_metre, width: w, height: w }
     }
 
@@ -353,7 +452,7 @@ impl PlayCamera {
     pub fn camera(&self, placement: &Placement) -> Camera {
         Camera {
             r: mat_mul(&self.rows, &placement.rotation),
-            t: mat_vec(&self.rows, sub(placement.offset, self.eye)),
+            t: scale(mat_vec(&self.rows, sub(placement.offset, self.eye)), 1.0 / placement.size),
             fx: self.fx,
             fy: self.fy,
             cx: self.cx,
@@ -424,7 +523,7 @@ pub fn eye_camera(view: &Matrix34, tangents: [f32; 4], width: u32, height: u32, 
     let fy = height as f32 / (hi - lo);
     Camera {
         r: mat_mul(&rows, &placement.rotation),
-        t: mat_vec(&rows, sub(placement.offset, position(view))),
+        t: scale(mat_vec(&rows, sub(placement.offset, position(view))), 1.0 / placement.size),
         fx,
         fy,
         cx: -l * fx - 0.5,
@@ -480,6 +579,79 @@ mod tests {
 
     fn close(a: V3, b: V3, tol: f32) -> bool {
         (0..3).all(|i| (a[i] - b[i]).abs() <= tol)
+    }
+
+    /// A capture at a size looks from an eye exactly as if it were that large: what the renderer is given says the same.
+    #[test]
+    fn a_placement_at_a_size_projects_where_the_point_stands_in_the_room() {
+        let view = StartView { position: [1.0, 2.0, 3.0], target: [4.0, 1.0, 2.0], floor: None, eye_height: None };
+        let head = head_at(0.3, 1.7, -0.2, 0.7);
+        let small = Small::new(&view, &head, 6.0);
+        let middle = view.eye();
+        let placement = small.placement(middle);
+        assert!(close(placement.apply(middle), small.anchor, 1e-5), "its middle stands at its anchor");
+        // At the size asked: a point `reach` metres from the middle is as far from the anchor as it reaches in the room.
+        let far = placement.apply(add(middle, [small.reach(), 0.0, 0.0]));
+        assert!((length(sub(far, small.anchor)) - SMALL_RADIUS_M).abs() < 1e-4);
+        // Through the camera, where the room says.
+        let tangents = [-1.39, 1.24, -1.47, 1.45];
+        let camera = eye_camera(&head, tangents, 800, 800, &placement);
+        let same_size = eye_camera(&head, tangents, 800, 800, &Placement { size: 1.0, ..placement });
+        for p in [middle, add(middle, [0.5, 0.1, -0.2]), add(middle, [-1.0, 0.4, 0.8])] {
+            let at = mat_vec(&camera.r, p);
+            let (x, y, z) = (at[0] + camera.t[0], at[1] + camera.t[1], at[2] + camera.t[2]);
+            let (u, v) = (camera.fx * x / z + camera.cx, camera.fy * y / z + camera.cy);
+            // The point's place in the room, as an eye at the same place sees a thing there with no size at all.
+            let room = placement.apply(p);
+            let direct = eye_camera(&head, tangents, 800, 800, &Placement { rotation: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]], offset: [0.0; 3], size: 1.0 });
+            let d = mat_vec(&direct.r, room);
+            let (dx, dy, dz) = (d[0] + direct.t[0], d[1] + direct.t[1], d[2] + direct.t[2]);
+            assert!((u - (direct.fx * dx / dz + direct.cx)).abs() < 0.05 && (v - (direct.fy * dy / dz + direct.cy)).abs() < 0.05, "{u} {v}");
+            assert!(dz > 0.0, "in front");
+        }
+        let _ = same_size;
+    }
+
+    #[test]
+    fn a_hand_near_it_takes_it_and_its_stick_zooms_it_and_only_that_hand() {
+        let view = StartView { position: [0.0, 1.6, 0.0], target: [0.0, 1.6, -1.0], floor: None, eye_height: None };
+        let head = head_at(0.0, 1.7, 0.0, 0.0);
+        let mut small = Small::new(&view, &head, 6.0);
+        let start = small;
+        let near = head_at(small.anchor[0] + 0.2, small.anchor[1], small.anchor[2], 0.0);
+        let away = head_at(small.anchor[0] + 2.0, small.anchor[1], small.anchor[2], 0.0);
+        // Too far: a grip does nothing, and a grip already closed when it comes near does not take it either.
+        small.step([Some(away), None], [true, false], [1.0, 0.0], 0.1);
+        assert!(!small.held());
+        small.step([Some(near), None], [true, false], [1.0, 0.0], 0.1);
+        assert!(!small.held());
+        assert_eq!(small.size, start.size, "nothing held, the stick walks and zooms nothing");
+        small.step([Some(near), None], [false, false], [0.0, 0.0], 0.1);
+        small.step([Some(near), None], [true, false], [0.0, 0.0], 0.1);
+        assert!(small.held());
+        // It stays where it was as it is taken, and follows the hand, turning with it.
+        assert!(close(small.anchor, start.anchor, 1e-5));
+        let moved = head_at(near.m[0][3] + 0.1, near.m[1][3] + 0.3, near.m[2][3], 1.0);
+        small.step([Some(moved), None], [true, false], [0.0, 0.0], 0.1);
+        let from_hand = sub(small.anchor, position(&moved));
+        assert!((length(from_hand) - 0.2).abs() < 1e-4, "at the same distance from the hand");
+        assert!(small.rotation != start.rotation);
+        // The other hand's stick does nothing, a resting thumb neither, its own does.
+        let size = small.size;
+        small.step([Some(moved), None], [true, false], [0.1, 1.0], 0.5);
+        assert_eq!(small.size, size);
+        small.step([Some(moved), None], [true, false], [1.0, 0.0], 0.5);
+        assert!(small.size > size);
+        assert!(small.reach() < start.reach(), "closer, it shows less");
+        small.step([Some(moved), None], [true, false], [-1.0, 0.0], 0.5);
+        assert!((small.size - size).abs() < size * 0.01);
+        // Let go, it stays, and no stick moves it.
+        let anchor = small.anchor;
+        small.step([Some(near), None], [false, false], [1.0, 0.0], 0.5);
+        assert!(!small.held());
+        assert_eq!(small.anchor, anchor);
+        // No end to zooming but its limits.
+        small.step([Some(near), None], [false, false], [0.0; 2], 0.1);
     }
 
     fn head_at(x: f32, y: f32, z: f32, yaw: f32) -> Matrix34 {

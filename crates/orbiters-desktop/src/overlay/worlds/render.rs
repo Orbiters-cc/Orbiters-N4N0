@@ -66,6 +66,8 @@ pub struct FaceRenderer {
     wide: [Option<(wgpu::Texture, wgpu::TextureView)>; 2],
     resample: Resample,
     background: [f32; 3],
+    /// What the splats leave shows what is behind the picture: a capture standing small in the room.
+    transparent: bool,
     total: usize,
     overflows_seen: u32,
 }
@@ -116,7 +118,7 @@ impl FaceRenderer {
     pub fn new(device: wgpu::Device, queue: wgpu::Queue) -> Self {
         let gpu = Gpu::renderer(device.clone(), queue.clone());
         let resample = Resample::new(&device);
-        Self { device, queue, gpu, scratch: None, masters: Vec::new(), wide: [None, None], resample, background: BACKGROUND, total: 0, overflows_seen: 0 }
+        Self { transparent: false, device, queue, gpu, scratch: None, masters: Vec::new(), wide: [None, None], resample, background: BACKGROUND, total: 0, overflows_seen: 0 }
     }
 
     /// Uploads `capture`'s splats and sky map (the first ones drawn at most later: [`FaceRenderer::render`]'s count).
@@ -125,7 +127,24 @@ impl FaceRenderer {
         self.gpu.set_sky(capture.sky.as_ref().map(|s| (s.width, s.rgb.as_slice())))?;
         self.background = capture.sky.as_ref().map(|s| s.horizon()).or_else(|| orbiters_reconstruct::sky::horizon(&capture.gaussians)).unwrap_or(BACKGROUND);
         self.total = capture.gaussians.len();
+        self.transparent = false;
         Ok(())
+    }
+
+    /// What was just loaded shows with nothing around it, no sky and no background.
+    pub fn make_transparent(&mut self) -> anyhow::Result<()> {
+        self.gpu.set_sky(None)?;
+        self.background = [0.0; 3];
+        self.transparent = true;
+        Ok(())
+    }
+
+    fn present_on(gpu: &orbiters_reconstruct::gpu::Gpu, transparent: bool, view: &wgpu::TextureView) {
+        if transparent {
+            gpu.present_alpha(view);
+        } else {
+            gpu.present(view);
+        }
     }
 
     fn scratch(&mut self, width: u32) -> &wgpu::TextureView {
@@ -168,7 +187,7 @@ impl FaceRenderer {
         self.gpu.step(&camera, self.background, Target::None, None)?;
         self.scratch(width);
         let (_, texture, view) = self.scratch.as_ref().expect("made above");
-        self.gpu.present(view);
+        Self::present_on(&self.gpu, self.transparent, view);
         let mut enc = self.device.create_command_encoder(&Default::default());
         enc.copy_texture_to_texture(
             wgpu::TexelCopyTextureInfo { texture, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
@@ -230,7 +249,7 @@ impl FaceRenderer {
         self.gpu.count = count.min(self.total).max(1.min(self.total));
         self.gpu.step(&camera.camera(placement), self.background, Target::None, None)?;
         let (_, view) = self.wide[eye_index].as_ref().expect("made above");
-        self.gpu.present(view);
+        Self::present_on(&self.gpu, self.transparent, view);
         Ok(())
     }
 
@@ -314,7 +333,7 @@ impl FaceRenderer {
             usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::COPY_SRC,
             view_formats: &[],
         });
-        self.gpu.present(&texture.create_view(&Default::default()));
+        Self::present_on(&self.gpu, self.transparent, &texture.create_view(&Default::default()));
         read_texture(&self.device, &self.queue, &texture)
     }
 }
@@ -368,4 +387,55 @@ pub fn timed<T>(f: impl FnOnce() -> T) -> (T, f64) {
     let start = Instant::now();
     let out = f();
     (out, start.elapsed().as_secs_f64() * 1000.0)
+}
+
+#[cfg(test)]
+mod small_tests {
+    use super::super::stereo::{self, Small};
+    use super::*;
+
+    /// Draws a real session small: `ORBIT_SESSION=<its folder> ORBIT_OUT=<a .png>`. What surrounds it must be transparent,
+    /// which only a headset could otherwise tell.
+    #[test]
+    #[ignore = "needs a GPU and a real session"]
+    fn a_capture_small_stands_in_nothing() {
+        let dir = std::path::PathBuf::from(std::env::var("ORBIT_SESSION").unwrap());
+        let out = std::path::PathBuf::from(std::env::var("ORBIT_OUT").unwrap());
+        let full = super::super::catalog::read_local(&dir, &Default::default()).unwrap();
+        let capture = full.around_subject();
+        // A head at the room's middle, looking down -Z.
+        let head = orbiters_openvr::Matrix34 { m: [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 1.6], [0.0, 0.0, 1.0, 0.0]] };
+        let small = Small::new(&capture.view, &head, capture.small_reach());
+        let placement = small.placement(capture.view.eye());
+        println!("{} splats, showing {} within {} m at size {}", capture.gaussians.len(), capture.within(small.reach()), small.reach(), small.size);
+        let (_adapter, device, queue) = super::device(None).unwrap();
+        let mut renderer = FaceRenderer::new(device, queue);
+        renderer.load(&capture).unwrap();
+        renderer.make_transparent().unwrap();
+        let (w, h) = (1024, 1024);
+        let camera = stereo::eye_camera(&head, [-1.0, 1.0, -1.0, 1.0], w, h, &placement);
+        let t = std::time::Instant::now();
+        let pixels = renderer.render_view(&camera, capture.within(small.reach())).unwrap();
+        println!("drawn in {:?}", t.elapsed());
+        let alpha = |x: u32, y: u32| pixels[((y * w + x) * 4 + 3) as usize];
+        for (x, y) in [(2, 2), (w - 3, 2), (2, h - 3), (w - 3, h - 3)] {
+            assert_eq!(alpha(x, y), 0, "nothing in the corner {x},{y}");
+        }
+        let covered = pixels.chunks_exact(4).filter(|p| p[3] > 200).count();
+        let clear = pixels.chunks_exact(4).filter(|p| p[3] == 0).count();
+        println!("{:.1}% solid, {:.1}% clear", covered as f32 * 100.0 / (w * h) as f32, clear as f32 * 100.0 / (w * h) as f32);
+        assert!(covered > 1000, "it shows");
+        assert!(pixels.chunks_exact(4).all(|p| p[0] <= p[3] && p[1] <= p[3] && p[2] <= p[3]), "premultiplied");
+        // Over a checkerboard, as the room behind it.
+        let mut shown = pixels.clone();
+        for (i, p) in shown.chunks_exact_mut(4).enumerate() {
+            let (x, y) = (i as u32 % w, i as u32 / w);
+            let back: u32 = if (x / 32 + y / 32) % 2 == 0 { 70 } else { 110 };
+            for c in 0..3 {
+                p[c] = (p[c] as u32 + back * (255 - p[3] as u32) / 255).min(255) as u8;
+            }
+            p[3] = 255;
+        }
+        super::super::shots::write_png(&out, w, h, &shown).unwrap();
+    }
 }

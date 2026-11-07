@@ -157,7 +157,8 @@ pub fn draw(renderer: &mut FaceRenderer, job: &Job, targets: &[&eframe::wgpu::Te
 }
 
 enum Ask {
-    Load(Arc<Capture>),
+    /// A capture, and whether nothing shows around it.
+    Load(Arc<Capture>, bool),
     Width(u32),
     Render(Job),
 }
@@ -210,8 +211,11 @@ impl Thread {
         let mut side: Option<super::interop::RenderSide> = None;
         while let Ok(ask) = asks.recv() {
             match ask {
-                Ask::Load(capture) => {
+                Ask::Load(capture, transparent) => {
                     renderer.load(&capture)?;
+                    if transparent {
+                        renderer.make_transparent()?;
+                    }
                     let _ = answers.send(Answer::Loaded);
                 }
                 Ask::Width(width) => {
@@ -290,6 +294,15 @@ pub struct View {
     d3d11: Option<super::interop::OverlaySide>,
     capture: Option<Arc<Capture>>,
     placement: Option<Placement>,
+    /// The capture as asked to show, and whether small: then `capture` is it in order around its subject, on its way
+    /// here while it is sorted, and what holds it.
+    full: Option<Arc<Capture>>,
+    small_on: bool,
+    small: Option<stereo::Small>,
+    small_coming: Option<mpsc::Receiver<Arc<Capture>>>,
+    /// When the hands last moved it; where it stood for the wide views last drawn.
+    small_read: Option<Instant>,
+    wide_placement: Option<Placement>,
     quality: Quality,
     /// The width the shared textures have (0: none yet).
     width: u32,
@@ -345,6 +358,12 @@ impl View {
             d3d11: None,
             capture: None,
             placement: None,
+            full: None,
+            small_on: false,
+            small: None,
+            small_coming: None,
+            small_read: None,
+            wide_placement: None,
             quality: Quality::default(),
             width: 0,
             phase: Phase::Off,
@@ -439,7 +458,9 @@ impl View {
         self.timing_read = None;
         self.trace.begin();
         self.warm_up(steamvr);
-        let Some(thread) = &self.thread else { return };
+        if self.thread.is_none() {
+            return;
+        }
         if self.handles.is_none() {
             match self.create(overlay) {
                 Ok(h) => self.handles = Some(h),
@@ -450,8 +471,34 @@ impl View {
             }
         }
         self.hide_all(overlay);
+        self.full = Some(capture.clone());
+        self.small = None;
+        self.small_coming = None;
+        if self.small_on {
+            // Sorted anew around its subject, on the way to the GPU.
+            let (tx, rx) = mpsc::channel();
+            let full = capture;
+            let _ = std::thread::Builder::new().name("3d-worlds-small".into()).spawn(move || {
+                let _ = tx.send(Arc::new(full.around_subject()));
+            });
+            self.small_coming = Some(rx);
+            self.capture = None;
+            self.loaded = false;
+            self.cubes = [None; 2];
+            self.switching = None;
+            self.forget_drawn();
+            self.phase = Phase::Loading;
+            self.alpha = 0.0;
+            return;
+        }
         self.placement = Some(Placement::at(&capture.view, &head_pose(steamvr, 0.0)));
-        let _ = thread.tx.send(Ask::Load(capture.clone()));
+        self.begin(capture, false);
+    }
+
+    /// `capture` on its way to the GPU, to show as it is placed.
+    fn begin(&mut self, capture: Arc<Capture>, transparent: bool) {
+        let Some(thread) = &self.thread else { return };
+        let _ = thread.tx.send(Ask::Load(capture.clone(), transparent));
         if self.width != self.quality.pixels() + 2 * MARGIN {
             let _ = thread.tx.send(Ask::Width(self.quality.pixels() + 2 * MARGIN));
         }
@@ -462,6 +509,39 @@ impl View {
         self.forget_drawn();
         self.phase = Phase::Loading;
         self.alpha = 0.0;
+    }
+
+    /// Whether captures show small before the person and not around them.
+    pub fn small_on(&self) -> bool {
+        self.small_on
+    }
+
+    /// Whether what shows now can be taken in a hand.
+    pub fn small(&self) -> bool {
+        self.small.is_some()
+    }
+
+    /// Captures show small, or around the person: what shows now too.
+    pub fn set_small(&mut self, on: bool, overlay: &vr::Overlay, steamvr: &vr::Client) {
+        if self.small_on == on {
+            return;
+        }
+        self.small_on = on;
+        if self.active() {
+            if let Some(full) = self.full.clone() {
+                self.show(overlay, steamvr, full);
+            }
+        }
+    }
+
+    /// The hands, for what shows small: their poses, grips and sticks' up and down.
+    pub fn small_input(&mut self, hands: [Option<vr::Matrix34>; 2], grips: [bool; 2], sticks: [f32; 2]) {
+        let now = Instant::now();
+        let seconds = self.small_read.map_or(0.0, |t| now.duration_since(t).as_secs_f32()).min(0.1);
+        self.small_read = Some(now);
+        let (Some(small), Some(capture)) = (self.small.as_mut(), self.capture.as_ref()) else { return };
+        small.step(hands, grips, sticks, seconds);
+        self.placement = Some(small.placement(capture.view.eye()));
     }
 
     fn forget_drawn(&mut self) {
@@ -480,7 +560,14 @@ impl View {
     /// The start view over where the head stands now, facing its way: a new cube draws it whole.
     pub fn recenter(&mut self, steamvr: &vr::Client) {
         if let Some(c) = &self.capture {
-            self.placement = Some(Placement::at(&c.view, &head_pose(steamvr, 0.0)));
+            if let Some(small) = self.small.as_mut() {
+                let size = small.size;
+                *small = stereo::Small::new(&c.view, &head_pose(steamvr, 0.0), 1.0);
+                small.size = size;
+                self.placement = Some(small.placement(c.view.eye()));
+            } else {
+                self.placement = Some(Placement::at(&c.view, &head_pose(steamvr, 0.0)));
+            }
             self.renew();
         }
     }
@@ -516,6 +603,8 @@ impl View {
                 *h =
                     overlay.create(&format!("{}.{c}.{f}", self.key), "3D world").map_err(|code| format!("a 3D world overlay: SteamVR overlay error {code}"))?;
                 let _ = overlay.set_flag(*h, overlay_flag::SIDE_BY_SIDE_PARALLEL, true);
+                // A capture all around is opaque and this changes nothing; small, what is around it shows the room.
+                let _ = overlay.set_flag(*h, overlay_flag::IS_PREMULTIPLIED, true);
                 // Under N4N0's menu (10) and the pill.
                 let _ = overlay.set_sort_order(*h, 0);
             }
@@ -547,6 +636,13 @@ impl View {
             self.observe(steamvr, Instant::now());
         }
         self.answers(overlay);
+        if let Some(sorted) = self.small_coming.as_ref().and_then(|rx| rx.try_recv().ok()) {
+            self.small_coming = None;
+            let small = stereo::Small::new(&sorted.view, &head_pose(steamvr, 0.0), sorted.small_reach());
+            self.placement = Some(small.placement(sorted.view.eye()));
+            self.small = Some(small);
+            self.begin(sorted, true);
+        }
         let now = Instant::now();
         match self.phase {
             Phase::Off => return,
@@ -556,6 +652,9 @@ impl View {
                     self.hide_all(overlay);
                     self.phase = Phase::Off;
                     self.capture = None;
+                    self.full = None;
+                    self.small = None;
+                    self.small_coming = None;
                     // The device, the splats and the textures go with the thread.
                     self.thread = None;
                     #[cfg(windows)]
@@ -741,6 +840,8 @@ impl View {
             Phase::Loading => capture.within(0.0),
             _ => capture.gaussians.len(),
         };
+        // Small, only what it reaches is drawn.
+        let count = self.small.as_ref().map_or(count, |small| count.min(capture.within(small.reach())));
         let pixels = self.width - 2 * MARGIN;
         let id = self.next_id;
         let active_holds = self.cubes[self.active].is_some_and(|c| c.pixels == pixels && eyes.iter().all(|e| c.holds(*e, REACH_M)));
@@ -771,6 +872,7 @@ impl View {
             None => true,
             Some((from, look, drawn)) => {
                 drawn != count
+                    || self.wide_placement != Some(placement)
                     || (0..2).any(|e| super::pacing::translation_due(stereo::length(stereo::sub(eyes[e], from[e])), self.moving, self.still, self.settling))
                     || stereo::dot(look, looking).clamp(-1.0, 1.0).acos() > TURNED
             }
@@ -783,6 +885,7 @@ impl View {
                 return None;
             }
             self.last_wide = Some((eyes, looking, count));
+            self.wide_placement = Some(placement);
             self.settling = false;
             self.next_id += 1;
             return Some(Job { id, cube, cube_index: self.active, placement, eyes, work: Work::Wide { cameras, faces }, count, wait: self.wait });

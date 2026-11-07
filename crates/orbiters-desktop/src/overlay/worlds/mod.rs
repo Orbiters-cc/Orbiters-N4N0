@@ -369,7 +369,7 @@ impl Worlds {
                         self.relayed.push(Relayed::Show(entry.clone()));
                     }
                 }
-                action @ (Action::Hide | Action::Recenter | Action::SeeThrough(_) | Action::Quality(_)) if self.relay.is_some() => self.relayed.push(Relayed::View(action)),
+                action @ (Action::Hide | Action::Recenter | Action::SeeThrough(_) | Action::Small(_) | Action::Quality(_)) if self.relay.is_some() => self.relayed.push(Relayed::View(action)),
                 Action::Show(_) => {
                     if let Some(backend) = &self.backend {
                         backend.show_window();
@@ -377,7 +377,7 @@ impl Worlds {
                     let time = self.time();
                     self.panel.say("Opened in the Orbiters window, where it shows in 3D", time);
                 }
-                Action::Hide | Action::Recenter | Action::SeeThrough(_) | Action::Quality(_) | Action::Open => {}
+                Action::Hide | Action::Recenter | Action::SeeThrough(_) | Action::Small(_) | Action::Quality(_) | Action::Open => {}
                 Action::Leave => self.open = false,
                 Action::Refresh => {
                     self.catalog.refresh(&self.source);
@@ -630,6 +630,22 @@ impl Worlds {
     }
 
     /// The 3D view goes: from a button that is not on this panel.
+    pub fn view_small(&mut self, on: bool) {
+        if self.relay.is_some() {
+            self.relayed.push(Relayed::View(Action::Small(on)));
+        }
+    }
+
+    /// Whether what shows can be taken in a hand.
+    pub fn small_showing(&self) -> bool {
+        self.view.small()
+    }
+
+    /// The hands, for what shows small.
+    pub fn small_input(&mut self, hands: [Option<vr::Matrix34>; 2], grips: [bool; 2], sticks: [f32; 2]) {
+        self.view.small_input(hands, grips, sticks);
+    }
+
     pub fn hide_view(&mut self) {
         if self.relay.is_some() {
             self.relayed.push(Relayed::View(Action::Hide));
@@ -662,6 +678,7 @@ impl Worlds {
             current: self.current.as_ref().map(|e| e.id),
             quality: self.view.quality(),
             see_through: self.view.see_through,
+            small: self.view.small_on(),
             error: self.error.clone().or_else(|| self.view.error.clone()),
             fetching,
             listing_error,
@@ -1081,6 +1098,7 @@ impl Worlds {
                 }
                 Action::Recenter => self.view.recenter(steamvr),
                 Action::SeeThrough(on) => self.view.see_through = on,
+                Action::Small(on) => self.view.set_small(on, overlay, steamvr),
                 Action::Quality(q) => self.view.set_quality(q),
                 Action::Leave => self.open = false,
                 Action::Refresh => {

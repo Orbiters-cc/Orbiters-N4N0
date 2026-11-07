@@ -179,6 +179,8 @@ pub enum Action {
     Hide,
     Recenter,
     SeeThrough(bool),
+    /// Captures show small before the person, to take in a hand, or all around them.
+    Small(bool),
     Quality(Quality),
     /// Back to N4N0's menu.
     Leave,
@@ -209,6 +211,8 @@ pub struct Status {
     pub shown: bool,
     pub quality: Quality,
     pub see_through: bool,
+    /// Captures show small before the person.
+    pub small: bool,
     pub error: Option<String>,
     /// The listing is being read; why it could not be.
     pub fetching: bool,

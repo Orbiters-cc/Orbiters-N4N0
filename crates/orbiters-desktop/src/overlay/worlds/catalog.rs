@@ -567,6 +567,18 @@ impl Capture {
         Self { gaussians: sorted, distances: order.into_iter().map(|(d, _)| d).collect(), sky, view }
     }
 
+    /// The same capture to show small: in order of distance from what its start view looks at, around which it stands.
+    pub fn around_subject(&self) -> Self {
+        let view = StartView { position: self.view.target, target: self.view.position, floor: self.view.floor, eye_height: self.view.eye_height };
+        Self::new(self.gaussians.clone(), None, view)
+    }
+
+    /// What it shows small at first, around its subject: up to where it was seen from. Seen from outside, a capture is a
+    /// shell of what surrounded its camera, and past that point what lay behind the camera would stand in the way.
+    pub fn small_reach(&self) -> f32 {
+        (stereo::length(stereo::sub(self.view.target, self.view.position)) * 1.1).clamp(1.0, 30.0)
+    }
+
     /// The splats within `radius` of the start eye (the first ones).
     pub fn within(&self, radius: f32) -> usize {
         self.distances.partition_point(|d| *d <= radius)

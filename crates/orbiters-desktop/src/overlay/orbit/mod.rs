@@ -867,9 +867,10 @@ impl Panels {
             (None, Some(stage)) => Some(("Getting it ready".to_string(), stage.clone())),
             (None, None) => None,
         };
-        if showing != self.facts.view_showing || said != self.facts.view_said {
+        if showing != self.facts.view_showing || said != self.facts.view_said || status.small != self.facts.view_small {
             self.facts.view_showing = showing;
             self.facts.view_said = said;
+            self.facts.view_small = status.small;
             for panel in self.list.iter_mut().chain(self.takeover.iter_mut()) {
                 panel.dirty = true;
             }
@@ -1060,6 +1061,7 @@ impl Panels {
                 .collect(),
             recent_pictures: Vec::new(),
             view_said: self.facts.view_said.clone(),
+            view_small: self.facts.view_small,
             reconstructing: snap.reconstruction.as_ref().map(|j| j.progress.clamp(0.0, 1.0)),
             waiting: snap.reconstruct_queue.len(),
             desktop: snap.n4n0.desktop_mode || !snap.steamvr.running,
@@ -1459,6 +1461,11 @@ impl Panels {
                 }
             }
             Action::NewConversation => self.backend.n4n0(N4n0Command::NewConversation),
+            Action::SmallView(on) => {
+                if let Some(worlds) = self.stage.worlds.as_mut() {
+                    worlds.view_small(on);
+                }
+            }
             Action::HideView => {
                 if let Some(worlds) = self.stage.worlds.as_mut() {
                     worlds.hide_view();

@@ -78,6 +78,8 @@ pub enum Action {
     /// From the picture shown large, back to the gallery; to the picture after it, or before.
     PictureBack,
     PictureStep(bool),
+    /// Captures show small before the person, or around them.
+    SmallView(bool),
     /// The 3D view goes.
     HideView,
     /// The scroll bar: where it is grabbed.
@@ -272,8 +274,9 @@ pub struct Facts {
     pub opened_picture: Option<TextureId>,
     pub recent_words: Vec<(usize, String, Option<f32>)>,
     pub recent_pictures: Vec<(usize, TextureId)>,
-    /// What the 3D view says of what was asked of it.
+    /// What the 3D view says of what was asked of it, and whether captures show small.
     pub view_said: Option<(String, String)>,
+    pub view_small: bool,
     /// What is being reconstructed: its share done (0 to 1), and how many wait after it.
     pub reconstructing: Option<f32>,
     pub waiting: usize,
@@ -351,6 +354,8 @@ pub struct Item {
 /// What an item is drawn as.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Look {
+    /// Whether captures show small or around the person.
+    SmallView,
     /// One choice of what the gallery shows.
     Filter(GalleryFilter),
     /// A picture of the gallery, as large as the page.
@@ -460,6 +465,7 @@ pub fn items(zone: Zone, size: Vec2, facts: &Facts) -> Vec<Item> {
             // While a capture shows around the person: it is one press from gone, wherever on the sheet.
             if facts.view_showing {
                 out.push(Item { action: Action::HideView, rect: r(w - 40.0 - 8.0 - 96.0, 11.0, 96.0, 30.0), look: Look::HideView });
+                out.push(Item { action: Action::SmallView(!facts.view_small), rect: r(w - 40.0 - 8.0 - 96.0 - 6.0 - 96.0, 11.0, 96.0, 30.0), look: Look::SmallView });
             }
             // All tools has what plays on its page.
             if facts.music.is_some() && !facts.beside_wing && !facts.view_showing && status_now(facts).is_none() && facts.sheet != Some(Sheet::All) {
@@ -856,6 +862,8 @@ pub fn caption(action: Action, facts: &Facts) -> Option<(String, String)> {
         },
         Action::NewConversation => ("New conversation".into(), "N4N0 starts over.".into()),
         Action::HideView => ("Hide 3D".into(), "The capture around you goes.".into()),
+        Action::SmallView(true) => ("Small".into(), "Before you: grip it to take it, its hand's stick zooms.".into()),
+        Action::SmallView(false) => ("Around you".into(), "Stand in it again.".into()),
         Action::Capture(n) => {
             let recent = facts.recent.get(n)?;
             let says = match recent.kind {
@@ -1071,14 +1079,14 @@ pub fn paint(p: &Painter, zone: Zone, size: Vec2, facts: &Facts, hover: Option<u
             let from = x + title + 18.0;
             // The head is where this sheet says what is going on: nothing lies over or under it.
             if let Some((first, second)) = status_now(facts) {
-                let room = size.x - 50.0 - if facts.view_showing { 104.0 } else { 0.0 } - from;
+                let room = size.x - 50.0 - if facts.view_showing { 206.0 } else { 0.0 } - from;
                 let big = theme::font(13.0, weight::BOLD);
                 let small = theme::font(11.5, weight::MEDIUM);
                 p.text(pos2(from, 18.0), Align2::LEFT_CENTER, fit(p, &first, &big, room), big, look::ACCENT);
                 p.text(pos2(from, 35.0), Align2::LEFT_CENTER, fit(p, &second, &small, room), small, look::LABEL);
             } else if let Some((first, second)) = facts.pointed.filter(|_| matches!(facts.sheet, Some(Sheet::All | Sheet::Pictures))).and_then(|a| caption(a, facts)) {
                 // What a small tile does, which it does not say itself.
-                let room = size.x - 50.0 - if facts.view_showing { 104.0 } else { 0.0 } - from;
+                let room = size.x - 50.0 - if facts.view_showing { 206.0 } else { 0.0 } - from;
                 let big = theme::font(13.0, weight::BOLD);
                 let small = theme::font(11.5, weight::MEDIUM);
                 p.text(pos2(from, 18.0), Align2::LEFT_CENTER, fit(p, &first, &big, room), big, look::LABEL);
@@ -1478,6 +1486,11 @@ fn draw(p: &Painter, zone: Zone, item: &Item, facts: &Facts, hovered: bool, pres
             let y = top + (track - knob) * (facts.gallery_scroll / max).clamp(0.0, 1.0);
             let (width, alpha) = if hovered || pressed { (10.0, 170) } else { (6.0, 80) };
             p.rect_filled(Rect::from_min_size(pos2(rect.center().x - width / 2.0, y), vec2(width, knob)), theme::radius(width / 2.0), Color32::from_white_alpha(alpha));
+        }
+        Look::SmallView => {
+            let radius = theme::radius(rect.height() / 2.0);
+            p.rect_filled(rect, radius, if hovered { look::TILE_HOVER } else { look::TILE });
+            p.text(rect.center(), Align2::CENTER_CENTER, if facts.view_small { "Around you" } else { "Small" }, theme::font(13.0, weight::SEMIBOLD), look::LABEL);
         }
         Look::HideView => {
             let radius = theme::radius(rect.height() / 2.0);

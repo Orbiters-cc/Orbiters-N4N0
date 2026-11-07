@@ -23,7 +23,7 @@ pub mod stick3d;
 const FEW_CAPTURES: usize = 3;
 
 /// How much of a hole's width a capture lying in it fills: its top and foot are cut by the hole, as captures are wider than tall.
-pub const SMALL_FILLS_HOLE: f32 = 0.62;
+pub const SMALL_FILLS_HOLE: f32 = 0.8;
 mod diagnostics;
 pub mod finder;
 #[cfg(windows)]
@@ -612,6 +612,8 @@ impl Worlds {
     pub fn show_world_for_test(&mut self, id: u64) {
         self.panel.page = panel::Page::Detail;
         self.panel.selected = Some(id);
+        // Its side panel already out: on its way it is drawn moved, and the test would depend on how fast it runs.
+        self.panel.moves = false;
         self.panel.dirty = true;
     }
 

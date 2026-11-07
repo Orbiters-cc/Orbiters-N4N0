@@ -1494,7 +1494,7 @@ pub fn caption(action: Action, facts: &Facts) -> Option<(String, String)> {
         Action::Capture(n) => {
             let recent = facts.recent.get(n)?;
             let says = match recent.kind {
-                RecentKind::Capture if facts.desktop => tr("Press to turn it in 3D, right here."),
+                RecentKind::Capture if facts.desktop => tr("Press to see it in 3D, here on the sheet."),
                 RecentKind::Capture => tr("Press to see it in 3D around you."),
                 RecentKind::NoView => tr("It has no 3D yet. The Orbiters window can make it."),
                 RecentKind::Picture => tr("Press to see it large."),
@@ -1659,7 +1659,7 @@ pub fn paint(p: &Painter, zone: Zone, size: Vec2, facts: &Facts, hover: Option<u
             let c = panel.center();
             // Opaque while it says something: VRChat's icons would show behind the words.
             let says = facts.picture_wait.is_some() || facts.pointed.and_then(|a| caption(a, facts)).is_some();
-            p.circle_filled(c, size.x / 2.0, if says { Color32::from_rgb(11, 13, 16) } else { Color32::from_rgba_premultiplied(9, 11, 14, 236) });
+            p.circle_filled(c, size.x / 2.0, if says { Color32::from_rgb(11, 13, 16) } else { Color32::from_rgba_premultiplied(9, 11, 14, 250) });
             draw_hub(p, c, size.x, facts);
             return;
         }
@@ -2373,7 +2373,7 @@ fn draw(p: &Painter, zone: Zone, item: &Item, facts: &Facts, hovered: bool, pres
             let font = look::font(18.0, weight::SEMIBOLD);
             let shown = fit(p, &facts.videos_for, &font, rect.width() - 170.0);
             p.text(pos2(rect.left() + 46.0, rect.center().y), Align2::LEFT_CENTER, shown, font, look::LABEL);
-            p.text(pos2(rect.right() - 18.0, rect.center().y), Align2::RIGHT_CENTER, tr("Search again"), look::font(14.5, weight::MEDIUM), look::MUTED);
+            p.text(pos2(rect.right() - 18.0, rect.center().y), Align2::RIGHT_CENTER, tr("Search again"), look::font(15.0, weight::SEMIBOLD), if hovered { look::accent() } else { look::LABEL });
         }
         Look::NewTalk => {
             p.rect_filled(rect, look::radius(rect.height() / 2.0), if hovered { look::TILE_HOVER } else { look::TILE });
@@ -2523,7 +2523,8 @@ fn draw(p: &Painter, zone: Zone, item: &Item, facts: &Facts, hovered: bool, pres
                 Some(InviteChip::Sent) => (look::accent(), look::on_accent(), look::accent(), tr("Invited").to_string()),
                 Some(InviteChip::Failed) => (theme::mix(look::OPAQUE, theme::DANGER, 0.3), look::LABEL, theme::DANGER, tr("Failed").to_string()),
                 // Only the first on offer is solid: a list of them would shout. Invited, solid, then says at once what it did.
-                None if primary && facts.worlds_visited.iter().position(|v| !v.here) == Some(group) => (if pressed { theme::mix(look::accent(), Color32::BLACK, 0.25) } else if hovered { theme::mix(look::accent(), Color32::WHITE, 0.15) } else { look::accent() }, look::on_accent(), look::accent(), words),
+                // Round 8's judges: a first one solid said something nobody could read. All rest alike; what is pointed at lights.
+                None if false => (if pressed { theme::mix(look::accent(), Color32::BLACK, 0.25) } else if hovered { theme::mix(look::accent(), Color32::WHITE, 0.15) } else { look::accent() }, look::on_accent(), look::accent(), words),
                 None if primary => (if pressed { theme::mix(look::OPAQUE, look::accent(), 0.5) } else if hovered { theme::mix(look::OPAQUE, look::accent(), 0.3) } else { look::OPAQUE }, look::LABEL, look::accent(), words),
                 None => (if pressed { theme::mix(look::OPAQUE, look::accent(), 0.35) } else if hovered { look::TILE_HOVER } else { look::OPAQUE }, look::LABEL, if hovered { look::accent() } else { theme::INK_600 }, words),
             };
@@ -2846,13 +2847,17 @@ fn draw_capture(p: &Painter, rect: Rect, n: usize, facts: &Facts, hovered: bool,
     clip.text(pos2(rect.left() + 14.0, rect.bottom() - 37.0), Align2::LEFT_CENTER, fit(&clip, &recent.title, &font, room), font, look::LABEL);
     let font = look::font(15.0, weight::MEDIUM);
     clip.text(pos2(rect.left() + 14.0, rect.bottom() - 15.0), Align2::LEFT_CENTER, fit(&clip, &state, &font, room), font, theme::FG_2);
-    // In one gallery with VRChat's pictures, what can show in 3D says so.
-    if recent.kind == RecentKind::Capture {
-        let badge = Rect::from_min_size(rect.min + vec2(10.0, 10.0), vec2(68.0, 32.0));
-        clip.rect_filled(badge, look::radius(16.0), theme::alpha(theme::INK_900, 0.94));
-        widgets::icon(&clip, badge.min + vec2(21.0, 16.0), icons::CUBE, 19.0, look::accent());
-        clip.text(badge.min + vec2(36.0, 16.0), Align2::LEFT_CENTER, "3D", look::font(16.0, weight::BOLD), Color32::WHITE);
-    }
+    // In one gallery with VRChat's pictures, every tile says what it is in the same place (round 8's judges: only some had a badge, so the rest had to be guessed).
+    let (glyph, word, tint) = match recent.kind {
+        RecentKind::Capture => (icons::CUBE, "3D", look::accent()),
+        _ => (icons::IMAGE, tr_ctx("a kind of picture", "Photo"), theme::FG_2),
+    };
+    let font = look::font(16.0, weight::BOLD);
+    let wide = clip.layout_no_wrap(word.to_string(), font.clone(), Color32::WHITE).size().x;
+    let badge = Rect::from_min_size(rect.min + vec2(10.0, 10.0), vec2(wide + 48.0, 32.0));
+    clip.rect_filled(badge, look::radius(16.0), theme::alpha(theme::INK_900, 0.94));
+    widgets::icon(&clip, badge.min + vec2(21.0, 16.0), glyph, 19.0, tint);
+    clip.text(badge.min + vec2(36.0, 16.0), Align2::LEFT_CENTER, word, font, Color32::WHITE);
     if let Some(done) = progress {
         let bar = Rect::from_min_size(pos2(rect.left() + 14.0, rect.bottom() - 6.0), vec2(room * done.clamp(0.0, 1.0), 3.0));
         clip.rect_filled(bar, look::radius(1.5), look::accent());

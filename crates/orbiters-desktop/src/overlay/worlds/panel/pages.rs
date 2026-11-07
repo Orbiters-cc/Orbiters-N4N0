@@ -1,6 +1,7 @@
 //! The panel's pages past a capture's own: the labels the results are kept to, its world's labels to give, its
 //! comments, a comment or a reason typed on the keyboard, and its pictures.
 
+use super::super::super::orbit::panels::look as orbit_look;
 use super::*;
 
 /// A label of the list on the labels page (three across).
@@ -112,9 +113,9 @@ impl Panel {
 
     /// The page's title beside Back: `title`, then the world's name fainter.
     fn title(&self, p: &Painter, title: &str, world: Option<&str>, until: f32, shown: f32) {
-        let mut job = Txt::new(title, 28.0).weight(weight::SEMIBOLD).color(fade(theme::FG, shown)).job_truncated(until - 108.0);
+        let mut job = orbit_look::txt(title, 28.0).weight(weight::SEMIBOLD).color(fade(theme::FG, shown)).job_truncated(until - 108.0);
         if let Some(w) = world {
-            job.append(&format!("  {w}"), 0.0, Txt::new("", 20.0).color(fade(theme::FG_3, shown)).format());
+            job.append(&format!("  {w}"), 0.0, orbit_look::txt("", 20.0).color(fade(theme::FG_3, shown)).format());
         }
         let galley = p.layout_job(job);
         p.galley(pos2(108.0, 52.0 - galley.size().y / 2.0), galley, theme::FG);
@@ -149,14 +150,14 @@ impl Panel {
                         _ => {}
                     }
                 }
-                text(p, pos2(32.0, 538.0), Align2::LEFT_CENTER, Txt::new("Every label picked: worlds members gave them all", 15.0).color(fade(theme::FG_3, shown)));
+                text(p, pos2(32.0, 538.0), Align2::LEFT_CENTER, orbit_look::txt("Every label picked: worlds members gave them all", 15.0).color(fade(theme::FG_3, shown)));
                 let n = self.results(d).len();
                 let line = match n {
                     0 => "No world matches".to_string(),
                     1 => "1 world matches".to_string(),
                     n => format!("{n} worlds match"),
                 };
-                text(p, pos2(992.0, 538.0), Align2::RIGHT_CENTER, Txt::new(line, 16.0).color(fade(theme::FG_3, shown)));
+                text(p, pos2(992.0, 538.0), Align2::RIGHT_CENTER, orbit_look::txt(line, 16.0).color(fade(theme::FG_3, shown)));
             }
             Page::Labels => {
                 self.title(p, "Labels", name, 990.0, shown);
@@ -181,10 +182,10 @@ impl Panel {
                     Some(n) => (n, theme::WARN),
                     None => (hint, theme::FG_3),
                 };
-                text_cut(p, pos2(32.0, 492.0), 960.0, Txt::new(line, 16.0).color(fade(tint, shown)));
+                text_cut(p, pos2(32.0, 492.0), 960.0, orbit_look::txt(line, 16.0).color(fade(tint, shown)));
                 if let Some(reason) = wf.justification.as_ref().filter(|_| wf.has("ai-world")) {
                     let reason = reason.split_whitespace().collect::<Vec<_>>().join(" ");
-                    text_cut(p, pos2(32.0, 524.0), 960.0, Txt::new(format!("Your reason: {reason}"), 15.0).color(fade(theme::FG_4, shown)));
+                    text_cut(p, pos2(32.0, 524.0), 960.0, orbit_look::txt(format!("Your reason: {reason}"), 15.0).color(fade(theme::FG_4, shown)));
                 }
             }
             Page::Comments => {
@@ -202,7 +203,7 @@ impl Panel {
                     }
                 }
                 if pages > 1 {
-                    text(p, pos2(512.0, 540.0), Align2::CENTER_CENTER, Txt::new(format!("{}/{}", page + 1, pages), 17.0).color(fade(theme::FG_3, shown)));
+                    text(p, pos2(512.0, 540.0), Align2::CENTER_CENTER, orbit_look::txt(format!("{}/{}", page + 1, pages), 17.0).color(fade(theme::FG_3, shown)));
                 }
                 for (i, c) in wf.comments.iter().skip(page * COMMENTS_PER_PAGE).take(COMMENTS_PER_PAGE).enumerate() {
                     let row = comment_rect(i);
@@ -213,11 +214,11 @@ impl Panel {
                     let face = pos2(row.min.x + 38.0, row.min.y + 34.0);
                     p.circle_filled(face, 20.0, fade(theme::alpha(widgets::name_color(by), 0.3), appear));
                     let initial: String = by.chars().next().map(|c| c.to_uppercase().collect()).unwrap_or_default();
-                    text(p, face, Align2::CENTER_CENTER, Txt::new(initial, 18.0).weight(weight::SEMIBOLD).color(fade(theme::FG, appear)));
+                    text(p, face, Align2::CENTER_CENTER, orbit_look::txt(initial, 18.0).weight(weight::SEMIBOLD).color(fade(theme::FG, appear)));
                     let when = if c.id == 0 && c.mine { "sending…".to_string() } else { orbiters_n4n0_core::feedback::ago(d.now.saturating_sub(c.at)) };
                     let width = if c.mine { 740.0 } else { 860.0 };
-                    text_cut(p, pos2(row.min.x + 72.0, row.min.y + 12.0), width, Txt::new(format!("{by} · {when}"), 15.0).weight(weight::MEDIUM).color(fade(theme::FG_3, appear)));
-                    let mut job = Txt::new(c.text.split_whitespace().collect::<Vec<_>>().join(" "), 17.0).color(fade(theme::FG, appear)).line_height(23.0).job(width);
+                    text_cut(p, pos2(row.min.x + 72.0, row.min.y + 12.0), width, orbit_look::txt(format!("{by} · {when}"), 15.0).weight(weight::MEDIUM).color(fade(theme::FG_3, appear)));
+                    let mut job = orbit_look::txt(c.text.split_whitespace().collect::<Vec<_>>().join(" "), 17.0).color(fade(theme::FG, appear)).line_height(23.0).job(width);
                     job.wrap.max_rows = 2;
                     p.galley(pos2(row.min.x + 72.0, row.min.y + 38.0), p.layout_job(job), theme::FG);
                     if c.mine && c.id != 0 {
@@ -235,15 +236,15 @@ impl Panel {
                         ("No comment yet", "Write the first one: what is there to do, who it is for")
                     };
                     widgets::icon(p, pos2(512.0, 230.0), icons::CHAT_CIRCLE_TEXT, 44.0, fade(theme::FG_4, shown));
-                    text(p, pos2(512.0, 286.0), Align2::CENTER_CENTER, Txt::new(title, 24.0).weight(weight::SEMIBOLD).color(fade(theme::FG, shown)));
-                    text(p, pos2(512.0, 320.0), Align2::CENTER_CENTER, Txt::new(line, 17.0).color(fade(theme::FG_3, shown)));
+                    text(p, pos2(512.0, 286.0), Align2::CENTER_CENTER, orbit_look::txt(title, 24.0).weight(weight::SEMIBOLD).color(fade(theme::FG, shown)));
+                    text(p, pos2(512.0, 320.0), Align2::CENTER_CENTER, orbit_look::txt(line, 17.0).color(fade(theme::FG_3, shown)));
                 }
                 let note = self.note(time).map(str::to_string).or_else(|| wf.error.clone());
                 if let Some(note) = note {
-                    text_cut(p, pos2(32.0, 530.0), 380.0, Txt::new(note, 15.0).color(fade(theme::WARN, shown)));
+                    text_cut(p, pos2(32.0, 530.0), 380.0, orbit_look::txt(note, 15.0).color(fade(theme::WARN, shown)));
                 } else if wf.comment_count as usize > wf.comments.len() && !wf.comments.is_empty() {
                     let line = format!("The newest {} of {}", wf.comments.len(), wf.comment_count);
-                    text(p, pos2(32.0, 540.0), Align2::LEFT_CENTER, Txt::new(line, 15.0).color(fade(theme::FG_4, shown)));
+                    text(p, pos2(32.0, 540.0), Align2::LEFT_CENTER, orbit_look::txt(line, 15.0).color(fade(theme::FG_4, shown)));
                 }
             }
             Page::Compose(compose) => {
@@ -266,14 +267,14 @@ impl Panel {
                 let label = if compose == Compose::Comment { "Send" } else { "Done" };
                 let (bg, fg) = if valid { (theme::ACCENT, theme::ON_ACCENT) } else { (RAISED, theme::FG_3) };
                 pill_button(p, SEND, Some(icons::PAPER_PLANE_TILT), label, bg, fg, h, pr, 1.0);
-                text_cut(p, pos2(36.0, 96.0), 952.0, Txt::new(prompt, 19.0).weight(weight::SEMIBOLD).color(fade(theme::FG, shown)));
+                text_cut(p, pos2(36.0, 96.0), 952.0, orbit_look::txt(prompt, 19.0).weight(weight::SEMIBOLD).color(fade(theme::FG, shown)));
                 let tint = if valid { theme::ACCENT } else { theme::FG_3 };
-                text(p, pos2(36.0, 136.0), Align2::LEFT_CENTER, Txt::new(count, 15.0).color(fade(tint, shown)));
+                text(p, pos2(36.0, 136.0), Align2::LEFT_CENTER, orbit_look::txt(count, 15.0).color(fade(tint, shown)));
                 if let Some(note) = self.note(time) {
-                    text(p, pos2(988.0, 136.0), Align2::RIGHT_CENTER, Txt::new(note.to_string(), 15.0).color(fade(theme::WARN, shown)));
+                    text(p, pos2(988.0, 136.0), Align2::RIGHT_CENTER, orbit_look::txt(note.to_string(), 15.0).color(fade(theme::WARN, shown)));
                 }
                 // The whole text, for a long one the field shows the end of.
-                let mut job = Txt::new(self.draft.clone(), 16.0).color(fade(theme::FG_2, shown)).line_height(21.0).job(952.0);
+                let mut job = orbit_look::txt(self.draft.clone(), 16.0).color(fade(theme::FG_2, shown)).line_height(21.0).job(952.0);
                 job.wrap.max_rows = 3;
                 p.galley(pos2(36.0, 158.0), p.layout_job(job), theme::FG_2);
                 self.keyboard(p, targets, shown);
@@ -284,13 +285,13 @@ impl Panel {
                 let count = facts.map_or(e.pictures as usize, |f| f.picture_count.max(e.pictures as usize));
                 self.title(p, &format!("Pictures · {count}"), Some(&e.name), 840.0, shown);
                 let Some(f) = facts else {
-                    text(p, pos2(512.0, 300.0), Align2::CENTER_CENTER, Txt::new("Loading the pictures…", 19.0).color(fade(theme::FG_3, shown)));
+                    text(p, pos2(512.0, 300.0), Align2::CENTER_CENTER, orbit_look::txt("Loading the pictures…", 19.0).color(fade(theme::FG_3, shown)));
                     return;
                 };
                 if f.pictures.is_empty() {
                     widgets::icon(p, pos2(512.0, 250.0), icons::IMAGES, 44.0, fade(theme::FG_4, shown));
-                    text(p, pos2(512.0, 306.0), Align2::CENTER_CENTER, Txt::new("No picture of this world yet", 24.0).weight(weight::SEMIBOLD).color(fade(theme::FG, shown)));
-                    text(p, pos2(512.0, 340.0), Align2::CENTER_CENTER, Txt::new("Members share theirs from Orbiters - N4N0's Worlds page", 17.0).color(fade(theme::FG_3, shown)));
+                    text(p, pos2(512.0, 306.0), Align2::CENTER_CENTER, orbit_look::txt("No picture of this world yet", 24.0).weight(weight::SEMIBOLD).color(fade(theme::FG, shown)));
+                    text(p, pos2(512.0, 340.0), Align2::CENTER_CENTER, orbit_look::txt("Members share theirs from Orbiters - N4N0's Worlds page", 17.0).color(fade(theme::FG_3, shown)));
                     return;
                 }
                 let caption = |w: &WorldPicture| {
@@ -316,11 +317,11 @@ impl Panel {
                         Some(id) => cover(p, rect, id, aspect, CornerRadius::same(16), shown),
                         None => {
                             p.rect_filled(rect, CornerRadius::same(16), fade(SURFACE, shown));
-                            text(p, rect.center(), Align2::CENTER_CENTER, Txt::new("Loading…", 18.0).color(fade(theme::FG_3, shown)));
+                            text(p, rect.center(), Align2::CENTER_CENTER, orbit_look::txt("Loading…", 18.0).color(fade(theme::FG_3, shown)));
                         }
                     }
                     let line = format!("{}  ·  {} of {}", caption(w), i + 1, f.pictures.len());
-                    text(p, pos2(512.0, 552.0), Align2::CENTER_CENTER, Txt::new(line.trim_start_matches(" ·").trim().to_string(), 16.0).color(fade(theme::FG_3, shown)));
+                    text(p, pos2(512.0, 552.0), Align2::CENTER_CENTER, orbit_look::txt(line.trim_start_matches(" ·").trim().to_string(), 16.0).color(fade(theme::FG_3, shown)));
                     return;
                 }
                 let pages = f.pictures.len().div_ceil(PICTURES_PER_PAGE).max(1);
@@ -349,17 +350,17 @@ impl Panel {
                                     p.rect_filled(thumb, CornerRadius::same(14), fade(if h { RAISED } else { SURFACE }, appear));
                                 }
                             }
-                            text_cut(p, pos2(rect.min.x + 4.0, rect.min.y + 170.0), rect.width() - 8.0, Txt::new(caption(w), 14.0).color(fade(theme::FG_3, appear)));
+                            text_cut(p, pos2(rect.min.x + 4.0, rect.min.y + 170.0), rect.width() - 8.0, orbit_look::txt(caption(w), 14.0).color(fade(theme::FG_3, appear)));
                         }
                         _ => {}
                     }
                 }
                 if pages > 1 {
-                    text(p, pos2(860.0, 52.0), Align2::RIGHT_CENTER, Txt::new(format!("{}/{}", current + 1, pages), 17.0).color(theme::FG_3));
+                    text(p, pos2(860.0, 52.0), Align2::RIGHT_CENTER, orbit_look::txt(format!("{}/{}", current + 1, pages), 17.0).color(theme::FG_3));
                 }
                 if f.picture_count > f.pictures.len() {
                     let line = format!("The newest {} of {}: all of them on orbiters.cc", f.pictures.len(), f.picture_count);
-                    text(p, pos2(512.0, 552.0), Align2::CENTER_CENTER, Txt::new(line, 15.0).color(fade(theme::FG_4, shown)));
+                    text(p, pos2(512.0, 552.0), Align2::CENTER_CENTER, orbit_look::txt(line, 15.0).color(fade(theme::FG_4, shown)));
                 }
             }
             Page::Browse | Page::Typing | Page::Detail => {}

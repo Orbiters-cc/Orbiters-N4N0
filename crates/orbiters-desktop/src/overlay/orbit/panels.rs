@@ -27,11 +27,43 @@ pub mod look {
 
     static ACCENT_NOW: AtomicU32 = AtomicU32::new(0x00da6d);
     static RETRO_NOW: AtomicBool = AtomicBool::new(false);
+    static DOTS_NOW: AtomicBool = AtomicBool::new(false);
 
-    /// What is chosen in the sheet of Settings.
-    pub(super) fn choose(accent: [u8; 3], retro: bool) {
+    /// What is chosen in the sheet of Settings. With the retro look what is lit is a grey, as all of it goes through one colour afterwards: a dark colour must not dim it.
+    pub(super) fn choose(accent: [u8; 3], retro: bool, dots: bool) {
+        let accent = if retro { [185; 3] } else { accent };
         ACCENT_NOW.store(u32::from_be_bytes([0, accent[0], accent[1], accent[2]]), Ordering::Relaxed);
         RETRO_NOW.store(retro, Ordering::Relaxed);
+        DOTS_NOW.store(retro && dots, Ordering::Relaxed);
+    }
+
+    /// Whether the retro look is chosen.
+    pub fn retro() -> bool {
+        RETRO_NOW.load(Ordering::Relaxed)
+    }
+
+    /// How pictures are drawn: in the retro menu's dots if they are not to keep their colours, as they are otherwise.
+    pub fn picture_look() -> Option<orbiters_ui::software::PictureLook> {
+        DOTS_NOW.load(Ordering::Relaxed).then_some(super::super::retro::dots as orbiters_ui::software::PictureLook)
+    }
+
+    /// Text of the look chosen, for what lays out its own: the retro menu's monospace, a little smaller as it is wider.
+    pub fn txt(text: impl Into<String>, size: f32) -> theme::Txt {
+        let txt = theme::Txt::new(text, size);
+        if retro() {
+            theme::Txt { size: size * 0.9, ..txt }.mono()
+        } else {
+            txt
+        }
+    }
+
+    /// A corner of a picture: the look chosen has them or does not.
+    pub fn picture_radii(radii: [f32; 4]) -> [f32; 4] {
+        if retro() {
+            [0.0; 4]
+        } else {
+            radii
+        }
     }
 
     /// The accent chosen.
@@ -52,7 +84,7 @@ pub mod look {
 
     /// A font of the look chosen: the retro menu's monospace, a little smaller as it is wider.
     pub fn font(size: f32, weight: f32) -> FontId {
-        if RETRO_NOW.load(Ordering::Relaxed) {
+        if retro() {
             FontId::new(size * 0.9, FontFamily::Monospace)
         } else {
             theme::font(size, weight)
@@ -61,7 +93,7 @@ pub mod look {
 
     /// A corner of the look chosen: the retro menu's are hard.
     pub fn radius(r: f32) -> CornerRadius {
-        theme::radius(if RETRO_NOW.load(Ordering::Relaxed) { r.min(3.0) } else { r })
+        theme::radius(if retro() { r.min(3.0) } else { r })
     }
 
     /// A panel's fill: Orbiters' ink, a little cool.
@@ -404,8 +436,6 @@ pub struct Facts {
     pub beside_wing: bool,
     /// The Quick Menu's parts are in a strip under it: its caption lies under that.
     pub strip_caption: bool,
-    /// The wing's tiles were hidden.
-    pub tiles_hidden: bool,
     /// What the sheet of settings shows: as chosen, and the sound device for VR, by name.
     pub orbit: OrbitSettings,
     pub vr_output: Option<String>,
@@ -717,8 +747,8 @@ fn head_tabs(facts: &Facts) -> (Vec<Item>, f32) {
         (Action::Talk, icons::MICROPHONE, "Ask", 62.0),
         (Action::All, icons::SQUARES_FOUR, "All tools", 90.0),
     ];
-    // The wing has them, right beside the sheet: where it shows, they would only say it again. All tools has them, as large tiles, right under them.
-    if (facts.beside_wing && !facts.strip_caption && !facts.tiles_hidden) || facts.sheet == Some(Sheet::All) {
+    // All tools has them, as large tiles, right under them.
+    if facts.sheet == Some(Sheet::All) {
         return (Vec::new(), 10.0);
     }
     let busy = facts.view_showing || status_now(facts).is_some();
@@ -726,13 +756,15 @@ fn head_tabs(facts: &Facts) -> (Vec<Item>, f32) {
     if !facts.desktop && busy {
         return (Vec::new(), 10.0);
     }
-    let compact = busy;
     let open = |action: Action| match (facts.sheet, action) {
         (Some(Sheet::Worlds), Action::Worlds) | (Some(Sheet::All), Action::All) | (Some(Sheet::Pictures), Action::Pictures) | (Some(Sheet::Talk), Action::Talk) => true,
         (Some(Sheet::Instances), Action::Page(Target::Instances)) | (Some(Sheet::Results), Action::Page(Target::YouTube)) => true,
         (Some(Sheet::Menu), Action::Page(Target::YouTube)) => facts.sheet_title == "YouTube",
         _ => false,
     };
+    // A page that is none of them says its name after them: on a screen they make it room, as small icons. In a headset they are named, and the name has what is left.
+    let unnamed = !TABS.iter().any(|t| open(t.0));
+    let compact = busy || (unnamed && facts.desktop);
     let mut x = 10.0;
     let mut out = Vec::new();
     for (action, icon, label, wide) in TABS {
@@ -748,9 +780,11 @@ fn head_tabs(facts: &Facts) -> (Vec<Item>, f32) {
 fn strip(w: f32, h: f32, facts: &Facts) -> Vec<Item> {
     const PAD: f32 = 5.0;
     const MARK: f32 = 34.0;
-    // What plays at its end, when anything does: the wing has it at its foot.
+    // What plays at its end, when anything does: the wing has it at its foot. And in a headset a way to put it away, as the wing has at its head.
+    let hide = facts.vr_close && facts.sheet.is_none();
+    let hide_wide = if hide { HIDE_TILES + GAP } else { 0.0 };
     let cells: f32 = if facts.music.is_some() { 7.7 } else { 6.0 };
-    let width = (w - MARK - PAD * 2.0 - GAP * (cells.ceil() - 1.0)) / cells;
+    let width = (w - MARK - PAD * 2.0 - hide_wide - GAP * (cells.ceil() - 1.0)) / cells;
     let at = |c: f32| r(MARK + PAD + c * (width + GAP), PAD, width, h - PAD * 2.0);
     let tile = |action, icon, label, badge, rect| Item { action, rect, look: Look::Tile { icon, label, badge } };
     let mut items = vec![
@@ -763,6 +797,9 @@ fn strip(w: f32, h: f32, facts: &Facts) -> Vec<Item> {
     ];
     if facts.music.is_some() {
         items.push(Item { action: Action::PlayPause, rect: r(at(6.0).left(), PAD, width * 1.7, h - PAD * 2.0), look: Look::PlayingSmall });
+    }
+    if hide {
+        items.push(Item { action: Action::Hide, rect: r(w - PAD - HIDE_TILES, PAD, HIDE_TILES, h - PAD * 2.0), look: Look::HideWord });
     }
     items
 }
@@ -924,7 +961,7 @@ fn filter_track() -> Rect {
 /// A picture, rounded: it is a picture for the retro look as well.
 fn squircle_picture(p: &Painter, rect: Rect, radii: [f32; 4], id: TextureId, uv: Rect, tint: Color32) {
     keep_colour(p, rect);
-    orbiters_ui::paint::squircle_texture(p, rect, radii, id, uv, tint);
+    orbiters_ui::paint::squircle_texture(p, rect, look::picture_radii(radii), id, uv, tint);
 }
 
 thread_local! {
@@ -938,8 +975,20 @@ thread_local! {
 pub fn keep_colour(p: &Painter, rect: Rect) {
     let rect = rect.intersect(p.clip_rect());
     if rect.is_positive() {
-        PICTURES.with(|l| l.borrow_mut().push(rect));
+        // A canvas whose frames are not taken (N4N0's own menu, say) must not fill this up.
+        PICTURES.with(|l| {
+            let mut list = l.borrow_mut();
+            if list.len() < 256 {
+                list.push(rect);
+            }
+        });
     }
+}
+
+/// A frame that changed nothing is not finished: what it said about its pictures must not reach the next part's.
+pub fn forget_pictures() {
+    PICTURES.with(|l| l.borrow_mut().clear());
+    COLOURS.with(|l| l.borrow_mut().clear());
 }
 
 /// How luminance maps to the retro look's one colour: from nearly black through the colour to nearly white, as a phosphor does.
@@ -1004,7 +1053,7 @@ static STYLE: std::sync::Mutex<Option<(Vec<[u8; 3]>, bool)>> = std::sync::Mutex:
 /// Takes what is chosen in Settings as how the parts look from now on.
 pub fn set_style(o: &OrbitSettings) {
     let retro = o.theme == MenuLook::Retro;
-    look::choose(if retro { o.retro_color } else { o.accent }, retro);
+    look::choose(o.accent, retro, !o.retro_pictures);
     *STYLE.lock().unwrap_or_else(|e| e.into_inner()) = retro.then(|| (retro_ramp(o.retro_color), o.retro_pictures));
 }
 
@@ -1370,7 +1419,7 @@ pub fn caption(action: Action, facts: &Facts) -> Option<(String, String)> {
         Action::Pictures => ("Pictures".into(), "Take a 3D picture, record a scene, see your captures.".into()),
         Action::All => ("All tools".into(), "Everything Orbiters can do from here.".into()),
         Action::Settings => ("Settings".into(), "These menus' layout, colours and motion, and the sound in VR.".into()),
-        Action::Set(Pick::Hue) => ("Any colour".into(), "Press where you want it on the bar.".into()),
+        Action::Set(Pick::Hue) => ("Any colour".into(), "Press on the bar, or drag along it.".into()),
         Action::Set(Pick::Sound(_)) => ("Sound in VR".into(), "The output Windows uses when SteamVR starts.".into()),
         Action::Record if facts.recording => ("Stop recording".into(), "Orbiters then turns it into a 3D scene.".into()),
         Action::Record => ("Record a 3D scene".into(), "Walk around with VRChat's camera; Orbiters makes a 3D scene of what it saw.".into()),
@@ -1521,6 +1570,11 @@ fn ring_mesh(p: &Painter, ring: Ring, center: Pos2, near: Color32, far: Color32)
 
 /// The accent along a cell's outer edge, under the pointer.
 fn ring_rim(p: &Painter, ring: Ring, center: Pos2, on: bool) {
+    if !on && look::retro() {
+        // Line work: all round every cell, as round anything of the retro menu's that can be pressed.
+        cell_edge(p, ring, center, 1.5, super::retro::LINE);
+        return;
+    }
     if !on {
         // At rest a hairline of Orbiters' own along its outer edge: it follows VRChat's wheel, and it is not VRChat's.
         let line: Vec<Pos2> = (0..=16).map(|i| center + zones::polar(ring.outer - 1.0, ring.from + (ring.to - ring.from) * i as f32 / 16.0)).collect();
@@ -1611,8 +1665,10 @@ pub fn paint(p: &Painter, zone: Zone, size: Vec2, facts: &Facts, hover: Option<u
             if !tabs.iter().any(|t| matches!(t.look, Look::HeadTab { on: true, .. })) {
                 widgets::icon(p, pos2(x + 10.0, 22.0), glyph, 21.0, tint);
                 x += 28.0;
-                text(p, pos2(x, 22.0), Align2::LEFT_CENTER, &facts.sheet_title, 18.0, weight::SEMIBOLD, look::LABEL);
-                x += p.layout_no_wrap(facts.sheet_title.clone(), look::font(18.0, weight::SEMIBOLD), Color32::WHITE).size().x;
+                let font = look::font(18.0, weight::SEMIBOLD);
+                let title = fit(p, &facts.sheet_title, &font, size.x - 50.0 - x);
+                x += p.layout_no_wrap(title.clone(), font.clone(), Color32::WHITE).size().x;
+                p.text(pos2(x - p.layout_no_wrap(title.clone(), font.clone(), Color32::WHITE).size().x, 22.0), Align2::LEFT_CENTER, title, font, look::LABEL);
             }
             // Well clear of them, in a column of its own.
             let from = x + 12.0;
@@ -3043,7 +3099,7 @@ mod tests {
         };
         let desktop = Facts { desktop: true, sheet: Some(Sheet::All), ..facts() };
         let on = names(&desktop);
-        // The tabs would only repeat the large tiles.
+        // The tabs would only repeat the large tiles: Enzo, and nowhere else.
         assert!(!items(Zone::SheetBack, vec2(704.0, 445.5), &desktop).iter().any(|i| matches!(i.look, Look::HeadTab { .. })));
         for absent in ["Call", "Saved looks", "Light", "Fast walk", "Smooth tracking"] {
             assert!(!on.contains(&absent), "{absent} on a desktop with none of it");
@@ -3109,6 +3165,56 @@ mod tests {
         // Settings saved before these fields keep what they had, with the defaults for the new.
         let old: orbiters_core::settings::OrbitSettings = serde_json::from_str("{}").unwrap();
         assert_eq!((old.layout, old.theme, old.accent), (OrbitLayout::Wing, MenuLook::Modern, [0x00, 0xda, 0x6d]));
+    }
+
+    /// Enzo: the tabs are a good idea, only All tools has them already. Beside the wing as well; in a headset named or not there, when the head has something else to say.
+    #[test]
+    fn head_tabs_are_on_every_sheet_but_all_tools() {
+        let tabs = |facts: &Facts| items(Zone::SheetBack, vec2(704.0, 445.5), facts).iter().filter(|i| matches!(i.look, Look::HeadTab { .. })).count();
+        for desktop in [true, false] {
+            for beside_wing in [true, false] {
+                for sheet in [Sheet::Pictures, Sheet::Instances, Sheet::Worlds, Sheet::Settings, Sheet::Menu] {
+                    let facts = Facts { desktop, beside_wing, sheet: Some(sheet), ..facts() };
+                    assert_eq!(tabs(&facts), 6, "{sheet:?} on a screen: {desktop}, beside the wing: {beside_wing}");
+                }
+                assert_eq!(tabs(&Facts { desktop, beside_wing, sheet: Some(Sheet::All), ..facts() }), 0);
+            }
+        }
+        let busy = Facts { desktop: false, sheet: Some(Sheet::Pictures), view_showing: true, ..facts() };
+        assert_eq!(tabs(&busy), 0, "a headset's are named or not there");
+        // A page with no tab of its own keeps room for its name, on a screen.
+        let (_, x) = head_tabs(&Facts { desktop: true, sheet: Some(Sheet::Settings), ..facts() });
+        assert!(x < 300.0, "{x}");
+    }
+
+    /// Under the menu, in a headset, as on the wing: a way to put the tiles away. Not where the sheet has its own close, nor on a screen.
+    #[test]
+    fn the_strip_can_be_hidden_in_a_headset() {
+        let hide = |facts: &Facts| strip(600.0, 52.0, facts).into_iter().filter(|i| i.action == Action::Hide).collect::<Vec<_>>();
+        let vr = Facts { vr_close: true, sheet: None, ..facts() };
+        let found = hide(&vr);
+        assert_eq!(found.len(), 1);
+        let all = strip(600.0, 52.0, &vr);
+        for (i, a) in all.iter().enumerate() {
+            assert!(a.rect.right() <= 600.0 && a.rect.width() >= 50.0, "{:?}", a.rect);
+            for b in &all[i + 1..] {
+                assert!(!a.rect.intersects(b.rect), "{:?} {:?}", a.rect, b.rect);
+            }
+        }
+        assert!(hide(&Facts { vr_close: false, sheet: None, ..facts() }).is_empty());
+        assert!(hide(&Facts { vr_close: true, sheet: Some(Sheet::Pictures), ..facts() }).is_empty());
+    }
+
+    /// Dragging along the bar goes through the colours and stops at its ends, wherever the pointer goes.
+    #[test]
+    fn a_drag_along_the_colour_bar_follows_it_and_stays_on_it() {
+        let bar = hue_bar();
+        assert_eq!(hue_at(bar.left() - 200.0), hue_at(bar.left()));
+        assert_eq!(hue_at(bar.right() + 200.0), hue_at(bar.right()));
+        let along: Vec<[u8; 3]> = (0..=8).map(|n| hue_at(bar.left() + bar.width() * n as f32 / 8.0)).collect();
+        for pair in along.windows(2) {
+            assert_ne!(pair[0], pair[1], "every step of it is another colour");
+        }
     }
 
     #[test]

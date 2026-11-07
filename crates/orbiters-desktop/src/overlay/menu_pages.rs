@@ -253,7 +253,7 @@ pub(crate) fn sample_media() -> Media {
 }
 
 /// Menus with sample content, one per page, with the element hovered and pressed.
-fn samples() -> Vec<(ScreenPage, Menu, Option<usize>, Option<usize>)> {
+pub(crate) fn samples() -> Vec<(ScreenPage, Menu, Option<usize>, Option<usize>)> {
     let mut out = Vec::new();
     let base = || {
         let mut m = Menu::new(KeyboardLayout::Qwerty, 5, PhotoLength::Standard);

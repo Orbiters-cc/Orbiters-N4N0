@@ -20,6 +20,24 @@ fn recent() -> panels::Gallery {
 }
 
 fn stand_in(seed: u8) -> ColorImage {
+    // Real pictures where there are some to hand: dots and colours are judged on those.
+    static REAL: std::sync::OnceLock<Vec<ColorImage>> = std::sync::OnceLock::new();
+    let real = REAL.get_or_init(|| {
+        let Ok(dir) = std::env::var("ORBIT_PANEL_WORLDS") else { return Vec::new() };
+        let Ok(read) = std::fs::read_dir(dir) else { return Vec::new() };
+        let mut paths: Vec<std::path::PathBuf> = read.flatten().map(|e| e.path()).collect();
+        paths.sort();
+        paths
+            .into_iter()
+            .filter_map(|path| {
+                let image = image::open(&path).ok()?.to_rgb8();
+                Some(ColorImage::from_rgb([image.width() as usize, image.height() as usize], image.as_raw()))
+            })
+            .collect()
+    });
+    if !real.is_empty() {
+        return real[seed as usize % real.len()].clone();
+    }
     let (w, h) = (160usize, 90usize);
     let mut pixels = Vec::with_capacity(w * h);
     for y in 0..h {
@@ -36,7 +54,7 @@ fn stand_in(seed: u8) -> ColorImage {
 fn picture(placed: &Placed, facts: &Facts, hover: Option<usize>, pressed: Option<usize>) -> (Vec<u8>, [u32; 2]) {
     let px = [placed.rect.width().round() as u32, placed.rect.height().round() as u32];
     let logical = placed.logical();
-    let mut canvas = Canvas::zoomed(px[0], px[1], px[0] as f32 / logical.x);
+    let mut canvas = Canvas::zoomed(px[0], px[1], px[0] as f32 / logical.x).in_orbit_look();
     let textures: Vec<_> = (0..4).map(|i| canvas.ctx().load_texture("recent", stand_in(i), TextureOptions::LINEAR)).collect();
     let mut facts = facts.clone();
     facts.recent_pictures = textures.iter().enumerate().map(|(n, texture)| (n, texture.id())).collect();
@@ -463,7 +481,7 @@ pub(super) fn vr_shots(out: &Path, refs: &Path) -> anyhow::Result<()> {
 fn sharp_picture(placed: &Placed, facts: &Facts, hover: Option<usize>, sharp: f32) -> (Vec<u8>, [u32; 2]) {
     let px = [(placed.rect.width() * sharp).round() as u32, (placed.rect.height() * sharp).round() as u32];
     let logical = placed.logical();
-    let mut canvas = Canvas::zoomed(px[0], px[1], px[0] as f32 / logical.x);
+    let mut canvas = Canvas::zoomed(px[0], px[1], px[0] as f32 / logical.x).in_orbit_look();
     let textures: Vec<_> = (0..4).map(|i| canvas.ctx().load_texture("recent", stand_in(i), TextureOptions::LINEAR)).collect();
     let mut facts = facts.clone();
     facts.recent_pictures = textures.iter().enumerate().map(|(n, texture)| (n, texture.id())).collect();
@@ -597,9 +615,52 @@ fn settings_scenes(out: &Path, client: Vec2, idle: &Facts) -> anyhow::Result<()>
     let colour = OrbitSettings { theme: MenuLook::Retro, retro_color: panels::SWATCHES[7], retro_pictures: true, ..plain };
     panels::set_style(&colour);
     qm_scene("orbit-retro-colour", out, client, &sheet(colour, Sheet::Pictures, "Pictures"), None, Some(Sheet::Pictures))?;
+    panels::set_style(&mono);
+    qm_scene("orbit-retro-all", out, client, &sheet(mono, Sheet::All, "All tools"), None, Some(Sheet::All))?;
+    let strip = OrbitSettings { layout: OrbitLayout::Strip, ..mono };
+    qm_scene("orbit-retro-strip", out, client, &Facts { orbit: strip, strip_caption: true, vr_close: true, ..idle.clone() }, Some(0), None)?;
+    wheel_scene("orbit-retro-wheel", out, client, &Facts { orbit: mono, ..idle.clone() }, None, None, false)?;
+    page_scene("orbit-retro-page", out, &mono)?;
+    let colour = OrbitSettings { theme: MenuLook::Retro, retro_color: panels::SWATCHES[7], retro_pictures: true, ..plain };
+    panels::set_style(&colour);
+    page_scene("orbit-retro-page-colour", out, &colour)?;
+    panels::set_style(&pink);
+    page_scene("orbit-accent-page", out, &pink)?;
+    panels::set_style(&plain);
     panels::set_style(&plain);
     let strip = OrbitSettings { layout: OrbitLayout::Strip, ..plain };
     qm_scene("orbit-strip", out, client, &Facts { orbit: strip, strip_caption: true, hint: Some(("Your tools", "Worlds in 3D, videos, instances and 3D pictures.")), ..idle.clone() }, None, None)?;
+    Ok(())
+}
+
+/// One of N4N0's own pages inside a sheet, as the sheet draws it with what is chosen: the accent reaching it, or its retro drawing under the one colour.
+fn page_scene(name: &str, out: &Path, chosen: &orbiters_core::settings::OrbitSettings) -> anyhow::Result<()> {
+    use crate::overlay::{menu_pages, menu_retro, menu_ui};
+    use orbiters_core::settings::MenuLook;
+    let px = [1024u32, 576];
+    let mut canvas = Canvas::zoomed(px[0], px[1], 1.0).in_orbit_look();
+    canvas.set_restyle_off(true);
+    let retro = chosen.theme == MenuLook::Retro;
+    let (_, menu, _, _) = menu_pages::samples().into_iter().find(|(page, ..)| format!("{page:?}").contains("Photo")).expect("a page with pictures");
+    let textures: Vec<_> = (0..4).map(|i| canvas.ctx().load_texture("recent", stand_in(i), TextureOptions::LINEAR)).collect();
+    let skin = crate::overlay::orbit::page_skin(chosen.accent);
+    let mut n = std::cell::Cell::new(0usize);
+    let picture = |_: &str| {
+        let i = n.get();
+        n.set(i + 1);
+        Some(textures[i % textures.len()].id())
+    };
+    let view = menu_ui::View { menu: &menu, hover: None, pressed: None, picture: &picture, time: 0.4, skin: &skin };
+    for _ in 0..2 {
+        canvas.paint(0.4, |p| if retro { menu_retro::draw(p, egui::pos2(0.0, 0.0), &view) } else { menu_ui::draw(p, egui::pos2(0.0, 0.0), &view) });
+    }
+    *n.get_mut() = 0;
+    let from = canvas.pixels().to_vec();
+    let mut image = from.clone();
+    panels::finish_picture(&mut image, &from, px, 1.0, [0, 0, px[0], px[1]]);
+    let path = out.join(format!("{name}.png"));
+    save_png(&path, &over_ground(&image, px[0], px[1]))?;
+    println!("{}", path.display());
     Ok(())
 }
 
@@ -613,7 +674,7 @@ fn results_over_the_game(out: &Path, client: Vec2, idle: &Facts) -> anyhow::Resu
     let found = youtube::search("rain sounds", "en")?;
     let page = zones::place(Zone::Takeover, client).expect("it fits");
     let px = [page.rect.width() as u32, page.rect.height() as u32];
-    let mut canvas = Canvas::zoomed(px[0], px[1], px[0] as f32 / 1024.0);
+    let mut canvas = Canvas::zoomed(px[0], px[1], px[0] as f32 / 1024.0).in_orbit_look();
     let videos: Vec<panels::VideoTile> = found
         .videos
         .iter()
@@ -650,7 +711,7 @@ fn results_over_the_game(out: &Path, client: Vec2, idle: &Facts) -> anyhow::Resu
 }
 
 fn sheet_picture(sheet: panels::Sheet, facts: &Facts, px: [u32; 2]) -> Vec<u8> {
-    let mut canvas = Canvas::zoomed(px[0], px[1], px[0] as f32 / 1024.0);
+    let mut canvas = Canvas::zoomed(px[0], px[1], px[0] as f32 / 1024.0).in_orbit_look();
     let textures: Vec<_> = (0..4).map(|i| canvas.ctx().load_texture("recent", stand_in(i), TextureOptions::LINEAR)).collect();
     let mut facts = facts.clone();
     facts.recent_pictures = textures.iter().enumerate().map(|(n, texture)| (n, texture.id())).collect();

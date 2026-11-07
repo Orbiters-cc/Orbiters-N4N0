@@ -13,6 +13,7 @@ pub mod detect;
 #[cfg(windows)]
 pub mod desktop;
 pub mod panels;
+pub mod retro;
 pub mod sheet_view;
 pub mod vr;
 pub mod zones;
@@ -39,11 +40,6 @@ use zones::{Around, Group, Placed, Zone};
 /// Whether the desktop's panels are wanted: VRChat runs without SteamVR, on this computer, and the setting says so.
 pub fn wanted_on_desktop(snap: &Snapshot) -> bool {
     orbiters_core::osc::VRCHAT_RUNS_HERE && snap.vrchat.running && !snap.vrchat.remote && !snap.steamvr.running && snap.settings.orbit.any()
-}
-
-/// N4N0's pages in Orbiters' own look: the design system's, as everywhere else in the app.
-pub fn skin() -> &'static Skin {
-    Skin::english()
 }
 
 /// A part's appearing: a spring from nothing to its place, a little past it. Each turn moves the window or overlay and its alpha, no new picture.
@@ -147,7 +143,7 @@ impl Panel {
             placed,
             px,
             logical,
-            canvas: Canvas::zoomed(px[0], px[1], zoom),
+            canvas: Canvas::zoomed(px[0], px[1], zoom).in_orbit_look(),
             out: vec![0; px[0] as usize * px[1] as usize * 4],
             mask,
             items: Vec::new(),
@@ -168,7 +164,10 @@ impl Panel {
 
     /// Takes what the canvas painted: the changed part, cut to the panel's shape. Returns it (x0, y0, x1, y1).
     fn take_picture(&mut self) -> Option<[u32; 4]> {
-        let changed = self.canvas.damage()?;
+        let Some(changed) = self.canvas.damage() else {
+            panels::forget_pictures();
+            return None;
+        };
         let [w, h] = self.px;
         let pixels = self.canvas.pixels();
         for y in changed[1]..changed[3].min(h) {
@@ -193,6 +192,9 @@ impl Panel {
         pos2(uv[0] * self.logical.x, uv[1] * self.logical.y)
     }
 }
+
+/// How often a colour held on the bar shows: every part is painted for it.
+const HUE_EVERY: Duration = Duration::from_millis(60);
 
 /// How long a second ring stays open after the pointer left it and its cell: a hand crossing the gap must not close it.
 pub const BLOOM_GRACE: Duration = Duration::from_millis(350);
@@ -611,14 +613,43 @@ struct Stage {
     worlds: Option<Worlds>,
     px: [u32; 2],
     retro: bool,
+    /// What N4N0's pages on the sheet are drawn with: the accent chosen for these menus.
+    skin: Skin,
+    skin_accent: [u8; 3],
 }
+
+/// N4N0's pages inside a sheet are drawn here, so what is chosen reaches them with nothing to update on the avatar's screen, which is another drawing altogether. Where a page has a colour of its own (a tile's tint, a danger's red), that stays.
+pub(crate) fn page_skin(accent: [u8; 3]) -> Skin {
+    let standard = Skin::english();
+    let mut colors = orbiters_n4n0_core::menu::theme::Theme::MODERN.colors;
+    colors.accent = accent;
+    Skin { palette: menu_ui::Palette::new(&colors), retro: standard.retro.clone(), strings: standard.strings.clone() }
+}
+
+#[cfg(test)]
+mod page_skin_tests {
+    use super::*;
+
+    /// The accent reaches what N4N0's pages draw with; its retro colours and its words stay as they are.
+    #[test]
+    fn an_accent_reaches_the_pages_in_a_sheet() {
+        let pink = page_skin([255, 90, 170]);
+        assert_eq!(pink.palette.accent, egui::Color32::from_rgb(255, 90, 170));
+        let standard = Skin::english();
+        assert_eq!(pink.retro, standard.retro);
+        assert_eq!(pink.palette.card, standard.palette.card);
+        assert_eq!(page_skin(DEFAULT_PAGE_ACCENT).palette.accent, standard.palette.accent, "as it was until one is chosen");
+    }
+}
+
+const DEFAULT_PAGE_ACCENT: [u8; 3] = orbiters_n4n0_core::menu::theme::Theme::MODERN.colors.accent;
 
 impl Stage {
     fn new(px: [u32; 2], with_worlds: bool) -> Self {
-        let canvas = Canvas::zoomed(px[0], px[1], px[0] as f32 / layout::WIDTH as f32);
+        let canvas = Canvas::zoomed(px[0], px[1], px[0] as f32 / layout::WIDTH as f32).in_orbit_look();
         let host = MenuHost::new(canvas.ctx().clone());
         let worlds = with_worlds.then(|| Worlds::alone(canvas.ctx().clone()));
-        Self { canvas, host, worlds, px, retro: false }
+        Self { canvas, host, worlds, px, retro: false, skin: page_skin(DEFAULT_PAGE_ACCENT), skin_accent: DEFAULT_PAGE_ACCENT }
     }
 }
 
@@ -653,6 +684,8 @@ pub struct Panels {
     view_texture: Option<TextureHandle>,
     view_plate: Vec<[f32; 2]>,
     turning: Option<Pos2>,
+    /// A colour being chosen along the bar: seen at once, saved when let go, and when it last showed.
+    hue_held: Option<([u8; 3], Instant)>,
     seek_late: Option<f32>,
     seek_asked: Option<(u32, Instant)>,
     /// Captures of this computer's gallery asked to show in 3D, for the view that shows them.
@@ -724,6 +757,7 @@ impl Panels {
             view_texture: None,
             view_plate: Vec::new(),
             turning: None,
+            hue_held: None,
             seek_late: None,
             seek_asked: None,
             local_asked: Vec::new(),
@@ -1052,20 +1086,12 @@ impl Panels {
                 host.effects(vec![Effect::Media(orbiters_n4n0_core::menu::MediaCommand::Seek(seconds))], snap, &self.backend);
             }
         }
-        // What is chosen in Settings: from now on, all of it painted again.
+        // What is chosen in Settings: from now on, all of it painted again. A colour held on the bar is what shows until it is let go.
         let style = (snap.settings.orbit, snap.settings.vr_audio.output.as_ref().map(|e| e.name.clone()));
-        if self.style_seen.as_ref() != Some(&style) {
+        if self.style_seen.as_ref() != Some(&style) && self.hue_held.is_none() {
             panels::set_style(&style.0);
             self.style_seen = Some(style);
-            for panel in self.list.iter_mut().chain(self.takeover.iter_mut()) {
-                panel.dirty = true;
-                panel.canvas.invalidate();
-            }
-            self.stage.canvas.invalidate();
-            self.stage.host.dirty = true;
-            if let Some(worlds) = self.stage.worlds.as_mut() {
-                worlds.repaint();
-            }
+            self.paint_all_again();
         }
         if let Some(listed) = self.audio_outputs_coming.as_ref().and_then(|rx| rx.try_recv().ok()) {
             self.audio_outputs = listed;
@@ -1249,8 +1275,14 @@ impl Panels {
             opened_view: None,
             world_video_picture: if self.facts.sheet == Some(Sheet::All) { menu.world_video.as_ref().and_then(|v| orbiters_n4n0_core::videos::youtube_id(&v.url)).and_then(|id| self.stage.host.picture(&id, false)) } else { None },
             strip_caption: self.list.iter().any(|p| p.zone == Zone::QmStrip),
-            tiles_hidden: self.hidden,
-            orbit: snap.settings.orbit,
+            // While a colour is held on the bar, that one.
+            orbit: {
+                let mut orbit = snap.settings.orbit;
+                if self.hue_held.is_some() {
+                    (orbit.accent, orbit.retro_color) = (self.facts.orbit.accent, self.facts.orbit.retro_color);
+                }
+                orbit
+            },
             vr_output: snap.settings.vr_audio.output.as_ref().map(|e| e.name.clone()),
             // Only what is on the page: they change as it is made and as time goes, and there may be tens of thousands.
             recent_words: self
@@ -1360,6 +1392,33 @@ impl Panels {
         }
     }
 
+    /// Every part painted again, in a look that changed.
+    fn paint_all_again(&mut self) {
+        for panel in self.list.iter_mut().chain(self.takeover.iter_mut()) {
+            panel.dirty = true;
+            panel.canvas.invalidate();
+        }
+        self.stage.canvas.invalidate();
+        self.stage.host.dirty = true;
+        if let Some(worlds) = self.stage.worlds.as_mut() {
+            worlds.repaint();
+        }
+    }
+
+    /// `colour` from the bar, as the colour of the look chosen, for now.
+    fn show_hue(&mut self, colour: [u8; 3]) {
+        let mut orbit = self.facts.orbit;
+        if orbit.theme == MenuLook::Retro {
+            orbit.retro_color = colour;
+        } else {
+            orbit.accent = colour;
+        }
+        self.facts.orbit = orbit;
+        panels::set_style(&orbit);
+        self.hue_held = Some((colour, Instant::now()));
+        self.paint_all_again();
+    }
+
     /// A pointer on a part (`on`: its index in [`Panels::all`], and where in units), or on none.
     pub fn hover(&mut self, on: Option<(usize, Pos2)>) {
         let count = self.list.len();
@@ -1373,6 +1432,13 @@ impl Panels {
         }
         if let (Some(_), Some(p)) = (self.seeking, self.sheet_pointer) {
             self.seeking = panels::timeline_fraction(&self.facts, p.x).or(self.seeking);
+        }
+        // All of it is painted for each colour: as fast as it can be seen to follow, and no faster.
+        if let (Some((was, when)), Some(p)) = (self.hue_held, self.sheet_pointer) {
+            let colour = panels::hue_at(p.x);
+            if colour != was && when.elapsed() >= HUE_EVERY {
+                self.show_hue(colour);
+            }
         }
         if let (Some(drag), Some(p), Some(sheet)) = (self.drag.as_mut(), self.sheet_pointer, self.facts.sheet) {
             let now = Instant::now();
@@ -1516,6 +1582,13 @@ impl Panels {
             self.drag = Some(Drag::new(self.facts.gallery_scroll, None, false));
             return out;
         }
+        // Along the bar of colours: seen as it moves, saved when let go.
+        if action == Some(Action::Set(panels::Pick::Hue)) {
+            if let Some(p) = self.sheet_pointer {
+                self.show_hue(panels::hue_at(p.x));
+            }
+            return out;
+        }
         // Along what plays: where it is held, and moved there when let go.
         if action == Some(Action::Timeline) {
             if let Some(p) = self.sheet_pointer {
@@ -1567,10 +1640,8 @@ impl Panels {
             panels::Pick::Theme(theme) => serde_json::json!({ "orbit": { "theme": theme } }),
             panels::Pick::Pictures(keep) => serde_json::json!({ "orbit": { "retro_pictures": keep } }),
             panels::Pick::Swatch(i) => colour(panels::SWATCHES[i]),
-            panels::Pick::Hue => {
-                let Some(p) = self.sheet_pointer else { return };
-                colour(panels::hue_at(p.x))
-            }
+            // Pressed and dragged: see `press`, `hover` and `release`.
+            panels::Pick::Hue => return,
             panels::Pick::Sound(after) => {
                 let now = snap.settings.vr_audio.output.as_ref();
                 let at = now.and_then(|e| self.audio_outputs.iter().position(|o| o.id == e.id || o.name == e.name));
@@ -1773,6 +1844,16 @@ impl Panels {
 
     /// The pointer's button went up.
     pub fn release(&mut self) {
+        if let Some((held, _)) = self.hue_held.take() {
+            // Where it was let go, not the last colour a slow frame showed.
+            let colour = self.sheet_pointer.map_or(held, |p| panels::hue_at(p.x));
+            if colour != held {
+                self.show_hue(colour);
+                self.hue_held = None;
+            }
+            let key = if self.facts.orbit.theme == MenuLook::Retro { "retro_color" } else { "accent" };
+            self.backend.patch_settings(serde_json::json!({ "orbit": { key: colour } }));
+        }
         if self.turning.take().is_some() {
             if let Some(view) = &self.sheet_view {
                 view.hold(false);
@@ -1842,11 +1923,20 @@ impl Panels {
         let sheet = self.facts.sheet;
         let stage = &mut self.stage;
         let panel = self.takeover.as_mut().expect("just looked");
-        let retro_now = snap.settings.n4n0.menu.look == MenuLook::Retro;
+        // The retro look chosen here draws N4N0's pages with N4N0's retro drawing, under its one colour: their pictures come plain, as the look draws them itself.
+        let chosen = self.facts.orbit;
+        let retro_here = chosen.theme == MenuLook::Retro;
+        let retro_now = retro_here || snap.settings.n4n0.menu.look == MenuLook::Retro;
         if retro_now != stage.retro {
             stage.retro = retro_now;
             stage.host.dirty = true;
         }
+        if chosen.accent != stage.skin_accent {
+            stage.skin_accent = chosen.accent;
+            stage.skin = page_skin(chosen.accent);
+            stage.host.dirty = true;
+        }
+        stage.canvas.set_restyle_off(sheet == Some(Sheet::Menu));
         match sheet {
             Some(Sheet::Worlds) => {
                 if let Some(worlds) = stage.worlds.as_mut() {
@@ -1862,8 +1952,8 @@ impl Panels {
                     stage.host.dirty = false;
                     let (hover, pressed, retro) = (panel.hover, panel.pressed, stage.retro);
                     let host = &stage.host;
-                    let picture = |id: &str| -> Option<TextureId> { host.picture(id, retro) };
-                    let view = View { menu: &host.menu, hover, pressed, picture: &picture, time, skin: skin() };
+                    let picture = |id: &str| -> Option<TextureId> { host.picture(id, retro && !retro_here) };
+                    let view = View { menu: &host.menu, hover, pressed, picture: &picture, time, skin: &stage.skin };
                     let cover = self.facts.desktop && !self.show_keys && host.menu.shows_keyboard();
                     let world_video = host.menu.world_video.as_ref().map(|v| v.title.as_deref().map_or_else(|| v.url.clone(), panels::clean_title));
                     stage.canvas.paint(time, |p| {
@@ -2006,6 +2096,9 @@ impl Panels {
 impl Stage {
     /// What the canvas painted, to the page on the sheet.
     fn canvas_to(&mut self, panel: &mut Panel, show: &mut impl FnMut(&Panel, [u32; 4])) {
+        if self.canvas.damage().is_none() {
+            panels::forget_pictures();
+        }
         if let Some(changed) = self.canvas.damage() {
             let [w, h] = panel.px;
             let pixels = self.canvas.pixels();

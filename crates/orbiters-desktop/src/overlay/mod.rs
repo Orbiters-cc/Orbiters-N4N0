@@ -198,19 +198,43 @@ pub struct Canvas {
     size: egui::Vec2,
     /// Pixels a point.
     zoom: f32,
+    /// What its frames go through last: the look chosen for the menus around VRChat's. `restyle_off` leaves a page that has this drawing already.
+    restyle: Option<orbit::retro::Pass>,
+    restyle_off: bool,
 }
 
 impl Canvas {
     pub fn new(width: u32, height: u32) -> Self {
         let ctx = egui::Context::default();
         orbiters_ui::install(&ctx);
-        Self { ctx, painter: Software::new(width, height), size: egui::vec2(width as f32, height as f32), zoom: 1.0 }
+        Self { ctx, painter: Software::new(width, height), size: egui::vec2(width as f32, height as f32), zoom: 1.0, restyle: None, restyle_off: false }
     }
 
     /// One of `width` x `height` pixels drawn at `zoom` pixels a point (a panel that scales with what it stands beside: text
     /// stays crisp).
     pub fn zoomed(width: u32, height: u32, zoom: f32) -> Self {
         Self { size: egui::vec2(width as f32, height as f32) / zoom, zoom, ..Self::new(width, height) }
+    }
+
+    /// One whose frames take the look chosen for the menus around VRChat's.
+    pub fn in_orbit_look(mut self) -> Self {
+        self.restyle = Some(orbit::retro::pass);
+        self
+    }
+
+    /// Whether the look's drawing stays off: a page of N4N0's that draws it itself (its pictures go on as they were).
+    pub fn set_restyle_off(&mut self, off: bool) {
+        if self.restyle_off != off {
+            self.restyle_off = off;
+            self.painter.invalidate();
+        }
+    }
+
+    /// How its pictures are drawn now.
+    fn pictures_now(&mut self) {
+        if self.restyle.is_some() {
+            self.painter.set_picture_look(orbit::panels::look::picture_look());
+        }
     }
 
     /// The canvas's egui context (textures it paints are loaded through it).
@@ -224,7 +248,14 @@ impl Canvas {
         let mut draw = draw;
         let mut input = RawInput { screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), self.size)), time: Some(time), ..Default::default() };
         input.viewports.insert(ViewportId::ROOT, ViewportInfo { native_pixels_per_point: Some(self.zoom), ..Default::default() });
-        let mut full = self.ctx.run_ui(input, |ui| draw(ui.painter()));
+        let (restyle, size) = (self.restyle.filter(|_| !self.restyle_off), self.size);
+        let mut full = self.ctx.run_ui(input, |ui| {
+            draw(ui.painter());
+            if let Some(pass) = restyle {
+                pass(ui.ctx(), ui.layer_id(), size);
+            }
+        });
+        self.pictures_now();
         self.painter.set_textures(&mut full.textures_delta);
         let primitives = self.ctx.tessellate(std::mem::take(&mut full.shapes), full.pixels_per_point);
         // Textures egui let go of are freed once painted with (the frame may still draw them).
@@ -238,7 +269,14 @@ impl Canvas {
         let mut draw = draw;
         let mut input = RawInput { screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), self.size)), time: Some(time), ..Default::default() };
         input.viewports.insert(ViewportId::ROOT, ViewportInfo { native_pixels_per_point: Some(self.zoom), ..Default::default() });
-        let mut full = self.ctx.run_ui(input, |ui| draw(ui));
+        let (restyle, size) = (self.restyle.filter(|_| !self.restyle_off), self.size);
+        let mut full = self.ctx.run_ui(input, |ui| {
+            draw(ui);
+            if let Some(pass) = restyle {
+                pass(ui.ctx(), ui.layer_id(), size);
+            }
+        });
+        self.pictures_now();
         self.painter.set_textures(&mut full.textures_delta);
         let primitives = self.ctx.tessellate(std::mem::take(&mut full.shapes), full.pixels_per_point);
         self.painter.paint(&primitives, full.pixels_per_point, egui::Color32::TRANSPARENT);

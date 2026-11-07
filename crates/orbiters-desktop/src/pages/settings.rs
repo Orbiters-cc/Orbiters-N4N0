@@ -1108,6 +1108,10 @@ fn orbit_settings(ui: &mut egui::Ui, snap: &Snapshot, orbit: &mut orbiters_core:
         apply |= widgets::toggle(ui, "orbit-wheel", &mut orbit.wheel);
     });
     widgets::separator(ui);
+    widgets::field(ui, "Around the camera", Some("In a headset: 3D pictures and the QR code beside VRChat's camera. It looks for the camera's panel on VRChat's window while the camera is open, and keeps nothing it sees."), 48.0, |ui| {
+        apply |= widgets::toggle(ui, "orbit-camera", &mut orbit.camera_tiles);
+    });
+    widgets::separator(ui);
     widgets::field(ui, "Around the Quick Menu", Some("Orbiters beside VRChat's own Quick Menu, with it, whatever N4N0's menu does: opened with Esc in desktop mode, or by a short press of the menu button in VR."), 48.0, |ui| {
         apply |= widgets::toggle(ui, "orbit-quick-menu", &mut orbit.quick_menu);
     });

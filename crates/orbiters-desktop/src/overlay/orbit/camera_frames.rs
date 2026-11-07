@@ -1,0 +1,206 @@
+//! VRChat's window, read for its camera panel ([`super::camera_track`]), on a thread of its own and only while its camera is open: Windows Graphics Capture, as
+//! `desktop.rs` reads it for its menus, ten looks a second and nothing between them. Dropped, it costs nothing. The picture goes no further than the reading of it.
+
+use super::camera_track::{self, Found};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::Instant;
+
+/// A look's result: what was found, on a picture of `size`, and when.
+#[derive(Clone, Copy, Debug)]
+pub struct Seen {
+    pub found: Found,
+    pub size: [f32; 2],
+    pub at: Instant,
+}
+
+/// Reads the window until dropped.
+pub struct CameraWatch {
+    seen: Arc<Mutex<Option<Seen>>>,
+    stop: Arc<AtomicBool>,
+}
+
+impl CameraWatch {
+    pub fn start() -> Self {
+        let (seen, stop) = (Arc::new(Mutex::new(None)), Arc::new(AtomicBool::new(false)));
+        let (s, st) = (seen.clone(), stop.clone());
+        let _ = std::thread::Builder::new().name("camera panel".into()).spawn(move || run(&s, &st));
+        Self { seen, stop }
+    }
+
+    /// The last look's result, once.
+    pub fn take(&self) -> Option<Seen> {
+        self.seen.lock().unwrap_or_else(|e| e.into_inner()).take()
+    }
+}
+
+impl Drop for CameraWatch {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+    }
+}
+
+#[cfg(not(windows))]
+fn run(_: &Mutex<Option<Seen>>, _: &AtomicBool) {}
+
+#[cfg(windows)]
+fn run(seen: &Mutex<Option<Seen>>, stop: &AtomicBool) {
+    use std::time::Duration;
+    let mut said = false;
+    while !stop.load(Ordering::Relaxed) {
+        // VRChat may not be there, or its window may go: looked for again.
+        match imp::Frames::open() {
+            Ok(mut frames) => {
+                said = false;
+                while !stop.load(Ordering::Relaxed) && frames.alive() {
+                    if let Some((bgra, width, height, stride, left, top, client)) = frames.next() {
+                        // Only what is the game's: the frame's title bar and borders are not.
+                        let start = top as usize * stride + left as usize * 4;
+                        if let Some(game) = bgra.get(start..) {
+                            let _ = (width, height);
+                            if let Some(found) = camera_track::find(game, client[0] as usize, client[1] as usize, stride) {
+                                *seen.lock().unwrap_or_else(|e| e.into_inner()) = Some(Seen { found, size: [client[0] as f32, client[1] as f32], at: Instant::now() });
+                            }
+                        }
+                    }
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+            }
+            Err(e) => {
+                if !std::mem::replace(&mut said, true) {
+                    eprintln!("camera panel: {e}");
+                }
+            }
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    }
+}
+
+#[cfg(windows)]
+mod imp {
+    use windows::core::{w, Interface};
+    use windows::Graphics::Capture::{Direct3D11CaptureFramePool, GraphicsCaptureItem, GraphicsCaptureSession};
+    use windows::Graphics::DirectX::Direct3D11::IDirect3DDevice;
+    use windows::Graphics::DirectX::DirectXPixelFormat;
+    use windows::Win32::Foundation::{HMODULE, HWND, POINT, RECT};
+    use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_HARDWARE;
+    use windows::Win32::Graphics::Direct3D11::*;
+    use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC};
+    use windows::Win32::Graphics::Dxgi::IDXGIDevice;
+    use windows::Win32::Graphics::Gdi::ClientToScreen;
+    use windows::Win32::System::WinRT::Direct3D11::{CreateDirect3D11DeviceFromDXGIDevice, IDirect3DDxgiInterfaceAccess};
+    use windows::Win32::System::WinRT::Graphics::Capture::IGraphicsCaptureItemInterop;
+    use windows::Win32::UI::WindowsAndMessaging::{FindWindowW, GetClientRect, GetWindowRect, IsWindow};
+
+    pub struct Frames {
+        window: HWND,
+        device: ID3D11Device,
+        context: ID3D11DeviceContext,
+        winrt: IDirect3DDevice,
+        pool: Direct3D11CaptureFramePool,
+        _session: GraphicsCaptureSession,
+        _item: GraphicsCaptureItem,
+        size: (i32, i32),
+        staging: Option<(ID3D11Texture2D, u32, u32)>,
+        pixels: Vec<u8>,
+    }
+
+    impl Frames {
+        pub fn open() -> Result<Self, String> {
+            let text = |what: &str, e: windows::core::Error| format!("{what}: {}", e.message());
+            // SAFETY: a plain query by name.
+            let window = unsafe { FindWindowW(w!("UnityWndClass"), w!("VRChat")) }.map_err(|e| text("no VRChat window", e))?;
+            let (mut device, mut context): (Option<ID3D11Device>, Option<ID3D11DeviceContext>) = (None, None);
+            // SAFETY: the outputs are valid.
+            unsafe { D3D11CreateDevice(None, D3D_DRIVER_TYPE_HARDWARE, HMODULE::default(), D3D11_CREATE_DEVICE_BGRA_SUPPORT, None, D3D11_SDK_VERSION, Some(&mut device), None, Some(&mut context)) }.map_err(|e| text("Direct3D", e))?;
+            let (device, context) = (device.ok_or("no Direct3D device")?, context.ok_or("no Direct3D context")?);
+            let dxgi: IDXGIDevice = device.cast().map_err(|e| text("DXGI", e))?;
+            // SAFETY: the DXGI device is alive for the call.
+            let winrt: IDirect3DDevice = unsafe { CreateDirect3D11DeviceFromDXGIDevice(&dxgi) }.and_then(|d| d.cast()).map_err(|e| text("device", e))?;
+            let interop = windows::core::factory::<GraphicsCaptureItem, IGraphicsCaptureItemInterop>().map_err(|e| text("capture item", e))?;
+            // SAFETY: a window handle; one that is gone only fails.
+            let item: GraphicsCaptureItem = unsafe { interop.CreateForWindow(window) }.map_err(|e| text("capture item", e))?;
+            let size = item.Size().map_err(|e| text("size", e))?;
+            let pool = Direct3D11CaptureFramePool::CreateFreeThreaded(&winrt, DirectXPixelFormat::B8G8R8A8UIntNormalized, 2, size).map_err(|e| text("frames", e))?;
+            let session = pool.CreateCaptureSession(&item).map_err(|e| text("session", e))?;
+            let _ = session.SetIsCursorCaptureEnabled(false);
+            let _ = session.SetIsBorderRequired(false);
+            session.StartCapture().map_err(|e| text("start", e))?;
+            Ok(Self { window, device, context, winrt, pool, _session: session, _item: item, size: (size.Width, size.Height), staging: None, pixels: Vec::new() })
+        }
+
+        pub fn alive(&self) -> bool {
+            // SAFETY: a plain query.
+            unsafe { IsWindow(Some(self.window)) }.as_bool()
+        }
+
+        /// The newest frame's pixels: them, its size, their stride, where the game's area starts in them, and how large that is.
+        pub fn next(&mut self) -> Option<(&[u8], u32, u32, usize, u32, u32, [u32; 2])> {
+            let mut newest = None;
+            while let Ok(frame) = self.pool.TryGetNextFrame() {
+                newest = Some(frame);
+            }
+            let frame = newest?;
+            let content = frame.ContentSize().ok()?;
+            if (content.Width, content.Height) != self.size {
+                self.size = (content.Width, content.Height);
+                let _ = self.pool.Recreate(&self.winrt, DirectXPixelFormat::B8G8R8A8UIntNormalized, 2, content);
+                return None;
+            }
+            let access: IDirect3DDxgiInterfaceAccess = frame.Surface().ok()?.cast().ok()?;
+            // SAFETY: the surface is a Direct3D 11 texture, as the pool was made for.
+            let texture: ID3D11Texture2D = unsafe { access.GetInterface() }.ok()?;
+            let (width, height) = (content.Width as u32, content.Height as u32);
+            let staging = self.staging_for(width, height)?;
+            // SAFETY: both textures are this device's and of one format; the box is the frame's; it is unmapped before anything else happens to it.
+            let stride = unsafe {
+                let region = D3D11_BOX { left: 0, top: 0, front: 0, right: width, bottom: height, back: 1 };
+                self.context.CopySubresourceRegion(&staging, 0, 0, 0, 0, &texture, 0, Some(&region));
+                let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
+                self.context.Map(&staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped)).ok()?;
+                let pitch = mapped.RowPitch;
+                self.pixels.clear();
+                self.pixels.extend_from_slice(std::slice::from_raw_parts(mapped.pData as *const u8, (pitch * height) as usize));
+                self.context.Unmap(&staging, 0);
+                pitch as usize
+            };
+            let (mut outer, mut client, mut corner) = (RECT::default(), RECT::default(), POINT::default());
+            // SAFETY: plain queries with valid outputs.
+            unsafe {
+                GetWindowRect(self.window, &mut outer).ok()?;
+                GetClientRect(self.window, &mut client).ok()?;
+                let _ = ClientToScreen(self.window, &mut corner);
+            }
+            let (left, top) = ((corner.x - outer.left).max(0) as u32, (corner.y - outer.top).max(0) as u32);
+            let area = [(client.right - client.left).max(0) as u32, (client.bottom - client.top).max(0) as u32];
+            let area = [area[0].min(width.saturating_sub(left)), area[1].min(height.saturating_sub(top))];
+            Some((&self.pixels, width, height, stride, left, top, area))
+        }
+
+        fn staging_for(&mut self, width: u32, height: u32) -> Option<ID3D11Texture2D> {
+            if let Some((t, w, h)) = &self.staging {
+                if *w == width && *h == height {
+                    return Some(t.clone());
+                }
+            }
+            let description = D3D11_TEXTURE2D_DESC {
+                Width: width,
+                Height: height,
+                MipLevels: 1,
+                ArraySize: 1,
+                Format: DXGI_FORMAT_B8G8R8A8_UNORM,
+                SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+                Usage: D3D11_USAGE_STAGING,
+                BindFlags: 0,
+                CPUAccessFlags: D3D11_CPU_ACCESS_READ.0 as u32,
+                MiscFlags: 0,
+            };
+            let mut staging: Option<ID3D11Texture2D> = None;
+            // SAFETY: the description and the output are valid.
+            unsafe { self.device.CreateTexture2D(&description, None, Some(&mut staging)) }.ok()?;
+            let staging = staging?;
+            self.staging = Some((staging.clone(), width, height));
+            Some(staging)
+        }
+    }
+}

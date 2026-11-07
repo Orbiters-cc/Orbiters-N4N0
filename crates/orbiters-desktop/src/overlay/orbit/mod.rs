@@ -9,6 +9,8 @@
 //! showing or a key has just asked for one. Closed, nothing is painted, and no window or overlay shows.
 
 pub mod block;
+pub mod camera_frames;
+pub mod camera_track;
 pub mod detect;
 #[cfg(windows)]
 pub mod desktop;
@@ -2130,7 +2132,7 @@ impl Panels {
     /// Moves each part's spring on.
     pub fn step_springs(&mut self, dt: f32) {
         let caption = self.caption_shown();
-        for panel in self.list.iter_mut().filter(|p| matches!(p.zone, Zone::QmCaption | Zone::WheelCaption)) {
+        for panel in self.list.iter_mut().filter(|p| matches!(p.zone, Zone::QmCaption | Zone::WheelCaption | Zone::CameraCaption)) {
             panel.shown = caption && !self.peek;
         }
         for panel in self.list.iter_mut().chain(self.takeover.iter_mut()) {

@@ -21,6 +21,8 @@ use egui::{pos2, vec2, Pos2, Rect, Vec2};
 pub enum Around {
     Wheel,
     QuickMenu,
+    /// VRChat's camera panel, where it is seen (`camera_track`). In a headset alone.
+    Camera,
 }
 
 /// The wheel in a window of this client size: its centre and radius, in pixels.
@@ -155,6 +157,11 @@ impl Group {
 pub enum Zone {
     /// Over a corner, while a sheet is up: takes the sheet and all with it away for a moment, to reach VRChat's own menus, and brings them back as they were.
     SheetPeek,
+    /// Tiles down the left of VRChat's camera panel, and what they say over it.
+    CameraPeople,
+    CameraWorld,
+    CameraQr,
+    CameraCaption,
     /// Straight up, where the eyes go first: 3D world search.
     WheelWorlds,
     WheelYouTube,
@@ -217,16 +224,21 @@ impl Zone {
         [Zone::WingName, Zone::WingWorlds, Zone::WingYouTube, Zone::WingInstances, Zone::WingPictures, Zone::WingTalk, Zone::WingAll, Zone::WingPlaying, Zone::QmCaption];
 
     /// The zones around a menu.
+    pub const CAMERA: [Zone; 4] = [Zone::CameraPeople, Zone::CameraWorld, Zone::CameraQr, Zone::CameraCaption];
+
     pub fn around(around: Around) -> &'static [Zone] {
         match around {
             Around::Wheel => &Self::WHEEL,
             Around::QuickMenu => &Self::QUICK_MENU,
+            Around::Camera => &Self::CAMERA,
         }
     }
 
     /// Which menu its place is measured from.
     pub fn menu(self) -> Around {
-        if Self::WHEEL.contains(&self) || self == Zone::WheelHide {
+        if Self::CAMERA.contains(&self) {
+            Around::Camera
+        } else if Self::WHEEL.contains(&self) || self == Zone::WheelHide {
             Around::Wheel
         } else {
             Around::QuickMenu
@@ -272,7 +284,7 @@ impl Zone {
 
     /// Nothing is pressed here: the pointer and a click pass through to what is under it.
     pub fn passes_clicks(self) -> bool {
-        matches!(self, Zone::WheelCaption | Zone::QmCaption | Zone::WheelVeil | Zone::SheetHint)
+        matches!(self, Zone::WheelCaption | Zone::QmCaption | Zone::CameraCaption | Zone::WheelVeil | Zone::SheetHint)
     }
 
     /// Its place in the menu's units from the menu's centre, y down: around the wheel in hundredths of its radius (a 1280 x 720 window's pixels, nearly), around the Quick
@@ -307,6 +319,11 @@ impl Zone {
             // Under the tab row, where VRChat's own tooltip for what lies under the pointer appears.
             Zone::SheetHint => r(-300.0, 268.0, 300.0, 302.0),
             Zone::SheetPeek => r(362.0, -300.0, 512.0, -268.0),
+            // In the panel's own units (410 x 220, from its middle): clear of its left edge, as its row of buttons goes off to the right.
+            Zone::CameraPeople => r(-301.0, -110.0, -215.0, -40.0),
+            Zone::CameraWorld => r(-301.0, -35.0, -215.0, 35.0),
+            Zone::CameraQr => r(-301.0, 40.0, -215.0, 110.0),
+            Zone::CameraCaption => r(-301.0, -152.0, 120.0, -116.0),
             // N4N0's pages' own shape, 704 wide.
             Zone::Takeover => r(-352.0, -196.0, 352.0, 200.0),
             _ => unreachable!("the rings' cells return above"),
@@ -370,7 +387,7 @@ pub fn frame(around: Around, client: Vec2) -> (Pos2, f32) {
             let (center, radius) = wheel(client);
             (center, radius / 100.0)
         }
-        Around::QuickMenu => quick_menu(client),
+        Around::QuickMenu | Around::Camera => quick_menu(client),
     }
 }
 

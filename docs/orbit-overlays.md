@@ -106,6 +106,12 @@ Retro is N4N0's retro menu, in one colour. `orbit/retro.rs` is one pass over eve
 
 Taken in a hand, a small 3D view is out of the menu's: it stays when the menu closes and when the world changes, until its X or Hide. With the menu off an X floats above it. The Quick Menu opened again goes straight to the sheet it was on (Worlds or Pictures), to go on through them. While it lies across a menu it fades away, as SteamVR draws overlays over VRChat whatever their distance (`stereo::shows_over`); in a panel's hole it is meant to be there. The hand holding it zooms with its stick and moves its middle with its touchpad, along the ground: the splats are sorted from the start eye, so past it `Gpu::set_marks` leaves out what is out of reach. Its hint comes back whenever one is opened with none showing.
 
+## Around VRChat's camera
+
+In a headset, tiles for a 3D picture of people, of the world, and the QR code lie beside VRChat's camera panel. It can be grabbed and it can fly, and `/usercamera/Pose` is the camera's place and not its panel's, so it is found by sight, as Enzo proposed: while VRChat says its camera is open (and only then) its window is read ten times a second (`camera_frames.rs`, Windows Graphics Capture; the picture goes no further than the reading) for the panel's white X and white chevron (`camera_track.rs`). Only blobs that are white, shaped as those, and lying as the panel has them count. How far apart they are gives its size, the chevron's direction how it is turned. That goes back into the room through the left eye's projection and the head's pose when the frame was taken, in a plane facing the eye. It is a third menu for `vr.rs` (`Around::Camera`), so lasers, presses and painting are the same as elsewhere.
+
+**Not measured in a headset:** how much of the eye VRChat's window shows (taken as the whole width, `camera_track::Mirror`), the panel's size in metres (`PANEL_UNIT_M`: this only moves how far away the tiles seem) and how late a frame is (`CAMERA_FRAME_AGE`). A panel's turn away from the eye is not read, only its tilt in the picture: the tiles face the eye. On a white world behind the X it is lost, and the tiles go after 0.8 s. The window must not be minimized.
+
 ## Hide Orbiters
 
 While a sheet is up, a chip over a corner takes all of it away for a moment to reach VRChat's own menus, and brings it back as it was.

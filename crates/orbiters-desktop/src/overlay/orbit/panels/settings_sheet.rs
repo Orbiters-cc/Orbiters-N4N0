@@ -108,7 +108,7 @@ pub(super) fn language_name(facts: &Facts) -> String {
 /// What this sheet's things do, where they are pointed at.
 pub(super) fn settings_caption(action: Action) -> Option<(String, String)> {
     let (a, b) = match action {
-        Action::Settings => (tr("Settings"), tr("These menus' layout, colours and motion, the sound in VR and your language.")),
+        Action::Settings => (tr("Settings"), tr("These menus' layout, colours, motion, sound and language.")),
         Action::Set(Pick::Hue) => (tr("Any colour"), tr("Press on the bar, or drag along it.")),
         Action::Set(Pick::Sound(_)) => (tr("Sound in VR"), tr("The output Windows uses when SteamVR starts.")),
         Action::Set(Pick::Language(_)) => (tr("Language"), tr("Saved to your Orbiters account, and used on the website too.")),

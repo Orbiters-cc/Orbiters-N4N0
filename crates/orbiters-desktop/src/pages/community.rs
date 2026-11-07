@@ -434,11 +434,12 @@ impl State {
             if p.event.is_some() { theme::ACCENT } else { color },
             false,
         ) + 6.0;
-        let _ = x;
         if p.reaction_count > 0 {
             let t = Txt::new(p.reaction_count.to_string(), 10.5).weight(weight::SEMIBOLD).color(theme::FG);
             let tw = widgets::text_size(ui, &t).x;
-            let br = Rect::from_min_size(pos2(thumb.right() - 12.0 - tw - 34.0, thumb.top() + 12.0), vec2(tw + 34.0, 22.0));
+            // Under a badge that reaches it (French's "ÉVÉNEMENT", on a narrow card).
+            let left = thumb.right() - 12.0 - tw - 34.0;
+            let br = Rect::from_min_size(pos2(left, thumb.top() + if x > left { 38.0 } else { 12.0 }), vec2(tw + 34.0, 22.0));
             pa.rect_filled(br, theme::radius(11.0), theme::black(0.55));
             widgets::icon_fill(&pa, pos2(br.left() + 14.0, br.center().y), icons::HEART, 11.0, theme::REC);
             widgets::text(&pa, pos2(br.left() + 24.0, br.center().y), Align2::LEFT_CENTER, &t);

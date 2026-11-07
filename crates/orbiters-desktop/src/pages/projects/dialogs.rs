@@ -46,7 +46,7 @@ pub fn modals(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
         Modal::Setup => (
             if nano { icons::N4N0_MARK } else { icons::PERSON },
             if nano { tr("Add N4N0 to your avatar").into() } else { tr("Add My Avatar").into() },
-            names.map(|(a, p)| format!("{a} in {p}")).unwrap_or_default(),
+            names.map(|(a, p)| tr!("{avatar} in {project}", avatar = a, project = p)).unwrap_or_default(),
             580.0,
         ),
         Modal::Duplicate(path) => {

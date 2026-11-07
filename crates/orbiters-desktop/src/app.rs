@@ -400,7 +400,10 @@ impl App {
             if page == Page::Sessions && snap.storage.sessions > 0 {
                 let t = Txt::new(snap.storage.sessions.to_string(), 11.0).color(theme::FG_3);
                 let s = widgets::text_size(ui, &t);
-                let badge = Rect::from_min_size(pos2(r.right() - 12.0 - s.x - 16.0, r.center().y - 10.0), vec2(s.x + 16.0, 20.0));
+                // Off a long name (French's "Photos et captures"), closer to the row's end.
+                let name_end = x + 30.0 + widgets::text_size(ui, &Txt::new(label, 14.0).weight(weight::MEDIUM)).x;
+                let margin = if name_end + 4.0 > r.right() - 12.0 - s.x - 16.0 { 5.0 } else { 12.0 };
+                let badge = Rect::from_min_size(pos2(r.right() - margin - s.x - 16.0, r.center().y - 10.0), vec2(s.x + 16.0, 20.0));
                 p.rect_filled(badge, theme::radius(10.0), theme::white(0.07));
                 widgets::text(&p, badge.center(), Align2::CENTER_CENTER, &t);
             }

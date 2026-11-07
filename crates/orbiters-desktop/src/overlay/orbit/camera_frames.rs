@@ -173,17 +173,17 @@ mod imp {
         pub fn open() -> Result<Self, String> {
             let text = |what: &str, e: windows::core::Error| format!("{what}: {}", e.message());
             // SAFETY: a plain query by name.
-            let window = unsafe { FindWindowW(w!("UnityWndClass"), w!("VRChat")) }.map_err(|e| text("no VRChat window", e))?;
+            let window = unsafe { FindWindowW(w!("UnityWndClass"), w!("VRChat")) }.map_err(|e| text("no VRChat window", e))?; // i18n: not shown (only printed to the log, with `camera panel:`)
             let (mut device, mut context): (Option<ID3D11Device>, Option<ID3D11DeviceContext>) = (None, None);
             // SAFETY: the outputs are valid.
             unsafe { D3D11CreateDevice(None, D3D_DRIVER_TYPE_HARDWARE, HMODULE::default(), D3D11_CREATE_DEVICE_BGRA_SUPPORT, None, D3D11_SDK_VERSION, Some(&mut device), None, Some(&mut context)) }.map_err(|e| text("Direct3D", e))?;
-            let (device, context) = (device.ok_or("no Direct3D device")?, context.ok_or("no Direct3D context")?);
+            let (device, context) = (device.ok_or("no Direct3D device")?, context.ok_or("no Direct3D context")?); // i18n: not shown (only printed to the log, with `camera panel:`)
             let dxgi: IDXGIDevice = device.cast().map_err(|e| text("DXGI", e))?;
             // SAFETY: the DXGI device is alive for the call.
             let winrt: IDirect3DDevice = unsafe { CreateDirect3D11DeviceFromDXGIDevice(&dxgi) }.and_then(|d| d.cast()).map_err(|e| text("device", e))?;
-            let interop = windows::core::factory::<GraphicsCaptureItem, IGraphicsCaptureItemInterop>().map_err(|e| text("capture item", e))?;
+            let interop = windows::core::factory::<GraphicsCaptureItem, IGraphicsCaptureItemInterop>().map_err(|e| text("capture item", e))?; // i18n: not shown (only printed to the log, with `camera panel:`)
             // SAFETY: a window handle; one that is gone only fails.
-            let item: GraphicsCaptureItem = unsafe { interop.CreateForWindow(window) }.map_err(|e| text("capture item", e))?;
+            let item: GraphicsCaptureItem = unsafe { interop.CreateForWindow(window) }.map_err(|e| text("capture item", e))?; // i18n: not shown (only printed to the log, with `camera panel:`)
             let size = item.Size().map_err(|e| text("size", e))?;
             let pool = Direct3D11CaptureFramePool::CreateFreeThreaded(&winrt, DirectXPixelFormat::B8G8R8A8UIntNormalized, 2, size).map_err(|e| text("frames", e))?;
             let session = pool.CreateCaptureSession(&item).map_err(|e| text("session", e))?;

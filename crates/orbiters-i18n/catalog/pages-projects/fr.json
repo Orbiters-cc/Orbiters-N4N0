@@ -542,5 +542,6 @@
   "{version} · removed": "{version} · retiré",
   "{v} is not a version": "{v} n’est pas une version",
   "Checking required disk space…": "Vérification de l’espace disque nécessaire…",
-  "it took too long ({doing})": "cela a pris trop de temps ({doing})"
+  "it took too long ({doing})": "cela a pris trop de temps ({doing})",
+  "{avatar} in {project}": "{avatar} dans {project}"
 }

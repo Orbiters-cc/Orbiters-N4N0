@@ -167,7 +167,7 @@
   "Not running": "Cerrado",
   "Nothing beside the selection to add": "No hay nada al lado de la selección que agregar",
   "Nothing inside the sphere": "No hay nada dentro de la esfera",
-  "Nothing said yet: N4N0's answers show here.": "Aún no se ha dicho nada: las respuestas de N4N0 aparecen aquí.",
+  "Nothing said yet: N4N0's answers show here.": "Nada todavía: las respuestas de N4N0 aparecen aquí.",
   "Nothing there to select": "No hay nada que seleccionar ahí",
   "Nothing to take away": "No hay nada que quitar",
   "Now playing": "Reproduciendo",
@@ -415,5 +415,6 @@
   "splats\u0004Blur": "Desenfocar",
   "lamp\u0004Brightness": "Brillo",
   "tool\u0004Select": "Selección",
-  "the noun\u0004Recording": "Grabación"
+  "the noun\u0004Recording": "Grabación",
+  "stat tile\u0004Depth frames": "Profundidad"
 }

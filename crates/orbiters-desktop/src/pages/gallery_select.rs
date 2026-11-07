@@ -1151,7 +1151,7 @@ mod tests {
             assert_eq!(copied(&order, &keys(&["a", "b"])), "Copié\u{a0}: 2 photos");
             assert_eq!(copied(&order, &keys(&["a", "b", "c"])), "Copié\u{a0}: 2 photos et une capture 3D");
         });
-        in_language(Language::Ja, || assert_eq!(copied(&order, &keys(&["a", "b", "c"])), "2枚の写真と3Dキャプチャ1件をコピーしました"));
+        in_language(Language::Ja, || assert_eq!(copied(&order, &keys(&["a", "b", "c"])), "写真2枚と3Dキャプチャ1件をコピーしました"));
         in_language(Language::Es, || assert_eq!(copied(&order, &keys(&["c"])), "Copiado: una captura 3D"));
     }
 

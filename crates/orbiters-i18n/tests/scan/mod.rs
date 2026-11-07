@@ -359,7 +359,8 @@ pub fn looks_like_text(text: &str) -> bool {
         }
         let capitalized = first.is_uppercase() && rest.chars().all(|c| c.is_lowercase() || matches!(c, '\'' | '\u{2019}' | '-' | '.' | '!' | '?' | ':' | ',' | '…'));
         // A word set apart from a value (`{} avatars`, `{n} of`) or with a space left for what is glued to it (` friends`): a person reads those, whatever the case. A unit (`{} ms`) has its two letters.
-        let spoken = spaced && plain.chars().count() >= 3 && plain.chars().all(|c| c.is_lowercase() || c == '\'' || c == '\u{2019}' || c == '-');
+        let between = text.trim().starts_with('{') && text.trim().ends_with('}');
+        let spoken = spaced && (between || plain.chars().count() >= 3) && plain.chars().all(|c| c.is_lowercase() || c == '\'' || c == '\u{2019}' || c == '-');
         return capitalized || spoken;
     }
     // Several words: at least one real word in lower case, or a capitalized one.

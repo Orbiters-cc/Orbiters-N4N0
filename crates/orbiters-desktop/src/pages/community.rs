@@ -171,7 +171,7 @@ impl State {
                 if account_changed {
                     self.galleries = None;
                     self.galleries_job = Job::spawn(ctx, move || {
-                        let account = orbiters_core::account::read(server).ok_or_else(|| anyhow::anyhow!("Sign in to Orbiters in Settings first."))?;
+                        let account = orbiters_core::account::read(server).ok_or_else(|| anyhow::anyhow!("{}", tr("Sign in to Orbiters in Settings first.")))?;
                         Api::new(server).galleries(&account.token)
                     });
                 }

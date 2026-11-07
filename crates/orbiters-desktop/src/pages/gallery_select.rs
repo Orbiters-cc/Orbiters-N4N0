@@ -1049,7 +1049,7 @@ fn kept(stem: &Path) -> Option<PathBuf> {
 
 /// Fetches a picture into `stem` with the extension its bytes say (written whole, then renamed).
 fn fetch(from: &Remote, stem: &Path) -> anyhow::Result<PathBuf> {
-    let dir = stem.parent().ok_or_else(|| anyhow::anyhow!("no folder"))?;
+    let dir = stem.parent().ok_or_else(|| anyhow::anyhow!("{}", tr("no folder")))?;
     std::fs::create_dir_all(dir)?;
     let part = with_ext(stem, "part");
     let bytes = match from {
@@ -1061,11 +1061,11 @@ fn fetch(from: &Remote, stem: &Path) -> anyhow::Result<PathBuf> {
             bytes?
         }
         Remote::Gallery { server, asset, id, url } => {
-            let account = orbiters_core::account::read(*server).ok_or_else(|| anyhow::anyhow!("Sign in to Orbiters in Settings first."))?;
+            let account = orbiters_core::account::read(*server).ok_or_else(|| anyhow::anyhow!("{}", tr("Sign in to Orbiters in Settings first.")))?;
             let api = Api::new(*server);
             let renewed = api.picture_source(&account.token, *asset, *id, false).ok().unwrap_or_default();
             let links: Vec<String> = [renewed.full_url, renewed.src, Some(url.clone())].into_iter().flatten().filter(|u| u.starts_with("https://")).collect();
-            let mut last = anyhow::anyhow!("Orbiters has no link for this picture");
+            let mut last = anyhow::anyhow!("{}", tr("Orbiters has no link for this picture"));
             let mut got = None;
             for link in links {
                 match api.image(&link) {
@@ -1080,7 +1080,7 @@ fn fetch(from: &Remote, stem: &Path) -> anyhow::Result<PathBuf> {
         }
         Remote::Link(url) => Api::new(Server::Production).image(url)?,
     };
-    let format = image::guess_format(&bytes).map_err(|_| anyhow::anyhow!("Orbiters did not send a picture"))?;
+    let format = image::guess_format(&bytes).map_err(|_| anyhow::anyhow!("{}", tr("Orbiters did not send a picture")))?;
     let ext = format.extensions_str().first().copied().unwrap_or("png");
     let ext = if ext == "jpeg" { "jpg" } else { ext };
     let out = with_ext(stem, ext);
@@ -1097,12 +1097,12 @@ pub fn download(from: &Remote, stem: &Path) -> anyhow::Result<PathBuf> {
     };
     let dir = orbiters_core::paths::documents_root().join("Downloaded pictures");
     std::fs::create_dir_all(&dir)?;
-    let name = got.file_name().ok_or_else(|| anyhow::anyhow!("no name"))?.to_string_lossy().into_owned();
+    let name = got.file_name().ok_or_else(|| anyhow::anyhow!("{}", tr("no name")))?.to_string_lossy().into_owned();
     let (base, ext) = name.rsplit_once('.').unwrap_or((name.as_str(), "png"));
     let out = (1..1000)
         .map(|n| dir.join(if n == 1 { format!("{base}.{ext}") } else { format!("{base} ({n}).{ext}") }))
         .find(|p| !p.exists())
-        .ok_or_else(|| anyhow::anyhow!("too many copies already"))?;
+        .ok_or_else(|| anyhow::anyhow!("{}", tr("too many copies already")))?;
     std::fs::copy(&got, &out)?;
     Ok(out)
 }

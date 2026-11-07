@@ -594,7 +594,7 @@ impl Dialog {
                         .into_iter()
                         .map(|u| Friend { image: (!u.picture().is_empty()).then(|| u.picture().to_owned()), id: u.id, name: u.display_name })
                         .collect()),
-                    _ => Err("Unexpected friends response.".into()),
+                    _ => Err(tr("Unexpected friends response.").into()),
                 }
             });
         }

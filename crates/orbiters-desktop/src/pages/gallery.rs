@@ -1882,7 +1882,7 @@ fn instance_popover(ctx: &egui::Context, cx: &mut Cx, state: &mut State) {
                 use crate::controller::vrchat_data::{Request, Response};
                 match backend.vrchat_data(scope, Request::Instance { world, instance })? {
                     Response::Instance(alive) => Ok(alive),
-                    _ => Err("Unexpected instance response.".into()),
+                    _ => Err(tr("Unexpected instance response.").into()),
                 }
             });
         }

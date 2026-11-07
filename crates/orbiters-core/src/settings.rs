@@ -4,6 +4,15 @@ use crate::contracts::manifest::{CaptureMode, StorageQuality};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
+/// The FPS booster's slider, at Off until a person moves it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct BoosterSettings {
+    pub level: orbiters_booster::Level,
+    /// Moving to Avatars asks once what that does to how other people look.
+    pub avatars_told: bool,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
@@ -32,6 +41,8 @@ pub struct Settings {
     pub world_performance: bool,
     /// Walk boost: the play space moves along with the movement stick, so walking in VRChat goes faster.
     pub walk_boost: WalkBoostSettings,
+    /// The FPS booster's slider: remembered, and acting only while VRChat has the scene.
+    pub booster: BoosterSettings,
     /// How long a 3D picture's camera flight lasts (more seconds, more of the place seen).
     pub photo_3d: Photo3dLength,
     /// What a 3D picture is of, the last one chosen: what N4N0's menu and the Action Menu take, which have one button.
@@ -711,6 +722,7 @@ impl Default for Settings {
             n4n0: N4n0Settings::default(),
             world_performance: false,
             walk_boost: WalkBoostSettings::default(),
+            booster: BoosterSettings::default(),
             photo_3d: Photo3dLength::default(),
             photo_3d_mode: PictureMode::default(),
             photo_3d_timer: 0,

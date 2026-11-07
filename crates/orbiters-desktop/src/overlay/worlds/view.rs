@@ -340,6 +340,8 @@ pub struct View {
     small_read: Option<Instant>,
     wide_placement: Option<Placement>,
     quality: Quality,
+    /// Chosen on the panel's bar: the FPS booster leaves it.
+    person_chose_quality: bool,
     /// The width the shared textures have (0: none yet).
     width: u32,
     phase: Phase,
@@ -413,6 +415,7 @@ impl View {
             small_read: None,
             wide_placement: None,
             quality: Quality::default(),
+            person_chose_quality: false,
             width: 0,
             phase: Phase::Off,
             loaded: false,
@@ -474,6 +477,16 @@ impl View {
 
     pub fn quality(&self) -> Quality {
         self.quality
+    }
+
+    /// The FPS booster's step 2 on a PC short of graphics card: Light, for now, never saved. A choice the person makes on the
+    /// panel's bar wins from then on.
+    pub fn set_light_for_booster(&mut self, light: bool) {
+        if self.person_chose_quality {
+            return;
+        }
+        let wanted = if light { Quality::Performance } else { Quality::default() };
+        self.change_quality(wanted);
     }
 
     /// Starts the render thread early (its device and shaders take a moment), while the capture downloads.
@@ -724,6 +737,11 @@ impl View {
     }
 
     pub fn set_quality(&mut self, quality: Quality) {
+        self.person_chose_quality = true;
+        self.change_quality(quality);
+    }
+
+    fn change_quality(&mut self, quality: Quality) {
         if quality == self.quality {
             return;
         }

@@ -93,9 +93,56 @@ pub fn speak() {
     orbiters_ui::fonts::prefer_language(orbiters_i18n::language().tag());
 }
 
+/// Four busy threads and no GPU, until its file is gone or a few minutes passed, so that nothing ever has to kill it.
+#[cfg(windows)]
+fn test_load(running: Option<PathBuf>) {
+    const AT_MOST: std::time::Duration = std::time::Duration::from_secs(300);
+    let began = std::time::Instant::now();
+    let go_on = move || began.elapsed() < AT_MOST && running.as_ref().is_some_and(|file| file.exists());
+    let threads: Vec<_> = (0..4)
+        .map(|_| {
+            let go_on = go_on.clone();
+            std::thread::spawn(move || {
+                let mut value = 1u64;
+                while go_on() {
+                    for _ in 0..200_000 {
+                        value = value.wrapping_mul(0x0100_0000_01b3).rotate_left(7);
+                    }
+                    std::hint::black_box(value);
+                }
+            })
+        })
+        .collect();
+    for thread in threads {
+        let _ = thread.join();
+    }
+}
+
 #[cfg(windows)]
 fn main() {
     let raw: Vec<String> = std::env::args().skip(1).collect();
+    // What an uninstall left to do at the next sign-in, from a copy of this program: no window, and nothing else.
+    if raw.first().map(String::as_str) == Some(orbiters_booster::system::RESTORE_ARGUMENT) {
+        let copy = orbiters_booster::system::restorer_copy_path();
+        let store = orbiters_booster::system::store_for_user(&copy);
+        if orbiters_booster::system::run_restorer(&store) && store.remove_if_empty() {
+            // Nothing owed any more: this copy goes too, once it has ended.
+            if std::env::current_exe().ok().is_some_and(|me| me.to_string_lossy().eq_ignore_ascii_case(&copy.to_string_lossy())) {
+                // And its folder, empty by then, and the Orbiters folder if nothing else of Orbiters' is in it.
+                let folder = orbiters_booster::data_dir();
+                let parent = folder.parent().map(std::path::Path::to_path_buf);
+                let mut folders = vec![folder.as_path()];
+                folders.extend(parent.as_deref());
+                system::delete_after_exit_with(&copy, &folders);
+            }
+        }
+        return;
+    }
+    // Test builds' test load for the FPS booster's step 1, as a copy of this program under an allowlisted name.
+    if raw.first().map(String::as_str) == Some("--booster-test-load") {
+        test_load(raw.get(1).map(PathBuf::from));
+        return;
+    }
     speak();
     // For review: `--language fr` stays in that language whatever the computer and the app say (the screenshots in each language).
     if let Some(language) = raw.iter().position(|a| a == "--language").and_then(|i| raw.get(i + 1)).and_then(|tag| orbiters_i18n::normalize(tag)) {

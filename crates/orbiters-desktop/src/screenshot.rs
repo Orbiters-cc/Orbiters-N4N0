@@ -766,7 +766,7 @@ fn shots(args: &[String], picture_folders: Vec<PathBuf>) -> anyhow::Result<()> {
             open_detail: false,
             toasts: vec![],
             pointer: None,
-            scroll: 0.0,
+            scroll: 200.0,
             world: None,
             home: None,
             library: None,
@@ -1378,6 +1378,48 @@ fn shots(args: &[String], picture_folders: Vec<PathBuf>) -> anyhow::Result<()> {
             frames: 150,
             splash: false,
             open_detail: true,
+            toasts: vec![],
+            pointer: None,
+            scroll: 0.0,
+            world: None,
+            home: None,
+            library: None,
+        },
+        Scenario {
+            name: "settings-booster",
+            page: Page::Settings,
+            // The figures are sample data for the picture, not measured.
+            snapshot: {
+                use orbiters_booster::{engine, trial};
+                let mut s = idle.clone();
+                s.steamvr.running = true;
+                s.settings.booster.level = orbiters_booster::Level::Background;
+                s.booster.watching = true;
+                s.booster.overlay.streamer = true;
+                let report = &mut s.booster.overlay.report;
+                report.line = engine::Line::Kept;
+                report.limit = orbiters_booster::classify::Limit::Processor;
+                report.comparisons = vec![trial::Comparison {
+                    kind: trial::Kind::Programs,
+                    verdict: trial::Verdict::Kept,
+                    before_fps: 36.0,
+                    after_fps: 41.0,
+                    before_filled: 0.49,
+                    after_filled: 0.38,
+                    before_over_2x: 0.0,
+                    after_over_2x: 0.0,
+                    before_late_cpu: 0.4,
+                    after_late_cpu: 0.3,
+                    before_late_gpu: 0.0,
+                    after_late_gpu: 0.0,
+                    stalls_at_switch: 0,
+                    kept: true,
+                }];
+                s
+            },
+            frames: 90,
+            splash: false,
+            open_detail: false,
             toasts: vec![],
             pointer: None,
             scroll: 0.0,

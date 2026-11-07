@@ -184,6 +184,14 @@ pub enum ToService {
     WalkBoost {
         strength: f32,
     },
+    /// What the overlay concluded of the frames (`crate::booster`).
+    BoosterReport {
+        report: Box<crate::booster::OverlayReport>,
+    },
+    /// What the window or the overlay asks of the FPS booster.
+    Booster {
+        command: crate::booster::Command,
+    },
     /// The VRChat bridge: Stop, Pause, Resume, a new token.
     Bridge {
         command: crate::bridge::Command,

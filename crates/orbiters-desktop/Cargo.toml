@@ -13,6 +13,7 @@ path = "src/main.rs"
 orbiters-i18n = { workspace = true }
 orbiters-projects = { workspace = true }
 orbiters-core = { workspace = true }
+orbiters-booster = { workspace = true }
 orbiters-contracts = { workspace = true }
 orbiters-ui = { workspace = true }
 orbiters-sound = { workspace = true }

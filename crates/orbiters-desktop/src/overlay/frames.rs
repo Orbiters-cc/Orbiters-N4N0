@@ -13,6 +13,11 @@ const POLL: Duration = Duration::from_millis(200);
 
 pub struct FrameSampler {
     last_frame: Option<u32>,
+    /// The FPS booster's frames since the last turn, and the last one it was given.
+    fresh: Vec<orbiters_booster::frames::Frame>,
+    fresh_through: Option<u32>,
+    /// VRChat had the scene at the last read: the frames of a time out of it (a loading screen) are not given as its own.
+    fresh_scene: bool,
     intervals: Vec<f32>,
     since: Instant,
     polled: Option<Instant>,
@@ -25,6 +30,9 @@ impl FrameSampler {
     pub fn new(steamvr: &vr::Client) -> Self {
         Self {
             last_frame: None,
+            fresh: Vec::new(),
+            fresh_through: None,
+            fresh_scene: false,
             intervals: Vec::new(),
             since: Instant::now(),
             polled: None,
@@ -34,9 +42,16 @@ impl FrameSampler {
         }
     }
 
+    /// The frames [`FrameSampler::update`] just read, for the FPS booster, each once and oldest first. No second poller: this
+    /// is the same read.
+    pub fn fresh(&self) -> &[orbiters_booster::frames::Frame] {
+        &self.fresh
+    }
+
     /// Reads the frames VRChat showed since the last read (`vrchat_scene`: VRChat has the scene and is not loading),
     /// five times a second whatever the overlay loop's pace; a chunk once ten seconds were gathered.
     pub fn update(&mut self, steamvr: &vr::Client, vrchat_scene: bool) -> Option<FrameChunk> {
+        self.fresh.clear();
         if self.polled.is_some_and(|t| t.elapsed() < POLL) {
             return None;
         }
@@ -45,6 +60,25 @@ impl FrameSampler {
         let mut timings = [FrameTiming::default(); 64];
         let n = compositor.frame_timings(&mut timings);
         let newest = timings[..n].iter().map(|t| t.frame_index).max();
+        // The newest frame may still be presented again, and a frame presented again is what "filled in" counts: each goes
+        // to the booster once a newer one came, when its count is final.
+        let back_in_scene = vrchat_scene && !self.fresh_scene;
+        self.fresh_scene = vrchat_scene;
+        if let Some(newest) = newest.filter(|_| back_in_scene) {
+            // What the compositor still holds is from before: a loading screen's frames, not the scene's.
+            self.fresh_through = Some(newest.saturating_sub(1));
+        } else if let Some(newest) = newest.filter(|_| vrchat_scene) {
+            // The count starting over: another application has the scene now.
+            let through = self.fresh_through.filter(|last| *last < newest.saturating_add(1000));
+            for t in timings[..n].iter().filter(|t| t.frame_index < newest && through.is_none_or(|last| t.frame_index > last)) {
+                // Each frame once, its last entry having its final count.
+                match self.fresh.last_mut() {
+                    Some(last) if last.index == t.frame_index => *last = crate::overlay::booster::frame_of(t),
+                    _ => self.fresh.push(crate::overlay::booster::frame_of(t)),
+                }
+            }
+            self.fresh_through = Some(newest.saturating_sub(1).max(through.unwrap_or(0)));
+        }
         if vrchat_scene {
             for t in &timings[..n] {
                 let new = self.last_frame.is_none_or(|last| t.frame_index > last);

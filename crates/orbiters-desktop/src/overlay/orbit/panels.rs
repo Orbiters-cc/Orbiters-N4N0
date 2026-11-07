@@ -20,6 +20,9 @@ use orbiters_ui::{icons, widgets};
 use orbiters_core::settings::{MenuLook, OrbitLayout, OrbitSettings, VrMotion};
 use std::path::PathBuf;
 
+mod booster_sheet;
+pub use booster_sheet::{booster_level_at, BoosterFacts, BoosterPick};
+use booster_sheet::{booster_caption, booster_items, draw_booster, draw_booster_cell};
 mod settings_sheet;
 mod mic_sheet;
 pub use mic_sheet::MicTile;
@@ -137,6 +140,8 @@ pub mod look {
 pub enum Action {
     /// The sheet and all with it away for a moment, or back.
     Peek,
+    /// The FPS booster's sheet.
+    Booster,
     /// The sheet of settings for these menus, and something chosen on it.
     Settings,
     Set(Pick),
@@ -227,6 +232,8 @@ pub enum Sheet {
     Tracking,
     /// Microphones: what each hears, and which is used for what.
     Mics,
+    /// The FPS booster's slider, and what it measured.
+    Booster,
 }
 
 /// What can be chosen on the sheet of settings.
@@ -254,6 +261,8 @@ pub enum Pick {
     Smoothing(bool),
     /// Along a smoothing slider.
     SmoothingBar(Smoothed),
+    /// Something on the FPS booster's sheet.
+    Booster(BoosterPick),
 }
 
 /// The colours to choose from at a press.
@@ -472,6 +481,8 @@ pub struct Facts {
     pub tracking_note: String,
     /// The smoothing slider held, and where.
     pub smoothing_held: Option<(Smoothed, u16)>,
+    /// The FPS booster's sheet, made only while it shows.
+    pub booster: BoosterFacts,
     pub n4n0_says: Option<String>,
     pub wake_word: Option<String>,
     /// The ring's cells can be picked by the number keys: on the desktop's wheel.
@@ -556,6 +567,8 @@ pub enum Look {
     HeadBack,
     /// A smoothing slider.
     SmoothingBar(Smoothed),
+    /// A stop of the FPS booster's slider.
+    BoosterCell(orbiters_booster::Level),
     /// What plays in a strip's tile: its picture, its play or pause.
     PlayingSmall,
     /// Hides these parts, in so many words.
@@ -738,6 +751,9 @@ fn accessories(facts: &Facts) -> Vec<(Action, &'static str, &'static str)> {
     small.push((Action::Page(Target::WorldFeedback), icons::HEART, tr("World feedback")));
     small.push((Action::Page(Target::Qr), icons::QR_CODE, tr("QR code")));
     small.push((Action::Page(Target::Suggest), icons::CHAT_TEARDROP_TEXT, tr("Suggest")));
+    if orbiters_core::osc::VRCHAT_RUNS_HERE {
+        small.push((Action::Booster, icons::GAUGE, tr("FPS booster")));
+    }
     small.push((Action::Settings, icons::GEAR_SIX, tr("Settings")));
     small.push((Action::OpenApp, icons::N4N0_MARK, tr("Open Orbiters")));
     small
@@ -957,6 +973,7 @@ fn sheet_page_items(sheet: Sheet, facts: &Facts) -> Vec<Item> {
         Sheet::Settings => settings_items(facts),
         Sheet::Tracking => tracking_items(facts),
         Sheet::Mics => mic_items(facts),
+        Sheet::Booster => booster_items(facts),
         Sheet::Menu | Sheet::Worlds => Vec::new(),
     }
 }
@@ -1402,6 +1419,7 @@ fn sheet_says(facts: &Facts) -> &'static str {
         Some(Sheet::Settings) => tr("How these menus lie, move, sound and look."),
         Some(Sheet::Tracking) => tr("Less jitter, a little more lag, in milliseconds."),
         Some(Sheet::Mics) => tr("Speak: the one that moves is the one hearing you."),
+        Some(Sheet::Booster) => tr("Spend what helps your frames. Shows what it really gains."),
         Some(Sheet::All) => tr("Everything Orbiters can do from here."),
         _ => tr("Orbiters, beside VRChat's menu."),
     }
@@ -1418,6 +1436,7 @@ fn sheet_mark(facts: &Facts) -> (&'static str, Color32) {
         Some(Sheet::Settings) => (icons::GEAR_SIX, look::LABEL),
         Some(Sheet::Mics) => (icons::MICROPHONE, look::LABEL),
         Some(Sheet::Tracking) => (icons::VIRTUAL_REALITY, tool_tint(Action::Page(Target::Tracking))),
+        Some(Sheet::Booster) => (icons::GAUGE, look::LABEL),
         Some(Sheet::All) => (icons::SQUARES_FOUR, look::LABEL),
         Some(Sheet::Menu) if facts.sheet_title == "YouTube" => (icons::YOUTUBE_LOGO, tool_tint(Action::Page(Target::YouTube))),
         _ => (icons::N4N0_MARK, look::LABEL),
@@ -1431,7 +1450,7 @@ pub fn hit(items: &[Item], p: Pos2) -> Option<usize> {
 
 /// What the caption says of what is pointed at, in words for someone who has never seen any of this: a title and what it does.
 pub fn caption(action: Action, facts: &Facts) -> Option<(String, String)> {
-    if let Some(said) = settings_caption(action).or_else(|| tracking_caption(action)) {
+    if let Some(said) = settings_caption(action).or_else(|| tracking_caption(action)).or_else(|| booster_caption(action)) {
         return Some(said);
     }
     let (a, b): (String, String) = match action {
@@ -1475,7 +1494,7 @@ pub fn caption(action: Action, facts: &Facts) -> Option<(String, String)> {
         Action::Page(Target::Qr) => (tr("QR code").into(), tr("Open a link shown in the world, through VRChat's camera.").into()),
         Action::Page(Target::Suggest) => (tr("Suggest").into(), tr("Tell the Orbiters team what you would like.").into()),
         Action::Page(_) => return None,
-        Action::Set(_) => return None,
+        Action::Set(_) | Action::Booster => return None,
         Action::FastWalk => (tr("Fast walk").into(), if let Some(words) = facts.fast_walk_lesser.filter(|_| facts.fast_walk) { tr(words).to_string() } else if facts.fast_walk { tr("On: you walk faster. Press to turn it off.").into() } else { tr("Walk faster than VRChat lets you.").to_string() }),
         Action::PlayPause => match &facts.music {
             Some((title, playing)) => (title.clone(), if *playing { tr("Playing on your computer. Press to pause.").into() } else { tr("Paused on your computer. Press to play.").to_string() }),
@@ -1781,6 +1800,9 @@ pub fn paint_sheet(p: &Painter, sheet: Sheet, facts: &Facts, hover: Option<usize
     }
     if sheet == Sheet::Tracking {
         draw_tracking(p, facts);
+    }
+    if sheet == Sheet::Booster {
+        draw_booster(p, facts);
     }
     if sheet == Sheet::Instances && facts.worlds_visited.is_empty() {
         widgets::icon(p, page.center() - vec2(0.0, 30.0), icons::CLOCK, 54.0, look::MUTED);
@@ -2438,6 +2460,7 @@ fn draw(p: &Painter, zone: Zone, item: &Item, facts: &Facts, hovered: bool, pres
             p.text(pos2(left + 34.0, rect.center().y), Align2::LEFT_CENTER, label, font, ink);
         }
         Look::SmoothingBar(which) => draw_smoothing_bar(p, rect, which, facts, hovered),
+        Look::BoosterCell(level) => draw_booster_cell(p, rect, level, facts, hovered, pressed),
         Look::SoundName => draw_stepper_name(p, rect, icons::SPEAKER_HIGH, sound_name(facts)),
         Look::LanguageName => draw_stepper_name(p, rect, icons::GLOBE, &language_name(facts)),
         Look::Swatch(i) => {

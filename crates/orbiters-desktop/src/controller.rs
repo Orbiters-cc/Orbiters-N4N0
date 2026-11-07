@@ -133,6 +133,8 @@ pub struct Controller {
     bridge: Mutex<Option<Arc<crate::bridge::keeper::Keeper>>>,
     /// The bridge restarts VRChat between two worlds: the moments it is closed start no reconstruction.
     bridge_holds_reconstructions: AtomicBool,
+    /// What the FPS booster holds back, and all it keeps here (controller/booster.rs).
+    pub(crate) booster: booster::Hub,
     /// Why a session's last reconstruction failed, for the VRChat bridge: a toast reaches no agent.
     reconstruction_failures: Mutex<std::collections::HashMap<PathBuf, String>>,
     /// What this member added to the Map explorer, and the uploads' numbering (controller/maps.rs).
@@ -297,6 +299,8 @@ pub type Shared = Arc<Controller>;
 
 mod account;
 mod around;
+mod booster;
+pub(crate) use booster::{dev_build as booster_dev_build, restore_at_sign_in as booster_restore_at_sign_in, store as booster_store};
 mod bridge_game;
 mod burst;
 #[cfg(all(test, windows))]
@@ -358,6 +362,7 @@ impl Controller {
             vrchat_login: Mutex::new(vrchat_login::Runtime::default()),
             bridge: Mutex::new(None),
             bridge_holds_reconstructions: AtomicBool::new(false),
+            booster: Default::default(),
             reconstruction_failures: Mutex::default(),
             maps_mine: Mutex::new(None),
             upload_serial: AtomicU64::new(0),
@@ -1684,6 +1689,10 @@ impl Controller {
         if self.bridge_holds_reconstructions.load(Ordering::Relaxed) {
             return true;
         }
+        // The FPS booster's step 2. Headset off for a minute is a break here too: nothing has to wait through it.
+        if self.booster.holds_reconstructions() && !self.headset_on_break() {
+            return true;
+        }
         self.settings().reconstruct_while_playing == WhilePlaying::AfterVrchat && self.snapshot.lock().unwrap().vrchat.runs_here() && !self.headset_on_break()
     }
 
@@ -2076,6 +2085,9 @@ impl Controller {
     /// preparation of a 970k-splat capture made 17 % of a stand-in game's 90 Hz frames late at low queue priority as at
     /// normal priority (docs/capture-detail-2026-10-29.md), so it waits for VRChat to close (a share prepares at once).
     fn next_upload_prep(self: &Shared) {
+        if self.booster.holds_preparing() {
+            return;
+        }
         let (vrchat, steamvr) = {
             let s = self.snapshot.lock().unwrap();
             (s.vrchat.runs_here(), s.steamvr.running)

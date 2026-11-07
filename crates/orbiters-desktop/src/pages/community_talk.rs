@@ -14,6 +14,7 @@ use egui::{pos2, vec2, Align2, CornerRadius, CursorIcon, Id, Order, Rect, Sense,
 use orbiters_core::account::{Api, Server};
 use orbiters_core::community;
 use orbiters_core::gallery_talk::{Reaction, Reactions, Replies, Reply};
+use orbiters_i18n::{mark, tr, tr_n};
 use orbiters_ui::anim::{self, Spring};
 use orbiters_ui::theme::{self, weight, Txt};
 use orbiters_ui::widgets::{self, Button, Size, Variant};
@@ -104,7 +105,7 @@ impl Talk {
 /// Reads a picture's replies and reactions (those it has) on a worker.
 fn read(server: Server, id: u64, replies: bool, reactions: bool) -> Said {
     let Some(account) = orbiters_core::account::read(server) else {
-        let signed_out = || "Sign in to Orbiters in Settings first.".to_string();
+        let signed_out = || mark("Sign in to Orbiters in Settings first.").to_string();
         return Said {
             replies: if replies { Phase::Failed(signed_out()) } else { Phase::None },
             reactions: if reactions { Phase::Failed(signed_out()) } else { Phase::None },
@@ -128,8 +129,8 @@ fn read(server: Server, id: u64, replies: bool, reactions: bool) -> Said {
 /// answers 401 or 404 without the picture's own words.
 fn why(e: &anyhow::Error) -> String {
     match community::Refused::of(e) {
-        Some(r) if r.status == 401 && r.code.is_none() => "Orbiters does not let this app read them yet.".into(),
-        Some(r) if r.status == 404 && r.message != "Image no longer available." => "Orbiters does not have them for this picture yet.".into(),
+        Some(r) if r.status == 401 && r.code.is_none() => mark("Orbiters does not let this app read them yet.").into(),
+        Some(r) if r.status == 404 && r.message != mark("Image no longer available.") => mark("Orbiters does not have them for this picture yet.").into(),
         Some(r) => r.message.clone(),
         None => e.to_string(),
     }
@@ -165,7 +166,7 @@ fn row(r: &Reply, now: u64, server: Server) -> Row {
         (if picture { icons::IMAGE } else { icons::LINK_SIMPLE }, f.name.clone())
     });
     Row {
-        name: if r.author.name.trim().is_empty() { "Discord member".into() } else { r.author.name.trim().to_string() },
+        name: if r.author.name.trim().is_empty() { tr("Discord member").into() } else { r.author.name.trim().to_string() },
         avatar: r.author.avatar().map(str::to_owned),
         text: r.text(),
         when: if at > 0 { format::relative_time(at, now.max(at)) } else { String::new() },
@@ -178,16 +179,12 @@ fn row(r: &Reply, now: u64, server: Server) -> Row {
 
 /// "1 reply", "5 replies".
 pub fn heading(total: u32) -> String {
-    if total == 1 {
-        "1 reply".into()
-    } else {
-        format!("{total} replies")
-    }
+    tr_n("{count} reply", "{count} replies", total as u64)
 }
 
 /// What a reaction's hover says: who, then "reacted with :orbit:".
 pub fn hover_lines(r: &Reaction) -> (String, String) {
-    (r.who(NAMES_SHOWN), format!("reacted with {}", r.emoji.label()))
+    (r.who(NAMES_SHOWN), tr!("reacted with {emoji}", emoji = r.emoji.label()))
 }
 
 fn now() -> u64 {
@@ -260,7 +257,7 @@ fn reaction_pills(ui: &mut Ui, wid: Id, p: &community::Picture, phase: Option<&P
             if failed {
                 let tip = Rect::from_min_size(r.min, r.size());
                 if hover > 0.01 {
-                    tooltip(&ctx, id, tip, hover, None, "Who reacted could not be read", "Click to try again", pictures);
+                    tooltip(&ctx, id, tip, hover, None, tr("Who reacted could not be read"), tr("Click to try again"), pictures);
                 }
                 if widgets::activated(&resp.on_hover_cursor(CursorIcon::PointingHand)) {
                     retry = true;
@@ -351,7 +348,7 @@ fn replies_list(ui: &mut Ui, wid: Id, p: &community::Picture, phase: Option<&Pha
     if let Some(link) = ready.and_then(|r| r.discord_link()) {
         let br = Rect::from_min_size(pos2(head.right() - 32.0, head.top()), vec2(32.0, 32.0));
         let id = wid.with("replies-discord");
-        let resp = ui.interact(br, id, Sense::click()).on_hover_text("Open the message on Discord").on_hover_cursor(CursorIcon::PointingHand);
+        let resp = ui.interact(br, id, Sense::click()).on_hover_text(tr("Open the message on Discord")).on_hover_cursor(CursorIcon::PointingHand);
         let hover = anim::toggle(&ctx, id.with("hover"), resp.hovered(), Spring::SNAPPY);
         pa.circle_filled(br.center(), 16.0, theme::white(0.04 + 0.08 * hover));
         widgets::icon_fill(&pa, br.center(), icons::DISCORD_LOGO, 17.0, DISCORD);
@@ -363,8 +360,8 @@ fn replies_list(ui: &mut Ui, wid: Id, p: &community::Picture, phase: Option<&Pha
     match phase {
         Some(Phase::Failed(why)) => {
             let (r, _) = ui.allocate_exact_size(vec2(w, 32.0), Sense::hover());
-            let said = Txt::new(format!("The replies could not be read: {why}"), 12.5).color(theme::FG_2);
-            let b = Button::new("Try again").icon(icons::ARROW_CLOCKWISE).size(Size::Sm).variant(Variant::Secondary).id_salt(wid.with("replies-retry"));
+            let said = Txt::new(tr!("The replies could not be read: {why}", why = tr(why)), 12.5).color(theme::FG_2);
+            let b = Button::new(tr("Try again")).icon(icons::ARROW_CLOCKWISE).size(Size::Sm).variant(Variant::Secondary).id_salt(wid.with("replies-retry"));
             let bw = b.desired_width(ui);
             widgets::text_truncated(ui.painter(), pos2(r.left(), r.center().y), Align2::LEFT_CENTER, &said, w - bw - 12.0);
             return super::sharing::pressed(b.show_at(ui, Rect::from_min_size(pos2(r.right() - bw, r.top()), vec2(bw, 32.0))));
@@ -379,7 +376,7 @@ fn replies_list(ui: &mut Ui, wid: Id, p: &community::Picture, phase: Option<&Pha
             if replies.more() > 0 {
                 if let Some(link) = replies.discord_link() {
                     ui.add_space(10.0);
-                    let t = Txt::new(format!("{} more on Discord", replies.more()), 12.5).weight(weight::SEMIBOLD).color(theme::ACCENT);
+                    let t = Txt::new(tr!("{count} more on Discord", count = replies.more()), 12.5).weight(weight::SEMIBOLD).color(theme::ACCENT);
                     let tw = widgets::text_size(ui, &t).x;
                     let (r, _) = ui.allocate_exact_size(vec2(w, 20.0), Sense::hover());
                     let lr = Rect::from_min_size(pos2(r.left() + AVATAR + 10.0, r.top()), vec2(tw, 20.0));
@@ -432,7 +429,7 @@ fn reply(ui: &mut Ui, id: Id, row: &Row, pictures: &mut Pictures, open_url: &mut
     let nr = widgets::text_truncated(&pa, pos2(r.left() + x, r.top() + 8.0), Align2::LEFT_CENTER, &name, bubble_w * 0.6);
     if let Some(profile) = &row.profile {
         for (part, rect) in [("avatar", ar), ("name", nr)] {
-            let resp = ui.interact(rect, id.with(part), Sense::click()).on_hover_text(format!("{} on Orbiters", row.name)).on_hover_cursor(CursorIcon::PointingHand);
+            let resp = ui.interact(rect, id.with(part), Sense::click()).on_hover_text(tr!("{name} on Orbiters", name = row.name)).on_hover_cursor(CursorIcon::PointingHand);
             if part == "name" && resp.hovered() {
                 pa.hline(nr.x_range(), nr.bottom(), egui::Stroke::new(1.0, theme::FG));
             }
@@ -441,7 +438,7 @@ fn reply(ui: &mut Ui, id: Id, row: &Row, pictures: &mut Pictures, open_url: &mut
             }
         }
     }
-    let when = if row.edited { format!("{} · edited", row.when) } else { row.when.clone() };
+    let when = if row.edited { tr!("{when} · edited", when = row.when) } else { row.when.clone() };
     if !when.trim().is_empty() {
         let tr = widgets::text(&pa, pos2(nr.right() + 8.0, r.top() + 8.0), Align2::LEFT_CENTER, &Txt::new(when, 11.5).color(theme::FG_3));
         if !row.when_full.is_empty() {
@@ -527,6 +524,17 @@ mod tests {
         assert_eq!(hover_lines(&r), ("Alex, Mika, Robin and 1 other".into(), "reacted with :orbit:".into()));
         let many = Reaction { count: 100, users: (0..100).map(|i| Person { name: format!("m{i}"), ..Default::default() }).collect(), ..r };
         assert!(hover_lines(&many).0.ends_with("m59 and 40 others"), "the first {NAMES_SHOWN} by name");
+    }
+
+    /// Counts take each language's plural and what a reaction says is a phrase of its own, in the language of the moment.
+    #[test]
+    fn replies_and_reactions_speak_the_language() {
+        use orbiters_i18n::{in_language, Language};
+        in_language(Language::Fr, || {
+            assert_eq!((heading(0), heading(1), heading(2)), ("0 réponse".to_string(), "1 réponse".to_string(), "2 réponses".to_string()));
+        });
+        in_language(Language::Ja, || assert_eq!(heading(5), "返信5件"));
+        in_language(Language::Es, || assert_eq!((heading(0), heading(1)), ("0 respuestas".to_string(), "1 respuesta".to_string())));
     }
 
     #[test]

@@ -6,6 +6,7 @@
 use super::reconstruct_again::{self as again, Offer};
 use super::{Cx, Job};
 use crate::controller::shares::{self as controller, Entry, Operation as Action, Outcome, Request, Stage};
+use orbiters_i18n::{mark, tr, tr_n};
 use egui::{pos2, vec2, Align2, Color32, Id, Order, Rect, Sense, Ui, UiBuilder};
 use orbiters_core::{
     account::Server,
@@ -381,11 +382,11 @@ impl Dialog {
         }
         if state == "updated" {
             self.entry.uploaded_edits = self.entry.edits.clone().and_then(Result::ok);
-            self.notice = Some(UPDATED_NOTICE.into());
+            self.notice = Some(tr(UPDATED_NOTICE).into());
         }
         if state == "update-failed" {
             self.last = Some(Action::Update);
-            self.error = Some(format!("Not updated: Orbiters could not be reached. {}", controller::KEPT));
+            self.error = Some(tr!("Not updated: Orbiters could not be reached. {kept}", kept = tr(controller::KEPT)));
         }
         // Reconstructed again since it was shared: Update the shared capture, saying why.
         if state == "reconstructed" {
@@ -414,11 +415,11 @@ impl Dialog {
             }
         }
         if state == "error" {
-            self.error = Some("Orbiters could not be reached. Your capture is still on this computer.".into());
+            self.error = Some(tr("Orbiters could not be reached. Your capture is still on this computer.").into());
             self.last = Some(Action::Share(Share { public: true, ..Default::default() }));
         }
         if state == "done" {
-            self.notice = Some("Shared publicly: it is on Orbiters now.".into());
+            self.notice = Some(tr("Shared publicly: it is on Orbiters now.").into());
             if let Some(item) = self.entry.remote.as_mut() {
                 item.public = true;
             }
@@ -452,7 +453,7 @@ impl Dialog {
             let new = state.result.is_some() && state.result != before;
             self.entry.set_session(state);
             if new {
-                self.notice = Some(if before.is_some() { "Reconstructed: View in 3D shows the new one" } else { "Reconstructed: View in 3D shows it, and it can be shared" }.into());
+                self.notice = Some(if before.is_some() { tr("Reconstructed: View in 3D shows the new one") } else { tr("Reconstructed: View in 3D shows it, and it can be shared") }.into());
             }
         }
         let Some(controller::Local::Session(dir)) = self.entry.local.as_ref().filter(|_| !self.fixture_active) else { return };
@@ -593,7 +594,7 @@ impl Dialog {
                         .into_iter()
                         .map(|u| Friend { image: (!u.picture().is_empty()).then(|| u.picture().to_owned()), id: u.id, name: u.display_name })
                         .collect()),
-                    _ => Err("Unexpected friends response.".into()),
+                    _ => Err(tr("Unexpected friends response.").into()),
                 }
             });
         }
@@ -684,13 +685,13 @@ impl Dialog {
             Outcome::Shared(Shared::Item { item }) | Outcome::Unshared(item) => {
                 let was_public = self.entry.remote.as_ref().is_some_and(|i| i.public);
                 let notice = match &self.last {
-                    Some(Action::Share(s)) if s.public && !s.recipients.is_empty() => "Shared publicly and with your friends".to_string(),
-                    Some(Action::Share(s)) if s.public => "Shared publicly: it is on Orbiters now".to_string(),
-                    Some(Action::Share(s)) => format!("Shared with {} friend{}", s.recipients.len(), if s.recipients.len() == 1 { "" } else { "s" }),
-                    Some(Action::Unshare(u)) if u.all => "Not shared any more".to_string(),
-                    Some(Action::Unshare(u)) if u.public && was_public => "Not public any more".to_string(),
-                    Some(Action::Unshare(_)) => "Sharing updated".to_string(),
-                    _ => "Sharing updated".to_string(),
+                    Some(Action::Share(s)) if s.public && !s.recipients.is_empty() => tr("Shared publicly and with your friends").to_string(),
+                    Some(Action::Share(s)) if s.public => tr("Shared publicly: it is on Orbiters now").to_string(),
+                    Some(Action::Share(s)) => tr_n("Shared with {count} friend", "Shared with {count} friends", s.recipients.len() as u64),
+                    Some(Action::Unshare(u)) if u.all => tr("Not shared any more").to_string(),
+                    Some(Action::Unshare(u)) if u.public && was_public => tr("Not public any more").to_string(),
+                    Some(Action::Unshare(_)) => tr("Sharing updated").to_string(),
+                    _ => tr("Sharing updated").to_string(),
                 };
                 self.entry.remote = Some(item);
                 self.changed = true;
@@ -711,30 +712,32 @@ impl Dialog {
                 if let Some(entry) = self.rollback.take() {
                     self.entry = entry;
                 }
-                let from =
-                    self.entry.remote.as_ref().and_then(|i| i.from.as_ref()).map(|p| p.name.clone()).unwrap_or_else(|| "the person who shared it".into());
-                self.notice = Some(format!("Request sent: {from} decides"));
+                let from = self.entry.remote.as_ref().and_then(|i| i.from.as_ref()).map(|p| p.name.clone());
+                self.notice = Some(match from {
+                    Some(from) => tr!("Request sent: {from} decides", from = from),
+                    None => tr("Request sent: the person who shared it decides").to_string(),
+                });
             }
             Outcome::Updated { item, edits } => {
                 self.entry.remote = Some(item);
                 self.entry.uploaded_edits = Some(edits);
                 self.changed = true;
                 self.rollback = None;
-                self.notice = Some(UPDATED_NOTICE.into());
+                self.notice = Some(tr(UPDATED_NOTICE).into());
                 if std::mem::take(&mut self.copy_after) {
                     let server = if cx.snap.settings.development { Server::Development } else { Server::Production };
                     self.copy_link(ctx, server);
                 }
             }
             Outcome::Answered(request) => {
-                self.notice = Some("Share request answered".into());
+                self.notice = Some(tr("Share request answered").into());
                 if let Some(item) = request.item {
                     self.entry.remote = Some(item);
                     self.changed = true;
                 }
             }
             Outcome::Downloaded(path) => {
-                self.notice = Some(format!("Saved to {}", path.display()));
+                self.notice = Some(tr!("Saved to {path}", path = path.display()));
                 if let Some(item) = self.entry.remote.as_ref().filter(|i| i.kind == shares::Kind::Capture) {
                     if let Some(gpu) = cx.gpu {
                         self.viewer = Some(super::splats::Viewer::open_shared(
@@ -911,7 +914,7 @@ impl Dialog {
                 cu.disable();
             }
             self.picture_overlays(&mut cu, cx, picture, busy, full, &mut act);
-            if viewer::close_button(&mut cu, f.rect, "Close") {
+            if viewer::close_button(&mut cu, f.rect, tr("Close")) {
                 close = true;
             }
             // Edit, on the close button's row: the photo editor for a picture, Edit in 3D for a 3D capture.
@@ -924,8 +927,8 @@ impl Dialog {
             // The items before and after it, over the picture's sides.
             let can = self.can_navigate() || self.fixture_active;
             for (dir, glyph, label, x, there) in [
-                (-1i64, icons::CARET_LEFT, "Previous", picture.left() + 16.0 + 20.0, self.neighbours.0),
-                (1, icons::CARET_RIGHT, "Next", picture.right() - 16.0 - 20.0, self.neighbours.1),
+                (-1i64, icons::CARET_LEFT, tr("Previous"), picture.left() + 16.0 + 20.0, self.neighbours.0),
+                (1, icons::CARET_RIGHT, tr("Next"), picture.right() - 16.0 - 20.0, self.neighbours.1),
             ] {
                 if !there || full > 0.5 {
                     continue;
@@ -1000,21 +1003,21 @@ impl Dialog {
     /// What the window's Edit opens, on what it can open: a picture's photo editor, a reconstructed capture's Edit in 3D.
     /// What is merely shared with you has its 3D view (View in 3D, once downloaded) and Edit in 3D in there.
     fn edit_button(&self, cx: &Cx) -> Option<Button<'static>> {
-        let b = Button::new("Edit").icon(icons::SLIDERS_HORIZONTAL).variant(Variant::Glass).id_salt("capture-window-edit");
+        let b = Button::new(tr("Edit")).icon(icons::SLIDERS_HORIZONTAL).variant(Variant::Glass).id_salt("capture-window-edit");
         if matches!(self.entry.local, Some(controller::Local::Session(_))) {
             let can = cx.gpu.is_some();
-            return self.entry.ready.then(|| b.enabled(can).hint(if can { "Edit in 3D: this capture's 3D view with the photo editor's layers" } else { "Edit in 3D takes a graphics card this window does not have" }));
+            return self.entry.ready.then(|| b.enabled(can).hint(if can { tr("Edit in 3D: this capture's 3D view with the photo editor's layers") } else { tr("Edit in 3D takes a graphics card this window does not have") }));
         }
-        super::editor::source_of(self.layers.layered(&self.entry)).is_some().then_some(b.hint("Edits a copy in the photo editor: this picture stays as it is"))
+        super::editor::source_of(self.layers.layered(&self.entry)).is_some().then_some(b.hint(tr("Edits a copy in the photo editor: this picture stays as it is")))
     }
 
     /// Over the picture: what it is (top left), its 3D view or folder (bottom right), a share's or a reconstruction's
     /// progress (bottom edge).
     fn picture_overlays(&mut self, ui: &mut Ui, cx: &Cx, picture: Rect, busy: bool, full: f32, act: &mut Option<Act>) {
         let p = ui.painter().clone();
-        let (glyph, label, color) = if self.entry.is_picture() { (icons::IMAGES, "Picture", theme::FG) } else { (icons::CUBE, "3D capture", theme::ACCENT) };
+        let (glyph, label, color) = if self.entry.is_picture() { (icons::IMAGES, tr("Picture"), theme::FG) } else { (icons::CUBE, tr("3D capture"), theme::ACCENT) };
         // A multi-layer picture's chosen layer says which.
-        let layer = self.layers.chosen_name().map(|n| format!("{n} layer"));
+        let layer = self.layers.chosen_name().map(|n| tr!("{name} layer", name = n));
         let (glyph, label) = match &layer {
             Some(l) => (icons::STACK, l.as_str()),
             None => (glyph, label),
@@ -1060,7 +1063,7 @@ impl Dialog {
             let r = Rect::from_min_size(picture.max - vec2(16.0 + 32.0, 16.0 + 32.0), vec2(32.0, 32.0));
             let mut fu = ui.new_child(UiBuilder::new().max_rect(r).id_salt("capture-window-unfull"));
             fu.multiply_opacity(((full - 0.5) * 2.0).clamp(0.0, 1.0));
-            let resp = widgets::IconButton::new(icons::CORNERS_IN, "Back to its details").size(32.0, 15.0).backdrop(theme::black(0.5)).show_at(&mut fu, r);
+            let resp = widgets::IconButton::new(icons::CORNERS_IN, tr("Back to its details")).size(32.0, 15.0).backdrop(theme::black(0.5)).show_at(&mut fu, r);
             if pressed(resp) {
                 *act = Some(Act::Full);
             }
@@ -1075,11 +1078,11 @@ impl Dialog {
         if !self.entry.is_picture() {
             let (label, enabled, hint) = match &self.entry.local {
                 Some(controller::Local::Session(_)) if !self.entry.ready => {
-                    ("View in 3D", false, Some("Reconstruct it first: the 3D view comes from its splats"))
+                    (tr("View in 3D"), false, Some(tr("Reconstruct it first: the 3D view comes from its splats")))
                 }
-                Some(controller::Local::Session(_)) => ("View in 3D", cx.gpu.is_some(), None),
-                _ if busy && matches!(self.last, Some(Action::Download)) => ("Downloading…", false, None),
-                _ => ("View in 3D", !busy, None),
+                Some(controller::Local::Session(_)) => (tr("View in 3D"), cx.gpu.is_some(), None),
+                _ if busy && matches!(self.last, Some(Action::Download)) => (tr("Downloading…"), false, None),
+                _ => (tr("View in 3D"), !busy, None),
             };
             let mut b = Button::new(label).icon(icons::CUBE_FOCUS).variant(Variant::Glass).size(Size::Sm).enabled(enabled).id_salt("capture-window-3d");
             if let Some(h) = hint {
@@ -1094,7 +1097,7 @@ impl Dialog {
         }
         if let Some(local) = &self.entry.local {
             let r = Rect::from_min_size(pos2(right - 32.0, bottom - 32.0), vec2(32.0, 32.0));
-            let label = if matches!(local, controller::Local::Picture(_)) { "Show in its folder" } else { "Open its folder" };
+            let label = if matches!(local, controller::Local::Picture(_)) { tr("Show in its folder") } else { tr("Open its folder") };
             let resp = widgets::IconButton::new(icons::FOLDER_OPEN, label).size(32.0, 15.0).backdrop(theme::black(0.5)).show_at(ui, r);
             if pressed(resp) {
                 *act = Some(Act::Folder);
@@ -1105,11 +1108,11 @@ impl Dialog {
         // one has Reconstruct to share among its actions).
         if let Some(o) = offer.filter(|o| self.entry.ready || matches!(o, Offer::Running { .. } | Offer::Paused { .. } | Offer::Waiting { .. })) {
             let (glyph, hint, pressed_does) = match o {
-                Offer::Start { .. } => (icons::MAGIC_WAND, "Trains a new 3D view from its frames: it replaces this one once it is done", Some(Act::Reconstruct)),
-                Offer::Blocked { reason, .. } => (icons::MAGIC_WAND, reason, None),
-                Offer::Running { .. } => (icons::X, "Stops it: the 3D view stays as it is", Some(Act::StopReconstruct)),
-                Offer::Paused { .. } => (icons::X, "Stops it, and what it has done so far goes: the 3D view stays as it is", Some(Act::StopReconstruct)),
-                Offer::Waiting { hint } => (icons::X, hint, Some(Act::Unqueue)),
+                Offer::Start { .. } => (icons::MAGIC_WAND, tr("Trains a new 3D view from its frames: it replaces this one once it is done"), Some(Act::Reconstruct)),
+                Offer::Blocked { reason, .. } => (icons::MAGIC_WAND, tr(reason), None),
+                Offer::Running { .. } => (icons::X, tr("Stops it: the 3D view stays as it is"), Some(Act::StopReconstruct)),
+                Offer::Paused { .. } => (icons::X, tr("Stops it, and what it has done so far goes: the 3D view stays as it is"), Some(Act::StopReconstruct)),
+                Offer::Waiting { hint } => (icons::X, tr(hint), Some(Act::Unqueue)),
             };
             let b = Button::new(o.label()).icon(glyph).variant(Variant::Glass).size(Size::Sm).enabled(pressed_does.is_some()).hint(hint).id_salt("capture-window-again");
             let w = b.desired_width(ui);
@@ -1124,7 +1127,7 @@ impl Dialog {
         }
         if self.entry.is_picture() {
             let r = Rect::from_min_size(pos2(right - 32.0, bottom - 32.0), vec2(32.0, 32.0));
-            let resp = widgets::IconButton::new(icons::CORNERS_OUT, "See it whole").size(32.0, 15.0).backdrop(theme::black(0.5)).show_at(ui, r);
+            let resp = widgets::IconButton::new(icons::CORNERS_OUT, tr("See it whole")).size(32.0, 15.0).backdrop(theme::black(0.5)).show_at(ui, r);
             if pressed(resp) {
                 *act = Some(Act::Full);
             }
@@ -1154,10 +1157,10 @@ impl Dialog {
                 // Nothing to reconstruct or share: the card says why.
             } else if !self.entry.ready && matches!(self.entry.local, Some(controller::Local::Session(_))) {
                 let (label, can, hint) = match offer {
-                    Some(Offer::Blocked { reason, .. }) => ("Reconstruct to share", false, Some(reason)),
-                    Some(Offer::Running { .. } | Offer::Waiting { .. }) => ("Reconstructing…", false, None),
-                    Some(Offer::Paused { .. }) => ("Reconstruction paused", false, None),
-                    _ => ("Reconstruct to share", true, None),
+                    Some(Offer::Blocked { reason, .. }) => (tr("Reconstruct to share"), false, Some(tr(reason))),
+                    Some(Offer::Running { .. } | Offer::Waiting { .. }) => (tr("Reconstructing…"), false, None),
+                    Some(Offer::Paused { .. }) => (tr("Reconstruction paused"), false, None),
+                    _ => (tr("Reconstruct to share"), true, None),
                 };
                 let mut b = Button::new(label).icon(icons::MAGIC_WAND).variant(Variant::Primary).enabled(can);
                 if let Some(h) = hint {
@@ -1166,29 +1169,29 @@ impl Dialog {
                 actions.push((Act::Reconstruct, b));
             } else {
                 if !public {
-                    let label = if busy && matches!(&self.last, Some(Action::Share(s)) if s.public) { "Sharing…" } else { "Share publicly" };
+                    let label = if busy && matches!(&self.last, Some(Action::Share(s)) if s.public) { tr("Sharing…") } else { tr("Share publicly") };
                     let variant = if edited { Variant::Secondary } else { Variant::Primary };
                     actions.push((Act::Public, Button::new(label).icon(icons::GLOBE).variant(variant).enabled(can_share && !busy)));
                 }
-                actions.push((Act::ShareTo, Button::new("Share to …").icon(icons::USERS).variant(Variant::Secondary).enabled(can_share && !busy)));
+                actions.push((Act::ShareTo, Button::new(tr("Share to …")).icon(icons::USERS).variant(Variant::Secondary).enabled(can_share && !busy)));
                 if !self.entry.is_picture() {
                     actions.push((Act::CopyLink, self.copy_button(ui, busy, can_share)));
                 }
                 // A capture of this computer, reconstructed: what its 3D view shows, as a file for other tools.
                 if self.entry.ready && matches!(self.entry.local, Some(controller::Local::Session(_))) {
-                    let b = Button::new("Export…").icon(icons::UPLOAD_SIMPLE).variant(Variant::Secondary).enabled(!rebuilding).hint(if rebuilding {
-                        "Once the new 3D view is ready: the file holds its splats"
+                    let b = Button::new(tr("Export…")).icon(icons::UPLOAD_SIMPLE).variant(Variant::Secondary).enabled(!rebuilding).hint(if rebuilding {
+                        tr("Once the new 3D view is ready: the file holds its splats")
                     } else {
-                        "Saves what its 3D view shows as an SPZ, GLB or PLY file, for a VRChat splat world, Unity, SuperSplat, Cesium or Blender"
+                        tr("Saves what its 3D view shows as an SPZ, GLB or PLY file, for a VRChat splat world, Unity, SuperSplat, Cesium or Blender")
                     });
                     actions.push((Act::Export, b));
                 }
             }
         } else {
-            let label = if busy && matches!(self.last, Some(Action::Share(_))) { "Asking…" } else { "Ask to share" };
+            let label = if busy && matches!(self.last, Some(Action::Share(_))) { tr("Asking…") } else { tr("Ask to share") };
             actions.push((Act::ShareTo, Button::new(label).icon(icons::PAPER_PLANE_TILT).variant(Variant::Primary).enabled(can_share && !busy)));
             if self.entry.is_picture() {
-                actions.push((Act::Download, Button::new("Download").icon(icons::DOWNLOAD_SIMPLE).enabled(!busy)));
+                actions.push((Act::Download, Button::new(tr("Download")).icon(icons::DOWNLOAD_SIMPLE).enabled(!busy)));
             } else if public && !hidden {
                 actions.push((Act::CopyLink, self.copy_button(ui, busy, true)));
             }
@@ -1260,7 +1263,7 @@ impl Dialog {
         }
         if hidden {
             ui.add_space(14.0);
-            feedback::banner(ui, Id::unique(("capture-hidden", &self.entry.key)), Tone::Warn, "Hidden by a moderator: it can no longer be shared.", false);
+            feedback::banner(ui, Id::unique(("capture-hidden", &self.entry.key)), Tone::Warn, tr("Hidden by a moderator: it can no longer be shared."), false);
         }
         // A result the wearer was taken out of says so, and any result of this computer can be made again with or without them.
         if let (true, true, Some(controller::Local::Session(dir))) = (mine, self.entry.ready, &self.entry.local) {
@@ -1276,9 +1279,9 @@ impl Dialog {
             if let Some(row) = row.filter(|_| matches!(offer, Some(Offer::Start { .. }))) {
                 ui.add_space(8.0);
                 let b = Button::new(row.label()).icon(if row.takes_out() { icons::USER_MINUS } else { icons::USER_PLUS }).variant(Variant::Ghost).size(Size::Sm).id_salt("capture-wearer-row").hint(if row.takes_out() {
-                    "A new 3D view with the avatar you wore taken out: what stood behind it comes from other frames, where they saw it. Anyone touching your avatar comes out with it"
+                    tr("A new 3D view with the avatar you wore taken out: what stood behind it comes from other frames, where they saw it. Anyone touching your avatar comes out with it")
                 } else {
-                    "A new 3D view with the avatar you wore left in it"
+                    tr("A new 3D view with the avatar you wore left in it")
                 });
                 let bw = b.desired_width(ui);
                 let (r, _) = ui.allocate_exact_size(vec2(w, 32.0), Sense::hover());
@@ -1294,18 +1297,18 @@ impl Dialog {
             ui.add_space(14.0);
             let why = if self.entry.reconstructed_since_upload() {
                 if shared {
-                    "Reconstructed since it was shared: whoever sees it, on Orbiters and in VRChat, still sees the previous version."
+                    tr("Reconstructed since it was shared: whoever sees it, on Orbiters and in VRChat, still sees the previous version.")
                 } else {
-                    "Reconstructed since it was uploaded: its copy on Orbiters is still the previous version."
+                    tr("Reconstructed since it was uploaded: its copy on Orbiters is still the previous version.")
                 }
             } else if shared {
-                "Edited since it was shared: whoever sees it, on Orbiters and in VRChat, still sees its splats as they were then."
+                tr("Edited since it was shared: whoever sees it, on Orbiters and in VRChat, still sees its splats as they were then.")
             } else {
-                "Edited since it was uploaded: its copy on Orbiters still has its splats as they were then."
+                tr("Edited since it was uploaded: its copy on Orbiters still has its splats as they were then.")
             };
             feedback::banner(ui, Id::unique(("capture-edited", &self.entry.key)), Tone::Warn, why, false);
             ui.add_space(8.0);
-            let label = if shared { "Update the shared capture" } else { "Update the uploaded copy" };
+            let label = if shared { tr("Update the shared capture") } else { tr("Update the uploaded copy") };
             let b = Button::new(label).icon(icons::CLOUD_ARROW_UP).variant(Variant::Primary).size(Size::Sm).enabled(!busy && !hidden).id_salt("capture-update");
             let bw = b.desired_width(ui);
             let (r, _) = ui.allocate_exact_size(vec2(w, 32.0), Sense::hover());
@@ -1316,56 +1319,59 @@ impl Dialog {
         if busy {
             ui.add_space(14.0);
             let what = match &self.last {
-                Some(Action::Download) => "Downloading…".to_string(),
+                Some(Action::Download) => tr("Downloading…").to_string(),
                 Some(Action::Update) => match self.stage {
-                    Stage::Waiting => "Waiting for its other change to finish…".to_string(),
-                    Stage::Preparing => "Preparing its edited 3D view…".to_string(),
-                    Stage::Sending { sent, total } if sent > 0 && total > 0 => format!("Sending {} of {}…", megabytes(sent), megabytes(total)),
-                    Stage::Sending { total, .. } if total > 0 => format!("Sending {}…", megabytes(total)),
-                    Stage::Replacing => "Replacing the shared files…".to_string(),
-                    _ => "Updating the shared capture…".to_string(),
+                    Stage::Waiting => tr("Waiting for its other change to finish…").to_string(),
+                    Stage::Preparing => tr("Preparing its edited 3D view…").to_string(),
+                    Stage::Sending { sent, total } if sent > 0 && total > 0 => tr!("Sending {sent} of {total}…", sent = megabytes(sent), total = megabytes(total)),
+                    Stage::Sending { total, .. } if total > 0 => tr!("Sending {total}…", total = megabytes(total)),
+                    Stage::Replacing => tr("Replacing the shared files…").to_string(),
+                    _ => tr("Updating the shared capture…").to_string(),
                 },
-                Some(Action::Unshare(_)) => "Updating who sees it…".to_string(),
-                Some(Action::Share(_)) if !mine => format!("Asking {}…", item.as_ref().and_then(|i| i.from.as_ref()).map_or("them", |p| p.name.as_str())),
+                Some(Action::Unshare(_)) => tr("Updating who sees it…").to_string(),
+                Some(Action::Share(_)) if !mine => match item.as_ref().and_then(|i| i.from.as_ref()) {
+                    Some(from) => tr!("Asking {name}…", name = from.name),
+                    None => tr("Asking them…").to_string(),
+                },
                 Some(Action::Share(s)) => match self.stage {
-                    Stage::Waiting => "Waiting for its other change to finish…".to_string(),
-                    Stage::Preparing => "Preparing the 3D view for sharing…".to_string(),
-                    Stage::Sending { sent, total } if sent > 0 && total > 0 => format!("Sending {} of {}…", megabytes(sent), megabytes(total)),
-                    Stage::Sending { total, .. } if total > 0 => format!("Sending {}…", megabytes(total)),
-                    Stage::Sending { .. } => "Sending…".to_string(),
-                    Stage::Replacing => "Replacing the shared files…".to_string(),
-                    Stage::Starting | Stage::Sharing => format!("Sharing {}…", whom(s)),
-                    Stage::Items { done, total } => format!("Sharing {} · {done} of {total} done…", whom(s)),
+                    Stage::Waiting => tr("Waiting for its other change to finish…").to_string(),
+                    Stage::Preparing => tr("Preparing the 3D view for sharing…").to_string(),
+                    Stage::Sending { sent, total } if sent > 0 && total > 0 => tr!("Sending {sent} of {total}…", sent = megabytes(sent), total = megabytes(total)),
+                    Stage::Sending { total, .. } if total > 0 => tr!("Sending {total}…", total = megabytes(total)),
+                    Stage::Sending { .. } => tr("Sending…").to_string(),
+                    Stage::Replacing => tr("Replacing the shared files…").to_string(),
+                    Stage::Starting | Stage::Sharing => format!("{}…", sharing_to(s)),
+                    Stage::Items { done, total } => format!("{} · {}…", sharing_to(s), tr!("{done} of {total} done", done = done, total = total)),
                 },
-                _ => "Working…".to_string(),
+                _ => tr("Working…").to_string(),
             };
             working_part(ui, &what, sent_part(self.stage));
             if matches!(self.last, Some(Action::Share(_) | Action::Update)) && mine {
                 ui.add_space(6.0);
-                paragraph(ui, "You can close this window: it carries on.", 11.5, theme::FG_4, w);
+                paragraph(ui, tr("You can close this window: it carries on."), 11.5, theme::FG_4, w);
             }
         }
         // A reconstruction of this capture: how far, or what it waits for, or why there can be none.
         match offer {
             Some(Offer::Running { fraction, stage }) => {
                 ui.add_space(14.0);
-                working_part(ui, &format!("{stage} · {:.0}%", fraction * 100.0), Some(fraction));
+                working_part(ui, &tr!("{stage} · {percent}%", stage = tr(stage), percent = format!("{:.0}", fraction * 100.0)), Some(fraction));
                 ui.add_space(6.0);
-                paragraph(ui, "You can close this window: it carries on. Its 3D view stays as it is until the new one is ready.", 11.5, theme::FG_4, w);
+                paragraph(ui, tr("You can close this window: it carries on. Its 3D view stays as it is until the new one is ready."), 11.5, theme::FG_4, w);
             }
             Some(Offer::Paused { fraction, why }) => {
                 ui.add_space(14.0);
-                paused_part(ui, &format!("Paused · {:.0}% kept", fraction * 100.0), fraction);
+                paused_part(ui, &tr!("Paused · {percent}% kept", percent = format!("{:.0}", fraction * 100.0)), fraction);
                 ui.add_space(6.0);
-                paragraph(ui, why, 11.5, theme::FG_3, w);
+                paragraph(ui, tr(why), 11.5, theme::FG_3, w);
             }
             Some(Offer::Waiting { hint }) => {
                 ui.add_space(14.0);
-                paragraph(ui, &format!("Waiting to reconstruct. {hint}."), 12.0, theme::FG_3, w);
+                paragraph(ui, &tr!("Waiting to reconstruct. {hint}.", hint = tr(hint)), 12.0, theme::FG_3, w);
             }
             Some(Offer::Blocked { reason, again: true, .. }) => {
                 ui.add_space(14.0);
-                paragraph(ui, &format!("{reason}."), 12.0, theme::FG_3, w);
+                paragraph(ui, &tr!("{reason}.", reason = tr(reason)), 12.0, theme::FG_3, w);
             }
             _ => {}
         }
@@ -1406,7 +1412,7 @@ impl Dialog {
             feedback::banner(ui, Id::unique(("capture-error", &self.entry.key, &e)), Tone::Danger, &e, false);
             if self.last.is_some() {
                 ui.add_space(8.0);
-                let b = Button::new("Try again").icon(icons::ARROW_CLOCKWISE).size(Size::Sm).enabled(!busy).id_salt("capture-retry");
+                let b = Button::new(tr("Try again")).icon(icons::ARROW_CLOCKWISE).size(Size::Sm).enabled(!busy).id_salt("capture-retry");
                 let bw = b.desired_width(ui);
                 let (r, _) = ui.allocate_exact_size(vec2(w, 32.0), Sense::hover());
                 if pressed(b.show_at(ui, Rect::from_min_size(r.min, vec2(bw, 32.0)))) {
@@ -1419,13 +1425,13 @@ impl Dialog {
     /// "3D capture · 28 Oct 2026, 22:00 · ⊕ Public", or who shared it.
     fn subline(&mut self, ui: &Ui, at: egui::Pos2, max_w: f32, mine: bool, item: Option<&shares::Item>) {
         let p = ui.painter().clone();
-        let kind = if self.entry.is_picture() { "VRChat picture" } else { "3D capture" };
+        let kind = if self.entry.is_picture() { tr("VRChat picture") } else { tr("3D capture") };
         let date = super::local_time(&controller::iso(self.entry.taken));
         let line = Txt::new(format!("{kind} · {date}"), 12.5).color(theme::FG_3);
         let r = widgets::text_truncated(&p, at, Align2::LEFT_CENTER, &line, max_w);
         let x = r.right() + 10.0;
         let (glyph, label, color) = match item {
-            None => (icons::HARD_DRIVE, "Only on this computer".to_string(), theme::FG_3),
+            None => (icons::HARD_DRIVE, tr("Only on this computer").to_string(), theme::FG_3),
             Some(i) if !mine => {
                 if let Some(from) = &i.from {
                     let ar = Rect::from_center_size(pos2(x + 9.0, at.y), vec2(18.0, 18.0));
@@ -1433,15 +1439,15 @@ impl Dialog {
                         self.pictures.get(ui.ctx(), &crate::worlds::Picture::Remote { world_id: format!("person-{}", from.id), url: url.clone(), large: false })
                     });
                     widgets::avatar(&p, ar, tex.as_ref(), &from.name);
-                    let t = Txt::new(format!("from {}", from.name), 12.5).weight(weight::MEDIUM).color(theme::FG_2);
+                    let t = Txt::new(tr!("from {name}", name = from.name), 12.5).weight(weight::MEDIUM).color(theme::FG_2);
                     widgets::text_truncated(&p, pos2(ar.right() + 6.0, at.y), Align2::LEFT_CENTER, &t, (at.x + max_w - ar.right() - 6.0).max(10.0));
                     return;
                 }
-                (icons::USERS, "Shared with you".to_string(), theme::FG_2)
+                (icons::USERS, tr("Shared with you").to_string(), theme::FG_2)
             }
             // Who sees it is listed under the line (Shared with).
             Some(i) if i.public || !i.grants.is_empty() => return,
-            Some(_) => (icons::LOCK_SIMPLE, "Only you".to_string(), theme::FG_3),
+            Some(_) => (icons::LOCK_SIMPLE, tr("Only you").to_string(), theme::FG_3),
         };
         if x + 40.0 > at.x + max_w {
             return;
@@ -1462,7 +1468,7 @@ impl Dialog {
     fn shared_with(&mut self, ui: &mut Ui, cx: &Cx, busy: bool, act: &mut Option<Act>) {
         let w = ui.available_width();
         let (cap, _) = ui.allocate_exact_size(vec2(w, 14.0), Sense::hover());
-        widgets::text(ui.painter(), pos2(cap.left(), cap.center().y), Align2::LEFT_CENTER, &Txt::caps("Shared with"));
+        widgets::text(ui.painter(), pos2(cap.left(), cap.center().y), Align2::LEFT_CENTER, &Txt::caps(tr("Shared with")));
         ui.add_space(8.0);
         let Some(item) = self.entry.remote.clone() else { return };
         enum C {
@@ -1474,7 +1480,7 @@ impl Dialog {
         let mut coming: Vec<bool> = Vec::new();
         if item.public {
             let on_way = self.public_on_its_way;
-            chips.push((C::Public, Chip::new("Everyone on Orbiters").icon(icons::GLOBE).tone(theme::ACCENT).removable(!on_way).enabled(!busy)));
+            chips.push((C::Public, Chip::new(tr("Everyone on Orbiters")).icon(icons::GLOBE).tone(theme::ACCENT).removable(!on_way).enabled(!busy)));
             coming.push(on_way);
         }
         let names: Vec<(String, String)> =
@@ -1491,7 +1497,7 @@ impl Dialog {
             chips.push((C::Grant(id.clone()), Chip::new(name).person(tex.as_ref()).removable(!on_way).enabled(!busy).id_salt(("grant", id))));
             coming.push(on_way);
         }
-        let all = Button::new("Unshare everything").icon(icons::EYE_SLASH).variant(Variant::Danger).size(Size::Sm).enabled(!busy).id_salt("unshare-all");
+        let all = Button::new(tr("Unshare everything")).icon(icons::EYE_SLASH).variant(Variant::Danger).size(Size::Sm).enabled(!busy).id_salt("unshare-all");
         const SPIN: f32 = 22.0;
         let mut widths: Vec<f32> = chips.iter().zip(&coming).map(|((_, c), on_way)| c.width(ui) + if *on_way { SPIN } else { 0.0 }).collect();
         // Nothing to take back while everyone listed is still on their way.
@@ -1530,7 +1536,7 @@ impl Dialog {
         let warning = self.warning.clone().unwrap_or_default();
         let reasons: Vec<String> = self.entry.content.explicit_reasons.iter().map(|r| orbiters_core::explicit::reason_label(r)).collect();
         let inner = w - 32.0 - 52.0;
-        let title = Txt::new("Before you share publicly", 14.5).weight(weight::SEMIBOLD);
+        let title = Txt::new(tr("Before you share publicly"), 14.5).weight(weight::SEMIBOLD);
         let body = ui.painter().layout_job(Txt::new(&warning, 12.5).color(theme::FG_2).line_height(19.0).job(inner));
         let tags_w: Vec<f32> = reasons.iter().map(|r| widgets::text_size(ui, &Txt::new(r, 11.0).weight(weight::MEDIUM)).x + 16.0).collect();
         let (tag_at, tags_h) = widgets::flow(&tags_w, inner, 22.0, 6.0);
@@ -1556,8 +1562,8 @@ impl Dialog {
                 widgets::text(&p, tr.center(), Align2::CENTER_CENTER, &Txt::new(r, 11.0).weight(weight::MEDIUM).color(theme::FG_2));
             }
         }
-        let anyway = Button::new("Share anyway").icon(icons::GLOBE).variant(Variant::Warn).size(Size::Sm).enabled(!busy).id_salt("share-anyway");
-        let cancel = Button::new("Cancel").variant(Variant::Ghost).size(Size::Sm).id_salt("warning-cancel");
+        let anyway = Button::new(tr("Share anyway")).icon(icons::GLOBE).variant(Variant::Warn).size(Size::Sm).enabled(!busy).id_salt("share-anyway");
+        let cancel = Button::new(tr("Cancel")).variant(Variant::Ghost).size(Size::Sm).id_salt("warning-cancel");
         let (aw, cw) = (anyway.desired_width(ui), cancel.desired_width(ui));
         let by = rect.bottom() - 18.0 - 32.0;
         if pressed(anyway.show_at(ui, Rect::from_min_size(pos2(rect.right() - 16.0 - aw, by), vec2(aw, 32.0)))) {
@@ -1573,24 +1579,24 @@ impl Dialog {
         let ctx = ui.ctx().clone();
         let w = ui.available_width();
         let mine = self.entry.mine();
-        let from = self.entry.remote.as_ref().and_then(|i| i.from.as_ref()).map(|p| p.name.clone()).unwrap_or_else(|| "the sharer".into());
-        let (title, sub) = if mine {
-            ("Share with friends".to_string(), "They find it in Photos & captures, under Shared with me.".to_string())
-        } else {
-            (format!("Ask {from} to share it"), format!("{from} decides who else may see it."))
+        let from = self.entry.remote.as_ref().and_then(|i| i.from.as_ref()).map(|p| p.name.clone());
+        let (title, sub) = match (mine, from) {
+            (true, _) => (tr("Share with friends").to_string(), tr("They find it in Photos & captures, under Shared with me.").to_string()),
+            (false, Some(from)) => (tr!("Ask {from} to share it", from = from), tr!("{from} decides who else may see it.", from = from)),
+            (false, None) => (tr("Ask the sharer to share it").to_string(), tr("The sharer decides who else may see it.").to_string()),
         };
         let (head, _) = ui.allocate_exact_size(vec2(w, 40.0), Sense::hover());
         let p = ui.painter().clone();
         widgets::text(&p, pos2(head.left(), head.top() + 10.0), Align2::LEFT_CENTER, &Txt::new(title, 14.5).weight(weight::SEMIBOLD));
         widgets::text_truncated(&p, pos2(head.left(), head.top() + 30.0), Align2::LEFT_CENTER, &Txt::new(sub, 12.0).color(theme::FG_3), w - 120.0);
-        let count = Txt::new(format!("{} of 50", self.selected.len()), 11.5).color(theme::FG_4);
+        let count = Txt::new(tr!("{count} of 50", count = self.selected.len()), 11.5).color(theme::FG_4);
         if !self.selected.is_empty() {
             widgets::text(&p, pos2(head.right(), head.top() + 10.0), Align2::RIGHT_CENTER, &count);
         }
         ui.add_space(10.0);
         let search_w = w;
         let mut su = ui.new_child(UiBuilder::new().max_rect(Rect::from_min_size(ui.cursor().min, vec2(search_w, 40.0))).id_salt("friend-search-row"));
-        widgets::search_field(&mut su, "friend-search", &mut self.query, "Search your VRChat friends", search_w);
+        widgets::search_field(&mut su, "friend-search", &mut self.query, tr("Search your VRChat friends"), search_w);
         ui.allocate_exact_size(vec2(w, 40.0), Sense::hover());
         ui.add_space(12.0);
 
@@ -1610,7 +1616,7 @@ impl Dialog {
         } else if let Some(error) = self.friends_error.clone() {
             feedback::banner(ui, Id::unique(("friends-error", &self.entry.key)), Tone::Danger, &error, false);
             ui.add_space(8.0);
-            let b = Button::new("Load friends again").icon(icons::ARROW_CLOCKWISE).size(Size::Sm).enabled(!busy).id_salt("friends-retry");
+            let b = Button::new(tr("Load friends again")).icon(icons::ARROW_CLOCKWISE).size(Size::Sm).enabled(!busy).id_salt("friends-retry");
             let bw = b.desired_width(ui);
             let (r, _) = ui.allocate_exact_size(vec2(w, 32.0), Sense::hover());
             if pressed(b.show_at(ui, Rect::from_min_size(r.min, vec2(bw, 32.0)))) {
@@ -1619,9 +1625,9 @@ impl Dialog {
             }
         } else if self.friends_list.is_empty() {
             let text = if cx.snap.vrchat_login.allowed && cx.snap.vrchat_login.user.is_some() {
-                "No VRChat friends to show yet."
+                tr("No VRChat friends to show yet.")
             } else {
-                "No VRChat friends known yet: sign in to VRChat in Settings, or let VRCX or VRCNext load your friend list."
+                tr("No VRChat friends known yet: sign in to VRChat in Settings, or let VRCX or VRCNext load your friend list.")
             };
             paragraph(ui, text, 12.5, theme::FG_3, w);
         } else {
@@ -1656,15 +1662,15 @@ impl Dialog {
                 }
             }
             if matches.is_empty() {
-                paragraph(ui, &format!("No friend called \"{}\".", self.query.trim()), 12.5, theme::FG_3, w);
+                paragraph(ui, &tr!("No friend called \"{name}\".", name = self.query.trim()), 12.5, theme::FG_3, w);
             } else if shown < matches.len() {
                 ui.add_space(8.0);
-                paragraph(ui, &format!("{} more: search to find them", matches.len() - shown), 11.5, theme::FG_4, w);
+                paragraph(ui, &tr!("{count} more: search to find them", count = matches.len() - shown), 11.5, theme::FG_4, w);
             }
         }
         ui.add_space(12.0);
         if !mine {
-            let public = Chip::new("Everyone on Orbiters too")
+            let public = Chip::new(tr("Everyone on Orbiters too"))
                 .icon(icons::GLOBE)
                 .tone(theme::ACCENT)
                 .selected(self.request_public)
@@ -1678,7 +1684,7 @@ impl Dialog {
             ui.add_space(12.0);
         }
         let mut mu = ui.new_child(UiBuilder::new().max_rect(Rect::from_min_size(ui.cursor().min, vec2(w, 36.0))).id_salt("share-message-row"));
-        widgets::text_field(&mut mu, "share-message", &mut self.message, "Add a message (optional)", w, false);
+        widgets::text_field(&mut mu, "share-message", &mut self.message, tr("Add a message (optional)"), w, false);
         if self.message.chars().count() > 280 {
             self.message = self.message.chars().take(280).collect();
         }
@@ -1687,14 +1693,14 @@ impl Dialog {
         let n = self.selected.len();
         let label = if mine {
             match n {
-                0 => "Share".to_string(),
-                1 => "Share with 1 friend".to_string(),
-                _ => format!("Share with {n} friends"),
+                0 => tr("Share").to_string(),
+                1 => tr("Share with 1 friend").to_string(),
+                _ => tr!("Share with {count} friends", count = n),
             }
         } else if n == 0 && self.request_public {
-            "Ask to share publicly".to_string()
+            tr("Ask to share publicly").to_string()
         } else {
-            "Send request".to_string()
+            tr("Send request").to_string()
         };
         let send = Button::new(&label)
             .icon(icons::PAPER_PLANE_TILT)
@@ -1702,7 +1708,7 @@ impl Dialog {
             .size(Size::Sm)
             .enabled(!busy && (n > 0 || (!mine && self.request_public)))
             .id_salt("share-send");
-        let cancel = Button::new("Cancel").variant(Variant::Ghost).size(Size::Sm).enabled(!busy).id_salt("share-cancel");
+        let cancel = Button::new(tr("Cancel")).variant(Variant::Ghost).size(Size::Sm).enabled(!busy).id_salt("share-cancel");
         let (sw, cw) = (send.desired_width(ui), cancel.desired_width(ui));
         let (r, _) = ui.allocate_exact_size(vec2(w, 32.0), Sense::hover());
         if pressed(send.show_at(ui, Rect::from_min_size(pos2(r.right() - sw, r.top()), vec2(sw, 32.0)))) {
@@ -1721,7 +1727,7 @@ impl Dialog {
         if let Some(at) = self.copied_at.filter(|_| copied) {
             ui.ctx().request_repaint_after(std::time::Duration::from_secs_f64((at + COPIED_FOR - now).max(0.0)));
         }
-        let looks = [(icons::LINK_SIMPLE, "Copy public link"), (icons::LINK_SIMPLE, "Making it public…"), (icons::CHECK, "Link copied")];
+        let looks = [(icons::LINK_SIMPLE, tr("Copy public link")), (icons::LINK_SIMPLE, tr("Making it public…")), (icons::CHECK, tr("Link copied"))];
         let w = looks.iter().map(|(glyph, label)| Button::new(label).icon(glyph).size(Size::Sm).desired_width(ui)).fold(0.0, f32::max);
         let (glyph, label) = looks[if copied {
             2
@@ -1733,9 +1739,9 @@ impl Dialog {
         let public = self.entry.remote.as_ref().is_some_and(|i| i.public);
         Button::new(label).icon(glyph).variant(if copied { Variant::Primary } else { Variant::Secondary }).enabled(copied || (enabled && !busy)).width(w).hint(
             if public {
-                "Copies the address of its page on Orbiters: Discord and other apps show its picture with it"
+                tr("Copies the address of its page on Orbiters: Discord and other apps show its picture with it")
             } else {
-                "Shares it publicly on Orbiters, then copies the address of its page"
+                tr("Shares it publicly on Orbiters, then copies the address of its page")
             },
         )
     }
@@ -1743,7 +1749,7 @@ impl Dialog {
     /// Its link was just copied (screenshots).
     pub fn stage_copied(&mut self, ctx: &egui::Context) {
         self.copied_at = Some(anim::time(ctx));
-        self.notice = Some("Public link copied: paste it in Discord or anywhere, its picture shows with it".into());
+        self.notice = Some(tr("Public link copied: paste it in Discord or anywhere, its picture shows with it").into());
     }
 
     /// The capture's public page (contracts `Docs/capture-sharing.md`, Public page), once it is public.
@@ -1757,7 +1763,7 @@ impl Dialog {
         if let Some(link) = self.public_link(server) {
             ctx.copy_text(link);
             self.copied_at = Some(anim::time(ctx));
-            self.notice = Some("Public link copied: paste it in Discord or anywhere, its picture shows with it".into());
+            self.notice = Some(tr("Public link copied: paste it in Discord or anywhere, its picture shows with it").into());
         }
     }
 
@@ -1873,7 +1879,7 @@ impl Dialog {
 }
 
 /// What the window says once the shared capture is updated.
-const UPDATED_NOTICE: &str = "Updated: everyone now sees it as its 3D view shows it, on Orbiters and in VRChat";
+const UPDATED_NOTICE: &str = mark("Updated: everyone now sees it as its 3D view shows it, on Orbiters and in VRChat");
 /// How often the open window reads the capture's splat edits again (a small file; edited in its 3D view meanwhile).
 const EDITS_EVERY: f64 = 2.0;
 
@@ -1973,23 +1979,22 @@ fn sent_part(stage: Stage) -> Option<f32> {
 /// "31.6 MB", "820 KB".
 fn megabytes(bytes: u64) -> String {
     if bytes >= 1_000_000 {
-        format!("{:.1} MB", bytes as f64 / 1e6)
+        tr!("{size} MB", size = format!("{:.1}", bytes as f64 / 1e6))
     } else {
-        format!("{} KB", bytes.div_ceil(1000))
+        tr!("{size} KB", size = bytes.div_ceil(1000))
     }
 }
 
-/// Who a share goes to: "with Alex", "with 3 friends", "publicly", "publicly and with 2 friends".
-fn whom(s: &Share) -> String {
-    let friends = match s.recipients.as_slice() {
-        [] => String::new(),
-        [one] => format!("with {}", one.display_name),
-        many => format!("with {} friends", many.len()),
-    };
-    match (s.public, friends.is_empty()) {
-        (true, true) => "publicly".into(),
-        (true, false) => format!("publicly and {friends}"),
-        _ => friends,
+/// Who a share goes to, as the start of what is said while it goes: "Sharing with Alex", "Sharing publicly and with 3 friends".
+/// Each is a sentence of its own, so a language can put its words in its own order.
+fn sharing_to(s: &Share) -> String {
+    match (s.public, s.recipients.as_slice()) {
+        (true, []) => tr("Sharing publicly").to_string(),
+        (true, [one]) => tr!("Sharing publicly and with {name}", name = one.display_name),
+        (true, many) => tr!("Sharing publicly and with {count} friends", count = many.len()),
+        (false, []) => tr("Sharing").to_string(),
+        (false, [one]) => tr!("Sharing with {name}", name = one.display_name),
+        (false, many) => tr!("Sharing with {count} friends", count = many.len()),
     }
 }
 
@@ -2009,7 +2014,7 @@ pub fn morph(ui: &mut Ui, id: Id, right: egui::Pos2, expanded_width: f32, enable
     let mut expanded = ctx.data(|d| d.get_temp::<bool>(id)).unwrap_or(false);
     let k = anim::spring(&ctx, id.with("split"), [if expanded { 1.0 } else { 0.0 }], Spring { stiffness: 340.0, damping: 22.0, mass: 0.8 })[0];
     let kc = k.clamp(0.0, 1.0);
-    let share = Button::new("Share").icon(icons::CLOUD_ARROW_UP).variant(Variant::Secondary).enabled(enabled && !expanded).id_salt(id.with("share"));
+    let share = Button::new(tr("Share")).icon(icons::CLOUD_ARROW_UP).variant(Variant::Secondary).enabled(enabled && !expanded).id_salt(id.with("share"));
     let small_w = share.desired_width(ui);
     let small = Rect::from_min_size(pos2(right.x - small_w, right.y), vec2(small_w, 40.0));
     let full = Rect::from_min_size(pos2(right.x - expanded_width, right.y), vec2(expanded_width, 40.0));
@@ -2028,8 +2033,8 @@ pub fn morph(ui: &mut Ui, id: Id, right: egui::Pos2, expanded_width: f32, enable
         }
     } else {
         // The two halves: one surface at first, parting as they reach their places.
-        let public_label = "Share publicly";
-        let to_label = "Share to …";
+        let public_label = tr("Share publicly");
+        let to_label = tr("Share to …");
         let with_icons = Button::new(public_label).icon(icons::GLOBE).desired_width(ui) <= half;
         let mut pa = Button::new(public_label).variant(Variant::Primary).enabled(enabled && expanded).width(half).id_salt(id.with("public"));
         let mut pb = Button::new(to_label).variant(Variant::Secondary).enabled(enabled && expanded).width(half).id_salt(id.with("to"));
@@ -2073,7 +2078,7 @@ pub fn morph(ui: &mut Ui, id: Id, right: egui::Pos2, expanded_width: f32, enable
                 let mut lp = p.with_clip_rect(a.intersect(p.clip_rect()));
                 lp.multiply_opacity(out);
                 widgets::icon(&lp, pos2(small.left() + 18.0 + 7.5, small.center().y), icons::CLOUD_ARROW_UP, 15.0, theme::FG);
-                widgets::text(&lp, pos2(small.left() + 18.0 + 23.0, small.center().y), Align2::LEFT_CENTER, &Txt::new("Share", 13.5).weight(weight::MEDIUM));
+                widgets::text(&lp, pos2(small.left() + 18.0 + 23.0, small.center().y), Align2::LEFT_CENTER, &Txt::new(tr("Share"), 13.5).weight(weight::MEDIUM));
             }
             if inn > 0.0 {
                 label(a, public_label, icons::GLOBE, theme::ON_ACCENT);
@@ -2088,6 +2093,28 @@ pub fn morph(ui: &mut Ui, id: Id, right: egui::Pos2, expanded_width: f32, enable
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Who a share goes to and how big a file is are said as whole sentences of the language, each in its own words.
+    #[test]
+    fn what_a_share_says_follows_the_language() {
+        use orbiters_i18n::{in_language, Language};
+        let friend = |n: &str| shares::Recipient { vrchat_user_id: format!("usr_{n}"), display_name: n.into() };
+        let public = Share { public: true, ..Default::default() };
+        let with_alex = Share { public: true, recipients: vec![friend("Alex")], ..Default::default() };
+        let three = Share { recipients: vec![friend("a"), friend("b"), friend("c")], ..Default::default() };
+        assert_eq!(sharing_to(&three), "Sharing with 3 friends");
+        in_language(Language::Fr, || {
+            assert_eq!(sharing_to(&public), "Partage public");
+            assert_eq!(sharing_to(&with_alex), "Partage public et avec Alex");
+            assert_eq!(sharing_to(&three), "Partage avec 3 amis");
+            assert_eq!(megabytes(31_600_000), "31.6\u{a0}Mo");
+        });
+        in_language(Language::Ja, || {
+            assert_eq!(sharing_to(&three), "フレンド3人に共有中");
+            assert_eq!(megabytes(820_000), "820KB");
+        });
+        in_language(Language::Es, || assert_eq!(sharing_to(&with_alex), "Compartiendo públicamente y con Alex"));
+    }
     use crate::controller::shares::tests::{capture_at, delete_splat, prepared, requests, stand_in, uploaded_session};
     use orbiters_core::shares::Item;
     use egui::{Event, Modifiers, PointerButton, RawInput};

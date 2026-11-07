@@ -111,7 +111,7 @@ mod win {
                 let hwnd = CreateWindowExW(
                     WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
                     w!("STATIC"),
-                    w!("Orbiters coverage"),
+                    w!("Orbiters coverage"), // i18n: not shown
                     WS_POPUP,
                     at.x,
                     at.y,

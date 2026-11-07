@@ -180,15 +180,18 @@ impl Failure {
         let mb = |b: u64| orbiters_ui::format::bytes(b as f64);
         match self {
             Failure::Edits(why) => tr!("{why} Discard them to export every splat as trained: Select splats in its 3D view can remove them again.", why = why),
-            Failure::NoRoom { needed, free, folder } => tr!(
-                "Not enough room: the {format} takes {size}, and {folder} has {free} left, with {kept} to leave free for {system} and other programs. Choose another place, or free up space there.",
-                format = format.label(),
-                size = mb(needed.saturating_sub(ROOM_KEPT)),
-                folder = folder.display(),
-                free = mb(*free),
-                kept = mb(ROOM_KEPT),
-                system = if cfg!(target_os = "macos") { "macOS" } else { "Windows" },
-            ),
+            Failure::NoRoom { needed, free, folder } => {
+                let system = if cfg!(target_os = "macos") { "macOS" } else { "Windows" };
+                tr!(
+                    "Not enough room: the {format} takes {size}, and {folder} has {free} left, with {kept} to leave free for {system} and other programs. Choose another place, or free up space there.",
+                    format = format.label(),
+                    size = mb(needed.saturating_sub(ROOM_KEPT)),
+                    folder = folder.display(),
+                    free = mb(*free),
+                    kept = mb(ROOM_KEPT),
+                    system = system,
+                )
+            }
             Failure::NotWritable { folder, why } => tr!("N4N0 cannot write in {folder}: {why}. Choose another place.", folder = folder.display(), why = tr(why)),
             Failure::OwnFiles => {
                 tr("That is inside the capture's own folder: N4N0 replaces its files when it reconstructs it, and deletes them with it. Choose another place.").into()

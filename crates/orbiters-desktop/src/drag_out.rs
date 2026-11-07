@@ -204,10 +204,10 @@ mod mac {
 
     /// Starts the drag. The session runs on its own in AppKit's event loop, and tells [`ENDED`] how it went.
     pub fn drag(drag: &Drag, ctx: egui::Context) -> Result<(), String> {
-        let mtm = MainThreadMarker::new().ok_or("not on the window's thread")?;
+        let mtm = MainThreadMarker::new().ok_or("not on the window's thread")?; // i18n: not shown
         let app = NSApplication::sharedApplication(mtm);
-        let window = app.keyWindow().or_else(|| app.mainWindow()).ok_or("no window")?;
-        let view: Retained<NSView> = window.contentView().ok_or("no view")?;
+        let window = app.keyWindow().or_else(|| app.mainWindow()).ok_or("no window")?; // i18n: not shown
+        let view: Retained<NSView> = window.contentView().ok_or("no view")?; // i18n: not shown
         let urls = urls(&drag.files);
         if urls.is_empty() {
             return Err("no files".into());
@@ -251,7 +251,7 @@ mod mac {
             1,
             1.0,
         )
-        .ok_or("no event")?;
+        .ok_or("no event")?; // i18n: not shown
         let source = Source::new(mtm, ctx);
         let session = view.beginDraggingSessionWithItems_event_source(&items, &event, ProtocolObject::from_ref(&*source));
         session.setAnimatesToStartingPositionsOnCancelOrFail(true);
@@ -262,7 +262,7 @@ mod mac {
 
     /// The files on the clipboard as the Finder's Copy leaves them.
     pub fn copy(files: &[PathBuf]) -> Result<(), String> {
-        let _ = MainThreadMarker::new().ok_or("not on the window's thread")?;
+        let _ = MainThreadMarker::new().ok_or("not on the window's thread")?; // i18n: not shown
         let urls = urls(files);
         if urls.is_empty() {
             return Err("no files".into());
@@ -344,8 +344,8 @@ mod win {
         // once set, and flushing renders it into the clipboard's own memory.
         unsafe {
             let _ = OleInitialize(None);
-            let data = offer(&Drag { files: files.to_vec(), image: None }).ok_or("These files could not be offered")?;
-            OleSetClipboard(&data).map_err(|e| format!("The clipboard is busy: {e}"))?;
+            let data = offer(&Drag { files: files.to_vec(), image: None }).ok_or_else(|| orbiters_i18n::tr("These files could not be offered"))?;
+            OleSetClipboard(&data).map_err(|e| orbiters_i18n::tr!("The clipboard is busy: {error}", error = e))?;
             let _ = OleFlushClipboard();
             Ok(())
         }
@@ -378,7 +378,7 @@ mod win {
     /// "Preferred DropEffect": copy (Explorer would move files dropped on the same drive otherwise).
     unsafe fn prefer_copy(data: &IDataObject) {
         unsafe {
-            let format = RegisterClipboardFormatW(windows::core::w!("Preferred DropEffect"));
+            let format = RegisterClipboardFormatW(windows::core::w!("Preferred DropEffect")); // i18n: not shown
             let Ok(memory) = GlobalAlloc(GMEM_MOVEABLE, 4) else { return };
             let at = GlobalLock(memory) as *mut u32;
             if at.is_null() {

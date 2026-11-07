@@ -17,6 +17,7 @@
 //! SteamVR only while no overlay runs.
 
 use orbiters_core::settings::TrackingSettings;
+use orbiters_i18n::tr;
 use orbiters_openvr::DeviceClass;
 use orbiters_n4n0_core::menu::SMOOTHING_STRENGTHS;
 use serde::{Deserialize, Serialize};
@@ -188,11 +189,11 @@ fn not_loaded(add_on: orbiters_smooth::AddOnState, registered: Option<SystemTime
 
 fn not_loaded_note(why: NotLoaded) -> String {
     match why {
-        NotLoaded::BlockedBySafeMode => "SteamVR's Safe Mode turned the driver off: turn orbiters_smooth on in Manage Add-ons".into(),
-        NotLoaded::TurnedOff => "Turned off in SteamVR: turn orbiters_smooth on in its Manage Add-ons".into(),
-        NotLoaded::RegisteredSince => "Just installed: smoothing starts at SteamVR's next start (only this once)".into(),
-        NotLoaded::Starting => "Waiting for SteamVR to start its smoothing driver".into(),
-        NotLoaded::Unknown => "SteamVR did not load the smoothing driver: restart SteamVR once".into(),
+        NotLoaded::BlockedBySafeMode => tr("SteamVR's Safe Mode turned the driver off: turn orbiters_smooth on in Manage Add-ons").into(),
+        NotLoaded::TurnedOff => tr("Turned off in SteamVR: turn orbiters_smooth on in its Manage Add-ons").into(),
+        NotLoaded::RegisteredSince => tr("Just installed: smoothing starts at SteamVR's next start (only this once)").into(),
+        NotLoaded::Starting => tr("Waiting for SteamVR to start its smoothing driver").into(),
+        NotLoaded::Unknown => tr("SteamVR did not load the smoothing driver: restart SteamVR once").into(),
     }
 }
 
@@ -208,7 +209,7 @@ impl Smoothing {
         #[cfg(not(windows))]
         {
             let _ = w;
-            "Smoothing needs Windows".into()
+            tr("Smoothing needs Windows").into()
         }
         #[cfg(windows)]
         self.keep_windows(w)
@@ -230,7 +231,7 @@ impl Smoothing {
         if self.control.is_none() {
             match orbiters_smooth::Control::open_or_create() {
                 Ok(control) => self.control = Some(control),
-                Err(e) => return format!("The driver cannot be reached: {e}"),
+                Err(e) => return tr!("The driver cannot be reached: {error}", error = e),
             }
         }
         self.keep_kinds(w, now);
@@ -252,17 +253,17 @@ impl Smoothing {
             control.set_enabled(enabled);
         }
         if !enabled {
-            return "Off: SteamVR tracks every device as it is".into();
+            return tr("Off: SteamVR tracks every device as it is").into();
         }
         let heartbeat = control.driver_heartbeat();
         if let (Some((Err(e), _)), None) = (&self.installed, &heartbeat) {
-            return format!("The driver could not be installed: {e}");
+            return tr!("The driver could not be installed: {error}", error = e);
         }
         match (w.steamvr, heartbeat) {
-            (false, _) => "Ready: smoothing starts with SteamVR".into(),
-            (true, Some(status)) if status.hooks > 0 => "Smoothing your devices now".into(),
-            (true, Some(_)) if self.turned_on_at.is_some_and(|t| now.saturating_duration_since(t) < TURNING_ON) => "Turning smoothing on".into(),
-            (true, Some(_)) => "The driver runs but could not reach SteamVR's tracking".into(),
+            (false, _) => tr("Ready: smoothing starts with SteamVR").into(),
+            (true, Some(status)) if status.hooks > 0 => tr("Smoothing your devices now").into(),
+            (true, Some(_)) if self.turned_on_at.is_some_and(|t| now.saturating_duration_since(t) < TURNING_ON) => tr("Turning smoothing on").into(),
+            (true, Some(_)) => tr("The driver runs but could not reach SteamVR's tracking").into(),
             (true, None) => {
                 let install = orbiters_smooth::Installation::for_user().ok();
                 let add_on = install.as_ref().map_or(orbiters_smooth::AddOnState::On, |i| i.add_on_state());

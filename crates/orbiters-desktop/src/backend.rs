@@ -7,6 +7,7 @@ use crate::ipc::{Client, N4n0Command, ToService, UpdateAction};
 use crate::state::{AccountState, MapsMine, Snapshot};
 use orbiters_contracts::performance::calibration::Calibration;
 use orbiters_core::settings::Settings;
+use orbiters_i18n::tr;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
@@ -383,7 +384,7 @@ impl Backend for Local {
     fn trash_session(&self, dir: PathBuf) {
         let r = self.ctl.trash_session(&dir);
         if r.is_ok() {
-            self.ctl.notify(NoticeKind::Success, "Session moved to the recycle bin.");
+            self.ctl.notify(NoticeKind::Success, tr!("Session moved to the {bin}.", bin = tr(crate::words::BIN)));
         }
         self.report(r);
     }
@@ -412,7 +413,7 @@ impl Backend for Local {
         let ctl = self.ctl.clone();
         std::thread::spawn(move || {
             if let Err(e) = ctl.sign_in() {
-                ctl.notify(crate::controller::NoticeKind::Error, format!("Could not start the sign-in: {e}"));
+                ctl.notify(crate::controller::NoticeKind::Error, tr!("Could not start the sign-in: {error}", error = e));
             }
         });
     }

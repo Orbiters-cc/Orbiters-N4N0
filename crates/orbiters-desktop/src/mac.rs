@@ -5,6 +5,7 @@
 
 use crate::backend::Ctl;
 use crate::service::Service;
+use orbiters_i18n::tr;
 use objc2::rc::Retained;
 use objc2::runtime::{NSObject, NSObjectProtocol, ProtocolObject};
 use objc2::{define_class, msg_send, DefinedClass, MainThreadMarker, MainThreadOnly};
@@ -88,8 +89,8 @@ fn template_icon() -> anyhow::Result<tray_icon::Icon> {
 
 /// The status item and its menu, as the system's others: a click opens the menu.
 fn tray() -> anyhow::Result<TrayIcon> {
-    let show = MenuItem::with_id("show", "Show Orbiters - N4N0", true, None);
-    let quit = MenuItem::with_id("quit", "Quit Orbiters - N4N0", true, None);
+    let show = MenuItem::with_id("show", tr("Show Orbiters - N4N0"), true, None);
+    let quit = MenuItem::with_id("quit", tr("Quit Orbiters - N4N0"), true, None);
     let menu = Menu::with_items(&[&show, &PredefinedMenuItem::separator(), &quit])?;
     MenuEvent::set_event_handler(Some(|e: MenuEvent| {
         let Some(service) = SERVICE.get() else { return };
@@ -115,7 +116,7 @@ fn tray() -> anyhow::Result<TrayIcon> {
 /// mDNS answered minutes late), and so would a window behind others, which then does not hear that the app quit. A process
 /// that has nothing to do uses nothing either way.
 pub fn stay_awake() {
-    let reason = NSString::from_str("Talks with VRChat and the app's other processes");
+    let reason = NSString::from_str("Talks with VRChat and the app's other processes"); // i18n: not shown
     let activity = NSProcessInfo::processInfo().beginActivityWithOptions_reason(NSActivityOptions::UserInitiatedAllowingIdleSystemSleep, &reason);
     // For the life of the process: ending it would let the nap back.
     std::mem::forget(activity);
@@ -156,9 +157,9 @@ pub fn install_window_menu(ctl: Ctl) {
 
 fn window_menu(ctl: Ctl) -> anyhow::Result<()> {
     let app = Submenu::new("Orbiters - N4N0", true);
-    let quit = MenuItem::with_id("window-quit", "Quit Orbiters - N4N0", true, Some("Cmd+Q".parse()?));
+    let quit = MenuItem::with_id("window-quit", tr("Quit Orbiters - N4N0"), true, Some("Cmd+Q".parse()?));
     app.append_items(&[
-        &PredefinedMenuItem::about(Some("About Orbiters - N4N0"), None),
+        &PredefinedMenuItem::about(Some(tr("About Orbiters - N4N0")), None),
         &PredefinedMenuItem::separator(),
         &PredefinedMenuItem::services(None),
         &PredefinedMenuItem::separator(),
@@ -168,7 +169,7 @@ fn window_menu(ctl: Ctl) -> anyhow::Result<()> {
         &PredefinedMenuItem::separator(),
         &quit,
     ])?;
-    let window = Submenu::new("Window", true);
+    let window = Submenu::new(tr("Window"), true);
     window.append_items(&[
         &PredefinedMenuItem::minimize(None),
         &PredefinedMenuItem::maximize(None),

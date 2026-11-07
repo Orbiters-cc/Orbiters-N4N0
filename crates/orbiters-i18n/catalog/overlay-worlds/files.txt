@@ -1,0 +1,13 @@
+# The files this area covers: every text in them is wrapped and translated (tests/coverage.rs).
+crates/orbiters-desktop/src/overlay/worlds/panel.rs
+crates/orbiters-desktop/src/overlay/worlds/panel/shots.rs
+crates/orbiters-desktop/src/overlay/worlds/panel/pages.rs
+crates/orbiters-desktop/src/overlay/worlds/mod.rs
+crates/orbiters-desktop/src/overlay/worlds/small_hint.rs
+crates/orbiters-desktop/src/overlay/worlds/view.rs
+crates/orbiters-desktop/src/overlay/worlds/render.rs
+crates/orbiters-desktop/src/overlay/worlds/panel/bar.rs
+crates/orbiters-desktop/src/overlay/worlds/finder.rs
+crates/orbiters-desktop/src/overlay/worlds/interop.rs
+crates/orbiters-desktop/src/overlay/worlds/catalog.rs
+crates/orbiters-desktop/src/overlay/worlds/shots.rs

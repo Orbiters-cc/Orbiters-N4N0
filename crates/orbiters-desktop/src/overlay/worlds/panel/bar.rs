@@ -5,6 +5,7 @@
 
 use super::super::super::orbit::panels::look as orbit_look;
 use super::*;
+use orbiters_i18n::tr;
 
 /// The bar's picture, as wide as N4N0's menu.
 pub const BAR_PX: [u32; 2] = [1024, 88];
@@ -64,15 +65,15 @@ pub fn draw_bar(p: &Painter, status: &Status, name: Option<&str>, hover: Option<
                 }
                 let x = r.min.x + 60.0;
                 let width = r.max.x - x - 34.0;
-                text_cut(p, pos2(x, r.min.y + 9.0), width, orbit_look::txt(name.unwrap_or("3D world").to_string(), 18.0).weight(weight::SEMIBOLD).color(theme::FG));
+                text_cut(p, pos2(x, r.min.y + 9.0), width, orbit_look::txt(name.unwrap_or_else(|| tr("3D world")).to_string(), 18.0).weight(weight::SEMIBOLD).color(theme::FG));
                 let line = if let Some(e) = &status.error {
                     e.clone()
                 } else if status.shown && status.stage.is_none() {
-                    "Around you · its page".to_string()
+                    tr("Around you · its page").to_string()
                 } else if let Some(f) = status.download {
-                    format!("Downloading {:.0}%", f * 100.0)
+                    tr!("Downloading {percent}%", percent = format!("{:.0}", f * 100.0))
                 } else {
-                    status.stage.clone().unwrap_or_else(|| "Getting ready".into())
+                    status.stage.clone().unwrap_or_else(|| tr("Getting ready").into())
                 };
                 let tint = if status.error.is_some() { theme::DANGER } else { theme::FG_3 };
                 text_cut(p, pos2(x, r.min.y + 35.0), width, orbit_look::txt(line, 14.0).color(tint));
@@ -85,24 +86,24 @@ pub fn draw_bar(p: &Painter, status: &Status, name: Option<&str>, hover: Option<
             }
             Target::SeeThrough => {
                 let (bg, fg) = if status.see_through { (theme::ACCENT, theme::ON_ACCENT) } else { (RAISED, theme::FG) };
-                bar_button(p, *rect, icons::VIRTUAL_REALITY, "See VRChat", bg, fg, h, pr, 1.0);
+                bar_button(p, *rect, icons::VIRTUAL_REALITY, tr("See VRChat"), bg, fg, h, pr, 1.0);
             }
-            Target::Recenter => bar_button(p, *rect, icons::CROSSHAIR, "Recenter", RAISED, theme::FG, h, pr, if status.shown { 1.0 } else { 0.45 }),
+            Target::Recenter => bar_button(p, *rect, icons::CROSSHAIR, tr("Recenter"), RAISED, theme::FG, h, pr, if status.shown { 1.0 } else { 0.45 }),
             Target::Quality(q) => {
                 if q == Quality::Performance {
                     let track = Rect::from_min_max(rect.min, all[5].1.max);
                     p.rect_filled(track, CornerRadius::same(32), SURFACE);
                 }
                 let r = Rect::from_center_size(rect.center(), vec2(rect.width() - 6.0, rect.height() - 10.0));
-                segment(p, r, q.label(), status.quality == q, h, pr, 1.0);
+                segment(p, r, q.shown_label(), status.quality == q, h, pr, 1.0);
             }
             Target::Hide => {
                 let label = if status.shown {
-                    "Hide"
+                    tr("Hide")
                 } else if status.error.is_some() {
-                    "Close"
+                    tr("Close")
                 } else {
-                    "Cancel"
+                    tr("Cancel")
                 };
                 bar_button(p, *rect, icons::EYE_SLASH, label, theme::mix(RAISED, theme::DANGER, 0.22), theme::FG, h, pr, 1.0);
             }

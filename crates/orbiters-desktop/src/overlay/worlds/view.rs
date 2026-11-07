@@ -15,6 +15,7 @@ use super::pacing::{Kind, Pacer};
 use super::render::FaceRenderer;
 use super::stereo::{self, Cube, Placement, PlayCamera, V3};
 use orbiters_openvr::{self as vr, compositor::Eye, overlay_flag, Pose, Universe, MAX_DEVICES};
+use orbiters_i18n::{tr, tr_ctx};
 use std::sync::mpsc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -69,11 +70,21 @@ impl Quality {
         }
     }
 
+    /// Its name as saved in pictures' names and files: English in every language, read back by tools.
     pub fn label(self) -> &'static str {
         match self {
-            Quality::Performance => "Light",
-            Quality::Balanced => "Balanced",
-            Quality::High => "Sharp",
+            Quality::Performance => "Light", // i18n: not shown
+            Quality::Balanced => "Balanced", // i18n: not shown (see label(): the name kept in files, shown_label() has the shown one)
+            Quality::High => "Sharp", // i18n: not shown (see label(): the name kept in files, shown_label() has the shown one)
+        }
+    }
+
+    /// Its name for a person, in the language now. "Light" here is how little it asks of the computer, not a lamp.
+    pub fn shown_label(self) -> &'static str {
+        match self {
+            Quality::Performance => tr_ctx("quality", "Light"),
+            Quality::Balanced => tr_ctx("quality", "Balanced"),
+            Quality::High => tr_ctx("quality", "Sharp"),
         }
     }
 
@@ -434,7 +445,7 @@ impl View {
             None
         };
         let Some(luid) = found else {
-            self.error = Some("SteamVR did not say which graphics card the headset uses.".into());
+            self.error = Some(tr("SteamVR did not say which graphics card the headset uses.").into());
             return;
         };
         #[cfg(windows)]
@@ -627,7 +638,8 @@ impl View {
         for (c, cube) in out.iter_mut().enumerate() {
             for (f, h) in cube.iter_mut().enumerate() {
                 *h =
-                    overlay.create(&format!("{}.{c}.{f}", self.key), "3D world").map_err(|code| format!("a 3D world overlay: SteamVR overlay error {code}"))?;
+                    overlay.create(&format!("{}.{c}.{f}", self.key), "3D world") // i18n: not shown (the overlay's name in SteamVR)
+                    .map_err(|code| tr!("a 3D world overlay: SteamVR overlay error {code}", code = code))?;
                 let _ = overlay.set_flag(*h, overlay_flag::SIDE_BY_SIDE_PARALLEL, true);
                 // A capture all around is opaque and this changes nothing; small, what is around it shows the room.
                 let _ = overlay.set_flag(*h, overlay_flag::IS_PREMULTIPLIED, true);
@@ -1035,7 +1047,7 @@ impl View {
             for &(f, slot) in faces {
                 if let Some(raw) = side.raw(f * 2 + slot) {
                     if let Err(code) = overlay.set_texture_d3d11(handles[cube_index][f], raw) {
-                        self.error = Some(format!("SteamVR refused a 3D world picture (overlay error {code})"));
+                        self.error = Some(tr!("SteamVR refused a 3D world picture (overlay error {code})", code = code));
                     }
                 }
                 self.shown_slot[f] = slot;

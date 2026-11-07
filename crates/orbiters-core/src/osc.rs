@@ -1747,6 +1747,9 @@ mod tests {
         let sink = got.clone();
         let svc = OscService::start("Orbiters - N4N0 test", &[], Network::Loopback { vrchat_port: 9 }, false, move |e, at| sink.lock().unwrap().push((e, at))).unwrap();
         assert!(svc.sender.local_addr().unwrap().ip().is_loopback());
+        if no_network_listening() {
+            return;
+        }
         let Some(ip) = primary_ipv4() else { return };
         // Sent to this machine's LAN address: nothing listens there.
         let client = UdpSocket::bind((ip, 0)).unwrap();

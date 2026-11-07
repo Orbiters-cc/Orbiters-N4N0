@@ -51,7 +51,7 @@ pub mod look {
 
     /// How pictures are drawn: in the retro menu's dots if they are not to keep their colours, as they are otherwise.
     pub fn picture_look() -> Option<orbiters_ui::software::PictureLook> {
-        DOTS_NOW.load(Ordering::Relaxed).then_some(super::super::retro::dots as orbiters_ui::software::PictureLook)
+        DOTS_NOW.load(Ordering::Relaxed).then_some(super::super::retro::phosphor as orbiters_ui::software::PictureLook)
     }
 
     /// Text of the look chosen, for what lays out its own: the retro menu's monospace, a little smaller as it is wider.
@@ -443,6 +443,8 @@ pub struct Facts {
     pub wake_word: Option<String>,
     /// The ring's cells can be picked by the number keys: on the desktop's wheel.
     pub digits: bool,
+    /// Hide was pressed, and only the way back shows.
+    pub hidden: bool,
     /// Enzo: the wheel's keys show only while Alt is held.
     pub key_caps: bool,
     /// The sheet is away for a moment.
@@ -501,8 +503,6 @@ pub struct Item {
 pub enum Look {
     /// What plays in a strip's tile: its picture, its play or pause.
     PlayingSmall,
-    /// From a capture shown here, on to the app's window, where it shows in 3D.
-    OpenWindow,
     /// Hides these parts, in so many words.
     HideWord,
     /// Back from a picture shown large.
@@ -871,10 +871,6 @@ fn sheet_page_items(sheet: Sheet, facts: &Facts) -> Vec<Item> {
             }
             if picture_beside(facts, n, true).is_some() {
                 out.push(Item { action: Action::PictureStep(true), rect: r(958.0, 262.0, 52.0, 52.0), look: Look::Step(true) });
-            }
-            // On the desktop a capture turns here, and is walked in in the app's window.
-            if facts.desktop && facts.recent.get(n).is_some_and(|r| r.kind == RecentKind::Capture) {
-                out.push(Item { action: Action::OpenApp, rect: r(1024.0 - 20.0 - 316.0, 576.0 - 68.0, 316.0, 50.0), look: Look::OpenWindow });
             }
             out
         }
@@ -1585,6 +1581,8 @@ pub fn paint(p: &Painter, zone: Zone, size: Vec2, facts: &Facts, hover: Option<u
             draw_hub(p, c, size.x, facts);
             return;
         }
+        // Hidden, only the way back shows.
+        Zone::WingName if facts.hidden => {}
         Zone::WingName => {
             // The name on a pill of its own, with what runs when it does.
             // Its Hide is a pill of its own beside it: the name is its mark then, and each has its room.
@@ -2528,11 +2526,6 @@ fn draw(p: &Painter, zone: Zone, item: &Item, facts: &Facts, hovered: bool, pres
             p.text(pos2(x, rect.center().y - 7.0), Align2::LEFT_CENTER, fit(p, name, &font, room), font, look::LABEL);
             p.text(pos2(x, rect.center().y + 7.5), Align2::LEFT_CENTER, if playing { tr_ctx("tile", "Press to pause") } else { tr_ctx("tile", "Press to play") }, look::font(9.5, weight::MEDIUM), look::MUTED);
         }
-        Look::OpenWindow => {
-            p.rect_filled(rect, look::radius(rect.height() / 2.0), if pressed { theme::mix(look::accent(), Color32::BLACK, 0.25) } else if hovered { theme::mix(look::accent(), Color32::WHITE, 0.15) } else { look::accent() });
-            widgets::icon(p, pos2(rect.left() + 26.0, rect.center().y), icons::ARROW_SQUARE_OUT, 22.0, look::on_accent());
-            p.text(pos2(rect.left() + 46.0, rect.center().y), Align2::LEFT_CENTER, tr("Walk around it, in Orbiters"), look::font(19.0, weight::BOLD), look::on_accent());
-        }
         Look::PeekWord => {
             let radius = look::radius(rect.height() / 2.0);
             p.rect_filled(rect, radius, if pressed { look::TILE_DOWN } else if hovered { look::TILE_HOVER } else { look::TILE });
@@ -2545,15 +2538,20 @@ fn draw(p: &Painter, zone: Zone, item: &Item, facts: &Facts, hovered: bool, pres
             p.text(pos2(left + 22.0, rect.center().y), Align2::LEFT_CENTER, words, font, look::LABEL);
         }
         Look::HideWord => {
-            // A real pill: it presses, and it says what goes.
+            // A real pill: it presses, and it says what goes, or what comes back.
             let radius = look::radius(rect.height() / 2.0);
             p.rect_filled(rect, radius, if pressed { look::TILE_DOWN } else if hovered { look::TILE_HOVER } else { look::TILE });
             p.rect_stroke(rect.shrink(0.5), radius, Stroke::new(1.0, Color32::from_white_alpha(if hovered { 120 } else { 54 })), egui::StrokeKind::Inside);
-            let words = if zone == Zone::WheelHide { tr("Hide ring") } else { tr("Hide tiles") };
+            let words = match (zone == Zone::WheelHide, facts.hidden) {
+                (true, false) => tr("Hide ring"),
+                (false, false) => tr("Hide tiles"),
+                (true, true) => tr("Show ring"),
+                (false, true) => tr("Show tiles"),
+            };
             let font = look::font(13.0, weight::SEMIBOLD);
             let wide = p.layout_no_wrap(words.to_string(), font.clone(), look::LABEL).size().x;
             let left = rect.center().x - (wide + 22.0) / 2.0;
-            widgets::icon(p, pos2(left + 8.0, rect.center().y), icons::EYE_SLASH, 16.0, look::LABEL);
+            widgets::icon(p, pos2(left + 8.0, rect.center().y), if facts.hidden { icons::EYE } else { icons::EYE_SLASH }, 16.0, look::LABEL);
             p.text(pos2(left + 22.0, rect.center().y), Align2::LEFT_CENTER, words, font, look::LABEL);
         }
         Look::Close => {
@@ -2795,12 +2793,6 @@ fn draw_turning(p: &Painter, rect: Rect, n: usize, facts: &Facts, view: &OpenedV
     match (&view.failed, view.picture) {
         (Some(_), _) => waiting(p, tr("Its 3D cannot show here. It can in Orbiters.")),
         (None, Some(id)) => {
-            // The plate under it, as in a headset.
-            let points: Vec<Pos2> = view.plate.iter().map(|uv| pos2(rect.left() + uv[0] * rect.width(), rect.top() + uv[1] * rect.height())).collect();
-            if points.len() > 2 {
-                p.add(Shape::convex_polygon(points.clone(), Color32::from_rgb(25, 28, 34), Stroke::NONE));
-                p.add(Shape::closed_line(points, Stroke::new(2.5, theme::alpha(look::accent(), 0.85))));
-            }
             keep_colour(p, rect);
             p.add(RectShape::filled(rect, 0.0, Color32::WHITE).with_texture(id, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0))));
         }

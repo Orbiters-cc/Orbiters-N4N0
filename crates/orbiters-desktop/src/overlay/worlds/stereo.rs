@@ -237,6 +237,45 @@ pub struct Small {
     moved: [f32; 2],
 }
 
+/// What a stick that turns does, as VRChat has it: smoothly, or a step each push.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct TurnStick {
+    pushed: bool,
+}
+
+/// How fast a stick all the way turns, and how far a step goes, in radians. Not read from VRChat, which does not say: about what it does.
+const TURNS_PER_S: f32 = 1.75;
+const TURN_STEP: f32 = std::f32::consts::FRAC_PI_6;
+/// Under this a stick is at rest, and a step needs this far, and a return under the first to go again.
+const TURN_REST: f32 = 0.2;
+const TURN_PUSHED: f32 = 0.7;
+
+impl TurnStick {
+    /// How far the world turns now, in radians about up: pushed right, what is ahead goes to the left.
+    pub fn step(&mut self, stick: f32, seconds: f32, in_steps: bool) -> f32 {
+        if in_steps {
+            if stick.abs() < TURN_REST {
+                self.pushed = false;
+            } else if stick.abs() >= TURN_PUSHED && !self.pushed {
+                self.pushed = true;
+                return TURN_STEP * stick.signum();
+            }
+            return 0.0;
+        }
+        if stick.abs() < TURN_REST {
+            return 0.0;
+        }
+        (stick.abs() - TURN_REST) / (1.0 - TURN_REST) * stick.signum() * TURNS_PER_S * seconds
+    }
+}
+
+/// `placement` turned by `radians` about the vertical through `about`.
+pub fn turned_about(placement: &Placement, about: V3, radians: f32) -> Placement {
+    let (s, c) = radians.sin_cos();
+    let turn = [[c, 0.0, s], [0.0, 1.0, 0.0], [-s, 0.0, c]];
+    Placement { rotation: mat_mul(&turn, &placement.rotation), offset: add(about, mat_vec(&turn, sub(placement.offset, about))), size: placement.size }
+}
+
 /// A menu standing in the room, as far as what is drawn over it goes: its place (its middle, Z towards who looks) and size in metres.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MenuBox {
@@ -841,6 +880,26 @@ mod tests {
         assert_ne!(small.placement(eye).offset, start.offset);
         small.move_middle(hands, pads, 100.0, 1.5);
         assert!((small.moved_by() - 1.5).abs() < 1e-3, "stops where the capture ends");
+    }
+
+    /// Enzo: "the vrchat rotation joystick command to be reproduced". Pushed right, one turns right: what was ahead goes left, and where one stands stays.
+    #[test]
+    fn the_turning_stick_turns_the_world_about_the_head() {
+        let placement = Placement { rotation: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]], offset: [0.0, 0.0, 0.0], size: 1.0 };
+        let head = [0.0, 1.6, 0.0];
+        let turned = turned_about(&placement, head, 0.5);
+        assert!(length(sub(turned.apply(head), head)) < 1e-5, "where one stands stays");
+        let ahead = turned.apply([0.0, 1.6, -1.0]);
+        assert!(ahead[0] < -0.4, "what was ahead goes left: {ahead:?}");
+        assert!((ahead[1] - 1.6).abs() < 1e-5, "no higher or lower");
+        let mut stick = TurnStick::default();
+        assert_eq!(stick.step(0.1, 0.1, false), 0.0, "a thumb at rest");
+        assert!(stick.step(1.0, 0.1, false) > 0.0 && stick.step(-1.0, 0.1, false) < 0.0);
+        // In steps: one for each push.
+        assert_eq!(stick.step(0.9, 0.1, true), TURN_STEP);
+        assert_eq!(stick.step(0.9, 0.1, true), 0.0, "held, no more");
+        assert_eq!(stick.step(0.0, 0.1, true), 0.0);
+        assert_eq!(stick.step(-0.9, 0.1, true), -TURN_STEP);
     }
 
     /// Enzo: "it's better that the 3D captures never go in front of the menus".

@@ -181,7 +181,6 @@ pub struct Worlds {
     /// What says how to handle what shows small; it has been used; a new opening of the menu asks it back for the next capture.
     hint: Option<small_hint::SmallHint>,
     backdrop: Option<small_hint::Backdrop>,
-    plate: Option<small_hint::Plate>,
     hide_chip: Option<small_hint::HideChip>,
     small_place: Option<(vr::Matrix34, f32)>,
     /// Where each hand's tool is and which way it points, and its trigger, now and a turn ago.
@@ -287,7 +286,6 @@ impl Worlds {
             alone: false,
             key: key.to_string(),
             hint: None,
-            plate: None,
             hide_chip: None,
             small_rays: [None; 2],
             small_triggers: [false; 2],
@@ -364,7 +362,6 @@ impl Worlds {
             alone: true,
             key: String::new(),
             hint: None,
-            plate: None,
             hide_chip: None,
             small_rays: [None; 2],
             small_triggers: [false; 2],
@@ -504,13 +501,6 @@ impl Worlds {
                         self.start_live(&entry);
                     }
                 }
-                Action::Walk => {
-                    if let Some(backend) = &self.backend {
-                        backend.show_window();
-                    }
-                    let time = self.time();
-                    self.panel.say(tr("Opened in the Orbiters window, to walk around it"), time);
-                }
                 // On a sheet in VR: for the overlay's own 3D worlds, which has the view.
                 Action::Show(id) if self.relay.is_some() => {
                     if let Some(entry) = entries.iter().find(|e| e.id == id).or(self.picked.as_ref().filter(|e| e.id == id)) {
@@ -583,7 +573,6 @@ impl Worlds {
         let entries = self.entries();
         let status = self.status();
         let time = self.time();
-        let (no_thumb, no_picture) = (|_: &Entry| -> Option<TextureId> { None }, |_: u64, _: bool| -> Option<TextureId> { None });
         let picked = self.picked().cloned();
         // On a headset's endless list a press waits: it may be a drag of the list.
         if let Some((_, y)) = self.live_pointer.filter(|at| self.panel.vr_list_on(&status) && panel::Panel::vr_list_holds(at.0, at.1)) {
@@ -611,6 +600,16 @@ impl Worlds {
         }
         self.act_alone(actions, entries);
         self.follow_live(entries);
+    }
+
+    #[cfg(test)]
+    pub fn status_for_test(&self) -> Status {
+        self.status()
+    }
+
+    /// Whether the pointer is on something of the panel.
+    pub fn points_at_something(&self) -> bool {
+        self.panel.hover.is_some() || (self.panel.vr_dragging())
     }
 
     /// The press of [`Worlds::press_alone`] let go.
@@ -655,9 +654,6 @@ impl Worlds {
         }
         if let Some(chip) = self.hide_chip.take() {
             chip.destroy(overlay);
-        }
-        if let Some(plate) = self.plate.take() {
-            plate.destroy(overlay);
         }
         let _ = overlay.destroy(self.chip);
         let _ = overlay.destroy(self.bar);
@@ -817,13 +813,9 @@ impl Worlds {
     fn status(&self) -> Status {
         let mut status = self.own_status();
         // On a sheet in VR the 3D view is the overlay's own: what shows is what it says.
+        // All of it: this panel has no view of its own there. It said it was on a screen, and so a capture pressed in a headset turned flat on the page, with no way to be around you.
         if let Some(view) = &self.relay {
-            status.current = view.current;
-            status.quality = view.quality;
-            status.see_through = view.see_through;
-            status.download = view.download;
-            status.stage = view.stage.clone();
-            status.error = view.error.clone().or(status.error);
+            status = Status { fetching: status.fetching, listing_error: status.listing_error, list: status.list, error: view.error.clone().or(status.error), ..view.clone() };
         }
         status
     }
@@ -835,8 +827,11 @@ impl Worlds {
 
     /// Makes this panel, on a sheet in VR, one that asks for what only the overlay's own 3D worlds can do, `view` being what those say. Returns what it asked since last time.
     pub fn relay_to(&mut self, view: Status) -> Vec<Relayed> {
-        self.relay = Some(view);
-        self.panel.dirty = true;
+        // Only when it says something new. Called every turn, this painted the whole page 45 times a second for nothing: 41 ms turns in a headset, with hover waiting behind them.
+        if self.relay.as_ref() != Some(&view) {
+            self.relay = Some(view);
+            self.panel.dirty = true;
+        }
         std::mem::take(&mut self.relayed)
     }
 
@@ -851,14 +846,6 @@ impl Worlds {
         let home = self.small_place.is_some_and(|(at, _)| small.is_some_and(|s| stereo::length(stereo::sub(stereo::position(&at), s.anchor)) <= stereo::SMALL_DOCKS_WITHIN_M * 2.0));
         let covered = !home && small.is_some_and(|s| !s.docked && self.menu_boxes.iter().any(|m| stereo::shows_over(eye, s.anchor, s.radius(), m)));
         self.view.set_covered(covered);
-        // The plate it stands on.
-        let plate = self.view.small_plate().filter(|_| !covered);
-        if plate.is_some() && self.plate.is_none() {
-            self.plate = small_hint::Plate::new(overlay, &self.key).map_err(|e| eprintln!("{e:#}")).ok();
-        }
-        if let Some(on) = self.plate.as_mut() {
-            on.update(overlay, presenter, plate);
-        }
         // The dark pane behind it in a panel's hole.
         let pane = small.filter(|s| s.docked).and(self.small_place).map(|(at, radius)| (at, radius * 2.0 / SMALL_FILLS_HOLE + 0.012));
         if pane.is_some() && self.backdrop.is_none() {
@@ -953,6 +940,11 @@ impl Worlds {
         self.view.small()
     }
 
+    /// VRChat's turning stick, for what shows around the person.
+    pub fn turn_stick(&mut self, stick: f32, steamvr: &vr::Client) {
+        self.view.turn_stick(stick, steamvr);
+    }
+
     /// The hands, for what shows small.
     pub fn small_input(&mut self, hands: [Option<vr::Matrix34>; 2], grips: [bool; 2], sticks: [f32; 2], pads: [[f32; 2]; 2]) {
         self.view.small_input(hands, grips, sticks, pads);
@@ -1015,7 +1007,8 @@ impl Worlds {
             }
         } else if self.current.is_some() && self.view.active() {
             if self.view.preparing() {
-                s.stage = Some(tr("Getting your graphics card ready").into());
+                // Its device and shaders stay for the next: after the first, a capture only has to get there.
+                s.stage = Some(if self.view.first_time() { tr("Getting your graphics card ready") } else { tr("Opening it") }.into());
             } else {
                 s.shown = true;
             }
@@ -1418,8 +1411,6 @@ impl Worlds {
                     self.download = Some(Download { id, key, progress, answer: rx });
                     self.current = Some(entry);
                 }
-                // With a headset the capture stands around the person: a screen's alone.
-                Action::Walk => {}
                 Action::Hide => {
                     self.download = None;
                     self.error = None;

@@ -685,8 +685,7 @@ pub struct Panels {
     videos_had: usize,
     /// How many lines the conversation had.
     talk_had: usize,
-    /// What play or pause was last asked, and when; the place held along what plays; where it was let go; where it was moved to, and when.
-    play_asked: Option<(bool, Instant)>,
+    /// The place held along what plays; where it was let go; where it was moved to, and when.
     seeking: Option<f32>,
     /// The sound devices to choose from on the sheet of settings, and those on their way.
     audio_outputs: Vec<orbiters_core::settings::AudioEndpoint>,
@@ -772,7 +771,6 @@ impl Panels {
             videos_asked: None,
             videos_had: 0,
             talk_had: 0,
-            play_asked: None,
             seeking: None,
             audio_outputs: Vec::new(),
             audio_outputs_coming: None,
@@ -854,7 +852,32 @@ impl Panels {
         }
     }
 
-    /// What is open: parts for it in the places `places` gives, or none. Hide lasts until the menu closes. Whatever was held lets go.
+    /// What is on the sheet, for a note in the log.
+    pub fn doing(&self) -> String {
+        format!("sheet {:?}, page {:?}, parts {}", self.facts.sheet, self.stage.host.menu.page, self.list.len())
+    }
+
+    /// Hidden, all that shows around VRChat's menu `menu`: the one button that brings the rest back.
+    pub fn way_back(&self, menu: Option<Around>, places: &mut Vec<Placed>) {
+        let zone = match menu {
+            Some(Around::Wheel) => Zone::WheelHide,
+            Some(Around::QuickMenu) => Zone::WingName,
+            _ => return,
+        };
+        if self.hidden {
+            places.retain(|p| p.zone == zone);
+            // A strip has it inside itself.
+            if places.is_empty() {
+                places.push(zones::in_units(zone));
+            }
+        }
+    }
+
+    pub fn hidden(&self) -> bool {
+        self.hidden
+    }
+
+    /// What is open: parts for it in the places `places` gives, or none. Whatever was held lets go.
     pub fn set_open(&mut self, around: Option<Around>, places: Vec<Placed>, snap: &Snapshot) {
         if around != self.open {
             // Enzo: a view held in a hand stays, and the menu comes back where it was, to go on through the worlds or the pictures.
@@ -865,7 +888,6 @@ impl Panels {
             }
             self.peek = false;
             self.stop_talking();
-            self.hidden = false;
             self.facts.pointed = None;
             self.facts.sheet = None;
             self.release();
@@ -875,7 +897,7 @@ impl Panels {
             self.bloom = Bloom::default();
             self.show_keys = false;
         }
-        if self.hidden || around.is_none() {
+        if around.is_none() {
             self.list.clear();
             self.takeover = None;
             self.facts.sheet = None;
@@ -912,7 +934,7 @@ impl Panels {
         }
         // The Quick Menu again, with a view still in a hand: where it was.
         if around == Some(Around::QuickMenu) && self.takeover.is_none() {
-            match self.resume.take().filter(|_| self.view_taken) {
+            match self.resume.take().filter(|_| self.view_taken && !self.hidden) {
                 Some((sheet, title, scroll)) => self.open_again(sheet, &title, scroll, snap),
                 None => {}
             }
@@ -1375,7 +1397,7 @@ impl Panels {
             desktop: snap.n4n0.desktop_mode || !snap.steamvr.running,
             fast_walk: snap.settings.walk_boost.enabled,
             n4n0: snap.settings.n4n0.enabled,
-            music: menu.media.as_ref().map(|m| (m.title.clone(), shown_playing(m.playing, self.play_asked, Instant::now()))),
+            music: menu.media.as_ref().map(|m| (m.title.clone(), m.playing)),
             music_by: menu.media.as_ref().map_or(String::new(), |m| m.artist.clone()),
             art: None,
             no_kit: snap.worn_kit == Some(false),
@@ -1434,6 +1456,7 @@ impl Panels {
             can_seek: menu.media.as_ref().is_some_and(|m| m.can_seek),
             world_video: menu.world_video.as_ref().map(|v| v.title.as_deref().map_or_else(|| v.url.clone(), panels::clean_title)),
             key_caps: self.key_caps,
+            hidden: self.hidden,
             peek: self.peek,
             digits: self.open == Some(Around::Wheel) && self.takeover.is_none() && (snap.n4n0.desktop_mode || !snap.steamvr.running),
             beside_wing: self.open == Some(Around::QuickMenu),
@@ -1595,8 +1618,30 @@ impl Panels {
         }
     }
 
-    /// The pointer's button went down on what it hovers.
+    /// Whether the pointer is on something that can be pressed: where a click is heard, whatever the press then does.
+    fn on_something(&self) -> bool {
+        let is_something = |panel: &Panel| panel.hover.and_then(|i| panel.items.get(i)).is_some_and(|item| item.action != Action::Idle);
+        if self.list.iter().any(is_something) {
+            return true;
+        }
+        match self.facts.sheet {
+            Some(Sheet::Worlds) => self.stage.worlds.as_ref().is_some_and(Worlds::points_at_something),
+            Some(Sheet::Menu) => self.takeover.as_ref().is_some_and(|p| p.hover.is_some()),
+            Some(_) => self.takeover.as_ref().is_some_and(is_something),
+            None => false,
+        }
+    }
+
+    /// The pointer's button went down on what it hovers. Every press on something clicks, here and only here, so that nothing new can forget it (Enzo): lists that wait to see if a press is a
+    /// drag, sheets, N4N0's pages and the world's panel alike.
     pub fn press(&mut self, snap: &Snapshot) -> Pressed {
+        let on_something = self.on_something();
+        let mut out = self.press_what(snap);
+        out.clicked |= on_something;
+        out
+    }
+
+    fn press_what(&mut self, snap: &Snapshot) -> Pressed {
         let mut out = Pressed::default();
         // In front of everything, what the sheet shows takes it.
         match self.facts.sheet {
@@ -1845,12 +1890,6 @@ impl Panels {
                     _ => Target::MediaPlayPause,
                 };
                 let host = &mut self.stage.host;
-                // What it was asked to become stays said until what is read catches up.
-                if target == Target::MediaPlayPause {
-                    if let Some(media) = host.menu.media.as_ref().filter(|m| m.can_play_pause) {
-                        self.play_asked = Some((!shown_playing(media.playing, self.play_asked, Instant::now()), Instant::now()));
-                    }
-                }
                 let effects = host.press(target);
                 host.effects(effects, snap, &self.backend);
             }
@@ -1917,9 +1956,14 @@ impl Panels {
             }
             Action::Set(pick) => self.set(pick, snap),
             Action::CloseSheet => self.close_sheet(),
+            // Enzo: hidden until shown again, whatever VRChat's menu does meanwhile. It said nothing was open before, which turned what follows the button upside down: closing VRChat's menu opened the tiles.
             Action::Hide => {
-                self.hidden = true;
-                out.hide = true;
+                self.hidden = !self.hidden;
+                self.facts.hidden = self.hidden;
+                for panel in &mut self.list {
+                    panel.dirty = true;
+                }
+                out.hide = self.hidden;
                 self.release();
             }
             Action::Idle => {}
@@ -2322,13 +2366,8 @@ fn visited_worlds(rows: &[orbiters_n4n0_core::menu::InstanceRow], now: u64, pict
     worlds
 }
 
-/// How long an app gets to do what it was asked before what it says is believed over what was asked: the computer's music is read once a second, and it read the old state just after a press.
+/// How long a place asked for in what plays is shown over what the app says, which is read once a second.
 const MEDIA_CATCHES_UP: Duration = Duration::from_millis(2500);
-
-/// Whether what plays shows as playing: what was just asked (Enzo: "the play / pause button doesn't switch state correctly"), else what the app says.
-fn shown_playing(read: bool, asked: Option<(bool, Instant)>, now: Instant) -> bool {
-    asked.filter(|(_, at)| now.duration_since(*at) < MEDIA_CATCHES_UP).map_or(read, |(playing, _)| playing)
-}
 
 /// How fast a list thrown slows down: by e every this fraction of a second's inverse.
 const THROW_SLOWS: f32 = 2.2;
@@ -2532,18 +2571,6 @@ mod tests {
         assert_eq!(drag.follow(305.0, 1000.0, true, t), Some(95.0), "moved once, a drag for good");
         assert_eq!(drag.follow(900.0, 1000.0, false, t), Some(0.0), "with no give, not past the top");
         assert!(drag.follow(900.0, 1000.0, true, t).unwrap() < 0.0, "with it, a little past the top");
-    }
-
-    #[test]
-    fn play_and_pause_show_what_was_asked_until_the_app_has_caught_up() {
-        let t = Instant::now();
-        // Pressed to pause: a read of the old state does not flip it back.
-        let asked = Some((false, t));
-        assert!(!shown_playing(true, asked, t + Duration::from_millis(900)));
-        // After a while the app is believed, whichever it says.
-        assert!(shown_playing(true, asked, t + MEDIA_CATCHES_UP));
-        assert!(shown_playing(true, None, t));
-        assert!(!shown_playing(false, None, t));
     }
 
     /// Round 6, seen in the game: the newest capture was asked for twice, as a capture and as the newest of all, and the list
@@ -2827,3 +2854,7 @@ mod tests {
     }
 
 }
+
+/// The menus as a headset uses them, with nothing of SteamVR: what a person does, and what happens.
+#[cfg(test)]
+mod flows;

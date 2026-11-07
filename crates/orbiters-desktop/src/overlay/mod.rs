@@ -66,6 +66,36 @@ const DEVICE_RETRY: Duration = Duration::from_secs(5);
 
 /// How long raw pixels last after the `refusals`-th refusal in a row: 5 s, 10 s, 20 s… up to about ten minutes.
 #[cfg(windows)]
+
+/// A turn of the menus that took long enough to be felt, in the log with what was up: what a person calls unresponsive leaves no other mark. At most one line each few seconds, and nothing
+/// otherwise.
+#[derive(Default)]
+struct Stalls {
+    said: Option<Instant>,
+}
+
+impl Stalls {
+    const FELT: Duration = Duration::from_millis(150);
+    const AT_MOST: Duration = Duration::from_secs(5);
+
+    fn note(&mut self, took: Duration, doing: impl FnOnce() -> String) {
+        if took < Self::FELT || self.said.is_some_and(|at| at.elapsed() < Self::AT_MOST) {
+            return;
+        }
+        self.said = Some(Instant::now());
+        let dir = orbiters_core::paths::logs_dir();
+        let at = orbiters_core::now_utc_iso();
+        let line = format!("{at} a turn took {} ms: {}
+", took.as_millis(), doing()); // i18n: a log's line
+        if std::fs::create_dir_all(&dir).is_ok() {
+            if let Ok(mut file) = std::fs::OpenOptions::new().append(true).create(true).open(dir.join("overlay-stalls.log")) {
+                use std::io::Write;
+                let _ = file.write_all(line.as_bytes());
+            }
+        }
+    }
+}
+
 fn after_refusals(refusals: u32) -> Duration {
     DEVICE_RETRY * 2u32.pow(refusals.saturating_sub(1).min(7))
 }
@@ -590,6 +620,7 @@ fn session(args: &[String]) -> anyhow::Result<Ended> {
     let ctx = egui::Context::default();
     orbiters_ui::install(&ctx);
     let sounds = Sounds::start();
+    let mut stall = Stalls::default();
     let mut painter = painter();
     let mut presenter = Presenter::new(&steamvr);
     if let Some(icon) = thumbnail() {
@@ -833,12 +864,15 @@ fn session(args: &[String]) -> anyhow::Result<Ended> {
                 world_status: t.menu.worlds.view_status(),
                 prediction: (frame - since).clamp(0.0, 0.05),
             };
+            let began = Instant::now();
             let turn = orbit.update(cx);
+            stall.note(began.elapsed(), || orbit.doing());
             if turn.clicked {
                 sounds.click();
             }
             t.menu.worlds.from_elsewhere(turn.worlds);
             t.menu.worlds.small_place(turn.small_place);
+            let menu_up = !turn.menus_up.is_empty();
             t.menu.worlds.menus_up(turn.menus_up);
             if t.menu.worlds.small_showing() {
                 let read = actions.pads(&steamvr);
@@ -848,6 +882,11 @@ fn session(args: &[String]) -> anyhow::Result<Ended> {
                 let lasers = actions.lasers(&steamvr, 0.0);
                 t.menu.worlds.small_input(lasers, actions.grabs(&steamvr), sticks, touchpads);
                 t.menu.worlds.small_tools(lasers, actions.orbit_triggers(&steamvr, [false; 2]));
+            } else if snap.settings.orbit.immersive_turn && t.menu.worlds.view.active() {
+                // Around the person: VRChat's turning stick is the hand that does not walk. Held still with a menu up, whose lists it scrolls.
+                let hand = if snap.settings.walk_boost.hand == orbiters_core::settings::Hand::Left { 1 } else { 0 };
+                let stick = if menu_up { 0.0 } else { actions.pads(&steamvr).map_or(0.0, |pads| pads.sticks[hand].x) };
+                t.menu.worlds.turn_stick(stick, &steamvr);
             }
         }
         if t.menu.update(&overlay, &steamvr, &mut presenter, &snap, &backend, button, watch) {

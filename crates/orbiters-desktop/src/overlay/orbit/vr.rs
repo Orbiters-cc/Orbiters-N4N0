@@ -415,6 +415,19 @@ pub fn sheet_plane(head: &Matrix34, size: f32) -> Plane {
 }
 
 /// One hand's laser on the panels: which, where in its units and its hit. The nearest wins, the wheel's bite is not on them.
+/// A part as a pointer finds it.
+fn seen_at(quad: Quad, place: &Placing, shown: bool) -> Quad {
+    let transform = match place {
+        Placing::Room => quad.transform,
+        Placing::At(at) => *at,
+    };
+    if shown {
+        Quad { transform, ..quad }
+    } else {
+        Quad { transform, width: 0.0, height: 0.0 }
+    }
+}
+
 fn laser_on(quads: &[(Quad, Placed)], origin: V3, direction: V3) -> Option<(usize, [f32; 2], space::Hit)> {
     let mut best: Option<(usize, [f32; 2], space::Hit)> = None;
     for (i, (quad, placed)) in quads.iter().enumerate() {
@@ -465,6 +478,26 @@ const CAMERA_LOST_AFTER: Duration = Duration::from_millis(800);
 const CAMERA_LOOKS_TO_SHOW: u32 = 2;
 
 impl OrbitVr {
+    /// What is up, for a note in the log when a turn took too long.
+    pub fn doing(&self) -> String {
+        format!("open {:?}, {}", self.panels.open_menu(), self.panels.doing())
+    }
+
+    /// Why the tiles around VRChat's camera cannot show, for its switch in Settings.
+    fn camera_note(&self, snap: &Snapshot) -> Option<String> {
+        let settings = &snap.settings;
+        if !settings.orbit.camera_tiles || !snap.steamvr.running {
+            return None;
+        }
+        if !settings.osc.enabled {
+            return Some(orbiters_i18n::mark("OSC is off in these settings, so Orbiters cannot tell that the camera is open.").to_string());
+        }
+        if snap.vrchat.running && snap.camera_open_said.is_none() {
+            return Some(orbiters_i18n::mark("VRChat does not say whether its camera is open: turn on OSC in its Action Menu.").to_string());
+        }
+        self.camera_watch.as_ref().and_then(|watch| watch.problem()).map(str::to_string)
+    }
+
     /// Where VRChat's camera panel is now, while it is being watched and was seen.
     fn camera_turn(&mut self, steamvr: &vr::Client, prediction: f32, now: Instant, dt: f32) -> Option<Plane> {
         let watch = self.camera_watch.as_ref()?;
@@ -537,6 +570,8 @@ pub struct OrbitVr {
     last_turn: Instant,
     instance: Option<String>,
     told: Option<OrbitStatus>,
+    /// Where the hands last pointed.
+    pointers: [Option<vr::Matrix34>; 2],
     overrides_asked: bool,
     /// The hand whose laser moves the pointer.
     active: Option<usize>,
@@ -567,6 +602,7 @@ impl OrbitVr {
             plane: None,
             takeover_plane: None,
             camera_watch: None,
+            pointers: [None; 2],
             camera_follow: Default::default(),
             camera_seen: None,
             camera_looks: 0,
@@ -601,6 +637,7 @@ impl OrbitVr {
         let status = OrbitStatus {
             note: (on != Some(true)).then(|| mark("SteamVR's \"Experimental overlay input overrides\" (Settings, Developer) is off: pointing at a panel still presses in VRChat too.").to_string()),
             steamvr_overrides: on,
+            camera_note: self.camera_note(cx.snap),
         };
         if self.told.as_ref() != Some(&status) {
             cx.backend.orbit_status(status.clone());
@@ -709,7 +746,8 @@ impl OrbitVr {
         self.camera_was = camera;
         let open = self.buttons.open();
         // VRChat's camera panel, seen on its window while it says its camera is open, with neither of its menus up.
-        let camera_wanted = settings.camera_tiles && open == Open::Closed && camera == Some(true);
+        // Looked for even with a menu up: VRChat's camera is opened from one, and what follows the buttons may still say it is open.
+        let camera_wanted = settings.camera_tiles && camera == Some(true);
         if camera_wanted != self.camera_watch.is_some() {
             self.camera_watch = camera_wanted.then(super::camera_frames::CameraWatch::start);
             self.camera_follow.clear();
@@ -774,6 +812,8 @@ impl OrbitVr {
         if menu == Some(Around::Wheel) && !self.panels.sheet_open() {
             places.push(zones::in_units(Zone::WheelHide));
         }
+        // Hidden: only the way back, and nothing else, whatever VRChat's menu does.
+        self.panels.way_back(menu, &mut places);
         self.panels.takeover_place = Some(zones::in_units(Zone::Takeover));
         self.panels.back_place = Some(zones::in_units(Zone::SheetBack));
         self.panels.peek_place = Some(zones::in_units(Zone::SheetPeek));
@@ -887,8 +927,14 @@ impl OrbitVr {
         }
 
         // Who points at what.
-        let lasers = if cx.input_read { cx.actions.lasers(cx.steamvr, cx.prediction) } else { [None; 2] };
+        // A read that failed is not a hand gone: dropping the hover for it paints twice and shows it late.
+        if cx.input_read {
+            self.pointers = cx.actions.lasers(cx.steamvr, cx.prediction);
+        }
+        let lasers = self.pointers;
         let triggers = cx.actions.orbit_triggers(cx.steamvr, self.block.blocked());
+        // Where each part is seen, smoothed or on its spring, and not where it is going: a pointer on what it sees is on it.
+        let where_seen: Vec<(Quad, Placed)> = quads.iter().zip(self.panels.all()).zip(&placing).map(|((q, p), place)| (seen_at(q.0, place, p.shown), q.1)).collect();
         let hits: [Option<(usize, [f32; 2], space::Hit)>; 2] = std::array::from_fn(|i| {
             // The hand that holds the menu points at nothing.
             if matches!(open, Open::Wheel(h) | Open::QuickMenu(h) if h == i) {
@@ -896,8 +942,7 @@ impl OrbitVr {
             }
             lasers[i].and_then(|tip| {
                 let (o, d) = space::ray(&tip);
-                let shown: Vec<(Quad, Placed)> = quads.iter().zip(self.panels.all()).map(|(q, p)| if p.shown { *q } else { (Quad { width: 0.0, height: 0.0, ..q.0 }, q.1) }).collect();
-                laser_on(&shown, o, d)
+                laser_on(&where_seen, o, d)
             })
         });
         let hands: [HandNow; 2] = std::array::from_fn(|i| HandNow { on_panel: hits[i].is_some(), trigger: triggers[i] });
@@ -927,10 +972,6 @@ impl OrbitVr {
             if down && !was && blocked_before[h] {
                 let pressed = self.panels.press(cx.snap);
                 turn.clicked |= pressed.clicked;
-                // Its close says nothing is open: what puts these right when a menu closed some way this could not see.
-                if pressed.hide {
-                    self.buttons.reset();
-                }
             } else if !down && was {
                 self.panels.release();
             }
@@ -945,7 +986,7 @@ impl OrbitVr {
                 tip,
                 eyes: space::position(&head),
                 end: hit.point,
-                surface: quads[panel].0.transform,
+                surface: where_seen[panel].0.transform,
                 pressed: triggers[hand],
             });
             self.lasers.update(cx.overlay, cx.presenter, hand, beam);

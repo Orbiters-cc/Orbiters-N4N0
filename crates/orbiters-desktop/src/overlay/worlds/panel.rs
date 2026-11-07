@@ -127,8 +127,6 @@ pub enum Page {
 /// What can be pressed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Target {
-    /// On a screen: on to walking around what turns on the panel.
-    Walk,
     /// On a screen: what turns on the panel, to take with the mouse.
     Hero,
     /// Closes the side panel.
@@ -189,8 +187,6 @@ pub enum Target {
 pub enum Action {
     /// Show this capture (its listing id) around the person; on a screen, turning on this panel.
     Show(u64),
-    /// On a screen: on to walking around it, in the app's window.
-    Walk,
     Hide,
     Recenter,
     SeeThrough(bool),
@@ -216,7 +212,7 @@ pub enum Action {
 }
 
 /// How the capture view goes, as the panel shows it.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct Status {
     /// The capture shown or on its way (its listing id).
     pub current: Option<u64>,
@@ -701,12 +697,6 @@ fn draw_live(p: &Painter, hero: Rect, live: &Live) {
         return;
     };
     p.rect_filled(hero, corner, Color32::from_rgb(15, 17, 21));
-    let inside = p.with_clip_rect(hero);
-    let points: Vec<Pos2> = live.plate.iter().map(|uv| pos2(hero.left() + uv[0] * hero.width(), hero.top() + uv[1] * hero.height())).collect();
-    if points.len() > 2 {
-        inside.add(egui::Shape::convex_polygon(points.clone(), Color32::from_rgb(25, 28, 34), Stroke::NONE));
-        inside.add(egui::Shape::closed_line(points, Stroke::new(2.0, theme::alpha(orbit_look::accent(), 0.85))));
-    }
     super::super::orbit::panels::keep_colour(p, hero);
     p.add(egui::epaint::RectShape::filled(hero, corner, Color32::WHITE).with_texture(id, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0))));
     let txt = orbit_look::txt(tr("Drag to turn it"), 14.5).weight(weight::MEDIUM).color(Color32::WHITE);
@@ -1101,9 +1091,7 @@ impl Panel {
                 if !e.capture {
                     out.push((Target::Join, if vr { VR_GO_HALF } else { SHOW_WHOLE }));
                 } else if !status.headset {
-                    if live_here {
-                        out.push((Target::Walk, SHOW_WHOLE));
-                    } else if !current {
+                    if !live_here && !current {
                         out.push((Target::Show, SHOW_WHOLE));
                     }
                 } else if current {
@@ -1294,7 +1282,6 @@ impl Panel {
                     (false, false) => vec![Action::Show(e.id)],
                 }
             }
-            Target::Walk => vec![Action::Walk],
             Target::Hero => Vec::new(),
             Target::Join => self.entry(d).map(|e| Action::Join(e.world_id.clone())).into_iter().collect(),
             Target::OpenWeb => self.entry(d).map(|e| Action::OpenWeb(e.world_id.clone())).into_iter().collect(),
@@ -1945,8 +1932,6 @@ impl Panel {
                     let lit = !(current && status.small);
                     pill_button(p, *rect, Some(glyph), label, if lit { orbit_look::accent() } else { RAISED2 }, if lit { orbit_look::on_accent() } else { theme::FG }, h, pr, rest);
                 }
-                // It shows here already: what a press adds is walking around in it.
-                Target::Walk => pill_button(p, *rect, Some(icons::ARROW_SQUARE_OUT), tr("Walk around it, in Orbiters"), orbit_look::accent(), orbit_look::on_accent(), h, pr, rest),
                 Target::ShowSmall => {
                     let lit = current && status.small;
                     pill_button(p, *rect, Some(icons::HAND_GRABBING), tr("Small here"), if lit { orbit_look::accent() } else { RAISED2 }, if lit { orbit_look::on_accent() } else { theme::FG }, h, pr, rest);
@@ -2656,16 +2641,15 @@ mod tests {
         let mut panel = Panel { page: Page::Detail, selected: Some(1), ..Default::default() };
         assert_eq!(panel.press(Target::Show, &d, 1.0), [Action::Show(1)]);
         let has = |panel: &Panel, t: Target| panel.targets(&d).iter().any(|(x, _)| *x == t);
-        assert!(has(&panel, Target::Show) && !has(&panel, Target::Walk) && !has(&panel, Target::Hero));
+        assert!(has(&panel, Target::Show) && !has(&panel, Target::Hero));
         panel.live = Some(Live { id: 1, ..Default::default() });
-        assert!(!has(&panel, Target::Show) && has(&panel, Target::Walk) && has(&panel, Target::Hero));
-        assert_eq!(panel.press(Target::Walk, &d, 2.0), [Action::Walk]);
+        assert!(!has(&panel, Target::Show) && has(&panel, Target::Hero));
         // Its close stays on top of it.
         let (x, y) = (SIDE_CLOSE.center().x, SIDE_CLOSE.center().y);
         assert_eq!(panel.hit(&d, x, y), Some(Target::CloseSide));
         // Another world's page: its own button again, until that one turns as well.
         panel.selected = Some(2);
-        assert!(!has(&panel, Target::Walk) && !has(&panel, Target::Hero));
+        assert!(!has(&panel, Target::Hero));
     }
 
     /// Round 8's judges: no orphan row beside the panel. An odd last world has the way on to other worlds beside it.

@@ -3250,7 +3250,7 @@ fn spiral() -> Vec<[f32; 3]> {
 }
 
 /// A backend that does nothing: the overlay shots press buttons (Calibrate) without touching the app's files.
-struct Still;
+pub(crate) struct Still;
 
 impl crate::backend::Backend for Still {
     fn n4n0(&self, _command: crate::ipc::N4n0Command) {}

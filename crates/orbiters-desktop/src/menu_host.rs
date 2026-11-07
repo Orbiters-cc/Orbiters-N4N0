@@ -1,6 +1,6 @@
 //! N4N0's menu (`orbiters_n4n0_core::menu`) run where it is drawn: the SteamVR overlay's menu in the play space, and Home,
 //! the window's main page. `orbiters_n4n0::menu_host` keeps it in step with the tray service and fetches what it
-//! shows; here its pictures are egui textures (with the retro look's green dots), and what it asks goes to the service
+//! shows; here its pictures are egui textures (in the retro look's green), and what it asks goes to the service
 //! over the backend.
 
 use crate::backend::Ctl;
@@ -30,8 +30,8 @@ impl Textures {
             }
             images.insert(name.to_string(), image.clone());
         }
-        let dots = menu_retro::dots(&image, 1);
-        (self.ctx.load_texture(name, image, TextureOptions::LINEAR), self.ctx.load_texture(format!("{name}-dots"), dots, TextureOptions::NEAREST))
+        let green = menu_retro::phosphor(&image);
+        (self.ctx.load_texture(name, image, TextureOptions::LINEAR), self.ctx.load_texture(format!("{name}-dots"), green, TextureOptions::LINEAR))
     }
 }
 
@@ -102,7 +102,7 @@ impl MenuHost {
         self.0.pictures().images.lock().ok()?.get(key).cloned()
     }
 
-    /// A thumbnail by its key once loaded, as the look draws it (`retro`: its green dots).
+    /// A thumbnail by its key once loaded, as the look draws it (`retro`: in its green).
     pub fn picture(&self, key: &str, retro: bool) -> Option<TextureId> {
         self.0.picture(key).map(|(photo, dots)| if retro { dots.id() } else { photo.id() })
     }

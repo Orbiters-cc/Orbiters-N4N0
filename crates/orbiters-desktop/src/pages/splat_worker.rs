@@ -275,11 +275,11 @@ impl Readback {
         slice.map_async(wgpu::MapMode::Read, move |r| {
             let _ = tx.send(r);
         });
-        device.poll(wgpu::PollType::wait_indefinitely()).map_err(|e| anyhow::anyhow!("waiting for the integrated GPU: {e}"))?;
-        rx.recv()?.map_err(|e| anyhow::anyhow!("reading the frame back: {e}"))?;
+        device.poll(wgpu::PollType::wait_indefinitely()).map_err(|e| anyhow::anyhow!("{}", orbiters_i18n::tr!("waiting for the integrated GPU: {error}", error = e)))?;
+        rx.recv()?.map_err(|e| anyhow::anyhow!("{}", orbiters_i18n::tr!("reading the frame back: {error}", error = e)))?;
         let mut pixels = Vec::with_capacity((w * h * 4) as usize);
         {
-            let data = slice.get_mapped_range().map_err(|e| anyhow::anyhow!("reading the frame back: {e:?}"))?;
+            let data = slice.get_mapped_range().map_err(|e| anyhow::anyhow!("{}", orbiters_i18n::tr!("reading the frame back: {error}", error = format!("{e:?}"))))?;
             for row in data.chunks_exact(self.row as usize) {
                 pixels.extend_from_slice(&row[..(w * 4) as usize]);
             }

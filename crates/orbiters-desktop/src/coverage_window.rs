@@ -215,7 +215,7 @@ mod win {
 
     impl Panel {
         pub fn open(_: u32, _: u32, _: i32) -> anyhow::Result<Self> {
-            anyhow::bail!("only on Windows")
+            anyhow::bail!("{}", orbiters_i18n::tr("only on Windows"))
         }
         pub fn show(&mut self, _: &[u8]) {}
         pub fn pump(&self) {}

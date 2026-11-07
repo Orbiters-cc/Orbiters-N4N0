@@ -491,7 +491,7 @@ mod imp {
     }
 
     pub fn set_default(_: &str, _: Role) -> Result<(), &'static str> {
-        Err("the default devices change for SteamVR only, which does not run on a Mac")
+        Err(orbiters_i18n::tr("the default devices change for SteamVR only, which does not run on a Mac"))
     }
 
     pub struct Meter;
@@ -537,11 +537,11 @@ mod imp {
     }
 
     pub fn set_default(_: &str, _: Role) -> Result<(), &'static str> {
-        Err("only on Windows")
+        Err(orbiters_i18n::tr("only on Windows"))
     }
 
     pub fn play_test(_: &str) -> Result<(), &'static str> {
-        Err("only on Windows")
+        Err(orbiters_i18n::tr("only on Windows"))
     }
 }
 

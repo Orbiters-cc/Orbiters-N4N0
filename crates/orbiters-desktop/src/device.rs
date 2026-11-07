@@ -295,7 +295,7 @@ pub struct VoiceProcess;
 impl Ears for VoiceProcess {
     fn spawn(&self, events: VoiceEvents, ended: VoiceEnded) -> anyhow::Result<Box<dyn VoiceWorker>> {
         let path = crate::worker::sibling_exe("orbiters-voice");
-        anyhow::ensure!(path.is_file(), "N4N0's voice worker was not found at {}", path.display());
+        anyhow::ensure!(path.is_file(), "{}", tr!("N4N0's voice worker was not found at {path}", path = path.display()));
         let mut cmd = Command::new(&path);
         cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
         #[cfg(windows)]

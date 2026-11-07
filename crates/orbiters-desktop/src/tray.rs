@@ -31,7 +31,7 @@ mod win {
         let rgba = match info.color_type {
             png::ColorType::Rgba => buf[..info.buffer_size()].to_vec(),
             png::ColorType::Rgb => buf[..info.buffer_size()].as_chunks::<3>().0.iter().flat_map(|c| [c[0], c[1], c[2], 255]).collect(),
-            other => anyhow::bail!("unexpected icon format {other:?}"),
+            other => anyhow::bail!("unexpected icon format {other:?}"), // i18n: not shown (a bundled icon, logged)
         };
         Ok(tray_icon::Icon::from_rgba(rgba, info.width, info.height)?)
     }

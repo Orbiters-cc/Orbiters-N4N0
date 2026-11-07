@@ -105,7 +105,7 @@ pub fn start(wanted: String, events: QrEvents) -> Result<Box<dyn QrScan>, String
     #[cfg(not(windows))]
     {
         let _ = (wanted, events);
-        Err("Reading VRChat's camera needs Spout, on Windows".into())
+        Err(tr("Reading VRChat's camera needs Spout, on Windows").into())
     }
 }
 

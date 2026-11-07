@@ -60,7 +60,7 @@ pub trait Backend: Send + Sync {
     fn vrchat_login(&self, _command: crate::controller::vrchat_login::Command) {}
     /// Blocking read-only request. Call only from a page job or image loader.
     fn vrchat_data(&self, _scope: controller::vrchat_data::Scope, _request: controller::vrchat_data::Request) -> controller::vrchat_data::Result {
-        Err("VRChat data is unavailable.".into())
+        Err(tr("VRChat data is unavailable.").into())
     }
     /// Uploads the picture file at `path` as the VRChat picture of `id`, an avatar or world of the signed-in VRChat
     /// account. Its step and outcome come in the snapshot's `vrchat_login.upload`, the outcome as a notice too.

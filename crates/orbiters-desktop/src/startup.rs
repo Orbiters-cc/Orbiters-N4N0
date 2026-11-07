@@ -51,7 +51,7 @@ pub fn set_start_with_windows(on: bool) -> anyhow::Result<()> {
     #[cfg(not(any(windows, target_os = "macos")))]
     {
         let _ = on;
-        anyhow::bail!("starting with the system is for Windows only")
+        anyhow::bail!("{}", tr("starting with the system is for Windows only"))
     }
 }
 
@@ -64,7 +64,7 @@ pub mod mac {
     const LABEL: &str = "cc.orbiters.n4n0";
 
     fn agent_file() -> anyhow::Result<PathBuf> {
-        Ok(std::env::var_os("HOME").map(PathBuf::from).ok_or_else(|| anyhow::anyhow!("no home folder"))?.join("Library/LaunchAgents").join(format!("{LABEL}.plist")))
+        Ok(std::env::var_os("HOME").map(PathBuf::from).ok_or_else(|| anyhow::anyhow!("{}", tr("no home folder")))?.join("Library/LaunchAgents").join(format!("{LABEL}.plist")))
     }
 
     fn escape(text: &str) -> String {

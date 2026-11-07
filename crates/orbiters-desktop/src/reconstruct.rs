@@ -25,7 +25,7 @@ impl ReconstructHandle {
         on_exit: impl FnOnce() + Send + 'static,
     ) -> anyhow::Result<Self> {
         let path = sibling_exe("orbiters-reconstruct");
-        anyhow::ensure!(path.is_file(), "reconstruction worker not found at {}", path.display());
+        anyhow::ensure!(path.is_file(), "{}", orbiters_i18n::tr!("reconstruction worker not found at {path}", path = path.display()));
         let mut cmd = Command::new(&path);
         cmd.arg(session).arg("--resume");
         if integrated {

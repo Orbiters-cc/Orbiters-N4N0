@@ -46,7 +46,7 @@ pub fn recorded(dir: &Path) -> anyhow::Result<(Vec<View>, usize)> {
             framed: false,
         })
         .collect();
-    anyhow::ensure!(!views.is_empty(), "this session has no keyframe to look from");
+    anyhow::ensure!(!views.is_empty(), "{}", orbiters_i18n::tr("this session has no keyframe to look from"));
     // Of the frames, a rig face's 90° square being no view of the picture.
     use orbiters_core::contracts::strip::flags;
     let frame = keyframes.iter().position(|r| !(flags::kind(r.strip_flags) == flags::KIND_RIG && flags::face(r.strip_flags) != 0));

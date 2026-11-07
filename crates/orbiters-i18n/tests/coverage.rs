@@ -119,14 +119,23 @@ fn what_an_area_covers_is_wrapped_and_translated() {
                     }
                 }
             }
+            // A text with a context: under its context, or the text alone, which `tr_ctx` falls back on.
+            for literal in &scanned.keys {
+                let Some(context) = &literal.in_context else { continue };
+                let keyed = format!("{context}\u{4}{}", literal.text);
+                for language in Language::TRANSLATED {
+                    if !known[&language].contains(&keyed) && !known[&language].contains(&literal.text) {
+                        problems.push(format!("{file}:{}: no {} for {:?} in the context {context:?} (add it to catalog/{name}/{}.json)", literal.line, language.tag(), literal.text, language.tag()));
+                    }
+                }
+            }
         }
     }
     assert!(problems.is_empty(), "{} problems:\n{}", problems.len(), problems.join("\n"));
 }
 
-/// The end of the work: every file of the app, with text a person reads, is covered by an area. Ignored until then; `cargo test -p orbiters-i18n -- --ignored` says what is left.
+/// Every file of the app, with text a person reads, is covered by an area: a new file with text cannot slip past the rest of this.
 #[test]
-#[ignore = "until every batch is in"]
 fn every_file_with_text_is_covered() {
     let covered: BTreeSet<String> = areas().iter().flat_map(|a| lines_of(&a.join("files.txt"))).collect();
     let mut files = Vec::new();
@@ -164,6 +173,8 @@ fn the_reader_tells_text_from_code() {
             let e = std::env::var("AN_ENV_VAR");
             let f = r#"Raw text shown"#;
             let g = tr_ctx("A context", "With a context");
+            write!(f, "A display says it");
+            write!(out, "To a file");
             let h = "Line marked"; // i18n: not shown
             let i = Id::new("An id");
             let j = 'x';
@@ -185,9 +196,11 @@ fn the_reader_tells_text_from_code() {
     "##;
     let found = literals(source);
     let shown: Vec<&str> = found.iter().filter(|l| !l.key).map(|l| l.text.as_str()).collect();
-    assert_eq!(shown, ["Shown text", "Raw text shown", "Static text", "Formatted {} text", "Argument text", "Nested text", "A label", "About it", "A widget called error", "An error", "Another error", "A bare field", "A line that goes on", "After tests"]);
+    assert_eq!(shown, ["Shown text", "Raw text shown", "A display says it", "Static text", "Formatted {} text", "Argument text", "Nested text", "A label", "About it", "A widget called error", "An error", "Another error", "A bare field", "A line that goes on", "After tests"]);
     let errors: Vec<&str> = found.iter().filter(|l| l.error).map(|l| l.text.as_str()).collect();
-    assert_eq!(errors, ["An error", "Another error"], "counted apart");
+    assert_eq!(errors, ["A display says it", "An error", "Another error"], "counted apart");
+    let contexts: Vec<(&str, &str)> = found.iter().filter_map(|l| l.in_context.as_deref().map(|c| (c, l.text.as_str()))).collect();
+    assert_eq!(contexts, [("A context", "With a context")], "a text is checked under its context");
     let keys: Vec<&str> = found.iter().filter(|l| l.key && !l.context).map(|l| l.text.as_str()).collect();
     assert_eq!(keys, ["Wrapped text", "Wrapped {x} text", "Marked text", "A wrapped field", "A wrapped {x} field"], "a context is not a key on its own");
     // The same source checked out with CRLF reads the same: a key with a continued line is one key, as rustc reads it.

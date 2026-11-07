@@ -13,6 +13,7 @@
 use crate::contracts::manifest::{DEPTH_DIR, KEYFRAMES_DIR, MANIFEST_FILE, RAW_DEPTH_DIR};
 use crate::contracts::performance as perf;
 use crate::reconstruction;
+use orbiters_i18n::tr;
 use serde::{Deserialize, Serialize};
 use std::path::{Component, Path, PathBuf};
 
@@ -174,8 +175,8 @@ pub fn trimmed(dir: &Path) -> bool {
 /// goes as it goes. Refused for a session without a finished reconstruction: nothing would be left to see. Returns
 /// the bytes freed; on an error, what went before it stays gone.
 pub fn keep_only_view(dir: &Path, freed: &mut dyn FnMut(u64)) -> anyhow::Result<u64> {
-    anyhow::ensure!(dir.join(MANIFEST_FILE).is_file(), "{} is not a session folder.", dir.display());
-    anyhow::ensure!(has_view(dir), "This session has no 3D view to keep: reconstruct it first.");
+    anyhow::ensure!(dir.join(MANIFEST_FILE).is_file(), "{}", tr!("{path} is not a session folder.", path = dir.display()));
+    anyhow::ensure!(has_view(dir), "{}", tr("This session has no 3D view to keep: reconstruct it first."));
     let mut total = 0;
     let result = (|| {
         let (keyframes, going) = (dir.join(KEYFRAMES_DIR), dir.join(KEYFRAMES_GOING));
@@ -198,7 +199,7 @@ pub fn keep_only_view(dir: &Path, freed: &mut dyn FnMut(u64)) -> anyhow::Result<
 /// Deletes a whole session folder for good, the biggest parts first; `freed` as for [`keep_only_view`]. Refused for a
 /// folder without a session manifest.
 pub fn delete_session(dir: &Path, freed: &mut dyn FnMut(u64)) -> anyhow::Result<u64> {
-    anyhow::ensure!(dir.join(MANIFEST_FILE).is_file(), "{} is not a session folder.", dir.display());
+    anyhow::ensure!(dir.join(MANIFEST_FILE).is_file(), "{}", tr!("{path} is not a session folder.", path = dir.display()));
     let mut total = 0;
     let result = (|| -> std::io::Result<()> {
         for e in capture_files(dir) {
@@ -253,6 +254,21 @@ mod tests {
     use crate::bundle::{self, BundleWriter};
     use crate::contracts::manifest::{SessionManifest, FRAMES_FILE, THUMBNAIL_FILE};
     use std::fs;
+
+    /// An error that can reach a toast is written in the language of the moment it happens (the typed part of the sentence, here the
+    /// folder, stays as it is), and the same error in English is untouched.
+    #[test]
+    fn errors_are_written_in_the_language_of_the_moment() {
+        use orbiters_i18n::{in_language, Language};
+        let nothing = std::env::temp_dir().join(format!("orbiters-no-session-{}", std::process::id()));
+        let shown = nothing.display().to_string();
+        let message = || delete_session(&nothing, &mut |_| {}).unwrap_err().to_string();
+        assert_eq!(message(), format!("{shown} is not a session folder."));
+        in_language(Language::Fr, || assert_eq!(message(), format!("{shown} n’est pas un dossier de session.")));
+        in_language(Language::Es, || assert_eq!(message(), format!("{shown} no es una carpeta de sesión.")));
+        in_language(Language::Ja, || assert_eq!(message(), format!("{shown}はセッションフォルダーではありません。")));
+        in_language(Language::PtBr, || assert_eq!(message(), format!("{shown} não é uma pasta de sessão.")));
+    }
 
     /// A session as a capture with every stream and a reconstruction leaves it, plus a note the person put there; its
     /// folder is under a temporary root of its own (`name`).

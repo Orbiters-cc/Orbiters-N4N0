@@ -15,6 +15,7 @@ use crate::gaussians::{logit, sigmoid, Gaussians, PACKED as PACKED_FLOATS};
 use crate::gaussians::{rotation_matrix, PACKED};
 use crate::gpu::{Gpu, LearningRates, Relocation, Target};
 use anyhow::ensure;
+use orbiters_i18n::tr;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -519,7 +520,7 @@ pub fn score_held_out(
                         }
                         None => psnr(img, &data.views[*i].image, &crate::wearer::scene(&data.mask, &data.views[*i].image)),
                     };
-                    ensure!(psnr.is_finite(), "keyframe {} has no scene pixel to score", data.views[*i].keyframe);
+                    ensure!(psnr.is_finite(), "{}", tr!("keyframe {index} has no scene pixel to score", index = data.views[*i].keyframe));
                     each(*i, img)?;
                     Ok(psnr)
                 })
@@ -579,7 +580,7 @@ impl Control<'_> {
 pub fn train(data: &Dataset, gpu: &mut Gpu, init: Gaussians, settings: &Settings, report: impl FnMut(&Progress)) -> anyhow::Result<Outcome> {
     match train_from(data, gpu, Start::Seeds(init), settings, Control::default(), report)? {
         Ran::Finished(outcome) => Ok(outcome),
-        Ran::Paused(_) => anyhow::bail!("a run nothing can pause paused"),
+        Ran::Paused(_) => anyhow::bail!("{}", tr("a run nothing can pause paused")),
     }
 }
 
@@ -597,7 +598,7 @@ pub fn train_from(data: &Dataset, gpu: &mut Gpu, from: Start, settings: &Setting
     let detail = if settings.detail_share > 0.0 && settings.detail_share < 1.0 { data.detail_views() } else { Vec::new() };
     let train_views: Vec<usize> = (0..data.views.len()).filter(|i| held_out.binary_search(i).is_err()).collect();
     let others: Vec<usize> = train_views.iter().copied().filter(|i| detail.binary_search(i).is_err()).collect();
-    ensure!(!others.is_empty(), "every keyframe is held out: nothing to train on");
+    ensure!(!others.is_empty(), "{}", tr("every keyframe is held out: nothing to train on"));
     let iterations = match settings.iterations {
         0 if detail.is_empty() => default_iterations(data),
         0 => detail_iterations(data.views.len() - detail.len(), settings.detail_share),
@@ -627,16 +628,16 @@ pub fn train_from(data: &Dataset, gpu: &mut Gpu, from: Start, settings: &Setting
         Start::Steps(s) => (None, Some(s), None),
         Start::Trained(t) => (None, None, Some(t)),
     };
-    ensure!(seeds.as_ref().is_none_or(|g| !g.is_empty()), "no Gaussians to start from");
+    ensure!(seeds.as_ref().is_none_or(|g| !g.is_empty()), "{}", tr("no Gaussians to start from"));
     if let Some(s) = &steps {
-        ensure!(s.iterations == iterations, "a paused run of {} steps resumed as one of {iterations}", s.iterations);
+        ensure!(s.iterations == iterations, "{}", tr!("a paused run of {paused} steps resumed as one of {resumed}", paused = s.iterations, resumed = iterations));
     }
     // The training time before this start (what the report and the time left go by).
     let earlier = steps.as_ref().map_or(0.0, |s| s.seconds) + trained.as_ref().map_or(0.0, |t| t.seconds);
     // A session's frames whose every pixel is strip or band (or a mask never set) would train on nothing and score
     // nothing.
     let scene_pixels = data.mask.iter().filter(|m| **m > 0.5).count() as f32;
-    ensure!(scene_pixels > 0.0, "the capture strip and the skeleton band cover all of these {}×{} keyframes: nothing to train on", data.width, data.height);
+    ensure!(scene_pixels > 0.0, "{}", tr!("the capture strip and the skeleton band cover all of these {width}×{height} keyframes: nothing to train on", width = data.width, height = data.height));
     let depth_views: Vec<usize> = (0..data.depth_views.len()).filter(|&i| data.depth_views[i].valid() > 0).collect();
     // The rig's faces, when they have scene pixels and sizes of their own (their mask is kept per size).
     let faces = data.faces.as_ref().filter(|f| !f.views.is_empty() && f.sizes.iter().all(|s| s.scene_pixels > 0.0 && (s.width, s.height) != (data.width, data.height)));
@@ -948,7 +949,7 @@ pub fn train_from(data: &Dataset, gpu: &mut Gpu, from: Start, settings: &Setting
         if it % settings.relocate_every == 0 && it >= 500 && it <= relocate_until {
             // The last round's plan must land before the next round reads the set (rare: rounds are 100 steps apart).
             if let Some(h) = rounds.plan.take() {
-                let plan = h.join().map_err(|_| anyhow::anyhow!("the relocation planner panicked"))?;
+                let plan = h.join().map_err(|_| anyhow::anyhow!("{}", tr("the relocation planner panicked")))?;
                 gpu.apply_relocation(&plan)?;
                 regularise_for(gpu, settings, plan.len, extent);
             }
@@ -996,7 +997,7 @@ pub fn train_from(data: &Dataset, gpu: &mut Gpu, from: Start, settings: &Setting
                 floor_patched = crate::wearer::patch_floor(volume, &mut g);
                 eprintln!("the wearer's volume: {wearer_left} Gaussians left; the floor they stood on: {floor_patched} patched");
             }
-            ensure!(!g.is_empty(), "training left no Gaussian that shows anywhere");
+            ensure!(!g.is_empty(), "{}", tr("training left no Gaussian that shows anywhere"));
             if settings.sky_fill {
                 // The sky shell's far field, as the measurements took it: beyond half the shell's distance from the cameras.
                 let added = crate::sky::complete(&mut g, camera_centre(data), crate::init::SKY * 0.5, crate::init::SKY);
@@ -1071,7 +1072,7 @@ impl Rounds {
     #[allow(clippy::too_many_arguments)]
     fn advance(&mut self, gpu: &mut Gpu, settings: &Settings, it: u32, relocate_until: u32, scored: bool, extent: f32, filter_cams: &[Camera]) -> anyhow::Result<()> {
         if self.plan.as_ref().is_some_and(|h| h.is_finished()) {
-            let plan = self.plan.take().expect("checked").join().map_err(|_| anyhow::anyhow!("the relocation planner panicked"))?;
+            let plan = self.plan.take().expect("checked").join().map_err(|_| anyhow::anyhow!("{}", tr("the relocation planner panicked")))?;
             crate::timing::section("4d3 relocation apply", None, || gpu.apply_relocation(&plan))?;
             regularise_for(gpu, settings, plan.len, extent);
             gpu.update_filter_3d(filter_cams, settings.filter_3d)?;
@@ -1116,7 +1117,7 @@ impl Rounds {
     #[allow(clippy::too_many_arguments)]
     fn settle(&mut self, gpu: &mut Gpu, dev: &wgpu::Device, settings: &Settings, it: u32, relocate_until: u32, scored: bool, extent: f32, filter_cams: &[Camera]) -> anyhow::Result<()> {
         while self.weights.is_some() || self.plan.is_some() {
-            dev.poll(wgpu::PollType::wait_indefinitely()).map_err(|e| anyhow::anyhow!("waiting for the GPU: {e}"))?;
+            dev.poll(wgpu::PollType::wait_indefinitely()).map_err(|e| anyhow::anyhow!("{}", tr!("waiting for the GPU: {error}", error = e)))?;
             if self.plan.as_ref().is_some_and(|h| !h.is_finished()) {
                 std::thread::sleep(std::time::Duration::from_millis(1));
             }

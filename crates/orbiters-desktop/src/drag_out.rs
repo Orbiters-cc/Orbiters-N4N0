@@ -62,7 +62,7 @@ pub fn copy_files(files: &[PathBuf]) -> Result<(), String> {
     #[cfg(not(any(windows, target_os = "macos")))]
     {
         let _ = files;
-        Err("Copying files is for Windows".into())
+        Err(orbiters_i18n::tr("Copying files is for Windows").into())
     }
 }
 
@@ -210,7 +210,7 @@ mod mac {
         let view: Retained<NSView> = window.contentView().ok_or("no view")?; // i18n: not shown
         let urls = urls(&drag.files);
         if urls.is_empty() {
-            return Err("no files".into());
+            return Err("no files".into()); // i18n: not shown (a drag that could not start is only logged)
         }
         let at_window = window.mouseLocationOutsideOfEventStream();
         let at_view = view.convertPoint_fromView(at_window, None);
@@ -265,7 +265,7 @@ mod mac {
         let _ = MainThreadMarker::new().ok_or("not on the window's thread")?; // i18n: not shown
         let urls = urls(files);
         if urls.is_empty() {
-            return Err("no files".into());
+            return Err(orbiters_i18n::tr("no files").into());
         }
         let board = NSPasteboard::generalPasteboard();
         board.clearContents();
@@ -273,7 +273,7 @@ mod mac {
         if board.writeObjects(&NSArray::from_slice(&writers)) {
             Ok(())
         } else {
-            Err("The clipboard did not take the files".into())
+            Err(orbiters_i18n::tr("The clipboard did not take the files").into())
         }
     }
 

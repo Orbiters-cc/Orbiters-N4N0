@@ -129,7 +129,7 @@ pub fn integrated_device() -> anyhow::Result<(wgpu::Device, wgpu::Queue)> {
     let adapter = block_on(instance.enumerate_adapters(backends))
         .into_iter()
         .find(|a| a.get_info().device_type == wgpu::DeviceType::IntegratedGpu)
-        .context("no integrated GPU")?;
+        .with_context(|| orbiters_i18n::tr("no integrated GPU"))?;
     let gpu = adapter.limits();
     let base = wgpu::Limits { max_buffer_size: gpu.max_buffer_size, max_storage_buffer_binding_size: gpu.max_storage_buffer_binding_size, ..wgpu::Limits::default() };
     let desc = wgpu::DeviceDescriptor { label: Some("orbiters 3D view"), required_limits: limits(base), memory_hints: wgpu::MemoryHints::MemoryUsage, ..Default::default() }; // i18n: not shown

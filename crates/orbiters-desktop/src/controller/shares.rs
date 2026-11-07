@@ -190,7 +190,7 @@ fn run_request(request: Request, report: Report) -> anyhow::Result<Outcome> {
             let (api, token) = api(request.server)?;
             Ok(Outcome::Answered(api.answer_capture_request(&token, id, approve, acknowledge_explicit)?.request))
         }
-        Operation::Download => download(request.server, request.entry.remote.ok_or_else(|| anyhow::anyhow!("No uploaded item"))?).map(Outcome::Downloaded),
+        Operation::Download => download(request.server, request.entry.remote.ok_or_else(|| anyhow::anyhow!("{}", tr("No uploaded item")))?).map(Outcome::Downloaded),
         Operation::Update => update(request.server, request.entry, report).map(|(item, edits)| Outcome::Updated { item, edits }),
     }
 }
@@ -221,7 +221,7 @@ fn share_all(entries: Vec<Entry>, report: Report, one: impl Fn(Entry) -> anyhow:
         let shared = result?;
         first.get_or_insert(shared);
     }
-    first.ok_or_else(|| anyhow::anyhow!("Nothing was shared"))
+    first.ok_or_else(|| anyhow::anyhow!("{}", tr("Nothing was shared")))
 }
 
 impl super::Controller {
@@ -548,7 +548,7 @@ pub fn session_picture_size(width: u32, height: u32) -> Option<[u32; 2]> {
     (r.y1 > r.y0).then_some([width, r.y1 - r.y0])
 }
 pub fn api(server: Server) -> anyhow::Result<(Api, String)> {
-    let account = account::read(server).ok_or_else(|| anyhow::anyhow!("Sign in to Orbiters in Settings first."))?;
+    let account = account::read(server).ok_or_else(|| anyhow::anyhow!("{}", tr("Sign in to Orbiters in Settings first.")))?;
     Ok((Api::new(server), account.token))
 }
 pub fn feed(server: Server, query: shares::Query) -> anyhow::Result<shares::Feed> {
@@ -696,9 +696,9 @@ fn edits_now(entry: &Entry) -> anyhow::Result<Option<String>> {
     }
 }
 fn records_path(server: Server) -> anyhow::Result<PathBuf> {
-    let account = account::read(server).ok_or_else(|| anyhow::anyhow!("Sign in first"))?;
-    let user = account.user.ok_or_else(|| anyhow::anyhow!("Orbiters did not identify this account"))?;
-    anyhow::ensure!(user.chars().all(|c| c.is_ascii_digit()), "Invalid account id");
+    let account = account::read(server).ok_or_else(|| anyhow::anyhow!("{}", tr("Sign in first")))?;
+    let user = account.user.ok_or_else(|| anyhow::anyhow!("{}", tr("Orbiters did not identify this account")))?;
+    anyhow::ensure!(user.chars().all(|c| c.is_ascii_digit()), "{}", tr("Invalid account id"));
     Ok(orbiters_core::paths::config_dir().join(format!("capture-uploads-{}-{user}.json", if server == Server::Development { "dev" } else { "prod" })))
 }
 /// What this account uploaded from this computer: each session's or picture's upload as the server last answered it.
@@ -840,26 +840,26 @@ fn share_with(
         known
     } else {
         anyhow::ensure!(!request.public || !entry.content.explicit || request.acknowledge_explicit, "{}", tr(shares::EXPLICIT_WARNING));
-        let source_key = match entry.local.as_ref().ok_or_else(|| anyhow::anyhow!("No local file to upload"))? {
-            Local::Session(p) => p.file_name().map(|n| n.to_string_lossy().into_owned()).ok_or_else(|| anyhow::anyhow!("No capture folder name"))?,
+        let source_key = match entry.local.as_ref().ok_or_else(|| anyhow::anyhow!("{}", tr("No local file to upload")))? {
+            Local::Session(p) => p.file_name().map(|n| n.to_string_lossy().into_owned()).ok_or_else(|| anyhow::anyhow!("{}", tr("No capture folder name")))?,
             Local::Picture(p) => entry
                 .source_key
                 .clone()
                 .or_else(|| crate::worlds::hashes(vec![p.clone()]).remove(p))
-                .ok_or_else(|| anyhow::anyhow!("Could not fingerprint this picture"))?,
+                .ok_or_else(|| anyhow::anyhow!("{}", tr("Could not fingerprint this picture")))?,
         };
-        anyhow::ensure!(source_key.chars().count() <= 128, "The capture folder name is longer than the server's 128-character source key limit.");
+        anyhow::ensure!(source_key.chars().count() <= 128, "{}", tr("The capture folder name is longer than the server's 128-character source key limit."));
         let mut metadata = serde_json::json!({"visibility":if request.public{"public"}else{"private"},"explicit":entry.content.explicit,"explicitReasons":entry.content.explicit_reasons,"acknowledgeExplicit":request.acknowledge_explicit,"takenAt":iso(entry.taken)});
         metadata["sourceKey"] = serde_json::json!(source_key);
         metadata["instanceId"] = serde_json::json!(entry.instance);
 
-        let uploaded: Uploaded = match entry.local.as_ref().ok_or_else(|| anyhow::anyhow!("No local file to upload"))? {
+        let uploaded: Uploaded = match entry.local.as_ref().ok_or_else(|| anyhow::anyhow!("{}", tr("No local file to upload")))? {
             Local::Session(dir) => {
                 report(Stage::Preparing);
                 let super::maps::Prepared { files, sky, metadata: view, generation } = prepare(dir)?;
                 // The picture only when drawn for these edits (capture_picture), and the edits still those prepared.
                 let picture = crate::capture_picture::jpeg(dir);
-                anyhow::ensure!(edits_now(entry)?.as_deref() == Some(generation.as_str()), "Its splat edits changed while it was being prepared: share it again.");
+                anyhow::ensure!(edits_now(entry)?.as_deref() == Some(generation.as_str()), "{}", tr("Its splat edits changed while it was being prepared: share it again."));
                 sent_edits = Some(generation);
                 step(steps, "prepared", &mut at);
                 let bytes = files.len() + sky.as_deref().and_then(|p| std::fs::metadata(p).ok()).map_or(0, |m| m.len());
@@ -875,7 +875,7 @@ fn share_with(
                     for (sent, total) in rx {
                         report(Stage::Sending { sent, total });
                     }
-                    sending.join().unwrap_or_else(|_| Err(anyhow::anyhow!("The upload stopped unexpectedly")))
+                    sending.join().unwrap_or_else(|_| Err(anyhow::anyhow!("{}", tr("The upload stopped unexpectedly"))))
                 })
                 .inspect(|_| step(steps, &format!("sent {:.1} MB and stored", bytes as f64 / 1e6), &mut at))? // i18n: not shown
             }
@@ -890,7 +890,7 @@ fn share_with(
                     Some(uploaded) => uploaded,
                     None => {
                         let item = api.capture_by_source_key(token, &entry.world_id, Kind::Picture, &source_key)?.ok_or_else(|| {
-                            anyhow::anyhow!("The server skipped this picture, but its source identity is not available yet. Refresh the gallery and retry.")
+                            anyhow::anyhow!("{}", tr("The server skipped this picture, but its source identity is not available yet. Refresh the gallery and retry."))
                         })?;
                         Uploaded { kind: item.kind, id: item.id, visibility: if item.public { "public" } else { "private" }.into() }
                     }
@@ -983,7 +983,8 @@ pub fn update(server: Server, entry: Entry, report: Report) -> anyhow::Result<(I
 /// Why an update did not happen, and that the version shared before stays.
 fn not_updated(e: &anyhow::Error) -> String {
     let why = e.to_string();
-    let end = if why.ends_with(['.', '!', '?']) { "" } else { "." };
+    // Where a sentence ends in the language it is in: the full-width marks are Japanese's.
+    let end = if why.ends_with(['.', '!', '?', '。', '！', '？']) { "" } else { "." };
     format!("{} {}", tr!("Not updated: {reason}", reason = format!("{why}{end}")), tr(KEPT))
 }
 
@@ -1001,7 +1002,7 @@ fn update_with(
     prepare: Prepare,
 ) -> anyhow::Result<(Item, String)> {
     let mut at = Instant::now();
-    let Some(Local::Session(dir)) = entry.local.as_ref() else { anyhow::bail!("Only a 3D capture of this computer can be updated.") };
+    let Some(Local::Session(dir)) = entry.local.as_ref() else { anyhow::bail!("{}", tr("Only a 3D capture of this computer can be updated.")) };
     let record = records.as_ref().ok().and_then(|p| read_records(p).into_iter().find(|r| r.path == *dir));
     let id = entry
         .remote
@@ -1009,7 +1010,7 @@ fn update_with(
         .filter(|i| i.kind == Kind::Capture)
         .map(|i| i.id)
         .or_else(|| record.as_ref().filter(|r| r.uploaded.kind == Kind::Capture).map(|r| r.uploaded.id))
-        .ok_or_else(|| anyhow::anyhow!("It is not uploaded yet: share it to upload it."))?;
+        .ok_or_else(|| anyhow::anyhow!("{}", tr("It is not uploaded yet: share it to upload it.")))?;
     // Damaged edits stop it before anything is asked of Orbiters.
     edits_now(entry)?;
     let current = match api.capture_item(token, Kind::Capture, id) {
@@ -1018,11 +1019,11 @@ fn update_with(
             if let Ok(path) = records.as_ref() {
                 forget_record(path, dir, id);
             }
-            anyhow::bail!("It is not on Orbiters any more: share it again to upload it as its 3D view shows it now.");
+            anyhow::bail!("{}", tr("It is not on Orbiters any more: share it again to upload it as its 3D view shows it now."));
         }
         Err(e) => return Err(e),
     };
-    anyhow::ensure!(current.mine, "Only the member who uploaded it can update it.");
+    anyhow::ensure!(current.mine, "{}", tr("Only the member who uploaded it can update it."));
     let revision = current.capture.as_ref().map_or(1, shares::Capture::revision);
     step(steps, "asked Orbiters", &mut at); // i18n: not shown
     report(Stage::Preparing);
@@ -1031,7 +1032,8 @@ fn update_with(
     let picture = crate::capture_picture::jpeg(dir);
     anyhow::ensure!(
         edits_now(entry)?.as_deref() == Some(generation.as_str()),
-        "Its splat edits changed while it was being prepared: update it again once they are done."
+        "{}",
+        tr("Its splat edits changed while it was being prepared: update it again once they are done.")
     );
     step(steps, "prepared", &mut at);
     let bytes = files.len() + sky.as_deref().and_then(|p| std::fs::metadata(p).ok()).map_or(0, |m| m.len());
@@ -1046,16 +1048,19 @@ fn update_with(
         for (sent, total) in rx {
             report(if total > 0 && sent >= total { Stage::Replacing } else { Stage::Sending { sent, total } });
         }
-        sending.join().unwrap_or_else(|_| Err(anyhow::anyhow!("The update stopped unexpectedly")))
+        sending.join().unwrap_or_else(|_| Err(anyhow::anyhow!("{}", tr("The update stopped unexpectedly"))))
     });
     let item = match sent {
         Ok(item) => item,
         Err(e) => {
             if let Some(conflict) = e.downcast_ref::<shares::RevisionConflict>() {
                 anyhow::bail!(
-                    "it was updated from somewhere else meanwhile (it is at revision {}; this computer replaced revision {revision}). Look at it, then \
-                     update it again to send what this computer's 3D view shows.",
-                    conflict.revision
+                    "{}",
+                    tr!(
+                        "it was updated from somewhere else meanwhile (it is at revision {current}; this computer replaced revision {revision}). Look at it, then update it again to send what this computer's 3D view shows.",
+                        current = conflict.revision,
+                        revision = revision
+                    )
                 );
             }
             // No answer after the files went (the connection dropped), or a server error, which may come after the switch
@@ -1128,7 +1133,7 @@ fn share_log(line: &str) {
 pub fn unshare(server: Server, entry: Entry, request: shares::Unshare) -> anyhow::Result<Item> {
     let _one = Changing::of(&entry, &|_| {});
     let (api, token) = api(server)?;
-    let item = entry.remote.as_ref().ok_or_else(|| anyhow::anyhow!("This item has not been uploaded"))?;
+    let item = entry.remote.as_ref().ok_or_else(|| anyhow::anyhow!("{}", tr("This item has not been uploaded")))?;
     let item = api.unshare_capture(&token, item.kind, item.id, &request)?;
     save_record(records_path(server).as_deref().map_err(|e| anyhow::anyhow!("{e}")), &entry, &item)?;
     Ok(item)
@@ -1444,6 +1449,9 @@ pub(crate) mod tests {
             "Not updated: Cloud storage upload failed for file 81: fixture. Everyone still sees the version shared before."
         );
         assert_eq!(record_of(&records).unwrap().edits, None, "the record still says the files there are as trained");
+        // A reason that ends with Japanese's full-width stop gets no second one.
+        let said = orbiters_i18n::in_language(orbiters_i18n::Language::Ja, || not_updated(&anyhow::anyhow!("サーバーが応答しませんでした。")));
+        assert!(said.starts_with("更新されませんでした：サーバーが応答しませんでした。") && !said.contains("。."), "{said}");
         update_with(&api, "token", Ok(records.as_path()), &entry, &|_| {}, &mut Vec::new(), &prepared).unwrap();
         assert_eq!(
             requests(&seen),

@@ -27,6 +27,7 @@ use crate::portraits::Portrait;
 use crate::train::Start;
 use anyhow::{bail, ensure, Context as _};
 use orbiters_core::reconstruction as rec;
+use orbiters_i18n::tr;
 use serde::{Deserialize, Serialize};
 use std::io::{Read as _, Write as _};
 use std::path::{Path, PathBuf};
@@ -83,7 +84,7 @@ pub struct Interrupted;
 
 impl std::fmt::Display for Interrupted {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("asked to pause")
+        f.write_str(orbiters_i18n::tr("asked to pause"))
     }
 }
 
@@ -257,7 +258,7 @@ pub struct Checkpoint {
 /// with other settings, or a worker updated meanwhile, starts over.
 pub fn key(session: &Path, settings: &str) -> anyhow::Result<String> {
     use orbiters_core::contracts::manifest;
-    let hash = |file: &str| orbiters_core::visited::sha256_file(&session.join(file)).with_context(|| format!("reading {file}"));
+    let hash = |file: &str| orbiters_core::visited::sha256_file(&session.join(file)).with_context(|| tr!("reading {path}", path = file));
     let program = std::env::current_exe().and_then(std::fs::metadata).map_or(0, |m| m.len());
     Ok(format!("{}|{}|{program}|{}|{}|{settings}", String::from_utf8_lossy(MAGIC), env!("CARGO_PKG_VERSION"), hash(manifest::MANIFEST_FILE)?, hash(manifest::FRAMES_FILE)?))
 }
@@ -302,13 +303,13 @@ pub fn peek(session: &Path) -> Option<Header> {
 
 fn read_header(f: &mut std::fs::File) -> anyhow::Result<Header> {
     let mut start = [0u8; 12];
-    f.read_exact(&mut start).context("too short")?;
-    ensure!(&start[..8] == MAGIC, "another format");
+    f.read_exact(&mut start).context("too short")?; // i18n: not shown (a checkpoint that cannot be read only reaches the log)
+    ensure!(&start[..8] == MAGIC, "another format"); // i18n: not shown (a checkpoint that cannot be read only reaches the log)
     let length = u32::from_le_bytes(start[8..12].try_into().expect("four bytes"));
-    ensure!(length <= MOST_HEADER, "a header of {length} bytes");
+    ensure!(length <= MOST_HEADER, "a header of {length} bytes"); // i18n: not shown (a checkpoint that cannot be read only reaches the log)
     let mut text = vec![0u8; length as usize];
-    f.read_exact(&mut text).context("too short")?;
-    serde_json::from_slice(&text).context("its header")
+    f.read_exact(&mut text).context("too short")?; // i18n: not shown (a checkpoint that cannot be read only reaches the log)
+    serde_json::from_slice(&text).context("its header") // i18n: not shown (a checkpoint that cannot be read only reaches the log)
 }
 
 /// A session's checkpoint when it matches `key`. One that does not is discarded, saying why: the run starts over.
@@ -433,7 +434,7 @@ pub fn write(session: &Path, key: &str, state: &Start, extras: &Extras) -> anyho
     };
     let mut sections: Sections<'_> = vec![("portraits", owned(&portrait_words(&extras.portraits))), ("sky seen", owned(&bits(&extras.sky_seen)))];
     match state {
-        Start::Seeds(_) => bail!("a run that has not started has nothing to keep"),
+        Start::Seeds(_) => bail!("{}", tr("a run that has not started has nothing to keep")),
         Start::Steps(s) => {
             header.iteration = s.iteration;
             header.iterations = s.iterations;
@@ -485,7 +486,7 @@ pub fn write(session: &Path, key: &str, state: &Start, extras: &Extras) -> anyho
     }
     let total: u64 = sections.iter().map(|(_, b)| b.len() as u64).sum();
     if let Some(free) = free_space(session) {
-        ensure!(free >= total + LEAVE_FREE, "only {} MB is free on the disk: a checkpoint of {} MB would leave a capture too little", free >> 20, total >> 20);
+        ensure!(free >= total + LEAVE_FREE, "{}", tr!("only {free} MB is free on the disk: a checkpoint of {size} MB would leave a capture too little", free = free >> 20, size = total >> 20));
     }
     let mut sum = SEED;
     for (name, bytes) in &sections {
@@ -513,7 +514,7 @@ pub fn write(session: &Path, key: &str, state: &Start, extras: &Extras) -> anyho
     })();
     if let Err(e) = written {
         let _ = std::fs::remove_file(&tmp);
-        return Err(e).with_context(|| format!("writing {}", path.display()));
+        return Err(e).with_context(|| tr!("writing {path}", path = path.display()));
     }
     Ok(total + text.len() as u64 + 12)
 }
@@ -528,11 +529,11 @@ struct Reader<'a> {
 impl Reader<'_> {
     fn next<T: bytemuck::Pod>(&mut self, name: &str) -> anyhow::Result<Vec<T>> {
         let (found, bytes) = self.sections.next().with_context(|| format!("no {name}"))?;
-        ensure!(found == name, "{found} where {name} should be");
+        ensure!(found == name, "{found} where {name} should be"); // i18n: not shown (a checkpoint that cannot be read only reaches the log)
         let size = std::mem::size_of::<T>() as u64;
-        ensure!(bytes % size == 0, "{name} of {bytes} bytes");
+        ensure!(bytes % size == 0, "{name} of {bytes} bytes"); // i18n: not shown (a checkpoint that cannot be read only reaches the log)
         let mut v = vec![T::zeroed(); (bytes / size) as usize];
-        self.f.read_exact(bytemuck::cast_slice_mut(&mut v)).with_context(|| format!("reading {name}"))?;
+        self.f.read_exact(bytemuck::cast_slice_mut(&mut v)).with_context(|| format!("reading {name}"))?; // i18n: not shown (a checkpoint that cannot be read only reaches the log)
         self.sum.add(bytemuck::cast_slice(&v));
         Ok(v)
     }
@@ -542,7 +543,7 @@ impl Reader<'_> {
 pub fn read_body(session: &Path, header: &Header) -> anyhow::Result<Checkpoint> {
     let mut f = std::fs::File::open(file(session))?;
     let again = read_header(&mut f)?;
-    ensure!(again == *header, "it changed since its header was read");
+    ensure!(again == *header, "it changed since its header was read"); // i18n: not shown (a checkpoint that cannot be read only reaches the log)
     let mut r = Reader { f: std::io::BufReader::with_capacity(1 << 20, f), sections: header.sections.iter(), sum: SEED };
     let portraits = portraits_of(&r.next::<u32>("portraits")?);
     let seen = r.next::<u32>("sky seen")?;
@@ -550,25 +551,25 @@ pub fn read_body(session: &Path, header: &Header) -> anyhow::Result<Checkpoint> 
     let mut extras = Extras { budget: header.budget, starved: header.starved, sky_fill: header.sky_fill, portraits, sky_seen: flags(&seen, texels), trained_sky: None };
     let start = if header.trained {
         let packed = r.next::<f32>("gaussians")?;
-        ensure!(packed.len() == header.gaussians * PACKED, "{} floats for {} Gaussians", packed.len(), header.gaussians);
+        ensure!(packed.len() == header.gaussians * PACKED, "{} floats for {} Gaussians", packed.len(), header.gaussians); // i18n: not shown (a checkpoint that cannot be read only reaches the log)
         let gaussians = Gaussians::unpack(&packed);
         drop(packed);
         if header.sky_width > 0 {
             let rgb = r.next::<[f32; 3]>("sky colours")?;
-            ensure!(rgb.len() == texels, "{} sky texels for {} across", rgb.len(), header.sky_width);
+            ensure!(rgb.len() == texels, "{} sky texels for {} across", rgb.len(), header.sky_width); // i18n: not shown (a checkpoint that cannot be read only reaches the log)
             extras.trained_sky = Some((header.sky_width, rgb));
         }
         Start::Trained(Box::new(TrainedState { gaussians, iterations: header.iterations, seconds: header.seconds, psnr: header.psnr, wearer_left: header.wearer_left, floor_patched: header.floor_patched }))
     } else {
         let buffers = TrainingBuffers { params: r.next("params")?, m1: r.next("moment 1")?, m2: r.next("moment 2")?, stats: r.next("stats")? };
         let n = header.gaussians;
-        ensure!(buffers.params.len() == n * PACKED && buffers.m1.len() == n * PACKED && buffers.m2.len() == n * PACKED && buffers.stats.len() == n * 8, "sections of another size than {n} Gaussians");
+        ensure!(buffers.params.len() == n * PACKED && buffers.m1.len() == n * PACKED && buffers.m2.len() == n * PACKED && buffers.stats.len() == n * 8, "sections of another size than {n} Gaussians"); // i18n: not shown (a checkpoint that cannot be read only reaches the log)
         let sky = if header.sky_width > 0 {
             let rgb = r.next::<[f32; 3]>("sky colours")?;
             let trained = flags(&r.next::<u32>("sky trained")?, texels);
             let (few1, few2) = (r.next::<[f32; 4]>("sky moment 1")?, r.next::<[f32; 4]>("sky moment 2")?);
             let count = header.sky_trained as usize;
-            ensure!(rgb.len() == texels && few1.len() == count && few2.len() == count && trained.iter().filter(|t| **t).count() == count, "a sky map of another size");
+            ensure!(rgb.len() == texels && few1.len() == count && few2.len() == count && trained.iter().filter(|t| **t).count() == count, "a sky map of another size"); // i18n: not shown (a checkpoint that cannot be read only reaches the log)
             let spread = |few: &[[f32; 4]]| -> Vec<[f32; 4]> {
                 let mut values = few.iter();
                 trained.iter().map(|t| if *t { *values.next().expect("counted") } else { [0.0; 4] }).collect()
@@ -596,8 +597,8 @@ pub fn read_body(session: &Path, header: &Header) -> anyhow::Result<Checkpoint> 
         }))
     };
     let mut rest = [0u8; 1];
-    ensure!(r.f.read(&mut rest)? == 0, "more than its sections say");
-    ensure!(format!("{:016x}", r.sum.0) == header.checksum, "its checksum differs: the file is damaged");
+    ensure!(r.f.read(&mut rest)? == 0, "more than its sections say"); // i18n: not shown (a checkpoint that cannot be read only reaches the log)
+    ensure!(format!("{:016x}", r.sum.0) == header.checksum, "its checksum differs: the file is damaged"); // i18n: not shown (a checkpoint that cannot be read only reaches the log)
     Ok(Checkpoint { extras, start })
 }
 

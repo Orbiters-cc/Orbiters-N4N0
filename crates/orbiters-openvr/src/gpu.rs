@@ -148,7 +148,7 @@ impl OverlayTextures {
         assert_eq!(rgba.len(), (width * height * 4) as usize);
         // SAFETY: a plain query of the device.
         if let Err(e) = unsafe { self.device.GetDeviceRemovedReason() } {
-            return Err(PresentError::DeviceLost(format!("the overlay's graphics device was lost: {e}")));
+            return Err(PresentError::DeviceLost(format!("the overlay's graphics device was lost: {e}"))); // i18n: not shown (the overlay writes it to its log and falls back on raw pixels)
         }
         if self.slots.get(&handle).is_none_or(|s| s.size != (width, height)) {
             let textures = [self.texture(width, height).map_err(PresentError::Refused)?, self.texture(width, height).map_err(PresentError::Refused)?];

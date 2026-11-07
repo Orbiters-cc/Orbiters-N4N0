@@ -31,6 +31,8 @@ use std::time::{Duration, Instant};
 
 /// A press this long is the wheel's, shorter the Quick Menu's. VRChat does not publish it: to be confirmed in the headset.
 pub const HOLD: Duration = Duration::from_millis(500);
+/// When a press with the Quick Menu open closes it, in case it becomes a long one: as late as can be, so that hardly any short press lasts this long.
+pub const CLOSE_AHEAD: Duration = Duration::from_millis(380);
 /// With no press and no laser on them for this long the panels go, and nothing is taken to be open.
 pub const IDLE_OPEN: Duration = Duration::from_secs(300);
 
@@ -53,12 +55,16 @@ pub struct MenuButtons {
     down: [bool; 2],
     /// The press under way: on which hand, since when, and whether it began on that hand's open wheel.
     press: Option<(usize, Instant, bool)>,
+    /// The Quick Menu this closed for a press that may be long, on which hand.
+    closed_ahead: Option<usize>,
+    /// What VRChat must be told now: its Quick Menu toggled, on that hand.
+    toggle: Option<usize>,
 }
 
 impl Default for MenuButtons {
     fn default() -> Self {
         // Buttons taken as held: one already down when this starts presses nothing.
-        Self { open: Open::Closed, down: [true; 2], press: None }
+        Self { open: Open::Closed, down: [true; 2], press: None, closed_ahead: None, toggle: None }
     }
 }
 
@@ -87,20 +93,38 @@ impl MenuButtons {
         }
     }
 
+    /// VRChat's Quick Menu to toggle now, on which hand, once.
+    pub fn quick_menu_to_toggle(&mut self) -> Option<usize> {
+        self.toggle.take()
+    }
+
     pub fn step(&mut self, down: [bool; 2], now: Instant) -> Open {
         for hand in 0..2 {
             if down[hand] && !self.down[hand] && self.press.is_none() {
                 self.press = Some((hand, now, self.open == Open::Wheel(hand)));
+                self.closed_ahead = None;
             }
         }
         if let Some((hand, since, on_wheel)) = self.press {
             let held = now.duration_since(since);
             if down[hand] {
+                // Enzo: a long press with the Quick Menu open only closed it. VRChat opens its wheel for a press that finds its Quick Menu closed, and nothing here can open its wheel, so
+                // the Quick Menu is closed just before the press becomes a long one.
+                if let Open::QuickMenu(on) = self.open {
+                    if held >= CLOSE_AHEAD && !on_wheel && self.closed_ahead.is_none() {
+                        self.closed_ahead = Some(on);
+                        self.toggle = Some(on);
+                    }
+                }
                 // The wheel takes the place of what was open.
                 if held >= HOLD && !on_wheel {
                     self.open = Open::Wheel(hand);
                 }
             } else {
+                // A slow short press after all: VRChat toggles its Quick Menu at the release, back open. It was to close.
+                if let Some(on) = self.closed_ahead.take().filter(|_| held < HOLD) {
+                    self.toggle = Some(on);
+                }
                 if on_wheel {
                     self.open = Open::Closed;
                 } else if held < HOLD {
@@ -477,6 +501,8 @@ pub struct Cx<'a, 'o> {
 pub struct Turn {
     /// A press happened (for the click's sound).
     pub clicked: bool,
+    /// The hand holding VRChat's menu, whose grip means nothing to what lies in a panel's hole.
+    pub menu_hand: Option<usize>,
     /// What the panel on the sheet asked of the 3D view. The sheet has its own panel, so nothing else opens beside it, and N4N0's menu stays out of this.
     pub(in crate::overlay) worlds: Vec<super::super::worlds::Relayed>,
     /// The menus up now: what a capture must not show over. None with no menu.
@@ -488,9 +514,28 @@ pub struct Turn {
 /// How much of the eye VRChat's window shows, as worked back from Enzo's two pictures: its tiles were 1.4 times the panel's scale, and how far they were off grows with the place on the picture by that.
 const WINDOW_SHARE: f32 = 0.716;
 const WINDOW_MOVED: [f32; 2] = [0.0, 0.0];
-/// How long the tiles stay where they are with no look seeing the panel (a hand over it, a white world behind its X, a head turned away), so that a look that misses moves nothing;
-/// and how many looks it takes to show them at first. They go at once when VRChat says its camera closed.
-const CAMERA_LOST_AFTER: Duration = Duration::from_secs(5);
+/// VRChat's `/input/QuickMenuToggle*`, as a button going to `value`, sent straight to it on this computer.
+fn send_quick_menu_toggle(hand: usize, value: i32, port: u16) {
+    let Ok(socket) = std::net::UdpSocket::bind(("127.0.0.1", 0)) else { return };
+    let _ = socket.send_to(&osc_int(if hand == 0 { "/input/QuickMenuToggleLeft" } else { "/input/QuickMenuToggleRight" }, value), ("127.0.0.1", port));
+}
+
+/// An OSC message of one integer.
+fn osc_int(address: &str, value: i32) -> Vec<u8> {
+    let mut out = address.as_bytes().to_vec();
+    out.extend(std::iter::repeat_n(0u8, 4 - out.len() % 4));
+    out.extend_from_slice(b",i\0\0");
+    out.extend_from_slice(&value.to_be_bytes());
+    out
+}
+
+fn settings_walk_left(snap: &Snapshot) -> bool {
+    snap.settings.walk_boost.hand == orbiters_core::settings::Hand::Left
+}
+
+/// How long the tiles stay where they are with no look seeing the panel (a hand over it, a white world behind its X, a head turned away): let go it stays still in the room, so what is known of it
+/// stays true for long. And how many looks it takes to show them at first. They go at once when VRChat says its camera closed.
+const CAMERA_LOST_AFTER: Duration = Duration::from_secs(20);
 /// How far within the eye's view the tiles must lie, of its width: its very edge is not seen through the lens.
 const CAMERA_VIEW_MARGIN: f32 = 0.1;
 const CAMERA_LOOKS_TO_SHOW: u32 = 2;
@@ -498,7 +543,7 @@ const CAMERA_LOOKS_TO_SHOW: u32 = 2;
 impl OrbitVr {
     /// What is up, for a note in the log when a turn took too long.
     pub fn doing(&self) -> String {
-        format!("open {:?}, {}", self.panels.open_menu(), self.panels.doing())
+        format!("open {:?}, {}", self.panels.open_menu(), self.panels.doing()) // i18n: not shown (a note in the log)
     }
 
     /// Why the tiles around VRChat's camera cannot show, for its switch in Settings.
@@ -517,7 +562,7 @@ impl OrbitVr {
     }
 
     /// Where VRChat's camera panel is now, while it is being watched and was seen.
-    fn camera_turn(&mut self, steamvr: &vr::Client, prediction: f32, now: Instant, dt: f32) -> Option<Plane> {
+    fn camera_turn(&mut self, steamvr: &vr::Client, actions: &Actions, input_read: bool, prediction: f32, now: Instant, dt: f32) -> Option<Plane> {
         let watch = self.camera_watch.as_ref()?;
         let mut poses = [Pose::default(); MAX_DEVICES];
         steamvr.predicted_poses(Universe::Standing, prediction, &mut poses);
@@ -555,6 +600,17 @@ impl OrbitVr {
                 self.camera_looks = self.camera_looks.saturating_add(1);
             }
         }
+        // What tracking knows, and what grabs it. Only while it shows: a grip means nothing to it otherwise.
+        let device = |role| steamvr.controller_index(role).filter(|&d| (d as usize) < MAX_DEVICES && poses[d as usize].pose_is_valid).map(|d| poses[d as usize].device_to_absolute);
+        let hands = [device(ControllerRole::LeftHand), device(ControllerRole::RightHand)];
+        let grips = if input_read { actions.grabs(steamvr) } else { [false; 2] };
+        let lasers = if input_read { actions.lasers(steamvr, prediction) } else { [None; 2] };
+        let pointers = lasers.map(|tip| tip.map(|tip| { let (o, d) = space::ray(&tip); (o, d) }));
+        let placed = self.camera_follow.step(dt, hands, grips, pointers);
+        // While a hand has it, it is known, seen or not.
+        if self.camera_follow.is_held() {
+            self.camera_seen = Some(now);
+        }
         if self.camera_seen.is_none_or(|at| now.duration_since(at) > CAMERA_LOST_AFTER) {
             self.camera_follow.clear();
             self.camera_looks = 0;
@@ -563,7 +619,7 @@ impl OrbitVr {
         if self.camera_looks < CAMERA_LOOKS_TO_SHOW {
             return None;
         }
-        self.camera_follow.step(dt).map(|(frame, unit)| Plane { frame, unit })
+        placed.map(|(frame, unit)| Plane { frame, unit })
     }
 }
 
@@ -596,6 +652,8 @@ pub struct OrbitVr {
     camera_watch: Option<CameraWatch>,
     camera_follow: super::camera_track::Follow,
     camera_side: camera_track::Side,
+    hole_logged: super::super::vr_log::Every,
+    osc_toggle: Option<(usize, Instant)>,
     camera_seen: Option<Instant>,
     camera_looks: u32,
     /// The head lately, for where it was when a look's frame was taken.
@@ -640,6 +698,8 @@ impl OrbitVr {
             pointers: [None; 2],
             camera_follow: Default::default(),
             camera_side: Default::default(),
+            hole_logged: Default::default(),
+            osc_toggle: None,
             camera_seen: None,
             camera_looks: 0,
             camera_heads: Default::default(),
@@ -767,6 +827,11 @@ impl OrbitVr {
         let down = if cx.input_read { cx.actions.orbit_menu_buttons(cx.steamvr) } else { [false; 2] };
         if cx.input_read {
             self.buttons.step(down, now);
+            if let Some(hand) = self.buttons.quick_menu_to_toggle() {
+                super::super::vr_log::line(&format!("buttons: toggling VRChat's Quick Menu on hand {hand}, open {:?}", self.buttons.open())); // i18n: not shown (a log's line)
+                self.osc_toggle = Some((hand, now));
+                send_quick_menu_toggle(hand, 1, cx.snap.settings.osc.vrchat_port);
+            }
             // Walking closes VRChat's Quick Menu. A moment's touch of the stick does not; laying the parts on it is not walking.
             let stick = cx.actions.pads(cx.steamvr).map_or(0.0, |pads| pads.sticks[0].x.hypot(pads.sticks[0].y));
             self.walking_since = (stick >= WALKS_AT && self.aligning.is_none()).then(|| self.walking_since.unwrap_or(now));
@@ -793,7 +858,7 @@ impl OrbitVr {
             self.camera_seen = None;
             self.camera_looks = 0;
         }
-        let camera_plane = self.camera_turn(cx.steamvr, cx.prediction, now, dt);
+        let camera_plane = self.camera_turn(cx.steamvr, &*cx.actions, cx.input_read, cx.prediction, now, dt);
         let menu = match open {
             Open::QuickMenu(_) if settings.around_quick_menu() => Some(Around::QuickMenu),
             Open::Wheel(_) if settings.around_wheel() => Some(Around::Wheel),
@@ -1061,6 +1126,26 @@ impl OrbitVr {
             let there = Matrix34 { m: [[1.0, 0.0, 0.0, x], [0.0, 1.0, 0.0, y], [0.0, 0.0, 1.0, 0.0]] };
             Some((space::compose(&frame, &there), hole.width() / 1024.0 * quad.width / 2.0 * super::super::worlds::SMALL_FILLS_HOLE))
         });
+        // The stick's up and down scrolls what is on the sheet, unless a hand holds what shows small: that is zoomed with it. The stick that does not walk, as VRChat's turning one.
+        if self.panels.sheet_open() && !cx.world_status.small_held && cx.input_read {
+            let hand = if settings_walk_left(cx.snap) { 1 } else { 0 };
+            if let Some(pads) = cx.actions.pads(cx.steamvr) {
+                self.panels.stick(pads.sticks[hand].y, dt, cx.snap);
+            }
+        }
+        // The toggle's button lets go a moment later, as a finger does.
+        if let Some((hand, at)) = self.osc_toggle.filter(|(_, at)| now.duration_since(*at) >= Duration::from_millis(60)) {
+            let _ = at;
+            send_quick_menu_toggle(hand, 0, cx.snap.settings.osc.vrchat_port);
+            self.osc_toggle = None;
+        }
+        turn.menu_hand = match open {
+            Open::Wheel(hand) | Open::QuickMenu(hand) => Some(hand),
+            Open::Closed => None,
+        };
+        if self.hole_logged.due(Duration::from_secs(1)) && cx.world_status.small {
+            super::super::vr_log::line(&format!("panel: {} small place {:?} world panel status small {} docked {} shown {} stage {:?}", self.panels.hole_report(), turn.small_place.map(|(at, r)| ([at.m[0][3], at.m[1][3], at.m[2][3]], r)), cx.world_status.small, cx.world_status.small_docked, cx.world_status.shown, cx.world_status.stage)); // i18n: not shown (a log's line)
+        }
         // Pictures, then each overlay where it goes.
         self.show(&mut cx, &quads, &placing);
         self.last_shown = true;
@@ -1408,6 +1493,54 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// Enzo: "When long clicking on the hand wheel menu button while the quick menu is open, it doesn't open the wheel menu but just closes the quick menu".
+    #[test]
+    fn a_long_press_closes_the_quick_menu_ahead_of_the_wheel() {
+        let t0 = Instant::now();
+        let at = |ms: u64| t0 + Duration::from_millis(ms);
+        let open_quick = |b: &mut MenuButtons| {
+            b.step([false, false], at(0));
+            b.step([false, true], at(10));
+            b.step([false, false], at(60));
+            assert_eq!(b.open(), Open::QuickMenu(1));
+            assert_eq!(b.quick_menu_to_toggle(), None);
+        };
+        // Long: closed just before it becomes long, once, and then it is the wheel.
+        let mut b = MenuButtons::default();
+        open_quick(&mut b);
+        b.step([false, true], at(1000));
+        b.step([false, true], at(1200));
+        assert_eq!(b.quick_menu_to_toggle(), None, "a short press is no business of this");
+        b.step([false, true], at(1000 + CLOSE_AHEAD.as_millis() as u64));
+        assert_eq!(b.quick_menu_to_toggle(), Some(1));
+        b.step([false, true], at(1450));
+        assert_eq!(b.quick_menu_to_toggle(), None, "once");
+        assert_eq!(b.step([false, true], at(1500)), Open::Wheel(1));
+        assert_eq!(b.step([false, false], at(1600)), Open::Wheel(1));
+        // A slow short one: VRChat opens it again at the release, so it is told again; what is open is nothing.
+        let mut b = MenuButtons::default();
+        open_quick(&mut b);
+        b.step([false, true], at(1000));
+        b.step([false, true], at(1400));
+        assert_eq!(b.quick_menu_to_toggle(), Some(1));
+        assert_eq!(b.step([false, false], at(1450)), Open::Closed);
+        assert_eq!(b.quick_menu_to_toggle(), Some(1));
+        // A quick one: VRChat closes it itself, as ever.
+        let mut b = MenuButtons::default();
+        open_quick(&mut b);
+        b.step([false, true], at(1000));
+        assert_eq!(b.step([false, false], at(1100)), Open::Closed);
+        assert_eq!(b.quick_menu_to_toggle(), None);
+    }
+
+    #[test]
+    fn an_osc_message_is_padded_as_osc_has_it() {
+        let m = osc_int("/input/Jump", 1);
+        assert_eq!(m.len() % 4, 0);
+        assert_eq!(&m[..12], b"/input/Jump\0");
+        assert_eq!(&m[12..], &[b',', b'i', 0, 0, 0, 0, 0, 1]);
     }
 
     /// Enzo: "when I open the camera, the wheel menu disappears".

@@ -98,10 +98,10 @@ impl RealGame {
             Some(Ok(())) => Ok(()),
             Some(Err(e)) => Err(Failure::new(
                 "osc_failed",
-                format!("OSC to VRChat failed: {e}"),
-                "Check get_state's osc_answers: OSC must be on in VRChat's Action Menu (r), Options, OSC.",
+                format!("OSC to VRChat failed: {e}"), // i18n: not shown (the agent reads it, in English)
+                "Check get_state's osc_answers: OSC must be on in VRChat's Action Menu (r), Options, OSC.", // i18n: not shown (the agent reads it)
             )),
-            None => Err(Failure::new("osc_off", "OSC is off in Orbiters - N4N0.", "Tell the person to turn it on in its Settings.")),
+            None => Err(Failure::new("osc_off", "OSC is off in Orbiters - N4N0.", "Tell the person to turn it on in its Settings.")), // i18n: not shown (the agent reads it)
         }
     }
 }
@@ -293,8 +293,8 @@ impl Flag for RealFlag {
     }
 
     fn ask(&self) -> anyhow::Result<bool> {
-        let ctl = self.ctl.upgrade().ok_or_else(|| anyhow::anyhow!("the app is closing"))?;
-        let (api, token) = ctl.vrchat_identity().ok_or_else(|| anyhow::anyhow!("signed out"))?;
+        let ctl = self.ctl.upgrade().ok_or_else(|| anyhow::anyhow!("the app is closing"))?; // i18n: not shown (the keeper reads only whether it failed: features.rs Grant::answered)
+        let (api, token) = ctl.vrchat_identity().ok_or_else(|| anyhow::anyhow!("signed out"))?; // i18n: not shown (the keeper reads only whether it failed: features.rs Grant::answered)
         api.member_feature(&token, orbiters_core::features::VRCHAT_BRIDGE)
     }
 

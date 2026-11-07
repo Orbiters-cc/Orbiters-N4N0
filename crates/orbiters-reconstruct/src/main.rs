@@ -20,6 +20,7 @@
 use anyhow::{bail, Context as _};
 use orbiters_contracts::qoi;
 use orbiters_core::reconstruction::{self as rec, Event, Report, Stage};
+use orbiters_i18n::tr;
 use orbiters_reconstruct::checkpoint::{self, Extras, Interrupted, Lab, LabStage, Pause};
 use orbiters_reconstruct::{gpu, init, ply, prepare, sky, timing, train};
 use std::io::Write as _;
@@ -68,7 +69,7 @@ fn args() -> anyhow::Result<Args> {
     let mut resume = false;
     let mut lab = Lab::default();
     while let Some(a) = it.next() {
-        let mut number = |name: &str| -> anyhow::Result<u64> { it.next().with_context(|| format!("{name} needs a value"))?.parse().with_context(|| format!("{name} takes a number")) };
+        let mut number = |name: &str| -> anyhow::Result<u64> { it.next().with_context(|| tr!("{name} needs a value", name = name))?.parse().with_context(|| tr!("{name} takes a number", name = name)) };
         match a.as_str() {
             "--width" => width = number("--width")? as u32,
             // Lab: the wearer leaves or stays whatever the session says (orbiters_reconstruct::wearer).
@@ -154,11 +155,11 @@ fn args() -> anyhow::Result<Args> {
                 lab.at = it.next().context("--pause-at needs steps")?.split(',').map(str::parse).collect::<Result<_, _>>().context("--pause-at takes numbers")?;
             }
             "--pause-in" => lab.stage = Some(LabStage::parse(&it.next().context("--pause-in needs a stage")?)?),
-            _ if a.starts_with("--") => bail!("unknown option {a}"),
+            _ if a.starts_with("--") => bail!("{}", tr!("unknown option {option}", option = a)),
             _ => session = Some(PathBuf::from(a)),
         }
     }
-    Ok(Args { resume, lab, portrait_boxes, session: session.context("usage: orbiters-reconstruct <session folder> [--width N] [--iterations N] [--budget N] [--robust T] [--gpu integrated|fastest]")?, width, settings, budget, device, wearer })
+    Ok(Args { resume, lab, portrait_boxes, session: session.with_context(|| tr("usage: orbiters-reconstruct <session folder> [--width N] [--iterations N] [--budget N] [--robust T] [--gpu integrated|fastest]"))?, width, settings, budget, device, wearer })
 }
 
 fn rgb8(img: &[[f32; 4]]) -> Vec<u8> {
@@ -270,7 +271,7 @@ fn run(args: Args) -> anyhow::Result<Ended> {
     }
     let data = &prepared.data;
     let held_out = train::held_out_views(data, args.settings.hold_out_every);
-    let mut gpu = device.join().map_err(|_| anyhow::anyhow!("the GPU device's thread panicked"))??;
+    let mut gpu = device.join().map_err(|_| anyhow::anyhow!("{}", tr("the GPU device's thread panicked")))??;
     let dev = gpu.device.clone();
     let mut settings = args.settings.clone();
     settings.wearer = prepared.wearer.as_ref().map(|(volume, _)| std::sync::Arc::new(volume.clone())).filter(|v| !v.is_empty());
@@ -280,7 +281,7 @@ fn run(args: Args) -> anyhow::Result<Ended> {
         eprintln!("a picture of the world: no steps on faces");
     }
     // A checkpoint that cannot be read costs what it held, no more: the run starts over.
-    let restored = match body.map(|b| b.join().map_err(|_| anyhow::anyhow!("reading the checkpoint panicked"))?).transpose() {
+    let restored = match body.map(|b| b.join().map_err(|_| anyhow::anyhow!("reading the checkpoint panicked"))?).transpose() { // i18n: not shown (only reaches the worker's log: the run starts over)
         Ok(found) => found,
         Err(e) => {
             eprintln!("the paused run's checkpoint is not used ({e:#}): starting over");
@@ -440,7 +441,7 @@ fn run(args: Args) -> anyhow::Result<Ended> {
     }
     let partial = dir.join(rec::PARTIAL_DIR);
     if partial.exists() {
-        std::fs::remove_dir_all(&partial).with_context(|| format!("clearing {}", partial.display()))?;
+        std::fs::remove_dir_all(&partial).with_context(|| tr!("clearing {path}", path = partial.display()))?;
     }
     std::fs::create_dir_all(partial.join(rec::HELD_OUT_DIR))?;
     timing::section("5 ply", None, || ply::write(&partial.join(rec::PLY_FILE), &outcome.gaussians))?;
@@ -565,12 +566,12 @@ fn replace(dir: &Path, partial: &Path) -> anyhow::Result<()> {
     let backup = dir.join(BACKUP_DIR);
     recover(dir);
     if out.exists() && retry(|| std::fs::rename(&out, &backup)).is_err() {
-        return replace_files(&out, partial).with_context(|| format!("replacing the previous result in {}", out.display()));
+        return replace_files(&out, partial).with_context(|| tr!("replacing the previous result in {path}", path = out.display()));
     }
     if let Err(e) = retry(|| std::fs::rename(partial, &out)) {
         // Back as it was.
         let _ = std::fs::rename(&backup, &out);
-        return Err(e).with_context(|| format!("moving the result to {}", out.display()));
+        return Err(e).with_context(|| tr!("moving the result to {path}", path = out.display()));
     }
     if backup.exists() {
         let _ = std::fs::remove_dir_all(&backup);
@@ -582,14 +583,14 @@ fn replace(dir: &Path, partial: &Path) -> anyhow::Result<()> {
 /// keeps open) and the report last (it says what the folder holds). Held-out renders that cannot be replaced keep the
 /// previous ones; renders of keyframes the new run did not hold out are deleted where possible.
 fn replace_files(out: &Path, partial: &Path) -> anyhow::Result<()> {
-    retry(|| std::fs::rename(partial.join(rec::PLY_FILE), out.join(rec::PLY_FILE))).with_context(|| format!("{} is open in another program: close it and reconstruct again", out.join(rec::PLY_FILE).display()))?;
+    retry(|| std::fs::rename(partial.join(rec::PLY_FILE), out.join(rec::PLY_FILE))).with_context(|| tr!("{path} is open in another program: close it and reconstruct again", path = out.join(rec::PLY_FILE).display()))?;
     // The previous splats' edits and the worker's pictures kept aside for them go with them (a folder moved as a whole
     // takes them along): edits name splats of the PLY they were made on, and a picture kept aside belongs to its PLY.
     retry(|| match std::fs::remove_file(out.join(rec::EDIT_FILE)) {
         Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
         _ => Ok(()),
     })
-    .with_context(|| format!("{} is open in another program: close it and reconstruct again", out.join(rec::EDIT_FILE).display()))?;
+    .with_context(|| tr!("{path} is open in another program: close it and reconstruct again", path = out.join(rec::EDIT_FILE).display()))?;
     for e in std::fs::read_dir(out).into_iter().flatten().flatten() {
         if rec::is_trained_preview_file(&e.file_name().to_string_lossy()) {
             let _ = retry(|| std::fs::remove_file(e.path()));
@@ -598,9 +599,9 @@ fn replace_files(out: &Path, partial: &Path) -> anyhow::Result<()> {
     // The sky map goes with the splats it was trained with: a result without one leaves none behind.
     let sky = out.join(rec::SKY_FILE);
     if partial.join(rec::SKY_FILE).exists() {
-        retry(|| std::fs::rename(partial.join(rec::SKY_FILE), &sky)).with_context(|| format!("{} is open in another program: close it and reconstruct again", sky.display()))?;
+        retry(|| std::fs::rename(partial.join(rec::SKY_FILE), &sky)).with_context(|| tr!("{path} is open in another program: close it and reconstruct again", path = sky.display()))?;
     } else if sky.exists() {
-        retry(|| std::fs::remove_file(&sky)).with_context(|| format!("{} is open in another program: close it and reconstruct again", sky.display()))?;
+        retry(|| std::fs::remove_file(&sky)).with_context(|| tr!("{path} is open in another program: close it and reconstruct again", path = sky.display()))?;
     }
     let _ = retry(|| std::fs::rename(partial.join(rec::PREVIEW_FILE), out.join(rec::PREVIEW_FILE)));
     let (from, to) = (partial.join(rec::HELD_OUT_DIR), out.join(rec::HELD_OUT_DIR));
@@ -649,7 +650,7 @@ fn vrchat(args: &[String]) -> anyhow::Result<()> {
     let mut untuned = false;
     let mut it = args[2..].iter();
     while let Some(a) = it.next() {
-        let mut value = || it.next().with_context(|| format!("{a} needs a value"));
+        let mut value = || it.next().with_context(|| format!("{a} needs a value")); // i18n: not shown (the --vrchat command-line tool, run from a terminal: the app never starts it)
         match a.as_str() {
             "--untuned" => untuned = true,
             "--before" => options = orbiters_reconstruct::tree_tune::ExportOptions::before(),
@@ -666,7 +667,7 @@ fn vrchat(args: &[String]) -> anyhow::Result<()> {
             "--refit-width" => options.refit_width = value()?.parse()?,
             "--pc-appearance" => options.pc_appearance = true,
             "--tight" => options.tight = true,
-            _ => bail!("unknown argument {a}; {usage}"),
+            _ => bail!("unknown argument {a}; {usage}"), // i18n: not shown (the --vrchat command-line tool, run from a terminal: the app never starts it)
         }
     }
     let session = std::path::Path::new(session);

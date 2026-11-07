@@ -16,6 +16,7 @@
 //! [`Discovery::Platform`]: the system's Bonjour registers the services and browses, the app hands what it sees to
 //! [`OscService::saw`], and the answers VRChat takes also go to the chosen VRChat directly ([`announce`]).
 
+use orbiters_i18n::tr;
 use rosc::{OscMessage, OscPacket, OscType};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -324,7 +325,7 @@ const MAX_ANSWER: usize = 8 << 20;
 /// answer included, which may be at most [`MAX_ANSWER`] bytes.
 pub fn http_get(addr: SocketAddr, path: &str, timeout: Duration) -> anyhow::Result<String> {
     let (status, body) = http_request(addr, path, timeout)?;
-    anyhow::ensure!(status == 200, "HTTP status {status}");
+    anyhow::ensure!(status == 200, "{}", tr!("HTTP status {status}", status = status));
     Ok(String::from_utf8(body)?)
 }
 
@@ -353,7 +354,7 @@ fn http_request(addr: SocketAddr, path: &str, timeout: Duration) -> anyhow::Resu
     let mut chunk = vec![0u8; 64 * 1024];
     loop {
         let left = deadline.saturating_duration_since(Instant::now());
-        anyhow::ensure!(!left.is_zero(), "no complete answer from {addr} within {} ms", timeout.as_millis());
+        anyhow::ensure!(!left.is_zero(), "{}", tr!("no complete answer from {addr} within {ms} ms", addr = addr, ms = timeout.as_millis()));
         stream.set_read_timeout(Some(left))?;
         let n = match stream.read(&mut chunk) {
             Ok(0) => break,
@@ -361,13 +362,13 @@ fn http_request(addr: SocketAddr, path: &str, timeout: Duration) -> anyhow::Resu
             Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
             Err(e) => return Err(e.into()),
         };
-        anyhow::ensure!(raw.len() + n <= MAX_ANSWER, "the answer from {addr} is over {} MB", MAX_ANSWER >> 20);
+        anyhow::ensure!(raw.len() + n <= MAX_ANSWER, "{}", tr!("the answer from {addr} is over {size} MB", addr = addr, size = MAX_ANSWER >> 20));
         raw.extend_from_slice(&chunk[..n]);
     }
-    let split = raw.windows(4).position(|w| w == b"\r\n\r\n").ok_or_else(|| anyhow::anyhow!("no HTTP header"))?;
+    let split = raw.windows(4).position(|w| w == b"\r\n\r\n").ok_or_else(|| anyhow::anyhow!("{}", tr("no HTTP header")))?;
     let head = String::from_utf8_lossy(&raw[..split]).to_ascii_lowercase();
     let status = head.strip_prefix("http/1.").and_then(|h| h.split_whitespace().nth(1)).and_then(|s| s.parse::<u16>().ok());
-    let status = status.ok_or_else(|| anyhow::anyhow!("not an HTTP answer: {}", head.lines().next().unwrap_or("")))?;
+    let status = status.ok_or_else(|| anyhow::anyhow!("{}", tr!("not an HTTP answer: {first_line}", first_line = head.lines().next().unwrap_or(""))))?;
     let body = &raw[split + 4..];
     let body = if head.contains("transfer-encoding: chunked") { dechunk(body)? } else { body.to_vec() };
     Ok((status, body))
@@ -376,14 +377,14 @@ fn http_request(addr: SocketAddr, path: &str, timeout: Duration) -> anyhow::Resu
 fn dechunk(mut data: &[u8]) -> anyhow::Result<Vec<u8>> {
     let mut out = Vec::new();
     loop {
-        let line_end = data.windows(2).position(|w| w == b"\r\n").ok_or_else(|| anyhow::anyhow!("bad chunk"))?;
+        let line_end = data.windows(2).position(|w| w == b"\r\n").ok_or_else(|| anyhow::anyhow!("{}", tr("bad chunk")))?;
         let size_text = String::from_utf8_lossy(&data[..line_end]);
         let size = usize::from_str_radix(size_text.split(';').next().unwrap_or("").trim(), 16)?;
         data = &data[line_end + 2..];
         if size == 0 {
             return Ok(out);
         }
-        anyhow::ensure!(data.len() >= size, "truncated chunk");
+        anyhow::ensure!(data.len() >= size, "{}", tr("truncated chunk"));
         out.extend_from_slice(&data[..size]);
         data = data.get(size + 2..).unwrap_or(&[]);
     }
@@ -416,12 +417,12 @@ pub fn vrchat_value(addr: SocketAddr, path: &str, timeout: Duration) -> anyhow::
     if status == 404 {
         return Ok(None);
     }
-    anyhow::ensure!(status == 200, "HTTP status {status}");
+    anyhow::ensure!(status == 200, "{}", tr!("HTTP status {status}", status = status));
     let node: serde_json::Value = serde_json::from_slice(&body)?;
     let mut values = Vec::new();
     tree_values(&node, &mut values);
     let value = values.into_iter().find(|(p, _)| p == path).map(|(_, v)| v);
-    value.map(Some).ok_or_else(|| anyhow::anyhow!("VRChat's {path} has no value"))
+    value.map(Some).ok_or_else(|| anyhow::anyhow!("{}", tr!("VRChat's {path} has no value", path = path)))
 }
 
 /// Current values of an OSCQuery tree: every node with a `VALUE`, by full path (first value of each node).
@@ -952,7 +953,7 @@ impl OscService {
 
     /// Where messages go now, or why none can.
     fn to_vrchat(&self) -> anyhow::Result<SocketAddr> {
-        self.route.target().ok_or_else(|| anyhow::anyhow!("VRChat was not found on the network yet"))
+        self.route.target().ok_or_else(|| anyhow::anyhow!("{}", tr("VRChat was not found on the network yet")))
     }
 
     /// Sends one message to VRChat's input port.
@@ -984,7 +985,7 @@ impl OscService {
 /// Windows, the first time a program listens beyond loopback, its firewall asks the person in a window that takes the
 /// foreground; a test program is named by a hash of its build, so each new one asks again, and while the prompt is up no game
 /// or agent gets the focus. mDNS is what listens: a test run has nothing to find on the network anyway.
-pub(crate) fn no_network_listening() -> bool {
+pub fn no_network_listening() -> bool {
     std::env::var_os("ORBITERS_NO_NETWORK_LISTENING").is_some()
 }
 
@@ -1069,7 +1070,7 @@ fn answer(service: &str, instance: &str, host: &str, address: Ipv4Addr, port: u1
 fn mdns_socket(interface: Option<Ipv4Addr>) -> std::io::Result<socket2::Socket> {
     // This is what raised Windows' firewall prompt in test runs: it binds every interface.
     if no_network_listening() {
-        return Err(std::io::Error::other("nothing listens on the network in this run"));
+        return Err(std::io::Error::other("nothing listens on the network in this run")); // i18n: not shown (only when ORBITERS_NO_NETWORK_LISTENING is set, which the agents' test runs do; mDNS logs it)
     }
     let socket = socket2::Socket::new(socket2::Domain::IPV4, socket2::Type::DGRAM, Some(socket2::Protocol::UDP))?;
     socket.set_reuse_address(true)?;

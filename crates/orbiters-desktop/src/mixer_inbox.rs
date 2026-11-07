@@ -69,21 +69,24 @@ pub fn session_for_mixer(session: &Path, exports: &Path) -> anyhow::Result<PathB
         return Ok(session.to_path_buf());
     }
     let (kept, removed, generation) = orbiters_reconstruct::edit::read_edited(&result.join(rec::PLY_FILE))?;
-    let name = session.file_name().context("a session folder without a name")?;
+    let name = session.file_name().with_context(|| orbiters_i18n::tr("a session folder without a name"))?;
     let dest = exports.join(name);
     let partial = exports.join(format!("{}.partial", name.to_string_lossy()));
     let sky = result.join(rec::SKY_FILE);
     let picture = orbiters_reconstruct::edit::picture_state(&result).preview_ok().then(|| result.join(rec::PREVIEW_FILE)).filter(|p| p.is_file());
     let small = [session.join(orbiters_core::contracts::manifest::MANIFEST_FILE), session.join(orbiters_core::contracts::manifest::FRAMES_FILE), sky.clone()];
     let needed = 1024 + kept.len() as u64 * 92 + small.iter().chain(picture.iter()).filter_map(|p| std::fs::metadata(p).ok()).map(|m| m.len()).sum::<u64>();
-    std::fs::create_dir_all(exports).with_context(|| format!("making {}", exports.display()))?;
+    std::fs::create_dir_all(exports).with_context(|| orbiters_i18n::tr!("making {path}", path = exports.display()))?;
     if let Some(free) = orbiters_projects::size::free_space(exports) {
         anyhow::ensure!(
             free >= needed + EXPORT_MARGIN,
-            "Mixer gets a copy of this capture without the splats its 3D view removed: {} MB, and {} has {} MB left (512 MB kept free).",
-            needed >> 20,
-            exports.display(),
-            free >> 20
+            "{}",
+            orbiters_i18n::tr!(
+                "Mixer gets a copy of this capture without the splats its 3D view removed: {needed} MB, and {folder} has {free} MB left (512 MB kept free).",
+                needed = needed >> 20,
+                folder = exports.display(),
+                free = free >> 20
+            )
         );
     }
     let _ = std::fs::remove_dir_all(&partial);
@@ -93,7 +96,7 @@ pub fn session_for_mixer(session: &Path, exports: &Path) -> anyhow::Result<PathB
         (session.join(orbiters_core::contracts::manifest::MANIFEST_FILE), partial.join(orbiters_core::contracts::manifest::MANIFEST_FILE)),
         (session.join(orbiters_core::contracts::manifest::FRAMES_FILE), partial.join(orbiters_core::contracts::manifest::FRAMES_FILE)),
     ] {
-        std::fs::copy(&from, &to).with_context(|| format!("copying {}", from.display()))?;
+        std::fs::copy(&from, &to).with_context(|| orbiters_i18n::tr!("copying {path}", path = from.display()))?;
     }
     if sky.is_file() {
         std::fs::copy(&sky, out.join(rec::SKY_FILE))?;
@@ -109,9 +112,9 @@ pub fn session_for_mixer(session: &Path, exports: &Path) -> anyhow::Result<PathB
     let made = serde_json::json!({ "from": session, "splatEdits": generation, "removed": removed, "kept": kept.len() });
     std::fs::write(partial.join("export.json"), serde_json::to_vec_pretty(&made)?)?;
     if dest.exists() {
-        std::fs::remove_dir_all(&dest).with_context(|| format!("replacing {}", dest.display()))?;
+        std::fs::remove_dir_all(&dest).with_context(|| orbiters_i18n::tr!("replacing {path}", path = dest.display()))?;
     }
-    std::fs::rename(&partial, &dest).with_context(|| format!("putting {} in place", dest.display()))?;
+    std::fs::rename(&partial, &dest).with_context(|| orbiters_i18n::tr!("putting {path} in place", path = dest.display()))?;
     Ok(dest)
 }
 

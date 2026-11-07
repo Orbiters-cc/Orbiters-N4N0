@@ -143,7 +143,7 @@ pub fn save(result: &Path, fingerprint: &Fingerprint, files: &PreviewFiles, meta
     for part in parts {
         bytes.extend_from_slice(part);
     }
-    anyhow::ensure!(bytes.len() as u64 <= MAX_BYTES, "upload preparation exceeds the cache limit");
+    anyhow::ensure!(bytes.len() as u64 <= MAX_BYTES, "{}", orbiters_i18n::tr("upload preparation exceeds the cache limit"));
     let digest = Sha256::digest(&bytes[40..]);
     bytes[8..40].copy_from_slice(&digest);
     orbiters_core::write_atomic(&result.join(FILE), &bytes)?;

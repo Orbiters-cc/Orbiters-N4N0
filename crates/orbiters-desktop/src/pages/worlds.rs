@@ -12,7 +12,7 @@ use orbiters_core::account::Server;
 use orbiters_core::bundle::SessionSummary;
 use orbiters_core::maps::{world_page_url, MineWorld};
 use orbiters_core::visited::{self, Shot};
-use orbiters_i18n::{fill, mark, tr, tr_n};
+use orbiters_i18n::{fill, mark, tr, tr_n, tr_ctx};
 use orbiters_ui::anim::{self, ease, Spring};
 use orbiters_ui::paint::{self, Gradient};
 use orbiters_ui::theme::{self, weight, Txt};
@@ -838,7 +838,7 @@ fn detail(ui: &mut Ui, cx: &mut Cx, state: &mut State, page: Rect) {
                     ),
                     (
                         icons::GAUGE,
-                        tr("Frame rate"),
+                        tr_ctx("stat tile", "Frame rate"),
                         match &info {
                             Some(Info::Listed(p)) => p.world.performance.as_ref().map(|f| format!("{} fps", f.fps)).unwrap_or_else(|| "–".into()),
                             _ => "–".into(),

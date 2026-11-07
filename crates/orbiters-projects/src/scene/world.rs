@@ -15,6 +15,7 @@ use super::texture::{self, Encoded, Linear};
 use super::{material, yaml};
 use crate::preview as file;
 use anyhow::Context as _;
+use orbiters_i18n::tr;
 use std::path::PathBuf;
 
 /// The most lightmaps a preview keeps, and the most pixels on a side of each by how many there are.
@@ -53,9 +54,9 @@ pub fn lighting_data_maps(loader: &mut Loader, graph: &Graph) -> Vec<Option<Stri
 
 /// A lightmap read and made small.
 pub fn lightmap(path: &std::path::Path, side: u32, limits: &super::Limits) -> anyhow::Result<(Encoded, f32)> {
-    limits.check("reading the lightmaps")?; // i18n: not shown (what a time-limit error says it was doing)
+    limits.check(tr("reading the lightmaps"))?;
     let picture = texture::decode_linear(path, limits.max_texture_bytes)?;
-    limits.check("reading the lightmaps")?; // i18n: not shown (what a time-limit error says it was doing)
+    limits.check(tr("reading the lightmaps"))?;
     texture::encode_light(&picture.shrink(side, true), 0.999, 92)
 }
 
@@ -253,7 +254,7 @@ pub fn lightmap_of(graph: &Graph, unity_maps: &[Option<String>], id: i64, index:
 
 /// Which file holds a lightmap (for messages).
 pub fn path_of(loader: &Loader, guid: &str) -> anyhow::Result<PathBuf> {
-    loader.assets.path(guid).with_context(|| format!("a lightmap that is not in the project ({guid})"))
+    loader.assets.path(guid).with_context(|| tr!("a lightmap that is not in the project ({guid})", guid = guid))
 }
 
 #[cfg(test)]

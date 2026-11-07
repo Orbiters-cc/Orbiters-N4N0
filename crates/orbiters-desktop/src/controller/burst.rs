@@ -341,8 +341,17 @@ impl super::Controller {
     }
 
     /// [`Self::take_3d_picture`] of a given length and kind (the VRChat bridge says which; a person's settings say otherwise).
+    ///
+    /// What stops it is said in English, whatever the language: the two who ask are not the ones who read it in the person's language.
+    /// N4N0 (a toast, and the line of the 3D picture page, which its avatar's screen draws from a Latin-only atlas) keeps the English
+    /// as the key it translates where it draws, as it does for [`orbiters_n4n0::platform::CAMERA_CLOSED`]; the VRChat bridge hands
+    /// it to an AI, which is told in English. Only the errors are made inside: the recording itself runs on a thread of its own.
     pub fn take_3d_picture_of(self: &Shared, length: Photo3dLength, mode: PictureMode) -> anyhow::Result<()> {
-        anyhow::ensure!(self.snapshot.lock().unwrap().vrchat.running, "Start VRChat and open its camera first.");
+        orbiters_i18n::in_language(orbiters_i18n::Language::En, || self.start_3d_picture(length, mode))
+    }
+
+    fn start_3d_picture(self: &Shared, length: Photo3dLength, mode: PictureMode) -> anyhow::Result<()> {
+        anyhow::ensure!(self.snapshot.lock().unwrap().vrchat.running, "{}", tr("Start VRChat and open its camera first."));
         self.ensure_capture_idle()?;
         let (pose, focus, smooth, eye_height) = {
             let osc = self.osc_values.lock().unwrap();
@@ -357,7 +366,7 @@ impl super::Controller {
         // the tree then says, no camera shows and a recording gets no frame; there is no endpoint to open it).
         anyhow::ensure!(self.camera_open() != Some(false), orbiters_n4n0::platform::CAMERA_CLOSED);
         let Some(pose) = pose else {
-            anyhow::bail!("Move VRChat's camera once so Orbiters knows where it is, then try again.");
+            anyhow::bail!("{}", tr("Move VRChat's camera once so Orbiters knows where it is, then try again."));
         };
         let pose: [f32; 6] = pose.try_into().expect("six values");
         // N4N0's menu and link card stand in front of their owner: while the capture kit records (N4N0/Capture/Record),
@@ -558,6 +567,20 @@ impl super::Controller {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use orbiters_i18n::{in_language, Language};
+
+    /// What stops a 3D picture is told in English in any language: N4N0 keys its translation on that text where it draws it (its screen has no
+    /// Japanese), and the bridge hands it to an AI. A scan has no such reader: a toast says it in the person's language.
+    #[test]
+    fn a_picture_that_cannot_start_says_why_in_english_and_a_scan_in_the_language() {
+        let ctl = crate::controller::Controller::new(orbiters_core::settings::Settings::default());
+        for language in [Language::Ja, Language::Fr, Language::Es, Language::PtBr] {
+            let picture = in_language(language, || ctl.take_3d_picture().unwrap_err().to_string());
+            assert_eq!(picture, "Start VRChat and open its camera first.", "{language:?}");
+            let scan = in_language(language, || ctl.take_scan().unwrap_err().to_string());
+            assert_ne!(scan, "Start VRChat and open its camera first.", "{language:?}");
+        }
+    }
 
     fn ends_where_it_started(poses: &[[f32; 6]], pose: [f32; 6]) {
         assert_eq!(poses.first(), Some(&pose));

@@ -4,6 +4,7 @@ use crate::state::AccountState;
 use orbiters_core::account::{Api, Server};
 use orbiters_core::features::{FeatureCache, REFRESH};
 use orbiters_core::vrchat_api::{Client, Error, Gate, Login, Secret, TwoFactor, User};
+use orbiters_i18n::tr;
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -289,9 +290,9 @@ impl Controller {
             };
             let clear_session = signing_out || matches!(result, Err(Error::Unauthorized));
             let result = match result {
-                Err(Error::Unauthorized) if signing_in => Err("The username or password was not accepted by VRChat.".to_string()),
-                Err(Error::Storage) if signing_out => Err("The saved VRChat session could not be removed. Try signing out again.".into()),
-                Err(e) if signing_out => Err(format!("Signed out on this computer. VRChat could not confirm remote sign-out: {e}")),
+                Err(Error::Unauthorized) if signing_in => Err(tr("The username or password was not accepted by VRChat.").to_string()),
+                Err(Error::Storage) if signing_out => Err(tr("The saved VRChat session could not be removed. Try signing out again.").into()),
+                Err(e) if signing_out => Err(tr!("Signed out on this computer. VRChat could not confirm remote sign-out: {error}", error = e)),
                 r => r.map_err(|e| e.to_string()),
             };
             drop(c);

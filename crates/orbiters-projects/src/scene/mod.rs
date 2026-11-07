@@ -271,7 +271,8 @@ impl std::fmt::Display for TooLong {
 
 impl std::error::Error for TooLong {}
 
-/// Why a scene has no preview: what a person reads, and whether it is tried again because the time ran out.
+/// Why a scene has no preview: in English, as it is kept in the cache for later, and said in the language of that moment where it is drawn (its `Display`); and whether it
+/// is tried again because the time ran out.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Failure {
     pub why: String,
@@ -287,7 +288,7 @@ impl std::ops::Deref for Failure {
 
 impl std::fmt::Display for Failure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.why)
+        f.write_str(&orbiters_i18n::tr_written(&self.why))
     }
 }
 
@@ -467,11 +468,12 @@ pub fn build_scene(project: &Path, scene: &SceneInfo, limits: &Limits) -> Result
     // The scene's own times as they were before it was read: a save in Unity during the build (the preview is of the
     // file before it) then shows as a change, and the scene is built again.
     let before: Vec<(PathBuf, Option<(u64, i64)>)> = [scene.path.clone(), prefab::meta_path(&scene.path)].into_iter().map(|p| (p.clone(), stamp(&p))).collect();
-    let result = (|| -> anyhow::Result<build::Built> {
+    // In English, what goes wrong is kept: see [`Failure`].
+    let result = orbiters_i18n::in_language(orbiters_i18n::Language::En, || -> anyhow::Result<build::Built> {
         let assets = assets::index(project, Some(&dir.join("guids.txt")), limits)?;
         let file = build::SceneFile { path: scene.path.clone(), guid: scene.guid.clone(), name: scene.name.clone() };
         build::build(project, &file, &assets, limits)
-    })();
+    });
     let mut files: Vec<PathBuf> = vec![scene.path.clone(), prefab::meta_path(&scene.path)];
     for manifest in ["Packages/manifest.json", "Packages/vpm-manifest.json", "ProjectSettings/ProjectSettings.asset"] {
         files.push(project.join(manifest));
@@ -482,7 +484,8 @@ pub fn build_scene(project: &Path, scene: &SceneInfo, limits: &Limits) -> Result
             files.extend(b.files.iter().cloned());
             (None, b.report.clone())
         }
-        Err(e) => (Some(short(&format!("{e:#}"))), build::Report::default()),
+        // English, for the record: its `Failure` says it in the language of whoever reads it, and `short` knows English's clauses.
+        Err(e) => (Some(short(&orbiters_i18n::in_language(orbiters_i18n::Language::En, || format!("{e:#}")))), build::Report::default()),
     };
     // Stopped (the app closing, a build wanted first) or out of time, whatever the message says (a model's reader
     // stopped by the deadline reports that it could not read the file).
@@ -528,7 +531,9 @@ pub fn build_scene(project: &Path, scene: &SceneInfo, limits: &Limits) -> Result
 
 /// A reason short enough for a chip (its innermost clause, the context before it dropped), at most 160 characters.
 fn short(e: &str) -> String {
-    let last = e.rsplit(": ").next().unwrap_or(e);
+    // Japanese's colon too, for what a thread of the build or an older record wrote in it.
+    let after = [e.rfind(": ").map(|i| i + 2), e.rfind('：').map(|i| i + '：'.len_utf8())].into_iter().flatten().max();
+    let last = after.map_or(e, |i| &e[i..]);
     let s = if last.len() < 12 { e } else { last };
     s.chars().take(160).collect()
 }

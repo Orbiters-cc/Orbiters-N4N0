@@ -6,6 +6,7 @@
 //! default bindings for each kind of controller (people change them in SteamVR's controller settings, under Orbiters).
 //! SteamVR gives the same inputs to VRChat as well. Every set is read once a frame, together.
 
+use orbiters_i18n::tr;
 use orbiters_n4n0::input::{Pad, Pads};
 use orbiters_openvr::input::{ActionHandle, ActionSetHandle, ActiveSet, OVERLAY_GLOBAL_PRIORITY_MIN};
 use orbiters_openvr::{self as vr};
@@ -360,8 +361,34 @@ pub struct Actions {
     blocked: [bool; 2],
     sets: Vec<ActionSetHandle>,
     /// The manifest could not be loaded: why (said once).
-    pub failed: Option<String>,
+    pub failed: Option<Unavailable>,
     menu_down: bool,
+}
+
+/// Why SteamVR's input could not be set up. SteamVR's error stays a code and is put into words where it is drawn
+/// ([`Unavailable::text`]), so that a change of language shows in the Walk boost card while the failure stays.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Unavailable {
+    /// An `EVRInputError` of SteamVR.
+    Input(i32),
+    /// Something else said why (a file that could not be written, SteamVR's interface missing), in its own words.
+    Said(String),
+}
+
+impl Unavailable {
+    /// What a person reads, in the language now.
+    pub fn text(&self) -> String {
+        match self {
+            Unavailable::Input(code) => tr!("SteamVR input error {code}", code = code),
+            Unavailable::Said(said) => said.clone(),
+        }
+    }
+}
+
+impl std::fmt::Display for Unavailable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.text())
+    }
 }
 
 /// The panels around VRChat's menus' actions.
@@ -375,12 +402,11 @@ struct Orbit {
 
 impl Actions {
     pub fn load(steamvr: &vr::Client) -> Self {
-        let loaded = (|| -> Result<_, String> {
-            let input = steamvr.input().map_err(|e| e.to_string())?;
-            let path = write_manifest(&manifest_dir()).map_err(|e| e.to_string())?;
+        let loaded = (|| -> Result<_, Unavailable> {
+            let input = steamvr.input().map_err(|e| Unavailable::Said(e.to_string()))?;
+            let path = write_manifest(&manifest_dir()).map_err(|e| Unavailable::Said(e.to_string()))?;
             keep_saved_bindings_whole(steamvr, &manifest_dir());
-            // An error text, kept English like the others ([`anyhow`]): a later pass decides whether they are translated.
-            let fail = |c: i32| anyhow::anyhow!("SteamVR input error {c}").to_string();
+            let fail = Unavailable::Input;
             input.set_action_manifest(&path).map_err(fail)?;
             let walk = Walk {
                 set: input.action_set("/actions/walk").map_err(fail)?,
@@ -394,7 +420,7 @@ impl Actions {
             );
             let presses = [input.action("/actions/menu/in/press_left").map_err(fail)?, input.action("/actions/menu/in/press_right").map_err(fail)?];
             let avatar = input.action_set("/actions/avatar").map_err(fail)?;
-            let hand = |hand: &str| -> Result<HandPads, String> {
+            let hand = |hand: &str| -> Result<HandPads, Unavailable> {
                 let a = |name: String| input.action(&format!("/actions/avatar/in/{name}")).map_err(fail);
                 Ok(HandPads {
                     touchpad: [a(format!("touchpad_{hand}"))?, a(format!("touchpad_{hand}_touch"))?, a(format!("touchpad_{hand}_click"))?, a(format!("touchpad_{hand}_force"))?],
@@ -614,6 +640,17 @@ fn pad(position: Option<(f32, f32)>, touch: bool, click: bool, force: Option<f32
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_steamvr_input_error_is_put_into_the_language_it_is_drawn_in() {
+        use orbiters_i18n::{in_language, Language};
+        let failed = Unavailable::Input(5);
+        assert_eq!(failed.text(), "SteamVR input error 5");
+        assert_eq!(in_language(Language::Fr, || failed.text()), "erreur d’entrée SteamVR 5");
+        assert_eq!(in_language(Language::Ja, || failed.to_string()), "SteamVRの入力エラー 5");
+        // What something else said is its own words.
+        assert_eq!(in_language(Language::Es, || Unavailable::Said("disk full".into()).text()), "disk full");
+    }
 
     #[test]
     fn a_saved_binding_gets_what_it_lacks_and_keeps_what_the_person_chose() {

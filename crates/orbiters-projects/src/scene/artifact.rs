@@ -19,6 +19,7 @@ use super::prefab::{self, Graph, MatSource, MeshSource, Obj};
 use super::serialized::{ObjectInfo, SerializedFile};
 use super::yaml::{Ref, Value};
 use anyhow::{ensure, Context as _};
+use orbiters_i18n::tr;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::io::{Read as _, Seek as _, SeekFrom};
@@ -252,7 +253,7 @@ impl Artifact {
         let mut head = vec![0u8; SerializedFile::HEAD];
         file.read_exact(&mut head)?;
         let meta = SerializedFile::head_size(&head)?;
-        ensure!(meta <= size && meta <= 256 << 20, "metadata of {} MB", meta >> 20);
+        ensure!(meta <= size && meta <= 256 << 20, "{}", tr!("metadata of {size} MB", size = meta >> 20));
         let mut b = vec![0u8; meta as usize];
         file.seek(SeekFrom::Start(0))?;
         file.read_exact(&mut b)?;
@@ -271,7 +272,7 @@ impl Artifact {
     }
 
     pub fn object(&self, id: i64, class: i32) -> anyhow::Result<Value> {
-        let o = self.info.objects().iter().find(|o| o.id == id && (class == 0 || o.class == class)).context("an object its import did not make")?;
+        let o = self.info.objects().iter().find(|o| o.id == id && (class == 0 || o.class == class)).with_context(|| tr("an object its import did not make"))?;
         self.read(o)
     }
 

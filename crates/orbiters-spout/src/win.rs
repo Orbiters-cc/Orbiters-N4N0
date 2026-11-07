@@ -353,7 +353,7 @@ fn create_device(adapter: Option<&IDXGIAdapter>) -> Result<(ID3D11Device, ID3D11
     .map_err(|e| platform("D3D11CreateDevice", e))?;
     match (device, context) {
         (Some(device), Some(context)) => Ok((device, context)),
-        _ => Err(SpoutError::Platform("D3D11CreateDevice returned nothing".into())),
+        _ => Err(SpoutError::Platform("D3D11CreateDevice returned nothing".into())), // i18n: not shown (a graphics call named in an error detail)
     }
 }
 
@@ -571,7 +571,7 @@ impl Connection {
             let hr = unsafe { (Interface::vtable(k).AcquireSync)(Interface::as_raw(k), 0, ACCESS_TIMEOUT_MS) };
             return match hr.0 {
                 0 => Ok(true),
-                0x80 => Err(SpoutError::Platform("the sender's texture was abandoned (its program closed or its GPU reset)".into())),
+                0x80 => Err(SpoutError::Platform(orbiters_i18n::tr("the sender's texture was abandoned (its program closed or its GPU reset)").into())),
                 _ if hr.is_err() => Err(platform("AcquireSync", windows::core::Error::from(hr))),
                 _ => Ok(false),
             };
@@ -713,7 +713,7 @@ impl Receiver {
         }
         let (w, h) = (desc.Width, desc.Height);
         if w == 0 || h == 0 || w > MAX_SIDE || h > MAX_SIDE || w as u64 * h as u64 > MAX_PIXELS {
-            return Err(SpoutError::Platform(format!("the sender's picture is {w}×{h}: Orbiters reads pictures up to 8K (7680×4320)")));
+            return Err(SpoutError::Platform(orbiters_i18n::tr!("the sender's picture is {width}×{height}: Orbiters reads pictures up to 8K (7680×4320)", width = w, height = h)));
         }
         let keyed = if desc.MiscFlags & (D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX.0 as u32) != 0 { shared.cast::<IDXGIKeyedMutex>().ok() } else { None };
         // Mip levels and array slices are left out (the copies take the first subresource); samples are resolved.
@@ -770,7 +770,7 @@ impl Receiver {
             eprintln!("spout: {why}; opening \"{name}\" again");
             return self.connect(&name).map(|_| ());
         }
-        let Some(conn) = self.conn.as_mut() else { return Err(SpoutError::Platform("not connected".into())) };
+        let Some(conn) = self.conn.as_mut() else { return Err(SpoutError::Platform(orbiters_i18n::tr("not connected").into())) };
         if conn.present_checked.elapsed() >= PRESENCE_EVERY {
             conn.present_checked = Instant::now();
             // Let go first: held, the block would outlive its sender.
@@ -801,11 +801,11 @@ impl Receiver {
                 Ok(()) => return Ok(mapped),
                 Err(e) if e.code() == DXGI_ERROR_WAS_STILL_DRAWING => {
                     if start.elapsed() >= COPY_LIMIT {
-                        return Err(SpoutError::Platform("the GPU did not finish copying the frame".into()));
+                        return Err(SpoutError::Platform(orbiters_i18n::tr("the GPU did not finish copying the frame").into()));
                     }
                     std::thread::sleep(Duration::from_micros(250));
                 }
-                Err(e) => return Err(platform("Map", e)),
+                Err(e) => return Err(platform("Map", e)), // i18n: not shown (a graphics call named in an error detail)
             }
         }
     }
@@ -1015,7 +1015,7 @@ impl FrameReader<'_> {
     /// are this frame's: the others may still hold an older one.
     pub fn rows(&mut self, ranges: &[(u32, u32)]) -> Result<Frame<'_>> {
         let rx = &mut *self.receiver;
-        let Some(conn) = rx.conn.as_ref() else { return Err(SpoutError::Platform("not connected".into())) };
+        let Some(conn) = rx.conn.as_ref() else { return Err(SpoutError::Platform(orbiters_i18n::tr("not connected").into())) };
         let (w, h, format, bpp) = (conn.info.width, conn.info.height, conn.info.format, conn.bytes_per_pixel);
         let wanted: Vec<(u32, u32)> = ranges.iter().map(|&(a, b)| (a.min(h), b.min(h))).filter(|(a, b)| a < b).collect();
         let missing: Vec<(u32, u32)> = wanted.iter().flat_map(|&r| missing_rows(r, &self.fresh)).collect();
@@ -1048,7 +1048,7 @@ impl FrameReader<'_> {
         // `height` rows `stride` apart, the last one only as long as the picture is wide.
         let len = stride * (h as usize - 1) + w as usize * bpp;
         if stride < w as usize * bpp || (m.DepthPitch != 0 && (m.DepthPitch as usize) < len) {
-            return Err(SpoutError::Platform("the mapped frame is smaller than the picture".into()));
+            return Err(SpoutError::Platform(orbiters_i18n::tr("the mapped frame is smaller than the picture").into()));
         }
         // SAFETY: the staging texture stays mapped until this reader unmaps it, and `len` bytes lie within it.
         let raw = unsafe { std::slice::from_raw_parts(m.pData as *const u8, len) };
@@ -1137,7 +1137,7 @@ impl Sender {
         if existed && registered(&raw) {
             // Another program sends under this name: taking its info block over would redirect its receivers. (A
             // block that outlived its sender, held by a receiver, is taken over: that is how a sender restarts.)
-            return Err(SpoutError::Platform(format!("a Spout sender named \"{name}\" already exists")));
+            return Err(SpoutError::Platform(orbiters_i18n::tr!("a Spout sender named \"{name}\" already exists", name = name)));
         }
         {
             let mut b = [0u8; INFO_SIZE];
@@ -1202,7 +1202,7 @@ impl Sender {
     pub fn send_rgba(&mut self, rgba: &[u8]) -> Result<()> {
         let n = self.width as usize * self.height as usize * 4;
         if rgba.len() < n {
-            return Err(SpoutError::Platform("frame smaller than the sender".into()));
+            return Err(SpoutError::Platform(orbiters_i18n::tr("frame smaller than the sender").into()));
         }
         self.bgra.resize(n, 0);
         for (dst, src) in self.bgra.as_chunks_mut::<4>().0.iter_mut().zip(rgba.as_chunks::<4>().0) {

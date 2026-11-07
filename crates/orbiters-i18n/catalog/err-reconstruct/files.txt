@@ -1,0 +1,15 @@
+# The files this area covers: every text in them is wrapped and translated (tests/coverage.rs).
+crates/orbiters-reconstruct/src/aberration.rs
+crates/orbiters-reconstruct/src/checkpoint.rs
+crates/orbiters-reconstruct/src/dataset.rs
+crates/orbiters-reconstruct/src/edit.rs
+crates/orbiters-reconstruct/src/export.rs
+crates/orbiters-reconstruct/src/gpu.rs
+crates/orbiters-reconstruct/src/main.rs
+crates/orbiters-reconstruct/src/mesh/mod.rs
+crates/orbiters-reconstruct/src/ply.rs
+crates/orbiters-reconstruct/src/sky.rs
+crates/orbiters-reconstruct/src/train.rs
+crates/orbiters-reconstruct/src/tree_file.rs
+crates/orbiters-reconstruct/src/tree_tune.rs
+crates/orbiters-reconstruct/src/web.rs

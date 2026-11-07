@@ -4,6 +4,7 @@
 //! Reading one is a single file read and a header parse; nothing is converted.
 
 use anyhow::{bail, ensure, Context as _};
+use orbiters_i18n::tr;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
@@ -530,7 +531,7 @@ impl Preview {
 
 /// Reads and checks a preview file.
 pub fn read(path: &Path) -> anyhow::Result<Preview> {
-    let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
+    let bytes = std::fs::read(path).with_context(|| tr!("reading {path}", path = path.display()))?;
     parse(bytes)
 }
 
@@ -543,60 +544,75 @@ pub fn parse(bytes: Vec<u8>) -> anyhow::Result<Preview> {
 }
 
 fn parse_header(bytes: &[u8]) -> anyhow::Result<(Header, usize)> {
-    ensure!(bytes.len() >= START && (&bytes[..8] == MAGIC || &bytes[..8] == LEGACY_MAGIC), "not an Orbiters project preview");
+    ensure!(bytes.len() >= START && (&bytes[..8] == MAGIC || &bytes[..8] == LEGACY_MAGIC), "{}", tr("not an Orbiters project preview"));
     let schema = u32::from_le_bytes(bytes[8..12].try_into().unwrap());
-    ensure!((OLDEST_SCHEMA..=SCHEMA).contains(&schema), "a project preview of schema {schema}, this version reads {OLDEST_SCHEMA} to {SCHEMA}");
+    ensure!((OLDEST_SCHEMA..=SCHEMA).contains(&schema), "{}", tr!("a project preview of schema {schema}, this version reads {oldest} to {newest}", schema = schema, oldest = OLDEST_SCHEMA, newest = SCHEMA));
     let len = u32::from_le_bytes(bytes[12..16].try_into().unwrap()) as usize;
-    ensure!(START + len <= bytes.len(), "the preview's header runs past its end");
-    let header: Header = serde_json::from_slice(&bytes[START..START + len]).context("the preview's header")?;
+    ensure!(START + len <= bytes.len(), "{}", tr("the preview's header runs past its end"));
+    let header: Header = serde_json::from_slice(&bytes[START..START + len]).with_context(|| tr("the preview's header"))?;
     Ok((header, align(START + len)))
 }
 
 fn check(p: &Preview) -> anyhow::Result<()> {
     let h = &p.header;
     let room = p.bytes.len().saturating_sub(p.data) as u64;
-    let inside = |b: Blob, what: &str| -> anyhow::Result<()> {
-        ensure!(b.offset.checked_add(b.length).is_some_and(|end| end <= room), "the preview's {what} lies outside the file");
+    // `what` tells the whole sentence only when a blob is outside (a sentence cannot be built from pieces and translated).
+    let inside = |b: Blob, what: &dyn Fn() -> String| -> anyhow::Result<()> {
+        ensure!(b.offset.checked_add(b.length).is_some_and(|end| end <= room), "{}", what());
         Ok(())
     };
     for (i, t) in h.textures.iter().enumerate() {
-        inside(t.data, &format!("texture {i}"))?; // i18n: not shown (a GPU label)
+        inside(t.data, &|| tr!("the preview's texture {i} lies outside the file", i = i))?;
     }
     for (i, m) in h.meshes.iter().enumerate() {
-        inside(m.data, &format!("mesh {i}"))?; // i18n: not shown (a GPU label)
-        inside(m.indices, &format!("mesh {i}'s indices"))?; // i18n: not shown (error detail of a damaged preview file)
-        ensure!(m.data.length == m.vertices as u64 * VERTEX_SIZE as u64, "mesh {i} has {} vertices in {} bytes", m.vertices, m.data.length);
+        inside(m.data, &|| tr!("the preview's mesh {i} lies outside the file", i = i))?;
+        inside(m.indices, &|| tr!("the preview's indices of mesh {i} lie outside the file", i = i))?;
+        ensure!(
+            m.data.length == m.vertices as u64 * VERTEX_SIZE as u64,
+            "{}",
+            tr!("mesh {i} has {vertices} vertices in {bytes} bytes", i = i, vertices = m.vertices, bytes = m.data.length)
+        );
         let count = m.indices.length / m.index_format.size() as u64;
-        ensure!(m.indices.length % m.index_format.size() as u64 == 0, "mesh {i}'s indices are cut short");
+        ensure!(m.indices.length % m.index_format.size() as u64 == 0, "{}", tr!("mesh {i}'s indices are cut short", i = i));
         if let Some(uv) = m.lightmap_uv {
-            inside(uv, &format!("mesh {i}'s lightmap UVs"))?; // i18n: not shown (error detail of a damaged preview file)
-            ensure!(uv.length == m.vertices as u64 * LIGHTMAP_UV_SIZE as u64, "mesh {i} has {} vertices in {} bytes of lightmap UVs", m.vertices, uv.length);
+            inside(uv, &|| tr!("the preview's lightmap UVs of mesh {i} lie outside the file", i = i))?;
+            ensure!(
+                uv.length == m.vertices as u64 * LIGHTMAP_UV_SIZE as u64,
+                "{}",
+                tr!("mesh {i} has {vertices} vertices in {bytes} bytes of lightmap UVs", i = i, vertices = m.vertices, bytes = uv.length)
+            );
         }
         for s in &m.submeshes {
-            ensure!(s.start as u64 + s.count as u64 <= count && s.count % 3 == 0, "mesh {i} has a submesh outside its indices");
+            ensure!(s.start as u64 + s.count as u64 <= count && s.count % 3 == 0, "{}", tr!("mesh {i} has a submesh outside its indices", i = i));
         }
     }
-    inside(h.instances.matrices, "matrices")?;
-    ensure!(h.instances.matrices.length == h.instances.count as u64 * 64, "{} matrices in {} bytes", h.instances.count, h.instances.matrices.length);
+    inside(h.instances.matrices, &|| tr("the preview's matrices lie outside the file").to_string())?;
+    ensure!(
+        h.instances.matrices.length == h.instances.count as u64 * 64,
+        "{}",
+        tr!("{count} matrices in {bytes} bytes", count = h.instances.count, bytes = h.instances.matrices.length)
+    );
     for d in &h.draws {
-        ensure!(d.instance < h.instances.count, "a draw of instance {} of {}", d.instance, h.instances.count);
-        let Some(mesh) = h.meshes.get(d.mesh as usize) else { bail!("a draw of mesh {} of {}", d.mesh, h.meshes.len()) };
-        ensure!(d.materials.len() <= mesh.submeshes.len(), "a draw with more materials than its mesh has submeshes");
-        ensure!(d.materials.iter().all(|&m| m < h.materials.len() as i32), "a draw of a material the preview does not have");
+        ensure!(d.instance < h.instances.count, "{}", tr!("a draw of instance {instance} of {count}", instance = d.instance, count = h.instances.count));
+        let Some(mesh) = h.meshes.get(d.mesh as usize) else {
+            bail!("{}", tr!("a draw of mesh {mesh} of {count}", mesh = d.mesh, count = h.meshes.len()))
+        };
+        ensure!(d.materials.len() <= mesh.submeshes.len(), "{}", tr("a draw with more materials than its mesh has submeshes"));
+        ensure!(d.materials.iter().all(|&m| m < h.materials.len() as i32), "{}", tr("a draw of a material the preview does not have"));
         if let Some(l) = d.lightmap {
-            ensure!((l.index as usize) < h.lightmaps.len(), "a draw of lightmap {} of {}", l.index, h.lightmaps.len());
+            ensure!((l.index as usize) < h.lightmaps.len(), "{}", tr!("a draw of lightmap {index} of {count}", index = l.index, count = h.lightmaps.len()));
         }
     }
     for (i, m) in h.materials.iter().enumerate() {
         for t in [m.texture, m.surface_texture, m.normal_texture, m.emission_texture] {
-            ensure!(t < h.textures.len() as i32, "material {i} uses a texture the preview does not have");
+            ensure!(t < h.textures.len() as i32, "{}", tr!("material {i} uses a texture the preview does not have", i = i));
         }
     }
     for l in &h.lightmaps {
-        ensure!((l.texture as usize) < h.textures.len(), "a lightmap uses a texture the preview does not have");
+        ensure!((l.texture as usize) < h.textures.len(), "{}", tr("a lightmap uses a texture the preview does not have"));
     }
     if let Some(s) = h.sky {
-        ensure!(s.texture < h.textures.len() as i32, "the sky uses a texture the preview does not have");
+        ensure!(s.texture < h.textures.len() as i32, "{}", tr("the sky uses a texture the preview does not have"));
     }
     Ok(())
 }
@@ -637,7 +653,7 @@ pub fn read_header(path: &Path) -> anyhow::Result<Header> {
     let mut start = [0u8; START];
     f.read_exact(&mut start)?;
     let len = u32::from_le_bytes(start[12..16].try_into().unwrap()) as usize;
-    ensure!(len < 64 << 20, "the preview's header is too large");
+    ensure!(len < 64 << 20, "{}", tr("the preview's header is too large"));
     let mut bytes = start.to_vec();
     bytes.resize(START + len, 0);
     f.read_exact(&mut bytes[START..])?;

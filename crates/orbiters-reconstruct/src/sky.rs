@@ -14,6 +14,7 @@
 use crate::dataset::{sample_rgb, Dataset, DepthGrid};
 use crate::gaussians::{logit, sigmoid, Gaussians};
 use anyhow::Context as _;
+use orbiters_i18n::tr;
 use std::path::Path;
 
 const AZIMUTHS: usize = 64;
@@ -604,31 +605,31 @@ impl SkyMap {
 
     /// Writes the map as an 8-bit sRGB PNG (orbiters_core::reconstruction::SKY_FILE, contracts Docs/session-bundle.md).
     pub fn write(&self, path: &Path) -> anyhow::Result<()> {
-        let file = std::fs::File::create(path).with_context(|| format!("writing {}", path.display()))?;
+        let file = std::fs::File::create(path).with_context(|| tr!("writing {path}", path = path.display()))?;
         let mut encoder = png::Encoder::new(std::io::BufWriter::new(file), self.width, self.width / 2);
         encoder.set_color(png::ColorType::Rgb);
         encoder.set_depth(png::BitDepth::Eight);
         encoder.set_source_srgb(png::SrgbRenderingIntent::Perceptual);
         let bytes: Vec<u8> = self.rgb.iter().flat_map(|c| c.map(|v| (v.clamp(0.0, 1.0) * 255.0 + 0.5) as u8)).collect();
-        let mut writer = encoder.write_header().with_context(|| format!("writing {}", path.display()))?;
-        writer.write_image_data(&bytes).with_context(|| format!("writing {}", path.display()))?;
-        writer.finish().with_context(|| format!("writing {}", path.display()))
+        let mut writer = encoder.write_header().with_context(|| tr!("writing {path}", path = path.display()))?;
+        writer.write_image_data(&bytes).with_context(|| tr!("writing {path}", path = path.display()))?;
+        writer.finish().with_context(|| tr!("writing {path}", path = path.display()))
     }
 
     /// Reads a map [`SkyMap::write`] wrote (any 8-bit PNG twice as wide as high, a width a multiple of 4).
     pub fn read(path: &Path) -> anyhow::Result<Self> {
-        let file = std::fs::File::open(path).with_context(|| format!("reading {}", path.display()))?;
+        let file = std::fs::File::open(path).with_context(|| tr!("reading {path}", path = path.display()))?;
         let mut decoder = png::Decoder::new(std::io::BufReader::new(file));
         decoder.set_transformations(png::Transformations::EXPAND | png::Transformations::STRIP_16);
-        let mut reader = decoder.read_info().with_context(|| format!("reading {}", path.display()))?;
-        let mut buf = vec![0; reader.output_buffer_size().context("a sky map too large")?];
-        let info = reader.next_frame(&mut buf).with_context(|| format!("reading {}", path.display()))?;
+        let mut reader = decoder.read_info().with_context(|| tr!("reading {path}", path = path.display()))?;
+        let mut buf = vec![0; reader.output_buffer_size().with_context(|| tr("a sky map too large"))?];
+        let info = reader.next_frame(&mut buf).with_context(|| tr!("reading {path}", path = path.display()))?;
         let (width, height) = (info.width, info.height);
-        anyhow::ensure!(width >= 4 && width % 4 == 0 && width == 2 * height, "{}: a sky map is twice as wide as high ({width} × {height})", path.display());
+        anyhow::ensure!(width >= 4 && width % 4 == 0 && width == 2 * height, "{}", tr!("{path}: a sky map is twice as wide as high ({width} × {height})", path = path.display(), width = width, height = height));
         let channels = match info.color_type {
             png::ColorType::Rgb => 3,
             png::ColorType::Rgba => 4,
-            other => anyhow::bail!("{}: a sky map is RGB, not {other:?}", path.display()),
+            other => anyhow::bail!("{}", tr!("{path}: a sky map is RGB, not {found}", path = path.display(), found = format!("{other:?}"))),
         };
         let rgb = buf[..info.buffer_size()].chunks_exact(channels).map(|p| [0, 1, 2].map(|c| p[c] as f32 / 255.0)).collect();
         Ok(Self { width, rgb })

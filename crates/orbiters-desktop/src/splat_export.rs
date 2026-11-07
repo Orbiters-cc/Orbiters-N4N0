@@ -322,7 +322,7 @@ pub fn export_with(session: &Path, format: Format, dest: &Path, progress: &Progr
     };
     let splats = (0..g.len()).filter(|&i| !g.sky.get(i).copied().unwrap_or(false)).count();
     if splats == 0 {
-        return Err(Failure::Failed("its 3D view hides or deletes every splat: show some again in Select splats to export them".into()));
+        return Err(Failure::Failed(tr("its 3D view hides or deletes every splat: show some again in Select splats to export them").into()));
     }
     progress.go_on()?;
     let made = match format {
@@ -361,7 +361,7 @@ pub fn export_with(session: &Path, format: Format, dest: &Path, progress: &Progr
         return Err(match e {
             Wrote::Stopped => Failure::Stopped,
             Wrote::Changed => Failure::Changed,
-            Wrote::Exists => Failure::Failed(format!("{} is already there", part.display())),
+            Wrote::Exists => Failure::Failed(tr!("{path} is already there", path = part.display())),
             Wrote::Io(e) => failure(&e, &folder, needed, free_space),
         });
     }

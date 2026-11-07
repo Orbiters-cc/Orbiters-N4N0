@@ -7,6 +7,7 @@ use super::model::{BlendShape, ModelMesh, Skin};
 use super::yaml::{self, Value};
 use super::Limits;
 use anyhow::{bail, ensure, Context as _};
+use orbiters_i18n::tr;
 use std::path::Path;
 
 pub fn read(path: &Path, file_id: i64, limits: &Limits) -> anyhow::Result<ModelMesh> {
@@ -16,13 +17,13 @@ pub fn read(path: &Path, file_id: i64, limits: &Limits) -> anyhow::Result<ModelM
     if super::serialized::is_serialized(&bytes) {
         // Saved in Unity's binary format (a tool's generated mesh).
         let (class, v) = super::serialized::object(&bytes, file_id, 43)?;
-        ensure!(class == 43, "the object is not a mesh");
+        ensure!(class == 43, "{}", tr("the object is not a mesh"));
         return parse(&v);
     }
-    let text = String::from_utf8(bytes).map_err(|_| anyhow::anyhow!("neither Unity text nor Unity's binary format"))?;
-    ensure!(yaml::is_text(&text), "not a Unity asset");
+    let text = String::from_utf8(bytes).map_err(|_| anyhow::anyhow!("{}", tr("neither Unity text nor Unity's binary format")))?;
+    ensure!(yaml::is_text(&text), "{}", tr("not a Unity asset"));
     let docs = yaml::documents(&text);
-    let doc = docs.iter().find(|d| d.class == 43 && d.id == file_id).or_else(|| docs.iter().find(|d| d.class == 43)).context("no mesh in it")?;
+    let doc = docs.iter().find(|d| d.class == 43 && d.id == file_id).or_else(|| docs.iter().find(|d| d.class == 43)).with_context(|| tr("no mesh in it"))?;
     parse(&doc.parse())
 }
 
@@ -79,7 +80,7 @@ fn half(h: u16) -> f32 {
 pub fn parse(m: &Value) -> anyhow::Result<ModelMesh> {
     let vd = m.get("m_VertexData");
     let count = vd.get("m_VertexCount").as_i64().unwrap_or(0).max(0) as usize;
-    ensure!(count <= 4_000_000, "{count} vertices");
+    ensure!(count <= 4_000_000, "{}", tr!("{count} vertices", count = count));
     let data = match (vd.get("_typelessdata"), vd.get("m_DataSize")) {
         (Value::Str(h), _) => hex(h),
         (_, Value::Bytes(b)) => b.clone(),
@@ -102,7 +103,7 @@ pub fn parse(m: &Value) -> anyhow::Result<ModelMesh> {
         })
         .collect();
     if channels.is_empty() || data.is_empty() {
-        bail!("its vertices are not saved in it (an older Unity's format)");
+        bail!("{}", tr("its vertices are not saved in it (an older Unity's format)"));
     }
     // Each stream's stride, and where it starts (after the previous, aligned to 16 bytes).
     let streams = channels.iter().map(|c| c.0).max().unwrap_or(0) as usize + 1;
@@ -128,7 +129,7 @@ pub fn parse(m: &Value) -> anyhow::Result<ModelMesh> {
         component(&data, start[s] + v * stride[s] + off as usize + k * format_size(fmt), fmt)
     };
     let has = |ch: usize| channels.get(ch).is_some_and(|c| c.3 > 0);
-    ensure!(has(0), "no positions");
+    ensure!(has(0), "{}", tr("no positions"));
     let positions: Vec<[f32; 3]> = (0..count).map(|v| [read(0, v, 0), read(0, v, 1), read(0, v, 2)]).collect();
     let normals: Vec<[f32; 3]> = if has(1) {
         (0..count).map(|v| super::model::normalize([read(1, v, 0), read(1, v, 1), read(1, v, 2)])).collect()

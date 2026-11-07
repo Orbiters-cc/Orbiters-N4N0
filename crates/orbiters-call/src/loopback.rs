@@ -71,7 +71,7 @@ impl Report {
 
 impl fmt::Display for Report {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        writeln!(f, "connected in {} ms, listened {:.1} s", self.connect_ms, self.listened.as_secs_f32())?;
+        writeln!(f, "connected in {} ms, listened {:.1} s", self.connect_ms, self.listened.as_secs_f32())?; // i18n: not shown (a developer's test tool)
         for (who, h) in ["callee heard the caller", "caller heard the callee"].iter().zip(&self.heard) { // i18n: not shown (the loopback test tool prints for developers)
             writeln!(
                 f,
@@ -118,7 +118,7 @@ pub async fn run(listen: Duration) -> anyhow::Result<Report> {
     let mut ticker = tokio::time::interval(Duration::from_millis(20));
     let result = loop {
         if listening.is_none() && started.elapsed() > CONNECT_TIMEOUT {
-            break Err(anyhow::anyhow!("the calls did not connect in {} s", CONNECT_TIMEOUT.as_secs()));
+            break Err(anyhow::anyhow!("the calls did not connect in {} s", CONNECT_TIMEOUT.as_secs())); // i18n: not shown (the loopback test tool prints for developers)
         }
         if listening.is_some_and(|t| t.elapsed() >= listen) {
             break Ok(());
@@ -140,7 +140,7 @@ pub async fn run(listen: Duration) -> anyhow::Result<Report> {
                             listening = Some(Instant::now());
                         }
                     }
-                    PeerEvent::Ended(reason) => break Err(anyhow::anyhow!("call {id} ended: {reason:?}")),
+                    PeerEvent::Ended(reason) => break Err(anyhow::anyhow!("call {id} ended: {reason:?}")), // i18n: not shown (the loopback test tool prints for developers)
                 }
             }
             _ = ticker.tick() => {

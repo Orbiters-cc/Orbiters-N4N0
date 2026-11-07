@@ -411,66 +411,14 @@ impl Drop for TestLoad {
     }
 }
 
-/// What was measured, to the logs folder.
+/// What was measured, to the logs folder, in the language of the app: Enzo reads it after the test.
 fn write_test_report(snap: &crate::state::Snapshot) -> Option<std::path::PathBuf> {
     let path = orbiters_core::paths::logs_dir().join("fps-test-report.txt");
     let _ = std::fs::create_dir_all(path.parent()?);
-    let report = &snap.booster.overlay.report;
-    let mut text = String::from("FPS booster test report\n\n"); // i18n: not shown
-    text += &format!("Limit now: {:?}. Reason flags seen: {}. Streamer: {}.\n", report.limit, report.flags_seen, snap.booster.overlay.streamer); // i18n: not shown
-    if let Some(now) = report.now {
-        text += &format!(
-            "Now: {:.1} real frames a second at {:.0} Hz, filled in {:.0} %, late CPU {:.0} %, late GPU {:.0} %, app CPU {:.1} ms (estimate), app GPU {:.1} ms.\n", // i18n: not shown
-            now.real_fps,
-            now.refresh_hz,
-            now.filled_share * 100.0,
-            now.late_cpu_share * 100.0,
-            now.late_gpu_share * 100.0,
-            now.app_cpu_ms,
-            now.app_gpu_ms
-        );
-    }
-    text += "\nComparisons (without / with the change, same scene, twice):\n"; // i18n: not shown
-    for c in &report.comparisons {
-        text += &format!(
-            "{:?}: {:?}. Real frames {:.1} / {:.1}. Filled in {:.0} % / {:.0} %. Late CPU {:.0} % / {:.0} %. Late GPU {:.0} % / {:.0} %. Over 2x budget {:.1} % / {:.1} %. Stalls at the switches: {}.\n", // i18n: not shown
-            c.kind,
-            c.verdict,
-            c.before_fps,
-            c.after_fps,
-            c.before_filled * 100.0,
-            c.after_filled * 100.0,
-            c.before_late_cpu * 100.0,
-            c.after_late_cpu * 100.0,
-            c.before_late_gpu * 100.0,
-            c.after_late_gpu * 100.0,
-            c.before_over_2x * 100.0,
-            c.after_over_2x * 100.0,
-            c.stalls_at_switch
-        );
-    }
-    text += "\nBy hand on the list (30 s before / after; people may have moved):\n"; // i18n: not shown
-    for m in &report.guide.results {
-        text += &format!(
-            "{:?}: real frames {:.1} / {:.1}, filled in {:.0} % / {:.0} %, people {:?} / {:?}.\n", // i18n: not shown
-            m.item,
-            m.before_fps,
-            m.after_fps,
-            m.before_filled * 100.0,
-            m.after_filled * 100.0,
-            m.before_people,
-            m.after_people
-        );
-    }
-    if let Some(log) = orbiters_booster::vrsettings::compositor_log_for_user() {
-        if let Some(c) = std::fs::read_to_string(log).ok().and_then(|t| orbiters_booster::log::parse_compositor(&t).pop()) {
-            text += &format!(
-                "\nSteamVR's own totals for the last session that ended: {} presents, {} reprojected, {} dropped, app CPU {:?} ms.\n", // i18n: not shown
-                c.presents, c.reprojected, c.dropped, c.app_cpu_ms
-            );
-        }
-    }
-    std::fs::write(&path, text).ok()?;
+    let compositor = orbiters_booster::vrsettings::compositor_log_for_user()
+        .and_then(|log| std::fs::read_to_string(log).ok())
+        .and_then(|text| orbiters_booster::log::parse_compositor(&text).pop());
+    std::fs::write(&path, crate::booster::test_report(snap, compositor.as_ref())).ok()?;
     Some(path)
 }
 

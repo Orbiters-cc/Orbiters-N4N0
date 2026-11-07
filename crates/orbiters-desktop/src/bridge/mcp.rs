@@ -198,7 +198,7 @@ fn read_request(stream: &mut TcpStream, buffered: &mut Vec<u8>, stop: &AtomicBoo
             break at;
         }
         if buffered.len() > MAX_HEAD {
-            return Some(Err(Reply::refused(431, "Request Header Fields Too Large", -32600, "The request's headers are too long.")));
+            return Some(Err(Reply::refused(431, "Request Header Fields Too Large", -32600, "The request's headers are too long."))); // i18n: not shown (the MCP client reads this HTTP/JSON-RPC answer)
         }
         if !read_some(stream, &mut chunk, buffered, stop, begin)? {
             return None;
@@ -212,17 +212,17 @@ fn read_request(stream: &mut TcpStream, buffered: &mut Vec<u8>, stop: &AtomicBoo
     let headers: Vec<(String, String)> = lines.filter_map(|l| l.split_once(':')).map(|(n, v)| (n.trim().to_string(), v.trim().to_string())).collect();
     let mut request = Request { method, path, headers, body: Vec::new() };
     if request.header("Transfer-Encoding").is_some() {
-        return Some(Err(Reply::refused(411, "Length Required", -32600, "Send a Content-Length.")));
+        return Some(Err(Reply::refused(411, "Length Required", -32600, "Send a Content-Length."))); // i18n: not shown (the MCP client reads this HTTP/JSON-RPC answer)
     }
     let length: usize = match request.header("Content-Length") {
         Some(value) => match value.parse() {
             Ok(length) => length,
-            Err(_) => return Some(Err(Reply::refused(400, "Bad Request", -32600, "A Content-Length that is not a number."))),
+            Err(_) => return Some(Err(Reply::refused(400, "Bad Request", -32600, "A Content-Length that is not a number."))), // i18n: not shown (the MCP client reads this HTTP/JSON-RPC answer)
         },
         None => 0,
     };
     if length > MAX_BODY {
-        return Some(Err(Reply::refused(413, "Content Too Large", -32600, "The request is too large.")));
+        return Some(Err(Reply::refused(413, "Content Too Large", -32600, "The request is too large."))); // i18n: not shown (the MCP client reads this HTTP/JSON-RPC answer)
     }
     let start = head_end + 4;
     while buffered.len() < start + length {
@@ -319,7 +319,7 @@ fn era(request: &Request, message: &Value) -> Result<Option<String>, Reply> {
         return match header {
             Some(version) if !LEGACY.contains(&version) && version != MODERN => Err(unsupported(version)),
             Some(version) if version == MODERN => {
-                Err(header_mismatch(&id, "MCP-Protocol-Version says the current revision, whose requests carry it in _meta too."))
+                Err(header_mismatch(&id, "MCP-Protocol-Version says the current revision, whose requests carry it in _meta too.")) // i18n: not shown (the MCP client reads this HTTP/JSON-RPC answer)
             }
             _ => Ok(None),
         };
@@ -328,7 +328,7 @@ fn era(request: &Request, message: &Value) -> Result<Option<String>, Reply> {
         return Err(unsupported(declared));
     }
     if header != Some(declared) {
-        return Err(header_mismatch(&id, "MCP-Protocol-Version does not match _meta."));
+        return Err(header_mismatch(&id, "MCP-Protocol-Version does not match _meta.")); // i18n: not shown (the MCP client reads this HTTP/JSON-RPC answer)
     }
     Ok(Some(declared.to_string()))
 }
@@ -341,8 +341,8 @@ fn header_mismatch(id: &Value, message: &str) -> Reply {
 fn headers_match(request: &Request, method: &str, message: &Value) -> Result<(), String> {
     match request.header("Mcp-Method") {
         Some(value) if value == method => {}
-        Some(value) => return Err(format!("Mcp-Method {value} does not match {method}.")),
-        None => return Err("Mcp-Method is missing.".into()),
+        Some(value) => return Err(format!("Mcp-Method {value} does not match {method}.")), // i18n: not shown (the MCP client reads this HTTP/JSON-RPC answer)
+        None => return Err("Mcp-Method is missing.".into()), // i18n: not shown (the MCP client reads this HTTP/JSON-RPC answer)
     }
     let named = match method {
         "tools/call" | "prompts/get" => message["params"]["name"].as_str(),
@@ -351,7 +351,7 @@ fn headers_match(request: &Request, method: &str, message: &Value) -> Result<(),
     };
     let header = request.header("Mcp-Name").ok_or("Mcp-Name is missing.")?; // i18n: not shown
     if decoded_name(header).as_deref() != named {
-        return Err("Mcp-Name does not match the body.".to_string());
+        return Err("Mcp-Name does not match the body.".to_string()); // i18n: not shown (the MCP client reads this HTTP/JSON-RPC answer)
     }
     Ok(())
 }
@@ -431,7 +431,7 @@ fn rpc(shared: &Shared, request: &Request, message: &Value, stream: &TcpStream) 
                     "messages": [{ "role": "user", "content": { "type": "text", "text": format!("{}\n\nDo this now, for: {worlds}.", tools::GUIDE) } }],
                 }))
             }
-            _ => Err((-32602, "There is no such prompt: world_tour is the one there is.".to_string())),
+            _ => Err((-32602, "There is no such prompt: world_tour is the one there is.".to_string())), // i18n: not shown (the MCP client reads this HTTP/JSON-RPC answer)
         },
         "tools/call" => Ok(call_tool(shared, message, stream)),
         _ => {

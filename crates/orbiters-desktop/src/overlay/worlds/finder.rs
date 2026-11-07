@@ -381,7 +381,7 @@ pub fn web_link(world_id: &str) -> Option<String> {
 
 /// Opens a [`launch_link`] with the program Windows has for `vrchat://` links (VRChat's launcher).
 pub fn open_launch(link: &str) -> anyhow::Result<()> {
-    anyhow::ensure!(link.starts_with("vrchat://launch?ref=orbiters.cc&id=wrld_"), "Not a VRChat launch link");
+    anyhow::ensure!(link.starts_with("vrchat://launch?ref=orbiters.cc&id=wrld_"), "{}", tr("Not a VRChat launch link"));
     #[cfg(windows)]
     {
         use windows::core::{w, HSTRING, PCWSTR};
@@ -390,10 +390,10 @@ pub fn open_launch(link: &str) -> anyhow::Result<()> {
         // SAFETY: a plain call with valid, null-terminated strings.
         let result = unsafe { ShellExecuteW(None, w!("open"), &HSTRING::from(link), PCWSTR::null(), PCWSTR::null(), SW_SHOWNORMAL) };
         // Values above 32 mean success.
-        anyhow::ensure!(result.0 as usize > 32, "VRChat's launcher did not open (error {}): is VRChat installed?", result.0 as usize);
+        anyhow::ensure!(result.0 as usize > 32, "{}", tr!("VRChat's launcher did not open (error {code}): is VRChat installed?", code = result.0 as usize));
     }
     #[cfg(not(windows))]
-    anyhow::bail!("Launching VRChat is for Windows");
+    anyhow::bail!("{}", tr("Launching VRChat is for Windows"));
     #[cfg(windows)]
     Ok(())
 }
@@ -401,6 +401,13 @@ pub fn open_launch(link: &str) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_launch_that_cannot_happen_says_so_in_the_language_now() {
+        use orbiters_i18n::{in_language, Language};
+        assert_eq!(open_launch("https://example.com").unwrap_err().to_string(), "Not a VRChat launch link");
+        assert_eq!(in_language(Language::PtBr, || open_launch("https://example.com").unwrap_err().to_string()), "Não é um link de inicialização do VRChat");
+    }
 
     const HOME: &str = "wrld_4432ea9b-729c-46e3-8eaf-846aa0a37fdd";
 

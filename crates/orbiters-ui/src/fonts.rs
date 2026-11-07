@@ -124,6 +124,7 @@ pub fn install(ctx: &egui::Context) {
     }
     ctx.set_fonts(defs);
 
+    ctx.data_mut(|d| d.insert_temp(egui::Id::unique(LANGUAGE_FONTS), PREFERRED.load(Ordering::Relaxed)));
     // Once per context, whatever calls this again.
     let added = ctx.data_mut(|d| std::mem::replace(d.get_temp_mut_or_default::<bool>(egui::Id::unique("orbiters-fonts-provider")), true));
     if !added {
@@ -321,6 +322,24 @@ static PREFERRED: AtomicU8 = AtomicU8::new(0);
 /// context already drew keep the face it found for them; call this before drawing.
 pub fn prefer_language(language: &str) {
     PREFERRED.store(language_cjk(language).map_or(0, |c| 1 + c as u8), Ordering::Relaxed);
+}
+
+/// Where a context notes which language its faces were found for.
+const LANGUAGE_FONTS: &str = "orbiters-fonts-language";
+
+/// To call each frame of a context that can live through a change of language. A face found once stays in a family's fallbacks and is what egui then uses for all the letters it has:
+/// kanji already drawn on an English or French interface (a world's name) would come from Microsoft YaHei, in Chinese forms, for all the Japanese that follows. So when the
+/// language wants another font the context starts over, with no faces found.
+pub fn follow_language(ctx: &egui::Context) {
+    let now = PREFERRED.load(Ordering::Relaxed);
+    let was = ctx.data(|d| d.get_temp::<u8>(egui::Id::unique(LANGUAGE_FONTS)));
+    if was.is_some_and(|was| was != now) {
+        // The fonts are the same, so setting them again does nothing: new providers make egui build its fonts anew, and
+        // forget the faces found so far.
+        ctx.set_font_providers(vec![Arc::new(SystemFallback { cjk: cjk() })]);
+        ctx.data_mut(|d| d.insert_temp(egui::Id::unique(LANGUAGE_FONTS), now));
+        ctx.request_repaint();
+    }
 }
 
 /// The CJK font a language's texts want (none for other languages).
@@ -661,6 +680,7 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn every_language_of_the_website_draws_in_every_family() {
+        let _one_at_a_time = PREFERRING.lock().unwrap_or_else(|e| e.into_inner());
         const SAMPLES: [(&str, &str); 5] = [
             ("en", "AaZz09?!'\u{2026}"),
             ("fr", "\u{e0}\u{e2}\u{e4}\u{e6}\u{e7}\u{e9}\u{e8}\u{ea}\u{eb}\u{ee}\u{ef}\u{f4}\u{f6}\u{153}\u{f9}\u{fb}\u{fc}\u{ff}\u{c0}\u{c7}\u{c9}\u{c8}\u{152}\u{ab}\u{bb}\u{2019}"),
@@ -704,9 +724,14 @@ mod tests {
     }
 
     /// Japanese has its fonts on every Windows this runs on, without the optional Japanese fonts: Yu Gothic comes first, and it ships with Windows 10 and 11.
+    /// The tests that change which language's fonts are preferred, one at a time: it is one setting for the whole process, and a test that looked for Japanese while another
+    /// went back to English found Microsoft YaHei.
+    static PREFERRING: Mutex<()> = Mutex::new(());
+
     #[cfg(windows)]
     #[test]
     fn japanese_comes_from_a_font_windows_always_has() {
+        let _one_at_a_time = PREFERRING.lock().unwrap_or_else(|e| e.into_inner());
         assert_eq!(table::JAPANESE[0][0].0, "YuGothM.ttc");
         let dir = windows_fonts();
         assert!(dir.join("YuGothM.ttc").is_file() && dir.join("YuGothB.ttc").is_file());
@@ -758,8 +783,37 @@ mod tests {
         }
     }
 
+    /// A kanji drawn before the language became Japanese must not keep its Chinese font for everything after.
+    #[cfg(windows)]
+    #[test]
+    fn a_change_to_japanese_leaves_no_chinese_face_behind() {
+        let _one_at_a_time = PREFERRING.lock().unwrap_or_else(|e| e.into_inner());
+        let ctx = egui::Context::default();
+        prefer_language("zh");
+        install(&ctx);
+        let raw = egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(400.0, 300.0))), ..Default::default() };
+        let draw = |ctx: &egui::Context| {
+            let mut full = ctx.run_ui(raw.clone(), |ui| {
+                let _ = ui.painter().layout_no_wrap("\u{8a00}\u{8a9e}".to_string(), egui::FontId::new(16.0, family(400.0)), egui::Color32::WHITE);
+            });
+            full.textures_delta.clear();
+            // The faces this context found for letters its own fonts lack.
+            ctx.fonts(|f| f.discovered_fonts().iter().map(|i| i.name.clone()).filter(|n| n.starts_with("system:")).collect::<Vec<_>>())
+        };
+        draw(&ctx);
+        let before = draw(&ctx);
+        assert!(before.iter().any(|f| f.contains("msyh")), "a font for Chinese first: {before:?}");
+        prefer_language("ja");
+        follow_language(&ctx);
+        draw(&ctx);
+        let after = draw(&ctx);
+        prefer_language("en");
+        assert!(after.iter().any(|f| f.contains("YuGoth")) && !after.iter().any(|f| f.contains("msyh")), "{after:?}");
+    }
+
     #[test]
     fn a_language_puts_its_cjk_font_first() {
+        let _one_at_a_time = PREFERRING.lock().unwrap_or_else(|e| e.into_inner());
         assert_eq!(language_cjk("ja"), Some(Cjk::Japanese));
         assert_eq!(language_cjk("zh-TW"), Some(Cjk::Traditional));
         assert_eq!(language_cjk("zh"), Some(Cjk::Simplified));
@@ -784,6 +838,7 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn the_mac_s_fonts_draw_other_scripts() {
+        let _one_at_a_time = PREFERRING.lock().unwrap_or_else(|e| e.into_inner());
         let fallback = SystemFallback { cjk: Cjk::Japanese };
         for c in ['猫', 'ね', '한', 'ไ', 'ع', 'א', 'ह', 'ሰ', 'д', 'α', 'ệ', '✓', '→'] {
             let (name, data) = fallback.face(c, 400).unwrap_or_else(|| panic!("no face for {c}"));
@@ -813,6 +868,7 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn system_fonts_draw_other_scripts() {
+        let _one_at_a_time = PREFERRING.lock().unwrap_or_else(|e| e.into_inner());
         if !windows_fonts().join("msyh.ttc").is_file() {
             return;
         }

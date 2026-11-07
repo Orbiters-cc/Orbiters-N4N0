@@ -365,7 +365,7 @@ impl Game for LabGame {
     fn launch(&self, plan: &LaunchPlan) -> Result<(), Failure> {
         let mut state = self.state.lock().unwrap();
         if state.behaviour.launch_fails {
-            return Err(Failure::new("start_failed", "VRChat did not start: the lab says no.", "Ask the person to look at the computer."));
+            return Err(Failure::new("start_failed", "VRChat did not start: the lab says no.", "Ask the person to look at the computer.")); // i18n: not shown (an AI client reads it in the tool's answer; the lab is a fake VRChat for tests)
         }
         state.launches.push(plan.clone());
         let window = LabWindow::open(&self.title).ok_or_else(|| Failure::new("start_failed", "The fake window did not open.", "This is the lab."))?; // i18n: not shown
@@ -452,7 +452,7 @@ impl Game for LabGame {
         }
         let mut state = self.state.lock().unwrap();
         if !state.foreground && !super::win::is_foreground(window.handle) {
-            return Err(Failure::new("not_foreground", "VRChat is not the foreground window, so no keyboard or mouse input was sent.", "Call focus_game."));
+            return Err(Failure::new("not_foreground", "VRChat is not the foreground window, so no keyboard or mouse input was sent.", "Call focus_game.")); // i18n: not shown (an AI client reads it in the tool's answer; the lab is a fake VRChat for tests)
         }
         // Recorded, never sent: this computer's input belongs to the person at it.
         for event in input {
@@ -482,7 +482,7 @@ impl Game for LabGame {
     fn take_picture(&self, length: Photo3dLength, _mode: PictureMode) -> Result<(), Failure> {
         let mut state = self.state.lock().unwrap();
         if !state.camera_open {
-            return Err(Failure::new("camera_closed", "Open the camera before", "This is the lab."));
+            return Err(Failure::new("camera_closed", "Open the camera before", "This is the lab.")); // i18n: not shown (an AI client reads it in the tool's answer; the lab is a fake VRChat for tests)
         }
         let number = state.pictures.len() + state.session.is_some() as usize;
         let session = self.dir.join(format!("session-{number}-{length:?}"));

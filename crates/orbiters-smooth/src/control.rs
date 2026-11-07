@@ -37,7 +37,7 @@ impl Mapping {
         #[cfg(not(windows))]
         {
             let _ = name;
-            Err(io::Error::new(io::ErrorKind::Unsupported, "tracking smoothing needs Windows"))
+            Err(io::Error::new(io::ErrorKind::Unsupported, orbiters_i18n::tr("tracking smoothing needs Windows")))
         }
     }
 
@@ -45,7 +45,7 @@ impl Mapping {
     /// (`win::wide`), made once so that retrying allocates nothing.
     pub fn open(name: &[u16]) -> io::Result<Mapping> {
         if name.last() != Some(&0) {
-            return Err(io::Error::new(io::ErrorKind::InvalidInput, "the name must end with a NUL"));
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "the name must end with a NUL")); // i18n: not shown (a programming error: the names are built by this crate)
         }
         #[cfg(windows)]
         {
@@ -59,7 +59,7 @@ impl Mapping {
         }
         #[cfg(not(windows))]
         {
-            Err(io::Error::new(io::ErrorKind::Unsupported, "tracking smoothing needs Windows"))
+            Err(io::Error::new(io::ErrorKind::Unsupported, orbiters_i18n::tr("tracking smoothing needs Windows")))
         }
     }
 
@@ -82,7 +82,7 @@ impl Mapping {
         if !ok || info.RegionSize < std::mem::size_of::<ControlBlock>() {
             // SAFETY: the view mapped above.
             unsafe { UnmapViewOfFile(view) };
-            return Err(close(io::Error::new(io::ErrorKind::InvalidData, "the smoothing control block is smaller than this version's")));
+            return Err(close(io::Error::new(io::ErrorKind::InvalidData, orbiters_i18n::tr("the smoothing control block is smaller than this version's"))));
         }
         // Views start on an allocation granularity boundary (64 KB): aligned for the block.
         Ok(Mapping { handle, block: view as *const ControlBlock, created })
@@ -133,9 +133,10 @@ impl Control {
         let block = mapping.block();
         if block.magic.load(Ordering::Acquire) == MAGIC {
             if !block.is_valid() {
-                return Err(io::Error::other(format!(
-                    "the tracking smoothing control is in use by another version of Orbiters - N4N0 (layout {}, this one {VERSION})",
-                    block.version.load(Ordering::Relaxed)
+                return Err(io::Error::other(orbiters_i18n::tr!(
+                    "the tracking smoothing control is in use by another version of Orbiters - N4N0 (layout {layout}, this one {version})",
+                    layout = block.version.load(Ordering::Relaxed),
+                    version = VERSION
                 )));
             }
         } else {

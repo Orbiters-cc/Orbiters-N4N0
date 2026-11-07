@@ -29,6 +29,10 @@ use tokio::sync::mpsc::{unbounded_channel, UnboundedSender};
 /// Where calls bind when the default route's interface cannot be found: every interface (loopback and link-local
 /// left out).
 const ANY_ADDR: &str = "0.0.0.0:0";
+/// Where calls bind in a run that must not listen on the network (`ORBITERS_NO_NETWORK_LISTENING`, the agents' test
+/// runs): a call there cannot reach anyone, but it starts, gathers and ends as any other, without Windows' firewall
+/// asking the person over whatever they are doing.
+const LOOPBACK_ADDR: &str = "127.0.0.1:0";
 /// A call that has not connected by then is given up (it rings for 30 s at most).
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(60);
 /// A connected call that hears nothing for this long is over: the other side always sends (muted, or with its
@@ -52,8 +56,12 @@ fn error(call: u64, message: impl Into<String>) {
 }
 
 /// The local address of the interface the default route goes through, as a bind address: the only one whose
-/// address the other side may learn. Nothing is sent (a UDP "connect" only picks the route).
+/// address the other side may learn. Nothing is sent (a UDP "connect" only picks the route). Loopback in a run that
+/// must not listen on the network ([`LOOPBACK_ADDR`]).
 fn default_route_addr() -> String {
+    if orbiters_core::osc::no_network_listening() {
+        return LOOPBACK_ADDR.to_string();
+    }
     let probe = || -> std::io::Result<std::net::IpAddr> {
         let socket = std::net::UdpSocket::bind(ANY_ADDR)?;
         // A documentation address (RFC 5737): routed like any public one, never reached.
@@ -417,6 +425,15 @@ mod tests {
             out.push(read.map(|()| String::from_utf8(line.clone()).unwrap()));
         }
         out
+    }
+
+    /// A run that must not listen on the network (the agents' test runs, `ORBITERS_NO_NETWORK_LISTENING`) binds its calls to
+    /// loopback: Windows' firewall then asks nobody, and the calls of the tests below start, gather and end all the same.
+    #[test]
+    fn a_run_that_must_not_listen_binds_calls_to_loopback() {
+        if orbiters_core::osc::no_network_listening() {
+            assert_eq!(default_route_addr(), LOOPBACK_ADDR);
+        }
     }
 
     #[test]

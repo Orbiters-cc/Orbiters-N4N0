@@ -2273,6 +2273,12 @@ fn render(gpu: &mut Offscreen, sc: &Scenario, scale: f32, size: Vec2, path: &std
         if let Some(p) = sc.pointer {
             input.events.push(Event::PointerMoved(p));
         }
+        // `ORBITERS_SCREENSHOT_SCROLL`: any scene, further down.
+        let wanted = std::env::var("ORBITERS_SCREENSHOT_SCROLL").ok().and_then(|s| s.parse::<f32>().ok());
+        if let (Some(scroll), true) = (wanted, f + 30 == sc.frames) {
+            input.events.push(Event::PointerMoved(pos2(760.0, 500.0)));
+            input.events.push(Event::MouseWheel { unit: egui::MouseWheelUnit::Point, delta: vec2(0.0, -scroll), phase: egui::TouchPhase::Move, modifiers: egui::Modifiers::NONE, source: egui::MouseWheelSource::Wheel });
+        }
         if sc.scroll != 0.0 && f + 30 == sc.frames {
             input.events.push(Event::PointerMoved(sc.pointer.unwrap_or(pos2(760.0, 500.0))));
             input.events.push(Event::MouseWheel {

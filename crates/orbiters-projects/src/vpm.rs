@@ -1,5 +1,6 @@
 //! Uses ALCOM's VPM resolver and its shared VCC environment. Never hand-edit a VPM manifest.
 use anyhow::{bail, Context};
+use orbiters_i18n::tr;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -103,15 +104,15 @@ pub async fn register(root: &Path, path: &Path, add: bool) -> anyhow::Result<()>
     let mut db = VccDatabaseConnection::connect(&io).await?;
     if add {
         if !crate::discovery::is_project(path) {
-            bail!("Choose a Unity project containing ProjectSettings/ProjectVersion.txt.");
+            bail!("{}", tr("Choose a Unity project containing ProjectSettings/ProjectVersion.txt."));
         }
         let project = UnityProject::load(DefaultProjectIo::new(path.into())).await?;
-        if db.find_project(path.to_str().context("Project path is not Unicode")?)?.is_none() {
+        if db.find_project(path.to_str().with_context(|| tr("Project path is not Unicode"))?)?.is_none() {
             db.add_project(&project).await?;
         }
-        settings.add_user_project(path.to_str().context("Project path is not Unicode")?);
+        settings.add_user_project(path.to_str().with_context(|| tr("Project path is not Unicode"))?);
     } else {
-        if let Some(p) = db.find_project(path.to_str().context("Project path is not Unicode")?)? {
+        if let Some(p) = db.find_project(path.to_str().with_context(|| tr("Project path is not Unicode"))?)? {
             db.remove_project(&p);
         }
         settings.retain_user_projects(|p| crate::discovery::key(Path::new(p)) != crate::discovery::key(path));
@@ -252,7 +253,7 @@ pub async fn add_repo(root: &Path, url: &str, headers: BTreeMap<String, String>)
     let mut settings = Settings::load(&io).await?;
     let url = url::Url::parse(url)?;
     if !matches!(url.scheme(), "https" | "http") {
-        bail!("A repository URL must use HTTPS or HTTP.");
+        bail!("{}", tr("A repository URL must use HTTPS or HTTP."));
     }
     if settings.get_user_repos().iter().any(|r| r.url() == Some(&url)) {
         return Ok(());
@@ -317,7 +318,7 @@ pub async fn change(root: &Path, path: &Path, action: Change) -> anyhow::Result<
                     .unwrap_or_else(|| VersionSelector::latest_for(Some(project.unity_version()), *prerelease));
                 let p = packages
                     .find_package_by_name(name, selector)
-                    .with_context(|| format!("No compatible version of {name} is available in enabled repositories."))?;
+                    .with_context(|| tr!("No compatible version of {name} is available in enabled repositories.", name = name))?;
                 asked.push((p.name().to_string(), p.version().to_string()));
                 requested.push(p);
             }
@@ -331,8 +332,11 @@ pub async fn change(root: &Path, path: &Path, action: Change) -> anyhow::Result<
             return Err(crate::coherent::Conflicted { plan }.into());
         }
         bail!(
-            "These package changes conflict with installed packages: {}. No changes were applied.",
-            changes.conflicts().keys().map(|s| s.as_ref()).collect::<Vec<_>>().join(", ")
+            "{}",
+            tr!(
+                "These package changes conflict with installed packages: {names}. No changes were applied.",
+                names = changes.conflicts().keys().map(|s| s.as_ref()).collect::<Vec<_>>().join(", ")
+            )
         );
     }
     project.apply_pending_changes(&PackageInstaller::new(&io, Some(&client)), changes).await?;
@@ -369,14 +373,17 @@ async fn apply_plan(
             requested.push(
                 packages
                     .find_package_by_name(name, VersionSelector::specific_version(&v))
-                    .with_context(|| format!("{name} {version} is no longer in the enabled repositories."))?,
+                    .with_context(|| tr!("{name} {version} is no longer in the enabled repositories.", name = name, version = version))?,
             );
         }
         let changes = project.add_package_request(packages, &requested, vrc_get_vpm::unity_project::AddPackageOperation::AutoDetected, prerelease).await?;
         if !changes.conflicts().is_empty() {
             bail!(
-                "The plan conflicts again with: {} (the repositories changed since it was made).",
-                changes.conflicts().keys().map(|s| s.as_ref()).collect::<Vec<_>>().join(", ")
+                "{}",
+                tr!(
+                    "The plan conflicts again with: {names} (the repositories changed since it was made).",
+                    names = changes.conflicts().keys().map(|s| s.as_ref()).collect::<Vec<_>>().join(", ")
+                )
             );
         }
         project.apply_pending_changes(&installer, changes).await?;
@@ -396,8 +403,8 @@ async fn apply_plan(
         }
         .await;
         return Err(match restored {
-            Ok(()) => e.context("Nothing was changed: the project's packages are as they were"),
-            Err(r) => e.context(format!("The package list was put back, but restoring its packages failed ({r:#}): use Restore")),
+            Ok(()) => e.context(tr("Nothing was changed: the project's packages are as they were")),
+            Err(r) => e.context(tr!("The package list was put back, but restoring its packages failed ({why}): use Restore", why = format!("{r:#}"))),
         });
     }
     Ok(())

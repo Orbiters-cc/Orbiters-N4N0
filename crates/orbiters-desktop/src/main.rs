@@ -62,7 +62,7 @@ fn main() -> anyhow::Result<()> {
                 .stack_size(16 << 20)
                 .spawn(move || screenshot::run(&args))
                 .map_err(anyhow::Error::from)
-                .and_then(|t| t.join().unwrap_or_else(|_| Err(anyhow::anyhow!("the screenshots stopped on a panic"))))
+                .and_then(|t| t.join().unwrap_or_else(|_| Err(anyhow::anyhow!("the screenshots stopped on a panic")))) // i18n: not shown (a developer's command line, in English)
         }
         // From RunOnce, at sign-in, after something died with a change of the FPS booster in force.
         Some(orbiters_booster::system::RESTORE_ARGUMENT) => controller::booster_restore_at_sign_in(),

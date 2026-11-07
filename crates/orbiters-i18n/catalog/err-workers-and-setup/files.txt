@@ -1,0 +1,2 @@
+# The files this area covers: every text in them is wrapped and translated (tests/coverage.rs).
+# None: every file of this group is in an area already (foundation-crates); this folder only holds the error texts they gained.

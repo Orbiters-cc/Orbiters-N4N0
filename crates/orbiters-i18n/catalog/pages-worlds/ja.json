@@ -192,5 +192,6 @@
   "{total} visits on VRChat": "VRChat上で訪問{total}回",
   "{when} · by {author}": "{when} · 作者：{author}",
   "whole month\u0004May": "5月",
-  "whole month\u0004{day} {month} {year}": "{year}年{month}{day}日"
+  "whole month\u0004{day} {month} {year}": "{year}年{month}{day}日",
+  "stat tile\u0004Frame rate": "FPS"
 }

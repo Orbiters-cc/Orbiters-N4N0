@@ -156,7 +156,7 @@ impl PeerConnectionEventHandler for Handler {
         // The address behind a reflexive or relayed candidate is this computer's own, and of no use to the other
         // side (RFC 8445 keeps it for diagnostics): left out, as browsers do.
         if !candidate.related_address.is_empty() {
-            candidate.related_address = "0.0.0.0".into();
+            candidate.related_address = "0.0.0.0".into(); // network: not a socket (what a candidate says it was related to)
             candidate.related_port = 0;
         }
         match candidate.to_json() {
@@ -378,7 +378,7 @@ impl Call {
     }
 
     async fn local_sdp(&self) -> anyhow::Result<String> {
-        let sdp = self.pc.local_description().await.ok_or_else(|| anyhow::anyhow!("no local description"))?.sdp;
+        let sdp = self.pc.local_description().await.ok_or_else(|| anyhow::anyhow!("{}", orbiters_i18n::tr("no local description")))?.sdp;
         Ok(protocol::without_candidates(&sdp))
     }
 
@@ -405,9 +405,9 @@ impl Call {
         if std::mem::replace(&mut self.sending, true) {
             return Ok(());
         }
-        let ssrc = *self.track.ssrcs().await.first().ok_or_else(|| anyhow::anyhow!("the track has no SSRC"))?;
+        let ssrc = *self.track.ssrcs().await.first().ok_or_else(|| anyhow::anyhow!("{}", orbiters_i18n::tr("the track has no SSRC")))?;
         let parameters = self.sender.get_parameters().await?;
-        let payload_type = parameters.rtp_parameters.codecs.first().map(|c| c.payload_type).ok_or_else(|| anyhow::anyhow!("no codec was negotiated"))?;
+        let payload_type = parameters.rtp_parameters.codecs.first().map(|c| c.payload_type).ok_or_else(|| anyhow::anyhow!("{}", orbiters_i18n::tr("no codec was negotiated")))?;
         let mut encoder = FrameEncoder::new()?;
         let (track, mic, muted, levels) = (self.track.clone(), self.mic.clone(), self.muted.clone(), self.levels.clone());
         self.tasks.push(tokio::spawn(async move {

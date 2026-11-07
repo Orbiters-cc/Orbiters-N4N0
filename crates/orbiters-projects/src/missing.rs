@@ -8,6 +8,7 @@
 //! that version; the Known VPM catalog keeps a package's 40 newest versions in its supported range, so a repository
 //! it names without the version is read itself before saying it does not have it.
 use orbiters_core::account::{Api, Server};
+use orbiters_i18n::tr;
 use serde::Deserialize;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
@@ -266,7 +267,7 @@ pub async fn lookup(root: &Path, server: Server, missing: &[Missing]) -> anyhow:
     }
     if found.found.is_empty() && found.not_listed.is_empty() {
         if let Err(e) = catalog {
-            anyhow::bail!("Orbiters' Known VPM catalog could not be read: {e:#}");
+            anyhow::bail!("{}", tr!("Orbiters' Known VPM catalog could not be read: {why}", why = format!("{e:#}")));
         }
     }
     Ok(found)
@@ -280,7 +281,7 @@ pub async fn add(root: &Path, additions: &[Addition]) -> anyhow::Result<()> {
             crate::vpm::set_enabled(root, id, true).await?;
             continue;
         }
-        crate::vpm::add_repo(root, &a.url, BTreeMap::new()).await.map_err(|e| anyhow::anyhow!("{} could not be added: {e:#}", a.name))?;
+        crate::vpm::add_repo(root, &a.url, BTreeMap::new()).await.map_err(|e| anyhow::anyhow!("{}", tr!("{name} could not be added: {why}", name = a.name, why = format!("{e:#}"))))?;
         // Listed already but turned off: turned back on.
         let (settings, collection) = crate::vpm::collection(root, false).await?;
         let hidden: HashSet<&str> = collection.hidden.iter().map(String::as_str).collect();

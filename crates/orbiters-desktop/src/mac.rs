@@ -82,7 +82,7 @@ fn template_icon() -> anyhow::Result<tray_icon::Icon> {
     let mut reader = decoder.read_info()?;
     let mut buf = vec![0; reader.output_buffer_size().unwrap_or(0)];
     let info = reader.next_frame(&mut buf)?;
-    anyhow::ensure!(info.color_type == png::ColorType::Rgba, "unexpected icon format {:?}", info.color_type);
+    anyhow::ensure!(info.color_type == png::ColorType::Rgba, "unexpected icon format {:?}", info.color_type); // i18n: not shown (a bundled icon, logged)
     buf.truncate(info.buffer_size());
     Ok(tray_icon::Icon::from_rgba(buf, info.width, info.height)?)
 }
@@ -125,7 +125,7 @@ pub fn stay_awake() {
 /// Runs the service's side of AppKit on this, the main, thread until the process exits: the service leaves when asked
 /// to quit ([`leave`]).
 pub fn run_service(service: Arc<Service>) -> anyhow::Result<()> {
-    let mtm = MainThreadMarker::new().ok_or_else(|| anyhow::anyhow!("not on the main thread"))?;
+    let mtm = MainThreadMarker::new().ok_or_else(|| anyhow::anyhow!("not on the main thread"))?; // i18n: not shown (a programming error, logged)
     let _ = SERVICE.set(service);
     stay_awake();
     let app = NSApplication::sharedApplication(mtm);

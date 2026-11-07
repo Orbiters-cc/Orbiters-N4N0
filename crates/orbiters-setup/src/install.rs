@@ -123,10 +123,10 @@ fn close_app(dir: &Path, progress: &Progress, silent: bool) -> anyhow::Result<()
             while !system::wait_for_folder(dir, Duration::from_secs(1), stop) && !stop() {}
             progress.stuck(false);
         }
-        anyhow::ensure!(!progress.cancelled(), "Cancelled: Orbiters - N4N0 was still running.");
+        anyhow::ensure!(!progress.cancelled(), "{}", tr("Cancelled: Orbiters - N4N0 was still running."));
         system::terminate_folder(dir);
     }
-    anyhow::ensure!(system::processes_in(dir).is_empty(), "Orbiters - N4N0 is still running from {}.", dir.display());
+    anyhow::ensure!(system::processes_in(dir).is_empty(), "{}", orbiters_i18n::tr!("Orbiters - N4N0 is still running from {folder}.", folder = dir.display()));
     Ok(())
 }
 
@@ -138,12 +138,11 @@ pub fn install(bytes: &[u8], options: &Options, progress: &Progress, silent: boo
     if let Some(free) = system::free_space(dir) {
         anyhow::ensure!(
             free > index.total() + MARGIN,
-            "Not enough free space on the drive of {}: {} MB are needed.",
-            dir.display(),
-            (index.total() + MARGIN) >> 20
+            "{}",
+            orbiters_i18n::tr!("Not enough free space on the drive of {folder}: {size} MB are needed.", folder = dir.display(), size = (index.total() + MARGIN) >> 20)
         );
     }
-    std::fs::create_dir_all(dir).with_context(|| format!("{} cannot be created", dir.display()))?;
+    std::fs::create_dir_all(dir).with_context(|| orbiters_i18n::tr!("{path} cannot be created", path = dir.display()))?;
     let staging = dir.join(STAGING);
     let backup = dir.join(BACKUP);
     // What a cut install left.
@@ -176,7 +175,7 @@ pub fn install(bytes: &[u8], options: &Options, progress: &Progress, silent: boo
         start_with_steamvr: options.start_with_steamvr,
         installed: now(),
     };
-    record.write(dir).with_context(|| format!("{} cannot be written", dir.join(RECORD_FILE).display()))?;
+    record.write(dir).with_context(|| orbiters_i18n::tr!("{path} cannot be written", path = dir.join(RECORD_FILE).display()))?;
 
     progress.set(0.9, tr("Adding it to Windows…"));
     integrate(dir, &record, previous.as_ref(), index.total(), fresh)?;
@@ -198,14 +197,14 @@ fn swap(dir: &Path, staging: &Path, backup: &Path, index: &payload::Index, previ
             let (Some(dest), Some(to)) = (inside(dir, path), inside(backup, path)) else { continue };
             if dest.is_file() {
                 make_parent(&to)?;
-                rename(&dest, &to).with_context(|| format!("{} is in use by another program", dest.display()))?;
+                rename(&dest, &to).with_context(|| orbiters_i18n::tr!("{path} is in use by another program", path = dest.display()))?;
                 aside.push(path);
             }
         }
         for &path in &new {
             let (Some(from), Some(dest)) = (inside(staging, path), inside(dir, path)) else { continue };
             make_parent(&dest)?;
-            rename(&from, &dest).with_context(|| format!("{} cannot be written", dest.display()))?;
+            rename(&from, &dest).with_context(|| orbiters_i18n::tr!("{path} cannot be written", path = dest.display()))?;
             placed.push(path);
         }
         Ok(())
@@ -223,7 +222,7 @@ fn swap(dir: &Path, staging: &Path, backup: &Path, index: &payload::Index, previ
             }
         }
         remove_tree(staging);
-        return Err(e.context("The previous version was put back"));
+        return Err(e.context(tr("The previous version was put back")));
     }
     Ok(())
 }
@@ -231,13 +230,13 @@ fn swap(dir: &Path, staging: &Path, backup: &Path, index: &payload::Index, previ
 /// Windows' side: the installed-apps entry, the Start menu (and desktop) shortcut, the start with Windows; and SteamVR's
 /// start of the app, when SteamVR runs (else the app tells it, from the record, the next time it runs).
 fn integrate(dir: &Path, record: &InstallRecord, previous: Option<&InstallRecord>, size: u64, fresh: bool) -> anyhow::Result<()> {
-    system::register(dir, &record.version, size).context("The installed-apps entry cannot be written")?;
+    system::register(dir, &record.version, size).with_context(|| tr("The installed-apps entry cannot be written"))?;
     if let Some(link) = system::start_menu_shortcut() {
-        system::write_shortcut(&link, dir).context("The Start menu shortcut cannot be written")?;
+        system::write_shortcut(&link, dir).with_context(|| tr("The Start menu shortcut cannot be written"))?;
     }
     if let Some(link) = system::desktop_shortcut() {
         if record.desktop_shortcut && (fresh || link.exists()) {
-            system::write_shortcut(&link, dir).context("The desktop shortcut cannot be written")?;
+            system::write_shortcut(&link, dir).with_context(|| tr("The desktop shortcut cannot be written"))?;
         } else if !record.desktop_shortcut && previous.is_some_and(|p| p.desktop_shortcut) {
             let _ = std::fs::remove_file(&link);
         }
@@ -266,7 +265,7 @@ fn integrate(dir: &Path, record: &InstallRecord, previous: Option<&InstallRecord
 
 /// Updates the install in `dir` to the payload, keeping its options and channel.
 pub fn update(bytes: &[u8], dir: &Path, progress: &Progress, silent: bool) -> anyhow::Result<InstallRecord> {
-    let record = InstallRecord::read(dir).with_context(|| format!("Orbiters - N4N0 is not installed in {}.", dir.display()))?;
+    let record = InstallRecord::read(dir).with_context(|| tr!("Orbiters - N4N0 is not installed in {folder}.", folder = dir.display()))?;
     let options = Options {
         dir: dir.to_path_buf(),
         desktop_shortcut: record.desktop_shortcut,
@@ -275,7 +274,7 @@ pub fn update(bytes: &[u8], dir: &Path, progress: &Progress, silent: bool) -> an
         channel: record.channel,
     };
     install(bytes, &options, progress, silent, false)?;
-    InstallRecord::read(dir).context("The install record is missing after the update.")
+    InstallRecord::read(dir).with_context(|| tr("The install record is missing after the update."))
 }
 
 /// How long an uninstall waits for SteamVR to be closed, for a value still owed to it.
@@ -285,7 +284,7 @@ const BOOSTER_PATIENCE: Duration = Duration::from_secs(120);
 /// folder once empty. `remove_data` also removes its settings, caches and speech models; the person's sessions are
 /// never touched.
 pub fn uninstall(dir: &Path, remove_data: bool, progress: &Progress, silent: bool) -> anyhow::Result<()> {
-    let record = InstallRecord::read(dir).with_context(|| format!("Orbiters - N4N0 is not installed in {}.", dir.display()))?;
+    let record = InstallRecord::read(dir).with_context(|| tr!("Orbiters - N4N0 is not installed in {folder}.", folder = dir.display()))?;
     progress.set(0.05, tr("Closing Orbiters - N4N0…"));
     close_app(dir, progress, silent)?;
 
@@ -359,7 +358,7 @@ pub fn uninstall(dir: &Path, remove_data: bool, progress: &Progress, silent: boo
             let _ = std::fs::remove_dir(root.join("Orbiters"));
         }
     }
-    anyhow::ensure!(failed.is_empty(), "These files could not be removed (in use?): {}", failed.join(", "));
+    anyhow::ensure!(failed.is_empty(), "{}", tr!("These files could not be removed (in use?): {files}", files = failed.join(", ")));
     progress.set(1.0, tr("Uninstalled"));
     Ok(())
 }
@@ -537,5 +536,19 @@ mod tests {
     fn folders_compare_as_windows_does() {
         assert!(same_dir(Path::new("C:/Users/A/Programs/Orbiters - N4N0/"), Path::new(r"c:\users\a\programs\orbiters - n4n0")));
         assert!(!same_dir(Path::new("C:/Users/A/Programs/Orbiters"), Path::new("C:/Users/A/Programs/Orbiters - N4N0")));
+    }
+
+    /// The window shows an error as it came, and the setup speaks the language the app saved: the failure is worded when it happens.
+    #[test]
+    fn a_failed_uninstall_speaks_the_language_of_the_person() {
+        use orbiters_i18n::{in_language, Language};
+        let dir = scratch("not-installed");
+        let said = |language| in_language(language, || format!("{:#}", uninstall(&dir, false, &Progress::default(), true).unwrap_err()));
+        assert!(said(Language::En).starts_with("Orbiters - N4N0 is not installed in "));
+        assert!(said(Language::Fr).starts_with("Orbiters - N4N0 n’est pas installé dans "));
+        assert!(said(Language::Ja).contains("にインストールされていません"));
+        assert!(said(Language::Es).contains("no está instalado en"));
+        assert!(said(Language::PtBr).contains("não está instalado em"));
+        remove_tree(&dir);
     }
 }

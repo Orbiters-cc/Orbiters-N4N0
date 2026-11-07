@@ -44,7 +44,7 @@ fn allowed(url: &str) -> bool {
 /// The current release of `channel` on [`feed`], once its signature checks out against `key`.
 pub fn fetch_release(channel: &str, key: &[u8; 32]) -> anyhow::Result<Release> {
     let url = release_url(&feed(), channel);
-    anyhow::ensure!(allowed(&url), "{url}: not an HTTPS address");
+    anyhow::ensure!(allowed(&url), "{}", orbiters_i18n::tr!("{url}: not an HTTPS address", url = url));
     let response = agent().get(&url).header("Cache-Control", "no-cache").call().with_context(|| url.clone())?;
     let bytes = response.into_body().with_config().limit(MAX_RELEASE).read_to_vec().with_context(|| url.clone())?;
     SignedRelease::open(&bytes, key, channel)
@@ -61,7 +61,7 @@ pub fn none_published(error: &anyhow::Error) -> bool {
 /// the bytes there are of the size; `stop` ends it early (an error).
 pub fn download(artifact: &Artifact, to: &Path, mut progress: impl FnMut(u64, u64), stop: &AtomicBool) -> anyhow::Result<()> {
     let url = artifact.resolve(&feed());
-    anyhow::ensure!(allowed(&url), "{url}: not an HTTPS address");
+    anyhow::ensure!(allowed(&url), "{}", orbiters_i18n::tr!("{url}: not an HTTPS address", url = url));
     if let Some(parent) = to.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -114,7 +114,7 @@ pub fn download(artifact: &Artifact, to: &Path, mut progress: impl FnMut(u64, u6
             if have > artifact.size {
                 drop(file);
                 let _ = std::fs::remove_file(&part);
-                anyhow::bail!("{url}: larger than the release says");
+                anyhow::bail!("{}", orbiters_i18n::tr!("{url}: larger than the release says", url = url));
             }
             hasher.update(&buf[..n]);
             file.write_all(&buf[..n])?;
@@ -122,10 +122,10 @@ pub fn download(artifact: &Artifact, to: &Path, mut progress: impl FnMut(u64, u6
         }
         file.into_inner().map_err(|e| e.into_error())?.sync_all()?;
     }
-    anyhow::ensure!(have == artifact.size, "{url}: the download stopped at {have} of {} bytes", artifact.size);
+    anyhow::ensure!(have == artifact.size, "{}", orbiters_i18n::tr!("{url}: the download stopped at {have} of {size} bytes", url = url, have = have, size = artifact.size));
     if crate::hex(&hasher.finalize()) != artifact.sha256 {
         let _ = std::fs::remove_file(&part);
-        anyhow::bail!("{url}: not the file the release names (its SHA-256 differs)");
+        anyhow::bail!("{}", orbiters_i18n::tr!("{url}: not the file the release names (its SHA-256 differs)", url = url));
     }
     let _ = std::fs::remove_file(to);
     std::fs::rename(&part, to)?;

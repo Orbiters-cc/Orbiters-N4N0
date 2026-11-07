@@ -211,7 +211,7 @@ static STORE: OnceLock<Box<dyn CredentialStore>> = OnceLock::new();
 /// Keeps the account in `store` from now on, instead of the Unity tools' file: once, at start, before the account is
 /// read.
 pub fn set_store(store: Box<dyn CredentialStore>) -> anyhow::Result<()> {
-    STORE.set(store).map_err(|_| anyhow::anyhow!("the account's store was given already"))
+    STORE.set(store).map_err(|_| anyhow::anyhow!("the account's store was given already")) // i18n: not shown (a mistake in the program's start-up: nothing calls this twice, and nothing passes it to a person)
 }
 
 /// Where the account is kept: the app's store, else the Unity tools'.
@@ -239,7 +239,7 @@ pub fn modified(server: Server) -> Option<std::time::SystemTime> {
 
 /// Signs `account` in for every tool on `server`.
 pub fn save(server: Server, account: &Account) -> anyhow::Result<()> {
-    let path = account_path(server).context("no Unity preferences folder")?;
+    let path = account_path(server).with_context(|| tr("no Unity preferences folder"))?;
     write_file(store(), &path, account)?;
     let _ = std::fs::remove_file(path.with_file_name(server.legacy_file_name()));
     Ok(())
@@ -247,11 +247,11 @@ pub fn save(server: Server, account: &Account) -> anyhow::Result<()> {
 
 /// Signs every tool out of `server` (nothing is revoked on the server, as in Unity).
 pub fn remove(server: Server) -> anyhow::Result<()> {
-    let path = account_path(server).context("no Unity preferences folder")?;
+    let path = account_path(server).with_context(|| tr("no Unity preferences folder"))?;
     match std::fs::remove_file(&path) {
         Ok(()) => {}
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => return Err(e).with_context(|| format!("could not remove {}", path.display())),
+        Err(e) => return Err(e).with_context(|| tr!("could not remove {path}", path = path.display())),
     }
     let _ = std::fs::remove_file(path.with_file_name(server.legacy_file_name()));
     Ok(())
@@ -477,7 +477,7 @@ impl Api {
         if !(200..300).contains(&status) {
             return Err(error(status, &text).into());
         }
-        serde_json::from_str(&text).with_context(|| format!("unexpected answer from Orbiters ({status})"))
+        serde_json::from_str(&text).with_context(|| tr!("unexpected answer from Orbiters ({status})", status = status))
     }
 
     /// Whether `token` still works, with the account it belongs to.
@@ -513,7 +513,7 @@ impl Api {
         let body = serde_json::json!({ "client": CLIENT, "device": device, "port": port, "path": path });
         let link: Link = Self::json(self.agent.post(&self.url("editor-links")).send_json(body)?)?;
         if link.link_url.is_empty() || link.connected_url.is_empty() || link.exchange_token.is_empty() {
-            bail!("Orbiters did not return a sign-in link.");
+            bail!("{}", tr("Orbiters did not return a sign-in link."));
         }
         Ok(link)
     }

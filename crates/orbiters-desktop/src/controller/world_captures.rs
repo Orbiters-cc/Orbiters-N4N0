@@ -224,7 +224,7 @@ fn read_requests(dir: &Path) -> Vec<(PathBuf, Result<Request, String>)> {
         .into_iter()
         .map(|(_, p)| {
             let read = std::fs::read(&p).map_err(|e| e.to_string()).and_then(|b| serde_json::from_slice::<Request>(&b).map_err(|e| e.to_string()));
-            let checked = read.and_then(|r| if r.schema == SCHEMA { Ok(r) } else { Err(format!("schema {} is not {SCHEMA}", r.schema)) });
+            let checked = read.and_then(|r| if r.schema == SCHEMA { Ok(r) } else { Err(format!("schema {} is not {SCHEMA}", r.schema)) }); // i18n: not shown (read_requests' Err is logged by the watcher: "world captures: {file}: {message}")
             (p, checked)
         })
         .collect()

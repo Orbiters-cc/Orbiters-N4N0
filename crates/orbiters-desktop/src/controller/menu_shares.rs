@@ -8,7 +8,7 @@ use super::shares::{self, Entry, Local, Operation, Outcome, Request};
 use super::Shared;
 use crate::state::{CaptureState, Snapshot};
 use orbiters_core::account::Server;
-use orbiters_i18n::{fill, tr_latin};
+use orbiters_i18n::{english_of, fill, language, tr_latin, Language};
 use orbiters_n4n0_core::captures::{CapturePhase, CaptureRow, CapturesView, Friend, ShareAsk, Sharing, HISTORY_MAX, RECIPIENTS_MAX};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -147,7 +147,7 @@ impl MenuShares {
                     }
                     Some(Some(Outcome::Shared(orbiters_core::shares::Shared::Request { .. }))) => Sharing::Done { public: ask.public, people },
                     Some(Some(Outcome::Failed { explicit: true, .. })) => Sharing::Explicit,
-                    Some(Some(Outcome::Failed { message, .. })) => Sharing::Failed { message: message.clone() },
+                    Some(Some(Outcome::Failed { message, .. })) => Sharing::Failed { message: on_screen(message) },
                     Some(Some(_)) => Sharing::Idle,
                 }
             }
@@ -256,15 +256,15 @@ impl super::Controller {
     /// its 3D view is made, else once it is (queued for reconstruction when nothing makes it).
     pub(super) fn menu_capture_share(self: &Shared, ask: ShareAsk) -> Result<(), String> {
         if ask.recipients.len() > RECIPIENTS_MAX {
-            return Err(format!("A capture goes to at most {RECIPIENTS_MAX} friends at a time"));
+            return Err(fill(tr_latin("A capture goes to at most {max} friends at a time"), &[("max", &RECIPIENTS_MAX)]));
         }
         if !ask.public && ask.recipients.is_empty() {
-            return Err("Choose who to share it with".into());
+            return Err(tr_latin("Choose who to share it with").into());
         }
         let name = folder_of(&ask.key);
         let snap = self.view();
         if snap.capture.session_dir.as_deref().is_some_and(|d| folder(d) == name) && (snap.is_capturing() || snap.capture.state == CaptureState::Stopping) {
-            return Err("It is still being recorded: share it once it is saved".into());
+            return Err(tr_latin("It is still being recorded: share it once it is saved").into());
         }
         {
             let m = self.menu_shares.lock().unwrap();
@@ -280,7 +280,7 @@ impl super::Controller {
         let settings = self.settings();
         let entries = shares::local_entries(&settings.sessions_dir, server(settings.development));
         let entry = entries.iter().find(|e| matches!(e.local, Some(Local::Session(_))) && folder_of(&e.key) == name).cloned();
-        let Some(mut entry) = entry else { return Err("This capture is no longer on the computer".into()) };
+        let Some(mut entry) = entry else { return Err(tr_latin("This capture is no longer on the computer").into()) };
         let made = self.menu_shares.lock().unwrap().made.contains(&name);
         entry.ready |= made;
         let asked = if entry.ready {
@@ -289,7 +289,7 @@ impl super::Controller {
             let dir = entry.local.as_ref().map(|l| l.path().to_path_buf()).unwrap_or_default();
             let busy = snap.reconstruction.as_ref().is_some_and(|j| folder(&j.session_dir) == name) || snap.reconstruct_queue.iter().any(|d| folder(d) == name);
             if !busy {
-                self.queue_reconstruction(dir).map_err(|e| fill(tr_latin("Its 3D view cannot be made: {error}"), &[("error", &e)]))?;
+                self.queue_reconstruction(dir).map_err(|e| fill(tr_latin("Its 3D view cannot be made: {error}"), &[("error", &on_screen(&e.to_string()))]))?;
             }
             Asked::Waiting { entry: Box::new(entry), ask, since: Instant::now() }
         };
@@ -317,12 +317,24 @@ impl super::Controller {
 
     /// The VRChat friends a capture can go to: the member's VRChat session when there is one, else VRCX's or VRCNext's.
     pub(super) fn menu_friends(&self) -> Result<Vec<Friend>, String> {
-        let users = self.vrchat_source().friends().map_err(|e| fill(tr_latin("Friends could not be read: {error}"), &[("error", &e)]))?;
+        let users = self.vrchat_source().friends().map_err(|e| fill(tr_latin("Friends could not be read: {error}"), &[("error", &on_screen(&e.to_string()))]))?;
         if users.is_empty() {
-            return Err("No VRChat friends found: sign in to VRChat in Orbiters - N4N0, or use VRCX or VRCNext".into());
+            return Err(tr_latin("No VRChat friends found: sign in to VRChat in Orbiters - N4N0, or use VRCX or VRCNext").into());
         }
         Ok(users.into_iter().map(|u| Friend { id: u.id, name: u.display_name }).collect())
     }
+}
+
+/// A failure's text as N4N0's screen can draw it. The screen is drawn from a glyph atlas with no Japanese (`orbiters_n4n0_core::text::latin`), and an
+/// error was made in the language now: a text this app translated goes back to its English and out again through [`tr_latin`] (French, Spanish and
+/// Portuguese say it, Japanese stays English there). What has no translation to go back by (a text with values in it, an operating system's, a
+/// server's) is kept, unless Japanese would come out as `?`: then the screen says where the reason is. The toast and the pages have the whole text.
+fn on_screen(message: &str) -> String {
+    let text = tr_latin(english_of(message));
+    if language() == Language::Ja && text.chars().any(|c| c as u32 >= 0x2E80) {
+        return tr_latin("the reason is in Orbiters - N4N0's window").into();
+    }
+    text.to_string()
 }
 
 /// A capture's picture for N4N0's menus (its key: the session's folder), as the session's thumbnail.
@@ -337,6 +349,26 @@ mod tests {
     use super::*;
     use crate::controller::shares::ShareJob;
     use crate::state::ReconstructionJob;
+
+    /// A failure on N4N0's screen is Latin whatever the language: Japanese would come out as `?` there (the toast and the pages say it whole).
+    #[test]
+    fn a_failure_on_the_screen_is_in_a_language_it_can_draw() {
+        use orbiters_i18n::{in_language, Language};
+        let sign_in = "Sign in to Orbiters in Settings first.";
+        for language in [Language::En, Language::Ja, Language::Fr, Language::Es, Language::PtBr] {
+            let made = in_language(language, || orbiters_i18n::tr(sign_in).to_string());
+            let on_screen = in_language(language, || on_screen(&made));
+            let drawn = in_language(language, || tr_latin(sign_in).to_string());
+            assert_eq!(on_screen, drawn, "{language:?}: what was translated goes back to English and out again as the screen has it");
+            assert!(language != Language::Ja || on_screen == sign_in, "Japanese stays English there");
+        }
+        // Nothing to go back by (values in it, an operating system's words): kept, unless Japanese would come out as `?`.
+        in_language(Language::Ja, || {
+            assert_eq!(on_screen("The disk is full"), "The disk is full");
+            assert_eq!(on_screen("ディスクがいっぱいです"), "the reason is in Orbiters - N4N0's window");
+        });
+        in_language(Language::Fr, || assert_eq!(on_screen("ディスクがいっぱいです"), "ディスクがいっぱいです"));
+    }
 
     fn entry(dir: &Path, ready: bool) -> Entry {
         Entry {

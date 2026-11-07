@@ -43,7 +43,7 @@
   "Downloading version {version}: {percent} %": "Téléchargement de la version {version} : {percent} %",
   "Everyone still sees the version shared before.": "Tout le monde voit toujours la version partagée avant.",
   "Face & avatar": "Visage et avatar",
-  "Finishing in your browser": "À terminer dans ton navigateur",
+  "Finishing in your browser": "Dans ton navigateur…",
   "For Cesium, three.js and other glTF viewers that draw splats. Unity's and Blender's own importers cannot open it yet.": "Pour Cesium, three.js et les autres visionneuses glTF qui affichent des splats. Les importeurs d’Unity et de Blender ne peuvent pas encore l’ouvrir.",
   "For VRChat splat worlds (VRChat Gaussian Splatting), Unity splat importers, SuperSplat, Spark and web viewers.": "Pour les mondes à splats de VRChat (VRChat Gaussian Splatting), les importeurs de splats d’Unity, SuperSplat, Spark et les visionneuses web.",
   "Freed {bytes}.": "{bytes} libérés.",

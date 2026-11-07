@@ -97,7 +97,7 @@ pub(super) fn poll(ctx: &egui::Context, cx: &Cx, state: &mut State) {
             p.owned_job = Job::spawn(ctx, move || {
                 let result = match backend.vrchat_data(scope, Request::Owned { ids: ids.clone() }) {
                     Ok(Response::Owned(owned)) => Ok(owned),
-                    Ok(_) => Err("Unexpected answer.".to_string()),
+                    Ok(_) => Err(tr("Unexpected answer.").to_string()),
                     Err(e) => Err(e),
                 };
                 (ids, result)

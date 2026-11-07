@@ -294,15 +294,15 @@ pub fn set_start_with_steamvr(dir: &Path, on: bool) -> anyhow::Result<bool> {
 /// already, else the app tells it the next time SteamVR runs. A settings file that cannot be read is left alone.
 pub fn remember_start_with_steamvr(on: bool, told: bool) -> anyhow::Result<()> {
     use anyhow::Context as _;
-    let path = orbiters_update::app_settings_file().context("no settings folder")?;
+    let path = orbiters_update::app_settings_file().with_context(|| orbiters_i18n::tr("no settings folder"))?;
     let mut settings: serde_json::Value = match std::fs::read_to_string(&path) {
-        Ok(text) => serde_json::from_str(&text).with_context(|| format!("{} cannot be read", path.display()))?,
+        Ok(text) => serde_json::from_str(&text).with_context(|| orbiters_i18n::tr!("{path} cannot be read", path = path.display()))?,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => serde_json::json!({}),
         Err(e) => return Err(e.into()),
     };
-    let fields = settings.as_object_mut().with_context(|| format!("{} is not a settings file", path.display()))?;
+    let fields = settings.as_object_mut().with_context(|| orbiters_i18n::tr!("{path} is not a settings file", path = path.display()))?;
     let startup = fields.entry("startup").or_insert_with(|| serde_json::json!({}));
-    anyhow::ensure!(startup.is_object(), "{} has another startup section", path.display());
+    anyhow::ensure!(startup.is_object(), "{}", orbiters_i18n::tr!("{path} has another startup section", path = path.display()));
     startup["steamvr"] = serde_json::json!(on);
     startup["steamvr_pending"] = serde_json::json!(!told);
     if let Some(parent) = path.parent() {

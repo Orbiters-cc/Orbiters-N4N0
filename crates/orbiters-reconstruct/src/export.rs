@@ -25,6 +25,7 @@ use crate::{
     ply,
 };
 use anyhow::{Context, ensure};
+use orbiters_i18n::tr;
 use serde_json::json;
 use std::path::Path;
 
@@ -66,16 +67,16 @@ impl Frame {
 /// file never carries a value its readers would choke on.
 fn exported(g: &Gaussians) -> anyhow::Result<Vec<usize>> {
     let n = g.len();
-    ensure!([g.rotations.len(), g.log_scales.len(), g.colors.len(), g.opacity_logits.len()].iter().all(|&l| l == n), "inconsistent Gaussian arrays");
+    ensure!([g.rotations.len(), g.log_scales.len(), g.colors.len(), g.opacity_logits.len()].iter().all(|&l| l == n), "{}", tr("inconsistent Gaussian arrays"));
     let ids: Vec<_> = (0..n).filter(|&i| !g.sky.get(i).copied().unwrap_or(false)).collect();
-    ensure!(!ids.is_empty() && ids.len() <= u32::MAX as usize, "export requires 1..2^32-1 non-sky splats");
+    ensure!(!ids.is_empty() && ids.len() <= u32::MAX as usize, "{}", tr("export requires 1..2^32-1 non-sky splats"));
     for &i in &ids {
         let values = g.means[i].iter().chain(&g.rotations[i]).chain(&g.log_scales[i]).chain(&g.colors[i]).chain([&g.opacity_logits[i]]);
-        ensure!(values.copied().all(f32::is_finite), "nonfinite splat {i}");
-        ensure!(g.rotations[i].iter().map(|x| x * x).sum::<f32>().is_finite() && g.rotations[i].iter().any(|x| x.abs() > 1e-12), "invalid rotation {i}");
-        ensure!(g.colors[i].iter().all(|c| ((c - 0.5) / ply::SH_C0).is_finite()), "SH0 overflow at splat {i}");
-        ensure!(g.log_scales[i].iter().all(|x| x.exp().is_finite() && x.exp() > 0.0), "invalid scale {i}");
-        ensure!(g.filter(i) == 0.0, "splat {i} has an unfused 3D filter");
+        ensure!(values.copied().all(f32::is_finite), "{}", tr!("nonfinite splat {index}", index = i));
+        ensure!(g.rotations[i].iter().map(|x| x * x).sum::<f32>().is_finite() && g.rotations[i].iter().any(|x| x.abs() > 1e-12), "{}", tr!("invalid rotation {index}", index = i));
+        ensure!(g.colors[i].iter().all(|c| ((c - 0.5) / ply::SH_C0).is_finite()), "{}", tr!("SH0 overflow at splat {index}", index = i));
+        ensure!(g.log_scales[i].iter().all(|x| x.exp().is_finite() && x.exp() > 0.0), "{}", tr!("invalid scale {index}", index = i));
+        ensure!(g.filter(i) == 0.0, "{}", tr!("splat {index} has an unfused 3D filter", index = i));
     }
     Ok(ids)
 }
@@ -154,8 +155,8 @@ pub fn gltf(g: &Gaussians) -> anyhow::Result<Vec<u8>> {
     while !json.len().is_multiple_of(4) {
         json.push(b' ');
     }
-    let len = 28usize.checked_add(json.len()).and_then(|x| x.checked_add(bin.len())).context("GLB too large")?;
-    ensure!(len <= u32::MAX as usize, "GLB exceeds 4 GB");
+    let len = 28usize.checked_add(json.len()).and_then(|x| x.checked_add(bin.len())).with_context(|| tr("GLB too large"))?;
+    ensure!(len <= u32::MAX as usize, "{}", tr("GLB exceeds 4 GB"));
     let mut out = Vec::with_capacity(len);
     // Header (magic "glTF", version 2, length), then the JSON chunk's length and type "JSON".
     for v in [0x4654_6c67, 2, len as u32, json.len() as u32, 0x4e4f_534a] {
@@ -235,7 +236,7 @@ fn spz_streams(g: &Gaussians) -> anyhow::Result<(u32, [Vec<u8>; 5], Saturated)> 
     for &i in &ids {
         for p in Frame::Rub.position(g.means[i]) {
             let v = (p * 4096.).round();
-            ensure!((-8388608.0..=8388607.0).contains(&v), "SPZ position outside signed 24-bit range at splat {i}");
+            ensure!((-8388608.0..=8388607.0).contains(&v), "{}", tr!("SPZ position outside signed 24-bit range at splat {index}", index = i));
             streams[0].extend_from_slice(&(v as i32).to_le_bytes()[..3]);
         }
         streams[1].push(byte(sigmoid(g.opacity_logits[i]) * 255.));
@@ -362,19 +363,19 @@ pub fn ply(g: &Gaussians) -> anyhow::Result<Vec<u8>> {
 /// left out, as from every other output; a damaged or outdated edit refuses the export instead of exporting it all.
 fn cli(args: &[String], encode: fn(&Gaussians) -> anyhow::Result<Vec<u8>>) -> anyhow::Result<()> {
     ensure!(args.len() == 2, "usage: --export-gltf <splats.ply> <out.glb> or --export-spz <splats.ply> <out.spz>");
-    let (g, _, _) = crate::edit::read_edited(Path::new(&args[0])).with_context(|| format!("reading {}", args[0]))?;
+    let (g, _, _) = crate::edit::read_edited(Path::new(&args[0])).with_context(|| format!("reading {}", args[0]))?; // i18n: not shown (a command-line tool run from a terminal: the app never starts it)
     let bytes = encode(&g)?;
     let out = Path::new(&args[1]);
     if out.exists() {
-        ensure!(std::fs::canonicalize(out)? != std::fs::canonicalize(&args[0])?, "input and output must differ");
+        ensure!(std::fs::canonicalize(out)? != std::fs::canonicalize(&args[0])?, "input and output must differ"); // i18n: not shown (a command-line tool run from a terminal: the app never starts it)
     }
     let tmp = out.with_extension(format!("{}.part", out.extension().and_then(|x| x.to_str()).unwrap_or("export")));
     if tmp.exists() {
-        ensure!(std::fs::canonicalize(&tmp)? != std::fs::canonicalize(&args[0])?, "input and temporary output must differ");
+        ensure!(std::fs::canonicalize(&tmp)? != std::fs::canonicalize(&args[0])?, "input and temporary output must differ"); // i18n: not shown (a command-line tool run from a terminal: the app never starts it)
     }
     if let Err(e) = std::fs::write(&tmp, bytes).and_then(|_| std::fs::rename(&tmp, out)) {
         std::fs::remove_file(&tmp).ok();
-        return Err(e).with_context(|| format!("writing {}", out.display()));
+        return Err(e).with_context(|| format!("writing {}", out.display())); // i18n: not shown (a command-line tool run from a terminal: the app never starts it)
     }
     Ok(())
 }

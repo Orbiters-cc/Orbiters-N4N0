@@ -106,7 +106,7 @@ impl Drop for CameraWatch {
             let _ = thread.join();
         }
         let health = *self.health.lock().unwrap_or_else(|e| e.into_inner());
-        note(&format!("{:?}: {} looks, {} found the panel, over {} s", health.source, health.looks, health.finds, self.began.elapsed().as_secs())); // i18n: a log's line
+        note(&format!("{:?}: {} looks, {} found the panel, over {} s", health.source, health.looks, health.finds, self.began.elapsed().as_secs())); // i18n: not shown (a log's line)
     }
 }
 
@@ -190,7 +190,7 @@ fn run(seen: &Mutex<Option<Seen>>, stop: &AtomicBool, health: &Mutex<Health>, fr
                             errors = 0;
                             let whole = picture.whole;
                             if !std::mem::replace(&mut said, true) {
-                                note(&format!("reading the left eye, {} x {}", whole[0], whole[1])); // i18n: a log's line
+                                note(&format!("reading the left eye, {} x {}", whole[0], whole[1])); // i18n: not shown (a log's line)
                             }
                             if from.keep_frames && area.is_none() {
                                 keep(&picture.rgba, picture.width as usize, picture.height as usize, picture.width as usize * 4, Source::Eye, &mut kept);
@@ -203,7 +203,7 @@ fn run(seen: &Mutex<Option<Seen>>, stop: &AtomicBool, health: &Mutex<Health>, fr
                             errors += 1;
                             last = None;
                             if errors == EYE_TRIES {
-                                note(&format!("the eye cannot be read: {e}")); // i18n: a log's line
+                                note(&format!("the eye cannot be read: {e}")); // i18n: not shown (a log's line)
                             }
                         }
                     }
@@ -211,7 +211,7 @@ fn run(seen: &Mutex<Option<Seen>>, stop: &AtomicBool, health: &Mutex<Health>, fr
                     std::thread::sleep(every.saturating_sub(began.elapsed()));
                 }
             }
-            Err(e) => note(&format!("no reader for the eye: {e}")), // i18n: a log's line
+            Err(e) => note(&format!("no reader for the eye: {e}")), // i18n: not shown (a log's line)
         }
     }
     if !stop.load(Ordering::Relaxed) {
@@ -251,7 +251,7 @@ fn run_on_window(seen: &Mutex<Option<Seen>>, stop: &AtomicBool, health: &Mutex<H
             }
             Err(e) => {
                 if !std::mem::replace(&mut said, true) {
-                    note(&format!("VRChat's window cannot be read: {e}")); // i18n: a log's line
+                    note(&format!("VRChat's window cannot be read: {e}")); // i18n: not shown (a log's line)
                 }
                 told(&|h| h.cannot_open = true);
             }

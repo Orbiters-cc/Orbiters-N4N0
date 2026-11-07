@@ -1411,7 +1411,7 @@ fn scene_chips(c: &Current, builds: &Builder) -> SceneChips {
                 Source::Stale(_) => ChipState::Outdated,
                 Source::None if building => ChipState::Building,
                 Source::None => ChipState::Unbuilt,
-                Source::Failed(why) => ChipState::Failed(why.why.clone()),
+                Source::Failed(why) => ChipState::Failed(why.to_string()),
             };
             let name = match s.scene.rel.rsplit('/').nth(1) {
                 Some(folder) if named(&s.scene.name) > 1 => format!("{} · {folder}", s.scene.name),

@@ -28,10 +28,11 @@ pub fn start(archive: &Path, bundle: &Path, hidden: bool) -> std::io::Result<()>
 
 /// `--apply-update <archive> <application> <the app's process> <hidden|window>`.
 pub fn run(args: &[String]) -> anyhow::Result<()> {
+    orbiters_core::settings::Settings::speak_saved_language();
     let [archive, bundle, pid, how] = args else { anyhow::bail!("--apply-update <archive> <application> <process> <hidden|window>") };
     let (archive, bundle) = (PathBuf::from(archive), PathBuf::from(bundle));
     let hidden = how == "hidden";
-    wait_for(pid.parse().context("not a process id")?);
+    wait_for(pid.parse().context("not a process id")?); // i18n: not shown (this helper is started with its arguments by the app, nobody types them)
     // Whatever happened, an app opens at the end: this version if it went wrong.
     if let Err(e) = apply(&archive, &bundle) {
         eprintln!("the update did not install: {e:#}");
@@ -61,11 +62,11 @@ fn wait_for(pid: u32) {
 }
 
 fn apply(archive: &Path, bundle: &Path) -> anyhow::Result<()> {
-    let parent = bundle.parent().context("the application is in no folder")?;
+    let parent = bundle.parent().with_context(|| tr("the application is in no folder"))?;
     // Beside the application: on its volume, so that the swap is a rename.
     let unpacked = parent.join(format!(".orbiters-update-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&unpacked);
-    std::fs::create_dir_all(&unpacked).with_context(|| format!("{} cannot be written", parent.display()))?;
+    std::fs::create_dir_all(&unpacked).with_context(|| tr!("{path} cannot be written", path = parent.display()))?;
     let result = (|| {
         run_tool(Command::new("/usr/bin/ditto").args(["-x", "-k"]).arg(archive).arg(&unpacked)).context("unpacking")?;
         let new = unpacked.join(MAC_APP);
@@ -78,19 +79,19 @@ fn apply(archive: &Path, bundle: &Path) -> anyhow::Result<()> {
 
 /// The application unpacked is this app's, with its signature whole.
 fn check(new: &Path) -> anyhow::Result<()> {
-    let id = run_tool(Command::new("/usr/bin/plutil").args(["-extract", "CFBundleIdentifier", "raw"]).arg(new.join("Contents/Info.plist"))).context("its Info.plist")?;
-    anyhow::ensure!(id.trim() == MAC_BUNDLE_ID, "it is another application ({})", id.trim());
-    run_tool(Command::new("/usr/bin/codesign").args(["--verify", "--deep", "--strict"]).arg(new)).context("its signature")?;
+    let id = run_tool(Command::new("/usr/bin/plutil").args(["-extract", "CFBundleIdentifier", "raw"]).arg(new.join("Contents/Info.plist"))).with_context(|| tr("its Info.plist"))?;
+    anyhow::ensure!(id.trim() == MAC_BUNDLE_ID, "{}", tr!("it is another application ({id})", id = id.trim()));
+    run_tool(Command::new("/usr/bin/codesign").args(["--verify", "--deep", "--strict"]).arg(new)).with_context(|| tr("its signature"))?;
     Ok(())
 }
 
 /// `new` takes `bundle`'s place, by renames; if the second fails the old one goes back. The old one is removed last.
 fn swap(new: &Path, bundle: &Path) -> anyhow::Result<()> {
     let old = bundle.with_file_name(format!(".orbiters-old-{}", std::process::id()));
-    std::fs::rename(bundle, &old).with_context(|| format!("{} cannot be moved", bundle.display()))?;
+    std::fs::rename(bundle, &old).with_context(|| tr!("{path} cannot be moved", path = bundle.display()))?;
     if let Err(e) = std::fs::rename(new, bundle) {
-        std::fs::rename(&old, bundle).with_context(|| format!("the old version could not be put back from {}", old.display()))?;
-        return Err(e).with_context(|| format!("{} cannot be replaced", bundle.display()));
+        std::fs::rename(&old, bundle).with_context(|| tr!("the old version could not be put back from {path}", path = old.display()))?;
+        return Err(e).with_context(|| tr!("{path} cannot be replaced", path = bundle.display()));
     }
     let _ = std::fs::remove_dir_all(&old);
     Ok(())

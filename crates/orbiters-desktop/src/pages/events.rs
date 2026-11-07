@@ -2176,11 +2176,12 @@ fn event_card(
     widgets::text_truncated(&p, pos2(tx, tile.top() + gh + 12.0), Align2::LEFT_CENTER, &Txt::new(times, 12.0).color(theme::FG_3), tw);
     // Host and world, then Join.
     let line_y = r.bottom() - 26.0;
-    let b = Button::new(if signed { tr("On the list") } else { tr("Join") })
-        .icon(if signed { icons::CHECK } else { icons::ARROW_RIGHT })
-        .variant(if signed { Variant::Secondary } else { Variant::Primary })
-        .size(Size::Sm)
-        .id_salt(id.with("join"));
+    let label = if signed { tr("On the list") } else { tr("Join") };
+    let mut b = Button::new(label).variant(if signed { Variant::Secondary } else { Variant::Primary }).size(Size::Sm).id_salt(id.with("join"));
+    // Join gives up its arrow where its word is long ("Rejoindre"), rather than the world's name beside it.
+    if signed || widgets::text_size(&cu, &Txt::new(label, 12.0)).x <= 40.0 {
+        b = b.icon(if signed { icons::CHECK } else { icons::ARROW_RIGHT });
+    }
     let bw = b.desired_width(&cu);
     let br = Rect::from_min_size(pos2(r.right() - 14.0 - bw, line_y - 16.0), vec2(bw, 32.0));
     let join = sharing::pressed(b.show_at(&mut cu, br));
@@ -2201,8 +2202,14 @@ fn event_card(
     }
     if let Some(w) = c.world.as_ref().and_then(|w| w.name.as_ref()) {
         if room - fx > 40.0 {
-            widgets::icon(&p, pos2(fx + 6.0, line_y), icons::GLOBE, 12.0, theme::FG_4);
-            widgets::text_truncated(&p, pos2(fx + 18.0, line_y), Align2::LEFT_CENTER, &Txt::new(w, 12.0).color(theme::FG_3), room - fx - 18.0);
+            // Its name whole rather than its little globe, where only one fits (Join is wider in some languages).
+            let wide = widgets::text_size(&cu, &Txt::new(w, 12.0)).x;
+            let globe = wide + 18.0 <= room - fx || wide > room - fx;
+            if globe {
+                widgets::icon(&p, pos2(fx + 6.0, line_y), icons::GLOBE, 12.0, theme::FG_4);
+            }
+            let at = if globe { fx + 18.0 } else { fx };
+            widgets::text_truncated(&p, pos2(at, line_y), Align2::LEFT_CENTER, &Txt::new(w, 12.0).color(theme::FG_3), room - at);
         }
     }
     (interactive && (join || widgets::pressed(&resp))).then_some(thumb)

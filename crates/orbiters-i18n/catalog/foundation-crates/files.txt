@@ -64,3 +64,4 @@ crates/orbiters-update/src/net.rs
 crates/orbiters-update/src/payload.rs
 crates/orbiters-update/src/windows_start.rs
 crates/orbiters-voice/src/main.rs
+crates/orbiters-spout/src/lib.rs

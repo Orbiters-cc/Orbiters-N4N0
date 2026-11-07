@@ -244,14 +244,19 @@ pub fn measured_words(m: &Measured) -> String {
     )
 }
 
-/// What to change back by hand, with what it was.
-pub fn put_back_words(item: &ToPutBack) -> String {
-    let name = match item.item {
+/// An item of the list by the name of its setting in VRChat.
+pub fn item_setting(item: Item) -> &'static str {
+    match item {
         Item::MaxShown => tr("Maximum Shown Avatars"),
         Item::BlockVeryPoor => tr("Avatar Performance"),
         Item::HideBeyond => tr("Hide Avatars Beyond"),
         Item::Msaa2x | Item::MsaaOff => "MSAA",
-    };
+    }
+}
+
+/// What to change back by hand, with what it was.
+pub fn put_back_words(item: &ToPutBack) -> String {
+    let name = item_setting(item.item);
     match item.was {
         Some(was) => orbiters_i18n::tr!("{name}: it was {value}", name = name, value = known_words(was)),
         None => orbiters_i18n::tr!("{name}: check VRChat's menu", name = name),
@@ -285,6 +290,89 @@ pub fn changed_now(snap: &Snapshot) -> Vec<String> {
         out.push(tr("3D pictures: waiting until you leave VRChat").to_string());
     }
     out
+}
+
+fn one(value: f32) -> String {
+    format!("{value:.1}")
+}
+
+fn none(value: f32) -> String {
+    format!("{value:.0}")
+}
+
+fn share(value: f32) -> String {
+    format!("{:.0}", value * 100.0)
+}
+
+/// The test report: what was measured, in the person's language. Figures only from what was measured; nothing else.
+pub fn test_report(snap: &Snapshot, compositor: Option<&orbiters_booster::log::CompositorStats>) -> String {
+    let report = &snap.booster.overlay.report;
+    let mut lines = vec![tr("FPS booster test report").to_string(), String::new()];
+    lines.push(line_words(Line::Limit, report.limit).to_string());
+    lines.push(
+        if report.flags_seen { tr("SteamVR's reasons for late frames were seen.") } else { tr("SteamVR never gave a reason for a late frame.") }.to_string(),
+    );
+    if snap.booster.overlay.streamer {
+        lines.push(streamer_line().to_string());
+    }
+    if let Some(now) = report.now {
+        lines.push(orbiters_i18n::tr!(
+            "Now: {fps} real frames a second at {hz} Hz, {filled} % filled in by SteamVR, {cpu_late} % late for the processor, {gpu_late} % late for the graphics card, processor {cpu} ms (estimate), graphics card {gpu} ms.",
+            fps = one(now.real_fps),
+            hz = none(now.refresh_hz),
+            filled = share(now.filled_share),
+            cpu_late = share(now.late_cpu_share),
+            gpu_late = share(now.late_gpu_share),
+            cpu = one(now.app_cpu_ms),
+            gpu = one(now.app_gpu_ms)
+        ));
+    }
+    lines.push(String::new());
+    lines.push(tr("Comparisons, without then with the change, in the same scene, twice:").to_string());
+    for c in &report.comparisons {
+        lines.push(orbiters_i18n::tr!(
+            "{change}: {result} Real frames {fps_before} / {fps_after}. Filled in {filled_before} % / {filled_after} %. Late for the processor {cpu_before} % / {cpu_after} %. Late for the graphics card {gpu_before} % / {gpu_after} %. Over twice the budget {over_before} % / {over_after} %. Stalls at the switches: {stalls}.",
+            change = kind_name(c.kind),
+            result = before_after(c).said,
+            fps_before = one(c.before_fps),
+            fps_after = one(c.after_fps),
+            filled_before = share(c.before_filled),
+            filled_after = share(c.after_filled),
+            cpu_before = share(c.before_late_cpu),
+            cpu_after = share(c.after_late_cpu),
+            gpu_before = share(c.before_late_gpu),
+            gpu_after = share(c.after_late_gpu),
+            over_before = one(c.before_over_2x * 100.0),
+            over_after = one(c.after_over_2x * 100.0),
+            stalls = c.stalls_at_switch
+        ));
+    }
+    lines.push(String::new());
+    lines.push(tr("By hand on the list, 30 s before and after (people may have moved):").to_string());
+    let people = |p: Option<u32>| p.map_or_else(|| "?".to_string(), |p| p.to_string());
+    for m in &report.guide.results {
+        lines.push(orbiters_i18n::tr!(
+            "{setting}: real frames {fps_before} / {fps_after}, filled in {filled_before} % / {filled_after} %, people {people_before} / {people_after}.",
+            setting = item_setting(m.item),
+            fps_before = one(m.before_fps),
+            fps_after = one(m.after_fps),
+            filled_before = share(m.before_filled),
+            filled_after = share(m.after_filled),
+            people_before = people(m.before_people),
+            people_after = people(m.after_people)
+        ));
+    }
+    if let Some(c) = compositor {
+        lines.push(String::new());
+        lines.push(orbiters_i18n::tr!(
+            "SteamVR's own totals for the last session that ended: {presents} presents, {reprojected} reprojected, {dropped} dropped, application processor time {cpu} ms.",
+            presents = c.presents,
+            reprojected = c.reprojected,
+            dropped = c.dropped,
+            cpu = c.app_cpu_ms.map_or_else(|| "?".to_string(), one)
+        ));
+    }
+    lines.join("\n") + "\n"
 }
 
 /// App processor and graphics card time, in milliseconds, marked as estimates.
@@ -392,6 +480,22 @@ mod tests {
         let said = changed_now(&snap);
         assert_eq!(said[0], "SteamVR's resolution: 0.85, it was Auto");
         assert_eq!(said[1], "chrome in efficiency mode (12), it was off");
+    }
+
+    /// The test report Enzo reads after the test is in the app's language, figures and all.
+    #[test]
+    fn the_test_report_is_translated() {
+        let mut snap = Snapshot::new(Settings::default());
+        snap.booster.overlay.report.comparisons = vec![comparison(Verdict::Kept)];
+        snap.booster.overlay.report.now = Some(orbiters_booster::engine::Now { real_fps: 36.0, refresh_hz: 72.0, ..Default::default() });
+        let english = test_report(&snap, None);
+        assert!(english.starts_with("FPS booster test report\n"));
+        assert!(english.contains("Real frames 36.2 / 41.1."), "{english}");
+        orbiters_i18n::in_language(orbiters_i18n::Language::Fr, || {
+            let french = test_report(&snap, None);
+            assert!(french.starts_with("Rapport de test du booster de FPS"), "{french}");
+            assert!(french.contains("36.2"), "the figures are the same: {french}");
+        });
     }
 
     /// Nothing of this says official, approved, safe or optimized, in any stop or line: words the design forbids.

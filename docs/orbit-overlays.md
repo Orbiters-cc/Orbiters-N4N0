@@ -102,6 +102,14 @@ Opened from All tools: where the tiles lie (`OrbitLayout`: the wing, or the stri
 
 Retro is N4N0's retro menu, in one colour. `orbit/retro.rs` is one pass over everything a part drew, at the end of its frame (`Canvas::in_orbit_look`), so no part has a second drawing: capitals, cut corners, a line round what can be pressed (dim for long rows), the dot grid and double frame on what covers a page, icons between brackets. It draws in greys and `finish_picture` puts them through a ramp of the colour; the colours to choose from are kept. Pictures: Fully monochrome draws them in the retro menu's dots, at the texture (`Software::set_picture_look`, so text over them stays sharp and it can be undone without loading them again); Pictures in colour leaves them and `finish_picture` restores what `keep_colour` marked. N4N0's pages in a sheet draw `menu_retro` itself, with the pass off. Not the same as N4N0's: there is no top plate with its version and hatched tapes, memory plate, level bar, corner crosshairs or scanlines on these parts; gradients (the wheel's cells, a scrim over a picture) stay gradients, in the one colour; the world's chip and bar in a headset keep the modern look. All saved as any setting is, by a patch.
 
+## A view held in a hand
+
+Taken in a hand, a small 3D view is out of the menu's: it stays when the menu closes and when the world changes, until its X or Hide. With the menu off an X floats above it. The Quick Menu opened again goes straight to the sheet it was on (Worlds or Pictures), to go on through them. While it lies across a menu it fades away, as SteamVR draws overlays over VRChat whatever their distance (`stereo::shows_over`); in a panel's hole it is meant to be there. The hand holding it zooms with its stick and moves its middle with its touchpad, along the ground: the splats are sorted from the start eye, so past it `Gpu::set_marks` leaves out what is out of reach. Its hint comes back whenever one is opened with none showing.
+
+## Hide Orbiters
+
+While a sheet is up, a chip over a corner takes all of it away for a moment to reach VRChat's own menus, and brings it back as it was.
+
 ## VRChat's tooltips under a sheet
 
 On the desktop VRChat lights what lies under the pointer even with a sheet over it, as nothing outside the game can stop that, and shows its tooltip under its tab row. While the pointer is on these parts, `Zone::SheetHint` lies over that place and says what the pointer is on. What is pointed at is said only there while it is up (`Facts::hint_band`), else in the sheet's head.

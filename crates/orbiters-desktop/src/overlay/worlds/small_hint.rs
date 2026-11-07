@@ -5,7 +5,7 @@
 use super::super::{Canvas, Presenter};
 use super::stereo::{self, V3};
 use egui::epaint::{Mesh, Vertex, WHITE_UV};
-use egui::{pos2, vec2, Align2, Color32, Painter, Pos2, Rect, Shape};
+use egui::{pos2, vec2, Align2, Color32, Painter, Pos2, Rect, Shape, Vec2};
 use orbiters_openvr as vr;
 use orbiters_ui::theme::{self, weight};
 use super::super::orbit::panels::look as orbit_look;
@@ -106,22 +106,29 @@ pub fn joystick(p: &Painter, base: Pos2, push: f32) {
     ellipse(p, top + vec2(0.0, 1.0), vec2(rx * 0.42, ry * 0.42), Color32::from_rgba_unmultiplied(70, 76, 90, 70));
 }
 
-fn words(p: &Painter, at: Pos2, glyph: &str, first: &str, second: &str, on: f32) {
-    let lit = mix(theme::FG_3, orbit_look::accent(), on);
-    let text = mix(theme::FG_2, Color32::WHITE, on);
-    let row = Rect::from_min_size(at - vec2(8.0, 10.0), vec2(226.0, 84.0));
-    if on > 0.01 {
-        p.rect_filled(row, theme::radius(18.0), theme::alpha(orbit_look::accent(), 0.18 * on));
+/// The offsets of a dark edge round what floats on the world with nothing behind it (Enzo: no frame), to read on a bright world as on a dark one.
+const EDGE: [Vec2; 8] = [vec2(-2.0, 0.0), vec2(2.0, 0.0), vec2(0.0, -2.0), vec2(0.0, 2.0), vec2(-1.5, -1.5), vec2(1.5, -1.5), vec2(-1.5, 1.5), vec2(1.5, 1.5)];
+
+fn edged_text(p: &Painter, at: Pos2, align: Align2, text: &str, font: egui::FontId, color: Color32) {
+    for by in EDGE {
+        p.text(at + by, align, text, font.clone(), theme::alpha(Color32::BLACK, 0.85));
     }
-    widgets::icon(p, at + vec2(16.0, 32.0), glyph, 30.0, lit);
-    p.text(at + vec2(42.0, 18.0), Align2::LEFT_CENTER, first, theme::font(30.0, weight::BOLD), text);
-    p.text(at + vec2(42.0, 49.0), Align2::LEFT_CENTER, second, theme::font(22.0, weight::SEMIBOLD), mix(theme::FG_2, Color32::WHITE, on));
+    p.text(at, align, text, font, color);
 }
 
-/// A tail from the card's foot towards what it speaks of.
-fn tail(p: &Painter, card: Rect) {
-    let middle = card.center_bottom();
-    p.add(Shape::convex_polygon(vec![middle + vec2(-18.0, -1.0), middle + vec2(18.0, -1.0), middle + vec2(0.0, 18.0)], theme::alpha(theme::INK_900, 0.95), egui::Stroke::NONE));
+fn edged_icon(p: &Painter, at: Pos2, glyph: &str, size: f32, color: Color32) {
+    for by in EDGE {
+        widgets::icon(p, at + by, glyph, size, theme::alpha(Color32::BLACK, 0.85));
+    }
+    widgets::icon(p, at, glyph, size, color);
+}
+
+fn words(p: &Painter, at: Pos2, glyph: &str, first: &str, second: &str, on: f32) {
+    let lit = mix(theme::FG, orbit_look::accent(), on);
+    let text = mix(theme::FG, Color32::WHITE, on);
+    edged_icon(p, at + vec2(16.0, 32.0), glyph, 30.0, lit);
+    edged_text(p, at + vec2(42.0, 18.0), Align2::LEFT_CENTER, first, theme::font(30.0, weight::BOLD), text);
+    edged_text(p, at + vec2(42.0, 49.0), Align2::LEFT_CENTER, second, theme::font(22.0, weight::SEMIBOLD), text);
 }
 
 /// The hint on a page of [`PX`], `seconds` into its animation.
@@ -129,17 +136,15 @@ pub fn paint(p: &Painter, stage: Stage, seconds: f32) {
     let page = Rect::from_min_size(Pos2::ZERO, vec2(PX[0] as f32, PX[1] as f32));
     match stage {
         Stage::Stick { hand } => {
-            let card = Rect::from_min_max(page.min + vec2(2.0, 2.0), page.max - vec2(2.0, 20.0));
-            p.rect_filled(card, theme::radius(30.0), theme::alpha(theme::INK_900, 0.95));
-            tail(p, card);
             let push = stick_at(seconds);
             joystick(p, pos2(104.0, 186.0), push);
             let which = if hand == 0 { "Left stick" } else { "Right stick" };
-            p.text(pos2(104.0, 28.0), Align2::CENTER_CENTER, which, theme::font(19.0, weight::SEMIBOLD), theme::FG_2);
+            edged_text(p, pos2(104.0, 28.0), Align2::CENTER_CENTER, which, theme::font(19.0, weight::SEMIBOLD), theme::FG);
             let up = ((push - 0.2) / 0.8).clamp(0.0, 1.0);
             let down = ((-push - 0.2) / 0.8).clamp(0.0, 1.0);
             words(p, pos2(208.0, 26.0), icons::CARET_UP, "Push up", "to zoom in", up);
             words(p, pos2(208.0, 126.0), icons::CARET_DOWN, "Pull down", "to zoom out", down);
+            edged_text(p, pos2(208.0, 214.0), Align2::LEFT_CENTER, "Touchpad: move around", theme::font(19.0, weight::SEMIBOLD), theme::FG);
             // Off the stick, the way it goes: in time with the words that light up.
             if up > 0.0 {
                 widgets::icon(p, pos2(104.0, 60.0), icons::CARET_UP, 46.0, theme::alpha(orbit_look::accent(), up));
@@ -150,34 +155,30 @@ pub fn paint(p: &Painter, stage: Stage, seconds: f32) {
         }
         Stage::Grip { near } => {
             let card = Rect::from_center_size(page.center() + vec2(0.0, 30.0), vec2(PX[0] as f32 - 4.0, 140.0));
-            p.rect_filled(card, theme::radius(30.0), theme::alpha(theme::INK_900, 0.95));
-            if near {
-                p.rect_filled(card, theme::radius(30.0), theme::alpha(orbit_look::accent(), 0.24));
-                p.rect_stroke(card.shrink(1.5), theme::radius(28.0), egui::Stroke::new(3.0, orbit_look::accent()), egui::StrokeKind::Inside);
-            }
-            tail(p, card);
             let phase = (seconds / 1.3).fract() * std::f32::consts::TAU;
             let beat = if near { 1.0 + 0.1 * phase.sin() } else { 1.0 + 0.05 * phase.sin() };
-            widgets::icon(p, card.left_center() + vec2(66.0, 0.0), icons::HAND_GRABBING, 66.0 * beat, if near { Color32::WHITE } else { orbit_look::accent() });
+            edged_icon(p, card.left_center() + vec2(66.0, 0.0), icons::HAND_GRABBING, 66.0 * beat, if near { Color32::WHITE } else { orbit_look::accent() });
             let (first, second) = if near { ("Close your grip", "It comes with your hand") } else { ("Grip to take it", "With either hand") };
-            p.text(card.left_center() + vec2(122.0, -20.0), Align2::LEFT_CENTER, first, theme::font(32.0, weight::BOLD), Color32::WHITE);
-            p.text(card.left_center() + vec2(122.0, 22.0), Align2::LEFT_CENTER, second, theme::font(22.0, weight::MEDIUM), theme::FG_2);
+            let ink = if near { orbit_look::accent() } else { Color32::WHITE };
+            edged_text(p, card.left_center() + vec2(122.0, -20.0), Align2::LEFT_CENTER, first, theme::font(32.0, weight::BOLD), ink);
+            edged_text(p, card.left_center() + vec2(122.0, 22.0), Align2::LEFT_CENTER, second, theme::font(22.0, weight::MEDIUM), theme::FG);
         }
     }
 }
 
-/// The small Hide under a view taken in a hand, so that it can go where it is, with no menu to reopen.
-pub const CHIP_PX: [u32; 2] = [280, 88];
-pub const CHIP_WIDTH_M: f32 = 0.115;
+/// The small X above a view, so that it can go where it is, with no menu to reopen.
+pub const CHIP_PX: [u32; 2] = [128, 128];
+pub const CHIP_WIDTH_M: f32 = 0.05;
+/// How far off its middle a laser still has it: the X is small, and with the menu off there is no beam to aim by.
+const CHIP_AIM_M: f32 = 0.08;
 
 /// [`HideChip`]'s picture.
 pub fn paint_chip(p: &Painter, pointed: bool) {
-    let page = Rect::from_min_size(Pos2::ZERO, vec2(CHIP_PX[0] as f32, CHIP_PX[1] as f32)).shrink(2.0);
-    p.rect_filled(page, theme::radius(page.height() / 2.0), if pointed { orbit_look::accent() } else { theme::INK_750 });
-    p.rect_stroke(page.shrink(1.0), theme::radius(page.height() / 2.0 - 1.0), egui::Stroke::new(2.5, if pointed { orbit_look::accent() } else { Color32::from_white_alpha(120) }), egui::StrokeKind::Inside);
-    let ink = if pointed { orbit_look::on_accent() } else { Color32::WHITE };
-    widgets::icon(p, page.left_center() + vec2(46.0, 0.0), icons::EYE_SLASH, 38.0, ink);
-    p.text(page.left_center() + vec2(78.0, 0.0), Align2::LEFT_CENTER, "Hide 3D", theme::font(38.0, weight::BOLD), ink);
+    let page = Rect::from_min_size(Pos2::ZERO, vec2(CHIP_PX[0] as f32, CHIP_PX[1] as f32));
+    let radius = page.height() / 2.0 - 2.0;
+    p.circle_filled(page.center(), radius, theme::alpha(theme::INK_900, 0.95));
+    p.circle_stroke(page.center(), radius - 1.5, egui::Stroke::new(3.0, if pointed { orbit_look::accent() } else { theme::white(0.25) }));
+    widgets::icon(p, page.center(), icons::X, radius * 1.05, if pointed { orbit_look::accent() } else { theme::FG });
 }
 
 pub struct HideChip {
@@ -226,12 +227,10 @@ impl HideChip {
     }
 }
 
-/// Where a view's Hide lies, facing `eye`: just past the plate's rim on the side towards who looks, and under it. `plate` is the plate's middle.
-pub fn chip_place(plate: V3, radius: f32, eye: V3) -> vr::Matrix34 {
-    let to = stereo::sub(eye, plate);
-    let level = stereo::length([to[0], 0.0, to[2]]).max(1e-3);
-    let towards = [to[0] / level, 0.0, to[2] / level];
-    facing(stereo::add(stereo::add(plate, stereo::scale(towards, radius * 1.02)), [0.0, -0.055, 0.0]), eye)
+/// Where a view's X lies, facing `eye`: floating just above it. `plate` is the plate's middle.
+pub fn chip_place(middle: V3, radius: f32, eye: V3, over_the_hint: bool) -> vr::Matrix34 {
+    let over = if over_the_hint { hint_place(middle, radius)[1] - middle[1] + WIDTH_M * PX[1] as f32 / PX[0] as f32 / 2.0 + 0.04 } else { radius + 0.05 };
+    facing(stereo::add(middle, [0.0, over, 0.0]), eye)
 }
 
 /// Whether a tool at `tip`, pointing along `along`, is on a chip at `place`: its ray within a generous margin, or itself close by.
@@ -250,7 +249,7 @@ pub fn on_chip(place: &vr::Matrix34, tip: V3, along: V3) -> bool {
         return false;
     }
     let hit = stereo::sub(stereo::add(tip, stereo::scale(along, distance)), middle);
-    stereo::dot(hit, stereo::axis(place, 0)).abs() <= CHIP_WIDTH_M * 0.8 && stereo::dot(hit, stereo::axis(place, 1)).abs() <= CHIP_WIDTH_M * 0.4
+    stereo::dot(hit, stereo::axis(place, 0)).abs() <= CHIP_AIM_M && stereo::dot(hit, stereo::axis(place, 1)).abs() <= CHIP_AIM_M
 }
 
 /// Its overlay.
@@ -495,7 +494,7 @@ mod tests {
 
     #[test]
     fn its_hide_is_found_by_a_laser_with_room_to_spare_or_by_a_hand_near_it() {
-        let place = chip_place([0.0, 1.4, -0.6], 0.3, [0.0, 1.6, 0.0]);
+        let place = chip_place([0.0, 1.4, -0.6], 0.3, [0.0, 1.6, 0.0], false);
         let middle = stereo::position(&place);
         // From the chest, straight at it.
         let tip = [0.0, 1.0, -0.2];

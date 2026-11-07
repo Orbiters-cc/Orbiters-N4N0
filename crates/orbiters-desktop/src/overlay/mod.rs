@@ -835,10 +835,14 @@ fn session(args: &[String]) -> anyhow::Result<Ended> {
             }
             t.menu.worlds.from_elsewhere(turn.worlds);
             t.menu.worlds.small_place(turn.small_place);
+            t.menu.worlds.menus_up(turn.menus_up);
             if t.menu.worlds.small_showing() {
-                let sticks = actions.pads(&steamvr).map_or([0.0; 2], |pads| [pads.sticks[0].y, pads.sticks[1].y]);
+                let read = actions.pads(&steamvr);
+                let sticks = read.as_ref().map_or([0.0; 2], |pads| [pads.sticks[0].y, pads.sticks[1].y]);
+                // Touched, a thumb on a touchpad moves what shows: at rest it says nothing.
+                let touchpads = read.as_ref().map_or([[0.0; 2]; 2], |pads| [0, 1].map(|h| if pads.touchpads[h].touch { [pads.touchpads[h].x, pads.touchpads[h].y] } else { [0.0; 2] }));
                 let lasers = actions.lasers(&steamvr, 0.0);
-                t.menu.worlds.small_input(lasers, actions.grabs(&steamvr), sticks);
+                t.menu.worlds.small_input(lasers, actions.grabs(&steamvr), sticks, touchpads);
                 t.menu.worlds.small_tools(lasers, actions.orbit_triggers(&steamvr, [false; 2]));
             }
         }

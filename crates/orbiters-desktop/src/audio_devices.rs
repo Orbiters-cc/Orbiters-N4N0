@@ -14,6 +14,9 @@
 //! device. Nothing sets a default there: setting them is for SteamVR, which does not run on a Mac.
 
 pub use orbiters_core::settings::AudioEndpoint;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 /// Which way the sound goes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -60,6 +63,119 @@ pub fn set_default(id: &str, role: Role) -> Result<(), String> {
     imp::set_default(id, role).map_err(|e| e.to_string())
 }
 
+/// One microphone and how loud it is now, 0 to 1 (`None`: it cannot be read now, held by another app for itself, say).
+#[derive(Clone, Debug, PartialEq)]
+pub struct MicLevel {
+    pub endpoint: AudioEndpoint,
+    pub peak: Option<f32>,
+}
+
+/// Every microphone, which is Windows' default, and whether they were read at all yet.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct MicLevels {
+    pub mics: Vec<MicLevel>,
+    pub default_id: Option<String>,
+    pub read: bool,
+}
+
+/// How long nobody looked before the microphones close. A card off the screen, a page left, a window minimized: it is simply not drawn any more.
+const METERS_CLOSE_AFTER: Duration = Duration::from_millis(1500);
+/// How often the list of devices and the default are read again: they come and go.
+const METERS_LIST_EVERY: Duration = Duration::from_secs(2);
+
+/// Every microphone's level, on a thread of its own, opened while something looks at them. Nothing heard is kept or goes anywhere: Windows' meter of each is all that is read.
+pub struct Meters {
+    now: Arc<Mutex<MicLevels>>,
+    seen: Arc<Mutex<Instant>>,
+    stop: Arc<AtomicBool>,
+}
+
+/// Renders show made-up microphones: none of this computer's opens to draw a picture.
+static MADE_UP_MICS: AtomicBool = AtomicBool::new(false);
+
+pub fn made_up_mics() {
+    MADE_UP_MICS.store(true, Ordering::Relaxed);
+}
+
+fn made_up() -> MicLevels {
+    let mic = |id: &str, name: &str, peak| MicLevel { endpoint: AudioEndpoint { id: id.into(), name: name.into() }, peak };
+    MicLevels {
+        mics: vec![
+            mic("a", "Microphone (Valve Index Headset)", Some(0.0)),
+            mic("b", "Headset Microphone (Arctis 7 Chat)", Some(0.22)),
+            mic("c", "Microphone (Realtek High Definition Audio)", Some(0.004)),
+            mic("d", "Line In (USB Audio Device)", None),
+            mic("e", "Microphone (Elgato Wave:3)", Some(0.0)),
+        ],
+        default_id: Some("a".into()),
+        read: true,
+    }
+}
+
+impl Meters {
+    pub fn start() -> Self {
+        let (now, seen, stop) = (Arc::<Mutex<MicLevels>>::default(), Arc::new(Mutex::new(Instant::now())), Arc::new(AtomicBool::new(false)));
+        if MADE_UP_MICS.load(Ordering::Relaxed) {
+            *now.lock().unwrap_or_else(|e| e.into_inner()) = made_up();
+            return Self { now, seen, stop };
+        }
+        let (t_now, t_seen, t_stop) = (now.clone(), seen.clone(), stop.clone());
+        let _ = std::thread::Builder::new().name("mic levels".into()).spawn(move || watch(&t_now, &t_seen, &t_stop));
+        Self { now, seen, stop }
+    }
+
+    /// Something looks at them now.
+    pub fn looked_at(&self) {
+        *self.seen.lock().unwrap_or_else(|e| e.into_inner()) = Instant::now();
+    }
+
+    pub fn levels(&self) -> MicLevels {
+        self.now.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+}
+
+impl Drop for Meters {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+    }
+}
+
+/// The turn of the thread: only what is looked at stays open.
+fn watch(now: &Mutex<MicLevels>, seen: &Mutex<Instant>, stop: &AtomicBool) {
+    let mut open: Vec<(AudioEndpoint, Option<imp::Meter>)> = Vec::new();
+    let mut listed: Option<Instant> = None;
+    let mut default_id = None;
+    while !stop.load(Ordering::Relaxed) {
+        let looked = seen.lock().unwrap_or_else(|e| e.into_inner()).elapsed() < METERS_CLOSE_AFTER;
+        if !looked {
+            open.clear();
+            listed = None;
+            std::thread::sleep(Duration::from_millis(100));
+            continue;
+        }
+        if listed.is_none_or(|t| t.elapsed() >= METERS_LIST_EVERY) {
+            listed = Some(Instant::now());
+            let mics = list(Flow::Input).unwrap_or_default();
+            default_id = defaults(Flow::Input)[0].as_ref().map(|d| d.id.clone());
+            // Those still there stay open, for their levels not to jump.
+            let mut was = std::mem::take(&mut open);
+            open = mics
+                .into_iter()
+                .map(|endpoint| match was.iter().position(|(e, _)| e.id == endpoint.id) {
+                    Some(i) => was.swap_remove(i),
+                    None => {
+                        let meter = imp::Meter::open(&endpoint.id);
+                        (endpoint, meter)
+                    }
+                })
+                .collect();
+        }
+        let mics = open.iter().map(|(endpoint, meter)| MicLevel { endpoint: endpoint.clone(), peak: meter.as_ref().and_then(imp::Meter::peak) }).collect();
+        *now.lock().unwrap_or_else(|e| e.into_inner()) = MicLevels { mics, default_id: default_id.clone(), read: true };
+        std::thread::sleep(Duration::from_millis(33));
+    }
+}
+
 /// Plays a short sound on the output `id` (whatever the default is), returning once it has played.
 pub fn play_test(id: &str) -> Result<(), String> {
     imp::play_test(id).map_err(|e| e.to_string())
@@ -72,6 +188,7 @@ mod imp {
     use std::time::{Duration, Instant};
     use windows::core::{IUnknown, IUnknown_Vtbl, Interface, GUID, HRESULT, HSTRING, PCWSTR};
     use windows::Win32::Foundation::PROPERTYKEY;
+    use windows::Win32::Media::Audio::Endpoints::IAudioMeterInformation;
     use windows::Win32::Media::Audio::{
         eCapture, eCommunications, eConsole, eMultimedia, eRender, EDataFlow, ERole, IAudioClient, IAudioRenderClient, IMMDevice,
         IMMDeviceEnumerator, MMDeviceEnumerator, AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM, DEVICE_STATE_ACTIVE,
@@ -243,6 +360,45 @@ mod imp {
         ROLES.map(|r| unsafe { devices.GetDefaultAudioEndpoint(data_flow(flow), role(r)).ok().as_ref().and_then(endpoint) })
     }
 
+    /// One microphone's meter. Windows' meter of a capture device says nothing until something captures from it, so a stream runs that nobody reads: what comes in is dropped by
+    /// Windows as its buffer fills, and only the level is read.
+    pub struct Meter {
+        meter: IAudioMeterInformation,
+        client: IAudioClient,
+    }
+
+    // COM objects of a multithreaded apartment, used from the thread that opened them.
+    impl Meter {
+        pub fn open(id: &str) -> Option<Self> {
+            let devices = enumerator().ok()?;
+            let id = HSTRING::from(id);
+            // SAFETY: plain calls on Windows' objects; the format is Windows' own and freed here once used.
+            unsafe {
+                let device = devices.GetDevice(PCWSTR(id.as_ptr())).ok()?;
+                let meter: IAudioMeterInformation = device.Activate(CLSCTX_ALL, None).ok()?;
+                let client: IAudioClient = device.Activate(CLSCTX_ALL, None).ok()?;
+                let format = client.GetMixFormat().ok()?;
+                let began = client.Initialize(AUDCLNT_SHAREMODE_SHARED, Default::default(), 1_000_000, 0, format, None);
+                CoTaskMemFree(Some(format as *const c_void));
+                began.ok()?;
+                client.Start().ok()?;
+                Some(Self { meter, client })
+            }
+        }
+
+        pub fn peak(&self) -> Option<f32> {
+            // SAFETY: a plain call.
+            unsafe { self.meter.GetPeakValue().ok() }
+        }
+    }
+
+    impl Drop for Meter {
+        fn drop(&mut self) {
+            // SAFETY: a plain call; a client not started says so, and that is fine.
+            let _ = unsafe { self.client.Stop() };
+        }
+    }
+
     pub fn set_default(id: &str, r: Role) -> windows::core::Result<()> {
         // SAFETY: as `enumerator`; the policy object is Windows' own, called through the slot declared above with a
         // string that outlives the call.
@@ -338,6 +494,18 @@ mod imp {
         Err("the default devices change for SteamVR only, which does not run on a Mac")
     }
 
+    pub struct Meter;
+
+    impl Meter {
+        pub fn open(_: &str) -> Option<Self> {
+            None
+        }
+
+        pub fn peak(&self) -> Option<f32> {
+            None
+        }
+    }
+
     pub fn play_test(id: &str) -> Result<(), String> {
         let sound = orbiters_sound::render(&orbiters_sound::sounds::REVEAL, orbiters_sound::RATE);
         ca::play_on(id, &sound)
@@ -356,6 +524,18 @@ mod imp {
         Default::default()
     }
 
+    pub struct Meter;
+
+    impl Meter {
+        pub fn open(_: &str) -> Option<Self> {
+            None
+        }
+
+        pub fn peak(&self) -> Option<f32> {
+            None
+        }
+    }
+
     pub fn set_default(_: &str, _: Role) -> Result<(), &'static str> {
         Err("only on Windows")
     }
@@ -367,6 +547,25 @@ mod imp {
 
 #[cfg(test)]
 mod tests {
+    /// This computer's microphones really open and report a level, the default stays as it is. Opens them for a moment, so not with the rest.
+    #[test]
+    #[ignore = "opens this computer's microphones"]
+    fn this_computers_microphones_report_a_level() {
+        let before = defaults(Flow::Input)[0].clone();
+        let meters = Meters::start();
+        for _ in 0..20 {
+            meters.looked_at();
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        let levels = meters.levels();
+        assert!(levels.read, "it read them");
+        for mic in &levels.mics {
+            println!("{:?}: {:?}", mic.endpoint.name, mic.peak);
+        }
+        assert!(levels.mics.iter().any(|m| m.peak.is_some()), "at least one can be read");
+        assert_eq!(defaults(Flow::Input)[0], before, "looking changes nothing");
+    }
+
     use super::*;
 
     /// This computer's devices and defaults, read only (nothing is set):

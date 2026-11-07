@@ -160,6 +160,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         panels.takeover_place = zones::place(Zone::Takeover, size);
         panels.back_place = zones::place(Zone::SheetBack, size);
         panels.hint_place = zones::place(Zone::SheetHint, size);
+        panels.peek_place = zones::place(Zone::SheetPeek, size);
         panels.set_open(open, places, &snap);
         panels.follow_note(&snap);
         if panels.is_empty() {
@@ -179,6 +180,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         pointer.follow(open == Some(Around::Wheel) && (alt_held() || sheet_on_wheel), origin, size, window, sheet_on_wheel);
         // Over VRChat's wheel too while a 3D picture waits: VRChat's lit slice has nothing to do with it, and two things would look chosen.
         panels.set_pointing((pointer.active() || panels.picture_waiting()) && !panels.sheet_open(), !snap.settings.reduce_motion);
+        panels.set_key_caps(alt_held());
         let at = pointer.at().unwrap_or(pos2(cursor.0 as f32, cursor.1 as f32));
         let on = (open != Some(Around::Wheel) || pointer.at().is_some()).then(|| hit(&panels, at - origin.to_vec2())).flatten();
         panels.hover(on);

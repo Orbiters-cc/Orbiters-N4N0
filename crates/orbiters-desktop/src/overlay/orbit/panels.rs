@@ -122,6 +122,8 @@ pub mod look {
 /// What pressing something does.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Action {
+    /// The sheet and all with it away for a moment, or back.
+    Peek,
     /// The sheet of settings for these menus, and something chosen on it.
     Settings,
     Set(Pick),
@@ -432,6 +434,10 @@ pub struct Facts {
     pub wake_word: Option<String>,
     /// The ring's cells can be picked by the number keys: on the desktop's wheel.
     pub digits: bool,
+    /// Enzo: the wheel's keys show only while Alt is held.
+    pub key_caps: bool,
+    /// The sheet is away for a moment.
+    pub peek: bool,
     /// The wing or its strip lies beside the sheet: it has the name and what plays already.
     pub beside_wing: bool,
     /// The Quick Menu's parts are in a strip under it: its caption lies under that.
@@ -521,6 +527,8 @@ pub enum Look {
     NewTalk,
     /// A world the person was in: its picture, name and last time.
     Visit(usize),
+    /// Takes everything away for a moment, or brings it back.
+    PeekWord,
     /// One of the tools, in a sheet's head: from any sheet to any other, with or without the wing.
     HeadTab { icon: &'static str, label: &'static str, on: bool },
     /// One of two ways, on the sheet of settings.
@@ -613,6 +621,7 @@ pub fn items(zone: Zone, size: Vec2, facts: &Facts) -> Vec<Item> {
         Zone::WingPlaying => vec![Item { action: Action::PlayPause, rect: whole, look: Look::Playing }],
         Zone::QmStrip => strip(w, h, facts),
         Zone::SheetHint => Vec::new(),
+        Zone::SheetPeek => vec![Item { action: Action::Peek, rect: whole, look: Look::PeekWord }],
         Zone::SheetBack => {
             let mut out = vec![Item { action: Action::CloseSheet, rect: r(w - 40.0, 7.0, 30.0, 30.0), look: Look::Close }];
             out.extend(head_tabs(facts).0);
@@ -1395,6 +1404,7 @@ pub fn hit(items: &[Item], p: Pos2) -> Option<usize> {
 /// What the caption says of what is pointed at, in words for someone who has never seen any of this: a title and what it does.
 pub fn caption(action: Action, facts: &Facts) -> Option<(String, String)> {
     let (a, b): (String, String) = match action {
+        Action::Peek => ("Hide Orbiters".into(), "Reach VRChat's own menus. Nothing here closes.".into()),
         Action::Worlds => ("Worlds in 3D".into(), "Search any world. Walk in those captured in 3D.".into()),
         Action::Picture(_) if facts.no_kit => ("This avatar has no capture kit".into(), "Add N4N0 to it in Orbiters, My Avatar, to take 3D pictures with it.".into()),
         Action::Picture(_) if facts.picture_wait.is_some() => (if facts.digits && facts.sheet.is_none() { "Press 6 to call it off" } else { "Press to call it off" }.into(), "Or open VRChat's camera: it then starts by itself.".into()),
@@ -1658,7 +1668,10 @@ pub fn paint(p: &Painter, zone: Zone, size: Vec2, facts: &Facts, hover: Option<u
             // Its head has the colour of what it is, as on All tools.
             let (glyph, tint) = sheet_mark(facts);
             let round = (look::RADIUS + 2.0) as u8;
-            p.rect_filled(Rect::from_min_max(panel.min, pos2(panel.right(), panel.top() + SHEET_HEAD)), egui::CornerRadius { nw: round, ne: round, sw: 0, se: 0 }, theme::alpha(tint, 0.11));
+            // Each sheet's head has its tool's colour, as All tools has it: the eye finds a tool by it, there and here. What has none of its own has the accent, not a grey.
+            let band = if tint == theme::MARK { look::accent() } else { tint };
+            p.rect_filled(Rect::from_min_max(panel.min, pos2(panel.right(), panel.top() + SHEET_HEAD)), egui::CornerRadius { nw: round, ne: round, sw: 0, se: 0 }, theme::mix(theme::alpha(tint, 0.11), band, 0.16));
+            p.rect_filled(Rect::from_min_size(pos2(panel.left(), panel.top() + SHEET_HEAD - 2.0), vec2(panel.width(), 2.0)), 0.0, theme::alpha(band, 0.55));
             top_light(p, panel);
             // The tools along it say which page this is; a page of N4N0's own says so after them.
             let (tabs, mut x) = head_tabs(facts);
@@ -2000,7 +2013,7 @@ fn draw(p: &Painter, zone: Zone, item: &Item, facts: &Facts, hovered: bool, pres
             if zone.blooms().is_some() {
                 bloom_mark(p, ring, center);
             }
-            if facts.digits {
+            if facts.key_caps {
                 digit(p, zone, ring, center);
             }
         }
@@ -2150,7 +2163,7 @@ fn draw(p: &Painter, zone: Zone, item: &Item, facts: &Facts, hovered: bool, pres
                     p.circle_filled(at, 11.0, if dim { theme::FG_4 } else { theme::REC });
                 }
                 curved(p, center, ring.outer - 11.5, ring.middle(), &time, CELL_WORDS - 1.0, weight::BOLD, color, true);
-                if facts.digits {
+                if facts.key_caps {
                     digit(p, zone, ring, center);
                 }
             } else {
@@ -2482,7 +2495,7 @@ fn draw(p: &Painter, zone: Zone, item: &Item, facts: &Facts, hovered: bool, pres
                 if !none {
                     bloom_mark(p, ring, center);
                 }
-                if facts.digits {
+                if facts.key_caps {
                     digit(p, zone, ring, center);
                 }
             } else {
@@ -2568,6 +2581,17 @@ fn draw(p: &Painter, zone: Zone, item: &Item, facts: &Facts, hovered: bool, pres
             p.rect_filled(rect, look::radius(rect.height() / 2.0), if pressed { theme::mix(look::accent(), Color32::BLACK, 0.25) } else if hovered { theme::mix(look::accent(), Color32::WHITE, 0.15) } else { look::accent() });
             widgets::icon(p, pos2(rect.left() + 26.0, rect.center().y), icons::ARROW_SQUARE_OUT, 22.0, look::on_accent());
             p.text(pos2(rect.left() + 46.0, rect.center().y), Align2::LEFT_CENTER, "Walk around it, in Orbiters", look::font(19.0, weight::BOLD), look::on_accent());
+        }
+        Look::PeekWord => {
+            let radius = look::radius(rect.height() / 2.0);
+            p.rect_filled(rect, radius, if pressed { look::TILE_DOWN } else if hovered { look::TILE_HOVER } else { look::TILE });
+            p.rect_stroke(rect.shrink(0.5), radius, Stroke::new(1.0, Color32::from_white_alpha(if hovered { 120 } else { 54 })), egui::StrokeKind::Inside);
+            let (icon, words) = if facts.peek { (icons::EYE, "Show Orbiters") } else { (icons::EYE_SLASH, "Hide Orbiters") };
+            let font = look::font(13.0, weight::SEMIBOLD);
+            let wide = p.layout_no_wrap(words.to_string(), font.clone(), look::LABEL).size().x;
+            let left = rect.center().x - (wide + 22.0) / 2.0;
+            widgets::icon(p, pos2(left + 8.0, rect.center().y), icon, 16.0, look::LABEL);
+            p.text(pos2(left + 22.0, rect.center().y), Align2::LEFT_CENTER, words, font, look::LABEL);
         }
         Look::HideWord => {
             // A real pill: it presses, and it says what goes.
@@ -2718,7 +2742,7 @@ fn picture_button(p: &Painter, zone: Zone, shape: Shaped, rect: Rect, mode: Phot
     let (at, size) = cell_icon(ring, center);
     widgets::icon(p, at, glyph, size * 0.9, if lit || dim { ink } else if hovered { Color32::WHITE } else { theme::mix(look::accent(), Color32::WHITE, 0.3) });
     curved(p, center, ring.outer - 11.5, middle, of, CELL_WORDS - 1.0, weight::BOLD, label, true);
-    if facts.digits {
+    if facts.key_caps {
         digit(p, zone, ring, center);
     }
 }

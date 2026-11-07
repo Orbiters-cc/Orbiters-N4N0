@@ -126,6 +126,8 @@ pub struct Job {
     pub placement: Placement,
     pub eyes: [V3; 2],
     pub work: Work,
+    /// Small with its middle moved: only what it reaches from there, with the capture to read that from.
+    pub clip: Option<(V3, f32, Arc<Capture>)>,
     /// Splats drawn (the first ones: the reveal).
     pub count: usize,
     /// The shared fence value the GPU waits for first.
@@ -134,6 +136,7 @@ pub struct Job {
 
 /// Draws a batch on `renderer`: into the faces' pictures, then copied to `targets` (face × 2 + slot).
 pub fn draw(renderer: &mut FaceRenderer, job: &Job, targets: &[&eframe::wgpu::Texture]) -> anyhow::Result<bool> {
+    renderer.clip(job.clip.as_ref());
     let publish: Vec<(usize, &eframe::wgpu::Texture)> = job.work.faces().iter().map(|&(f, slot)| (f, targets[f * 2 + slot])).collect();
     match &job.work {
         Work::Faces(faces) => {
@@ -335,6 +338,9 @@ pub struct View {
     settling: bool,
     wait: u64,
     alpha: f32,
+    /// It lies across a menu, and how far it has gone for that.
+    covered: bool,
+    covered_by: f32,
     pub see_through: bool,
     unseen_turn: usize,
     last_unseen: Option<Instant>,
@@ -392,6 +398,8 @@ impl View {
             settling: false,
             wait: 0,
             alpha: 0.0,
+            covered: false,
+            covered_by: 0.0,
             see_through: false,
             unseen_turn: 0,
             last_unseen: None,
@@ -538,14 +546,25 @@ impl View {
     }
 
     /// The hands, for what shows small: their poses, grips and sticks' up and down.
-    pub fn small_input(&mut self, hands: [Option<vr::Matrix34>; 2], grips: [bool; 2], sticks: [f32; 2]) {
+    pub fn small_input(&mut self, hands: [Option<vr::Matrix34>; 2], grips: [bool; 2], sticks: [f32; 2], pads: [[f32; 2]; 2]) {
         let now = Instant::now();
         let seconds = self.small_read.map_or(0.0, |t| now.duration_since(t).as_secs_f32()).min(0.1);
         self.small_read = Some(now);
         let (Some(small), Some(capture)) = (self.small.as_mut(), self.capture.as_ref()) else { return };
         let dock = self.small_place.map(|(at, radius)| stereo::SmallDock::behind(&capture.view, &at, radius));
         small.step(hands, grips, sticks, seconds, dock);
+        small.move_middle(hands, pads, seconds, capture.farthest());
         self.placement = Some(small.placement(capture.view.eye()));
+    }
+
+    /// What shows small lies across a menu, or no longer does. An overlay shows over VRChat's menus whatever its distance, so it goes while it does.
+    pub fn set_covered(&mut self, covered: bool) {
+        self.covered = covered;
+    }
+
+    /// Whether it is away for that.
+    pub fn covered(&self) -> bool {
+        self.covered
     }
 
     /// Where a panel has a place for what shows small, and how large it is, or that it has none.
@@ -702,6 +721,12 @@ impl View {
             }
             Phase::Loading => {}
             Phase::Shown { since } => {
+                // Quickly, and not in a blink, should a hand wave it past a menu's edge.
+                let wanted = if self.covered { 1.0 } else { 0.0 };
+                self.covered_by += (wanted - self.covered_by) * 0.3;
+                if (wanted - self.covered_by).abs() < 0.01 {
+                    self.covered_by = wanted;
+                }
                 let t = (since.elapsed().as_secs_f32() / FADE_IN.as_secs_f32()).min(1.0);
                 let eased = 1.0 - (1.0 - t).powi(3);
                 self.set_alpha(overlay, eased * self.alpha_scale());
@@ -837,10 +862,11 @@ impl View {
     }
 
     fn alpha_scale(&self) -> f32 {
+        let away = 1.0 - self.covered_by;
         if self.see_through {
-            SEE_THROUGH_ALPHA
+            SEE_THROUGH_ALPHA * away
         } else {
-            1.0
+            away
         }
     }
 
@@ -870,7 +896,8 @@ impl View {
             _ => capture.gaussians.len(),
         };
         // Small, only what it reaches is drawn.
-        let count = self.small.as_ref().map_or(count, |small| count.min(capture.within(small.reach())));
+        let count = self.small.as_ref().map_or(count, |small| count.min(capture.within(small.reach() + small.moved_by())));
+        let clip = self.small.as_ref().filter(|small| small.moved_by() > 0.0).map(|small| (small.middle(capture.view.eye()), small.reach(), capture.clone()));
         let pixels = self.width - 2 * MARGIN;
         let id = self.next_id;
         let active_holds = self.cubes[self.active].is_some_and(|c| c.pixels == pixels && eyes.iter().all(|e| c.holds(*e, REACH_M)));
@@ -893,7 +920,7 @@ impl View {
             }
             self.next_id += 1;
             let faces = (0..6).map(|f| (f, 1 - self.shown_slot[f])).collect();
-            return Some(Job { id, cube, cube_index: next, placement, eyes, work: Work::Faces(faces), count, wait: self.wait });
+            return Some(Job { id, cube, cube_index: next, placement, eyes, work: Work::Faces(faces), count, clip: clip.clone(), wait: self.wait });
         }
         let cube = self.cubes[self.active]?;
         let looking = stereo::scale(stereo::axis(head, 2), -1.0);
@@ -917,7 +944,7 @@ impl View {
             self.wide_placement = Some(placement);
             self.settling = false;
             self.next_id += 1;
-            return Some(Job { id, cube, cube_index: self.active, placement, eyes, work: Work::Wide { cameras, faces }, count, wait: self.wait });
+            return Some(Job { id, cube, cube_index: self.active, placement, eyes, work: Work::Wide { cameras, faces }, count, clip: clip.clone(), wait: self.wait });
         }
         // Now and then a face out of view, drawn whole from where the eyes are now.
         if !self.still || self.pacer.level != 0 || self.last_unseen.is_some_and(|t| now.duration_since(t) < UNSEEN_EVERY) {
@@ -939,6 +966,7 @@ impl View {
                 self.last_unseen = Some(now);
                 self.next_id += 1;
                 return Some(Job {
+                    clip: clip.clone(),
                     id,
                     cube,
                     cube_index: self.active,

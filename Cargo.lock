@@ -4305,6 +4305,7 @@ dependencies = [
  "objc2-metal 0.3.2",
  "orbiters-contracts",
  "orbiters-core",
+ "orbiters-i18n",
  "orbiters-openvr",
  "ort",
  "png",

@@ -8,8 +8,9 @@ crates/orbiters-desktop/src/bridge/tools.rs
 # This crate, and the keyed menu texts it holds beside (crates/orbiters-n4n0-core/menu-strings are their translations).
 crates/orbiters-i18n
 crates/orbiters-n4n0-core/src/menu/strings.rs
-# GPU pass names and the reconstruction's internals, and a driver with no window.
-crates/orbiters-reconstruct
+# A driver with no window.
 crates/orbiters-smooth-driver
+# GPU pass names and the reconstruction's internals; but its errors can reach a toast.
+errors-only crates/orbiters-reconstruct
 # The phone app is not these windows and overlays: its own request.
 crates/orbiters-n4n0-mobile

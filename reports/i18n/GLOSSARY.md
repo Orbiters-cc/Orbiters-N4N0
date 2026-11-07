@@ -31,7 +31,7 @@ Always in Latin script, as written here (ja: never katakana).
 
 ## VRChat's own menus: **translated, in VRChat's words**
 
-The order listed Quick Menu among the names that never change. VRChat's own translated pages do translate it, and people run VRChat in these languages, so we use VRChat's words. If the orchestrator or Enzo wants the English names kept instead, only these rows and the strings that use them change.
+Enzo decided (2026-11-07): Quick Menu is translated. VRChat's own translated pages do too, and people run VRChat in these languages, so we use VRChat's words.
 
 | English | ja | fr | es | pt-BR |
 |---|---|---|---|---|

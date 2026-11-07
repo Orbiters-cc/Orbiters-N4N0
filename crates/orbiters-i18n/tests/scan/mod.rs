@@ -22,7 +22,8 @@ pub const NOT_SHOWN: &[&str] = &[
     "Id::new", "with", "id_salt", "id", "push_id", "scope_id", "load_texture", "header", "get", "post", "put", "delete", "request", "url", "query", "json!", "get_mut", "contains_key", "Name", "from_blob", "lookup", "pointer",
 ];
 
-/// Errors: for a person only where a window shows them, which reading the source cannot tell. Not held to the test; counted apart, for a decision.
+/// Errors. Enzo: translated, especially those that can reach a toast. Reading the source cannot tell which do, so all are held to the test, and one that truly never
+/// reaches a person (a log, what a server or an AI reads) is marked `// i18n: not shown`. Counted apart in reports, as they are wrapped differently.
 pub const ERRORS: &[&str] = &["anyhow!", "bail!", "ensure!", "context", "with_context", "Err"];
 
 /// Names that are the same in every language, as the glossary has them: a text of nothing but these needs no translation.
@@ -431,10 +432,19 @@ pub fn scan_file(path: &Path) -> Scanned {
             }
         }
     }
-    Scanned { file: relative(path), bare, keys, errors }
+    let file = relative(path);
+    if errors_only(&file) {
+        bare.clear();
+    }
+    Scanned { file, bare, keys, errors }
 }
 
 /// The files nobody reads the text of (`not-shown.txt`): those paths, and all under those folders.
 pub fn not_shown(file: &str) -> bool {
     lines_of(&Path::new(env!("CARGO_MANIFEST_DIR")).join("not-shown.txt")).iter().any(|p| file == p || file.starts_with(&format!("{p}/")))
+}
+
+/// The files whose other strings are internal names but whose errors can reach a person (`not-shown.txt`'s `errors-only` lines).
+pub fn errors_only(file: &str) -> bool {
+    lines_of(&Path::new(env!("CARGO_MANIFEST_DIR")).join("not-shown.txt")).iter().filter_map(|l| l.strip_prefix("errors-only ")).any(|p| file == p || file.starts_with(&format!("{p}/")))
 }

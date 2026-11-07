@@ -110,7 +110,7 @@ def main():
     out = ["# Translation batches", "", f"{len(texts)} different texts, {sum(len(t.split()) for t in texts)} words to translate into 4 languages. "
            f"{len(matches)} of them ({sum(len(t.split()) for t in matches)} words) are in `catalog/website` already, from the website, word for word. "
            f"{shared} texts are used by more than one batch: see \"The same text in two batches\" in BATCH-BRIEF.md.", "",
-           "Each file is in one batch, so batches can be wrapped side by side and merge cleanly. Strings and words are of what is not yet wrapped; \"errors\" are error strings, not held to the test.", "",
+           "Each file is in one batch, so batches can be wrapped side by side and merge cleanly. Strings and words are of what is not yet wrapped, errors apart: \"Errors\" are error strings, also to translate (Enzo) and held to the test.", "",
            "| Batch | What | Files | Strings | Words | Not in `website` | Errors |", "|---|---|---:|---:|---:|---:|---:|"]
     summary = {}
     for name, about, _ in BATCHES:

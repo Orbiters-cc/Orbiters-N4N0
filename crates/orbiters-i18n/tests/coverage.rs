@@ -1,5 +1,5 @@
 //! Fails on text a person sees that is not translated: in the files a catalog area says it covers (`catalog/<area>/files.txt`), every string that
-//! reads as words must be wrapped (or on the area's `allow.txt`, or its line marked `// i18n: not shown`), and every wrapped text must have a translation in
+//! reads as words, errors included, must be wrapped (or on the area's `allow.txt`, or its line marked `// i18n: not shown`), and every wrapped text must have a translation in
 //! all four languages, with the same `{names}` as the English.
 
 #[path = "scan/mod.rs"]
@@ -107,7 +107,7 @@ fn what_an_area_covers_is_wrapped_and_translated() {
         let allowed: BTreeSet<String> = lines_of(&area.join("allow.txt")).into_iter().collect();
         for file in lines_of(&area.join("files.txt")) {
             let scanned = scan_file(&root().join(&file));
-            for literal in &scanned.bare {
+            for literal in scanned.bare.iter().chain(&scanned.errors) {
                 if !allowed.contains(literal.text.as_str()) {
                     problems.push(format!("{file}:{}: not wrapped: {:?}", literal.line, literal.text));
                 }
@@ -135,7 +135,8 @@ fn every_file_with_text_is_covered() {
         .iter()
         .filter_map(|path| {
             let scanned = scan_file(path);
-            (!scanned.bare.is_empty() && !covered.contains(&scanned.file) && !not_shown(&scanned.file)).then(|| format!("{}: {}", scanned.file, scanned.bare.len()))
+            let count = scanned.bare.len() + scanned.errors.len();
+            (count > 0 && !covered.contains(&scanned.file) && !not_shown(&scanned.file)).then(|| format!("{}: {count}", scanned.file))
         })
         .collect();
     assert!(left.is_empty(), "{} files left:\n{}", left.len(), left.join("\n"));

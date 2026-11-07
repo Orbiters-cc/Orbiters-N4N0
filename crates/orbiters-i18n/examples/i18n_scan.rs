@@ -13,8 +13,12 @@ fn main() {
     match args.first().map(String::as_str) {
         Some("file") => {
             for path in &args[1..] {
-                for literal in scan_file(&root().join(path)).bare {
+                let scanned = scan_file(&root().join(path));
+                for literal in scanned.bare {
                     println!("{path}:{}: {:?}", literal.line, literal.text);
+                }
+                for literal in scanned.errors {
+                    println!("{path}:{}: error {:?}", literal.line, literal.text);
                 }
             }
         }
@@ -35,7 +39,7 @@ fn main() {
             let area = Path::new(env!("CARGO_MANIFEST_DIR")).join("catalog").join(&args[1]);
             for file in lines_of(&area.join("files.txt")) {
                 let scanned = scan_file(&root().join(&file));
-                println!("{file}: {} to wrap, {} wrapped", scanned.bare.len(), scanned.keys.len());
+                println!("{file}: {} to wrap, {} errors to wrap, {} wrapped", scanned.bare.len(), scanned.errors.len(), scanned.keys.len());
             }
         }
         _ => {

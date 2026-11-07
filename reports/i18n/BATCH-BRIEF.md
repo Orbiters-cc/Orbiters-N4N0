@@ -17,7 +17,7 @@ Your batch's name and files are in `BATCHES.md`. **Edit only those files and you
 ## The work
 
 1. Make `catalog/<batch>/` with `ja.json`, `fr.json`, `es.json`, `pt-BR.json` (flat `{ "English": "translation" }`, UTF-8) and `files.txt`. List your files in `files.txt` **as you finish each one**: from then on the test holds it to the rules.
-2. List a file's text, then wrap it:
+2. List a file's text, errors included, then wrap it:
    ```
    deskcargo.sh "$PWD" run -q -p orbiters-i18n --example i18n_scan -- file crates/.../page.rs
    ```
@@ -35,6 +35,7 @@ Your batch's name and files are in `BATCHES.md`. **Edit only those files and you
 | `"{n} pictures"`, by count | `tr_n("{count} picture", "{count} pictures", n as u64)` |
 | A `const` table or a static label | `mark("Worlds")` where it is written, `tr(label)` where it is drawn |
 | One English word needing two translations | `tr_ctx("the button", "Record")`, with key `"the button\u0004Record"` in the catalog |
+| An error | `bail!("{}", tr("..."))`, `.with_context(\|\| tr!("...", x = x))` |
 | Text no person reads, but the scan flags it | Add `// i18n: not shown` at the end of that line |
 | A text that stays the same in every language | A line in your area's `allow.txt` |
 
@@ -48,7 +49,7 @@ Your batch's name and files are in `BATCHES.md`. **Edit only those files and you
 - **egui ids:** `ui.id_salt(label)` and the like must stay on the English text, or an open popup loses its state when the language changes.
 - **Text kept across frames won't change language.** Text computed once (`OnceLock`, a field set at start, a cached galley) keeps the old language. Compute it where it is drawn, or store the English and `tr` it at draw time.
 - **Keep it English:** logs, and anything sent to a server or read by an AI, including prompts, tool descriptions, `Suggest` payloads and the assistant's instructions (`policy.rs`, `assistant.rs`). `not-shown.txt` covers some of this. Mark the rest `// i18n: not shown`.
-- **Errors:** `anyhow!`, `bail!`, `.context()` and `Err(...)` strings are counted apart and **not** held to the test. Whether they get translated is an open decision: leave them unless your orchestrator says otherwise.
+- **Errors are translated too** (Enzo: "especially if they can reach toasts"). `anyhow!`, `bail!`, `ensure!`, `.context()` and `Err(...)` strings are held to the test, because reading the source can't tell which reach a toast. Write `bail!("{}", tr("Could not read the file"))` and `.with_context(|| tr!("Could not read {name}", name = name))`: use `with_context`, not `context`, so the language is read when the error happens. An error that truly never reaches a person gets `// i18n: not shown`: a log line, or what a server or an AI reads. If code reads an error's text (`contains`, a server's message), it must not read the translation: move that to a code or an enum. A server's own message passes through as it came.
 - **Numbers, dates and sizes:** pass them in as values. Don't type formatted numbers into a translation.
 - **Tests:** they run in English by default, so tests that assert English text keep passing. To test another language use `orbiters_i18n::in_language(Language::Fr, || ...)`. Never `set_language` in a test: it changes every thread.
 

@@ -2,7 +2,7 @@
 
 4040 different texts, 23845 words to translate into 4 languages. 124 of them (204 words) are in `catalog/website` already, from the website, word for word. 269 texts are used by more than one batch: see "The same text in two batches" in BATCH-BRIEF.md.
 
-Each file is in one batch, so batches can be wrapped side by side and merge cleanly. Strings and words are of what is not yet wrapped; "errors" are error strings, not held to the test.
+Each file is in one batch, so batches can be wrapped side by side and merge cleanly. Strings and words are of what is not yet wrapped, errors apart: "Errors" are error strings, also to translate (Enzo) and held to the test.
 
 | Batch | What | Files | Strings | Words | Not in `website` | Errors |
 |---|---|---:|---:|---:|---:|---:|
@@ -17,7 +17,7 @@ Each file is in one batch, so batches can be wrapped side by side and merge clea
 | `pages-projects` | App window: Projects | 46 | 884 | 4423 | 709 | 198 |
 | `pages-worlds` | App window: Worlds, Videos, Saved looks and the rest of the pages | 3 | 188 | 847 | 158 | 0 |
 | `controller` | What the service reports to the windows: status, toasts, the tray | 57 | 495 | 3462 | 459 | 192 |
-| `foundation-crates` | Setup, shared widgets and the lower crates | 65 | 458 | 2145 | 369 | 211 |
+| `foundation-crates` | Setup, shared widgets and the lower crates | 79 | 458 | 2145 | 369 | 381 |
 
 ## `orbit`: The menus around VRChat's: wheel, wing, strip, All tools and their sheets
 
@@ -316,6 +316,20 @@ Each file is in one batch, so batches can be wrapped side by side and merge clea
 - `crates/orbiters-core/src/maps.rs`: 0 strings, 0 words, 9 errors
 - `crates/orbiters-core/src/paths.rs`: 0 strings, 0 words, 1 errors
 - `crates/orbiters-core/src/vrchat_source.rs`: 0 strings, 0 words, 2 errors
+- `crates/orbiters-reconstruct/src/aberration.rs`: 0 strings, 0 words, 3 errors
+- `crates/orbiters-reconstruct/src/checkpoint.rs`: 0 strings, 0 words, 16 errors
+- `crates/orbiters-reconstruct/src/dataset.rs`: 0 strings, 0 words, 5 errors
+- `crates/orbiters-reconstruct/src/edit.rs`: 0 strings, 0 words, 19 errors
+- `crates/orbiters-reconstruct/src/export.rs`: 0 strings, 0 words, 12 errors
+- `crates/orbiters-reconstruct/src/gpu.rs`: 0 strings, 0 words, 49 errors
+- `crates/orbiters-reconstruct/src/main.rs`: 0 strings, 0 words, 14 errors
+- `crates/orbiters-reconstruct/src/mesh/mod.rs`: 0 strings, 0 words, 23 errors
+- `crates/orbiters-reconstruct/src/ply.rs`: 0 strings, 0 words, 5 errors
+- `crates/orbiters-reconstruct/src/sky.rs`: 0 strings, 0 words, 3 errors
+- `crates/orbiters-reconstruct/src/train.rs`: 0 strings, 0 words, 10 errors
+- `crates/orbiters-reconstruct/src/tree_file.rs`: 0 strings, 0 words, 6 errors
+- `crates/orbiters-reconstruct/src/tree_tune.rs`: 0 strings, 0 words, 2 errors
+- `crates/orbiters-reconstruct/src/web.rs`: 0 strings, 0 words, 3 errors
 - `crates/orbiters-smooth/src/control.rs`: 0 strings, 0 words, 5 errors
 - `crates/orbiters-smooth/src/install.rs`: 0 strings, 0 words, 17 errors
 - `crates/orbiters-update/src/net.rs`: 0 strings, 0 words, 5 errors

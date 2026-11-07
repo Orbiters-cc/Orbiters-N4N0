@@ -78,6 +78,8 @@ pub struct Entry {
     pub found_by: Option<String>,
     /// Lower-case text a search looks in: the world, its author and the sharer.
     search: String,
+    /// A capture on this computer: its session, read from there and not downloaded.
+    pub local: Option<std::path::PathBuf>,
 }
 
 /// Ids of worlds without a capture have this bit (the listing's ids are a database's, far under it).
@@ -141,6 +143,44 @@ impl Entry {
             visited: None,
             found_by: found_by.map(|q| q.trim().to_lowercase()),
             search,
+            local: None,
+        }
+    }
+
+    /// A capture of this computer's gallery, for the 3D view. `changed` tells its results apart: made again, it is read again.
+    pub fn local(dir: std::path::PathBuf, name: String, changed: u64) -> Self {
+        let id = dir.to_string_lossy().to_ascii_lowercase().bytes().fold(0xcbf2_9ce4_8422_2325u64, |h, b| (h ^ b as u64).wrapping_mul(0x0100_0000_01b3));
+        Self {
+            capture: true,
+            slot: None,
+            key: changed as u32,
+            // Neither a listing's id nor a world's.
+            id: (id >> 2) | (1 << 62),
+            world_id: String::new(),
+            search: name.to_lowercase(),
+            name,
+            author: None,
+            description: String::new(),
+            uploader: None,
+            splats: 0,
+            view: StartView { position: [0.0, 1.6, 0.0], target: [0.0, 1.6, -1.0], floor: None, eye_height: None },
+            sky: false,
+            official: false,
+            captured_at: None,
+            capacity: None,
+            visits: None,
+            favorites: None,
+            pictures: 0,
+            only_for: None,
+            feedback: Aggregate::default(),
+            thumbnail: None,
+            tags: Vec::new(),
+            occupants: None,
+            performance: None,
+            preview: false,
+            visited: None,
+            found_by: None,
+            local: Some(dir),
         }
     }
 
@@ -280,6 +320,7 @@ pub fn parse(json: &str) -> anyhow::Result<Vec<Entry>> {
                 visited: None,
                 found_by: None,
                 search,
+                local: None,
             })
         })
         .collect())
@@ -534,6 +575,26 @@ impl Capture {
     pub fn farthest(&self) -> f32 {
         self.distances.last().copied().unwrap_or(1.0)
     }
+}
+
+/// A session of this computer as the 3D view takes it: its splats less what was edited out, its sky, and the start view its upload would say.
+pub fn read_local(dir: &std::path::Path, progress: &Progress) -> anyhow::Result<Capture> {
+    use orbiters_core::reconstruction;
+    progress.stage.store(STAGE_PREPARING, Ordering::Relaxed);
+    let result = reconstruction::result_dir(dir);
+    let (mut g, _, found) = orbiters_reconstruct::edit::read_for_view(&result.join(reconstruction::PLY_FILE))?;
+    // Edits of an earlier reconstruction are no edits of this one.
+    if let orbiters_reconstruct::edit::Found::Current(edit) = &found {
+        orbiters_reconstruct::edit::apply(&mut g, edit);
+    }
+    let sky_file = result.join(reconstruction::SKY_FILE);
+    let sky = if sky_file.is_file() { Some(SkyMap::read(&sky_file)?) } else { None };
+    let (views, start) = crate::views::recorded(dir)?;
+    let (v, ground) = crate::views::eye_level(dir, &g, &views[start]);
+    let depth = crate::views::depth_ahead(&g, &v);
+    let target = [v.position[0] + v.forward[0] * depth, v.position[1] + v.forward[1] * depth, v.position[2] + v.forward[2] * depth];
+    let flip = |p: [f32; 3]| [p[0], p[1], -p[2]];
+    Ok(Capture::new(g, sky, StartView { position: flip(v.position), target: flip(target), floor: Some(ground.floor), eye_height: Some(ground.eye_height) }))
 }
 
 /// The listing, read on a thread of its own when asked (at most once a minute).

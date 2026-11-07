@@ -12,10 +12,10 @@ use orbiters_ui::offscreen::save_png;
 use std::path::{Path, PathBuf};
 
 /// Four recent captures, with stand-in pictures (dusk colours) that `paint` makes textures of.
-fn recent() -> Vec<Recent> {
+fn recent() -> panels::Gallery {
     [("Sky Dream", "3D picture, ready"), ("Rainy Skyline", "Reconstructing 42%"), ("Pacific Dreams (Night)", "Recording, waiting"), ("After The Rain", "3D picture, ready")]
         .iter()
-        .map(|(title, state)| Recent { dir: PathBuf::from(title), title: title.to_string(), state: state.to_string(), progress: state.contains('%').then_some(0.42), picture: None })
+        .map(|(title, state)| Recent { dir: PathBuf::from(title), title: title.to_string(), state: state.to_string(), progress: state.contains('%').then_some(0.42), picture: None, ..Default::default() })
         .collect()
 }
 
@@ -39,9 +39,7 @@ fn picture(placed: &Placed, facts: &Facts, hover: Option<usize>, pressed: Option
     let mut canvas = Canvas::zoomed(px[0], px[1], px[0] as f32 / logical.x);
     let textures: Vec<_> = (0..4).map(|i| canvas.ctx().load_texture("recent", stand_in(i), TextureOptions::LINEAR)).collect();
     let mut facts = facts.clone();
-    for (recent, texture) in facts.recent.iter_mut().zip(&textures) {
-        recent.picture = Some(texture.id());
-    }
+    facts.recent_pictures = textures.iter().enumerate().map(|(n, texture)| (n, texture.id())).collect();
     for _ in 0..2 {
         canvas.paint(0.0, |p| panels::paint(p, placed.zone, logical, &facts, hover, pressed));
     }
@@ -364,9 +362,7 @@ fn sharp_picture(placed: &Placed, facts: &Facts, hover: Option<usize>, sharp: f3
     let mut canvas = Canvas::zoomed(px[0], px[1], px[0] as f32 / logical.x);
     let textures: Vec<_> = (0..4).map(|i| canvas.ctx().load_texture("recent", stand_in(i), TextureOptions::LINEAR)).collect();
     let mut facts = facts.clone();
-    for (recent, texture) in facts.recent.iter_mut().zip(&textures) {
-        recent.picture = Some(texture.id());
-    }
+    facts.recent_pictures = textures.iter().enumerate().map(|(n, texture)| (n, texture.id())).collect();
     for _ in 0..2 {
         canvas.paint(0.0, |p| panels::paint(p, placed.zone, logical, &facts, hover, None));
     }
@@ -384,7 +380,7 @@ pub(super) fn shots(out: &Path) -> anyhow::Result<()> {
     let hd = vec2(1280.0, 720.0);
     let idle = Facts { recent: recent(), timer: 3, n4n0: true, desktop: true, music: Some(("The Weeknd - Moth to a Flame".into(), true)), ..Default::default() };
     let hint = Some(("Hold Left Alt to use this ring", "Your mouse then points here instead of at VRChat's wheel."));
-    let empty = Facts { recent: Vec::new(), music: None, ..idle.clone() };
+    let empty = Facts { recent: Default::default(), music: None, ..idle.clone() };
     let busy = Facts { recording: true, recording_seconds: Some(83), capture_busy: true, reconstructing: Some(0.42), waiting: 2, ..idle.clone() };
     let counting = Facts { countdown: Some(2), picture_mode: Some(PhotoMode::People), pointed: Some(Action::Picture(PhotoMode::People)), ..idle.clone() };
     let pointing = |a| Facts { pointed: Some(a), ..idle.clone() };
@@ -467,9 +463,7 @@ fn sheet_picture(sheet: panels::Sheet, facts: &Facts, px: [u32; 2]) -> Vec<u8> {
     let mut canvas = Canvas::zoomed(px[0], px[1], px[0] as f32 / 1024.0);
     let textures: Vec<_> = (0..4).map(|i| canvas.ctx().load_texture("recent", stand_in(i), TextureOptions::LINEAR)).collect();
     let mut facts = facts.clone();
-    for (recent, texture) in facts.recent.iter_mut().zip(&textures) {
-        recent.picture = Some(texture.id());
-    }
+    facts.recent_pictures = textures.iter().enumerate().map(|(n, texture)| (n, texture.id())).collect();
     for _ in 0..2 {
         canvas.paint(0.0, |p| panels::paint_sheet(p, sheet, &facts, None, None));
     }

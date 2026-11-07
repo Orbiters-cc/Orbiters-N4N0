@@ -241,101 +241,264 @@ pub struct Pressed {
 /// reaches them, and go again once it is far past them: it can hold any number of captures.
 #[derive(Default)]
 struct Recents {
+    /// All there is, newest first.
     loaded: Vec<LoadedRecent>,
-    seen: Option<u64>,
+    /// What the gallery shows of it, in its filter, and that as tiles.
+    shown_index: Vec<usize>,
+    shown: panels::Gallery,
+    arranged: Option<(panels::GalleryFilter, orbiters_core::settings::GalleryLayout)>,
+    seen: Option<(u64, u64)>,
+    /// When it was last listed: a first scan of the pictures says it found more all the time.
+    listed: Option<Instant>,
     rx: Option<mpsc::Receiver<Vec<LoadedRecent>>>,
-    /// What reads pictures: what to read, and what it read.
-    reader: Option<(mpsc::Sender<PathBuf>, mpsc::Receiver<(PathBuf, Option<ColorImage>)>)>,
+    /// Those whose picture was asked for.
+    asked: Vec<usize>,
+    /// What reads pictures: what to read, newest last, and what it read.
+    reader: Option<(PicturesAsked, mpsc::Receiver<(crate::worlds::Picture, Option<ColorImage>)>)>,
+    /// The picture shown large, as it is asked for, and it when it came.
+    big: Option<(crate::worlds::Picture, Option<ColorImage>)>,
 }
 
+type PicturesAsked = std::sync::Arc<(std::sync::Mutex<Vec<crate::worlds::Picture>>, std::sync::Condvar)>;
+
+/// How many threads read pictures. Reading VRChat's for the first time means decoding their PNGs.
+const PICTURE_READERS: usize = 2;
+/// How wide a picture is read to show large: what the app's own window reads.
+const LARGE_PICTURE: u32 = 2048;
+/// How often the list is read again while there is news of it.
+const LIST_AGAIN: Duration = Duration::from_secs(5);
+
 struct LoadedRecent {
-    dir: PathBuf,
+    /// Its session's folder, or its file.
+    key: PathBuf,
     title: String,
     image: Option<ColorImage>,
     asked: bool,
     has_view: bool,
+    /// A capture, and of those a 3D picture, not one of VRChat's pictures.
+    session: bool,
     picture: bool,
+    taken: u64,
     modified: u64,
+    source: crate::worlds::Picture,
+    aspect: f32,
+    /// Its place among the tiles; none when its filter hides it.
+    at: Option<usize>,
+}
+
+impl LoadedRecent {
+    fn kind(&self) -> panels::RecentKind {
+        match (self.session, self.has_view) {
+            (true, true) => panels::RecentKind::Capture,
+            (true, false) => panels::RecentKind::NoView,
+            (false, _) => panels::RecentKind::Picture,
+        }
+    }
+}
+
+/// All the pictures and captures on this computer, as the app's Photos & captures lists them, newest first.
+fn list_pictures(sessions: &std::path::Path, folders: &[PathBuf]) -> Vec<LoadedRecent> {
+    use crate::worlds::Picture;
+    let mut list = Vec::new();
+    for world in crate::worlds::load_gallery(sessions, folders) {
+        let title = if world.name.is_empty() { "A VRChat world".to_string() } else { world.name.clone() };
+        for s in &world.sessions {
+            let aspect = crate::controller::shares::session_picture_size(s.manifest.capture.width, s.manifest.capture.height).map_or(16.0 / 9.0, |[w, h]| w as f32 / h.max(1) as f32);
+            list.push(LoadedRecent {
+                key: s.dir.clone(),
+                title: title.clone(),
+                image: None,
+                asked: false,
+                has_view: s.reconstruction.is_some(),
+                session: true,
+                picture: s.picture.is_some(),
+                taken: crate::controller::shares::unix(&s.manifest.created_utc),
+                modified: s.modified,
+                source: Picture::Session(s.dir.clone()),
+                aspect,
+                at: None,
+            });
+        }
+        for shot in &world.shots {
+            let aspect = if shot.info.width > 0 && shot.info.height > 0 { shot.info.width as f32 / shot.info.height as f32 } else { 16.0 / 9.0 };
+            list.push(LoadedRecent {
+                key: shot.path.clone(),
+                title: title.clone(),
+                image: None,
+                asked: false,
+                has_view: false,
+                session: false,
+                picture: false,
+                taken: shot.info.taken,
+                modified: shot.info.taken,
+                source: Picture::Shot { path: shot.path.clone(), size: shot.size, width: crate::worlds::THUMB_WIDTH },
+                aspect,
+                at: None,
+            });
+        }
+    }
+    list.sort_by_key(|r| std::cmp::Reverse(r.taken));
+    list
 }
 
 impl Recents {
-    fn follow(&mut self, version: u64, sessions: PathBuf) -> bool {
+    /// Takes a new list when one is ready, and asks for one when `version` says there is news. Says whether it changed.
+    fn follow(&mut self, version: (u64, u64), sessions: PathBuf, folders: Vec<PathBuf>) -> bool {
         let mut changed = false;
         if let Some(rx) = &self.rx {
             if let Ok(mut list) = rx.try_recv() {
                 // What was read already stays.
-                for old in self.loaded.drain(..).filter(|o| o.asked) {
-                    if let Some(new) = list.iter_mut().find(|n: &&mut LoadedRecent| n.dir == old.dir) {
-                        (new.image, new.asked) = (old.image, old.asked);
+                let mut had: HashMap<crate::worlds::Picture, Option<ColorImage>> = HashMap::new();
+                for i in &self.asked {
+                    if let Some(old) = self.loaded.get_mut(*i) {
+                        had.insert(old.source.clone(), old.image.take());
+                    }
+                }
+                self.asked.clear();
+                for (i, new) in list.iter_mut().enumerate() {
+                    if let Some(image) = had.remove(&new.source) {
+                        (new.image, new.asked) = (image, true);
+                        self.asked.push(i);
                     }
                 }
                 self.loaded = list;
+                self.arranged = None;
                 self.rx = None;
                 changed = true;
             }
         }
-        if self.rx.is_none() && self.seen != Some(version) {
+        if self.rx.is_none() && self.seen != Some(version) && self.listed.is_none_or(|t| t.elapsed() >= LIST_AGAIN) {
             self.seen = Some(version);
+            self.listed = Some(Instant::now());
             let (tx, rx) = mpsc::channel();
             self.rx = Some(rx);
             let _ = std::thread::Builder::new().name("orbit-recent".into()).spawn(move || {
-                let mut list = crate::controller::list_sessions(&sessions);
-                list.sort_by_key(|s| std::cmp::Reverse(s.modified));
-                let loaded = list
-                    .into_iter()
-                    .map(|s| {
-                        let title = s.manifest.world.as_ref().and_then(|w| w.name.clone()).filter(|n| !n.is_empty()).unwrap_or_else(|| "Capture".to_string());
-                        LoadedRecent { dir: s.dir, title, image: None, asked: false, has_view: s.reconstruction.is_some(), picture: s.picture.is_some(), modified: s.modified }
-                    })
-                    .collect();
-                let _ = tx.send(loaded);
+                let _ = tx.send(list_pictures(&sessions, &folders));
             });
         }
         changed
+    }
+
+    /// Makes the tiles again when the list, its filter or its layout changed. Says whether they did.
+    fn arrange(&mut self, filter: panels::GalleryFilter, layout: orbiters_core::settings::GalleryLayout) -> bool {
+        if self.arranged == Some((filter, layout)) {
+            return false;
+        }
+        self.arranged = Some((filter, layout));
+        self.shown_index.clear();
+        let mut items = Vec::new();
+        for (i, r) in self.loaded.iter_mut().enumerate() {
+            r.at = None;
+            if filter == panels::GalleryFilter::All || r.session {
+                r.at = Some(self.shown_index.len());
+                self.shown_index.push(i);
+                items.push(Recent { dir: r.key.clone(), title: r.title.clone(), state: String::new(), progress: None, picture: None, aspect: r.aspect, kind: r.kind() });
+            }
+        }
+        self.shown = panels::Gallery::new(items, layout);
+        true
+    }
+
+    /// Tile `n`.
+    fn tile(&self, n: usize) -> Option<&LoadedRecent> {
+        self.shown_index.get(n).and_then(|i| self.loaded.get(*i))
     }
 
     /// The pictures that came. Says whether any did.
     fn pictures_came(&mut self) -> bool {
         let Some((_, got)) = &self.reader else { return false };
         let mut any = false;
-        while let Ok((dir, image)) = got.try_recv() {
-            if let Some(recent) = self.loaded.iter_mut().find(|r| r.dir == dir && r.asked) {
-                recent.image = image;
+        while let Ok((picture, image)) = got.try_recv() {
+            if let Some(big) = self.big.as_mut().filter(|b| b.0 == picture) {
+                big.1 = image;
+                any = true;
+            } else if let Some(i) = self.asked.iter().copied().find(|i| self.loaded.get(*i).is_some_and(|r| r.source == picture)) {
+                self.loaded[i].image = image;
                 any = true;
             }
         }
         any
     }
 
-    /// Asks for the pictures from `first` to `last` not here yet.
-    fn ask(&mut self, first: usize, last: usize) {
-        let reader = self.reader.get_or_insert_with(|| {
-            let (ask, asked) = mpsc::channel::<PathBuf>();
-            let (give, got) = mpsc::channel();
-            let _ = std::thread::Builder::new().name("orbit-pictures".into()).spawn(move || {
-                for dir in asked {
-                    let image = orbiters_core::bundle::read_thumbnail(&dir).map(|(w, h, rgba)| ColorImage::from_rgba_unmultiplied([w as usize, h as usize], &rgba));
-                    if give.send((dir, image)).is_err() {
-                        return;
-                    }
+    /// What reads pictures, started the first time. It reads what was asked last first: what is on the page now.
+    fn reader(&mut self) -> &PicturesAsked {
+        &self
+            .reader
+            .get_or_insert_with(|| {
+                let asked: PicturesAsked = Default::default();
+                let (give, got) = mpsc::channel();
+                for _ in 0..PICTURE_READERS {
+                    let (asked, give) = (asked.clone(), give.clone());
+                    let _ = std::thread::Builder::new().name("orbit-pictures".into()).spawn(move || loop {
+                        let picture = {
+                            let mut queue = asked.0.lock().unwrap_or_else(|e| e.into_inner());
+                            loop {
+                                if let Some(picture) = queue.pop() {
+                                    break picture;
+                                }
+                                // Those here and the readers alone are left: this is over.
+                                if std::sync::Arc::strong_count(&asked) <= PICTURE_READERS {
+                                    return;
+                                }
+                                queue = asked.1.wait_timeout(queue, Duration::from_secs(1)).unwrap_or_else(|e| e.into_inner()).0;
+                            }
+                        };
+                        let image = crate::worlds::decode_local(&picture);
+                        if give.send((picture, image)).is_err() {
+                            return;
+                        }
+                    });
                 }
-            });
-            (ask, got)
-        });
-        for recent in self.loaded.iter_mut().skip(first).take(last.saturating_sub(first) + 1).filter(|r| !r.asked) {
-            recent.asked = true;
-            let _ = reader.0.send(recent.dir.clone());
-        }
+                (asked, got)
+            })
+            .0
     }
 
-    /// Lets go of the pictures outside `first` to `last`.
+    /// Asks for the pictures of the tiles from `first` to `last` not here yet.
+    fn ask(&mut self, first: usize, last: usize) {
+        let new: Vec<usize> = self.shown_index.iter().skip(first).take(last.saturating_sub(first) + 1).copied().filter(|i| !self.loaded[*i].asked).collect();
+        if new.is_empty() {
+            return;
+        }
+        let pictures: Vec<_> = new.iter().rev().map(|i| self.loaded[*i].source.clone()).collect();
+        for i in new {
+            self.loaded[i].asked = true;
+            self.asked.push(i);
+        }
+        let asked = self.reader().clone();
+        asked.0.lock().unwrap_or_else(|e| e.into_inner()).extend(pictures);
+        asked.1.notify_all();
+    }
+
+    /// Lets go of the pictures of the tiles outside `first` to `last`, and of asking for them.
     fn keep(&mut self, first: usize, last: usize) {
-        for (i, recent) in self.loaded.iter_mut().enumerate() {
-            if (i < first || i > last) && recent.asked && recent.image.is_some() {
+        let before = self.asked.len();
+        let loaded = &mut self.loaded;
+        self.asked.retain(|i| {
+            let Some(recent) = loaded.get_mut(*i) else { return false };
+            let stays = recent.at.is_some_and(|at| at >= first && at <= last);
+            if !stays {
                 recent.image = None;
                 recent.asked = false;
             }
+            stays
+        });
+        if self.asked.len() != before {
+            let wanted: std::collections::HashSet<&crate::worlds::Picture> = self.asked.iter().filter_map(|i| self.loaded.get(*i)).map(|r| &r.source).chain(self.big.iter().map(|b| &b.0)).collect();
+            if let Some((asked, _)) = &self.reader {
+                asked.0.lock().unwrap_or_else(|e| e.into_inner()).retain(|p| wanted.contains(p));
+            }
         }
+    }
+
+    /// Shows the picture of tile `n` large.
+    fn open_big(&mut self, n: usize) {
+        let Some(crate::worlds::Picture::Shot { path, size, .. }) = self.tile(n).map(|r| r.source.clone()) else { return };
+        let picture = crate::worlds::Picture::Shot { path, size, width: LARGE_PICTURE };
+        self.big = Some((picture.clone(), None));
+        let asked = self.reader().clone();
+        asked.0.lock().unwrap_or_else(|e| e.into_inner()).push(picture);
+        asked.1.notify_all();
     }
 }
 
@@ -351,17 +514,20 @@ fn ago(seconds: u64) -> String {
 
 /// What a recent capture reads as.
 fn recent_state(r: &LoadedRecent, snap: &Snapshot, now: u64) -> String {
+    if !r.session {
+        return ago(now.saturating_sub(r.taken));
+    }
     let kind = if r.picture { "3D picture" } else { "Recording" };
-    if let Some(job) = snap.reconstruction.as_ref().filter(|j| j.session_dir == r.dir) {
+    if let Some(job) = snap.reconstruction.as_ref().filter(|j| j.session_dir == r.key) {
         return format!("Making 3D {:.0}%", job.progress.clamp(0.0, 1.0) * 100.0);
     }
-    if snap.reconstruct_queue.contains(&r.dir) {
+    if snap.reconstruct_queue.contains(&r.key) {
         return format!("{kind}, waiting");
     }
     if r.has_view {
-        format!("{kind}, {}", ago(now.saturating_sub(r.modified)))
+        format!("{kind}, {}", ago(now.saturating_sub(r.taken)))
     } else {
-        kind.to_string()
+        format!("{kind}, no 3D yet")
     }
 }
 
@@ -404,6 +570,8 @@ pub struct Panels {
     seeking: Option<f32>,
     seek_late: Option<f32>,
     seek_asked: Option<(u32, Instant)>,
+    /// Captures of this computer's gallery asked to show in 3D, for the view that shows them.
+    local_asked: Vec<super::worlds::Relayed>,
     /// How fast the list was thrown, in its units a second.
     throw: f32,
     /// The invite asked for last, and when; the result whose link was copied, and when.
@@ -461,6 +629,7 @@ impl Panels {
             seeking: None,
             seek_late: None,
             seek_asked: None,
+            local_asked: Vec::new(),
             throw: 0.0,
             invited: None,
             copied: None,
@@ -582,6 +751,13 @@ impl Panels {
         self.facts.gallery_scroll = 0.0;
         self.gallery_to = 0.0;
         self.throw = 0.0;
+        self.facts.opened = None;
+        self.recents.big = None;
+        // What was taken since shows when it opens.
+        if sheet == Sheet::Pictures {
+            self.recents.seen = None;
+            self.recents.listed = None;
+        }
         if self.takeover.is_none() {
             self.takeover = Some(Panel::new(place, self.sharp, 0, !snap.settings.reduce_motion));
         }
@@ -666,21 +842,41 @@ impl Panels {
 
     /// The mouse's wheel, in notches, up positive: moves the sheet's list, when it has one.
     pub fn wheel(&mut self, notches: f32) {
-        if let Some(sheet) = self.facts.sheet {
+        if let Some(sheet) = self.facts.sheet.filter(|_| self.facts.opened.is_none()) {
             self.gallery_to = (self.gallery_to - notches * 180.0).clamp(0.0, panels::max_scroll(sheet, &self.facts));
+        }
+    }
+
+    /// The gallery's page paints again.
+    fn gallery_dirty(&mut self) {
+        if let Some(panel) = self.takeover.as_mut() {
+            panel.dirty = true;
+            panel.hover = None;
+        }
+        for panel in &mut self.list {
+            panel.dirty = true;
         }
     }
 
     /// VR: the panel on the sheet relays to the overlay's own 3D worlds, whose view `status` says what it does. What it asked since last time.
     pub(in crate::overlay) fn world_relay(&mut self, status: super::worlds::panel::Status) -> Vec<super::worlds::Relayed> {
         let showing = status.current.is_some();
-        if showing != self.facts.view_showing {
+        // Asked from the gallery, which has no page of the view's own to say it on.
+        let said = match (&status.error, &status.stage) {
+            (Some(why), _) => Some(("It cannot show in 3D".to_string(), why.clone())),
+            (None, Some(stage)) => Some(("Getting it ready".to_string(), stage.clone())),
+            (None, None) => None,
+        };
+        if showing != self.facts.view_showing || said != self.facts.view_said {
             self.facts.view_showing = showing;
+            self.facts.view_said = said;
             for panel in self.list.iter_mut().chain(self.takeover.iter_mut()) {
                 panel.dirty = true;
             }
         }
-        self.stage.worlds.as_mut().map_or_else(Vec::new, |worlds| worlds.relay_to(status))
+        let mut asked = self.stage.worlds.as_mut().map_or_else(Vec::new, |worlds| worlds.relay_to(status));
+        asked.append(&mut self.local_asked);
+        asked
     }
 
     /// A number key on the wheel: as a press on that cell, clockwise from the top.
@@ -717,7 +913,10 @@ impl Panels {
         if self.open.is_none() {
             return;
         }
-        if self.recents.follow(library, snap.settings.sessions_dir.clone()) {
+        let in_gallery = self.facts.sheet == Some(Sheet::Pictures);
+        let listed = in_gallery && self.recents.follow((library, crate::worlds::picture_revision()), snap.settings.sessions_dir.clone(), snap.settings.picture_folders.clone());
+        let arranged = in_gallery && self.recents.arrange(self.facts.gallery_filter, snap.settings.photos_layout);
+        if listed || arranged {
             for panel in &mut self.list {
                 panel.dirty = true;
             }
@@ -734,14 +933,22 @@ impl Panels {
         }
         if self.facts.sheet == Some(Sheet::Pictures) {
             if let Some(panel) = self.takeover.as_mut() {
-                let shown = || panel.items.iter().filter_map(|i| if let panels::Look::Capture(n) = i.look { Some(n) } else { None });
+                let shown = || panel.items.iter().filter_map(|i| if let panels::Look::Capture(n) | panels::Look::BigPicture(n) = i.look { Some(n) } else { None });
                 if let (Some(first), Some(last)) = (shown().min(), shown().max()) {
                     self.recents.ask(first, last + 6);
                     self.recents.keep(first.saturating_sub(36), last + 36);
-                    let here: std::collections::HashSet<String> = self.recents.loaded.iter().filter(|r| r.image.is_some()).map(|r| r.dir.to_string_lossy().to_string()).collect();
+                    let here: std::collections::HashSet<String> = self.recents.asked.iter().filter_map(|i| self.recents.loaded.get(*i)).filter(|r| r.image.is_some()).map(|r| r.key.to_string_lossy().to_string()).collect();
                     let art = self.art.as_ref().map(|a| a.0.clone());
-                    panel.pictures.retain(|k, _| here.contains(k) || art.as_ref() == Some(k));
+                    let large = self.recents.big.as_ref().and_then(|b| if let crate::worlds::Picture::Shot { path, .. } = &b.0 { Some(format!("large {}", path.display())) } else { None });
+                    panel.pictures.retain(|k, _| here.contains(k) || art.as_ref() == Some(k) || large.as_ref() == Some(k));
                 }
+            }
+        } else if !self.recents.asked.is_empty() {
+            // Its pictures do not stay in memory once it is left.
+            self.recents.keep(1, 0);
+            let art = self.art.as_ref().map(|a| a.0.clone());
+            if let Some(panel) = self.takeover.as_mut() {
+                panel.pictures.retain(|k, _| art.as_ref() == Some(k));
             }
         }
         // N4N0's menu is what plays and its controls go through: open, drawn or not.
@@ -837,7 +1044,22 @@ impl Panels {
             countdown: snap.n4n0.photo_countdown,
             picture_flying: snap.capture.photo_3d && !matches!(snap.capture.state, CaptureState::Idle),
             // Their pictures are looked up per part, in `paint`.
-            recent: self.recents.loaded.iter().filter(|_| self.facts.sheet == Some(Sheet::Pictures)).map(|r| Recent { dir: r.dir.clone(), title: r.title.clone(), state: recent_state(r, snap, now), progress: progress(&r.dir), picture: None }).collect(),
+            recent: if self.facts.sheet == Some(Sheet::Pictures) { self.recents.shown.clone() } else { Default::default() },
+            gallery_filter: self.facts.gallery_filter,
+            gallery_reading: self.recents.rx.is_some() && self.recents.loaded.is_empty(),
+            opened: self.facts.opened,
+            opened_picture: None,
+            // Only what is on the page: they change as it is made and as time goes, and there may be tens of thousands.
+            recent_words: self
+                .takeover
+                .iter()
+                .filter(|_| self.facts.sheet == Some(Sheet::Pictures))
+                .flat_map(|panel| &panel.items)
+                .filter_map(|i| if let panels::Look::Capture(n) | panels::Look::BigPicture(n) = i.look { Some(n) } else { None })
+                .filter_map(|n| self.recents.tile(n).map(|r| (n, recent_state(r, snap, now), progress(&r.key))))
+                .collect(),
+            recent_pictures: Vec::new(),
+            view_said: self.facts.view_said.clone(),
             reconstructing: snap.reconstruction.as_ref().map(|j| j.progress.clamp(0.0, 1.0)),
             waiting: snap.reconstruct_queue.len(),
             desktop: snap.n4n0.desktop_mode || !snap.steamvr.running,
@@ -1063,7 +1285,7 @@ impl Panels {
             }
         }
         // A list's own empty space can be dragged too.
-        if look.is_none() && self.sheet_pointer.is_some() && matches!(self.facts.sheet, Some(Sheet::Pictures | Sheet::Instances | Sheet::Results | Sheet::Talk)) {
+        if look.is_none() && self.facts.opened.is_none() && self.sheet_pointer.is_some() && matches!(self.facts.sheet, Some(Sheet::Pictures | Sheet::Instances | Sheet::Results | Sheet::Talk)) {
             self.throw = 0.0;
             self.drag = Some(Drag::new(self.facts.gallery_scroll, None, false));
             return out;
@@ -1109,7 +1331,45 @@ impl Panels {
                 }
             }
             Action::All => self.open_sheet(Sheet::All, "All tools", snap),
-            Action::Pictures => self.open_sheet(Sheet::Pictures, "3D pictures", snap),
+            Action::Pictures => self.open_sheet(Sheet::Pictures, "Pictures", snap),
+            Action::Capture(n) => {
+                let Some(recent) = self.recents.tile(n) else { return };
+                match recent.kind() {
+                    panels::RecentKind::Capture if self.worlds_here => {
+                        self.local_asked.push(super::worlds::Relayed::ShowLocal { dir: recent.key.clone(), name: recent.title.clone(), changed: recent.modified });
+                    }
+                    // Nothing shows around the person with no headset: the app's window does.
+                    panels::RecentKind::Capture => self.backend.show_window(),
+                    // Its caption says why not.
+                    panels::RecentKind::NoView => out.clicked = false,
+                    panels::RecentKind::Picture => {
+                        self.facts.opened = Some(n);
+                        self.recents.open_big(n);
+                        self.gallery_dirty();
+                    }
+                }
+            }
+            Action::Filter(filter) => {
+                if self.facts.gallery_filter != filter {
+                    self.facts.gallery_filter = filter;
+                    self.facts.gallery_scroll = 0.0;
+                    self.gallery_to = 0.0;
+                    self.throw = 0.0;
+                    self.gallery_dirty();
+                }
+            }
+            Action::PictureBack => {
+                self.facts.opened = None;
+                self.recents.big = None;
+                self.gallery_dirty();
+            }
+            Action::PictureStep(after) => {
+                if let Some(n) = self.facts.opened.and_then(|n| panels::picture_beside(&self.facts, n, after)) {
+                    self.facts.opened = Some(n);
+                    self.recents.open_big(n);
+                    self.gallery_dirty();
+                }
+            }
             // It says why not, under the pointer.
             Action::Picture(_) if self.facts.no_kit => out.clicked = false,
             Action::Picture(mode) => {
@@ -1332,11 +1592,20 @@ impl Panels {
                     panel.dirty = false;
                     panel.items = panels::sheet_items(sheet, &self.facts);
                     let mut facts = self.facts.clone();
-                    for (recent, loaded) in facts.recent.iter_mut().zip(&self.recents.loaded) {
-                        if let Some(image) = &loaded.image {
-                            let ctx = stage.canvas.ctx();
-                            let name = loaded.dir.to_string_lossy().to_string();
-                            recent.picture = Some(panel.pictures.entry(name).or_insert_with(|| ctx.load_texture("recent", image.clone(), TextureOptions::LINEAR)).id());
+                    if sheet == Sheet::Pictures {
+                        let ctx = stage.canvas.ctx();
+                        for item in &panel.items {
+                            let (panels::Look::Capture(n) | panels::Look::BigPicture(n)) = item.look else { continue };
+                            let Some(loaded) = self.recents.tile(n) else { continue };
+                            if let Some(image) = &loaded.image {
+                                let name = loaded.key.to_string_lossy().to_string();
+                                let id = panel.pictures.entry(name).or_insert_with(|| ctx.load_texture("recent", image.clone(), TextureOptions::LINEAR)).id();
+                                facts.recent_pictures.push((n, id));
+                            }
+                        }
+                        if let Some((crate::worlds::Picture::Shot { path, .. }, Some(image))) = &self.recents.big {
+                            let name = format!("large {}", path.display());
+                            facts.opened_picture = Some(panel.pictures.entry(name).or_insert_with(|| ctx.load_texture("large", image.clone(), TextureOptions::LINEAR)).id());
                         }
                     }
                     if let (Some((key, image)), Sheet::All) = (&art, sheet) {
@@ -1662,6 +1931,71 @@ mod tests {
         assert!(shown_playing(true, asked, t + MEDIA_CATCHES_UP));
         assert!(shown_playing(true, None, t));
         assert!(!shown_playing(false, None, t));
+    }
+
+    fn listed(key: &str, session: bool, has_view: bool) -> LoadedRecent {
+        let path = PathBuf::from(key);
+        LoadedRecent {
+            source: if session { crate::worlds::Picture::Session(path.clone()) } else { crate::worlds::Picture::Shot { path: path.clone(), size: 1, width: 560 } },
+            key: path,
+            title: key.into(),
+            image: None,
+            asked: false,
+            has_view,
+            session,
+            picture: session,
+            taken: 0,
+            modified: 0,
+            aspect: 16.0 / 9.0,
+            at: None,
+        }
+    }
+
+    /// Enzo: "a general gallery with all the vrchat pictures and 3D captures shown together (we can have a filter to only show the 3D ones)".
+    #[test]
+    fn the_gallery_shows_all_or_the_captures_and_tiles_keep_to_what_they_are() {
+        use panels::{GalleryFilter, RecentKind};
+        let layout = Default::default();
+        let mut recents = Recents { loaded: vec![listed("a.png", false, false), listed("cap", true, true), listed("b.png", false, false), listed("raw", true, false)], ..Default::default() };
+        assert!(recents.arrange(GalleryFilter::All, layout));
+        assert!(!recents.arrange(GalleryFilter::All, layout), "nothing changed: the same tiles");
+        assert_eq!(recents.shown.iter().map(|r| r.kind).collect::<Vec<_>>(), [RecentKind::Picture, RecentKind::Capture, RecentKind::Picture, RecentKind::NoView]);
+        assert!(recents.arrange(GalleryFilter::Captures, layout));
+        assert_eq!(recents.shown.iter().map(|r| r.kind).collect::<Vec<_>>(), [RecentKind::Capture, RecentKind::NoView]);
+        // A tile's number is its place among those shown.
+        assert_eq!(recents.tile(0).unwrap().key, PathBuf::from("cap"));
+        assert_eq!(recents.tile(1).unwrap().key, PathBuf::from("raw"));
+        assert!(recents.tile(2).is_none());
+    }
+
+    #[test]
+    fn pictures_far_from_the_page_are_let_go_and_no_longer_asked_for() {
+        let mut recents = Recents { loaded: (0..10).map(|i| listed(&format!("{i}.png"), false, false)).collect(), ..Default::default() };
+        recents.arrange(panels::GalleryFilter::All, Default::default());
+        // None is read here: the readers wait on an empty queue once they have taken what they could not read.
+        recents.ask(0, 3);
+        assert_eq!(recents.asked.len(), 4);
+        recents.ask(0, 3);
+        assert_eq!(recents.asked.len(), 4, "asked once");
+        recents.keep(2, 9);
+        assert_eq!(recents.asked.len(), 2);
+        assert!(!recents.loaded[0].asked && recents.loaded[3].asked);
+        // Left: all goes.
+        recents.keep(1, 0);
+        assert!(recents.asked.is_empty());
+    }
+
+    #[test]
+    #[ignore = "reads a real session: ORBIT_SESSION=<its folder>"]
+    fn a_real_session_reads_for_the_3d_view() {
+        let dir = PathBuf::from(std::env::var("ORBIT_SESSION").unwrap());
+        let progress = super::super::worlds::catalog::Progress::default();
+        let t = Instant::now();
+        let capture = super::super::worlds::catalog::read_local(&dir, &progress).unwrap();
+        println!("{} splats in {:?}; eye {:?} ground {} sky {} farthest {}", capture.gaussians.len(), t.elapsed(), capture.view.eye(), capture.view.ground(), capture.sky.is_some(), capture.farthest());
+        assert!(capture.gaussians.len() > 1000);
+        // Its start eye is where there are splats, as the distance sort says.
+        assert!(capture.within(30.0) > capture.gaussians.len() / 4);
     }
 
     /// Enzo: "be able to throw the scrolling so we can go faster".

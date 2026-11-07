@@ -64,6 +64,8 @@ const TYPING_PAUSE: Duration = Duration::from_millis(400);
 #[derive(Clone, Debug)]
 pub enum Relayed {
     Show(Entry),
+    /// A capture of this computer's gallery: its session, what it is called, and what tells its results apart.
+    ShowLocal { dir: std::path::PathBuf, name: String, changed: u64 },
     View(Action),
 }
 
@@ -643,6 +645,12 @@ impl Worlds {
                     self.picked = Some(entry);
                     self.deferred.push(Action::Show(id));
                 }
+                Relayed::ShowLocal { dir, name, changed } => {
+                    let entry = Entry::local(dir, name, changed);
+                    let id = entry.id;
+                    self.picked = Some(entry);
+                    self.deferred.push(Action::Show(id));
+                }
                 Relayed::View(action) => self.deferred.push(action),
             }
         }
@@ -1055,13 +1063,17 @@ impl Worlds {
                     let (tx, rx) = mpsc::channel();
                     let (source, p, e) = (self.source.clone(), progress.clone(), entry.clone());
                     let _ = std::thread::Builder::new().name("3d-worlds-download".into()).spawn(move || {
-                        let _ = tx.send(source.download(&e, &p));
+                        let _ = tx.send(match &e.local {
+                            Some(dir) => catalog::read_local(dir, &p),
+                            None => source.download(&e, &p),
+                        });
                     });
                     self.download = Some(Download { id, key, progress, answer: rx });
                     self.current = Some(entry);
                 }
                 Action::Hide => {
                     self.download = None;
+                    self.error = None;
                     self.view.hide();
                     if !self.view.active() {
                         self.current = None;

@@ -842,7 +842,7 @@ impl OrbitVr {
         turn.worlds = self.panels.world_relay(cx.world_status.clone());
         for asked in &turn.worlds {
             match asked {
-                super::super::worlds::Relayed::Show(_) => self.showed_view = true,
+                super::super::worlds::Relayed::Show(_) | super::super::worlds::Relayed::ShowLocal { .. } => self.showed_view = true,
                 super::super::worlds::Relayed::View(super::super::worlds::panel::Action::Hide) => self.showed_view = false,
                 super::super::worlds::Relayed::View(_) => {}
             }

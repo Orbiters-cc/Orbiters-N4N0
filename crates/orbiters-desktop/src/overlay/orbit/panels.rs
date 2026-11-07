@@ -71,6 +71,13 @@ pub enum Action {
     OpenApp,
     /// Moves in what plays: where is the pointer's.
     Timeline,
+    /// A tile of the gallery: a capture shows in 3D, a picture large.
+    Capture(usize),
+    /// What the gallery shows.
+    Filter(GalleryFilter),
+    /// From the picture shown large, back to the gallery; to the picture after it, or before.
+    PictureBack,
+    PictureStep(bool),
     /// The 3D view goes.
     HideView,
     /// The scroll bar: where it is grabbed.
@@ -159,7 +166,70 @@ pub struct WorldVisit {
 }
 
 /// What the panels show of a recent capture.
-#[derive(Clone, Debug, PartialEq)]
+/// What a tile of the gallery is.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum RecentKind {
+    /// A capture that can show in 3D.
+    #[default]
+    Capture,
+    /// A capture with no 3D made of it (yet).
+    NoView,
+    /// One of VRChat's pictures.
+    Picture,
+}
+
+/// What the gallery shows, of what is on this computer.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum GalleryFilter {
+    #[default]
+    All,
+    /// Only captures, as Enzo asked: "we can have a filter to only show the 3D ones".
+    Captures,
+}
+
+/// The gallery's tiles and where each lies, made once when they change. Tens of thousands of pictures are nothing unusual, and this goes around with the facts each frame: it is
+/// compared by being the same list.
+#[derive(Clone, Debug, Default)]
+pub struct Gallery(std::sync::Arc<GalleryList>);
+
+#[derive(Debug, Default)]
+struct GalleryList {
+    items: Vec<Recent>,
+    rects: Vec<Rect>,
+    height: f32,
+}
+
+impl Gallery {
+    pub fn new(items: Vec<Recent>, layout: orbiters_core::settings::GalleryLayout) -> Self {
+        if items.is_empty() {
+            return Self::default();
+        }
+        let aspects: Vec<f32> = items.iter().map(Recent::shape).collect();
+        let (rects, height) = crate::pages::gallery_layout::arrange(layout, &aspects, 1024.0 - 48.0, 300.0, 0.0);
+        Self(std::sync::Arc::new(GalleryList { items, rects, height }))
+    }
+}
+
+impl PartialEq for Gallery {
+    fn eq(&self, other: &Self) -> bool {
+        std::sync::Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl std::ops::Deref for Gallery {
+    type Target = [Recent];
+    fn deref(&self) -> &[Recent] {
+        &self.0.items
+    }
+}
+
+impl FromIterator<Recent> for Gallery {
+    fn from_iter<I: IntoIterator<Item = Recent>>(items: I) -> Self {
+        Self::new(items.into_iter().collect(), Default::default())
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct Recent {
     pub dir: PathBuf,
     pub title: String,
@@ -168,6 +238,15 @@ pub struct Recent {
     /// Reconstructed so far, while it is.
     pub progress: Option<f32>,
     pub picture: Option<TextureId>,
+    /// Its width over its height, 0 when not known.
+    pub aspect: f32,
+    pub kind: RecentKind,
+}
+
+impl Recent {
+    fn shape(&self) -> f32 {
+        if self.aspect > 0.0 { self.aspect } else { 16.0 / 9.0 }
+    }
 }
 
 /// What the panels show of Orbiters' state.
@@ -185,7 +264,16 @@ pub struct Facts {
     /// Which the last press asked for: its button shows the countdown.
     pub picture_mode: Option<PhotoMode>,
     /// The newest captures, at most six.
-    pub recent: Vec<Recent>,
+    pub recent: Gallery,
+    /// What the gallery shows; whether it is still being read; the picture shown large, and its picture; each tile on the page's words (its number, its state, how far made) and picture.
+    pub gallery_filter: GalleryFilter,
+    pub gallery_reading: bool,
+    pub opened: Option<usize>,
+    pub opened_picture: Option<TextureId>,
+    pub recent_words: Vec<(usize, String, Option<f32>)>,
+    pub recent_pictures: Vec<(usize, TextureId)>,
+    /// What the 3D view says of what was asked of it.
+    pub view_said: Option<(String, String)>,
     /// What is being reconstructed: its share done (0 to 1), and how many wait after it.
     pub reconstructing: Option<f32>,
     pub waiting: usize,
@@ -263,6 +351,12 @@ pub struct Item {
 /// What an item is drawn as.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Look {
+    /// One choice of what the gallery shows.
+    Filter(GalleryFilter),
+    /// A picture of the gallery, as large as the page.
+    BigPicture(usize),
+    /// To the picture after this one, or before.
+    Step(bool),
     /// A cell of the ring: its icon over its label.
     Cell { icon: &'static str, label: &'static str, badge: bool },
     /// A small heading over a group of a sheet's tiles.
@@ -509,21 +603,40 @@ fn sheet_page_items(sheet: Sheet, facts: &Facts) -> Vec<Item> {
             }
             out
         }
+        Sheet::Pictures if facts.opened.is_some() => {
+            let n = facts.opened.unwrap_or(0);
+            let mut out = vec![
+                Item { action: Action::Idle, rect: r(0.0, 0.0, 1024.0, 576.0), look: Look::BigPicture(n) },
+                Item { action: Action::PictureBack, rect: r(24.0, 8.0, 44.0, 44.0), look: Look::Back },
+            ];
+            if picture_beside(facts, n, false).is_some() {
+                out.push(Item { action: Action::PictureStep(false), rect: r(14.0, 262.0, 52.0, 52.0), look: Look::Step(false) });
+            }
+            if picture_beside(facts, n, true).is_some() {
+                out.push(Item { action: Action::PictureStep(true), rect: r(958.0, 262.0, 52.0, 52.0), look: Look::Step(true) });
+            }
+            out
+        }
         Sheet::Pictures => {
             let (x0, gap, y0, h) = (24.0, 12.0, 10.0, GALLERY_TOP - 22.0);
-            let width = (1024.0 - x0 * 2.0 - gap * 2.0) / 3.0;
+            // Its three buttons, and at the end what it shows.
+            const FILTER: f32 = 104.0;
+            let width = (1024.0 - x0 * 2.0 - gap * 3.0 - FILTER) / 3.0;
             let mut out = Vec::new();
             // Under the buttons, and so under them for the pointer too.
             let (rects, _) = gallery_rects(facts);
             for (i, rect) in rects.iter().enumerate() {
                 let rect = rect.translate(vec2(x0, GALLERY_TOP - facts.gallery_scroll));
                 if rect.bottom() > GALLERY_TOP && rect.top() < 576.0 {
-                    out.push(Item { action: Action::Page(Target::History), rect, look: Look::Capture(i) });
+                    out.push(Item { action: Action::Capture(i), rect, look: Look::Capture(i) });
                 }
             }
             out.push(Item { action: Action::Picture(PhotoMode::People), rect: r(x0, y0, width, h), look: Look::Picture(PhotoMode::People) });
             out.push(Item { action: Action::Picture(PhotoMode::World), rect: r(x0 + width + gap, y0, width, h), look: Look::Picture(PhotoMode::World) });
             out.push(Item { action: Action::Record, rect: r(x0 + (width + gap) * 2.0, y0, width, h), look: Look::Record });
+            let (x, tall) = (1024.0 - x0 - FILTER, (h - 6.0) / 2.0);
+            out.push(Item { action: Action::Filter(GalleryFilter::All), rect: r(x, y0, FILTER, tall), look: Look::Filter(GalleryFilter::All) });
+            out.push(Item { action: Action::Filter(GalleryFilter::Captures), rect: r(x, y0 + tall + 6.0, FILTER, tall), look: Look::Filter(GalleryFilter::Captures) });
             out
         }
         Sheet::Menu | Sheet::Worlds => Vec::new(),
@@ -533,13 +646,20 @@ fn sheet_page_items(sheet: Sheet, facts: &Facts) -> Vec<Item> {
 /// Where the gallery starts on its page, under its three buttons.
 pub const GALLERY_TOP: f32 = 106.0;
 
+/// The nearest picture after tile `n`, or before: captures show in 3D and not large, so they are stepped over.
+pub fn picture_beside(facts: &Facts, n: usize, after: bool) -> Option<usize> {
+    let is_picture = |r: &Recent| r.kind == RecentKind::Picture;
+    if after {
+        facts.recent.get(n + 1..)?.iter().position(is_picture).map(|i| n + 1 + i)
+    } else {
+        facts.recent.get(..n)?.iter().rposition(is_picture)
+    }
+}
+
 /// The gallery as the app's own Photos & captures lays it out, in the layout chosen there: each capture's place from the gallery's top, and its height. All 16:9 as the thumbnails are, so
 /// that nothing moves as pictures arrive.
-fn gallery_rects(facts: &Facts) -> (Vec<Rect>, f32) {
-    if facts.recent.is_empty() {
-        return (Vec::new(), 0.0);
-    }
-    crate::pages::gallery_layout::arrange(facts.gallery_layout, &vec![16.0 / 9.0; facts.recent.len()], 1024.0 - 48.0, 300.0, 0.0)
+fn gallery_rects(facts: &Facts) -> (&[Rect], f32) {
+    (&facts.recent.0.rects, facts.recent.0.height)
 }
 
 /// Where YouTube's results start on their page, under the search they are of.
@@ -584,6 +704,8 @@ pub fn visits_shown(scroll: f32) -> std::ops::Range<usize> {
 /// How far a sheet's list scrolls.
 pub fn max_scroll(sheet: Sheet, facts: &Facts) -> f32 {
     match sheet {
+        // A picture shown large leaves where the list was alone.
+        Sheet::Pictures if facts.opened.is_some() => 0.0,
         Sheet::Pictures => (GALLERY_TOP + gallery_rects(facts).1 + 12.0 - 576.0).max(0.0),
         Sheet::Instances => (VISIT_TOP + facts.worlds_visited.len() as f32 * (VISIT_HEIGHT + VISIT_GAP) + 4.0 - 576.0).max(0.0),
         Sheet::Results => {
@@ -734,6 +856,20 @@ pub fn caption(action: Action, facts: &Facts) -> Option<(String, String)> {
         },
         Action::NewConversation => ("New conversation".into(), "N4N0 starts over.".into()),
         Action::HideView => ("Hide 3D".into(), "The capture around you goes.".into()),
+        Action::Capture(n) => {
+            let recent = facts.recent.get(n)?;
+            let says = match recent.kind {
+                RecentKind::Capture if facts.desktop => "Press to open the Orbiters window, where it shows in 3D.",
+                RecentKind::Capture => "Press to see it in 3D around you.",
+                RecentKind::NoView => "It has no 3D yet. The Orbiters window can make it.",
+                RecentKind::Picture => "Press to see it large.",
+            };
+            (recent.title.clone(), says.into())
+        }
+        Action::Filter(GalleryFilter::All) => ("Everything".into(), "VRChat's pictures and your 3D captures together.".into()),
+        Action::Filter(GalleryFilter::Captures) => ("Only 3D".into(), "Only your 3D pictures and recordings.".into()),
+        Action::PictureBack => ("Back".into(), "To the gallery.".into()),
+        Action::PictureStep(after) => (if after { "Next picture" } else { "Previous picture" }.into(), "Pictures only: captures show in 3D.".into()),
         Action::Timeline => ("Move in what plays".into(), "Press or drag along it.".into()),
         Action::ScrollBar => ("Scroll".into(), "Hold and move it.".into()),
         Action::Video(i) => (facts.videos.get(i).map_or(String::new(), |v| v.title.clone()), "Press to copy its link, for the world's video player.".into()),
@@ -935,14 +1071,14 @@ pub fn paint(p: &Painter, zone: Zone, size: Vec2, facts: &Facts, hover: Option<u
             let from = x + title + 18.0;
             // The head is where this sheet says what is going on: nothing lies over or under it.
             if let Some((first, second)) = status_now(facts) {
-                let room = size.x - 50.0 - from;
+                let room = size.x - 50.0 - if facts.view_showing { 104.0 } else { 0.0 } - from;
                 let big = theme::font(13.0, weight::BOLD);
                 let small = theme::font(11.5, weight::MEDIUM);
                 p.text(pos2(from, 18.0), Align2::LEFT_CENTER, fit(p, &first, &big, room), big, look::ACCENT);
                 p.text(pos2(from, 35.0), Align2::LEFT_CENTER, fit(p, &second, &small, room), small, look::LABEL);
             } else if let Some((first, second)) = facts.pointed.filter(|_| matches!(facts.sheet, Some(Sheet::All | Sheet::Pictures))).and_then(|a| caption(a, facts)) {
                 // What a small tile does, which it does not say itself.
-                let room = size.x - 50.0 - from;
+                let room = size.x - 50.0 - if facts.view_showing { 104.0 } else { 0.0 } - from;
                 let big = theme::font(13.0, weight::BOLD);
                 let small = theme::font(11.5, weight::MEDIUM);
                 p.text(pos2(from, 18.0), Align2::LEFT_CENTER, fit(p, &first, &big, room), big, look::LABEL);
@@ -979,8 +1115,13 @@ pub fn paint_sheet(p: &Painter, sheet: Sheet, facts: &Facts, hover: Option<usize
     }
     if sheet == Sheet::Pictures && facts.recent.is_empty() {
         widgets::icon(p, pos2(512.0, 300.0), icons::CUBE, 54.0, look::MUTED);
-        text(p, pos2(512.0, 354.0), Align2::CENTER_CENTER, "No captures yet", 22.0, weight::BOLD, look::LABEL);
-        text(p, pos2(512.0, 384.0), Align2::CENTER_CENTER, "Your 3D pictures and recordings show here.", 16.0, weight::MEDIUM, look::MUTED);
+        let (first, second) = match (facts.gallery_reading, facts.gallery_filter) {
+            (true, _) => ("Reading your pictures", "They show here in a moment."),
+            (false, GalleryFilter::All) => ("Nothing here yet", "VRChat's pictures and your 3D captures show here."),
+            (false, GalleryFilter::Captures) => ("No captures yet", "Your 3D pictures and recordings show here."),
+        };
+        text(p, pos2(512.0, 354.0), Align2::CENTER_CENTER, first, 22.0, weight::BOLD, look::LABEL);
+        text(p, pos2(512.0, 384.0), Align2::CENTER_CENTER, second, 16.0, weight::MEDIUM, look::MUTED);
     }
     for (i, item) in sheet_items(sheet, facts).iter().enumerate() {
         draw(p, Zone::Takeover, item, facts, hover == Some(i), pressed == Some(i));
@@ -1513,6 +1654,18 @@ fn draw(p: &Painter, zone: Zone, item: &Item, facts: &Facts, hovered: bool, pres
         }
         Look::Caption => draw_caption(p, rect, facts),
         Look::Capture(n) => draw_capture(p, rect, n, facts, hovered, pressed),
+        Look::BigPicture(n) => draw_big_picture(p, rect, n, facts),
+        Look::Step(after) => {
+            p.circle_filled(rect.center(), rect.width() / 2.0, if hovered { theme::alpha(theme::INK_900, 0.95) } else { theme::alpha(theme::INK_900, 0.7) });
+            widgets::icon(p, rect.center(), if after { icons::CARET_RIGHT } else { icons::CARET_LEFT }, 26.0, look::LABEL);
+        }
+        Look::Filter(filter) => {
+            let on = facts.gallery_filter == filter;
+            let fill = if on { theme::VIOLET } else if hovered { look::TILE_HOVER } else { look::TILE };
+            p.rect_filled(rect, theme::radius(rect.height() / 2.0), fill);
+            let words = if filter == GalleryFilter::All { "All" } else { "Only 3D" };
+            p.text(rect.center(), Align2::CENTER_CENTER, words, theme::font(15.0, weight::SEMIBOLD), if on { Color32::WHITE } else { look::LABEL });
+        }
     }
 }
 
@@ -1623,10 +1776,11 @@ fn draw_capture(p: &Painter, rect: Rect, n: usize, facts: &Facts, hovered: bool,
     const RADIUS: f32 = 16.0;
     let radii = [theme::squircle(RADIUS); 4];
     let points = orbiters_ui::paint::squircle_points_corners(rect, radii);
-    match recent.picture {
+    let (state, progress) = facts.recent_words.iter().find(|w| w.0 == n).map_or_else(|| (recent.state.clone(), recent.progress), |w| (w.1.clone(), w.2));
+    match tile_picture(facts, n) {
         Some(id) => {
             let v = if pressed { 200 } else { 255 };
-            orbiters_ui::paint::squircle_texture(&clip, rect, radii, id, cover_uv(rect.size()), Color32::from_rgb(v, v, v));
+            orbiters_ui::paint::squircle_texture(&clip, rect, radii, id, cover_uv_of(rect.size(), recent.shape()), Color32::from_rgb(v, v, v));
         }
         None => {
             orbiters_ui::paint::fill_convex(&clip, &points, |_| theme::INK_750);
@@ -1643,14 +1797,50 @@ fn draw_capture(p: &Painter, rect: Rect, n: usize, facts: &Facts, hovered: bool,
     let font = theme::font(19.0, weight::BOLD);
     clip.text(pos2(rect.left() + 14.0, rect.bottom() - 37.0), Align2::LEFT_CENTER, fit(&clip, &recent.title, &font, room), font, look::LABEL);
     let font = theme::font(15.0, weight::MEDIUM);
-    clip.text(pos2(rect.left() + 14.0, rect.bottom() - 15.0), Align2::LEFT_CENTER, fit(&clip, &recent.state, &font, room), font, theme::FG_2);
-    if let Some(done) = recent.progress {
+    clip.text(pos2(rect.left() + 14.0, rect.bottom() - 15.0), Align2::LEFT_CENTER, fit(&clip, &state, &font, room), font, theme::FG_2);
+    // In one gallery with VRChat's pictures, what can show in 3D says so.
+    if recent.kind == RecentKind::Capture {
+        let badge = Rect::from_min_size(rect.min + vec2(10.0, 10.0), vec2(56.0, 26.0));
+        clip.rect_filled(badge, theme::radius(13.0), theme::alpha(theme::INK_900, 0.82));
+        widgets::icon(&clip, badge.min + vec2(17.0, 13.0), icons::CUBE, 15.0, look::ACCENT);
+        clip.text(badge.min + vec2(28.0, 13.0), Align2::LEFT_CENTER, "3D", theme::font(13.0, weight::BOLD), look::LABEL);
+    }
+    if let Some(done) = progress {
         let bar = Rect::from_min_size(pos2(rect.left() + 14.0, rect.bottom() - 6.0), vec2(room * done.clamp(0.0, 1.0), 3.0));
         clip.rect_filled(bar, theme::radius(1.5), theme::ACCENT);
     }
     if hovered {
         clip.rect_stroke(rect.shrink(1.0), theme::radius(RADIUS), Stroke::new(2.0, look::ACCENT), egui::StrokeKind::Middle);
     }
+}
+
+/// A tile's picture, when it has come.
+fn tile_picture(facts: &Facts, n: usize) -> Option<TextureId> {
+    facts.recent_pictures.iter().find(|w| w.0 == n).map(|w| w.1).or_else(|| facts.recent.get(n).and_then(|r| r.picture))
+}
+
+/// A picture of the gallery whole on its page, on its small picture until the large one has come.
+fn draw_big_picture(p: &Painter, rect: Rect, n: usize, facts: &Facts) {
+    let Some(recent) = facts.recent.get(n) else { return };
+    p.rect_filled(rect, theme::radius(12.0), theme::alpha(theme::INK_900, 0.92));
+    let room = rect.shrink(8.0);
+    let shape = recent.shape();
+    let size = if room.width() / room.height() > shape { vec2(room.height() * shape, room.height()) } else { vec2(room.width(), room.width() / shape) };
+    let shown = Rect::from_center_size(room.center(), size);
+    match facts.opened_picture.or_else(|| tile_picture(facts, n)) {
+        Some(id) => {
+            orbiters_ui::paint::squircle_texture(p, shown, [theme::squircle(10.0); 4], id, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
+        }
+        None => widgets::icon(p, shown.center(), icons::IMAGE, 54.0, look::MUTED),
+    }
+    let state = facts.recent_words.iter().find(|w| w.0 == n).map_or(recent.state.as_str(), |w| w.1.as_str());
+    let words = format!("{}, {}", recent.title, state);
+    let font = theme::font(16.0, weight::SEMIBOLD);
+    let words = fit(p, &words, &font, 760.0);
+    let wide = p.layout_no_wrap(words.clone(), font.clone(), look::LABEL).size().x + 28.0;
+    let pill = Rect::from_center_size(pos2(rect.center().x, rect.bottom() - 30.0), vec2(wide, 34.0));
+    p.rect_filled(pill, theme::radius(17.0), theme::alpha(theme::INK_900, 0.82));
+    p.text(pill.center(), Align2::CENTER_CENTER, words, font, look::LABEL);
 }
 
 /// The words about what is pointed at, or what to do first, in a pill as wide as they are. Nothing to say: nothing shows.
@@ -1673,7 +1863,9 @@ fn status_now(facts: &Facts) -> Option<(String, String)> {
     if facts.picture_flying {
         return Some(("3D picture in progress".into(), "The camera is flying. Stay where you are for a moment.".into()));
     }
-    said_now(facts).or_else(|| facts.invite_said.clone().map(|said| (facts.sheet_title.clone(), said)))
+    said_now(facts)
+        .or_else(|| facts.invite_said.clone().map(|said| (facts.sheet_title.clone(), said)))
+        .or_else(|| facts.view_said.clone().filter(|_| facts.sheet == Some(Sheet::Pictures)))
 }
 
 /// What a 3D picture waits for, in the caption's two lines.
@@ -1705,7 +1897,12 @@ pub fn draw_words(p: &Painter, rect: Rect, first: &str, second: &str) {
 
 /// The part of a 16:9 thumbnail that fills a box of this shape without stretching it.
 fn cover_uv(size: Vec2) -> Rect {
-    let (box_aspect, picture_aspect) = (size.x / size.y.max(1.0), 16.0 / 9.0);
+    cover_uv_of(size, 16.0 / 9.0)
+}
+
+/// The part of a picture of this shape that fills a box of this size.
+fn cover_uv_of(size: Vec2, picture_aspect: f32) -> Rect {
+    let box_aspect = size.x / size.y.max(1.0);
     if box_aspect > picture_aspect {
         let v = picture_aspect / box_aspect;
         Rect::from_min_max(pos2(0.0, (1.0 - v) / 2.0), pos2(1.0, (1.0 + v) / 2.0))
@@ -1754,7 +1951,7 @@ mod tests {
 
     fn facts() -> Facts {
         Facts {
-            recent: (0..4).map(|i| Recent { dir: PathBuf::from(format!("s{i}")), title: format!("World {i}"), state: "3D picture, 2 h ago".into(), progress: None, picture: None }).collect(),
+            recent: (0..4).map(|i| Recent { dir: PathBuf::from(format!("s{i}")), title: format!("World {i}"), state: "3D picture, 2 h ago".into(), progress: None, picture: None, ..Default::default() }).collect(),
             timer: 3,
             n4n0: true,
             ..Default::default()
@@ -1879,7 +2076,7 @@ mod tests {
 
     #[test]
     fn the_gallery_scrolls_through_everything_and_keeps_its_buttons_on_top() {
-        let many = |n: usize| Facts { recent: (0..n).map(|i| Recent { dir: PathBuf::from(format!("s{i}")), title: format!("W{i}"), state: String::new(), progress: None, picture: None }).collect(), desktop: true, ..facts() };
+        let many = |n: usize| Facts { recent: (0..n).map(|i| Recent { dir: PathBuf::from(format!("s{i}")), title: format!("W{i}"), state: String::new(), progress: None, picture: None, ..Default::default() }).collect(), desktop: true, ..facts() };
         let captures = |f: &Facts| sheet_items(Sheet::Pictures, f).iter().filter_map(|i| if let Look::Capture(n) = i.look { Some(n) } else { None }).collect::<Vec<_>>();
         let start = many(200);
         let shown = captures(&start);
@@ -1897,6 +2094,38 @@ mod tests {
         let button = items.iter().find(|i| i.action == Action::Picture(PhotoMode::People)).unwrap().rect;
         let on = hit(&items, button.center()).unwrap();
         assert_eq!(items[on].action, Action::Picture(PhotoMode::People));
+    }
+
+    /// Enzo: "when I click on a capture, instead of showing me the capture in 3D, it teleports me in a weird page".
+    #[test]
+    fn a_tile_acts_for_itself_and_a_picture_shows_large_with_a_way_back() {
+        let kinds = [RecentKind::Capture, RecentKind::Picture, RecentKind::NoView, RecentKind::Picture];
+        let recent: Gallery = kinds.iter().map(|kind| Recent { title: "A world".into(), kind: *kind, ..Default::default() }).collect();
+        let facts = Facts { recent, sheet: Some(Sheet::Pictures), ..Facts::default() };
+        let items = sheet_items(Sheet::Pictures, &facts);
+        for n in 0..kinds.len() {
+            assert!(items.iter().any(|i| i.action == Action::Capture(n) && matches!(i.look, Look::Capture(m) if m == n)), "{n}");
+            assert!(caption(Action::Capture(n), &facts).is_some(), "says what it does");
+        }
+        assert!(!items.iter().any(|i| matches!(i.action, Action::Page(_))), "no page of captures to share");
+        // What it shows can be chosen, on the page itself.
+        assert!(items.iter().any(|i| i.action == Action::Filter(GalleryFilter::Captures)));
+        assert!(caption(Action::Filter(GalleryFilter::Captures), &facts).is_some());
+        // Large: back is there, the list keeps its place, and the steps go from picture to picture, over the captures.
+        let opened = Facts { opened: Some(1), gallery_scroll: 40.0, ..facts.clone() };
+        let large = sheet_items(Sheet::Pictures, &opened);
+        assert!(large.iter().any(|i| i.action == Action::PictureBack));
+        assert!(!large.iter().any(|i| matches!(i.action, Action::Capture(_) | Action::Filter(_) | Action::ScrollBar)));
+        assert_eq!(picture_beside(&opened, 1, true), Some(3));
+        assert_eq!(picture_beside(&opened, 1, false), None);
+        assert!(!large.iter().any(|i| i.action == Action::PictureStep(false)), "nothing before it");
+        assert!(large.iter().any(|i| i.action == Action::PictureStep(true)));
+        assert_eq!(picture_beside(&opened, 3, true), None);
+        assert_eq!(max_scroll(Sheet::Pictures, &opened), 0.0);
+        // The same list is the same list, however large: nothing compares its tiles each frame.
+        let again = facts.recent.clone();
+        assert!(again == facts.recent);
+        assert!(facts.recent != kinds.iter().map(|_| Recent::default()).collect::<Gallery>());
     }
 
     /// Enzo, in the headset: "when I grab a tile to scroll down, it just opens it".
@@ -1974,13 +2203,13 @@ mod tests {
     /// Enzo: "be able to grab the scrolling bar too".
     #[test]
     fn a_list_that_scrolls_has_a_bar_to_grab_and_it_reaches_both_ends() {
-        let facts = Facts { recent: (0..120).map(|i| Recent { dir: PathBuf::from(format!("s{i}")), title: String::new(), state: String::new(), progress: None, picture: None }).collect(), sheet: Some(Sheet::Pictures), desktop: true, ..facts() };
+        let facts = Facts { recent: (0..120).map(|i| Recent { dir: PathBuf::from(format!("s{i}")), title: String::new(), state: String::new(), progress: None, picture: None, ..Default::default() }).collect(), sheet: Some(Sheet::Pictures), desktop: true, ..facts() };
         let bar = sheet_items(Sheet::Pictures, &facts).into_iter().find(|i| i.action == Action::ScrollBar).expect("a bar");
         assert!(bar.rect.right() <= 1024.0 && bar.rect.left() >= 1000.0, "off the tiles");
         assert_eq!(scroll_from_bar(Sheet::Pictures, &facts, 0.0), 0.0);
         assert_eq!(scroll_from_bar(Sheet::Pictures, &facts, 576.0), max_scroll(Sheet::Pictures, &facts));
         // A few captures have none.
-        let few = Facts { recent: facts.recent[..2].to_vec(), ..facts.clone() };
+        let few = Facts { recent: facts.recent[..2].iter().cloned().collect(), ..facts.clone() };
         assert!(!sheet_items(Sheet::Pictures, &few).iter().any(|i| i.action == Action::ScrollBar));
     }
 

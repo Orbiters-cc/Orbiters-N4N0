@@ -10,6 +10,7 @@
 //! .blend files MCB made are `Assets/MCB/blenderProjects/<avatar root>_<hash>/(blend~/)<avatar root>.blend`. Neither
 //! records a blueprint ID: a link goes to the avatar whose root it names, else to the avatars and worlds of the scene
 //! it was made from. Only files that exist are listed; nothing is written.
+use orbiters_i18n::tr;
 use crate::avatars::Avatar;
 use crate::discovery;
 use std::collections::HashMap;
@@ -378,7 +379,7 @@ pub fn installs() -> Vec<Blender> {
         let mut apps: Vec<PathBuf> = steam_libraries().into_iter().map(|l| l.join("steamapps/common/Blender/Blender.app")).collect();
         apps.extend(apps_in(Path::new("/Applications")));
         apps.extend(dirs::home_dir().map(|h| apps_in(&h.join("Applications"))).unwrap_or_default());
-        apps.extend(crate::mac::spotlight("kMDItemCFBundleIdentifier == 'org.blenderfoundation.blender'"));
+        apps.extend(crate::mac::spotlight("kMDItemCFBundleIdentifier == 'org.blenderfoundation.blender'")); // i18n: not shown (a macOS query and a folder name)
         exes.extend(apps.iter().map(|app| crate::mac::bundle_program(app)));
     }
     let mut out: Vec<Blender> = vec![];
@@ -418,7 +419,7 @@ pub fn choose<'a>(installs: &'a [Blender], with_addons: &[(u32, u32)]) -> Option
 
 /// The Blender [`open`] uses, if one is found.
 pub fn find() -> Option<Blender> {
-    let settings = if cfg!(target_os = "macos") { "Blender" } else { "Blender Foundation/Blender" };
+    let settings = if cfg!(target_os = "macos") { "Blender" } else { "Blender Foundation/Blender" }; // i18n: not shown (a macOS query and a folder name)
     let config = dirs::config_dir().map(|d| d.join(settings)).map(|d| with_addons(&d)).unwrap_or_default();
     let all = installs();
     choose(&all, &config).cloned()
@@ -437,7 +438,7 @@ pub fn open(blend: &Path) -> anyhow::Result<String> {
         }
         let answer = crate::mac::open_command().arg(blend).output()?;
         anyhow::ensure!(answer.status.success(), "No program here opens .blend files. Install Blender from blender.org.");
-        Ok("the program .blend files open with".into())
+        Ok(tr("the program .blend files open with").into())
     }
     #[cfg(not(target_os = "macos"))]
     {
@@ -452,7 +453,7 @@ pub fn open(blend: &Path) -> anyhow::Result<String> {
             }
         }
         crate::reveal(blend)?;
-        Ok("the program .blend files open with".into())
+        Ok(tr("the program .blend files open with").into())
     }
 }
 

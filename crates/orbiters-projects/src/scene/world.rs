@@ -53,9 +53,9 @@ pub fn lighting_data_maps(loader: &mut Loader, graph: &Graph) -> Vec<Option<Stri
 
 /// A lightmap read and made small.
 pub fn lightmap(path: &std::path::Path, side: u32, limits: &super::Limits) -> anyhow::Result<(Encoded, f32)> {
-    limits.check("reading the lightmaps")?;
+    limits.check("reading the lightmaps")?; // i18n: not shown (what a time-limit error says it was doing)
     let picture = texture::decode_linear(path, limits.max_texture_bytes)?;
-    limits.check("reading the lightmaps")?;
+    limits.check("reading the lightmaps")?; // i18n: not shown (what a time-limit error says it was doing)
     texture::encode_light(&picture.shrink(side, true), 0.999, 92)
 }
 

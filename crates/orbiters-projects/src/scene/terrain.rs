@@ -120,7 +120,7 @@ fn parse(v: &Value, sub: &dyn Fn(i64) -> Option<Value>, assets: &Assets, files: 
     let prototypes: Vec<Ref> = d.get("m_TreePrototypes").items().iter().map(|p| p.get("prefab").as_ref().unwrap_or(Ref { file_id: 0, guid: None })).collect();
     let trees = trees_of(d.get("m_TreeInstances"));
     let detail_patches = d.get("m_Patches").items().iter().filter(|p| !bytes_of(p.get("coverage"), 1).iter().all(|c| *c == 0)).count();
-    Ok(TerrainData { name: v.get("m_Name").str_or("Terrain").to_string(), size, resolution, heights, layers, alpha, prototypes, trees, detail_patches })
+    Ok(TerrainData { name: v.get("m_Name").str_or("Terrain").to_string(), size, resolution, heights, layers, alpha, prototypes, trees, detail_patches }) // i18n: not shown (Unity's default terrain name)
 }
 
 /// A list of plain numbers as its bytes, however the file holds it: bytes (binary), hex (text), or a list.

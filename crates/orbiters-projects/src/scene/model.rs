@@ -225,7 +225,7 @@ impl ImportSettings {
 pub fn load(path: &Path, settings: &ImportSettings, limits: &Limits) -> anyhow::Result<Model> {
     let size = std::fs::metadata(path).with_context(|| format!("reading {}", path.display()))?.len();
     anyhow::ensure!(size <= limits.max_model_bytes, "{} is {} MB, more than a preview reads", file_name(path), size >> 20);
-    limits.check("loading the models")?;
+    limits.check("loading the models")?; // i18n: not shown (what a time-limit error says it was doing)
     let deadline = limits.deadline;
     let cancel = limits.cancel.clone();
     let progress = move |_: &ufbx::Progress| {
@@ -258,7 +258,7 @@ pub fn load(path: &Path, settings: &ImportSettings, limits: &Limits) -> anyhow::
     let scene = match ufbx::load_file(path_str, opts) {
         Ok(s) => s,
         Err(e) => {
-            limits.check("loading the models")?;
+            limits.check("loading the models")?; // i18n: not shown (what a time-limit error says it was doing)
             bail!("{} could not be read: {}", file_name(path), e.description);
         }
     };
@@ -410,7 +410,7 @@ fn convert(scene: &ufbx::Scene, settings: &ImportSettings, unit: f32, limits: &L
         let has_mesh = node.mesh.as_ref().is_some_and(|m| m.num_triangles > 0);
         let ids = NodeIds {
             game_object: unique("GameObject", &path),
-            transform: unique("Transform", &format!("{path}/Transform")),
+            transform: unique("Transform", &format!("{path}/Transform")), // i18n: not shown (Unity ids and names of a model's parts)
             renderer: if !has_mesh {
                 0
             } else if skinned {
@@ -452,7 +452,7 @@ fn convert(scene: &ufbx::Scene, settings: &ImportSettings, unit: f32, limits: &L
         if mesh.num_triangles == 0 {
             continue;
         }
-        limits.check("reading the models' meshes")?;
+        limits.check("reading the models' meshes")?; // i18n: not shown (what a time-limit error says it was doing)
         triangles += mesh.num_triangles;
         anyhow::ensure!(triangles <= limits.max_model_triangles, "the model has more than {} triangles", limits.max_model_triangles);
         let (m, used) = mesh_of(node, mesh, settings, unit, &node_index)?;
@@ -466,7 +466,7 @@ fn convert(scene: &ufbx::Scene, settings: &ImportSettings, unit: f32, limits: &L
                         materials.len() - 1
                     }),
                     None => *material_index.entry(u32::MAX).or_insert_with(|| {
-                        materials.push(ModelMaterial { name: "No Name".into(), color: [1.0; 4], texture: None });
+                        materials.push(ModelMaterial { name: "No Name".into(), color: [1.0; 4], texture: None }); // i18n: not shown (Unity ids and names of a model's parts)
                         materials.len() - 1
                     }),
                 }
@@ -474,7 +474,7 @@ fn convert(scene: &ufbx::Scene, settings: &ImportSettings, unit: f32, limits: &L
             .collect();
         let name = node.element.name.to_string();
         let index = meshes.len();
-        mesh_ids.entry(file_id("Mesh", &name, 0)).or_insert(index);
+        mesh_ids.entry(file_id("Mesh", &name, 0)).or_insert(index); // i18n: not shown (Unity ids and names of a model's parts)
         meshes.push(m);
         nodes[i].mesh = Some(index);
         nodes[i].materials = slots;

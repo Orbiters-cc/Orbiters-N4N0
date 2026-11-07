@@ -16,6 +16,7 @@
 //! project never opened with Toolkit, or never opened at all, has its 3D preview too; the window's chips switch
 //! between the scenes, building the one picked if needed; a scene that cannot be built says why ("No preview: …").
 
+use orbiters_i18n::{tr, tr_n};
 use super::builds::{self, Builder, Done};
 use super::preview_gpu::{self, LightMode, Pipelines, Scene, View};
 use super::state::State;
@@ -684,20 +685,20 @@ pub(super) fn cover(ui: &mut Ui, cx: &Cx, state: &mut State, project: &Project, 
         let busy = c.loading.running() || status == Status::Listing;
         if c.loading.running() {
         } else if let Some(e) = &c.error {
-            notes.push(Note::new(icons::WARNING, "3D preview unreadable".into(), format!("Its file could not be read: {e}")));
+            notes.push(Note::new(icons::WARNING, tr("3D preview unreadable").into(), tr!("Its file could not be read: {error}", error = e)));
         } else {
             match &status {
                 Status::NoScene => {
-                    notes.push(Note::new(icons::CUBE, "No scene to preview".into(), "This project has no scene (.unity file) under Assets yet.".into()))
+                    notes.push(Note::new(icons::CUBE, tr("No scene to preview").into(), tr("This project has no scene (.unity file) under Assets yet.").into()))
                 }
                 Status::Building => notes.push(Note {
                     spinner: true,
                     ..Note::new(
                         icons::CUBE,
-                        "Building 3D preview…".into(),
-                        format!(
-                            "Reading {scene_name} from the project's files: its prefabs, models, materials and textures. Kept once built, \
-                             until one of them changes; the first time on a hard disk can take a minute."
+                        tr("Building 3D preview…").into(),
+                        tr!(
+                            "Reading {scene} from the project's files: its prefabs, models, materials and textures. Kept once built, until one of them changes; the first time on a hard disk can take a minute.",
+                            scene = scene_name
                         ),
                     )
                 }),
@@ -705,46 +706,50 @@ pub(super) fn cover(ui: &mut Ui, cx: &Cx, state: &mut State, project: &Project, 
                     let offer = match &toolkit {
                         Some((None, newest)) => Some((
                             icons::PLUS,
-                            if updating { "Adding Toolkit…" } else { "Add Toolkit for 3D" },
-                            format!(
-                                "Orbiters Toolkit draws the scene you save in Unity here, exactly.{}",
-                                if newest.is_some() {
-                                    " Press to add it, then save the scene once."
-                                } else {
-                                    " Add the Orbiters repository, then Orbiters Toolkit below."
-                                }
-                            ),
+                            if updating { tr("Adding Toolkit…") } else { tr("Add Toolkit for 3D") },
+                            if newest.is_some() {
+                                tr("Orbiters Toolkit draws the scene you save in Unity here, exactly. Press to add it, then save the scene once.").to_string()
+                            } else {
+                                tr("Orbiters Toolkit draws the scene you save in Unity here, exactly. Add the Orbiters repository, then Orbiters Toolkit below.").to_string()
+                            },
                             newest.clone(),
                         )),
                         Some((Some(v), newest)) if version(v) < version(TOOLKIT_PREVIEWS) => Some((
                             super::art::glyph::ARROW_UP,
-                            if updating { "Updating Toolkit…" } else { "Update Toolkit for 3D" },
-                            format!(
-                                "Orbiters Toolkit {v} in this project does not draw 3D previews yet ({TOOLKIT_PREVIEWS} does).{}",
-                                match newest {
-                                    Some(n) =>
-                                        format!(" Press to update it to {n}: with the project open in Unity, its scene shows here once the editor reloaded."),
-                                    None => " Refresh the Orbiters repository to get the newer one.".into(),
-                                }
-                            ),
+                            if updating { tr("Updating Toolkit…") } else { tr("Update Toolkit for 3D") },
+                            match newest {
+                                Some(n) => tr!(
+                                    "Orbiters Toolkit {version} in this project does not draw 3D previews yet ({previews} does). Press to update it to {newest}: with the project open in Unity, its scene shows here once the editor reloaded.",
+                                    version = v,
+                                    previews = TOOLKIT_PREVIEWS,
+                                    newest = n
+                                ),
+                                None => tr!(
+                                    "Orbiters Toolkit {version} in this project does not draw 3D previews yet ({previews} does). Refresh the Orbiters repository to get the newer one.",
+                                    version = v,
+                                    previews = TOOLKIT_PREVIEWS
+                                ),
+                            },
                             newest.clone(),
                         )),
                         _ => None,
                     };
-                    let hint = if why.starts_with("it took too long") {
+                    let hint = if why.starts_with("it took too long") { // i18n: not shown (the English start of the time-limit error, which stays English)
                         // `scene::RETRY_AFTER`: what the first try read is kept, so the next gets further.
-                        "It is tried again in half an hour (the first look at a project on a hard disk is the slowest), or as soon \
-                         as the scene is saved."
+                        tr("It is tried again in half an hour (the first look at a project on a hard disk is the slowest), or as soon as the scene is saved.")
                     } else if offer.is_some() {
-                        "Orbiters Toolkit draws it exactly each time the scene is saved in Unity."
+                        tr("Orbiters Toolkit draws it exactly each time the scene is saved in Unity.")
                     } else {
                         if cfg!(target_os = "macos") {
-                            "Save the scene in Unity (Cmd+S): Orbiters Toolkit draws it exactly and it shows here a moment later."
+                            tr("Save the scene in Unity (Cmd+S): Orbiters Toolkit draws it exactly and it shows here a moment later.")
                         } else {
-                            "Save the scene in Unity (Ctrl+S): Orbiters Toolkit draws it exactly and it shows here a moment later."
+                            tr("Save the scene in Unity (Ctrl+S): Orbiters Toolkit draws it exactly and it shows here a moment later.")
                         }
                     };
-                    notes.push(Note::new(icons::WARNING, format!("No preview: {why}"), format!("{scene_name}: no 3D preview, {why}.\n\n{hint}")));
+                    notes.push(Note {
+                        short: Some(tr("No 3D preview")),
+                        ..Note::new(icons::WARNING, tr!("No preview: {why}", why = why), tr!("{scene}: no 3D preview, {why}.\n\n{hint}", scene = scene_name, why = why, hint = hint))
+                    });
                     if let Some((glyph, label, tip, offer)) = offer {
                         notes.push(Note { offer, spinner: updating, ..Note::new(glyph, label.into(), tip) });
                     }
@@ -762,7 +767,10 @@ pub(super) fn cover(ui: &mut Ui, cx: &Cx, state: &mut State, project: &Project, 
             let room = (right - left).max(80.0);
             let full = Txt::new(&note.label, 11.5).weight(weight::MEDIUM);
             let fits = widgets::text_size(ui, &full).x + 36.0 <= room;
-            let label = if !fits && note.glyph == icons::WARNING && note.label.starts_with("No preview") { "No 3D preview" } else { note.label.as_str() };
+            let label = match note.short {
+                Some(short) if !fits => short,
+                _ => note.label.as_str(),
+            };
             let txt = Txt::new(label, 11.5).weight(weight::MEDIUM);
             let w = (widgets::text_size(ui, &txt).x + 36.0).min(room);
             let r = Rect::from_min_size(pos2(right - w, rect.top() + 12.0), vec2(w, 24.0));
@@ -802,7 +810,7 @@ pub(super) fn cover(ui: &mut Ui, cx: &Cx, state: &mut State, project: &Project, 
         }
         if let Some(v) = act {
             let installed = toolkit.as_ref().and_then(|t| t.0.clone());
-            let label = if installed.is_some() { format!("Updating Orbiters Toolkit to {v}…") } else { format!("Adding Orbiters Toolkit {v}…") };
+            let label = if installed.is_some() { tr!("Updating Orbiters Toolkit to {version}…", version = v) } else { tr!("Adding Orbiters Toolkit {version}…", version = v) };
             let change = orbiters_projects::vpm::Change::Install { names: vec![(TOOLKIT.into(), Some(v))], prerelease: false };
             super::panel::package_action(state, &ctx, project, change, &label, TOOLKIT);
         }
@@ -833,7 +841,7 @@ pub(super) fn cover(ui: &mut Ui, cx: &Cx, state: &mut State, project: &Project, 
     let mut bu = ui.new_child(UiBuilder::new().max_rect(button).id_salt(id.with("open")));
     bu.multiply_opacity(k * (0.75 + 0.25 * hover));
     let open =
-        widgets::activated(&IconButton::new(icons::CORNERS_OUT, "Look around in 3D").size(32.0, 15.0).backdrop(theme::black(0.55)).show_at(&mut bu, button));
+        widgets::activated(&IconButton::new(icons::CORNERS_OUT, tr("Look around in 3D")).size(32.0, 15.0).backdrop(theme::black(0.55)).show_at(&mut bu, button));
     if (open || resp.clicked()) && k > 0.5 {
         pv.open_window(&ctx, rect, radii[0]);
     }
@@ -847,11 +855,13 @@ struct Note {
     /// What pressing it installs (Orbiters Toolkit's version).
     offer: Option<String>,
     spinner: bool,
+    /// What the label says when it does not fit.
+    short: Option<&'static str>,
 }
 
 impl Note {
     fn new(glyph: &'static str, label: String, tip: String) -> Self {
-        Self { glyph, label, tip, offer: None, spinner: false }
+        Self { glyph, label, tip, offer: None, spinner: false, short: None }
     }
 }
 
@@ -929,9 +939,9 @@ pub(super) fn window(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
         if let Some(ch) = pending.filter(|_| pk > 0.01) {
             ui.painter().rect_filled(f.rect, theme::radius(f.radius), theme::black(0.45 * pk));
             let (glyph, text, spin) = match &ch.state {
-                ChipState::Failed(why) => (icons::WARNING, format!("No preview of {}: {why}", ch.name), false),
-                ChipState::Ready(_) => (icons::CUBE, format!("Opening {}…", ch.name), true),
-                _ => (icons::CUBE, format!("Building {} from the project's files…", ch.name), true),
+                ChipState::Failed(why) => (icons::WARNING, tr!("No preview of {name}: {why}", name = ch.name, why = why), false),
+                ChipState::Ready(_) => (icons::CUBE, tr!("Opening {name}…", name = ch.name), true),
+                _ => (icons::CUBE, tr!("Building {name} from the project's files…", name = ch.name), true),
             };
             let txt = Txt::new(&text, 13.0).weight(weight::MEDIUM).color(theme::alpha(theme::FG, pk));
             let w = (widgets::text_size(ui, &txt).x + 56.0).min(f.rect.width() - 80.0);
@@ -962,14 +972,14 @@ pub(super) fn window(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
         let mut scene_rects = Vec::new();
         chrome(&mut cu, cx, &project, header, written, source, &scenes, &mut scene_rects, busy, f.rect, light, &mut light_switch, &mut act);
         rects_out = scene_rects;
-        if viewer::close_button(&mut cu, f.rect, "Close") {
+        if viewer::close_button(&mut cu, f.rect, tr("Close")) {
             close = true;
         }
         // How to move around, until the view was turned.
         let shown = !c.touched && ctx.input(|i| i.time) - pv.opened_at < HINT_S;
         let hk = anim::toggle(&ctx, wid.with("hint"), shown, Spring::SOFT) * f.content;
         if hk > 0.01 {
-            let txt = Txt::new("Drag to turn  ·  right-drag to move  ·  scroll to zoom  ·  double-click to frame", 12.0).color(theme::alpha(theme::FG_2, hk));
+            let txt = Txt::new(tr("Drag to turn  ·  right-drag to move  ·  scroll to zoom  ·  double-click to frame"), 12.0).color(theme::alpha(theme::FG_2, hk));
             let w = widgets::text_size(ui, &txt).x + 32.0;
             let y = f.rect.bottom() - 26.0 - if scenes.chips.len() > 1 { 52.0 } else { 0.0 } + 8.0 * (1.0 - hk);
             let r = Rect::from_center_size(pos2(f.rect.center().x, y), vec2(w, 30.0));
@@ -1054,7 +1064,7 @@ fn chrome(
     // light would show nothing: its half then stays dim and says why).
     if let Some(LightSwitch { prefer_scene, scene_shows }) = light {
         let scene_light = prefer_scene && scene_shows;
-        let labels = [(true, icons::LIGHTBULB, "Scene light"), (false, icons::SUN, "Studio light")];
+        let labels = [(true, icons::LIGHTBULB, tr("Scene light")), (false, icons::SUN, tr("Studio light"))];
         let txts = labels.map(|(on, _, l)| Txt::new(l, 12.5).weight(if on == scene_light { weight::SEMIBOLD } else { weight::MEDIUM }));
         let widths = txts.each_ref().map(|t| widgets::text_size(ui, t).x + 50.0);
         let close = viewer::close_rect(rect);
@@ -1079,16 +1089,15 @@ fn chrome(
             widgets::icon(&p, pos2(r.left() + 19.0, r.center().y), glyph, 13.0, glyph_tint);
             widgets::text(&p, pos2(r.left() + 31.0, r.center().y), Align2::LEFT_CENTER, &txt.color(fg));
             let tip = match (on, offered) {
-                (true, true) => "The lights the scene has in Unity: its directional lights and ambient light",
+                (true, true) => tr("The lights the scene has in Unity: its directional lights and ambient light"),
                 (true, false) => {
-                    "This scene has too little light of its own to show it (no sun or a very dim one, and an ambient \
-                     light that is black or that Unity had not computed yet), so it is shown in the studio light"
+                    tr("This scene has too little light of its own to show it (no sun or a very dim one, and an ambient light that is black or that Unity had not computed yet), so it is shown in the studio light")
                 }
-                _ => "The same studio light for every preview, as bright as a new Unity scene",
+                _ => tr("The same studio light for every preview, as bright as a new Unity scene"),
             };
             let resp = if offered { resp.on_hover_cursor(egui::CursorIcon::PointingHand) } else { resp }.on_hover_text(tip);
             if widgets::activated(&resp) && !chosen {
-                *act = Some(WindowAct::SceneLight(label == "Scene light"));
+                *act = Some(WindowAct::SceneLight(on));
             }
             sx = r.right();
         }
@@ -1098,7 +1107,7 @@ fn chrome(
     let scene_name = if h.scene.name.is_empty() { project.name.clone() } else { h.scene.name.clone() };
     let saved = written
         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|d| format!("Saved {}", format::relative_time(d.as_secs(), orbiters_projects::discovery::now())))
+        .map(|d| tr!("Saved {when}", when = format::relative_time(d.as_secs(), orbiters_projects::discovery::now())))
         .unwrap_or_default();
     let sub = [project.name.as_str(), saved.as_str()].iter().filter(|s| !s.is_empty()).copied().collect::<Vec<_>>().join("  ·  ");
     let title = Txt::new(&scene_name, 16.0).weight(weight::SEMIBOLD).tracking(-0.01);
@@ -1114,11 +1123,10 @@ fn chrome(
     };
     let tile = Rect::from_min_size(chip.min + vec2(10.0, 10.0), vec2(34.0, 34.0));
     let from = match source {
-        Some(Source::Toolkit(_)) => "Drawn by Orbiters Toolkit when the scene was saved in Unity: exactly as Unity shows it.",
-        Some(Source::Stale(_)) => "Built from the project's files; something changed since, so it is built again and updates here.",
+        Some(Source::Toolkit(_)) => tr("Drawn by Orbiters Toolkit when the scene was saved in Unity: exactly as Unity shows it."),
+        Some(Source::Stale(_)) => tr("Built from the project's files; something changed since, so it is built again and updates here."),
         Some(_) => {
-            "Built by Orbiters - N4N0 from the project's files (scene, prefabs, models, materials, textures), without Unity. \
-                    Orbiters Toolkit draws it exactly each time the scene is saved in Unity."
+            tr("Built by Orbiters - N4N0 from the project's files (scene, prefabs, models, materials, textures), without Unity. Orbiters Toolkit draws it exactly each time the scene is saved in Unity.")
         }
         None => "",
     };
@@ -1134,10 +1142,10 @@ fn chrome(
     let s = &h.stats;
     let mut facts = vec![];
     if !h.avatars.is_empty() {
-        facts.push(if h.avatars.len() == 1 { "1 avatar".to_string() } else { format!("{} avatars", h.avatars.len()) });
+        facts.push(tr_n("{count} avatar", "{count} avatars", h.avatars.len() as u64));
     }
-    facts.push(format!("{} triangles", compact(s.triangles)));
-    facts.push(if h.materials.len() == 1 { "1 material".to_string() } else { format!("{} materials", h.materials.len()) });
+    facts.push(tr!("{count} triangles", count = compact(s.triangles)));
+    facts.push(tr_n("{count} material", "{count} materials", h.materials.len() as u64));
     // Left out for the budget or unreadable (utility shaders and empty meshes are not worth a word).
     let skipped: u32 = s.skipped.iter().filter(|(k, _)| matches!(k.as_str(), "budget" | "missing")).map(|(_, n)| n).sum();
     let mut x = rect.left() + 14.0;
@@ -1157,20 +1165,20 @@ fn chrome(
         p.circle_filled(r.center(), 15.0, theme::black(0.5));
         widgets::icon(&p, r.center(), icons::INFO, 14.0, theme::FG_3);
         let n = |k: &str| s.skipped.get(k).copied().unwrap_or(0);
-        let why = [
-            (n("budget"), "beyond the preview's 2 million triangles"),
-            (n("missing"), "could not be read"),
-        ]
-        .iter()
-        .filter(|(k, _)| *k > 0)
-        .map(|(k, what)| format!("{k} {what}"))
-        .collect::<Vec<_>>()
-        .join(", ");
-        ui.interact(r, Id::unique("project-preview-skipped"), Sense::hover()).on_hover_text(format!("{skipped} meshes are not in this preview: {why}."));
+        let mut reasons = Vec::new();
+        if n("budget") > 0 {
+            reasons.push(tr!("{count} beyond the preview's 2 million triangles", count = n("budget")));
+        }
+        if n("missing") > 0 {
+            reasons.push(tr!("{count} could not be read", count = n("missing")));
+        }
+        let why = reasons.join(", ");
+        let text = orbiters_i18n::fill(&tr_n("{count} mesh is not in this preview: {why}.", "{count} meshes are not in this preview: {why}.", skipped as u64), &[("why", &why)]);
+        ui.interact(r, Id::unique("project-preview-skipped"), Sense::hover()).on_hover_text(text);
     }
 
     // Open in Unity and framing again, bottom right.
-    let b = Button::new("Open in Unity")
+    let b = Button::new(tr("Open in Unity"))
         .icon(icons::PLAY)
         .variant(Variant::Primary)
         .size(Size::Sm)
@@ -1185,7 +1193,7 @@ fn chrome(
     // The right end of the room the note may take: the chips' row when there is one, else the buttons.
     let mut note_end = rr.left() - 8.0;
     if widgets::activated(
-        &IconButton::new(icons::ARROW_COUNTER_CLOCKWISE, "Frame it again")
+        &IconButton::new(icons::ARROW_COUNTER_CLOCKWISE, tr("Frame it again"))
             .size(32.0, 15.0)
             .backdrop(theme::black(0.5))
             .id_salt("preview-reset")
@@ -1204,7 +1212,7 @@ fn chrome(
             Txt::new(&ch.name, 12.5).weight(if on { weight::SEMIBOLD } else { weight::MEDIUM }).color(if on { theme::FG } else { theme::FG_2 })
         };
         let width_of = |ch: &SceneChip| widgets::text_size(ui, &txt_of(ch)).x + 28.0 + if ch.state.marked() { 18.0 } else { 0.0 };
-        let more_label = format!("All scenes · {n}");
+        let more_label = tr!("All scenes · {n}", n = n);
         let more_txt = Txt::new(&more_label, 12.5).weight(weight::MEDIUM).color(theme::FG_2);
         let more_w = widgets::text_size(ui, &more_txt).x + 44.0;
         let side = (bw + 60.0).max(x - rect.left() + 12.0);
@@ -1279,7 +1287,7 @@ fn chrome(
                 }
                 widgets::text(&p, pos2(r.left() + 14.0, r.center().y), Align2::LEFT_CENTER, &more_txt);
                 widgets::icon(&p, pos2(r.right() - 16.0, r.center().y), super::art::glyph::CARET_UP, 11.0, theme::FG_3);
-                let pressed = widgets::activated(&resp.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text("Every scene of the project"));
+                let pressed = widgets::activated(&resp.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(tr("Every scene of the project")));
                 let details: Vec<String> = scenes.chips.iter().map(|ch| ch.state.detail().to_string()).collect();
                 let items: Vec<orbiters_ui::popup::Item> = scenes
                     .chips
@@ -1316,7 +1324,7 @@ fn chrome(
     // facts, after them, only in the room the scenes' chips leave (it never takes one of their places), the title's
     // tooltip saying the same when it does not fit.
     if matches!(source, Some(Source::Built(_) | Source::Stale(_))) {
-        let txt = Txt::new("Built from files", 12.0).color(theme::FG_3);
+        let txt = Txt::new(tr("Built from files"), 12.0).color(theme::FG_3);
         let fw = widgets::text_size(ui, &txt).x + 24.0 + 18.0;
         if note_x + fw <= note_end {
             let r = Rect::from_min_size(pos2(note_x, y - 15.0), vec2(fw, 30.0));
@@ -1324,9 +1332,7 @@ fn chrome(
             widgets::icon(&p, pos2(r.left() + 19.0, r.center().y), icons::CUBE, 12.0, theme::FG_3);
             widgets::text(&p, pos2(r.left() + 31.0, r.center().y), Align2::LEFT_CENTER, &txt);
             ui.interact(r, Id::unique("project-preview-built"), Sense::hover()).on_hover_text(
-                "Built by Orbiters - N4N0 from the project's files, without Unity: close to what Unity shows, not exact (no \
-                 normal maps, animators or what tools do at upload). Orbiters Toolkit draws the exact one each time the scene \
-                 is saved in Unity.",
+                tr("Built by Orbiters - N4N0 from the project's files, without Unity: close to what Unity shows, not exact (no normal maps, animators or what tools do at upload). Orbiters Toolkit draws the exact one each time the scene is saved in Unity."),
             );
         }
     }
@@ -1366,11 +1372,11 @@ impl ChipState {
     /// Its line in the list of every scene.
     fn detail(&self) -> &str {
         match self {
-            ChipState::Ready(true) => "Toolkit",
+            ChipState::Ready(true) => tr("Toolkit"),
             ChipState::Ready(false) | ChipState::Outdated => "",
-            ChipState::Unbuilt => "Not built yet",
-            ChipState::Building => "Building…",
-            ChipState::Failed(_) => "No preview",
+            ChipState::Unbuilt => tr("Not built yet"),
+            ChipState::Building => tr("Building…"),
+            ChipState::Failed(_) => tr("No preview"),
         }
     }
 }
@@ -1378,12 +1384,12 @@ impl ChipState {
 impl SceneChip {
     fn tip(&self) -> String {
         let what = match &self.state {
-            ChipState::Ready(true) => "Drawn by Orbiters Toolkit when it was saved in Unity".to_string(),
-            ChipState::Ready(false) => "Built from the project's files".to_string(),
-            ChipState::Outdated => "Built from the project's files; changed since, built again when shown".to_string(),
-            ChipState::Unbuilt => "Press to build its preview from the project's files".to_string(),
-            ChipState::Building => "Building its preview from the project's files…".to_string(),
-            ChipState::Failed(why) => format!("No preview: {why}"),
+            ChipState::Ready(true) => tr("Drawn by Orbiters Toolkit when it was saved in Unity").to_string(),
+            ChipState::Ready(false) => tr("Built from the project's files").to_string(),
+            ChipState::Outdated => tr("Built from the project's files; changed since, built again when shown").to_string(),
+            ChipState::Unbuilt => tr("Press to build its preview from the project's files").to_string(),
+            ChipState::Building => tr("Building its preview from the project's files…").to_string(),
+            ChipState::Failed(why) => tr!("No preview: {why}", why = why),
         };
         format!("{}\n{what}", self.rel)
     }
@@ -1480,7 +1486,7 @@ impl State {
             let assets = dir.join("Assets");
             std::fs::create_dir_all(&assets).expect("stand-in folder");
             std::fs::write(assets.join("Avatar.unity"), "%YAML 1.1\n%TAG !u! tag:unity3d.com,2011:\n").expect("stand-in scene");
-            std::fs::write(assets.join("Avatar.unity.meta"), format!("fileFormatVersion: 2\nguid: {}\n", "5".repeat(32))).expect("stand-in scene");
+            std::fs::write(assets.join("Avatar.unity.meta"), format!("fileFormatVersion: 2\nguid: {}\n", "5".repeat(32))).expect("stand-in scene"); // i18n: not shown (a Unity meta file written for a screenshot scene)
             self.preview.hold_builds = name == "projects-preview-building";
         } else if name != "projects-preview-no-scene" {
             std::fs::create_dir_all(&folder).expect("stand-in folder");
@@ -1490,7 +1496,7 @@ impl State {
             };
             std::fs::write(folder.join("stand-in.preview"), bytes).expect("stand-in preview");
             if name == "projects-preview-scenes" {
-                std::fs::write(folder.join("second.preview"), stand_in_scene("Club stage")).expect("stand-in preview");
+                std::fs::write(folder.join("second.preview"), stand_in_scene("Club stage")).expect("stand-in preview"); // i18n: not shown (sample data of a screenshot scene)
             }
         }
         self.preview.fixture = Some(dir);
@@ -1572,7 +1578,7 @@ impl Previews {
 /// A stand-in scene for screenshots: N4N0's black sphere with white strokes floating over a plinth, a ring round it and
 /// two cubes, as an avatar scene.
 fn stand_in() -> Vec<u8> {
-    stand_in_scene("Avatar")
+    stand_in_scene("Avatar") // i18n: not shown (sample data of a screenshot scene)
 }
 
 fn stand_in_scene(scene: &str) -> Vec<u8> {
@@ -1636,11 +1642,11 @@ fn stand_in_scene(scene: &str) -> Vec<u8> {
         ..Default::default()
     };
     let materials = vec![
-        Material { smoothness: 0.75, ..mat("Sphere", [1.0, 1.0, 1.0, 1.0], 0) },
-        Material { smoothness: 0.1, ..mat("Plinth", [0.36, 0.36, 0.40, 1.0], -1) },
-        Material { shading: file::Shading::Unlit, emission: [0.0, 0.35, 0.08], ..mat("Ring", [0.0, 0.85, 0.43, 1.0], -1) },
-        Material { shading: file::Shading::Toon, shade: [0.62, 0.55, 0.72], ..mat("Cube", [0.86, 0.55, 0.33, 1.0], -1) },
-        Material { metallic: 1.0, smoothness: 0.7, ..mat("Cube 2", [0.42, 0.52, 0.92, 1.0], -1) },
+        Material { smoothness: 0.75, ..mat("Sphere", [1.0, 1.0, 1.0, 1.0], 0) }, // i18n: not shown (sample data of a screenshot scene)
+        Material { smoothness: 0.1, ..mat("Plinth", [0.36, 0.36, 0.40, 1.0], -1) }, // i18n: not shown (sample data of a screenshot scene)
+        Material { shading: file::Shading::Unlit, emission: [0.0, 0.35, 0.08], ..mat("Ring", [0.0, 0.85, 0.43, 1.0], -1) }, // i18n: not shown (sample data of a screenshot scene)
+        Material { shading: file::Shading::Toon, shade: [0.62, 0.55, 0.72], ..mat("Cube", [0.86, 0.55, 0.33, 1.0], -1) }, // i18n: not shown (sample data of a screenshot scene)
+        Material { metallic: 1.0, smoothness: 0.7, ..mat("Cube 2", [0.42, 0.52, 0.92, 1.0], -1) }, // i18n: not shown (sample data of a screenshot scene)
     ];
     let trs = |t: [f32; 3], yaw: f32, tilt: f32| -> [f32; 16] {
         let (sy, cy) = yaw.sin_cos();
@@ -1662,7 +1668,7 @@ fn stand_in_scene(scene: &str) -> Vec<u8> {
     let bounds = Bounds { min: [-0.72, 0.0, -0.55], max: [0.78, 0.96, 0.55] };
     let header = Header {
         written_utc: "2026-10-29T21:40:00Z".into(),
-        generator: "Orbiters - N4N0 (stand-in)".into(),
+        generator: "Orbiters - N4N0 (stand-in)".into(), // i18n: not shown (sample data of a screenshot scene)
         unity: "2022.3.22f1".into(),
         scene: file::Scene { name: scene.into(), path: format!("Assets/{scene}.unity"), guid: format!("{:032x}", scene.len()) },
         kind: Kind::Avatars,

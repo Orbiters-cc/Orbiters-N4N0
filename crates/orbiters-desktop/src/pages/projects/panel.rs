@@ -6,6 +6,7 @@
 //! does not have it, its packages (their own icons, versions in dropdowns), the packages it could add, and its Git
 //! repository (branch, changes, remote page, last commits on a timeline). Switching projects crossfades the cards.
 
+use orbiters_i18n::{tr, tr_ctx, tr_n};
 use super::art::{self, glyph};
 use super::state::{server, Outcome, PackageIcon, State, MIXER, MIXER_PAGE};
 use crate::pages::{Cx, PAD_X};
@@ -151,7 +152,7 @@ fn sticky_bar(ui: &mut Ui, cx: &mut Cx, state: &mut State, project: &Project, re
     let dy = 8.0 * (1.0 - k);
     let mut bu = ui.new_child(UiBuilder::new().max_rect(band).id_salt("project-panel-bar"));
     bu.multiply_opacity(k);
-    let b = Button::new("Open in Unity")
+    let b = Button::new(tr("Open in Unity"))
         .icon(icons::PLAY)
         .variant(Variant::Primary)
         .size(Size::Sm)
@@ -162,7 +163,7 @@ fn sticky_bar(ui: &mut Ui, cx: &mut Cx, state: &mut State, project: &Project, re
     let mut right = band.right() - 20.0;
     if sheet {
         let close = Rect::from_center_size(pos2(right - 16.0, band.center().y + dy), vec2(32.0, 32.0));
-        let pressed = widgets::activated(&IconButton::new(icons::X, "Close").size(32.0, 15.0).id_salt("panel-bar-close").show_at(&mut bu, close));
+        let pressed = widgets::activated(&IconButton::new(icons::X, tr("Close")).size(32.0, 15.0).id_salt("panel-bar-close").show_at(&mut bu, close));
         if pressed && k > 0.5 {
             state.panel_closing = true;
         }
@@ -206,7 +207,7 @@ fn resize_handle(ui: &mut Ui, state: &mut State, page: Rect, rect: Rect) {
     let resp = ui
         .interact(strip, id, Sense::click_and_drag())
         .on_hover_cursor(CursorIcon::ResizeHorizontal)
-        .on_hover_text("Drag to resize, double-click for the usual width");
+        .on_hover_text(tr("Drag to resize, double-click for the usual width"));
     if resp.dragged() {
         if let Some(p) = ctx.pointer_interact_pos() {
             state.panel_width = Some(page.right() - PAD_X - p.x);
@@ -257,7 +258,7 @@ fn hero(ui: &mut Ui, cx: &mut Cx, state: &mut State, project: &Project, sheet: b
     );
     if sheet {
         let close = Rect::from_center_size(pos2(cover.right() - 26.0, cover.top() + 26.0), vec2(32.0, 32.0));
-        if widgets::activated(&IconButton::new(icons::X, "Close").size(32.0, 15.0).backdrop(theme::black(0.55)).show_at(ui, close)) {
+        if widgets::activated(&IconButton::new(icons::X, tr("Close")).size(32.0, 15.0).backdrop(theme::black(0.55)).show_at(ui, close)) {
             state.panel_closing = true;
         }
     }
@@ -276,12 +277,12 @@ fn hero(ui: &mut Ui, cx: &mut Cx, state: &mut State, project: &Project, sheet: b
     y += 30.0;
     // What it is.
     let mut px = x;
-    let edited = format!("Edited {}", format::relative_time(project.modified, orbiters_projects::discovery::now()));
+    let edited = tr!("Edited {when}", when = format::relative_time(project.modified, orbiters_projects::discovery::now()));
     for (g, label) in [(Some(icons::CUBE), format!("Unity {}", project.unity)), (Some(icons::CLOCK), edited)] {
         px += widgets::pill_at(&p, ui, pos2(px, y + 11.0), g, &label) + 6.0;
     }
     if project.missing {
-        widgets::pill_at(&p, ui, pos2(px, y + 11.0), Some(icons::WARNING), "Folder missing");
+        widgets::pill_at(&p, ui, pos2(px, y + 11.0), Some(icons::WARNING), tr("Folder missing"));
     } else {
         size_pill(ui, state, project, pos2(px, y + 11.0), r.right() - 16.0);
     }
@@ -301,7 +302,7 @@ fn hero(ui: &mut Ui, cx: &mut Cx, state: &mut State, project: &Project, sheet: b
         super::unity_session::controls(ui, state, project, wide, "hero");
     } else if project.registered {
         let moving = state.repairing(&project.path);
-        let b = Button::new(if moving { "Moving its Library…" } else { "Open in Unity" })
+        let b = Button::new(if moving { tr("Moving its Library…") } else { tr("Open in Unity") })
             .icon(icons::PLAY)
             .variant(Variant::Primary)
             .width(main_w)
@@ -311,26 +312,26 @@ fn hero(ui: &mut Ui, cx: &mut Cx, state: &mut State, project: &Project, sheet: b
             state.open_unity(&ctx, project, false);
         }
     } else {
-        let b = Button::new("Add to my projects").icon(icons::PLUS).variant(Variant::Primary).width(main_w).enabled(!busy).id_salt("panel-add");
+        let b = Button::new(tr("Add to my projects")).icon(icons::PLUS).variant(Variant::Primary).width(main_w).enabled(!busy).id_salt("panel-add");
         if widgets::activated(&b.show_at(ui, main)) {
             let path = project.path.clone();
-            state.task(&ctx, "Adding the project…", move || {
+            state.task(&ctx, tr("Adding the project…"), move || {
                 orbiters_projects::runtime()?.block_on(vpm::register(&orbiters_projects::vcc_dir(), &path, true))?;
-                Ok(Outcome::Added(path, "Project added: VCC and ALCOM list it too".into()))
+                Ok(Outcome::Added(path, tr("Project added: VCC and ALCOM list it too").into()))
             });
         }
     }
-    let folder = IconButton::new(icons::FOLDER_OPEN, "Open the folder").size(40.0, 17.0).backdrop(theme::control()).id_salt("panel-folder");
+    let folder = IconButton::new(icons::FOLDER_OPEN, tr("Open the folder")).size(40.0, 17.0).backdrop(theme::control()).id_salt("panel-folder");
     if !open && !project.missing && widgets::activated(&folder.show_at(ui, round(2))) {
         let path = project.path.clone();
-        state.task(&ctx, "Opening the folder…", move || {
+        state.task(&ctx, tr("Opening the folder…"), move || {
             orbiters_projects::reveal(&path)?;
             Ok(Outcome::Picked(None))
         });
     }
-    let hub = IconButton::new(icons::CUBE, "Open Unity Hub").size(40.0, 17.0).backdrop(theme::control()).id_salt("panel-hub");
+    let hub = IconButton::new(icons::CUBE, tr("Open Unity Hub")).size(40.0, 17.0).backdrop(theme::control()).id_salt("panel-hub");
     if !open && widgets::activated(&hub.show_at(ui, round(1))) {
-        state.task(&ctx, "Opening Unity Hub…", move || {
+        state.task(&ctx, tr("Opening Unity Hub…"), move || {
             orbiters_projects::open_hub()?;
             Ok(Outcome::Picked(None))
         });
@@ -340,7 +341,7 @@ fn hero(ui: &mut Ui, cx: &mut Cx, state: &mut State, project: &Project, sheet: b
     // The actions the cards' right-click menus have too (`menus`).
     let acts = super::menus::project_items(state, project, false);
     let items: Vec<Item> = acts.iter().map(|(i, _)| *i).collect();
-    if let Some(act) = popup::menu_button(ui, "project-menu", menu_r, icons::DOTS_THREE, "More", &items).map(|k| acts[k].1) {
+    if let Some(act) = popup::menu_button(ui, "project-menu", menu_r, icons::DOTS_THREE, tr("More"), &items).map(|k| acts[k].1) {
         super::menus::project_act(&ctx, cx, state, project, act, menu_r, sheet);
     }
 }
@@ -355,7 +356,7 @@ fn size_pill(ui: &mut Ui, state: &mut State, project: &Project, at: egui::Pos2, 
     let Some(s) = state.sizes.get(&project.path).copied() else {
         if measuring || state.fixture {
             // "Measuring…" with its spinner, or the spinner alone where the words do not fit.
-            let t = Txt::new("Measuring…", 11.5).color(theme::FG_3);
+            let t = Txt::new(tr("Measuring…"), 11.5).color(theme::FG_3);
             let full = Rect::from_min_size(pos2(at.x, at.y - 10.0), vec2(widgets::text_size(ui, &t).x + 32.0, 20.0));
             let r = if full.right() <= right { full } else { Rect::from_min_size(full.min, vec2(28.0, 20.0)) };
             if r.right() <= right {
@@ -364,14 +365,14 @@ fn size_pill(ui: &mut Ui, state: &mut State, project: &Project, at: egui::Pos2, 
                 if r == full {
                     widgets::text(&p, pos2(r.left() + 24.0, r.center().y), Align2::LEFT_CENTER, &t);
                 }
-                let _ = ui.interact(r, Id::unique(("project-size", &project.path)), Sense::hover()).on_hover_text("Measuring how much the project takes on disk…");
+                let _ = ui.interact(r, Id::unique(("project-size", &project.path)), Sense::hover()).on_hover_text(tr("Measuring how much the project takes on disk…"));
             }
         }
         return;
     };
     let total = format::bytes(s.total as f64);
     let library = format::bytes(s.library as f64);
-    let wide = format!("{total} · Library {library}");
+    let wide = tr!("{total} · Library {library}", total = total, library = library);
     let width = |label: &str| widgets::text_size(ui, &Txt::new(label, 11.5)).x + 32.0;
     let label = if s.library > 0 && at.x + width(&wide) <= right {
         wide
@@ -383,12 +384,13 @@ fn size_pill(ui: &mut Ui, state: &mut State, project: &Project, at: egui::Pos2, 
     let w = widgets::pill_at(&p, ui, at, Some(icons::HARD_DRIVE), &label);
     let files = format::integer(s.files as f64);
     let mut hint = if s.library > 0 {
-        format!("{total} on disk in {files} files. Library takes {library} of it: Unity makes it again from the project when it is missing.")
+        tr!("{total} on disk in {files} files. Library takes {library} of it: Unity makes it again from the project when it is missing.", total = total, files = files, library = library)
     } else {
-        format!("{total} on disk in {files} files.")
+        tr!("{total} on disk in {files} files.", total = total, files = files)
     };
     if measuring {
-        hint.push_str(" Measuring again…");
+        hint.push(' ');
+        hint.push_str(tr("Measuring again…"));
     }
     let _ = ui.interact(Rect::from_min_size(pos2(at.x, at.y - 10.0), vec2(w, 20.0)), Id::unique(("project-size", &project.path)), Sense::hover()).on_hover_text(hint);
 }
@@ -401,15 +403,15 @@ fn avatars(ui: &mut Ui, cx: &mut Cx, state: &mut State, project: &Project) {
         ui,
         "avatars",
         icons::PERSON_ARMS_SPREAD,
-        "Avatars",
+        tr("Avatars"),
         count,
         |_, _| {},
         |ui| {
             if project.avatars.is_empty() {
                 let text = if project.kind == orbiters_projects::discovery::Kind::Worlds {
-                    "A world project: N4N0 goes on avatars."
+                    tr("A world project: N4N0 goes on avatars.")
                 } else {
-                    "No uploaded avatar yet. Upload one from the VRChat SDK panel, save its scene, and it shows up here."
+                    tr("No uploaded avatar yet. Upload one from the VRChat SDK panel, save its scene, and it shows up here.")
                 };
                 let g = ui.painter().layout_job(Txt::new(text, 12.5).color(theme::FG_3).line_height(19.0).job(ui.available_width()));
                 let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), g.size().y + 4.0), Sense::hover());
@@ -430,10 +432,10 @@ fn avatars(ui: &mut Ui, cx: &mut Cx, state: &mut State, project: &Project) {
                 let link = Rect::from_min_size(pos2(r.right() - 32.0, r.top() + 2.0), vec2(32.0, 32.0));
                 state.anchors.insert(format!("avatar-vrchat-{i}"), link);
                 let url = format!("https://vrchat.com/home/avatar/{}", a.id);
-                let open = IconButton::new(icons::ARROW_SQUARE_OUT, "Open on VRChat").size(32.0, 15.0).backdrop(theme::control()).id_salt(("avatar-vrchat", &a.id));
+                let open = IconButton::new(icons::ARROW_SQUARE_OUT, tr("Open on VRChat")).size(32.0, 15.0).backdrop(theme::control()).id_salt(("avatar-vrchat", &a.id));
                 if widgets::activated(&open.show_at(ui, link).on_hover_text(&url)) {
                     if let Err(e) = crate::controller::open_url(&url) {
-                        cx.toasts.push(&ctx, orbiters_ui::toast::Kind::Error, format!("The page could not open: {e}"));
+                        cx.toasts.push(&ctx, orbiters_ui::toast::Kind::Error, tr!("The page could not open: {error}", error = e));
                     }
                 }
                 let p = ui.painter();
@@ -445,7 +447,7 @@ fn avatars(ui: &mut Ui, cx: &mut Cx, state: &mut State, project: &Project) {
                     link.left() - x - 88.0,
                 );
                 if worn.as_ref() == Some(&a.id) {
-                    let t = Txt::new("Wearing", 10.5).weight(weight::SEMIBOLD).color(theme::ACCENT);
+                    let t = Txt::new(tr("Wearing"), 10.5).weight(weight::SEMIBOLD).color(theme::ACCENT);
                     let tw = widgets::text_size(ui, &t).x + 16.0;
                     let pr = Rect::from_min_size(pos2(nr.right() + 8.0, nr.center().y - 10.0), vec2(tw, 20.0));
                     p.rect_filled(pr, theme::radius(10.0), theme::alpha(theme::ACCENT, 0.14));
@@ -453,23 +455,23 @@ fn avatars(ui: &mut Ui, cx: &mut Cx, state: &mut State, project: &Project) {
                 }
                 widgets::text_truncated(p, pos2(x, thumb.top() + 30.0), Align2::LEFT_CENTER, &Txt::new(&a.scene, 11.5).color(theme::FG_3), link.left() - 8.0 - x);
                 let enabled = project.registered && !state.running();
-                let nano = Button::new("Add N4N0").icon(icons::N4N0_MARK).size(Size::Sm).enabled(enabled).id_salt(("add-n4n0", &a.id, &a.scene));
+                let nano = Button::new(tr("Add N4N0")).icon(icons::N4N0_MARK).size(Size::Sm).enabled(enabled).id_salt(("add-n4n0", &a.id, &a.scene));
                 let nw = nano.desired_width(ui);
                 let nr = Rect::from_min_size(pos2(x, thumb.top() + 46.0), vec2(nw, 32.0));
                 state.anchors.insert(format!("add-n4n0-{i}"), nr);
-                let hint = if project.registered { "My Avatar, Toolkit and N4N0: Unity asks you to confirm" } else { "Add the project to your list first" };
+                let hint = if project.registered { tr("My Avatar, Toolkit and N4N0: Unity asks you to confirm") } else { tr("Add the project to your list first") };
                 if widgets::activated(&nano.show_at(ui, nr).on_hover_text(hint)) {
                     state.modal_fill = theme::control();
                     state.install(&ctx, project.clone(), a.clone(), true, server(cx), nr);
                 }
-                let mine = Button::new("My Avatar only").icon(icons::PERSON).variant(Variant::Ghost).size(Size::Sm).enabled(enabled).id_salt((
+                let mine = Button::new(tr("My Avatar only")).icon(icons::PERSON).variant(Variant::Ghost).size(Size::Sm).enabled(enabled).id_salt((
                     "add-my-avatar",
                     &a.id,
                     &a.scene,
                 ));
                 let mw = mine.desired_width(ui);
                 let mr = Rect::from_min_size(pos2(nr.right() + 6.0, nr.top()), vec2(mw, 32.0));
-                if mr.right() <= r.right() + 1.0 && widgets::activated(&mine.show_at(ui, mr).on_hover_text("Installs My Avatar in the project, without N4N0")) {
+                if mr.right() <= r.right() + 1.0 && widgets::activated(&mine.show_at(ui, mr).on_hover_text(tr("Installs My Avatar in the project, without N4N0"))) {
                     state.modal_fill = theme::INK_850;
                     state.install(&ctx, project.clone(), a.clone(), false, server(cx), mr);
                 }
@@ -529,19 +531,19 @@ fn mixer(ui: &mut Ui, cx: &mut Cx, state: &mut State, project: &Project) {
             toggle_info = info_button(ui, info_id, info_rect, info_open);
         },
         |ui| {
-            let text = Txt::new("Improves Unity's UI and adds features including Git management, sculpting, weight painting, mesh editing and more.", 12.5)
+            let text = Txt::new(tr("Improves Unity's UI and adds features including Git management, sculpting, weight painting, mesh editing and more."), 12.5)
                 .color(theme::FG_3)
                 .line_height(19.0);
             let g = ui.painter().layout_job(text.job(ui.available_width()));
             let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), g.size().y), Sense::hover());
             ui.painter().galley(r.min, g, theme::FG_3);
-            let label = if adding { "Adding Mixer…" } else { "Add Mixer" };
+            let label = if adding { tr("Adding Mixer…") } else { tr("Add Mixer") };
             let b = Button::new(label).icon(icons::PLUS).size(Size::Sm).enabled(project.registered && !busy).id_salt(("add-mixer", &project.path));
             let bw = b.desired_width(ui);
             let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), 32.0), Sense::hover());
             let br = Rect::from_min_size(row.min, vec2(bw, 32.0));
             state.anchors.insert("add-mixer".into(), br);
-            let hint = if project.registered { "Installs Mixer from the Orbiters repository" } else { "Add the project to your list first" };
+            let hint = if project.registered { tr("Installs Mixer from the Orbiters repository") } else { tr("Add the project to your list first") };
             if widgets::activated(&b.show_at(ui, br).on_hover_text(hint)) {
                 state.add_mixer(&ctx, project);
             }
@@ -566,9 +568,9 @@ fn mixer(ui: &mut Ui, cx: &mut Cx, state: &mut State, project: &Project) {
 fn info_button(ui: &mut Ui, id: Id, r: Rect, open: bool) -> bool {
     let ctx = ui.ctx().clone();
     let resp = ui.interact(r, id.with("button"), Sense::click()).on_hover_cursor(CursorIcon::PointingHand).on_hover_text(if open {
-        "Hide what Mixer adds"
+        tr("Hide what Mixer adds")
     } else {
-        "What Mixer adds"
+        tr("What Mixer adds")
     });
     let hover = anim::toggle(&ctx, id.with("hover"), resp.hovered(), Spring::SOFT);
     let press = anim::toggle(&ctx, id.with("press"), resp.is_pointer_button_down_on(), Spring::SNAPPY);
@@ -600,8 +602,7 @@ fn mixer_info(ui: &mut Ui, cx: &mut Cx, id: Id, open: bool) {
     }
     let w = ui.available_width();
     let text = Txt::new(
-        "Mixer adds new features to the Unity Editor such as sculpting, weight painting, mesh editing and syncing with a \
-         Blender project, and improves the existing panels.",
+        tr("Mixer adds new features to the Unity Editor such as sculpting, weight painting, mesh editing and syncing with a Blender project, and improves the existing panels."),
         13.0,
     )
     .color(theme::FG_2)
@@ -620,7 +621,7 @@ fn mixer_info(ui: &mut Ui, cx: &mut Cx, id: Id, open: bool) {
     tp.multiply_opacity(a);
     tp.galley(pos2(well.left() + 16.0, well.top() + 14.0 - drop), g, theme::FG_2);
     // The page: an accent link that brightens on hover, its arrow nudging out.
-    let link = Txt::new("Mixer's presentation on orbiters.cc", 12.5).weight(weight::SEMIBOLD).color(theme::ACCENT);
+    let link = Txt::new(tr("Mixer's presentation on orbiters.cc"), 12.5).weight(weight::SEMIBOLD).color(theme::ACCENT);
     let lw = widgets::text_size(&iu, &link).x + 24.0;
     let lr = Rect::from_min_size(pos2(well.left() + 10.0, well.bottom() - 10.0 - 28.0 - drop * 0.5), vec2(lw + 12.0, 28.0));
     let resp = iu.interact(lr, id.with("link"), Sense::click()).on_hover_cursor(CursorIcon::PointingHand).on_hover_text(MIXER_PAGE);
@@ -630,7 +631,7 @@ fn mixer_info(ui: &mut Ui, cx: &mut Cx, id: Id, open: bool) {
     widgets::icon(&tp, pos2(lr.right() - 14.0 + 2.0 * hover, lr.center().y - 2.0 * hover), icons::ARROW_SQUARE_OUT, 13.0, theme::ACCENT);
     if widgets::activated(&resp) && a > 0.5 {
         if let Err(e) = crate::controller::open_url(MIXER_PAGE) {
-            cx.toasts.push(&ctx, orbiters_ui::toast::Kind::Error, format!("The page could not open: {e}"));
+            cx.toasts.push(&ctx, orbiters_ui::toast::Kind::Error, tr!("The page could not open: {error}", error = e));
         }
     }
 }
@@ -698,14 +699,14 @@ fn available(ui: &mut Ui, state: &mut State, project: &Project) {
         ui,
         "available",
         icons::PLUS,
-        "Add packages",
+        tr("Add packages"),
         Some(all.to_string()),
         |_, _| {},
         |ui| {
-            widgets::search_field(ui, "package-search", &mut state.package_query, "Search the repositories' packages", ui.available_width());
+            widgets::search_field(ui, "package-search", &mut state.package_query, tr("Search the repositories' packages"), ui.available_width());
             ui.add_space(2.0);
             if list.is_empty() {
-                widgets::text(ui.painter(), ui.cursor().min + vec2(0.0, 12.0), Align2::LEFT_CENTER, &Txt::new("No package matches.", 12.5).color(theme::FG_3));
+                widgets::text(ui.painter(), ui.cursor().min + vec2(0.0, 12.0), Align2::LEFT_CENTER, &Txt::new(tr("No package matches."), 12.5).color(theme::FG_3));
                 ui.add_space(24.0);
             }
             let shown = if state.all_packages || !q.is_empty() { list.len() } else { list.len().min(AVAILABLE_FIRST) };
@@ -722,7 +723,7 @@ fn available(ui: &mut Ui, state: &mut State, project: &Project) {
                 package_row(ui, icon.as_ref(), &pkg.name, &pkg.display_name, 100.0 + 8.0 + 32.0, |ui, c| {
                     let dd = Rect::from_min_size(pos2(c.left(), c.center().y - 15.0), vec2(100.0, 30.0));
                     let add = Rect::from_min_size(pos2(c.right() - 32.0, c.center().y - 16.0), vec2(32.0, 32.0));
-                    let items: Vec<Item> = vs.iter().map(|v| if v.contains('-') { Item::new(v).detail("Pre-release") } else { Item::new(v) }).collect();
+                    let items: Vec<Item> = vs.iter().map(|v| if v.contains('-') { Item::new(v).detail(tr("Pre-release")) } else { Item::new(v) }).collect();
                     let selected = vs.iter().position(|v| **v == chosen);
                     if let Some(k) = popup::dropdown(ui, ("available", &pkg.name), dd, &chosen, &items, selected, !busy) {
                         ctx.data_mut(|d| d.insert_temp(id, vs[k].clone()));
@@ -730,16 +731,16 @@ fn available(ui: &mut Ui, state: &mut State, project: &Project) {
                     if working {
                         feedback::spinner(ui.painter(), add.center(), 8.0, 2.0, theme::ACCENT);
                     } else {
-                        let b = IconButton::new(icons::PLUS, "Add to the project").size(32.0, 15.0).backdrop(theme::control()).id_salt(("add", &pkg.name));
+                        let b = IconButton::new(icons::PLUS, tr("Add to the project")).size(32.0, 15.0).backdrop(theme::control()).id_salt(("add", &pkg.name));
                         if !busy && widgets::activated(&b.show_at(ui, add)) {
                             let change = vpm::Change::Install { names: vec![(pkg.name.clone(), Some(chosen.clone()))], prerelease: state.prerelease };
-                            package_action(state, &ctx, project, change, &format!("Adding {} {}…", pkg.display_name, chosen), &pkg.name);
+                            package_action(state, &ctx, project, change, &tr!("Adding {package} {version}…", package = pkg.display_name, version = chosen), &pkg.name);
                         }
                     }
                 });
             }
             if list.len() > shown || (state.all_packages && list.len() > AVAILABLE_FIRST && q.is_empty()) {
-                let label = if state.all_packages { "Show fewer".to_string() } else { format!("Show all {}", list.len()) };
+                let label = if state.all_packages { tr("Show fewer").to_string() } else { tr!("Show all {count}", count = list.len()) };
                 let b = Button::new(&label).variant(Variant::Ghost).size(Size::Sm).id_salt("available-all");
                 let bw = b.desired_width(ui);
                 let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), 32.0), Sense::hover());
@@ -758,7 +759,7 @@ pub(super) fn package_action(state: &mut State, ctx: &egui::Context, p: &Project
     state.plan_open = false;
     state.task(ctx, label, move || {
         match orbiters_projects::runtime()?.block_on(vpm::change(&orbiters_projects::vcc_dir(), &path, change)) {
-            Ok(()) => Ok(Outcome::Changed("Packages updated".into())),
+            Ok(()) => Ok(Outcome::Changed(tr("Packages updated").into())),
             // Not cancelled: the plan making it coherent, in its dialog.
             Err(e) => match e.downcast::<orbiters_projects::coherent::Conflicted>() {
                 Ok(c) => Ok(Outcome::Conflict(path, c.plan)),
@@ -786,7 +787,7 @@ fn commits(ui: &mut Ui, cx: &mut Cx, state: &mut State, project: &Project) {
         ui,
         "commits",
         glyph::GIT_COMMIT,
-        "Recent commits",
+        tr("Recent commits"),
         None,
         |ui, slot| {
             let Some(web) = &repo.web else { return };
@@ -794,9 +795,9 @@ fn commits(ui: &mut Ui, cx: &mut Cx, state: &mut State, project: &Project) {
             let (g, label) = match host {
                 "github.com" => (glyph::GITHUB, "GitHub".to_string()),
                 h if h.contains("gitlab") => (glyph::GITLAB, "GitLab".to_string()),
-                h => (icons::ARROW_SQUARE_OUT, h.trim_start_matches("www.").split('.').next().map(capitalised).unwrap_or_else(|| "Remote".into())),
+                h => (icons::ARROW_SQUARE_OUT, h.trim_start_matches("www.").split('.').next().map(capitalised).unwrap_or_else(|| tr("the remote").into())),
             };
-            let label = format!("Open on {label}");
+            let label = tr!("Open on {label}", label = label);
             let b = Button::new(&label).icon(g).variant(Variant::Ghost).size(Size::Sm).id_salt(("commits-remote", &project.path));
             let bw = b.desired_width(ui).min(slot.width());
             let r = Rect::from_min_size(pos2(slot.right() - bw, slot.center().y - 16.0), vec2(bw, 32.0));
@@ -858,7 +859,7 @@ fn commits(ui: &mut Ui, cx: &mut Cx, state: &mut State, project: &Project) {
                 let hash = Txt::new(&c.short, 11.0).mono().color(theme::FG_2);
                 let hw = widgets::text_size(ui, &hash).x + 14.0;
                 let hr = Rect::from_min_size(pos2(row.right() - hw, row.top() + 30.0 + dy), vec2(hw, 18.0));
-                let hresp = ui.interact(hr, id.with("hash"), Sense::click()).on_hover_cursor(CursorIcon::PointingHand).on_hover_text("Copy the commit's hash");
+                let hresp = ui.interact(hr, id.with("hash"), Sense::click()).on_hover_cursor(CursorIcon::PointingHand).on_hover_text(tr("Copy the commit's hash"));
                 let hh = anim::toggle(&ctx, id.with("hash-hover"), hresp.hovered(), Spring::SOFT);
                 p.rect_filled(hr, theme::radius(9.0), theme::white(0.05 + 0.05 * hh));
                 widgets::text(&p, hr.center(), Align2::CENTER_CENTER, &hash);
@@ -920,7 +921,7 @@ fn commits(ui: &mut Ui, cx: &mut Cx, state: &mut State, project: &Project) {
             ui.painter().set(line, egui::Shape::Vec(shapes));
             if let Some(hash) = copy {
                 ctx.copy_text(hash);
-                cx.toasts.push(&ctx, orbiters_ui::toast::Kind::Success, "Commit hash copied");
+                cx.toasts.push(&ctx, orbiters_ui::toast::Kind::Success, tr("Commit hash copied"));
             } else if let Some(hash) = toggle {
                 if !state.commit_open.remove(&hash) {
                     state.commit_open.insert(hash);
@@ -931,7 +932,7 @@ fn commits(ui: &mut Ui, cx: &mut Cx, state: &mut State, project: &Project) {
     if open_remote {
         if let Some(web) = &repo.web {
             if let Err(e) = crate::controller::open_url(web) {
-                cx.toasts.push(&ctx, orbiters_ui::toast::Kind::Error, format!("The page could not open: {e}"));
+                cx.toasts.push(&ctx, orbiters_ui::toast::Kind::Error, tr!("The page could not open: {error}", error = e));
             }
         }
     }
@@ -942,22 +943,22 @@ fn git_status(ui: &mut Ui, repo: &orbiters_projects::git::Repo) {
     let ctx = ui.ctx().clone();
     // (glyph, label, colour, a pulsing dot)
     let mut chips: Vec<(Option<&str>, String, Color32, bool)> = vec![];
-    chips.push((Some(glyph::GIT_BRANCH), repo.branch.clone().unwrap_or_else(|| "Detached".into()), theme::FG, false));
+    chips.push((Some(glyph::GIT_BRANCH), repo.branch.clone().unwrap_or_else(|| tr("Detached").into()), theme::FG, false));
     match &repo.upstream {
-        Some(up) if repo.ahead == 0 && repo.behind == 0 => chips.push((Some(icons::CHECK), format!("Up to date with {up}"), theme::FG_3, false)),
+        Some(up) if repo.ahead == 0 && repo.behind == 0 => chips.push((Some(icons::CHECK), tr!("Up to date with {upstream}", upstream = up), theme::FG_3, false)),
         Some(_) => {
             if repo.ahead > 0 {
-                chips.push((Some(glyph::ARROW_UP), format!("{} to push", repo.ahead), theme::ACCENT, false));
+                chips.push((Some(glyph::ARROW_UP), tr!("{count} to push", count = repo.ahead), theme::ACCENT, false));
             }
             if repo.behind > 0 {
-                chips.push((Some(glyph::ARROW_DOWN), format!("{} to pull", repo.behind), theme::BLUE, false));
+                chips.push((Some(glyph::ARROW_DOWN), tr!("{count} to pull", count = repo.behind), theme::BLUE, false));
             }
         }
-        None => chips.push((None, "Not on a remote".into(), theme::FG_3, false)),
+        None => chips.push((None, tr("Not on a remote").into(), theme::FG_3, false)),
     }
     if repo.changes > 0 {
         let n = repo.changes;
-        chips.push((None, format!("{n} uncommitted {}", if n == 1 { "change" } else { "changes" }), theme::WARN, true));
+        chips.push((None, tr_n("{count} uncommitted change", "{count} uncommitted changes", n as u64), theme::WARN, true));
     }
     let style = |label: &str, c: Color32| Txt::new(label, 11.5).weight(weight::MEDIUM).color(c);
     let widths: Vec<f32> =
@@ -993,11 +994,40 @@ fn git_status(ui: &mut Ui, repo: &orbiters_projects::git::Repo) {
 fn date(unix: u64) -> String {
     let Ok(t) = time::OffsetDateTime::from_unix_timestamp(unix as i64) else { return String::new() };
     let t = time::UtcOffset::current_local_offset().map(|o| t.to_offset(o)).unwrap_or(t);
-    let month = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"][t.month() as usize - 1];
-    format!("{} {month} {}, {:02}:{:02}", t.day(), t.year(), t.hour(), t.minute())
+    let month = [
+        tr_ctx("month", "Jan"),
+        tr_ctx("month", "Feb"),
+        tr_ctx("month", "Mar"),
+        tr_ctx("month", "Apr"),
+        tr_ctx("month", "May"),
+        tr_ctx("month", "Jun"),
+        tr_ctx("month", "Jul"),
+        tr_ctx("month", "Aug"),
+        tr_ctx("month", "Sep"),
+        tr_ctx("month", "Oct"),
+        tr_ctx("month", "Nov"),
+        tr_ctx("month", "Dec"),
+    ][t.month() as usize - 1];
+    tr!("{day} {month} {year}, {time}", day = t.day(), month = month, year = t.year(), time = format!("{:02}:{:02}", t.hour(), t.minute()))
 }
 
 fn capitalised(s: &str) -> String {
     let mut c = s.chars();
     c.next().map(|f| f.to_uppercase().chain(c).collect()).unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use orbiters_i18n::{in_language, Language};
+
+    #[test]
+    fn a_date_is_written_in_the_language_of_the_window() {
+        // The 15th of February 1970, whatever the zone this runs in.
+        let unix = 45 * 86_400;
+        in_language(Language::En, || assert!(date(unix).contains("Feb 1970"), "{}", date(unix)));
+        in_language(Language::Fr, || assert!(date(unix).contains("févr. 1970"), "{}", date(unix)));
+        in_language(Language::Ja, || assert!(date(unix).starts_with("1970年2月"), "{}", date(unix)));
+        in_language(Language::PtBr, || assert!(date(unix).contains("fev 1970"), "{}", date(unix)));
+    }
 }

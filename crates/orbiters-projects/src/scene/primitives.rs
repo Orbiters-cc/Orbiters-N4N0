@@ -17,7 +17,7 @@ pub fn builtin(file_id: i64) -> Option<ModelMesh> {
         _ => return None,
     };
     Some(ModelMesh {
-        name: "Built-in".into(),
+        name: "Built-in".into(), // i18n: not shown (the name of a mesh made in code)
         positions: verts.iter().map(|v| v.0).collect(),
         normals: verts.iter().map(|v| v.1).collect(),
         uvs: verts.iter().map(|v| v.2).collect(),

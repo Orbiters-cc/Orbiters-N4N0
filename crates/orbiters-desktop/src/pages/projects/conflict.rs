@@ -3,6 +3,7 @@
 //! and why) and one button applying it through `vpm::Change::Plan`, the usual install path. A package no version of
 //! which fits blocks the plan, named with the range it holds; Remove it too solves again without it. Cancel changes
 //! nothing.
+use orbiters_i18n::tr;
 use super::art::{self, glyph};
 use super::state::{Outcome, State};
 use crate::pages::Job;
@@ -21,10 +22,10 @@ pub(crate) struct View {
 
 /// The dialog's title, subtitle and width.
 pub(super) fn head(state: &State) -> (String, String) {
-    let Some(v) = &state.conflict else { return ("Packages conflict".into(), String::new()) };
+    let Some(v) = &state.conflict else { return (tr("Packages conflict").into(), String::new()) };
     let asked: Vec<String> = v.plan.requested.iter().map(|(n, ver)| format!("{} {ver}", display(v, n))).collect();
-    let title = if v.plan.solved() || v.plan.blockers.is_empty() { "Update to coherent versions" } else { "This change is blocked" };
-    (title.into(), format!("{} needs other packages to change with it", asked.join(", ")))
+    let title = if v.plan.solved() || v.plan.blockers.is_empty() { tr("Update to coherent versions") } else { tr("This change is blocked") };
+    (title.into(), tr!("{packages} needs other packages to change with it", packages = asked.join(", ")))
 }
 
 fn display(v: &View, name: &str) -> String {
@@ -59,9 +60,9 @@ pub(super) fn body(ui: &mut Ui, state: &mut State) {
     let plan = v.plan.clone();
     let w = ui.available_width();
     if !plan.conflicts.is_empty() {
-        art::caps(ui, "What conflicts");
+        art::caps(ui, tr("What conflicts"));
         for c in &plan.conflicts {
-            let lines: Vec<String> = c.needed_by.iter().map(|n| format!("{} {} accepts {}", n.display_name, n.version, if n.range.is_empty() { "another version" } else { &n.range })).collect();
+            let lines: Vec<String> = c.needed_by.iter().map(|n| tr!("{package} {version} accepts {range}", package = n.display_name, version = n.version, range = if n.range.is_empty() { tr("another version") } else { &n.range })).collect();
             let body = Txt::new(lines.join("\n"), 12.0).color(theme::FG_3).line_height(18.0);
             let galley = ui.painter().layout_job(body.job(w - 44.0));
             let (r, _) = ui.allocate_exact_size(vec2(w, 34.0 + galley.size().y + 10.0), Sense::hover());
@@ -81,14 +82,14 @@ pub(super) fn body(ui: &mut Ui, state: &mut State) {
     if solving {
         let (r, _) = ui.allocate_exact_size(vec2(w, 40.0), Sense::hover());
         feedback::spinner(ui.painter(), pos2(r.left() + 12.0, r.center().y), 8.0, 2.0, theme::ACCENT);
-        widgets::text(ui.painter(), pos2(r.left() + 30.0, r.center().y), Align2::LEFT_CENTER, &Txt::new("Solving again…", 12.5).color(theme::FG_2));
+        widgets::text(ui.painter(), pos2(r.left() + 30.0, r.center().y), Align2::LEFT_CENTER, &Txt::new(tr("Solving again…"), 12.5).color(theme::FG_2));
         return;
     }
     if let Some(e) = &plan.error {
-        feedback::banner(ui, egui::Id::unique(("conflict-error", e)), Tone::Danger, &format!("No plan could be made: {e}"), false);
+        feedback::banner(ui, egui::Id::unique(("conflict-error", e)), Tone::Danger, &tr!("No plan could be made: {error}", error = e), false);
     }
     if !plan.steps.is_empty() && plan.blockers.is_empty() {
-        art::caps(ui, if plan.steps.len() == 1 { "What changes" } else { "What changes, all at once" });
+        art::caps(ui, if plan.steps.len() == 1 { tr("What changes") } else { tr("What changes, all at once") });
         for (i, s) in plan.steps.iter().enumerate() {
             if i > 0 {
                 widgets::separator(ui);
@@ -97,12 +98,16 @@ pub(super) fn body(ui: &mut Ui, state: &mut State) {
         }
     }
     if !plan.blockers.is_empty() {
-        art::caps(ui, "What blocks it");
+        art::caps(ui, tr("What blocks it"));
         let mut removing: Option<String> = None;
         for b in &plan.blockers {
-            let text = format!(
-                "{} {} accepts {} {} only, and none of its versions in your repositories works with {}.",
-                b.display_name, b.version, b.dependency, b.range, b.wanted
+            let text = tr!(
+                "{package} {version} accepts {dependency} {range} only, and none of its versions in your repositories works with {wanted}.",
+                package = b.display_name,
+                version = b.version,
+                dependency = b.dependency,
+                range = b.range,
+                wanted = b.wanted
             );
             let galley = ui.painter().layout_job(Txt::new(&text, 12.0).color(theme::FG_2).line_height(18.0).job(w - 44.0 - 150.0));
             let (r, _) = ui.allocate_exact_size(vec2(w, (galley.size().y + 24.0).max(56.0)), Sense::hover());
@@ -112,16 +117,16 @@ pub(super) fn body(ui: &mut Ui, state: &mut State) {
             p.galley(pos2(r.left() + 36.0, r.top() + 12.0), galley, theme::FG_2);
             let br = Rect::from_min_size(pos2(r.right() - 12.0 - 132.0, r.center().y - 16.0), vec2(132.0, 32.0));
             if b.removable {
-                let resp = Button::new("Remove it too").icon(glyph::TRASH_SIMPLE).variant(Variant::Danger).size(Size::Sm).width(132.0).enabled(!state.running()).id_salt(("conflict-remove", &b.name)).show_at(ui, br);
+                let resp = Button::new(tr("Remove it too")).icon(glyph::TRASH_SIMPLE).variant(Variant::Danger).size(Size::Sm).width(132.0).enabled(!state.running()).id_salt(("conflict-remove", &b.name)).show_at(ui, br);
                 state.anchors.insert(format!("conflict-remove-{}", b.name), br);
-                if widgets::activated(&resp.on_hover_text("Solves the plan again without it; nothing changes before you apply")) {
+                if widgets::activated(&resp.on_hover_text(tr("Solves the plan again without it; nothing changes before you apply"))) {
                     removing = Some(b.name.clone());
                 }
             } else {
-                widgets::text(ui.painter(), pos2(br.right(), br.center().y), Align2::RIGHT_CENTER, &Txt::new("Needed by others", 11.5).color(theme::FG_3));
+                widgets::text(ui.painter(), pos2(br.right(), br.center().y), Align2::RIGHT_CENTER, &Txt::new(tr("Needed by others"), 11.5).color(theme::FG_3));
             }
         }
-        para(ui, Txt::new("Or keep the versions you have: Cancel changes nothing.", 12.0).color(theme::FG_3).line_height(18.0));
+        para(ui, Txt::new(tr("Or keep the versions you have: Cancel changes nothing."), 12.0).color(theme::FG_3).line_height(18.0));
         if let Some(name) = removing {
             let v = state.conflict.as_mut().unwrap();
             let (path, requested, prerelease) = (v.path.clone(), v.plan.requested.clone(), v.plan.prerelease);
@@ -146,8 +151,8 @@ fn step(ui: &mut Ui, state: &mut State, s: &orbiters_projects::updates::Step) {
     art::package_icon(p, state.icons.get(&s.name), t, &s.name);
     let (label, color) = match (&s.from, &s.to) {
         (Some(f), Some(t)) => (format!("{f} → {t}"), theme::ACCENT),
-        (None, Some(t)) => (format!("added · {t}"), theme::ACCENT),
-        (Some(f), None) => (format!("{f} · removed"), theme::DANGER),
+        (None, Some(t)) => (tr!("added · {version}", version = t), theme::ACCENT),
+        (Some(f), None) => (tr!("{version} · removed", version = f), theme::DANGER),
         (None, None) => (String::new(), theme::FG_3),
     };
     let version = Txt::new(&label, 12.0).weight(weight::MEDIUM).color(color);
@@ -169,11 +174,11 @@ pub(super) fn footer(ui: &mut Ui, state: &mut State) {
     let solved = v.plan.solved() && !v.solving.running();
     let n = v.plan.steps.len();
     let label = if !solved {
-        "Update together".to_string()
+        tr("Update together").to_string()
     } else if n == 1 {
-        "Apply the change".to_string()
+        tr("Apply the change").to_string()
     } else {
-        format!("Update {n} packages together")
+        tr!("Update {n} packages together", n = n)
     };
     let b = Button::new(&label).icon(glyph::ARROW_UP).variant(Variant::Primary).enabled(solved && !state.running()).id_salt("conflict-apply");
     if widgets::activated(&b.show(ui)) {
@@ -181,12 +186,12 @@ pub(super) fn footer(ui: &mut Ui, state: &mut State) {
         let change = vpm::Change::Plan { install: plan.install.clone(), remove: plan.remove.clone(), prerelease: plan.prerelease };
         state.last_change = Some((path.clone(), change.clone()));
         state.close_modal(&ctx);
-        state.task(&ctx, &format!("Updating {n} packages…"), move || {
+        state.task(&ctx, &tr!("Updating {n} packages…", n = n), move || {
             orbiters_projects::runtime()?.block_on(vpm::change(&orbiters_projects::vcc_dir(), &path, change))?;
-            Ok(Outcome::Changed(format!("{n} packages updated to versions that work together")))
+            Ok(Outcome::Changed(tr!("{n} packages updated to versions that work together", n = n)))
         });
     }
-    if widgets::activated(&Button::new("Cancel").variant(Variant::Ghost).id_salt("conflict-cancel").show(ui)) {
+    if widgets::activated(&Button::new(tr("Cancel")).variant(Variant::Ghost).id_salt("conflict-cancel").show(ui)) {
         state.close_modal(&ctx);
         state.conflict = None;
     }

@@ -226,8 +226,8 @@ fn alpha(shader: &str, p: &Props) -> Alpha {
     if let Some(t) = p.tags.get("RenderType") {
         match t.as_str() {
             "TransparentCutout" => return Alpha::Cutout,
-            "Transparent" | "Fade" => return Alpha::Blend,
-            "Opaque" => return Alpha::Opaque,
+            "Transparent" | "Fade" => return Alpha::Blend, // i18n: not shown (Unity's own names)
+            "Opaque" => return Alpha::Opaque, // i18n: not shown (Unity's own names)
             _ => {}
         }
     }
@@ -373,15 +373,15 @@ pub fn shader_name(text: &str) -> Option<String> {
 pub fn builtin_shader(file_id: i64) -> &'static str {
     match file_id {
         46 => "standard",
-        45 => "standard (specular setup)",
+        45 => "standard (specular setup)", // i18n: not shown (Unity's own names)
         10750 => "unlit/texture",
         10751 => "unlit/transparent",
-        10752 => "unlit/transparent cutout",
+        10752 => "unlit/transparent cutout", // i18n: not shown (Unity's own names)
         10753 => "unlit/color",
         10755 => "unlit/texture",
-        200 | 7 => "legacy shaders/diffuse",
+        200 | 7 => "legacy shaders/diffuse", // i18n: not shown (Unity's own names)
         103 => "skybox/cubemap",
-        104 => "skybox/6 sided",
+        104 => "skybox/6 sided", // i18n: not shown (Unity's own names)
         106 => "skybox/procedural",
         108 => "skybox/panoramic",
         _ => "standard",

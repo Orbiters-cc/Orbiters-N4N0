@@ -3,6 +3,7 @@
 //! change breaks, its newest version that accepts what the plan installs, until nothing conflicts. A package with no
 //! such version blocks the plan, named with the range it holds, unless the person chooses to remove it too. Nothing
 //! is written here; `vpm::Change::Plan` applies a solved plan through the usual install path.
+use orbiters_i18n::tr;
 use crate::updates::Step;
 use std::collections::HashMap;
 use std::path::Path;
@@ -91,19 +92,19 @@ pub async fn solve_with(project: &UnityProject, packages: &impl PackageCollectio
     let display = |n: &str| names.get(n).cloned().unwrap_or_else(|| n.to_string());
     let mut out = Plan { requested: requested.to_vec(), remove: remove.to_vec(), prerelease, ..Default::default() };
     let mut install: Vec<(String, String)> = requested.to_vec();
-    let mut why: HashMap<String, String> = requested.iter().map(|(n, _)| (n.clone(), "asked for".to_string())).collect();
+    let mut why: HashMap<String, String> = requested.iter().map(|(n, _)| (n.clone(), tr("asked for").to_string())).collect();
     let unity = project.unity_version();
     for round in 0..12 {
         let mut infos = vec![];
         for (n, v) in &install {
             let Ok(version) = v.parse::<Version>() else {
-                out.error = Some(format!("{v} is not a version"));
+                out.error = Some(tr!("{v} is not a version", v = v));
                 return out;
             };
             match packages.find_package_by_name(n, VersionSelector::specific_version(&version)) {
                 Some(p) => infos.push(p),
                 None => {
-                    out.error = Some(format!("{} {v} is in none of your repositories", display(n)));
+                    out.error = Some(tr!("{package} {v} is in none of your repositories", package = display(n), v = v));
                     return out;
                 }
             }
@@ -179,7 +180,7 @@ pub async fn solve_with(project: &UnityProject, packages: &impl PackageCollectio
                     // Brought along: who in the plan depends on it.
                     let mut by: Vec<&String> = deps.iter().filter(|(p, d)| p.as_str() != name.as_ref() && d.iter().any(|(k, _)| k == name.as_ref())).map(|(p, _)| p).collect();
                     by.sort_by_key(|p| (!install.iter().any(|(n, _)| n == *p), (*p).clone()));
-                    by.first().map(|p| format!("needed by {} {}", display(p), planned[p.as_str()]))
+                    by.first().map(|p| tr!("needed by {package} {version}", package = display(p), version = planned[p.as_str()]))
                 });
                 steps.push(Step { name: name.to_string(), display_name: display(name), from, to, why: reason });
             }
@@ -190,7 +191,7 @@ pub async fn solve_with(project: &UnityProject, packages: &impl PackageCollectio
                         display_name: display(r),
                         from: Some(l.version().to_string()),
                         to: None,
-                        why: Some("removed: no version of it works with the others".into()),
+                        why: Some(tr("removed: no version of it works with the others").into()),
                     });
                 }
             }
@@ -205,7 +206,7 @@ pub async fn solve_with(project: &UnityProject, packages: &impl PackageCollectio
         for (d, requirers, unity_conflict) in &conflicts {
             let wanted = planned.get(d).map(ToString::to_string).unwrap_or_default();
             if requirers.is_empty() && *unity_conflict {
-                out.error = Some(format!("{} {wanted} needs another Unity version than {unity}", display(d)));
+                out.error = Some(tr!("{package} {wanted} needs another Unity version than {unity}", package = display(d), wanted = wanted, unity = unity));
                 return out;
             }
             for c in requirers {
@@ -219,7 +220,7 @@ pub async fn solve_with(project: &UnityProject, packages: &impl PackageCollectio
                 match candidates.iter().find(|p| fits(p)).filter(|_| !fixed) {
                     Some(p) => {
                         let v = p.version().to_string();
-                        why.insert(c.clone(), format!("{current} accepts {} {} only; {v} works with {wanted}", display(d), range_of(c, d)));
+                        why.insert(c.clone(), tr!("{current} accepts {package} {range} only; {v} works with {wanted}", current = current, package = display(d), range = range_of(c, d), v = v, wanted = wanted));
                         install.push((c.clone(), v));
                         progress = true;
                     }
@@ -245,7 +246,7 @@ pub async fn solve_with(project: &UnityProject, packages: &impl PackageCollectio
             return out;
         }
     }
-    out.error = Some("No coherent set of versions was found.".into());
+    out.error = Some(tr("No coherent set of versions was found.").into());
     out
 }
 

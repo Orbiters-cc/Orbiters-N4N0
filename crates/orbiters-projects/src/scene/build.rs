@@ -148,36 +148,36 @@ pub fn build(project: &Path, scene: &SceneFile, assets: &Assets, limits: &Limits
         let Obj::Renderer(r) = &graph.objects[id] else { continue };
         report.renderers += 1;
         let Some(&t) = world.transform_of.get(&r.game_object) else {
-            drop("no transform");
+            drop("no transform"); // i18n: not shown (a counter key the report reads, not text)
             continue;
         };
         if !r.enabled {
-            drop("renderer off");
+            drop("renderer off"); // i18n: not shown (a counter key the report reads, not text)
             continue;
         }
         if !world.shown(t) {
-            drop("inactive or EditorOnly");
+            drop("inactive or EditorOnly"); // i18n: not shown (a counter key the report reads, not text)
             continue;
         }
         if lower_lods.contains(id) {
-            drop("lower LOD");
+            drop("lower LOD"); // i18n: not shown (a counter key the report reads, not text)
             continue;
         }
         let source = if r.skinned { &r.mesh } else { filters.get(&r.game_object).copied().unwrap_or(&MeshSource::None) };
         let key = match source {
             MeshSource::None => {
-                drop("no mesh set (UI text, or made at run time)");
+                drop("no mesh set (UI text, or made at run time)"); // i18n: not shown (a counter key the report reads, not text)
                 continue;
             }
             MeshSource::Model { guid, mesh } => format!("{guid}:{mesh}"),
             MeshSource::Asset(r) => format!("{}:{}", r.guid.as_deref().unwrap_or("-"), r.file_id),
         };
         if !meshes.contains_key(&key) {
-            limits.check("reading the meshes")?;
+            limits.check("reading the meshes")?; // i18n: not shown (what a time-limit error says it was doing)
             let m = match resolve_mesh(&mut loader, source) {
                 Ok(m) => Some(m),
                 Err(e) => {
-                    limits.check("reading the meshes")?;
+                    limits.check("reading the meshes")?; // i18n: not shown (what a time-limit error says it was doing)
                     let what = format!("{e:#}");
                     if !loader.missing.contains(&what) && loader.missing.len() < 64 {
                         loader.missing.push(what);
@@ -188,11 +188,11 @@ pub fn build(project: &Path, scene: &SceneFile, assets: &Assets, limits: &Limits
             meshes.insert(key.clone(), m);
         }
         let Some(mesh) = meshes[&key].clone() else {
-            drop("mesh could not be read");
+            drop("mesh could not be read"); // i18n: not shown (a counter key the report reads, not text)
             continue;
         };
         if mesh.positions.is_empty() || mesh.triangles() == 0 {
-            drop("empty mesh");
+            drop("empty mesh"); // i18n: not shown (a counter key the report reads, not text)
             continue;
         }
         let avatar = avatars.iter().position(|(at, _)| world.under(t, *at)).map(|i| i as u32);
@@ -266,7 +266,7 @@ pub fn build(project: &Path, scene: &SceneFile, assets: &Assets, limits: &Limits
                 MatSource::Baked(k) => format!("b:{k}"),
             };
             if !looks.contains_key(&key) {
-                limits.check("reading the materials")?;
+                limits.check("reading the materials")?; // i18n: not shown (what a time-limit error says it was doing)
                 let resolved = match src {
                     MatSource::Baked(k) => Ok(baked_looks[*k].0.clone()),
                     src => resolve_material(&mut loader, src, &mut shader_names),
@@ -276,7 +276,7 @@ pub fn build(project: &Path, scene: &SceneFile, assets: &Assets, limits: &Limits
                     if !loader.missing.contains(&what) && loader.missing.len() < 64 {
                         loader.missing.push(what);
                     }
-                    Look { material: file::Material { name: "Missing".into(), color: [0.75, 0.75, 0.75, 1.0], ..Default::default() }, ..Default::default() }
+                    Look { material: file::Material { name: "Missing".into(), color: [0.75, 0.75, 0.75, 1.0], ..Default::default() }, ..Default::default() } // i18n: not shown (a stored name or detail of the scene file)
                 });
                 looks.insert(key.clone(), (materials.len(), look.clone()));
                 materials.push(look.material.clone());
@@ -346,7 +346,7 @@ pub fn build(project: &Path, scene: &SceneFile, assets: &Assets, limits: &Limits
             loader.files.push(prefab::meta_path(p));
         }
     }
-    limits.check("reading the pictures")?;
+    limits.check("reading the pictures")?; // i18n: not shown (what a time-limit error says it was doing)
     let decoded = decode_all(&jobs, limits);
     let mut writer = Writer::default();
     let mut textures: Vec<Texture> = Vec::new();
@@ -371,7 +371,7 @@ pub fn build(project: &Path, scene: &SceneFile, assets: &Assets, limits: &Limits
                 });
             }
             Err(e) => {
-                let name = path.as_ref().map(|p| prefab::rel(assets, p)).unwrap_or_else(|| format!("a texture ({g})"));
+                let name = path.as_ref().map(|p| prefab::rel(assets, p)).unwrap_or_else(|| format!("a texture ({g})")); // i18n: not shown (a stored name or detail of the scene file)
                 let what = format!("{name}: {e:#}");
                 if !loader.missing.contains(&what) && loader.missing.len() < 64 {
                     loader.missing.push(what);
@@ -421,7 +421,7 @@ pub fn build(project: &Path, scene: &SceneFile, assets: &Assets, limits: &Limits
                 textures.push(Texture { width: e.width, height: e.height, format: ImageFormat::Jpeg, linear: false, data });
             }
             Err(e) => {
-                let name = p.as_ref().map(|p| prefab::rel(assets, p)).unwrap_or_else(|| format!("a lightmap ({g})"));
+                let name = p.as_ref().map(|p| prefab::rel(assets, p)).unwrap_or_else(|| format!("a lightmap ({g})")); // i18n: not shown (a stored name or detail of the scene file)
                 let what = format!("{name}: {e:#}");
                 if !loader.missing.contains(&what) && loader.missing.len() < 64 {
                     loader.missing.push(what);
@@ -431,7 +431,7 @@ pub fn build(project: &Path, scene: &SceneFile, assets: &Assets, limits: &Limits
     }
 
     // The sky.
-    limits.check("reading the sky")?;
+    limits.check("reading the sky")?; // i18n: not shown (what a time-limit error says it was doing)
     let built_sky = place::sky(&mut loader, &graph);
     let mut sky = None;
     let mut sky_ambient = None;
@@ -463,7 +463,7 @@ pub fn build(project: &Path, scene: &SceneFile, assets: &Assets, limits: &Limits
     let mut vertices_total = 0u64;
     let identity = math::IDENTITY;
     for (c, slots) in candidates.iter().zip(&draws_materials) {
-        limits.check("posing the meshes")?;
+        limits.check("posing the meshes")?; // i18n: not shown (what a time-limit error says it was doing)
         let m = c.matrix;
         let posed = c.skinned && (c.mesh.skin.is_some() || c.blend.iter().any(|w| *w != 0.0));
         let (mesh_index, matrix, world_b) = if posed {
@@ -545,7 +545,7 @@ pub fn build(project: &Path, scene: &SceneFile, assets: &Assets, limits: &Limits
     if skipped_budget > 0 {
         skipped.insert("budget".to_string(), skipped_budget);
     }
-    for (why, key) in [("terrain trees thinned", "trees"), ("terrain details", "details")] {
+    for (why, key) in [("terrain trees thinned", "trees"), ("terrain details", "details")] { // i18n: not shown (a counter key the report reads, not text)
         if let Some(&n) = dropped.get(why) {
             skipped.insert(key.to_string(), n);
         }
@@ -560,7 +560,7 @@ pub fn build(project: &Path, scene: &SceneFile, assets: &Assets, limits: &Limits
     report.ms = start.elapsed().as_secs_f64() * 1000.0;
     let header = Header {
         written_utc: now_utc(),
-        generator: format!("Orbiters - N4N0 {} (from the project's files)", env!("CARGO_PKG_VERSION")),
+        generator: format!("Orbiters - N4N0 {} (from the project's files)", env!("CARGO_PKG_VERSION")), // i18n: not shown (a stored name or detail of the scene file)
         unity: unity_version(project),
         scene: file::Scene { name: scene.name.clone(), path: prefab::rel(assets, &scene.path), guid: scene.guid.clone() },
         kind,
@@ -781,7 +781,7 @@ pub fn material_of_slot(loader: &mut Loader, src: &MatSource, shader_names: &mut
 fn resolve_material(loader: &mut Loader, src: &MatSource, shader_names: &mut HashMap<String, String>) -> anyhow::Result<Look> {
     match src {
         MatSource::None => {
-            Ok(Look { material: file::Material { name: "None".into(), color: [0.75, 0.75, 0.75, 1.0], ..Default::default() }, ..Default::default() })
+            Ok(Look { material: file::Material { name: "None".into(), color: [0.75, 0.75, 0.75, 1.0], ..Default::default() }, ..Default::default() }) // i18n: not shown (a stored name or detail of the scene file)
         }
         MatSource::Asset(r) => {
             let guid = r.guid.as_deref().context("a material in the scene itself")?;
@@ -806,7 +806,7 @@ fn resolve_material(loader: &mut Loader, src: &MatSource, shader_names: &mut Has
                 // A model's own material, by Unity's ID of it: its name's hash, or a name an older import numbered.
                 let m = loader.model(guid)?;
                 let named = loader.model_settings(guid).material_ids.get(&r.file_id).cloned();
-                let k = m.materials.iter().position(|mm| super::model::file_id("Material", &mm.name, 0) == r.file_id || named.as_deref() == Some(mm.name.as_str())).unwrap_or(0);
+                let k = m.materials.iter().position(|mm| super::model::file_id("Material", &mm.name, 0) == r.file_id || named.as_deref() == Some(mm.name.as_str())).unwrap_or(0); // i18n: not shown (a stored name or detail of the scene file)
                 return model_slot(loader, guid, k, shader_names);
             }
             mat_file(loader, &path, shader_names)
@@ -1161,7 +1161,7 @@ enum Use {
 
 fn decode_all(jobs: &[(String, Use, Option<PathBuf>, bool, u32)], limits: &Limits) -> Vec<anyhow::Result<texture::Encoded>> {
     in_parallel(jobs, limits, |(_, how, path, keep_alpha, side)| {
-        limits.check("reading the pictures")?;
+        limits.check("reading the pictures")?; // i18n: not shown (what a time-limit error says it was doing)
         let path = path.as_ref().context("not in the project")?;
         let img = texture::decode(path, limits.max_texture_bytes)?;
         // An emission mask needs less detail than the colour, ripples and grain a little less.
@@ -1197,14 +1197,14 @@ fn add_terrains(
         if !t.enabled || !world.shown(tr) {
             continue;
         }
-        loader.limits.check("reading the terrain")?;
+        loader.limits.check("reading the terrain")?; // i18n: not shown (what a time-limit error says it was doing)
         let Some(r) = &t.data else { continue };
         let Some(path) = r.guid.as_deref().and_then(|g| loader.assets.path(g)) else {
-            let what = "a terrain whose data is not in the project".to_string();
+            let what = "a terrain whose data is not in the project".to_string(); // i18n: not shown (a stored name or detail of the scene file)
             if !loader.missing.contains(&what) {
                 loader.missing.push(what);
             }
-            *dropped.entry("mesh could not be read".to_string()).or_insert(0) += 1;
+            *dropped.entry("mesh could not be read".to_string()).or_insert(0) += 1; // i18n: not shown (a counter key the report reads, not text)
             continue;
         };
         let name = prefab::rel(loader.assets, &path);
@@ -1216,7 +1216,7 @@ fn add_terrains(
                 if !loader.missing.contains(&what) && loader.missing.len() < 64 {
                     loader.missing.push(what);
                 }
-                *dropped.entry("mesh could not be read".to_string()).or_insert(0) += 1;
+                *dropped.entry("mesh could not be read".to_string()).or_insert(0) += 1; // i18n: not shown (a counter key the report reads, not text)
                 continue;
             }
         };
@@ -1247,7 +1247,7 @@ fn add_terrains(
             lightmap: place::lightmap_of(graph, unity_lightmaps, id, t.lightmap_index, t.lightmap_st),
         });
         if data.detail_patches > 0 {
-            *dropped.entry("terrain details".to_string()).or_insert(0) += data.detail_patches as u32;
+            *dropped.entry("terrain details".to_string()).or_insert(0) += data.detail_patches as u32; // i18n: not shown (a counter key the report reads, not text)
         }
         if !t.trees {
             continue;
@@ -1271,11 +1271,11 @@ fn add_terrains(
         }
         let step = data.trees.len().div_ceil(terrain::MAX_TREES).max(1);
         if step > 1 {
-            *dropped.entry("terrain trees thinned".to_string()).or_insert(0) += (data.trees.len() - data.trees.len() / step) as u32;
+            *dropped.entry("terrain trees thinned".to_string()).or_insert(0) += (data.trees.len() - data.trees.len() / step) as u32; // i18n: not shown (a counter key the report reads, not text)
         }
         for (i, tree) in data.trees.iter().step_by(step).enumerate() {
             let Some(parts) = protos.get(tree.prototype) else { continue };
-            loader.limits.check("placing the trees")?;
+            loader.limits.check("placing the trees")?; // i18n: not shown (what a time-limit error says it was doing)
             let place = [at[0] + tree.position[0] * data.size[0], at[1] + tree.position[1] * data.size[1], at[2] + tree.position[2] * data.size[2]];
             let (s, c) = (tree.rotation * 0.5).sin_cos();
             let m = math::trs(place, [0.0, s, 0.0, c], [tree.width, tree.height, tree.width]);

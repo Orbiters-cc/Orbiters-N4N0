@@ -1,3 +1,4 @@
+use orbiters_i18n::tr;
 use crate::avatars::{self, Avatar, SceneCache};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -19,8 +20,8 @@ pub enum Kind {
 impl Kind {
     pub fn label(self) -> &'static str {
         match self {
-            Self::Avatars => "Avatars",
-            Self::Worlds => "Worlds",
+            Self::Avatars => tr("Avatars"),
+            Self::Worlds => tr("Worlds"),
             Self::Vrchat => "VRChat",
             Self::Unity => "Unity",
         }
@@ -97,7 +98,7 @@ pub fn skip_dir(name: &str) -> bool {
     let n = name.to_ascii_lowercase();
     matches!(
         n.as_str(),
-        "windows" | "programdata" | "$recycle.bin" | "system volume information" | "appdata" | "library" | "temp" | "logs" | "obj" | "node_modules" | ".git"
+        "windows" | "programdata" | "$recycle.bin" | "system volume information" | "appdata" | "library" | "temp" | "logs" | "obj" | "node_modules" | ".git" // i18n: not shown (folder names and a macOS query the scan skips or asks for)
     ) || n.starts_with("program files")
         || mac_only_skip(&n)
 }
@@ -112,7 +113,7 @@ fn mac_only_skip(name: &str) -> bool {
 fn asks_permission(path: &Path) -> bool {
     cfg!(target_os = "macos")
         && path.parent().is_some_and(|parent| dirs::home_dir().as_deref() == Some(parent))
-        && path.file_name().is_some_and(|n| ["Desktop", "Documents", "Downloads", "Movies", "Music", "Pictures"].iter().any(|g| n == *g))
+        && path.file_name().is_some_and(|n| ["Desktop", "Documents", "Downloads", "Movies", "Music", "Pictures"].iter().any(|g| n == *g)) // i18n: not shown (folder names and a macOS query the scan skips or asks for)
 }
 pub fn is_link(m: &std::fs::Metadata) -> bool {
     #[cfg(windows)]
@@ -256,7 +257,7 @@ fn scan_roots(_force: bool) -> Vec<PathBuf> {
 /// question for the folders macOS guards. Reading a project found in one is what makes it ask, and only then.
 #[cfg(target_os = "macos")]
 fn spotlight_projects() -> Vec<PathBuf> {
-    projects_of_version_files(crate::mac::spotlight("kMDItemFSName == 'ProjectVersion.txt'"))
+    projects_of_version_files(crate::mac::spotlight("kMDItemFSName == 'ProjectVersion.txt'")) // i18n: not shown (folder names and a macOS query the scan skips or asks for)
 }
 /// The projects `<project>/ProjectSettings/ProjectVersion.txt` files name, without those a walk would not go to.
 #[cfg(target_os = "macos")]
@@ -314,7 +315,7 @@ pub fn discover(mut scan: Scan, force: bool, cancel: &AtomicBool, publish: impl 
         found.insert(key(p), p.clone());
     }
     rebuild(&mut scan, &found, &known);
-    scan.status = "Finding nearby projects".into();
+    scan.status = tr("Finding nearby projects").into();
     publish(&scan);
     let seeds = seeds(&registered);
     let mut roots = HashSet::new();
@@ -334,7 +335,7 @@ pub fn discover(mut scan: Scan, force: bool, cancel: &AtomicBool, publish: impl 
     let mut enriched = HashSet::new();
     enrich(&mut scan, cancel, &mut enriched, &mut publish);
     if force || now().saturating_sub(scan.last_full) >= 3600 {
-        scan.status = "Scanning fixed local disks".into();
+        scan.status = tr("Scanning fixed local disks").into();
         publish(&scan);
         let start = Instant::now();
         let mut count = 0;
@@ -347,7 +348,7 @@ pub fn discover(mut scan: Scan, force: bool, cancel: &AtomicBool, publish: impl 
             publish(&scan);
         }
         for disk in scan_roots(force) {
-            scan.status = format!("Scanning {}", disk.display());
+            scan.status = tr!("Scanning {disk}", disk = disk.display());
             publish(&scan);
             count += scan_disk(&disk, !force, cancel, &mut found, &mut scan.warnings);
             if cancel.load(Ordering::Relaxed) {
@@ -392,7 +393,7 @@ fn enrich(scan: &mut Scan, cancel: &AtomicBool, enriched: &mut HashSet<String>, 
             continue;
         }
         let path = p.path.clone();
-        scan.status = format!("Reading {} in {}", if p.kind == Kind::Worlds { "worlds" } else { "avatars" }, p.name);
+        scan.status = if p.kind == Kind::Worlds { tr!("Reading worlds in {project}", project = p.name) } else { tr!("Reading avatars in {project}", project = p.name) };
         publish(scan);
         let (items, complete) = avatars::in_project_checked(&path, &mut scan.scenes);
         // A readable Assets root does not guarantee its subfolders, scenes or prefabs were readable.
@@ -448,7 +449,7 @@ fn scan_disk(root: &Path, quiet: bool, cancel: &AtomicBool, found: &mut HashMap<
             break;
         }
         if advanced.elapsed() > Duration::from_secs(60) {
-            warnings.push(format!("{} stopped responding for 60 seconds. Its scan was interrupted; Refresh retries it.", root.display()));
+            warnings.push(tr!("{folder} stopped responding for 60 seconds. Its scan was interrupted; Refresh retries it.", folder = root.display()));
             break;
         }
     }

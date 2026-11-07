@@ -13,7 +13,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
 use vrc_get_vpm::version::{PrereleaseAcceptance, Version, VersionRange};
 
-const NOT_FOUND: &str = "Following dependencies are not found: ";
+const NOT_FOUND: &str = "Following dependencies are not found: "; // i18n: not shown (vrc-get's own English message, which is parsed)
 /// Orbiters listings read when the catalog and the person's repositories had nothing.
 const LISTINGS_READ: usize = 40;
 

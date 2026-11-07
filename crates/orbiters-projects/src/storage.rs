@@ -10,6 +10,7 @@
 //!
 //! [`remove_orphans`] takes away what a repair could not: closing the app in the middle of a copy kills the thread and
 //! leaves a cache folder no Library points at.
+use orbiters_i18n::tr;
 use anyhow::{bail, Context};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -31,7 +32,7 @@ pub const INSTANT_ENTRIES: usize = 256;
 /// stand-in project: with it set, repairs copy only there and orphan removal looks only there.
 pub const CACHE_DIR_VAR: &str = "ORBITERS_UNITY_CACHE_DIR";
 
-const BACKUP_PREFIX: &str = "Library.orbiters-relocation-";
+const BACKUP_PREFIX: &str = "Library.orbiters-relocation-"; // i18n: not shown (a folder name; an error text, English until errors are decided; a macOS path part)
 
 #[derive(Clone, Debug, Default)]
 pub struct Health {
@@ -612,7 +613,7 @@ fn project_lock(project: &Path) -> anyhow::Result<std::fs::File> {
 /// meet on the Mac). An editor that has the project open without one is looked for by its command line too.
 #[cfg(unix)]
 fn project_lock(project: &Path) -> anyhow::Result<std::fs::File> {
-    const HELD: &str = "Close this project's Unity window before repairing storage";
+    const HELD: &str = "Close this project's Unity window before repairing storage"; // i18n: not shown (a folder name; an error text, English until errors are decided; a macOS path part)
     std::fs::create_dir_all(project.join("Temp"))?;
     let file = std::fs::OpenOptions::new().write(true).create(true).truncate(false).open(project.join("Temp/UnityLockfile")).context(HELD)?;
     match file.try_lock() {
@@ -698,8 +699,8 @@ fn discard_copy(target: &Path, work: &Work) -> Option<PathBuf> {
 #[cfg(any(windows, unix))]
 fn partial_note(left: &Option<PathBuf>) -> String {
     match left {
-        None => "The partial copy was deleted.".to_string(),
-        Some(p) => format!("The partial copy at {} could not be deleted; Orbiters tries again the next time its window opens.", p.display()),
+        None => tr("The partial copy was deleted.").to_string(),
+        Some(p) => tr!("The partial copy at {path} could not be deleted; Orbiters tries again the next time its window opens.", path = p.display()),
     }
 }
 
@@ -954,7 +955,7 @@ fn disk_present(path: &Path) -> bool {
     use std::path::Component::{Normal, RootDir};
     let mut parts = path.components();
     match (parts.next(), parts.next(), parts.next()) {
-        (Some(RootDir), Some(Normal(volumes)), Some(Normal(disk))) if volumes == "Volumes" => Path::new("/Volumes").join(disk).exists(),
+        (Some(RootDir), Some(Normal(volumes)), Some(Normal(disk))) if volumes == "Volumes" => Path::new("/Volumes").join(disk).exists(), // i18n: not shown (a folder name; an error text, English until errors are decided; a macOS path part)
         _ => true,
     }
 }

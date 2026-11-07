@@ -128,7 +128,7 @@ pub fn unity_hub() -> Option<PathBuf> {
     return unity_hub_on_mac(configured);
     #[cfg(not(target_os = "macos"))]
     {
-        let installed = uninstall_entry(|key, name| key == "Unity Technologies - Hub" || name.starts_with("Unity Hub")).and_then(|(location, icon)| {
+        let installed = uninstall_entry(|key, name| key == "Unity Technologies - Hub" || name.starts_with("Unity Hub")).and_then(|(location, icon)| { // i18n: not shown (Windows registry key and macOS query)
             icon.filter(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("exe"))).or(location.map(|l| l.join("Unity Hub.exe")))
         });
         [configured, installed, Some(PathBuf::from(r"C:\Program Files\Unity Hub\Unity Hub.exe"))].into_iter().flatten().find(|p| p.is_file())
@@ -146,7 +146,7 @@ fn unity_hub_on_mac(configured: Option<PathBuf>) -> Option<PathBuf> {
         .into_iter()
         .chain(usual)
         .find(|p| p.is_file())
-        .or_else(|| mac::spotlight("kMDItemCFBundleIdentifier == 'com.unity3d.unityhub'").iter().map(|app| mac::bundle_program(app)).find(|p| p.is_file()))
+        .or_else(|| mac::spotlight("kMDItemCFBundleIdentifier == 'com.unity3d.unityhub'").iter().map(|app| mac::bundle_program(app)).find(|p| p.is_file())) // i18n: not shown (Windows registry key and macOS query)
 }
 
 pub fn runtime() -> anyhow::Result<tokio::runtime::Runtime> {

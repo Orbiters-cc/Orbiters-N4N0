@@ -5,6 +5,7 @@
 //! its outcome comes as a toast. Which items are the member's is asked once per account, a batch at a time, for the
 //! thumbnails drawn. Anyone else's thumbnails, and every thumbnail while signed out of VRChat, stay as they are.
 
+use orbiters_i18n::tr;
 use super::art;
 use super::state::{Poke, State};
 use crate::controller::vrchat_data::{Request, Response, Scope, OWNED_BATCH};
@@ -172,7 +173,7 @@ pub(super) fn thumbnail(ui: &mut Ui, cx: &Cx, state: &mut State, a: &Avatar, rec
     if let Some(u) = running.filter(|u| u.id == a.id) {
         let k = anim::value(&ctx, id.with("progress"), u.step.map_or(0.0, |s| s.progress()), Spring::SOFT);
         progress(ui, rect, radii, Some(k));
-        let label = u.step.map_or("Uploading to VRChat…", |s| s.label());
+        let label = u.step.map_or(tr("Uploading to VRChat…"), |s| s.label());
         let _ = ui.interact(rect, id, Sense::hover()).on_hover_text(label);
         return;
     }
@@ -195,11 +196,11 @@ pub(super) fn thumbnail(ui: &mut Ui, cx: &Cx, state: &mut State, a: &Avatar, rec
     }
     if busy {
         if running.is_some() && !open {
-            let _ = resp.on_hover_text("Another picture is uploading to VRChat");
+            let _ = resp.on_hover_text(tr("Another picture is uploading to VRChat"));
         }
         return;
     }
-    let resp = resp.on_hover_cursor(CursorIcon::PointingHand).on_hover_text("Change the picture on VRChat");
+    let resp = resp.on_hover_cursor(CursorIcon::PointingHand).on_hover_text(tr("Change the picture on VRChat"));
     if widgets::activated(&resp) {
         change(&ctx, cx, state, a);
     }
@@ -222,7 +223,7 @@ pub(super) fn change(ctx: &egui::Context, cx: &Cx, state: &mut State, a: &Avatar
     let (item, name, backend, scope) = (a.id.clone(), a.name.clone(), cx.ctl.clone(), Scope::of(cx.snap));
     p.picking = Some(item.clone());
     p.pick = Job::spawn(ctx, move || {
-        let path = rfd::FileDialog::new().set_title(format!("A new picture for {name} on VRChat")).add_filter("Pictures", &EXTENSIONS).pick_file();
+        let path = rfd::FileDialog::new().set_title(tr!("A new picture for {name} on VRChat", name = name)).add_filter(tr("Pictures"), &EXTENSIONS).pick_file();
         if let Some(path) = &path {
             backend.vrchat_picture(scope, item.clone(), path.clone());
         }

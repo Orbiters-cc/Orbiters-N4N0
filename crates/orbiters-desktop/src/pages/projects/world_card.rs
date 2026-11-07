@@ -5,6 +5,7 @@
 //! which reads the same server. Uploads run in the tray service (they go on when the window closes) and come back in
 //! its snapshot, as on the Visited worlds page. Each world's Blender files follow it ([`super::blend`]).
 
+use orbiters_i18n::{tr, tr_n};
 use super::art;
 use super::state::State;
 use crate::pages::{Cx, Job};
@@ -21,7 +22,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 /// The VRChat world that shows, in VRChat, what members added to worlds on Orbiters.
-const VIEWER_WORLD: &str = "Orbiters 3D pictures viewer";
+const VIEWER_WORLD: &str = "Orbiters 3D pictures viewer"; // i18n: not shown (the name of a world in VRChat)
 /// How long an upload handed to the tray service shows as starting before the service lists it.
 const HANDED_SECS: f64 = 3.0;
 
@@ -62,7 +63,7 @@ pub(super) fn load(sessions_dir: &Path) -> HashMap<String, Here> {
                 })
                 .collect();
             let folder = w.shots.first().and_then(|s| s.path.parent().map(Path::to_path_buf));
-            let name = (!w.name.is_empty() && w.name != "Unnamed world").then(|| w.name.clone());
+            let name = (!w.name.is_empty() && w.name != "Unnamed world").then(|| w.name.clone()); // i18n: not shown (the name VRChat gives a world that has none)
             (w.id, Here { name, captures, pictures: w.shots.len(), folder })
         })
         .collect()
@@ -71,8 +72,8 @@ pub(super) fn load(sessions_dir: &Path) -> HashMap<String, Here> {
 /// What this member has on Orbiters of a world, in words ("3D preview · 12 pictures"); empty for nothing.
 fn on_orbiters(m: &MineWorld) -> String {
     let n = m.pictures.len();
-    let pictures = (n > 0).then(|| format!("{n} {}", if n == 1 { "picture" } else { "pictures" }));
-    [m.preview.as_ref().map(|_| "3D preview".to_string()), pictures].into_iter().flatten().collect::<Vec<_>>().join(" · ")
+    let pictures = (n > 0).then(|| tr_n("{count} picture", "{count} pictures", n as u64));
+    [m.preview.as_ref().map(|_| tr("3D preview").to_string()), pictures].into_iter().flatten().collect::<Vec<_>>().join(" · ")
 }
 
 /// The world's page on VRChat.
@@ -113,12 +114,12 @@ pub(super) fn card(ui: &mut Ui, cx: &mut Cx, state: &mut State, project: &Projec
         ui,
         "worlds",
         icons::GLOBE,
-        "Worlds",
+        tr("Worlds"),
         count,
         |_, _| {},
         |ui| {
             if project.worlds.is_empty() {
-                let text = "No uploaded world yet. Upload it from the VRChat SDK panel, save its scene, and it shows up here.";
+                let text = tr("No uploaded world yet. Upload it from the VRChat SDK panel, save its scene, and it shows up here.");
                 let g = ui.painter().layout_job(Txt::new(text, 12.5).color(theme::FG_3).line_height(19.0).job(ui.available_width()));
                 let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), g.size().y + 4.0), Sense::hover());
                 ui.painter().galley(r.min, g, theme::FG_3);
@@ -157,9 +158,9 @@ fn row(ui: &mut Ui, cx: &mut Cx, state: &mut State, project: &Project, w: &Avata
     let py = thumb.top() + 52.0;
     let on = mine.map(on_orbiters).unwrap_or_default();
     if known || mine.is_some() {
-        let label = if on.is_empty() { "Not on Orbiters yet".to_string() } else { on.clone() };
+        let label = if on.is_empty() { tr("Not on Orbiters yet").to_string() } else { on.clone() };
         let pw = widgets::pill_at(p, ui, pos2(x, py), Some(icons::MAP_TRIFOLD), &label);
-        let hint = if on.is_empty() { "Nothing of yours on Orbiters' Map explorer for this world yet".to_string() } else { format!("On Orbiters' Map explorer: {on}") };
+        let hint = if on.is_empty() { tr("Nothing of yours on Orbiters' Map explorer for this world yet").to_string() } else { tr!("On Orbiters' Map explorer: {on}", on = on) };
         let _ = ui.interact(Rect::from_min_size(pos2(x, py - 10.0), vec2(pw, 20.0)), Id::unique(("world-on-orbiters", &w.id)), Sense::hover()).on_hover_text(hint);
     } else {
         // Orbiters has not answered yet.
@@ -167,10 +168,10 @@ fn row(ui: &mut Ui, cx: &mut Cx, state: &mut State, project: &Project, w: &Avata
     }
     let url = vrchat_page(&w.id);
     state.anchors.insert(format!("world-vrchat-{i}"), link);
-    let open = IconButton::new(icons::ARROW_SQUARE_OUT, "Open on VRChat").size(32.0, 15.0).backdrop(theme::control()).id_salt(("world-vrchat", &w.id));
+    let open = IconButton::new(icons::ARROW_SQUARE_OUT, tr("Open on VRChat")).size(32.0, 15.0).backdrop(theme::control()).id_salt(("world-vrchat", &w.id));
     if widgets::activated(&open.show_at(ui, link).on_hover_text(&url)) {
         if let Err(e) = crate::controller::open_url(&url) {
-            cx.toasts.push(&ctx, orbiters_ui::toast::Kind::Error, format!("The page could not open: {e}"));
+            cx.toasts.push(&ctx, orbiters_ui::toast::Kind::Error, tr!("The page could not open: {error}", error = e));
         }
     }
     add(ui, cx, state, w, &name, here.as_ref(), mine, i);
@@ -220,8 +221,10 @@ fn add(ui: &mut Ui, cx: &mut Cx, state: &mut State, w: &Avatar, name: &str, here
 
     let width = ui.available_width();
     let inner = width - 28.0;
-    let text = format!(
-        "Add your 3D captures and pictures of {name}: they show on orbiters.cc's Maps page and in the VRChat world {VIEWER_WORLD}, for everyone."
+    let text = tr!(
+        "Add your 3D captures and pictures of {name}: they show on orbiters.cc's Maps page and in the VRChat world {world}, for everyone.",
+        name = name,
+        world = VIEWER_WORLD
     );
     let g = ui.painter().layout_job(Txt::new(&text, 12.5).color(theme::FG_3).line_height(19.0).job(inner));
 
@@ -229,16 +232,16 @@ fn add(ui: &mut Ui, cx: &mut Cx, state: &mut State, w: &Avatar, name: &str, here
     let captures: Vec<&Capture> = here.map(|h| h.captures.iter().filter(|c| c.splats.is_some()).collect()).unwrap_or_default();
     let recorded = here.is_some_and(|h| !h.captures.is_empty());
     let capture_label = if sending_preview {
-        "Sharing in 3D…"
+        tr("Sharing in 3D…")
     } else if captures.len() > 1 {
-        "Share a 3D capture"
+        tr("Share a 3D capture")
     } else {
-        "Share my 3D capture"
+        tr("Share my 3D capture")
     };
     let capture_b = Button::new(capture_label).icon(icons::CUBE).size(Size::Sm);
-    let pictures_b = Button::new("VRChat pictures").icon(icons::IMAGES).size(Size::Sm);
-    let files_b = Button::new("From this computer").icon(icons::FOLDER_OPEN).size(Size::Sm);
-    let sign_b = Button::new(if cx.snap.account.state == AccountState::SigningIn { "Finish in your browser" } else { "Sign in to Orbiters to add" })
+    let pictures_b = Button::new(tr("VRChat pictures")).icon(icons::IMAGES).size(Size::Sm);
+    let files_b = Button::new(tr("From this computer")).icon(icons::FOLDER_OPEN).size(Size::Sm);
+    let sign_b = Button::new(if cx.snap.account.state == AccountState::SigningIn { tr("Finish in your browser") } else { tr("Sign in to Orbiters to add") })
         .icon(icons::SIGN_IN)
         .variant(Variant::Primary)
         .size(Size::Sm);
@@ -279,18 +282,18 @@ fn add(ui: &mut Ui, cx: &mut Cx, state: &mut State, w: &Avatar, name: &str, here
         state.anchors.insert(format!("world-capture-{i}"), r);
         let replaces = mine.is_some_and(|m| m.preview.is_some());
         let hint = if !recorded {
-            "Record this world from the Capture page, then reconstruct it in Photos & captures"
+            tr("Record this world from the Capture page, then reconstruct it in Photos & captures")
         } else if captures.is_empty() {
-            "Reconstruct a capture of this world in Photos & captures first"
+            tr("Reconstruct a capture of this world in Photos & captures first")
         } else if replaces {
-            "Its splats become the world's 3D preview on Orbiters, in place of yours"
+            tr("Its splats become the world's 3D preview on Orbiters, in place of yours")
         } else {
-            "Its splats become the world's 3D preview on Orbiters"
+            tr("Its splats become the world's 3D preview on Orbiters")
         };
         let mut share: Option<PathBuf> = None;
         if captures.len() > 1 && !sending_preview {
             let labels: Vec<String> = captures.iter().map(|c| c.when.clone()).collect();
-            let details: Vec<String> = captures.iter().map(|c| format!("{} splats", compact(c.splats.unwrap_or(0)))).collect();
+            let details: Vec<String> = captures.iter().map(|c| tr!("{count} splats", count = compact(c.splats.unwrap_or(0)))).collect();
             let items: Vec<Item> = labels.iter().zip(&details).map(|(l, d)| Item::new(l).detail(d).icon(icons::CUBE)).collect();
             if let Some(k) = popup::dropdown(&mut bu, ("world-capture", &w.id), r, capture_label, &items, None, true) {
                 share = Some(captures[k].dir.clone());
@@ -308,21 +311,21 @@ fn add(ui: &mut Ui, cx: &mut Cx, state: &mut State, w: &Avatar, name: &str, here
         // Pictures: VRChat's (the dialog opens where the newest taken here is), or any from the computer.
         let taken = here.map_or(0, |h| h.pictures);
         let pictures_hint = match taken {
-            0 => "Pick pictures you took in VRChat".to_string(),
-            1 => "Pick pictures you took in VRChat: 1 was taken in this world".to_string(),
-            n => format!("Pick pictures you took in VRChat: {n} were taken in this world"),
+            0 => tr("Pick pictures you took in VRChat").to_string(),
+            1 => tr("Pick pictures you took in VRChat: 1 was taken in this world").to_string(),
+            n => tr!("Pick pictures you took in VRChat: {n} were taken in this world", n = n),
         };
         let r = at(1);
         state.anchors.insert(format!("world-pictures-{i}"), r);
         let enabled = !picking && !sending_pictures;
         if widgets::activated(&pictures_b.enabled(enabled).hint(&pictures_hint).id_salt(("world-pictures", &w.id)).show_at(&mut bu, r)) {
             let folder = here.and_then(|h| h.folder.clone());
-            pick(state, &ctx, w, name, move || folder.or_else(|| orbiters_core::visited::screenshot_dirs().into_iter().next()), "Pictures of this world from VRChat");
+            pick(state, &ctx, w, name, move || folder.or_else(|| orbiters_core::visited::screenshot_dirs().into_iter().next()), tr("Pictures of this world from VRChat"));
         }
         let r = at(2);
-        if widgets::activated(&files_b.enabled(enabled).hint("Pick pictures of this world from anywhere on the computer").id_salt(("world-files", &w.id)).show_at(&mut bu, r)) {
+        if widgets::activated(&files_b.enabled(enabled).hint(tr("Pick pictures of this world from anywhere on the computer")).id_salt(("world-files", &w.id)).show_at(&mut bu, r)) {
             let pictures = || std::env::var_os("USERPROFILE").map(|h| PathBuf::from(h).join("Pictures")).filter(|p| p.is_dir());
-            pick(state, &ctx, w, name, pictures, "Pictures of this world");
+            pick(state, &ctx, w, name, pictures, tr("Pictures of this world"));
         }
     }
     if let Some(s) = status {
@@ -338,7 +341,7 @@ fn pick(state: &mut State, ctx: &egui::Context, w: &Avatar, name: &str, start: i
     }
     let (id, name) = (w.id.clone(), name.to_string());
     state.pick_job = Job::spawn(ctx, move || {
-        let mut dialog = rfd::FileDialog::new().set_title(title).add_filter("Pictures", &["png", "jpg", "jpeg", "webp"]);
+        let mut dialog = rfd::FileDialog::new().set_title(title).add_filter(tr("Pictures"), &["png", "jpg", "jpeg", "webp"]);
         if let Some(dir) = start() {
             dialog = dialog.set_directory(dir);
         }
@@ -358,19 +361,19 @@ fn status_line(ui: &Ui, r: Rect, s: &Status, name: &str) {
     match s {
         Status::Starting => {
             feedback::spinner(p, icon_at, 6.0, 1.8, theme::ACCENT);
-            line("Sending to Orbiters…", theme::FG_2);
+            line(tr("Sending to Orbiters…"), theme::FG_2);
         }
         Status::Running(u) => {
             feedback::spinner(p, icon_at, 6.0, 1.8, theme::ACCENT);
             let what = match u.kind {
-                UploadKind::Preview => "the 3D capture".to_string(),
-                UploadKind::Pictures => format!("{} {}", u.paths.len(), if u.paths.len() == 1 { "picture" } else { "pictures" }),
+                UploadKind::Preview => tr("the 3D capture").to_string(),
+                UploadKind::Pictures => tr_n("{count} picture", "{count} pictures", u.paths.len() as u64),
             };
             match u.state {
-                UploadState::Preparing => line("Preparing the 3D capture for Orbiters…", theme::FG_2),
+                UploadState::Preparing => line(tr("Preparing the 3D capture for Orbiters…"), theme::FG_2),
                 _ => {
                     let f = anim::spring_from(ui.ctx(), Id::unique(("world-upload", u.id)), [0.0], [u.fraction()], Spring::SOFT)[0].clamp(0.0, 1.0);
-                    line(&format!("Sharing {what} · {:.0}%", f * 100.0), theme::FG_2);
+                    line(&tr!("Sharing {what} · {percent}%", what = what, percent = format!("{:.0}", f * 100.0)), theme::FG_2);
                     let bar = Rect::from_min_size(pos2(text_at.x, r.bottom() - 4.0), vec2(r.right() - text_at.x, 3.0));
                     p.rect_filled(bar, theme::radius(1.5), theme::white(0.08));
                     p.rect_filled(Rect::from_min_size(bar.min, vec2((bar.width() * f).max(3.0), 3.0)), theme::radius(1.5), theme::ACCENT);
@@ -378,22 +381,29 @@ fn status_line(ui: &Ui, r: Rect, s: &Status, name: &str) {
             }
         }
         Status::Finished(u) => {
-            let pictures = |n: usize| format!("{n} {}", if n == 1 { "picture" } else { "pictures" });
+            let pictures = |n: usize| tr_n("{count} picture", "{count} pictures", n as u64);
             // Short on the line; the whole of it on hover.
             let (glyph, color, short, whole) = match (&u.state, u.kind) {
-                (UploadState::Failed { message }, _) => (icons::WARNING, theme::DANGER, format!("Not added: {message}"), format!("Not added to {name}: {message}")),
+                (UploadState::Failed { message }, _) => (icons::WARNING, theme::DANGER, tr!("Not added: {message}", message = message), tr!("Not added to {name}: {message}", name = name, message = message)),
                 (UploadState::Done { .. }, UploadKind::Preview) => (
                     icons::CHECK_CIRCLE,
                     theme::ACCENT,
-                    "3D capture shared".to_string(),
-                    format!("Your 3D capture is {name}'s 3D preview on Orbiters"),
+                    tr("3D capture shared").to_string(),
+                    tr!("Your 3D capture is {name}'s 3D preview on Orbiters", name = name),
                 ),
                 (UploadState::Done { added: 0, .. }, UploadKind::Pictures) => {
-                    (icons::CHECK_CIRCLE, theme::FG_3, "Already on Orbiters".to_string(), format!("These pictures of {name} were on Orbiters already"))
+                    (icons::CHECK_CIRCLE, theme::FG_3, tr("Already on Orbiters").to_string(), tr!("These pictures of {name} were on Orbiters already", name = name))
                 }
                 (UploadState::Done { added, skipped }, UploadKind::Pictures) => {
-                    let more = if *skipped > 0 { format!(" · {skipped} there already") } else { String::new() };
-                    (icons::CHECK_CIRCLE, theme::ACCENT, format!("{} added{more}", pictures(*added)), format!("{} added to {name} on Orbiters{more}", pictures(*added)))
+                    let (short, whole) = if *skipped > 0 {
+                        (
+                            tr!("{pictures} added · {skipped} there already", pictures = pictures(*added), skipped = skipped),
+                            tr!("{pictures} added to {name} on Orbiters · {skipped} there already", pictures = pictures(*added), name = name, skipped = skipped),
+                        )
+                    } else {
+                        (tr!("{pictures} added", pictures = pictures(*added)), tr!("{pictures} added to {name} on Orbiters", pictures = pictures(*added), name = name))
+                    };
+                    (icons::CHECK_CIRCLE, theme::ACCENT, short, whole)
                 }
                 _ => return,
             };

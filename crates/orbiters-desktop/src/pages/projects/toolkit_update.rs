@@ -4,6 +4,7 @@
 //! person's press, in VRChat's window. An avatar from no project on this computer gets a polite word instead of a button that
 //! could only fail: it still works, the app takes it out of its pictures in software (orbiters_reconstruct::wearer).
 
+use orbiters_i18n::tr;
 use super::state::{Outcome, State};
 use orbiters_projects::discovery::Project;
 use orbiters_projects::vpm;
@@ -28,8 +29,10 @@ pub fn project_of<'a>(projects: &'a [Project], id: &str) -> Option<&'a Project> 
 
 /// What the person reads when no project here holds the avatar.
 pub fn refusal(avatar: Option<&str>) -> String {
-    let avatar = avatar.unwrap_or("This avatar");
-    format!("{avatar} is not in a Unity project on this PC, so there is nothing here to update. Nothing needs doing: it still comes out of your pictures this way.")
+    match avatar {
+        Some(avatar) => tr!("{avatar} is not in a Unity project on this PC, so there is nothing here to update. Nothing needs doing: it still comes out of your pictures this way.", avatar = avatar),
+        None => tr("This avatar is not in a Unity project on this PC, so there is nothing here to update. Nothing needs doing: it still comes out of your pictures this way.").to_string(),
+    }
 }
 
 impl State {
@@ -52,8 +55,8 @@ impl State {
     pub fn update_toolkit(&mut self, ctx: &egui::Context, id: &str, avatar: Option<&str>) {
         let Some(project) = project_of(&self.scan.projects, id).cloned() else { return };
         let name = project.name.clone();
-        let avatar = avatar.unwrap_or("your avatar").to_string();
-        self.task(ctx, &format!("Updating Orbiters Toolkit in {name}…"), move || {
+        let avatar = avatar.map(str::to_string);
+        self.task(ctx, &tr!("Updating Orbiters Toolkit in {name}…", name = name), move || {
             match orbiters_projects::runtime()?.block_on(vpm::install_orbiters(&orbiters_projects::vcc_dir(), &project.path, &["orbiters.toolkit"])) {
                 Ok(()) => {}
                 // Not cancelled: the plan making it coherent, in its dialog.
@@ -63,7 +66,10 @@ impl State {
                 },
             }
             orbiters_projects::open_project(&project)?;
-            Ok(Outcome::Changed(format!("{name} has the current Orbiters Toolkit and is open in Unity. Upload {avatar} from VRChat's SDK panel when you're ready: N4N0 uploads nothing by itself.")))
+            Ok(Outcome::Changed(match &avatar {
+                Some(avatar) => tr!("{name} has the current Orbiters Toolkit and is open in Unity. Upload {avatar} from VRChat's SDK panel when you're ready: N4N0 uploads nothing by itself.", name = name, avatar = avatar),
+                None => tr!("{name} has the current Orbiters Toolkit and is open in Unity. Upload your avatar from VRChat's SDK panel when you're ready: N4N0 uploads nothing by itself.", name = name),
+            }))
         });
     }
 

@@ -36,7 +36,7 @@ const STILL: (u32, u32) = (640, 360);
 /// What the worker finished.
 pub(super) enum Done {
     /// A scene's preview built (its file), or why not.
-    Built { project: PathBuf, guid: String, result: Result<Entry, String> },
+    Built { project: PathBuf, guid: String, result: Result<Entry, scene::Failure> },
     /// A card's still (one kept from before first, then a new one if its preview changed).
     Still { project: PathBuf, image: ColorImage },
     /// A project gets no still (no scene, or none that builds).
@@ -199,7 +199,7 @@ fn work(shared: &Shared, tx: &mpsc::Sender<Done>, ctx: &egui::Context, device: &
         };
         let run = std::panic::AssertUnwindSafe(|| match &job {
             Job::Build(project, scene) => match build(project, scene, &cancel) {
-                Err(why) if why == scene::STOPPED => Outcome::Stopped,
+                Err(why) if why.why == scene::STOPPED => Outcome::Stopped,
                 result => {
                     send(Done::Built { project: project.clone(), guid: scene.guid.clone(), result });
                     Outcome::Done
@@ -261,7 +261,7 @@ enum Outcome {
     Stopped,
 }
 
-fn build(project: &Path, scene: &SceneInfo, cancel: &Arc<AtomicBool>) -> Result<Entry, String> {
+fn build(project: &Path, scene: &SceneInfo, cancel: &Arc<AtomicBool>) -> Result<Entry, scene::Failure> {
     // Built meanwhile (a card's still and the panel asked for the same scene).
     if let Some(e) = scene::fresh(project, &scene.guid) {
         return Ok(e);
@@ -372,7 +372,7 @@ fn draw_still(
         }
         Source::Stale(_) | Source::None => {
             let result = build(project, &slot.scene, cancel);
-            if result.as_ref().err().is_some_and(|why| why == scene::STOPPED) {
+            if result.as_ref().err().is_some_and(|why| why.why == scene::STOPPED) {
                 *stopped = true;
                 return None;
             }

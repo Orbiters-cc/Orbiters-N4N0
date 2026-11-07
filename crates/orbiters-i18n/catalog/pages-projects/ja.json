@@ -541,5 +541,6 @@
   "{total} · Library {library}": "{total} · Library {library}",
   "{version} · removed": "{version} · 削除",
   "{v} is not a version": "{v}はバージョンとして正しくありません",
-  "Checking required disk space…": "必要なディスク容量を確認中…"
+  "Checking required disk space…": "必要なディスク容量を確認中…",
+  "it took too long ({doing})": "時間がかかりすぎました（{doing}）"
 }

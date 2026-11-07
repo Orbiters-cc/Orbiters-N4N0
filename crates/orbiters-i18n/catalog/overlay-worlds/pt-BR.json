@@ -190,5 +190,8 @@
   "{name}: {text}": "{name}: {text}",
   "{number} of {total}": "{number} de {total}",
   "view\u0004Small": "Pequeno",
-  "Touchpad: move around": "Touchpad: mover-se"
+  "Touchpad: move around": "Touchpad: mover-se",
+  "Orbiters answered {status}": "O Orbiters respondeu {status}",
+  "{url} answered {status}": "{url} respondeu {status}",
+  "this capture was replaced on Orbiters: refresh the list": "esta captura foi substituída no Orbiters: atualize a lista"
 }

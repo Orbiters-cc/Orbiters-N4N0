@@ -190,5 +190,8 @@
   "{name}: {text}": "{name}：{text}",
   "{number} of {total}": "{number} / {total}",
   "view\u0004Small": "ミニ",
-  "Touchpad: move around": "タッチパッド：移動"
+  "Touchpad: move around": "タッチパッド：移動",
+  "Orbiters answered {status}": "Orbitersの応答：{status}",
+  "{url} answered {status}": "{url}の応答：{status}",
+  "this capture was replaced on Orbiters: refresh the list": "このキャプチャはOrbiters上で置き換えられました。リストを更新してください"
 }

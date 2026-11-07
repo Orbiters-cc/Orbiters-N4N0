@@ -206,7 +206,7 @@ enum Status {
     /// Being built from the project's files (or waiting to be).
     Building,
     /// It cannot be built: why.
-    Failed(String),
+    Failed(native::Failure),
     /// The project has no scene.
     NoScene,
     /// Not listed yet.
@@ -564,7 +564,7 @@ impl Previews {
 }
 
 /// A finished build in `c`'s scenes: its preview, or why there is none.
-fn apply_build(c: &mut Current, guid: &str, result: Result<file::Entry, String>) {
+fn apply_build(c: &mut Current, guid: &str, result: Result<file::Entry, native::Failure>) {
     if let Some(slot) = c.slots.iter_mut().find(|s| s.scene.guid == guid) {
         slot.source = match result {
             Ok(e) => Source::Built(e),
@@ -734,7 +734,7 @@ pub(super) fn cover(ui: &mut Ui, cx: &Cx, state: &mut State, project: &Project, 
                         )),
                         _ => None,
                     };
-                    let hint = if why.starts_with("it took too long") { // i18n: not shown (the English start of the time-limit error, which stays English)
+                    let hint = if why.out_of_time {
                         // `scene::RETRY_AFTER`: what the first try read is kept, so the next gets further.
                         tr("It is tried again in half an hour (the first look at a project on a hard disk is the slowest), or as soon as the scene is saved.")
                     } else if offer.is_some() {
@@ -1411,7 +1411,7 @@ fn scene_chips(c: &Current, builds: &Builder) -> SceneChips {
                 Source::Stale(_) => ChipState::Outdated,
                 Source::None if building => ChipState::Building,
                 Source::None => ChipState::Unbuilt,
-                Source::Failed(why) => ChipState::Failed(why.clone()),
+                Source::Failed(why) => ChipState::Failed(why.why.clone()),
             };
             let name = match s.scene.rel.rsplit('/').nth(1) {
                 Some(folder) if named(&s.scene.name) > 1 => format!("{} · {folder}", s.scene.name),

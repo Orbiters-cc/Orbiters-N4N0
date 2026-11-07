@@ -541,5 +541,6 @@
   "{total} · Library {library}": "{total} · Library {library}",
   "{version} · removed": "{version} · retiré",
   "{v} is not a version": "{v} n’est pas une version",
-  "Checking required disk space…": "Vérification de l’espace disque nécessaire…"
+  "Checking required disk space…": "Vérification de l’espace disque nécessaire…",
+  "it took too long ({doing})": "cela a pris trop de temps ({doing})"
 }

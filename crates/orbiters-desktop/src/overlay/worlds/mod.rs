@@ -1693,13 +1693,12 @@ struct Visible {
 
 /// A download's error in a line the panel can show.
 fn short_error(e: &anyhow::Error) -> String {
-    let text = format!("{e:#}");
-    let text = if text.contains("replaced") {
+    let text = if e.chain().any(|cause| cause.is::<catalog::Replaced>()) {
         tr("This capture was replaced on Orbiters: go back and pick it again").to_string()
-    } else if text.contains("answered 404") {
+    } else if e.chain().filter_map(|cause| cause.downcast_ref::<catalog::Answered>()).any(|a| a.status == 404) {
         tr("This capture is no longer on Orbiters").to_string()
     } else {
-        tr!("Could not download it: {text}", text = text)
+        tr!("Could not download it: {text}", text = format!("{e:#}"))
     };
     text.chars().take(90).collect()
 }

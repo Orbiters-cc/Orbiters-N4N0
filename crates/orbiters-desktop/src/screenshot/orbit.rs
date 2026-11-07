@@ -12,10 +12,10 @@ use orbiters_ui::offscreen::save_png;
 use std::path::{Path, PathBuf};
 
 /// Four recent captures, with stand-in pictures (dusk colours) that `paint` makes textures of.
-fn recent() -> Vec<Recent> {
+fn recent() -> panels::Gallery {
     [("Sky Dream", "3D picture, ready"), ("Rainy Skyline", "Reconstructing 42%"), ("Pacific Dreams (Night)", "Recording, waiting"), ("After The Rain", "3D picture, ready")]
         .iter()
-        .map(|(title, state)| Recent { dir: PathBuf::from(title), title: title.to_string(), state: state.to_string(), progress: state.contains('%').then_some(0.42), picture: None })
+        .map(|(title, state)| Recent { dir: PathBuf::from(title), title: title.to_string(), state: state.to_string(), progress: state.contains('%').then_some(0.42), picture: None, ..Default::default() })
         .collect()
 }
 
@@ -39,9 +39,7 @@ fn picture(placed: &Placed, facts: &Facts, hover: Option<usize>, pressed: Option
     let mut canvas = Canvas::zoomed(px[0], px[1], px[0] as f32 / logical.x);
     let textures: Vec<_> = (0..4).map(|i| canvas.ctx().load_texture("recent", stand_in(i), TextureOptions::LINEAR)).collect();
     let mut facts = facts.clone();
-    for (recent, texture) in facts.recent.iter_mut().zip(&textures) {
-        recent.picture = Some(texture.id());
-    }
+    facts.recent_pictures = textures.iter().enumerate().map(|(n, texture)| (n, texture.id())).collect();
     for _ in 0..2 {
         canvas.paint(0.0, |p| panels::paint(p, placed.zone, logical, &facts, hover, pressed));
     }
@@ -139,6 +137,16 @@ impl Eye {
         let d = [(x - self.size[0] as f32 / 2.0) / self.focal, -(y - self.size[1] as f32 / 2.0) / self.focal, -1.0];
         let l = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
         [d[0] / l, d[1] / l, d[2] / l]
+    }
+
+    /// A picture of the whole view in premultiplied RGBA over what is there.
+    fn over(&mut self, picture: &[u8]) {
+        for (to, from) in self.pixels.chunks_exact_mut(4).zip(picture.chunks_exact(4)) {
+            let left = 255 - from[3] as u32;
+            for c in 0..3 {
+                to[c] = (from[c] as u32 + to[c] as u32 * left / 255).min(255) as u8;
+            }
+        }
     }
 
     /// `picture` (premultiplied RGBA of `px`) on `quad`, seen from the eyes, each pixel sampled from it with four rays' worth of softness.
@@ -277,8 +285,9 @@ pub(super) fn vr_shots(out: &Path, refs: &Path) -> anyhow::Result<()> {
         });
         let facts = Facts { recent: recent(), timer: 3, n4n0: true, desktop: false, vr_close: true, music: Some(("The Weeknd - Moth to a Flame".into(), true)), can_call: true, can_states: true, can_light: true, ..Default::default() };
         // The wheel on a hand, where a person looks at it; the other hand's laser on its cells.
-        let grip = space::from_axes([1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0], [0.03, 1.56, -0.40]);
-        let plane = vr::wheel_plane(&grip, &head, 1.0).expect("a plane");
+        let tune = vr::Tune::default();
+        let held = space::facing([0.03, 1.5, -0.40], space::position(&head), [0.0, 1.0, 0.0]).expect("a frame");
+        let plane = vr::wheel_plane(&vr::grip_holding(&held, &tune.wheel(1)), 1, &tune, 1.0);
         let wheel_scene = |facts: &Facts, hover: Option<Zone>, bloom: Option<zones::Group>, name: &str| -> anyhow::Result<()> {
             let mut eye = Eye::new(size, &ground, eyes);
             let unit_m = plane.unit;
@@ -294,7 +303,7 @@ pub(super) fn vr_shots(out: &Path, refs: &Path) -> anyhow::Result<()> {
                 let placed = zones::in_units(zone);
                 let hovered = hover == Some(zone);
                 let (pixels, px) = sharp_picture(&placed, facts, hovered.then_some(0), 2.0);
-                let quad = plane.quad(&placed, if hovered { -crate::overlay::orbit::POP } else { 0.0 }, 0.004);
+                let quad = plane.quad(&placed, 0.0, 0.004);
                 eye.quad(&quad, &pixels, px, 1.0);
                 if hovered {
                     let at = zone.ring().map_or(placed.rect.center().to_vec2(), |r| r.anchor());
@@ -312,11 +321,12 @@ pub(super) fn vr_shots(out: &Path, refs: &Path) -> anyhow::Result<()> {
         wheel_scene(&pointing(Action::Worlds), Some(Zone::WheelWorlds), None, &format!("vr-wheel-{world}-point-worlds"))?;
         wheel_scene(&pointing(Action::Pictures), Some(Zone::WheelPictures), Some(bloom), &format!("vr-wheel-{world}-point-pictures"))?;
         wheel_scene(&pointing(Action::Picture(PhotoMode::World)), Some(Zone::BloomWorld), Some(bloom), &format!("vr-wheel-{world}-point-picture"))?;
-        wheel_scene(&pointing(Action::PlayPause), Some(Zone::BloomPlay), Some(zones::Group::Playing), &format!("vr-wheel-{world}-point-playing"))?;
+        wheel_scene(&pointing(Action::PlayPause), Some(Zone::BloomNext), Some(zones::Group::Playing), &format!("vr-wheel-{world}-point-playing"))?;
         let counting = Facts { countdown: Some(2), picture_mode: Some(PhotoMode::People), pointed: Some(Action::Picture(PhotoMode::People)), ..facts.clone() };
         wheel_scene(&counting, None, Some(bloom), &format!("vr-wheel-{world}-countdown"))?;
         // The Quick Menu where it opens before the eyes, the wing beside it.
-        let plane = vr::quick_menu_plane(&head, 1.0);
+        let held = space::before_eyes(&head, 0.5, 0.08);
+        let plane = vr::quick_menu_plane(&vr::grip_holding(&held, &tune.quick_menu(1)), 1, &tune, 1.0);
         let qm_scene = |facts: &Facts, hover: Option<usize>, sheet: Option<Sheet>, name: &str| -> anyhow::Result<()> {
             let mut eye = Eye::new(size, &ground, eyes);
             let center_units = zones::Placed { zone: Zone::SheetBack, rect: qm_units, center: pos2(0.0, 0.0), unit: 1.0 };
@@ -324,7 +334,7 @@ pub(super) fn vr_shots(out: &Path, refs: &Path) -> anyhow::Result<()> {
             let mut end = None;
             for zone in Zone::QUICK_MENU {
                 let placed = zones::in_units(zone);
-                let hovered = hover.filter(|_| zone == Zone::QmWing);
+                let hovered = hover.filter(|_| zone == Zone::WingWorlds).map(|_| 0);
                 let (pixels, px) = sharp_picture(&placed, facts, hovered, 2.0);
                 eye.quad(&plane.quad(&placed, 0.0, 0.004), &pixels, px, 1.0);
                 if let Some(i) = hovered {
@@ -349,8 +359,78 @@ pub(super) fn vr_shots(out: &Path, refs: &Path) -> anyhow::Result<()> {
         qm_scene(&facts, None, None, &format!("vr-qm-{world}"))?;
         qm_scene(&pointing(Action::Worlds), Some(0), None, &format!("vr-qm-{world}-point-worlds"))?;
         qm_scene(&Facts { sheet: Some(Sheet::All), sheet_title: "All tools".into(), ..facts.clone() }, None, Some(Sheet::All), &format!("vr-sheet-{world}-all"))?;
-        qm_scene(&Facts { sheet: Some(Sheet::Pictures), sheet_title: "3D pictures".into(), ..facts.clone() }, None, Some(Sheet::Pictures), &format!("vr-sheet-{world}-pictures"))?;
+        qm_scene(&Facts { sheet: Some(Sheet::Pictures), sheet_title: "Pictures".into(), ..facts.clone() }, None, Some(Sheet::Pictures), &format!("vr-sheet-{world}-pictures"))?;
         let _ = Target::Close;
+        // A real capture standing small, drawn by the view's own renderer: in the hole of a world's side panel (the panel's picture
+        // beside the frames, `panel-small-docked.png` of --world-view), then in a hand with what says how to zoom it.
+        if let (true, Ok(session)) = (world == "forest", std::env::var("ORBIT_SESSION")) {
+            use crate::overlay::worlds::{catalog, render, small_hint, stereo};
+            let full = catalog::read_local(Path::new(&session), &Default::default())?;
+            let capture = full.around_subject();
+            let (_adapter, device, queue) = render::device(None)?;
+            let mut renderer = render::FaceRenderer::new(device, queue);
+            renderer.load(&capture)?;
+            renderer.make_transparent()?;
+            let tan = 50f32.to_radians().tan();
+            let (w, h) = (size[0], size[1]);
+            let tangents = [-tan, tan, -tan * h as f32 / w as f32, tan * h as f32 / w as f32];
+            let mut model = |small: &stereo::Small| -> anyhow::Result<Vec<u8>> {
+                let camera = stereo::eye_camera(&head, tangents, w, h, &small.placement(capture.view.eye()));
+                renderer.render_view(&camera, capture.within(small.reach()))
+            };
+            let panel = image::open(refs.join("panel-small-docked.png"))?.to_rgba8();
+            let panel_px = [panel.width(), panel.height()];
+            let mut panel_pixels = panel.into_raw();
+            for p in panel_pixels.chunks_exact_mut(4) {
+                let a = p[3] as u32;
+                for c in &mut p[..3] {
+                    *c = (*c as u32 * a / 255) as u8;
+                }
+            }
+            let page = zones::in_units(Zone::Takeover);
+            let page_quad = plane.quad(&page, 0.0, 0.02);
+            let hole = crate::overlay::worlds::panel::SIDE_HERO;
+            let (x, y) = ((hole.center().x / 1024.0 - 0.5) * page_quad.width, (0.5 - hole.center().y / 576.0) * page_quad.height);
+            let there = orbiters_openvr::Matrix34 { m: [[1.0, 0.0, 0.0, x], [0.0, 1.0, 0.0, y], [0.0, 0.0, 1.0, 0.0]] };
+            let at = space::compose(&page_quad.transform, &there);
+            let radius = hole.width() / 1024.0 * page_quad.width / 2.0 * crate::overlay::worlds::SMALL_FILLS_HOLE;
+            let dock = stereo::SmallDock::behind(&capture.view, &at, radius);
+            let small = stereo::Small::new(&capture.view, &head, capture.small_reach()).at_dock(&dock);
+            // Docked.
+            let worlds = Facts { sheet: Some(Sheet::Worlds), sheet_title: "Worlds in 3D".into(), view_showing: true, view_small: true, sheet_hole: Some(egui::Rect::from_min_max(pos2(hole.min.x * 0.6875, hole.min.y * 0.6875 + 52.0), pos2(hole.max.x * 0.6875, hole.max.y * 0.6875 + 52.0))), ..facts.clone() };
+            let center_units = zones::Placed { zone: Zone::SheetBack, rect: qm_units, center: pos2(0.0, 0.0), unit: 1.0 };
+            let mut eye = Eye::new(size, &ground, eyes);
+            eye.quad(&plane.quad(&center_units, 0.0, 0.0), &qm, qm_px, 1.0);
+            // The dark pane behind it.
+            let pane = vec![[32u8, 36, 46, 255]; 4].concat();
+            eye.quad(&Quad { transform: at, width: hole.width() / 1024.0 * page_quad.width + 0.012, height: hole.height() / 576.0 * page_quad.height + 0.012 }, &pane, [2, 2], 1.0);
+            eye.over(&model(&small)?);
+            for zone in Zone::QUICK_MENU {
+                let placed = zones::in_units(zone);
+                let (pixels, px) = sharp_picture(&placed, &worlds, None, 2.0);
+                eye.quad(&plane.quad(&placed, 0.0, 0.004), &pixels, px, 1.0);
+            }
+            let back = zones::in_units(Zone::SheetBack);
+            let (pixels, px) = sharp_picture(&back, &worlds, None, 2.0);
+            eye.quad(&plane.quad(&back, 0.0, 0.016), &pixels, px, 1.0);
+            eye.quad(&page_quad, &panel_pixels, panel_px, 1.0);
+            eye.save(out, "vr-small-in-the-panel")?;
+            // In a hand, with what says how to zoom it.
+            let mut held = stereo::Small::new(&capture.view, &head, capture.small_reach());
+            held.anchor = [0.02, 1.46, -0.70];
+            let mut eye = Eye::new(size, &ground, eyes);
+            eye.over(&model(&held)?);
+            let hint_px = small_hint::PX;
+            let mut canvas = Canvas::new(hint_px[0], hint_px[1]);
+            for _ in 0..2 {
+                canvas.paint(0.0, |p| small_hint::paint(p, small_hint::Stage::Stick, 0.65));
+            }
+            let up = [held.anchor[0], held.anchor[1] + held.radius() + 0.09, held.anchor[2]];
+            let hint_frame = small_hint::facing(up, space::position(&head));
+            let hint_w = small_hint::WIDTH_M;
+            eye.quad(&Quad { transform: hint_frame, width: hint_w, height: hint_w * hint_px[1] as f32 / hint_px[0] as f32 }, canvas.pixels(), hint_px, 1.0);
+            eye.save(out, "vr-small-in-a-hand")?;
+        }
     }
     Ok(())
 }
@@ -362,9 +442,7 @@ fn sharp_picture(placed: &Placed, facts: &Facts, hover: Option<usize>, sharp: f3
     let mut canvas = Canvas::zoomed(px[0], px[1], px[0] as f32 / logical.x);
     let textures: Vec<_> = (0..4).map(|i| canvas.ctx().load_texture("recent", stand_in(i), TextureOptions::LINEAR)).collect();
     let mut facts = facts.clone();
-    for (recent, texture) in facts.recent.iter_mut().zip(&textures) {
-        recent.picture = Some(texture.id());
-    }
+    facts.recent_pictures = textures.iter().enumerate().map(|(n, texture)| (n, texture.id())).collect();
     for _ in 0..2 {
         canvas.paint(0.0, |p| panels::paint(p, placed.zone, logical, &facts, hover, None));
     }
@@ -382,7 +460,7 @@ pub(super) fn shots(out: &Path) -> anyhow::Result<()> {
     let hd = vec2(1280.0, 720.0);
     let idle = Facts { recent: recent(), timer: 3, n4n0: true, desktop: true, music: Some(("The Weeknd - Moth to a Flame".into(), true)), ..Default::default() };
     let hint = Some(("Hold Left Alt to use this ring", "Your mouse then points here instead of at VRChat's wheel."));
-    let empty = Facts { recent: Vec::new(), music: None, ..idle.clone() };
+    let empty = Facts { recent: Default::default(), music: None, ..idle.clone() };
     let busy = Facts { recording: true, recording_seconds: Some(83), capture_busy: true, reconstructing: Some(0.42), waiting: 2, ..idle.clone() };
     let counting = Facts { countdown: Some(2), picture_mode: Some(PhotoMode::People), pointed: Some(Action::Picture(PhotoMode::People)), ..idle.clone() };
     let pointing = |a| Facts { pointed: Some(a), ..idle.clone() };
@@ -395,7 +473,7 @@ pub(super) fn shots(out: &Path) -> anyhow::Result<()> {
     wheel_scene("orbit-wheel-point-worlds", out, hd, &pointing(Action::Worlds), Some((Zone::WheelWorlds, 0)), None, true)?;
     wheel_scene("orbit-wheel-point-pictures", out, hd, &pointing(Action::Pictures), Some((Zone::WheelPictures, 0)), Some(bloom), true)?;
     wheel_scene("orbit-wheel-point-people", out, hd, &pointing(Action::Picture(PhotoMode::People)), Some((Zone::BloomPeople, 0)), Some(bloom), true)?;
-    wheel_scene("orbit-wheel-point-playing", out, hd, &pointing(Action::PlayPause), Some((Zone::BloomPlay, 0)), Some(playing), true)?;
+    wheel_scene("orbit-wheel-point-playing", out, hd, &pointing(Action::PlayPause), Some((Zone::WheelPlaying, 0)), Some(playing), true)?;
     wheel_scene("orbit-wheel-1080", out, vec2(1920.0, 1080.0), &Facts { hint, ..idle.clone() }, None, None, false)?;
     wheel_scene("orbit-wheel-540", out, vec2(960.0, 540.0), &Facts { hint, ..idle.clone() }, None, None, false)?;
     wheel_scene("orbit-wheel-narrow", out, vec2(800.0, 800.0), &Facts { hint, ..idle.clone() }, None, None, false)?;
@@ -406,9 +484,12 @@ pub(super) fn shots(out: &Path) -> anyhow::Result<()> {
     qm_scene("orbit-qm-narrow", out, vec2(800.0, 800.0), &idle, None, None)?;
     qm_scene("orbit-sheet-all", out, hd, &Facts { sheet: Some(Sheet::All), sheet_title: "All tools".into(), ..idle.clone() }, None, Some(Sheet::All))?;
     qm_scene("orbit-sheet-all-vr", out, hd, &Facts { desktop: false, can_call: true, can_states: true, can_light: true, sheet: Some(Sheet::All), sheet_title: "All tools".into(), ..idle.clone() }, None, Some(Sheet::All))?;
-    qm_scene("orbit-sheet-pictures", out, hd, &Facts { sheet: Some(Sheet::Pictures), sheet_title: "3D pictures".into(), ..idle.clone() }, None, Some(Sheet::Pictures))?;
-    qm_scene("orbit-sheet-countdown", out, hd, &Facts { sheet: Some(Sheet::Pictures), sheet_title: "3D pictures".into(), ..counting.clone() }, None, Some(Sheet::Pictures))?;
-    qm_scene("orbit-sheet-pictures-busy", out, hd, &Facts { sheet: Some(Sheet::Pictures), sheet_title: "3D pictures".into(), ..busy.clone() }, None, Some(Sheet::Pictures))?;
+    qm_scene("orbit-sheet-pictures", out, hd, &Facts { sheet: Some(Sheet::Pictures), sheet_title: "Pictures".into(), ..idle.clone() }, None, Some(Sheet::Pictures))?;
+    let lines = vec![(true, "What's the weather like in Paris?".to_string()), (false, "It is 14 degrees and raining in Paris, with clear skies expected by this evening.".to_string()), (true, "Find a world with rain".to_string()), (false, "After The Rain has a 3D capture you can walk in. Open Worlds in 3D to see it.".to_string())];
+    qm_scene("orbit-sheet-talk", out, hd, &Facts { sheet: Some(Sheet::Talk), sheet_title: "Ask N4N0".into(), talk_lines: lines.clone(), beside_wing: true, ..idle.clone() }, None, Some(Sheet::Talk))?;
+    qm_scene("orbit-sheet-talk-listening", out, hd, &Facts { sheet: Some(Sheet::Talk), sheet_title: "Ask N4N0".into(), talk_lines: lines, talk: crate::overlay::orbit::panels::TalkNow::Listening(0.6), beside_wing: true, ..idle.clone() }, None, Some(Sheet::Talk))?;
+    qm_scene("orbit-sheet-countdown", out, hd, &Facts { sheet: Some(Sheet::Pictures), sheet_title: "Pictures".into(), ..counting.clone() }, None, Some(Sheet::Pictures))?;
+    qm_scene("orbit-sheet-pictures-busy", out, hd, &Facts { sheet: Some(Sheet::Pictures), sheet_title: "Pictures".into(), ..busy.clone() }, None, Some(Sheet::Pictures))?;
     let _ = Target::Close;
     Ok(())
 }
@@ -440,7 +521,7 @@ fn qm_scene(name: &str, out: &Path, client: Vec2, facts: &Facts, hover: Option<u
     stand_in_menu(Around::QuickMenu, client, &mut ground);
     let mut image = ground.pixels().to_vec();
     for placed in zones::layout(Around::QuickMenu, client) {
-        let hovered = hover.filter(|_| placed.zone == Zone::QmWing);
+        let hovered = hover.filter(|_| placed.zone == Zone::WingWorlds).map(|_| 0);
         let (pixels, px) = picture(&placed, facts, hovered, None);
         blit(&mut image, w, &pixels, px, placed.rect.min);
     }
@@ -462,9 +543,7 @@ fn sheet_picture(sheet: panels::Sheet, facts: &Facts, px: [u32; 2]) -> Vec<u8> {
     let mut canvas = Canvas::zoomed(px[0], px[1], px[0] as f32 / 1024.0);
     let textures: Vec<_> = (0..4).map(|i| canvas.ctx().load_texture("recent", stand_in(i), TextureOptions::LINEAR)).collect();
     let mut facts = facts.clone();
-    for (recent, texture) in facts.recent.iter_mut().zip(&textures) {
-        recent.picture = Some(texture.id());
-    }
+    facts.recent_pictures = textures.iter().enumerate().map(|(n, texture)| (n, texture.id())).collect();
     for _ in 0..2 {
         canvas.paint(0.0, |p| panels::paint_sheet(p, sheet, &facts, None, None));
     }

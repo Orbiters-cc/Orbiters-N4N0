@@ -524,6 +524,9 @@ pub struct Snapshot {
     /// Whether the avatar worn has N4N0's capture kit, as VRChat's parameters say: `None` when they do not say.
     #[serde(default)]
     pub worn_kit: Option<bool>,
+    /// Whether VRChat's camera is open, as VRChat last said: `None` when it has not said.
+    #[serde(default)]
+    pub camera_open_said: Option<bool>,
 }
 
 impl Snapshot {
@@ -531,6 +534,7 @@ impl Snapshot {
         Self {
             orbit: OrbitStatus::default(),
             worn_kit: None,
+            camera_open_said: None,
             version: orbiters_core::APP_VERSION.into(),
             vrchat: VrchatStatus {
                 running: false,

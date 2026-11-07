@@ -16,6 +16,10 @@
 
 pub mod cache;
 pub mod catalog;
+pub mod small_hint;
+
+/// How much of a hole's width a capture lying in it fills: its top and foot are cut by the hole, as captures are wider than tall.
+pub const SMALL_FILLS_HOLE: f32 = 0.8;
 mod diagnostics;
 pub mod finder;
 #[cfg(windows)]
@@ -59,6 +63,17 @@ const FACTS_EVERY: Duration = Duration::from_millis(250);
 const BAR_EVERY: Duration = Duration::from_millis(33);
 /// A search is asked once the typing paused this long (Done asks at once).
 const TYPING_PAUSE: Duration = Duration::from_millis(400);
+
+/// What a panel on a sheet asks of the overlay's own 3D worlds, which has the 3D view.
+#[derive(Clone, Debug)]
+pub enum Relayed {
+    Show(Entry),
+    /// VRChat's menu just opened (the hint of a small view shows again for the next capture).
+    MenuOpened,
+    /// A capture of this computer's gallery: its session, what it is called, and what tells its results apart.
+    ShowLocal { dir: std::path::PathBuf, name: String, changed: u64 },
+    View(Action),
+}
 
 /// The world list the panel shows: the 3D captures, the worlds visited, or a list VRChat (or Orbiters) answers.
 #[derive(Clone, Debug, PartialEq)]
@@ -122,6 +137,9 @@ pub struct Worlds {
     /// The worlds' pages on the Map explorer, as far as fetched (performance, tags, pictures).
     facts: HashMap<String, Facts>,
     facts_pending: bool,
+    /// On a sheet in VR: what the overlay's own 3D worlds say of their view, and what was asked of them.
+    relay: Option<Status>,
+    relayed: Vec<Relayed>,
     /// The player's VRChat name (a capture shared with some players only is listed for them).
     me: Option<String>,
     infos: crate::worlds::Infos,
@@ -149,6 +167,15 @@ pub struct Worlds {
     epoch: Instant,
     keys_seen: Option<u32>,
     last_paint: Option<Instant>,
+    /// With no SteamVR: nothing can show around or before the person.
+    alone: bool,
+    key: String,
+    /// What says how to handle what shows small; it has been used; a new opening of the menu asks it back for the next capture.
+    hint: Option<small_hint::SmallHint>,
+    backdrop: Option<small_hint::Backdrop>,
+    small_place: Option<(vr::Matrix34, f32)>,
+    hint_used: bool,
+    hint_again: bool,
 }
 
 /// Now, in Unix seconds.
@@ -216,6 +243,8 @@ impl Worlds {
             asked: None,
             facts: HashMap::new(),
             facts_pending: false,
+            relay: None,
+            relayed: Vec::new(),
             me: None,
             infos: crate::worlds::Infos::new(&ctx),
             pictures: crate::worlds::Pictures::new(&ctx),
@@ -235,6 +264,13 @@ impl Worlds {
             epoch: Instant::now(),
             keys_seen: None,
             last_paint: None,
+            alone: false,
+            key: key.to_string(),
+            hint: None,
+            backdrop: None,
+            small_place: None,
+            hint_used: false,
+            hint_again: false,
         })
     }
 
@@ -274,6 +310,8 @@ impl Worlds {
             asked: None,
             facts: HashMap::new(),
             facts_pending: false,
+            relay: None,
+            relayed: Vec::new(),
             me: None,
             infos: crate::worlds::Infos::new(&ctx),
             pictures: crate::worlds::Pictures::new(&ctx),
@@ -293,6 +331,13 @@ impl Worlds {
             epoch: Instant::now(),
             keys_seen: None,
             last_paint: None,
+            alone: true,
+            key: String::new(),
+            hint: None,
+            backdrop: None,
+            small_place: None,
+            hint_used: false,
+            hint_again: false,
         }
     }
 
@@ -347,6 +392,13 @@ impl Worlds {
     fn act_alone(&mut self, actions: Vec<Action>, entries: &[Entry]) {
         for action in actions {
             match action {
+                // On a sheet in VR: for the overlay's own 3D worlds, which has the view.
+                Action::Show(id) if self.relay.is_some() => {
+                    if let Some(entry) = entries.iter().find(|e| e.id == id).or(self.picked.as_ref().filter(|e| e.id == id)) {
+                        self.relayed.push(Relayed::Show(entry.clone()));
+                    }
+                }
+                action @ (Action::Hide | Action::Recenter | Action::SeeThrough(_) | Action::Small(_) | Action::SmallBack | Action::Quality(_)) if self.relay.is_some() => self.relayed.push(Relayed::View(action)),
                 Action::Show(_) => {
                     if let Some(backend) = &self.backend {
                         backend.show_window();
@@ -354,7 +406,7 @@ impl Worlds {
                     let time = self.time();
                     self.panel.say("Opened in the Orbiters window, where it shows in 3D", time);
                 }
-                Action::Hide | Action::Recenter | Action::SeeThrough(_) | Action::Quality(_) | Action::Open => {}
+                Action::Hide | Action::Recenter | Action::SeeThrough(_) | Action::Small(_) | Action::SmallBack | Action::Quality(_) | Action::Open => {}
                 Action::Leave => self.open = false,
                 Action::Refresh => {
                     self.catalog.refresh(&self.source);
@@ -438,6 +490,12 @@ impl Worlds {
 
     pub fn destroy(&mut self, overlay: &vr::Overlay) {
         self.view.destroy(overlay);
+        if let Some(hint) = self.hint.take() {
+            hint.destroy(overlay);
+        }
+        if let Some(backdrop) = self.backdrop.take() {
+            backdrop.destroy(overlay);
+        }
         let _ = overlay.destroy(self.chip);
         let _ = overlay.destroy(self.bar);
     }
@@ -581,11 +639,135 @@ impl Worlds {
 
     /// What the panel shows of the capture view.
     fn status(&self) -> Status {
+        let mut status = self.own_status();
+        // On a sheet in VR the 3D view is the overlay's own: what shows is what it says.
+        if let Some(view) = &self.relay {
+            status.current = view.current;
+            status.quality = view.quality;
+            status.see_through = view.see_through;
+            status.download = view.download;
+            status.stage = view.stage.clone();
+            status.error = view.error.clone().or(status.error);
+        }
+        status
+    }
+
+    /// What this one's 3D view is doing, for a panel elsewhere ([`Worlds::relay_to`]).
+    pub fn view_status(&self) -> Status {
+        self.own_status()
+    }
+
+    /// Makes this panel, on a sheet in VR, one that asks for what only the overlay's own 3D worlds can do, `view` being what those say. Returns what it asked since last time.
+    pub fn relay_to(&mut self, view: Status) -> Vec<Relayed> {
+        self.relay = Some(view);
+        self.panel.dirty = true;
+        std::mem::take(&mut self.relayed)
+    }
+
+    /// The 3D view goes: from a button that is not on this panel.
+    /// What says how to handle what shows small, until it has been used.
+    fn update_hint(&mut self, overlay: &vr::Overlay, steamvr: &vr::Client, presenter: &mut Presenter, snap: &Snapshot) {
+        let small = self.view.small_now().copied();
+        self.hint_used |= small.is_some_and(|s| s.zoomed);
+        // The dark pane behind it in a panel's hole.
+        let pane = small.filter(|s| s.docked).and(self.small_place).map(|(at, radius)| (at, radius * 2.0 / SMALL_FILLS_HOLE + 0.012));
+        if pane.is_some() && self.backdrop.is_none() {
+            self.backdrop = small_hint::Backdrop::new(overlay, &self.key).map_err(|e| eprintln!("{e:#}")).ok();
+        }
+        if let Some(backdrop) = self.backdrop.as_mut() {
+            backdrop.update(overlay, presenter, pane);
+        }
+        let wanted = small.filter(|s| !self.hint_used && !s.docked).map(|s| {
+            let stage = if s.held() { small_hint::Stage::Stick } else { small_hint::Stage::Grip { near: s.near } };
+            (stage, s.anchor, s.radius())
+        });
+        if self.hint.is_none() {
+            if wanted.is_none() {
+                return;
+            }
+            match small_hint::SmallHint::new(overlay, &self.key) {
+                Ok(hint) => self.hint = Some(hint),
+                Err(e) => {
+                    eprintln!("{e:#}");
+                    return;
+                }
+            }
+        }
+        if let Some(hint) = self.hint.as_mut() {
+            hint.update(overlay, presenter, &view::head_pose(steamvr, 0.0), wanted, !snap.settings.reduce_motion);
+        }
+    }
+
+    /// Where in the panel what shows small lies, when it may.
+    pub fn small_place_on_panel(&self) -> Option<egui::Rect> {
+        self.panel.small_place(&self.status())
+    }
+
+    /// The hole in the panel it shows through, when it lies there now.
+    pub fn small_hole(&self) -> Option<egui::Rect> {
+        self.panel.hole(&self.status())
+    }
+
+    /// Where a panel has a place for what shows small, and how large it is.
+    pub fn small_place(&mut self, place: Option<(vr::Matrix34, f32)>) {
+        self.small_place = place;
+        self.view.small_place(place);
+    }
+
+    pub fn view_small(&mut self, on: bool) {
+        if self.relay.is_some() {
+            self.relayed.push(Relayed::View(Action::Small(on)));
+        }
+    }
+
+    /// Whether what shows can be taken in a hand.
+    pub fn small_showing(&self) -> bool {
+        self.view.small()
+    }
+
+    /// The hands, for what shows small.
+    pub fn small_input(&mut self, hands: [Option<vr::Matrix34>; 2], grips: [bool; 2], sticks: [f32; 2]) {
+        self.view.small_input(hands, grips, sticks);
+    }
+
+    pub fn hide_view(&mut self) {
+        if self.relay.is_some() {
+            self.relayed.push(Relayed::View(Action::Hide));
+        }
+    }
+
+    /// What a panel on a sheet asked: as if pressed on this one.
+    pub fn from_elsewhere(&mut self, asked: Vec<Relayed>) {
+        for ask in asked {
+            match ask {
+                Relayed::Show(entry) => {
+                    let id = entry.id;
+                    self.picked = Some(entry);
+                    self.deferred.push(Action::Show(id));
+                }
+                Relayed::ShowLocal { dir, name, changed } => {
+                    let entry = Entry::local(dir, name, changed);
+                    let id = entry.id;
+                    self.picked = Some(entry);
+                    self.deferred.push(Action::Show(id));
+                }
+                Relayed::MenuOpened => self.hint_again = true,
+                Relayed::View(action) => self.deferred.push(action),
+            }
+        }
+    }
+
+    fn own_status(&self) -> Status {
         let (fetching, listing_error) = self.catalog.state();
         let mut s = Status {
             current: self.current.as_ref().map(|e| e.id),
             quality: self.view.quality(),
             see_through: self.view.see_through,
+            small: self.view.small_on(),
+            small_taken: self.view.small_now().is_some_and(|s| s.taken),
+            small_docked: self.view.small_now().is_some_and(|s| s.docked),
+            small_near: self.view.small_now().is_some_and(|s| s.near),
+            headset: !self.alone,
             error: self.error.clone().or_else(|| self.view.error.clone()),
             fetching,
             listing_error,
@@ -686,6 +868,7 @@ impl Worlds {
         }
         self.finish_download(overlay, steamvr);
         self.view.update(overlay, steamvr);
+        self.update_hint(overlay, steamvr, presenter, snap);
         if self.current.is_some() && self.download.is_none() && !self.view.active() {
             // Hidden (or failed): nothing is current any more.
             self.current = None;
@@ -971,6 +1154,10 @@ impl Worlds {
                     let Some(entry) = entries.iter().find(|e| e.id == id).or(self.picked.as_ref().filter(|e| e.id == id)).filter(|e| e.capture).cloned() else {
                         continue;
                     };
+                    // A new capture from a new opening of the menu: its hint again.
+                    if std::mem::take(&mut self.hint_again) {
+                        self.hint_used = false;
+                    }
                     self.error = None;
                     self.view.error = None;
                     let key = cache::Key::of(&entry);
@@ -987,13 +1174,17 @@ impl Worlds {
                     let (tx, rx) = mpsc::channel();
                     let (source, p, e) = (self.source.clone(), progress.clone(), entry.clone());
                     let _ = std::thread::Builder::new().name("3d-worlds-download".into()).spawn(move || {
-                        let _ = tx.send(source.download(&e, &p));
+                        let _ = tx.send(match &e.local {
+                            Some(dir) => catalog::read_local(dir, &p),
+                            None => source.download(&e, &p),
+                        });
                     });
                     self.download = Some(Download { id, key, progress, answer: rx });
                     self.current = Some(entry);
                 }
                 Action::Hide => {
                     self.download = None;
+                    self.error = None;
                     self.view.hide();
                     if !self.view.active() {
                         self.current = None;
@@ -1001,6 +1192,8 @@ impl Worlds {
                 }
                 Action::Recenter => self.view.recenter(steamvr),
                 Action::SeeThrough(on) => self.view.see_through = on,
+                Action::Small(on) => self.view.set_small(on, overlay, steamvr),
+                Action::SmallBack => self.view.small_back(),
                 Action::Quality(q) => self.view.set_quality(q),
                 Action::Leave => self.open = false,
                 Action::Refresh => {
@@ -1165,13 +1358,22 @@ impl Worlds {
             panel::Page::Typing => (self.panel.results(&d).into_iter().take(panel::PER_ROW).collect(), true),
             panel::Page::Browse => (self.panel.results(&d).into_iter().skip(self.panel.results_page * panel::PER_PAGE).take(panel::PER_PAGE).collect(), true),
             panel::Page::Filter => (Vec::new(), true),
+            // The list beside the side panel, and the world on it.
+            panel::Page::Detail => {
+                let first = self.panel.results_page * panel::PER_PAGE;
+                let mut list: Vec<&Entry> = self.panel.results(&d).into_iter().skip(first).take(panel::PER_PAGE).collect();
+                if let Some(e) = self.panel.entry(&d).filter(|e| !list.iter().any(|l| l.id == e.id)) {
+                    list.push(e);
+                }
+                (list, true)
+            }
             _ => (self.panel.entry(&d).into_iter().collect(), false),
         };
         // A card of a list's world has what its list said; its page, or a capture's card, reads the world's page on
         // the Map explorer (Orbiters reads VRChat for it: asked only as needed).
         shown
             .into_iter()
-            .map(|e| Visible { id: e.id, world: e.world_id.clone(), thumbnail: e.thumbnail.clone(), page: !cards || e.capture || e.thumbnail.is_none() })
+            .map(|e| Visible { id: e.id, world: e.world_id.clone(), thumbnail: e.thumbnail.clone(), page: !cards || e.capture || e.thumbnail.is_none() || (self.panel.page == panel::Page::Detail && self.panel.selected == Some(e.id)) })
             .collect()
     }
 
@@ -1187,6 +1389,14 @@ impl Worlds {
             }
         }
         out
+    }
+
+    /// A world's thumbnail, from its id alone, once it is here: for what lists worlds outside this panel.
+    pub fn world_thumbnail(&mut self, world_id: &str) -> Option<TextureId> {
+        self.facts_for(world_id);
+        let url = self.facts.get(world_id).and_then(|f| f.thumbnail.clone())?;
+        let picture = crate::worlds::Picture::Remote { world_id: world_id.to_string(), url, large: false };
+        self.pictures.get(&self.ctx, &picture).map(|t| t.id())
     }
 
     /// The selected capture's world's pictures on the pictures page: the page's thumbnails, the one shown whole.

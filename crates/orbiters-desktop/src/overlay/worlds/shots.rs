@@ -32,6 +32,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
     std::fs::create_dir_all(&out)?;
     let panel_only = args.iter().any(|a| a == "--panel-only");
     super::panel::shots(&out)?;
+    super::small_hint::shots(&out)?;
     if panel_only {
         return Ok(());
     }

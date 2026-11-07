@@ -287,14 +287,9 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
 
 /// What Home's heading says while N4N0 does not listen: how to call it from here.
 fn idle_line(settings: &Settings) -> String {
-    match settings.n4n0.wake_words.first().filter(|_| settings.n4n0.wake_word) {
-        Some(word) => {
-            let mut letters = word.chars();
-            let word: String = letters.next().map(|c| c.to_uppercase().chain(letters).collect()).unwrap_or_default();
-            format!("Pick a feature, or say “{word}” to talk to N4N0")
-        }
-        None => "Pick a feature, or hold Talk on N4N0's page to talk to it".into(),
-    }
+    // Enzo: saying its name should not be the first thing offered: "almost nobody will want to do that".
+    let _ = settings;
+    "Pick a feature, or hold Talk on N4N0's page to talk to it".into()
 }
 
 fn home(ui: &mut Ui, cx: &mut Cx, menu: &Menu, idle: &str, copied: Option<&str>, network: &mut super::network::State, acts: &mut Vec<Act>) {

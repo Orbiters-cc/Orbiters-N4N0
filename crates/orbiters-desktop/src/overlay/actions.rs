@@ -258,6 +258,64 @@ const CONTROLLERS: [(&str, &str, &str); 9] = [
     ("frame_controller", "thumbstick", "joystick"),
 ];
 
+/// The application's key, under which SteamVR keeps its settings.
+const APP_KEY_SECTION: &std::ffi::CStr = c"cc.orbiters.n4n0";
+
+/// A binding saved for this application, which SteamVR's own autosave also makes, is used in place of the default ones, and knows nothing of the action sets added since: on 2026-11-07
+/// Enzo's Touch controllers had one from two days before, so `/actions/orbit` was not bound and no panel ever opened in VR, with nothing to say so. So what a saved binding lacks is added to
+/// a copy of it, and the copy becomes the saved one: what the person chose stays. One that cannot be read goes, and the defaults apply. Before the manifest is set, which is when it is read.
+fn keep_saved_bindings_whole(steamvr: &vr::Client, dir: &Path) {
+    use std::ffi::CString;
+    let runtime = vr::runtime_dir();
+    for (controller, _, _) in CONTROLLERS {
+        let key = |what: &str| CString::new(format!("{controller}_250820_{what}_steamvrinput")).expect("no NUL in these");
+        let Some(url) = steamvr.setting_string(APP_KEY_SECTION, &key("CurrentURL")) else { continue };
+        let saved = saved_binding_file(&url, runtime.as_deref()).and_then(|file| std::fs::read_to_string(file).ok());
+        let Ok(ours) = std::fs::read_to_string(dir.join(format!("bindings_{controller}.json"))) else { continue };
+        let Some(saved) = saved else {
+            eprintln!("SteamVR's saved binding for {controller} cannot be read ({url}): the default one applies");
+            steamvr.remove_setting(APP_KEY_SECTION, &key("CurrentURL"));
+            steamvr.remove_setting(APP_KEY_SECTION, &key("AutosaveURL"));
+            continue;
+        };
+        let Some(merged) = merged_binding(&saved, &ours) else { continue };
+        let file = dir.join(format!("merged_bindings_{controller}.json"));
+        let Ok(()) = std::fs::write(&file, merged) else { continue };
+        let url = format!("file:///{}", file.to_string_lossy().replace('\\', "/"));
+        eprintln!("SteamVR's saved binding for {controller} lacked some of this application's actions: they were added ({url})");
+        if let Ok(url) = CString::new(url) {
+            steamvr.set_setting_string(APP_KEY_SECTION, &key("CurrentURL"), &url);
+            steamvr.set_setting_string(APP_KEY_SECTION, &key("AutosaveURL"), &url);
+        }
+    }
+}
+
+/// The file a saved binding's address stands for: a Workshop item's (the one file in its folder, under SteamVR's own Steam library) or a file's.
+fn saved_binding_file(url: &str, runtime: Option<&Path>) -> Option<PathBuf> {
+    if let Some(item) = url.strip_prefix("vr-input-workshop://") {
+        let library = runtime?.parent()?.parent()?;
+        let folder = library.join("workshop").join("content").join("250820").join(item);
+        return std::fs::read_dir(folder).ok()?.filter_map(Result::ok).map(|e| e.path()).find(|p| p.is_file());
+    }
+    let path = url.strip_prefix("file:///").or_else(|| url.strip_prefix("file://"))?;
+    Some(PathBuf::from(path))
+}
+
+/// `saved` with the action sets of `ours` that it lacks, the rest as it is: `None` when it lacks none, or when either is not a binding.
+fn merged_binding(saved: &str, ours: &str) -> Option<String> {
+    let mut saved: serde_json::Value = serde_json::from_str(saved).ok()?;
+    let ours: serde_json::Value = serde_json::from_str(ours).ok()?;
+    let theirs = saved.get_mut("bindings")?.as_object_mut()?;
+    let mut added = false;
+    for (set, binding) in ours.get("bindings")?.as_object()? {
+        if !theirs.contains_key(set) {
+            theirs.insert(set.clone(), binding.clone());
+            added = true;
+        }
+    }
+    added.then(|| serde_json::to_string_pretty(&saved).ok()).flatten()
+}
+
 pub(super) fn write_manifest(dir: &Path) -> std::io::Result<PathBuf> {
     std::fs::create_dir_all(dir)?;
     let files = CONTROLLERS;
@@ -320,6 +378,7 @@ impl Actions {
         let loaded = (|| -> Result<_, String> {
             let input = steamvr.input().map_err(|e| e.to_string())?;
             let path = write_manifest(&manifest_dir()).map_err(|e| e.to_string())?;
+            keep_saved_bindings_whole(steamvr, &manifest_dir());
             let fail = |c: i32| format!("SteamVR input error {c}");
             input.set_action_manifest(&path).map_err(fail)?;
             let walk = Walk {
@@ -554,6 +613,52 @@ fn pad(position: Option<(f32, f32)>, touch: bool, click: bool, force: Option<f32
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_saved_binding_gets_what_it_lacks_and_keeps_what_the_person_chose() {
+        let saved = r#"{ "app_key": "cc.orbiters.n4n0", "name": "mine", "controller_type": "oculus_touch",
+            "bindings": { "/actions/menu": { "sources": ["chosen"] } } }"#;
+        let ours = r#"{ "bindings": { "/actions/menu": { "sources": ["default"] }, "/actions/orbit": { "sources": ["new"] }, "/actions/orbit_block": { "sources": [] } } }"#;
+        let merged: serde_json::Value = serde_json::from_str(&merged_binding(saved, ours).expect("two sets lacking")).unwrap();
+        assert_eq!(merged["bindings"]["/actions/menu"]["sources"][0], "chosen", "what was chosen stays");
+        assert_eq!(merged["bindings"]["/actions/orbit"]["sources"][0], "new");
+        assert!(merged["bindings"]["/actions/orbit_block"].is_object());
+        assert_eq!((&merged["name"], &merged["app_key"]), (&serde_json::json!("mine"), &serde_json::json!("cc.orbiters.n4n0")));
+        // Complete: left alone, and so nothing is written. Not a binding: left alone too.
+        assert_eq!(merged_binding(ours, ours), None);
+        assert_eq!(merged_binding("not json", ours), None);
+        assert_eq!(merged_binding("{}", ours), None);
+    }
+
+    #[test]
+    fn a_saved_binding_s_address_is_found_as_steamvr_keeps_it() {
+        let root = std::env::temp_dir().join(format!("orbit-saved-binding-{}", std::process::id()));
+        let item = root.join("steamapps/workshop/content/250820/3830136132");
+        std::fs::create_dir_all(&item).unwrap();
+        std::fs::write(item.join("9429_legacy.bin"), "{}").unwrap();
+        let runtime = root.join("steamapps/common/SteamVR");
+        let found = saved_binding_file("vr-input-workshop://3830136132", Some(&runtime)).unwrap();
+        assert_eq!(found.file_name().unwrap(), "9429_legacy.bin");
+        assert_eq!(saved_binding_file("vr-input-workshop://1", Some(&runtime)), None, "no such item");
+        assert_eq!(saved_binding_file("file:///C:/x/y.json", None), Some(PathBuf::from("C:/x/y.json")));
+        assert_eq!(saved_binding_file("something else", Some(&runtime)), None);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// With this application's real bindings: the very case that hid the panels in VR.
+    #[test]
+    fn enzos_saved_touch_binding_would_now_have_the_menu_button() {
+        let dir = std::env::temp_dir().join(format!("orbit-real-bindings-{}", std::process::id()));
+        write_manifest(&dir).unwrap();
+        let ours = std::fs::read_to_string(dir.join("bindings_oculus_touch.json")).unwrap();
+        let saved = r#"{ "app_key": "cc.orbiters.n4n0", "bindings": { "/actions/avatar": {}, "/actions/menu": {}, "/actions/panel": {}, "/actions/walk": {} } }"#;
+        let merged: serde_json::Value = serde_json::from_str(&merged_binding(saved, &ours).unwrap()).unwrap();
+        let sources = merged["bindings"]["/actions/orbit"]["sources"].as_array().unwrap();
+        assert!(sources.iter().any(|s| s["inputs"]["click"]["output"] == "/actions/orbit/in/menu_left"));
+        assert!(sources.iter().any(|s| s["inputs"]["click"]["output"] == "/actions/orbit/in/menu_right"));
+        assert!(merged["bindings"]["/actions/orbit_block"]["sources"].as_array().is_some_and(|s| !s.is_empty()));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn bindings_are_json() {

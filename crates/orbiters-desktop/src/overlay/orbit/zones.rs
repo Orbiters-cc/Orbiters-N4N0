@@ -44,12 +44,12 @@ pub const QM_ICONS_X: [f32; 7] = [-132.0, -88.0, -44.0, 0.0, 44.0, 88.0, 132.0];
 
 /// Where the ring starts and ends, in hundredths of the wheel's radius: just off VRChat's rim, a band about as deep as VRChat's own slices are long.
 pub const RING_INNER: f32 = 106.0;
-pub const RING_OUTER: f32 = 202.0;
+pub const RING_OUTER: f32 = 172.0;
 /// The ring that blooms outside it.
-pub const BLOOM_INNER: f32 = 206.0;
-pub const BLOOM_OUTER: f32 = 292.0;
+pub const BLOOM_INNER: f32 = 176.0;
+pub const BLOOM_OUTER: f32 = 238.0;
 /// The music's controls need less depth.
-pub const BLOOM_SHORT: f32 = 262.0;
+pub const BLOOM_SHORT: f32 = 218.0;
 /// What separates two cells, and the cells' corners, in those units.
 const RING_GAP: f32 = 3.5;
 const RING_CORNER: f32 = 9.0;
@@ -150,8 +150,8 @@ impl Group {
 
     pub fn cells(self) -> &'static [Zone] {
         match self {
-            Group::Pictures => &[Zone::BloomPeople, Zone::BloomWorld, Zone::BloomRecord, Zone::BloomRecent],
-            Group::Playing => &[Zone::BloomPrevious, Zone::BloomPlay, Zone::BloomNext],
+            Group::Pictures => &[Zone::BloomPeople, Zone::BloomWorld, Zone::BloomRecord],
+            Group::Playing => &[Zone::BloomPrevious, Zone::BloomNext],
         }
     }
 }
@@ -171,9 +171,7 @@ pub enum Zone {
     BloomPeople,
     BloomWorld,
     BloomRecord,
-    BloomRecent,
     BloomPrevious,
-    BloomPlay,
     BloomNext,
     /// What is pointed at, in words, above the ring. Nothing presses here.
     WheelCaption,
@@ -181,18 +179,27 @@ pub enum Zone {
     WheelVeil,
     /// In VR only: the ring's close, for when VRChat's wheel closed without its button.
     WheelHide,
-    /// The one wing docked to the Quick Menu.
-    QmWing,
+    /// The wing docked to the Quick Menu, each tile a part of its own with nothing behind them, so that each can move by itself in VR (Enzo). Its name, its six tiles, what plays.
+    WingName,
+    WingWorlds,
+    WingYouTube,
+    WingInstances,
+    WingPictures,
+    WingTalk,
+    WingAll,
+    WingPlaying,
+    /// The wing's tiles in a row under the Quick Menu's tabs, where the window has no room beside it: VRChat's own panels stay uncovered.
+    QmStrip,
     /// What is pointed at, in words, right above the wing.
     QmCaption,
-    /// The sheet's back: covers the Quick Menu with one clean edge, with a head and a foot.
+    /// The sheet's back: over the Quick Menu's panels down to the main panel's own bottom edge, so that VRChat's tabs stay, with a head.
     SheetBack,
     /// The page on the sheet. Input to VRChat is blocked while pointing here.
     Takeover,
 }
 
 impl Zone {
-    pub const WHEEL: [Zone; 15] = [
+    pub const WHEEL: [Zone; 13] = [
         Zone::WheelVeil,
         Zone::WheelWorlds,
         Zone::WheelYouTube,
@@ -203,13 +210,13 @@ impl Zone {
         Zone::BloomPeople,
         Zone::BloomWorld,
         Zone::BloomRecord,
-        Zone::BloomRecent,
         Zone::BloomPrevious,
-        Zone::BloomPlay,
         Zone::BloomNext,
         Zone::WheelCaption,
     ];
-    pub const QUICK_MENU: [Zone; 2] = [Zone::QmWing, Zone::QmCaption];
+    pub const WING: [Zone; 8] = [Zone::WingName, Zone::WingWorlds, Zone::WingYouTube, Zone::WingInstances, Zone::WingPictures, Zone::WingTalk, Zone::WingAll, Zone::WingPlaying];
+    pub const QUICK_MENU: [Zone; 9] =
+        [Zone::WingName, Zone::WingWorlds, Zone::WingYouTube, Zone::WingInstances, Zone::WingPictures, Zone::WingTalk, Zone::WingAll, Zone::WingPlaying, Zone::QmCaption];
 
     /// The zones around a menu.
     pub fn around(around: Around) -> &'static [Zone] {
@@ -238,13 +245,11 @@ impl Zone {
             Zone::WheelInstances => Ring::cell(210.0, 270.0),
             Zone::WheelPictures => Ring::cell(270.0, 330.0),
             // On the left, so as to stay clear of the caption over the ring.
-            Zone::BloomPeople => Ring::bloom(288.0, 312.0),
-            Zone::BloomWorld => Ring::bloom(264.0, 288.0),
-            Zone::BloomRecord => Ring::bloom(240.0, 264.0),
-            Zone::BloomRecent => Ring::bloom(216.0, 240.0),
-            Zone::BloomPrevious => Ring::short(90.0, 110.0),
-            Zone::BloomPlay => Ring::short(110.0, 130.0),
-            Zone::BloomNext => Ring::short(130.0, 150.0),
+            Zone::BloomPeople => Ring::bloom(285.0, 315.0),
+            Zone::BloomWorld => Ring::bloom(255.0, 285.0),
+            Zone::BloomRecord => Ring::bloom(225.0, 255.0),
+            Zone::BloomPrevious => Ring::short(90.0, 120.0),
+            Zone::BloomNext => Ring::short(120.0, 150.0),
             _ => return None,
         })
     }
@@ -252,8 +257,8 @@ impl Zone {
     /// The second ring it belongs to.
     pub fn group(self) -> Option<Group> {
         match self {
-            Zone::BloomPeople | Zone::BloomWorld | Zone::BloomRecord | Zone::BloomRecent => Some(Group::Pictures),
-            Zone::BloomPrevious | Zone::BloomPlay | Zone::BloomNext => Some(Group::Playing),
+            Zone::BloomPeople | Zone::BloomWorld | Zone::BloomRecord => Some(Group::Pictures),
+            Zone::BloomPrevious | Zone::BloomNext => Some(Group::Playing),
             _ => None,
         }
     }
@@ -280,29 +285,46 @@ impl Zone {
         }
         let r = |x0: f32, y0: f32, x1: f32, y1: f32| Rect::from_min_max(pos2(x0, y0), pos2(x1, y1));
         match self {
-            Zone::WheelCaption => r(-220.0, -264.0, 220.0, -208.0),
+            Zone::WheelCaption => r(-220.0, -236.0, 220.0, -180.0),
             Zone::WheelVeil => r(-103.0, -103.0, 103.0, 103.0),
-            Zone::WheelHide => r(150.0, -190.0, 182.0, -158.0),
+            Zone::WheelHide => r(126.0, -156.0, 156.0, -126.0),
             // As tall as My Profile and as wide, beside it.
-            Zone::QmWing => r(354.0, -150.0, 516.0, 186.0),
-            Zone::QmCaption => r(196.0, -206.0, 516.0, -154.0),
-            // The whole Quick Menu: its sticker and FPS line over it, its tab row and the badge under it.
-            Zone::SheetBack => r(-352.0, -246.0, 352.0, 262.0),
+            // As tall as My Profile and as wide, beside it.
+            Zone::WingName => r(362.0, -150.0, 524.0, -120.0),
+            Zone::WingWorlds => wing_tile(0.0, 0.0),
+            Zone::WingYouTube => wing_tile(1.0, 0.0),
+            Zone::WingInstances => wing_tile(0.0, 1.0),
+            Zone::WingPictures => wing_tile(1.0, 1.0),
+            Zone::WingTalk => wing_tile(0.0, 2.0),
+            Zone::WingAll => wing_tile(1.0, 2.0),
+            Zone::WingPlaying => r(362.0, 132.0, 524.0, 186.0),
+            Zone::QmStrip => r(-262.0, 266.0, 262.0, 322.0),
+            Zone::QmCaption => r(200.0, -206.0, 524.0, -154.0),
+            // The Quick Menu's panels and the FPS line over them, ending where its main panel ends: its tab row and badge stay VRChat's.
+            Zone::SheetBack => r(-352.0, -248.0, 352.0, 204.0),
             // N4N0's pages' own shape, 704 wide.
-            Zone::Takeover => r(-352.0, -198.0, 352.0, 198.0),
+            Zone::Takeover => r(-352.0, -196.0, 352.0, 200.0),
             _ => unreachable!("the rings' cells return above"),
         }
     }
 
-    /// Where it lies where its first place does not fit: the wing in My Profile's place.
+    /// Where it lies where its first place does not fit: the caption, under the strip.
     fn fallback(self) -> Option<Rect> {
         let r = |x0: f32, y0: f32, x1: f32, y1: f32| Rect::from_min_max(pos2(x0, y0), pos2(x1, y1));
         match self {
-            Zone::QmWing => Some(r(190.0, -150.0, 352.0, 186.0)),
-            Zone::QmCaption => Some(r(32.0, -206.0, 352.0, -154.0)),
+            Zone::QmCaption => Some(r(-262.0, 324.0, 262.0, 364.0)),
             _ => None,
         }
     }
+}
+
+/// A tile of the wing, in its column and row.
+fn wing_tile(column: f32, row: f32) -> Rect {
+    const WIDTH: f32 = 78.0;
+    const HEIGHT: f32 = 76.0;
+    const GAP: f32 = 6.0;
+    let min = pos2(362.0 + column * (WIDTH + GAP), -114.0 + row * (HEIGHT + GAP));
+    Rect::from_min_size(min, vec2(WIDTH, HEIGHT))
 }
 
 /// What a panel keeps clear of the window's edge, in pixels.
@@ -373,7 +395,13 @@ pub fn in_units(zone: Zone) -> Placed {
 
 /// Every zone that fits around a menu.
 pub fn layout(around: Around, client: Vec2) -> Vec<Placed> {
-    Zone::around(around).iter().filter_map(|z| place(*z, client)).collect()
+    let mut out: Vec<Placed> = Zone::around(around).iter().filter_map(|z| place(*z, client)).collect();
+    // No room for the wing, all of it or none: a strip that covers none of VRChat's panels.
+    if around == Around::QuickMenu && !Zone::WING.iter().all(|z| out.iter().any(|p| p.zone == *z)) {
+        out.retain(|p| !Zone::WING.contains(&p.zone));
+        out.extend(place(Zone::QmStrip, client));
+    }
+    out
 }
 
 #[cfg(test)]
@@ -482,26 +510,34 @@ mod tests {
     }
 
     #[test]
-    fn the_wing_docks_where_there_is_room_and_takes_my_profile_s_place_where_there_is_none() {
-        // Off the Quick Menu's main panel, its wings, its row of icons and its safety button.
+    fn the_wing_docks_where_there_is_room_and_no_part_ever_covers_vrchat_s_panels_at_rest() {
+        // The Quick Menu's main panel, its wings, its row of icons and its safety button, its badge.
         let keep_off = [
             Rect::from_min_max(pos2(-188.0, -204.0), pos2(188.0, 204.0)),
             Rect::from_min_max(pos2(-351.0, -150.0), pos2(351.0, 186.0)),
-            Rect::from_min_max(pos2(-242.0, 204.0), pos2(242.0, 242.0)),
+            Rect::from_min_max(pos2(-242.0, 204.0), pos2(242.0, 262.0)),
         ];
         for k in keep_off {
-            assert!(!Zone::QmWing.units().intersects(k), "the wing on {k:?}");
+            for zone in Zone::WING {
+                assert!(!zone.units().intersects(k), "the wing's {zone:?} on {k:?}");
+            }
+            assert!(!Zone::QmStrip.units().intersects(k), "the strip on {k:?}");
         }
         let (_, unit) = quick_menu(vec2(1280.0, 720.0));
-        let docked = place(Zone::QmWing, vec2(1280.0, 720.0)).unwrap();
-        assert!((docked.rect.left() - (640.0 + 354.0 * unit)).abs() < 1.0);
+        let docked = place(Zone::WingName, vec2(1280.0, 720.0)).unwrap();
+        assert!((docked.rect.left() - (640.0 + 362.0 * unit)).abs() < 1.0);
         for (w, h) in SIZES {
-            let wing = place(Zone::QmWing, vec2(w, h)).expect("it always has a place");
-            let (center, unit) = quick_menu(vec2(w, h));
-            assert!(wing.rect.left() >= center.x + 188.0 * unit, "{w}x{h}: not on the main panel");
-            assert!(wing.rect.right() <= w && wing.rect.bottom() <= h, "{w}x{h}");
-            assert!(place(Zone::QmCaption, vec2(w, h)).is_some(), "{w}x{h}");
+            let around = layout(Around::QuickMenu, vec2(w, h));
+            let (wing, strip) = (around.iter().filter(|p| Zone::WING.contains(&p.zone)).count(), around.iter().filter(|p| p.zone == Zone::QmStrip).count());
+            assert!((wing, strip) == (Zone::WING.len(), 0) || (wing, strip) == (0, 1), "{w}x{h}: the whole wing or the strip: {wing} {strip}");
+            for placed in &around {
+                assert!(placed.rect.left() >= 0.0 && placed.rect.right() <= w && placed.rect.bottom() <= h, "{w}x{h}: {:?}", placed.zone);
+            }
         }
+        // A narrow window has the strip, and its words under it.
+        let narrow = layout(Around::QuickMenu, vec2(1000.0, 900.0));
+        assert!(narrow.iter().any(|p| p.zone == Zone::QmStrip) && narrow.iter().any(|p| p.zone == Zone::QmCaption));
+        assert!(!layout(Around::QuickMenu, vec2(1920.0, 1080.0)).iter().any(|p| p.zone == Zone::QmStrip));
     }
 
     #[test]
@@ -523,16 +559,26 @@ mod tests {
     }
 
     #[test]
-    fn the_sheet_covers_the_quick_menu_with_one_edge_and_the_page_keeps_its_shape() {
+    fn the_sheet_covers_the_panels_leaves_vrchat_s_tabs_and_the_page_keeps_its_shape() {
         let back = Zone::SheetBack.units();
-        // Its main panel, wings, tab row, FPS line and the sticker on top.
-        for rect in [Rect::from_min_max(pos2(-351.0, -240.0), pos2(351.0, 258.0))] {
+        // Its main panel, wings and FPS line, leaving no sliver of them.
+        for rect in [Rect::from_min_max(pos2(-351.0, -240.0), pos2(351.0, 204.0))] {
             assert!(back.contains_rect(rect), "{rect:?}");
         }
+        // Its tab row and the badge on it stay VRChat's, as does what lies over the FPS line.
+        assert!(!back.intersects(Rect::from_min_max(pos2(-242.0, 206.0), pos2(242.0, 262.0))));
+        // It keeps a gutter to the wing beside it.
+        assert!(Zone::WING.iter().all(|z| z.units().left() - back.right() >= 10.0));
         let page = Zone::Takeover.units();
         assert!(back.contains_rect(page));
         assert!((page.width() / page.height() - 1024.0 / 576.0).abs() < 0.01);
-        assert!(!Zone::QmWing.units().intersects(back), "the wing stays beside it as tabs");
+        assert!(Zone::WING.iter().all(|z| !z.units().intersects(back)), "the wing stays beside it as tabs");
+        // No tile of the wing on another.
+        for (i, a) in Zone::WING.iter().enumerate() {
+            for b in &Zone::WING[i + 1..] {
+                assert!(!a.units().intersects(b.units()), "{a:?} {b:?}");
+            }
+        }
         for (w, h) in SIZES {
             assert!(place(Zone::SheetBack, vec2(w, h)).is_some() && place(Zone::Takeover, vec2(w, h)).is_some(), "{w}x{h}");
         }
@@ -555,6 +601,7 @@ mod tests {
         let small = place(Zone::WheelWorlds, vec2(960.0, 540.0)).unwrap();
         let large = place(Zone::WheelWorlds, vec2(1920.0, 1080.0)).unwrap();
         assert!((large.rect.width() / small.rect.width() - 2.0).abs() < 0.02);
-        assert!((large.logical() - small.logical()).length() < 1.5, "the same drawing");
+        // Within what whole pixels round away: a pixel is 1.33 units in the small window, on each side.
+        assert!((large.logical() - small.logical()).length() < 2.7, "the same drawing");
     }
 }

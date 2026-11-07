@@ -490,6 +490,42 @@ impl Client {
         (error == 0).then_some(value)
     }
 
+    /// A SteamVR setting's text: `None` when it has none.
+    pub fn setting_string(&self, section: &std::ffi::CStr, key: &std::ffi::CStr) -> Option<String> {
+        type F = unsafe extern "system" fn(*const i8, *const i8, *mut std::ffi::c_char, u32, *mut i32);
+        let table = self.table(&self.settings_table, "IVRSettings_003").ok()?;
+        let mut error = 0;
+        let mut text = [0 as std::ffi::c_char; 2048];
+        // SAFETY: IVRSettings_003 entry 8 is GetString; NUL-terminated names, and the buffer's size is what is passed.
+        unsafe { entry::<F>(table, 8)(section.as_ptr(), key.as_ptr(), text.as_mut_ptr(), text.len() as u32, &mut error) };
+        if error != 0 {
+            return None;
+        }
+        // SAFETY: GetString wrote a NUL-terminated string into the buffer, which also starts zeroed.
+        let text = unsafe { std::ffi::CStr::from_ptr(text.as_ptr()) }.to_string_lossy().into_owned();
+        (!text.is_empty()).then_some(text)
+    }
+
+    /// Sets a SteamVR setting's text; whether it took.
+    pub fn set_setting_string(&self, section: &std::ffi::CStr, key: &std::ffi::CStr, value: &std::ffi::CStr) -> bool {
+        type F = unsafe extern "system" fn(*const i8, *const i8, *const i8, *mut i32);
+        let Ok(table) = self.table(&self.settings_table, "IVRSettings_003") else { return false };
+        let mut error = 0;
+        // SAFETY: IVRSettings_003 entry 4 is SetString; NUL-terminated strings.
+        unsafe { entry::<F>(table, 4)(section.as_ptr(), key.as_ptr(), value.as_ptr(), &mut error) };
+        error == 0
+    }
+
+    /// Takes a SteamVR setting away; whether that worked.
+    pub fn remove_setting(&self, section: &std::ffi::CStr, key: &std::ffi::CStr) -> bool {
+        type F = unsafe extern "system" fn(*const i8, *const i8, *mut i32);
+        let Ok(table) = self.table(&self.settings_table, "IVRSettings_003") else { return false };
+        let mut error = 0;
+        // SAFETY: IVRSettings_003 entry 10 is RemoveKeyInSection; NUL-terminated names.
+        unsafe { entry::<F>(table, 10)(section.as_ptr(), key.as_ptr(), &mut error) };
+        error == 0
+    }
+
     /// Sets a SteamVR setting; whether it took.
     pub fn set_setting_bool(&self, section: &std::ffi::CStr, key: &std::ffi::CStr, value: bool) -> bool {
         type F = unsafe extern "system" fn(*const i8, *const i8, bool, *mut i32);

@@ -787,14 +787,19 @@ fn session(args: &[String]) -> anyhow::Result<Ended> {
                 input_read,
                 dashboard,
                 in_game: vrchat_scene,
+                frame,
+                world_status: t.menu.worlds.view_status(),
                 prediction: (frame - since).clamp(0.0, 0.05),
             };
             let turn = orbit.update(cx);
             if turn.clicked {
                 sounds.click();
             }
-            if turn.worlds {
-                t.menu.open_worlds(&overlay, &steamvr, &snap);
+            t.menu.worlds.from_elsewhere(turn.worlds);
+            t.menu.worlds.small_place(turn.small_place);
+            if t.menu.worlds.small_showing() {
+                let sticks = actions.pads(&steamvr).map_or([0.0; 2], |pads| [pads.sticks[0].y, pads.sticks[1].y]);
+                t.menu.worlds.small_input(actions.lasers(&steamvr, 0.0), actions.grabs(&steamvr), sticks);
             }
         }
         if t.menu.update(&overlay, &steamvr, &mut presenter, &snap, &backend, button, watch) {

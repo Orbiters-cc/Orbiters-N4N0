@@ -488,10 +488,11 @@ const TEASER: Rect = Rect { min: Pos2 { x: SIDE_LEFT, y: 526.0 }, max: Pos2 { x:
 
 /// Tile `i` of the `n` small tiles under what to do, spread across the whole width.
 fn small_tile(i: usize, n: usize, vr: bool) -> Rect {
-    let width = (SIDE_RIGHT - SIDE_LEFT - 6.0 * (n as f32 - 1.0)) / n as f32;
-    let x = SIDE_LEFT + i as f32 * (width + 6.0);
+    let left = if vr { VR_LEFT } else { SIDE_LEFT };
+    let width = (SIDE_RIGHT - left - 6.0 * (n as f32 - 1.0)) / n as f32;
+    let x = left + i as f32 * (width + 6.0);
     if vr {
-        Rect::from_min_max(pos2(x, 416.0), pos2(x + width, 478.0))
+        Rect::from_min_max(pos2(x, 442.0), pos2(x + width, 504.0))
     } else {
         Rect::from_min_max(pos2(x, 392.0), pos2(x + width, 444.0))
     }
@@ -504,27 +505,78 @@ fn small_action(p: &Painter, rect: Rect, glyph: &str, filled: bool, count: u64, 
     let bg = if hover { theme::mix(bg, Color32::WHITE, 0.08) } else { bg };
     p.rect_filled(rect, CornerRadius::same(14), fade(bg, alpha));
     let number = count_or_nothing(count);
-    let line = rect.min.y + rect.height() * 0.36;
-    let at = if number.is_empty() { rect.center().x } else { rect.center().x - 14.0 };
+    // A headset's are larger: there is the room, and the need.
+    let large = rect.height() > 56.0;
+    let (icon, count, said) = if large { (24.0, 20.0, 17.5) } else { (20.0, 16.5, 14.5) };
+    let line = rect.min.y + rect.height() * 0.34;
+    let at = if number.is_empty() { rect.center().x } else { rect.center().x - 16.0 };
     if filled {
-        widgets::icon_fill(p, pos2(at, line), glyph, 20.0, fade(fg, alpha));
+        widgets::icon_fill(p, pos2(at, line), glyph, icon, fade(fg, alpha));
     } else {
-        widgets::icon(p, pos2(at, line), glyph, 20.0, fade(fg, alpha));
+        widgets::icon(p, pos2(at, line), glyph, icon, fade(fg, alpha));
     }
     if !number.is_empty() {
-        text(p, pos2(at + 14.0, line), Align2::LEFT_CENTER, Txt::new(number, 16.5).weight(weight::SEMIBOLD).color(fade(fg, alpha)));
+        text(p, pos2(at + icon * 0.7, line), Align2::LEFT_CENTER, Txt::new(number, count).weight(weight::SEMIBOLD).color(fade(fg, alpha)));
     }
-    text(p, pos2(rect.center().x, rect.min.y + rect.height() * 0.76), Align2::CENTER_CENTER, Txt::new(word, 14.5).weight(weight::MEDIUM).color(fade(theme::FG, alpha)));
+    text(p, pos2(rect.center().x, rect.min.y + rect.height() * 0.75), Align2::CENTER_CENTER, Txt::new(word, said).weight(weight::MEDIUM).color(fade(theme::FG, alpha)));
 }
 
-/// A headset's side panel: fewer things, larger, as what is read at arm's length with a moving hand is not what is read on a screen. What a screen has more of waits a press away.
-const VR_SHOW: Rect = Rect { min: Pos2 { x: SIDE_LEFT, y: 292.0 }, max: Pos2 { x: 835.0, y: 350.0 } };
-const VR_SHOW_SMALL: Rect = Rect { min: Pos2 { x: 841.0, y: 292.0 }, max: Pos2 { x: SIDE_RIGHT, y: 350.0 } };
-const VR_SHOW_WHOLE: Rect = Rect { min: Pos2 { x: SIDE_LEFT, y: 292.0 }, max: Pos2 { x: SIDE_RIGHT, y: 350.0 } };
-const VR_GO: Rect = Rect { min: Pos2 { x: SIDE_LEFT, y: 358.0 }, max: Pos2 { x: 835.0, y: 410.0 } };
-const VR_WEB: Rect = Rect { min: Pos2 { x: 841.0, y: 358.0 }, max: Pos2 { x: SIDE_RIGHT, y: 410.0 } };
-const VR_WEB_WHOLE: Rect = Rect { min: Pos2 { x: SIDE_LEFT, y: 358.0 }, max: Pos2 { x: SIDE_RIGHT, y: 410.0 } };
-const VR_OTHER: Rect = Rect { min: Pos2 { x: 820.0, y: 522.0 }, max: Pos2 { x: SIDE_RIGHT, y: 556.0 } };
+/// A headset's page, on its own and not a smaller screen's: what is read at arm's length with a moving hand. Six worlds as pictures with their names, and beside them a wide panel:
+/// the hole, the name, one row of what to do, one of its small tiles. Search and the filters wait behind the list's one head.
+const VR_LEFT: f32 = 464.0;
+const VR_SIDE: Rect = Rect { min: Pos2 { x: 452.0, y: 12.0 }, max: Pos2 { x: 1012.0, y: 564.0 } };
+/// Its picture; where a capture standing small is seen through it.
+pub const VR_HERO: Rect = Rect { min: Pos2 { x: VR_LEFT, y: 24.0 }, max: Pos2 { x: SIDE_RIGHT, y: 296.0 } };
+const VR_SMALL_BACK: Rect = Rect { min: Pos2 { x: 836.0, y: 244.0 }, max: Pos2 { x: 990.0, y: 288.0 } };
+const VR_GRIP: Rect = Rect { min: Pos2 { x: 774.0, y: 302.0 }, max: Pos2 { x: SIDE_RIGHT, y: 346.0 } };
+const VR_SHOW: Rect = Rect { min: Pos2 { x: VR_LEFT, y: 372.0 }, max: Pos2 { x: 637.0, y: 434.0 } };
+const VR_SHOW_SMALL: Rect = Rect { min: Pos2 { x: 645.0, y: 372.0 }, max: Pos2 { x: 819.0, y: 434.0 } };
+const VR_GO: Rect = Rect { min: Pos2 { x: 827.0, y: 372.0 }, max: Pos2 { x: SIDE_RIGHT, y: 434.0 } };
+const VR_GO_HALF: Rect = Rect { min: Pos2 { x: VR_LEFT, y: 372.0 }, max: Pos2 { x: 728.0, y: 434.0 } };
+const VR_WEB_HALF: Rect = Rect { min: Pos2 { x: 736.0, y: 372.0 }, max: Pos2 { x: SIDE_RIGHT, y: 434.0 } };
+const VR_OTHER: Rect = Rect { min: Pos2 { x: VR_LEFT, y: 512.0 }, max: Pos2 { x: SIDE_RIGHT, y: 556.0 } };
+/// The list's one head: where it is, and through it search and the filters.
+const VR_LIST_RIGHT: f32 = 440.0;
+const VR_PREVIOUS: Pos2 = Pos2 { x: 356.0, y: 54.0 };
+const VR_NEXT: Pos2 = Pos2 { x: 412.0, y: 54.0 };
+
+fn vr_list_head(pages: usize) -> Rect {
+    Rect::from_min_max(pos2(24.0, 24.0), pos2(if pages > 1 { 322.0 } else { VR_LIST_RIGHT }, 84.0))
+}
+
+/// A result's place in a headset: two columns of three.
+fn vr_card_rect(slot: usize) -> Rect {
+    let (col, row) = ((slot % 2) as f32, (slot / 2) as f32);
+    Rect::from_min_size(pos2(24.0 + col * 212.0, 96.0 + row * 156.0), vec2(204.0, 148.0))
+}
+
+/// One of them: its picture, what it is, and its name as large as the head's.
+fn vr_card(p: &Painter, rect: Rect, entry: &Entry, d: &Data, hover: bool, pressed: bool, selected: bool) {
+    let rect = if pressed { rect.shrink(2.0) } else { rect };
+    p.rect_filled(rect, CornerRadius::same(16), if hover { RAISED2 } else { RAISED });
+    let thumb = Rect::from_min_max(rect.min, pos2(rect.max.x, rect.max.y - 42.0));
+    picture(p, thumb, (d.thumb)(entry), &entry.world_id, CornerRadius { nw: 16, ne: 16, sw: 0, se: 0 }, 1.0);
+    let status = d.status;
+    let chip = if status.current == Some(entry.id) {
+        Some((if !status.shown { "Loading" } else if status.small { "Small" } else { "Around you" }, if status.shown { theme::ACCENT } else { theme::WARN }))
+    } else if entry.capture {
+        Some(("3D", theme::ACCENT))
+    } else {
+        None
+    };
+    if let Some((word, tint)) = chip {
+        let galley = p.layout_job(Txt::new(word, 16.5).weight(weight::BOLD).color(theme::ON_ACCENT).job(f32::INFINITY));
+        let back = Rect::from_min_size(thumb.min + vec2(8.0, 8.0), vec2(galley.size().x + 18.0, 28.0));
+        p.rect_filled(back, CornerRadius::same(14), tint);
+        p.galley(pos2(back.min.x + 9.0, back.center().y - galley.size().y / 2.0), galley, theme::ON_ACCENT);
+    }
+    let name = Txt::new(entry.name.clone(), 20.0).weight(weight::SEMIBOLD).color(theme::FG);
+    let galley = p.layout_job(name.job_truncated(rect.width() - 20.0));
+    p.galley(pos2(rect.min.x + 10.0, rect.max.y - 21.0 - galley.size().y / 2.0), galley, theme::FG);
+    if selected {
+        p.rect_stroke(rect, CornerRadius::same(16), Stroke::new(3.0, theme::ACCENT), StrokeKind::Inside);
+    }
+}
 
 /// Where a few captures and the worlds under their heading lie: at full width, or beside the side panel. `n` captures come first.
 fn few_rects(count: usize, n: usize, side: bool) -> (Vec<Option<Rect>>, f32) {
@@ -750,6 +802,19 @@ impl Panel {
     /// The browse page's pressable things, at full width or beside the side panel.
     fn browse_targets(&self, d: &Data, out: &mut Vec<(Target, Rect)>, side: bool) {
         let results = self.results(d);
+        if side && d.status.headset {
+            let pages = self.pages(d, results.len());
+            out.push((Target::CloseSide, vr_list_head(pages)));
+            if pages > 1 {
+                out.push((Target::Previous, Rect::from_center_size(VR_PREVIOUS, vec2(52.0, 60.0))));
+                out.push((Target::Next, Rect::from_center_size(VR_NEXT, vec2(52.0, 60.0))));
+            }
+            let first = self.results_page.min(pages - 1) * PER_PAGE;
+            for (i, _) in results.iter().enumerate().skip(first).take(PER_PAGE) {
+                out.push((Target::Card(i), vr_card_rect(i - first)));
+            }
+            return;
+        }
         out.push((Target::Field, if side { side_field_rect() } else { field_rect() }));
         let pages = self.pages(d, results.len());
         if pages > 1 {
@@ -796,7 +861,7 @@ impl Panel {
 
     /// Where a capture standing small may lie on this page: the picture of its world's side panel.
     pub fn small_place(&self, status: &Status) -> Option<Rect> {
-        (self.page == Page::Detail && status.small && status.current.is_some() && status.current == self.selected).then_some(SIDE_HERO)
+        (self.page == Page::Detail && status.small && status.current.is_some() && status.current == self.selected).then_some(if status.headset { VR_HERO } else { SIDE_HERO })
     }
 
     /// The hole it is seen through, when it lies there now.
@@ -818,14 +883,20 @@ impl Panel {
                 out.extend(keys(self.layout, false));
             }
             Page::Detail => {
+                let vr = d.status.headset;
+                // In a headset the list's head is the way back as well, and there is one.
+                if vr {
+                    out.clear();
+                }
                 self.browse_targets(d, &mut out, true);
-                out.push((Target::CloseSide, SIDE_CLOSE));
+                if !vr {
+                    out.push((Target::CloseSide, SIDE_CLOSE));
+                }
                 let Some(e) = self.entry(d) else { return out };
                 let status = d.status;
                 let current = status.current == Some(e.id) && (status.shown || status.stage.is_some());
-                let vr = status.headset;
                 if !e.capture {
-                    out.push((Target::Join, if vr { VR_SHOW_WHOLE } else { SHOW_WHOLE }));
+                    out.push((Target::Join, if vr { VR_GO_HALF } else { SHOW_WHOLE }));
                 } else if !status.headset {
                     if !current {
                         out.push((Target::Show, SHOW_WHOLE));
@@ -836,7 +907,7 @@ impl Panel {
                     out.push((Target::Show, VR_SHOW));
                     out.push((Target::ShowSmall, VR_SHOW_SMALL));
                     if status.small && status.small_taken {
-                        out.push((Target::SmallBack, SMALL_BACK));
+                        out.push((Target::SmallBack, VR_SMALL_BACK));
                     }
                 } else {
                     out.push((Target::Show, VR_SHOW));
@@ -846,16 +917,16 @@ impl Panel {
                 let web = super::finder::web_link(&e.world_id).is_some();
                 if e.capture {
                     out.push((Target::Join, match (web, vr) {
-                        (true, true) => VR_GO,
+                        (_, true) => VR_GO,
                         (true, false) => GO,
-                        (false, true) => VR_WEB_WHOLE,
                         (false, false) => WEB_WHOLE,
                     }));
-                    if web {
-                        out.push((Target::OpenWeb, if vr { VR_WEB } else { WEB }));
+                    // A page on VRChat's site is for a screen.
+                    if web && !vr {
+                        out.push((Target::OpenWeb, WEB));
                     }
                 } else if web {
-                    out.push((Target::OpenWeb, if vr { VR_WEB_WHOLE } else { WEB_WHOLE }));
+                    out.push((Target::OpenWeb, if vr { VR_WEB_HALF } else { WEB_WHOLE }));
                 }
                 let mut tiles = vec![Target::Like, Target::Comments];
                 if d.facts_of(e).is_some_and(|f| f.picture_count > 0) || e.pictures > 0 {
@@ -1260,9 +1331,11 @@ impl Panel {
         let shown = ease_out((time - self.page_at) / PAGE_FADE);
         let targets = self.targets(d);
         let state = |t: Target| (self.hover == Some(t), self.pressed == Some(t));
-        // The back button, on every page.
-        let (hover, pressed) = state(Target::Back);
-        round_button(p, pos2(60.0, 52.0), icons::ARROW_LEFT, hover, pressed, 1.0);
+        // The back button, on every page but a headset's side panel, whose list's head is that.
+        if targets.iter().any(|(t, _)| *t == Target::Back) {
+            let (hover, pressed) = state(Target::Back);
+            round_button(p, pos2(60.0, 52.0), icons::ARROW_LEFT, hover, pressed, 1.0);
+        }
         match self.page {
             Page::Browse => self.browse(p, d, &targets, time, shown),
             Page::Typing => {
@@ -1315,6 +1388,39 @@ impl Panel {
         let state = |t: Target| (self.hover == Some(t), self.pressed == Some(t));
         let results = self.results(d);
         let side = self.page == Page::Detail;
+        if side && d.status.headset {
+            let pages = self.pages(d, results.len());
+            let (h, pr) = state(Target::CloseSide);
+            let head = vr_list_head(pages);
+            p.rect_filled(if pr { head.shrink(2.0) } else { head }, CornerRadius::same(24), if h { RAISED2 } else { RAISED });
+            widgets::icon(p, pos2(head.min.x + 26.0, head.center().y), icons::CARET_LEFT, 24.0, theme::FG);
+            let name = if self.query.is_empty() { self.section.label(d.status.list.vrchat).to_string() } else { self.query.clone() };
+            let room = head.width() - 44.0 - 76.0;
+            let galley = p.layout_job(Txt::new(name, 21.0).weight(weight::SEMIBOLD).color(theme::FG).job_truncated(room));
+            p.galley(pos2(head.min.x + 44.0, head.center().y - galley.size().y / 2.0), galley, theme::FG);
+            // What else is behind it.
+            widgets::icon(p, pos2(head.max.x - 58.0, head.center().y), icons::MAGNIFYING_GLASS, 23.0, theme::FG_2);
+            widgets::icon(p, pos2(head.max.x - 26.0, head.center().y), icons::SLIDERS_HORIZONTAL, 23.0, theme::FG_2);
+            if pages > 1 {
+                let (h, pr) = state(Target::Previous);
+                round_button(p, VR_PREVIOUS, icons::CARET_LEFT, h, pr, 1.0);
+                let (h, pr) = state(Target::Next);
+                round_button(p, VR_NEXT, icons::CARET_RIGHT, h, pr, 1.0);
+            }
+            let current = self.results_page.min(pages - 1);
+            for (t, rect) in targets {
+                if let Target::Card(i) = *t {
+                    let (h, pr) = state(*t);
+                    vr_card(p, *rect, results[i], d, h, pr, self.selected == Some(results[i].id));
+                }
+            }
+            if results.is_empty() {
+                text(p, pos2(232.0, 320.0), Align2::CENTER_CENTER, Txt::new("Nothing else here", 20.0).color(theme::FG_3));
+            } else if current * PER_PAGE >= results.len() {
+                text(p, pos2(232.0, 320.0), Align2::CENTER_CENTER, Txt::new("Finding more worlds\u{2026}", 20.0).color(fade(theme::FG_3, shown)));
+            }
+            return;
+        }
         field(p, if side { side_field_rect() } else { field_rect() }, &self.query, "Search VRChat worlds", false, state(Target::Field), time, 1.0);
         // How many, at the field's end (while what is typed leaves room).
         if !side && self.query.chars().count() <= 28 && !results.is_empty() {
@@ -1496,14 +1602,16 @@ impl Panel {
         let state = |t: Target| (self.hover == Some(t), self.pressed == Some(t));
         let hole = self.hole(status);
         let opening = ease_out((time - self.page_at) / PAGE_FADE);
+        let vr = status.headset;
+        let side = if vr { VR_SIDE } else { SIDE };
         match hole {
-            Some(h) => fill_around(p, SIDE, 22.0, h, 14.0, SURFACE),
+            Some(h) => fill_around(p, side, 22.0, h, 14.0, SURFACE),
             None => {
-                p.rect_filled(SIDE.translate(vec2((1.0 - opening) * 28.0, 0.0)), CornerRadius::same(22), fade(SURFACE, opening.max(0.3)));
+                p.rect_filled(side.translate(vec2((1.0 - opening) * 28.0, 0.0)), CornerRadius::same(22), fade(SURFACE, opening.max(0.3)));
             }
         }
         let Some(entry) = self.entry(d) else {
-            text(p, SIDE.center(), Align2::CENTER_CENTER, Txt::new("This world is no longer listed", 17.0).color(theme::FG_3));
+            text(p, side.center(), Align2::CENTER_CENTER, Txt::new("This world is no longer listed", 17.0).color(theme::FG_3));
             return;
         };
         // Another world's, coming in at once.
@@ -1522,14 +1630,16 @@ impl Panel {
                 p.line_segment([at, at + vec2(0.0, y * arm)], stroke);
             }
             let words = if near { "Close your grip" } else { "Grip to take it" };
-            let galley = p.layout_job(Txt::new(words, 20.0).weight(weight::BOLD).color(Color32::WHITE).job(f32::INFINITY));
-            // Over the capture's sky: what stands on it stays seen.
-            let pill = Rect::from_center_size(pos2(h.center().x, h.min.y + 30.0), vec2(galley.size().x + 66.0, 44.0));
-            p.rect_filled(pill, CornerRadius::same(22), if near { theme::ACCENT } else { theme::black(0.8) });
-            widgets::icon(p, pos2(pill.min.x + 28.0, pill.center().y), icons::HAND_GRABBING, 25.0, if near { theme::ON_ACCENT } else { theme::ACCENT });
-            p.galley(pos2(pill.min.x + 48.0, pill.center().y - galley.size().y / 2.0), galley, Color32::WHITE);
+            let ink = if near { theme::ON_ACCENT } else { theme::FG };
+            let galley = p.layout_job(Txt::new(words, 21.0).weight(weight::BOLD).color(ink).job(f32::INFINITY));
+            // Right under the hole, off the capture: nothing lies over what it says can be taken.
+            p.rect_filled(VR_GRIP, CornerRadius::same(22), if near { theme::ACCENT } else { RAISED2 });
+            let left = VR_GRIP.center().x - (galley.size().x + 34.0) / 2.0;
+            widgets::icon(p, pos2(left + 13.0, VR_GRIP.center().y), icons::HAND_GRABBING, 26.0, if near { theme::ON_ACCENT } else { theme::ACCENT });
+            p.galley(pos2(left + 34.0, VR_GRIP.center().y - galley.size().y / 2.0), galley, ink);
         } else {
-            let hero = SIDE_HERO;
+            let hero = if vr { VR_HERO } else { SIDE_HERO };
+            let small_back = if vr { VR_SMALL_BACK } else { SMALL_BACK };
             picture(p, hero, (d.thumb)(entry), &entry.world_id, CornerRadius::same(14), rest);
             let foot = Rect::from_min_max(pos2(hero.min.x, hero.max.y - 44.0), hero.max);
             if current || !entry.capture {
@@ -1546,7 +1656,7 @@ impl Panel {
                 };
                 let pulse = if status.shown && status.stage.is_none() { 1.0 } else { 0.55 + 0.45 * ((time * 4.0).sin() as f32 * 0.5 + 0.5) };
                 p.circle_filled(pos2(hero.min.x + 20.0, foot.center().y), 5.0, fade(dot, rest * pulse));
-                let room = if taken { SMALL_BACK.min.x - hero.min.x - 44.0 } else { hero.width() - 44.0 };
+                let room = if taken { small_back.min.x - hero.min.x - 44.0 } else { hero.width() - 44.0 };
                 text_cut(p, pos2(hero.min.x + 34.0, foot.center().y), room, Txt::new(label, 15.0).weight(weight::MEDIUM).color(fade(theme::FG, rest)));
                 if let Some(f) = status.download {
                     let track = Rect::from_min_size(pos2(hero.min.x, hero.max.y - 4.0), vec2(hero.width(), 4.0));
@@ -1564,18 +1674,24 @@ impl Panel {
             }
         }
         // Its way out, on its edge.
-        let (h, pr) = state(Target::CloseSide);
-        let tab = if pr { SIDE_CLOSE.shrink(1.0) } else { SIDE_CLOSE };
-        p.rect_filled(tab, CornerRadius::same(14), if h { RAISED2 } else { RAISED });
-        widgets::icon(p, tab.center(), icons::CARET_RIGHT, 20.0, theme::FG);
+        if !vr {
+            let (h, pr) = state(Target::CloseSide);
+            let tab = if pr { SIDE_CLOSE.shrink(1.0) } else { SIDE_CLOSE };
+            p.rect_filled(tab, CornerRadius::same(14), if h { RAISED2 } else { RAISED });
+            widgets::icon(p, tab.center(), icons::CARET_RIGHT, 20.0, theme::FG);
+        }
         // Its name, as long as it is; who made it.
-        let (x, width) = (SIDE_LEFT, SIDE_RIGHT - SIDE_LEFT);
-        let vr = status.headset;
-        let mut title = Txt::new(entry.name.clone(), if vr { 24.0 } else { 21.0 }).weight(weight::SEMIBOLD).color(fade(theme::FG, rest)).job(width);
-        title.wrap.max_rows = 2;
-        let galley = p.layout_job(title);
-        // Its last line just over who made it, however many it has.
-        p.galley(pos2(x, 262.0 - galley.size().y), galley, theme::FG);
+        let (x, width) = if vr { (VR_LEFT, SIDE_RIGHT - VR_LEFT) } else { (SIDE_LEFT, SIDE_RIGHT - SIDE_LEFT) };
+        if vr {
+            let room = if hole.is_some() { VR_GRIP.min.x - x - 14.0 } else { width };
+            text_cut(p, pos2(x, 302.0), room, Txt::new(entry.name.clone(), 27.0).weight(weight::SEMIBOLD).color(fade(theme::FG, rest)));
+        } else {
+            let mut title = Txt::new(entry.name.clone(), 21.0).weight(weight::SEMIBOLD).color(fade(theme::FG, rest)).job(width);
+            title.wrap.max_rows = 2;
+            let galley = p.layout_job(title);
+            // Its last line just over who made it, however many it has.
+            p.galley(pos2(x, 262.0 - galley.size().y), galley, theme::FG);
+        }
         let facts = d.facts_of(entry);
         let mut under = Vec::new();
         if let Some(author) = d.author(entry) {
@@ -1593,16 +1709,17 @@ impl Panel {
         }
         // In a headset, who made it and no more.
         let under = if vr { under.first().cloned().unwrap_or_default() } else { under.join(" \u{b7} ") };
-        text_cut(p, pos2(x, 266.0), width, Txt::new(under, if vr { 18.0 } else { 16.5 }).color(fade(theme::FG, rest)));
+        text_cut(p, pos2(x, if vr { 340.0 } else { 266.0 }), width, Txt::new(under, if vr { 19.0 } else { 16.5 }).color(fade(theme::FG, rest)));
         // What it can be seen as, and the rest.
         let wf = d.world_feedback(entry);
         for (t, rect) in targets {
             let (h, pr) = state(*t);
             match *t {
                 Target::Show => {
-                    let label = if !status.headset { "See it in 3D" } else { "Around me" };
+                    // On a screen it opens the Orbiters window, and says so.
+                    let (glyph, label) = if !status.headset { (icons::ARROW_SQUARE_OUT, "See it in 3D, in Orbiters") } else { (icons::CUBE, "Around me") };
                     let lit = !(current && status.small);
-                    pill_button(p, *rect, Some(icons::CUBE), label, if lit { theme::ACCENT } else { RAISED2 }, if lit { theme::ON_ACCENT } else { theme::FG }, h, pr, rest);
+                    pill_button(p, *rect, Some(glyph), label, if lit { theme::ACCENT } else { RAISED2 }, if lit { theme::ON_ACCENT } else { theme::FG }, h, pr, rest);
                 }
                 Target::ShowSmall => {
                     let lit = current && status.small;
@@ -1611,12 +1728,15 @@ impl Panel {
                 Target::SmallBack => pill_button(p, *rect, Some(icons::ARROW_U_UP_LEFT), "Back here", theme::ACCENT, theme::ON_ACCENT, h, pr, rest),
                 Target::Join => {
                     let (glyph, label) = if status.list.vrchat { (icons::ENVELOPE_SIMPLE, "Invite me") } else { (icons::PLAY, "Go there") };
-                    if entry.capture {
+                    if entry.capture && vr {
+                        pill_button(p, *rect, Some(glyph), label, RAISED2, theme::FG, h, pr, rest);
+                    } else if entry.capture {
                         icon_button(p, *rect, glyph, false, label, RAISED2, theme::FG, h, pr, rest);
                     } else {
                         pill_button(p, *rect, Some(glyph), label, theme::ACCENT, theme::ON_ACCENT, h, pr, rest);
                     }
                 }
+                Target::OpenWeb if vr => pill_button(p, *rect, Some(icons::ARROW_SQUARE_OUT), "Web page", RAISED, theme::FG, h, pr, rest),
                 Target::OpenWeb => icon_button(p, *rect, icons::ARROW_SQUARE_OUT, false, "Web page", RAISED, theme::FG, h, pr, rest),
                 Target::Like => {
                     let (bg, fg) = if wf.liked { (theme::alpha(theme::REC, 0.22), theme::REC) } else { (RAISED, theme::FG) };
@@ -1634,6 +1754,11 @@ impl Panel {
                 Target::Other => {
                     let n = d.others(entry).len();
                     let label = if n == 1 { "1 more capture \u{203a}".to_string() } else { format!("{n} more \u{203a}") };
+                    if vr {
+                        let label = if n == 1 { "1 more capture of this world".to_string() } else { format!("{n} more captures of this world") };
+                        pill_button(p, *rect, Some(icons::CUBE), &label, RAISED, theme::FG, h, pr, rest);
+                        continue;
+                    }
                     text(p, pos2(rect.max.x, rect.center().y), Align2::RIGHT_CENTER, Txt::new(label, 15.5).weight(weight::SEMIBOLD).color(fade(if h { theme::FG } else { theme::ACCENT }, rest)));
                 }
                 _ => {}
@@ -1642,13 +1767,21 @@ impl Panel {
         // As much of the world's description as fits. In a headset, larger, and no more than that under it: its numbers are on the tiles over it.
         let description = if entry.description.trim().is_empty() { facts.and_then(|f| f.description.as_deref()).unwrap_or("") } else { entry.description.as_str() };
         if !description.trim().is_empty() {
-            let mut job = Txt::new(description.split_whitespace().collect::<Vec<_>>().join(" "), if vr { 17.5 } else { 16.0 }).color(fade(theme::FG, rest)).job(width);
+            let mut job = Txt::new(description.split_whitespace().collect::<Vec<_>>().join(" "), if vr { 18.0 } else { 16.0 }).color(fade(theme::FG, rest)).job(width);
             // More of it where nobody has said anything yet.
             let quiet = wf.comments.is_empty() && wf.comment_count == 0;
             job.wrap.max_rows = if !vr && d.others(entry).is_empty() && (quiet || d.performance(entry).is_none()) { 3 } else { 2 };
-            p.galley(pos2(x, if vr { 486.0 } else { 452.0 }), p.layout_job(job), theme::FG);
+            // In a headset it has what the row of other captures leaves.
+            if !vr || d.others(entry).is_empty() {
+                p.galley(pos2(x, if vr { 510.0 } else { 452.0 }), p.layout_job(job), theme::FG);
+            }
         }
         if vr {
+            // Why a press did nothing, over what is there.
+            if let Some(note) = self.note(time).map(str::to_string).or_else(|| wf.error.clone()).or_else(|| status.error.clone().filter(|_| !current)) {
+                p.rect_filled(VR_OTHER, CornerRadius::same(14), SURFACE);
+                text_cut(p, pos2(x, VR_OTHER.min.y + 10.0), width, Txt::new(note, 18.0).color(fade(theme::WARN, rest)));
+            }
             return;
         }
         // How smoothly VRChat runs there.
@@ -2182,6 +2315,30 @@ mod tests {
         assert_eq!(ids(&panel, &facts, &none), [1, 4, 3, 2]);
         panel.query = "shr".into();
         assert_eq!(ids(&panel, &facts, &none), [3]);
+    }
+
+    /// Round 6's judges: a headset's page is not a smaller screen's. One head for the list, no filter row, and nothing over the hole.
+    #[test]
+    fn a_headsets_side_panel_has_no_filter_row_and_nothing_over_its_hole() {
+        let entries = super::super::catalog::parse(LISTING).unwrap();
+        let facts = HashMap::new();
+        let feedback = FeedbackView::default();
+        let status = Status { headset: true, current: Some(1), shown: true, small: true, small_docked: true, ..Default::default() };
+        let panel = Panel { page: Page::Detail, selected: Some(1), ..Default::default() };
+        let d = data(&entries, &status, &feedback, &facts);
+        let targets = panel.targets(&d);
+        for (t, r) in &targets {
+            assert!(!matches!(t, Target::Back | Target::Field | Target::Section(_) | Target::Sort(_) | Target::Filter), "{t:?}");
+            assert!(!r.intersects(VR_HERO), "{t:?} over the hole");
+            if matches!(t, Target::Card(_)) {
+                assert!(r.max.x <= VR_SIDE.min.x && r.max.y <= 576.0, "{r:?}");
+            }
+        }
+        assert!(!VR_GRIP.intersects(VR_HERO));
+        assert_eq!(panel.hole(&status), Some(VR_HERO));
+        assert!(VR_HERO.width() * VR_HERO.height() > 2.0 * SIDE_HERO.width() * SIDE_HERO.height());
+        // The list's head goes back to all of it.
+        assert!(targets.iter().any(|(t, _)| *t == Target::CloseSide));
     }
 
     /// Round 3's judges, of the headset: tight targets. On a world's side panel and its list, at arm's length, none under 2 degrees.

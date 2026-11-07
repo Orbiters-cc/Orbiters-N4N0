@@ -52,9 +52,9 @@ In VR the same units are laid on a plane: the wheel's rides the hand facing the 
 
 The block's rules (`block.rs`): blocked on hover, before any press. A press begun in the game stays the game's until let go; a press begun on a panel stays ours until let go. Off the panel, free at once; panels gone, free at once whatever is held. It is said anew every frame, so it ends by not being said, and SteamVR forgets it with the process. If the overlay's loop hangs with a block on, the process ends itself after 1.5 s.
 
-## Real pictures on the parts
+## Real pictures on All tools
 
-The wing's tiles and the wheel's cells for Worlds in 3D, Instances and Pictures hold a dimmed real picture, and All tools' large cards hold real content: the newest three captures, the last three places, the newest picture. `Recents::newest` picks them, and `keep_the_newest` holds only those while no gallery is open, so an endless gallery still costs nothing once it is left. Each is asked for once: asked for twice, a new list would lose what had been read of it. YouTube keeps its icon, since the menu knows the world's player by its title alone.
+All tools' large cards hold real content: the newest three captures, the last three places, the newest picture, what the world's player has. `Recents::newest` picks them and `keep_the_newest` holds only those. Each is asked for once: asked for twice, a new list would lose what had been read of it. The wheel's cells and the wing's tiles hold none: tried in round 6, dark captures on three of six parts read as dead cells. They have one treatment, a solid base and the tool's colour on the icon (`part_ink`).
 
 ## The gallery
 
@@ -68,7 +68,7 @@ The gallery, previous instances, YouTube's results and the conversation scroll b
 
 ## The wheel's keys, on the desktop
 
-Number keys are the first way in: each cell shows its key as a cap, and the caption leads with them, Left Alt second. While pointing, and while a picture waits, the veil is solid: VRChat goes on lighting a slice under it, and that must not read as what is pointed at. A picture asked for from the ring can be called off with a second press, and the caption says so.
+Number keys are the first way in: each cell shows its key as a cap on its axis, under its icon (`cell_icon`), and the caption leads with them, Left Alt second. The cell pointed at lights up whole, with a line round it. While pointing, and while a picture waits, the veil is solid: VRChat goes on lighting a slice under it, and that must not read as what is pointed at. A picture asked for from the ring can be called off with a second press, and the caption says so.
 
 ## A capture standing small (VR)
 
@@ -84,7 +84,7 @@ The stick also reaches VRChat, as nothing takes it from the game while the captu
 
 ## Worlds in 3D
 
-Beside the side panel every result of a short list keeps its place (`few_rects`, shorter cards there, See them all stays). In a headset, Around me and Small here both stay under the hole, the current one lit. With a sheet up, a wing stands off it by `WING_OFF_A_SHEET`: the sheet is nearer the eyes and would seem to run into it.
+On a screen, beside the side panel every result of a short list keeps its place (`few_rects`, shorter cards there, See them all stays), and See it in 3D says it opens in Orbiters. A headset's page is its own (`VR_*`), not a smaller screen's: six worlds as pictures with their names, one head on the list that goes back to search and the filters, and a wide panel with the hole (`VR_HERO`), the name, one row of what to do and one of small tiles. Grip to take it lies under the hole, not on it. Around me and Small here both stay, the current one lit. With a sheet up, a wing stands off it by `WING_OFF_A_SHEET`: the sheet is nearer the eyes and would seem to run into it.
 
 A press on a world opens its details on a side panel beside the list, which narrows to two columns of the same six results, so that another can be pressed at once (`Page::Detail`, `SIDE`). In a headset a press on a world with a capture shows it, around the person or small, whichever was chosen last.
 

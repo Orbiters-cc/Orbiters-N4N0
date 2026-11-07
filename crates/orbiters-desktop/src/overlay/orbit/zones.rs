@@ -291,7 +291,7 @@ impl Zone {
             Zone::WheelCaption => r(-220.0, -270.0, 220.0, -214.0),
             Zone::WheelVeil => r(-103.0, -103.0, 103.0, 103.0),
             // Off the ring, in the free corner past its seam, and no smaller than a thumb's worth of laser.
-            Zone::WheelHide => r(140.0, -186.0, 196.0, -156.0),
+            Zone::WheelHide => r(118.0, -182.0, 202.0, -150.0),
             // As tall as My Profile and as wide, beside it.
             // As tall as My Profile and as wide, beside it.
             Zone::WingName => r(362.0, -150.0, 524.0, -120.0),
@@ -302,7 +302,7 @@ impl Zone {
             Zone::WingTalk => wing_tile(0.0, 2.0),
             Zone::WingAll => wing_tile(1.0, 2.0),
             Zone::WingPlaying => r(362.0, 132.0, 524.0, 186.0),
-            Zone::QmStrip => r(-262.0, 266.0, 262.0, 322.0),
+            Zone::QmStrip => r(-300.0, 266.0, 300.0, 322.0),
             Zone::QmCaption => r(200.0, -206.0, 524.0, -154.0),
             // The Quick Menu's panels and the FPS line over them, ending where its main panel ends: its tab row and badge stay VRChat's.
             // Clear of what VRChat has over its menu, down over its main panel's foot.

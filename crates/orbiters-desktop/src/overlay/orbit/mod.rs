@@ -859,6 +859,11 @@ impl Panels {
         }
     }
 
+    /// A 3D picture waits for VRChat's camera.
+    pub fn picture_waiting(&self) -> bool {
+        self.facts.picture_wait.is_some()
+    }
+
     /// The gallery's page paints again.
     fn gallery_dirty(&mut self) {
         if let Some(panel) = self.takeover.as_mut() {
@@ -1375,12 +1380,12 @@ impl Panels {
                     panels::RecentKind::Capture if self.worlds_here => {
                         self.local_asked.push(super::worlds::Relayed::ShowLocal { dir: recent.key.clone(), name: recent.title.clone(), changed: recent.modified });
                     }
-                    // Nothing shows around the person with no headset: the app's window does.
-                    panels::RecentKind::Capture => self.backend.show_window(),
                     // Its caption says why not.
                     panels::RecentKind::NoView => out.clicked = false,
-                    panels::RecentKind::Picture => {
+                    // Nothing shows around the person with no headset: seen here first, as a picture is, with the app's window as what is next.
+                    panels::RecentKind::Capture | panels::RecentKind::Picture => {
                         self.facts.opened = Some(n);
+                        self.recents.big = None;
                         self.recents.open_big(n);
                         self.gallery_dirty();
                     }
@@ -1885,7 +1890,7 @@ const THROW_SLOWS: f32 = 2.2;
 const BOUNCE_PULL: f32 = 150.0;
 const BOUNCE_DAMP: f32 = 21.0;
 /// The speed a list runs past its end at, at most; and what a notch of the wheel at its end gives it.
-const BOUNCE_SPEED: f32 = 2600.0;
+const BOUNCE_SPEED: f32 = 1500.0;
 const WHEEL_KICK: f32 = 420.0;
 
 /// The fastest a list can be thrown, in its units a second.
@@ -1950,8 +1955,9 @@ impl Drag {
 /// How far a list is shown for a place `wanted` past its ends: all of it within them, and beyond less and less, as on an
 /// iPhone or VRChat's own menus (Enzo: "a bouncing / elastic effect when reaching the limit").
 fn rubber_band(wanted: f32, max: f32) -> f32 {
+    // Enough to see that it gives, and never so much that the list seems to have gone.
     const FOLLOWS: f32 = 0.55;
-    const AT_MOST: f32 = 300.0;
+    const AT_MOST: f32 = 60.0;
     let band = |past: f32| (1.0 - 1.0 / (past * FOLLOWS / AT_MOST + 1.0)) * AT_MOST;
     if wanted < 0.0 {
         -band(-wanted)
@@ -2166,7 +2172,7 @@ mod tests {
         assert_eq!(rubber_band(500.0, 1000.0), 500.0);
         assert!(rubber_band(-40.0, 1000.0) < 0.0 && rubber_band(-40.0, 1000.0) > -40.0);
         assert!(rubber_band(1040.0, 1000.0) > 1000.0 && rubber_band(1040.0, 1000.0) < 1040.0);
-        assert!(rubber_band(-4000.0, 1000.0) > -300.0);
+        assert!(rubber_band(-4000.0, 1000.0) > -60.0);
         assert!(rubber_band(-400.0, 1000.0) < rubber_band(-200.0, 1000.0), "the further, the further");
         // A list that does not scroll gives too.
         assert!(rubber_band(-40.0, 0.0) < 0.0 && rubber_band(40.0, 0.0) > 0.0);
@@ -2188,10 +2194,10 @@ mod tests {
         // Thrown at its end, it runs past by something to see, and not by much, and comes to rest there.
         let (x, v, furthest) = run(900.0, 4000.0, 1000.0, true);
         assert_eq!((x, v), (1000.0, 0.0));
-        assert!(furthest > 1020.0 && furthest < 1200.0, "{furthest}");
+        assert!(furthest > 1015.0 && furthest < 1080.0, "{furthest}");
         let (x, _, furthest) = run(100.0, -4000.0, 1000.0, true);
         assert_eq!(x, 0.0);
-        assert!(furthest < -20.0 && furthest > -200.0, "{furthest}");
+        assert!(furthest < -15.0 && furthest > -80.0, "{furthest}");
         // Thrown with room, it slows and stops inside.
         let (x, v, furthest) = run(0.0, 900.0, 5000.0, true);
         assert_eq!(v, 0.0);
@@ -2261,7 +2267,7 @@ mod tests {
         let mut snap = Snapshot::new(Default::default());
         assert_eq!(away_words(&snap, &None), None, "nothing to say: nothing shows");
         snap.n4n0.photo_wait = Some(PhotoWait::Camera);
-        assert!(away_words(&snap, &None).unwrap().0.contains("Open VRChat's Stream Camera"));
+        assert!(away_words(&snap, &None).unwrap().0.contains("Stream Camera"));
         snap.n4n0.photo_wait = Some(PhotoWait::Move);
         assert!(away_words(&snap, &None).unwrap().0.contains("Move VRChat's camera"));
         // What stopped it goes before waiting; a countdown goes before anything.

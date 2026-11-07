@@ -177,7 +177,8 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         let cursor = cursor_at();
         let sheet_on_wheel = open == Some(Around::Wheel) && panels.sheet_open();
         pointer.follow(open == Some(Around::Wheel) && (alt_held() || sheet_on_wheel), origin, size, window, sheet_on_wheel);
-        panels.set_pointing(pointer.active() && !panels.sheet_open(), !snap.settings.reduce_motion);
+        // Over VRChat's wheel too while a 3D picture waits: VRChat's lit slice has nothing to do with it, and two things would look chosen.
+        panels.set_pointing((pointer.active() || panels.picture_waiting()) && !panels.sheet_open(), !snap.settings.reduce_motion);
         let at = pointer.at().unwrap_or(pos2(cursor.0 as f32, cursor.1 as f32));
         let on = (open != Some(Around::Wheel) || pointer.at().is_some()).then(|| hit(&panels, at - origin.to_vec2())).flatten();
         panels.hover(on);

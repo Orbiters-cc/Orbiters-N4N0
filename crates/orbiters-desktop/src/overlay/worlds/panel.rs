@@ -36,6 +36,8 @@ pub const HEIGHT: f32 = 576.0;
 /// Cards on a page of results (three across, two down), and on the typing page's single row.
 pub const PER_PAGE: usize = 6;
 pub const PER_ROW: usize = 3;
+/// How many popular worlds follow few captures, under their heading.
+pub const FEW_MORE: usize = 3;
 /// Characters the search holds.
 pub const QUERY_MAX: usize = 40;
 /// Comments on a page of Comments, pictures on a page of Pictures.
@@ -485,10 +487,49 @@ const OTHER: Rect = Rect { min: Pos2 { x: 860.0, y: 476.0 }, max: Pos2 { x: SIDE
 const TEASER: Rect = Rect { min: Pos2 { x: SIDE_LEFT, y: 516.0 }, max: Pos2 { x: SIDE_RIGHT, y: 552.0 } };
 
 /// Tile `i` of the `n` small tiles under what to do, spread across the whole width.
-fn small_tile(i: usize, n: usize) -> Rect {
+fn small_tile(i: usize, n: usize, vr: bool) -> Rect {
     let width = (SIDE_RIGHT - SIDE_LEFT - 6.0 * (n as f32 - 1.0)) / n as f32;
     let x = SIDE_LEFT + i as f32 * (width + 6.0);
-    Rect::from_min_max(pos2(x, 394.0), pos2(x + width, 434.0))
+    if vr {
+        Rect::from_min_max(pos2(x, 418.0), pos2(x + width, 470.0))
+    } else {
+        Rect::from_min_max(pos2(x, 394.0), pos2(x + width, 434.0))
+    }
+}
+
+/// A headset's side panel: fewer things, larger, as what is read at arm's length with a moving hand is not what is read on a screen. What a screen has more of waits a press away.
+const VR_SHOW: Rect = Rect { min: Pos2 { x: SIDE_LEFT, y: 292.0 }, max: Pos2 { x: 835.0, y: 350.0 } };
+const VR_SHOW_SMALL: Rect = Rect { min: Pos2 { x: 841.0, y: 292.0 }, max: Pos2 { x: SIDE_RIGHT, y: 350.0 } };
+const VR_SHOW_WHOLE: Rect = Rect { min: Pos2 { x: SIDE_LEFT, y: 292.0 }, max: Pos2 { x: SIDE_RIGHT, y: 350.0 } };
+const VR_GO: Rect = Rect { min: Pos2 { x: SIDE_LEFT, y: 358.0 }, max: Pos2 { x: 835.0, y: 410.0 } };
+const VR_WEB: Rect = Rect { min: Pos2 { x: 841.0, y: 358.0 }, max: Pos2 { x: SIDE_RIGHT, y: 410.0 } };
+const VR_WEB_WHOLE: Rect = Rect { min: Pos2 { x: SIDE_LEFT, y: 358.0 }, max: Pos2 { x: SIDE_RIGHT, y: 410.0 } };
+const VR_OTHER: Rect = Rect { min: Pos2 { x: 820.0, y: 522.0 }, max: Pos2 { x: SIDE_RIGHT, y: 556.0 } };
+
+/// Where a few captures and the worlds under their heading lie: at full width, or beside the side panel. `n` captures come first.
+fn few_rects(count: usize, n: usize, side: bool) -> (Vec<Option<Rect>>, f32) {
+    let mut out = Vec::with_capacity(count);
+    if side {
+        let rows = n.div_ceil(2) as f32;
+        let heading = 148.0 + rows * 136.0;
+        for i in 0..count {
+            let (slot, top) = if i < n { (i, 148.0) } else { (i - n, heading + 26.0) };
+            let (col, row) = ((slot % 2) as f32, (slot / 2) as f32);
+            let rect = Rect::from_min_size(pos2(32.0 + col * 316.0, top + row * 136.0), vec2(304.0, 124.0));
+            out.push((rect.bottom() <= 566.0).then_some(rect));
+        }
+        (out, heading)
+    } else {
+        let rows = n.div_ceil(PER_ROW) as f32;
+        let heading = 148.0 + rows * 200.0 - 4.0;
+        for i in 0..count {
+            let (slot, top) = if i < n { (i, 148.0) } else { (i - n, heading + 28.0) };
+            let (col, row) = ((slot % PER_ROW) as f32, (slot / PER_ROW) as f32);
+            let rect = Rect::from_min_size(pos2(32.0 + col * 328.0, top + row * 200.0), vec2(304.0, 188.0));
+            out.push((rect.bottom() <= 572.0).then_some(rect));
+        }
+        (out, heading)
+    }
 }
 
 /// Beside the side panel: the row of what is browsed gets narrower, and the field and its pages.
@@ -664,6 +705,12 @@ impl Panel {
             || self.note.as_ref().is_some_and(|(_, at)| time - at < NOTE_FOR + 0.1)
     }
 
+    /// How many captures lead the list when worlds without one follow them for lack of them.
+    fn few_leading(&self, d: &Data, results: &[&Entry]) -> Option<usize> {
+        let followed = !self.searching(d) && self.section == Section::Captures && !self.filtered() && results.iter().any(|e| !e.capture);
+        followed.then(|| results.iter().filter(|e| e.capture).count())
+    }
+
     /// Showing the captures, of which there are few.
     fn few_captures(&self, d: &Data) -> bool {
         !self.searching(d) && self.section == Section::Captures && !self.filtered() && self.results(d).len() <= 3
@@ -702,8 +749,20 @@ impl Panel {
             out.push((Target::ClearFilters, CLEAR));
         }
         let first = self.results_page.min(pages - 1) * PER_PAGE;
-        for (i, _) in results.iter().enumerate().skip(first).take(PER_PAGE) {
-            out.push((Target::Card(i), if side { side_card_rect(i - first) } else { card_rect(i - first) }));
+        if let Some(n) = self.few_leading(d, &results) {
+            let (rects, heading) = few_rects(results.len(), n, side);
+            for (i, rect) in rects.into_iter().enumerate() {
+                if let Some(rect) = rect {
+                    out.push((Target::Card(i), rect));
+                }
+            }
+            if !side {
+                out.push((Target::Section(Section::Popular), Rect::from_min_size(pos2(860.0, heading - 6.0), vec2(132.0, 34.0))));
+            }
+        } else {
+            for (i, _) in results.iter().enumerate().skip(first).take(PER_PAGE) {
+                out.push((Target::Card(i), if side { side_card_rect(i - first) } else { card_rect(i - first) }));
+            }
         }
         if !results.is_empty() && self.few_captures(d) {
             for (s, _, rect) in self.few_targets(side) {
@@ -744,31 +803,37 @@ impl Panel {
                 let Some(e) = self.entry(d) else { return out };
                 let status = d.status;
                 let current = status.current == Some(e.id) && (status.shown || status.stage.is_some());
+                let vr = status.headset;
                 if !e.capture {
-                    out.push((Target::Join, SHOW_WHOLE));
+                    out.push((Target::Join, if vr { VR_SHOW_WHOLE } else { SHOW_WHOLE }));
                 } else if !status.headset {
                     if !current {
                         out.push((Target::Show, SHOW_WHOLE));
                     }
                 } else if current {
                     // The other way to see it: the sheet's head, or N4N0's bar, hides it.
-                    out.push(if status.small { (Target::Show, SHOW_WHOLE) } else { (Target::ShowSmall, SHOW_WHOLE) });
+                    out.push(if status.small { (Target::Show, VR_SHOW_WHOLE) } else { (Target::ShowSmall, VR_SHOW_WHOLE) });
                     if status.small && status.small_taken {
                         out.push((Target::SmallBack, SMALL_BACK));
                     }
                 } else {
-                    out.push((Target::Show, SHOW));
-                    out.push((Target::ShowSmall, SHOW_SMALL));
+                    out.push((Target::Show, VR_SHOW));
+                    out.push((Target::ShowSmall, VR_SHOW_SMALL));
                 }
                 // Going there, from a capture as from any world; else its page on VRChat alone.
                 let web = super::finder::web_link(&e.world_id).is_some();
                 if e.capture {
-                    out.push((Target::Join, if web { GO } else { WEB_WHOLE }));
+                    out.push((Target::Join, match (web, vr) {
+                        (true, true) => VR_GO,
+                        (true, false) => GO,
+                        (false, true) => VR_WEB_WHOLE,
+                        (false, false) => WEB_WHOLE,
+                    }));
                     if web {
-                        out.push((Target::OpenWeb, WEB));
+                        out.push((Target::OpenWeb, if vr { VR_WEB } else { WEB }));
                     }
                 } else if web {
-                    out.push((Target::OpenWeb, WEB_WHOLE));
+                    out.push((Target::OpenWeb, if vr { VR_WEB_WHOLE } else { WEB_WHOLE }));
                 }
                 let mut tiles = vec![Target::Like, Target::Comments];
                 if d.facts_of(e).is_some_and(|f| f.picture_count > 0) || e.pictures > 0 {
@@ -777,11 +842,13 @@ impl Panel {
                 tiles.push(Target::Labels);
                 let n = tiles.len();
                 for (i, t) in tiles.into_iter().enumerate() {
-                    out.push((t, small_tile(i, n)));
+                    out.push((t, small_tile(i, n, vr)));
                 }
-                out.push((Target::Comments, TEASER));
+                if !vr {
+                    out.push((Target::Comments, TEASER));
+                }
                 if !d.others(e).is_empty() {
-                    out.push((Target::Other, OTHER));
+                    out.push((Target::Other, if vr { VR_OTHER } else { OTHER }));
                 }
             }
             Page::Filter | Page::Labels | Page::Comments | Page::Compose(_) | Page::Pictures => self.page_targets(d, &mut out),
@@ -1299,6 +1366,27 @@ impl Panel {
             p.circle_filled(CLEAR.center(), if pr { 18.0 } else { 20.0 }, if h { RAISED } else { SURFACE });
             widgets::icon(p, CLEAR.center(), icons::X, 18.0, theme::FG_2);
         }
+        // Worlds that follow few captures, under a heading of their own.
+        if let Some(n) = self.few_leading(d, &results) {
+            let (_, heading) = few_rects(results.len(), n, side);
+            let line = Rect::from_min_size(pos2(32.0, heading - 2.0), vec2(if side { 620.0 } else { 960.0 }, 1.5));
+            p.rect_filled(line, CornerRadius::ZERO, theme::white(0.12));
+            let name = Section::Popular.label(d.status.list.vrchat);
+            text(p, pos2(32.0, heading + 13.0), Align2::LEFT_CENTER, Txt::new(format!("{name} worlds"), 16.5).weight(weight::SEMIBOLD).color(theme::FG));
+            let wide = p.layout_job(Txt::new(format!("{name} worlds"), 16.5).weight(weight::SEMIBOLD).job(f32::INFINITY)).size().x;
+            text(p, pos2(32.0 + wide + 12.0, heading + 13.0), Align2::LEFT_CENTER, Txt::new("No 3D capture yet", 15.5).color(theme::FG_3));
+            if !side {
+                let (h, _) = state(Target::Section(Section::Popular));
+                text(p, pos2(992.0, heading + 11.0), Align2::RIGHT_CENTER, Txt::new("See them all \u{203a}", 15.5).weight(weight::SEMIBOLD).color(if h { theme::FG } else { theme::ACCENT }));
+                // Beside few captures, what there is to say of them.
+                if n % PER_ROW != 0 {
+                    let slot = card_rect(n);
+                    let x = slot.min.x + 8.0;
+                    text(p, pos2(x, slot.center().y - 14.0), Align2::LEFT_CENTER, Txt::new("Few worlds have one yet", 17.0).weight(weight::MEDIUM).color(theme::FG_2));
+                    text(p, pos2(x, slot.center().y + 12.0), Align2::LEFT_CENTER, Txt::new("Open one to walk in it", 15.5).color(theme::FG_3));
+                }
+            }
+        }
         // Few captures yet: the free space goes on to the worlds that are there.
         if !results.is_empty() && self.few_captures(d) {
             for (i, (s, glyph, rect)) in self.few_targets(side).into_iter().enumerate() {
@@ -1316,8 +1404,6 @@ impl Panel {
                 let appear = ease_out((time - self.page_at - slot as f64 * CARD_STAGGER) / PAGE_FADE);
                 let lift = (1.0 - appear) * 18.0;
                 let (h, pr) = state(*t);
-                // Among the captures for lack of them, and saying so.
-                let extra = !self.searching(d) && self.section == Section::Captures && !results[i].capture;
                 if side {
                     compact_card(p, *rect, results[i], d, h, pr, 1.0);
                     // The one whose details these are.
@@ -1326,11 +1412,6 @@ impl Panel {
                     }
                 } else {
                     card(p, rect.translate(vec2(0.0, lift)), results[i], d, h, pr, appear);
-                    if extra {
-                        let tag = Rect::from_min_size(rect.min + vec2(10.0, 10.0 + lift), vec2(84.0, 26.0));
-                        p.rect_filled(tag, CornerRadius::same(13), fade(theme::black(0.72), appear));
-                        text(p, tag.center(), Align2::CENTER_CENTER, Txt::new(Section::Popular.label(d.status.list.vrchat), 14.0).weight(weight::SEMIBOLD).color(fade(theme::FG, appear)));
-                    }
                 }
             }
         }
@@ -1466,7 +1547,8 @@ impl Panel {
         widgets::icon(p, tab.center(), icons::CARET_RIGHT, 20.0, theme::FG);
         // Its name, as long as it is; who made it.
         let (x, width) = (SIDE_LEFT, SIDE_RIGHT - SIDE_LEFT);
-        let mut title = Txt::new(entry.name.clone(), 21.0).weight(weight::SEMIBOLD).color(fade(theme::FG, rest)).job(width);
+        let vr = status.headset;
+        let mut title = Txt::new(entry.name.clone(), if vr { 24.0 } else { 21.0 }).weight(weight::SEMIBOLD).color(fade(theme::FG, rest)).job(width);
         title.wrap.max_rows = 2;
         let galley = p.layout_job(title);
         // Its last line just over who made it, however many it has.
@@ -1486,7 +1568,9 @@ impl Panel {
                 under.push(format!("last {}", orbiters_n4n0_core::feedback::ago(d.now.saturating_sub(last))));
             }
         }
-        text_cut(p, pos2(x, 266.0), width, Txt::new(under.join(" \u{b7} "), 16.0).color(fade(theme::FG_2, rest)));
+        // In a headset, who made it and no more.
+        let under = if vr { under.first().cloned().unwrap_or_default() } else { under.join(" \u{b7} ") };
+        text_cut(p, pos2(x, 266.0), width, Txt::new(under, if vr { 18.0 } else { 16.0 }).color(fade(theme::FG_2, rest)));
         // What it can be seen as, and the rest.
         let wf = d.world_feedback(entry);
         for (t, rect) in targets {
@@ -1509,16 +1593,16 @@ impl Panel {
                 Target::OpenWeb => icon_button(p, *rect, icons::ARROW_SQUARE_OUT, false, "Web page", RAISED, theme::FG, h, pr, rest),
                 Target::Like => {
                     let (bg, fg) = if wf.liked { (theme::alpha(theme::REC, 0.22), theme::REC) } else { (RAISED, theme::FG) };
-                    icon_button(p, *rect, icons::HEART, wf.liked, &short_count(wf.likes as u64), bg, fg, h, pr, rest * if wf.loading { 0.75 } else { 1.0 });
+                    icon_button(p, *rect, icons::HEART, wf.liked, &count_or_nothing(wf.likes as u64), bg, fg, h, pr, rest * if wf.loading { 0.75 } else { 1.0 });
                 }
-                Target::Comments if *rect != TEASER => icon_button(p, *rect, icons::CHAT_CIRCLE_TEXT, false, &wf.comment_count.to_string(), RAISED, theme::FG, h, pr, rest),
+                Target::Comments if *rect != TEASER => icon_button(p, *rect, icons::CHAT_CIRCLE_TEXT, false, &count_or_nothing(wf.comment_count as u64), RAISED, theme::FG, h, pr, rest),
                 Target::Pictures => {
                     let n = facts.map_or(entry.pictures as usize, |f| f.picture_count.max(entry.pictures as usize));
                     icon_button(p, *rect, icons::IMAGES, false, &short_count(n as u64), RAISED, theme::FG, h, pr, rest);
                 }
                 Target::Labels => {
                     let given = wf.top().len();
-                    icon_button(p, *rect, icons::TAG, false, &given.to_string(), RAISED, theme::FG, h, pr, rest);
+                    icon_button(p, *rect, icons::TAG, false, &count_or_nothing(given as u64), RAISED, theme::FG, h, pr, rest);
                 }
                 Target::Other => {
                     let n = d.others(entry).len();
@@ -1528,12 +1612,15 @@ impl Panel {
                 _ => {}
             }
         }
-        // As much of the world's description as fits.
+        // As much of the world's description as fits. In a headset, larger, and no more than that under it: its numbers are on the tiles over it.
         let description = if entry.description.trim().is_empty() { facts.and_then(|f| f.description.as_deref()).unwrap_or("") } else { entry.description.as_str() };
         if !description.trim().is_empty() {
-            let mut job = Txt::new(description.split_whitespace().collect::<Vec<_>>().join(" "), 15.5).color(fade(theme::FG_2, rest)).job(width);
+            let mut job = Txt::new(description.split_whitespace().collect::<Vec<_>>().join(" "), if vr { 17.5 } else { 15.5 }).color(fade(theme::FG_2, rest)).job(width);
             job.wrap.max_rows = 2;
-            p.galley(pos2(x, 441.0), p.layout_job(job), theme::FG_2);
+            p.galley(pos2(x, if vr { 477.0 } else { 441.0 }), p.layout_job(job), theme::FG_2);
+        }
+        if vr {
+            return;
         }
         // How smoothly VRChat runs there.
         if let Some(perf) = d.performance(entry) {
@@ -1563,6 +1650,15 @@ impl Panel {
 
 fn side_field_rect() -> Rect {
     Rect::from_min_max(pos2(100.0, 24.0), pos2(540.0, 80.0))
+}
+
+/// A number on a small tile, or nothing where it is nought: a row of noughts reads as a row of faults.
+fn count_or_nothing(n: u64) -> String {
+    if n == 0 {
+        String::new()
+    } else {
+        short_count(n)
+    }
 }
 
 fn field_rect() -> Rect {
@@ -1664,7 +1760,7 @@ fn icon_button(p: &Painter, rect: Rect, glyph: &str, filled: bool, label: &str, 
     p.rect_filled(rect, CornerRadius::same((rect.height() / 2.0) as u8), fade(bg, alpha));
     let txt = Txt::new(label, 18.0).weight(weight::SEMIBOLD).color(fade(fg, alpha));
     let galley = p.layout_job(txt.job_truncated((rect.width() - 52.0).max(10.0)));
-    let total = 30.0 + galley.size().x;
+    let total = if label.is_empty() { 22.0 } else { 30.0 + galley.size().x };
     let left = rect.center().x - total / 2.0;
     let at = pos2(left + 11.0, rect.center().y);
     if filled {
@@ -1690,7 +1786,7 @@ fn segment(p: &Painter, rect: Rect, label: &str, on: bool, hover: bool, pressed:
     let fg = if on { CARD } else { theme::FG_2 };
     let r = if pressed { rect.shrink(2.0) } else { rect.shrink(1.0) };
     p.rect_filled(r, CornerRadius::same((r.height() / 2.0) as u8), fade(bg, alpha));
-    text(p, r.center(), Align2::CENTER_CENTER, Txt::new(label, 16.0).weight(weight::MEDIUM).color(fade(fg, alpha)));
+    text(p, r.center(), Align2::CENTER_CENTER, Txt::new(label, 17.0).weight(weight::MEDIUM).color(fade(fg, alpha)));
 }
 
 /// A label as a chip: its name and how many gave it; lit when the member gave it.
@@ -1910,7 +2006,7 @@ fn compact_card(p: &Painter, rect: Rect, entry: &Entry, d: &Data, hover: bool, p
     name.wrap.max_rows = 2;
     p.galley(pos2(x, rect.min.y + 14.0), p.layout_job(name), theme::FG);
     if let Some(a) = d.author(entry) {
-        text_cut(p, pos2(x, rect.min.y + 62.0), width, Txt::new(a.to_string(), 15.0).color(fade(theme::FG_3, alpha)));
+        text_cut(p, pos2(x, rect.min.y + 62.0), width, Txt::new(a.to_string(), 16.0).color(fade(theme::FG_3, alpha)));
     }
     if status.current == Some(entry.id) {
         p.circle_filled(pos2(x + 6.0, rect.min.y + 88.0), 5.0, fade(if status.shown { theme::ACCENT } else { theme::WARN }, alpha));

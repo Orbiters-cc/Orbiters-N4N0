@@ -159,16 +159,17 @@ pub fn paint(p: &Painter, stage: Stage, seconds: f32) {
 }
 
 /// The small Hide under a view taken in a hand, so that it can go where it is, with no menu to reopen.
-pub const CHIP_PX: [u32; 2] = [224, 72];
-pub const CHIP_WIDTH_M: f32 = 0.11;
+pub const CHIP_PX: [u32; 2] = [280, 88];
+pub const CHIP_WIDTH_M: f32 = 0.115;
 
 /// [`HideChip`]'s picture.
 pub fn paint_chip(p: &Painter, pointed: bool) {
     let page = Rect::from_min_size(Pos2::ZERO, vec2(CHIP_PX[0] as f32, CHIP_PX[1] as f32)).shrink(2.0);
-    p.rect_filled(page, theme::radius(page.height() / 2.0), if pointed { theme::ACCENT } else { theme::alpha(theme::INK_900, 0.92) });
+    p.rect_filled(page, theme::radius(page.height() / 2.0), if pointed { theme::ACCENT } else { theme::INK_750 });
+    p.rect_stroke(page.shrink(1.0), theme::radius(page.height() / 2.0 - 1.0), egui::Stroke::new(2.5, if pointed { theme::ACCENT } else { Color32::from_white_alpha(120) }), egui::StrokeKind::Inside);
     let ink = if pointed { theme::ON_ACCENT } else { Color32::WHITE };
-    widgets::icon(p, page.left_center() + vec2(36.0, 0.0), icons::EYE_SLASH, 30.0, ink);
-    p.text(page.left_center() + vec2(62.0, 0.0), Align2::LEFT_CENTER, "Hide 3D", theme::font(28.0, weight::SEMIBOLD), ink);
+    widgets::icon(p, page.left_center() + vec2(46.0, 0.0), icons::EYE_SLASH, 38.0, ink);
+    p.text(page.left_center() + vec2(78.0, 0.0), Align2::LEFT_CENTER, "Hide 3D", theme::font(38.0, weight::BOLD), ink);
 }
 
 pub struct HideChip {
@@ -217,9 +218,12 @@ impl HideChip {
     }
 }
 
-/// Where a view's Hide lies, facing `eye`, and whether a laser (its origin and direction) or a hand's tip is on it.
-pub fn chip_place(at: V3, radius: f32, eye: V3) -> vr::Matrix34 {
-    facing(stereo::add(at, [0.0, -(radius * 0.62 + 0.05), 0.0]), eye)
+/// Where a view's Hide lies, facing `eye`: just past the plate's rim on the side towards who looks, and under it. `plate` is the plate's middle.
+pub fn chip_place(plate: V3, radius: f32, eye: V3) -> vr::Matrix34 {
+    let to = stereo::sub(eye, plate);
+    let level = stereo::length([to[0], 0.0, to[2]]).max(1e-3);
+    let towards = [to[0] / level, 0.0, to[2] / level];
+    facing(stereo::add(stereo::add(plate, stereo::scale(towards, radius * 1.02)), [0.0, -0.055, 0.0]), eye)
 }
 
 /// Whether a tool at `tip`, pointing along `along`, is on a chip at `place`: its ray within a generous margin, or itself close by.

@@ -431,7 +431,7 @@ pub(super) fn vr_shots(out: &Path, refs: &Path) -> anyhow::Result<()> {
             eye.save(out, &format!("vr-small-in-the-panel{names}"))?;
             // In a hand, with what says how to zoom it, and its Hide.
             let mut held = stereo::Small::new(&capture.view, &head, capture.small_reach());
-            held.anchor = [0.0, 1.4, -0.62];
+            held.anchor = [0.0, 1.45, -0.62];
             let mut eye = Eye::new(size, &ground, eyes);
             let (plate_at, plate_w) = held.plate(below);
             eye.quad(&Quad { transform: plate_at, width: plate_w, height: plate_w }, &plate_pixels, [plate_side; 2], 1.0);
@@ -449,7 +449,7 @@ pub(super) fn vr_shots(out: &Path, refs: &Path) -> anyhow::Result<()> {
             for _ in 0..2 {
                 canvas.paint(0.0, |p| small_hint::paint_chip(p, false));
             }
-            let chip = small_hint::chip_place(held.anchor, held.radius(), space::position(&head));
+            let chip = small_hint::chip_place(stereo::position(&plate_at), held.radius(), space::position(&head));
             eye.quad(&Quad { transform: chip, width: small_hint::CHIP_WIDTH_M, height: small_hint::CHIP_WIDTH_M * small_hint::CHIP_PX[1] as f32 / small_hint::CHIP_PX[0] as f32 }, canvas.pixels(), small_hint::CHIP_PX, 1.0);
             eye.save(out, &format!("vr-small-in-a-hand{names}"))?;
         }

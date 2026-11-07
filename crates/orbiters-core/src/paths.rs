@@ -25,7 +25,7 @@ static ROOTS: OnceLock<Roots> = OnceLock::new();
 
 /// Gives the app's own folders, once, before any path is asked for: every path here derives from them from then on.
 pub fn set_roots(roots: Roots) -> anyhow::Result<()> {
-    ROOTS.set(roots).map_err(|_| anyhow::anyhow!("the app's folders were given already"))
+    ROOTS.set(roots).map_err(|_| anyhow::anyhow!("the app's folders were given already")) // i18n: not shown (a mistake in the program's start-up; the screenshot tool, run by developers, is the only one that passes it on)
 }
 
 /// The folders the app gave, when it gave some.

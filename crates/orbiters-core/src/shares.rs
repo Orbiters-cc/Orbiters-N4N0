@@ -322,10 +322,11 @@ impl Api {
         }
     }
     pub fn share_capture(&self, token: &str, kind: Kind, id: u64, share: &Share) -> anyhow::Result<Shared> {
-        anyhow::ensure!(share.public || !share.recipients.is_empty(), "Choose someone to share with.");
+        anyhow::ensure!(share.public || !share.recipients.is_empty(), "{}", tr("Choose someone to share with."));
         anyhow::ensure!(
             share.recipients.len() <= 50 && share.message.chars().count() <= 280,
-            "Choose at most 50 people and a message of at most 280 characters."
+            "{}",
+            tr("Choose at most 50 people and a message of at most 280 characters.")
         );
         json(self.agent().post(&self.url(&format!("{}/share", path(kind, id)))).header("Authorization", &format!("Bearer {token}")).send_json(share)?)
     }

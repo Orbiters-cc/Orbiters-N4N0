@@ -293,7 +293,7 @@ pub struct LanBrowser {
 impl LanBrowser {
     /// Starts looking.
     pub fn start() -> anyhow::Result<Self> {
-        anyhow::ensure!(!crate::osc::no_network_listening(), "nothing listens on the network in this test run");
+        anyhow::ensure!(!crate::osc::no_network_listening(), "nothing listens on the network in this test run"); // i18n: not shown (only when ORBITERS_NO_NETWORK_LISTENING is set, which the agents' test runs do)
         let daemon = mdns_sd::ServiceDaemon::new()?;
         let events = daemon.browse(SERVICE)?;
         let found = Arc::<Mutex<Vec<FoundVrchat>>>::default();

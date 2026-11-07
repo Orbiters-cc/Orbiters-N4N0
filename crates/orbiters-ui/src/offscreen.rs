@@ -28,7 +28,7 @@ impl Offscreen {
             force_fallback_adapter: false,
             apply_limit_buckets: false,
         }))
-        .context("no GPU adapter")?;
+        .context("no GPU adapter")?; // i18n: not shown (only the screenshot tools, run by developers, draw off screen; their failure goes to a console)
         // Small allocator blocks and a small D3D12 view heap: the defaults reserve hundreds of MB up front.
         let limits = wgpu::Limits { max_texture_dimension_2d: 8192, max_non_sampler_bindings: 16_384, ..wgpu::Limits::default() };
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
@@ -37,7 +37,7 @@ impl Offscreen {
             memory_hints: wgpu::MemoryHints::MemoryUsage,
             ..Default::default()
         }))
-        .context("no GPU device")?;
+        .context("no GPU device")?; // i18n: not shown (only the screenshot tools, run by developers, draw off screen; their failure goes to a console)
         let format = wgpu::TextureFormat::Rgba8Unorm;
         let mut renderer = egui_wgpu::Renderer::new(&device, format, egui_wgpu::RendererOptions { msaa_samples: 1, dithering: true, ..Default::default() });
         crate::install_wgpu(&device, format, 1, &mut renderer.callback_resources);
@@ -133,8 +133,8 @@ impl Offscreen {
         self.queue.submit(commands);
         let slice = buffer.slice(..);
         slice.map_async(wgpu::MapMode::Read, |_| {});
-        self.device.poll(wgpu::PollType::wait_indefinitely()).context("GPU readback")?;
-        let mapped = slice.get_mapped_range().context("map readback")?;
+        self.device.poll(wgpu::PollType::wait_indefinitely()).context("GPU readback")?; // i18n: not shown (only the screenshot tools, run by developers, draw off screen; their failure goes to a console)
+        let mapped = slice.get_mapped_range().context("map readback")?; // i18n: not shown (only the screenshot tools, run by developers, draw off screen; their failure goes to a console)
         let mut rgba = Vec::with_capacity((w * h * 4) as usize);
         for y in 0..h as usize {
             let start = y * row as usize;

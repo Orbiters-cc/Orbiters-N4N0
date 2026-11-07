@@ -19,6 +19,12 @@ use orbiters_ui::{icons, widgets};
 use orbiters_core::settings::{MenuLook, OrbitLayout, OrbitSettings, VrMotion};
 use std::path::PathBuf;
 
+mod settings_sheet;
+use settings_sheet::{draw_settings, draw_stepper_name, hue_color, language_name, settings_items, settings_caption, sound_name};
+pub use settings_sheet::{hue_at, language_after};
+#[cfg(test)]
+use settings_sheet::hue_bar;
+
 /// Orbiters' colours, at a cool dark temperature that sits beside VRChat's teal without copying it.
 pub mod look {
     use egui::{Color32, CornerRadius, FontFamily, FontId};
@@ -218,6 +224,8 @@ pub enum Pick {
     Pictures(bool),
     /// The next sound device, or the one before.
     Sound(bool),
+    /// The next place in the language picker, or the one before.
+    Language(bool),
 }
 
 /// The colours to choose from at a press.
@@ -439,6 +447,8 @@ pub struct Facts {
     /// What the sheet of settings shows: as chosen, and the sound device for VR, by name.
     pub orbit: OrbitSettings,
     pub vr_output: Option<String>,
+    /// The place the language picker is at.
+    pub language_choice: Option<orbiters_i18n::Language>,
     /// What the Instances sheet lists, and what the last invite said.
     pub worlds_visited: Vec<WorldVisit>,
     pub invite_said: Option<String>,
@@ -527,6 +537,7 @@ pub enum Look {
     Choice { icon: &'static str, label: &'static str, on: bool },
     /// The sound device chosen for VR.
     SoundName,
+    LanguageName,
     /// A colour to choose, one of [`SWATCHES`], and the bar of all of them.
     Swatch(usize),
     HueBar,
@@ -636,80 +647,6 @@ pub fn items(zone: Zone, size: Vec2, facts: &Facts) -> Vec<Item> {
         }
         // The sheet's page, as its sheet says ([`sheet_items`]) or N4N0's own.
         Zone::Takeover => facts.sheet.map_or_else(Vec::new, |s| sheet_items(s, facts)),
-    }
-}
-
-/// Where a row of the sheet of settings starts, and where its controls do.
-fn settings_row(i: usize) -> f32 {
-    12.0 + i as f32 * 92.0
-}
-const SETTINGS_X: f32 = 276.0;
-const SETTINGS_HIGH: f32 = 58.0;
-
-/// The bar of colours.
-fn hue_bar() -> Rect {
-    r(SETTINGS_X + 8.0 * 60.0 + 12.0, settings_row(4) + 12.0, 1000.0 - (SETTINGS_X + 8.0 * 60.0 + 12.0), 42.0)
-}
-
-/// The colour on the bar at `x` on the page.
-pub fn hue_at(x: f32) -> [u8; 3] {
-    let bar = hue_bar();
-    hue_color(((x - bar.left()) / bar.width()).clamp(0.0, 1.0))
-}
-
-fn hue_color(t: f32) -> [u8; 3] {
-    egui::ecolor::Hsva::new(t, 0.8, 1.0, 1.0).to_srgb()
-}
-
-/// The sheet of settings, row by row.
-fn settings_items(facts: &Facts) -> Vec<Item> {
-    let mut out = Vec::new();
-    let mut two = |i: usize, first: (Pick, &'static str, &'static str, bool), second: (Pick, &'static str, &'static str, bool)| {
-        for (n, (pick, icon, label, on)) in [first, second].into_iter().enumerate() {
-            out.push(Item { action: Action::Set(pick), rect: r(SETTINGS_X + n as f32 * 318.0, settings_row(i) + 4.0, 306.0, SETTINGS_HIGH), look: Look::Choice { icon, label, on } });
-        }
-    };
-    let o = &facts.orbit;
-    let strip = o.layout == OrbitLayout::Strip;
-    two(0, (Pick::Layout(OrbitLayout::Wing), icons::SQUARES_FOUR, "Beside the menu", !strip), (Pick::Layout(OrbitLayout::Strip), icons::ARROW_DOWN, "Under the menu", strip));
-    let springy = o.vr_motion == VrMotion::Springy;
-    two(1, (Pick::Motion(VrMotion::Springy), icons::SPARKLE, "Springy", springy), (Pick::Motion(VrMotion::Matched), icons::HAND_GRABBING, "Rigid", !springy));
-    let retro = o.theme == MenuLook::Retro;
-    two(3, (Pick::Theme(MenuLook::Modern), icons::PALETTE, "Modern", !retro), (Pick::Theme(MenuLook::Retro), icons::MONITOR_PLAY, "Retro", retro));
-    if retro {
-        two(5, (Pick::Pictures(false), icons::IMAGE, "Fully monochrome", !o.retro_pictures), (Pick::Pictures(true), icons::IMAGES, "Pictures in colour", o.retro_pictures));
-    }
-    let y = settings_row(2) + 4.0;
-    out.push(Item { action: Action::Set(Pick::Sound(false)), rect: r(SETTINGS_X, y + 1.0, 56.0, 56.0), look: Look::Step(false) });
-    out.push(Item { action: Action::Idle, rect: r(SETTINGS_X + 64.0, y, 1000.0 - SETTINGS_X - 128.0, SETTINGS_HIGH), look: Look::SoundName });
-    out.push(Item { action: Action::Set(Pick::Sound(true)), rect: r(1000.0 - 56.0, y + 1.0, 56.0, 56.0), look: Look::Step(true) });
-    for i in 0..SWATCHES.len() {
-        out.push(Item { action: Action::Set(Pick::Swatch(i)), rect: r(SETTINGS_X + i as f32 * 60.0, settings_row(4) + 6.0, 54.0, 54.0), look: Look::Swatch(i) });
-    }
-    out.push(Item { action: Action::Set(Pick::Hue), rect: hue_bar(), look: Look::HueBar });
-    out
-}
-
-/// A row's name and what it is about, down the left of the sheet of settings.
-fn draw_settings(p: &Painter, facts: &Facts) {
-    let retro = facts.orbit.theme == MenuLook::Retro;
-    let mut rows = vec![
-        (0, "Layout", "Where the tiles lie on the Quick Menu"),
-        (1, "Tiles in VR", "How they follow your hand"),
-        (2, "Sound in VR", "The output Windows uses when SteamVR starts"),
-        (3, "Theme", "How these menus look"),
-        (4, "Colour", if retro { "The one colour of everything" } else { "The accent of every button" }),
-    ];
-    if retro {
-        rows.push((5, "Pictures", "Retro can leave them in colour"));
-    }
-    for (i, name, about) in rows {
-        let y = settings_row(i);
-        let font = look::font(20.0, weight::BOLD);
-        p.text(pos2(26.0, y + 15.0), Align2::LEFT_CENTER, name, font, look::LABEL);
-        let mut job = egui::text::LayoutJob::simple(about.to_string(), look::font(15.0, weight::MEDIUM), look::LABEL, SETTINGS_X - 40.0);
-        job.wrap.max_rows = 2;
-        p.galley(pos2(26.0, y + 28.0), p.layout_job(job), look::LABEL);
     }
 }
 
@@ -1394,7 +1331,12 @@ pub fn hit(items: &[Item], p: Pos2) -> Option<usize> {
 
 /// What the caption says of what is pointed at, in words for someone who has never seen any of this: a title and what it does.
 pub fn caption(action: Action, facts: &Facts) -> Option<(String, String)> {
+    if let Some(said) = settings_caption(action) {
+        return Some(said);
+    }
     let (a, b): (String, String) = match action {
+        // Said above.
+        Action::Settings => return None,
         Action::Worlds => ("Worlds in 3D".into(), "Search any world. Walk in those captured in 3D.".into()),
         Action::Picture(_) if facts.no_kit => ("This avatar has no capture kit".into(), "Add N4N0 to it in Orbiters, My Avatar, to take 3D pictures with it.".into()),
         Action::Picture(_) if facts.picture_wait.is_some() => (if facts.digits && facts.sheet.is_none() { "Press 6 to call it off" } else { "Press to call it off" }.into(), "Or open VRChat's camera: it then starts by itself.".into()),
@@ -1418,9 +1360,6 @@ pub fn caption(action: Action, facts: &Facts) -> Option<(String, String)> {
         Action::Mute => ("Mute".into(), "Your computer's sound, on or off.".into()),
         Action::Pictures => ("Pictures".into(), "Take a 3D picture, record a scene, see your captures.".into()),
         Action::All => ("All tools".into(), "Everything Orbiters can do from here.".into()),
-        Action::Settings => ("Settings".into(), "These menus' layout, colours and motion, and the sound in VR.".into()),
-        Action::Set(Pick::Hue) => ("Any colour".into(), "Press on the bar, or drag along it.".into()),
-        Action::Set(Pick::Sound(_)) => ("Sound in VR".into(), "The output Windows uses when SteamVR starts.".into()),
         Action::Record if facts.recording => ("Stop recording".into(), "Orbiters then turns it into a 3D scene.".into()),
         Action::Record => ("Record a 3D scene".into(), "Walk around with VRChat's camera; Orbiters makes a 3D scene of what it saw.".into()),
         Action::Page(Target::Instances) => ("Instances".into(), "Where you were lately. Go back with an invite.".into()),
@@ -2355,13 +2294,8 @@ fn draw(p: &Painter, zone: Zone, item: &Item, facts: &Facts, hovered: bool, pres
             widgets::icon(p, pos2(left + 12.0, rect.center().y), icon, 24.0, ink);
             p.text(pos2(left + 34.0, rect.center().y), Align2::LEFT_CENTER, label, font, ink);
         }
-        Look::SoundName => {
-            p.rect_filled(rect, look::radius(14.0), look::TILE);
-            widgets::icon(p, pos2(rect.left() + 30.0, rect.center().y), icons::SPEAKER_HIGH, 24.0, look::LABEL);
-            let font = look::font(19.0, weight::SEMIBOLD);
-            let name = facts.vr_output.as_deref().unwrap_or("Leave it as it is");
-            p.text(pos2(rect.left() + 56.0, rect.center().y), Align2::LEFT_CENTER, fit(p, name, &font, rect.width() - 70.0), font, look::LABEL);
-        }
+        Look::SoundName => draw_stepper_name(p, rect, icons::SPEAKER_HIGH, sound_name(facts)),
+        Look::LanguageName => draw_stepper_name(p, rect, icons::GLOBE, &language_name(facts)),
         Look::Swatch(i) => {
             COLOURS.with(|l| l.borrow_mut().push(rect));
             let [red, green, blue] = SWATCHES[i];

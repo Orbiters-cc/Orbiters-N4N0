@@ -4063,6 +4063,7 @@ version = "0.3.5-dev.13"
 dependencies = [
  "anyhow",
  "orbiters-core",
+ "orbiters-i18n",
  "orbiters-sound",
  "windows 0.62.2",
  "windows-core 0.62.2",
@@ -4078,6 +4079,7 @@ dependencies = [
  "bytes",
  "log",
  "orbiters-core",
+ "orbiters-i18n",
  "orbiters-sound",
  "rtc",
  "serde",
@@ -4096,6 +4098,7 @@ dependencies = [
  "orbiters-audio",
  "orbiters-contracts",
  "orbiters-core",
+ "orbiters-i18n",
  "orbiters-openvr",
  "orbiters-spout",
  "serde",
@@ -4125,6 +4128,7 @@ dependencies = [
  "mdns-sd",
  "memchr",
  "orbiters-contracts",
+ "orbiters-i18n",
  "ring",
  "rosc",
  "rusqlite",
@@ -4157,6 +4161,7 @@ dependencies = [
  "objc2-foundation 0.3.2",
  "orbiters-contracts",
  "orbiters-core",
+ "orbiters-i18n",
  "orbiters-n4n0",
  "orbiters-n4n0-core",
  "orbiters-openvr",
@@ -4188,12 +4193,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "orbiters-i18n"
+version = "0.3.5-dev.13"
+dependencies = [
+ "serde_json",
+]
+
+[[package]]
 name = "orbiters-n4n0"
 version = "0.3.5-dev.13"
 dependencies = [
  "anyhow",
  "orbiters-contracts",
  "orbiters-core",
+ "orbiters-i18n",
  "orbiters-n4n0-core",
  "rosc",
  "serde",
@@ -4208,6 +4221,7 @@ dependencies = [
  "anyhow",
  "orbiters-contracts",
  "orbiters-core",
+ "orbiters-i18n",
  "png",
  "rosc",
  "serde",
@@ -4236,6 +4250,7 @@ name = "orbiters-openvr"
 version = "0.3.5-dev.13"
 dependencies = [
  "orbiters-contracts",
+ "orbiters-i18n",
  "serde_json",
  "windows 0.62.2",
 ]
@@ -4256,6 +4271,7 @@ dependencies = [
  "objc2-core-graphics",
  "objc2-foundation 0.3.2",
  "orbiters-core",
+ "orbiters-i18n",
  "plist",
  "reqwest",
  "resvg",
@@ -4309,6 +4325,7 @@ dependencies = [
  "dirs 6.0.0",
  "eframe",
  "egui",
+ "orbiters-i18n",
  "orbiters-openvr",
  "orbiters-smooth",
  "orbiters-ui",
@@ -4327,6 +4344,7 @@ name = "orbiters-smooth"
 version = "0.3.5-dev.13"
 dependencies = [
  "anyhow",
+ "orbiters-i18n",
  "serde_json",
 ]
 
@@ -4344,6 +4362,7 @@ dependencies = [
  "anyhow",
  "block2 0.6.2",
  "objc2 0.6.5",
+ "orbiters-i18n",
  "windows 0.62.2",
 ]
 
@@ -4352,6 +4371,7 @@ name = "orbiters-spout"
 version = "0.3.5-dev.13"
 dependencies = [
  "orbiters-contracts",
+ "orbiters-i18n",
  "windows 0.62.2",
 ]
 
@@ -4364,6 +4384,7 @@ dependencies = [
  "egui",
  "egui-wgpu",
  "memmap2",
+ "orbiters-i18n",
  "png",
  "pollster 1.0.1",
  "rayon",
@@ -4379,6 +4400,7 @@ dependencies = [
  "anyhow",
  "base64 0.22.1",
  "dirs 6.0.0",
+ "orbiters-i18n",
  "ring",
  "semver",
  "serde",
@@ -4398,6 +4420,7 @@ dependencies = [
  "bzip2 0.4.4",
  "orbiters-audio",
  "orbiters-core",
+ "orbiters-i18n",
  "orbiters-n4n0-core",
  "serde",
  "serde_json",

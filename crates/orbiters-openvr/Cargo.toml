@@ -6,6 +6,7 @@ edition.workspace = true
 publish.workspace = true
 
 [dependencies]
+orbiters-i18n = { workspace = true }
 orbiters-contracts = { workspace = true }
 serde_json = { workspace = true }
 

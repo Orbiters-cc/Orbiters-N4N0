@@ -306,6 +306,7 @@ mod dolly;
 pub(crate) mod hide_self;
 pub use hide_self::{upload_can_hide, uploaded_avatar_name};
 mod lan;
+mod language;
 mod maps;
 pub(crate) mod menu_shares;
 mod n4n0;
@@ -422,6 +423,8 @@ impl Controller {
         world_captures::spawn(self.clone());
         world_feedback::spawn(self.clone());
         self.start_account();
+        crate::language::follow(&self.settings());
+        self.start_language();
         self.start_vrchat_login();
         self.start_n4n0();
         self.start_calls();
@@ -1429,6 +1432,9 @@ impl Controller {
         self.publish();
         if echo && previous.walk_boost.strength != settings.walk_boost.strength {
             self.n4n0.send_parameter(orbiters_contracts::n4n0::params::WALK_BOOST, rosc::OscType::Float(settings.walk_boost.strength));
+        }
+        if previous.language != settings.language {
+            crate::language::follow(&settings);
         }
         if previous.reconstruct_while_playing != settings.reconstruct_while_playing {
             // One running where the setting no longer has it pauses; those held while VRChat runs may start now.

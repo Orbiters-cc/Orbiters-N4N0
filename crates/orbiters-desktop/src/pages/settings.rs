@@ -118,6 +118,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
             let snap = cx.snap;
             let mut m = super::Masonry::new(ui, "settings");
             m.add(1, |ui| account(ui, cx, &mut state.confirm_sign_out));
+            m.add(13, |ui| apply |= super::language_card::card(ui, cx, 13, &mut draft));
             m.add(10, |ui| vrchat_account(ui, cx, &mut state.vrchat));
             // Only for an account the server says has it: nobody else sees a trace of it.
             if snap.bridge.allowed && orbiters_core::osc::VRCHAT_RUNS_HERE {

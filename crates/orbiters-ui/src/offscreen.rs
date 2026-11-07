@@ -82,6 +82,7 @@ impl Offscreen {
 
     fn paint(&mut self, ctx: &egui::Context, full: &egui::FullOutput, screen: egui::Rect) -> anyhow::Result<ColorImage> {
         let ppp = full.pixels_per_point;
+        crate::text_audit::record(&full.shapes);
         let jobs = ctx.tessellate(full.shapes.clone(), ppp);
         let (w, h) = ((screen.width() * ppp).round() as u32, (screen.height() * ppp).round() as u32);
         let desc = egui_wgpu::ScreenDescriptor { size_in_pixels: [w, h], pixels_per_point: ppp };
@@ -147,6 +148,7 @@ impl Offscreen {
 
 /// Writes an image as PNG.
 pub fn save_png(path: &std::path::Path, image: &ColorImage) -> anyhow::Result<()> {
+    crate::text_audit::end_scene(&path.file_stem().unwrap_or_default().to_string_lossy());
     let file = std::io::BufWriter::new(std::fs::File::create(path)?);
     let mut enc = png::Encoder::new(file, image.width() as u32, image.height() as u32);
     enc.set_color(png::ColorType::Rgba);

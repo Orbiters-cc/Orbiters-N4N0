@@ -615,12 +615,12 @@ struct Stage {
     retro: bool,
     /// What N4N0's pages on the sheet are drawn with: the accent chosen for these menus.
     skin: Skin,
-    skin_accent: [u8; 3],
+    skin_for: ([u8; 3], orbiters_i18n::Language),
 }
 
 /// N4N0's pages inside a sheet are drawn here, so what is chosen reaches them with nothing to update on the avatar's screen, which is another drawing altogether. Where a page has a colour of its own (a tile's tint, a danger's red), that stays.
 pub(crate) fn page_skin(accent: [u8; 3]) -> Skin {
-    let standard = Skin::english();
+    let standard = Skin::current();
     let mut colors = orbiters_n4n0_core::menu::theme::Theme::MODERN.colors;
     colors.accent = accent;
     Skin { palette: menu_ui::Palette::new(&colors), retro: standard.retro.clone(), strings: standard.strings.clone() }
@@ -639,6 +639,8 @@ mod page_skin_tests {
         assert_eq!(pink.retro, standard.retro);
         assert_eq!(pink.palette.card, standard.palette.card);
         assert_eq!(page_skin(DEFAULT_PAGE_ACCENT).palette.accent, standard.palette.accent, "as it was until one is chosen");
+        let french = orbiters_i18n::in_language(orbiters_i18n::Language::Fr, || page_skin([1, 2, 3]));
+        assert_eq!(french.strings.language(), "fr", "N4N0's pages speak the language chosen");
     }
 }
 
@@ -649,7 +651,7 @@ impl Stage {
         let canvas = Canvas::zoomed(px[0], px[1], px[0] as f32 / layout::WIDTH as f32).in_orbit_look();
         let host = MenuHost::new(canvas.ctx().clone());
         let worlds = with_worlds.then(|| Worlds::alone(canvas.ctx().clone()));
-        Self { canvas, host, worlds, px, retro: false, skin: page_skin(DEFAULT_PAGE_ACCENT), skin_accent: DEFAULT_PAGE_ACCENT }
+        Self { canvas, host, worlds, px, retro: false, skin: page_skin(DEFAULT_PAGE_ACCENT), skin_for: (DEFAULT_PAGE_ACCENT, orbiters_i18n::language()) }
     }
 }
 
@@ -676,7 +678,7 @@ pub struct Panels {
     audio_outputs: Vec<orbiters_core::settings::AudioEndpoint>,
     audio_outputs_coming: Option<mpsc::Receiver<Vec<orbiters_core::settings::AudioEndpoint>>>,
     /// What was last taken as how the parts look.
-    style_seen: Option<(orbiters_core::settings::OrbitSettings, Option<String>)>,
+    style_seen: Option<(orbiters_core::settings::OrbitSettings, Option<String>, Option<orbiters_i18n::Language>, orbiters_i18n::Language)>,
     /// A capture turning on the sheet, on the desktop: its view, its newest picture not painted yet, what it has been painted with, and the hand on it.
     sheet_view: Option<sheet_view::SheetView>,
     view_frame: Option<sheet_view::Frame>,
@@ -1087,7 +1089,8 @@ impl Panels {
             }
         }
         // What is chosen in Settings: from now on, all of it painted again. A colour held on the bar is what shows until it is let go.
-        let style = (snap.settings.orbit, snap.settings.vr_audio.output.as_ref().map(|e| e.name.clone()));
+        crate::language::follow(&snap.settings);
+        let style = (snap.settings.orbit, snap.settings.vr_audio.output.as_ref().map(|e| e.name.clone()), crate::language::chosen(&snap.settings), orbiters_i18n::language());
         if self.style_seen.as_ref() != Some(&style) && self.hue_held.is_none() {
             panels::set_style(&style.0);
             self.style_seen = Some(style);
@@ -1284,6 +1287,7 @@ impl Panels {
                 orbit
             },
             vr_output: snap.settings.vr_audio.output.as_ref().map(|e| e.name.clone()),
+            language_choice: crate::language::chosen(&snap.settings),
             // Only what is on the page: they change as it is made and as time goes, and there may be tens of thousands.
             recent_words: self
                 .takeover
@@ -1642,6 +1646,7 @@ impl Panels {
             panels::Pick::Swatch(i) => colour(panels::SWATCHES[i]),
             // Pressed and dragged: see `press`, `hover` and `release`.
             panels::Pick::Hue => return,
+            panels::Pick::Language(after) => crate::language::patch(panels::language_after(crate::language::chosen(&snap.settings), after)),
             panels::Pick::Sound(after) => {
                 let now = snap.settings.vr_audio.output.as_ref();
                 let at = now.and_then(|e| self.audio_outputs.iter().position(|o| o.id == e.id || o.name == e.name));
@@ -1823,7 +1828,7 @@ impl Panels {
             }
             Action::OpenApp => self.backend.show_window(),
             Action::Settings => {
-                self.open_sheet(Sheet::Settings, "Settings", snap);
+                self.open_sheet(Sheet::Settings, orbiters_i18n::tr("Settings"), snap);
                 // The sound devices there are, read off this thread: it is COM, and may take a moment.
                 let (tx, rx) = mpsc::channel();
                 self.audio_outputs_coming = Some(rx);
@@ -1931,8 +1936,9 @@ impl Panels {
             stage.retro = retro_now;
             stage.host.dirty = true;
         }
-        if chosen.accent != stage.skin_accent {
-            stage.skin_accent = chosen.accent;
+        let skin_for = (chosen.accent, orbiters_i18n::language());
+        if skin_for != stage.skin_for {
+            stage.skin_for = skin_for;
             stage.skin = page_skin(chosen.accent);
             stage.host.dirty = true;
         }

@@ -602,7 +602,7 @@ fn qm_scene(name: &str, out: &Path, client: Vec2, facts: &Facts, hover: Option<u
 fn settings_scenes(out: &Path, client: Vec2, idle: &Facts) -> anyhow::Result<()> {
     use orbiters_core::settings::{MenuLook, OrbitLayout, OrbitSettings};
     use panels::Sheet;
-    let sheet = |orbit: OrbitSettings, which: Sheet, title: &str| Facts { orbit, sheet: Some(which), sheet_title: title.into(), beside_wing: true, vr_output: Some("Speakers (Realtek Audio)".into()), ..idle.clone() };
+    let sheet = |orbit: OrbitSettings, which: Sheet, title: &str| Facts { orbit, sheet: Some(which), sheet_title: orbiters_i18n::tr(title).into(), beside_wing: true, vr_output: Some("Speakers (Realtek Audio)".into()), ..idle.clone() };
     let plain = OrbitSettings::default();
     qm_scene("orbit-settings", out, client, &sheet(plain, Sheet::Settings, "Settings"), None, Some(Sheet::Settings))?;
     let pink = OrbitSettings { accent: panels::SWATCHES[4], ..plain };
@@ -616,6 +616,7 @@ fn settings_scenes(out: &Path, client: Vec2, idle: &Facts) -> anyhow::Result<()>
     panels::set_style(&colour);
     qm_scene("orbit-retro-colour", out, client, &sheet(colour, Sheet::Pictures, "Pictures"), None, Some(Sheet::Pictures))?;
     panels::set_style(&mono);
+    qm_scene("orbit-settings-retro-language", out, client, &Facts { language_choice: Some(orbiters_i18n::Language::Ja), ..sheet(mono, Sheet::Settings, "Settings") }, None, Some(Sheet::Settings))?;
     qm_scene("orbit-retro-all", out, client, &sheet(mono, Sheet::All, "All tools"), None, Some(Sheet::All))?;
     let strip = OrbitSettings { layout: OrbitLayout::Strip, ..mono };
     qm_scene("orbit-retro-strip", out, client, &Facts { orbit: strip, strip_caption: true, vr_close: true, ..idle.clone() }, Some(0), None)?;

@@ -342,7 +342,7 @@ fn preferred_cjk(locale: Cjk) -> Cjk {
 
 /// The user's locale name ("ja-JP").
 #[cfg(windows)]
-fn user_locale() -> String {
+pub fn user_locale() -> String {
     #[link(name = "kernel32")]
     extern "system" {
         fn GetUserDefaultLocaleName(name: *mut u16, length: i32) -> i32;
@@ -383,7 +383,7 @@ pub fn user_locale() -> String {
 }
 
 #[cfg(all(not(windows), not(target_os = "macos")))]
-fn user_locale() -> String {
+pub fn user_locale() -> String {
     ["LC_ALL", "LC_CTYPE", "LANG"].iter().find_map(|v| std::env::var(v).ok().filter(|s| !s.is_empty())).unwrap_or_default()
 }
 
@@ -654,6 +654,70 @@ impl egui::FontProvider for SystemFallback {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every language of the website, in every family the interface writes with, with the fonts of this computer: each letter a real glyph of a real
+    /// font, on what the windows, the overlay canvases, the VR parts and the software painter all share ([`install`]). A letter no font has
+    /// would draw as a blank or a box, and silently: this compares it with what the fonts give for a character that does not exist.
+    #[cfg(windows)]
+    #[test]
+    fn every_language_of_the_website_draws_in_every_family() {
+        const SAMPLES: [(&str, &str); 5] = [
+            ("en", "AaZz09?!'\u{2026}"),
+            ("fr", "\u{e0}\u{e2}\u{e4}\u{e6}\u{e7}\u{e9}\u{e8}\u{ea}\u{eb}\u{ee}\u{ef}\u{f4}\u{f6}\u{153}\u{f9}\u{fb}\u{fc}\u{ff}\u{c0}\u{c7}\u{c9}\u{c8}\u{152}\u{ab}\u{bb}\u{2019}"),
+            ("es", "\u{e1}\u{e9}\u{ed}\u{f3}\u{fa}\u{fc}\u{f1}\u{c1}\u{c9}\u{cd}\u{d3}\u{da}\u{d1}\u{bf}\u{a1}"),
+            ("pt-BR", "\u{e1}\u{e2}\u{e3}\u{e0}\u{e7}\u{e9}\u{ea}\u{ed}\u{f3}\u{f4}\u{f5}\u{fa}\u{c3}\u{d5}\u{c7}"),
+            ("ja", "\u{3042}\u{3093}\u{30a2}\u{30f3}\u{30fc}\u{8a2d}\u{5b9a}\u{8a00}\u{8a9e}\u{5199}\u{771f}\u{4fdd}\u{5b58}\u{300c}\u{300d}\u{3001}\u{3002}\u{ff01}\u{ff1f}"),
+        ];
+        let ctx = egui::Context::default();
+        install(&ctx);
+        let raw = egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(800.0, 600.0))), ..Default::default() };
+        let draw = |text: &str, family: &FontFamily| {
+            let mut out = Vec::new();
+            let mut full = ctx.run_ui(raw.clone(), |ui| {
+                let galley = ui.painter().layout_no_wrap(text.to_string(), egui::FontId::new(16.0, family.clone()), egui::Color32::WHITE);
+                for row in &galley.rows {
+                    for glyph in &row.glyphs {
+                        out.push((glyph.chr, glyph.uv_rect));
+                    }
+                }
+            });
+            full.textures_delta.clear();
+            out
+        };
+        let mut missing = Vec::new();
+        for family in [family(400.0), family(500.0), family(600.0), family(700.0), FontFamily::Monospace] {
+            // What a character no font has draws as: the same place in the atlas as this one is the same box.
+            let nothing = draw("\u{10FFFD}", &family)[0].1;
+            let other = draw("\u{10FFFC}", &family)[0].1;
+            assert!(other.min == nothing.min && other.max == nothing.max, "this test can tell a missing letter");
+            for (language, letters) in SAMPLES {
+                // Twice: a system font comes in at the first letter it is asked for.
+                let _ = draw(letters, &family);
+                for (c, uv) in draw(letters, &family) {
+                    if uv.is_nothing() || (uv.min == nothing.min && uv.max == nothing.max) {
+                        missing.push(format!("{language} {c:?} in {family:?}"));
+                    }
+                }
+            }
+        }
+        assert!(missing.is_empty(), "{}", missing.join("\n"));
+    }
+
+    /// Japanese has its fonts on every Windows this runs on, without the optional Japanese fonts: Yu Gothic comes first, and it ships with Windows 10 and 11.
+    #[cfg(windows)]
+    #[test]
+    fn japanese_comes_from_a_font_windows_always_has() {
+        assert_eq!(table::JAPANESE[0][0].0, "YuGothM.ttc");
+        let dir = windows_fonts();
+        assert!(dir.join("YuGothM.ttc").is_file() && dir.join("YuGothB.ttc").is_file());
+        let face = SystemFallback { cjk: Cjk::Simplified };
+        PREFERRED.store(1 + Cjk::Japanese as u8, Ordering::Relaxed);
+        let found = face.face('\u{8a00}', 400).map(|f| f.0);
+        let bold = face.face('\u{8a00}', 700).map(|f| f.0);
+        PREFERRED.store(0, Ordering::Relaxed);
+        assert_eq!(found.as_deref(), Some("system:YuGothM.ttc#1"), "Japanese text on a computer in any language");
+        assert!(bold.as_deref().is_some_and(|b| b.starts_with("system:YuGothB")), "{bold:?}");
+    }
 
     #[test]
     fn letters_find_their_script() {

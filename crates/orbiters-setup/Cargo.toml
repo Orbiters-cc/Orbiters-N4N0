@@ -10,6 +10,7 @@ name = "orbiters-setup"
 path = "src/main.rs"
 
 [dependencies]
+orbiters-i18n = { workspace = true }
 orbiters-update = { workspace = true, features = ["payload"] }
 # SteamVR's start of the app (its application manifest), set while SteamVR runs.
 orbiters-openvr = { workspace = true }

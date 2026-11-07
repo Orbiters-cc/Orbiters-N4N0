@@ -195,6 +195,7 @@ impl App {
     pub fn draw(&mut self, ui: &mut Ui) {
         let ctx = ui.ctx().clone();
         let snap = self.ctl.view();
+        crate::language::follow(&snap.settings);
         // This process reads Orbiters too (the Map explorer's public pages): from the environment the service uses.
         if snap.settings.development != orbiters_update::development() {
             crate::controller::use_environment(snap.settings.development);

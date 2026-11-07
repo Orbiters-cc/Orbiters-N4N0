@@ -255,6 +255,7 @@ impl Canvas {
                 pass(ui.ctx(), ui.layer_id(), size);
             }
         });
+        orbiters_ui::text_audit::record(&full.shapes);
         self.pictures_now();
         self.painter.set_textures(&mut full.textures_delta);
         let primitives = self.ctx.tessellate(std::mem::take(&mut full.shapes), full.pixels_per_point);
@@ -276,6 +277,7 @@ impl Canvas {
                 pass(ui.ctx(), ui.layer_id(), size);
             }
         });
+        orbiters_ui::text_audit::record(&full.shapes);
         self.pictures_now();
         self.painter.set_textures(&mut full.textures_delta);
         let primitives = self.ctx.tessellate(std::mem::take(&mut full.shapes), full.pixels_per_point);

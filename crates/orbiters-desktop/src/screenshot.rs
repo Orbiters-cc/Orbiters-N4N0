@@ -178,6 +178,17 @@ fn sandbox_user_data() -> anyhow::Result<(PathBuf, Vec<PathBuf>)> {
     Ok((root, folders))
 }
 
+/// Writes where text no longer fits when the run ends, however it ends.
+struct TextReport(PathBuf);
+
+impl Drop for TextReport {
+    fn drop(&mut self) {
+        if let Err(e) = std::fs::write(&self.0, orbiters_ui::text_audit::report()) {
+            eprintln!("{}: {e}", self.0.display());
+        }
+    }
+}
+
 pub fn run(args: &[String]) -> anyhow::Result<()> {
     let (sandbox, picture_folders) = sandbox_user_data()?;
     eprintln!("screenshots: settings and caches in {}", sandbox.display());
@@ -199,6 +210,7 @@ fn shots(args: &[String], picture_folders: Vec<PathBuf>) -> anyhow::Result<()> {
     let mut width = 1280.0f32;
     let mut only: Option<String> = None;
     let mut frames = Frames::default();
+    let mut text_report = None;
     let mut it = args[1..].iter();
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -210,9 +222,21 @@ fn shots(args: &[String], picture_folders: Vec<PathBuf>) -> anyhow::Result<()> {
             "--width" => width = it.next().context("--width <points>")?.parse()?,
             "--extend" => frames.extend = it.next().context("--extend <frames>")?.parse()?,
             "--sequence" => frames.sequence = it.next().context("--sequence <frames>")?.parse()?,
+            // In any language, whatever is chosen; and where its text no longer fits.
+            "--language" => {
+                let tag = it.next().context("--language <en, ja, fr, es or pt-BR>")?;
+                let language = orbiters_i18n::normalize(tag).with_context(|| format!("{tag} is not a language of the website"))?;
+                orbiters_i18n::pin_language(language);
+                orbiters_ui::fonts::prefer_language(language.tag());
+            }
+            "--text-report" => {
+                text_report = Some(TextReport(PathBuf::from(it.next().context("--text-report <file>")?)));
+                orbiters_ui::text_audit::turn_on();
+            }
             other => anyhow::bail!("unknown option {other}"),
         }
     }
+    let _text_report = text_report;
     settings.consent_acknowledged = true;
     std::fs::create_dir_all(&out)?;
     if only.as_deref() == Some("e2e") {

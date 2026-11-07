@@ -327,6 +327,13 @@ impl Controller {
         Ok(())
     }
 
+    /// The API and credential when an account is saved; the outer `None` until the saved account was read at all.
+    pub(super) fn language_account(&self) -> Option<Option<(Api, String)>> {
+        let rt = self.account_runtime.lock().unwrap();
+        let (server, _) = rt.read?;
+        Some(rt.account.as_ref().map(|a| (Api::new(server), a.token.clone())))
+    }
+
     /// The API and credential for calls to Orbiters, when an account is saved (checked or not).
     pub fn account_api(&self) -> Option<(Api, String)> {
         let rt = self.account_runtime.lock().unwrap();

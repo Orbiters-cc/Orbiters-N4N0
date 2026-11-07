@@ -60,6 +60,10 @@ pub struct Settings {
     /// The floating Orbiters panel in the play space (the SteamVR tab's interface without SteamVR's dashboard, so
     /// VRChat keeps the controllers) and the watch on a wrist that opens N4N0's menu.
     pub floating: FloatingSettings,
+    /// The language: the last the account gave or the person picked (a website tag: `ja`, `pt-BR`); `None`, this computer's.
+    pub language: Option<String>,
+    /// That pick has yet to reach the account.
+    pub language_unsent: bool,
     /// How the Orbiters menu appears in VRChat: around VRChat's own menus, or one of the older ways.
     pub orbit: OrbitSettings,
     /// Experimental, VRC+: recordings also read VRChat's camera dolly's other streams (Spout `VRCSender2` to
@@ -668,6 +672,8 @@ impl Default for Settings {
             rig_views: RigViews::default(),
             coverage_overlay: CoverageOverlay::default(),
             floating: FloatingSettings::default(),
+            language: None,
+            language_unsent: false,
             orbit: OrbitSettings::default(),
             dolly_streams: false,
             photos_layout: GalleryLayout::default(),

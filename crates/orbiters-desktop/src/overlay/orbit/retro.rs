@@ -305,9 +305,9 @@ mod tests {
         let ctx = Context::default();
         let mut full = ctx.run_ui(Default::default(), |ui| {
             let font = egui::FontId::new(14.0, FontFamily::Monospace);
-            let galley = ui.painter().layout_no_wrap("straße é ちま a".to_string(), font, Color32::WHITE);
+            let galley = ui.painter().layout_no_wrap("straße é ç ã õ ñ ü œ ちま 設定 a".to_string(), font, Color32::WHITE);
             let text = TextShape::new(pos2(0.0, 0.0), galley, Color32::WHITE);
-            assert_eq!(capitals(ui.ctx(), text).galley.job.text, "STRAßE É ちま A");
+            assert_eq!(capitals(ui.ctx(), text).galley.job.text, "STRAßE É Ç Ã Õ Ñ Ü Œ ちま 設定 A", "accents stay on their capitals; Japanese has none, and is untouched");
             let font = egui::FontId::new(14.0, FontFamily::Proportional);
             let galley = ui.painter().layout_no_wrap("kept".to_string(), font, Color32::WHITE);
             let text = TextShape::new(pos2(0.0, 0.0), galley, Color32::WHITE);

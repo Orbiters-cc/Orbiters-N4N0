@@ -109,6 +109,9 @@ struct Setup {
 
 impl Setup {
     fn new(cc: &eframe::CreationContext<'_>, args: Args, payload: Option<&'static [u8]>, code: Arc<AtomicI32>) -> Self {
+        // Nobody is signed in here: this computer's language.
+        orbiters_i18n::set_language(orbiters_i18n::normalize(&orbiters_ui::fonts::user_locale()).unwrap_or(orbiters_i18n::Language::En));
+        orbiters_ui::fonts::prefer_language(orbiters_i18n::language().tag());
         orbiters_ui::install(&cc.egui_ctx);
         if let Some(rs) = &cc.wgpu_render_state {
             orbiters_ui::install_wgpu(&rs.device, rs.target_format, 1, &mut rs.renderer.write().callback_resources);

@@ -1,0 +1,1397 @@
+{
+ "orbit": {
+  "about": "The menus around VRChat's: wheel, wing, strip, All tools and their sheets",
+  "files": {
+   "crates/orbiters-desktop/src/overlay/orbit/desktop.rs": {
+    "strings": 12,
+    "words": 63,
+    "errors": 1
+   },
+   "crates/orbiters-desktop/src/overlay/orbit/mod.rs": {
+    "strings": 48,
+    "words": 163,
+    "errors": 0
+   },
+   "crates/orbiters-desktop/src/overlay/orbit/panels.rs": {
+    "strings": 258,
+    "words": 1106,
+    "errors": 0
+   },
+   "crates/orbiters-desktop/src/overlay/orbit/vr.rs": {
+    "strings": 1,
+    "words": 18,
+    "errors": 0
+   }
+  }
+ },
+ "overlay-worlds": {
+  "about": "Worlds in 3D: its side panel, pages and hints",
+  "files": {
+   "crates/orbiters-desktop/src/overlay/worlds/catalog.rs": {
+    "strings": 0,
+    "words": 0,
+    "errors": 4
+   },
+   "crates/orbiters-desktop/src/overlay/worlds/finder.rs": {
+    "strings": 7,
+    "words": 10,
+    "errors": 3
+   },
+   "crates/orbiters-desktop/src/overlay/worlds/interop.rs": {
+    "strings": 1,
+    "words": 3,
+    "errors": 18
+   },
+   "crates/orbiters-desktop/src/overlay/worlds/mod.rs": {
+    "strings": 23,
+    "words": 137,
+    "errors": 5
+   },
+   "crates/orbiters-desktop/src/overlay/worlds/panel.rs": {
+    "strings": 128,
+    "words": 441,
+    "errors": 0
+   },
+   "crates/orbiters-desktop/src/overlay/worlds/panel/bar.rs": {
+    "strings": 9,
+    "words": 17,
+    "errors": 0
+   },
+   "crates/orbiters-desktop/src/overlay/worlds/panel/pages.rs": {
+    "strings": 38,
+    "words": 146,
+    "errors": 0
+   },
+   "crates/orbiters-desktop/src/overlay/worlds/panel/shots.rs": {
+    "strings": 57,
+    "words": 210,
+    "errors": 0
+   },
+   "crates/orbiters-desktop/src/overlay/worlds/render.rs": {
+    "strings": 11,
+    "words": 27,
+    "errors": 6
+   },
+   "crates/orbiters-desktop/src/overlay/worlds/shots.rs": {
+    "strings": 0,
+    "words": 0,
+    "errors": 2
+   },
+   "crates/orbiters-desktop/src/overlay/worlds/small_hint.rs": {
+    "strings": 15,
+    "words": 53,
+    "errors": 4
+   },
+   "crates/orbiters-desktop/src/overlay/worlds/view.rs": {
+    "strings": 7,
+    "words": 32,
+    "errors": 0
+   }
+  }
+ },
+ "overlay-rest": {
+  "about": "The other overlays: VR panel, N4N0's menu pages, its keyboard",
+  "files": {
+   "crates/orbiters-desktop/src/overlay/actions.rs": {
+    "strings": 5,
+    "words": 30,
+    "errors": 0
+   },
+   "crates/orbiters-desktop/src/overlay/calibration.rs": {
+    "strings": 23,
+    "words": 91,
+    "errors": 0
+   },
+   "crates/orbiters-desktop/src/overlay/coverage.rs": {
+    "strings": 6,
+    "words": 16,
+    "errors": 1
+   },
+   "crates/orbiters-desktop/src/overlay/eye_picture.rs": {
+    "strings": 0,
+    "words": 0,
+    "errors": 1
+   },
+   "crates/orbiters-desktop/src/overlay/floating/laser.rs": {
+    "strings": 3,
+    "words": 11,
+    "errors": 1
+   },
+   "crates/orbiters-desktop/src/overlay/floating/panel.rs": {
+    "strings": 3,
+    "words": 8,
+    "errors": 1
+   },
+   "crates/orbiters-desktop/src/overlay/floating/watch.rs": {
+    "strings": 1,
+    "words": 2,
+    "errors": 1
+   },
+   "crates/orbiters-desktop/src/overlay/menu.rs": {
+    "strings": 1,
+    "words": 2,
+    "errors": 1
+   },
+   "crates/orbiters-desktop/src/overlay/menu_pages.rs": {
+    "strings": 79,
+    "words": 340,
+    "errors": 3
+   },
+   "crates/orbiters-desktop/src/overlay/mod.rs": {
+    "strings": 5,
+    "words": 13,
+    "errors": 3
+   },
+   "crates/orbiters-desktop/src/overlay/ui.rs": {
+    "strings": 85,
+    "words": 398,
+    "errors": 0
+   }
+  }
+ },
+ "n4n0": {
+  "about": "N4N0 itself: what its menu writes live, the assistant, its messages",
+  "files": {
+   "crates/orbiters-n4n0-core/src/assistant.rs": {
+    "strings": 3,
+    "words": 26,
+    "errors": 6
+   },
+   "crates/orbiters-n4n0-core/src/captures.rs": {
+    "strings": 15,
+    "words": 53,
+    "errors": 0
+   },
+   "crates/orbiters-n4n0-core/src/context.rs": {
+    "strings": 11,
+    "words": 129,
+    "errors": 0
+   },
+   "crates/orbiters-n4n0-core/src/controls.rs": {
+    "strings": 11,
+    "words": 23,
+    "errors": 6
+   },
+   "crates/orbiters-n4n0-core/src/drops.rs": {
+    "strings": 0,
+    "words": 0,
+    "errors": 2
+   },
+   "crates/orbiters-n4n0-core/src/feedback.rs": {
+    "strings": 10,
+    "words": 34,
+    "errors": 0
+   },
+   "crates/orbiters-n4n0-core/src/invites.rs": {
+    "strings": 3,
+    "words": 19,
+    "errors": 0
+   },
+   "crates/orbiters-n4n0-core/src/menu/layout.rs": {
+    "strings": 141,
+    "words": 522,
+    "errors": 0
+   },
+   "crates/orbiters-n4n0-core/src/menu/mod.rs": {
+    "strings": 46,
+    "words": 198,
+    "errors": 0
+   },
+   "crates/orbiters-n4n0-core/src/menu/theme.rs": {
+    "strings": 10,
+    "words": 67,
+    "errors": 7
+   },
+   "crates/orbiters-n4n0-core/src/menu/touch.rs": {
+    "strings": 3,
+    "words": 10,
+    "errors": 0
+   },
+   "crates/orbiters-n4n0-core/src/mirror.rs": {
+    "strings": 8,
+    "words": 55,
+    "errors": 0
+   },
+   "crates/orbiters-n4n0-core/src/picture.rs": {
+    "strings": 0,
+    "words": 0,
+    "errors": 8
+   },
+   "crates/orbiters-n4n0-core/src/policy.rs": {
+    "strings": 34,
+    "words": 257,
+    "errors": 0
+   },
+   "crates/orbiters-n4n0-core/src/qr.rs": {
+    "strings": 3,
+    "words": 32,
+    "errors": 7
+   },
+   "crates/orbiters-n4n0-core/src/states.rs": {
+    "strings": 6,
+    "words": 38,
+    "errors": 0
+   },
+   "crates/orbiters-n4n0-core/src/suggestions.rs": {
+    "strings": 0,
+    "words": 0,
+    "errors": 2
+   },
+   "crates/orbiters-n4n0-core/src/text.rs": {
+    "strings": 3,
+    "words": 3,
+    "errors": 0
+   },
+   "crates/orbiters-n4n0-core/src/tools.rs": {
+    "strings": 3,
+    "words": 12,
+    "errors": 2
+   },
+   "crates/orbiters-n4n0-core/src/videos.rs": {
+    "strings": 0,
+    "words": 0,
+    "errors": 1
+   },
+   "crates/orbiters-n4n0-core/src/youtube.rs": {
+    "strings": 1,
+    "words": 2,
+    "errors": 3
+   },
+   "crates/orbiters-n4n0/src/media.rs": {
+    "strings": 7,
+    "words": 9,
+    "errors": 0
+   },
+   "crates/orbiters-n4n0/src/menu_host.rs": {
+    "strings": 1,
+    "words": 6,
+    "errors": 0
+   },
+   "crates/orbiters-n4n0/src/platform.rs": {
+    "strings": 1,
+    "words": 4,
+    "errors": 5
+   },
+   "crates/orbiters-n4n0/src/pointer_log.rs": {
+    "strings": 6,
+    "words": 60,
+    "errors": 0
+   },
+   "crates/orbiters-n4n0/src/qr.rs": {
+    "strings": 3,
+    "words": 31,
+    "errors": 0
+   },
+   "crates/orbiters-n4n0/src/runtime.rs": {
+    "strings": 51,
+    "words": 327,
+    "errors": 7
+   },
+   "crates/orbiters-n4n0/src/screen.rs": {
+    "strings": 36,
+    "words": 264,
+    "errors": 1
+   },
+   "crates/orbiters-n4n0/src/states.rs": {
+    "strings": 12,
+    "words": 115,
+    "errors": 6
+   },
+   "crates/orbiters-n4n0/src/status.rs": {
+    "strings": 4,
+    "words": 32,
+    "errors": 0
+   },
+   "crates/orbiters-n4n0/src/tests.rs": {
+    "strings": 9,
+    "words": 50,
+    "errors": 1
+   },
+   "crates/orbiters-n4n0/src/voice.rs": {
+    "strings": 7,
+    "words": 48,
+    "errors": 0
+   }
+  }
+ },
+ "pages-settings": {
+  "about": "App window: Settings and what it opens",
+  "files": {
+   "crates/orbiters-desktop/src/pages/experimental.rs": {
+    "strings": 43,
+    "words": 311,
+    "errors": 0
+   },
+   "crates/orbiters-desktop/src/pages/form.rs": {
+    "strings": 1,
+    "words": 1,
+    "errors": 0
+   },
+   "crates/orbiters-desktop/src/pages/mic.rs": {
+    "strings": 7,
+    "words": 36,
+    "errors": 0
+   },
+   "crates/orbiters-desktop/src/pages/mod.rs": {
+    "strings": 12,
+    "words": 12,
+    "errors": 0
+   },
+   "crates/orbiters-desktop/src/pages/n4n0.rs": {
+    "strings": 189,
+    "words": 1279,
+    "errors": 0
+   },
+   "crates/orbiters-desktop/src/pages/network.rs": {
+    "strings": 38,
+    "words": 236,
+    "errors": 0
+   },
+   "crates/orbiters-desktop/src/pages/requests.rs": {
+    "strings": 31,
+    "words": 130,
+    "errors": 0
+   },
+   "crates/orbiters-desktop/src/pages/settings.rs": {
+    "strings": 223,
+    "words": 1662,
+    "errors": 0
+   },
+   "crates/orbiters-desktop/src/pages/storage.rs": {
+    "strings": 56,
+    "words": 281,
+    "errors": 0
+   },
+   "crates/orbiters-desktop/src/pages/vr_audio.rs": {
+    "strings": 19,
+    "words": 143,
+    "errors": 0
+   }
+  }
+ },
+ "pages-capture": {
+  "about": "App window: Home, Capture, Sessions, reconstruction",
+  "files": {
+   "crates/orbiters-desktop/src/pages/capture.rs": {
+    "strings": 113,
+    "words": 612,
+    "errors": 0
+   },
+   "crates/orbiters-desktop/src/pages/home.rs": {
+    "strings": 132,
+    "words": 600,
+    "errors": 0
+   },
+   "crates/orbiters-desktop/src/pages/reconstruct_again.rs": {
+    "strings": 24,
+    "words": 162,
+    "errors": 0
+   },
+   "crates/orbiters-desktop/src/pages/sessions.rs": {
+    "strings": 84,
+    "words": 350,
+    "errors": 0
+   },
+   "crates/orbiters-desktop/src/pages/splat_export.rs": {
+    "strings": 31,
+    "words": 217,
+    "errors": 0
+   },
+   "crates/orbiters-desktop/src/pages/splat_worker.rs": {
+    "strings": 4,
+    "words": 18,
+    "errors": 3
+   },
+   "crates/orbiters-desktop/src/pages/splats.rs": {
+    "strings": 44,
+    "words": 253,
+    "errors": 1
+   },
+   "crates/orbiters-desktop/src/pages/splats/edit3d.rs": {
+    "strings": 9,
+    "words": 33,
+    "errors": 0
+   },
+   "crates/orbiters-desktop/src/pages/splats/select.rs": {
+    "strings": 65,
+    "words": 451,
+    "errors": 2
+   }
+  }
+ },
+ "pages-gallery": {
+  "about": "App window: Gallery, Sharing, Community, Events",
+  "files": {
+   "crates/orbiters-desktop/src/pages/community.rs": {
+    "strings": 24,
+    "words": 40,
+    "errors": 1
+   },
+   "crates/orbiters-desktop/src/pages/community_talk.rs": {
+    "strings": 15,
+    "words": 70,
+    "errors": 0
+   },
+   "crates/orbiters-desktop/src/pages/events.rs": {
+    "strings": 126,
+    "words": 469,
+    "errors": 0
+   },
+   "crates/orbiters-desktop/src/pages/gallery.rs": {
+    "strings": 123,
+    "words": 549,
+    "errors": 1
+   },
+   "crates/orbiters-desktop/src/pages/gallery_assets.rs": {
+    "strings": 18,
+    "words": 40,
+    "errors": 0
+   },
+   "crates/orbiters-desktop/src/pages/gallery_folders.rs": {
+    "strings": 13,
+    "words": 76,
+    "errors": 0
+   },
+   "crates/orbiters-desktop/src/pages/gallery_layers.rs": {
+    "strings": 6,
+    "words": 23,
+    "errors": 0
+   },
+   "crates/orbiters-desktop/src/pages/gallery_layout.rs": {
+    "strings": 3,
+    "words": 35,
+    "errors": 0
+   },
+   "crates/orbiters-desktop/src/pages/gallery_select.rs": {
+    "strings": 20,
+    "words": 93,
+    "errors": 6
+   },
+   "crates/orbiters-desktop/src/pages/sharing.rs": {
+    "strings": 139,
+    "words": 749,
+    "errors": 1
+   }
+  }
+ },
+ "pages-editor": {
+  "about": "App window: the photo and 3D editor",
+  "files": {
+   "crates/orbiters-desktop/src/pages/editor/canvas.rs": {
+    "strings": 3,
+    "words": 11,
+    "errors": 0
+   },
+   "crates/orbiters-desktop/src/pages/editor/controls.rs": {
+    "strings": 106,
+    "words": 453,
+    "errors": 0
+   },
+   "crates/orbiters-desktop/src/pages/editor/crop.rs": {
+    "strings": 24,
+    "words": 97,
+    "errors": 0
+   },
+   "crates/orbiters-desktop/src/pages/editor/files.rs": {
+    "strings": 3,
+    "words": 5,
+    "errors": 4
+   },
+   "crates/orbiters-desktop/src/pages/editor/layers.rs": {
+    "strings": 41,
+    "words": 109,
+    "errors": 0
+   },
+   "crates/orbiters-desktop/src/pages/editor/looks.rs": {
+    "strings": 9,
+    "words": 37,
+    "errors": 1
+   },
+   "crates/orbiters-desktop/src/pages/editor/mod.rs": {
+    "strings": 27,
+    "words": 124,
+    "errors": 0
+   },
+   "crates/orbiters-desktop/src/pages/editor/preview.rs": {
+    "strings": 1,
+    "words": 3,
+    "errors": 0
+   }
+  }
+ },
+ "pages-projects": {
+  "about": "App window: Projects",
+  "files": {
+   "crates/orbiters-desktop/src/pages/projects/blend.rs": {
+    "strings": 6,
+    "words": 18,
+    "errors": 0
+   },
+   "crates/orbiters-desktop/src/pages/projects/builds.rs": {
+    "strings": 1,
+    "words": 9,
+    "errors": 0
+   },
+   "crates/orbiters-desktop/src/pages/projects/conflict.rs": {
+    "strings": 24,
+    "words": 110,
+    "errors": 0
+   },
+   "crates/orbiters-desktop/src/pages/projects/dialogs.rs": {
+    "strings": 101,
+    "words": 513,
+    "errors": 0
+   },
+   "crates/orbiters-desktop/src/pages/projects/duplicate.rs": {
+    "strings": 28,
+    "words": 190,
+    "errors": 0
+   },
+   "crates/orbiters-desktop/src/pages/projects/menus.rs": {
+    "strings": 30,
+    "words": 117,
+    "errors": 0
+   },
+   "crates/orbiters-desktop/src/pages/projects/missing_card.rs": {
+    "strings": 22,
+    "words": 106,
+    "errors": 0
+   },
+   "crates/orbiters-desktop/src/pages/projects/package_fixtures.rs": {
+    "strings": 19,
+    "words": 74,
+    "errors": 0
+   },
+   "crates/orbiters-desktop/src/pages/projects/packages_card.rs": {
+    "strings": 30,
+    "words": 131,
+    "errors": 0
+   },
+   "crates/orbiters-desktop/src/pages/projects/panel.rs": {
+    "strings": 74,
+    "words": 304,
+    "errors": 0
+   },
+   "crates/orbiters-desktop/src/pages/projects/preview.rs": {
+    "strings": 71,
+    "words": 561,
+    "errors": 0
+   },
+   "crates/orbiters-desktop/src/pages/projects/preview_gpu.rs": {
+    "strings": 39,
+    "words": 85,
+    "errors": 2
+   },
+   "crates/orbiters-desktop/src/pages/projects/repo_cards.rs": {
+    "strings": 61,
+    "words": 251,
+    "errors": 0
+   },
+   "crates/orbiters-desktop/src/pages/projects/state.rs": {
+    "strings": 72,
+    "words": 295,
+    "errors": 0
+   },
+   "crates/orbiters-desktop/src/pages/projects/storage_card.rs": {
+    "strings": 56,
+    "words": 601,
+    "errors": 0
+   },
+   "crates/orbiters-desktop/src/pages/projects/toolkit_update.rs": {
+    "strings": 5,
+    "words": 63,
+    "errors": 0
+   },
+   "crates/orbiters-desktop/src/pages/projects/ui.rs": {
+    "strings": 47,
+    "words": 218,
+    "errors": 0
+   },
+   "crates/orbiters-desktop/src/pages/projects/unity_session.rs": {
+    "strings": 23,
+    "words": 113,
+    "errors": 0
+   },
+   "crates/orbiters-desktop/src/pages/projects/vrchat_picture.rs": {
+    "strings": 5,
+    "words": 22,
+    "errors": 1
+   },
+   "crates/orbiters-desktop/src/pages/projects/world_card.rs": {
+    "strings": 40,
+    "words": 238,
+    "errors": 0
+   },
+   "crates/orbiters-projects/src/avatars.rs": {
+    "strings": 2,
+    "words": 2,
+    "errors": 0
+   },
+   "crates/orbiters-projects/src/blender.rs": {
+    "strings": 5,
+    "words": 19,
+    "errors": 2
+   },
+   "crates/orbiters-projects/src/coherent.rs": {
+    "strings": 8,
+    "words": 52,
+    "errors": 0
+   },
+   "crates/orbiters-projects/src/discovery.rs": {
+    "strings": 15,
+    "words": 40,
+    "errors": 0
+   },
+   "crates/orbiters-projects/src/editor.rs": {
+    "strings": 0,
+    "words": 0,
+    "errors": 7
+   },
+   "crates/orbiters-projects/src/lib.rs": {
+    "strings": 2,
+    "words": 7,
+    "errors": 14
+   },
+   "crates/orbiters-projects/src/missing.rs": {
+    "strings": 1,
+    "words": 5,
+    "errors": 2
+   },
+   "crates/orbiters-projects/src/preview.rs": {
+    "strings": 2,
+    "words": 7,
+    "errors": 19
+   },
+   "crates/orbiters-projects/src/scene/artifact.rs": {
+    "strings": 0,
+    "words": 0,
+    "errors": 2
+   },
+   "crates/orbiters-projects/src/scene/build.rs": {
+    "strings": 29,
+    "words": 99,
+    "errors": 17
+   },
+   "crates/orbiters-projects/src/scene/material.rs": {
+    "strings": 7,
+    "words": 12,
+    "errors": 0
+   },
+   "crates/orbiters-projects/src/scene/mesh_asset.rs": {
+    "strings": 0,
+    "words": 0,
+    "errors": 6
+   },
+   "crates/orbiters-projects/src/scene/mod.rs": {
+    "strings": 2,
+    "words": 6,
+    "errors": 1
+   },
+   "crates/orbiters-projects/src/scene/model.rs": {
+    "strings": 6,
+    "words": 14,
+    "errors": 5
+   },
+   "crates/orbiters-projects/src/scene/prefab.rs": {
+    "strings": 6,
+    "words": 21,
+    "errors": 12
+   },
+   "crates/orbiters-projects/src/scene/primitives.rs": {
+    "strings": 1,
+    "words": 1,
+    "errors": 0
+   },
+   "crates/orbiters-projects/src/scene/serialized.rs": {
+    "strings": 23,
+    "words": 34,
+    "errors": 21
+   },
+   "crates/orbiters-projects/src/scene/terrain.rs": {
+    "strings": 1,
+    "words": 1,
+    "errors": 7
+   },
+   "crates/orbiters-projects/src/scene/texture.rs": {
+    "strings": 0,
+    "words": 0,
+    "errors": 19
+   },
+   "crates/orbiters-projects/src/scene/world.rs": {
+    "strings": 2,
+    "words": 6,
+    "errors": 1
+   },
+   "crates/orbiters-projects/src/setup.rs": {
+    "strings": 0,
+    "words": 0,
+    "errors": 5
+   },
+   "crates/orbiters-projects/src/size.rs": {
+    "strings": 3,
+    "words": 3,
+    "errors": 2
+   },
+   "crates/orbiters-projects/src/storage.rs": {
+    "strings": 5,
+    "words": 33,
+    "errors": 19
+   },
+   "crates/orbiters-projects/src/templates.rs": {
+    "strings": 8,
+    "words": 19,
+    "errors": 21
+   },
+   "crates/orbiters-projects/src/updates.rs": {
+    "strings": 2,
+    "words": 23,
+    "errors": 2
+   },
+   "crates/orbiters-projects/src/vpm.rs": {
+    "strings": 0,
+    "words": 0,
+    "errors": 11
+   }
+  }
+ },
+ "pages-worlds": {
+  "about": "App window: Worlds, Videos, Saved looks and the rest of the pages",
+  "files": {
+   "crates/orbiters-desktop/src/pages/states.rs": {
+    "strings": 46,
+    "words": 253,
+    "errors": 0
+   },
+   "crates/orbiters-desktop/src/pages/videos.rs": {
+    "strings": 55,
+    "words": 203,
+    "errors": 0
+   },
+   "crates/orbiters-desktop/src/pages/worlds.rs": {
+    "strings": 87,
+    "words": 391,
+    "errors": 0
+   }
+  }
+ },
+ "controller": {
+  "about": "What the service reports to the windows: status, toasts, the tray",
+  "files": {
+   "crates/orbiters-desktop/src/app.rs": {
+    "strings": 34,
+    "words": 103,
+    "errors": 0
+   },
+   "crates/orbiters-desktop/src/audio_devices.rs": {
+    "strings": 0,
+    "words": 0,
+    "errors": 3
+   },
+   "crates/orbiters-desktop/src/backend.rs": {
+    "strings": 2,
+    "words": 12,
+    "errors": 1
+   },
+   "crates/orbiters-desktop/src/bridge/capture.rs": {
+    "strings": 14,
+    "words": 60,
+    "errors": 8
+   },
+   "crates/orbiters-desktop/src/bridge/clients.rs": {
+    "strings": 22,
+    "words": 131,
+    "errors": 3
+   },
+   "crates/orbiters-desktop/src/bridge/e2e.rs": {
+    "strings": 5,
+    "words": 12,
+    "errors": 0
+   },
+   "crates/orbiters-desktop/src/bridge/input.rs": {
+    "strings": 3,
+    "words": 6,
+    "errors": 4
+   },
+   "crates/orbiters-desktop/src/bridge/keeper.rs": {
+    "strings": 10,
+    "words": 106,
+    "errors": 0
+   },
+   "crates/orbiters-desktop/src/bridge/lab.rs": {
+    "strings": 19,
+    "words": 63,
+    "errors": 6
+   },
+   "crates/orbiters-desktop/src/bridge/mcp.rs": {
+    "strings": 26,
+    "words": 101,
+    "errors": 14
+   },
+   "crates/orbiters-desktop/src/bridge/mod.rs": {
+    "strings": 7,
+    "words": 36,
+    "errors": 4
+   },
+   "crates/orbiters-desktop/src/bridge/win.rs": {
+    "strings": 4,
+    "words": 29,
+    "errors": 12
+   },
+   "crates/orbiters-desktop/src/controller.rs": {
+    "strings": 33,
+    "words": 307,
+    "errors": 19
+   },
+   "crates/orbiters-desktop/src/controller/account.rs": {
+    "strings": 3,
+    "words": 23,
+    "errors": 3
+   },
+   "crates/orbiters-desktop/src/controller/around.rs": {
+    "strings": 2,
+    "words": 18,
+    "errors": 0
+   },
+   "crates/orbiters-desktop/src/controller/bridge_game.rs": {
+    "strings": 18,
+    "words": 140,
+    "errors": 6
+   },
+   "crates/orbiters-desktop/src/controller/burst.rs": {
+    "strings": 8,
+    "words": 106,
+    "errors": 2
+   },
+   "crates/orbiters-desktop/src/controller/calls.rs": {
+    "strings": 23,
+    "words": 118,
+    "errors": 3
+   },
+   "crates/orbiters-desktop/src/controller/cleanup.rs": {
+    "strings": 14,
+    "words": 58,
+    "errors": 3
+   },
+   "crates/orbiters-desktop/src/controller/hide_self.rs": {
+    "strings": 14,
+    "words": 291,
+    "errors": 0
+   },
+   "crates/orbiters-desktop/src/controller/lan.rs": {
+    "strings": 2,
+    "words": 6,
+    "errors": 0
+   },
+   "crates/orbiters-desktop/src/controller/maps.rs": {
+    "strings": 11,
+    "words": 50,
+    "errors": 10
+   },
+   "crates/orbiters-desktop/src/controller/menu_shares.rs": {
+    "strings": 4,
+    "words": 35,
+    "errors": 5
+   },
+   "crates/orbiters-desktop/src/controller/n4n0.rs": {
+    "strings": 3,
+    "words": 5,
+    "errors": 0
+   },
+   "crates/orbiters-desktop/src/controller/pause_tests.rs": {
+    "strings": 1,
+    "words": 6,
+    "errors": 0
+   },
+   "crates/orbiters-desktop/src/controller/scan.rs": {
+    "strings": 3,
+    "words": 17,
+    "errors": 2
+   },
+   "crates/orbiters-desktop/src/controller/shares.rs": {
+    "strings": 40,
+    "words": 317,
+    "errors": 22
+   },
+   "crates/orbiters-desktop/src/controller/update.rs": {
+    "strings": 8,
+    "words": 62,
+    "errors": 0
+   },
+   "crates/orbiters-desktop/src/controller/vr_audio.rs": {
+    "strings": 9,
+    "words": 57,
+    "errors": 0
+   },
+   "crates/orbiters-desktop/src/controller/vrchat_data.rs": {
+    "strings": 6,
+    "words": 47,
+    "errors": 17
+   },
+   "crates/orbiters-desktop/src/controller/vrchat_login.rs": {
+    "strings": 0,
+    "words": 0,
+    "errors": 3
+   },
+   "crates/orbiters-desktop/src/controller/world_captures.rs": {
+    "strings": 19,
+    "words": 161,
+    "errors": 1
+   },
+   "crates/orbiters-desktop/src/controller/world_feedback.rs": {
+    "strings": 3,
+    "words": 25,
+    "errors": 2
+   },
+   "crates/orbiters-desktop/src/coverage_window.rs": {
+    "strings": 1,
+    "words": 2,
+    "errors": 1
+   },
+   "crates/orbiters-desktop/src/device.rs": {
+    "strings": 4,
+    "words": 7,
+    "errors": 1
+   },
+   "crates/orbiters-desktop/src/drag_out.rs": {
+    "strings": 8,
+    "words": 29,
+    "errors": 4
+   },
+   "crates/orbiters-desktop/src/gpu.rs": {
+    "strings": 3,
+    "words": 8,
+    "errors": 1
+   },
+   "crates/orbiters-desktop/src/ipc.rs": {
+    "strings": 0,
+    "words": 0,
+    "errors": 3
+   },
+   "crates/orbiters-desktop/src/mac.rs": {
+    "strings": 6,
+    "words": 25,
+    "errors": 2
+   },
+   "crates/orbiters-desktop/src/mac_update.rs": {
+    "strings": 1,
+    "words": 23,
+    "errors": 9
+   },
+   "crates/orbiters-desktop/src/main.rs": {
+    "strings": 0,
+    "words": 0,
+    "errors": 1
+   },
+   "crates/orbiters-desktop/src/media.rs": {
+    "strings": 9,
+    "words": 187,
+    "errors": 2
+   },
+   "crates/orbiters-desktop/src/mixer_inbox.rs": {
+    "strings": 0,
+    "words": 0,
+    "errors": 3
+   },
+   "crates/orbiters-desktop/src/qr.rs": {
+    "strings": 2,
+    "words": 13,
+    "errors": 1
+   },
+   "crates/orbiters-desktop/src/reconstruct.rs": {
+    "strings": 0,
+    "words": 0,
+    "errors": 1
+   },
+   "crates/orbiters-desktop/src/service.rs": {
+    "strings": 3,
+    "words": 17,
+    "errors": 0
+   },
+   "crates/orbiters-desktop/src/splat_export.rs": {
+    "strings": 27,
+    "words": 256,
+    "errors": 3
+   },
+   "crates/orbiters-desktop/src/startup.rs": {
+    "strings": 1,
+    "words": 6,
+    "errors": 2
+   },
+   "crates/orbiters-desktop/src/state.rs": {
+    "strings": 14,
+    "words": 192,
+    "errors": 0
+   },
+   "crates/orbiters-desktop/src/streams.rs": {
+    "strings": 21,
+    "words": 62,
+    "errors": 0
+   },
+   "crates/orbiters-desktop/src/tracking.rs": {
+    "strings": 13,
+    "words": 98,
+    "errors": 1
+   },
+   "crates/orbiters-desktop/src/tray.rs": {
+    "strings": 5,
+    "words": 14,
+    "errors": 1
+   },
+   "crates/orbiters-desktop/src/upload_prep.rs": {
+    "strings": 0,
+    "words": 0,
+    "errors": 1
+   },
+   "crates/orbiters-desktop/src/views.rs": {
+    "strings": 0,
+    "words": 0,
+    "errors": 1
+   },
+   "crates/orbiters-desktop/src/words.rs": {
+    "strings": 5,
+    "words": 9,
+    "errors": 0
+   },
+   "crates/orbiters-desktop/src/worker.rs": {
+    "strings": 0,
+    "words": 0,
+    "errors": 1
+   },
+   "crates/orbiters-desktop/src/worlds.rs": {
+    "strings": 2,
+    "words": 6,
+    "errors": 0
+   }
+  }
+ },
+ "foundation-crates": {
+  "about": "Setup, shared widgets and the lower crates",
+  "files": {
+   "crates/orbiters-audio/src/lib.rs": {
+    "strings": 4,
+    "words": 8,
+    "errors": 6
+   },
+   "crates/orbiters-call/src/call.rs": {
+    "strings": 0,
+    "words": 0,
+    "errors": 3
+   },
+   "crates/orbiters-call/src/loopback.rs": {
+    "strings": 2,
+    "words": 8,
+    "errors": 2
+   },
+   "crates/orbiters-call/src/main.rs": {
+    "strings": 10,
+    "words": 86,
+    "errors": 0
+   },
+   "crates/orbiters-capture/src/audio.rs": {
+    "strings": 9,
+    "words": 49,
+    "errors": 8
+   },
+   "crates/orbiters-capture/src/coverage.rs": {
+    "strings": 11,
+    "words": 84,
+    "errors": 0
+   },
+   "crates/orbiters-capture/src/main.rs": {
+    "strings": 9,
+    "words": 33,
+    "errors": 7
+   },
+   "crates/orbiters-capture/src/session.rs": {
+    "strings": 24,
+    "words": 210,
+    "errors": 0
+   },
+   "crates/orbiters-capture/src/sources.rs": {
+    "strings": 11,
+    "words": 58,
+    "errors": 3
+   },
+   "crates/orbiters-capture/src/tracking.rs": {
+    "strings": 0,
+    "words": 0,
+    "errors": 1
+   },
+   "crates/orbiters-capture/src/verify.rs": {
+    "strings": 4,
+    "words": 16,
+    "errors": 0
+   },
+   "crates/orbiters-core/src/account.rs": {
+    "strings": 8,
+    "words": 55,
+    "errors": 6
+   },
+   "crates/orbiters-core/src/assets.rs": {
+    "strings": 9,
+    "words": 10,
+    "errors": 2
+   },
+   "crates/orbiters-core/src/bundle.rs": {
+    "strings": 0,
+    "words": 0,
+    "errors": 4
+   },
+   "crates/orbiters-core/src/cleanup.rs": {
+    "strings": 0,
+    "words": 0,
+    "errors": 3
+   },
+   "crates/orbiters-core/src/community.rs": {
+    "strings": 4,
+    "words": 28,
+    "errors": 1
+   },
+   "crates/orbiters-core/src/dpapi.rs": {
+    "strings": 1,
+    "words": 2,
+    "errors": 12
+   },
+   "crates/orbiters-core/src/gallery_talk.rs": {
+    "strings": 2,
+    "words": 4,
+    "errors": 0
+   },
+   "crates/orbiters-core/src/lan.rs": {
+    "strings": 2,
+    "words": 6,
+    "errors": 1
+   },
+   "crates/orbiters-core/src/lib.rs": {
+    "strings": 1,
+    "words": 1,
+    "errors": 0
+   },
+   "crates/orbiters-core/src/maps.rs": {
+    "strings": 0,
+    "words": 0,
+    "errors": 9
+   },
+   "crates/orbiters-core/src/osc.rs": {
+    "strings": 4,
+    "words": 30,
+    "errors": 11
+   },
+   "crates/orbiters-core/src/panic_log.rs": {
+    "strings": 1,
+    "words": 3,
+    "errors": 0
+   },
+   "crates/orbiters-core/src/paths.rs": {
+    "strings": 0,
+    "words": 0,
+    "errors": 1
+   },
+   "crates/orbiters-core/src/picture.rs": {
+    "strings": 4,
+    "words": 53,
+    "errors": 0
+   },
+   "crates/orbiters-core/src/settings.rs": {
+    "strings": 1,
+    "words": 6,
+    "errors": 0
+   },
+   "crates/orbiters-core/src/shares.rs": {
+    "strings": 2,
+    "words": 18,
+    "errors": 2
+   },
+   "crates/orbiters-core/src/video_history.rs": {
+    "strings": 3,
+    "words": 4,
+    "errors": 0
+   },
+   "crates/orbiters-core/src/visited.rs": {
+    "strings": 1,
+    "words": 1,
+    "errors": 0
+   },
+   "crates/orbiters-core/src/vrchat_accounts.rs": {
+    "strings": 5,
+    "words": 26,
+    "errors": 0
+   },
+   "crates/orbiters-core/src/vrchat_api.rs": {
+    "strings": 29,
+    "words": 157,
+    "errors": 0
+   },
+   "crates/orbiters-core/src/vrchat_log.rs": {
+    "strings": 1,
+    "words": 2,
+    "errors": 0
+   },
+   "crates/orbiters-core/src/vrchat_source.rs": {
+    "strings": 0,
+    "words": 0,
+    "errors": 2
+   },
+   "crates/orbiters-core/src/world_feedback.rs": {
+    "strings": 5,
+    "words": 22,
+    "errors": 0
+   },
+   "crates/orbiters-openvr/src/applications.rs": {
+    "strings": 2,
+    "words": 17,
+    "errors": 1
+   },
+   "crates/orbiters-openvr/src/gpu.rs": {
+    "strings": 4,
+    "words": 11,
+    "errors": 1
+   },
+   "crates/orbiters-openvr/src/lib.rs": {
+    "strings": 1,
+    "words": 2,
+    "errors": 1
+   },
+   "crates/orbiters-openvr/src/mirror.rs": {
+    "strings": 8,
+    "words": 22,
+    "errors": 1
+   },
+   "crates/orbiters-setup/build.rs": {
+    "strings": 2,
+    "words": 11,
+    "errors": 0
+   },
+   "crates/orbiters-setup/src/install.rs": {
+    "strings": 12,
+    "words": 34,
+    "errors": 15
+   },
+   "crates/orbiters-setup/src/main.rs": {
+    "strings": 6,
+    "words": 57,
+    "errors": 4
+   },
+   "crates/orbiters-setup/src/system.rs": {
+    "strings": 2,
+    "words": 15,
+    "errors": 4
+   },
+   "crates/orbiters-setup/src/ui.rs": {
+    "strings": 77,
+    "words": 374,
+    "errors": 3
+   },
+   "crates/orbiters-smooth/src/control.rs": {
+    "strings": 0,
+    "words": 0,
+    "errors": 5
+   },
+   "crates/orbiters-smooth/src/install.rs": {
+    "strings": 0,
+    "words": 0,
+    "errors": 17
+   },
+   "crates/orbiters-sound/src/coreaudio.rs": {
+    "strings": 15,
+    "words": 88,
+    "errors": 5
+   },
+   "crates/orbiters-sound/src/device.rs": {
+    "strings": 18,
+    "words": 142,
+    "errors": 1
+   },
+   "crates/orbiters-spout/src/win.rs": {
+    "strings": 4,
+    "words": 13,
+    "errors": 10
+   },
+   "crates/orbiters-ui/src/blur.rs": {
+    "strings": 11,
+    "words": 26,
+    "errors": 0
+   },
+   "crates/orbiters-ui/src/dialog.rs": {
+    "strings": 1,
+    "words": 1,
+    "errors": 0
+   },
+   "crates/orbiters-ui/src/feedback.rs": {
+    "strings": 2,
+    "words": 2,
+    "errors": 0
+   },
+   "crates/orbiters-ui/src/fonts.rs": {
+    "strings": 33,
+    "words": 59,
+    "errors": 0
+   },
+   "crates/orbiters-ui/src/format.rs": {
+    "strings": 16,
+    "words": 23,
+    "errors": 0
+   },
+   "crates/orbiters-ui/src/glow.rs": {
+    "strings": 6,
+    "words": 13,
+    "errors": 0
+   },
+   "crates/orbiters-ui/src/offscreen.rs": {
+    "strings": 5,
+    "words": 12,
+    "errors": 4
+   },
+   "crates/orbiters-ui/src/photo/edit.rs": {
+    "strings": 29,
+    "words": 113,
+    "errors": 0
+   },
+   "crates/orbiters-ui/src/photo/gpu.rs": {
+    "strings": 19,
+    "words": 50,
+    "errors": 4
+   },
+   "crates/orbiters-ui/src/photo/text.rs": {
+    "strings": 9,
+    "words": 11,
+    "errors": 0
+   },
+   "crates/orbiters-ui/src/record.rs": {
+    "strings": 1,
+    "words": 3,
+    "errors": 0
+   },
+   "crates/orbiters-ui/src/widgets.rs": {
+    "strings": 1,
+    "words": 1,
+    "errors": 0
+   },
+   "crates/orbiters-update/src/lib.rs": {
+    "strings": 2,
+    "words": 17,
+    "errors": 12
+   },
+   "crates/orbiters-update/src/net.rs": {
+    "strings": 0,
+    "words": 0,
+    "errors": 5
+   },
+   "crates/orbiters-update/src/payload.rs": {
+    "strings": 0,
+    "words": 0,
+    "errors": 14
+   },
+   "crates/orbiters-update/src/windows_start.rs": {
+    "strings": 0,
+    "words": 0,
+    "errors": 1
+   },
+   "crates/orbiters-voice/src/main.rs": {
+    "strings": 5,
+    "words": 48,
+    "errors": 19
+   }
+  }
+ }
+}

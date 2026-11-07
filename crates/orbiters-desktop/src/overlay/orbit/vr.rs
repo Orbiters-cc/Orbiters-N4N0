@@ -478,6 +478,11 @@ const CAMERA_LOST_AFTER: Duration = Duration::from_millis(800);
 const CAMERA_LOOKS_TO_SHOW: u32 = 2;
 
 impl OrbitVr {
+    /// What is up, for a note in the log when a turn took too long.
+    pub fn doing(&self) -> String {
+        format!("open {:?}, {}", self.panels.open_menu(), self.panels.doing())
+    }
+
     /// Why the tiles around VRChat's camera cannot show, for its switch in Settings.
     fn camera_note(&self, snap: &Snapshot) -> Option<String> {
         let settings = &snap.settings;

@@ -170,7 +170,9 @@ pub const SMALL_PLATE_RIM: f32 = 0.86;
 pub const SMALL_RADIUS_M: f32 = 0.26;
 /// How much further than that a hand can take hold of it; how far from its place in the panel it goes back there when let go.
 const SMALL_REACH_M: f32 = 0.15;
-const SMALL_DOCKS_WITHIN_M: f32 = 0.12;
+pub const SMALL_DOCKS_WITHIN_M: f32 = 0.12;
+/// How many of what it reaches a touchpad held all the way moves its middle a second.
+const SMALL_MOVES_REACHES_PER_S: f32 = 0.9;
 /// How much a full stick zooms a second, and how far a thumb's rest does nothing.
 const SMALL_ZOOM_PER_S: f32 = 1.4;
 const SMALL_STICK_REST: f32 = 0.25;
@@ -231,6 +233,36 @@ pub struct Small {
     pub near: bool,
     /// A stick zoomed it.
     pub zoomed: bool,
+    /// How far its middle was moved from the capture's start eye, along the capture's ground (X and Z), in the capture's metres.
+    moved: [f32; 2],
+}
+
+/// A menu standing in the room, as far as what is drawn over it goes: its place (its middle, Z towards who looks) and size in metres.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MenuBox {
+    pub place: Matrix34,
+    pub width: f32,
+    pub height: f32,
+}
+
+/// Whether a capture of `radius` at `anchor` shows over `menu`, seen from `eye`. SteamVR draws overlays over the game and by their order, not by how far they are, so what counts
+/// is where it shows, near or far. Enzo: a capture never goes in front of the menus.
+pub fn shows_over(eye: V3, anchor: V3, radius: f32, menu: &MenuBox) -> bool {
+    let (middle, normal) = (position(&menu.place), axis(&menu.place, 2));
+    let along = sub(anchor, eye);
+    let facing = dot(along, normal);
+    if facing.abs() < 1e-4 {
+        return false;
+    }
+    // Where the line from the eye through it meets the menu's plane, and how large it is there.
+    let t = dot(sub(middle, eye), normal) / facing;
+    if t <= 0.0 {
+        return false;
+    }
+    let on = sub(add(eye, scale(along, t)), middle);
+    let (x, y) = (dot(on, axis(&menu.place, 0)), dot(on, axis(&menu.place, 1)));
+    let seen = radius * t + 0.02;
+    x.abs() <= menu.width / 2.0 + seen && y.abs() <= menu.height / 2.0 + seen
 }
 
 /// The hand holding it, and it as that hand holds it.
@@ -273,7 +305,7 @@ impl Small {
         let tipped = mat_mul(&frame, &mat_mul(&[[1.0, 0.0, 0.0], [0.0, tc, -ts], [0.0, ts, tc]], &transposed(&frame)));
         let rotation = mat_mul(&tipped, &Placement::at(view, head).rotation);
         let anchor = add(add(position(head), scale(ahead, 0.55)), [0.0, -0.15, 0.0]);
-        Self { rotation, anchor, reach: reach.clamp(SMALL_REACHES.0, SMALL_REACHES.1), radius: SMALL_RADIUS_M, held: None, grips: [false; 2], taken: false, docked: false, settled: false, near: false, zoomed: false }
+        Self { rotation, anchor, reach: reach.clamp(SMALL_REACHES.0, SMALL_REACHES.1), moved: [0.0; 2], radius: SMALL_RADIUS_M, held: None, grips: [false; 2], taken: false, docked: false, settled: false, near: false, zoomed: false }
     }
 
     /// Already in its place in a panel, as when it first shows there.
@@ -307,7 +339,39 @@ impl Small {
     /// Where a capture whose middle is `middle` stands.
     pub fn placement(&self, middle: V3) -> Placement {
         let size = self.size();
+        let middle = self.middle(middle);
         Placement { rotation: self.rotation, offset: sub(self.anchor, scale(mat_vec(&self.rotation, middle), size)), size }
+    }
+
+    /// Where its middle is in the capture, from the capture's start eye.
+    pub fn middle(&self, eye: V3) -> V3 {
+        add(eye, [self.moved[0], 0.0, self.moved[1]])
+    }
+
+    /// How far its middle was moved.
+    pub fn moved_by(&self) -> f32 {
+        self.moved[0].hypot(self.moved[1])
+    }
+
+    /// One frame of the touchpad of the hand holding it: its middle goes the way the thumb pushes, as that hand points, along the capture's ground (Enzo: no up and down, for
+    /// now), at a pace that suits how much shows. No farther from the start than `limit`, where the capture ends.
+    pub fn move_middle(&mut self, hands: [Option<Matrix34>; 2], pads: [[f32; 2]; 2], seconds: f32, limit: f32) {
+        let Some(hold) = self.held else { return };
+        let Some(pose) = hands[hold.hand].as_ref() else { return };
+        let pad = pads[hold.hand];
+        if pad[0].hypot(pad[1]) <= SMALL_STICK_REST {
+            return;
+        }
+        let world = add(scale(axis(pose, 0), pad[0]), scale(axis(pose, 2), -pad[1]));
+        let inside = mat_vec(&transposed(&self.rotation), world);
+        let level = inside[0].hypot(inside[2]);
+        if level < 1e-3 {
+            return;
+        }
+        let pace = pad[0].hypot(pad[1]).min(1.0) * self.reach * SMALL_MOVES_REACHES_PER_S * seconds;
+        let to = [self.moved[0] + inside[0] / level * pace, self.moved[1] + inside[2] / level * pace];
+        let far = to[0].hypot(to[1]);
+        self.moved = if far > limit { [to[0] * limit / far, to[1] * limit / far] } else { to };
     }
 
     /// How far from its middle it shows the capture, in the capture's metres.
@@ -748,6 +812,49 @@ mod tests {
     fn small_for_hands() -> Small {
         let view = StartView { position: [0.0, 1.6, 0.0], target: [0.0, 1.6, -1.0], floor: None, eye_height: None };
         Small::new(&view, &head_at(0.0, 1.7, 0.0, 0.0), 6.0)
+    }
+
+    /// Enzo: a touchpad moves the middle of what shows, along the ground; only the hand holding it, and not past the capture.
+    #[test]
+    fn the_touchpad_of_the_hand_holding_it_moves_its_middle() {
+        let mut small = small_for_hands();
+        let eye = [0.0, 1.6, 0.0];
+        let start = small.placement(eye);
+        let hand = head_at(small.anchor[0] + 0.05, small.anchor[1], small.anchor[2], 0.0);
+        let hands = [None, Some(hand)];
+        let pads = [[0.0, 0.0], [0.0, 1.0]];
+        small.move_middle(hands, pads, 0.5, 100.0);
+        assert_eq!(small.moved_by(), 0.0, "nothing held, nothing moves");
+        small.step(hands, [false, true], [0.0; 2], 0.016, None);
+        assert!(small.held());
+        small.move_middle(hands, [[0.0, 1.0], [0.0, 0.0]], 0.5, 100.0);
+        assert_eq!(small.moved_by(), 0.0, "the other hand's touchpad does nothing");
+        small.move_middle(hands, [[0.0; 2], [0.02, 0.02]], 0.5, 100.0);
+        assert_eq!(small.moved_by(), 0.0, "a thumb resting");
+        small.move_middle(hands, pads, 0.5, 100.0);
+        assert!(small.moved_by() > 0.1);
+        let middle = small.middle(eye);
+        assert_eq!(middle[1], eye[1], "no up and down");
+        // What it shows is still at its anchor, whatever moved under it: the middle moved is what stands there now.
+        let placed = small.placement(eye).apply(middle);
+        assert!(length(sub(placed, small.anchor)) < 1e-3, "{placed:?} {:?}", small.anchor);
+        assert_ne!(small.placement(eye).offset, start.offset);
+        small.move_middle(hands, pads, 100.0, 1.5);
+        assert!((small.moved_by() - 1.5).abs() < 1e-3, "stops where the capture ends");
+    }
+
+    /// Enzo: "it's better that the 3D captures never go in front of the menus".
+    #[test]
+    fn a_capture_shows_over_a_menu_if_it_lies_across_it_near_or_far() {
+        let menu = MenuBox { place: Matrix34 { m: [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 1.5], [0.0, 0.0, 1.0, -1.0]] }, width: 0.6, height: 0.4 };
+        let eye = [0.0, 1.5, 0.0];
+        assert!(shows_over(eye, [0.0, 1.5, -0.5], 0.1, &menu), "between the eye and it");
+        assert!(shows_over(eye, [0.0, 1.5, -1.5], 0.1, &menu), "behind it, where overlays still draw over each other");
+        assert!(!shows_over(eye, [1.0, 1.5, -0.5], 0.1, &menu), "well to the side");
+        assert!(!shows_over(eye, [0.0, 1.5, 1.0], 0.1, &menu), "behind who looks");
+        // Its edge counts, and closer it covers more.
+        assert!(shows_over(eye, [0.2, 1.5, -0.5], 0.08, &menu));
+        assert!(!shows_over(eye, [0.3, 1.5, -1.0], 0.0, &MenuBox { width: 0.2, ..menu }));
     }
 
     #[test]

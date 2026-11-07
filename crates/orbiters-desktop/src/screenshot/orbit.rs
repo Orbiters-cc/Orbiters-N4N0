@@ -469,7 +469,7 @@ pub(super) fn vr_shots(out: &Path, refs: &Path) -> anyhow::Result<()> {
             for _ in 0..2 {
                 canvas.paint(0.0, |p| small_hint::paint_chip(p, false));
             }
-            let chip = small_hint::chip_place(stereo::position(&plate_at), held.radius(), space::position(&head));
+            let chip = small_hint::chip_place(held.anchor, held.radius(), space::position(&head), true);
             eye.quad(&Quad { transform: chip, width: small_hint::CHIP_WIDTH_M, height: small_hint::CHIP_WIDTH_M * small_hint::CHIP_PX[1] as f32 / small_hint::CHIP_PX[0] as f32 }, canvas.pixels(), small_hint::CHIP_PX, 1.0);
             eye.save(out, &format!("vr-small-in-a-hand{names}"))?;
         }
@@ -514,7 +514,7 @@ pub(super) fn shots(out: &Path) -> anyhow::Result<()> {
     wheel_scene("orbit-wheel-empty", out, hd, &Facts { hint, ..empty.clone() }, None, None, false)?;
     wheel_scene("orbit-wheel-busy", out, hd, &busy, None, Some(bloom), true)?;
     wheel_scene("orbit-wheel-countdown", out, hd, &counting, None, Some(bloom), true)?;
-    wheel_scene("orbit-wheel-point-worlds", out, hd, &pointing(Action::Worlds), Some((Zone::WheelWorlds, 0)), None, true)?;
+    wheel_scene("orbit-wheel-point-worlds", out, hd, &Facts { key_caps: true, ..pointing(Action::Worlds) }, Some((Zone::WheelWorlds, 0)), None, true)?;
     wheel_scene("orbit-wheel-point-pictures", out, hd, &pointing(Action::Pictures), Some((Zone::WheelPictures, 0)), Some(bloom), true)?;
     wheel_scene("orbit-wheel-point-people", out, hd, &pointing(Action::Picture(PhotoMode::People)), Some((Zone::BloomPeople, 0)), Some(bloom), true)?;
     wheel_scene("orbit-wheel-point-playing", out, hd, &pointing(Action::PlayPause), Some((Zone::WheelPlaying, 0)), Some(playing), true)?;
@@ -585,6 +585,10 @@ fn qm_scene(name: &str, out: &Path, client: Vec2, facts: &Facts, hover: Option<u
         blit(&mut image, w, &pixels, px, placed.rect.min);
     }
     if let Some(sheet) = sheet {
+        if let Some(peek) = zones::place(Zone::SheetPeek, client) {
+            let (pixels, px) = picture(&peek, facts, None, None);
+            blit(&mut image, w, &pixels, px, peek.rect.min);
+        }
         let back = zones::place(Zone::SheetBack, client).expect("it fits");
         let (pixels, px) = picture(&back, facts, None, None);
         blit(&mut image, w, &pixels, px, back.rect.min);

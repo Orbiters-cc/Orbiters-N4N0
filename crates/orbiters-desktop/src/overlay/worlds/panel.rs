@@ -445,6 +445,12 @@ pub struct Panel {
     pub page: Page,
     pub query: String,
     pub results_page: usize,
+    /// How far down a headset's endless list of worlds is, the hand on it, how fast it was thrown, and how far it can go now.
+    vr_scroll: f32,
+    vr_hold: Option<VrHold>,
+    vr_throw: f32,
+    vr_throw_at: f64,
+    vr_most: std::cell::Cell<f32>,
     pub hover: Option<Target>,
     pub pressed: Option<Target>,
     /// The capture whose page shows (its listing id).
@@ -555,17 +561,35 @@ const VR_WEB_HALF: Rect = Rect { min: Pos2 { x: 736.0, y: 372.0 }, max: Pos2 { x
 const VR_OTHER: Rect = Rect { min: Pos2 { x: VR_LEFT, y: 512.0 }, max: Pos2 { x: SIDE_RIGHT, y: 556.0 } };
 /// The list's one head: where it is, and through it search and the filters.
 const VR_LIST_RIGHT: f32 = 440.0;
-const VR_PREVIOUS: Pos2 = Pos2 { x: 356.0, y: 54.0 };
-const VR_NEXT: Pos2 = Pos2 { x: 412.0, y: 54.0 };
 
 fn vr_list_head(pages: usize) -> Rect {
     Rect::from_min_max(pos2(24.0, 24.0), pos2(if pages > 1 { 322.0 } else { VR_LIST_RIGHT }, 84.0))
 }
 
-/// A result's place in a headset: two columns of three.
-fn vr_card_rect(slot: usize) -> Rect {
-    let (col, row) = ((slot % 2) as f32, (slot / 2) as f32);
-    Rect::from_min_size(pos2(24.0 + col * 212.0, 96.0 + row * 156.0), vec2(204.0, 148.0))
+/// A result's place on a headset's list, before it is scrolled: two columns, as far down as there are worlds.
+fn vr_card_rect(i: usize) -> Rect {
+    let (col, row) = ((i % 2) as f32, (i / 2) as f32);
+    Rect::from_min_size(pos2(24.0 + col * 212.0, VR_LIST_TOP + 4.0 + row * VR_ROW), vec2(204.0, 148.0))
+}
+
+const VR_LIST_TOP: f32 = 92.0;
+const VR_LIST_BOTTOM: f32 = 564.0;
+const VR_ROW: f32 = 156.0;
+/// How far a hand goes before a press on the list is a drag of it: a little more than a hand's tremble at a laser's length.
+const VR_DRAG_FROM: f32 = 14.0;
+/// How much of its speed a thrown list keeps after a second, and below what speed it stops.
+const VR_THROW_KEEPS: f64 = 0.04;
+const VR_THROW_STOPS: f32 = 24.0;
+
+/// A hand on a headset's list: where it pressed, what it pressed, and where it was last.
+#[derive(Clone, Copy, Debug)]
+struct VrHold {
+    from: f32,
+    scroll: f32,
+    target: Option<Target>,
+    dragged: bool,
+    last: (f32, f64),
+    speed: f32,
 }
 
 /// One of them: its picture, what it is, and its name as large as the head's.
@@ -750,6 +774,88 @@ impl Panel {
     }
 
     /// Pages of `n` results: one more while the list has more to read (its next page is read once there).
+    /// A headset's list goes on as far as there are worlds, with no pages: Enzo, "infinite scroll creates less friction".
+    pub fn vr_list_on(&self, status: &Status) -> bool {
+        self.page == Page::Detail && status.headset
+    }
+
+    pub fn vr_list_holds(x: f32, y: f32) -> bool {
+        (24.0..VR_LIST_RIGHT + 8.0).contains(&x) && (VR_LIST_TOP..VR_LIST_BOTTOM).contains(&y)
+    }
+
+    /// Back to the start of a list: another section, another search.
+    fn to_the_top(&mut self) {
+        self.results_page = 0;
+        self.vr_scroll = 0.0;
+        self.vr_throw = 0.0;
+    }
+
+    fn vr_scroll_to(&mut self, to: f32) {
+        self.vr_scroll = to.clamp(0.0, self.vr_most.get());
+        // What is near the end asks for what follows it, as a page near the end did.
+        self.results_page = ((self.vr_scroll / VR_ROW) as usize * 2) / PER_PAGE;
+        self.dirty = true;
+    }
+
+    pub fn vr_press(&mut self, y: f32, target: Option<Target>, time: f64) {
+        self.vr_throw = 0.0;
+        self.vr_hold = Some(VrHold { from: y, scroll: self.vr_scroll, target, dragged: false, last: (y, time), speed: 0.0 });
+    }
+
+    /// The hand on the list moved: past a tremble, the list goes with it.
+    pub fn vr_drag(&mut self, y: f32, time: f64) {
+        let Some(mut hold) = self.vr_hold else { return };
+        hold.dragged |= (y - hold.from).abs() >= VR_DRAG_FROM;
+        if hold.dragged {
+            let seconds = (time - hold.last.1) as f32;
+            if seconds > 0.001 {
+                hold.speed = (hold.last.0 - y) / seconds;
+                hold.last = (y, time);
+            }
+            self.vr_hold = Some(hold);
+            self.vr_scroll_to(hold.scroll + hold.from - y);
+        } else {
+            self.vr_hold = Some(hold);
+        }
+    }
+
+    pub fn vr_dragging(&self) -> bool {
+        self.vr_hold.is_some_and(|h| h.dragged)
+    }
+
+    /// Let go: what was pressed, if it stayed a press; thrown, if it was moving.
+    pub fn vr_release(&mut self, time: f64) -> Option<Target> {
+        let hold = self.vr_hold.take()?;
+        if hold.dragged {
+            self.vr_throw = hold.speed;
+            self.vr_throw_at = time;
+            return None;
+        }
+        hold.target
+    }
+
+    /// A list thrown goes on, slowing.
+    pub fn vr_coast(&mut self, time: f64) {
+        if self.vr_throw == 0.0 {
+            return;
+        }
+        let seconds = (time - self.vr_throw_at).clamp(0.0, 0.1);
+        self.vr_throw_at = time;
+        let to = self.vr_scroll + self.vr_throw * seconds as f32;
+        self.vr_throw *= VR_THROW_KEEPS.powf(seconds) as f32;
+        self.vr_scroll_to(to);
+        if self.vr_throw.abs() < VR_THROW_STOPS || self.vr_scroll <= 0.0 || self.vr_scroll >= self.vr_most.get() {
+            self.vr_throw = 0.0;
+        }
+        self.dirty = true;
+    }
+
+    /// How far a headset's list of `n` goes, with a row more when more are coming.
+    fn vr_measure(&self, n: usize, more: bool) {
+        let rows = n.div_ceil(2) + usize::from(more);
+        self.vr_most.set((VR_LIST_TOP + 4.0 + rows as f32 * VR_ROW - VR_LIST_BOTTOM).max(0.0));
+    }
+
     fn pages(&self, d: &Data, n: usize) -> usize {
         n.div_ceil(PER_PAGE).max(1) + usize::from(d.status.list.more && n > 0)
     }
@@ -870,15 +976,15 @@ impl Panel {
     fn browse_targets(&self, d: &Data, out: &mut Vec<(Target, Rect)>, side: bool) {
         let results = self.results(d);
         if side && d.status.headset {
-            let pages = self.pages(d, results.len());
-            out.push((Target::CloseSide, vr_list_head(pages)));
-            if pages > 1 {
-                out.push((Target::Previous, Rect::from_center_size(VR_PREVIOUS, vec2(52.0, 60.0))));
-                out.push((Target::Next, Rect::from_center_size(VR_NEXT, vec2(52.0, 60.0))));
-            }
-            let first = self.results_page.min(pages - 1) * PER_PAGE;
-            for (i, _) in results.iter().enumerate().skip(first).take(PER_PAGE) {
-                out.push((Target::Card(i), vr_card_rect(i - first)));
+            out.push((Target::CloseSide, vr_list_head(1)));
+            self.vr_measure(results.len(), d.status.list.more || self.loading(d));
+            // What shows of those in view is what can be pressed.
+            let list = Rect::from_min_max(pos2(0.0, VR_LIST_TOP), pos2(VR_LIST_RIGHT + 8.0, VR_LIST_BOTTOM));
+            for i in 0..results.len() {
+                let rect = vr_card_rect(i).translate(vec2(0.0, -self.vr_scroll)).intersect(list);
+                if rect.is_positive() {
+                    out.push((Target::Card(i), rect));
+                }
             }
             return;
         }
@@ -1102,12 +1208,12 @@ impl Panel {
             Target::Done => match self.page {
                 Page::Compose(c) => self.send(c, d, time),
                 Page::Filter => {
-                    self.results_page = 0;
+                    self.to_the_top();
                     self.go(Page::Browse, time);
                     Vec::new()
                 }
                 _ => {
-                    self.results_page = 0;
+                    self.to_the_top();
                     self.go(Page::Browse, time);
                     vec![Action::Search]
                 }
@@ -1174,14 +1280,14 @@ impl Panel {
             Target::OpenWeb => self.entry(d).map(|e| Action::OpenWeb(e.world_id.clone())).into_iter().collect(),
             Target::Has3d => {
                 self.has_3d = !self.has_3d;
-                self.results_page = 0;
+                self.to_the_top();
                 self.page_at = time;
                 Vec::new()
             }
             Target::Section(s) => {
                 if self.section != s {
                     self.section = s;
-                    self.results_page = 0;
+                    self.to_the_top();
                     self.page_at = time;
                 }
                 Vec::new()
@@ -1193,7 +1299,7 @@ impl Panel {
             Target::Retry => vec![Action::Refresh],
             Target::Sort(s) => {
                 self.sort = s;
-                self.results_page = 0;
+                self.to_the_top();
                 self.page_at = time;
                 Vec::new()
             }
@@ -1209,20 +1315,20 @@ impl Panel {
                         }
                         None => self.labels.push(l.id.clone()),
                     }
-                    self.results_page = 0;
+                    self.to_the_top();
                 }
                 Vec::new()
             }
             Target::FilterOfficial => {
                 self.official = !self.official;
-                self.results_page = 0;
+                self.to_the_top();
                 Vec::new()
             }
             Target::ClearFilters => {
                 self.labels.clear();
                 self.official = false;
                 self.has_3d = false;
-                self.results_page = 0;
+                self.to_the_top();
                 self.page_at = time;
                 Vec::new()
             }
@@ -1368,13 +1474,13 @@ impl Panel {
             }
             typed.push(c);
         }
-        self.results_page = 0;
+        self.to_the_top();
         self.dirty = true;
     }
 
     fn erase(&mut self) {
         self.typed().pop();
-        self.results_page = 0;
+        self.to_the_top();
         self.dirty = true;
     }
 
@@ -1470,9 +1576,8 @@ impl Panel {
         let results = self.results(d);
         let side = self.page == Page::Detail;
         if side && d.status.headset {
-            let pages = self.pages(d, results.len());
             let (h, pr) = state(Target::CloseSide);
-            let head = vr_list_head(pages);
+            let head = vr_list_head(1);
             p.rect_filled(if pr { head.shrink(2.0) } else { head }, CornerRadius::same(24), if h { RAISED2 } else { RAISED });
             widgets::icon(p, pos2(head.min.x + 26.0, head.center().y), icons::CARET_LEFT, 24.0, theme::FG);
             let name = if self.query.is_empty() { self.section.label(d.status.list.vrchat).to_string() } else { self.query.clone() };
@@ -1482,23 +1587,29 @@ impl Panel {
             // What else is behind it.
             widgets::icon(p, pos2(head.max.x - 58.0, head.center().y), icons::MAGNIFYING_GLASS, 23.0, theme::FG_2);
             widgets::icon(p, pos2(head.max.x - 26.0, head.center().y), icons::SLIDERS_HORIZONTAL, 23.0, theme::FG_2);
-            if pages > 1 {
-                let (h, pr) = state(Target::Previous);
-                round_button(p, VR_PREVIOUS, icons::CARET_LEFT, h, pr, 1.0);
-                let (h, pr) = state(Target::Next);
-                round_button(p, VR_NEXT, icons::CARET_RIGHT, h, pr, 1.0);
-            }
-            let current = self.results_page.min(pages - 1);
-            for (t, rect) in targets {
+            let list = p.with_clip_rect(Rect::from_min_max(pos2(0.0, VR_LIST_TOP), pos2(VR_LIST_RIGHT + 8.0, VR_LIST_BOTTOM)));
+            for (t, _) in targets {
                 if let Target::Card(i) = *t {
                     let (h, pr) = state(*t);
-                    vr_card(p, *rect, results[i], d, h, pr, self.selected == Some(results[i].id));
+                    vr_card(&list, vr_card_rect(i).translate(vec2(0.0, -self.vr_scroll)), results[i], d, h, pr, self.selected == Some(results[i].id));
                 }
             }
             if results.is_empty() {
                 text(p, pos2(232.0, 320.0), Align2::CENTER_CENTER, orbit_look::txt("Nothing else here", 20.0).color(theme::FG_3));
-            } else if current * PER_PAGE >= results.len() {
-                text(p, pos2(232.0, 320.0), Align2::CENTER_CENTER, orbit_look::txt("Finding more worlds\u{2026}", 20.0).color(fade(theme::FG_3, shown)));
+            } else if d.status.list.more || self.loading(d) {
+                // Under the last of them, as they keep coming.
+                let y = vr_card_rect(results.len().next_multiple_of(2)).center().y - self.vr_scroll;
+                if y < VR_LIST_BOTTOM {
+                    text(&list, pos2(232.0, y), Align2::CENTER_CENTER, orbit_look::txt("Finding more worlds\u{2026}", 20.0).color(theme::FG_3));
+                }
+            }
+            // Where in it this is.
+            let most = self.vr_most.get();
+            if most > 0.0 {
+                let track = VR_LIST_BOTTOM - VR_LIST_TOP;
+                let high = (track * track / (track + most)).max(48.0);
+                let y = VR_LIST_TOP + (track - high) * (self.vr_scroll / most);
+                p.rect_filled(Rect::from_min_size(pos2(VR_LIST_RIGHT + 3.0, y), vec2(4.0, high)), CornerRadius::same(2), theme::white(0.3));
             }
             return;
         }
@@ -2342,6 +2453,44 @@ mod tests {
     use super::*;
 
     /// Round 5's judges: beside the panel, the list lost its fifth world.
+    /// Enzo: "infinite scroll creates less friction". A press stays a press; a drag moves the list and presses nothing; a throw coasts and stops at the end.
+    #[test]
+    fn a_headsets_list_of_worlds_is_endless() {
+        let mut panel = Panel::default();
+        panel.vr_measure(40, true);
+        assert_eq!(panel.vr_most.get(), VR_LIST_TOP + 4.0 + 21.0 * VR_ROW - VR_LIST_BOTTOM);
+        // A press, with a hand's tremble.
+        panel.vr_press(200.0, Some(Target::Card(3)), 0.0);
+        panel.vr_drag(204.0, 0.01);
+        assert!(!panel.vr_dragging());
+        assert_eq!(panel.vr_release(0.02), Some(Target::Card(3)));
+        assert_eq!(panel.vr_scroll, 0.0);
+        // A drag.
+        panel.vr_press(400.0, Some(Target::Card(3)), 1.0);
+        panel.vr_drag(380.0, 1.01);
+        panel.vr_drag(300.0, 1.02);
+        assert!(panel.vr_dragging());
+        assert_eq!(panel.vr_scroll, 100.0);
+        // Down a good way, it asks for what follows, as turning the pages did.
+        panel.vr_drag(-2400.0, 1.1);
+        assert!(panel.results_page >= 4, "{}", panel.results_page);
+        assert_eq!(panel.vr_release(1.11), None, "a drag is no press");
+        // Thrown: it goes on, slowing, and stops.
+        let thrown = panel.vr_throw;
+        assert!(thrown > 0.0);
+        let was = panel.vr_scroll;
+        panel.vr_coast(1.2);
+        assert!(panel.vr_scroll > was && panel.vr_throw < thrown);
+        for n in 0..400 {
+            panel.vr_coast(1.2 + n as f64 * 0.05);
+        }
+        assert_eq!(panel.vr_throw, 0.0);
+        assert!(panel.vr_scroll <= panel.vr_most.get());
+        // Another list starts from its top.
+        panel.to_the_top();
+        assert_eq!((panel.vr_scroll, panel.results_page), (0.0, 0));
+    }
+
     #[test]
     fn every_world_of_a_few_keeps_its_place_beside_the_side_panel() {
         let (rects, heading) = few_rects(5, 2, true);

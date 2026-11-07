@@ -686,6 +686,16 @@ pub struct Panels {
     turning: Option<Pos2>,
     /// A colour being chosen along the bar: seen at once, saved when let go, and when it last showed.
     hue_held: Option<([u8; 3], Instant)>,
+    /// The wheel's keys show.
+    key_caps: bool,
+    /// The sheet and all with it are away for a moment.
+    peek: bool,
+    /// A view is held out of the menu's (in a headset): it stays when the menu closes.
+    pub view_taken: bool,
+    /// The sheet left with such a view out: what the Quick Menu opens on when it comes back.
+    resume: Option<(Sheet, String, f32)>,
+    /// Where the way to do so lies.
+    pub peek_place: Option<Placed>,
     seek_late: Option<f32>,
     seek_asked: Option<(u32, Instant)>,
     /// Captures of this computer's gallery asked to show in 3D, for the view that shows them.
@@ -758,6 +768,11 @@ impl Panels {
             view_plate: Vec::new(),
             turning: None,
             hue_held: None,
+            key_caps: false,
+            peek: false,
+            view_taken: false,
+            resume: None,
+            peek_place: None,
             seek_late: None,
             seek_asked: None,
             local_asked: Vec::new(),
@@ -826,6 +841,13 @@ impl Panels {
     /// What is open: parts for it in the places `places` gives, or none. Hide lasts until the menu closes. Whatever was held lets go.
     pub fn set_open(&mut self, around: Option<Around>, places: Vec<Placed>, snap: &Snapshot) {
         if around != self.open {
+            // Enzo: a view held in a hand stays, and the menu comes back where it was, to go on through the worlds or the pictures.
+            if self.open.is_some() && self.view_taken {
+                if let Some(sheet) = self.facts.sheet.filter(|s| matches!(s, Sheet::Worlds | Sheet::Pictures)) {
+                    self.resume = Some((sheet, self.facts.sheet_title.clone(), self.facts.gallery_scroll));
+                }
+            }
+            self.peek = false;
             self.stop_talking();
             self.hidden = false;
             self.facts.pointed = None;
@@ -847,9 +869,10 @@ impl Panels {
         // Opened from the wheel, the sheet is all that shows: its cut-off cells would stick out from under it.
         let places: Vec<Placed> = if self.takeover.is_some() && around == Some(Around::Wheel) { Vec::new() } else { places };
         let back = self.takeover.is_some().then_some(self.back_place).flatten();
+        let peek = self.takeover.is_some().then_some(self.peek_place).flatten();
         // On the desktop VRChat lights what lies under the pointer, sheet or no sheet. Where the wing leaves the row under its tabs free.
         let band = self.hint_place.filter(|_| back.is_some() && around == Some(Around::QuickMenu) && self.facts.desktop && !places.iter().any(|p| p.zone == Zone::QmStrip));
-        let places: Vec<Placed> = places.into_iter().chain(back).chain(band).collect();
+        let places: Vec<Placed> = places.into_iter().chain(back).chain(band).chain(peek).collect();
         // Moved or another size: the parts of a size stay as they are, those changed are made anew.
         let unchanged = self.list.len() == places.len() && self.list.iter().zip(&places).all(|(a, b)| a.placed == *b);
         if !unchanged {
@@ -870,6 +893,35 @@ impl Panels {
                     }
                 })
                 .collect();
+        }
+        // The Quick Menu again, with a view still in a hand: where it was.
+        if around == Some(Around::QuickMenu) && self.takeover.is_none() {
+            match self.resume.take().filter(|_| self.view_taken) {
+                Some((sheet, title, scroll)) => self.open_again(sheet, &title, scroll, snap),
+                None => {}
+            }
+        }
+    }
+
+    /// A sheet as it was left.
+    fn open_again(&mut self, sheet: Sheet, title: &str, scroll: f32, snap: &Snapshot) {
+        self.open_sheet(sheet, title, snap);
+        (self.facts.gallery_scroll, self.gallery_to) = (scroll, scroll);
+        if sheet == Sheet::Worlds {
+            let layout = self.stage.host.menu.layout;
+            if let Some(worlds) = self.stage.worlds.as_mut() {
+                worlds.open_panel(layout);
+            }
+        }
+    }
+
+    /// Enzo: the wheel's keys show only while Alt is held.
+    pub fn set_key_caps(&mut self, on: bool) {
+        if self.key_caps != on {
+            self.key_caps = on;
+            for panel in self.list.iter_mut().filter(|p| p.zone.ring().is_some()) {
+                panel.dirty = true;
+            }
         }
     }
 
@@ -1363,6 +1415,8 @@ impl Panels {
             }),
             can_seek: menu.media.as_ref().is_some_and(|m| m.can_seek),
             world_video: menu.world_video.as_ref().map(|v| v.title.as_deref().map_or_else(|| v.url.clone(), panels::clean_title)),
+            key_caps: self.key_caps,
+            peek: self.peek,
             digits: self.open == Some(Around::Wheel) && self.takeover.is_none() && (snap.n4n0.desktop_mode || !snap.steamvr.running),
             beside_wing: self.open == Some(Around::QuickMenu),
             worlds_visited: visited,
@@ -1496,11 +1550,12 @@ impl Panels {
         let was = self.bloom.open();
         let group = self.bloom.step(on_zone, Instant::now());
         let live = !self.facts.desktop || group.is_some();
+        let self_peek = self.peek;
         for panel in &mut self.list {
             if let Some(of) = panel.zone.group() {
                 let show = group == Some(of);
                 if panel.shown != show {
-                    panel.shown = show;
+                    panel.shown = show && !self_peek;
                     if show {
                         let order = of.cells().iter().position(|z| *z == panel.zone).unwrap_or(0);
                         panel.appear = Appear::new(order, live);
@@ -1512,7 +1567,7 @@ impl Panels {
         // VRChat reacts to where the pointer is only while it is on what hides it.
         let on_parts = on.is_some();
         for panel in self.list.iter_mut().filter(|p| p.zone == Zone::SheetHint) {
-            panel.shown = on_parts;
+            panel.shown = on_parts && !self.peek;
         }
         // The caption says what is pointed at.
         let pointed = self.list.iter().find_map(|p| p.hover.and_then(|i| p.items.get(i)).map(|item| item.action)).or_else(|| self.takeover.as_ref().filter(|_| matches!(sheet, Some(Sheet::All | Sheet::Pictures))).and_then(|p| p.hover.and_then(|i| p.items.get(i)).map(|item| item.action)));
@@ -1794,6 +1849,16 @@ impl Panels {
                 }
             }
             Action::NewConversation => self.backend.n4n0(N4n0Command::NewConversation),
+            Action::Peek => {
+                self.peek = !self.peek;
+                let peek = self.peek;
+                for panel in self.list.iter_mut().chain(self.takeover.iter_mut()) {
+                    // Those that say when they show say so again next turn.
+                    panel.shown = !peek || panel.zone == Zone::SheetPeek;
+                    panel.dirty |= panel.zone == Zone::SheetPeek;
+                }
+                self.facts.peek = peek;
+            }
             Action::SmallView(on) => {
                 if let Some(worlds) = self.stage.worlds.as_mut() {
                     worlds.view_small(on);
@@ -2066,7 +2131,7 @@ impl Panels {
     pub fn step_springs(&mut self, dt: f32) {
         let caption = self.caption_shown();
         for panel in self.list.iter_mut().filter(|p| matches!(p.zone, Zone::QmCaption | Zone::WheelCaption)) {
-            panel.shown = caption;
+            panel.shown = caption && !self.peek;
         }
         for panel in self.list.iter_mut().chain(self.takeover.iter_mut()) {
             panel.appear.step(dt);

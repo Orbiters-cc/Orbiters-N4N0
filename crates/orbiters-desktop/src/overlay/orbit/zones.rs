@@ -153,6 +153,8 @@ impl Group {
 /// Orbiters' parts. Around the wheel: the ring's cells clockwise from straight up. Around the Quick Menu: its wing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Zone {
+    /// Over a corner, while a sheet is up: takes the sheet and all with it away for a moment, to reach VRChat's own menus, and brings them back as they were.
+    SheetPeek,
     /// Straight up, where the eyes go first: 3D world search.
     WheelWorlds,
     WheelYouTube,
@@ -304,6 +306,7 @@ impl Zone {
             Zone::SheetBack => r(-352.0, -240.0, 352.0, 205.5),
             // Under the tab row, where VRChat's own tooltip for what lies under the pointer appears.
             Zone::SheetHint => r(-300.0, 268.0, 300.0, 302.0),
+            Zone::SheetPeek => r(362.0, -300.0, 512.0, -268.0),
             // N4N0's pages' own shape, 704 wide.
             Zone::Takeover => r(-352.0, -196.0, 352.0, 200.0),
             _ => unreachable!("the rings' cells return above"),
@@ -315,6 +318,7 @@ impl Zone {
         let r = |x0: f32, y0: f32, x1: f32, y1: f32| Rect::from_min_max(pos2(x0, y0), pos2(x1, y1));
         match self {
             Zone::QmCaption => Some(r(-262.0, 326.0, 262.0, 364.0)),
+            Zone::SheetPeek => Some(r(-352.0, -276.0, -202.0, -244.0)),
             _ => None,
         }
     }

@@ -71,8 +71,6 @@ const TYPING_PAUSE: Duration = Duration::from_millis(400);
 #[derive(Clone, Debug)]
 pub enum Relayed {
     Show(Entry),
-    /// VRChat's menu just opened (the hint of a small view shows again for the next capture).
-    MenuOpened,
     /// A capture of this computer's gallery: its session, what it is called, and what tells its results apart.
     ShowLocal { dir: std::path::PathBuf, name: String, changed: u64 },
     View(Action),
@@ -190,7 +188,8 @@ pub struct Worlds {
     small_triggers: [bool; 2],
     small_triggers_were: [bool; 2],
     hint_used: bool,
-    hint_again: bool,
+    /// The menus up now.
+    menu_boxes: Vec<stereo::MenuBox>,
 }
 
 /// Now, in Unix seconds.
@@ -295,7 +294,7 @@ impl Worlds {
             backdrop: None,
             small_place: None,
             hint_used: false,
-            hint_again: false,
+            menu_boxes: Vec::new(),
         })
     }
 
@@ -372,7 +371,7 @@ impl Worlds {
             backdrop: None,
             small_place: None,
             hint_used: false,
-            hint_again: false,
+            menu_boxes: Vec::new(),
         }
     }
 
@@ -565,6 +564,11 @@ impl Worlds {
             view.turn(now.0 - from.0, now.1 - from.1);
         }
         self.live_pointer = at;
+        if let Some((_, y)) = at {
+            self.panel.vr_drag(y, self.time());
+        }
+        // A list being dragged is no press of what passes under the hand.
+        let hover = if self.panel.vr_dragging() { None } else { hover };
         if hover != self.panel.hover {
             self.panel.hover = hover;
             self.panel.dirty = true;
@@ -578,25 +582,46 @@ impl Worlds {
         let time = self.time();
         let (no_thumb, no_picture) = (|_: &Entry| -> Option<TextureId> { None }, |_: u64, _: bool| -> Option<TextureId> { None });
         let picked = self.picked().cloned();
+        // On a headset's endless list a press waits: it may be a drag of the list.
+        if let Some((_, y)) = self.live_pointer.filter(|at| self.panel.vr_list_on(&status) && panel::Panel::vr_list_holds(at.0, at.1)) {
+            if matches!(self.panel.hover, None | Some(panel::Target::Card(_))) {
+                self.panel.pressed = self.panel.hover;
+                self.panel.vr_press(y, self.panel.hover, time);
+                return true;
+            }
+        }
         let Some(target) = self.panel.hover else { return false };
+        self.press_target(target, &entries, &status, picked.as_ref(), time);
+        true
+    }
+
+    fn press_target(&mut self, target: panel::Target, entries: &[Entry], status: &panel::Status, picked: Option<&Entry>, time: f64) {
+        let (no_thumb, no_picture) = (|_: &Entry| -> Option<TextureId> { None }, |_: u64, _: bool| -> Option<TextureId> { None });
         self.panel.pressed = Some(target);
         let actions = {
-            let d = Data { entries: &entries, picked: picked.as_ref(), status: &status, feedback: &self.feedback, facts: &self.facts, thumb: &no_thumb, picture: &no_picture, now: unix_now() };
+            let d = Data { entries, picked, status, feedback: &self.feedback, facts: &self.facts, thumb: &no_thumb, picture: &no_picture, now: unix_now() };
             self.panel.press(target, &d, time)
         };
-        self.keep_picked(&entries);
+        self.keep_picked(entries);
         if let (panel::Target::Hero, Some((_, view))) = (target, &self.live) {
             view.hold(true);
         }
-        self.act_alone(actions, &entries);
-        self.follow_live(&entries);
-        true
+        self.act_alone(actions, entries);
+        self.follow_live(entries);
     }
 
     /// The press of [`Worlds::press_alone`] let go.
     pub fn release_alone(&mut self) {
         if let (Some(panel::Target::Hero), Some((_, view))) = (self.panel.pressed, &self.live) {
             view.hold(false);
+        }
+        // A press on the endless list that did not become a drag: it is a press after all.
+        let time = self.time();
+        if let Some(target) = self.panel.vr_release(time) {
+            let entries = self.entries();
+            let status = self.status();
+            let picked = self.picked().cloned();
+            self.press_target(target, &entries, &status, picked.as_ref(), time);
         }
         self.panel.pressed = None;
         self.panel.dirty = true;
@@ -817,8 +842,14 @@ impl Worlds {
     fn update_hint(&mut self, overlay: &vr::Overlay, steamvr: &vr::Client, presenter: &mut Presenter, snap: &Snapshot) {
         let small = self.view.small_now().copied();
         self.hint_used |= small.is_some_and(|s| s.zoomed);
+        // Across a menu: away, what stands with it too. In a panel's hole it is meant to be there.
+        let eye = stereo::position(&view::head_pose(steamvr, 0.0));
+        // Brought back to its hole, it must show to be let go there.
+        let home = self.small_place.is_some_and(|(at, _)| small.is_some_and(|s| stereo::length(stereo::sub(stereo::position(&at), s.anchor)) <= stereo::SMALL_DOCKS_WITHIN_M * 2.0));
+        let covered = !home && small.is_some_and(|s| !s.docked && self.menu_boxes.iter().any(|m| stereo::shows_over(eye, s.anchor, s.radius(), m)));
+        self.view.set_covered(covered);
         // The plate it stands on.
-        let plate = self.view.small_plate();
+        let plate = self.view.small_plate().filter(|_| !covered);
         if plate.is_some() && self.plate.is_none() {
             self.plate = small_hint::Plate::new(overlay, &self.key).map_err(|e| eprintln!("{e:#}")).ok();
         }
@@ -833,7 +864,7 @@ impl Worlds {
         if let Some(backdrop) = self.backdrop.as_mut() {
             backdrop.update(overlay, presenter, pane);
         }
-        let wanted = small.filter(|s| !self.hint_used && !s.docked).map(|s| {
+        let wanted = small.filter(|s| !self.hint_used && !s.docked && !covered).map(|s| {
             let stage = match s.held_by() {
                 Some(hand) => small_hint::Stage::Stick { hand },
                 None => small_hint::Stage::Grip { near: s.near },
@@ -857,13 +888,12 @@ impl Worlds {
         }
     }
 
-    /// What is out of a panel can go where it is: a Hide under it, for a laser or a hand, with no menu to reopen.
+    /// Enzo: with the menu off, an X floating above it, for a laser or a hand, with no menu to reopen. With the menu up, the menu has its own Hide.
     fn update_hide_chip(&mut self, overlay: &vr::Overlay, steamvr: &vr::Client, presenter: &mut Presenter) {
-        let small = self.view.small_now().copied().filter(|s| s.taken && !s.docked);
+        let small = self.view.small_now().copied().filter(|s| !s.docked && self.menu_boxes.is_empty());
         let eye = stereo::position(&view::head_pose(steamvr, 0.0));
         let wanted = small.map(|s| {
-            let plate = self.view.small_plate().map_or(s.anchor, |(at, _)| stereo::position(&at));
-            let place = small_hint::chip_place(plate, s.radius(), eye);
+            let place = small_hint::chip_place(s.anchor, s.radius(), eye, !self.hint_used);
             // The hand holding it does not press what lies under it.
             let holding = s.held_by();
             let pointed = (0..2).any(|h| Some(h) != holding && self.small_rays[h].is_some_and(|(tip, along)| small_hint::on_chip(&place, tip, along)));
@@ -880,6 +910,11 @@ impl Worlds {
         if wanted.is_some_and(|(_, _, pressed)| pressed) {
             self.deferred.push(Action::Hide);
         }
+    }
+
+    /// The menus up now, for what must not show over them: none with no menu.
+    pub fn menus_up(&mut self, boxes: Vec<stereo::MenuBox>) {
+        self.menu_boxes = boxes;
     }
 
     /// The tools of the hands for a view's Hide: where each is, which way it points, and its trigger.
@@ -916,8 +951,8 @@ impl Worlds {
     }
 
     /// The hands, for what shows small.
-    pub fn small_input(&mut self, hands: [Option<vr::Matrix34>; 2], grips: [bool; 2], sticks: [f32; 2]) {
-        self.view.small_input(hands, grips, sticks);
+    pub fn small_input(&mut self, hands: [Option<vr::Matrix34>; 2], grips: [bool; 2], sticks: [f32; 2], pads: [[f32; 2]; 2]) {
+        self.view.small_input(hands, grips, sticks, pads);
     }
 
     pub fn hide_view(&mut self) {
@@ -941,7 +976,6 @@ impl Worlds {
                     self.picked = Some(entry);
                     self.deferred.push(Action::Show(id));
                 }
-                Relayed::MenuOpened => self.hint_again = true,
                 Relayed::View(action) => self.deferred.push(action),
             }
         }
@@ -1345,8 +1379,8 @@ impl Worlds {
                     let Some(entry) = entries.iter().find(|e| e.id == id).or(self.picked.as_ref().filter(|e| e.id == id)).filter(|e| e.capture).cloned() else {
                         continue;
                     };
-                    // A new capture from a new opening of the menu: its hint again.
-                    if std::mem::take(&mut self.hint_again) {
+                    // Enzo: nothing showing, and one opened from the start: its hint again, even if an earlier one was zoomed by accident.
+                    if !self.view.active() {
                         self.hint_used = false;
                     }
                     self.error = None;
@@ -1490,6 +1524,7 @@ impl Worlds {
 
     /// Paints the panel on the menu's canvas.
     pub fn paint(&mut self, canvas: &mut Canvas) {
+        self.panel.vr_coast(self.time());
         self.panel.dirty = false;
         if let Some(frame) = self.live_frame.take() {
             let image = egui::ColorImage::from_rgba_premultiplied(frame.size, &frame.rgba);

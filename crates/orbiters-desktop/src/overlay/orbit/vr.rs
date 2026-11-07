@@ -451,6 +451,8 @@ pub struct Turn {
     pub clicked: bool,
     /// What the panel on the sheet asked of the 3D view. The sheet has its own panel, so nothing else opens beside it, and N4N0's menu stays out of this.
     pub(in crate::overlay) worlds: Vec<super::super::worlds::Relayed>,
+    /// The menus up now: what a capture must not show over. None with no menu.
+    pub(in crate::overlay) menus_up: Vec<super::super::worlds::stereo::MenuBox>,
     /// Where the sheet has a place for a capture standing small: the middle of its hole, its Z towards who looks, and how far it can reach there.
     pub(in crate::overlay) small_place: Option<(Matrix34, f32)>,
 }
@@ -708,6 +710,8 @@ impl OrbitVr {
         }
         self.panels.takeover_place = Some(zones::in_units(Zone::Takeover));
         self.panels.back_place = Some(zones::in_units(Zone::SheetBack));
+        self.panels.peek_place = Some(zones::in_units(Zone::SheetPeek));
+        self.panels.view_taken = cx.world_status.small_taken;
         self.panels.set_open(menu, places, cx.snap);
         if self.panels.is_empty() {
             self.close(&mut cx);
@@ -879,11 +883,14 @@ impl OrbitVr {
             match asked {
                 super::super::worlds::Relayed::Show(_) | super::super::worlds::Relayed::ShowLocal { .. } => self.showed_view = true,
                 super::super::worlds::Relayed::View(super::super::worlds::panel::Action::Hide) => self.showed_view = false,
-                super::super::worlds::Relayed::View(_) | super::super::worlds::Relayed::MenuOpened => {}
+                super::super::worlds::Relayed::View(_) => {}
             }
         }
-        if !self.last_shown {
-            turn.worlds.push(super::super::worlds::Relayed::MenuOpened);
+        // VRChat's own menu, as far as it reaches round its plane, and each part of ours that shows. What is in a sheet's hole is told apart where it is used.
+        turn.menus_up = quads.iter().zip(self.panels.all()).filter(|(_, p)| p.shown).map(|((q, _), _)| super::super::worlds::stereo::MenuBox { place: q.transform, width: q.width, height: q.height }).collect();
+        if let Some(plane) = self.plane.as_ref() {
+            let (width, height) = if menu == Some(Around::Wheel) { (218.0, 218.0) } else { (704.0, 524.0) };
+            turn.menus_up.push(super::super::worlds::stereo::MenuBox { place: plane.frame, width: width * plane.unit, height: height * plane.unit });
         }
         turn.small_place = self.panels.small_place_on_sheet().and_then(|hole| {
             let i = self.panels.all().position(|p| p.zone == Zone::Takeover)?;

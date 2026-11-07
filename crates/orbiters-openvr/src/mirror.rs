@@ -79,7 +79,7 @@ impl EyeReader {
         let swap = match desc.Format {
             DXGI_FORMAT_R8G8B8A8_UNORM | DXGI_FORMAT_R8G8B8A8_UNORM_SRGB => false,
             DXGI_FORMAT_B8G8R8A8_UNORM | DXGI_FORMAT_B8G8R8A8_UNORM_SRGB => true,
-            other => return Err(format!("the mirror texture's format {} is not 8-bit RGBA", other.0)),
+            other => return Err(orbiters_i18n::tr!("the mirror texture's format {format} is not 8-bit RGBA", format = other.0)),
         };
         let staging_desc = D3D11_TEXTURE2D_DESC {
             Width: desc.Width,

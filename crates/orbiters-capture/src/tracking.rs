@@ -165,7 +165,7 @@ impl TrackingRecorder {
         self.stop.store(true, Ordering::Relaxed);
         match self.thread.take().expect("running").join() {
             Ok(r) => r,
-            Err(_) => anyhow::bail!("the tracking thread panicked"),
+            Err(_) => anyhow::bail!("{}", orbiters_i18n::tr("the tracking thread panicked")),
         }
     }
 }

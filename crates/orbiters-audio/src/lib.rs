@@ -209,12 +209,12 @@ mod imp {
             let (tx, rx) = mpsc::sync_channel(1);
             let handler: IActivateAudioInterfaceCompletionHandler = Activated(tx).into();
             let operation = ActivateAudioInterfaceAsync(VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK, &IAudioClient::IID, Some(&*variant), &handler)?;
-            rx.recv_timeout(Duration::from_secs(5)).map_err(|_| anyhow::anyhow!("process loopback did not activate"))?;
+            rx.recv_timeout(Duration::from_secs(5)).map_err(|_| anyhow::anyhow!("{}", orbiters_i18n::tr("process loopback did not activate")))?;
             let mut result = HRESULT(0);
             let mut unknown = None;
             operation.GetActivateResult(&mut result, &mut unknown)?;
             result.ok()?;
-            Ok(unknown.ok_or_else(|| anyhow::anyhow!("no audio client"))?.cast()?)
+            Ok(unknown.ok_or_else(|| anyhow::anyhow!("{}", orbiters_i18n::tr("no audio client")))?.cast()?)
         }
     }
 
@@ -392,13 +392,13 @@ mod imp {
         mut packet: impl FnMut(&Packet<'_>) -> anyhow::Result<()>,
     ) -> anyhow::Result<(String, Ended)> {
         let AudioSource::Mic(id) = source else {
-            anyhow::bail!("a program's sound cannot be recorded on macOS");
+            anyhow::bail!("{}", orbiters_i18n::tr("a program's sound cannot be recorded on macOS"));
         };
         let uid = match id {
             Some(uid) => uid.clone(),
-            None => ca::default_uid(Flow::Input).ok_or_else(|| anyhow::anyhow!("this computer has no microphone"))?,
+            None => ca::default_uid(Flow::Input).ok_or_else(|| anyhow::anyhow!("{}", orbiters_i18n::tr("this computer has no microphone")))?,
         };
-        let device = ca::device(&uid).ok_or_else(|| anyhow::anyhow!("the microphone {uid} is not there"))?;
+        let device = ca::device(&uid).ok_or_else(|| anyhow::anyhow!("{}", orbiters_i18n::tr!("the microphone {uid} is not there", uid = uid)))?;
         // A voice: mono at the device's rate (or the one asked for).
         let rate = options.rate.unwrap_or_else(|| ca::rate_of(&uid).unwrap_or(48_000.0).round() as u32);
         let turn = Arc::new(Turn::default());
@@ -546,7 +546,7 @@ mod imp {
         _ready: impl FnMut(&str, Format) -> anyhow::Result<()>,
         _packet: impl FnMut(&Packet<'_>) -> anyhow::Result<()>,
     ) -> anyhow::Result<(String, Ended)> {
-        anyhow::bail!("sound capture is only available on Windows for now")
+        anyhow::bail!("{}", orbiters_i18n::tr("sound capture is only available on Windows for now"))
     }
 }
 

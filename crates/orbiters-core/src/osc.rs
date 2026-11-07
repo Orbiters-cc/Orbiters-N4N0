@@ -1067,6 +1067,10 @@ fn answer(service: &str, instance: &str, host: &str, address: Ipv4Addr, port: u1
 /// A socket on the mDNS port, for the answers to go out from: VRChat's discovery may well hold to mDNS's rule that an
 /// answer comes from that port.
 fn mdns_socket(interface: Option<Ipv4Addr>) -> std::io::Result<socket2::Socket> {
+    // This is what raised Windows' firewall prompt in test runs: it binds every interface.
+    if no_network_listening() {
+        return Err(std::io::Error::other("nothing listens on the network in this run"));
+    }
     let socket = socket2::Socket::new(socket2::Domain::IPV4, socket2::Type::DGRAM, Some(socket2::Protocol::UDP))?;
     socket.set_reuse_address(true)?;
     // Apple's mDNSResponder holds the port with SO_REUSEPORT, which only others asking for it can share.

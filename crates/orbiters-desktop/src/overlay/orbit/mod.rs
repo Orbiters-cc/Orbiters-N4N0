@@ -632,6 +632,11 @@ impl Panels {
         }
     }
 
+    /// VR: the panel on the sheet relays to the overlay's own 3D worlds, whose view `status` says what it does. What it asked since last time.
+    pub(in crate::overlay) fn world_relay(&mut self, status: super::worlds::panel::Status) -> Vec<super::worlds::Relayed> {
+        self.stage.worlds.as_mut().map_or_else(Vec::new, |worlds| worlds.relay_to(status))
+    }
+
     /// A number key on the wheel: as a press on that cell, clockwise from the top.
     pub fn press_cell(&mut self, cell: usize, snap: &Snapshot) -> Pressed {
         const CELLS: [Zone; 6] = [Zone::WheelWorlds, Zone::WheelYouTube, Zone::WheelPlaying, Zone::WheelAll, Zone::WheelInstances, Zone::WheelPictures];

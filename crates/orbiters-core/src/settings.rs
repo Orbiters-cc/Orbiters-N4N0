@@ -141,18 +141,17 @@ pub enum CoverageOverlay {
     RightHand,
 }
 
-/// How the Orbiters menu appears while VRChat runs (Settings, VRChat menus).
+/// Where N4N0's own menu shows, the one opened by its dedicated button or the watch. It has nothing to do with the panels around VRChat's menus ([`OrbitSettings::wheel`],
+/// [`OrbitSettings::quick_menu`]), which go on or off whatever this says (Enzo, 2026-11-07: "completely independent").
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MenuDisplay {
-    /// Panels around VRChat's Action Menu wheel and Quick Menu, appearing and going with them.
+    /// On the avatar's N4N0 screen when it has one, floating otherwise. (`around_vrchat`: what a setting from when this choice also held the panels says.)
     #[default]
-    AroundVrchat,
-    /// N4N0's menu floating in the play space, opened by the watch or the binding, even with an avatar that has N4N0's
-    /// screen.
-    Floating,
-    /// N4N0's menu on the avatar's N4N0 screen when it has one, floating otherwise.
+    #[serde(alias = "around_vrchat")]
     AvatarScreen,
+    /// Floating in the play space, even with an avatar that has N4N0's screen.
+    Floating,
 }
 
 /// The panels around VRChat's own menus (`overlay::orbit`).
@@ -174,12 +173,12 @@ impl OrbitSettings {
 
     /// The wheel's panels are wanted.
     pub fn around_wheel(&self) -> bool {
-        self.display == MenuDisplay::AroundVrchat && self.wheel
+        self.wheel
     }
 
     /// The Quick Menu's panels are wanted.
     pub fn around_quick_menu(&self) -> bool {
-        self.display == MenuDisplay::AroundVrchat && self.quick_menu
+        self.quick_menu
     }
 
     /// Any of the panels are wanted.
@@ -190,7 +189,7 @@ impl OrbitSettings {
 
 impl Default for OrbitSettings {
     fn default() -> Self {
-        Self { display: MenuDisplay::AroundVrchat, wheel: true, quick_menu: true, vr_size: 1.0 }
+        Self { display: MenuDisplay::AvatarScreen, wheel: true, quick_menu: true, vr_size: 1.0 }
     }
 }
 

@@ -60,6 +60,13 @@ const BAR_EVERY: Duration = Duration::from_millis(33);
 /// A search is asked once the typing paused this long (Done asks at once).
 const TYPING_PAUSE: Duration = Duration::from_millis(400);
 
+/// What a panel on a sheet asks of the overlay's own 3D worlds, which has the 3D view.
+#[derive(Clone, Debug)]
+pub enum Relayed {
+    Show(Entry),
+    View(Action),
+}
+
 /// The world list the panel shows: the 3D captures, the worlds visited, or a list VRChat (or Orbiters) answers.
 #[derive(Clone, Debug, PartialEq)]
 enum Shown {
@@ -122,6 +129,9 @@ pub struct Worlds {
     /// The worlds' pages on the Map explorer, as far as fetched (performance, tags, pictures).
     facts: HashMap<String, Facts>,
     facts_pending: bool,
+    /// On a sheet in VR: what the overlay's own 3D worlds say of their view, and what was asked of them.
+    relay: Option<Status>,
+    relayed: Vec<Relayed>,
     /// The player's VRChat name (a capture shared with some players only is listed for them).
     me: Option<String>,
     infos: crate::worlds::Infos,
@@ -216,6 +226,8 @@ impl Worlds {
             asked: None,
             facts: HashMap::new(),
             facts_pending: false,
+            relay: None,
+            relayed: Vec::new(),
             me: None,
             infos: crate::worlds::Infos::new(&ctx),
             pictures: crate::worlds::Pictures::new(&ctx),
@@ -274,6 +286,8 @@ impl Worlds {
             asked: None,
             facts: HashMap::new(),
             facts_pending: false,
+            relay: None,
+            relayed: Vec::new(),
             me: None,
             infos: crate::worlds::Infos::new(&ctx),
             pictures: crate::worlds::Pictures::new(&ctx),
@@ -347,6 +361,13 @@ impl Worlds {
     fn act_alone(&mut self, actions: Vec<Action>, entries: &[Entry]) {
         for action in actions {
             match action {
+                // On a sheet in VR: for the overlay's own 3D worlds, which has the view.
+                Action::Show(id) if self.relay.is_some() => {
+                    if let Some(entry) = entries.iter().find(|e| e.id == id).or(self.picked.as_ref().filter(|e| e.id == id)) {
+                        self.relayed.push(Relayed::Show(entry.clone()));
+                    }
+                }
+                action @ (Action::Hide | Action::Recenter | Action::SeeThrough(_) | Action::Quality(_)) if self.relay.is_some() => self.relayed.push(Relayed::View(action)),
                 Action::Show(_) => {
                     if let Some(backend) = &self.backend {
                         backend.show_window();
@@ -581,6 +602,46 @@ impl Worlds {
 
     /// What the panel shows of the capture view.
     fn status(&self) -> Status {
+        let mut status = self.own_status();
+        // On a sheet in VR the 3D view is the overlay's own: what shows is what it says.
+        if let Some(view) = &self.relay {
+            status.current = view.current;
+            status.quality = view.quality;
+            status.see_through = view.see_through;
+            status.download = view.download;
+            status.stage = view.stage.clone();
+            status.error = view.error.clone().or(status.error);
+        }
+        status
+    }
+
+    /// What this one's 3D view is doing, for a panel elsewhere ([`Worlds::relay_to`]).
+    pub fn view_status(&self) -> Status {
+        self.own_status()
+    }
+
+    /// Makes this panel, on a sheet in VR, one that asks for what only the overlay's own 3D worlds can do, `view` being what those say. Returns what it asked since last time.
+    pub fn relay_to(&mut self, view: Status) -> Vec<Relayed> {
+        self.relay = Some(view);
+        self.panel.dirty = true;
+        std::mem::take(&mut self.relayed)
+    }
+
+    /// What a panel on a sheet asked: as if pressed on this one.
+    pub fn from_elsewhere(&mut self, asked: Vec<Relayed>) {
+        for ask in asked {
+            match ask {
+                Relayed::Show(entry) => {
+                    let id = entry.id;
+                    self.picked = Some(entry);
+                    self.deferred.push(Action::Show(id));
+                }
+                Relayed::View(action) => self.deferred.push(action),
+            }
+        }
+    }
+
+    fn own_status(&self) -> Status {
         let (fetching, listing_error) = self.catalog.state();
         let mut s = Status {
             current: self.current.as_ref().map(|e| e.id),

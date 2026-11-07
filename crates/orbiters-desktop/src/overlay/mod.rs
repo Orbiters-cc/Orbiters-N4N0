@@ -12,6 +12,7 @@
 //! quits or its server is gone, with [`EXIT_STEAMVR_GONE`].
 
 mod actions;
+mod vr_log;
 pub mod calibration;
 pub mod coverage;
 #[cfg(windows)]
@@ -621,6 +622,7 @@ fn session(args: &[String]) -> anyhow::Result<Ended> {
     orbiters_ui::install(&ctx);
     let sounds = Sounds::start();
     let mut stall = Stalls::default();
+    let mut input_log = vr_log::Every::default();
     let mut painter = painter();
     let mut presenter = Presenter::new(&steamvr);
     if let Some(icon) = thumbnail() {
@@ -878,20 +880,36 @@ fn session(args: &[String]) -> anyhow::Result<Ended> {
             t.menu.worlds.from_elsewhere(turn.worlds);
             t.menu.worlds.small_place(turn.small_place);
             let menu_up = !turn.menus_up.is_empty();
+            let menu_hand = turn.menu_hand;
             t.menu.worlds.menus_up(turn.menus_up);
             if t.menu.worlds.small_showing() {
                 let read = actions.pads(&steamvr);
                 let sticks = read.as_ref().map_or([0.0; 2], |pads| [pads.sticks[0].y, pads.sticks[1].y]);
-                // Touched, a thumb on a touchpad moves what shows: at rest it says nothing.
-                let touchpads = read.as_ref().map_or([[0.0; 2]; 2], |pads| [0, 1].map(|h| if pads.touchpads[h].touch { [pads.touchpads[h].x, pads.touchpads[h].y] } else { [0.0; 2] }));
+                // What moves what shows, for the hand holding it: a touchpad where there is one, else the other hand's stick. SteamVR's profile for Enzo's controllers has only a button at the
+                // thumb rest (`trackpad` is an invalid input on them), so no thumb position ever comes.
+                let moves = read.as_ref().map_or([[0.0; 2]; 2], |pads| [0, 1].map(|h| if pads.touchpads[h].touch { [pads.touchpads[h].x, pads.touchpads[h].y] } else { [pads.sticks[1 - h].x, pads.sticks[1 - h].y] }));
                 let lasers = actions.lasers(&steamvr, 0.0);
-                t.menu.worlds.small_input(lasers, actions.grabs(&steamvr), sticks, touchpads);
+                // The hand holding the menu closes on it without meaning to take what lies in its hole.
+                let mut grabs = actions.grabs(&steamvr);
+                if let Some(hand) = menu_hand {
+                    grabs[hand] = false;
+                }
+                if input_log.due(Duration::from_secs(1)) {
+                    vr_log::line(&format!("small input: read {} sticks {:?} moves {:?} grips {grabs:?} menu hand {menu_hand:?}", read.is_some(), sticks, moves)); // i18n: not shown (a log's line)
+                }
+                t.menu.worlds.small_input(lasers, grabs, sticks, moves);
                 t.menu.worlds.small_tools(lasers, actions.orbit_triggers(&steamvr, [false; 2]));
             } else if snap.settings.orbit.immersive_turn && t.menu.worlds.view.active() {
-                // Around the person: VRChat's turning stick is the hand that does not walk. Held still with a menu up, whose lists it scrolls.
+                // Around the person: VRChat's turning stick is the hand that does not walk, side to side. It turns with a menu up too: a capture shown from these menus goes when they close, so
+                // holding it still then meant it never turned at all. Their lists take the stick's up and down.
                 let hand = if snap.settings.walk_boost.hand == orbiters_core::settings::Hand::Left { 1 } else { 0 };
-                let stick = if menu_up { 0.0 } else { actions.pads(&steamvr).map_or(0.0, |pads| pads.sticks[hand].x) };
-                t.menu.worlds.turn_stick(stick, &steamvr);
+                let read = actions.pads(&steamvr);
+                let stick = read.as_ref().map_or(0.0, |pads| pads.sticks[hand].x);
+                let turned = t.menu.worlds.turn_stick(stick, &steamvr);
+                let every = if turned != 0.0 || stick.abs() > 0.2 { Duration::from_millis(250) } else { Duration::from_secs(2) };
+                if input_log.due(every) {
+                    vr_log::line(&format!("turn: read {} hand {hand} stick x {stick:.2} turned {:.4} rad steps {} menu up {menu_up}", read.is_some(), turned, t.menu.worlds.view.turns_in_steps())); // i18n: not shown (a log's line)
+                }
             }
         }
         if t.menu.update(&overlay, &steamvr, &mut presenter, &snap, &backend, button, watch) {

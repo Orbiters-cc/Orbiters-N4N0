@@ -234,6 +234,13 @@ impl Bloom {
     }
 }
 
+/// What a screen of the sheet had when it was left.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct Kept {
+    scroll: f32,
+    opened: Option<usize>,
+}
+
 /// What a press asks of the platform beyond the service.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Pressed {
@@ -730,6 +737,20 @@ pub struct Panels {
     drag: Option<Drag>,
     sheet_pointer: Option<Pos2>,
     pressed_late: Option<Action>,
+    /// Each screen as it was left: by its sheet and its name. N4N0's pages keep their results in the menu itself, which goes on being there, and the page they were on here.
+    kept: HashMap<(Sheet, String), Kept>,
+    kept_pages: HashMap<String, Page>,
+    /// The way back: what opened the screens before this one, and what opened this one; where N4N0's page opened, under which its own pages lie.
+    trail: Vec<Action>,
+    here: Option<Action>,
+    page_root: Option<Page>,
+    going_back: bool,
+    worlds_opened: bool,
+    /// The stick's up and down on a page that turns by whole pages: when it last did.
+    stick_paged: Option<Instant>,
+    /// The page of microphones: what reads them while it shows, and the one asked to be Windows' default until Windows says so.
+    mic_meters: Option<crate::audio_devices::Meters>,
+    mic_asked: Option<String>,
     /// The Instances sheet's worlds' pictures so far.
     visit_pictures: HashMap<String, egui::TextureId>,
     /// The page on the sheet (its back is in `list`).
@@ -803,6 +824,16 @@ impl Panels {
             drag: None,
             sheet_pointer: None,
             pressed_late: None,
+            kept: HashMap::new(),
+            kept_pages: HashMap::new(),
+            trail: Vec::new(),
+            here: None,
+            page_root: None,
+            going_back: false,
+            worlds_opened: false,
+            stick_paged: None,
+            mic_meters: None,
+            mic_asked: None,
             visit_pictures: HashMap::new(),
             open: None,
             recents: Recents::default(),
@@ -854,6 +885,58 @@ impl Panels {
                 if pointing {
                     panel.appear = Appear::new(0, live);
                 }
+            }
+        }
+    }
+
+    /// A microphone made Windows' default, off this thread: it is COM, and may take a moment. It shows chosen at once, and Windows' next reading says if it took.
+    fn mic_default(&mut self, i: usize) {
+        let Some(id) = self.facts.mics.get(i).map(|m| m.id.clone()) else { return };
+        self.mic_asked = Some(id.clone());
+        if let Some(panel) = self.takeover.as_mut() {
+            panel.dirty = true;
+        }
+        let _ = std::thread::Builder::new().name("orbit-mic-default".into()).spawn(move || { // i18n: not shown (a thread's name)
+            use crate::audio_devices::{set_default, ROLES};
+            if let Err(e) = ROLES.iter().try_for_each(|role| set_default(&id, *role)) {
+                super::vr_log::line(&format!("mic: Windows did not take {id}: {e}")); // i18n: not shown (a log's line)
+            }
+        });
+    }
+
+    /// The page of microphones, each turn it shows: what they hear now.
+    fn follow_mics(&mut self, snap: &Snapshot, seconds: f32) {
+        if self.facts.sheet != Some(Sheet::Mics) {
+            // Nothing keeps them open with the page gone, and nothing they hear is kept.
+            self.mic_meters = None;
+            return;
+        }
+        let Some(meters) = self.mic_meters.as_ref() else { return };
+        meters.looked_at();
+        let levels = meters.levels();
+        if self.mic_asked.as_deref() == levels.default_id.as_deref() {
+            self.mic_asked = None;
+        }
+        let chosen = self.mic_asked.clone().or_else(|| levels.default_id.clone());
+        let tiles: Vec<panels::MicTile> = levels
+            .mics
+            .iter()
+            .map(|mic| {
+                let was = self.facts.mics.iter().find(|m| m.id == mic.endpoint.id).map_or(0.0, |m| m.level);
+                let level = mic.peak.map(|peak| crate::pages::mic_grid::settled(was, crate::pages::mic_grid::fill_of(peak), seconds));
+                panels::MicTile { id: mic.endpoint.id.clone(), name: mic.endpoint.name.clone(), level: level.unwrap_or(0.0), can_hear: level.is_some(), default: chosen.as_deref() == Some(mic.endpoint.id.as_str()) }
+            })
+            .collect();
+        let changed = tiles.len() != self.facts.mics.len() || tiles.iter().zip(&self.facts.mics).any(|(a, b)| a.default != b.default || (a.level - b.level).abs() > 0.01 || a.name != b.name);
+        let voice = (snap.settings.performance.record_mic, snap.settings.performance.mic_device.clone(), snap.settings.n4n0.mic_device.clone());
+        let choices: Vec<(String, String)> = snap.mics.iter().map(|m| (m.id.clone(), m.name.clone())).collect();
+        let settings_changed = voice != (self.facts.voice_on, self.facts.voice_mic.clone(), self.facts.n4n0_mic.clone()) || choices != self.facts.mic_choices;
+        if changed || settings_changed {
+            self.facts.mics = tiles;
+            (self.facts.voice_on, self.facts.voice_mic, self.facts.n4n0_mic) = voice;
+            self.facts.mic_choices = choices;
+            if let Some(panel) = self.takeover.as_mut() {
+                panel.dirty = true;
             }
         }
     }
@@ -972,6 +1055,7 @@ impl Panels {
     /// Opens `sheet` on the sheet, with `title`.
     fn open_sheet(&mut self, sheet: Sheet, title: &str, snap: &Snapshot) {
         let Some(place) = self.takeover_place else { return };
+        self.keep_screen();
         let size = place.rect.size() * self.sharp;
         let px = [size.x.round() as u32, size.y.round() as u32];
         if self.stage.px != px || (self.worlds_here && self.stage.worlds.is_none()) {
@@ -979,8 +1063,10 @@ impl Panels {
         }
         self.facts.sheet = Some(sheet);
         self.facts.sheet_title = title.to_string();
-        self.facts.gallery_scroll = 0.0;
-        self.gallery_to = 0.0;
+        // As it was left, whichever way this comes back to it.
+        let kept = self.kept.get(&(sheet, title.to_string())).copied().unwrap_or_default();
+        self.facts.gallery_scroll = kept.scroll;
+        self.gallery_to = kept.scroll;
         self.throw = 0.0;
         self.facts.opened = None;
         self.recents.big = None;
@@ -988,6 +1074,9 @@ impl Panels {
         if sheet == Sheet::Pictures {
             self.recents.seen = None;
             self.recents.listed = None;
+            if let Some(n) = kept.opened {
+                self.open_tile(n, snap);
+            }
         }
         if self.takeover.is_none() {
             self.takeover = Some(Panel::new(place, self.sharp, 0, !snap.settings.reduce_motion));
@@ -1026,6 +1115,9 @@ impl Panels {
 
     fn close_sheet(&mut self) {
         self.stop_talking();
+        self.keep_screen();
+        self.trail.clear();
+        self.here = None;
         self.takeover = None;
         self.facts.sheet = None;
         self.facts.sheet_title.clear();
@@ -1036,7 +1128,53 @@ impl Panels {
         self.show_keys = false;
     }
 
-    /// A page of N4N0's menu on the sheet, from its Home as the menu starts there.
+    /// What opens a screen of the sheet, for the way back. What brought them there is what brings them back: everything else about it is kept by [`Panels::keep_screen`].
+    fn opens_a_screen(action: Action) -> bool {
+        matches!(action, Action::Worlds | Action::All | Action::Pictures | Action::Talk | Action::Settings | Action::Page(_))
+    }
+
+    /// Before leaving a screen, or showing another of the same name: what it has.
+    fn keep_screen(&mut self) {
+        let Some(sheet) = self.facts.sheet else { return };
+        let page = matches!(sheet, Sheet::Menu | Sheet::Results).then_some(self.stage.host.menu.page);
+        self.kept.insert((sheet, self.facts.sheet_title.clone()), Kept { scroll: self.gallery_to, opened: self.facts.opened });
+        if let Some(page) = page {
+            self.kept_pages.insert(self.facts.sheet_title.clone(), page);
+        }
+    }
+
+    /// The head's Back: to the last screen, or within this one when it went further. Enzo: "a consistent back button on every page that will take us to the last screen".
+    fn go_back(&mut self, snap: &Snapshot, out: &mut Pressed) {
+        // Within what shows, first.
+        if self.facts.opened.is_some() {
+            self.act(Action::PictureBack, snap, out);
+            return;
+        }
+        match self.facts.sheet {
+            Some(Sheet::Menu | Sheet::Results) if self.page_root.is_some_and(|root| root != self.stage.host.menu.page) => {
+                let host = &mut self.stage.host;
+                let effects = host.press(Target::Back);
+                host.effects(effects, snap, &self.backend);
+                return;
+            }
+            Some(Sheet::Worlds) => {
+                if self.stage.worlds.as_mut().is_some_and(|w| w.back_within()) {
+                    return;
+                }
+            }
+            _ => {}
+        }
+        match self.trail.pop() {
+            Some(screen) => {
+                self.going_back = true;
+                self.act(screen, snap, out);
+                self.going_back = false;
+            }
+            None => self.close_sheet(),
+        }
+    }
+
+    /// A page of N4N0's menu on the sheet, as it was left, or from its Home as the menu starts there.
     fn open_page(&mut self, target: Target, snap: &Snapshot) {
         let title = match target {
             Target::YouTube => "YouTube",
@@ -1046,6 +1184,7 @@ impl Panels {
             Target::States => mark("Saved looks"),
             Target::Light => mark("Light"),
             Target::Tracking => mark("Smooth tracking"),
+            Target::Microphones => mark("Your microphones"),
             Target::WorldFeedback => mark("World feedback"),
             Target::Qr => mark("QR code"),
             Target::Suggest => mark("Suggest"),
@@ -1055,16 +1194,36 @@ impl Panels {
         // page on the menu has the avatar screen's fixed choices, and here there is room for sliders in milliseconds.
         if target == Target::Instances {
             self.open_sheet(Sheet::Instances, mark("Instances"), snap);
+        } else if target == Target::Microphones {
+            self.open_sheet(Sheet::Mics, title, snap);
+            self.mic_meters.get_or_insert_with(crate::audio_devices::Meters::start);
+            return;
         } else if target == Target::Tracking {
             self.open_sheet(Sheet::Tracking, title, snap);
         } else {
             self.open_sheet(Sheet::Menu, title, snap);
         }
+        let kept = self.kept_pages.get(title).copied();
         let host = &mut self.stage.host;
         let _ = host.menu.close();
         host.open(snap);
-        let effects = host.press(target);
-        host.effects(effects, snap, &self.backend);
+        // Its own way back is the sheet's head.
+        host.menu.back_on_the_sheet = true;
+        // The scanner's camera starts with a press, and what shows of a home is no place to come back to.
+        match kept.filter(|page| !matches!(page, Page::Home | Page::More | Page::Qr) && target != Target::Qr) {
+            Some(page) => {
+                let effects = host.press(target);
+                host.effects(effects, snap, &self.backend);
+                self.page_root = Some(host.menu.page);
+                host.menu.page = page;
+                host.dirty = true;
+            }
+            None => {
+                let effects = host.press(target);
+                host.effects(effects, snap, &self.backend);
+                self.page_root = Some(host.menu.page);
+            }
+        }
     }
 
     /// Follows the service's state: the parts' facts, recent captures, what is on the sheet.
@@ -1090,7 +1249,7 @@ impl Panels {
     /// The mouse's wheel, in notches, up positive: moves the sheet's list, when it has one. At its end it gives a little.
     pub fn wheel(&mut self, notches: f32) {
         if self.facts.sheet == Some(Sheet::Worlds) {
-            if let Some(worlds) = self.stage.worlds.as_ref() {
+            if let Some(worlds) = self.stage.worlds.as_mut() {
                 worlds.wheel_alone(notches);
             }
         }
@@ -1147,6 +1306,73 @@ impl Panels {
         let mut asked = self.stage.worlds.as_mut().map_or_else(Vec::new, |worlds| worlds.relay_to(status));
         asked.append(&mut self.local_asked);
         asked
+    }
+
+    /// What is submitted at the hole a capture shows through, read back: how solid the sheet's page and its back are at its middle and just outside it. Both must be 0 at its middle.
+    fn hole_alphas(&self) -> [Option<u8>; 4] {
+        let sample = |panel: Option<&Panel>, at: Pos2| -> Option<u8> {
+            let panel = panel?;
+            let zoom = panel.px[0] as f32 / panel.logical.x;
+            let (x, y) = ((at.x * zoom) as usize, (at.y * zoom) as usize);
+            panel.pixels().get((y * panel.px[0] as usize + x) * 4 + 3).copied()
+        };
+        let page = self.takeover.as_ref();
+        let back = self.list.iter().find(|p| p.zone == Zone::SheetBack);
+        let hole = self.stage.worlds.as_ref().and_then(|w| w.small_hole());
+        let back_hole = self.facts.sheet_hole;
+        [
+            hole.and_then(|h| sample(page, h.center())),
+            hole.and_then(|h| sample(page, pos2(h.center().x, h.max.y + 8.0))),
+            back_hole.and_then(|h| sample(back, h.center())),
+            back_hole.and_then(|h| sample(back, pos2(h.center().x, h.max.y + 8.0))),
+        ]
+    }
+
+    pub(in crate::overlay) fn hole_report(&self) -> String {
+        let [page_middle, page_outside, back_middle, back_outside] = self.hole_alphas();
+        let hole = self.stage.worlds.as_ref().and_then(|w| w.small_hole());
+        format!("page hole {hole:?} alpha at its middle {page_middle:?} outside {page_outside:?}; back hole {:?} alpha at its middle {back_middle:?} outside {back_outside:?}; sheet {:?}", self.facts.sheet_hole, self.facts.sheet) // i18n: not shown (a log's line)
+    }
+
+    /// The stick's up and down, -1 to 1, for `seconds`: what is on the sheet scrolls, as a wheel does but as long as it is held. Enzo: "the up down joystick (same as the one for zoom in small 3D view) allow to scroll in scrollable pages".
+    pub fn stick(&mut self, up: f32, seconds: f32, snap: &Snapshot) {
+        const REST: f32 = 0.25;
+        const UNITS_PER_S: f32 = 900.0;
+        if up.abs() < REST {
+            self.stick_paged = None;
+            return;
+        }
+        let pace = (up.abs() - REST) / (1.0 - REST) * up.signum();
+        match self.facts.sheet {
+            Some(Sheet::Worlds) => {
+                if let Some(worlds) = self.stage.worlds.as_mut() {
+                    worlds.scroll_by(-pace * UNITS_PER_S * seconds);
+                }
+            }
+            // N4N0's pages turn by whole pages, as they do on the avatar's screen.
+            Some(Sheet::Menu) => {
+                if self.stick_paged.is_none_or(|at| at.elapsed() >= STICK_PAGES_EVERY) && pace.abs() > 0.5 {
+                    self.stick_paged = Some(Instant::now());
+                    let host = &mut self.stage.host;
+                    let target = if up > 0.0 { Target::Previous } else { Target::Next };
+                    if !layout::target_state(&host.menu, target).hidden {
+                        let effects = host.press(target);
+                        host.effects(effects, snap, &self.backend);
+                        host.dirty = true;
+                    }
+                }
+            }
+            Some(sheet) if self.facts.opened.is_none() => {
+                let max = panels::max_scroll(sheet, &self.facts);
+                self.throw = 0.0;
+                self.gallery_to = (self.gallery_to - pace * UNITS_PER_S * seconds).clamp(0.0, max);
+                self.facts.gallery_scroll = self.gallery_to;
+                if let Some(panel) = self.takeover.as_mut() {
+                    panel.dirty = true;
+                }
+            }
+            _ => {}
+        }
     }
 
     /// Where on the sheet's page a capture standing small may lie.
@@ -1418,7 +1644,15 @@ impl Panels {
             no_kit: snap.worn_kit == Some(false),
             timer: snap.settings.photo_3d_timer,
             can_call: menu.calls_ready,
+            mics: self.facts.mics.clone(),
+            mic_choices: self.facts.mic_choices.clone(),
+            voice_on: self.facts.voice_on,
+            voice_mic: self.facts.voice_mic.clone(),
+            n4n0_mic: self.facts.n4n0_mic.clone(),
             can_states: menu.states_ready,
+            can_copy_playing: !layout::target_state(menu, Target::CopyPlaying).hidden,
+            can_drop_playing: !layout::target_state(menu, Target::DropPlaying).hidden,
+            playing_link_copied: menu.media.as_ref().and_then(|m| m.video.as_deref()).is_some_and(|v| menu.copied.as_deref() == Some(v)),
             can_light: menu.light.is_some(),
             vr_close: self.sharp > 1.0,
             picture_mode: self.facts.picture_mode,
@@ -1788,6 +2022,9 @@ impl Panels {
             panels::Pick::Swatch(i) => colour(panels::SWATCHES[i]),
             // Pressed and dragged: see `press`, `hover` and `release`.
             panels::Pick::Hue | panels::Pick::SmoothingBar(_) => return,
+            panels::Pick::VoiceOn(on) => serde_json::json!({ "performance": { "record_mic": on } }),
+            panels::Pick::VoiceMic(after) => serde_json::json!({ "performance": { "mic_device": panels::mic_after(&self.facts.mic_choices, &snap.settings.performance.mic_device, after) } }),
+            panels::Pick::N4n0Mic(after) => serde_json::json!({ "n4n0": { "mic_device": panels::mic_after(&self.facts.mic_choices, &snap.settings.n4n0.mic_device, after) } }),
             panels::Pick::Smoothing(on) => serde_json::json!({ "tracking": { "enabled": on } }),
             panels::Pick::Language(after) => crate::language::patch(panels::language_after(crate::language::chosen(&snap.settings), after)),
             panels::Pick::Sound(after) => {
@@ -1807,12 +2044,42 @@ impl Panels {
     /// What a press on `action` does.
     fn act(&mut self, action: Action, snap: &Snapshot, out: &mut Pressed) {
         out.clicked = action != Action::Idle;
+        // Going to another screen: the one that was is on the way back.
+        if Self::opens_a_screen(action) {
+            if let Some(here) = self.here.filter(|here| *here != action && self.facts.sheet.is_some() && !self.going_back) {
+                self.trail.push(here);
+                // A long way round is not a longer way back.
+                if let Some(first) = self.trail.iter().position(|screen| *screen == action) {
+                    self.trail.truncate(first);
+                }
+            }
+            self.here = Some(action);
+        }
         match action {
+            Action::Back => self.go_back(snap, out),
+            // By the menu's own press, so it does here what it does on N4N0's page: that says so, and offers Drop once it was copied.
+            Action::PlayingLink(target) => {
+                let host = &mut self.stage.host;
+                let effects = host.press(target);
+                host.effects(effects, snap, &self.backend);
+                if let Some(panel) = self.takeover.as_mut() {
+                    panel.dirty = true;
+                }
+            }
+            Action::MicDefault(i) => self.mic_default(i),
             Action::Worlds => {
                 if self.worlds_here {
+                    let kept = self.worlds_opened;
                     self.open_sheet(Sheet::Worlds, mark("Worlds in 3D"), snap);
+                    self.worlds_opened = true;
                     if let Some(worlds) = self.stage.worlds.as_mut() {
-                        worlds.open_panel(self.stage.host.menu.layout);
+                        worlds.set_moves(!snap.settings.reduce_motion);
+                        // It keeps its search, its list and where it was. The first time it opens as ever.
+                        if kept {
+                            worlds.come_back(self.stage.host.menu.layout);
+                        } else {
+                            worlds.open_panel(self.stage.host.menu.layout);
+                        }
                     }
                 } else {
                     out.worlds = true;
@@ -2204,6 +2471,7 @@ impl Panels {
     /// Takes the menu's own business for a turn while it is on the sheet: what it fetches, what comes back, and telling the service: only its keyboard needs it to know (keys go to the
     /// keyboard page). Opening a page does not start N4N0 listening: that is what Ask N4N0 is for.
     pub fn menu_turn(&mut self, snap: &Snapshot) {
+        self.follow_mics(snap, 0.011);
         let on_sheet = self.facts.sheet == Some(Sheet::Menu);
         let keyboard = (on_sheet && self.stage.host.menu.shows_keyboard()) || (self.facts.sheet == Some(Sheet::Worlds) && self.stage.worlds.as_ref().is_some_and(|w| w.typing()));
         let state = (keyboard, false, keyboard);
@@ -2404,6 +2672,9 @@ fn visited_worlds(rows: &[orbiters_n4n0_core::menu::InstanceRow], now: u64, pict
 
 /// How long a place asked for in what plays is shown over what the app says, which is read once a second.
 const MEDIA_CATCHES_UP: Duration = Duration::from_millis(2500);
+
+/// How often the stick turns a page, held.
+const STICK_PAGES_EVERY: Duration = Duration::from_millis(420);
 
 /// How fast a list thrown slows down: by e every this fraction of a second's inverse.
 const THROW_SLOWS: f32 = 2.2;

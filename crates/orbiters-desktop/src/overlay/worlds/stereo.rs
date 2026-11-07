@@ -181,6 +181,7 @@ const SMALL_REACHES: (f32, f32) = (0.5, 150.0);
 /// How fast it settles where it goes, and how near that is there.
 const SMALL_SETTLES_PER_S: f32 = 14.0;
 const SMALL_SETTLED_M: f32 = 0.002;
+const SMALL_TREMBLE_M: f32 = 0.003;
 
 /// How much a capture in a panel's hole is tipped towards who looks, and one out in the room: held below the eyes that one is seen
 /// from above already.
@@ -269,6 +270,17 @@ impl TurnStick {
     }
 }
 
+/// How far apart two rotations are, about as radians for small ones.
+fn turned_away(a: &[[f32; 3]; 3], b: &[[f32; 3]; 3]) -> f32 {
+    let mut trace = 0.0;
+    for c in 0..3 {
+        for row in 0..3 {
+            trace += a[row][c] * b[row][c];
+        }
+    }
+    (((trace - 1.0) / 2.0).clamp(-1.0, 1.0)).acos()
+}
+
 /// `placement` turned by `radians` about the vertical through `about`.
 pub fn turned_about(placement: &Placement, about: V3, radians: f32) -> Placement {
     let (s, c) = radians.sin_cos();
@@ -282,26 +294,6 @@ pub struct MenuBox {
     pub place: Matrix34,
     pub width: f32,
     pub height: f32,
-}
-
-/// Whether a capture of `radius` at `anchor` shows over `menu`, seen from `eye`. SteamVR draws overlays over the game and by their order, not by how far they are, so what counts
-/// is where it shows, near or far. Enzo: a capture never goes in front of the menus.
-pub fn shows_over(eye: V3, anchor: V3, radius: f32, menu: &MenuBox) -> bool {
-    let (middle, normal) = (position(&menu.place), axis(&menu.place, 2));
-    let along = sub(anchor, eye);
-    let facing = dot(along, normal);
-    if facing.abs() < 1e-4 {
-        return false;
-    }
-    // Where the line from the eye through it meets the menu's plane, and how large it is there.
-    let t = dot(sub(middle, eye), normal) / facing;
-    if t <= 0.0 {
-        return false;
-    }
-    let on = sub(add(eye, scale(along, t)), middle);
-    let (x, y) = (dot(on, axis(&menu.place, 0)), dot(on, axis(&menu.place, 1)));
-    let seen = radius * t + 0.02;
-    x.abs() <= menu.width / 2.0 + seen && y.abs() <= menu.height / 2.0 + seen
 }
 
 /// The hand holding it, and it as that hand holds it.
@@ -413,6 +405,11 @@ impl Small {
         self.moved = if far > limit { [to[0] * limit / far, to[1] * limit / far] } else { to };
     }
 
+    /// Whether a hand took it from its place.
+    pub fn taken(&self) -> bool {
+        self.taken
+    }
+
     /// How far from its middle it shows the capture, in the capture's metres.
     pub fn reach(&self) -> f32 {
         self.reach
@@ -486,12 +483,18 @@ impl Small {
             Some(d) => {
                 self.docked = true;
                 if self.settled {
-                    (self.rotation, self.anchor, self.radius) = (d.rotation, d.anchor, d.radius);
+                    // A hand holding the menu always trembles, and every move of this draws it all again, late: only a real move counts.
+                    if length(sub(self.anchor, d.anchor)) > SMALL_TREMBLE_M || (self.radius - d.radius).abs() > SMALL_TREMBLE_M || turned_away(&self.rotation, &d.rotation) > 0.01 {
+                        (self.rotation, self.anchor, self.radius) = (d.rotation, d.anchor, d.radius);
+                    }
                 } else {
                     self.rotation = towards(&self.rotation, &d.rotation, settling);
                     self.anchor = add(self.anchor, scale(sub(d.anchor, self.anchor), settling));
                     self.radius += (d.radius - self.radius) * settling;
                     self.settled = length(sub(self.anchor, d.anchor)) < SMALL_SETTLED_M && (self.radius - d.radius).abs() < SMALL_SETTLED_M;
+                    if self.settled {
+                        (self.rotation, self.anchor, self.radius) = (d.rotation, d.anchor, d.radius);
+                    }
                 }
             }
             None => self.radius += (SMALL_RADIUS_M - self.radius) * settling,
@@ -903,19 +906,6 @@ mod tests {
     }
 
     /// Enzo: "it's better that the 3D captures never go in front of the menus".
-    #[test]
-    fn a_capture_shows_over_a_menu_if_it_lies_across_it_near_or_far() {
-        let menu = MenuBox { place: Matrix34 { m: [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 1.5], [0.0, 0.0, 1.0, -1.0]] }, width: 0.6, height: 0.4 };
-        let eye = [0.0, 1.5, 0.0];
-        assert!(shows_over(eye, [0.0, 1.5, -0.5], 0.1, &menu), "between the eye and it");
-        assert!(shows_over(eye, [0.0, 1.5, -1.5], 0.1, &menu), "behind it, where overlays still draw over each other");
-        assert!(!shows_over(eye, [1.0, 1.5, -0.5], 0.1, &menu), "well to the side");
-        assert!(!shows_over(eye, [0.0, 1.5, 1.0], 0.1, &menu), "behind who looks");
-        // Its edge counts, and closer it covers more.
-        assert!(shows_over(eye, [0.2, 1.5, -0.5], 0.08, &menu));
-        assert!(!shows_over(eye, [0.3, 1.5, -1.0], 0.0, &MenuBox { width: 0.2, ..menu }));
-    }
-
     #[test]
     fn a_hand_near_it_takes_it_and_its_stick_zooms_it_and_only_that_hand() {
         let mut small = small_for_hands();

@@ -144,8 +144,9 @@ impl FaceRenderer {
             .means
             .iter()
             .map(|m| {
-                let (x, y, z) = (m[0] - middle[0], m[1] - middle[1], m[2] - middle[2]);
-                if x * x + y * y + z * z <= within {
+                // Across the ground only: moved, it shows the same round as before, with nothing cut for its height.
+                let (x, z) = (m[0] - middle[0], m[2] - middle[2]);
+                if x * x + z * z <= within {
                     0
                 } else {
                     2

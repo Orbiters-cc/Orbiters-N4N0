@@ -1105,7 +1105,7 @@ fn folder_field(ui: &mut Ui, label: &str, description: Option<&str>, value: &std
 }
 
 /// The system's default microphone, as a choice among microphones (each system names its own).
-pub(super) fn default_mic() -> &'static str {
+pub(crate) fn default_mic() -> &'static str {
     tr(crate::words::DEFAULT_MIC)
 }
 

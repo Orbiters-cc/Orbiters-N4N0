@@ -488,65 +488,195 @@ pub fn panel_in_room(found: &Found, size: [f32; 2], mirror: &Mirror, eye: &Matri
     (frame, unit)
 }
 
-/// Follows what is seen, ten times a second, smoothly at the headset's rate: at once over a jump, softly over a tremble. A jump counts only when the next look agrees: one wrong look moves nothing.
+/// Where the panel is, from what tracking already knows, as Enzo proposed: taken in a hand it goes with that controller until it is let go, and let go it stays still in the room. So nothing here
+/// waits on a picture, and it does not tremble with one. What is seen is a regular recalibration, keeping this on VRChat's own panel: a little at each look, and at once only when two looks agree
+/// that it is somewhere else (it was moved by what this cannot see: it flew, or it follows the head).
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Follow {
-    target: Option<(Matrix34, f32)>,
-    now: Option<(Matrix34, f32)>,
+    /// Where it shows and where it should, as what it is held by has it: the hand, or the room.
+    at: Option<(Matrix34, f32)>,
+    wanted: Option<(Matrix34, f32)>,
+    /// A look far from there, in the room, waiting for a second.
     unsure: Option<(Matrix34, f32)>,
+    held: Option<(usize, Matrix34)>,
+    /// The hand moves too fast for a picture, which is older than the hand's pose, to say anything of it.
+    hand_moving: bool,
+    grips: [bool; 2],
 }
 
-/// How far it goes towards what is seen, per second, and beyond what distance it simply is there.
-const FOLLOWS_PER_S: f32 = 14.0;
-const JUMPS_M: f32 = 0.25;
+/// How fast what shows goes to where it should, per second.
+const SETTLES_PER_S: f32 = 8.0;
+/// A look further than this from there takes a second look to believe, and is then believed at once.
+const JUMPS_M: f32 = 0.15;
+/// Nearer than this a look says nothing: depth read from a size trembles by that much.
+const LOOK_SAYS_NOTHING_M: f32 = 0.006;
+/// How much of what a look says it takes: little, unless it is clearly off.
+const LOOK_NUDGES: f32 = 0.12;
+const LOOK_CORRECTS: f32 = 0.5;
+const CLEARLY_OFF_M: f32 = 0.04;
+/// A hand faster than this, in metres a second, is not compared with a picture of it.
+const HAND_TOO_FAST: f32 = 0.2;
+/// How far around the panel a hand closing its grip takes it, and how far beside it a pointer does.
+const HAND_TAKES_M: f32 = 0.14;
+const POINTER_TAKES_M: f32 = 0.06;
 
 fn apart(a: &Matrix34, b: &Matrix34) -> f32 {
     (0..3).map(|i| (a.m[i][3] - b.m[i][3]).powi(2)).sum::<f32>().sqrt()
 }
 
+fn turned_apart(a: &Matrix34, b: &Matrix34) -> f32 {
+    let trace: f32 = (0..3).map(|c| (0..3).map(|i| a.m[i][c] * b.m[i][c]).sum::<f32>()).sum();
+    ((trace - 1.0) / 2.0).clamp(-1.0, 1.0).acos()
+}
+
+/// `a` then `b`, as frames.
+fn then(a: &Matrix34, b: &Matrix34) -> Matrix34 {
+    Matrix34 {
+        m: std::array::from_fn(|i| {
+            let row = |c: usize| a.m[i][0] * b.m[0][c] + a.m[i][1] * b.m[1][c] + a.m[i][2] * b.m[2][c];
+            [row(0), row(1), row(2), row(3) + a.m[i][3]]
+        }),
+    }
+}
+
+/// What undoes a frame with no scale in it.
+fn undone(a: &Matrix34) -> Matrix34 {
+    let r = |i: usize, c: usize| a.m[c][i];
+    Matrix34 { m: std::array::from_fn(|i| [r(i, 0), r(i, 1), r(i, 2), -(r(i, 0) * a.m[0][3] + r(i, 1) * a.m[1][3] + r(i, 2) * a.m[2][3])]) }
+}
+
+/// Part of the way from `a` to `b`, still a frame.
+fn towards(a: &Matrix34, b: &Matrix34, k: f32) -> Matrix34 {
+    let mut m = a.m;
+    for (row, to) in m.iter_mut().zip(b.m.iter()) {
+        for (v, t) in row.iter_mut().zip(to.iter()) {
+            *v += (*t - *v) * k;
+        }
+    }
+    let axis = |c: usize| -> [f32; 3] { [m[0][c], m[1][c], m[2][c]] };
+    let unit_of = |a: [f32; 3]| -> [f32; 3] {
+        let l = (a[0] * a[0] + a[1] * a[1] + a[2] * a[2]).sqrt().max(1e-5);
+        [a[0] / l, a[1] / l, a[2] / l]
+    };
+    let cross = |a: [f32; 3], b: [f32; 3]| [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+    let z = unit_of(axis(2));
+    let x = unit_of(cross(axis(1), z));
+    let y = cross(z, x);
+    Matrix34 { m: std::array::from_fn(|i| [x[i], y[i], z[i], m[i][3]]) }
+}
+
+/// Whether a grip closing takes the panel at `frame`: the hand is at it, or points at it.
+fn takes(frame: &Matrix34, unit: f32, hand: &Matrix34, pointer: Option<([f32; 3], [f32; 3])>) -> bool {
+    let (half_w, half_h) = (PANEL_SIZE[0] / 2.0 * unit, PANEL_SIZE[1] / 2.0 * unit);
+    let on_it = undone(frame);
+    let local = |p: [f32; 3]| -> [f32; 3] { std::array::from_fn(|i| on_it.m[i][0] * p[0] + on_it.m[i][1] * p[1] + on_it.m[i][2] * p[2] + on_it.m[i][3]) };
+    let at_hand = local([hand.m[0][3], hand.m[1][3], hand.m[2][3]]);
+    if at_hand[0].abs() <= half_w + HAND_TAKES_M && at_hand[1].abs() <= half_h + HAND_TAKES_M && at_hand[2].abs() <= HAND_TAKES_M * 2.0 {
+        return true;
+    }
+    pointer.is_some_and(|(from, along)| {
+        let o = local(from);
+        let d: [f32; 3] = std::array::from_fn(|i| on_it.m[i][0] * along[0] + on_it.m[i][1] * along[1] + on_it.m[i][2] * along[2]);
+        if d[2].abs() < 1e-4 {
+            return false;
+        }
+        let t = -o[2] / d[2];
+        t > 0.0 && (o[0] + d[0] * t).abs() <= half_w + POINTER_TAKES_M && (o[1] + d[1] * t).abs() <= half_h + POINTER_TAKES_M
+    })
+}
+
 impl Follow {
+    fn held_by(&self) -> Option<&Matrix34> {
+        self.held.as_ref().map(|(_, hand)| hand)
+    }
+
+    fn local(&self, frame: &Matrix34) -> Matrix34 {
+        self.held_by().map_or(*frame, |hand| then(&undone(hand), frame))
+    }
+
+    fn in_room(&self, frame: &Matrix34) -> Matrix34 {
+        self.held_by().map_or(*frame, |hand| then(hand, frame))
+    }
+
+    /// What a look saw, in the room.
     pub fn seen(&mut self, frame: Matrix34, unit: f32) {
-        if let Some((now, _)) = self.target.filter(|(now, _)| apart(now, &frame) > JUMPS_M) {
-            let _ = now;
-            if !self.unsure.is_some_and(|(was, _)| apart(&was, &frame) <= JUMPS_M) {
+        let local = self.local(&frame);
+        let Some((wanted, wanted_unit)) = self.wanted else {
+            self.at = Some((local, unit));
+            self.wanted = Some((local, unit));
+            return;
+        };
+        if self.hand_moving {
+            return;
+        }
+        let far = apart(&wanted, &local);
+        if far > JUMPS_M {
+            if self.unsure.is_some_and(|(was, _)| apart(&was, &frame) <= JUMPS_M) {
+                self.unsure = None;
+                self.at = Some((local, unit));
+                self.wanted = Some((local, unit));
+            } else {
                 self.unsure = Some((frame, unit));
-                return;
             }
+            return;
         }
         self.unsure = None;
-        self.target = Some((frame, unit));
+        if far < LOOK_SAYS_NOTHING_M && turned_apart(&wanted, &local) < 2f32.to_radians() {
+            return;
+        }
+        let k = if far > CLEARLY_OFF_M { LOOK_CORRECTS } else { LOOK_NUDGES };
+        self.wanted = Some((towards(&wanted, &local, k), wanted_unit + (unit - wanted_unit) * k));
     }
 
     pub fn clear(&mut self) {
         *self = Self::default();
     }
 
-    pub fn step(&mut self, seconds: f32) -> Option<(Matrix34, f32)> {
-        let (target, unit) = self.target?;
-        let Some((now, was)) = self.now else {
-            self.now = Some((target, unit));
-            return self.now;
-        };
-        let k = if apart(&target, &now) > JUMPS_M { 1.0 } else { 1.0 - (-FOLLOWS_PER_S * seconds).exp() };
-        let mut m = now.m;
-        for (row, to) in m.iter_mut().zip(target.m.iter()) {
-            for (a, b) in row.iter_mut().zip(to.iter()) {
-                *a += (*b - *a) * k;
+    /// Whether a hand has it.
+    pub fn is_held(&self) -> bool {
+        self.held.is_some()
+    }
+
+    /// One frame: the hands' poses, their grips, and where they point. Where it is now, in the room.
+    pub fn step(&mut self, seconds: f32, hands: [Option<Matrix34>; 2], grips: [bool; 2], pointers: [Option<([f32; 3], [f32; 3])>; 2]) -> Option<(Matrix34, f32)> {
+        let (at, unit) = self.at?;
+        let (wanted, wanted_unit) = self.wanted.unwrap_or((at, unit));
+        // The hand that has it moves it, and that is that; let go, it stays where it was let go of.
+        let room = self.in_room(&at);
+        let room_wanted = self.in_room(&wanted);
+        let was_held = self.held;
+        self.hand_moving = false;
+        if let Some((hand, was)) = was_held {
+            match hands[hand].filter(|_| grips[hand]) {
+                Some(pose) => {
+                    self.hand_moving = apart(&was, &pose) > HAND_TOO_FAST * seconds.max(0.001);
+                    self.held = Some((hand, pose));
+                }
+                None => {
+                    self.held = None;
+                    self.at = Some((room, unit));
+                    self.wanted = Some((room_wanted, wanted_unit));
+                }
+            }
+        } else {
+            for hand in 0..2 {
+                if grips[hand] && !self.grips[hand] {
+                    if let Some(pose) = hands[hand].filter(|pose| takes(&room, unit, pose, pointers[hand])) {
+                        self.held = Some((hand, pose));
+                        self.at = Some((then(&undone(&pose), &room), unit));
+                        self.wanted = Some((then(&undone(&pose), &room_wanted), wanted_unit));
+                        break;
+                    }
+                }
             }
         }
-        // Straight again: what was mixed is not quite a rotation.
-        let axis = |c: usize| -> [f32; 3] { [m[0][c], m[1][c], m[2][c]] };
-        let unit_of = |a: [f32; 3]| -> [f32; 3] {
-            let l = (a[0] * a[0] + a[1] * a[1] + a[2] * a[2]).sqrt().max(1e-5);
-            [a[0] / l, a[1] / l, a[2] / l]
-        };
-        let cross = |a: [f32; 3], b: [f32; 3]| [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
-        let z = unit_of(axis(2));
-        let x = unit_of(cross(axis(1), z));
-        let y = cross(z, x);
-        let shown = Matrix34 { m: std::array::from_fn(|i| [x[i], y[i], z[i], m[i][3]]) };
-        self.now = Some((shown, was + (unit - was) * k));
-        self.now
+        self.grips = grips;
+        let (at, unit) = self.at?;
+        let (wanted, wanted_unit) = self.wanted.unwrap_or((at, unit));
+        let k = 1.0 - (-SETTLES_PER_S * seconds).exp();
+        let now = (towards(&at, &wanted, k), unit + (wanted_unit - unit) * k);
+        self.at = Some(now);
+        Some((self.in_room(&now.0), now.1))
     }
 }
 
@@ -842,22 +972,91 @@ mod tests {
         assert!(frame.m[1][3] < 1.5, "below the eye: {:?}", frame.m);
     }
 
+    fn at(x: f32) -> Matrix34 {
+        Matrix34 { m: [[1.0, 0.0, 0.0, x], [0.0, 1.0, 0.0, 1.0], [0.0, 0.0, 1.0, -0.5]] }
+    }
+
+    const NOBODY: [Option<([f32; 3], [f32; 3])>; 2] = [None, None];
+
+    /// Enzo: "when it's dropped, it stays static". Looks that tremble do not move it, and one wrong look does not either.
     #[test]
-    fn it_follows_softly_and_jumps_only_when_the_next_look_agrees() {
+    fn let_go_it_stays_still_and_a_look_only_recalibrates() {
         let mut follow = Follow::default();
-        assert!(follow.step(0.01).is_none());
-        let at = |x: f32| Matrix34 { m: [[1.0, 0.0, 0.0, x], [0.0, 1.0, 0.0, 1.0], [0.0, 0.0, 1.0, -0.5]] };
+        assert!(follow.step(0.01, [None; 2], [false; 2], NOBODY).is_none());
         follow.seen(at(0.0), 0.001);
-        assert_eq!(follow.step(0.01).unwrap().0.m[0][3], 0.0);
-        follow.seen(at(0.1), 0.001);
-        let soft = follow.step(0.011).unwrap().0.m[0][3];
-        assert!(soft > 0.0 && soft < 0.05, "{soft}");
-        // One look far away moves nothing; a second there does, at once.
-        follow.seen(at(0.1), 0.001);
+        assert_eq!(follow.step(0.011, [None; 2], [false; 2], NOBODY).unwrap().0.m[0][3], 0.0);
+        // What depth reads trembles by this: nothing moves.
+        follow.seen(at(0.004), 0.001);
+        assert_eq!(follow.step(0.011, [None; 2], [false; 2], NOBODY).unwrap().0.m[0][3], 0.0);
+        // One look far away moves nothing.
         follow.seen(at(1.0), 0.001);
-        let held = follow.step(0.011).unwrap().0.m[0][3];
-        assert!(held < 0.2, "{held}");
+        assert!(follow.step(0.011, [None; 2], [false; 2], NOBODY).unwrap().0.m[0][3].abs() < 0.001);
+        // Off by a little, again and again: it comes over gently, and does not stay apart from what VRChat shows.
+        follow.seen(at(0.02), 0.001);
+        let first = follow.step(0.011, [None; 2], [false; 2], NOBODY).unwrap().0.m[0][3];
+        assert!(first > 0.0 && first < 0.004, "{first}");
+        for _ in 0..60 {
+            follow.seen(at(0.02), 0.001);
+            for _ in 0..9 {
+                follow.step(0.011, [None; 2], [false; 2], NOBODY);
+            }
+        }
+        assert!((follow.step(0.011, [None; 2], [false; 2], NOBODY).unwrap().0.m[0][3] - 0.02).abs() < 0.008);
+        // Two looks agreeing it is elsewhere: it flew, so it is there at once.
         follow.seen(at(1.0), 0.001);
-        assert_eq!(follow.step(0.011).unwrap().0.m[0][3], 1.0);
+        follow.seen(at(1.0), 0.001);
+        assert_eq!(follow.step(0.011, [None; 2], [false; 2], NOBODY).unwrap().0.m[0][3], 1.0);
+    }
+
+    /// Enzo: "use the tracking of the controller that grabbed it + the headset tracking ... until the user drops it".
+    #[test]
+    fn taken_in_a_hand_it_goes_with_that_hand_until_let_go() {
+        let mut follow = Follow::default();
+        follow.seen(at(0.0), PANEL_M / PANEL_SIZE[0]);
+        follow.step(0.011, [None; 2], [false; 2], NOBODY);
+        let hand = |x: f32| Some(Matrix34 { m: [[1.0, 0.0, 0.0, x], [0.0, 1.0, 0.0, 1.0], [0.0, 0.0, 1.0, -0.45]] });
+        // A grip far off takes nothing, and neither does a hand held closed coming to it.
+        let far = Some(Matrix34 { m: [[1.0, 0.0, 0.0, 3.0], [0.0, 1.0, 0.0, 1.0], [0.0, 0.0, 1.0, 0.0]] });
+        follow.step(0.011, [None, far], [false, true], NOBODY);
+        assert!(!follow.is_held());
+        follow.step(0.011, [None, hand(0.0)], [false, true], NOBODY);
+        assert!(!follow.is_held(), "the grip closed elsewhere");
+        follow.step(0.011, [None, hand(0.0)], [false; 2], NOBODY);
+        // It closes on it: the panel goes with it exactly, with no picture.
+        follow.step(0.011, [None, hand(0.0)], [false, true], NOBODY);
+        assert!(follow.is_held());
+        let moved = follow.step(0.011, [None, hand(0.5)], [false, true], NOBODY).unwrap().0;
+        assert!((moved.m[0][3] - 0.5).abs() < 1e-3, "{:?}", moved.m);
+        // What a picture says of a moving hand is older than the hand: nothing.
+        follow.seen(at(0.1), PANEL_M / PANEL_SIZE[0]);
+        assert!((follow.step(0.011, [None, hand(0.6)], [false, true], NOBODY).unwrap().0.m[0][3] - 0.6).abs() < 1e-3);
+        // Let go, it stays there.
+        let left = follow.step(0.011, [None, hand(0.6)], [false; 2], NOBODY).unwrap().0.m[0][3];
+        assert!(!follow.is_held());
+        assert!((follow.step(0.011, [None, hand(2.0)], [false; 2], NOBODY).unwrap().0.m[0][3] - left).abs() < 1e-5);
+    }
+
+    /// A pointer across the room takes it too, as VRChat lets it: and one pointing away does not.
+    #[test]
+    fn a_pointer_on_the_panel_takes_it() {
+        let panel = at(0.0);
+        let hand = Matrix34 { m: [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 1.0], [0.0, 0.0, 1.0, 2.0]] };
+        assert!(takes(&panel, PANEL_M / PANEL_SIZE[0], &hand, Some(([0.0, 1.0, 2.0], [0.0, 0.0, -1.0]))));
+        assert!(!takes(&panel, PANEL_M / PANEL_SIZE[0], &hand, Some(([0.0, 1.0, 2.0], [1.0, 0.0, 0.0]))));
+        assert!(!takes(&panel, PANEL_M / PANEL_SIZE[0], &hand, None));
+    }
+
+    /// `then` and `undone` are what the above stands on.
+    #[test]
+    fn a_frame_undone_is_nothing() {
+        let (s, c) = 0.7f32.sin_cos();
+        let a = Matrix34 { m: [[c, 0.0, s, 1.0], [0.0, 1.0, 0.0, 2.0], [-s, 0.0, c, 3.0]] };
+        let none = then(&undone(&a), &a);
+        for i in 0..3 {
+            for j in 0..4 {
+                let wanted = if i == j { 1.0 } else { 0.0 };
+                assert!((none.m[i][j] - wanted).abs() < 1e-5, "{:?}", none.m);
+            }
+        }
     }
 }

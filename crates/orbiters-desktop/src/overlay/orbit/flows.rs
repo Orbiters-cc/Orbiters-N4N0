@@ -121,10 +121,7 @@ fn saved_looks_with_real_looks_answers() {
             assert_eq!(person.panels.facts.sheet, Some(Sheet::Menu), "{what}: it stays");
         }
         assert!(person.find(Action::Pictures).is_some(), "the wing is there");
-        person.panels.hover(Some(at(60.0, 52.0)));
-        person.turn();
-        assert!(person.panels.press(&person.snap).clicked, "back");
-        person.panels.release();
+        assert!(person.press(Action::Back).clicked, "back");
         person.turns(3);
         assert_eq!(person.panels.facts.sheet, Some(Sheet::All), "back to All tools");
         person.press(Action::Page(Target::States));
@@ -144,4 +141,127 @@ fn the_panel_on_a_sheet_in_vr_is_a_headsets() {
     let status = worlds.status_for_test();
     assert!(status.headset && status.small && status.small_docked && status.shown);
     assert_eq!(status.current, Some(7));
+}
+
+/// Enzo: "if I made a research on the Youtube one and then went in the world page, when going back to the youtube one, I will still have the video results and scroll position".
+#[test]
+fn a_screen_is_as_it_was_left() {
+    use orbiters_n4n0_core::menu::Page;
+    let mut person = Person::new();
+    person.around = Some(Around::QuickMenu);
+    person.turns(3);
+    person.press(Action::Pictures);
+    person.turns(2);
+    // With no turn between: this empty list would bring it back within what it allows.
+    person.panels.gallery_to = 60.0;
+    person.panels.facts.gallery_scroll = 60.0;
+    let snap = person.snap.clone();
+    person.panels.open_sheet(Sheet::All, "All tools", &snap);
+    assert_eq!(person.panels.facts.gallery_scroll, 0.0, "a screen of its own");
+    person.panels.open_sheet(Sheet::Pictures, "Pictures", &snap);
+    assert_eq!(person.panels.gallery_to, 60.0, "and that one where it was");
+    person.panels.stage.host.menu.states_ready = true;
+    person.panels.open_sheet(Sheet::Pictures, "Pictures", &snap);
+    person.turns(2);
+    // N4N0's page, on an inner page of it.
+    person.press(Action::All);
+    person.turns(2);
+    person.press(Action::Page(Target::States));
+    person.turns(2);
+    person.panels.stage.host.menu.page = Page::NewState;
+    person.press(Action::All);
+    person.turns(2);
+    person.press(Action::Page(Target::States));
+    person.turns(2);
+    assert_eq!(person.panels.stage.host.menu.page, Page::NewState);
+}
+
+/// Enzo: "a consistent back button on every page that will take us to the last screen". In one place, within a screen first, through the tabs, and off the sheet at the end.
+#[test]
+fn back_goes_to_the_last_screen_from_one_place() {
+    use orbiters_n4n0_core::menu::Page;
+    let mut person = Person::new();
+    person.around = Some(Around::QuickMenu);
+    person.turns(3);
+    person.press(Action::All);
+    person.turns(2);
+    let place = |person: &Person| person.panels.all().find_map(|p| p.items.iter().find(|i| i.action == Action::Back).map(|i| i.rect));
+    person.panels.stage.host.menu.states_ready = true;
+    person.turns(2);
+    let at = place(&person).expect("a Back on All tools");
+    person.press(Action::Page(Target::States));
+    person.turns(2);
+    assert_eq!(person.panels.facts.sheet, Some(Sheet::Menu));
+    assert_eq!(place(&person), Some(at), "in the same place");
+    // Further in it, it comes back within.
+    person.panels.stage.host.menu.page = Page::NewState;
+    person.turns(1);
+    person.press(Action::Back);
+    person.turns(2);
+    assert_eq!(person.panels.stage.host.menu.page, Page::States);
+    assert_eq!(person.panels.facts.sheet, Some(Sheet::Menu));
+    person.press(Action::Back);
+    person.turns(2);
+    assert_eq!(person.panels.facts.sheet, Some(Sheet::All), "and on to the screen before");
+    // Through the tiles and the tabs alike.
+    person.press(Action::Pictures);
+    person.turns(2);
+    assert_eq!(place(&person), Some(at));
+    person.press(Action::Back);
+    person.turns(2);
+    assert_eq!(person.panels.facts.sheet, Some(Sheet::All));
+    person.press(Action::Back);
+    person.turns(2);
+    assert_eq!(person.panels.facts.sheet, None, "and off the sheet");
+}
+
+/// Enzo: "up down joystick ... scroll in scrollable pages". A stick at rest does nothing.
+#[test]
+fn the_stick_scrolls_what_is_on_the_sheet() {
+    let mut person = Person::new();
+    person.around = Some(Around::QuickMenu);
+    person.turns(3);
+    person.press(Action::Page(Target::Instances));
+    person.turns(2);
+    person.panels.facts.worlds_visited = vec![Default::default(); 20];
+    let max = super::panels::max_scroll(Sheet::Instances, &person.panels.facts);
+    assert!(max > 100.0, "{max}");
+    let snap = person.snap.clone();
+    person.panels.stick(0.1, 0.1, &snap);
+    assert_eq!(person.panels.gallery_to, 0.0, "at rest");
+    person.panels.stick(-1.0, 0.1, &snap);
+    assert_eq!(person.panels.gallery_to, 90.0, "down the page, pulled");
+    person.panels.stick(1.0, 10.0, &snap);
+    assert_eq!(person.panels.gallery_to, 0.0, "and no further than its start");
+}
+
+/// Enzo: "the hole is glitchy and I don't see the 3D view behind it". What is submitted for the sheet's page and its back, by the same painting as in a headset, read back at the hole. This says
+/// the pictures are clear there: what becomes of them in the compositor only `vr-test.log` can say.
+#[test]
+fn the_hole_is_clear_in_what_is_submitted() {
+    use crate::overlay::worlds::panel::Status;
+    for retro in [false, true] {
+        let mut person = Person::new();
+        let mut snap = (*person.snap).clone();
+        if retro {
+            snap.settings.orbit.theme = orbiters_core::settings::MenuLook::Retro;
+        }
+        person.snap = Arc::new(snap);
+        person.around = Some(Around::QuickMenu);
+        person.turns(3);
+        person.press(Action::Worlds);
+        person.turns(2);
+        let docked = Status { headset: true, small: true, small_docked: true, shown: true, current: Some(7), ..Default::default() };
+        person.panels.stage.worlds.as_mut().unwrap().show_world_for_test(7);
+        for _ in 0..4 {
+            let _ = person.panels.world_relay(docked.clone());
+            person.turn();
+        }
+        let [page_middle, page_outside, back_middle, back_outside] = person.panels.hole_alphas();
+        println!("hole, retro {retro}: page {page_middle:?} outside {page_outside:?}, back {back_middle:?} outside {back_outside:?}");
+        assert_eq!(page_middle, Some(0), "the page, retro {retro}");
+        assert_eq!(back_middle, Some(0), "its back, retro {retro}");
+        assert!(page_outside.is_some_and(|a| a > 200), "and solid around it: {page_outside:?}");
+        assert!(back_outside.is_some_and(|a| a > 200), "{back_outside:?}");
+    }
 }

@@ -254,6 +254,11 @@ pub fn shots(out: &std::path::Path) -> anyhow::Result<()> {
     paint("small-near", &entries, &detail, &Status { small_near: true, ..docked.clone() }, &feedback, 5.0)?;
     paint("small-taken", &entries, &detail, &Status { small_docked: false, small_taken: true, ..docked.clone() }, &feedback, 5.0)?;
     paint("side-headset", &entries, &detail, &Status { headset: true, ..Default::default() }, &feedback, 5.0)?;
+    // A headset's list with no side panel, on a sheet: endless, with no arrows and no Back of its own; and part way through the side panel coming out.
+    let sheet = Panel { on_sheet: true, ..base.clone() };
+    paint("browse-headset", &entries, &sheet, &Status { headset: true, ..Default::default() }, &feedback, 5.0)?;
+    let coming = Panel { on_sheet: true, moves: true, page: Page::Detail, selected: detail.selected, ..base.clone() };
+    paint("side-coming", &entries, &coming, &Status { headset: true, ..Default::default() }, &feedback, 0.05)?;
     let failed = Status { listing_error: Some("Orbiters could not be reached (timed out)".into()), ..Default::default() }; // i18n: not shown (a stand-in server error, English like the real ones)
     paint("offline", &[], &base, &failed, &FeedbackView::default(), 5.0)?;
     let not_current = Panel { page: Page::Detail, selected: Some(12), ..base.clone() };

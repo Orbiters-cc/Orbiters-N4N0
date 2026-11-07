@@ -521,6 +521,15 @@ pub(super) fn shots(out: &Path) -> anyhow::Result<()> {
     qm_scene("orbit-qm-narrow", out, vec2(800.0, 800.0), &idle, None, None)?;
     qm_scene("orbit-sheet-all", out, hd, &Facts { sheet: Some(Sheet::All), sheet_title: "All tools".into(), ..idle.clone() }, None, Some(Sheet::All))?;
     qm_scene("orbit-sheet-all-vr", out, hd, &Facts { desktop: false, can_call: true, can_states: true, can_light: true, sheet: Some(Sheet::All), sheet_title: "All tools".into(), ..idle.clone() }, None, Some(Sheet::All))?;
+    // What plays with its link known, then copied; the page of microphones, with made-up ones.
+    qm_scene("orbit-sheet-all-link", out, hd, &Facts { desktop: false, can_states: true, can_copy_playing: true, can_drop_playing: true, playing_link_copied: true, sheet: Some(Sheet::All), sheet_title: "All tools".into(), ..idle.clone() }, None, Some(Sheet::All))?;
+    let mics = vec![
+        panels::MicTile { id: "a".into(), name: "Quest Pro microphone".into(), level: 0.72, can_hear: true, default: true },
+        panels::MicTile { id: "b".into(), name: "Headset (Virtual Desktop Audio)".into(), level: 0.08, can_hear: true, default: false },
+        panels::MicTile { id: "c".into(), name: "Webcam C920".into(), level: 0.3, can_hear: true, default: false },
+        panels::MicTile { id: "d".into(), name: "Line in".into(), level: 0.0, can_hear: false, default: false },
+    ];
+    qm_scene("orbit-sheet-mics", out, hd, &Facts { desktop: false, mics, voice_on: true, sheet: Some(Sheet::Mics), sheet_title: "Your microphones".into(), ..idle.clone() }, None, Some(Sheet::Mics))?;
     qm_scene("orbit-sheet-pictures", out, hd, &Facts { sheet: Some(Sheet::Pictures), sheet_title: "Pictures".into(), ..idle.clone() }, None, Some(Sheet::Pictures))?;
     let lines = vec![(true, "What's the weather like in Paris?".to_string()), (false, "It is 14 degrees and raining in Paris, with clear skies expected by this evening.".to_string()), (true, "Find a world with rain".to_string()), (false, "After The Rain has a 3D capture you can walk in. Open Worlds in 3D to see it.".to_string())];
     // YouTube's results, stand-in pictures and names: a search needs typing, which no test does in the game.

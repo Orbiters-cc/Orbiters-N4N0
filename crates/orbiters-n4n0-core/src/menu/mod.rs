@@ -560,6 +560,8 @@ pub enum Call {
 /// What can be pressed. The layout of each page lists where.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Target {
+    /// The overlay's page of microphones: no page of the avatar's screen.
+    Microphones,
     Close,
     Back,
     // Home's tiles.
@@ -904,6 +906,8 @@ pub struct Menu {
     /// why there are none), and the page of them shown (from 0).
     pub states: Vec<StateRow>,
     pub states_ready: bool,
+    /// Where this is drawn something else has the way back, always in one place: its own does not show.
+    pub back_on_the_sheet: bool,
     pub states_note: String,
     pub state_page: usize,
     /// A save pressed here, shown in the list until the host's list has it (or [`SAVE_SHOWN`] passed).
@@ -1381,6 +1385,7 @@ impl Menu {
                 vec![Effect::TakeBack]
             }
             Target::TakeBack => Vec::new(),
+            Target::Microphones => Vec::new(),
             Target::More => {
                 self.go(Page::More);
                 Vec::new()

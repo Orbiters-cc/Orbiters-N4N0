@@ -1400,7 +1400,7 @@ mod tests {
                 let tracked = noise(&mut state) % 500 != 0;
                 room.untracked = !tracked;
                 // Another application's drag, a recenter, another world: all may move the play space in one go.
-                let event = noise(&mut state) % 20_000;
+                let event = noise(&mut state) % 4_000;
                 let mut moved_by_someone = false;
                 if event < 3 {
                     room.other_app_shows([0.1 * event as f32, 0.0, 0.0]);

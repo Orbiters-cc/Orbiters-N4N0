@@ -190,7 +190,7 @@ impl SharedMemory {
         // Read before anything else can set it.
         let existed = unsafe { GetLastError() } == ERROR_ALREADY_EXISTS;
         let memory = Self::from_mapping(OwnedHandle(h), FILE_MAP_ALL_ACCESS)
-            .ok_or_else(|| SpoutError::Platform(format!("MapViewOfFile failed for {}", decode_name(raw))))?;
+            .ok_or_else(|| SpoutError::Platform(format!("MapViewOfFile failed for {}", decode_name(raw))))?; // i18n: not shown (a graphics or Windows call named in an error detail)
         Ok((memory, existed))
     }
 
@@ -656,13 +656,13 @@ impl Receiver {
     fn texture(&self, desc: &D3D11_TEXTURE2D_DESC, what: &str) -> Result<ID3D11Resource> {
         let mut texture: Option<ID3D11Texture2D> = None;
         unsafe { self.device.CreateTexture2D(desc, None, Some(&mut texture)) }.map_err(|e| platform(&format!("CreateTexture2D ({what})"), e))?;
-        texture.ok_or_else(|| SpoutError::Platform(format!("CreateTexture2D ({what}) returned nothing")))?.cast().map_err(|e| platform("cast", e))
+        texture.ok_or_else(|| SpoutError::Platform(format!("CreateTexture2D ({what}) returned nothing")))?.cast().map_err(|e| platform("cast", e)) // i18n: not shown (a graphics or Windows call named in an error detail)
     }
 
     fn open_shared(&self, handle: HANDLE) -> Result<ID3D11Texture2D> {
         let mut shared: Option<ID3D11Texture2D> = None;
         unsafe { self.device.OpenSharedResource(handle, &mut shared) }.map_err(|e| platform("OpenSharedResource", e))?;
-        shared.ok_or_else(|| SpoutError::Platform("OpenSharedResource returned nothing".into()))
+        shared.ok_or_else(|| SpoutError::Platform("OpenSharedResource returned nothing".into())) // i18n: not shown (a graphics or Windows call named in an error detail)
     }
 
     /// Legacy share handles open only on the adapter that made them: with VRChat on a laptop's discrete GPU and this
@@ -1127,7 +1127,7 @@ impl Sender {
             MiscFlags: D3D11_RESOURCE_MISC_SHARED.0 as u32,
         };
         let mut texture = None;
-        unsafe { device.CreateTexture2D(&desc, None, Some(&mut texture)) }.map_err(|e| platform("CreateTexture2D (shared)", e))?;
+        unsafe { device.CreateTexture2D(&desc, None, Some(&mut texture)) }.map_err(|e| platform("CreateTexture2D (shared)", e))?; // i18n: not shown (a graphics or Windows call named in an error detail)
         let texture: ID3D11Texture2D = texture.expect("texture");
         let resource: IDXGIResource = texture.cast().map_err(|e| platform("cast", e))?;
         let handle = unsafe { resource.GetSharedHandle() }.map_err(|e| platform("GetSharedHandle", e))?;

@@ -14,6 +14,7 @@
 //! everywhere, and `unity-wizard/token` tells whether it still works.
 
 use anyhow::{bail, Context as _};
+use orbiters_i18n::tr;
 use serde::{Deserialize, Serialize};
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -149,7 +150,7 @@ pub struct Account {
 /// Without the credential: an account printed in a log or a test's failure shows who, never the token.
 impl std::fmt::Debug for Account {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Account")
+        f.debug_struct("Account") // i18n: not shown (a debug name)
             .field("token", &"(hidden)")
             .field("user", &self.user)
             .field("username", &self.username)
@@ -367,7 +368,7 @@ impl Link {
 impl std::fmt::Debug for Link {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let page = self.link_url.split(['?', '#']).next().unwrap_or_default();
-        f.debug_struct("Link")
+        f.debug_struct("Link") // i18n: not shown (a debug name)
             .field("link_url", &format_args!("{page}?(hidden)"))
             .field("connected_url", &self.connected_url)
             .field("exchange_token", &"(hidden)")
@@ -524,17 +525,17 @@ impl Api {
         let body = serde_json::json!({ "exchangeToken": exchange_token, "code": code });
         let response = match self.agent.post(&self.url("editor-links/exchange")).send_json(body) {
             Ok(response) => response,
-            Err(e) => return Exchange::Retry(format!("Orbiters could not be reached: {e}")),
+            Err(e) => return Exchange::Retry(tr!("Orbiters could not be reached: {error}", error = e)),
         };
         let status = response.status().as_u16();
         match Self::json::<Account>(response) {
             Ok(account) if !account.token.trim().is_empty() => Exchange::Done(account),
-            Ok(_) => Exchange::Ended("Orbiters did not return a credential. Sign in again.".into()),
+            Ok(_) => Exchange::Ended(tr("Orbiters did not return a credential. Sign in again.").into()),
             Err(e) => {
                 let said = e.downcast_ref::<ApiError>().map(|api| api.message.clone()).filter(|m| !m.is_empty());
                 match status {
-                    404 | 410 => Exchange::Ended(said.unwrap_or_else(|| "The sign-in expired. Sign in again.".into())),
-                    _ => Exchange::Retry(said.unwrap_or_else(|| format!("Orbiters could not finish the sign-in ({status})."))),
+                    404 | 410 => Exchange::Ended(said.unwrap_or_else(|| tr("The sign-in expired. Sign in again.").into())),
+                    _ => Exchange::Retry(said.unwrap_or_else(|| tr!("Orbiters could not finish the sign-in ({status}).", status = status))),
                 }
             }
         }
@@ -699,9 +700,9 @@ fn percent_decode(text: &str) -> Option<String> {
 fn respond(stream: &mut TcpStream, location: Option<&str>) {
     let answer = match location.filter(|l| !l.chars().any(char::is_control)) {
         Some(location) => format!(
-            "HTTP/1.1 302 Found\r\nLocation: {location}\r\nCache-Control: no-store\r\nReferrer-Policy: no-referrer\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            "HTTP/1.1 302 Found\r\nLocation: {location}\r\nCache-Control: no-store\r\nReferrer-Policy: no-referrer\r\nContent-Length: 0\r\nConnection: close\r\n\r\n" // i18n: not shown (an HTTP answer)
         ),
-        None => "HTTP/1.1 404 Not Found\r\nCache-Control: no-store\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_string(),
+        None => "HTTP/1.1 404 Not Found\r\nCache-Control: no-store\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_string(), // i18n: not shown (an HTTP answer)
     };
     let _ = stream.set_write_timeout(Some(CALLBACK_READ));
     let _ = stream.write_all(answer.as_bytes());

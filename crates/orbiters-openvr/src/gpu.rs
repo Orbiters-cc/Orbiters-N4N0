@@ -107,7 +107,7 @@ impl OverlayTextures {
             )
         }
         .map_err(|e| format!("D3D11CreateDevice: {e}"))?;
-        Ok(Self { device: device.ok_or("no device")?, context: context.ok_or("no context")?, slots: HashMap::new() })
+        Ok(Self { device: device.ok_or("no device")?, context: context.ok_or("no context")?, slots: HashMap::new() }) // i18n: not shown (a graphics call named in a log or an error detail)
     }
 
     fn texture(&self, width: u32, height: u32) -> Result<ID3D11Texture2D, String> {
@@ -126,7 +126,7 @@ impl OverlayTextures {
         let mut t = None;
         // SAFETY: valid description and out parameter.
         unsafe { self.device.CreateTexture2D(&desc, None, Some(&mut t)) }.map_err(|e| format!("CreateTexture2D: {e}"))?;
-        t.ok_or_else(|| "no texture".into())
+        t.ok_or_else(|| "no texture".into()) // i18n: not shown (a graphics call named in a log or an error detail)
     }
 
     /// Shows RGBA pixels (top row first, gamma-encoded) on overlay `handle`.
@@ -169,7 +169,7 @@ impl OverlayTextures {
             }
         }
         slot.next ^= 1;
-        overlay.set_texture_d3d11(handle, texture.as_raw()).map_err(|code| PresentError::Refused(format!("SetOverlayTexture: SteamVR overlay error {code}")))
+        overlay.set_texture_d3d11(handle, texture.as_raw()).map_err(|code| PresentError::Refused(format!("SetOverlayTexture: SteamVR overlay error {code}"))) // i18n: not shown (a graphics call named in a log or an error detail)
     }
 
     /// Forgets the textures of an overlay that was destroyed.

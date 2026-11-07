@@ -258,7 +258,7 @@ pub fn safe_file_name(name: &str) -> String {
     let limited: String = cleaned.trim().chars().take(80).collect();
     let trimmed = limited.trim_end_matches(['.', ' ']);
     if trimmed.is_empty() {
-        return "Untitled".into();
+        return "Untitled".into(); // i18n: not shown (a file name made from nothing)
     }
     // The device is named by what comes before the first dot ("NUL.txt" and "NUL .tar.gz" are NUL too): the mark goes
     // there, not at the end.

@@ -21,7 +21,8 @@ mod verify;
 use crossbeam_channel::RecvTimeoutError;
 use orbiters_contracts::manifest::{CaptureMode, ConsentInfo, StorageQuality};
 use orbiters_core::protocol::{AudioDeviceInfo, PerformanceSpec, SourceSpec, SpoutSourceInfo, StartCapture, WorkerCommand, WorkerEvent};
-use orbiters_core::settings::KeyframeSettings;
+use orbiters_core::settings::{KeyframeSettings, Settings};
+use orbiters_i18n::tr;
 use session::{CaptureSession, Processed, Warning};
 use sources::{FrameSource, Next, RawSequenceSource, TestPatternSource};
 use std::collections::HashMap;
@@ -33,6 +34,8 @@ use std::time::{Duration, Instant};
 
 fn main() {
     orbiters_core::panic_log::install();
+    // Warnings and errors it reports are written in the language of the app that reads them.
+    Settings::speak_saved_language();
     let args: Vec<String> = std::env::args().skip(1).collect();
     let result = match args.first().map(String::as_str) {
         Some("worker") => run_worker(),
@@ -142,17 +145,17 @@ fn run_session(source: &mut dyn FrameSource, session: &mut CaptureSession, max_f
         match outcome {
             // A frame that could not be read (a Spout readback that failed): the source opens its sender again.
             Some(Err(e)) => eprintln!("warning: a frame could not be read: {e:#}"),
-            Some(Ok(Processed::SizeChanged { width, height })) => return Ok(format!("the frame size changed to {width}x{height}")),
+            Some(Ok(Processed::SizeChanged { width, height })) => return Ok(format!("the frame size changed to {width}x{height}")), // i18n: not shown (the reason of a command line run)
             _ => {}
         }
         if let Next::End = next {
-            return Ok("end of input".into());
+            return Ok("end of input".into()); // i18n: not shown (a reason the command line prints and the controller reads as a word)
         }
         if max_frames.is_some_and(|m| session.stats.frames >= m) {
-            return Ok("frame limit".into());
+            return Ok("frame limit".into()); // i18n: not shown (a reason the command line prints)
         }
         if max_seconds.is_some_and(|m| started.elapsed().as_secs_f64() >= m) {
-            return Ok("time limit".into());
+            return Ok("time limit".into()); // i18n: not shown (a reason the command line prints)
         }
         if last_print.elapsed() >= Duration::from_secs(1) {
             let s = session.refresh_stats();
@@ -231,7 +234,7 @@ fn cli_record(args: &[String]) -> anyhow::Result<()> {
 fn cli_send_test(args: &[String]) -> anyhow::Result<()> {
     #[cfg(windows)]
     {
-        let name = flag(args, "--name").unwrap_or("Orbiters Test Pattern");
+        let name = flag(args, "--name").unwrap_or("Orbiters Test Pattern"); // i18n: not shown (the name of a Spout sender made by a test tool)
         let width = flag(args, "--width").and_then(|v| v.parse().ok()).unwrap_or(1920);
         let height = flag(args, "--height").and_then(|v| v.parse().ok()).unwrap_or(1080);
         let fps: f32 = flag(args, "--fps").and_then(|v| v.parse().ok()).unwrap_or(30.0);
@@ -370,7 +373,8 @@ fn finish(current: &mut Option<Running>, out: &mut Output, reason: &str) -> Opti
     let Running { session, source, start, .. } = current.take()?;
     let finished = session.finish();
     if !finished.warnings.is_empty() {
-        out.emit(&WorkerEvent::Error { message: format!("Finishing the session: {}", finished.warnings.join("; ")) });
+        let message = tr!("Finishing the session: {warnings}", warnings = finished.warnings.join("; "));
+        out.emit(&WorkerEvent::Error { message });
     }
     out.emit(&WorkerEvent::Stopped { session_dir: finished.dir, manifest: Box::new(finished.manifest), reason: reason.into() });
     Some((source, start))
@@ -407,7 +411,7 @@ fn run_worker() -> anyhow::Result<()> {
                         }
                     }
                     Err(e) => {
-                        let _ = err_tx.send(format!("bad command: {e}"));
+                        let _ = err_tx.send(format!("bad command: {e}")); // i18n: not shown (the controller sent something the worker cannot read: a fault, not a message)
                     }
                 }
             }
@@ -524,7 +528,7 @@ fn run_worker() -> anyhow::Result<()> {
                 }
                 match outcome {
                     Some(Ok(Processed::SizeChanged { width, height })) => resized = Some((width, height)),
-                    Some(Err(e)) => r.session.warn(Warning::Source, format!("A frame could not be read: {e:#}")),
+                    Some(Err(e)) => r.session.warn(Warning::Source, tr!("A frame could not be read: {error}", error = format!("{e:#}"))),
                     _ => {}
                 }
             }
@@ -568,7 +572,7 @@ fn run_worker() -> anyhow::Result<()> {
                 current = start_session(start, Some(source), &mut out);
             }
         } else if ended {
-            finish(&mut current, &mut out, "end of input");
+            finish(&mut current, &mut out, "end of input"); // i18n: not shown (the Stopped reason: the controller reads it as a word)
         }
     }
 }

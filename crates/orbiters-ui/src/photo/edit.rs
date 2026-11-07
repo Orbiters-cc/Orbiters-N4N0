@@ -3,6 +3,7 @@
 //! of the picture (its width and height from the top-left corner, sizes of its height), so the same edit looks the same
 //! on the preview and on the full picture. Every field has a default, so an edit saved by an older version opens.
 
+use orbiters_i18n::tr;
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -187,27 +188,27 @@ impl Kind {
 
     pub fn name(self) -> &'static str {
         match self {
-            Kind::Light => "Light",
-            Kind::Color => "Color",
-            Kind::Curves => "Curves",
-            Kind::Vignette => "Vignette",
-            Kind::Aberration => "Chromatic aberration",
-            Kind::Comic => "Comic",
-            Kind::Blur => "Blur",
-            Kind::Text => "Text",
+            Kind::Light => tr("Light"),
+            Kind::Color => tr("Color"),
+            Kind::Curves => tr("Curves"),
+            Kind::Vignette => tr("Vignette"),
+            Kind::Aberration => tr("Chromatic aberration"),
+            Kind::Comic => tr("Comic"),
+            Kind::Blur => tr("Blur"),
+            Kind::Text => tr("Text"),
         }
     }
 
     pub fn about(self) -> &'static str {
         match self {
-            Kind::Light => "Exposure, brightness, contrast, highlights, shadows and black point.",
-            Kind::Color => "Temperature, tint, saturation, vibrance and hue.",
-            Kind::Curves => "Tones remapped by a curve, for all channels or red, green and blue.",
-            Kind::Vignette => "Darker or lighter edges around a centre you can move.",
-            Kind::Aberration => "Colour fringes toward the edges, like a cheap lens.",
-            Kind::Comic => "Flat colours in a few tones and ink outlines, like a comic page. Dots add a print screen.",
-            Kind::Blur => "Gaussian, lens (round bokeh) or directional (motion); in 3D, by each splat's depth.",
-            Kind::Text => "A line of text in a font and a style, placed on the picture.",
+            Kind::Light => tr("Exposure, brightness, contrast, highlights, shadows and black point."),
+            Kind::Color => tr("Temperature, tint, saturation, vibrance and hue."),
+            Kind::Curves => tr("Tones remapped by a curve, for all channels or red, green and blue."),
+            Kind::Vignette => tr("Darker or lighter edges around a centre you can move."),
+            Kind::Aberration => tr("Colour fringes toward the edges, like a cheap lens."),
+            Kind::Comic => tr("Flat colours in a few tones and ink outlines, like a comic page. Dots add a print screen."),
+            Kind::Blur => tr("Gaussian, lens (round bokeh) or directional (motion); in 3D, by each splat's depth."),
+            Kind::Text => tr("A line of text in a font and a style, placed on the picture."),
         }
     }
 
@@ -417,10 +418,10 @@ pub enum BlurKind {
 impl BlurKind {
     pub fn name(self) -> &'static str {
         match self {
-            BlurKind::Gaussian => "Gaussian",
-            BlurKind::Lens => "Lens",
-            BlurKind::Directional => "Directional",
-            BlurKind::Depth => "Depth",
+            BlurKind::Gaussian => tr("Gaussian"),
+            BlurKind::Lens => tr("Lens"),
+            BlurKind::Directional => tr("Directional"),
+            BlurKind::Depth => tr("Depth"),
         }
     }
 }
@@ -439,8 +440,8 @@ pub enum Focus {
 impl Focus {
     pub fn name(self) -> &'static str {
         match self {
-            Focus::Auto => "Auto",
-            Focus::Manual => "Manual",
+            Focus::Auto => tr("Auto"),
+            Focus::Manual => tr("Manual"),
         }
     }
 }
@@ -516,10 +517,10 @@ impl TextStyle {
 
     pub fn name(self) -> &'static str {
         match self {
-            TextStyle::Clean => "Clean",
-            TextStyle::Outline => "Outline",
-            TextStyle::Shadow => "Shadow",
-            TextStyle::Glow => "Glow",
+            TextStyle::Clean => tr("Clean"),
+            TextStyle::Outline => tr("Outline"),
+            TextStyle::Shadow => tr("Shadow"),
+            TextStyle::Glow => tr("Glow"),
         }
     }
 }
@@ -678,9 +679,9 @@ impl Aspect {
 
     pub fn name(self) -> &'static str {
         match self {
-            Aspect::Free => "Freeform",
-            Aspect::Original | Aspect::OriginalTurned => "Original",
-            Aspect::Square => "Square",
+            Aspect::Free => tr("Freeform"),
+            Aspect::Original | Aspect::OriginalTurned => tr("Original"),
+            Aspect::Square => tr("Square"),
             Aspect::Portrait => "4:5",
             Aspect::Classic => "3:2",
             Aspect::Wide => "16:9",

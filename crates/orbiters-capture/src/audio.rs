@@ -384,7 +384,8 @@ fn run(
     what: &str,
     capture: &mut Capture,
 ) -> anyhow::Result<(TrackWriter, String)> {
-    let what = if what == "mic" { "The microphone" } else { "VRChat's sound" };
+    // Each message is written whole for each track: a sentence cannot be built from the name of its subject in every language.
+    let mic = what == "mic";
     // The writer thread, once the device first opened (its rate and channels make the file's), and its queue. Both
     // callbacks reach it, one after the other.
     let writer: std::cell::RefCell<Option<WriterThread>> = Default::default();
@@ -433,7 +434,7 @@ fn run(
                 *shared.name.lock().unwrap() = last_name.clone();
                 pause = REOPEN_FIRST;
                 if reopened {
-                    *shared.trouble.lock().unwrap() = Some(format!("{what} is recorded again ({name})."));
+                    *shared.trouble.lock().unwrap() = Some(if mic { orbiters_i18n::tr!("The microphone is recorded again ({name}).", name = name) } else { orbiters_i18n::tr!("VRChat's sound is recorded again ({name}).", name = name) });
                 }
                 Ok(())
             },
@@ -477,12 +478,14 @@ fn run(
         let why = match result {
             // Not even the first time: nothing to record into.
             Err(e) if writer.borrow().is_none() => return Err(e),
-            Err(e) => format!("{what} could not be opened again ({e:#}): tried again shortly."),
-            Ok((name, Ended::Lost(e))) => format!("{what} went away ({name}: {e}): recorded again as soon as it comes back."),
+            Err(e) if mic => orbiters_i18n::tr!("The microphone could not be opened again ({error}): tried again shortly.", error = format!("{e:#}")),
+            Err(e) => orbiters_i18n::tr!("VRChat's sound could not be opened again ({error}): tried again shortly.", error = format!("{e:#}")),
+            Ok((name, Ended::Lost(e))) if mic => orbiters_i18n::tr!("The microphone went away ({name}: {error}): recorded again as soon as it comes back.", name = name, error = e),
+            Ok((name, Ended::Lost(e))) => orbiters_i18n::tr!("VRChat's sound went away ({name}: {error}): recorded again as soon as it comes back.", name = name, error = e),
             Ok((_, Ended::DefaultChanged)) => {
                 eprintln!("audio: the system's default microphone changed");
                 pause = Duration::ZERO;
-                format!("{what} follows {} default microphone, which changed.", if cfg!(target_os = "macos") { "the Mac's" } else { "Windows'" })
+                if cfg!(target_os = "macos") { orbiters_i18n::tr!("The microphone follows the Mac's default microphone, which changed.") } else { orbiters_i18n::tr!("The microphone follows Windows' default microphone, which changed.") }
             }
             Ok((_, Ended::Refused(e))) => {
                 // The writer stopped (the disk): its error ends this track.
@@ -494,7 +497,7 @@ fn run(
                     Some(Err(e)) => e,
                     _ => anyhow::anyhow!("{e}"),
                 };
-                *shared.trouble.lock().unwrap() = Some(format!("{what} is not recorded any more: {e:#}"));
+                *shared.trouble.lock().unwrap() = Some(if mic { orbiters_i18n::tr!("The microphone is not recorded any more: {error}", error = format!("{e:#}")) } else { orbiters_i18n::tr!("VRChat's sound is not recorded any more: {error}", error = format!("{e:#}")) });
                 failed = Some(e);
                 break;
             }

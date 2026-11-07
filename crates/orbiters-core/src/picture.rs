@@ -3,6 +3,7 @@
 //! picture from before the two modes, which trains as it always did.
 
 use crate::settings::{Photo3dLength, PictureMode};
+use orbiters_i18n::tr;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
@@ -100,8 +101,8 @@ pub enum WearerRow {
 impl WearerRow {
     pub fn label(self) -> &'static str {
         match self {
-            WearerRow::TakeOut => "Reconstruct without my avatar",
-            WearerRow::PutBack => "Reconstruct with my avatar",
+            WearerRow::TakeOut => tr("Reconstruct without my avatar"),
+            WearerRow::PutBack => tr("Reconstruct with my avatar"),
         }
     }
 
@@ -124,9 +125,9 @@ pub fn wearer_row(session: &Path) -> Option<WearerRow> {
 /// A line for whoever looks at a result, when the wearer was taken out of it or could not be.
 pub fn wearer_line(report: &crate::reconstruction::Report) -> Option<&'static str> {
     if report.wearer.is_some() {
-        Some("Your avatar was taken out of this 3D view afterwards, as it could not hide itself: what stood behind it comes from other frames. Its shadow may remain.")
+        Some(tr("Your avatar was taken out of this 3D view afterwards, as it could not hide itself: what stood behind it comes from other frames. Its shadow may remain."))
     } else if report.wearer_not_found {
-        Some("Your avatar should have left this 3D view, and nothing of it was found to take out.")
+        Some(tr("Your avatar should have left this 3D view, and nothing of it was found to take out."))
     } else {
         None
     }

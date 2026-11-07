@@ -7,6 +7,7 @@
 //! - `--uninstall [--dir <folder>]`: what Windows' installed apps run (`orbiters-setup.exe`, the setup without
 //!   programs inside, kept in the install folder). It copies itself out of the folder first, to be able to remove it.
 //! - `--silent`: no window (default choices; a running app is closed); `--dir` picks the folder of an install.
+//! - `--screenshots <folder> [--language <tag>]`: every page rendered offscreen, in a language.
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
@@ -17,6 +18,8 @@ mod system;
 #[cfg(windows)]
 mod ui;
 
+#[cfg(windows)]
+use orbiters_i18n::{tr, Language};
 use std::path::PathBuf;
 
 /// What the setup was started to do.
@@ -72,9 +75,33 @@ pub fn payload() -> Option<&'static [u8]> {
     }
 }
 
+/// The language the setup speaks, for its window and its message boxes: the one the app saved when it is installed here (what the account gave or the
+/// person picked), else this computer's. Nobody is signed in to the setup itself.
+#[cfg(windows)]
+pub fn language_wanted() -> Language {
+    let saved = orbiters_update::app_settings_file()
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+        .and_then(|settings| settings["language"].as_str().and_then(orbiters_i18n::normalize));
+    saved.or_else(|| orbiters_i18n::normalize(&orbiters_ui::fonts::user_locale())).unwrap_or(Language::En)
+}
+
+/// Takes the language of [`language_wanted`], and the kanji forms of Japanese for it.
+#[cfg(windows)]
+pub fn speak() {
+    orbiters_i18n::set_language(language_wanted());
+    orbiters_ui::fonts::prefer_language(orbiters_i18n::language().tag());
+}
+
 #[cfg(windows)]
 fn main() {
     let raw: Vec<String> = std::env::args().skip(1).collect();
+    speak();
+    // For review: `--language fr` stays in that language whatever the computer and the app say (the screenshots in each language).
+    if let Some(language) = raw.iter().position(|a| a == "--language").and_then(|i| raw.get(i + 1)).and_then(|tag| orbiters_i18n::normalize(tag)) {
+        orbiters_i18n::pin_language(language);
+        orbiters_ui::fonts::prefer_language(language.tag());
+    }
     let payload = payload();
     // For review: every page rendered offscreen.
     if let Some(i) = raw.iter().position(|a| a == "--screenshots") {
@@ -142,7 +169,7 @@ pub fn target_dir(args: &Args) -> PathBuf {
 fn relocate(args: &Args) -> i32 {
     let Some(dir) = install_dir(args) else {
         if !args.silent {
-            system::message("Orbiters - N4N0 is not installed for this Windows account.", false, false);
+            system::message(tr("Orbiters - N4N0 is not installed for this Windows account."), false, false);
         }
         return 1;
     };
@@ -159,7 +186,7 @@ fn relocate(args: &Args) -> i32 {
         Ok(()) => 0,
         Err(e) => {
             if !args.silent {
-                system::message(&format!("The uninstall could not start: {e}"), false, true);
+                system::message(&orbiters_i18n::tr!("The uninstall could not start: {error}", error = e), false, true);
             }
             1
         }
@@ -237,8 +264,8 @@ pub fn done_relocated(args: &Args) {
 fn fallback(args: &Args, payload: Option<&'static [u8]>) -> i32 {
     let version = payload.and_then(|p| orbiters_update::payload::read_index(p).ok()).map(|i| i.version).unwrap_or_default();
     let ask = match args.mode {
-        Mode::Install => Some(format!("Install Orbiters - N4N0 {version} in {}?\n\nIf it is running, it closes first.", target_dir(args).display())),
-        Mode::Uninstall => Some("Uninstall Orbiters - N4N0?\n\nYour sessions and settings are kept.".to_string()),
+        Mode::Install => Some(orbiters_i18n::tr!("Install Orbiters - N4N0 {version} in {folder}?\n\nIf it is running, it closes first.", version = version, folder = target_dir(args).display())),
+        Mode::Uninstall => Some(tr("Uninstall Orbiters - N4N0?\n\nYour sessions and settings are kept.").to_string()),
         Mode::Update => None,
     };
     if let Some(question) = ask {
@@ -252,11 +279,11 @@ fn fallback(args: &Args, payload: Option<&'static [u8]>) -> i32 {
         Ok(()) => {
             match args.mode {
                 Mode::Install => {
-                    system::message(&format!("Orbiters - N4N0 {version} is installed. Find it in the Start menu."), false, false);
+                    system::message(&orbiters_i18n::tr!("Orbiters - N4N0 {version} is installed. Find it in the Start menu.", version = version), false, false);
                     relaunch(&target_dir(args), false);
                 }
                 Mode::Uninstall => {
-                    system::message("Orbiters - N4N0 is uninstalled.", false, false);
+                    system::message(tr("Orbiters - N4N0 is uninstalled."), false, false);
                 }
                 Mode::Update => {}
             }

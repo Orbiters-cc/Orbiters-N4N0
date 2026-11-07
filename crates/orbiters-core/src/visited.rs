@@ -335,7 +335,7 @@ pub fn read_shot(path: &Path) -> Option<ShotInfo> {
             if let Some(text) = itxt(&data, "XML:com.adobe.xmp") {
                 xmp = Some(text);
             }
-            if let Some(text) = itxt(&data, "Description") {
+            if let Some(text) = itxt(&data, "Description") { // i18n: not shown (the name of a PNG text chunk)
                 vrcx = serde_json::from_str::<serde_json::Value>(&text).ok();
             }
         } else if kind == b"IEND" {

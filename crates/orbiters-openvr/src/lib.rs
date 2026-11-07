@@ -423,7 +423,7 @@ impl Client {
 
     pub fn connect_to(runtime: &Path, app: AppType) -> Result<Self, Error> {
         let library = platform::Library::open(runtime).map_err(Error::Load)?;
-        let factory = library.symbol(c"VRClientCoreFactory").ok_or_else(|| Error::Load("no VRClientCoreFactory".into()))?;
+        let factory = library.symbol(c"VRClientCoreFactory").ok_or_else(|| Error::Load("no VRClientCoreFactory".into()))?; // i18n: not shown (a symbol name in a load error detail)
         // SAFETY: the documented factory signature of vrclient.
         let factory: FactoryFn = unsafe { std::mem::transmute(factory) };
         let mut code = 0;

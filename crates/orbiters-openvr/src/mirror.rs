@@ -55,13 +55,13 @@ impl EyeReader {
             )
         }
         .map_err(|e| format!("D3D11CreateDevice: {e}"))?;
-        Ok(Self { device: device.ok_or("no device")?, context: context.ok_or("no context")? })
+        Ok(Self { device: device.ok_or("no device")?, context: context.ok_or("no context")? }) // i18n: not shown (a graphics call named in an error detail)
     }
 
     /// `eye`'s picture now, copied whole and read back (a few milliseconds for a 2k × 2k eye).
     pub fn read(&self, compositor: &Compositor, eye: Eye) -> Result<EyePicture, String> {
         // SAFETY: this reader's live device; the view is released once copied, and not used after.
-        let raw = unsafe { compositor.mirror_d3d11(eye, self.device.as_raw()) }.map_err(|e| format!("GetMirrorTextureD3D11: compositor error {e}"))?;
+        let raw = unsafe { compositor.mirror_d3d11(eye, self.device.as_raw()) }.map_err(|e| format!("GetMirrorTextureD3D11: compositor error {e}"))?; // i18n: not shown (a graphics call named in an error detail)
         let picture = self.copy(&raw);
         unsafe { compositor.release_mirror_d3d11(raw) };
         picture
@@ -69,10 +69,10 @@ impl EyeReader {
 
     fn copy(&self, raw: &*mut c_void) -> Result<EyePicture, String> {
         // SAFETY: SteamVR's view, alive until it is released after this call; borrowed, never released by us.
-        let view = unsafe { ID3D11ShaderResourceView::from_raw_borrowed(raw) }.ok_or("no mirror view")?;
+        let view = unsafe { ID3D11ShaderResourceView::from_raw_borrowed(raw) }.ok_or("no mirror view")?; // i18n: not shown (a graphics call named in an error detail)
         // SAFETY: a valid view.
-        let resource: ID3D11Resource = unsafe { view.GetResource() }.map_err(|e| format!("mirror texture: {e}"))?;
-        let texture: ID3D11Texture2D = resource.cast().map_err(|e| format!("mirror texture: {e}"))?;
+        let resource: ID3D11Resource = unsafe { view.GetResource() }.map_err(|e| format!("mirror texture: {e}"))?; // i18n: not shown (a graphics call named in an error detail)
+        let texture: ID3D11Texture2D = resource.cast().map_err(|e| format!("mirror texture: {e}"))?; // i18n: not shown (a graphics call named in an error detail)
         let mut desc = D3D11_TEXTURE2D_DESC::default();
         // SAFETY: valid texture and out parameter.
         unsafe { texture.GetDesc(&mut desc) };
@@ -96,14 +96,14 @@ impl EyeReader {
         let mut staging = None;
         // SAFETY: valid description and out parameter.
         unsafe { self.device.CreateTexture2D(&staging_desc, None, Some(&mut staging)) }.map_err(|e| format!("CreateTexture2D: {e}"))?;
-        let staging = staging.ok_or("no staging texture")?;
+        let staging = staging.ok_or("no staging texture")?; // i18n: not shown (a graphics call named in an error detail)
         let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
         // SAFETY: both textures are this device's, of the same size and format; Map waits for the copy.
         unsafe {
             self.context.CopySubresourceRegion(&staging, 0, 0, 0, 0, &texture, 0, None);
             self.context.Map(&staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped))
         }
-        .map_err(|e| format!("Map: {e}"))?;
+        .map_err(|e| format!("Map: {e}"))?; // i18n: not shown (a graphics call named in an error detail)
         let (w, h) = (desc.Width as usize, desc.Height as usize);
         let mut rgba = vec![0u8; w * h * 4];
         for y in 0..h {

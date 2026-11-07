@@ -2,6 +2,7 @@
 //! databases are opened read-only while they run). N4N0's calls use them (contracts `Docs/n4n0-calls.md`): the account is
 //! offered for the verified link, the friends are matched on Orbiters as hashes. Nothing here signs in to VRChat.
 
+use orbiters_i18n::tr;
 use rusqlite::{Connection, OpenFlags};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
@@ -20,7 +21,7 @@ impl Source {
         match self {
             Source::Vrcx => "VRCX",
             Source::Vrcnext => "VRCNext",
-            Source::VrchatLog => "VRChat's log",
+            Source::VrchatLog => tr("VRChat's log"),
         }
     }
 }
@@ -53,7 +54,7 @@ fn vrcnext_dir() -> Option<PathBuf> {
 
 /// The account VRCX last signed in with.
 fn vrcx_account(db: &Connection) -> Option<String> {
-    db.query_row("SELECT value FROM configs WHERE key = 'config:lastuserloggedin'", [], |r| r.get::<_, String>(0)).ok().filter(|id| is_user_id(id))
+    db.query_row("SELECT value FROM configs WHERE key = 'config:lastuserloggedin'", [], |r| r.get::<_, String>(0)).ok().filter(|id| is_user_id(id)) // i18n: not shown (SQL)
 }
 
 /// VRCX names its per-account tables after the account: `usr1339e525d75d…_friend_log_current`.
@@ -63,7 +64,7 @@ fn vrcx_table_prefix(id: &str) -> String {
 
 fn vrcx_friends(db: &Connection, account: &str) -> BTreeSet<String> {
     let table = format!("{}_friend_log_current", vrcx_table_prefix(account));
-    let Ok(mut q) = db.prepare(&format!("SELECT user_id FROM \"{table}\"")) else { return BTreeSet::new() };
+    let Ok(mut q) = db.prepare(&format!("SELECT user_id FROM \"{table}\"")) else { return BTreeSet::new() }; // i18n: not shown (SQL)
     q.query_map([], |r| r.get::<_, String>(0)).map(|rows| rows.flatten().filter(|id| is_user_id(id)).collect()).unwrap_or_default()
 }
 
@@ -76,7 +77,7 @@ fn vrcnext_accounts(dir: &Path) -> Vec<String> {
 
 fn vrcnext_friends(dir: &Path) -> BTreeSet<String> {
     let Some(db) = open(&dir.join("VRCNData.db")) else { return BTreeSet::new() };
-    let Ok(mut q) = db.prepare("SELECT user_id FROM user_tracking WHERE profile_is_friend = 1") else { return BTreeSet::new() };
+    let Ok(mut q) = db.prepare("SELECT user_id FROM user_tracking WHERE profile_is_friend = 1") else { return BTreeSet::new() }; // i18n: not shown (SQL)
     q.query_map([], |r| r.get::<_, String>(0)).map(|rows| rows.flatten().filter(|id| is_user_id(id)).collect()).unwrap_or_default()
 }
 
@@ -103,7 +104,7 @@ pub fn friends(log_account: Option<&str>) -> Vec<Friend> {
         if let Some(db) = vrcx_db().and_then(|p| open(&p)) {
             if vrcx_account(&db).as_ref() == Some(account) {
                 let table = format!("{}_friend_log_current", vrcx_table_prefix(account));
-                if let Ok(mut q) = db.prepare(&format!("SELECT user_id,display_name FROM \"{table}\"")) {
+                if let Ok(mut q) = db.prepare(&format!("SELECT user_id,display_name FROM \"{table}\"")) { // i18n: not shown (SQL)
                     if let Ok(rows) = q.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))) {
                         for (id, name) in rows.flatten() {
                             if let Some(f) = out.get_mut(&id) {

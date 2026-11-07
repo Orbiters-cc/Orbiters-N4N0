@@ -6,6 +6,7 @@
 
 use crate::account::Api;
 use crate::community::{answer, Mentions, Message};
+use orbiters_i18n::{fill, tr, tr_n};
 use serde::{Deserialize, Serialize};
 
 /// Who wrote a reply, as Discord showed them in the server.
@@ -134,19 +135,18 @@ impl Reaction {
     pub fn who(&self, max: usize) -> String {
         let names: Vec<&str> = self.users.iter().map(|u| u.name.trim()).filter(|n| !n.is_empty()).take(max.max(1)).collect();
         let others = (self.count as usize).saturating_sub(names.len());
-        let others = match others {
-            0 => None,
-            1 if names.is_empty() => Some("1 person".to_string()),
-            1 => Some("1 other".to_string()),
-            n if names.is_empty() => Some(format!("{n} people")),
-            n => Some(format!("{n} others")),
+        let comma = tr(", ");
+        // The names, in the language's way of listing: "Alex, Mika and Robin"; what is left over is a count that ends the sentence.
+        let listed = |names: &[&str]| match names {
+            [] => String::new(),
+            [only] => only.to_string(),
+            [first @ .., last] => tr!("{names} and {last}", names = first.join(comma), last = last),
         };
-        let mut parts: Vec<String> = names.iter().map(|n| n.to_string()).collect();
-        parts.extend(others);
-        match parts.len() {
-            0 => String::new(),
-            1 => parts.remove(0),
-            n => format!("{} and {}", parts[..n - 1].join(", "), parts[n - 1]),
+        match (names.is_empty(), others) {
+            (true, 0) => String::new(),
+            (true, n) => tr_n("{count} person", "{count} people", n as u64),
+            (false, 0) => listed(&names),
+            (false, n) => fill(&tr_n("{names} and {count} other", "{names} and {count} others", n as u64), &[("names", &names.join(comma))]),
         }
     }
 }
@@ -206,6 +206,18 @@ mod tests {
         assert_eq!(two.who(40), "Alex and Mika");
         assert_eq!(Reaction { count: 3, ..Default::default() }.who(40), "3 people");
         assert_eq!(Reaction::default().who(40), "");
+        // The list and the count of those left over are each language's own.
+        use orbiters_i18n::{in_language, Language};
+        in_language(Language::Fr, || {
+            assert_eq!(orbit.who(40), "Alex, Mika et Robin");
+            assert_eq!(orbit.who(2), "Alex, Mika et 1 autre personne");
+            assert_eq!(heart.who(40), "Alex et 2 autres personnes");
+            assert_eq!(fire.who(40), "1 personne");
+        });
+        in_language(Language::Ja, || {
+            assert_eq!(orbit.who(2), "Alex、Mikaほか1人");
+            assert_eq!(two.who(40), "AlexとMika");
+        });
         let bad = Emoji { id: Some("../x".into()), name: "x".into(), ..Default::default() };
         assert_eq!(bad.image_url(), None);
     }

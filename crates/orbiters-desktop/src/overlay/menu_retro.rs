@@ -544,6 +544,7 @@ fn slot(p: &Painter, s: &layout::Slot, text: &str, origin: Pos2, pal: &RetroPale
 fn picture(p: &Painter, r: Rect, texture: Option<TextureId>, skin: &Skin) {
     match texture {
         Some(id) => {
+            super::orbit::panels::keep_colour(p, r);
             p.add(egui::epaint::RectShape::filled(r, 0.0, Color32::WHITE).with_texture(id, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0))));
             brackets(p, r.expand(3.0), 10.0, Stroke::new(1.5, skin.retro.line));
         }

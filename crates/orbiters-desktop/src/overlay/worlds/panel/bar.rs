@@ -3,6 +3,7 @@
 //! panel shows its front, whatever page is open: the controls used to be on the capture's page only, and only once
 //! it showed (not while it loaded, not on the results, not on another capture's page), so they came and went.
 
+use super::super::super::orbit::panels::look as orbit_look;
 use super::*;
 
 /// The bar's picture, as wide as N4N0's menu.
@@ -63,7 +64,7 @@ pub fn draw_bar(p: &Painter, status: &Status, name: Option<&str>, hover: Option<
                 }
                 let x = r.min.x + 60.0;
                 let width = r.max.x - x - 34.0;
-                text_cut(p, pos2(x, r.min.y + 9.0), width, Txt::new(name.unwrap_or("3D world").to_string(), 18.0).weight(weight::SEMIBOLD).color(theme::FG));
+                text_cut(p, pos2(x, r.min.y + 9.0), width, orbit_look::txt(name.unwrap_or("3D world").to_string(), 18.0).weight(weight::SEMIBOLD).color(theme::FG));
                 let line = if let Some(e) = &status.error {
                     e.clone()
                 } else if status.shown && status.stage.is_none() {
@@ -74,7 +75,7 @@ pub fn draw_bar(p: &Painter, status: &Status, name: Option<&str>, hover: Option<
                     status.stage.clone().unwrap_or_else(|| "Getting ready".into())
                 };
                 let tint = if status.error.is_some() { theme::DANGER } else { theme::FG_3 };
-                text_cut(p, pos2(x, r.min.y + 35.0), width, Txt::new(line, 14.0).color(tint));
+                text_cut(p, pos2(x, r.min.y + 35.0), width, orbit_look::txt(line, 14.0).color(tint));
                 widgets::icon(p, pos2(r.max.x - 20.0, r.center().y), icons::CARET_RIGHT, 18.0, theme::FG_3);
                 if let Some(f) = status.download {
                     let track = Rect::from_min_size(pos2(x, r.max.y - 8.0), vec2(width, 3.0));
@@ -115,7 +116,7 @@ fn bar_button(p: &Painter, rect: Rect, glyph: &str, label: &str, bg: Color32, fg
     let rect = if pressed { rect.shrink(2.0) } else { rect };
     let bg = if hover { theme::mix(bg, Color32::WHITE, 0.08) } else { bg };
     p.rect_filled(rect, CornerRadius::same((rect.height() / 2.0) as u8), fade(bg, alpha));
-    let galley = p.layout_job(Txt::new(label, 17.0).weight(weight::SEMIBOLD).color(fade(fg, alpha)).job_truncated(rect.width() - 46.0));
+    let galley = p.layout_job(orbit_look::txt(label, 17.0).weight(weight::SEMIBOLD).color(fade(fg, alpha)).job_truncated(rect.width() - 46.0));
     let total = 28.0 + galley.size().x;
     let left = rect.center().x - total / 2.0;
     widgets::icon(p, pos2(left + 10.0, rect.center().y), glyph, 21.0, fade(fg, alpha));

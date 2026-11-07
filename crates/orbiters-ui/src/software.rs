@@ -8,7 +8,7 @@
 //! that part needs to be handed on. A pulsing dot repaints a few tiles, not the whole tab.
 
 use egui::epaint::{ClippedPrimitive, ImageData, Primitive, TextureId, Vertex};
-use egui::{Color32, TextureFilter, TextureWrapMode, TexturesDelta};
+use egui::{Color32, ColorImage, TextureFilter, TextureWrapMode, TexturesDelta};
 use std::collections::HashMap;
 
 /// The side of the square tiles frames are compared in (pixels).
@@ -24,6 +24,34 @@ struct Texture {
     nearest_magnified: bool,
     nearest_minified: bool,
     wrap: TextureWrapMode,
+    /// What it was before the picture look, while one is on and this is a picture.
+    plain: Option<(usize, usize, Vec<Color32>)>,
+}
+
+/// How pictures are drawn instead of as they are.
+pub type PictureLook = fn(&ColorImage) -> ColorImage;
+
+impl Texture {
+    /// Whether it is a picture: a whole opaque image of some size. Text and marks have transparency and stay.
+    fn is_picture(id: TextureId, image: &ColorImage) -> bool {
+        id != TextureId::default() && image.size[0].min(image.size[1]) >= 32 && image.pixels.iter().all(|c| c.a() >= 250)
+    }
+
+    /// In `look`, from what it was.
+    fn look(&mut self, look: PictureLook) {
+        let (width, height, texels) = self.plain.take().unwrap_or_else(|| (self.width, self.height, std::mem::take(&mut self.texels)));
+        let plain = ColorImage { size: [width, height], source_size: egui::vec2(width as f32, height as f32), pixels: texels };
+        let shown = look(&plain);
+        (self.width, self.height, self.texels) = (shown.size[0], shown.size[1], shown.pixels);
+        self.plain = Some((width, height, plain.pixels));
+    }
+
+    /// As it was.
+    fn unlook(&mut self) {
+        if let Some((width, height, texels)) = self.plain.take() {
+            (self.width, self.height, self.texels) = (width, height, texels);
+        }
+    }
 }
 
 impl Texture {
@@ -60,6 +88,8 @@ pub struct Software {
     /// Painted under every frame instead of a plain colour (a backdrop that never changes is copied, not redrawn).
     backdrop: Option<Vec<[u8; 4]>>,
     textures: HashMap<TextureId, Texture>,
+    /// How pictures are drawn, where not as they are.
+    picture_look: Option<PictureLook>,
     /// What covered each tile of the last frame: a hash of the triangles over it, in painting order (row by row).
     tiles: Vec<u64>,
     /// The same for the frame being painted (kept to reuse its memory).
@@ -80,6 +110,7 @@ impl Software {
             pixels: vec![[0; 4]; width as usize * height as usize],
             backdrop: None,
             textures: HashMap::new(),
+            picture_look: None,
             tiles: Vec::new(),
             next_tiles: Vec::new(),
             stale: true,
@@ -115,6 +146,28 @@ impl Software {
     }
 
     /// Applies new and changed textures (before painting); takes them out of `delta`.
+    /// Draws pictures through `look` from now on, those it has as well; `None`, as they are.
+    pub fn set_picture_look(&mut self, look: Option<PictureLook>) {
+        if self.picture_look.is_some() == look.is_some() {
+            return;
+        }
+        self.picture_look = look;
+        self.stale = true;
+        for (id, texture) in &mut self.textures {
+            match look {
+                None => texture.unlook(),
+                Some(look) => {
+                    let plain = ColorImage { size: [texture.width, texture.height], source_size: egui::vec2(texture.width as f32, texture.height as f32), pixels: std::mem::take(&mut texture.texels) };
+                    let picture = Texture::is_picture(*id, &plain);
+                    texture.texels = plain.pixels;
+                    if picture {
+                        texture.look(look);
+                    }
+                }
+            }
+        }
+    }
+
     pub fn set_textures(&mut self, delta: &mut TexturesDelta) {
         if !delta.set.is_empty() {
             // Triangles over a changed texture look different with the same vertices.
@@ -125,14 +178,18 @@ impl Software {
                 let ImageData::Color(image) = &d.image;
                 match d.pos {
                     None => {
-                        let texture = Texture {
+                        let mut texture = Texture {
                             width: image.size[0],
                             height: image.size[1],
                             texels: image.pixels.clone(),
                             nearest_magnified: d.options.magnification == TextureFilter::Nearest,
                             nearest_minified: d.options.minification == TextureFilter::Nearest,
                             wrap: d.options.wrap_mode,
+                            plain: None,
                         };
+                        if let Some(look) = self.picture_look.filter(|_| Texture::is_picture(id, image)) {
+                            texture.look(look);
+                        }
                         self.textures.insert(id, texture);
                     }
                     Some([px, py]) => {

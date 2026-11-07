@@ -534,9 +534,9 @@ fn small_action(p: &Painter, rect: Rect, glyph: &str, filled: bool, count: u64, 
         widgets::icon(p, pos2(at, line), glyph, icon, fade(fg, alpha));
     }
     if !number.is_empty() {
-        text(p, pos2(at + icon * 0.7, line), Align2::LEFT_CENTER, Txt::new(number, count).weight(weight::SEMIBOLD).color(fade(fg, alpha)));
+        text(p, pos2(at + icon * 0.7, line), Align2::LEFT_CENTER, orbit_look::txt(number, count).weight(weight::SEMIBOLD).color(fade(fg, alpha)));
     }
-    text(p, pos2(rect.center().x, rect.min.y + rect.height() * 0.75), Align2::CENTER_CENTER, Txt::new(word, said).weight(weight::MEDIUM).color(fade(theme::FG, alpha)));
+    text(p, pos2(rect.center().x, rect.min.y + rect.height() * 0.75), Align2::CENTER_CENTER, orbit_look::txt(word, said).weight(weight::MEDIUM).color(fade(theme::FG, alpha)));
 }
 
 /// A headset's page, on its own and not a smaller screen's: what is read at arm's length with a moving hand. Six worlds as pictures with their names, and beside them a wide panel:
@@ -583,13 +583,13 @@ fn vr_card(p: &Painter, rect: Rect, entry: &Entry, d: &Data, hover: bool, presse
         None
     };
     if let Some((word, tint)) = chip {
-        let galley = p.layout_job(Txt::new(word, 16.5).weight(weight::BOLD).color(orbit_look::on_accent()).job(f32::INFINITY));
+        let galley = p.layout_job(orbit_look::txt(word, 16.5).weight(weight::BOLD).color(orbit_look::on_accent()).job(f32::INFINITY));
         let back = Rect::from_min_size(thumb.min + vec2(8.0, 8.0), vec2(galley.size().x + 18.0, 28.0));
         p.rect_filled(back, CornerRadius::same(14), tint);
         p.galley(pos2(back.min.x + 9.0, back.center().y - galley.size().y / 2.0), galley, orbit_look::on_accent());
     }
     // Its whole name, on two lines where it takes them: worlds are told apart by it.
-    let mut name = Txt::new(entry.name.clone(), 18.5).weight(weight::SEMIBOLD).color(theme::FG).job(rect.width() - 18.0);
+    let mut name = orbit_look::txt(entry.name.clone(), 18.5).weight(weight::SEMIBOLD).color(theme::FG).job(rect.width() - 18.0);
     name.wrap.max_rows = 2;
     let galley = p.layout_job(name);
     p.galley(pos2(rect.min.x + 9.0, rect.max.y - 28.0 - galley.size().y / 2.0), galley, theme::FG);
@@ -642,7 +642,7 @@ fn more_slot(count: usize, n: usize, side: bool) -> Option<Rect> {
 fn draw_live(p: &Painter, hero: Rect, live: &Live) {
     let corner = CornerRadius::same(14);
     let say = |p: &Painter, words: &str| {
-        let txt = Txt::new(words, 15.0).weight(weight::SEMIBOLD).color(Color32::WHITE);
+        let txt = orbit_look::txt(words, 15.0).weight(weight::SEMIBOLD).color(Color32::WHITE);
         let galley = p.layout_job(txt.job_truncated(hero.width() - 40.0));
         let pill = Rect::from_center_size(hero.center(), galley.size() + vec2(26.0, 14.0));
         p.rect_filled(pill, CornerRadius::same(14), theme::black(0.82));
@@ -665,7 +665,7 @@ fn draw_live(p: &Painter, hero: Rect, live: &Live) {
     }
     super::super::orbit::panels::keep_colour(p, hero);
     p.add(egui::epaint::RectShape::filled(hero, corner, Color32::WHITE).with_texture(id, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0))));
-    let txt = Txt::new("Drag to turn it", 14.5).weight(weight::MEDIUM).color(Color32::WHITE);
+    let txt = orbit_look::txt("Drag to turn it", 14.5).weight(weight::MEDIUM).color(Color32::WHITE);
     let galley = p.layout_job(txt.job(f32::INFINITY));
     let pill = Rect::from_min_size(pos2(hero.left() + 8.0, hero.bottom() - 8.0 - galley.size().y - 8.0), galley.size() + vec2(18.0, 8.0));
     p.rect_filled(pill, CornerRadius::same(10), theme::black(0.72));
@@ -1440,7 +1440,7 @@ impl Panel {
                     } else {
                         "No world matches"
                     };
-                    text(p, pos2(512.0, 162.0), Align2::CENTER_CENTER, Txt::new(msg, 19.0).color(fade(theme::FG_3, shown)));
+                    text(p, pos2(512.0, 162.0), Align2::CENTER_CENTER, orbit_look::txt(msg, 19.0).color(fade(theme::FG_3, shown)));
                 }
                 self.keyboard(p, &targets, shown);
             }
@@ -1477,7 +1477,7 @@ impl Panel {
             widgets::icon(p, pos2(head.min.x + 26.0, head.center().y), icons::CARET_LEFT, 24.0, theme::FG);
             let name = if self.query.is_empty() { self.section.label(d.status.list.vrchat).to_string() } else { self.query.clone() };
             let room = head.width() - 44.0 - 76.0;
-            let galley = p.layout_job(Txt::new(name, 21.0).weight(weight::SEMIBOLD).color(theme::FG).job_truncated(room));
+            let galley = p.layout_job(orbit_look::txt(name, 21.0).weight(weight::SEMIBOLD).color(theme::FG).job_truncated(room));
             p.galley(pos2(head.min.x + 44.0, head.center().y - galley.size().y / 2.0), galley, theme::FG);
             // What else is behind it.
             widgets::icon(p, pos2(head.max.x - 58.0, head.center().y), icons::MAGNIFYING_GLASS, 23.0, theme::FG_2);
@@ -1496,9 +1496,9 @@ impl Panel {
                 }
             }
             if results.is_empty() {
-                text(p, pos2(232.0, 320.0), Align2::CENTER_CENTER, Txt::new("Nothing else here", 20.0).color(theme::FG_3));
+                text(p, pos2(232.0, 320.0), Align2::CENTER_CENTER, orbit_look::txt("Nothing else here", 20.0).color(theme::FG_3));
             } else if current * PER_PAGE >= results.len() {
-                text(p, pos2(232.0, 320.0), Align2::CENTER_CENTER, Txt::new("Finding more worlds\u{2026}", 20.0).color(fade(theme::FG_3, shown)));
+                text(p, pos2(232.0, 320.0), Align2::CENTER_CENTER, orbit_look::txt("Finding more worlds\u{2026}", 20.0).color(fade(theme::FG_3, shown)));
             }
             return;
         }
@@ -1513,7 +1513,7 @@ impl Panel {
                 None if results.len() == 1 => "1 world".to_string(),
                 None => format!("{}{more} worlds", results.len()),
             };
-            text(p, pos2(field_rect().max.x - 28.0, field_rect().center().y), Align2::RIGHT_CENTER, Txt::new(count, 16.0).color(theme::FG_4));
+            text(p, pos2(field_rect().max.x - 28.0, field_rect().center().y), Align2::RIGHT_CENTER, orbit_look::txt(count, 16.0).color(theme::FG_4));
         }
         let pages = self.pages(d, results.len());
         let current = self.results_page.min(pages - 1);
@@ -1525,7 +1525,7 @@ impl Panel {
             round_button(p, next, icons::CARET_RIGHT, h, pr, 1.0);
             let of = if d.status.list.more { format!("{}/{}+", current + 1, pages - 1) } else { format!("{}/{}", current + 1, pages) };
             if !side {
-                text(p, pos2(860.0, 52.0), Align2::RIGHT_CENTER, Txt::new(of, 17.0).color(theme::FG_3));
+                text(p, pos2(860.0, 52.0), Align2::RIGHT_CENTER, orbit_look::txt(of, 17.0).color(theme::FG_3));
             }
         }
         // What is browsed (searching: every world, 3D only), the order, the labels kept to.
@@ -1538,7 +1538,7 @@ impl Panel {
                 Some(FoundBy::Orbiters) => "Every public VRChat world, from Orbiters",
                 None => "Every VRChat world",
             };
-            text_cut(p, pos2(ONLY_3D.max.x + 14.0, 106.0), (if side { SIDE_SORT.min.x } else { SORT.min.x }) - ONLY_3D.max.x - 24.0, Txt::new(from, 15.0).color(theme::FG_3));
+            text_cut(p, pos2(ONLY_3D.max.x + 14.0, 106.0), (if side { SIDE_SORT.min.x } else { SORT.min.x }) - ONLY_3D.max.x - 24.0, orbit_look::txt(from, 15.0).color(theme::FG_3));
         } else {
             let track = Rect::from_min_max(section_rect(0).min, section_rect(Section::ALL.len() - 1).max);
             p.rect_filled(track, CornerRadius::same(20), SURFACE);
@@ -1589,24 +1589,24 @@ impl Panel {
             let line = Rect::from_min_size(pos2(32.0, heading - 2.0), vec2(if side { 620.0 } else { 960.0 }, 1.5));
             p.rect_filled(line, CornerRadius::ZERO, theme::white(0.12));
             let name = Section::Popular.label(d.status.list.vrchat);
-            text(p, pos2(32.0, heading + 13.0), Align2::LEFT_CENTER, Txt::new(format!("{name} worlds"), 16.5).weight(weight::SEMIBOLD).color(theme::FG));
-            let wide = p.layout_job(Txt::new(format!("{name} worlds"), 16.5).weight(weight::SEMIBOLD).job(f32::INFINITY)).size().x;
-            text(p, pos2(32.0 + wide + 12.0, heading + 13.0), Align2::LEFT_CENTER, Txt::new("No 3D capture yet", 15.5).color(theme::FG_3));
+            text(p, pos2(32.0, heading + 13.0), Align2::LEFT_CENTER, orbit_look::txt(format!("{name} worlds"), 16.5).weight(weight::SEMIBOLD).color(theme::FG));
+            let wide = p.layout_job(orbit_look::txt(format!("{name} worlds"), 16.5).weight(weight::SEMIBOLD).job(f32::INFINITY)).size().x;
+            text(p, pos2(32.0 + wide + 12.0, heading + 13.0), Align2::LEFT_CENTER, orbit_look::txt("No 3D capture yet", 15.5).color(theme::FG_3));
             let (h, pr) = state(Target::Section(Section::Popular));
             if let Some(slot) = more_slot(results.len(), n, side) {
                 let slot = if pr { slot.shrink(3.0) } else { slot };
                 p.rect_filled(slot, CornerRadius::same(20), if h { RAISED } else { SURFACE });
                 if side {
-                    text(p, slot.center() - vec2(0.0, 13.0), Align2::CENTER_CENTER, Txt::new("Other worlds", 18.0).weight(weight::SEMIBOLD).color(theme::FG));
-                    text(p, slot.center() + vec2(0.0, 15.0), Align2::CENTER_CENTER, Txt::new("See them all \u{203a}", 16.0).weight(weight::SEMIBOLD).color(if h { theme::FG } else { orbit_look::accent() }));
+                    text(p, slot.center() - vec2(0.0, 13.0), Align2::CENTER_CENTER, orbit_look::txt("Other worlds", 18.0).weight(weight::SEMIBOLD).color(theme::FG));
+                    text(p, slot.center() + vec2(0.0, 15.0), Align2::CENTER_CENTER, orbit_look::txt("See them all \u{203a}", 16.0).weight(weight::SEMIBOLD).color(if h { theme::FG } else { orbit_look::accent() }));
                 } else {
                     widgets::icon(p, slot.center() - vec2(0.0, 46.0), icons::GLOBE_HEMISPHERE_WEST, 40.0, orbit_look::accent());
-                    text(p, slot.center() + vec2(0.0, 2.0), Align2::CENTER_CENTER, Txt::new("Other worlds", 20.0).weight(weight::SEMIBOLD).color(theme::FG));
-                    text(p, slot.center() + vec2(0.0, 30.0), Align2::CENTER_CENTER, Txt::new("Every popular one, or search for any", 15.5).color(theme::FG_2));
-                    text(p, slot.center() + vec2(0.0, 60.0), Align2::CENTER_CENTER, Txt::new("See them all \u{203a}", 16.0).weight(weight::SEMIBOLD).color(if h { theme::FG } else { orbit_look::accent() }));
+                    text(p, slot.center() + vec2(0.0, 2.0), Align2::CENTER_CENTER, orbit_look::txt("Other worlds", 20.0).weight(weight::SEMIBOLD).color(theme::FG));
+                    text(p, slot.center() + vec2(0.0, 30.0), Align2::CENTER_CENTER, orbit_look::txt("Every popular one, or search for any", 15.5).color(theme::FG_2));
+                    text(p, slot.center() + vec2(0.0, 60.0), Align2::CENTER_CENTER, orbit_look::txt("See them all \u{203a}", 16.0).weight(weight::SEMIBOLD).color(if h { theme::FG } else { orbit_look::accent() }));
                 }
             } else {
-                text(p, pos2(if side { 652.0 } else { 992.0 }, heading + 11.0), Align2::RIGHT_CENTER, Txt::new("See them all \u{203a}", 15.5).weight(weight::SEMIBOLD).color(if h { theme::FG } else { orbit_look::accent() }));
+                text(p, pos2(if side { 652.0 } else { 992.0 }, heading + 11.0), Align2::RIGHT_CENTER, orbit_look::txt("See them all \u{203a}", 15.5).weight(weight::SEMIBOLD).color(if h { theme::FG } else { orbit_look::accent() }));
             }
         }
         // Few captures yet: the free space goes on to the worlds that are there.
@@ -1618,7 +1618,7 @@ impl Panel {
             }
         }
         if !results.is_empty() && current * PER_PAGE >= results.len() {
-            text(p, pos2(if side { 340.0 } else { 512.0 }, 330.0), Align2::CENTER_CENTER, Txt::new("Finding more worlds…", 19.0).color(fade(theme::FG_3, shown)));
+            text(p, pos2(if side { 340.0 } else { 512.0 }, 330.0), Align2::CENTER_CENTER, orbit_look::txt("Finding more worlds…", 19.0).color(fade(theme::FG_3, shown)));
         }
         for (t, rect) in targets {
             if let Target::Card(i) = *t {
@@ -1639,17 +1639,17 @@ impl Panel {
         }
         if side {
             if results.is_empty() {
-                text(p, pos2(340.0, 330.0), Align2::CENTER_CENTER, Txt::new("Nothing else here", 18.0).color(theme::FG_3));
+                text(p, pos2(340.0, 330.0), Align2::CENTER_CENTER, orbit_look::txt("Nothing else here", 18.0).color(theme::FG_3));
             } else if self.few_captures(d) {
-                text(p, pos2(340.0, 420.0), Align2::CENTER_CENTER, Txt::new("Few worlds have a 3D capture yet", 17.0).weight(weight::MEDIUM).color(theme::FG_2));
-                text(p, pos2(340.0, 448.0), Align2::CENTER_CENTER, Txt::new("Search any world above, or look through these", 15.0).color(theme::FG_3));
+                text(p, pos2(340.0, 420.0), Align2::CENTER_CENTER, orbit_look::txt("Few worlds have a 3D capture yet", 17.0).weight(weight::MEDIUM).color(theme::FG_2));
+                text(p, pos2(340.0, 448.0), Align2::CENTER_CENTER, orbit_look::txt("Search any world above, or look through these", 15.0).color(theme::FG_3));
             }
         } else if results.is_empty() {
             self.empty(p, d, shown, state(Target::Retry));
         } else if self.few_captures(d) {
             // Few worlds have a capture yet: the free space says what these are, and where the others are.
-            text(p, pos2(512.0, 424.0), Align2::CENTER_CENTER, Txt::new("Worlds people captured in 3D: open one to walk in it", 19.0).weight(weight::MEDIUM).color(fade(theme::FG, shown)));
-            text(p, pos2(512.0, 456.0), Align2::CENTER_CENTER, Txt::new("Few have one yet. Search any world above, or look through these", 16.0).color(fade(theme::FG_3, shown)));
+            text(p, pos2(512.0, 424.0), Align2::CENTER_CENTER, orbit_look::txt("Worlds people captured in 3D: open one to walk in it", 19.0).weight(weight::MEDIUM).color(fade(theme::FG, shown)));
+            text(p, pos2(512.0, 456.0), Align2::CENTER_CENTER, orbit_look::txt("Few have one yet. Search any world above, or look through these", 16.0).color(fade(theme::FG_3, shown)));
         }
     }
 
@@ -1681,9 +1681,9 @@ impl Panel {
             (icons::MAGNIFYING_GLASS, "No world matches", "Try another name, or a 3D capture's author or sharer")
         };
         widgets::icon(p, pos2(512.0, 270.0), icon, 44.0, fade(theme::FG_4, shown));
-        text(p, pos2(512.0, 326.0), Align2::CENTER_CENTER, Txt::new(title, 24.0).weight(weight::SEMIBOLD).color(fade(theme::FG, shown)));
+        text(p, pos2(512.0, 326.0), Align2::CENTER_CENTER, orbit_look::txt(title, 24.0).weight(weight::SEMIBOLD).color(fade(theme::FG, shown)));
         let line: String = line.chars().take(80).collect();
-        text(p, pos2(512.0, 360.0), Align2::CENTER_CENTER, Txt::new(line, 17.0).color(fade(theme::FG_3, shown)));
+        text(p, pos2(512.0, 360.0), Align2::CENTER_CENTER, orbit_look::txt(line, 17.0).color(fade(theme::FG_3, shown)));
         if self.failure(d).is_some() {
             pill_button(p, Rect::from_center_size(pos2(512.0, 420.0), vec2(200.0, 56.0)), Some(icons::ARROW_CLOCKWISE), "Try again", RAISED, theme::FG, retry.0, retry.1, shown);
         }
@@ -1704,7 +1704,7 @@ impl Panel {
             }
         }
         let Some(entry) = self.entry(d) else {
-            text(p, side.center(), Align2::CENTER_CENTER, Txt::new("This world is no longer listed", 17.0).color(theme::FG_3));
+            text(p, side.center(), Align2::CENTER_CENTER, orbit_look::txt("This world is no longer listed", 17.0).color(theme::FG_3));
             return;
         };
         // Another world's, coming in at once.
@@ -1725,7 +1725,7 @@ impl Panel {
             let words = if near { "Close your grip" } else { "Grip to take it" };
             // Right under the hole, off the capture, and with nothing around it: this is done with a hand, and is no button for a laser.
             let ink = if near { orbit_look::accent() } else { theme::FG };
-            let galley = p.layout_job(Txt::new(words, 21.0).weight(weight::BOLD).color(ink).job(f32::INFINITY));
+            let galley = p.layout_job(orbit_look::txt(words, 21.0).weight(weight::BOLD).color(ink).job(f32::INFINITY));
             let left = VR_GRIP.max.x - galley.size().x - 34.0;
             widgets::icon(p, pos2(left + 13.0, VR_GRIP.center().y), icons::HAND_GRABBING, 27.0, orbit_look::accent());
             p.galley(pos2(left + 34.0, VR_GRIP.center().y - galley.size().y / 2.0), galley, ink);
@@ -1752,7 +1752,7 @@ impl Panel {
                 let pulse = if status.shown && status.stage.is_none() { 1.0 } else { 0.55 + 0.45 * ((time * 4.0).sin() as f32 * 0.5 + 0.5) };
                 p.circle_filled(pos2(hero.min.x + 20.0, foot.center().y), 5.0, fade(dot, rest * pulse));
                 let room = if taken { small_back.min.x - hero.min.x - 44.0 } else { hero.width() - 44.0 };
-                text_cut(p, pos2(hero.min.x + 34.0, foot.center().y), room, Txt::new(label, 15.0).weight(weight::MEDIUM).color(fade(theme::FG, rest)));
+                text_cut(p, pos2(hero.min.x + 34.0, foot.center().y), room, orbit_look::txt(label, 15.0).weight(weight::MEDIUM).color(fade(theme::FG, rest)));
                 if let Some(f) = status.download {
                     let track = Rect::from_min_size(pos2(hero.min.x, hero.max.y - 4.0), vec2(hero.width(), 4.0));
                     p.rect_filled(track, CornerRadius::same(2), fade(theme::white(0.12), rest));
@@ -1765,7 +1765,7 @@ impl Panel {
                     (None, true) => "Its 3D preview is on orbiters.cc".to_string(),
                     (None, false) => "No 3D capture of it yet".to_string(),
                 };
-                text_cut(p, pos2(hero.min.x + 16.0, foot.center().y), hero.width() - 32.0, Txt::new(line, 15.0).color(fade(theme::FG_2, rest)));
+                text_cut(p, pos2(hero.min.x + 16.0, foot.center().y), hero.width() - 32.0, orbit_look::txt(line, 15.0).color(fade(theme::FG_2, rest)));
             }
         }
         // Its way out, on its edge.
@@ -1779,9 +1779,9 @@ impl Panel {
         let (x, width) = if vr { (VR_LEFT, SIDE_RIGHT - VR_LEFT) } else { (SIDE_LEFT, SIDE_RIGHT - SIDE_LEFT) };
         if vr {
             let room = if hole.is_some() { VR_GRIP.min.x - x - 14.0 } else { width };
-            text_cut(p, pos2(x, 302.0), room, Txt::new(entry.name.clone(), 27.0).weight(weight::SEMIBOLD).color(fade(theme::FG, rest)));
+            text_cut(p, pos2(x, 302.0), room, orbit_look::txt(entry.name.clone(), 27.0).weight(weight::SEMIBOLD).color(fade(theme::FG, rest)));
         } else {
-            let mut title = Txt::new(entry.name.clone(), 21.0).weight(weight::SEMIBOLD).color(fade(theme::FG, rest)).job(width);
+            let mut title = orbit_look::txt(entry.name.clone(), 21.0).weight(weight::SEMIBOLD).color(fade(theme::FG, rest)).job(width);
             title.wrap.max_rows = 2;
             let galley = p.layout_job(title);
             // Its last line just over who made it, however many it has.
@@ -1804,7 +1804,7 @@ impl Panel {
         }
         // In a headset, who made it and no more.
         let under = if vr { under.first().cloned().unwrap_or_default() } else { under.join(" \u{b7} ") };
-        text_cut(p, pos2(x, if vr { 340.0 } else { 266.0 }), width, Txt::new(under, if vr { 19.0 } else { 16.5 }).color(fade(theme::FG, rest)));
+        text_cut(p, pos2(x, if vr { 340.0 } else { 266.0 }), width, orbit_look::txt(under, if vr { 19.0 } else { 16.5 }).color(fade(theme::FG, rest)));
         // What it can be seen as, and the rest.
         let wf = d.world_feedback(entry);
         for (t, rect) in targets {
@@ -1856,7 +1856,7 @@ impl Panel {
                         pill_button(p, *rect, Some(icons::CUBE), &label, RAISED, theme::FG, h, pr, rest);
                         continue;
                     }
-                    text(p, pos2(rect.max.x, rect.center().y), Align2::RIGHT_CENTER, Txt::new(label, 15.5).weight(weight::SEMIBOLD).color(fade(if h { theme::FG } else { orbit_look::accent() }, rest)));
+                    text(p, pos2(rect.max.x, rect.center().y), Align2::RIGHT_CENTER, orbit_look::txt(label, 15.5).weight(weight::SEMIBOLD).color(fade(if h { theme::FG } else { orbit_look::accent() }, rest)));
                 }
                 _ => {}
             }
@@ -1864,7 +1864,7 @@ impl Panel {
         // As much of the world's description as fits. In a headset, larger, and no more than that under it: its numbers are on the tiles over it.
         let description = if entry.description.trim().is_empty() { facts.and_then(|f| f.description.as_deref()).unwrap_or("") } else { entry.description.as_str() };
         if !description.trim().is_empty() {
-            let mut job = Txt::new(description.split_whitespace().collect::<Vec<_>>().join(" "), if vr { 18.0 } else { 16.0 }).color(fade(theme::FG, rest)).job(width);
+            let mut job = orbit_look::txt(description.split_whitespace().collect::<Vec<_>>().join(" "), if vr { 18.0 } else { 16.0 }).color(fade(theme::FG, rest)).job(width);
             // More of it where nobody has said anything yet.
             let quiet = wf.comments.is_empty() && wf.comment_count == 0;
             job.wrap.max_rows = if !vr && d.others(entry).is_empty() && (quiet || d.performance(entry).is_none()) { 3 } else { 2 };
@@ -1877,7 +1877,7 @@ impl Panel {
             // Why a press did nothing, over what is there.
             if let Some(note) = self.note(time).map(str::to_string).or_else(|| wf.error.clone()).or_else(|| status.error.clone().filter(|_| !current)) {
                 p.rect_filled(VR_OTHER, CornerRadius::same(14), SURFACE);
-                text_cut(p, pos2(x, VR_OTHER.min.y + 10.0), width, Txt::new(note, 18.0).color(fade(theme::WARN, rest)));
+                text_cut(p, pos2(x, VR_OTHER.min.y + 10.0), width, orbit_look::txt(note, 18.0).color(fade(theme::WARN, rest)));
             }
             return;
         }
@@ -1890,7 +1890,7 @@ impl Panel {
         let note = self.note(time).map(str::to_string).or_else(|| wf.error.clone()).or_else(|| status.error.clone().filter(|_| !current));
         let teaser_hover = self.hover == Some(Target::Comments);
         if let Some(note) = note {
-            text_cut(p, pos2(x, TEASER.center().y), width, Txt::new(note, 15.5).color(fade(theme::WARN, rest)));
+            text_cut(p, pos2(x, TEASER.center().y), width, orbit_look::txt(note, 15.5).color(fade(theme::WARN, rest)));
         } else {
             let teaser = TEASER;
             if wf.comments.is_empty() && !(wf.loading && wf.comment_count > 0) {
@@ -1905,7 +1905,7 @@ impl Panel {
                 None if wf.loading && wf.comment_count > 0 => "Reading the comments\u{2026}".to_string(),
                 None => "No comment yet: be the first".to_string(),
             };
-            text_cut(p, pos2(teaser.min.x + 28.0, teaser.center().y), teaser.width() - 34.0, Txt::new(line, 15.5).color(fade(theme::FG, rest)));
+            text_cut(p, pos2(teaser.min.x + 28.0, teaser.center().y), teaser.width() - 34.0, orbit_look::txt(line, 15.5).color(fade(theme::FG, rest)));
         }
     }
 }
@@ -2005,7 +2005,7 @@ fn pill_button(p: &Painter, rect: Rect, glyph: Option<&str>, label: &str, bg: Co
     let rect = if pressed { rect.shrink(2.0) } else { rect };
     let bg = if hover { theme::mix(bg, Color32::WHITE, 0.08) } else { bg };
     p.rect_filled(rect, CornerRadius::same((rect.height() / 2.0) as u8), fade(bg, alpha));
-    let label_txt = Txt::new(label, 20.0).weight(weight::SEMIBOLD).color(fade(fg, alpha));
+    let label_txt = orbit_look::txt(label, 20.0).weight(weight::SEMIBOLD).color(fade(fg, alpha));
     let galley = p.layout_job(label_txt.job_truncated((rect.width() - 40.0).max(10.0)));
     let icon_w = if glyph.is_some() { 30.0 } else { 0.0 };
     let total = icon_w + galley.size().x;
@@ -2022,7 +2022,7 @@ fn icon_button(p: &Painter, rect: Rect, glyph: &str, filled: bool, label: &str, 
     let rect = if pressed { rect.shrink(2.0) } else { rect };
     let bg = if hover { theme::mix(bg, Color32::WHITE, 0.08) } else { bg };
     p.rect_filled(rect, CornerRadius::same((rect.height() / 2.0) as u8), fade(bg, alpha));
-    let txt = Txt::new(label, 18.0).weight(weight::SEMIBOLD).color(fade(fg, alpha));
+    let txt = orbit_look::txt(label, 18.0).weight(weight::SEMIBOLD).color(fade(fg, alpha));
     let galley = p.layout_job(txt.job_truncated((rect.width() - 52.0).max(10.0)));
     let total = if label.is_empty() { 22.0 } else { 30.0 + galley.size().x };
     let left = rect.center().x - total / 2.0;
@@ -2041,7 +2041,7 @@ fn chip_button(p: &Painter, rect: Rect, glyph: &str, label: &str, bg: Color32, f
     let rect = if pressed { rect.shrink(1.5) } else { rect };
     p.rect_filled(rect, CornerRadius::same((rect.height() / 2.0) as u8), fade(bg, alpha));
     widgets::icon(p, pos2(rect.min.x + 22.0, rect.center().y), glyph, 18.0, fade(fg, alpha));
-    text_cut(p, pos2(rect.min.x + 40.0, rect.center().y - 10.0), rect.width() - 54.0, Txt::new(label, 16.0).weight(weight::MEDIUM).color(fade(fg, alpha)));
+    text_cut(p, pos2(rect.min.x + 40.0, rect.center().y - 10.0), rect.width() - 54.0, orbit_look::txt(label, 16.0).weight(weight::MEDIUM).color(fade(fg, alpha)));
 }
 
 /// One choice of a segmented control (the order, how sharp).
@@ -2050,7 +2050,7 @@ fn segment(p: &Painter, rect: Rect, label: &str, on: bool, hover: bool, pressed:
     let fg = if on { CARD } else { theme::FG_2 };
     let r = if pressed { rect.shrink(2.0) } else { rect.shrink(1.0) };
     p.rect_filled(r, CornerRadius::same((r.height() / 2.0) as u8), fade(bg, alpha));
-    text(p, r.center(), Align2::CENTER_CENTER, Txt::new(label, 17.0).weight(weight::MEDIUM).color(fade(fg, alpha)));
+    text(p, r.center(), Align2::CENTER_CENTER, orbit_look::txt(label, 17.0).weight(weight::MEDIUM).color(fade(fg, alpha)));
 }
 
 /// A label as a chip: its name and how many gave it; lit when the member gave it.
@@ -2067,7 +2067,7 @@ fn label_chip(p: &Painter, rect: Rect, name: &str, count: Option<u32>, mine: boo
     let pad = rect.height() / 2.0;
     let mut right = rect.max.x - pad + 4.0;
     if let Some(n) = count.filter(|n| *n > 0) {
-        let galley = p.layout_job(Txt::new(short_count(n as u64), size - 1.0).color(fade(sub, alpha)).job(f32::INFINITY));
+        let galley = p.layout_job(orbit_look::txt(short_count(n as u64), size - 1.0).color(fade(sub, alpha)).job(f32::INFINITY));
         right -= galley.size().x;
         p.galley(pos2(right, rect.center().y - galley.size().y / 2.0), galley, sub);
         right -= 8.0;
@@ -2077,7 +2077,7 @@ fn label_chip(p: &Painter, rect: Rect, name: &str, count: Option<u32>, mine: boo
         widgets::icon(p, pos2(left + 7.0, rect.center().y), icons::CHECK, size, fade(fg, alpha));
         left += 20.0;
     }
-    text_cut(p, pos2(left, rect.center().y - size * 0.62), (right - left).max(10.0), Txt::new(name, size).weight(weight::MEDIUM).color(fade(fg, alpha)));
+    text_cut(p, pos2(left, rect.center().y - size * 0.62), (right - left).max(10.0), orbit_look::txt(name, size).weight(weight::MEDIUM).color(fade(fg, alpha)));
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2087,7 +2087,7 @@ fn key_cap(p: &Painter, rect: Rect, label: &str, glyph: Option<&str>, bg: Color3
     p.rect_filled(rect, CornerRadius::same(10), fade(bg, alpha));
     match glyph {
         Some(g) => widgets::icon(p, rect.center(), g, 24.0, fade(fg, alpha)),
-        None => text(p, rect.center(), Align2::CENTER_CENTER, Txt::new(label, 22.0).color(fade(fg, alpha))),
+        None => text(p, rect.center(), Align2::CENTER_CENTER, orbit_look::txt(label, 22.0).color(fade(fg, alpha))),
     }
 }
 
@@ -2103,18 +2103,18 @@ fn field(p: &Painter, rect: Rect, typed: &str, hint: &str, active: bool, (hover,
     let at = pos2(rect.min.x + 62.0, rect.center().y);
     let room = rect.max.x - at.x - 28.0;
     let shown = if typed.is_empty() && !active {
-        Txt::new(hint, 20.0).color(fade(theme::FG_4, alpha))
+        orbit_look::txt(hint, 20.0).color(fade(theme::FG_4, alpha))
     } else if typed.is_empty() {
-        Txt::new("", 20.0).color(fade(theme::FG, alpha))
+        orbit_look::txt("", 20.0).color(fade(theme::FG, alpha))
     } else {
         // The end of what is typed, where the cursor is.
         let chars: Vec<char> = typed.chars().collect();
         let mut from = chars.len().saturating_sub(64);
         loop {
             let tail: String = chars[from..].iter().collect();
-            let galley = p.layout_job(Txt::new(tail.clone(), 20.0).job(f32::INFINITY));
+            let galley = p.layout_job(orbit_look::txt(tail.clone(), 20.0).job(f32::INFINITY));
             if galley.size().x <= room || from + 1 >= chars.len() {
-                break Txt::new(tail, 20.0).color(fade(theme::FG, alpha));
+                break orbit_look::txt(tail, 20.0).color(fade(theme::FG, alpha));
             }
             from += 2;
         }
@@ -2163,7 +2163,7 @@ fn hsv(h: f32, s: f32, v: f32) -> Color32 {
 
 /// A tinted chip at `at`; returns its width.
 fn chip(p: &Painter, at: Pos2, glyph: &str, label: &str, tint: Color32, alpha: f32) -> f32 {
-    let txt = Txt::new(label, 15.0).weight(weight::MEDIUM).color(fade(tint, alpha));
+    let txt = orbit_look::txt(label, 15.0).weight(weight::MEDIUM).color(fade(tint, alpha));
     let galley = p.layout_job(txt.job(f32::INFINITY));
     let rect = Rect::from_min_size(at, vec2(galley.size().x + 42.0, 30.0));
     p.rect_filled(rect, CornerRadius::same(15), fade(theme::alpha(tint, 0.14), alpha));
@@ -2183,7 +2183,7 @@ pub fn short_count(n: u64) -> String {
 
 /// A badge on a picture's corner: an icon and a number or a word.
 fn badge(p: &Painter, at: Pos2, right: bool, glyph: &str, filled: bool, label: &str, tint: Color32, alpha: f32) {
-    let galley = p.layout_job(Txt::new(label, 14.0).weight(weight::SEMIBOLD).color(fade(theme::FG, alpha)).job(f32::INFINITY));
+    let galley = p.layout_job(orbit_look::txt(label, 14.0).weight(weight::SEMIBOLD).color(fade(theme::FG, alpha)).job(f32::INFINITY));
     let w = galley.size().x + 36.0;
     let rect = if right { Rect::from_min_size(pos2(at.x - w, at.y), vec2(w, 26.0)) } else { Rect::from_min_size(at, vec2(w, 26.0)) };
     p.rect_filled(rect, CornerRadius::same(13), fade(theme::black(0.6), alpha));
@@ -2213,14 +2213,14 @@ fn card(p: &Painter, rect: Rect, entry: &Entry, d: &Data, hover: bool, pressed: 
     if status.current == Some(entry.id) {
         let label = if status.shown { "Around you" } else { "Loading" };
         let tint = if status.shown { orbit_look::accent() } else { theme::WARN };
-        let txt = Txt::new(label, 14.0).weight(weight::SEMIBOLD).color(fade(orbit_look::on_accent(), alpha));
+        let txt = orbit_look::txt(label, 14.0).weight(weight::SEMIBOLD).color(fade(orbit_look::on_accent(), alpha));
         let galley = p.layout_job(txt.job(f32::INFINITY));
         let chip = Rect::from_min_size(thumb.min + vec2(12.0, 12.0), vec2(galley.size().x + 22.0, 26.0));
         p.rect_filled(chip, CornerRadius::same(13), fade(tint, alpha));
         p.galley(pos2(chip.min.x + 11.0, chip.center().y - galley.size().y / 2.0), galley, orbit_look::on_accent());
     } else if entry.capture {
         // A 3D capture: shown around the person from here.
-        let txt = Txt::new("3D", 15.5).weight(weight::SEMIBOLD).color(fade(orbit_look::on_accent(), alpha));
+        let txt = orbit_look::txt("3D", 15.5).weight(weight::SEMIBOLD).color(fade(orbit_look::on_accent(), alpha));
         let galley = p.layout_job(txt.job(f32::INFINITY));
         let chip = Rect::from_min_size(thumb.min + vec2(12.0, 12.0), vec2(galley.size().x + 44.0, 26.0));
         p.rect_filled(chip, CornerRadius::same(13), fade(orbit_look::accent(), alpha));
@@ -2242,7 +2242,7 @@ fn card(p: &Painter, rect: Rect, entry: &Entry, d: &Data, hover: bool, pressed: 
     } else if let Some(n) = entry.occupants.filter(|n| *n > 0) {
         badge(p, pos2(thumb.max.x - 10.0, thumb.max.y - 34.0), true, icons::USERS, false, &short_count(n as u64), theme::FG_2, alpha);
     }
-    text_cut(p, pos2(rect.min.x + 16.0, rect.min.y + CARD_THUMB + 9.0), rect.width() - 32.0, Txt::new(entry.name.clone(), 19.0).weight(weight::SEMIBOLD).color(fade(theme::FG, alpha)));
+    text_cut(p, pos2(rect.min.x + 16.0, rect.min.y + CARD_THUMB + 9.0), rect.width() - 32.0, orbit_look::txt(entry.name.clone(), 19.0).weight(weight::SEMIBOLD).color(fade(theme::FG, alpha)));
     // Its author, and the labels people gave its world most.
     let mut meta: Vec<String> = d.author(entry).map(str::to_string).into_iter().collect();
     let wf = d.world_feedback(entry);
@@ -2255,7 +2255,7 @@ fn card(p: &Painter, rect: Rect, entry: &Entry, d: &Data, hover: bool, pressed: 
             None => "No 3D capture yet".to_string(),
         });
     }
-    text_cut(p, pos2(rect.min.x + 16.0, rect.min.y + CARD_THUMB + 36.0), rect.width() - 32.0, Txt::new(meta.join(" · "), 15.0).color(fade(theme::FG_3, alpha)));
+    text_cut(p, pos2(rect.min.x + 16.0, rect.min.y + CARD_THUMB + 36.0), rect.width() - 32.0, orbit_look::txt(meta.join(" · "), 15.0).color(fade(theme::FG_3, alpha)));
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2267,25 +2267,25 @@ fn compact_card(p: &Painter, rect: Rect, entry: &Entry, d: &Data, hover: bool, p
     picture(p, thumb, (d.thumb)(entry), &entry.world_id, CornerRadius::same(10), alpha);
     let x = thumb.max.x + 14.0;
     let width = rect.max.x - x - 12.0;
-    let mut name = Txt::new(entry.name.clone(), 16.5).weight(weight::SEMIBOLD).color(fade(theme::FG, alpha)).job(width);
+    let mut name = orbit_look::txt(entry.name.clone(), 16.5).weight(weight::SEMIBOLD).color(fade(theme::FG, alpha)).job(width);
     name.wrap.max_rows = 2;
     p.galley(pos2(x, rect.min.y + 10.0), p.layout_job(name), theme::FG);
     if let Some(a) = d.author(entry) {
-        text_cut(p, pos2(x, rect.min.y + 62.0), width, Txt::new(a.to_string(), 16.0).color(fade(theme::FG_3, alpha)));
+        text_cut(p, pos2(x, rect.min.y + 62.0), width, orbit_look::txt(a.to_string(), 16.0).color(fade(theme::FG_3, alpha)));
     }
     if status.current == Some(entry.id) {
         p.circle_filled(pos2(x + 6.0, rect.min.y + 88.0), 5.0, fade(if status.shown { orbit_look::accent() } else { theme::WARN }, alpha));
-        text(p, pos2(x + 18.0, rect.min.y + 88.0), Align2::LEFT_CENTER, Txt::new(if !status.shown { "Loading" } else if status.small { "Small" } else { "Around you" }, 15.5).color(fade(theme::FG_2, alpha)));
+        text(p, pos2(x + 18.0, rect.min.y + 88.0), Align2::LEFT_CENTER, orbit_look::txt(if !status.shown { "Loading" } else if status.small { "Small" } else { "Around you" }, 15.5).color(fade(theme::FG_2, alpha)));
     } else {
         let mut at = x;
         if entry.capture {
             widgets::icon(p, pos2(at + 7.0, rect.min.y + 88.0), icons::CUBE, 15.0, fade(orbit_look::accent(), alpha));
-            text(p, pos2(at + 20.0, rect.min.y + 88.0), Align2::LEFT_CENTER, Txt::new("3D", 14.0).weight(weight::SEMIBOLD).color(fade(orbit_look::accent(), alpha)));
+            text(p, pos2(at + 20.0, rect.min.y + 88.0), Align2::LEFT_CENTER, orbit_look::txt("3D", 14.0).weight(weight::SEMIBOLD).color(fade(orbit_look::accent(), alpha)));
             at += 50.0;
         }
         if d.likes(entry) > 0 {
             widgets::icon_fill(p, pos2(at + 7.0, rect.min.y + 88.0), icons::HEART, 14.0, fade(theme::FG_3, alpha));
-            text(p, pos2(at + 20.0, rect.min.y + 88.0), Align2::LEFT_CENTER, Txt::new(short_count(d.likes(entry) as u64), 15.5).color(fade(theme::FG_3, alpha)));
+            text(p, pos2(at + 20.0, rect.min.y + 88.0), Align2::LEFT_CENTER, orbit_look::txt(short_count(d.likes(entry) as u64), 15.5).color(fade(theme::FG_3, alpha)));
         }
     }
 }
@@ -2312,7 +2312,7 @@ pub fn draw_chip(p: &Painter, status: &Status, name: Option<&str>, hover: bool, 
     } else {
         widgets::icon(p, pos2(icon_x, rect.center().y), glyph, 26.0, tint);
     }
-    text_cut(p, pos2(rect.min.x + 64.0, rect.center().y - 13.0), rect.width() - 100.0, Txt::new(label, 21.0).weight(weight::SEMIBOLD).color(theme::FG));
+    text_cut(p, pos2(rect.min.x + 64.0, rect.center().y - 13.0), rect.width() - 100.0, orbit_look::txt(label, 21.0).weight(weight::SEMIBOLD).color(theme::FG));
     widgets::icon(p, pos2(rect.max.x - 30.0, rect.center().y), icons::CARET_RIGHT, 20.0, theme::FG_3);
 }
 

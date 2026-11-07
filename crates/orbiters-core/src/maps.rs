@@ -3,6 +3,7 @@
 
 use crate::account::{Api, ApiError};
 use anyhow::Context;
+use orbiters_i18n::tr;
 use serde::{Deserialize, Serialize};
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -10,7 +11,7 @@ use std::time::Duration;
 
 /// A world id fit for a path of the API: VRChat's own shape, nothing else ([`crate::vrchat_log::is_world_id`]).
 fn world_path(world_id: &str) -> anyhow::Result<&str> {
-    anyhow::ensure!(crate::vrchat_log::is_world_id(world_id), "Not a VRChat world: {world_id:?}");
+    anyhow::ensure!(crate::vrchat_log::is_world_id(world_id), "{}", tr!("Not a VRChat world: {world}", world = format!("{world_id:?}")));
     Ok(world_id)
 }
 
@@ -319,7 +320,7 @@ pub fn found_path(list: &WorldList, page: usize) -> Option<String> {
 /// its own, one shaped otherwise left out, never the page.
 pub fn parse_found(json: &str) -> anyhow::Result<FoundWorlds> {
     let v: serde_json::Value = serde_json::from_str(json)?;
-    let items = v.get("items").and_then(|i| i.as_array()).ok_or_else(|| anyhow::anyhow!("not a list of worlds"))?;
+    let items = v.get("items").and_then(|i| i.as_array()).ok_or_else(|| anyhow::anyhow!("{}", tr("not a list of worlds")))?;
     let items = items
         .iter()
         .filter_map(|item| {
@@ -340,7 +341,7 @@ impl Api {
         if response.status().as_u16() == 404 {
             let text = response.into_body().with_config().limit(64 * 1024).read_to_string().unwrap_or_default();
             let ours = serde_json::from_str::<serde_json::Value>(&text).ok().is_some_and(|v| v.get("error").is_some_and(|e| e.is_string()));
-            anyhow::ensure!(ours, "this Orbiters server has no Map explorer");
+            anyhow::ensure!(ours, "{}", tr("this Orbiters server has no Map explorer"));
             return Ok(None);
         }
         Ok(Some(Self::json(response)?))
@@ -350,10 +351,13 @@ impl Api {
     /// the worlds Orbiters knows while VRChat cannot be asked). The lists only VRChat has are an error saying so.
     pub fn find_worlds(&self, list: &WorldList, page: usize) -> anyhow::Result<FoundWorlds> {
         let Some(path) = found_path(list, page) else {
-            anyhow::bail!(match list {
-                WorldList::Favorites => "Sign in to VRChat in Orbiters - N4N0's Settings to see your favorite worlds.",
-                _ => "Sign in to VRChat in Orbiters - N4N0's Settings to see the worlds people are in now.",
-            })
+            anyhow::bail!(
+                "{}",
+                match list {
+                    WorldList::Favorites => tr("Sign in to VRChat in Orbiters - N4N0's Settings to see your favorite worlds."),
+                    _ => tr("Sign in to VRChat in Orbiters - N4N0's Settings to see the worlds people are in now."),
+                }
+            )
         };
         let response = self.agent().get(&self.url(&path)).call()?;
         let status = response.status().as_u16();
@@ -457,7 +461,7 @@ impl Api {
             parts.push(Part::bytes("picture", format!("capture-{id}.jpg"), "image/jpeg", picture));
         }
         let mut metadata = metadata.clone();
-        anyhow::ensure!(metadata.is_object(), "The capture's details are not an object");
+        anyhow::ensure!(metadata.is_object(), "{}", tr("The capture's details are not an object"));
         metadata["revision"] = serde_json::json!(revision);
         let response = self.multipart_with("PUT", token, &format!("captures/capture/{id}/files"), &metadata.to_string(), parts, progress)?;
         Ok(crate::shares::json::<Answer>(response)?.item)
@@ -534,13 +538,13 @@ impl Api {
             .timeout_global(Some(Duration::from_secs(30 * 60)))
             .build()
             .send(ureq::SendBody::from_owned_reader(reader))
-            .context("Orbiters could not be reached")
+            .with_context(|| tr("Orbiters could not be reached"))
     }
 
     /// A public picture (VRChat's world thumbnails), at most 16 MB, over https only: a redirect to plain http is
     /// refused too.
     pub fn image(&self, url: &str) -> anyhow::Result<Vec<u8>> {
-        anyhow::ensure!(url.starts_with("https://"), "not an https address");
+        anyhow::ensure!(url.starts_with("https://"), "{}", tr("not an https address"));
         let response = self.agent().get(url).config().https_only(true).build().call()?;
         let status = response.status().as_u16();
         if !(200..300).contains(&status) {
@@ -588,7 +592,7 @@ impl Piece {
                 let n = f.read(&mut buf[..max])?;
                 // Shorter than when it was measured: the request would not match its own length.
                 if n == 0 {
-                    return Err(std::io::Error::new(std::io::ErrorKind::UnexpectedEof, format!("{} changed while it was sent", path.display())));
+                    return Err(std::io::Error::new(std::io::ErrorKind::UnexpectedEof, tr!("{path} changed while it was sent", path = path.display())));
                 }
                 *left -= n as u64;
                 Ok(n)

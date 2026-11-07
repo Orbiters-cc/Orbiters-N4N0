@@ -213,6 +213,81 @@ pub fn english_names_of(shown: &str) -> &'static [&'static str] {
     english_of_table(language()).and_then(|back| back.get(shown)).map_or(&[], |keys| keys.as_slice())
 }
 
+/// A catalog's texts with values in them, ready to be matched: the words around each `{name}`, the names in order, the translation.
+struct Written {
+    words: Vec<&'static str>,
+    names: Vec<&'static str>,
+    translated: &'static str,
+}
+
+/// The whole of a language's texts with values, the most words first: the most exact is tried first. Words too few to mean anything (`{a} in {b}`) are left out, as they would match any sentence.
+fn written_table(language: Language) -> Option<&'static Vec<Written>> {
+    static TABLES: [OnceLock<Vec<Written>>; 5] = [const { OnceLock::new() }; 5];
+    let table = table(language)?;
+    Some(TABLES[language as usize].get_or_init(|| {
+        let mut all = Vec::new();
+        for (english, translated) in table.iter() {
+            if english.contains(CONTEXT) || !english.contains('{') {
+                continue;
+            }
+            let (mut words, mut names, mut rest): (Vec<&'static str>, Vec<&'static str>, &'static str) = (Vec::new(), Vec::new(), english);
+            while let Some(open) = rest.find('{') {
+                let Some(close) = rest[open..].find('}') else { break };
+                words.push(&rest[..open]);
+                names.push(&rest[open + 1..open + close]);
+                rest = &rest[open + close + 1..];
+            }
+            words.push(rest);
+            if words.iter().map(|w| w.len()).sum::<usize>() >= 6 {
+                all.push(Written { words, names, translated });
+            }
+        }
+        all.sort_by_key(|w: &Written| (std::cmp::Reverse(w.words.iter().map(|x| x.len()).sum::<usize>()), w.translated));
+        all
+    }))
+}
+
+/// The values `english` has in the places of `written`'s names, when it is that text.
+fn values_of<'a>(written: &Written, english: &'a str) -> Option<Vec<&'a str>> {
+    let mut rest = english.strip_prefix(written.words[0])?;
+    let mut values = Vec::with_capacity(written.names.len());
+    for (i, word) in written.words[1..].iter().enumerate() {
+        let last = i + 2 == written.words.len();
+        let end = if last {
+            if word.is_empty() { rest.len() } else { rest.len().checked_sub(word.len()).filter(|end| rest.is_char_boundary(*end) && &rest[*end..] == *word)? }
+        } else {
+            rest.find(*word)?
+        };
+        values.push(&rest[..end]);
+        rest = &rest[end + word.len()..];
+    }
+    Some(values)
+}
+
+/// `english` said in the language now, when it was written out with its values in it earlier and kept: a failure kept in a file, read again after the language changed. It is
+/// found again by its words, each value said in turn as it may be a text too (`it took too long (reading the meshes)`). What is no text of the catalogs stays as it is, so
+/// something kept in another language, or from a server, shows as it came.
+pub fn tr_written(english: &str) -> String {
+    let Some(written) = written_table(language()) else { return english.to_string() };
+    let plain = tr(english);
+    if plain != english {
+        return plain.to_string();
+    }
+    for text in written {
+        if let Some(values) = values_of(text, english) {
+            let said: Vec<String> = values.iter().map(|v| tr_written(v)).collect();
+            let pairs: Vec<(&str, &dyn Display)> = text.names.iter().zip(&said).map(|(n, s)| (*n, s as &dyn Display)).collect();
+            return fill(text.translated, &pairs);
+        }
+    }
+    // A reason given with its cause.
+    if let Some((before, after)) = english.split_once(": ") {
+        let colon = if language() == Language::Ja { "：" } else if language() == Language::Fr { "\u{a0}: " } else { ": " };
+        return format!("{}{colon}{}", tr_written(before), tr_written(after));
+    }
+    english.to_string()
+}
+
 /// `text` with each `{name}` replaced by its value. A name that is not in `values` stays as written, so a mistake shows and breaks nothing;
 /// a value is put in as it is, never read for names itself.
 pub fn fill(text: &str, values: &[(&str, &dyn Display)]) -> String {
@@ -282,6 +357,19 @@ pub fn placeholders(text: &str) -> Vec<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn what_was_written_out_in_english_is_said_in_the_language_now() {
+        // English, and what no catalog has, stay as they are.
+        assert_eq!(tr_written("it took too long (reading the meshes)"), "it took too long (reading the meshes)");
+        in_language(Language::Fr, || {
+            assert_eq!(tr_written("nothing any catalog has"), "nothing any catalog has");
+            assert_eq!(tr_written("Settings"), tr("Settings"));
+            let said = tr_written("it took too long (reading the meshes)");
+            assert!(said.contains(tr("reading the meshes")) && said != "it took too long (reading the meshes)", "{said}");
+        });
+        in_language(Language::Ja, || assert!(!tr_written("it took too long (reading the meshes)").contains("too long")));
+    }
 
     #[test]
     fn tags_normalize_as_the_website_does() {

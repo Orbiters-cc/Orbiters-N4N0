@@ -1,6 +1,7 @@
 use crate::avatars::Avatar;
 use anyhow::{bail, Context};
 use serde::{Deserialize, Serialize};
+use orbiters_i18n::tr;
 use std::path::Path;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -50,9 +51,9 @@ pub struct Installed {
 }
 
 pub fn request(avatar: Avatar, asset_id: u64, server: &str, app_version: &str) -> anyhow::Result<Request> {
-    uuid::Uuid::parse_str(avatar.id.strip_prefix("avtr_").context("Only uploaded avatars can receive N4N0")?)?;
+    uuid::Uuid::parse_str(avatar.id.strip_prefix("avtr_").with_context(|| tr("Only uploaded avatars can receive N4N0"))?)?;
     if asset_id == 0 {
-        bail!("N4N0 is not published in this environment yet.");
+        bail!("{}", tr("N4N0 is not published in this environment yet."));
     }
     Ok(Request {
         schema: 1,
@@ -67,14 +68,14 @@ pub fn request(avatar: Avatar, asset_id: u64, server: &str, app_version: &str) -
 }
 pub fn write(project: &Path, request: &Request) -> anyhow::Result<()> {
     if request.schema != 1 || uuid::Uuid::parse_str(&request.id)?.to_string() != request.id {
-        bail!("Invalid setup request id or schema");
+        bail!("{}", tr("Invalid setup request id or schema"));
     }
     crate::write_json(&project.join("UserSettings/Orbiters/SetupRequests").join(format!("{}.json", request.id)), request)
 }
 /// Consume only a valid result for this request. A partially published or wrong result stays untouched.
 pub fn read_result(project: &Path, id: &str) -> anyhow::Result<Option<ResultFile>> {
     if uuid::Uuid::parse_str(id)?.to_string() != id {
-        bail!("Invalid setup request id");
+        bail!("{}", tr("Invalid setup request id"));
     }
     let p = project.join("UserSettings/Orbiters/SetupRequests").join(format!("{id}.result.json"));
     let bytes = match std::fs::read(&p) {
@@ -84,7 +85,7 @@ pub fn read_result(project: &Path, id: &str) -> anyhow::Result<Option<ResultFile
     };
     let result: ResultFile = serde_json::from_slice(&bytes)?;
     if result.schema != 1 || result.id != id {
-        bail!("Toolkit returned a result for a different request or schema");
+        bail!("{}", tr("Toolkit returned a result for a different request or schema"));
     }
     Ok(Some(result))
 }

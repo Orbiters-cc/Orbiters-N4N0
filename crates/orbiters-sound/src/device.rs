@@ -111,7 +111,7 @@ impl Running {
                 Ok(Self { stop, level, trouble, thread: Some(thread) })
             }
             Ok(Err(e)) => anyhow::bail!("{e}"),
-            Err(_) => anyhow::bail!("the sound devices did not open in time"),
+            Err(_) => anyhow::bail!("{}", orbiters_i18n::tr("the sound devices did not open in time")),
         }
     }
 

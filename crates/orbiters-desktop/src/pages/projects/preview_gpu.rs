@@ -503,7 +503,7 @@ pub(super) fn load(device: &wgpu::Device, queue: &wgpu::Queue, pipelines: Option
         let decode_ms = ms(t);
         let (pipelines, pipelines_ms) = match (pipelines, compiling) {
             (Some(p), _) => (p, 0.0),
-            (None, Some(job)) => job.join().map_err(|_| anyhow::anyhow!("the preview's pipelines could not be made"))?,
+            (None, Some(job)) => job.join().map_err(|_| anyhow::anyhow!("{}", orbiters_i18n::tr("the preview's pipelines could not be made")))?,
             (None, None) => unreachable!(),
         };
         let t = std::time::Instant::now();
@@ -1067,7 +1067,7 @@ impl Scene {
         self.targets = saved;
         self.last = None;
         let pixels = crate::overlay::worlds::render::read_texture(device, queue, &t.picture)?;
-        image::RgbaImage::from_raw(size.0, size.1, pixels).ok_or_else(|| anyhow::anyhow!("a still of the wrong size"))
+        image::RgbaImage::from_raw(size.0, size.1, pixels).ok_or_else(|| anyhow::anyhow!("{}", orbiters_i18n::tr("a still of the wrong size")))
     }
 
     fn look(&self) -> Look {

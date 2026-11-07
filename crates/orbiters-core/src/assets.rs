@@ -115,13 +115,13 @@ pub fn gather(assets: Vec<Asset>, showcase: impl Fn(u64) -> anyhow::Result<Vec<P
         let mut out = Vec::with_capacity(assets.len());
         for chunk in assets.chunks(6) {
             let handles: Vec<_> = chunk.iter().map(|a| s.spawn(|| showcase(a.id))).collect();
-            out.extend(handles.into_iter().map(|h| h.join().unwrap_or_else(|_| Err(anyhow::anyhow!("reading a showcase failed")))));
+            out.extend(handles.into_iter().map(|h| h.join().unwrap_or_else(|_| Err(anyhow::anyhow!("{}", tr("reading a showcase failed"))))));
         }
         out
     });
     let refused = |e: &anyhow::Error| Refused::of(e).is_some_and(|r| matches!(r.status, 401 | 403));
     if !answers.is_empty() && answers.iter().all(|a| a.as_ref().is_err_and(refused)) {
-        anyhow::bail!("Orbiters does not let this app read your assets' showcases yet.");
+        anyhow::bail!("{}", tr("Orbiters does not let this app read your assets' showcases yet."));
     }
     let mut first_error = None;
     let mut out = Vec::new();

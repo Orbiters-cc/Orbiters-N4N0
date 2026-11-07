@@ -281,12 +281,12 @@ impl Error {
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Error::NotInstalled => write!(f, "SteamVR is not installed"),
-            Error::Init(121) => write!(f, "SteamVR is not running"),
-            Error::Init(119) => write!(f, "SteamVR is shutting down"),
-            Error::Init(code) => write!(f, "SteamVR refused the connection (error {code})"),
-            Error::Interface(name, code) => write!(f, "SteamVR has no {name} (error {code})"),
-            Error::Load(e) => write!(f, "could not load SteamVR's client: {e}"),
+            Error::NotInstalled => f.write_str(orbiters_i18n::tr("SteamVR is not installed")),
+            Error::Init(121) => f.write_str(orbiters_i18n::tr("SteamVR is not running")),
+            Error::Init(119) => f.write_str(orbiters_i18n::tr("SteamVR is shutting down")),
+            Error::Init(code) => f.write_str(&orbiters_i18n::tr!("SteamVR refused the connection (error {code})", code = code)),
+            Error::Interface(name, code) => f.write_str(&orbiters_i18n::tr!("SteamVR has no {name} (error {code})", name = name, code = code)),
+            Error::Load(e) => f.write_str(&orbiters_i18n::tr!("could not load SteamVR's client: {error}", error = e)),
         }
     }
 }
@@ -353,7 +353,7 @@ mod platform {
 
     impl Library {
         pub fn open(_runtime: &Path) -> Result<Self, String> {
-            Err("only Windows is supported for now".into())
+            Err("only Windows is supported for now".into()) // i18n: not shown (the stub of a platform with no SteamVR; the overlay logs the load error)
         }
 
         pub fn symbol(&self, _name: &std::ffi::CStr) -> Option<*const std::ffi::c_void> {

@@ -55,7 +55,7 @@ impl Controller {
     }
 
     fn start_upload(&self, world_id: &str, world_name: &str, kind: UploadKind, paths: Vec<PathBuf>) -> anyhow::Result<u64> {
-        anyhow::ensure!(orbiters_core::vrchat_log::is_world_id(world_id), "Not a VRChat world.");
+        anyhow::ensure!(orbiters_core::vrchat_log::is_world_id(world_id), "{}", tr("Not a VRChat world."));
         let id = self.upload_serial.fetch_add(1, Ordering::Relaxed) + 1;
         self.update(|s| {
             let running = s.uploads.iter().any(|u| u.running() && u.world_id == world_id && u.kind == kind);
@@ -69,7 +69,7 @@ impl Controller {
                 }
             }
             if running {
-                Err(anyhow::anyhow!("This is already being sent."))
+                Err(anyhow::anyhow!("{}", tr("This is already being sent.")))
             } else {
                 Ok(id)
             }
@@ -131,8 +131,8 @@ impl Controller {
 
     /// Shares pictures of a world: VRChat screenshots, sent as they are, 12 per request.
     pub fn upload_pictures(self: &Shared, world_id: String, world_name: String, paths: Vec<PathBuf>) -> anyhow::Result<()> {
-        let Some((api, token)) = self.account_api() else { anyhow::bail!("Sign in to Orbiters first.") };
-        anyhow::ensure!(!paths.is_empty(), "Choose pictures to share.");
+        let Some((api, token)) = self.account_api() else { anyhow::bail!("{}", tr("Sign in to Orbiters first.")) };
+        anyhow::ensure!(!paths.is_empty(), "{}", tr("Choose pictures to share."));
         let id = self.start_upload(&world_id, &world_name, UploadKind::Pictures, paths.clone())?;
         let c = self.clone();
         std::thread::spawn(move || {
@@ -155,7 +155,7 @@ impl Controller {
     ) -> anyhow::Result<(usize, usize)> {
         let sizes: Vec<u64> = paths.iter().map(|p| std::fs::metadata(p).map(|m| m.len()).unwrap_or(0)).collect();
         if let Some(i) = sizes.iter().position(|s| *s > MAX_PICTURE_BYTES) {
-            anyhow::bail!("{} is over 25 MB.", paths[i].file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default());
+            anyhow::bail!("{}", tr!("{file} is over 25 MB.", file = paths[i].file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()));
         }
         let total: u64 = sizes.iter().sum();
         let (mut added, mut skipped, mut done) = (0, 0, 0u64);
@@ -185,8 +185,8 @@ impl Controller {
 
     /// Shares a session's reconstruction as the world's 3D preview (replacing this member's earlier one).
     pub fn upload_preview(self: &Shared, world_id: String, world_name: String, session: PathBuf) -> anyhow::Result<()> {
-        let Some((api, token)) = self.account_api() else { anyhow::bail!("Sign in to Orbiters first.") };
-        anyhow::ensure!(reconstruction::read_report(&session).is_some(), "Reconstruct this session first.");
+        let Some((api, token)) = self.account_api() else { anyhow::bail!("{}", tr("Sign in to Orbiters first.")) };
+        anyhow::ensure!(reconstruction::read_report(&session).is_some(), "{}", tr("Reconstruct this session first."));
         let id = self.start_upload(&world_id, &world_name, UploadKind::Preview, vec![session.clone()])?;
         let c = self.clone();
         std::thread::spawn(move || {
@@ -195,7 +195,7 @@ impl Controller {
             let state = match web_preview(&session).and_then(|Prepared { files, sky, metadata, generation }| {
                 // The picture only when drawn for these edits (capture_picture), and the edits still those prepared.
                 let picture = crate::capture_picture::jpeg(&session);
-                anyhow::ensure!(edits_now()? == generation, "Its splat edits changed while it was being prepared: upload it again.");
+                anyhow::ensure!(edits_now()? == generation, "{}", tr("Its splat edits changed while it was being prepared: upload it again."));
                 let total = files.len() + sky.as_deref().and_then(|p| std::fs::metadata(p).ok()).map_or(0, |m| m.len());
                 c.update_if(|s| match s.uploads.iter_mut().find(|u| u.id == id) {
                     Some(u) => {
@@ -209,7 +209,8 @@ impl Controller {
                 // A world's preview is public once uploaded: edited meanwhile, it says so (the next upload replaces it).
                 anyhow::ensure!(
                     edits_now()? == generation,
-                    "Its splats were changed in its 3D view while it was uploading: the world's preview has them as they were. Upload it again."
+                    "{}",
+                    tr("Its splats were changed in its 3D view while it was uploading: the world's preview has them as they were. Upload it again.")
                 );
                 Ok(())
             }) {
@@ -263,7 +264,7 @@ pub fn prepare(session: &Path, device: orbiters_reconstruct::gpu::DeviceOptions)
         }
         eprintln!("the splat edits of {} changed while it was prepared: again", session.display());
     }
-    anyhow::bail!("Its splat edits kept changing while it was being prepared: share it again once they are done.")
+    anyhow::bail!("{}", tr("Its splat edits kept changing while it was being prepared: share it again once they are done."))
 }
 
 /// One [`prepare`]: the trees and the generation they were made with.

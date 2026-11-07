@@ -13,7 +13,7 @@
   "Add N4N0": "Agregar N4N0",
   "Add N4N0 here": "Agregar N4N0 aquí",
   "Add N4N0 to your avatar": "Agregar N4N0 a tu avatar",
-  "Add Toolkit for 3D": "Agregar Toolkit para 3D",
+  "Add Toolkit for 3D": "Agregar Toolkit 3D",
   "Add a Unity project": "Agregar un proyecto de Unity",
   "Add a project to your list first: it can then be copied here.": "Primero agrega un proyecto a tu lista: después podrás copiarlo aquí.",
   "Add a repository": "Agregar un repositorio",
@@ -543,5 +543,6 @@
   "{v} is not a version": "{v} no es una versión",
   "Checking required disk space…": "Comprobando el espacio de disco necesario…",
   "it took too long ({doing})": "tardó demasiado ({doing})",
-  "{avatar} in {project}": "{avatar} en {project}"
+  "{avatar} in {project}": "{avatar} en {project}",
+  "an error in Orbiters - N4N0 while reading it": "un error de Orbiters - N4N0 al leerlo"
 }

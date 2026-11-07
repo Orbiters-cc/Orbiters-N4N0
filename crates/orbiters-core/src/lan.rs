@@ -293,7 +293,7 @@ pub struct LanBrowser {
 impl LanBrowser {
     /// Starts looking.
     pub fn start() -> anyhow::Result<Self> {
-        anyhow::ensure!(!crate::osc::no_network_listening(), "nothing listens on the network in this test run");
+        anyhow::ensure!(!crate::osc::no_network_listening(), "nothing listens on the network in this test run"); // i18n: not shown (only when ORBITERS_NO_NETWORK_LISTENING is set, which the agents' test runs do)
         let daemon = mdns_sd::ServiceDaemon::new()?;
         let events = daemon.browse(SERVICE)?;
         let found = Arc::<Mutex<Vec<FoundVrchat>>>::default();
@@ -502,7 +502,7 @@ mod tests {
                 let mut stream = stream;
                 let mut buf = [0u8; 1024];
                 let _ = stream.read(&mut buf);
-                let body = r#"{"NAME":"VRChat-Client-TEST01","OSC_IP":"0.0.0.0","OSC_PORT":9123}"#;
+                let body = r#"{"NAME":"VRChat-Client-TEST01","OSC_IP":"0.0.0.0","OSC_PORT":9123}"#; // network: not a socket (what a stand-in VRChat answers)
                 let _ = write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
             }
         });

@@ -44,8 +44,8 @@ pub fn pack(version: &str, files: &[(String, PathBuf)], out: &Path) -> anyhow::R
     let mut entries = Vec::with_capacity(files.len());
     let mut seen = HashSet::new();
     for (path, source) in files {
-        anyhow::ensure!(inside(Path::new("."), path).is_some() && path != INDEX && !path.contains('\\'), "{path}: not a path for the install folder");
-        anyhow::ensure!(seen.insert(path.to_ascii_lowercase()), "{path} is in the payload twice");
+        anyhow::ensure!(inside(Path::new("."), path).is_some() && path != INDEX && !path.contains('\\'), "{path}: not a path for the install folder"); // i18n: not shown (packing runs in `cargo xtask release`)
+        anyhow::ensure!(seen.insert(path.to_ascii_lowercase()), "{path} is in the payload twice"); // i18n: not shown (packing runs in `cargo xtask release`)
         let size = std::fs::metadata(source).with_context(|| format!("{}", source.display()))?.len();
         entries.push(Entry { path: path.clone(), size, sha256: crate::sha256_file(source)? });
     }
@@ -59,7 +59,7 @@ pub fn pack(version: &str, files: &[(String, PathBuf)], out: &Path) -> anyhow::R
     tar.append_data(&mut header(json.len() as u64), INDEX, json.as_slice())?;
     for ((path, source), entry) in files.iter().zip(&index.files) {
         let file = std::fs::File::open(source)?;
-        anyhow::ensure!(file.metadata()?.len() == entry.size, "{} changed while it was packed", source.display());
+        anyhow::ensure!(file.metadata()?.len() == entry.size, "{} changed while it was packed", source.display()); // i18n: not shown (packing runs in `cargo xtask release`)
         tar.append_data(&mut header(entry.size), path, file)?;
     }
     let writer = tar.into_inner()?.finish()?;
@@ -81,14 +81,14 @@ fn header(size: u64) -> tar::Header {
 pub fn read_index(payload: &[u8]) -> anyhow::Result<Index> {
     let mut archive = tar::Archive::new(zstd::Decoder::with_buffer(payload)?);
     let mut entries = archive.entries()?;
-    let first = entries.next().context("the installer's payload is empty")??;
+    let first = entries.next().with_context(|| orbiters_i18n::tr("the installer's payload is empty"))??;
     index_of(first)
 }
 
 fn index_of(entry: tar::Entry<'_, impl Read>) -> anyhow::Result<Index> {
-    anyhow::ensure!(entry.path()?.as_ref() == Path::new(INDEX), "the installer's payload does not start with its index");
-    let index: Index = serde_json::from_reader(entry.take(4 << 20)).context("the installer's payload index cannot be read")?;
-    anyhow::ensure!(index.product == PRODUCT, "the installer holds {}, not Orbiters - N4N0", index.product);
+    anyhow::ensure!(entry.path()?.as_ref() == Path::new(INDEX), "{}", orbiters_i18n::tr("the installer's payload does not start with its index"));
+    let index: Index = serde_json::from_reader(entry.take(4 << 20)).with_context(|| orbiters_i18n::tr("the installer's payload index cannot be read"))?;
+    anyhow::ensure!(index.product == PRODUCT, "{}", orbiters_i18n::tr!("the installer holds {product}, not Orbiters - N4N0", product = index.product));
     Ok(index)
 }
 
@@ -98,18 +98,18 @@ pub fn unpack(payload: &[u8], into: &Path, mut progress: impl FnMut(u64, u64, &s
     std::fs::create_dir_all(into)?;
     let mut archive = tar::Archive::new(zstd::Decoder::with_buffer(payload)?);
     let mut entries = archive.entries()?;
-    let index = index_of(entries.next().context("the installer's payload is empty")??)?;
+    let index = index_of(entries.next().with_context(|| orbiters_i18n::tr("the installer's payload is empty"))??)?;
     let total = index.total();
     let mut done = 0u64;
     let mut seen = HashSet::new();
     let mut buf = vec![0u8; 256 * 1024];
     for entry in entries {
         let mut entry = entry?;
-        anyhow::ensure!(entry.header().entry_type().is_file(), "the installer's payload holds something that is not a file");
+        anyhow::ensure!(entry.header().entry_type().is_file(), "{}", orbiters_i18n::tr("the installer's payload holds something that is not a file"));
         let path = entry.path()?.to_string_lossy().replace('\\', "/");
-        let expected = index.files.iter().find(|f| f.path == path).with_context(|| format!("{path} is in the installer but not in its index"))?;
-        anyhow::ensure!(seen.insert(path.clone()), "{path} is in the installer twice");
-        let dest = inside(into, &path).with_context(|| format!("{path} would land outside the install folder"))?;
+        let expected = index.files.iter().find(|f| f.path == path).with_context(|| orbiters_i18n::tr!("{path} is in the installer but not in its index", path = path))?;
+        anyhow::ensure!(seen.insert(path.clone()), "{}", orbiters_i18n::tr!("{path} is in the installer twice", path = path));
+        let dest = inside(into, &path).with_context(|| orbiters_i18n::tr!("{path} would land outside the install folder", path = path))?;
         if let Some(parent) = dest.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -128,9 +128,9 @@ pub fn unpack(payload: &[u8], into: &Path, mut progress: impl FnMut(u64, u64, &s
             progress(done, total, &path);
         }
         out.into_inner().map_err(|e| e.into_error())?.sync_all()?;
-        anyhow::ensure!(written == expected.size && hex(&hasher.finalize()) == expected.sha256, "{path} is damaged in the installer");
+        anyhow::ensure!(written == expected.size && hex(&hasher.finalize()) == expected.sha256, "{}", orbiters_i18n::tr!("{path} is damaged in the installer", path = path));
     }
-    anyhow::ensure!(seen.len() == index.files.len(), "the installer is missing files of its index");
+    anyhow::ensure!(seen.len() == index.files.len(), "{}", orbiters_i18n::tr("the installer is missing files of its index"));
     Ok(index)
 }
 
@@ -183,6 +183,20 @@ mod tests {
         bytes[middle] ^= 0x40;
         assert!(unpack(&bytes, &dir.join("unpacked"), |_, _, _| {}).is_err());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The setup shows this to the person in the language the app saved: the error is made when it happens, so `with_context` reads the language then.
+    #[test]
+    fn an_empty_payload_is_refused_in_the_language_of_the_person() {
+        use orbiters_i18n::{in_language, Language};
+        let tar = tar::Builder::new(Vec::new()).into_inner().unwrap();
+        let bytes = zstd::encode_all(tar.as_slice(), 3).unwrap();
+        let said = |language| in_language(language, || format!("{:#}", read_index(&bytes).unwrap_err()));
+        assert_eq!(said(Language::En), "the installer's payload is empty");
+        assert_eq!(said(Language::Fr), "le contenu du programme d’installation est vide");
+        assert_eq!(said(Language::Ja), "インストーラーの中身が空です");
+        assert_eq!(said(Language::Es), "el contenido del instalador está vacío");
+        assert_eq!(said(Language::PtBr), "o conteúdo do instalador está vazio");
     }
 
     #[test]

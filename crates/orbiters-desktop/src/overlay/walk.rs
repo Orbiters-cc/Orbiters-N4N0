@@ -576,7 +576,6 @@ pub struct WalkBoost {
     place: Option<String>,
     last: Option<Instant>,
     /// The manifest could not be loaded: said once.
-    failed: Option<String>,
     gate: Gate,
     /// How fast the boost dragged the play space on the last frame (m/s; 0 when it did not).
     boost: f32,
@@ -624,14 +623,13 @@ pub struct WalkBoost {
 }
 
 impl WalkBoost {
-    /// Walk boost with the overlay's actions (none when SteamVR's input could not load them: `failed` says why).
-    pub fn new(actions: Option<Walk>, failed: Option<String>) -> Self {
+    /// Walk boost with the overlay's actions (none when SteamVR's input could not load them).
+    pub fn new(actions: Option<Walk>) -> Self {
         Self {
             actions,
             carried: None,
             place: None,
             last: None,
-            failed,
             gate: Gate::default(),
             boost: 0.0,
             moving: false,
@@ -696,7 +694,7 @@ impl WalkBoost {
     fn end_through(&mut self, why: &str) {
         if let Some(through) = self.through.take() {
             let walked = length(&through.offset);
-            self.log.say(format!("through the driver: back by {walked:.2} m: {why}"));
+            self.log.say(format!("through the driver: back by {walked:.2} m: {why}")); // i18n: not shown (the walk's log)
             if let Some(driver) = self.driver.as_mut() {
                 driver.send(&WalkNow::default());
             }
@@ -709,11 +707,6 @@ impl WalkBoost {
     /// The headset's frame (from its refresh rate), which steps are counted in.
     pub fn set_frame(&mut self, frame: Option<Duration>) {
         self.frame = frame.filter(|f| !f.is_zero() && f.as_secs_f32() <= MAX_STEP_S);
-    }
-
-    /// Why walk boost cannot work, if it cannot.
-    pub fn unavailable(&self) -> Option<&str> {
-        self.failed.as_deref()
     }
 
     /// The play space moved on the last frame: the overlay loop then runs once per frame the compositor shows.
@@ -730,21 +723,21 @@ impl WalkBoost {
     fn held_back(&self, m: &Moment, now: Instant) -> Option<&'static str> {
         let since = |t: Instant| now.saturating_duration_since(t);
         if self.actions.is_none() {
-            Some("no controls")
+            Some("no controls") // i18n: not shown (the walk's log)
         } else if !m.settings.enabled || m.settings.strength <= 0.0 {
-            Some("turned off")
+            Some("turned off") // i18n: not shown (the walk's log)
         } else if !m.walking_allowed {
-            Some("VRChat's scene not in front (dashboard, loading)")
+            Some("VRChat's scene not in front (dashboard, loading)") // i18n: not shown (the walk's log)
         } else if m.held {
-            Some("a menu or the calibration stands in the play space")
+            Some("a menu or the calibration stands in the play space") // i18n: not shown (the walk's log)
         } else if m.away {
             Some("away")
         } else if self.changed.is_some_and(|t| since(t) < MENU_QUIET) {
-            Some("a setting just changed")
+            Some("a setting just changed") // i18n: not shown (the walk's log)
         } else if self.room_setup.is_some_and(|t| since(t) < ROOM_SETUP) {
-            Some("room setup")
+            Some("room setup") // i18n: not shown (the walk's log)
         } else if self.other_app.is_some() {
-            Some("another application moves the play space")
+            Some("another application moves the play space") // i18n: not shown (the walk's log)
         } else {
             None
         }
@@ -780,7 +773,7 @@ impl WalkBoost {
                 self.reading = if now.saturating_duration_since(since) < READING_TRIAL {
                     Reading::Unproven(Some(since))
                 } else {
-                    self.log.say(format!("the play space read from the headset's poses does not follow the walk's shows: another application's will not be noticed (read {:?})", live.m));
+                    self.log.say(format!("the play space read from the headset's poses does not follow the walk's shows: another application's will not be noticed (read {:?})", live.m)); // i18n: not shown (the walk's log)
                     Reading::Unrelated
                 };
             }
@@ -788,7 +781,7 @@ impl WalkBoost {
         }
         if !ours {
             let (carried, back) = (length(&carried.offset), distance(&carried.base.standing, &live));
-            self.log.say(format!("another application showed its own play space: {carried:.2} m walked are gone, it is {back:.2} m from where the walk began"));
+            self.log.say(format!("another application showed its own play space: {carried:.2} m walked are gone, it is {back:.2} m from where the walk began")); // i18n: not shown (the walk's log)
             self.carried = None;
             self.shown.clear();
             self.taken_at = Some(now);
@@ -847,23 +840,23 @@ impl WalkBoost {
         if self.place.as_deref() != m.place {
             // Another world or instance (or VRChat closed): the play space goes back while the avatar respawns.
             self.place = m.place.map(str::to_string);
-            self.say_put_back("another world, or VRChat closed");
+            self.say_put_back("another world, or VRChat closed"); // i18n: not shown (the walk's log)
             self.put_back(play);
-            self.end_through("another world, or VRChat closed");
+            self.end_through("another world, or VRChat closed"); // i18n: not shown (the walk's log)
         }
         let path = self.choose_path(m.settings);
         if path != self.path {
             self.path = path;
-            self.log.say(format!("the walk goes {path:?}"));
+            self.log.say(format!("the walk goes {path:?}")); // i18n: not shown (the walk's log)
         }
         // One way at a time: what the other one carried goes back as this one takes over.
         if path == WalkPath::Driver {
             if self.carried.is_some() {
-                self.say_put_back("now through the driver");
+                self.say_put_back("now through the driver"); // i18n: not shown (the walk's log)
                 self.put_back(play);
             }
         } else if self.through.is_some() {
-            self.end_through("now through the play space");
+            self.end_through("now through the play space"); // i18n: not shown (the walk's log)
         }
         let seen = (m.settings.enabled, m.settings.strength);
         if self.seen.is_some_and(|s| s != seen) {
@@ -881,14 +874,14 @@ impl WalkBoost {
                 if self.run.is_none() {
                     self.run = Some(now);
                     let carried = self.carried.as_ref().map_or(0.0, |c| length(&c.offset));
-                    self.log.say(format!("walking: {carried:.2} m from where the carry began"));
+                    self.log.say(format!("walking: {carried:.2} m from where the carry began")); // i18n: not shown (the walk's log)
                 }
             }
             Err(why) => {
                 if let Some(start) = self.run.take() {
                     let carried = self.carried.as_ref().map_or(0.0, |c| length(&c.offset));
                     let lasted = now.saturating_duration_since(start).as_secs_f32();
-                    self.log.say(format!("stopped after {lasted:.2} s, {carried:.2} m from where the carry began: {why}"));
+                    self.log.say(format!("stopped after {lasted:.2} s, {carried:.2} m from where the carry began: {why}")); // i18n: not shown (the walk's log)
                 }
             }
         }
@@ -911,19 +904,19 @@ impl WalkBoost {
             return Err(why);
         }
         if !m.input_read {
-            return Err("the controllers could not be read");
+            return Err("the controllers could not be read"); // i18n: not shown (the walk's log)
         }
-        let Some(stick) = stick else { return Err("the stick is not active") };
+        let Some(stick) = stick else { return Err("the stick is not active") }; // i18n: not shown (the walk's log)
         if !pushed {
-            return Err("the stick was let go");
+            return Err("the stick was let go"); // i18n: not shown (the walk's log)
         }
         if !carries {
-            return Err("VRChat does not walk the avatar");
+            return Err("VRChat does not walk the avatar"); // i18n: not shown (the walk's log)
         }
-        let Some(frame) = frame() else { return Err("forward is not tracked") };
+        let Some(frame) = frame() else { return Err("forward is not tracked") }; // i18n: not shown (the walk's log)
         let dir = direction(stick, &frame);
         if dir == [0.0; 3] {
-            return Err("no way forward");
+            return Err("no way forward"); // i18n: not shown (the walk's log)
         }
         Ok((dir, RUN_SPEED * m.settings.strength.clamp(0.0, 1.0) * WalkBoostSettings::MAX_EXTRA))
     }
@@ -1001,7 +994,7 @@ impl WalkBoost {
             let Some((_, now_at)) = devices.iter().find(|(d, _)| d == device) else { continue };
             let went = [0, 1, 2].map(|i| now_at[i] - then[i]);
             let missed = length(&[went[0] - expected[0], went[1] - expected[1], went[2] - expected[2]]);
-            lines.push(format!("device {device} {:.2} m, missed by {missed:.2}", length(&went)));
+            lines.push(format!("device {device} {:.2} m, missed by {missed:.2}", length(&went))); // i18n: not shown (the walk's log)
             behind |= missed > PROOF_MISS_METRES;
         }
         if lines.is_empty() {
@@ -1011,10 +1004,10 @@ impl WalkBoost {
         let poses = self.driver.as_mut().map_or(0, |d| d.walked());
         let asked = length(&moved);
         if behind {
-            self.log.say(format!("through the driver: NOT every device followed {asked:.2} m ({}), {poses} poses moved: the walk goes back to the play space", lines.join("; ")));
+            self.log.say(format!("through the driver: NOT every device followed {asked:.2} m ({}), {poses} poses moved: the walk goes back to the play space", lines.join("; "))); // i18n: not shown (the walk's log)
             self.refused = true;
         } else {
-            self.log.say(format!("through the driver: every device followed {asked:.2} m ({}), {poses} poses moved", lines.join("; ")));
+            self.log.say(format!("through the driver: every device followed {asked:.2} m ({}), {poses} poses moved", lines.join("; "))); // i18n: not shown (the walk's log)
             self.proven = true;
         }
         self.proof = None;
@@ -1032,22 +1025,22 @@ impl WalkBoost {
     ) -> Result<(), &'static str> {
         let (dir, speed) = self.wanted(m, stick, frame, now)?;
         if dt <= 0.0 {
-            return Err("the first frame");
+            return Err("the first frame"); // i18n: not shown (the walk's log)
         }
         let step = dir.map(|d| d * speed * dt);
         if !step.iter().all(|s| s.is_finite()) {
-            return Err("a step that is not a number");
+            return Err("a step that is not a number"); // i18n: not shown (the walk's log)
         }
         if self.carried.is_none() {
             // No preview of the boost's shows now: the working copy reverts to SteamVR's own setup or to another
             // application's preview. The walk starts from what everyone sees, whichever that is.
             play.revert();
-            let Some(own) = play.read() else { return Err("SteamVR gave no setup") };
+            let Some(own) = play.read() else { return Err("SteamVR gave no setup") }; // i18n: not shown (the walk's log)
             let live = if self.reading == Reading::Follows { play.live_standing() } else { None };
             let base = live.map_or_else(|| own.clone(), |live| own.at_live(&live));
             let over_other = self.other_showing || !same_place(&own.standing, &base.standing);
             if over_other {
-                self.log.say(format!("the walk starts on another application's play space, {:.2} m from SteamVR's own setup", distance(&own.standing, &base.standing)));
+                self.log.say(format!("the walk starts on another application's play space, {:.2} m from SteamVR's own setup", distance(&own.standing, &base.standing))); // i18n: not shown (the walk's log)
             }
             self.shown.clear();
             self.shown.push_back((now, base.standing));
@@ -1071,7 +1064,7 @@ impl WalkBoost {
     fn say_put_back(&mut self, why: &str) {
         if let Some(carried) = &self.carried {
             let walked = length(&carried.offset);
-            self.log.say(format!("back where the carry began, {walked:.2} m ago: {why}"));
+            self.log.say(format!("back where the carry began, {walked:.2} m ago: {why}")); // i18n: not shown (the walk's log)
         }
     }
 
@@ -1079,9 +1072,9 @@ impl WalkBoost {
     pub fn reset(&mut self, steamvr: &vr::Client) {
         match steamvr.chaperone_setup() {
             Ok(mut setup) => {
-                self.say_put_back("the overlay ends");
+                self.say_put_back("the overlay ends"); // i18n: not shown (the walk's log)
                 self.put_back(&mut setup);
-                self.end_through("the overlay ends");
+                self.end_through("the overlay ends"); // i18n: not shown (the walk's log)
             }
             // Nothing can be put back without the interface (SteamVR drops the preview with this process).
             Err(_) => self.carried = None,
@@ -1146,12 +1139,12 @@ impl WalkBoost {
         match event {
             PlaySpaceEvent::StandingReset | PlaySpaceEvent::SeatedReset => {
                 if let (Some(through), Some(was), Some(live)) = (self.through, self.standing, play.live_standing()) {
-                    self.log.say(format!("{event:?} with {:.2} m walked through the driver: the play space moved {:.2} m, the walk goes on", length(&through.offset), distance(&was, &live)));
+                    self.log.say(format!("{event:?} with {:.2} m walked through the driver: the play space moved {:.2} m, the walk goes on", length(&through.offset), distance(&was, &live))); // i18n: not shown (the walk's log)
                     self.standing = Some(live);
                 }
             }
             PlaySpaceEvent::RoomSetupStarting => {
-                self.end_through("room setup");
+                self.end_through("room setup"); // i18n: not shown (the walk's log)
                 self.room_setup = Some(now);
             }
             PlaySpaceEvent::SetupCommitted => self.room_setup = None,
@@ -1172,11 +1165,11 @@ impl WalkBoost {
         }
         let own_echo = self.shown_at.is_some_and(|t| now.saturating_duration_since(t) < OWN_EVENTS);
         match event {
-            PlaySpaceEvent::StandingReset => self.let_go(play, "a recenter"),
-            PlaySpaceEvent::SeatedReset if !own_echo => self.let_go(play, "a seated reset"),
-            PlaySpaceEvent::UniverseChanged { from, to } if from != to => self.let_go(play, "another tracking universe"),
+            PlaySpaceEvent::StandingReset => self.let_go(play, "a recenter"), // i18n: not shown (the walk's log)
+            PlaySpaceEvent::SeatedReset if !own_echo => self.let_go(play, "a seated reset"), // i18n: not shown (the walk's log)
+            PlaySpaceEvent::UniverseChanged { from, to } if from != to => self.let_go(play, "another tracking universe"), // i18n: not shown (the walk's log)
             PlaySpaceEvent::RoomSetupStarting => {
-                self.let_go(play, "room setup");
+                self.let_go(play, "room setup"); // i18n: not shown (the walk's log)
                 self.room_setup = Some(now);
             }
             // Room setup saved its play space: the boost may move it. Another application's saved change leaves the
@@ -1396,7 +1389,7 @@ mod tests {
     }
 
     fn boost() -> WalkBoost {
-        WalkBoost::new(Some(Walk { set: 1, left: 2, right: 3 }), None)
+        WalkBoost::new(Some(Walk { set: 1, left: 2, right: 3 }))
     }
 
     const FORWARD: Option<[f32; 2]> = Some([0.0, 1.0]);

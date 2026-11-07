@@ -316,7 +316,7 @@ impl AudioRecorder {
             }
             Err(_) => {
                 shared.stop();
-                anyhow::bail!("the audio device did not start")
+                anyhow::bail!("{}", orbiters_i18n::tr("the audio device did not start"))
             }
         }
     }
@@ -359,7 +359,7 @@ impl AudioRecorder {
         self.shared.stop();
         match self.thread.take().expect("running").join() {
             Ok(r) => r,
-            Err(_) => anyhow::bail!("the audio thread panicked"),
+            Err(_) => anyhow::bail!("{}", orbiters_i18n::tr("the audio thread panicked")),
         }
     }
 }
@@ -421,7 +421,7 @@ fn run(
             &shared.interrupt,
             &mut |name, f| {
                 if let Some(first) = format {
-                    anyhow::ensure!(f.channels == first.channels, "{name} gives {} channels, the track has {}", f.channels, first.channels);
+                    anyhow::ensure!(f.channels == first.channels, "{}", orbiters_i18n::tr!("{name} gives {have} channels, the track has {want}", name = name, have = f.channels, want = first.channels));
                 } else {
                     let track = TrackWriter::create(path, f.rate, f.channels, published.clone())?;
                     let (tx, rx) = crossbeam_channel::bounded::<ToWrite>(WRITER_QUEUE);
@@ -440,7 +440,7 @@ fn run(
             },
             &mut |p| {
                 let writer = writer.borrow();
-                let Some((tx, _)) = writer.as_ref() else { anyhow::bail!("no track to write") };
+                let Some((tx, _)) = writer.as_ref() else { anyhow::bail!("{}", orbiters_i18n::tr("no track to write")) };
                 let samples = match p.samples {
                     // While paused, silence keeps the timeline continuous.
                     Some(samples) if !shared.paused.load(Ordering::Relaxed) => {
@@ -461,7 +461,7 @@ fn run(
                         lost += 1;
                         Ok(())
                     }
-                    Err(crossbeam_channel::TrySendError::Disconnected(_)) => anyhow::bail!("the track's writer stopped"),
+                    Err(crossbeam_channel::TrySendError::Disconnected(_)) => anyhow::bail!("{}", orbiters_i18n::tr("the track's writer stopped")),
                 }
             },
         );
@@ -491,7 +491,7 @@ fn run(
                 // The writer stopped (the disk): its error ends this track.
                 let error = writer.borrow_mut().take().map(|(tx, thread)| {
                     drop(tx);
-                    thread.join().map_err(|_| anyhow::anyhow!("the track's writer panicked")).and_then(|r| r.map(|_| ()))
+                    thread.join().map_err(|_| anyhow::anyhow!("{}", orbiters_i18n::tr("the track's writer panicked"))).and_then(|r| r.map(|_| ()))
                 });
                 let e = match error {
                     Some(Err(e)) => e,
@@ -519,9 +519,9 @@ fn run(
     if let Some(e) = failed {
         return Err(e);
     }
-    let (tx, thread) = writer.into_inner().ok_or_else(|| anyhow::anyhow!("the audio device did not start"))?;
+    let (tx, thread) = writer.into_inner().ok_or_else(|| anyhow::anyhow!("{}", orbiters_i18n::tr("the audio device did not start")))?;
     drop(tx);
-    let writer = thread.join().map_err(|_| anyhow::anyhow!("the track's writer panicked"))??;
+    let writer = thread.join().map_err(|_| anyhow::anyhow!("{}", orbiters_i18n::tr("the track's writer panicked")))??;
     Ok((writer, last_name))
 }
 

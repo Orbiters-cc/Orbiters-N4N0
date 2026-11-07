@@ -86,7 +86,7 @@ mod platform {
                             let moved = session.TryChangePlaybackPositionAsync(start + seconds as i64 * 10_000_000)?.join()?;
                             if !moved {
                                 // E_FAIL: the app said no.
-                                return Err(windows::core::Error::new(windows::core::HRESULT(0x8000_4005_u32 as i32), "the app did not move in its timeline"));
+                                return Err(windows::core::Error::new(windows::core::HRESULT(0x8000_4005_u32 as i32), "the app did not move in its timeline")); // i18n: not shown (a refused command is only logged by the media thread)
                             }
                             return Ok(());
                         }
@@ -567,7 +567,7 @@ end tell"#
                         return Ok(());
                     }
                     let Ok(output) = ask(command_script(app, &words)).recv_timeout(COMMAND_WAIT) else {
-                        return Err(format!("{} did not answer", app.name));
+                        return Err(format!("{} did not answer", app.name)); // i18n: not shown (a refused command is only logged by the media thread)
                     };
                     match answer(app, output, &mut self.players[index].said) {
                         Answer::Refused => self.players[index].refused_until = Some(Instant::now() + REFUSED_FOR),

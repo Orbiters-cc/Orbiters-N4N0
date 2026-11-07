@@ -14,6 +14,7 @@
 use super::render::{Stage, DIRECTIONAL_MAX, GAUSSIAN_MAX, LENS_MAX};
 use super::{blur, text, tone, BlurKind, Comic, Crop, Edit, Effect, Layer, Mask, Rgba8};
 use anyhow::Context as _;
+use orbiters_i18n::tr;
 use egui_wgpu::wgpu;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
@@ -658,7 +659,7 @@ impl Stack {
 
     /// The picture made last, read back (waits for the GPU): for saving it and for tests.
     pub fn read(&self) -> anyhow::Result<Rgba8> {
-        let (size, texture, _) = self.output.as_ref().context("nothing drawn")?;
+        let (size, texture, _) = self.output.as_ref().with_context(|| tr("nothing drawn"))?;
         read_texture(&self.device, &self.queue, texture, *size)
     }
 }
@@ -793,11 +794,11 @@ pub fn read_texture(device: &wgpu::Device, queue: &wgpu::Queue, texture: &wgpu::
     slice.map_async(wgpu::MapMode::Read, move |r| {
         let _ = tx.send(r);
     });
-    device.poll(wgpu::PollType::wait_indefinitely()).map_err(|e| anyhow::anyhow!("waiting for the GPU: {e}"))?;
-    rx.recv()?.map_err(|e| anyhow::anyhow!("reading the picture back: {e}"))?;
+    device.poll(wgpu::PollType::wait_indefinitely()).map_err(|e| anyhow::anyhow!("{}", tr!("waiting for the GPU: {error}", error = e)))?;
+    rx.recv()?.map_err(|e| anyhow::anyhow!("{}", tr!("reading the picture back: {error}", error = e)))?;
     let mut pixels = Vec::with_capacity((w * h * 4) as usize);
     {
-        let data = slice.get_mapped_range().map_err(|e| anyhow::anyhow!("reading the picture back: {e:?}"))?;
+        let data = slice.get_mapped_range().map_err(|e| anyhow::anyhow!("{}", tr!("reading the picture back: {error}", error = format!("{e:?}"))))?;
         for r in data.chunks_exact(row as usize) {
             pixels.extend_from_slice(&r[..(w * 4) as usize]);
         }

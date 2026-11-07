@@ -163,7 +163,7 @@ impl Drop for Builder {
 }
 
 /// What a panic in a job says on its scene's chip and card (kept until its files change).
-const CRASHED: &str = "an error in Orbiters - N4N0 while reading it"; // i18n: not shown (stored with a failed build as an error, English until errors are decided)
+const CRASHED: &str = orbiters_i18n::mark("an error in Orbiters - N4N0 while reading it");
 
 /// The next job, marked running, with the light and what stops it; none once the app is closing.
 fn next(shared: &Shared) -> Option<(Job, bool, Arc<AtomicBool>)> {

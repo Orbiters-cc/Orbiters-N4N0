@@ -44,8 +44,8 @@ impl Controller {
         if trim.is_empty() && delete.is_empty() {
             // Nothing taken: the window's "under way" goes with the next snapshot.
             self.publish();
-            anyhow::ensure!(busy.is_empty(), "Left alone: {}.", busy.join(", "));
-            anyhow::bail!(if asked == 1 { "This session cannot be cleaned up." } else { "These sessions cannot be cleaned up." });
+            anyhow::ensure!(busy.is_empty(), "{}", tr!("Left alone: {list}.", list = busy.join(", ")));
+            anyhow::bail!("{}", if asked == 1 { tr("This session cannot be cleaned up.") } else { tr("These sessions cannot be cleaned up.") });
         }
         // What it frees, from the sizes the library keeps (measured now for a session not listed yet).
         let bytes = |d: &PathBuf, whole: bool| {

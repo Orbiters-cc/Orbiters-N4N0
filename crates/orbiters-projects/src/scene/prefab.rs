@@ -21,6 +21,7 @@ use super::model::{self, ImportSettings, Model};
 use super::yaml::{self, Ref, Value};
 use super::Limits;
 use anyhow::{bail, Context as _};
+use orbiters_i18n::tr;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -348,7 +349,7 @@ impl<'a> Loader<'a> {
                 Err(e) => {
                     // Only worth saying when nothing else can read the model: an FBX is then read from its file.
                     if stale_too {
-                        let what = format!("{}: its import in Library could not be read: {e:#}", rel(self.assets, path)); // i18n: not shown (an error detail)
+                        let what = tr!("{name}: its import in Library could not be read: {error}", name = rel(self.assets, path), error = format!("{e:#}"));
                         self.note_missing(what);
                     }
                     None
@@ -374,19 +375,19 @@ impl<'a> Loader<'a> {
     }
 
     fn read_text(&mut self, path: &Path) -> anyhow::Result<String> {
-        let size = std::fs::metadata(path).with_context(|| format!("{} is missing", rel(self.assets, path)))?.len();
-        anyhow::ensure!(size <= self.limits.max_yaml_bytes, "{} is {} MB, more than a preview reads", rel(self.assets, path), size >> 20);
-        let bytes = std::fs::read(path).with_context(|| format!("reading {}", rel(self.assets, path)))?;
+        let size = std::fs::metadata(path).with_context(|| tr!("{name} is missing", name = rel(self.assets, path)))?.len();
+        anyhow::ensure!(size <= self.limits.max_yaml_bytes, "{}", tr!("{name} is {size} MB, more than a preview reads", name = rel(self.assets, path), size = size >> 20));
+        let bytes = std::fs::read(path).with_context(|| tr!("reading {name}", name = rel(self.assets, path)))?;
         self.files.push(path.to_path_buf());
         let text = String::from_utf8(bytes).unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned());
         if !yaml::is_text(&text) {
-            bail!("{} is saved in Unity's binary format (Asset Serialization is not Force Text)", rel(self.assets, path));
+            bail!("{}", tr!("{name} is saved in Unity's binary format (Asset Serialization is not Force Text)", name = rel(self.assets, path)));
         }
         Ok(text)
     }
 
     fn file_at(&mut self, path: &Path, depth: usize) -> anyhow::Result<Graph> {
-        self.limits.check("reading the scene")?; // i18n: not shown (what a time-limit error says it was doing)
+        self.limits.check(tr("reading the scene"))?;
         let text = self.read_text(path)?;
         let mut graph = Graph::default();
         let mut instances = Vec::new();
@@ -483,10 +484,10 @@ impl<'a> Loader<'a> {
         if let Some(why) = self.failed.get(guid) {
             bail!("{why}");
         }
-        anyhow::ensure!(depth <= MAX_DEPTH, "prefabs nested more than {MAX_DEPTH} deep");
-        anyhow::ensure!(self.resolving.insert(guid.to_string()), "a prefab that contains itself");
+        anyhow::ensure!(depth <= MAX_DEPTH, "{}", tr!("prefabs nested more than {depth} deep", depth = MAX_DEPTH));
+        anyhow::ensure!(self.resolving.insert(guid.to_string()), "{}", tr("a prefab that contains itself"));
         let result = (|| {
-            let path = self.assets.path(guid).with_context(|| format!("an asset that is not in the project ({guid})"))?;
+            let path = self.assets.path(guid).with_context(|| tr!("an asset that is not in the project ({guid})", guid = guid))?;
             let ext = path.extension().map(|e| e.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
             match ext.as_str() {
                 "prefab" | "unity" => self.file_at(&path, depth + 1),
@@ -500,12 +501,12 @@ impl<'a> Loader<'a> {
                 }
                 other if only_unity_reads(other) => {
                     let name = rel(self.assets, &path);
-                    let a = self.artifact(guid, &path, true).with_context(|| format!("{name} is a .{other} model only Unity's import reads: open the project in Unity once"))?;
+                    let a = self.artifact(guid, &path, true).with_context(|| tr!("{name} is a .{other} model only Unity's import reads: open the project in Unity once", name = name, other = other))?;
                     self.files.push(path.clone());
                     self.files.push(meta_path(&path));
                     artifact_graph(&a).with_context(|| name)
                 }
-                other => bail!("{} is a .{other} model, which previews do not read", rel(self.assets, &path)),
+                other => bail!("{}", tr!("{name} is a .{other} model, which previews do not read", name = rel(self.assets, &path), other = other)),
             }
         })();
         self.resolving.remove(guid);
@@ -525,14 +526,17 @@ impl<'a> Loader<'a> {
         if let Some(m) = self.models.get(guid) {
             return Ok(m.clone());
         }
-        let path = self.assets.path(guid).with_context(|| format!("a model that is not in the project ({guid})"))?;
+        let path = self.assets.path(guid).with_context(|| tr!("a model that is not in the project ({guid})", guid = guid))?;
         // Every model a scene's renderers use is loaded before the drawing budget picks among them: a world of hundreds
         // of models would hold them all (gigabytes) for a preview that draws 2 million triangles.
         anyhow::ensure!(
             self.model_triangles < self.limits.max_loaded_triangles,
-            "{} left out: the scene's models have more than {} million triangles",
-            rel(self.assets, &path),
-            self.limits.max_loaded_triangles / 1_000_000
+            "{}",
+            tr!(
+                "{name} left out: the scene's models have more than {millions} million triangles",
+                name = rel(self.assets, &path),
+                millions = self.limits.max_loaded_triangles / 1_000_000
+            )
         );
         let settings = self.model_settings(guid);
         self.files.push(path.clone());
@@ -560,16 +564,16 @@ impl<'a> Loader<'a> {
     }
 
     fn instantiate(&mut self, instance: i64, pi: &Value, into: &mut Graph, depth: usize) -> anyhow::Result<()> {
-        self.limits.check("resolving prefabs")?; // i18n: not shown (what a time-limit error says it was doing)
+        self.limits.check(tr("resolving prefabs"))?;
         self.prefab_instances += 1;
-        anyhow::ensure!(self.prefab_instances <= self.limits.max_prefab_instances, "more than {} prefab instances", self.limits.max_prefab_instances);
+        anyhow::ensure!(self.prefab_instances <= self.limits.max_prefab_instances, "{}", tr!("more than {count} prefab instances", count = self.limits.max_prefab_instances));
         let Some(source) = pi.get("m_SourcePrefab").as_ref().and_then(|r| r.guid) else { return Ok(()) };
         let src = match self.source(&source, depth) {
             Ok(g) => g,
             Err(e) => {
                 // The time limit stops the whole preview; a missing or unreadable source only leaves its copy out.
-                self.limits.check("resolving prefabs")?; // i18n: not shown (what a time-limit error says it was doing)
-                let name = self.assets.path(&source).map(|p| rel(self.assets, &p)).unwrap_or_else(|| format!("a prefab ({source})")); // i18n: not shown (an error detail)
+                self.limits.check(tr("resolving prefabs"))?;
+                let name = self.assets.path(&source).map(|p| rel(self.assets, &p)).unwrap_or_else(|| tr!("a prefab ({guid})", guid = source));
                 self.note_missing(format!("{name}: {e:#}"));
                 return Ok(());
             }
@@ -577,7 +581,7 @@ impl<'a> Loader<'a> {
         // Each instance copies its source's objects, and a source holding fifty instances of a prefab holding fifty
         // of another is 2,500 copies of that one: a few levels of that would fill the memory, which the count of
         // instances (each source is resolved once) never sees.
-        anyhow::ensure!(self.objects_made + src.objects.len() <= self.limits.max_objects, "more than {} objects in its prefabs", self.limits.max_objects);
+        anyhow::ensure!(self.objects_made + src.objects.len() <= self.limits.max_objects, "{}", tr!("more than {count} objects in its prefabs", count = self.limits.max_objects));
         self.objects_made += src.objects.len();
         let m = pi.get("m_Modification");
         let parent = m.get("m_TransformParent").as_ref().map_or(0, |r| r.file_id);

@@ -191,11 +191,11 @@ impl Setup {
                 let result = match run {
                     Job::Install(options, fresh) => match payload {
                         Some(bytes) => install::install(bytes, &options, &task, false, fresh),
-                        None => Err(anyhow::anyhow!("This setup holds no programs to install.")),
+                        None => Err(anyhow::anyhow!("{}", tr("This setup holds no programs to install."))),
                     },
                     Job::Update(dir) => match payload {
                         Some(bytes) => install::update(bytes, &dir, &task, false).map(drop),
-                        None => Err(anyhow::anyhow!("This setup holds no programs to install.")),
+                        None => Err(anyhow::anyhow!("{}", tr("This setup holds no programs to install."))),
                     },
                     Job::Uninstall(dir, remove_data) => install::uninstall(&dir, remove_data, &task, false),
                 };
@@ -1043,7 +1043,7 @@ pub fn screenshots(dir: &std::path::Path, payload: Option<&'static [u8]>) -> any
             image = gpu.frame(&ctx, input, |ui| setup.draw(ui), f + 1 == frames)?;
         }
         let path = dir.join(format!("{name}.png"));
-        save_png(&path, &image.context("the frame gave no picture")?)?;
+        save_png(&path, &image.context("the frame gave no picture")?)?; // i18n: not shown (the setup's own screenshot command, for developers)
         println!("{}", path.display());
     }
     Ok(())

@@ -8,6 +8,7 @@
 
 use crate::gaussians::{Gaussians, Seen};
 use anyhow::{bail, Context as _};
+use orbiters_i18n::tr;
 use std::io::Write as _;
 use std::path::Path;
 
@@ -57,7 +58,7 @@ pub fn write(path: &Path, g: &Gaussians) -> anyhow::Result<()> {
         }
     }
     let tmp = path.with_extension("ply.part");
-    std::fs::write(&tmp, &out).with_context(|| format!("writing {}", tmp.display()))?;
+    std::fs::write(&tmp, &out).with_context(|| tr!("writing {path}", path = tmp.display()))?;
     std::fs::rename(&tmp, path)?;
     Ok(())
 }
@@ -70,19 +71,19 @@ pub fn read(path: &Path) -> anyhow::Result<Gaussians> {
 
 /// [`read`] of a PLY's bytes.
 pub fn parse(data: &[u8]) -> anyhow::Result<Gaussians> {
-    let end = data.windows(11).position(|w| w == b"end_header\n").context("no PLY header")? + 11;
+    let end = data.windows(11).position(|w| w == b"end_header\n").with_context(|| tr("no PLY header"))? + 11;
     let header = std::str::from_utf8(&data[..end])?;
-    let count: usize = header.lines().find_map(|l| l.strip_prefix("element vertex ")).context("no vertex count")?.trim().parse()?;
+    let count: usize = header.lines().find_map(|l| l.strip_prefix("element vertex ")).with_context(|| tr("no vertex count"))?.trim().parse()?;
     let props: Vec<&str> = header.lines().filter_map(|l| l.strip_prefix("property float ")).collect();
     let extras = props.len() > PROPERTIES.len();
     if props[..props.len().min(PROPERTIES.len())] != PROPERTIES || (extras && props[PROPERTIES.len()..] != EXTRAS) {
-        bail!("unexpected PLY properties: {props:?}");
+        bail!("{}", tr!("unexpected PLY properties: {properties}", properties = format!("{props:?}")));
     }
     let stride = props.len() * 4;
     // A header may claim any count: one past what the file holds is an error, never an overflow.
-    let needed = count.checked_mul(stride).and_then(|b| b.checked_add(end)).context("PLY vertex count out of range")?;
+    let needed = count.checked_mul(stride).and_then(|b| b.checked_add(end)).with_context(|| tr("PLY vertex count out of range"))?;
     if data.len() < needed {
-        bail!("PLY truncated");
+        bail!("{}", tr("PLY truncated"));
     }
     let mut g = Gaussians::default();
     for i in 0..count {
@@ -106,6 +107,15 @@ pub fn parse(data: &[u8]) -> anyhow::Result<Gaussians> {
 mod tests {
     use super::*;
     use crate::gaussians::rotation_matrix;
+
+    /// An error reads in the language of the window the worker reports to: a toast shows it as it is.
+    #[test]
+    fn a_damaged_file_is_reported_in_the_language_of_the_window() {
+        use orbiters_i18n::{in_language, Language};
+        assert_eq!(parse(b"").unwrap_err().to_string(), "no PLY header");
+        assert_eq!(in_language(Language::Fr, || parse(b"").unwrap_err().to_string()), "pas d’en-tête PLY");
+        assert_eq!(in_language(Language::Ja, || parse(b"").unwrap_err().to_string()), "PLYのヘッダーがありません");
+    }
 
     #[test]
     fn round_trips_and_mirrors_rotations_with_positions() {

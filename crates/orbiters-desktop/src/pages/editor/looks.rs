@@ -45,7 +45,7 @@ fn write(looks: Vec<Look>) -> anyhow::Result<()> {
 /// Keeps the layers of `edit` as the look `name` (first in the list; one of that name replaced).
 pub fn save(name: &str, edit: &Edit) -> anyhow::Result<()> {
     let name = name.trim();
-    anyhow::ensure!(!name.is_empty(), "a look needs a name");
+    anyhow::ensure!(!name.is_empty(), "{}", tr("a look needs a name"));
     let mut looks = list();
     looks.retain(|l| !l.name.eq_ignore_ascii_case(name));
     looks.insert(0, Look { name: name.to_string(), layers: edit.layers.clone() });
@@ -112,6 +112,17 @@ pub fn new_name(looks: &[Look]) -> String {
 mod tests {
     use super::*;
     use orbiters_ui::photo::{Effect, Light, Mask, Vignette};
+
+    /// The refusal is said in the language of the person, when it happens (not when the program started).
+    #[test]
+    fn a_look_without_a_name_is_refused_in_each_language() {
+        use orbiters_i18n::{in_language, Language};
+        let edit = Edit::default();
+        assert_eq!(save("  ", &edit).unwrap_err().to_string(), "a look needs a name");
+        for (language, said) in [(Language::Fr, "un style a besoin d’un nom"), (Language::Es, "un estilo necesita un nombre"), (Language::PtBr, "um estilo precisa de um nome"), (Language::Ja, "ルックには名前が必要です")] {
+            assert_eq!(in_language(language, || save("  ", &edit).unwrap_err().to_string()), said);
+        }
+    }
 
     #[test]
     fn a_look_is_kept_by_name_and_put_over_another_edit() {

@@ -113,7 +113,7 @@ pub struct Built {
 
 /// The collider of a prepared session.
 pub fn build(session: &Path, data: &Dataset, s: &Settings) -> anyhow::Result<Built> {
-    ensure!(s.voxel.is_finite() && (0.01..=0.5).contains(&s.voxel), "voxel must be finite, 0.01 to 0.5 metre");
+    ensure!(s.voxel.is_finite() && (0.01..=0.5).contains(&s.voxel), "voxel must be finite, 0.01 to 0.5 metre"); // i18n: not shown (the lab collider exporter, run from a terminal (docs/mesh.md) or by mesh_bench: no window starts it)
     let start = Instant::now();
     let mut stage = Instant::now();
     let mut lap = |name: &str, times: &mut serde_json::Map<String, serde_json::Value>| {
@@ -122,7 +122,7 @@ pub fn build(session: &Path, data: &Dataset, s: &Settings) -> anyhow::Result<Bui
     };
     let mut times = serde_json::Map::new();
     let path = roi::walked(session, data);
-    ensure!(!path.feet.is_empty(), "no camera path in this session");
+    ensure!(!path.feet.is_empty(), "no camera path in this session"); // i18n: not shown (the lab collider exporter, run from a terminal (docs/mesh.md) or by mesh_bench: no window starts it)
     let roi = Roi::new(&path, s.radius, s.below, s.above);
     let mut volume = tsdf::fuse(data, &roi, s);
     lap("fuse", &mut times);
@@ -364,7 +364,7 @@ impl Mesh {
     /// winding reversed, so an import gives back the capture's Unity world. One mesh named "N4N0 collider", 16-bit
     /// indices when it has at most 65 535 vertices.
     pub fn write(&self, path: &Path) -> anyhow::Result<()> {
-        ensure!(!self.triangles.is_empty(), "no measured surface survived extraction");
+        ensure!(!self.triangles.is_empty(), "no measured surface survived extraction"); // i18n: not shown (the lab collider exporter, run from a terminal (docs/mesh.md) or by mesh_bench: no window starts it)
         let positions: Vec<_> = self.positions.iter().map(|p| [-p[0], p[1], p[2]]).collect();
         let triangles: Vec<_> = self.triangles.iter().map(|t| [t[0], t[2], t[1]]).collect();
         if path.extension().and_then(|s| s.to_str()) == Some("obj") {
@@ -378,7 +378,7 @@ impl Mesh {
             out.flush()?;
             return Ok(());
         }
-        ensure!(path.extension().and_then(|s| s.to_str()) == Some("glb"), "output extension must be .glb or .obj");
+        ensure!(path.extension().and_then(|s| s.to_str()) == Some("glb"), "output extension must be .glb or .obj"); // i18n: not shown (the lab collider exporter, run from a terminal (docs/mesh.md) or by mesh_bench: no window starts it)
         let mut min = [f32::INFINITY; 3];
         let mut max = [f32::NEG_INFINITY; 3];
         for p in &positions {
@@ -439,30 +439,30 @@ impl Mesh {
     /// reversed, UnityGLTF/glTFast) or raw.
     pub fn read_glb(path: &Path, reflect: bool) -> anyhow::Result<Mesh> {
         let b = std::fs::read(path)?;
-        let word = |at: usize| -> anyhow::Result<u32> { Ok(u32::from_le_bytes(b.get(at..at + 4).context("truncated GLB word")?.try_into()?)) };
-        ensure!(b.get(..4) == Some(b"glTF") && word(4)? == 2 && word(8)? as usize == b.len(), "GLB header");
+        let word = |at: usize| -> anyhow::Result<u32> { Ok(u32::from_le_bytes(b.get(at..at + 4).context("truncated GLB word")?.try_into()?)) }; // i18n: not shown (the lab collider exporter, run from a terminal (docs/mesh.md) or by mesh_bench: no window starts it)
+        ensure!(b.get(..4) == Some(b"glTF") && word(4)? == 2 && word(8)? as usize == b.len(), "GLB header"); // i18n: not shown (the lab collider exporter, run from a terminal (docs/mesh.md) or by mesh_bench: no window starts it)
         let n = word(12)? as usize;
-        ensure!(word(16)? == 0x4e4f534a, "JSON chunk required");
-        let j: serde_json::Value = serde_json::from_slice(b.get(20..20 + n).context("truncated JSON")?)?;
+        ensure!(word(16)? == 0x4e4f534a, "JSON chunk required"); // i18n: not shown (the lab collider exporter, run from a terminal (docs/mesh.md) or by mesh_bench: no window starts it)
+        let j: serde_json::Value = serde_json::from_slice(b.get(20..20 + n).context("truncated JSON")?)?; // i18n: not shown (the lab collider exporter, run from a terminal (docs/mesh.md) or by mesh_bench: no window starts it)
         let binary = 28 + n;
-        ensure!(word(24 + n)? == 0x004e4942 && binary + word(20 + n)? as usize == b.len(), "BIN chunk required");
-        ensure!(j["meshes"].as_array().is_some_and(|v| v.len() == 1) && j["meshes"][0]["primitives"].as_array().is_some_and(|v| v.len() == 1), "one mesh, one primitive");
+        ensure!(word(24 + n)? == 0x004e4942 && binary + word(20 + n)? as usize == b.len(), "BIN chunk required"); // i18n: not shown (the lab collider exporter, run from a terminal (docs/mesh.md) or by mesh_bench: no window starts it)
+        ensure!(j["meshes"].as_array().is_some_and(|v| v.len() == 1) && j["meshes"][0]["primitives"].as_array().is_some_and(|v| v.len() == 1), "one mesh, one primitive"); // i18n: not shown (the lab collider exporter, run from a terminal (docs/mesh.md) or by mesh_bench: no window starts it)
         for field in ["matrix", "translation", "rotation", "scale", "children"] {
-            ensure!(j["nodes"][0][field].is_null(), "transformed or hierarchical GLB is unsupported");
+            ensure!(j["nodes"][0][field].is_null(), "transformed or hierarchical GLB is unsupported"); // i18n: not shown (the lab collider exporter, run from a terminal (docs/mesh.md) or by mesh_bench: no window starts it)
         }
         let primitive = &j["meshes"][0]["primitives"][0];
-        ensure!(primitive["mode"].is_null() || primitive["mode"] == 4, "triangle list required");
-        let pa = &j["accessors"][primitive["attributes"]["POSITION"].as_u64().context("position accessor")? as usize];
-        let ia = &j["accessors"][primitive["indices"].as_u64().context("index accessor")? as usize];
+        ensure!(primitive["mode"].is_null() || primitive["mode"] == 4, "triangle list required"); // i18n: not shown (the lab collider exporter, run from a terminal (docs/mesh.md) or by mesh_bench: no window starts it)
+        let pa = &j["accessors"][primitive["attributes"]["POSITION"].as_u64().context("position accessor")? as usize]; // i18n: not shown (the lab collider exporter, run from a terminal (docs/mesh.md) or by mesh_bench: no window starts it)
+        let ia = &j["accessors"][primitive["indices"].as_u64().context("index accessor")? as usize]; // i18n: not shown (the lab collider exporter, run from a terminal (docs/mesh.md) or by mesh_bench: no window starts it)
         let data = |a: &serde_json::Value, element: usize| -> anyhow::Result<(&[u8], usize, usize)> {
-            let v = &j["bufferViews"][a["bufferView"].as_u64().context("buffer view")? as usize];
+            let v = &j["bufferViews"][a["bufferView"].as_u64().context("buffer view")? as usize]; // i18n: not shown (the lab collider exporter, run from a terminal (docs/mesh.md) or by mesh_bench: no window starts it)
             let start = binary + v["byteOffset"].as_u64().unwrap_or(0) as usize + a["byteOffset"].as_u64().unwrap_or(0) as usize;
-            let count = a["count"].as_u64().context("accessor count")? as usize;
+            let count = a["count"].as_u64().context("accessor count")? as usize; // i18n: not shown (the lab collider exporter, run from a terminal (docs/mesh.md) or by mesh_bench: no window starts it)
             let stride = v["byteStride"].as_u64().unwrap_or(element as u64) as usize;
-            ensure!(start + count.saturating_sub(1) * stride + element <= b.len(), "accessor out of range");
+            ensure!(start + count.saturating_sub(1) * stride + element <= b.len(), "accessor out of range"); // i18n: not shown (the lab collider exporter, run from a terminal (docs/mesh.md) or by mesh_bench: no window starts it)
             Ok((&b[start..], count, stride))
         };
-        ensure!(pa["componentType"] == 5126 && pa["type"] == "VEC3", "float positions required");
+        ensure!(pa["componentType"] == 5126 && pa["type"] == "VEC3", "float positions required"); // i18n: not shown (the lab collider exporter, run from a terminal (docs/mesh.md) or by mesh_bench: no window starts it)
         let (bytes, count, stride) = data(pa, 12)?;
         let positions: Vec<[f32; 3]> = (0..count)
             .map(|i| {
@@ -473,8 +473,8 @@ impl Mesh {
                 p
             })
             .collect();
-        let ty = ia["componentType"].as_u64().context("index type")?;
-        ensure!(ty == 5125 || ty == 5123, "unsigned int or short indices required");
+        let ty = ia["componentType"].as_u64().context("index type")?; // i18n: not shown (the lab collider exporter, run from a terminal (docs/mesh.md) or by mesh_bench: no window starts it)
+        ensure!(ty == 5125 || ty == 5123, "unsigned int or short indices required"); // i18n: not shown (the lab collider exporter, run from a terminal (docs/mesh.md) or by mesh_bench: no window starts it)
         let element = if ty == 5125 { 4 } else { 2 };
         let (bytes, count, stride) = data(ia, element)?;
         let indices: Vec<u32> = (0..count)
@@ -563,16 +563,16 @@ pub fn cli(args: &[String]) -> anyhow::Result<()> {
             }
             "--quest" => s.budget = QUEST_BUDGET,
             "--no-fill" => s.fill = false,
-            other => anyhow::bail!("unknown option {other}"),
+            other => anyhow::bail!("unknown option {other}"), // i18n: not shown (the lab collider exporter, run from a terminal (docs/mesh.md) or by mesh_bench: no window starts it)
         }
         i += 1;
     }
-    ensure!(s.voxel.is_finite() && (0.01..=0.5).contains(&s.voxel), "invalid voxel size");
+    ensure!(s.voxel.is_finite() && (0.01..=0.5).contains(&s.voxel), "invalid voxel size"); // i18n: not shown (the lab collider exporter, run from a terminal (docs/mesh.md) or by mesh_bench: no window starts it)
     let start = Instant::now();
     let session = Path::new(&args[0]);
     let prepared = crate::prepare::prepare(session, &crate::prepare::Options { width: 640, aberration: false, ..Default::default() }, |_| {})?;
     let built = build(session, &prepared.data, &s)?;
-    built.mesh.write(Path::new(&args[1])).context("writing mesh")?;
+    built.mesh.write(Path::new(&args[1])).context("writing mesh")?; // i18n: not shown (the lab collider exporter, run from a terminal (docs/mesh.md) or by mesh_bench: no window starts it)
     let mut stats = built.stats;
     stats["total_seconds"] = start.elapsed().as_secs_f64().into();
     println!("{stats}");

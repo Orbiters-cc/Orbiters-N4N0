@@ -624,7 +624,7 @@ impl View {
                 visible += overlay.is_visible(*h) as u32;
             }
         }
-        let small = self.small.as_ref().map(|s| format!("docked {} taken {} held {:?} reach {:.2} radius {:.3} anchor {:?} middle moved {:?}", s.docked, s.taken(), s.held_by(), s.reach(), s.radius(), s.anchor, s.moved_by()));
+        let small = self.small.as_ref().map(|s| format!("docked {} taken {} held {:?} reach {:.2} radius {:.3} anchor {:?} middle moved {:?}", s.docked, s.taken(), s.held_by(), s.reach(), s.radius(), s.anchor, s.moved_by())); // i18n: not shown (a note in the log)
         let place = self.small_place.map(|(at, radius)| (stereo::position(&at), radius));
         format!(
             "view: phase {} alpha {:.2} faces visible {visible}/{total} faces submitted {} loaded {} in flight {} cube {:?} small [{}] hole's place {place:?} error {:?}", // i18n: not shown (a log's line)

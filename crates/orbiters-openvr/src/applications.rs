@@ -133,7 +133,7 @@ impl Client {
         }
         match self.add_application_manifest(path) {
             Ok(()) | Err(APP_KEY_ALREADY_EXISTS) => {}
-            Err(code) => return Err(format!("SteamVR did not take the application's manifest (error {code})")),
+            Err(code) => return Err(orbiters_i18n::tr!("SteamVR did not take the application's manifest (error {code})", code = code)),
         }
         self.set_application_auto_launch(manifest.key, true).map_err(|code| orbiters_i18n::tr!("SteamVR did not set its start (error {code})", code = code))
     }

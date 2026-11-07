@@ -187,7 +187,7 @@ pub struct ScanRuntime {
 impl super::Controller {
     /// Scans the place around VRChat's camera where it stands now.
     pub fn take_scan(self: &Shared) -> anyhow::Result<()> {
-        anyhow::ensure!(self.snapshot.lock().unwrap().vrchat.running, "Start VRChat and open its camera first.");
+        anyhow::ensure!(self.snapshot.lock().unwrap().vrchat.running, "{}", tr("Start VRChat and open its camera first."));
         self.ensure_capture_idle()?;
         let (pose, smooth) = {
             let osc = self.osc_values.lock().unwrap();
@@ -196,7 +196,7 @@ impl super::Controller {
             (pose, smooth)
         };
         let Some(pose) = pose else {
-            anyhow::bail!("Move VRChat's camera once so Orbiters knows where it is, then try again.");
+            anyhow::bail!("{}", tr("Move VRChat's camera once so Orbiters knows where it is, then try again."));
         };
         let pose: [f32; 6] = pose.try_into().expect("six values");
         self.scan.lock().unwrap().recording = true;

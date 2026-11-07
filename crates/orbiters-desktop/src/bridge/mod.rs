@@ -416,13 +416,13 @@ impl Bridge {
         let mut looked = begin;
         while Instant::now() < until {
             if call.client_gone() {
-                return Err(Failure::new("client_gone", "The client disconnected: input was released.", "Call the tool again if this still makes sense."));
+                return Err(Failure::new("client_gone", "The client disconnected: input was released.", "Call the tool again if this still makes sense.")); // i18n: not shown (an AI client reads it in the tool's answer)
             }
             if self.stopped_since(call) {
                 return Err(Failure::new(
                     "stopped",
-                    "The person took control back in Orbiters - N4N0.",
-                    "Stop here: the person has to turn the bridge on again.",
+                    "The person took control back in Orbiters - N4N0.", // i18n: not shown (an AI client reads it in the tool's answer)
+                    "Stop here: the person has to turn the bridge on again.", // i18n: not shown (an AI client reads it in the tool's answer)
                 ));
             }
             if let Some(paused) = self.paused() {

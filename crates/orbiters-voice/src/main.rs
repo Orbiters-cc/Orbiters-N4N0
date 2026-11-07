@@ -70,7 +70,7 @@ fn path_string(p: PathBuf) -> Option<String> {
 }
 
 fn load_vad(models: &Path) -> anyhow::Result<VoiceActivityDetector> {
-    anyhow::ensure!(models.join(voice::VAD_FILE).is_file(), "N4N0's speech models are not installed in {}", models.display());
+    anyhow::ensure!(models.join(voice::VAD_FILE).is_file(), "{}", orbiters_i18n::tr!("N4N0's speech models are not installed in {folder}", folder = models.display()));
     VoiceActivityDetector::create(
         &VadModelConfig {
             silero_vad: SileroVadModelConfig {
@@ -89,11 +89,11 @@ fn load_vad(models: &Path) -> anyhow::Result<VoiceActivityDetector> {
         },
         LONGEST.as_secs_f32() + 5.0,
     )
-    .ok_or_else(|| anyhow::anyhow!("voice activity detection did not load"))
+    .ok_or_else(|| anyhow::anyhow!("{}", orbiters_i18n::tr("voice activity detection did not load")))
 }
 
 fn load_recognizer(models: &Path) -> anyhow::Result<OfflineRecognizer> {
-    anyhow::ensure!(voice::installed(models), "N4N0's speech models are not installed in {} (or are damaged)", models.display());
+    anyhow::ensure!(voice::installed(models), "{}", orbiters_i18n::tr!("N4N0's speech models are not installed in {folder} (or are damaged)", folder = models.display()));
     let asr = models.join(voice::ASR_DIR);
     let mut config = OfflineRecognizerConfig::default();
     config.model_config.transducer = OfflineTransducerModelConfig {
@@ -106,7 +106,7 @@ fn load_recognizer(models: &Path) -> anyhow::Result<OfflineRecognizer> {
     config.model_config.num_threads = THREADS;
     config.model_config.provider = Some("cpu".into());
     config.decoding_method = Some("greedy_search".into());
-    OfflineRecognizer::create(&config).ok_or_else(|| anyhow::anyhow!("the speech recogniser did not load"))
+    OfflineRecognizer::create(&config).ok_or_else(|| anyhow::anyhow!("{}", orbiters_i18n::tr("the speech recogniser did not load")))
 }
 
 fn transcribe(recognizer: &OfflineRecognizer, samples: &[f32]) -> (String, u32) {
@@ -234,7 +234,7 @@ impl Worker {
                     },
                     |_, frames, samples| {
                         let chunk = samples.map(<[f32]>::to_vec).unwrap_or_else(|| vec![0.0; frames as usize]);
-                        audio.send(Input::Audio(generation, chunk)).map_err(|_| anyhow::anyhow!("the worker stopped"))
+                        audio.send(Input::Audio(generation, chunk)).map_err(|_| anyhow::anyhow!("{}", orbiters_i18n::tr("the worker stopped")))
                     },
                 );
                 let _ = tx.send(Input::MicClosed(generation, result.err().map(|e| format!("{e:#}"))));
@@ -658,7 +658,7 @@ fn install(models: &Path, repair: bool, progress: &Progress) -> anyhow::Result<(
         let _ = std::fs::remove_file(&archive);
     }
     let left = voice::damaged(models);
-    anyhow::ensure!(left.is_empty(), "the models are still incomplete ({})", left.join(", "));
+    anyhow::ensure!(left.is_empty(), "{}", orbiters_i18n::tr!("the models are still incomplete ({files})", files = left.join(", ")));
     progress.unpacking(1.0);
     Ok(())
 }
@@ -713,7 +713,7 @@ fn download(agent: &ureq::Agent, url: &str, to: &Path, expected: voice::Expected
                 Err(e) if have + 1 > expected.size => {
                     drop(file);
                     let _ = std::fs::remove_file(to);
-                    anyhow::bail!("{url}: larger than the {} bytes expected ({e})", expected.size);
+                    anyhow::bail!("{}", orbiters_i18n::tr!("{url}: larger than the {size} bytes expected ({error})", url = url, size = expected.size, error = e));
                 }
                 Err(e) => return Err(e.into()),
             };
@@ -724,7 +724,7 @@ fn download(agent: &ureq::Agent, url: &str, to: &Path, expected: voice::Expected
             if have > expected.size {
                 drop(file);
                 let _ = std::fs::remove_file(to);
-                anyhow::bail!("{url}: larger than the {} bytes expected: not the file Orbiters knows", expected.size);
+                anyhow::bail!("{}", orbiters_i18n::tr!("{url}: larger than the {size} bytes expected: not the file Orbiters knows", url = url, size = expected.size));
             }
             hasher.update(&buf[..n]);
             file.write_all(&buf[..n])?;
@@ -732,13 +732,13 @@ fn download(agent: &ureq::Agent, url: &str, to: &Path, expected: voice::Expected
         }
         file.into_inner().map_err(|e| e.into_error())?.sync_all()?;
     }
-    anyhow::ensure!(have == expected.size, "{url}: the download stopped at {have} of {} bytes (the next try goes on from there)", expected.size);
+    anyhow::ensure!(have == expected.size, "{}", orbiters_i18n::tr!("{url}: the download stopped at {have} of {size} bytes (the next try goes on from there)", url = url, have = have, size = expected.size));
     let digest = format!("{:x}", hasher.finalize());
     eprintln!("voice: {name}: {have} bytes, SHA-256 {digest}");
     if let Some(pinned) = expected.sha256 {
         if digest != pinned {
             let _ = std::fs::remove_file(to);
-            anyhow::bail!("{url}: not the file Orbiters knows (SHA-256 {digest})");
+            anyhow::bail!("{}", orbiters_i18n::tr!("{url}: not the file Orbiters knows (SHA-256 {digest})", url = url, digest = digest));
         }
     }
     Ok(())
@@ -758,11 +758,11 @@ fn unpack_archive(archive: &Path, into: &Path, progress: &Progress) -> anyhow::R
         let path = entry.path()?.into_owned();
         anyhow::ensure!(
             path.components().all(|c| matches!(c, Component::Normal(_) | Component::CurDir)),
-            "the archive holds a path outside its folder ({}): refused",
-            path.display()
+            "{}",
+            orbiters_i18n::tr!("the archive holds a path outside its folder ({path}): refused", path = path.display())
         );
         let kind = entry.header().entry_type();
-        anyhow::ensure!(!kind.is_symlink() && !kind.is_hard_link(), "the archive holds a link ({}): refused", path.display());
+        anyhow::ensure!(!kind.is_symlink() && !kind.is_hard_link(), "{}", orbiters_i18n::tr!("the archive holds a link ({path}): refused", path = path.display()));
         let parts: Vec<String> =
             path.components().filter_map(|c| if let Component::Normal(p) = c { Some(p.to_string_lossy().into_owned()) } else { None }).collect();
         let name = match parts.as_slice() {
@@ -771,17 +771,17 @@ fn unpack_archive(archive: &Path, into: &Path, progress: &Progress) -> anyhow::R
             _ => continue,
         };
         let Some(index) = voice::ASR_FILES.iter().position(|f| *f == name) else { continue };
-        anyhow::ensure!(kind.is_file(), "{name} is not a file in the archive");
+        anyhow::ensure!(kind.is_file(), "{}", orbiters_i18n::tr!("{name} is not a file in the archive", name = name));
         let size = voice::ASR_SIZES[index];
-        anyhow::ensure!(entry.size() == size, "{name} is {} bytes in the archive, not the {size} Orbiters knows", entry.size());
-        anyhow::ensure!(!found[index], "{name} is twice in the archive");
+        anyhow::ensure!(entry.size() == size, "{}", orbiters_i18n::tr!("{name} is {found} bytes in the archive, not the {size} Orbiters knows", name = name, found = entry.size(), size = size));
+        anyhow::ensure!(!found[index], "{}", orbiters_i18n::tr!("{name} is twice in the archive", name = name));
         let mut file = std::fs::File::create(into.join(&name))?;
         let mut buf = vec![0u8; 256 * 1024];
         let mut left = size;
         let mut limited = (&mut entry).take(size);
         while left > 0 {
             let n = limited.read(&mut buf)?;
-            anyhow::ensure!(n > 0, "{name} is cut short in the archive");
+            anyhow::ensure!(n > 0, "{}", orbiters_i18n::tr!("{name} is cut short in the archive", name = name));
             file.write_all(&buf[..n])?;
             left -= n as u64;
             written += n as u64;
@@ -790,7 +790,7 @@ fn unpack_archive(archive: &Path, into: &Path, progress: &Progress) -> anyhow::R
         file.sync_all()?;
         found[index] = true;
     }
-    anyhow::ensure!(found.iter().all(|f| *f), "the archive lacks some of the recogniser's files");
+    anyhow::ensure!(found.iter().all(|f| *f), "{}", orbiters_i18n::tr("the archive lacks some of the recogniser's files"));
     Ok(())
 }
 
@@ -799,8 +799,8 @@ fn transcribe_files(files: &[String]) -> anyhow::Result<()> {
     let recognizer = load_recognizer(&orbiters_core::paths::models_dir())?;
     println!("models loaded in {} ms", started.elapsed().as_millis());
     for file in files {
-        let wave = sherpa_onnx::Wave::read(file).ok_or_else(|| anyhow::anyhow!("cannot read {file}"))?;
-        anyhow::ensure!(wave.sample_rate() == RATE as i32, "{file}: {} Hz (16000 needed)", wave.sample_rate());
+        let wave = sherpa_onnx::Wave::read(file).ok_or_else(|| anyhow::anyhow!("cannot read {file}"))?; // i18n: not shown (the `--transcribe` command line, for developers)
+        anyhow::ensure!(wave.sample_rate() == RATE as i32, "{file}: {} Hz (16000 needed)", wave.sample_rate()); // i18n: not shown (the `--transcribe` command line, for developers)
         let (text, ms) = transcribe(&recognizer, wave.samples());
         println!("{file}: {:.1} s of audio in {ms} ms: {text}", wave.samples().len() as f32 / RATE as f32);
     }

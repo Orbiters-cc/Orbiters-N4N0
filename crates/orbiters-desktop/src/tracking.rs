@@ -238,7 +238,7 @@ impl Smoothing {
         if self.installed.as_ref().is_none_or(|(r, at)| r.is_err() && now.saturating_duration_since(*at) >= INSTALL_RETRY) {
             let result = match shipped_driver() {
                 Some(dll) => orbiters_smooth::install::install(&dll).map(drop).map_err(|e| format!("{e:#}")),
-                None => Err("this copy of Orbiters - N4N0 has no smoothing driver beside it".into()),
+                None => Err(tr("this copy of Orbiters - N4N0 has no smoothing driver beside it").into()),
             };
             self.installed = Some((result, now));
         }

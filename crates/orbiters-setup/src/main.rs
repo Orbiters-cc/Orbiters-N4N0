@@ -210,7 +210,7 @@ fn run_task(args: &Args, payload: Option<&'static [u8]>, progress: &install::Pro
     use anyhow::Context as _;
     let result = match args.mode {
         Mode::Install => {
-            let bytes = payload.context("This setup holds no programs to install.")?;
+            let bytes = payload.with_context(|| tr("This setup holds no programs to install."))?;
             let options = install::Options {
                 dir: target_dir(args),
                 desktop_shortcut: true,
@@ -222,12 +222,12 @@ fn run_task(args: &Args, payload: Option<&'static [u8]>, progress: &install::Pro
             install::install(bytes, &options, progress, silent, fresh).map(|_| options.dir)
         }
         Mode::Update => {
-            let bytes = payload.context("This setup holds no programs to install.")?;
-            let dir = install_dir(args).context("Orbiters - N4N0 is not installed for this Windows account.")?;
+            let bytes = payload.with_context(|| tr("This setup holds no programs to install."))?;
+            let dir = install_dir(args).with_context(|| tr("Orbiters - N4N0 is not installed for this Windows account."))?;
             install::update(bytes, &dir, progress, silent).map(|_| dir)
         }
         Mode::Uninstall => {
-            let dir = install_dir(args).context("Orbiters - N4N0 is not installed for this Windows account.")?;
+            let dir = install_dir(args).with_context(|| tr("Orbiters - N4N0 is not installed for this Windows account."))?;
             let r = install::uninstall(&dir, remove_data, progress, silent).map(|_| dir);
             done_relocated(args);
             return r.map(drop);

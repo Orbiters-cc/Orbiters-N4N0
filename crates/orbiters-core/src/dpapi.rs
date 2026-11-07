@@ -4,7 +4,7 @@
 pub(crate) fn crypt(data: &[u8], entropy: &[u8], encrypt: bool) -> anyhow::Result<Vec<u8>> {
     use windows::Win32::Foundation::{LocalFree, HLOCAL};
     use windows::Win32::Security::Cryptography::{CryptProtectData, CryptUnprotectData, CRYPTPROTECT_UI_FORBIDDEN, CRYPT_INTEGER_BLOB};
-    anyhow::ensure!(data.len() <= u32::MAX as usize && entropy.len() <= u32::MAX as usize, "Secret is too large");
+    anyhow::ensure!(data.len() <= u32::MAX as usize && entropy.len() <= u32::MAX as usize, "{}", orbiters_i18n::tr("Secret is too large"));
     let blob = |bytes: &[u8]| CRYPT_INTEGER_BLOB { cbData: bytes.len() as u32, pbData: bytes.as_ptr() as *mut u8 };
     let mut out = CRYPT_INTEGER_BLOB::default();
     // SAFETY: both input slices live for the call. DPAPI allocates the output with LocalAlloc; it is copied and freed once.
@@ -25,7 +25,7 @@ pub(crate) fn crypt(data: &[u8], entropy: &[u8], encrypt: bool) -> anyhow::Resul
 
 #[cfg(not(any(windows, target_os = "macos")))]
 pub(crate) fn crypt(_: &[u8], _: &[u8], _: bool) -> anyhow::Result<Vec<u8>> {
-    anyhow::bail!("VRChat session storage requires Windows DPAPI")
+    anyhow::bail!("{}", orbiters_i18n::tr("VRChat session storage requires Windows DPAPI"))
 }
 
 /// What DPAPI does on Windows, on the Mac: AES-256-GCM under a key that stays in the person's login keychain and is made
@@ -43,6 +43,7 @@ pub(crate) fn crypt(data: &[u8], entropy: &[u8], encrypt: bool) -> anyhow::Resul
 
 #[cfg(target_os = "macos")]
 mod mac {
+    use orbiters_i18n::tr;
     use ring::aead::{Aad, LessSafeKey, Nonce, UnboundKey, AES_256_GCM, NONCE_LEN};
     use ring::rand::{SecureRandom, SystemRandom};
     use security_framework::passwords::{get_generic_password, set_generic_password};
@@ -56,40 +57,40 @@ mod mac {
     /// The key from the login keychain, made and kept there when there is none yet.
     pub(super) fn keychain_key() -> anyhow::Result<[u8; KEY_LEN]> {
         match get_generic_password(SERVICE, ACCOUNT) {
-            Ok(bytes) => <[u8; KEY_LEN]>::try_from(bytes.as_slice()).map_err(|_| anyhow::anyhow!("the keychain holds a key of another length")),
+            Ok(bytes) => <[u8; KEY_LEN]>::try_from(bytes.as_slice()).map_err(|_| anyhow::anyhow!("{}", tr("the keychain holds a key of another length"))),
             Err(e) if e.code() == NOT_FOUND => {
                 let mut key = [0u8; KEY_LEN];
-                SystemRandom::new().fill(&mut key).map_err(|_| anyhow::anyhow!("no random numbers"))?;
-                set_generic_password(SERVICE, ACCOUNT, &key).map_err(|e| anyhow::anyhow!("the keychain did not keep the key: {e}"))?;
+                SystemRandom::new().fill(&mut key).map_err(|_| anyhow::anyhow!("{}", tr("no random numbers")))?;
+                set_generic_password(SERVICE, ACCOUNT, &key).map_err(|e| anyhow::anyhow!("{}", tr!("the keychain did not keep the key: {error}", error = e)))?;
                 Ok(key)
             }
-            Err(e) => anyhow::bail!("the keychain did not give the key: {e}"),
+            Err(e) => anyhow::bail!("{}", tr!("the keychain did not give the key: {error}", error = e)),
         }
     }
 
     fn cipher(key: &[u8; KEY_LEN]) -> anyhow::Result<LessSafeKey> {
-        Ok(LessSafeKey::new(UnboundKey::new(&AES_256_GCM, key).map_err(|_| anyhow::anyhow!("not a key"))?))
+        Ok(LessSafeKey::new(UnboundKey::new(&AES_256_GCM, key).map_err(|_| anyhow::anyhow!("{}", tr("not a key")))?))
     }
 
     /// A fresh nonce, then the sealed text and its tag.
     pub(super) fn seal(key: &[u8; KEY_LEN], data: &[u8], entropy: &[u8]) -> anyhow::Result<Vec<u8>> {
         let mut nonce = [0u8; NONCE_LEN];
-        SystemRandom::new().fill(&mut nonce).map_err(|_| anyhow::anyhow!("no random numbers"))?;
+        SystemRandom::new().fill(&mut nonce).map_err(|_| anyhow::anyhow!("{}", tr("no random numbers")))?;
         let mut sealed = data.to_vec();
         cipher(key)?
             .seal_in_place_append_tag(Nonce::assume_unique_for_key(nonce), Aad::from(entropy), &mut sealed)
-            .map_err(|_| anyhow::anyhow!("sealing failed"))?;
+            .map_err(|_| anyhow::anyhow!("{}", tr("sealing failed")))?;
         let mut out = nonce.to_vec();
         out.append(&mut sealed);
         Ok(out)
     }
 
     pub(super) fn open(key: &[u8; KEY_LEN], sealed: &[u8], entropy: &[u8]) -> anyhow::Result<Vec<u8>> {
-        anyhow::ensure!(sealed.len() >= NONCE_LEN, "too short to be sealed");
+        anyhow::ensure!(sealed.len() >= NONCE_LEN, "{}", tr("too short to be sealed"));
         let (nonce, text) = sealed.split_at(NONCE_LEN);
-        let nonce = Nonce::try_assume_unique_for_key(nonce).map_err(|_| anyhow::anyhow!("not a nonce"))?;
+        let nonce = Nonce::try_assume_unique_for_key(nonce).map_err(|_| anyhow::anyhow!("{}", tr("not a nonce")))?;
         let mut text = text.to_vec();
-        let plain = cipher(key)?.open_in_place(nonce, Aad::from(entropy), &mut text).map_err(|_| anyhow::anyhow!("not sealed for this user"))?.len();
+        let plain = cipher(key)?.open_in_place(nonce, Aad::from(entropy), &mut text).map_err(|_| anyhow::anyhow!("{}", tr("not sealed for this user")))?.len();
         text.truncate(plain);
         Ok(text)
     }

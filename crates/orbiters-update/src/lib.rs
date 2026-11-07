@@ -184,7 +184,7 @@ pub struct SignedRelease {
 impl SignedRelease {
     /// Signs `release` with the release key's private half (PKCS#8, as `cargo xtask keygen` writes it).
     pub fn sign(release: &Release, private_key: &[u8]) -> anyhow::Result<Self> {
-        let pair = ring::signature::Ed25519KeyPair::from_pkcs8(private_key).map_err(|e| anyhow::anyhow!("not an Ed25519 private key: {e}"))?;
+        let pair = ring::signature::Ed25519KeyPair::from_pkcs8(private_key).map_err(|e| anyhow::anyhow!("not an Ed25519 private key: {e}"))?; // i18n: not shown (release signing, run by `cargo xtask release`)
         let json = serde_json::to_string_pretty(release)?;
         let signature = pair.sign(json.as_bytes());
         Ok(Self { release: json, signature: base64::engine::general_purpose::STANDARD.encode(signature.as_ref()) })
@@ -193,18 +193,19 @@ impl SignedRelease {
     /// The release in a published file, once its signature checks out against `key` and it is of [`PRODUCT`] and
     /// `channel` (a release of another channel served in its place is refused, as is anything unsigned).
     pub fn open(bytes: &[u8], key: &[u8; 32], channel: &str) -> anyhow::Result<Release> {
-        let signed: SignedRelease = serde_json::from_slice(bytes).context("not a signed release")?;
-        let signature = base64::engine::general_purpose::STANDARD.decode(signed.signature.trim()).context("the signature is not Base64")?;
+        let signed: SignedRelease = serde_json::from_slice(bytes).with_context(|| orbiters_i18n::tr("not a signed release"))?;
+        let signature = base64::engine::general_purpose::STANDARD.decode(signed.signature.trim()).with_context(|| orbiters_i18n::tr("the signature is not Base64"))?;
         ring::signature::UnparsedPublicKey::new(&ring::signature::ED25519, key)
             .verify(signed.release.as_bytes(), &signature)
-            .map_err(|_| anyhow::anyhow!("the release is not signed with Orbiters' release key"))?;
-        let release: Release = serde_json::from_str(&signed.release).context("the signed release cannot be read")?;
-        anyhow::ensure!(release.product == PRODUCT, "the release is of {}, not Orbiters - N4N0", release.product);
-        anyhow::ensure!(release.channel == channel, "the release is of the {} channel, not {channel}", release.channel);
-        anyhow::ensure!(semver::Version::parse(&release.version).is_ok(), "the release's version ({}) is not a version", release.version);
+            .map_err(|_| anyhow::anyhow!("{}", orbiters_i18n::tr("the release is not signed with Orbiters' release key")))?;
+        let release: Release = serde_json::from_str(&signed.release).with_context(|| orbiters_i18n::tr("the signed release cannot be read"))?;
+        anyhow::ensure!(release.product == PRODUCT, "{}", orbiters_i18n::tr!("the release is of {product}, not Orbiters - N4N0", product = release.product));
+        anyhow::ensure!(release.channel == channel, "{}", orbiters_i18n::tr!("the release is of the {other} channel, not {channel}", other = release.channel, channel = channel));
+        anyhow::ensure!(semver::Version::parse(&release.version).is_ok(), "{}", orbiters_i18n::tr!("the release's version ({version}) is not a version", version = release.version));
         anyhow::ensure!(
             release.installer.sha256.len() == 64 && release.installer.sha256.bytes().all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()),
-            "the release's installer has no SHA-256"
+            "{}",
+            orbiters_i18n::tr("the release's installer has no SHA-256")
         );
         Ok(release)
     }
@@ -213,7 +214,7 @@ impl SignedRelease {
 /// A new release key: its private half (PKCS#8) and its public half.
 #[cfg(feature = "signing")]
 pub fn generate_key() -> anyhow::Result<(Vec<u8>, [u8; 32])> {
-    let pkcs8 = ring::signature::Ed25519KeyPair::generate_pkcs8(&ring::rand::SystemRandom::new()).map_err(|_| anyhow::anyhow!("no randomness for a key"))?;
+    let pkcs8 = ring::signature::Ed25519KeyPair::generate_pkcs8(&ring::rand::SystemRandom::new()).map_err(|_| anyhow::anyhow!("no randomness for a key"))?; // i18n: not shown (release signing, run by `cargo xtask keygen`)
     let public = public_key_of(pkcs8.as_ref())?;
     Ok((pkcs8.as_ref().to_vec(), public))
 }
@@ -222,8 +223,8 @@ pub fn generate_key() -> anyhow::Result<(Vec<u8>, [u8; 32])> {
 #[cfg(feature = "signing")]
 pub fn public_key_of(private_key: &[u8]) -> anyhow::Result<[u8; 32]> {
     use ring::signature::KeyPair as _;
-    let pair = ring::signature::Ed25519KeyPair::from_pkcs8(private_key).map_err(|e| anyhow::anyhow!("not an Ed25519 private key: {e}"))?;
-    pair.public_key().as_ref().try_into().context("an Ed25519 public key is 32 bytes")
+    let pair = ring::signature::Ed25519KeyPair::from_pkcs8(private_key).map_err(|e| anyhow::anyhow!("not an Ed25519 private key: {e}"))?; // i18n: not shown (release signing, run by `cargo xtask release`)
+    pair.public_key().as_ref().try_into().context("an Ed25519 public key is 32 bytes") // i18n: not shown (release signing, run by `cargo xtask`)
 }
 
 /// Whether `candidate` is a later version than `current` (semantic versions; anything unreadable is not).

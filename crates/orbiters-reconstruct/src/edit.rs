@@ -24,6 +24,7 @@
 use crate::gaussians::Gaussians;
 use anyhow::{Context as _, bail, ensure};
 use orbiters_core::reconstruction as rec;
+use orbiters_i18n::tr;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
@@ -83,7 +84,7 @@ impl Identity {
 
     /// The identity of the PLY at `path` (read whole).
     pub fn read(path: &Path) -> anyhow::Result<Self> {
-        Ok(Self::of(&std::fs::read(path).with_context(|| format!("reading {}", path.display()))?))
+        Ok(Self::of(&std::fs::read(path).with_context(|| tr!("reading {path}", path = path.display()))?))
     }
 }
 
@@ -232,39 +233,39 @@ impl Edit {
     /// Reads [`Edit::encode`]'s bytes: anything else (truncated, flipped, another format or version, runs that do not
     /// add up to its splats, marks it does not know) is an error, never a partial edit.
     pub fn decode(bytes: &[u8]) -> anyhow::Result<Self> {
-        ensure!(bytes.len() >= 20 && &bytes[..8] == MAGIC, "not a splat edit file");
+        ensure!(bytes.len() >= 20 && &bytes[..8] == MAGIC, "{}", tr("not a splat edit file"));
         let (body, tail) = bytes.split_at(bytes.len() - 8);
-        ensure!(content_hash(body) == u64::from_le_bytes(tail.try_into().expect("8 bytes")), "the splat edit file is damaged");
+        ensure!(content_hash(body) == u64::from_le_bytes(tail.try_into().expect("8 bytes")), "{}", tr("the splat edit file is damaged"));
         let length = u32::from_le_bytes(body[8..12].try_into().expect("4 bytes")) as usize;
-        ensure!(length <= MAX_HEADER && 12 + length <= body.len(), "the splat edit file is damaged");
-        let header: Header = serde_json::from_slice(&body[12..12 + length]).context("the splat edit file's header")?;
-        ensure!(header.format == FORMAT, "not a splat edit file");
-        ensure!(header.version == VERSION, "splat edits of version {} (this app reads version {VERSION}): update the app", header.version);
-        let hash = u64::from_str_radix(&header.ply.hash, 16).context("the splat edit file's PLY hash")?;
+        ensure!(length <= MAX_HEADER && 12 + length <= body.len(), "{}", tr("the splat edit file is damaged"));
+        let header: Header = serde_json::from_slice(&body[12..12 + length]).with_context(|| tr("the splat edit file's header"))?;
+        ensure!(header.format == FORMAT, "{}", tr("not a splat edit file"));
+        ensure!(header.version == VERSION, "{}", tr!("splat edits of version {found} (this app reads version {expected}): update the app", found = header.version, expected = VERSION));
+        let hash = u64::from_str_radix(&header.ply.hash, 16).with_context(|| tr("the splat edit file's PLY hash"))?;
         // A header may claim any count: never more than a PLY of its size holds, nor than any reconstruction has.
-        ensure!(header.splats <= MAX_SPLATS && header.splats as u64 <= header.ply.bytes / PLY_SPLAT_BYTES, "the splat edit file is damaged");
+        ensure!(header.splats <= MAX_SPLATS && header.splats as u64 <= header.ply.bytes / PLY_SPLAT_BYTES, "{}", tr("the splat edit file is damaged"));
         let mut marks = Vec::with_capacity(header.splats);
         let mut at = 12 + length;
         while at < body.len() {
             let mut n = 0u64;
             let mut shift = 0;
             loop {
-                let byte = *body.get(at).context("the splat edit file is damaged")?;
+                let byte = *body.get(at).with_context(|| tr("the splat edit file is damaged"))?;
                 at += 1;
-                ensure!(shift < 63, "the splat edit file is damaged");
+                ensure!(shift < 63, "{}", tr("the splat edit file is damaged"));
                 n |= ((byte & 0x7F) as u64) << shift;
                 shift += 7;
                 if byte & 0x80 == 0 {
                     break;
                 }
             }
-            let mark = *body.get(at).context("the splat edit file is damaged")?;
+            let mark = *body.get(at).with_context(|| tr("the splat edit file is damaged"))?;
             at += 1;
-            ensure!(mark == 0 || mark == HIDDEN || mark == DELETED, "the splat edit file has a mark it does not know ({mark})");
-            ensure!(n > 0 && marks.len() as u64 + n <= header.splats as u64, "the splat edit file is damaged");
+            ensure!(mark == 0 || mark == HIDDEN || mark == DELETED, "{}", tr!("the splat edit file has a mark it does not know ({mark})", mark = mark));
+            ensure!(n > 0 && marks.len() as u64 + n <= header.splats as u64, "{}", tr("the splat edit file is damaged"));
             marks.resize(marks.len() + n as usize, mark);
         }
-        ensure!(marks.len() == header.splats, "the splat edit file is damaged");
+        ensure!(marks.len() == header.splats, "{}", tr("the splat edit file is damaged"));
         Ok(Self { marks, ply: Identity { bytes: header.ply.bytes, hash }, picture: header.picture, ply_modified: header.ply.modified })
     }
 
@@ -273,12 +274,12 @@ impl Edit {
         let path = result.join(rec::EDIT_FILE);
         if self.removes_nothing() {
             match std::fs::remove_file(&path) {
-                Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e).with_context(|| format!("removing {}", path.display())),
+                Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e).with_context(|| tr!("removing {path}", path = path.display())),
                 _ => return Ok(()),
             }
         }
         let stamped = Edit { ply_modified: modified_ns(&result.join(rec::PLY_FILE)), ..self.clone() };
-        orbiters_core::write_atomic(&path, &stamped.encode()).with_context(|| format!("writing {}", path.display()))
+        orbiters_core::write_atomic(&path, &stamped.encode()).with_context(|| tr!("writing {path}", path = path.display()))
     }
 }
 
@@ -299,8 +300,8 @@ impl Found {
     /// What stops the outputs, as the person reads it.
     pub fn problem(&self) -> Option<String> {
         match self {
-            Found::Stale(_) => Some("Its splat edits were made on an earlier reconstruction of it: open its 3D view to discard them.".into()),
-            Found::Unreadable(e) => Some(format!("Its splat edits could not be read ({e}): open its 3D view to discard them.")),
+            Found::Stale(_) => Some(tr("Its splat edits were made on an earlier reconstruction of it: open its 3D view to discard them.").into()),
+            Found::Unreadable(e) => Some(tr!("Its splat edits could not be read ({error}): open its 3D view to discard them.", error = e)),
             _ => None,
         }
     }
@@ -328,7 +329,7 @@ pub fn find(ply: &Path, identity: Identity, splats: usize) -> Found {
 
 /// The PLY at `ply` whole, its identity and its edit: what the 3D view loads (it draws the edit's marks).
 pub fn read_for_view(ply: &Path) -> anyhow::Result<(Gaussians, Identity, Found)> {
-    let bytes = std::fs::read(ply).with_context(|| format!("reading {}", ply.display()))?;
+    let bytes = std::fs::read(ply).with_context(|| tr!("reading {path}", path = ply.display()))?;
     parse_for_view(ply, &bytes)
 }
 
@@ -365,9 +366,9 @@ pub fn generation(result: &Path) -> anyhow::Result<String> {
     let path = result.join(rec::EDIT_FILE);
     match std::fs::read(&path) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(UNEDITED.into()),
-        Err(e) => Err(e).with_context(|| format!("Its splat edits could not be read ({})", path.display())),
+        Err(e) => Err(e).with_context(|| tr!("Its splat edits could not be read ({path})", path = path.display())),
         Ok(bytes) => {
-            Ok(Edit::decode(&bytes).map_err(|e| anyhow::anyhow!("Its splat edits could not be read ({e:#}): open its 3D view to discard them."))?.generation())
+            Ok(Edit::decode(&bytes).map_err(|e| anyhow::anyhow!("{}", tr!("Its splat edits could not be read ({error}): open its 3D view to discard them.", error = format!("{e:#}"))))?.generation())
         }
     }
 }
@@ -626,7 +627,7 @@ pub fn discard(result: &Path) -> anyhow::Result<()> {
 pub fn discard_for(result: &Path, ply: Option<Identity>) -> anyhow::Result<()> {
     let path = result.join(rec::EDIT_FILE);
     match std::fs::remove_file(&path) {
-        Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e).with_context(|| format!("removing {}", path.display())),
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e).with_context(|| tr!("removing {path}", path = path.display())),
         _ => {}
     }
     restore_picture(result, ply)
@@ -651,13 +652,13 @@ pub fn write_picture(result: &Path, ply: Identity, qoi: &[u8]) -> anyhow::Result
     let kept = std::fs::read(&trained).ok().filter(|b| whole_picture(b));
     if kept.is_none() {
         if let Ok(bytes) = std::fs::read(&preview) {
-            ensure!(whole_picture(&bytes), "{} is damaged: nothing to keep aside", preview.display());
-            orbiters_core::write_atomic(&trained, &bytes).with_context(|| format!("keeping {}", trained.display()))?;
-            ensure!(std::fs::read(&trained).is_ok_and(|b| b == bytes), "{} was not kept whole", trained.display());
+            ensure!(whole_picture(&bytes), "{}", tr!("{path} is damaged: nothing to keep aside", path = preview.display()));
+            orbiters_core::write_atomic(&trained, &bytes).with_context(|| tr!("keeping {path}", path = trained.display()))?;
+            ensure!(std::fs::read(&trained).is_ok_and(|b| b == bytes), "{}", tr!("{path} was not kept whole", path = trained.display()));
         }
     }
     remove_other_backups(result, Some(ply));
-    orbiters_core::write_atomic(&preview, qoi).with_context(|| format!("writing {}", preview.display()))
+    orbiters_core::write_atomic(&preview, qoi).with_context(|| tr!("writing {path}", path = preview.display()))
 }
 
 /// The worker's own picture of the PLY `ply` back in its place once nothing is edited (a damaged backup is refused,
@@ -668,11 +669,11 @@ pub fn restore_picture(result: &Path, ply: Option<Identity>) -> anyhow::Result<(
     let trained = result.join(rec::trained_preview_file(ply.hash));
     let bytes = match std::fs::read(&trained) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        r => r.with_context(|| format!("reading {}", trained.display()))?,
+        r => r.with_context(|| tr!("reading {path}", path = trained.display()))?,
     };
     if !whole_picture(&bytes) {
         let _ = std::fs::remove_file(&trained);
-        bail!("the worker's picture kept aside ({}) was damaged: the picture there stays", trained.display());
+        bail!("{}", tr!("the worker's picture kept aside ({path}) was damaged: the picture there stays", path = trained.display()));
     }
     orbiters_core::write_atomic(&result.join(rec::PREVIEW_FILE), &bytes)?;
     std::fs::remove_file(&trained)?;
@@ -713,6 +714,19 @@ pub fn preview_camera(session: &Path) -> Option<crate::camera::Camera> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// What stops an upload or an export reads in the window's language, with the reason put in its place.
+    #[test]
+    fn an_edit_problem_is_reported_in_the_language_of_the_window() {
+        use orbiters_i18n::{in_language, Language};
+        let unreadable = Found::Unreadable("x".into());
+        assert_eq!(unreadable.problem().unwrap(), "Its splat edits could not be read (x): open its 3D view to discard them.");
+        assert_eq!(
+            in_language(Language::Es, || unreadable.problem().unwrap()),
+            "No se pudieron leer sus ediciones de splats (x): abre su vista 3D para descartarlas."
+        );
+        assert_eq!(in_language(Language::PtBr, || Edit::decode(b"").unwrap_err().to_string()), "não é um arquivo de edições de splats");
+    }
 
     fn temp(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("orbiters-edit-{name}-{}-{}", std::process::id(), fastrand::u32(..)));

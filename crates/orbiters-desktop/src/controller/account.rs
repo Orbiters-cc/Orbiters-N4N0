@@ -57,7 +57,7 @@ impl Drop for SignIn {
 /// Opens a web page (http or https only) in the default browser.
 pub fn open_url(url: &str) -> anyhow::Result<()> {
     let lower = url.to_ascii_lowercase();
-    anyhow::ensure!(lower.starts_with("https://") || lower.starts_with("http://"), "Not a web page: {url}");
+    anyhow::ensure!(lower.starts_with("https://") || lower.starts_with("http://"), "{}", tr!("Not a web page: {url}", url = url));
     #[cfg(windows)]
     open_with_browser(url)?;
     #[cfg(target_os = "linux")]
@@ -84,7 +84,7 @@ fn open_with_browser(url: &str) -> anyhow::Result<()> {
             CoUninitialize();
         }
         // Values above 32 mean success.
-        anyhow::ensure!(result.0 as usize > 32, "Could not open the browser (error {}).", result.0 as usize);
+        anyhow::ensure!(result.0 as usize > 32, "{}", tr!("Could not open the browser (error {code}).", code = result.0 as usize));
     }
     Ok(())
 }
@@ -193,7 +193,8 @@ impl Controller {
             // The links come from the API: the browser is sent only to the website's own pages.
             anyhow::ensure!(
                 server.is_website_page(&link.link_url) && server.is_website_page(&link.connected_url),
-                "Orbiters answered with a sign-in link that is not on its website."
+                "{}",
+                tr("Orbiters answered with a sign-in link that is not on its website.")
             );
             Ok((callback, link))
         })();

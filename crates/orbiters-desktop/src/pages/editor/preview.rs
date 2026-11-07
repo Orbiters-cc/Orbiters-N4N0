@@ -49,7 +49,7 @@ impl Preview {
     pub fn start(ctx: &egui::Context, inputs: Arc<Vec<Rgba8>>, full: (u32, u32)) -> Self {
         let shared = Arc::new(Shared::default());
         let (s, ctx) = (shared.clone(), ctx.clone());
-        std::thread::Builder::new().name("photo editor preview".into()).spawn(move || run(&s, &ctx, &inputs, full)).expect("thread");
+        std::thread::Builder::new().name("photo editor preview".into()).spawn(move || run(&s, &ctx, &inputs, full)).expect("thread"); // i18n: not shown
         Self { shared, last: None }
     }
 

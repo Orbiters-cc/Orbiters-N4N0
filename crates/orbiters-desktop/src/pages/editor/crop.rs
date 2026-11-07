@@ -14,6 +14,7 @@
 
 use super::Editor;
 use egui::{pos2, vec2, Align2, Color32, CursorIcon, Id, Painter, Pos2, Rect, Sense, Shape, Stroke, Ui, Vec2};
+use orbiters_i18n::{mark, tr};
 use orbiters_ui::anim::{self, Spring};
 use orbiters_ui::photo::geometry::{self, Warp};
 use orbiters_ui::photo::level::{self, Level};
@@ -49,19 +50,20 @@ pub(crate) enum Dial {
 impl Dial {
     pub(crate) const ALL: [Dial; 3] = [Dial::Straighten, Dial::Vertical, Dial::Horizontal];
 
+    /// The dial's name in English, a key: [`tr`] it where it is drawn.
     pub(crate) fn name(self) -> &'static str {
         match self {
-            Dial::Straighten => "Straighten",
-            Dial::Vertical => "Vertical",
-            Dial::Horizontal => "Horizontal",
+            Dial::Straighten => mark("Straighten"),
+            Dial::Vertical => mark("Vertical"),
+            Dial::Horizontal => mark("Horizontal"),
         }
     }
 
     pub(crate) fn about(self) -> &'static str {
         match self {
-            Dial::Straighten => "Straighten: turn the picture a little to level it",
-            Dial::Vertical => "Vertical perspective: lines leaning together upwards, as a building shot from below, made upright",
-            Dial::Horizontal => "Horizontal perspective: a wall seen at an angle turned to face you",
+            Dial::Straighten => mark("Straighten: turn the picture a little to level it"),
+            Dial::Vertical => mark("Vertical perspective: lines leaning together upwards, as a building shot from below, made upright"),
+            Dial::Horizontal => mark("Horizontal perspective: a wall seen at an angle turned to face you"),
         }
     }
 
@@ -647,7 +649,8 @@ fn tool(ui: &mut Ui, id: Id, r: Rect, label: &str, on: bool, enabled: bool, draw
         theme::mix(theme::FG_2, theme::FG, hover)
     };
     draw(p, c, color);
-    let resp = resp.on_hover_text(label);
+    // `label` is the English key: control notes find a control by it, the tip says it in the language.
+    let resp = resp.on_hover_text(tr(label));
     let resp = if enabled { resp.on_hover_cursor(CursorIcon::PointingHand) } else { resp };
     enabled && widgets::activated(&resp)
 }
@@ -693,7 +696,7 @@ fn tools_row(ed: &mut Editor, ui: &mut Ui, id: Id, r: Rect, size: (f32, f32)) {
     let entered = ed.crop.entered.clone().unwrap_or_default();
     let changed = ed.doc.geometry != entered;
     // Cancel, and Reset while the crop is not the picture as it was taken.
-    let b = Button::new("Cancel").size(Size::Sm).variant(Variant::Ghost).id_salt(id.with("cancel"));
+    let b = Button::new(tr("Cancel")).size(Size::Sm).variant(Variant::Ghost).id_salt(id.with("cancel"));
     let cw = b.desired_width(ui);
     if super::super::sharing::pressed(b.show_at(ui, Rect::from_min_size(pos2(r.left(), mid - 16.0), vec2(cw, 32.0)))) {
         ed.doc.geometry = entered.clone();
@@ -704,7 +707,7 @@ fn tools_row(ed: &mut Editor, ui: &mut Ui, id: Id, r: Rect, size: (f32, f32)) {
     let resettable = !g.is_identity() || g.aspect != Aspect::Free;
     let shown = anim::toggle(ui.ctx(), id.with("reset-shown"), resettable, Spring::SNAPPY);
     if shown > 0.01 {
-        let b = Button::new("Reset").icon(icons::ARROW_COUNTER_CLOCKWISE).size(Size::Sm).variant(Variant::Ghost).enabled(resettable).id_salt(id.with("reset"));
+        let b = Button::new(tr("Reset")).icon(icons::ARROW_COUNTER_CLOCKWISE).size(Size::Sm).variant(Variant::Ghost).enabled(resettable).id_salt(id.with("reset"));
         let rw = b.desired_width(ui);
         let mut ru = ui.new_child(egui::UiBuilder::new().max_rect(r).id_salt(id.with("reset-ui")));
         ru.multiply_opacity(shown);
@@ -714,7 +717,7 @@ fn tools_row(ed: &mut Editor, ui: &mut Ui, id: Id, r: Rect, size: (f32, f32)) {
         }
     }
     // Done, lit once something changed.
-    let b = Button::new("Done").icon(icons::CHECK).size(Size::Sm).variant(Variant::Primary).enabled(changed).id_salt(id.with("done"));
+    let b = Button::new(tr("Done")).icon(icons::CHECK).size(Size::Sm).variant(Variant::Primary).enabled(changed).id_salt(id.with("done"));
     let dw = b.desired_width(ui);
     if super::super::sharing::pressed(b.show_at(ui, Rect::from_min_size(pos2(r.right() - dw, mid - 16.0), vec2(dw, 32.0)))) {
         ed.selected = super::Selected::Nothing;
@@ -733,18 +736,18 @@ fn tools_row(ed: &mut Editor, ui: &mut Ui, id: Id, r: Rect, size: (f32, f32)) {
         at
     };
     let flip_r = next(36.0);
-    if tool(ui, id.with("flip"), flip_r, "Flip across", false, true, |p, c, color| widgets::icon(p, c, icons::FLIP_HORIZONTAL, 18.0, color)) {
+    if tool(ui, id.with("flip"), flip_r, mark("Flip across"), false, true, |p, c, color| widgets::icon(p, c, icons::FLIP_HORIZONTAL, 18.0, color)) {
         flip(g, true);
     }
     let turn_r = next(36.0);
-    if tool(ui, id.with("turn"), turn_r, "Rotate a quarter to the left", false, true, |p, c, color| widgets::icon(p, c, icons::ARROW_ARC_LEFT, 18.0, color)) {
+    if tool(ui, id.with("turn"), turn_r, mark("Rotate a quarter to the left"), false, true, |p, c, color| widgets::icon(p, c, icons::ARROW_ARC_LEFT, 18.0, color)) {
         turn(g, true);
     }
     // AUTO: the picture levelled by its lines; lit while it is.
     let auto_r = next(auto_w);
     let label = match found {
-        Some(f) => format!("Level the picture by its lines ({:+.1}°)", auto_straighten(g, &f)),
-        None => "No straight lines to level the picture by".to_string(),
+        Some(f) => tr!("Level the picture by its lines ({angle})", angle = format!("{:+.1}°", auto_straighten(g, &f))),
+        None => tr("No straight lines to level the picture by").to_string(),
     };
     let aid = id.with("auto");
     let resp = ui.interact(auto_r, aid, if found.is_some() { Sense::click() } else { Sense::hover() });
@@ -759,7 +762,7 @@ fn tools_row(ed: &mut Editor, ui: &mut Ui, id: Id, r: Rect, size: (f32, f32)) {
             p.rect_stroke(pill, theme::radius(12.0), Stroke::new(1.2, theme::alpha(if found.is_some() { theme::FG_2 } else { theme::FG_4 }, 1.0 - lit)), egui::StrokeKind::Inside);
         }
         let color = theme::mix(if found.is_some() { theme::FG } else { theme::FG_4 }, theme::ON_ACCENT, lit);
-        widgets::text(p, pill.center(), Align2::CENTER_CENTER, &Txt::new("AUTO", 11.5).weight(weight::BOLD).tracking(0.06).color(color));
+        widgets::text(p, pill.center(), Align2::CENTER_CENTER, &Txt::new(tr("AUTO"), 11.5).weight(weight::BOLD).tracking(0.06).color(color));
     }
     let resp = resp.on_hover_text(label);
     let resp = if found.is_some() { resp.on_hover_cursor(CursorIcon::PointingHand) } else { resp };
@@ -772,19 +775,19 @@ fn tools_row(ed: &mut Editor, ui: &mut Ui, id: Id, r: Rect, size: (f32, f32)) {
     }
     let aspect_r = next(36.0);
     let shapes = ed.crop.shapes;
-    if tool(ui, id.with("aspect"), aspect_r, "Shapes", shapes || g.aspect != Aspect::Free, true, aspect_icon) {
+    if tool(ui, id.with("aspect"), aspect_r, mark("Shapes"), shapes || g.aspect != Aspect::Free, true, aspect_icon) {
         ed.crop.shapes = !shapes;
     }
     let more_r = next(36.0);
     let pasted = COPIED.lock().ok().and_then(|c| c.clone());
     let items = [
-        Item::new("Rotate a quarter to the right").icon(icons::ARROW_ARC_RIGHT),
-        Item::new("Flip upside down").icon(icons::FLIP_VERTICAL),
-        Item::new("Copy this crop").icon(icons::COPY),
-        Item::new(if pasted.is_some() { "Paste the crop copied" } else { "Paste a crop (copy one first)" }).icon(icons::COPY_SIMPLE),
-        Item::new("Undo every change of the crop").icon(icons::ARROW_U_UP_LEFT),
+        Item::new(tr("Rotate a quarter to the right")).icon(icons::ARROW_ARC_RIGHT),
+        Item::new(tr("Flip upside down")).icon(icons::FLIP_VERTICAL),
+        Item::new(tr("Copy this crop")).icon(icons::COPY),
+        Item::new(if pasted.is_some() { tr("Paste the crop copied") } else { tr("Paste a crop (copy one first)") }).icon(icons::COPY_SIMPLE),
+        Item::new(tr("Undo every change of the crop")).icon(icons::ARROW_U_UP_LEFT),
     ];
-    match popup::menu_button(ui, id.with("more"), more_r, icons::DOTS_THREE, "More", &items) {
+    match popup::menu_button(ui, id.with("more"), more_r, icons::DOTS_THREE, tr("More"), &items) {
         Some(0) => turn(g, false),
         Some(1) => flip(g, false),
         Some(2) => {
@@ -846,7 +849,7 @@ fn dials(ed: &mut Editor, ui: &mut Ui, id: Id, r: Rect) {
             let color = if value.abs() >= 0.05 { theme::ACCENT } else { theme::mix(theme::FG_2, theme::FG, on.max(hover)) };
             dial_icon(p, c, *dial, color);
         }
-        let resp = resp.on_hover_text(dial.about()).on_hover_cursor(CursorIcon::PointingHand);
+        let resp = resp.on_hover_text(tr(dial.about())).on_hover_cursor(CursorIcon::PointingHand);
         if widgets::activated(&resp) {
             if chosen {
                 // Pressed again: to zero, and back to what it was by a press after.
@@ -870,7 +873,7 @@ fn dials(ed: &mut Editor, ui: &mut Ui, id: Id, r: Rect) {
     }
     // The chosen dial's name, then its ruler.
     let name_y = row_y + 37.0;
-    widgets::text(ui.painter(), pos2(r.center().x, name_y), Align2::CENTER_CENTER, &Txt::caps(st.dial.name()));
+    widgets::text(ui.painter(), pos2(r.center().x, name_y), Align2::CENTER_CENTER, &Txt::caps(tr(st.dial.name())));
     let ruler_r = Rect::from_center_size(pos2(r.center().x, r.bottom() - 22.0), vec2(r.width().min(460.0), 40.0));
     let dial = st.dial;
     let value = dial.value_mut(g);
@@ -977,7 +980,7 @@ fn ruler(ui: &mut Ui, st: &mut Ruler, id: Id, r: Rect, value: &mut f32) {
     if resp.hovered() || resp.dragged() {
         ctx.set_cursor_icon(if resp.dragged() { CursorIcon::Grabbing } else { CursorIcon::ResizeHorizontal });
     }
-    widgets::note_control(&ctx, "Ruler", r, true);
+    widgets::note_control(&ctx, "Ruler", r, true); // i18n: not shown
 }
 
 /// Whether the shapes show lying: the crop's shape's way, else as last chosen, else the picture's.
@@ -1004,7 +1007,7 @@ fn shapes(ed: &mut Editor, ui: &mut Ui, id: Id, r: Rect, size: (f32, f32)) {
     let row_y = r.top() + 24.0;
     for (i, l) in [false, true].into_iter().enumerate() {
         let b = Rect::from_center_size(pos2(r.center().x + (i as f32 - 0.5) * 48.0, row_y), vec2(40.0, 34.0));
-        let label = if l { "Landscape" } else { "Portrait" };
+        let label = if l { mark("Landscape") } else { mark("Portrait") };
         let on = landscape == l;
         if tool(ui, id.with(("orientation", i)), b, label, on, true, |p, c, color| orientation_icon(p, c, l, color)) {
             set_landscape(st, g, l, tw, th);

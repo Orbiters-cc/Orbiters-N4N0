@@ -7,6 +7,7 @@
 use super::{glyph, layers, tint, widgets as w, Editor, Selected};
 use crate::pages::Job;
 use egui::{pos2, vec2, Align2, Color32, CursorIcon, Id, Rect, Sense, Ui, UiBuilder};
+use orbiters_i18n::{mark, tr};
 use orbiters_ui::photo::text::FontInfo;
 use orbiters_ui::photo::{self, render, Aspect, Blur, BlurKind, Channel, Effect, Focus, Kind, Mask, TextStyle};
 use orbiters_ui::theme::{self, weight, Txt};
@@ -99,18 +100,18 @@ fn paragraph(ui: &mut Ui, text: &str) {
 
 fn nothing(ed: &mut Editor, ui: &mut Ui) {
     if ed.live.is_some() {
-        header(ui, icons::SLIDERS_HORIZONTAL, theme::ACCENT, "Edit in 3D", "The layers go on every frame while you move around. Save picture writes this view and its edited copy, which opens again here.");
+        header(ui, icons::SLIDERS_HORIZONTAL, theme::ACCENT, tr("Edit in 3D"), tr("The layers go on every frame while you move around. Save picture writes this view and its edited copy, which opens again here."));
     } else {
-        header(ui, icons::SLIDERS_HORIZONTAL, theme::ACCENT, "Edit a copy", "The picture itself is never changed: saving writes a copy beside it, with its edit, which opens again here.");
+        header(ui, icons::SLIDERS_HORIZONTAL, theme::ACCENT, tr("Edit a copy"), tr("The picture itself is never changed: saving writes a copy beside it, with its edit, which opens again here."));
     }
-    let size = ed.loaded.as_ref().map(|l| format!("{} × {} pixels", l.full.0, l.full.1)).unwrap_or_else(|| "Reading the picture…".into());
+    let size = ed.loaded.as_ref().map(|l| tr!("{width} × {height} pixels", width = l.full.0, height = l.full.1)).unwrap_or_else(|| tr("Reading the picture…").to_string());
     paragraph(ui, &size);
     if !ed.doc.sources.is_empty() {
         ui.add_space(8.0);
         let names: Vec<String> = ed.doc.sources.iter().rev().map(|s| layers::source_name(&s.name)).collect();
-        paragraph(ui, &format!("A multi-layer picture from VRChat's camera: {}. Each has its own effects, under the whole picture's.", names.join(", ")));
+        paragraph(ui, &tr!("A multi-layer picture from VRChat's camera: {names}. Each has its own effects, under the whole picture's.", names = layers::list(&names)));
     }
-    w::label(ui, "Start with");
+    w::label(ui, tr("Start with"));
     let quick = [Kind::Light, Kind::Color, Kind::Comic, Kind::Text];
     let widths: Vec<f32> = quick.iter().map(|k| Chip::new(k.name()).icon(glyph(*k)).width(ui)).collect();
     let (pos, h) = widgets::flow(&widths, ui.available_width(), widgets::CHIP_H, 8.0);
@@ -118,7 +119,7 @@ fn nothing(ed: &mut Editor, ui: &mut Ui) {
     let title = ed.title.clone();
     for ((k, p), cw) in quick.iter().zip(pos).zip(widths) {
         let cr = Rect::from_min_size(r.min + p, vec2(cw, widgets::CHIP_H));
-        if Chip::new(k.name()).icon(glyph(*k)).id_salt(("quick", k.name())).show_at(ui, cr).pressed {
+        if Chip::new(k.name()).icon(glyph(*k)).id_salt(("quick", glyph(*k))).show_at(ui, cr).pressed {
             layers::add(ed, *k, &title);
         }
     }
@@ -126,9 +127,9 @@ fn nothing(ed: &mut Editor, ui: &mut Ui) {
     paragraph(
         ui,
         if cfg!(target_os = "macos") {
-            "Cmd+Z undoes, Cmd+Shift+Z redoes, Delete removes the chosen layer. Hold the eye at the top to see the picture as it was."
+            tr("Cmd+Z undoes, Cmd+Shift+Z redoes, Delete removes the chosen layer. Hold the eye at the top to see the picture as it was.")
         } else {
-            "Ctrl+Z undoes, Ctrl+Shift+Z redoes, Delete removes the chosen layer. Hold the eye at the top to see the picture as it was."
+            tr("Ctrl+Z undoes, Ctrl+Shift+Z redoes, Delete removes the chosen layer. Hold the eye at the top to see the picture as it was.")
         },
     );
 }
@@ -138,11 +139,11 @@ fn crop(ed: &mut Editor, ui: &mut Ui) {
         ui,
         icons::CROP,
         theme::ACCENT,
-        "Crop and rotate",
+        tr("Crop and rotate"),
         if cfg!(target_os = "macos") {
-            "Drag the frame's corners or edges, or the picture under it; a pinch or two fingers zoom. The dials under the picture straighten it and set its perspective upright; AUTO levels it by its own lines."
+            tr("Drag the frame's corners or edges, or the picture under it; a pinch or two fingers zoom. The dials under the picture straighten it and set its perspective upright; AUTO levels it by its own lines.")
         } else {
-            "Drag the frame's corners or edges, or the picture under it; the wheel zooms. The dials under the picture straighten it and set its perspective upright; AUTO levels it by its own lines."
+            tr("Drag the frame's corners or edges, or the picture under it; the wheel zooms. The dials under the picture straighten it and set its perspective upright; AUTO levels it by its own lines.")
         },
     );
     let full = ed.loaded.as_ref().map_or((16, 9), |l| l.full);
@@ -150,9 +151,9 @@ fn crop(ed: &mut Editor, ui: &mut Ui) {
     let (tw, th) = photo::geometry::turned_size(full.0, full.1, g.turns);
     let (tw, th) = (tw as f32, th as f32);
     let original = tw / th.max(1.0);
-    w::label(ui, "Shape");
+    w::label(ui, tr("Shape"));
     let mut landscape = super::crop::landscape(&ed.crop, g, original);
-    let options = [SegOption::new(false, "Portrait"), SegOption::new(true, "Landscape")];
+    let options = [SegOption::new(false, tr("Portrait")), SegOption::new(true, tr("Landscape"))];
     if widgets::segmented(ui, "crop-orientation", &mut landscape, &options, true) {
         super::crop::set_landscape(&mut ed.crop, g, landscape, tw, th);
     }
@@ -161,29 +162,29 @@ fn crop(ed: &mut Editor, ui: &mut Ui) {
     let widths: Vec<f32> = list.iter().map(|a| Chip::new(a.name()).selected(g.aspect.preset() == a.preset()).width(ui)).collect();
     let (pos, h) = widgets::flow(&widths, ui.available_width(), widgets::CHIP_H, 8.0);
     let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), h), Sense::hover());
-    for ((a, p), cw) in list.iter().zip(pos).zip(widths) {
+    for (n, ((a, p), cw)) in list.iter().zip(pos).zip(widths).enumerate() {
         let cr = Rect::from_min_size(r.min + p, vec2(cw, widgets::CHIP_H));
-        if Chip::new(a.name()).selected(g.aspect.preset() == a.preset()).id_salt(("aspect", a.name())).show_at(ui, cr).pressed {
+        if Chip::new(a.name()).selected(g.aspect.preset() == a.preset()).id_salt(("aspect", n)).show_at(ui, cr).pressed {
             super::crop::set_aspect(g, *a, tw, th);
         }
     }
-    w::label(ui, "Straighten and perspective");
+    w::label(ui, tr("Straighten and perspective"));
     for dial in super::crop::Dial::ALL {
-        if w::slider(ui, ("crop-dial", dial.name()), dial.name(), dial.value_mut(g), -45.0..=45.0, 0.0, |v| format!("{v:+.1}°")) {
+        if w::slider(ui, ("crop-dial", dial.name()), tr(dial.name()), dial.value_mut(g), -45.0..=45.0, 0.0, |v| format!("{v:+.1}°")) {
             ed.crop.dial = dial;
         }
     }
     ui.add_space(6.0);
     let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), 40.0), Sense::hover());
     let buttons = [
-        (icons::ARROW_ARC_LEFT, "Rotate a quarter to the left"),
-        (icons::ARROW_ARC_RIGHT, "Rotate a quarter to the right"),
-        (icons::FLIP_HORIZONTAL, "Flip across"),
-        (icons::FLIP_VERTICAL, "Flip upside down"),
+        (icons::ARROW_ARC_LEFT, mark("Rotate a quarter to the left")),
+        (icons::ARROW_ARC_RIGHT, mark("Rotate a quarter to the right")),
+        (icons::FLIP_HORIZONTAL, mark("Flip across")),
+        (icons::FLIP_VERTICAL, mark("Flip upside down")),
     ];
     for (i, (glyph, label)) in buttons.iter().enumerate() {
         let r = Rect::from_min_size(pos2(row.left() + i as f32 * 48.0, row.top()), vec2(40.0, 40.0));
-        if widgets::activated(&IconButton::new(glyph, label).size(40.0, 18.0).backdrop(theme::white(0.05)).show_at(ui, r)) {
+        if widgets::activated(&IconButton::new(glyph, tr(label)).size(40.0, 18.0).backdrop(theme::white(0.05)).id_salt(("crop-turn", i)).show_at(ui, r)) {
             match i {
                 0 | 1 => super::crop::turn(g, i == 0),
                 2 => super::crop::flip(g, true),
@@ -192,7 +193,7 @@ fn crop(ed: &mut Editor, ui: &mut Ui) {
         }
     }
     ui.add_space(12.0);
-    let b = Button::new("Reset").icon(icons::ARROW_COUNTER_CLOCKWISE).size(Size::Sm).enabled(!g.is_identity() || g.aspect != Aspect::Free).id_salt("crop-reset");
+    let b = Button::new(tr("Reset")).icon(icons::ARROW_COUNTER_CLOCKWISE).size(Size::Sm).enabled(!g.is_identity() || g.aspect != Aspect::Free).id_salt("crop-reset");
     let bw = b.desired_width(ui);
     let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), 32.0), Sense::hover());
     if super::super::sharing::pressed(b.show_at(ui, Rect::from_min_size(r.min, vec2(bw, 32.0)))) {
@@ -200,24 +201,24 @@ fn crop(ed: &mut Editor, ui: &mut Ui) {
     }
     ui.add_space(12.0);
     let (ow, oh) = g.output_size(full.0, full.1);
-    paragraph(ui, &format!("The copy will be {ow} × {oh} pixels."));
+    paragraph(ui, &tr!("The copy will be {width} × {height} pixels.", width = ow, height = oh));
 }
 
 fn source(ed: &mut Editor, ui: &mut Ui, i: usize) {
     let Some(s) = ed.doc.sources.get_mut(i) else { return };
     let name = layers::source_name(&s.name);
     let about = match s.name.to_ascii_lowercase().as_str() {
-        "environment" => "The world, as VRChat's camera saved it apart from the people.",
-        "player" | "players" | "users" => "The people, transparent around them: blur the world and keep them sharp, or give them the comic look alone.",
-        "ui" => "The interface VRChat drew over the picture, transparent elsewhere.",
-        _ => "The picture VRChat saved with its layers, all of them in one.",
+        "environment" => tr("The world, as VRChat's camera saved it apart from the people."),
+        "player" | "players" | "users" => tr("The people, transparent around them: blur the world and keep them sharp, or give them the comic look alone."),
+        "ui" => tr("The interface VRChat drew over the picture, transparent elsewhere."),
+        _ => tr("The picture VRChat saved with its layers, all of them in one."),
     };
     header(ui, layers::source_glyph(&s.name), theme::FG_2, &name, about);
-    w::switch(ui, ("source-visible", i), "Shown", &mut s.visible);
+    w::switch(ui, ("source-visible", i), tr("Shown"), &mut s.visible);
     ui.add_space(4.0);
-    w::slider(ui, ("source-opacity", i), "Opacity", &mut s.opacity, 0.0..=1.0, 1.0, w::percent);
+    w::slider(ui, ("source-opacity", i), tr("Opacity"), &mut s.opacity, 0.0..=1.0, 1.0, w::percent);
     ui.add_space(12.0);
-    let b = Button::new("Add an effect to it").icon(icons::PLUS).size(Size::Sm).id_salt(("source-add", i));
+    let b = Button::new(tr("Add an effect to it")).icon(icons::PLUS).size(Size::Sm).id_salt(("source-add", i));
     let bw = b.desired_width(ui);
     let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), 32.0), Sense::hover());
     if super::super::sharing::pressed(b.show_at(ui, Rect::from_min_size(r.min, vec2(bw, 32.0)))) {
@@ -236,10 +237,10 @@ fn layer(ed: &mut Editor, ui: &mut Ui) {
     header(ui, glyph(kind), tint(kind), kind.name(), kind.about());
     // Move, copy, remove.
     let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), 36.0), Sense::hover());
-    let acts = [(icons::ARROW_UP, "Move up"), (icons::ARROW_DOWN, "Move down"), (icons::COPY, "Duplicate"), (icons::TRASH, "Remove")];
+    let acts = [(icons::ARROW_UP, mark("Move up")), (icons::ARROW_DOWN, mark("Move down")), (icons::COPY, mark("Duplicate")), (icons::TRASH, mark("Remove"))];
     for (i, (glyph, label)) in acts.iter().enumerate() {
         let r = Rect::from_min_size(pos2(row.left() + i as f32 * 44.0, row.top()), vec2(36.0, 36.0));
-        let mut b = IconButton::new(glyph, label).size(36.0, 16.0).backdrop(theme::white(0.05));
+        let mut b = IconButton::new(glyph, tr(label)).size(36.0, 16.0).backdrop(theme::white(0.05)).id_salt(("layer-act", i));
         if i == 3 {
             b = b.danger();
         }
@@ -259,29 +260,29 @@ fn layer(ed: &mut Editor, ui: &mut Ui) {
     let selected = ed.selected;
     let Some(l) = super::find_mut(&mut ed.doc, selected) else { return };
     let lid = l.id;
-    w::slider(ui, ("opacity", lid), "Opacity", &mut l.opacity, 0.0..=1.0, 1.0, w::percent);
+    w::slider(ui, ("opacity", lid), tr("Opacity"), &mut l.opacity, 0.0..=1.0, 1.0, w::percent);
     match &mut l.effect {
         Effect::Light(v) => {
-            w::label(ui, "Light");
-            w::slider_look(ui, ("exposure", lid), "Exposure", &mut v.exposure, -4.0..=4.0, 0.0, |v| format!("{v:+.2} EV"), w::Look::Exposure);
-            w::slider_look(ui, ("brightness", lid), "Brightness", &mut v.brightness, -1.0..=1.0, 0.0, w::signed, w::Look::Brightness);
-            w::slider_look(ui, ("contrast", lid), "Contrast", &mut v.contrast, -1.0..=1.0, 0.0, w::signed, w::Look::Contrast);
-            w::slider_look(ui, ("highlights", lid), "Highlights", &mut v.highlights, -1.0..=1.0, 0.0, w::signed, w::Look::Highlights);
-            w::slider_look(ui, ("shadows", lid), "Shadows", &mut v.shadows, -1.0..=1.0, 0.0, w::signed, w::Look::Shadows);
-            w::slider_look(ui, ("black", lid), "Black point", &mut v.black_point, -0.25..=0.5, 0.0, w::signed, w::Look::BlackPoint);
+            w::label(ui, tr("Light"));
+            w::slider_look(ui, ("exposure", lid), tr("Exposure"), &mut v.exposure, -4.0..=4.0, 0.0, |v| format!("{v:+.2} EV"), w::Look::Exposure);
+            w::slider_look(ui, ("brightness", lid), tr("Brightness"), &mut v.brightness, -1.0..=1.0, 0.0, w::signed, w::Look::Brightness);
+            w::slider_look(ui, ("contrast", lid), tr("Contrast"), &mut v.contrast, -1.0..=1.0, 0.0, w::signed, w::Look::Contrast);
+            w::slider_look(ui, ("highlights", lid), tr("Highlights"), &mut v.highlights, -1.0..=1.0, 0.0, w::signed, w::Look::Highlights);
+            w::slider_look(ui, ("shadows", lid), tr("Shadows"), &mut v.shadows, -1.0..=1.0, 0.0, w::signed, w::Look::Shadows);
+            w::slider_look(ui, ("black", lid), tr("Black point"), &mut v.black_point, -0.25..=0.5, 0.0, w::signed, w::Look::BlackPoint);
         }
         Effect::Color(v) => {
-            w::label(ui, "White balance");
-            w::slider_look(ui, ("temperature", lid), "Temperature", &mut v.temperature, -1.0..=1.0, 0.0, w::signed, w::Look::Temperature);
-            w::slider_look(ui, ("tint", lid), "Tint", &mut v.tint, -1.0..=1.0, 0.0, w::signed, w::Look::Tint);
-            w::label(ui, "Colour");
-            w::slider_look(ui, ("saturation", lid), "Saturation", &mut v.saturation, -1.0..=1.0, 0.0, w::signed, w::Look::Saturation);
-            w::slider_look(ui, ("vibrance", lid), "Vibrance", &mut v.vibrance, -1.0..=1.0, 0.0, w::signed, w::Look::Vibrance);
-            w::slider_look(ui, ("hue", lid), "Hue", &mut v.hue, -180.0..=180.0, 0.0, |v| format!("{v:+.0}°"), w::Look::Hue);
+            w::label(ui, tr("White balance"));
+            w::slider_look(ui, ("temperature", lid), tr("Temperature"), &mut v.temperature, -1.0..=1.0, 0.0, w::signed, w::Look::Temperature);
+            w::slider_look(ui, ("tint", lid), tr("Tint"), &mut v.tint, -1.0..=1.0, 0.0, w::signed, w::Look::Tint);
+            w::label(ui, tr("Colour"));
+            w::slider_look(ui, ("saturation", lid), tr("Saturation"), &mut v.saturation, -1.0..=1.0, 0.0, w::signed, w::Look::Saturation);
+            w::slider_look(ui, ("vibrance", lid), tr("Vibrance"), &mut v.vibrance, -1.0..=1.0, 0.0, w::signed, w::Look::Vibrance);
+            w::slider_look(ui, ("hue", lid), tr("Hue"), &mut v.hue, -180.0..=180.0, 0.0, |v| format!("{v:+.0}°"), w::Look::Hue);
         }
         Effect::Curves(c) => {
             ui.add_space(8.0);
-            let options = [SegOption::new(Channel::Rgb, "RGB"), SegOption::new(Channel::Red, "Red"), SegOption::new(Channel::Green, "Green"), SegOption::new(Channel::Blue, "Blue")];
+            let options = [SegOption::new(Channel::Rgb, tr("RGB")), SegOption::new(Channel::Red, tr("Red")), SegOption::new(Channel::Green, tr("Green")), SegOption::new(Channel::Blue, tr("Blue"))];
             widgets::segmented(ui, ("curve-channel", lid), &mut ed.channel, &options, true);
             ui.add_space(10.0);
             let color = match ed.channel {
@@ -292,9 +293,9 @@ fn layer(ed: &mut Editor, ui: &mut Ui) {
             };
             curve_editor(ui, id.with(("curve", lid, format!("{:?}", ed.channel))), c.points_mut(ed.channel), color, &histogram);
             ui.add_space(8.0);
-            paragraph(ui, "Drag a point; press on the curve to add one; double-click a point or drag it out to remove it.");
+            paragraph(ui, tr("Drag a point; press on the curve to add one; double-click a point or drag it out to remove it."));
             ui.add_space(8.0);
-            let b = Button::new("Straighten this curve").icon(icons::ARROW_COUNTER_CLOCKWISE).size(Size::Sm).id_salt(("curve-reset", lid));
+            let b = Button::new(tr("Straighten this curve")).icon(icons::ARROW_COUNTER_CLOCKWISE).size(Size::Sm).id_salt(("curve-reset", lid));
             let bw = b.desired_width(ui);
             let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), 32.0), Sense::hover());
             if super::super::sharing::pressed(b.show_at(ui, Rect::from_min_size(r.min, vec2(bw, 32.0)))) {
@@ -302,39 +303,39 @@ fn layer(ed: &mut Editor, ui: &mut Ui) {
             }
         }
         Effect::Vignette(v) => {
-            w::label(ui, "Vignette");
-            w::slider_look(ui, ("amount", lid), "Amount", &mut v.amount, -1.0..=1.0, 0.6, w::signed, w::Look::Vignette);
-            w::slider(ui, ("size", lid), "Size", &mut v.size, 0.3..=2.0, 1.0, w::percent);
-            w::slider(ui, ("feather", lid), "Softness", &mut v.feather, 0.0..=1.0, 0.5, w::percent);
+            w::label(ui, tr("Vignette"));
+            w::slider_look(ui, ("amount", lid), tr("Amount"), &mut v.amount, -1.0..=1.0, 0.6, w::signed, w::Look::Vignette);
+            w::slider(ui, ("size", lid), tr("Size"), &mut v.size, 0.3..=2.0, 1.0, w::percent);
+            w::slider(ui, ("feather", lid), tr("Softness"), &mut v.feather, 0.0..=1.0, 0.5, w::percent);
             ui.add_space(4.0);
-            paragraph(ui, "Below zero it lightens the edges. Drag its centre on the picture.");
+            paragraph(ui, tr("Below zero it lightens the edges. Drag its centre on the picture."));
             center_button(ui, ("vig-centre", lid), &mut v.center);
         }
         Effect::Aberration(a) => {
-            w::label(ui, "Chromatic aberration");
-            w::slider_look(ui, ("amount", lid), "Amount", &mut a.amount, 0.0..=3.0, 1.0, |v| format!("{v:.2}"), w::Look::Aberration);
-            paragraph(ui, "Red and blue part away from the centre, more towards the edges. Drag the centre on the picture.");
+            w::label(ui, tr("Chromatic aberration"));
+            w::slider_look(ui, ("amount", lid), tr("Amount"), &mut a.amount, 0.0..=3.0, 1.0, |v| format!("{v:.2}"), w::Look::Aberration);
+            paragraph(ui, tr("Red and blue part away from the centre, more towards the edges. Drag the centre on the picture."));
             center_button(ui, ("ab-centre", lid), &mut a.center);
         }
         Effect::Comic(c) => {
-            w::label(ui, "Comic");
+            w::label(ui, tr("Comic"));
             let mut tones = c.tones as f32;
-            if w::slider(ui, ("tones", lid), "Tones", &mut tones, photo::Comic::MIN_TONES as f32..=photo::Comic::MAX_TONES as f32, 4.0, |v| format!("{}", v.round() as u32)) {
+            if w::slider(ui, ("tones", lid), tr("Tones"), &mut tones, photo::Comic::MIN_TONES as f32..=photo::Comic::MAX_TONES as f32, 4.0, |v| format!("{}", v.round() as u32)) {
                 c.tones = tones.round() as u32;
             }
-            w::slider_look(ui, ("ink", lid), "Ink lines", &mut c.ink, 0.0..=1.0, 0.6, w::percent, w::Look::Ink);
-            w::switch(ui, ("dots", lid), "Print dots", &mut c.dots);
+            w::slider_look(ui, ("ink", lid), tr("Ink lines"), &mut c.ink, 0.0..=1.0, 0.6, w::percent, w::Look::Ink);
+            w::switch(ui, ("dots", lid), tr("Print dots"), &mut c.dots);
             if c.dots {
-                w::slider(ui, ("dot-size", lid), "Dot size", &mut c.dot_size, 0.0..=1.0, 0.3, w::percent);
+                w::slider(ui, ("dot-size", lid), tr("Dot size"), &mut c.dot_size, 0.0..=1.0, 0.3, w::percent);
             }
             ui.add_space(4.0);
-            paragraph(ui, "The Toolkit photoshoot's comic look. On a VRChat layer (the people), its outline is inked too.");
+            paragraph(ui, tr("The Toolkit photoshoot's comic look. On a VRChat layer (the people), its outline is inked too."));
         }
         Effect::Blur(b) => {
             // By depth: on a 3D view's splats (Edit in 3D, or an edit saved there).
             if ed.live.is_some() || b.kind == BlurKind::Depth {
                 let mut by_depth = b.kind == BlurKind::Depth;
-                if w::switch(ui, ("blur-depth", lid), "Depth of field", &mut by_depth) {
+                if w::switch(ui, ("blur-depth", lid), tr("Depth of field"), &mut by_depth) {
                     b.kind = if by_depth { BlurKind::Depth } else { BlurKind::Gaussian };
                 }
             }
@@ -344,7 +345,7 @@ fn layer(ed: &mut Editor, ui: &mut Ui) {
                 return;
             }
             ui.add_space(8.0);
-            let options = [SegOption::new(BlurKind::Gaussian, "Gaussian"), SegOption::new(BlurKind::Lens, "Lens"), SegOption::new(BlurKind::Directional, "Directional")];
+            let options = [SegOption::new(BlurKind::Gaussian, tr("Gaussian")), SegOption::new(BlurKind::Lens, tr("Lens")), SegOption::new(BlurKind::Directional, tr("Directional"))];
             widgets::segmented(ui, ("blur-kind", lid), &mut b.kind, &options, true);
             ui.add_space(8.0);
             let max = match b.kind {
@@ -355,24 +356,24 @@ fn layer(ed: &mut Editor, ui: &mut Ui) {
             };
             b.radius = b.radius.min(max);
             let label = match b.kind {
-                BlurKind::Directional => "Length",
-                _ => "Radius",
+                BlurKind::Directional => tr("Length"),
+                _ => tr("Radius"),
             };
             w::slider(ui, ("radius", lid), label, &mut b.radius, 0.0..=max, 0.01, |v| format!("{:.1} %", v * 100.0));
             match b.kind {
                 BlurKind::Lens => {
-                    w::slider(ui, ("bokeh", lid), "Bokeh", &mut b.bokeh, 0.0..=1.0, 0.5, w::percent);
+                    w::slider(ui, ("bokeh", lid), tr("Bokeh"), &mut b.bokeh, 0.0..=1.0, 0.5, w::percent);
                 }
                 BlurKind::Directional => {
-                    w::slider(ui, ("angle", lid), "Angle", &mut b.angle, -90.0..=90.0, 0.0, |v| format!("{v:+.0}°"));
+                    w::slider(ui, ("angle", lid), tr("Angle"), &mut b.angle, -90.0..=90.0, 0.0, |v| format!("{v:+.0}°"));
                 }
                 BlurKind::Gaussian | BlurKind::Depth => {}
             }
             ui.add_space(4.0);
-            paragraph(ui, "Keep part of the picture sharp with Where: a circle (inverted) or a band, like a tilt-shift.");
+            paragraph(ui, tr("Keep part of the picture sharp with Where: a circle (inverted) or a band, like a tilt-shift."));
         }
         Effect::Text(t) => {
-            w::label(ui, "Words");
+            w::label(ui, tr("Words"));
             let edit = egui::TextEdit::multiline(&mut t.value)
                 .id(id.with(("text", lid)))
                 .desired_rows(2)
@@ -380,15 +381,15 @@ fn layer(ed: &mut Editor, ui: &mut Ui) {
                 .font(theme::font(14.0, weight::MEDIUM))
                 .text_color(theme::FG)
                 .margin(egui::Margin::symmetric(10, 8))
-                .hint_text(egui::RichText::new("Type something…").color(theme::FG_4));
+                .hint_text(egui::RichText::new(tr("Type something…")).color(theme::FG_4));
             egui::Frame::NONE.fill(theme::INK_750).corner_radius(theme::radius(12.0)).show(ui, |ui| {
                 ui.add(edit);
             });
-            w::slider(ui, ("text-size", lid), "Size", &mut t.size, photo::Text::MIN_SIZE..=photo::Text::MAX_SIZE, 0.13, |v| format!("{:.0} %", v * 100.0));
-            w::label(ui, "Style");
+            w::slider(ui, ("text-size", lid), tr("Size"), &mut t.size, photo::Text::MIN_SIZE..=photo::Text::MAX_SIZE, 0.13, |v| format!("{:.0} %", v * 100.0));
+            w::label(ui, tr("Style"));
             let options: Vec<SegOption<TextStyle>> = TextStyle::ALL.iter().map(|s| SegOption::new(*s, s.name())).collect();
             widgets::segmented(ui, ("text-style", lid), &mut t.style, &options, true);
-            w::label(ui, "Colour");
+            w::label(ui, tr("Colour"));
             const COLORS: [[u8; 3]; 12] = [
                 [255, 255, 255],
                 [16, 16, 20],
@@ -406,11 +407,11 @@ fn layer(ed: &mut Editor, ui: &mut Ui) {
             if let Some(c) = w::swatches(ui, id.with(("swatches", lid)), &COLORS, t.color) {
                 t.color = c;
             }
-            w::label(ui, "Font");
+            w::label(ui, tr("Font"));
             ed.fonts.ensure(&ctx);
             font_list(&mut ed.fonts, ui, id.with(("fonts", lid)), &mut t.font);
             ui.add_space(6.0);
-            paragraph(ui, "Drag the text on the picture to move it.");
+            paragraph(ui, tr("Drag the text on the picture to move it."));
         }
     }
     if kind != Kind::Text {
@@ -421,7 +422,7 @@ fn layer(ed: &mut Editor, ui: &mut Ui) {
 /// A distance in metres, as the depth blur shows it.
 pub(super) fn distance_text(m: f32) -> String {
     if m >= 0.9 * orbiters_reconstruct::dof::FAR_FOCUS {
-        "far away".into()
+        tr("far away").to_string()
     } else if m < 1.0 {
         format!("{:.0} cm", m * 100.0)
     } else if m < 10.0 {
@@ -435,10 +436,10 @@ pub(super) fn distance_text(m: f32) -> String {
 /// shows in front of the focus and behind it. Drawn on the splats (Edit in 3D): it has no Where.
 fn depth(ui: &mut Ui, lid: u32, b: &mut Blur, mut live: Option<&mut super::Live>) {
     if live.is_none() {
-        paragraph(ui, "Depth of field blurs a 3D view's splats by how far they are from the focus: it shows and saves in Edit in 3D. A picture has no depth, so here it changes nothing.");
+        paragraph(ui, tr("Depth of field blurs a 3D view's splats by how far they are from the focus: it shows and saves in Edit in 3D. A picture has no depth, so here it changes nothing."));
         ui.add_space(6.0);
     }
-    w::label(ui, "Focus");
+    w::label(ui, tr("Focus"));
     let options = [SegOption::new(Focus::Auto, Focus::Auto.name()), SegOption::new(Focus::Manual, Focus::Manual.name())];
     widgets::segmented(ui, ("dof-focus", lid), &mut b.focus, &options, true);
     ui.add_space(6.0);
@@ -446,20 +447,20 @@ fn depth(ui: &mut Ui, lid: u32, b: &mut Blur, mut live: Option<&mut super::Live>
     let mut setting = false;
     match b.focus {
         Focus::Auto => {
-            paragraph(ui, "Drag the focus dot on the picture: what lies under it stays sharp, and the focus follows it as you move around.");
+            paragraph(ui, tr("Drag the focus dot on the picture: what lies under it stays sharp, and the focus follows it as you move around."));
             if let Some(f) = measured {
                 ui.add_space(4.0);
-                paragraph(ui, &format!("Focused at {}.", distance_text(f)));
+                paragraph(ui, &tr!("Focused at {distance}.", distance = distance_text(f)));
             }
             ui.add_space(8.0);
             let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), 32.0), Sense::hover());
-            let centre = Button::new("Centre it").icon(icons::CROSSHAIR).size(Size::Sm).enabled(b.point != [0.5, 0.5]).id_salt(("dof-centre", lid));
+            let centre = Button::new(tr("Centre it")).icon(icons::CROSSHAIR).size(Size::Sm).enabled(b.point != [0.5, 0.5]).id_salt(("dof-centre", lid));
             let cw = centre.desired_width(ui);
             if super::super::sharing::pressed(centre.show_at(ui, Rect::from_min_size(row.min, vec2(cw, 32.0)))) {
                 b.point = [0.5, 0.5];
             }
             if let Some(f) = measured.filter(|f| *f < 0.9 * orbiters_reconstruct::dof::FAR_FOCUS) {
-                let keep = Button::new("Keep this distance").size(Size::Sm).id_salt(("dof-keep", lid));
+                let keep = Button::new(tr("Keep this distance")).size(Size::Sm).id_salt(("dof-keep", lid));
                 let kw = keep.desired_width(ui);
                 if super::super::sharing::pressed(keep.show_at(ui, Rect::from_min_size(row.min + vec2(cw + 8.0, 0.0), vec2(kw, 32.0)))) {
                     b.focus = Focus::Manual;
@@ -471,30 +472,30 @@ fn depth(ui: &mut Ui, lid: u32, b: &mut Blur, mut live: Option<&mut super::Live>
             // Along the log of the distance: as fine near the eye as far from it.
             let (lo, hi) = (Blur::MIN_DISTANCE.ln(), Blur::MAX_DISTANCE.ln());
             let mut t = b.distance.clamp(Blur::MIN_DISTANCE, Blur::MAX_DISTANCE).ln();
-            if w::slider(ui, ("dof-distance", lid), "Distance", &mut t, lo..=hi, 3f32.ln(), |t| distance_text(t.exp())) {
+            if w::slider(ui, ("dof-distance", lid), tr("Distance"), &mut t, lo..=hi, 3f32.ln(), |t| distance_text(t.exp())) {
                 b.distance = t.exp();
             }
             setting = w::slider_held(ui, ("dof-distance", lid));
             if let Some(l) = live.as_deref_mut() {
-                w::switch(ui, ("dof-plane", lid), "Show the focus while setting it", &mut l.show_plane);
-                paragraph(ui, "While you drag the distance, what lies at it is tinted green.");
+                w::switch(ui, ("dof-plane", lid), tr("Show the focus while setting it"), &mut l.show_plane);
+                paragraph(ui, tr("While you drag the distance, what lies at it is tinted green."));
             }
         }
     }
     if let Some(l) = live {
         l.setting_focus = setting;
     }
-    w::label(ui, "Lens");
-    w::slider(ui, ("dof-aperture", lid), "Aperture", &mut b.aperture, 0.0..=1.0, 0.4, w::percent);
-    w::slider(ui, ("dof-near", lid), "Foreground", &mut b.near, 0.0..=1.0, 1.0, w::percent);
-    w::slider(ui, ("dof-far", lid), "Background", &mut b.far, 0.0..=1.0, 1.0, w::percent);
+    w::label(ui, tr("Lens"));
+    w::slider(ui, ("dof-aperture", lid), tr("Aperture"), &mut b.aperture, 0.0..=1.0, 0.4, w::percent);
+    w::slider(ui, ("dof-near", lid), tr("Foreground"), &mut b.near, 0.0..=1.0, 1.0, w::percent);
+    w::slider(ui, ("dof-far", lid), tr("Background"), &mut b.far, 0.0..=1.0, 1.0, w::percent);
     ui.add_space(4.0);
-    paragraph(ui, "Each splat spreads over a lens's disc as wide as it is out of focus, in front of the focus and behind it. Opacity lowers the aperture.");
+    paragraph(ui, tr("Each splat spreads over a lens's disc as wide as it is out of focus, in front of the focus and behind it. Opacity lowers the aperture."));
 }
 
 /// Where a layer acts, and the shape's sliders.
 fn mask(ui: &mut Ui, lid: u32, m: &mut Mask) {
-    w::label(ui, "Where");
+    w::label(ui, tr("Where"));
     #[derive(Clone, Copy, PartialEq)]
     enum Shape {
         All,
@@ -506,7 +507,7 @@ fn mask(ui: &mut Ui, lid: u32, m: &mut Mask) {
         Mask::Radial { .. } => Shape::Circle,
         Mask::Band { .. } => Shape::Band,
     };
-    let options = [SegOption::new(Shape::All, "Everywhere"), SegOption::new(Shape::Circle, "Circle"), SegOption::new(Shape::Band, "Band")];
+    let options = [SegOption::new(Shape::All, tr("Everywhere")), SegOption::new(Shape::Circle, tr("Circle")), SegOption::new(Shape::Band, tr("Band"))];
     if widgets::segmented(ui, ("mask", lid), &mut shape, &options, true) {
         let center = m.center().unwrap_or([0.5, 0.5]);
         *m = match shape {
@@ -520,22 +521,22 @@ fn mask(ui: &mut Ui, lid: u32, m: &mut Mask) {
     match m {
         Mask::Everywhere => {}
         Mask::Radial { radius, feather, invert, .. } => {
-            w::slider(ui, ("mask-radius", lid), "Radius", radius, 0.02..=1.5, 0.25, w::percent);
-            w::slider(ui, ("mask-feather", lid), "Softness", feather, 0.0..=1.0, 0.2, w::percent);
-            w::switch(ui, ("mask-invert", lid), "Outside the circle", invert);
+            w::slider(ui, ("mask-radius", lid), tr("Radius"), radius, 0.02..=1.5, 0.25, w::percent);
+            w::slider(ui, ("mask-feather", lid), tr("Softness"), feather, 0.0..=1.0, 0.2, w::percent);
+            w::switch(ui, ("mask-invert", lid), tr("Outside the circle"), invert);
         }
         Mask::Band { angle, width, feather, invert, .. } => {
-            w::slider(ui, ("mask-width", lid), "Width", width, 0.02..=1.5, 0.2, w::percent);
-            w::slider(ui, ("mask-feather", lid), "Softness", feather, 0.0..=1.0, 0.15, w::percent);
-            w::slider(ui, ("mask-angle", lid), "Angle", angle, -90.0..=90.0, 0.0, |v| format!("{v:+.0}°"));
-            w::switch(ui, ("mask-invert", lid), "Outside the band", invert);
+            w::slider(ui, ("mask-width", lid), tr("Width"), width, 0.02..=1.5, 0.2, w::percent);
+            w::slider(ui, ("mask-feather", lid), tr("Softness"), feather, 0.0..=1.0, 0.15, w::percent);
+            w::slider(ui, ("mask-angle", lid), tr("Angle"), angle, -90.0..=90.0, 0.0, |v| format!("{v:+.0}°"));
+            w::switch(ui, ("mask-invert", lid), tr("Outside the band"), invert);
         }
     }
 }
 
 fn center_button(ui: &mut Ui, salt: impl egui::AsIdSalt, center: &mut [f32; 2]) {
     ui.add_space(8.0);
-    let b = Button::new("Centre it").icon(icons::CROSSHAIR).size(Size::Sm).enabled(*center != [0.5, 0.5]).id_salt(salt);
+    let b = Button::new(tr("Centre it")).icon(icons::CROSSHAIR).size(Size::Sm).enabled(*center != [0.5, 0.5]).id_salt(salt);
     let bw = b.desired_width(ui);
     let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), 32.0), Sense::hover());
     if super::super::sharing::pressed(b.show_at(ui, Rect::from_min_size(r.min, vec2(bw, 32.0)))) {
@@ -546,7 +547,7 @@ fn center_button(ui: &mut Ui, salt: impl egui::AsIdSalt, center: &mut [f32; 2]) 
 /// A searchable list of fonts, each name drawn in its font; the chosen one ringed.
 fn font_list(fonts: &mut Fonts, ui: &mut Ui, id: Id, chosen: &mut String) {
     let w = ui.available_width();
-    widgets::search_field(ui, id.with("search"), &mut fonts.query, "Search fonts", w);
+    widgets::search_field(ui, id.with("search"), &mut fonts.query, tr("Search fonts"), w);
     ui.add_space(8.0);
     let q = fonts.query.trim().to_lowercase();
     let shown: Vec<FontInfo> = fonts.list.iter().filter(|f| q.is_empty() || f.name.to_lowercase().contains(&q)).cloned().collect();
@@ -586,7 +587,7 @@ fn font_list(fonts: &mut Fonts, ui: &mut Ui, id: Id, chosen: &mut String) {
                         widgets::text_truncated(p, pos2(r.left() + 10.0, r.center().y), Align2::LEFT_CENTER, &Txt::new(&f.name, 13.0), max_w);
                     }
                 }
-                let resp = resp.on_hover_cursor(CursorIcon::PointingHand).on_hover_text(if f.bundled { format!("{} (built in)", f.name) } else { f.name.clone() });
+                let resp = resp.on_hover_cursor(CursorIcon::PointingHand).on_hover_text(if f.bundled { tr!("{font} (built in)", font = f.name) } else { f.name.clone() });
                 if widgets::pressed(&resp) {
                     *chosen = f.key.clone();
                 }
@@ -595,7 +596,7 @@ fn font_list(fonts: &mut Fonts, ui: &mut Ui, id: Id, chosen: &mut String) {
     });
     if loading {
         ui.add_space(6.0);
-        paragraph(ui, "Looking for this computer's fonts…");
+        paragraph(ui, tr("Looking for this computer's fonts…"));
     }
 }
 

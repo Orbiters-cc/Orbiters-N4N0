@@ -3,6 +3,7 @@
 //! canvas itself ([`super::crop`]). The vignette's and the aberration's centre, a mask's centre and its circle's edge
 //! or band, texts (a press on one chooses it) and a depth blur's focus dot are dragged on the picture.
 
+use orbiters_i18n::tr;
 use super::{find_mut, Editor, Selected};
 use egui::{pos2, vec2, Align2, Color32, CursorIcon, Pos2, Rect, Sense, Stroke, Ui};
 use orbiters_ui::photo::render::{self, Stage};
@@ -48,7 +49,7 @@ pub(super) fn show(ed: &mut Editor, ui: &mut Ui, rect: Rect) {
             }
             None => {
                 feedback::spinner(&p, rect.center() - vec2(0.0, 18.0), 12.0, 2.5, theme::ACCENT);
-                widgets::text(&p, rect.center() + vec2(0.0, 14.0), Align2::CENTER_CENTER, &Txt::new(if ed.source.remote.is_some() { "Downloading the picture at its full size…" } else { "Reading the picture…" }, 13.0).color(theme::FG_3));
+                widgets::text(&p, rect.center() + vec2(0.0, 14.0), Align2::CENTER_CENTER, &Txt::new(if ed.source.remote.is_some() { tr("Downloading the picture at its full size…") } else { tr("Reading the picture…") }, 13.0).color(theme::FG_3));
                 ctx.request_repaint();
             }
         }
@@ -109,7 +110,7 @@ fn picture(ed: &mut Editor, ui: &mut Ui, rect: Rect, full: (u32, u32)) {
         ctx.request_repaint();
     }
     if ed.comparing {
-        let t = Txt::new("Original", 11.5).color(theme::FG);
+        let t = Txt::new(tr("Original"), 11.5).color(theme::FG);
         let w = widgets::text_size(ui, &t).x + 24.0;
         let r = Rect::from_min_size(pos2(frame.left() + 12.0, frame.top() + 12.0), vec2(w, 26.0));
         p.rect_filled(r, theme::radius(13.0), theme::black(0.6));

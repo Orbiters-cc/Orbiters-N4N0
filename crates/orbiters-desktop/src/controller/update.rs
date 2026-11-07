@@ -13,6 +13,7 @@ use super::{Controller, NoticeKind, Shared};
 use crate::ipc::UpdateAction;
 use crate::state::UpdateState;
 use orbiters_update::{InstallRecord, Release};
+use orbiters_i18n::tr;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
@@ -222,8 +223,13 @@ impl Controller {
             Err(e) => {
                 eprintln!("updates: {e:#}");
                 if !ready {
-                    let place = if orbiters_update::development() { "The development server" } else { "Orbiters" };
-                    self.update(|s| s.update.state = UpdateState::Failed { message: format!("{place} could not be asked for updates ({e:#}).") });
+                    let error = format!("{e:#}");
+                    let message = if orbiters_update::development() {
+                        tr!("The development server could not be asked for updates ({error}).", error = error)
+                    } else {
+                        tr!("Orbiters could not be asked for updates ({error}).", error = error)
+                    };
+                    self.update(|s| s.update.state = UpdateState::Failed { message });
                 }
                 return;
             }
@@ -275,7 +281,8 @@ impl Controller {
             if let Err(e) = downloaded {
                 eprintln!("updates: {e:#}");
                 if !self.quitting.load(Ordering::Relaxed) {
-                    self.update(|s| s.update.state = UpdateState::Failed { message: format!("Version {version} could not be downloaded: {e}") });
+                    let message = tr!("Version {version} could not be downloaded: {error}", version = version, error = e);
+                    self.update(|s| s.update.state = UpdateState::Failed { message });
                 }
                 return;
             }
@@ -286,21 +293,21 @@ impl Controller {
         }
         tidy(Some(&version));
         self.update(|s| s.update.state = UpdateState::Ready { version: version.clone(), notes: release.notes.clone() });
-        self.notify(NoticeKind::Info, format!("Orbiters - N4N0 {version} is ready: restart it to update (Settings, About)."));
+        self.notify(NoticeKind::Info, tr!("Orbiters - N4N0 {version} is ready: restart it to update (Settings, About).", version = version));
     }
 
     /// Restarts into the downloaded update: at once when nothing would be cut short (or `now`), otherwise once the
     /// running work ends.
     fn restart_to_update(self: &Shared, now: bool) {
         let UpdateState::Ready { version, .. } = self.view().update.state.clone() else {
-            self.notify(NoticeKind::Warning, "No update is ready yet.");
+            self.notify(NoticeKind::Warning, tr("No update is ready yet."));
             return;
         };
         if !now {
             if let Some(work) = self.busy_with() {
                 let first = self.update_if(|s| !std::mem::replace(&mut s.update.restart_when_idle, true));
                 if first {
-                    self.notify(NoticeKind::Info, format!("Orbiters - N4N0 restarts to update once {work} ends."));
+                    self.notify(NoticeKind::Info, tr!("Orbiters - N4N0 restarts to update once {work} ends.", work = tr(work)));
                 }
                 return;
             }
@@ -310,7 +317,8 @@ impl Controller {
         let Some(ready) = read_ready().filter(|r| r.version == version && verified(&setup, r)) else {
             // Gone or damaged since: it downloads again.
             tidy(None);
-            self.update(|s| s.update.state = UpdateState::Failed { message: format!("The downloaded update ({version}) was damaged: it downloads again.") });
+            let message = tr!("The downloaded update ({version}) was damaged: it downloads again.", version = version);
+            self.update(|s| s.update.state = UpdateState::Failed { message });
             self.update_action(UpdateAction::Check);
             return;
         };
@@ -318,7 +326,7 @@ impl Controller {
         let u = self.updates.lock().unwrap();
         match (&u.restarter, &u.install) {
             (Some(restart), Some(dir)) => restart(&setup, dir),
-            _ => self.notify(NoticeKind::Error, "This window cannot restart Orbiters - N4N0 to update."),
+            _ => self.notify(NoticeKind::Error, tr("This window cannot restart Orbiters - N4N0 to update.")),
         }
     }
 }

@@ -19,6 +19,7 @@ use crate::state::{CallContact, CallLink, CallPhase, CallView};
 use orbiters_core::account::{Api, ApiError};
 use orbiters_core::call::{self, CallCommand, CallEvent, EndReason, IceCandidate, IceServer};
 use orbiters_core::vrchat_accounts::{self, LocalVrchat};
+use orbiters_i18n::{fill, tr, tr_latin};
 use serde_json::{json, Value};
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, ChildStdin, Command, Stdio};
@@ -193,15 +194,15 @@ enum Ending {
 impl Ending {
     fn text(self, name: &str, connected: bool) -> String {
         match self {
-            Ending::Declined => format!("{name} can't talk right now."),
-            Ending::DeclinedHere => format!("Call from {name} declined."),
-            Ending::Unanswered => format!("{name} didn't answer."),
-            Ending::Missed => format!("Missed call from {name}."),
-            Ending::Ended => format!("Call with {name} ended."),
-            Ending::Busy => format!("{name} is on another call."),
-            Ending::Failed if connected => format!("The call with {name} dropped."),
-            Ending::Failed => format!("The call with {name} could not connect."),
-            Ending::Unreachable => format!("The call with {name} could not connect: this network seems to block calls."),
+            Ending::Declined => fill(tr_latin("{name} can't talk right now."), &[("name", &name)]),
+            Ending::DeclinedHere => fill(tr_latin("Call from {name} declined."), &[("name", &name)]),
+            Ending::Unanswered => fill(tr_latin("{name} didn't answer."), &[("name", &name)]),
+            Ending::Missed => fill(tr_latin("Missed call from {name}."), &[("name", &name)]),
+            Ending::Ended => fill(tr_latin("Call with {name} ended."), &[("name", &name)]),
+            Ending::Busy => fill(tr_latin("{name} is on another call."), &[("name", &name)]),
+            Ending::Failed if connected => fill(tr_latin("The call with {name} dropped."), &[("name", &name)]),
+            Ending::Failed => fill(tr_latin("The call with {name} could not connect."), &[("name", &name)]),
+            Ending::Unreachable => fill(tr_latin("The call with {name} could not connect: this network seems to block calls."), &[("name", &name)]),
         }
     }
 }
@@ -405,15 +406,15 @@ impl CallsRuntime {
             // One call at a time (and a call without an offer cannot be answered): the caller hears this side is busy.
             return Acts { signals: vec![Signal::Close { id: id.to_string(), decline: true }], ..Default::default() };
         }
-        let name = v["from"]["name"].as_str().map(str::trim).filter(|n| !n.is_empty()).unwrap_or("A friend").to_string();
+        let name = v["from"]["name"].as_str().map(str::trim).filter(|n| !n.is_empty()).unwrap_or_else(|| tr_latin("A friend")).to_string();
         self.numbered += 1;
         let mut c = Call::new(self.numbered, v["from"]["id"].as_str().unwrap_or_default().to_string(), name.clone(), true, now);
         c.id = Some(id.to_string());
         c.offer = Some((offer.to_string(), call::ice_servers(&v["ice_servers"])));
         self.call = Some(c);
         Acts {
-            say: Some(format!("{name} is calling. Touch me or press Call to answer.")),
-            notice: Some((NoticeKind::Info, format!("{name} is calling: answer on the N4N0 page, in the SteamVR tab or by touching N4N0."))),
+            say: Some(fill(tr_latin("{name} is calling. Touch me or press Call to answer."), &[("name", &name)])),
+            notice: Some((NoticeKind::Info, tr!("{name} is calling: answer on the N4N0 page, in the SteamVR tab or by touching N4N0.", name = name))),
             publish: true,
             ..Default::default()
         }
@@ -427,7 +428,7 @@ impl CallsRuntime {
                 if call != 0 && self.current(call).is_none() {
                     return Acts::default();
                 }
-                Acts { notice: Some((NoticeKind::Warning, format!("Call: {message}"))), ..Default::default() }
+                Acts { notice: Some((NoticeKind::Warning, tr!("Call: {message}", message = message))), ..Default::default() }
             }
             CallEvent::Offer { call, sdp } => match self.current(call).filter(|c| !c.incoming) {
                 Some(c) => Acts { signals: vec![Signal::Create { number: call, contact: c.contact.clone(), offer: sdp }], ..Default::default() },
@@ -461,7 +462,7 @@ impl CallsRuntime {
                 c.phase = CallPhase::Connected;
                 c.connected_at = Some(now_ms());
                 c.since = now;
-                Acts { say: Some(format!("On a call with {}.", c.name)), publish: true, ..Default::default() }
+                Acts { say: Some(fill(tr_latin("On a call with {name}."), &[("name", &c.name)])), publish: true, ..Default::default() }
             }
             CallEvent::Levels { call, mic, remote } => {
                 let Some(c) = self.current(call) else { return Acts::default() };
@@ -491,7 +492,7 @@ impl CallsRuntime {
             return Acts::default();
         }
         let mut acts = self.finish(Ending::Failed, true);
-        acts.notice = Some((NoticeKind::Warning, "Call: the call worker stopped.".into()));
+        acts.notice = Some((NoticeKind::Warning, tr("Call: the call worker stopped.").into()));
         acts
     }
 
@@ -558,7 +559,7 @@ fn not_linked(e: &anyhow::Error) -> bool {
 pub fn menu_text(contacts: &[CallContact], picked: usize) -> String {
     if contacts.is_empty() {
         // Two blocks of the panel (eight cells each on most props): whole within a tenth of a second.
-        return "No friend online".into();
+        return tr_latin("No friend online").into();
     }
     let picked = picked.min(contacts.len() - 1);
     let first = (picked / PAGE) * PAGE;
@@ -756,7 +757,7 @@ impl super::Controller {
         let (done, wait) = mpsc::channel();
         let _ = std::thread::Builder::new().name("calls-leave".into()).spawn(move || {
             let agent = orbiters_core::http_agent(Some(Duration::from_secs(2)), Some(Duration::from_secs(3)));
-            let auth = format!("Bearer {token}");
+            let auth = format!("Bearer {token}"); // i18n: not shown
             if let Some(id) = call_id {
                 let _ = agent.post(&api.url(&format!("n4n0/calls/{id}/end"))).header("Authorization", &auth).send_json(json!({}));
             }
@@ -1150,7 +1151,7 @@ impl super::Controller {
                         Err(e) if e.downcast_ref::<ApiError>().is_some_and(|a| a.status == 409) => Err(Ending::Busy),
                         Err(e) => {
                             eprintln!("calls n4n0/calls: {e:#}");
-                            self.notify(NoticeKind::Warning, format!("Call: {e}"));
+                            self.notify(NoticeKind::Warning, tr!("Call: {message}", message = e));
                             Err(Ending::Failed)
                         }
                     };
@@ -1161,7 +1162,7 @@ impl super::Controller {
                 Signal::Answer { number, id, sdp } => {
                     if let Err(e) = post(&api, &token, &format!("n4n0/calls/{id}/answer"), &json!({ "answer": sdp })) {
                         eprintln!("calls answer: {e:#}");
-                        self.notify(NoticeKind::Warning, format!("Call: {e}"));
+                        self.notify(NoticeKind::Warning, tr!("Call: {message}", message = e));
                         let mut rt = self.calls.lock().unwrap();
                         let acts = rt.signal_failed(number);
                         self.calls_act(rt, acts);
@@ -1183,7 +1184,7 @@ impl super::Controller {
             let mut rt = self.calls.lock().unwrap();
             let Some(name) = rt.contacts.iter().find(|c| c.id == contact).map(|c| c.name.clone()) else {
                 drop(rt);
-                self.notify(NoticeKind::Warning, "This friend cannot be called right now.");
+                self.notify(NoticeKind::Warning, tr("This friend cannot be called right now."));
                 return;
             };
             let Some(number) = rt.dial(&contact, &name, Instant::now()) else { return };
@@ -1191,11 +1192,11 @@ impl super::Controller {
             (number, name)
         };
         self.calls_publish(|_| {});
-        self.n4n0_say(&format!("Calling {name}…"));
+        self.n4n0_say(&fill(tr_latin("Calling {name}…"), &[("name", &name)]));
         let ctl = self.clone();
         std::thread::spawn(move || {
             let servers = match ctl.calls_api() {
-                Some((api, token)) => ice_servers(&api, &token).map_err(|e| format!("the call relay could not be reached: {e}")),
+                Some((api, token)) => ice_servers(&api, &token).map_err(|e| tr!("the call relay could not be reached: {error}", error = e)),
                 None => Err("sign in to Orbiters to call.".to_string()),
             };
             let (mic, direct) = ctl.with_settings(|s| (s.n4n0.mic_device.clone(), s.n4n0.direct_calls));
@@ -1211,7 +1212,7 @@ impl super::Controller {
                 }
                 Err(e) => {
                     let mut acts = if rt.current(number).is_some() { rt.finish(Ending::Failed, true) } else { Acts::default() };
-                    acts.notice = Some((NoticeKind::Warning, format!("Call: {e}")));
+                    acts.notice = Some((NoticeKind::Warning, tr!("Call: {message}", message = e)));
                     acts
                 }
             };

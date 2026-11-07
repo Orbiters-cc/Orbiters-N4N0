@@ -104,7 +104,7 @@ pub fn options(gpu: WindowGpu) -> WgpuConfiguration {
         let gpu = adapter.limits();
         let base = wgpu::Limits { max_buffer_size: gpu.max_buffer_size, max_storage_buffer_binding_size: gpu.max_storage_buffer_binding_size, ..base };
         wgpu::DeviceDescriptor {
-            label: Some("orbiters window"),
+            label: Some("orbiters window"), // i18n: not shown
             required_limits: limits(base),
             memory_hints: wgpu::MemoryHints::MemoryUsage,
             ..Default::default()
@@ -132,7 +132,7 @@ pub fn integrated_device() -> anyhow::Result<(wgpu::Device, wgpu::Queue)> {
         .context("no integrated GPU")?;
     let gpu = adapter.limits();
     let base = wgpu::Limits { max_buffer_size: gpu.max_buffer_size, max_storage_buffer_binding_size: gpu.max_storage_buffer_binding_size, ..wgpu::Limits::default() };
-    let desc = wgpu::DeviceDescriptor { label: Some("orbiters 3D view"), required_limits: limits(base), memory_hints: wgpu::MemoryHints::MemoryUsage, ..Default::default() };
+    let desc = wgpu::DeviceDescriptor { label: Some("orbiters 3D view"), required_limits: limits(base), memory_hints: wgpu::MemoryHints::MemoryUsage, ..Default::default() }; // i18n: not shown
     let (device, queue) = block_on(adapter.request_device(&desc)).map_err(|e| anyhow::anyhow!("{}: {e}", adapter.get_info().name))?;
     report_errors(&device);
     Ok((device, queue))
@@ -166,7 +166,7 @@ fn select(adapters: &[wgpu::Adapter]) -> Result<wgpu::Adapter, String> {
             wgpu::DeviceType::Cpu => 4,
         })
         .cloned()
-        .ok_or_else(|| "no GPU adapter".to_string())
+        .ok_or_else(|| "no GPU adapter".to_string()) // i18n: not shown
 }
 
 /// PCI vendor and device id of the adapter whose output shows the primary monitor.

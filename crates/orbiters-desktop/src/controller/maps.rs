@@ -9,6 +9,7 @@ use crate::ipc::ToClient;
 use crate::state::{MapsMine, UploadKind, UploadState, UploadStatus};
 use orbiters_core::maps::{Part, PreviewFiles};
 use orbiters_core::{bundle, reconstruction, visited};
+use orbiters_i18n::tr;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 use std::time::Instant;
@@ -104,15 +105,21 @@ impl Controller {
         });
         if let Some((name, kind)) = finished {
             let (tone, message) = match (&state, kind) {
-                (UploadState::Done { .. }, UploadKind::Preview) => (NoticeKind::Success, format!("3D preview of {name} shared on the Map explorer.")),
+                (UploadState::Done { .. }, UploadKind::Preview) => (NoticeKind::Success, tr!("3D preview of {name} shared on the Map explorer.", name = name)),
                 (UploadState::Done { added: 0, .. }, UploadKind::Pictures) => {
-                    (NoticeKind::Info, format!("These pictures of {name} were already on the Map explorer."))
+                    (NoticeKind::Info, tr!("These pictures of {name} were already on the Map explorer.", name = name))
                 }
                 (UploadState::Done { added, skipped }, UploadKind::Pictures) => {
-                    let more = if *skipped > 0 { format!(" ({skipped} already there)") } else { String::new() };
-                    (NoticeKind::Success, format!("{added} picture{} of {name} shared on the Map explorer{more}.", if *added == 1 { "" } else { "s" }))
+                    // Whole sentences: the plural and the order are each language's own.
+                    let text = match (*added == 1, *skipped > 0) {
+                        (true, false) => tr!("1 picture of {name} shared on the Map explorer.", name = name),
+                        (false, false) => tr!("{added} pictures of {name} shared on the Map explorer.", added = added, name = name),
+                        (true, true) => tr!("1 picture of {name} shared on the Map explorer ({skipped} already there).", name = name, skipped = skipped),
+                        (false, true) => tr!("{added} pictures of {name} shared on the Map explorer ({skipped} already there).", added = added, name = name, skipped = skipped),
+                    };
+                    (NoticeKind::Success, text)
                 }
-                (UploadState::Failed { message }, _) => (NoticeKind::Error, format!("Could not share to the Map explorer: {message}")),
+                (UploadState::Failed { message }, _) => (NoticeKind::Error, tr!("Could not share to the Map explorer: {message}", message = message)),
                 _ => (NoticeKind::Info, String::new()),
             };
             if !message.is_empty() {
@@ -266,10 +273,10 @@ fn prepare_once(session: &Path, device: orbiters_reconstruct::gpu::DeviceOptions
     let _preparing = crate::upload_prep::PREPARING.lock().unwrap_or_else(|e| e.into_inner());
     let result = reconstruction::result_dir(session);
     let key = crate::upload_prep::tree_key();
-    let stage = PrepStage::new("cache fingerprint");
+    let stage = PrepStage::new("cache fingerprint"); // i18n: not shown
     let fingerprint = crate::upload_prep::Fingerprint::read(session, &result).ok();
     drop(stage);
-    let stage = PrepStage::new("cache read");
+    let stage = PrepStage::new("cache read"); // i18n: not shown
     let cached = fingerprint.as_ref().and_then(|fingerprint| Some((crate::upload_prep::load(&result, fingerprint, key)?, fingerprint.generation()?.to_string())));
     drop(stage);
     if let Some(((files, metadata), generation)) = cached {
@@ -278,21 +285,21 @@ fn prepare_once(session: &Path, device: orbiters_reconstruct::gpu::DeviceOptions
         drop(stage);
         return Ok(Prepared { files, sky, metadata, generation });
     }
-    let stage = PrepStage::new("read result");
+    let stage = PrepStage::new("read result"); // i18n: not shown
     // Without what the 3D view hid or deleted (orbiters_reconstruct::edit): an edit that cannot be applied stops the
     // share with why, rather than letting a removed avatar back in.
     let (g, _, generation) = orbiters_reconstruct::edit::read_edited(&result.join(reconstruction::PLY_FILE))?;
     drop(stage);
-    let stage = PrepStage::new("start view");
+    let stage = PrepStage::new("start view"); // i18n: not shown
     let (views, start) = crate::views::recorded(session)?;
     let (v, ground) = crate::views::eye_level(session, &g, &views[start]);
     let depth = crate::views::depth_ahead(&g, &v);
     let target = [v.position[0] + v.forward[0] * depth, v.position[1] + v.forward[1] * depth, v.position[2] + v.forward[2] * depth];
     drop(stage);
-    let stage = PrepStage::new("session cameras");
+    let stage = PrepStage::new("session cameras"); // i18n: not shown
     let cameras = orbiters_reconstruct::tree_tune::session_cameras(session)?;
     drop(stage);
-    let stage = PrepStage::new("gpu setup");
+    let stage = PrepStage::new("gpu setup"); // i18n: not shown
     let mut gpu = orbiters_reconstruct::gpu::Gpu::with_options(orbiters_reconstruct::gpu::DeviceOptions {
         profile: std::env::var_os("ORBITERS_PREP_PROFILE").is_some(),
         ..device
@@ -329,7 +336,7 @@ fn prepare_once(session: &Path, device: orbiters_reconstruct::gpu::DeviceOptions
     // A full/read-only disk must not prevent the upload; the next share can prepare again.
     // Under the key of the generation the trees were made with only (not one the edits passed through meanwhile).
     if let Some(fingerprint) = fingerprint.as_ref().filter(|f| gpu.is_some() && f.generation() == Some(generation.as_str())) {
-        let stage = PrepStage::new("cache write");
+        let stage = PrepStage::new("cache write"); // i18n: not shown
         if crate::upload_prep::Fingerprint::read(session, &result).ok().as_ref() == Some(fingerprint) {
             if let Err(e) = crate::upload_prep::save(&result, fingerprint, &files, &metadata) {
                 eprintln!("Could not cache upload preparation: {e:#}");

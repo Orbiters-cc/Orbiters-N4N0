@@ -4,6 +4,7 @@
 //! the next, for a code further away) and decodes the QR codes in it with `rqrr`. N4N0 decides what opens.
 
 use orbiters_n4n0::{QrEvents, QrScan, QrSeen};
+use orbiters_i18n::tr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -98,7 +99,7 @@ pub fn start(wanted: String, events: QrEvents) -> Result<Box<dyn QrScan>, String
                 lower_priority();
                 run(&wanted, &events, &flag);
             })
-            .map_err(|e| format!("The scanner could not start: {e}"))?;
+            .map_err(|e| tr!("The scanner could not start: {error}", error = e))?;
         Ok(Box::new(Scan(stop)))
     }
     #[cfg(not(windows))]
@@ -130,7 +131,7 @@ fn run(wanted: &str, events: &QrEvents, stop: &AtomicBool) {
     let mut receiver = match orbiters_spout::Receiver::new() {
         Ok(r) => r,
         Err(e) => {
-            events(QrSeen::Failed(format!("VRChat's camera cannot be read here: {e}")));
+            events(QrSeen::Failed(tr!("VRChat's camera cannot be read here: {error}", error = e)));
             return;
         }
     };

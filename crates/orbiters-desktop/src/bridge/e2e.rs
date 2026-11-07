@@ -23,7 +23,7 @@ const TOKEN: &str = "test-token";
 fn exchange(port: u16, method: &str, path: &str, headers: &[(&str, String)], body: &str) -> std::io::Result<(u16, String, Value)> {
     let mut stream = TcpStream::connect(("127.0.0.1", port))?;
     stream.set_read_timeout(Some(Duration::from_secs(60)))?;
-    let mut request = format!("{method} {path} HTTP/1.1\r\nConnection: close\r\nContent-Length: {}\r\n", body.len());
+    let mut request = format!("{method} {path} HTTP/1.1\r\nConnection: close\r\nContent-Length: {}\r\n", body.len()); // i18n: not shown
     for (name, value) in headers {
         request.push_str(&format!("{name}: {value}\r\n"));
     }
@@ -60,10 +60,10 @@ fn exchange(port: u16, method: &str, path: &str, headers: &[(&str, String)], bod
 /// The usual headers of the current revision for a message, with the right token.
 fn modern_headers<'a>(port: u16, method: &str, name: Option<&str>) -> Vec<(&'a str, String)> {
     let mut headers = vec![
-        ("Host", format!("127.0.0.1:{port}")),
-        ("Authorization", format!("Bearer {TOKEN}")),
+        ("Host", format!("127.0.0.1:{port}")), // i18n: not shown
+        ("Authorization", format!("Bearer {TOKEN}")), // i18n: not shown
         ("Content-Type", "application/json".to_string()),
-        ("Accept", "application/json, text/event-stream".to_string()),
+        ("Accept", "application/json, text/event-stream".to_string()), // i18n: not shown
         ("MCP-Protocol-Version", MODERN.to_string()),
         ("Mcp-Method", method.to_string()),
     ];

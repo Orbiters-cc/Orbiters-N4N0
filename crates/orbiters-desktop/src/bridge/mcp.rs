@@ -255,7 +255,7 @@ fn read_some(stream: &mut TcpStream, chunk: &mut [u8], buffered: &mut Vec<u8>, s
 
 fn write_reply(stream: &mut TcpStream, reply: &Reply) -> std::io::Result<()> {
     let mut head = format!(
-        "HTTP/1.1 {} {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\n",
+        "HTTP/1.1 {} {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\n", // i18n: not shown
         reply.status,
         reply.reason,
         reply.body.len()
@@ -269,33 +269,33 @@ fn write_reply(stream: &mut TcpStream, reply: &Reply) -> std::io::Result<()> {
 /// The checks every request passes before anything is looked at, then the call.
 fn answer(shared: &Shared, request: &Request, stream: &TcpStream) -> Reply {
     if !host_ok(request.header("Host"), shared.port) {
-        return Reply::refused(403, "Forbidden", -32600, "This service answers only under its own address.");
+        return Reply::refused(403, "Forbidden", -32600, "This service answers only under its own address."); // i18n: not shown
     }
     if !origin_ok(request.header("Origin"), shared.port) {
-        return Reply::refused(403, "Forbidden", -32600, "Requests from web pages are refused.");
+        return Reply::refused(403, "Forbidden", -32600, "Requests from web pages are refused."); // i18n: not shown
     }
     let path = request.path.split('?').next().unwrap_or_default();
     if path != "/mcp" {
-        return Reply::refused(404, "Not Found", -32600, "The MCP endpoint is /mcp.");
+        return Reply::refused(404, "Not Found", -32600, "The MCP endpoint is /mcp."); // i18n: not shown
     }
     if !token_ok(request.header("Authorization"), &shared.token) {
-        let mut reply = Reply::refused(401, "Unauthorized", -32600, "Wrong or missing token. Orbiters - N4N0's Settings, Experimental, has the right one.");
-        reply.extra = "WWW-Authenticate: Bearer\r\n";
+        let mut reply = Reply::refused(401, "Unauthorized", -32600, "Wrong or missing token. Orbiters - N4N0's Settings, Experimental, has the right one."); // i18n: not shown
+        reply.extra = "WWW-Authenticate: Bearer\r\n"; // i18n: not shown
         return reply;
     }
     if request.method != "POST" {
-        let mut reply = Reply::refused(405, "Method Not Allowed", -32600, "This endpoint takes POST only: it offers no stream.");
-        reply.extra = "Allow: POST\r\n";
+        let mut reply = Reply::refused(405, "Method Not Allowed", -32600, "This endpoint takes POST only: it offers no stream."); // i18n: not shown
+        reply.extra = "Allow: POST\r\n"; // i18n: not shown
         return reply;
     }
     if !request.header("Content-Type").is_some_and(|c| c.to_ascii_lowercase().starts_with("application/json")) {
-        return Reply::refused(415, "Unsupported Media Type", -32600, "Send application/json.");
+        return Reply::refused(415, "Unsupported Media Type", -32600, "Send application/json."); // i18n: not shown
     }
     let Ok(message) = serde_json::from_slice::<Value>(&request.body) else {
-        return Reply::refused(400, "Bad Request", -32700, "The body is not JSON.");
+        return Reply::refused(400, "Bad Request", -32700, "The body is not JSON."); // i18n: not shown
     };
     if message.get("jsonrpc").and_then(Value::as_str) != Some("2.0") {
-        return Reply::refused(400, "Bad Request", -32600, "A JSON-RPC 2.0 message is expected.");
+        return Reply::refused(400, "Bad Request", -32600, "A JSON-RPC 2.0 message is expected."); // i18n: not shown
     }
     rpc(shared, request, &message, stream)
 }
@@ -310,7 +310,7 @@ fn era(request: &Request, message: &Value) -> Result<Option<String>, Reply> {
         supported.extend(LEGACY);
         Reply::json(
             400,
-            "Bad Request",
+            "Bad Request", // i18n: not shown
             &json!({ "jsonrpc": "2.0", "id": id, "error": { "code": -32022, "message": "Unsupported protocol version", "data": { "supported": supported, "requested": requested } } }),
         )
     };
@@ -334,7 +334,7 @@ fn era(request: &Request, message: &Value) -> Result<Option<String>, Reply> {
 }
 
 fn header_mismatch(id: &Value, message: &str) -> Reply {
-    Reply::json(400, "Bad Request", &json!({ "jsonrpc": "2.0", "id": id, "error": { "code": -32020, "message": format!("Header mismatch: {message}") } }))
+    Reply::json(400, "Bad Request", &json!({ "jsonrpc": "2.0", "id": id, "error": { "code": -32020, "message": format!("Header mismatch: {message}") } })) // i18n: not shown
 }
 
 /// `Mcp-Method` and `Mcp-Name` say what the body says.
@@ -349,7 +349,7 @@ fn headers_match(request: &Request, method: &str, message: &Value) -> Result<(),
         "resources/read" => message["params"]["uri"].as_str(),
         _ => return Ok(()),
     };
-    let header = request.header("Mcp-Name").ok_or("Mcp-Name is missing.")?;
+    let header = request.header("Mcp-Name").ok_or("Mcp-Name is missing.")?; // i18n: not shown
     if decoded_name(header).as_deref() != named {
         return Err("Mcp-Name does not match the body.".to_string());
     }
@@ -360,13 +360,13 @@ fn headers_match(request: &Request, method: &str, message: &Value) -> Result<(),
 fn rpc(shared: &Shared, request: &Request, message: &Value, stream: &TcpStream) -> Reply {
     let Some(method) = message.get("method").and_then(Value::as_str) else {
         // A response from a client that has been sent no request: nothing to do.
-        return Reply { status: 202, reason: "Accepted", extra: "", body: Vec::new() };
+        return Reply { status: 202, reason: "Accepted", extra: "", body: Vec::new() }; // i18n: not shown
     };
     let id = message.get("id").cloned();
     let Some(id) = id.filter(|i| !i.is_null()) else {
         // Notifications: `notifications/initialized`, `notifications/cancelled`.
         shared.bridge.client_heard(None);
-        return Reply { status: 202, reason: "Accepted", extra: "", body: Vec::new() };
+        return Reply { status: 202, reason: "Accepted", extra: "", body: Vec::new() }; // i18n: not shown
     };
     let modern = match method {
         "initialize" => None,
@@ -425,7 +425,7 @@ fn rpc(shared: &Shared, request: &Request, message: &Value, stream: &TcpStream) 
         )),
         "prompts/get" => match message["params"]["name"].as_str() {
             Some("world_tour") => {
-                let worlds = message["params"]["arguments"]["worlds"].as_str().unwrap_or("worlds of your choice, from find_worlds");
+                let worlds = message["params"]["arguments"]["worlds"].as_str().unwrap_or("worlds of your choice, from find_worlds"); // i18n: not shown
                 Ok(json!({
                     "description": "Go from world to world and take 3D pictures.",
                     "messages": [{ "role": "user", "content": { "type": "text", "text": format!("{}\n\nDo this now, for: {worlds}.", tools::GUIDE) } }],
@@ -436,7 +436,7 @@ fn rpc(shared: &Shared, request: &Request, message: &Value, stream: &TcpStream) 
         "tools/call" => Ok(call_tool(shared, message, stream)),
         _ => {
             let body = json!({ "jsonrpc": "2.0", "id": id, "error": { "code": -32601, "message": format!("Method not found: {method}") } });
-            return if modern.is_some() { Reply::json(404, "Not Found", &body) } else { Reply::json(200, "OK", &body) };
+            return if modern.is_some() { Reply::json(404, "Not Found", &body) } else { Reply::json(200, "OK", &body) }; // i18n: not shown
         }
     };
     match result {

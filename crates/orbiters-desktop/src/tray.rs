@@ -8,14 +8,19 @@ pub use win::Tray;
 mod win {
     use crate::controller::NoticeKind;
     use crate::service::Service;
+    use orbiters_i18n::{language, tr, Language};
     use std::sync::Arc;
     use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
     use tray_icon::{MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
 
     pub struct Tray {
         _icon: TrayIcon,
+        show: MenuItem,
         toggle: MenuItem,
+        quit: MenuItem,
         capturing: bool,
+        /// The language the entries were last written in.
+        language: Language,
     }
 
     fn icon() -> anyhow::Result<tray_icon::Icon> {
@@ -34,9 +39,9 @@ mod win {
     impl Tray {
         /// Creates the icon; its events arrive on this thread's message loop.
         pub fn new(service: Arc<Service>) -> anyhow::Result<Self> {
-            let show = MenuItem::with_id("show", "Show Orbiters - N4N0", true, None);
-            let toggle = MenuItem::with_id("toggle", "Start recording", true, None);
-            let quit = MenuItem::with_id("quit", "Quit Orbiters - N4N0", true, None);
+            let show = MenuItem::with_id("show", tr("Show Orbiters - N4N0"), true, None);
+            let toggle = MenuItem::with_id("toggle", tr("Start recording"), true, None);
+            let quit = MenuItem::with_id("quit", tr("Quit Orbiters - N4N0"), true, None);
             let menu = Menu::with_items(&[&show, &toggle, &PredefinedMenuItem::separator(), &quit])?;
             let tray =
                 TrayIconBuilder::new().with_tooltip("Orbiters - N4N0").with_menu(Box::new(menu)).with_menu_on_left_click(false).with_icon(icon()?).build()?;
@@ -64,14 +69,18 @@ mod win {
                     service.show_window(false);
                 }
             }));
-            Ok(Self { _icon: tray, toggle, capturing: false })
+            Ok(Self { _icon: tray, show, toggle, quit, capturing: false, language: language() })
         }
 
         /// Keeps the menu's start/stop entry in step with the capture.
         pub fn update(&mut self, capturing: bool) {
-            if capturing != self.capturing {
+            // Also when the language changed: the account can bring a new one after the icon was made.
+            if capturing != self.capturing || language() != self.language {
                 self.capturing = capturing;
-                self.toggle.set_text(if capturing { "Stop recording" } else { "Start recording" });
+                self.language = language();
+                self.toggle.set_text(if capturing { tr("Stop recording") } else { tr("Start recording") });
+                self.show.set_text(tr("Show Orbiters - N4N0"));
+                self.quit.set_text(tr("Quit Orbiters - N4N0"));
             }
         }
     }

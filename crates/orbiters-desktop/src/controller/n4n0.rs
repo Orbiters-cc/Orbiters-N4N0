@@ -10,6 +10,7 @@ use orbiters_core::account::Api;
 use orbiters_core::osc::OscValue;
 use orbiters_core::settings::Settings;
 use orbiters_core::vrchat_log::WorldState;
+use orbiters_i18n::{mark, tr};
 use orbiters_n4n0::{CallRequest, Files, Host, Osc, Scene};
 use orbiters_n4n0_core::text::Message;
 use std::collections::HashMap;
@@ -300,9 +301,9 @@ impl Controller {
         system.refresh_processes_specifics(ProcessesToUpdate::All, true, ProcessRefreshKind::nothing().with_cpu().with_memory());
         let groups: [(&str, &[&str]); 5] = [
             ("Orbiters - N4N0", &["orbiters-desktop.exe", "orbiters-desktop"]),
-            ("Capture worker", &["orbiters-capture.exe", "orbiters-capture"]),
-            ("N4N0's ears", &["orbiters-voice.exe", "orbiters-voice"]),
-            ("Reconstruction", &["orbiters-reconstruct.exe", "orbiters-reconstruct"]),
+            (mark("Capture worker"), &["orbiters-capture.exe", "orbiters-capture"]),
+            (mark("N4N0's ears"), &["orbiters-voice.exe", "orbiters-voice"]),
+            (mark("Reconstruction"), &["orbiters-reconstruct.exe", "orbiters-reconstruct"]),
             ("VRChat", &["vrchat.exe", "vrchat"]),
         ];
         let mut usage = Vec::new();
@@ -317,7 +318,7 @@ impl Controller {
                 }
             }
             if any {
-                usage.push(ProcessUsage { name: label.to_string(), cpu_percent: cpu, memory_mb: memory as f32 / (1024.0 * 1024.0) });
+                usage.push(ProcessUsage { name: tr(label).to_string(), cpu_percent: cpu, memory_mb: memory as f32 / (1024.0 * 1024.0) });
             }
         }
         self.n4n0.set_resources(usage);

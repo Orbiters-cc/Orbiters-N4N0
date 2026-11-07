@@ -276,7 +276,7 @@ impl LabGame {
                 state.joining = None;
                 let instance = state.behaviour.land_in.clone().unwrap_or(instance);
                 drop(state);
-                self.write_join(&world, &instance, if world == LAB_WORLD_A { "Lab World A" } else { "Lab World B" });
+                self.write_join(&world, &instance, if world == LAB_WORLD_A { "Lab World A" } else { "Lab World B" }); // i18n: not shown
                 state = self.state.lock().unwrap();
             }
         }
@@ -323,10 +323,10 @@ impl Game for LabGame {
             world_name: world.world_name.clone().filter(|_| running),
             instance: world.instance.clone().filter(|_| running),
             in_world: world.in_world && running,
-            local_player: (running && state.player_from.is_none_or(|from| Instant::now() >= from)).then(|| "Lab Agent".to_string()),
-            avatar_name: running.then(|| state.worn.as_ref().map_or_else(|| "Lab Avatar".to_string(), |id| format!("Lab Avatar {id}"))),
+            local_player: (running && state.player_from.is_none_or(|from| Instant::now() >= from)).then(|| "Lab Agent".to_string()), // i18n: not shown
+            avatar_name: running.then(|| state.worn.as_ref().map_or_else(|| "Lab Avatar".to_string(), |id| format!("Lab Avatar {id}"))), // i18n: not shown
             others: 0,
-            vrchat_user: Some((LAB_USER.to_string(), "Lab Agent".to_string())),
+            vrchat_user: Some((LAB_USER.to_string(), "Lab Agent".to_string())), // i18n: not shown
             desktop_mode: running.then_some(true),
             osc_found: running,
             camera_pose_known: state.pose_known,
@@ -338,7 +338,7 @@ impl Game for LabGame {
                 progress: 0.5,
             }),
             queue: state.queue.clone(),
-            queue_waits_for: "once VRChat closes or the headset has been off a minute".into(),
+            queue_waits_for: "once VRChat closes or the headset has been off a minute".into(), // i18n: not shown
             steamvr: false,
         }
     }
@@ -358,7 +358,7 @@ impl Game for LabGame {
         let card = |id: &str, name: &str| WorldCard { id: id.to_string(), name: name.to_string(), author: None, occupants: None, last_visit: None };
         Ok(match find {
             Find::Search(query) if !query.to_lowercase().contains("lab") => Vec::new(),
-            _ => vec![card(LAB_WORLD_A, "Lab World A"), card(LAB_WORLD_B, "Lab World B")],
+            _ => vec![card(LAB_WORLD_A, "Lab World A"), card(LAB_WORLD_B, "Lab World B")], // i18n: not shown
         })
     }
 
@@ -368,7 +368,7 @@ impl Game for LabGame {
             return Err(Failure::new("start_failed", "VRChat did not start: the lab says no.", "Ask the person to look at the computer."));
         }
         state.launches.push(plan.clone());
-        let window = LabWindow::open(&self.title).ok_or_else(|| Failure::new("start_failed", "The fake window did not open.", "This is the lab."))?;
+        let window = LabWindow::open(&self.title).ok_or_else(|| Failure::new("start_failed", "The fake window did not open.", "This is the lab."))?; // i18n: not shown
         state.window = Some(window);
         state.pid = Some(std::process::id());
         state.player_from = Some(Instant::now() + state.behaviour.load + state.behaviour.player_after);
@@ -376,7 +376,7 @@ impl Game for LabGame {
         drop(state);
         self.new_log();
         // Like VRChat, its log names the start's own arguments first.
-        self.write_line("Launching with args");
+        self.write_line("Launching with args"); // i18n: not shown
         Ok(())
     }
 
@@ -405,7 +405,7 @@ impl Game for LabGame {
     fn capture(&self, window: &GameWindow, max_width: u32) -> Result<Shot, Failure> {
         match &self.capture_in_child {
             Some(exe) => super::capture::shot_in_child(exe, window.handle, max_width),
-            None => super::capture::shot(window.handle, max_width).map_err(|e| Failure::new("screenshot_failed", e, "This is the lab.")),
+            None => super::capture::shot(window.handle, max_width).map_err(|e| Failure::new("screenshot_failed", e, "This is the lab.")), // i18n: not shown
         }
     }
 
@@ -415,7 +415,7 @@ impl Game for LabGame {
             OscArg::Float(f) => rosc::OscType::Float(f),
         }];
         let bytes = rosc::encoder::encode(&rosc::OscPacket::Message(rosc::OscMessage { addr: address.to_string(), args })).expect("an OSC message encodes");
-        self.osc_out.send_to(&bytes, self.osc_in).map(drop).map_err(|e| Failure::new("osc_failed", e.to_string(), "This is the lab."))?;
+        self.osc_out.send_to(&bytes, self.osc_in).map(drop).map_err(|e| Failure::new("osc_failed", e.to_string(), "This is the lab."))?; // i18n: not shown
         if let Some(also) = self.osc_also {
             let _ = self.osc_out.send_to(&bytes, also);
         }
@@ -525,7 +525,7 @@ impl Default for LabWindow {
 }
 
 impl LabWindow {
-    pub const TITLE: &'static str = "VRChat lab";
+    pub const TITLE: &'static str = "VRChat lab"; // i18n: not shown
 
     /// The fake Quick Menu with its camera icon: what a model looking at the picture finds and clicks.
     #[cfg(windows)]
@@ -608,11 +608,11 @@ mod window {
                             let _ = DeleteObject(brush.into());
                         }
                         let _ = SetBkMode(dc, TRANSPARENT);
-                        let mut text: Vec<u16> = "Camera".encode_utf16().collect();
+                        let mut text: Vec<u16> = "Camera".encode_utf16().collect(); // i18n: not shown
                         let mut area = button;
                         let _ = SetTextColor(dc, COLORREF(0x0000_0000));
                         DrawTextW(dc, &mut text, &mut area, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-                        let mut title: Vec<u16> = "Quick Menu".encode_utf16().collect();
+                        let mut title: Vec<u16> = "Quick Menu".encode_utf16().collect(); // i18n: not shown
                         let mut area = RECT { left: 20, top: 24, right: 300, bottom: 60 };
                         let _ = SetTextColor(dc, COLORREF(0x00FF_FFFF));
                         DrawTextW(dc, &mut title, &mut area, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
@@ -700,11 +700,11 @@ impl StandIn {
                     }
                     let request = String::from_utf8_lossy(&request).to_ascii_lowercase();
                     let (status, body) = if !request.contains("authorization: bearer orbit-lab") {
-                        ("401 Unauthorized", r#"{"message":"expired"}"#.to_string())
+                        ("401 Unauthorized", r#"{"message":"expired"}"#.to_string()) // i18n: not shown
                     } else if request.starts_with("get /features/mine?names=n4n0-vrchat-bridge ") {
                         ("200 OK", format!(r#"{{"features":{{"n4n0-vrchat-bridge":{}}}}}"#, is_owner.load(Ordering::Relaxed)))
                     } else {
-                        ("404 Not Found", r#"{"message":"no"}"#.to_string())
+                        ("404 Not Found", r#"{"message":"no"}"#.to_string()) // i18n: not shown
                     };
                     let _ = write!(
                         stream,

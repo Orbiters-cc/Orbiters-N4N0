@@ -1021,7 +1021,7 @@ impl Flight {
             match self.tasks.pop_front()? {
                 Task::Sweep(group, kind, seconds) => {
                     let Some(poses) = self.sweep(seen, group, kind, seconds) else {
-                        self.log.push(format!("no {kind:?} sweep around {:?}: depth shows no way", group.head));
+                        self.log.push(format!("no {kind:?} sweep around {:?}: depth shows no way", group.head)); // i18n: not shown
                         continue;
                     };
                     return Some(self.flew(poses, false));
@@ -1029,7 +1029,7 @@ impl Flight {
                 Task::Ring(rise, tilt, seconds) => {
                     let ring = Sweep::ring(middle_of(seen, place(&self.start)), self.start[1] + rise, tilt, self.p11);
                     let Some(route) = ring.route(seen, place(&self.at), self.turn) else {
-                        self.log.push(format!("no ring {rise} m up: depth shows no way"));
+                        self.log.push(format!("no ring {rise} m up: depth shows no way")); // i18n: not shown
                         continue;
                     };
                     self.turn = -self.turn;

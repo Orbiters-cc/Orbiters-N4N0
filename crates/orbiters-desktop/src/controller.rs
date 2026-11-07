@@ -16,6 +16,7 @@ use orbiters_core::protocol::{OscSample, PerformanceSpec, SourceSpec, StartCaptu
 use orbiters_core::reconstruction::Event as ReconstructEvent;
 use orbiters_core::settings::{Settings, WhilePlaying};
 use orbiters_core::visited;
+use orbiters_i18n::{mark, tr};
 use orbiters_core::vrchat_log::{LogEvent, LogWatcher, WorldState};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, VecDeque};
@@ -588,7 +589,7 @@ impl Controller {
                     if ended {
                         s.capture.state = CaptureState::Idle;
                         s.capture.from_osc = false;
-                        s.capture.error = Some("The capture worker stopped unexpectedly.".into());
+                        s.capture.error = Some(tr("The capture worker stopped unexpectedly.").into());
                     }
                     ended
                 });
@@ -653,7 +654,7 @@ impl Controller {
             && self.stopping_since.lock().unwrap().is_some_and(|t| t.elapsed() > STOP_LIMIT);
         if stuck {
             *self.stopping_since.lock().unwrap() = None;
-            self.notify(NoticeKind::Error, "The capture worker did not finish saving the session: it was restarted. The session keeps what was saved.");
+            self.notify(NoticeKind::Error, tr("The capture worker did not finish saving the session: it was restarted. The session keeps what was saved."));
             // Dropping the handle ends the process; its end resets the state (`ensure_worker`'s exit).
             let worker = self.worker.lock().unwrap().take();
             drop(worker);
@@ -665,7 +666,7 @@ impl Controller {
             WorkerEvent::Ready { version } => {
                 self.update(|s| {
                     s.worker.ready = true;
-                    s.worker.error = (version != orbiters_core::APP_VERSION).then(|| format!("worker version {version} differs from the app"));
+                    s.worker.error = (version != orbiters_core::APP_VERSION).then(|| tr!("worker version {version} differs from the app", version = version));
                 });
                 // The microphones for the settings.
                 let ctl = self.clone();
@@ -695,7 +696,7 @@ impl Controller {
                 .or_else(|| self.snapshot.lock().unwrap().n4n0.avatar_id.clone());
                 content.merge(&orbiters_core::explicit::manifest_content(avatar.as_deref()));
                 if let Err(e) = content.save(&session_dir) {
-                    self.notify(NoticeKind::Error, format!("Could not save capture content flags: {e}"));
+                    self.notify(NoticeKind::Error, tr!("Could not save capture content flags: {error}", error = e));
                 }
                 self.update(|s| {
                     // Stopping: a stop came before the worker started, and its Stop follows the Start.
@@ -733,7 +734,7 @@ impl Controller {
                 // Stats arrive four times a second; that is also the interface's refresh rate while recording.
                 self.publish();
                 if over_limit {
-                    self.notify(NoticeKind::Warning, "Storage limit reached: recording stopped. Raise the limit in Settings or free space.");
+                    self.notify(NoticeKind::Warning, tr("Storage limit reached: recording stopped. Raise the limit in Settings or free space."));
                     let _ = self.stop_capture();
                 }
             }
@@ -765,7 +766,7 @@ impl Controller {
                     self.update(|s| s.capture.no_strip = Some(why));
                     self.notify(
                         NoticeKind::Error,
-                        format!("No 3D capture: {} frames came, none with the capture strip, so there are no keyframes. {}", manifest.stats.frames, why.message()),
+                        tr!("No 3D capture: {frames} frames came, none with the capture strip, so there are no keyframes. {reason}", frames = manifest.stats.frames, reason = why.message()),
                     );
                 }
                 self.push_notice(Notice::SessionSaved {
@@ -780,7 +781,7 @@ impl Controller {
                     let part = self.burst.lock().unwrap().recording || self.scan.lock().unwrap().recording;
                     if let Some(dir) = session.clone().filter(|_| part) {
                         if let Err(e) = self.queue_reconstruction(dir) {
-                            self.notify(NoticeKind::Warning, format!("A part of the recording, at another resolution, is not reconstructed: {e}"));
+                            self.notify(NoticeKind::Warning, tr!("A part of the recording, at another resolution, is not reconstructed: {error}", error = e));
                         }
                     }
                 }
@@ -1080,7 +1081,7 @@ impl Controller {
                 eprintln!("calibration to the worker: {e:#}");
             }
         }
-        self.notify(NoticeKind::Success, format!("Calibrated: eyes at {:.2} m, hands {:.2} m apart.", info.head_height_m, info.arm_span_m));
+        self.notify(NoticeKind::Success, tr!("Calibrated: eyes at {eyes} m, hands {hands} m apart.", eyes = format!("{:.2}", info.head_height_m), hands = format!("{:.2}", info.arm_span_m)));
         if cfg!(test) {
             return;
         }
@@ -1094,7 +1095,7 @@ impl Controller {
                 .unwrap_or(Ok(()))
                 .and_then(|_| orbiters_core::write_atomic(&path, &serde_json::to_vec_pretty(&stored).unwrap_or_default()));
             if let Err(e) = r {
-                ctl.notify(NoticeKind::Error, format!("Could not keep the calibration: {e}"));
+                ctl.notify(NoticeKind::Error, tr!("Could not keep the calibration: {error}", error = e));
             }
         });
     }
@@ -1477,7 +1478,7 @@ impl Controller {
                 }
                 if let Err(e) = s.save() {
                     if let Some(ctl) = ctl.upgrade() {
-                        ctl.notify(NoticeKind::Error, format!("Could not save the settings: {e}"));
+                        ctl.notify(NoticeKind::Error, tr!("Could not save the settings: {error}", error = e));
                     }
                 }
             };
@@ -1642,8 +1643,12 @@ impl Controller {
         let sent = crate::mixer_inbox::session_for_mixer(&dir, &crate::mixer_inbox::exports_dir())?;
         crate::mixer_inbox::send_splats(editor, &sent, &title)?;
         let project = if editor.project_name.is_empty() { "Unity".to_string() } else { editor.project_name.clone() };
-        let without = if sent != dir { ", without the splats hidden or deleted in its 3D view" } else { "" };
-        self.notify(NoticeKind::Success, format!("Sent to Mixer in {project}{without}: the splats appear in its open scene."));
+        let text = if sent != dir {
+            tr!("Sent to Mixer in {project}, without the splats hidden or deleted in its 3D view: the splats appear in its open scene.", project = project)
+        } else {
+            tr!("Sent to Mixer in {project}: the splats appear in its open scene.", project = project)
+        };
+        self.notify(NoticeKind::Success, text);
         Ok(())
     }
 
@@ -1652,7 +1657,7 @@ impl Controller {
         // Splat edits name splats of the result they were made on, so a finished run replaces them with it; every press
         // that can lose them asks first (pages::reconstruct_again).
         if self.queue_reconstruction(dir)? {
-            self.notify(NoticeKind::Info, format!("Waiting its turn: the reconstruction starts {}.", self.reconstruction_waits_for()));
+            self.notify(NoticeKind::Info, tr!("Waiting its turn: the reconstruction starts {when}.", when = tr(self.reconstruction_waits_for())));
         }
         Ok(())
     }
@@ -1660,11 +1665,11 @@ impl Controller {
     /// What a waiting reconstruction waits for, as the end of "it starts …".
     pub(crate) fn reconstruction_waits_for(&self) -> &'static str {
         if self.is_capturing() {
-            "after the capture"
+            mark("after the capture")
         } else if self.reconstruction.lock().unwrap().is_some() {
-            "after the ones before it"
+            mark("after the ones before it")
         } else {
-            "once VRChat closes or the headset has been off a minute"
+            mark("once VRChat closes or the headset has been off a minute")
         }
     }
 
@@ -1697,11 +1702,11 @@ impl Controller {
         let Some(integrated) = self.reconstruction.lock().unwrap().as_ref().filter(|r| !r.told).map(|r| r.integrated) else { return };
         let playing_there = self.settings().reconstruct_while_playing == WhilePlaying::IntegratedGpu && self.snapshot.lock().unwrap().vrchat.running;
         let says = if self.held_for_vrchat() {
-            Some("VRChat is running: the reconstruction is paused. It continues from where it was once VRChat closes or the headset has been off a minute.")
+            Some(tr("VRChat is running: the reconstruction is paused. It continues from where it was once VRChat closes or the headset has been off a minute."))
         } else if integrated && !playing_there {
-            Some("The reconstruction continues from where it was on the graphics card.")
+            Some(tr("The reconstruction continues from where it was on the graphics card."))
         } else if !integrated && playing_there {
-            Some("VRChat started: the reconstruction continues from where it was on the integrated GPU.")
+            Some(tr("VRChat started: the reconstruction continues from where it was on the integrated GPU."))
         } else {
             None
         };
@@ -1723,7 +1728,7 @@ impl Controller {
     pub(crate) fn capture_takes_the_gpu(&self) {
         crate::upload_prep::pause();
         if self.pause_reconstruction() {
-            self.notify(NoticeKind::Info, "Reconstruction paused: a capture started. It continues from where it was when the capture ends.");
+            self.notify(NoticeKind::Info, tr("Reconstruction paused: a capture started. It continues from where it was when the capture ends."));
         }
     }
 
@@ -1933,7 +1938,7 @@ impl Controller {
                 Ok(()) => return,
                 Err(e) => {
                     let name = dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-                    self.notify(NoticeKind::Error, format!("{name} was not reconstructed: {e}"));
+                    self.notify(NoticeKind::Error, tr!("{name} was not reconstructed: {error}", name = name, error = e));
                     self.forget_paused(&dir);
                 }
             }
@@ -1984,7 +1989,7 @@ impl Controller {
                     }
                 });
                 if over {
-                    self.notify(NoticeKind::Info, "The paused reconstruction could not continue from where it was (N4N0 was updated, or its file was damaged): it starts over.");
+                    self.notify(NoticeKind::Info, tr("The paused reconstruction could not continue from where it was (N4N0 was updated, or its file was damaged): it starts over."));
                 }
             }
             ReconstructEvent::Resumed { iteration, iterations, gaussians, psnr, seconds } => self.update(|s| {
@@ -2015,8 +2020,12 @@ impl Controller {
                     });
                 }
                 if let Some(message) = message {
-                    let then = if kept { "It continues from an earlier pause" } else { "It starts over" };
-                    self.notify(NoticeKind::Warning, format!("The reconstruction's progress could not be kept ({message}). {then} when it can."));
+                    let text = if kept {
+                        tr!("The reconstruction's progress could not be kept ({message}). It continues from an earlier pause when it can.", message = message)
+                    } else {
+                        tr!("The reconstruction's progress could not be kept ({message}). It starts over when it can.", message = message)
+                    };
+                    self.notify(NoticeKind::Warning, text);
                 }
             }
             ReconstructEvent::Progress { iteration, iterations, gaussians, psnr, seconds, .. } => self.update(|s| {
@@ -2037,11 +2046,12 @@ impl Controller {
                     shares::reconstructed(&dir);
                     crate::upload_prep::queue(dir);
                 }
-                let quality = report.psnr_held_out.map(|p| format!(", {p:.1} dB on views it never saw")).unwrap_or_default();
-                self.notify(
-                    NoticeKind::Success,
-                    format!("Reconstruction finished: {} splats{quality}.", orbiters_ui::format::integer(report.gaussians as f64)),
-                );
+                let splats = orbiters_ui::format::integer(report.gaussians as f64);
+                let text = match report.psnr_held_out {
+                    Some(p) => tr!("Reconstruction finished: {splats} splats, {quality} dB on views it never saw.", splats = splats, quality = format!("{p:.1}")),
+                    None => tr!("Reconstruction finished: {splats} splats.", splats = splats),
+                };
+                self.notify(NoticeKind::Success, text);
                 refresh_storage(self);
                 self.bump_library();
             }
@@ -2050,7 +2060,7 @@ impl Controller {
                     self.reconstruction_failures.lock().unwrap().insert(session, message.clone());
                 }
                 self.mark_reconstruction_over();
-                self.notify(NoticeKind::Error, format!("Reconstruction failed: {message}"));
+                self.notify(NoticeKind::Error, tr!("Reconstruction failed: {message}", message = message));
             }
         }
     }
@@ -2075,7 +2085,7 @@ impl Controller {
             integrated,
             move |line| {
                 let mut log = log.worker_log.lock().unwrap();
-                log.push_back(format!("prepare upload: {line}"));
+                log.push_back(format!("prepare upload: {line}")); // i18n: not shown
                 while log.len() > 400 {
                     log.pop_front();
                 }
@@ -2103,7 +2113,7 @@ impl Controller {
         let mut keep_on_show = false;
         if let Some(r) = ended {
             if !r.told {
-                self.notify(NoticeKind::Error, "The reconstruction worker stopped unexpectedly.");
+                self.notify(NoticeKind::Error, tr("The reconstruction worker stopped unexpectedly."));
             }
             // Stopped, or crashed (what it would go on from may be why): the next run starts over.
             if r.stopped || !r.told {
@@ -2438,10 +2448,10 @@ fn spawn_watchers(ctl: Shared) {
                                     if paused {
                                         let _ = ctl.pause_capture(true);
                                     }
-                                    let told = if paused { "New world: a new session, paused like the last one." } else { "New world: started a new session." };
+                                    let told = if paused { tr("New world: a new session, paused like the last one.") } else { tr("New world: started a new session.") };
                                     ctl.notify(NoticeKind::Info, told);
                                 }
-                                Err(e) => ctl.notify(NoticeKind::Error, format!("New world: the new session did not start: {e}")),
+                                Err(e) => ctl.notify(NoticeKind::Error, tr!("New world: the new session did not start: {error}", error = e)),
                             }
                         }
                     } else {

@@ -151,7 +151,7 @@ mod imp {
     pub fn close_window(handle: isize) -> Result<(), Failure> {
         // SAFETY: posting a message; a window gone meanwhile only makes this fail.
         unsafe { PostMessageW(Some(hwnd(handle)), WM_CLOSE, WPARAM(0), LPARAM(0)) }.map_err(|e| {
-            Failure::new("close_failed", format!("Windows did not take the close request: {e}"), "Call get_state: the game may have gone already.")
+            Failure::new("close_failed", format!("Windows did not take the close request: {e}"), "Call get_state: the game may have gone already.") // i18n: not shown
         })
     }
 
@@ -274,7 +274,7 @@ mod imp {
             ));
         };
         command.stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
-        command.spawn().map(drop).map_err(|e| Failure::new("start_failed", format!("VRChat did not start: {e}"), "Ask the person to look at the computer."))
+        command.spawn().map(drop).map_err(|e| Failure::new("start_failed", format!("VRChat did not start: {e}"), "Ask the person to look at the computer.")) // i18n: not shown
     }
 }
 

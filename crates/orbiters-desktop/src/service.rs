@@ -8,6 +8,7 @@ use crate::ipc::{self, Endpoint, N4n0Command, Role, ToClient, ToService};
 use crate::mailbox::Mailbox;
 use crate::single;
 use orbiters_core::settings::Settings;
+use orbiters_i18n::tr;
 use std::io::BufReader;
 use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
@@ -263,7 +264,7 @@ impl Service {
         let window_open = self.links.lock().unwrap().iter().any(|l| l.role == Role::Window);
         match controller::update::start_setup(setup, dir, !window_open) {
             Ok(()) => self.quit(),
-            Err(e) => self.ctl.notify(NoticeKind::Error, format!("The update could not start: {e}")),
+            Err(e) => self.ctl.notify(NoticeKind::Error, tr!("The update could not start: {error}", error = e)),
         }
     }
 
@@ -287,7 +288,7 @@ impl Service {
             ToService::Trash { dir } => {
                 let r = ctl.trash_session(&dir);
                 if r.is_ok() {
-                    ctl.notify(NoticeKind::Success, format!("Session moved to the {}.", crate::words::BIN));
+                    ctl.notify(NoticeKind::Success, tr!("Session moved to the {bin}.", bin = tr(crate::words::BIN)));
                 }
                 report(r);
             }
@@ -300,7 +301,7 @@ impl Service {
                 let c = ctl.clone();
                 std::thread::spawn(move || {
                     if let Err(e) = c.sign_in() {
-                        c.notify(NoticeKind::Error, format!("Could not start the sign-in: {e}"));
+                        c.notify(NoticeKind::Error, tr!("Could not start the sign-in: {error}", error = e));
                     }
                 });
             }

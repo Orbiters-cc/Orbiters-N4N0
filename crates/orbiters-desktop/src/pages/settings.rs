@@ -29,6 +29,7 @@ pub struct State {
     log_open: bool,
     picker: Option<(Folder, Job<Option<PathBuf>>)>,
     mic: MicTest,
+    mic_grid: super::mic_grid::State,
     /// "Sign out" was pressed once: it asks before signing every tool out.
     confirm_sign_out: bool,
     /// Whether Windows starts the app: read when the page opens (on the visit it was read), set at once by its switch
@@ -51,6 +52,7 @@ impl State {
     /// Ends the mic test (leaving the page).
     pub fn stop_mic_test(&mut self) {
         self.mic = MicTest::default();
+        self.mic_grid.stop();
         self.vr_audio.stop();
         self.vrchat.password.clear();
         self.vrchat.code.clear();
@@ -119,6 +121,10 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
             let mut m = super::Masonry::new(ui, "settings");
             m.add(1, |ui| account(ui, cx, &mut state.confirm_sign_out));
             m.add(13, |ui| apply |= super::language_card::card(ui, cx, 13, &mut draft));
+            // Setting Windows' default is Windows' alone.
+            if cfg!(windows) {
+                m.add(14, |ui| super::mic_grid::card(ui, cx, 14, &mut state.mic_grid));
+            }
             m.add(10, |ui| vrchat_account(ui, cx, &mut state.vrchat));
             // Only for an account the server says has it: nobody else sees a trace of it.
             if snap.bridge.allowed && orbiters_core::osc::VRCHAT_RUNS_HERE {
@@ -1101,6 +1107,10 @@ fn orbit_settings(ui: &mut egui::Ui, snap: &Snapshot, orbit: &mut orbiters_core:
     widgets::separator(ui);
     widgets::field(ui, "Around the Action Menu's wheel", Some("Orbiters around VRChat's own wheel, with it, whatever N4N0's menu does: opened with R in desktop mode, or by holding the menu button in VR."), 48.0, |ui| {
         apply |= widgets::toggle(ui, "orbit-wheel", &mut orbit.wheel);
+    });
+    widgets::separator(ui);
+    widgets::field(ui, "Around the camera", Some("In a headset: 3D pictures and the QR code beside VRChat's camera. It looks for the camera's panel on VRChat's window while the camera is open, and keeps nothing it sees."), 48.0, |ui| {
+        apply |= widgets::toggle(ui, "orbit-camera", &mut orbit.camera_tiles);
     });
     widgets::separator(ui);
     widgets::field(ui, "Around the Quick Menu", Some("Orbiters beside VRChat's own Quick Menu, with it, whatever N4N0's menu does: opened with Esc in desktop mode, or by a short press of the menu button in VR."), 48.0, |ui| {

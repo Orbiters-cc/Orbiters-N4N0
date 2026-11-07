@@ -11,6 +11,7 @@ pub mod header;
 pub mod home;
 pub mod language_card;
 pub mod mic;
+pub mod mic_grid;
 pub mod n4n0;
 pub mod network;
 pub mod projects;

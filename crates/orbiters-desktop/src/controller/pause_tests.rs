@@ -22,7 +22,12 @@ fn running(ctl: &Shared, dir: &Path, integrated: bool, lines: &str) {
     cmd.raw_arg(format!(r#"/S /C "set /p asked= {lines}""#));
     let events = ctl.clone();
     let exit = ctl.clone();
-    let handle = ReconstructHandle::spawn_command(cmd, move |e| events.on_reconstruct_event(e), |_| {}, move || exit.on_reconstruct_exit()).unwrap();
+    let exits = stand_in_exits(ctl);
+    exits.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let handle = ReconstructHandle::spawn_command(cmd, move |e| events.on_reconstruct_event(e), |_| {}, move || {
+        exit.on_reconstruct_exit();
+        exits.1.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }).unwrap();
     *ctl.reconstruction.lock().unwrap() = Some(Reconstruction { handle, dir: dir.to_path_buf(), told: false, integrated, pausing: None, freed: false, stopped: false });
     ctl.update(|s| {
         let mut job = ReconstructionJob::new(dir.to_path_buf(), integrated);
@@ -34,9 +39,27 @@ fn running(ctl: &Shared, dir: &Path, integrated: bool, lines: &str) {
 
 const PAUSED: &str = r#"& echo {"event":"pausing"} & echo {"event":"paused","kept":true,"message":null}"#;
 
+/// How many stand-ins each controller started, and how many finished leaving. `on_reconstruct_exit` takes the run off
+/// `ctl.reconstruction` first and only then deletes what it leaves and clears what shows, so a run being gone from there
+/// does not mean its exit is over: on a busy computer a test looking at that moment saw the old state.
+fn stand_in_exits(ctl: &Shared) -> Arc<(std::sync::atomic::AtomicUsize, std::sync::atomic::AtomicUsize)> {
+    static EXITS: Mutex<Vec<(usize, Arc<(std::sync::atomic::AtomicUsize, std::sync::atomic::AtomicUsize)>)>> = Mutex::new(Vec::new());
+    let id = Arc::as_ptr(ctl) as usize;
+    let mut all = EXITS.lock().unwrap();
+    if let Some((_, e)) = all.iter().find(|(i, _)| *i == id) {
+        return e.clone();
+    }
+    let e = Arc::new(Default::default());
+    all.push((id, Arc::clone(&e)));
+    e
+}
+
+/// Waits until every stand-in of `ctl` has left and its exit is over.
 fn gone(ctl: &Shared) {
+    use std::sync::atomic::Ordering::SeqCst;
+    let exits = stand_in_exits(ctl);
     let until = Instant::now() + Duration::from_secs(30);
-    while ctl.reconstruction.lock().unwrap().is_some() {
+    while ctl.reconstruction.lock().unwrap().is_some() || exits.1.load(SeqCst) < exits.0.load(SeqCst) {
         assert!(Instant::now() < until, "the stand-in never left");
         std::thread::sleep(Duration::from_millis(10));
     }

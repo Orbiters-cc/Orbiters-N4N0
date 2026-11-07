@@ -55,6 +55,8 @@ pub fn adapter_luid(adapter: &wgpu::Adapter) -> Option<u64> {
 
 /// Draws a capture's faces into textures.
 pub struct FaceRenderer {
+    /// The middle and reach of what is drawn, where marks leave the rest out.
+    clipped: Option<(V3, f32)>,
     pub device: wgpu::Device,
     pub queue: wgpu::Queue,
     gpu: Gpu,
@@ -118,12 +120,46 @@ impl FaceRenderer {
     pub fn new(device: wgpu::Device, queue: wgpu::Queue) -> Self {
         let gpu = Gpu::renderer(device.clone(), queue.clone());
         let resample = Resample::new(&device);
-        Self { transparent: false, device, queue, gpu, scratch: None, masters: Vec::new(), wide: [None, None], resample, background: BACKGROUND, total: 0, overflows_seen: 0 }
+        Self { clipped: None, transparent: false, device, queue, gpu, scratch: None, masters: Vec::new(), wide: [None, None], resample, background: BACKGROUND, total: 0, overflows_seen: 0 }
+    }
+
+    /// Only what lies within `reach` of `middle` is drawn, with the middle moved away from where the splats are sorted from. `None`, all of them again. Asked with each batch, read
+    /// again when it moved enough to see. On this thread, as a capture has millions: the marks themselves cost a frame nothing (`Gpu::set_marks`).
+    pub fn clip(&mut self, clip: Option<&(V3, f32, std::sync::Arc<Capture>)>) {
+        let Some((middle, reach, capture)) = clip else {
+            if self.clipped.take().is_some() {
+                self.gpu.count = self.total;
+                self.gpu.set_marks(&[]);
+            }
+            return;
+        };
+        let near = |a: f32, b: f32| (a - b).abs() < *reach * 0.02;
+        if self.clipped.is_some_and(|(c, r)| near(c[0], middle[0]) && near(c[2], middle[2]) && near(r, *reach)) {
+            return;
+        }
+        self.clipped = Some((*middle, *reach));
+        let within = reach * reach;
+        let marks: Vec<u8> = capture
+            .gaussians
+            .means
+            .iter()
+            .map(|m| {
+                let (x, y, z) = (m[0] - middle[0], m[1] - middle[1], m[2] - middle[2]);
+                if x * x + y * y + z * z <= within {
+                    0
+                } else {
+                    2
+                }
+            })
+            .collect();
+        self.gpu.count = self.total;
+        self.gpu.set_marks(&marks);
     }
 
     /// Uploads `capture`'s splats and sky map (the first ones drawn at most later: [`FaceRenderer::render`]'s count).
     pub fn load(&mut self, capture: &Capture) -> anyhow::Result<()> {
         self.gpu.upload(&capture.gaussians);
+        self.clipped = None;
         self.gpu.set_sky(capture.sky.as_ref().map(|s| (s.width, s.rgb.as_slice())))?;
         self.background = capture.sky.as_ref().map(|s| s.horizon()).or_else(|| orbiters_reconstruct::sky::horizon(&capture.gaussians)).unwrap_or(BACKGROUND);
         self.total = capture.gaussians.len();

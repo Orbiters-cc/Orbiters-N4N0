@@ -133,11 +133,11 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
     let targets: Vec<eframe::wgpu::Texture> = (0..12).map(|_| render::face_texture(&device, cube.width())).collect();
     let target_refs: Vec<&eframe::wgpu::Texture> = targets.iter().collect();
     // The cube first, drawn whole from where the person stood (as the overlay does for a new cube).
-    let whole = Job { id: 1, cube, cube_index: 0, placement, eyes, work: Work::Faces((0..6).map(|f| (f, 0)).collect()), count, wait: 0 };
+    let whole = Job { id: 1, cube, cube_index: 0, placement, eyes, work: Work::Faces((0..6).map(|f| (f, 0)).collect()), count, clip: None, wait: 0 };
     view::draw(&mut renderer, &whole, &target_refs)?;
     let cameras = wide_cameras(&moved_views, tangents, Quality::Balanced, independent);
     let covered: Vec<(usize, usize)> = (0..6).filter(|&f| cameras.iter().any(|c| cube.face_in(f, c))).map(|f| (f, 1)).collect();
-    let batch = Job { id: 2, cube, cube_index: 0, placement, eyes: new_eyes, work: Work::Wide { cameras, faces: covered.clone() }, count, wait: 0 };
+    let batch = Job { id: 2, cube, cube_index: 0, placement, eyes: new_eyes, work: Work::Wide { cameras, faces: covered.clone() }, count, clip: None, wait: 0 };
     view::draw(&mut renderer, &batch, &target_refs)?;
     let after: Vec<wgpu_face::Face> = (0..6)
         .map(|f| -> anyhow::Result<wgpu_face::Face> {
@@ -208,7 +208,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             let cameras = wide_cameras(&turned, tangents, quality, independent);
             pixels = cameras[0].width * cameras[0].height;
             let faces: Vec<(usize, usize)> = (0..6).filter(|&f| cameras.iter().any(|c| cube.face_in(f, c))).map(|f| (f, round % 2)).collect();
-            let job = Job { id: round as u64, cube, cube_index: 0, placement, eyes, work: Work::Wide { cameras, faces }, count, wait: 0 };
+            let job = Job { id: round as u64, cube, cube_index: 0, placement, eyes, work: Work::Wide { cameras, faces }, count, clip: None, wait: 0 };
             let (drawn, t) = render::timed(|| view::draw(&mut renderer, &job, &target_refs));
             drawn?;
             if round >= 1 {
@@ -366,7 +366,7 @@ fn load_run(
     let count = capture.gaussians.len();
     view::draw(
         &mut renderer,
-        &Job { id: 0, cube, cube_index: 0, placement, eyes: eyes0, work: Work::Faces((0..6).map(|f| (f, 0)).collect()), count, wait: 0 },
+        &Job { id: 0, cube, cube_index: 0, placement, eyes: eyes0, work: Work::Faces((0..6).map(|f| (f, 0)).collect()), count, clip: None, wait: 0 },
         &target_refs,
     )?;
     let start = std::time::Instant::now();
@@ -411,7 +411,7 @@ fn load_run(
         last = Some((eyes, looking));
         let cameras = wide_cameras(&views, tangents, quality, independent);
         let faces: Vec<(usize, usize)> = (0..6).filter(|&f| cameras.iter().any(|c| cube.face_in(f, c))).map(|f| (f, (batches % 2) as usize)).collect();
-        let job = Job { id: batches, cube, cube_index: 0, placement, eyes, work: Work::Wide { cameras, faces }, count, wait: 0 };
+        let job = Job { id: batches, cube, cube_index: 0, placement, eyes, work: Work::Wide { cameras, faces }, count, clip: None, wait: 0 };
         let asked = std::time::Instant::now();
         pacer.admitted(asked, batches);
         let (drawn, ms) = render::timed(|| view::draw(&mut renderer, &job, &target_refs));

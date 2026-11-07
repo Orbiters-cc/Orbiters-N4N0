@@ -189,6 +189,8 @@ pub struct OrbitSettings {
     pub wheel: bool,
     /// Panels around the Quick Menu.
     pub quick_menu: bool,
+    /// Tiles around VRChat's camera panel, in a headset: found on VRChat's window while its camera is open.
+    pub camera_tiles: bool,
     /// How large the panels are in VR against where they are measured to be, one of [`OrbitSettings::VR_SIZES`]: VRChat
     /// scales its menus with things only the headset shows.
     pub vr_size: f32,
@@ -229,7 +231,7 @@ impl OrbitSettings {
 
 impl Default for OrbitSettings {
     fn default() -> Self {
-        Self { layout: OrbitLayout::Wing, theme: MenuLook::Modern, accent: [0x00, 0xda, 0x6d], retro_color: [0x2b, 0xe3, 0x6a], retro_pictures: false, display: MenuDisplay::AvatarScreen, wheel: true, quick_menu: true, vr_size: 1.0, vr_motion: VrMotion::Springy, vr_smoothing_quick_menu_ms: 35.0, vr_smoothing_wheel_ms: 20.0 }
+        Self { camera_tiles: true, layout: OrbitLayout::Wing, theme: MenuLook::Modern, accent: [0x00, 0xda, 0x6d], retro_color: [0x2b, 0xe3, 0x6a], retro_pictures: false, display: MenuDisplay::AvatarScreen, wheel: true, quick_menu: true, vr_size: 1.0, vr_motion: VrMotion::Springy, vr_smoothing_quick_menu_ms: 35.0, vr_smoothing_wheel_ms: 20.0 }
     }
 }
 

@@ -734,7 +734,8 @@ impl OrbitVr {
                 Some((was, smooth)) if *was == hand => smooth,
                 held => &mut held.insert((hand, Smooth::at(&pose))).1,
             };
-            (pose, smooth.step(&pose, settings.vr_smoothing_ms.max(0.0) / 1000.0, dt))
+            let ms = if menu == Some(Around::Wheel) { settings.vr_smoothing_wheel_ms } else { settings.vr_smoothing_quick_menu_ms };
+            (pose, smooth.step(&pose, ms.max(0.0) / 1000.0, dt))
         });
         let jelly = &mut self.jelly;
         let aligning = self.aligning.is_some();

@@ -1121,8 +1121,12 @@ fn orbit_settings(ui: &mut egui::Ui, snap: &Snapshot, orbit: &mut orbiters_core:
         apply |= widgets::segmented(ui, "orbit-vr-motion", &mut orbit.vr_motion, &motions, true);
     });
     widgets::separator(ui);
-    widgets::field(ui, "Smoothing", Some("How softly what is rigid follows your hand: what opens in front of VRChat's menu, always, and the tiles with Match VRChat. Move it while shaking your hand in the headset, until it stays with VRChat's menu."), 300.0, |ui| {
-        apply |= widgets::slider(ui, "orbit-vr-smoothing", &mut orbit.vr_smoothing_ms, 0.0..=150.0, 5.0, |v| if v == 0.0 { "None".into() } else { format!("{v:.0} ms") });
+    let smoothing = |v: f32| if v == 0.0 { "None".to_string() } else { format!("{v:.0} ms") };
+    widgets::field(ui, "Smoothing on the Quick Menu", Some("How softly what is rigid follows your hand: what opens in front of VRChat's menu, always, and the tiles when they match it. About 35 ms lines up with VRChat."), 300.0, |ui| {
+        apply |= widgets::slider(ui, "orbit-vr-smoothing-quick-menu", &mut orbit.vr_smoothing_quick_menu_ms, 0.0..=150.0, 5.0, smoothing);
+    });
+    widgets::field(ui, "Smoothing on the wheel", Some("The same around VRChat's Action Menu. About 20 ms lines up with VRChat."), 300.0, |ui| {
+        apply |= widgets::slider(ui, "orbit-vr-smoothing-wheel", &mut orbit.vr_smoothing_wheel_ms, 0.0..=150.0, 5.0, smoothing);
     });
     let now = if !orbiters_core::osc::VRCHAT_RUNS_HERE {
         Some("VRChat runs on another computer here, so nothing can appear around its menus.".to_string())

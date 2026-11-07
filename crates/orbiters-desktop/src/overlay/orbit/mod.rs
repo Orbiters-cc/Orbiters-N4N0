@@ -572,6 +572,8 @@ pub struct Panels {
     seek_asked: Option<(u32, Instant)>,
     /// Captures of this computer's gallery asked to show in 3D, for the view that shows them.
     local_asked: Vec<super::worlds::Relayed>,
+    /// Lists give at their ends and come back: not with Reduce motion.
+    elastic: bool,
     /// How fast the list was thrown, in its units a second.
     throw: f32,
     /// The invite asked for last, and when; the result whose link was copied, and when.
@@ -630,6 +632,7 @@ impl Panels {
             seek_late: None,
             seek_asked: None,
             local_asked: Vec::new(),
+            elastic: true,
             throw: 0.0,
             invited: None,
             copied: None,
@@ -840,10 +843,15 @@ impl Panels {
         }
     }
 
-    /// The mouse's wheel, in notches, up positive: moves the sheet's list, when it has one.
+    /// The mouse's wheel, in notches, up positive: moves the sheet's list, when it has one. At its end it gives a little.
     pub fn wheel(&mut self, notches: f32) {
         if let Some(sheet) = self.facts.sheet.filter(|_| self.facts.opened.is_none()) {
-            self.gallery_to = (self.gallery_to - notches * 180.0).clamp(0.0, panels::max_scroll(sheet, &self.facts));
+            let max = panels::max_scroll(sheet, &self.facts);
+            let to = self.gallery_to - notches * 180.0;
+            self.gallery_to = to.clamp(0.0, max);
+            if self.elastic && to != self.gallery_to {
+                self.throw = (to - self.gallery_to).signum() * WHEEL_KICK;
+            }
         }
     }
 
@@ -914,6 +922,7 @@ impl Panels {
         if self.open.is_none() {
             return;
         }
+        self.elastic = !snap.settings.reduce_motion;
         let in_gallery = self.facts.sheet == Some(Sheet::Pictures);
         let listed = in_gallery && self.recents.follow((library, crate::worlds::picture_revision()), snap.settings.sessions_dir.clone(), snap.settings.picture_folders.clone());
         let arranged = in_gallery && self.recents.arrange(self.facts.gallery_filter, snap.settings.photos_layout);
@@ -1170,7 +1179,7 @@ impl Panels {
                 drag.measure(to, now);
                 Some(to)
             } else {
-                drag.follow(p.y, panels::max_scroll(sheet, &self.facts), now)
+                drag.follow(p.y, panels::max_scroll(sheet, &self.facts), self.elastic, now)
             };
             if let Some(to) = to {
                 self.gallery_to = to;
@@ -1664,22 +1673,15 @@ impl Panels {
         for panel in self.list.iter_mut().chain(self.takeover.iter_mut()) {
             panel.appear.step(dt);
         }
-        // A list thrown goes on, slowing, until it stops or meets its end.
-        if self.throw != 0.0 {
+        // A list thrown goes on, slowing, past its end and back; or it glides to where its wheel sent it. Only its page paints.
+        if self.drag.is_none() {
             let max = self.facts.sheet.map_or(0.0, |sheet| panels::max_scroll(sheet, &self.facts));
-            let to = self.gallery_to + self.throw * dt;
-            self.gallery_to = to.clamp(0.0, max);
-            self.throw *= (-dt * THROW_SLOWS).exp();
-            if self.throw.abs() < 30.0 || to != self.gallery_to {
-                self.throw = 0.0;
-            }
-        }
-        // The gallery glides to where its wheel sent it. Only its page paints.
-        let off = self.gallery_to - self.facts.gallery_scroll;
-        if off != 0.0 {
-            self.facts.gallery_scroll = if off.abs() < 0.5 { self.gallery_to } else { self.facts.gallery_scroll + off * (1.0 - (-dt * 18.0).exp()) };
-            if let Some(panel) = self.takeover.as_mut() {
-                panel.dirty = true;
+            let was = self.facts.gallery_scroll;
+            (self.facts.gallery_scroll, self.throw, self.gallery_to) = scroll_step(was, self.throw, self.gallery_to, max, dt, self.elastic);
+            if self.facts.gallery_scroll != was {
+                if let Some(panel) = self.takeover.as_mut() {
+                    panel.dirty = true;
+                }
             }
         }
     }
@@ -1812,6 +1814,12 @@ fn shown_playing(read: bool, asked: Option<(bool, Instant)>, now: Instant) -> bo
 
 /// How fast a list thrown slows down: by e every this fraction of a second's inverse.
 const THROW_SLOWS: f32 = 2.2;
+/// How a list past its end is pulled back, and how much that is held back: a little under critical, so it settles softly.
+const BOUNCE_PULL: f32 = 150.0;
+const BOUNCE_DAMP: f32 = 21.0;
+/// The speed a list runs past its end at, at most; and what a notch of the wheel at its end gives it.
+const BOUNCE_SPEED: f32 = 2600.0;
+const WHEEL_KICK: f32 = 420.0;
 
 /// The fastest a list can be thrown, in its units a second.
 const MAX_THROW: f32 = 6000.0;
@@ -1838,11 +1846,12 @@ impl Drag {
         Self { from: None, scroll, action, moved: bar, bar, speed: 0.0, last: None }
     }
 
-    /// The pointer at `y`: where the list goes, when it goes.
-    fn follow(&mut self, y: f32, max: f32, now: Instant) -> Option<f32> {
+    /// The pointer at `y`: where the list goes, when it goes. Past its ends it follows less and less.
+    fn follow(&mut self, y: f32, max: f32, elastic: bool, now: Instant) -> Option<f32> {
         let from = *self.from.get_or_insert(y);
         self.moved |= (y - from).abs() > Self::SLOP;
-        let to = self.moved.then(|| (self.scroll + from - y).clamp(0.0, max))?;
+        let wanted = self.scroll + from - y;
+        let to = self.moved.then(|| if elastic { rubber_band(wanted, max) } else { wanted.clamp(0.0, max) })?;
         self.measure(to, now);
         Some(to)
     }
@@ -1869,6 +1878,83 @@ impl Drag {
             self.speed.clamp(-MAX_THROW, MAX_THROW)
         }
     }
+}
+
+/// How far a list is shown for a place `wanted` past its ends: all of it within them, and beyond less and less, as on an
+/// iPhone or VRChat's own menus (Enzo: "a bouncing / elastic effect when reaching the limit").
+fn rubber_band(wanted: f32, max: f32) -> f32 {
+    const FOLLOWS: f32 = 0.55;
+    const AT_MOST: f32 = 300.0;
+    let band = |past: f32| (1.0 - 1.0 / (past * FOLLOWS / AT_MOST + 1.0)) * AT_MOST;
+    if wanted < 0.0 {
+        -band(-wanted)
+    } else if wanted > max {
+        max + band(wanted - max)
+    } else {
+        wanted
+    }
+}
+
+/// A frame of a list let go: where it is `x`, how fast it goes `v`, and where its wheel sent it `to`, from nought to `max`.
+/// Thrown, it slows, runs past its end and is pulled back, without going beyond it the other way. With no give, it stops
+/// there.
+fn scroll_step(mut x: f32, mut v: f32, mut to: f32, max: f32, dt: f32, elastic: bool) -> (f32, f32, f32) {
+    let within = |x: f32| x >= 0.0 && x <= max;
+    if !elastic {
+        if v != 0.0 {
+            to = (x + v * dt).clamp(0.0, max);
+            let stopped = to == 0.0 || to == max;
+            x = to;
+            v *= (-dt * THROW_SLOWS).exp();
+            if v.abs() < 30.0 || stopped {
+                v = 0.0;
+            }
+            return (x, v, to);
+        }
+        let off = to - x;
+        return (if off.abs() < 0.5 { to } else { x + off * (1.0 - (-dt * 18.0).exp()) }, 0.0, to.clamp(0.0, max));
+    }
+    if v == 0.0 && within(x) {
+        // Where its wheel sent it, or nowhere.
+        let off = to - x;
+        return (if off.abs() < 0.5 { to } else { x + off * (1.0 - (-dt * 18.0).exp()) }, 0.0, to.clamp(0.0, max));
+    }
+    // In small steps, so a slow frame does not fling it.
+    let steps = (dt / (1.0 / 240.0)).ceil().clamp(1.0, 16.0);
+    let h = dt / steps;
+    let end_then = |x: f32| if x < 0.0 { 0.0 } else { max };
+    for _ in 0..steps as u32 {
+        if within(x) {
+            v *= (-h * THROW_SLOWS).exp();
+            let next = x + v * h;
+            // What runs past its end goes on no faster than comes back in a moment.
+            if !within(next) {
+                v = v.clamp(-BOUNCE_SPEED, BOUNCE_SPEED);
+            }
+            x = next;
+            if within(x) && v.abs() < 30.0 {
+                v = 0.0;
+                break;
+            }
+        } else {
+            let end = end_then(x);
+            let outside = x < 0.0;
+            v += (-BOUNCE_PULL * (x - end) - BOUNCE_DAMP * v) * h;
+            x += v * h;
+            // Back at its end: it rests there.
+            if (x >= end) == outside {
+                x = end;
+                v = 0.0;
+                break;
+            }
+        }
+    }
+    // Barely past and barely moving: there.
+    if !within(x) && (x - end_then(x)).abs() < 0.3 && v.abs() < 8.0 {
+        x = end_then(x);
+        v = 0.0;
+    }
+    (x, v, x.clamp(0.0, max))
 }
 
 /// How long what stopped a 3D picture stays said.
@@ -1919,13 +2005,14 @@ mod tests {
     fn a_press_that_moves_scrolls_and_one_that_stays_presses() {
         let t = Instant::now();
         let mut drag = Drag::new(100.0, Some(Action::Pictures), false);
-        assert_eq!(drag.follow(300.0, 1000.0, t), None, "where it starts");
-        assert_eq!(drag.follow(305.0, 1000.0, t), None, "a hand's shake is still a press");
+        assert_eq!(drag.follow(300.0, 1000.0, true, t), None, "where it starts");
+        assert_eq!(drag.follow(305.0, 1000.0, true, t), None, "a hand's shake is still a press");
         assert!(!drag.moved);
-        assert_eq!(drag.follow(250.0, 1000.0, t), Some(150.0), "up the page, on down the list");
+        assert_eq!(drag.follow(250.0, 1000.0, true, t), Some(150.0), "up the page, on down the list");
         assert!(drag.moved);
-        assert_eq!(drag.follow(305.0, 1000.0, t), Some(95.0), "moved once, a drag for good");
-        assert_eq!(drag.follow(900.0, 1000.0, t), Some(0.0), "not past the top");
+        assert_eq!(drag.follow(305.0, 1000.0, true, t), Some(95.0), "moved once, a drag for good");
+        assert_eq!(drag.follow(900.0, 1000.0, false, t), Some(0.0), "with no give, not past the top");
+        assert!(drag.follow(900.0, 1000.0, true, t).unwrap() < 0.0, "with it, a little past the top");
     }
 
     #[test]
@@ -2005,15 +2092,65 @@ mod tests {
         assert!(capture.within(30.0) > capture.gaussians.len() / 4);
     }
 
+    /// Enzo: "a bouncing / elastic effect when reaching the limit (top or bottom) or trying to scroll up when we're already all the way up".
+    #[test]
+    fn a_list_gives_at_its_ends_and_comes_back() {
+        // Under the hand: all of it within its ends, less and less past them, and never far.
+        assert_eq!(rubber_band(500.0, 1000.0), 500.0);
+        assert!(rubber_band(-40.0, 1000.0) < 0.0 && rubber_band(-40.0, 1000.0) > -40.0);
+        assert!(rubber_band(1040.0, 1000.0) > 1000.0 && rubber_band(1040.0, 1000.0) < 1040.0);
+        assert!(rubber_band(-4000.0, 1000.0) > -300.0);
+        assert!(rubber_band(-400.0, 1000.0) < rubber_band(-200.0, 1000.0), "the further, the further");
+        // A list that does not scroll gives too.
+        assert!(rubber_band(-40.0, 0.0) < 0.0 && rubber_band(40.0, 0.0) > 0.0);
+        let run = |mut x: f32, mut v: f32, max: f32, elastic: bool| {
+            let (mut to, mut furthest) = (x.clamp(0.0, max), x);
+            for _ in 0..600 {
+                (x, v, to) = scroll_step(x, v, to, max, 1.0 / 90.0, elastic);
+                if (x - max / 2.0).abs() > (furthest - max / 2.0).abs() {
+                    furthest = x;
+                }
+            }
+            (x, v, furthest)
+        };
+        // Let go past the top, it comes back and rests at the very top, and not beyond it into the list.
+        let (x, v, _) = run(-60.0, 0.0, 1000.0, true);
+        assert_eq!((x, v), (0.0, 0.0));
+        let (x, v, _) = run(1060.0, 0.0, 1000.0, true);
+        assert_eq!((x, v), (1000.0, 0.0));
+        // Thrown at its end, it runs past by something to see, and not by much, and comes to rest there.
+        let (x, v, furthest) = run(900.0, 4000.0, 1000.0, true);
+        assert_eq!((x, v), (1000.0, 0.0));
+        assert!(furthest > 1020.0 && furthest < 1200.0, "{furthest}");
+        let (x, _, furthest) = run(100.0, -4000.0, 1000.0, true);
+        assert_eq!(x, 0.0);
+        assert!(furthest < -20.0 && furthest > -200.0, "{furthest}");
+        // Thrown with room, it slows and stops inside.
+        let (x, v, furthest) = run(0.0, 900.0, 5000.0, true);
+        assert_eq!(v, 0.0);
+        assert!(x > 200.0 && x < 500.0 && furthest >= 0.0, "{x}");
+        // With Reduce motion, no give at all.
+        let (x, _, furthest) = run(900.0, 4000.0, 1000.0, false);
+        assert_eq!(x, 1000.0);
+        assert!(furthest <= 1000.0);
+        // At rest nothing moves, and its wheel still glides.
+        assert_eq!(scroll_step(300.0, 0.0, 300.0, 1000.0, 1.0 / 90.0, true), (300.0, 0.0, 300.0));
+        let (x, _, to) = scroll_step(300.0, 0.0, 500.0, 1000.0, 1.0 / 90.0, true);
+        assert!(x > 300.0 && x < 500.0 && to == 500.0);
+        // A slow frame does not fling it.
+        let (x, _, _) = scroll_step(1100.0, 0.0, 1000.0, 1000.0, 0.2, true);
+        assert!((1000.0..1100.0).contains(&x));
+    }
+
     /// Enzo: "be able to throw the scrolling so we can go faster".
     #[test]
     fn a_list_let_go_while_moving_is_thrown_and_one_let_go_at_rest_is_not() {
         let t = Instant::now();
         let at = |ms: u64| t + Duration::from_millis(ms);
         let mut drag = Drag::new(0.0, None, false);
-        drag.follow(500.0, 9000.0, at(0));
+        drag.follow(500.0, 9000.0, true, at(0));
         for (i, ms) in (10..=100).step_by(10).enumerate() {
-            drag.follow(500.0 - 20.0 * (i as f32 + 1.0), 9000.0, at(ms));
+            drag.follow(500.0 - 20.0 * (i as f32 + 1.0), 9000.0, true, at(ms));
         }
         let thrown = drag.throw(at(105));
         assert!(thrown > 1000.0, "down the list, about 2000 a second: {thrown}");

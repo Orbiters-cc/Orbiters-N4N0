@@ -1483,6 +1483,9 @@ fn draw(p: &Painter, zone: Zone, item: &Item, facts: &Facts, hovered: bool, pres
             let Some(sheet) = facts.sheet else { return };
             let Some((top, track, knob)) = scroll_bar(sheet, facts) else { return };
             let max = max_scroll(sheet, facts);
+            // Past an end its knob is squeezed against that end, as far as the list has gone.
+            let past = (-facts.gallery_scroll).max(facts.gallery_scroll - max).max(0.0);
+            let knob = (knob - past * 0.6).max(14.0);
             let y = top + (track - knob) * (facts.gallery_scroll / max).clamp(0.0, 1.0);
             let (width, alpha) = if hovered || pressed { (10.0, 170) } else { (6.0, 80) };
             p.rect_filled(Rect::from_min_size(pos2(rect.center().x - width / 2.0, y), vec2(width, knob)), theme::radius(width / 2.0), Color32::from_white_alpha(alpha));

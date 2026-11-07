@@ -5,10 +5,10 @@
 //! **What cannot be known in VR, said plainly.** VRChat tells nothing about its menus (see [`super::detect`]), and no eye picture is read here. What is known is the button: VRChat's own
 //! bindings (`VRChat_Data/StreamingAssets/SteamVR`) put its `Menu` action on B (Index), Y and B (Touch and most others) and the application menu button (Vive, WMR), a short press being the
 //! Quick Menu and a held one the wheel. [`MenuButtons`] follows that and nothing more, so:
-//! - each menu is followed by itself, so that a press read wrongly on one does not turn the other inside out: the first version kept one state for all of them, and showed the Quick Menu's
-//!   parts when it closed and none when it opened. It can still be wrong when VRChat's menu closes by another way than the button: **the parts' close button says nothing is open** and puts
-//!   that right at once, and so does a world change, or a long time with no press and no laser on them.
-//! - where the menus are on the hand, and how large, is measured nowhere: [`Tune`] holds the estimates, and its file changes them live, in the headset.
+//! - only one menu is open at a time, and each thing known to close one closes it here too (Enzo, 2026-11-07: "walking, opening another menu"): the Quick Menu goes with the left stick,
+//!   the other menu opening takes the first's place. Anything else that closes one leaves these out of step, as nothing says so: **the parts' close button says nothing is open** and puts that
+//!   right at once, and so does a world change, or a long time with no press and no laser on them.
+//! - where the menus are on the hand, and how large, can only be measured in a headset: [`Tune`] holds it, set by grabbing the parts and laying them on VRChat's menu ([`Tune::align`]).
 
 use super::super::actions::Actions;
 use super::super::floating::laser::{self, Lasers};
@@ -30,6 +30,10 @@ pub const HOLD: Duration = Duration::from_millis(500);
 /// With no press and no laser on them for this long the panels go, and nothing is taken to be open.
 pub const IDLE_OPEN: Duration = Duration::from_secs(300);
 
+/// How far the left stick goes before the avatar walks, and for how long, as a thumb resting on it does not.
+const WALKS_AT: f32 = 0.5;
+const WALKS_AFTER: Duration = Duration::from_millis(200);
+
 /// What the buttons say shows, on which hand (0 left, 1 right).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Open {
@@ -38,13 +42,10 @@ pub enum Open {
     Wheel(usize),
 }
 
-/// From the menu button of each hand to what VRChat should be showing. The Quick Menu and each hand's wheel are followed apart.
+/// From the menu button of each hand to what VRChat should be showing: one menu at a time, as VRChat has them.
 #[derive(Clone, Copy, Debug)]
 pub struct MenuButtons {
-    quick_menu: Option<usize>,
-    wheels: [bool; 2],
-    /// The wheel opened last, which shows when both are open.
-    last_wheel: usize,
+    open: Open,
     down: [bool; 2],
     /// The press under way: on which hand, since when, and whether it began on that hand's open wheel.
     press: Option<(usize, Instant, bool)>,
@@ -53,62 +54,90 @@ pub struct MenuButtons {
 impl Default for MenuButtons {
     fn default() -> Self {
         // Buttons taken as held: one already down when this starts presses nothing.
-        Self { quick_menu: None, wheels: [false; 2], last_wheel: 0, down: [true; 2], press: None }
+        Self { open: Open::Closed, down: [true; 2], press: None }
     }
 }
 
 impl MenuButtons {
     pub fn open(&self) -> Open {
-        if self.wheels[self.last_wheel] {
-            Open::Wheel(self.last_wheel)
-        } else if self.wheels[1 - self.last_wheel] {
-            Open::Wheel(1 - self.last_wheel)
-        } else {
-            self.quick_menu.map_or(Open::Closed, Open::QuickMenu)
-        }
+        self.open
     }
 
     /// Nothing is open: the person said so with the parts' close, or VRChat is not where a menu can be (a world change, the dashboard, it closed), or nothing happened for a long time.
     pub fn reset(&mut self) {
-        self.quick_menu = None;
-        self.wheels = [false; 2];
+        self.open = Open::Closed;
         self.press = None;
+    }
+
+    /// The avatar walks: VRChat closes its Quick Menu then, and not its wheel, whose hand's stick picks its slices.
+    pub fn walking(&mut self) {
+        if matches!(self.open, Open::QuickMenu(_)) {
+            self.open = Open::Closed;
+        }
     }
 
     pub fn step(&mut self, down: [bool; 2], now: Instant) -> Open {
         for hand in 0..2 {
             if down[hand] && !self.down[hand] && self.press.is_none() {
-                self.press = Some((hand, now, self.wheels[hand]));
+                self.press = Some((hand, now, self.open == Open::Wheel(hand)));
             }
         }
         if let Some((hand, since, on_wheel)) = self.press {
             let held = now.duration_since(since);
             if down[hand] {
+                // The wheel takes the place of what was open.
                 if held >= HOLD && !on_wheel {
-                    self.wheels[hand] = true;
-                    self.last_wheel = hand;
+                    self.open = Open::Wheel(hand);
                 }
             } else {
                 if on_wheel {
-                    self.wheels[hand] = false;
+                    self.open = Open::Closed;
                 } else if held < HOLD {
-                    // As VRChat must, this waits for the button's release: only then is it known not to be the wheel's.
-                    self.quick_menu = if self.quick_menu.is_some() { None } else { Some(hand) };
+                    // As VRChat must, this waits for the release: only then is it known not to be the wheel's. A wheel on the other hand gives way to it.
+                    self.open = if matches!(self.open, Open::QuickMenu(_)) { Open::Closed } else { Open::QuickMenu(hand) };
                 }
                 self.press = None;
             }
         }
         self.down = down;
-        self.open()
+        self.open
     }
 }
 
-/// Where VRChat's menus are on the hand, and how large. Measured nowhere: these are estimates until Enzo's headset says otherwise, and `orbit-vr-tune.json` in the app's data folder changes
-/// any of them live, so that they can be set while looking at them.
-#[derive(Clone, Copy, Debug, PartialEq, serde::Deserialize)]
+/// A pose on a hand, as saved: three rows of a matrix.
+pub type Saved = [f32; 12];
+
+fn to_saved(m: &Matrix34) -> Saved {
+    std::array::from_fn(|i| m.m[i / 4][i % 4])
+}
+
+fn from_saved(saved: &Saved) -> Matrix34 {
+    let mut m = Matrix34::IDENTITY;
+    for (i, v) in saved.iter().enumerate() {
+        m.m[i / 4][i % 4] = *v;
+    }
+    m
+}
+
+/// A pose on one hand as it lies on the other: the two hands mirror each other across the controller's own middle.
+fn mirrored(on_hand: &Matrix34) -> Matrix34 {
+    let flip = |v: [f32; 3]| [-v[0], v[1], v[2]];
+    let (y, z) = (flip(space::axis(on_hand, 1)), flip(space::axis(on_hand, 2)));
+    space::from_axes(space::cross(y, z), y, z, flip(space::position(on_hand)))
+}
+
+/// Where VRChat's menus are on the hand, and how large. VRChat says nowhere, and only a headset can show it. These are the estimates until `orbit-vr-tune.json` in the app's data folder says
+/// otherwise, read live. With `align` on in it, the hand not holding the menu grabs the parts by its grip and lays them on VRChat's menu: letting go saves that, for that hand and,
+/// mirrored, for the other until it has its own. Holding the other grip too, the distance between the hands scales them.
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 pub struct Tune {
-    /// How far the plane leans back from the top of the controller toward the wrist, in degrees: 0 lies flat on it, 90 stands across it.
+    /// The parts can be grabbed and laid on VRChat's menu.
+    pub align: bool,
+    /// As laid there, on the left hand and on the right.
+    pub wheel_on: [Option<Saved>; 2],
+    pub qm_on: [Option<Saved>; 2],
+    /// The estimates, until then. How far the plane leans back from the top of the controller toward the wrist, in degrees: 0 lies flat on it, 90 stands across it.
     pub wheel_tilt: f32,
     /// How far from the grip, along where the controller points and along its top, in metres.
     pub wheel_ahead: f32,
@@ -123,7 +152,7 @@ pub struct Tune {
 
 impl Default for Tune {
     fn default() -> Self {
-        Self { wheel_tilt: 45.0, wheel_ahead: 0.06, wheel_up: 0.0, wheel_radius: 0.09, qm_tilt: 40.0, qm_ahead: 0.18, qm_up: 0.14, qm_unit: 0.0009 }
+        Self { align: false, wheel_on: [None; 2], qm_on: [None; 2], wheel_tilt: 45.0, wheel_ahead: 0.06, wheel_up: 0.0, wheel_radius: 0.09, qm_tilt: 40.0, qm_ahead: 0.18, qm_up: 0.14, qm_unit: 0.0009 }
     }
 }
 
@@ -141,24 +170,48 @@ impl Tune {
             }
         }
     }
+
+    fn write(&self) {
+        let written = serde_json::to_string_pretty(self).map_err(|e| e.to_string()).and_then(|text| std::fs::write(Self::file(), text).map_err(|e| e.to_string()));
+        if let Err(e) = written {
+            eprintln!("{}: {e}", Self::file().display());
+        }
+    }
+
+    /// The wheel's plane on this hand, from its grip.
+    pub fn wheel(&self, hand: usize) -> Matrix34 {
+        on_this_hand(&self.wheel_on, hand).unwrap_or_else(|| on_hand(self.wheel_tilt, self.wheel_ahead, self.wheel_up))
+    }
+
+    /// The Quick Menu's plane on this hand, from its grip.
+    pub fn quick_menu(&self, hand: usize) -> Matrix34 {
+        on_this_hand(&self.qm_on, hand).unwrap_or_else(|| on_hand(self.qm_tilt, self.qm_ahead, self.qm_up))
+    }
 }
 
-/// A plane riding a controller: turned with it, leaning `tilt` degrees from its top toward its wrist, `ahead` along where it points and `up` along its top. Its +Z faces who holds it.
-fn on_hand(grip: &Matrix34, tilt: f32, ahead: f32, up: f32) -> Matrix34 {
-    let (x, top, back) = (space::axis(grip, 0), space::axis(grip, 1), space::axis(grip, 2));
-    let (sin, cos) = tilt.to_radians().sin_cos();
-    let at = space::add(space::add(space::position(grip), space::scale(back, -ahead)), space::scale(top, up));
-    space::from_axes(x, space::add(space::scale(back, -cos), space::scale(top, sin)), space::add(space::scale(top, cos), space::scale(back, sin)), at)
+/// What was laid on this hand, else on the other, mirrored.
+fn on_this_hand(saved: &[Option<Saved>; 2], hand: usize) -> Option<Matrix34> {
+    saved[hand].as_ref().map(from_saved).or_else(|| saved[1 - hand].as_ref().map(|other| mirrored(&from_saved(other))))
 }
 
-/// The grip that would hold a plane as [`on_hand`] has it: for the pictures of a hand held where a person looks at its menu.
-pub fn grip_holding(frame: &Matrix34, tilt: f32, ahead: f32, up: f32) -> Matrix34 {
-    let (x, along, normal) = (space::axis(frame, 0), space::axis(frame, 1), space::axis(frame, 2));
+/// A plane on a controller's own axes, leaning `tilt` degrees from its top toward its wrist, `ahead` along where it points and `up` along its top. Its +Z faces who holds it.
+fn on_hand(tilt: f32, ahead: f32, up: f32) -> Matrix34 {
     let (sin, cos) = tilt.to_radians().sin_cos();
-    let top = space::add(space::scale(normal, cos), space::scale(along, sin));
-    let back = space::add(space::scale(normal, sin), space::scale(along, -cos));
-    let at = space::add(space::add(space::position(frame), space::scale(back, ahead)), space::scale(top, -up));
-    space::from_axes(x, top, back, at)
+    space::from_axes([1.0, 0.0, 0.0], [0.0, sin, -cos], [0.0, cos, sin], [0.0, up, -ahead])
+}
+
+/// The grip that would hold a plane lying `on_hand` as it is, for the pictures of a hand held where a person looks at its menu.
+pub fn grip_holding(frame: &Matrix34, on_hand: &Matrix34) -> Matrix34 {
+    space::compose(frame, &space::inverse(on_hand))
+}
+
+/// One grip's hold on the parts while they are laid on VRChat's menu.
+#[derive(Clone, Copy, Debug)]
+struct Aligning {
+    /// The plane as held by the grabbing hand.
+    held: Matrix34,
+    /// With the other grip too: how far apart the hands were, and the size then.
+    scaling: Option<(f32, f32)>,
 }
 
 /// The sheet opened from the wheel: it stays where it opened, before the eyes, with no menu of VRChat's under it to ride with.
@@ -195,13 +248,13 @@ impl Plane {
 }
 
 /// The wheel on the hand that opened it, turning with it as VRChat's does.
-pub fn wheel_plane(grip: &Matrix34, tune: &Tune, size: f32) -> Plane {
-    Plane { frame: on_hand(grip, tune.wheel_tilt, tune.wheel_ahead, tune.wheel_up), unit: tune.wheel_radius * size / 100.0 }
+pub fn wheel_plane(grip: &Matrix34, hand: usize, tune: &Tune, size: f32) -> Plane {
+    Plane { frame: space::compose(grip, &tune.wheel(hand)), unit: tune.wheel_radius * size / 100.0 }
 }
 
 /// The Quick Menu on the hand that opened it, the same way.
-pub fn quick_menu_plane(grip: &Matrix34, tune: &Tune, size: f32) -> Plane {
-    Plane { frame: on_hand(grip, tune.qm_tilt, tune.qm_ahead, tune.qm_up), unit: tune.qm_unit * size }
+pub fn quick_menu_plane(grip: &Matrix34, hand: usize, tune: &Tune, size: f32) -> Plane {
+    Plane { frame: space::compose(grip, &tune.quick_menu(hand)), unit: tune.qm_unit * size }
 }
 
 /// A sheet with no menu of VRChat's under it: before the eyes, where it opened.
@@ -253,6 +306,9 @@ pub struct OrbitVr {
     tune: Tune,
     tune_seen: Option<std::time::SystemTime>,
     tune_read: Instant,
+    aligning: Option<Aligning>,
+    /// Since when the left stick has been pushed far enough to walk.
+    walking_since: Option<Instant>,
     buttons: MenuButtons,
     block: Block,
     stuck: Stuck,
@@ -281,6 +337,8 @@ impl OrbitVr {
             tune: Tune::read().unwrap_or_default(),
             tune_seen: None,
             tune_read: now,
+            aligning: None,
+            walking_since: None,
             buttons: MenuButtons::default(),
             block: Block::default(),
             stuck: Stuck::start(),
@@ -325,6 +383,56 @@ impl OrbitVr {
         }
     }
 
+    /// With [`Tune::align`]: the free hand's grip holds the plane; letting go saves where it lies on the hand that holds the menu.
+    fn align(&mut self, open: Open, grips: [bool; 2], devices: &[Option<u32>; 2], poses: &[Pose; MAX_DEVICES], size: f32) {
+        let hand = match open {
+            Open::Wheel(hand) | Open::QuickMenu(hand) => hand,
+            Open::Closed => {
+                self.aligning = None;
+                return;
+            }
+        };
+        let (Some(holder), Some(free)) = (devices[hand], devices[1 - hand]) else { return };
+        let (holder, free) = (poses[holder as usize].device_to_absolute, poses[free as usize].device_to_absolute);
+        let wheel = matches!(open, Open::Wheel(_));
+        match self.aligning {
+            None if grips[1 - hand] => {
+                if let Some(plane) = self.plane {
+                    self.aligning = Some(Aligning { held: space::compose(&space::inverse(&free), &plane.frame), scaling: None });
+                }
+            }
+            Some(mut aligning) if grips[1 - hand] => {
+                let apart = space::length(space::sub(space::position(&free), space::position(&holder)));
+                if grips[hand] {
+                    let from = aligning.scaling.get_or_insert((apart.max(0.01), if wheel { self.tune.wheel_radius } else { self.tune.qm_unit }));
+                    let scaled = from.1 * apart / from.0;
+                    if wheel {
+                        self.tune.wheel_radius = scaled;
+                    } else {
+                        self.tune.qm_unit = scaled;
+                    }
+                } else {
+                    aligning.scaling = None;
+                }
+                self.aligning = Some(aligning);
+                let unit = if wheel { self.tune.wheel_radius / 100.0 } else { self.tune.qm_unit };
+                self.plane = Some(Plane { frame: space::compose(&free, &aligning.held), unit: unit * size });
+            }
+            Some(aligning) => {
+                self.aligning = None;
+                let on_hand = to_saved(&space::compose(&space::inverse(&holder), &space::compose(&free, &aligning.held)));
+                if wheel {
+                    self.tune.wheel_on[hand] = Some(on_hand);
+                } else {
+                    self.tune.qm_on[hand] = Some(on_hand);
+                }
+                self.tune.write();
+                self.tune_seen = std::fs::metadata(Tune::file()).and_then(|m| m.modified()).ok();
+            }
+            None => {}
+        }
+    }
+
     /// A turn of the overlay's loop.
     pub fn update(&mut self, mut cx: Cx<'_, '_>) -> Turn {
         let now = Instant::now();
@@ -359,7 +467,16 @@ impl OrbitVr {
             }
         }
         let down = if cx.input_read { cx.actions.orbit_menu_buttons(cx.steamvr) } else { [false; 2] };
-        let open = if cx.input_read { self.buttons.step(down, now) } else { self.buttons.open() };
+        if cx.input_read {
+            self.buttons.step(down, now);
+            // Walking closes VRChat's Quick Menu. A moment's touch of the stick does not; laying the parts on it is not walking.
+            let stick = cx.actions.pads(cx.steamvr).map_or(0.0, |pads| pads.sticks[0].x.hypot(pads.sticks[0].y));
+            self.walking_since = (stick >= WALKS_AT && self.aligning.is_none()).then(|| self.walking_since.unwrap_or(now));
+            if self.walking_since.is_some_and(|since| now.duration_since(since) >= WALKS_AFTER) {
+                self.buttons.walking();
+            }
+        }
+        let open = self.buttons.open();
         let menu = match open {
             Open::QuickMenu(_) if settings.around_quick_menu() => Some(Around::QuickMenu),
             Open::Wheel(_) if settings.around_wheel() => Some(Around::Wheel),
@@ -390,12 +507,14 @@ impl OrbitVr {
             self.pointing_since = now;
         }
         let plane = match (menu, open) {
-            (Some(Around::Wheel), Open::Wheel(hand)) => devices[hand].map(|d| wheel_plane(&poses[d as usize].device_to_absolute, &self.tune, settings.vr_size)),
-            (Some(Around::QuickMenu), Open::QuickMenu(hand)) => devices[hand].map(|d| quick_menu_plane(&poses[d as usize].device_to_absolute, &self.tune, settings.vr_size)),
+            (Some(Around::Wheel), Open::Wheel(hand)) => devices[hand].map(|d| wheel_plane(&poses[d as usize].device_to_absolute, hand, &self.tune, settings.vr_size)),
+            (Some(Around::QuickMenu), Open::QuickMenu(hand)) => devices[hand].map(|d| quick_menu_plane(&poses[d as usize].device_to_absolute, hand, &self.tune, settings.vr_size)),
             _ => None,
         };
         // A hand out of tracking for a moment: the parts stay where it was.
         self.plane = plane.or(self.plane);
+        let grips = if self.tune.align && cx.input_read { cx.actions.grabs(cx.steamvr) } else { [false; 2] };
+        self.align(open, grips, &devices, &poses, settings.vr_size);
         let mut places: Vec<Placed> = menu.map_or_else(Vec::new, |m| Zone::around(m).iter().map(|z| zones::in_units(*z)).collect());
         // Here VRChat's wheel can close unseen: the ring has its own close.
         if menu == Some(Around::Wheel) && !self.panels.sheet_open() {
@@ -606,29 +725,38 @@ mod tests {
 
     /// What Enzo saw: the Quick Menu's parts going when it opened and coming when it closed.
     #[test]
-    fn the_quick_menu_is_never_turned_inside_out_by_the_wheel() {
+    fn opening_the_other_menu_takes_the_first_s_place_and_never_turns_it_inside_out() {
         let t0 = Instant::now();
         let mut b = fresh(t0);
-        // The wheel, opened and closed on one hand: the Quick Menu's state is untouched.
-        assert_eq!(run(&mut b, t0, &[(0, 100, 900)], 1000), Open::Wheel(0));
-        assert_eq!(run(&mut b, t0, &[(0, 1100, 1200)], 1300), Open::Closed);
+        // The wheel over the Quick Menu: it takes its place, and when it closes nothing is open.
+        assert_eq!(run(&mut b, t0, &[(1, 100, 200)], 300), Open::QuickMenu(1));
+        assert_eq!(run(&mut b, t0, &[(0, 400, 1100)], 1200), Open::Wheel(0));
+        assert_eq!(run(&mut b, t0, &[(0, 1300, 1400)], 1500), Open::Closed);
         // Then the Quick Menu opens with its first press, and closes with its second.
-        assert_eq!(run(&mut b, t0, &[(1, 1400, 1500)], 1600), Open::QuickMenu(1));
-        assert_eq!(run(&mut b, t0, &[(1, 1700, 1800)], 1900), Open::Closed);
-        // A wheel on the other hand while it is open: the wheel shows, and when it goes the Quick Menu is still there.
-        assert_eq!(run(&mut b, t0, &[(1, 2000, 2100)], 2200), Open::QuickMenu(1));
-        assert_eq!(run(&mut b, t0, &[(0, 2300, 3000)], 3100), Open::Wheel(0));
-        assert_eq!(run(&mut b, t0, &[(0, 3200, 3300)], 3400), Open::QuickMenu(1));
+        assert_eq!(run(&mut b, t0, &[(1, 1600, 1700)], 1800), Open::QuickMenu(1));
+        assert_eq!(run(&mut b, t0, &[(1, 1900, 2000)], 2100), Open::Closed);
+        // The Quick Menu from the other hand over a wheel: it takes the wheel's place.
+        assert_eq!(run(&mut b, t0, &[(0, 2200, 2900)], 3000), Open::Wheel(0));
+        assert_eq!(run(&mut b, t0, &[(1, 3100, 3200)], 3300), Open::QuickMenu(1));
+        // A wheel on the other hand takes the place of the first.
+        assert_eq!(run(&mut b, t0, &[(0, 3400, 4100)], 4200), Open::Wheel(0));
+        assert_eq!(run(&mut b, t0, &[(1, 4300, 5000)], 5100), Open::Wheel(1));
     }
 
+    /// Enzo: walking closes VRChat's menu, and left the parts inside out.
     #[test]
-    fn each_hand_has_its_own_wheel() {
+    fn walking_closes_the_quick_menu_and_the_next_press_opens_it() {
         let t0 = Instant::now();
         let mut b = fresh(t0);
-        run(&mut b, t0, &[(0, 100, 800)], 900);
-        assert_eq!(run(&mut b, t0, &[(1, 1000, 1700)], 1800), Open::Wheel(1), "the last opened shows");
-        assert_eq!(run(&mut b, t0, &[(1, 1900, 2000)], 2100), Open::Wheel(0), "closing it leaves the other");
-        assert_eq!(run(&mut b, t0, &[(0, 2200, 2300)], 2400), Open::Closed);
+        assert_eq!(run(&mut b, t0, &[(1, 100, 200)], 300), Open::QuickMenu(1));
+        b.walking();
+        assert_eq!(b.open(), Open::Closed);
+        assert_eq!(run(&mut b, t0, &[(1, 400, 500)], 600), Open::QuickMenu(1), "open with the next press, not inside out");
+        // The wheel stays: its stick is what picks its slices.
+        let mut b = fresh(t0);
+        assert_eq!(run(&mut b, t0, &[(0, 100, 900)], 1000), Open::Wheel(0));
+        b.walking();
+        assert_eq!(b.open(), Open::Wheel(0));
     }
 
     #[test]
@@ -666,11 +794,10 @@ mod tests {
     #[test]
     fn the_wheel_and_the_quick_menu_turn_with_the_hand_that_opened_them() {
         let tune = Tune::default();
-        for plane_of in [wheel_plane as fn(&Matrix34, &Tune, f32) -> Plane, quick_menu_plane] {
-            let (a, b) = (plane_of(&grip(), &tune, 1.0), plane_of(&turned(&grip(), 90.0), &tune, 1.0));
+        for plane_of in [wheel_plane as fn(&Matrix34, usize, &Tune, f32) -> Plane, quick_menu_plane] {
+            let (a, b) = (plane_of(&grip(), 1, &tune, 1.0), plane_of(&turned(&grip(), 90.0), 1, &tune, 1.0));
             // A quarter turn of the hand, a quarter turn of the plane.
-            let (x_a, x_b) = (space::axis(&a.frame, 0), space::axis(&b.frame, 0));
-            assert!(space::dot(x_a, x_b).abs() < 0.001, "it turned with the hand");
+            assert!(space::dot(space::axis(&a.frame, 0), space::axis(&b.frame, 0)).abs() < 0.001, "it turned with the hand");
             // And it stays as far from the hand, wherever the hand is.
             let distance = |p: &Plane, g: &Matrix34| space::length(space::sub(space::position(&p.frame), space::position(g)));
             assert!((distance(&a, &grip()) - distance(&b, &turned(&grip(), 90.0))).abs() < 0.001);
@@ -682,28 +809,50 @@ mod tests {
     }
 
     #[test]
-    fn a_plane_moves_with_the_hand_and_grip_holding_undoes_it() {
+    fn a_plane_keeps_its_share_of_the_wheel_and_grip_holding_undoes_it() {
         let tune = Tune::default();
-        let plane = wheel_plane(&grip(), &tune, 1.0);
+        let plane = wheel_plane(&grip(), 1, &tune, 1.0);
         let top = plane.quad(&zones::in_units(Zone::WheelWorlds), 0.0, NEAR_M);
-        // The first cell is toward the picture's top.
         let up = space::dot(space::sub(space::position(&top.transform), space::position(&plane.frame)), space::axis(&plane.frame, 1));
-        assert!(up > 0.0);
-        // It keeps its share of the wheel, larger in Settings, larger here.
+        assert!(up > 0.0, "the first cell is toward the picture's top");
         assert!((top.width / tune.wheel_radius - zones::Zone::WheelWorlds.units().width() / 100.0).abs() < 0.01);
-        let large = wheel_plane(&grip(), &tune, 1.25).quad(&zones::in_units(Zone::WheelWorlds), 0.0, 0.0).width;
+        let large = wheel_plane(&grip(), 1, &tune, 1.25).quad(&zones::in_units(Zone::WheelWorlds), 0.0, 0.0).width;
         assert!((large / top.width - 1.25).abs() < 0.01);
         assert!(OrbitSettings::VR_SIZES.contains(&1.25));
-        let back = grip_holding(&plane.frame, tune.wheel_tilt, tune.wheel_ahead, tune.wheel_up);
+        let back = grip_holding(&plane.frame, &tune.wheel(1));
         assert!(space::length(space::sub(space::position(&back), space::position(&grip()))) < 0.001);
         assert!(space::dot(space::axis(&back, 1), space::axis(&grip(), 1)) > 0.999);
     }
 
+    /// What is laid on one hand: exact on that hand, mirrored on the other until it has its own.
     #[test]
-    fn the_tune_file_changes_what_it_names_and_only_that() {
-        let tune: Tune = serde_json::from_str(r#"{ "wheel_tilt": 70.0 }"#).unwrap();
+    fn a_plane_laid_on_a_hand_is_kept_and_mirrored_on_the_other() {
+        let laid = space::from_axes([0.6, 0.0, 0.8], [0.0, 1.0, 0.0], [-0.8, 0.0, 0.6], [0.05, 0.1, -0.2]);
+        let mut tune = Tune::default();
+        tune.wheel_on[1] = Some(to_saved(&laid));
+        let right = tune.wheel(1);
+        assert_eq!(right.m, laid.m);
+        let left = tune.wheel(0);
+        assert!((space::position(&left)[0] + 0.05).abs() < 0.001, "the other side of the controller");
+        assert!((space::position(&left)[1] - 0.1).abs() < 0.001);
+        let (x, y, z) = (space::axis(&left, 0), space::axis(&left, 1), space::axis(&left, 2));
+        assert!(space::length(space::sub(space::cross(x, y), z)) < 0.001, "still not a mirror image of a picture");
+        // Its own, once it has one; and the Quick Menu is apart from all this.
+        tune.wheel_on[0] = Some(to_saved(&laid));
+        assert_eq!(tune.wheel(0).m, laid.m);
+        assert_eq!(tune.quick_menu(1).m, Tune::default().quick_menu(1).m);
+    }
+
+    #[test]
+    fn the_tune_file_changes_what_it_names_keeps_what_was_laid_and_only_that() {
+        let tune: Tune = serde_json::from_str(r#"{ "wheel_tilt": 70.0, "align": true }"#).unwrap();
         assert_eq!(tune.wheel_tilt, 70.0);
+        assert!(tune.align);
         assert_eq!(tune.qm_ahead, Tune::default().qm_ahead);
+        let mut laid = tune;
+        laid.qm_on[0] = Some(to_saved(&grip()));
+        let back: Tune = serde_json::from_str(&serde_json::to_string(&laid).unwrap()).unwrap();
+        assert_eq!(back, laid);
     }
 
     #[test]

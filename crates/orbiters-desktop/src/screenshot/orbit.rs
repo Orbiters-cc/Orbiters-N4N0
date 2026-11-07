@@ -279,8 +279,7 @@ pub(super) fn vr_shots(out: &Path, refs: &Path) -> anyhow::Result<()> {
         // The wheel on a hand, where a person looks at it; the other hand's laser on its cells.
         let tune = vr::Tune::default();
         let held = space::facing([0.03, 1.5, -0.40], space::position(&head), [0.0, 1.0, 0.0]).expect("a frame");
-        let grip = vr::grip_holding(&held, tune.wheel_tilt, tune.wheel_ahead, tune.wheel_up);
-        let plane = vr::wheel_plane(&grip, &tune, 1.0);
+        let plane = vr::wheel_plane(&vr::grip_holding(&held, &tune.wheel(1)), 1, &tune, 1.0);
         let wheel_scene = |facts: &Facts, hover: Option<Zone>, bloom: Option<zones::Group>, name: &str| -> anyhow::Result<()> {
             let mut eye = Eye::new(size, &ground, eyes);
             let unit_m = plane.unit;
@@ -319,7 +318,7 @@ pub(super) fn vr_shots(out: &Path, refs: &Path) -> anyhow::Result<()> {
         wheel_scene(&counting, None, Some(bloom), &format!("vr-wheel-{world}-countdown"))?;
         // The Quick Menu where it opens before the eyes, the wing beside it.
         let held = space::before_eyes(&head, 0.5, 0.08);
-        let plane = vr::quick_menu_plane(&vr::grip_holding(&held, tune.qm_tilt, tune.qm_ahead, tune.qm_up), &tune, 1.0);
+        let plane = vr::quick_menu_plane(&vr::grip_holding(&held, &tune.quick_menu(1)), 1, &tune, 1.0);
         let qm_scene = |facts: &Facts, hover: Option<usize>, sheet: Option<Sheet>, name: &str| -> anyhow::Result<()> {
             let mut eye = Eye::new(size, &ground, eyes);
             let center_units = zones::Placed { zone: Zone::SheetBack, rect: qm_units, center: pos2(0.0, 0.0), unit: 1.0 };

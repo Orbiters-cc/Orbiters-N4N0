@@ -991,6 +991,9 @@ pub(crate) fn no_network_listening() -> bool {
 /// The address this machine reaches the network from (no packet is sent: connecting a UDP socket only picks the
 /// route), or `None` offline.
 pub(crate) fn primary_ipv4() -> Option<std::net::Ipv4Addr> {
+    if no_network_listening() {
+        return None;
+    }
     let socket = UdpSocket::bind("0.0.0.0:0").ok()?;
     socket.connect("192.0.2.1:9").ok()?;
     match socket.local_addr().ok()?.ip() {

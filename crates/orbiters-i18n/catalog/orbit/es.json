@@ -17,10 +17,10 @@
   "A VRChat world": "Un mundo de VRChat",
   "A world": "Un mundo",
   "Add N4N0 to it in Orbiters, My Avatar, to take 3D pictures with it.": "Añade N4N0 a este avatar en Orbiters, My Avatar, para tomar fotos 3D con él.",
-  "Add Orbiters as a friend": "Añade a Orbiters como amigo",
+  "Add Orbiters as a friend": "Agregar a Orbiters como amigo",
   "All tools": "Todas las herramientas",
   "Around you": "A tu alrededor",
-  "Ask": "N4N0",
+  "Ask": "Preguntar",
   "Ask N4N0": "Preguntar a N4N0",
   "Asking…": "Solicitando…",
   "Back to VRChat's menu.": "Vuelve al menú de VRChat.",
@@ -62,7 +62,7 @@
   "It cannot show in 3D": "No se puede mostrar en 3D",
   "It has no 3D yet. The Orbiters window can make it.": "Aún no tiene 3D. La ventana de Orbiters puede crearlo.",
   "It is in your captures. Orbiters makes it 3D next.": "Está en tus capturas. Orbiters la convierte en 3D a continuación.",
-  "Its 3D cannot show here. It can in Orbiters.": "Su 3D no se puede mostrar aquí. En Orbiters sí.",
+  "Its 3D cannot show here. It can in Orbiters.": "No se puede mostrar su 3D aquí. En Orbiters sí.",
   "Its speech models are downloading": "Los modelos de voz se están descargando",
   "Keeps this place in 3D, without you in it: walk in it afterwards.": "Guarda este lugar en 3D, sin ti dentro: luego podrás recorrerlo.",
   "Keeps those around you in 3D: look around them afterwards.": "Guarda en 3D a quienes te rodean: luego podrás mirar a su alrededor.",
@@ -174,7 +174,7 @@
   "VRChat's pictures and your 3D captures show here.": "Las fotos de VRChat y tus capturas 3D aparecen aquí.",
   "VRChat's pictures and your 3D captures together.": "Las fotos de VRChat y tus capturas 3D juntas.",
   "Waiting for the camera": "Esperando la cámara",
-  "Walk around it, in Orbiters": "Recorrerlo en Orbiters",
+  "Walk around it, in Orbiters": "Recorrerlo, en Orbiters",
   "Walk around with VRChat's camera; Orbiters makes a 3D scene of what it saw.": "Camina con la cámara de VRChat; Orbiters crea una escena 3D de lo que vio.",
   "Walk faster than VRChat lets you.": "Camina más rápido de lo que permite VRChat.",
   "What your computer plays shows here, with its controls.": "Lo que reproduce tu computadora aparece aquí, con sus controles.",
@@ -222,5 +222,6 @@
   "“Pause the music”": "“Pausa la música”",
   "“Take a picture in five seconds”": "“Toma una foto en cinco segundos”",
   "“Tell people I'll be back soon”": "“Dile a la gente que vuelvo pronto”",
-  "“Turn your light on, in blue”": "“Enciende tu luz, en azul”"
+  "“Turn your light on, in blue”": "“Enciende tu luz, en azul”",
+  "tile\u0004Ask": "N4N0"
 }

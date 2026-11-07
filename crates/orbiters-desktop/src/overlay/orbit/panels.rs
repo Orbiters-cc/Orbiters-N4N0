@@ -1312,6 +1312,15 @@ fn hero_body(p: &Painter, body: Rect, action: Action, line: &str, facts: &Facts)
     }
 }
 
+/// A sheet's title in the language now. It is kept in English while the sheet is open. Two are words that mean something else on their own: "Call" as a button is to call, and as a page it is the call.
+fn sheet_name(title: &str) -> &str {
+    match title {
+        "Call" => tr_ctx("voice call", title), // i18n: not shown
+        "Light" => tr_ctx("lamp", title), // i18n: not shown
+        _ => tr(title),
+    }
+}
+
 /// What a sheet is for, in a few words.
 fn sheet_says(facts: &Facts) -> &'static str {
     match facts.sheet {
@@ -1406,7 +1415,7 @@ pub fn caption(action: Action, facts: &Facts) -> Option<(String, String)> {
         },
         Action::NewConversation => (tr("New conversation").into(), tr("N4N0 starts over.").into()),
         Action::HideView => (tr("Hide 3D").into(), tr("The capture around you goes.").into()),
-        Action::SmallView(true) => (tr("Small").into(), tr("Before you: grip it to take it, its hand's stick zooms.").into()),
+        Action::SmallView(true) => (tr_ctx("view", "Small").into(), tr("Before you: grip it to take it, its hand's stick zooms.").into()),
         Action::SmallView(false) => (tr("Around you").into(), tr("Stand in it again.").into()),
         Action::Capture(n) => {
             let recent = facts.recent.get(n)?;
@@ -1600,7 +1609,7 @@ pub fn paint(p: &Painter, zone: Zone, size: Vec2, facts: &Facts, hover: Option<u
         Zone::SheetHint => {
             // Over VRChat's tooltip for what the sheet hides, where one appears.
             p.rect_filled(panel, look::radius(panel.height() / 2.0), look::OPAQUE);
-            let (first, second) = facts.pointed.and_then(|a| caption(a, facts)).unwrap_or_else(|| (tr(&facts.sheet_title).to_string(), sheet_says(facts).to_string()));
+            let (first, second) = facts.pointed.and_then(|a| caption(a, facts)).unwrap_or_else(|| (sheet_name(&facts.sheet_title).to_string(), sheet_says(facts).to_string()));
             let font = look::font(13.5, weight::MEDIUM);
             let words = format!("{first}: {second}");
             p.text(panel.center(), Align2::CENTER_CENTER, fit(p, &words, &font, panel.width() - 28.0), font, look::LABEL);
@@ -1626,7 +1635,7 @@ pub fn paint(p: &Painter, zone: Zone, size: Vec2, facts: &Facts, hover: Option<u
                 widgets::icon(p, pos2(x + 10.0, 22.0), glyph, 21.0, tint);
                 x += 28.0;
                 let font = look::font(18.0, weight::SEMIBOLD);
-                let title = fit(p, tr(&facts.sheet_title), &font, size.x - 50.0 - x);
+                let title = fit(p, sheet_name(&facts.sheet_title), &font, size.x - 50.0 - x);
                 x += p.layout_no_wrap(title.clone(), font.clone(), Color32::WHITE).size().x;
                 p.text(pos2(x - p.layout_no_wrap(title.clone(), font.clone(), Color32::WHITE).size().x, 22.0), Align2::LEFT_CENTER, title, font, look::LABEL);
             }
@@ -2224,7 +2233,7 @@ fn draw(p: &Painter, zone: Zone, item: &Item, facts: &Facts, hovered: bool, pres
         Look::SmallView => {
             let radius = look::radius(rect.height() / 2.0);
             p.rect_filled(rect, radius, if hovered { look::TILE_HOVER } else { look::TILE });
-            p.text(rect.center(), Align2::CENTER_CENTER, if facts.view_small { tr("Around you") } else { tr("Small") }, look::font(13.0, weight::SEMIBOLD), look::LABEL);
+            p.text(rect.center(), Align2::CENTER_CENTER, if facts.view_small { tr("Around you") } else { tr_ctx("view", "Small") }, look::font(13.0, weight::SEMIBOLD), look::LABEL);
         }
         Look::HideView => {
             let radius = look::radius(rect.height() / 2.0);
@@ -2861,7 +2870,7 @@ fn status_now(facts: &Facts) -> Option<(String, String)> {
         return Some((tr("3D picture in progress").into(), tr("The camera is flying. Stay where you are for a moment.").into()));
     }
     said_now(facts)
-        .or_else(|| facts.invite_said.clone().map(|said| (tr(&facts.sheet_title).to_string(), said)))
+        .or_else(|| facts.invite_said.clone().map(|said| (sheet_name(&facts.sheet_title).to_string(), said)))
         .or_else(|| facts.view_said.clone().filter(|_| facts.sheet == Some(Sheet::Pictures)))
 }
 

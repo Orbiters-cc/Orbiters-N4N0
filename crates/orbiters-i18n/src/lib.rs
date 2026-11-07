@@ -182,6 +182,37 @@ pub fn tr_ctx<'a>(context: &str, english: &'a str) -> &'a str {
     tr(english)
 }
 
+/// The English keys a language's translations came from, each translation with all the keys that have it, plain keys first and in order, context left out.
+fn english_of_table(language: Language) -> Option<&'static HashMap<&'static str, Vec<&'static str>>> {
+    static TABLES: [OnceLock<HashMap<&'static str, Vec<&'static str>>>; 5] = [const { OnceLock::new() }; 5];
+    let table = table(language)?;
+    Some(TABLES[language as usize].get_or_init(|| {
+        let mut sorted: Vec<(&&'static str, &&'static str)> = table.iter().collect();
+        sorted.sort_by_key(|(english, _)| (english.contains(CONTEXT), **english));
+        let mut back: HashMap<&'static str, Vec<&'static str>> = HashMap::new();
+        for (english, translated) in sorted {
+            let plain = english.rsplit(CONTEXT).next().unwrap_or(english);
+            let keys = back.entry(*translated).or_default();
+            if !keys.contains(&plain) {
+                keys.push(plain);
+            }
+        }
+        back
+    }))
+}
+
+/// The English of a text already translated, for what must not change with the language: a widget's id (a button's label is what it is told apart by, and a
+/// `Button::new(tr("Save"))` no longer has its English to give). What has no translation is itself. Two English texts with one translation give the first, so it is
+/// not for comparing with a particular English text: see [`english_names_of`].
+pub fn english_of(shown: &str) -> &str {
+    english_of_table(language()).and_then(|back| back.get(shown)).and_then(|keys| keys.first().copied()).unwrap_or(shown)
+}
+
+/// Every English text with this translation, for an automated run that looks for a control by its English name in any language. Empty where there is no translation.
+pub fn english_names_of(shown: &str) -> &'static [&'static str] {
+    english_of_table(language()).and_then(|back| back.get(shown)).map_or(&[], |keys| keys.as_slice())
+}
+
 /// `text` with each `{name}` replaced by its value. A name that is not in `values` stays as written, so a mistake shows and breaks nothing;
 /// a value is put in as it is, never read for names itself.
 pub fn fill(text: &str, values: &[(&str, &dyn Display)]) -> String {

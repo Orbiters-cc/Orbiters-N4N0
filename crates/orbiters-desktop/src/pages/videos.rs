@@ -6,7 +6,7 @@
 use super::{Cx, Job};
 use crate::ipc::N4n0Command;
 use egui::{pos2, vec2, Align2, Color32, ColorImage, CursorIcon, Id, Key, Order, Rect, Sense, TextureHandle, TextureId, TextureOptions, Ui, UiBuilder};
-use orbiters_i18n::{fill, mark, tr, tr_n};
+use orbiters_i18n::{fill, mark, tr, tr_ctx, tr_n};
 use orbiters_core::video_history::{self, Bookmark, Bookmarks, History, Loaded, Played};
 use orbiters_ui::anim::{self, ease, Spring};
 use orbiters_ui::theme::{self, weight, Txt};
@@ -372,7 +372,7 @@ fn day(secs: u64, now: u64) -> (i64, String) {
         mark("November"),
         mark("December"),
     ];
-    let month = tr(months[date.month() as usize - 1]);
+    let month = tr_ctx("whole month", months[date.month() as usize - 1]);
     let name = match today - d {
         0 => tr("Today").to_string(),
         1 => tr("Yesterday").to_string(),
@@ -389,7 +389,7 @@ fn day(secs: u64, now: u64) -> (i64, String) {
         _ if date.year() == time::OffsetDateTime::from_unix_timestamp(now as i64 + offset).map_or(0, |n| n.year()) => {
             tr!("{day} {month}", day = date.day(), month = month)
         }
-        _ => tr!("{day} {month} {year}", day = date.day(), month = month, year = date.year()),
+        _ => fill(tr_ctx("whole month", "{day} {month} {year}"), &[("day", &date.day()), ("month", &month), ("year", &date.year())]),
     };
     (d, name)
 }

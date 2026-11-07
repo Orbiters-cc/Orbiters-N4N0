@@ -319,7 +319,7 @@ fn source_row(ed: &mut Editor, ui: &mut Ui, i: usize) {
 fn layer_sub(l: &Layer) -> String {
     let mut parts = Vec::new();
     if !l.visible {
-        parts.push(tr("Hidden").to_string());
+        parts.push(tr_ctx("layer", "Hidden").to_string());
     } else if l.opacity < 1.0 {
         parts.push(w::percent(l.opacity));
     }

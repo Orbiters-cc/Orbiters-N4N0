@@ -54,7 +54,7 @@
   "Font": "Fuente",
   "Foreground": "Primer plano",
   "Gaussian": "Gaussiano",
-  "Hidden": "Oculta",
+  "Hidden": "Oculto",
   "Highlights": "Luces altas",
   "Hold to see the original": "Mantén presionado para ver el original",
   "Horizontal": "Horizontal",
@@ -154,7 +154,7 @@
   "Vertical": "Vertical",
   "Vertical perspective: lines leaning together upwards, as a building shot from below, made upright": "Perspectiva vertical: las líneas que convergen hacia arriba, como en un edificio fotografiado desde abajo, se enderezan",
   "Vibrance": "Intensidad",
-  "Vignette": "Viñeteado",
+  "Vignette": "Viñeta",
   "Where": "Zona",
   "While you drag the distance, what lies at it is tinted green.": "Mientras arrastras la distancia, lo que está a esa distancia se tiñe de verde.",
   "White balance": "Balance de blancos",
@@ -204,5 +204,6 @@
   "{style}, {font}": "{style}, {font}",
   "{tones} tones, ink {ink}": "{tones} tonos, tinta {ink}",
   "{tones} tones, ink {ink}, dots": "{tones} tonos, tinta {ink}, puntos",
-  "{width} × {height} pixels": "{width} × {height} píxeles"
+  "{width} × {height} pixels": "{width} × {height} píxeles",
+  "layer\u0004Hidden": "Oculta"
 }

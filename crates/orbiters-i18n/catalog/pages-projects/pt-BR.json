@@ -1,6 +1,6 @@
 {
   "3D capture shared": "Captura 3D compartilhada",
-  "3D preview": "prévia 3D",
+  "3D preview": "Prévia 3D",
   "3D preview unreadable": "Prévia 3D ilegível",
   "A copy of the project, beside it or anywhere you choose": "Uma cópia do projeto, ao lado ou onde você escolher",
   "A copy of {name}, beside it or anywhere you choose": "Uma cópia de {name}, ao lado ou onde você escolher",
@@ -117,7 +117,7 @@
   "Finding nearby projects": "Procurando projetos próximos",
   "Finding the avatars of your projects…": "Procurando os avatares dos seus projetos…",
   "Finds which repositories have these packages (Orbiters' Known VPM first) and shows them before adding": "Procura quais repositórios têm esses pacotes (primeiro o Known VPM do Orbiters) e mostra antes de adicionar",
-  "Finish in your browser": "Concluir no navegador",
+  "Finish in your browser": "Conclua no navegador",
   "Folder missing": "Pasta ausente",
   "Found on this computer": "Encontrados neste computador",
   "Frame it again": "Enquadrar de novo",

@@ -40,7 +40,7 @@
   "Could not share to the Map explorer: {message}": "No se pudo compartir en el explorador de mapas: {message}",
   "Could not start the sign-in: {error}": "No se pudo iniciar el inicio de sesión: {error}",
   "Default microphone": "Micrófono predeterminado",
-  "Downloading version {version}: {percent} %": "Descargando la versión {version}: {percent}%",
+  "Downloading version {version}: {percent} %": "Descargando la versión {version}: {percent} %",
   "Everyone still sees the version shared before.": "Todos siguen viendo la versión compartida antes.",
   "Face & avatar": "Cara y avatar",
   "Finishing in your browser": "Termina en tu navegador",
@@ -169,7 +169,7 @@
   "SteamVR devices at {hz} Hz": "Dispositivos de SteamVR a {hz} Hz",
   "SteamVR did not load the smoothing driver: restart SteamVR once": "SteamVR no cargó el controlador de suavizado: reinicia SteamVR una vez",
   "SteamVR's Safe Mode turned the driver off: turn orbiters_smooth on in Manage Add-ons": "El Safe Mode de SteamVR desactivó el controlador: activa orbiters_smooth en Manage Add-ons",
-  "Stop recording": "Detener grabación",
+  "Stop recording": "Detener la grabación",
   "Stopped from Settings: control is back with the person.": "Detenido desde Configuración: el control vuelve a la persona.",
   "Storage limit reached: recording stopped. Raise the limit in Settings or free space.": "Se alcanzó el límite de almacenamiento: la grabación se detuvo. Sube el límite en Configuración o libera espacio.",
   "System default": "Predeterminado del sistema",
@@ -256,7 +256,7 @@
   "Version {version} is ready: it installs once {work} ends{first}": "La versión {version} está lista: se instala cuando termine {work}{first}",
   "Videos": "Videos",
   "Visited worlds": "Mundos visitados",
-  "Waiting": "Esperando",
+  "Waiting": "En espera",
   "Waiting for SteamVR": "Esperando a SteamVR",
   "Waiting for SteamVR to start its smoothing driver": "Esperando a que SteamVR inicie su controlador de suavizado",
   "Waiting for VRChat's OSC": "Esperando el OSC de VRChat",
@@ -331,5 +331,6 @@
   "{path} is not a file name": "{path} no es un nombre de archivo",
   "{path} is not a raw capture of this world.": "{path} no es una captura sin procesar de este mundo.",
   "{path} is not a session in Orbiters - N4N0's sessions folder.": "{path} no es una sesión de la carpeta de sesiones de Orbiters - N4N0.",
-  "{why} Discard them to export every splat as trained: Select splats in its 3D view can remove them again.": "{why} Descártalas para exportar todos los splats tal como se entrenaron: con la selección de splats en su vista 3D podrás quitarlos otra vez."
+  "{why} Discard them to export every splat as trained: Select splats in its 3D view can remove them again.": "{why} Descártalas para exportar todos los splats tal como se entrenaron: con la selección de splats en su vista 3D podrás quitarlos otra vez.",
+  "file\u0004Small": "Pequeño"
 }

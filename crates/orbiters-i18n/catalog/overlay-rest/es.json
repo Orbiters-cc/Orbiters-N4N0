@@ -77,7 +77,7 @@
   "Stay still.": "No te muevas.",
   "SteamVR refused the controls: {why}": "SteamVR rechazó los controles: {why}",
   "Still": "Quieto",
-  "Stop recording": "Detener grabación",
+  "Stop recording": "Detener la grabación",
   "Strength": "Intensidad",
   "Stretch your arms out to the targets.": "Estira los brazos hacia los objetivos.",
   "Switches apply to the next recording": "Los cambios se aplican en la próxima grabación",
@@ -110,5 +110,5 @@
   "Your stick": "Tu joystick",
   "a call\u0004Decline": "Rechazar",
   "or N4N0 › Record in your Action Menu": "o N4N0 › Record en tu menú de acción",
-  "{left} of {limit} free answers left today": "Respuestas gratuitas restantes hoy: {left} de {limit}"
+  "{left} of {limit} free answers left today": "Quedan {left} de {limit} respuestas gratuitas hoy"
 }

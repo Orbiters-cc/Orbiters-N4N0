@@ -21,7 +21,7 @@
 
 use super::*;
 use egui::{PointerButton, Pos2};
-use orbiters_i18n::{mark, tr};
+use orbiters_i18n::{mark, tr, tr_ctx};
 use orbiters_reconstruct::edit::{self, DELETED, Edit, Found, HIDDEN, History, Identity, SELECTED};
 use orbiters_reconstruct::select::{self as pick, Splats};
 use orbiters_ui::anim::{self, Spring};
@@ -1179,7 +1179,7 @@ impl Viewer {
         let whole_w = widths.iter().sum::<f32>() + 6.0 * (widths.len() as f32 - 1.0) + 12.0;
 
         // The tools: a segmented control, and the brush's size in the room left beside what works on the whole capture.
-        let label = Txt::new(tr("Select"), 12.0).color(theme::FG_3);
+        let label = Txt::new(tr_ctx("tool", "Select"), 12.0).color(theme::FG_3);
         let label_w = widgets::text_size(ui, &label).x;
         let options = [
             SegOption::new(Tool::Pick, tr("Pick")).hint(tr("Click the splats under the cursor (1)")),

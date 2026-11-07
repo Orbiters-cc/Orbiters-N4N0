@@ -54,7 +54,7 @@
   "Font": "Fonte",
   "Foreground": "Primeiro plano",
   "Gaussian": "Gaussiano",
-  "Hidden": "Oculta",
+  "Hidden": "Oculto",
   "Highlights": "Realces",
   "Hold to see the original": "Mantenha pressionado para ver o original",
   "Horizontal": "Horizontal",
@@ -204,5 +204,6 @@
   "{style}, {font}": "{style}, {font}",
   "{tones} tones, ink {ink}": "{tones} tons, tinta {ink}",
   "{tones} tones, ink {ink}, dots": "{tones} tons, tinta {ink}, pontos",
-  "{width} × {height} pixels": "{width} × {height} pixels"
+  "{width} × {height} pixels": "{width} × {height} pixels",
+  "layer\u0004Hidden": "Oculta"
 }

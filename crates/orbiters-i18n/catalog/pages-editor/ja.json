@@ -81,7 +81,7 @@
   "Not saved: close again to leave without saving": "未保存です。もう一度閉じると、保存せずに終了します",
   "Opacity": "不透明度",
   "Opens its capture's 3D view where it was made, with these layers": "撮影した場所の3Dキャプチャのビューを、これらのレイヤー付きで開きます",
-  "Original": "元の写真",
+  "Original": "オリジナル",
   "Outside the band": "帯の外側",
   "Outside the circle": "円の外側",
   "Paste a crop (copy one first)": "トリミングをペースト（先にコピーが必要）",
@@ -96,8 +96,8 @@
   "Radius {radius}, bokeh {bokeh}": "半径 {radius}、ボケ {bokeh}",
   "Reading the picture…": "写真を読み込んでいます…",
   "Red and blue part away from the centre, more towards the edges. Drag the centre on the picture.": "赤と青が中心から離れる方向にずれ、端に近いほど大きくずれます。中心は写真上でドラッグして動かせます。",
-  "Redo (Cmd+Shift+Z)": "やり直す(Cmd+Shift+Z)",
-  "Redo (Ctrl+Shift+Z)": "やり直す(Ctrl+Shift+Z)",
+  "Redo (Cmd+Shift+Z)": "やり直す（Cmd+Shift+Z）",
+  "Redo (Ctrl+Shift+Z)": "やり直す（Ctrl+Shift+Z）",
   "Remove this layer": "このレイヤーを削除",
   "Remove “{name}”": "「{name}」を削除",
   "Rotate a quarter to the left": "左に90°回転",
@@ -148,8 +148,8 @@
   "Tint": "色合い",
   "Tones": "階調",
   "Type something…": "文字を入力…",
-  "Undo (Cmd+Z)": "元に戻す(Cmd+Z)",
-  "Undo (Ctrl+Z)": "元に戻す(Ctrl+Z)",
+  "Undo (Cmd+Z)": "元に戻す（Cmd+Z）",
+  "Undo (Ctrl+Z)": "元に戻す（Ctrl+Z）",
   "Undo every change of the crop": "トリミングの変更をすべて取り消す",
   "Vertical": "垂直",
   "Vertical perspective: lines leaning together upwards, as a building shot from below, made upright": "垂直方向の遠近：下から撮った建物のように上すぼまりになった線を、まっすぐに直します",
@@ -204,5 +204,6 @@
   "{style}, {font}": "{style}, {font}",
   "{tones} tones, ink {ink}": "{tones}階調、インク {ink}",
   "{tones} tones, ink {ink}, dots": "{tones}階調、インク {ink}、ドット",
-  "{width} × {height} pixels": "{width} × {height} ピクセル"
+  "{width} × {height} pixels": "{width} × {height} ピクセル",
+  "layer\u0004Hidden": "非表示"
 }

@@ -145,10 +145,10 @@ fn every_file_with_text_is_covered() {
 /// `mark` and `tr` take literals only: a key the scan cannot read could not be checked.
 #[test]
 fn the_reader_tells_text_from_code() {
-    for text in ["Settings", "Worlds in 3D", "Press {key} to start", "Hide tiles", "Can't reach Orbiters.", "Loading…", "Sound in VR", "3D picture of people", "Try again", "THE WEEKND FROM SOMEWHERE ELSE", "Saving..."] {
+    for text in ["Settings", "Worlds in 3D", "Press {key} to start", "Hide tiles", "Can't reach Orbiters.", "Loading…", "Sound in VR", "3D picture of people", "Try again", "THE WEEKND FROM SOMEWHERE ELSE", "Saving...", "{} avatars", "conflicts with {}", "{n} pictures", " friends"] {
         assert!(looks_like_text(text), "{text:?} is text");
     }
-    for text in ["", "{}", "{} {}", "foo_bar", "maxWidth", "file.png", "a/b/c", "https://orbiters.cc/x", "n4n0/calls", "wrld_123", "VRCX", "orbit-wheel", "--hidden", "VRChat", "N4N0", "\u{E000}", "-1", "x", "en-US", "application/json", "{a}/{b}.json", "C:\\Users"] {
+    for text in ["", "{}", "{} {}", "foo_bar", "maxWidth", "file.png", "a/b/c", "https://orbiters.cc/x", "n4n0/calls", "wrld_123", "VRCX", "orbit-wheel", "--hidden", "VRChat", "N4N0", "\u{E000}", "-1", "x", "en-US", "application/json", "{a}/{b}.json", "C:\\Users", "{} ms", "{key}.small-hide", "{w}x{h}"] {
         assert!(!looks_like_text(text), "{text:?} is not text");
     }
     let source = r##"
@@ -175,6 +175,9 @@ fn the_reader_tells_text_from_code() {
             error!("A log called error");
             bail!("An error");
             let n = thing().context("Another error")?;
+            let o = Thing { field: tr("A wrapped field"), other: tr!("A wrapped {x} field", x = 1), id: Id::new("A field's id"), said: "A bare field" };
+            let p = "A line that \
+                     goes on";
         }
         #[cfg(test)]
         mod tests { fn t() { let x = "Test text"; } }
@@ -182,9 +185,12 @@ fn the_reader_tells_text_from_code() {
     "##;
     let found = literals(source);
     let shown: Vec<&str> = found.iter().filter(|l| !l.key).map(|l| l.text.as_str()).collect();
-    assert_eq!(shown, ["Shown text", "Raw text shown", "Static text", "Formatted {} text", "Argument text", "Nested text", "A label", "About it", "A widget called error", "An error", "Another error", "After tests"]);
+    assert_eq!(shown, ["Shown text", "Raw text shown", "Static text", "Formatted {} text", "Argument text", "Nested text", "A label", "About it", "A widget called error", "An error", "Another error", "A bare field", "A line that goes on", "After tests"]);
     let errors: Vec<&str> = found.iter().filter(|l| l.error).map(|l| l.text.as_str()).collect();
     assert_eq!(errors, ["An error", "Another error"], "counted apart");
     let keys: Vec<&str> = found.iter().filter(|l| l.key && !l.context).map(|l| l.text.as_str()).collect();
-    assert_eq!(keys, ["Wrapped text", "Wrapped {x} text", "Marked text"], "a context is not a key on its own");
+    assert_eq!(keys, ["Wrapped text", "Wrapped {x} text", "Marked text", "A wrapped field", "A wrapped {x} field"], "a context is not a key on its own");
+    // The same source checked out with CRLF reads the same: a key with a continued line is one key, as rustc reads it.
+    let crlf: Vec<String> = literals(&source.replace('\n', "\r\n")).into_iter().map(|l| l.text).collect();
+    assert_eq!(crlf, found.iter().map(|l| l.text.clone()).collect::<Vec<_>>());
 }

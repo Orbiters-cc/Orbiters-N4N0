@@ -34,14 +34,19 @@ pub fn control(ctx: &egui::Context, label: &str) -> Option<(Rect, bool)> {
     drawn.0.get(label).filter(|(_, _, p)| p + 1 >= pass).map(|(r, enabled, _)| (*r, *enabled))
 }
 
-/// Notes where a control labelled `label` was drawn, for [`control`] (an automated run only).
+/// Notes where a control labelled `label` was drawn, for [`control`] (an automated run only). It goes under its English names too: a run looks for a control by its English
+/// name, and finds it in every language.
 pub fn note_control(ctx: &egui::Context, label: &str, rect: Rect, enabled: bool) {
     if !WATCH.load(Ordering::Relaxed) {
         return;
     }
     let pass = ctx.cumulative_pass_nr();
     ctx.data_mut(|d| {
-        d.get_temp_mut_or_default::<Drawn>(drawn_id()).0.insert(label.to_string(), (rect, enabled, pass));
+        let drawn = &mut d.get_temp_mut_or_default::<Drawn>(drawn_id()).0;
+        for english in orbiters_i18n::english_names_of(label) {
+            drawn.insert((*english).to_string(), (rect, enabled, pass));
+        }
+        drawn.insert(label.to_string(), (rect, enabled, pass));
     });
 }
 
@@ -285,12 +290,13 @@ impl<'a> Button<'a> {
         }
     }
 
-    /// Shows the button in a given rect (for layouts that place it themselves). Its id comes from its label and icon
+    /// Shows the button in a given rect (for layouts that place it themselves). Its id comes from its label's English and its icon
     /// (or [`Button::id_salt`]), never from where it is: a button that moves (scrolling, an entrance, a scale-in)
-    /// stays one widget, so a press on it still clicks and no state is left behind at every position it passed.
+    /// stays one widget, so a press on it still clicks and no state is left behind at every position it passed; nor from its
+    /// language, so a language change while it is held or open behind a popup leaves it the same button.
     pub fn show_at(self, ui: &mut Ui, rect: Rect) -> Response {
         let (_, _, size, gap, icon_size) = self.metrics();
-        let key = self.id_salt.unwrap_or_else(|| IdSalt::new((self.label, self.icon)));
+        let key = self.id_salt.unwrap_or_else(|| IdSalt::new((orbiters_i18n::english_of(self.label), self.icon)));
         let resp = ui.interact(rect, ui.scope_id().with("button").with_salt(key), if self.enabled { Sense::click() } else { Sense::hover() });
         if self.enabled {
             pressed(&resp);
@@ -412,7 +418,7 @@ impl<'a> IconButton<'a> {
     /// Shows the button in a given rect; its id comes from its icon and label (or [`IconButton::id_salt`]), never
     /// from where it is.
     pub fn show_at(self, ui: &mut Ui, rect: Rect) -> Response {
-        let key = self.id_salt.unwrap_or_else(|| IdSalt::new((self.glyph, self.label)));
+        let key = self.id_salt.unwrap_or_else(|| IdSalt::new((self.glyph, orbiters_i18n::english_of(self.label))));
         let resp = ui.interact(rect, ui.scope_id().with("icon-button").with_salt(key), Sense::click());
         pressed(&resp);
         note_control(ui.ctx(), self.label, rect, true);

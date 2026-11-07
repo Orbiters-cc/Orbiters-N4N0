@@ -7,7 +7,7 @@ use egui::{pos2, vec2, Align, Align2, Id, Layout, Rect, Sense, Ui, UiBuilder, Ve
 use orbiters_contracts::manifest::{CaptureMode, StorageQuality};
 use orbiters_core::picture::Left;
 use orbiters_core::settings::{Photo3dLength, PictureMode, Settings};
-use orbiters_i18n::{fill, mark, tr, tr_n};
+use orbiters_i18n::{fill, mark, tr, tr_ctx, tr_n};
 use orbiters_n4n0_core::menu::strings::{Strings, FLIGHTS};
 use orbiters_ui::anim::{self, Spring};
 use orbiters_ui::format;
@@ -532,7 +532,7 @@ fn chips(ui: &mut Ui, cx: &mut Cx, projects: &mut super::projects::State) {
                 if source.is_some() { Tone::Ok } else { Tone::Warn },
             )
         } else {
-            (icons::BROADCAST, tr("Recording"), tr("Where VRChat runs").into(), Tone::Off)
+            (icons::BROADCAST, tr_ctx("the noun", "Recording"), tr("Where VRChat runs").into(), Tone::Off)
         },
         (
             icons::SPARKLE,
@@ -604,7 +604,7 @@ fn recording_settings(ui: &mut Ui, cx: &mut Cx) {
     block(ui, cx, 9, 76.0, |ui, card| {
         widgets::card(ui.painter(), card, theme::CARD_RADIUS);
         let p = ui.painter().clone();
-        widgets::text(&p, pos2(card.left() + 22.0, card.top() + 28.0), Align2::LEFT_CENTER, &Txt::caps(tr("Recording")));
+        widgets::text(&p, pos2(card.left() + 22.0, card.top() + 28.0), Align2::LEFT_CENTER, &Txt::caps(tr_ctx("the noun", "Recording")));
         let sub = if snap.osc.listening { tr("Also from your Action Menu") } else { tr("Saved as a session") };
         widgets::text_truncated(&p, pos2(card.left() + 22.0, card.top() + 50.0), Align2::LEFT_CENTER, &Txt::new(sub, 12.5).color(theme::FG_3), 180.0);
         let mut mode = settings.capture_mode;

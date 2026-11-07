@@ -565,7 +565,7 @@ impl Viewer {
         let unsure = [
             SegOption::new(Unsure::Shown, tr_ctx("splats", "Show")),
             SegOption::new(Unsure::Faded, tr("Fade")),
-            SegOption::new(Unsure::Blurred, tr("Blur")),
+            SegOption::new(Unsure::Blurred, tr_ctx("splats", "Blur")),
             SegOption::new(Unsure::Hazed, tr("Haze")),
         ];
         let percent = |v: f32| format!("{:.0} %", v * 100.0);

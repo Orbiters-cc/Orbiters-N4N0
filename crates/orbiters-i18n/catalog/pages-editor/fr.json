@@ -204,5 +204,6 @@
   "{style}, {font}": "{style}, {font}",
   "{tones} tones, ink {ink}": "{tones} nuances, encre {ink}",
   "{tones} tones, ink {ink}, dots": "{tones} nuances, encre {ink}, points",
-  "{width} × {height} pixels": "{width} × {height} pixels"
+  "{width} × {height} pixels": "{width} × {height} pixels",
+  "layer\u0004Hidden": "Masqué"
 }

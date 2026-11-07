@@ -620,7 +620,7 @@ fn vr_card(p: &Painter, rect: Rect, entry: &Entry, d: &Data, hover: bool, presse
     picture(p, thumb, (d.thumb)(entry), &entry.world_id, CornerRadius { nw: 16, ne: 16, sw: 0, se: 0 }, 1.0);
     let status = d.status;
     let chip = if status.current == Some(entry.id) {
-        Some((if !status.shown { tr("Loading") } else if status.small { tr("Small") } else { tr("Around you") }, if status.shown { orbit_look::accent() } else { theme::WARN }))
+        Some((if !status.shown { tr("Loading") } else if status.small { tr_ctx("view", "Small") } else { tr("Around you") }, if status.shown { orbit_look::accent() } else { theme::WARN }))
     } else if entry.capture {
         Some(("3D", orbit_look::accent()))
     } else {
@@ -2436,7 +2436,7 @@ fn compact_card(p: &Painter, rect: Rect, entry: &Entry, d: &Data, hover: bool, p
     }
     if status.current == Some(entry.id) {
         p.circle_filled(pos2(x + 6.0, rect.min.y + 88.0), 5.0, fade(if status.shown { orbit_look::accent() } else { theme::WARN }, alpha));
-        text(p, pos2(x + 18.0, rect.min.y + 88.0), Align2::LEFT_CENTER, orbit_look::txt(if !status.shown { tr("Loading") } else if status.small { tr("Small") } else { tr("Around you") }, 15.5).color(fade(theme::FG_2, alpha)));
+        text(p, pos2(x + 18.0, rect.min.y + 88.0), Align2::LEFT_CENTER, orbit_look::txt(if !status.shown { tr("Loading") } else if status.small { tr_ctx("view", "Small") } else { tr("Around you") }, 15.5).color(fade(theme::FG_2, alpha)));
     } else {
         let mut at = x;
         if entry.capture {

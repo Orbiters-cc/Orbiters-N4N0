@@ -162,7 +162,7 @@
   "Sign-in expired": "Connexion expirée",
   "Signed in to Orbiters as {name}.": "Connecté à Orbiters en tant que {name}.",
   "Signed in, but the Unity tools will not share it: {error}": "Connecté, mais les outils Unity ne le partageront pas : {error}",
-  "Small": "Léger",
+  "Small": "Petit",
   "Smoothing needs Windows": "Le lissage nécessite Windows",
   "Smoothing your devices now": "Lissage de tes appareils en cours",
   "Start recording": "Démarrer l’enregistrement",
@@ -235,7 +235,7 @@
   "Turning smoothing on": "Activation du lissage",
   "Unity projects": "Projets Unity",
   "Unnamed world": "Monde sans nom",
-  "Update": "Màj",
+  "Update": "Mettre à jour",
   "Updated. Restart any {name} session already open.": "Mis à jour. Relance les sessions {name} déjà ouvertes.",
   "Updated: everyone who sees this 3D capture now sees it as its 3D view shows it.": "Mis à jour : toutes les personnes qui voient cette capture 3D la voient désormais comme sa vue 3D la montre.",
   "VRChat at {ip}": "VRChat sur {ip}",
@@ -297,7 +297,7 @@
   "the recording": "l’enregistrement",
   "the running work": "le travail en cours",
   "the speech models' download": "le téléchargement des modèles vocaux",
-  "the upload": "le téléversement",
+  "the upload": "l’envoi",
   "the world may wipe it": "le monde peut l’effacer",
   "this capture has no splats any more: reconstruct it again": "cette capture n’a plus de splats : reconstruis-la de nouveau",
   "tray": "la zone de notification",
@@ -331,5 +331,6 @@
   "{path} is not a file name": "{path} n’est pas un nom de fichier",
   "{path} is not a raw capture of this world.": "{path} n’est pas une capture brute de ce monde.",
   "{path} is not a session in Orbiters - N4N0's sessions folder.": "{path} n’est pas une session du dossier des sessions d’Orbiters - N4N0.",
-  "{why} Discard them to export every splat as trained: Select splats in its 3D view can remove them again.": "{why} Abandonne-les pour exporter tous les splats tels qu’entraînés : tu pourras les retirer de nouveau en sélectionnant des splats dans sa vue 3D."
+  "{why} Discard them to export every splat as trained: Select splats in its 3D view can remove them again.": "{why} Abandonne-les pour exporter tous les splats tels qu’entraînés : tu pourras les retirer de nouveau en sélectionnant des splats dans sa vue 3D.",
+  "file\u0004Small": "Léger"
 }

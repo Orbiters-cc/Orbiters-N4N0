@@ -18,7 +18,7 @@
 //! its `reconstruction/` folder whole, and deleting the capture deletes the rest for good ([`Failure::OwnFiles`]).
 
 use orbiters_core::reconstruction as rec;
-use orbiters_i18n::{mark, tr};
+use orbiters_i18n::{mark, tr, tr_ctx};
 use orbiters_reconstruct::{edit, export as encode};
 use std::io::{Read as _, Write as _};
 use std::path::{Path, PathBuf};
@@ -57,7 +57,7 @@ impl Format {
     /// What it is, in two words.
     pub fn kind(self) -> &'static str {
         match self {
-            Format::Spz => tr("Small"),
+            Format::Spz => tr_ctx("file", "Small"),
             Format::Glb => tr("glTF standard"),
             Format::Ply => tr("Full precision"),
         }

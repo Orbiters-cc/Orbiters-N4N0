@@ -198,8 +198,11 @@ pub fn literals(source: &str) -> Vec<Literal> {
                         match chars.get(i) {
                             Some('n') => text.push('\n'),
                             Some('t') => text.push('\t'),
-                            Some('\n') => {
-                                // A continued line: its indentation is not text.
+                            Some('\r') | Some('\n') => {
+                                // A continued line: its indentation is not text. `\r` first in a file checked out with CRLF, which rustc reads as `\n`.
+                                if chars[i] == '\r' {
+                                    i += 1;
+                                }
                                 line += 1;
                                 i += 1;
                                 while chars.get(i).is_some_and(|c| c.is_whitespace()) {
@@ -230,7 +233,9 @@ pub fn literals(source: &str) -> Vec<Literal> {
                     if chars[i] == '\n' {
                         line += 1;
                     }
-                    text.push(chars[i]);
+                    if chars[i] != '\r' || chars.get(i + 1) != Some(&'\n') {
+                        text.push(chars[i]);
+                    }
                     i += 1;
                 }
                 i += 1;
@@ -268,8 +273,8 @@ pub fn literals(source: &str) -> Vec<Literal> {
                 i += 1;
             }
             c if c.is_whitespace() => {
-                // `foo (` is not written; a space ends a name, except inside a path.
-                if !path.ends_with(':') {
+                // `foo (` is not written; a space ends a name, except inside a path (`a::\n b`). After one colon the name was a field's, and the call is what comes next.
+                if !path.ends_with("::") {
                     path.clear();
                 }
                 i += 1;
@@ -320,6 +325,7 @@ pub fn looks_like_text(text: &str) -> bool {
             _ => {}
         }
     }
+    let spaced = text != text.trim() || (text.contains('{') && plain != plain.trim());
     let plain = plain.trim();
     if !plain.chars().any(char::is_alphabetic) {
         return false;
@@ -352,7 +358,9 @@ pub fn looks_like_text(text: &str) -> bool {
             return false; // Sample names and already foreign text.
         }
         let capitalized = first.is_uppercase() && rest.chars().all(|c| c.is_lowercase() || matches!(c, '\'' | '\u{2019}' | '-' | '.' | '!' | '?' | ':' | ',' | '…'));
-        return capitalized;
+        // A word set apart from a value (`{} avatars`, `{n} of`) or with a space left for what is glued to it (` friends`): a person reads those, whatever the case. A unit (`{} ms`) has its two letters.
+        let spoken = spaced && plain.chars().count() >= 3 && plain.chars().all(|c| c.is_lowercase() || c == '\'' || c == '\u{2019}' || c == '-');
+        return capitalized || spoken;
     }
     // Several words: at least one real word in lower case, or a capitalized one.
     let words: Vec<&str> = plain.split_whitespace().collect();

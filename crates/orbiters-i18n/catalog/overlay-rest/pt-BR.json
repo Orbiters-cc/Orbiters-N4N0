@@ -77,13 +77,13 @@
   "Stay still.": "Não se mexa.",
   "SteamVR refused the controls: {why}": "O SteamVR recusou os controles: {why}",
   "Still": "Parado",
-  "Stop recording": "Parar gravação",
+  "Stop recording": "Parar a gravação",
   "Strength": "Intensidade",
   "Stretch your arms out to the targets.": "Estique os braços até os alvos.",
   "Switches apply to the next recording": "As opções valem para a próxima gravação",
   "T-pose": "T-pose",
   "T-pose calibration": "Calibração em T-pose",
-  "Talk to N4N0": "Falar com N4N0",
+  "Talk to N4N0": "Falar com o N4N0",
   "The hand whose stick moves you in VRChat.": "A mão cujo analógico move você no VRChat.",
   "The headset and both controllers need to be tracked.": "O headset e os dois controles precisam estar rastreados.",
   "The headset isn't tracked.": "O headset não está sendo rastreado.",
@@ -110,5 +110,5 @@
   "Your stick": "Seu analógico",
   "a call\u0004Decline": "Recusar",
   "or N4N0 › Record in your Action Menu": "ou N4N0 › Record no seu Menu de Ação",
-  "{left} of {limit} free answers left today": "Respostas gratuitas restantes hoje: {left} de {limit}"
+  "{left} of {limit} free answers left today": "Restam {left} de {limit} respostas gratuitas hoje"
 }

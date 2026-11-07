@@ -11,7 +11,7 @@ use super::{
 };
 use crate::captures::{CaptureRow, Friends, Sharing};
 use crate::feedback::{self, COMMENTS_PER_PAGE, TOP_LABELS};
-use orbiters_i18n::{tr, tr_n};
+use orbiters_i18n::{tr, tr_ctx, tr_n};
 use std::sync::OnceLock;
 
 pub const WIDTH: u16 = 1024;
@@ -2346,7 +2346,7 @@ pub fn qr_note(qr: &crate::qr::QrView) -> String {
 fn instance_meta(row: &super::InstanceRow) -> String {
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
     let seconds = now.saturating_sub(row.at);
-    let mut parts = vec![tr(row.kind()).to_string()];
+    let mut parts = vec![tr_ctx("instance", row.kind()).to_string()];
     if let Some(region) = row.region() {
         parts.push(region.to_string());
     }

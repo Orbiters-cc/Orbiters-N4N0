@@ -362,7 +362,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
                                 cx.ctl.n4n0(N4n0Command::AnswerCall);
                             }
                         } else {
-                            let label = if call.muted { tr("Unmute") } else { tr("Mute") };
+                            let label = if call.muted { tr_ctx("call", "Unmute") } else { tr_ctx("call", "Mute") };
                             if Button::new(label).icon(icons::MICROPHONE).size(Size::Sm).show(ui).clicked() {
                                 cx.ctl.n4n0(N4n0Command::MuteCall { on: !call.muted });
                             }

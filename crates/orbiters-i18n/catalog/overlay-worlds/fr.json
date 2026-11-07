@@ -4,7 +4,7 @@
   "1 person in it now": "1 personne dedans maintenant",
   "3D by {user}": "3D par {user}",
   "3D only": "En 3D",
-  "3D world": "Monde en 3D",
+  "3D world": "Monde 3D",
   "3D worlds": "Mondes en 3D",
   "Active now": "Actifs",
   "Around me": "Autour de moi",
@@ -51,7 +51,7 @@
   "Grip to take it": "Grip pour le prendre",
   "Has a 3D capture": "A une capture 3D",
   "Hide": "Masquer",
-  "Hide 3D": "Masquer 3D",
+  "Hide 3D": "Masquer la 3D",
   "In your hand": "Dans ta main",
   "Invite sent: accept it in VRChat's notifications": "Invitation envoyée : accepte-la dans VRChat",
   "It comes with your hand": "Il suit ta main",
@@ -76,7 +76,7 @@
   "No favorite world yet": "Aucun monde favori pour l’instant",
   "No picture of this world yet": "Pas encore de photo de ce monde",
   "No world has these labels": "Aucun monde n’a ces étiquettes",
-  "No world matches": "Aucun monde ne correspond",
+  "No world matches": "Aucun monde trouvé",
   "No world visited yet": "Aucun monde visité pour l’instant",
   "Nothing else here": "Rien d’autre ici",
   "On the computer: Orbiters - N4N0, Settings, VRChat account": "Sur l’ordinateur : Orbiters - N4N0, Paramètres, compte VRChat",
@@ -188,5 +188,6 @@
   "{fps} fps · {verdict}": "{fps} fps · {verdict}",
   "{have} of {need} words · public, beside the label": "{have} mots sur {need} · public, à côté de l’étiquette",
   "{name}: {text}": "{name} : {text}",
-  "{number} of {total}": "{number} sur {total}"
+  "{number} of {total}": "{number} sur {total}",
+  "view\u0004Small": "Petit"
 }

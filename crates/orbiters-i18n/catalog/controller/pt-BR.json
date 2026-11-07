@@ -169,7 +169,7 @@
   "SteamVR devices at {hz} Hz": "Dispositivos do SteamVR a {hz} Hz",
   "SteamVR did not load the smoothing driver: restart SteamVR once": "O SteamVR não carregou o driver de suavização: reinicie o SteamVR uma vez",
   "SteamVR's Safe Mode turned the driver off: turn orbiters_smooth on in Manage Add-ons": "O Safe Mode do SteamVR desativou o driver: ative orbiters_smooth em Manage Add-ons",
-  "Stop recording": "Parar gravação",
+  "Stop recording": "Parar a gravação",
   "Stopped from Settings: control is back with the person.": "Parado em Configurações: o controle voltou para a pessoa.",
   "Storage limit reached: recording stopped. Raise the limit in Settings or free space.": "Limite de armazenamento atingido: a gravação parou. Aumente o limite em Configurações ou libere espaço.",
   "System default": "Padrão do sistema",
@@ -297,7 +297,7 @@
   "the recording": "a gravação",
   "the running work": "o trabalho em andamento",
   "the speech models' download": "o download dos modelos de voz",
-  "the upload": "o upload",
+  "the upload": "o envio",
   "the world may wipe it": "o mundo pode apagá-la",
   "this capture has no splats any more: reconstruct it again": "esta captura não tem mais splats: reconstrua de novo",
   "tray": "a bandeja do sistema",
@@ -331,5 +331,6 @@
   "{path} is not a file name": "{path} não é um nome de arquivo",
   "{path} is not a raw capture of this world.": "{path} não é uma captura bruta deste mundo.",
   "{path} is not a session in Orbiters - N4N0's sessions folder.": "{path} não é uma sessão da pasta de sessões do Orbiters - N4N0.",
-  "{why} Discard them to export every splat as trained: Select splats in its 3D view can remove them again.": "{why} Descarte-as para exportar todos os splats como foram treinados: selecionando splats na visão 3D dela, você poderá removê-los de novo."
+  "{why} Discard them to export every splat as trained: Select splats in its 3D view can remove them again.": "{why} Descarte-as para exportar todos os splats como foram treinados: selecionando splats na visão 3D dela, você poderá removê-los de novo.",
+  "file\u0004Small": "Pequeno"
 }

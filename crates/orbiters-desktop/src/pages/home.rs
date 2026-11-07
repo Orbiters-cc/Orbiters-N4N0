@@ -15,7 +15,7 @@ use egui::epaint::RectShape;
 use egui::{pos2, vec2, Align, Align2, Color32, CursorIcon, Id, Key, Layout, Painter, Pos2, Rect, Sense, Stroke, TextureId, Ui, UiBuilder, Vec2};
 use orbiters_contracts::n4n0::{LIGHT_COLORS, LIGHT_LEVELS};
 use orbiters_core::settings::Settings;
-use orbiters_i18n::{mark, tr};
+use orbiters_i18n::{mark, tr, tr_ctx};
 use orbiters_n4n0_core::menu::layout::{self, Content, Icon, Tint, HOME_TILES, MORE_CARDS_QR};
 use orbiters_n4n0_core::menu::strings::{self, Strings, Text};
 use orbiters_n4n0_core::menu::{Call, Effect, Media, MediaCommand, Menu, Page, PhotoLength, PhotoMode, Target, Volume, TIMERS};
@@ -771,7 +771,7 @@ fn pager(ui: &mut Ui, menu: &Menu) -> Option<Target> {
 
 fn call(ui: &mut Ui, cx: &Cx, menu: &Menu, acts: &mut Vec<Act>) {
     let sub = if menu.calls_ready { layout::text(menu, Content::CallsTitle) } else { tr("Friends who are online, a press away").to_string() };
-    top(ui, cx, tr("Call"), &sub, acts);
+    top(ui, cx, tr_ctx("voice call", "Call"), &sub, acts);
     if let Some(call) = &menu.call {
         let ringing = matches!(call, Call::Ringing { .. });
         let name = layout::text(menu, Content::CallName);
@@ -1064,7 +1064,7 @@ fn light(ui: &mut Ui, cx: &Cx, menu: &Menu, acts: &mut Vec<Act>) {
         widgets::separator(ui);
         let mut level = light.level_choice();
         let levels: Vec<SegOption<usize>> = (0..LIGHT_LEVELS.len()).map(|i| SegOption::new(i, strings::LIGHT_LEVELS.get(i).map_or("", |&t| menu_text(t)))).collect();
-        widgets::field(ui, tr("Brightness"), None, 260.0, |ui| {
+        widgets::field(ui, tr_ctx("lamp", "Brightness"), None, 260.0, |ui| {
             if widgets::segmented(ui, "orbiters-home-light-level", &mut level, &levels, true) {
                 acts.push(Act::Press(Target::LightLevel(level as u8)));
             }

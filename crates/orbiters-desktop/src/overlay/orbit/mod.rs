@@ -30,7 +30,7 @@ use crate::menu_host::MenuHost;
 use crate::state::{CaptureState, Snapshot};
 use egui::{pos2, vec2, ColorImage, Pos2, TextureHandle, TextureId, TextureOptions, Vec2};
 use orbiters_core::settings::MenuLook;
-use orbiters_i18n::{mark, tr};
+use orbiters_i18n::{mark, tr, tr_ctx};
 use orbiters_n4n0_core::menu::layout::{self, ScreenPage};
 use orbiters_n4n0_core::menu::{Effect, Page, Target};
 use panels::{Action, Facts, Item, Recent, Sheet};
@@ -2280,7 +2280,7 @@ fn flight_words(error: Option<&str>) -> (String, String) {
 fn access_words(kind: &str) -> &str {
     match kind {
         "Invite" => tr("Invite only"), // i18n: not shown (the kind as the server names it, matched)
-        other => other,
+        other => tr_ctx("instance", other),
     }
 }
 

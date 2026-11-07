@@ -136,9 +136,9 @@ fn bindings(controller: &str, input: &str, mode: &str) -> String {
     };
     let menu = menu_source(controller);
     let opens = match MENU_OPEN.iter().find(|(c, _, _)| *c == controller) {
-        Some((_, input, MenuOpen::Taps)) => format!("two quick taps on the left {input} open"),
-        Some((_, input, MenuOpen::Double)) => format!("a double press of the left {} opens", if *input == "x" { "X button" } else { input }),
-        None => "a double press of the left stick opens".to_string(),
+        Some((_, input, MenuOpen::Taps)) => format!("two quick taps on the left {input} open"), // i18n: not shown (a line of the bindings file SteamVR reads)
+        Some((_, input, MenuOpen::Double)) => format!("a double press of the left {} opens", if *input == "x" { "X button" } else { input }), // i18n: not shown (the bindings file)
+        None => "a double press of the left stick opens".to_string(), // i18n: not shown (the bindings file)
     };
     let press = |hand: &str| {
         format!(r#"{{ "path": "/user/hand/{hand}/input/trigger", "mode": "trigger", "inputs": {{ "click": {{ "output": "/actions/menu/in/press_{hand}" }} }} }}"#)
@@ -379,7 +379,8 @@ impl Actions {
             let input = steamvr.input().map_err(|e| e.to_string())?;
             let path = write_manifest(&manifest_dir()).map_err(|e| e.to_string())?;
             keep_saved_bindings_whole(steamvr, &manifest_dir());
-            let fail = |c: i32| format!("SteamVR input error {c}");
+            // An error text, kept English like the others ([`anyhow`]): a later pass decides whether they are translated.
+            let fail = |c: i32| anyhow::anyhow!("SteamVR input error {c}").to_string();
             input.set_action_manifest(&path).map_err(fail)?;
             let walk = Walk {
                 set: input.action_set("/actions/walk").map_err(fail)?,

@@ -125,8 +125,8 @@ pub struct Panel {
 impl Panel {
     pub fn new(overlay: &vr::Overlay, key: &str) -> anyhow::Result<Self> {
         let fail = |what: &str, code: i32| anyhow::anyhow!("{what}: SteamVR overlay error {code}");
-        let handle = overlay.create(&format!("{key}.floating"), "Orbiters").map_err(|c| fail("floating panel", c))?;
-        let bar = overlay.create(&format!("{key}.floating-bar"), "Orbiters panel's bar").map_err(|c| fail("floating panel's bar", c))?;
+        let handle = overlay.create(&format!("{key}.floating"), "Orbiters").map_err(|c| fail("floating panel", c))?; // i18n: not shown (an error text)
+        let bar = overlay.create(&format!("{key}.floating-bar"), "Orbiters panel's bar").map_err(|c| fail("floating panel's bar", c))?; // i18n: not shown (a name for SteamVR)
         let _ = overlay.set_width_in_meters(bar, BAR_WIDTH_M);
         for h in [handle, bar] {
             let _ = overlay.set_flag(h, overlay_flag::IS_PREMULTIPLIED, true);

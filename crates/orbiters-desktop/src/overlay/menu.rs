@@ -132,7 +132,7 @@ pub fn in_front(head: &Matrix34, distance: f32, below: f32) -> Matrix34 {
 impl MenuOverlay {
     pub fn new(overlay: &vr::Overlay, key: &str) -> anyhow::Result<Self> {
         let fail = |what: &str, code: i32| anyhow::anyhow!("{what}: SteamVR overlay error {code}");
-        let handle = overlay.create(&format!("{key}.menu"), "N4N0's menu").map_err(|c| fail("menu", c))?;
+        let handle = overlay.create(&format!("{key}.menu"), "N4N0's menu").map_err(|c| fail("menu", c))?; // i18n: not shown (a name for SteamVR)
         let _ = overlay.set_width_in_meters(handle, WIDTH_M);
         // No SteamVR input method: its laser mouse would take VRChat's input while the menu shows. The controllers'
         // own lasers send it the same mouse events instead (`Overlay::inject_event`, from `overlay::floating`).

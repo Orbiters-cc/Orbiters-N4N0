@@ -8,6 +8,7 @@ use egui::{pos2, vec2, Align2, Color32, Painter, Pos2, Rect, Stroke};
 use orbiters_contracts::performance::calibration::Calibration;
 use orbiters_contracts::performance::tracking::{Device, DeviceClass, Sample};
 use orbiters_core::pose::{by_role, calibration_of, TPoseCheck};
+use orbiters_i18n::{language, mark, tr, Language};
 use orbiters_openvr::Matrix34;
 use orbiters_ui::theme::{self, weight, Txt};
 use orbiters_ui::{icons, widgets};
@@ -123,6 +124,21 @@ impl Frame {
     }
 }
 
+/// A length in metres, to two decimals, written as the language writes them: a comma in French and Brazilian Portuguese (`1,65`), a point
+/// elsewhere (`1.65`). The unit stays in the sentence, where each translation puts it.
+pub fn metres(value: f32) -> String {
+    let text = format!("{value:.2}");
+    match language() {
+        Language::Fr | Language::PtBr => text.replace('.', ","),
+        _ => text,
+    }
+}
+
+/// A failed calibration. (`reason` is English, translated where it is drawn.)
+fn failed(at: f64, reason: &'static str) -> Phase {
+    Phase::Failed { at, reason }
+}
+
 /// SteamVR's space from Unity conventions (Z mirrored).
 fn vr(p: [f32; 3]) -> [f32; 3] {
     [p[0], p[1], -p[2]]
@@ -188,7 +204,7 @@ impl Calibrator {
                 self.phase = Phase::Waiting { since: now };
                 self.update_live(devices, samples);
             }
-            None => self.phase = Phase::Failed { at: now, reason: "The headset isn't tracked." },
+            None => self.phase = failed(now, mark("The headset isn't tracked.")),
         }
     }
 
@@ -211,7 +227,7 @@ impl Calibrator {
                     _ => None,
                 };
                 match check {
-                    None => self.phase = Phase::Failed { at: now, reason: "The headset and both controllers need to be tracked." },
+                    None => self.phase = failed(now, mark("The headset and both controllers need to be tracked.")),
                     Some(check) if check.all() => {
                         let from = held.unwrap_or(now);
                         if now - from >= HOLD_S {
@@ -222,7 +238,7 @@ impl Calibrator {
                         self.phase = Phase::Holding { since, held: Some(from), check };
                     }
                     Some(_) if now - since > HOLD_TIMEOUT_S => {
-                        self.phase = Phase::Failed { at: now, reason: "No T-pose seen: stand straight, hands on the two targets." };
+                        self.phase = failed(now, mark("No T-pose seen: stand straight, hands on the two targets."));
                     }
                     Some(check) => self.phase = Phase::Holding { since, held: None, check },
                 }
@@ -273,15 +289,15 @@ pub fn paint_mirror(p: &Painter, cal: &Calibrator, now: f64) {
 
     // Heading.
     let (title, line, tone): (String, String, Color32) = match &cal.phase {
-        Phase::Waiting { .. } => ("Close the dashboard".into(), "Then face this mirror and stand straight.".into(), theme::FG),
-        Phase::Countdown { until } => (format!("{}", (until - now).ceil().max(1.0) as u32), "Put your hands on the two targets.".into(), theme::FG),
+        Phase::Waiting { .. } => (tr("Close the dashboard").into(), tr("Then face this mirror and stand straight.").into(), theme::FG),
+        Phase::Countdown { until } => (format!("{}", (until - now).ceil().max(1.0) as u32), tr("Put your hands on the two targets.").into(), theme::FG),
         Phase::Holding { check, held, .. } if check.all() => {
             let k = held.map_or(0.0, |h| ((now - h) / HOLD_S).clamp(0.0, 1.0));
-            (if k >= 1.0 { "Got it".into() } else { "Hold it…".into() }, "Stay still for a moment.".into(), theme::OK)
+            (if k >= 1.0 { tr("Got it").into() } else { tr("Hold it…").into() }, tr("Stay still for a moment.").into(), theme::OK)
         }
-        Phase::Holding { check, .. } => ("T-pose".into(), first_fix(check).into(), theme::WARN),
-        Phase::Done { eye, span, .. } => ("Calibrated".into(), format!("Eyes at {eye:.2} m, hands {span:.2} m apart."), theme::OK),
-        Phase::Failed { reason, .. } => ("Not calibrated".into(), (*reason).into(), theme::DANGER),
+        Phase::Holding { check, .. } => (tr("T-pose").into(), tr(first_fix(check)).into(), theme::WARN),
+        Phase::Done { eye, span, .. } => (tr("Calibrated").into(), tr!("Eyes at {eye} m, hands {span} m apart.", eye = metres(*eye), span = metres(*span)), theme::OK),
+        Phase::Failed { reason, .. } => (tr("Not calibrated").into(), tr(reason).into(), theme::DANGER),
         Phase::Idle => (String::new(), String::new(), theme::FG),
     };
     widgets::text(p, pos2(rect.center().x, 62.0), Align2::CENTER_CENTER, &Txt::new(title, 44.0).weight(weight::SEMIBOLD).color(tone));
@@ -359,11 +375,11 @@ pub fn paint_mirror(p: &Painter, cal: &Calibrator, now: f64) {
         _ => None,
     };
     let items = [
-        ("Arms out", check.map(|c| c.wide)),
-        ("Level", check.map(|c| c.level)),
-        ("Shoulders", check.map(|c| c.shoulders)),
-        ("Centred", check.map(|c| c.centered)),
-        ("Still", check.map(|c| c.still)),
+        (mark("Arms out"), check.map(|c| c.wide)),
+        (mark("Level"), check.map(|c| c.level)),
+        (mark("Shoulders"), check.map(|c| c.shoulders)),
+        (mark("Centred"), check.map(|c| c.centered)),
+        (mark("Still"), check.map(|c| c.still)),
     ];
     let w = (rect.width() - 40.0) / items.len() as f32;
     for (i, (label, ok)) in items.iter().enumerate() {
@@ -374,22 +390,22 @@ pub fn paint_mirror(p: &Painter, cal: &Calibrator, now: f64) {
             None => theme::FG_4,
         };
         widgets::icon(p, c, if *ok == Some(true) { icons::CHECK_CIRCLE } else { icons::CIRCLE }, 24.0, color);
-        widgets::text(p, pos2(c.x, c.y + 30.0), Align2::CENTER_CENTER, &Txt::new(*label, 15.0).color(if *ok == Some(true) { theme::FG } else { theme::FG_3 }));
+        widgets::text(p, pos2(c.x, c.y + 30.0), Align2::CENTER_CENTER, &Txt::new(tr(label), 15.0).color(if *ok == Some(true) { theme::FG } else { theme::FG_3 }));
     }
 }
 
 /// What to fix first when the pose is not there yet.
 fn first_fix(c: &TPoseCheck) -> &'static str {
     if !c.wide {
-        "Stretch your arms out to the targets."
+        mark("Stretch your arms out to the targets.")
     } else if !c.shoulders {
-        "Hands at shoulder height."
+        mark("Hands at shoulder height.")
     } else if !c.level {
-        "Keep both hands at the same height."
+        mark("Keep both hands at the same height.")
     } else if !c.centered {
-        "Stand between your hands."
+        mark("Stand between your hands.")
     } else {
-        "Stay still."
+        mark("Stay still.")
     }
 }
 
@@ -416,6 +432,20 @@ mod tests {
             vec![device(DeviceClass::Hmd, "head"), device(DeviceClass::Controller, "left_hand"), device(DeviceClass::Controller, "right_hand")],
             vec![at(0, [0.0, 1.6, 0.0]), at(1, left), at(2, right)],
         )
+    }
+
+    /// Lengths are written as the language writes them, and a failure's reason is stored in English and said in the language drawn.
+    #[test]
+    fn lengths_and_reasons_follow_the_language() {
+        use orbiters_i18n::in_language;
+        assert_eq!(in_language(Language::En, || metres(1.634)), "1.63");
+        assert_eq!(in_language(Language::Ja, || metres(1.634)), "1.63");
+        assert_eq!(in_language(Language::Fr, || metres(1.634)), "1,63");
+        assert_eq!(in_language(Language::PtBr, || metres(1.634)), "1,63");
+        let Phase::Failed { reason, .. } = failed(0.0, mark("Stay still.")) else { panic!("failed() fails") };
+        assert_eq!(reason, "Stay still.", "kept in English");
+        assert_eq!(in_language(Language::Fr, || tr(reason)), "Ne bouge pas.");
+        assert_eq!(in_language(Language::Ja, || tr(reason)), "動かないでください。");
     }
 
     #[test]

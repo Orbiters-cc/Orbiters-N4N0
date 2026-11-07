@@ -1,0 +1,12 @@
+# The files this area covers: every text in them is wrapped and translated (tests/coverage.rs).
+crates/orbiters-desktop/src/overlay/ui.rs
+crates/orbiters-desktop/src/overlay/menu_pages.rs
+crates/orbiters-desktop/src/overlay/calibration.rs
+crates/orbiters-desktop/src/overlay/actions.rs
+crates/orbiters-desktop/src/overlay/coverage.rs
+crates/orbiters-desktop/src/overlay/mod.rs
+crates/orbiters-desktop/src/overlay/floating/laser.rs
+crates/orbiters-desktop/src/overlay/floating/panel.rs
+crates/orbiters-desktop/src/overlay/floating/watch.rs
+crates/orbiters-desktop/src/overlay/menu.rs
+crates/orbiters-desktop/src/overlay/eye_picture.rs

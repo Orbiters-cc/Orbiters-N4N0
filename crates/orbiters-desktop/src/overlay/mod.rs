@@ -318,11 +318,11 @@ struct World {
 impl World {
     fn new(overlay: &vr::Overlay) -> anyhow::Result<Self> {
         let fail = |what: &str, code: i32| anyhow::anyhow!("{what}: SteamVR overlay error {code}");
-        let mirror = overlay.create(&format!("{KEY}.mirror"), "Orbiters calibration mirror").map_err(|c| fail("mirror", c))?;
+        let mirror = overlay.create(&format!("{KEY}.mirror"), "Orbiters calibration mirror").map_err(|c| fail("mirror", c))?; // i18n: not shown (a name for SteamVR)
         let _ = overlay.set_width_in_meters(mirror, MIRROR_WIDTH_M);
         let mut targets = [0; 2];
         for (i, side) in ["left", "right"].into_iter().enumerate() {
-            targets[i] = overlay.create(&format!("{KEY}.target.{side}"), &format!("Orbiters {side} hand target")).map_err(|c| fail("hand target", c))?;
+            targets[i] = overlay.create(&format!("{KEY}.target.{side}"), &format!("Orbiters {side} hand target")).map_err(|c| fail("hand target", c))?; // i18n: not shown (a name for SteamVR)
             let _ = overlay.set_width_in_meters(targets[i], TARGET_WIDTH_M);
         }
         // Painted premultiplied, as the menu: without the flag the glow shows dim and edges get dark fringes.
@@ -581,10 +581,10 @@ fn session(args: &[String]) -> anyhow::Result<Ended> {
     let backend: Ctl = Arc::new(Remote(client.clone()));
     let overlay = steamvr.overlay().context("SteamVR has no overlay interface")?;
     let fail = |what: &str, code: i32| anyhow::anyhow!("{what}: SteamVR overlay error {code}");
-    let (main, thumb) = overlay.create_dashboard(KEY, "Orbiters").map_err(|c| fail("dashboard tab", c))?;
+    let (main, thumb) = overlay.create_dashboard(KEY, "Orbiters").map_err(|c| fail("dashboard tab", c))?; // i18n: not shown (an error text)
     overlay.set_width_in_meters(main, 2.0).map_err(|c| fail("width", c))?;
     overlay.set_mouse_input(main).map_err(|c| fail("input", c))?;
-    overlay.set_mouse_scale(main, WIDTH as f32, HEIGHT as f32).map_err(|c| fail("mouse scale", c))?;
+    overlay.set_mouse_scale(main, WIDTH as f32, HEIGHT as f32).map_err(|c| fail("mouse scale", c))?; // i18n: not shown (an error text)
     let _ = overlay.set_flag(main, vr::overlay_flag::ENABLE_CLICK_STABILIZATION, true);
 
     let ctx = egui::Context::default();
@@ -704,6 +704,8 @@ fn session(args: &[String]) -> anyhow::Result<Ended> {
         }
         was_visible = visible;
         let snap = backend.view();
+        // The language the settings ask for, for the dashboard tab too, whether or not the menus around VRChat are on.
+        crate::language::follow(&snap.settings);
         // SteamVR's server can end without a quit event: its process is watched here, and by the service.
         if snap.steamvr.running {
             steamvr_seen = Instant::now();

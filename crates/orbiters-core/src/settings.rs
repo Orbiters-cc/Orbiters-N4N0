@@ -158,10 +158,10 @@ pub enum MenuDisplay {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum VrMotion {
-    /// Each tile a little behind the hand on its own spring: never in step with VRChat's menu, on purpose, on any computer.
+    /// Each tile around VRChat's menus a little behind the hand on its own spring: never in step with VRChat's menu, on purpose, on any computer.
     #[default]
     Springy,
-    /// Rigid, behind the hand by [`OrbitSettings::vr_delay_frames`] of VRChat's frames.
+    /// Rigid, behind the hand by [`OrbitSettings::vr_delay_frames`] of VRChat's frames, as what opens in front of VRChat's menu always is.
     Matched,
 }
 
@@ -178,7 +178,7 @@ pub struct OrbitSettings {
     /// scales its menus with things only the headset shows.
     pub vr_size: f32,
     pub vr_motion: VrMotion,
-    /// With [`VrMotion::Matched`]: how far behind the hand, in VRChat's frames, measured as it runs, so that it follows the frame rate of each computer. 0: on the hand exactly, which is ahead of VRChat.
+    /// How far behind the hand what is rigid lies, in VRChat's frames as they are measured, so that it follows the frame rate of each computer. Enzo's test: 0 is ahead of VRChat, 1 behind it.
     pub vr_delay_frames: f32,
 }
 
@@ -203,7 +203,7 @@ impl OrbitSettings {
 
 impl Default for OrbitSettings {
     fn default() -> Self {
-        Self { display: MenuDisplay::AvatarScreen, wheel: true, quick_menu: true, vr_size: 1.0, vr_motion: VrMotion::Springy, vr_delay_frames: 1.0 }
+        Self { display: MenuDisplay::AvatarScreen, wheel: true, quick_menu: true, vr_size: 1.0, vr_motion: VrMotion::Springy, vr_delay_frames: 0.3 }
     }
 }
 

@@ -394,8 +394,11 @@ pub struct Panels {
     was_flying: bool,
     /// Where the gallery is going to, as its wheel said.
     gallery_to: f32,
-    /// The page of the Instances sheet, and the worlds' pictures so far.
-    visited_page: usize,
+    /// A press on a list, which may yet be a drag; where the pointer is on the sheet; and what it turned out to press.
+    drag: Option<Drag>,
+    sheet_pointer: Option<Pos2>,
+    pressed_late: Option<Action>,
+    /// The Instances sheet's worlds' pictures so far.
     visit_pictures: HashMap<String, egui::TextureId>,
     /// The page on the sheet (its back is in `list`).
     pub takeover: Option<Panel>,
@@ -436,7 +439,9 @@ impl Panels {
             note: PictureNote::default(),
             was_flying: false,
             gallery_to: 0.0,
-            visited_page: 0,
+            drag: None,
+            sheet_pointer: None,
+            pressed_late: None,
             visit_pictures: HashMap::new(),
             open: None,
             recents: Recents::default(),
@@ -593,7 +598,6 @@ impl Panels {
         };
         // Where the person was has a sheet of its own here, on the menu's own list and invites.
         if target == Target::Instances {
-            self.visited_page = 0;
             self.open_sheet(Sheet::Instances, "Previous instances", snap);
         } else {
             self.open_sheet(Sheet::Menu, title, snap);
@@ -625,10 +629,10 @@ impl Panels {
         }
     }
 
-    /// The mouse's wheel, in notches, up positive: moves the gallery, when it shows.
+    /// The mouse's wheel, in notches, up positive: moves the sheet's list, when it has one.
     pub fn wheel(&mut self, notches: f32) {
-        if self.facts.sheet == Some(Sheet::Pictures) {
-            self.gallery_to = (self.gallery_to - notches * 180.0).clamp(0.0, panels::gallery_max_scroll(&self.facts));
+        if let Some(sheet) = self.facts.sheet {
+            self.gallery_to = (self.gallery_to - notches * 180.0).clamp(0.0, panels::max_scroll(sheet, &self.facts));
         }
     }
 
@@ -655,6 +659,10 @@ impl Panels {
     }
 
     pub fn follow(&mut self, snap: &Snapshot, library: u64) {
+        // What a press in a list turned out to press, now it was let go without moving.
+        if let Some(action) = self.pressed_late.take() {
+            self.act(action, snap, &mut Pressed::default());
+        }
         if self.open.is_none() {
             return;
         }
@@ -721,7 +729,8 @@ impl Panels {
         }
         if let Some(worlds) = self.stage.worlds.as_mut() {
             if self.facts.sheet == Some(Sheet::Instances) {
-                for visit in &self.facts.worlds_visited {
+                let shown = panels::visits_shown(self.facts.gallery_scroll);
+                for visit in self.facts.worlds_visited.iter().skip(shown.start).take(shown.len()) {
                     if !self.visit_pictures.contains_key(&visit.world_id) {
                         if let Some(picture) = worlds.world_thumbnail(&visit.world_id) {
                             self.visit_pictures.insert(visit.world_id.clone(), picture);
@@ -741,7 +750,7 @@ impl Panels {
         let progress = |dir: &PathBuf| snap.reconstruction.as_ref().filter(|j| j.session_dir == *dir).map(|j| j.progress.clamp(0.0, 1.0));
         let recording = matches!(snap.capture.state, CaptureState::Recording | CaptureState::Paused) && !snap.capture.photo_3d;
         let menu = &self.stage.host.menu;
-        let visited = if self.facts.sheet == Some(Sheet::Instances) { visited_worlds(&menu.instances, now, self.visited_page, &self.visit_pictures) } else { (Vec::new(), 0) };
+        let visited = if self.facts.sheet == Some(Sheet::Instances) { visited_worlds(&menu.instances, now, &self.visit_pictures) } else { Vec::new() };
         Facts {
             recording,
             recording_seconds: recording.then(|| snap.capture.stats.as_ref().map_or(0, |s| s.elapsed_s as u32)),
@@ -773,9 +782,7 @@ impl Panels {
             world_video: menu.world_video.as_ref().map(|v| v.title.clone().unwrap_or_else(|| v.url.clone())),
             digits: self.open == Some(Around::Wheel) && self.takeover.is_none() && (snap.n4n0.desktop_mode || !snap.steamvr.running),
             beside_wing: self.open == Some(Around::QuickMenu),
-            worlds_visited: visited.0,
-            visited_page: self.visited_page.min(visited.1.saturating_sub(1)),
-            visited_pages: visited.1,
+            worlds_visited: visited,
             invite_said: (self.facts.sheet == Some(Sheet::Instances)).then(|| menu.notice.clone()).flatten(),
             note: self.facts.note.clone(),
             picture_wait: snap.n4n0.photo_wait,
@@ -807,6 +814,16 @@ impl Panels {
         let (sheet, show_keys, desktop) = (self.facts.sheet, self.show_keys, self.facts.desktop);
         let mut worlds_hover = None;
         let mut on_zone = None;
+        self.sheet_pointer = on.filter(|(at, _)| *at == count).map(|(_, p)| p);
+        if let (Some(drag), Some(p), Some(sheet)) = (self.drag.as_mut(), self.sheet_pointer, self.facts.sheet) {
+            if let Some(to) = drag.follow(p.y, panels::max_scroll(sheet, &self.facts)) {
+                self.gallery_to = to;
+                self.facts.gallery_scroll = to;
+                if let Some(panel) = self.takeover.as_mut() {
+                    panel.dirty = true;
+                }
+            }
+        }
         for (i, panel) in self.list.iter_mut().chain(self.takeover.iter_mut()).enumerate() {
             let hover = on.filter(|(at, _)| *at == i).and_then(|(_, p)| {
                 on_zone = Some(panel.zone);
@@ -903,15 +920,35 @@ impl Panels {
             _ => {}
         }
         let mut action = None;
+        let mut look = None;
         for panel in self.list.iter_mut().chain(self.takeover.iter_mut()) {
             if let Some(i) = panel.hover {
                 panel.pressed = Some(i);
                 panel.dirty = true;
                 action = panel.items.get(i).map(|item| item.action);
+                look = panel.items.get(i).map(|item| item.look);
                 break;
             }
         }
+        // A list's own empty space can be dragged too.
+        if look.is_none() && self.sheet_pointer.is_some() && matches!(self.facts.sheet, Some(Sheet::Pictures | Sheet::Instances)) {
+            self.drag = Some(Drag { from: None, scroll: self.facts.gallery_scroll, action: None, moved: false });
+            return out;
+        }
+        // In a list a press waits: it may be a drag, of the list and not of what it began on.
+        if let (Some(sheet), Some(look)) = (self.facts.sheet, look) {
+            if panels::scrolls_with_a_drag(sheet, &look) {
+                self.drag = Some(Drag { from: None, scroll: self.facts.gallery_scroll, action, moved: false });
+                return out;
+            }
+        }
         let Some(action) = action else { return out };
+        self.act(action, snap, &mut out);
+        out
+    }
+
+    /// What a press on `action` does.
+    fn act(&mut self, action: Action, snap: &Snapshot, out: &mut Pressed) {
         out.clicked = action != Action::Idle;
         match action {
             Action::Worlds => {
@@ -979,10 +1016,6 @@ impl Panels {
                 let effects = host.press(Target::Mute);
                 host.effects(effects, snap, &self.backend);
             }
-            Action::GalleryScroll(on) => self.wheel(if on { -2.0 } else { 2.0 }),
-            Action::InstancesPage(next) => {
-                self.visited_page = if next { self.visited_page + 1 } else { self.visited_page.saturating_sub(1) };
-            }
             Action::FastWalk => {
                 let host = &mut self.stage.host;
                 let effects = host.press(Target::FastWalk);
@@ -1013,11 +1046,15 @@ impl Panels {
             }
             Action::Idle => {}
         }
-        out
     }
 
     /// The pointer's button went up.
     pub fn release(&mut self) {
+        if let Some(drag) = self.drag.take() {
+            if !drag.moved {
+                self.pressed_late = drag.action;
+            }
+        }
         if std::mem::take(&mut self.talking) {
             self.backend.n4n0(N4n0Command::Talk { down: false });
         }
@@ -1045,7 +1082,7 @@ impl Panels {
             panel.dirty = false;
             panel.items = panels::items(panel.zone, panel.logical, &self.facts);
             let mut facts = self.facts.clone();
-            if matches!(panel.zone, Zone::WheelPlaying | Zone::QmWing) {
+            if matches!(panel.zone, Zone::WheelPlaying | Zone::WingPlaying) {
                 if let Some((key, image)) = &art {
                     let ctx = panel.canvas.ctx();
                     facts.art = Some(panel.pictures.entry(key.clone()).or_insert_with(|| ctx.load_texture("art", image.clone(), TextureOptions::LINEAR)).id());
@@ -1249,11 +1286,8 @@ fn flight_words(error: Option<&str>) -> (String, String) {
     }
 }
 
-/// How many worlds a page of the Instances sheet has.
-const VISITS_PER_PAGE: usize = 5;
-
-/// Where the person was, as the Instances sheet shows it: a row for each world, its last time first, on pages. `rows` come the newest first.
-fn visited_worlds(rows: &[orbiters_n4n0_core::menu::InstanceRow], now: u64, page: usize, pictures: &HashMap<String, egui::TextureId>) -> (Vec<panels::WorldVisit>, usize) {
+/// Where the person was, as the Instances sheet shows it: a row for each world, its last time first. `rows` come the newest first.
+fn visited_worlds(rows: &[orbiters_n4n0_core::menu::InstanceRow], now: u64, pictures: &HashMap<String, egui::TextureId>) -> Vec<panels::WorldVisit> {
     let mut worlds: Vec<panels::WorldVisit> = Vec::new();
     for row in rows {
         let id = row.location.split(':').next().unwrap_or_default();
@@ -1273,9 +1307,28 @@ fn visited_worlds(rows: &[orbiters_n4n0_core::menu::InstanceRow], now: u64, page
             }
         }
     }
-    let pages = worlds.len().div_ceil(VISITS_PER_PAGE).max(1);
-    let shown = worlds.into_iter().skip(page.min(pages - 1) * VISITS_PER_PAGE).take(VISITS_PER_PAGE).collect();
-    (shown, pages)
+    worlds
+}
+
+/// A press on a list: it scrolls if the pointer moves, and presses what it was on if not.
+#[derive(Clone, Copy, Debug)]
+struct Drag {
+    from: Option<f32>,
+    scroll: f32,
+    action: Option<Action>,
+    moved: bool,
+}
+
+impl Drag {
+    /// How far the pointer goes before it is a drag and no press, in the page's units.
+    const SLOP: f32 = 12.0;
+
+    /// The pointer at `y`: where the list goes, when it goes.
+    fn follow(&mut self, y: f32, max: f32) -> Option<f32> {
+        let from = *self.from.get_or_insert(y);
+        self.moved |= (y - from).abs() > Self::SLOP;
+        self.moved.then(|| (self.scroll + from - y).clamp(0.0, max))
+    }
 }
 
 /// How long what stopped a 3D picture stays said.
@@ -1321,23 +1374,34 @@ fn note_words(text: &str) -> (String, String) {
 mod tests {
     use super::*;
 
+    /// Enzo: "when I grab a tile to scroll down, it just opens it".
+    #[test]
+    fn a_press_that_moves_scrolls_and_one_that_stays_presses() {
+        let mut drag = Drag { from: None, scroll: 100.0, action: Some(Action::Pictures), moved: false };
+        assert_eq!(drag.follow(300.0, 1000.0), None, "where it starts");
+        assert_eq!(drag.follow(305.0, 1000.0), None, "a hand's shake is still a press");
+        assert!(!drag.moved);
+        assert_eq!(drag.follow(250.0, 1000.0), Some(150.0), "up the page, on down the list");
+        assert!(drag.moved);
+        assert_eq!(drag.follow(305.0, 1000.0), Some(95.0), "moved once, a drag for good");
+        assert_eq!(drag.follow(900.0, 1000.0), Some(0.0), "not past the top");
+    }
+
     #[test]
     fn where_the_person_was_is_a_row_for_each_world_the_last_time_first() {
         use orbiters_n4n0_core::menu::InstanceRow;
         let row = |world: &str, id: &str, instance: &str, at: u64| InstanceRow { location: format!("wrld_{id}:{instance}~region(eu)"), world: world.into(), at };
         let now = 100_000;
         let rows = [row("Rain", "a", "1", now - 300), row("Sky", "b", "2", now - 600), row("Rain", "a", "3", now - 1320), row("", "c", "4", now - 7200)];
-        let (worlds, pages) = visited_worlds(&rows, now, 0, &HashMap::new());
-        assert_eq!(pages, 1);
+        let worlds = visited_worlds(&rows, now, &HashMap::new());
         assert_eq!(worlds.iter().map(|w| w.name.as_str()).collect::<Vec<_>>(), ["Rain", "Sky", "A world"]);
         assert!(worlds[0].location.contains(":1~"), "the invite goes to the last time");
         assert_eq!(worlds[0].earlier.len(), 1, "the time before is a choice of its own");
         assert!(worlds[0].earlier[0].0.contains(":3~"));
         assert!(worlds[0].line.contains("EU") || worlds[0].line.contains("eu"), "{}", worlds[0].line);
-        // Many worlds: on pages, and a page past the end shows the last.
-        let many: Vec<InstanceRow> = (0..12).map(|i| row("W", &i.to_string(), "1", now - i)).collect();
-        assert_eq!(visited_worlds(&many, now, 0, &HashMap::new()).1, 3);
-        assert_eq!(visited_worlds(&many, now, 9, &HashMap::new()).0.len(), 2);
+        // All of them: the sheet scrolls.
+        let many: Vec<InstanceRow> = (0..120).map(|i| row("W", &i.to_string(), "1", now - i)).collect();
+        assert_eq!(visited_worlds(&many, now, &HashMap::new()).len(), 120);
     }
 
     #[test]

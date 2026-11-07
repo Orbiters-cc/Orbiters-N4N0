@@ -179,8 +179,15 @@ pub enum Zone {
     WheelVeil,
     /// In VR only: the ring's close, for when VRChat's wheel closed without its button.
     WheelHide,
-    /// The one wing docked to the Quick Menu.
-    QmWing,
+    /// The wing docked to the Quick Menu, each tile a part of its own with nothing behind them, so that each can move by itself in VR (Enzo). Its name, its six tiles, what plays.
+    WingName,
+    WingWorlds,
+    WingYouTube,
+    WingInstances,
+    WingPictures,
+    WingTalk,
+    WingAll,
+    WingPlaying,
     /// The wing's tiles in a row under the Quick Menu's tabs, where the window has no room beside it: VRChat's own panels stay uncovered.
     QmStrip,
     /// What is pointed at, in words, right above the wing.
@@ -207,7 +214,9 @@ impl Zone {
         Zone::BloomNext,
         Zone::WheelCaption,
     ];
-    pub const QUICK_MENU: [Zone; 2] = [Zone::QmWing, Zone::QmCaption];
+    pub const WING: [Zone; 8] = [Zone::WingName, Zone::WingWorlds, Zone::WingYouTube, Zone::WingInstances, Zone::WingPictures, Zone::WingTalk, Zone::WingAll, Zone::WingPlaying];
+    pub const QUICK_MENU: [Zone; 9] =
+        [Zone::WingName, Zone::WingWorlds, Zone::WingYouTube, Zone::WingInstances, Zone::WingPictures, Zone::WingTalk, Zone::WingAll, Zone::WingPlaying, Zone::QmCaption];
 
     /// The zones around a menu.
     pub fn around(around: Around) -> &'static [Zone] {
@@ -280,7 +289,15 @@ impl Zone {
             Zone::WheelVeil => r(-103.0, -103.0, 103.0, 103.0),
             Zone::WheelHide => r(126.0, -156.0, 156.0, -126.0),
             // As tall as My Profile and as wide, beside it.
-            Zone::QmWing => r(362.0, -150.0, 524.0, 186.0),
+            // As tall as My Profile and as wide, beside it.
+            Zone::WingName => r(362.0, -150.0, 524.0, -120.0),
+            Zone::WingWorlds => wing_tile(0.0, 0.0),
+            Zone::WingYouTube => wing_tile(1.0, 0.0),
+            Zone::WingInstances => wing_tile(0.0, 1.0),
+            Zone::WingPictures => wing_tile(1.0, 1.0),
+            Zone::WingTalk => wing_tile(0.0, 2.0),
+            Zone::WingAll => wing_tile(1.0, 2.0),
+            Zone::WingPlaying => r(362.0, 132.0, 524.0, 186.0),
             Zone::QmStrip => r(-262.0, 266.0, 262.0, 322.0),
             Zone::QmCaption => r(200.0, -206.0, 524.0, -154.0),
             // The Quick Menu's panels and the FPS line over them, ending where its main panel ends: its tab row and badge stay VRChat's.
@@ -299,6 +316,15 @@ impl Zone {
             _ => None,
         }
     }
+}
+
+/// A tile of the wing, in its column and row.
+fn wing_tile(column: f32, row: f32) -> Rect {
+    const WIDTH: f32 = 78.0;
+    const HEIGHT: f32 = 76.0;
+    const GAP: f32 = 6.0;
+    let min = pos2(362.0 + column * (WIDTH + GAP), -114.0 + row * (HEIGHT + GAP));
+    Rect::from_min_size(min, vec2(WIDTH, HEIGHT))
 }
 
 /// What a panel keeps clear of the window's edge, in pixels.
@@ -370,8 +396,9 @@ pub fn in_units(zone: Zone) -> Placed {
 /// Every zone that fits around a menu.
 pub fn layout(around: Around, client: Vec2) -> Vec<Placed> {
     let mut out: Vec<Placed> = Zone::around(around).iter().filter_map(|z| place(*z, client)).collect();
-    // No room for the wing: a strip that covers none of VRChat's panels.
-    if around == Around::QuickMenu && !out.iter().any(|p| p.zone == Zone::QmWing) {
+    // No room for the wing, all of it or none: a strip that covers none of VRChat's panels.
+    if around == Around::QuickMenu && !Zone::WING.iter().all(|z| out.iter().any(|p| p.zone == *z)) {
+        out.retain(|p| !Zone::WING.contains(&p.zone));
         out.extend(place(Zone::QmStrip, client));
     }
     out
@@ -491,16 +518,18 @@ mod tests {
             Rect::from_min_max(pos2(-242.0, 204.0), pos2(242.0, 262.0)),
         ];
         for k in keep_off {
-            assert!(!Zone::QmWing.units().intersects(k), "the wing on {k:?}");
+            for zone in Zone::WING {
+                assert!(!zone.units().intersects(k), "the wing's {zone:?} on {k:?}");
+            }
             assert!(!Zone::QmStrip.units().intersects(k), "the strip on {k:?}");
         }
         let (_, unit) = quick_menu(vec2(1280.0, 720.0));
-        let docked = place(Zone::QmWing, vec2(1280.0, 720.0)).unwrap();
+        let docked = place(Zone::WingName, vec2(1280.0, 720.0)).unwrap();
         assert!((docked.rect.left() - (640.0 + 362.0 * unit)).abs() < 1.0);
         for (w, h) in SIZES {
             let around = layout(Around::QuickMenu, vec2(w, h));
-            let wing = around.iter().filter(|p| matches!(p.zone, Zone::QmWing | Zone::QmStrip)).count();
-            assert_eq!(wing, 1, "{w}x{h}: one of them, always");
+            let (wing, strip) = (around.iter().filter(|p| Zone::WING.contains(&p.zone)).count(), around.iter().filter(|p| p.zone == Zone::QmStrip).count());
+            assert!((wing, strip) == (Zone::WING.len(), 0) || (wing, strip) == (0, 1), "{w}x{h}: the whole wing or the strip: {wing} {strip}");
             for placed in &around {
                 assert!(placed.rect.left() >= 0.0 && placed.rect.right() <= w && placed.rect.bottom() <= h, "{w}x{h}: {:?}", placed.zone);
             }
@@ -539,11 +568,17 @@ mod tests {
         // Its tab row and the badge on it stay VRChat's, as does what lies over the FPS line.
         assert!(!back.intersects(Rect::from_min_max(pos2(-242.0, 206.0), pos2(242.0, 262.0))));
         // It keeps a gutter to the wing beside it.
-        assert!(Zone::QmWing.units().left() - back.right() >= 10.0);
+        assert!(Zone::WING.iter().all(|z| z.units().left() - back.right() >= 10.0));
         let page = Zone::Takeover.units();
         assert!(back.contains_rect(page));
         assert!((page.width() / page.height() - 1024.0 / 576.0).abs() < 0.01);
-        assert!(!Zone::QmWing.units().intersects(back), "the wing stays beside it as tabs");
+        assert!(Zone::WING.iter().all(|z| !z.units().intersects(back)), "the wing stays beside it as tabs");
+        // No tile of the wing on another.
+        for (i, a) in Zone::WING.iter().enumerate() {
+            for b in &Zone::WING[i + 1..] {
+                assert!(!a.units().intersects(b.units()), "{a:?} {b:?}");
+            }
+        }
         for (w, h) in SIZES {
             assert!(place(Zone::SheetBack, vec2(w, h)).is_some() && place(Zone::Takeover, vec2(w, h)).is_some(), "{w}x{h}");
         }

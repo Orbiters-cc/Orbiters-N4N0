@@ -326,7 +326,7 @@ pub(super) fn vr_shots(out: &Path, refs: &Path) -> anyhow::Result<()> {
             let mut end = None;
             for zone in Zone::QUICK_MENU {
                 let placed = zones::in_units(zone);
-                let hovered = hover.filter(|_| zone == Zone::QmWing);
+                let hovered = hover.filter(|_| zone == Zone::WingWorlds).map(|_| 0);
                 let (pixels, px) = sharp_picture(&placed, facts, hovered, 2.0);
                 eye.quad(&plane.quad(&placed, 0.0, 0.004), &pixels, px, 1.0);
                 if let Some(i) = hovered {
@@ -442,7 +442,7 @@ fn qm_scene(name: &str, out: &Path, client: Vec2, facts: &Facts, hover: Option<u
     stand_in_menu(Around::QuickMenu, client, &mut ground);
     let mut image = ground.pixels().to_vec();
     for placed in zones::layout(Around::QuickMenu, client) {
-        let hovered = hover.filter(|_| placed.zone == Zone::QmWing);
+        let hovered = hover.filter(|_| placed.zone == Zone::WingWorlds).map(|_| 0);
         let (pixels, px) = picture(&placed, facts, hovered, None);
         blit(&mut image, w, &pixels, px, placed.rect.min);
     }

@@ -1114,18 +1114,16 @@ fn orbit_settings(ui: &mut egui::Ui, snap: &Snapshot, orbit: &mut orbiters_core:
     use orbiters_core::settings::VrMotion;
     let motions = [SegOption::new(VrMotion::Springy, "Springy"), SegOption::new(VrMotion::Matched, "Match VRChat")];
     let said = match orbit.vr_motion {
-        VrMotion::Springy => "Each tile follows your hand on a little spring. It looks the same on any computer.",
-        VrMotion::Matched => "The panels stay rigid, and trail your hand as VRChat's menu does. How much depends on your computer's frame rate, which this follows as it changes.",
+        VrMotion::Springy => "The tiles around VRChat's menus each follow your hand on a little spring of their own.",
+        VrMotion::Matched => "The tiles around VRChat's menus stay rigid, and trail your hand as VRChat's menu does.",
     };
     widgets::field(ui, "How they follow your hand in VR", Some(said), 300.0, |ui| {
         apply |= widgets::segmented(ui, "orbit-vr-motion", &mut orbit.vr_motion, &motions, true);
     });
-    if orbit.vr_motion == VrMotion::Matched {
-        widgets::separator(ui);
-        widgets::field(ui, "Delay behind your hand", Some("Move it while shaking your hand in the headset, until the panels stay with VRChat's menu."), 300.0, |ui| {
-            apply |= widgets::slider(ui, "orbit-vr-delay", &mut orbit.vr_delay_frames, 0.0..=3.0, 0.05, |v| if v == 0.0 { "None".into() } else { format!("{v:.2} frames") });
-        });
-    }
+    widgets::separator(ui);
+    widgets::field(ui, "Delay behind your hand", Some("For what opens in front of VRChat's menu, always, and for the tiles with Match VRChat. Move it while shaking your hand in the headset, until it stays with VRChat's menu. In VRChat's frames, so it follows your frame rate."), 300.0, |ui| {
+        apply |= widgets::slider(ui, "orbit-vr-delay", &mut orbit.vr_delay_frames, 0.0..=1.5, 0.05, |v| if v == 0.0 { "None".into() } else { format!("{v:.2} frames") });
+    });
     let now = if !orbiters_core::osc::VRCHAT_RUNS_HERE {
         Some("VRChat runs on another computer here, so nothing can appear around its menus.".to_string())
     } else if let Some(note) = &snap.orbit.note {

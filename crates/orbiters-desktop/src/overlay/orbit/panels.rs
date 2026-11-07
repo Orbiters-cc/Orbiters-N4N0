@@ -70,13 +70,9 @@ pub enum Action {
     OpenApp,
     /// Invites the person to a world's instance: the group's, and which of its visits.
     Invite(usize, usize),
-    /// The next or the previous page of instances.
-    InstancesPage(bool),
     /// The computer's volume up or down, and muted or not.
     Volume(bool),
     Mute,
-    /// The gallery on, or back, by its buttons where there is no wheel.
-    GalleryScroll(bool),
     /// The sheet goes.
     CloseSheet,
     /// The parts go for this opening of VRChat's menu.
@@ -158,7 +154,7 @@ pub struct Facts {
     pub no_kit: bool,
     /// A 3D picture's timer, in seconds.
     pub timer: u32,
-    /// How far the gallery is scrolled, in its page's units, and the layout the app's own gallery uses.
+    /// How far the sheet's list is scrolled, in its page's units, and the layout the app's own gallery uses.
     pub gallery_scroll: f32,
     pub gallery_layout: orbiters_core::settings::GalleryLayout,
     /// The computer's volume, and whether it is muted; where what plays is and how long it lasts.
@@ -170,10 +166,8 @@ pub struct Facts {
     pub digits: bool,
     /// The wing or its strip lies beside the sheet: it has the name and what plays already.
     pub beside_wing: bool,
-    /// What the Instances sheet lists, the page of it, how many pages, and what the last invite said.
+    /// What the Instances sheet lists, and what the last invite said.
     pub worlds_visited: Vec<WorldVisit>,
-    pub visited_page: usize,
-    pub visited_pages: usize,
     pub invite_said: Option<String>,
     /// What the caption says with nothing pointed at (a key to hold).
     pub hint: Option<(&'static str, &'static str)>,
@@ -213,8 +207,6 @@ pub enum Look {
     Visit(usize),
     /// A button to a world's instance: 0 the last time and the main one, else one of the times before.
     Chip { group: usize, visit: usize },
-    /// The pages' count.
-    Pages,
     /// A tile as VRChat's: its icon over its label, edged.
     Tile { icon: &'static str, label: &'static str, badge: bool },
     /// One of the main features on All tools: large, in its colour, with what it does.
@@ -254,6 +246,7 @@ pub fn items(zone: Zone, size: Vec2, facts: &Facts) -> Vec<Item> {
     let (w, h) = (size.x, size.y);
     let whole = r(0.0, 0.0, w, h);
     let cell = |action, icon, label, badge| vec![Item { action, rect: whole, look: Look::Cell { icon, label, badge } }];
+    let tile = |action, icon, label, badge| vec![Item { action, rect: whole, look: Look::Tile { icon, label, badge } }];
     let transport_icon = if facts.music.as_ref().is_some_and(|m| m.1) { icons::PAUSE } else { icons::PLAY };
     match zone {
         Zone::WheelWorlds => cell(Action::Worlds, icons::GLOBE_HEMISPHERE_WEST, "Worlds in 3D", true),
@@ -270,7 +263,22 @@ pub fn items(zone: Zone, size: Vec2, facts: &Facts) -> Vec<Item> {
         Zone::WheelCaption | Zone::QmCaption => vec![Item { action: Action::Idle, rect: whole, look: Look::Caption }],
         Zone::WheelVeil => vec![Item { action: Action::Idle, rect: whole, look: Look::Blank }],
         Zone::WheelHide => vec![Item { action: Action::Hide, rect: whole, look: Look::Close }],
-        Zone::QmWing => wing(w, h, facts),
+        // The wing's tiles, each a part of its own.
+        Zone::WingName => {
+            // One close at a time: the sheet has its own.
+            if facts.vr_close && facts.sheet.is_none() {
+                vec![Item { action: Action::Hide, rect: r(w - 28.0, 2.0, 26.0, 26.0), look: Look::Close }]
+            } else {
+                Vec::new()
+            }
+        }
+        Zone::WingWorlds => tile(Action::Worlds, icons::GLOBE_HEMISPHERE_WEST, "Worlds in 3D", true),
+        Zone::WingYouTube => tile(Action::Page(Target::YouTube), icons::YOUTUBE_LOGO, "YouTube", false),
+        Zone::WingInstances => tile(Action::Page(Target::Instances), icons::CLOCK, "Instances", false),
+        Zone::WingPictures => tile(Action::Pictures, icons::CUBE, "3D pictures", false),
+        Zone::WingTalk => vec![Item { action: Action::Talk, rect: whole, look: Look::Talk }],
+        Zone::WingAll => tile(Action::All, icons::SQUARES_FOUR, "All tools", false),
+        Zone::WingPlaying => vec![Item { action: Action::PlayPause, rect: whole, look: Look::Playing }],
         Zone::QmStrip => strip(w, h),
         Zone::SheetBack => {
             let mut out = vec![Item { action: Action::CloseSheet, rect: r(w - 40.0, 11.0, 30.0, 30.0), look: Look::Close }];
@@ -287,32 +295,6 @@ pub fn items(zone: Zone, size: Vec2, facts: &Facts) -> Vec<Item> {
         // The sheet's page, as its sheet says ([`sheet_items`]) or N4N0's own.
         Zone::Takeover => facts.sheet.map_or_else(Vec::new, |s| sheet_items(s, facts)),
     }
-}
-
-/// The wing: VRChat's two columns of tiles under its header, what plays at its foot.
-fn wing(w: f32, h: f32, facts: &Facts) -> Vec<Item> {
-    const HEAD: f32 = 36.0;
-    const PAD: f32 = 8.0;
-    let foot = 58.0;
-    let width = (w - PAD * 2.0 - GAP) / 2.0;
-    let rows = 3.0;
-    let height = (h - HEAD - PAD * 2.0 - foot - GAP * rows) / rows;
-    let at = |c: f32, i: f32| r(PAD + c * (width + GAP), HEAD + PAD + i * (height + GAP), width, height);
-    let tile = |action, icon, label, badge, rect| Item { action, rect, look: Look::Tile { icon, label, badge } };
-    let mut out = vec![
-        tile(Action::Worlds, icons::GLOBE_HEMISPHERE_WEST, "Worlds in 3D", true, at(0.0, 0.0)),
-        tile(Action::Page(Target::YouTube), icons::YOUTUBE_LOGO, "YouTube", false, at(1.0, 0.0)),
-        tile(Action::Page(Target::Instances), icons::CLOCK, "Instances", false, at(0.0, 1.0)),
-        tile(Action::Pictures, icons::CUBE, "3D pictures", false, at(1.0, 1.0)),
-        Item { action: Action::Talk, rect: at(0.0, 2.0), look: Look::Talk },
-        tile(Action::All, icons::SQUARES_FOUR, "All tools", false, at(1.0, 2.0)),
-        Item { action: Action::PlayPause, rect: r(PAD, h - PAD - foot, w - PAD * 2.0, foot), look: Look::Playing },
-    ];
-    // One close at a time: the sheet has its own.
-    if facts.vr_close && facts.sheet.is_none() {
-        out.push(Item { action: Action::Hide, rect: r(w - 32.0, 5.0, 26.0, 26.0), look: Look::Close });
-    }
-    out
 }
 
 /// The wing's tiles in a row: its mark, then the six.
@@ -388,10 +370,14 @@ pub fn sheet_items(sheet: Sheet, facts: &Facts) -> Vec<Item> {
             out
         }
         Sheet::Instances => {
-            let (x0, y0, height, gap) = (24.0, 10.0, 90.0, 8.0);
+            let (x0, y0, height, gap) = (24.0, VISIT_TOP, VISIT_HEIGHT, VISIT_GAP);
             let mut out = Vec::new();
             for (i, visit) in facts.worlds_visited.iter().enumerate() {
-                let y = y0 + i as f32 * (height + gap);
+                let y = y0 + i as f32 * (height + gap) - facts.gallery_scroll;
+                // Only what shows is laid on the page.
+                if y + height < 0.0 || y > 576.0 {
+                    continue;
+                }
                 out.push(Item { action: Action::Idle, rect: r(x0, y, 1024.0 - x0 * 2.0, height), look: Look::Visit(i) });
                 // The last time first, the times before after it: each chip goes to that instance.
                 let mut right = 1024.0 - x0 - 12.0;
@@ -404,23 +390,11 @@ pub fn sheet_items(sheet: Sheet, facts: &Facts) -> Vec<Item> {
                     right -= width + 6.0;
                 }
             }
-            if facts.visited_pages > 1 {
-                let y = 576.0 - 48.0;
-                if facts.visited_page > 0 {
-                    out.push(Item { action: Action::InstancesPage(false), rect: r(1024.0 - x0 - 170.0, y, 40.0, 40.0), look: Look::Transport(icons::CARET_LEFT) });
-                }
-                out.push(Item { action: Action::Idle, rect: r(1024.0 - x0 - 124.0, y, 76.0, 40.0), look: Look::Pages });
-                if facts.visited_page + 1 < facts.visited_pages {
-                    out.push(Item { action: Action::InstancesPage(true), rect: r(1024.0 - x0 - 40.0, y, 40.0, 40.0), look: Look::Transport(icons::CARET_RIGHT) });
-                }
-            }
             out
         }
         Sheet::Pictures => {
             let (x0, gap, y0, h) = (24.0, 12.0, 10.0, GALLERY_TOP - 22.0);
-            // With no wheel to scroll with, in VR, the gallery has its own buttons.
-            let room = if facts.desktop { 0.0 } else { 52.0 };
-            let width = (1024.0 - x0 * 2.0 - room - gap * 2.0) / 3.0;
+            let width = (1024.0 - x0 * 2.0 - gap * 2.0) / 3.0;
             let mut out = Vec::new();
             // Under the buttons, and so under them for the pointer too.
             let (rects, _) = gallery_rects(facts);
@@ -433,11 +407,6 @@ pub fn sheet_items(sheet: Sheet, facts: &Facts) -> Vec<Item> {
             out.push(Item { action: Action::Picture(PhotoMode::People), rect: r(x0, y0, width, h), look: Look::Picture(PhotoMode::People) });
             out.push(Item { action: Action::Picture(PhotoMode::World), rect: r(x0 + width + gap, y0, width, h), look: Look::Picture(PhotoMode::World) });
             out.push(Item { action: Action::Record, rect: r(x0 + (width + gap) * 2.0, y0, width, h), look: Look::Record });
-            if !facts.desktop {
-                let x = 1024.0 - x0 - 44.0;
-                out.push(Item { action: Action::GalleryScroll(false), rect: r(x, y0 - 4.0, 44.0, 44.0), look: Look::Transport(icons::CARET_UP) });
-                out.push(Item { action: Action::GalleryScroll(true), rect: r(x, y0 + 44.0, 44.0, 44.0), look: Look::Transport(icons::CARET_DOWN) });
-            }
             out
         }
         Sheet::Menu | Sheet::Worlds => Vec::new(),
@@ -456,9 +425,29 @@ fn gallery_rects(facts: &Facts) -> (Vec<Rect>, f32) {
     crate::pages::gallery_layout::arrange(facts.gallery_layout, &vec![16.0 / 9.0; facts.recent.len()], 1024.0 - 48.0, 300.0, 0.0)
 }
 
-/// How far the gallery scrolls.
-pub fn gallery_max_scroll(facts: &Facts) -> f32 {
-    (GALLERY_TOP + gallery_rects(facts).1 + 12.0 - 576.0).max(0.0)
+/// The Instances sheet's rows.
+const VISIT_TOP: f32 = 10.0;
+const VISIT_HEIGHT: f32 = 90.0;
+const VISIT_GAP: f32 = 8.0;
+
+/// Which rows of the Instances sheet show, scrolled this far, for what fetches their pictures.
+pub fn visits_shown(scroll: f32) -> std::ops::Range<usize> {
+    let first = ((scroll - VISIT_TOP) / (VISIT_HEIGHT + VISIT_GAP)).floor().max(0.0) as usize;
+    first..first + (576.0 / (VISIT_HEIGHT + VISIT_GAP)).ceil() as usize + 1
+}
+
+/// How far a sheet's list scrolls.
+pub fn max_scroll(sheet: Sheet, facts: &Facts) -> f32 {
+    match sheet {
+        Sheet::Pictures => (GALLERY_TOP + gallery_rects(facts).1 + 12.0 - 576.0).max(0.0),
+        Sheet::Instances => (VISIT_TOP + facts.worlds_visited.len() as f32 * (VISIT_HEIGHT + VISIT_GAP) + 4.0 - 576.0).max(0.0),
+        _ => 0.0,
+    }
+}
+
+/// Whether a press on this is the start of a drag as much as a press: what lies in a list that scrolls. It only acts if let go without moving.
+pub fn scrolls_with_a_drag(sheet: Sheet, look: &Look) -> bool {
+    matches!(sheet, Sheet::Pictures | Sheet::Instances) && matches!(look, Look::Capture(_) | Look::Visit(_) | Look::Chip { .. })
 }
 
 /// What plays's controls, on its panel on All tools: nothing about it needs a page of its own.
@@ -524,8 +513,6 @@ pub fn caption(action: Action, facts: &Facts) -> Option<(String, String)> {
             let when = place.and_then(|v| if visit == 0 { None } else { v.earlier.get(visit - 1).map(|e| e.1.clone()) });
             ("Invite me".into(), when.map_or_else(|| "Orbiters invites you to the instance you were last in here.".to_string(), |w| format!("To the instance you were in {w}.")))
         }
-        Action::InstancesPage(_) => return None,
-        Action::GalleryScroll(on) => (if on { "Further on" } else { "Back" }.into(), "Through your captures.".into()),
         Action::Volume(up) => (if up { "Louder" } else { "Quieter" }.into(), "Your computer's volume.".into()),
         Action::Mute => ("Mute".into(), "Your computer's sound, on or off.".into()),
         Action::Pictures => ("3D pictures".into(), "Take a 3D picture, record a scene, see your captures.".into()),
@@ -715,17 +702,16 @@ pub fn paint(p: &Painter, zone: Zone, size: Vec2, facts: &Facts, hover: Option<u
             text(p, c + vec2(0.0, 18.0), Align2::CENTER_CENTER, "Pointing here", 10.0, weight::SEMIBOLD, look::LABEL);
             return;
         }
-        Zone::QmWing => {
-            p.rect_filled(panel, theme::radius(look::RADIUS), look::PANEL);
-            top_light(p, panel);
-            widgets::icon(p, pos2(21.0, 18.0), icons::N4N0_MARK, 18.0, look::LABEL);
-            text(p, pos2(36.0, 18.0), Align2::LEFT_CENTER, "Orbiters", 14.0, weight::SEMIBOLD, look::LABEL);
+        Zone::WingName => {
+            // The name on a pill of its own, with what runs when it does.
+            p.rect_filled(panel, theme::radius(size.y / 2.0), look::PANEL);
+            widgets::icon(p, pos2(19.0, size.y / 2.0), icons::N4N0_MARK, 16.0, look::LABEL);
+            text(p, pos2(32.0, size.y / 2.0), Align2::LEFT_CENTER, "Orbiters", 13.0, weight::SEMIBOLD, look::LABEL);
+            let right = size.x - if facts.vr_close && facts.sheet.is_none() { 34.0 } else { 10.0 };
             if facts.recording {
-                // Only while it runs: what it does, in the header.
-                p.circle_filled(pos2(size.x - 52.0, 18.0), 4.5, theme::REC);
-                text(p, pos2(size.x - 8.0, 18.0), Align2::RIGHT_CENTER, &clock(facts.recording_seconds.unwrap_or(0)), 11.5, weight::SEMIBOLD, look::LABEL);
+                text(p, pos2(right, size.y / 2.0), Align2::RIGHT_CENTER, &clock(facts.recording_seconds.unwrap_or(0)), 11.0, weight::SEMIBOLD, theme::REC);
             } else if let Some(done) = facts.reconstructing {
-                text(p, pos2(size.x - 8.0, 18.0), Align2::RIGHT_CENTER, &format!("3D {:.0}%", done * 100.0), 11.5, weight::SEMIBOLD, look::ACCENT);
+                text(p, pos2(right, size.y / 2.0), Align2::RIGHT_CENTER, &format!("3D {:.0}%", done * 100.0), 11.0, weight::SEMIBOLD, look::ACCENT);
             }
         }
         Zone::QmStrip => {
@@ -791,13 +777,14 @@ pub fn paint_sheet(p: &Painter, sheet: Sheet, facts: &Facts, hover: Option<usize
     for (i, item) in sheet_items(sheet, facts).iter().enumerate() {
         draw(p, Zone::Takeover, item, facts, hover == Some(i), pressed == Some(i));
     }
-    // Where in the gallery this is.
-    if sheet == Sheet::Pictures {
-        let max = gallery_max_scroll(facts);
-        if max > 0.0 {
-            let track = 576.0 - GALLERY_TOP - 8.0;
+    // Where in the list this is.
+    let max = max_scroll(sheet, facts);
+    if max > 0.0 {
+        {
+            let top = if sheet == Sheet::Pictures { GALLERY_TOP } else { 8.0 };
+            let track = 576.0 - top - 8.0;
             let length = (track * track / (track + max)).max(36.0);
-            let y = GALLERY_TOP + (track - length) * (facts.gallery_scroll / max).clamp(0.0, 1.0);
+            let y = top + (track - length) * (facts.gallery_scroll / max).clamp(0.0, 1.0);
             p.rect_filled(Rect::from_min_size(pos2(1024.0 - 13.0, y), vec2(5.0, length)), theme::radius(2.5), Color32::from_white_alpha(70));
         }
     }
@@ -1115,9 +1102,6 @@ fn draw(p: &Painter, zone: Zone, item: &Item, facts: &Facts, hovered: bool, pres
             p.rect_stroke(rect, radius, Stroke::new(1.5, edge), egui::StrokeKind::Inside);
             let font = theme::font(if primary { 16.0 } else { 14.0 }, weight::SEMIBOLD);
             p.text(rect.center(), Align2::CENTER_CENTER, fit(p, &words, &font, rect.width() - 12.0), font, if primary { look::ACCENT } else { look::LABEL });
-        }
-        Look::Pages => {
-            text(p, rect.center(), Align2::CENTER_CENTER, &format!("{} of {}", facts.visited_page + 1, facts.visited_pages), 15.0, weight::SEMIBOLD, look::MUTED);
         }
         Look::Playing => {
             let none = facts.music.is_none();
@@ -1563,19 +1547,44 @@ mod tests {
         let start = many(200);
         let shown = captures(&start);
         assert!(shown.contains(&0) && shown.len() < 30, "only what shows is laid on the page: {}", shown.len());
-        let max = gallery_max_scroll(&start);
+        let max = max_scroll(Sheet::Pictures, &start);
         assert!(max > 1000.0);
         let end = Facts { gallery_scroll: max, ..start.clone() };
         assert!(captures(&end).contains(&199), "the last one can be reached");
         assert!(!captures(&end).contains(&0));
         // A few captures do not scroll at all.
-        assert_eq!(gallery_max_scroll(&many(2)), 0.0);
+        assert_eq!(max_scroll(Sheet::Pictures, &many(2)), 0.0);
         // A capture passing under the buttons never takes their press.
         let middle = Facts { gallery_scroll: 90.0, ..start };
         let items = sheet_items(Sheet::Pictures, &middle);
         let button = items.iter().find(|i| i.action == Action::Picture(PhotoMode::People)).unwrap().rect;
         let on = hit(&items, button.center()).unwrap();
         assert_eq!(items[on].action, Action::Picture(PhotoMode::People));
+    }
+
+    /// Enzo, in the headset: "when I grab a tile to scroll down, it just opens it".
+    #[test]
+    fn what_lies_in_a_list_waits_to_see_whether_it_is_a_drag_and_what_is_fixed_does_not() {
+        let list = Look::Capture(0);
+        assert!(scrolls_with_a_drag(Sheet::Pictures, &list));
+        assert!(scrolls_with_a_drag(Sheet::Instances, &Look::Chip { group: 0, visit: 0 }));
+        assert!(!scrolls_with_a_drag(Sheet::Pictures, &Look::Picture(PhotoMode::World)), "its buttons on top act at once");
+        assert!(!scrolls_with_a_drag(Sheet::Pictures, &Look::Record));
+    }
+
+    #[test]
+    fn previous_instances_scroll_through_every_world_and_lay_only_what_shows() {
+        let visit = |i: usize| WorldVisit { world_id: format!("wrld_{i}"), name: format!("W{i}"), line: String::new(), location: format!("wrld_{i}:1"), earlier: Vec::new(), picture: None };
+        let facts = Facts { worlds_visited: (0..100).map(visit).collect(), desktop: true, ..facts() };
+        let rows = |f: &Facts| sheet_items(Sheet::Instances, f).iter().filter_map(|i| if let Look::Visit(n) = i.look { Some(n) } else { None }).collect::<Vec<_>>();
+        assert!(rows(&facts).len() <= 8);
+        let max = max_scroll(Sheet::Instances, &facts);
+        assert!(rows(&Facts { gallery_scroll: max, ..facts.clone() }).contains(&99), "the last can be reached");
+        for scroll in [0.0, 500.0, max] {
+            let shown = rows(&Facts { gallery_scroll: scroll, ..facts.clone() });
+            let range = visits_shown(scroll);
+            assert!(shown.iter().all(|n| range.contains(n)), "{scroll}: {shown:?} {range:?}");
+        }
     }
 
     #[test]
@@ -1622,12 +1631,12 @@ mod tests {
 
     #[test]
     fn the_close_button_is_hit_before_what_it_sits_on() {
-        let size = Zone::QmWing.units().size();
+        let size = Zone::WingName.units().size();
         let vr = Facts { vr_close: true, ..facts() };
-        let list = items(Zone::QmWing, size, &vr);
+        let list = items(Zone::WingName, size, &vr);
         let close = list.iter().find(|i| i.action == Action::Hide).expect("in VR");
         assert_eq!(list[hit(&list, close.rect.center()).unwrap()].action, Action::Hide);
-        assert!(items(Zone::QmWing, size, &facts()).iter().all(|i| i.action != Action::Hide), "the desktop's menu closes by itself");
+        assert!(items(Zone::WingName, size, &facts()).iter().all(|i| i.action != Action::Hide), "the desktop's menu closes by itself");
         assert_eq!(hit(&list, pos2(-5.0, -5.0)), None);
     }
 

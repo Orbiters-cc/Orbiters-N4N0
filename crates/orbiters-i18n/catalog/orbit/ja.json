@@ -185,7 +185,7 @@
   "Type on your keyboard": "キーボードで入力してください",
   "VRChat does not say whether its camera is open: turn on OSC in its Action Menu.": "VRChatがカメラの状態を伝えていません。アクションメニューでOSCをオンにしてください。",
   "VRChat is in exclusive full screen, which no other window can be above. Use a window or borderless full screen.": "VRChatは排他的フルスクリーンで動いているため、他のウィンドウをその上に表示できません。ウィンドウまたはボーダーレスのフルスクリーンにしてください。",
-  "VRChat's camera is open, but its panel is not on VRChat's window now. The tiles come when it is in view.": "VRChatのカメラは開いていますが、今はパネルがVRChatのウィンドウに映っていません。視界に入るとタイルが表示されます。",
+  "VRChat's camera is open, but its panel is not in view now. The tiles come when it is.": "VRChatのカメラは開いていますが、今はパネルが視界にありません。視界に入るとタイルが表示されます。",
   "VRChat's camera then flies around by itself.": "そのあとVRChatのカメラが自動で飛び回ります。",
   "VRChat's pictures and your 3D captures show here.": "VRChatの写真と3Dキャプチャがここに表示されます。",
   "VRChat's pictures and your 3D captures together.": "VRChatの写真と3Dキャプチャをまとめて表示します。",

@@ -559,7 +559,8 @@ impl Client {
         unsafe { entry::<F>(self.system, 5)(eye as i32) }
     }
 
-    /// `eye`'s field of view as the tangents of its sides (left, right, top, bottom; top is negative, y pointing down).
+    /// `eye`'s field of view as the tangents of its sides, as SteamVR names them (left, right, top, bottom). In a headset whose eye reaches further down than up, the larger of top and bottom is
+    /// the side up, as `ComposeProjection` has it: on a Quest Pro -1.376 and 0.900, for 54 degrees down and 42 up.
     pub fn projection_raw(&self, eye: compositor::Eye) -> [f32; 4] {
         type F = unsafe extern "system" fn(i32, *mut f32, *mut f32, *mut f32, *mut f32);
         let mut t = [0f32; 4];

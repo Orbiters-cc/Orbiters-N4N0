@@ -20,6 +20,8 @@ use orbiters_core::settings::VrMotion;
 use orbiters_i18n::mark;
 use super::Panels;
 use crate::backend::Ctl;
+use super::camera_frames::{CameraWatch, Source};
+use super::camera_track;
 use crate::state::{OrbitStatus, Snapshot};
 use egui::Pos2;
 use orbiters_openvr::{self as vr, ControllerRole, Matrix34, Pose, Universe, MAX_DEVICES};
@@ -169,11 +171,23 @@ pub struct Tune {
     pub qm_up: f32,
     /// What one of the Quick Menu's units is, in metres (its main panel is 376 wide).
     pub qm_unit: f32,
+    /// VRChat's camera panel: how wide it is in metres, which only moves how far away the tiles seem.
+    pub camera_panel_m: f32,
+    /// How old what is read of the eye, and of VRChat's window, is by the time it is read, in milliseconds. Tiles that swim as the head turns and settle when it stops: this is too little or too much.
+    pub camera_eye_age_ms: f32,
+    pub camera_window_age_ms: f32,
+    /// Reads VRChat's window and not what the compositor has of the eye.
+    pub camera_use_window: bool,
+    /// How much of the eye's width VRChat's window shows, and how far its middle lies from the eye's, right and down, of the eye's width. Only for reading the window.
+    pub camera_window_share: f32,
+    pub camera_window_moved: [f32; 2],
+    /// Keeps a frame a second in the logs' folder (`camera-frames`), for measuring.
+    pub camera_keep_frames: bool,
 }
 
 impl Default for Tune {
     fn default() -> Self {
-        Self { align: false, wheel_on: [None, Some(WHEEL_RIGHT)], qm_on: [Some(QM_LEFT), Some(QM_RIGHT)], wheel_tilt: 0.0, wheel_ahead: 0.062, wheel_up: -0.018, wheel_radius: 0.101_8, qm_tilt: 10.0, qm_ahead: 0.127, qm_up: -0.03, qm_unit: 0.0009 }
+        Self { align: false, wheel_on: [None, Some(WHEEL_RIGHT)], qm_on: [Some(QM_LEFT), Some(QM_RIGHT)], wheel_tilt: 0.0, wheel_ahead: 0.062, wheel_up: -0.018, wheel_radius: 0.101_8, qm_tilt: 10.0, qm_ahead: 0.127, qm_up: -0.03, qm_unit: 0.0009 , camera_panel_m: camera_track::PANEL_M, camera_eye_age_ms: 15.0, camera_window_age_ms: 45.0, camera_use_window: false, camera_window_share: WINDOW_SHARE, camera_window_moved: WINDOW_MOVED, camera_keep_frames: false}
     }
 }
 
@@ -471,10 +485,14 @@ pub struct Turn {
     pub(in crate::overlay) small_place: Option<(Matrix34, f32)>,
 }
 
-/// How old a frame of the window is when a look reads it. Not measured in a headset: VRChat's window shows, and the capture hands on, about this late.
-const CAMERA_FRAME_AGE: Duration = Duration::from_millis(45);
-/// How long the panel stays where it was with no look seeing it (a hand over it, a white world behind its X), and how many looks in a row it takes to show.
-const CAMERA_LOST_AFTER: Duration = Duration::from_millis(800);
+/// How much of the eye VRChat's window shows, as worked back from Enzo's two pictures: its tiles were 1.4 times the panel's scale, and how far they were off grows with the place on the picture by that.
+const WINDOW_SHARE: f32 = 0.716;
+const WINDOW_MOVED: [f32; 2] = [0.0, 0.0];
+/// How long the tiles stay where they are with no look seeing the panel (a hand over it, a white world behind its X, a head turned away), so that a look that misses moves nothing;
+/// and how many looks it takes to show them at first. They go at once when VRChat says its camera closed.
+const CAMERA_LOST_AFTER: Duration = Duration::from_secs(5);
+/// How far within the eye's view the tiles must lie, of its width: its very edge is not seen through the lens.
+const CAMERA_VIEW_MARGIN: f32 = 0.1;
 const CAMERA_LOOKS_TO_SHOW: u32 = 2;
 
 impl OrbitVr {
@@ -504,18 +522,34 @@ impl OrbitVr {
         let mut poses = [Pose::default(); MAX_DEVICES];
         steamvr.predicted_poses(Universe::Standing, prediction, &mut poses);
         if poses[0].pose_is_valid {
-            self.camera_heads.push_back((now, poses[0].device_to_absolute));
+            // Where the head will be `prediction` from now, which is when this pose is for.
+            self.camera_heads.push_back((now + Duration::from_secs_f32(prediction.max(0.0)), poses[0].device_to_absolute));
             while self.camera_heads.len() > 60 {
                 self.camera_heads.pop_front();
             }
         }
         if let Some(seen) = watch.take() {
-            let then = seen.at.checked_sub(CAMERA_FRAME_AGE).unwrap_or(seen.at);
+            let age = if seen.source == Source::Eye { self.tune.camera_eye_age_ms } else { self.tune.camera_window_age_ms };
+            let then = seen.at.checked_sub(Duration::from_secs_f32(age.max(0.0) / 1000.0)).unwrap_or(seen.at);
             let head = self.camera_heads.iter().min_by_key(|(at, _)| if *at > then { *at - then } else { then - *at }).map(|(_, h)| *h);
             if let Some(head) = head {
                 let eye_on_head = steamvr.eye_to_head(vr::compositor::Eye::Left);
-                let mirror = super::camera_track::Mirror { tangents: steamvr.projection_raw(vr::compositor::Eye::Left), aspect: seen.size[0] / seen.size[1].max(1.0) };
-                let (frame, unit) = super::camera_track::panel_in_room(&seen.found, seen.size, &mirror, &space::compose(&head, &eye_on_head));
+                let raw = steamvr.projection_raw(vr::compositor::Eye::Left);
+                let whole = camera_track::Mirror::whole_eye(raw);
+                let mirror = match seen.source {
+                    Source::Eye => whole,
+                    Source::Window => camera_track::Mirror::window(raw, seen.size[0] / seen.size[1].max(1.0), self.tune.camera_window_share, self.tune.camera_window_moved),
+                };
+                // On the side with room in the eye's whole view, a little within it.
+                let tangent_of = |u: [f32; 2]| {
+                    let p = seen.found.at(u);
+                    mirror.tangent(p[0] / seen.size[0], p[1] / seen.size[1])
+                };
+                let sides = camera_track::eye_sides(raw);
+                let within = (sides[1] - sides[0]) * CAMERA_VIEW_MARGIN;
+                self.camera_side = camera_track::side_with_room(tangent_of, [sides[0] + within, sides[1] - within, sides[2], sides[3]], self.camera_side);
+                let _ = whole;
+                let (frame, unit) = camera_track::panel_in_room(&seen.found, seen.size, &mirror, &space::compose(&head, &eye_on_head), self.tune.camera_panel_m, self.camera_side);
                 self.camera_follow.seen(frame, unit);
                 self.camera_seen = Some(now);
                 self.camera_looks = self.camera_looks.saturating_add(1);
@@ -559,8 +593,9 @@ pub struct OrbitVr {
     plane: Option<Plane>,
     takeover_plane: Option<Plane>,
     /// VRChat's camera panel: what reads its window while its camera is open, where it was last seen, and how many looks in a row saw it.
-    camera_watch: Option<super::camera_frames::CameraWatch>,
+    camera_watch: Option<CameraWatch>,
     camera_follow: super::camera_track::Follow,
+    camera_side: camera_track::Side,
     camera_seen: Option<Instant>,
     camera_looks: u32,
     /// The head lately, for where it was when a look's frame was taken.
@@ -604,6 +639,7 @@ impl OrbitVr {
             camera_watch: None,
             pointers: [None; 2],
             camera_follow: Default::default(),
+            camera_side: Default::default(),
             camera_seen: None,
             camera_looks: 0,
             camera_heads: Default::default(),
@@ -749,7 +785,10 @@ impl OrbitVr {
         // Looked for even with a menu up: VRChat's camera is opened from one, and what follows the buttons may still say it is open.
         let camera_wanted = settings.camera_tiles && camera == Some(true);
         if camera_wanted != self.camera_watch.is_some() {
-            self.camera_watch = camera_wanted.then(super::camera_frames::CameraWatch::start);
+            self.camera_watch = camera_wanted.then(|| {
+                let mirror = if self.tune.camera_use_window { None } else { cx.steamvr.compositor().ok().map(|c| c.mirror_source()) };
+                CameraWatch::start(super::camera_frames::From { mirror, adapter: cx.steamvr.dxgi_adapter_index(), keep_frames: self.tune.camera_keep_frames })
+            });
             self.camera_follow.clear();
             self.camera_seen = None;
             self.camera_looks = 0;
@@ -805,6 +844,7 @@ impl OrbitVr {
         let mut places: Vec<Placed> = match (menu, open) {
             (Some(Around::QuickMenu), Open::QuickMenu(_)) if settings.layout == orbiters_core::settings::OrbitLayout::Strip => strip_places(),
             (Some(Around::QuickMenu), Open::QuickMenu(hand)) => quick_menu_places(hand),
+            (Some(Around::Camera), _) if self.camera_side == camera_track::Side::Right => Zone::CAMERA.iter().map(|z| zones::in_units(*z).mirrored()).collect(),
             (Some(m), _) => Zone::around(m).iter().map(|z| zones::in_units(*z)).collect(),
             (None, _) => Vec::new(),
         };

@@ -2,13 +2,13 @@
 //! h-view read it): one eye's picture of the scene application, read back to the CPU. For N4N0's phone camera: a picture
 //! of the world as its owner sees it, without VRChat's camera.
 
-use crate::compositor::{Compositor, Eye};
+use crate::compositor::{Compositor, Eye, MirrorSource};
 use std::ffi::c_void;
 use windows::core::Interface;
 use windows::Win32::Foundation::HMODULE;
 use windows::Win32::Graphics::Direct3D::{D3D_DRIVER_TYPE_HARDWARE, D3D_DRIVER_TYPE_UNKNOWN, D3D_FEATURE_LEVEL_10_0, D3D_FEATURE_LEVEL_11_0};
 use windows::Win32::Graphics::Direct3D11::{
-    D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, ID3D11Resource, ID3D11ShaderResourceView, ID3D11Texture2D, D3D11_CPU_ACCESS_READ,
+    D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, ID3D11Resource, ID3D11ShaderResourceView, ID3D11Texture2D, D3D11_BOX, D3D11_CPU_ACCESS_READ,
     D3D11_CREATE_DEVICE_FLAG, D3D11_MAPPED_SUBRESOURCE, D3D11_MAP_READ, D3D11_SDK_VERSION, D3D11_TEXTURE2D_DESC, D3D11_USAGE_STAGING,
 };
 use windows::Win32::Graphics::Dxgi::Common::{
@@ -21,6 +21,9 @@ pub struct EyePicture {
     pub width: u32,
     pub height: u32,
     pub rgba: Vec<u8>,
+    /// Where this lies in the whole eye's picture, and how large that is.
+    pub from: [u32; 2],
+    pub whole: [u32; 2],
 }
 
 /// Reads eyes' pictures through one small D3D11 device on the headset's GPU (DXGI adapter `adapter`, the default one
@@ -60,14 +63,19 @@ impl EyeReader {
 
     /// `eye`'s picture now, copied whole and read back (a few milliseconds for a 2k × 2k eye).
     pub fn read(&self, compositor: &Compositor, eye: Eye) -> Result<EyePicture, String> {
+        self.read_part(compositor.mirror_source(), eye, None)
+    }
+
+    /// The same, of only `area` (x, y, width, height) if given, as a look at something whose place is known needs.
+    pub fn read_part(&self, source: MirrorSource, eye: Eye, area: Option<[u32; 4]>) -> Result<EyePicture, String> {
         // SAFETY: this reader's live device; the view is released once copied, and not used after.
-        let raw = unsafe { compositor.mirror_d3d11(eye, self.device.as_raw()) }.map_err(|e| format!("GetMirrorTextureD3D11: compositor error {e}"))?; // i18n: not shown (a graphics call named in an error detail)
-        let picture = self.copy(&raw);
-        unsafe { compositor.release_mirror_d3d11(raw) };
+        let raw = unsafe { source.mirror_d3d11(eye, self.device.as_raw()) }.map_err(|e| format!("GetMirrorTextureD3D11: compositor error {e}"))?; // i18n: not shown (a graphics call named in an error detail)
+        let picture = self.copy(&raw, area);
+        unsafe { source.release_mirror_d3d11(raw) };
         picture
     }
 
-    fn copy(&self, raw: &*mut c_void) -> Result<EyePicture, String> {
+    fn copy(&self, raw: &*mut c_void, area: Option<[u32; 4]>) -> Result<EyePicture, String> {
         // SAFETY: SteamVR's view, alive until it is released after this call; borrowed, never released by us.
         let view = unsafe { ID3D11ShaderResourceView::from_raw_borrowed(raw) }.ok_or("no mirror view")?; // i18n: not shown (a graphics call named in an error detail)
         // SAFETY: a valid view.
@@ -81,9 +89,12 @@ impl EyeReader {
             DXGI_FORMAT_B8G8R8A8_UNORM | DXGI_FORMAT_B8G8R8A8_UNORM_SRGB => true,
             other => return Err(format!("the mirror texture's format {} is not 8-bit RGBA", other.0)),
         };
+        let [x0, y0, part_w, part_h] = area.unwrap_or([0, 0, desc.Width, desc.Height]);
+        let (x0, y0) = (x0.min(desc.Width.saturating_sub(1)), y0.min(desc.Height.saturating_sub(1)));
+        let (part_w, part_h) = (part_w.clamp(1, desc.Width - x0), part_h.clamp(1, desc.Height - y0));
         let staging_desc = D3D11_TEXTURE2D_DESC {
-            Width: desc.Width,
-            Height: desc.Height,
+            Width: part_w,
+            Height: part_h,
             MipLevels: 1,
             ArraySize: 1,
             Format: desc.Format,
@@ -98,13 +109,14 @@ impl EyeReader {
         unsafe { self.device.CreateTexture2D(&staging_desc, None, Some(&mut staging)) }.map_err(|e| format!("CreateTexture2D: {e}"))?;
         let staging = staging.ok_or("no staging texture")?; // i18n: not shown (a graphics call named in an error detail)
         let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
-        // SAFETY: both textures are this device's, of the same size and format; Map waits for the copy.
+        let part = D3D11_BOX { left: x0, top: y0, front: 0, right: x0 + part_w, bottom: y0 + part_h, back: 1 };
+        // SAFETY: both textures are this device's, of one format, and the box lies within the source and fits the copy; Map waits for the copy.
         unsafe {
-            self.context.CopySubresourceRegion(&staging, 0, 0, 0, 0, &texture, 0, None);
+            self.context.CopySubresourceRegion(&staging, 0, 0, 0, 0, &texture, 0, Some(&part));
             self.context.Map(&staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped))
         }
         .map_err(|e| format!("Map: {e}"))?; // i18n: not shown (a graphics call named in an error detail)
-        let (w, h) = (desc.Width as usize, desc.Height as usize);
+        let (w, h) = (part_w as usize, part_h as usize);
         let mut rgba = vec![0u8; w * h * 4];
         for y in 0..h {
             // SAFETY: the mapped rows are RowPitch bytes apart, each at least w × 4 bytes long.
@@ -117,6 +129,6 @@ impl EyeReader {
         }
         // SAFETY: mapped above.
         unsafe { self.context.Unmap(&staging, 0) };
-        Ok(EyePicture { width: desc.Width, height: desc.Height, rgba })
+        Ok(EyePicture { width: part_w, height: part_h, rgba, from: [x0, y0], whole: [desc.Width, desc.Height] })
     }
 }

@@ -17,6 +17,7 @@ use super::super::Presenter;
 use super::block::{Block, HandNow, Stuck};
 use super::zones::{self, Around, Placed, Zone};
 use orbiters_core::settings::VrMotion;
+use orbiters_i18n::mark;
 use super::Panels;
 use crate::backend::Ctl;
 use crate::state::{OrbitStatus, Snapshot};
@@ -598,7 +599,7 @@ impl OrbitVr {
             }
         }
         let status = OrbitStatus {
-            note: (on != Some(true)).then(|| "SteamVR's \"Experimental overlay input overrides\" (Settings, Developer) is off: pointing at a panel still presses in VRChat too.".to_string()),
+            note: (on != Some(true)).then(|| mark("SteamVR's \"Experimental overlay input overrides\" (Settings, Developer) is off: pointing at a panel still presses in VRChat too.").to_string()),
             steamvr_overrides: on,
         };
         if self.told.as_ref() != Some(&status) {

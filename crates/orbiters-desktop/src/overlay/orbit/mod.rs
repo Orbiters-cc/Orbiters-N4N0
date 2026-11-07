@@ -30,6 +30,7 @@ use crate::menu_host::MenuHost;
 use crate::state::{CaptureState, Snapshot};
 use egui::{pos2, vec2, ColorImage, Pos2, TextureHandle, TextureId, TextureOptions, Vec2};
 use orbiters_core::settings::MenuLook;
+use orbiters_i18n::{mark, tr};
 use orbiters_n4n0_core::menu::layout::{self, ScreenPage};
 use orbiters_n4n0_core::menu::{Effect, Page, Target};
 use panels::{Action, Facts, Item, Recent, Sheet};
@@ -253,7 +254,7 @@ struct Recents {
     /// What the gallery shows of it, in its filter, and that as tiles.
     shown_index: Vec<usize>,
     shown: panels::Gallery,
-    arranged: Option<(panels::GalleryFilter, orbiters_core::settings::GalleryLayout)>,
+    arranged: Option<(panels::GalleryFilter, orbiters_core::settings::GalleryLayout, orbiters_i18n::Language)>,
     seen: Option<(u64, u64)>,
     /// When it was last listed: a first scan of the pictures says it found more all the time.
     listed: Option<Instant>,
@@ -320,7 +321,8 @@ fn list_pictures(sessions: &std::path::Path, folders: &[PathBuf]) -> Vec<LoadedR
     use crate::worlds::Picture;
     let mut list = Vec::new();
     for world in crate::worlds::load_gallery(sessions, folders) {
-        let title = if world.name.is_empty() { "A VRChat world".to_string() } else { world.name.clone() };
+        // Kept as the English key, and put in the language where it is drawn (`shown_title`): the list is made once.
+        let title = if world.name.is_empty() { mark("A VRChat world").to_string() } else { world.name.clone() };
         for s in &world.sessions {
             let aspect = crate::controller::shares::session_picture_size(s.manifest.capture.width, s.manifest.capture.height).map_or(16.0 / 9.0, |[w, h]| w as f32 / h.max(1) as f32);
             list.push(LoadedRecent {
@@ -404,10 +406,12 @@ impl Recents {
 
     /// Makes the tiles again when the list, its filter or its layout changed. Says whether they did.
     fn arrange(&mut self, filter: panels::GalleryFilter, layout: orbiters_core::settings::GalleryLayout) -> bool {
-        if self.arranged == Some((filter, layout)) {
+        // The language is part of what it was arranged for: a title the list makes up (a world with no name) is in it.
+        let language = orbiters_i18n::language();
+        if self.arranged == Some((filter, layout, language)) {
             return false;
         }
-        self.arranged = Some((filter, layout));
+        self.arranged = Some((filter, layout, language));
         self.shown_index.clear();
         let mut items = Vec::new();
         for (i, r) in self.loaded.iter_mut().enumerate() {
@@ -415,7 +419,7 @@ impl Recents {
             if filter == panels::GalleryFilter::All || r.session {
                 r.at = Some(self.shown_index.len());
                 self.shown_index.push(i);
-                items.push(Recent { dir: r.key.clone(), title: r.title.clone(), state: String::new(), progress: None, picture: None, aspect: r.aspect, kind: r.kind() });
+                items.push(Recent { dir: r.key.clone(), title: shown_title(&r.title), state: String::new(), progress: None, picture: None, aspect: r.aspect, kind: r.kind() });
             }
         }
         self.shown = panels::Gallery::new(items, layout);
@@ -579,13 +583,18 @@ impl Recents {
     }
 }
 
+/// A capture's title in the language now: the name of its world as it is, or the English stand-in kept for a world with none.
+fn shown_title(title: &str) -> String {
+    if title == mark("A VRChat world") { tr(title).to_string() } else { title.to_string() }
+}
+
 /// How long ago, in a word.
 fn ago(seconds: u64) -> String {
     match seconds {
-        0..=89 => "just now".into(),
-        90..=3599 => format!("{} min ago", seconds / 60),
-        3600..=86399 => format!("{} h ago", seconds / 3600),
-        _ => format!("{} d ago", seconds / 86400),
+        0..=89 => tr("just now").into(),
+        90..=3599 => tr!("{minutes} min ago", minutes = seconds / 60),
+        3600..=86399 => tr!("{hours} h ago", hours = seconds / 3600),
+        _ => tr!("{days} d ago", days = seconds / 86400),
     }
 }
 
@@ -594,17 +603,20 @@ fn recent_state(r: &LoadedRecent, snap: &Snapshot, now: u64) -> String {
     if !r.session {
         return ago(now.saturating_sub(r.taken));
     }
-    let kind = if r.picture { "3D picture" } else { "Recording" };
+    // Whole sentences for each kind: the word order of "3D picture, waiting" is not the same everywhere.
     if let Some(job) = snap.reconstruction.as_ref().filter(|j| j.session_dir == r.key) {
-        return format!("Making 3D {:.0}%", job.progress.clamp(0.0, 1.0) * 100.0);
+        return tr!("Making 3D {percent}%", percent = format!("{:.0}", job.progress.clamp(0.0, 1.0) * 100.0));
     }
     if snap.reconstruct_queue.contains(&r.key) {
-        return format!("{kind}, waiting");
+        return if r.picture { tr("3D picture, waiting") } else { tr("Recording, waiting") }.to_string();
     }
     if r.has_view {
-        format!("{kind}, {}", ago(now.saturating_sub(r.taken)))
+        let when = ago(now.saturating_sub(r.taken));
+        if r.picture { tr!("3D picture, {when}", when = when) } else { tr!("Recording, {when}", when = when) }
+    } else if r.picture {
+        tr("3D picture, no 3D yet").to_string()
     } else {
-        format!("{kind}, no 3D yet")
+        tr("Recording, no 3D yet").to_string()
     }
 }
 
@@ -1000,20 +1012,20 @@ impl Panels {
     fn open_page(&mut self, target: Target, snap: &Snapshot) {
         let title = match target {
             Target::YouTube => "YouTube",
-            Target::Music => "Now playing",
-            Target::History => "Your captures",
-            Target::Call => "Call",
-            Target::States => "Saved looks",
-            Target::Light => "Light",
-            Target::Tracking => "Smooth tracking",
-            Target::WorldFeedback => "World feedback",
-            Target::Qr => "QR code",
-            Target::Suggest => "Suggest",
+            Target::Music => mark("Now playing"),
+            Target::History => mark("Your captures"),
+            Target::Call => mark("Call"),
+            Target::States => mark("Saved looks"),
+            Target::Light => mark("Light"),
+            Target::Tracking => mark("Smooth tracking"),
+            Target::WorldFeedback => mark("World feedback"),
+            Target::Qr => mark("QR code"),
+            Target::Suggest => mark("Suggest"),
             _ => "",
         };
         // Where the person was has a sheet of its own here, on the menu's own list and invites.
         if target == Target::Instances {
-            self.open_sheet(Sheet::Instances, "Instances", snap);
+            self.open_sheet(Sheet::Instances, mark("Instances"), snap);
         } else {
             self.open_sheet(Sheet::Menu, title, snap);
         }
@@ -1085,8 +1097,8 @@ impl Panels {
         let showing = status.current.is_some();
         // Asked from the gallery, which has no page of the view's own to say it on.
         let said = match (&status.error, &status.stage) {
-            (Some(why), _) => Some(("It cannot show in 3D".to_string(), why.clone())),
-            (None, Some(stage)) => Some(("Getting it ready".to_string(), stage.clone())),
+            (Some(why), _) => Some((tr("It cannot show in 3D").to_string(), why.clone())),
+            (None, Some(stage)) => Some((tr("Getting it ready").to_string(), stage.clone())),
             (None, None) => None,
         };
         // The sheet's back has the same hole as the page on it: page units to its own, the page lying 52 under its top.
@@ -1255,7 +1267,7 @@ impl Panels {
         }
         // The menu going back to its Home, or to its own More, means back to All tools here: those two pages do not show.
         if self.facts.sheet == Some(Sheet::Menu) && matches!(self.stage.host.menu.page, Page::Home | Page::More) {
-            self.open_sheet(Sheet::All, "All tools", snap);
+            self.open_sheet(Sheet::All, mark("All tools"), snap);
         }
         // YouTube's results are one list here, the rest of it the menu's own pages.
         if self.facts.sheet == Some(Sheet::Menu) && self.stage.host.menu.page == Page::Results {
@@ -1287,7 +1299,7 @@ impl Panels {
         }
         // An invite that needs Orbiters as a friend first goes on the menu's own page.
         if self.facts.sheet == Some(Sheet::Instances) && self.stage.host.menu.page != Page::Instances {
-            self.open_sheet(Sheet::Menu, "Add Orbiters as a friend", snap);
+            self.open_sheet(Sheet::Menu, mark("Add Orbiters as a friend"), snap);
         }
         if let Some(worlds) = self.stage.worlds.as_mut() {
             if matches!(self.facts.sheet, Some(Sheet::Instances | Sheet::All)) {
@@ -1724,7 +1736,7 @@ impl Panels {
         match action {
             Action::Worlds => {
                 if self.worlds_here {
-                    self.open_sheet(Sheet::Worlds, "Worlds in 3D", snap);
+                    self.open_sheet(Sheet::Worlds, mark("Worlds in 3D"), snap);
                     if let Some(worlds) = self.stage.worlds.as_mut() {
                         worlds.open_panel(self.stage.host.menu.layout);
                     }
@@ -1732,13 +1744,13 @@ impl Panels {
                     out.worlds = true;
                 }
             }
-            Action::All => self.open_sheet(Sheet::All, "All tools", snap),
-            Action::Pictures => self.open_sheet(Sheet::Pictures, "Pictures", snap),
+            Action::All => self.open_sheet(Sheet::All, mark("All tools"), snap),
+            Action::Pictures => self.open_sheet(Sheet::Pictures, mark("Pictures"), snap),
             Action::Capture(n) => {
                 let Some(recent) = self.recents.tile(n) else { return };
                 match recent.kind() {
                     panels::RecentKind::Capture if self.worlds_here && !self.facts.desktop => {
-                        self.local_asked.push(super::worlds::Relayed::ShowLocal { dir: recent.key.clone(), name: recent.title.clone(), changed: recent.modified });
+                        self.local_asked.push(super::worlds::Relayed::ShowLocal { dir: recent.key.clone(), name: shown_title(&recent.title), changed: recent.modified });
                     }
                     // Its caption says why not.
                     panels::RecentKind::NoView => out.clicked = false,
@@ -1845,7 +1857,7 @@ impl Panels {
             Action::Timeline => {}
             Action::Talk => {
                 if self.facts.n4n0 {
-                    self.open_sheet(Sheet::Talk, "Ask N4N0", snap);
+                    self.open_sheet(Sheet::Talk, mark("Ask N4N0"), snap);
                 }
             }
             Action::TalkToggle => {
@@ -2193,15 +2205,15 @@ fn type_hint(p: &egui::Painter, playing: Option<&str>) {
     let area = egui::Rect::from_min_max(pos2(0.0, KEYS_TOP), pos2(layout::WIDTH as f32, layout::HEIGHT as f32));
     p.rect_filled(area, 0.0, panels::look::OPAQUE);
     widgets::icon(p, area.center() - vec2(0.0, 26.0), icons::KEYBOARD, 56.0, panels::look::LABEL);
-    p.text(area.center() + vec2(0.0, 24.0), egui::Align2::CENTER_CENTER, "Type on your keyboard", theme::font(22.0, theme::weight::BOLD), panels::look::LABEL);
-    p.text(area.center() + vec2(0.0, 54.0), egui::Align2::CENTER_CENTER, "Enter searches", theme::font(15.0, theme::weight::MEDIUM), panels::look::MUTED);
+    p.text(area.center() + vec2(0.0, 24.0), egui::Align2::CENTER_CENTER, tr("Type on your keyboard"), theme::font(22.0, theme::weight::BOLD), panels::look::LABEL);
+    p.text(area.center() + vec2(0.0, 54.0), egui::Align2::CENTER_CENTER, tr("Enter searches"), theme::font(15.0, theme::weight::MEDIUM), panels::look::MUTED);
     // What the world's player has now, which is what a search here would replace.
     if let Some(title) = playing {
         let row = egui::Rect::from_center_size(pos2(area.center().x, area.bottom() - 42.0), vec2(area.width() - 96.0, 56.0));
         p.rect_filled(row, theme::radius(10.0), panels::look::TILE);
         widgets::icon(p, pos2(row.left() + 30.0, row.center().y), icons::MONITOR_PLAY, 26.0, panels::look::LABEL);
         let font = theme::font(13.0, theme::weight::SEMIBOLD);
-        p.text(pos2(row.left() + 56.0, row.center().y - 11.0), egui::Align2::LEFT_CENTER, "In this world's player", font, panels::look::MUTED);
+        p.text(pos2(row.left() + 56.0, row.center().y - 11.0), egui::Align2::LEFT_CENTER, tr("In this world's player"), font, panels::look::MUTED);
         let font = theme::font(16.0, theme::weight::SEMIBOLD);
         let room = row.width() - 72.0;
         let mut shown = title.to_string();
@@ -2231,13 +2243,13 @@ fn talk_now(snap: &Snapshot) -> panels::TalkNow {
         return panels::TalkNow::Listening((snap.n4n0.voice.level * 20.0).round() / 20.0);
     }
     if !settings.enabled || !settings.assistant {
-        return panels::TalkNow::Off("Turn on N4N0's assistant in Orbiters");
+        return panels::TalkNow::Off(mark("Turn on N4N0's assistant in Orbiters"));
     }
     if snap.n4n0.voice.downloading.is_some() {
-        return panels::TalkNow::Off("Its speech models are downloading");
+        return panels::TalkNow::Off(mark("Its speech models are downloading"));
     }
     if !snap.n4n0.voice.installed {
-        return panels::TalkNow::Off("Install its speech in Orbiters, N4N0");
+        return panels::TalkNow::Off(mark("Install its speech in Orbiters, N4N0"));
     }
     if snap.n4n0.thinking {
         return panels::TalkNow::Thinking;
@@ -2248,26 +2260,26 @@ fn talk_now(snap: &Snapshot) -> panels::TalkNow {
 /// What must be said with no menu up: a 3D picture under way or waiting, or what stopped one. With VRChat's camera open on the desktop no menu can be.
 fn away_words(snap: &Snapshot, note: &Option<(String, String)>, mode: Option<orbiters_n4n0_core::menu::PhotoMode>) -> Option<(String, String)> {
     if let Some(seconds) = snap.n4n0.photo_countdown {
-        return Some((format!("3D picture in {seconds}"), "VRChat's camera then flies around by itself.".into()));
+        return Some((tr!("3D picture in {seconds}", seconds = seconds), tr("VRChat's camera then flies around by itself.").into()));
     }
     if snap.capture.photo_3d && !matches!(snap.capture.state, CaptureState::Idle) {
-        return Some(("3D picture in progress".into(), "The camera is flying. Stay where you are for a moment.".into()));
+        return Some((tr("3D picture in progress").into(), tr("The camera is flying. Stay where you are for a moment.").into()));
     }
-    note.clone().or_else(|| snap.n4n0.photo_wait.map(|wait| panels::wait_words(wait, mode, "R, then 6, calls it off"))).or_else(|| snap.n4n0.panel.clone().map(|said| ("N4N0".to_string(), said)))
+    note.clone().or_else(|| snap.n4n0.photo_wait.map(|wait| panels::wait_words(wait, mode, tr("R, then 6, calls it off")))).or_else(|| snap.n4n0.panel.clone().map(|said| ("N4N0".to_string(), said)))
 }
 
 /// What the end of a flight says.
 fn flight_words(error: Option<&str>) -> (String, String) {
     match error {
-        Some(error) => ("The 3D picture stopped".into(), error.to_string()),
-        None => ("3D picture saved".into(), "It is in your captures. Orbiters makes it 3D next.".into()),
+        Some(error) => (tr("The 3D picture stopped").into(), error.to_string()),
+        None => (tr("3D picture saved").into(), tr("It is in your captures. Orbiters makes it 3D next.").into()),
     }
 }
 
 /// Who may join an instance, in words that cannot be taken for the row's Invite me.
 fn access_words(kind: &str) -> &str {
     match kind {
-        "Invite" => "Invite only",
+        "Invite" => tr("Invite only"), // i18n: not shown (the kind as the server names it, matched)
         other => other,
     }
 }
@@ -2295,7 +2307,7 @@ fn visited_worlds(rows: &[orbiters_n4n0_core::menu::InstanceRow], now: u64, pict
                 let region = row.region().map_or(String::new(), |r| format!(" \u{b7} {r}"));
                 worlds.push(panels::WorldVisit {
                     world_id: id.to_string(),
-                    name: if row.world.is_empty() { "A world".to_string() } else { row.world.clone() },
+                    name: if row.world.is_empty() { tr("A world").to_string() } else { row.world.clone() },
                     line: format!("{when}{region} \u{b7} {}", access_words(row.kind())),
                     location: row.location.clone(),
                     here: here == Some(row.location.as_str()),
@@ -2495,9 +2507,9 @@ impl PictureNote {
 /// The note in the caption's two lines. VRChat's camera closed is the common one, and has a way out.
 fn note_words(text: &str) -> (String, String) {
     if text == orbiters_n4n0::platform::CAMERA_CLOSED {
-        ("Open VRChat's camera first".into(), "Quick Menu, the camera icon, Stream Camera. Then press this again.".into())
+        (tr("Open VRChat's camera first").into(), tr("Quick Menu, the camera icon, Stream Camera. Then press this again.").into())
     } else {
-        ("3D picture".into(), text.to_string())
+        (tr("3D picture").into(), tr(text).to_string())
     }
 }
 

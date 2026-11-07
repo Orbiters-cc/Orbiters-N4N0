@@ -443,7 +443,9 @@ impl Store {
         let mut changed = false;
         for (entry, verdict) in entries.into_iter().zip(verdicts) {
             match verdict {
-                Verdict::Changed => {
+                // Back at its original after the booster's change was in force: someone put it back. That is a choice too,
+                // theirs, and told as one, or the booster would only make it again.
+                Verdict::Changed | Verdict::Back if verdict == Verdict::Changed || entry.stage == Stage::Applied => {
                     kept.push(entry.target);
                     changed = true;
                 }

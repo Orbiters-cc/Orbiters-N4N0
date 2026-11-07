@@ -23,8 +23,9 @@ const REPORT_GONE_AFTER: Duration = Duration::from_secs(5);
 const SCAN_EVERY: Duration = Duration::from_secs(5);
 /// How often a SteamVR value still owed is tried again through its file while SteamVR stays closed.
 const OFFLINE_EVERY: Duration = Duration::from_secs(60);
-/// How often what is lowered is looked at again, for programs that started since.
-const RELOWER_EVERY: Duration = Duration::from_secs(10);
+/// How often step 1 looks again: for programs that started since, for one that started playing sound (put back), and for a
+/// choice someone made by hand (kept).
+const RELOWER_EVERY: Duration = Duration::from_secs(5);
 
 /// What the service keeps of the booster.
 #[derive(Default)]
@@ -201,6 +202,8 @@ impl super::Controller {
         let (mut steamvr_was_closed, mut last_offline) = (false, None);
         let mut holding = false;
         let cores = programs::core_count();
+        let mut slower = programs::Slower::default();
+        let mut level = Level::Off;
         loop {
             std::thread::sleep(Duration::from_secs(1));
             if self.quitting.load(Ordering::Relaxed) {
@@ -211,13 +214,24 @@ impl super::Controller {
             let snap = self.view();
             let wants = if snap.booster.watching { snap.booster.overlay.report.wants } else { Wants::default() };
             let here = snap.vrchat.runs_here();
+            if snap.settings.booster.level != level {
+                // A program taken out of efficiency mode by hand is left so until the step changes.
+                level = snap.settings.booster.level;
+                slower.forget();
+            }
 
             // Who is running, without opening any of them, only while it can matter.
             let due = here && snap.steamvr.running && last_seen.as_ref().is_none_or(|(at, _)| at.elapsed() >= SCAN_EVERY);
             if due {
                 let seen = programs::scan();
                 if let Some((at, before)) = &last_seen {
-                    let used = programs::cpu_use(before, &seen, at.elapsed().as_secs_f32(), cores);
+                    // What plays sound can't be slowed, so it isn't counted as competition a test could act on. Not knowing
+                    // what plays counts none.
+                    let left_out = match programs::audio_pids() {
+                        Some(audible) => programs::audible_names(&seen, &audible),
+                        None => programs::ALLOWLIST.iter().map(|n| n.to_lowercase()).collect(),
+                    };
+                    let used = programs::cpu_use(before, &seen, at.elapsed().as_secs_f32(), cores, &left_out);
                     self.update_if(|s| {
                         let b = &mut s.booster;
                         let changed = b.cpu_total != used.total || b.listed_cores != used.listed_cores || b.top != used.top;
@@ -234,7 +248,7 @@ impl super::Controller {
             if wants.lower_programs && here {
                 if last_lower.is_none_or(|at| at.elapsed() >= RELOWER_EVERY) {
                     // It lists the system afresh itself, and opens nothing it did not find there.
-                    let _ = programs::lower(&store, &mut os);
+                    let _ = slower.slow(&store, &mut os);
                     last_lower = Some(Instant::now());
                     lowered_any = true;
                     self.booster_note_lowered(&store);

@@ -215,6 +215,7 @@ pub struct Engine {
     /// Frames of the running trial, for the raw log.
     raw: Vec<Frame>,
     raw_kind: Option<Kind>,
+    level: Level,
 }
 
 impl Default for Engine {
@@ -249,6 +250,7 @@ impl Engine {
             flags_seen: false,
             raw: Vec::new(),
             raw_kind: None,
+            level: Level::Off,
         }
     }
 
@@ -392,6 +394,11 @@ impl Engine {
     /// One turn. `request`, if any, was already numbered and checked by the caller.
     pub fn tick(&mut self, inputs: &Inputs, request: Option<Request>) -> Wants {
         let now = inputs.now;
+        if inputs.level != self.level {
+            // A choice the person made by hand is respected until the step is changed, not for good.
+            self.level = inputs.level;
+            self.left_alone = None;
+        }
         if inputs.world != self.world {
             // Another world: nothing said about the last one holds, and what was changed goes back.
             self.world = inputs.world;

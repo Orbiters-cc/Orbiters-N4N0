@@ -162,8 +162,16 @@ pub fn launch(program: &Path, args: &[&str]) -> std::io::Result<()> {
 /// Removes `file` once this program has ended (a program cannot remove itself while it runs): a hidden `cmd` waits a
 /// couple of seconds, then deletes it.
 pub fn delete_after_exit(file: &Path) {
+    delete_after_exit_with(file, &[]);
+}
+
+/// The same, then each of `folders` in order, if it is empty by then (`rmdir` without `/s` removes nothing else).
+pub fn delete_after_exit_with(file: &Path, folders: &[&Path]) {
     use std::os::windows::process::CommandExt;
-    let line = format!("/d /c ping -n 3 127.0.0.1 >nul & del /f /q \"{}\"", file.display());
+    let mut line = format!("/d /c ping -n 3 127.0.0.1 >nul & del /f /q \"{}\"", file.display());
+    for folder in folders {
+        line.push_str(&format!(" & rmdir \"{}\"", folder.display())); // i18n: not shown (a command line)
+    }
     let system = std::env::var_os("SystemRoot").map(PathBuf::from).unwrap_or_else(|| PathBuf::from(r"C:\Windows"));
     let _ = std::process::Command::new(system.join("System32").join("cmd.exe"))
         .raw_arg(line)

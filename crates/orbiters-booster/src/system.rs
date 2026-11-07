@@ -306,8 +306,11 @@ mod tests {
             fn list(&mut self) -> Vec<programs::Seen> {
                 Vec::new()
             }
-            fn open(&mut self, _: u32) -> Option<programs::Opened> {
+            fn open(&mut self, _: u32, _: u64, _: &str) -> Option<programs::Opened> {
                 None
+            }
+            fn audible(&mut self) -> Option<Vec<u32>> {
+                Some(Vec::new())
             }
             fn set_state(&mut self, _: u32, _: u64, _: &str, _: i64) -> bool {
                 false
@@ -384,8 +387,11 @@ mod tests {
             fn list(&mut self) -> Vec<programs::Seen> {
                 Vec::new()
             }
-            fn open(&mut self, _: u32) -> Option<programs::Opened> {
+            fn open(&mut self, _: u32, _: u64, _: &str) -> Option<programs::Opened> {
                 None
+            }
+            fn audible(&mut self) -> Option<Vec<u32>> {
+                Some(Vec::new())
             }
             fn set_state(&mut self, _: u32, _: u64, _: &str, _: i64) -> bool {
                 false

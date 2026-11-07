@@ -154,7 +154,6 @@ impl Sharpness {
     fn restore(&mut self, api: &dyn SettingsApi) -> (bool, bool) {
         let (mut live, store) = self.live(api);
         let got = store.restore(&mut live, &is_steamvr, &mut |_| {});
-        let _ = store.rearm();
         match got {
             Ok(r) => (r.waiting.is_empty(), !r.kept.is_empty()),
             Err(_) => (false, false),
@@ -165,6 +164,7 @@ impl Sharpness {
     pub fn recover(&mut self, api: &dyn SettingsApi) {
         let (done, _) = self.restore(api);
         self.owed = !done;
+        let _ = self.store.rearm();
     }
 
     /// What it is before the booster: Auto's own choice counts as the base when no manual value is set. `None`: SteamVR
@@ -473,6 +473,79 @@ pub(crate) mod tests {
         sharpness.teardown(&steamvr, false);
         assert!(steamvr.values.borrow().is_empty());
         assert!(!flag.0.load(Ordering::SeqCst));
+    }
+
+    /// N4 through the loop as it runs: the engine keeps a lower sharpness, the person puts SteamVR back to Auto by hand, and for
+    /// the rest of the step neither the 5-second check nor the engine touches it again; changing the step lifts that.
+    #[test]
+    fn sharpness_put_back_by_hand_stays_until_the_step_changes() {
+        use crate::engine::{Engine, Inputs, Line, Wants};
+        use crate::frames::{Frame, LATE_GPU};
+        use crate::Level;
+        let dir = Scratch::new("hand-loop");
+        let (mut sharpness, steamvr, _) = session(&dir.0);
+        let mut engine = Engine::new();
+        let mut inputs =
+            Inputs { now: 0.0, scene: true, world: 1, people: Some(10), level: Level::Picture, refresh_hz: 72.0, listed_cores: 0.0, ..Inputs::default() };
+        let mut wants = Wants::default();
+        let mut applied = 1.0f32;
+        let mut index = 0u32;
+        let mut put_back_at = None;
+        let mut step = |engine: &mut Engine, sharpness: &mut Sharpness, inputs: &mut Inputs, wants: &mut Wants, applied: &mut f32| {
+            // The graphics card is late, less so with a lower sharpness, and frames rise.
+            let (fps, gpu) = if *applied < 1.0 { (42.0, 9.0) } else { (36.0, 12.0) };
+            let batch: Vec<Frame> = (0..(fps * 0.2) as u32)
+                .map(|i| {
+                    index += 1;
+                    Frame {
+                        index,
+                        time_s: inputs.now + i as f64 / fps,
+                        presents: 2,
+                        flags: LATE_GPU,
+                        interval_ms: 1000.0 / fps as f32,
+                        pre_submit_gpu_ms: gpu,
+                        poses_ready_ms: 1.0,
+                        frame_ready_ms: 7.0,
+                        ..Frame::default()
+                    }
+                })
+                .collect();
+            engine.push(inputs, &batch);
+            *wants = engine.tick(inputs, None);
+            if (wants.sharpness - *applied).abs() > 0.0005 {
+                *applied = wants.sharpness;
+                if let Some(left) = sharpness.follow(&steamvr, wants.sharpness) {
+                    engine.leave_sharpness_alone(left);
+                }
+            }
+            if ((inputs.now * 5.0).round() as u64).is_multiple_of(25) {
+                if let Some(left) = sharpness.check(&steamvr, true) {
+                    engine.leave_sharpness_alone(left);
+                }
+            }
+            inputs.now += 0.2;
+        };
+        while inputs.now < 160.0 {
+            step(&mut engine, &mut sharpness, &mut inputs, &mut wants, &mut applied);
+        }
+        assert!(steamvr.values.borrow().contains_key(SCALE), "the engine kept a lower sharpness");
+        // By hand, back to Auto.
+        steamvr.remove(SECTION, SCALE).unwrap();
+        steamvr.remove(SECTION, MANUAL_OVERRIDE).unwrap();
+        while inputs.now < 900.0 {
+            step(&mut engine, &mut sharpness, &mut inputs, &mut wants, &mut applied);
+            if steamvr.values.borrow().is_empty() && put_back_at.is_none() {
+                put_back_at = Some(inputs.now);
+            }
+            assert!(steamvr.values.borrow().is_empty(), "at {:.1} s the booster changed the person's Auto again", inputs.now);
+        }
+        assert_eq!(engine.report(&inputs, &wants).line, Line::HandChanged);
+        assert!(sharpness.shown().is_none(), "it no longer says it changed anything");
+        inputs.level = Level::Background;
+        step(&mut engine, &mut sharpness, &mut inputs, &mut wants, &mut applied);
+        inputs.level = Level::Picture;
+        step(&mut engine, &mut sharpness, &mut inputs, &mut wants, &mut applied);
+        assert!(engine.report(&inputs, &wants).left_alone.is_none(), "a new step may try again");
     }
 
     /// F4: the override took and the scale was refused. The override comes back at once, not at the end of the session.

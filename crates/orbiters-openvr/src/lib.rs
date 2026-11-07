@@ -394,6 +394,13 @@ pub mod settings_error {
     pub const UNSET_HAS_NO_DEFAULT: i32 = 5;
 }
 
+/// One IVRSettings call at a time in this process: OpenVR doesn't say its settings may be called from two threads at once, and
+/// the FPS booster's thread calls them beside the overlay's own.
+fn settings_lock() -> std::sync::MutexGuard<'static, ()> {
+    static ONE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    ONE.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 /// `IVRSettings_003`'s table, which another thread may use while the client that gave it is alive (as [`compositor::MirrorSource`]
 /// for the compositor's). Every call gives SteamVR's error code.
 #[derive(Clone, Copy, Debug)]
@@ -408,6 +415,7 @@ impl SettingsHandle {
     pub fn get_bool(&self, section: &std::ffi::CStr, key: &std::ffi::CStr) -> Result<bool, i32> {
         type F = unsafe extern "system" fn(*const i8, *const i8, *mut i32) -> bool;
         let mut error = 0;
+        let _serial = settings_lock();
         // SAFETY: IVRSettings_003 entry 5 is GetBool; NUL-terminated names.
         let value = unsafe { entry::<F>(self.table, SETTINGS_GET_BOOL)(section.as_ptr(), key.as_ptr(), &mut error) };
         if error == 0 { Ok(value) } else { Err(error) }
@@ -416,6 +424,7 @@ impl SettingsHandle {
     pub fn get_float(&self, section: &std::ffi::CStr, key: &std::ffi::CStr) -> Result<f32, i32> {
         type F = unsafe extern "system" fn(*const i8, *const i8, *mut i32) -> f32;
         let mut error = 0;
+        let _serial = settings_lock();
         // SAFETY: IVRSettings_003 entry 7 is GetFloat; NUL-terminated names.
         let value = unsafe { entry::<F>(self.table, 7)(section.as_ptr(), key.as_ptr(), &mut error) };
         if error == 0 { Ok(value) } else { Err(error) }
@@ -424,6 +433,7 @@ impl SettingsHandle {
     pub fn set_bool(&self, section: &std::ffi::CStr, key: &std::ffi::CStr, value: bool) -> Result<(), i32> {
         type F = unsafe extern "system" fn(*const i8, *const i8, bool, *mut i32);
         let mut error = 0;
+        let _serial = settings_lock();
         // SAFETY: IVRSettings_003 entry 1 is SetBool; NUL-terminated names.
         unsafe { entry::<F>(self.table, 1)(section.as_ptr(), key.as_ptr(), value, &mut error) };
         if error == 0 { Ok(()) } else { Err(error) }
@@ -432,6 +442,7 @@ impl SettingsHandle {
     pub fn set_float(&self, section: &std::ffi::CStr, key: &std::ffi::CStr, value: f32) -> Result<(), i32> {
         type F = unsafe extern "system" fn(*const i8, *const i8, f32, *mut i32);
         let mut error = 0;
+        let _serial = settings_lock();
         // SAFETY: IVRSettings_003 entry 3 is SetFloat; NUL-terminated names.
         unsafe { entry::<F>(self.table, 3)(section.as_ptr(), key.as_ptr(), value, &mut error) };
         if error == 0 { Ok(()) } else { Err(error) }
@@ -440,6 +451,7 @@ impl SettingsHandle {
     pub fn remove(&self, section: &std::ffi::CStr, key: &std::ffi::CStr) -> Result<(), i32> {
         type F = unsafe extern "system" fn(*const i8, *const i8, *mut i32);
         let mut error = 0;
+        let _serial = settings_lock();
         // SAFETY: IVRSettings_003 entry 10 is RemoveKeyInSection; NUL-terminated names.
         unsafe { entry::<F>(self.table, 10)(section.as_ptr(), key.as_ptr(), &mut error) };
         if error == 0 { Ok(()) } else { Err(error) }
@@ -544,6 +556,7 @@ impl Client {
         type F = unsafe extern "system" fn(*const i8, *const i8, *mut i32) -> bool;
         let table = self.table(&self.settings_table, "IVRSettings_003").ok()?;
         let mut error = 0;
+        let _serial = settings_lock();
         // SAFETY: IVRSettings_003's table in order: GetSettingsErrorNameFromEnum 0, SetBool 1, SetInt32 2, SetFloat 3,
         // SetString 4, GetBool 5; NUL-terminated names.
         let value = unsafe { entry::<F>(table, SETTINGS_GET_BOOL)(section.as_ptr(), key.as_ptr(), &mut error) };
@@ -561,6 +574,7 @@ impl Client {
         type F = unsafe extern "system" fn(*const i8, *const i8, *mut i32) -> f32;
         let table = self.table(&self.settings_table, "IVRSettings_003").ok()?;
         let mut error = 0;
+        let _serial = settings_lock();
         // SAFETY: IVRSettings_003 entry 7 is GetFloat (GetBool 5, GetInt32 6); NUL-terminated names.
         let value = unsafe { entry::<F>(table, 7)(section.as_ptr(), key.as_ptr(), &mut error) };
         (error == 0).then_some(value)
@@ -571,6 +585,7 @@ impl Client {
         type F = unsafe extern "system" fn(*const i8, *const i8, f32, *mut i32);
         let Ok(table) = self.table(&self.settings_table, "IVRSettings_003") else { return false };
         let mut error = 0;
+        let _serial = settings_lock();
         // SAFETY: IVRSettings_003 entry 3 is SetFloat; NUL-terminated names.
         unsafe { entry::<F>(table, 3)(section.as_ptr(), key.as_ptr(), value, &mut error) };
         error == 0
@@ -582,6 +597,7 @@ impl Client {
         let table = self.table(&self.settings_table, "IVRSettings_003").ok()?;
         let mut error = 0;
         let mut text = [0 as std::ffi::c_char; 2048];
+        let _serial = settings_lock();
         // SAFETY: IVRSettings_003 entry 8 is GetString; NUL-terminated names, and the buffer's size is what is passed.
         unsafe { entry::<F>(table, 8)(section.as_ptr(), key.as_ptr(), text.as_mut_ptr(), text.len() as u32, &mut error) };
         if error != 0 {
@@ -597,6 +613,7 @@ impl Client {
         type F = unsafe extern "system" fn(*const i8, *const i8, *const i8, *mut i32);
         let Ok(table) = self.table(&self.settings_table, "IVRSettings_003") else { return false };
         let mut error = 0;
+        let _serial = settings_lock();
         // SAFETY: IVRSettings_003 entry 4 is SetString; NUL-terminated strings.
         unsafe { entry::<F>(table, 4)(section.as_ptr(), key.as_ptr(), value.as_ptr(), &mut error) };
         error == 0
@@ -607,6 +624,7 @@ impl Client {
         type F = unsafe extern "system" fn(*const i8, *const i8, *mut i32);
         let Ok(table) = self.table(&self.settings_table, "IVRSettings_003") else { return false };
         let mut error = 0;
+        let _serial = settings_lock();
         // SAFETY: IVRSettings_003 entry 10 is RemoveKeyInSection; NUL-terminated names.
         unsafe { entry::<F>(table, 10)(section.as_ptr(), key.as_ptr(), &mut error) };
         error == 0
@@ -617,6 +635,7 @@ impl Client {
         type F = unsafe extern "system" fn(*const i8, *const i8, bool, *mut i32);
         let Ok(table) = self.table(&self.settings_table, "IVRSettings_003") else { return false };
         let mut error = 0;
+        let _serial = settings_lock();
         // SAFETY: IVRSettings_003 entry 1 is SetBool; NUL-terminated names.
         unsafe { entry::<F>(table, 1)(section.as_ptr(), key.as_ptr(), value, &mut error) };
         error == 0

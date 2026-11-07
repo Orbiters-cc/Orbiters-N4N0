@@ -128,7 +128,12 @@ fn main() {
         if orbiters_booster::system::run_restorer(&store) && store.remove_if_empty() {
             // Nothing owed any more: this copy goes too, once it has ended.
             if std::env::current_exe().ok().is_some_and(|me| me.to_string_lossy().eq_ignore_ascii_case(&copy.to_string_lossy())) {
-                system::delete_after_exit(&copy);
+                // And its folder, empty by then, and the Orbiters folder if nothing else of Orbiters' is in it.
+                let folder = orbiters_booster::data_dir();
+                let parent = folder.parent().map(std::path::Path::to_path_buf);
+                let mut folders = vec![folder.as_path()];
+                folders.extend(parent.as_deref());
+                system::delete_after_exit_with(&copy, &folders);
             }
         }
         return;

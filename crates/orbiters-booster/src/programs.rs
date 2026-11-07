@@ -13,20 +13,54 @@
 //!
 //! **The refusals are in the lowest layer, and before any handle.** Every route reads or changes a process through
 //! [`read_state`] and [`set_state`], which refuse a name on the never-list, and refuse any PID that a fresh list of the system's
-//! processes does not show with the same name and creation time: a PID the system gave to another process since, VRChat or its
-//! anti-cheat included, is never opened. Listing opens nothing: names, creation times and processor time come from one system
-//! call ([`scan`]). A handle is opened only for a process that passed, its real image, creation time and user are checked again
-//! on that handle, and the change is made on the same handle, so the process can't be swapped in between.
+//! processes does not show with the same name and creation time. Listing opens nothing: names, creation times and processor time
+//! come from one system call ([`scan`]). Then a process is opened **read-only**, and its image and creation time are checked
+//! before anything else is read from it. Only while that checked handle is held, which keeps its PID from going to another
+//! process, is a second handle asked for with the right to change it.
+//!
+//! **What remains:** between the list and that first read-only open, a program can end and the system give its PID to another,
+//! VRChat or its anti-cheat included. That one gets a single read-only look at its image name and creation time, and nothing more:
+//! no change right, no token, no other read. No API opens a process other than by its PID, so this can't be closed further; it is
+//! the access Task Manager and game overlays use on VRChat all the time.
+//!
+//! **Sound.** A program with an active audio session, playing or recording, is left alone, by name: a browser's audio service and
+//! its tabs alike. Efficiency mode on a saturated processor would make it crackle, and the comparison, which counts only VRChat's
+//! frames, would take that for a gain.
 
 use crate::journal::{Access, Applied, Change, Read, Store, Target, Unreadable, Value};
 
-/// Efficiency mode's state as one number: whether it is controlled (0x100) and whether it is on (0x1).
-pub const SYSTEM_DECIDES: i64 = 0;
-pub const EFFICIENCY: i64 = 0x101;
+/// A program's power throttling, as one number: `PROCESS_POWER_THROTTLING_STATE`'s two masks whole, the control mask in the high
+/// half. All of them, timer resolution's included: what is put back is exactly what was there.
+pub const fn pack(control: u32, state: u32) -> i64 {
+    (control as i64) << 32 | state as i64
+}
 
-/// What a program's state is, from `PROCESS_POWER_THROTTLING_STATE`'s two masks (execution speed only).
-pub fn state_of(control: u32, state: u32) -> i64 {
-    ((control & 1) as i64) << 8 | (state & 1) as i64
+pub const fn unpack(value: i64) -> (u32, u32) {
+    ((value >> 32) as u32, value as u32)
+}
+
+/// Execution speed: the bit efficiency mode is.
+const EXECUTION_SPEED: u32 = 1;
+/// Nobody chose anything: the system decides all of it.
+pub const SYSTEM_DECIDES: i64 = 0;
+/// Efficiency mode on, and nothing else chosen.
+pub const EFFICIENCY: i64 = pack(EXECUTION_SPEED, EXECUTION_SPEED);
+
+/// Someone already chose this program's execution speed, on or off: theirs.
+pub fn speed_chosen(value: i64) -> bool {
+    unpack(value).0 & EXECUTION_SPEED != 0
+}
+
+/// The same throttling with efficiency mode on, every other bit as it was.
+pub fn slowed(original: i64) -> i64 {
+    let (control, state) = unpack(original);
+    pack(control | EXECUTION_SPEED, state | EXECUTION_SPEED)
+}
+
+/// Whether this value puts the program in efficiency mode.
+pub fn slows(value: i64) -> bool {
+    let (control, state) = unpack(value);
+    control & EXECUTION_SPEED != 0 && state & EXECUTION_SPEED != 0
 }
 
 /// The programs step 1 may slow down, by exact exe name without `.exe`: browsers, editors and compilers. None is a host for
@@ -112,7 +146,7 @@ pub struct Seen {
 pub struct Opened {
     pub image: String,
     pub created: u64,
-    /// Efficiency mode, as [`state_of`] has it.
+    /// Its power throttling, as [`pack`] has it.
     pub state: i64,
     pub same_user: bool,
 }
@@ -122,11 +156,14 @@ pub struct Opened {
 pub trait ProcessOs {
     /// The processes running now, opening none.
     fn list(&mut self) -> Vec<Seen>;
-    /// Opens the process to read it. Only ever called for a process [`listed`] says is the one meant.
-    fn open(&mut self, pid: u32) -> Option<Opened>;
-    /// Opens it once, checks on that handle that it is still the process of `created` named `name`, this user's, and only
-    /// then sets its state.
+    /// Opens the process read-only. If its image or creation time is not the one meant, nothing else is read: `None`. Only
+    /// ever called for a process [`listed`] says is the one meant.
+    fn open(&mut self, pid: u32, created: u64, name: &str) -> Option<Opened>;
+    /// Opens it read-only, checks that it is the process of `created` named `name` and this user's, and only then, holding that
+    /// handle, asks for the right to change it and sets its state.
     fn set_state(&mut self, pid: u32, created: u64, name: &str, state: i64) -> bool;
+    /// The processes with an active audio session, playing or recording. `None`: that could not be found out.
+    fn audible(&mut self) -> Option<Vec<u32>>;
 }
 
 /// Whether a fresh list shows this PID as the process meant: same name, same creation time, and not refused. A PID the
@@ -145,7 +182,7 @@ pub fn read_state(os: &mut dyn ProcessOs, list: &[Seen], pid: u32, created: u64,
     if never_touch(name) || !listed(list, pid, created, name) {
         return Read::Gone;
     }
-    match os.open(pid) {
+    match os.open(pid, created, name) {
         Some(opened) if same(&opened, created, name) => Read::Value(Value::Int(opened.state)),
         _ => Read::Gone,
     }
@@ -157,8 +194,7 @@ pub fn set_state(os: &mut dyn ProcessOs, list: &[Seen], pid: u32, created: u64, 
     if never_touch(name) || !listed(list, pid, created, name) {
         return false;
     }
-    let slows = state & 1 == 1;
-    if slows && !(lowering && may_lower(name)) {
+    if slows(state) && !(lowering && may_lower(name)) {
         return false;
     }
     os.set_state(pid, created, name, state)
@@ -204,36 +240,85 @@ pub fn candidates(seen: &[Seen]) -> Vec<&Seen> {
     seen.iter().filter(|p| may_lower(&p.name)).collect()
 }
 
-/// Puts what is on the list in efficiency mode, if it is this user's and its state is the system's own. A program whose state
-/// someone or something set is theirs, and not touched. The system is listed afresh first.
-pub fn lower(store: &Store, os: &mut dyn ProcessOs) -> Result<usize, Unreadable> {
-    let list = os.list();
-    let mut changes = Vec::new();
-    for program in candidates(&list) {
-        let Some(opened) = os.open(program.pid) else { continue };
-        if !same(&opened, program.created, &program.name) || opened.state != SYSTEM_DECIDES || !may_lower(&opened.image) {
-            continue;
+fn is_process(e: &crate::journal::Entry) -> bool {
+    matches!(e.target, Target::Process { .. })
+}
+
+/// The names of the programs with an active audio session: all of a browser's processes go with its audio service's.
+pub fn audible_names(list: &[Seen], audible: &[u32]) -> std::collections::HashSet<String> {
+    list.iter().filter(|p| audible.contains(&p.pid)).map(|p| stem(&p.name)).collect()
+}
+
+/// Step 1 over a session: what the person chose stays theirs until the step changes.
+#[derive(Default)]
+pub struct Slower {
+    /// Processes taken out of efficiency mode, or put back, by someone after the booster set them: not set again.
+    respected: std::collections::HashSet<(u32, u64)>,
+}
+
+impl Slower {
+    /// The step changed: what the person chose under the last one is no longer held back from.
+    pub fn forget(&mut self) {
+        self.respected.clear();
+    }
+
+    /// Puts what is on the list in efficiency mode, if it is this user's, nobody chose its execution speed, it has no active
+    /// audio, and nobody took it out since the booster set it. First lets go of what someone changed (theirs from then on),
+    /// and of what ended; puts back what has started playing or recording sound. Lists the system afresh itself. How many
+    /// were set now.
+    pub fn slow(&mut self, store: &Store, os: &mut dyn ProcessOs) -> Result<usize, Unreadable> {
+        for target in store.release_changed(&mut ProcessAccess::new(os), &is_process)? {
+            if let Target::Process { pid, created, .. } = target {
+                self.respected.insert((pid, created));
+            }
         }
-        changes.push(Change {
-            target: Target::Process { pid: program.pid, created: program.created, name: stem(&program.name) },
-            value: Value::Int(EFFICIENCY),
-            leave_with: None,
-        });
+        let list = os.list();
+        let Some(audible) = os.audible() else {
+            // Whether anything plays can't be told: nothing is slowed, and what was comes back.
+            restore_all(store, os)?;
+            return Ok(0);
+        };
+        let audible = audible_names(&list, &audible);
+        if !audible.is_empty() {
+            store.restore(&mut ProcessAccess::new(os), &|e| matches!(&e.target, Target::Process { name, .. } if audible.contains(name)), &mut |_| {})?;
+        }
+        let mut changes = Vec::new();
+        for program in candidates(&list) {
+            if self.respected.contains(&(program.pid, program.created)) || audible.contains(&stem(&program.name)) {
+                continue;
+            }
+            let Some(opened) = os.open(program.pid, program.created, &program.name) else { continue };
+            if !same(&opened, program.created, &program.name) || !may_lower(&opened.image) {
+                continue;
+            }
+            // In efficiency mode already (the booster's, as the journal says), or someone else's choice either way.
+            if speed_chosen(opened.state) {
+                continue;
+            }
+            let target = Target::Process { pid: program.pid, created: program.created, name: stem(&program.name) };
+            changes.push(Change { target, value: Value::Int(slowed(opened.state)), leave_with: None });
+        }
+        if changes.is_empty() {
+            return Ok(0);
+        }
+        let applied = store.apply(&mut ProcessAccess::lowering(os, list), &changes, &mut |_| {})?;
+        for (change, applied) in changes.iter().zip(&applied) {
+            if let (Applied::ChangedSince, Target::Process { pid, created, .. }) = (applied, &change.target) {
+                self.respected.insert((*pid, *created));
+            }
+        }
+        Ok(applied.iter().filter(|a| **a == Applied::Done).count())
     }
-    if changes.is_empty() {
-        return Ok(0);
-    }
-    let applied = store.apply(&mut ProcessAccess::lowering(os, list), &changes, &mut |_| {})?;
-    // One put back by its owner since the booster set it is theirs: its entry goes, and it is not set again while it lives.
-    if applied.contains(&Applied::ChangedSince) {
-        let _ = store.release_changed(&mut ProcessAccess::new(os), &|e| matches!(e.target, Target::Process { .. }));
-    }
-    Ok(applied.iter().filter(|a| **a == Applied::Done).count())
+}
+
+/// One pass of step 1 with nothing remembered: what tests and a one-off use.
+pub fn lower(store: &Store, os: &mut dyn ProcessOs) -> Result<usize, Unreadable> {
+    Slower::default().slow(store, os)
 }
 
 /// Puts back every program changed: only if each is still the same process and still as the booster set it.
 pub fn restore_all(store: &Store, os: &mut dyn ProcessOs) -> Result<crate::journal::Restored, Unreadable> {
-    store.restore(&mut ProcessAccess::new(os), &|e| matches!(e.target, Target::Process { .. }), &mut |_| {})
+    store.restore(&mut ProcessAccess::new(os), &is_process, &mut |_| {})
 }
 
 /// Processor use between two looks at the system.
@@ -247,8 +332,9 @@ pub struct CpuUse {
     pub top: Vec<(String, f32)>,
 }
 
-/// Compares two looks at the system, taken `seconds` apart on a computer of `cores` logical processors.
-pub fn cpu_use(before: &[Seen], after: &[Seen], seconds: f32, cores: f32) -> CpuUse {
+/// Compares two looks at the system, taken `seconds` apart on a computer of `cores` logical processors. Programs named in
+/// `left_out` (playing sound) don't count as what step 1 could slow.
+pub fn cpu_use(before: &[Seen], after: &[Seen], seconds: f32, cores: f32, left_out: &std::collections::HashSet<String>) -> CpuUse {
     use std::collections::HashMap;
     if seconds <= 0.0 {
         return CpuUse::default();
@@ -263,7 +349,7 @@ pub fn cpu_use(before: &[Seen], after: &[Seen], seconds: f32, cores: f32) -> Cpu
         }
         let used = p.cpu.saturating_sub(earlier.get(&(p.pid, p.created)).copied().unwrap_or(p.cpu)) as f32 / 10_000_000.0 / seconds;
         total += used;
-        if may_lower(&p.name) {
+        if may_lower(&p.name) && !left_out.contains(&stem(&p.name)) {
             listed += used;
         }
         *by_name.entry(stem(&p.name)).or_default() += used;
@@ -350,8 +436,8 @@ mod real {
     use windows::Win32::Security::{EqualSid, GetTokenInformation, TokenUser, TOKEN_QUERY, TOKEN_USER};
     use windows::Win32::System::Threading::{
         GetCurrentProcess, GetProcessInformation, GetProcessTimes, OpenProcess, OpenProcessToken, ProcessPowerThrottling, QueryFullProcessImageNameW,
-        SetProcessInformation, PROCESS_ACCESS_RIGHTS, PROCESS_NAME_WIN32, PROCESS_POWER_THROTTLING_CURRENT_VERSION, PROCESS_POWER_THROTTLING_EXECUTION_SPEED,
-        PROCESS_POWER_THROTTLING_STATE, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SET_INFORMATION,
+        SetProcessInformation, PROCESS_ACCESS_RIGHTS, PROCESS_NAME_WIN32, PROCESS_POWER_THROTTLING_CURRENT_VERSION, PROCESS_POWER_THROTTLING_STATE,
+        PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SET_INFORMATION,
     };
 
     struct Close(HANDLE);
@@ -377,8 +463,9 @@ mod real {
         Some(bytes)
     }
 
-    /// Reads all [`Opened`] says from one handle.
-    fn opened(process: HANDLE) -> Option<Opened> {
+    /// Reads all [`Opened`] says from a read-only handle, if it is the process meant: its image and creation time first, and
+    /// nothing more of a process that is another one (no throttling, no token).
+    fn opened(process: HANDLE, expect_created: u64, expect_name: &str) -> Option<Opened> {
         let mut wide = vec![0u16; 1024];
         let mut length = wide.len() as u32;
         // SAFETY: the buffer's length is what is passed.
@@ -387,6 +474,10 @@ mod real {
         let (mut created, mut exited, mut kernel, mut user) = (FILETIME::default(), FILETIME::default(), FILETIME::default(), FILETIME::default());
         // SAFETY: valid out parameters.
         unsafe { GetProcessTimes(process, &mut created, &mut exited, &mut kernel, &mut user) }.ok()?;
+        let created = (created.dwHighDateTime as u64) << 32 | created.dwLowDateTime as u64;
+        if created != expect_created || stem(&image) != stem(expect_name) || never_touch(&image) {
+            return None;
+        }
         let mut throttling = PROCESS_POWER_THROTTLING_STATE { Version: PROCESS_POWER_THROTTLING_CURRENT_VERSION, ..Default::default() };
         // SAFETY: a valid handle and a buffer of the size passed.
         unsafe {
@@ -407,12 +498,7 @@ mod real {
             (Some(a), Some(b)) => unsafe { EqualSid((*a.as_ptr().cast::<TOKEN_USER>()).User.Sid, (*b.as_ptr().cast::<TOKEN_USER>()).User.Sid) }.is_ok(),
             _ => false,
         };
-        Some(Opened {
-            image,
-            created: (created.dwHighDateTime as u64) << 32 | created.dwLowDateTime as u64,
-            state: state_of(throttling.ControlMask, throttling.StateMask),
-            same_user,
-        })
+        Some(Opened { image, created, state: pack(throttling.ControlMask, throttling.StateMask), same_user })
     }
 
     fn open_with(pid: u32, rights: PROCESS_ACCESS_RIGHTS) -> Option<Close> {
@@ -428,20 +514,27 @@ mod real {
             scan()
         }
 
-        fn open(&mut self, pid: u32) -> Option<Opened> {
+        fn open(&mut self, pid: u32, created: u64, name: &str) -> Option<Opened> {
             let process = open_with(pid, PROCESS_QUERY_LIMITED_INFORMATION)?;
-            opened(process.0)
+            opened(process.0, created, name)
+        }
+
+        fn audible(&mut self) -> Option<Vec<u32>> {
+            audio_pids()
         }
 
         fn set_state(&mut self, pid: u32, created: u64, name: &str, state: i64) -> bool {
-            // One handle: checked, then changed. A live handle also keeps the PID from going to another process meanwhile.
-            let Some(process) = open_with(pid, PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SET_INFORMATION) else { return false };
-            if !opened(process.0).is_some_and(|o| same(&o, created, name)) {
+            // Read-only first, and checked.
+            let Some(checked) = open_with(pid, PROCESS_QUERY_LIMITED_INFORMATION) else { return false };
+            if !opened(checked.0, created, name).is_some_and(|o| same(&o, created, name)) {
                 return false;
             }
-            let control = if state & 0x100 != 0 { PROCESS_POWER_THROTTLING_EXECUTION_SPEED } else { 0 };
-            let on = if state & 1 != 0 { PROCESS_POWER_THROTTLING_EXECUTION_SPEED } else { 0 };
+            // Only now the right to change it. While `checked` is held the process object lives, so its PID can't be another
+            // process's: this second open reaches the very process just checked.
+            let Some(process) = open_with(pid, PROCESS_SET_INFORMATION) else { return false };
+            let (control, on) = unpack(state);
             let throttling = PROCESS_POWER_THROTTLING_STATE { Version: PROCESS_POWER_THROTTLING_CURRENT_VERSION, ControlMask: control, StateMask: on };
+            drop(checked);
             // SAFETY: a live handle with the right to set this, and the structure's size.
             unsafe {
                 SetProcessInformation(
@@ -456,12 +549,53 @@ mod real {
     }
 }
 
+/// The processes with an active audio session on any of Windows' active audio devices, playing or recording. No process is
+/// opened: the audio service says which PIDs its sessions belong to.
+#[cfg(windows)]
+pub fn audio_pids() -> Option<Vec<u32>> {
+    use windows::core::Interface;
+    use windows::Win32::Media::Audio::{
+        eAll, AudioSessionStateActive, IAudioSessionControl2, IAudioSessionManager2, IMMDeviceEnumerator, MMDeviceEnumerator, DEVICE_STATE_ACTIVE,
+    };
+    use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, CLSCTX_ALL, COINIT_MULTITHREADED};
+    // SAFETY: COM calls on interfaces this function holds; each is released when dropped.
+    unsafe {
+        let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+        let devices: IMMDeviceEnumerator = CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL).ok()?;
+        let collection = devices.EnumAudioEndpoints(eAll, DEVICE_STATE_ACTIVE).ok()?;
+        let mut out = Vec::new();
+        for i in 0..collection.GetCount().ok()? {
+            let Ok(device) = collection.Item(i) else { continue };
+            let Ok(manager) = device.Activate::<IAudioSessionManager2>(CLSCTX_ALL, None) else { continue };
+            let Ok(sessions) = manager.GetSessionEnumerator() else { continue };
+            for j in 0..sessions.GetCount().unwrap_or(0) {
+                let Ok(session) = sessions.GetSession(j) else { continue };
+                if session.GetState().ok() != Some(AudioSessionStateActive) {
+                    continue;
+                }
+                if let Ok(pid) = session.cast::<IAudioSessionControl2>().and_then(|s| s.GetProcessId()) {
+                    out.push(pid);
+                }
+            }
+        }
+        Some(out)
+    }
+}
+
+#[cfg(not(windows))]
+pub fn audio_pids() -> Option<Vec<u32>> {
+    None
+}
+
 #[cfg(not(windows))]
 impl ProcessOs for RealOs {
     fn list(&mut self) -> Vec<Seen> {
         Vec::new()
     }
-    fn open(&mut self, _pid: u32) -> Option<Opened> {
+    fn open(&mut self, _pid: u32, _created: u64, _name: &str) -> Option<Opened> {
+        None
+    }
+    fn audible(&mut self) -> Option<Vec<u32>> {
         None
     }
     fn set_state(&mut self, _pid: u32, _created: u64, _name: &str, _state: i64) -> bool {
@@ -482,9 +616,17 @@ pub(crate) mod tests {
         pub processes: HashMap<u32, Opened>,
         pub opened: Vec<u32>,
         pub set: Vec<(u32, i64)>,
+        /// What has an active audio session; `None`: it can't be told.
+        pub audible: Option<Vec<u32>>,
+        /// Without `audible` set, nothing plays.
+        pub audible_default: bool,
     }
 
     impl Table {
+        pub(crate) fn new() -> Self {
+            Self { audible_default: true, ..Self::default() }
+        }
+
         pub(crate) fn add(&mut self, pid: u32, image: &str, state: i64) {
             self.processes.insert(pid, Opened { image: format!("C:\\Programs\\{image}"), created: pid as u64 * 100, state, same_user: true });
         }
@@ -497,9 +639,12 @@ pub(crate) mod tests {
                 .map(|(pid, p)| Seen { pid: *pid, name: p.image.rsplit('\\').next().unwrap().to_string(), created: p.created, cpu: 0 })
                 .collect()
         }
-        fn open(&mut self, pid: u32) -> Option<Opened> {
+        fn open(&mut self, pid: u32, created: u64, name: &str) -> Option<Opened> {
             self.opened.push(pid);
-            self.processes.get(&pid).cloned()
+            self.processes.get(&pid).filter(|p| p.created == created && stem(&p.image) == stem(name)).cloned()
+        }
+        fn audible(&mut self) -> Option<Vec<u32>> {
+            (self.audible.is_some() || self.audible_default).then(|| self.audible.clone().unwrap_or_default())
         }
         fn set_state(&mut self, pid: u32, created: u64, name: &str, state: i64) -> bool {
             self.opened.push(pid);
@@ -592,7 +737,7 @@ pub(crate) mod tests {
     fn a_refused_process_is_not_even_opened() {
         for (i, name) in NEVER.into_iter().enumerate() {
             let pid = i as u32 + 1;
-            let mut os = Table::default();
+            let mut os = Table::new();
             os.add(pid, name, SYSTEM_DECIDES);
             let list = os.list();
             assert!(!set_state(&mut os, &list, pid, pid as u64 * 100, name, EFFICIENCY, true), "{name}");
@@ -614,7 +759,7 @@ pub(crate) mod tests {
             )
             .unwrap();
             let store = Store::new(&dir.0, Box::new(NotArmed));
-            let mut os = Table::default();
+            let mut os = Table::new();
             // The process with that PID now: started later, whatever its name.
             os.processes.insert(5000, Opened { image: format!("C:\\Programs\\{now}"), created: 900, state: SYSTEM_DECIDES, same_user: true });
             let got = restore_all(&store, &mut os).unwrap();
@@ -634,7 +779,7 @@ pub(crate) mod tests {
         )
         .unwrap();
         let store = Store::new(&dir.0, Box::new(NotArmed));
-        let mut os = Table::default();
+        let mut os = Table::new();
         os.processes.insert(5000, Opened { image: "C:\\Games\\VRChat\\VRChat.exe".into(), created: 900, state: SYSTEM_DECIDES, same_user: true });
         let closed = || true;
         store.restore(&mut crate::system::Offline::new(&mut os, None, &closed), &|_| true, &mut |_| {}).unwrap();
@@ -646,7 +791,7 @@ pub(crate) mod tests {
     fn lowering_a_whole_system_leaves_everything_else_alone() {
         let dir = Scratch::new("whole");
         let store = Store::new(&dir.0, Box::new(NotArmed));
-        let mut os = Table::default();
+        let mut os = Table::new();
         for (i, name) in NEVER.into_iter().enumerate() {
             os.add(i as u32 + 1, name, SYSTEM_DECIDES);
         }
@@ -662,11 +807,11 @@ pub(crate) mod tests {
     /// F6: a journal whose original says "efficiency mode on" can't make a restore turn it on.
     #[test]
     fn a_restore_only_ever_takes_efficiency_mode_off() {
-        let mut os = Table::default();
+        let mut os = Table::new();
         os.add(1, "chrome.exe", SYSTEM_DECIDES);
         let list = os.list();
         assert!(!set_state(&mut os, &list, 1, 100, "chrome", EFFICIENCY, false));
-        assert!(set_state(&mut os, &list, 1, 100, "chrome", 0x100, false), "explicitly off is allowed");
+        assert!(set_state(&mut os, &list, 1, 100, "chrome", pack(1, 0), false), "explicitly off is allowed");
         assert!(set_state(&mut os, &list, 1, 100, "chrome", SYSTEM_DECIDES, false));
         assert!(os.set.iter().all(|(_, s)| s & 1 == 0));
     }
@@ -677,19 +822,19 @@ pub(crate) mod tests {
     fn programs_come_back_only_if_they_are_still_ours() {
         let dir = Scratch::new("back");
         let store = Store::new(&dir.0, Box::new(NotArmed));
-        let mut os = Table::default();
+        let mut os = Table::new();
         for (pid, name) in [(1, "chrome.exe"), (2, "code.exe"), (3, "cargo.exe"), (4, "rustc.exe")] {
             os.add(pid, name, SYSTEM_DECIDES);
         }
         assert_eq!(lower(&store, &mut os).unwrap(), 4);
         // Taken out of efficiency mode by its owner, or by the person in Task Manager.
-        os.processes.get_mut(&2).unwrap().state = 0x100;
+        os.processes.get_mut(&2).unwrap().state = pack(1, 0);
         // PID reuse: same number, another program, started later.
         os.processes.insert(3, Opened { image: "C:\\Programs\\cargo.exe".into(), created: 99_999, state: EFFICIENCY, same_user: true });
         os.processes.remove(&4);
         let got = restore_all(&store, &mut os).unwrap();
         assert_eq!(os.processes[&1].state, SYSTEM_DECIDES, "still ours: back");
-        assert_eq!(os.processes[&2].state, 0x100, "its owner's");
+        assert_eq!(os.processes[&2].state, pack(1, 0), "its owner's");
         assert_eq!(os.processes[&3].state, EFFICIENCY, "not the same process");
         assert_eq!((got.back.len(), got.kept.len(), got.gone.len()), (1, 1, 2));
         assert!(store.entries().unwrap().is_empty());
@@ -700,8 +845,8 @@ pub(crate) mod tests {
     fn only_programs_left_to_the_system_and_of_this_user_are_slowed() {
         let dir = Scratch::new("normal");
         let store = Store::new(&dir.0, Box::new(NotArmed));
-        let mut os = Table::default();
-        os.add(1, "chrome.exe", 0x100);
+        let mut os = Table::new();
+        os.add(1, "chrome.exe", pack(1, 0));
         os.add(2, "chrome.exe", SYSTEM_DECIDES);
         os.processes.get_mut(&2).unwrap().same_user = false;
         assert_eq!(lower(&store, &mut os).unwrap(), 0);
@@ -720,7 +865,7 @@ pub(crate) mod tests {
             at(4, "VRChat.exe", 20.0),
             at(5, "cargo.exe", 7.0),
         ];
-        let got = cpu_use(&before, &after, 10.0, 8.0);
+        let got = cpu_use(&before, &after, 10.0, 8.0, &Default::default());
         assert!((got.listed_cores - 1.0).abs() < 0.01, "only the listed, and a new one counts from now: {got:?}");
         assert_eq!(got.top[0].0, "chrome");
         assert_eq!(got.top[1].0, "vrchat");
@@ -736,14 +881,45 @@ pub(crate) mod tests {
         fn list(&mut self) -> Vec<Seen> {
             scan().into_iter().filter(|p| self.0.contains(&p.pid)).collect()
         }
-        fn open(&mut self, pid: u32) -> Option<Opened> {
+        fn open(&mut self, pid: u32, created: u64, name: &str) -> Option<Opened> {
             assert!(self.0.contains(&pid), "a test opened {pid}, which it did not start");
-            RealOs.open(pid)
+            RealOs.open(pid, created, name)
+        }
+        fn audible(&mut self) -> Option<Vec<u32>> {
+            Some(Vec::new())
         }
         fn set_state(&mut self, pid: u32, created: u64, name: &str, state: i64) -> bool {
             assert!(self.0.contains(&pid), "a test changed {pid}, which it did not start");
             RealOs.set_state(pid, created, name, state)
         }
+    }
+
+    /// A test's own process's power throttling, read directly, whatever its name: for names the real path refuses.
+    #[cfg(windows)]
+    fn raw_state(pid: u32) -> i64 {
+        use windows::Win32::System::Threading::{
+            GetProcessInformation, OpenProcess, ProcessPowerThrottling, PROCESS_POWER_THROTTLING_CURRENT_VERSION, PROCESS_POWER_THROTTLING_STATE,
+            PROCESS_QUERY_LIMITED_INFORMATION,
+        };
+        // SAFETY: a process this test started; closed below.
+        let h = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) }.unwrap();
+        let mut state = PROCESS_POWER_THROTTLING_STATE { Version: PROCESS_POWER_THROTTLING_CURRENT_VERSION, ..Default::default() };
+        // SAFETY: a valid handle and a buffer of the size passed.
+        unsafe {
+            GetProcessInformation(h, ProcessPowerThrottling, (&mut state as *mut PROCESS_POWER_THROTTLING_STATE).cast(), std::mem::size_of_val(&state) as u32)
+        }
+        .unwrap();
+        unsafe {
+            let _ = windows::Win32::Foundation::CloseHandle(h);
+        }
+        pack(state.ControlMask, state.StateMask)
+    }
+
+    /// A test's own process's power throttling, read through the real path.
+    #[cfg(windows)]
+    fn real_state(pid: u32) -> i64 {
+        let me = scan().into_iter().find(|p| p.pid == pid).expect("the test's own process is listed");
+        RealOs.open(pid, me.created, &me.name).expect("it opens").state
     }
 
     /// Reads the real system, changes nothing: this very test's process is in the list, under its name.
@@ -755,10 +931,25 @@ pub(crate) mod tests {
         assert!(me.name.to_lowercase().starts_with("orbiters_booster"), "{}", me.name);
         assert!(me.created != 0);
         assert!(list.len() > 5);
-        // The same creation time a handle gives, or the journal's comparison would never match.
-        let opened = RealOs.open(std::process::id()).unwrap();
-        assert_eq!(opened.created, me.created);
+        // An Orbiters process, this one included, is refused on its handle too, before anything more is read from it.
+        assert_eq!(RealOs.open(me.pid, me.created, &me.name), None);
+        // The same creation time a handle gives, or the journal's comparison would never match: on a process of the test's own.
+        let dir = Scratch::new("created");
+        let sleeper = Sleeper::start(&dir.0, "blender.exe");
+        let pid = sleeper.child.id();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        let seen = loop {
+            if let Some(seen) = scan().into_iter().find(|p| p.pid == pid) {
+                break seen;
+            }
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        };
+        let opened = RealOs.open(pid, seen.created, &seen.name).unwrap();
+        assert_eq!(opened.created, seen.created);
         assert!(opened.same_user);
+        assert_eq!(RealOs.open(pid, seen.created + 1, &seen.name), None, "another creation time: nothing read");
+        assert_eq!(RealOs.open(pid, seen.created, "chrome.exe"), None, "another name: nothing read");
     }
 
     /// A copy of this test program under a given name, for a process of the test's own that can be changed for real and killed.
@@ -772,6 +963,10 @@ pub(crate) mod tests {
     #[cfg(windows)]
     impl Sleeper {
         fn start(dir: &std::path::Path, name: &str) -> Self {
+            Self::start_with(dir, name, &[])
+        }
+
+        fn start_with(dir: &std::path::Path, name: &str, env: &[(&str, &str)]) -> Self {
             let exe = dir.join(name);
             if !exe.exists() {
                 std::fs::copy(std::env::current_exe().unwrap(), &exe).unwrap();
@@ -779,6 +974,7 @@ pub(crate) mod tests {
             let child = std::process::Command::new(&exe)
                 .args(["--exact", "programs::tests::sleeper_body", "--ignored", "--nocapture"])
                 .env("ORBITERS_BOOSTER_SLEEP", dir)
+                .envs(env.iter().copied())
                 .stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::null())
                 .spawn()
@@ -821,6 +1017,24 @@ pub(crate) mod tests {
     #[ignore = "what `Sleeper` runs"]
     fn sleeper_body() {
         let Some(dir) = std::env::var_os("ORBITERS_BOOSTER_SLEEP").map(std::path::PathBuf::from) else { return };
+        // A program with a throttling choice of its own: it ignores timer resolution requests (0x4).
+        if std::env::var_os("ORBITERS_BOOSTER_OWN_TIMER").is_some() {
+            use windows::Win32::System::Threading::{
+                GetCurrentProcess, ProcessPowerThrottling, SetProcessInformation, PROCESS_POWER_THROTTLING_CURRENT_VERSION, PROCESS_POWER_THROTTLING_STATE,
+            };
+            let own = PROCESS_POWER_THROTTLING_STATE { Version: PROCESS_POWER_THROTTLING_CURRENT_VERSION, ControlMask: 4, StateMask: 4 };
+            // SAFETY: this process's own pseudo handle and the structure's size.
+            unsafe {
+                SetProcessInformation(
+                    GetCurrentProcess(),
+                    ProcessPowerThrottling,
+                    (&own as *const PROCESS_POWER_THROTTLING_STATE).cast(),
+                    std::mem::size_of_val(&own) as u32,
+                )
+            }
+            .unwrap();
+            std::fs::write(dir.join("own-timer"), "").unwrap();
+        }
         // Each copy lives while the test's folder does, two minutes at most: none outlives the test.
         let began = std::time::Instant::now();
         let wanted = || dir.exists() && began.elapsed() < std::time::Duration::from_secs(120);
@@ -879,11 +1093,11 @@ pub(crate) mod tests {
             }
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
-        assert_eq!(os.open(pid).unwrap().state, SYSTEM_DECIDES);
+        assert_eq!(real_state(pid), SYSTEM_DECIDES);
         assert_eq!(lower(&store, &mut os).unwrap(), 1);
-        assert_eq!(os.open(pid).unwrap().state, EFFICIENCY);
+        assert_eq!(real_state(pid), EFFICIENCY);
         assert_eq!(restore_all(&store, &mut os).unwrap().back.len(), 1);
-        assert_eq!(os.open(pid).unwrap().state, SYSTEM_DECIDES);
+        assert_eq!(real_state(pid), SYSTEM_DECIDES);
     }
 
     /// B2: a program slowed down starts a child, as a browser does for a new tab or an editor for a terminal. The child is
@@ -914,11 +1128,11 @@ pub(crate) mod tests {
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
         assert_eq!(priority_class(child), NORMAL_PRIORITY_CLASS.0, "the child is not Below Normal");
-        assert_eq!(both.open(child).unwrap().state, SYSTEM_DECIDES, "nor in efficiency mode");
+        assert_eq!(real_state(child), SYSTEM_DECIDES, "nor in efficiency mode");
         restore_all(&store, &mut both).unwrap();
         for pid in [parent, child] {
             assert_eq!(priority_class(pid), NORMAL_PRIORITY_CLASS.0, "{pid}");
-            assert_eq!(both.open(pid).unwrap().state, SYSTEM_DECIDES, "{pid}");
+            assert_eq!(real_state(pid), SYSTEM_DECIDES, "{pid}");
         }
         assert!(store.entries().unwrap().is_empty());
     }
@@ -944,13 +1158,13 @@ pub(crate) mod tests {
             assert!(std::time::Instant::now() < deadline);
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
-        assert_eq!(os.open(pid).unwrap().state, EFFICIENCY);
+        assert_eq!(real_state(pid), EFFICIENCY);
         owner.kill().unwrap();
         let _ = owner.wait();
-        assert_eq!(os.open(pid).unwrap().state, EFFICIENCY, "this gap is real until the next start: the owner's death alone restores nothing");
+        assert_eq!(real_state(pid), EFFICIENCY, "this gap is real until the next start: the owner's death alone restores nothing");
         let store = Store::new(&dir.0, Box::new(NotArmed));
         assert_eq!(restore_all(&store, &mut os).unwrap().back.len(), 1);
-        assert_eq!(os.open(pid).unwrap().state, SYSTEM_DECIDES);
+        assert_eq!(real_state(pid), SYSTEM_DECIDES);
         assert!(store.entries().unwrap().is_empty());
     }
 
@@ -994,10 +1208,111 @@ pub(crate) mod tests {
             let me = list[0].clone();
             assert_eq!(lower(&store, &mut os).unwrap(), 0, "{name}");
             assert!(!set_state(&mut os, &list, me.pid, me.created, &me.name, EFFICIENCY, true), "{name}");
-            assert_eq!(RealOs.open(pid).unwrap().state, SYSTEM_DECIDES, "{name}");
+            assert_eq!(raw_state(pid), SYSTEM_DECIDES, "{name}");
             assert!(store.entries().unwrap().is_empty(), "{name}");
             drop(sleeper);
             let _ = std::fs::remove_file(dir.0.join("child"));
         }
+    }
+
+    /// N3: a program's own throttling choice (it ignores timer resolution requests) is kept while it is slowed, and is what comes
+    /// back, bit for bit.
+    #[cfg(windows)]
+    #[test]
+    fn a_programs_own_throttling_bits_come_back_exactly() {
+        let dir = Scratch::new("own-timer");
+        let store = Store::new(&dir.0, Box::new(NotArmed));
+        let sleeper = Sleeper::start_with(&dir.0, "blender.exe", &[("ORBITERS_BOOSTER_OWN_TIMER", "1")]);
+        let pid = sleeper.child.id();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while !dir.0.join("own-timer").exists() {
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let mut os = Only(vec![pid]);
+        assert_eq!(real_state(pid), pack(4, 4));
+        assert_eq!(lower(&store, &mut os).unwrap(), 1);
+        assert_eq!(real_state(pid), pack(5, 5), "efficiency mode added, its own bit kept");
+        restore_all(&store, &mut os).unwrap();
+        assert_eq!(real_state(pid), pack(4, 4), "exactly what it had");
+    }
+
+    /// N2: a browser playing sound, through its audio service, is left whole: its tabs too. One that starts playing once slowed
+    /// comes back. If audio can't be enumerated, nothing is slowed and what was comes back.
+    #[test]
+    fn programs_with_sound_are_left_alone() {
+        let dir = Scratch::new("audio");
+        let store = Store::new(&dir.0, Box::new(NotArmed));
+        let mut os = Table::new();
+        // 10: chrome's browser process, 11: its audio service, 12: a tab. 20: an editor.
+        for (pid, name) in [(10, "chrome.exe"), (11, "chrome.exe"), (12, "chrome.exe"), (20, "code.exe")] {
+            os.add(pid, name, SYSTEM_DECIDES);
+        }
+        os.audible = Some(vec![11]);
+        let mut slower = Slower::default();
+        assert_eq!(slower.slow(&store, &mut os).unwrap(), 1);
+        assert_eq!(os.set, vec![(20, EFFICIENCY)], "only the editor");
+        // The music stops: chrome may be slowed now. Then the editor plays a sound: it comes back.
+        os.audible = Some(vec![]);
+        assert_eq!(slower.slow(&store, &mut os).unwrap(), 3);
+        os.audible = Some(vec![20]);
+        slower.slow(&store, &mut os).unwrap();
+        assert_eq!(os.processes[&20].state, SYSTEM_DECIDES, "back once it plays");
+        // Can't tell: everything back.
+        os.audible = None;
+        os.audible_default = false;
+        assert_eq!(slower.slow(&store, &mut os).unwrap(), 0);
+        assert!(os.processes.values().all(|p| p.state == SYSTEM_DECIDES));
+        assert!(store.entries().unwrap().is_empty());
+    }
+
+    /// N4 through the loop as it runs: slowed, taken out of efficiency mode by hand (or put back to the system's choice), and the
+    /// next passes, ten seconds apart in real use, leave it as the person put it, until the step changes.
+    #[test]
+    fn a_choice_made_by_hand_stays_until_the_step_changes() {
+        for by_hand in [SYSTEM_DECIDES, pack(1, 0)] {
+            let dir = Scratch::new("respected");
+            let store = Store::new(&dir.0, Box::new(NotArmed));
+            let mut os = Table::new();
+            os.add(1, "chrome.exe", SYSTEM_DECIDES);
+            let mut slower = Slower::default();
+            assert_eq!(slower.slow(&store, &mut os).unwrap(), 1);
+            os.processes.get_mut(&1).unwrap().state = by_hand;
+            for _ in 0..3 {
+                assert_eq!(slower.slow(&store, &mut os).unwrap(), 0);
+                assert_eq!(os.processes[&1].state, by_hand, "{by_hand:#x}: the person's");
+            }
+            assert!(store.entries().unwrap().is_empty());
+            slower.forget();
+            if by_hand == SYSTEM_DECIDES {
+                assert_eq!(slower.slow(&store, &mut os).unwrap(), 1, "a new step may again");
+            }
+        }
+    }
+
+    /// N8: entries of programs that ended go at the next pass, and so does what they counted.
+    #[test]
+    fn ended_programs_leave_the_journal() {
+        let dir = Scratch::new("ended");
+        let store = Store::new(&dir.0, Box::new(NotArmed));
+        let mut os = Table::new();
+        for pid in 1..=5 {
+            os.add(pid, "rustc.exe", SYSTEM_DECIDES);
+        }
+        let mut slower = Slower::default();
+        slower.slow(&store, &mut os).unwrap();
+        assert_eq!(store.entries().unwrap().len(), 5);
+        for pid in 1..=4 {
+            os.processes.remove(&pid);
+        }
+        slower.slow(&store, &mut os).unwrap();
+        assert_eq!(store.entries().unwrap().len(), 1);
+    }
+
+    /// Reads which processes have sound now, opening none; changes nothing.
+    #[cfg(windows)]
+    #[test]
+    fn the_real_audio_sessions_can_be_listed() {
+        assert!(audio_pids().is_some());
     }
 }

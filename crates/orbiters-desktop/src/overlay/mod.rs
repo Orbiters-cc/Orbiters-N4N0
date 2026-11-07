@@ -588,7 +588,6 @@ struct Teardown<'a> {
 
 impl Drop for Teardown<'_> {
     fn drop(&mut self) {
-        self.booster.teardown(self.steamvr_gone);
         self.state.release(self.backend);
         // Always: the menu may have closed on this turn's effects after its state was reported, unheard yet.
         self.backend.n4n0(N4n0Command::MenuState { open: false, dictation: false, keyboard: false });
@@ -603,6 +602,11 @@ impl Drop for Teardown<'_> {
             o.destroy(self.overlay);
         }
         let _ = self.overlay.destroy(self.main);
+        // Last: a worker stuck in a call into a SteamVR that hangs must not hold up the rest. Then the process ends without
+        // unloading SteamVR's client under that call; the journal, written to survive a kill, keeps what is owed.
+        if !self.booster.teardown(self.steamvr_gone) {
+            std::process::exit(if self.steamvr_gone { EXIT_STEAMVR_GONE } else { 0 });
+        }
     }
 }
 

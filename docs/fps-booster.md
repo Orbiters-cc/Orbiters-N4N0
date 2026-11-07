@@ -7,7 +7,7 @@ number is promised.
 | Step | What it spends | It really does | It does not |
 |---|---|---|---|
 | Off | Nothing | The frame logger runs; nothing else changes | |
-| Background | Other programs' speed | Limited by the processor, with allowlisted programs using a core or more: compares putting them in **efficiency mode** (Windows' EcoQoS, Task Manager's "Efficiency mode"), A/B/A/B, and keeps that only if real frames rise. Stops preparing shares. Paces Orbiters' panels at 30 a second when the graphics card is short or the limit unknown | Close, suspend or kill anything; change priority classes; touch anything off the list |
+| Background | Other programs' speed | Limited by the processor, with allowlisted programs using a core or more: compares putting them in **efficiency mode** (Windows' EcoQoS, Task Manager's "Efficiency mode"), A/B/A/B, and keeps that only if real frames rise. Stops preparing shares. Paces Orbiters' panels at 30 a second when the graphics card is short or the limit unknown | Close, suspend or kill anything; change priority classes; touch anything off the list; slow a program that is playing or recording sound; undo a choice someone made by hand |
 | Picture | Sharpness, waiting for 3D pictures | 3D pictures wait until VRChat leaves or the headset is off a minute. Limited by the graphics card: compares `supersampleScale` × 0.85, keeps it only if real frames rise and the card's time really fell; 3D panels go to Light | Lower sharpness when the processor is the limit: it says so instead |
 | Avatars | How other people look | A list, one item at a time, of VRChat's own settings for the person to change in VRChat. Done compares 30 s before with 30 s after, labelled as what it is | Change any of them itself. Nothing of VRChat's is written |
 
@@ -27,11 +27,28 @@ before opening anything it refuses:
 
 - a name on the never-list: VRChat, `start_protected_game`, EasyAntiCheat, everything starting with `vr` or `steam`, the VR runtimes
   and streamers, recorders, voice, tracking and OSC tools, Orbiters;
-- any PID that a fresh list of the system's processes does not show with the same name and creation time: a PID given to another
-  process since is never opened, on any path, recovery and the sign-in restorer included.
+- any PID that a fresh list of the system's processes does not show with the same name and creation time, on every path, recovery
+  and the sign-in restorer included.
 
-Listing processes opens none of them. A handle is opened only for a process that passed, its image, creation time and user are
-checked again on that handle, and the change is made on that same handle. A restore can only ever take efficiency mode off.
+Listing processes opens none of them. A process that passed is then opened **read-only**, and its image name and creation time are
+checked before anything else is read. Only while that checked handle is held, which keeps its PID from going to another process, is
+a second handle asked for with the right to change it. A restore can only ever take efficiency mode off.
+
+**What remains:** if a program ends between the list and that first open and the system gives its PID to another process, VRChat or
+its anti-cheat included, that process gets one read-only look at its image name and creation time, and nothing more: no right to
+change it, no token, no other read. No Windows API opens a process other than by its PID, so this can't be closed further; it is the
+access Task Manager and game overlays use on VRChat all the time.
+
+**Sound.** A program with an active audio session, playing or recording (read from Windows' audio sessions, `IAudioSessionManager2`,
+which opens no process), is never put in efficiency mode, and is put back as soon as it starts. It goes by name: a browser whose audio
+service plays is left whole, its tabs included. This is checked at every pass, every 5 seconds, so before each test too, and what
+plays sound doesn't count as competition a test could act on. If the audio sessions can't be read, nothing is slowed.
+
+**Choices made by hand.** A program someone takes out of efficiency mode (Task Manager, the program itself), or a sharpness someone
+puts back in SteamVR, is theirs until the step is changed: the booster doesn't set it again.
+
+**Exactly back.** A program's power throttling is read and journaled whole, timer resolution's bit included; efficiency mode is
+added to it, and what was there is what comes back.
 
 The allowlist is exact names of browsers, editors and compilers: `chrome`, `msedge`, `firefox`, `brave`, `opera`, `code`, `devenv`,
 `rider64`, `Unity`, `blender`, `rustc`, `cargo`, `link`, `cl`, `msbuild`. Left out on purpose: Python, Node, .NET and Docker (they

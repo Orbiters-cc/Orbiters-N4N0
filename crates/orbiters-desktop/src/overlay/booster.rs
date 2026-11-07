@@ -100,6 +100,8 @@ enum Job {
     Check {
         watching: bool,
     },
+    /// The settings the log notes, read only.
+    ReadForLog,
     /// The session ends: restore live, unless SteamVR is gone.
     End {
         steamvr_gone: bool,
@@ -110,6 +112,24 @@ enum Job {
 enum Heard {
     Left(LeftAlone),
     Shown(Option<(Option<f32>, f32)>),
+    Log(SteamVrRead),
+    Ended,
+}
+
+/// How long the overlay waits for the worker at its end: SteamVR waits only a few seconds for its applications at a quit, and a
+/// call into a SteamVR that hangs would not return.
+const END_WAIT: Duration = Duration::from_secs(5);
+
+/// The settings the log notes. Every IVRSettings call of the overlay's turn is made here, on the worker's thread, so that no two
+/// threads call SteamVR's settings at once.
+fn read_for_log(api: &Api) -> SteamVrRead {
+    SteamVrRead {
+        disable_async: api.get_bool(steamvr::SECTION, "disableAsync").ok(),
+        motion_smoothing: api.get_bool(steamvr::SECTION, "motionSmoothing").ok(),
+        supersample_manual_override: api.get_bool(steamvr::SECTION, steamvr::MANUAL_OVERRIDE).ok(),
+        supersample_scale: api.get_float(steamvr::SECTION, steamvr::SCALE).ok(),
+        app_resolution_scale: api.get_float(VRCHAT_APP, "resolutionScale").ok(),
+    }
 }
 
 /// The thread that holds the journal's SteamVR side. The client it came from outlives it: [`Host::teardown`] waits for it.
@@ -128,19 +148,34 @@ impl Worker {
             .name("fps-booster-steamvr".into())
             .spawn(move || {
                 let api = Api(handle);
-                for job in inbox {
-                    let left = match job {
-                        Job::Factor(factor) => sharpness.follow(&api, factor),
-                        Job::Check { watching } => sharpness.check(&api, watching),
-                        Job::End { steamvr_gone } => {
-                            sharpness.teardown(&api, steamvr_gone);
-                            return;
-                        }
-                    };
-                    if let Some(left) = left {
-                        let _ = tell.send(Heard::Left(left));
+                while let Ok(first) = inbox.recv() {
+                    // An end goes first: what queued with it (a check, a factor) is skipped, not waited behind.
+                    let mut jobs = vec![first];
+                    jobs.extend(inbox.try_iter());
+                    let end = jobs.iter().find_map(|job| match job {
+                        Job::End { steamvr_gone } => Some(*steamvr_gone),
+                        _ => None,
+                    });
+                    if let Some(steamvr_gone) = end {
+                        sharpness.teardown(&api, steamvr_gone);
+                        let _ = tell.send(Heard::Ended);
+                        return;
                     }
-                    let _ = tell.send(Heard::Shown(sharpness.shown()));
+                    for job in jobs {
+                        let left = match job {
+                            Job::Factor(factor) => sharpness.follow(&api, factor),
+                            Job::Check { watching } => sharpness.check(&api, watching),
+                            Job::ReadForLog => {
+                                let _ = tell.send(Heard::Log(read_for_log(&api)));
+                                continue;
+                            }
+                            Job::End { .. } => None,
+                        };
+                        if let Some(left) = left {
+                            let _ = tell.send(Heard::Left(left));
+                        }
+                        let _ = tell.send(Heard::Shown(sharpness.shown()));
+                    }
                 }
             })
             .ok()?;
@@ -196,6 +231,8 @@ pub struct Host {
     /// The factor last asked of the worker, and what it says is in force.
     asked: f32,
     shown: Option<(Option<f32>, f32)>,
+    /// What the worker last read of SteamVR's settings, for the log.
+    steamvr_read: SteamVrRead,
     session_frames: f64,
     session_seconds: f64,
     vrchat_was_running: bool,
@@ -219,6 +256,7 @@ impl Host {
             last_check: None,
             asked: 1.0,
             shown: None,
+            steamvr_read: SteamVrRead::default(),
             session_frames: 0.0,
             session_seconds: 0.0,
             vrchat_was_running: false,
@@ -275,10 +313,11 @@ impl Host {
             if self.last_check.is_none_or(|at| at.elapsed() >= CHECK_OWNED) {
                 self.last_check = Some(Instant::now());
                 let _ = worker.jobs.send(Job::Check { watching: scene && snap.settings.booster.level >= Level::Picture });
+                let _ = worker.jobs.send(Job::ReadForLog);
             }
         }
         PANEL_PACE_MS.store(if wants.pace_panels { SLOW_PACE_MS } else { NORMAL_PACE_MS }, Ordering::Relaxed);
-        self.write_log(client, snap, &inputs, &wants);
+        self.write_log(snap, &inputs, &wants);
         self.self_check_at_session_end(snap);
         if self.last_report.is_none_or(|at| at.elapsed() >= REPORT_EVERY) {
             self.last_report = Some(Instant::now());
@@ -305,11 +344,13 @@ impl Host {
                     self.asked = f32::NAN;
                 }
                 Heard::Shown(shown) => self.shown = shown,
+                Heard::Log(read) => self.steamvr_read = read,
+                Heard::Ended => {}
             }
         }
     }
 
-    fn write_log(&mut self, client: &vr::Client, snap: &Snapshot, inputs: &Inputs, wants: &Wants) {
+    fn write_log(&mut self, snap: &Snapshot, inputs: &Inputs, wants: &Wants) {
         if let Some((frames, kind)) = self.engine.take_raw_if_any() {
             let _ = self.log.send(LogJob::Raw(frames, kind));
         }
@@ -317,14 +358,7 @@ impl Host {
         self.session_frames += block.summary.frames as f64;
         self.session_seconds += block.summary.seconds as f64;
         let report = self.engine.report(inputs, wants);
-        let (section, app) = (cstring(steamvr::SECTION), cstring(VRCHAT_APP));
-        let steamvr = SteamVrRead {
-            disable_async: client.setting_bool(&section, &cstring("disableAsync")),
-            motion_smoothing: client.setting_bool(&section, &cstring("motionSmoothing")),
-            supersample_manual_override: client.setting_bool(&section, &cstring(steamvr::MANUAL_OVERRIDE)),
-            supersample_scale: client.setting_float(&section, &cstring(steamvr::SCALE)),
-            app_resolution_scale: client.setting_float(&app, &cstring("resolutionScale")),
-        };
+        let steamvr = self.steamvr_read;
         let line = BlockLine {
             at: orbiters_core::now_utc_iso(),
             summary: block.summary,
@@ -361,15 +395,26 @@ impl Host {
 
     /// The session ends. With SteamVR still there, everything comes back before it does; with SteamVR gone (a crash, its
     /// server ended), nothing is restored through it, and what is owed stays in the journal for its file and the next overlay.
-    /// Waits for the worker, whose SteamVR handle must not outlive the client.
-    pub fn teardown(&mut self, steamvr_gone: bool) {
+    /// Waits for the worker, whose SteamVR handle must not outlive the client, a few seconds at most. Whether it ended: if not
+    /// (a SteamVR call that hangs), the caller ends the process without dropping the client, and the journal, written to survive
+    /// that, still has whatever is owed.
+    pub fn teardown(&mut self, steamvr_gone: bool) -> bool {
         PANEL_PACE_MS.store(NORMAL_PACE_MS, Ordering::Relaxed);
-        if let Some(mut worker) = self.worker.take() {
-            let _ = worker.jobs.send(Job::End { steamvr_gone });
-            if let Some(thread) = worker.thread.take() {
-                let _ = thread.join();
+        let Some(mut worker) = self.worker.take() else { return true };
+        let _ = worker.jobs.send(Job::End { steamvr_gone });
+        let deadline = Instant::now() + END_WAIT;
+        loop {
+            match worker.heard.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+                Ok(Heard::Ended) => break,
+                Ok(_) => continue,
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                Err(mpsc::RecvTimeoutError::Timeout) => return false,
             }
         }
+        if let Some(thread) = worker.thread.take() {
+            let _ = thread.join();
+        }
+        true
     }
 }
 

@@ -65,7 +65,7 @@ struct Worker {
 impl Worker {
     fn spawn(ctl: Shared, number: u64) -> anyhow::Result<Self> {
         let path = crate::worker::sibling_exe("orbiters-call");
-        anyhow::ensure!(path.is_file(), "The call worker was not found at {}", path.display());
+        anyhow::ensure!(path.is_file(), "{}", tr!("The call worker was not found at {path}", path = path.display()));
         let mut cmd = Command::new(&path);
         cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
         #[cfg(windows)]
@@ -1092,7 +1092,7 @@ impl super::Controller {
                 }
             }
         }
-        Err("The call worker could not be started.".into())
+        Err(tr("The call worker could not be started.").into())
     }
 
     /// Hands a request to the thread that sends them (started when there is none; none once calls stopped).
@@ -1197,7 +1197,7 @@ impl super::Controller {
         std::thread::spawn(move || {
             let servers = match ctl.calls_api() {
                 Some((api, token)) => ice_servers(&api, &token).map_err(|e| tr!("the call relay could not be reached: {error}", error = e)),
-                None => Err("sign in to Orbiters to call.".to_string()),
+                None => Err(tr("sign in to Orbiters to call.").to_string()),
             };
             let (mic, direct) = ctl.with_settings(|s| (s.n4n0.mic_device.clone(), s.n4n0.direct_calls));
             let mic = (!mic.is_empty()).then_some(mic);

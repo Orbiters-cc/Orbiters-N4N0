@@ -1,0 +1,2 @@
+# The files this area covers: every text in them is wrapped and translated (tests/coverage.rs).
+# None of its own: the 14 files of the controller's errors are in the `controller` area already (their other texts are done); this folder holds their error texts.

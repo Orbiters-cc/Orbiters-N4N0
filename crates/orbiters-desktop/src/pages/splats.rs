@@ -27,6 +27,7 @@ use eframe::egui_wgpu::{self, wgpu};
 use egui::{pos2, vec2, Align2, Color32, Id, Rect, Sense, Ui, UiBuilder, Vec2};
 use orbiters_core::reconstruction;
 use orbiters_core::settings::ViewGpu;
+use orbiters_i18n::{tr, tr_ctx};
 use orbiters_reconstruct::camera::{normalize, Camera};
 use orbiters_reconstruct::gaussians::Gaussians;
 use orbiters_reconstruct::gpu::{Confidence, ConfidenceMode, DepthOfField, FarField, FarMode, Gpu, Target};
@@ -410,12 +411,12 @@ impl Viewer {
                 }
             };
             if let Some(e) = error {
-                widgets::text(&p, rect.center(), Align2::CENTER_CENTER, &Txt::new(format!("This view could not be drawn: {e}"), 13.0).color(theme::DANGER));
+                widgets::text(&p, rect.center(), Align2::CENTER_CENTER, &Txt::new(tr!("This view could not be drawn: {e}", e = e), 13.0).color(theme::DANGER));
             }
         } else {
             let (text, color) = match &self.error {
-                Some(e) => (format!("The splats could not be shown: {e}"), theme::DANGER),
-                None => ("Loading the splats…".to_string(), theme::FG_3),
+                Some(e) => (tr!("The splats could not be shown: {e}", e = e), theme::DANGER),
+                None => (tr("Loading the splats…").to_string(), theme::FG_3),
             };
             widgets::text(&p, rect.center(), Align2::CENTER_CENTER, &Txt::new(text, 13.0).color(color));
             ctx.request_repaint_after(std::time::Duration::from_millis(100));
@@ -429,10 +430,10 @@ impl Viewer {
         // Under the title, its splats (those its edits keep of them).
         let sub = match &self.loaded {
             Some(l) => match l.edits.as_ref().map(|e| e.hidden() + e.deleted()).filter(|n| *n > 0) {
-                Some(removed) => format!("{} of {} splats", format::integer((l.splats - removed) as f64), format::integer(l.splats as f64)),
-                None => format!("{} splats", format::integer(l.splats as f64)),
+                Some(removed) => tr!("{kept} of {count} splats", kept = format::integer((l.splats - removed) as f64), count = format::integer(l.splats as f64)),
+                None => tr!("{count} splats", count = format::integer(l.splats as f64)),
             },
-            None => "3D view".into(),
+            None => tr("3D view").into(),
         };
         let sub_t = Txt::new(sub, 11.0).color(theme::FG_3);
         let title_t = Txt::new(&self.title, 14.0).weight(weight::SEMIBOLD);
@@ -450,13 +451,13 @@ impl Viewer {
         }
         self.problem_chip(ui, &p, rect, title_r);
         let close_r = Rect::from_min_size(pos2(bar.right() - 44.0, bar.top()), vec2(44.0, 44.0));
-        if IconButton::new(icons::X, "Close the 3D view").size(44.0, 18.0).backdrop(theme::black(0.55)).show_at(ui, close_r).clicked() {
+        if IconButton::new(icons::X, tr("Close the 3D view")).size(44.0, 18.0).backdrop(theme::black(0.55)).show_at(ui, close_r).clicked() {
             open = false;
         }
         if let Some(l) = self.loaded.as_ref() {
             let reset_w = RESET_W;
             let reset_r = Rect::from_min_size(pos2(close_r.left() - 10.0 - reset_w, bar.top() + 2.0), vec2(reset_w, 40.0));
-            if Button::new("Recorded view").icon(icons::ARROW_COUNTER_CLOCKWISE).variant(Variant::Glass).width(reset_w).show_at(ui, reset_r).clicked() {
+            if Button::new(tr("Recorded view")).icon(icons::ARROW_COUNTER_CLOCKWISE).variant(Variant::Glass).width(reset_w).show_at(ui, reset_r).clicked() {
                 if let (Some(v), Some(o)) = (l.views.get(self.view), self.orbit.as_mut()) {
                     *o = Orbit::from_view(v, l.depth);
                 }
@@ -471,7 +472,7 @@ impl Viewer {
                     &p,
                     label_r.center(),
                     Align2::CENTER_CENTER,
-                    &Txt::new(format!("View {} of {}", self.view + 1, l.views.len()), 12.0).color(theme::FG_2),
+                    &Txt::new(tr!("View {n} of {total}", n = self.view + 1, total = l.views.len()), 12.0).color(theme::FG_2),
                 );
                 let mut step = 0i64;
                 if Button::new("‹").variant(Variant::Ghost).width(step_w).show_at(ui, prev_r).clicked() {
@@ -491,9 +492,9 @@ impl Viewer {
                 self.select_controls(ui, &p, rect);
             } else {
                 let hint = if cfg!(target_os = "macos") {
-                    "Drag or two fingers to orbit · Shift and two fingers to pan · pinch to zoom · WASD and QE to fly · double-click for the recorded view"
+                    tr("Drag or two fingers to orbit · Shift and two fingers to pan · pinch to zoom · WASD and QE to fly · double-click for the recorded view")
                 } else {
-                    "Drag to orbit · right-drag to pan · scroll to zoom · WASD and QE to fly · double-click for the recorded view"
+                    tr("Drag to orbit · right-drag to pan · scroll to zoom · WASD and QE to fly · double-click for the recorded view")
                 };
                 let hint_t = Txt::new(hint, 11.5).color(theme::FG_2);
                 let hs = widgets::text_size(ui, &hint_t);
@@ -562,10 +563,10 @@ impl Viewer {
     /// poorly seen splats show as and how strongly, and above it, with `far`, the far field and its distance.
     fn controls(&mut self, ui: &mut Ui, p: &egui::Painter, rect: Rect, hint: Rect, far: bool) {
         let unsure = [
-            SegOption::new(Unsure::Shown, "Show"),
-            SegOption::new(Unsure::Faded, "Fade"),
-            SegOption::new(Unsure::Blurred, "Blur"),
-            SegOption::new(Unsure::Hazed, "Haze"),
+            SegOption::new(Unsure::Shown, tr_ctx("splats", "Show")),
+            SegOption::new(Unsure::Faded, tr("Fade")),
+            SegOption::new(Unsure::Blurred, tr("Blur")),
+            SegOption::new(Unsure::Hazed, tr("Haze")),
         ];
         let percent = |v: f32| format!("{:.0} %", v * 100.0);
         let right = rect.right() - 16.0;
@@ -573,12 +574,12 @@ impl Viewer {
         let widest = 18.0 + 90.0 + 12.0 + 230.0 + 300.0 + 6.0;
         let bottom = if hint.right() + 12.0 + widest <= right { rect.bottom() - 16.0 + 7.0 } else { hint.top() - 10.0 };
         let amount = (self.unsure != Unsure::Shown).then_some((&mut self.amount, 0.0..=1.0, 0.05, &percent as &dyn Fn(f32) -> String));
-        let first = control_chip(ui, p, "splat-unsure", right, bottom, "Poorly seen", &mut self.unsure, &unsure, amount);
+        let first = control_chip(ui, p, "splat-unsure", right, bottom, tr("Poorly seen"), &mut self.unsure, &unsure, amount);
         if far {
-            let options = [SegOption::new(FarMode::Shown, "Show"), SegOption::new(FarMode::Fog, "Fog"), SegOption::new(FarMode::Crop, "Crop")];
+            let options = [SegOption::new(FarMode::Shown, tr_ctx("splats", "Show")), SegOption::new(FarMode::Fog, tr("Fog")), SegOption::new(FarMode::Crop, tr("Crop"))];
             let metres = |v: f32| format!("{v:.0} m");
             let distance = (self.far != FarMode::Shown).then_some((&mut self.far_distance, 5.0..=100.0, 5.0, &metres as &dyn Fn(f32) -> String));
-            control_chip(ui, p, "splat-far", right, first.top() - 10.0, "Far away", &mut self.far, &options, distance);
+            control_chip(ui, p, "splat-far", right, first.top() - 10.0, tr("Far away"), &mut self.far, &options, distance);
         }
     }
 }
@@ -706,11 +707,11 @@ impl Viewer {
         let unsaved = l.edits.as_ref().is_some_and(|e| e.unsaved());
         let views = l.views.len();
         let saving = self.still.is_some();
-        let b = Button::new(if saving { "Saving the view…" } else { "Save this view" })
+        let b = Button::new(if saving { tr("Saving the view…") } else { tr("Save this view") })
             .icon(icons::CAMERA)
             .variant(Variant::Glass)
             .enabled(!saving)
-            .hint("Saves the picture of this view in Photos & captures, larger than on screen, to edit or share")
+            .hint(tr("Saves the picture of this view in Photos & captures, larger than on screen, to edit or share"))
             .id_salt("splat-save-view");
         let bw = b.desired_width(ui);
         let save_r = Rect::from_min_size(pos2(title_r.right() + 10.0, title_r.top() + 2.0), vec2(bw, 40.0));
@@ -736,10 +737,10 @@ impl Viewer {
             }
         }
         // Edit in 3D beside it.
-        let e = Button::new("Edit in 3D")
+        let e = Button::new(tr("Edit in 3D"))
             .icon(icons::SLIDERS_HORIZONTAL)
             .variant(Variant::Glass)
-            .hint("Edits this view with the photo editor's layers while you keep moving around in 3D")
+            .hint(tr("Edits this view with the photo editor's layers while you keep moving around in 3D"))
             .id_salt("splat-edit-3d");
         let ew = e.desired_width(ui);
         let edit_r = Rect::from_min_size(pos2(save_r.right() + 10.0, save_r.top()), vec2(ew, 40.0));
@@ -748,11 +749,11 @@ impl Viewer {
         }
         // Select splats beside it, for a capture of this computer (a downloaded `.splat` has no edits).
         if let Some(can) = selectable {
-            let b = Button::new("Select splats")
+            let b = Button::new(tr("Select splats"))
                 .icon(icons::CROSSHAIR)
                 .variant(Variant::Glass)
                 .enabled(can)
-                .hint(if can { "Selects splats to hide or delete them (a leftover avatar, floaters): they leave everything shared from this capture" } else { "Discard the edits that could not be applied first" })
+                .hint(if can { tr("Selects splats to hide or delete them (a leftover avatar, floaters): they leave everything shared from this capture") } else { tr("Discard the edits that could not be applied first") })
                 .id_salt("splat-select");
             let bw = b.desired_width(ui);
             let select_r = Rect::from_min_size(pos2(edit_r.right() + 10.0, edit_r.top()), vec2(bw, 40.0));
@@ -765,16 +766,16 @@ impl Viewer {
             // beside the PLY: while the last save failed, it would hold splats this view leaves out, so Export waits for
             // Retry (in Select splats) as it waits for edits that could not be applied.
             let ok = can && !unsaved;
-            let b = Button::new("Export…")
+            let b = Button::new(tr("Export…"))
                 .icon(icons::UPLOAD_SIMPLE)
                 .variant(Variant::Glass)
                 .enabled(ok)
                 .hint(if !can {
-                    "Discard the edits that could not be applied first"
+                    tr("Discard the edits that could not be applied first")
                 } else if unsaved {
-                    "Its splat edits are not saved: Retry in Select splats first, so that the file leaves out what this view hides"
+                    tr("Its splat edits are not saved: Retry in Select splats first, so that the file leaves out what this view hides")
                 } else {
-                    "Saves what this view shows as an SPZ, GLB or PLY file, for a VRChat splat world, Unity, SuperSplat, Cesium or Blender"
+                    tr("Saves what this view shows as an SPZ, GLB or PLY file, for a VRChat splat world, Unity, SuperSplat, Cesium or Blender")
                 })
                 .id_salt("splat-export");
             let bw = b.desired_width(ui);
@@ -785,7 +786,7 @@ impl Viewer {
                 (b.show_at(ui, r).clicked(), r)
             } else {
                 let r = Rect::from_min_size(pos2(x, edit_r.top()), vec2(40.0, 40.0));
-                let icon = IconButton::new(icons::UPLOAD_SIMPLE, "Export…").size(40.0, 17.0).backdrop(theme::black(0.55)).id_salt("splat-export-icon");
+                let icon = IconButton::new(icons::UPLOAD_SIMPLE, tr("Export…")).size(40.0, 17.0).backdrop(theme::black(0.55)).id_salt("splat-export-icon");
                 // Dimmed and deaf while it waits, as the whole button is.
                 let mut iu = ui.new_child(UiBuilder::new().max_rect(r).id_salt("splat-export-icon"));
                 if !ok {
@@ -799,16 +800,16 @@ impl Viewer {
         }
         // Saved: where, and Edit right after.
         let (text, tone) = match (&self.saved, &self.still_error) {
-            (Some(_), _) => ("Saved in Photos & captures", theme::ACCENT),
-            (None, Some(_)) => ("This view could not be saved", theme::DANGER),
+            (Some(_), _) => (tr("Saved in Photos & captures"), theme::ACCENT),
+            (None, Some(_)) => (tr("This view could not be saved"), theme::DANGER),
             _ => return,
         };
         let t = Txt::new(text, 13.0).color(theme::FG);
         let tw = widgets::text_size(ui, &t).x;
         let saved = self.saved.clone();
         let small = orbiters_ui::widgets::Size::Sm;
-        let edit = Button::new("Edit").icon(icons::SLIDERS_HORIZONTAL).variant(Variant::Primary).size(small).id_salt("splat-saved-edit");
-        let folder = Button::new("").icon(icons::FOLDER_OPEN).variant(Variant::Ghost).size(small).hint("Show it in its folder").id_salt("splat-saved-folder");
+        let edit = Button::new(tr("Edit")).icon(icons::SLIDERS_HORIZONTAL).variant(Variant::Primary).size(small).id_salt("splat-saved-edit");
+        let folder = Button::new("").icon(icons::FOLDER_OPEN).variant(Variant::Ghost).size(small).hint(tr("Show it in its folder")).id_salt("splat-saved-folder");
         let (ew, fw) = (edit.desired_width(ui), folder.desired_width(ui));
         let buttons = if saved.is_some() { 12.0 + ew + 4.0 + fw } else { 0.0 };
         let w = 42.0 + tw + buttons + 8.0 + 30.0 + 8.0;
@@ -830,7 +831,7 @@ impl Viewer {
             }
         }
         let close = Rect::from_center_size(pos2(chip_r.right() - 24.0, chip_r.center().y), vec2(28.0, 28.0));
-        if IconButton::new(icons::X, "Dismiss").size(28.0, 14.0).id_salt("splat-saved-dismiss").show_at(ui, close).clicked() {
+        if IconButton::new(icons::X, tr("Dismiss")).size(28.0, 14.0).id_salt("splat-saved-dismiss").show_at(ui, close).clicked() {
             self.saved = None;
             self.still_error = None;
         }
@@ -1015,9 +1016,9 @@ pub(super) struct Blit {
 impl Blit {
     fn new(device: &wgpu::Device, target: orbiters_ui::RenderTarget) -> Self {
         use wgpu::util::DeviceExt;
-        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("splat blit"), source: wgpu::ShaderSource::Wgsl(BLIT.into()) });
+        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("splat blit"), source: wgpu::ShaderSource::Wgsl(BLIT.into()) }); // i18n: not shown
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("splat blit"),
+            label: Some("splat blit"), // i18n: not shown
             entries: &[
                 wgpu::BindGroupLayoutEntry {
                     binding: 0,
@@ -1044,12 +1045,12 @@ impl Blit {
             ],
         });
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("splat blit"),
+            label: Some("splat blit"), // i18n: not shown
             bind_group_layouts: &[Some(&layout)],
             immediate_size: 0,
         });
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("splat blit"),
+            label: Some("splat blit"), // i18n: not shown
             layout: Some(&pipeline_layout),
             vertex: wgpu::VertexState { module: &module, entry_point: Some("vs_main"), buffers: &[], compilation_options: Default::default() },
             primitive: wgpu::PrimitiveState::default(),
@@ -1065,14 +1066,14 @@ impl Blit {
             cache: None,
         });
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-            label: Some("splat blit"),
+            label: Some("splat blit"), // i18n: not shown
             mag_filter: wgpu::FilterMode::Linear,
             min_filter: wgpu::FilterMode::Linear,
             ..Default::default()
         });
         let linear = if target.format.is_srgb() { 1.0f32 } else { 0.0 };
         let params = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("splat blit"),
+            label: Some("splat blit"), // i18n: not shown
             contents: bytemuck::cast_slice(&[linear, 0.0, 0.0, 0.0]),
             usage: wgpu::BufferUsages::UNIFORM,
         });
@@ -1091,7 +1092,7 @@ impl Blit {
     /// What draws `view` (an RGBA8 image of encoded sRGB) over the callback's rectangle.
     pub(super) fn bind_group(&self, device: &wgpu::Device, view: &wgpu::TextureView) -> wgpu::BindGroup {
         device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("splat blit"),
+            label: Some("splat blit"), // i18n: not shown
             layout: &self.layout,
             entries: &[
                 wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(view) },

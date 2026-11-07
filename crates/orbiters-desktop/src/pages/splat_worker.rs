@@ -87,7 +87,7 @@ impl Worker {
     pub fn start(ctx: &egui::Context, gpu: Gpu, device: wgpu::Device, queue: wgpu::Queue, marks: u64) -> Self {
         let shared = Arc::new(Shared::default());
         let (s, ctx) = (shared.clone(), ctx.clone());
-        std::thread::Builder::new().name("splats on the integrated GPU".into()).spawn(move || run(&s, &ctx, gpu, &device, &queue)).expect("thread");
+        std::thread::Builder::new().name("splats on the integrated GPU".into()).spawn(move || run(&s, &ctx, gpu, &device, &queue)).expect("thread"); // i18n: not shown
         Self { shared, shown: Arc::default(), last: None, marks }
     }
 
@@ -237,7 +237,7 @@ struct Readback {
 impl Readback {
     fn new(device: &wgpu::Device, w: u32, h: u32) -> Self {
         let texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("splats on the integrated GPU"),
+            label: Some("splats on the integrated GPU"), // i18n: not shown
             size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
             mip_level_count: 1,
             sample_count: 1,
@@ -249,7 +249,7 @@ impl Readback {
         let view = texture.create_view(&Default::default());
         let row = (w * 4).next_multiple_of(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT);
         let buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("splats read back"),
+            label: Some("splats read back"), // i18n: not shown
             size: u64::from(row) * u64::from(h),
             usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
@@ -309,7 +309,7 @@ impl egui_wgpu::CallbackTrait for FrameCallback {
         let (w, h) = frame.size;
         if shown.as_ref().is_none_or(|s| s.size != frame.size) {
             let texture = device.create_texture(&wgpu::TextureDescriptor {
-                label: Some("splats from the integrated GPU"),
+                label: Some("splats from the integrated GPU"), // i18n: not shown
                 size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
                 mip_level_count: 1,
                 sample_count: 1,

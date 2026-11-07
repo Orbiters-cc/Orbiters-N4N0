@@ -17,6 +17,7 @@
 
 use super::super::editor::{files, Editor, LiveAsk};
 use super::*;
+use orbiters_i18n::tr;
 use orbiters_ui::photo::gpu::{self, Stack};
 use orbiters_ui::photo::render::{self as photo_render, Stage};
 use orbiters_reconstruct::dof;
@@ -134,7 +135,7 @@ impl Viewer {
     fn enter_with(&mut self, ctx: &egui::Context, full: (u32, u32), doc: Edit) {
         let shared = Arc::new(Mutex::new(Shared::default()));
         let (s, (device, queue), c) = (shared.clone(), self.window.clone(), ctx.clone());
-        let made = std::thread::Builder::new().name("photo layers on the GPU".into()).spawn(move || {
+        let made = std::thread::Builder::new().name("photo layers on the GPU".into()).spawn(move || { // i18n: not shown
             let stack = Stack::live(&device, &queue);
             if let Ok(mut s) = s.lock() {
                 s.stack = Some(stack);
@@ -310,7 +311,7 @@ pub(super) fn show(v: &mut Viewer, ui: &mut Ui, rect: Rect) -> Option<bool> {
         ctx.layer_painter(s.layer).with_clip_rect(s.clip).set(s.shape, egui_wgpu::Callback::new_paint_callback(s.frame, callback));
         let p = ctx.layer_painter(s.layer).with_clip_rect(s.clip.intersect(s.frame));
         if let Some(e) = error {
-            widgets::text(&p, s.frame.center(), Align2::CENTER_CENTER, &Txt::new(format!("This view could not be drawn: {e}"), 13.0).color(theme::DANGER));
+            widgets::text(&p, s.frame.center(), Align2::CENTER_CENTER, &Txt::new(tr!("This view could not be drawn: {e}", e = e), 13.0).color(theme::DANGER));
         } else if ed.shared.lock().map(|sh| sh.stack.is_none()).unwrap_or(false) {
             orbiters_ui::feedback::spinner(&p, s.frame.center(), 12.0, 2.5, theme::ACCENT);
             ctx.request_repaint_after(std::time::Duration::from_millis(50));
@@ -506,10 +507,10 @@ struct Show {
 impl Show {
     fn new(device: &wgpu::Device, target: orbiters_ui::RenderTarget) -> Self {
         use wgpu::util::DeviceExt;
-        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("edit in 3D"), source: wgpu::ShaderSource::Wgsl(SHOW.into()) });
+        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("edit in 3D"), source: wgpu::ShaderSource::Wgsl(SHOW.into()) }); // i18n: not shown
         let fragment = wgpu::ShaderStages::FRAGMENT;
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("edit in 3D"),
+            label: Some("edit in 3D"), // i18n: not shown
             entries: &[
                 wgpu::BindGroupLayoutEntry {
                     binding: 0,
@@ -526,9 +527,9 @@ impl Show {
                 },
             ],
         });
-        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("edit in 3D"), bind_group_layouts: &[Some(&layout)], immediate_size: 0 });
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("edit in 3D"), bind_group_layouts: &[Some(&layout)], immediate_size: 0 }); // i18n: not shown
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("edit in 3D"),
+            label: Some("edit in 3D"), // i18n: not shown
             layout: Some(&pipeline_layout),
             vertex: wgpu::VertexState { module: &module, entry_point: Some("vs_main"), buffers: &[], compilation_options: Default::default() },
             primitive: wgpu::PrimitiveState::default(),
@@ -543,10 +544,10 @@ impl Show {
             multiview_mask: None,
             cache: None,
         });
-        let sampler = device.create_sampler(&wgpu::SamplerDescriptor { label: Some("edit in 3D"), mag_filter: wgpu::FilterMode::Linear, min_filter: wgpu::FilterMode::Linear, ..Default::default() });
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor { label: Some("edit in 3D"), mag_filter: wgpu::FilterMode::Linear, min_filter: wgpu::FilterMode::Linear, ..Default::default() }); // i18n: not shown
         let linear = if target.format.is_srgb() { 1.0f32 } else { 0.0 };
         let params = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("edit in 3D"),
+            label: Some("edit in 3D"), // i18n: not shown
             contents: bytemuck::cast_slice(&[linear, 0.0, 0.0, 0.0]),
             usage: wgpu::BufferUsages::UNIFORM,
         });
@@ -563,7 +564,7 @@ impl Show {
 
     fn bind_group(&self, device: &wgpu::Device, view: &wgpu::TextureView) -> wgpu::BindGroup {
         device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("edit in 3D"),
+            label: Some("edit in 3D"), // i18n: not shown
             layout: &self.layout,
             entries: &[
                 wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(view) },

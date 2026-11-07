@@ -51,6 +51,9 @@ pub struct N4n0Line {
     pub text: String,
     /// Unix time in milliseconds.
     pub at_ms: u64,
+    /// N4N0's answer as far as it has arrived: replaced as more comes, and by the whole answer at the end.
+    #[serde(default)]
+    pub streaming: bool,
 }
 
 /// An action of N4N0's (publishing an event…) waiting for the member's approval on Orbiters.
@@ -237,8 +240,8 @@ pub struct N4n0Status {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TrackingView {
     pub on: bool,
-    /// Each kind's strength, an index of `orbiters_n4n0_core::menu::SMOOTHING_LABELS`: headset, controllers, trackers.
-    pub levels: [u8; 3],
+    /// Each kind's time constant in milliseconds: headset, controllers, trackers.
+    pub ms: [u16; 3],
     /// What the driver does now.
     pub note: String,
 }

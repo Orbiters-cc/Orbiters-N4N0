@@ -136,6 +136,7 @@
   "How frames become a session": "フレームからセッションを作る方法",
   "How large N4N0's projected screen is, for you and everyone around.": "N4N0が映す画面の大きさです。自分にも周りの人にも同じ大きさで表示されます。",
   "How much faster than VRChat's own walking.": "VRChat本来の歩行より、どれだけ速くするかです。",
+  "How much faster than VRChat's own walking. OVR Advanced Settings' Space Drag and Space Turn move the same play space: using them puts you back where they last left you, so turn off their bindings to keep the distance you walked.": "VRChat本来の歩行より、どれだけ速くするかです。OVR Advanced SettingsのSpace DragとSpace Turnは同じプレイスペースを動かします。使うと、それらが最後に置いた位置に戻るので、歩いた距離を保つにはそれらの割り当てをオフにしてください。",
   "How softly what is rigid follows your hand: what opens in front of VRChat's menu, always, and the tiles when they match it. About 35 ms lines up with VRChat.": "固定された要素が手にどれだけなめらかに追従するかです。VRChatのメニューの前に開くものには常に、タイルにはVRChatに合わせているときに適用されます。約35 msでVRChatと揃います。",
   "How they follow your hand in VR": "VRでの手への追従のしかた",
   "Idle": "待機中",

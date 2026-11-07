@@ -613,7 +613,15 @@ fn orbiters(answers: Vec<String>) -> (String, Arc<Mutex<Vec<Value>>>) {
             seen.lock().unwrap().push(serde_json::from_slice::<Value>(&body).unwrap());
             let events = answers.next().unwrap_or_default();
             let mut stream = stream;
-            let _ = stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n{events}").as_bytes()); // i18n: not shown
+            let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n"); // i18n: not shown
+            // A NUL between events: the server takes its time there, as a model does between its words.
+            for (i, part) in events.split('\0').enumerate() {
+                if i > 0 {
+                    std::thread::sleep(Duration::from_millis(150));
+                }
+                let _ = stream.write_all(part.as_bytes());
+                let _ = stream.flush();
+            }
         }
     });
     (base, bodies)
@@ -658,6 +666,99 @@ fn a_turn_runs_the_tools_it_asks_for_and_answers_on_the_panel() {
     let whos: Vec<N4n0Who> = status.lines.iter().map(|l| l.who).collect();
     assert_eq!(whos, vec![N4n0Who::You, N4n0Who::Note, N4n0Who::N4n0]);
     assert!(!status.thinking);
+    t.shutdown(&n);
+}
+
+/// Waits until `until` holds of the status, and returns it.
+fn status_when(t: &TestHost, until: impl Fn(&N4n0Status) -> bool) -> N4n0Status {
+    let start = Instant::now();
+    loop {
+        let status = t.view();
+        if until(&status) {
+            return status;
+        }
+        assert!(start.elapsed() < Duration::from_secs(5), "never came: {:?}", status.lines);
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+fn delta(text: &str) -> String {
+    format!("event: text\ndata: {}\n\n\0", json!({ "delta": text }))
+}
+
+fn the_answers(status: &N4n0Status) -> Vec<(String, bool)> {
+    status.lines.iter().filter(|l| l.who == N4n0Who::N4n0).map(|l| (l.text.clone(), l.streaming)).collect()
+}
+
+/// Enzo: "shows a stream of the text as it's being received". Each window and sheet draws `lines`: the answer is there as
+/// it arrives, one line that grows, and the whole answer takes its place, never beside it.
+#[test]
+fn an_answer_shows_as_it_arrives_and_once_when_whole() {
+    let (t, n, _vrchat) = n4n0_with_vrchat();
+    let done = format!("event: done\ndata: {}\n\n", json!({ "messages": [], "tool_calls": [] }));
+    let (base, _) = orbiters(vec![format!("{}{}{}{done}", delta("It is "), delta("sunny "), delta("and warm."))]);
+    t.sign_in(base, "orbit-test");
+    n.ask("Is it nice out?".into(), "typed");
+    let first = status_when(&t, |s| !the_answers(s).is_empty());
+    assert_eq!(the_answers(&first), vec![("It is".to_string(), true)], "the first words, as they came");
+    assert!(first.thinking, "still answering");
+    let more = status_when(&t, |s| the_answers(s).first().is_some_and(|a| a.0 == "It is sunny"));
+    assert_eq!(the_answers(&more).len(), 1, "the same line, grown");
+    let whole = status_when(&t, |s| !s.thinking);
+    assert_eq!(the_answers(&whole), vec![("It is sunny and warm.".to_string(), false)], "once, and whole");
+    let whos: Vec<N4n0Who> = whole.lines.iter().map(|l| l.who).collect();
+    assert_eq!(whos, vec![N4n0Who::You, N4n0Who::N4n0]);
+    t.shutdown(&n);
+}
+
+/// A round of words before a tool, then the answer: what a tool says stays above what arrives, and one answer is left.
+#[test]
+fn words_before_a_tool_give_way_to_the_answer() {
+    let (t, n, _vrchat) = n4n0_with_vrchat();
+    let tool = format!(
+        "event: done\ndata: {}\n\n",
+        json!({ "messages": [], "tool_calls": [{ "id": "call_1", "name": "set_avatar_control", "input": { "control": "hoodie", "on": true } }] })
+    );
+    let done = format!("event: done\ndata: {}\n\n", json!({ "messages": [], "tool_calls": [] }));
+    let (base, _) = orbiters(vec![format!("{}{tool}", delta("One moment.")), format!("{}{}{done}", delta("Your hoodie "), delta("is on."))]);
+    t.sign_in(base, "orbit-test");
+    n.ask("Hoodie please".into(), "typed");
+    let arriving = status_when(&t, |s| the_answers(s).first().is_some_and(|a| a.0 == "Your hoodie"));
+    assert_eq!(the_answers(&arriving).len(), 1, "the next round's words replace the last round's: {:?}", arriving.lines);
+    let whole = status_when(&t, |s| !s.thinking);
+    assert_eq!(the_answers(&whole), vec![("Your hoodie is on.".to_string(), false)]);
+    assert_eq!(whole.lines.iter().filter(|l| l.streaming).count(), 0);
+    t.shutdown(&n);
+}
+
+/// The stream broken halfway: what had arrived goes, and the error says why.
+#[test]
+fn an_answer_that_breaks_off_leaves_no_half_line() {
+    let (t, n, _vrchat) = n4n0_with_vrchat();
+    let error = format!("event: error\ndata: {}\n\n", json!({ "code": "overloaded", "message": "Too many people at once." }));
+    let (base, _) = orbiters(vec![format!("{}{error}", delta("Half an"))]);
+    t.sign_in(base, "orbit-test");
+    n.ask("Hello".into(), "typed");
+    status_when(&t, |s| !the_answers(s).is_empty());
+    let over = status_when(&t, |s| !s.thinking);
+    assert!(the_answers(&over).is_empty(), "{:?}", over.lines);
+    assert!(over.lines.iter().any(|l| l.who == N4n0Who::Error && l.text == "Too many people at once."), "{:?}", over.lines);
+    t.shutdown(&n);
+}
+
+/// New conversation while an answer arrives: nothing of it comes back, not a line of what was still on its way.
+#[test]
+fn a_new_conversation_stops_what_is_arriving() {
+    let (t, n, _vrchat) = n4n0_with_vrchat();
+    let (base, _) = orbiters(vec![format!("{}{}{}", delta("One "), delta("two "), delta("three"))]);
+    t.sign_in(base, "orbit-test");
+    n.ask("Count".into(), "typed");
+    status_when(&t, |s| !the_answers(s).is_empty());
+    n.command(Command::NewConversation);
+    let cleared = status_when(&t, |s| s.lines.is_empty() && !s.thinking);
+    assert!(cleared.lines.is_empty());
+    std::thread::sleep(Duration::from_millis(500));
+    assert!(t.view().lines.is_empty(), "{:?}", t.view().lines);
     t.shutdown(&n);
 }
 

@@ -459,7 +459,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
                 if draft.walk_boost.enabled {
                     widgets::separator(ui);
                     let max = orbiters_core::settings::WalkBoostSettings::MAX_EXTRA * 100.0;
-                    widgets::field(ui, tr("Strength"), Some(tr("How much faster than VRChat's own walking.")), 284.0, |ui| {
+                    widgets::field(ui, tr("Strength"), Some(tr("How much faster than VRChat's own walking. OVR Advanced Settings' Space Drag and Space Turn move the same play space: using them puts you back where they last left you, so turn off their bindings to keep the distance you walked.")), 284.0, |ui| {
                         apply |= widgets::slider(ui, "walk-strength", &mut draft.walk_boost.strength, 0.0..=1.0, 0.05, |v| format!("+{:.0} %", v * max));
                     });
                 }
@@ -1156,10 +1156,10 @@ fn orbit_settings(ui: &mut egui::Ui, snap: &Snapshot, orbit: &mut orbiters_core:
     widgets::separator(ui);
     let smoothing = |v: f32| if v == 0.0 { tr_ctx("smoothing", "None").to_string() } else { format!("{v:.0} ms") };
     widgets::field(ui, tr("Smoothing on the Quick Menu"), Some(tr("How softly what is rigid follows your hand: what opens in front of VRChat's menu, always, and the tiles when they match it. About 35 ms lines up with VRChat.")), 300.0, |ui| {
-        apply |= widgets::slider(ui, "orbit-vr-smoothing-quick-menu", &mut orbit.vr_smoothing_quick_menu_ms, 0.0..=150.0, 5.0, smoothing);
+        apply |= widgets::slider(ui, "orbit-vr-smoothing-quick-menu", &mut orbit.vr_smoothing_quick_menu_ms, 0.0..=150.0, 1.0, smoothing);
     });
     widgets::field(ui, tr("Smoothing on the wheel"), Some(tr("The same around VRChat's Action Menu. About 20 ms lines up with VRChat.")), 300.0, |ui| {
-        apply |= widgets::slider(ui, "orbit-vr-smoothing-wheel", &mut orbit.vr_smoothing_wheel_ms, 0.0..=150.0, 5.0, smoothing);
+        apply |= widgets::slider(ui, "orbit-vr-smoothing-wheel", &mut orbit.vr_smoothing_wheel_ms, 0.0..=150.0, 1.0, smoothing);
     });
     let now = if !orbiters_core::osc::VRCHAT_RUNS_HERE {
         Some(tr("VRChat runs on another computer here, so nothing can appear around its menus.").to_string())

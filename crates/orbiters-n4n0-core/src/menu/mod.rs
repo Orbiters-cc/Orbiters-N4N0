@@ -185,18 +185,24 @@ pub struct Draft {
 pub struct Tracking {
     /// Smoothing is on.
     pub on: bool,
-    /// Each kind's strength, an index of [`SMOOTHING_LABELS`]: the headset, the controllers, the trackers.
-    pub levels: [u8; 3],
+    /// Each kind's time constant, in milliseconds: the headset, the controllers, the trackers.
+    pub ms: [u16; 3],
     /// What the driver does now ("Smoothing your devices now", "Ready: smoothing starts with SteamVR"), or why it cannot.
     pub note: String,
 }
 
 /// The kinds of devices the Tracking page smooths, in its rows' order (in English: [`strings::TRACKING_KINDS`]).
 pub const TRACKING_KINDS: [&str; 3] = [strings::TRACKING_KINDS[0].en(), strings::TRACKING_KINDS[1].en(), strings::TRACKING_KINDS[2].en()];
-/// The strengths it offers, and what each is (0 leaves the device as SteamVR tracks it, 1 the strongest; in English:
-/// [`strings::SMOOTHING`]).
+/// The strengths the avatar's screen and the SteamVR menu offer, with their fixed pages, in milliseconds (in English:
+/// [`strings::SMOOTHING`]). The window and the Quick Menu's sheet have sliders for any value; these pages say the exact
+/// values in their state line, and ring the choice nearest each.
 pub const SMOOTHING_LABELS: [&str; 4] = [strings::SMOOTHING[0].en(), strings::SMOOTHING[1].en(), strings::SMOOTHING[2].en(), strings::SMOOTHING[3].en()];
-pub const SMOOTHING_STRENGTHS: [f32; 4] = [0.0, 0.35, 0.65, 0.9];
+pub const SMOOTHING_MS: [u16; 4] = [0, 42, 78, 108];
+
+/// The fixed choice nearest a time constant.
+pub fn smoothing_choice(ms: u16) -> usize {
+    (0..SMOOTHING_MS.len()).min_by_key(|&i| SMOOTHING_MS[i].abs_diff(ms)).unwrap_or(0)
+}
 
 /// The pages a display has (contracts `Docs/n4n0.md`, Menu): the avatar's screen by its version (`N4N0/Screen/Version`),
 /// the overlay and the window all of them ([`Pages::ALL`]).
@@ -625,8 +631,8 @@ pub enum Target {
     // Home's eighth and ninth tiles.
     Tracking,
     Suggest,
-    /// Tracking: smoothing on or off, and a kind's strength (kind × 4 + strength: [`TRACKING_KINDS`] ×
-    /// [`SMOOTHING_LABELS`]).
+    /// Tracking: smoothing on or off, and a kind's fixed choice (kind × 4 + choice: [`TRACKING_KINDS`] ×
+    /// [`SMOOTHING_LABELS`], worth [`SMOOTHING_MS`]).
     TrackingSwitch,
     Smoothing(u8),
     /// Suggest features: type it, say it, send it.
@@ -767,7 +773,7 @@ pub enum Effect {
     /// Smooth SteamVR's tracking so (the Tracking page).
     Tracking {
         on: bool,
-        levels: [u8; 3],
+        ms: [u16; 3],
     },
     /// Listen to the person for the suggestion they dictate (Suggest features' Talk).
     Dictate,
@@ -1302,14 +1308,14 @@ impl Menu {
                 Some(tracking) => {
                     match target {
                         Target::Smoothing(i) if ((i / 4) as usize) < TRACKING_KINDS.len() => {
-                            tracking.levels[(i / 4) as usize] = i % 4;
+                            tracking.ms[(i / 4) as usize] = SMOOTHING_MS[(i % 4) as usize];
                             // Choosing a strength turns smoothing on (Off for every kind leaves it on, doing nothing).
                             tracking.on = true;
                         }
                         Target::TrackingSwitch => tracking.on = !tracking.on,
                         _ => return Vec::new(),
                     }
-                    vec![Effect::Tracking { on: tracking.on, levels: tracking.levels }]
+                    vec![Effect::Tracking { on: tracking.on, ms: tracking.ms }]
                 }
                 None => Vec::new(),
             },
@@ -1740,6 +1746,15 @@ impl Menu {
             }
         }
         self.suggest()
+    }
+
+    /// A kind's time constant from a slider (the window, the Quick Menu's sheet), which turns smoothing on as a choice
+    /// on the fixed pages does.
+    pub fn set_smoothing_ms(&mut self, kind: usize, ms: u16) -> Vec<Effect> {
+        let Some(tracking) = self.tracking.as_mut().filter(|_| kind < TRACKING_KINDS.len()) else { return Vec::new() };
+        tracking.ms[kind] = ms.min(120);
+        tracking.on = true;
+        vec![Effect::Tracking { on: tracking.on, ms: tracking.ms }]
     }
 
     /// What a text field shows becomes the search field's text (a display with a keyboard of its own: the window's
@@ -3050,13 +3065,19 @@ mod tests {
         assert_eq!(menu.page, Page::Tracking);
         assert!(menu.press(Target::Smoothing(5)).is_empty(), "nothing to set without the host's smoothing");
         assert!(layout::target_state(&menu, Target::Smoothing(5)).unavailable);
-        menu.tracking = Some(Tracking { on: false, levels: [0, 1, 2], note: String::new() });
+        menu.tracking = Some(Tracking { on: false, ms: [0, 42, 78], note: String::new() });
         // Controllers (kind 1) to High (3).
-        assert_eq!(menu.press(Target::Smoothing(7)), vec![Effect::Tracking { on: true, levels: [0, 3, 2] }]);
+        assert_eq!(menu.press(Target::Smoothing(7)), vec![Effect::Tracking { on: true, ms: [0, 108, 78] }]);
         assert!(layout::target_state(&menu, Target::Smoothing(7)).on && !layout::target_state(&menu, Target::Smoothing(5)).on);
-        assert_eq!(menu.press(Target::TrackingSwitch), vec![Effect::Tracking { on: false, levels: [0, 3, 2] }]);
+        assert_eq!(menu.press(Target::TrackingSwitch), vec![Effect::Tracking { on: false, ms: [0, 108, 78] }]);
         assert!(!layout::target_state(&menu, Target::Smoothing(7)).on, "off: no strength ringed");
         assert!(menu.press(Target::Smoothing(12)).is_empty(), "no fourth kind");
+        // A value from a slider: the fixed pages ring the nearest choice and say the value itself.
+        assert_eq!(menu.set_smoothing_ms(1, 35), vec![Effect::Tracking { on: true, ms: [0, 35, 78] }]);
+        assert!(layout::target_state(&menu, Target::Smoothing(5)).on, "35 ms is nearest Low");
+        assert!(menu.set_smoothing_ms(3, 35).is_empty(), "no fourth kind");
+        assert_eq!(menu.set_smoothing_ms(0, 500), vec![Effect::Tracking { on: true, ms: [120, 35, 78] }], "no longer than the driver's longest");
+        assert_eq!(layout::text(&menu, layout::Content::TrackingState), "On: 120 / 35 / 78 ms");
     }
 
     #[test]

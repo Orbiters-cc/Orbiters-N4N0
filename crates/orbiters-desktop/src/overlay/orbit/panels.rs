@@ -21,6 +21,9 @@ use orbiters_core::settings::{MenuLook, OrbitLayout, OrbitSettings, VrMotion};
 use std::path::PathBuf;
 
 mod settings_sheet;
+mod tracking_sheet;
+pub use tracking_sheet::{smoothing_at, Smoothed};
+use tracking_sheet::{draw_smoothing_bar, draw_tracking, tracking_caption, tracking_items};
 use settings_sheet::{draw_settings, draw_stepper_name, hue_color, language_name, settings_items, settings_caption, sound_name};
 pub use settings_sheet::{hue_at, language_after};
 #[cfg(test)]
@@ -211,6 +214,8 @@ pub enum Sheet {
     Talk,
     /// How these menus lie, move, sound and look.
     Settings,
+    /// Tracking smoothing, in milliseconds.
+    Tracking,
 }
 
 /// What can be chosen on the sheet of settings.
@@ -229,6 +234,10 @@ pub enum Pick {
     Sound(bool),
     /// The next place in the language picker, or the one before.
     Language(bool),
+    /// Tracking smoothing on or off.
+    Smoothing(bool),
+    /// Along a smoothing slider.
+    SmoothingBar(Smoothed),
 }
 
 /// The colours to choose from at a press.
@@ -439,6 +448,12 @@ pub struct Facts {
     /// Talking with N4N0: where it stands, the conversation (whether the person said it, what was said), what N4N0 says right now, and how to call it by name when that is on.
     pub talk: TalkNow,
     pub talk_lines: Vec<(bool, String)>,
+    /// Tracking smoothing: on or off and each kind's milliseconds, and what the driver does now (`None`: not here).
+    pub tracking: Option<(bool, [u16; 3], String)>,
+    /// Why not, when it is not here.
+    pub tracking_note: String,
+    /// The smoothing slider held, and where.
+    pub smoothing_held: Option<(Smoothed, u16)>,
     pub n4n0_says: Option<String>,
     pub wake_word: Option<String>,
     /// The ring's cells can be picked by the number keys: on the desktop's wheel.
@@ -499,6 +514,8 @@ pub struct Item {
 /// What an item is drawn as.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Look {
+    /// A smoothing slider.
+    SmoothingBar(Smoothed),
     /// What plays in a strip's tile: its picture, its play or pause.
     PlayingSmall,
     /// From a capture shown here, on to the app's window, where it shows in 3D.
@@ -900,6 +917,7 @@ fn sheet_page_items(sheet: Sheet, facts: &Facts) -> Vec<Item> {
             out
         }
         Sheet::Settings => settings_items(facts),
+        Sheet::Tracking => tracking_items(facts),
         Sheet::Menu | Sheet::Worlds => Vec::new(),
     }
 }
@@ -1330,6 +1348,7 @@ fn sheet_says(facts: &Facts) -> &'static str {
         Some(Sheet::Results) => tr("Copy a link for the world's player, or drop it in the world."),
         Some(Sheet::Talk) => tr("Press the button, and ask N4N0 anything."),
         Some(Sheet::Settings) => tr("How these menus lie, move, sound and look."),
+        Some(Sheet::Tracking) => tr("Less jitter, a little more lag, in milliseconds."),
         Some(Sheet::All) => tr("Everything Orbiters can do from here."),
         _ => tr("Orbiters, beside VRChat's menu."),
     }
@@ -1344,6 +1363,7 @@ fn sheet_mark(facts: &Facts) -> (&'static str, Color32) {
         Some(Sheet::Results) => (icons::YOUTUBE_LOGO, tool_tint(Action::Page(Target::YouTube))),
         Some(Sheet::Talk) => (icons::MICROPHONE, look::LABEL),
         Some(Sheet::Settings) => (icons::GEAR_SIX, look::LABEL),
+        Some(Sheet::Tracking) => (icons::VIRTUAL_REALITY, tool_tint(Action::Page(Target::Tracking))),
         Some(Sheet::All) => (icons::SQUARES_FOUR, look::LABEL),
         Some(Sheet::Menu) if facts.sheet_title == "YouTube" => (icons::YOUTUBE_LOGO, tool_tint(Action::Page(Target::YouTube))),
         _ => (icons::N4N0_MARK, look::LABEL),
@@ -1357,7 +1377,7 @@ pub fn hit(items: &[Item], p: Pos2) -> Option<usize> {
 
 /// What the caption says of what is pointed at, in words for someone who has never seen any of this: a title and what it does.
 pub fn caption(action: Action, facts: &Facts) -> Option<(String, String)> {
-    if let Some(said) = settings_caption(action) {
+    if let Some(said) = settings_caption(action).or_else(|| tracking_caption(action)) {
         return Some(said);
     }
     let (a, b): (String, String) = match action {
@@ -1695,6 +1715,9 @@ pub fn paint_sheet(p: &Painter, sheet: Sheet, facts: &Facts, hover: Option<usize
     }
     if sheet == Sheet::Settings {
         draw_settings(p, facts);
+    }
+    if sheet == Sheet::Tracking {
+        draw_tracking(p, facts);
     }
     if sheet == Sheet::Instances && facts.worlds_visited.is_empty() {
         widgets::icon(p, page.center() - vec2(0.0, 30.0), icons::CLOCK, 54.0, look::MUTED);
@@ -2324,6 +2347,7 @@ fn draw(p: &Painter, zone: Zone, item: &Item, facts: &Facts, hovered: bool, pres
             widgets::icon(p, pos2(left + 12.0, rect.center().y), icon, 24.0, ink);
             p.text(pos2(left + 34.0, rect.center().y), Align2::LEFT_CENTER, label, font, ink);
         }
+        Look::SmoothingBar(which) => draw_smoothing_bar(p, rect, which, facts, hovered),
         Look::SoundName => draw_stepper_name(p, rect, icons::SPEAKER_HIGH, sound_name(facts)),
         Look::LanguageName => draw_stepper_name(p, rect, icons::GLOBE, &language_name(facts)),
         Look::Swatch(i) => {

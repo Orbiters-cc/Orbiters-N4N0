@@ -264,20 +264,46 @@ impl Default for FloatingSettings {
     }
 }
 
-/// Tracking smoothing (Orbiters - N4N0's SteamVR driver): on or off, and each kind of device's strength as an index of
-/// the menu's choices (`orbiters_n4n0_core::menu::SMOOTHING_STRENGTHS`: off, low, medium, high), headset, controllers,
-/// trackers.
+/// Tracking smoothing (Orbiters - N4N0's SteamVR driver): on or off, and each kind of device's time constant in
+/// milliseconds, headset, controllers, trackers (0 leaves it as SteamVR tracks it). The driver eases each pose toward the
+/// new one over that time whatever the frame rate, so a device in steady motion trails by that many milliseconds.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(from = "SavedTracking")]
 pub struct TrackingSettings {
     pub enabled: bool,
-    pub levels: [u8; 3],
+    pub ms: [u16; 3],
+}
+
+impl TrackingSettings {
+    /// The driver's longest (`orbiters_smooth::MAX_TIME_CONSTANT_MS`).
+    pub const MAX_MS: u16 = 120;
+    /// What Off, Low, Medium and High were: strengths 0, 0.35, 0.65 and 0.9 of [`TrackingSettings::MAX_MS`], kept for the
+    /// settings saved with them, which so smooth exactly as they did.
+    pub const LEVEL_MS: [u16; 4] = [0, 42, 78, 108];
 }
 
 impl Default for TrackingSettings {
     /// The headset untouched (smoothing it can make people sick), the controllers a little, the trackers more.
     fn default() -> Self {
-        Self { enabled: false, levels: [0, 1, 2] }
+        Self { enabled: false, ms: [0, Self::LEVEL_MS[1], Self::LEVEL_MS[2]] }
+    }
+}
+
+/// [`TrackingSettings`] as a file may hold them: in milliseconds, or as the index of Off, Low, Medium and High that
+/// versions up to 0.3.5-dev.15 saved (`levels`).
+#[derive(Default, Deserialize)]
+#[serde(default)]
+struct SavedTracking {
+    enabled: bool,
+    ms: Option<[u16; 3]>,
+    levels: Option<[u8; 3]>,
+}
+
+impl From<SavedTracking> for TrackingSettings {
+    fn from(saved: SavedTracking) -> Self {
+        let from_level = |l: u8| Self::LEVEL_MS.get(l as usize).copied().unwrap_or(0);
+        let ms = saved.ms.or(saved.levels.map(|l| l.map(from_level))).unwrap_or(Self::default().ms);
+        Self { enabled: saved.enabled, ms: ms.map(|m| m.min(Self::MAX_MS)) }
     }
 }
 
@@ -855,6 +881,29 @@ fn migrated(text: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Enzo's saved settings: `levels` became milliseconds, and each smooths exactly as it did (strength × 120 ms).
+    #[test]
+    fn smoothing_saved_as_levels_keeps_its_time() {
+        let read = |json: serde_json::Value| serde_json::from_value::<Settings>(serde_json::json!({ "tracking": json })).unwrap().tracking;
+        let old = read(serde_json::json!({ "enabled": true, "levels": [0, 2, 0] }));
+        assert_eq!((old.enabled, old.ms), (true, [0, 78, 0]));
+        assert_eq!(read(serde_json::json!({ "levels": [1, 2, 3] })).ms, [42, 78, 108]);
+        assert_eq!(read(serde_json::json!({ "levels": [9, 2, 3] })).ms, [0, 78, 108], "a level there never was is off");
+        for (level, ms) in [0.0f32, 0.35, 0.65, 0.9].into_iter().zip(TrackingSettings::LEVEL_MS) {
+            assert_eq!(ms, (level * TrackingSettings::MAX_MS as f32).round() as u16);
+        }
+        // Saved again: in milliseconds only, and the same when read back.
+        let saved = serde_json::to_value(&old).unwrap();
+        assert_eq!(saved, serde_json::json!({ "enabled": true, "ms": [0, 78, 0] }));
+        assert_eq!(read(saved), old);
+        assert_eq!(read(serde_json::json!({ "ms": [35, 200, 0] })).ms, [35, 120, 0], "no longer than the driver's longest");
+        assert_eq!(read(serde_json::json!({})), TrackingSettings { enabled: false, ..Default::default() });
+        // A slider's change saved over them as a patch, as every window and sheet does.
+        let (patched, left_out) = Settings { tracking: old, ..Default::default() }.patched(&serde_json::json!({ "tracking": { "ms": [20, 35, 0] } }));
+        assert!(left_out.is_empty(), "{left_out:?}");
+        assert_eq!((patched.tracking.enabled, patched.tracking.ms), (true, [20, 35, 0]));
+    }
 
     #[test]
     fn n4n0_s_section_moves_from_its_earlier_key_once() {

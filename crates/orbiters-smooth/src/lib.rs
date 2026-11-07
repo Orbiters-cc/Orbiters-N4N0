@@ -39,6 +39,8 @@ pub const MAGIC: u32 = u32::from_le_bytes(*b"OSMT");
 pub const VERSION: u32 = 1;
 /// SteamVR's device indices (`k_unMaxTrackedDeviceCount`).
 pub const MAX_DEVICES: usize = 64;
+/// A strength of 1 eases each pose over this time constant: a strength is a time constant in milliseconds over this.
+pub const MAX_TIME_CONSTANT_MS: f32 = 120.0;
 /// The driver counts as running while its heartbeat is at most this old.
 pub const HEARTBEAT_TIMEOUT_MS: u64 = 3000;
 

@@ -794,7 +794,9 @@ fn conversation(ui: &mut Ui, n4n0: &N4n0Status) {
             }
         }
     }
-    if n4n0.thinking || n4n0.listening {
+    // The answer arriving says it all by itself: the dots are for before its first words.
+    let arriving = n4n0.lines.last().is_some_and(|l| l.streaming);
+    if (n4n0.thinking && !arriving) || n4n0.listening {
         let (row, _) = ui.allocate_exact_size(vec2(width, 38.0), Sense::hover());
         let bubble = Rect::from_min_size(pos2(row.left() + 34.0, row.top()), vec2(if n4n0.listening { 150.0 } else { 64.0 }, 30.0));
         ui.painter().rect_filled(bubble, theme::radius(14.0), theme::alpha(theme::ACCENT, 0.13));

@@ -3,3 +3,4 @@ crates/orbiters-desktop/src/overlay/orbit/panels/settings_sheet.rs
 crates/orbiters-desktop/src/pages/language_card.rs
 crates/orbiters-desktop/src/language.rs
 crates/orbiters-desktop/src/controller/language.rs
+crates/orbiters-desktop/src/overlay/orbit/panels/tracking_sheet.rs

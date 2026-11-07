@@ -2097,8 +2097,9 @@ pub fn text_for(menu: &Menu, content: Content, public: bool) -> String {
                 puts.to_string()
             }
         }
+        // The fixed pages have no sliders: what each kind really is, in the order of their rows.
         Content::TrackingState => match &menu.tracking {
-            Some(t) if t.on => tr("On").into(),
+            Some(t) if t.on => tr!("On: {headset} / {controllers} / {trackers} ms", headset = t.ms[0], controllers = t.ms[1], trackers = t.ms[2]),
             Some(_) => tr("Off").into(),
             None => String::new(),
         },
@@ -2503,7 +2504,7 @@ pub fn target_state(menu: &Menu, target: Target) -> State {
         Target::DraftPose => menu.draft.pose,
         Target::DraftDefault => menu.draft.default,
         Target::TrackingSwitch => menu.tracking.as_ref().is_some_and(|t| t.on),
-        Target::Smoothing(i) => menu.tracking.as_ref().is_some_and(|t| t.on && t.levels.get((i / 4) as usize) == Some(&(i % 4))),
+        Target::Smoothing(i) => menu.tracking.as_ref().is_some_and(|t| t.on && t.ms.get((i / 4) as usize).is_some_and(|&ms| super::smoothing_choice(ms) == (i % 4) as usize)),
         Target::SuggestTalk => menu.dictating,
         // The timeline's segments the music reached.
         Target::Timeline(i) => menu.media.as_ref().is_some_and(|m| timeline_lit(m, i)),
@@ -3085,7 +3086,7 @@ mod tests {
         playing.media = Some(Media { title: "Midnight City".into(), artist: "M83".into(), app: "Spotify".into(), playing: true, position: Some(83), duration: Some(243), ..Default::default() });
         playing.volume = Some(Volume { percent: 40, muted: false });
         playing.light = Some(Light { on: true, color: 2, level: 0.62 });
-        playing.tracking = Some(Tracking { on: true, levels: [1, 1, 1], note: String::new() });
+        playing.tracking = Some(Tracking { on: true, ms: [42, 42, 42], note: String::new() });
         playing.fast_walk = true;
         out.push(playing);
         let mut stated = base();
@@ -3114,7 +3115,7 @@ mod tests {
         alone.photo_timer = 0;
         alone.desktop_mode = true;
         alone.light = Some(Light { on: false, color: 0, level: 0.5 });
-        alone.tracking = Some(Tracking { on: false, levels: [0, 0, 0], note: String::new() });
+        alone.tracking = Some(Tracking { on: false, ms: [0, 0, 0], note: String::new() });
         alone.contacts = vec![Contact { id: "u".into(), name: "Lyra".into() }];
         alone.calls_ready = true;
         out.push(alone.clone());

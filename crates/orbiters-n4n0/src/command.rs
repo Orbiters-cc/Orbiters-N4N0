@@ -112,11 +112,11 @@ pub enum Command {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         avatar: Option<String>,
     },
-    /// Tracking smoothing as N4N0's menu set it (its Tracking page): on or off, each kind's strength (an index of
-    /// `orbiters_n4n0_core::menu::SMOOTHING_LABELS`: headset, controllers, trackers).
+    /// Tracking smoothing as N4N0's menu set it (its Tracking page): on or off, each kind's time constant in
+    /// milliseconds (headset, controllers, trackers).
     Tracking {
         on: bool,
-        levels: [u8; 3],
+        ms: [u16; 3],
     },
     /// A feature suggestion for Orbiters from N4N0's menu (`voice`: some of it was said to N4N0).
     Suggest {

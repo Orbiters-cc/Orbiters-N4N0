@@ -74,6 +74,8 @@ enum Act {
     States(StateAction, Option<String>),
     /// The suggestion's new text.
     Suggestion(String),
+    /// A kind of device's smoothing, in milliseconds (its slider).
+    Smoothing(usize, u16),
     /// Back to Home itself.
     Home,
 }
@@ -263,6 +265,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
             }
             Act::States(action, avatar) => cx.ctl.n4n0(N4n0Command::States { action, avatar }),
             Act::Suggestion(text) => host.menu.suggestion = text,
+            Act::Smoothing(kind, ms) => effects.extend(host.menu.set_smoothing_ms(kind, ms)),
             Act::Home => effects.extend(go_home(host)),
         }
     }
@@ -1072,14 +1075,14 @@ fn light(ui: &mut Ui, cx: &Cx, menu: &Menu, acts: &mut Vec<Act>) {
     });
 }
 
-/// Tracking smoothing: the switch, each kind of device's strength, and what the driver does now.
+/// Tracking smoothing: the switch, each kind of device's time constant in milliseconds, and what the driver does now.
 fn tracking(ui: &mut Ui, cx: &Cx, menu: &Menu, acts: &mut Vec<Act>) {
     let Some(tracking) = menu.tracking.clone() else {
         top(ui, cx, tr("Tracking"), tr("Smoother trackers, controllers and headset"), acts);
         return note_card(ui, cx, 1, icons::VIRTUAL_REALITY, tr("Not on this computer"), &layout::text(menu, Content::TrackingNote));
     };
     top(ui, cx, tr("Tracking"), &tracking.note, acts);
-    let sub = tr("Less jitter, a little more lag: SteamVR's prediction is damped and each device's motion eased");
+    let sub = tr("Less jitter, a little more lag: a device in steady motion trails by the milliseconds you set");
     section(ui, cx, 1, icons::VIRTUAL_REALITY, tr("Smooth tracking"), Some(sub), |ui| {
         widgets::field(ui, tr("Smoothing"), Some(tr("Orbiters - N4N0's SteamVR driver: on, off and strengths at once")), 48.0, |ui| {
             let mut on = tracking.on;
@@ -1090,15 +1093,24 @@ fn tracking(ui: &mut Ui, cx: &Cx, menu: &Menu, acts: &mut Vec<Act>) {
         let hints = [mark("Keep it low: a smoothed headset lags behind your head"), mark("For your hands"), mark("Full-body trackers jitter most")];
         for (k, kind) in strings::TRACKING_KINDS.iter().enumerate() {
             widgets::separator(ui);
-            let mut level = tracking.levels[k] as usize;
-            let levels: Vec<SegOption<usize>> = strings::SMOOTHING.iter().enumerate().map(|(i, &name)| SegOption::new(i, menu_text(name))).collect();
+            let mut ms = tracking.ms[k] as f32;
             widgets::field(ui, menu_text(*kind), Some(tr(hints[k])), 320.0, |ui| {
-                if widgets::segmented(ui, &format!("orbiters-home-smoothing-{k}"), &mut level, &levels, tracking.on) {
-                    acts.push(Act::Press(Target::Smoothing((k * 4 + level) as u8)));
+                let max = orbiters_core::settings::TrackingSettings::MAX_MS as f32;
+                if widgets::slider(ui, format!("orbiters-home-smoothing-{k}"), &mut ms, 0.0..=max, 1.0, smoothing_words) {
+                    acts.push(Act::Smoothing(k, ms.round() as u16));
                 }
             });
         }
     });
+}
+
+/// A smoothing slider's value.
+fn smoothing_words(ms: f32) -> String {
+    if ms < 0.5 {
+        tr("Off").to_string()
+    } else {
+        tr!("{ms} ms", ms = format!("{ms:.0}"))
+    }
 }
 
 /// Suggest features: the idea written here, sent to the Orbiters team.

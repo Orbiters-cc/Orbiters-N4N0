@@ -49,6 +49,8 @@ const BUNDLE_MESSAGES: usize = 20;
 const MAX_WAIT: Duration = Duration::from_millis(250);
 const MAX_WAIT_OPEN: Duration = Duration::from_millis(100);
 const MIN_WAIT: Duration = Duration::from_millis(4);
+/// What has arrived of an answer goes to the windows and sheets this often at most: faster than it can be read.
+const STREAM_EVERY: Duration = Duration::from_millis(60);
 /// Lines of the conversation the window keeps.
 const MAX_LINES: usize = 60;
 /// Tool rounds of one turn: requests that bring tool results, after the first (contracts `Docs/n4n0-assistant.md`).
@@ -429,9 +431,27 @@ impl N4n0Runtime {
     }
 
     pub(crate) fn line(&mut self, who: N4n0Who, text: impl Into<String>) {
-        self.lines.push(N4n0Line { who, text: text.into(), at_ms: crate::unix_ms() });
+        self.lines.push(N4n0Line { who, text: text.into(), at_ms: crate::unix_ms(), streaming: false });
         let excess = self.lines.len().saturating_sub(MAX_LINES);
         self.lines.drain(..excess);
+    }
+
+    /// N4N0's answer as far as it has arrived, at the foot of the conversation: one line, replaced as more comes. What
+    /// a tool said since stays above it. The whole answer takes its place through [`Runtime::end_stream`] and
+    /// [`Runtime::line`], so that it is never there twice.
+    pub(crate) fn stream_line(&mut self, text: &str) {
+        let at_ms = match self.lines.iter().position(|l| l.streaming) {
+            Some(i) => self.lines.remove(i).at_ms,
+            None => crate::unix_ms(),
+        };
+        self.lines.push(N4n0Line { who: N4n0Who::N4n0, text: text.to_string(), at_ms, streaming: true });
+        let excess = self.lines.len().saturating_sub(MAX_LINES);
+        self.lines.drain(..excess);
+    }
+
+    /// The answer under way is over: its line goes, whatever came of it (the whole answer, an error, nothing).
+    pub(crate) fn end_stream(&mut self) {
+        self.lines.retain(|l| !l.streaming);
     }
 
     fn send_now(&mut self, messages: impl IntoIterator<Item = Message>) {
@@ -728,7 +748,7 @@ impl N4n0 {
                 rt.forget_avatar();
             }
             rt.vrchat_running = vrchat;
-            rt.tracking = smoothing.map(|note| TrackingView { on: tracking.enabled, levels: tracking.levels, note });
+            rt.tracking = smoothing.map(|note| TrackingView { on: tracking.enabled, ms: tracking.ms, note });
             if rt.tracking.is_none() {
                 // Kept in English: the menus draw it through `tr`.
                 rt.tracking_note = mark("Smoothing SteamVR's tracking needs Orbiters - N4N0 on the computer running SteamVR").into();
@@ -1709,9 +1729,9 @@ impl N4n0 {
                 self.n4n0.lock().unwrap().screen.overlay_keyboard = open && keyboard;
                 self.menu_overlay_state(open, dictation)
             }
-            Command::Tracking { on, levels } => self.update_settings(|s| {
+            Command::Tracking { on, ms } => self.update_settings(|s| {
                 s.tracking.enabled = on;
-                s.tracking.levels = levels;
+                s.tracking.ms = ms;
             }),
             Command::Suggest { text, voice } => self.suggestion_send(text, voice, false),
             Command::InviteMe { location } => self.invite_send(location, false),
@@ -1844,8 +1864,12 @@ impl N4n0 {
             let request =
                 Request { client: "desktop", messages: &conversation, input: input.take(), tool_results: std::mem::take(&mut results), tools: &tools, context };
             let mut answer = String::new();
+            let mut streamed_at = None::<Instant>;
             let done = assistant::send(&api, &token, &request, &cancel, |e| match e {
-                Event::Text(t) => answer.push_str(&t),
+                Event::Text(t) => {
+                    answer.push_str(&t);
+                    self.stream_answer(id, generation, answer.trim(), &mut streamed_at);
+                }
                 Event::Tool { name, phase } => {
                     if phase == "running" {
                         self.add_line(N4n0Who::Note, format!("N4N0: {}…", tool_words(&name)));
@@ -1891,6 +1915,7 @@ impl N4n0 {
             return;
         }
         rt.turn = None;
+        rt.end_stream();
         match outcome {
             Ok(()) => {
                 rt.conversation = assistant::trim(conversation, MAX_CONVERSATION);
@@ -1939,6 +1964,23 @@ impl N4n0 {
         self.publish();
     }
 
+    /// What has arrived of turn `id`'s answer goes to the conversation, every [`STREAM_EVERY`] at most: every window and
+    /// sheet is sent the whole status each time. A turn New conversation stopped shows nothing more.
+    fn stream_answer(&self, id: u64, generation: u64, so_far: &str, streamed_at: &mut Option<Instant>) {
+        if so_far.is_empty() || streamed_at.is_some_and(|t| t.elapsed() < STREAM_EVERY) {
+            return;
+        }
+        {
+            let mut rt = self.n4n0.lock().unwrap();
+            if rt.turn.as_ref().is_none_or(|t| t.id != id) || rt.generation != generation {
+                return;
+            }
+            rt.stream_line(so_far);
+        }
+        *streamed_at = Some(Instant::now());
+        self.publish();
+    }
+
     /// The app quits: N4N0's ears stop, the N4N0 thread ends with a turn under way, and N4N0's projected screen and its
     /// Menu toggle are turned off over OSC (best effort, one datagram), so the avatar's screen does not stay open with
     /// nothing left to drive it once the app is gone. Called while OSC still runs.
@@ -1972,6 +2014,7 @@ impl N4n0 {
         if let Some(turn) = rt.turn.take() {
             turn.cancel.store(true, Ordering::Relaxed);
         }
+        rt.end_stream();
         rt.wake();
     }
 

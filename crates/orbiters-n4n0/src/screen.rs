@@ -1947,9 +1947,9 @@ impl N4n0 {
                 Effect::ApplyState { id, .. } => self.states_apply(id, false),
                 Effect::Drop { link, title, video } => self.card_drop(link, title, video),
                 Effect::TakeBack => self.card_take_back(),
-                Effect::Tracking { on, levels } => self.update_settings(|s| {
+                Effect::Tracking { on, ms } => self.update_settings(|s| {
                     s.tracking.enabled = on;
-                    s.tracking.levels = levels;
+                    s.tracking.ms = ms;
                 }),
                 Effect::Dictate => self.menu_listen(),
                 Effect::SendSuggestion { text, voice } => self.suggestion_send(text, voice, true),
@@ -2072,7 +2072,7 @@ pub(crate) fn tick(
     let listening = rt.listening.is_some();
     let thinking = rt.thinking();
     let light = rt.light;
-    let tracking = rt.tracking.as_ref().map(|t| orbiters_n4n0_core::menu::Tracking { on: t.on, levels: t.levels, note: t.note.clone() });
+    let tracking = rt.tracking.as_ref().map(|t| orbiters_n4n0_core::menu::Tracking { on: t.on, ms: t.ms, note: t.note.clone() });
     let (tracking_note, versions) = (rt.tracking_note.clone(), rt.versions.clone());
     // The avatar's saved states, as the States page lists them (again while one saved there waits for the list).
     let states_key = (rt.states.version, rt.avatar_id.clone());

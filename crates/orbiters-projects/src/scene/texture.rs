@@ -6,6 +6,7 @@
 //! left out (the material keeps its colour), so one odd 16k texture cannot hold a preview or fill the memory.
 
 use anyhow::{bail, ensure, Context as _};
+use orbiters_i18n::tr;
 use image::RgbaImage;
 use std::path::Path;
 
@@ -35,7 +36,7 @@ pub fn decode(path: &Path, max_bytes: u64) -> anyhow::Result<RgbaImage> {
     limits.max_image_height = Some(MAX_SIDE);
     limits.max_alloc = Some(512 << 20);
     reader.limits(limits);
-    Ok(reader.decode().with_context(|| format!("a .{ext} the preview cannot read"))?.to_rgba8())
+    Ok(reader.decode().with_context(|| tr!("a .{ext} the preview cannot read", ext = ext))?.to_rgba8())
 }
 
 /// A picture in linear light: lightmaps and skies, whose values run far above 1.
@@ -65,7 +66,7 @@ pub fn decode_linear(path: &Path, max_bytes: u64) -> anyhow::Result<Linear> {
     limits.max_image_height = Some(MAX_SIDE);
     limits.max_alloc = Some(MAX_LINEAR_ALLOC);
     reader.limits(limits);
-    let img = reader.decode().with_context(|| format!("a .{ext} the preview cannot read"))?.into_rgb32f();
+    let img = reader.decode().with_context(|| tr!("a .{ext} the preview cannot read", ext = ext))?.into_rgb32f();
     let (width, height) = img.dimensions();
     // No light of NaN or below zero (a bake's stray pixels).
     let pixels = img.pixels().map(|p| [0, 1, 2].map(|k| if p[k].is_finite() { p[k].max(0.0) } else { 0.0 })).collect();
@@ -248,21 +249,21 @@ use image::ImageEncoder as _;
 /// Photoshop's merged picture (what Unity imports of a PSD/PSB): 8, 16 or 32 bits a channel, grey or RGB (with
 /// the merged alpha when there is a fourth channel), raw or PackBits-compressed.
 pub fn psd(b: &[u8]) -> anyhow::Result<RgbaImage> {
-    let be16 = |at: usize| -> anyhow::Result<u16> { Ok(u16::from_be_bytes(b.get(at..at + 2).context("cut short")?.try_into()?)) };
-    let be32 = |at: usize| -> anyhow::Result<u32> { Ok(u32::from_be_bytes(b.get(at..at + 4).context("cut short")?.try_into()?)) };
-    let be64 = |at: usize| -> anyhow::Result<u64> { Ok(u64::from_be_bytes(b.get(at..at + 8).context("cut short")?.try_into()?)) };
-    ensure!(b.len() >= 26 && &b[..4] == b"8BPS", "not a Photoshop file");
+    let be16 = |at: usize| -> anyhow::Result<u16> { Ok(u16::from_be_bytes(b.get(at..at + 2).with_context(|| tr("cut short"))?.try_into()?)) };
+    let be32 = |at: usize| -> anyhow::Result<u32> { Ok(u32::from_be_bytes(b.get(at..at + 4).with_context(|| tr("cut short"))?.try_into()?)) };
+    let be64 = |at: usize| -> anyhow::Result<u64> { Ok(u64::from_be_bytes(b.get(at..at + 8).with_context(|| tr("cut short"))?.try_into()?)) };
+    ensure!(b.len() >= 26 && &b[..4] == b"8BPS", "{}", tr("not a Photoshop file"));
     let version = be16(4)?;
-    ensure!(version == 1 || version == 2, "Photoshop version {version}");
+    ensure!(version == 1 || version == 2, "{}", tr!("Photoshop version {version}", version = version));
     let channels = be16(12)? as usize;
     let height = be32(14)?;
     let width = be32(18)?;
     let depth = be16(22)?;
     let mode = be16(24)?;
-    ensure!(width > 0 && height > 0 && width <= MAX_SIDE && height <= MAX_SIDE, "{width}×{height} pixels");
-    ensure!(matches!(depth, 8 | 16 | 32), "{depth} bits a channel");
-    ensure!(matches!(mode, 1 | 3), "colour mode {mode} (only grey and RGB are read)");
-    let skip = |at: usize, n: u64| -> anyhow::Result<usize> { usize::try_from(n).ok().and_then(|n| at.checked_add(n)).context("cut short") };
+    ensure!(width > 0 && height > 0 && width <= MAX_SIDE && height <= MAX_SIDE, "{}", tr!("{width}×{height} pixels", width = width, height = height));
+    ensure!(matches!(depth, 8 | 16 | 32), "{}", tr!("{depth} bits a channel", depth = depth));
+    ensure!(matches!(mode, 1 | 3), "{}", tr!("colour mode {mode} (only grey and RGB are read)", mode = mode));
+    let skip = |at: usize, n: u64| -> anyhow::Result<usize> { usize::try_from(n).ok().and_then(|n| at.checked_add(n)).with_context(|| tr("cut short")) };
     let mut at = 26usize;
     at = skip(at + 4, be32(at)? as u64)?; // colour mode data
     at = skip(at + 4, be32(at)? as u64)?; // image resources
@@ -273,35 +274,35 @@ pub fn psd(b: &[u8]) -> anyhow::Result<RgbaImage> {
     let bytes_per = depth as usize / 8;
     let row = w * bytes_per;
     let wanted = if mode == 3 { channels.min(4) } else { channels.min(2) };
-    ensure!(wanted >= 1, "no channels");
+    ensure!(wanted >= 1, "{}", tr("no channels"));
     // What the planes take once decoded: within `image`'s own limit for the other formats, and never more than the
     // file could hold (PackBits makes at most 128 bytes of 2), so a header claiming 8192² at 32 bits in a 64 KB file
     // is not given a gigabyte on each of the decoding threads.
     let planes_bytes = row * h * wanted;
-    ensure!(planes_bytes <= 512 << 20, "{width}×{height} pixels at {depth} bits");
-    ensure!(planes_bytes <= b.len().saturating_mul(64), "cut short");
+    ensure!(planes_bytes <= 512 << 20, "{}", tr!("{width}×{height} pixels at {depth} bits", width = width, height = height, depth = depth));
+    ensure!(planes_bytes <= b.len().saturating_mul(64), "{}", tr("cut short"));
     let mut planes: Vec<Vec<u8>> = Vec::with_capacity(wanted);
     match compression {
         0 => {
             for c in 0..wanted {
                 let start = at + c * row * h;
-                planes.push(b.get(start..start + row * h).context("cut short")?.to_vec());
+                planes.push(b.get(start..start + row * h).with_context(|| tr("cut short"))?.to_vec());
             }
         }
         1 => {
             let count_size = if version == 2 { 4 } else { 2 };
             let counts_at = at;
-            let mut data = channels.checked_mul(h * count_size).and_then(|n| at.checked_add(n)).context("cut short")?;
+            let mut data = channels.checked_mul(h * count_size).and_then(|n| at.checked_add(n)).with_context(|| tr("cut short"))?;
             for c in 0..channels {
                 let mut plane = Vec::with_capacity(row * h);
                 for y in 0..h {
                     let k = counts_at + (c * h + y) * count_size;
                     let n = if version == 2 { be32(k)? as usize } else { be16(k)? as usize };
                     if c < wanted {
-                        let src = b.get(data..data.checked_add(n).context("cut short")?).context("cut short")?;
+                        let src = b.get(data..data.checked_add(n).with_context(|| tr("cut short"))?).with_context(|| tr("cut short"))?;
                         packbits(src, row, &mut plane);
                     }
-                    data = data.checked_add(n).context("cut short")?;
+                    data = data.checked_add(n).with_context(|| tr("cut short"))?;
                 }
                 if c < wanted {
                     planes.push(plane);
@@ -310,7 +311,7 @@ pub fn psd(b: &[u8]) -> anyhow::Result<RgbaImage> {
                 }
             }
         }
-        other => bail!("Photoshop compression {other} (save with Maximize Compatibility)"),
+        other => bail!("{}", tr!("Photoshop compression {other} (save with Maximize Compatibility)", other = other)),
     }
     let sample = |plane: &[u8], i: usize| -> u8 {
         match depth {
@@ -444,5 +445,22 @@ mod tests {
         assert_eq!((e.width, e.height, e.png), (64, 32, true), "never larger, PNG for the alpha");
         assert!(!encode(&img, 128, false).unwrap().png, "an opaque material's picture stays JPEG");
         assert!(image::load_from_memory(&e.bytes).is_ok());
+    }
+
+    /// A preview that cannot be drawn says why in the language now: these errors reach the "No preview" chip, and what reads
+    /// them (the cache's record, the retry) must not depend on their words, so the language is read when the error happens.
+    #[test]
+    fn a_picture_that_cannot_be_read_says_so_in_the_language_now() {
+        use orbiters_i18n::{in_language, Language};
+        assert_eq!(psd(b"not a psd at all, not a psd at all").unwrap_err().to_string(), "not a Photoshop file");
+        for (language, said) in [
+            (Language::Ja, "Photoshopファイルではありません"),
+            (Language::Fr, "pas un fichier Photoshop"),
+            (Language::Es, "no es un archivo de Photoshop"),
+            (Language::PtBr, "não é um arquivo do Photoshop"),
+        ] {
+            let error = in_language(language, || psd(b"not a psd at all, not a psd at all").unwrap_err().to_string());
+            assert_eq!(error, said);
+        }
     }
 }

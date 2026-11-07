@@ -16,6 +16,7 @@ use super::prefab::{self, Graph, Loader, MatSource, MeshSource, Obj};
 use super::{math, primitives, terrain, texture, world as place, Limits};
 use crate::preview::{self as file, Bounds, Draw, Header, ImageFormat, IndexFormat, Instances, Kind, Mesh, Submesh, Texture, Writer};
 use anyhow::Context as _;
+use orbiters_i18n::tr;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -173,11 +174,11 @@ pub fn build(project: &Path, scene: &SceneFile, assets: &Assets, limits: &Limits
             MeshSource::Asset(r) => format!("{}:{}", r.guid.as_deref().unwrap_or("-"), r.file_id),
         };
         if !meshes.contains_key(&key) {
-            limits.check("reading the meshes")?; // i18n: not shown (what a time-limit error says it was doing)
+            limits.check(tr("reading the meshes"))?;
             let m = match resolve_mesh(&mut loader, source) {
                 Ok(m) => Some(m),
                 Err(e) => {
-                    limits.check("reading the meshes")?; // i18n: not shown (what a time-limit error says it was doing)
+                    limits.check(tr("reading the meshes"))?;
                     let what = format!("{e:#}");
                     if !loader.missing.contains(&what) && loader.missing.len() < 64 {
                         loader.missing.push(what);
@@ -223,8 +224,8 @@ pub fn build(project: &Path, scene: &SceneFile, assets: &Assets, limits: &Limits
     report.renderers += graph.objects.values().filter(|o| matches!(o, Obj::Terrain(_))).count();
     if candidates.is_empty() {
         match loader.missing.first() {
-            Some(why) => anyhow::bail!("nothing could be drawn: {why}"),
-            None => anyhow::bail!("the scene has nothing to draw"),
+            Some(why) => anyhow::bail!("{}", tr!("nothing could be drawn: {why}", why = why)),
+            None => anyhow::bail!("{}", tr("the scene has nothing to draw")),
         }
     }
     // Toolkit's order for the budget: avatars first, then the largest.
@@ -266,7 +267,7 @@ pub fn build(project: &Path, scene: &SceneFile, assets: &Assets, limits: &Limits
                 MatSource::Baked(k) => format!("b:{k}"),
             };
             if !looks.contains_key(&key) {
-                limits.check("reading the materials")?; // i18n: not shown (what a time-limit error says it was doing)
+                limits.check(tr("reading the materials"))?;
                 let resolved = match src {
                     MatSource::Baked(k) => Ok(baked_looks[*k].0.clone()),
                     src => resolve_material(&mut loader, src, &mut shader_names),
@@ -346,7 +347,7 @@ pub fn build(project: &Path, scene: &SceneFile, assets: &Assets, limits: &Limits
             loader.files.push(prefab::meta_path(p));
         }
     }
-    limits.check("reading the pictures")?; // i18n: not shown (what a time-limit error says it was doing)
+    limits.check(tr("reading the pictures"))?;
     let decoded = decode_all(&jobs, limits);
     let mut writer = Writer::default();
     let mut textures: Vec<Texture> = Vec::new();
@@ -371,7 +372,7 @@ pub fn build(project: &Path, scene: &SceneFile, assets: &Assets, limits: &Limits
                 });
             }
             Err(e) => {
-                let name = path.as_ref().map(|p| prefab::rel(assets, p)).unwrap_or_else(|| format!("a texture ({g})")); // i18n: not shown (a stored name or detail of the scene file)
+                let name = path.as_ref().map(|p| prefab::rel(assets, p)).unwrap_or_else(|| tr!("a texture ({guid})", guid = g));
                 let what = format!("{name}: {e:#}");
                 if !loader.missing.contains(&what) && loader.missing.len() < 64 {
                     loader.missing.push(what);
@@ -407,7 +408,7 @@ pub fn build(project: &Path, scene: &SceneFile, assets: &Assets, limits: &Limits
     // Two at a time: a 4096² lightmap takes 200 MB while it is decoded, a build in the background should not hold more.
     let lightmap_limits = Limits { threads: limits.threads.min(2), ..limits.clone() };
     let read_lightmaps = in_parallel(&lightmap_paths, &lightmap_limits, |p| {
-        let p = p.as_ref().context("not in the project")?;
+        let p = p.as_ref().with_context(|| tr("not in the project"))?;
         place::lightmap(p, lightmap_side, limits)
     });
     let mut lightmaps: Vec<file::Lightmap> = Vec::new();
@@ -421,7 +422,7 @@ pub fn build(project: &Path, scene: &SceneFile, assets: &Assets, limits: &Limits
                 textures.push(Texture { width: e.width, height: e.height, format: ImageFormat::Jpeg, linear: false, data });
             }
             Err(e) => {
-                let name = p.as_ref().map(|p| prefab::rel(assets, p)).unwrap_or_else(|| format!("a lightmap ({g})")); // i18n: not shown (a stored name or detail of the scene file)
+                let name = p.as_ref().map(|p| prefab::rel(assets, p)).unwrap_or_else(|| tr!("a lightmap ({guid})", guid = g));
                 let what = format!("{name}: {e:#}");
                 if !loader.missing.contains(&what) && loader.missing.len() < 64 {
                     loader.missing.push(what);
@@ -431,7 +432,7 @@ pub fn build(project: &Path, scene: &SceneFile, assets: &Assets, limits: &Limits
     }
 
     // The sky.
-    limits.check("reading the sky")?; // i18n: not shown (what a time-limit error says it was doing)
+    limits.check(tr("reading the sky"))?;
     let built_sky = place::sky(&mut loader, &graph);
     let mut sky = None;
     let mut sky_ambient = None;
@@ -463,7 +464,7 @@ pub fn build(project: &Path, scene: &SceneFile, assets: &Assets, limits: &Limits
     let mut vertices_total = 0u64;
     let identity = math::IDENTITY;
     for (c, slots) in candidates.iter().zip(&draws_materials) {
-        limits.check("posing the meshes")?; // i18n: not shown (what a time-limit error says it was doing)
+        limits.check(tr("posing the meshes"))?;
         let m = c.matrix;
         let posed = c.skinned && (c.mesh.skin.is_some() || c.blend.iter().any(|w| *w != 0.0));
         let (mesh_index, matrix, world_b) = if posed {
@@ -694,7 +695,7 @@ impl<'g> World<'g> {
 
 fn resolve_mesh(loader: &mut Loader, source: &MeshSource) -> anyhow::Result<Arc<ModelMesh>> {
     match source {
-        MeshSource::None => anyhow::bail!("no mesh"),
+        MeshSource::None => anyhow::bail!("{}", tr("no mesh")),
         MeshSource::Model { guid, mesh } => {
             let m = loader.model(guid)?;
             Ok(Arc::new(clone_mesh(&m.meshes[*mesh])))
@@ -702,13 +703,13 @@ fn resolve_mesh(loader: &mut Loader, source: &MeshSource) -> anyhow::Result<Arc<
         MeshSource::Asset(r) => {
             // A mesh saved in the scene itself (a tool's mesh, a ProBuilder shape).
             let Some(guid) = r.guid.as_deref() else {
-                let path = loader.scene.clone().context("a mesh in the scene itself")?;
+                let path = loader.scene.clone().with_context(|| tr("a mesh in the scene itself"))?;
                 return super::mesh_asset::read(&path, r.file_id, loader.limits).map(Arc::new).with_context(|| prefab::rel(loader.assets, &path));
             };
             if guid == "0000000000000000e000000000000000" {
-                return primitives::builtin(r.file_id).map(Arc::new).with_context(|| format!("Unity's built-in mesh {}", r.file_id));
+                return primitives::builtin(r.file_id).map(Arc::new).with_context(|| tr!("Unity's built-in mesh {id}", id = r.file_id));
             }
-            let path = loader.assets.path(guid).with_context(|| format!("a mesh that is not in the project ({guid})"))?;
+            let path = loader.assets.path(guid).with_context(|| tr!("a mesh that is not in the project ({guid})", guid = guid))?;
             let ext = path.extension().map(|e| e.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
             if ext == "fbx" || ext == "obj" || prefab::only_unity_reads(&ext) {
                 // What Unity's import made, by Unity's ID of it; an FBX falls back to reading the file.
@@ -716,7 +717,7 @@ fn resolve_mesh(loader: &mut Loader, source: &MeshSource) -> anyhow::Result<Arc<
                     loader.files.push(path.clone());
                     match a.mesh(r.file_id) {
                         Ok(m) => return Ok(Arc::new(m)),
-                        Err(e) if prefab::only_unity_reads(&ext) => return Err(e).with_context(|| format!("a mesh of {}", prefab::rel(loader.assets, &path))),
+                        Err(e) if prefab::only_unity_reads(&ext) => return Err(e).with_context(|| tr!("a mesh of {name}", name = prefab::rel(loader.assets, &path))),
                         Err(_) => {}
                     }
                 }
@@ -735,7 +736,7 @@ fn resolve_mesh(loader: &mut Loader, source: &MeshSource) -> anyhow::Result<Arc<
                         // Models imported before Unity 2019.3 number their meshes 4300000, 4300002, …
                         .or_else(|| (r.file_id >= 4_300_000 && r.file_id < 4_400_000 && r.file_id % 2 == 0).then(|| ((r.file_id - 4_300_000) / 2) as usize))
                         .filter(|i| *i < m.meshes.len())
-                        .with_context(|| format!("a mesh {} does not have", prefab::rel(loader.assets, &path)))?;
+                        .with_context(|| tr!("a mesh that {name} does not have", name = prefab::rel(loader.assets, &path)))?;
                     Ok(Arc::new(clone_mesh(&m.meshes[index])))
                 }
                 "asset" | "mesh" => {
@@ -743,9 +744,9 @@ fn resolve_mesh(loader: &mut Loader, source: &MeshSource) -> anyhow::Result<Arc<
                     super::mesh_asset::read(&path, r.file_id, loader.limits).map(Arc::new).with_context(|| prefab::rel(loader.assets, &path))
                 }
                 other if prefab::only_unity_reads(other) => {
-                    anyhow::bail!("{} is a .{other} model only Unity's import reads: open the project in Unity once", prefab::rel(loader.assets, &path))
+                    anyhow::bail!("{}", tr!("{name} is a .{other} model only Unity's import reads: open the project in Unity once", name = prefab::rel(loader.assets, &path), other = other))
                 }
-                other => anyhow::bail!("{} is a .{other} mesh, which previews do not read", prefab::rel(loader.assets, &path)),
+                other => anyhow::bail!("{}", tr!("{name} is a .{other} mesh, which previews do not read", name = prefab::rel(loader.assets, &path), other = other)),
             }
         }
     }
@@ -784,12 +785,12 @@ fn resolve_material(loader: &mut Loader, src: &MatSource, shader_names: &mut Has
             Ok(Look { material: file::Material { name: "None".into(), color: [0.75, 0.75, 0.75, 1.0], ..Default::default() }, ..Default::default() }) // i18n: not shown (a stored name or detail of the scene file)
         }
         MatSource::Asset(r) => {
-            let guid = r.guid.as_deref().context("a material in the scene itself")?;
+            let guid = r.guid.as_deref().with_context(|| tr("a material in the scene itself"))?;
             if guid == "0000000000000000f000000000000000" {
                 // Unity's Default-Material and Default-Diffuse.
                 return Ok(Look { material: file::Material { name: "Default-Material".into(), ..Default::default() }, ..Default::default() });
             }
-            let path = loader.assets.path(guid).with_context(|| format!("a material that is not in the project ({guid})"))?;
+            let path = loader.assets.path(guid).with_context(|| tr!("a material that is not in the project ({guid})", guid = guid))?;
             let ext = path.extension().map(|e| e.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
             if ext == "fbx" || ext == "obj" || prefab::only_unity_reads(&ext) {
                 // A model's own material as its import made it, its properties read as a `.mat` file's.
@@ -801,7 +802,7 @@ fn resolve_material(loader: &mut Loader, src: &MatSource, shader_names: &mut Has
                     }
                 }
                 if prefab::only_unity_reads(&ext) {
-                    anyhow::bail!("a material of {}, only in its import", prefab::rel(loader.assets, &path));
+                    anyhow::bail!("{}", tr!("a material of {name}, only in its import", name = prefab::rel(loader.assets, &path)));
                 }
                 // A model's own material, by Unity's ID of it: its name's hash, or a name an older import numbered.
                 let m = loader.model(guid)?;
@@ -812,15 +813,15 @@ fn resolve_material(loader: &mut Loader, src: &MatSource, shader_names: &mut Has
             mat_file(loader, &path, shader_names)
         }
         MatSource::Model { guid, material } => model_slot(loader, guid, *material, shader_names),
-        MatSource::Baked(_) => anyhow::bail!("a look the build keeps itself"),
+        MatSource::Baked(_) => anyhow::bail!("{}", tr("a look the build keeps itself")),
     }
 }
 
 fn mat_file(loader: &mut Loader, path: &Path, shader_names: &mut HashMap<String, String>) -> anyhow::Result<Look> {
-    let text = std::fs::read_to_string(path).with_context(|| format!("reading {}", prefab::rel(loader.assets, path)))?;
+    let text = std::fs::read_to_string(path).with_context(|| tr!("reading {name}", name = prefab::rel(loader.assets, path)))?;
     loader.files.push(path.to_path_buf());
     let (name, shader, props) =
-        material::props(&text).with_context(|| format!("{} is not a material Unity saved as text", prefab::rel(loader.assets, path)))?;
+        material::props(&text).with_context(|| tr!("{name} is not a material Unity saved as text", name = prefab::rel(loader.assets, path)))?;
     let shader_name = shader_name_of(loader, shader, shader_names);
     Ok(material::look(&name, &shader_name, &props))
 }
@@ -1161,8 +1162,8 @@ enum Use {
 
 fn decode_all(jobs: &[(String, Use, Option<PathBuf>, bool, u32)], limits: &Limits) -> Vec<anyhow::Result<texture::Encoded>> {
     in_parallel(jobs, limits, |(_, how, path, keep_alpha, side)| {
-        limits.check("reading the pictures")?; // i18n: not shown (what a time-limit error says it was doing)
-        let path = path.as_ref().context("not in the project")?;
+        limits.check(tr("reading the pictures"))?;
+        let path = path.as_ref().with_context(|| tr("not in the project"))?;
         let img = texture::decode(path, limits.max_texture_bytes)?;
         // An emission mask needs less detail than the colour, ripples and grain a little less.
         let side = match how {
@@ -1193,14 +1194,14 @@ fn add_terrains(
     ids.sort();
     for id in ids {
         let Some(Obj::Terrain(t)) = graph.objects.get(&id) else { continue };
-        let Some(&tr) = world.transform_of.get(&t.game_object) else { continue };
-        if !t.enabled || !world.shown(tr) {
+        let Some(&tform) = world.transform_of.get(&t.game_object) else { continue };
+        if !t.enabled || !world.shown(tform) {
             continue;
         }
-        loader.limits.check("reading the terrain")?; // i18n: not shown (what a time-limit error says it was doing)
+        loader.limits.check(tr("reading the terrain"))?;
         let Some(r) = &t.data else { continue };
         let Some(path) = r.guid.as_deref().and_then(|g| loader.assets.path(g)) else {
-            let what = "a terrain whose data is not in the project".to_string(); // i18n: not shown (a stored name or detail of the scene file)
+            let what = tr("a terrain whose data is not in the project").to_string();
             if !loader.missing.contains(&what) {
                 loader.missing.push(what);
             }
@@ -1227,7 +1228,7 @@ fn add_terrains(
         baked.push((Look { material, main_texture: Some(format!("baked:{k}")), ..Default::default() }, picture));
         let mesh = Arc::new(data.mesh());
         // Terrains stand at their transform's place, turned and scaled by nothing else.
-        let m = world.matrix(tr);
+        let m = world.matrix(tform);
         let at = [m[12], m[13], m[14]];
         let matrix = math::trs(at, [0.0, 0.0, 0.0, 1.0], [1.0, 1.0, 1.0]);
         let local = bounds_of(&mesh.positions);
@@ -1275,7 +1276,7 @@ fn add_terrains(
         }
         for (i, tree) in data.trees.iter().step_by(step).enumerate() {
             let Some(parts) = protos.get(tree.prototype) else { continue };
-            loader.limits.check("placing the trees")?; // i18n: not shown (what a time-limit error says it was doing)
+            loader.limits.check(tr("placing the trees"))?;
             let place = [at[0] + tree.position[0] * data.size[0], at[1] + tree.position[1] * data.size[1], at[2] + tree.position[2] * data.size[2]];
             let (s, c) = (tree.rotation * 0.5).sin_cos();
             let m = math::trs(place, [0.0, s, 0.0, c], [tree.width, tree.height, tree.width]);
@@ -1906,5 +1907,27 @@ Terrain:
         assert!(built.files.iter().any(|f| f.ends_with("Rig.fbx")));
         assert!(built.files.iter().any(|f| f.ends_with("Avatar Variant.prefab")));
         assert!(built.report.missing.is_empty(), "{:?}", built.report.missing);
+    }
+
+    /// The time ran out: the error is typed (what is done about it never reads its words) and says what the build was doing in
+    /// the language now, as a phrase that reads inside "it took too long (…)".
+    #[test]
+    fn a_build_out_of_time_says_what_it_was_doing_in_the_language_now() {
+        use crate::scene::TooLong;
+        use orbiters_i18n::{in_language, Language};
+        let limits = Limits::new(std::time::Duration::ZERO);
+        let error = limits.check(tr("reading the meshes")).unwrap_err();
+        assert!(error.is::<TooLong>());
+        assert_eq!(error.to_string(), "it took too long (reading the meshes)");
+        for (language, said) in [
+            (Language::Ja, "時間がかかりすぎました（メッシュの読み込み）"),
+            (Language::Fr, "cela a pris trop de temps (la lecture des meshes)"),
+            (Language::Es, "tardó demasiado (la lectura de los meshes)"),
+            (Language::PtBr, "demorou demais (a leitura dos meshes)"),
+        ] {
+            let error = in_language(language, || limits.check(tr("reading the meshes")).unwrap_err());
+            assert!(error.is::<TooLong>(), "typed in {language:?} too");
+            assert_eq!(in_language(language, || error.to_string()), said);
+        }
     }
 }

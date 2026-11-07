@@ -1,0 +1,2 @@
+# The files this area covers: every text in them is wrapped and translated (tests/coverage.rs).
+# None: the scene files of the 3D preview are in pages-projects already; this folder only holds their error texts.

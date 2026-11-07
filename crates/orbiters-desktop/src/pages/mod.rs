@@ -339,3 +339,27 @@ pub fn local_time_unix(secs: u64) -> String {
     let Ok(t) = time::OffsetDateTime::from_unix_timestamp(secs as i64) else { return String::new() };
     local_time(&t.format(&time::format_description::well_known::Rfc3339).unwrap_or_default())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use orbiters_i18n::{in_language, Language};
+
+    /// Each language writes the date its own way, but keeps the date and the time apart by ", " (the gallery and community pages split them there),
+    /// and leaves no `{name}` of its template unfilled.
+    #[test]
+    fn a_date_follows_the_language_and_keeps_its_time_after_a_comma() {
+        for language in Language::ALL {
+            in_language(language, || {
+                let text = local_time("2026-10-20T12:30:00Z");
+                assert!(!text.contains('{') && !text.contains('}'), "{language:?}: {text}");
+                let (date, clock) = text.rsplit_once(", ").unwrap_or_else(|| panic!("{language:?}: no comma in {text}"));
+                assert!(clock.len() == 5 && clock.as_bytes()[2] == b':', "{language:?}: {clock}");
+                assert!(date.contains("2026"), "{language:?}: {date}");
+                if language == Language::Ja {
+                    assert!(date.contains('年') && date.contains('月') && date.contains('日'), "{date}");
+                }
+            });
+        }
+    }
+}

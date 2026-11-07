@@ -82,8 +82,10 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
                 let signed_in = matches!(snap.account.state, AccountState::SignedIn { .. } | AccountState::Offline { .. } | AccountState::Checking { .. });
                 let can_ask = snap.settings.n4n0.enabled && snap.settings.n4n0.assistant && signed_in;
                 let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), 40.0), Sense::hover());
-                let talk_w = 132.0;
-                let ask_w = 92.0;
+                // A longer word in another language widens its button, and the field gives the room.
+                let talk_label = if state.talking { tr("Listening…") } else { tr("Hold to talk") };
+                let talk_w = Button::new(talk_label).icon(icons::MICROPHONE).desired_width(ui).max(132.0);
+                let ask_w = Button::new(tr("Ask")).icon(icons::SPARKLE).desired_width(ui).max(92.0);
                 let field = Rect::from_min_max(row.min, pos2(row.right() - talk_w - ask_w - 16.0, row.max.y));
                 let mut fu = ui.new_child(UiBuilder::new().max_rect(field).layout(Layout::left_to_right(egui::Align::Center)));
                 let resp = widgets::text_field(&mut fu, "n4n0-ask", &mut state.ask, tr("Ask N4N0 something…"), field.width(), false);
@@ -96,8 +98,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
                 // Talk: held to speak, like the menu's button. One widget whatever its label says: the press that
                 // changes the label keeps holding it.
                 let talk_rect = Rect::from_min_size(pos2(ask_rect.right() + 8.0, row.top()), vec2(talk_w, 40.0));
-                let label = if state.talking { tr("Listening…") } else { tr("Hold to talk") };
-                let talk = Button::new(label)
+                let talk = Button::new(talk_label)
                     .icon(icons::MICROPHONE)
                     .enabled(can_ask && n4n0.voice.installed)
                     .width(talk_w)
@@ -550,11 +551,13 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
                 None => tr("Wear an avatar with the N4N0 prop in VRChat to test it").to_string(),
             };
             m.add(9, |ui| section(ui, cx, 9, icons::FLASK, tr("Testing"), Some(&testing_sub), |ui| {
+                // The button's own width (a longer word in another language), so the description does not run under it.
+                let play_w = Button::new(tr("Play every state")).icon(icons::PLAY).size(Size::Sm).desired_width(ui).max(150.0);
                 widgets::field(
                     ui,
                     tr("States"),
                     Some(tr("Hold N4N0 in one state, as everyone sees it, or play them all, two seconds each. Automatic follows what N4N0 is doing.")),
-                    150.0,
+                    play_w + 8.0,
                     |ui| {
                         if Button::new(tr("Play every state")).icon(icons::PLAY).size(Size::Sm).enabled(prop && !n4n0.test_cycle).show(ui).clicked() {
                             cx.ctl.n4n0(N4n0Command::TestCycle);

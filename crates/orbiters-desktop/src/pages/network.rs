@@ -198,6 +198,29 @@ mod tests {
         assert_eq!(summary(&status(LanLink::Waiting)), "Waiting for VRChat on Quest-3");
     }
 
+    /// What the card says follows the language, with the values where each language puts them, and the sidebar's Tone stays what it was.
+    #[test]
+    fn the_card_speaks_each_language_with_its_values_in_place() {
+        use orbiters_i18n::{in_language, Language};
+        let one = FoundVrchat { name: "a".into(), device: None, ip: Ipv4Addr::new(10, 0, 0, 2), query_port: 1, osc_port: None };
+        let connected = status(LanLink::Connected);
+        let waiting = status(LanLink::Waiting);
+        let choose = LanStatus { link: LanLink::Choose, found: vec![one.clone(), one], ..Default::default() };
+        for (language, connected_to, waiting_for, found) in [
+            (Language::Fr, "Connecté à VRChat on Quest-3 · 192.168.1.23", "En attente de Quest-3", "2 trouvés\u{a0}: choisis-en un"),
+            (Language::Ja, "VRChat on Quest-3に接続済み · 192.168.1.23", "Quest-3を待機中", "2件見つかりました：1つ選んでください"),
+            (Language::Es, "Conectado a VRChat on Quest-3 · 192.168.1.23", "Esperando a Quest-3", "Se encontraron 2: elige uno"),
+            (Language::PtBr, "Conectado a VRChat on Quest-3 · 192.168.1.23", "Aguardando Quest-3", "2 encontrados: escolha um"),
+        ] {
+            in_language(language, || {
+                assert_eq!(summary(&connected), connected_to, "{language:?}");
+                assert_eq!(sidebar_status(&waiting), (waiting_for.to_string(), Tone::Warn), "{language:?}");
+                assert_eq!(sidebar_status(&choose), (found.to_string(), Tone::Warn), "{language:?}");
+                assert_eq!(sidebar_status(&connected).1, Tone::Ok, "{language:?}");
+            });
+        }
+    }
+
     #[test]
     fn only_an_address_can_be_entered() {
         assert_eq!(parse_address(" 192.168.1.23 "), Some(Ipv4Addr::new(192, 168, 1, 23)));

@@ -404,7 +404,12 @@ impl Export {
         if !ready && !self.edits.running() {
             b = b.hint(tr("Discard the splat edits that could not be applied first"));
         }
-        if widgets::activated(&b.show(ui)) && ready && !picking {
+        let go = b.show(ui);
+        // Its name with a value in it has no English of its own to be found by, in a run in another language.
+        if !picking {
+            widgets::note_control(ui.ctx(), &format!("Export {}…", self.format.label()), go.rect, ready); // i18n: not shown
+        }
+        if widgets::activated(&go) && ready && !picking {
             self.ask(&ctx, false);
         }
         if widgets::activated(&Button::new(tr("Cancel")).variant(Variant::Ghost).id_salt("export-cancel").show(ui)) {

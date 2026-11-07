@@ -558,7 +558,7 @@
   "{count} lossless pictures": "{count} images sans perte",
   "{count} reconstructed capture: frames, depth and sound. Its 3D view stays.": "{count} capture reconstruite : images, profondeur et son. Sa vue 3D reste.",
   "{count} reconstructed captures: frames, depth and sound. Their 3D views stay.": "{count} captures reconstruites : images, profondeur et son. Leurs vues 3D restent.",
-  "{count} saved": "Enregistrées : {count}",
+  "{count} saved": "Gardées : {count}",
   "{count} session left · it goes on with the window closed": "{count} session restante · ça continue fenêtre fermée",
   "{count} session of captures and 3D pictures": "{count} session de captures et de photos 3D",
   "{count} sessions left · it goes on with the window closed": "{count} sessions restantes · ça continue fenêtre fermée",

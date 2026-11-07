@@ -2118,6 +2118,10 @@ fn shots(args: &[String], picture_folders: Vec<PathBuf>) -> anyhow::Result<()> {
         })) {
             continue;
         }
+        // These read a real Unity project: a run with no scene named goes on without them.
+        if only.is_none() && sc.name.starts_with("projects-preview-native") && std::env::var_os("ORBITERS_PREVIEW_PROJECT").is_none() {
+            continue;
+        }
         let path = out.join(format!("{}.png", sc.name));
         render(&mut gpu, &sc, scale, vec2(width, height), &path, frames)?;
         println!("{}", path.display());

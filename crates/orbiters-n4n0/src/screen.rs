@@ -921,7 +921,7 @@ impl ScreenRuntime {
                         _ => "someone else's touch", // i18n: not shown
                     };
                     if let Some((index, target)) = hit {
-                        self.pointer_log.press(who, x, y, &format!("{target:?} on {}", ScreenPage::of(&self.menu).name()));
+                        self.pointer_log.press(who, x, y, &format!("{target:?} on {}", ScreenPage::of(&self.menu).name())); // i18n: not shown (a log line)
                         self.pressed = Some((index, now));
                         self.presses = self.presses.wrapping_add(1);
                         self.dragging[hand] = menu::timeline_segment(target);

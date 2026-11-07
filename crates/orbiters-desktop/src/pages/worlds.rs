@@ -1657,7 +1657,7 @@ fn viewer(ctx: &egui::Context, cx: &mut Cx, state: &mut State, world: &VisitedWo
         } else if fixed.contains(&shot.path) {
             // The folder button sits beside the words, whatever length they have in the language.
             let said = widgets::text(&pp, pos2(pic.right(), pic.bottom() + 24.0), Align2::RIGHT_CENTER, &Txt::new(tr("Shared on the Map explorer"), 12.5).color(theme::OK));
-            left = said.left() - 14.0;
+            left = (pic.right() - 190.0).min(said.left() - 14.0);
         }
         let folder_r = Rect::from_min_size(pos2(left - 32.0, pic.bottom() + 8.0), vec2(32.0, 32.0));
         if IconButton::new(icons::FOLDER_OPEN, mark("Show in its folder")).size(32.0, 15.0).show_at(&mut vu, folder_r).clicked() {

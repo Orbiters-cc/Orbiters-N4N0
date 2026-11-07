@@ -122,7 +122,7 @@
   "N4N0: music volume at {percent} %": "N4N0 : volume de la musique à {percent} %",
   "N4N0: music went back": "N4N0 : musique revenue en arrière",
   "Name the new state": "Nomme le nouvel état",
-  "No 3D capture yet": "Pas encore de capture 3D",
+  "No 3D capture yet": "Aucune capture 3D",
   "No 3D view yet": "Pas de vue 3D",
   "No comment yet": "Pas encore de commentaire",
   "No friend online": "Aucun ami en ligne",
@@ -332,7 +332,7 @@
   "{count} likes": "{count} j’aime",
   "{count} parameter this avatar no longer has left out": "{count} paramètre que cet avatar n’a plus est ignoré",
   "{count} parameters this avatar no longer has left out": "{count} paramètres que cet avatar n’a plus sont ignorés",
-  "{count} saved": "Enregistrées : {count}",
+  "{count} saved": "Gardées : {count}",
   "{count} saved for this avatar": "{count} enregistrés pour cet avatar",
   "{days} d": "{days} j",
   "{days} d ago": "il y a {days} j",
@@ -347,5 +347,6 @@
   "{puts} · also after each world join": "{puts} · aussi à chaque arrivée",
   "{reason}: a QR code here opens only http or https pages": "{reason} : un QR code ici n’ouvre que des pages http ou https",
   "{time} · muted": "{time} · micro coupé",
-  "✓ Link copied": "✓ Lien copié"
+  "✓ Link copied": "✓ Lien copié",
+  "panel\u0004Search videos": "Rechercher"
 }

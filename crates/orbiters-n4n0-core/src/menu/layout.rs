@@ -1722,7 +1722,7 @@ fn tile_note(menu: &Menu, tile: u8) -> String {
         0 if menu.desktop_mode => tr("Only in VR").into(),
         0 => (if menu.fast_walk { tr("On") } else { tr("Off") }).into(),
         1 => match menu.results.len() {
-            0 => tr("Search videos").into(),
+            0 => tr_ctx("panel", "Search videos").into(),
             _ => format!("\"{}\"", menu.results_for),
         },
         2 => match &menu.call {

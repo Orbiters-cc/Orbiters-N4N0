@@ -1471,10 +1471,10 @@ fn draw(p: &Painter, zone: Zone, item: &Item, facts: &Facts, hovered: bool, pres
             if hovered || on {
                 p.rect_stroke(rect.shrink(0.75), radius, Stroke::new(1.5, tint), egui::StrokeKind::Middle);
             }
-            let at = pos2(rect.left() + 26.0, rect.center().y);
-            widgets::icon(p, at, icon, 24.0, tint);
-            let font = theme::font(16.0, weight::SEMIBOLD);
-            p.text(pos2(rect.left() + 46.0, rect.center().y), Align2::LEFT_CENTER, fit(p, label, &font, rect.width() - 52.0), font, look::LABEL);
+            let at = pos2(rect.left() + 20.0, rect.center().y);
+            widgets::icon(p, at, icon, 22.0, tint);
+            let font = theme::font(15.0, weight::SEMIBOLD);
+            p.text(pos2(rect.left() + 36.0, rect.center().y), Align2::LEFT_CENTER, fit(p, label, &font, rect.width() - 40.0), font, look::LABEL);
         }
         Look::NowPlaying => {
             let tint = theme::VIOLET;

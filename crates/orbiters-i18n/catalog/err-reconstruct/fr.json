@@ -96,5 +96,6 @@
   "{path} was not kept whole": "{path} n’a pas été conservé en entier",
   "{path}: a sky map is RGB, not {found}": "{path} : une carte du ciel est en RVB, pas en {found}",
   "{path}: a sky map is twice as wide as high ({width} × {height})": "{path} : une carte du ciel est deux fois plus large que haute ({width} × {height})",
-  "{total} tile entries in one view: more than the GPU can sort ({max_entries})": "{total} entrées de tuile dans une vue : plus que le GPU ne peut en trier ({max_entries})"
+  "{total} tile entries in one view: more than the GPU can sort ({max_entries})": "{total} entrées de tuile dans une vue : plus que le GPU ne peut en trier ({max_entries})",
+  "asked to pause": "une pause a été demandée"
 }

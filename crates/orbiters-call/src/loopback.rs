@@ -71,7 +71,7 @@ impl Report {
 
 impl fmt::Display for Report {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        writeln!(f, "connected in {} ms, listened {:.1} s", self.connect_ms, self.listened.as_secs_f32())?;
+        writeln!(f, "connected in {} ms, listened {:.1} s", self.connect_ms, self.listened.as_secs_f32())?; // i18n: not shown (a developer's test tool)
         for (who, h) in ["callee heard the caller", "caller heard the callee"].iter().zip(&self.heard) { // i18n: not shown (the loopback test tool prints for developers)
             writeln!(
                 f,

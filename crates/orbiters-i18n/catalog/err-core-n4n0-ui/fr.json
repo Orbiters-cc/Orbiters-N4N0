@@ -42,7 +42,7 @@
   "too short to be sealed": "trop court pour être chiffré",
   "truncated chunk": "bloc tronqué",
   "unexpected answer from Orbiters ({status})": "réponse inattendue d’Orbiters ({status})",
-  "waiting for the GPU: {error}": "échec en attendant le GPU : {error}",
+  "waiting for the GPU: {error}": "attente du GPU : {error}",
   "{path} changed while it was sent": "{path} a changé pendant l’envoi",
   "{path} is not a manifest": "{path} n’est pas un manifeste",
   "{path} is not a session folder.": "{path} n’est pas un dossier de session.",

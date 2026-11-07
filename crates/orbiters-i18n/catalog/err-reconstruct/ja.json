@@ -61,7 +61,7 @@
   "reading back from the GPU: {error}": "GPUからの読み戻しに失敗しました：{error}",
   "reading frames.bin": "frames.binの読み込み中",
   "reading the session's manifest": "セッションのマニフェストの読み込み中",
-  "reading {path}": "{path}の読み込み中",
+  "reading {path}": "{path}の読み込み",
   "removing {path}": "{path}の削除中",
   "replacing the previous result in {path}": "{path}内の前回の結果を置き換え中",
   "splat edits of version {found} (this app reads version {expected}): update the app": "バージョン{found}のスプラット編集です(このアプリが読み込めるのはバージョン{expected})：アプリを更新してください",
@@ -96,5 +96,6 @@
   "{path} was not kept whole": "{path}を完全な形で保管できませんでした",
   "{path}: a sky map is RGB, not {found}": "{path}：スカイマップはRGBで、{found}ではありません",
   "{path}: a sky map is twice as wide as high ({width} × {height})": "{path}：スカイマップの幅は高さの2倍でなければなりません({width} × {height})",
-  "{total} tile entries in one view: more than the GPU can sort ({max_entries})": "1つのビューにタイルのエントリが{total}個あり、GPUが並べ替えられる数({max_entries})を超えています"
+  "{total} tile entries in one view: more than the GPU can sort ({max_entries})": "1つのビューにタイルのエントリが{total}個あり、GPUが並べ替えられる数({max_entries})を超えています",
+  "asked to pause": "一時停止を求められました"
 }

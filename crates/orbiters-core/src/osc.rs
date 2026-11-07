@@ -985,7 +985,7 @@ impl OscService {
 /// Windows, the first time a program listens beyond loopback, its firewall asks the person in a window that takes the
 /// foreground; a test program is named by a hash of its build, so each new one asks again, and while the prompt is up no game
 /// or agent gets the focus. mDNS is what listens: a test run has nothing to find on the network anyway.
-pub(crate) fn no_network_listening() -> bool {
+pub fn no_network_listening() -> bool {
     std::env::var_os("ORBITERS_NO_NETWORK_LISTENING").is_some()
 }
 

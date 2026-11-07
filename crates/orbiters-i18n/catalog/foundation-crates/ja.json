@@ -270,5 +270,15 @@
   "Lens blur": "レンズぼかし",
   "Directional blur": "方向ぼかし",
   "Depth blur": "被写界深度ぼかし",
-  "List {number}": "リスト{number}"
+  "List {number}": "リスト{number}",
+  "SteamVR is not installed": "SteamVRがインストールされていません",
+  "SteamVR is not running": "SteamVRが起動していません",
+  "SteamVR is shutting down": "SteamVRが終了中です",
+  "SteamVR refused the connection (error {code})": "SteamVRが接続を拒否しました（エラー{code}）",
+  "SteamVR has no {name} (error {code})": "SteamVRに{name}がありません（エラー{code}）",
+  "could not load SteamVR's client: {error}": "SteamVRのクライアントを読み込めませんでした：{error}",
+  "the tracking smoothing control is in use by another version of Orbiters - N4N0 (layout {layout}, this one {version})": "トラッキング補正の制御は別のバージョンのOrbiters - N4N0が使用中です（レイアウト{layout}、このバージョンは{version}）",
+  "SteamVR no longer loads the smoothing driver, but its folder {path} could not be removed (SteamVR may still be using it; close SteamVR and try again)": "SteamVRはスムージングドライバーを読み込まなくなりましたが、フォルダー{path}を削除できませんでした（SteamVRが使用中の可能性があります。SteamVRを閉じてもう一度お試しください）",
+  "Spout sender \"{name}\" not found": "Spoutセンダー「{name}」が見つかりません",
+  "unsupported Spout texture format (DXGI {format})": "対応していないSpoutテクスチャ形式です（DXGI {format}）"
 }

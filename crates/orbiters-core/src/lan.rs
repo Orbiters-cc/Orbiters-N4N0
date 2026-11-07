@@ -502,7 +502,7 @@ mod tests {
                 let mut stream = stream;
                 let mut buf = [0u8; 1024];
                 let _ = stream.read(&mut buf);
-                let body = r#"{"NAME":"VRChat-Client-TEST01","OSC_IP":"0.0.0.0","OSC_PORT":9123}"#;
+                let body = r#"{"NAME":"VRChat-Client-TEST01","OSC_IP":"0.0.0.0","OSC_PORT":9123}"#; // network: not a socket (what a stand-in VRChat answers)
                 let _ = write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
             }
         });

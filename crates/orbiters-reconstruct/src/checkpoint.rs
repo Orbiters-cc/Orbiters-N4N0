@@ -84,7 +84,7 @@ pub struct Interrupted;
 
 impl std::fmt::Display for Interrupted {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("asked to pause")
+        f.write_str(orbiters_i18n::tr("asked to pause"))
     }
 }
 

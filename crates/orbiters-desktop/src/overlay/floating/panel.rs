@@ -274,6 +274,7 @@ impl Panel {
                 ..Default::default()
             };
             input.viewports.insert(ViewportId::ROOT, ViewportInfo { native_pixels_per_point: Some(1.0), focused: Some(true), ..Default::default() });
+            orbiters_ui::fonts::follow_language(&self.ctx);
             let mut full = self.ctx.run_ui(input, |ui| state.show_in(ui, snap, backend, poses, ui::Surface::Floating));
             pressed |= orbiters_ui::widgets::take_press(&self.ctx);
             self.painter.set_textures(&mut full.textures_delta);

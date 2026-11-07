@@ -2202,8 +2202,14 @@ fn event_card(
     }
     if let Some(w) = c.world.as_ref().and_then(|w| w.name.as_ref()) {
         if room - fx > 40.0 {
-            widgets::icon(&p, pos2(fx + 6.0, line_y), icons::GLOBE, 12.0, theme::FG_4);
-            widgets::text_truncated(&p, pos2(fx + 18.0, line_y), Align2::LEFT_CENTER, &Txt::new(w, 12.0).color(theme::FG_3), room - fx - 18.0);
+            // Its name whole rather than its little globe, where only one fits (Join is wider in some languages).
+            let wide = widgets::text_size(&cu, &Txt::new(w, 12.0)).x;
+            let globe = wide + 18.0 <= room - fx || wide > room - fx;
+            if globe {
+                widgets::icon(&p, pos2(fx + 6.0, line_y), icons::GLOBE, 12.0, theme::FG_4);
+            }
+            let at = if globe { fx + 18.0 } else { fx };
+            widgets::text_truncated(&p, pos2(at, line_y), Align2::LEFT_CENTER, &Txt::new(w, 12.0).color(theme::FG_3), room - at);
         }
     }
     (interactive && (join || widgets::pressed(&resp))).then_some(thumb)

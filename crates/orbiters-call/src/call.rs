@@ -156,7 +156,7 @@ impl PeerConnectionEventHandler for Handler {
         // The address behind a reflexive or relayed candidate is this computer's own, and of no use to the other
         // side (RFC 8445 keeps it for diagnostics): left out, as browsers do.
         if !candidate.related_address.is_empty() {
-            candidate.related_address = "0.0.0.0".into();
+            candidate.related_address = "0.0.0.0".into(); // network: not a socket (what a candidate says it was related to)
             candidate.related_port = 0;
         }
         match candidate.to_json() {

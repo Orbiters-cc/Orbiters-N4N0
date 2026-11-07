@@ -28,8 +28,8 @@
   "a staging texture: {error}": "ステージングテクスチャ：{error}",
   "no staging texture": "ステージングテクスチャがありません",
   "the headset's GPU is not among wgpu's adapters": "ヘッドセットのGPUがwgpuのアダプターに見つかりません",
-  "no GPU adapter: {error}": "GPUアダプターがありません：{error}",
+  "no GPU adapter: {error}": "GPUアダプターが見つかりません：{error}",
   "GPU device: {error}": "GPUデバイス：{error}",
-  "waiting for the GPU: {error}": "GPUの待機：{error}",
+  "waiting for the GPU: {error}": "GPUの待機中：{error}",
   "reading back: {error}": "結果の読み出し：{error}"
 }

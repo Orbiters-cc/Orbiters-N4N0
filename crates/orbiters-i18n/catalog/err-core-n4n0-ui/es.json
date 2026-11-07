@@ -42,7 +42,7 @@
   "too short to be sealed": "demasiado corto para estar cifrado",
   "truncated chunk": "fragmento truncado",
   "unexpected answer from Orbiters ({status})": "respuesta inesperada de Orbiters ({status})",
-  "waiting for the GPU: {error}": "error al esperar a la GPU: {error}",
+  "waiting for the GPU: {error}": "al esperar la GPU: {error}",
   "{path} changed while it was sent": "{path} cambió mientras se enviaba",
   "{path} is not a manifest": "{path} no es un manifiesto",
   "{path} is not a session folder.": "{path} no es una carpeta de sesión.",

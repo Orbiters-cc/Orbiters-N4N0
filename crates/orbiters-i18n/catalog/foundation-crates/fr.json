@@ -270,5 +270,15 @@
   "Lens blur": "Flou d’objectif",
   "Directional blur": "Flou directionnel",
   "Depth blur": "Flou de profondeur",
-  "List {number}": "Liste {number}"
+  "List {number}": "Liste {number}",
+  "SteamVR is not installed": "SteamVR n’est pas installé",
+  "SteamVR is not running": "SteamVR n’est pas lancé",
+  "SteamVR is shutting down": "SteamVR est en train de se fermer",
+  "SteamVR refused the connection (error {code})": "SteamVR a refusé la connexion (erreur {code})",
+  "SteamVR has no {name} (error {code})": "SteamVR n’a pas {name} (erreur {code})",
+  "could not load SteamVR's client: {error}": "impossible de charger le client de SteamVR : {error}",
+  "the tracking smoothing control is in use by another version of Orbiters - N4N0 (layout {layout}, this one {version})": "le contrôle du suivi lissé est utilisé par une autre version d’Orbiters - N4N0 (disposition {layout}, celle-ci {version})",
+  "SteamVR no longer loads the smoothing driver, but its folder {path} could not be removed (SteamVR may still be using it; close SteamVR and try again)": "SteamVR ne charge plus le pilote de lissage, mais son dossier {path} n’a pas pu être supprimé (SteamVR l’utilise peut-être encore ; ferme SteamVR et réessaie)",
+  "Spout sender \"{name}\" not found": "Émetteur Spout « {name} » introuvable",
+  "unsupported Spout texture format (DXGI {format})": "format de texture Spout non pris en charge (DXGI {format})"
 }

@@ -56,8 +56,8 @@ pub enum SpoutError {
 impl std::fmt::Display for SpoutError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            SpoutError::NotFound(name) => write!(f, "Spout sender \"{name}\" not found"),
-            SpoutError::UnsupportedFormat(fmt) => write!(f, "unsupported Spout texture format (DXGI {fmt})"),
+            SpoutError::NotFound(name) => write!(f, "{}", orbiters_i18n::tr!("Spout sender \"{name}\" not found", name = name)),
+            SpoutError::UnsupportedFormat(fmt) => write!(f, "{}", orbiters_i18n::tr!("unsupported Spout texture format (DXGI {format})", format = fmt)),
             SpoutError::Platform(msg) => write!(f, "{msg}"),
         }
     }

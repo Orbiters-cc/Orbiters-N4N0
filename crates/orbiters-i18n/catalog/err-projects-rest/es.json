@@ -20,7 +20,7 @@
   "Unity Hub could not be opened: {why}": "No se pudo abrir Unity Hub: {why}",
   "Orbiters' Known VPM catalog could not be read: {why}": "No se pudo leer el catálogo Known VPM de Orbiters: {why}",
   "{name} could not be added: {why}": "No se pudo agregar {name}: {why}",
-  "reading {path}": "lectura de {path}",
+  "reading {path}": "al leer {path}",
   "not an Orbiters project preview": "no es una vista previa de proyecto de Orbiters",
   "a project preview of schema {schema}, this version reads {oldest} to {newest}": "una vista previa de proyecto con esquema {schema}; esta versión lee de {oldest} a {newest}",
   "the preview's header runs past its end": "el encabezado de la vista previa pasa del final del archivo",

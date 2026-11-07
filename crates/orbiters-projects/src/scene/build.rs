@@ -1137,6 +1137,8 @@ fn in_parallel<T: Sync, R: Send>(jobs: &[T], limits: &Limits, f: impl Fn(&T) -> 
     let threads = std::thread::available_parallelism().map_or(4, |n| n.get()).clamp(1, limits.threads.max(1)).min(jobs.len().max(1));
     let next = std::sync::atomic::AtomicUsize::new(0);
     let results: Vec<std::sync::Mutex<Option<R>>> = jobs.iter().map(|_| std::sync::Mutex::new(None)).collect();
+    // The language of the build, for what goes wrong in these threads too.
+    let language = orbiters_i18n::language();
     std::thread::scope(|scope| {
         for _ in 0..threads {
             scope.spawn(|| {
@@ -1144,7 +1146,7 @@ fn in_parallel<T: Sync, R: Send>(jobs: &[T], limits: &Limits, f: impl Fn(&T) -> 
                 loop {
                     let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     let Some(job) = jobs.get(i) else { break };
-                    *results[i].lock().unwrap() = Some(f(job));
+                    *results[i].lock().unwrap() = Some(orbiters_i18n::in_language(language, || f(job)));
                 }
             });
         }

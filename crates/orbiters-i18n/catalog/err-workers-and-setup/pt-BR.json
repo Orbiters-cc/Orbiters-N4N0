@@ -83,7 +83,7 @@
   "{name} is {found} bytes in the archive, not the {size} Orbiters knows": "{name} tem {found} bytes no compactado, não os {size} que o Orbiters conhece",
   "{path} cannot be created": "Não é possível criar {path}",
   "{path} cannot be read": "Não é possível ler {path}",
-  "{path} cannot be written": "Não é possível gravar {path}",
+  "{path} cannot be written": "não é possível gravar em {path}",
   "{path} has another startup section": "{path} tem uma seção de inicialização de outro tipo",
   "{path} is damaged in the installer": "{path} está danificado no instalador",
   "{path} is in the installer but not in its index": "{path} está no instalador, mas não no índice dele",

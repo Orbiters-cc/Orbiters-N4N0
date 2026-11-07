@@ -1,7 +1,7 @@
 {
   "GLB exceeds 4 GB": "o GLB passa de 4 GB",
   "GLB too large": "GLB grande demais",
-  "GPU device: {error}": "dispositivo GPU: {error}",
+  "GPU device: {error}": "dispositivo de GPU: {error}",
   "GPU error: {error}": "erro da GPU: {error}",
   "Invalid splat file": "Arquivo de splats inválido",
   "Invalid splat position or scale": "Posição ou escala de splat inválida",
@@ -61,7 +61,7 @@
   "reading back from the GPU: {error}": "erro ao ler de volta da GPU: {error}",
   "reading frames.bin": "lendo frames.bin",
   "reading the session's manifest": "lendo o manifesto da sessão",
-  "reading {path}": "lendo {path}",
+  "reading {path}": "ao ler {path}",
   "removing {path}": "removendo {path}",
   "replacing the previous result in {path}": "substituindo o resultado anterior em {path}",
   "splat edits of version {found} (this app reads version {expected}): update the app": "edições de splats da versão {found} (este app lê a versão {expected}): atualize o app",
@@ -84,7 +84,7 @@
   "unexpected PLY properties: {properties}": "propriedades PLY inesperadas: {properties}",
   "unknown option {option}": "opção desconhecida: {option}",
   "usage: orbiters-reconstruct <session folder> [--width N] [--iterations N] [--budget N] [--robust T] [--gpu integrated|fastest]": "uso: orbiters-reconstruct <pasta da sessão> [--width N] [--iterations N] [--budget N] [--robust T] [--gpu integrated|fastest]",
-  "waiting for the GPU: {error}": "esperando a GPU: {error}",
+  "waiting for the GPU: {error}": "ao aguardar a GPU: {error}",
   "writing {path}": "escrevendo {path}",
   "{name} cannot do {feature}": "{name} não consegue fazer {feature}",
   "{name} has no subgroup operations, which reconstruction needs.": "{name} não tem operações de subgrupo, que a reconstrução exige.",
@@ -96,5 +96,6 @@
   "{path} was not kept whole": "{path} não foi guardado por inteiro",
   "{path}: a sky map is RGB, not {found}": "{path}: um mapa do céu é RGB, não {found}",
   "{path}: a sky map is twice as wide as high ({width} × {height})": "{path}: um mapa do céu tem o dobro de largura que de altura ({width} × {height})",
-  "{total} tile entries in one view: more than the GPU can sort ({max_entries})": "{total} entradas de bloco em uma visão: mais do que a GPU consegue ordenar ({max_entries})"
+  "{total} tile entries in one view: more than the GPU can sort ({max_entries})": "{total} entradas de bloco em uma visão: mais do que a GPU consegue ordenar ({max_entries})",
+  "asked to pause": "foi solicitada uma pausa"
 }

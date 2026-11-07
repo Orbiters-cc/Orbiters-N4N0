@@ -943,7 +943,7 @@ impl Panels {
 
     /// What is on the sheet, for a note in the log.
     pub fn doing(&self) -> String {
-        format!("sheet {:?}, page {:?}, parts {}", self.facts.sheet, self.stage.host.menu.page, self.list.len())
+        format!("sheet {:?}, page {:?}, parts {}", self.facts.sheet, self.stage.host.menu.page, self.list.len()) // i18n: not shown (a note in the log)
     }
 
     /// Hidden, all that shows around VRChat's menu `menu`: the one button that brings the rest back.

@@ -42,7 +42,7 @@
   "too short to be sealed": "暗号化されたデータとしては短すぎます",
   "truncated chunk": "チャンクが途中で切れています",
   "unexpected answer from Orbiters ({status})": "Orbitersから想定外の応答がありました({status})",
-  "waiting for the GPU: {error}": "GPUの完了待ちで失敗しました：{error}",
+  "waiting for the GPU: {error}": "GPUの待機中：{error}",
   "{path} changed while it was sent": "{path}は送信中に変更されました",
   "{path} is not a manifest": "{path}はマニフェストではありません",
   "{path} is not a session folder.": "{path}はセッションフォルダーではありません。",

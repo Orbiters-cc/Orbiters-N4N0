@@ -36,8 +36,10 @@ pub struct Literal {
     pub text: String,
     /// `tr`, `tr_ctx`, `tr_n`, `tr!` or `mark` holds it.
     pub key: bool,
-    /// Which argument of the call holding it, for `tr_ctx`, whose first is not a text.
+    /// In a `tr_ctx`, whose text is looked up under its context: not a key on its own.
     pub context: bool,
+    /// A `tr_ctx`'s text, with the context written before it: `tr_ctx("the call", "Mute")`.
+    pub in_context: Option<String>,
     /// An error's text.
     pub error: bool,
 }
@@ -47,7 +49,7 @@ pub fn literals(source: &str) -> Vec<Literal> {
     let chars: Vec<char> = source.chars().collect();
     let mut out = Vec::new();
     let (mut i, mut line) = (0, 1);
-    // The names of the calls we are inside, by bracket. `None` for a bracket that is no call.
+    // The calls we are inside, by bracket: `None` for a bracket that is no call, and how many arguments of it have gone by.
     let mut stack: Vec<(char, Option<String>, usize)> = Vec::new();
     let mut path = String::new();
     let lines: Vec<&str> = source.lines().collect();
@@ -259,12 +261,19 @@ pub fn literals(source: &str) -> Vec<Literal> {
             }
             '(' | '[' | '{' => {
                 let name = if c == '(' && !path.is_empty() { Some(path.clone()) } else { None };
-                stack.push((c, name, line));
+                stack.push((c, name, 0));
                 path.clear();
                 i += 1;
             }
             ')' | ']' | '}' => {
                 stack.pop();
+                path.clear();
+                i += 1;
+            }
+            ',' => {
+                if let Some(top) = stack.last_mut() {
+                    top.2 += 1;
+                }
                 path.clear();
                 i += 1;
             }
@@ -300,16 +309,21 @@ fn emit(out: &mut Vec<Literal>, stack: &[(char, Option<String>, usize)], line: u
     let innermost = stack.iter().rev().find_map(|s| s.1.as_deref());
     if innermost.is_some_and(|n| is_call(n, KEY_CALLS)) {
         let context = innermost.is_some_and(|n| n.ends_with("tr_ctx"));
-        out.push(Literal { line, text, key: true, context, error: false });
+        // Its second argument, when the first was written out too.
+        let second = stack.iter().rev().find(|s| s.1.is_some()).is_some_and(|s| s.2 >= 1);
+        let in_context = if context && second { out.last().filter(|l| l.context && l.in_context.is_none()).map(|l| l.text.clone()) } else { None };
+        out.push(Literal { line, text, key: true, context, in_context, error: false });
         return;
     }
     if lines.get(line - 1).is_some_and(|l| l.contains("i18n: not shown")) {
         return;
     }
-    if names().any(|name| is_call(name, NOT_SHOWN)) {
+    // `write!(f, ...)` in a `Display` is what an error says, which is shown: only the writing to a file or a log is not.
+    let says = lines.get(line - 1).is_some_and(|l| l.contains("write!(f,") || l.contains("writeln!(f,") || l.contains("f.write_str("));
+    if !says && names().any(|name| is_call(name, NOT_SHOWN)) {
         return;
     }
-    out.push(Literal { line, text, key: false, context: false, error: names().any(|name| is_call(name, ERRORS)) });
+    out.push(Literal { line, text, key: false, context: false, in_context: None, error: says || names().any(|name| is_call(name, ERRORS)) });
 }
 
 /// Whether a string reads as words for a person, rather than an identifier, a path or a format.

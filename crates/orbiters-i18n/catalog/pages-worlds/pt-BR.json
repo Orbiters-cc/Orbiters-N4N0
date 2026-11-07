@@ -144,7 +144,7 @@
   "Your bookmarks could not be read ({error}): nothing is saved until they can be.": "Não foi possível ler seus favoritos ({error}): nada será salvo até que seja possível.",
   "before Orbiters kept them": "antes de o Orbiters registrar",
   "by {author}": "por {author}",
-  "last {when}": "última vez {when}",
+  "last {when}": "última: {when}",
   "none shared": "nenhuma compartilhada",
   "not measured yet": "ainda não medido",
   "nothing saved yet": "nada salvo ainda",
@@ -192,5 +192,6 @@
   "{total} visits on VRChat": "{total} visitas no VRChat",
   "{when} · by {author}": "{when} · por {author}",
   "whole month\u0004May": "maio",
-  "whole month\u0004{day} {month} {year}": "{day} de {month} de {year}"
+  "whole month\u0004{day} {month} {year}": "{day} de {month} de {year}",
+  "stat tile\u0004Frame rate": "Quadros/s"
 }

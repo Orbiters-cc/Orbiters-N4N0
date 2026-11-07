@@ -266,9 +266,9 @@
   "{what}: Core Audio said '{code}'": "{what}: o Core Audio respondeu “{code}”",
   "{what}: Core Audio said {status}": "{what}: o Core Audio respondeu {status}",
   "{write_errors} file(s) could not be written": "{write_errors} arquivo(s) não puderam ser gravados",
-  "Gaussian blur": "Desfoque gaussiano",
-  "Lens blur": "Desfoque de lente",
-  "Directional blur": "Desfoque direcional",
-  "Depth blur": "Desfoque de profundidade",
+  "Gaussian blur": "Gaussiano",
+  "Lens blur": "De lente",
+  "Directional blur": "Direcional",
+  "Depth blur": "De profundidade",
   "List {number}": "Lista {number}"
 }

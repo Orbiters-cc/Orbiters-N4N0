@@ -299,7 +299,7 @@ pub fn switch(ui: &mut Ui, id_salt: impl egui::AsIdSalt, label: &str, on: &mut b
     let (r, _) = ui.allocate_exact_size(vec2(w, 36.0), Sense::hover());
     widgets::text(ui.painter(), pos2(r.left(), r.center().y), Align2::LEFT_CENTER, &Txt::new(label, 13.0).weight(weight::MEDIUM));
     let t = Rect::from_min_size(pos2(r.right() - 48.0, r.center().y - 14.0), vec2(48.0, 28.0));
-    let mut tu = ui.new_child(egui::UiBuilder::new().max_rect(t).id_salt(("editor-switch", label)));
+    let mut tu = ui.new_child(egui::UiBuilder::new().max_rect(t).id_salt(("editor-switch", orbiters_i18n::english_of(label))));
     widgets::toggle(&mut tu, id_salt, on)
 }
 

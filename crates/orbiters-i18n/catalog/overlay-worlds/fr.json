@@ -146,7 +146,7 @@
   "a 3D world overlay: SteamVR overlay error {code}": "un overlay de monde 3D : erreur d’overlay SteamVR {code}",
   "by {author}": "par {author}",
   "count\u0004Comment": "Commentaire",
-  "last {when}": "dernière visite {when}",
+  "last {when}": "dernière : {when}",
   "month\u0004Apr": "avr.",
   "month\u0004Aug": "août",
   "month\u0004Dec": "déc.",

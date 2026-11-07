@@ -1027,7 +1027,7 @@ fn shapes(ed: &mut Editor, ui: &mut Ui, id: Id, r: Rect, size: (f32, f32)) {
     for ((a, p), w) in list.iter().zip(pos).zip(widths) {
         let cr = Rect::from_min_size(origin + p, vec2(w, widgets::CHIP_H));
         let chosen = g.aspect.preset() == a.preset();
-        if Chip::new(a.name()).selected(chosen).id_salt(id.with(("shape", a.name()))).show_at(ui, cr).pressed {
+        if Chip::new(a.name()).selected(chosen).id_salt(id.with(("shape", orbiters_i18n::english_of(a.name())))).show_at(ui, cr).pressed {
             if a.landscape(original).is_some() {
                 st.landscape = a.landscape(original);
             }

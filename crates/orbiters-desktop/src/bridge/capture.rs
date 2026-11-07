@@ -33,7 +33,7 @@ pub fn encode(frame: &Bgra, max_width: u32) -> Result<Shot, String> {
         sum += p[0] as u64 + p[1] as u64 + p[2] as u64;
     }
     let all_black = sum / (frame.width as u64 * frame.height as u64 * 3).max(1) < 2;
-    let image = image::RgbImage::from_raw(frame.width, frame.height, rgb).ok_or("the frame's size does not match its pixels")?;
+    let image = image::RgbImage::from_raw(frame.width, frame.height, rgb).ok_or("the frame's size does not match its pixels")?; // i18n: not shown
     let max_width = max_width.max(64);
     let image = if frame.width > max_width {
         let height = ((frame.height as u64 * max_width as u64) / frame.width as u64).max(1) as u32;
@@ -45,7 +45,7 @@ pub fn encode(frame: &Bgra, max_width: u32) -> Result<Shot, String> {
     let mut jpeg = Vec::new();
     image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg, 80)
         .encode(image.as_raw(), width, height, image::ExtendedColorType::Rgb8)
-        .map_err(|e| format!("the picture could not be encoded: {e}"))?;
+        .map_err(|e| format!("the picture could not be encoded: {e}"))?; // i18n: not shown
     Ok(Shot { jpeg, width, height, all_black })
 }
 
@@ -73,8 +73,8 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
 
 /// Reads what [`run`] answered.
 pub fn parse_answer(bytes: &[u8]) -> Result<Shot, String> {
-    let at = bytes.iter().position(|b| *b == b'\n').ok_or("no answer")?;
-    let head: serde_json::Value = serde_json::from_slice(&bytes[..at]).map_err(|_| "an answer that is not JSON")?;
+    let at = bytes.iter().position(|b| *b == b'\n').ok_or("no answer")?; // i18n: not shown
+    let head: serde_json::Value = serde_json::from_slice(&bytes[..at]).map_err(|_| "an answer that is not JSON")?; // i18n: not shown
     if let Some(error) = head["error"].as_str() {
         return Err(error.to_string());
     }
@@ -95,8 +95,8 @@ pub fn shot_in_child(exe: &std::path::Path, handle: isize, max_width: u32) -> Re
     let failed = |why: String| {
         Failure::new(
             "screenshot_failed",
-            format!("VRChat's window could not be captured: {why}"),
-            "Check that VRChat's window is not minimized, then try again.",
+            format!("VRChat's window could not be captured: {why}"), // i18n: not shown
+            "Check that VRChat's window is not minimized, then try again.", // i18n: not shown
         )
     };
     let mut command = std::process::Command::new(exe);
@@ -108,7 +108,7 @@ pub fn shot_in_child(exe: &std::path::Path, handle: isize, max_width: u32) -> Re
         command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
     }
     let mut child = command.spawn().map_err(|e| failed(e.to_string()))?;
-    let mut stdout = child.stdout.take().ok_or_else(|| failed("no output".into()))?;
+    let mut stdout = child.stdout.take().ok_or_else(|| failed("no output".into()))?; // i18n: not shown
     let reader = std::thread::spawn(move || {
         let mut bytes = Vec::new();
         let _ = stdout.read_to_end(&mut bytes);
@@ -215,9 +215,9 @@ pub(crate) mod imp {
         }
         // SAFETY: WinRT in this thread's apartment; it stays for the process, which ends after this picture.
         let _ = unsafe { RoInitialize(RO_INIT_MULTITHREADED) };
-        let interop = windows::core::factory::<GraphicsCaptureItem, IGraphicsCaptureItemInterop>().map_err(|e| text("capture item", e))?;
+        let interop = windows::core::factory::<GraphicsCaptureItem, IGraphicsCaptureItemInterop>().map_err(|e| text("capture item", e))?; // i18n: not shown
         // SAFETY: a window handle; asking for one that is gone only fails.
-        let item: GraphicsCaptureItem = unsafe { interop.CreateForWindow(window) }.map_err(|e| text("capture item", e))?;
+        let item: GraphicsCaptureItem = unsafe { interop.CreateForWindow(window) }.map_err(|e| text("capture item", e))?; // i18n: not shown
         let size = item.Size().map_err(|e| text("size", e))?;
         let (mut device, mut context): (Option<ID3D11Device>, Option<ID3D11DeviceContext>) = (None, None);
         // SAFETY: the outputs are valid; the device lives in this function.
@@ -235,12 +235,12 @@ pub(crate) mod imp {
             )
         }
         .map_err(|e| text("Direct3D", e))?;
-        let (device, context) = (device.ok_or("no Direct3D device")?, context.ok_or("no Direct3D context")?);
+        let (device, context) = (device.ok_or("no Direct3D device")?, context.ok_or("no Direct3D context")?); // i18n: not shown
         let dxgi: IDXGIDevice = device.cast().map_err(|e| text("DXGI", e))?;
         // SAFETY: the DXGI device is alive for the call.
         let winrt: IDirect3DDevice = unsafe { CreateDirect3D11DeviceFromDXGIDevice(&dxgi) }.and_then(|d| d.cast()).map_err(|e| text("device", e))?;
         let pool =
-            Direct3D11CaptureFramePool::CreateFreeThreaded(&winrt, DirectXPixelFormat::B8G8R8A8UIntNormalized, 1, size).map_err(|e| text("frame pool", e))?;
+            Direct3D11CaptureFramePool::CreateFreeThreaded(&winrt, DirectXPixelFormat::B8G8R8A8UIntNormalized, 1, size).map_err(|e| text("frame pool", e))?; // i18n: not shown
         let session = pool.CreateCaptureSession(&item).map_err(|e| text("session", e))?;
         // Menus need the pointer in the picture; Windows' yellow border is left off where it allows that.
         let _ = session.SetIsCursorCaptureEnabled(true);
@@ -272,7 +272,7 @@ pub(crate) mod imp {
         let mut staging: Option<ID3D11Texture2D> = None;
         // SAFETY: the description and the output are valid.
         unsafe { device.CreateTexture2D(&staging_description, None, Some(&mut staging)) }.map_err(|e| text("staging", e))?;
-        let staging = staging.ok_or("no staging texture")?;
+        let staging = staging.ok_or("no staging texture")?; // i18n: not shown
         // SAFETY: both textures are this device's, of one size and format; the mapping is read within its stride and height,
         // and unmapped before anything else happens to it.
         let pixels = unsafe {
@@ -297,7 +297,7 @@ pub(crate) mod imp {
         let window = HWND(handle as *mut _);
         let mut client = RECT::default();
         // SAFETY: the output is valid.
-        unsafe { GetClientRect(window, &mut client) }.map_err(|e| format!("window size: {}", e.message()))?;
+        unsafe { GetClientRect(window, &mut client) }.map_err(|e| format!("window size: {}", e.message()))?; // i18n: not shown
         let (width, height) = ((client.right - client.left).max(0), (client.bottom - client.top).max(0));
         if width == 0 || height == 0 {
             return Err("the window has no pixels".into());

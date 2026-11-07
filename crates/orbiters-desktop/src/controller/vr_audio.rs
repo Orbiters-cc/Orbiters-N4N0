@@ -14,6 +14,7 @@
 use super::{Controller, Shared};
 use crate::audio_devices::{AudioEndpoint, Flow, Role, ROLES};
 use orbiters_core::settings::VrAudioSettings;
+use orbiters_i18n::tr;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -130,8 +131,8 @@ fn names(names: &[String]) -> String {
     match names {
         [] => String::new(),
         [one] => one.clone(),
-        [a, b] => format!("{a} and {b}"),
-        [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
+        [a, b] => tr!("{a} and {b}", a = a, b = b),
+        [rest @ .., last] => tr!("{list} and {last}", list = rest.join(tr(", ")), last = last),
     }
 }
 
@@ -233,9 +234,9 @@ impl<D: Devices> Keeper<D> {
             self.saved.set[i] = Some(target);
         }
         if !failed.is_empty() {
-            self.note(utc_ms, format!("Windows did not take {}", failed.join("; ")), true);
+            self.note(utc_ms, tr!("Windows did not take {devices}", devices = failed.join("; ")), true);
         } else if !set.is_empty() {
-            let text = if again { format!("Set again to {} (another app had changed it)", names(&set)) } else { format!("Set to {}", names(&set)) };
+            let text = if again { tr!("Set again to {devices} (another app had changed it)", devices = names(&set)) } else { tr!("Set to {devices}", devices = names(&set)) };
             self.note(utc_ms, text, false);
         }
     }
@@ -246,8 +247,11 @@ impl<D: Devices> Keeper<D> {
         let missing: Vec<String> = (0..2)
             .filter(|&i| window.missing[i] && choice[i].is_some())
             .map(|i| {
-                let kept = self.devices.defaults(FLOWS[i])[0].as_ref().map(|e| format!(", Windows kept {}", e.name)).unwrap_or_default();
-                format!("{} was not there{kept}", choice[i].as_ref().map(|e| e.name.as_str()).unwrap_or_default())
+                let device = choice[i].as_ref().map(|e| e.name.as_str()).unwrap_or_default();
+                match self.devices.defaults(FLOWS[i])[0].as_ref() {
+                    Some(kept) => tr!("{device} was not there, Windows kept {kept}", device = device, kept = kept.name),
+                    None => tr!("{device} was not there", device = device),
+                }
             })
             .collect();
         if !missing.is_empty() {
@@ -307,7 +311,7 @@ impl<D: Devices> Keeper<D> {
             }
         }
         if !back.is_empty() {
-            let text = if again { format!("Put back {} again (another app had changed it)", names(&back)) } else { format!("Put back {}", names(&back)) };
+            let text = if again { tr!("Put back {devices} again (another app had changed it)", devices = names(&back)) } else { tr!("Put back {devices}", devices = names(&back)) };
             self.note(utc_ms, text, false);
         }
     }
@@ -320,7 +324,7 @@ impl<D: Devices> Keeper<D> {
             .filter_map(|i| self.saved.previous[i].as_ref()?.iter().flatten().next().map(|e| e.name.clone()))
             .collect();
         if !missing.is_empty() {
-            self.note(utc_ms, format!("{} was not there to put back", names(&missing)), true);
+            self.note(utc_ms, tr!("{devices} was not there to put back", devices = names(&missing)), true);
         }
         self.forget();
     }
@@ -351,7 +355,7 @@ impl<D: Devices> Keeper<D> {
             }
         }
         if !back.is_empty() {
-            self.note(utc_ms, format!("Put back {} (SteamVR had closed while Orbiters - N4N0 was not running)", names(&back)), false);
+            self.note(utc_ms, tr!("Put back {devices} (SteamVR had closed while Orbiters - N4N0 was not running)", devices = names(&back)), false);
         }
         self.forget();
     }

@@ -31,6 +31,7 @@ use guard::Guard;
 use input::{Held, Hold, Input};
 use person::{Heard, OwnInput, Paused, Presence};
 use serde::{Deserialize, Serialize};
+use orbiters_i18n::tr;
 use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
@@ -236,7 +237,7 @@ impl Bridge {
         let name = name
             .map(|n| n.chars().filter(|c| !c.is_control()).take(64).collect::<String>())
             .or_else(|| client.as_ref().map(|c| c.0.clone()))
-            .unwrap_or_else(|| "An MCP client".into());
+            .unwrap_or_else(|| tr("An MCP client").into());
         *client = Some((name, Instant::now()));
     }
 
@@ -271,7 +272,7 @@ impl Bridge {
                     held
                 };
                 self.release_all();
-                self.log(true, if held { "Paused by the hotkey." } else { "Going on: resumed by the hotkey." });
+                self.log(true, if held { tr("Paused by the hotkey.") } else { tr("Going on: resumed by the hotkey.") });
             }
         }
     }
@@ -287,7 +288,7 @@ impl Bridge {
             }
         }
         self.release_all();
-        self.log(true, if held { "Paused from Settings." } else { "Going on: resumed from Settings." });
+        self.log(true, if held { tr("Paused from Settings.") } else { tr("Going on: resumed from Settings.") });
     }
 
     /// The person takes control back: everything held comes up, what runs ends, a recording stops, and the game (left as
@@ -311,7 +312,7 @@ impl Bridge {
     /// Starts telling the guard; called when the service starts listening.
     pub(crate) fn start_guard(&self) -> Result<(), String> {
         let Some(exe) = &self.guard_exe else { return Ok(()) };
-        let guard = Guard::spawn(exe).map_err(|e| format!("The input guard did not start: {e}"))?;
+        let guard = Guard::spawn(exe).map_err(|e| tr!("The input guard did not start: {error}", error = e))?;
         *self.guard.lock().unwrap() = Some(guard);
         Ok(())
     }
@@ -351,7 +352,7 @@ impl Bridge {
     pub fn tick(&self) {
         if self.held.overdue(Instant::now()) {
             self.release_all();
-            self.log(false, "Input was still down past its time: released.");
+            self.log(false, tr("Input was still down past its time: released."));
         }
         self.follow_game();
     }

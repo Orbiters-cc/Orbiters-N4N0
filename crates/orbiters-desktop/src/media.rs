@@ -240,8 +240,8 @@ mod platform {
     }
 
     const APPS: [App; 2] = [
-        App { id: "com.apple.Music", name: "Music", length_per_second: 1, art_link: false },
-        App { id: "com.spotify.client", name: "Spotify", length_per_second: 1000, art_link: true },
+        App { id: "com.apple.Music", name: "Music", length_per_second: 1, art_link: false }, // i18n: not shown
+        App { id: "com.spotify.client", name: "Spotify", length_per_second: 1000, art_link: true }, // i18n: not shown
     ];
 
     /// How long a reading waits for a player: longer, and it goes on without it (the volume still reads) and looks for
@@ -263,9 +263,9 @@ mod platform {
     pub(super) fn read_script(app: &App) -> String {
         let id = app.id;
         let per_second = app.length_per_second;
-        let art = if app.art_link { "my field(artwork url of theTrack)" } else { "\"\"" };
+        let art = if app.art_link { "my field(artwork url of theTrack)" } else { "\"\"" }; // i18n: not shown
         format!(
-            r#"on field(v)
+            /* i18n: not shown */ r#"on field(v)
 	if v is missing value then return ""
 	return v as text
 end field
@@ -292,7 +292,7 @@ end tell"#
     pub(super) fn art_script(app: &App) -> String {
         let id = app.id;
         format!(
-            r#"if application id "{id}" is not running then return ""
+            /* i18n: not shown */ r#"if application id "{id}" is not running then return ""
 tell application id "{id}"
 	if (count of artworks of current track) is 0 then return ""
 	return raw data of artwork 1 of current track
@@ -303,7 +303,7 @@ end tell"#
     /// The script that makes `app` do `what`.
     pub(super) fn command_script(app: &App, what: &str) -> String {
         let id = app.id;
-        format!(r#"if application id "{id}" is running then tell application id "{id}" to {what}"#)
+        format!(r#"if application id "{id}" is running then tell application id "{id}" to {what}"#) // i18n: not shown
     }
 
     /// What `command` is in a player's words, for those a player takes.
@@ -312,9 +312,9 @@ end tell"#
             MediaCommand::PlayPause => "playpause".into(),
             MediaCommand::Play => "play".into(),
             MediaCommand::Pause => "pause".into(),
-            MediaCommand::Next => "next track".into(),
-            MediaCommand::Previous => "previous track".into(),
-            MediaCommand::Seek(seconds) => format!("set player position to {seconds}"),
+            MediaCommand::Next => "next track".into(), // i18n: not shown
+            MediaCommand::Previous => "previous track".into(), // i18n: not shown
+            MediaCommand::Seek(seconds) => format!("set player position to {seconds}"), // i18n: not shown
             MediaCommand::Volume(_) | MediaCommand::Mute(_) => return None,
         })
     }

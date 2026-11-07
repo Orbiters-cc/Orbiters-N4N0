@@ -79,9 +79,9 @@ impl Hold {
             Hold::OscButton(a) => format!("osc-button {a}"),
             Hold::OscAxis(a) => format!("osc-axis {a}"),
             Hold::Key { scan, extended } => format!("key {scan} {extended}"),
-            Hold::Button(MouseButton::Left) => "button left".into(),
-            Hold::Button(MouseButton::Right) => "button right".into(),
-            Hold::Button(MouseButton::Middle) => "button middle".into(),
+            Hold::Button(MouseButton::Left) => "button left".into(), // i18n: not shown
+            Hold::Button(MouseButton::Right) => "button right".into(), // i18n: not shown
+            Hold::Button(MouseButton::Middle) => "button middle".into(), // i18n: not shown
         }
     }
 }

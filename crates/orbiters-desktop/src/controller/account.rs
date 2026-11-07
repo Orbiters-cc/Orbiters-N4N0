@@ -7,6 +7,7 @@
 use super::{Controller, NoticeKind, Shared};
 use crate::state::AccountState;
 use orbiters_core::account::{self, Account, Api, Callback, Check, Exchange, Served, Server};
+use orbiters_i18n::tr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
@@ -248,13 +249,13 @@ impl Controller {
                     rt.offline_since = None;
                     drop(rt);
                     if let Err(e) = saved {
-                        self.notify(NoticeKind::Warning, format!("Signed in, but the Unity tools will not share it: {e}"));
+                        self.notify(NoticeKind::Warning, tr!("Signed in, but the Unity tools will not share it: {error}", error = e));
                     }
                     self.update(|s| {
                         s.account.state = AccountState::SignedIn { username: name.clone() };
                         s.account.error = None;
                     });
-                    self.notify(NoticeKind::Success, format!("Signed in to Orbiters as {name}."));
+                    self.notify(NoticeKind::Success, tr!("Signed in to Orbiters as {name}.", name = name));
                 }
                 // The browser can bring another (Connect clicked again): the error shows meanwhile.
                 Exchange::Retry(message) => {
@@ -279,7 +280,7 @@ impl Controller {
                 drop(rt);
                 self.update(|s| {
                     s.account.state = before.unwrap_or(AccountState::SignedOut);
-                    s.account.error = Some("The sign-in expired. Sign in again.".into());
+                    s.account.error = Some(tr("The sign-in expired. Sign in again.").into());
                 });
             }
         }

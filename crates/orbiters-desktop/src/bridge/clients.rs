@@ -23,6 +23,7 @@
 //! rewritten, and the log and Settings say so, with what cannot be fixed from here: a session already open keeps what it read.
 
 use serde::{Deserialize, Serialize};
+use orbiters_i18n::tr;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -164,7 +165,7 @@ fn scrub(text: &str, token: &str) -> String {
 
 /// The first line of a client's complaint that says anything, without its token.
 fn complaint(said: &str, token: &str) -> String {
-    let line = said.lines().map(str::trim).find(|l| !l.is_empty() && !l.starts_with("WARNING")).unwrap_or("It gave no reason.");
+    let line = said.lines().map(str::trim).find(|l| !l.is_empty() && !l.starts_with("WARNING")).unwrap_or_else(|| tr("It gave no reason."));
     scrub(line, token).chars().take(300).collect()
 }
 
@@ -195,14 +196,14 @@ pub fn parse_claude_get(said: &str) -> Entry {
 
 /// Reads `codex mcp get --json`'s answer.
 pub fn parse_codex_get(said: &str) -> Result<Entry, String> {
-    let json: serde_json::Value = serde_json::from_str(said).map_err(|_| "Codex's answer could not be read.".to_string())?;
+    let json: serde_json::Value = serde_json::from_str(said).map_err(|_| tr("Codex's answer could not be read.").to_string())?;
     let transport = &json["transport"];
-    let token = transport["http_headers"]["Authorization"].as_str().and_then(|h| h.strip_prefix("Bearer ")).map(str::to_string);
+    let token = transport["http_headers"]["Authorization"].as_str().and_then(|h| h.strip_prefix("Bearer ")).map(str::to_string); // i18n: not shown
     let disabled = json["enabled"].as_bool() == Some(false);
     Ok(Entry {
         address: transport["url"].as_str().map(str::to_string),
         token,
-        problem: disabled.then(|| "It is turned off in Codex's settings.".to_string()),
+        problem: disabled.then(|| tr("It is turned off in Codex's settings.").to_string()),
         not_for_this_user: false,
     })
 }
@@ -275,7 +276,7 @@ fn run(exe: &Path, args: &[&str], home: Option<&Path>, environment: &[(&str, &st
         use std::os::windows::process::CommandExt;
         command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
     }
-    let mut child = command.spawn().map_err(|e| format!("It could not be started: {e}"))?;
+    let mut child = command.spawn().map_err(|e| tr!("It could not be started: {error}", error = e))?;
     let read = |pipe: Option<Box<dyn Read + Send>>| {
         let (sender, receiver) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
@@ -343,7 +344,7 @@ impl ClaudeCli {
     }
 
     fn run(&self, args: &[&str]) -> Result<Ran, String> {
-        let exe = self.program().ok_or("Claude Code is not installed on this computer.")?;
+        let exe = self.program().ok_or_else(|| tr("Claude Code is not installed on this computer."))?;
         let mut environment = self.config_dir.iter().map(|d| ("CLAUDE_CONFIG_DIR", d.as_os_str())).collect::<Vec<_>>();
         // `mcp get` connects to say how it went: 30 s by default when something else holds the old port and never answers, measured,
         // twice for a repair. The bridge answers at once, so a short wait says the same.
@@ -374,7 +375,7 @@ impl ClientCli for ClaudeCli {
     }
 
     fn add(&self, address: &str, token: &str) -> Result<(), String> {
-        let header = format!("Authorization: Bearer {token}");
+        let header = format!("Authorization: Bearer {token}"); // i18n: not shown
         let ran = self.run(&["mcp", "add", "--scope", "user", "--transport", "http", SERVER_NAME, address, "--header", &header])?;
         if ran.success {
             Ok(())
@@ -420,7 +421,7 @@ impl CodexCli {
     }
 
     fn run(&self, args: &[&str]) -> Result<Ran, String> {
-        let exe = self.program().ok_or("Codex is not installed on this computer.")?;
+        let exe = self.program().ok_or_else(|| tr("Codex is not installed on this computer."))?;
         let environment = self.home.iter().map(|h| ("CODEX_HOME", h.as_os_str())).collect::<Vec<_>>();
         run(&exe, args, home().as_deref(), &environment, COMMAND_LIMIT)
     }
@@ -459,21 +460,21 @@ impl CodexCli {
     /// Changes its settings file: beside it and renamed over it, so that a Codex reading it finds either whole file; made in the same
     /// folder, it gets that folder's permissions, as the file it replaces had. Nothing to change writes nothing.
     fn change_config(&self, change: impl FnOnce(&str) -> String) -> Result<(), String> {
-        let file = self.config_file().ok_or("Codex's settings file was not found.")?;
+        let file = self.config_file().ok_or_else(|| tr("Codex's settings file was not found."))?;
         let config = match std::fs::read_to_string(&file) {
             Ok(config) => config,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
-            Err(e) => return Err(format!("Codex's settings could not be read: {e}")),
+            Err(e) => return Err(tr!("Codex's settings could not be read: {error}", error = e)),
         };
         let changed = change(&config);
         if changed == config {
             return Ok(());
         }
         let temporary = file.with_extension("toml.orbiters-tmp");
-        std::fs::write(&temporary, changed).map_err(|e| format!("Codex's settings could not be written: {e}"))?;
+        std::fs::write(&temporary, changed).map_err(|e| tr!("Codex's settings could not be written: {error}", error = e))?;
         std::fs::rename(&temporary, &file).map_err(|e| {
             let _ = std::fs::remove_file(&temporary);
-            format!("Codex's settings could not be written: {e}")
+            tr!("Codex's settings could not be written: {error}", error = e)
         })
     }
 }
@@ -610,7 +611,7 @@ impl Registrations {
                 let outcome = if matches!(looked.registration, Registration::Outdated(_)) {
                     let mut outcome = Self::add_or_replace(cli.as_ref(), &wanted);
                     if !outcome.failed {
-                        outcome.note = Some(format!("Its address or token was old, and is updated now. Restart any {} session already open.", cli.client().name()));
+                        outcome.note = Some(tr!("Its address or token was old, and is updated now. Restart any {name} session already open.", name = cli.client().name()));
                     }
                     if let Some(note) = &outcome.note {
                         (this.log)(!outcome.failed, format!("{}: {note}", cli.client().name()));
@@ -626,7 +627,7 @@ impl Registrations {
 
     fn add_or_replace(cli: &dyn ClientCli, wanted: &Wanted) -> Outcome {
         let name = cli.client().name();
-        let failed = |registration, why: String| Outcome { registration, note: Some(format!("It was not added: {why}")), failed: true };
+        let failed = |registration, why: String| Outcome { registration, note: Some(tr!("It was not added: {reason}", reason = why)), failed: true };
         if !cli.installed() {
             return Outcome { registration: Registration::NotInstalled, note: None, failed: false };
         }
@@ -650,16 +651,16 @@ impl Registrations {
                     Registration::Added => Outcome {
                         registration,
                         note: Some(if before.is_some() {
-                            format!("Updated. Restart any {name} session already open.")
+                            tr!("Updated. Restart any {name} session already open.", name = name)
                         } else {
-                            format!("A new {name} session has it; one already open has to be restarted.")
+                            tr!("A new {name} session has it; one already open has to be restarted.", name = name)
                         }),
                         failed: false,
                     },
                     Registration::NotConnecting(why) => {
-                        Outcome { note: Some(format!("It was added, and {name} cannot connect: {why}")), registration, failed: true }
+                        Outcome { note: Some(tr!("It was added, and {name} cannot connect: {reason}", name = name, reason = why)), registration, failed: true }
                     }
-                    _ => failed(registration, format!("{name} does not show what was added.")),
+                    _ => failed(registration, tr!("{name} does not show what was added.", name = name)),
                 }
             }
             Err(why) => failed(Registration::Unreadable(why.clone()), why),
@@ -671,12 +672,12 @@ impl Registrations {
             Ok(()) => {
                 let looked = Self::look(cli, wanted);
                 if looked.registration == Registration::NotAdded {
-                    Outcome { note: Some("Removed.".into()), ..looked }
+                    Outcome { note: Some(tr("Removed.").into()), ..looked }
                 } else {
-                    Outcome { note: Some(format!("{} still shows it.", cli.client().name())), failed: true, ..looked }
+                    Outcome { note: Some(tr!("{name} still shows it.", name = cli.client().name())), failed: true, ..looked }
                 }
             }
-            Err(why) => Outcome { note: Some(format!("It was not removed: {why}")), failed: true, ..Self::look(cli, wanted) },
+            Err(why) => Outcome { note: Some(tr!("It was not removed: {reason}", reason = why)), failed: true, ..Self::look(cli, wanted) },
         }
     }
 }

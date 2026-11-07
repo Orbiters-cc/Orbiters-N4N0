@@ -7,6 +7,7 @@ use orbiters_core::{
     visited,
 };
 use serde::{Deserialize, Serialize};
+use orbiters_i18n::{mark, tr};
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::{Condvar, Mutex};
@@ -274,13 +275,13 @@ impl super::Controller {
             let (kind, message) = match &outcome {
                 Outcome::Failed { message, explicit: false } => (super::NoticeKind::Error, message.clone()),
                 Outcome::Failed { explicit: true, .. } => {
-                    (super::NoticeKind::Info, "Open Photos & captures to confirm sharing this explicit item publicly.".into())
+                    (super::NoticeKind::Info, tr("Open Photos & captures to confirm sharing this explicit item publicly.").into())
                 }
-                Outcome::Shared(shares::Shared::Request { .. }) => (super::NoticeKind::Success, "Share request sent.".into()),
-                Outcome::Answered(_) => (super::NoticeKind::Success, "Share request answered.".into()),
-                Outcome::Downloaded(p) => (super::NoticeKind::Success, format!("Saved {}", p.display())),
-                Outcome::Updated { .. } => (super::NoticeKind::Success, UPDATED.into()),
-                _ => (super::NoticeKind::Success, "Sharing updated.".into()),
+                Outcome::Shared(shares::Shared::Request { .. }) => (super::NoticeKind::Success, tr("Share request sent.").into()),
+                Outcome::Answered(_) => (super::NoticeKind::Success, tr("Share request answered.").into()),
+                Outcome::Downloaded(p) => (super::NoticeKind::Success, tr!("Saved {path}", path = p.display())),
+                Outcome::Updated { .. } => (super::NoticeKind::Success, tr(UPDATED).into()),
+                _ => (super::NoticeKind::Success, tr("Sharing updated.").into()),
             };
             ctl.update(|s| {
                 if let Some(j) = s.capture_shares.iter_mut().find(|j| j.id == id) {
@@ -314,8 +315,8 @@ impl super::Controller {
         }
         std::thread::spawn(move || {
             let started = Instant::now();
-            let failed = super::maps::web_preview(&session).err().map(|e| format!(", failed: {e}")).unwrap_or_default();
-            share_log(&format!("3D capture {} prepared ahead of its share in {:.2} s{failed}", session.display(), started.elapsed().as_secs_f64()));
+            let failed = super::maps::web_preview(&session).err().map(|e| format!(", failed: {e}")).unwrap_or_default(); // i18n: not shown
+            share_log(&format!("3D capture {} prepared ahead of its share in {:.2} s{failed}", session.display(), started.elapsed().as_secs_f64())); // i18n: not shown
             AHEAD.lock().unwrap_or_else(|e| e.into_inner()).remove(&session);
         });
     }
@@ -596,7 +597,7 @@ fn mark_reconstructed(path: &Path, dir: &Path) {
     if changed {
         let written = serde_json::to_vec(&records).map_err(anyhow::Error::from).and_then(|b| orbiters_core::write_atomic(path, &b).map_err(anyhow::Error::from));
         if let Err(e) = written {
-            share_log(&format!("3D capture {} reconstructed, its upload record not updated: {e:#}", dir.display()));
+            share_log(&format!("3D capture {} reconstructed, its upload record not updated: {e:#}", dir.display())); // i18n: not shown
         }
     }
 }
@@ -614,7 +615,7 @@ fn replaces(result: &Path, records: Option<&Path>, dir: &Path, remote: Option<&I
     if let Ok(bytes) = std::fs::read(result.join(orbiters_core::reconstruction::EDIT_FILE)) {
         match orbiters_reconstruct::edit::Edit::decode(&bytes) {
             Ok(e) => lines.extend(edits_line(e.hidden() + e.deleted())),
-            Err(_) => lines.push("Its splat edits, which could not be read, go with the current one.".to_string()),
+            Err(_) => lines.push(tr("Its splat edits, which could not be read, go with the current one.").to_string()),
         }
     }
     let record = records.and_then(|p| read_records(p).into_iter().find(|r| r.path == dir));
@@ -629,21 +630,21 @@ fn replaces(result: &Path, records: Option<&Path>, dir: &Path, remote: Option<&I
 pub(crate) fn edits_line(removed: usize) -> Option<String> {
     match removed {
         0 => None,
-        1 => Some("The splat hidden or deleted in its 3D view comes back: you can select it again in the new one.".to_string()),
-        n => Some(format!("The {} splats hidden or deleted in its 3D view come back: you can select them again in the new one.", orbiters_ui::format::integer(n as f64))),
+        1 => Some(tr("The splat hidden or deleted in its 3D view comes back: you can select it again in the new one.").to_string()),
+        n => Some(tr!("The {count} splats hidden or deleted in its 3D view come back: you can select them again in the new one.", count = orbiters_ui::format::integer(n as f64))),
     }
 }
 
 /// What a new result does to a capture shared publicly and with `friends`: nothing at once, and that is what to know.
 pub(crate) fn shared_line(public: bool, friends: usize) -> Option<String> {
-    let update = "until you update the shared capture, which its window offers once the new one is ready.";
-    let them = if friends == 1 { "the friend you shared it with".to_string() } else { format!("the {friends} friends you shared it with") };
+    // Whole sentences, each with its ending: the order of the parts is each language's own.
     match (public, friends) {
         (false, 0) => None,
-        (true, 0) => Some(format!("Its public link stays, and goes on showing the current version {update}")),
-        (false, 1) => Some(format!("The friend you shared it with keeps seeing the current version {update}")),
-        (false, n) => Some(format!("The {n} friends you shared it with keep seeing the current version {update}")),
-        (true, _) => Some(format!("Its public link and {them} keep the current version {update}")),
+        (true, 0) => Some(tr("Its public link stays, and goes on showing the current version until you update the shared capture, which its window offers once the new one is ready.").to_string()),
+        (false, 1) => Some(tr("The friend you shared it with keeps seeing the current version until you update the shared capture, which its window offers once the new one is ready.").to_string()),
+        (false, n) => Some(tr!("The {friends} friends you shared it with keep seeing the current version until you update the shared capture, which its window offers once the new one is ready.", friends = n)),
+        (true, 1) => Some(tr("Its public link and the friend you shared it with keep the current version until you update the shared capture, which its window offers once the new one is ready.").to_string()),
+        (true, n) => Some(tr!("Its public link and the {friends} friends you shared it with keep the current version until you update the shared capture, which its window offers once the new one is ready.", friends = n)),
     }
 }
 
@@ -680,12 +681,11 @@ pub fn session_state(dir: &Path, server: Server) -> Option<SessionState> {
 }
 
 /// Why a capture is not shared when its splat edits changed while it was being shared.
-const EDITED_MEANWHILE: &str = "Its splats were changed in its 3D view while it was being shared, so it is not shared: share it again to send what \
-     its 3D view shows now.";
+const EDITED_MEANWHILE: &str = mark("Its splats were changed in its 3D view while it was being shared, so it is not shared: share it again to send what its 3D view shows now.");
 /// What the tray says once an update is done.
-pub(crate) const UPDATED: &str = "Updated: everyone who sees this 3D capture now sees it as its 3D view shows it.";
+pub(crate) const UPDATED: &str = mark("Updated: everyone who sees this 3D capture now sees it as its 3D view shows it.");
 /// How a failed update ends: Orbiters switches to new files whole or not at all.
-pub(crate) const KEPT: &str = "Everyone still sees the version shared before.";
+pub(crate) const KEPT: &str = mark("Everyone still sees the version shared before.");
 
 /// The generation of the splat edits of a capture's session now (none for a picture); edits that cannot be read stop
 /// whatever asked.
@@ -783,14 +783,14 @@ pub fn share(server: Server, entry: Entry, request: shares::Share, report: Repor
         api(server).and_then(|(api, token)| share_with(&api, &token, records_path(server), &entry, &request, report, &mut steps, &super::maps::web_preview));
     let whom = match (request.public, request.recipients.len()) {
         (true, 0) => "publicly".to_string(),
-        (public, n) => format!("{}with {n} friend{}", if public { "publicly and " } else { "" }, if n == 1 { "" } else { "s" }),
+        (public, n) => format!("{}with {n} friend{}", if public { "publicly and " } else { "" }, if n == 1 { "" } else { "s" }), // i18n: not shown
     };
-    let what = if entry.is_picture() { "picture" } else { "3D capture" };
+    let what = if entry.is_picture() { "picture" } else { "3D capture" }; // i18n: not shown
     let end = match &result {
         Ok(_) => String::new(),
-        Err(e) => format!(", failed: {e}"),
+        Err(e) => format!(", failed: {e}"), // i18n: not shown
     };
-    share_log(&format!("{what} {} shared {whom}: {}; {:.2} s in all{end}", entry.key, steps.join(", "), started.elapsed().as_secs_f64()));
+    share_log(&format!("{what} {} shared {whom}: {}; {:.2} s in all{end}", entry.key, steps.join(", "), started.elapsed().as_secs_f64())); // i18n: not shown
     result
 }
 /// What makes a capture's upload files: [`super::maps::web_preview`] (a stand-in in tests).
@@ -816,7 +816,7 @@ fn share_with(
     let mut at = Instant::now();
     let _one = Changing::of(entry, report);
     if at.elapsed().as_millis() > 50 {
-        step(steps, "waited for its other change", &mut at);
+        step(steps, "waited for its other change", &mut at); // i18n: not shown
     }
     let records = records.as_deref().map_err(|e| anyhow::anyhow!("{e}"));
     let record = entry.local.as_ref().and_then(|l| records.as_ref().ok().and_then(|p| read_records(p).into_iter().find(|r| r.path == l.path())));
@@ -877,7 +877,7 @@ fn share_with(
                     }
                     sending.join().unwrap_or_else(|_| Err(anyhow::anyhow!("The upload stopped unexpectedly")))
                 })
-                .inspect(|_| step(steps, &format!("sent {:.1} MB and stored", bytes as f64 / 1e6), &mut at))?
+                .inspect(|_| step(steps, &format!("sent {:.1} MB and stored", bytes as f64 / 1e6), &mut at))? // i18n: not shown
             }
             Local::Picture(path) => {
                 let name = path.file_name().unwrap_or_default().to_string_lossy();
@@ -885,7 +885,7 @@ fn share_with(
                 metadata["takenAt"] = serde_json::json!([iso(entry.taken)]);
                 report(Stage::Sending { sent: 0, total: std::fs::metadata(path).map_or(0, |m| m.len()) });
                 let result = api.add_shared_pictures(token, &entry.world_id, vec![part], &metadata)?;
-                step(steps, "sent and stored", &mut at);
+                step(steps, "sent and stored", &mut at); // i18n: not shown
                 match result.added.into_iter().next() {
                     Some(uploaded) => uploaded,
                     None => {
@@ -914,16 +914,16 @@ fn share_with(
             if request.public {
                 let withdraw = shares::Unshare { public: true, recipients: Vec::new(), all: false };
                 if let Err(e) = api.unshare_capture(token, kind, id, &withdraw) {
-                    step(steps, &format!("could not take it back from the public ({e})"), &mut at);
+                    step(steps, &format!("could not take it back from the public ({e})"), &mut at); // i18n: not shown
                 }
             }
-            anyhow::bail!("{EDITED_MEANWHILE}");
+            anyhow::bail!("{}", tr(EDITED_MEANWHILE));
         }
     }
     // Edits that cannot be read now stop the share too; edited while it was updated, it is not shared either.
     if let Some(now) = edits_now(entry)? {
         let made_with = sent_edits.as_deref().unwrap_or(&uploaded_edits);
-        anyhow::ensure!(now == made_with, "{EDITED_MEANWHILE}");
+        anyhow::ensure!(now == made_with, "{}", tr(EDITED_MEANWHILE));
     }
     report(Stage::Sharing);
     let shared = api.share_capture(token, kind, id, request);
@@ -937,9 +937,9 @@ fn share_with(
                         match crate::capture_picture::jpeg(dir).map(|jpeg| api.set_capture_picture(token, item.id, jpeg)) {
                             Some(Ok(with_picture)) => {
                                 *item = with_picture;
-                                step(steps, "gave it its picture", &mut at);
+                                step(steps, "gave it its picture", &mut at); // i18n: not shown
                             }
-                            Some(Err(e)) => step(steps, &format!("its picture failed ({e})"), &mut at),
+                            Some(Err(e)) => step(steps, &format!("its picture failed ({e})"), &mut at), // i18n: not shown
                             None => {}
                         }
                     }
@@ -973,10 +973,10 @@ pub fn update(server: Server, entry: Entry, report: Report) -> anyhow::Result<(I
         update_with(&api, &token, records.as_deref().map_err(|e| anyhow::anyhow!("{e}")), &entry, report, &mut steps, &super::maps::web_preview)
     });
     let end = match &result {
-        Ok((item, _)) => format!(", revision {}", item.capture.as_ref().map_or(1, shares::Capture::revision)),
-        Err(e) => format!(", failed: {e}"),
+        Ok((item, _)) => format!(", revision {}", item.capture.as_ref().map_or(1, shares::Capture::revision)), // i18n: not shown
+        Err(e) => format!(", failed: {e}"), // i18n: not shown
     };
-    share_log(&format!("3D capture {} updated: {}; {:.2} s in all{end}", entry.key, steps.join(", "), started.elapsed().as_secs_f64()));
+    share_log(&format!("3D capture {} updated: {}; {:.2} s in all{end}", entry.key, steps.join(", "), started.elapsed().as_secs_f64())); // i18n: not shown
     result.map_err(|e| anyhow::anyhow!("{}", not_updated(&e)))
 }
 
@@ -984,7 +984,7 @@ pub fn update(server: Server, entry: Entry, report: Report) -> anyhow::Result<(I
 fn not_updated(e: &anyhow::Error) -> String {
     let why = e.to_string();
     let end = if why.ends_with(['.', '!', '?']) { "" } else { "." };
-    format!("Not updated: {why}{end} {KEPT}")
+    format!("{} {}", tr!("Not updated: {reason}", reason = format!("{why}{end}")), tr(KEPT))
 }
 
 /// [`update`] through `api` as `token` (the caller holds the item's [`Changing`]), this account's upload records in
@@ -1024,7 +1024,7 @@ fn update_with(
     };
     anyhow::ensure!(current.mine, "Only the member who uploaded it can update it.");
     let revision = current.capture.as_ref().map_or(1, shares::Capture::revision);
-    step(steps, "asked Orbiters", &mut at);
+    step(steps, "asked Orbiters", &mut at); // i18n: not shown
     report(Stage::Preparing);
     let super::maps::Prepared { files, sky, metadata, generation } = prepare(dir)?;
     // The picture only when drawn for these edits (capture_picture), and the edits still those prepared.
@@ -1070,18 +1070,18 @@ fn update_with(
             };
             match switched {
                 Some(now) => {
-                    step(steps, &format!("lost the answer ({e}), found it switched"), &mut at);
+                    step(steps, &format!("lost the answer ({e}), found it switched"), &mut at); // i18n: not shown
                     now
                 }
                 None => return Err(e),
             }
         }
     };
-    step(steps, &format!("sent {:.1} MB and switched", bytes as f64 / 1e6), &mut at);
+    step(steps, &format!("sent {:.1} MB and switched", bytes as f64 / 1e6), &mut at); // i18n: not shown
     // Switched: everyone sees the update whatever happens here. A record that cannot be saved is only this computer's
     // note of it (the capture then asks to be updated again), never "Not updated".
     if let Err(e) = save_record_edits(records, entry, &item, Some(generation.clone())) {
-        step(steps, &format!("its upload record could not be saved ({e})"), &mut at);
+        step(steps, &format!("its upload record could not be saved ({e})"), &mut at); // i18n: not shown
     }
     Ok((item, generation))
 }

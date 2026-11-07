@@ -8,6 +8,7 @@
 use super::{NoticeKind, Shared};
 use crate::state::CaptureState;
 use orbiters_core::protocol::{coverage, CoverageMap};
+use orbiters_i18n::tr;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -260,9 +261,9 @@ impl super::Controller {
         let was = std::mem::take(&mut self.scan.lock().unwrap().recording);
         let Some(dir) = session.filter(|_| was) else { return };
         match self.queue_reconstruction(dir) {
-            Ok(false) => self.notify(NoticeKind::Success, "Scan recorded: it is being reconstructed."),
-            Ok(true) => self.notify(NoticeKind::Success, format!("Scan recorded: its reconstruction starts {}.", self.reconstruction_waits_for())),
-            Err(e) => self.notify(NoticeKind::Warning, format!("Scan recorded, not reconstructed: {e}")),
+            Ok(false) => self.notify(NoticeKind::Success, tr("Scan recorded: it is being reconstructed.")),
+            Ok(true) => self.notify(NoticeKind::Success, tr!("Scan recorded: its reconstruction starts {when}.", when = tr(self.reconstruction_waits_for()))),
+            Err(e) => self.notify(NoticeKind::Warning, tr!("Scan recorded, not reconstructed: {error}", error = e)),
         }
     }
 }

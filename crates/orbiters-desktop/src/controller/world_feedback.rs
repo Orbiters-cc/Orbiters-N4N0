@@ -9,6 +9,7 @@ use super::Shared;
 use orbiters_contracts::world_feedback::{self as contract, Action as Line, Refusal};
 use orbiters_core::account::Api;
 use orbiters_core::vrchat_log::{LogEvent, LogWatcher};
+use orbiters_i18n::{mark, tr, tr_latin};
 use orbiters_core::world_feedback::{client_id, Action, Client, Failure, Known, Queue, Seen, Set};
 use orbiters_n4n0_core::feedback::{CommentRow, FeedbackAsk, FeedbackView, LabelCount, Subject, Why, WorldFeedback, SUBJECTS_MAX};
 use std::collections::HashMap;
@@ -28,7 +29,7 @@ const ASKED_MAX: usize = 6;
 /// Previous instances are read again from their file after this long.
 const INSTANCES_EVERY: Duration = Duration::from_secs(10);
 /// What the answer gives the member's own comments as their author (the world says "You").
-const ME: &str = "You";
+const ME: &str = mark("You");
 
 fn now_ms() -> u64 {
     orbiters_n4n0::unix_ms()
@@ -177,7 +178,7 @@ impl WorldFeedbackRuntime {
     }
 
     fn seen(&self, world: &str) -> Seen {
-        self.known.get(world).cloned().unwrap_or_default().seen(world, &self.queue, ME)
+        self.known.get(world).cloned().unwrap_or_default().seen(world, &self.queue, tr_latin(ME))
     }
 
     /// The local address's answer (contracts `Docs/world-feedback.md`, The probe and the state).
@@ -560,7 +561,7 @@ fn serve(ctl: Shared) {
             }
             Err(e) => {
                 ctl.world_feedback.lock().unwrap().port_note =
-                    Some(format!("Port {} is taken ({e}): the N4N0 world cannot reach Orbiters - N4N0 to give feedback", contract::PORT));
+                    Some(tr!("Port {port} is taken ({error}): the N4N0 world cannot reach Orbiters - N4N0 to give feedback", port = contract::PORT, error = e));
                 std::thread::sleep(Duration::from_secs(30));
             }
         }
@@ -629,7 +630,7 @@ fn respond(runtime: &std::sync::Mutex<WorldFeedbackRuntime>, mut stream: TcpStre
         }
     };
     let head = if body.is_empty() {
-        format!("HTTP/1.1 {} {}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n", status.0, status.1)
+        format!("HTTP/1.1 {} {}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n", status.0, status.1) // i18n: not shown
     } else {
         format!(
             "HTTP/1.1 {} {}\r\nContent-Type: application/json; charset=utf-8\r\nCache-Control: no-store\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",

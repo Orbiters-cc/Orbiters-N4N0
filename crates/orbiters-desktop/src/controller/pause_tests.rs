@@ -32,7 +32,7 @@ fn running(ctl: &Shared, dir: &Path, integrated: bool, lines: &str) {
     });
 }
 
-const PAUSED: &str = r#"& echo {"event":"pausing"} & echo {"event":"paused","kept":true,"message":null}"#;
+const PAUSED: &str = r#"& echo {"event":"pausing"} & echo {"event":"paused","kept":true,"message":null}"#; // i18n: not shown
 
 fn gone(ctl: &Shared) {
     let until = Instant::now() + Duration::from_secs(30);

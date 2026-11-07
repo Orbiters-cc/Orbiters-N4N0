@@ -10,6 +10,7 @@ use crate::state::{AccountState, CaptureState, Snapshot};
 use orbiters_core::account::Server;
 use orbiters_core::bundle::{self, SessionSummary};
 use orbiters_core::explicit::Content;
+use orbiters_i18n::tr;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
@@ -236,41 +237,41 @@ fn take(ctl: &Shared, r: Request, file: PathBuf, imports: &mut VecDeque<(Request
         ctl.world_captures.lock().unwrap().answer(&world, answer(&r.id, &r.action, false, message, r.session.clone()), Some(&file));
     };
     if !is_world_id(&world) {
-        return fail("The request names no VRChat world: upload the world once, then publish its captures.".into());
+        return fail(tr("The request names no VRChat world: upload the world once, then publish its captures.").into());
     }
     match r.action.as_str() {
         "watch" => {
             let _ = std::fs::remove_file(&file);
         }
         "import" => {
-            let Some(capture) = r.capture.clone() else { return fail("The request names no raw capture.".into()) };
+            let Some(capture) = r.capture.clone() else { return fail(tr("The request names no raw capture.").into()) };
             match raw_capture(&capture) {
                 Some((id, _)) if id == world => imports.push_back((r, file)),
-                Some(_) => fail(format!("{} is a capture of another world.", capture.display())),
-                None => fail(format!("{} is not a raw capture of this world.", capture.display())),
+                Some(_) => fail(tr!("{path} is a capture of another world.", path = capture.display())),
+                None => fail(tr!("{path} is not a raw capture of this world.", path = capture.display())),
             }
         }
         "share" | "unshare" => {
             let sessions_dir = ctl.settings().sessions_dir;
-            let Some(dir) = r.session.clone() else { return fail("The request names no session.".into()) };
+            let Some(dir) = r.session.clone() else { return fail(tr("The request names no session.").into()) };
             let Some(summary) = bundle::list_sessions(&sessions_dir).into_iter().find(|s| same_path(&s.dir, &dir)) else {
-                return fail(format!("{} is not a session in Orbiters - N4N0's sessions folder.", dir.display()));
+                return fail(tr!("{path} is not a session in Orbiters - N4N0's sessions folder.", path = dir.display()));
             };
             if world_of(&summary).as_deref() != Some(world.as_str()) {
-                return fail("This session was recorded in another world.".into());
+                return fail(tr("This session was recorded in another world.").into());
             }
             let server = Server::current();
             let remote = shares::uploads(server).into_iter().find(|(p, _)| same_path(p, &summary.dir)).map(|(_, item)| item);
             let share = r.action == "share";
             if share && summary.reconstruction.is_none() {
-                return fail("Its 3D view is not made yet: share it once its reconstruction is done.".into());
+                return fail(tr("Its 3D view is not made yet: share it once its reconstruction is done.").into());
             }
             if !share && remote.is_none() {
-                return fail("This capture was never shared.".into());
+                return fail(tr("This capture was never shared.").into());
             }
             let entry = session_entry(&summary, &world, &r.world.name, remote);
             if share && entry.content.explicit {
-                return fail("This capture is marked explicit: share it from Orbiters - N4N0's Photos & captures, which asks you to confirm.".into());
+                return fail(tr("This capture is marked explicit: share it from Orbiters - N4N0's Photos & captures, which asks you to confirm.").into());
             }
             let operation = if share {
                 Operation::Share(orbiters_core::shares::Share { public: true, ..Default::default() })
@@ -280,7 +281,7 @@ fn take(ctl: &Shared, r: Request, file: PathBuf, imports: &mut VecDeque<(Request
             jobs.insert(r.id.clone(), Job { world: world.clone(), action: if share { "share" } else { "unshare" }, session: summary.dir.clone(), file });
             ctl.capture_share(shares::Request { id: r.id, server, entry, extra: Vec::new(), operation });
         }
-        other => fail(format!("Orbiters - N4N0 does not know the action \"{other}\": update it.")),
+        other => fail(tr!("Orbiters - N4N0 does not know the action \"{other}\": update it.", other = other)),
     }
 }
 
@@ -337,7 +338,7 @@ fn step_import(ctl: &Shared, imports: &mut VecDeque<(Request, PathBuf)>) {
         import.idle = if state == CaptureState::Idle { import.idle + 1 } else { 0 };
         if import.idle >= 2 {
             let import = rt.importing.take().unwrap();
-            let error = ctl.view().capture.error.clone().unwrap_or_else(|| "The import stopped before its session was saved.".into());
+            let error = ctl.view().capture.error.clone().unwrap_or_else(|| tr("The import stopped before its session was saved.").into());
             rt.answer(&import.world, answer(&import.request, "import", false, error, None), Some(&import.file));
         }
         return;
@@ -369,11 +370,11 @@ fn finish_jobs(ctl: &Shared, jobs: &mut HashMap<String, Job>) {
         };
         let (done, message) = match outcome {
             shares::Outcome::Failed { explicit: true, .. } => {
-                (false, "This capture is marked explicit: share it from Orbiters - N4N0's Photos & captures, which asks you to confirm.".to_string())
+                (false, tr("This capture is marked explicit: share it from Orbiters - N4N0's Photos & captures, which asks you to confirm.").to_string())
             }
             shares::Outcome::Failed { message, .. } => (false, message),
-            _ if job.action == "share" => (true, "Shared publicly.".to_string()),
-            _ => (true, "Taken off the public listing.".to_string()),
+            _ if job.action == "share" => (true, tr("Shared publicly.").to_string()),
+            _ => (true, tr("Taken off the public listing.").to_string()),
         };
         ctl.world_captures.lock().unwrap().answer(&job.world, answer(id, job.action, done, message, Some(job.session.clone())), Some(&job.file));
         false
@@ -477,11 +478,11 @@ impl super::Controller {
         let Some(import) = self.world_captures.lock().unwrap().importing.take() else { return };
         let answered = match session {
             Some(dir) => match self.queue_reconstruction(dir.clone()) {
-                Ok(false) => answer(&import.request, "import", true, "Imported: it is being reconstructed.", Some(dir)),
-                Ok(true) => answer(&import.request, "import", true, format!("Imported: its reconstruction starts {}.", self.reconstruction_waits_for()), Some(dir)),
-                Err(e) => answer(&import.request, "import", false, format!("Imported, not reconstructed: {e}"), Some(dir)),
+                Ok(false) => answer(&import.request, "import", true, tr("Imported: it is being reconstructed."), Some(dir)),
+                Ok(true) => answer(&import.request, "import", true, tr!("Imported: its reconstruction starts {when}.", when = tr(self.reconstruction_waits_for())), Some(dir)),
+                Err(e) => answer(&import.request, "import", false, tr!("Imported, not reconstructed: {error}", error = e), Some(dir)),
             },
-            None => answer(&import.request, "import", false, "The import was not saved.", None),
+            None => answer(&import.request, "import", false, tr("The import was not saved."), None),
         };
         self.world_captures.lock().unwrap().answer(&import.world, answered, Some(&import.file));
     }

@@ -6,6 +6,7 @@ use super::{NoticeKind, Shared};
 use crate::state::{LanLink, LanStatus};
 use orbiters_core::lan::{self, Choice, LanBrowser};
 use orbiters_core::osc::{Discovery, LanVrchat, Network, Ports};
+use orbiters_i18n::tr;
 use std::net::Ipv4Addr;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::time::Duration;
@@ -133,7 +134,7 @@ impl super::Controller {
                     s.osc.remote.ip = Some(ip);
                 });
                 if first {
-                    self.notify(NoticeKind::Success, format!("Connected to {label}."));
+                    self.notify(NoticeKind::Success, tr!("Connected to {label}.", label = label));
                 }
             }
         }
@@ -178,7 +179,7 @@ impl super::Controller {
         }
         let label = match &choice {
             Choice::Found(vrchat) => Some(vrchat.label()),
-            Choice::Typed(ip) | Choice::Last(ip) => Some(format!("VRChat at {ip}")),
+            Choice::Typed(ip) | Choice::Last(ip) => Some(tr!("VRChat at {ip}", ip = ip)),
             Choice::Nobody | Choice::Ask => None,
         };
         let status = LanStatus { link, found, peer, peer_label: label, this_computer: here };

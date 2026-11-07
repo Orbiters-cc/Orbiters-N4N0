@@ -26,8 +26,8 @@
   "The output Windows uses when SteamVR starts": "SteamVRの起動時にWindowsが使う出力",
   "The output Windows uses when SteamVR starts.": "SteamVRの起動時にWindowsが使う出力です。",
   "Theme": "テーマ",
-  "These menus' layout, colours and motion, the sound in VR and your language.": "これらのメニューのレイアウト、色、動き、VRのサウンド、言語を設定します。",
   "Tiles in VR": "VRのタイル",
   "Under the menu": "メニューの下",
-  "Where the tiles lie on the Quick Menu": "クイックメニュー上のタイルの位置"
+  "Where the tiles lie on the Quick Menu": "クイックメニュー上のタイルの位置",
+  "These menus' layout, colours, motion, sound and language.": "これらのメニューのレイアウト、色、動き、サウンド、言語を設定します。"
 }

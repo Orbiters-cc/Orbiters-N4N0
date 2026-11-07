@@ -26,8 +26,8 @@
   "The output Windows uses when SteamVR starts": "La salida que usa Windows cuando se inicia SteamVR",
   "The output Windows uses when SteamVR starts.": "La salida que usa Windows cuando se inicia SteamVR.",
   "Theme": "Tema",
-  "These menus' layout, colours and motion, the sound in VR and your language.": "El diseño, los colores y el movimiento de estos menús, el sonido en VR y tu idioma.",
   "Tiles in VR": "Mosaicos en VR",
   "Under the menu": "Debajo del menú",
-  "Where the tiles lie on the Quick Menu": "Dónde van los mosaicos en el menú rápido"
+  "Where the tiles lie on the Quick Menu": "Dónde van los mosaicos en el menú rápido",
+  "These menus' layout, colours, motion, sound and language.": "El diseño, los colores, el movimiento, el sonido y el idioma de estos menús."
 }

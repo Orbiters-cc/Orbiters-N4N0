@@ -241,7 +241,7 @@ impl Hints {
     fn now(&self, open: Option<Around>, pointing: bool) -> Option<(&'static str, &'static str)> {
         match open {
             Some(Around::Wheel) if pointing => None,
-            Some(Around::Wheel) if self.pointed < Self::FULL => Some(("Press 1 to 6 to pick", "Or hold Left Alt: your mouse then points here, not at VRChat's wheel")),
+            Some(Around::Wheel) if self.pointed < Self::FULL => Some(("Press 1 to 6 to pick", "Or hold Left Alt to point")),
             Some(Around::Wheel) => Some(("1 to 6 to pick, Left Alt to point", "")),
             // Says what this is, and that it is not VRChat's.
             Some(Around::QuickMenu) if self.openings <= Self::FULL => Some(("Orbiters, beside VRChat's menu", "Worlds in 3D, videos, instances and 3D pictures.")),

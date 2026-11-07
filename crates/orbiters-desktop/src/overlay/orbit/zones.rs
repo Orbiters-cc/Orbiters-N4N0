@@ -289,7 +289,7 @@ impl Zone {
         let r = |x0: f32, y0: f32, x1: f32, y1: f32| Rect::from_min_max(pos2(x0, y0), pos2(x1, y1));
         match self {
             Zone::WheelCaption => r(-220.0, -270.0, 220.0, -214.0),
-            Zone::WheelVeil => r(-103.0, -103.0, 103.0, 103.0),
+            Zone::WheelVeil => r(-109.0, -109.0, 109.0, 109.0),
             // Off the ring, in the free corner past its seam, and no smaller than a thumb's worth of laser.
             Zone::WheelHide => r(118.0, -182.0, 202.0, -150.0),
             // As tall as My Profile and as wide, beside it.

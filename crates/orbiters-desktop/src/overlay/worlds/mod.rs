@@ -22,7 +22,7 @@ pub mod small_hint;
 const FEW_CAPTURES: usize = 3;
 
 /// How much of a hole's width a capture lying in it fills: its top and foot are cut by the hole, as captures are wider than tall.
-pub const SMALL_FILLS_HOLE: f32 = 0.74;
+pub const SMALL_FILLS_HOLE: f32 = 0.62;
 mod diagnostics;
 pub mod finder;
 #[cfg(windows)]

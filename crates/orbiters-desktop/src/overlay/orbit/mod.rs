@@ -474,20 +474,17 @@ impl Recents {
         asked.1.notify_all();
     }
 
-    /// The newest three captures with a 3D view, and the newest thing of all, and the newest of another world than that capture's: what the parts show of what they open.
-    fn newest(&self) -> (Vec<usize>, Option<usize>, Option<usize>) {
+    /// The newest three captures with a 3D view, and the newest thing of all: what All tools holds.
+    fn newest(&self) -> (Vec<usize>, Option<usize>) {
         let captures: Vec<usize> = self.loaded.iter().enumerate().filter(|(_, r)| r.has_view).map(|(i, _)| i).take(3).collect();
-        let any = (!self.loaded.is_empty()).then_some(0);
-        let world = captures.first().and_then(|i| self.loaded.get(*i)).map(|r| r.title.clone());
-        let other = self.loaded.iter().position(|r| Some(&r.title) != world.as_ref());
-        (captures, any, other)
+        (captures, (!self.loaded.is_empty()).then_some(0))
     }
 
-    /// Holds and asks for those pictures alone: with no gallery on, nothing else stays in memory.
+    /// Holds and asks for those pictures alone: outside the gallery, nothing else stays in memory.
     fn keep_the_newest(&mut self) {
-        let (captures, any, other) = self.newest();
+        let (captures, any) = self.newest();
         // The newest capture is often the newest of all too: each once, or a new list would lose what was read of it.
-        let mut wanted: Vec<usize> = captures.into_iter().chain(any).chain(other).collect();
+        let mut wanted: Vec<usize> = captures.into_iter().chain(any).collect();
         wanted.sort_unstable();
         wanted.dedup();
         let loaded = &mut self.loaded;
@@ -990,9 +987,10 @@ impl Panels {
             return;
         }
         self.elastic = !snap.settings.reduce_motion;
-        // The parts show the newest of them, whatever is open.
-        let listed = self.recents.follow((library, crate::worlds::picture_revision()), snap.settings.sessions_dir.clone(), snap.settings.picture_folders.clone());
-        let arranged = self.recents.arrange(self.facts.gallery_filter, snap.settings.photos_layout);
+        // All tools shows the newest of them too.
+        let in_gallery = matches!(self.facts.sheet, Some(Sheet::Pictures | Sheet::All));
+        let listed = in_gallery && self.recents.follow((library, crate::worlds::picture_revision()), snap.settings.sessions_dir.clone(), snap.settings.picture_folders.clone());
+        let arranged = in_gallery && self.recents.arrange(self.facts.gallery_filter, snap.settings.photos_layout);
         if listed || arranged {
             for panel in &mut self.list {
                 panel.dirty = true;
@@ -1007,12 +1005,18 @@ impl Panels {
             if let Some(panel) = self.takeover.as_mut() {
                 panel.dirty = true;
             }
-            for panel in &mut self.list {
-                panel.dirty = true;
-            }
         }
-        if self.facts.sheet != Some(Sheet::Pictures) {
+        if self.facts.sheet == Some(Sheet::All) {
             self.recents.keep_the_newest();
+        } else if self.facts.sheet != Some(Sheet::Pictures) {
+            // Its pictures do not stay in memory once it is left.
+            if !self.recents.asked.is_empty() {
+                self.recents.keep(1, 0);
+                let art = self.art.as_ref().map(|a| a.0.clone());
+                if let Some(panel) = self.takeover.as_mut() {
+                    panel.pictures.retain(|k, _| art.as_ref() == Some(k));
+                }
+            }
         } else if let Some(panel) = self.takeover.as_mut() {
             let shown = || panel.items.iter().filter_map(|i| if let panels::Look::Capture(n) | panels::Look::BigPicture(n) = i.look { Some(n) } else { None });
             if let (Some(first), Some(last)) = (shown().min(), shown().max()) {
@@ -1138,7 +1142,6 @@ impl Panels {
             hint_band: self.list.iter().any(|p| p.zone == Zone::SheetHint),
             hero_captures: Vec::new(),
             hero_picture: None,
-            tile_picture: None,
             reconstructing: snap.reconstruction.as_ref().map(|j| j.progress.clamp(0.0, 1.0)),
             waiting: snap.reconstruct_queue.len(),
             desktop: snap.n4n0.desktop_mode || !snap.steamvr.running,
@@ -1201,7 +1204,7 @@ impl Panels {
                 Some((at, of))
             }),
             can_seek: menu.media.as_ref().is_some_and(|m| m.can_seek),
-            world_video: menu.world_video.as_ref().map(|v| v.title.clone().unwrap_or_else(|| v.url.clone())),
+            world_video: menu.world_video.as_ref().map(|v| v.title.as_deref().map_or_else(|| v.url.clone(), panels::clean_title)),
             digits: self.open == Some(Around::Wheel) && self.takeover.is_none() && (snap.n4n0.desktop_mode || !snap.steamvr.running),
             beside_wing: self.open == Some(Around::QuickMenu),
             worlds_visited: visited,
@@ -1626,23 +1629,6 @@ impl Panels {
             panel.dirty = false;
             panel.items = panels::items(panel.zone, panel.logical, &self.facts);
             let mut facts = self.facts.clone();
-            // What the part opens, for real: the newest capture on Worlds, the newest of all on Pictures, another world on Instances.
-            let (captures, any, other) = self.recents.newest();
-            let source = match panel.zone {
-                Zone::WheelWorlds | Zone::WingWorlds => captures.first().copied(),
-                Zone::WheelPictures | Zone::WingPictures => any,
-                Zone::WheelInstances | Zone::WingInstances => other,
-                _ => None,
-            };
-            if let Some(loaded) = source.and_then(|i| self.recents.loaded.get(i)) {
-                let name = loaded.key.to_string_lossy().to_string();
-                if let Some(image) = &loaded.image {
-                    let ctx = panel.canvas.ctx();
-                    facts.tile_picture = Some(panel.pictures.entry(name).or_insert_with(|| ctx.load_texture("tile", image.clone(), TextureOptions::LINEAR)).id());
-                } else if let Some(texture) = panel.pictures.get(&name) {
-                    facts.tile_picture = Some(texture.id());
-                }
-            }
             if matches!(panel.zone, Zone::WheelPlaying | Zone::WingPlaying) {
                 if let Some((key, image)) = &art {
                     let ctx = panel.canvas.ctx();
@@ -1710,7 +1696,7 @@ impl Panels {
                     let mut facts = self.facts.clone();
                     if sheet == Sheet::All {
                         // What All tools' large tiles hold, for real.
-                        let (captures, any, _) = self.recents.newest();
+                        let (captures, any) = self.recents.newest();
                         let ctx = stage.canvas.ctx();
                         let texture = |i: usize, panel: &mut Panel| -> Option<TextureId> {
                             let loaded = self.recents.loaded.get(i)?;

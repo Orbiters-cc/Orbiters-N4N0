@@ -77,7 +77,7 @@ pub struct Conflicted {
 impl std::fmt::Display for Conflicted {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let names: Vec<&str> = self.plan.conflicts.iter().map(|c| c.name.as_str()).collect();
-        write!(f, "These package changes conflict with installed packages: {}. No changes were applied.", names.join(", "))
+        write!(f, "{}", tr!("These package changes conflict with installed packages: {names}. No changes were applied.", names = names.join(", ")))
     }
 }
 impl std::error::Error for Conflicted {}

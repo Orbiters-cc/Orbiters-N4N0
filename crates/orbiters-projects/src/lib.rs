@@ -22,6 +22,7 @@ pub mod templates;
 pub mod updates;
 pub mod vpm;
 
+use orbiters_i18n::tr;
 use std::path::{Path, PathBuf};
 
 pub fn data_dir() -> PathBuf {
@@ -255,16 +256,15 @@ pub fn open_project(project: &discovery::Project) -> anyhow::Result<Opened> {
     let name = project.name.clone();
     let p = project.clone();
     within(OPEN_LIMIT, move || open_now(&p)).unwrap_or_else(|| {
-        anyhow::bail!("Opening {name} is taking too long: its disk or Unity's list of editors is not answering. Unity may still open by itself.")
+        anyhow::bail!("{}", tr!("Opening {name} is taking too long: its disk or Unity's list of editors is not answering. Unity may still open by itself.", name = name))
     })
 }
 
 fn open_now(project: &discovery::Project) -> anyhow::Result<Opened> {
     anyhow::ensure!(
         discovery::is_project(&project.path),
-        "{} is not at {} any more. If it is on a disk that is not connected, connect it and try again.",
-        project.name,
-        project.path.display()
+        "{}",
+        tr!("{name} is not at {path} any more. If it is on a disk that is not connected, connect it and try again.", name = project.name, path = project.path.display())
     );
     let locked = unity_open(&project.path);
     let editors = editor::running();
@@ -276,12 +276,16 @@ fn open_now(project: &discovery::Project) -> anyhow::Result<Opened> {
     // Unity would only say the same, in a dialog of its own, and quit.
     anyhow::ensure!(
         !locked,
-        "Something else holds {}'s lock (its Temp/UnityLockfile): Unity still quitting, or Orbiters repairing its storage. Try again in a moment.",
-        project.name
+        "{}",
+        tr!("Something else holds {name}'s lock (its Temp/UnityLockfile): Unity still quitting, or Orbiters repairing its storage. Try again in a moment.", name = project.name)
     );
-    anyhow::ensure!(!project.unity.is_empty(), "{} does not say which Unity version it uses (ProjectSettings/ProjectVersion.txt).", project.name);
+    anyhow::ensure!(
+        !project.unity.is_empty(),
+        "{}",
+        tr!("{name} does not say which Unity version it uses (ProjectSettings/ProjectVersion.txt).", name = project.name)
+    );
     let editor = discovery::find_editor(&project.unity)
-        .ok_or_else(|| anyhow::anyhow!("Unity {} is not installed. Open Unity Hub to install this version.", project.unity))?;
+        .ok_or_else(|| anyhow::anyhow!("{}", tr!("Unity {version} is not installed. Open Unity Hub to install this version.", version = project.unity)))?;
     // Only ever instant. A problem with it must not stop Unity opening: the panel's warning says what to do about the disk.
     let moved = storage::preflight(&project.path).unwrap_or_else(|e| {
         eprintln!("the storage check of {} did not finish: {e:#}", project.path.display());
@@ -291,12 +295,46 @@ fn open_now(project: &discovery::Project) -> anyhow::Result<Opened> {
     let started = {
         let mut command = hidden_command(&editor);
         command.arg("-projectPath").arg(&project.path);
-        start_watched(command, START_WATCH)
+        start_watched(command, START_WATCH, Starting { unity: &project.unity, editor: &editor })
     };
     #[cfg(target_os = "macos")]
-    let started = start_on_mac(&editor, &project.path, START_WATCH);
-    started.map_err(|e| anyhow::anyhow!("Unity {} ({}) {e:#}", project.unity, editor.display()))?;
+    let started = start_on_mac(&editor, &project.path, START_WATCH, &project.unity);
+    started?;
     Ok(Opened { already_open: false, moved })
+}
+
+/// The editor being started, so that each way it can fail is told as one whole sentence (a sentence cut in pieces cannot be translated).
+#[derive(Clone, Copy)]
+struct Starting<'a> {
+    unity: &'a str,
+    editor: &'a Path,
+}
+
+impl Starting<'_> {
+    fn not_started(&self, why: impl std::fmt::Display) -> anyhow::Error {
+        let (unity, editor, why) = (self.unity, self.editor.display(), why.to_string());
+        anyhow::anyhow!("{}", tr!("Unity {unity} ({editor}) could not be started: {why}", unity = unity, editor = editor, why = why))
+    }
+
+    fn not_watched(&self, why: impl std::fmt::Display) -> anyhow::Error {
+        let (unity, editor, why) = (self.unity, self.editor.display(), why.to_string());
+        anyhow::anyhow!("{}", tr!("Unity {unity} ({editor}) could not be watched: {why}", unity = unity, editor = editor, why = why))
+    }
+
+    /// It ended at once, with `status` when the system says one.
+    fn quit(&self, status: Option<std::process::ExitStatus>) -> anyhow::Error {
+        let (unity, editor) = (self.unity, self.editor.display());
+        match status {
+            Some(status) => anyhow::anyhow!(
+                "{}",
+                tr!("Unity {unity} ({editor}) quit right after starting ({status}). Its log is at {log}.", unity = unity, editor = editor, status = status, log = EDITOR_LOG)
+            ),
+            None => anyhow::anyhow!(
+                "{}",
+                tr!("Unity {unity} ({editor}) quit right after starting. Its log is at {log}.", unity = unity, editor = editor, log = EDITOR_LOG)
+            ),
+        }
+    }
 }
 
 /// Starts `editor` on `project`, through the system when it is in an application bundle ([`mac::start_app`]). There is no
@@ -304,21 +342,25 @@ fn open_now(project: &discovery::Project) -> anyhow::Result<Opened> {
 /// of being seen, or never being seen: a process exists as soon as `open` has answered, so one not there after
 /// [`FIRST_SIGHT`] was gone before it could be looked at.
 #[cfg(target_os = "macos")]
-fn start_on_mac(editor: &Path, project: &Path, watch: std::time::Duration) -> anyhow::Result<()> {
-    use anyhow::Context;
+fn start_on_mac(editor: &Path, project: &Path, watch: std::time::Duration, unity: &str) -> anyhow::Result<()> {
     use std::process::Stdio;
+    let who = Starting { unity, editor };
     let Some(app) = mac::enclosing_app(editor) else {
         let mut command = hidden_command(editor);
         command.arg("-projectPath").arg(project).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
-        return start_watched(command, watch);
+        return start_watched(command, watch, who);
     };
-    let answer = mac::start_app(&app).arg("--args").arg("-projectPath").arg(project).output().context("could not be started")?;
-    anyhow::ensure!(answer.status.success(), "could not be started: {}", String::from_utf8_lossy(&answer.stderr).trim());
+    let answer = mac::start_app(&app).arg("--args").arg("-projectPath").arg(project).output().map_err(|e| who.not_started(e))?;
+    if !answer.status.success() {
+        return Err(who.not_started(String::from_utf8_lossy(&answer.stderr).trim()));
+    }
     let start = std::time::Instant::now();
     let mut seen: Option<std::time::Instant> = None;
     loop {
         let here = editor::of(&editor::running(), project, false).is_some();
-        anyhow::ensure!(here || (seen.is_none() && start.elapsed() < FIRST_SIGHT), "quit right after starting. Its log is at {EDITOR_LOG}.");
+        if !(here || (seen.is_none() && start.elapsed() < FIRST_SIGHT)) {
+            return Err(who.quit(None));
+        }
         if here && seen.get_or_insert_with(std::time::Instant::now).elapsed() >= watch {
             return Ok(());
         }
@@ -333,13 +375,14 @@ const FIRST_SIGHT: std::time::Duration = std::time::Duration::from_secs(6);
 /// Starts `command` and watches it for `watch`: a program that could not start, or that quit at once with a failure, is an
 /// error rather than a success said too soon. One still running, or ended well (it handed over to another process), is
 /// started.
-fn start_watched(mut command: std::process::Command, watch: std::time::Duration) -> anyhow::Result<()> {
-    use anyhow::Context;
-    let mut child = command.spawn().context("could not be started")?;
+fn start_watched(mut command: std::process::Command, watch: std::time::Duration, who: Starting) -> anyhow::Result<()> {
+    let mut child = command.spawn().map_err(|e| who.not_started(e))?;
     let start = std::time::Instant::now();
     while start.elapsed() < watch {
-        if let Some(status) = child.try_wait().context("could not be watched")? {
-            anyhow::ensure!(status.success(), "quit right after starting ({status}). Its log is at {EDITOR_LOG}.");
+        if let Some(status) = child.try_wait().map_err(|e| who.not_watched(e))? {
+            if !status.success() {
+                return Err(who.quit(Some(status)));
+            }
             return Ok(());
         }
         std::thread::sleep(std::time::Duration::from_millis(50));
@@ -353,11 +396,15 @@ fn start_watched(mut command: std::process::Command, watch: std::time::Duration)
 }
 
 pub fn open_hub() -> anyhow::Result<()> {
-    let path = unity_hub().ok_or_else(|| anyhow::anyhow!("Unity Hub is not installed. Download it from unity.com/download."))?;
+    let path = unity_hub().ok_or_else(|| anyhow::anyhow!("{}", tr("Unity Hub is not installed. Download it from unity.com/download.")))?;
     #[cfg(target_os = "macos")]
     if let Some(app) = mac::enclosing_app(&path) {
         let answer = mac::open_command().arg(&app).output()?;
-        anyhow::ensure!(answer.status.success(), "Unity Hub could not be opened: {}", String::from_utf8_lossy(&answer.stderr).trim());
+        anyhow::ensure!(
+            answer.status.success(),
+            "{}",
+            tr!("Unity Hub could not be opened: {why}", why = String::from_utf8_lossy(&answer.stderr).trim())
+        );
         return Ok(());
     }
     hidden_command(path).spawn()?;
@@ -400,6 +447,10 @@ mod open_tests {
     use super::*;
     use std::time::{Duration, Instant};
 
+    fn who() -> Starting<'static> {
+        Starting { unity: "2022.3.22f1", editor: Path::new("Unity.exe") }
+    }
+
     #[cfg(windows)]
     fn cmd(args: &[&str]) -> std::process::Command {
         let mut c = hidden_command("cmd");
@@ -410,16 +461,16 @@ mod open_tests {
     #[cfg(windows)]
     #[test]
     fn a_program_that_quits_at_once_with_a_failure_is_said_to_have_failed() {
-        let error = start_watched(cmd(&["exit", "3"]), Duration::from_secs(10)).unwrap_err();
+        let error = start_watched(cmd(&["exit", "3"]), Duration::from_secs(10), who()).unwrap_err();
         assert!(format!("{error:#}").contains("quit right after starting"), "{error:#}");
     }
 
     #[cfg(windows)]
     #[test]
     fn a_program_that_ended_well_or_goes_on_running_is_started_without_waiting_for_it() {
-        start_watched(cmd(&["exit", "0"]), Duration::from_secs(10)).unwrap();
+        start_watched(cmd(&["exit", "0"]), Duration::from_secs(10), who()).unwrap();
         let start = Instant::now();
-        start_watched(cmd(&["ping", "-n", "4", "127.0.0.1"]), Duration::from_millis(200)).unwrap();
+        start_watched(cmd(&["ping", "-n", "4", "127.0.0.1"]), Duration::from_millis(200), who()).unwrap();
         assert!(start.elapsed() < Duration::from_secs(2), "the watch ends the wait, not the program");
     }
 
@@ -433,11 +484,11 @@ mod open_tests {
     #[cfg(unix)]
     #[test]
     fn a_program_that_quits_at_once_with_a_failure_says_where_its_log_is() {
-        let error = format!("{:#}", start_watched(sh("exit 3"), Duration::from_secs(10)).unwrap_err());
+        let error = format!("{:#}", start_watched(sh("exit 3"), Duration::from_secs(10), who()).unwrap_err());
         assert!(error.contains("quit right after starting") && error.contains(EDITOR_LOG), "{error}");
-        start_watched(sh("exit 0"), Duration::from_secs(10)).unwrap();
+        start_watched(sh("exit 0"), Duration::from_secs(10), who()).unwrap();
         let start = Instant::now();
-        start_watched(sh("sleep 3"), Duration::from_millis(200)).unwrap();
+        start_watched(sh("sleep 3"), Duration::from_millis(200), who()).unwrap();
         assert!(start.elapsed() < Duration::from_secs(2), "the watch ends the wait, not the program");
     }
 
@@ -483,8 +534,28 @@ mod open_tests {
     }
 
     #[test]
+    fn a_start_failure_is_one_sentence_in_the_language_of_the_moment() {
+        use orbiters_i18n::{in_language, Language};
+        let said = |language| in_language(language, || who().quit(None).to_string());
+        assert!(said(Language::En).contains("quit right after starting"));
+        let french = said(Language::Fr);
+        assert!(french.contains("2022.3.22f1") && french.contains(EDITOR_LOG) && !french.contains("quit right"), "{french}");
+        let japanese = in_language(Language::Ja, || who().not_started("x").to_string());
+        assert!(japanese.contains("起動できませんでした") && japanese.contains('x'), "{japanese}");
+    }
+
+    #[test]
+    fn the_conflict_error_is_said_in_the_language_of_the_moment() {
+        use orbiters_i18n::{in_language, Language};
+        let error = coherent::Conflicted { plan: Default::default() };
+        assert!(error.to_string().contains("conflict with installed packages"));
+        let portuguese = in_language(Language::PtBr, || error.to_string());
+        assert!(portuguese.contains("conflito") && !portuguese.contains("conflict with"), "{portuguese}");
+    }
+
+    #[test]
     fn a_program_that_cannot_start_says_so() {
-        let error = start_watched(hidden_command("Z:/no/such/Unity.exe"), Duration::from_secs(1)).unwrap_err();
+        let error = start_watched(hidden_command("Z:/no/such/Unity.exe"), Duration::from_secs(1), who()).unwrap_err();
         assert!(format!("{error:#}").contains("could not be started"), "{error:#}");
     }
 

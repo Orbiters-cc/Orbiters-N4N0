@@ -5,6 +5,7 @@
 //! editor whose command line cannot be read (another user's, elevated) is matched by its window title only while the
 //! project's `Temp/UnityLockfile` is held. Nothing in the project is deleted: Unity removes its own lock file.
 use crate::discovery::key;
+use orbiters_i18n::tr;
 use std::path::{Path, PathBuf};
 
 /// A Unity editor process with a project open.
@@ -254,7 +255,7 @@ fn current(pid: u32, project: &Path) -> anyhow::Result<Editor> {
     of(&editors, project, crate::unity_open(project))
         .filter(|e| e.pid == pid)
         .cloned()
-        .ok_or_else(|| anyhow::anyhow!("Unity no longer has {} open.", project.display()))
+        .ok_or_else(|| anyhow::anyhow!("{}", tr!("Unity no longer has {path} open.", path = project.display())))
 }
 
 #[cfg(windows)]
@@ -267,7 +268,7 @@ pub fn show(pid: u32, project: &Path) -> anyhow::Result<()> {
     current(pid, project)?;
     #[cfg(windows)]
     {
-        let hwnd = window(pid).ok_or_else(|| anyhow::anyhow!("Unity's window was not found."))?;
+        let hwnd = window(pid).ok_or_else(|| anyhow::anyhow!("{}", tr("Unity's window was not found.")))?;
         win::front(hwnd);
     }
     #[cfg(target_os = "macos")]
@@ -283,7 +284,7 @@ pub fn show(pid: u32, project: &Path) -> anyhow::Result<()> {
                 shown = mac::open_command().arg(app).status().is_ok_and(|s| s.success()) || shown;
             }
         }
-        anyhow::ensure!(shown, "macOS did not bring Unity to the front. Its icon in the Dock does.");
+        anyhow::ensure!(shown, "{}", tr("macOS did not bring Unity to the front. Its icon in the Dock does."));
     }
     Ok(())
 }
@@ -294,14 +295,14 @@ pub fn close(pid: u32, project: &Path) -> anyhow::Result<()> {
     current(pid, project)?;
     #[cfg(windows)]
     {
-        let hwnd = window(pid).ok_or_else(|| anyhow::anyhow!("Unity's window was not found."))?;
+        let hwnd = window(pid).ok_or_else(|| anyhow::anyhow!("{}", tr("Unity's window was not found.")))?;
         win::close(hwnd)?;
     }
     #[cfg(target_os = "macos")]
     {
         // Its windows now: one more later is its question about unsaved scenes.
         crate::mac::note_windows_before_quit(pid);
-        anyhow::ensure!(crate::mac::terminate(pid), "macOS could not ask Unity to quit. Quit it from its own menu.");
+        anyhow::ensure!(crate::mac::terminate(pid), "{}", tr("macOS could not ask Unity to quit. Quit it from its own menu."));
     }
     Ok(())
 }
@@ -317,8 +318,8 @@ pub fn kill(pid: u32, project: &Path) -> anyhow::Result<()> {
         .filter(|(p, parent, args, _)| *p != pid && *parent == Some(pid) && worker_of(args).is_some_and(|w| same_folder(&w, project)))
         .map(|(p, _, _, _)| *p)
         .collect();
-    let process = system.process(sysinfo::Pid::from_u32(pid)).ok_or_else(|| anyhow::anyhow!("Unity already quit."))?;
-    anyhow::ensure!(process.kill(), "Unity could not be ended (it may run as another user).");
+    let process = system.process(sysinfo::Pid::from_u32(pid)).ok_or_else(|| anyhow::anyhow!("{}", tr("Unity already quit.")))?;
+    anyhow::ensure!(process.kill(), "{}", tr("Unity could not be ended (it may run as another user)."));
     for w in workers {
         if let Some(p) = system.process(sysinfo::Pid::from_u32(w)) {
             p.kill();

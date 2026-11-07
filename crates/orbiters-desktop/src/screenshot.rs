@@ -199,6 +199,7 @@ fn shots(args: &[String], picture_folders: Vec<PathBuf>) -> anyhow::Result<()> {
     let mut width = 1280.0f32;
     let mut only: Option<String> = None;
     let mut frames = Frames::default();
+    crate::audio_devices::made_up_mics();
     let mut it = args[1..].iter();
     while let Some(a) = it.next() {
         match a.as_str() {

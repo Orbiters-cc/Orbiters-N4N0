@@ -12,6 +12,7 @@ use orbiters_contracts::manifest::{depth_file, DEPTH_DIR, KEYFRAMES_DIR};
 use orbiters_contracts::image::Rect;
 use orbiters_contracts::{qoi, rig, skeleton, strip};
 use orbiters_core::bundle;
+use orbiters_i18n::{tr, tr_n};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -340,8 +341,8 @@ pub fn load(dir: &Path, max_width: u32, progress: impl FnMut(f32)) -> anyhow::Re
 
 /// [`load`] within `budget`.
 pub fn load_with(dir: &Path, max_width: u32, budget: Budget, mut progress: impl FnMut(f32)) -> anyhow::Result<Dataset> {
-    let manifest = bundle::read_manifest(dir).context("reading the session's manifest")?;
-    let records: Vec<FrameRecord> = bundle::read_records(dir).context("reading frames.bin")?.into_iter().filter(|r| r.has(record_flags::STRIP_OK) && posed(r)).collect();
+    let manifest = bundle::read_manifest(dir).with_context(|| tr("reading the session's manifest"))?;
+    let records: Vec<FrameRecord> = bundle::read_records(dir).with_context(|| tr("reading frames.bin"))?.into_iter().filter(|r| r.has(record_flags::STRIP_OK) && posed(r)).collect();
     // The rig's faces are keyframes of their own (their records say which face), of another size than the frames'.
     let face_of = |r: &FrameRecord| if strip::flags::kind(r.strip_flags) == strip::flags::KIND_RIG { strip::flags::face(r.strip_flags) } else { 0 };
     let pictures = records.iter().filter(|r| r.has(record_flags::KEYFRAME) && r.keyframe_index >= 0);
@@ -352,12 +353,12 @@ pub fn load_with(dir: &Path, max_width: u32, budget: Budget, mut progress: impl 
     let size = most_common(keyframes.iter().map(|r| (r.width, r.height)));
     let sized: Vec<&FrameRecord> = keyframes.iter().copied().filter(|r| Some((r.width, r.height)) == size).collect();
     if sized.len() < 2 {
-        bail!("This session has {} keyframes: reconstruction needs a few views of the world.", sized.len());
+        bail!("{}", tr_n("This session has {count} keyframe: reconstruction needs a few views of the world.", "This session has {count} keyframes: reconstruction needs a few views of the world.", sized.len() as u64));
     }
     let (full_w, full_h) = size.expect("two keyframes");
     let geometry = Geometry::at_most(full_w, full_h, max_width);
     let (w, h) = (geometry.width(), geometry.height());
-    ensure!(w >= 16 && h >= 16, "keyframes of {full_w}×{full_h} are too small to reconstruct from");
+    ensure!(w >= 16 && h >= 16, "{}", tr!("keyframes of {width}×{height} are too small to reconstruct from", width = full_w, height = full_h));
     let mut loaded = Loaded { keyframes: keyframes.len(), depth_frames: depth_frames.len(), keyframes_skipped: keyframes.len() - sized.len(), ..Default::default() };
 
     // Within the budget, the keyframes that look at the world most differently.
@@ -437,8 +438,11 @@ pub fn load_with(dir: &Path, max_width: u32, budget: Budget, mut progress: impl 
         Faces { views: face_views, sizes }
     });
     if views.len() < 2 {
-        let why = loaded.first_problem.as_deref().map(|p| format!(" ({p})")).unwrap_or_default();
-        bail!("Only {} of this session's {} keyframes could be read{why}: reconstruction needs a few views of the world.", views.len(), loaded.keyframes);
+        let (read, total) = (views.len(), loaded.keyframes);
+        match loaded.first_problem.as_deref() {
+            Some(why) => bail!("{}", tr!("Only {read} of this session's {total} keyframes could be read ({why}): reconstruction needs a few views of the world.", read = read, total = total, why = why)),
+            None => bail!("{}", tr!("Only {read} of this session's {total} keyframes could be read: reconstruction needs a few views of the world.", read = read, total = total)),
+        }
     }
     views.sort_by_key(|v| v.keyframe);
 
@@ -628,10 +632,10 @@ fn load_keyframe(dir: &Path, r: &FrameRecord, geometry: &Geometry) -> anyhow::Re
 /// held-out ones again after the keyframes in memory were realigned: crate::aberration).
 pub fn keyframe_image(dir: &Path, index: i32, geometry: &Geometry) -> anyhow::Result<Vec<u32>> {
     let path = dir.join(KEYFRAMES_DIR).join(bundle::keyframe_file(index));
-    let data = std::fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
+    let data = std::fs::read(&path).with_context(|| tr!("reading {path}", path = path.display()))?;
     let (w, h) = (geometry.full_width, geometry.full_height);
     // Refused before anything is allocated when its header gives another size.
-    let (_, rgba) = qoi::decode_rgba_sized(&data, w, h).map_err(|e| anyhow!("{} (a keyframe of the session's {w}×{h}): {e:?}", path.display()))?;
+    let (_, rgba) = qoi::decode_rgba_sized(&data, w, h).map_err(|e| anyhow!("{}", tr!("{path} (a keyframe of the session's {width}×{height}): {error}", path = path.display(), width = w, height = h, error = format!("{e:?}"))))?;
     Ok(downscale(&rgba, w, h, geometry.factor))
 }
 

@@ -15,6 +15,7 @@ use crate::gaussians::Gaussians;
 use crate::gpu::{Gpu, LearningRates, Target};
 use crate::timing::PrepStage;
 use crate::tree::{self, Tree};
+use orbiters_i18n::tr;
 use orbiters_core::contracts::frame_record::record_flags;
 use std::path::Path;
 use std::sync::Arc;
@@ -96,7 +97,7 @@ impl Rank {
             "area" => Self::Area,
             "contribution" => Self::Contribution,
             "seen" => Self::Seen,
-            _ => anyhow::bail!("a rank is area, contribution or seen, not {name}"),
+            _ => anyhow::bail!("a rank is area, contribution or seen, not {name}"), // i18n: not shown (the --rank option of command-line tools: only a terminal shows it)
         })
     }
 }
@@ -526,7 +527,7 @@ pub fn vrchat_files_kept(
                 let _time = PrepStage::new("tree build pc");
                 fitting(g, PC_SPLATS, &score, PC_SPLATS * 3 / 4, options.tight)
             };
-            anyhow::ensure!(pc.leaf_splats().len() >= 1000, "This reconstruction has too few splats to show the world.");
+            anyhow::ensure!(pc.leaf_splats().len() >= 1000, "{}", tr("This reconstruction has too few splats to show the world."));
             let quest = if pc.len() <= QUEST_SPLATS {
                 None
             } else {

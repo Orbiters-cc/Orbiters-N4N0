@@ -11,6 +11,7 @@
 
 use crate::gaussians::{Gaussians, logit, sigmoid};
 use crate::tree::{Node, Tree};
+use orbiters_i18n::tr;
 use orbiters_contracts::splat_tree::{self as st, Bounds, BoxRecord, Header, Splat};
 use rayon::prelude::*;
 use std::ops::Range;
@@ -135,13 +136,14 @@ pub fn parse(bytes: &[u8]) -> anyhow::Result<Tree> {
     let mut next = 0usize;
     for i in 0..count {
         let r = BoxRecord::read(bytes, i);
-        anyhow::ensure!(r.parent.is_none_or(|p| (p as usize) < i) && (i == 0) == r.parent.is_none(), "a box's parent comes after it");
-        anyhow::ensure!(r.first as usize == next && r.count >= 1, "a splat tree's boxes do not cover its splats in order");
+        anyhow::ensure!(r.parent.is_none_or(|p| (p as usize) < i) && (i == 0) == r.parent.is_none(), "{}", tr("a box's parent comes after it"));
+        anyhow::ensure!(r.first as usize == next && r.count >= 1, "{}", tr("a splat tree's boxes do not cover its splats in order"));
         next += r.count as usize;
-        anyhow::ensure!(next <= splats, "a box's splats run past the file's");
+        anyhow::ensure!(next <= splats, "{}", tr("a box's splats run past the file's"));
         anyhow::ensure!(
             r.bounds.min.iter().chain(&r.bounds.step).all(|v| v.is_finite()) && r.bounds.step.iter().all(|&s| s >= 0.0),
-            "a box's bounds are not finite"
+            "{}",
+            tr("a box's bounds are not finite")
         );
         let depth = r.parent.map_or(0, |p| nodes[p as usize].depth + 1);
         let [x, y, z] = r.center;
@@ -151,7 +153,7 @@ pub fn parse(bytes: &[u8]) -> anyhow::Result<Tree> {
         }
         bounds.push(r.bounds);
     }
-    anyhow::ensure!(next == splats, "a splat tree's boxes do not cover its splats");
+    anyhow::ensure!(next == splats, "{}", tr("a splat tree's boxes do not cover its splats"));
     let first = st::splat_offset(count, 0);
     let decoded: Vec<Vec<Splat>> = nodes
         .par_iter()
@@ -164,7 +166,7 @@ pub fn parse(bytes: &[u8]) -> anyhow::Result<Tree> {
         .collect();
     let mut g = Gaussians::default();
     for s in decoded.iter().flatten() {
-        anyhow::ensure!(s.log_scale.iter().all(|v| v.is_finite()), "a splat's scale is not finite");
+        anyhow::ensure!(s.log_scale.iter().all(|v| v.is_finite()), "{}", tr("a splat's scale is not finite"));
         let (mean, log_scale, rotation, opacity_logit, color) = unity(s);
         g.push(mean, log_scale, rotation, opacity_logit, color);
     }

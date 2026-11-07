@@ -5,6 +5,7 @@
 //! load shows the world from where you stand outward.
 
 use crate::gaussians::Gaussians;
+use orbiters_i18n::tr;
 
 pub const SPLAT_BYTES: usize = 32;
 /// About 19 MB: what a phone on the website still loads and draws smoothly.
@@ -15,17 +16,18 @@ pub const DEFAULT_MAX: usize = 600_000;
 pub fn read_splat(bytes: &[u8]) -> anyhow::Result<Gaussians> {
     anyhow::ensure!(
         !bytes.is_empty() && bytes.len().is_multiple_of(SPLAT_BYTES) && bytes.len() / SPLAT_BYTES <= crate::tree_tune::PC_SPLATS,
-        "Invalid splat file"
+        "{}",
+        tr("Invalid splat file")
     );
     let mut g = Gaussians::default();
     for b in bytes.chunks_exact(SPLAT_BYTES) {
         let f = |i: usize| f32::from_le_bytes(b[i..i + 4].try_into().unwrap());
         let position = [f(0), f(4), -f(8)];
         let scales = [f(12), f(16), f(20)];
-        anyhow::ensure!(position.iter().chain(scales.iter()).all(|v| v.is_finite()) && scales.iter().all(|v| *v > 0.0), "Invalid splat position or scale");
+        anyhow::ensure!(position.iter().chain(scales.iter()).all(|v| v.is_finite()) && scales.iter().all(|v| *v > 0.0), "{}", tr("Invalid splat position or scale"));
         let mut q = [(b[28] as f32 - 128.0) / 128.0, -(b[29] as f32 - 128.0) / 128.0, -(b[30] as f32 - 128.0) / 128.0, (b[31] as f32 - 128.0) / 128.0];
         let n = q.iter().map(|v| v * v).sum::<f32>().sqrt();
-        anyhow::ensure!(n > 0.01, "Invalid splat rotation");
+        anyhow::ensure!(n > 0.01, "{}", tr("Invalid splat rotation"));
         for v in &mut q {
             *v /= n;
         }

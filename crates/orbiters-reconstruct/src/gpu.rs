@@ -16,6 +16,7 @@ use crate::cpu;
 pub use crate::dof::DepthOfField;
 use crate::gaussians::{Gaussians, Seen, PACKED, SEEN_IN};
 use anyhow::{anyhow, bail, Context as _};
+use orbiters_i18n::tr;
 use bytemuck::{Pod, Zeroable};
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -528,13 +529,13 @@ impl PendingWeights {
         match self.state.load(Ordering::SeqCst) {
             0 => Ok(None),
             1 => {
-                let view = self.staging.get_mapped_range(..).map_err(|e| anyhow!("reading back from the GPU: {e:?}"))?;
+                let view = self.staging.get_mapped_range(..).map_err(|e| anyhow!("{}", tr!("reading back from the GPU: {error}", error = format!("{e:?}"))))?;
                 let out = bytemuck::cast_slice::<u8, f32>(&view[..self.n * 4]).to_vec();
                 drop(view);
                 self.staging.unmap();
                 Ok(Some(out))
             }
-            _ => anyhow::bail!("the GPU did not hand the relocation weights back (was the device lost?)"),
+            _ => anyhow::bail!("{}", tr("the GPU did not hand the relocation weights back (was the device lost?)")),
         }
     }
 }
@@ -710,7 +711,7 @@ pub fn depth_key(depth: f32, bits: u32) -> u32 {
 /// `desc` must be what the adapter supports (as for [`wgpu::Adapter::request_device`]).
 #[cfg(target_vendor = "apple")]
 unsafe fn low_priority_device(_: &wgpu::Adapter, _: &wgpu::DeviceDescriptor<'_>) -> anyhow::Result<(wgpu::Device, wgpu::Queue)> {
-    anyhow::bail!("Metal has no queue priorities")
+    anyhow::bail!("{}", tr("Metal has no queue priorities"))
 }
 
 #[cfg(not(target_vendor = "apple"))]
@@ -718,7 +719,7 @@ unsafe fn low_priority_device(adapter: &wgpu::Adapter, desc: &wgpu::DeviceDescri
     use ash::vk;
     let open = {
         // SAFETY: the hal adapter is used here only, while `adapter` lives.
-        let hal = unsafe { adapter.as_hal::<wgpu::hal::api::Vulkan>() }.context("not a Vulkan adapter")?;
+        let hal = unsafe { adapter.as_hal::<wgpu::hal::api::Vulkan>() }.with_context(|| tr("not a Vulkan adapter"))?;
         // SAFETY: a read-only query of the physical device.
         let extensions = unsafe { hal.shared_instance().raw_instance().enumerate_device_extension_properties(hal.raw_physical_device()) }?;
         let has = |name: &std::ffi::CStr| extensions.iter().any(|e| e.extension_name_as_c_str() == Ok(name));
@@ -727,7 +728,7 @@ unsafe fn low_priority_device(adapter: &wgpu::Adapter, desc: &wgpu::DeviceDescri
         } else if has(ash::ext::global_priority::NAME) {
             ash::ext::global_priority::NAME
         } else {
-            anyhow::bail!("the GPU's Vulkan driver has no queue priorities");
+            anyhow::bail!("{}", tr("the GPU's Vulkan driver has no queue priorities"));
         };
         let mut priority = vk::DeviceQueueGlobalPriorityCreateInfoKHR::default().global_priority(vk::QueueGlobalPriorityKHR::LOW);
         let priority = &mut priority;
@@ -828,18 +829,18 @@ impl Gpu {
             block_on(instance.enumerate_adapters(wgpu::Backends::PRIMARY))
                 .into_iter()
                 .find(|a| a.get_info().device_type == wgpu::DeviceType::IntegratedGpu)
-                .context("this computer has no integrated GPU (or it is turned off in the BIOS): train on the graphics card, or once VRChat closes")?
+                .with_context(|| tr("this computer has no integrated GPU (or it is turned off in the BIOS): train on the graphics card, or once VRChat closes"))?
         } else {
             block_on(instance.request_adapter(&wgpu::RequestAdapterOptions { power_preference: wgpu::PowerPreference::HighPerformance, ..Default::default() }))
-                .map_err(|e| anyhow!("no GPU adapter: {e}"))?
+                .map_err(|e| anyhow!("{}", tr!("no GPU adapter: {error}", error = e)))?
         };
         let info = adapter.get_info();
         let available = adapter.features();
         if !available.contains(wgpu::Features::SUBGROUP) {
-            anyhow::bail!("{} has no subgroup operations, which reconstruction needs.", info.name);
+            anyhow::bail!("{}", tr!("{name} has no subgroup operations, which reconstruction needs.", name = info.name));
         }
         let sums = match options.sums {
-            Some(s) if !available.contains(s.features()) => anyhow::bail!("{} cannot do {}", info.name, s.name()),
+            Some(s) if !available.contains(s.features()) => anyhow::bail!("{}", tr!("{name} cannot do {feature}", name = info.name, feature = s.name())),
             Some(s) => s,
             None => GradientSums::best(available),
         };
@@ -865,7 +866,7 @@ impl Gpu {
         let low_priority = low.is_some();
         let (device, queue) = match low {
             Some(d) => d,
-            None => block_on(adapter.request_device(&desc)).map_err(|e| anyhow!("GPU device: {e}"))?,
+            None => block_on(adapter.request_device(&desc)).map_err(|e| anyhow!("{}", tr!("GPU device: {error}", error = e)))?,
         };
         let errors = Arc::new(std::sync::Mutex::new(None::<String>));
         {
@@ -1168,13 +1169,13 @@ impl Gpu {
     }
 
     fn training(&self) -> anyhow::Result<&Training> {
-        self.k.training.as_ref().context("this GPU only renders")
+        self.k.training.as_ref().with_context(|| tr("this GPU only renders"))
     }
 
     /// The GPU error a training device reported, if any (it stays: nothing after it can be trusted).
     fn check(&self) -> anyhow::Result<()> {
         match self.errors.lock().unwrap_or_else(|p| p.into_inner()).as_ref() {
-            Some(e) => bail!("GPU error: {e}"),
+            Some(e) => bail!("{}", tr!("GPU error: {error}", error = e)),
             None => Ok(()),
         }
     }
@@ -1189,7 +1190,7 @@ impl Gpu {
         let invalid = block_on(invalid.pop());
         let memory = block_on(memory.pop());
         match invalid.or(memory) {
-            Some(e) => Err(anyhow!("GPU error: {e}")),
+            Some(e) => Err(anyhow!("{}", tr!("GPU error: {error}", error = e))),
             None => out,
         }
     }
@@ -1283,7 +1284,7 @@ impl Gpu {
     /// the Adam moments and the statistics since the last relocation round. The gradient sums are not part of it: the
     /// backward pass clears them with each step.
     pub fn training_state(&self) -> anyhow::Result<crate::checkpoint::TrainingBuffers> {
-        let s = self.splats.as_ref().context("nothing uploaded")?;
+        let s = self.splats.as_ref().with_context(|| tr("nothing uploaded"))?;
         let n = self.count;
         Ok(crate::checkpoint::TrainingBuffers {
             params: self.read(&s.params, n * PACKED)?,
@@ -1336,7 +1337,7 @@ impl Gpu {
         let rgb: Vec<[f32; 3]> = state.texels.iter().map(|t| [t[0], t[1], t[2]]).collect();
         self.set_sky(Some((state.width, &rgb)))?;
         let s = self.sky.as_ref().expect("just set");
-        let l = s.learning.as_ref().context("a sky map's learning on a device that does not train")?;
+        let l = s.learning.as_ref().with_context(|| tr("a sky map's learning on a device that does not train"))?;
         self.queue.write_buffer(&s.texels, 0, bytemuck::cast_slice(&state.texels));
         self.queue.write_buffer(&l.m1, 0, bytemuck::cast_slice(&state.m1));
         self.queue.write_buffer(&l.m2, 0, bytemuck::cast_slice(&state.m2));
@@ -1438,11 +1439,11 @@ impl Gpu {
             let state = state.clone();
             staging.map_async(wgpu::MapMode::Read, .., move |r| state.store(if r.is_ok() { 1 } else { 2 }, Ordering::SeqCst));
         }
-        self.device.poll(wgpu::PollType::wait_indefinitely()).map_err(|e| anyhow!("waiting for the GPU: {e}"))?;
+        self.device.poll(wgpu::PollType::wait_indefinitely()).map_err(|e| anyhow!("{}", tr!("waiting for the GPU: {error}", error = e)))?;
         // An error since (out of memory, a lost device) means what came back is not the result.
         self.check()?;
-        anyhow::ensure!(state.load(Ordering::SeqCst) == 1, "the GPU did not hand its results back (was the device lost?)");
-        let view = staging.get_mapped_range(..).map_err(|e| anyhow!("reading back from the GPU: {e:?}"))?;
+        anyhow::ensure!(state.load(Ordering::SeqCst) == 1, "{}", tr("the GPU did not hand its results back (was the device lost?)"));
+        let view = staging.get_mapped_range(..).map_err(|e| anyhow!("{}", tr!("reading back from the GPU: {error}", error = format!("{e:?}"))))?;
         let out = bytemuck::cast_slice::<u8, T>(&view[..bytes as usize]).to_vec();
         drop(view);
         staging.unmap();
@@ -1451,7 +1452,7 @@ impl Gpu {
 
     /// The Gaussians, their Adam moments and densification statistics (packed).
     pub fn download(&self) -> anyhow::Result<Download> {
-        let s = self.splats.as_ref().context("nothing uploaded")?;
+        let s = self.splats.as_ref().with_context(|| tr("nothing uploaded"))?;
         let n = self.count;
         let m1: Vec<f32> = self.read(&s.m1, n * PACKED)?;
         let m2: Vec<f32> = self.read(&s.m2, n * PACKED)?;
@@ -1462,7 +1463,7 @@ impl Gpu {
     /// The Gaussians alone, with their 3D filters (a finished run's result: its Adam moments and statistics stay on the
     /// device).
     pub fn download_params(&self) -> anyhow::Result<Gaussians> {
-        let s = self.splats.as_ref().context("nothing uploaded")?;
+        let s = self.splats.as_ref().with_context(|| tr("nothing uploaded"))?;
         let mut g = Gaussians::unpack(&self.read::<f32>(&s.params, self.count * PACKED)?);
         g.filter_3d = self.read(&s.filter, self.count)?;
         Ok(g)
@@ -1473,7 +1474,7 @@ impl Gpu {
     pub fn update_filter_3d(&mut self, cams: &[Camera], scale: f32) -> anyhow::Result<()> {
         self.check()?;
         let t = self.training()?;
-        let s = self.splats.as_ref().context("no Gaussians")?;
+        let s = self.splats.as_ref().with_context(|| tr("no Gaussians"))?;
         let n = self.count;
         let mut enc = self.device.create_command_encoder(&Default::default());
         if scale <= 0.0 || cams.is_empty() {
@@ -1542,7 +1543,7 @@ impl Gpu {
     /// round), −2 − its opacity if alive on the sky shell, else its opacity.
     pub fn relocation_weights(&self, max_radius: f32) -> anyhow::Result<Vec<f32>> {
         let t = self.training()?;
-        let s = self.splats.as_ref().context("no Gaussians")?;
+        let s = self.splats.as_ref().with_context(|| tr("no Gaussians"))?;
         let n = self.count;
         let weights = storage(&self.device, "relocation weights", (n * 4) as u64);
         let info = self.uniform(&[n as u32, 0, max_radius.to_bits(), 0]);
@@ -1559,7 +1560,7 @@ impl Gpu {
     /// `classify`: four floats a Gaussian in all).
     pub fn request_relocation_weights(&self, max_radius: f32, scores: bool) -> anyhow::Result<PendingWeights> {
         let t = self.training()?;
-        let s = self.splats.as_ref().context("no Gaussians")?;
+        let s = self.splats.as_ref().with_context(|| tr("no Gaussians"))?;
         let n = self.count;
         let floats = if scores { 4 * n } else { n };
         let weights = storage(&self.device, "relocation weights", (floats * 4) as u64);
@@ -1599,7 +1600,7 @@ impl Gpu {
             self.forget_binds();
         }
         let t = self.training()?;
-        let s = self.splats.as_ref().context("no Gaussians")?;
+        let s = self.splats.as_ref().with_context(|| tr("no Gaussians"))?;
         let mut enc = self.device.create_command_encoder(&Default::default());
         let passes: [(&wgpu::ComputePipeline, &[u8], usize); 3] = [
             (&t.relocate_adjust, bytemuck::cast_slice(&plan.adjust), plan.adjust.len()),
@@ -1625,7 +1626,7 @@ impl Gpu {
 
     /// The last step's parameter gradients (packed), for tests.
     pub fn read_grads(&self) -> anyhow::Result<Vec<f32>> {
-        let s = self.splats.as_ref().context("nothing uploaded")?;
+        let s = self.splats.as_ref().with_context(|| tr("nothing uploaded"))?;
         self.read(&s.grads, self.count * PACKED)
     }
 
@@ -1672,7 +1673,7 @@ impl Gpu {
     /// The loss mask (1 scene, 0 strip and band) for images of this size: colour steps, scores and visibility rounds
     /// at that size need one.
     pub fn set_mask(&mut self, w: u32, h: u32, mask: &[f32]) -> anyhow::Result<()> {
-        anyhow::ensure!(mask.len() == (w * h) as usize, "a mask of {} pixels for {w}×{h} images", mask.len());
+        anyhow::ensure!(mask.len() == (w * h) as usize, "{}", tr!("a mask of {pixels} pixels for {width}×{height} images", pixels = mask.len(), width = w, height = h));
         let buffer = match self.masks.iter().find(|(s, _)| *s == (w, h)) {
             Some((_, b)) => b.clone(),
             None => {
@@ -1687,7 +1688,7 @@ impl Gpu {
 
     /// The loss mask set for images of this size.
     fn mask_for(&self, w: u32, h: u32) -> anyhow::Result<wgpu::Buffer> {
-        self.masks.iter().find(|(s, _)| *s == (w, h)).map(|(_, b)| b.clone()).with_context(|| format!("no loss mask was set for {w}×{h} images"))
+        self.masks.iter().find(|(s, _)| *s == (w, h)).map(|(_, b)| b.clone()).with_context(|| tr!("no loss mask was set for {width}×{height} images", width = w, height = h))
     }
 
     fn ensure_sort(&mut self, n: usize) {
@@ -1902,12 +1903,12 @@ impl Gpu {
             self.training()?;
         }
         self.check()?;
-        anyhow::ensure!(cam.width > 0 && cam.height > 0, "a view of {}×{} pixels", cam.width, cam.height);
+        anyhow::ensure!(cam.width > 0 && cam.height > 0, "{}", tr!("a view of {width}×{height} pixels", width = cam.width, height = cam.height));
         // A colour target is a keyframe of the camera's size, and like a visibility round it needs the loss mask of
         // that size (a size whose mask was never set would train on nothing).
         let mask = match &target {
             Target::Color { rgba, .. } => {
-                anyhow::ensure!(rgba.len() == (cam.width * cam.height) as usize, "a keyframe of {} pixels for a {}×{} camera", rgba.len(), cam.width, cam.height);
+                anyhow::ensure!(rgba.len() == (cam.width * cam.height) as usize, "{}", tr!("a keyframe of {pixels} pixels for a {width}×{height} camera", pixels = rgba.len(), width = cam.width, height = cam.height));
                 Some(self.mask_for(cam.width, cam.height)?)
             }
             _ if seen.is_some() => Some(self.mask_for(cam.width, cam.height)?),
@@ -1939,7 +1940,7 @@ impl Gpu {
         };
         self.queue.write_buffer(&self.frame, 0, bytemuck::bytes_of(&frame));
         let (params, proj, counts, offsets, filter, seen_buf, marks) = {
-            let s = self.splats.as_ref().context("no Gaussians")?;
+            let s = self.splats.as_ref().with_context(|| tr("no Gaussians"))?;
             (s.params.clone(), s.proj.clone(), s.counts.clone(), s.offsets.clone(), s.filter.clone(), s.seen.clone(), s.marks.clone())
         };
         // A training device sizes the sort from the counts read back for this image size, without waiting: entries
@@ -2015,13 +2016,13 @@ impl Gpu {
                 let state = state.clone();
                 self.total_staging.map_async(wgpu::MapMode::Read, .., move |r| state.store(if r.is_ok() { 1 } else { 2 }, Ordering::SeqCst));
             }
-            self.device.poll(wgpu::PollType::wait_indefinitely()).map_err(|e| anyhow!("waiting for the GPU: {e}"))?;
+            self.device.poll(wgpu::PollType::wait_indefinitely()).map_err(|e| anyhow!("{}", tr!("waiting for the GPU: {error}", error = e)))?;
             let total = match self.total_staging.get_mapped_range(..) {
                 Ok(view) if state.load(Ordering::SeqCst) == 1 => bytemuck::cast_slice::<u8, u32>(&view)[0],
-                _ => bail!("the GPU did not hand back a view's tile count (was the device lost?)"),
+                _ => bail!("{}", tr("the GPU did not hand back a view's tile count (was the device lost?)")),
             };
             self.total_staging.unmap();
-            anyhow::ensure!(total <= max_entries, "{total} tile entries in one view: more than the GPU can sort ({max_entries})");
+            anyhow::ensure!(total <= max_entries, "{}", tr!("{total} tile entries in one view: more than the GPU can sort ({max_entries})", total = total, max_entries = max_entries));
             self.note_total(size, total);
             // A viewer's next frames go without waiting while the sort has half again the estimate's room (`roomy`):
             // it gets that room now, or every frame would wait.
@@ -2271,7 +2272,7 @@ impl Gpu {
             return Ok(());
         }
         let start = std::time::Instant::now();
-        self.device.poll(wgpu::PollType::wait_indefinitely()).map_err(|e| anyhow!("waiting for the GPU: {e}"))?;
+        self.device.poll(wgpu::PollType::wait_indefinitely()).map_err(|e| anyhow!("{}", tr!("waiting for the GPU: {error}", error = e)))?;
         // A moving average: one slow part (VRChat's work in between) moves it a quarter.
         let took = start.elapsed();
         self.paced[part] = (self.paced[part] * 3 + took) / 4;
@@ -2368,7 +2369,7 @@ impl Gpu {
             self.forget_binds();
             return Ok(());
         };
-        anyhow::ensure!(width >= 4 && width % 4 == 0 && rgb.len() == (width as usize) * (width as usize / 2), "a sky map of {} texels for {} across", rgb.len(), width);
+        anyhow::ensure!(width >= 4 && width % 4 == 0 && rgb.len() == (width as usize) * (width as usize / 2), "{}", tr!("a sky map of {texels} texels for {width} across", texels = rgb.len(), width = width));
         let texels: Vec<[f32; 4]> = rgb.iter().map(|c| [c[0], c[1], c[2], 0.0]).collect();
         let bytes = (texels.len() * 16) as u64;
         let t = storage(&self.device, "sky texels", bytes);
@@ -2422,12 +2423,12 @@ impl Gpu {
     /// composite) and the rasteriser's backward alone into zeroed sums (the projection backward would read and zero
     /// them). Float sums on 16×16 tiles only (the training colour steps' path on Vulkan with f32 atomics).
     pub fn lab_raster_dump(&mut self, cam: &Camera, target: Target<'_>) -> anyhow::Result<RasterDump> {
-        anyhow::ensure!(matches!(target, Target::Color { .. }), "a colour step");
+        anyhow::ensure!(matches!(target, Target::Color { .. }), "a colour step"); // i18n: not shown (the lab raster dump of examples/rasterdump.rs: no window starts it)
         self.step(cam, [0.0; 3], target, None)?;
         let _ = self.device.poll(wgpu::PollType::wait_indefinitely());
-        anyhow::ensure!(!self.tile8_step, "16×16 tiles");
-        let t = self.k.training.as_ref().context("a training device")?;
-        anyhow::ensure!(matches!(t.sums, GradientSums::Float), "float gradient sums (this device has {:?})", t.sums);
+        anyhow::ensure!(!self.tile8_step, "16×16 tiles"); // i18n: not shown (the lab raster dump of examples/rasterdump.rs: no window starts it)
+        let t = self.k.training.as_ref().context("a training device")?; // i18n: not shown (the lab raster dump of examples/rasterdump.rs: no window starts it)
+        anyhow::ensure!(matches!(t.sums, GradientSums::Float), "float gradient sums (this device has {:?})", t.sums); // i18n: not shown (the lab raster dump of examples/rasterdump.rs: no window starts it)
         let backward = if self.reference_backward { t.backward.clone() } else { t.backward_blocks.clone() };
         let i = self.image.as_ref().context("image")?;
         let s = self.sort.as_ref().context("sort")?;
@@ -2472,7 +2473,7 @@ impl Gpu {
     /// of that step again `reps` times, each in its own submission, timed with GPU timestamps (needs
     /// [`DeviceOptions::profile`]): (forward ms, backward ms) per repeat, the backward into sums cleared before it.
     pub fn lab_time_raster(&mut self, cam: &Camera, reps: usize) -> anyhow::Result<Vec<(f64, f64)>> {
-        let t = self.k.training.as_ref().context("a training device")?;
+        let t = self.k.training.as_ref().context("a training device")?; // i18n: not shown (the lab raster dump of examples/rasterdump.rs: no window starts it)
         let backward = if self.reference_backward { t.backward.clone() } else { t.backward_blocks.clone() };
         let i = self.image.as_ref().context("image")?;
         let s = self.sort.as_ref().context("sort")?;
@@ -2553,7 +2554,7 @@ impl Gpu {
 
     /// The last rendered image: (r, g, b, depth) per pixel.
     pub fn read_image(&self) -> anyhow::Result<Vec<[f32; 4]>> {
-        let i = self.image.as_ref().context("nothing rendered")?;
+        let i = self.image.as_ref().with_context(|| tr("nothing rendered"))?;
         let px = (i.width * i.height) as usize;
         Ok(self.read::<f32>(&i.out_color, px * 4)?.as_chunks::<4>().0.to_vec())
     }
@@ -2571,7 +2572,7 @@ impl Gpu {
             self.stop_if_paused()?;
             self.caught(|gpu| gpu.run(cam, background, Target::None, None, Some(&view)))?;
             let t = self.training()?;
-            let s = self.splats.as_ref().context("no Gaussians")?;
+            let s = self.splats.as_ref().with_context(|| tr("no Gaussians"))?;
             let eye = cam.position();
             let info = self.uniform(&[
                 n as u32,
@@ -2656,18 +2657,18 @@ impl Gpu {
         }
         self.visibility_pipelined = false;
         self.visibility_over = 0.0;
-        out.unwrap_or_else(|| Err(anyhow!("a visibility round dropped tile entries even when waiting")))
+        out.unwrap_or_else(|| Err(anyhow!("{}", tr("a visibility round dropped tile entries even when waiting"))))
     }
 
     /// PSNR of a render from `cam` against a keyframe over the scene pixels (the mask set for its size), computed on
     /// the device: only one partial sum per 256 pixels crosses the bus.
     pub fn score(&mut self, cam: &Camera, background: [f32; 3], rgba: &[u32]) -> anyhow::Result<f32> {
         self.training()?;
-        anyhow::ensure!(rgba.len() == (cam.width * cam.height) as usize, "a keyframe of {} pixels for a {}×{} camera", rgba.len(), cam.width, cam.height);
+        anyhow::ensure!(rgba.len() == (cam.width * cam.height) as usize, "{}", tr!("a keyframe of {pixels} pixels for a {width}×{height} camera", pixels = rgba.len(), width = cam.width, height = cam.height));
         let mask = self.mask_for(cam.width, cam.height)?;
         self.step(cam, background, Target::None, None)?;
         let t = self.training()?;
-        let i = self.image.as_ref().context("nothing rendered")?;
+        let i = self.image.as_ref().with_context(|| tr("nothing rendered"))?;
         self.queue.write_buffer(&i.target, 0, bytemuck::cast_slice(rgba));
         let (gx, gy) = groups((cam.width * cam.height) as usize);
         let mut enc = self.device.create_command_encoder(&Default::default());
@@ -2677,27 +2678,27 @@ impl Gpu {
         let partial: Vec<f32> = self.read(&i.d_pixel, (gx * gy) as usize * 4)?;
         let (se, count) = partial.as_chunks::<4>().0.iter().fold((0f64, 0f64), |(s, c), p| (s + p[0] as f64, c + p[1] as f64));
         // No scene pixel is no score (not a perfect one).
-        anyhow::ensure!(count > 0.0, "no scene pixel to score in a {}×{} view", cam.width, cam.height);
+        anyhow::ensure!(count > 0.0, "{}", tr!("no scene pixel to score in a {width}×{height} view", width = cam.width, height = cam.height));
         let mse = (se / count).max(1e-10);
         Ok((10.0 * (1.0 / mse).log10()) as f32)
     }
 
     /// The pixels the last robust colour step kept (1) or left out (0).
     pub fn read_kept(&self) -> anyhow::Result<Vec<f32>> {
-        let i = self.image.as_ref().context("nothing rendered")?;
+        let i = self.image.as_ref().with_context(|| tr("nothing rendered"))?;
         self.read::<f32>(&i.kept, (i.width * i.height) as usize)
     }
 
     /// The last step's loss gradient per pixel (r, g, b, depth), for tests.
     pub fn read_d_pixel(&self) -> anyhow::Result<Vec<[f32; 4]>> {
-        let i = self.image.as_ref().context("nothing rendered")?;
+        let i = self.image.as_ref().with_context(|| tr("nothing rendered"))?;
         let px = (i.width * i.height) as usize;
         Ok(self.read::<f32>(&i.d_pixel, px * 4)?.as_chunks::<4>().0.to_vec())
     }
 
     /// The last rendered final transmittance per pixel.
     pub fn read_transmittance(&self) -> anyhow::Result<Vec<f32>> {
-        let i = self.image.as_ref().context("nothing rendered")?;
+        let i = self.image.as_ref().with_context(|| tr("nothing rendered"))?;
         let px = (i.width * i.height) as usize;
         Ok(self.read::<u32>(&i.out_state, px * 2)?.as_chunks::<2>().0.iter().map(|c| f32::from_bits(c[0])).collect())
     }

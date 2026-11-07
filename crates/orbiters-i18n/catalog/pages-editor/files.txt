@@ -1,0 +1,9 @@
+# The files this area covers: every text in them is wrapped and translated (tests/coverage.rs).
+crates/orbiters-desktop/src/pages/editor/controls.rs
+crates/orbiters-desktop/src/pages/editor/mod.rs
+crates/orbiters-desktop/src/pages/editor/layers.rs
+crates/orbiters-desktop/src/pages/editor/crop.rs
+crates/orbiters-desktop/src/pages/editor/looks.rs
+crates/orbiters-desktop/src/pages/editor/canvas.rs
+crates/orbiters-desktop/src/pages/editor/files.rs
+crates/orbiters-desktop/src/pages/editor/preview.rs

@@ -6,6 +6,7 @@
 
 use super::{glyph, tint, widgets as w, Editor, Selected};
 use egui::{pos2, vec2, Align2, CursorIcon, Id, Rect, Sense, Ui, UiBuilder};
+use orbiters_i18n::{mark, tr, tr_ctx, tr_n};
 use orbiters_ui::anim::{self, Spring};
 use orbiters_ui::photo::{Effect, Kind, Layer, Mask};
 use orbiters_ui::theme::{self, weight, Txt};
@@ -34,8 +35,8 @@ pub(super) fn show(ed: &mut Editor, ui: &mut Ui, rect: Rect, title: &str) {
     let mut pu = ui.new_child(UiBuilder::new().max_rect(inner).layout(egui::Layout::top_down(egui::Align::Min)).id_salt(ed.id.with("layers")));
     pu.spacing_mut().item_spacing = vec2(0.0, 0.0);
     let (head, _) = pu.allocate_exact_size(vec2(inner.width(), 36.0), Sense::hover());
-    widgets::text(pu.painter(), pos2(head.left() + 4.0, head.center().y), Align2::LEFT_CENTER, &Txt::new("Layers", 15.5).weight(weight::SEMIBOLD));
-    let add = Button::new(if ed.adding { "Done" } else { "Add" }).icon(if ed.adding { icons::CHECK } else { icons::PLUS }).size(Size::Sm).id_salt("editor-add");
+    widgets::text(pu.painter(), pos2(head.left() + 4.0, head.center().y), Align2::LEFT_CENTER, &Txt::new(tr("Layers"), 15.5).weight(weight::SEMIBOLD));
+    let add = Button::new(if ed.adding { tr("Done") } else { tr("Add") }).icon(if ed.adding { icons::CHECK } else { icons::PLUS }).size(Size::Sm).id_salt("editor-add");
     let aw = add.desired_width(&pu);
     if super::super::sharing::pressed(add.show_at(&mut pu, Rect::from_min_size(pos2(head.right() - aw, head.center().y - 16.0), vec2(aw, 32.0)))) {
         ed.adding = !ed.adding;
@@ -51,12 +52,12 @@ pub(super) fn show(ed: &mut Editor, ui: &mut Ui, rect: Rect, title: &str) {
         if ed.doc.sources.is_empty() {
             stack_rows(ed, ui, None, 0.0);
             if ed.live.is_some() {
-                picture_row(ui, "The 3D view", icons::CUBE, "Drawn live as you move around");
+                picture_row(ui, tr("The 3D view"), icons::CUBE, tr("Drawn live as you move around"));
             } else {
-                picture_row(ui, "The picture", icons::IMAGE, "Never changed: saving makes a copy");
+                picture_row(ui, tr("The picture"), icons::IMAGE, tr("Never changed: saving makes a copy"));
             }
         } else {
-            group_row(ui, "Whole picture", icons::IMAGES, &format!("{} over all its layers", count(ed.doc.layers.len())));
+            group_row(ui, tr("Whole picture"), icons::IMAGES, &tr!("{effects} over all its layers", effects = count(ed.doc.layers.len())));
             stack_rows(ed, ui, None, 0.0);
             for i in (0..ed.doc.sources.len()).rev() {
                 source_row(ed, ui, i);
@@ -69,9 +70,24 @@ pub(super) fn show(ed: &mut Editor, ui: &mut Ui, rect: Rect, title: &str) {
 
 fn count(n: usize) -> String {
     match n {
-        0 => "No effects".into(),
-        1 => "1 effect".into(),
-        n => format!("{n} effects"),
+        0 => tr("No effects").to_string(),
+        n => tr_n("{count} effect", "{count} effects", n as u64),
+    }
+}
+
+/// `items` put together as the language writes a list: "a, b, c" (Japanese has its own comma).
+pub(super) fn list(items: &[String]) -> String {
+    let mut rest = items.iter();
+    let Some(first) = rest.next() else { return String::new() };
+    rest.fold(first.clone(), |all, next| tr!("{all}, {next}", all = all, next = next))
+}
+
+/// `text` with its first letter capital. It goes by letters, not bytes: Japanese and accented text starts with more than one byte.
+pub(super) fn capital(text: &str) -> String {
+    let mut letters = text.chars();
+    match letters.next() {
+        Some(first) => first.to_uppercase().chain(letters).collect(),
+        None => String::new(),
     }
 }
 
@@ -92,8 +108,8 @@ fn add_grid(ed: &mut Editor, ui: &mut Ui, open: f32, title: &str) {
         _ => None,
     };
     let to = match target.and_then(|i| ed.doc.sources.get(i)) {
-        Some(s) => format!("Adds to {}", s.name),
-        None => "Adds to the whole picture".into(),
+        Some(s) => tr!("Adds to {name}", name = s.name),
+        None => tr("Adds to the whole picture").to_string(),
     };
     widgets::text(gu.painter(), pos2(r.left() + 4.0, r.top() + 10.0), Align2::LEFT_CENTER, &Txt::new(to, 11.5).color(theme::FG_3));
     let tw = (w - 6.0) / cols as f32;
@@ -109,7 +125,7 @@ fn add_grid(ed: &mut Editor, ui: &mut Ui, open: f32, title: &str) {
         let tile = Rect::from_center_size(pos2(c.left() + 22.0, c.center().y), vec2(28.0, 28.0));
         p.rect_filled(tile, theme::radius(9.0), theme::alpha(tint(*kind), 0.16));
         widgets::icon(p, tile.center(), glyph(*kind), 15.0, tint(*kind));
-        let name = if *kind == Kind::Aberration { "Aberration" } else { kind.name() };
+        let name = if *kind == Kind::Aberration { tr("Aberration") } else { kind.name() };
         widgets::text_truncated(p, pos2(tile.right() + 8.0, c.center().y), Align2::LEFT_CENTER, &Txt::new(name, 12.5).weight(weight::MEDIUM), c.right() - tile.right() - 12.0);
         let resp = resp.on_hover_cursor(CursorIcon::PointingHand).on_hover_text(kind.about());
         if widgets::pressed(&resp) {
@@ -215,27 +231,22 @@ fn crop_row(ed: &mut Editor, ui: &mut Ui) {
     let g = &ed.doc.geometry;
     let mut parts = Vec::new();
     if !g.turns.is_multiple_of(4) {
-        parts.push(format!("turned {}°", (g.turns % 4) as u32 * 90));
+        parts.push(tr!("turned {angle}", angle = format!("{}°", (g.turns % 4) as u32 * 90)));
     }
     if g.flip_h || g.flip_v {
-        parts.push("flipped".to_string());
+        parts.push(tr("flipped").to_string());
     }
     if g.straighten != 0.0 {
-        parts.push(format!("straightened {:.1}°", g.straighten));
+        parts.push(tr!("straightened {angle}", angle = format!("{:.1}°", g.straighten)));
     }
     if g.vertical != 0.0 || g.horizontal != 0.0 {
-        parts.push("perspective".to_string());
+        parts.push(tr("perspective").to_string());
     }
     if g.crop != orbiters_ui::photo::Crop::FULL {
-        parts.push(if g.aspect == orbiters_ui::photo::Aspect::Free { "cropped".into() } else { format!("cropped {}", g.aspect.name()) });
+        parts.push(if g.aspect == orbiters_ui::photo::Aspect::Free { tr("cropped").to_string() } else { tr!("cropped {aspect}", aspect = g.aspect.name()) });
     }
-    let sub = if parts.is_empty() {
-        "The whole picture".to_string()
-    } else {
-        let s = parts.join(", ");
-        s[..1].to_uppercase() + &s[1..]
-    };
-    row_text(ui, r, r.left() + 8.0, icons::CROP, theme::ACCENT, "Crop and rotate", &sub, r.right() - 8.0);
+    let sub = if parts.is_empty() { tr("The whole picture").to_string() } else { capital(&list(&parts)) };
+    row_text(ui, r, r.left() + 8.0, icons::CROP, theme::ACCENT, tr("Crop and rotate"), &sub, r.right() - 8.0);
     if widgets::pressed(&resp.on_hover_cursor(CursorIcon::PointingHand)) {
         ed.selected = if selected { Selected::Nothing } else { Selected::Crop };
     }
@@ -270,16 +281,18 @@ pub(super) fn source_glyph(name: &str) -> &'static str {
 /// VRChat's name for one of its layers as the list says it.
 pub(super) fn source_name(name: &str) -> String {
     match name.to_ascii_lowercase().as_str() {
-        "environment" => "World (Environment)".into(),
-        "player" | "players" | "users" => "People (Player)".into(),
-        "ui" => "Interface (UI)".into(),
+        "environment" => tr("World (Environment)").to_string(),
+        "player" | "players" | "users" => tr("People (Player)").to_string(),
+        "ui" => tr("Interface (UI)").to_string(),
+        // The layer the editor adds under VRChat's when it has no world of its own.
+        "picture" => tr("Picture").to_string(),
         _ => name.to_string(),
     }
 }
 
 fn eye(ui: &mut Ui, id: Id, at: egui::Pos2, visible: &mut bool) {
     let r = Rect::from_center_size(at, vec2(28.0, 28.0));
-    let resp = IconButton::new(if *visible { icons::EYE } else { icons::EYE_SLASH }, if *visible { "Hide" } else { "Show" }).size(28.0, 14.0).id_salt(id).show_at(ui, r);
+    let resp = IconButton::new(if *visible { icons::EYE } else { icons::EYE_SLASH }, if *visible { tr_ctx("the eye", "Hide") } else { tr_ctx("the eye", "Show") }).size(28.0, 14.0).id_salt(id).show_at(ui, r);
     if widgets::activated(&resp) {
         *visible = !*visible;
     }
@@ -306,24 +319,19 @@ fn source_row(ed: &mut Editor, ui: &mut Ui, i: usize) {
 fn layer_sub(l: &Layer) -> String {
     let mut parts = Vec::new();
     if !l.visible {
-        parts.push("Hidden".to_string());
+        parts.push(tr("Hidden").to_string());
     } else if l.opacity < 1.0 {
         parts.push(w::percent(l.opacity));
     }
     match l.mask {
-        Mask::Radial { invert, .. } => parts.push(if invert { "outside a circle" } else { "inside a circle" }.into()),
-        Mask::Band { invert, .. } => parts.push(if invert { "outside a band" } else { "along a band" }.into()),
+        Mask::Radial { invert, .. } => parts.push(if invert { tr("outside a circle") } else { tr("inside a circle") }.into()),
+        Mask::Band { invert, .. } => parts.push(if invert { tr("outside a band") } else { tr("along a band") }.into()),
         Mask::Everywhere => {}
     }
     if parts.is_empty() {
         parts.push(summary(&l.effect));
     }
-    let s = parts.join(", ");
-    if s.is_empty() {
-        s
-    } else {
-        s[..1].to_uppercase() + &s[1..]
-    }
+    capital(&list(&parts))
 }
 
 /// What a layer's settings come to, in a few words ("+0.45 EV, shadows +55").
@@ -331,51 +339,55 @@ pub(super) fn summary(e: &Effect) -> String {
     let some = |items: Vec<(f32, String)>| {
         let said: Vec<String> = items.into_iter().filter(|(v, _)| v.abs() > 0.005).map(|(_, s)| s).take(3).collect();
         if said.is_empty() {
-            "No change yet".to_string()
+            tr("No change yet").to_string()
         } else {
-            said.join(", ")
+            list(&said)
         }
     };
     match e {
         Effect::Light(v) => some(vec![
             (v.exposure, format!("{:+.2} EV", v.exposure)),
-            (v.brightness, format!("brightness {}", w::signed(v.brightness))),
-            (v.contrast, format!("contrast {}", w::signed(v.contrast))),
-            (v.highlights, format!("highlights {}", w::signed(v.highlights))),
-            (v.shadows, format!("shadows {}", w::signed(v.shadows))),
-            (v.black_point, format!("black point {}", w::signed(v.black_point))),
+            (v.brightness, tr!("brightness {value}", value = w::signed(v.brightness))),
+            (v.contrast, tr!("contrast {value}", value = w::signed(v.contrast))),
+            (v.highlights, tr!("highlights {value}", value = w::signed(v.highlights))),
+            (v.shadows, tr!("shadows {value}", value = w::signed(v.shadows))),
+            (v.black_point, tr!("black point {value}", value = w::signed(v.black_point))),
         ]),
         Effect::Color(v) => some(vec![
-            (v.temperature, if v.temperature > 0.0 { format!("warmer {}", w::signed(v.temperature)) } else { format!("cooler {}", w::signed(v.temperature)) }),
-            (v.tint, format!("tint {}", w::signed(v.tint))),
-            (v.saturation, format!("saturation {}", w::signed(v.saturation))),
-            (v.vibrance, format!("vibrance {}", w::signed(v.vibrance))),
-            (v.hue, format!("hue {:+.0}°", v.hue)),
+            (v.temperature, if v.temperature > 0.0 { tr!("warmer {value}", value = w::signed(v.temperature)) } else { tr!("cooler {value}", value = w::signed(v.temperature)) }),
+            (v.tint, tr!("tint {value}", value = w::signed(v.tint))),
+            (v.saturation, tr!("saturation {value}", value = w::signed(v.saturation))),
+            (v.vibrance, tr!("vibrance {value}", value = w::signed(v.vibrance))),
+            (v.hue, tr!("hue {value}", value = format!("{:+.0}°", v.hue))),
         ]),
         Effect::Curves(c) => {
             let line = |p: &Vec<[f32; 2]>| *p == vec![[0.0, 0.0], [1.0, 1.0]];
-            let bent: Vec<&str> = [("RGB", &c.rgb), ("red", &c.red), ("green", &c.green), ("blue", &c.blue)].iter().filter(|(_, p)| !line(p)).map(|(n, _)| *n).collect();
+            let bent: Vec<String> = [(mark("RGB"), &c.rgb), (mark("red"), &c.red), (mark("green"), &c.green), (mark("blue"), &c.blue)].iter().filter(|(_, p)| !line(p)).map(|(n, _)| tr(n).to_string()).collect();
             if bent.is_empty() {
-                "Straight curves".into()
+                tr("Straight curves").to_string()
+            } else if bent.len() > 1 {
+                tr!("{channels} curves", channels = list(&bent))
             } else {
-                format!("{} curve{}", bent.join(", "), if bent.len() > 1 { "s" } else { "" })
+                tr!("{channels} curve", channels = list(&bent))
             }
         }
-        Effect::Vignette(v) => format!("{} edges {}", if v.amount >= 0.0 { "darker" } else { "lighter" }, w::percent(v.amount.abs())),
-        Effect::Aberration(a) => format!("Amount {:.2}", a.amount),
-        Effect::Comic(c) => format!("{} tones, ink {}{}", c.tones, w::percent(c.ink), if c.dots { ", dots" } else { "" }),
+        Effect::Vignette(v) if v.amount >= 0.0 => tr!("darker edges {amount}", amount = w::percent(v.amount.abs())),
+        Effect::Vignette(v) => tr!("lighter edges {amount}", amount = w::percent(v.amount.abs())),
+        Effect::Aberration(a) => tr!("Amount {value}", value = format!("{:.2}", a.amount)),
+        Effect::Comic(c) if c.dots => tr!("{tones} tones, ink {ink}, dots", tones = c.tones, ink = w::percent(c.ink)),
+        Effect::Comic(c) => tr!("{tones} tones, ink {ink}", tones = c.tones, ink = w::percent(c.ink)),
         Effect::Blur(b) => match b.kind {
-            orbiters_ui::photo::BlurKind::Directional => format!("{:.1} % long, {:+.0}°", b.radius * 100.0, b.angle),
-            orbiters_ui::photo::BlurKind::Lens => format!("Radius {:.1} %, bokeh {}", b.radius * 100.0, w::percent(b.bokeh)),
-            orbiters_ui::photo::BlurKind::Gaussian => format!("Radius {:.1} %", b.radius * 100.0),
+            orbiters_ui::photo::BlurKind::Directional => tr!("{length} long, {angle}", length = format!("{:.1} %", b.radius * 100.0), angle = format!("{:+.0}°", b.angle)),
+            orbiters_ui::photo::BlurKind::Lens => tr!("Radius {radius}, bokeh {bokeh}", radius = format!("{:.1} %", b.radius * 100.0), bokeh = w::percent(b.bokeh)),
+            orbiters_ui::photo::BlurKind::Gaussian => tr!("Radius {radius}", radius = format!("{:.1} %", b.radius * 100.0)),
             orbiters_ui::photo::BlurKind::Depth => match b.focus {
-                orbiters_ui::photo::Focus::Auto => format!("Auto focus, aperture {}", w::percent(b.aperture)),
-                orbiters_ui::photo::Focus::Manual => format!("Focus {}, aperture {}", super::controls::distance_text(b.distance), w::percent(b.aperture)),
+                orbiters_ui::photo::Focus::Auto => tr!("Auto focus, aperture {aperture}", aperture = w::percent(b.aperture)),
+                orbiters_ui::photo::Focus::Manual => tr!("Focus {distance}, aperture {aperture}", distance = super::controls::distance_text(b.distance), aperture = w::percent(b.aperture)),
             },
         },
         Effect::Text(t) => {
-            let font = if t.font.is_empty() { "Inter".to_string() } else { std::path::Path::new(&t.font).file_stem().map_or(t.font.clone(), |s| s.to_string_lossy().into_owned()) };
-            format!("{}, {font}", t.style.name())
+            let font = if t.font.is_empty() { "Inter".to_string() } else { std::path::Path::new(&t.font).file_stem().map_or(t.font.clone(), |s| s.to_string_lossy().into_owned()) }; // i18n: not shown
+            tr!("{style}, {font}", style = t.style.name(), font = font)
         }
     }
 }
@@ -445,7 +457,7 @@ fn stack_rows(ed: &mut Editor, ui: &mut Ui, stack: Option<usize>, indent: f32) {
         if selected || resp.hovered() {
             widgets::icon(lu.painter(), pos2(r.right() - 52.0, r.center().y), icons::DOTS_SIX_VERTICAL, 14.0, theme::FG_4);
             let bin = Rect::from_center_size(pos2(r.right() - 22.0, r.center().y), vec2(28.0, 28.0));
-            if widgets::activated(&IconButton::new(icons::TRASH, "Remove this layer").size(28.0, 14.0).danger().id_salt(row_id.with("bin")).show_at(&mut lu, bin)) {
+            if widgets::activated(&IconButton::new(icons::TRASH, tr("Remove this layer")).size(28.0, 14.0).danger().id_salt(row_id.with("bin")).show_at(&mut lu, bin)) {
                 ed.selected = Selected::Layer(stack, *id);
                 delete_selected(ed);
                 return;
@@ -481,5 +493,32 @@ fn stack_rows(ed: &mut Editor, ui: &mut Ui, stack: Option<usize>, indent: f32) {
             let to = (n - 1).saturating_sub(shown).min(list.len());
             list.insert(to, l);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use orbiters_i18n::{in_language, Language};
+    use orbiters_ui::photo::{Effect, Light};
+
+    /// A row's second line starts with a capital by letters, not bytes: Japanese and accents begin with more than one byte and used to be cut inside.
+    #[test]
+    fn a_rows_second_line_is_said_in_each_language_without_cutting_a_letter() {
+        assert_eq!(capital("shadows +40"), "Shadows +40");
+        assert_eq!(capital("énergie"), "Énergie");
+        assert_eq!(capital("明るさ +40"), "明るさ +40");
+        assert_eq!(capital(""), "");
+        let effect = Effect::Light(Light { brightness: 0.4, shadows: 0.55, ..Default::default() });
+        assert_eq!(summary(&effect), "brightness +40, shadows +55");
+        for (language, expected) in [(Language::Ja, "明るさ +40、シャドウ +55"), (Language::Fr, "luminosité +40, ombres +55"), (Language::Es, "brillo +40, sombras +55"), (Language::PtBr, "brilho +40, sombras +55")] {
+            in_language(language, || {
+                assert_eq!(summary(&effect), expected);
+                assert!(!capital(&summary(&effect)).is_empty());
+            });
+        }
+        in_language(Language::Fr, || assert_eq!(count(2), "2 effets"));
+        in_language(Language::Fr, || assert_eq!(count(0), "Aucun effet"));
+        in_language(Language::Ja, || assert_eq!(count(1), "1個のエフェクト"));
     }
 }

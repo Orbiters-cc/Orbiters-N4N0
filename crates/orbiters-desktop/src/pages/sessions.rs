@@ -9,7 +9,7 @@ use egui::{pos2, vec2, Align2, Color32, ColorImage, CornerRadius, CursorIcon, Id
 use orbiters_core::bundle::{self, SessionSummary};
 use orbiters_contracts::manifest::StorageQuality;
 use orbiters_core::reconstruction::{self, Report, Stage};
-use orbiters_i18n::{fill, mark, tr, tr_n};
+use orbiters_i18n::{fill, mark, tr, tr_ctx, tr_n};
 use orbiters_ui::anim::{self, ease, Spring};
 use orbiters_ui::paint::{self, Gradient};
 use orbiters_ui::theme::{self, weight, Txt};
@@ -1069,7 +1069,7 @@ fn detail(ctx: &egui::Context, cx: &mut Cx, state: &mut State, page: Rect) {
                 Some(tr!("{percent} decoded", percent = format::percent(st.strip_ok as f64, st.frames.max(1) as f64))),
             ),
             (icons::CUBE, tr("Keyframes"), format::integer(st.keyframes as f64), None),
-            (icons::CPU, tr("Depth frames"), format::integer(st.depth_frames as f64), None),
+            (icons::CPU, tr_ctx("stat tile", "Depth frames"), format::integer(st.depth_frames as f64), None),
         ];
         let mw = (main.width() - 36.0) / 4.0;
         for (i, (glyph, label, value, sub)) in minis.iter().enumerate() {

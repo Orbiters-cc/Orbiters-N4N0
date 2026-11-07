@@ -145,7 +145,7 @@ fn every_file_with_text_is_covered() {
 /// `mark` and `tr` take literals only: a key the scan cannot read could not be checked.
 #[test]
 fn the_reader_tells_text_from_code() {
-    for text in ["Settings", "Worlds in 3D", "Press {key} to start", "Hide tiles", "Can't reach Orbiters.", "Loading…", "Sound in VR", "3D picture of people", "Try again", "THE WEEKND FROM SOMEWHERE ELSE", "Saving...", "{} avatars", "conflicts with {}", "{n} pictures", " friends"] {
+    for text in ["Settings", "Worlds in 3D", "Press {key} to start", "Hide tiles", "Can't reach Orbiters.", "Loading…", "Sound in VR", "3D picture of people", "Try again", "THE WEEKND FROM SOMEWHERE ELSE", "Saving...", "{} avatars", "conflicts with {}", "{n} pictures", " friends", "{a} in {b}"] {
         assert!(looks_like_text(text), "{text:?} is text");
     }
     for text in ["", "{}", "{} {}", "foo_bar", "maxWidth", "file.png", "a/b/c", "https://orbiters.cc/x", "n4n0/calls", "wrld_123", "VRCX", "orbit-wheel", "--hidden", "VRChat", "N4N0", "\u{E000}", "-1", "x", "en-US", "application/json", "{a}/{b}.json", "C:\\Users", "{} ms", "{key}.small-hide", "{w}x{h}"] {

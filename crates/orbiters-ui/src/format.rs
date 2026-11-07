@@ -32,7 +32,7 @@ pub fn bytes(n: f64) -> String {
     if !n.is_finite() {
         return "–".into();
     }
-    let units = if language() == Language::Fr { ["o", "Ko", "Mo", "Go", "To"] } else { ["B", "KB", "MB", "GB", "TB"] };
+    let units = if language() == Language::Fr { ["o", "Ko", "Mo", "Go", "To"] } else { ["B", "KB", "MB", "GB", "TB"] }; // i18n: not shown (how French writes bytes: units, written where they are chosen)
     let gap = if language() == Language::Fr { '\u{a0}' } else { ' ' };
     let sign = if n < 0.0 { "-" } else { "" };
     let mut v = n.abs();

@@ -115,7 +115,9 @@ pub fn card(ui: &mut Ui, cx: &Cx, index: usize, state: &mut State) {
             if is_default {
                 p.rect_stroke(rect.shrink(0.75), radius, Stroke::new(1.5, theme::ACCENT), StrokeKind::Inside);
             }
-            let room = rect.width() - 28.0 - if is_default { 62.0 } else { 0.0 };
+            // The name gives way to "Default", as long as that is in the language.
+            let default_wide = if is_default { ui.painter().layout_no_wrap(tr_ctx("microphone", "Default").to_string(), theme::font(12.0, weight::SEMIBOLD), theme::ACCENT).size().x + 12.0 } else { 0.0 };
+            let room = rect.width() - 28.0 - default_wide.max(if is_default { 62.0 } else { 0.0 });
             let name = p.layout_job(Txt::new(mic.endpoint.name.clone(), 13.5).weight(weight::MEDIUM).color(theme::FG).job_truncated(room));
             p.galley(pos2(rect.left() + 14.0, rect.top() + 12.0), name, theme::FG);
             if is_default {

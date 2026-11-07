@@ -1,11 +1,12 @@
 //! Where VRChat's camera panel is, in a headset, to lay tiles around it. VRChat says nothing of it: `/usercamera/Pose` is the camera's own place, which leaves its panel behind
-//! once it flies (Enzo). What is always on the panel can be seen, as Enzo proposed: the white **X** at its top left and the white **chevron** under its middle, on VRChat's own
-//! window, which shows what one eye sees. How far apart they are says how large it is, the chevron's direction how it is turned. Nothing touches the game.
+//! once it flies (Enzo). What is always on the panel can be seen, as Enzo proposed: its white **X** at the top left and its white **chevron** under the middle, in what one eye sees.
+//! How far apart they are says how large it is, the chevron's direction how it is turned. Nothing touches the game.
 //!
-//! Only what is white is looked at, as blobs, and only one X and one chevron that lie as they do on the panel count: a white world or another X alone finds nothing, and
-//! [`CameraWatch`](super::camera_frames) only looks while VRChat says its camera is open. **A wrong tile is worse than a late one.**
+//! In a headset these glyphs are small and soft: on Enzo's own pictures the X is 9 pixels across and hardly reaches 200 of 255, so what is bright is looked for at two levels and a glyph is
+//! told by its shape on a grid, not by counting its arms. An X and a chevron alone could be anything, so what else is always on the panel must lie where the two say it does: the icon beside
+//! the X, the sliders, the column of icons on the left, the row of buttons. **A wrong tile is worse than a late one.**
 //!
-//! The mirror's view is taken to be the whole width of the left eye, cropped in height. That and the panel's size in metres ([`PANEL_UNIT_M`]) are not measured in a headset yet.
+//! [`Mirror`] says what the picture covers. What the compositor has of the eye covers all of it, known from SteamVR; VRChat's window does not, and is only used when that cannot be read.
 
 use orbiters_openvr::Matrix34;
 
@@ -13,78 +14,159 @@ use orbiters_openvr::Matrix34;
 pub const PANEL_X: [f32; 2] = [-181.0, -83.0];
 pub const PANEL_CHEVRON: [f32; 2] = [-8.0, 100.0];
 pub const PANEL_SIZE: [f32; 2] = [410.0, 220.0];
-/// A panel's unit in the room at VRChat's usual size: about 30 cm across. Only how far away it seems comes from this; where it shows comes from where it is seen.
-pub const PANEL_UNIT_M: f32 = 0.30 / 410.0;
+/// How wide the panel is in the room at VRChat's usual size. Only how far away the tiles seem comes from this; where they show comes from where it is seen. `camera_panel_m` in `Tune`.
+pub const PANEL_M: f32 = 0.30;
 
-/// What counts as white, on each channel: an icon's middle on any world.
-const WHITE: u8 = 215;
-/// A glyph's size in the picture, in pixels at the size it is read at: smaller is a speck, larger a white wall.
-const SMALLEST: f32 = 6.0;
-const LARGEST: usize = 120;
-/// How a glyph's size compares with how far apart the two are, from the panel as it is, with room for how a turn of it foreshortens.
-const X_SHARE: (f32, f32) = (0.03, 0.12);
-const CHEVRON_SHARE: (f32, f32) = (0.04, 0.2);
-/// As Enzo's picture of the panel has them: how large each is against how far apart they are, and how much of its square the X fills.
+/// What counts as bright, of a pixel's darkest channel: a glyph's middle at the size a headset shows it, and one with a bright world close behind it.
+const BRIGHT: [u8; 2] = [150, 190];
+/// A blob's size in pixels: smaller is a speck, larger is a wall.
+const SMALLEST_BLOB: usize = 6;
+const LARGEST_BLOB: usize = 160;
+const X_SIZES: (usize, usize) = (5, 48);
+const CHEVRON_SIZES: (usize, usize) = (8, 90);
+/// How large each is against how far apart they are, with room for how a turn of the panel foreshortens them; and as the panel has them.
+const X_SHARE: (f32, f32) = (0.022, 0.09);
+const CHEVRON_SHARE: (f32, f32) = (0.04, 0.16);
 const X_IS: f32 = 0.044;
-const CHEVRON_IS: f32 = 0.065;
-const X_FILLS: f32 = 0.58;
-const CHEVRON_BENDS: f32 = 0.6;
-/// How far the two are apart at the least, in pixels: below this they are too small to tell from anything.
-const NEAREST: f32 = 80.0;
-/// How far a panel may lean in the picture: a head on its side is not how a camera is used, and a row of icons lying any way is not a panel.
-const STANDS_AT_LEAST: f32 = 0.5;
-/// How across and how far down the X → chevron line runs, as the panel has it (173 across, 183 down), with room for a turn of it.
-const ACROSS_PER_DOWN: (f32, f32) = (0.35, 1.25);
+const CHEVRON_IS: f32 = 0.075;
+/// How far apart they are at the least, in pixels of what is read.
+const NEAREST: f32 = 70.0;
+/// How far a panel may lean in the picture.
+const LEANS_AT_MOST: f32 = 60.0;
+/// How like an X it must be on its grid: 0.6 to 0.8 on real ones at 7 to 12 pixels, under 0.45 on the panel's other icons.
+const X_LOOKS: f32 = 0.45;
+/// How bent a chevron is: 0 for a straight bar, near 1 for a V.
+const CHEVRON_BENDS: f32 = 0.42;
+/// How much of what else is always on the panel must lie where these two say: of the icon beside the X, the sliders, the left column and the row of buttons. Four on a real one, at most two on
+/// any of 258 frames with VRChat's menus and ours.
+const SUPPORT: usize = 3;
+
+/// The same when it is so small that it is read at twice its size: all of it, as a wrong tile is worse than a late one.
+const SUPPORT_SMALL: usize = 4;
 
 /// One frame's reading, in pixels of what was given.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Found {
     pub x: [f32; 2],
     pub chevron: [f32; 2],
-    /// The way down the panel, in the picture: y down, a unit long.
+    pub middle: [f32; 2],
+    /// The panel's right and down in the picture, unit long and at right angles.
+    pub right: [f32; 2],
     pub down: [f32; 2],
+    /// Pixels to one of its units along each: a panel turned away is narrower, and as tall.
+    pub across: f32,
+    pub tall: f32,
+}
+
+impl Found {
+    fn moved(mut self, by: [f32; 2], scale: f32) -> Self {
+        let at = |p: [f32; 2]| [p[0] / scale + by[0], p[1] / scale + by[1]];
+        (self.x, self.chevron, self.middle) = (at(self.x), at(self.chevron), at(self.middle));
+        self.across /= scale;
+        self.tall /= scale;
+        self
+    }
+
+    /// The same, for a picture that started `by` further on.
+    pub fn shifted(self, by: [f32; 2]) -> Self {
+        self.moved(by, 1.0)
+    }
+
+    /// Where a place on the panel in its units lies in the picture.
+    pub fn at(&self, unit: [f32; 2]) -> [f32; 2] {
+        [
+            self.middle[0] + self.right[0] * unit[0] * self.across + self.down[0] * unit[1] * self.tall,
+            self.middle[1] + self.right[1] * unit[0] * self.across + self.down[1] * unit[1] * self.tall,
+        ]
+    }
+}
+
+/// How bright each pixel is, as its darkest channel: only white things stay.
+struct Light {
+    width: usize,
+    height: usize,
+    px: Vec<u8>,
+}
+
+impl Light {
+    fn of(pixels: &[u8], width: usize, height: usize, stride: usize, area: [usize; 4]) -> Self {
+        let [x0, y0, w, h] = [area[0].min(width), area[1].min(height), area[2], area[3]];
+        let (w, h) = (w.min(width - x0), h.min(height - y0));
+        let mut px = vec![0u8; w * h];
+        for y in 0..h {
+            let start = (y0 + y) * stride + x0 * 4;
+            let Some(row) = pixels.get(start..start + w * 4) else { continue };
+            for (out, p) in px[y * w..(y + 1) * w].iter_mut().zip(row.chunks_exact(4)) {
+                *out = p[0].min(p[1]).min(p[2]);
+            }
+        }
+        Self { width: w, height: h, px }
+    }
+
+    /// Twice as large, for what is small.
+    fn doubled(&self) -> Self {
+        let (w, h) = (self.width * 2, self.height * 2);
+        let mut px = vec![0u8; w * h];
+        for y in 0..h {
+            for x in 0..w {
+                px[y * w + x] = self.sample((x as f32 + 0.5) / 2.0, (y as f32 + 0.5) / 2.0) as u8;
+            }
+        }
+        Self { width: w, height: h, px }
+    }
+
+    /// Between pixels, whose middles lie at .5.
+    fn sample(&self, x: f32, y: f32) -> f32 {
+        let (fx, fy) = (x - 0.5, y - 0.5);
+        if fx < 0.0 || fy < 0.0 || fx >= (self.width - 1) as f32 || fy >= (self.height - 1) as f32 {
+            return 0.0;
+        }
+        let (ix, iy, ax, ay) = (fx as usize, fy as usize, fx.fract(), fy.fract());
+        let at = |x: usize, y: usize| self.px[y * self.width + x] as f32;
+        (at(ix, iy) * (1.0 - ax) + at(ix + 1, iy) * ax) * (1.0 - ay) + (at(ix, iy + 1) * (1.0 - ax) + at(ix + 1, iy + 1) * ax) * ay
+    }
 }
 
 #[derive(Clone, Debug)]
 struct Blob {
     area: usize,
-    min: [usize; 2],
-    max: [usize; 2],
+    wide: usize,
+    high: usize,
     middle: [f32; 2],
-    /// Its long and short lengths, and the way of the long one.
+    /// Its long and short spreads, and the way of the long one.
     long: f32,
     short: f32,
     along: [f32; 2],
-    /// Pixels of the picture to one pixel read.
-    scale: f32,
     /// How bent it is: 0 for a straight bar, near 1 for a V, whichever way it opens.
     bend: f32,
 }
 
-/// The white blobs of a picture of `width` x `height` BGRA pixels, `stride` bytes a row, reading every `step`th pixel. In pixels of the picture.
-fn blobs(bgra: &[u8], width: usize, height: usize, stride: usize, step: usize) -> Vec<Blob> {
-    let (w, h) = (width / step, height / step);
-    if w < 8 || h < 8 {
-        return Vec::new();
+impl Blob {
+    fn size(&self) -> usize {
+        self.wide.max(self.high)
     }
-    let mut white = vec![false; w * h];
-    for y in 0..h {
-        let row = y * step * stride;
-        for x in 0..w {
-            let i = row + x * step * 4;
-            if let Some(p) = bgra.get(i..i + 3) {
-                white[y * w + x] = p[0] >= WHITE && p[1] >= WHITE && p[2] >= WHITE;
-            }
-        }
+
+    fn may_be_x(&self) -> bool {
+        let fill = self.area as f32 / (self.wide * self.high) as f32;
+        (X_SIZES.0..=X_SIZES.1).contains(&self.size()) && self.wide.min(self.high) as f32 >= 0.55 * self.size() as f32 && self.long <= self.short * 1.7 && (0.3..=0.82).contains(&fill)
     }
-    let mut out = Vec::new();
+
+    fn may_be_chevron(&self) -> bool {
+        (CHEVRON_SIZES.0..=CHEVRON_SIZES.1).contains(&self.size()) && self.long >= self.short * 1.7 && self.long <= self.short * 8.0 && self.bend >= CHEVRON_BENDS
+    }
+}
+
+/// The blobs of what is at least `level`, added to `out`.
+fn blobs(light: &Light, level: u8, out: &mut Vec<Blob>) {
+    let (w, h) = (light.width, light.height);
+    let mut left: Vec<bool> = light.px.iter().map(|&p| p >= level).collect();
     let mut todo: Vec<usize> = Vec::new();
     let mut pixels: Vec<usize> = Vec::new();
-    for start in 0..white.len() {
-        if !white[start] {
+    for start in 0..left.len() {
+        if !left[start] {
             continue;
         }
-        white[start] = false;
+        left[start] = false;
         todo.push(start);
         pixels.clear();
         let (mut min, mut max) = ([usize::MAX; 2], [0usize; 2]);
@@ -92,15 +174,17 @@ fn blobs(bgra: &[u8], width: usize, height: usize, stride: usize, step: usize) -
             pixels.push(at);
             let (x, y) = (at % w, at / w);
             (min[0], min[1], max[0], max[1]) = (min[0].min(x), min[1].min(y), max[0].max(x), max[1].max(y));
-            for (nx, ny) in [(x.wrapping_sub(1), y), (x + 1, y), (x, y.wrapping_sub(1)), (x, y + 1)] {
-                if nx < w && ny < h && white[ny * w + nx] {
-                    white[ny * w + nx] = false;
-                    todo.push(ny * w + nx);
+            for ny in y.saturating_sub(1)..=(y + 1).min(h - 1) {
+                for nx in x.saturating_sub(1)..=(x + 1).min(w - 1) {
+                    if left[ny * w + nx] {
+                        left[ny * w + nx] = false;
+                        todo.push(ny * w + nx);
+                    }
                 }
             }
         }
-        let wide = (max[0] - min[0] + 1).max(max[1] - min[1] + 1);
-        if pixels.len() < 12 || wide > LARGEST {
+        let (wide, high) = (max[0] - min[0] + 1, max[1] - min[1] + 1);
+        if pixels.len() < SMALLEST_BLOB || wide.max(high) > LARGEST_BLOB {
             continue;
         }
         // Its shape: the spread of its pixels, whichever way it lies.
@@ -122,154 +206,278 @@ fn blobs(bgra: &[u8], width: usize, height: usize, stride: usize, step: usize) -
         let middle = (xx + yy) / 2.0;
         let apart = (((xx - yy) / 2.0).powi(2) + xy * xy).sqrt();
         let angle = 0.5 * (2.0 * xy).atan2(xx - yy);
-        let scale = step as f32;
         // How far out along its length goes with how far across: |t| against n, as a correlation.
         let (ca, sa) = (angle.cos(), angle.sin());
         let (mut sum_t, mut sum_n, mut tt, mut nn, mut tn) = (0.0f32, 0.0f32, 0.0f32, 0.0f32, 0.0f32);
         for at in &pixels {
             let (dx, dy) = ((at % w) as f32 - mx, (at / w) as f32 - my);
-            let (t, n) = ((dx * ca + dy * sa).abs(), dy * ca - dx * sa);
+            let (t, m) = ((dx * ca + dy * sa).abs(), dy * ca - dx * sa);
             sum_t += t;
-            sum_n += n;
+            sum_n += m;
             tt += t * t;
-            nn += n * n;
-            tn += t * n;
+            nn += m * m;
+            tn += t * m;
         }
-        let spread = ((tt - sum_t * sum_t / n_of(&pixels)) * (nn - sum_n * sum_n / n_of(&pixels))).max(1e-6).sqrt();
-        let bend = ((tn - sum_t * sum_n / n_of(&pixels)) / spread).abs();
+        let spread = ((tt - sum_t * sum_t / n) * (nn - sum_n * sum_n / n)).max(1e-6).sqrt();
         out.push(Blob {
             area: pixels.len(),
-            min: [min[0] * step, min[1] * step],
-            max: [(max[0] + 1) * step, (max[1] + 1) * step],
-            middle: [(mx + 0.5) * scale, (my + 0.5) * scale],
-            long: (middle + apart).max(0.0).sqrt() * scale,
-            short: (middle - apart).max(0.0).sqrt() * scale,
-            along: [angle.cos(), angle.sin()],
-            scale,
-            bend,
+            wide,
+            high,
+            middle: [mx + 0.5, my + 0.5],
+            long: (middle + apart).max(0.0).sqrt(),
+            short: (middle - apart).max(0.0).sqrt(),
+            along: [ca, sa],
+            bend: ((tn - sum_t * sum_n / n) / spread).abs(),
         });
     }
-    out
 }
 
-fn n_of(pixels: &[usize]) -> f32 {
-    pixels.len() as f32
-}
-
-impl Blob {
-    fn size(&self) -> f32 {
-        (self.max[0] - self.min[0]).max(self.max[1] - self.min[1]) as f32
-    }
-
-    /// An X: as long as it is wide whichever way it lies, filled at its middle, with four arms round it, at two distances out. Measured on the real X at six turns and sizes,
-    /// where the white icons nearest to it have anything from one to eight.
-    fn is_x(&self, white: &dyn Fn(f32, f32) -> bool) -> bool {
-        if self.size() < SMALLEST || self.long > self.short * 1.35 || !white(self.middle[0], self.middle[1]) {
-            return false;
+/// How like an X what is around `at` is, turned by `lean`: a correlation with an ideal one on a grid, which is all that can be said of 9 pixels.
+fn x_looks(light: &Light, at: [f32; 2], half: f32, lean: f32) -> f32 {
+    const N: usize = 11;
+    let (s, c) = lean.sin_cos();
+    let (mut seen, mut ideal) = ([0f32; N * N], [0f32; N * N]);
+    for j in 0..N {
+        for i in 0..N {
+            let (u, v) = (i as f32 / (N - 1) as f32 * 2.0 - 1.0, j as f32 / (N - 1) as f32 * 2.0 - 1.0);
+            seen[j * N + i] = light.sample(at[0] + half * (u * c - v * s), at[1] + half * (u * s + v * c));
+            let (x, y) = (u * 1.25, v * 1.25);
+            let on_arm = (x - y).abs() / std::f32::consts::SQRT_2 < 0.28 || (x + y).abs() / std::f32::consts::SQRT_2 < 0.28;
+            ideal[j * N + i] = if on_arm && x.abs().max(y.abs()) <= 1.0 { 1.0 } else { 0.0 };
         }
-        let arms = |reach: f32| {
-            let mut count = 0;
-            let mut was = white(self.middle[0] + reach, self.middle[1]);
-            for i in 1..=48 {
-                let (s, c) = (i as f32 / 48.0 * std::f32::consts::TAU).sin_cos();
-                let on = white(self.middle[0] + reach * c, self.middle[1] + reach * s);
-                if on && !was {
-                    count += 1;
-                }
-                was = on;
-            }
-            count
+    }
+    let mean = |a: &[f32]| a.iter().sum::<f32>() / a.len() as f32;
+    let (ms, mi) = (mean(&seen), mean(&ideal));
+    let (mut both, mut ss, mut ii) = (0.0, 0.0, 0.0);
+    for (a, b) in seen.iter().zip(&ideal) {
+        both += (a - ms) * (b - mi);
+        ss += (a - ms) * (a - ms);
+        ii += (b - mi) * (b - mi);
+    }
+    both / (ss * ii).sqrt().max(1e-3)
+}
+
+/// One way of reading the panel from its X and its chevron.
+#[derive(Clone, Copy)]
+struct Reading {
+    right: [f32; 2],
+    down: [f32; 2],
+    across: f32,
+    tall: f32,
+    middle: [f32; 2],
+}
+
+impl Reading {
+    fn support(&self, all: &[Blob]) -> usize {
+        let on = |b: &Blob| {
+            let d = [b.middle[0] - self.middle[0], b.middle[1] - self.middle[1]];
+            [(d[0] * self.right[0] + d[1] * self.right[1]) / self.across, (d[0] * self.down[0] + d[1] * self.down[1]) / self.tall]
         };
-        let across = (self.area as f32).sqrt() * self.scale;
-        arms(across * 0.55) == 4 && arms(across * 0.65) == 4
-    }
-
-    /// A chevron: longer than it is thick, and bent, which a bar of text or a slider is not. Measured on the real one at 0.85 to 0.89, where straight things are under 0.35.
-    fn is_chevron(&self) -> bool {
-        self.size() >= SMALLEST && self.long >= self.short * 1.7 && self.long <= self.short * 7.0 && self.bend >= CHEVRON_BENDS
+        let size = (self.across + self.tall) / 2.0;
+        let near = |p: [f32; 2], t: [f32; 2]| all.iter().any(|b| { let u = on(b); (u[0] - p[0]).abs() <= t[0] && (u[1] - p[1]).abs() <= t[1] });
+        let icon = all.iter().any(|b| {
+            let u = on(b);
+            (u[0] + 154.0).abs() <= 14.0 && (u[1] + 84.0).abs() <= 10.0 && b.size() as f32 >= 9.0 * size && b.area as f32 >= 30.0 * size * size
+        });
+        let slider = all.iter().any(|b| {
+            let u = on(b);
+            (130.0..=195.0).contains(&u[0]) && (-5.0..=95.0).contains(&u[1]) && b.long >= b.short * 2.0 && b.long / size >= 6.0 && (b.along[0] * self.down[0] + b.along[1] * self.down[1]).abs() > 30f32.to_radians().cos()
+        });
+        let column = [36.0, 54.0, 74.0, 93.0].iter().filter(|y| near([-190.0, **y], [14.0, 8.0])).count();
+        let buttons = [[-148.0, 131.0], [-35.0, 133.0], [82.0, 135.0]].iter().filter(|p| near(**p, [18.0, 14.0])).count();
+        icon as usize + slider as usize + (column >= 2) as usize + (buttons >= 2) as usize
     }
 }
 
-/// The X and the chevron of a camera panel in a picture, or `None`.
-pub fn find(bgra: &[u8], width: usize, height: usize, stride: usize) -> Option<Found> {
-    let step = (width / 1280).max(1);
-    let found = blobs(bgra, width, height, stride, step);
-    let white = |x: f32, y: f32| -> bool {
-        if x < 0.0 || y < 0.0 || x as usize >= width || y as usize >= height {
-            return false;
-        }
-        let i = y as usize * stride + x as usize * 4;
-        bgra.get(i..i + 3).is_some_and(|p| p[0] >= WHITE && p[1] >= WHITE && p[2] >= WHITE)
-    };
-    let xs: Vec<&Blob> = found.iter().filter(|b| b.is_x(&white)).collect();
-    let chevrons: Vec<&Blob> = found.iter().filter(|b| b.is_chevron()).collect();
+/// The panel in what is read, in its pixels.
+fn look(light: &Light, needs: usize) -> Option<Found> {
+    if light.width < 16 || light.height < 16 {
+        return None;
+    }
+    let mut all = Vec::new();
+    for level in BRIGHT {
+        blobs(light, level, &mut all);
+    }
+    let panel = [PANEL_CHEVRON[0] - PANEL_X[0], PANEL_CHEVRON[1] - PANEL_X[1]];
+    let (panel_far, panel_angle) = (panel[0].hypot(panel[1]), panel[1].atan2(panel[0]));
     let mut best: Option<(f32, Found)> = None;
-    for x in &xs {
-        for c in &chevrons {
+    for x in all.iter().filter(|b| b.may_be_x()) {
+        for c in all.iter().filter(|b| b.may_be_chevron()) {
             let v = [c.middle[0] - x.middle[0], c.middle[1] - x.middle[1]];
             let far = v[0].hypot(v[1]);
             if far < NEAREST {
                 continue;
             }
-            // The chevron lies across the panel: its short way is the panel's up and down, the one of the two that goes from the X to it.
-            let mut down = [-c.along[1], c.along[0]];
-            if down[0] * v[0] + down[1] * v[1] < 0.0 {
-                down = [-down[0], -down[1]];
-            }
-            if down[1] < STANDS_AT_LEAST {
-                continue;
-            }
-            let right = [down[1], -down[0]];
-            let (across, along) = (v[0] * right[0] + v[1] * right[1], v[0] * down[0] + v[1] * down[1]);
-            if along <= 0.0 || !(ACROSS_PER_DOWN.0..=ACROSS_PER_DOWN.1).contains(&(across / along)) {
-                continue;
-            }
-            let (x_share, c_share) = (x.size() / far, c.size() / far);
+            let (x_share, c_share) = (x.size() as f32 / far, c.size() as f32 / far);
             if !(X_SHARE.0..=X_SHARE.1).contains(&x_share) || !(CHEVRON_SHARE.0..=CHEVRON_SHARE.1).contains(&c_share) {
                 continue;
             }
-            // Nearest to how the panel has them.
-            let score = (across / along - 173.0 / 183.0).abs() + (x_share - X_IS).abs() * 4.0 + (c_share - CHEVRON_IS).abs() * 4.0 + (x.area as f32 * x.scale * x.scale / (x.size() * x.size()) - X_FILLS).abs();
-            if best.as_ref().is_none_or(|b| score < b.0) {
-                best = Some((score, Found { x: x.middle, chevron: c.middle, down }));
+            // Seen straight on, the two say its size and how it leans.
+            let lean = v[1].atan2(v[0]) - panel_angle;
+            if lean.abs() > LEANS_AT_MOST.to_radians() {
+                continue;
+            }
+            let (s, co) = lean.sin_cos();
+            let (right, down) = ([co, s], [-s, co]);
+            // The chevron lies along the panel's right.
+            let mut along = c.along;
+            let lies = along[0] * right[0] + along[1] * right[1];
+            if lies.abs() < 35f32.to_radians().cos() {
+                continue;
+            }
+            if lies < 0.0 {
+                along = [-along[0], -along[1]];
+            }
+            let looks = x_looks(light, x.middle, x.size() as f32 * 0.625, lean);
+            if looks < X_LOOKS {
+                continue;
+            }
+            let per_unit = far / panel_far;
+            let straight = Reading {
+                right,
+                down,
+                across: per_unit,
+                tall: per_unit,
+                middle: [x.middle[0] - (right[0] * PANEL_X[0] + down[0] * PANEL_X[1]) * per_unit, x.middle[1] - (right[1] * PANEL_X[0] + down[1] * PANEL_X[1]) * per_unit],
+            };
+            // Turned away it is narrower, and the chevron still lies along its right: this reads it then.
+            let down_of_chevron = [-along[1], along[0]];
+            let (a, b) = (v[0] * along[0] + v[1] * along[1], v[0] * down_of_chevron[0] + v[1] * down_of_chevron[1]);
+            let turned = (a > far * 0.25 && b > far * 0.25).then(|| {
+                let (across, tall) = (a / panel[0], b / panel[1]);
+                Reading {
+                    right: along,
+                    down: down_of_chevron,
+                    across,
+                    tall,
+                    middle: [x.middle[0] - along[0] * PANEL_X[0] * across - down_of_chevron[0] * PANEL_X[1] * tall, x.middle[1] - along[1] * PANEL_X[0] * across - down_of_chevron[1] * PANEL_X[1] * tall],
+                }
+            });
+            for reading in [Some(straight), turned].into_iter().flatten() {
+                let support = reading.support(&all);
+                if support < needs {
+                    continue;
+                }
+                let score = looks + support as f32 * 0.2 - (x_share - X_IS).abs() * 3.0 - (c_share - CHEVRON_IS).abs() * 2.0;
+                if best.as_ref().is_none_or(|b| score > b.0) {
+                    let found = Found { x: x.middle, chevron: c.middle, middle: reading.middle, right: reading.right, down: reading.down, across: reading.across, tall: reading.tall };
+                    best = Some((score, found));
+                }
             }
         }
     }
     best.map(|b| b.1)
 }
 
-/// How a frame of the mirror maps on the eye: its tangents as SteamVR gives them (left, right, top, bottom), and the picture's width over its height.
+/// The panel in a picture of 4-byte pixels, whichever way round its colours are, or `None`.
+pub fn find(pixels: &[u8], width: usize, height: usize, stride: usize) -> Option<Found> {
+    find_in(pixels, width, height, stride, [0, 0, width, height], width <= LOOKS_TWICE_UP_TO)
+}
+
+/// Pictures up to this wide are read at twice their size too when nothing is found. A panel this picture shows 200 pixels across or less has an X of under 6.
+const LOOKS_TWICE_UP_TO: usize = 1400;
+
+/// The same, only in `area` (x, y, width, height), and at twice the size too if asked, when nothing is found.
+pub fn find_in(pixels: &[u8], width: usize, height: usize, stride: usize, area: [usize; 4], twice: bool) -> Option<Found> {
+    let light = Light::of(pixels, width, height, stride, area);
+    let by = [area[0].min(width) as f32, area[1].min(height) as f32];
+    look(&light, SUPPORT).map(|f| f.moved(by, 1.0)).or_else(|| twice.then(|| look(&light.doubled(), SUPPORT_SMALL).map(|f| f.moved(by, 2.0))).flatten())
+}
+
+/// Around a panel found, with room for how far it goes between two looks: what the next look reads.
+pub fn around(found: &Found, width: usize, height: usize) -> [usize; 4] {
+    let (reach_x, reach_y) = (PANEL_SIZE[0] * found.across.max(found.tall), PANEL_SIZE[1] * 1.4 * found.across.max(found.tall));
+    let (x0, y0) = ((found.middle[0] - reach_x).max(0.0) as usize, (found.middle[1] - reach_y).max(0.0) as usize);
+    [x0, y0, ((reach_x * 2.0) as usize).min(width - x0.min(width)), ((reach_y * 2.0) as usize).min(height - y0.min(height))]
+}
+
+/// What a picture covers of the eye: the tangents from the eye at its top left, right and down, and how many it spans.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Mirror {
-    pub tangents: [f32; 4],
-    pub aspect: f32,
+    pub from: [f32; 2],
+    pub spans: [f32; 2],
+}
+
+/// The tangents of an eye's sides, right and down, from what SteamVR gives. SteamVR's bottom is the tangent of the side *up*, whatever its name: `ComposeProjection` puts it at the top of the
+/// picture, and `stereo::eye_camera` reads it so. On the Quest Pro these are up 0.900 and down 1.376. Taking them the other way lays things 0.476 too high, which is how the tiles
+/// came to be well above the panel in Enzo's pictures.
+pub fn eye_sides(raw: [f32; 4]) -> [f32; 4] {
+    let (up, below) = (raw[2].max(raw[3]), raw[2].min(raw[3]));
+    [raw[0].min(raw[1]), raw[0].max(raw[1]), -up, -below]
 }
 
 impl Mirror {
+    /// The whole of an eye, as the compositor has it.
+    pub fn whole_eye(raw: [f32; 4]) -> Self {
+        let [left, right, top, bottom] = eye_sides(raw);
+        Self { from: [left, top], spans: [right - left, bottom - top] }
+    }
+
+    /// VRChat's window, `share` of the eye's width, as wide as it is against its height, about the eye's middle moved by `moved` of its width.
+    pub fn window(raw: [f32; 4], aspect: f32, share: f32, moved: [f32; 2]) -> Self {
+        let [left, right, top, bottom] = eye_sides(raw);
+        let wide = (right - left) * share;
+        let tall = wide / aspect.max(0.1);
+        let middle = [(left + right) / 2.0 + moved[0] * (right - left), (top + bottom) / 2.0 + moved[1] * (right - left)];
+        Self { from: [middle[0] - wide / 2.0, middle[1] - tall / 2.0], spans: [wide, tall] }
+    }
+
     /// A place on the picture (0 to 1 each way) as tangents from the eye: right, and down.
     pub fn tangent(&self, u: f32, v: f32) -> [f32; 2] {
-        let [left, right, top, bottom] = self.tangents;
-        let wide = right - left;
-        [left + u * wide, (top + bottom) / 2.0 + (v - 0.5) * wide / self.aspect]
+        [self.from[0] + u * self.spans[0], self.from[1] + v * self.spans[1]]
     }
 }
 
-/// Where a panel seen by the eye lies in the room, and what one of its units is there. `eye` is that eye's pose then. In the plane facing it, turned as it is seen turned.
-pub fn panel_in_room(found: &Found, size: [f32; 2], mirror: &Mirror, eye: &Matrix34) -> (Matrix34, f32) {
+/// Which side of the panel the tiles lie on.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Side {
+    #[default]
+    Left,
+    Right,
+}
+
+impl Side {
+    pub fn sign(self) -> f32 {
+        match self {
+            Side::Left => -1.0,
+            Side::Right => 1.0,
+        }
+    }
+}
+
+/// How far the tiles' outer edge lies from the panel's middle, and how far their inner edge, in its units.
+pub const TILES_REACH: f32 = 301.0;
+pub const TILES_START: f32 = 215.0;
+
+/// The side the tiles fit on, within `sides` (left, right, top, bottom, in the same units as `at`): where they are stays, unless the other has room and they have none. `at` turns a place on
+/// the panel into a place where `sides` are.
+pub fn side_with_room(at: impl Fn([f32; 2]) -> [f32; 2], sides: [f32; 4], was: Side) -> Side {
+    let room = |side: Side| {
+        let corners = [[side.sign() * TILES_REACH, -110.0], [side.sign() * TILES_REACH, 110.0]];
+        corners.iter().map(|c| { let p = at(*c); (p[0] - sides[0]).min(sides[1] - p[0]) }).fold(f32::MAX, f32::min)
+    };
+    let other = if was == Side::Left { Side::Right } else { Side::Left };
+    if room(was) < 0.0 && room(other) > room(was) {
+        other
+    } else {
+        was
+    }
+}
+
+/// Where a panel seen by the eye lies in the room, and what one of its units is there. `eye` is that eye's pose then. In the plane facing it, turned as it is seen turned, its middle moved so
+/// that the tiles on `side` lie next to its edge even when a turn makes it narrower.
+pub fn panel_in_room(found: &Found, size: [f32; 2], mirror: &Mirror, eye: &Matrix34, panel_m: f32, side: Side) -> (Matrix34, f32) {
     let on = |p: [f32; 2]| mirror.tangent(p[0] / size[0], p[1] / size[1]);
-    let (x, chevron) = (on(found.x), on(found.chevron));
-    // The same way in tangents as in pixels: they scale alike across and down.
-    let down = found.down;
+    // A place on the picture is a place in tangents; so is a way along it, and how long.
+    let place = on(found.middle);
+    let towards = on([found.middle[0] + found.down[0] * found.tall, found.middle[1] + found.down[1] * found.tall]);
+    let along = [towards[0] - place[0], towards[1] - place[1]];
+    let per_unit = along[0].hypot(along[1]).max(1e-5);
+    let down = [along[0] / per_unit, along[1] / per_unit];
     let right = [down[1], -down[0]];
-    let v = [chevron[0] - x[0], chevron[1] - x[1]];
-    let panel_v = [PANEL_CHEVRON[0] - PANEL_X[0], PANEL_CHEVRON[1] - PANEL_X[1]];
-    // Tangent per unit: by how far down the line runs, which a turn about the panel's up does not change.
-    let per_unit = (v[0] * down[0] + v[1] * down[1]) / panel_v[1];
-    let middle = [
-        x[0] + (right[0] * -PANEL_X[0] + down[0] * -PANEL_X[1]) * per_unit,
-        x[1] + (right[1] * -PANEL_X[0] + down[1] * -PANEL_X[1]) * per_unit,
-    ];
-    let depth = (PANEL_UNIT_M / per_unit.max(1e-5)).clamp(0.2, 3.0);
+    let narrower = (PANEL_SIZE[0] / 2.0) * (1.0 - found.across / found.tall).max(0.0);
+    let middle = [place[0] - side.sign() * right[0] * narrower * per_unit, place[1] - side.sign() * right[1] * narrower * per_unit];
+    let depth = (panel_m / PANEL_SIZE[0] / per_unit).clamp(0.2, 3.0);
     let unit = per_unit * depth;
     let m = &eye.m;
     let turn = |a: [f32; 3]| -> [f32; 3] { std::array::from_fn(|i| m[i][0] * a[0] + m[i][1] * a[1] + m[i][2] * a[2]) };
@@ -280,19 +488,32 @@ pub fn panel_in_room(found: &Found, size: [f32; 2], mirror: &Mirror, eye: &Matri
     (frame, unit)
 }
 
-/// Follows what is seen, ten times a second, smoothly at the headset's rate: at once over a jump, softly over a tremble.
+/// Follows what is seen, ten times a second, smoothly at the headset's rate: at once over a jump, softly over a tremble. A jump counts only when the next look agrees: one wrong look moves nothing.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Follow {
     target: Option<(Matrix34, f32)>,
     now: Option<(Matrix34, f32)>,
+    unsure: Option<(Matrix34, f32)>,
 }
 
 /// How far it goes towards what is seen, per second, and beyond what distance it simply is there.
 const FOLLOWS_PER_S: f32 = 14.0;
 const JUMPS_M: f32 = 0.25;
 
+fn apart(a: &Matrix34, b: &Matrix34) -> f32 {
+    (0..3).map(|i| (a.m[i][3] - b.m[i][3]).powi(2)).sum::<f32>().sqrt()
+}
+
 impl Follow {
     pub fn seen(&mut self, frame: Matrix34, unit: f32) {
+        if let Some((now, _)) = self.target.filter(|(now, _)| apart(now, &frame) > JUMPS_M) {
+            let _ = now;
+            if !self.unsure.is_some_and(|(was, _)| apart(&was, &frame) <= JUMPS_M) {
+                self.unsure = Some((frame, unit));
+                return;
+            }
+        }
+        self.unsure = None;
         self.target = Some((frame, unit));
     }
 
@@ -306,8 +527,7 @@ impl Follow {
             self.now = Some((target, unit));
             return self.now;
         };
-        let apart = (0..3).map(|i| (target.m[i][3] - now.m[i][3]).powi(2)).sum::<f32>().sqrt();
-        let k = if apart > JUMPS_M { 1.0 } else { 1.0 - (-FOLLOWS_PER_S * seconds).exp() };
+        let k = if apart(&target, &now) > JUMPS_M { 1.0 } else { 1.0 - (-FOLLOWS_PER_S * seconds).exp() };
         let mut m = now.m;
         for (row, to) in m.iter_mut().zip(target.m.iter()) {
             for (a, b) in row.iter_mut().zip(to.iter()) {
@@ -339,68 +559,121 @@ mod tests {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("src/overlay/orbit/testdata")
     }
 
-    /// Enzo's own picture of the panel: the red rings round the X and the chevron are his.
-    fn panel_picture() -> (Vec<u8>, usize, usize) {
-        let image = image::open(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/overlay/orbit/testdata_camera/camera-panel-752x417.jpg")).expect("the picture").to_rgba8();
-        let (width, height) = (image.width() as usize, image.height() as usize);
-        let mut bgra = image.into_raw();
-        for p in bgra.chunks_exact_mut(4) {
-            p.swap(0, 2);
-        }
-        (bgra, width, height)
+    struct Picture {
+        pixels: Vec<u8>,
+        width: usize,
+        height: usize,
+        /// Where its X and its chevron are, read by hand.
+        x: [f32; 2],
+        chevron: [f32; 2],
     }
 
-    /// The same twice as large, as VRChat's window really is, turned by `degrees` and scaled by `scale` about its middle, blended as a panel in 3D is drawn.
-    fn turned(from: &[u8], width: usize, height: usize, degrees: f32, scale: f32) -> (Vec<u8>, usize, usize) {
-        let (w, h) = (width * 2, height * 2);
+    fn picture(name: &str, x: [f32; 2], chevron: [f32; 2]) -> Picture {
+        let image = image::open(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/overlay/orbit/testdata_camera").join(name)).expect("the picture").to_rgba8();
+        let (width, height) = (image.width() as usize, image.height() as usize);
+        Picture { pixels: image.into_raw(), width, height, x, chevron }
+    }
+
+    /// Enzo's two pictures from a headset, as they are, at 1280 x 720: its panel is 330 pixels across and its X 9, tilted each way, with its button row open and a world behind.
+    fn headset_pictures() -> [Picture; 2] {
+        [picture("camera-headset-1.png", [683.5, 323.0], [839.5, 451.0]), picture("camera-headset-2.png", [645.5, 393.0], [746.5, 574.5])]
+    }
+
+    /// His first small picture, of a panel straight on, and the panel on a desktop's camera, large and in another of its modes.
+    fn other_pictures() -> [Picture; 2] {
+        [picture("camera-panel-752x417.jpg", [204.0, 102.0], [377.0, 285.0]), picture("camera-desktop-960x540.jpg", [280.0, 169.0], [480.0, 388.0])]
+    }
+
+    /// What a picture is turned to by a lean, a size and a turn away (the width's share), about its middle. Sampled as a GPU would at that size: several times within a pixel when smaller.
+    fn seen(p: &Picture, degrees: f32, scale: f32, turned: f32) -> (Vec<u8>, impl Fn([f32; 2]) -> [f32; 2] + use<>) {
         let (s, c) = degrees.to_radians().sin_cos();
+        let (w, h) = (p.width, p.height);
         let (cx, cy) = (w as f32 / 2.0, h as f32 / 2.0);
         let mut out = vec![0u8; w * h * 4];
-        let at = |x: usize, y: usize, ch: usize| from[(y.min(height - 1) * width + x.min(width - 1)) * 4 + ch] as f32;
+        let source = |x: f32, y: f32, ch: usize| -> f32 {
+            let (fx, fy) = ((x - 0.5).clamp(0.0, (w - 2) as f32), (y - 0.5).clamp(0.0, (h - 2) as f32));
+            let (ix, iy, ax, ay) = (fx as usize, fy as usize, fx.fract(), fy.fract());
+            let at = |x: usize, y: usize| p.pixels[(y * w + x) * 4 + ch] as f32;
+            (at(ix, iy) * (1.0 - ax) + at(ix + 1, iy) * ax) * (1.0 - ay) + (at(ix, iy + 1) * (1.0 - ax) + at(ix + 1, iy + 1) * ax) * ay
+        };
+        let samples: &[(f32, f32)] = if scale < 0.95 { &[(-0.25, -0.25), (0.25, -0.25), (-0.25, 0.25), (0.25, 0.25)] } else { &[(0.0, 0.0)] };
         for y in 0..h {
             for x in 0..w {
-                let (dx, dy) = ((x as f32 - cx) / scale, (y as f32 - cy) / scale);
-                let (fx, fy) = ((cx + dx * c + dy * s) / 2.0, (cy - dx * s + dy * c) / 2.0);
-                if fx < 0.0 || fy < 0.0 || fx >= width as f32 || fy >= height as f32 {
-                    continue;
+                let mut sum = [0f32; 3];
+                for (ox, oy) in samples {
+                    let (dx, dy) = ((x as f32 + 0.5 + ox - cx) / (scale * turned), (y as f32 + 0.5 + oy - cy) / scale);
+                    let (fx, fy) = (cx + dx * c + dy * s, cy - dx * s + dy * c);
+                    for (ch, v) in sum.iter_mut().enumerate() {
+                        *v += source(fx, fy, ch);
+                    }
                 }
-                let (ix, iy, ax, ay) = (fx as usize, fy as usize, fx.fract(), fy.fract());
-                for ch in 0..4 {
-                    let v = (at(ix, iy, ch) * (1.0 - ax) + at(ix + 1, iy, ch) * ax) * (1.0 - ay) + (at(ix, iy + 1, ch) * (1.0 - ax) + at(ix + 1, iy + 1, ch) * ax) * ay;
-                    out[(y * w + x) * 4 + ch] = v as u8;
+                let i = (y * w + x) * 4;
+                for ch in 0..3 {
+                    out[i + ch] = (sum[ch] / samples.len() as f32) as u8;
                 }
+                out[i + 3] = 255;
             }
         }
-        (out, w, h)
+        (out, move |q: [f32; 2]| {
+            let (dx, dy) = ((q[0] - cx) * scale, (q[1] - cy) * scale);
+            [cx + (dx * c - dy * s) * turned, cy + dx * s + dy * c]
+        })
     }
 
-    #[test]
-    fn it_finds_the_x_and_the_chevron_on_the_real_panel() {
-        let (bgra, width, height) = panel_picture();
-        let found = find(&bgra, width, height, width * 4).expect("the panel");
-        assert!((found.x[0] - 204.0).abs() < 8.0 && (found.x[1] - 102.0).abs() < 8.0, "{found:?}");
-        assert!((found.chevron[0] - 377.0).abs() < 8.0 && (found.chevron[1] - 285.0).abs() < 8.0, "{found:?}");
-        assert!(found.down[1] > 0.98, "it stands straight here: {found:?}");
+    fn near(a: [f32; 2], b: [f32; 2], within: f32) -> bool {
+        (a[0] - b[0]).hypot(a[1] - b[1]) < within
     }
 
-    /// Every turn and size finds the X and the chevron themselves, where they went, and not something else that lies about right.
+    /// Enzo: "having a hard time to track the camera UI". As they are: the X and the chevron themselves, and it leans as it does there.
     #[test]
-    fn it_finds_the_panel_turned_and_at_other_distances() {
-        let (bgra, width, height) = panel_picture();
-        for (degrees, scale) in [(0.0, 1.0), (10.0, 1.0), (-15.0, 1.0), (25.0, 0.9), (0.0, 0.7), (-8.0, 1.2), (35.0, 1.0), (-30.0, 0.8), (5.0, 0.5)] {
-            let (picture, w, h) = turned(&bgra, width, height, degrees, scale);
-            let seen = find(&picture, w, h, w * 4).unwrap_or_else(|| panic!("at {degrees} degrees, {scale}"));
-            let (s, c) = (degrees as f32).to_radians().sin_cos();
-            let (cx, cy) = (w as f32 / 2.0, h as f32 / 2.0);
-            let where_to = |x: f32, y: f32| {
-                let (dx, dy) = ((x * 2.0 - cx) * scale, (y * 2.0 - cy) * scale);
-                [cx + dx * c - dy * s, cy + dx * s + dy * c]
-            };
-            let (x, chevron) = (where_to(204.0, 102.0), where_to(377.0, 285.0));
-            assert!((seen.x[0] - x[0]).hypot(seen.x[1] - x[1]) < 14.0, "{degrees} {scale}: the X is at {x:?}: {seen:?}");
-            assert!((seen.chevron[0] - chevron[0]).hypot(seen.chevron[1] - chevron[1]) < 14.0, "{degrees} {scale}: the chevron is at {chevron:?}: {seen:?}");
-            let angle = (-seen.down[0]).atan2(seen.down[1]).to_degrees();
-            assert!((angle - degrees).abs() < 12.0, "{degrees} {scale}: it leans {angle}");
+    fn it_finds_the_panel_on_enzos_pictures_as_they_are() {
+        for (p, leans) in headset_pictures().iter().zip([-7.0f32, 14.0]) {
+            let found = find(&p.pixels, p.width, p.height, p.width * 4).expect("the panel");
+            assert!(near(found.x, p.x, 3.0) && near(found.chevron, p.chevron, 3.0), "{found:?}");
+            let lean = (-found.down[0]).atan2(found.down[1]).to_degrees();
+            assert!((lean - leans).abs() < 8.0, "it leans {lean}");
+            assert!((found.across * PANEL_SIZE[0] - 330.0).abs() < 50.0, "{found:?}");
+        }
+        for p in other_pictures() {
+            let found = find(&p.pixels, p.width, p.height, p.width * 4).expect("the panel");
+            assert!(near(found.x, p.x, 8.0) && near(found.chevron, p.chevron, 8.0), "{found:?}");
+        }
+    }
+
+    /// How often it finds them, by how large the panel is and by how it leans and turns: printed, and held to.
+    #[test]
+    fn how_often_it_finds_the_panel_at_the_sizes_a_person_sees() {
+        let leans = [-45.0, -30.0, -15.0, 0.0, 15.0, 30.0, 45.0];
+        let turns = [1.0, 0.9, 0.8];
+        let pictures = headset_pictures();
+        for scale in [1.3f32, 1.0, 0.8, 0.7, 0.6, 0.5, 0.4] {
+            let (mut hit, mut straight, mut tries) = (0, 0, 0);
+            let mut missed = Vec::new();
+            for (n, p) in pictures.iter().enumerate() {
+                for lean in leans {
+                    for turned in turns {
+                        let (picture, to) = seen(p, lean, scale, turned);
+                        tries += 1;
+                        let found = find(&picture, p.width, p.height, p.width * 4);
+                        if found.is_some_and(|f| near(f.x, to(p.x), 9.0) && near(f.chevron, to(p.chevron), 12.0)) {
+                            hit += 1;
+                            straight += (turned == 1.0) as usize;
+                        } else {
+                            missed.push((n, lean, turned, found.is_some()));
+                            if let Some(f) = found {
+                                println!("  wrong at {scale} {n} {lean} {turned}: {:?} {:?} and not {:?} {:?}", f.x, f.chevron, to(p.x), to(p.chevron));
+                            }
+                        }
+                    }
+                }
+            }
+            println!("panel {:>3} px wide, X {:>4.1} px: {hit}/{tries} ({straight}/14 facing the eye); missed {missed:?}", (330.0 * scale) as u32, 9.0 * scale);
+            // No wrong place, ever: what is found is the panel.
+            assert!(missed.iter().all(|m| !m.3), "found somewhere else: {missed:?}");
+            if scale >= 0.6 {
+                assert!(straight >= 13, "{scale}: {straight} of 14");
+                assert!(hit >= tries * 7 / 10, "{scale}: {hit} of {tries}");
+            }
         }
     }
 
@@ -412,9 +685,6 @@ mod tests {
         for entry in std::fs::read_dir(testdata()).unwrap().flatten() {
             let path = entry.path();
             let name = path.file_name().unwrap().to_string_lossy().to_string();
-            if name.starts_with("camera-panel") {
-                continue;
-            }
             // Parts of frames are too small to hold a panel: whole frames.
             let Ok(image) = image::open(&path) else { continue };
             let image = image.to_rgba8();
@@ -422,12 +692,8 @@ mod tests {
                 continue;
             }
             let (width, height) = (image.width() as usize, image.height() as usize);
-            let mut bgra = image.into_raw();
-            for p in bgra.chunks_exact_mut(4) {
-                p.swap(0, 2);
-            }
             checked += 1;
-            if let Some(found) = find(&bgra, width, height, width * 4) {
+            if let Some(found) = find(image.as_raw(), width, height, width * 4) {
                 wrong.push(format!("{name}: {found:?}"));
             }
         }
@@ -442,8 +708,56 @@ mod tests {
         assert_eq!(find(&vec![255u8; w * h * 4], w, h, w * 4), None);
     }
 
+    /// What is read around the last place finds the same as the whole picture.
+    #[test]
+    fn around_the_last_place_finds_the_same() {
+        for p in headset_pictures() {
+            let whole = find(&p.pixels, p.width, p.height, p.width * 4).unwrap();
+            let area = around(&whole, p.width, p.height);
+            assert!(area[2] < p.width * 3 / 4 && area[3] <= p.height, "{area:?}");
+            let there = find_in(&p.pixels, p.width, p.height, p.width * 4, area, false).unwrap();
+            assert!(near(there.x, whole.x, 0.6) && near(there.chevron, whole.chevron, 0.6), "{there:?} {whole:?}");
+        }
+    }
+
+    /// How long a look takes on 1280 x 720, whole and around the panel. Printed: a debug build, so far slower than what ships.
+    #[test]
+    fn how_long_a_look_takes() {
+        let [p, _] = headset_pictures();
+        let began = std::time::Instant::now();
+        let whole = find(&p.pixels, p.width, p.height, p.width * 4).unwrap();
+        let once = began.elapsed();
+        let area = around(&whole, p.width, p.height);
+        let began = std::time::Instant::now();
+        find_in(&p.pixels, p.width, p.height, p.width * 4, area, false).unwrap();
+        let there = began.elapsed();
+        let black = vec![0u8; p.pixels.len()];
+        let began = std::time::Instant::now();
+        assert_eq!(find(&black, p.width, p.height, p.width * 4), None);
+        println!("a look: whole {once:?}, around it {there:?}, nothing there at both sizes {:?}", began.elapsed());
+    }
+
+    /// Quest Pro's left eye, as SteamVR's logs give it.
+    const QUEST_PRO: [f32; 4] = [-1.376, 0.839, -1.376, 0.900];
+
+    /// The cause of the tiles' lying above the panel. Up is the smaller tangent here (0.900), as `stereo::eye_camera` reads it, and the picture's middle is below straight ahead.
+    #[test]
+    fn the_eye_reaches_further_down_than_up() {
+        let eye = Mirror::whole_eye(QUEST_PRO);
+        assert_eq!(eye.tangent(0.0, 0.0), [-1.376, -0.9]);
+        let [right, bottom] = eye.tangent(1.0, 1.0);
+        assert!((right - 0.839).abs() < 1e-4 && (bottom - 1.376).abs() < 1e-4);
+        assert!(eye.tangent(0.5, 0.5)[1] > 0.2, "the middle of the picture is below straight ahead");
+        // eye_camera's row 0 looks up by the same, for the 3D views that are seen right.
+        assert_eq!(eye_sides(QUEST_PRO)[2], -QUEST_PRO[2].max(QUEST_PRO[3]));
+    }
+
+    fn straight_found(at: impl Fn([f32; 2]) -> [f32; 2], per_pixel: f32) -> Found {
+        Found { x: at(PANEL_X), chevron: at(PANEL_CHEVRON), middle: at([0.0, 0.0]), right: [1.0, 0.0], down: [0.0, 1.0], across: per_pixel, tall: per_pixel }
+    }
+
     fn mirror() -> Mirror {
-        Mirror { tangents: [-1.0, 1.0, -1.0, 1.0], aspect: 16.0 / 9.0 }
+        Mirror::whole_eye([-1.0, 1.0, -1.0, 1.0])
     }
 
     const STILL: Matrix34 = Matrix34 { m: [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 1.5], [0.0, 0.0, 1.0, 0.0]] };
@@ -451,35 +765,85 @@ mod tests {
     /// A panel straight ahead, of its usual size at half a metre, comes out there, and its parts lie where they were seen.
     #[test]
     fn a_panel_seen_lands_where_it_was_seen_in_the_room() {
-        let size = [1600.0, 900.0];
-        // Half a metre away: a unit is that many tangents.
-        let per_unit = PANEL_UNIT_M / 0.5;
-        let pixels_per_tangent = 800.0;
-        let at = |p: [f32; 2]| [800.0 + p[0] * per_unit * pixels_per_tangent, 450.0 + p[1] * per_unit * pixels_per_tangent];
-        let found = Found { x: at(PANEL_X), chevron: at(PANEL_CHEVRON), down: [0.0, 1.0] };
-        let (frame, unit) = panel_in_room(&found, size, &mirror(), &STILL);
+        let size = [1000.0, 1000.0];
+        let per_unit = PANEL_M / PANEL_SIZE[0] / 0.5;
+        let pixels = per_unit * 500.0;
+        let found = straight_found(|p| [500.0 + p[0] * pixels, 500.0 + p[1] * pixels], pixels);
+        let (frame, unit) = panel_in_room(&found, size, &mirror(), &STILL, PANEL_M, Side::Left);
         assert!((frame.m[2][3] + 0.5).abs() < 1e-3, "half a metre ahead: {:?}", frame.m);
         assert!(frame.m[0][3].abs() < 1e-3 && (frame.m[1][3] - 1.5).abs() < 1e-3, "straight ahead: {:?}", frame.m);
-        assert!((unit - PANEL_UNIT_M).abs() < 1e-5);
+        assert!((unit - PANEL_M / PANEL_SIZE[0]).abs() < 1e-5);
         assert_eq!((frame.m[0][0], frame.m[1][1], frame.m[2][2]), (1.0, 1.0, 1.0), "facing the eye, upright");
+    }
+
+    /// Whatever the panel's real size, it comes back to the same place on the picture: where the tiles show comes from where it is seen. Worked back through the eye as the headset draws it.
+    #[test]
+    fn the_tiles_land_beside_the_panel_on_the_picture_whatever_its_size_and_tilt() {
+        let eye = Mirror::whole_eye(QUEST_PRO);
+        let size = [2000.0, 2055.0];
+        let back = |frame: &Matrix34, unit: f32, u: [f32; 2]| -> [f32; 2] {
+            // From the panel's plane to the room, the eye being STILL's, and on to the picture.
+            let p: [f32; 3] = std::array::from_fn(|i| frame.m[i][0] * u[0] * unit - frame.m[i][1] * u[1] * unit + frame.m[i][3] - STILL.m[i][3]);
+            let (tx, ty) = (p[0] / -p[2], -p[1] / -p[2]);
+            [(tx - eye.from[0]) / eye.spans[0] * size[0], (ty - eye.from[1]) / eye.spans[1] * size[1]]
+        };
+        for (px, py, lean, per_pixel) in [(1000.0f32, 900.0f32, 0.0f32, 0.8f32), (1400.0, 600.0, -7.0, 1.1), (700.0, 1500.0, 14.0, 0.6), (1100.0, 1200.0, 35.0, 1.5)] {
+            let (s, c) = lean.to_radians().sin_cos();
+            let (right, down) = ([c, s], [-s, c]);
+            let at = |p: [f32; 2]| [px + (p[0] * right[0] + p[1] * down[0]) * per_pixel, py + (p[0] * right[1] + p[1] * down[1]) * per_pixel];
+            let found = Found { x: at(PANEL_X), chevron: at(PANEL_CHEVRON), middle: at([0.0, 0.0]), right, down, across: per_pixel, tall: per_pixel };
+            for panel_m in [0.2, 0.3, 0.45] {
+                for side in [Side::Left, Side::Right] {
+                    let (frame, unit) = panel_in_room(&found, size, &eye, &STILL, panel_m, side);
+                    for spot in [[side.sign() * 258.0, 0.0], [side.sign() * 258.0, 75.0], [0.0, 0.0]] {
+                        let (seen, wanted) = (back(&frame, unit, spot), at(spot));
+                        assert!(near(seen, wanted, 2.0), "{lean} {panel_m} {side:?} {spot:?}: {seen:?} and not {wanted:?}");
+                    }
+                }
+            }
+        }
+    }
+
+    /// A panel turned away is narrower: the tiles stay next to its edge and not where a straight one's would be.
+    #[test]
+    fn a_narrower_panel_keeps_the_tiles_next_to_its_edge() {
+        let size = [1000.0, 1000.0];
+        let found = Found { across: 0.8 * 0.7, ..straight_found(|p| [500.0 + p[0] * 0.8, 500.0 + p[1] * 0.8], 0.8) };
+        let (straight, unit) = panel_in_room(&Found { across: 0.8, ..found }, size, &mirror(), &STILL, PANEL_M, Side::Left);
+        let (left, _) = panel_in_room(&found, size, &mirror(), &STILL, PANEL_M, Side::Left);
+        let (right, _) = panel_in_room(&found, size, &mirror(), &STILL, PANEL_M, Side::Right);
+        let units = |frame: &Matrix34| (frame.m[0][3] - straight.m[0][3]) / unit;
+        assert!((units(&left) - 61.5).abs() < 1.0, "{}", units(&left));
+        assert!((units(&right) + 61.5).abs() < 1.0, "{}", units(&right));
+    }
+
+    /// Enzo's first picture has the panel low and right: there is room on its left. Close to the left of the view they go to its right, and stay there until they must go back.
+    #[test]
+    fn the_tiles_take_the_side_with_room() {
+        let picture = [0.0, 1280.0, 0.0, 720.0];
+        let at = |middle: f32| move |u: [f32; 2]| [middle + u[0] * 0.8, 360.0 + u[1] * 0.8];
+        assert_eq!(side_with_room(at(840.0), picture, Side::Left), Side::Left);
+        assert_eq!(side_with_room(at(200.0), picture, Side::Left), Side::Right);
+        assert_eq!(side_with_room(at(640.0), picture, Side::Right), Side::Right, "it stays while it fits");
+        assert_eq!(side_with_room(at(1100.0), picture, Side::Right), Side::Left);
     }
 
     #[test]
     fn a_panel_turned_in_the_picture_is_turned_in_the_room_and_low_in_the_picture_is_low() {
         // Down the picture leaning to the left: the panel's right goes down on the right.
         let s = 20.0f32.to_radians();
-        let down = [-s.sin(), s.cos()];
-        let right = [down[1], -down[0]];
-        let size = [1600.0, 900.0];
-        let per_unit = PANEL_UNIT_M / 0.5;
-        let at = |p: [f32; 2]| [800.0 + (p[0] * right[0] + p[1] * down[0]) * per_unit * 800.0, 650.0 + (p[0] * right[1] + p[1] * down[1]) * per_unit * 800.0];
-        let (frame, _) = panel_in_room(&Found { x: at(PANEL_X), chevron: at(PANEL_CHEVRON), down }, size, &mirror(), &STILL);
+        let (right, down) = ([s.cos(), s.sin()], [-s.sin(), s.cos()]);
+        let size = [1000.0, 1000.0];
+        let per_pixel = PANEL_M / PANEL_SIZE[0] / 0.5 * 500.0;
+        let at = |p: [f32; 2]| [500.0 + (p[0] * right[0] + p[1] * down[0]) * per_pixel, 700.0 + (p[0] * right[1] + p[1] * down[1]) * per_pixel];
+        let found = Found { x: at(PANEL_X), chevron: at(PANEL_CHEVRON), middle: at([0.0, 0.0]), right, down, across: per_pixel, tall: per_pixel };
+        let (frame, _) = panel_in_room(&found, size, &mirror(), &STILL, PANEL_M, Side::Left);
         assert!(frame.m[1][0] < -0.3, "the panel's right goes down: {:?}", frame.m);
         assert!(frame.m[1][3] < 1.5, "below the eye: {:?}", frame.m);
     }
 
     #[test]
-    fn it_follows_softly_and_jumps_when_far() {
+    fn it_follows_softly_and_jumps_only_when_the_next_look_agrees() {
         let mut follow = Follow::default();
         assert!(follow.step(0.01).is_none());
         let at = |x: f32| Matrix34 { m: [[1.0, 0.0, 0.0, x], [0.0, 1.0, 0.0, 1.0], [0.0, 0.0, 1.0, -0.5]] };
@@ -488,6 +852,11 @@ mod tests {
         follow.seen(at(0.1), 0.001);
         let soft = follow.step(0.011).unwrap().0.m[0][3];
         assert!(soft > 0.0 && soft < 0.05, "{soft}");
+        // One look far away moves nothing; a second there does, at once.
+        follow.seen(at(0.1), 0.001);
+        follow.seen(at(1.0), 0.001);
+        let held = follow.step(0.011).unwrap().0.m[0][3];
+        assert!(held < 0.2, "{held}");
         follow.seen(at(1.0), 0.001);
         assert_eq!(follow.step(0.011).unwrap().0.m[0][3], 1.0);
     }

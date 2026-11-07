@@ -363,6 +363,11 @@ pub struct Placed {
 }
 
 impl Placed {
+    /// On the other side of the middle of what it is around.
+    pub fn mirrored(self) -> Self {
+        Self { rect: Rect::from_min_max(pos2(-self.rect.max.x, self.rect.min.y), pos2(-self.rect.min.x, self.rect.max.y)), ..self }
+    }
+
     /// Its size in units.
     pub fn logical(&self) -> Vec2 {
         self.rect.size() / self.unit

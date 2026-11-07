@@ -58,7 +58,48 @@ impl Client {
     }
 }
 
+/// What reads an eye's picture from another thread than the client's. Whoever makes one keeps the client alive until it is dropped.
+#[derive(Clone, Copy, Debug)]
+pub struct MirrorSource {
+    table: *const usize,
+}
+
+// SAFETY: only the table's address, of a process-wide interface; GetMirrorTextureD3D11 is called from other threads by every mirror reader.
+unsafe impl Send for MirrorSource {}
+
+impl MirrorSource {
+    /// See [`Compositor::mirror_d3d11`].
+    ///
+    /// # Safety
+    /// `device` is a live `ID3D11Device*` on the headset's GPU, and the client this came from is alive.
+    pub unsafe fn mirror_d3d11(&self, eye: Eye, device: *mut c_void) -> Result<*mut c_void, i32> {
+        type F = unsafe extern "system" fn(i32, *mut c_void, *mut *mut c_void) -> i32;
+        let mut view = std::ptr::null_mut();
+        // SAFETY: IVRCompositor_029 entry 35 is GetMirrorTextureD3D11 (two entries past _027's, as every entry from
+        // GetFrameTimings on); the out parameter is valid.
+        let error = unsafe { entry::<F>(self.table, 35)(eye as i32, device, &mut view) };
+        if error == 0 && !view.is_null() {
+            Ok(view)
+        } else {
+            Err(error)
+        }
+    }
+
+    /// # Safety
+    /// `view` came from [`MirrorSource::mirror_d3d11`] and is not used after.
+    pub unsafe fn release_mirror_d3d11(&self, view: *mut c_void) {
+        type F = unsafe extern "system" fn(*mut c_void);
+        // SAFETY: entry 36 is ReleaseMirrorTextureD3D11, given a view GetMirrorTextureD3D11 returned.
+        unsafe { entry::<F>(self.table, 36)(view) }
+    }
+}
+
 impl Compositor<'_> {
+    /// For reading eyes' pictures on a thread of their own.
+    pub fn mirror_source(&self) -> MirrorSource {
+        MirrorSource { table: self.table }
+    }
+
     /// The last frames (oldest first), at most `out.len()`; how many were filled.
     pub fn frame_timings(&self, out: &mut [FrameTiming]) -> usize {
         type F = unsafe extern "system" fn(*mut FrameTiming, u32) -> u32;
@@ -75,32 +116,6 @@ impl Compositor<'_> {
         type F = unsafe extern "system" fn() -> u32;
         // SAFETY: entry 24 is GetCurrentSceneFocusProcess.
         unsafe { entry::<F>(self.table, 24)() }
-    }
-
-    /// A shader resource view (`ID3D11ShaderResourceView*`) of `eye`'s picture, opened on `device`; released with
-    /// [`Compositor::release_mirror_d3d11`].
-    ///
-    /// # Safety
-    /// `device` is a live `ID3D11Device*` on the headset's GPU.
-    pub unsafe fn mirror_d3d11(&self, eye: Eye, device: *mut c_void) -> Result<*mut c_void, i32> {
-        type F = unsafe extern "system" fn(i32, *mut c_void, *mut *mut c_void) -> i32;
-        let mut view = std::ptr::null_mut();
-        // SAFETY: IVRCompositor_029 entry 35 is GetMirrorTextureD3D11 (two entries past _027's, as every entry from
-        // GetFrameTimings on); the out parameter is valid.
-        let error = unsafe { entry::<F>(self.table, 35)(eye as i32, device, &mut view) };
-        if error == 0 && !view.is_null() {
-            Ok(view)
-        } else {
-            Err(error)
-        }
-    }
-
-    /// # Safety
-    /// `view` came from [`Compositor::mirror_d3d11`] and is not used after.
-    pub unsafe fn release_mirror_d3d11(&self, view: *mut c_void) {
-        type F = unsafe extern "system" fn(*mut c_void);
-        // SAFETY: entry 36 is ReleaseMirrorTextureD3D11, given a view GetMirrorTextureD3D11 returned.
-        unsafe { entry::<F>(self.table, 36)(view) }
     }
 
     /// The scene application shows a loading screen.

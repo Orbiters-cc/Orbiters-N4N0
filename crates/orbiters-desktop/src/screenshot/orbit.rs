@@ -602,32 +602,56 @@ fn qm_scene(name: &str, out: &Path, client: Vec2, facts: &Facts, hover: Option<u
 
 /// The tiles around VRChat's camera, found by the tracker on Enzo's own picture of it, twice as large as a real window would show it: where they land, in pixels. The tracker reads the picture; nothing here is placed by hand.
 fn camera_scene(out: &Path, facts: &Facts) -> anyhow::Result<()> {
-    use crate::overlay::orbit::camera_track::{self, PANEL_CHEVRON, PANEL_X};
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/overlay/orbit/testdata_camera/camera-panel-752x417.jpg");
-    let picture = image::open(path)?.to_rgba8();
-    let (w, h) = (picture.width() * 2, picture.height() * 2);
-    let ground = image::imageops::resize(&picture, w, h, image::imageops::FilterType::Triangle);
-    let mut bgra = ground.as_raw().clone();
-    for p in bgra.chunks_exact_mut(4) {
-        p.swap(0, 2);
+    use crate::overlay::orbit::camera_track;
+    let folder = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/overlay/orbit/testdata_camera");
+    for (name, shown) in [("camera-headset-1.png", "orbit-camera-tiles-headset-1"), ("camera-headset-2.png", "orbit-camera-tiles-headset-2"), ("camera-panel-752x417.jpg", "orbit-camera-tiles")] {
+        let picture = image::open(folder.join(name))?.to_rgba8();
+        let (w, h) = (picture.width(), picture.height());
+        let mut image = picture.as_raw().clone();
+        let found = camera_track::find(&image, w as usize, h as usize, w as usize * 4).ok_or_else(|| anyhow::anyhow!("no panel found on {name}"))?;
+        // At the tracker's own place, turned as it reads the panel, on the side it chooses with this picture as the view.
+        let side = camera_track::side_with_room(|u| found.at(u), [0.0, w as f32, 0.0, h as f32], camera_track::Side::Left);
+        let unit = found.tall;
+        let shift = [(-side.sign()) * 205.0 * (1.0 - found.across / found.tall).max(0.0), 0.0];
+        let facts = Facts { pointed: Some(panels::Action::Picture(orbiters_n4n0_core::menu::PhotoMode::People)), ..facts.clone() };
+        for zone in Zone::CAMERA {
+            let units = if side == camera_track::Side::Right { zones::in_units(zone).mirrored().rect } else { zone.units() };
+            let size = units.size() * unit;
+            let px = [size.x.round().max(1.0) * 2.0, size.y.round().max(1.0) * 2.0];
+            let placed = Placed { zone, rect: egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(px[0], px[1])), center: egui::pos2(0.0, 0.0), unit: unit * 2.0 };
+            let (pixels, drawn) = picture_of(&placed, &facts);
+            // Each of its pixels where the plane has it, sampled from where it is on the tile.
+            let middle = units.center();
+            let at = |u: f32, v: f32| {
+                let p = [middle.x + shift[0] + u * units.width(), middle.y + shift[1] + v * units.height()];
+                [found.middle[0] + (found.right[0] * p[0] + found.down[0] * p[1]) * unit, found.middle[1] + (found.right[1] * p[0] + found.down[1] * p[1]) * unit]
+            };
+            let corners = [at(-0.5, -0.5), at(0.5, -0.5), at(-0.5, 0.5), at(0.5, 0.5)];
+            let (x0, x1) = (corners.iter().map(|c| c[0]).fold(f32::MAX, f32::min) as i32, corners.iter().map(|c| c[0]).fold(f32::MIN, f32::max) as i32);
+            let (y0, y1) = (corners.iter().map(|c| c[1]).fold(f32::MAX, f32::min) as i32, corners.iter().map(|c| c[1]).fold(f32::MIN, f32::max) as i32);
+            for y in y0.max(0)..(y1 + 1).min(h as i32) {
+                for x in x0.max(0)..(x1 + 1).min(w as i32) {
+                    let d = [x as f32 + 0.5 - found.middle[0], y as f32 + 0.5 - found.middle[1]];
+                    let p = [(d[0] * found.right[0] + d[1] * found.right[1]) / unit - shift[0], (d[0] * found.down[0] + d[1] * found.down[1]) / unit - shift[1]];
+                    let (u, v) = ((p[0] - units.min.x) / units.width(), (p[1] - units.min.y) / units.height());
+                    if !(0.0..1.0).contains(&u) || !(0.0..1.0).contains(&v) {
+                        continue;
+                    }
+                    let (sx, sy) = ((u * drawn[0] as f32) as usize, (v * drawn[1] as f32) as usize);
+                    let from = (sy * drawn[0] as usize + sx) * 4;
+                    let to = (y as usize * w as usize + x as usize) * 4;
+                    // Premultiplied, as a panel is drawn.
+                    let a = pixels[from + 3] as f32 / 255.0;
+                    for ch in 0..3 {
+                        image[to + ch] = (pixels[from + ch] as f32 + image[to + ch] as f32 * (1.0 - a)) as u8;
+                    }
+                }
+            }
+        }
+        let path = out.join(format!("{shown}.png"));
+        save_png(&path, &over_ground(&image, w, h))?;
+        println!("{}: {} side, the panel {} px wide {:?}", path.display(), if side == camera_track::Side::Left { "left" } else { "right" }, (found.across * 410.0) as u32, found.middle);
     }
-    let found = camera_track::find(&bgra, w as usize, h as usize, w as usize * 4).ok_or_else(|| anyhow::anyhow!("no panel found"))?;
-    let (down, right) = (found.down, [found.down[1], -found.down[0]]);
-    let v = [found.chevron[0] - found.x[0], found.chevron[1] - found.x[1]];
-    let unit = (v[0] * down[0] + v[1] * down[1]) / (PANEL_CHEVRON[1] - PANEL_X[1]);
-    let center = egui::pos2(found.x[0] + (right[0] * -PANEL_X[0] + down[0] * -PANEL_X[1]) * unit, found.x[1] + (right[1] * -PANEL_X[0] + down[1] * -PANEL_X[1]) * unit);
-    let mut image = ground.as_raw().clone();
-    let facts = Facts { pointed: Some(panels::Action::Picture(orbiters_n4n0_core::menu::PhotoMode::People)), ..facts.clone() };
-    for zone in Zone::CAMERA {
-        let units = zone.units();
-        let rect = egui::Rect::from_min_max(center + units.min.to_vec2() * unit, center + units.max.to_vec2() * unit);
-        let placed = Placed { zone, rect: egui::Rect::from_min_max(rect.min.round(), rect.max.round()), center, unit };
-        let (pixels, px) = picture_of(&placed, &facts);
-        blit(&mut image, w, &pixels, px, placed.rect.min);
-    }
-    let path = out.join("orbit-camera-tiles.png");
-    save_png(&path, &over_ground(&image, w, h))?;
-    println!("{}", path.display());
     Ok(())
 }
 

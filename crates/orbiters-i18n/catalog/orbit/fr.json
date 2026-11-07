@@ -185,7 +185,7 @@
   "Type on your keyboard": "Tape au clavier",
   "VRChat does not say whether its camera is open: turn on OSC in its Action Menu.": "VRChat n’indique pas si sa caméra est ouverte : active OSC dans son menu d’action.",
   "VRChat is in exclusive full screen, which no other window can be above. Use a window or borderless full screen.": "VRChat est en plein écran exclusif : aucune autre fenêtre ne peut passer au-dessus. Utilise le mode fenêtré ou le plein écran sans bordure.",
-  "VRChat's camera is open, but its panel is not on VRChat's window now. The tiles come when it is in view.": "La caméra de VRChat est ouverte, mais son panneau n’est pas sur la fenêtre de VRChat pour l’instant. Les tuiles apparaissent quand il est en vue.",
+  "VRChat's camera is open, but its panel is not in view now. The tiles come when it is.": "La caméra de VRChat est ouverte, mais son panneau n’est pas en vue pour l’instant. Les tuiles apparaissent quand il l’est.",
   "VRChat's camera then flies around by itself.": "La caméra de VRChat se met ensuite à voler toute seule.",
   "VRChat's pictures and your 3D captures show here.": "Les photos de VRChat et tes captures 3D s’affichent ici.",
   "VRChat's pictures and your 3D captures together.": "Les photos de VRChat et tes captures 3D ensemble.",

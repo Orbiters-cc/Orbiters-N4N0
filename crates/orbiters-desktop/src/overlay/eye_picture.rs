@@ -11,7 +11,7 @@ use std::time::Instant;
 pub fn run(args: &[String]) -> anyhow::Result<()> {
     let out = Path::new(args.first().context("usage: --eye-picture <out.png> [--right]")?);
     let eye = if args.iter().any(|a| a == "--right") { Eye::Right } else { Eye::Left };
-    let client = super::connect_steamvr()?.context("SteamVR is not running")?;
+    let client = super::connect_steamvr()?.context("SteamVR is not running")?; // i18n: not shown (a developer's command line, printed on a terminal in English like its usage line)
     let reader = EyeReader::new(client.dxgi_adapter_index()).map_err(anyhow::Error::msg)?;
     let compositor = client.compositor().map_err(|e| anyhow::anyhow!("{e}"))?;
     let start = Instant::now();

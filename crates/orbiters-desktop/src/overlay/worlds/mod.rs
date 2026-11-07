@@ -803,10 +803,10 @@ impl Worlds {
                 };
                 let (backend, scope, ask) = (self.backend.clone(), self.scope.clone(), list.clone());
                 self.finder.ask(&list, page, move || {
-                    let (Some(backend), Some(scope)) = (backend, scope) else { return Err("The app's service is not there.".into()) };
+                    let (Some(backend), Some(scope)) = (backend, scope) else { return Err(tr("The app's service is not there.").into()) };
                     match backend.vrchat_data(scope, DataRequest::WorldList { list: ask, page })? {
                         DataResponse::Worlds(found) => Ok(found),
-                        _ => Err("The app's service answered something else.".into()),
+                        _ => Err(tr("The app's service answered something else.").into()),
                     }
                 });
             }
@@ -1285,7 +1285,7 @@ impl Worlds {
         let answer = match d.answer.try_recv() {
             Ok(a) => a,
             Err(mpsc::TryRecvError::Empty) => return,
-            Err(mpsc::TryRecvError::Disconnected) => Err(anyhow::anyhow!("the download stopped")),
+            Err(mpsc::TryRecvError::Disconnected) => Err(anyhow::anyhow!("{}", tr("the download stopped"))),
         };
         let (id, key) = (d.id, d.key.clone());
         self.download = None;

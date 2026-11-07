@@ -265,7 +265,7 @@ pub fn bench(args: &[String]) -> anyhow::Result<()> {
         let _ = RoInitialize(RO_INIT_MULTITHREADED);
     }
     // SAFETY: a plain query by name.
-    let game = unsafe { windows::Win32::UI::WindowsAndMessaging::FindWindowW(w!("UnityWndClass"), w!("VRChat")) }.context("no VRChat window")?;
+    let game = unsafe { windows::Win32::UI::WindowsAndMessaging::FindWindowW(w!("UnityWndClass"), w!("VRChat")) }.context("no VRChat window")?; // i18n: not shown (a developer's benchmark command)
     let capture = Capture::new(game, &Gpu::new().map_err(|e| anyhow::anyhow!(e))?).map_err(|e| anyhow::anyhow!(e))?;
     let (begin, mut mark, mut frames) = (Instant::now(), Instant::now(), 0u32);
     while begin.elapsed().as_secs_f32() < seconds {

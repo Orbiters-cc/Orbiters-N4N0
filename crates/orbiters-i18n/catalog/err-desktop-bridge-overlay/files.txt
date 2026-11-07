@@ -1,0 +1,1 @@
+# The files this area covers: none. Every file of this group is already in an area, which stays as it is (ERRORS.md).

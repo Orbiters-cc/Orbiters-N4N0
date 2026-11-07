@@ -633,7 +633,7 @@ fn options(args: &[String]) -> anyhow::Result<Options> {
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--theme" | "--strings" => {
-                let path = args.next().ok_or_else(|| anyhow!("{arg} needs a file: {arg} <file.json>"))?;
+                let path = args.next().ok_or_else(|| anyhow!("{arg} needs a file: {arg} <file.json>"))?; // i18n: not shown (a documented command line for theme authors, in English like its usage text)
                 if arg == "--theme" {
                     let (t, warnings) = Theme::load(Path::new(path)).map_err(|e| anyhow!("--theme: {e}"))?;
                     for w in warnings {
@@ -648,9 +648,9 @@ fn options(args: &[String]) -> anyhow::Result<Options> {
                     strings = Some(parsed.strings);
                 }
             }
-            flag if flag.starts_with("--") => bail!("unknown option {flag} (--n4n0-menu <out> [--theme <theme.json>] [--strings <strings.json>])"),
+            flag if flag.starts_with("--") => bail!("unknown option {flag} (--n4n0-menu <out> [--theme <theme.json>] [--strings <strings.json>])"), // i18n: not shown (a documented command line for theme authors, in English like its usage text)
             path if out.is_none() => out = Some(PathBuf::from(path)),
-            extra => bail!("one output folder only ({extra:?} is a second)"),
+            extra => bail!("one output folder only ({extra:?} is a second)"), // i18n: not shown (a documented command line for theme authors, in English like its usage text)
         }
     }
     Ok(Options { out: out.unwrap_or_else(|| PathBuf::from("n4n0-menu")), theme, strings: strings.unwrap_or_else(|| Strings::english().clone()) })

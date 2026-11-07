@@ -178,13 +178,13 @@ pub const LONGEST_HOLD: Duration = Duration::from_secs(10);
 /// The press a tool asks for, checked: how long, bounded, or a failure saying the limit.
 pub fn bounded_seconds(seconds: f64) -> Result<Duration, Failure> {
     if !(seconds.is_finite() && seconds > 0.0) {
-        return Err(Failure::new("bad_duration", "seconds must be a positive number.", "Pass seconds between 0.05 and 10."));
+        return Err(Failure::new("bad_duration", "seconds must be a positive number.", "Pass seconds between 0.05 and 10.")); // i18n: not shown (an AI client reads it in the tool's answer)
     }
     if seconds > LONGEST_HOLD.as_secs_f64() {
         return Err(Failure::new(
             "bad_duration",
-            format!("{seconds} s is longer than the {} s a press may last: a lost connection must not leave an avatar walking.", LONGEST_HOLD.as_secs()),
-            "Split it into several calls of 10 s or less.",
+            format!("{seconds} s is longer than the {} s a press may last: a lost connection must not leave an avatar walking.", LONGEST_HOLD.as_secs()), // i18n: not shown (an AI client reads it in the tool's answer)
+            "Split it into several calls of 10 s or less.", // i18n: not shown (an AI client reads it in the tool's answer)
         ));
     }
     Ok(Duration::from_secs_f64(seconds.max(0.05)))

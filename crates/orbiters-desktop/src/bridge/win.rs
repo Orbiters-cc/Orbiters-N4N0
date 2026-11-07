@@ -53,14 +53,14 @@ mod imp {
     }
     pub fn bring_forward(_handle: isize) {}
     pub fn close_window(_handle: isize) -> Result<(), Failure> {
-        Err(Failure::new("not_windows", "The bridge is for Windows.", "Run it on Windows."))
+        Err(Failure::new("not_windows", "The bridge is for Windows.", "Run it on Windows.")) // i18n: not shown (an AI client reads it in the tool's answer)
     }
     pub fn inject(_window: &GameWindow, _input: &[Input]) -> Result<(), Failure> {
-        Err(Failure::new("not_windows", "The bridge is for Windows.", "Run it on Windows."))
+        Err(Failure::new("not_windows", "The bridge is for Windows.", "Run it on Windows.")) // i18n: not shown (an AI client reads it in the tool's answer)
     }
     pub fn release(_input: &[Input]) {}
     pub fn start_vrchat(_args: &[String]) -> Result<(), Failure> {
-        Err(Failure::new("not_windows", "The bridge is for Windows.", "Run it on Windows."))
+        Err(Failure::new("not_windows", "The bridge is for Windows.", "Run it on Windows.")) // i18n: not shown (an AI client reads it in the tool's answer)
     }
 }
 
@@ -200,8 +200,8 @@ mod imp {
         if !is_foreground(window.handle) {
             return Err(Failure::new(
                 "not_foreground",
-                "VRChat is not the foreground window, so no keyboard or mouse input was sent.",
-                "Moving with walk and turn works without the focus. For menus call focus_game; if that does not help, the person must click VRChat.",
+                "VRChat is not the foreground window, so no keyboard or mouse input was sent.", // i18n: not shown (an AI client reads it in the tool's answer)
+                "Moving with walk and turn works without the focus. For menus call focus_game; if that does not help, the person must click VRChat.", // i18n: not shown (an AI client reads it in the tool's answer)
             ));
         }
         // SAFETY: `events` lives for the call and the size is the structure's own.
@@ -209,8 +209,8 @@ mod imp {
         if sent as usize != events.len() {
             return Err(Failure::new(
                 "input_blocked",
-                format!("Windows took {sent} of {} input events: something blocks input (a window running as administrator, the lock screen).", events.len()),
-                "Ask the person to look at the computer.",
+                format!("Windows took {sent} of {} input events: something blocks input (a window running as administrator, the lock screen).", events.len()), // i18n: not shown (an AI client reads it in the tool's answer)
+                "Ask the person to look at the computer.", // i18n: not shown (an AI client reads it in the tool's answer)
             ));
         }
         Ok(())
@@ -269,8 +269,8 @@ mod imp {
         } else {
             return Err(Failure::new(
                 "vrchat_not_installed",
-                "Neither Steam nor VRChat's launcher was found on this computer.",
-                "Ask the person to install VRChat, or to start it once so that it registers itself.",
+                "Neither Steam nor VRChat's launcher was found on this computer.", // i18n: not shown (an AI client reads it in the tool's answer)
+                "Ask the person to install VRChat, or to start it once so that it registers itself.", // i18n: not shown (an AI client reads it in the tool's answer)
             ));
         };
         command.stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());

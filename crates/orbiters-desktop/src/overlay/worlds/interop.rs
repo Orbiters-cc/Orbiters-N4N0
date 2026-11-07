@@ -6,6 +6,7 @@
 //! texture over (SteamVR copies it on that device's context), so it never overwrites one being read.
 
 use anyhow::{anyhow, Context as _};
+use orbiters_i18n::tr;
 use eframe::wgpu;
 use windows::core::{Interface, PCWSTR};
 use windows::Win32::Foundation::{CloseHandle, HANDLE, HMODULE, LUID};
@@ -55,7 +56,7 @@ pub struct Handles {
 
 fn raw_device(device: &wgpu::Device) -> anyhow::Result<ID3D12Device> {
     // SAFETY: the D3D12 device behind a DX12 wgpu device; only used to create shared resources and a fence.
-    unsafe { device.as_hal::<wgpu::hal::api::Dx12>().map(|d| d.raw_device().clone()).context("the 3D worlds device is not a D3D12 one") }
+    unsafe { device.as_hal::<wgpu::hal::api::Dx12>().map(|d| d.raw_device().clone()).with_context(|| tr("the 3D worlds device is not a D3D12 one")) }
 }
 
 impl RenderSide {
@@ -87,10 +88,10 @@ impl RenderSide {
             let mut resource: Option<ID3D12Resource> = None;
             // SAFETY: valid descriptions; the out parameter is an Option of the asked interface.
             unsafe { d3d12.CreateCommittedResource(&heap, D3D12_HEAP_FLAG_SHARED, &desc, D3D12_RESOURCE_STATE_COMMON, None, &mut resource) }
-                .map_err(|e| anyhow!("a shared face texture: {e}"))?;
-            let resource = resource.context("no shared face texture")?;
+                .map_err(|e| anyhow!("{}", tr!("a shared face texture: {error}", error = e)))?;
+            let resource = resource.with_context(|| tr("no shared face texture"))?;
             // SAFETY: a shared resource of this device; the handle goes to the D3D11 side, which closes it.
-            let handle = unsafe { d3d12.CreateSharedHandle(&resource, None, SHARED_ACCESS, PCWSTR::null()) }.map_err(|e| anyhow!("sharing a face texture: {e}"))?;
+            let handle = unsafe { d3d12.CreateSharedHandle(&resource, None, SHARED_ACCESS, PCWSTR::null()) }.map_err(|e| anyhow!("{}", tr!("sharing a face texture: {error}", error = e)))?;
             handles.push(Shared::of(handle));
             let size = wgpu::Extent3d { width: 2 * width, height: width, depth_or_array_layers: 1 };
             // SAFETY: the resource matches the description given to wgpu (format, size, one mip, one sample). wgpu is told
@@ -116,9 +117,9 @@ impl RenderSide {
             textures.push(texture);
         }
         // SAFETY: a plain fence, shared.
-        let fence: ID3D12Fence = unsafe { d3d12.CreateFence(0, D3D12_FENCE_FLAG_SHARED) }.map_err(|e| anyhow!("a shared fence: {e}"))?;
+        let fence: ID3D12Fence = unsafe { d3d12.CreateFence(0, D3D12_FENCE_FLAG_SHARED) }.map_err(|e| anyhow!("{}", tr!("a shared fence: {error}", error = e)))?;
         // SAFETY: as the textures' handles.
-        let fence_handle = unsafe { d3d12.CreateSharedHandle(&fence, None, SHARED_ACCESS, PCWSTR::null()) }.map_err(|e| anyhow!("sharing a fence: {e}"))?;
+        let fence_handle = unsafe { d3d12.CreateSharedHandle(&fence, None, SHARED_ACCESS, PCWSTR::null()) }.map_err(|e| anyhow!("{}", tr!("sharing a fence: {error}", error = e)))?;
         Ok((Self { textures, fence }, Handles { textures: handles, fence: Shared::of(fence_handle), width }))
     }
 
@@ -129,8 +130,8 @@ impl RenderSide {
         }
         // SAFETY: the D3D12 queue behind the wgpu queue, used from the thread that submits to it.
         unsafe {
-            let q = queue.as_hal::<wgpu::hal::api::Dx12>().context("the 3D worlds queue is not a D3D12 one")?;
-            q.as_raw().Wait(&self.fence, value).map_err(|e| anyhow!("waiting on the shared fence: {e}"))
+            let q = queue.as_hal::<wgpu::hal::api::Dx12>().with_context(|| tr("the 3D worlds queue is not a D3D12 one"))?;
+            q.as_raw().Wait(&self.fence, value).map_err(|e| anyhow!("{}", tr!("waiting on the shared fence: {error}", error = e)))
         }
     }
 }
@@ -162,13 +163,13 @@ impl OverlaySide {
         unsafe {
             let factory: IDXGIFactory4 = CreateDXGIFactory1().map_err(|e| anyhow!("DXGI: {e}"))?;
             let adapter: IDXGIAdapter =
-                factory.EnumAdapterByLuid(LUID { LowPart: luid as u32, HighPart: (luid >> 32) as i32 }).map_err(|e| anyhow!("the headset's adapter: {e}"))?;
+                factory.EnumAdapterByLuid(LUID { LowPart: luid as u32, HighPart: (luid >> 32) as i32 }).map_err(|e| anyhow!("{}", tr!("the headset's adapter: {error}", error = e)))?;
             let levels = [D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0];
             let (mut device, mut context): (Option<ID3D11Device>, Option<ID3D11DeviceContext>) = (None, None);
             D3D11CreateDevice(&adapter, D3D_DRIVER_TYPE_UNKNOWN, HMODULE::default(), D3D11_CREATE_DEVICE_FLAG(0), Some(&levels), D3D11_SDK_VERSION, Some(&mut device), None, Some(&mut context))
                 .map_err(|e| anyhow!("D3D11CreateDevice: {e}"))?;
-            let device: ID3D11Device5 = device.context("no device")?.cast().map_err(|e| anyhow!("a D3D11.4 device: {e}"))?;
-            let context: ID3D11DeviceContext4 = context.context("no context")?.cast().map_err(|e| anyhow!("a D3D11.3 context: {e}"))?;
+            let device: ID3D11Device5 = device.with_context(|| tr("no device"))?.cast().map_err(|e| anyhow!("{}", tr!("a D3D11.4 device: {error}", error = e)))?;
+            let context: ID3D11DeviceContext4 = context.with_context(|| tr("no context"))?.cast().map_err(|e| anyhow!("{}", tr!("a D3D11.3 context: {error}", error = e)))?;
             Ok(Self { device, context, textures: Vec::new(), fence: None, signalled: 0, width: 0 })
         }
     }
@@ -182,7 +183,7 @@ impl OverlaySide {
             // SAFETY: a handle the render side made for this adapter; closed once opened.
             match unsafe { device1.OpenSharedResource1::<ID3D11Texture2D>(h.handle()) } {
                 Ok(t) => textures.push(t),
-                Err(e) => failed = failed.or(Some(anyhow!("opening a face texture: {e}"))),
+                Err(e) => failed = failed.or(Some(anyhow!("{}", tr!("opening a face texture: {error}", error = e)))),
             }
             // SAFETY: the handle is ours to close.
             unsafe {
@@ -198,7 +199,7 @@ impl OverlaySide {
         if let Some(e) = failed {
             return Err(e);
         }
-        opened.map_err(|e| anyhow!("opening the shared fence: {e}"))?;
+        opened.map_err(|e| anyhow!("{}", tr!("opening the shared fence: {error}", error = e)))?;
         self.textures = textures;
         self.fence = fence;
         self.signalled = 0;
@@ -223,7 +224,7 @@ impl OverlaySide {
 
     /// Texture `i`'s pixels as the D3D11 side sees them (RGBA8, rows packed): what SteamVR would get (the offline check).
     pub fn read(&self, i: usize) -> anyhow::Result<Vec<u8>> {
-        let texture = self.textures.get(i).context("no such texture")?;
+        let texture = self.textures.get(i).with_context(|| tr("no such texture"))?;
         // SAFETY: a staging copy of a texture of this device, mapped for reading on this thread.
         unsafe {
             let mut desc = D3D11_TEXTURE2D_DESC::default();
@@ -233,8 +234,8 @@ impl OverlaySide {
             desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ.0 as u32;
             desc.MiscFlags = 0;
             let mut staging = None;
-            self.device.CreateTexture2D(&desc, None, Some(&mut staging)).map_err(|e| anyhow!("a staging texture: {e}"))?;
-            let staging: ID3D11Texture2D = staging.context("no staging texture")?;
+            self.device.CreateTexture2D(&desc, None, Some(&mut staging)).map_err(|e| anyhow!("{}", tr!("a staging texture: {error}", error = e)))?;
+            let staging: ID3D11Texture2D = staging.with_context(|| tr("no staging texture"))?;
             self.context.CopyResource(&staging, texture);
             let mut mapped = Default::default();
             self.context.Map(&staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped)).map_err(|e| anyhow!("mapping: {e}"))?;

@@ -317,7 +317,7 @@ struct World {
 
 impl World {
     fn new(overlay: &vr::Overlay) -> anyhow::Result<Self> {
-        let fail = |what: &str, code: i32| anyhow::anyhow!("{what}: SteamVR overlay error {code}");
+        let fail = |what: &str, code: i32| anyhow::anyhow!("{what}: SteamVR overlay error {code}"); // i18n: not shown (the overlay process's own stderr, a log nobody reads in a window)
         let mirror = overlay.create(&format!("{KEY}.mirror"), "Orbiters calibration mirror").map_err(|c| fail("mirror", c))?; // i18n: not shown (a name for SteamVR)
         let _ = overlay.set_width_in_meters(mirror, MIRROR_WIDTH_M);
         let mut targets = [0; 2];
@@ -579,8 +579,8 @@ fn session(args: &[String]) -> anyhow::Result<Ended> {
     let server = Server::find();
     let client = Client::connect(&endpoint, Role::Overlay)?;
     let backend: Ctl = Arc::new(Remote(client.clone()));
-    let overlay = steamvr.overlay().context("SteamVR has no overlay interface")?;
-    let fail = |what: &str, code: i32| anyhow::anyhow!("{what}: SteamVR overlay error {code}");
+    let overlay = steamvr.overlay().context("SteamVR has no overlay interface")?; // i18n: not shown (the overlay process's own stderr, a log nobody reads in a window)
+    let fail = |what: &str, code: i32| anyhow::anyhow!("{what}: SteamVR overlay error {code}"); // i18n: not shown (the overlay process's own stderr, a log nobody reads in a window)
     let (main, thumb) = overlay.create_dashboard(KEY, "Orbiters").map_err(|c| fail("dashboard tab", c))?; // i18n: not shown (an error text)
     overlay.set_width_in_meters(main, 2.0).map_err(|c| fail("width", c))?;
     overlay.set_mouse_input(main).map_err(|c| fail("input", c))?;
@@ -596,7 +596,7 @@ fn session(args: &[String]) -> anyhow::Result<Ended> {
         presenter.show(&overlay, thumb, &icon, 128, 128);
     }
     let mut actions = actions::Actions::load(&steamvr);
-    let mut walk = walk::WalkBoost::new(actions.walk, actions.failed.clone());
+    let mut walk = walk::WalkBoost::new(actions.walk, actions.failed.as_ref().map(actions::Unavailable::text));
     walk.set_frame(steamvr.float_property(0, vr::prop::DISPLAY_FREQUENCY).filter(|hz| *hz > 1.0).map(|hz| Duration::from_secs_f32(1.0 / hz)));
     let mut devices = crate::tracking::DeviceKindsWatch::default();
     let mut state = ui::OverlayUi::default();
@@ -706,6 +706,13 @@ fn session(args: &[String]) -> anyhow::Result<Ended> {
         let snap = backend.view();
         // The language the settings ask for, for the dashboard tab too, whether or not the menus around VRChat are on.
         crate::language::follow(&snap.settings);
+        // Words that stay on the dashboard are put into the language now, as the settings can change it while they show.
+        if let Some(failed) = &actions.failed {
+            let text = failed.text();
+            if t.state.walk_unavailable.as_deref() != Some(text.as_str()) {
+                t.state.walk_unavailable = Some(text);
+            }
+        }
         // SteamVR's server can end without a quit event: its process is watched here, and by the service.
         if snap.steamvr.running {
             steamvr_seen = Instant::now();

@@ -484,7 +484,7 @@ impl Source {
         let validators = Validators { url: url.to_string(), etag: header("etag"), last_modified: header("last-modified") };
         let total = response.headers().get("content-length").and_then(|v| v.to_str().ok()).and_then(|v| v.parse::<u64>().ok());
         if let Some(total) = total {
-            anyhow::ensure!(total <= MAX_FILE, "{url} is {total} bytes");
+            anyhow::ensure!(total <= MAX_FILE, "{}", tr!("{url} is {total} bytes", url = url, total = total));
             progress.total.store(total, Ordering::Relaxed);
         }
         let mut reader = response.into_body().into_with_config().limit(MAX_FILE).reader();

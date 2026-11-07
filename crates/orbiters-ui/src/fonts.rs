@@ -680,6 +680,7 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn every_language_of_the_website_draws_in_every_family() {
+        let _one_at_a_time = PREFERRING.lock().unwrap_or_else(|e| e.into_inner());
         const SAMPLES: [(&str, &str); 5] = [
             ("en", "AaZz09?!'\u{2026}"),
             ("fr", "\u{e0}\u{e2}\u{e4}\u{e6}\u{e7}\u{e9}\u{e8}\u{ea}\u{eb}\u{ee}\u{ef}\u{f4}\u{f6}\u{153}\u{f9}\u{fb}\u{fc}\u{ff}\u{c0}\u{c7}\u{c9}\u{c8}\u{152}\u{ab}\u{bb}\u{2019}"),
@@ -837,6 +838,7 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn the_mac_s_fonts_draw_other_scripts() {
+        let _one_at_a_time = PREFERRING.lock().unwrap_or_else(|e| e.into_inner());
         let fallback = SystemFallback { cjk: Cjk::Japanese };
         for c in ['猫', 'ね', '한', 'ไ', 'ع', 'א', 'ह', 'ሰ', 'д', 'α', 'ệ', '✓', '→'] {
             let (name, data) = fallback.face(c, 400).unwrap_or_else(|| panic!("no face for {c}"));
@@ -866,6 +868,7 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn system_fonts_draw_other_scripts() {
+        let _one_at_a_time = PREFERRING.lock().unwrap_or_else(|e| e.into_inner());
         if !windows_fonts().join("msyh.ttc").is_file() {
             return;
         }

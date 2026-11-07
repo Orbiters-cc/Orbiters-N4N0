@@ -38,7 +38,8 @@ fn nothing_listens_beyond_loopback_unless_the_run_allows_it() {
     let mut files = Vec::new();
     rust_files(&crates, &mut files);
     assert!(files.len() > 100, "the workspace's sources are read: {}", files.len());
-    let every = ["\"0.0.0.0", "[0, 0, 0, 0]", "UNSPECIFIED", "\"[::]", "\"[::]:"];
+    // An address, not any four zeros (a pixel, a buffer): `SocketAddr::from(([0, 0, 0, 0], port))` is how one is written.
+    let every = ["\"0.0.0.0", "(([0, 0, 0, 0]", "Ipv4Addr::new(0, 0, 0, 0)", "UNSPECIFIED", "\"[::]", "\"[::]:"];
     let mut wrong = Vec::new();
     for path in &files {
         if path.ends_with("listening.rs") {

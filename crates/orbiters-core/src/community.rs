@@ -404,7 +404,7 @@ fn refused(status: u16, text: &str) -> Refused {
 
 /// Only the path pieces Orbiters makes (uuids, `main`, numbers): nothing that would leave the route.
 fn piece(s: &str) -> anyhow::Result<&str> {
-    anyhow::ensure!(!s.is_empty() && s.len() <= 64 && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'), "not an Orbiters id");
+    anyhow::ensure!(!s.is_empty() && s.len() <= 64 && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'), "{}", tr("not an Orbiters id"));
     Ok(s)
 }
 

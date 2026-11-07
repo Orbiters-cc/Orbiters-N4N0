@@ -5,6 +5,7 @@ use crate::contracts::frame_record::{record_flags, FrameRecord, RECORD_SIZE};
 use crate::contracts::manifest::{self, SessionManifest};
 use crate::contracts::qoi;
 use anyhow::Context;
+use orbiters_i18n::tr;
 use serde::Serialize;
 use std::fs::{self, File};
 use std::io::{BufWriter, Write};
@@ -21,16 +22,16 @@ pub fn depth_file(index: i32) -> String {
 
 /// Creates `parent/name`, or `parent/name (2)`, `(3)`, … when it exists.
 pub fn unique_dir(parent: &Path, name: &str) -> anyhow::Result<PathBuf> {
-    fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
+    fs::create_dir_all(parent).with_context(|| tr!("creating {path}", path = parent.display()))?;
     for i in 1..10_000 {
         let candidate = if i == 1 { parent.join(name) } else { parent.join(format!("{name} ({i})")) };
         match fs::create_dir(&candidate) {
             Ok(()) => return Ok(candidate),
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(e) => return Err(e).with_context(|| format!("creating {}", candidate.display())),
+            Err(e) => return Err(e).with_context(|| tr!("creating {path}", path = candidate.display())),
         }
     }
-    anyhow::bail!("no free folder name for {name}")
+    anyhow::bail!("{}", tr!("no free folder name for {name}", name = name))
 }
 
 /// Writes one session bundle. Keyframe and depth files are written by the caller (often on other threads) at
@@ -157,7 +158,7 @@ impl BundleWriter {
 
     /// Writes the session thumbnail (a downscaled copy of the first keyframe).
     pub fn write_thumbnail(&self, rgba: &[u8], width: u32, height: u32) -> anyhow::Result<()> {
-        anyhow::ensure!(width > 0 && height > 0 && u64::from(width) * u64::from(height) * 4 <= rgba.len() as u64, "Invalid thumbnail dimensions.");
+        anyhow::ensure!(width > 0 && height > 0 && u64::from(width) * u64::from(height) * 4 <= rgba.len() as u64, "{}", tr("Invalid thumbnail dimensions."));
         let crop = capture_picture_rect(width, height);
         let row = width as usize * 4;
         let (tw, th, small) = downscale(&rgba[crop.y0 as usize * row..crop.y1 as usize * row], width, crop.y1 - crop.y0, 480);
@@ -266,9 +267,9 @@ impl SessionSummary {
 /// an error.
 pub fn read_manifest(dir: &Path) -> anyhow::Result<SessionManifest> {
     let path = dir.join(manifest::MANIFEST_FILE);
-    let text = crate::read_text(&path)?.ok_or_else(|| anyhow::anyhow!("{} not found", path.display()))?;
+    let text = crate::read_text(&path)?.ok_or_else(|| anyhow::anyhow!("{}", tr!("{path} not found", path = path.display())))?;
     let (manifest, dropped) = crate::json_lenient::<SessionManifest>(&text);
-    anyhow::ensure!(dropped.iter().all(|d| d != "(not JSON)"), "{} is not a manifest", path.display());
+    anyhow::ensure!(dropped.iter().all(|d| d != "(not JSON)"), "{}", tr!("{path} is not a manifest", path = path.display()));
     Ok(manifest)
 }
 

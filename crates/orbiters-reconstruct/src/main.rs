@@ -698,6 +698,8 @@ fn vrchat(args: &[String]) -> anyhow::Result<()> {
 }
 
 fn main() {
+    // Its messages read as the window it reports to does.
+    orbiters_core::settings::Settings::speak_saved_language();
     orbiters_core::panic_log::install();
     orbiters_core::leave_with_parent();
     let all: Vec<String> = std::env::args().skip(1).collect();

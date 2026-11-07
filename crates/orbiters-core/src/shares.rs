@@ -1,8 +1,10 @@
 //! Capture sharing contract (`contracts/Docs/capture-sharing.md`). No VRChat credentials or messages.
 use crate::account::{Api, ApiError};
+use orbiters_i18n::{mark, tr};
 use serde::{Deserialize, Serialize};
 
-pub const EXPLICIT_WARNING: &str = "Any explicit content shared publicly will be reported to the VRChat staff.";
+/// Shown as it is where a window shows it; `tr(EXPLICIT_WARNING)` gives it in the language now.
+pub const EXPLICIT_WARNING: &str = mark("Any explicit content shared publicly will be reported to the VRChat staff.");
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -264,7 +266,7 @@ pub(crate) fn json<T: serde::de::DeserializeOwned>(response: ureq::http::Respons
     let text = response.into_body().with_config().limit(32 * 1024 * 1024).read_to_string()?;
     if !(200..300).contains(&status) {
         let value: serde_json::Value = serde_json::from_str(&text).unwrap_or_default();
-        let message = value["message"].as_str().or_else(|| value["error"].as_str()).unwrap_or("Orbiters could not complete the request").to_string();
+        let message = value["message"].as_str().or_else(|| value["error"].as_str()).unwrap_or(tr("Orbiters could not complete the request")).to_string();
         if status == 409 && value["code"] == "explicit-acknowledgement" {
             return Err(ExplicitAcknowledgement(message).into());
         }

@@ -8,6 +8,7 @@
 //! sends here only when its launch options say so ([`launch_option`]).
 
 use crate::osc::{http_get, on_lan, primary_ipv4};
+use orbiters_i18n::tr;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::net::{Ipv4Addr, SocketAddr};
@@ -49,8 +50,8 @@ impl FoundVrchat {
     /// What the interface calls it.
     pub fn label(&self) -> String {
         match &self.device {
-            Some(device) => format!("VRChat on {device}"),
-            None => format!("VRChat at {}", self.ip),
+            Some(device) => tr!("VRChat on {device}", device = device),
+            None => tr!("VRChat at {address}", address = self.ip),
         }
     }
 }

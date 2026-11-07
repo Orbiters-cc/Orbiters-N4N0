@@ -1,5 +1,7 @@
 //! Number and time formatting shared by the interfaces.
 
+use orbiters_i18n::{mark, tr};
+
 /// Bytes in SI units, one decimal under ten: "8.2 MB", "82 MB".
 pub fn bytes(n: f64) -> String {
     if !n.is_finite() {
@@ -71,14 +73,15 @@ pub fn percent(part: f64, total: f64) -> String {
 pub fn relative_time(epoch_seconds: u64, now_seconds: u64) -> String {
     let diff = now_seconds.saturating_sub(epoch_seconds);
     match diff {
-        0..60 => "just now".into(),
-        60..3600 => format!("{} min ago", diff / 60),
-        3600..86400 => format!("{} h ago", diff / 3600),
-        86400..604800 => format!("{} d ago", diff / 86400),
+        0..60 => tr("just now").into(),
+        60..3600 => tr!("{minutes} min ago", minutes = diff / 60),
+        3600..86400 => tr!("{hours} h ago", hours = diff / 3600),
+        86400..604800 => tr!("{days} d ago", days = diff / 86400),
         _ => {
             let (y, m, d) = civil_from_days((epoch_seconds / 86400) as i64);
-            let months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-            format!("{d} {} {y}", months[(m - 1) as usize])
+            let months = [mark("Jan"), mark("Feb"), mark("Mar"), mark("Apr"), mark("May"), mark("Jun"), mark("Jul"), mark("Aug"), mark("Sep"), mark("Oct"), mark("Nov"), mark("Dec")];
+            // The whole date is one text: the order of day, month and year is each language's own.
+            tr!("{day} {month} {year}", day = d, month = tr(months[(m - 1) as usize]), year = y)
         }
     }
 }
@@ -144,5 +147,22 @@ mod tests {
         assert_eq!(relative_time(0, 7_200), "2 h ago");
         // 2026-10-12 00:00 UTC
         assert_eq!(relative_time(1_791_763_200, 1_791_763_200 + 30 * 86400), "12 Oct 2026");
+    }
+
+    /// The same moments in the other languages: the order of a date and the words of a time are each language's own.
+    #[test]
+    fn times_and_dates_read_in_the_language_now() {
+        use orbiters_i18n::{in_language, Language};
+        let old = (1_791_763_200, 1_791_763_200 + 30 * 86400);
+        in_language(Language::Ja, || {
+            assert_eq!(relative_time(0, 7_200), "2時間前");
+            assert_eq!(relative_time(old.0, old.1), "2026年10月12日");
+        });
+        in_language(Language::Fr, || {
+            assert_eq!(relative_time(0, 300), "il y a 5 min");
+            assert_eq!(relative_time(old.0, old.1), "12 oct. 2026");
+        });
+        in_language(Language::Es, || assert_eq!(relative_time(0, 86_400 * 2), "hace 2 d"));
+        in_language(Language::PtBr, || assert_eq!(relative_time(old.0, old.1), "12 out 2026"));
     }
 }

@@ -1,0 +1,10 @@
+# Names of fonts, shown as they are in every language (the bundled fonts of the photo editor's text tool).
+Inter
+Bonbon
+Creepster
+Diplomata
+JetBrains Mono
+Matemasie
+Monoton
+Pirata One
+Plaster

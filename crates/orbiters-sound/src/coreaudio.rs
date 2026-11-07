@@ -15,6 +15,7 @@
 use block2::RcBlock;
 use objc2::runtime::{AnyObject, Bool};
 use objc2::{class, msg_send};
+use orbiters_i18n::{mark, tr};
 use std::collections::VecDeque;
 use std::ffi::{c_char, c_void, CStr, CString};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -184,9 +185,9 @@ fn check(what: &str, status: OsStatus) -> Result<(), String> {
     }
     let code = status.to_be_bytes();
     if code.iter().all(|c| c.is_ascii_graphic() || *c == b' ') {
-        Err(format!("{what}: Core Audio said '{}'", String::from_utf8_lossy(&code)))
+        Err(tr!("{what}: Core Audio said '{code}'", what = tr(what), code = String::from_utf8_lossy(&code)))
     } else {
-        Err(format!("{what}: Core Audio said {status}"))
+        Err(tr!("{what}: Core Audio said {status}", what = tr(what), status = status))
     }
 }
 
@@ -394,24 +395,24 @@ pub fn output_volume() -> Option<(f32, bool)> {
 
 /// Sets the default output's volume (0..1).
 pub fn set_output_volume(volume: f32) -> Result<(), String> {
-    let device = default_device(Flow::Output).ok_or("this computer has no sound output")?;
+    let device = default_device(Flow::Output).ok_or(tr("this computer has no sound output"))?;
     let volume = volume.clamp(0.0, 1.0);
     // SAFETY: the property is one `f32`, alive for the call.
     let status = unsafe { AudioObjectSetPropertyData(device, &address(DEVICE_VOLUME, SCOPE_OUTPUT), 0, std::ptr::null(), 4, (&raw const volume).cast()) };
-    check("setting the volume", status)
+    check(mark("setting the volume"), status)
 }
 
 /// Mutes the default output or lets it sound again. A device without a mute of its own has nothing to do when unmuted.
 pub fn set_output_mute(muted: bool) -> Result<(), String> {
-    let device = default_device(Flow::Output).ok_or("this computer has no sound output")?;
+    let device = default_device(Flow::Output).ok_or(tr("this computer has no sound output"))?;
     let mute = address(DEVICE_MUTE, SCOPE_OUTPUT);
     // SAFETY: a plain question about a property, which is one `u32` when it is there, alive for the call.
     unsafe {
         if AudioObjectHasProperty(device, &mute) == 0 {
-            return if muted { Err("this sound output cannot be muted".into()) } else { Ok(()) };
+            return if muted { Err(tr("this sound output cannot be muted").into()) } else { Ok(()) };
         }
         let value = u32::from(muted);
-        check("muting", AudioObjectSetPropertyData(device, &mute, 0, std::ptr::null(), 4, (&raw const value).cast()))
+        check(mark("muting"), AudioObjectSetPropertyData(device, &mute, 0, std::ptr::null(), 4, (&raw const value).cast()))
     }
 }
 
@@ -453,8 +454,8 @@ pub fn mic_access() -> MicAccess {
     }
 }
 
-const MIC_DENIED: &str = "macOS keeps the microphone from Orbiters - N4N0: turn it on in System Settings › Privacy & Security › Microphone";
-const MIC_ASKING: &str = "macOS is asking whether Orbiters - N4N0 may use the microphone: answer it, then try again";
+const MIC_DENIED: &str = mark("macOS keeps the microphone from Orbiters - N4N0: turn it on in System Settings › Privacy & Security › Microphone");
+const MIC_ASKING: &str = mark("macOS is asking whether Orbiters - N4N0 may use the microphone: answer it, then try again");
 
 /// Whether this app may use the microphone. The first time, macOS asks the person, once per process: that answer takes
 /// a while, so this says it is being asked rather than waiting, and whoever opens the microphone again finds the answer.
@@ -464,14 +465,14 @@ pub fn microphone_access() -> Result<(), String> {
     static ASKED: AtomicBool = AtomicBool::new(false);
     match mic_access() {
         MicAccess::Allowed => Ok(()),
-        MicAccess::Denied => Err(MIC_DENIED.into()),
+        MicAccess::Denied => Err(tr(MIC_DENIED).into()),
         MicAccess::Undetermined => {
             if !ASKED.swap(true, Ordering::Relaxed) {
                 let answered = RcBlock::new(|_granted: Bool| {});
                 // SAFETY: a class method taking the `NSString` constant and a block, which it copies.
                 let _: () = unsafe { msg_send![class!(AVCaptureDevice), requestAccessForMediaType: AVMediaTypeAudio, completionHandler: &*answered] };
             }
-            Err(MIC_ASKING.into())
+            Err(tr(MIC_ASKING).into())
         }
     }
 }
@@ -547,10 +548,10 @@ fn dispose(queue: QueueRef) {
 }
 
 fn set_device(queue: QueueRef, uid: &str) -> Result<(), String> {
-    let string = Cf::new(uid).ok_or("a device's name that cannot be read")?;
+    let string = Cf::new(uid).ok_or(tr("a device's name that cannot be read"))?;
     // SAFETY: the property is a `CFString`, which the queue copies.
     let status = unsafe { AudioQueueSetProperty(queue, QUEUE_DEVICE, (&raw const string.0).cast(), std::mem::size_of::<CfString>() as u32) };
-    check("choosing the device", status)
+    check(mark("choosing the device"), status)
 }
 
 unsafe extern "C" fn rendered(user: *mut c_void, _queue: QueueRef, buffer: BufferRef) {
@@ -578,7 +579,7 @@ impl Render {
     /// Opens the output `uid`: its turn comes on `turn` each time a buffer has played.
     pub fn open(uid: &str, turn: &Arc<Turn>) -> Result<Self, String> {
         if !alive(uid) {
-            return Err(format!("the sound output {uid} is not there"));
+            return Err(tr!("the sound output {uid} is not there", uid = uid));
         }
         let format = float_format(crate::device::RATE, 2);
         let back = Back::new(turn);
@@ -596,13 +597,13 @@ impl Render {
                 &mut queue,
             )
         };
-        check("opening the sound output", status)?;
+        check(mark("opening the sound output"), status)?;
         let render = Self { queue, back, started: false, uid: uid.to_string() };
         set_device(queue, uid)?;
         for _ in 0..RENDER_BUFFERS {
             let mut buffer = std::ptr::null_mut();
             // SAFETY: the queue is open and owns what it allocates.
-            check("opening the sound output", unsafe { AudioQueueAllocateBuffer(queue, RENDER_FRAMES * 8, &mut buffer) })?;
+            check(mark("opening the sound output"), unsafe { AudioQueueAllocateBuffer(queue, RENDER_FRAMES * 8, &mut buffer) })?;
             render.back.push(buffer as usize);
         }
         Ok(render)
@@ -617,12 +618,12 @@ impl Render {
             unsafe {
                 fill(std::slice::from_raw_parts_mut((*buffer).data.cast::<f32>(), RENDER_FRAMES as usize * 2));
                 (*buffer).size = RENDER_FRAMES * 8;
-                check("playing", AudioQueueEnqueueBuffer(self.queue, buffer, 0, std::ptr::null()))?;
+                check(mark("playing"), AudioQueueEnqueueBuffer(self.queue, buffer, 0, std::ptr::null()))?;
             }
         }
         if !self.started {
             // SAFETY: the queue is open; no time means as soon as it can.
-            check("starting the sound output", unsafe { AudioQueueStart(self.queue, std::ptr::null()) })?;
+            check(mark("starting the sound output"), unsafe { AudioQueueStart(self.queue, std::ptr::null()) })?;
             self.started = true;
         }
         Ok(())
@@ -672,7 +673,7 @@ impl Capture {
     /// ([`microphone_access`]).
     pub fn open(uid: &str, rate: u32, hold: Duration, turn: &Arc<Turn>) -> Result<Self, String> {
         if !alive(uid) {
-            return Err(format!("the microphone {uid} is not there"));
+            return Err(tr!("the microphone {uid} is not there", uid = uid));
         }
         microphone_access()?;
         let format = float_format(rate, 1);
@@ -690,7 +691,7 @@ impl Capture {
                 &mut queue,
             )
         };
-        check("opening the microphone", status)?;
+        check(mark("opening the microphone"), status)?;
         let capture = Self { queue, back, uid: uid.to_string() };
         set_device(queue, uid)?;
         let frames = (rate as u64 * CAPTURE_BUFFER.as_millis() as u64 / 1000).max(1) as u32;
@@ -699,8 +700,8 @@ impl Capture {
             let mut buffer = std::ptr::null_mut();
             // SAFETY: the queue is open and owns what it allocates; it fills the buffer before giving it back.
             unsafe {
-                check("opening the microphone", AudioQueueAllocateBuffer(queue, frames * 4, &mut buffer))?;
-                check("opening the microphone", AudioQueueEnqueueBuffer(queue, buffer, 0, std::ptr::null()))?;
+                check(mark("opening the microphone"), AudioQueueAllocateBuffer(queue, frames * 4, &mut buffer))?;
+                check(mark("opening the microphone"), AudioQueueEnqueueBuffer(queue, buffer, 0, std::ptr::null()))?;
             }
         }
         Ok(capture)
@@ -708,7 +709,7 @@ impl Capture {
 
     pub fn start(&mut self) -> Result<(), String> {
         // SAFETY: the queue is open; no time means as soon as it can.
-        check("starting the microphone", unsafe { AudioQueueStart(self.queue, std::ptr::null()) })
+        check(mark("starting the microphone"), unsafe { AudioQueueStart(self.queue, std::ptr::null()) })
     }
 
     /// Hands what was recorded to `each` (samples and their time), the oldest first, and gives the buffers back. An
@@ -723,7 +724,7 @@ impl Capture {
                 let samples = std::slice::from_raw_parts((*buffer).data.cast::<f32>().cast_const(), (*buffer).size as usize / 4);
                 let result = if samples.is_empty() { Ok(()) } else { each(samples, stamp) };
                 (*buffer).size = 0;
-                check("reading the microphone", AudioQueueEnqueueBuffer(self.queue, buffer, 0, std::ptr::null()))?;
+                check(mark("reading the microphone"), AudioQueueEnqueueBuffer(self.queue, buffer, 0, std::ptr::null()))?;
                 result
             };
             if result.is_err() {

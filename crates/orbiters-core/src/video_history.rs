@@ -459,10 +459,10 @@ impl Bookmarks {
     pub fn create(&mut self, name: &str) -> String {
         let mut name = list_name(name);
         if name.is_empty() {
-            name = if self.lists.iter().any(|l| l.name == "Favourites") {
-                (2..).map(|n| format!("List {n}")).find(|n| !self.lists.iter().any(|l| l.name == *n)).unwrap_or_default()
+            name = if self.lists.iter().any(|l| l.name == "Favourites") { // i18n: not shown (the name of a list is saved, and a later call compares it: it stays what it was made with)
+                (2..).map(|n| format!("List {n}")).find(|n| !self.lists.iter().any(|l| l.name == *n)).unwrap_or_default() // i18n: not shown (the name of a list is saved, and a later call compares it: it stays what it was made with)
             } else {
-                "Favourites".into()
+                "Favourites".into() // i18n: not shown (the name of a list is saved, and a later call compares it: it stays what it was made with)
             };
         }
         let id = loop {

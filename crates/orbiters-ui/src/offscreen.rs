@@ -32,7 +32,7 @@ impl Offscreen {
         // Small allocator blocks and a small D3D12 view heap: the defaults reserve hundreds of MB up front.
         let limits = wgpu::Limits { max_texture_dimension_2d: 8192, max_non_sampler_bindings: 16_384, ..wgpu::Limits::default() };
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-            label: Some("orbiters offscreen"),
+            label: Some("orbiters offscreen"), // i18n: not shown (names a graphics debugger shows)
             required_limits: limits,
             memory_hints: wgpu::MemoryHints::MemoryUsage,
             ..Default::default()
@@ -87,7 +87,7 @@ impl Offscreen {
         let (w, h) = ((screen.width() * ppp).round() as u32, (screen.height() * ppp).round() as u32);
         let desc = egui_wgpu::ScreenDescriptor { size_in_pixels: [w, h], pixels_per_point: ppp };
         let texture = self.device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("orbiters offscreen target"),
+            label: Some("orbiters offscreen target"), // i18n: not shown (names a graphics debugger shows)
             size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
             mip_level_count: 1,
             sample_count: 1,
@@ -97,12 +97,12 @@ impl Offscreen {
             view_formats: &[],
         });
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("orbiters offscreen") });
+        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("orbiters offscreen") }); // i18n: not shown (names a graphics debugger shows)
         let mut renderer = self.renderer.write();
         let mut commands = renderer.update_buffers(&self.device, &self.queue, &mut encoder, &jobs, &desc);
         {
             let pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("orbiters offscreen"),
+                label: Some("orbiters offscreen"), // i18n: not shown (names a graphics debugger shows)
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: &view,
                     resolve_target: None,
@@ -119,7 +119,7 @@ impl Offscreen {
         drop(renderer);
         let row = (w * 4).div_ceil(256) * 256;
         let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("orbiters offscreen readback"),
+            label: Some("orbiters offscreen readback"), // i18n: not shown (names a graphics debugger shows)
             size: (row * h) as u64,
             usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
             mapped_at_creation: false,

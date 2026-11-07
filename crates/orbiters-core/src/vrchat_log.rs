@@ -122,7 +122,7 @@ impl WorldState {
     /// " to avatar ": a name can hold those words too ("Me to avatar X", next to the local "Me"). The longest name of
     /// someone here that the line starts with is who it is; with none, the parse's cut stands.
     fn who_switched(&self, player: &str, avatar: &str) -> (String, String) {
-        const TO: &str = " to avatar ";
+        const TO: &str = " to avatar "; // i18n: not shown (the words of VRChat's log line)
         let line = format!("{player}{TO}{avatar}");
         let known = self.players.values().chain(self.local_player.iter());
         let named = known.filter(|name| line.len() > name.len() + TO.len() && line.starts_with(name.as_str()) && line[name.len()..].starts_with(TO));

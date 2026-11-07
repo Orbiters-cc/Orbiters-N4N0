@@ -120,7 +120,7 @@ impl Client {
     pub fn set_start_with_steamvr(&self, manifest: &Manifest, path: &Path, on: bool) -> Result<(), String> {
         if !on {
             if self.is_application_installed(manifest.key) {
-                self.set_application_auto_launch(manifest.key, false).map_err(|code| format!("SteamVR did not switch off its start (error {code})"))?;
+                self.set_application_auto_launch(manifest.key, false).map_err(|code| orbiters_i18n::tr!("SteamVR did not switch off its start (error {code})", code = code))?;
             }
             return Ok(());
         }
@@ -135,7 +135,7 @@ impl Client {
             Ok(()) | Err(APP_KEY_ALREADY_EXISTS) => {}
             Err(code) => return Err(format!("SteamVR did not take the application's manifest (error {code})")),
         }
-        self.set_application_auto_launch(manifest.key, true).map_err(|code| format!("SteamVR did not set its start (error {code})"))
+        self.set_application_auto_launch(manifest.key, true).map_err(|code| orbiters_i18n::tr!("SteamVR did not set its start (error {code})", code = code))
     }
 
     /// SteamVR forgets the application: not started any more, its manifest unregistered and removed (uninstalling).

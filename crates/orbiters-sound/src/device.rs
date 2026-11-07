@@ -368,7 +368,7 @@ mod imp {
     impl Mmcss {
         fn audio() -> Option<Self> {
             let mut index = 0u32;
-            unsafe { AvSetMmThreadCharacteristicsW(w!("Audio"), &mut index) }.ok().map(Self)
+            unsafe { AvSetMmThreadCharacteristicsW(w!("Audio"), &mut index) }.ok().map(Self) // i18n: not shown (Windows names this task class "Audio")
         }
     }
 
@@ -612,13 +612,13 @@ mod imp {
                     *choice = None;
                     let fallback = unsafe { open_capture(&devices, None) };
                     *trouble = Some(match &fallback {
-                        Ok(_) => format!("the chosen microphone could not be opened ({e:#}); the default one is used"),
-                        Err(e2) => format!("no microphone could be opened ({e2:#}): the other side hears nothing"),
+                        Ok(_) => orbiters_i18n::tr!("the chosen microphone could not be opened ({error}); the default one is used", error = format!("{e:#}")),
+                        Err(e2) => orbiters_i18n::tr!("no microphone could be opened ({error}): the other side hears nothing", error = format!("{e2:#}")),
                     });
                     fallback.ok()
                 }
                 Err(e) => {
-                    *trouble = Some(format!("the microphone could not be opened ({e:#})"));
+                    *trouble = Some(orbiters_i18n::tr!("the microphone could not be opened ({error})", error = format!("{e:#}")));
                     None
                 }
             }
@@ -627,7 +627,7 @@ mod imp {
         let mut render = match unsafe { open_render(&devices) } {
             Ok(r) => Some(r),
             Err(e) => {
-                out_trouble = Some(format!("the sound output could not be opened ({e:#})"));
+                out_trouble = Some(orbiters_i18n::tr!("the sound output could not be opened ({error})", error = format!("{e:#}")));
                 None
             }
         };
@@ -639,7 +639,7 @@ mod imp {
             let failed = render.as_mut().and_then(|r| unsafe { feed(r, &mut |out| playout.fill(&mut playback.lock().unwrap(), out)) }.err());
             if let Some(e) = failed {
                 *render = None;
-                *trouble = Some(format!("the sound output stopped ({e}); opening it again"));
+                *trouble = Some(orbiters_i18n::tr!("the sound output stopped ({error}); opening it again", error = e));
             }
         };
         // Silence (or what already waits) goes out at once: the output starts with the call.
@@ -660,7 +660,7 @@ mod imp {
             let heard = capture.as_ref().and_then(|c| unsafe { drain(c, on_mic, &shared.level) }.err());
             if let Some(e) = heard {
                 capture = None;
-                mic_trouble = Some(format!("the microphone stopped ({e}); opening it again"));
+                mic_trouble = Some(orbiters_i18n::tr!("the microphone stopped ({error}); opening it again", error = e));
             }
             speak(&mut render, &mut out_trouble);
             if checked.elapsed() < CHECK_EVERY {
@@ -682,7 +682,7 @@ mod imp {
                         out_trouble = None;
                         speak(&mut render, &mut out_trouble);
                     }
-                    Err(e) => out_trouble = Some(format!("the sound output could not be opened ({e:#})")),
+                    Err(e) => out_trouble = Some(orbiters_i18n::tr!("the sound output could not be opened ({error})", error = format!("{e:#}"))),
                 }
             }
             shared.trouble(mic_trouble.clone().or(out_trouble.clone()));
@@ -722,7 +722,7 @@ mod imp {
     }
 
     fn open_render(turn: &Arc<Turn>) -> Result<Render, String> {
-        let uid = default_output().ok_or("this computer has no sound output")?;
+        let uid = default_output().ok_or(orbiters_i18n::tr("this computer has no sound output"))?;
         #[cfg(test)]
         RENDERS_OPENED.fetch_add(1, Ordering::Relaxed);
         Render::open(&uid, turn)
@@ -733,7 +733,7 @@ mod imp {
     fn open_capture(device: Option<&str>, turn: &Arc<Turn>) -> Result<Capture, String> {
         let uid = match device {
             Some(uid) => uid.to_string(),
-            None => ca::default_uid(Flow::Input).ok_or("this computer has no microphone")?,
+            None => ca::default_uid(Flow::Input).ok_or(orbiters_i18n::tr("this computer has no microphone"))?,
         };
         let mut capture = Capture::open(&uid, RATE, MIC_HOLD, turn)?;
         capture.start()?;
@@ -840,13 +840,13 @@ mod imp {
                     *choice = None;
                     let fallback = open_capture(None, &turn);
                     *trouble = Some(match &fallback {
-                        Ok(_) => format!("the chosen microphone could not be opened ({e}); the default one is used"),
-                        Err(e2) => format!("no microphone could be opened ({e2}): the other side hears nothing"),
+                        Ok(_) => orbiters_i18n::tr!("the chosen microphone could not be opened ({error}); the default one is used", error = e),
+                        Err(e2) => orbiters_i18n::tr!("no microphone could be opened ({error}): the other side hears nothing", error = e2),
                     });
                     fallback.ok()
                 }
                 Err(e) => {
-                    *trouble = Some(format!("the microphone could not be opened ({e})"));
+                    *trouble = Some(orbiters_i18n::tr!("the microphone could not be opened ({error})", error = e));
                     None
                 }
             }
@@ -855,7 +855,7 @@ mod imp {
         let mut render = match open_render(&turn) {
             Ok(r) => Some(r),
             Err(e) => {
-                out_trouble = Some(format!("the sound output could not be opened ({e})"));
+                out_trouble = Some(orbiters_i18n::tr!("the sound output could not be opened ({error})", error = e));
                 None
             }
         };
@@ -867,7 +867,7 @@ mod imp {
             let failed = render.as_mut().and_then(|r| r.feed(&mut |out| playout.fill(&mut playback.lock().unwrap(), out)).err());
             if let Some(e) = failed {
                 *render = None;
-                *trouble = Some(format!("the sound output stopped ({e}); opening it again"));
+                *trouble = Some(orbiters_i18n::tr!("the sound output stopped ({error}); opening it again", error = e));
             }
         };
         // Silence (or what already waits) goes out at once: the output starts with the call.
@@ -887,7 +887,7 @@ mod imp {
             let heard = capture.as_mut().and_then(|c| drain(c, on_mic, &shared.level).err());
             if let Some(e) = heard {
                 capture = None;
-                mic_trouble = Some(format!("the microphone stopped ({e}); opening it again"));
+                mic_trouble = Some(orbiters_i18n::tr!("the microphone stopped ({error}); opening it again", error = e));
             }
             speak(&mut render, &mut out_trouble);
             if checked.elapsed() < CHECK_EVERY {
@@ -909,7 +909,7 @@ mod imp {
                         out_trouble = None;
                         speak(&mut render, &mut out_trouble);
                     }
-                    Err(e) => out_trouble = Some(format!("the sound output could not be opened ({e})")),
+                    Err(e) => out_trouble = Some(orbiters_i18n::tr!("the sound output could not be opened ({error})", error = e)),
                 }
             }
             shared.trouble(mic_trouble.clone().or(out_trouble.clone()));
@@ -935,7 +935,7 @@ mod imp {
         _buffering: Buffering,
         _lenient: bool,
     ) {
-        shared.fail("sound devices need Windows for now".into());
+        shared.fail(orbiters_i18n::tr("sound devices need Windows for now").into());
     }
 }
 

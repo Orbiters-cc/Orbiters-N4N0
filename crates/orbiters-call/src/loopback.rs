@@ -72,7 +72,7 @@ impl Report {
 impl fmt::Display for Report {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         writeln!(f, "connected in {} ms, listened {:.1} s", self.connect_ms, self.listened.as_secs_f32())?;
-        for (who, h) in ["callee heard the caller", "caller heard the callee"].iter().zip(&self.heard) {
+        for (who, h) in ["callee heard the caller", "caller heard the callee"].iter().zip(&self.heard) { // i18n: not shown (the loopback test tool prints for developers)
             writeln!(
                 f,
                 "{who}: {:.2} s of sound, {:.0} Hz sent, {:.1} Hz heard, rms {:.3} (sent {:.3}), tone {:.1}% of the energy",

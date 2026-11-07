@@ -261,7 +261,7 @@ mod imp {
                         Some(id) => enumerator.GetDevice(&HSTRING::from(id.as_str()))?,
                         None => enumerator.GetDefaultAudioEndpoint(eCapture, eConsole)?,
                     };
-                    let name = friendly_name(&device).unwrap_or_else(|| "Microphone".into());
+                    let name = friendly_name(&device).unwrap_or_else(|| orbiters_i18n::tr("Microphone").into());
                     let client: IAudioClient = device.Activate(CLSCTX_ALL, None)?;
                     let mix = client.GetMixFormat()?;
                     let own = (*mix).nSamplesPerSec;
@@ -272,7 +272,7 @@ mod imp {
                     // A voice: mono at the device's rate (or the one asked for).
                     (client, name, options.rate.unwrap_or(own), 1u16, false)
                 }
-                AudioSource::Process(pid) => (process_loopback(*pid)?, format!("VRChat (process {pid})"), options.rate.unwrap_or(48_000), 2u16, true),
+                AudioSource::Process(pid) => (process_loopback(*pid)?, orbiters_i18n::tr!("VRChat (process {pid})", pid = pid), options.rate.unwrap_or(48_000), 2u16, true),
             };
             let flags = AUDCLNT_STREAMFLAGS_EVENTCALLBACK
                 | AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM
@@ -294,7 +294,7 @@ mod imp {
                 // On time while the machine is busy (VRChat, a reconstruction): Windows' "Audio" task class.
                 let mmcss = if options.pro_audio {
                     let mut index = 0u32;
-                    AvSetMmThreadCharacteristicsW(windows::core::w!("Audio"), &mut index).ok()
+                    AvSetMmThreadCharacteristicsW(windows::core::w!("Audio"), &mut index).ok() // i18n: not shown (Windows names this task class "Audio")
                 } else {
                     None
                 };
@@ -418,7 +418,7 @@ mod imp {
             if checked.elapsed() >= CHECK_EVERY {
                 checked = Instant::now();
                 if !ca::alive(&uid) {
-                    break Ended::Lost(format!("{} went away", device.name));
+                    break Ended::Lost(orbiters_i18n::tr!("{name} went away", name = device.name));
                 }
                 if follow && ca::default_uid(Flow::Input).is_some_and(|d| d != uid) {
                     break Ended::DefaultChanged;

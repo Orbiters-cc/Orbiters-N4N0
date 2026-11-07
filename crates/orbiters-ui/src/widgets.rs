@@ -361,7 +361,8 @@ impl<'a> Button<'a> {
     }
 }
 
-/// Round icon button (36 points), lighter on hover, deeper press.
+/// Round icon button (36 points), lighter on hover, deeper press. Its label is the English text: it names the button for an automated run
+/// ([`control`]) and for its id, and the tooltip shows it in the language now. A label written as `mark("Close")` is a text to translate.
 pub struct IconButton<'a> {
     glyph: &'a str,
     label: &'a str,
@@ -405,7 +406,7 @@ impl<'a> IconButton<'a> {
         let (rect, resp) = ui.allocate_exact_size(Vec2::splat(self.size), Sense::click());
         note_control(ui.ctx(), self.label, rect, true);
         self.paint(ui, rect, &resp);
-        resp.on_hover_cursor(CursorIcon::PointingHand).on_hover_text(self.label)
+        resp.on_hover_cursor(CursorIcon::PointingHand).on_hover_text(orbiters_i18n::tr(self.label))
     }
 
     /// Shows the button in a given rect; its id comes from its icon and label (or [`IconButton::id_salt`]), never
@@ -416,7 +417,7 @@ impl<'a> IconButton<'a> {
         pressed(&resp);
         note_control(ui.ctx(), self.label, rect, true);
         self.paint(ui, rect, &resp);
-        resp.on_hover_cursor(CursorIcon::PointingHand).on_hover_text(self.label)
+        resp.on_hover_cursor(CursorIcon::PointingHand).on_hover_text(orbiters_i18n::tr(self.label))
     }
 
     fn paint(&self, ui: &Ui, rect: Rect, resp: &Response) {
@@ -685,7 +686,7 @@ fn field_frame(ui: &mut Ui, rect: Rect, id: Id, value: &mut String, hint: &str, 
     let mut resp = ui.put(inner, edit);
     if clear && !value.is_empty() {
         let x = Rect::from_center_size(pos2(rect.right() - 22.0, rect.center().y), vec2(28.0, 28.0));
-        if activated(&IconButton::new(icons::X, "Clear").size(28.0, 13.0).id_salt(id.with("clear")).show_at(ui, x)) {
+        if activated(&IconButton::new(icons::X, orbiters_i18n::mark("Clear")).size(28.0, 13.0).id_salt(id.with("clear")).show_at(ui, x)) {
             value.clear();
             resp.mark_changed();
             resp.request_focus();

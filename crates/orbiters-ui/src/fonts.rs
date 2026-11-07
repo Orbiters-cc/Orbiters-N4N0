@@ -481,7 +481,7 @@ mod table {
         [("tahoma.ttf", 0), ("tahomabd.ttf", 0), ("tahomabd.ttf", 0)],
         [("arial.ttf", 0), ("arialbd.ttf", 0), ("arialbd.ttf", 0)],
     ];
-    pub const INDIC: &[Weights] = &[[("Nirmala.ttf", 0), ("NirmalaB.ttf", 0), ("NirmalaB.ttf", 0)], [("Nirmala.ttc", 0); 3]];
+    pub const INDIC: &[Weights] = &[[("Nirmala.ttf", 0), ("NirmalaB.ttf", 0), ("NirmalaB.ttf", 0)], [("Nirmala.ttc", 0); 3]]; // i18n: not shown (system font file names)
     pub const ETHIOPIC: &[Weights] = &[[("ebrima.ttf", 0), ("ebrimabd.ttf", 0), ("ebrimabd.ttf", 0)]];
     pub const MYANMAR: &[Weights] = &[[("mmrtext.ttf", 0), ("mmrtextb.ttf", 0), ("mmrtextb.ttf", 0)]];
     pub const TIBETAN: &[Weights] = &[[("himalaya.ttf", 0); 3]];
@@ -496,14 +496,14 @@ mod table {
     use super::Weights;
     // Hiragino for Japanese as the system does; PingFang UI (its Text cuts) and Heiti for Chinese. PingFang's file holds
     // one weight per face that is not a static file on every macOS, so the bolder columns ask Heiti's Medium when it is missing.
-    pub const JAPANESE: &[Weights] = &[[("ヒラギノ角ゴシック W4.ttc", 0), ("ヒラギノ角ゴシック W6.ttc", 0), ("ヒラギノ角ゴシック W7.ttc", 0)], [("PingFangUI.ttc", 4); 3]];
+    pub const JAPANESE: &[Weights] = &[[("ヒラギノ角ゴシック W4.ttc", 0), ("ヒラギノ角ゴシック W6.ttc", 0), ("ヒラギノ角ゴシック W7.ttc", 0)], [("PingFangUI.ttc", 4); 3]]; // i18n: not shown (system font file names)
     pub const SIMPLIFIED: &[Weights] =
-        &[[("PingFangUI.ttc", 0); 3], [("Hiragino Sans GB.ttc", 0), ("Hiragino Sans GB.ttc", 2), ("Hiragino Sans GB.ttc", 2)], [("STHeiti Medium.ttc", 1); 3]];
-    pub const TRADITIONAL: &[Weights] = &[[("PingFangUI.ttc", 1); 3], [("STHeiti Light.ttc", 0), ("STHeiti Medium.ttc", 0), ("STHeiti Medium.ttc", 0)]];
+        &[[("PingFangUI.ttc", 0); 3], [("Hiragino Sans GB.ttc", 0), ("Hiragino Sans GB.ttc", 2), ("Hiragino Sans GB.ttc", 2)], [("STHeiti Medium.ttc", 1); 3]]; // i18n: not shown (system font file names)
+    pub const TRADITIONAL: &[Weights] = &[[("PingFangUI.ttc", 1); 3], [("STHeiti Light.ttc", 0), ("STHeiti Medium.ttc", 0), ("STHeiti Medium.ttc", 0)]]; // i18n: not shown (system font file names)
     pub const KOREAN: &[Weights] = &[[("AppleSDGothicNeo.ttc", 0), ("AppleSDGothicNeo.ttc", 4), ("AppleSDGothicNeo.ttc", 6)]];
-    pub const THAI: &[Weights] = &[[("ThonburiUI.ttc", 0); 3], [("Thonburi.ttc", 0), ("Thonburi.ttc", 1), ("Thonburi.ttc", 1)]];
-    pub const LAO: &[Weights] = &[[("Lao MN.ttc", 0), ("Lao MN.ttc", 1), ("Lao MN.ttc", 1)], [("Lao Sangam MN.ttf", 0); 3]];
-    pub const KHMER: &[Weights] = &[[("Khmer MN.ttc", 0), ("Khmer MN.ttc", 1), ("Khmer MN.ttc", 1)], [("Khmer Sangam MN.ttf", 0); 3]];
+    pub const THAI: &[Weights] = &[[("ThonburiUI.ttc", 0); 3], [("Thonburi.ttc", 0), ("Thonburi.ttc", 1), ("Thonburi.ttc", 1)]]; // i18n: not shown (system font file names)
+    pub const LAO: &[Weights] = &[[("Lao MN.ttc", 0), ("Lao MN.ttc", 1), ("Lao MN.ttc", 1)], [("Lao Sangam MN.ttf", 0); 3]]; // i18n: not shown (system font file names)
+    pub const KHMER: &[Weights] = &[[("Khmer MN.ttc", 0), ("Khmer MN.ttc", 1), ("Khmer MN.ttc", 1)], [("Khmer Sangam MN.ttf", 0); 3]]; // i18n: not shown (system font file names)
     /// San Francisco: every Latin, Greek and Cyrillic letter Orbiters Sans lacks, then Arabic, Hebrew, Armenian and
     /// Georgian in the system's own cuts, and Arial Unicode for the rest.
     pub const SEGOE: &[Weights] = &[
@@ -512,10 +512,10 @@ mod table {
         [("SFHebrew.ttf", 0); 3],
         [("SFArmenian.ttf", 0); 3],
         [("SFGeorgian.ttf", 0); 3],
-        [("Arial Unicode.ttf", 0); 3],
+        [("Arial Unicode.ttf", 0); 3], // i18n: not shown (system font file names)
     ];
     pub const INDIC: &[Weights] = &[
-        [("Kohinoor.ttc", 0), ("Kohinoor.ttc", 2), ("Kohinoor.ttc", 3)],
+        [("Kohinoor.ttc", 0), ("Kohinoor.ttc", 2), ("Kohinoor.ttc", 3)], // i18n: not shown (system font file names)
         // Bangla, Devanagari, Gujarati, Gurmukhi, Kannada, Malayalam, Odia, Tamil, Telugu.
         [("SFIndia.ttc", 0); 3],
         [("SFIndia.ttc", 1); 3],
@@ -527,13 +527,13 @@ mod table {
         [("SFIndia.ttc", 7); 3],
         [("SFIndia.ttc", 8); 3],
     ];
-    pub const ETHIOPIC: &[Weights] = &[[("KefaIII.ttf", 0); 3], [("Kefa.ttc", 0); 3]];
+    pub const ETHIOPIC: &[Weights] = &[[("KefaIII.ttf", 0); 3], [("Kefa.ttc", 0); 3]]; // i18n: not shown (system font file names)
     pub const MYANMAR: &[Weights] = &[[("NotoSansMyanmar.ttc", 6), ("NotoSansMyanmar.ttc", 7), ("NotoSansMyanmar.ttc", 1)]];
-    pub const TIBETAN: &[Weights] = &[[("Kailasa.ttc", 0), ("Kailasa.ttc", 1), ("Kailasa.ttc", 1)]];
+    pub const TIBETAN: &[Weights] = &[[("Kailasa.ttc", 0), ("Kailasa.ttc", 1), ("Kailasa.ttc", 1)]]; // i18n: not shown (system font file names)
     pub const MONGOLIAN: &[Weights] = &[[("NotoSansMongolian-Regular.ttf", 0); 3]];
     pub const CHEROKEE: &[Weights] = &[[("PlantagenetCherokee.ttf", 0); 3]];
     pub const YI: &[Weights] = &[[("NotoSansYi-Regular.ttf", 0); 3]];
-    pub const SYMBOLS: &[Weights] = &[[("Apple Symbols.ttf", 0); 3], [("Arial Unicode.ttf", 0); 3]];
+    pub const SYMBOLS: &[Weights] = &[[("Apple Symbols.ttf", 0); 3], [("Arial Unicode.ttf", 0); 3]]; // i18n: not shown (system font file names)
 }
 
 #[cfg(all(not(windows), not(target_os = "macos")))]

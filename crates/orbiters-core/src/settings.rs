@@ -558,6 +558,24 @@ pub const GOGOLOCO_PARAMETERS: &[&str] = &[
     "Go/PoseY",
 ];
 
+/// This computer's locale name (`ja-JP`), empty when it says none.
+fn computer_locale() -> String {
+    #[cfg(windows)]
+    {
+        #[link(name = "kernel32")]
+        extern "system" {
+            fn GetUserDefaultLocaleName(name: *mut u16, length: i32) -> i32;
+        }
+        let mut name = [0u16; 85];
+        // SAFETY: the buffer holds LOCALE_NAME_MAX_LENGTH (85) UTF-16 units, the length the call is given.
+        let n = unsafe { GetUserDefaultLocaleName(name.as_mut_ptr(), name.len() as i32) };
+        if n > 1 {
+            return String::from_utf16_lossy(&name[..(n - 1) as usize]);
+        }
+    }
+    ["LC_ALL", "LC_CTYPE", "LANG"].iter().find_map(|v| std::env::var(v).ok().filter(|s| !s.is_empty())).unwrap_or_default()
+}
+
 impl Default for N4n0Settings {
     fn default() -> Self {
         Self {
@@ -569,7 +587,7 @@ impl Default for N4n0Settings {
             mic_device: String::new(),
             text_step_ms: 300,
             afk_message_enabled: false,
-            afk_message: "Away for a moment, back soon!".into(),
+            afk_message: "Away for a moment, back soon!".into(), // i18n: not shown (a saved text the person edits, sent to VRChat in the chatbox: it stays what was typed)
             carry_parameters: GOGOLOCO_PARAMETERS.iter().map(|s| s.to_string()).collect(),
             pins: Vec::new(),
             calls: false,
@@ -716,6 +734,20 @@ impl Settings {
 
     pub fn load() -> Self {
         Self::load_from(&crate::paths::settings_file())
+    }
+
+    /// The language a program of its own (the call, capture and speech workers) speaks: the one these settings hold (what the account gave
+    /// or the person picked), else this computer's, English where the website has no such language. The app does the same for itself
+    /// (`orbiters-desktop`'s `language` module) and follows a change at once; a program started here speaks the language it started in,
+    /// so that what it reports (`tr!` in its messages) reads as the window it reports to does.
+    pub fn language_wanted(&self) -> orbiters_i18n::Language {
+        let from_settings = self.language.as_deref().and_then(orbiters_i18n::normalize);
+        from_settings.or_else(|| orbiters_i18n::normalize(&computer_locale())).unwrap_or(orbiters_i18n::Language::En)
+    }
+
+    /// Makes this program speak the language the saved settings ask for ([`Settings::language_wanted`]).
+    pub fn speak_saved_language() {
+        orbiters_i18n::set_language(Self::load().language_wanted());
     }
 
     /// Writes the whole file at once ([`crate::write_atomic`]): a crash, a power cut or another save at the same time

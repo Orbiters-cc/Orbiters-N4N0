@@ -281,7 +281,8 @@ impl Worker {
         let pause = REOPEN_FIRST.saturating_mul(1 << (self.mic_failures - 1).min(5)).min(REOPEN_MAX);
         self.reopen_at = Some(Instant::now() + pause);
         if let Some(message) = error {
-            emit(&VoiceEvent::Error { message: format!("The microphone could not be opened: {message}") });
+            let message = orbiters_i18n::tr!("The microphone could not be opened: {error}", error = message);
+            emit(&VoiceEvent::Error { message });
             // Whoever listened hears nothing: say so instead of waiting.
             if let Some(listen) = self.listen.take() {
                 self.held.clear();
@@ -298,7 +299,7 @@ impl Worker {
                 match load_vad(&models) {
                     Ok(vad) => {
                         self.vad = Some(vad);
-                        emit(&VoiceEvent::Ready { engine: "Parakeet TDT 0.6B v3 (int8, sherpa-onnx)".into(), load_ms: started.elapsed().as_millis() as u32 });
+                        emit(&VoiceEvent::Ready { engine: "Parakeet TDT 0.6B v3 (int8, sherpa-onnx)".into() /* i18n: not shown */, load_ms: started.elapsed().as_millis() as u32 });
                     }
                     Err(e) => emit(&VoiceEvent::Error { message: format!("{e:#}") }),
                 }
@@ -411,7 +412,8 @@ impl Worker {
             Err(e) => {
                 // Tried again at the next sentence.
                 self.recognizer = Recognizer::Unloaded;
-                emit(&VoiceEvent::Error { message: format!("N4N0's speech recogniser did not load: {e}") });
+                let message = orbiters_i18n::tr!("N4N0's speech recogniser did not load: {error}", error = e);
+                emit(&VoiceEvent::Error { message });
                 while let Some(s) = self.waiting.pop_front() {
                     if s.for_n4n0 {
                         emit(&VoiceEvent::Heard { text: String::new(), for_n4n0: true, seconds: 0.0, decode_ms: 0, listen: s.listen });
@@ -528,7 +530,7 @@ impl Worker {
         if let Some(progress) = &self.installing {
             if progress.idle_for() > STALL {
                 emit(&VoiceEvent::Error {
-                    message: "The download of N4N0's speech models stalled (nothing came for a minute). Try again: it goes on from where it stopped.".into(),
+                    message: orbiters_i18n::tr("The download of N4N0's speech models stalled (nothing came for a minute). Try again: it goes on from where it stopped.").into(),
                 });
                 return false;
             }
@@ -808,6 +810,8 @@ fn transcribe_files(files: &[String]) -> anyhow::Result<()> {
 fn main() {
     orbiters_core::panic_log::install();
     orbiters_core::leave_with_parent();
+    // What it reports is written in the language of the app that reads it.
+    orbiters_core::settings::Settings::speak_saved_language();
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.first().map(String::as_str) == Some("transcribe") {
         if let Err(e) = transcribe_files(&args[1..]) {
@@ -851,7 +855,10 @@ fn main() {
             Ok(Input::Installed(result)) => {
                 match result {
                     Ok(()) => emit(&VoiceEvent::Installed),
-                    Err(e) => emit(&VoiceEvent::Error { message: format!("Could not install N4N0's speech models: {e}") }),
+                    Err(e) => {
+                        let message = orbiters_i18n::tr!("Could not install N4N0's speech models: {error}", error = e);
+                        emit(&VoiceEvent::Error { message })
+                    }
                 }
                 break;
             }

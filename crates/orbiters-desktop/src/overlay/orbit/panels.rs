@@ -279,8 +279,11 @@ pub struct Facts {
     pub hint_band: bool,
     /// The hole in the sheet what shows small is seen through, in the sheet's back's units.
     pub sheet_hole: Option<Rect>,
-    /// The pictures behind All tools' large tiles.
-    pub hero_pictures: Vec<(Action, TextureId)>,
+    /// What All tools' large tiles hold, for real: the newest 3D captures, the newest picture.
+    pub hero_captures: Vec<TextureId>,
+    pub hero_picture: Option<TextureId>,
+    /// A wing's tile or a wheel's cell's own picture, for what it opens.
+    pub tile_picture: Option<TextureId>,
     /// What the 3D view says of what was asked of it, and whether captures show small.
     pub view_said: Option<(String, String)>,
     pub view_small: bool,
@@ -558,11 +561,11 @@ fn sheet_page_items(sheet: Sheet, facts: &Facts) -> Vec<Item> {
             small.push((Action::Page(Target::Suggest), icons::CHAT_TEARDROP_TEXT, "Suggest"));
             small.push((Action::OpenApp, icons::N4N0_MARK, "Open Orbiters"));
             const PER_ROW: usize = 6;
-            let (small_h, small_gap) = (56.0, 8.0);
+            let (small_h, small_gap) = (60.0, 8.0);
             let small_rows = small.len().div_ceil(PER_ROW) as f32;
             let block = small_rows * small_h + (small_rows - 1.0) * small_gap;
             let free = 576.0 - y0 * 2.0 - gap * 2.0 - block;
-            let (first_h, second_h) = (free * 0.56, free * 0.44);
+            let (first_h, second_h) = (free * 0.58, free * 0.42);
             // Worlds in 3D largest, then what people come for; what plays with all its controls, there, with no page of its own.
             let first_w = (width - gap * 2.0) * 0.42;
             let rest_w = (width - gap * 2.0 - first_w) / 2.0;
@@ -626,11 +629,11 @@ fn sheet_page_items(sheet: Sheet, facts: &Facts) -> Vec<Item> {
                 // The last time at the end, its large button; before it the times before, the newest first: each goes to that instance.
                 let right = 1024.0 - x0 - 12.0;
                 let width = 124.0;
-                out.push(Item { action: Action::Invite(i, 0), rect: r(right - width, y + 24.0, width, 42.0), look: Look::Chip { group: i, visit: 0 } });
+                out.push(Item { action: Action::Invite(i, 0), rect: r(right - width, y + 30.0, width, 46.0), look: Look::Chip { group: i, visit: 0 } });
                 let shown = visit.earlier.len().min(EARLIER_SHOWN);
                 let left = right - width - 8.0 - shown as f32 * (EARLIER_WIDTH + 6.0);
                 for n in 0..shown {
-                    out.push(Item { action: Action::Invite(i, n + 1), rect: r(left + n as f32 * (EARLIER_WIDTH + 6.0), y + 24.0, EARLIER_WIDTH, 42.0), look: Look::Chip { group: i, visit: n + 1 } });
+                    out.push(Item { action: Action::Invite(i, n + 1), rect: r(left + n as f32 * (EARLIER_WIDTH + 6.0), y + 30.0, EARLIER_WIDTH, 46.0), look: Look::Chip { group: i, visit: n + 1 } });
                 }
             }
             out
@@ -795,7 +798,7 @@ pub fn scroll_bar(sheet: Sheet, facts: &Facts) -> Option<(f32, f32, f32)> {
             _ => 8.0,
         };
         let track = 576.0 - top - 8.0;
-        (top, track, (track * track / (track + max)).max(36.0))
+        (top, track, (track * track / (track + max)).max(48.0))
     })
 }
 
@@ -864,6 +867,82 @@ fn tool_tint(action: Action) -> Color32 {
         Action::Page(Target::States) => theme::PURPLE,
         Action::Page(Target::Light) | Action::Page(Target::Suggest) => theme::WARN,
         _ => theme::MARK,
+    }
+}
+
+/// What a large tile of All tools holds under its name.
+fn hero_body(p: &Painter, body: Rect, action: Action, line: &str, facts: &Facts) {
+    let words = |p: &Painter, at: Pos2, text: &str, rows: usize, width: f32| {
+        let mut job = egui::text::LayoutJob::simple(text.to_string(), theme::font(16.5, weight::MEDIUM), look::MUTED, width);
+        job.wrap.max_rows = rows;
+        job.wrap.overflow_character = Some('\u{2026}');
+        p.galley(at, p.layout_job(job), look::MUTED);
+    };
+    let radii = [theme::squircle(10.0); 4];
+    match action {
+        Action::Worlds if !facts.hero_captures.is_empty() => {
+            // The newest large, the two before it beside it: the place itself says what this is.
+            let said = if body.height() > 118.0 { 48.0 } else { 0.0 };
+            let height = (body.height() - said).max(40.0);
+            let captures = &facts.hero_captures;
+            let side = if captures.len() >= 3 { (height - 8.0) / 2.0 * 16.0 / 9.0 } else { 0.0 };
+            let large = Rect::from_min_size(body.min, vec2(if side > 0.0 { body.width() - side - 8.0 } else { body.width() }, height));
+            orbiters_ui::paint::squircle_texture(p, large, radii, captures[0], cover_uv(large.size()), Color32::WHITE);
+            if side > 0.0 {
+                for (i, id) in captures.iter().skip(1).take(2).enumerate() {
+                    let h = (height - 8.0) / 2.0;
+                    let tile = Rect::from_min_size(pos2(large.right() + 8.0, body.top() + i as f32 * (h + 8.0)), vec2(side, h));
+                    orbiters_ui::paint::squircle_texture(p, tile, radii, *id, cover_uv(tile.size()), Color32::WHITE);
+                }
+            }
+            if said > 0.0 {
+                words(p, pos2(body.left(), body.top() + height + 6.0), line, 2, body.width());
+            }
+        }
+        Action::Page(Target::Instances) if !facts.worlds_visited.is_empty() => {
+            let row = ((body.height() + 6.0) / 3.0).clamp(36.0, 56.0);
+            let rows = ((body.height() + 6.0) / row).floor().max(1.0) as usize;
+            for (i, visit) in facts.worlds_visited.iter().take(rows).enumerate() {
+                let y = body.top() + i as f32 * row;
+                let side = row - 6.0;
+                let tile = Rect::from_min_size(pos2(body.left(), y), vec2(side * 16.0 / 9.0, side));
+                match visit.picture {
+                    Some(id) => orbiters_ui::paint::squircle_texture(p, tile, [theme::squircle(7.0); 4], id, cover_uv(tile.size()), Color32::WHITE),
+                    None => {
+                        p.rect_filled(tile, theme::radius(7.0), look::HEADER);
+                    }
+                }
+                let x = tile.right() + 10.0;
+                let font = theme::font(16.0, weight::SEMIBOLD);
+                p.text(pos2(x, y + side / 2.0), Align2::LEFT_CENTER, fit(p, &visit.name, &font, body.right() - x), font, look::LABEL);
+            }
+        }
+        Action::Pictures if facts.hero_picture.is_some() => {
+            let height = body.height() - 26.0;
+            let tile = Rect::from_min_size(body.min, vec2(body.width(), height.max(30.0)));
+            if let Some(id) = facts.hero_picture {
+                orbiters_ui::paint::squircle_texture(p, tile, radii, id, cover_uv(tile.size()), Color32::WHITE);
+            }
+            let font = theme::font(15.5, weight::MEDIUM);
+            p.text(pos2(body.left(), body.bottom() - 9.0), Align2::LEFT_CENTER, fit(p, line, &font, body.width()), font, look::MUTED);
+        }
+        _ => {
+            // What is true now says more than what it is for.
+            let said = match (action, &facts.world_video) {
+                (Action::Page(Target::YouTube), Some(title)) => format!("In this world's player: {title}"),
+                _ => line.to_string(),
+            };
+            // Under it, where this leads: the search that opens with it.
+            let search = action == Action::Page(Target::YouTube) && body.height() >= 92.0;
+            let rows = ((body.height() - if search { 46.0 } else { 0.0 }) / 22.0).floor().max(1.0) as usize;
+            words(p, body.min, &said, rows, body.width());
+            if search {
+                let field = Rect::from_min_max(pos2(body.left(), body.bottom() - 38.0), body.max);
+                p.rect_filled(field, theme::radius(19.0), theme::alpha(theme::INK_900, 0.45));
+                widgets::icon(p, pos2(field.left() + 22.0, field.center().y), icons::MAGNIFYING_GLASS, 18.0, look::LABEL);
+                text(p, pos2(field.left() + 40.0, field.center().y), Align2::LEFT_CENTER, "Search YouTube", 16.0, weight::MEDIUM, look::LABEL);
+            }
+        }
     }
 }
 
@@ -957,7 +1036,7 @@ pub fn caption(action: Action, facts: &Facts) -> Option<(String, String)> {
         Action::Capture(n) => {
             let recent = facts.recent.get(n)?;
             let says = match recent.kind {
-                RecentKind::Capture if facts.desktop => "Press to see it here, and go on to it in 3D.",
+                RecentKind::Capture if facts.desktop => "See it here, then open it in 3D.",
                 RecentKind::Capture => "Press to see it in 3D around you.",
                 RecentKind::NoView => "It has no 3D yet. The Orbiters window can make it.",
                 RecentKind::Picture => "Press to see it large.",
@@ -1135,7 +1214,8 @@ pub fn paint(p: &Painter, zone: Zone, size: Vec2, facts: &Facts, hover: Option<u
         Zone::WheelVeil => {
             // A dark veil over VRChat's wheel, and whose turn it is at its hub.
             let c = panel.center();
-            p.circle_filled(c, size.x / 2.0, Color32::from_rgba_premultiplied(6, 8, 10, 224));
+            // Solid: what VRChat lights under it has nothing to do with what is pointed at.
+            p.circle_filled(c, size.x / 2.0, Color32::from_rgb(10, 12, 15));
             widgets::icon(p, c - vec2(0.0, 6.0), icons::N4N0_MARK, 30.0, look::LABEL);
             text(p, c + vec2(0.0, 18.0), Align2::CENTER_CENTER, if facts.picture_wait.is_some() { "Waiting" } else { "Pointing here" }, 10.0, weight::SEMIBOLD, look::LABEL);
             return;
@@ -1256,8 +1336,13 @@ fn draw_conversation(p: &Painter, facts: &Facts) {
     text(p, pos2(TALK_LEFT + 2.0, 30.0), Align2::LEFT_CENTER, "Conversation", 20.0, weight::BOLD, look::LABEL);
     let area = Rect::from_min_max(pos2(TALK_LEFT, TALK_TOP), pos2(1024.0 - 20.0, 576.0));
     if facts.talk_lines.is_empty() {
-        text(p, pos2(TALK_LEFT + 2.0, TALK_TOP + 18.0), Align2::LEFT_CENTER, "Nothing said yet", 19.0, weight::SEMIBOLD, look::MUTED);
-        text(p, pos2(TALK_LEFT + 2.0, TALK_TOP + 46.0), Align2::LEFT_CENTER, "Press the button, and ask N4N0 anything. What you both say stays here.", 16.0, weight::MEDIUM, look::MUTED);
+        let (first, second) = if matches!(facts.talk, TalkNow::Listening(_)) {
+            ("Go ahead", "N4N0 is listening. Press the button again when you are done.")
+        } else {
+            ("Nothing said yet", "Press the button, and ask N4N0 anything. What you both say stays here.")
+        };
+        text(p, pos2(TALK_LEFT + 2.0, TALK_TOP + 18.0), Align2::LEFT_CENTER, first, 19.0, weight::SEMIBOLD, look::MUTED);
+        text(p, pos2(TALK_LEFT + 2.0, TALK_TOP + 46.0), Align2::LEFT_CENTER, second, 16.0, weight::MEDIUM, look::MUTED);
         return;
     }
     let clip = p.with_clip_rect(area);
@@ -1357,7 +1442,7 @@ fn curved(p: &Painter, center: Pos2, radius: f32, middle: f32, s: &str, size: f3
 
 /// The number key that picks a cell, in its corner.
 fn digit(p: &Painter, ring: Ring, center: Pos2) {
-    let at = center + zones::polar(ring.inner + 11.0, ring.from + (ring.to - ring.from) * 0.15);
+    let at = center + zones::polar(ring.inner + 14.0, ring.from + (ring.to - ring.from) * 0.14);
     let n = match ring.middle().rem_euclid(360.0) as u32 {
         0 => "1",
         60 => "2",
@@ -1366,7 +1451,11 @@ fn digit(p: &Painter, ring: Ring, center: Pos2) {
         240 => "5",
         _ => "6",
     };
-    text(p, at, Align2::CENTER_CENTER, n, 10.0, weight::BOLD, look::MUTED);
+    // A key's cap: the first way in on a desktop, not a footnote.
+    let cap = Rect::from_center_size(at, Vec2::splat(19.0));
+    p.rect_filled(cap, theme::radius(5.0), theme::INK_600);
+    p.rect_stroke(cap, theme::radius(5.0), Stroke::new(1.0, Color32::from_white_alpha(90)), egui::StrokeKind::Inside);
+    text(p, at, Align2::CENTER_CENTER, n, 13.0, weight::BOLD, Color32::WHITE);
 }
 
 fn is_selected(item: &Item, facts: &Facts) -> bool {
@@ -1389,6 +1478,11 @@ fn draw(p: &Painter, zone: Zone, item: &Item, facts: &Facts, hovered: bool, pres
             let (ring, center) = shape.ring.expect("a cell is on a ring");
             let waiting = item.action == Action::Pictures && facts.picture_wait.is_some();
             ring_fill(p, ring, center, if pressed { 0.65 } else if hovered || waiting { 0.38 } else { 0.0 });
+            // What it opens, for real, quietly under its name and icon.
+            if let Some(id) = facts.tile_picture {
+                p.add(RectShape::filled(rect, 0.0, Color32::from_gray(if hovered { 190 } else { 150 })).with_texture(id, cover_uv(rect.size())));
+                cell_edge(p, ring, center, 3.0, look::CELL_FAR);
+            }
             ring_rim(p, ring, center, hovered || waiting);
             let label = if waiting { "Waiting for the camera" } else { label };
             // Its icon upright toward the wheel, its name bent along its outer edge.
@@ -1409,6 +1503,16 @@ fn draw(p: &Painter, zone: Zone, item: &Item, facts: &Facts, hovered: bool, pres
         Look::Tile { icon, label, badge: has_badge } => {
             let selected = is_selected(item, facts);
             tile_back(p, rect, hovered, pressed, selected);
+            // What it opens, for real: a place, a picture. Its name stays on a dark foot.
+            if let Some(id) = facts.tile_picture {
+                let radii = [theme::squircle(look::TILE_RADIUS); 4];
+                orbiters_ui::paint::squircle_texture(p, rect, radii, id, cover_uv(rect.size()), Color32::from_gray(if hovered { 255 } else { 225 }));
+                let points = orbiters_ui::paint::squircle_points_corners(rect, radii);
+                orbiters_ui::paint::fill_gradient(p, &points, &orbiters_ui::paint::Gradient::vertical(rect, &[(0.0, theme::alpha(theme::INK_900, 0.12)), (0.5, theme::alpha(theme::INK_900, 0.32)), (0.72, theme::alpha(theme::INK_900, 0.82)), (1.0, theme::alpha(theme::INK_900, 0.94))]));
+                if selected || hovered {
+                    p.rect_stroke(rect.shrink(1.0), theme::radius(look::TILE_RADIUS), Stroke::new(2.0, look::ACCENT), egui::StrokeKind::Middle);
+                }
+            }
             let ink = if selected || hovered { look::ACCENT } else { look::LABEL };
             let size = (rect.height() * 0.42).clamp(18.0, 32.0);
             let top = rect.center().y - (size + 3.0 + 11.0) / 2.0;
@@ -1430,38 +1534,20 @@ fn draw(p: &Painter, zone: Zone, item: &Item, facts: &Facts, hovered: bool, pres
         Look::Hero { icon, label, line, badge: has_badge, tint } => {
             let radius = theme::radius(look::TILE_RADIUS + 4.0);
             p.rect_filled(rect, radius, theme::mix(look::TILE, tint, if pressed { 0.30 } else if hovered { 0.24 } else { 0.16 }));
-            // What it holds, for real, in its corner: its newest picture, the world you were last in. The tile keeps its own colour.
-            if let Some((_, id)) = facts.hero_pictures.iter().find(|(a, _)| *a == item.action) {
-                let side = (rect.height() * 0.44).min(84.0);
-                let picture = Rect::from_min_size(pos2(rect.right() - 14.0 - side * 16.0 / 9.0, rect.top() + 14.0), vec2(side * 16.0 / 9.0, side));
-                orbiters_ui::paint::squircle_texture(p, picture, [theme::squircle(12.0); 4], *id, cover_uv(picture.size()), Color32::WHITE);
-            }
             if hovered {
                 p.rect_stroke(rect.shrink(1.0), radius, Stroke::new(2.0, tint), egui::StrokeKind::Middle);
             }
-            let chip = Rect::from_min_size(rect.min + vec2(18.0, 18.0), Vec2::splat(72.0));
-            p.rect_filled(chip, theme::radius(18.0), theme::alpha(tint, 0.22));
-            widgets::icon(p, chip.center(), icon, 42.0, tint);
+            // Its name beside its icon, and under them what it holds: real pictures and places wherever there are any.
+            let chip = Rect::from_min_size(rect.min + vec2(14.0, 14.0), Vec2::splat(52.0));
+            p.rect_filled(chip, theme::radius(14.0), theme::alpha(tint, 0.22));
+            widgets::icon(p, chip.center(), icon, 31.0, tint);
             if has_badge {
-                badge(p, chip.center(), 52.0, look::ACCENT, look::ON_ACCENT);
+                badge(p, chip.center(), 38.0, look::ACCENT, look::ON_ACCENT);
             }
-            // What is true now says more than what it is for.
-            let said = match (item.action, &facts.world_video) {
-                (Action::Page(Target::YouTube), Some(title)) => format!("In this world's player: {title}"),
-                _ => line.to_string(),
-            };
-            let room = rect.width() - 36.0;
-            let small = theme::font(16.0, weight::MEDIUM);
-            let (one, two) = two_lines(p, &said, &small, room);
-            // Always two lines' room, so that names beside each other share a baseline.
-            let mut y = rect.bottom() - 16.0 - 2.0 * 21.0;
-            let font = theme::font(27.0, weight::BOLD);
-            p.text(pos2(rect.left() + 18.0, y - 20.0), Align2::LEFT_CENTER, fit(p, label, &font, room), font, look::LABEL);
-            p.text(pos2(rect.left() + 18.0, y + 10.0), Align2::LEFT_CENTER, one, small.clone(), look::MUTED);
-            if let Some(two) = two {
-                y += 21.0;
-                p.text(pos2(rect.left() + 18.0, y + 10.0), Align2::LEFT_CENTER, two, small, look::MUTED);
-            }
+            let font = theme::font(25.0, weight::BOLD);
+            p.text(pos2(chip.right() + 12.0, chip.center().y), Align2::LEFT_CENTER, fit(p, label, &font, rect.right() - chip.right() - 22.0), font, look::LABEL);
+            let body = Rect::from_min_max(pos2(rect.left() + 14.0, chip.bottom() + 10.0), rect.max - vec2(14.0, 12.0));
+            hero_body(p, body, item.action, line, facts);
         }
         Look::Small { icon, label, tint } => {
             let on = item.action == Action::FastWalk && facts.fast_walk;
@@ -1473,8 +1559,8 @@ fn draw(p: &Painter, zone: Zone, item: &Item, facts: &Facts, hovered: bool, pres
             }
             let at = pos2(rect.left() + 20.0, rect.center().y);
             widgets::icon(p, at, icon, 22.0, tint);
-            let font = theme::font(15.0, weight::SEMIBOLD);
-            p.text(pos2(rect.left() + 36.0, rect.center().y), Align2::LEFT_CENTER, fit(p, label, &font, rect.width() - 40.0), font, look::LABEL);
+            let font = theme::font(15.5, weight::SEMIBOLD);
+            p.text(pos2(rect.left() + 36.0, rect.center().y), Align2::LEFT_CENTER, fit(p, label, &font, rect.width() - 40.0), font, Color32::WHITE);
         }
         Look::NowPlaying => {
             let tint = theme::VIOLET;
@@ -1516,6 +1602,7 @@ fn draw(p: &Painter, zone: Zone, item: &Item, facts: &Facts, hovered: bool, pres
                 p.rect_filled(bar, theme::radius(3.5), Color32::from_white_alpha(70));
                 let level = if muted { 0.0 } else { percent as f32 / 100.0 };
                 p.rect_filled(Rect::from_min_size(bar.min, vec2(bar.width() * level, 7.0)), theme::radius(3.5), look::LABEL);
+                p.circle_filled(pos2(bar.left() + bar.width() * level, bar.center().y), 8.0, look::LABEL);
             }
         }
         Look::Picture(mode) => picture_button(p, zone, shape, rect, mode, facts, hovered, pressed),
@@ -1703,8 +1790,8 @@ fn draw(p: &Painter, zone: Zone, item: &Item, facts: &Facts, hovered: bool, pres
                 let points = orbiters_ui::paint::squircle_points_corners(rect, [theme::squircle(look::TILE_RADIUS); 4]);
                 // A small part of its picture spread across the row: its colours, and nothing that could be read.
                 let spread = Rect::from_center_size(pos2(0.5, 0.5), vec2(0.05, 0.05));
-                orbiters_ui::paint::squircle_texture(p, rect, [theme::squircle(look::TILE_RADIUS); 4], id, spread, Color32::from_gray(90));
-                orbiters_ui::paint::fill_gradient(p, &points, &orbiters_ui::paint::Gradient::horizontal(rect, &[(0.0, theme::alpha(look::TILE, 0.45)), (0.5, theme::alpha(look::TILE, 0.82)), (1.0, theme::alpha(look::TILE, 0.92))]));
+                orbiters_ui::paint::squircle_texture(p, rect, [theme::squircle(look::TILE_RADIUS); 4], id, spread, Color32::from_gray(70));
+                orbiters_ui::paint::fill_gradient(p, &points, &orbiters_ui::paint::Gradient::horizontal(rect, &[(0.0, theme::alpha(look::TILE, 0.6)), (0.5, theme::alpha(look::TILE, 0.9)), (1.0, theme::alpha(look::TILE, 0.96))]));
             }
             let picture = Rect::from_min_size(rect.min + vec2(6.0, 6.0), vec2((rect.height() - 12.0) * 16.0 / 9.0, rect.height() - 12.0));
             match visit.picture {
@@ -1720,10 +1807,11 @@ fn draw(p: &Painter, zone: Zone, item: &Item, facts: &Facts, hovered: bool, pres
             // The buttons lie on its right: the words stop short of them.
             let shown = visit.earlier.len().min(EARLIER_SHOWN);
             let earlier_from = rect.right() - 12.0 - 124.0 - 8.0 - shown as f32 * (EARLIER_WIDTH + 6.0);
+            // Over the times before: what pressing one does. They are as much buttons as Invite me.
             if shown > 0 {
-                text(p, pos2(earlier_from - 8.0, rect.center().y), Align2::RIGHT_CENTER, "Earlier", 15.5, weight::MEDIUM, look::MUTED);
+                text(p, pos2(earlier_from, rect.top() + 16.0), Align2::LEFT_CENTER, "Or invite me to an earlier one", 15.0, weight::MEDIUM, look::MUTED);
             }
-            let room = earlier_from - x - if shown > 0 { 66.0 } else { 8.0 };
+            let room = earlier_from - x - 10.0;
             let font = theme::font(20.0, weight::BOLD);
             p.text(pos2(x, rect.center().y - 14.0), Align2::LEFT_CENTER, fit(p, &visit.name, &font, room), font, look::LABEL);
             let font = theme::font(16.0, weight::MEDIUM);
@@ -2090,7 +2178,7 @@ fn status_now(facts: &Facts) -> Option<(String, String)> {
 /// What a 3D picture waits for, in the caption's two lines.
 pub fn wait_words(wait: orbiters_n4n0::status::PhotoWait) -> (String, String) {
     match wait {
-        orbiters_n4n0::status::PhotoWait::Camera => ("To start: Esc, the camera tab, then Stream Camera".into(), String::new()),
+        orbiters_n4n0::status::PhotoWait::Camera => ("To start: Esc, the camera tab, then Stream Camera".into(), "Or press it again to call it off".into()),
         orbiters_n4n0::status::PhotoWait::Move => ("Move VRChat's camera a little".into(), "The 3D picture starts as soon as Orbiters sees where it is.".into()),
     }
 }

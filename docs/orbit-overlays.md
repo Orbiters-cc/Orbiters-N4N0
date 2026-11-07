@@ -52,6 +52,10 @@ In VR the same units are laid on a plane: the wheel's rides the hand facing the 
 
 The block's rules (`block.rs`): blocked on hover, before any press. A press begun in the game stays the game's until let go; a press begun on a panel stays ours until let go. Off the panel, free at once; panels gone, free at once whatever is held. It is said anew every frame, so it ends by not being said, and SteamVR forgets it with the process. If the overlay's loop hangs with a block on, the process ends itself after 1.5 s.
 
+## Real pictures on the parts
+
+The wing's tiles and the wheel's cells for Worlds in 3D, Instances and Pictures hold a dimmed real picture, and All tools' large cards hold real content: the newest three captures, the last three places, the newest picture. `Recents::newest` picks them, and `keep_the_newest` holds only those while no gallery is open, so an endless gallery still costs nothing once it is left. Each is asked for once: asked for twice, a new list would lose what had been read of it. YouTube keeps its icon, since the menu knows the world's player by its title alone.
+
 ## The gallery
 
 The Pictures sheet lists what the app's own Photos & captures lists on this computer: `worlds::load_gallery`, VRChat's pictures and the captures together, newest first, with **All** and **Only 3D** at its top right, in the layout chosen in the app (`pages::gallery_layout::arrange`). A list can hold tens of thousands: `panels::Gallery` holds the tiles and their places once, compares by being the same list, and each frame's facts only carry the words and pictures of the tiles on the page. Pictures are decoded by two threads, what was asked last first, and let go far from the page.
@@ -61,6 +65,10 @@ A capture with a 3D view shows in 3D from its tile (`Relayed::ShowLocal`, `catal
 ## Lists
 
 The gallery, previous instances, YouTube's results and the conversation scroll by dragging on them, by a bar to grab, and thrown (`Drag`). Past an end they give less and less under the hand (`rubber_band`), run past it when thrown and come back to rest exactly there, without going beyond it the other way (`scroll_step`). A notch of the mouse's wheel at an end gives a little. With Reduce motion, no give at all.
+
+## The wheel's keys, on the desktop
+
+Number keys are the first way in: each cell shows its key as a cap, and the caption leads with them, Left Alt second. While pointing, and while a picture waits, the veil is solid: VRChat goes on lighting a slice under it, and that must not read as what is pointed at. A picture asked for from the ring can be called off with a second press, and the caption says so.
 
 ## A capture standing small (VR)
 
@@ -75,6 +83,8 @@ Once taken, it has a Hide 3D of its own under it (`small_hint::HideChip`), found
 The stick also reaches VRChat, as nothing takes it from the game while the capture is held: held in the left hand, its zoom also walks the avatar.
 
 ## Worlds in 3D
+
+Beside the side panel every result of a short list keeps its place (`few_rects`, shorter cards there, See them all stays). In a headset, Around me and Small here both stay under the hole, the current one lit. With a sheet up, a wing stands off it by `WING_OFF_A_SHEET`: the sheet is nearer the eyes and would seem to run into it.
 
 A press on a world opens its details on a side panel beside the list, which narrows to two columns of the same six results, so that another can be pressed at once (`Page::Detail`, `SIDE`). In a headset a press on a world with a capture shows it, around the person or small, whichever was chosen last.
 

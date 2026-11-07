@@ -351,7 +351,11 @@ impl Recents {
                 let mut had: HashMap<crate::worlds::Picture, Option<ColorImage>> = HashMap::new();
                 for i in &self.asked {
                     if let Some(old) = self.loaded.get_mut(*i) {
-                        had.insert(old.source.clone(), old.image.take());
+                        let image = old.image.take();
+                        let kept = had.entry(old.source.clone()).or_default();
+                        if image.is_some() {
+                            *kept = image;
+                        }
                     }
                 }
                 self.asked.clear();
@@ -461,6 +465,46 @@ impl Recents {
             return;
         }
         let pictures: Vec<_> = new.iter().rev().map(|i| self.loaded[*i].source.clone()).collect();
+        for i in new {
+            self.loaded[i].asked = true;
+            self.asked.push(i);
+        }
+        let asked = self.reader().clone();
+        asked.0.lock().unwrap_or_else(|e| e.into_inner()).extend(pictures);
+        asked.1.notify_all();
+    }
+
+    /// The newest three captures with a 3D view, and the newest thing of all, and the newest of another world than that capture's: what the parts show of what they open.
+    fn newest(&self) -> (Vec<usize>, Option<usize>, Option<usize>) {
+        let captures: Vec<usize> = self.loaded.iter().enumerate().filter(|(_, r)| r.has_view).map(|(i, _)| i).take(3).collect();
+        let any = (!self.loaded.is_empty()).then_some(0);
+        let world = captures.first().and_then(|i| self.loaded.get(*i)).map(|r| r.title.clone());
+        let other = self.loaded.iter().position(|r| Some(&r.title) != world.as_ref());
+        (captures, any, other)
+    }
+
+    /// Holds and asks for those pictures alone: with no gallery on, nothing else stays in memory.
+    fn keep_the_newest(&mut self) {
+        let (captures, any, other) = self.newest();
+        // The newest capture is often the newest of all too: each once, or a new list would lose what was read of it.
+        let mut wanted: Vec<usize> = captures.into_iter().chain(any).chain(other).collect();
+        wanted.sort_unstable();
+        wanted.dedup();
+        let loaded = &mut self.loaded;
+        self.asked.retain(|i| {
+            let Some(recent) = loaded.get_mut(*i) else { return false };
+            let stays = wanted.contains(i);
+            if !stays {
+                recent.image = None;
+                recent.asked = false;
+            }
+            stays
+        });
+        let new: Vec<usize> = wanted.into_iter().filter(|i| self.loaded.get(*i).is_some_and(|r| !r.asked)).collect();
+        if new.is_empty() {
+            return;
+        }
+        let pictures: Vec<_> = new.iter().map(|i| self.loaded[*i].source.clone()).collect();
         for i in new {
             self.loaded[i].asked = true;
             self.asked.push(i);
@@ -769,6 +813,11 @@ impl Panels {
             self.takeover = Some(Panel::new(place, self.sharp, 0, !snap.settings.reduce_motion));
         }
         self.stage.host.dirty = true;
+        // All tools says where you were lately.
+        if sheet == Sheet::All {
+            let host = &mut self.stage.host;
+            host.effects(vec![Effect::Instances], snap, &self.backend);
+        }
         if let Some(panel) = self.takeover.as_mut() {
             panel.dirty = true;
             panel.hover = None;
@@ -941,10 +990,9 @@ impl Panels {
             return;
         }
         self.elastic = !snap.settings.reduce_motion;
-        // All tools shows the newest of them too.
-        let in_gallery = matches!(self.facts.sheet, Some(Sheet::Pictures | Sheet::All));
-        let listed = in_gallery && self.recents.follow((library, crate::worlds::picture_revision()), snap.settings.sessions_dir.clone(), snap.settings.picture_folders.clone());
-        let arranged = in_gallery && self.recents.arrange(self.facts.gallery_filter, snap.settings.photos_layout);
+        // The parts show the newest of them, whatever is open.
+        let listed = self.recents.follow((library, crate::worlds::picture_revision()), snap.settings.sessions_dir.clone(), snap.settings.picture_folders.clone());
+        let arranged = self.recents.arrange(self.facts.gallery_filter, snap.settings.photos_layout);
         if listed || arranged {
             for panel in &mut self.list {
                 panel.dirty = true;
@@ -959,28 +1007,21 @@ impl Panels {
             if let Some(panel) = self.takeover.as_mut() {
                 panel.dirty = true;
             }
-        }
-        if self.facts.sheet == Some(Sheet::All) {
-            self.recents.ask(0, 0);
-            self.recents.keep(0, 0);
-        } else if self.facts.sheet == Some(Sheet::Pictures) {
-            if let Some(panel) = self.takeover.as_mut() {
-                let shown = || panel.items.iter().filter_map(|i| if let panels::Look::Capture(n) | panels::Look::BigPicture(n) = i.look { Some(n) } else { None });
-                if let (Some(first), Some(last)) = (shown().min(), shown().max()) {
-                    self.recents.ask(first, last + 6);
-                    self.recents.keep(first.saturating_sub(36), last + 36);
-                    let here: std::collections::HashSet<String> = self.recents.asked.iter().filter_map(|i| self.recents.loaded.get(*i)).filter(|r| r.image.is_some()).map(|r| r.key.to_string_lossy().to_string()).collect();
-                    let art = self.art.as_ref().map(|a| a.0.clone());
-                    let large = self.recents.big.as_ref().and_then(|b| if let crate::worlds::Picture::Shot { path, .. } = &b.0 { Some(format!("large {}", path.display())) } else { None });
-                    panel.pictures.retain(|k, _| here.contains(k) || art.as_ref() == Some(k) || large.as_ref() == Some(k));
-                }
+            for panel in &mut self.list {
+                panel.dirty = true;
             }
-        } else if !self.recents.asked.is_empty() {
-            // Its pictures do not stay in memory once it is left.
-            self.recents.keep(1, 0);
-            let art = self.art.as_ref().map(|a| a.0.clone());
-            if let Some(panel) = self.takeover.as_mut() {
-                panel.pictures.retain(|k, _| art.as_ref() == Some(k));
+        }
+        if self.facts.sheet != Some(Sheet::Pictures) {
+            self.recents.keep_the_newest();
+        } else if let Some(panel) = self.takeover.as_mut() {
+            let shown = || panel.items.iter().filter_map(|i| if let panels::Look::Capture(n) | panels::Look::BigPicture(n) = i.look { Some(n) } else { None });
+            if let (Some(first), Some(last)) = (shown().min(), shown().max()) {
+                self.recents.ask(first, last + 6);
+                self.recents.keep(first.saturating_sub(36), last + 36);
+                let here: std::collections::HashSet<String> = self.recents.asked.iter().filter_map(|i| self.recents.loaded.get(*i)).filter(|r| r.image.is_some()).map(|r| r.key.to_string_lossy().to_string()).collect();
+                let art = self.art.as_ref().map(|a| a.0.clone());
+                let large = self.recents.big.as_ref().and_then(|b| if let crate::worlds::Picture::Shot { path, .. } = &b.0 { Some(format!("large {}", path.display())) } else { None });
+                panel.pictures.retain(|k, _| here.contains(k) || art.as_ref() == Some(k) || large.as_ref() == Some(k));
             }
         }
         // N4N0's menu is what plays and its controls go through: open, drawn or not.
@@ -1095,7 +1136,9 @@ impl Panels {
             view_small: self.facts.view_small,
             sheet_hole: self.facts.sheet_hole,
             hint_band: self.list.iter().any(|p| p.zone == Zone::SheetHint),
-            hero_pictures: Vec::new(),
+            hero_captures: Vec::new(),
+            hero_picture: None,
+            tile_picture: None,
             reconstructing: snap.reconstruction.as_ref().map(|j| j.progress.clamp(0.0, 1.0)),
             waiting: snap.reconstruct_queue.len(),
             desktop: snap.n4n0.desktop_mode || !snap.steamvr.running,
@@ -1583,6 +1626,23 @@ impl Panels {
             panel.dirty = false;
             panel.items = panels::items(panel.zone, panel.logical, &self.facts);
             let mut facts = self.facts.clone();
+            // What the part opens, for real: the newest capture on Worlds, the newest of all on Pictures, another world on Instances.
+            let (captures, any, other) = self.recents.newest();
+            let source = match panel.zone {
+                Zone::WheelWorlds | Zone::WingWorlds => captures.first().copied(),
+                Zone::WheelPictures | Zone::WingPictures => any,
+                Zone::WheelInstances | Zone::WingInstances => other,
+                _ => None,
+            };
+            if let Some(loaded) = source.and_then(|i| self.recents.loaded.get(i)) {
+                let name = loaded.key.to_string_lossy().to_string();
+                if let Some(image) = &loaded.image {
+                    let ctx = panel.canvas.ctx();
+                    facts.tile_picture = Some(panel.pictures.entry(name).or_insert_with(|| ctx.load_texture("tile", image.clone(), TextureOptions::LINEAR)).id());
+                } else if let Some(texture) = panel.pictures.get(&name) {
+                    facts.tile_picture = Some(texture.id());
+                }
+            }
             if matches!(panel.zone, Zone::WheelPlaying | Zone::WingPlaying) {
                 if let Some((key, image)) = &art {
                     let ctx = panel.canvas.ctx();
@@ -1650,16 +1710,16 @@ impl Panels {
                     let mut facts = self.facts.clone();
                     if sheet == Sheet::All {
                         // What All tools' large tiles hold, for real.
-                        if let Some(id) = facts.worlds_visited.first().and_then(|v| v.picture) {
-                            facts.hero_pictures.push((Action::Page(Target::Instances), id));
-                        }
-                        if let Some(loaded) = self.recents.tile(0).filter(|r| r.image.is_some()) {
-                            let ctx = stage.canvas.ctx();
+                        let (captures, any, _) = self.recents.newest();
+                        let ctx = stage.canvas.ctx();
+                        let texture = |i: usize, panel: &mut Panel| -> Option<TextureId> {
+                            let loaded = self.recents.loaded.get(i)?;
+                            let image = loaded.image.as_ref()?;
                             let name = loaded.key.to_string_lossy().to_string();
-                            let image = loaded.image.as_ref().expect("just looked");
-                            let id = panel.pictures.entry(name).or_insert_with(|| ctx.load_texture("recent", image.clone(), TextureOptions::LINEAR)).id();
-                            facts.hero_pictures.push((Action::Pictures, id));
-                        }
+                            Some(panel.pictures.entry(name).or_insert_with(|| ctx.load_texture("recent", image.clone(), TextureOptions::LINEAR)).id())
+                        };
+                        facts.hero_captures = captures.into_iter().filter_map(|i| texture(i, panel)).collect();
+                        facts.hero_picture = any.and_then(|i| texture(i, panel));
                     }
                     if sheet == Sheet::Pictures {
                         let ctx = stage.canvas.ctx();
@@ -1841,6 +1901,15 @@ fn flight_words(error: Option<&str>) -> (String, String) {
     }
 }
 
+/// Who may join an instance, in words that cannot be taken for the row's Invite me.
+fn access_words(kind: &str) -> &str {
+    match kind {
+        "Invite" => "Invite only",
+        "Invite+" => "Invite+ open",
+        other => other,
+    }
+}
+
 /// When a visit was, so that two are told apart: the day and time this week, the date before that.
 fn day_and_time(at: u64, now: u64) -> String {
     let offset = time::UtcOffset::current_local_offset().unwrap_or(time::UtcOffset::UTC);
@@ -1865,7 +1934,7 @@ fn visited_worlds(rows: &[orbiters_n4n0_core::menu::InstanceRow], now: u64, pict
                 worlds.push(panels::WorldVisit {
                     world_id: id.to_string(),
                     name: if row.world.is_empty() { "A world".to_string() } else { row.world.clone() },
-                    line: format!("{when}{region} \u{b7} {}", row.kind()),
+                    line: format!("{when}{region} \u{b7} {}", access_words(row.kind())),
                     location: row.location.clone(),
                     earlier: Vec::new(),
                     picture: pictures.get(id).copied(),
@@ -2098,6 +2167,29 @@ mod tests {
         assert!(shown_playing(true, asked, t + MEDIA_CATCHES_UP));
         assert!(shown_playing(true, None, t));
         assert!(!shown_playing(false, None, t));
+    }
+
+    /// Round 6, seen in the game: the newest capture was asked for twice, as a capture and as the newest of all, and the list
+    /// coming again then lost what had been read of it, for good: blank tiles, in the gallery too.
+    #[test]
+    fn the_newest_pictures_are_asked_for_once_and_stay_when_the_list_comes_again() {
+        let list = || vec![listed("a", true, true), listed("b", true, true), listed("c", false, false)];
+        let mut recents = Recents { loaded: list(), seen: Some((0, 0)), ..Default::default() };
+        recents.keep_the_newest();
+        let mut once = recents.asked.clone();
+        once.sort_unstable();
+        once.dedup();
+        assert_eq!(once.len(), recents.asked.len(), "{:?}", recents.asked);
+        assert!(once.contains(&0) && once.contains(&1));
+        recents.loaded[0].image = Some(ColorImage::from_rgb([1, 1], &[0, 0, 0]));
+        // The same one twice, however it came: what was read stays.
+        recents.asked.push(0);
+        let (tx, rx) = mpsc::channel();
+        recents.rx = Some(rx);
+        tx.send(list()).unwrap();
+        assert!(recents.follow((0, 0), PathBuf::new(), Vec::new()));
+        assert!(recents.loaded[0].image.is_some());
+        assert!(recents.loaded[0].asked);
     }
 
     fn listed(key: &str, session: bool, has_view: bool) -> LoadedRecent {

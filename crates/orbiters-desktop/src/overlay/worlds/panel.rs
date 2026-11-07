@@ -474,7 +474,7 @@ const SIDE_RIGHT: f32 = 1000.0;
 /// Its picture; where a capture standing small is seen through it.
 pub const SIDE_HERO: Rect = Rect { min: Pos2 { x: SIDE_LEFT, y: 24.0 }, max: Pos2 { x: SIDE_RIGHT, y: 206.0 } };
 /// Hides it: a tab on its edge, far from the sheet's own X.
-const SIDE_CLOSE: Rect = Rect { min: Pos2 { x: 648.0, y: 252.0 }, max: Pos2 { x: 680.0, y: 324.0 } };
+const SIDE_CLOSE: Rect = Rect { min: Pos2 { x: 948.0, y: 32.0 }, max: Pos2 { x: 992.0, y: 76.0 } };
 const SMALL_BACK: Rect = Rect { min: Pos2 { x: 862.0, y: 162.0 }, max: Pos2 { x: 992.0, y: 198.0 } };
 /// What to do with it first; then going there; then its four small tiles.
 const SHOW: Rect = Rect { min: Pos2 { x: SIDE_LEFT, y: 296.0 }, max: Pos2 { x: 835.0, y: 340.0 } };
@@ -554,7 +554,7 @@ fn vr_card_rect(slot: usize) -> Rect {
 fn vr_card(p: &Painter, rect: Rect, entry: &Entry, d: &Data, hover: bool, pressed: bool, selected: bool) {
     let rect = if pressed { rect.shrink(2.0) } else { rect };
     p.rect_filled(rect, CornerRadius::same(16), if hover { RAISED2 } else { RAISED });
-    let thumb = Rect::from_min_max(rect.min, pos2(rect.max.x, rect.max.y - 42.0));
+    let thumb = Rect::from_min_max(rect.min, pos2(rect.max.x, rect.max.y - 56.0));
     picture(p, thumb, (d.thumb)(entry), &entry.world_id, CornerRadius { nw: 16, ne: 16, sw: 0, se: 0 }, 1.0);
     let status = d.status;
     let chip = if status.current == Some(entry.id) {
@@ -570,9 +570,11 @@ fn vr_card(p: &Painter, rect: Rect, entry: &Entry, d: &Data, hover: bool, presse
         p.rect_filled(back, CornerRadius::same(14), tint);
         p.galley(pos2(back.min.x + 9.0, back.center().y - galley.size().y / 2.0), galley, theme::ON_ACCENT);
     }
-    let name = Txt::new(entry.name.clone(), 20.0).weight(weight::SEMIBOLD).color(theme::FG);
-    let galley = p.layout_job(name.job_truncated(rect.width() - 20.0));
-    p.galley(pos2(rect.min.x + 10.0, rect.max.y - 21.0 - galley.size().y / 2.0), galley, theme::FG);
+    // Its whole name, on two lines where it takes them: worlds are told apart by it.
+    let mut name = Txt::new(entry.name.clone(), 18.5).weight(weight::SEMIBOLD).color(theme::FG).job(rect.width() - 18.0);
+    name.wrap.max_rows = 2;
+    let galley = p.layout_job(name);
+    p.galley(pos2(rect.min.x + 9.0, rect.max.y - 28.0 - galley.size().y / 2.0), galley, theme::FG);
     if selected {
         p.rect_stroke(rect, CornerRadius::same(16), Stroke::new(3.0, theme::ACCENT), StrokeKind::Inside);
     }
@@ -588,7 +590,9 @@ fn few_rects(count: usize, n: usize, side: bool) -> (Vec<Option<Rect>>, f32) {
         for i in 0..count {
             let (slot, top) = if i < n { (i, 148.0) } else { (i - n, heading + 28.0) };
             let (col, row) = ((slot % 2) as f32, (slot / 2) as f32);
-            let rect = Rect::from_min_size(pos2(32.0 + col * 316.0, top + row * 122.0), vec2(304.0, 114.0));
+            // The last of its group, alone on its row, takes the row: no hole in the list's edge.
+            let last_alone = (i + 1 == n || i + 1 == count) && slot % 2 == 0;
+            let rect = Rect::from_min_size(pos2(32.0 + col * 316.0, top + row * 122.0), vec2(if last_alone { 620.0 } else { 304.0 }, 114.0));
             out.push((rect.bottom() <= 568.0).then_some(rect));
         }
         (out, heading)
@@ -842,11 +846,17 @@ impl Panel {
                     out.push((Target::Card(i), rect));
                 }
             }
-            let right = if side { 652.0 } else { 992.0 };
-            out.push((Target::Section(Section::Popular), Rect::from_min_size(pos2(right - 132.0, heading - 6.0), vec2(132.0, 34.0))));
+            // Beside few captures, the way on takes the row's place; else it is on the heading's end.
+            if !side && n % PER_ROW != 0 {
+                out.push((Target::Section(Section::Popular), card_rect(n)));
+            } else {
+                let right = if side { 652.0 } else { 992.0 };
+                out.push((Target::Section(Section::Popular), Rect::from_min_size(pos2(right - 132.0, heading - 6.0), vec2(132.0, 34.0))));
+            }
         } else {
             for (i, _) in results.iter().enumerate().skip(first).take(PER_PAGE) {
-                out.push((Target::Card(i), if side { side_card_rect(i - first) } else { card_rect(i - first) }));
+                let alone = side && i + 1 == results.len() && (i - first) % 2 == 0;
+                out.push((Target::Card(i), if alone { side_card_rect(i - first).with_max_x(652.0) } else if side { side_card_rect(i - first) } else { card_rect(i - first) }));
             }
         }
         if !results.is_empty() && self.few_captures(d) {
@@ -1425,7 +1435,13 @@ impl Panel {
         // How many, at the field's end (while what is typed leaves room).
         if !side && self.query.chars().count() <= 28 && !results.is_empty() {
             let more = if d.status.list.more { "+" } else { "" };
-            let count = if results.len() == 1 { "1 world".to_string() } else { format!("{}{more} worlds", results.len()) };
+            // How many of what the filter that is on shows.
+            let count = match self.few_leading(d, &results) {
+                Some(1) => "1 with a 3D capture".to_string(),
+                Some(n) => format!("{n} with a 3D capture"),
+                None if results.len() == 1 => "1 world".to_string(),
+                None => format!("{}{more} worlds", results.len()),
+            };
             text(p, pos2(field_rect().max.x - 28.0, field_rect().center().y), Align2::RIGHT_CENTER, Txt::new(count, 16.0).color(theme::FG_4));
         }
         let pages = self.pages(d, results.len());
@@ -1505,15 +1521,17 @@ impl Panel {
             text(p, pos2(32.0, heading + 13.0), Align2::LEFT_CENTER, Txt::new(format!("{name} worlds"), 16.5).weight(weight::SEMIBOLD).color(theme::FG));
             let wide = p.layout_job(Txt::new(format!("{name} worlds"), 16.5).weight(weight::SEMIBOLD).job(f32::INFINITY)).size().x;
             text(p, pos2(32.0 + wide + 12.0, heading + 13.0), Align2::LEFT_CENTER, Txt::new("No 3D capture yet", 15.5).color(theme::FG_3));
-            let (h, _) = state(Target::Section(Section::Popular));
-            text(p, pos2(if side { 652.0 } else { 992.0 }, heading + 11.0), Align2::RIGHT_CENTER, Txt::new("See them all \u{203a}", 15.5).weight(weight::SEMIBOLD).color(if h { theme::FG } else { theme::ACCENT }));
-            // Beside few captures, what there is to say of them.
+            let (h, pr) = state(Target::Section(Section::Popular));
             if !side && n % PER_ROW != 0 {
                 let slot = card_rect(n);
-                let x = slot.min.x + 8.0;
-                let said = if n == 1 { "1 world with a 3D capture so far".to_string() } else { format!("{n} worlds with a 3D capture so far") };
-                text(p, pos2(x, slot.center().y - 14.0), Align2::LEFT_CENTER, Txt::new(said, 16.0).weight(weight::MEDIUM).color(theme::FG_2));
-                text(p, pos2(x, slot.center().y + 12.0), Align2::LEFT_CENTER, Txt::new("Open one to walk in it", 15.5).color(theme::FG_3));
+                let slot = if pr { slot.shrink(3.0) } else { slot };
+                p.rect_filled(slot, CornerRadius::same(20), if h { RAISED } else { SURFACE });
+                widgets::icon(p, slot.center() - vec2(0.0, 46.0), icons::GLOBE_HEMISPHERE_WEST, 40.0, theme::ACCENT);
+                text(p, slot.center() + vec2(0.0, 2.0), Align2::CENTER_CENTER, Txt::new("Other worlds", 20.0).weight(weight::SEMIBOLD).color(theme::FG));
+                text(p, slot.center() + vec2(0.0, 30.0), Align2::CENTER_CENTER, Txt::new("Every popular one, or search for any", 15.5).color(theme::FG_2));
+                text(p, slot.center() + vec2(0.0, 60.0), Align2::CENTER_CENTER, Txt::new("See them all \u{203a}", 16.0).weight(weight::SEMIBOLD).color(if h { theme::FG } else { theme::ACCENT }));
+            } else {
+                text(p, pos2(if side { 652.0 } else { 992.0 }, heading + 11.0), Align2::RIGHT_CENTER, Txt::new("See them all \u{203a}", 15.5).weight(weight::SEMIBOLD).color(if h { theme::FG } else { theme::ACCENT }));
             }
         }
         // Few captures yet: the free space goes on to the worlds that are there.
@@ -1630,12 +1648,11 @@ impl Panel {
                 p.line_segment([at, at + vec2(0.0, y * arm)], stroke);
             }
             let words = if near { "Close your grip" } else { "Grip to take it" };
-            let ink = if near { theme::ON_ACCENT } else { theme::FG };
+            // Right under the hole, off the capture, and with nothing around it: this is done with a hand, and is no button for a laser.
+            let ink = if near { theme::ACCENT } else { theme::FG };
             let galley = p.layout_job(Txt::new(words, 21.0).weight(weight::BOLD).color(ink).job(f32::INFINITY));
-            // Right under the hole, off the capture: nothing lies over what it says can be taken.
-            p.rect_filled(VR_GRIP, CornerRadius::same(22), if near { theme::ACCENT } else { RAISED2 });
-            let left = VR_GRIP.center().x - (galley.size().x + 34.0) / 2.0;
-            widgets::icon(p, pos2(left + 13.0, VR_GRIP.center().y), icons::HAND_GRABBING, 26.0, if near { theme::ON_ACCENT } else { theme::ACCENT });
+            let left = VR_GRIP.max.x - galley.size().x - 34.0;
+            widgets::icon(p, pos2(left + 13.0, VR_GRIP.center().y), icons::HAND_GRABBING, 27.0, theme::ACCENT);
             p.galley(pos2(left + 34.0, VR_GRIP.center().y - galley.size().y / 2.0), galley, ink);
         } else {
             let hero = if vr { VR_HERO } else { SIDE_HERO };
@@ -1677,8 +1694,8 @@ impl Panel {
         if !vr {
             let (h, pr) = state(Target::CloseSide);
             let tab = if pr { SIDE_CLOSE.shrink(1.0) } else { SIDE_CLOSE };
-            p.rect_filled(tab, CornerRadius::same(14), if h { RAISED2 } else { RAISED });
-            widgets::icon(p, tab.center(), icons::CARET_RIGHT, 20.0, theme::FG);
+            p.circle_filled(tab.center(), tab.width() / 2.0, if h { theme::black(0.92) } else { theme::black(0.72) });
+            widgets::icon(p, tab.center(), icons::X, 20.0, theme::FG);
         }
         // Its name, as long as it is; who made it.
         let (x, width) = if vr { (VR_LEFT, SIDE_RIGHT - VR_LEFT) } else { (SIDE_LEFT, SIDE_RIGHT - SIDE_LEFT) };
@@ -1740,16 +1757,16 @@ impl Panel {
                 Target::OpenWeb => icon_button(p, *rect, icons::ARROW_SQUARE_OUT, false, "Web page", RAISED, theme::FG, h, pr, rest),
                 Target::Like => {
                     let (bg, fg) = if wf.liked { (theme::alpha(theme::REC, 0.22), theme::REC) } else { (RAISED, theme::FG) };
-                    small_action(p, *rect, icons::HEART, wf.liked, wf.likes as u64, "Likes", bg, fg, h, pr, rest * if wf.loading { 0.75 } else { 1.0 });
+                    small_action(p, *rect, icons::HEART, wf.liked, wf.likes as u64, if wf.likes == 0 { "Like" } else { "Likes" }, bg, fg, h, pr, rest * if wf.loading { 0.75 } else { 1.0 });
                 }
-                Target::Comments if *rect != TEASER => small_action(p, *rect, icons::CHAT_CIRCLE_TEXT, false, wf.comment_count as u64, "Comments", RAISED, theme::FG, h, pr, rest),
+                Target::Comments if *rect != TEASER => small_action(p, *rect, icons::CHAT_CIRCLE_TEXT, false, wf.comment_count as u64, if wf.comment_count == 0 { "Comment" } else { "Comments" }, RAISED, theme::FG, h, pr, rest),
                 Target::Pictures => {
                     let n = facts.map_or(entry.pictures as usize, |f| f.picture_count.max(entry.pictures as usize));
                     small_action(p, *rect, icons::IMAGES, false, n as u64, "Pictures", RAISED, theme::FG, h, pr, rest);
                 }
                 Target::Labels => {
                     let given = wf.top().len();
-                    small_action(p, *rect, icons::TAG, false, given as u64, "Labels", RAISED, theme::FG, h, pr, rest);
+                    small_action(p, *rect, icons::TAG, false, given as u64, if given == 0 { "Label it" } else { "Labels" }, RAISED, theme::FG, h, pr, rest);
                 }
                 Target::Other => {
                     let n = d.others(entry).len();
@@ -1847,8 +1864,10 @@ fn compact_rect(i: usize) -> Rect {
     Rect::from_min_size(pos2(32.0 + i as f32 * 328.0, 100.0), vec2(304.0, 120.0))
 }
 
+/// A card's picture beside the side panel: all of it, as its world made it, for its own words are often on it.
 fn compact_thumb(card: Rect) -> Rect {
-    Rect::from_min_size(card.min + vec2(10.0, 10.0), vec2(112.0, 100.0))
+    let high = card.height() - 20.0;
+    Rect::from_min_size(card.min + vec2(10.0, 10.0), vec2(high * 16.0 / 9.0, high))
 }
 
 /// The keyboard's keys: digits, three rows of letters (Backspace at the end of the last), then the space bar; with

@@ -162,6 +162,8 @@ pub struct WorldVisit {
     pub line: String,
     /// VRChat's location of the last time.
     pub location: String,
+    /// The person is in that very instance now.
+    pub here: bool,
     /// The times before: location, and how long ago.
     pub earlier: Vec<(String, String)>,
     pub picture: Option<TextureId>,
@@ -273,6 +275,10 @@ pub struct Facts {
     pub gallery_reading: bool,
     pub opened: Option<usize>,
     pub opened_picture: Option<TextureId>,
+    /// A capture shown on the sheet in 3D, on the desktop: how far it is, and its picture now.
+    pub opened_view: Option<OpenedView>,
+    /// The world's player's video's own picture.
+    pub world_video_picture: Option<TextureId>,
     pub recent_words: Vec<(usize, String, Option<f32>)>,
     pub recent_pictures: Vec<(usize, TextureId)>,
     /// The band under VRChat's tabs is up, and says what is pointed at.
@@ -329,6 +335,8 @@ pub struct Facts {
     pub digits: bool,
     /// The wing or its strip lies beside the sheet: it has the name and what plays already.
     pub beside_wing: bool,
+    /// The Quick Menu's parts are in a strip under it: its caption lies under that.
+    pub strip_caption: bool,
     /// What the Instances sheet lists, and what the last invite said.
     pub worlds_visited: Vec<WorldVisit>,
     pub invite_said: Option<String>,
@@ -349,6 +357,16 @@ pub struct Facts {
     pub can_light: bool,
     /// In VR, a close on the sheet and the wing.
     pub vr_close: bool,
+}
+
+/// A capture turning on a sheet.
+#[derive(Clone, Debug, PartialEq)]
+pub struct OpenedView {
+    /// Its picture, once there is one; the plate it stands on, as a line over it (0 to 1).
+    pub picture: Option<TextureId>,
+    pub plate: Vec<[f32; 2]>,
+    /// Why it cannot show.
+    pub failed: Option<String>,
 }
 
 /// Something to point at on a panel.
@@ -401,6 +419,12 @@ pub enum Look {
     NewTalk,
     /// A world the person was in: its picture, name and last time.
     Visit(usize),
+    /// One of the tools, in a sheet's head: from any sheet to any other, with or without the wing.
+    HeadTab { icon: &'static str, label: &'static str, on: bool },
+    /// Over the Instances sheet's rows: what they offer, once.
+    VisitHead,
+    /// Where the Invite me of the instance the person is in would be.
+    HereNow,
     /// A button to a world's instance: 0 the last time and the main one, else one of the times before.
     Chip { group: usize, visit: usize },
     /// A tile as VRChat's: its icon over its label, edged.
@@ -432,6 +456,8 @@ pub enum Look {
 }
 
 const GAP: f32 = 6.0;
+/// How wide Hide tiles is, of the wing's name's width.
+const HIDE_TILES: f32 = 122.0;
 
 fn r(x: f32, y: f32, w: f32, h: f32) -> Rect {
     Rect::from_min_size(pos2(x, y), vec2(w, h))
@@ -450,7 +476,8 @@ pub fn items(zone: Zone, size: Vec2, facts: &Facts) -> Vec<Item> {
         Zone::WheelPlaying => vec![Item { action: Action::PlayPause, rect: whole, look: Look::Playing }],
         Zone::WheelAll => cell(Action::All, icons::SQUARES_FOUR, "All tools", false),
         Zone::WheelInstances => cell(Action::Page(Target::Instances), icons::CLOCK, "Instances", false),
-        Zone::WheelPictures => cell(Action::Pictures, icons::IMAGES, "Pictures", false),
+        // While a picture waits, this cell is what calls it off.
+        Zone::WheelPictures => cell(if facts.picture_wait.is_some() { Action::Picture(facts.picture_mode.unwrap_or(PhotoMode::World)) } else { Action::Pictures }, icons::IMAGES, "Pictures", false),
         Zone::BloomPeople => vec![Item { action: Action::Picture(PhotoMode::People), rect: whole, look: Look::Picture(PhotoMode::People) }],
         Zone::BloomWorld => vec![Item { action: Action::Picture(PhotoMode::World), rect: whole, look: Look::Picture(PhotoMode::World) }],
         Zone::BloomRecord => vec![Item { action: Action::Record, rect: whole, look: Look::Record }],
@@ -463,7 +490,7 @@ pub fn items(zone: Zone, size: Vec2, facts: &Facts) -> Vec<Item> {
         Zone::WingName => {
             // One close at a time: the sheet has its own.
             if facts.vr_close && facts.sheet.is_none() {
-                vec![Item { action: Action::Hide, rect: r(w - 74.0, 2.0, 72.0, 26.0), look: Look::HideWord }]
+                vec![Item { action: Action::Hide, rect: r(w - HIDE_TILES, 0.0, HIDE_TILES, h), look: Look::HideWord }]
             } else {
                 Vec::new()
             }
@@ -479,6 +506,7 @@ pub fn items(zone: Zone, size: Vec2, facts: &Facts) -> Vec<Item> {
         Zone::SheetHint => Vec::new(),
         Zone::SheetBack => {
             let mut out = vec![Item { action: Action::CloseSheet, rect: r(w - 40.0, 7.0, 30.0, 30.0), look: Look::Close }];
+            out.extend(head_tabs(facts).0);
             // While a capture shows around the person: it is one press from gone, wherever on the sheet.
             if facts.view_showing {
                 out.push(Item { action: Action::HideView, rect: r(w - 40.0 - 8.0 - 96.0, 7.0, 96.0, 30.0), look: Look::HideView });
@@ -502,13 +530,41 @@ pub fn items(zone: Zone, size: Vec2, facts: &Facts) -> Vec<Item> {
     }
 }
 
+/// The tools along a sheet's head, and where they end. Their names where there is room; with something else to say in the head, or for a laser, icons but for the one that is open.
+fn head_tabs(facts: &Facts) -> (Vec<Item>, f32) {
+    const TABS: [(Action, &str, &str, f32); 6] = [
+        (Action::Worlds, icons::GLOBE_HEMISPHERE_WEST, "Worlds", 84.0),
+        (Action::Page(Target::YouTube), icons::YOUTUBE_LOGO, "YouTube", 90.0),
+        (Action::Page(Target::Instances), icons::CLOCK, "Instances", 100.0),
+        (Action::Pictures, icons::IMAGES, "Pictures", 90.0),
+        (Action::Talk, icons::MICROPHONE, "Ask", 62.0),
+        (Action::All, icons::SQUARES_FOUR, "All tools", 90.0),
+    ];
+    let compact = !facts.desktop || facts.view_showing || status_now(facts).is_some();
+    let open = |action: Action| match (facts.sheet, action) {
+        (Some(Sheet::Worlds), Action::Worlds) | (Some(Sheet::All), Action::All) | (Some(Sheet::Pictures), Action::Pictures) | (Some(Sheet::Talk), Action::Talk) => true,
+        (Some(Sheet::Instances), Action::Page(Target::Instances)) | (Some(Sheet::Results), Action::Page(Target::YouTube)) => true,
+        (Some(Sheet::Menu), Action::Page(Target::YouTube)) => facts.sheet_title == "YouTube",
+        _ => false,
+    };
+    let mut x = 10.0;
+    let mut out = Vec::new();
+    for (action, icon, label, wide) in TABS {
+        let on = open(action);
+        let width = if compact && !on { 36.0 } else { wide };
+        out.push(Item { action, rect: r(x, 7.0, width, 30.0), look: Look::HeadTab { icon, label, on } });
+        x += width + 3.0;
+    }
+    (out, x)
+}
+
 /// The wing's tiles in a row: its mark, then the six.
 fn strip(w: f32, h: f32, facts: &Facts) -> Vec<Item> {
     const PAD: f32 = 5.0;
     const MARK: f32 = 34.0;
     // What plays at its end, when anything does: the wing has it at its foot.
-    let cells = if facts.music.is_some() { 7.0 } else { 6.0 };
-    let width = (w - MARK - PAD * 2.0 - GAP * (cells - 1.0)) / cells;
+    let cells: f32 = if facts.music.is_some() { 7.7 } else { 6.0 };
+    let width = (w - MARK - PAD * 2.0 - GAP * (cells.ceil() - 1.0)) / cells;
     let at = |c: f32| r(MARK + PAD + c * (width + GAP), PAD, width, h - PAD * 2.0);
     let tile = |action, icon, label, badge, rect| Item { action, rect, look: Look::Tile { icon, label, badge } };
     let mut items = vec![
@@ -520,7 +576,7 @@ fn strip(w: f32, h: f32, facts: &Facts) -> Vec<Item> {
         tile(Action::All, icons::SQUARES_FOUR, "All tools", false, at(5.0)),
     ];
     if facts.music.is_some() {
-        items.push(Item { action: Action::PlayPause, rect: at(6.0), look: Look::PlayingSmall });
+        items.push(Item { action: Action::PlayPause, rect: r(at(6.0).left(), PAD, width * 1.7, h - PAD * 2.0), look: Look::PlayingSmall });
     }
     items
 }
@@ -558,20 +614,21 @@ fn sheet_page_items(sheet: Sheet, facts: &Facts) -> Vec<Item> {
             small.push((Action::Page(Target::Qr), icons::QR_CODE, "QR code"));
             small.push((Action::Page(Target::Suggest), icons::CHAT_TEARDROP_TEXT, "Suggest"));
             small.push((Action::OpenApp, icons::N4N0_MARK, "Open Orbiters"));
-            const PER_ROW: usize = 6;
-            let (small_h, small_gap) = (60.0, 8.0);
-            let small_rows = small.len().div_ceil(PER_ROW) as f32;
+            // In two rows, whatever there is: they are read, and aimed at.
+            let per_row = small.len().div_ceil(2).max(3);
+            let (small_h, small_gap) = (50.0, 8.0);
+            let small_rows = small.len().div_ceil(per_row) as f32;
             let block = small_rows * small_h + (small_rows - 1.0) * small_gap;
             let free = 576.0 - y0 * 2.0 - gap * 2.0 - block;
-            let (first_h, second_h) = (free * 0.58, free * 0.42);
+            let (first_h, second_h) = (free * 0.56, free * 0.44);
             // Worlds in 3D largest, then what people come for; what plays with all its controls, there, with no page of its own.
             let first_w = (width - gap * 2.0) * 0.42;
             let rest_w = (width - gap * 2.0 - first_w) / 2.0;
             let hero = |action, rect, icon, label, line, badge| Item { action, rect, look: Look::Hero { icon, label, line, badge, tint: tool_tint(action) } };
             let row2 = y0 + first_h + gap;
             let mut out = vec![
-                hero(Action::Worlds, r(x0, y0, first_w, first_h), icons::GLOBE_HEMISPHERE_WEST, "Worlds in 3D", "Search any world, and walk in the 3D captures of those that have one", true),
-                hero(Action::Page(Target::YouTube), r(x0 + first_w + gap, y0, rest_w, first_h), icons::YOUTUBE_LOGO, "YouTube", "Find a video for the world's player", false),
+                hero(Action::Worlds, r(x0, y0, first_w, first_h), icons::GLOBE_HEMISPHERE_WEST, "Worlds in 3D", "Search any world. Walk through the ones captured in 3D.", true),
+                hero(Action::Page(Target::YouTube), r(x0 + first_w + gap, y0, rest_w, first_h), icons::YOUTUBE_LOGO, "YouTube", "Find a video for this world's player", false),
                 hero(Action::Page(Target::Instances), r(x0 + first_w + gap * 2.0 + rest_w, y0, rest_w, first_h), icons::CLOCK, "Instances", "Where you were lately: go back", false),
             ];
             let playing = r(x0, row2, first_w + gap + rest_w, second_h);
@@ -579,7 +636,7 @@ fn sheet_page_items(sheet: Sheet, facts: &Facts) -> Vec<Item> {
             out.extend(now_playing_controls(playing, facts));
             out.push(hero(Action::Pictures, r(playing.right() + gap, row2, rest_w, second_h), icons::IMAGES, "Pictures", "Your pictures and 3D captures", false));
             let top = row2 + second_h + gap;
-            for (i, row) in small.chunks(PER_ROW).enumerate() {
+            for (i, row) in small.chunks(per_row).enumerate() {
                 let w = (width - small_gap * (row.len() as f32 - 1.0)) / row.len() as f32;
                 let y = top + i as f32 * (small_h + small_gap);
                 for (c, (action, icon, label)) in row.iter().enumerate() {
@@ -604,7 +661,7 @@ fn sheet_page_items(sheet: Sheet, facts: &Facts) -> Vec<Item> {
                 out.push(Item { action: Action::VideoDrop(i), rect: r(rect.left(), rect.bottom() - 42.0, main, 40.0), look: Look::VideoDrop });
                 out.push(Item { action: Action::Video(i), rect: r(rect.left() + main + 6.0, rect.bottom() - 42.0, rect.width() - main - 6.0, 40.0), look: Look::VideoCopy(i) });
             }
-            out.push(Item { action: Action::ResultsBack, rect: r(24.0, 8.0, 44.0, 44.0), look: Look::Back });
+            out.push(Item { action: Action::ResultsBack, rect: r(24.0, 8.0, 520.0, 44.0), look: Look::Back });
             out
         }
         Sheet::Talk => {
@@ -616,11 +673,11 @@ fn sheet_page_items(sheet: Sheet, facts: &Facts) -> Vec<Item> {
         }
         Sheet::Instances => {
             let (x0, y0, height, gap) = (24.0, VISIT_TOP, VISIT_HEIGHT, VISIT_GAP);
-            let mut out = Vec::new();
+            let mut out = vec![Item { action: Action::Idle, rect: r(0.0, 0.0, 1024.0, VISIT_HEAD), look: Look::VisitHead }];
             for (i, visit) in facts.worlds_visited.iter().enumerate() {
                 let y = y0 + i as f32 * (height + gap) - facts.gallery_scroll;
                 // Only what shows is laid on the page.
-                if y + height < 0.0 || y > 576.0 {
+                if y + height < VISIT_HEAD || y > 576.0 {
                     continue;
                 }
                 out.push(Item { action: Action::Idle, rect: r(x0, y, 1024.0 - x0 * 2.0, height), look: Look::Visit(i) });
@@ -628,10 +685,17 @@ fn sheet_page_items(sheet: Sheet, facts: &Facts) -> Vec<Item> {
                 let right = 1024.0 - x0 - 12.0;
                 let width = INVITE_WIDTH;
                 let top = y + (height - 50.0) / 2.0;
-                out.push(Item { action: Action::Invite(i, 0), rect: r(right - width, top, width, 50.0), look: Look::Chip { group: i, visit: 0 } });
+                // Where the person is now is nowhere to be invited to.
+                if top >= VISIT_HEAD {
+                    if visit.here {
+                        out.push(Item { action: Action::Idle, rect: r(right - width, top, width, 50.0), look: Look::HereNow });
+                    } else {
+                        out.push(Item { action: Action::Invite(i, 0), rect: r(right - width, top, width, 50.0), look: Look::Chip { group: i, visit: 0 } });
+                    }
+                }
                 let shown = visit.earlier.len().min(EARLIER_SHOWN);
                 let left = right - width - 8.0 - shown as f32 * (EARLIER_WIDTH + 6.0);
-                for n in 0..shown {
+                for n in (0..shown).filter(|_| top >= VISIT_HEAD) {
                     out.push(Item { action: Action::Invite(i, n + 1), rect: r(left + n as f32 * (EARLIER_WIDTH + 6.0), top + 2.0, EARLIER_WIDTH, 46.0), look: Look::Chip { group: i, visit: n + 1 } });
                 }
             }
@@ -649,9 +713,9 @@ fn sheet_page_items(sheet: Sheet, facts: &Facts) -> Vec<Item> {
             if picture_beside(facts, n, true).is_some() {
                 out.push(Item { action: Action::PictureStep(true), rect: r(958.0, 262.0, 52.0, 52.0), look: Look::Step(true) });
             }
-            // On the desktop a capture is seen here first, and in the app's window after: nothing else can show it in 3D there.
+            // On the desktop a capture turns here, and is walked in in the app's window.
             if facts.desktop && facts.recent.get(n).is_some_and(|r| r.kind == RecentKind::Capture) {
-                out.push(Item { action: Action::OpenApp, rect: r(1024.0 - 24.0 - 360.0, 576.0 - 70.0, 360.0, 50.0), look: Look::OpenWindow });
+                out.push(Item { action: Action::OpenApp, rect: r(1024.0 - 20.0 - 316.0, 576.0 - 68.0, 316.0, 50.0), look: Look::OpenWindow });
             }
             out
         }
@@ -743,7 +807,9 @@ fn talk_line_height(text: &str) -> f32 {
 }
 
 /// The Instances sheet's rows.
-const VISIT_TOP: f32 = 10.0;
+/// What stays over the rows as they scroll: one line on what they offer, and over their columns what those are.
+const VISIT_HEAD: f32 = 40.0;
+const VISIT_TOP: f32 = 44.0;
 const VISIT_HEIGHT: f32 = 90.0;
 const VISIT_GAP: f32 = 8.0;
 
@@ -938,8 +1004,8 @@ fn hero_body(p: &Painter, body: Rect, action: Action, line: &str, facts: &Facts)
             p.text(pos2(body.left(), body.bottom() - 9.0), Align2::LEFT_CENTER, fit(p, line, &font, body.width()), font, look::MUTED);
         }
         Action::Page(Target::YouTube) => {
-            // What is in the world's player, read; and at its foot where this leads, as large as a button is.
-            let foot = 48.0f32.min(body.height() * 0.45);
+            // What is in this world's player, as itself where its picture is known; and at its foot where this leads, as large as a button is.
+            let foot = 46.0f32.min(body.height() * 0.42);
             let search = Rect::from_min_max(pos2(body.left(), body.bottom() - foot), body.max);
             p.rect_filled(search, theme::radius(foot / 2.0), theme::mix(look::TILE, tool_tint(action), 0.6));
             let font = theme::font(18.0, weight::SEMIBOLD);
@@ -947,19 +1013,33 @@ fn hero_body(p: &Painter, body: Rect, action: Action, line: &str, facts: &Facts)
             let left = search.center().x - (wide + 28.0) / 2.0;
             widgets::icon(p, pos2(left + 10.0, search.center().y), icons::MAGNIFYING_GLASS, 20.0, look::LABEL);
             p.text(pos2(left + 28.0, search.center().y), Align2::LEFT_CENTER, "Search YouTube", font, look::LABEL);
-            let room = body.height() - foot - 8.0;
-            let (title, top) = match &facts.world_video {
-                Some(title) => {
-                    p.text(body.min + vec2(0.0, 9.0), Align2::LEFT_CENTER, "In this world's player", theme::font(15.5, weight::MEDIUM), look::MUTED);
-                    (title.as_str(), 22.0)
-                }
-                None => (line, 0.0),
+            let room = Rect::from_min_max(body.min, pos2(body.right(), search.top() - 8.0));
+            let lines = |p: &Painter, at: Pos2, words: &str, size: f32, w: f32, ink: Color32, rows: usize| -> f32 {
+                let mut job = egui::text::LayoutJob::simple(words.to_string(), theme::font(size, w), ink, room.width() - 20.0);
+                job.wrap.max_rows = rows;
+                job.wrap.overflow_character = Some('\u{2026}');
+                let galley = p.layout_job(job);
+                let high = galley.size().y;
+                p.galley(at, galley, ink);
+                high
             };
-            let rows = ((room - top) / 24.0).floor().max(1.0) as usize;
-            let mut job = egui::text::LayoutJob::simple(title.to_string(), theme::font(19.0, weight::SEMIBOLD), look::LABEL, body.width());
-            job.wrap.max_rows = rows;
-            job.wrap.overflow_character = Some('\u{2026}');
-            p.galley(body.min + vec2(0.0, top), p.layout_job(job), look::LABEL);
+            match (&facts.world_video, facts.world_video_picture) {
+                (Some(title), Some(id)) => {
+                    orbiters_ui::paint::squircle_texture(p, room, radii, id, cover_uv(room.size()), Color32::WHITE);
+                    let points = orbiters_ui::paint::squircle_points_corners(room, radii);
+                    orbiters_ui::paint::fill_gradient(p, &points, &orbiters_ui::paint::Gradient::vertical(room, &[(0.0, Color32::TRANSPARENT), (0.35, theme::alpha(theme::INK_900, 0.25)), (0.65, theme::alpha(theme::INK_900, 0.85)), (1.0, theme::alpha(theme::INK_900, 0.96))]));
+                    let top = (room.bottom() - 74.0).max(room.top() + 4.0);
+                    let high = lines(p, pos2(room.left() + 10.0, top), "This world's player", 14.5, weight::MEDIUM, look::LABEL, 1);
+                    lines(p, pos2(room.left() + 10.0, top + high + 1.0), title, 17.5, weight::SEMIBOLD, Color32::WHITE, 2);
+                }
+                (Some(title), None) => {
+                    let high = lines(p, room.min, "This world's player", 15.5, weight::MEDIUM, look::MUTED, 1);
+                    lines(p, room.min + vec2(0.0, high + 4.0), title, 21.0, weight::SEMIBOLD, look::LABEL, (((room.height() - high) / 27.0).floor() as usize).max(1));
+                }
+                (None, _) => {
+                    lines(p, room.min, line, 21.0, weight::SEMIBOLD, look::LABEL, ((room.height() / 27.0).floor() as usize).max(1));
+                }
+            }
         }
         _ => {
             let rows = (body.height() / 22.0).floor().max(1.0) as usize;
@@ -1003,9 +1083,9 @@ pub fn hit(items: &[Item], p: Pos2) -> Option<usize> {
 /// What the caption says of what is pointed at, in words for someone who has never seen any of this: a title and what it does.
 pub fn caption(action: Action, facts: &Facts) -> Option<(String, String)> {
     let (a, b): (String, String) = match action {
-        Action::Worlds => ("Worlds in 3D".into(), "Search any world. Walk in those with a 3D capture.".into()),
+        Action::Worlds => ("Worlds in 3D".into(), "Search any world. Walk in those captured in 3D.".into()),
         Action::Picture(_) if facts.no_kit => ("This avatar has no capture kit".into(), "Add N4N0 to it in Orbiters, My Avatar, to take 3D pictures with it.".into()),
-        Action::Picture(_) if facts.picture_wait.is_some() => ("Press again to call it off".into(), "Or open VRChat's camera: it then starts by itself.".into()),
+        Action::Picture(_) if facts.picture_wait.is_some() => (if facts.digits && facts.sheet.is_none() { "Press 6 to call it off" } else { "Press to call it off" }.into(), "Or open VRChat's camera: it then starts by itself.".into()),
         Action::Picture(mode) => {
             if let Some(s) = facts.countdown {
                 (format!("3D picture in {s}"), "VRChat's camera then flies around by itself.".into())
@@ -1058,7 +1138,7 @@ pub fn caption(action: Action, facts: &Facts) -> Option<(String, String)> {
         Action::Capture(n) => {
             let recent = facts.recent.get(n)?;
             let says = match recent.kind {
-                RecentKind::Capture if facts.desktop => "See it here, then open it in 3D.",
+                RecentKind::Capture if facts.desktop => "Press to turn it in 3D, right here.",
                 RecentKind::Capture => "Press to see it in 3D around you.",
                 RecentKind::NoView => "It has no 3D yet. The Orbiters window can make it.",
                 RecentKind::Picture => "Press to see it large.",
@@ -1072,8 +1152,8 @@ pub fn caption(action: Action, facts: &Facts) -> Option<(String, String)> {
         Action::Timeline => ("Move in what plays".into(), "Press or drag along it.".into()),
         Action::ScrollBar => ("Scroll".into(), "Hold and move it.".into()),
         Action::Video(i) => (facts.videos.get(i).map_or(String::new(), |v| v.title.clone()), "Press to copy its link, for the world's video player.".into()),
-        Action::VideoDrop(_) => ("Drop it in the world".into(), "A card with its link appears before you, for whoever grabs it.".into()),
-        Action::ResultsBack => ("Back".into(), "To the search.".into()),
+        Action::VideoDrop(_) => ("Drop in world".into(), "Puts a card with the link in front of you, for anyone to grab.".into()),
+        Action::ResultsBack => ("Search again".into(), "Back to the search, to change what you looked for.".into()),
         Action::Talk if facts.n4n0 => ("Ask N4N0".into(), "Your assistant in VRChat: talk to it, and see all it said.".into()),
         Action::Talk => ("Ask N4N0".into(), "Turn N4N0 on in Orbiters first.".into()),
         Action::OpenApp => ("Open Orbiters".into(), "The full app, on your computer.".into()),
@@ -1210,21 +1290,22 @@ pub fn paint(p: &Painter, zone: Zone, size: Vec2, facts: &Facts, hover: Option<u
     let panel = Rect::from_min_size(pos2(0.0, 0.0), size);
     match zone {
         Zone::WheelVeil => {
-            // A dark veil over VRChat's wheel, and whose turn it is at its hub.
+            // Over VRChat's wheel while the ring is what is pointed at: smoked, and what is pointed at lies in it, right beside where the eyes are.
             let c = panel.center();
-            // Solid: what VRChat lights under it has nothing to do with what is pointed at.
-            p.circle_filled(c, size.x / 2.0, Color32::from_rgb(10, 12, 15));
-            widgets::icon(p, c - vec2(0.0, 6.0), icons::N4N0_MARK, 30.0, look::LABEL);
-            text(p, c + vec2(0.0, 18.0), Align2::CENTER_CENTER, if facts.picture_wait.is_some() { "Waiting" } else { "Pointing here" }, 10.0, weight::SEMIBOLD, look::LABEL);
+            p.circle_filled(c, size.x / 2.0, Color32::from_rgba_premultiplied(9, 11, 14, 236));
+            draw_hub(p, c, size.x, facts);
             return;
         }
         Zone::WingName => {
             // The name on a pill of its own, with what runs when it does.
-            p.rect_filled(panel, theme::radius(size.y / 2.0), look::PANEL);
+            // Its Hide is a pill of its own beside it: the name is its mark then, and each has its room.
+            let hide = facts.vr_close && facts.sheet.is_none();
+            p.rect_filled(if hide { Rect::from_min_max(panel.min, pos2(size.x - HIDE_TILES - 4.0, size.y)) } else { panel }, theme::radius(size.y / 2.0), look::PANEL);
             widgets::icon(p, pos2(19.0, size.y / 2.0), icons::N4N0_MARK, 16.0, look::LABEL);
-            // The name in what its Hide leaves it.
-            text(p, pos2(32.0, size.y / 2.0), Align2::LEFT_CENTER, if facts.vr_close && facts.sheet.is_none() { "Orbiters" } else { "Orbiters N4N0" }, 13.0, weight::SEMIBOLD, look::LABEL);
-            let right = size.x - if facts.vr_close && facts.sheet.is_none() { 34.0 } else { 10.0 };
+            if !hide {
+                text(p, pos2(32.0, size.y / 2.0), Align2::LEFT_CENTER, "Orbiters N4N0", 13.0, weight::SEMIBOLD, look::LABEL);
+            }
+            let right = size.x - if hide { HIDE_TILES + 12.0 } else { 10.0 };
             if facts.recording {
                 text(p, pos2(right, size.y / 2.0), Align2::RIGHT_CENTER, &clock(facts.recording_seconds.unwrap_or(0)), 11.0, weight::SEMIBOLD, theme::REC);
             } else if let Some(done) = facts.reconstructing {
@@ -1256,19 +1337,16 @@ pub fn paint(p: &Painter, zone: Zone, size: Vec2, facts: &Facts, hover: Option<u
             let round = (look::RADIUS + 2.0) as u8;
             p.rect_filled(Rect::from_min_max(panel.min, pos2(panel.right(), panel.top() + SHEET_HEAD)), egui::CornerRadius { nw: round, ne: round, sw: 0, se: 0 }, theme::alpha(tint, 0.11));
             top_light(p, panel);
-            // Beside the wing, which has the name, the head only says the page.
-            let mut x = 18.0;
-            if !facts.beside_wing {
-                widgets::icon(p, pos2(x + 10.0, 22.0), icons::N4N0_MARK, 20.0, look::LABEL);
-                text(p, pos2(x + 28.0, 22.0), Align2::LEFT_CENTER, "Orbiters", 14.0, weight::SEMIBOLD, look::MUTED);
-                x += 94.0;
+            // The tools along it say which page this is; a page of N4N0's own says so after them.
+            let (tabs, mut x) = head_tabs(facts);
+            if !tabs.iter().any(|t| matches!(t.look, Look::HeadTab { on: true, .. })) {
+                widgets::icon(p, pos2(x + 10.0, 22.0), glyph, 21.0, tint);
+                x += 28.0;
+                text(p, pos2(x, 22.0), Align2::LEFT_CENTER, &facts.sheet_title, 18.0, weight::SEMIBOLD, look::LABEL);
+                x += p.layout_no_wrap(facts.sheet_title.clone(), theme::font(18.0, weight::SEMIBOLD), Color32::WHITE).size().x;
             }
-            widgets::icon(p, pos2(x + 10.0, 22.0), glyph, 21.0, tint);
-            x += 28.0;
-            text(p, pos2(x, 22.0), Align2::LEFT_CENTER, &facts.sheet_title, 18.0, weight::SEMIBOLD, look::LABEL);
-            let title = p.layout_no_wrap(facts.sheet_title.clone(), theme::font(18.0, weight::SEMIBOLD), Color32::WHITE).size().x;
-            // Well clear of the title, in a column of its own.
-            let from = (x + title + 28.0).max(170.0);
+            // Well clear of them, in a column of its own.
+            let from = x + 12.0;
             // The head is where this sheet says what is going on: nothing lies over or under it.
             if let Some((first, second)) = status_now(facts) {
                 let room = size.x - 50.0 - if facts.view_showing { 206.0 } else { 0.0 } - from;
@@ -1284,13 +1362,6 @@ pub fn paint(p: &Painter, zone: Zone, size: Vec2, facts: &Facts, hover: Option<u
                 let small = theme::font(11.5, weight::MEDIUM);
                 p.text(pos2(from, 14.0), Align2::LEFT_CENTER, fit(p, &first, &big, room), big, look::LABEL);
                 p.text(pos2(from, 31.0), Align2::LEFT_CENTER, fit(p, &second, &small, room), small, look::MUTED);
-            // What the buttons of its rows do, once.
-            } else if facts.sheet == Some(Sheet::Instances) {
-                let room = size.x - 50.0 - from;
-                let big = theme::font(13.0, weight::BOLD);
-                let small = theme::font(11.5, weight::MEDIUM);
-                p.text(pos2(from, 14.0), Align2::LEFT_CENTER, fit(p, "Invite me goes to your last visit", &big, room), big, look::LABEL);
-                p.text(pos2(from, 31.0), Align2::LEFT_CENTER, fit(p, "A time goes to that earlier visit", &small, room), small, look::LABEL);
             } else if let (Some((name, playing)), false, false) = (facts.music.as_ref().filter(|_| !facts.view_showing), facts.beside_wing, facts.sheet == Some(Sheet::All)) {
                 let font = theme::font(12.0, weight::SEMIBOLD);
                 let right = size.x - 56.0 - 26.0 * 3.0 - 8.0;
@@ -1303,16 +1374,21 @@ pub fn paint(p: &Painter, zone: Zone, size: Vec2, facts: &Facts, hover: Option<u
     for (i, item) in items(zone, size, facts).iter().enumerate() {
         draw(p, zone, item, facts, hover == Some(i), pressed == Some(i));
     }
+    // A list goes on under its foot: it fades there, and is not cut.
+    if zone == Zone::Takeover && facts.opened.is_none() {
+        if let Some(sheet) = facts.sheet.filter(|s| matches!(s, Sheet::Pictures | Sheet::Instances | Sheet::Results)) {
+            if facts.gallery_scroll < max_scroll(sheet, facts) - 1.0 {
+                let foot = Rect::from_min_max(pos2(0.0, 576.0 - 56.0), pos2(1024.0 - SCROLL_BAR_GRAB, 576.0));
+                orbiters_ui::paint::fill_gradient(p, &[foot.left_top(), foot.right_top(), foot.right_bottom(), foot.left_bottom()], &orbiters_ui::paint::Gradient::vertical(foot, &[(0.0, Color32::TRANSPARENT), (1.0, look::OPAQUE)]));
+            }
+        }
+    }
 }
 
 /// Draws a sheet's page (in N4N0's page's units): native to these menus, in VRChat's manner.
 pub fn paint_sheet(p: &Painter, sheet: Sheet, facts: &Facts, hover: Option<usize>, pressed: Option<usize>) {
     let page = Rect::from_min_size(pos2(0.0, 0.0), vec2(1024.0, 576.0));
     p.rect_filled(page, 0.0, look::OPAQUE);
-    if sheet == Sheet::Results {
-        let font = theme::font(20.0, weight::SEMIBOLD);
-        p.text(pos2(82.0, 30.0), Align2::LEFT_CENTER, fit(p, &facts.videos_for, &font, 880.0), font, look::LABEL);
-    }
     if sheet == Sheet::Talk {
         draw_conversation(p, facts);
     }
@@ -1344,10 +1420,20 @@ fn draw_conversation(p: &Painter, facts: &Facts) {
         let (first, second) = if matches!(facts.talk, TalkNow::Listening(_)) {
             ("Go ahead", "N4N0 is listening. Press the button again when you are done.")
         } else {
-            ("Nothing said yet", "Press the button, and ask N4N0 anything. What you both say stays here.")
+            ("Nothing said yet", "Press the button, and ask N4N0 anything.")
         };
-        text(p, pos2(TALK_LEFT + 2.0, TALK_TOP + 18.0), Align2::LEFT_CENTER, first, 19.0, weight::SEMIBOLD, look::MUTED);
-        text(p, pos2(TALK_LEFT + 2.0, TALK_TOP + 46.0), Align2::LEFT_CENTER, second, 16.0, weight::MEDIUM, look::MUTED);
+        text(p, pos2(TALK_LEFT + 2.0, TALK_TOP + 22.0), Align2::LEFT_CENTER, first, 27.0, weight::BOLD, look::LABEL);
+        let font = theme::font(18.5, weight::MEDIUM);
+        p.text(pos2(TALK_LEFT + 2.0, TALK_TOP + 58.0), Align2::LEFT_CENTER, fit(p, second, &font, TALK_WIDTH - 4.0), font, look::LABEL);
+        // What it can do for real, in words that work.
+        text(p, pos2(TALK_LEFT + 2.0, TALK_TOP + 112.0), Align2::LEFT_CENTER, "You could say", 16.5, weight::MEDIUM, look::MUTED);
+        for (i, (glyph, said)) in [(icons::PLAY, "\u{201c}Pause the music\u{201d}"), (icons::CAMERA, "\u{201c}Take a picture in five seconds\u{201d}"), (icons::LIGHTBULB, "\u{201c}Turn your light on, in blue\u{201d}"), (icons::CHAT_TEARDROP_TEXT, "\u{201c}Tell people I'll be back soon\u{201d}")].into_iter().enumerate() {
+            let row = Rect::from_min_size(pos2(TALK_LEFT, TALK_TOP + 134.0 + i as f32 * 70.0), vec2(TALK_WIDTH, 62.0));
+            p.rect_filled(row, theme::radius(look::TILE_RADIUS + 2.0), look::TILE);
+            widgets::icon(p, pos2(row.left() + 32.0, row.center().y), glyph, 26.0, look::MUTED);
+            let font = theme::font(20.0, weight::SEMIBOLD);
+            p.text(pos2(row.left() + 60.0, row.center().y), Align2::LEFT_CENTER, fit(p, said, &font, row.width() - 72.0), font, look::LABEL);
+        }
         return;
     }
     let clip = p.with_clip_rect(area);
@@ -1445,33 +1531,105 @@ fn curved(p: &Painter, center: Pos2, radius: f32, middle: f32, s: &str, size: f3
     }
 }
 
-/// Where a cell's icon lies, and how large. With a key to show it moves out along the cell's axis, for the key under it.
-fn cell_icon(ring: Ring, center: Pos2, facts: &Facts, size: f32) -> (Pos2, f32) {
-    let (radius, size) = if facts.digits { (ring.inner + 34.0, size * 0.85) } else { (ring.inner + 24.0, size) };
-    (center + zones::polar(radius, ring.middle()), size)
+/// What the disc over VRChat's wheel says: the tool pointed at, with its colour and in a line what it does; what a 3D picture waits for; or only whose it is.
+fn draw_hub(p: &Painter, c: Pos2, across: f32, facts: &Facts) {
+    let wrapped = |p: &Painter, top: f32, words: &str, size: f32, w: f32, ink: Color32, rows: usize, room: f32| -> f32 {
+        let mut job = egui::text::LayoutJob::simple(words.to_string(), theme::font(size, w), ink, room);
+        job.wrap.max_rows = rows;
+        job.wrap.overflow_character = Some('\u{2026}');
+        job.halign = egui::Align::Center;
+        let galley = p.layout_job(job);
+        let high = galley.size().y;
+        p.galley(pos2(c.x, top), galley, ink);
+        high
+    };
+    let room = across * 0.74;
+    if let (Some(wait), None) = (facts.picture_wait, facts.pointed) {
+        let _ = wait;
+        widgets::icon(p, c - vec2(0.0, 32.0), icons::CAMERA, 34.0, theme::mix(tool_tint(Action::Pictures), Color32::WHITE, 0.3));
+        let of = if facts.picture_mode == Some(PhotoMode::People) { "3D picture of people" } else { "3D picture of this world" };
+        let high = wrapped(p, c.y - 6.0, of, 14.0, weight::BOLD, Color32::WHITE, 2, room);
+        wrapped(p, c.y - 2.0 + high, "waits for the camera", 12.0, weight::MEDIUM, look::LABEL, 1, room);
+        return;
+    }
+    let Some((first, second)) = facts.pointed.and_then(|a| caption(a, facts)) else {
+        // Whose it is, and no more.
+        widgets::icon(p, c, icons::N4N0_MARK, 40.0, Color32::from_white_alpha(60));
+        return;
+    };
+    let action = facts.pointed.unwrap_or(Action::Idle);
+    if let (Action::PlayPause, Some(id)) = (action, facts.art) {
+        let art = Rect::from_center_size(c - vec2(0.0, 44.0), Vec2::splat(52.0));
+        p.add(RectShape::filled(art, theme::radius(8.0), Color32::WHITE).with_texture(id, cover_uv(art.size())));
+    } else if let Some(icon) = hub_icon(action) {
+        widgets::icon(p, c - vec2(0.0, 44.0), icon, 40.0, part_ink(action));
+    }
+    let high = wrapped(p, c.y - 14.0, &first, 15.0, weight::BOLD, Color32::WHITE, 2, room);
+    wrapped(p, c.y - 11.0 + high, &second, 11.5, weight::MEDIUM, look::LABEL, if high > 24.0 { 2 } else { 3 }, room);
+}
+
+/// The icon of what the disc says.
+fn hub_icon(action: Action) -> Option<&'static str> {
+    Some(match action {
+        Action::Worlds => icons::GLOBE_HEMISPHERE_WEST,
+        Action::Page(Target::YouTube) => icons::YOUTUBE_LOGO,
+        Action::Page(Target::Instances) => icons::CLOCK,
+        Action::Pictures => icons::IMAGES,
+        Action::All => icons::SQUARES_FOUR,
+        Action::PlayPause => icons::MUSIC_NOTES,
+        Action::Previous => icons::SKIP_BACK,
+        Action::Next => icons::SKIP_FORWARD,
+        Action::Picture(PhotoMode::People) => icons::USERS,
+        Action::Picture(PhotoMode::World) => icons::IMAGE,
+        Action::Record => icons::RECORD,
+        _ => return None,
+    })
+}
+
+/// How large a cell's name is.
+const CELL_WORDS: f32 = 13.5;
+
+/// Where a cell's icon lies on its axis, and how large: between the key at its inner edge and its name at its outer.
+fn cell_icon(ring: Ring, center: Pos2) -> (Pos2, f32) {
+    (center + zones::polar(ring.inner + 30.0, ring.middle()), 32.0)
+}
+
+/// 3D, on an icon's lower corner: the name lies the other way.
+fn corner_badge(p: &Painter, icon_at: Pos2, icon_size: f32) {
+    let b = Rect::from_center_size(icon_at + vec2(icon_size * 0.46, icon_size * 0.26), vec2(23.0, 15.0));
+    p.rect_filled(b.expand(1.5), theme::radius(5.5), look::CELL_FAR);
+    p.rect_filled(b, theme::radius(4.5), look::ACCENT);
+    text(p, b.center(), Align2::CENTER_CENTER, "3D", 10.0, weight::BOLD, look::ON_ACCENT);
 }
 
 /// The colour of a part's icon: its tool's, from All tools, the eye finds it by; the name stays white.
 fn part_ink(action: Action) -> Color32 {
-    theme::mix(tool_tint(action), Color32::WHITE, 0.15)
+    theme::mix(tool_tint(action), Color32::WHITE, 0.3)
 }
 
-/// The number key that picks a cell, on its axis under its icon.
-fn digit(p: &Painter, ring: Ring, center: Pos2) {
-    let at = center + zones::polar(ring.inner + 10.0, ring.middle());
-    let n = match ring.middle().rem_euclid(360.0) as u32 {
-        0 => "1",
-        60 => "2",
-        120 => "3",
-        180 => "4",
-        240 => "5",
-        _ => "6",
-    };
-    // A key's cap: the first way in on a desktop, not a footnote.
-    let cap = Rect::from_center_size(at, Vec2::splat(17.0));
-    p.rect_filled(cap, theme::radius(5.0), theme::INK_600);
-    p.rect_stroke(cap, theme::radius(5.0), Stroke::new(1.0, Color32::from_white_alpha(90)), egui::StrokeKind::Inside);
-    text(p, at, Align2::CENTER_CENTER, n, 13.0, weight::BOLD, Color32::WHITE);
+/// The number key that picks a cell, quiet, on its axis at the cell's inner edge: always in the same place, the first thing past the wheel.
+fn digit(p: &Painter, zone: Zone, ring: Ring, center: Pos2) {
+    let Some(n) = key_of(zone) else { return };
+    let at = center + zones::polar(ring.inner + 9.5, ring.middle());
+    let cap = Rect::from_center_size(at, Vec2::splat(15.0));
+    p.rect_stroke(cap, theme::radius(4.0), Stroke::new(1.0, Color32::from_white_alpha(70)), egui::StrokeKind::Inside);
+    text(p, at, Align2::CENTER_CENTER, n, 11.0, weight::SEMIBOLD, Color32::from_white_alpha(190));
+}
+
+/// The key that picks a part of the wheel.
+pub fn key_of(zone: Zone) -> Option<&'static str> {
+    Some(match zone {
+        Zone::WheelWorlds => "1",
+        Zone::WheelYouTube => "2",
+        Zone::WheelPlaying => "3",
+        Zone::WheelAll => "4",
+        Zone::WheelInstances => "5",
+        Zone::WheelPictures => "6",
+        Zone::BloomPeople => "7",
+        Zone::BloomWorld => "8",
+        Zone::BloomRecord => "9",
+        _ => return None,
+    })
 }
 
 fn is_selected(item: &Item, facts: &Facts) -> bool {
@@ -1492,22 +1650,22 @@ fn draw(p: &Painter, zone: Zone, item: &Item, facts: &Facts, hovered: bool, pres
         Look::Blank => {}
         Look::Cell { icon, label, badge: has_badge } => {
             let (ring, center) = shape.ring.expect("a cell is on a ring");
-            let waiting = item.action == Action::Pictures && facts.picture_wait.is_some();
+            let waiting = zone == Zone::WheelPictures && facts.picture_wait.is_some();
             ring_fill(p, ring, center, if pressed { 1.0 } else if hovered { 0.8 } else if waiting { 0.5 } else { 0.0 });
             ring_rim(p, ring, center, hovered || waiting);
             let label = if waiting { "Waiting for the camera" } else { label };
             // Its icon upright toward the wheel, its name bent along its outer edge.
-            let (at, size) = cell_icon(ring, center, facts, 26.0);
-            widgets::icon(p, at, icon, size, part_ink(item.action));
+            let (at, size) = cell_icon(ring, center);
+            widgets::icon(p, at, icon, size, if hovered && !waiting { Color32::WHITE } else { part_ink(if waiting { Action::Pictures } else { item.action }) });
             if has_badge {
-                badge(p, at, size, look::ACCENT, look::ON_ACCENT);
+                corner_badge(p, at, size);
             }
-            curved(p, center, ring.outer - 12.0, ring.middle(), label, 12.5, weight::BOLD, look::LABEL, true);
+            curved(p, center, ring.outer - 11.5, ring.middle(), label, CELL_WORDS, weight::BOLD, look::LABEL, true);
             if zone.blooms().is_some() {
                 bloom_mark(p, ring, center);
             }
             if facts.digits {
-                digit(p, ring, center);
+                digit(p, zone, ring, center);
             }
         }
         Look::Tile { icon, label, badge: has_badge } => {
@@ -1558,9 +1716,9 @@ fn draw(p: &Painter, zone: Zone, item: &Item, facts: &Facts, hovered: bool, pres
                 p.rect_stroke(rect.shrink(0.75), radius, Stroke::new(1.5, tint), egui::StrokeKind::Middle);
             }
             let at = pos2(rect.left() + 20.0, rect.center().y);
-            widgets::icon(p, at, icon, 22.0, tint);
-            let font = theme::font(15.5, weight::SEMIBOLD);
-            p.text(pos2(rect.left() + 36.0, rect.center().y), Align2::LEFT_CENTER, fit(p, label, &font, rect.width() - 40.0), font, Color32::WHITE);
+            widgets::icon(p, at + vec2(2.0, 0.0), icon, 25.0, tint);
+            let font = theme::font(18.0, weight::SEMIBOLD);
+            p.text(pos2(rect.left() + 44.0, rect.center().y), Align2::LEFT_CENTER, fit(p, label, &font, rect.width() - 50.0), font, Color32::WHITE);
         }
         Look::NowPlaying => {
             let tint = theme::VIOLET;
@@ -1580,7 +1738,7 @@ fn draw(p: &Painter, zone: Zone, item: &Item, facts: &Facts, hovered: bool, pres
             let x = rect.left() + rect.height();
             let room = rect.right() - x - 14.0;
             let font = theme::font(13.0, weight::SEMIBOLD);
-            p.text(pos2(x, rect.top() + 20.0), Align2::LEFT_CENTER, "Now playing", font, tint);
+            p.text(pos2(x, rect.top() + 20.0), Align2::LEFT_CENTER, "Now playing on this computer", font, tint);
             match &facts.music {
                 Some((title, _)) => {
                     let font = theme::font(23.0, weight::BOLD);
@@ -1615,16 +1773,19 @@ fn draw(p: &Painter, zone: Zone, item: &Item, facts: &Facts, hovered: bool, pres
                 if facts.recording {
                     ring_mesh(p, ring, center, theme::mix(theme::REC, Color32::BLACK, 0.35), theme::mix(theme::REC, Color32::BLACK, 0.6));
                 } else {
-                    ring_fill(p, ring, center, if pressed { 0.65 } else if hovered { 0.38 } else { 0.0 });
+                    ring_fill(p, ring, center, if pressed { 1.0 } else if hovered { 0.8 } else { 0.0 });
                 }
                 ring_rim(p, ring, center, hovered);
-                let at = center + zones::polar(ring.inner + 20.0, ring.middle());
+                let (at, _) = cell_icon(ring, center);
                 if facts.recording {
-                    p.rect_filled(Rect::from_center_size(at, Vec2::splat(16.0)), theme::radius(3.0), color);
+                    p.rect_filled(Rect::from_center_size(at, Vec2::splat(18.0)), theme::radius(3.0), color);
                 } else {
-                    p.circle_filled(at, 9.5, if dim { theme::FG_4 } else { theme::REC });
+                    p.circle_filled(at, 11.0, if dim { theme::FG_4 } else { theme::REC });
                 }
-                curved(p, center, ring.outer - 12.0, ring.middle(), &time, 12.0, weight::BOLD, color, true);
+                curved(p, center, ring.outer - 11.5, ring.middle(), &time, CELL_WORDS - 1.0, weight::BOLD, color, true);
+                if facts.digits {
+                    digit(p, zone, ring, center);
+                }
             } else {
                 let tint = theme::REC;
                 let radius = theme::radius(if rect.height() < 60.0 { rect.height() / 2.0 } else { look::TILE_RADIUS + 2.0 });
@@ -1744,8 +1905,15 @@ fn draw(p: &Painter, zone: Zone, item: &Item, facts: &Facts, hovered: bool, pres
             p.text(pos2(rect.left() + 42.0, rect.center().y), Align2::LEFT_CENTER, "Back to pictures", theme::font(15.5, weight::SEMIBOLD), look::LABEL);
         }
         Look::Back => {
-            p.circle_filled(rect.center(), rect.width() / 2.0, if hovered { look::TILE_HOVER } else { look::TILE });
-            widgets::icon(p, rect.center(), icons::CARET_LEFT, 24.0, look::LABEL);
+            // What was searched, as a field: it can be changed from here.
+            let radius = theme::radius(rect.height() / 2.0);
+            p.rect_filled(rect, radius, if hovered { look::TILE_HOVER } else { look::TILE });
+            p.rect_stroke(rect.shrink(0.5), radius, Stroke::new(1.0, Color32::from_white_alpha(if hovered { 110 } else { 44 })), egui::StrokeKind::Inside);
+            widgets::icon(p, pos2(rect.left() + 24.0, rect.center().y), icons::MAGNIFYING_GLASS, 21.0, look::LABEL);
+            let font = theme::font(18.0, weight::SEMIBOLD);
+            let shown = fit(p, &facts.videos_for, &font, rect.width() - 170.0);
+            p.text(pos2(rect.left() + 46.0, rect.center().y), Align2::LEFT_CENTER, shown, font, look::LABEL);
+            p.text(pos2(rect.right() - 18.0, rect.center().y), Align2::RIGHT_CENTER, "Search again", theme::font(14.5, weight::MEDIUM), look::MUTED);
         }
         Look::NewTalk => {
             p.rect_filled(rect, theme::radius(rect.height() / 2.0), if hovered { look::TILE_HOVER } else { look::TILE });
@@ -1783,7 +1951,37 @@ fn draw(p: &Painter, zone: Zone, item: &Item, facts: &Facts, hovered: bool, pres
         Look::Heading(name) => {
             text(p, pos2(rect.left() + 2.0, rect.center().y), Align2::LEFT_CENTER, name, 16.0, weight::BOLD, look::LABEL);
         }
+        Look::HeadTab { icon, label, on } => {
+            let radius = theme::radius(rect.height() / 2.0);
+            let tint = part_ink(item.action);
+            if on {
+                p.rect_filled(rect, radius, theme::alpha(tool_tint(item.action), 0.3));
+                p.rect_stroke(rect.shrink(0.5), radius, Stroke::new(1.0, theme::alpha(tint, 0.8)), egui::StrokeKind::Inside);
+            } else if hovered || pressed {
+                p.rect_filled(rect, radius, look::TILE_HOVER);
+            }
+            if rect.width() > 40.0 {
+                widgets::icon(p, pos2(rect.left() + 16.0, rect.center().y), icon, 17.0, tint);
+                p.text(pos2(rect.left() + 29.0, rect.center().y), Align2::LEFT_CENTER, label, theme::font(13.5, if on { weight::BOLD } else { weight::MEDIUM }), if on { Color32::WHITE } else { look::LABEL });
+            } else {
+                widgets::icon(p, rect.center(), icon, 18.0, tint);
+            }
+        }
+        Look::VisitHead => {
+            p.text(pos2(26.0, 20.0), Align2::LEFT_CENTER, "Invite me: your last visit. Or pick an earlier time.", theme::font(17.0, weight::MEDIUM), look::LABEL);
+            // Over their columns.
+            let right = 1024.0 - 24.0 - 12.0;
+            let font = theme::font(15.0, weight::MEDIUM);
+            p.text(pos2(right - INVITE_WIDTH - 8.0 - 6.0, 22.0), Align2::RIGHT_CENTER, "Earlier visits", font.clone(), look::MUTED);
+            p.text(pos2(right - INVITE_WIDTH / 2.0, 22.0), Align2::CENTER_CENTER, "Last visit", font, look::MUTED);
+        }
+        Look::HereNow => {
+            let clip = p.with_clip_rect(Rect::from_min_max(pos2(0.0, VISIT_HEAD), pos2(1024.0, 576.0)));
+            clip.circle_filled(pos2(rect.left() + 18.0, rect.center().y), 5.0, look::ACCENT);
+            clip.text(pos2(rect.left() + 32.0, rect.center().y), Align2::LEFT_CENTER, "You are here", theme::font(16.5, weight::SEMIBOLD), look::LABEL);
+        }
         Look::Visit(i) => {
+            let p = &p.with_clip_rect(Rect::from_min_max(pos2(0.0, VISIT_HEAD), pos2(1024.0, 576.0)));
             let Some(visit) = facts.worlds_visited.get(i) else { return };
             tile_back(p, rect, false, false, false);
             // The world itself across its row, fading out under what is to read.
@@ -1815,6 +2013,7 @@ fn draw(p: &Painter, zone: Zone, item: &Item, facts: &Facts, hovered: bool, pres
             p.text(pos2(x, rect.center().y + 14.0), Align2::LEFT_CENTER, fit(p, &visit.line, &font, room), font, look::MUTED);
         }
         Look::Chip { group, visit } => {
+            let p = &p.with_clip_rect(Rect::from_min_max(pos2(0.0, VISIT_HEAD), pos2(1024.0, 576.0)));
             let primary = visit == 0;
             let words = if primary {
                 "Invite me".to_string()
@@ -1829,14 +2028,24 @@ fn draw(p: &Painter, zone: Zone, item: &Item, facts: &Facts, hovered: bool, pres
                 Some(InviteChip::Asking) => (theme::mix(look::OPAQUE, look::ACCENT, 0.3), look::LABEL, look::ACCENT, "Asking…".to_string()),
                 Some(InviteChip::Sent) => (look::ACCENT, look::ON_ACCENT, look::ACCENT, "Invited".to_string()),
                 Some(InviteChip::Failed) => (theme::mix(look::OPAQUE, theme::DANGER, 0.3), look::LABEL, theme::DANGER, "Failed".to_string()),
-                // Tinted at rest, so that Invited, solid, says at once what it did.
-                None if primary => (theme::mix(look::OPAQUE, look::ACCENT, if pressed { 0.5 } else if hovered { 0.36 } else { 0.2 }), Color32::WHITE, look::ACCENT, words),
+                // Only the first on offer is solid: a list of them would shout. Invited, solid, then says at once what it did.
+                None if primary && facts.worlds_visited.iter().position(|v| !v.here) == Some(group) => (if pressed { theme::mix(look::ACCENT, Color32::BLACK, 0.25) } else if hovered { theme::mix(look::ACCENT, Color32::WHITE, 0.15) } else { look::ACCENT }, look::ON_ACCENT, look::ACCENT, words),
+                None if primary => (if pressed { theme::mix(look::OPAQUE, look::ACCENT, 0.5) } else if hovered { theme::mix(look::OPAQUE, look::ACCENT, 0.3) } else { look::OPAQUE }, look::LABEL, look::ACCENT, words),
                 None => (if pressed { theme::mix(look::OPAQUE, look::ACCENT, 0.35) } else if hovered { look::TILE_HOVER } else { look::OPAQUE }, look::LABEL, if hovered { look::ACCENT } else { theme::INK_600 }, words),
             };
             p.rect_filled(rect, radius, fill);
             p.rect_stroke(rect, radius, Stroke::new(1.5, edge), egui::StrokeKind::Inside);
             let font = theme::font(if primary { 18.0 } else { 16.5 }, if primary { weight::BOLD } else { weight::SEMIBOLD });
             p.text(rect.center(), Align2::CENTER_CENTER, fit(p, &words, &font, rect.width() - 12.0), font, ink);
+            // A time says what it does, on it.
+            if hovered && !primary && state.is_none() {
+                let said = format!("Invite to {words}");
+                let font = theme::font(15.5, weight::SEMIBOLD);
+                let wide = p.layout_no_wrap(said.clone(), font.clone(), look::ON_ACCENT).size().x + 22.0;
+                let tip = Rect::from_center_size(pos2(rect.center().x, rect.top() - 18.0), vec2(wide, 28.0));
+                p.rect_filled(tip, theme::radius(14.0), look::ACCENT);
+                p.text(tip.center(), Align2::CENTER_CENTER, said, font, look::ON_ACCENT);
+            }
         }
         Look::Playing => {
             let none = facts.music.is_none();
@@ -1846,20 +2055,15 @@ fn draw(p: &Painter, zone: Zone, item: &Item, facts: &Facts, hovered: bool, pres
                 ring_fill(p, ring, center, if pressed { 1.0 } else if hovered && !none { 0.8 } else { 0.0 });
                 ring_rim(p, ring, center, hovered);
                 let ink = if none { look::MUTED } else { look::LABEL };
-                // Its picture a small disc where the other cells have their icon, its play or pause on it; the song in the caption.
-                let (at, size) = cell_icon(ring, center, facts, 34.0);
-                if let (Some(id), false) = (facts.art, none) {
-                    let disc = Rect::from_center_size(at, Vec2::splat(size));
-                    p.add(RectShape::filled(disc, theme::radius(size / 2.0), Color32::from_gray(150)).with_texture(id, cover_uv(disc.size())));
-                    p.circle_stroke(at, size / 2.0, Stroke::new(1.5, Color32::from_white_alpha(70)));
-                }
-                widgets::icon(p, at, glyph, size * 0.53, ink);
-                curved(p, center, ring.outer - 12.0, ring.middle(), "Now playing", 12.5, weight::BOLD, ink, true);
+                // A plain play or pause, as large as the other cells' icons: its picture and the song are for when it is pointed at.
+                let (at, size) = cell_icon(ring, center);
+                widgets::icon_fill(p, at, glyph, size * 0.92, if none { look::MUTED } else { Color32::WHITE });
+                curved(p, center, ring.outer - 11.5, ring.middle(), "Now playing", CELL_WORDS, weight::BOLD, ink, true);
                 if !none {
                     bloom_mark(p, ring, center);
                 }
                 if facts.digits {
-                    digit(p, ring, center);
+                    digit(p, zone, ring, center);
                 }
             } else {
                 tile_back(p, rect, hovered && !none, pressed && !none, false);
@@ -1891,7 +2095,8 @@ fn draw(p: &Painter, zone: Zone, item: &Item, facts: &Facts, hovered: bool, pres
             if let Some((ring, center)) = shape.ring {
                 ring_fill(p, ring, center, if pressed { 1.0 } else if hovered { 0.8 } else { 0.0 });
                 ring_rim(p, ring, center, hovered);
-                widgets::icon(p, shape.at, glyph, 20.0, look::LABEL);
+                let (at, size) = cell_icon(ring, center);
+                widgets::icon(p, at, glyph, size * 0.8, Color32::WHITE);
             } else {
                 p.circle_filled(rect.center(), rect.width() / 2.0, if hovered { look::TILE_HOVER } else { look::TILE });
                 widgets::icon(p, rect.center(), glyph, rect.width() * 0.5, look::LABEL);
@@ -1917,22 +2122,42 @@ fn draw(p: &Painter, zone: Zone, item: &Item, facts: &Facts, hovered: bool, pres
         Look::PlayingSmall => {
             tile_back(p, rect, hovered, pressed, false);
             let playing = facts.music.as_ref().is_some_and(|m| m.1);
-            let at = pos2(rect.center().x, rect.top() + rect.height() * 0.4);
-            if let Some(id) = facts.art {
-                let disc = Rect::from_center_size(at, Vec2::splat(26.0));
-                p.add(RectShape::filled(disc, theme::radius(13.0), Color32::from_gray(150)).with_texture(id, cover_uv(disc.size())));
+            // Its play or pause, and what would play: the one tile that means nothing without its name.
+            let side = rect.height() - 12.0;
+            let art = Rect::from_min_size(rect.min + vec2(6.0, 6.0), Vec2::splat(side));
+            match facts.art {
+                Some(id) => {
+                    p.add(RectShape::filled(art, theme::radius(5.0), Color32::from_gray(140)).with_texture(id, cover_uv(art.size())));
+                }
+                None => {
+                    p.rect_filled(art, theme::radius(5.0), look::HEADER);
+                }
             }
-            widgets::icon(p, at, if playing { icons::PAUSE } else { icons::PLAY }, 15.0, look::LABEL);
-            text(p, pos2(rect.center().x, rect.bottom() - 9.0), Align2::CENTER_CENTER, if playing { "Pause" } else { "Play" }, 10.5, weight::MEDIUM, look::LABEL);
+            p.circle_filled(art.center(), side * 0.36, Color32::from_black_alpha(190));
+            widgets::icon(p, art.center(), if playing { icons::PAUSE } else { icons::PLAY }, side * 0.42, look::LABEL);
+            let x = art.right() + 6.0;
+            let room = rect.right() - x - 4.0;
+            let font = theme::font(10.0, weight::BOLD);
+            let name = facts.music.as_ref().map_or("", |m| m.0.as_str());
+            p.text(pos2(x, rect.center().y - 7.0), Align2::LEFT_CENTER, fit(p, name, &font, room), font, look::LABEL);
+            p.text(pos2(x, rect.center().y + 7.5), Align2::LEFT_CENTER, if playing { "Press to pause" } else { "Press to play" }, theme::font(9.5, weight::MEDIUM), look::MUTED);
         }
         Look::OpenWindow => {
             p.rect_filled(rect, theme::radius(rect.height() / 2.0), if pressed { theme::mix(look::ACCENT, Color32::BLACK, 0.25) } else if hovered { theme::mix(look::ACCENT, Color32::WHITE, 0.15) } else { look::ACCENT });
-            widgets::icon(p, pos2(rect.left() + 24.0, rect.center().y), icons::CUBE, 21.0, look::ON_ACCENT);
-            p.text(pos2(rect.left() + 44.0, rect.center().y), Align2::LEFT_CENTER, "See it in 3D, in the Orbiters window", theme::font(16.0, weight::BOLD), look::ON_ACCENT);
+            widgets::icon(p, pos2(rect.left() + 26.0, rect.center().y), icons::ARROW_SQUARE_OUT, 22.0, look::ON_ACCENT);
+            p.text(pos2(rect.left() + 46.0, rect.center().y), Align2::LEFT_CENTER, "See it in 3D, in Orbiters", theme::font(19.0, weight::BOLD), look::ON_ACCENT);
         }
         Look::HideWord => {
-            p.rect_filled(rect, theme::radius(rect.height() / 2.0), if hovered { look::TILE_HOVER } else { look::PANEL });
-            p.text(rect.center(), Align2::CENTER_CENTER, if zone == Zone::WheelHide { "Hide ring" } else { "Hide tiles" }, theme::font(12.5, weight::SEMIBOLD), look::LABEL);
+            // A real pill: it presses, and it says what goes.
+            let radius = theme::radius(rect.height() / 2.0);
+            p.rect_filled(rect, radius, if pressed { look::TILE_DOWN } else if hovered { look::TILE_HOVER } else { look::TILE });
+            p.rect_stroke(rect.shrink(0.5), radius, Stroke::new(1.0, Color32::from_white_alpha(if hovered { 120 } else { 54 })), egui::StrokeKind::Inside);
+            let words = if zone == Zone::WheelHide { "Hide ring" } else { "Hide tiles" };
+            let font = theme::font(13.0, weight::SEMIBOLD);
+            let wide = p.layout_no_wrap(words.to_string(), font.clone(), look::LABEL).size().x;
+            let left = rect.center().x - (wide + 22.0) / 2.0;
+            widgets::icon(p, pos2(left + 8.0, rect.center().y), icons::EYE_SLASH, 16.0, look::LABEL);
+            p.text(pos2(left + 22.0, rect.center().y), Align2::LEFT_CENTER, words, font, look::LABEL);
         }
         Look::Close => {
             p.circle_filled(rect.center(), rect.width() / 2.0, if hovered { look::TILE_HOVER } else { look::TILE });
@@ -1959,7 +2184,7 @@ fn draw(p: &Painter, zone: Zone, item: &Item, facts: &Facts, hovered: bool, pres
 
 /// A 3D picture's button: says "3D picture" on itself, a 3D badge on its icon, and what of. Under way, it is the countdown.
 #[allow(clippy::too_many_arguments)]
-fn picture_button(p: &Painter, _zone: Zone, shape: Shaped, rect: Rect, mode: PhotoMode, facts: &Facts, hovered: bool, pressed: bool) {
+fn picture_button(p: &Painter, zone: Zone, shape: Shaped, rect: Rect, mode: PhotoMode, facts: &Facts, hovered: bool, pressed: bool) {
     let mine = facts.picture_mode == Some(mode);
     let busy = facts.countdown.is_some() || facts.picture_flying;
     let lit = mine && busy;
@@ -1969,7 +2194,7 @@ fn picture_button(p: &Painter, _zone: Zone, shape: Shaped, rect: Rect, mode: Pho
             if lit {
                 p.rect_filled(rect, 0.0, theme::ACCENT);
             } else {
-                ring_fill(p, ring, center, if pressed { 0.65 } else if hovered { 0.38 } else { 0.0 });
+                ring_fill(p, ring, center, if pressed { 1.0 } else if hovered { 0.8 } else { 0.0 });
                 ring_rim(p, ring, center, hovered);
             }
         }
@@ -2068,9 +2293,12 @@ fn picture_button(p: &Painter, _zone: Zone, shape: Shaped, rect: Rect, mode: Pho
     } else {
         of
     };
-    let at = center + zones::polar(ring.inner + 20.0, middle);
-    widgets::icon(p, at, glyph, 22.0, ink);
-    curved(p, center, ring.outer - 12.0, middle, of, 12.5, weight::BOLD, label, true);
+    let (at, size) = cell_icon(ring, center);
+    widgets::icon(p, at, glyph, size * 0.9, if lit || dim { ink } else if hovered { Color32::WHITE } else { theme::mix(theme::ACCENT, Color32::WHITE, 0.3) });
+    curved(p, center, ring.outer - 11.5, middle, of, CELL_WORDS - 1.0, weight::BOLD, label, true);
+    if facts.digits {
+        digit(p, zone, ring, center);
+    }
 }
 
 /// A capture in the gallery, as the app's own Photos & captures has its tiles: the picture alone, rounded, a dark foot with its name and what it is on it.
@@ -2092,11 +2320,11 @@ fn draw_capture(p: &Painter, rect: Rect, n: usize, facts: &Facts, hovered: bool,
             widgets::icon(&clip, rect.center() - vec2(0.0, 14.0), glyph, 36.0, look::MUTED);
         }
     }
-    let foot = if hovered { 0.92 } else { 0.8 };
+    let foot = if hovered { 0.97 } else { 0.92 };
     orbiters_ui::paint::fill_gradient(
         &clip,
         &points,
-        &orbiters_ui::paint::Gradient::vertical(rect, &[(0.0, Color32::TRANSPARENT), (0.42, Color32::TRANSPARENT), (0.72, theme::alpha(theme::INK_900, 0.6)), (1.0, theme::alpha(theme::INK_950, foot))]),
+        &orbiters_ui::paint::Gradient::vertical(rect, &[(0.0, Color32::TRANSPARENT), (0.34, Color32::TRANSPARENT), (0.62, theme::alpha(theme::INK_900, 0.76)), (1.0, theme::alpha(theme::INK_950, foot))]),
     );
     let room = rect.width() - 28.0;
     let font = theme::font(19.0, weight::BOLD);
@@ -2105,10 +2333,10 @@ fn draw_capture(p: &Painter, rect: Rect, n: usize, facts: &Facts, hovered: bool,
     clip.text(pos2(rect.left() + 14.0, rect.bottom() - 15.0), Align2::LEFT_CENTER, fit(&clip, &state, &font, room), font, theme::FG_2);
     // In one gallery with VRChat's pictures, what can show in 3D says so.
     if recent.kind == RecentKind::Capture {
-        let badge = Rect::from_min_size(rect.min + vec2(10.0, 10.0), vec2(56.0, 26.0));
-        clip.rect_filled(badge, theme::radius(13.0), theme::alpha(theme::INK_900, 0.82));
-        widgets::icon(&clip, badge.min + vec2(17.0, 13.0), icons::CUBE, 15.0, look::ACCENT);
-        clip.text(badge.min + vec2(28.0, 13.0), Align2::LEFT_CENTER, "3D", theme::font(13.0, weight::BOLD), look::LABEL);
+        let badge = Rect::from_min_size(rect.min + vec2(10.0, 10.0), vec2(68.0, 32.0));
+        clip.rect_filled(badge, theme::radius(16.0), theme::alpha(theme::INK_900, 0.94));
+        widgets::icon(&clip, badge.min + vec2(21.0, 16.0), icons::CUBE, 19.0, look::ACCENT);
+        clip.text(badge.min + vec2(36.0, 16.0), Align2::LEFT_CENTER, "3D", theme::font(16.0, weight::BOLD), Color32::WHITE);
     }
     if let Some(done) = progress {
         let bar = Rect::from_min_size(pos2(rect.left() + 14.0, rect.bottom() - 6.0), vec2(room * done.clamp(0.0, 1.0), 3.0));
@@ -2127,6 +2355,10 @@ fn tile_picture(facts: &Facts, n: usize) -> Option<TextureId> {
 /// A picture of the gallery whole on its page, on its small picture until the large one has come.
 fn draw_big_picture(p: &Painter, rect: Rect, n: usize, facts: &Facts) {
     let Some(recent) = facts.recent.get(n) else { return };
+    if let Some(view) = &facts.opened_view {
+        draw_turning(p, rect, n, facts, view);
+        return;
+    }
     p.rect_filled(rect, theme::radius(12.0), theme::alpha(theme::INK_900, 0.92));
     let room = rect.shrink(8.0);
     let shape = recent.shape();
@@ -2148,19 +2380,86 @@ fn draw_big_picture(p: &Painter, rect: Rect, n: usize, facts: &Facts) {
     p.text(pill.center(), Align2::CENTER_CENTER, words, font, look::LABEL);
 }
 
+/// A capture turning on the sheet: on a dark stage, on its plate, live; its own picture until that is ready, and if it cannot be.
+fn draw_turning(p: &Painter, rect: Rect, n: usize, facts: &Facts, view: &OpenedView) {
+    let Some(recent) = facts.recent.get(n) else { return };
+    let stage = rect.shrink(4.0);
+    p.rect_filled(stage, theme::radius(12.0), Color32::from_rgb(15, 17, 21));
+    let waiting = |p: &Painter, words: &str| {
+        if let Some(id) = facts.opened_picture.or_else(|| tile_picture(facts, n)) {
+            orbiters_ui::paint::squircle_texture(p, stage, [theme::squircle(12.0); 4], id, cover_uv_of(stage.size(), recent.shape()), Color32::from_gray(120));
+        }
+        let font = theme::font(17.0, weight::SEMIBOLD);
+        let wide = p.layout_no_wrap(words.to_string(), font.clone(), look::LABEL).size().x + 34.0;
+        let pill = Rect::from_center_size(stage.center(), vec2(wide, 40.0));
+        p.rect_filled(pill, theme::radius(20.0), theme::alpha(theme::INK_900, 0.9));
+        p.text(pill.center(), Align2::CENTER_CENTER, words, font, look::LABEL);
+    };
+    match (&view.failed, view.picture) {
+        (Some(_), _) => waiting(p, "Its 3D cannot show here. It can in Orbiters."),
+        (None, Some(id)) => {
+            // The plate under it, as in a headset.
+            let points: Vec<Pos2> = view.plate.iter().map(|uv| pos2(rect.left() + uv[0] * rect.width(), rect.top() + uv[1] * rect.height())).collect();
+            if points.len() > 2 {
+                p.add(Shape::convex_polygon(points.clone(), Color32::from_rgb(25, 28, 34), Stroke::NONE));
+                p.add(Shape::closed_line(points, Stroke::new(2.5, theme::alpha(look::ACCENT, 0.85))));
+            }
+            p.add(RectShape::filled(rect, 0.0, Color32::WHITE).with_texture(id, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0))));
+        }
+        (None, None) => waiting(p, "Getting its 3D ready\u{2026}"),
+    }
+    // What it is, and what can be done with it, on the side the button leaves.
+    let state = facts.recent_words.iter().find(|w| w.0 == n).map_or(recent.state.as_str(), |w| w.1.as_str());
+    let title = format!("{}, {}", recent.title, state);
+    let foot = Rect::from_min_size(pos2(rect.left() + 20.0, rect.bottom() - 68.0), vec2(640.0, 50.0));
+    let (big, small) = (theme::font(17.0, weight::BOLD), theme::font(14.5, weight::MEDIUM));
+    let title = fit(p, &title, &big, foot.width() - 28.0);
+    let said = "Drag to turn it. The mouse's wheel brings it closer.";
+    let wide = p.layout_no_wrap(title.clone(), big.clone(), look::LABEL).size().x.max(p.layout_no_wrap(said.to_string(), small.clone(), look::LABEL).size().x) + 28.0;
+    let pill = Rect::from_min_size(foot.min, vec2(wide, foot.height()));
+    p.rect_filled(pill, theme::radius(14.0), theme::alpha(theme::INK_900, 0.82));
+    p.text(pos2(pill.left() + 14.0, pill.top() + 15.0), Align2::LEFT_CENTER, title, big, look::LABEL);
+    p.text(pos2(pill.left() + 14.0, pill.top() + 35.0), Align2::LEFT_CENTER, said, small, look::LABEL);
+}
+
 /// The words about what is pointed at, or what to do first, in a pill as wide as they are. Nothing to say: nothing shows.
 fn draw_caption(p: &Painter, zone: Zone, rect: Rect, facts: &Facts) {
     let on_the_wheel = zone == Zone::WheelCaption;
-    let words = said_now(facts).or_else(|| facts.pointed.and_then(|a| caption(a, facts))).or_else(|| facts.hint.map(|(a, b)| (a.to_string(), b.to_string())));
+    // On a desktop's wheel what is pointed at is said in the disc in its middle, nearer than any caption.
+    // And on a sheet with its band up, in that: one place says it.
+    let pointed = facts.pointed.filter(|_| !(on_the_wheel && facts.digits) && !(facts.hint_band && facts.sheet.is_some()));
+    let words = said_now(facts).or_else(|| pointed.and_then(|a| caption(a, facts))).or_else(|| facts.hint.map(|(a, b)| (a.to_string(), b.to_string())));
+    if on_the_wheel && facts.digits && facts.pointed.is_some() && words.is_none() {
+        return;
+    }
     // On the wheel, whose it is, whatever it has to say.
     let words = if on_the_wheel { Some(words.unwrap_or_else(|| ("Orbiters".to_string(), String::new()))) } else { words };
     let Some((first, second)) = words else { return };
+    // What plays's own picture beside its words, where it is what is pointed at.
+    if let (Some(Action::PlayPause), Some(id)) = (pointed, facts.art) {
+        draw_words_with_art(p, rect, &first, &second, id, zone == Zone::QmCaption);
+        return;
+    }
+    if zone == Zone::QmCaption && !facts.strip_caption {
+        draw_words_left(p, rect, &first, &second);
+        return;
+    }
     draw_words_marked(p, rect, &first, &second, on_the_wheel);
+}
+
+/// How a waiting picture is called off, from what is up now.
+fn wait_off(facts: &Facts) -> &'static str {
+    match facts.sheet {
+        Some(Sheet::Pictures) => "Press its button again to call it off",
+        Some(_) => "Pictures calls it off",
+        None if facts.digits => "Press 6 again to call it off",
+        None => "Press Pictures again to call it off",
+    }
 }
 
 /// What goes before anything else the caption would say: what stopped a 3D picture, or what one waits for.
 fn said_now(facts: &Facts) -> Option<(String, String)> {
-    facts.note.clone().or_else(|| facts.picture_wait.map(wait_words)).or_else(|| facts.n4n0_says.clone().map(|said| ("N4N0".to_string(), said)))
+    facts.note.clone().or_else(|| facts.picture_wait.map(|wait| wait_words(wait, facts.picture_mode, wait_off(facts)))).or_else(|| facts.n4n0_says.clone().map(|said| ("N4N0".to_string(), said)))
 }
 
 /// What a sheet's head says of what is going on.
@@ -2176,10 +2475,11 @@ fn status_now(facts: &Facts) -> Option<(String, String)> {
         .or_else(|| facts.view_said.clone().filter(|_| facts.sheet == Some(Sheet::Pictures)))
 }
 
-/// What a 3D picture waits for, in the caption's two lines.
-pub fn wait_words(wait: orbiters_n4n0::status::PhotoWait) -> (String, String) {
+/// What a 3D picture waits for, in the caption's two lines: which picture, the steps, and how to call it off where this is said.
+pub fn wait_words(wait: orbiters_n4n0::status::PhotoWait, mode: Option<PhotoMode>, off: &str) -> (String, String) {
+    let of = if mode == Some(PhotoMode::People) { "3D picture of people" } else { "3D picture of this world" };
     match wait {
-        orbiters_n4n0::status::PhotoWait::Camera => ("3D picture waiting: Esc, the camera tab, then Stream Camera".into(), "Or press it again to call it off".into()),
+        orbiters_n4n0::status::PhotoWait::Camera => (format!("{of}: waiting for the camera"), format!("1 Esc  \u{b7}  2 Camera tab  \u{b7}  3 Stream Camera  \u{b7}  {off}")),
         orbiters_n4n0::status::PhotoWait::Move => ("Move VRChat's camera a little".into(), "The 3D picture starts as soon as Orbiters sees where it is.".into()),
     }
 }
@@ -2187,6 +2487,40 @@ pub fn wait_words(wait: orbiters_n4n0::status::PhotoWait) -> (String, String) {
 /// Two lines in a pill as wide as they are.
 pub fn draw_words(p: &Painter, rect: Rect, first: &str, second: &str) {
     draw_words_marked(p, rect, first, second, false);
+}
+
+/// Two lines in a pill from the left edge of `rect`: on the wing, from the wing's own edge.
+fn draw_words_left(p: &Painter, rect: Rect, first: &str, second: &str) {
+    let (big, small) = (theme::font(13.0, weight::BOLD), theme::font(11.5, weight::MEDIUM));
+    let room = rect.width() - 22.0;
+    let (first, second) = (fit(p, first, &big, room), fit(p, second, &small, room));
+    let wide = |s: &str, f: &FontId| p.layout_no_wrap(s.to_string(), f.clone(), Color32::WHITE).size().x;
+    let width = wide(&first, &big).max(wide(&second, &small)) + 22.0;
+    let height = if second.is_empty() { 26.0 } else { 42.0 };
+    let pill = Rect::from_min_size(pos2(rect.left(), rect.bottom() - height), vec2(width, height));
+    p.rect_filled(pill, theme::radius(12.0), look::PANEL);
+    if second.is_empty() {
+        p.text(pill.left_center() + vec2(11.0, 0.0), Align2::LEFT_CENTER, first, big, look::LABEL);
+    } else {
+        p.text(pos2(pill.left() + 11.0, pill.top() + 13.0), Align2::LEFT_CENTER, first, big, look::LABEL);
+        p.text(pos2(pill.left() + 11.0, pill.top() + 29.0), Align2::LEFT_CENTER, second, small, look::MUTED);
+    }
+}
+
+/// The same, with what plays's picture at its start.
+fn draw_words_with_art(p: &Painter, rect: Rect, first: &str, second: &str, art: TextureId, from_left: bool) {
+    let (big, small) = (theme::font(13.0, weight::BOLD), theme::font(11.5, weight::MEDIUM));
+    let room = rect.width() - 66.0;
+    let (first, second) = (fit(p, first, &big, room), fit(p, second, &small, room));
+    let wide = |s: &str, f: &FontId| p.layout_no_wrap(s.to_string(), f.clone(), Color32::WHITE).size().x;
+    let width = wide(&first, &big).max(wide(&second, &small)) + 66.0;
+    let left = if from_left { rect.left() } else { rect.center().x - width / 2.0 };
+    let pill = Rect::from_min_size(pos2(left, rect.bottom() - 46.0), vec2(width, 46.0));
+    p.rect_filled(pill, theme::radius(12.0), look::PANEL);
+    let picture = Rect::from_min_size(pill.min + vec2(6.0, 6.0), Vec2::splat(34.0));
+    p.add(RectShape::filled(picture, theme::radius(6.0), Color32::WHITE).with_texture(art, cover_uv(picture.size())));
+    p.text(pos2(pill.left() + 50.0, pill.top() + 15.0), Align2::LEFT_CENTER, first, big, look::LABEL);
+    p.text(pos2(pill.left() + 50.0, pill.top() + 31.0), Align2::LEFT_CENTER, second, small, look::MUTED);
 }
 
 /// [`draw_words`], with Orbiters' mark in front when `mark`: what is on the wheel does not otherwise say whose it is.
@@ -2432,7 +2766,7 @@ mod tests {
         let degrees = |pixels: f32| 2.0 * (pixels * MM_A_PIXEL / 2.0 / AT_MM).atan().to_degrees();
         let tile = |n: usize| (0..n).map(|i| Recent { title: format!("W{i}"), kind: RecentKind::Picture, ..Default::default() }).collect::<Gallery>();
         let vr = Facts { desktop: false, can_call: true, can_states: true, can_light: true, music: Some(("A song".into(), true)), music_times: Some((30, 120)), can_seek: true, volume: Some((50, false)), recent: tile(60), ..Facts::default() };
-        let visits = vec![WorldVisit { name: "A world".into(), earlier: vec![("a".into(), "Sat 06:33".into()); 3], ..Default::default() }; 20];
+        let visits = vec![WorldVisit { here: false, name: "A world".into(), earlier: vec![("a".into(), "Sat 06:33".into()); 3], ..Default::default() }; 20];
         let videos = vec![VideoTile { title: "A".into(), channel: "B".into(), duration: None, picture: None }; 12];
         let sheets = [
             (Sheet::All, vr.clone()),
@@ -2514,7 +2848,7 @@ mod tests {
 
     #[test]
     fn previous_instances_scroll_through_every_world_and_lay_only_what_shows() {
-        let visit = |i: usize| WorldVisit { world_id: format!("wrld_{i}"), name: format!("W{i}"), line: String::new(), location: format!("wrld_{i}:1"), earlier: Vec::new(), picture: None };
+        let visit = |i: usize| WorldVisit { here: false, world_id: format!("wrld_{i}"), name: format!("W{i}"), line: String::new(), location: format!("wrld_{i}:1"), earlier: Vec::new(), picture: None };
         let facts = Facts { worlds_visited: (0..100).map(visit).collect(), desktop: true, ..facts() };
         let rows = |f: &Facts| sheet_items(Sheet::Instances, f).iter().filter_map(|i| if let Look::Visit(n) = i.look { Some(n) } else { None }).collect::<Vec<_>>();
         assert!(rows(&facts).len() <= 8);

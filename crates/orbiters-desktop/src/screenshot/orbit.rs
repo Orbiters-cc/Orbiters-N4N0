@@ -305,7 +305,7 @@ pub(super) fn vr_shots(out: &Path, refs: &Path) -> anyhow::Result<()> {
                 let placed = zones::in_units(zone);
                 let hovered = hover == Some(zone);
                 let (pixels, px) = sharp_picture(&placed, facts, hovered.then_some(0), 2.0);
-                let quad = plane.quad(&placed, 0.0, 0.004);
+                let quad = plane.quad(&vr::clear_of_sheet(placed, false), 0.0, 0.004);
                 eye.quad(&quad, &pixels, px, 1.0);
                 if hovered {
                     let at = zone.ring().map_or(placed.rect.center().to_vec2(), |r| r.anchor());
@@ -340,7 +340,7 @@ pub(super) fn vr_shots(out: &Path, refs: &Path) -> anyhow::Result<()> {
                 let placed = zones::in_units(zone);
                 let hovered = hover.filter(|_| zone == Zone::WingWorlds).map(|_| 0);
                 let (pixels, px) = sharp_picture(&placed, facts, hovered, 2.0);
-                eye.quad(&plane.quad(&placed, 0.0, 0.004), &pixels, px, 1.0);
+                eye.quad(&plane.quad(&vr::clear_of_sheet(placed, false), 0.0, 0.004), &pixels, px, 1.0);
                 if let Some(i) = hovered {
                     let item = panels::items(zone, placed.logical(), facts)[i].rect.center().to_vec2() + placed.rect.min.to_vec2();
                     end = Some(space::apply(&plane.frame, [item.x * plane.unit, -item.y * plane.unit, 0.01]));
@@ -349,11 +349,11 @@ pub(super) fn vr_shots(out: &Path, refs: &Path) -> anyhow::Result<()> {
             if let Some(sheet) = sheet {
                 let back = zones::in_units(Zone::SheetBack);
                 let (pixels, px) = sharp_picture(&back, facts, None, 2.0);
-                eye.quad(&plane.quad(&back, 0.0, 0.016), &pixels, px, 1.0);
+                eye.quad(&plane.quad(&vr::clear_of_sheet(back, true), 0.0, 0.016), &pixels, px, 1.0);
                 let page = zones::in_units(Zone::Takeover);
                 let px = [1408u32, 792u32];
                 let pixels = sheet_picture(sheet, facts, px);
-                eye.quad(&plane.quad(&page, 0.0, 0.02), &pixels, px, 1.0);
+                eye.quad(&plane.quad(&vr::clear_of_sheet(page, true), 0.0, 0.02), &pixels, px, 1.0);
             }
             if let Some(end) = end {
                 eye.laser([0.26, 1.05, -0.25], end);
@@ -400,7 +400,7 @@ pub(super) fn vr_shots(out: &Path, refs: &Path) -> anyhow::Result<()> {
                 }
             }
             let page = zones::in_units(Zone::Takeover);
-            let page_quad = plane.quad(&page, 0.0, 0.02);
+            let page_quad = plane.quad(&vr::clear_of_sheet(page, true), 0.0, 0.02);
             let hole = crate::overlay::worlds::panel::VR_HERO;
             let (x, y) = ((hole.center().x / 1024.0 - 0.5) * page_quad.width, (0.5 - hole.center().y / 576.0) * page_quad.height);
             let there = orbiters_openvr::Matrix34 { m: [[1.0, 0.0, 0.0, x], [0.0, 1.0, 0.0, y], [0.0, 0.0, 1.0, 0.0]] };
@@ -426,7 +426,7 @@ pub(super) fn vr_shots(out: &Path, refs: &Path) -> anyhow::Result<()> {
             }
             let back = zones::in_units(Zone::SheetBack);
             let (pixels, px) = sharp_picture(&back, &worlds, None, 2.0);
-            eye.quad(&plane.quad(&back, 0.0, 0.016), &pixels, px, 1.0);
+            eye.quad(&plane.quad(&vr::clear_of_sheet(back, true), 0.0, 0.016), &pixels, px, 1.0);
             eye.quad(&page_quad, &panel_pixels, panel_px, 1.0);
             eye.save(out, &format!("vr-small-in-the-panel{names}"))?;
             // In a hand, with what says how to zoom it, and its Hide.
@@ -523,6 +523,7 @@ pub(super) fn shots(out: &Path) -> anyhow::Result<()> {
     .map(|(title, channel, duration)| panels::VideoTile { title: title.to_string(), channel: channel.to_string(), duration: Some(duration.to_string()), picture: None })
     .collect();
     qm_scene("orbit-sheet-results", out, hd, &Facts { sheet: Some(Sheet::Results), sheet_title: "YouTube".into(), videos, videos_for: "rain sounds".into(), beside_wing: true, ..idle.clone() }, None, Some(Sheet::Results))?;
+    results_over_the_game(out, hd, &idle)?;
     qm_scene("orbit-sheet-talk", out, hd, &Facts { sheet: Some(Sheet::Talk), sheet_title: "Ask N4N0".into(), talk_lines: lines.clone(), beside_wing: true, ..idle.clone() }, None, Some(Sheet::Talk))?;
     qm_scene("orbit-sheet-talk-listening", out, hd, &Facts { sheet: Some(Sheet::Talk), sheet_title: "Ask N4N0".into(), talk_lines: lines, talk: crate::overlay::orbit::panels::TalkNow::Listening(0.6), beside_wing: true, ..idle.clone() }, None, Some(Sheet::Talk))?;
     qm_scene("orbit-sheet-countdown", out, hd, &Facts { sheet: Some(Sheet::Pictures), sheet_title: "Pictures".into(), ..counting.clone() }, None, Some(Sheet::Pictures))?;
@@ -571,6 +572,52 @@ fn qm_scene(name: &str, out: &Path, client: Vec2, facts: &Facts, hover: Option<u
         blit(&mut image, w, &pixels, [page.rect.width() as u32, page.rect.height() as u32], page.rect.min);
     }
     let path = out.join(format!("{name}.png"));
+    save_png(&path, &over_ground(&image, w, h))?;
+    println!("{}", path.display());
+    Ok(())
+}
+
+/// YouTube's results as they are: a real search, its real pictures, over a real frame of the game (`ORBIT_QM_FRAME`), a result's Drop in world pointed at. Typing is what starts a search
+/// and a script cannot type there (the keyboard's hook leaves out what is not a real key): this is painted, and says so where it is shown.
+fn results_over_the_game(out: &Path, client: Vec2, idle: &Facts) -> anyhow::Result<()> {
+    use orbiters_n4n0_core::youtube;
+    let Ok(frame) = std::env::var("ORBIT_QM_FRAME") else { return Ok(()) };
+    let (w, h) = (client.x as u32, client.y as u32);
+    let ground = image::imageops::resize(&image::open(&frame)?.to_rgba8(), w, h, image::imageops::FilterType::Triangle);
+    let found = youtube::search("rain sounds", "en")?;
+    let page = zones::place(Zone::Takeover, client).expect("it fits");
+    let px = [page.rect.width() as u32, page.rect.height() as u32];
+    let mut canvas = Canvas::zoomed(px[0], px[1], px[0] as f32 / 1024.0);
+    let videos: Vec<panels::VideoTile> = found
+        .videos
+        .iter()
+        .take(9)
+        .map(|v| panels::VideoTile {
+            title: v.title.clone(),
+            channel: v.channel.clone(),
+            duration: v.duration.clone(),
+            picture: youtube::thumbnail(&v.id).ok().and_then(|bytes| image::load_from_memory(&bytes).ok()).map(|picture| {
+                let picture = picture.to_rgb8();
+                canvas.ctx().load_texture(v.id.clone(), ColorImage::from_rgb([picture.width() as usize, picture.height() as usize], picture.as_raw()), TextureOptions::LINEAR).id()
+            }),
+        })
+        .collect();
+    let facts = Facts { sheet: Some(panels::Sheet::Results), sheet_title: "YouTube".into(), videos, videos_for: "rain sounds".into(), beside_wing: true, hint_band: true, pointed: Some(panels::Action::VideoDrop(1)), ..idle.clone() };
+    let items = panels::sheet_items(panels::Sheet::Results, &facts);
+    let hover = items.iter().position(|i| i.action == panels::Action::VideoDrop(1));
+    for _ in 0..2 {
+        canvas.paint(0.0, |p| panels::paint_sheet(p, panels::Sheet::Results, &facts, hover, None));
+    }
+    let mut image = ground.as_raw().clone();
+    for placed in zones::layout(Around::QuickMenu, client).into_iter().chain(zones::place(Zone::SheetHint, client)) {
+        let (pixels, px) = picture(&placed, &facts, None, None);
+        blit(&mut image, w, &pixels, px, placed.rect.min);
+    }
+    let back = zones::place(Zone::SheetBack, client).expect("it fits");
+    let (pixels, back_px) = picture(&back, &facts, None, None);
+    blit(&mut image, w, &pixels, back_px, back.rect.min);
+    blit(&mut image, w, canvas.pixels(), px, page.rect.min);
+    let path = out.join("orbit-sheet-results-real.png");
     save_png(&path, &over_ground(&image, w, h))?;
     println!("{}", path.display());
     Ok(())

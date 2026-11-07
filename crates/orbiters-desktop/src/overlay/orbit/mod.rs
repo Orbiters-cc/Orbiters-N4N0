@@ -13,6 +13,7 @@ pub mod detect;
 #[cfg(windows)]
 pub mod desktop;
 pub mod panels;
+pub mod sheet_view;
 pub mod vr;
 pub mod zones;
 
@@ -268,6 +269,18 @@ const LARGE_PICTURE: u32 = 2048;
 /// How often the list is read again while there is news of it.
 const LIST_AGAIN: Duration = Duration::from_secs(5);
 
+const ALL_TOOLS_CHOOSES_FROM: usize = 16;
+
+/// How bright a picture is, 0 to 1, by a sample of it.
+fn lightness(image: &ColorImage) -> f32 {
+    let (mut sum, mut n) = (0.0f32, 0u32);
+    for pixel in image.pixels.iter().step_by(97) {
+        sum += 0.2126 * pixel.r() as f32 + 0.7152 * pixel.g() as f32 + 0.0722 * pixel.b() as f32;
+        n += 1;
+    }
+    sum / n.max(1) as f32 / 255.0
+}
+
 struct LoadedRecent {
     /// Its session's folder, or its file.
     key: PathBuf,
@@ -474,17 +487,34 @@ impl Recents {
         asked.1.notify_all();
     }
 
-    /// The newest three captures with a 3D view, and the newest thing of all: what All tools holds.
+    /// The captures All tools may choose from, newest first.
+    fn candidates(&self) -> Vec<usize> {
+        self.loaded.iter().enumerate().filter(|(_, r)| r.has_view).map(|(i, _)| i).take(ALL_TOOLS_CHOOSES_FROM).collect()
+    }
+
+    /// What All tools holds: three captures of different worlds, the brightest of those read so far (the newest, until then): the largest feature must not hang on the last dark
+    /// world someone visited. And the newest picture of VRChat's (of anything, if there is none).
     fn newest(&self) -> (Vec<usize>, Option<usize>) {
-        let captures: Vec<usize> = self.loaded.iter().enumerate().filter(|(_, r)| r.has_view).map(|(i, _)| i).take(3).collect();
-        (captures, (!self.loaded.is_empty()).then_some(0))
+        let candidates = self.candidates();
+        let mut read: Vec<(usize, f32)> = candidates.iter().filter_map(|i| self.loaded[*i].image.as_ref().map(|image| (*i, lightness(image)))).collect();
+        read.sort_by(|a, b| b.1.total_cmp(&a.1));
+        let mut chosen: Vec<usize> = Vec::new();
+        for (i, _) in read {
+            if chosen.len() < 3 && !chosen.iter().any(|c| self.loaded[*c].title == self.loaded[i].title) {
+                chosen.push(i);
+            }
+        }
+        if chosen.is_empty() {
+            chosen = candidates.into_iter().take(3).collect();
+        }
+        let picture = self.loaded.iter().position(|r| !r.session).or((!self.loaded.is_empty()).then_some(0));
+        (chosen, picture)
     }
 
     /// Holds and asks for those pictures alone: outside the gallery, nothing else stays in memory.
     fn keep_the_newest(&mut self) {
-        let (captures, any) = self.newest();
         // The newest capture is often the newest of all too: each once, or a new list would lose what was read of it.
-        let mut wanted: Vec<usize> = captures.into_iter().chain(any).collect();
+        let mut wanted: Vec<usize> = self.candidates().into_iter().chain(self.newest().1).collect();
         wanted.sort_unstable();
         wanted.dedup();
         let loaded = &mut self.loaded;
@@ -609,6 +639,13 @@ pub struct Panels {
     /// What play or pause was last asked, and when; the place held along what plays; where it was let go; where it was moved to, and when.
     play_asked: Option<(bool, Instant)>,
     seeking: Option<f32>,
+    /// A capture turning on the sheet, on the desktop: its view, its newest picture not painted yet, what it has been painted with, and the hand on it.
+    sheet_view: Option<sheet_view::SheetView>,
+    view_frame: Option<sheet_view::Frame>,
+    view_state: Option<sheet_view::ViewState>,
+    view_texture: Option<TextureHandle>,
+    view_plate: Vec<[f32; 2]>,
+    turning: Option<Pos2>,
     seek_late: Option<f32>,
     seek_asked: Option<(u32, Instant)>,
     /// Captures of this computer's gallery asked to show in 3D, for the view that shows them.
@@ -671,6 +708,12 @@ impl Panels {
             talk_had: 0,
             play_asked: None,
             seeking: None,
+            sheet_view: None,
+            view_frame: None,
+            view_state: None,
+            view_texture: None,
+            view_plate: Vec::new(),
+            turning: None,
             seek_late: None,
             seek_asked: None,
             local_asked: Vec::new(),
@@ -810,8 +853,16 @@ impl Panels {
             self.takeover = Some(Panel::new(place, self.sharp, 0, !snap.settings.reduce_motion));
         }
         self.stage.host.dirty = true;
-        // All tools says where you were lately.
+        // All tools says where you were lately, and shows what the world's player has.
         if sheet == Sheet::All {
+            let host = &mut self.stage.host;
+            let picture = host.menu.world_video.as_ref().and_then(|v| orbiters_n4n0_core::videos::youtube_id(&v.url));
+            host.effects(vec![Effect::Instances], snap, &self.backend);
+            if let Some(id) = picture {
+                host.effects(vec![Effect::Thumbnails(vec![id])], snap, &self.backend);
+            }
+        }
+        if sheet == Sheet::Instances {
             let host = &mut self.stage.host;
             host.effects(vec![Effect::Instances], snap, &self.backend);
         }
@@ -895,6 +946,9 @@ impl Panels {
 
     /// The mouse's wheel, in notches, up positive: moves the sheet's list, when it has one. At its end it gives a little.
     pub fn wheel(&mut self, notches: f32) {
+        if let (Some(view), Some(_)) = (&self.sheet_view, self.facts.opened) {
+            view.zoom(notches);
+        }
         if let Some(sheet) = self.facts.sheet.filter(|_| self.facts.opened.is_none()) {
             let max = panels::max_scroll(sheet, &self.facts);
             let to = self.gallery_to - notches * 180.0;
@@ -954,8 +1008,12 @@ impl Panels {
 
     /// A number key on the wheel: as a press on that cell, clockwise from the top.
     pub fn press_cell(&mut self, cell: usize, snap: &Snapshot) -> Pressed {
-        const CELLS: [Zone; 6] = [Zone::WheelWorlds, Zone::WheelYouTube, Zone::WheelPlaying, Zone::WheelAll, Zone::WheelInstances, Zone::WheelPictures];
+        const CELLS: [Zone; 9] = [Zone::WheelWorlds, Zone::WheelYouTube, Zone::WheelPlaying, Zone::WheelAll, Zone::WheelInstances, Zone::WheelPictures, Zone::BloomPeople, Zone::BloomWorld, Zone::BloomRecord];
         let Some(zone) = CELLS.get(cell) else { return Pressed::default() };
+        // The second ring's keys while it is out, and only then.
+        if !self.list.iter().any(|p| p.zone == *zone && p.shown) {
+            return Pressed::default();
+        }
         for panel in self.list.iter_mut() {
             panel.hover = (panel.zone == *zone).then_some(0);
         }
@@ -966,7 +1024,7 @@ impl Panels {
 
     /// What to say with no menu up, in the pill over the game.
     pub fn away_words(&self, snap: &Snapshot) -> Option<(String, String)> {
-        away_words(snap, &self.facts.note)
+        away_words(snap, &self.facts.note, self.facts.picture_mode)
     }
 
     pub fn follow(&mut self, snap: &Snapshot, library: u64) {
@@ -987,6 +1045,24 @@ impl Panels {
             return;
         }
         self.elastic = !snap.settings.reduce_motion;
+        // A capture turning on a sheet: it goes when the sheet does, and all it holds goes with it.
+        if self.sheet_view.is_some() && (self.open.is_none() || self.facts.opened.is_none() || self.facts.sheet != Some(Sheet::Pictures)) {
+            self.sheet_view = None;
+            self.view_texture = None;
+            self.view_frame = None;
+            self.turning = None;
+        }
+        if let Some(view) = &self.sheet_view {
+            let state = view.state();
+            let frame = view.take_frame();
+            if frame.is_some() || self.view_state.as_ref() != Some(&state) {
+                self.view_frame = frame.or(self.view_frame.take());
+                self.view_state = Some(state);
+                if let Some(panel) = self.takeover.as_mut() {
+                    panel.dirty = true;
+                }
+            }
+        }
         // All tools shows the newest of them too.
         let in_gallery = matches!(self.facts.sheet, Some(Sheet::Pictures | Sheet::All));
         let listed = in_gallery && self.recents.follow((library, crate::worlds::picture_revision()), snap.settings.sessions_dir.clone(), snap.settings.picture_folders.clone());
@@ -1113,7 +1189,11 @@ impl Panels {
         let progress = |dir: &PathBuf| snap.reconstruction.as_ref().filter(|j| j.session_dir == *dir).map(|j| j.progress.clamp(0.0, 1.0));
         let recording = matches!(snap.capture.state, CaptureState::Recording | CaptureState::Paused) && !snap.capture.photo_3d;
         let menu = &self.stage.host.menu;
-        let visited = if matches!(self.facts.sheet, Some(Sheet::Instances | Sheet::All)) { visited_worlds(&menu.instances, now, &self.visit_pictures) } else { Vec::new() };
+        let visited = if matches!(self.facts.sheet, Some(Sheet::Instances | Sheet::All)) {
+            let world = &snap.vrchat.world;
+            let here = world.in_world.then(|| world.world_id.as_deref().zip(world.instance.as_deref()).map(|(w, i)| format!("{w}:{i}"))).flatten();
+            visited_worlds(&menu.instances, now, &self.visit_pictures, here.as_deref())
+        } else { Vec::new() };
         Facts {
             recording,
             recording_seconds: recording.then(|| snap.capture.stats.as_ref().map_or(0, |s| s.elapsed_s as u32)),
@@ -1126,6 +1206,9 @@ impl Panels {
             gallery_reading: self.recents.rx.is_some() && self.recents.loaded.is_empty(),
             opened: self.facts.opened,
             opened_picture: None,
+            opened_view: None,
+            world_video_picture: if self.facts.sheet == Some(Sheet::All) { menu.world_video.as_ref().and_then(|v| orbiters_n4n0_core::videos::youtube_id(&v.url)).and_then(|id| self.stage.host.picture(&id, false)) } else { None },
+            strip_caption: self.list.iter().any(|p| p.zone == Zone::QmStrip),
             // Only what is on the page: they change as it is made and as time goes, and there may be tens of thousands.
             recent_words: self
                 .takeover
@@ -1241,6 +1324,10 @@ impl Panels {
         let mut worlds_hover = None;
         let mut on_zone = None;
         self.sheet_pointer = on.filter(|(at, _)| *at == count).map(|(_, p)| p);
+        if let (Some(from), Some(p), Some(view)) = (self.turning, self.sheet_pointer, &self.sheet_view) {
+            view.turn(p.x - from.x, p.y - from.y);
+            self.turning = Some(p);
+        }
         if let (Some(_), Some(p)) = (self.seeking, self.sheet_pointer) {
             self.seeking = panels::timeline_fraction(&self.facts, p.x).or(self.seeking);
         }
@@ -1372,6 +1459,14 @@ impl Panels {
                 break;
             }
         }
+        // A capture turning on the sheet: dragged, it turns as the hand does.
+        if matches!(look, Some(panels::Look::BigPicture(_))) {
+            if let (Some(view), Some(p)) = (&self.sheet_view, self.sheet_pointer) {
+                view.hold(true);
+                self.turning = Some(p);
+            }
+            return out;
+        }
         // A list's own empty space can be dragged too.
         if look.is_none() && self.facts.opened.is_none() && self.sheet_pointer.is_some() && matches!(self.facts.sheet, Some(Sheet::Pictures | Sheet::Instances | Sheet::Results | Sheet::Talk)) {
             self.throw = 0.0;
@@ -1423,13 +1518,16 @@ impl Panels {
             Action::Capture(n) => {
                 let Some(recent) = self.recents.tile(n) else { return };
                 match recent.kind() {
-                    panels::RecentKind::Capture if self.worlds_here => {
+                    panels::RecentKind::Capture if self.worlds_here && !self.facts.desktop => {
                         self.local_asked.push(super::worlds::Relayed::ShowLocal { dir: recent.key.clone(), name: recent.title.clone(), changed: recent.modified });
                     }
                     // Its caption says why not.
                     panels::RecentKind::NoView => out.clicked = false,
                     // Nothing shows around the person with no headset: seen here first, as a picture is, with the app's window as what is next.
                     panels::RecentKind::Capture | panels::RecentKind::Picture => {
+                        // A capture turns in 3D here: a press shows it in 3D, on the desktop too.
+                        self.sheet_view = (recent.kind() == panels::RecentKind::Capture).then(|| sheet_view::SheetView::open(recent.key.clone(), !snap.settings.reduce_motion));
+                        self.view_texture = None;
                         self.facts.opened = Some(n);
                         self.recents.big = None;
                         self.recents.open_big(n);
@@ -1587,6 +1685,11 @@ impl Panels {
 
     /// The pointer's button went up.
     pub fn release(&mut self) {
+        if self.turning.take().is_some() {
+            if let Some(view) = &self.sheet_view {
+                view.hold(false);
+            }
+        }
         if let Some(fraction) = self.seeking.take() {
             self.seek_late = Some(fraction);
         }
@@ -1629,7 +1732,7 @@ impl Panels {
             panel.dirty = false;
             panel.items = panels::items(panel.zone, panel.logical, &self.facts);
             let mut facts = self.facts.clone();
-            if matches!(panel.zone, Zone::WheelPlaying | Zone::WingPlaying) {
+            if matches!(panel.zone, Zone::WheelPlaying | Zone::WingPlaying | Zone::QmStrip | Zone::WheelVeil | Zone::WheelCaption | Zone::QmCaption) {
                 if let Some((key, image)) = &art {
                     let ctx = panel.canvas.ctx();
                     facts.art = Some(panel.pictures.entry(key.clone()).or_insert_with(|| ctx.load_texture("art", image.clone(), TextureOptions::LINEAR)).id());
@@ -1674,7 +1777,7 @@ impl Panels {
                     let picture = |id: &str| -> Option<TextureId> { host.picture(id, retro) };
                     let view = View { menu: &host.menu, hover, pressed, picture: &picture, time, skin: skin() };
                     let cover = self.facts.desktop && !self.show_keys && host.menu.shows_keyboard();
-                    let world_video = host.menu.world_video.as_ref().map(|v| v.title.clone().unwrap_or_else(|| v.url.clone()));
+                    let world_video = host.menu.world_video.as_ref().map(|v| v.title.as_deref().map_or_else(|| v.url.clone(), panels::clean_title));
                     stage.canvas.paint(time, |p| {
                         if retro {
                             menu_retro::draw(p, pos2(0.0, 0.0), &view);
@@ -1706,6 +1809,24 @@ impl Panels {
                         };
                         facts.hero_captures = captures.into_iter().filter_map(|i| texture(i, panel)).collect();
                         facts.hero_picture = any.and_then(|i| texture(i, panel));
+                    }
+                    if let Some(view) = &self.sheet_view {
+                        if let Some(frame) = self.view_frame.take() {
+                            let image = ColorImage::from_rgba_premultiplied(frame.size, &frame.rgba);
+                            match &mut self.view_texture {
+                                Some(texture) => texture.set(image, TextureOptions::LINEAR),
+                                None => self.view_texture = Some(stage.canvas.ctx().load_texture("sheet-view", image, TextureOptions::LINEAR)),
+                            }
+                            self.view_plate = frame.plate;
+                        }
+                        facts.opened_view = Some(panels::OpenedView {
+                            picture: self.view_texture.as_ref().map(|t| t.id()),
+                            plate: self.view_plate.clone(),
+                            failed: match view.state() {
+                                sheet_view::ViewState::Failed(why) => Some(why),
+                                _ => None,
+                            },
+                        });
                     }
                     if sheet == Sheet::Pictures {
                         let ctx = stage.canvas.ctx();
@@ -1869,14 +1990,14 @@ fn talk_now(snap: &Snapshot) -> panels::TalkNow {
 }
 
 /// What must be said with no menu up: a 3D picture under way or waiting, or what stopped one. With VRChat's camera open on the desktop no menu can be.
-fn away_words(snap: &Snapshot, note: &Option<(String, String)>) -> Option<(String, String)> {
+fn away_words(snap: &Snapshot, note: &Option<(String, String)>, mode: Option<orbiters_n4n0_core::menu::PhotoMode>) -> Option<(String, String)> {
     if let Some(seconds) = snap.n4n0.photo_countdown {
         return Some((format!("3D picture in {seconds}"), "VRChat's camera then flies around by itself.".into()));
     }
     if snap.capture.photo_3d && !matches!(snap.capture.state, CaptureState::Idle) {
         return Some(("3D picture in progress".into(), "The camera is flying. Stay where you are for a moment.".into()));
     }
-    note.clone().or_else(|| snap.n4n0.photo_wait.map(panels::wait_words)).or_else(|| snap.n4n0.panel.clone().map(|said| ("N4N0".to_string(), said)))
+    note.clone().or_else(|| snap.n4n0.photo_wait.map(|wait| panels::wait_words(wait, mode, "R, then 6, calls it off"))).or_else(|| snap.n4n0.panel.clone().map(|said| ("N4N0".to_string(), said)))
 }
 
 /// What the end of a flight says.
@@ -1891,7 +2012,6 @@ fn flight_words(error: Option<&str>) -> (String, String) {
 fn access_words(kind: &str) -> &str {
     match kind {
         "Invite" => "Invite only",
-        "Invite+" => "Invite+ open",
         other => other,
     }
 }
@@ -1908,7 +2028,7 @@ fn day_and_time(at: u64, now: u64) -> String {
 }
 
 /// Where the person was, as the Instances sheet shows it: a row for each world, its last time first. `rows` come the newest first.
-fn visited_worlds(rows: &[orbiters_n4n0_core::menu::InstanceRow], now: u64, pictures: &HashMap<String, egui::TextureId>) -> Vec<panels::WorldVisit> {
+fn visited_worlds(rows: &[orbiters_n4n0_core::menu::InstanceRow], now: u64, pictures: &HashMap<String, egui::TextureId>, here: Option<&str>) -> Vec<panels::WorldVisit> {
     let mut worlds: Vec<panels::WorldVisit> = Vec::new();
     for row in rows {
         let id = row.location.split(':').next().unwrap_or_default();
@@ -1922,6 +2042,7 @@ fn visited_worlds(rows: &[orbiters_n4n0_core::menu::InstanceRow], now: u64, pict
                     name: if row.world.is_empty() { "A world".to_string() } else { row.world.clone() },
                     line: format!("{when}{region} \u{b7} {}", access_words(row.kind())),
                     location: row.location.clone(),
+                    here: here == Some(row.location.as_str()),
                     earlier: Vec::new(),
                     picture: pictures.get(id).copied(),
                 });
@@ -2321,7 +2442,7 @@ mod tests {
         let row = |world: &str, id: &str, instance: &str, at: u64| InstanceRow { location: format!("wrld_{id}:{instance}~region(eu)"), world: world.into(), at };
         let now = 100_000;
         let rows = [row("Rain", "a", "1", now - 300), row("Sky", "b", "2", now - 600), row("Rain", "a", "3", now - 1320), row("", "c", "4", now - 7200)];
-        let worlds = visited_worlds(&rows, now, &HashMap::new());
+        let worlds = visited_worlds(&rows, now, &HashMap::new(), None);
         assert_eq!(worlds.iter().map(|w| w.name.as_str()).collect::<Vec<_>>(), ["Rain", "Sky", "A world"]);
         assert!(worlds[0].location.contains(":1~"), "the invite goes to the last time");
         assert_eq!(worlds[0].earlier.len(), 1, "the time before is a choice of its own");
@@ -2329,7 +2450,7 @@ mod tests {
         assert!(worlds[0].line.contains("EU") || worlds[0].line.contains("eu"), "{}", worlds[0].line);
         // All of them: the sheet scrolls.
         let many: Vec<InstanceRow> = (0..120).map(|i| row("W", &i.to_string(), "1", now - i)).collect();
-        assert_eq!(visited_worlds(&many, now, &HashMap::new()).len(), 120);
+        assert_eq!(visited_worlds(&many, now, &HashMap::new(), None).len(), 120);
     }
 
     #[test]
@@ -2343,16 +2464,16 @@ mod tests {
     fn with_no_menu_up_the_pill_says_what_a_picture_is_doing_and_otherwise_nothing() {
         use orbiters_n4n0::status::PhotoWait;
         let mut snap = Snapshot::new(Default::default());
-        assert_eq!(away_words(&snap, &None), None, "nothing to say: nothing shows");
+        assert_eq!(away_words(&snap, &None, None), None, "nothing to say: nothing shows");
         snap.n4n0.photo_wait = Some(PhotoWait::Camera);
-        assert!(away_words(&snap, &None).unwrap().0.contains("Stream Camera"));
+        assert!(away_words(&snap, &None, None).unwrap().1.contains("Stream Camera"));
         snap.n4n0.photo_wait = Some(PhotoWait::Move);
-        assert!(away_words(&snap, &None).unwrap().0.contains("Move VRChat's camera"));
+        assert!(away_words(&snap, &None, None).unwrap().0.contains("Move VRChat's camera"));
         // What stopped it goes before waiting; a countdown goes before anything.
         let note = Some(("a".to_string(), "b".to_string()));
-        assert_eq!(away_words(&snap, &note).unwrap().0, "a");
+        assert_eq!(away_words(&snap, &note, None).unwrap().0, "a");
         snap.n4n0.photo_countdown = Some(3);
-        assert_eq!(away_words(&snap, &note).unwrap().0, "3D picture in 3");
+        assert_eq!(away_words(&snap, &note, None).unwrap().0, "3D picture in 3");
     }
 
     #[test]

@@ -14,7 +14,7 @@ Code: `crates/orbiters-desktop/src/overlay/orbit/`. Settings, Performance, "Orbi
 
 ## On the desktop
 
-A capture's press shows it large on the sheet, with the Orbiters window as the next step, as nothing shows in 3D in the game there. While a 3D picture waits for VRChat's camera the veil lies over VRChat's wheel, whose lit slice has nothing to do with it.
+A capture's press shows it in live 3D on the sheet (`sheet_view.rs`), with the Orbiters window as the step for walking around in it. While pointing, and while a 3D picture waits for VRChat's camera, a smoked disc lies over VRChat's wheel, whose lit slice has nothing to do with it, and says what is pointed at or what waits (`draw_hub`).
 
 ## Sizes in VR
 
@@ -56,6 +56,10 @@ The block's rules (`block.rs`): blocked on hover, before any press. A press begu
 
 All tools' large cards hold real content: the newest three captures, the last three places, the newest picture, what the world's player has. `Recents::newest` picks them and `keep_the_newest` holds only those. Each is asked for once: asked for twice, a new list would lose what had been read of it. The wheel's cells and the wing's tiles hold none: tried in round 6, dark captures on three of six parts read as dead cells. They have one treatment, a solid base and the tool's colour on the icon (`part_ink`).
 
+## A capture live on a desktop sheet
+
+`SheetView` runs on its own thread: it reads the capture, frames it as the small view does (`Capture::around_subject`, `Small`), and draws it with `FaceRenderer::render_view` into a picture the sheet paints, with its plate as a line under it. By itself it sways around the view the capture was taken from (a capture is mostly taken from one side), a drag takes it anywhere, the mouse's wheel zooms. It holds the 3D view's budget (`pacing::DUTY`) and at most 20 frames a second, draws nothing while nothing moves, and sizes its picture by what the last ones cost (960, 720 or 540 wide). The view, its GPU device and its memory go with its thread when it is closed. Reduce motion: it does not sway. If it cannot show, the capture's own picture stays, and says so. Only on the desktop: in a headset a capture stands around the person.
+
 ## The gallery
 
 The Pictures sheet lists what the app's own Photos & captures lists on this computer: `worlds::load_gallery`, VRChat's pictures and the captures together, newest first, with **All** and **Only 3D** at its top right, in the layout chosen in the app (`pages::gallery_layout::arrange`). A list can hold tens of thousands: `panels::Gallery` holds the tiles and their places once, compares by being the same list, and each frame's facts only carry the words and pictures of the tiles on the page. Pictures are decoded by two threads, what was asked last first, and let go far from the page.
@@ -68,7 +72,7 @@ The gallery, previous instances, YouTube's results and the conversation scroll b
 
 ## The wheel's keys, on the desktop
 
-Number keys are the first way in: each cell shows its key as a cap on its axis, under its icon (`cell_icon`), and the caption leads with them, Left Alt second. The cell pointed at lights up whole, with a line round it. While pointing, and while a picture waits, the veil is solid: VRChat goes on lighting a slice under it, and that must not read as what is pointed at. A picture asked for from the ring can be called off with a second press, and the caption says so.
+Each cell shows its key as a quiet mark at its inner edge, always in the same place (`digit`, `cell_icon`). Right over the ring, in the first uses, the caption says to hold Left Alt and click, or press a number; with Alt held, Click a tool. The cell pointed at lights up whole, with a line round it. While the second ring is out, 7, 8 and 9 pick its cells. While pointing, and while a picture waits, the veil is solid: VRChat goes on lighting a slice under it, and that must not read as what is pointed at. While a picture waits, the Pictures cell is what calls it off, by its key or a click: `items` makes it the press of the picture asked for, which is what toggles it. The caption says Press 6 again.
 
 ## A capture standing small (VR)
 
@@ -88,6 +92,10 @@ On a screen, beside the side panel every result of a short list keeps its place 
 
 A press on a world opens its details on a side panel beside the list, which narrows to two columns of the same six results, so that another can be pressed at once (`Page::Detail`, `SIDE`). In a headset a press on a world with a capture shows it, around the person or small, whichever was chosen last.
 
+## A sheet's head
+
+Its tools are tabs (`head_tabs`): from any sheet to any other, also from the wheel, where no wing lies beside it (there the mouse is VRChat's until Left Alt is held). On a screen they have their names. In a headset, and while the head has something to say, icons but for the open one, which leaves room for it.
+
 ## VRChat's tooltips under a sheet
 
 On the desktop VRChat lights what lies under the pointer even with a sheet over it, as nothing outside the game can stop that, and shows its tooltip under its tab row. While the pointer is on these parts, `Zone::SheetHint` lies over that place and says what the pointer is on. What is pointed at is said only there while it is up (`Facts::hint_band`), else in the sheet's head.
@@ -103,6 +111,8 @@ So a press **asks for** the picture (`Command::Photo3DWhenCamera`). The ring, th
 Closed: no window or overlay shows, nothing is painted, no capture runs; desktop mode asks for two keys' state every 33 ms. See `reports/orbit-overlays.md` for what was measured.
 
 ## Testing
+
+A script cannot type in the search: the keyboard's hook (`keys.rs`) leaves out injected keys, and they go on to VRChat. So YouTube's results in the pack are painted, from a real search over a real frame of the game (`results_over_the_game`, `ORBIT_QM_FRAME`). `ORBIT_PANEL_WORLDS` gives the panel's scene real names and pictures.
 
 - `cargo test -p orbiters-desktop overlay::orbit`: placement, hover, the block's state machine, the detector on real frames (`orbit/testdata`, made by `scripts/orbit-fixtures.py`).
 - `orbiters-desktop --screenshot <folder> --only orbit`: every panel's state.

@@ -133,6 +133,23 @@ fn stand_in_feedback(signed_in: bool) -> FeedbackView {
 }
 
 /// Soft gradients like the menu's history stand-ins.
+/// The real worlds a scene is to show, by name and picture.
+fn real_worlds() -> Vec<(String, egui::ColorImage)> {
+    let Ok(dir) = std::env::var("ORBIT_PANEL_WORLDS") else { return Vec::new() };
+    let Ok(read) = std::fs::read_dir(dir) else { return Vec::new() };
+    let mut paths: Vec<std::path::PathBuf> = read.flatten().map(|e| e.path()).collect();
+    paths.sort();
+    paths
+        .into_iter()
+        .filter_map(|path| {
+            let image = image::open(&path).ok()?.to_rgba8();
+            let stem = path.file_stem()?.to_string_lossy().to_string();
+            let name = stem.split_once(' ').map_or(stem.as_str(), |(_, name)| name).to_string();
+            Some((name, egui::ColorImage::from_rgba_unmultiplied([image.width() as usize, image.height() as usize], image.as_raw())))
+        })
+        .collect()
+}
+
 fn gradient(ctx: &egui::Context, name: &str, hue: f32, w: usize, h: usize) -> egui::TextureHandle {
     let (a, b) = (hsv(hue, 0.55, 0.62), hsv((hue + 0.08).fract(), 0.6, 0.22));
     let mut px = Vec::with_capacity(w * h);
@@ -147,11 +164,20 @@ fn gradient(ctx: &egui::Context, name: &str, hue: f32, w: usize, h: usize) -> eg
 }
 
 pub fn shots(out: &std::path::Path) -> anyhow::Result<()> {
-    let entries = stand_ins()?;
+    let mut entries = stand_ins()?;
+    // Real worlds' names and pictures, where given: `ORBIT_PANEL_WORLDS`, a folder of "NN Name.jpg".
+    let real = real_worlds();
+    for (entry, (name, _)) in entries.iter_mut().zip(&real) {
+        entry.name = name.clone();
+    }
     let facts = stand_in_facts(&entries);
     let mut canvas = Canvas::new(WIDTH as u32, HEIGHT as u32);
-    let thumbs: Vec<egui::TextureHandle> =
-        (0..entries.len()).map(|i| gradient(canvas.ctx(), &format!("stand-in-{i}"), (i.min(6) as f32 * 0.137 + 0.55).fract(), 320, 180)).collect();
+    let thumbs: Vec<egui::TextureHandle> = (0..entries.len())
+        .map(|i| match real.get(i) {
+            Some((_, image)) => canvas.ctx().load_texture(format!("real-{i}"), image.clone(), egui::TextureOptions::LINEAR),
+            None => gradient(canvas.ctx(), &format!("stand-in-{i}"), (i.min(6) as f32 * 0.137 + 0.55).fract(), 320, 180),
+        })
+        .collect();
     let pictures: HashMap<u64, egui::TextureHandle> = facts
         .values()
         .flat_map(|f| f.pictures.iter())
@@ -160,7 +186,7 @@ pub fn shots(out: &std::path::Path) -> anyhow::Result<()> {
     let world_thumbs: Vec<egui::TextureHandle> = (0..8).map(|i| gradient(canvas.ctx(), &format!("stand-in-world-{i}"), (i as f32 * 0.191 + 0.05).fract(), 320, 180)).collect();
     let thumb = |e: &Entry| -> Option<TextureId> {
         match entries.iter().position(|x| x.id == e.id) {
-            Some(i) => (i != 3).then(|| thumbs[i].id()),
+            Some(i) => (i != 3 || !real.is_empty()).then(|| thumbs[i].id()),
             None => Some(world_thumbs[e.name.len() % world_thumbs.len()].id()),
         }
     };

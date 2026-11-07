@@ -16,6 +16,7 @@ use egui::{pos2, vec2, Align2, Rect, Ui};
 use orbiters_core::account::{Api, Server};
 use orbiters_core::assets::{self, How, Owned};
 use orbiters_core::community;
+use orbiters_i18n::{tr, tr_n};
 use orbiters_ui::icons;
 use orbiters_ui::theme::{self, weight, Txt};
 use orbiters_ui::widgets::{self, IconButton};
@@ -38,8 +39,8 @@ fn parts(key: &str) -> Option<(u64, Option<usize>)> {
 /// "Made by you", "Yours on Orbiters".
 fn how(o: &Owned) -> &'static str {
     match o.asset.how {
-        How::Made => "Made by you",
-        How::Licensed => "Yours on Orbiters",
+        How::Made => tr("Made by you"),
+        How::Licensed => tr("Yours on Orbiters"),
     }
 }
 
@@ -170,7 +171,7 @@ impl State {
         let mut out = Vec::new();
         for a in &self.assets {
             let kind = assets::kind_label(&a.asset.kind);
-            let asset_found = q.is_empty() || [a.asset.name.to_lowercase(), kind.to_lowercase()].iter().any(|s| s.contains(q));
+            let asset_found = q.is_empty() || [a.asset.name.to_lowercase(), kind.to_lowercase(), tr(kind).to_lowercase()].iter().any(|s| s.contains(q));
             let taken = controller::unix(a.date());
             for (n, p) in a.pictures.iter().enumerate() {
                 let author = p.author.as_ref().map(|m| m.username.clone()).unwrap_or_default();
@@ -217,7 +218,7 @@ impl State {
     pub fn labels(&self, e: &Entry) -> Option<(String, String)> {
         let a = self.of(&e.key)?;
         let by = self.picture(&e.key).and_then(|p| p.author.as_ref()).map(|m| m.username.clone()).filter(|n| !n.is_empty());
-        Some((by.map_or_else(|| "Showcase picture".to_string(), |b| format!("by {b}")), how(a).to_string()))
+        Some((by.map_or_else(|| tr("Showcase picture").to_string(), |b| tr!("by {name}", name = b)), how(a).to_string()))
     }
 
     /// Its page on the website.
@@ -240,17 +241,17 @@ impl State {
             r.width() - 56.0,
         );
         let y = r.top() + 36.0;
-        let t = Txt::new(format!("{} · {}", assets::kind_label(&a.asset.kind), how(a)), 11.0).weight(weight::SEMIBOLD).color(theme::FG_2);
+        let t = Txt::new(format!("{} · {}", tr(assets::kind_label(&a.asset.kind)), how(a)), 11.0).weight(weight::SEMIBOLD).color(theme::FG_2);
         let tw = widgets::text_size(ui, &t).x;
         let pill = Rect::from_min_size(pos2(r.left(), y - 10.0), vec2(tw + 30.0, 20.0));
         p.rect_filled(pill, theme::radius(10.0), theme::white(0.06));
         widgets::icon(&p, pos2(pill.left() + 11.0, pill.center().y), icons::TAG, 11.0, theme::ACCENT);
         widgets::text(&p, pos2(pill.left() + 21.0, pill.center().y), Align2::LEFT_CENTER, &t);
         let when = super::super::local_time(a.date());
-        let items = format!("{count} showcase picture{}", if count == 1 { "" } else { "s" });
-        let b = IconButton::new(icons::ARROW_SQUARE_OUT, "Open on Orbiters").size(32.0, 15.0).backdrop(theme::control()).id_salt(("asset-site", a.asset.id));
+        let items = tr_n("{count} showcase picture", "{count} showcase pictures", count as u64);
+        let b = IconButton::new(icons::ARROW_SQUARE_OUT, tr("Open on Orbiters")).size(32.0, 15.0).backdrop(theme::control()).id_salt(("asset-site", a.asset.id));
         let br = Rect::from_min_size(pos2(r.right() - 32.0, r.top() + 6.0), vec2(32.0, 32.0));
-        let line = if when.is_empty() { items } else { format!("{items} · latest {when}") };
+        let line = if when.is_empty() { items } else { tr!("{items} · latest {when}", items = items, when = when) };
         widgets::text_truncated(&p, pos2(pill.right() + 10.0, y), Align2::LEFT_CENTER, &Txt::new(line, 12.0).color(theme::FG_3), br.left() - pill.right() - 26.0);
         if sharing::pressed(b.show_at(ui, br)) {
             let link = format!("{}{}#gallery", server.website(), a.page());
@@ -268,10 +269,11 @@ impl State {
         for k in keys {
             let (Some(a), Some(p)) = (self.of(k), self.picture(k)) else { continue };
             list.push(p.clone());
+            let line = tr!("{kind} showcase · {how}", kind = tr(assets::kind_label(&a.asset.kind)), how = how(a));
             about.push(About {
                 key: k.clone(),
                 title: a.asset.name.clone(),
-                line: format!("{} showcase · {}", assets::kind_label(&a.asset.kind), how(a)),
+                line,
                 site: format!("{}{}#gallery", server.website(), a.page()),
             });
         }

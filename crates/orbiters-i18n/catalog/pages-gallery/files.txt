@@ -1,0 +1,11 @@
+# The files this area covers: every text in them is wrapped and translated (tests/coverage.rs).
+crates/orbiters-desktop/src/pages/community.rs
+crates/orbiters-desktop/src/pages/gallery_layout.rs
+crates/orbiters-desktop/src/pages/gallery_layers.rs
+crates/orbiters-desktop/src/pages/gallery_assets.rs
+crates/orbiters-desktop/src/pages/gallery_folders.rs
+crates/orbiters-desktop/src/pages/gallery_select.rs
+crates/orbiters-desktop/src/pages/community_talk.rs
+crates/orbiters-desktop/src/pages/events.rs
+crates/orbiters-desktop/src/pages/gallery.rs
+crates/orbiters-desktop/src/pages/sharing.rs

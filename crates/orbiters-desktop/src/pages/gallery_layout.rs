@@ -6,6 +6,7 @@
 //! the listing, else its thumbnail's once decoded (springing there from 4:3, the website's stand-in, never jumping).
 use egui::{pos2, vec2, Id, Rect, Sense, Ui};
 use orbiters_core::settings::GalleryLayout;
+use orbiters_i18n::{mark, tr};
 use orbiters_ui::{
     anim::{self, Spring},
     icons,
@@ -128,9 +129,9 @@ pub fn picker(ui: &mut Ui, rect: Rect, layout: &mut GalleryLayout) -> bool {
     let track = Rect::from_center_size(rect.center(), vec2(PICKER_W, 40.0));
     p.rect_filled(track, theme::radius(20.0), theme::surface_soft());
     let options = [
-        (GalleryLayout::Masonry, icons::COLUMNS, "Masonry: columns of pictures, each as tall as its shape"),
-        (GalleryLayout::Rows, icons::ROWS, "Rows: pictures side by side, each row filling the width"),
-        (GalleryLayout::Grid, icons::SQUARES_FOUR, "Grid: the same card for every item, with what it is and who sees it"),
+        (GalleryLayout::Masonry, icons::COLUMNS, mark("Masonry: columns of pictures, each as tall as its shape")),
+        (GalleryLayout::Rows, icons::ROWS, mark("Rows: pictures side by side, each row filling the width")),
+        (GalleryLayout::Grid, icons::SQUARES_FOUR, mark("Grid: the same card for every item, with what it is and who sees it")),
     ];
     let rects: Vec<Rect> = (0..options.len()).map(|i| Rect::from_min_size(pos2(track.left() + 4.0 + i as f32 * 36.0, track.top() + 4.0), vec2(36.0, 32.0))).collect();
     let mut changed = false;
@@ -142,7 +143,7 @@ pub fn picker(ui: &mut Ui, rect: Rect, layout: &mut GalleryLayout) -> bool {
             *layout = *value;
             changed = true;
         }
-        resp.on_hover_text(*hint);
+        resp.on_hover_text(tr(hint));
     }
     if let Some(active) = options.iter().position(|o| o.0 == *layout) {
         let [x] = anim::spring(ui.ctx(), id.with("pill"), [rects[active].left() - track.left()], Spring::BOUNCY);

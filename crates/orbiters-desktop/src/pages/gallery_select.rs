@@ -25,6 +25,7 @@ use crate::drag_out::{self, Outcome};
 use egui::{pos2, vec2, Align2, Id, Order, Pos2, Rect, Response, Sense, Stroke, Ui};
 use orbiters_core::account::{Api, Server};
 use orbiters_core::shares::Kind;
+use orbiters_i18n::{tr, tr_n};
 use orbiters_ui::{
     anim::{self, ease, Spring},
     feedback, icons, paint,
@@ -235,7 +236,7 @@ impl Selection {
             if self.keys.contains(&e.key) { order.iter().filter(|o| self.keys.contains(&o.key)).map(|o| o.key.clone()).collect() } else { vec![e.key.clone()] };
         let entries: Vec<&Entry> = keys.iter().filter_map(|k| order.iter().find(|o| &o.key == k)).collect();
         if !entries.iter().any(|e| e.local.is_some() || remote(e, self.development).is_some()) {
-            self.said = Some(("These can't be dragged out".into(), anim::time(ctx)));
+            self.said = Some((tr("These can't be dragged out").into(), anim::time(ctx)));
             return;
         }
         for e in entries.iter().filter(|e| e.local.is_none()) {
@@ -257,7 +258,7 @@ impl Selection {
         }
         self.from_window = true;
         if !self.can_hand_out(e) {
-            self.said = Some(("This can't be dragged out".into(), anim::time(ctx)));
+            self.said = Some((tr("This can't be dragged out").into(), anim::time(ctx)));
             return;
         }
         if e.local.is_none() {
@@ -284,9 +285,9 @@ impl Selection {
     }
 
     /// Copies these files to the clipboard now (a multi-layer picture with its layers), saying so on the bar.
-    pub fn copy_paths(&mut self, ctx: &egui::Context, files: &[PathBuf], what: &str) {
+    pub fn copy_paths(&mut self, ctx: &egui::Context, files: &[PathBuf]) {
         let said = match drag_out::copy_files(files) {
-            Ok(()) => format!("Copied {what} to the clipboard"),
+            Ok(()) => tr("Copied the picture and its layers to the clipboard").to_string(),
             Err(e) => e,
         };
         self.say(ctx, &said);
@@ -382,7 +383,7 @@ impl Selection {
         if !self.carried.is_empty() && !self.started && self.lifted_at.is_finite() {
             if !ctx.input(|i| i.pointer.primary_down()) {
                 if self.waiting.is_some_and(|(n, _)| n > 0) {
-                    self.said = Some(("Still getting them from Orbiters: drag them again in a moment".into(), now));
+                    self.said = Some((tr("Still getting them from Orbiters: drag them again in a moment").into(), now));
                 }
                 self.carried.clear();
                 self.waiting = None;
@@ -411,7 +412,7 @@ impl Selection {
             if outcome == Outcome::Copied {
                 self.said = Some((copied(order, &self.handed), now));
             } else if outcome == Outcome::Failed {
-                self.said = Some((format!("{} could not start the drag", crate::words::SYSTEM), now));
+                self.said = Some((tr!("{system} could not start the drag", system = crate::words::SYSTEM), now));
             }
             self.carried.clear();
             self.started = false;
@@ -432,7 +433,7 @@ impl Selection {
                     nothing_came(&gathered)
                 } else {
                     match drag_out::copy_files(&gathered.files) {
-                        Ok(()) => format!("{} to the clipboard", copied(order, &gathered.keys)),
+                        Ok(()) => tr!("Copied {what} to the clipboard", what = copied_what(order, &gathered.keys)),
                         Err(e) => e,
                     }
                 };
@@ -479,9 +480,9 @@ impl Selection {
         }
         // A drag or a copy waiting for pictures from Orbiters says so, with a spinner.
         let coming = match (self.waiting, &self.copying) {
-            (Some((1, 1)), _) => Some("Getting it from Orbiters…".to_string()),
-            (Some((n, total)), _) if n > 0 => Some(format!("Getting {n} of {total} from Orbiters…")),
-            (_, Some(_)) => Some("Getting them from Orbiters to copy…".to_string()),
+            (Some((1, 1)), _) => Some(tr("Getting it from Orbiters…").to_string()),
+            (Some((n, total)), _) if n > 0 => Some(tr!("Getting {n} of {total} from Orbiters…", n = n, total = total)),
+            (_, Some(_)) => Some(tr("Getting them from Orbiters to copy…").to_string()),
             _ => None,
         };
         let said = coming.clone().or(said);
@@ -497,10 +498,10 @@ impl Selection {
         }
         let any = self.any() && !lone;
         let n = self.keys.len();
-        let count = Txt::new(if n == 1 { "1 selected".to_string() } else { format!("{n} selected") }, 14.0).weight(weight::SEMIBOLD);
-        let hint_text = said.clone().unwrap_or_else(|| "Drag them into Discord, a folder or any app".into());
+        let count = Txt::new(if n == 1 { tr("1 selected").to_string() } else { tr!("{count} selected", count = n) }, 14.0).weight(weight::SEMIBOLD);
+        let hint_text = said.clone().unwrap_or_else(|| tr("Drag them into Discord, a folder or any app").into());
         let hint = Txt::new(&hint_text, 12.5).color(if said.is_some() { theme::ACCENT } else { theme::FG_3 });
-        let all = Button::new("Select all").variant(Variant::Ghost).size(Size::Sm).id_salt("gallery-select-all");
+        let all = Button::new(tr("Select all")).variant(Variant::Ghost).size(Size::Sm).id_salt("gallery-select-all");
         let thumbs = if any { self.keys.len().min(3) } else { 0 };
         let count_w = if any { widgets::text_size(ui, &count).x } else { 0.0 };
         let narrow = page.width() < 760.0;
@@ -563,7 +564,7 @@ impl Selection {
             let mut right = rect.right() - 10.0;
             if any {
                 let close = Rect::from_center_size(pos2(right - 16.0, cy), vec2(32.0, 32.0));
-                let resp = ui.interact(close, id.with("clear"), Sense::click()).on_hover_text("Clear the selection (Esc)");
+                let resp = ui.interact(close, id.with("clear"), Sense::click()).on_hover_text(tr("Clear the selection (Esc)"));
                 let hover = anim::toggle(&ctx, id.with("clear-hover"), resp.hovered(), Spring::SNAPPY);
                 p.circle_filled(close.center(), 16.0, theme::white(0.04 + 0.08 * hover));
                 widgets::icon(&p, close.center(), icons::X, 15.0, theme::mix(theme::FG_3, theme::FG, hover));
@@ -677,23 +678,28 @@ struct Gathered {
 /// What the bar says when nothing could be handed out.
 fn nothing_came(g: &Gathered) -> String {
     match &g.failed {
-        Some(why) => format!("These could not be fetched from Orbiters: {why}"),
-        None => "These can't be dragged out".into(),
+        Some(why) => tr!("These could not be fetched from Orbiters: {why}", why = why),
+        None => tr("These can't be dragged out").into(),
     }
 }
 
 /// "Copied 3 pictures", "Copied a 3D capture", "Copied 2 pictures and a 3D capture": what was handed out (`handed`).
 fn copied(order: &[Entry], handed: &[String]) -> String {
+    tr!("Copied {what}", what = copied_what(order, handed))
+}
+
+/// "3 pictures", "a 3D capture", "2 pictures and a 3D capture": what was handed out, to say it in a sentence of its own.
+fn copied_what(order: &[Entry], handed: &[String]) -> String {
     let entries: Vec<&Entry> = handed.iter().filter_map(|k| order.iter().find(|o| &o.key == k)).collect();
     let pictures = entries.iter().filter(|e| e.is_picture()).count();
     let captures = entries.len().saturating_sub(pictures);
-    let part = |count: usize, one: &str, many: &str| match count {
-        0 => None,
-        1 => Some(one.to_string()),
-        c => Some(format!("{c} {many}")),
-    };
-    let parts: Vec<String> = [part(pictures, "a picture", "pictures"), part(captures, "a 3D capture", "3D captures")].into_iter().flatten().collect();
-    format!("Copied {}", parts.join(" and "))
+    let pictures = (pictures > 0).then(|| tr_n("a picture", "{count} pictures", pictures as u64));
+    let captures = (captures > 0).then(|| tr_n("a 3D capture", "{count} 3D captures", captures as u64));
+    match (pictures, captures) {
+        (Some(first), Some(second)) => tr!("{first} and {second}", first = first, second = second),
+        (Some(only), None) | (None, Some(only)) => only,
+        (None, None) => String::new(),
+    }
 }
 
 /// The files to hand out: each picture as it is, each capture as the picture of its 3D view (made once, kept in the
@@ -937,7 +943,7 @@ fn file_name(name: &str) -> String {
     let clean: String = name.chars().map(|c| if c.is_control() || r#"<>:"/\|?*"#.contains(c) { '_' } else { c }).take(120).collect();
     let clean = clean.trim_end_matches(['.', ' ']).trim_start().to_string();
     if clean.is_empty() {
-        "Orbiters picture".into()
+        "Orbiters picture".into() // i18n: not shown
     } else {
         clean
     }
@@ -1133,6 +1139,20 @@ mod tests {
         shared.local = None;
         shared.remote = Some(orbiters_core::shares::Item { kind: Kind::Picture, id: 4, ..Default::default() });
         assert_eq!(copied(&[shared], &keys(&["picture:4"])), "Copied a picture");
+    }
+
+    /// What was copied is said in whole sentences of the language, its pictures and captures counted in its plural.
+    #[test]
+    fn what_a_drag_copied_follows_the_language() {
+        use orbiters_i18n::{in_language, Language};
+        let order = vec![entry("a", true), entry("b", true), entry("c", false)];
+        let keys = |ks: &[&str]| ks.iter().map(|k| k.to_string()).collect::<Vec<_>>();
+        in_language(Language::Fr, || {
+            assert_eq!(copied(&order, &keys(&["a", "b"])), "Copié\u{a0}: 2 photos");
+            assert_eq!(copied(&order, &keys(&["a", "b", "c"])), "Copié\u{a0}: 2 photos et une capture 3D");
+        });
+        in_language(Language::Ja, || assert_eq!(copied(&order, &keys(&["a", "b", "c"])), "2枚の写真と3Dキャプチャ1件をコピーしました"));
+        in_language(Language::Es, || assert_eq!(copied(&order, &keys(&["c"])), "Copiado: una captura 3D"));
     }
 
     /// A card that is only on Orbiters: a community's picture, an asset's, one shared with the member, a shared 3D

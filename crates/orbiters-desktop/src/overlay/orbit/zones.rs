@@ -291,7 +291,7 @@ impl Zone {
             Zone::WheelCaption => r(-220.0, -270.0, 220.0, -214.0),
             Zone::WheelVeil => r(-103.0, -103.0, 103.0, 103.0),
             // Off the ring, in the free corner past its seam, and no smaller than a thumb's worth of laser.
-            Zone::WheelHide => r(146.0, -186.0, 182.0, -150.0),
+            Zone::WheelHide => r(140.0, -186.0, 196.0, -156.0),
             // As tall as My Profile and as wide, beside it.
             // As tall as My Profile and as wide, beside it.
             Zone::WingName => r(362.0, -150.0, 524.0, -120.0),
@@ -305,7 +305,8 @@ impl Zone {
             Zone::QmStrip => r(-262.0, 266.0, 262.0, 322.0),
             Zone::QmCaption => r(200.0, -206.0, 524.0, -154.0),
             // The Quick Menu's panels and the FPS line over them, ending where its main panel ends: its tab row and badge stay VRChat's.
-            Zone::SheetBack => r(-352.0, -248.0, 352.0, 204.0),
+            // Clear of what VRChat has over its menu, down over its main panel's foot.
+            Zone::SheetBack => r(-352.0, -240.0, 352.0, 205.5),
             // Under the tab row, where VRChat's own tooltip for what lies under the pointer appears.
             Zone::SheetHint => r(-300.0, 268.0, 300.0, 302.0),
             // N4N0's pages' own shape, 704 wide.

@@ -7,7 +7,7 @@
 //! app has no address for).
 
 use super::cache::{Disk, Validators};
-use super::stereo::{self, StartView};
+use super::stereo::{self, StartView, V3};
 use orbiters_core::account::{Api, Server};
 use orbiters_reconstruct::gaussians::Gaussians;
 use orbiters_reconstruct::sky::SkyMap;
@@ -551,6 +551,8 @@ pub struct Capture {
     /// Each splat's distance from the start eye, ascending.
     pub distances: Vec<f32>,
     pub sky: Option<SkyMap>,
+    /// Sorted to show small ([`Capture::around_subject`]): how far it shows at first.
+    small_reach: Option<f32>,
     pub view: StartView,
 }
 
@@ -564,20 +566,93 @@ impl Capture {
         for &(_, i) in &order {
             sorted.push(g.means[i], g.log_scales[i], g.rotations[i], g.opacity_logits[i], g.colors[i]);
         }
-        Self { gaussians: sorted, distances: order.into_iter().map(|(d, _)| d).collect(), sky, view }
+        Self { gaussians: sorted, distances: order.into_iter().map(|(d, _)| d).collect(), sky, view, small_reach: None }
     }
 
-    /// The same capture to show small: in order of distance from what its start view looks at, around which it stands.
+    /// What to show of it small, from what it holds: what makes a scene of a capture is what stands up in it, and a fixed
+    /// distance around what the camera looked at is mostly floor.
+    pub fn small_frame(&self) -> SmallFrame {
+        let g = &self.gaussians;
+        let view = &self.view;
+        let target = [view.target[0], view.target[1], -view.target[2]];
+        let step = (g.len() / 160_000).max(1);
+        // What can be seen: not what is nearly transparent, nor the huge splats of what is far away.
+        let points: Vec<V3> = (0..g.len())
+            .step_by(step)
+            .filter(|&i| g.opacity_logits[i] > 0.0 && g.log_scales[i].iter().all(|s| s.exp() < 0.5))
+            .map(|i| g.means[i])
+            .collect();
+        let flat = |a: V3, b: V3| (a[0] - b[0]).hypot(a[2] - b[2]);
+        let near: Vec<f32> = points.iter().filter(|p| flat(**p, target) < 6.0).map(|p| p[1]).collect();
+        // The ground: the start view's, unless what is around the subject says otherwise.
+        let mut ground = view.ground();
+        if near.len() > 400 {
+            let mut heights = near.clone();
+            heights.sort_by(f32::total_cmp);
+            let low = heights[heights.len() / 12];
+            if (low - ground).abs() > 0.5 {
+                ground = low;
+            }
+        }
+        let mut best = SmallFrame { middle: [target[0], ground + 0.8, target[2]], reach: 3.0, ground, top: ground + 3.0 };
+        let mut best_score = -1.0f32;
+        for reach in [1.2f32, 1.6, 2.2, 3.0, 4.0, 5.5, 7.5, 10.0, 14.0, 20.0] {
+            let inside: Vec<V3> = points.iter().copied().filter(|p| flat(*p, target) < reach && p[1] > ground - 0.25 && p[1] < ground + reach.max(4.0)).collect();
+            if inside.len() < 600 {
+                continue;
+            }
+            let standing: Vec<V3> = inside.iter().copied().filter(|p| p[1] - ground > 0.35).collect();
+            if standing.len() < 120 {
+                continue;
+            }
+            let mut heights: Vec<f32> = standing.iter().map(|p| p[1] - ground).collect();
+            heights.sort_by(f32::total_cmp);
+            // A ceiling is a layer far denser than what stands under it: no one sees in through it.
+            let ceiling = ceiling_in(&heights, (view.eye()[1] - ground).max(0.8));
+            let top = ceiling.map_or(heights[heights.len() * 9 / 10] * 1.15, |c| c - 0.15).max(1.6);
+            let tall = heights.iter().copied().filter(|h| *h <= top).max_by(f32::total_cmp).unwrap_or(top).min(top);
+            let share = standing.len() as f32 / inside.len() as f32;
+            // Much that stands up, that stands high against how wide the plate is, seen from close enough to tell what it is.
+            let score = (share / 0.55).min(1.0) * (tall / reach / 0.7).min(1.0) * (standing.len() as f32 / 2500.0).min(1.0) * (1.0 - reach / 40.0);
+            if score > best_score {
+                best_score = score;
+                let n = standing.len() as f32;
+                let (sx, sz) = standing.iter().fold((0.0, 0.0), |(x, z), p| (x + p[0] / n, z + p[2] / n));
+                // Towards what stands, and still around what the camera looked at.
+                let middle = [target[0] + (sx - target[0]) * 0.5, ground + tall * 0.34, target[2] + (sz - target[2]) * 0.5];
+                // With some room around it, as a stage has.
+                best = SmallFrame { middle, reach: reach * 1.3, ground, top: ground + top };
+            }
+        }
+        best
+    }
+
+    /// The same capture to show small: what [`Capture::small_frame`] says, in order of distance across the ground from its
+    /// middle, so that what shows at any zoom is a round slice, with no ceiling, of the ground and what stands on it.
     pub fn around_subject(&self) -> Self {
-        let ahead = stereo::add(self.view.target, stereo::sub(self.view.target, self.view.position));
-        let view = StartView { position: self.view.target, target: ahead, floor: self.view.floor, eye_height: self.view.eye_height };
-        Self::new(self.gaussians.clone(), None, view)
+        let frame = self.small_frame();
+        let forward = [self.view.target[0] - self.view.position[0], self.view.target[1] - self.view.position[1], self.view.target[2] - self.view.position[2]];
+        let flip = |p: V3| [p[0], p[1], -p[2]];
+        let position = flip(frame.middle);
+        let view = StartView { position, target: stereo::add(position, forward), floor: Some(frame.ground), eye_height: None };
+        let g = &self.gaussians;
+        let across = |i: usize| (g.means[i][0] - frame.middle[0]).hypot(g.means[i][2] - frame.middle[2]);
+        let mut order: Vec<(f32, usize)> = (0..g.len())
+            // Nor the huge soft splats that stood for far things: up close, on a small stage, they are smears.
+            .filter(|&i| g.is_finite(i) && g.means[i][1] > frame.ground - 0.25 && g.means[i][1] < frame.top && g.log_scales[i].iter().all(|s| s.exp() < 0.25))
+            .map(|i| (across(i), i))
+            .collect();
+        order.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let mut sorted = Gaussians::default();
+        for &(_, i) in &order {
+            sorted.push(g.means[i], g.log_scales[i], g.rotations[i], g.opacity_logits[i], g.colors[i]);
+        }
+        Self { gaussians: sorted, distances: order.into_iter().map(|(d, _)| d).collect(), sky: None, view, small_reach: Some(frame.reach) }
     }
 
-    /// What it shows small at first, around its subject: up to where it was seen from. Seen from outside, a capture is a
-    /// shell of what surrounded its camera, and past that point what lay behind the camera would stand in the way.
+    /// What it shows small at first.
     pub fn small_reach(&self) -> f32 {
-        (stereo::length(stereo::sub(self.view.target, self.view.position)) * 1.1).clamp(1.0, 30.0)
+        self.small_reach.unwrap_or(3.0)
     }
 
     /// The splats within `radius` of the start eye (the first ones).
@@ -588,6 +663,35 @@ impl Capture {
     pub fn farthest(&self) -> f32 {
         self.distances.last().copied().unwrap_or(1.0)
     }
+}
+
+/// What of a capture to show small.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SmallFrame {
+    /// Its middle, above the ground, around what stands there.
+    pub middle: stereo::V3,
+    /// How far across the ground it reaches from there.
+    pub reach: f32,
+    pub ground: f32,
+    /// Where it stops going up: under a ceiling, or over what stands highest.
+    pub top: f32,
+}
+
+/// How high a ceiling lies, of `heights` above the ground (sorted): the first thin layer above where the camera was holding far
+/// more of what is there than the layers under it do.
+fn ceiling_in(heights: &[f32], camera: f32) -> Option<f32> {
+    const LAYER: f32 = 0.25;
+    let layers = (heights.last().copied().unwrap_or(0.0) / LAYER).ceil() as usize + 1;
+    let mut count = vec![0u32; layers];
+    for h in heights {
+        count[(h / LAYER) as usize] += 1;
+    }
+    let from = ((camera / LAYER) as usize).max(4);
+    if layers <= from {
+        return None;
+    }
+    let under = count[2..from].iter().sum::<u32>() as f32 / (from - 2) as f32;
+    count.iter().enumerate().skip(from).find(|(_, c)| **c as f32 > under * 2.2).map(|(i, _)| i as f32 * LAYER)
 }
 
 /// A session of this computer as the 3D view takes it: its splats less what was edited out, its sky, and the start view its upload would say.
@@ -696,6 +800,62 @@ mod tests {
     ],"feedback":{"WRLD_HOME":{"likes":41,"labels":{"mirror":9,"meetup":12,"pens":9,"gone":0},"comments":7,
         "recent":[{"by":"Kana","text":"The mirror room is perfect for photos.","at":"2026-10-29T21:04:00Z"},{"text":"no author"},{"by":"x"}]},
         "wrld_dawn":"not an object"}}"#;
+
+    fn splat(g: &mut Gaussians, x: f32, y: f32, z: f32) {
+        g.push([x, y, z], [-3.5; 3], [1.0, 0.0, 0.0, 0.0], 3.0, [0.5; 3]);
+    }
+
+    /// A floor, far and wide, and on it near what the camera looks at a figure and some walls.
+    fn scene(ceiling: Option<f32>) -> Capture {
+        let mut g = Gaussians::default();
+        for i in 0..400 {
+            for j in 0..400 {
+                splat(&mut g, -30.0 + i as f32 * 0.15, 0.0, -30.0 + j as f32 * 0.15);
+            }
+        }
+        // Figure, 1.7 m tall, 2 m from the target.
+        for i in 0..6000 {
+            let t = i as f32 / 6000.0;
+            splat(&mut g, 2.0 + (t * 90.0).sin() * 0.2, t * 1.7, 0.3 + (t * 70.0).cos() * 0.2);
+        }
+        // Walls around, 2.6 m high.
+        for i in 0..20000 {
+            let t = i as f32 / 20000.0;
+            let a = t * std::f32::consts::TAU;
+            splat(&mut g, a.cos() * 3.2, (t * 300.0).fract() * 2.6, a.sin() * 3.2);
+        }
+        if let Some(y) = ceiling {
+            for i in 0..200 {
+                for j in 0..200 {
+                    splat(&mut g, -3.2 + i as f32 * 0.032, y, -3.2 + j as f32 * 0.032);
+                }
+            }
+        }
+        let view = StartView { position: [0.0, 1.6, 4.0], target: [0.0, 1.0, 0.0], floor: Some(0.0), eye_height: None };
+        Capture::new(g, None, view)
+    }
+
+    /// Round 3's judges: "a flat disc of ground". What it shows is chosen from what stands in the capture.
+    #[test]
+    fn a_small_capture_shows_what_stands_up_in_it_and_no_ceiling() {
+        let open = scene(None);
+        let frame = open.small_frame();
+        assert!(frame.reach >= 2.2 && frame.reach <= 7.0, "the room's width, not the whole floor: {frame:?}");
+        assert!(frame.middle[1] > 0.3, "its middle is above the ground: {frame:?}");
+        // Under a ceiling, it stops short of it.
+        let closed = scene(Some(2.8));
+        let frame = closed.small_frame();
+        assert!(frame.top < 2.8 && frame.top > 2.0, "{frame:?}");
+        let small = closed.around_subject();
+        assert!(small.gaussians.means.iter().all(|m| m[1] < frame.top), "no ceiling left");
+        assert!(small.within(frame.reach) > 300);
+        assert!(small.gaussians.len() < closed.gaussians.len());
+        // In order across the ground from its middle, and its view looks the way the capture's did.
+        assert!(small.distances.windows(2).all(|w| w[0] <= w[1]));
+        assert!((small.view.yaw() - closed.view.yaw()).abs() < 1e-4);
+        assert_eq!(small.small_reach(), frame.reach);
+        assert_eq!(small.view.ground(), frame.ground);
+    }
 
     #[test]
     fn the_listing_keeps_entries_with_a_start_view() {

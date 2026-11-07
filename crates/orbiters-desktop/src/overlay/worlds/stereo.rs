@@ -163,8 +163,11 @@ impl Placement {
     }
 }
 
+/// Where on its plate's picture, from its middle to its edge, the rim lies: what the capture reaches.
+pub const SMALL_PLATE_RIM: f32 = 0.86;
+
 /// How far from its middle a capture standing small reaches, in the room, once out of the panel.
-pub const SMALL_RADIUS_M: f32 = 0.3;
+pub const SMALL_RADIUS_M: f32 = 0.26;
 /// How much further than that a hand can take hold of it; how far from its place in the panel it goes back there when let go.
 const SMALL_REACH_M: f32 = 0.15;
 const SMALL_DOCKS_WITHIN_M: f32 = 0.12;
@@ -176,6 +179,11 @@ const SMALL_REACHES: (f32, f32) = (0.5, 150.0);
 /// How fast it settles where it goes, and how near that is there.
 const SMALL_SETTLES_PER_S: f32 = 14.0;
 const SMALL_SETTLED_M: f32 = 0.002;
+
+/// How much a capture in a panel's hole is tipped towards who looks, and one out in the room: held below the eyes that one is seen
+/// from above already.
+const SMALL_TILT_IN_A_HOLE: f32 = 30.0;
+const SMALL_TILT_IN_THE_ROOM: f32 = 14.0;
 
 /// Where a capture standing small lies in a panel: as that panel turns, this large, this far behind it.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -191,9 +199,11 @@ impl SmallDock {
     pub fn behind(view: &StartView, at: &Matrix34, radius: f32) -> Self {
         let (s, c) = (-view.yaw()).sin_cos();
         let turned = [[c, 0.0, s], [0.0, 1.0, 0.0], [s, 0.0, -c]];
-        // Most captures are wider than tall, with their ground low: raised a little, more of it is in the hole and less under it.
-        let raised = add(position(at), scale(axis(at, 1), radius * 0.28));
-        Self { rotation: mat_mul(&rotation_of(at), &turned), anchor: sub(raised, scale(axis(at, 2), radius * 0.7)), radius }
+        // Tipped towards who looks: a panel faces them, and a scene on it seen level would be seen edge on.
+        let (ts, tc) = SMALL_TILT_IN_A_HOLE.to_radians().sin_cos();
+        let tipped = [[1.0, 0.0, 0.0], [0.0, tc, -ts], [0.0, ts, tc]];
+        let raised = add(position(at), scale(axis(at, 1), radius * 0.1));
+        Self { rotation: mat_mul(&rotation_of(at), &mat_mul(&tipped, &turned)), anchor: sub(raised, scale(axis(at, 2), radius * 0.8)), radius }
     }
 }
 
@@ -253,10 +263,15 @@ impl Small {
     /// Half a metre before `head`, at its chest, turned as the capture would be around it, showing `reach` metres of
     /// the capture around its middle.
     pub fn new(view: &StartView, head: &Matrix34, reach: f32) -> Self {
-        let rotation = Placement::at(view, head).rotation;
         let back = axis(head, 2);
         let level = length([back[0], 0.0, back[2]]).max(1e-3);
         let ahead = [-back[0] / level, 0.0, -back[2] / level];
+        // Tipped towards who looks, about the level line across them.
+        let across = [-ahead[2], 0.0, ahead[0]];
+        let (ts, tc) = SMALL_TILT_IN_THE_ROOM.to_radians().sin_cos();
+        let frame = [[across[0], 0.0, -ahead[0]], [across[1], 1.0, -ahead[1]], [across[2], 0.0, -ahead[2]]];
+        let tipped = mat_mul(&frame, &mat_mul(&[[1.0, 0.0, 0.0], [0.0, tc, -ts], [0.0, ts, tc]], &transposed(&frame)));
+        let rotation = mat_mul(&tipped, &Placement::at(view, head).rotation);
         let anchor = add(add(position(head), scale(ahead, 0.55)), [0.0, -0.15, 0.0]);
         Self { rotation, anchor, reach: reach.clamp(SMALL_REACHES.0, SMALL_REACHES.1), radius: SMALL_RADIUS_M, held: None, grips: [false; 2], taken: false, docked: false, settled: false, near: false, zoomed: false }
     }
@@ -272,6 +287,16 @@ impl Small {
     pub fn zoomed_in(mut self, share: f32) -> Self {
         self.reach = (self.reach * share).clamp(SMALL_REACHES.0, SMALL_REACHES.1);
         self
+    }
+
+    /// Where the plate it stands on lies, for ground `below` its middle in the capture's metres, and how wide: its picture's face
+    /// up along the capture's up.
+    pub fn plate(&self, below: f32) -> (Matrix34, f32) {
+        let r = &self.rotation;
+        let (x, up) = ([r[0][0], r[1][0], r[2][0]], [r[0][1], r[1][1], r[2][1]]);
+        let y = cross(up, x);
+        let at = sub(self.anchor, scale(up, below * self.size()));
+        (Matrix34 { m: [[x[0], y[0], up[0], at[0]], [x[1], y[1], up[1], at[1]], [x[2], y[2], up[2], at[2]]] }, self.radius * 2.0 / SMALL_PLATE_RIM)
     }
 
     /// How large it stands against the capture.
@@ -775,7 +800,8 @@ mod tests {
         assert!(dot(sub(dock.anchor, position(&sheet)), axis(&sheet, 2)) < 0.0, "behind the panel, as seen by who faces it");
         // Its start view looks into the panel.
         let d = mat_vec(&dock.rotation, sub([view.target[0], view.target[1], -view.target[2]], view.eye()));
-        assert!(dot(d, axis(&sheet, 2)) < -0.99, "{d:?}");
+        let length_d = length(d);
+        assert!(dot(d, axis(&sheet, 2)) / length_d < -0.8, "{d:?}");
         let mut small = small_for_hands().at_dock(&dock);
         assert!(small.docked);
         assert_eq!(small.radius(), 0.08);

@@ -217,7 +217,8 @@ pub fn shots(out: &std::path::Path) -> anyhow::Result<()> {
     paint("morph-1", &entries, &morph, &downloading, &feedback, 10.0 + 0.07)?;
     paint("morph-2", &entries, &morph, &Status { current: Some(11), download: Some(0.1), stage: Some("Downloading 3.3 of 33.1 MB".into()), ..Default::default() }, &feedback, 10.0 + 0.2)?;
     // A capture standing small, seen through the side panel's hole; a hand near it; taken; a world's panel in a headset.
-    let docked = Status { current: Some(10), shown: true, small: true, small_docked: true, headset: true, ..Default::default() };
+    let mut docked = Status { current: Some(10), shown: true, small: true, small_docked: true, headset: true, ..Default::default() };
+    docked.list.vrchat = true;
     paint("small-docked", &entries, &detail, &docked, &feedback, 5.0)?;
     paint("small-near", &entries, &detail, &Status { small_near: true, ..docked.clone() }, &feedback, 5.0)?;
     paint("small-taken", &entries, &detail, &Status { small_docked: false, small_taken: true, ..docked.clone() }, &feedback, 5.0)?;

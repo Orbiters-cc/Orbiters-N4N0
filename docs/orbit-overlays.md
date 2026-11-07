@@ -12,6 +12,10 @@ Code: `crates/orbiters-desktop/src/overlay/orbit/`. Settings, Performance, "Orbi
 
 **No mod.** Nothing is injected, the game's files and memory are not touched. In desktop mode each panel is an ordinary topmost window; in VR an ordinary SteamVR overlay.
 
+## Sizes in VR
+
+A sheet is used at about 0.55 m, where one of its page's pixels is 0.62 mm. Nothing that can be pressed on a sheet or a world's side panel is under 2 degrees on its short side, and tests hold to that. Text on them is about 1 degree at least.
+
 ## How they follow the hand in VR
 
 Rigid parts and sheets follow a filter with its own time constant on each menu, about what VRChat's own feel like (Enzo, in the headset): `vr_smoothing_quick_menu_ms` 35, `vr_smoothing_wheel_ms` 20. The tiles around the menus are on springs of their own whose character keeps changing, or rigid, as Settings chooses.
@@ -56,7 +60,7 @@ The gallery, previous instances, YouTube's results and the conversation scroll b
 
 ## A capture standing small (VR)
 
-`worlds::stereo::Small`: a capture stands small before the person, what is farther from its subject than it shows not drawn. A capture at a size needs nothing of the renderer but the camera's translation divided by that size (`Placement::size`). It is sorted anew around its subject (`Capture::around_subject`) so the first splats are those near it, and drawn over nothing: `Gpu::present_alpha` writes what the splats leave of the background as transparency, premultiplied.
+`worlds::stereo::Small`: a capture stands small before the person. What it shows is chosen from its content (`Capture::small_frame`): around what stands up in it, not at a fixed radius, with its ceiling and huge far splats left out, as a round slice across the ground. It stands tipped towards who looks on a plate (`small_hint::Plate`): a soft shadow, a dark disc and a rim where the capture ends. A capture at a size needs nothing of the renderer but the camera's translation divided by that size (`Placement::size`). It is sorted anew around its subject (`Capture::around_subject`) so the first splats are those near it, and drawn over nothing: `Gpu::present_alpha` writes what the splats leave of the background as transparency, premultiplied.
 
 On a world's side panel it lies in a hole (`panel::Panel::hole`, the same hole in the sheet's back, `panels::Facts::sheet_hole`), behind which a dark pane (`small_hint::Backdrop`) hides VRChat's menu. It follows the panel until a grip closes near it (`Small::step`); then it follows that hand, grows, and that hand's stick zooms it. Let go near the hole, or asked with Back here, it returns. Taken, it stays when the menu closes, until Hide 3D.
 
@@ -72,7 +76,7 @@ A press on a world opens its details on a side panel beside the list, which narr
 
 ## VRChat's tooltips under a sheet
 
-On the desktop VRChat lights what lies under the pointer even with a sheet over it, as nothing outside the game can stop that, and shows its tooltip under its tab row. While the pointer is on these parts, `Zone::SheetHint` lies over that place and says what the pointer is on.
+On the desktop VRChat lights what lies under the pointer even with a sheet over it, as nothing outside the game can stop that, and shows its tooltip under its tab row. While the pointer is on these parts, `Zone::SheetHint` lies over that place and says what the pointer is on. What is pointed at is said only there while it is up (`Facts::hint_band`), else in the sheet's head.
 
 ## A 3D picture from these menus, on the desktop
 

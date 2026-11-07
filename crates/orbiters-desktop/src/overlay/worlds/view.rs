@@ -48,8 +48,6 @@ const FADE_IN: Duration = Duration::from_millis(450);
 const FADE_OUT: Duration = Duration::from_millis(350);
 /// The overlays' alpha with "See VRChat" on.
 pub const SEE_THROUGH_ALPHA: f32 = 0.55;
-/// In a panel's hole a capture shows less of itself, larger: there is not much room for a whole scene.
-const SMALL_CLOSER_IN_A_HOLE: f32 = 0.7;
 
 /// How sharp the faces are: pixels per eye across a face.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
@@ -560,6 +558,12 @@ impl View {
         self.small.as_ref().filter(|_| matches!(self.phase, Phase::Shown { .. }))
     }
 
+    /// Where the plate under what shows small lies.
+    pub fn small_plate(&self) -> Option<(vr::Matrix34, f32)> {
+        let (small, capture) = (self.small_now()?, self.capture.as_ref()?);
+        Some(small.plate(capture.view.eye()[1] - capture.view.ground()))
+    }
+
     /// What shows small goes back to its place in the panel.
     pub fn small_back(&mut self) {
         if let Some(small) = self.small.as_mut() {
@@ -627,8 +631,8 @@ impl View {
                 let _ = overlay.set_flag(*h, overlay_flag::SIDE_BY_SIDE_PARALLEL, true);
                 // A capture all around is opaque and this changes nothing; small, what is around it shows the room.
                 let _ = overlay.set_flag(*h, overlay_flag::IS_PREMULTIPLIED, true);
-                // Under N4N0's menu (10) and the pill, and over what lies behind it in a panel.
-                let _ = overlay.set_sort_order(*h, 1);
+                // Under N4N0's menu (10) and the pill, and over what lies under it: a panel's pane, its plate.
+                let _ = overlay.set_sort_order(*h, 2);
             }
         }
         Ok(out)
@@ -662,7 +666,7 @@ impl View {
             self.small_coming = None;
             let mut small = stereo::Small::new(&sorted.view, &head_pose(steamvr, 0.0), sorted.small_reach());
             if let Some((at, radius)) = self.small_place {
-                small = small.at_dock(&stereo::SmallDock::behind(&sorted.view, &at, radius)).zoomed_in(SMALL_CLOSER_IN_A_HOLE);
+                small = small.at_dock(&stereo::SmallDock::behind(&sorted.view, &at, radius));
             }
             self.placement = Some(small.placement(sorted.view.eye()));
             self.small = Some(small);

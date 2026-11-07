@@ -14,7 +14,7 @@ use std::time::Instant;
 pub const PX: [u32; 2] = [448, 256];
 pub const WIDTH_M: f32 = 0.28;
 /// How high above what it speaks of it floats.
-const ABOVE_M: f32 = 0.015;
+const ABOVE_M: f32 = 0.06;
 const FRAME_S: f32 = 1.0 / 45.0;
 /// One push up and pull down, in seconds.
 const CYCLE_S: f32 = 2.6;
@@ -182,7 +182,7 @@ impl HideChip {
         let handle = overlay.create(&format!("{key}.small-hide"), "Hide a small 3D view").map_err(|c| anyhow::anyhow!("the small view's Hide: {c:?}"))?;
         let _ = overlay.set_width_in_meters(handle, CHIP_WIDTH_M);
         let _ = overlay.set_flag(handle, vr::overlay_flag::IS_PREMULTIPLIED, true);
-        let _ = overlay.set_sort_order(handle, 2);
+        let _ = overlay.set_sort_order(handle, 3);
         Ok(Self { handle, canvas: Canvas::new(CHIP_PX[0], CHIP_PX[1]), shown: None })
     }
 
@@ -219,7 +219,7 @@ impl HideChip {
 
 /// Where a view's Hide lies, facing `eye`, and whether a laser (its origin and direction) or a hand's tip is on it.
 pub fn chip_place(at: V3, radius: f32, eye: V3) -> vr::Matrix34 {
-    facing(stereo::add(at, [0.0, -(radius * 0.45 + 0.05), 0.0]), eye)
+    facing(stereo::add(at, [0.0, -(radius * 0.62 + 0.05), 0.0]), eye)
 }
 
 /// Whether a tool at `tip`, pointing along `along`, is on a chip at `place`: its ray within a generous margin, or itself close by.
@@ -256,7 +256,7 @@ impl SmallHint {
         let _ = overlay.set_width_in_meters(handle, WIDTH_M);
         let _ = overlay.set_flag(handle, vr::overlay_flag::IS_PREMULTIPLIED, true);
         // Over the capture, and under N4N0's menu and these panels.
-        let _ = overlay.set_sort_order(handle, 2);
+        let _ = overlay.set_sort_order(handle, 3);
         Ok(Self { handle, canvas: Canvas::new(PX[0], PX[1]), born: Instant::now(), painted: None, shown: None })
     }
 
@@ -294,6 +294,87 @@ impl SmallHint {
     }
 }
 
+/// The plate a capture standing small stands on, under it: a soft shadow, a dark disc, a clean rim where the capture ends. It is
+/// in the room, tipped as the capture is, so that it gives the capture its shape from any side.
+pub struct Plate {
+    handle: vr::OverlayHandle,
+    pixels: Vec<u8>,
+    painted: bool,
+    shown: bool,
+}
+
+/// The plate's picture, premultiplied, `side` pixels square.
+pub fn plate_pixels(side: u32) -> Vec<u8> {
+    let mut pixels = Vec::with_capacity((side * side * 4) as usize);
+    let rim = stereo::SMALL_PLATE_RIM;
+    let smooth = |a: f32, b: f32, x: f32| {
+        let t = ((x - a) / (b - a)).clamp(0.0, 1.0);
+        t * t * (3.0 - 2.0 * t)
+    };
+    for y in 0..side {
+        for x in 0..side {
+            let (u, v) = ((x as f32 + 0.5) / side as f32 * 2.0 - 1.0, (y as f32 + 0.5) / side as f32 * 2.0 - 1.0);
+            let at = u.hypot(v);
+            // From the edge in: shadow, then the disc under the capture, a little lighter in its middle.
+            let shadow = 0.6 * (1.0 - smooth(rim, 1.0, at));
+            let disc = 1.0 - smooth(rim - 0.006, rim + 0.002, at);
+            let ring = (1.0 - ((at - rim).abs() / 0.012).clamp(0.0, 1.0)).powf(0.7);
+            let (mut r, mut g, mut b, mut a) = (0.0f32, 0.0f32, 0.0f32, shadow);
+            if disc > 0.0 {
+                let light = (1.0 - at / rim).clamp(0.0, 1.0) * 0.5;
+                let (dr, dg, db) = (0.09 + 0.05 * light, 0.1 + 0.055 * light, 0.125 + 0.07 * light);
+                let da = 0.94;
+                r = r * (1.0 - disc) + dr * da * disc;
+                g = g * (1.0 - disc) + dg * da * disc;
+                b = b * (1.0 - disc) + db * da * disc;
+                a = a * (1.0 - disc) + da * disc;
+            }
+            // Its rim, Orbiters' own green, soft on the disc.
+            let (rr, rg, rb) = (0.18, 0.95, 0.56);
+            r = r * (1.0 - ring) + rr * ring;
+            g = g * (1.0 - ring) + rg * ring;
+            b = b * (1.0 - ring) + rb * ring;
+            a = a * (1.0 - ring) + ring;
+            pixels.extend_from_slice(&[(r * 255.0) as u8, (g * 255.0) as u8, (b * 255.0) as u8, (a * 255.0) as u8]);
+        }
+    }
+    pixels
+}
+
+impl Plate {
+    const SIDE: u32 = 512;
+
+    pub fn new(overlay: &vr::Overlay, key: &str) -> anyhow::Result<Self> {
+        let handle = overlay.create(&format!("{key}.small-plate"), "Under a small 3D view").map_err(|c| anyhow::anyhow!("the small view's plate: {c:?}"))?;
+        let _ = overlay.set_flag(handle, vr::overlay_flag::IS_PREMULTIPLIED, true);
+        // Over a panel's pane, under the capture.
+        let _ = overlay.set_sort_order(handle, 1);
+        Ok(Self { handle, pixels: plate_pixels(Self::SIDE), painted: false, shown: false })
+    }
+
+    pub(super) fn update(&mut self, overlay: &vr::Overlay, presenter: &mut Presenter, place: Option<(vr::Matrix34, f32)>) {
+        let Some((at, width)) = place else {
+            if std::mem::take(&mut self.shown) {
+                let _ = overlay.hide(self.handle);
+            }
+            return;
+        };
+        if !self.painted {
+            self.painted = true;
+            presenter.show_part(overlay, self.handle, &self.pixels, Self::SIDE, Self::SIDE, [0, 0, Self::SIDE, Self::SIDE]);
+        }
+        let _ = overlay.set_width_in_meters(self.handle, width);
+        let _ = overlay.set_transform_absolute(self.handle, &at);
+        if !std::mem::replace(&mut self.shown, true) {
+            let _ = overlay.show(self.handle);
+        }
+    }
+
+    pub fn destroy(&self, overlay: &vr::Overlay) {
+        let _ = overlay.destroy(self.handle);
+    }
+}
+
 /// What lies behind a capture in a panel's hole, under it, so that VRChat's menu does not show through around it: a dark
 /// pane in the panel's plane, a little larger than the hole, whose edge the panel covers.
 pub struct Backdrop {
@@ -303,24 +384,30 @@ pub struct Backdrop {
     shown: bool,
 }
 
+/// The pane's size and picture.
+pub const BACKDROP_PX: [u32; 2] = [64, 36];
+pub fn backdrop_pixels() -> Vec<u8> {
+    let mut pixels = Vec::with_capacity((BACKDROP_PX[0] * BACKDROP_PX[1] * 4) as usize);
+    for y in 0..BACKDROP_PX[1] {
+        for x in 0..BACKDROP_PX[0] {
+            // Lightest in its middle, as a lit stage.
+            let (u, v) = (x as f32 / (BACKDROP_PX[0] - 1) as f32 * 2.0 - 1.0, y as f32 / (BACKDROP_PX[1] - 1) as f32 * 2.0 - 1.0);
+            let light = (1.0 - (u * u + v * v) * 0.5).clamp(0.0, 1.0);
+            pixels.extend_from_slice(&[(26.0 + 44.0 * light) as u8, (30.0 + 48.0 * light) as u8, (38.0 + 58.0 * light) as u8, 255]);
+        }
+    }
+    pixels
+}
+
 impl Backdrop {
-    const PX: [u32; 2] = [64, 36];
+    const PX: [u32; 2] = BACKDROP_PX;
 
     pub fn new(overlay: &vr::Overlay, key: &str) -> anyhow::Result<Self> {
         let handle = overlay.create(&format!("{key}.small-backdrop"), "Behind a small 3D view").map_err(|c| anyhow::anyhow!("the small view's backdrop: {c:?}"))?;
         let _ = overlay.set_flag(handle, vr::overlay_flag::IS_PREMULTIPLIED, true);
         // Under the capture.
         let _ = overlay.set_sort_order(handle, 0);
-        let mut pixels = Vec::with_capacity((Self::PX[0] * Self::PX[1] * 4) as usize);
-        for y in 0..Self::PX[1] {
-            for x in 0..Self::PX[0] {
-                // Lightest in its middle, as a lit stage.
-                let (u, v) = (x as f32 / (Self::PX[0] - 1) as f32 * 2.0 - 1.0, y as f32 / (Self::PX[1] - 1) as f32 * 2.0 - 1.0);
-                let light = (1.0 - (u * u + v * v) * 0.5).clamp(0.0, 1.0);
-                pixels.extend_from_slice(&[(26.0 + 44.0 * light) as u8, (30.0 + 48.0 * light) as u8, (38.0 + 58.0 * light) as u8, 255]);
-            }
-        }
-        Ok(Self { handle, pixels, painted: false, shown: false })
+        Ok(Self { handle, pixels: backdrop_pixels(), painted: false, shown: false })
     }
 
     /// At `place` (the middle of the hole), `width` across; or nowhere.
@@ -350,7 +437,7 @@ impl Backdrop {
 /// Where the hint's middle lies, for what it speaks of at `at` reaching `radius`: just over its middle, as most captures are flatter than they are wide, its tail towards it.
 pub fn hint_place(at: V3, radius: f32) -> V3 {
     let height = WIDTH_M * PX[1] as f32 / PX[0] as f32;
-    stereo::add(at, [0.0, radius * 0.42 + height / 2.0 + ABOVE_M, 0.0])
+    stereo::add(at, [0.0, radius * 0.5 + height / 2.0 + ABOVE_M, 0.0])
 }
 
 /// Upright at `place`, its face towards `eye`.

@@ -251,7 +251,7 @@ pub fn fetch(source: &Source) -> anyhow::Result<()> {
     let token = match orbiters_core::account::read(server) {
         Some(a) => a.token,
         None if r.kind == RemoteKind::Link => String::new(),
-        None => anyhow::bail!("Sign in to Orbiters in Settings to edit its pictures"),
+        None => anyhow::bail!("{}", orbiters_i18n::tr("Sign in to Orbiters in Settings to edit its pictures")),
     };
     let api = Api::new(server);
     if let Some(dir) = source.picture.parent() {
@@ -263,7 +263,7 @@ pub fn fetch(source: &Source) -> anyhow::Result<()> {
         RemoteKind::Gallery => {
             let get = |failed: bool| -> anyhow::Result<Vec<u8>> {
                 let links = api.picture_source(&token, r.asset, r.id, failed)?;
-                let url = links.full_url.or(links.src).filter(|u| u.starts_with("https://")).ok_or_else(|| anyhow::anyhow!("Orbiters has no link to this picture"))?;
+                let url = links.full_url.or(links.src).filter(|u| u.starts_with("https://")).ok_or_else(|| anyhow::anyhow!("{}", orbiters_i18n::tr("Orbiters has no link to this picture")))?;
                 get_link(&api, &url)
             };
             get(false).or_else(|_| get(true)).or_else(|e| if r.url.starts_with("https://") { get_link(&api, &r.url) } else { Err(e) }).and_then(|bytes| Ok(std::fs::write(&temp, bytes)?))
@@ -280,9 +280,9 @@ pub fn fetch(source: &Source) -> anyhow::Result<()> {
 
 /// A picture's bytes from an `https` link (up to 96 MB).
 fn get_link(api: &orbiters_core::account::Api, url: &str) -> anyhow::Result<Vec<u8>> {
-    anyhow::ensure!(url.starts_with("https://"), "not an https link");
+    anyhow::ensure!(url.starts_with("https://"), "{}", orbiters_i18n::tr("not an https link"));
     let response = api.agent().get(url).config().https_only(true).build().call()?;
-    anyhow::ensure!(response.status().is_success(), "the picture's link answered {}", response.status());
+    anyhow::ensure!(response.status().is_success(), "{}", orbiters_i18n::tr!("the picture's link answered {status}", status = response.status()));
     Ok(response.into_body().with_config().limit(96 << 20).read_to_vec()?)
 }
 

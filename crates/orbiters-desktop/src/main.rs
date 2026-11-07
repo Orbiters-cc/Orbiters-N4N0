@@ -61,7 +61,7 @@ fn main() -> anyhow::Result<()> {
                 .stack_size(16 << 20)
                 .spawn(move || screenshot::run(&args))
                 .map_err(anyhow::Error::from)
-                .and_then(|t| t.join().unwrap_or_else(|_| Err(anyhow::anyhow!("the screenshots stopped on a panic"))))
+                .and_then(|t| t.join().unwrap_or_else(|_| Err(anyhow::anyhow!("the screenshots stopped on a panic")))) // i18n: not shown (a developer's command line, in English)
         }
         Some("--gpu-bench") => bench::run(&args[1..]),
         Some("--window") => window::run(&args[1..]),

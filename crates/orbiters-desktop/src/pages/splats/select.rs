@@ -46,7 +46,7 @@ fn writing() -> std::sync::MutexGuard<'static, ()> {
 }
 
 /// Why a view's splats or edits no longer go together with the PLY on the disk.
-const RECONSTRUCTED: &str = "The capture was reconstructed again since its 3D view opened: close the view and open it again."; // i18n: not shown (the text of errors, which a later pass decides)
+const RECONSTRUCTED: &str = mark("The capture was reconstructed again since its 3D view opened: close the view and open it again.");
 
 /// A PLY's length and modification time: what tells cheaply that it is still the one an edit was made on (it is hashed
 /// again only when they changed).
@@ -71,7 +71,7 @@ fn persist(result: &Path, edit: &Edit, loaded: Option<Stamp>) -> anyhow::Result<
     let _w = writing();
     let ply = result.join(reconstruction::PLY_FILE);
     if loaded.is_none() || Stamp::of(&ply) != loaded {
-        anyhow::ensure!(Identity::read(&ply)? == edit.ply, "{RECONSTRUCTED} These edits were not saved.");
+        anyhow::ensure!(Identity::read(&ply)? == edit.ply, "{} {}", tr(RECONSTRUCTED), tr("These edits were not saved."));
     }
     if edit.removes_nothing() {
         edit::discard_for(result, Some(edit.ply))?;
@@ -101,7 +101,7 @@ pub(super) fn read(dir: &Path) -> anyhow::Result<(Gaussians, Option<SkyMap>, Opt
 pub(super) fn read_again(dir: &Path, expected: Option<Identity>) -> anyhow::Result<(Gaussians, Option<SkyMap>)> {
     let (g, sky, found) = read(dir)?;
     if let (Some(want), Some((now, _))) = (expected, found) {
-        anyhow::ensure!(now == want, "{RECONSTRUCTED}");
+        anyhow::ensure!(now == want, "{}", tr(RECONSTRUCTED));
     }
     Ok((g, sky))
 }
@@ -459,7 +459,7 @@ pub(super) fn redraw_picture(session: &Path, window: (wgpu::Device, wgpu::Queue)
         return Ok(false);
     }
     let splats = g.len();
-    let camera = edit::preview_camera(session).context("its records do not say where its picture was taken from")?;
+    let camera = edit::preview_camera(session).with_context(|| tr("its records do not say where its picture was taken from"))?;
     edit::apply(&mut g, &drawn);
     if g.is_empty() {
         // Everything removed: the renderer draws nothing of an empty set, so one splat too faint to show (far ahead,
@@ -792,7 +792,7 @@ impl Viewer {
                 // The very PLY the view shows (its hash, not only its count: IDs are its order).
                 let (g, now, _) = edit::read_for_view(&ply).map_err(|e| format!("{e:#}"))?;
                 if now != want {
-                    return Err(RECONSTRUCTED.into());
+                    return Err(tr(RECONSTRUCTED).into());
                 }
                 Ok(Arc::new(Splats::new(&g)))
             }));

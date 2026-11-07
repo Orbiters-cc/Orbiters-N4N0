@@ -856,7 +856,7 @@ impl Loaded {
         match &self.edits {
             None => Ok(None),
             Some(e) => match &e.problem {
-                Some(p) => Err(format!("No picture of this view until its splat edits are discarded: {p}")),
+                Some(p) => Err(tr!("No picture of this view until its splat edits are discarded: {problem}", problem = p)),
                 None => Ok(Some(Drawn { marks: e.drawn.clone(), ply: e.edit.ply })),
             },
         }

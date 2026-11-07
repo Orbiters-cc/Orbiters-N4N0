@@ -301,7 +301,7 @@ pub fn read_line_capped(reader: &mut impl BufRead, max: usize) -> std::io::Resul
         line.extend_from_slice(&available[..taken]);
         reader.consume(taken);
         if line.len() > max + 1 {
-            return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "line too long"));
+            return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "line too long")); // i18n: not shown (the service drops a connection that sends it, nobody is told)
         }
         if done {
             line.pop();
@@ -375,7 +375,7 @@ impl Client {
         reader.read_line(&mut line)?;
         let first = match serde_json::from_str::<ToClient>(&line)? {
             ToClient::Snapshot { snapshot } => Arc::new(*snapshot),
-            other => anyhow::bail!("unexpected first message from the service: {other:?}"),
+            other => anyhow::bail!("{}", orbiters_i18n::tr!("unexpected first message from the service: {message}", message = format!("{other:?}"))),
         };
         let client = Arc::new(Self {
             writer: Mutex::new(writer),
@@ -491,7 +491,7 @@ impl Client {
         let (tx, rx) = std::sync::mpsc::channel();
         self.vrchat_data.lock().unwrap().insert(id.clone(), tx);
         self.send(&ToService::VrchatData { id: id.clone(), scope, request });
-        let result = rx.recv_timeout(Duration::from_secs(120)).unwrap_or_else(|_| Err("VRChat data request timed out. Please try again.".into()));
+        let result = rx.recv_timeout(Duration::from_secs(120)).unwrap_or_else(|_| Err(orbiters_i18n::tr("VRChat data request timed out. Please try again.").into()));
         self.vrchat_data.lock().unwrap().remove(&id);
         result
     }

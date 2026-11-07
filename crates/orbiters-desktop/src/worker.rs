@@ -62,7 +62,7 @@ impl WorkerHandle {
         on_exit: impl FnOnce() + Send + 'static,
     ) -> anyhow::Result<Self> {
         let path = sibling_exe("orbiters-capture");
-        anyhow::ensure!(path.is_file(), "capture worker not found at {}", path.display());
+        anyhow::ensure!(path.is_file(), "{}", orbiters_i18n::tr!("capture worker not found at {path}", path = path.display()));
         let mut cmd = Command::new(&path);
         cmd.arg("worker").stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
         #[cfg(windows)]

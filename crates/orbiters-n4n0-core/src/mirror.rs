@@ -3,6 +3,7 @@
 //! screen. The menu asks ([`MirrorAsk`]); N4N0's runtime keeps the camera's state and hands back what the page shows
 //! ([`MirrorView`]).
 
+use orbiters_i18n::tr;
 use serde::{Deserialize, Serialize};
 
 /// What the Screen mirror page asks of N4N0's runtime.
@@ -70,18 +71,18 @@ impl MirrorView {
     /// The page's status line.
     pub fn state(&self) -> String {
         match self.phase {
-            Phase::Off => "Off".into(),
-            Phase::Aiming { seconds } => format!("Look at the world's screen · {seconds}"),
-            Phase::Placed => format!("Mirroring · zoom {}×", self.magnification()),
+            Phase::Off => tr("Off").into(),
+            Phase::Aiming { seconds } => tr!("Look at the world's screen · {seconds}", seconds = seconds),
+            Phase::Placed => tr!("Mirroring · zoom {zoom}×", zoom = self.magnification()),
         }
     }
 
     /// The page's note under its status.
     pub fn note(&self) -> &'static str {
         match self.phase {
-            Phase::Off => "Aim, then look at the world's video screen: N4N0 leaves a small camera there.",
-            Phase::Aiming { .. } => "The camera follows your eyes, then stays where you looked.",
-            Phase::Placed => "Only you see the picture: others see this page. Aim again to move it.",
+            Phase::Off => tr("Aim, then look at the world's video screen: N4N0 leaves a small camera there."),
+            Phase::Aiming { .. } => tr("The camera follows your eyes, then stays where you looked."),
+            Phase::Placed => tr("Only you see the picture: others see this page. Aim again to move it."),
         }
     }
 
@@ -89,8 +90,8 @@ impl MirrorView {
     pub fn unavailable_note(&self) -> Option<&'static str> {
         match self.reach {
             Reach::Screen => None,
-            Reach::Overlay => Some("On N4N0's screen"),
-            Reach::NoMirror => Some("Update N4N0"),
+            Reach::Overlay => Some(tr("On N4N0's screen")),
+            Reach::NoMirror => Some(tr("Update N4N0")),
         }
     }
 

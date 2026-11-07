@@ -4,7 +4,9 @@
 //! friends: until the member added it, Orbiters answers with the account to add.
 
 use crate::menu::{InstanceRow, InviteAccount, InviteAnswer};
+use crate::text::latin;
 use orbiters_core::account::Api;
+use orbiters_i18n::{tr, tr_latin};
 use orbiters_core::visited::History;
 use serde::Deserialize;
 use std::time::Duration;
@@ -56,7 +58,7 @@ pub fn send(api: &Api, token: &str, location: &str) -> InviteAnswer {
         .send_json(serde_json::json!({ "instance": location }));
     let response = match response {
         Ok(r) => r,
-        Err(e) => return InviteAnswer::Failed { message: format!("Orbiters could not be reached: {e}") },
+        Err(e) => return InviteAnswer::Failed { message: latin(|| tr!("Orbiters could not be reached: {error}", error = e)) },
     };
     let status = response.status().as_u16();
     let text = response.into_body().read_to_string().unwrap_or_default();
@@ -69,12 +71,15 @@ fn answer(status: u16, text: &str) -> InviteAnswer {
     if (200..300).contains(&status) {
         return InviteAnswer::Sent;
     }
-    let message = if body.message.trim().is_empty() { format!("Orbiters answered {status}") } else { body.message.trim().to_string() };
+    let message = if body.message.trim().is_empty() { latin(|| tr!("Orbiters answered {status}", status = status)) } else { body.message.trim().to_string() };
     match (body.code.as_str(), body.account) {
         ("not_friends" | "accepting", Some(account)) if !account.name.is_empty() => {
             InviteAnswer::NeedsFriend { account: InviteAccount { name: account.name, link: account.link }, message }
         }
-        ("unauthorized", _) if status == 401 => InviteAnswer::Failed { message: "Sign in to Orbiters in Orbiters - N4N0 first (Settings)".into() },
+        ("unauthorized", _) if status == 401 => {
+            let message = tr_latin("Sign in to Orbiters in Orbiters - N4N0 first (Settings)").to_string();
+            InviteAnswer::Failed { message }
+        }
         _ => InviteAnswer::Failed { message },
     }
 }

@@ -165,14 +165,14 @@ fn flag(input: &Value, key: &str) -> Option<bool> {
 
 /// The action a tool call asks for, or why it cannot be done.
 pub fn parse(name: &str, input: &Value) -> Result<Action, String> {
-    let need = |key: &str| text(input, key).ok_or_else(|| format!("{name} needs \"{key}\"."));
+    let need = |key: &str| text(input, key).ok_or_else(|| format!("{name} needs \"{key}\".")); // i18n: not shown
     Ok(match name {
         "set_avatar_control" => Action::SetControl { control: need("control")?, on: flag(input, "on"), value: number(input, "value") },
         "find_avatar_controls" => Action::FindControls { query: text(input, "query").unwrap_or_default() },
         "hold_avatar_control" => {
             Action::Hold { control: need("control")?, on: flag(input, "on"), value: number(input, "value"), release: flag(input, "release").unwrap_or(false) }
         }
-        "set_avatar_parameter" => Action::SetParameter { name: need("name")?, value: number(input, "value").ok_or("set_avatar_parameter needs \"value\".")? },
+        "set_avatar_parameter" => Action::SetParameter { name: need("name")?, value: number(input, "value").ok_or("set_avatar_parameter needs \"value\".")? }, // i18n: not shown
         "take_photo" => Action::TakePhoto { delay_seconds: number(input, "delay_seconds").unwrap_or(0.0).clamp(0.0, 10.0) as u32 },
         "save_video" => Action::SaveVideo,
         "list_saved_videos" => Action::ListSavedVideos,
@@ -201,7 +201,7 @@ pub fn parse(name: &str, input: &Value) -> Result<Action, String> {
                 Some("volume_down") => (None, Some(-10)),
                 Some("mute") => (Some(MediaCommand::Mute(true)), None),
                 Some("unmute") => (Some(MediaCommand::Mute(false)), None),
-                Some(other) => return Err(format!("control_media has no action \"{other}\".")),
+                Some(other) => return Err(format!("control_media has no action \"{other}\".")), // i18n: not shown
             };
             Action::Media { command, volume_change }
         }
@@ -211,13 +211,13 @@ pub fn parse(name: &str, input: &Value) -> Result<Action, String> {
                     orbiters_contracts::n4n0::LIGHT_COLORS
                         .iter()
                         .position(|(n, _)| n.eq_ignore_ascii_case(&name))
-                        .ok_or_else(|| format!("N4N0's light has no colour \"{name}\"."))? as u8,
+                        .ok_or_else(|| format!("N4N0's light has no colour \"{name}\"."))? as u8, // i18n: not shown
                 ),
                 None => None,
             };
             Action::Light { on: flag(input, "on"), color, level: number(input, "brightness").map(|v| v.clamp(0.0, 1.0)) }
         }
-        other => return Err(format!("Orbiters - N4N0 has no tool \"{other}\".")),
+        other => return Err(format!("Orbiters - N4N0 has no tool \"{other}\".")), // i18n: not shown
     })
 }
 

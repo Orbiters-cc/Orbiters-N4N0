@@ -115,7 +115,7 @@ impl TestHost {
         drop(before);
         let port = self.settings.lock().unwrap().osc.vrchat_port;
         let host = Arc::downgrade(self);
-        let service = OscService::start_batched("Orbiters - N4N0 test", &[], Network::Loopback { vrchat_port: port }, false, move |events, at| {
+        let service = OscService::start_batched("Orbiters - N4N0 test", &[], Network::Loopback { vrchat_port: port }, false, move |events, at| { // i18n: not shown
             if let Some(h) = host.upgrade() {
                 h.on_osc_events(events, at);
             }
@@ -421,7 +421,7 @@ impl Drop for FakeWorker {
 
 impl Ears for FakeEars {
     fn spawn(&self, events: VoiceEvents, ended: VoiceEnded) -> anyhow::Result<Box<dyn VoiceWorker>> {
-        anyhow::ensure!(*self.allowed.lock().unwrap(), "N4N0's voice worker was not found (tests)");
+        anyhow::ensure!(*self.allowed.lock().unwrap(), "N4N0's voice worker was not found (tests)"); // i18n: not shown
         let state = FakeWorkerState {
             commands: Default::default(),
             events: Arc::new(Mutex::new(Some(events))),
@@ -480,7 +480,7 @@ fn vrchat(tree: serde_json::Value) -> (UdpSocket, SocketAddr) {
             let Ok(mut stream) = stream else { continue };
             let mut buf = [0u8; 2048];
             let _ = stream.read(&mut buf);
-            let head = format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len());
+            let head = format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len()); // i18n: not shown
             let _ = stream.write_all(format!("{head}{body}").as_bytes());
         }
     });
@@ -613,7 +613,7 @@ fn orbiters(answers: Vec<String>) -> (String, Arc<Mutex<Vec<Value>>>) {
             seen.lock().unwrap().push(serde_json::from_slice::<Value>(&body).unwrap());
             let events = answers.next().unwrap_or_default();
             let mut stream = stream;
-            let _ = stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n{events}").as_bytes());
+            let _ = stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n{events}").as_bytes()); // i18n: not shown
         }
     });
     (base, bodies)
@@ -717,7 +717,7 @@ fn a_held_sentence_reaches_n4n0_after_the_button_is_let_go() {
 
 /// A `done` event (server-sent) with this conversation and these tool calls.
 fn done(messages: Value, tool_calls: Value) -> String {
-    format!("event: done\ndata: {}\n\n", json!({ "messages": messages, "tool_calls": tool_calls }))
+    format!("event: done\ndata: {}\n\n", json!({ "messages": messages, "tool_calls": tool_calls })) // i18n: not shown
 }
 
 /// Waits until the turn under way ended and the server got `requests` of them.
@@ -812,7 +812,7 @@ fn vrchat_late(tree: serde_json::Value, after: Duration) -> (UdpSocket, SocketAd
             let mut buf = [0u8; 2048];
             let _ = stream.read(&mut buf);
             let body = if Instant::now() < ready { json!({ "FULL_PATH": "/avatar", "CONTENTS": {} }).to_string() } else { tree.to_string() };
-            let head = format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len());
+            let head = format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len()); // i18n: not shown
             let _ = stream.write_all(format!("{head}{body}").as_bytes());
         }
     });
@@ -1375,7 +1375,7 @@ fn vrchat_live(tree: Arc<Mutex<serde_json::Value>>) -> (UdpSocket, SocketAddr) {
             let mut buf = [0u8; 2048];
             let _ = stream.read(&mut buf);
             let body = tree.lock().unwrap().to_string();
-            let head = format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len());
+            let head = format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len()); // i18n: not shown
             let _ = stream.write_all(format!("{head}{body}").as_bytes());
         }
     });
@@ -1396,9 +1396,9 @@ fn put_node(tree: &mut serde_json::Value, path: &str, kind: &str, value: serde_j
 fn states_tree(id: &str) -> serde_json::Value {
     let mut tree = avatar_tree(id);
     for (name, kind, value, access) in [
-        ("Hoodie", "T", json!(true), 3),
-        ("Hue", "f", json!(0.25), 3),
-        ("Outfit", "i", json!(2), 3),
+        ("Hoodie", "T", json!(true), 3), // i18n: not shown
+        ("Hue", "f", json!(0.25), 3), // i18n: not shown
+        ("Outfit", "i", json!(2), 3), // i18n: not shown
         ("Go/Stationary", "T", json!(true), 3),
         ("VRCEmote", "i", json!(5), 3),
         ("VRMode", "i", json!(1), 1),

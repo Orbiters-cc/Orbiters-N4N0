@@ -8,6 +8,7 @@
 
 use crate::status::{CallsStatus, NoticeKind, N4n0Status};
 use orbiters_core::account::Api;
+use orbiters_i18n::tr;
 use orbiters_core::osc::OscValue;
 use orbiters_core::settings::Settings;
 use orbiters_core::voice::{VoiceCommand, VoiceEvent};
@@ -68,7 +69,9 @@ pub trait QrScan: Send {}
 
 /// What every menu, the overlay, the window and a toast say when a 3D picture is asked for with VRChat's camera closed:
 /// OSC cannot open it (VRChat's `/usercamera/Mode` switches the camera's mode once it is open, nothing opens it).
-pub const CAMERA_CLOSED: &str = "Open the camera before";
+///
+/// Code compares with this English text (`contains`, `==`), so it stays English; where it is drawn it goes through `tr`.
+pub const CAMERA_CLOSED: &str = orbiters_i18n::mark("Open the camera before");
 
 /// The app N4N0 runs in: its settings, what it knows of VRChat, where N4N0's state goes, the Orbiters account, the
 /// order of what OSC messages ask for, and the features that are the app's own (calls, 3D pictures, the walk boost),
@@ -108,7 +111,7 @@ pub trait Host: Send + Sync + 'static {
     fn call(&self, _request: CallRequest) {}
     /// A 3D picture where VRChat's camera stands (VRChat's camera closed: an error saying [`CAMERA_CLOSED`]).
     fn photo_3d(&self) -> anyhow::Result<()> {
-        anyhow::bail!("3D pictures are taken by Orbiters - N4N0 on the computer that runs VRChat.")
+        anyhow::bail!("{}", tr("3D pictures are taken by Orbiters - N4N0 on the computer that runs VRChat."))
     }
     /// Whether VRChat's camera is open (`/usercamera/Mode` not 0, as VRChat's OSCQuery says): `None` when it does not say
     /// (VRChat not found, before 2025.3.3). Asked before a 3D picture's timer starts: OSC cannot open the camera.
@@ -123,7 +126,7 @@ pub trait Host: Send + Sync + 'static {
     /// a few times a second on a thread of its own, what it sees told to `events`. Dropping the scan stops it. A device
     /// without VRChat's camera says why it cannot.
     fn qr_scan(&self, _events: QrEvents) -> Result<Box<dyn QrScan>, String> {
-        Err("QR codes are read from VRChat's camera by Orbiters - N4N0 on the computer running VRChat".into())
+        Err(tr("QR codes are read from VRChat's camera by Orbiters - N4N0 on the computer running VRChat").into())
     }
     /// Lists the 3D captures again (N4N0's menu opened History; contracts `Docs/n4n0.md`, Menu, from screen version 12):
     /// the app reads them off N4N0's threads and hands them over with [`crate::N4n0::set_captures`], as it does whenever
@@ -132,11 +135,11 @@ pub trait Host: Send + Sync + 'static {
     /// Shares a 3D capture as the app's own pages do (contracts `Docs/capture-sharing.md`): how it goes comes back in its
     /// row ([`crate::N4n0::set_captures`]). A device that does not keep the captures says why.
     fn share_capture(&self, _ask: orbiters_n4n0_core::captures::ShareAsk) -> Result<(), String> {
-        Err("3D captures are shared by Orbiters - N4N0 on the computer that took them".into())
+        Err(tr("3D captures are shared by Orbiters - N4N0 on the computer that took them").into())
     }
     /// The VRChat friends a capture can go to (called on a thread of its own: it may ask VRChat or read VRCX).
     fn friends(&self) -> Result<Vec<orbiters_n4n0_core::captures::Friend>, String> {
-        Err("VRChat friends are read by Orbiters - N4N0 on the computer".into())
+        Err(tr("VRChat friends are read by Orbiters - N4N0 on the computer").into())
     }
     /// World feedback a menu asked (contracts `Docs/world-feedback.md`): a world's read again, or the player's like,
     /// label or comment sent, called on a thread of its own. The app answers with [`crate::N4n0::set_feedback`], at once
@@ -159,7 +162,7 @@ pub trait Host: Send + Sync + 'static {
     }
     /// Opens a video's link (http or https) on the device, to watch it there.
     fn watch(&self, _link: &str) -> Result<(), String> {
-        Err("Videos open on the computer running Orbiters - N4N0.".into())
+        Err(tr("Videos open on the computer running Orbiters - N4N0.").into())
     }
     /// N4N0's menu shows its keyboard (`on`) or no longer does: the computer's keyboard may type there meanwhile
     /// ([`crate::N4n0::key`]), VRChat's process `vrchat` in front.

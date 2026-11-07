@@ -124,9 +124,9 @@ impl Guard {
         match self {
             Guard::Tip(s) => format!("tip {}", s.name()),
             Guard::Aim(s) => format!("aim {}", s.name()),
-            Guard::WrongLength => "wrong length".into(),
-            Guard::TipPast => "tip past the face".into(),
-            Guard::Parallel => "points away or along".into(),
+            Guard::WrongLength => "wrong length".into(), // i18n: not shown
+            Guard::TipPast => "tip past the face".into(), // i18n: not shown
+            Guard::Parallel => "points away or along".into(), // i18n: not shown
         }
     }
 }

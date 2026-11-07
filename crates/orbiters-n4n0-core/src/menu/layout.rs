@@ -11,7 +11,7 @@ use super::{
 };
 use crate::captures::{CaptureRow, Friends, Sharing};
 use crate::feedback::{self, COMMENTS_PER_PAGE, TOP_LABELS};
-use orbiters_contracts::n4n0::{LIGHT_COLORS, LIGHT_LEVELS};
+use orbiters_i18n::{tr, tr_n};
 use std::sync::OnceLock;
 
 pub const WIDTH: u16 = 1024;
@@ -1712,73 +1712,91 @@ pub fn picture_key_for(menu: &Menu, picture: &Picture, public: bool) -> Option<S
     }
 }
 
+/// The cells a Previous instances row's line under its world has, and a History row's.
+const INSTANCE_META_COLUMNS: usize = 32;
+const CAPTURE_META_COLUMNS: usize = 33;
+
 /// A tile's note on Home.
 fn tile_note(menu: &Menu, tile: u8) -> String {
     match tile {
-        0 if menu.desktop_mode => "Only in VR".into(),
-        0 => (if menu.fast_walk { "On" } else { "Off" }).into(),
+        0 if menu.desktop_mode => tr("Only in VR").into(),
+        0 => (if menu.fast_walk { tr("On") } else { tr("Off") }).into(),
         1 => match menu.results.len() {
-            0 => "Search videos".into(),
+            0 => tr("Search videos").into(),
             _ => format!("\"{}\"", menu.results_for),
         },
         2 => match &menu.call {
-            Some(Call::Ringing { name }) => format!("{name} calls"),
-            Some(Call::Calling { .. }) => "Calling…".into(),
+            Some(Call::Ringing { name }) => tr!("{name} calls", name = name),
+            Some(Call::Calling { .. }) => tr("Calling…").into(),
             Some(Call::Connected { seconds, .. }) => super::clock(*seconds),
-            None if !menu.calls_ready => "Not available".into(),
+            None if !menu.calls_ready => tr("Not available").into(),
             None => match menu.contacts.len() {
-                0 => "No friend online".into(),
-                1 => "1 friend".into(),
-                n => format!("{n} friends"),
+                0 => tr("No friend online").into(),
+                n => tr_n("{count} friend", "{count} friends", n as u64),
             },
         },
         3 => match menu.countdown {
-            Some(n) => format!("In {n} s"),
-            None if menu.photo_timer == 0 => "No timer".into(),
-            None => format!("Timer {} s", menu.photo_timer),
+            Some(n) => tr!("In {seconds} s", seconds = n),
+            None if menu.photo_timer == 0 => tr("No timer").into(),
+            None => tr!("Timer {seconds} s", seconds = menu.photo_timer),
         },
         4 => match &menu.media {
             Some(m) if !m.title.is_empty() => m.title.clone(),
-            _ => "Nothing playing".into(),
+            _ => tr("Nothing playing").into(),
         },
         5 => match menu.light {
-            Some(light) if light.on => format!("On · {}", LIGHT_COLORS.get(light.color as usize).map_or("", |c| c.0)),
-            Some(_) => "Off".into(),
-            None => "Not on this N4N0".into(),
+            Some(light) if light.on => tr!("On · {color}", color = light_color(light.color)),
+            Some(_) => tr("Off").into(),
+            None => tr("Not on this N4N0").into(),
         },
-        6 if !menu.states_ready => "Avatar not known".into(),
+        6 if !menu.states_ready => tr("Avatar not known").into(),
         6 => match menu.states.len() {
-            0 => "Save how it is".into(),
-            1 => "1 saved".into(),
-            n => format!("{n} saved"),
+            0 => tr("Save how it is").into(),
+            1 => tr("1 saved").into(),
+            n => tr!("{count} saved", count = n),
         },
         7 => match &menu.tracking {
-            Some(t) if t.on => "Smoothing on".into(),
-            Some(_) => "Smoothing off".into(),
-            None => "Not here".into(),
+            Some(t) if t.on => tr("Smoothing on").into(),
+            Some(_) => tr("Smoothing off").into(),
+            None => tr("Not here").into(),
         },
-        NOTE_MORE => "Light, instances, more".into(),
-        NOTE_INSTANCES if !menu.instances_ready && menu.instances.is_empty() => "Join them again".into(),
+        NOTE_MORE => tr("Light, instances, more").into(),
+        NOTE_INSTANCES if !menu.instances_ready && menu.instances.is_empty() => tr("Join them again").into(),
         NOTE_INSTANCES => match menu.instances.len() {
-            0 => "None yet".into(),
-            1 => "1 instance".into(),
-            n => format!("{n} instances"),
+            0 => tr("None yet").into(),
+            n => tr_n("{count} instance", "{count} instances", n as u64),
         },
-        NOTE_QR if menu.qr.scanning() => "Scanning…".into(),
-        NOTE_QR => "Open a link from the camera".into(),
+        NOTE_QR if menu.qr.scanning() => tr("Scanning…").into(),
+        NOTE_QR => tr("Open a link from the camera").into(),
         NOTE_MIRROR => match (menu.mirror.unavailable_note(), menu.mirror.phase) {
             (Some(why), _) => why.into(),
-            (None, crate::mirror::Phase::Off) => "The world's screen, here".into(),
-            (None, crate::mirror::Phase::Aiming { .. }) => "Aiming…".into(),
-            (None, crate::mirror::Phase::Placed) => "Mirroring".into(),
+            (None, crate::mirror::Phase::Off) => tr("The world's screen, here").into(),
+            (None, crate::mirror::Phase::Aiming { .. }) => tr("Aiming…").into(),
+            (None, crate::mirror::Phase::Placed) => tr("Mirroring").into(),
         },
         NOTE_FEEDBACK => match menu.feedback.subjects.first() {
             Some(s) if s.why == feedback::Why::Here && !s.name.is_empty() => s.name.clone(),
-            _ => "Like, label, comment".into(),
+            _ => tr("Like, label, comment").into(),
         },
-        _ if menu.sending => "Sending…".into(),
-        _ => "Tell the team".into(),
+        _ if menu.sending => tr("Sending…").into(),
+        _ => tr("Tell the team").into(),
     }
+}
+
+/// A text kept as it was first written, drawn in the language now: a note or notice made of one fixed English text is its own key (`tr`); one
+/// made with values was translated when it was made, and is no key.
+fn said(text: &str) -> String {
+    tr(text).to_string()
+}
+
+/// A light colour's name in the language now: the menu's own words for it (`menu-strings`), in the order of the contract's colours.
+pub fn light_color(color: impl Into<usize>) -> &'static str {
+    strings::LIGHT_COLORS.get(color.into()).map_or("", |t| strings::Strings::builtin(orbiters_i18n::language()).get(*t))
+}
+
+/// A light brightness choice's name in the language now (the order of the contract's levels).
+fn light_level(choice: usize) -> &'static str {
+    strings::LIGHT_LEVELS.get(choice).map_or("", |t| strings::Strings::builtin(orbiters_i18n::language()).get(*t))
 }
 
 /// The lines of what the seven-tile Home's place for N4N0's words shows (`text`, cut between words; the last ends
@@ -1810,13 +1828,13 @@ pub fn short_link(link: &str, cols: usize) -> String {
 /// What a state puts back, for its row.
 fn state_meta(state: &super::StateRow) -> String {
     let what = match (state.pose, state.size) {
-        (true, true) => "Parameters, pose and size",
-        (true, false) => "Parameters and pose",
-        (false, true) => "Parameters and size",
-        (false, false) => "Parameters",
+        (true, true) => tr("Parameters, pose and size"),
+        (true, false) => tr("Parameters and pose"),
+        (false, true) => tr("Parameters and size"),
+        (false, false) => tr("Parameters"),
     };
     if state.id.is_empty() {
-        "Saving…".into()
+        tr("Saving…").into()
     } else {
         what.into()
     }
@@ -1843,12 +1861,12 @@ pub fn text_for(menu: &Menu, content: Content, public: bool) -> String {
     if public {
         match content {
             Content::ContactName(_) => return String::new(),
-            Content::CallName if menu.call.is_some() => return "A friend".into(),
-            Content::CallsTitle if menu.calls_ready => return "Call a friend".into(),
+            Content::CallName if menu.call.is_some() => return tr("A friend").into(),
+            Content::CallsTitle if menu.calls_ready => return tr("Call a friend").into(),
             Content::TileNote(2) => {
                 return match &menu.call {
-                    Some(Call::Ringing { .. }) => "Incoming call".into(),
-                    Some(Call::Calling { .. }) => "Calling…".into(),
+                    Some(Call::Ringing { .. }) => tr("Incoming call").into(),
+                    Some(Call::Calling { .. }) => tr("Calling…").into(),
                     Some(Call::Connected { seconds, .. }) => super::clock(*seconds),
                     None => String::new(),
                 }
@@ -1861,16 +1879,16 @@ pub fn text_for(menu: &Menu, content: Content, public: bool) -> String {
             Content::TypeLine(_) if matches!(menu.typing, Typing::Suggestion | Typing::Friend) => return String::new(),
             // The owner's friends, which part of a name they look for, and why their capture is flagged.
             Content::ShareFriend(_) | Content::ExplicitWhy(_) => return String::new(),
-            Content::FriendsTitle => return "Friends".into(),
+            Content::FriendsTitle => return tr("Friends").into(),
             _ => {}
         }
     }
     match content {
         Content::Status => {
             if menu.listening {
-                "Listening… say what you want".into()
+                tr("Listening… say what you want").into()
             } else {
-                "Tap a tile, or call N4N0 again to talk".into()
+                tr("Tap a tile, or call N4N0 again to talk").into()
             }
         }
         Content::TileNote(i) => tile_note(menu, i),
@@ -1879,9 +1897,9 @@ pub fn text_for(menu: &Menu, content: Content, public: bool) -> String {
         Content::Suggestion(i) => menu.shown_suggestions().nth(i as usize).map(str::to_string).unwrap_or_default(),
         Content::ResultsTitle => {
             if let Some(notice) = &menu.notice {
-                notice.clone()
+                said(notice)
             } else if menu.loading() {
-                format!("Searching \"{}\"…", menu.results_for)
+                tr!("Searching \"{query}\"…", query = menu.results_for)
             } else {
                 format!("\"{}\"", menu.results_for)
             }
@@ -1903,20 +1921,20 @@ pub fn text_for(menu: &Menu, content: Content, public: bool) -> String {
         },
         Content::HeardCaption => match (&menu.heard, menu.heard_private) {
             (None, _) => String::new(),
-            (Some(_), true) => "You said".into(),
-            (Some(_), false) => "N4N0 says".into(),
+            (Some(_), true) => tr("You said").into(),
+            (Some(_), false) => tr("N4N0 says").into(),
         },
         Content::HeardLine(i) => menu.heard.as_deref().map(|h| heard_lines(&shown(h))).and_then(|lines| lines.into_iter().nth(i as usize)).unwrap_or_default(),
         Content::StatesTitle => {
             if let Some(notice) = &menu.notice {
-                notice.clone()
+                said(notice)
             } else if !menu.states_ready {
-                menu.states_note.clone()
+                said(&menu.states_note)
             } else {
                 match menu.states.len() {
-                    0 => "Nothing saved for this avatar".into(),
-                    1 => "1 saved for this avatar".into(),
-                    n => format!("{n} saved for this avatar"),
+                    0 => tr("Nothing saved for this avatar").into(),
+                    1 => tr("1 saved for this avatar").into(),
+                    n => tr!("{count} saved for this avatar", count = n),
                 }
             }
         }
@@ -1935,12 +1953,12 @@ pub fn text_for(menu: &Menu, content: Content, public: bool) -> String {
         Content::CardLink => menu.card.as_ref().map(|c| short_link(&c.link, CARD_LINK_COLUMNS)).unwrap_or_default(),
         Content::ResultTitle(i) => menu.page_results().get(i as usize).map(|v| v.title.clone()).unwrap_or_default(),
         // The row whose link was copied says so (the notice says it too, and the row offers Drop).
-        Content::ResultMeta(i) if menu.page_results().get(i as usize).is_some_and(|v| menu.copied.as_deref() == Some(v.id.as_str())) => "✓ Link copied".into(),
+        Content::ResultMeta(i) if menu.page_results().get(i as usize).is_some_and(|v| menu.copied.as_deref() == Some(v.id.as_str())) => tr("✓ Link copied").into(),
         Content::ResultMeta(i) => menu
             .page_results()
             .get(i as usize)
             .map(|v| {
-                let length = if v.live { "LIVE".to_string() } else { v.duration.clone().unwrap_or_default() };
+                let length = if v.live { tr("LIVE").to_string() } else { v.duration.clone().unwrap_or_default() };
                 if length.is_empty() {
                     v.channel.clone()
                 } else {
@@ -1952,13 +1970,13 @@ pub fn text_for(menu: &Menu, content: Content, public: bool) -> String {
             .unwrap_or_default(),
         Content::CallsTitle => {
             if !menu.calls_ready {
-                menu.call_note.clone()
+                said(&menu.call_note)
             } else {
                 match menu.contacts.len() {
                     // Short: on the avatar's screen it goes with the page's header and one more block.
-                    0 => "No friend online".into(),
-                    1 => "Call a friend · 1 online".into(),
-                    n => format!("Call a friend · {n} online"),
+                    0 => tr("No friend online").into(),
+                    1 => tr("Call a friend · 1 online").into(),
+                    n => tr!("Call a friend · {count} online", count = n),
                 }
             }
         }
@@ -1968,45 +1986,44 @@ pub fn text_for(menu: &Menu, content: Content, public: bool) -> String {
             None => String::new(),
         },
         Content::CallState => match &menu.call {
-            Some(Call::Ringing { .. }) => "is calling you".into(),
-            Some(Call::Calling { .. }) => "Calling…".into(),
-            Some(Call::Connected { seconds, muted, .. }) => {
-                format!("{}{}", super::clock(*seconds), if *muted { " · muted" } else { "" })
-            }
+            Some(Call::Ringing { .. }) => tr("is calling you").into(),
+            Some(Call::Calling { .. }) => tr("Calling…").into(),
+            Some(Call::Connected { seconds, muted, .. }) if *muted => tr!("{time} · muted", time = super::clock(*seconds)),
+            Some(Call::Connected { seconds, .. }) => super::clock(*seconds),
             None => String::new(),
         },
         Content::PhotoStatus => match menu.countdown {
-            Some(n) => format!("Starting in {n}… hold still"),
+            Some(n) => tr!("Starting in {seconds}… hold still", seconds = n),
             None => match &menu.notice {
-                Some(notice) => notice.clone(),
+                Some(notice) => said(notice),
                 // The two pictures are buttons: nothing to say until something happens.
                 None if menu.pages.two_pictures() => String::new(),
                 // Shorter beside the last capture (from screen version 12).
                 // Which of the two Take takes, and how to change it: the line itself is the button, the older pictures of
                 // this page having room for one Take.
                 None => match menu.photo_mode {
-                    super::PhotoMode::People => "Of the people here. Tap: of the world".into(),
-                    super::PhotoMode::World => "Of the world, no avatars. Tap: of people".into(),
+                    super::PhotoMode::People => tr("Of the people here. Tap: of the world").into(),
+                    super::PhotoMode::World => tr("Of the world, no avatars. Tap: of people").into(),
                 },
             },
         },
         Content::MediaTitle => match &menu.media {
             Some(m) if !m.title.is_empty() => m.title.clone(),
-            _ => "Nothing is playing".into(),
+            _ => tr("Nothing is playing").into(),
         },
         Content::MediaArtist => match &menu.media {
             Some(m) if !m.title.is_empty() => m.artist.clone(),
-            _ => "Play music on this computer: it shows here".into(),
+            _ => tr("Play music on this computer: it shows here").into(),
         },
         // The YouTube video playing says its link was copied there (a YouTube page gives no album), as a result's row does.
-        Content::MediaAlbum if menu.pages.ten() && menu.media.as_ref().is_some_and(|m| m.video.is_some() && m.video == menu.copied) => "✓ Link copied".into(),
+        Content::MediaAlbum if menu.pages.ten() && menu.media.as_ref().is_some_and(|m| m.video.is_some() && m.video == menu.copied) => tr("✓ Link copied").into(),
         Content::MediaAlbum => menu.media.as_ref().filter(|m| !m.title.is_empty()).map(|m| m.album.clone()).unwrap_or_default(),
         // With the timeline (from screen version 9): what was just done, else whether it plays and which app (the time is
         // at the timeline's ends).
         Content::MediaState if menu.pages.timeline() => match (&menu.notice, &menu.media) {
-            (Some(notice), _) => notice.clone(),
+            (Some(notice), _) => said(notice),
             (None, Some(m)) if !m.title.is_empty() || !m.app.is_empty() => {
-                let parts = [if m.playing { "Playing" } else { "Paused" }, m.app.as_str()];
+                let parts = [if m.playing { tr("Playing") } else { tr("Paused") }, m.app.as_str()];
                 parts.into_iter().filter(|p| !p.is_empty()).collect::<Vec<_>>().join(" · ")
             }
             _ => String::new(),
@@ -2022,186 +2039,183 @@ pub fn text_for(menu: &Menu, content: Content, public: bool) -> String {
         },
         Content::MediaState => match &menu.media {
             Some(m) if !m.title.is_empty() || !m.app.is_empty() => {
-                let parts = [if m.playing { "Playing".to_string() } else { "Paused".to_string() }, media_time(m.position, m.duration), m.app.clone()];
+                let parts = [if m.playing { tr("Playing").to_string() } else { tr("Paused").to_string() }, media_time(m.position, m.duration), m.app.clone()];
                 parts.into_iter().filter(|p| !p.is_empty()).collect::<Vec<_>>().join(" · ")
             }
             _ => String::new(),
         },
         Content::VolumeLabel => match menu.volume {
-            Some(v) if v.muted => "Muted".into(),
-            Some(v) => format!("Volume {} %", v.percent),
+            Some(v) if v.muted => tr("Muted").into(),
+            Some(v) => tr!("Volume {percent} %", percent = v.percent),
             None => String::new(),
         },
         Content::LightState => match menu.light {
             Some(light) if light.on => {
-                let color = LIGHT_COLORS.get(light.color as usize).map_or("", |c| c.0);
-                format!("On · {color} · {}", LIGHT_LEVELS[light.level_choice()].0)
+                tr!("On · {color} · {level}", color = light_color(light.color), level = light_level(light.level_choice()))
             }
-            Some(_) => "Off".into(),
+            Some(_) => tr("Off").into(),
             None => String::new(),
         },
         Content::LightNote => match menu.light {
-            Some(_) => "Everyone around sees N4N0's light".into(),
-            None => "Turn Light on for N4N0 in My Avatar (its card's options)".into(),
+            Some(_) => tr("Everyone around sees N4N0's light").into(),
+            None => tr("Turn Light on for N4N0 in My Avatar (its card's options)").into(),
         },
         Content::HeardWide(i) => {
             menu.heard.as_deref().map(|h| wide_heard_lines(&shown(h))).and_then(|lines| lines.into_iter().nth(i as usize)).unwrap_or_default()
         }
         Content::Versions => menu.versions.clone(),
         Content::TypeTitle => match menu.typing {
-            Typing::StateName => "Name the new state".into(),
-            Typing::Suggestion => "Your idea for N4N0".into(),
-            Typing::Friend => "Find a friend by name".into(),
+            Typing::StateName => tr("Name the new state").into(),
+            Typing::Suggestion => tr("Your idea for N4N0").into(),
+            Typing::Friend => tr("Find a friend by name").into(),
             Typing::Comment => match menu.shown_subject() {
-                Some(s) if !s.name.is_empty() => format!("Comment on {}", s.name),
-                _ => "Your comment".into(),
+                Some(s) if !s.name.is_empty() => tr!("Comment on {name}", name = s.name),
+                _ => tr("Your comment").into(),
             },
             Typing::Justification => {
                 let words = orbiters_contracts::world_feedback::words(&menu.typed);
                 match &menu.notice {
-                    Some(notice) => notice.clone(),
-                    None if words >= 10 => format!("Why it is an AI world · {words} words"),
-                    None => format!("Why it is an AI world · {words} of 10 words"),
+                    Some(notice) => said(notice),
+                    None if words >= 10 => tr!("Why it is an AI world · {words} words", words = words),
+                    None => tr!("Why it is an AI world · {words} of 10 words", words = words),
                 }
             }
         },
         Content::TypeLine(i) => typed_lines(&menu.typed).into_iter().nth(i as usize).unwrap_or_default(),
         Content::DraftName => menu.draft.name.clone(),
         Content::DraftNote => {
-            let mut what = vec!["parameters"];
-            if menu.draft.size {
-                what.push("size");
+            // Whole sentences, as languages order and join the three differently.
+            let puts = match (menu.draft.size, menu.draft.pose) {
+                (false, false) => tr("Puts back its parameters"),
+                (true, false) => tr("Puts back its parameters and size"),
+                (false, true) => tr("Puts back its parameters and pose"),
+                (true, true) => tr("Puts back its parameters, size and pose"),
+            };
+            if menu.draft.default {
+                tr!("{puts} · also after each world join", puts = puts)
+            } else {
+                puts.to_string()
             }
-            if menu.draft.pose {
-                what.push("pose");
-            }
-            let last = what.pop().unwrap_or_default();
-            let list = if what.is_empty() { last.to_string() } else { format!("{} and {last}", what.join(", ")) };
-            let when = if menu.draft.default { " · also after each world join" } else { "" };
-            format!("Puts back its {list}{when}")
         }
         Content::TrackingState => match &menu.tracking {
-            Some(t) if t.on => "On".into(),
-            Some(_) => "Off".into(),
+            Some(t) if t.on => tr("On").into(),
+            Some(_) => tr("Off").into(),
             None => String::new(),
         },
         Content::TrackingNote => match &menu.tracking {
-            Some(t) => t.note.clone(),
-            None => menu.tracking_note.clone(),
+            Some(t) => said(&t.note),
+            None => said(&menu.tracking_note),
         },
         Content::SuggestLine(i) if menu.suggestion.trim().is_empty() => {
             if i == 0 {
-                "Type or say what N4N0 should do next".into()
+                tr("Type or say what N4N0 should do next").into()
             } else {
                 String::new()
             }
         }
         Content::SuggestLine(i) => suggestion_lines(&menu.suggestion).into_iter().nth(i as usize).unwrap_or_default(),
         Content::WorldVideo => match &menu.world_video {
-            Some(video) if menu.pages.ten() => format!("In the world: {}", video.title.as_deref().unwrap_or(&video.url)),
+            Some(video) if menu.pages.ten() => tr!("In the world: {title}", title = video.title.as_deref().unwrap_or(&video.url)),
             _ => String::new(),
         },
         Content::SuggestNote => {
             if let Some(notice) = &menu.notice {
-                notice.clone()
+                said(notice)
             } else if menu.dictating {
-                "Listening: say your idea".into()
+                tr("Listening: say your idea").into()
             } else {
                 String::new()
             }
         }
         Content::InstancesTitle => {
             if let Some(notice) = &menu.notice {
-                notice.clone()
+                said(notice)
             } else if !menu.instances_ready {
-                menu.instances_note.clone()
+                said(&menu.instances_note)
             } else {
                 match menu.instances.len() {
-                    0 => "None yet: join a world in VRChat".into(),
-                    1 => "1 instance".into(),
-                    n => format!("{n} instances"),
+                    0 => tr("None yet: join a world in VRChat").into(),
+                    n => tr_n("{count} instance", "{count} instances", n as u64),
                 }
             }
         }
         Content::InstanceWorld(i) => {
-            menu.page_instances().get(i as usize).map(|r| if r.world.is_empty() { "A world".to_string() } else { r.world.clone() }).unwrap_or_default()
+            menu.page_instances().get(i as usize).map(|r| if r.world.is_empty() { tr("A world").to_string() } else { r.world.clone() }).unwrap_or_default()
         }
         Content::InstanceMeta(i) => menu.page_instances().get(i as usize).map(instance_meta).unwrap_or_default(),
         Content::FriendName => menu.invite_account.as_ref().map(|a| a.name.clone()).unwrap_or_default(),
         Content::FriendLink => menu.invite_account.as_ref().map(|a| short_link(&a.link, FRIEND_LINK_COLUMNS)).unwrap_or_default(),
         Content::FriendNote => {
             if menu.invite_waiting {
-                "Asking Orbiters…".into()
+                tr("Asking Orbiters…").into()
             } else {
-                menu.notice.clone().unwrap_or_else(|| "Then press Try again".into())
+                menu.notice.as_deref().map(said).unwrap_or_else(|| tr("Then press Try again").into())
             }
         }
         Content::QrState => qr_state(&menu.qr).into(),
         Content::QrNote(i) => super::pieces(&qr_note(&menu.qr), QR_NOTE_COLUMNS).into_iter().nth(i as usize).unwrap_or_default(),
         Content::QrLink => match &menu.qr.link {
             Some(link) => short_link(link, QR_LINK_COLUMNS),
-            None => "None yet".into(),
+            None => tr("None yet").into(),
         },
-        Content::QrNotice => menu.notice.clone().unwrap_or_default(),
+        Content::QrNotice => menu.notice.as_deref().map(said).unwrap_or_default(),
         Content::LastWorld => match &menu.captures.latest {
             Some(c) => world_name(c),
-            None => "No 3D capture yet".into(),
+            None => tr("No 3D capture yet").into(),
         },
         Content::LastState => menu.captures.latest.as_ref().map(CaptureRow::state).unwrap_or_default(),
         Content::LastNote(i) => super::pieces(&last_note(menu.captures.latest.as_ref()), LAST_NOTE_COLUMNS).into_iter().nth(i as usize).unwrap_or_default(),
         Content::HistoryTitle => match &menu.notice {
-            Some(notice) => notice.clone(),
-            None if !menu.captures.listed => "Listing…".into(),
+            Some(notice) => said(notice),
+            None if !menu.captures.listed => tr("Listing…").into(),
             None => match menu.captures.history.len() {
-                0 if !menu.captures.note.is_empty() => menu.captures.note.clone(),
-                0 => "None on this computer yet".into(),
-                1 => "1 capture".into(),
-                n => format!("{n} captures"),
+                0 if !menu.captures.note.is_empty() => said(&menu.captures.note),
+                0 => tr("None on this computer yet").into(),
+                n => tr_n("{count} capture", "{count} captures", n as u64),
             },
         },
         Content::CaptureWorld(i) => menu.page_captures().get(i as usize).map(world_name).unwrap_or_default(),
         Content::CaptureMeta(i) => menu.page_captures().get(i as usize).map(capture_meta).unwrap_or_default(),
         Content::FriendsTitle => match &menu.friends {
-            Friends::None | Friends::Loading => "Loading friends…".into(),
-            Friends::Failed { .. } => "Friends not found".into(),
-            Friends::Ready { friends } if friends.is_empty() => "No friends found".into(),
+            Friends::None | Friends::Loading => tr("Loading friends…").into(),
+            Friends::Failed { .. } => tr("Friends not found").into(),
+            Friends::Ready { friends } if friends.is_empty() => tr("No friends found").into(),
             Friends::Ready { .. } if !menu.find.trim().is_empty() => format!("\"{}\": {}", menu.find.trim(), menu.found_friends().len()),
-            Friends::Ready { friends } => format!("{} friends", friends.len()),
+            Friends::Ready { friends } => tr_n("{count} friend", "{count} friends", friends.len() as u64),
         },
         Content::ShareFriend(i) => menu.page_friends().get(i as usize).map(|f| f.name.clone()).unwrap_or_default(),
         Content::FriendsNote => match (&menu.notice, &menu.friends) {
-            (Some(notice), _) => notice.clone(),
-            (None, Friends::Failed { message }) => message.clone(),
-            (None, _) if menu.chosen.is_empty() => "Choose friends, then Send".into(),
-            (None, _) if menu.chosen.len() == 1 => "1 friend chosen".into(),
-            (None, _) => format!("{} friends chosen", menu.chosen.len()),
+            (Some(notice), _) => said(notice),
+            (None, Friends::Failed { message }) => said(message),
+            (None, _) if menu.chosen.is_empty() => tr("Choose friends, then Send").into(),
+            (None, _) => tr_n("{count} friend chosen", "{count} friends chosen", menu.chosen.len() as u64),
         },
         Content::ExplicitWorld => menu.shared_capture().map(world_name).unwrap_or_default(),
-        Content::ExplicitState => "Flagged explicit content".into(),
+        Content::ExplicitState => tr("Flagged explicit content").into(),
         Content::ExplicitWhy(i) => {
             let reasons: Vec<String> =
                 menu.shared_capture().map(|c| c.explicit_reasons.iter().map(|r| orbiters_core::explicit::reason_label(r)).collect()).unwrap_or_default();
-            let why = if reasons.is_empty() { "Orbiters flagged it when it was shared".to_string() } else { format!("Because of {}", reasons.join(", ")) };
+            let why = if reasons.is_empty() { tr("Orbiters flagged it when it was shared").to_string() } else { tr!("Because of {reasons}", reasons = reasons.join(", ")) };
             super::pieces(&why, EXPLICIT_WHY_COLUMNS).into_iter().nth(i as usize).unwrap_or_default()
         }
-        Content::ExplicitLine(i) => super::pieces(crate::captures::EXPLICIT_WARNING, EXPLICIT_COLUMNS).into_iter().nth(i as usize).unwrap_or_default(),
+        Content::ExplicitLine(i) => super::pieces(tr(crate::captures::EXPLICIT_WARNING), EXPLICIT_COLUMNS).into_iter().nth(i as usize).unwrap_or_default(),
         Content::FeedbackWorld | Content::LabelsWorld => match menu.shown_subject() {
             Some(s) if !s.name.is_empty() => s.name.clone(),
-            Some(_) => "This world".into(),
-            None => "No world yet".into(),
+            Some(_) => tr("This world").into(),
+            None => tr("No world yet").into(),
         },
         Content::FeedbackWhy => match menu.shown_subject() {
             Some(s) => feedback::why_text(s.why, now()),
-            None => "Join a world to give it feedback".into(),
+            None => tr("Join a world to give it feedback").into(),
         },
         Content::LikeNote => match menu.shown_feedback() {
-            Some(f) if f.loading && f.likes == 0 => "Reading…".into(),
-            Some(f) if f.liked => format!("{} · You like it", feedback::likes_text(f.likes)),
+            Some(f) if f.loading && f.likes == 0 => tr("Reading…").into(),
+            Some(f) if f.liked => tr!("{likes} · You like it", likes = feedback::likes_text(f.likes)),
             Some(f) => feedback::likes_text(f.likes),
             None => String::new(),
         },
         Content::TopChip(i) => match menu.shown_feedback().and_then(|f| f.top().get(i as usize).map(|l| (l.id.clone(), l.count))) {
-            Some((id, count)) => format!("{} · {count}", orbiters_contracts::world_feedback::label(&id).map_or(id.as_str(), |l| l.name("en"))),
+            Some((id, count)) => format!("{} · {count}", orbiters_contracts::world_feedback::label(&id).map_or(id.as_str(), |l| l.name(orbiters_i18n::language().tag()))),
             None => String::new(),
         },
         Content::CommentsCount => menu.shown_feedback().map(|f| feedback::comments_text(f.comment_count)).unwrap_or_default(),
@@ -2211,23 +2225,23 @@ pub fn text_for(menu: &Menu, content: Content, public: bool) -> String {
             .and_then(|f| f.comments.first())
             .and_then(|c| wrapped(&c.text, NEWEST_COLUMNS, NEWEST_LINES).into_iter().nth(i as usize))
             .unwrap_or_else(|| match (i, menu.shown_feedback()) {
-                (0, Some(f)) if !f.loading && f.comments.is_empty() => "Be the first to say something".into(),
+                (0, Some(f)) if !f.loading && f.comments.is_empty() => tr("Be the first to say something").into(),
                 _ => String::new(),
             }),
         Content::MirrorState => menu.mirror.state(),
         Content::MirrorNote => menu.mirror.note().into(),
         Content::FeedbackNote | Content::LabelsNote => match (&menu.notice, menu.shown_feedback()) {
-            (Some(notice), _) => notice.clone(),
+            (Some(notice), _) => said(notice),
             _ if menu.shown_subject().is_none() => String::new(),
-            _ if !menu.feedback.signed_in => "Sign in to Orbiters - N4N0 to give feedback".into(),
-            (None, Some(f)) if f.error.is_some() => f.error.clone().unwrap_or_default(),
-            (None, Some(f)) if f.pending > 0 => "Sending…".into(),
-            (None, _) if content == Content::LabelsNote => "AI world asks why, in at least 10 words".into(),
+            _ if !menu.feedback.signed_in => tr("Sign in to Orbiters - N4N0 to give feedback").into(),
+            (None, Some(f)) if f.error.is_some() => f.error.as_deref().map(said).unwrap_or_default(),
+            (None, Some(f)) if f.pending > 0 => tr("Sending…").into(),
+            (None, _) if content == Content::LabelsNote => tr("AI world asks why, in at least 10 words").into(),
             _ => String::new(),
         },
         Content::CommentsTitle => match (&menu.notice, menu.shown_feedback()) {
-            (Some(notice), _) => notice.clone(),
-            (None, Some(f)) if f.loading && f.comments.is_empty() => "Reading…".into(),
+            (Some(notice), _) => said(notice),
+            (None, Some(f)) if f.loading && f.comments.is_empty() => tr("Reading…").into(),
             (None, Some(f)) => feedback::comments_text(f.comment_count),
             (None, None) => String::new(),
         },
@@ -2249,9 +2263,9 @@ fn now() -> u64 {
 fn comment_meta(c: &feedback::CommentRow, cols: usize) -> String {
     let seconds = now().saturating_sub(c.at);
     let long = feedback::ago(seconds);
-    let by = if c.by.trim().is_empty() { "Someone" } else { c.by.trim() };
+    let by = if c.by.trim().is_empty() { tr("Someone") } else { c.by.trim() };
     let when = if c.id == 0 {
-        "Sending…".to_string()
+        tr("Sending…").to_string()
     } else if by.chars().count() + 3 + long.chars().count() <= cols {
         long
     } else {
@@ -2263,7 +2277,7 @@ fn comment_meta(c: &feedback::CommentRow, cols: usize) -> String {
 /// A capture's world, as its rows name it.
 fn world_name(capture: &CaptureRow) -> String {
     if capture.world.trim().is_empty() {
-        "Unknown world".into()
+        tr("Unknown world").into()
     } else {
         capture.world.clone()
     }
@@ -2272,27 +2286,34 @@ fn world_name(capture: &CaptureRow) -> String {
 /// A History row's line under its world: when it was taken, then where it stands.
 fn capture_meta(capture: &CaptureRow) -> String {
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
-    format!("{} · {}", ago(now.saturating_sub(capture.taken)), capture.state())
+    let seconds = now.saturating_sub(capture.taken);
+    let long = format!("{} · {}", ago(seconds), capture.state());
+    // The long time ("2 h ago") gives way to the short one where a language needs more room than the row has.
+    if long.chars().count() <= CAPTURE_META_COLUMNS {
+        long
+    } else {
+        format!("{} · {}", feedback::ago_short(seconds), capture.state())
+    }
 }
 
 /// What the last capture's state means on the 3D picture page, in a sentence or two.
 fn last_note(capture: Option<&CaptureRow>) -> String {
     use crate::captures::CapturePhase;
-    let Some(capture) = capture else { return "Take a 3D picture here, or record one from the avatar's menu".into() };
+    let Some(capture) = capture else { return tr("Take a 3D picture here, or record one from the avatar's menu").into() };
     match &capture.sharing {
-        Sharing::Waiting { .. } => return "Orbiters - N4N0 makes its 3D view, then shares it".into(),
-        Sharing::Busy { .. } => return "Preparing and uploading its 3D view".into(),
-        Sharing::Done { public: true, .. } => return "On orbiters.cc/maps and in the world's viewer".into(),
-        Sharing::Done { .. } => return "Your friends find it in their Orbiters gallery".into(),
-        Sharing::Explicit => return "Press Share publicly to see why".into(),
-        Sharing::Failed { message } => return message.clone(),
+        Sharing::Waiting { .. } => return tr("Orbiters - N4N0 makes its 3D view, then shares it").into(),
+        Sharing::Busy { .. } => return tr("Preparing and uploading its 3D view").into(),
+        Sharing::Done { public: true, .. } => return tr("On orbiters.cc/maps and in the world's viewer").into(),
+        Sharing::Done { .. } => return tr("Your friends find it in their Orbiters gallery").into(),
+        Sharing::Explicit => return tr("Press Share publicly to see why").into(),
+        Sharing::Failed { message } => return said(message),
         Sharing::Idle => {}
     }
     match capture.phase {
-        CapturePhase::Recording | CapturePhase::Saving => "Share it once it is saved".into(),
-        CapturePhase::Waiting | CapturePhase::Making { .. } | CapturePhase::Paused { .. } | CapturePhase::NoView => "Share it now: it goes once its 3D view is made".into(),
-        CapturePhase::Ready if capture.explicit => "Flagged explicit: sharing it publicly asks first".into(),
-        CapturePhase::Ready => "Publicly, or with the friends you choose".into(),
+        CapturePhase::Recording | CapturePhase::Saving => tr("Share it once it is saved").into(),
+        CapturePhase::Waiting | CapturePhase::Making { .. } | CapturePhase::Paused { .. } | CapturePhase::NoView => tr("Share it now: it goes once its 3D view is made").into(),
+        CapturePhase::Ready if capture.explicit => tr("Flagged explicit: sharing it publicly asks first").into(),
+        CapturePhase::Ready => tr("Publicly, or with the friends you choose").into(),
     }
 }
 
@@ -2300,12 +2321,12 @@ fn last_note(capture: Option<&CaptureRow>) -> String {
 pub fn qr_state(qr: &crate::qr::QrView) -> &'static str {
     use crate::qr::QrPhase;
     match qr.phase {
-        QrPhase::Off => "Not scanning",
-        QrPhase::Starting => "Starting…",
-        QrPhase::NoCamera => "Waiting for VRChat's camera",
-        QrPhase::Looking if qr.link.is_some() => "Opened · looking for more",
-        QrPhase::Looking => "Point the stream camera at a QR code",
-        QrPhase::Stopped => "Stopped",
+        QrPhase::Off => tr("Not scanning"),
+        QrPhase::Starting => tr("Starting…"),
+        QrPhase::NoCamera => tr("Waiting for VRChat's camera"),
+        QrPhase::Looking if qr.link.is_some() => tr("Opened · looking for more"),
+        QrPhase::Looking => tr("Point the stream camera at a QR code"),
+        QrPhase::Stopped => tr("Stopped"),
     }
 }
 
@@ -2313,22 +2334,30 @@ pub fn qr_state(qr: &crate::qr::QrView) -> &'static str {
 /// it does with what it finds.
 pub fn qr_note(qr: &crate::qr::QrView) -> String {
     if !qr.note.is_empty() {
-        return qr.note.clone();
+        return said(&qr.note);
     }
     match qr.phase {
-        crate::qr::QrPhase::Off => "Press Scan again to read VRChat's stream camera".into(),
-        _ => "Its web link opens in the computer's browser at once".into(),
+        crate::qr::QrPhase::Off => tr("Press Scan again to read VRChat's stream camera").into(),
+        _ => tr("Its web link opens in the computer's browser at once").into(),
     }
 }
 
 /// A previous instance's line under its world: who may join it, its region, when it was joined.
 fn instance_meta(row: &super::InstanceRow) -> String {
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
-    let mut parts = vec![row.kind().to_string()];
+    let seconds = now.saturating_sub(row.at);
+    let mut parts = vec![tr(row.kind()).to_string()];
     if let Some(region) = row.region() {
         parts.push(region.to_string());
     }
-    parts.push(ago(now.saturating_sub(row.at)));
+    parts.push(ago(seconds));
+    let long = parts.join(" · ");
+    // The long time ("2 h ago") gives way to the short one where a language needs more room than the row has.
+    if long.chars().count() <= INSTANCE_META_COLUMNS {
+        return long;
+    }
+    parts.pop();
+    parts.push(feedback::ago_short(seconds));
     parts.join(" · ")
 }
 
@@ -2336,10 +2365,10 @@ fn instance_meta(row: &super::InstanceRow) -> String {
 /// "3 h ago", "2 d ago".
 pub fn ago(seconds: u64) -> String {
     match seconds {
-        0..60 => "just now".into(),
-        60..3600 => format!("{} min ago", seconds / 60),
-        3600..86400 => format!("{} h ago", seconds / 3600),
-        _ => format!("{} d ago", seconds / 86400),
+        0..60 => tr("just now").into(),
+        60..3600 => tr!("{minutes} min ago", minutes = seconds / 60),
+        3600..86400 => tr!("{hours} h ago", hours = seconds / 3600),
+        _ => tr!("{days} d ago", days = seconds / 86400),
     }
 }
 
@@ -2410,7 +2439,8 @@ pub fn slot_text(menu: &Menu, slot: &Slot) -> String {
 
 /// What a slot shows, cut to its cells, to the owner or to everyone else (`public`, see [`text_for`]).
 pub fn slot_text_for(menu: &Menu, slot: &Slot, public: bool) -> String {
-    let text = orbiters_contracts::n4n0::panel_text(&crate::text::fold_more(&text_for(menu, slot.content, public))).replace('\n', " ");
+    // The avatar's atlas has no Japanese: what a slot shows is in Latin letters (`latin`).
+    let text = orbiters_contracts::n4n0::panel_text(&crate::text::fold_more(&crate::text::latin(|| text_for(menu, slot.content, public)))).replace('\n', " ");
     match slot.content {
         // The field keeps the end in view, with the caret.
         Content::Query => {
@@ -3027,5 +3057,201 @@ mod tests {
         menu.heard = Some("Voilà ton sweat".into());
         menu.heard_private = false;
         assert_eq!(text_for(&menu, Content::Heard, true), "\"Voilà ton sweat\"");
+    }
+
+    /// Menus with something in each place, for the language tests below.
+    fn menus_with_something_everywhere() -> Vec<Menu> {
+        use super::super::{Call, Contact, InstanceRow, Light, Media, StateRow, Tracking, Volume};
+        use crate::captures::{CapturePhase, CaptureRow, Sharing};
+        let base = || {
+            let mut menu = Menu::new(KeyboardLayout::Qwerty, 3, super::super::PhotoLength::Standard);
+            menu.pages = Pages::ALL;
+            menu.open();
+            menu
+        };
+        let taken = now().saturating_sub(7200);
+        let capture = |phase: CapturePhase, sharing: Sharing| CaptureRow { key: "k".into(), world: "Moonlit Garden".into(), taken, phase, sharing, ..Default::default() };
+        let mut out = vec![base()];
+        let mut calling = base();
+        calling.contacts = (0..9).map(|i| Contact { id: format!("u{i}"), name: format!("Friend {i}") }).collect();
+        calling.calls_ready = true;
+        calling.call = Some(Call::Ringing { name: "Lyra Nightfall".into() });
+        out.push(calling.clone());
+        calling.call = Some(Call::Connected { name: "Lyra Nightfall".into(), seconds: 75, muted: true });
+        out.push(calling.clone());
+        calling.call = Some(Call::Calling { name: "Lyra Nightfall".into() });
+        out.push(calling);
+        let mut playing = base();
+        playing.media = Some(Media { title: "Midnight City".into(), artist: "M83".into(), app: "Spotify".into(), playing: true, position: Some(83), duration: Some(243), ..Default::default() });
+        playing.volume = Some(Volume { percent: 40, muted: false });
+        playing.light = Some(Light { on: true, color: 2, level: 0.62 });
+        playing.tracking = Some(Tracking { on: true, levels: [1, 1, 1], note: String::new() });
+        playing.fast_walk = true;
+        out.push(playing);
+        let mut stated = base();
+        stated.states = (0..4).map(|i| StateRow { id: format!("s{i}"), name: format!("State {i}"), default: i == 0, pose: i % 2 == 0, size: i < 2 }).collect();
+        stated.states_ready = true;
+        stated.draft.size = true;
+        stated.draft.pose = true;
+        stated.draft.default = true;
+        out.push(stated);
+        let mut shared = base();
+        shared.instances_ready = true;
+        shared.instances = ["~group(g)~groupAccessType(public)~region(us)", "~private(u)~canRequestInvite~region(jp)", "~friends(u)", "~hidden(u)~region(eu)", ""]
+            .into_iter()
+            .map(|tags| InstanceRow { location: format!("wrld_x:1{tags}"), world: "Moonlit Garden".into(), at: taken })
+            .collect();
+        let sharings = [Sharing::Idle, Sharing::Waiting { public: true, people: 0 }, Sharing::Busy { public: false, people: 3 }, Sharing::Done { public: true, people: 0 }, Sharing::Done { public: true, people: 12 }, Sharing::Done { public: false, people: 1 }, Sharing::Explicit, Sharing::Failed { message: "x".into() }];
+        let phases = [CapturePhase::Recording, CapturePhase::Saving, CapturePhase::Waiting, CapturePhase::Making { percent: 42 }, CapturePhase::Paused { percent: 42 }, CapturePhase::NoView, CapturePhase::Ready];
+        shared.captures.listed = true;
+        shared.captures.history = phases.iter().map(|p| capture(*p, Sharing::Idle)).chain(sharings.iter().map(|s| capture(CapturePhase::Ready, s.clone()))).collect();
+        shared.captures.latest = shared.captures.history.first().cloned();
+        out.push(shared.clone());
+        shared.captures.latest = shared.captures.history.last().cloned();
+        out.push(shared);
+        // The other things a tile's note can say.
+        let mut alone = base();
+        alone.photo_timer = 0;
+        alone.desktop_mode = true;
+        alone.light = Some(Light { on: false, color: 0, level: 0.5 });
+        alone.tracking = Some(Tracking { on: false, levels: [0, 0, 0], note: String::new() });
+        alone.contacts = vec![Contact { id: "u".into(), name: "Lyra".into() }];
+        alone.calls_ready = true;
+        out.push(alone.clone());
+        alone.countdown = Some(5);
+        alone.sending = true;
+        alone.calls_ready = false;
+        alone.call_note = "Sign in to Orbiters to call friends".into();
+        alone.states_ready = false;
+        alone.states_note = "VRChat's avatar is not known yet".into();
+        alone.instances_ready = false;
+        alone.qr.phase = crate::qr::QrPhase::Looking;
+        alone.mirror = crate::mirror::MirrorView { phase: crate::mirror::Phase::Aiming { seconds: 3 }, zoom: 2, reach: crate::mirror::Reach::Screen };
+        out.push(alone.clone());
+        alone.qr.phase = crate::qr::QrPhase::NoCamera;
+        alone.qr.note = "No picture from VRChat's camera: choose Stream and turn Spout Stream on in its settings".into();
+        alone.mirror = crate::mirror::MirrorView { phase: crate::mirror::Phase::Placed, zoom: 2, reach: crate::mirror::Reach::Overlay };
+        out.push(alone.clone());
+        alone.mirror.reach = crate::mirror::Reach::NoMirror;
+        alone.qr.phase = crate::qr::QrPhase::Stopped;
+        out.push(alone);
+        // Every notice the menu makes by itself, as it is said at the time.
+        for notice in ["Link copied: paste it, or Drop it", "Saved as \"Party\"", "Sharing with 3 friends…", "Thank you! Your suggestion reached Orbiters", "Not invited: x", "Comment deleted", "This player lets no app move in its timeline", "Sign in to Orbiters - N4N0 to give feedback", "Opened on the computer: send the friend request there"] {
+            let mut menu = base();
+            menu.notice = Some(notice.to_string());
+            out.push(menu);
+        }
+        out
+    }
+
+    /// Every slot of every page, in menus with something in each place, in each language: the avatar's screen holds Latin letters only (English in
+    /// Japanese), no `{name}` is left unfilled, and a translation is not cut where the English is not.
+    #[test]
+    fn the_slots_follow_the_language_and_fit_where_english_does() {
+        use orbiters_i18n::{in_language, Language};
+        let mut cut = Vec::new();
+        for (m, menu) in menus_with_something_everywhere().iter().enumerate() {
+            for page in ScreenPage::ALL {
+                for (i, slot) in cached(page).slots.iter().enumerate() {
+                    let english = in_language(Language::En, || slot_text(menu, slot));
+                    for language in Language::TRANSLATED {
+                        let said = in_language(language, || slot_text(menu, slot));
+                        assert!(!said.contains('{'), "{language:?} {page:?} {i}: {said:?}");
+                        if language == Language::Ja {
+                            assert_eq!(said, english, "Japanese keeps the avatar's screen in Latin letters: {page:?} {i}");
+                        }
+                        let (mine, theirs) = (said.matches('?').count(), english.matches('?').count());
+                        assert!(mine <= theirs, "{language:?} {page:?} {i}: a character the atlas does not hold, {said:?}");
+                        if said.ends_with('…') && !english.ends_with('…') {
+                            cut.push(format!("menu {m} {page:?} slot {i} ({} columns) {language:?}: {said:?} (English {english:?})", slot.cols));
+                        }
+                    }
+                }
+            }
+        }
+        assert!(cut.is_empty(), "{} texts are cut in a language and not in English:\n{}", cut.len(), cut.join("\n"));
+    }
+
+    /// Texts that go on several lines (a page's sentence cut between words) have lines enough for each language, or the end of the sentence is lost.
+    #[test]
+    fn the_sentences_that_wrap_have_the_lines_they_need() {
+        use crate::captures::{CapturePhase, CaptureRow, Sharing};
+        use orbiters_i18n::{in_language, Language};
+        let lines_of = |content: fn(u8) -> Content| (0..8u8).filter(|i| ScreenPage::ALL.iter().any(|p| cached(*p).slots.iter().any(|s| s.content == content(*i)))).count();
+        let (last_lines, qr_lines, why_lines, warning_lines) = (lines_of(Content::LastNote), lines_of(Content::QrNote), lines_of(Content::ExplicitWhy), lines_of(Content::ExplicitLine));
+        assert_eq!((last_lines, qr_lines, why_lines, warning_lines), (2, 3, 2, 2), "the pages' lines: if a page changes, so do these");
+        let sharings = [Sharing::Idle, Sharing::Waiting { public: true, people: 0 }, Sharing::Busy { public: true, people: 0 }, Sharing::Done { public: true, people: 1 }, Sharing::Done { public: false, people: 1 }, Sharing::Explicit];
+        let phases = [CapturePhase::Recording, CapturePhase::Waiting, CapturePhase::Ready];
+        for language in Language::TRANSLATED {
+            in_language(language, || {
+                use crate::text::latin;
+                let mut checks: Vec<(String, usize, usize)> = Vec::new();
+                // What the text needs in this language, against the lines the page has (or the English, where it already needs more).
+                let mut add = |text: &dyn Fn() -> String, columns: usize, room: usize| {
+                    let mine = latin(|| text());
+                    let english = in_language(Language::En, || super::super::pieces(&text(), columns).len());
+                    let needs = super::super::pieces(&mine, columns).len();
+                    checks.push((mine, needs, room.max(english)));
+                };
+                for sharing in &sharings {
+                    for phase in phases {
+                        for explicit in [false, true] {
+                            let capture = CaptureRow { sharing: sharing.clone(), phase, explicit, ..Default::default() };
+                            add(&|| last_note(Some(&capture)), LAST_NOTE_COLUMNS, last_lines);
+                        }
+                    }
+                }
+                add(&|| last_note(None), LAST_NOTE_COLUMNS, last_lines);
+                for phase in [crate::qr::QrPhase::Off, crate::qr::QrPhase::Looking] {
+                    let qr = crate::qr::QrView { phase, ..Default::default() };
+                    add(&|| qr_note(&qr), QR_NOTE_COLUMNS, qr_lines);
+                }
+                for note in [crate::qr::no_camera_note(Some(false)), crate::qr::no_camera_note(None)] {
+                    add(&|| tr(&note).to_string(), QR_NOTE_COLUMNS, qr_lines);
+                }
+                add(&|| tr(crate::captures::EXPLICIT_WARNING).to_string(), EXPLICIT_COLUMNS, warning_lines);
+                add(&|| tr("Orbiters flagged it when it was shared").to_string(), EXPLICIT_WHY_COLUMNS, why_lines);
+                let wrong: Vec<String> = checks.into_iter().filter(|(_, n, room)| n > room).map(|(t, n, room)| format!("{t:?}: {n} lines for {room}")).collect();
+                assert!(wrong.is_empty(), "{language:?}:\n{}", wrong.join("\n"));
+            });
+        }
+    }
+
+    /// The same texts on a page that draws them with a real font (the window's Home): in the language, with no value left unfilled.
+    #[test]
+    fn the_window_reads_the_texts_in_the_language() {
+        use orbiters_i18n::{in_language, Language};
+        let menus = menus_with_something_everywhere();
+        let all: Vec<Content> = ScreenPage::ALL.iter().flat_map(|p| cached(*p).slots.iter().map(|s| s.content)).collect();
+        for menu in &menus {
+            for content in &all {
+                for language in Language::TRANSLATED {
+                    let said = in_language(language, || text_for(menu, *content, false));
+                    assert!(!said.contains('{'), "{language:?} {content:?}: {said:?}");
+                }
+            }
+        }
+        let menu = &menus[1];
+        in_language(Language::Ja, || assert_eq!(text(menu, Content::TileNote(2)), "Lyra Nightfallから着信"));
+        in_language(Language::Fr, || assert_eq!(text(menu, Content::TileNote(2)), "Lyra Nightfall appelle"));
+        in_language(Language::En, || assert_eq!(text(menu, Content::TileNote(2)), "Lyra Nightfall calls"));
+    }
+
+    /// A count takes the plural of its language: French and Portuguese say 0 in the singular, Japanese has one form.
+    #[test]
+    fn counts_take_their_languages_plural() {
+        use orbiters_i18n::{in_language, Language};
+        let mut menu = Menu::default();
+        menu.states_ready = true;
+        let said = |language, menu: &Menu| in_language(language, || text(menu, Content::StatesTitle));
+        assert_eq!(said(Language::En, &menu), "Nothing saved for this avatar");
+        menu.states = vec![super::super::StateRow::default(); 2];
+        assert_eq!(said(Language::En, &menu), "2 saved for this avatar");
+        assert_eq!(said(Language::Fr, &menu), "2 enregistrés pour cet avatar");
+        assert_eq!(said(Language::Es, &menu), "2 guardados para este avatar");
+        assert_eq!(said(Language::PtBr, &menu), "2 salvos para este avatar");
+        assert_eq!(said(Language::Ja, &menu), "このアバターで2件保存済み");
+        menu.states = vec![super::super::StateRow::default()];
+        assert_eq!(said(Language::Fr, &menu), "1 enregistré pour cet avatar");
     }
 }

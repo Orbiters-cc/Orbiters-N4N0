@@ -1,6 +1,7 @@
 //! Saved videos: what a world's video player played (VRChat's log names every URL it resolves), kept on this computer
 //! when the person asks N4N0 to ("save me this video").
 
+use orbiters_i18n::tr;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
@@ -161,7 +162,7 @@ pub fn youtube_oembed(url: &str) -> anyhow::Result<Option<(String, String)>> {
     match response.status().as_u16() {
         200 => {}
         400..=499 => return Ok(None),
-        status => anyhow::bail!("YouTube answered {status}"),
+        status => anyhow::bail!("{}", tr!("YouTube answered {status}", status = status)),
     }
     let text = response.body_mut().with_config().limit(64 * 1024).read_to_string()?;
     Ok(parse_oembed(&text))

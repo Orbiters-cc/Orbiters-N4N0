@@ -26,9 +26,9 @@ impl Kind {
             Kind::Toggle => "toggle",
             Kind::Button => "button",
             Kind::Submenu => "submenu",
-            Kind::Radial => "radial 0-1",
-            Kind::TwoAxis => "two-axis puppet",
-            Kind::FourAxis => "four-axis puppet",
+            Kind::Radial => "radial 0-1", // i18n: not shown
+            Kind::TwoAxis => "two-axis puppet", // i18n: not shown
+            Kind::FourAxis => "four-axis puppet", // i18n: not shown
             Kind::Parameter => "parameter",
         }
     }
@@ -265,14 +265,14 @@ impl Controls {
     pub fn find(&self, query: &str) -> Result<&Control, String> {
         let q = normalize(query);
         if q.is_empty() {
-            return Err("Name a control.".into());
+            return Err("Name a control.".into()); // i18n: not shown
         }
         let keyed: Vec<(String, String, &Control)> = self.controls.iter().map(|c| (normalize(&c.path.join("/")), normalize(c.label()), c)).collect();
         fn pick<'c>(found: Vec<&'c Control>, query: &str) -> Option<Result<&'c Control, String>> {
             match found.len() {
                 0 => None,
                 1 => Some(Ok(found[0])),
-                _ => Some(Err(format!("Several controls match \"{query}\": {}.", list(&found)))),
+                _ => Some(Err(format!("Several controls match \"{query}\": {}.", list(&found)))), // i18n: not shown
             }
         }
         // Stages from the strictest: the whole path, the label, the end of the path, then the label or path holding it.
@@ -294,10 +294,10 @@ impl Controls {
             keyed.iter().map(|(p, _, c)| (p.split(['/', ' ']).filter(|w| words.contains(w)).count(), *c)).filter(|(n, _)| *n > 0).collect();
         scored.sort_by_key(|s| std::cmp::Reverse(s.0));
         match scored.as_slice() {
-            [] => Err(format!("No control named \"{query}\" on this avatar.")),
+            [] => Err(format!("No control named \"{query}\" on this avatar.")), // i18n: not shown
             [(_, c)] => Ok(*c),
             [(a, c), (b, _), ..] if a > b => Ok(*c),
-            _ => Err(format!("Several controls match \"{query}\": {}.", list(&scored.iter().map(|(_, c)| *c).take(6).collect::<Vec<_>>()))),
+            _ => Err(format!("Several controls match \"{query}\": {}.", list(&scored.iter().map(|(_, c)| *c).take(6).collect::<Vec<_>>()))), // i18n: not shown
         }
     }
 
@@ -326,16 +326,16 @@ impl Controls {
 
     /// The messages that apply `setting` to `control`.
     pub fn plan(&self, control: &Control, setting: Setting) -> Result<Plan, String> {
-        let name = control.target().ok_or_else(|| format!("\"{}\" sets no parameter.", control.path_text()))?;
+        let name = control.target().ok_or_else(|| format!("\"{}\" sets no parameter.", control.path_text()))?; // i18n: not shown
         let address = format!("{PARAMETERS_PREFIX}{name}");
         let message = |v: f32| (address.clone(), self.typed(name, v));
         Ok(match (control.kind, setting) {
-            (Kind::TwoAxis | Kind::FourAxis, _) => return Err(format!("\"{}\" is a puppet: N4N0 cannot hold it.", control.path_text())),
+            (Kind::TwoAxis | Kind::FourAxis, _) => return Err(format!("\"{}\" is a puppet: N4N0 cannot hold it.", control.path_text())), // i18n: not shown
             (Kind::Button, Setting::Off) => Plan { now: vec![message(0.0)], later: Vec::new() },
             (Kind::Button, _) => Plan { now: vec![message(control.value)], later: vec![message(0.0)] },
             (Kind::Radial, Setting::Value(v)) => Plan { now: vec![message(v.clamp(0.0, 1.0))], later: Vec::new() },
             // Neither on nor a value: a radial has no press, and its end (1.0) is rarely what was meant.
-            (Kind::Radial, Setting::Press) => return Err(format!("\"{}\" is a radial: give the value to set, from 0 to 1.", control.path_text())),
+            (Kind::Radial, Setting::Press) => return Err(format!("\"{}\" is a radial: give the value to set, from 0 to 1.", control.path_text())), // i18n: not shown
             (Kind::Radial, Setting::On) => Plan { now: vec![message(1.0)], later: Vec::new() },
             (Kind::Radial, Setting::Off) => Plan { now: vec![message(0.0)], later: Vec::new() },
             (Kind::Parameter, Setting::Value(v)) => Plan { now: vec![message(v)], later: Vec::new() },
@@ -368,7 +368,7 @@ impl Controls {
             out.push_str(&line);
         }
         if left > 0 {
-            out.push_str(&format!("… and {left} more (find_avatar_controls searches them)\n"));
+            out.push_str(&format!("… and {left} more (find_avatar_controls searches them)\n")); // i18n: not shown
         }
         out
     }

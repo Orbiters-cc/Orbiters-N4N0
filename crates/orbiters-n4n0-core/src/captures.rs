@@ -2,6 +2,7 @@
 //! the captures the menus list, where each stands (its 3D view, its shares), and the friends a capture goes to. The
 //! desktop lists the captures, reads the friends and shares; what the menus show of them is decided here.
 
+use orbiters_i18n::{mark, tr, tr_n};
 use serde::{Deserialize, Serialize};
 
 /// Captures History lists at most, the newest.
@@ -13,7 +14,7 @@ pub const FIND_MAX: usize = 32;
 /// A capture's picture is known to the menus by this and its key ([`CaptureRow::picture_key`]).
 pub const PICTURE_PREFIX: &str = "capture:";
 /// What the server and the menus say before an explicit capture is shared publicly (`Docs/capture-sharing.md`, Rules).
-pub const EXPLICIT_WARNING: &str = "Any explicit content shared publicly will be reported to the VRChat staff.";
+pub const EXPLICIT_WARNING: &str = mark("Any explicit content shared publicly will be reported to the VRChat staff.");
 
 /// Where a capture's 3D view stands.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -87,27 +88,27 @@ impl CaptureRow {
     /// its 3D view while it is not made, else where it is shared.
     pub fn state(&self) -> String {
         let whom = |public: bool, n: u32| match (public, n) {
-            (true, 0) => "Shared publicly".to_string(),
-            (true, n) => format!("Public · {n} friend{}", if n == 1 { "" } else { "s" }),
-            (false, n) => format!("With {n} friend{}", if n == 1 { "" } else { "s" }),
+            (true, 0) => tr("Shared publicly").to_string(),
+            (true, n) => tr_n("Public · {count} friend", "Public · {count} friends", n as u64),
+            (false, n) => tr_n("With {count} friend", "With {count} friends", n as u64),
         };
         match &self.sharing {
-            Sharing::Waiting { .. } => return "Shares when ready".into(),
-            Sharing::Busy { .. } => return "Sharing…".into(),
+            Sharing::Waiting { .. } => return tr("Shares when ready").into(),
+            Sharing::Busy { .. } => return tr("Sharing…").into(),
             Sharing::Done { public, people } => return whom(*public, *people),
-            Sharing::Explicit => return "Explicit: confirm".into(),
-            Sharing::Failed { .. } => return "Not shared".into(),
+            Sharing::Explicit => return tr("Explicit: confirm").into(),
+            Sharing::Failed { .. } => return tr("Not shared").into(),
             Sharing::Idle => {}
         }
         match self.phase {
-            CapturePhase::Recording => "Recording…".into(),
-            CapturePhase::Saving => "Saving…".into(),
-            CapturePhase::Waiting => "Waiting for 3D view".into(),
-            CapturePhase::Making { percent } => format!("3D view · {percent} %"),
-            CapturePhase::Paused { percent } => format!("3D view paused · {percent} %"),
-            CapturePhase::NoView => "No 3D view yet".into(),
+            CapturePhase::Recording => tr("Recording…").into(),
+            CapturePhase::Saving => tr("Saving…").into(),
+            CapturePhase::Waiting => tr("Waiting for 3D view").into(),
+            CapturePhase::Making { percent } => tr!("3D view · {percent} %", percent = percent),
+            CapturePhase::Paused { percent } => tr!("3D view paused · {percent} %", percent = percent),
+            CapturePhase::NoView => tr("No 3D view yet").into(),
             CapturePhase::Ready if self.public || self.people > 0 => whom(self.public, self.people),
-            CapturePhase::Ready => "Ready to share".into(),
+            CapturePhase::Ready => tr("Ready to share").into(),
         }
     }
 

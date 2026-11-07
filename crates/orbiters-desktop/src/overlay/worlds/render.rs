@@ -5,6 +5,7 @@
 use super::catalog::Capture;
 use super::stereo::{Cube, Placement, PlayCamera, V3};
 use anyhow::{anyhow, Context as _};
+use orbiters_i18n::tr;
 use eframe::wgpu;
 use orbiters_reconstruct::gpu::{block_on, Gpu, Target};
 use std::time::Instant;
@@ -19,10 +20,10 @@ pub fn device(luid: Option<u64>) -> anyhow::Result<(wgpu::Adapter, wgpu::Device,
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor { backends, ..wgpu::InstanceDescriptor::new_without_display_handle() });
     let adapters = block_on(instance.enumerate_adapters(backends));
     let adapter = match luid {
-        Some(luid) => adapters.into_iter().find(|a| adapter_luid(a) == Some(luid)).context("the headset's GPU is not among wgpu's adapters")?,
+        Some(luid) => adapters.into_iter().find(|a| adapter_luid(a) == Some(luid)).with_context(|| tr("the headset's GPU is not among wgpu's adapters"))?,
         None => {
             block_on(instance.request_adapter(&wgpu::RequestAdapterOptions { power_preference: wgpu::PowerPreference::HighPerformance, ..Default::default() }))
-                .map_err(|e| anyhow!("no GPU adapter: {e}"))?
+                .map_err(|e| anyhow!("{}", tr!("no GPU adapter: {error}", error = e)))?
         }
     };
     let desc = wgpu::DeviceDescriptor {
@@ -31,7 +32,7 @@ pub fn device(luid: Option<u64>) -> anyhow::Result<(wgpu::Adapter, wgpu::Device,
         memory_hints: wgpu::MemoryHints::MemoryUsage,
         ..Default::default()
     };
-    let (device, queue) = block_on(adapter.request_device(&desc)).map_err(|e| anyhow!("GPU device: {e}"))?;
+    let (device, queue) = block_on(adapter.request_device(&desc)).map_err(|e| anyhow!("{}", tr!("GPU device: {error}", error = e)))?;
     Ok((adapter, device, queue))
 }
 
@@ -346,7 +347,7 @@ impl FaceRenderer {
     /// Waits until the GPU finished what was asked. Returns whether a picture drawn since left splats out (the
     /// renderer's sort was short for it): those faces are drawn again.
     pub fn finish(&mut self) -> anyhow::Result<bool> {
-        self.device.poll(wgpu::PollType::wait_indefinitely()).map_err(|e| anyhow!("waiting for the GPU: {e}"))?;
+        self.device.poll(wgpu::PollType::wait_indefinitely()).map_err(|e| anyhow!("{}", tr!("waiting for the GPU: {error}", error = e)))?;
         let redraw = self.gpu.needs_redraw();
         // A later eye can consume and clear the renderer's redraw flag for an earlier eye. The monotonic counter
         // still remembers that the stereo batch lost entries, so the complete batch is refreshed.
@@ -408,8 +409,8 @@ pub fn read_texture(device: &wgpu::Device, queue: &wgpu::Queue, texture: &wgpu::
     queue.submit([enc.finish()]);
     let slice = buffer.slice(..);
     slice.map_async(wgpu::MapMode::Read, |_| {});
-    device.poll(wgpu::PollType::wait_indefinitely()).map_err(|e| anyhow!("waiting for the GPU: {e}"))?;
-    let data = slice.get_mapped_range().map_err(|e| anyhow!("reading back: {e:?}"))?;
+    device.poll(wgpu::PollType::wait_indefinitely()).map_err(|e| anyhow!("{}", tr!("waiting for the GPU: {error}", error = e)))?;
+    let data = slice.get_mapped_range().map_err(|e| anyhow!("{}", tr!("reading back: {error}", error = format!("{e:?}"))))?;
     let mut out = Vec::with_capacity((w * h * 4) as usize);
     for y in 0..h as usize {
         out.extend_from_slice(&data[y * row as usize..y * row as usize + w as usize * 4]);

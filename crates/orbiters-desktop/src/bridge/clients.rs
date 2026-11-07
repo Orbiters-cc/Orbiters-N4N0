@@ -297,10 +297,10 @@ fn run(exe: &Path, args: &[&str], home: Option<&Path>, environment: &[(&str, &st
             Ok(None) if begin.elapsed() > limit => {
                 let _ = child.kill();
                 let _ = child.wait();
-                return Err(format!("It did not answer within {} s.", limit.as_secs()));
+                return Err(tr!("It did not answer within {seconds} s.", seconds = limit.as_secs()));
             }
             Ok(None) => std::thread::sleep(Duration::from_millis(20)),
-            Err(e) => return Err(format!("It could not be followed: {e}")),
+            Err(e) => return Err(tr!("It could not be followed: {error}", error = e)),
         }
     };
     // A helper it left behind may hold a pipe open: what was said by now is what counts.
@@ -685,6 +685,18 @@ impl Registrations {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_program_given_up_on_says_so_in_the_language_now() {
+        use orbiters_i18n::{in_language, Language};
+        if !cfg!(windows) {
+            return;
+        }
+        let said = |language| in_language(language, || run(Path::new("cmd"), &["/c", "ping -n 30 127.0.0.1 >nul"], None, &[], Duration::from_secs(1)).err().expect("it hangs"));
+        assert_eq!(said(Language::En), "It did not answer within 1 s.");
+        assert_eq!(said(Language::Fr), "Il n’a pas répondu en 1\u{a0}s.");
+        assert_eq!(said(Language::Ja), "1秒以内に応答がありませんでした。");
+    }
 
     const WANTED: (&str, &str) = ("http://127.0.0.1:47615/mcp", "goodtoken");
 

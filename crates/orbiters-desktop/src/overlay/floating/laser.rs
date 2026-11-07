@@ -53,7 +53,7 @@ pub struct Lasers {
 
 impl Lasers {
     pub fn new(overlay: &vr::Overlay, key: &str) -> anyhow::Result<Self> {
-        let fail = |what: &str, code: i32| anyhow::anyhow!("{what}: SteamVR overlay error {code}");
+        let fail = |what: &str, code: i32| anyhow::anyhow!("{what}: SteamVR overlay error {code}"); // i18n: not shown (the overlay process's own stderr, a log nobody reads in a window)
         let mut beams = [0; 2];
         let mut dots = [0; 2];
         for (i, side) in ["left", "right"].into_iter().enumerate() {

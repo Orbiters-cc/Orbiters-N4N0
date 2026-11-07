@@ -24,7 +24,7 @@ pub struct Bgra {
 /// `frame` at most `max_width` wide as a JPEG, and whether it is (almost) black.
 pub fn encode(frame: &Bgra, max_width: u32) -> Result<Shot, String> {
     if frame.width == 0 || frame.height == 0 {
-        return Err("the window has no pixels".into());
+        return Err("the window has no pixels".into()); // i18n: not shown (goes into the screenshot tool's failure, which an AI client reads)
     }
     let mut rgb = Vec::with_capacity(frame.pixels.len() / 4 * 3);
     let mut sum = 0u64;
@@ -80,7 +80,7 @@ pub fn parse_answer(bytes: &[u8]) -> Result<Shot, String> {
     }
     let jpeg = bytes[at + 1..].to_vec();
     if head["bytes"].as_u64() != Some(jpeg.len() as u64) {
-        return Err("a picture cut short".into());
+        return Err("a picture cut short".into()); // i18n: not shown (goes into the screenshot tool's failure, which an AI client reads)
     }
     Ok(Shot {
         jpeg,
@@ -122,7 +122,7 @@ pub fn shot_in_child(exe: &std::path::Path, handle: isize, max_width: u32) -> Re
             _ => {
                 let _ = child.kill();
                 let _ = child.wait();
-                return Err(failed("it took too long".into()));
+                return Err(failed("it took too long".into())); // i18n: not shown (goes into the screenshot tool's failure, which an AI client reads)
             }
         }
     }
@@ -131,7 +131,7 @@ pub fn shot_in_child(exe: &std::path::Path, handle: isize, max_width: u32) -> Re
 
 #[cfg(not(windows))]
 pub fn grab(_handle: isize) -> Result<Bgra, String> {
-    Err("window capture is for Windows".into())
+    Err("window capture is for Windows".into()) // i18n: not shown (goes into the screenshot tool's failure, which an AI client reads)
 }
 
 /// Whether a frame is all but black.
@@ -211,7 +211,7 @@ pub(crate) mod imp {
         let window = HWND(handle as *mut _);
         // SAFETY: a plain query.
         if unsafe { IsIconic(window) }.as_bool() {
-            return Err("the window is minimized".into());
+            return Err("the window is minimized".into()); // i18n: not shown (goes into the screenshot tool's failure, which an AI client reads)
         }
         // SAFETY: WinRT in this thread's apartment; it stays for the process, which ends after this picture.
         let _ = unsafe { RoInitialize(RO_INIT_MULTITHREADED) };
@@ -251,7 +251,7 @@ pub(crate) mod imp {
             match pool.TryGetNextFrame() {
                 Ok(frame) => break frame,
                 Err(_) if begin.elapsed() < FIRST_FRAME => std::thread::sleep(Duration::from_millis(5)),
-                Err(e) => return Err(text("no frame came", e)),
+                Err(e) => return Err(text("no frame came", e)), // i18n: not shown (goes into the screenshot tool's failure, which an AI client reads)
             }
         };
         let surface = frame.Surface().map_err(|e| text("surface", e))?;
@@ -300,7 +300,7 @@ pub(crate) mod imp {
         unsafe { GetClientRect(window, &mut client) }.map_err(|e| format!("window size: {}", e.message()))?; // i18n: not shown
         let (width, height) = ((client.right - client.left).max(0), (client.bottom - client.top).max(0));
         if width == 0 || height == 0 {
-            return Err("the window has no pixels".into());
+            return Err("the window has no pixels".into()); // i18n: not shown (goes into the screenshot tool's failure, which an AI client reads)
         }
         // The first try of a process has come out black while the window has content: a second try after a moment does not.
         for attempt in 0..3 {
@@ -341,7 +341,7 @@ pub(crate) mod imp {
             let _ = DeleteDC(dc);
             ReleaseDC(None, screen);
             if !printed || lines == 0 {
-                return Err("PrintWindow did not answer".into());
+                return Err("PrintWindow did not answer".into()); // i18n: not shown (goes into the screenshot tool's failure, which an AI client reads)
             }
             Ok(Bgra { width: width as u32, height: height as u32, pixels })
         }

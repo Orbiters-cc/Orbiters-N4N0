@@ -1,0 +1,23 @@
+[package]
+name = "orbiters-booster"
+description = "Orbiters - N4N0's FPS booster without its interface: the frame logger and what it concludes, the journal that puts everything back, what may be lowered and what never."
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+dirs = { workspace = true }
+time = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+windows = { workspace = true, features = [
+    "Wdk_System_SystemInformation",
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Registry",
+    "Win32_System_Threading",
+    "Win32_System_WindowsProgramming",
+] }

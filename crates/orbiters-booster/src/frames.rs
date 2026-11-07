@@ -185,7 +185,15 @@ mod tests {
 
     #[test]
     fn app_times_come_from_the_right_fields() {
-        let frame = Frame { pre_submit_gpu_ms: 7.0, post_submit_gpu_ms: 2.0, total_gpu_ms: 11.0, poses_ready_ms: 1.0, frame_ready_ms: 17.0, presents: 1, ..Frame::default() };
+        let frame = Frame {
+            pre_submit_gpu_ms: 7.0,
+            post_submit_gpu_ms: 2.0,
+            total_gpu_ms: 11.0,
+            poses_ready_ms: 1.0,
+            frame_ready_ms: 17.0,
+            presents: 1,
+            ..Frame::default()
+        };
         let got = summarize(&steady(0.0, 5.0, 72.0, frame), AT_72).unwrap();
         assert_eq!((got.app_gpu.median, got.total_gpu.median, got.app_cpu.median), (9.0, 11.0, 16.0));
         // A frame whose poses came after its "ready": an estimate, and never negative.

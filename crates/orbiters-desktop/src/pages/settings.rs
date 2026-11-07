@@ -47,6 +47,8 @@ pub struct State {
     network: super::network::State,
     /// Experimental: the VRChat bridge.
     experimental: super::experimental::State,
+    /// The FPS booster's card.
+    booster: super::booster_card::State,
 }
 
 impl State {
@@ -122,6 +124,10 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
             let mut m = super::Masonry::new(ui, "settings");
             m.add(1, |ui| account(ui, cx, &mut state.confirm_sign_out));
             m.add(13, |ui| apply |= super::language_card::card(ui, cx, 13, &mut draft));
+            // High up: one control someone comes for, not to be scrolled to past capture's settings.
+            if orbiters_core::osc::VRCHAT_RUNS_HERE {
+                m.add(15, |ui| apply |= super::booster_card::card(ui, cx, 15, &mut state.booster, &mut draft));
+            }
             // Setting Windows' default is Windows' alone.
             if cfg!(windows) {
                 m.add(14, |ui| super::mic_grid::card(ui, cx, 14, &mut state.mic_grid));

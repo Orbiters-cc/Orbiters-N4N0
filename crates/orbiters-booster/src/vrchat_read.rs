@@ -89,7 +89,9 @@ fn account_values(account: &str) -> Vec<Raw> {
         let mut size = bytes.len() as u32;
         let mut kind = 0u32;
         // SAFETY: both buffers' sizes are what is passed.
-        let status = unsafe { RegEnumValueW(key, index, Some(PWSTR(name.as_mut_ptr())), &mut name_len, None, Some(&mut kind), Some(bytes.as_mut_ptr()), Some(&mut size)) };
+        let status = unsafe {
+            RegEnumValueW(key, index, Some(PWSTR(name.as_mut_ptr())), &mut name_len, None, Some(&mut kind), Some(bytes.as_mut_ptr()), Some(&mut size))
+        };
         if status == windows::Win32::Foundation::ERROR_NO_MORE_ITEMS {
             break;
         }
@@ -140,11 +142,21 @@ mod tests {
 
     #[test]
     fn the_limits_are_their_values_with_their_switches() {
-        let got = limits_from(&[dword("currentShowMaxNumberOfAvatarsEnabled", 1), dword("avatarProxyShowMaxNumber", 30), dword("avatarProxyShowAtRangeToggle", 1), double("avatarProxyShowAtRange", 12.7)]);
+        let got = limits_from(&[
+            dword("currentShowMaxNumberOfAvatarsEnabled", 1),
+            dword("avatarProxyShowMaxNumber", 30),
+            dword("avatarProxyShowAtRangeToggle", 1),
+            double("avatarProxyShowAtRange", 12.7),
+        ]);
         assert_eq!(got.max_shown, Some(Known::Count(30)));
         assert!(matches!(got.hide_beyond, Some(Known::Meters(m)) if (m - 12.7).abs() < 0.01));
         // Switched off, whatever value stays stored.
-        let got = limits_from(&[dword("currentShowMaxNumberOfAvatarsEnabled", 0), dword("avatarProxyShowMaxNumber", 30), dword("avatarProxyShowAtRangeToggle", 0), double("avatarProxyShowAtRange", 12.7)]);
+        let got = limits_from(&[
+            dword("currentShowMaxNumberOfAvatarsEnabled", 0),
+            dword("avatarProxyShowMaxNumber", 30),
+            dword("avatarProxyShowAtRangeToggle", 0),
+            double("avatarProxyShowAtRange", 12.7),
+        ]);
         assert_eq!((got.max_shown, got.hide_beyond), (Some(Known::Off), Some(Known::Off)));
         // A value without its switch, or the ordinary read's truncated 0: not known, so not shown.
         let got = limits_from(&[dword("avatarProxyShowMaxNumber", 30), dword("avatarProxyShowAtRangeToggle", 1), dword("avatarProxyShowAtRange", 0)]);
@@ -161,7 +173,8 @@ mod tests {
 
     #[test]
     fn the_account_is_the_one_the_log_names_or_none() {
-        let players: std::collections::BTreeMap<String, String> = [("usr_a".to_string(), "Me".to_string()), ("usr_b".to_string(), "Them".to_string()), ("name:Odd".to_string(), "Odd".to_string())].into();
+        let players: std::collections::BTreeMap<String, String> =
+            [("usr_a".to_string(), "Me".to_string()), ("usr_b".to_string(), "Them".to_string()), ("name:Odd".to_string(), "Odd".to_string())].into();
         assert_eq!(account_of(Some("Me"), &players), Some("usr_a".to_string()));
         assert_eq!(account_of(Some("Odd"), &players), None, "no real id");
         assert_eq!(account_of(None, &players), None);

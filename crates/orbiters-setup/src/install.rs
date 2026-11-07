@@ -278,6 +278,9 @@ pub fn update(bytes: &[u8], dir: &Path, progress: &Progress, silent: bool) -> an
     InstallRecord::read(dir).context("The install record is missing after the update.")
 }
 
+/// How long an uninstall waits for SteamVR to be closed, for a value still owed to it.
+const BOOSTER_PATIENCE: Duration = Duration::from_secs(120);
+
 /// Uninstalls the app from `dir`: what it added to Windows, then the files its record lists (nothing else), and the
 /// folder once empty. `remove_data` also removes its settings, caches and speech models; the person's sessions are
 /// never touched.
@@ -285,6 +288,8 @@ pub fn uninstall(dir: &Path, remove_data: bool, progress: &Progress, silent: boo
     let record = InstallRecord::read(dir).with_context(|| format!("Orbiters - N4N0 is not installed in {}.", dir.display()))?;
     progress.set(0.05, tr("Closing Orbiters - N4N0…"));
     close_app(dir, progress, silent)?;
+
+    finish_booster(progress, silent);
 
     progress.set(0.2, tr("Removing it from Windows…"));
     if system::registered_dir().is_some_and(|d| same_dir(&d, dir)) {
@@ -342,6 +347,9 @@ pub fn uninstall(dir: &Path, remove_data: bool, progress: &Progress, silent: boo
         for folder in data_dirs() {
             remove_tree(&folder);
         }
+        // The FPS booster's reminder of what to change back by hand. Its journal is not touched here: `finish_booster` removed it if nothing is owed.
+        let _ = std::fs::remove_file(orbiters_booster::data_dir().join("to-put-back.json"));
+        let _ = std::fs::remove_dir(orbiters_booster::data_dir());
         // The shared Orbiters folders, once nothing else of Orbiters' is left in them.
         for root in [dirs::config_dir(), dirs::data_local_dir()].into_iter().flatten() {
             let _ = std::fs::remove_dir(root.join("Orbiters"));
@@ -350,6 +358,37 @@ pub fn uninstall(dir: &Path, remove_data: bool, progress: &Progress, silent: boo
     anyhow::ensure!(failed.is_empty(), "These files could not be removed (in use?): {}", failed.join(", "));
     progress.set(1.0, tr("Uninstalled"));
     Ok(())
+}
+
+/// Everything the FPS booster changed comes back, now that the app that could do it has closed. A SteamVR value can't be
+/// restored while SteamVR runs: the window asks for it to be closed and waits a while. Past that, or silently, the journal
+/// and `RunOnce` stay, with a copy of this program outside the install folder to do it at the next sign-in. Never a reason
+/// for the uninstall to fail, as with the smoothing driver.
+fn finish_booster(progress: &Progress, silent: bool) {
+    use orbiters_booster::{programs, system as booster};
+    let restorer = booster::restorer_copy_path();
+    let store = booster::store_for_user(&restorer);
+    if !store.has_entries() {
+        return;
+    }
+    progress.set(0.1, tr("Putting back what the FPS booster changed…"));
+    let closed = || !programs::steamvr_running(&programs::scan());
+    let until = std::time::Instant::now() + BOOSTER_PATIENCE;
+    let settled = booster::settle_for_uninstall(&store, &mut programs::RealOs, orbiters_booster::vrsettings::settings_path_for_user(), &closed, silent, &mut || {
+        progress.set(0.1, tr("Close SteamVR to finish putting your settings back"));
+        std::thread::sleep(Duration::from_millis(500));
+        std::time::Instant::now() < until && !progress.forced() && !progress.cancelled()
+    });
+    if !settled {
+        // RunOnce pointing at the removed program would do nothing: this copy stays where the uninstall does not go.
+        match std::env::current_exe().ok().and_then(|me| booster::leave_a_restorer(&me)) {
+            Some(copy) => eprintln!("the FPS booster still owes a setting: {} restores it at the next sign-in", copy.display()), // i18n: not shown
+            None => eprintln!("the FPS booster still owes a setting, and no restorer could be left"), // i18n: not shown
+        }
+    } else {
+        store.remove_if_empty();
+        booster::remove_restorer_copy();
+    }
 }
 
 /// What Orbiters - N4N0 keeps outside its install folder, its own only (`orbiters_core::paths`): settings

@@ -1,5 +1,6 @@
 //! The pages, plus what they share: the page context, background jobs and staggered entrances.
 
+mod booster_card;
 pub mod capture;
 pub mod community;
 pub mod community_talk;

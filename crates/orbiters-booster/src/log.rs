@@ -105,7 +105,10 @@ impl Logger {
         let new = !path.exists();
         let mut file = std::io::BufWriter::new(std::fs::OpenOptions::new().append(true).create(true).open(path)?);
         if new {
-            writeln!(file, "kind,index,time_s,presents,flags,interval_ms,app_cpu_ms,app_gpu_ms,total_gpu_ms,compositor_cpu_ms,compositor_gpu_ms,dropped,mis_presented")?;
+            writeln!(
+                file,
+                "kind,index,time_s,presents,flags,interval_ms,app_cpu_ms,app_gpu_ms,total_gpu_ms,compositor_cpu_ms,compositor_gpu_ms,dropped,mis_presented"
+            )?;
         }
         for f in frames {
             writeln!(
@@ -194,7 +197,12 @@ pub fn self_check(logged_real_fps: f32, refresh_hz: f32, stats: &CompositorStats
     if implied <= 0.0 {
         return None;
     }
-    Some(SelfCheck { logged_real_fps, implied_real_fps: implied, compositor_reprojected_share: share, logger_is_wrong: (logged_real_fps - implied).abs() / implied > SELF_CHECK_LIMIT })
+    Some(SelfCheck {
+        logged_real_fps,
+        implied_real_fps: implied,
+        compositor_reprojected_share: share,
+        logger_is_wrong: (logged_real_fps - implied).abs() / implied > SELF_CHECK_LIMIT,
+    })
 }
 
 /// Where the logs are, for "Open the log folder".

@@ -594,6 +594,9 @@ pub struct Snapshot {
     /// What the panels around VRChat's menus last said of themselves.
     #[serde(default)]
     pub orbit: OrbitStatus,
+    /// The FPS booster, as both surfaces show it.
+    #[serde(default)]
+    pub booster: crate::booster::Status,
     /// Whether the avatar worn has N4N0's capture kit, as VRChat's parameters say: `None` when they do not say.
     #[serde(default)]
     pub worn_kit: Option<bool>,
@@ -606,6 +609,7 @@ impl Snapshot {
     pub fn new(settings: Settings) -> Self {
         Self {
             orbit: OrbitStatus::default(),
+            booster: Default::default(),
             worn_kit: None,
             camera_open_said: None,
             version: orbiters_core::APP_VERSION.into(),

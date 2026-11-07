@@ -16,6 +16,8 @@ orbiters-update = { workspace = true, features = ["payload"] }
 orbiters-openvr = { workspace = true }
 # Tracking smoothing's SteamVR driver, which the app registers: an uninstall takes it out of SteamVR's list.
 orbiters-smooth = { path = "../orbiters-smooth" }
+# What the FPS booster changed comes back at an uninstall, and this program is what can restore it afterwards.
+orbiters-booster = { workspace = true }
 serde_json = { workspace = true }
 orbiters-ui = { workspace = true }
 egui = { workspace = true }

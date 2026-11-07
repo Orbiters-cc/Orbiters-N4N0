@@ -490,6 +490,26 @@ impl Client {
         (error == 0).then_some(value)
     }
 
+    /// A SteamVR setting's float: `None` when it could not be read, as an unset key with no default is not 0.
+    pub fn setting_float(&self, section: &std::ffi::CStr, key: &std::ffi::CStr) -> Option<f32> {
+        type F = unsafe extern "system" fn(*const i8, *const i8, *mut i32) -> f32;
+        let table = self.table(&self.settings_table, "IVRSettings_003").ok()?;
+        let mut error = 0;
+        // SAFETY: IVRSettings_003 entry 7 is GetFloat (GetBool 5, GetInt32 6); NUL-terminated names.
+        let value = unsafe { entry::<F>(table, 7)(section.as_ptr(), key.as_ptr(), &mut error) };
+        (error == 0).then_some(value)
+    }
+
+    /// Sets a SteamVR setting's float; whether it took.
+    pub fn set_setting_float(&self, section: &std::ffi::CStr, key: &std::ffi::CStr, value: f32) -> bool {
+        type F = unsafe extern "system" fn(*const i8, *const i8, f32, *mut i32);
+        let Ok(table) = self.table(&self.settings_table, "IVRSettings_003") else { return false };
+        let mut error = 0;
+        // SAFETY: IVRSettings_003 entry 3 is SetFloat; NUL-terminated names.
+        unsafe { entry::<F>(table, 3)(section.as_ptr(), key.as_ptr(), value, &mut error) };
+        error == 0
+    }
+
     /// A SteamVR setting's text: `None` when it has none.
     pub fn setting_string(&self, section: &std::ffi::CStr, key: &std::ffi::CStr) -> Option<String> {
         type F = unsafe extern "system" fn(*const i8, *const i8, *mut std::ffi::c_char, u32, *mut i32);

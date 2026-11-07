@@ -245,6 +245,7 @@ impl Service {
         for link in self.links.lock().unwrap().iter() {
             link.mailbox.post(ToClient::Close);
         }
+        self.ctl.booster_quit();
         self.ctl.shutdown();
         #[cfg(windows)]
         unsafe {
@@ -347,6 +348,8 @@ impl Service {
                 self.keep_tracking();
             }
             ToService::WalkBoost { strength } => ctl.set_walk_boost(strength, false),
+            ToService::BoosterReport { report } => ctl.booster_report(*report),
+            ToService::Booster { command } => ctl.booster_command(command),
             ToService::WalkPath { path } => ctl.set_walk_path(crate::tracking::walk_path_said(path)),
             // Which Talk button is held matters: the service lets it go when that window or overlay goes away.
             ToService::N4n0 { command: N4n0Command::Talk { down } } => ctl.n4n0_app_talk(down, role == Role::Overlay),
@@ -414,6 +417,7 @@ impl Service {
         let still_there = self.links.lock().unwrap().iter().any(|l| l.role == role);
         if role == Role::Overlay && !still_there {
             self.ctl.set_overlay_connected(false);
+            self.ctl.booster_overlay_gone();
         }
         if !still_there && role != Role::Orbit {
             // What it held (a Talk button, the overlay's open menu) ends with it.
@@ -489,6 +493,8 @@ pub fn run(hidden: bool) -> anyhow::Result<()> {
     let _ = std::fs::create_dir_all(&settings.sessions_dir);
     let _ = std::fs::create_dir_all(&settings.raw_captures_dir);
     let ctl = Controller::new(settings);
+    // What an earlier run of the FPS booster left comes back before anything else starts.
+    ctl.start_booster();
     ctl.start();
     ctl.start_bridge();
 

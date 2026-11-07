@@ -113,7 +113,15 @@ mod tests {
     const B: f32 = 1000.0 / 72.0;
 
     fn summary(late_cpu: f32, late_gpu: f32, filled: f32, cpu_ms: f32, gpu_ms: f32) -> Summary {
-        let mut s = Summary { frames: 400, seconds: 10.0, real_fps: 40.0, late_cpu_share: late_cpu, late_gpu_share: late_gpu, filled_share: filled, ..Summary::default() };
+        let mut s = Summary {
+            frames: 400,
+            seconds: 10.0,
+            real_fps: 40.0,
+            late_cpu_share: late_cpu,
+            late_gpu_share: late_gpu,
+            filled_share: filled,
+            ..Summary::default()
+        };
         s.app_cpu.median = cpu_ms;
         s.app_gpu.median = gpu_ms;
         s

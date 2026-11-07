@@ -531,7 +531,8 @@ fn move_over(from: &Path, to: &Path) -> std::io::Result<()> {
     let wide = |p: &Path| p.as_os_str().encode_wide().chain([0]).collect::<Vec<u16>>();
     let (from, to) = (wide(from), wide(to));
     // SAFETY: both NUL-terminated and alive for the call.
-    unsafe { MoveFileExW(PCWSTR(from.as_ptr()), PCWSTR(to.as_ptr()), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) }.map_err(|e| std::io::Error::other(e.to_string()))
+    unsafe { MoveFileExW(PCWSTR(from.as_ptr()), PCWSTR(to.as_ptr()), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) }
+        .map_err(|e| std::io::Error::other(e.to_string()))
 }
 
 #[cfg(not(windows))]

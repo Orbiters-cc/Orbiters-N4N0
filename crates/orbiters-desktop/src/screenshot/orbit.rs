@@ -542,6 +542,8 @@ pub(super) fn shots(out: &Path) -> anyhow::Result<()> {
     let mut arriving = lines.clone();
     arriving.push((false, "Thirteen people are in this world right now, and two of your".to_string()));
     qm_scene("orbit-sheet-talk-arriving", out, hd, &Facts { sheet: Some(Sheet::Talk), sheet_title: "Ask N4N0".into(), talk_lines: arriving, talk: crate::overlay::orbit::panels::TalkNow::Thinking, beside_wing: true, ..idle.clone() }, None, Some(Sheet::Talk))?;
+    // The FPS booster's states. The figures are sample data for the picture, not measured.
+    booster_scenes(out, hd, &idle)?;
     qm_scene("orbit-sheet-tracking", out, hd, &Facts { sheet: Some(Sheet::Tracking), sheet_title: orbiters_i18n::tr("Smooth tracking").into(), tracking: Some((true, [0, 35, 78], "Smoothing your devices now".to_string())), beside_wing: true, ..idle.clone() }, None, Some(Sheet::Tracking))?;
     qm_scene("orbit-sheet-talk", out, hd, &Facts { sheet: Some(Sheet::Talk), sheet_title: "Ask N4N0".into(), talk_lines: lines.clone(), beside_wing: true, ..idle.clone() }, None, Some(Sheet::Talk))?;
     qm_scene("orbit-sheet-talk-listening", out, hd, &Facts { sheet: Some(Sheet::Talk), sheet_title: "Ask N4N0".into(), talk_lines: lines, talk: crate::overlay::orbit::panels::TalkNow::Listening(0.6), beside_wing: true, ..idle.clone() }, None, Some(Sheet::Talk))?;
@@ -680,6 +682,8 @@ fn settings_scenes(out: &Path, client: Vec2, idle: &Facts) -> anyhow::Result<()>
     panels::set_style(&mono);
     qm_scene("orbit-settings-retro-language", out, client, &Facts { language_choice: Some(orbiters_i18n::Language::Ja), ..sheet(mono, Sheet::Settings, "Settings") }, None, Some(Sheet::Settings))?;
     qm_scene("orbit-retro-all", out, client, &sheet(mono, Sheet::All, "All tools"), None, Some(Sheet::All))?;
+    let kept = booster_snapshot(|snap| snap.booster.overlay.report.comparisons = vec![sample_comparison(orbiters_booster::trial::Verdict::Kept)]);
+    qm_scene("orbit-retro-booster", out, client, &Facts { booster: panels::BoosterFacts::of(&kept, false, false, None), ..sheet(mono, Sheet::Booster, "FPS booster") }, None, Some(Sheet::Booster))?;
     let strip = OrbitSettings { layout: OrbitLayout::Strip, ..mono };
     qm_scene("orbit-retro-strip", out, client, &Facts { orbit: strip, strip_caption: true, vr_close: true, ..idle.clone() }, Some(0), None)?;
     wheel_scene("orbit-retro-wheel", out, client, &Facts { orbit: mono, ..idle.clone() }, None, None, false)?;
@@ -788,4 +792,83 @@ fn sheet_picture(sheet: panels::Sheet, facts: &Facts, px: [u32; 2]) -> Vec<u8> {
     let mut out = from.clone();
     panels::finish_picture(&mut out, &from, px, px[0] as f32 / 1024.0, [0, 0, px[0], px[1]]);
     out
+}
+
+/// A snapshot the FPS booster's sheet can be drawn from: VR running, the overlay watching, at Background unless changed.
+fn booster_snapshot(change: impl FnOnce(&mut crate::state::Snapshot)) -> crate::state::Snapshot {
+    use orbiters_booster::{engine, Level};
+    let mut snap = crate::state::Snapshot::new(orbiters_core::settings::Settings::default());
+    snap.steamvr.running = true;
+    snap.settings.booster.level = Level::Background;
+    snap.booster.watching = true;
+    snap.booster.overlay.streamer = true;
+    let report = &mut snap.booster.overlay.report;
+    report.line = engine::Line::Limit;
+    report.limit = orbiters_booster::classify::Limit::Processor;
+    report.now = Some(engine::Now { real_fps: 36.0, refresh_hz: 72.0, filled_share: 0.49, app_cpu_ms: 18.0, app_gpu_ms: 9.5, ..Default::default() });
+    report.guide.items = orbiters_booster::guided::list_for(report.limit);
+    report.guide.likely = true;
+    change(&mut snap);
+    snap
+}
+
+fn sample_comparison(verdict: orbiters_booster::trial::Verdict) -> orbiters_booster::trial::Comparison {
+    orbiters_booster::trial::Comparison {
+        kind: orbiters_booster::trial::Kind::Programs,
+        verdict,
+        before_fps: 36.0,
+        after_fps: if verdict == orbiters_booster::trial::Verdict::Kept { 41.0 } else { 36.0 },
+        before_filled: 0.49,
+        after_filled: if verdict == orbiters_booster::trial::Verdict::Kept { 0.38 } else { 0.49 },
+        before_over_2x: 0.0,
+        after_over_2x: 0.0,
+        before_late_cpu: 0.4,
+        after_late_cpu: 0.3,
+        before_late_gpu: 0.0,
+        after_late_gpu: 0.0,
+        stalls_at_switch: 0,
+    }
+}
+
+fn booster_scenes(out: &std::path::Path, size: egui::Vec2, idle: &Facts) -> anyhow::Result<()> {
+    use orbiters_booster::engine::Line;
+    use orbiters_booster::trial::Verdict;
+    use panels::Sheet;
+    use orbiters_booster::Level;
+    let at = |snap: &crate::state::Snapshot, details: bool, asking: bool| Facts {
+        sheet: Some(Sheet::Booster),
+        sheet_title: "FPS booster".into(),
+        booster: panels::BoosterFacts::of(snap, details, asking, None),
+        ..idle.clone()
+    };
+    let quiet = booster_snapshot(|_| {});
+    qm_scene("orbit-sheet-booster", out, size, &at(&quiet, false, false), None, Some(Sheet::Booster))?;
+    let kept = booster_snapshot(|s| {
+        s.booster.overlay.report.line = Line::Kept;
+        s.booster.overlay.report.comparisons = vec![sample_comparison(Verdict::Kept)];
+    });
+    qm_scene("orbit-booster-kept", out, size, &at(&kept, false, false), None, Some(Sheet::Booster))?;
+    let none = booster_snapshot(|s| {
+        s.booster.overlay.report.line = Line::NoGain;
+        s.booster.overlay.report.comparisons = vec![sample_comparison(Verdict::NoGain)];
+    });
+    qm_scene("orbit-booster-no-gain", out, size, &at(&none, false, false), None, Some(Sheet::Booster))?;
+    let processor = booster_snapshot(|s| {
+        s.settings.booster.level = Level::Picture;
+        s.booster.overlay.report.line = Line::ProcessorStays;
+    });
+    qm_scene("orbit-booster-processor", out, size, &at(&processor, false, false), None, Some(Sheet::Booster))?;
+    let avatars = booster_snapshot(|s| {
+        s.settings.booster.level = Level::Avatars;
+        s.booster.max_shown = Some(orbiters_booster::guided::Known::Count(30));
+    });
+    qm_scene("orbit-booster-avatars", out, size, &at(&avatars, false, false), None, Some(Sheet::Booster))?;
+    qm_scene("orbit-booster-asking", out, size, &at(&quiet, false, true), None, Some(Sheet::Booster))?;
+    let details = booster_snapshot(|s| {
+        s.booster.lowered = vec![("chrome".into(), 24), ("cargo".into(), 1)];
+        s.booster.overlay.report.wants.stop_preparing = true;
+        s.booster.test_tools = true;
+    });
+    qm_scene("orbit-booster-details", out, size, &at(&details, true, false), None, Some(Sheet::Booster))?;
+    Ok(())
 }

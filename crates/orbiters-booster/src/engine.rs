@@ -454,7 +454,11 @@ impl Engine {
             self.start(Kind::Programs, inputs, true);
             return;
         }
-        if inputs.level >= Level::Picture && self.left_alone.is_none() && matches!(limit, Limit::GraphicsCard | Limit::Both) && aged(self.sharpness_at, RETEST_S) {
+        if inputs.level >= Level::Picture
+            && self.left_alone.is_none()
+            && matches!(limit, Limit::GraphicsCard | Limit::Both)
+            && aged(self.sharpness_at, RETEST_S)
+        {
             // At most one test a world, but one that was kept and still leaves the graphics card late may go a step further.
             let another_step = self.sharpness_steps > 0;
             if self.sharpness_tested_in != Some(inputs.world) || another_step {
@@ -862,7 +866,12 @@ mod tests {
 
     #[test]
     fn a_comparison_stops_when_the_scene_stops_being_the_same() {
-        for spoil in [|i: &mut Inputs| i.people = Some(20), |i: &mut Inputs| i.dashboard = true, |i: &mut Inputs| i.recording = true, |i: &mut Inputs| i.world = WORLD + 1] {
+        for spoil in [
+            |i: &mut Inputs| i.people = Some(20),
+            |i: &mut Inputs| i.dashboard = true,
+            |i: &mut Inputs| i.recording = true,
+            |i: &mut Inputs| i.world = WORLD + 1,
+        ] {
             let mut run = Run::new(Level::Background, programs_help);
             run.run(JOIN_WAIT_S + 25.0);
             assert!(run.report().testing.is_some());

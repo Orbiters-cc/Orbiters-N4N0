@@ -258,7 +258,11 @@ pub fn edit_text(text: &str, section: &str, key: &str, value: &Value) -> Result<
     match text_of(value) {
         Some(new_value) => {
             let parsed: serde_json::Value = serde_json::from_str(&new_value).map_err(|_| EditError::NotJson)?;
-            slot.entry(section).or_insert_with(|| serde_json::Value::Object(Default::default())).as_object_mut().ok_or(EditError::NotJson)?.insert(key.to_string(), parsed);
+            slot.entry(section)
+                .or_insert_with(|| serde_json::Value::Object(Default::default()))
+                .as_object_mut()
+                .ok_or(EditError::NotJson)?
+                .insert(key.to_string(), parsed);
         }
         None => {
             if let Some(s) = slot.get_mut(section).and_then(serde_json::Value::as_object_mut) {
@@ -405,7 +409,11 @@ mod tests {
             .apply(
                 &mut SettingsFile { path: path.clone(), closed: &closed },
                 &[
-                    crate::journal::Change { target: Target::SteamVr { section: "steamvr".into(), key: "supersampleScale".into() }, value: Value::Float(1.19), leave_with: None },
+                    crate::journal::Change {
+                        target: Target::SteamVr { section: "steamvr".into(), key: "supersampleScale".into() },
+                        value: Value::Float(1.19),
+                        leave_with: None,
+                    },
                     crate::journal::Change { target: setting("motionSmoothing"), value: Value::Bool(true), leave_with: None },
                 ],
                 &mut |_| {},

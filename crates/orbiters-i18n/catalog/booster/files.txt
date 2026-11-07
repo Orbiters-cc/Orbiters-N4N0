@@ -1,0 +1,6 @@
+# The files this area covers: every text in them is wrapped and translated (tests/coverage.rs).
+crates/orbiters-desktop/src/booster.rs
+crates/orbiters-desktop/src/pages/booster_card.rs
+crates/orbiters-desktop/src/overlay/orbit/panels/booster_sheet.rs
+crates/orbiters-desktop/src/overlay/booster.rs
+crates/orbiters-desktop/src/controller/booster.rs

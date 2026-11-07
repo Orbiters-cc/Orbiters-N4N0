@@ -47,12 +47,15 @@ impl Armed for RunOnce {
     fn arm(&self) -> bool {
         use windows::core::PCWSTR;
         use windows::Win32::Foundation::ERROR_SUCCESS;
-        use windows::Win32::System::Registry::{RegCloseKey, RegCreateKeyExW, RegSetValueExW, HKEY, HKEY_CURRENT_USER, KEY_SET_VALUE, REG_OPTION_NON_VOLATILE, REG_SZ};
+        use windows::Win32::System::Registry::{
+            RegCloseKey, RegCreateKeyExW, RegSetValueExW, HKEY, HKEY_CURRENT_USER, KEY_SET_VALUE, REG_OPTION_NON_VOLATILE, REG_SZ,
+        };
         let wide = |t: &str| t.encode_utf16().chain([0]).collect::<Vec<u16>>();
         let (key_name, value_name, command) = (wide(&self.key), wide(&self.value), wide(&self.command));
         let mut key = HKEY::default();
         // SAFETY: NUL-terminated names and a valid out parameter.
-        let made = unsafe { RegCreateKeyExW(HKEY_CURRENT_USER, PCWSTR(key_name.as_ptr()), None, None, REG_OPTION_NON_VOLATILE, KEY_SET_VALUE, None, &mut key, None) };
+        let made =
+            unsafe { RegCreateKeyExW(HKEY_CURRENT_USER, PCWSTR(key_name.as_ptr()), None, None, REG_OPTION_NON_VOLATILE, KEY_SET_VALUE, None, &mut key, None) };
         if made != ERROR_SUCCESS {
             return false;
         }
@@ -155,11 +158,18 @@ pub fn run_restorer(store: &Store) -> bool {
 /// value owed while SteamVR runs can only wait: `wait` is asked each moment whether to go on (the window says "Close SteamVR
 /// to finish putting your settings back"), and a silent uninstall does not wait at all. Whether nothing is left owed. Never a
 /// reason for the uninstall to fail: what is left stays in the journal, for the next sign-in.
-pub fn settle_for_uninstall(store: &Store, os: &mut dyn ProcessOs, settings_path: Option<PathBuf>, closed: &dyn Fn() -> bool, silent: bool, wait: &mut dyn FnMut() -> bool) -> bool {
+pub fn settle_for_uninstall(
+    store: &Store,
+    os: &mut dyn ProcessOs,
+    settings_path: Option<PathBuf>,
+    closed: &dyn Fn() -> bool,
+    silent: bool,
+    wait: &mut dyn FnMut() -> bool,
+) -> bool {
     let mut attempt = |store: &Store| {
         let mut access = Offline::new(&mut *os, settings_path.clone(), closed);
         let _ = store.restore(&mut access, &|_| true, &mut |_| {});
-        store.entries().map_or(false, |e| e.is_empty())
+        store.entries().is_ok_and(|e| e.is_empty())
     };
     let mut done = attempt(store);
     if !done && !silent && !closed() && store.entries().is_ok_and(|e| owed_to_steamvr(&e)) {
@@ -294,7 +304,13 @@ mod tests {
             std::fs::write(&path, "{ \"steamvr\" : { \"supersampleScale\" : 1.4 } }").unwrap();
             let store = Store::new(dir, Box::new(crate::journal::NotArmed));
             let closed = || true;
-            store.apply(&mut Offline::new(&mut Nothing, Some(path.clone()), &closed), &[Change { target: setting("supersampleScale"), value: Value::Float(1.19), leave_with: None }], &mut |_| {}).unwrap();
+            store
+                .apply(
+                    &mut Offline::new(&mut Nothing, Some(path.clone()), &closed),
+                    &[Change { target: setting("supersampleScale"), value: Value::Float(1.19), leave_with: None }],
+                    &mut |_| {},
+                )
+                .unwrap();
             (store, path)
         };
         let scale = |path: &Path| vrsettings::read_value(&std::fs::read_to_string(path).unwrap(), "steamvr", "supersampleScale");

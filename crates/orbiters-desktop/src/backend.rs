@@ -90,6 +90,10 @@ pub trait Backend: Send + Sync {
     fn steamvr_devices(&self, _kinds: Vec<crate::tracking::DeviceKind>) {}
     /// How Fast walk carries the person now (the overlay decides it).
     fn walk_path(&self, _path: crate::state::WalkPath) {}
+    /// What the overlay concluded of the frames.
+    fn booster_report(&self, _report: crate::booster::OverlayReport) {}
+    /// What a surface asks of the FPS booster.
+    fn booster(&self, _command: crate::booster::Command) {}
     /// Sets the walk boost's strength (0 to 1), saved and sent to the avatar's `N4N0/WalkBoost`.
     fn walk_boost(&self, strength: f32);
     /// Makes VRChat find the OSC service again (it sends avatar parameters only to services it found).
@@ -279,6 +283,14 @@ impl Backend for Remote {
 
     fn walk_path(&self, path: crate::state::WalkPath) {
         self.0.send(&ToService::WalkPath { path });
+    }
+
+    fn booster_report(&self, report: crate::booster::OverlayReport) {
+        self.0.send(&ToService::BoosterReport { report: Box::new(report) });
+    }
+
+    fn booster(&self, command: crate::booster::Command) {
+        self.0.send(&ToService::Booster { command });
     }
 
     fn walk_boost(&self, strength: f32) {

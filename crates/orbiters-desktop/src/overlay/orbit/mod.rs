@@ -705,6 +705,10 @@ pub struct Panels {
     hue_held: Option<([u8; 3], Instant)>,
     /// A smoothing slider held, where it is seen; saved when let go.
     smoothing_held: Option<(panels::Smoothed, u16)>,
+    /// The FPS booster's sheet: its Details page, its one question, and the stop a press is held on.
+    booster_details: bool,
+    booster_asking: bool,
+    booster_held: Option<orbiters_booster::Level>,
     /// The wheel's keys show.
     key_caps: bool,
     /// The sheet and all with it are away for a moment.
@@ -788,6 +792,9 @@ impl Panels {
             turning: None,
             hue_held: None,
             smoothing_held: None,
+            booster_details: false,
+            booster_asking: false,
+            booster_held: None,
             key_caps: false,
             peek: false,
             view_taken: false,
@@ -1450,6 +1457,7 @@ impl Panels {
             tracking: snap.n4n0.tracking.as_ref().map(|t| (t.on, t.ms, t.note.clone())),
             tracking_note: snap.n4n0.tracking_note.clone(),
             smoothing_held: self.smoothing_held,
+            booster: if self.facts.sheet == Some(Sheet::Booster) { panels::BoosterFacts::of(snap, self.booster_details, self.booster_asking, self.booster_held) } else { Default::default() },
             talk_lines: if self.facts.sheet == Some(Sheet::Talk) {
                 snap.n4n0.lines.iter().map(|l| (l.who == orbiters_n4n0::status::N4n0Who::You, l.text.clone())).collect()
             } else {
@@ -1548,6 +1556,9 @@ impl Panels {
         }
         if let (Some((which, _)), Some(p)) = (self.smoothing_held, self.sheet_pointer) {
             self.smoothing_held = Some((which, panels::smoothing_at(p.x)));
+        }
+        if let (Some(_), Some(p)) = (self.booster_held, self.sheet_pointer) {
+            self.booster_held = Some(panels::booster_level_at(p.x));
         }
         // All of it is painted for each colour: as fast as it can be seen to follow, and no faster.
         if let (Some((was, when)), Some(p)) = (self.hue_held, self.sheet_pointer) {
@@ -1735,6 +1746,11 @@ impl Panels {
             }
             return out;
         }
+        // Across the FPS booster's stops: seen as it moves, chosen when let go.
+        if let Some(Action::Set(panels::Pick::Booster(panels::BoosterPick::Level(level)))) = action {
+            self.booster_held = Some(self.sheet_pointer.map_or(level, |p| panels::booster_level_at(p.x)));
+            return out;
+        }
         // Along what plays: where it is held, and moved there when let go.
         if action == Some(Action::Timeline) {
             if let Some(p) = self.sheet_pointer {
@@ -1775,6 +1791,47 @@ impl Panels {
         self.gallery_dirty();
     }
 
+    /// Something pressed on the FPS booster's sheet. The level is a setting like any other, so that the window shows it too;
+    /// the rest goes to the service, through which it reaches whatever does it.
+    fn booster_pick(&mut self, pick: panels::BoosterPick, snap: &Snapshot) {
+        use crate::booster::Command;
+        use orbiters_booster::engine::Request;
+        use orbiters_booster::Level;
+        use panels::BoosterPick as P;
+        let level_patch = |level: Level| serde_json::json!({ "booster": { "level": level } });
+        match pick {
+            P::Level(Level::Avatars) if !snap.settings.booster.avatars_told => self.booster_asking = true,
+            P::Level(level) => {
+                self.booster_asking = false;
+                self.backend.patch_settings(level_patch(level));
+            }
+            P::Understood => {
+                self.booster_asking = false;
+                self.backend.patch_settings(serde_json::json!({ "booster": { "level": Level::Avatars, "avatars_told": true } }));
+            }
+            P::StayOnPicture => {
+                self.booster_asking = false;
+                self.backend.patch_settings(level_patch(Level::Picture));
+            }
+            P::Details(on) => self.booster_details = on,
+            P::Test(kind) => self.backend.booster(Command::Overlay(Request::TestAnyway(kind))),
+            P::PutBack => self.backend.booster(Command::PutBack),
+            P::OpenLogs => self.backend.booster(Command::OpenLogs),
+            P::Done => {
+                if let Some(item) = snap.booster.overlay.report.guide.item() {
+                    self.backend.booster(Command::GuidedDone(item));
+                }
+            }
+            P::Next => self.backend.booster(Command::Overlay(Request::GuidedNext)),
+            P::Previous => self.backend.booster(Command::Overlay(Request::GuidedBack)),
+            P::PutBackDone => self.backend.booster(Command::PutBackDone),
+            P::HoldTest(on) => self.backend.booster(Command::Overlay(Request::HoldTestChange(on))),
+            P::Crash => self.backend.booster(Command::Overlay(Request::SimulateCrash)),
+            P::TestLoad(on) => self.backend.booster(Command::TestLoad(on)),
+            P::Report => self.backend.booster(Command::WriteTestReport),
+        }
+    }
+
     /// Something chosen on the sheet of settings: saved as any setting is, in a field or two of its own, and seen at once.
     fn set(&mut self, pick: panels::Pick, snap: &Snapshot) {
         use orbiters_core::settings::MenuLook;
@@ -1787,7 +1844,11 @@ impl Panels {
             panels::Pick::Pictures(keep) => serde_json::json!({ "orbit": { "retro_pictures": keep } }),
             panels::Pick::Swatch(i) => colour(panels::SWATCHES[i]),
             // Pressed and dragged: see `press`, `hover` and `release`.
-            panels::Pick::Hue | panels::Pick::SmoothingBar(_) => return,
+            panels::Pick::Hue | panels::Pick::SmoothingBar(_) | panels::Pick::Booster(panels::BoosterPick::Level(_)) => return,
+            panels::Pick::Booster(pick) => {
+                self.booster_pick(pick, snap);
+                return;
+            }
             panels::Pick::Smoothing(on) => serde_json::json!({ "tracking": { "enabled": on } }),
             panels::Pick::Language(after) => crate::language::patch(panels::language_after(crate::language::chosen(&snap.settings), after)),
             panels::Pick::Sound(after) => {
@@ -1974,6 +2035,11 @@ impl Panels {
                 host.effects(effects, snap, &self.backend);
             }
             Action::OpenApp => self.backend.show_window(),
+            Action::Booster => {
+                self.booster_details = false;
+                self.booster_asking = false;
+                self.open_sheet(Sheet::Booster, mark("FPS booster"), snap);
+            }
             Action::Settings => {
                 self.open_sheet(Sheet::Settings, orbiters_i18n::tr("Settings"), snap);
                 // The sound devices there are, read off this thread: it is COM, and may take a moment.
@@ -2001,6 +2067,11 @@ impl Panels {
 
     /// The pointer's button went up.
     pub fn release(&mut self) {
+        if let Some(held) = self.booster_held.take() {
+            let snap = self.backend.view();
+            let level = self.sheet_pointer.map_or(held, |p| panels::booster_level_at(p.x));
+            self.booster_pick(panels::BoosterPick::Level(level), &snap);
+        }
         if let Some((which, held)) = self.smoothing_held.take() {
             // Where it was let go.
             let ms = self.sheet_pointer.map_or(held, |p| panels::smoothing_at(p.x));

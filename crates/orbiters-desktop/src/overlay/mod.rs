@@ -12,6 +12,7 @@
 //! quits or its server is gone, with [`EXIT_STEAMVR_GONE`].
 
 mod actions;
+mod booster;
 pub mod calibration;
 pub mod coverage;
 #[cfg(windows)]
@@ -51,8 +52,6 @@ pub const EXIT_STEAMVR_GONE: i32 = 0x5354;
 /// SteamVR's server can end without a quit event (a crash): once the service has not seen it this long, the overlay
 /// ends too, and the next SteamVR gets a new one.
 const STEAMVR_GONE_AFTER: Duration = Duration::from_secs(5);
-/// The tab's pictures: at most 45 a second, whatever asks for them (the laser moving, the service's news).
-const MIN_FRAME: Duration = Duration::from_millis(22);
 /// A turn of the loop while nothing moves the play space: every turn reads the controllers, as a binding that opens
 /// N4N0's menu (a double press) is true for a moment only and SteamVR keeps no press between two reads, and the taps
 /// that open it by default are timed from these reads.
@@ -581,10 +580,13 @@ struct Teardown<'a> {
     floating: Option<floating::Floating>,
     /// The panels around VRChat's menus (none when SteamVR would not make their overlays).
     orbit: Option<orbit::vr::OrbitVr>,
+    /// The FPS booster: its frame logger, and what it changed in SteamVR.
+    booster: booster::Host,
 }
 
 impl Drop for Teardown<'_> {
     fn drop(&mut self) {
+        self.booster.teardown(self.steamvr);
         self.state.release(self.backend);
         // Always: the menu may have closed on this turn's effects after its state was reported, unheard yet.
         self.backend.n4n0(N4n0Command::MenuState { open: false, dictation: false, keyboard: false });
@@ -606,6 +608,10 @@ fn session(args: &[String]) -> anyhow::Result<Ended> {
     let endpoint = Endpoint::from_args(args).context("--overlay needs --service <port> <token>")?;
     // SteamVR first: an overlay that finds it gone leaves before the app ever counts it connected.
     let Some(steamvr) = connect_steamvr()? else { return Ok(Ended::SteamVrGone) };
+    // Before anything else: what an overlay that died left in SteamVR's settings comes back.
+    if orbiters_core::osc::VRCHAT_RUNS_HERE {
+        booster::recover_first(&steamvr);
+    }
     let server = Server::find();
     let client = Client::connect(&endpoint, Role::Overlay)?;
     let backend: Ctl = Arc::new(Remote(client.clone()));
@@ -639,7 +645,8 @@ fn session(args: &[String]) -> anyhow::Result<Ended> {
     // The floating panel is an addition: without its overlays the tab and the rest work as before.
     let floating = floating::Floating::new(&overlay, KEY).map_err(|e| eprintln!("floating panel unavailable: {e}")).ok();
     let orbit = orbit::vr::OrbitVr::new(&overlay, KEY, backend.clone()).map_err(|e| eprintln!("panels around VRChat's menus unavailable: {e}")).ok();
-    let mut t = Teardown { steamvr: &steamvr, overlay: &overlay, backend: &backend, main, state, walk, world, menu, coverage, floating, orbit };
+    let boost = booster::Host::new(&steamvr);
+    let mut t = Teardown { steamvr: &steamvr, overlay: &overlay, backend: &backend, main, state, walk, world, menu, coverage, floating, orbit, booster: boost };
     let mut frames = frames::FrameSampler::new(&steamvr);
     // What of the touchpads and sticks goes to the avatar's input parameters.
     let mut pads = orbiters_n4n0::input::Pacer::default();
@@ -768,10 +775,17 @@ fn session(args: &[String]) -> anyhow::Result<Ended> {
             }
         }
         // VRChat's frame times also pace N4N0's projected screen (the owner's steps follow the frame rate).
+        // Read whatever the settings say: the FPS booster's logger runs at every level, Off included.
+        let chunk = frames.update(&steamvr, vrchat_scene);
         if snap.settings.world_performance || snap.settings.n4n0.enabled {
-            if let Some(chunk) = frames.update(&steamvr, vrchat_scene) {
+            if let Some(chunk) = chunk {
                 backend.frames(chunk);
             }
+        }
+        if orbiters_core::osc::VRCHAT_RUNS_HERE {
+            let panel_3d = t.menu.worlds.view.active();
+            let wants = t.booster.update(&steamvr, &backend, &snap, frames.fresh(), vrchat_scene, dashboard, panel_3d);
+            t.menu.worlds.view.set_light_for_booster(wants.panels_light);
         }
         let place = snap.vrchat.running.then(|| snap.vrchat.world.instance.clone()).flatten();
         // Every action set at once, then what reads them; a failed read leaves the last frame's states, not to be
@@ -905,8 +919,10 @@ fn session(args: &[String]) -> anyhow::Result<Ended> {
         if !events.is_empty() {
             next_frame = Some(Instant::now());
         }
-        // At most 45 pictures a second, whatever asks for them.
-        let due = next_frame.is_some_and(|f| f <= Instant::now()) && last_frame.is_none_or(|f| f.elapsed() >= MIN_FRAME);
+        // At most 45 pictures a second, whatever asks for them (the laser moving, the service's news), or 30 while the FPS
+        // booster paces them.
+        let min_frame = booster::panel_pace();
+        let due = next_frame.is_some_and(|f| f <= Instant::now()) && last_frame.is_none_or(|f| f.elapsed() >= min_frame);
         if visible && due {
             last_frame = Some(Instant::now());
             orbiters_ui::anim::set_live(&ctx, !snap.settings.reduce_motion);
@@ -933,7 +949,7 @@ fn session(args: &[String]) -> anyhow::Result<Ended> {
             // calibration under way shows its progress on whichever tab is up.
             let delay = full.viewport_output.get(&ViewportId::ROOT).map(|v| v.repaint_delay).unwrap_or(Duration::MAX);
             next_frame = if delay < Duration::from_secs(3600) {
-                Some(Instant::now() + delay.max(MIN_FRAME))
+                Some(Instant::now() + delay.max(min_frame))
             } else if t.state.busy() {
                 Some(Instant::now() + Duration::from_millis(100))
             } else {

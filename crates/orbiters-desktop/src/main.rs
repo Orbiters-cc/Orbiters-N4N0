@@ -9,6 +9,7 @@
 mod app;
 mod audio_devices;
 mod backend;
+mod booster;
 mod bench;
 mod bridge;
 mod capture_picture;
@@ -63,6 +64,8 @@ fn main() -> anyhow::Result<()> {
                 .map_err(anyhow::Error::from)
                 .and_then(|t| t.join().unwrap_or_else(|_| Err(anyhow::anyhow!("the screenshots stopped on a panic"))))
         }
+        // From RunOnce, at sign-in, after something died with a change of the FPS booster in force.
+        Some(orbiters_booster::system::RESTORE_ARGUMENT) => controller::booster_restore_at_sign_in(),
         Some("--gpu-bench") => bench::run(&args[1..]),
         Some("--window") => window::run(&args[1..]),
         Some("--overlay") => overlay::run(&args[1..]),

@@ -19,8 +19,30 @@ pub const BELOW_NORMAL_PRIORITY: i64 = 0x4000;
 /// someone plays. Everything else is left alone by design: Discord, OBS, audio, VR tools, overlays, tracking, Steam, security
 /// software.
 pub const ALLOWLIST: [&str; 24] = [
-    "chrome", "msedge", "firefox", "brave", "opera", "code", "devenv", "rider64", "Unity", "blender", "node", "python", "pythonw", "rustc", "cargo", "link", "cl", "msbuild", "dotnet", "ffmpeg", "claude",
-    "codex", "Docker Desktop", "com.docker.backend",
+    "chrome",
+    "msedge",
+    "firefox",
+    "brave",
+    "opera",
+    "code",
+    "devenv",
+    "rider64",
+    "Unity",
+    "blender",
+    "node",
+    "python",
+    "pythonw",
+    "rustc",
+    "cargo",
+    "link",
+    "cl",
+    "msbuild",
+    "dotnet",
+    "ffmpeg",
+    "claude",
+    "codex",
+    "Docker Desktop",
+    "com.docker.backend",
 ];
 
 /// Names refused whatever any list says, in lower case. A name starting with one of these is refused too: `vr` takes in all
@@ -115,7 +137,9 @@ pub fn set_class(os: &mut dyn ProcessOs, pid: u32, created: u64, name: &str, cla
         return false;
     }
     match os.open(pid) {
-        Some(opened) if opened.created == created && stem(&opened.image) == stem(name) && opened.same_user && !never_touch(&opened.image) => os.set_class(pid, class),
+        Some(opened) if opened.created == created && stem(&opened.image) == stem(name) && opened.same_user && !never_touch(&opened.image) => {
+            os.set_class(pid, class)
+        }
         _ => false,
     }
 }
@@ -152,7 +176,11 @@ pub fn lower(store: &Store, os: &mut dyn ProcessOs, seen: &[Seen]) -> Result<usi
         if !opened.same_user || opened.created != program.created || opened.class != NORMAL_PRIORITY || !may_lower(&opened.image) {
             continue;
         }
-        changes.push(Change { target: Target::Process { pid: program.pid, created: program.created, name: stem(&program.name) }, value: Value::Int(BELOW_NORMAL_PRIORITY), leave_with: None });
+        changes.push(Change {
+            target: Target::Process { pid: program.pid, created: program.created, name: stem(&program.name) },
+            value: Value::Int(BELOW_NORMAL_PRIORITY),
+            leave_with: None,
+        });
     }
     if changes.is_empty() {
         return Ok(0);
@@ -278,7 +306,10 @@ impl ProcessOs for RealOs {
         use windows::core::PWSTR;
         use windows::Win32::Foundation::{CloseHandle, FILETIME, HANDLE};
         use windows::Win32::Security::{EqualSid, GetTokenInformation, TokenUser, TOKEN_QUERY, TOKEN_USER};
-        use windows::Win32::System::Threading::{GetCurrentProcess, GetPriorityClass, GetProcessTimes, OpenProcess, OpenProcessToken, QueryFullProcessImageNameW, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION};
+        use windows::Win32::System::Threading::{
+            GetCurrentProcess, GetPriorityClass, GetProcessTimes, OpenProcess, OpenProcessToken, QueryFullProcessImageNameW, PROCESS_NAME_WIN32,
+            PROCESS_QUERY_LIMITED_INFORMATION,
+        };
         // SAFETY: the least rights there are, and closed at the end of this call.
         let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) }.ok()?;
         struct Close(HANDLE);
@@ -328,7 +359,9 @@ impl ProcessOs for RealOs {
 
     fn set_class(&mut self, pid: u32, class: i64) -> bool {
         use windows::Win32::Foundation::CloseHandle;
-        use windows::Win32::System::Threading::{OpenProcess, SetPriorityClass, PROCESS_CREATION_FLAGS, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SET_INFORMATION};
+        use windows::Win32::System::Threading::{
+            OpenProcess, SetPriorityClass, PROCESS_CREATION_FLAGS, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SET_INFORMATION,
+        };
         // SAFETY: the rights it needs and no others, closed below.
         let Ok(process) = (unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SET_INFORMATION, false, pid) }) else { return false };
         // SAFETY: a live handle with the right to set this.
@@ -537,7 +570,14 @@ mod tests {
     fn processor_use_is_counted_by_name_and_in_cores() {
         let at = |pid, name: &str, seconds: f32| Seen { pid, name: name.into(), created: 1, cpu: (seconds * 10_000_000.0) as u64 };
         let before = [at(0, "Idle", 0.0), at(1, "chrome.exe", 1.0), at(2, "chrome.exe", 1.0), at(3, "Discord.exe", 0.0), at(4, "VRChat.exe", 10.0)];
-        let after = [at(0, "Idle", 100.0), at(1, "chrome.exe", 6.0), at(2, "chrome.exe", 6.0), at(3, "Discord.exe", 1.0), at(4, "VRChat.exe", 20.0), at(5, "node.exe", 7.0)];
+        let after = [
+            at(0, "Idle", 100.0),
+            at(1, "chrome.exe", 6.0),
+            at(2, "chrome.exe", 6.0),
+            at(3, "Discord.exe", 1.0),
+            at(4, "VRChat.exe", 20.0),
+            at(5, "node.exe", 7.0),
+        ];
         let got = cpu_use(&before, &after, 10.0, 8.0);
         assert!((got.listed_cores - 1.0).abs() < 0.01, "only the listed, and a new one counts from now: {got:?}");
         assert_eq!(got.top[0].0, "chrome");

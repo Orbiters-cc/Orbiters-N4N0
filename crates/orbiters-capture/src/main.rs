@@ -87,8 +87,8 @@ fn list_mics() -> Vec<AudioDeviceInfo> {
 
 /// A test pattern's size and rate, when they make sense (a size of 0 would panic, 100k × 100k would not fit in memory).
 fn check_pattern(width: u32, height: u32, fps: f32) -> anyhow::Result<()> {
-    anyhow::ensure!((64..=8192).contains(&width) && (64..=8192).contains(&height), "a test pattern of {width}×{height}: from 64 to 8192 pixels a side");
-    anyhow::ensure!(fps.is_finite() && fps > 0.0 && fps <= 1000.0, "a test pattern at {fps} fps: more than 0 and at most 1000");
+    anyhow::ensure!((64..=8192).contains(&width) && (64..=8192).contains(&height), "a test pattern of {width}×{height}: from 64 to 8192 pixels a side"); // i18n: not shown (the command line's test pattern, typed by a developer)
+    anyhow::ensure!(fps.is_finite() && fps > 0.0 && fps <= 1000.0, "a test pattern at {fps} fps: more than 0 and at most 1000"); // i18n: not shown (the command line's test pattern, typed by a developer)
     Ok(())
 }
 
@@ -103,9 +103,9 @@ fn open_source(spec: &SourceSpec) -> anyhow::Result<Box<dyn FrameSource>> {
             Box::new(sources::MultiSource::new(Box::new(sources::SpoutSource::new(name)?), others))
         }
         #[cfg(target_os = "macos")]
-        SourceSpec::Spout { .. } => anyhow::bail!("VRChat's camera reaches this app through Spout, which only Windows has: a Mac opens and reconstructs captures but does not record them"),
+        SourceSpec::Spout { .. } => anyhow::bail!("{}", orbiters_i18n::tr("VRChat's camera reaches this app through Spout, which only Windows has: a Mac opens and reconstructs captures but does not record them")),
         #[cfg(not(any(windows, target_os = "macos")))]
-        SourceSpec::Spout { .. } => anyhow::bail!("Spout is only available on Windows; use the PipeWire source on Linux"),
+        SourceSpec::Spout { .. } => anyhow::bail!("{}", orbiters_i18n::tr("Spout is only available on Windows; use the PipeWire source on Linux")),
         SourceSpec::RawSequence { path, realtime } => Box::new(RawSequenceSource::open(path, *realtime)?),
         SourceSpec::TestPattern { width, height, fps, depth_every, frames } => {
             check_pattern(*width, *height, *fps)?;
@@ -122,7 +122,7 @@ fn parse_source(text: &str) -> anyhow::Result<SourceSpec> {
     } else if let Some(path) = text.strip_prefix("raw:") {
         SourceSpec::RawSequence { path: PathBuf::from(path), realtime: false }
     } else {
-        anyhow::bail!("unknown source {text:?} (spout[:name], raw:<folder>, test)")
+        anyhow::bail!("unknown source {text:?} (spout[:name], raw:<folder>, test)") // i18n: not shown (a `--source` argument the app writes itself; only a developer types another)
     })
 }
 
@@ -266,12 +266,12 @@ fn cli_send_test(args: &[String]) -> anyhow::Result<()> {
     #[cfg(not(windows))]
     {
         let _ = args;
-        anyhow::bail!("Spout is only available on Windows")
+        anyhow::bail!("Spout is only available on Windows") // i18n: not shown (the `send` command of the command line, for developers)
     }
 }
 
 fn cli_verify(args: &[String]) -> anyhow::Result<()> {
-    let dir = args.first().ok_or_else(|| anyhow::anyhow!("usage: verify <raw capture folder> [--frames N]"))?;
+    let dir = args.first().ok_or_else(|| anyhow::anyhow!("usage: verify <raw capture folder> [--frames N]"))?; // i18n: not shown (the command line's usage, for developers)
     let report = verify::verify(std::path::Path::new(dir), flag(args, "--frames").and_then(|f| f.parse().ok()))?;
     println!("{}", serde_json::to_string_pretty(&report)?);
     Ok(())

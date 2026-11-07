@@ -67,7 +67,7 @@ impl Installation {
 
     /// `%LOCALAPPDATA%\Orbiters\SteamVR\drivers\orbiters_smooth` and `%LOCALAPPDATA%\openvr\openvrpaths.vrpath`.
     pub fn for_user() -> Result<Self> {
-        let local = std::env::var_os("LOCALAPPDATA").filter(|v| !v.is_empty()).map(PathBuf::from).context("LOCALAPPDATA is not set")?;
+        let local = std::env::var_os("LOCALAPPDATA").filter(|v| !v.is_empty()).map(PathBuf::from).with_context(|| orbiters_i18n::tr("LOCALAPPDATA is not set"))?;
         Ok(Self::new(local.join("Orbiters").join("SteamVR").join("drivers").join(DRIVER_NAME), local.join("openvr").join("openvrpaths.vrpath")))
     }
 
@@ -122,10 +122,10 @@ impl Installation {
     /// start. Fails, changing nothing, when SteamVR has never run here (no `openvrpaths.vrpath`).
     pub fn install(&self, driver_dll: &Path) -> Result<PathBuf> {
         let mut vrpath = read_vrpath(&self.vrpath)?;
-        let dll = std::fs::read(driver_dll).with_context(|| format!("could not read the driver {}", driver_dll.display()))?;
+        let dll = std::fs::read(driver_dll).with_context(|| orbiters_i18n::tr!("could not read the driver {path}", path = driver_dll.display()))?;
 
-        let bin = self.dll_path().parent().map(Path::to_path_buf).context("the driver folder has no parent")?;
-        std::fs::create_dir_all(&bin).with_context(|| format!("could not create {}", bin.display()))?;
+        let bin = self.dll_path().parent().map(Path::to_path_buf).with_context(|| orbiters_i18n::tr("the driver folder has no parent"))?;
+        std::fs::create_dir_all(&bin).with_context(|| orbiters_i18n::tr!("could not create {path}", path = bin.display()))?;
         write_if_changed(&self.manifest_path(), manifest().as_bytes())?;
         replace_dll(&self.dll_path(), &dll)?;
 
@@ -162,9 +162,9 @@ impl Installation {
         if self.driver_dir.exists() && std::fs::remove_dir_all(&self.driver_dir).is_err() {
             move_out_files_in_use(&self.driver_dir);
             std::fs::remove_dir_all(&self.driver_dir).with_context(|| {
-                format!(
-                    "SteamVR no longer loads the smoothing driver, but its folder {} could not be removed (SteamVR may still be using it; close SteamVR and try again)",
-                    self.driver_dir.display()
+                orbiters_i18n::tr!(
+                    "SteamVR no longer loads the smoothing driver, but its folder {path} could not be removed (SteamVR may still be using it; close SteamVR and try again)",
+                    path = self.driver_dir.display()
                 )
             })?;
         }
@@ -227,13 +227,13 @@ fn read_vrpath(path: &Path) -> Result<Value> {
     let text = match std::fs::read_to_string(path) {
         Ok(t) => t,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            bail!("SteamVR is not set up for this Windows user ({} is missing): start SteamVR once, then try again", path.display())
+            bail!("{}", orbiters_i18n::tr!("SteamVR is not set up for this Windows user ({path} is missing): start SteamVR once, then try again", path = path.display()))
         }
-        Err(e) => return Err(e).with_context(|| format!("could not read {}", path.display())),
+        Err(e) => return Err(e).with_context(|| orbiters_i18n::tr!("could not read {path}", path = path.display())),
     };
-    let value: Value = serde_json::from_str(text.trim_start_matches('\u{feff}')).with_context(|| format!("{} is not valid JSON", path.display()))?;
+    let value: Value = serde_json::from_str(text.trim_start_matches('\u{feff}')).with_context(|| orbiters_i18n::tr!("{path} is not valid JSON", path = path.display()))?;
     if !value.is_object() {
-        bail!("{} is not a JSON object", path.display());
+        bail!("{}", orbiters_i18n::tr!("{path} is not a JSON object", path = path.display()));
     }
     Ok(value)
 }
@@ -245,7 +245,7 @@ fn external_drivers(vrpath: &Value) -> Vec<String> {
 
 /// Sets `external_drivers`, as `vrpathreg` does: `null` when empty.
 fn set_external_drivers(vrpath: &mut Value, drivers: Vec<Value>) -> Result<()> {
-    let object = vrpath.as_object_mut().context("openvrpaths.vrpath is not a JSON object")?;
+    let object = vrpath.as_object_mut().with_context(|| orbiters_i18n::tr("openvrpaths.vrpath is not a JSON object"))?;
     object.insert("external_drivers".into(), if drivers.is_empty() { Value::Null } else { Value::Array(drivers) });
     Ok(())
 }
@@ -269,7 +269,7 @@ fn to_text(value: &Value) -> String {
 /// Writes through a temporary file beside it, so SteamVR never reads half a file.
 fn write_vrpath(path: &Path, value: &Value) -> Result<()> {
     let tmp = path.with_extension("vrpath.orbiters-tmp");
-    std::fs::write(&tmp, to_text(value)).with_context(|| format!("could not write {}", tmp.display()))?;
+    std::fs::write(&tmp, to_text(value)).with_context(|| orbiters_i18n::tr!("could not write {path}", path = tmp.display()))?;
     std::fs::rename(&tmp, path).inspect_err(|_| {
         let _ = std::fs::remove_file(&tmp);
     })?;
@@ -280,14 +280,14 @@ fn write_if_changed(path: &Path, bytes: &[u8]) -> Result<()> {
     if std::fs::read(path).ok().as_deref() == Some(bytes) {
         return Ok(());
     }
-    std::fs::write(path, bytes).with_context(|| format!("could not write {}", path.display()))
+    std::fs::write(path, bytes).with_context(|| orbiters_i18n::tr!("could not write {path}", path = path.display()))
 }
 
 /// Puts `bytes` at `path`. A loaded DLL cannot be overwritten on Windows but can be renamed: the old one is moved
 /// aside (`.old-<n>`, removed by a later install once SteamVR has let go of it).
 fn replace_dll(path: &Path, bytes: &[u8]) -> Result<()> {
-    let dir = path.parent().context("the DLL has no folder")?;
-    let name = path.file_name().context("the DLL has no name")?.to_string_lossy().into_owned();
+    let dir = path.parent().with_context(|| orbiters_i18n::tr("the DLL has no folder"))?;
+    let name = path.file_name().with_context(|| orbiters_i18n::tr("the DLL has no name"))?.to_string_lossy().into_owned();
     if let Ok(entries) = std::fs::read_dir(dir) {
         for entry in entries.flatten() {
             if entry.file_name().to_string_lossy().starts_with(&format!("{name}.old-")) {
@@ -299,15 +299,15 @@ fn replace_dll(path: &Path, bytes: &[u8]) -> Result<()> {
         return Ok(());
     }
     let new = dir.join(format!("{name}.new"));
-    std::fs::write(&new, bytes).with_context(|| format!("could not write {}", new.display()))?;
+    std::fs::write(&new, bytes).with_context(|| orbiters_i18n::tr!("could not write {path}", path = new.display()))?;
     if std::fs::rename(&new, path).is_ok() {
         return Ok(());
     }
-    let aside = (0..100).map(|n| dir.join(format!("{name}.old-{n}"))).find(|p| !p.exists()).context("too many old copies of the driver")?;
+    let aside = (0..100).map(|n| dir.join(format!("{name}.old-{n}"))).find(|p| !p.exists()).with_context(|| orbiters_i18n::tr("too many old copies of the driver"))?;
     let moved = std::fs::rename(path, &aside).and_then(|()| std::fs::rename(&new, path));
     moved.map_err(|e| {
         let _ = std::fs::remove_file(&new);
-        anyhow::Error::new(e).context(format!("could not replace {}", path.display()))
+        anyhow::Error::new(e).context(orbiters_i18n::tr!("could not replace {path}", path = path.display()))
     })
 }
 

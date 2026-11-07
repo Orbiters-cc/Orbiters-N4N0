@@ -87,7 +87,7 @@ impl EyeReader {
         let swap = match desc.Format {
             DXGI_FORMAT_R8G8B8A8_UNORM | DXGI_FORMAT_R8G8B8A8_UNORM_SRGB => false,
             DXGI_FORMAT_B8G8R8A8_UNORM | DXGI_FORMAT_B8G8R8A8_UNORM_SRGB => true,
-            other => return Err(format!("the mirror texture's format {} is not 8-bit RGBA", other.0)),
+            other => return Err(orbiters_i18n::tr!("the mirror texture's format {format} is not 8-bit RGBA", format = other.0)),
         };
         let [x0, y0, part_w, part_h] = area.unwrap_or([0, 0, desc.Width, desc.Height]);
         let (x0, y0) = (x0.min(desc.Width.saturating_sub(1)), y0.min(desc.Height.saturating_sub(1)));

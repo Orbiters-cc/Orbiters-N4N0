@@ -20,7 +20,7 @@ pub fn command_line(exe: &Path) -> String {
 pub fn set(exe: &Path, on: bool) -> anyhow::Result<()> {
     if !on {
         let status = unsafe { RegDeleteKeyValueW(HKEY_CURRENT_USER, &HSTRING::from(RUN_KEY), &HSTRING::from(RUN_VALUE)) };
-        anyhow::ensure!(status.is_ok() || status == ERROR_FILE_NOT_FOUND, "Windows did not let the start with Windows go ({status:?})");
+        anyhow::ensure!(status.is_ok() || status == ERROR_FILE_NOT_FOUND, "{}", orbiters_i18n::tr!("Windows did not let the start with Windows go ({status})", status = format!("{status:?}")));
         return Ok(());
     }
     let mut key = HKEY::default();

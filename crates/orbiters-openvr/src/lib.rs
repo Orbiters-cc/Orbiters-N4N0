@@ -353,7 +353,7 @@ mod platform {
 
     impl Library {
         pub fn open(_runtime: &Path) -> Result<Self, String> {
-            Err("only Windows is supported for now".into())
+            Err("only Windows is supported for now".into()) // i18n: not shown (the stub of a platform with no SteamVR; the overlay logs the load error)
         }
 
         pub fn symbol(&self, _name: &std::ffi::CStr) -> Option<*const std::ffi::c_void> {

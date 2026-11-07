@@ -436,15 +436,13 @@ pub struct RawSequenceSource {
 
 impl RawSequenceSource {
     pub fn open(dir: &Path, realtime: bool) -> anyhow::Result<Self> {
-        let text = std::fs::read_to_string(dir.join(raw_capture::RAW_FILE)).map_err(|e| anyhow::anyhow!("{}: no capture.json ({e})", dir.display()))?;
+        let text = std::fs::read_to_string(dir.join(raw_capture::RAW_FILE)).map_err(|e| anyhow::anyhow!("{}", orbiters_i18n::tr!("{folder}: no capture.json ({error})", folder = dir.display(), error = e)))?;
         let meta: RawCapture = serde_json::from_str(&text)?;
-        anyhow::ensure!(meta.format == raw_capture::RAW_FORMAT, "{} is not a raw capture", dir.display());
+        anyhow::ensure!(meta.format == raw_capture::RAW_FORMAT, "{}", orbiters_i18n::tr!("{folder} is not a raw capture", folder = dir.display()));
         anyhow::ensure!(
             meta.width > 0 && meta.height > 0 && meta.width as u64 * meta.height as u64 <= qoi::MAX_PIXELS,
-            "{}: capture.json gives a frame size of {}×{}",
-            dir.display(),
-            meta.width,
-            meta.height
+            "{}",
+            orbiters_i18n::tr!("{folder}: capture.json gives a frame size of {width}×{height}", folder = dir.display(), width = meta.width, height = meta.height)
         );
         let (tx, loaded) = crossbeam_channel::bounded::<Loaded>(2);
         let (frames, count, (width, height)) = (dir.join(raw_capture::FRAMES_DIR), meta.frame_count, (meta.width, meta.height));

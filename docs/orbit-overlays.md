@@ -62,11 +62,17 @@ On a world's side panel it lies in a hole (`panel::Panel::hole`, the same hole i
 
 `small_hint`: above it, what says how to take it and then how to zoom it, with a little thumbstick pushed up and pulled down. A stick zooming it ends the hint, until a new capture opens from a new opening of the menu (`Relayed::MenuOpened`).
 
+Once taken, it has a Hide 3D of its own under it (`small_hint::HideChip`), found by a laser with a margin or by a hand close by, as it may stay after the menu has closed.
+
 The stick also reaches VRChat, as nothing takes it from the game while the capture is held: held in the left hand, its zoom also walks the avatar.
 
 ## Worlds in 3D
 
 A press on a world opens its details on a side panel beside the list, which narrows to two columns of the same six results, so that another can be pressed at once (`Page::Detail`, `SIDE`). In a headset a press on a world with a capture shows it, around the person or small, whichever was chosen last.
+
+## VRChat's tooltips under a sheet
+
+On the desktop VRChat lights what lies under the pointer even with a sheet over it, as nothing outside the game can stop that, and shows its tooltip under its tab row. While the pointer is on these parts, `Zone::SheetHint` lies over that place and says what the pointer is on.
 
 ## A 3D picture from these menus, on the desktop
 

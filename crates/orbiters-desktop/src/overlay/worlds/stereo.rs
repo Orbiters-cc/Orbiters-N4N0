@@ -191,7 +191,9 @@ impl SmallDock {
     pub fn behind(view: &StartView, at: &Matrix34, radius: f32) -> Self {
         let (s, c) = (-view.yaw()).sin_cos();
         let turned = [[c, 0.0, s], [0.0, 1.0, 0.0], [s, 0.0, -c]];
-        Self { rotation: mat_mul(&rotation_of(at), &turned), anchor: sub(position(at), scale(axis(at, 2), radius * 0.7)), radius }
+        // Most captures are wider than tall, with their ground low: raised a little, more of it is in the hole and less under it.
+        let raised = add(position(at), scale(axis(at, 1), radius * 0.28));
+        Self { rotation: mat_mul(&rotation_of(at), &turned), anchor: sub(raised, scale(axis(at, 2), radius * 0.7)), radius }
     }
 }
 
@@ -266,6 +268,12 @@ impl Small {
         self
     }
 
+    /// Shows `share` of what it shows now, larger, with no hand asking.
+    pub fn zoomed_in(mut self, share: f32) -> Self {
+        self.reach = (self.reach * share).clamp(SMALL_REACHES.0, SMALL_REACHES.1);
+        self
+    }
+
     /// How large it stands against the capture.
     pub fn size(&self) -> f32 {
         self.radius / self.reach
@@ -288,6 +296,11 @@ impl Small {
 
     pub fn held(&self) -> bool {
         self.held.is_some()
+    }
+
+    /// The hand holding it.
+    pub fn held_by(&self) -> Option<usize> {
+        self.held.map(|h| h.hand)
     }
 
     /// Back to its place in the panel, from wherever a hand left it.

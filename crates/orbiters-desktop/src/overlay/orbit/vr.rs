@@ -705,6 +705,7 @@ impl OrbitVr {
         if self.panels.takeover.is_none() || menu != Some(Around::Wheel) {
             self.takeover_plane = None;
         }
+        let sheet_up = self.panels.takeover.is_some();
         let quads: Vec<(Quad, Placed)> = self
             .panels
             .all()
@@ -714,6 +715,8 @@ impl OrbitVr {
                 let near = match p.zone {
                     Zone::Takeover => TAKEOVER_NEAR_M,
                     Zone::SheetBack => TAKEOVER_NEAR_M - 0.004,
+                    // With a sheet up, in its plane: nearer than the wing, it would seem to run into it.
+                    _ if sheet_up => TAKEOVER_NEAR_M - 0.004,
                     _ => NEAR_M,
                 };
                 (on.quad(&p.placed, -p.outward(), near), p.placed)
@@ -758,6 +761,8 @@ impl OrbitVr {
                 let near = match p.zone {
                     Zone::Takeover => TAKEOVER_NEAR_M,
                     Zone::SheetBack => TAKEOVER_NEAR_M - 0.004,
+                    // With a sheet up, in its plane: nearer than the wing, it would seem to run into it.
+                    _ if sheet_up => TAKEOVER_NEAR_M - 0.004,
                     _ => NEAR_M,
                 };
                 let on_hand = Plane { frame, unit }.quad(&p.placed, -p.outward(), near).transform;

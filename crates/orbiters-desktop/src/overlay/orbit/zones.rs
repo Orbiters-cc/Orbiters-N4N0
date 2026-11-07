@@ -194,6 +194,8 @@ pub enum Zone {
     QmCaption,
     /// The sheet's back: over the Quick Menu's panels down to the main panel's own bottom edge, so that VRChat's tabs stay, with a head.
     SheetBack,
+    /// Under a sheet on the desktop: says what is pointed at, over VRChat's tooltip for what the sheet hides.
+    SheetHint,
     /// The page on the sheet. Input to VRChat is blocked while pointing here.
     Takeover,
 }
@@ -245,9 +247,10 @@ impl Zone {
             Zone::WheelInstances => Ring::cell(210.0, 270.0),
             Zone::WheelPictures => Ring::cell(270.0, 330.0),
             // On the left, so as to stay clear of the caption over the ring.
-            Zone::BloomPeople => Ring::bloom(285.0, 315.0),
-            Zone::BloomWorld => Ring::bloom(255.0, 285.0),
-            Zone::BloomRecord => Ring::bloom(225.0, 255.0),
+            // Around its parent, as far towards the top as the caption over the wheel leaves room.
+            Zone::BloomPeople => Ring::bloom(303.0, 333.0),
+            Zone::BloomWorld => Ring::bloom(273.0, 303.0),
+            Zone::BloomRecord => Ring::bloom(243.0, 273.0),
             Zone::BloomPrevious => Ring::short(90.0, 120.0),
             Zone::BloomNext => Ring::short(120.0, 150.0),
             _ => return None,
@@ -274,7 +277,7 @@ impl Zone {
 
     /// Nothing is pressed here: the pointer and a click pass through to what is under it.
     pub fn passes_clicks(self) -> bool {
-        matches!(self, Zone::WheelCaption | Zone::QmCaption | Zone::WheelVeil)
+        matches!(self, Zone::WheelCaption | Zone::QmCaption | Zone::WheelVeil | Zone::SheetHint)
     }
 
     /// Its place in the menu's units from the menu's centre, y down: around the wheel in hundredths of its radius (a 1280 x 720 window's pixels, nearly), around the Quick
@@ -285,9 +288,10 @@ impl Zone {
         }
         let r = |x0: f32, y0: f32, x1: f32, y1: f32| Rect::from_min_max(pos2(x0, y0), pos2(x1, y1));
         match self {
-            Zone::WheelCaption => r(-220.0, -236.0, 220.0, -180.0),
+            Zone::WheelCaption => r(-220.0, -270.0, 220.0, -214.0),
             Zone::WheelVeil => r(-103.0, -103.0, 103.0, 103.0),
-            Zone::WheelHide => r(126.0, -156.0, 156.0, -126.0),
+            // Off the ring, in the free corner past its seam, and no smaller than a thumb's worth of laser.
+            Zone::WheelHide => r(146.0, -186.0, 182.0, -150.0),
             // As tall as My Profile and as wide, beside it.
             // As tall as My Profile and as wide, beside it.
             Zone::WingName => r(362.0, -150.0, 524.0, -120.0),
@@ -302,6 +306,8 @@ impl Zone {
             Zone::QmCaption => r(200.0, -206.0, 524.0, -154.0),
             // The Quick Menu's panels and the FPS line over them, ending where its main panel ends: its tab row and badge stay VRChat's.
             Zone::SheetBack => r(-352.0, -248.0, 352.0, 204.0),
+            // Under the tab row, where VRChat's own tooltip for what lies under the pointer appears.
+            Zone::SheetHint => r(-300.0, 268.0, 300.0, 302.0),
             // N4N0's pages' own shape, 704 wide.
             Zone::Takeover => r(-352.0, -196.0, 352.0, 200.0),
             _ => unreachable!("the rings' cells return above"),

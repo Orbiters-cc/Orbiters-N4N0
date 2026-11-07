@@ -602,6 +602,7 @@ pub struct Panels {
     bloom: Bloom,
     /// Where the sheet's back and its page go.
     pub back_place: Option<Placed>,
+    pub hint_place: Option<Placed>,
     pub takeover_place: Option<Placed>,
     /// On the desktop's search page the on-screen keyboard was asked for.
     show_keys: bool,
@@ -650,6 +651,7 @@ impl Panels {
             started: Instant::now(),
             bloom: Bloom::default(),
             back_place: None,
+            hint_place: None,
             takeover_place: None,
             show_keys: false,
             reported: None,
@@ -717,7 +719,9 @@ impl Panels {
         // Opened from the wheel, the sheet is all that shows: its cut-off cells would stick out from under it.
         let places: Vec<Placed> = if self.takeover.is_some() && around == Some(Around::Wheel) { Vec::new() } else { places };
         let back = self.takeover.is_some().then_some(self.back_place).flatten();
-        let places: Vec<Placed> = places.into_iter().chain(back).collect();
+        // On the desktop VRChat lights what lies under the pointer, sheet or no sheet. Where the wing leaves the row under its tabs free.
+        let band = self.hint_place.filter(|_| back.is_some() && around == Some(Around::QuickMenu) && self.facts.desktop && !places.iter().any(|p| p.zone == Zone::QmStrip));
+        let places: Vec<Placed> = places.into_iter().chain(back).chain(band).collect();
         // Moved or another size: the parts of a size stay as they are, those changed are made anew.
         let unchanged = self.list.len() == places.len() && self.list.iter().zip(&places).all(|(a, b)| a.placed == *b);
         if !unchanged {
@@ -788,7 +792,7 @@ impl Panels {
         self.takeover = None;
         self.facts.sheet = None;
         self.facts.sheet_title.clear();
-        self.list.retain(|p| p.zone != Zone::SheetBack);
+        self.list.retain(|p| !matches!(p.zone, Zone::SheetBack | Zone::SheetHint));
         for panel in &mut self.list {
             panel.dirty = true;
         }
@@ -1252,6 +1256,11 @@ impl Panels {
             }
         }
         let _ = was;
+        // VRChat reacts to where the pointer is only while it is on what hides it.
+        let on_parts = on.is_some();
+        for panel in self.list.iter_mut().filter(|p| p.zone == Zone::SheetHint) {
+            panel.shown = on_parts;
+        }
         // The caption says what is pointed at.
         let pointed = self.list.iter().find_map(|p| p.hover.and_then(|i| p.items.get(i)).map(|item| item.action)).or_else(|| self.takeover.as_ref().filter(|_| matches!(sheet, Some(Sheet::All | Sheet::Pictures))).and_then(|p| p.hover.and_then(|i| p.items.get(i)).map(|item| item.action)));
         if pointed != self.facts.pointed {
@@ -1792,6 +1801,17 @@ fn flight_words(error: Option<&str>) -> (String, String) {
     }
 }
 
+/// When a visit was, so that two are told apart: the day and time this week, the date before that.
+fn day_and_time(at: u64, now: u64) -> String {
+    let offset = time::UtcOffset::current_local_offset().unwrap_or(time::UtcOffset::UTC);
+    let Ok(then) = time::OffsetDateTime::from_unix_timestamp(at as i64) else { return String::new() };
+    let then = then.to_offset(offset);
+    if now.saturating_sub(at) >= 6 * 86_400 {
+        return format!("{} {}", then.day(), &then.month().to_string()[..3]);
+    }
+    format!("{} {:02}:{:02}", &then.weekday().to_string()[..3], then.hour(), then.minute())
+}
+
 /// Where the person was, as the Instances sheet shows it: a row for each world, its last time first. `rows` come the newest first.
 fn visited_worlds(rows: &[orbiters_n4n0_core::menu::InstanceRow], now: u64, pictures: &HashMap<String, egui::TextureId>) -> Vec<panels::WorldVisit> {
     let mut worlds: Vec<panels::WorldVisit> = Vec::new();
@@ -1799,13 +1819,13 @@ fn visited_worlds(rows: &[orbiters_n4n0_core::menu::InstanceRow], now: u64, pict
         let id = row.location.split(':').next().unwrap_or_default();
         let when = ago(now.saturating_sub(row.at));
         match worlds.iter_mut().find(|w| w.world_id == id) {
-            Some(world) => world.earlier.push((row.location.clone(), when)),
+            Some(world) => world.earlier.push((row.location.clone(), day_and_time(row.at, now))),
             None => {
-                let region = row.region().map_or(String::new(), |r| format!(", {r}"));
+                let region = row.region().map_or(String::new(), |r| format!(" \u{b7} {r}"));
                 worlds.push(panels::WorldVisit {
                     world_id: id.to_string(),
                     name: if row.world.is_empty() { "A world".to_string() } else { row.world.clone() },
-                    line: format!("{}{region}, {when}", row.kind()),
+                    line: format!("{when}{region} \u{b7} {}", row.kind()),
                     location: row.location.clone(),
                     earlier: Vec::new(),
                     picture: pictures.get(id).copied(),

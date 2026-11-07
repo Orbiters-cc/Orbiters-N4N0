@@ -19,7 +19,7 @@ pub mod catalog;
 pub mod small_hint;
 
 /// How much of a hole's width a capture lying in it fills: its top and foot are cut by the hole, as captures are wider than tall.
-pub const SMALL_FILLS_HOLE: f32 = 0.8;
+pub const SMALL_FILLS_HOLE: f32 = 0.98;
 mod diagnostics;
 pub mod finder;
 #[cfg(windows)]
@@ -173,7 +173,12 @@ pub struct Worlds {
     /// What says how to handle what shows small; it has been used; a new opening of the menu asks it back for the next capture.
     hint: Option<small_hint::SmallHint>,
     backdrop: Option<small_hint::Backdrop>,
+    hide_chip: Option<small_hint::HideChip>,
     small_place: Option<(vr::Matrix34, f32)>,
+    /// Where each hand's tool is and which way it points, and its trigger, now and a turn ago.
+    small_rays: [Option<([f32; 3], [f32; 3])>; 2],
+    small_triggers: [bool; 2],
+    small_triggers_were: [bool; 2],
     hint_used: bool,
     hint_again: bool,
 }
@@ -267,6 +272,10 @@ impl Worlds {
             alone: false,
             key: key.to_string(),
             hint: None,
+            hide_chip: None,
+            small_rays: [None; 2],
+            small_triggers: [false; 2],
+            small_triggers_were: [false; 2],
             backdrop: None,
             small_place: None,
             hint_used: false,
@@ -334,6 +343,10 @@ impl Worlds {
             alone: true,
             key: String::new(),
             hint: None,
+            hide_chip: None,
+            small_rays: [None; 2],
+            small_triggers: [false; 2],
+            small_triggers_were: [false; 2],
             backdrop: None,
             small_place: None,
             hint_used: false,
@@ -495,6 +508,9 @@ impl Worlds {
         }
         if let Some(backdrop) = self.backdrop.take() {
             backdrop.destroy(overlay);
+        }
+        if let Some(chip) = self.hide_chip.take() {
+            chip.destroy(overlay);
         }
         let _ = overlay.destroy(self.chip);
         let _ = overlay.destroy(self.bar);
@@ -678,7 +694,10 @@ impl Worlds {
             backdrop.update(overlay, presenter, pane);
         }
         let wanted = small.filter(|s| !self.hint_used && !s.docked).map(|s| {
-            let stage = if s.held() { small_hint::Stage::Stick } else { small_hint::Stage::Grip { near: s.near } };
+            let stage = match s.held_by() {
+                Some(hand) => small_hint::Stage::Stick { hand },
+                None => small_hint::Stage::Grip { near: s.near },
+            };
             (stage, s.anchor, s.radius())
         });
         if self.hint.is_none() {
@@ -696,6 +715,36 @@ impl Worlds {
         if let Some(hint) = self.hint.as_mut() {
             hint.update(overlay, presenter, &view::head_pose(steamvr, 0.0), wanted, !snap.settings.reduce_motion);
         }
+    }
+
+    /// What is out of a panel can go where it is: a Hide under it, for a laser or a hand, with no menu to reopen.
+    fn update_hide_chip(&mut self, overlay: &vr::Overlay, steamvr: &vr::Client, presenter: &mut Presenter) {
+        let small = self.view.small_now().copied().filter(|s| s.taken && !s.docked);
+        let eye = stereo::position(&view::head_pose(steamvr, 0.0));
+        let wanted = small.map(|s| {
+            let place = small_hint::chip_place(s.anchor, s.radius(), eye);
+            // The hand holding it does not press what lies under it.
+            let holding = s.held_by();
+            let pointed = (0..2).any(|h| Some(h) != holding && self.small_rays[h].is_some_and(|(tip, along)| small_hint::on_chip(&place, tip, along)));
+            let pressed = (0..2).any(|h| Some(h) != holding && self.small_triggers[h] && !self.small_triggers_were[h] && self.small_rays[h].is_some_and(|(tip, along)| small_hint::on_chip(&place, tip, along)));
+            (place, pointed, pressed)
+        });
+        self.small_triggers_were = self.small_triggers;
+        if wanted.is_some() && self.hide_chip.is_none() {
+            self.hide_chip = small_hint::HideChip::new(overlay, &self.key).map_err(|e| eprintln!("{e:#}")).ok();
+        }
+        if let Some(chip) = self.hide_chip.as_mut() {
+            chip.update(overlay, presenter, wanted.map(|(place, pointed, _)| (place, pointed)));
+        }
+        if wanted.is_some_and(|(_, _, pressed)| pressed) {
+            self.deferred.push(Action::Hide);
+        }
+    }
+
+    /// The tools of the hands for a view's Hide: where each is, which way it points, and its trigger.
+    pub fn small_tools(&mut self, hands: [Option<vr::Matrix34>; 2], triggers: [bool; 2]) {
+        self.small_rays = hands.map(|h| h.map(|m| (stereo::position(&m), stereo::scale(stereo::axis(&m, 2), -1.0))));
+        self.small_triggers = triggers;
     }
 
     /// Where in the panel what shows small lies, when it may.
@@ -869,6 +918,7 @@ impl Worlds {
         self.finish_download(overlay, steamvr);
         self.view.update(overlay, steamvr);
         self.update_hint(overlay, steamvr, presenter, snap);
+        self.update_hide_chip(overlay, steamvr, presenter);
         if self.current.is_some() && self.download.is_none() && !self.view.active() {
             // Hidden (or failed): nothing is current any more.
             self.current = None;

@@ -428,7 +428,7 @@ pub fn find() -> Option<Blender> {
 /// Opens `blend` in Blender ([`find`]), else with whatever the shell opens .blend files with. What opened it, to
 /// tell the person.
 pub fn open(blend: &Path) -> anyhow::Result<String> {
-    anyhow::ensure!(blend.is_file(), "{} is not there anymore.", blend.display());
+    anyhow::ensure!(blend.is_file(), "{}", tr!("{path} is not there anymore.", path = blend.display()));
     #[cfg(target_os = "macos")]
     {
         if let Some(b) = find() {
@@ -437,7 +437,7 @@ pub fn open(blend: &Path) -> anyhow::Result<String> {
             }
         }
         let answer = crate::mac::open_command().arg(blend).output()?;
-        anyhow::ensure!(answer.status.success(), "No program here opens .blend files. Install Blender from blender.org.");
+        anyhow::ensure!(answer.status.success(), "{}", tr("No program here opens .blend files. Install Blender from blender.org."));
         Ok(tr("the program .blend files open with").into())
     }
     #[cfg(not(target_os = "macos"))]

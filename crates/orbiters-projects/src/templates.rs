@@ -107,7 +107,8 @@ pub fn builtins(cache: &Path) -> anyhow::Result<Vec<Template>> {
             banner: None,
         });
     }
-    let avatar = out.iter().find(|t| t.name == "VRChat Avatar Project").context("Bundled avatar template is missing")?;
+    // Found by its id: its name is translated, so it is the one thing that cannot be compared.
+    let avatar = out.iter().find(|t| t.id == "com.vrchat.template.avatar").with_context(|| tr("Bundled avatar template is missing"))?;
     let path = cache.join("base-2022.3.22f1");
     if !path.join("ProjectSettings/ProjectVersion.txt").is_file() {
         copy(&avatar.path, &path, &AtomicBool::new(false), &Arc::new(Mutex::default()))?;
@@ -134,7 +135,10 @@ pub fn validate_name(name: &str) -> anyhow::Result<()> {
         || ["COM", "LPT"].iter().any(|s| stem.strip_prefix(s).is_some_and(|v| v.len() == 1 && v.chars().all(|c| c.is_ascii_digit())))
     {
         // Projects travel: the rule is Windows' on every computer, though only there is it the system's own.
-        bail!(if cfg!(windows) { "Choose a valid Windows folder name." } else { "Choose a folder name that also works on Windows: none of < > : \" / \\ | ? *, no space or dot at its end, not CON or NUL." });
+        if cfg!(windows) {
+            bail!("{}", tr("Choose a valid Windows folder name."));
+        }
+        bail!("{}", tr("Choose a folder name that also works on Windows: none of < > : \" / \\ | ? *, no space or dot at its end, not CON or NUL."));
     }
     Ok(())
 }
@@ -171,16 +175,16 @@ pub fn copy(source: &Path, destination: &Path, cancel: &AtomicBool, progress: &S
 /// [`copy`], taking along what `keep` asks for.
 pub fn copy_keeping(source: &Path, destination: &Path, keep: Keep, cancel: &AtomicBool, progress: &SharedProgress) -> anyhow::Result<()> {
     if !source.is_dir() {
-        bail!("The source folder no longer exists.");
+        bail!("{}", tr("The source folder no longer exists."));
     }
     let source = std::fs::canonicalize(source)?;
-    let parent = destination.parent().context("Choose a destination folder")?;
+    let parent = destination.parent().with_context(|| tr("Choose a destination folder"))?;
     std::fs::create_dir_all(parent)?;
     let parent = std::fs::canonicalize(parent)?;
     if parent.starts_with(&source) {
-        bail!("Create the copy outside the source project.");
+        bail!("{}", tr("Create the copy outside the source project."));
     }
-    anyhow::ensure!(!destination.exists(), "The destination already exists; choose a new project name.");
+    anyhow::ensure!(!destination.exists(), "{}", tr("The destination already exists; choose a new project name."));
     let mut files = vec![];
     for entry in walkdir::WalkDir::new(&source)
         .follow_links(true)
@@ -190,18 +194,18 @@ pub fn copy_keeping(source: &Path, destination: &Path, keep: Keep, cancel: &Atom
         })
     {
         if cancel.load(Ordering::Relaxed) {
-            bail!("Copy cancelled. The incomplete folder was kept at {} and was not registered.", destination.display());
+            bail!("{}", tr!("Copy cancelled. The incomplete folder was kept at {path} and was not registered.", path = destination.display()));
         }
         let e = entry?;
         if e.file_type().is_file() {
             files.push(e.path().to_path_buf());
         }
     }
-    std::fs::create_dir(destination).context("The destination already exists or cannot be created; choose a new project name.")?;
+    std::fs::create_dir(destination).with_context(|| tr("The destination already exists or cannot be created; choose a new project name."))?;
     progress.lock().unwrap().total = files.len();
     for (i, p) in files.iter().enumerate() {
         if cancel.load(Ordering::Relaxed) {
-            bail!("Copy cancelled. The incomplete folder was kept at {} and was not registered.", destination.display());
+            bail!("{}", tr!("Copy cancelled. The incomplete folder was kept at {path} and was not registered.", path = destination.display()));
         }
         let rel = p.strip_prefix(&source)?;
         let dst = destination.join(rel);
@@ -211,13 +215,13 @@ pub fn copy_keeping(source: &Path, destination: &Path, keep: Keep, cancel: &Atom
         let mut buffer = vec![0u8; 1024 * 1024];
         loop {
             if cancel.load(Ordering::Relaxed) {
-                bail!("Copy cancelled. The incomplete folder was kept at {} and was not registered.", destination.display());
+                bail!("{}", tr!("Copy cancelled. The incomplete folder was kept at {path} and was not registered.", path = destination.display()));
             }
             let n = input.read(&mut buffer)?;
             if n == 0 {
                 break;
             }
-            output.write_all(&buffer[..n]).with_context(|| format!("Could not copy {}", rel.display()))?;
+            output.write_all(&buffer[..n]).with_context(|| tr!("Could not copy {path}", path = rel.display()))?;
         }
         // A new file is not executable here, and a copy must be usable: a package's tools, a plugin's programs.
         #[cfg(unix)]
@@ -281,18 +285,22 @@ async fn make(
 ) -> anyhow::Result<PathBuf> {
     validate_name(name)?;
     if !parent.is_absolute() {
-        bail!("Choose an absolute destination folder.");
+        bail!("{}", tr("Choose an absolute destination folder."));
     }
     let destination = parent.join(name);
     let required = duplication_bytes(source, copy.unwrap_or_default())?;
-    let free = crate::size::free_space(parent).context("Cannot check available disk space. Choose an accessible destination.")?;
-    anyhow::ensure!(free >= required, "Not enough disk space: free at least {} more bytes before duplicating.", required.saturating_sub(free));
+    let free = crate::size::free_space(parent).with_context(|| tr("Cannot check available disk space. Choose an accessible destination."))?;
+    anyhow::ensure!(
+        free >= required,
+        "{}",
+        tr!("Not enough disk space: free at least {bytes} more bytes before duplicating.", bytes = required.saturating_sub(free))
+    );
     copy_keeping(source, &destination, copy.unwrap_or_default(), cancel, progress)?;
     if copy.is_some() { copy_local_packages(source, &destination, cancel, progress)?; }
     let version = destination.join("ProjectSettings/ProjectVersion.txt");
     if !version.is_file() {
         if vrc_get_vpm::version::UnityVersion::parse(unity).is_none() {
-            bail!("Choose a Unity editor version. The copied folder is at {}.", destination.display());
+            bail!("{}", tr!("Choose a Unity editor version. The copied folder is at {path}.", path = destination.display()));
         }
         std::fs::create_dir_all(version.parent().unwrap())?;
         std::fs::write(version, format!("m_EditorVersion: {unity}\n"))?;
@@ -305,18 +313,18 @@ async fn make(
         std::fs::write(&path, retarget(&s, name, from.as_deref()))?;
     }
     if cancel.load(Ordering::Relaxed) {
-        bail!("Cancelled before resolving. The folder was kept and was not registered.");
+        bail!("{}", tr("Cancelled before resolving. The folder was kept and was not registered."));
     }
     // Register the completed copy before any optional restoration: a retained project must remain discoverable.
     progress.lock().unwrap().phase = mark("Registering project").into();
     crate::vpm::register(root, &destination, true).await
-        .with_context(|| format!("The copy is at {}, but registration failed", destination.display()))?;
+        .with_context(|| tr!("The copy is at {path}, but registration failed", path = destination.display()))?;
     // Duplication preserves installed package contents and exact locked versions, including packages whose
     // repositories are no longer available. Resolution is needed only for genuinely missing packages/templates.
     if copy.is_none() || !installed_dependencies_complete(&destination)? {
         progress.lock().unwrap().phase = mark("Restoring missing packages").into();
         crate::vpm::change(root, &destination, crate::vpm::Change::Resolve).await
-            .with_context(|| format!("The copy is listed at {}, but missing packages could not be restored", destination.display()))?;
+            .with_context(|| tr!("The copy is listed at {path}, but missing packages could not be restored", path = destination.display()))?;
     }
     Ok(destination)
 }
@@ -355,9 +363,9 @@ fn copy_local_packages(source: &Path, destination: &Path, cancel: &AtomicBool, p
     if let Some(dependencies) = manifest["dependencies"].as_object_mut() {
         for (name, value) in dependencies {
             let Some(local) = value.as_str().and_then(|s| s.strip_prefix("file:")) else { continue };
-            anyhow::ensure!(!name.contains(['/', '\\']) && name != "..", "Invalid package name: {name}");
+            anyhow::ensure!(!name.contains(['/', '\\']) && name != "..", "{}", tr!("Invalid package name: {name}", name = name));
             let origin = source.join("Packages").join(local).canonicalize()
-                .with_context(|| format!("Required local package {name} is unavailable"))?;
+                .with_context(|| tr!("Required local package {name} is unavailable", name = name))?;
             let target = destination.join("Packages").join(name);
             if origin.is_dir() {
                 if !target.exists() { copy_keeping(&origin, &target, Keep::default(), cancel, progress)?; }
@@ -384,7 +392,7 @@ fn installed_dependencies_complete(project: &Path) -> anyhow::Result<bool> {
         if dependencies.keys().any(|name| !locked.is_some_and(|l| l.contains_key(name))) { return Ok(false); }
     }
     for (name, package) in locked.into_iter().flatten() {
-        anyhow::ensure!(!name.contains(['/', '\\']) && name != "..", "Invalid package name: {name}");
+        anyhow::ensure!(!name.contains(['/', '\\']) && name != "..", "{}", tr!("Invalid package name: {name}", name = name));
         let installed = project.join("Packages").join(name).join("package.json");
         let Ok(bytes) = std::fs::read(installed) else { return Ok(false) };
         let installed: serde_json::Value = serde_json::from_slice(&bytes)?;
@@ -445,6 +453,34 @@ mod tests {
             });
             assert_eq!(ids, ["com.vrchat.template.avatar", "com.vrchat.template.world", "a", "z"], "{language:?}");
         }
+    }
+
+    #[test]
+    fn the_bundled_templates_are_found_in_every_language() {
+        // The avatar template used to be looked up by its (translated) name: in French it was "missing".
+        for language in orbiters_i18n::Language::TRANSLATED {
+            let temp = tempfile::tempdir().unwrap();
+            let found = orbiters_i18n::in_language(language, || builtins(temp.path()).map(|all| all.len()));
+            assert!(found.is_ok_and(|n| n >= 2), "{language:?}");
+        }
+    }
+
+    #[test]
+    fn an_error_is_said_in_the_language_of_the_moment_it_happens() {
+        use orbiters_i18n::{in_language, Language};
+        let english = validate_name("").unwrap_err().to_string();
+        let french = in_language(Language::Fr, || validate_name("").unwrap_err().to_string());
+        let japanese = in_language(Language::Ja, || validate_name("").unwrap_err().to_string());
+        assert_ne!(english, french);
+        assert_ne!(english, japanese);
+        assert!(japanese.contains("フォルダー"), "{japanese}");
+        // A value in the sentence stays: the path of a copy that was kept.
+        let cancel = AtomicBool::new(true);
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(temp.path().join("Source/Assets")).unwrap();
+        std::fs::write(temp.path().join("Source/Assets/a.txt"), "a").unwrap();
+        let said = in_language(Language::Es, || copy(&temp.path().join("Source"), &temp.path().join("Copy"), &cancel, &Arc::new(Mutex::default())).unwrap_err().to_string());
+        assert!(said.contains("Copia cancelada") && said.contains("Copy"), "{said}");
     }
 
     #[test]

@@ -86,7 +86,7 @@ pub fn measure(project: &Path, cancel: &AtomicBool) -> anyhow::Result<Size> {
 }
 
 fn measure_in(file: &Path, project: &Path, cancel: &AtomicBool, now: u64) -> anyhow::Result<Size> {
-    anyhow::ensure!(project.is_dir(), "The project's folder is missing.");
+    anyhow::ensure!(project.is_dir(), "The project's folder is missing."); // i18n: not shown (a project's size is a nicety: a failure only reaches the log, `project size …`)
     // Stamped before the walk: a change while it runs makes the answer stale, not the next one wrong.
     let stamp = stamp(project);
     let size = walk(project, cancel)?;
@@ -108,7 +108,7 @@ fn walk(project: &Path, cancel: &AtomicBool) -> anyhow::Result<Size> {
         .filter_entry(|e| e.depth() == 0 || !e.metadata().ok().is_some_and(|m| discovery::is_link(&m)));
     for entry in entries {
         if cancel.load(Ordering::Relaxed) {
-            anyhow::bail!("Cancelled");
+            anyhow::bail!("Cancelled"); // i18n: not shown (the walk was cancelled by the page itself, and its answer only reaches the log; nothing compares it)
         }
         // A file that went away or cannot be read while walking: left out.
         let Ok(e) = entry else { continue };

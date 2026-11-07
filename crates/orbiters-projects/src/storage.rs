@@ -281,7 +281,7 @@ pub fn preflight(project: &Path) -> anyhow::Result<Option<PathBuf>> {
         ..Health::default()
     };
     preflight_with(project, &health, |library, needed| {
-        let root = with_room(&destinations(library), needed).map(|(root, _)| root).context("No local disk has room for this project's Library.")?;
+        let root = with_room(&destinations(library), needed).map(|(root, _)| root).with_context(|| tr("No local disk has room for this project's Library."))?;
         remember_cache_root(&root)?;
         Ok(root)
     })
@@ -424,8 +424,8 @@ fn walk_library(library: &Path, progress: &SharedProgress, cancel: &AtomicBool) 
         if is_cancelled(cancel) {
             return Ok(None);
         }
-        let entry = entry.with_context(|| format!("Could not read {}", library.display()))?;
-        let meta = entry.metadata().with_context(|| format!("Could not read {}", entry.path().display()))?;
+        let entry = entry.with_context(|| tr!("Could not read {path}", path = library.display()))?;
+        let meta = entry.metadata().with_context(|| tr!("Could not read {path}", path = entry.path().display()))?;
         if crate::discovery::is_link(&meta) {
             return Ok(Some(Err(entry.path().to_path_buf())));
         }
@@ -513,7 +513,7 @@ pub fn repair(project: &Path, progress: &SharedProgress, cancel: &AtomicBool) ->
     #[cfg(not(any(windows, unix)))]
     {
         let _ = (project, progress, cancel);
-        bail!("Not enough space for Unity imports. Free at least 8 GB on the project's disk.");
+        bail!("{}", tr("Not enough space for Unity imports. Free at least 8 GB on the project's disk."));
     }
     #[cfg(any(windows, unix))]
     {
@@ -526,8 +526,13 @@ pub fn repair(project: &Path, progress: &SharedProgress, cancel: &AtomicBool) ->
         repair_with(project, progress, cancel, |library, needed| {
             let found = destinations(library);
             let root = with_room(&found, needed).map(|(root, _)| root).with_context(|| match found.iter().max_by_key(|(_, free)| *free) {
-                Some((root, free)) => format!("No local disk has room: the Library and Unity's imports need {needed} bytes; the most any other disk has is {free} bytes ({}).", root.display()),
-                None => "No other local disk was found to move the Library to.".to_string(),
+                Some((root, free)) => tr!(
+                    "No local disk has room: the Library and Unity's imports need {needed} bytes; the most any other disk has is {free} bytes ({disk}).",
+                    needed = needed,
+                    free = free,
+                    disk = root.display()
+                ),
+                None => tr("No other local disk was found to move the Library to.").to_string(),
             })?;
             remember_cache_root(&root)?;
             Ok(root)
@@ -538,17 +543,17 @@ pub fn repair(project: &Path, progress: &SharedProgress, cancel: &AtomicBool) ->
 /// [`repair`] with its destination given. `pick`: the cache folder for a Library needing `needed` bytes.
 #[cfg(any(windows, unix))]
 fn repair_with(project: &Path, progress: &SharedProgress, cancel: &AtomicBool, pick: impl FnOnce(&Path, u64) -> anyhow::Result<PathBuf>) -> anyhow::Result<RepairEnd> {
-    anyhow::ensure!(project.is_dir(), "The project's folder is missing: {}", project.display());
-    anyhow::ensure!(!crate::unity_open(project), "Unity has this project open. Quit its window, then choose Repair storage.");
+    anyhow::ensure!(project.is_dir(), "{}", tr!("The project's folder is missing: {path}", path = project.display()));
+    anyhow::ensure!(!crate::unity_open(project), "{}", tr("Unity has this project open. Quit its window, then choose Repair storage."));
     let project = project.canonicalize()?;
     let _lock = project_lock(&project)?;
     let library = project.join("Library");
     if std::fs::symlink_metadata(&library).is_ok_and(|m| crate::discovery::is_link(&m)) {
-        bail!("The project's Library is already redirected and its disk is full. Free space on that disk before retrying.");
+        bail!("{}", tr("The project's Library is already redirected and its disk is full. Free space on that disk before retrying."));
     }
     update(progress, |p| p.phase = Phase::Measuring);
     let Some(walked) = walk_library(&library, progress, cancel)? else { return Ok(RepairEnd::Cancelled { left: None }) };
-    let files = walked.map_err(|at| anyhow::anyhow!("Library contains a linked folder ({}); automatic relocation stopped without changing it.", at.display()))?;
+    let files = walked.map_err(|at| anyhow::anyhow!("{}", tr!("Library contains a linked folder ({path}); automatic relocation stopped without changing it.", path = at.display())))?;
     let bytes: u64 = files.iter().map(|(_, n)| *n).sum();
     // Checked again now, not only when the panel said what it would do: the disks may have filled since.
     let root = pick(&library, room_needed(bytes))?;
@@ -606,24 +611,27 @@ fn project_lock(project: &Path) -> anyhow::Result<std::fs::File> {
         .truncate(false)
         .share_mode(0)
         .open(project.join("Temp/UnityLockfile"))
-        .context("Close this project's Unity window before repairing storage")
+        .with_context(|| tr("Close this project's Unity window before repairing storage"))
 }
 
 /// The project's lock here is a lock on the same file, which also stops Unity if it takes one (`flock` and POSIX locks
 /// meet on the Mac). An editor that has the project open without one is looked for by its command line too.
 #[cfg(unix)]
 fn project_lock(project: &Path) -> anyhow::Result<std::fs::File> {
-    const HELD: &str = "Close this project's Unity window before repairing storage"; // i18n: not shown (a folder name; an error text, English until errors are decided; a macOS path part)
+    // What the person is told when something else holds the lock; asked for where it is told, so it follows the language of that moment.
+    fn held() -> &'static str {
+        tr("Close this project's Unity window before repairing storage")
+    }
     std::fs::create_dir_all(project.join("Temp"))?;
-    let file = std::fs::OpenOptions::new().write(true).create(true).truncate(false).open(project.join("Temp/UnityLockfile")).context(HELD)?;
+    let file = std::fs::OpenOptions::new().write(true).create(true).truncate(false).open(project.join("Temp/UnityLockfile")).with_context(held)?;
     match file.try_lock() {
         Ok(()) => {}
-        Err(std::fs::TryLockError::WouldBlock) => bail!(HELD),
+        Err(std::fs::TryLockError::WouldBlock) => bail!("{}", held()),
         // A file system that has no locks (exFAT): nobody can hold one there, Unity included.
         Err(std::fs::TryLockError::Error(e)) if e.kind() == std::io::ErrorKind::Unsupported || e.raw_os_error() == Some(libc::ENOTSUP) => {}
-        Err(std::fs::TryLockError::Error(e)) => return Err(e).context(HELD),
+        Err(std::fs::TryLockError::Error(e)) => return Err(e).with_context(held),
     }
-    anyhow::ensure!(crate::editor::of(&crate::editor::running(), project, false).is_none(), HELD);
+    anyhow::ensure!(crate::editor::of(&crate::editor::running(), project, false).is_none(), "{}", held());
     Ok(file)
 }
 
@@ -659,7 +667,7 @@ fn copy_and_check(from: &Path, to: &Path, buffers: &mut [Vec<u8>; 2], work: &Wor
     match same {
         None => return Ok(false),
         Some(true) => {}
-        Some(false) => bail!("A copied file differs from its original: {}", from.display()),
+        Some(false) => bail!("{}", tr!("A copied file differs from its original: {path}", path = from.display())),
     }
     // Here a new file is not executable either, and Library holds programs (Burst's compiler, in a package).
     if cfg!(unix) || meta.permissions().readonly() {
@@ -711,7 +719,7 @@ fn partial_note(left: &Option<PathBuf>) -> String {
 fn relocate(project: &Path, target: &Path, files: &[(PathBuf, u64)], work: &Work, link: impl FnOnce(&Path, &Path) -> std::io::Result<()>) -> anyhow::Result<RepairEnd> {
     let library = project.join("Library");
     let bytes: u64 = files.iter().map(|(_, n)| *n).sum();
-    anyhow::ensure!(!target.exists(), "Cache destination already exists");
+    anyhow::ensure!(!target.exists(), "{}", tr("Cache destination already exists"));
     // The record first: a kill at any moment after this leaves a cache that says which project it was for.
     crate::write_json(&target.with_extension("json"), &serde_json::json!({"project":project,"library":target}))?;
     std::fs::create_dir_all(target)?;
@@ -729,9 +737,9 @@ fn relocate(project: &Path, target: &Path, files: &[(PathBuf, u64)], work: &Work
         for (file, _) in files {
             let relative = file.strip_prefix(&library)?;
             let to = target.join(relative);
-            std::fs::create_dir_all(to.parent().context("A file without a folder")?)?;
+            std::fs::create_dir_all(to.parent().with_context(|| tr("A file without a folder"))?)?;
             update(work.progress, |p| p.file = relative.display().to_string());
-            if !copy_and_check(file, &to, &mut buffers, work).with_context(|| format!("Could not copy {}", relative.display()))? {
+            if !copy_and_check(file, &to, &mut buffers, work).with_context(|| tr!("Could not copy {path}", path = relative.display()))? {
                 return Ok(false);
             }
             update(work.progress, |p| p.files_done += 1);
@@ -743,7 +751,7 @@ fn relocate(project: &Path, target: &Path, files: &[(PathBuf, u64)], work: &Work
         Ok(false) => return Ok(RepairEnd::Cancelled { left: discard_copy(target, work) }),
         Err(error) => {
             let left = discard_copy(target, work);
-            return Err(error).with_context(|| format!("Library was not moved and stays where it is. {}", partial_note(&left)));
+            return Err(error).with_context(|| tr!("Library was not moved and stays where it is. {note}", note = partial_note(&left)));
         }
     }
     // The last moment Cancel can still leave everything as it was.
@@ -756,7 +764,7 @@ fn relocate(project: &Path, target: &Path, files: &[(PathBuf, u64)], work: &Work
     if had_library {
         if let Err(error) = std::fs::rename(&library, &backup) {
             let left = discard_copy(target, work);
-            return Err(error).with_context(|| format!("Something is using this project's Library, so it was not moved and stays where it is. {}", partial_note(&left)));
+            return Err(error).with_context(|| tr!("Something is using this project's Library, so it was not moved and stays where it is. {note}", note = partial_note(&left)));
         }
     }
     if let Err(error) = link(target, &library) {
@@ -765,14 +773,20 @@ fn relocate(project: &Path, target: &Path, files: &[(PathBuf, u64)], work: &Work
             remove_redirect(&library)?;
         }
         if library.exists() {
-            std::fs::remove_dir(&library).context("Could not remove an empty failed Library redirect")?;
+            std::fs::remove_dir(&library).with_context(|| tr("Could not remove an empty failed Library redirect"))?;
         }
         if had_library {
             // The copy stays when Library cannot come back: it is then the only complete one under that name.
-            std::fs::rename(&backup, &library).with_context(|| format!("Could not restore Library after a failed redirect. It is at {}, and a checked copy is at {}.", backup.display(), target.display()))?;
+            std::fs::rename(&backup, &library).with_context(|| {
+                tr!(
+                    "Could not restore Library after a failed redirect. It is at {backup}, and a checked copy is at {copy}.",
+                    backup = backup.display(),
+                    copy = target.display()
+                )
+            })?;
         }
         let left = discard_copy(target, work);
-        return Err(error).with_context(|| format!("Could not redirect Unity's cache, so Library stays where it is. {}", partial_note(&left)));
+        return Err(error).with_context(|| tr!("Could not redirect Unity's cache, so Library stays where it is. {note}", note = partial_note(&left)));
     }
     let mut old_left = None;
     if had_library {

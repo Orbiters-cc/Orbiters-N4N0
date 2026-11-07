@@ -2092,12 +2092,13 @@ fn shots(args: &[String], picture_folders: Vec<PathBuf>) -> anyhow::Result<()> {
     editor::append(&mut scenarios);
     projects_panel::append(&mut scenarios);
     gallery_layouts::append(&mut scenarios);
-    gallery_folders::append(&mut scenarios);
     gallery_assets::append(&mut scenarios);
     gallery_talk::append(&mut scenarios);
     floating::append(&mut scenarios);
     vr_audio::append(&mut scenarios);
     vrchat_bridge::append(&mut scenarios);
+    // Last: they read a picture folder on another drive, and what comes after them can wait on a slow or failing one.
+    gallery_folders::append(&mut scenarios);
 
     // Home's music is the overlay's sample song, never what this computer plays.
     crate::media::watcher().stand_in(crate::media::Reading {

@@ -5,7 +5,7 @@
 //! which reads the same server. Uploads run in the tray service (they go on when the window closes) and come back in
 //! its snapshot, as on the Visited worlds page. Each world's Blender files follow it ([`super::blend`]).
 
-use orbiters_i18n::{tr, tr_n};
+use orbiters_i18n::{mark, tr, tr_n};
 use super::art;
 use super::state::State;
 use crate::pages::{Cx, Job};
@@ -168,7 +168,7 @@ fn row(ui: &mut Ui, cx: &mut Cx, state: &mut State, project: &Project, w: &Avata
     }
     let url = vrchat_page(&w.id);
     state.anchors.insert(format!("world-vrchat-{i}"), link);
-    let open = IconButton::new(icons::ARROW_SQUARE_OUT, tr("Open on VRChat")).size(32.0, 15.0).backdrop(theme::control()).id_salt(("world-vrchat", &w.id));
+    let open = IconButton::new(icons::ARROW_SQUARE_OUT, mark("Open on VRChat")).size(32.0, 15.0).backdrop(theme::control()).id_salt(("world-vrchat", &w.id));
     if widgets::activated(&open.show_at(ui, link).on_hover_text(&url)) {
         if let Err(e) = crate::controller::open_url(&url) {
             cx.toasts.push(&ctx, orbiters_ui::toast::Kind::Error, tr!("The page could not open: {error}", error = e));

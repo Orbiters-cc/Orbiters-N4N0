@@ -1220,7 +1220,7 @@ impl Window {
                     }
                 }
                 _ => {
-                    let b = widgets::IconButton::new(icons::ARROW_SQUARE_OUT, tr("Open on Orbiters"))
+                    let b = widgets::IconButton::new(icons::ARROW_SQUARE_OUT, mark("Open on Orbiters"))
                         .size(40.0, 17.0)
                         .backdrop(theme::control())
                         .id_salt(wid.with("website"));

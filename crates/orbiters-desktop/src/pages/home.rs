@@ -798,7 +798,7 @@ fn call(ui: &mut Ui, cx: &Cx, menu: &Menu, acts: &mut Vec<Act>) {
         return;
     }
     if !menu.calls_ready {
-        return note_card(ui, cx, 1, icons::PHONE, tr("Calls are not available"), &menu.call_note);
+        return note_card(ui, cx, 1, icons::PHONE, tr("Calls are not available"), tr(&menu.call_note));
     }
     if menu.contacts.is_empty() {
         return note_card(ui, cx, 1, icons::USERS, tr("No friend online"), tr("Friends who can take a call show here as soon as they are online."));
@@ -829,7 +829,7 @@ fn call(ui: &mut Ui, cx: &Cx, menu: &Menu, acts: &mut Vec<Act>) {
 
 fn photo(ui: &mut Ui, cx: &Cx, menu: &Menu, blocked: Option<&str>, acts: &mut Vec<Act>) {
     // What stopped the last picture ("Open the camera before") shows by the buttons, plainly.
-    let warning = menu.notice.as_deref().filter(|_| menu.countdown.is_none());
+    let warning = menu.notice.as_deref().filter(|_| menu.countdown.is_none()).map(tr);
     let sub = match menu.countdown {
         Some(n) => tr!("Starting in {n}… hold still", n = n),
         None => tr("VRChat's camera flies, then comes back where it was").to_string(),
@@ -1181,7 +1181,7 @@ fn qr(ui: &mut Ui, cx: &Cx, menu: &Menu, acts: &mut Vec<Act>) {
     let policy = tr("Only http and https links open, each once while it stays before the camera");
     let notice = menu.notice.clone();
     m.add(2, |ui| {
-        section(ui, cx, 2, icons::LINK_SIMPLE, tr("Last link opened"), Some(notice.as_deref().unwrap_or(policy)), |ui| {
+        section(ui, cx, 2, icons::LINK_SIMPLE, tr("Last link opened"), Some(notice.as_deref().map_or(policy, tr)), |ui| {
             widgets::field(ui, &shown, None, 260.0, |ui| {
                 if Button::new(tr("Open again")).icon(icons::ARROW_SQUARE_OUT).variant(Variant::Secondary).enabled(link.is_some()).show(ui).clicked() {
                     acts.push(Act::Press(Target::QrOpen));

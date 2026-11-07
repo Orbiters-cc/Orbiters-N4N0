@@ -33,3 +33,5 @@ Midnight Rooftop
 Kiyo
 Cozy Cabin
 A rooftop over a city that never sleeps: neon, rain, a jukebox and a view over the bay. Best at night with friends.
+# A number and its unit, the same in all four languages.
+{} fps

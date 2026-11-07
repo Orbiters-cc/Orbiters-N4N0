@@ -914,7 +914,7 @@ fn video_row(ui: &mut Ui, r: Rect, row: &Row, texture: Option<TextureId>, held: 
     }
     let open_r = Rect::from_min_size(pos2(bookmark_r.right() + 4.0, bookmark_r.top()), vec2(36.0, 36.0));
     if video_history::openable(&row.url) {
-        if IconButton::new(icons::ARROW_SQUARE_OUT, tr("Open in the browser")).id_salt(("videos-open", &row.url)).show_at(ui, open_r).clicked() {
+        if IconButton::new(icons::ARROW_SQUARE_OUT, mark("Open in the browser")).id_salt(("videos-open", &row.url)).show_at(ui, open_r).clicked() {
             act = Some(Act::Open(row.url.clone()));
         }
     } else {

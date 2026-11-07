@@ -7,6 +7,7 @@
 //! channel once YouTube's oEmbed gave them. The window reads that file and keeps the bookmark lists ([`Bookmarks`],
 //! `video-bookmarks.json`), which nothing else changes. Nothing here needs a VRChat account.
 
+use orbiters_i18n::tr;
 use crate::vrchat_log::LogEvent;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
@@ -459,10 +460,12 @@ impl Bookmarks {
     pub fn create(&mut self, name: &str) -> String {
         let mut name = list_name(name);
         if name.is_empty() {
-            name = if self.lists.iter().any(|l| l.name == "Favourites") { // i18n: not shown (the name of a list is saved, and a later call compares it: it stays what it was made with)
-                (2..).map(|n| format!("List {n}")).find(|n| !self.lists.iter().any(|l| l.name == *n)).unwrap_or_default() // i18n: not shown (the name of a list is saved, and a later call compares it: it stays what it was made with)
+            // Named in the language now and saved so: a name stays what it was when it was made, as one typed does. So the first list made in another language counts too.
+            let first = tr("Favourites");
+            name = if self.lists.iter().any(|l| l.name == first || l.name == "Favourites") { // i18n: not shown (a list made in English)
+                (2..).map(|n| tr!("List {number}", number = n)).find(|n| !self.lists.iter().any(|l| l.name == *n)).unwrap_or_default()
             } else {
-                "Favourites".into() // i18n: not shown (the name of a list is saved, and a later call compares it: it stays what it was made with)
+                first.into()
             };
         }
         let id = loop {

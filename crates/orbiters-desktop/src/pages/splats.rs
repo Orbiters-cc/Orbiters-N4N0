@@ -27,7 +27,7 @@ use eframe::egui_wgpu::{self, wgpu};
 use egui::{pos2, vec2, Align2, Color32, Id, Rect, Sense, Ui, UiBuilder, Vec2};
 use orbiters_core::reconstruction;
 use orbiters_core::settings::ViewGpu;
-use orbiters_i18n::{tr, tr_ctx};
+use orbiters_i18n::{mark, tr, tr_ctx};
 use orbiters_reconstruct::camera::{normalize, Camera};
 use orbiters_reconstruct::gaussians::Gaussians;
 use orbiters_reconstruct::gpu::{Confidence, ConfidenceMode, DepthOfField, FarField, FarMode, Gpu, Target};
@@ -451,7 +451,7 @@ impl Viewer {
         }
         self.problem_chip(ui, &p, rect, title_r);
         let close_r = Rect::from_min_size(pos2(bar.right() - 44.0, bar.top()), vec2(44.0, 44.0));
-        if IconButton::new(icons::X, tr("Close the 3D view")).size(44.0, 18.0).backdrop(theme::black(0.55)).show_at(ui, close_r).clicked() {
+        if IconButton::new(icons::X, mark("Close the 3D view")).size(44.0, 18.0).backdrop(theme::black(0.55)).show_at(ui, close_r).clicked() {
             open = false;
         }
         if let Some(l) = self.loaded.as_ref() {
@@ -786,7 +786,7 @@ impl Viewer {
                 (b.show_at(ui, r).clicked(), r)
             } else {
                 let r = Rect::from_min_size(pos2(x, edit_r.top()), vec2(40.0, 40.0));
-                let icon = IconButton::new(icons::UPLOAD_SIMPLE, tr("Export…")).size(40.0, 17.0).backdrop(theme::black(0.55)).id_salt("splat-export-icon");
+                let icon = IconButton::new(icons::UPLOAD_SIMPLE, mark("Export…")).size(40.0, 17.0).backdrop(theme::black(0.55)).id_salt("splat-export-icon");
                 // Dimmed and deaf while it waits, as the whole button is.
                 let mut iu = ui.new_child(UiBuilder::new().max_rect(r).id_salt("splat-export-icon"));
                 if !ok {
@@ -831,7 +831,7 @@ impl Viewer {
             }
         }
         let close = Rect::from_center_size(pos2(chip_r.right() - 24.0, chip_r.center().y), vec2(28.0, 28.0));
-        if IconButton::new(icons::X, tr("Dismiss")).size(28.0, 14.0).id_salt("splat-saved-dismiss").show_at(ui, close).clicked() {
+        if IconButton::new(icons::X, mark("Dismiss")).size(28.0, 14.0).id_salt("splat-saved-dismiss").show_at(ui, close).clicked() {
             self.saved = None;
             self.still_error = None;
         }

@@ -3,7 +3,7 @@
 //! catalog, the person's repositories turned off, Orbiters listings), shows which repository will be added for which
 //! package (and the packages nobody provides, or not at the version needed) and, confirmed, adds them and runs the
 //! change that failed again; the card goes once it succeeds.
-use orbiters_i18n::tr;
+use orbiters_i18n::{mark, tr};
 use super::state::{Modal, Outcome, State};
 use crate::pages::Job;
 use egui::{pos2, vec2, Align2, Id, Rect, Sense, Shape, Ui, UiBuilder};
@@ -139,7 +139,7 @@ pub(super) fn show(ui: &mut Ui, state: &mut State, salt: &str) -> bool {
     widgets::icon(p, pos2(rect.left() + 24.0, rect.top() + 21.5), icons::WARNING, 16.0, theme::DANGER);
     let x = Rect::from_center_size(pos2(rect.right() - 22.0, rect.top() + 21.5), vec2(28.0, 28.0));
     let mut xu = ui.new_child(UiBuilder::new().max_rect(x).id_salt(("missing-dismiss", salt)));
-    if !retrying && widgets::activated(&IconButton::new(icons::X, tr("Dismiss")).size(28.0, 14.0).id_salt(("missing-x", salt)).show_at(&mut xu, x)) {
+    if !retrying && widgets::activated(&IconButton::new(icons::X, mark("Dismiss")).size(28.0, 14.0).id_salt(("missing-x", salt)).show_at(&mut xu, x)) {
         act = Some(Act::Dismiss);
     }
     ui.allocate_exact_size(vec2(w, h), Sense::hover());

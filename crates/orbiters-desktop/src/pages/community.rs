@@ -320,7 +320,7 @@ impl State {
         }
         let p = ui.painter().clone();
         let site = format!("{}gallery?tab=gallery-{gid}", if cx.snap.settings.development { Server::Development } else { Server::Production }.website());
-        let b = IconButton::new(icons::ARROW_SQUARE_OUT, tr("Open on Orbiters")).size(32.0, 15.0).backdrop(theme::control()).id_salt(("gallery-site", gid));
+        let b = IconButton::new(icons::ARROW_SQUARE_OUT, mark("Open on Orbiters")).size(32.0, 15.0).backdrop(theme::control()).id_salt(("gallery-site", gid));
         let br = Rect::from_min_size(pos2(r.right() - 32.0, r.top() + 6.0), vec2(32.0, 32.0));
         widgets::text_truncated(
             &p,
@@ -1214,7 +1214,7 @@ fn details(
     ] {
         let Some(url) = url else { continue };
         let br = Rect::from_min_size(pos2(bx - 36.0, row.top() + 4.0), vec2(36.0, 36.0));
-        if sharing::pressed(IconButton::new(glyph, tr(label)).size(36.0, 16.0).backdrop(theme::control()).id_salt(wid.with(label)).show_at(ui, br)) {
+        if sharing::pressed(IconButton::new(glyph, label).size(36.0, 16.0).backdrop(theme::control()).id_salt(wid.with(label)).show_at(ui, br)) {
             *open_url = Some(url);
         }
         bx -= 44.0;

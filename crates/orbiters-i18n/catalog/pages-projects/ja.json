@@ -64,7 +64,6 @@
   "Change the picture on VRChat": "VRChatの画像を変更",
   "Change the picture on VRChat…": "VRChatの画像を変更…",
   "Changing {package} to {version}…": "{package}を{version}に変更しています…",
-  "Checking required disk space?": "必要なディスク容量を確認中？",
   "Choose a Unity project…": "Unityプロジェクトを選択…",
   "Choose a folder": "フォルダーを選択",
   "Choose a location…": "場所を選択…",
@@ -541,5 +540,6 @@
   "{total} on disk in {files} files. Library takes {library} of it: Unity makes it again from the project when it is missing.": "ディスク上で{total}（{files}個のファイル）。うちLibraryが{library}で、なくなってもUnityがプロジェクトから作り直します。",
   "{total} · Library {library}": "{total} · Library {library}",
   "{version} · removed": "{version} · 削除",
-  "{v} is not a version": "{v}はバージョンとして正しくありません"
+  "{v} is not a version": "{v}はバージョンとして正しくありません",
+  "Checking required disk space…": "必要なディスク容量を確認中…"
 }

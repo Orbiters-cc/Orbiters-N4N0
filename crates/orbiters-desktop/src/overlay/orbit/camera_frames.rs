@@ -24,7 +24,7 @@ impl CameraWatch {
     pub fn start() -> Self {
         let (seen, stop) = (Arc::new(Mutex::new(None)), Arc::new(AtomicBool::new(false)));
         let (s, st) = (seen.clone(), stop.clone());
-        let _ = std::thread::Builder::new().name("camera panel".into()).spawn(move || run(&s, &st));
+        let _ = std::thread::Builder::new().name("camera panel".into()).spawn(move || run(&s, &st)); // i18n: not shown (a thread's name)
         Self { seen, stop }
     }
 

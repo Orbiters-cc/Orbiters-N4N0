@@ -1235,7 +1235,7 @@ impl Panels {
                 self.recents.keep(first.saturating_sub(36), last + 36);
                 let here: std::collections::HashSet<String> = self.recents.asked.iter().filter_map(|i| self.recents.loaded.get(*i)).filter(|r| r.image.is_some()).map(|r| r.key.to_string_lossy().to_string()).collect();
                 let art = self.art.as_ref().map(|a| a.0.clone());
-                let large = self.recents.big.as_ref().and_then(|b| if let crate::worlds::Picture::Shot { path, .. } = &b.0 { Some(format!("large {}", path.display())) } else { None });
+                let large = self.recents.big.as_ref().and_then(|b| if let crate::worlds::Picture::Shot { path, .. } = &b.0 { Some(format!("large {}", path.display())) } else { None }); // i18n: not shown (a key of the picture cache)
                 panel.pictures.retain(|k, _| here.contains(k) || art.as_ref() == Some(k) || large.as_ref() == Some(k));
             }
         }
@@ -1438,7 +1438,7 @@ impl Panels {
             digits: self.open == Some(Around::Wheel) && self.takeover.is_none() && (snap.n4n0.desktop_mode || !snap.steamvr.running),
             beside_wing: self.open == Some(Around::QuickMenu),
             worlds_visited: visited,
-            invite_said: matches!(self.facts.sheet, Some(Sheet::Instances | Sheet::Results)).then(|| menu.notice.clone()).flatten(),
+            invite_said: matches!(self.facts.sheet, Some(Sheet::Instances | Sheet::Results)).then(|| menu.notice.as_deref().map(|said| tr(said).to_string())).flatten(),
             note: self.facts.note.clone(),
             picture_wait: snap.n4n0.photo_wait,
             pointed: self.facts.pointed,
@@ -2103,7 +2103,7 @@ impl Panels {
                             }
                         }
                         if let Some((crate::worlds::Picture::Shot { path, .. }, Some(image))) = &self.recents.big {
-                            let name = format!("large {}", path.display());
+                            let name = format!("large {}", path.display()); // i18n: not shown (a key of the picture cache)
                             facts.opened_picture = Some(panel.pictures.entry(name).or_insert_with(|| ctx.load_texture("large", image.clone(), TextureOptions::LINEAR)).id());
                         }
                     }
@@ -2290,9 +2290,11 @@ fn day_and_time(at: u64, now: u64) -> String {
     let Ok(then) = time::OffsetDateTime::from_unix_timestamp(at as i64) else { return String::new() };
     let then = then.to_offset(offset);
     if now.saturating_sub(at) >= 6 * 86_400 {
-        return format!("{} {}", then.day(), &then.month().to_string()[..3]);
+        const MONTHS: [&str; 12] = [mark("Jan"), mark("Feb"), mark("Mar"), mark("Apr"), mark("May"), mark("Jun"), mark("Jul"), mark("Aug"), mark("Sep"), mark("Oct"), mark("Nov"), mark("Dec")];
+        return tr!("{day} {month}", day = then.day(), month = tr_ctx("month", MONTHS[then.month() as usize - 1]));
     }
-    format!("{} {:02}:{:02}", &then.weekday().to_string()[..3], then.hour(), then.minute())
+    const WEEKDAYS: [&str; 7] = [mark("Mon"), mark("Tue"), mark("Wed"), mark("Thu"), mark("Fri"), mark("Sat"), mark("Sun")];
+    tr!("{weekday} {time}", weekday = tr(WEEKDAYS[then.weekday().number_days_from_monday() as usize]), time = format!("{:02}:{:02}", then.hour(), then.minute()))
 }
 
 /// Where the person was, as the Instances sheet shows it: a row for each world, its last time first. `rows` come the newest first.

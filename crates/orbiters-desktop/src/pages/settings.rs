@@ -1097,11 +1097,7 @@ fn folder_field(ui: &mut Ui, label: &str, description: Option<&str>, value: &std
 
 /// The system's default microphone, as a choice among microphones (each system names its own).
 pub(super) fn default_mic() -> &'static str {
-    if cfg!(target_os = "macos") {
-        tr("System default")
-    } else {
-        tr("Windows default")
-    }
+    tr(crate::words::DEFAULT_MIC)
 }
 
 pub(super) fn source_chip(ui: &mut Ui, label: &str, active: bool) -> egui::Response {
@@ -1168,7 +1164,7 @@ fn orbit_settings(ui: &mut egui::Ui, snap: &Snapshot, orbit: &mut orbiters_core:
     let now = if !orbiters_core::osc::VRCHAT_RUNS_HERE {
         Some(tr("VRChat runs on another computer here, so nothing can appear around its menus.").to_string())
     } else if let Some(note) = &snap.orbit.note {
-        Some(note.clone())
+        Some(tr(note).to_string())
     } else if snap.vrchat.running {
         None
     } else {

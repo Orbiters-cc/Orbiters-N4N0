@@ -1063,7 +1063,7 @@ impl Dialog {
             let r = Rect::from_min_size(picture.max - vec2(16.0 + 32.0, 16.0 + 32.0), vec2(32.0, 32.0));
             let mut fu = ui.new_child(UiBuilder::new().max_rect(r).id_salt("capture-window-unfull"));
             fu.multiply_opacity(((full - 0.5) * 2.0).clamp(0.0, 1.0));
-            let resp = widgets::IconButton::new(icons::CORNERS_IN, tr("Back to its details")).size(32.0, 15.0).backdrop(theme::black(0.5)).show_at(&mut fu, r);
+            let resp = widgets::IconButton::new(icons::CORNERS_IN, mark("Back to its details")).size(32.0, 15.0).backdrop(theme::black(0.5)).show_at(&mut fu, r);
             if pressed(resp) {
                 *act = Some(Act::Full);
             }
@@ -1127,7 +1127,7 @@ impl Dialog {
         }
         if self.entry.is_picture() {
             let r = Rect::from_min_size(pos2(right - 32.0, bottom - 32.0), vec2(32.0, 32.0));
-            let resp = widgets::IconButton::new(icons::CORNERS_OUT, tr("See it whole")).size(32.0, 15.0).backdrop(theme::black(0.5)).show_at(ui, r);
+            let resp = widgets::IconButton::new(icons::CORNERS_OUT, mark("See it whole")).size(32.0, 15.0).backdrop(theme::black(0.5)).show_at(ui, r);
             if pressed(resp) {
                 *act = Some(Act::Full);
             }
@@ -1533,7 +1533,7 @@ impl Dialog {
     /// Going ahead with something flagged explicit, said plainly.
     fn warning_panel(&mut self, ui: &mut Ui, busy: bool, act: &mut Option<Act>) {
         let w = ui.available_width();
-        let warning = self.warning.clone().unwrap_or_default();
+        let warning = tr(self.warning.as_deref().unwrap_or_default()).to_string();
         let reasons: Vec<String> = self.entry.content.explicit_reasons.iter().map(|r| orbiters_core::explicit::reason_label(r)).collect();
         let inner = w - 32.0 - 52.0;
         let title = Txt::new(tr("Before you share publicly"), 14.5).weight(weight::SEMIBOLD);

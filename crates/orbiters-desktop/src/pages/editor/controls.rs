@@ -184,7 +184,7 @@ fn crop(ed: &mut Editor, ui: &mut Ui) {
     ];
     for (i, (glyph, label)) in buttons.iter().enumerate() {
         let r = Rect::from_min_size(pos2(row.left() + i as f32 * 48.0, row.top()), vec2(40.0, 40.0));
-        if widgets::activated(&IconButton::new(glyph, tr(label)).size(40.0, 18.0).backdrop(theme::white(0.05)).id_salt(("crop-turn", i)).show_at(ui, r)) {
+        if widgets::activated(&IconButton::new(glyph, label).size(40.0, 18.0).backdrop(theme::white(0.05)).id_salt(("crop-turn", i)).show_at(ui, r)) {
             match i {
                 0 | 1 => super::crop::turn(g, i == 0),
                 2 => super::crop::flip(g, true),
@@ -240,7 +240,7 @@ fn layer(ed: &mut Editor, ui: &mut Ui) {
     let acts = [(icons::ARROW_UP, mark("Move up")), (icons::ARROW_DOWN, mark("Move down")), (icons::COPY, mark("Duplicate")), (icons::TRASH, mark("Remove"))];
     for (i, (glyph, label)) in acts.iter().enumerate() {
         let r = Rect::from_min_size(pos2(row.left() + i as f32 * 44.0, row.top()), vec2(36.0, 36.0));
-        let mut b = IconButton::new(glyph, tr(label)).size(36.0, 16.0).backdrop(theme::white(0.05)).id_salt(("layer-act", i));
+        let mut b = IconButton::new(glyph, label).size(36.0, 16.0).backdrop(theme::white(0.05)).id_salt(("layer-act", i));
         if i == 3 {
             b = b.danger();
         }

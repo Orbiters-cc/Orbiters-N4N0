@@ -64,7 +64,6 @@
   "Change the picture on VRChat": "Changer la photo sur VRChat",
   "Change the picture on VRChat…": "Changer la photo sur VRChat…",
   "Changing {package} to {version}…": "Passage de {package} à {version}…",
-  "Checking required disk space?": "Vérification de l’espace disque nécessaire ?",
   "Choose a Unity project…": "Choisir un projet Unity…",
   "Choose a folder": "Choisir un dossier",
   "Choose a location…": "Choisir un emplacement…",
@@ -541,5 +540,6 @@
   "{total} on disk in {files} files. Library takes {library} of it: Unity makes it again from the project when it is missing.": "{total} sur le disque dans {files} fichiers. Library en prend {library} : Unity la recrée à partir du projet si elle manque.",
   "{total} · Library {library}": "{total} · Library {library}",
   "{version} · removed": "{version} · retiré",
-  "{v} is not a version": "{v} n’est pas une version"
+  "{v} is not a version": "{v} n’est pas une version",
+  "Checking required disk space…": "Vérification de l’espace disque nécessaire…"
 }

@@ -1,0 +1,2 @@
+# A number and its unit, the same in all four languages.
+{} fps

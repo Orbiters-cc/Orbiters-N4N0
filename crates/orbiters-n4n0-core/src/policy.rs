@@ -147,7 +147,7 @@ pub fn what(action: &Action, control: Option<&Control>) -> String {
     };
     let setting = |on: Option<bool>, value: Option<f32>| match (on, value) {
         (_, Some(v)) => format!(" at {v:.2}"),
-        (Some(false), None) => " off".to_string(),
+        (Some(false), None) => " off".to_string(), // i18n: not shown (what the AI reads)
         _ => " on".to_string(),
     };
     let nsfw = if control.is_some_and(|c| c.nsfw) { ", which the avatar's menu tags nsfw" } else { "" }; // i18n: not shown

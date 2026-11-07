@@ -1,13 +1,39 @@
 //! Number and time formatting shared by the interfaces.
 
-use orbiters_i18n::{mark, tr};
+use orbiters_i18n::{language, mark, tr, Language};
 
-/// Bytes in SI units, one decimal under ten: "8.2 MB", "82 MB".
+/// A decimal number as this language writes it: a comma in French, Spanish and Portuguese.
+fn decimal(number: String) -> String {
+    match language() {
+        Language::Fr | Language::Es | Language::PtBr => number.replace('.', ","),
+        Language::En | Language::Ja => number,
+    }
+}
+
+/// What groups thousands in this language. French's is a space that does not break.
+fn thousands() -> char {
+    match language() {
+        Language::Fr => '\u{a0}',
+        Language::Es | Language::PtBr => '.',
+        Language::En | Language::Ja => ',',
+    }
+}
+
+/// A percentage as this language writes it: with a space that does not break in French and Spanish.
+fn with_percent(number: String) -> String {
+    match language() {
+        Language::Fr | Language::Es => format!("{number}\u{a0}%"),
+        Language::En | Language::Ja | Language::PtBr => format!("{number}%"),
+    }
+}
+
+/// Bytes in SI units, one decimal under ten: "8.2 MB", "82 MB". French counts in octets: "8,2 Mo".
 pub fn bytes(n: f64) -> String {
     if !n.is_finite() {
         return "–".into();
     }
-    let units = ["B", "KB", "MB", "GB", "TB"];
+    let units = if language() == Language::Fr { ["o", "Ko", "Mo", "Go", "To"] } else { ["B", "KB", "MB", "GB", "TB"] };
+    let gap = if language() == Language::Fr { '\u{a0}' } else { ' ' };
     let sign = if n < 0.0 { "-" } else { "" };
     let mut v = n.abs();
     let mut i = 0;
@@ -16,7 +42,7 @@ pub fn bytes(n: f64) -> String {
         let digits = if i == 0 || v >= 9.95 { 0 } else { 1 };
         let shown = if digits == 0 { v.round() } else { (v * 10.0).round() / 10.0 };
         if shown < 1000.0 || i == units.len() - 1 {
-            return format!("{sign}{v:.digits$} {}", units[i]);
+            return format!("{sign}{}{gap}{}", decimal(format!("{v:.digits$}")), units[i]);
         }
         v /= 1000.0;
         i += 1;
@@ -37,7 +63,7 @@ pub fn duration(seconds: f64) -> String {
     }
 }
 
-/// Integer with thousands separators: "12,480".
+/// Integer with thousands separators: "12,480", as this language writes them ("12.480", and French's "12 480").
 pub fn integer(n: f64) -> String {
     if !n.is_finite() {
         return "0".into();
@@ -47,7 +73,7 @@ pub fn integer(n: f64) -> String {
     let mut out = String::new();
     for (i, ch) in digits.chars().enumerate() {
         if i > 0 && (digits.len() - i).is_multiple_of(3) {
-            out.push(',');
+            out.push(thousands());
         }
         out.push(ch);
     }
@@ -58,15 +84,15 @@ pub fn integer(n: f64) -> String {
     }
 }
 
-/// "92.5%", "100%" once complete: what is not complete never rounds up to it ("99.9%").
+/// "92.5%", "100%" once complete: what is not complete never rounds up to it ("99.9%"). As this language writes them: "92,5 %".
 pub fn percent(part: f64, total: f64) -> String {
     if total.is_nan() || total <= 0.0 || !part.is_finite() {
         return "–".into();
     }
     if part >= total {
-        return "100%".into();
+        return with_percent("100".into());
     }
-    format!("{:.1}%", (part / total * 100.0).min(99.9))
+    with_percent(decimal(format!("{:.1}", (part / total * 100.0).min(99.9))))
 }
 
 /// "just now", "5 min ago", "3 h ago", "2 d ago", then the date ("12 Oct 2026", UTC).
@@ -107,6 +133,16 @@ pub fn folder_name(path: &std::path::Path) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn numbers_are_written_as_each_language_writes_them() {
+        use orbiters_i18n::in_language;
+        assert_eq!((bytes(8_200_000.0), integer(12_480.0), percent(925.0, 1000.0)), ("8.2 MB".to_string(), "12,480".to_string(), "92.5%".to_string()));
+        in_language(Language::Ja, || assert_eq!((bytes(8_200_000.0), integer(12_480.0), percent(925.0, 1000.0)), ("8.2 MB".to_string(), "12,480".to_string(), "92.5%".to_string())));
+        in_language(Language::Fr, || assert_eq!((bytes(8_200_000.0), integer(12_480.0), percent(925.0, 1000.0)), ("8,2\u{a0}Mo".to_string(), "12\u{a0}480".to_string(), "92,5\u{a0}%".to_string())));
+        in_language(Language::Es, || assert_eq!((bytes(8_200_000.0), integer(12_480.0), percent(925.0, 1000.0)), ("8,2 MB".to_string(), "12.480".to_string(), "92,5\u{a0}%".to_string())));
+        in_language(Language::PtBr, || assert_eq!((bytes(8_200_000.0), integer(12_480.0), percent(1000.0, 1000.0)), ("8,2 MB".to_string(), "12.480".to_string(), "100%".to_string())));
+    }
+
     use super::*;
 
     #[test]

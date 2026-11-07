@@ -53,7 +53,7 @@ fn problem(state: &State, project: &Project) -> Option<String> {
         return Some(tr!("{location} has a folder named {name} already: choose another name.", location = d.location.trim(), name = name));
     }
     if let Some((_, Err(error))) = &d.measured { return Some(error.clone()); }
-    let Some(need) = needed(state, project) else { return Some(tr("Checking required disk space?").into()); };
+    let Some(need) = needed(state, project) else { return Some(tr("Checking required disk space…").into()); };
     if free.is_none() { return Some(tr("Cannot check free space. Choose an accessible destination.").into()); }
     free.filter(|f| *f < need).map(|f| tr!("The copy needs about {need}, and that disk has {free} left. Free some space or choose another disk.", need = format::bytes(need as f64), free = format::bytes(f as f64)))
 }
@@ -125,7 +125,7 @@ pub(super) fn body(ui: &mut Ui, state: &mut State, path: &Path) {
         let mut fu = ui.new_child(UiBuilder::new().max_rect(Rect::from_min_size(row.min, vec2(w - 44.0, 36.0))).id_salt("dup-location-slot"));
         widgets::text_field(&mut fu, "dup-location", &mut state.dup.location, tr("Choose a folder"), w - 44.0, false);
     }
-    let browse = IconButton::new(icons::FOLDER_OPEN, tr("Choose a folder")).size(36.0, 16.0).backdrop(theme::control()).id_salt("dup-browse");
+    let browse = IconButton::new(icons::FOLDER_OPEN, mark("Choose a folder")).size(36.0, 16.0).backdrop(theme::control()).id_salt("dup-browse");
     if widgets::activated(&browse.show_at(ui, Rect::from_min_size(pos2(row.right() - 36.0, row.top()), vec2(36.0, 36.0)))) && !state.dup.pick.running() && !state.fixture {
         let start = PathBuf::from(state.dup.location.trim());
         state.dup.pick = Job::spawn(&ctx, move || {

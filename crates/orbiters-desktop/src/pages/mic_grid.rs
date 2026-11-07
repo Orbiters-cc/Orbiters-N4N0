@@ -2,6 +2,7 @@
 //! right one rather than testing successively all of them until we find the right one". The microphones are open only while this card is on screen
 //! ([`crate::audio_devices::Meters`]), and nothing they hear is kept: only how loud.
 
+use orbiters_i18n::{tr, tr_ctx};
 use super::{section, Cx, Job};
 use crate::audio_devices::{self, MicLevels, ROLES};
 use egui::{pos2, vec2, Align2, Rect, Sense, Stroke, StrokeKind, Ui};
@@ -61,10 +62,10 @@ pub fn card(ui: &mut Ui, cx: &Cx, index: usize, state: &mut State) {
         state.setting = None;
         if let Err(e) = result {
             state.asked = None;
-            state.error = Some(format!("Windows did not take that microphone: {e}"));
+            state.error = Some(tr!("Windows did not take that microphone: {error}", error = e));
         }
     }
-    section(ui, cx, index, icons::MICROPHONE, "Microphones", Some("Speak: the one that moves is the one hearing you. Press one to make it Windows' default."), |ui| {
+    section(ui, cx, index, icons::MICROPHONE, tr("Microphones"), Some(tr("Speak: the one that moves is the one hearing you. Press one to make it Windows' default.")), |ui| {
         let meters = state.meters.get_or_insert_with(audio_devices::Meters::start);
         // While something looks: off the screen or minimized, this is not drawn, and they close by themselves.
         meters.looked_at();
@@ -72,7 +73,7 @@ pub fn card(ui: &mut Ui, cx: &Cx, index: usize, state: &mut State) {
         ctx.request_repaint_after(std::time::Duration::from_millis(33));
         if levels.mics.is_empty() {
             let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), TILE_HIGH), Sense::hover());
-            let said = if levels.read { "No microphone is plugged in or turned on." } else { "Looking for microphones\u{2026}" };
+            let said = if levels.read { tr("No microphone is plugged in or turned on.") } else { tr("Looking for microphones…") };
             ui.painter().text(rect.left_center(), Align2::LEFT_CENTER, said, theme::font(13.5, weight::MEDIUM), theme::FG_3);
             return;
         }
@@ -118,7 +119,7 @@ pub fn card(ui: &mut Ui, cx: &Cx, index: usize, state: &mut State) {
             let name = p.layout_job(Txt::new(mic.endpoint.name.clone(), 13.5).weight(weight::MEDIUM).color(theme::FG).job_truncated(room));
             p.galley(pos2(rect.left() + 14.0, rect.top() + 12.0), name, theme::FG);
             if is_default {
-                p.text(pos2(rect.right() - 14.0, rect.top() + 21.0), Align2::RIGHT_CENTER, "Default", theme::font(12.0, weight::SEMIBOLD), theme::ACCENT);
+                p.text(pos2(rect.right() - 14.0, rect.top() + 21.0), Align2::RIGHT_CENTER, tr_ctx("microphone", "Default"), theme::font(12.0, weight::SEMIBOLD), theme::ACCENT);
             }
             let track = Rect::from_min_max(pos2(rect.left() + 14.0, rect.bottom() - 21.0), pos2(rect.right() - 14.0, rect.bottom() - 13.0));
             match mic.peak {
@@ -131,7 +132,7 @@ pub fn card(ui: &mut Ui, cx: &Cx, index: usize, state: &mut State) {
                 }
                 // Held by another app for itself, say: it can still be chosen.
                 None => {
-                    p.text(track.left_center(), Align2::LEFT_CENTER, "Its level cannot be read now", theme::font(12.0, weight::MEDIUM), theme::FG_3);
+                    p.text(track.left_center(), Align2::LEFT_CENTER, tr("Its level cannot be read now"), theme::font(12.0, weight::MEDIUM), theme::FG_3);
                 }
             }
             if widgets::activated(&response) && !is_default && state.setting.is_none() {

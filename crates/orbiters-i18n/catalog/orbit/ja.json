@@ -22,7 +22,7 @@
   "Around you": "まわりに表示",
   "Ask": "質問",
   "Ask N4N0": "N4N0に聞く",
-  "Asking…": "リクエスト中…",
+  "Asking…": "申請中…",
   "Back to VRChat's menu.": "VRChatのメニューに戻ります。",
   "Back to pictures": "写真に戻る",
   "Back to the search, to change what you looked for.": "検索に戻って、探すものを変えられます。",
@@ -223,5 +223,11 @@
   "“Take a picture in five seconds”": "「5秒後に写真を撮って」",
   "“Tell people I'll be back soon”": "「すぐ戻ると伝えて」",
   "“Turn your light on, in blue”": "「ライトを青でつけて」",
-  "tile\u0004Ask": "聞く"
+  "tile\u0004Ask": "聞く",
+  "3D of people": "人物を3Dで",
+  "3D of world": "ワールドを3Dで",
+  "Hide Orbiters": "Orbitersを隠す",
+  "Show Orbiters": "Orbitersを表示",
+  "Reach VRChat's own menus. Nothing here closes.": "VRChat自体のメニューを操作できます。ここは閉じません。",
+  "{weekday} {time}": "{weekday}曜 {time}"
 }

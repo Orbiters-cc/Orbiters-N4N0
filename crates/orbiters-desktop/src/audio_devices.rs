@@ -101,11 +101,11 @@ fn made_up() -> MicLevels {
     let mic = |id: &str, name: &str, peak| MicLevel { endpoint: AudioEndpoint { id: id.into(), name: name.into() }, peak };
     MicLevels {
         mics: vec![
-            mic("a", "Microphone (Valve Index Headset)", Some(0.0)),
-            mic("b", "Headset Microphone (Arctis 7 Chat)", Some(0.22)),
-            mic("c", "Microphone (Realtek High Definition Audio)", Some(0.004)),
-            mic("d", "Line In (USB Audio Device)", None),
-            mic("e", "Microphone (Elgato Wave:3)", Some(0.0)),
+            mic("a", "Microphone (Valve Index Headset)", Some(0.0)), // i18n: not shown (made up for renders)
+            mic("b", "Headset Microphone (Arctis 7 Chat)", Some(0.22)), // i18n: not shown (made up for renders)
+            mic("c", "Microphone (Realtek High Definition Audio)", Some(0.004)), // i18n: not shown (made up for renders)
+            mic("d", "Line In (USB Audio Device)", None), // i18n: not shown (made up for renders)
+            mic("e", "Microphone (Elgato Wave:3)", Some(0.0)), // i18n: not shown (made up for renders)
         ],
         default_id: Some("a".into()),
         read: true,
@@ -120,7 +120,7 @@ impl Meters {
             return Self { now, seen, stop };
         }
         let (t_now, t_seen, t_stop) = (now.clone(), seen.clone(), stop.clone());
-        let _ = std::thread::Builder::new().name("mic levels".into()).spawn(move || watch(&t_now, &t_seen, &t_stop));
+        let _ = std::thread::Builder::new().name("mic levels".into()).spawn(move || watch(&t_now, &t_seen, &t_stop)); // i18n: not shown (a thread's name)
         Self { now, seen, stop }
     }
 

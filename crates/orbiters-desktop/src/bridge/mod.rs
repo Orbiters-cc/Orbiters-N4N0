@@ -402,7 +402,7 @@ impl Bridge {
         for (hold, osc, key) in holds {
             self.held.press(hold.clone(), until);
             lifted.holds.push(hold.clone());
-            self.tell_guard(format!("down {}", hold.guard_line()));
+            self.tell_guard(format!("down {}", hold.guard_line())); // i18n: not shown (what the AI reads)
             if let Some(address) = match hold {
                 Hold::OscButton(a) | Hold::OscAxis(a) => Some(*a),
                 _ => None,
@@ -458,7 +458,7 @@ impl Bridge {
     /// Tells the guard where OSC goes.
     pub(crate) fn tell_guard_target(&self) {
         if let Some(target) = self.game.osc_target() {
-            self.tell_guard(format!("target {target}"));
+            self.tell_guard(format!("target {target}")); // i18n: not shown (what the AI reads)
         }
     }
 }

@@ -686,7 +686,7 @@ fn selection_bar(ui: &mut Ui, rect: Rect, bottom: f32, k: f32, selected: usize, 
         acted = Some(On::Shrink);
     }
     x += sw + 4.0;
-    if IconButton::new(icons::X, tr("Clear")).size(32.0, 15.0).id_salt("splat-select-clear").show_at(&mut bu, small(x, 32.0)).clicked() {
+    if IconButton::new(icons::X, mark("Clear")).size(32.0, 15.0).id_salt("splat-select-clear").show_at(&mut bu, small(x, 32.0)).clicked() {
         acted = Some(On::Clear);
     }
     acted
@@ -1106,7 +1106,7 @@ impl Viewer {
                 bu.disable();
                 bu.multiply_opacity(0.35);
             }
-            if IconButton::new(glyph, tr(label)).size(36.0, 17.0).show_at(&mut bu, r).clicked() && enabled {
+            if IconButton::new(glyph, label).size(36.0, 17.0).show_at(&mut bu, r).clicked() && enabled {
                 if undo {
                     e.undo();
                 } else {

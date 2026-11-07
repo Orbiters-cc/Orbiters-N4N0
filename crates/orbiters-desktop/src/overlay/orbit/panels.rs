@@ -614,9 +614,9 @@ pub fn items(zone: Zone, size: Vec2, facts: &Facts) -> Vec<Item> {
         Zone::BloomNext => vec![Item { action: Action::Next, rect: whole, look: Look::Transport(icons::SKIP_FORWARD) }],
         Zone::WheelCaption | Zone::QmCaption | Zone::CameraCaption => vec![Item { action: Action::Idle, rect: whole, look: Look::Caption }],
         // Enzo: what takes a picture or reads a code, at the camera that does it.
-        Zone::CameraPeople => tile(Action::Picture(PhotoMode::People), icons::USERS, "3D of people", false),
-        Zone::CameraWorld => tile(Action::Picture(PhotoMode::World), icons::GLOBE_HEMISPHERE_WEST, "3D of world", false),
-        Zone::CameraQr => tile(Action::Page(Target::Qr), icons::QR_CODE, "QR code", false),
+        Zone::CameraPeople => tile(Action::Picture(PhotoMode::People), icons::USERS, tr("3D of people"), false),
+        Zone::CameraWorld => tile(Action::Picture(PhotoMode::World), icons::GLOBE_HEMISPHERE_WEST, tr("3D of world"), false),
+        Zone::CameraQr => tile(Action::Page(Target::Qr), icons::QR_CODE, tr("QR code"), false),
         Zone::WheelVeil => vec![Item { action: Action::Idle, rect: whole, look: Look::Blank }],
         Zone::WheelHide => vec![Item { action: Action::Hide, rect: whole, look: Look::HideWord }],
         // The wing's tiles, each a part of its own.
@@ -2537,7 +2537,7 @@ fn draw(p: &Painter, zone: Zone, item: &Item, facts: &Facts, hovered: bool, pres
             let radius = look::radius(rect.height() / 2.0);
             p.rect_filled(rect, radius, if pressed { look::TILE_DOWN } else if hovered { look::TILE_HOVER } else { look::TILE });
             p.rect_stroke(rect.shrink(0.5), radius, Stroke::new(1.0, Color32::from_white_alpha(if hovered { 120 } else { 54 })), egui::StrokeKind::Inside);
-            let (icon, words) = if facts.peek { (icons::EYE, "Show Orbiters") } else { (icons::EYE_SLASH, "Hide Orbiters") };
+            let (icon, words) = if facts.peek { (icons::EYE, tr("Show Orbiters")) } else { (icons::EYE_SLASH, tr("Hide Orbiters")) };
             let font = look::font(13.0, weight::SEMIBOLD);
             let wide = p.layout_no_wrap(words.to_string(), font.clone(), look::LABEL).size().x;
             let left = rect.center().x - (wide + 22.0) / 2.0;

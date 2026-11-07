@@ -16,7 +16,7 @@
 //! project never opened with Toolkit, or never opened at all, has its 3D preview too; the window's chips switch
 //! between the scenes, building the one picked if needed; a scene that cannot be built says why ("No preview: …").
 
-use orbiters_i18n::{tr, tr_n};
+use orbiters_i18n::{mark, tr, tr_n};
 use super::builds::{self, Builder, Done};
 use super::preview_gpu::{self, LightMode, Pipelines, Scene, View};
 use super::state::State;
@@ -841,7 +841,7 @@ pub(super) fn cover(ui: &mut Ui, cx: &Cx, state: &mut State, project: &Project, 
     let mut bu = ui.new_child(UiBuilder::new().max_rect(button).id_salt(id.with("open")));
     bu.multiply_opacity(k * (0.75 + 0.25 * hover));
     let open =
-        widgets::activated(&IconButton::new(icons::CORNERS_OUT, tr("Look around in 3D")).size(32.0, 15.0).backdrop(theme::black(0.55)).show_at(&mut bu, button));
+        widgets::activated(&IconButton::new(icons::CORNERS_OUT, mark("Look around in 3D")).size(32.0, 15.0).backdrop(theme::black(0.55)).show_at(&mut bu, button));
     if (open || resp.clicked()) && k > 0.5 {
         pv.open_window(&ctx, rect, radii[0]);
     }
@@ -1193,7 +1193,7 @@ fn chrome(
     // The right end of the room the note may take: the chips' row when there is one, else the buttons.
     let mut note_end = rr.left() - 8.0;
     if widgets::activated(
-        &IconButton::new(icons::ARROW_COUNTER_CLOCKWISE, tr("Frame it again"))
+        &IconButton::new(icons::ARROW_COUNTER_CLOCKWISE, mark("Frame it again"))
             .size(32.0, 15.0)
             .backdrop(theme::black(0.5))
             .id_salt("preview-reset")

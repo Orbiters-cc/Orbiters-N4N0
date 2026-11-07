@@ -612,7 +612,7 @@ impl Editor {
         let p = ui.painter().clone();
         let mid = bar.center().y;
         let back = Rect::from_center_size(pos2(bar.left() + GAP + 20.0, mid), vec2(40.0, 40.0));
-        if orbiters_ui::widgets::activated(&IconButton::new(icons::ARROW_LEFT, tr("Close the editor")).size(40.0, 18.0).backdrop(theme::white(0.04)).show_at(ui, back)) {
+        if orbiters_ui::widgets::activated(&IconButton::new(icons::ARROW_LEFT, mark("Close the editor")).size(40.0, 18.0).backdrop(theme::white(0.04)).show_at(ui, back)) {
             self.close(&ctx);
         }
         let x = back.right() + 14.0;
@@ -644,7 +644,7 @@ impl Editor {
                 bu.multiply_opacity(0.35);
             }
             // Its id from the English label: an open tooltip keeps its state when the language changes.
-            let resp = IconButton::new(glyph, tr(label)).size(40.0, 18.0).id_salt(label).show_at(&mut bu, r);
+            let resp = IconButton::new(glyph, label).size(40.0, 18.0).id_salt(label).show_at(&mut bu, r);
             if i == 0.0 {
                 self.comparing = resp.is_pointer_button_down_on();
             } else if orbiters_ui::widgets::activated(&resp) && enabled {

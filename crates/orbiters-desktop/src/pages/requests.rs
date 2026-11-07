@@ -2,7 +2,7 @@
 //! acknowledgement asked inline as for public sharing), and what you asked of others. The window grows out of the
 //! Requests button ([`orbiters_ui::dialog`]); answers run in the tray service.
 use super::{sharing, Cx, Job};
-use orbiters_i18n::{tr, tr_ctx};
+use orbiters_i18n::{mark, tr, tr_ctx};
 use crate::controller::shares::{self as controller, Operation, Outcome, Request};
 use egui::{pos2, vec2, Align2, Id, Rect, Sense, Ui, UiBuilder};
 use orbiters_core::{
@@ -225,7 +225,7 @@ impl State {
             let rr = Rect::from_center_size(pos2(bar.right() - 18.0, bar.center().y), vec2(36.0, 36.0));
             if self.list.running() {
                 feedback::spinner(ui.painter(), rr.center(), 8.0, 2.0, theme::FG_2);
-            } else if sharing::pressed(IconButton::new(icons::ARROW_CLOCKWISE, tr("Look for new requests")).id_salt("requests-refresh").show_at(ui, rr)) && !busy {
+            } else if sharing::pressed(IconButton::new(icons::ARROW_CLOCKWISE, mark("Look for new requests")).id_salt("requests-refresh").show_at(ui, rr)) && !busy {
                 self.refresh(&ctx, server);
             }
             if let Some(error) = self.error.clone() {
@@ -294,9 +294,9 @@ impl State {
         let (pill_at, pills_h) = widgets::flow(&pill_w, inner, 28.0, 6.0);
         let message = (!request.message.trim().is_empty())
             .then(|| ui.painter().layout_job(Txt::new(request.message.trim(), 13.0).color(theme::FG).line_height(19.0).job(inner - 40.0)));
-        let warning = self.warning.as_ref().filter(|(r, _)| r.id == request.id).map(|(_, m)| m.clone());
+        let warning = self.warning.as_ref().filter(|(r, _)| r.id == request.id).map(|(_, m)| tr(m).to_string());
         let warning_g = warning.as_ref().map(|m| ui.painter().layout_job(Txt::new(m, 12.5).color(theme::FG_2).line_height(18.0).job(inner - 32.0)));
-        let row_error = self.row_error.as_ref().filter(|(id, _)| *id == request.id).map(|(_, m)| m.clone());
+        let row_error = self.row_error.as_ref().filter(|(id, _)| *id == request.id).map(|(_, m)| tr(m).to_string());
         let mut h = 16.0 + 40.0 + 12.0 + pills_h;
         if let Some(g) = &message {
             h += 12.0 + g.size().y + 20.0;

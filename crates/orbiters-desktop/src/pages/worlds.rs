@@ -12,7 +12,7 @@ use orbiters_core::account::Server;
 use orbiters_core::bundle::SessionSummary;
 use orbiters_core::maps::{world_page_url, MineWorld};
 use orbiters_core::visited::{self, Shot};
-use orbiters_i18n::{fill, tr, tr_n};
+use orbiters_i18n::{fill, mark, tr, tr_n};
 use orbiters_ui::anim::{self, ease, Spring};
 use orbiters_ui::paint::{self, Gradient};
 use orbiters_ui::theme::{self, weight, Txt};
@@ -465,7 +465,7 @@ fn grid(ui: &mut Ui, cx: &mut Cx, state: &mut State, page: Rect, shown: f32, int
         }
         let mut su = au.new_child(UiBuilder::new().max_rect(search_r).id_salt("worlds-search"));
         widgets::search_field(&mut su, "worlds-search", &mut state.query, tr("Search worlds"), 224.0);
-        if IconButton::new(icons::IMAGES, tr("Open VRChat's pictures folder")).show_at(&mut au, folder_r).clicked() {
+        if IconButton::new(icons::IMAGES, mark("Open VRChat's pictures folder")).show_at(&mut au, folder_r).clicked() {
             if let Some(dir) = visited::screenshot_dirs().into_iter().next() {
                 let r = controller::open_path(&dir);
                 cx.run(&ctx, r);
@@ -1539,7 +1539,7 @@ fn action_bar(ctx: &egui::Context, o: &Open, world: &VisitedWorld, sharing: &Sha
             right = sr.left() - 8.0;
         }
         let clear = Rect::from_min_size(pos2(right - 36.0, rect.center().y - 18.0), vec2(36.0, 36.0));
-        if IconButton::new(icons::X, tr("Clear the selection")).show_at(ui, clear).clicked() {
+        if IconButton::new(icons::X, mark("Clear the selection")).show_at(ui, clear).clicked() {
             action = Some(BarAction::Clear);
         }
     });
@@ -1639,7 +1639,7 @@ fn viewer(ctx: &egui::Context, cx: &mut Cx, state: &mut State, world: &VisitedWo
             }
         }
         let close_r = Rect::from_min_size(pos2(area.right() - 24.0 - 40.0, area.top() + 16.0), vec2(40.0, 40.0));
-        if IconButton::new(icons::X, tr("Close")).size(40.0, 18.0).backdrop(theme::white(0.08)).show_at(&mut vu, close_r).clicked() {
+        if IconButton::new(icons::X, mark("Close")).size(40.0, 18.0).backdrop(theme::white(0.08)).show_at(&mut vu, close_r).clicked() {
             close = true;
         }
         let mut left = pic.right();
@@ -1660,7 +1660,7 @@ fn viewer(ctx: &egui::Context, cx: &mut Cx, state: &mut State, world: &VisitedWo
             left = said.left() - 14.0;
         }
         let folder_r = Rect::from_min_size(pos2(left - 32.0, pic.bottom() + 8.0), vec2(32.0, 32.0));
-        if IconButton::new(icons::FOLDER_OPEN, tr("Show in its folder")).size(32.0, 15.0).show_at(&mut vu, folder_r).clicked() {
+        if IconButton::new(icons::FOLDER_OPEN, mark("Show in its folder")).size(32.0, 15.0).show_at(&mut vu, folder_r).clicked() {
             if let Some(dir) = shot.path.parent() {
                 let r = controller::open_path(dir);
                 cx.run(ctx, r);

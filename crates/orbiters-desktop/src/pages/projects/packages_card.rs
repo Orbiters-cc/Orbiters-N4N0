@@ -4,7 +4,7 @@
 //! changes, from → to; what is left out and why) above the rows. Updates come from `orbiters_projects::updates`
 //! (checked after each look at the project's packages; releases, or pre-releases too with the switch). Every change
 //! goes through `panel::package_action`, the version list's path.
-use orbiters_i18n::tr;
+use orbiters_i18n::{mark, tr};
 use super::art::{self, glyph};
 use super::panel::{package_action, package_row, row_skeletons, versions};
 use super::state::State;
@@ -166,7 +166,7 @@ fn row(ui: &mut Ui, state: &mut State, project: &Project, pkg: &vpm::Package, up
                 }
             }
         }
-        let rb = IconButton::new(glyph::TRASH_SIMPLE, tr("Remove the package")).size(32.0, 15.0).danger().id_salt(("remove", &pkg.name));
+        let rb = IconButton::new(glyph::TRASH_SIMPLE, mark("Remove the package")).size(32.0, 15.0).danger().id_salt(("remove", &pkg.name));
         if !busy && widgets::activated(&rb.show_at(ui, rm)) {
             package_action(state, &ctx, project, vpm::Change::Remove(pkg.name.clone()), &tr!("Removing {package}…", package = pkg.display_name), &pkg.name);
         }

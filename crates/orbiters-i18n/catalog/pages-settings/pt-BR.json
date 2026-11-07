@@ -587,5 +587,14 @@
   "…or after it turns this much.": "…ou quando ela gira esse tanto.",
   "…or after this long, whatever happens.": "…ou depois deste tempo, aconteça o que acontecer.",
   "call\u0004Mute": "Silenciar",
-  "call\u0004Unmute": "Ativar microfone"
+  "call\u0004Unmute": "Ativar microfone",
+  "Around the camera": "Ao redor da câmera",
+  "In a headset: 3D pictures and the QR code beside VRChat's camera. It looks for the camera's panel on VRChat's window while the camera is open, and keeps nothing it sees.": "No headset: fotos 3D e o código QR ao lado da câmera do VRChat. Enquanto a câmera está aberta, ele procura o painel dela na janela do VRChat e não guarda nada do que vê.",
+  "Windows did not take that microphone: {error}": "O Windows não aceitou esse microfone: {error}",
+  "Microphones": "Microfones",
+  "Speak: the one that moves is the one hearing you. Press one to make it Windows' default.": "Fale: o que se mexer é o que está ouvindo você. Pressione um para torná-lo o padrão do Windows.",
+  "No microphone is plugged in or turned on.": "Nenhum microfone está conectado ou ligado.",
+  "Looking for microphones…": "Procurando microfones…",
+  "microphone\u0004Default": "Padrão",
+  "Its level cannot be read now": "O nível não pode ser lido agora"
 }

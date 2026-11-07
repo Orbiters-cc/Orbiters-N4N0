@@ -9,7 +9,7 @@ use egui::{pos2, vec2, Align2, Color32, ColorImage, CornerRadius, CursorIcon, Id
 use orbiters_core::bundle::{self, SessionSummary};
 use orbiters_contracts::manifest::StorageQuality;
 use orbiters_core::reconstruction::{self, Report, Stage};
-use orbiters_i18n::{fill, tr, tr_n};
+use orbiters_i18n::{fill, mark, tr, tr_n};
 use orbiters_ui::anim::{self, ease, Spring};
 use orbiters_ui::paint::{self, Gradient};
 use orbiters_ui::theme::{self, weight, Txt};
@@ -388,7 +388,7 @@ fn show_library(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
             state.import = Some(Import { serial: state.serial, closing: false, raws: Job::spawn(&ctx, move || controller::list_raw_captures(&dir)) });
         }
     }
-    if IconButton::new(icons::FOLDER_OPEN, tr("Open the captures folder")).show_at(ui, folder_r).clicked() {
+    if IconButton::new(icons::FOLDER_OPEN, mark("Open the captures folder")).show_at(ui, folder_r).clicked() {
         let r = controller::open_path(&cx.snap.settings.sessions_dir);
         cx.run(&ctx, r);
     }
@@ -1050,7 +1050,7 @@ fn detail(ctx: &egui::Context, cx: &mut Cx, state: &mut State, page: Rect) {
         let mut cu = ui.new_child(UiBuilder::new().max_rect(rect).id_salt(("detail-body", d.serial)));
         cu.multiply_opacity(content);
         let close_r = Rect::from_min_size(pos2(thumb.right() - 16.0 - 36.0, thumb.top() + 16.0), vec2(36.0, 36.0));
-        if IconButton::new(icons::X, tr("Close")).size(36.0, 18.0).backdrop(theme::black(0.4)).show_at(&mut cu, close_r).clicked() {
+        if IconButton::new(icons::X, mark("Close")).size(36.0, 18.0).backdrop(theme::black(0.4)).show_at(&mut cu, close_r).clicked() {
             close = true;
         }
 
@@ -1287,7 +1287,7 @@ fn detail(ctx: &egui::Context, cx: &mut Cx, state: &mut State, page: Rect) {
                     asked = true;
                 }
                 let folder = Rect::from_min_size(pos2(bin.left() - 48.0, y), vec2(40.0, 40.0));
-                if IconButton::new(icons::FOLDER_OPEN, tr("Open folder")).size(40.0, 17.0).show_at(&mut cu, folder).clicked() {
+                if IconButton::new(icons::FOLDER_OPEN, mark("Open folder")).size(40.0, 17.0).show_at(&mut cu, folder).clicked() {
                     open_folder = true;
                 }
             } else {
@@ -1296,7 +1296,7 @@ fn detail(ctx: &egui::Context, cx: &mut Cx, state: &mut State, page: Rect) {
                     open_folder = true;
                 }
             }
-            if IconButton::new(icons::TRASH, tr("Move to the recycle bin")).size(40.0, 17.0).danger().show_at(&mut cu, bin).clicked() {
+            if IconButton::new(icons::TRASH, mark("Move to the recycle bin")).size(40.0, 17.0).danger().show_at(&mut cu, bin).clicked() {
                 d.confirm_trash = true;
             }
         }

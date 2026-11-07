@@ -223,5 +223,11 @@
   "“Take a picture in five seconds”": "“Toma una foto en cinco segundos”",
   "“Tell people I'll be back soon”": "“Dile a la gente que vuelvo pronto”",
   "“Turn your light on, in blue”": "“Enciende tu luz, en azul”",
-  "tile\u0004Ask": "N4N0"
+  "tile\u0004Ask": "N4N0",
+  "3D of people": "Personas en 3D",
+  "3D of world": "Mundo en 3D",
+  "Hide Orbiters": "Ocultar Orbiters",
+  "Show Orbiters": "Mostrar Orbiters",
+  "Reach VRChat's own menus. Nothing here closes.": "Para llegar a los menús de VRChat. Aquí no se cierra nada.",
+  "{weekday} {time}": "{weekday} {time}"
 }

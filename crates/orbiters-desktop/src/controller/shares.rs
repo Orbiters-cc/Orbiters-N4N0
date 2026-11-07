@@ -839,7 +839,7 @@ fn share_with(
         }
         known
     } else {
-        anyhow::ensure!(!request.public || !entry.content.explicit || request.acknowledge_explicit, "{}", shares::EXPLICIT_WARNING);
+        anyhow::ensure!(!request.public || !entry.content.explicit || request.acknowledge_explicit, "{}", tr(shares::EXPLICIT_WARNING));
         let source_key = match entry.local.as_ref().ok_or_else(|| anyhow::anyhow!("No local file to upload"))? {
             Local::Session(p) => p.file_name().map(|n| n.to_string_lossy().into_owned()).ok_or_else(|| anyhow::anyhow!("No capture folder name"))?,
             Local::Picture(p) => entry

@@ -560,10 +560,10 @@ fn check(p: &Preview) -> anyhow::Result<()> {
         Ok(())
     };
     for (i, t) in h.textures.iter().enumerate() {
-        inside(t.data, &format!("texture {i}"))?;
+        inside(t.data, &format!("texture {i}"))?; // i18n: not shown (a GPU label)
     }
     for (i, m) in h.meshes.iter().enumerate() {
-        inside(m.data, &format!("mesh {i}"))?;
+        inside(m.data, &format!("mesh {i}"))?; // i18n: not shown (a GPU label)
         inside(m.indices, &format!("mesh {i}'s indices"))?; // i18n: not shown (error detail of a damaged preview file)
         ensure!(m.data.length == m.vertices as u64 * VERTEX_SIZE as u64, "mesh {i} has {} vertices in {} bytes", m.vertices, m.data.length);
         let count = m.indices.length / m.index_format.size() as u64;

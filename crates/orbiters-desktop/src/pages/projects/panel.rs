@@ -6,7 +6,7 @@
 //! does not have it, its packages (their own icons, versions in dropdowns), the packages it could add, and its Git
 //! repository (branch, changes, remote page, last commits on a timeline). Switching projects crossfades the cards.
 
-use orbiters_i18n::{tr, tr_ctx, tr_n};
+use orbiters_i18n::{mark, tr, tr_ctx, tr_n};
 use super::art::{self, glyph};
 use super::state::{server, Outcome, PackageIcon, State, MIXER, MIXER_PAGE};
 use crate::pages::{Cx, PAD_X};
@@ -163,7 +163,7 @@ fn sticky_bar(ui: &mut Ui, cx: &mut Cx, state: &mut State, project: &Project, re
     let mut right = band.right() - 20.0;
     if sheet {
         let close = Rect::from_center_size(pos2(right - 16.0, band.center().y + dy), vec2(32.0, 32.0));
-        let pressed = widgets::activated(&IconButton::new(icons::X, tr("Close")).size(32.0, 15.0).id_salt("panel-bar-close").show_at(&mut bu, close));
+        let pressed = widgets::activated(&IconButton::new(icons::X, mark("Close")).size(32.0, 15.0).id_salt("panel-bar-close").show_at(&mut bu, close));
         if pressed && k > 0.5 {
             state.panel_closing = true;
         }
@@ -258,7 +258,7 @@ fn hero(ui: &mut Ui, cx: &mut Cx, state: &mut State, project: &Project, sheet: b
     );
     if sheet {
         let close = Rect::from_center_size(pos2(cover.right() - 26.0, cover.top() + 26.0), vec2(32.0, 32.0));
-        if widgets::activated(&IconButton::new(icons::X, tr("Close")).size(32.0, 15.0).backdrop(theme::black(0.55)).show_at(ui, close)) {
+        if widgets::activated(&IconButton::new(icons::X, mark("Close")).size(32.0, 15.0).backdrop(theme::black(0.55)).show_at(ui, close)) {
             state.panel_closing = true;
         }
     }
@@ -321,7 +321,7 @@ fn hero(ui: &mut Ui, cx: &mut Cx, state: &mut State, project: &Project, sheet: b
             });
         }
     }
-    let folder = IconButton::new(icons::FOLDER_OPEN, tr("Open the folder")).size(40.0, 17.0).backdrop(theme::control()).id_salt("panel-folder");
+    let folder = IconButton::new(icons::FOLDER_OPEN, mark("Open the folder")).size(40.0, 17.0).backdrop(theme::control()).id_salt("panel-folder");
     if !open && !project.missing && widgets::activated(&folder.show_at(ui, round(2))) {
         let path = project.path.clone();
         state.task(&ctx, tr("Opening the folder…"), move || {
@@ -329,7 +329,7 @@ fn hero(ui: &mut Ui, cx: &mut Cx, state: &mut State, project: &Project, sheet: b
             Ok(Outcome::Picked(None))
         });
     }
-    let hub = IconButton::new(icons::CUBE, tr("Open Unity Hub")).size(40.0, 17.0).backdrop(theme::control()).id_salt("panel-hub");
+    let hub = IconButton::new(icons::CUBE, mark("Open Unity Hub")).size(40.0, 17.0).backdrop(theme::control()).id_salt("panel-hub");
     if !open && widgets::activated(&hub.show_at(ui, round(1))) {
         state.task(&ctx, tr("Opening Unity Hub…"), move || {
             orbiters_projects::open_hub()?;
@@ -432,7 +432,7 @@ fn avatars(ui: &mut Ui, cx: &mut Cx, state: &mut State, project: &Project) {
                 let link = Rect::from_min_size(pos2(r.right() - 32.0, r.top() + 2.0), vec2(32.0, 32.0));
                 state.anchors.insert(format!("avatar-vrchat-{i}"), link);
                 let url = format!("https://vrchat.com/home/avatar/{}", a.id);
-                let open = IconButton::new(icons::ARROW_SQUARE_OUT, tr("Open on VRChat")).size(32.0, 15.0).backdrop(theme::control()).id_salt(("avatar-vrchat", &a.id));
+                let open = IconButton::new(icons::ARROW_SQUARE_OUT, mark("Open on VRChat")).size(32.0, 15.0).backdrop(theme::control()).id_salt(("avatar-vrchat", &a.id));
                 if widgets::activated(&open.show_at(ui, link).on_hover_text(&url)) {
                     if let Err(e) = crate::controller::open_url(&url) {
                         cx.toasts.push(&ctx, orbiters_ui::toast::Kind::Error, tr!("The page could not open: {error}", error = e));
@@ -731,7 +731,7 @@ fn available(ui: &mut Ui, state: &mut State, project: &Project) {
                     if working {
                         feedback::spinner(ui.painter(), add.center(), 8.0, 2.0, theme::ACCENT);
                     } else {
-                        let b = IconButton::new(icons::PLUS, tr("Add to the project")).size(32.0, 15.0).backdrop(theme::control()).id_salt(("add", &pkg.name));
+                        let b = IconButton::new(icons::PLUS, mark("Add to the project")).size(32.0, 15.0).backdrop(theme::control()).id_salt(("add", &pkg.name));
                         if !busy && widgets::activated(&b.show_at(ui, add)) {
                             let change = vpm::Change::Install { names: vec![(pkg.name.clone(), Some(chosen.clone()))], prerelease: state.prerelease };
                             package_action(state, &ctx, project, change, &tr!("Adding {package} {version}…", package = pkg.display_name, version = chosen), &pkg.name);

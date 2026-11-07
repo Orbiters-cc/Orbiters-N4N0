@@ -189,7 +189,7 @@ fn repos(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
             ui.painter().rect_filled(pr, theme::radius(10.0), theme::white(0.05));
             widgets::text(ui.painter(), pr.center(), Align2::CENTER_CENTER, &t);
         } else {
-            let b = IconButton::new(glyph::TRASH_SIMPLE, tr("Remove the repository")).size(32.0, 15.0).danger().id_salt(("repo-remove", &r.id));
+            let b = IconButton::new(glyph::TRASH_SIMPLE, mark("Remove the repository")).size(32.0, 15.0).danger().id_salt(("repo-remove", &r.id));
             if !busy && widgets::activated(&b.show_at(ui, Rect::from_min_size(pos2(slot.right() - 32.0, slot.top()), vec2(32.0, 32.0)))) {
                 let id = r.id.clone();
                 state.task(&ctx, tr("Removing the repository…"), move || {
@@ -400,7 +400,7 @@ fn new_project(ui: &mut Ui, state: &mut State) {
         let mut fu = ui.new_child(UiBuilder::new().max_rect(Rect::from_min_size(row.min, vec2(w - 44.0, 36.0))).id_salt("new-location-slot"));
         widgets::text_field(&mut fu, "new-location", &mut state.new_location, tr("Choose a folder"), w - 44.0, false);
     }
-    let browse = IconButton::new(icons::FOLDER_OPEN, tr("Choose a folder")).size(36.0, 16.0).backdrop(theme::control()).id_salt("new-browse");
+    let browse = IconButton::new(icons::FOLDER_OPEN, mark("Choose a folder")).size(36.0, 16.0).backdrop(theme::control()).id_salt("new-browse");
     if !busy && widgets::activated(&browse.show_at(ui, Rect::from_min_size(pos2(row.right() - 36.0, row.top()), vec2(36.0, 36.0)))) {
         state.task(&ctx, tr("Choose a location…"), move || Ok(Outcome::Picked(rfd::FileDialog::new().pick_folder())));
     }

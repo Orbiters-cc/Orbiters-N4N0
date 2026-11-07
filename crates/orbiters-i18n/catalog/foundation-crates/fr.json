@@ -265,5 +265,10 @@
   "{skipped} frame(s) of the raw capture could not be read ({why})": "{skipped} image(s) de la capture brute n’ont pas pu être lues ({why})",
   "{what}: Core Audio said '{code}'": "{what} : Core Audio a répondu « {code} »",
   "{what}: Core Audio said {status}": "{what} : Core Audio a répondu {status}",
-  "{write_errors} file(s) could not be written": "{write_errors} fichier(s) n’ont pas pu être écrits"
+  "{write_errors} file(s) could not be written": "{write_errors} fichier(s) n’ont pas pu être écrits",
+  "Gaussian blur": "Flou gaussien",
+  "Lens blur": "Flou d’objectif",
+  "Directional blur": "Flou directionnel",
+  "Depth blur": "Flou de profondeur",
+  "List {number}": "Liste {number}"
 }

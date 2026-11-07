@@ -189,5 +189,6 @@
   "{have} of {need} words · public, beside the label": "{have} / {need}語 · ラベルの横に公開されます",
   "{name}: {text}": "{name}：{text}",
   "{number} of {total}": "{number} / {total}",
-  "view\u0004Small": "ミニ"
+  "view\u0004Small": "ミニ",
+  "Touchpad: move around": "タッチパッド：移動"
 }

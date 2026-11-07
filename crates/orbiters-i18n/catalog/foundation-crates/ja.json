@@ -265,5 +265,10 @@
   "{skipped} frame(s) of the raw capture could not be read ({why})": "生のキャプチャの{skipped}フレームを読み取れませんでした（{why}）",
   "{what}: Core Audio said '{code}'": "{what}：Core Audioが「{code}」を返しました",
   "{what}: Core Audio said {status}": "{what}：Core Audioが{status}を返しました",
-  "{write_errors} file(s) could not be written": "{write_errors}個のファイルを書き込めませんでした"
+  "{write_errors} file(s) could not be written": "{write_errors}個のファイルを書き込めませんでした",
+  "Gaussian blur": "ガウスぼかし",
+  "Lens blur": "レンズぼかし",
+  "Directional blur": "方向ぼかし",
+  "Depth blur": "被写界深度ぼかし",
+  "List {number}": "リスト{number}"
 }

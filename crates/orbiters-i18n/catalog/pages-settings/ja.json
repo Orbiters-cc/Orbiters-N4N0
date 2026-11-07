@@ -587,5 +587,14 @@
   "…or after it turns this much.": "…またはこの角度だけ回転したとき。",
   "…or after this long, whatever happens.": "…または何があってもこの時間が経ったとき。",
   "call\u0004Mute": "ミュート",
-  "call\u0004Unmute": "ミュート解除"
+  "call\u0004Unmute": "ミュート解除",
+  "Around the camera": "カメラのまわり",
+  "In a headset: 3D pictures and the QR code beside VRChat's camera. It looks for the camera's panel on VRChat's window while the camera is open, and keeps nothing it sees.": "ヘッドセットで、VRChatのカメラの横に3D写真とQRコードを表示します。カメラが開いている間はVRChatのウィンドウからカメラのパネルを探しますが、見たものは何も保存しません。",
+  "Windows did not take that microphone: {error}": "Windowsがそのマイクを受け付けませんでした：{error}",
+  "Microphones": "マイク",
+  "Speak: the one that moves is the one hearing you. Press one to make it Windows' default.": "話してみてください。動いているマイクが声を拾っています。押すとWindowsの既定になります。",
+  "No microphone is plugged in or turned on.": "接続またはオンになっているマイクがありません。",
+  "Looking for microphones…": "マイクを探しています…",
+  "microphone\u0004Default": "既定",
+  "Its level cannot be read now": "現在は音量を読み取れません"
 }

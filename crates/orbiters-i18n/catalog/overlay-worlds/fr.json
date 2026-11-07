@@ -189,5 +189,6 @@
   "{have} of {need} words · public, beside the label": "{have} mots sur {need} · public, à côté de l’étiquette",
   "{name}: {text}": "{name} : {text}",
   "{number} of {total}": "{number} sur {total}",
-  "view\u0004Small": "Petit"
+  "view\u0004Small": "Petit",
+  "Touchpad: move around": "Pavé tactile : se déplacer"
 }

@@ -340,7 +340,8 @@ impl App {
             &Txt::new("N4N0", 17.0).weight(weight::SEMIBOLD).tracking(0.02),
         );
         widgets::text(p, pos2(logo_rect.right() + 12.0, logo_rect.center().y + 10.0), Align2::LEFT_CENTER, &Txt::new("Orbiters", 11.5).color(theme::FG_3));
-        self.update_button(ui, snap, pos2(inner.right(), logo_rect.center().y), id.with("update"));
+        let name_wide = widgets::text_size(ui, &Txt::new("N4N0", 17.0).weight(weight::SEMIBOLD).tracking(0.02)).x.max(widgets::text_size(ui, &Txt::new("Orbiters", 11.5)).x);
+        self.update_button(ui, snap, pos2(inner.right(), logo_rect.center().y), logo_rect.right() + 12.0 + name_wide + 8.0, id.with("update"));
 
         // Navigation with a pill that slides to the active page.
         let nav_top = logo_rect.bottom() + 28.0;
@@ -451,7 +452,7 @@ impl App {
     /// The Update button beside the name (its right edge at `right_center`), as soon as a newer version is found: a
     /// progress ring while it downloads, then the green button that restarts into it (or, while a recording or another
     /// job would be cut short, what it waits for). Nothing while the app is up to date.
-    fn update_button(&mut self, ui: &mut Ui, snap: &Snapshot, right_center: egui::Pos2, id: Id) {
+    fn update_button(&mut self, ui: &mut Ui, snap: &Snapshot, right_center: egui::Pos2, name_end: f32, id: Id) {
         let ctx = ui.ctx().clone();
         let u = &snap.update;
         let (label, tip, fraction, live) = match &u.state {
@@ -472,8 +473,14 @@ impl App {
             }
             _ => return,
         };
-        let txt = Txt::new(label, 11.5).weight(weight::SEMIBOLD).color(if live { theme::ON_ACCENT } else { theme::ACCENT });
-        let w = widgets::text_size(ui, &txt).x + 34.0;
+        let words = |size: f32| Txt::new(label, size).weight(weight::SEMIBOLD).color(if live { theme::ON_ACCENT } else { theme::ACCENT });
+        // Beside the name, in the room it leaves: a longer word ("Mettre à jour") first gives up the icon (a download keeps its ring, which is its progress), then a little size.
+        let (room, wide) = (right_center.x - name_end, widgets::text_size(ui, &words(11.5)).x);
+        let with_icon = fraction.is_some() || wide + 34.0 <= room;
+        let lead = if with_icon { 23.0 } else { 11.0 };
+        let size = if lead + wide + 11.0 > room { (11.5 * (room - lead - 11.0) / wide).max(10.0) } else { 11.5 };
+        let txt = words(size);
+        let w = widgets::text_size(ui, &txt).x + lead + 11.0;
         let pill = Rect::from_min_size(pos2(right_center.x - w, right_center.y - 13.0), vec2(w, 26.0));
         let resp = ui.interact(pill, id, Sense::click()).on_hover_text(tip);
         let resp = if live { resp.on_hover_cursor(CursorIcon::PointingHand) } else { resp };
@@ -490,9 +497,10 @@ impl App {
                 orbiters_ui::paint::arc(p, at, 5.0, -std::f32::consts::FRAC_PI_2, std::f32::consts::TAU * f.clamp(0.0, 1.0), 2.0, theme::ACCENT);
                 ctx.request_repaint_after(std::time::Duration::from_millis(200));
             }
-            None => widgets::icon(p, at, icons::DOWNLOAD_SIMPLE, 12.5, if live { theme::ON_ACCENT } else { theme::ACCENT }),
+            None if with_icon => widgets::icon(p, at, icons::DOWNLOAD_SIMPLE, 12.5, if live { theme::ON_ACCENT } else { theme::ACCENT }),
+            None => {}
         }
-        widgets::text(p, pos2(shown.left() + 23.0, shown.center().y), Align2::LEFT_CENTER, &txt);
+        widgets::text(p, pos2(shown.left() + lead, shown.center().y), Align2::LEFT_CENTER, &txt);
         if live && widgets::pressed(&resp) {
             self.ctl.updates(UpdateAction::Restart { now: false });
         }

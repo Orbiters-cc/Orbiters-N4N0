@@ -9,3 +9,4 @@ crates/orbiters-desktop/src/pages/requests.rs
 crates/orbiters-desktop/src/pages/mic.rs
 crates/orbiters-desktop/src/pages/mod.rs
 crates/orbiters-desktop/src/pages/form.rs
+crates/orbiters-desktop/src/pages/mic_grid.rs

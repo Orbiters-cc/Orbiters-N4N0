@@ -245,7 +245,13 @@ impl Effect {
     pub fn title(&self) -> String {
         match self {
             Effect::Text(t) if !t.value.trim().is_empty() => format!("“{}”", t.value.lines().next().unwrap_or_default().trim()),
-            Effect::Blur(b) => format!("{} blur", b.kind.name()),
+            Effect::Blur(b) => match b.kind {
+                BlurKind::Gaussian => tr("Gaussian blur"),
+                BlurKind::Lens => tr("Lens blur"),
+                BlurKind::Directional => tr("Directional blur"),
+                BlurKind::Depth => tr("Depth blur"),
+            }
+            .to_string(),
             e => e.kind().name().to_string(),
         }
     }

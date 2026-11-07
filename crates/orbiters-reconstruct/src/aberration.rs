@@ -166,13 +166,13 @@ impl Measurement {
     pub fn verdict(&self) -> Result<f32, String> {
         let (fit, outer) = (self.intensity, self.median_outer);
         if !fit.is_finite() || fit < MIN_INTENSITY {
-            return Err(format!("none measured ({fit:.3})"));
+            return Err(format!("none measured ({fit:.3})")); // i18n: not shown (only the worker's log line reads it)
         }
         if self.patches < MIN_PATCHES {
-            return Err(format!("{fit:.3} measured on only {} patches", self.patches));
+            return Err(format!("{fit:.3} measured on only {} patches", self.patches)); // i18n: not shown (only the worker's log line reads it)
         }
         if (fit - outer).abs() > AGREEMENT * fit.max(outer) {
-            return Err(format!("the fit ({fit:.3}) and the frame's outer patches ({outer:.3}) disagree"));
+            return Err(format!("the fit ({fit:.3}) and the frame's outer patches ({outer:.3}) disagree")); // i18n: not shown (only the worker's log line reads it)
         }
         Ok(fit.min(MAX_INTENSITY))
     }

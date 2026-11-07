@@ -68,6 +68,16 @@ pub enum Action {
     Talk,
     /// The Orbiters window.
     OpenApp,
+    /// Starts or stops listening to the person.
+    TalkToggle,
+    /// N4N0 forgets this conversation.
+    NewConversation,
+    /// A YouTube result, the `n`-th: its link, for the world's player.
+    Video(usize),
+    /// A YouTube result as a card dropped in the world.
+    VideoDrop(usize),
+    /// Back to searching.
+    ResultsBack,
     /// Invites the person to a world's instance: the group's, and which of its visits.
     Invite(usize, usize),
     /// The computer's volume up or down, and muted or not.
@@ -92,6 +102,31 @@ pub enum Sheet {
     Worlds,
     /// Where the person was, a row for each world.
     Instances,
+    /// YouTube's results, all in one list.
+    Results,
+    /// Talking with N4N0: one button, and the conversation.
+    Talk,
+}
+
+/// A result of a YouTube search, as its list shows it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct VideoTile {
+    pub title: String,
+    pub channel: String,
+    pub duration: Option<String>,
+    pub picture: Option<TextureId>,
+}
+
+/// Where talking with N4N0 stands: what its button shows, so that it is clear as day.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub enum TalkNow {
+    #[default]
+    Ready,
+    /// With how loud the microphone is, 0 to 1.
+    Listening(f32),
+    Thinking,
+    /// It cannot now, and why.
+    Off(&'static str),
 }
 
 /// A world the person was in, with its instances: how the Instances sheet shows them.
@@ -162,6 +197,14 @@ pub struct Facts {
     pub music_times: Option<(u32, u32)>,
     /// What the world's video player has.
     pub world_video: Option<String>,
+    /// YouTube's results, and what was searched.
+    pub videos: Vec<VideoTile>,
+    pub videos_for: String,
+    /// Talking with N4N0: where it stands, the conversation (whether the person said it, what was said), what N4N0 says right now, and how to call it by name when that is on.
+    pub talk: TalkNow,
+    pub talk_lines: Vec<(bool, String)>,
+    pub n4n0_says: Option<String>,
+    pub wake_word: Option<String>,
     /// The ring's cells can be picked by the number keys: on the desktop's wheel.
     pub digits: bool,
     /// The wing or its strip lies beside the sheet: it has the name and what plays already.
@@ -203,6 +246,16 @@ pub enum Look {
     Cell { icon: &'static str, label: &'static str, badge: bool },
     /// A small heading over a group of a sheet's tiles.
     Heading(&'static str),
+    /// A YouTube result.
+    Video(usize),
+    /// A small button on a YouTube result.
+    VideoDrop,
+    /// The back button of YouTube's results.
+    Back,
+    /// The one button that talks to N4N0.
+    TalkButton,
+    /// Starting the conversation over.
+    NewTalk,
     /// A world the person was in: its picture, name and last time.
     Visit(usize),
     /// A button to a world's instance: 0 the last time and the main one, else one of the times before.
@@ -369,6 +422,29 @@ pub fn sheet_items(sheet: Sheet, facts: &Facts) -> Vec<Item> {
             }
             out
         }
+        Sheet::Results => {
+            let (columns, width, height, top) = video_grid();
+            let mut out = Vec::new();
+            for i in 0..facts.videos.len() {
+                let (c, row) = ((i % columns) as f32, (i / columns) as f32);
+                let y = top + row * (height + 12.0) - facts.gallery_scroll;
+                if y + height < RESULTS_TOP || y > 576.0 {
+                    continue;
+                }
+                let rect = r(24.0 + c * (width + 12.0), y, width, height);
+                out.push(Item { action: Action::Video(i), rect, look: Look::Video(i) });
+                out.push(Item { action: Action::VideoDrop(i), rect: r(rect.right() - 72.0, rect.bottom() - 40.0, 64.0, 32.0), look: Look::VideoDrop });
+            }
+            out.push(Item { action: Action::ResultsBack, rect: r(24.0, 8.0, 44.0, 44.0), look: Look::Back });
+            out
+        }
+        Sheet::Talk => {
+            let mut out = vec![Item { action: Action::TalkToggle, rect: r(24.0, 60.0, 320.0, 460.0), look: Look::TalkButton }];
+            if !facts.talk_lines.is_empty() {
+                out.push(Item { action: Action::NewConversation, rect: r(1024.0 - 24.0 - 170.0, 10.0, 170.0, 40.0), look: Look::NewTalk });
+            }
+            out
+        }
         Sheet::Instances => {
             let (x0, y0, height, gap) = (24.0, VISIT_TOP, VISIT_HEIGHT, VISIT_GAP);
             let mut out = Vec::new();
@@ -425,6 +501,34 @@ fn gallery_rects(facts: &Facts) -> (Vec<Rect>, f32) {
     crate::pages::gallery_layout::arrange(facts.gallery_layout, &vec![16.0 / 9.0; facts.recent.len()], 1024.0 - 48.0, 300.0, 0.0)
 }
 
+/// Where YouTube's results start on their page, under the search they are of.
+const RESULTS_TOP: f32 = 60.0;
+
+/// YouTube's results' grid: columns, a tile's width and height, and where the first lies.
+fn video_grid() -> (usize, f32, f32, f32) {
+    let width = (1024.0 - 48.0 - 24.0) / 3.0;
+    (3, width, width * 9.0 / 16.0 + 62.0, RESULTS_TOP + 4.0)
+}
+
+/// Which of YouTube's results show, scrolled this far: what fetches their pictures, and the next ones.
+pub fn videos_shown(scroll: f32) -> std::ops::Range<usize> {
+    let (columns, _, height, top) = video_grid();
+    let row = (((scroll - top) / (height + 12.0)).floor().max(0.0)) as usize;
+    (row * columns)..((row + 4) * columns)
+}
+
+/// Where the conversation is on the talking sheet, and how wide.
+const TALK_LEFT: f32 = 368.0;
+const TALK_TOP: f32 = 60.0;
+const TALK_WIDTH: f32 = 1024.0 - TALK_LEFT - 24.0;
+
+/// A line's height: as good as can be told with no painter to measure it with, and a little over.
+fn talk_line_height(text: &str) -> f32 {
+    let per_line = ((TALK_WIDTH * 0.86 - 28.0) / 9.0).max(10.0);
+    let lines = (text.chars().count() as f32 / per_line).ceil().max(1.0);
+    lines * 24.0 + 26.0 + 10.0
+}
+
 /// The Instances sheet's rows.
 const VISIT_TOP: f32 = 10.0;
 const VISIT_HEIGHT: f32 = 90.0;
@@ -441,13 +545,18 @@ pub fn max_scroll(sheet: Sheet, facts: &Facts) -> f32 {
     match sheet {
         Sheet::Pictures => (GALLERY_TOP + gallery_rects(facts).1 + 12.0 - 576.0).max(0.0),
         Sheet::Instances => (VISIT_TOP + facts.worlds_visited.len() as f32 * (VISIT_HEIGHT + VISIT_GAP) + 4.0 - 576.0).max(0.0),
+        Sheet::Results => {
+            let (columns, _, height, top) = video_grid();
+            (top + facts.videos.len().div_ceil(columns) as f32 * (height + 12.0) + 8.0 - 576.0).max(0.0)
+        }
+        Sheet::Talk => (TALK_TOP + facts.talk_lines.iter().map(|(_, t)| talk_line_height(t)).sum::<f32>() + 8.0 - 576.0).max(0.0),
         _ => 0.0,
     }
 }
 
 /// Whether a press on this is the start of a drag as much as a press: what lies in a list that scrolls. It only acts if let go without moving.
 pub fn scrolls_with_a_drag(sheet: Sheet, look: &Look) -> bool {
-    matches!(sheet, Sheet::Pictures | Sheet::Instances) && matches!(look, Look::Capture(_) | Look::Visit(_) | Look::Chip { .. })
+    matches!(sheet, Sheet::Pictures | Sheet::Instances | Sheet::Results) && matches!(look, Look::Capture(_) | Look::Visit(_) | Look::Chip { .. } | Look::Video(_) | Look::VideoDrop)
 }
 
 /// What plays's controls, on its panel on All tools: nothing about it needs a page of its own.
@@ -538,7 +647,15 @@ pub fn caption(action: Action, facts: &Facts) -> Option<(String, String)> {
         },
         Action::Previous => ("Previous".into(), "The previous track on your computer.".into()),
         Action::Next => ("Next".into(), "The next track on your computer.".into()),
-        Action::Talk if facts.n4n0 => ("Ask N4N0".into(), "Hold and speak: N4N0 is your assistant in VRChat.".into()),
+        Action::TalkToggle => match facts.talk {
+            TalkNow::Listening(_) => ("Listening".into(), "Press when you are done.".into()),
+            _ => ("Talk to N4N0".into(), "Press, speak, and press again.".into()),
+        },
+        Action::NewConversation => ("New conversation".into(), "N4N0 starts over.".into()),
+        Action::Video(i) => (facts.videos.get(i).map_or(String::new(), |v| v.title.clone()), "Press to copy its link, for the world's video player.".into()),
+        Action::VideoDrop(_) => ("Drop it in the world".into(), "A card with its link, that whoever grabs it can use.".into()),
+        Action::ResultsBack => ("Back".into(), "To the search.".into()),
+        Action::Talk if facts.n4n0 => ("Ask N4N0".into(), "Your assistant in VRChat: talk to it, and see all it said.".into()),
         Action::Talk => ("Ask N4N0".into(), "Turn N4N0 on in Orbiters first.".into()),
         Action::OpenApp => ("Open Orbiters".into(), "The full app, on your computer.".into()),
         Action::CloseSheet => ("Close".into(), "Back to VRChat's menu.".into()),
@@ -764,6 +881,13 @@ pub fn paint(p: &Painter, zone: Zone, size: Vec2, facts: &Facts, hover: Option<u
 pub fn paint_sheet(p: &Painter, sheet: Sheet, facts: &Facts, hover: Option<usize>, pressed: Option<usize>) {
     let page = Rect::from_min_size(pos2(0.0, 0.0), vec2(1024.0, 576.0));
     p.rect_filled(page, 0.0, look::OPAQUE);
+    if sheet == Sheet::Results {
+        let font = theme::font(20.0, weight::SEMIBOLD);
+        p.text(pos2(82.0, 30.0), Align2::LEFT_CENTER, fit(p, &facts.videos_for, &font, 880.0), font, look::LABEL);
+    }
+    if sheet == Sheet::Talk {
+        draw_conversation(p, facts);
+    }
     if sheet == Sheet::Instances && facts.worlds_visited.is_empty() {
         widgets::icon(p, page.center() - vec2(0.0, 30.0), icons::CLOCK, 54.0, look::MUTED);
         text(p, page.center() + vec2(0.0, 24.0), Align2::CENTER_CENTER, "Nowhere yet", 22.0, weight::BOLD, look::LABEL);
@@ -781,12 +905,43 @@ pub fn paint_sheet(p: &Painter, sheet: Sheet, facts: &Facts, hover: Option<usize
     let max = max_scroll(sheet, facts);
     if max > 0.0 {
         {
-            let top = if sheet == Sheet::Pictures { GALLERY_TOP } else { 8.0 };
+            let top = match sheet {
+                Sheet::Pictures => GALLERY_TOP,
+                Sheet::Results => RESULTS_TOP,
+                Sheet::Talk => TALK_TOP,
+                _ => 8.0,
+            };
             let track = 576.0 - top - 8.0;
             let length = (track * track / (track + max)).max(36.0);
             let y = top + (track - length) * (facts.gallery_scroll / max).clamp(0.0, 1.0);
             p.rect_filled(Rect::from_min_size(pos2(1024.0 - 13.0, y), vec2(5.0, length)), theme::radius(2.5), Color32::from_white_alpha(70));
         }
+    }
+}
+
+/// The conversation with N4N0, newest at the foot, the person's lines to the right.
+fn draw_conversation(p: &Painter, facts: &Facts) {
+    text(p, pos2(TALK_LEFT + 2.0, 30.0), Align2::LEFT_CENTER, "Conversation", 20.0, weight::BOLD, look::LABEL);
+    let area = Rect::from_min_max(pos2(TALK_LEFT, TALK_TOP), pos2(1024.0 - 20.0, 576.0));
+    if facts.talk_lines.is_empty() {
+        text(p, area.center() - vec2(0.0, 22.0), Align2::CENTER_CENTER, "Nothing said yet", 22.0, weight::BOLD, look::MUTED);
+        text(p, area.center() + vec2(0.0, 12.0), Align2::CENTER_CENTER, "Press the button, and ask N4N0 anything.", 17.0, weight::MEDIUM, look::MUTED);
+        return;
+    }
+    let clip = p.with_clip_rect(area);
+    let mut y = TALK_TOP - facts.gallery_scroll;
+    for (person, line) in &facts.talk_lines {
+        let height = talk_line_height(line);
+        if y + height >= TALK_TOP && y <= 576.0 {
+            let wide = TALK_WIDTH * 0.86;
+            let galley = clip.layout(line.clone(), theme::font(17.0, weight::MEDIUM), look::LABEL, wide - 28.0);
+            let size = galley.size() + vec2(28.0, 20.0);
+            let x = if *person { TALK_LEFT + TALK_WIDTH - size.x } else { TALK_LEFT };
+            let bubble = Rect::from_min_size(pos2(x, y), size);
+            clip.rect_filled(bubble, theme::radius(14.0), if *person { theme::mix(look::TILE, look::ACCENT, 0.22) } else { look::TILE });
+            clip.galley(bubble.min + vec2(14.0, 10.0), galley, look::LABEL);
+        }
+        y += height;
     }
 }
 
@@ -885,7 +1040,7 @@ fn is_selected(item: &Item, facts: &Facts) -> bool {
     match (facts.sheet, item.action) {
         (Some(Sheet::Worlds), Action::Worlds) | (Some(Sheet::All), Action::All) | (Some(Sheet::Pictures), Action::Pictures) => true,
         (Some(Sheet::Menu), Action::Page(Target::YouTube)) => facts.sheet_title == "YouTube",
-        (Some(Sheet::Instances), Action::Page(Target::Instances)) => true,
+        (Some(Sheet::Instances), Action::Page(Target::Instances)) | (Some(Sheet::Results), Action::Page(Target::YouTube)) => true,
         _ => false,
     }
 }
@@ -1065,6 +1220,75 @@ fn draw(p: &Painter, zone: Zone, item: &Item, facts: &Facts, hovered: bool, pres
                 p.text(pos2(x, rect.center().y + 14.0), Align2::LEFT_CENTER, fit(p, "A 3D scene of where you walk", &small, room), small, look::MUTED);
             }
         }
+        Look::Video(i) => {
+            let Some(video) = facts.videos.get(i) else { return };
+            let clip = p.with_clip_rect(Rect::from_min_max(pos2(0.0, RESULTS_TOP), pos2(1024.0, 576.0)));
+            let radii = [theme::squircle(14.0); 4];
+            let picture = Rect::from_min_size(rect.min, vec2(rect.width(), rect.width() * 9.0 / 16.0));
+            match video.picture {
+                Some(id) => orbiters_ui::paint::squircle_texture(&clip, picture, radii, id, cover_uv(picture.size()), if pressed { Color32::from_gray(200) } else { Color32::WHITE }),
+                None => {
+                    orbiters_ui::paint::fill_convex(&clip, &orbiters_ui::paint::squircle_points_corners(picture, radii), |_| theme::INK_750);
+                    widgets::icon(&clip, picture.center(), icons::YOUTUBE_LOGO, 40.0, look::MUTED);
+                }
+            }
+            if hovered {
+                clip.rect_stroke(picture.shrink(1.0), theme::radius(14.0), Stroke::new(2.0, look::ACCENT), egui::StrokeKind::Middle);
+            }
+            if let Some(duration) = &video.duration {
+                let font = theme::font(14.0, weight::SEMIBOLD);
+                let wide = clip.layout_no_wrap(duration.clone(), font.clone(), Color32::WHITE).size().x;
+                let chip = Rect::from_min_size(picture.right_bottom() - vec2(wide + 20.0, 32.0), vec2(wide + 12.0, 24.0));
+                clip.rect_filled(chip, theme::radius(6.0), Color32::from_black_alpha(190));
+                clip.text(chip.center(), Align2::CENTER_CENTER, duration, font, look::LABEL);
+            }
+            let room = rect.width() - 84.0;
+            let font = theme::font(17.0, weight::BOLD);
+            clip.text(pos2(rect.left() + 2.0, picture.bottom() + 18.0), Align2::LEFT_CENTER, fit(&clip, &video.title, &font, room), font, look::LABEL);
+            let font = theme::font(14.0, weight::MEDIUM);
+            clip.text(pos2(rect.left() + 2.0, picture.bottom() + 42.0), Align2::LEFT_CENTER, fit(&clip, &video.channel, &font, room), font, look::MUTED);
+        }
+        Look::VideoDrop => {
+            let clip = p.with_clip_rect(Rect::from_min_max(pos2(0.0, RESULTS_TOP), pos2(1024.0, 576.0)));
+            clip.rect_filled(rect, theme::radius(rect.height() / 2.0), if hovered { look::TILE_HOVER } else { look::TILE });
+            clip.text(rect.center(), Align2::CENTER_CENTER, "Drop", theme::font(14.0, weight::SEMIBOLD), look::LABEL);
+        }
+        Look::Back => {
+            p.circle_filled(rect.center(), rect.width() / 2.0, if hovered { look::TILE_HOVER } else { look::TILE });
+            widgets::icon(p, rect.center(), icons::CARET_LEFT, 24.0, look::LABEL);
+        }
+        Look::NewTalk => {
+            p.rect_filled(rect, theme::radius(rect.height() / 2.0), if hovered { look::TILE_HOVER } else { look::TILE });
+            p.text(rect.center(), Align2::CENTER_CENTER, "New conversation", theme::font(15.0, weight::SEMIBOLD), look::LABEL);
+        }
+        Look::TalkButton => {
+            // Clear as day: the one thing on this page that changes with whether N4N0 hears you.
+            let center = pos2(rect.center().x, rect.top() + 170.0);
+            let radius = 118.0;
+            let (fill, ink, first, second): (Color32, Color32, &str, &str) = match facts.talk {
+                TalkNow::Ready => (theme::mix(look::TILE, look::ACCENT, if pressed { 0.4 } else if hovered { 0.3 } else { 0.18 }), look::ACCENT, "Press to talk", "Press again when you are done"),
+                TalkNow::Listening(_) => (look::ACCENT, look::ON_ACCENT, "Listening", "Press when you are done"),
+                TalkNow::Thinking => (look::TILE, look::LABEL, "Thinking", "N4N0 answers on the right"),
+                TalkNow::Off(why) => (look::TILE, theme::FG_4, "Not available", why),
+            };
+            if let TalkNow::Listening(level) = facts.talk {
+                p.circle_filled(center, radius + 12.0 + level.clamp(0.0, 1.0) * 28.0, theme::alpha(look::ACCENT, 0.22));
+            }
+            p.circle_filled(center, radius, fill);
+            if matches!(facts.talk, TalkNow::Ready) {
+                p.circle_stroke(center, radius, Stroke::new(3.0, look::ACCENT));
+            }
+            widgets::icon(p, center, if matches!(facts.talk, TalkNow::Thinking) { icons::CHAT_TEARDROP_TEXT } else { icons::MICROPHONE }, 96.0, ink);
+            let y = center.y + radius + 48.0;
+            let color = if matches!(facts.talk, TalkNow::Listening(_)) { look::ACCENT } else { look::LABEL };
+            text(p, pos2(rect.center().x, y), Align2::CENTER_CENTER, first, 30.0, weight::BOLD, color);
+            let font = theme::font(16.0, weight::MEDIUM);
+            p.text(pos2(rect.center().x, y + 34.0), Align2::CENTER_CENTER, fit(p, second, &font, rect.width() - 8.0), font, look::MUTED);
+            if let Some(word) = &facts.wake_word {
+                let font = theme::font(14.0, weight::MEDIUM);
+                p.text(pos2(rect.center().x, y + 62.0), Align2::CENTER_CENTER, fit(p, &format!("You can also say \u{201c}{word}\u{201d}"), &font, rect.width() - 8.0), font, look::MUTED);
+            }
+        }
         Look::Heading(name) => {
             text(p, pos2(rect.left() + 2.0, rect.center().y), Align2::LEFT_CENTER, name, 16.0, weight::BOLD, look::LABEL);
         }
@@ -1163,10 +1387,10 @@ fn draw(p: &Painter, zone: Zone, item: &Item, facts: &Facts, hovered: bool, pres
             }
         }
         Look::Talk => {
-            let on = pressed && facts.n4n0;
-            tile_back(p, rect, hovered, false, on);
+            let on = matches!(facts.talk, TalkNow::Listening(_));
+            tile_back(p, rect, hovered, pressed, on);
             let color = if on {
-                look::ON_ACCENT
+                look::ACCENT
             } else if !facts.n4n0 {
                 theme::FG_4
             } else if hovered {
@@ -1334,7 +1558,7 @@ fn draw_caption(p: &Painter, rect: Rect, facts: &Facts) {
 
 /// What goes before anything else the caption would say: what stopped a 3D picture, or what one waits for.
 fn said_now(facts: &Facts) -> Option<(String, String)> {
-    facts.note.clone().or_else(|| facts.picture_wait.map(wait_words))
+    facts.note.clone().or_else(|| facts.picture_wait.map(wait_words)).or_else(|| facts.n4n0_says.clone().map(|said| ("N4N0".to_string(), said)))
 }
 
 /// What a sheet's head says of what is going on.
@@ -1345,7 +1569,7 @@ fn status_now(facts: &Facts) -> Option<(String, String)> {
     if facts.picture_flying {
         return Some(("3D picture in progress".into(), "The camera is flying. Stay where you are for a moment.".into()));
     }
-    said_now(facts).or_else(|| facts.invite_said.clone().map(|said| ("Invite".to_string(), said)))
+    said_now(facts).or_else(|| facts.invite_said.clone().map(|said| (facts.sheet_title.clone(), said)))
 }
 
 /// What a 3D picture waits for, in the caption's two lines.
@@ -1585,6 +1809,52 @@ mod tests {
             let range = visits_shown(scroll);
             assert!(shown.iter().all(|n| range.contains(n)), "{scroll}: {shown:?} {range:?}");
         }
+    }
+
+    #[test]
+    fn youtube_results_are_one_list_and_lay_only_what_shows() {
+        let video = |i: usize| VideoTile { title: format!("V{i}"), channel: "C".into(), duration: None, picture: None };
+        let facts = Facts { videos: (0..200).map(video).collect(), desktop: true, ..facts() };
+        let tiles = |f: &Facts| sheet_items(Sheet::Results, f).iter().filter_map(|i| if let Look::Video(n) = i.look { Some(n) } else { None }).collect::<Vec<_>>();
+        assert!(tiles(&facts).contains(&0) && tiles(&facts).len() < 16);
+        let max = max_scroll(Sheet::Results, &facts);
+        assert!(tiles(&Facts { gallery_scroll: max, ..facts.clone() }).contains(&199), "the last can be reached");
+        assert!(scrolls_with_a_drag(Sheet::Results, &Look::Video(0)));
+        assert!(!scrolls_with_a_drag(Sheet::Results, &Look::Back), "its back acts at once");
+        // Its Drop lies on top of its tile, for the pointer too.
+        let items = sheet_items(Sheet::Results, &facts);
+        let chip = items.iter().find(|i| i.action == Action::VideoDrop(0)).unwrap().rect;
+        assert_eq!(items[hit(&items, chip.center()).unwrap()].action, Action::VideoDrop(0));
+        for scroll in [0.0, 900.0, max] {
+            let shown = tiles(&Facts { gallery_scroll: scroll, ..facts.clone() });
+            assert!(shown.iter().all(|n| videos_shown(scroll).contains(n)), "{scroll}: {shown:?}");
+        }
+    }
+
+    /// Enzo: "there should be an easy button to speak to it where it's clear as day when it listens or not".
+    #[test]
+    fn the_talking_page_has_one_button_says_where_it_stands_and_scrolls_its_conversation() {
+        let items = sheet_items(Sheet::Talk, &facts());
+        assert_eq!(items.iter().filter(|i| i.action == Action::TalkToggle).count(), 1);
+        assert!(!items.iter().any(|i| i.action == Action::NewConversation), "nothing to start over yet");
+        let listening = Facts { talk: TalkNow::Listening(0.5), ..facts() };
+        assert_eq!(caption(Action::TalkToggle, &listening).unwrap().0, "Listening");
+        assert_ne!(caption(Action::TalkToggle, &facts()).unwrap().0, "Listening");
+        let talked = Facts { talk_lines: (0..40).map(|i| (i % 2 == 0, "A sentence of a fair length said here. ".repeat(3))).collect(), ..facts() };
+        assert!(sheet_items(Sheet::Talk, &talked).iter().any(|i| i.action == Action::NewConversation));
+        assert!(max_scroll(Sheet::Talk, &talked) > 1000.0);
+        assert_eq!(max_scroll(Sheet::Talk, &Facts { talk_lines: vec![(true, "Hello".into())], ..facts() }), 0.0);
+    }
+
+    /// When N4N0 speaks it shows, wherever the person is in these menus.
+    #[test]
+    fn what_n4n0_says_shows_in_the_caption_and_a_sheet_s_head() {
+        let facts = Facts { n4n0_says: Some("It is sunny".into()), ..facts() };
+        assert_eq!(said_now(&facts), Some(("N4N0".to_string(), "It is sunny".to_string())));
+        assert_eq!(status_now(&facts).unwrap().1, "It is sunny");
+        // What stopped a picture goes before it.
+        let stopped = Facts { note: Some(("a".into(), "b".into())), ..facts };
+        assert_eq!(said_now(&stopped).unwrap().0, "a");
     }
 
     #[test]

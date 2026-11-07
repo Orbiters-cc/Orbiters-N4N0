@@ -394,6 +394,11 @@ pub struct Panels {
     was_flying: bool,
     /// Where the gallery is going to, as its wheel said.
     gallery_to: f32,
+    /// What was last asked for YouTube's results' pictures, and how many there were.
+    videos_asked: Option<std::ops::Range<usize>>,
+    videos_had: usize,
+    /// How many lines the conversation had.
+    talk_had: usize,
     /// A press on a list, which may yet be a drag; where the pointer is on the sheet; and what it turned out to press.
     drag: Option<Drag>,
     sheet_pointer: Option<Pos2>,
@@ -439,6 +444,9 @@ impl Panels {
             note: PictureNote::default(),
             was_flying: false,
             gallery_to: 0.0,
+            videos_asked: None,
+            videos_had: 0,
+            talk_had: 0,
             drag: None,
             sheet_pointer: None,
             pressed_late: None,
@@ -499,6 +507,7 @@ impl Panels {
     /// What is open: parts for it in the places `places` gives, or none. Hide lasts until the menu closes. Whatever was held lets go.
     pub fn set_open(&mut self, around: Option<Around>, places: Vec<Placed>, snap: &Snapshot) {
         if around != self.open {
+            self.stop_talking();
             self.hidden = false;
             self.facts.pointed = None;
             self.facts.sheet = None;
@@ -570,7 +579,15 @@ impl Panels {
         self.stage.canvas.invalidate();
     }
 
+    /// What is being said ends with its page: nobody should be listened to with no sign of it.
+    fn stop_talking(&mut self) {
+        if std::mem::take(&mut self.talking) {
+            self.backend.n4n0(N4n0Command::Talk { down: false });
+        }
+    }
+
     fn close_sheet(&mut self) {
+        self.stop_talking();
         self.takeover = None;
         self.facts.sheet = None;
         self.facts.sheet_title.clear();
@@ -723,6 +740,34 @@ impl Panels {
         if self.facts.sheet == Some(Sheet::Menu) && matches!(self.stage.host.menu.page, Page::Home | Page::More) {
             self.open_sheet(Sheet::All, "All tools", snap);
         }
+        // YouTube's results are one list here, the rest of it the menu's own pages.
+        if self.facts.sheet == Some(Sheet::Menu) && self.stage.host.menu.page == Page::Results {
+            self.open_sheet(Sheet::Results, "YouTube", snap);
+        } else if self.facts.sheet == Some(Sheet::Results) && self.stage.host.menu.page != Page::Results {
+            self.open_sheet(Sheet::Menu, "YouTube", snap);
+        }
+        if self.facts.sheet == Some(Sheet::Results) {
+            let shown = panels::videos_shown(self.facts.gallery_scroll);
+            if self.videos_asked != Some(shown.clone()) || self.videos_had != self.stage.host.menu.results.len() {
+                self.videos_asked = Some(shown.clone());
+                self.videos_had = self.stage.host.menu.results.len();
+                let host = &mut self.stage.host;
+                let ids: Vec<String> = host.menu.results.iter().skip(shown.start).take(shown.len()).map(|v| v.id.clone()).collect();
+                // Near the end, the next ones: the list has no end while YouTube has more.
+                let mut effects = host.menu.results.len().saturating_sub(shown.end).lt(&6).then(|| host.menu.want_more_results()).unwrap_or_default();
+                effects.push(orbiters_n4n0_core::menu::Effect::Thumbnails(ids));
+                host.effects(effects, snap, &self.backend);
+            }
+            if let Some(panel) = self.takeover.as_mut() {
+                // Their pictures arrive as they do.
+                panel.dirty = panel.dirty || self.stage.host.dirty;
+            }
+        }
+        // The conversation keeps its newest in view as it grows.
+        if self.facts.sheet == Some(Sheet::Talk) && self.talk_had != self.facts.talk_lines.len() {
+            self.talk_had = self.facts.talk_lines.len();
+            self.gallery_to = panels::max_scroll(Sheet::Talk, &self.facts);
+        }
         // An invite that needs Orbiters as a friend first goes on the menu's own page.
         if self.facts.sheet == Some(Sheet::Instances) && self.stage.host.menu.page != Page::Instances {
             self.open_sheet(Sheet::Menu, "Add Orbiters as a friend", snap);
@@ -775,6 +820,24 @@ impl Panels {
             vr_close: self.sharp > 1.0,
             picture_mode: self.facts.picture_mode,
             hint: self.facts.hint,
+            videos: if self.facts.sheet == Some(Sheet::Results) {
+                menu.results
+                    .iter()
+                    .map(|v| panels::VideoTile { title: v.title.clone(), channel: v.channel.clone(), duration: v.duration.clone(), picture: self.stage.host.picture(&v.id, false) })
+                    .collect()
+            } else {
+                Vec::new()
+            },
+            videos_for: menu.results_for.clone(),
+            talk: talk_now(snap),
+            talk_lines: if self.facts.sheet == Some(Sheet::Talk) {
+                snap.n4n0.lines.iter().map(|l| (l.who == orbiters_n4n0::status::N4n0Who::You, l.text.clone())).collect()
+            } else {
+                Vec::new()
+            },
+            // On its own page it is all there already.
+            n4n0_says: snap.n4n0.panel.clone().filter(|_| self.facts.sheet != Some(Sheet::Talk)),
+            wake_word: snap.settings.n4n0.wake_words.first().filter(|_| snap.settings.n4n0.wake_word).cloned(),
             gallery_scroll: self.facts.gallery_scroll,
             gallery_layout: snap.settings.photos_layout,
             volume: menu.volume.as_ref().map(|v| (v.percent, v.muted)),
@@ -783,7 +846,7 @@ impl Panels {
             digits: self.open == Some(Around::Wheel) && self.takeover.is_none() && (snap.n4n0.desktop_mode || !snap.steamvr.running),
             beside_wing: self.open == Some(Around::QuickMenu),
             worlds_visited: visited,
-            invite_said: (self.facts.sheet == Some(Sheet::Instances)).then(|| menu.notice.clone()).flatten(),
+            invite_said: matches!(self.facts.sheet, Some(Sheet::Instances | Sheet::Results)).then(|| menu.notice.clone()).flatten(),
             note: self.facts.note.clone(),
             picture_wait: snap.n4n0.photo_wait,
             pointed: self.facts.pointed,
@@ -931,7 +994,7 @@ impl Panels {
             }
         }
         // A list's own empty space can be dragged too.
-        if look.is_none() && self.sheet_pointer.is_some() && matches!(self.facts.sheet, Some(Sheet::Pictures | Sheet::Instances)) {
+        if look.is_none() && self.sheet_pointer.is_some() && matches!(self.facts.sheet, Some(Sheet::Pictures | Sheet::Instances | Sheet::Results | Sheet::Talk)) {
             self.drag = Some(Drag { from: None, scroll: self.facts.gallery_scroll, action: None, moved: false });
             return out;
         }
@@ -1033,9 +1096,29 @@ impl Panels {
             }
             Action::Talk => {
                 if self.facts.n4n0 {
-                    self.talking = true;
-                    self.backend.n4n0(N4n0Command::Talk { down: true });
+                    self.open_sheet(Sheet::Talk, "Ask N4N0", snap);
                 }
+            }
+            Action::TalkToggle => {
+                if !matches!(self.facts.talk, panels::TalkNow::Off(_)) {
+                    let down = !snap.n4n0.listening;
+                    self.talking = down;
+                    self.backend.n4n0(N4n0Command::Talk { down });
+                }
+            }
+            Action::NewConversation => self.backend.n4n0(N4n0Command::NewConversation),
+            Action::Video(i) | Action::VideoDrop(i) => {
+                // The menu's page of results is what its rows press on.
+                let host = &mut self.stage.host;
+                host.menu.result_page = i / orbiters_n4n0_core::menu::RESULTS_PER_PAGE;
+                let row = (i % orbiters_n4n0_core::menu::RESULTS_PER_PAGE) as u8;
+                let effects = host.press(if matches!(action, Action::Video(_)) { Target::Copy(row) } else { Target::Drop(row) });
+                host.effects(effects, snap, &self.backend);
+            }
+            Action::ResultsBack => {
+                let host = &mut self.stage.host;
+                let effects = host.press(Target::Back);
+                host.effects(effects, snap, &self.backend);
             }
             Action::OpenApp => self.backend.show_window(),
             Action::CloseSheet => self.close_sheet(),
@@ -1054,9 +1137,6 @@ impl Panels {
             if !drag.moved {
                 self.pressed_late = drag.action;
             }
-        }
-        if std::mem::take(&mut self.talking) {
-            self.backend.n4n0(N4n0Command::Talk { down: false });
         }
         for panel in self.list.iter_mut().chain(self.takeover.iter_mut()) {
             if panel.pressed.take().is_some() {
@@ -1267,6 +1347,27 @@ impl Drop for Panels {
     }
 }
 
+/// Where talking with N4N0 stands, and why it cannot when it cannot.
+fn talk_now(snap: &Snapshot) -> panels::TalkNow {
+    let settings = &snap.settings.n4n0;
+    if snap.n4n0.listening {
+        return panels::TalkNow::Listening((snap.n4n0.voice.level * 20.0).round() / 20.0);
+    }
+    if !settings.enabled || !settings.assistant {
+        return panels::TalkNow::Off("Turn on N4N0's assistant in Orbiters");
+    }
+    if snap.n4n0.voice.downloading.is_some() {
+        return panels::TalkNow::Off("Its speech models are downloading");
+    }
+    if !snap.n4n0.voice.installed {
+        return panels::TalkNow::Off("Install its speech in Orbiters, N4N0");
+    }
+    if snap.n4n0.thinking {
+        return panels::TalkNow::Thinking;
+    }
+    panels::TalkNow::Ready
+}
+
 /// What must be said with no menu up: a 3D picture under way or waiting, or what stopped one. With VRChat's camera open on the desktop no menu can be.
 fn away_words(snap: &Snapshot, note: &Option<(String, String)>) -> Option<(String, String)> {
     if let Some(seconds) = snap.n4n0.photo_countdown {
@@ -1275,7 +1376,7 @@ fn away_words(snap: &Snapshot, note: &Option<(String, String)>) -> Option<(Strin
     if snap.capture.photo_3d && !matches!(snap.capture.state, CaptureState::Idle) {
         return Some(("3D picture in progress".into(), "The camera is flying. Stay where you are for a moment.".into()));
     }
-    note.clone().or_else(|| snap.n4n0.photo_wait.map(panels::wait_words))
+    note.clone().or_else(|| snap.n4n0.photo_wait.map(panels::wait_words)).or_else(|| snap.n4n0.panel.clone().map(|said| ("N4N0".to_string(), said)))
 }
 
 /// What the end of a flight says.

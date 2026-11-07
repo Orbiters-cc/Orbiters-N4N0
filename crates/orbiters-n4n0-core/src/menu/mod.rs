@@ -2000,6 +2000,11 @@ impl Menu {
         }
     }
 
+    /// More results, for what shows them all in one list rather than page by page.
+    pub fn want_more_results(&mut self) -> Vec<Effect> {
+        self.fetch_more()
+    }
+
     /// Thumbnails of the results page shown, then of the next page (fetched ahead, so they show as it turns).
     pub fn thumbnails(&self) -> Vec<Effect> {
         let start = (self.result_page * RESULTS_PER_PAGE).min(self.results.len());

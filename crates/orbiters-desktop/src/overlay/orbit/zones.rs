@@ -297,8 +297,8 @@ impl Zone {
             Zone::WingAll => wing_tile(1.0, 2.0),
             Zone::WingPlaying => r(362.0, 132.0, 524.0, 186.0),
             Zone::QmStrip => r(-300.0, 266.0, 300.0, 322.0),
-            // On the wing: from its own left edge, right over its name, clear of what VRChat has over its menu.
-            Zone::QmCaption => r(362.0, -204.0, 632.0, -154.0),
+            // On the wing, as wide as it, right over its name: its words wrap, and it is as high as they take.
+            Zone::QmCaption => r(362.0, -262.0, 524.0, -154.0),
             // The Quick Menu's panels and the FPS line over them, ending where its main panel ends: its tab row and badge stay VRChat's.
             // Clear of what VRChat has over its menu, down over its main panel's foot.
             Zone::SheetBack => r(-352.0, -240.0, 352.0, 205.5),

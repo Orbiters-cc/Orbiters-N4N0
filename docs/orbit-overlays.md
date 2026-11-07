@@ -58,7 +58,7 @@ All tools' large cards hold real content: the newest three captures, the last th
 
 ## A capture live on a desktop sheet
 
-`SheetView` runs on its own thread: it reads the capture, frames it as the small view does (`Capture::around_subject`, `Small`), and draws it with `FaceRenderer::render_view` into a picture the sheet paints, with its plate as a line under it. By itself it sways around the view the capture was taken from (a capture is mostly taken from one side), a drag takes it anywhere, the mouse's wheel zooms. It holds the 3D view's budget (`pacing::DUTY`) and at most 20 frames a second, draws nothing while nothing moves, and sizes its picture by what the last ones cost (960, 720 or 540 wide). The view, its GPU device and its memory go with its thread when it is closed. Reduce motion: it does not sway. If it cannot show, the capture's own picture stays, and says so. Only on the desktop: in a headset a capture stands around the person.
+`SheetView` runs on its own thread: it reads the capture, frames it as the small view does (`Capture::around_subject`, `Small`), and draws it with `FaceRenderer::render_view` into a picture the sheet paints, with its plate as a line under it. By itself it sways around the view the capture was taken from (a capture is mostly taken from one side), a drag takes it anywhere, the mouse's wheel zooms. It holds the 3D view's budget (`pacing::DUTY`) and at most 20 frames a second, draws nothing while nothing moves, and sizes its picture by what the last ones cost (960, 720 or 540 wide). The view, its GPU device and its memory go with its thread when it is closed. Reduce motion: it does not sway. If it cannot show, the capture's own picture stays, and says so. Only on the desktop: in a headset a capture stands around the person. The same view turns on a world's side panel (`Worlds::start_live`, `panel::Live`): See it in 3D starts it there, at its smallest size, the next world pressed follows, and it goes with the panel. Its button is then Walk around it, in Orbiters, as on the gallery's sheet, which also steps from capture to capture.
 
 ## The gallery
 
@@ -94,7 +94,7 @@ A press on a world opens its details on a side panel beside the list, which narr
 
 ## A sheet's head
 
-Its tools are tabs (`head_tabs`): from any sheet to any other, also from the wheel, where no wing lies beside it (there the mouse is VRChat's until Left Alt is held). On a screen they have their names. In a headset, and while the head has something to say, icons but for the open one, which leaves room for it.
+Where no wing lies beside it (from the wheel, in a narrow window, with its tiles hidden), its tools are tabs (`head_tabs`): from any sheet to any other. Beside the wing they would only repeat it, and the head says the sheet's name. On a screen they have their names, and while the head has something to say, icons but for the open one. In a headset they are named or are not there.
 
 ## VRChat's tooltips under a sheet
 

@@ -246,7 +246,7 @@ impl Hints {
             Some(Around::Wheel) if self.pointed < Self::FULL => Some(("Hold Left Alt, then click a tool", "Or press its number")),
             Some(Around::Wheel) => Some(("Left Alt to click, or a number", "")),
             // Says what this is, and that it is not VRChat's.
-            Some(Around::QuickMenu) if self.openings <= Self::FULL => Some(("Orbiters' own menu", "Worlds in 3D, videos, instances and 3D pictures.")),
+            Some(Around::QuickMenu) if self.openings <= Self::FULL => Some(("Your tools", "Worlds in 3D, videos, instances and 3D pictures.")),
             _ => None,
         }
     }

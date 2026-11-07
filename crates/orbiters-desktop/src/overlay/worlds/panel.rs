@@ -125,6 +125,10 @@ pub enum Page {
 /// What can be pressed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Target {
+    /// On a screen: on to walking around what turns on the panel.
+    Walk,
+    /// On a screen: what turns on the panel, to take with the mouse.
+    Hero,
     /// Closes the side panel.
     CloseSide,
     /// Shows it small, in the panel's picture.
@@ -181,8 +185,10 @@ pub enum Target {
 /// What a press asks of the overlay.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Action {
-    /// Show this capture (its listing id) around the person.
+    /// Show this capture (its listing id) around the person; on a screen, turning on this panel.
     Show(u64),
+    /// On a screen: on to walking around it, in the app's window.
+    Walk,
     Hide,
     Recenter,
     SeeThrough(bool),
@@ -323,6 +329,15 @@ pub struct Data<'a> {
     pub now: u64,
 }
 
+/// A capture turning on the side panel, on a screen ([`super::super::orbit::sheet_view`]).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Live {
+    pub id: u64,
+    pub picture: Option<TextureId>,
+    pub plate: Vec<[f32; 2]>,
+    pub failed: bool,
+}
+
 /// The feedback view's key of a world (the app keeps them lowercase).
 pub fn world_key(world_id: &str) -> String {
     world_id.to_ascii_lowercase()
@@ -424,6 +439,8 @@ pub fn verdict(p: &WorldPerformance) -> (&'static str, Color32) {
 /// The panel's state.
 #[derive(Clone, Debug, Default)]
 pub struct Panel {
+    /// On a screen: the capture turning on the side panel.
+    pub live: Option<Live>,
     pub page: Page,
     pub query: String,
     pub results_page: usize,
@@ -590,9 +607,7 @@ fn few_rects(count: usize, n: usize, side: bool) -> (Vec<Option<Rect>>, f32) {
         for i in 0..count {
             let (slot, top) = if i < n { (i, 148.0) } else { (i - n, heading + 28.0) };
             let (col, row) = ((slot % 2) as f32, (slot / 2) as f32);
-            // The last of its group, alone on its row, takes the row: no hole in the list's edge.
-            let last_alone = (i + 1 == n || i + 1 == count) && slot % 2 == 0;
-            let rect = Rect::from_min_size(pos2(32.0 + col * 316.0, top + row * 122.0), vec2(if last_alone { 620.0 } else { 304.0 }, 114.0));
+            let rect = Rect::from_min_size(pos2(32.0 + col * 316.0, top + row * 122.0), vec2(304.0, 114.0));
             out.push((rect.bottom() <= 568.0).then_some(rect));
         }
         (out, heading)
@@ -607,6 +622,52 @@ fn few_rects(count: usize, n: usize, side: bool) -> (Vec<Option<Rect>>, f32) {
         }
         (out, heading)
     }
+}
+
+/// Where the way on to other worlds takes a free slot beside a few captures, when there is one: no gap in the list's edge.
+fn more_slot(count: usize, n: usize, side: bool) -> Option<Rect> {
+    if !side {
+        return (n % PER_ROW != 0).then(|| card_rect(n));
+    }
+    let others = count.saturating_sub(n);
+    (others % 2 == 1).then(|| {
+        let (rects, heading) = few_rects(count + 1, n, true);
+        let _ = heading;
+        rects.last().copied().flatten()
+    }).flatten()
+}
+
+/// A capture turning on the side panel, where its picture lies: as on the gallery's sheet, smaller. Its picture stays until it is ready, and if it cannot be.
+fn draw_live(p: &Painter, hero: Rect, live: &Live) {
+    let corner = CornerRadius::same(14);
+    let say = |p: &Painter, words: &str| {
+        let txt = Txt::new(words, 15.0).weight(weight::SEMIBOLD).color(Color32::WHITE);
+        let galley = p.layout_job(txt.job_truncated(hero.width() - 40.0));
+        let pill = Rect::from_center_size(hero.center(), galley.size() + vec2(26.0, 14.0));
+        p.rect_filled(pill, CornerRadius::same(14), theme::black(0.82));
+        p.galley(pill.min + vec2(13.0, 7.0), galley, Color32::WHITE);
+    };
+    if live.failed {
+        say(p, "Its 3D cannot show here. It can in Orbiters.");
+        return;
+    }
+    let Some(id) = live.picture else {
+        say(p, "Getting its 3D ready\u{2026}");
+        return;
+    };
+    p.rect_filled(hero, corner, Color32::from_rgb(15, 17, 21));
+    let inside = p.with_clip_rect(hero);
+    let points: Vec<Pos2> = live.plate.iter().map(|uv| pos2(hero.left() + uv[0] * hero.width(), hero.top() + uv[1] * hero.height())).collect();
+    if points.len() > 2 {
+        inside.add(egui::Shape::convex_polygon(points.clone(), Color32::from_rgb(25, 28, 34), Stroke::NONE));
+        inside.add(egui::Shape::closed_line(points, Stroke::new(2.0, theme::alpha(theme::ACCENT, 0.85))));
+    }
+    p.add(egui::epaint::RectShape::filled(hero, corner, Color32::WHITE).with_texture(id, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0))));
+    let txt = Txt::new("Drag to turn it", 14.5).weight(weight::MEDIUM).color(Color32::WHITE);
+    let galley = p.layout_job(txt.job(f32::INFINITY));
+    let pill = Rect::from_min_size(pos2(hero.left() + 8.0, hero.bottom() - 8.0 - galley.size().y - 8.0), galley.size() + vec2(18.0, 8.0));
+    p.rect_filled(pill, CornerRadius::same(10), theme::black(0.72));
+    p.galley(pill.min + vec2(9.0, 4.0), galley, Color32::WHITE);
 }
 
 /// Beside the side panel: the row of what is browsed gets narrower, and the field and its pages.
@@ -847,16 +908,15 @@ impl Panel {
                 }
             }
             // Beside few captures, the way on takes the row's place; else it is on the heading's end.
-            if !side && n % PER_ROW != 0 {
-                out.push((Target::Section(Section::Popular), card_rect(n)));
+            if let Some(slot) = more_slot(results.len(), n, side) {
+                out.push((Target::Section(Section::Popular), slot));
             } else {
                 let right = if side { 652.0 } else { 992.0 };
                 out.push((Target::Section(Section::Popular), Rect::from_min_size(pos2(right - 132.0, heading - 6.0), vec2(132.0, 34.0))));
             }
         } else {
             for (i, _) in results.iter().enumerate().skip(first).take(PER_PAGE) {
-                let alone = side && i + 1 == results.len() && (i - first) % 2 == 0;
-                out.push((Target::Card(i), if alone { side_card_rect(i - first).with_max_x(652.0) } else if side { side_card_rect(i - first) } else { card_rect(i - first) }));
+                out.push((Target::Card(i), if side { side_card_rect(i - first) } else { card_rect(i - first) }));
             }
         }
         if !results.is_empty() && self.few_captures(d) {
@@ -894,11 +954,16 @@ impl Panel {
             }
             Page::Detail => {
                 let vr = d.status.headset;
+                let live_here = !vr && self.entry(d).is_some_and(|e| self.live.as_ref().is_some_and(|l| l.id == e.id));
                 // In a headset the list's head is the way back as well, and there is one.
                 if vr {
                     out.clear();
                 }
                 self.browse_targets(d, &mut out, true);
+                // A hand on the capture turning there, under what lies over it.
+                if live_here {
+                    out.push((Target::Hero, SIDE_HERO));
+                }
                 if !vr {
                     out.push((Target::CloseSide, SIDE_CLOSE));
                 }
@@ -908,7 +973,9 @@ impl Panel {
                 if !e.capture {
                     out.push((Target::Join, if vr { VR_GO_HALF } else { SHOW_WHOLE }));
                 } else if !status.headset {
-                    if !current {
+                    if live_here {
+                        out.push((Target::Walk, SHOW_WHOLE));
+                    } else if !current {
                         out.push((Target::Show, SHOW_WHOLE));
                     }
                 } else if current {
@@ -1099,6 +1166,8 @@ impl Panel {
                     (false, false) => vec![Action::Show(e.id)],
                 }
             }
+            Target::Walk => vec![Action::Walk],
+            Target::Hero => Vec::new(),
             Target::Join => self.entry(d).map(|e| Action::Join(e.world_id.clone())).into_iter().collect(),
             Target::OpenWeb => self.entry(d).map(|e| Action::OpenWeb(e.world_id.clone())).into_iter().collect(),
             Target::Has3d => {
@@ -1522,14 +1591,18 @@ impl Panel {
             let wide = p.layout_job(Txt::new(format!("{name} worlds"), 16.5).weight(weight::SEMIBOLD).job(f32::INFINITY)).size().x;
             text(p, pos2(32.0 + wide + 12.0, heading + 13.0), Align2::LEFT_CENTER, Txt::new("No 3D capture yet", 15.5).color(theme::FG_3));
             let (h, pr) = state(Target::Section(Section::Popular));
-            if !side && n % PER_ROW != 0 {
-                let slot = card_rect(n);
+            if let Some(slot) = more_slot(results.len(), n, side) {
                 let slot = if pr { slot.shrink(3.0) } else { slot };
                 p.rect_filled(slot, CornerRadius::same(20), if h { RAISED } else { SURFACE });
-                widgets::icon(p, slot.center() - vec2(0.0, 46.0), icons::GLOBE_HEMISPHERE_WEST, 40.0, theme::ACCENT);
-                text(p, slot.center() + vec2(0.0, 2.0), Align2::CENTER_CENTER, Txt::new("Other worlds", 20.0).weight(weight::SEMIBOLD).color(theme::FG));
-                text(p, slot.center() + vec2(0.0, 30.0), Align2::CENTER_CENTER, Txt::new("Every popular one, or search for any", 15.5).color(theme::FG_2));
-                text(p, slot.center() + vec2(0.0, 60.0), Align2::CENTER_CENTER, Txt::new("See them all \u{203a}", 16.0).weight(weight::SEMIBOLD).color(if h { theme::FG } else { theme::ACCENT }));
+                if side {
+                    text(p, slot.center() - vec2(0.0, 13.0), Align2::CENTER_CENTER, Txt::new("Other worlds", 18.0).weight(weight::SEMIBOLD).color(theme::FG));
+                    text(p, slot.center() + vec2(0.0, 15.0), Align2::CENTER_CENTER, Txt::new("See them all \u{203a}", 16.0).weight(weight::SEMIBOLD).color(if h { theme::FG } else { theme::ACCENT }));
+                } else {
+                    widgets::icon(p, slot.center() - vec2(0.0, 46.0), icons::GLOBE_HEMISPHERE_WEST, 40.0, theme::ACCENT);
+                    text(p, slot.center() + vec2(0.0, 2.0), Align2::CENTER_CENTER, Txt::new("Other worlds", 20.0).weight(weight::SEMIBOLD).color(theme::FG));
+                    text(p, slot.center() + vec2(0.0, 30.0), Align2::CENTER_CENTER, Txt::new("Every popular one, or search for any", 15.5).color(theme::FG_2));
+                    text(p, slot.center() + vec2(0.0, 60.0), Align2::CENTER_CENTER, Txt::new("See them all \u{203a}", 16.0).weight(weight::SEMIBOLD).color(if h { theme::FG } else { theme::ACCENT }));
+                }
             } else {
                 text(p, pos2(if side { 652.0 } else { 992.0 }, heading + 11.0), Align2::RIGHT_CENTER, Txt::new("See them all \u{203a}", 15.5).weight(weight::SEMIBOLD).color(if h { theme::FG } else { theme::ACCENT }));
             }
@@ -1658,6 +1731,9 @@ impl Panel {
             let hero = if vr { VR_HERO } else { SIDE_HERO };
             let small_back = if vr { VR_SMALL_BACK } else { SMALL_BACK };
             picture(p, hero, (d.thumb)(entry), &entry.world_id, CornerRadius::same(14), rest);
+            if let Some(live) = self.live.as_ref().filter(|l| l.id == entry.id && !vr) {
+                draw_live(p, hero, live);
+            }
             let foot = Rect::from_min_max(pos2(hero.min.x, hero.max.y - 44.0), hero.max);
             if current || !entry.capture {
                 p.rect_filled(foot, CornerRadius { nw: 0, ne: 0, sw: 14, se: 14 }, fade(theme::black(0.62), rest));
@@ -1734,10 +1810,12 @@ impl Panel {
             match *t {
                 Target::Show => {
                     // On a screen it opens the Orbiters window, and says so.
-                    let (glyph, label) = if !status.headset { (icons::ARROW_SQUARE_OUT, "See it in 3D, in Orbiters") } else { (icons::CUBE, "Around me") };
+                    let (glyph, label) = if !status.headset { (icons::CUBE, "See it in 3D") } else { (icons::CUBE, "Around me") };
                     let lit = !(current && status.small);
                     pill_button(p, *rect, Some(glyph), label, if lit { theme::ACCENT } else { RAISED2 }, if lit { theme::ON_ACCENT } else { theme::FG }, h, pr, rest);
                 }
+                // It shows here already: what a press adds is walking around in it.
+                Target::Walk => pill_button(p, *rect, Some(icons::ARROW_SQUARE_OUT), "Walk around it, in Orbiters", theme::ACCENT, theme::ON_ACCENT, h, pr, rest),
                 Target::ShowSmall => {
                     let lit = current && status.small;
                     pill_button(p, *rect, Some(icons::HAND_GRABBING), "Small here", if lit { theme::ACCENT } else { RAISED2 }, if lit { theme::ON_ACCENT } else { theme::FG }, h, pr, rest);
@@ -1864,10 +1942,10 @@ fn compact_rect(i: usize) -> Rect {
     Rect::from_min_size(pos2(32.0 + i as f32 * 328.0, 100.0), vec2(304.0, 120.0))
 }
 
-/// A card's picture beside the side panel: all of it, as its world made it, for its own words are often on it.
+/// A card's picture beside the side panel: all of it, as its world made it, for its own words are often on it; small enough to leave its name two whole lines.
 fn compact_thumb(card: Rect) -> Rect {
-    let high = card.height() - 20.0;
-    Rect::from_min_size(card.min + vec2(10.0, 10.0), vec2(high * 16.0 / 9.0, high))
+    const HIGH: f32 = 70.0;
+    Rect::from_min_size(pos2(card.min.x + 10.0, card.center().y - HIGH / 2.0), vec2(HIGH * 16.0 / 9.0, HIGH))
 }
 
 /// The keyboard's keys: digits, three rows of letters (Backspace at the end of the last), then the space bar; with
@@ -2186,9 +2264,9 @@ fn compact_card(p: &Painter, rect: Rect, entry: &Entry, d: &Data, hover: bool, p
     picture(p, thumb, (d.thumb)(entry), &entry.world_id, CornerRadius::same(10), alpha);
     let x = thumb.max.x + 14.0;
     let width = rect.max.x - x - 12.0;
-    let mut name = Txt::new(entry.name.clone(), 17.0).weight(weight::SEMIBOLD).color(fade(theme::FG, alpha)).job(width);
+    let mut name = Txt::new(entry.name.clone(), 16.5).weight(weight::SEMIBOLD).color(fade(theme::FG, alpha)).job(width);
     name.wrap.max_rows = 2;
-    p.galley(pos2(x, rect.min.y + 14.0), p.layout_job(name), theme::FG);
+    p.galley(pos2(x, rect.min.y + 10.0), p.layout_job(name), theme::FG);
     if let Some(a) = d.author(entry) {
         text_cut(p, pos2(x, rect.min.y + 62.0), width, Txt::new(a.to_string(), 16.0).color(fade(theme::FG_3, alpha)));
     }
@@ -2334,6 +2412,39 @@ mod tests {
         assert_eq!(ids(&panel, &facts, &none), [1, 4, 3, 2]);
         panel.query = "shr".into();
         assert_eq!(ids(&panel, &facts, &none), [3]);
+    }
+
+    /// Round 8's judges: See it in 3D means one thing. On a screen it starts the capture turning in the panel; there, the button says what it adds, and a hand can take it.
+    #[test]
+    fn on_a_screen_a_world_turns_in_its_side_panel() {
+        let entries = super::super::catalog::parse(LISTING).unwrap();
+        let (facts, feedback) = (HashMap::new(), FeedbackView::default());
+        let status = Status::default();
+        let d = data(&entries, &status, &feedback, &facts);
+        let mut panel = Panel { page: Page::Detail, selected: Some(1), ..Default::default() };
+        assert_eq!(panel.press(Target::Show, &d, 1.0), [Action::Show(1)]);
+        let has = |panel: &Panel, t: Target| panel.targets(&d).iter().any(|(x, _)| *x == t);
+        assert!(has(&panel, Target::Show) && !has(&panel, Target::Walk) && !has(&panel, Target::Hero));
+        panel.live = Some(Live { id: 1, ..Default::default() });
+        assert!(!has(&panel, Target::Show) && has(&panel, Target::Walk) && has(&panel, Target::Hero));
+        assert_eq!(panel.press(Target::Walk, &d, 2.0), [Action::Walk]);
+        // Its close stays on top of it.
+        let (x, y) = (SIDE_CLOSE.center().x, SIDE_CLOSE.center().y);
+        assert_eq!(panel.hit(&d, x, y), Some(Target::CloseSide));
+        // Another world's page: its own button again, until that one turns as well.
+        panel.selected = Some(2);
+        assert!(!has(&panel, Target::Walk) && !has(&panel, Target::Hero));
+    }
+
+    /// Round 8's judges: no orphan row beside the panel. An odd last world has the way on to other worlds beside it.
+    #[test]
+    fn a_few_worlds_leave_no_hole_and_no_orphan_row_beside_the_side_panel() {
+        let (rects, _) = few_rects(5, 2, true);
+        assert!(rects.iter().flatten().all(|r| r.width() == 304.0));
+        let slot = more_slot(5, 2, true).expect("a free slot beside the fifth");
+        assert!(rects.iter().flatten().all(|r| !r.intersects(slot)));
+        assert_eq!(slot.top(), rects[4].unwrap().top());
+        assert_eq!(more_slot(6, 2, true), None);
     }
 
     /// Round 6's judges: a headset's page is not a smaller screen's. One head for the list, no filter row, and nothing over the hole.

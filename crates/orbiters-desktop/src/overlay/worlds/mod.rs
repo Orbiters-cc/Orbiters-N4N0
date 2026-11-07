@@ -110,6 +110,12 @@ pub struct Worlds {
     error: Option<String>,
     /// Captures shown lately, ready to show again.
     captures: cache::Memory,
+    /// On a screen: the capture turning on the side panel, its picture, the pointer on it, and whether it turns by itself.
+    live: Option<(u64, super::orbit::sheet_view::SheetView)>,
+    live_frame: Option<super::orbit::sheet_view::Frame>,
+    live_texture: Option<egui::TextureHandle>,
+    live_pointer: Option<(f32, f32)>,
+    live_turns: bool,
     chip: vr::OverlayHandle,
     chip_canvas: Canvas,
     chip_shown: bool,
@@ -229,6 +235,11 @@ impl Worlds {
             current: None,
             error: None,
             captures: cache::Memory::with_default_budget(),
+            live: None,
+            live_frame: None,
+            live_texture: None,
+            live_pointer: None,
+            live_turns: true,
             chip,
             chip_canvas: Canvas::new(CHIP_PX[0], CHIP_PX[1]),
             chip_shown: false,
@@ -301,6 +312,11 @@ impl Worlds {
             current: None,
             error: None,
             captures: cache::Memory::with_default_budget(),
+            live: None,
+            live_frame: None,
+            live_texture: None,
+            live_pointer: None,
+            live_turns: true,
             chip: 0,
             chip_canvas: Canvas::new(1, 1),
             chip_shown: false,
@@ -385,6 +401,23 @@ impl Worlds {
             self.panel.dirty = true;
         }
         self.region = finder::region(snap.vrchat.world.instance.as_deref());
+        self.live_turns = !snap.settings.reduce_motion;
+        // What turns on the side panel: its newest picture, or that it cannot.
+        if self.panel.page != panel::Page::Detail || !self.open {
+            self.stop_live();
+        }
+        if let Some((_, view)) = &self.live {
+            let failed = matches!(view.state(), super::orbit::sheet_view::ViewState::Failed(_));
+            let frame = view.take_frame();
+            let was_failed = self.panel.live.as_ref().is_some_and(|l| l.failed);
+            if frame.is_some() || failed != was_failed {
+                self.live_frame = frame.or(self.live_frame.take());
+                if let Some(live) = self.panel.live.as_mut() {
+                    live.failed = failed;
+                }
+                self.panel.dirty = true;
+            }
+        }
         while let Ok(said) = self.said.1.try_recv() {
             let time = self.time();
             self.panel.say(said, time);
@@ -407,10 +440,70 @@ impl Worlds {
         }
     }
 
+    /// Starts `entry` turning on the side panel. It reads what is on this computer, or what was downloaded before, as any showing of it does.
+    fn start_live(&mut self, entry: &Entry) {
+        let (source, from) = (self.source.clone(), entry.clone());
+        let load = move || match &from.local {
+            Some(dir) => catalog::read_local(dir, &Default::default()),
+            None => source.download(&from, &Default::default()),
+        };
+        self.live = Some((entry.id, super::orbit::sheet_view::SheetView::open_with(load, self.live_turns, 2)));
+        self.live_frame = None;
+        self.live_texture = None;
+        self.panel.live = Some(panel::Live { id: entry.id, ..Default::default() });
+        self.panel.dirty = true;
+    }
+
+    /// What turns on the side panel goes, with all it holds.
+    pub fn stop_live(&mut self) {
+        if self.live.take().is_some() {
+            self.live_frame = None;
+            self.live_texture = None;
+            self.panel.live = None;
+            self.panel.dirty = true;
+        }
+    }
+
+    /// Goes on from one world to the next as the person does (to see quickly what they look like), and stops with the panel.
+    fn follow_live(&mut self, entries: &[Entry]) {
+        let Some((id, _)) = &self.live else { return };
+        let id = *id;
+        if self.panel.page != panel::Page::Detail {
+            self.stop_live();
+        } else if self.panel.selected != Some(id) {
+            let next = self.panel.selected.and_then(|s| entries.iter().find(|e| e.id == s).or(self.picked.as_ref().filter(|e| e.id == s))).filter(|e| e.capture).cloned();
+            match next {
+                Some(entry) => self.start_live(&entry),
+                None => self.stop_live(),
+            }
+        }
+    }
+
+    /// The mouse's wheel over what turns on the side panel.
+    pub fn wheel_alone(&self, notches: f32) {
+        if let (Some((_, view)), Some(panel::Target::Hero)) = (&self.live, self.panel.hover) {
+            view.zoom(notches);
+        }
+    }
+
     /// The same as [`Worlds::act`] with no SteamVR: nothing can be shown around the person, so a capture opens in the Orbiters window, and what only the view has does nothing.
     fn act_alone(&mut self, actions: Vec<Action>, entries: &[Entry]) {
+        let headset = self.status().headset;
         for action in actions {
             match action {
+                // On a screen: on this panel, as a capture in the gallery does.
+                Action::Show(id) if !headset => {
+                    if let Some(entry) = entries.iter().find(|e| e.id == id).or(self.picked.as_ref().filter(|e| e.id == id)).cloned() {
+                        self.start_live(&entry);
+                    }
+                }
+                Action::Walk => {
+                    if let Some(backend) = &self.backend {
+                        backend.show_window();
+                    }
+                    let time = self.time();
+                    self.panel.say("Opened in the Orbiters window, to walk around it", time);
+                }
                 // On a sheet in VR: for the overlay's own 3D worlds, which has the view.
                 Action::Show(id) if self.relay.is_some() => {
                     if let Some(entry) = entries.iter().find(|e| e.id == id).or(self.picked.as_ref().filter(|e| e.id == id)) {
@@ -462,6 +555,11 @@ impl Worlds {
         let picked = self.picked().cloned();
         let d = Data { entries: &entries, picked: picked.as_ref(), status: &status, feedback: &self.feedback, facts: &self.facts, thumb: &no_thumb, picture: &no_picture, now: unix_now() };
         let hover = at.and_then(|(x, y)| self.panel.hit(&d, x, y));
+        // A hand on what turns on the panel turns it.
+        if let (Some(panel::Target::Hero), Some((_, view)), Some(from), Some(now)) = (self.panel.pressed, &self.live, self.live_pointer, at) {
+            view.turn(now.0 - from.0, now.1 - from.1);
+        }
+        self.live_pointer = at;
         if hover != self.panel.hover {
             self.panel.hover = hover;
             self.panel.dirty = true;
@@ -482,12 +580,19 @@ impl Worlds {
             self.panel.press(target, &d, time)
         };
         self.keep_picked(&entries);
+        if let (panel::Target::Hero, Some((_, view))) = (target, &self.live) {
+            view.hold(true);
+        }
         self.act_alone(actions, &entries);
+        self.follow_live(&entries);
         true
     }
 
     /// The press of [`Worlds::press_alone`] let go.
     pub fn release_alone(&mut self) {
+        if let (Some(panel::Target::Hero), Some((_, view))) = (self.panel.pressed, &self.live) {
+            view.hold(false);
+        }
         self.panel.pressed = None;
         self.panel.dirty = true;
     }
@@ -1263,6 +1368,8 @@ impl Worlds {
                     self.download = Some(Download { id, key, progress, answer: rx });
                     self.current = Some(entry);
                 }
+                // With a headset the capture stands around the person: a screen's alone.
+                Action::Walk => {}
                 Action::Hide => {
                     self.download = None;
                     self.error = None;
@@ -1379,6 +1486,17 @@ impl Worlds {
     /// Paints the panel on the menu's canvas.
     pub fn paint(&mut self, canvas: &mut Canvas) {
         self.panel.dirty = false;
+        if let Some(frame) = self.live_frame.take() {
+            let image = egui::ColorImage::from_rgba_premultiplied(frame.size, &frame.rgba);
+            match &mut self.live_texture {
+                Some(texture) => texture.set(image, egui::TextureOptions::LINEAR),
+                None => self.live_texture = Some(canvas.ctx().load_texture("side-panel-view", image, egui::TextureOptions::LINEAR)),
+            }
+            if let Some(live) = self.panel.live.as_mut() {
+                live.picture = self.live_texture.as_ref().map(|t| t.id());
+                live.plate = frame.plate;
+            }
+        }
         self.last_paint = Some(Instant::now());
         let entries = self.entries();
         let status = self.status();

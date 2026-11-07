@@ -946,6 +946,11 @@ impl Panels {
 
     /// The mouse's wheel, in notches, up positive: moves the sheet's list, when it has one. At its end it gives a little.
     pub fn wheel(&mut self, notches: f32) {
+        if self.facts.sheet == Some(Sheet::Worlds) {
+            if let Some(worlds) = self.stage.worlds.as_ref() {
+                worlds.wheel_alone(notches);
+            }
+        }
         if let (Some(view), Some(_)) = (&self.sheet_view, self.facts.opened) {
             view.zoom(notches);
         }
@@ -1035,6 +1040,12 @@ impl Panels {
                 let seconds = (fraction * of as f32) as u32;
                 self.seek_asked = Some((seconds, Instant::now()));
                 host.effects(vec![Effect::Media(orbiters_n4n0_core::menu::MediaCommand::Seek(seconds))], snap, &self.backend);
+            }
+        }
+        // A world's capture turning on its side panel: the same.
+        if self.open.is_none() || self.facts.sheet != Some(Sheet::Worlds) {
+            if let Some(worlds) = self.stage.worlds.as_mut() {
+                worlds.stop_live();
             }
         }
         // What a press in a list turned out to press, now it was let go without moving.
@@ -1209,6 +1220,7 @@ impl Panels {
             opened_view: None,
             world_video_picture: if self.facts.sheet == Some(Sheet::All) { menu.world_video.as_ref().and_then(|v| orbiters_n4n0_core::videos::youtube_id(&v.url)).and_then(|id| self.stage.host.picture(&id, false)) } else { None },
             strip_caption: self.list.iter().any(|p| p.zone == Zone::QmStrip),
+            tiles_hidden: self.hidden,
             // Only what is on the page: they change as it is made and as time goes, and there may be tens of thousands.
             recent_words: self
                 .takeover
@@ -1499,6 +1511,20 @@ impl Panels {
         out
     }
 
+    /// Shows tile `n` on the sheet, large: a capture turning in 3D, on the desktop too, as a press shows it in 3D; a picture as it is.
+    fn open_tile(&mut self, n: usize, snap: &Snapshot) {
+        let Some(recent) = self.recents.tile(n) else { return };
+        self.sheet_view = (recent.kind() == panels::RecentKind::Capture).then(|| sheet_view::SheetView::open(recent.key.clone(), !snap.settings.reduce_motion));
+        self.view_texture = None;
+        self.view_frame = None;
+        self.view_state = None;
+        self.view_plate.clear();
+        self.facts.opened = Some(n);
+        self.recents.big = None;
+        self.recents.open_big(n);
+        self.gallery_dirty();
+    }
+
     /// What a press on `action` does.
     fn act(&mut self, action: Action, snap: &Snapshot, out: &mut Pressed) {
         out.clicked = action != Action::Idle;
@@ -1525,13 +1551,7 @@ impl Panels {
                     panels::RecentKind::NoView => out.clicked = false,
                     // Nothing shows around the person with no headset: seen here first, as a picture is, with the app's window as what is next.
                     panels::RecentKind::Capture | panels::RecentKind::Picture => {
-                        // A capture turns in 3D here: a press shows it in 3D, on the desktop too.
-                        self.sheet_view = (recent.kind() == panels::RecentKind::Capture).then(|| sheet_view::SheetView::open(recent.key.clone(), !snap.settings.reduce_motion));
-                        self.view_texture = None;
-                        self.facts.opened = Some(n);
-                        self.recents.big = None;
-                        self.recents.open_big(n);
-                        self.gallery_dirty();
+                        self.open_tile(n, snap);
                     }
                 }
             }
@@ -1551,9 +1571,7 @@ impl Panels {
             }
             Action::PictureStep(after) => {
                 if let Some(n) = self.facts.opened.and_then(|n| panels::picture_beside(&self.facts, n, after)) {
-                    self.facts.opened = Some(n);
-                    self.recents.open_big(n);
-                    self.gallery_dirty();
+                    self.open_tile(n, snap);
                 }
             }
             // It says why not, under the pointer.

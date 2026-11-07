@@ -117,12 +117,16 @@ pub struct Costs {
 /// The view while a capture is open on a sheet. Dropped, its thread ends, and all it holds goes with it.
 pub struct SheetView {
     shared: Arc<Shared>,
-    pub dir: PathBuf,
 }
 
 impl SheetView {
     /// Starts showing the capture in `dir`; `turning` says whether it turns by itself (Reduce motion: not).
     pub fn open(dir: PathBuf, turning: bool) -> Self {
+        Self::open_with(move || catalog::read_local(&dir, &Default::default()), turning, 0)
+    }
+
+    /// The same, of what `load` gets, wherever that is: `largest` is the largest of [`SIZES`] it is worth drawing, for where it is shown.
+    pub fn open_with(load: impl FnOnce() -> anyhow::Result<Capture> + Send + 'static, turning: bool, largest: usize) -> Self {
         let shared = Arc::new(Shared {
             asked: Mutex::new(Asked::default()),
             stop: AtomicBool::new(false),
@@ -130,9 +134,9 @@ impl SheetView {
             state: Mutex::new(ViewState::Loading),
             costs: Mutex::new(Costs::default()),
         });
-        let (for_thread, from) = (shared.clone(), dir.clone());
+        let for_thread = shared.clone();
         let spawned = std::thread::Builder::new().name("orbit-sheet-view".into()).spawn(move || {
-            if let Err(e) = run(&for_thread, &from, turning) {
+            if let Err(e) = run(&for_thread, load, turning, largest) {
                 eprintln!("the sheet's 3D view: {e:#}");
                 *for_thread.state.lock().unwrap_or_else(|e| e.into_inner()) = ViewState::Failed(format!("{e:#}"));
             }
@@ -140,7 +144,7 @@ impl SheetView {
         if let Err(e) = spawned {
             *shared.state.lock().unwrap_or_else(|e| e.into_inner()) = ViewState::Failed(e.to_string());
         }
-        Self { shared, dir }
+        Self { shared }
     }
 
     /// The newest picture, once.
@@ -219,9 +223,9 @@ fn plate_line(small: &Small, below: f32, aspect: f32) -> Vec<[f32; 2]> {
         .collect()
 }
 
-fn run(shared: &Shared, dir: &std::path::Path, turning: bool) -> anyhow::Result<()> {
+fn run(shared: &Shared, load: impl FnOnce() -> anyhow::Result<Capture>, turning: bool, largest: usize) -> anyhow::Result<()> {
     let started = Instant::now();
-    let full = catalog::read_local(dir, &Default::default())?;
+    let full = load()?;
     let capture = full.around_subject();
     drop(full);
     if shared.stop.load(Ordering::Relaxed) {
@@ -241,7 +245,7 @@ fn run(shared: &Shared, dir: &std::path::Path, turning: bool) -> anyhow::Result<
     let start = stereo::Placement::at(&capture.view, &head).rotation;
     let below = capture.view.eye()[1] - capture.view.ground();
     let middle = capture.view.eye();
-    let (mut size, mut drawn, mut last, mut smooth_ms, mut swaying) = (START_SIZE, None::<(Pose, usize)>, Instant::now(), 0.0f32, 0.0f32);
+    let (mut size, mut drawn, mut last, mut smooth_ms, mut swaying) = (START_SIZE.max(largest), None::<(Pose, usize)>, Instant::now(), 0.0f32, 0.0f32);
     while !shared.stop.load(Ordering::Relaxed) {
         // It turns by itself, unless a hand has it or just had it.
         let pose = {
@@ -279,7 +283,7 @@ fn run(shared: &Shared, dir: &std::path::Path, turning: bool) -> anyhow::Result<
         if smooth_ms > TOO_LONG_MS && size + 1 < SIZES.len() {
             size += 1;
             smooth_ms = 0.0;
-        } else if smooth_ms > 0.0 && smooth_ms < ROOM_MS && size > 0 {
+        } else if smooth_ms > 0.0 && smooth_ms < ROOM_MS && size > largest {
             size -= 1;
             smooth_ms = 0.0;
         }

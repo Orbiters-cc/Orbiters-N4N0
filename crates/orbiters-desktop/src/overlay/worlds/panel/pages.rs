@@ -248,7 +248,7 @@ impl Panel {
             }
             Page::Compose(compose) => {
                 let hint = if compose == Compose::Comment { "Write a comment" } else { "Say why" };
-                field(p, &self.draft, hint, true, state(Target::Field), time, 1.0);
+                field(p, field_rect(), &self.draft, hint, true, state(Target::Field), time, 1.0);
                 let (valid, prompt, count) = match compose {
                     Compose::Comment => {
                         let n = self.draft.trim().chars().count();

@@ -875,10 +875,14 @@ impl Panels {
             (None, Some(stage)) => Some(("Getting it ready".to_string(), stage.clone())),
             (None, None) => None,
         };
-        if showing != self.facts.view_showing || said != self.facts.view_said || status.small != self.facts.view_small {
+        // The sheet's back has the same hole as the page on it: page units to its own, the page lying 52 under its top.
+        let hole = self.stage.worlds.as_ref().filter(|_| self.facts.sheet == Some(Sheet::Worlds)).and_then(|w| w.small_hole());
+        let hole = hole.map(|h| egui::Rect::from_min_max(pos2(h.min.x * 0.6875, h.min.y * 0.6875 + 52.0), pos2(h.max.x * 0.6875, h.max.y * 0.6875 + 52.0)));
+        if showing != self.facts.view_showing || said != self.facts.view_said || status.small != self.facts.view_small || hole != self.facts.sheet_hole {
             self.facts.view_showing = showing;
             self.facts.view_said = said;
             self.facts.view_small = status.small;
+            self.facts.sheet_hole = hole;
             for panel in self.list.iter_mut().chain(self.takeover.iter_mut()) {
                 panel.dirty = true;
             }
@@ -886,6 +890,11 @@ impl Panels {
         let mut asked = self.stage.worlds.as_mut().map_or_else(Vec::new, |worlds| worlds.relay_to(status));
         asked.append(&mut self.local_asked);
         asked
+    }
+
+    /// Where on the sheet's page a capture standing small may lie.
+    pub(in crate::overlay) fn small_place_on_sheet(&self) -> Option<egui::Rect> {
+        self.stage.worlds.as_ref().filter(|_| self.facts.sheet == Some(Sheet::Worlds)).and_then(|w| w.small_place_on_panel())
     }
 
     /// A number key on the wheel: as a press on that cell, clockwise from the top.
@@ -1071,6 +1080,7 @@ impl Panels {
             recent_pictures: Vec::new(),
             view_said: self.facts.view_said.clone(),
             view_small: self.facts.view_small,
+            sheet_hole: self.facts.sheet_hole,
             reconstructing: snap.reconstruction.as_ref().map(|j| j.progress.clamp(0.0, 1.0)),
             waiting: snap.reconstruct_queue.len(),
             desktop: snap.n4n0.desktop_mode || !snap.steamvr.running,

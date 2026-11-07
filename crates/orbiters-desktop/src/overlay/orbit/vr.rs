@@ -427,6 +427,8 @@ pub struct Turn {
     pub clicked: bool,
     /// What the panel on the sheet asked of the 3D view. The sheet has its own panel, so nothing else opens beside it, and N4N0's menu stays out of this.
     pub(in crate::overlay) worlds: Vec<super::super::worlds::Relayed>,
+    /// Where the sheet has a place for a capture standing small: the middle of its hole, its Z towards who looks, and how far it can reach there.
+    pub(in crate::overlay) small_place: Option<(Matrix34, f32)>,
 }
 
 pub struct OrbitVr {
@@ -637,7 +639,9 @@ impl OrbitVr {
             self.stuck.beat(false);
             // A capture shown from these menus goes with them (Enzo). One shown from N4N0's own menu is not theirs to hide.
             let mut turn = Turn::default();
-            if std::mem::take(&mut self.showed_view) {
+            // One taken in a hand is out of the menu's: it stays until Hide 3D.
+            if self.showed_view && !cx.world_status.small_taken {
+                self.showed_view = false;
                 turn.worlds.push(super::super::worlds::Relayed::View(super::super::worlds::panel::Action::Hide));
             }
             return turn;
@@ -845,9 +849,23 @@ impl OrbitVr {
             match asked {
                 super::super::worlds::Relayed::Show(_) | super::super::worlds::Relayed::ShowLocal { .. } => self.showed_view = true,
                 super::super::worlds::Relayed::View(super::super::worlds::panel::Action::Hide) => self.showed_view = false,
-                super::super::worlds::Relayed::View(_) => {}
+                super::super::worlds::Relayed::View(_) | super::super::worlds::Relayed::MenuOpened => {}
             }
         }
+        if !self.last_shown {
+            turn.worlds.push(super::super::worlds::Relayed::MenuOpened);
+        }
+        turn.small_place = self.panels.small_place_on_sheet().and_then(|hole| {
+            let i = self.panels.all().position(|p| p.zone == Zone::Takeover)?;
+            let quad = &quads[i].0;
+            let frame = match &placing[i] {
+                Placing::At(m) => *m,
+                Placing::Room => quad.transform,
+            };
+            let (x, y) = ((hole.center().x / 1024.0 - 0.5) * quad.width, (0.5 - hole.center().y / 576.0) * quad.height);
+            let there = Matrix34 { m: [[1.0, 0.0, 0.0, x], [0.0, 1.0, 0.0, y], [0.0, 0.0, 1.0, 0.0]] };
+            Some((space::compose(&frame, &there), hole.height() / 576.0 * quad.height / 2.0 * 0.92))
+        });
         // Pictures, then each overlay where it goes.
         self.show(&mut cx, &quads, &placing);
         self.last_shown = true;

@@ -300,6 +300,8 @@ pub struct View {
     small_on: bool,
     small: Option<stereo::Small>,
     small_coming: Option<mpsc::Receiver<Arc<Capture>>>,
+    /// Where a panel has a place for it, and how large that is: the panel's turn to say, each frame.
+    small_place: Option<(vr::Matrix34, f32)>,
     /// When the hands last moved it; where it stood for the wide views last drawn.
     small_read: Option<Instant>,
     wide_placement: Option<Placement>,
@@ -362,6 +364,7 @@ impl View {
             small_on: false,
             small: None,
             small_coming: None,
+            small_place: None,
             small_read: None,
             wide_placement: None,
             quality: Quality::default(),
@@ -540,8 +543,26 @@ impl View {
         let seconds = self.small_read.map_or(0.0, |t| now.duration_since(t).as_secs_f32()).min(0.1);
         self.small_read = Some(now);
         let (Some(small), Some(capture)) = (self.small.as_mut(), self.capture.as_ref()) else { return };
-        small.step(hands, grips, sticks, seconds);
+        let dock = self.small_place.map(|(at, radius)| stereo::SmallDock::behind(&capture.view, &at, radius));
+        small.step(hands, grips, sticks, seconds, dock);
         self.placement = Some(small.placement(capture.view.eye()));
+    }
+
+    /// Where a panel has a place for what shows small, and how large it is, or that it has none.
+    pub fn small_place(&mut self, place: Option<(vr::Matrix34, f32)>) {
+        self.small_place = place;
+    }
+
+    /// What shows small, once it shows.
+    pub fn small_now(&self) -> Option<&stereo::Small> {
+        self.small.as_ref().filter(|_| matches!(self.phase, Phase::Shown { .. }))
+    }
+
+    /// What shows small goes back to its place in the panel.
+    pub fn small_back(&mut self) {
+        if let Some(small) = self.small.as_mut() {
+            small.bring_back();
+        }
     }
 
     fn forget_drawn(&mut self) {
@@ -561,9 +582,8 @@ impl View {
     pub fn recenter(&mut self, steamvr: &vr::Client) {
         if let Some(c) = &self.capture {
             if let Some(small) = self.small.as_mut() {
-                let size = small.size;
-                *small = stereo::Small::new(&c.view, &head_pose(steamvr, 0.0), 1.0);
-                small.size = size;
+                let reach = small.reach();
+                *small = stereo::Small::new(&c.view, &head_pose(steamvr, 0.0), reach);
                 self.placement = Some(small.placement(c.view.eye()));
             } else {
                 self.placement = Some(Placement::at(&c.view, &head_pose(steamvr, 0.0)));
@@ -638,7 +658,10 @@ impl View {
         self.answers(overlay);
         if let Some(sorted) = self.small_coming.as_ref().and_then(|rx| rx.try_recv().ok()) {
             self.small_coming = None;
-            let small = stereo::Small::new(&sorted.view, &head_pose(steamvr, 0.0), sorted.small_reach());
+            let mut small = stereo::Small::new(&sorted.view, &head_pose(steamvr, 0.0), sorted.small_reach());
+            if let Some((at, radius)) = self.small_place {
+                small = small.at_dock(&stereo::SmallDock::behind(&sorted.view, &at, radius));
+            }
             self.placement = Some(small.placement(sorted.view.eye()));
             self.small = Some(small);
             self.begin(sorted, true);

@@ -407,7 +407,7 @@ mod small_tests {
         let head = orbiters_openvr::Matrix34 { m: [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 1.6], [0.0, 0.0, 1.0, 0.0]] };
         let small = Small::new(&capture.view, &head, capture.small_reach());
         let placement = small.placement(capture.view.eye());
-        println!("{} splats, showing {} within {} m at size {}", capture.gaussians.len(), capture.within(small.reach()), small.reach(), small.size);
+        println!("{} splats, showing {} within {} m at size {}", capture.gaussians.len(), capture.within(small.reach()), small.reach(), small.size());
         let (_adapter, device, queue) = super::device(None).unwrap();
         let mut renderer = FaceRenderer::new(device, queue);
         renderer.load(&capture).unwrap();

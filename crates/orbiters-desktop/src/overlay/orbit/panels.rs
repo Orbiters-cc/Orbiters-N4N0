@@ -274,6 +274,8 @@ pub struct Facts {
     pub opened_picture: Option<TextureId>,
     pub recent_words: Vec<(usize, String, Option<f32>)>,
     pub recent_pictures: Vec<(usize, TextureId)>,
+    /// The hole in the sheet what shows small is seen through, in the sheet's back's units.
+    pub sheet_hole: Option<Rect>,
     /// What the 3D view says of what was asked of it, and whether captures show small.
     pub view_said: Option<(String, String)>,
     pub view_small: bool,
@@ -465,7 +467,10 @@ pub fn items(zone: Zone, size: Vec2, facts: &Facts) -> Vec<Item> {
             // While a capture shows around the person: it is one press from gone, wherever on the sheet.
             if facts.view_showing {
                 out.push(Item { action: Action::HideView, rect: r(w - 40.0 - 8.0 - 96.0, 11.0, 96.0, 30.0), look: Look::HideView });
-                out.push(Item { action: Action::SmallView(!facts.view_small), rect: r(w - 40.0 - 8.0 - 96.0 - 6.0 - 96.0, 11.0, 96.0, 30.0), look: Look::SmallView });
+                // On Worlds in 3D, the world's side panel has it.
+                if facts.sheet != Some(Sheet::Worlds) {
+                    out.push(Item { action: Action::SmallView(!facts.view_small), rect: r(w - 40.0 - 8.0 - 96.0 - 6.0 - 96.0, 11.0, 96.0, 30.0), look: Look::SmallView });
+                }
             }
             // All tools has what plays on its page.
             if facts.music.is_some() && !facts.beside_wing && !facts.view_showing && status_now(facts).is_none() && facts.sheet != Some(Sheet::All) {
@@ -1065,7 +1070,12 @@ pub fn paint(p: &Painter, zone: Zone, size: Vec2, facts: &Facts, hover: Option<u
             widgets::icon(p, pos2(20.0, size.y / 2.0), icons::N4N0_MARK, 20.0, look::LABEL);
         }
         Zone::SheetBack => {
-            p.rect_filled(panel, theme::radius(look::RADIUS + 2.0), look::OPAQUE);
+            match facts.sheet_hole {
+                Some(hole) => super::super::worlds::panel::fill_around(p, panel, look::RADIUS + 2.0, hole, 10.0, look::OPAQUE),
+                None => {
+                    p.rect_filled(panel, theme::radius(look::RADIUS + 2.0), look::OPAQUE);
+                }
+            }
             top_light(p, panel);
             // Beside the wing, which has the name, the head only says the page.
             let mut x = 18.0;

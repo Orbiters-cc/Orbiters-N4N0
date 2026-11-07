@@ -569,7 +569,8 @@ impl Capture {
 
     /// The same capture to show small: in order of distance from what its start view looks at, around which it stands.
     pub fn around_subject(&self) -> Self {
-        let view = StartView { position: self.view.target, target: self.view.position, floor: self.view.floor, eye_height: self.view.eye_height };
+        let ahead = stereo::add(self.view.target, stereo::sub(self.view.target, self.view.position));
+        let view = StartView { position: self.view.target, target: ahead, floor: self.view.floor, eye_height: self.view.eye_height };
         Self::new(self.gaussians.clone(), None, view)
     }
 

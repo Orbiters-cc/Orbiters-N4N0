@@ -16,6 +16,7 @@
 
 pub mod cache;
 pub mod catalog;
+pub mod small_hint;
 mod diagnostics;
 pub mod finder;
 #[cfg(windows)]
@@ -64,6 +65,8 @@ const TYPING_PAUSE: Duration = Duration::from_millis(400);
 #[derive(Clone, Debug)]
 pub enum Relayed {
     Show(Entry),
+    /// VRChat's menu just opened (the hint of a small view shows again for the next capture).
+    MenuOpened,
     /// A capture of this computer's gallery: its session, what it is called, and what tells its results apart.
     ShowLocal { dir: std::path::PathBuf, name: String, changed: u64 },
     View(Action),
@@ -161,6 +164,13 @@ pub struct Worlds {
     epoch: Instant,
     keys_seen: Option<u32>,
     last_paint: Option<Instant>,
+    /// With no SteamVR: nothing can show around or before the person.
+    alone: bool,
+    key: String,
+    /// What says how to handle what shows small; it has been used; a new opening of the menu asks it back for the next capture.
+    hint: Option<small_hint::SmallHint>,
+    hint_used: bool,
+    hint_again: bool,
 }
 
 /// Now, in Unix seconds.
@@ -249,6 +259,11 @@ impl Worlds {
             epoch: Instant::now(),
             keys_seen: None,
             last_paint: None,
+            alone: false,
+            key: key.to_string(),
+            hint: None,
+            hint_used: false,
+            hint_again: false,
         })
     }
 
@@ -309,6 +324,11 @@ impl Worlds {
             epoch: Instant::now(),
             keys_seen: None,
             last_paint: None,
+            alone: true,
+            key: String::new(),
+            hint: None,
+            hint_used: false,
+            hint_again: false,
         }
     }
 
@@ -369,7 +389,7 @@ impl Worlds {
                         self.relayed.push(Relayed::Show(entry.clone()));
                     }
                 }
-                action @ (Action::Hide | Action::Recenter | Action::SeeThrough(_) | Action::Small(_) | Action::Quality(_)) if self.relay.is_some() => self.relayed.push(Relayed::View(action)),
+                action @ (Action::Hide | Action::Recenter | Action::SeeThrough(_) | Action::Small(_) | Action::SmallBack | Action::Quality(_)) if self.relay.is_some() => self.relayed.push(Relayed::View(action)),
                 Action::Show(_) => {
                     if let Some(backend) = &self.backend {
                         backend.show_window();
@@ -377,7 +397,7 @@ impl Worlds {
                     let time = self.time();
                     self.panel.say("Opened in the Orbiters window, where it shows in 3D", time);
                 }
-                Action::Hide | Action::Recenter | Action::SeeThrough(_) | Action::Small(_) | Action::Quality(_) | Action::Open => {}
+                Action::Hide | Action::Recenter | Action::SeeThrough(_) | Action::Small(_) | Action::SmallBack | Action::Quality(_) | Action::Open => {}
                 Action::Leave => self.open = false,
                 Action::Refresh => {
                     self.catalog.refresh(&self.source);
@@ -461,6 +481,9 @@ impl Worlds {
 
     pub fn destroy(&mut self, overlay: &vr::Overlay) {
         self.view.destroy(overlay);
+        if let Some(hint) = self.hint.take() {
+            hint.destroy(overlay);
+        }
         let _ = overlay.destroy(self.chip);
         let _ = overlay.destroy(self.bar);
     }
@@ -630,6 +653,46 @@ impl Worlds {
     }
 
     /// The 3D view goes: from a button that is not on this panel.
+    /// What says how to handle what shows small, until it has been used.
+    fn update_hint(&mut self, overlay: &vr::Overlay, steamvr: &vr::Client, presenter: &mut Presenter, snap: &Snapshot) {
+        let small = self.view.small_now().copied();
+        self.hint_used |= small.is_some_and(|s| s.zoomed);
+        let wanted = small.filter(|s| !self.hint_used && !s.docked).map(|s| {
+            let stage = if s.held() { small_hint::Stage::Stick } else { small_hint::Stage::Grip { near: s.near } };
+            (stage, s.anchor, s.radius())
+        });
+        if self.hint.is_none() {
+            if wanted.is_none() {
+                return;
+            }
+            match small_hint::SmallHint::new(overlay, &self.key) {
+                Ok(hint) => self.hint = Some(hint),
+                Err(e) => {
+                    eprintln!("{e:#}");
+                    return;
+                }
+            }
+        }
+        if let Some(hint) = self.hint.as_mut() {
+            hint.update(overlay, presenter, &view::head_pose(steamvr, 0.0), wanted, !snap.settings.reduce_motion);
+        }
+    }
+
+    /// Where in the panel what shows small lies, when it may.
+    pub fn small_place_on_panel(&self) -> Option<egui::Rect> {
+        self.panel.small_place(&self.status())
+    }
+
+    /// The hole in the panel it shows through, when it lies there now.
+    pub fn small_hole(&self) -> Option<egui::Rect> {
+        self.panel.hole(&self.status())
+    }
+
+    /// Where a panel has a place for what shows small, and how large it is.
+    pub fn small_place(&mut self, place: Option<(vr::Matrix34, f32)>) {
+        self.view.small_place(place);
+    }
+
     pub fn view_small(&mut self, on: bool) {
         if self.relay.is_some() {
             self.relayed.push(Relayed::View(Action::Small(on)));
@@ -667,6 +730,7 @@ impl Worlds {
                     self.picked = Some(entry);
                     self.deferred.push(Action::Show(id));
                 }
+                Relayed::MenuOpened => self.hint_again = true,
                 Relayed::View(action) => self.deferred.push(action),
             }
         }
@@ -679,6 +743,10 @@ impl Worlds {
             quality: self.view.quality(),
             see_through: self.view.see_through,
             small: self.view.small_on(),
+            small_taken: self.view.small_now().is_some_and(|s| s.taken),
+            small_docked: self.view.small_now().is_some_and(|s| s.docked),
+            small_near: self.view.small_now().is_some_and(|s| s.near),
+            headset: !self.alone,
             error: self.error.clone().or_else(|| self.view.error.clone()),
             fetching,
             listing_error,
@@ -779,6 +847,7 @@ impl Worlds {
         }
         self.finish_download(overlay, steamvr);
         self.view.update(overlay, steamvr);
+        self.update_hint(overlay, steamvr, presenter, snap);
         if self.current.is_some() && self.download.is_none() && !self.view.active() {
             // Hidden (or failed): nothing is current any more.
             self.current = None;
@@ -1064,6 +1133,10 @@ impl Worlds {
                     let Some(entry) = entries.iter().find(|e| e.id == id).or(self.picked.as_ref().filter(|e| e.id == id)).filter(|e| e.capture).cloned() else {
                         continue;
                     };
+                    // A new capture from a new opening of the menu: its hint again.
+                    if std::mem::take(&mut self.hint_again) {
+                        self.hint_used = false;
+                    }
                     self.error = None;
                     self.view.error = None;
                     let key = cache::Key::of(&entry);
@@ -1099,6 +1172,7 @@ impl Worlds {
                 Action::Recenter => self.view.recenter(steamvr),
                 Action::SeeThrough(on) => self.view.see_through = on,
                 Action::Small(on) => self.view.set_small(on, overlay, steamvr),
+                Action::SmallBack => self.view.small_back(),
                 Action::Quality(q) => self.view.set_quality(q),
                 Action::Leave => self.open = false,
                 Action::Refresh => {

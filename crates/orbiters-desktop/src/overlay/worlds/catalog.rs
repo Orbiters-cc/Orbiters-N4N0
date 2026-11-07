@@ -6,6 +6,7 @@
 //! the API's web `.splat` and sky map of the preview elsewhere (a development server publishes its slots to storage the
 //! app has no address for).
 
+use orbiters_i18n::tr;
 use super::cache::{Disk, Validators};
 use super::stereo::{self, StartView, V3};
 use orbiters_core::account::{Api, Server};
@@ -372,7 +373,7 @@ impl Source {
         let response = self.api.agent().get(&self.api.url("maps/vrchat/previews")).call()?;
         let status = response.status().as_u16();
         let text = response.into_body().with_config().limit(16 << 20).read_to_string()?;
-        anyhow::ensure!((200..300).contains(&status), "Orbiters answered {status}");
+        anyhow::ensure!((200..300).contains(&status), Answered { url: None, status });
         parse(&text)
     }
 
@@ -381,7 +382,7 @@ impl Source {
         let response = self.api.agent().get(&self.api.url("maps/vrchat/feedback")).call()?;
         let status = response.status().as_u16();
         let text = response.into_body().with_config().limit(8 << 20).read_to_string()?;
-        anyhow::ensure!((200..300).contains(&status), "Orbiters answered {status}");
+        anyhow::ensure!((200..300).contains(&status), Answered { url: None, status });
         parse_feedback(&text)
     }
 
@@ -452,7 +453,7 @@ impl Source {
             }
             // Unreachable: what was kept is the listing's upload all the same.
             Err(e) => match kept {
-                Some((bytes, _)) if !format!("{e:#}").contains("answered 4") => {
+                Some((bytes, _)) if !refused(&e) => {
                     disk.touch(name);
                     whole(&bytes);
                     Ok(bytes)
@@ -478,7 +479,7 @@ impl Source {
         if status == 304 && kept.is_some() {
             return Ok((None, kept.cloned().unwrap_or_default()));
         }
-        anyhow::ensure!((200..300).contains(&status), "{url} answered {status}");
+        anyhow::ensure!((200..300).contains(&status), Answered { url: Some(url.to_string()), status });
         let header = |k: &str| response.headers().get(k).and_then(|v| v.to_str().ok()).map(str::to_string);
         let validators = Validators { url: url.to_string(), etag: header("etag"), last_modified: header("last-modified") };
         let total = response.headers().get("content-length").and_then(|v| v.to_str().ok()).and_then(|v| v.parse::<u64>().ok());
@@ -523,11 +524,46 @@ impl Progress {
     }
 }
 
+/// A server answered with something other than success. An error of its own, as what is done about it must not read its words, which are in the language now.
+#[derive(Debug)]
+pub struct Answered {
+    url: Option<String>,
+    pub status: u16,
+}
+
+impl std::fmt::Display for Answered {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&match &self.url {
+            Some(url) => tr!("{url} answered {status}", url = url, status = self.status),
+            None => tr!("Orbiters answered {status}", status = self.status),
+        })
+    }
+}
+
+impl std::error::Error for Answered {}
+
+/// A capture's file was replaced at its slot since the list was read.
+#[derive(Debug)]
+pub struct Replaced;
+
+impl std::fmt::Display for Replaced {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(tr("this capture was replaced on Orbiters: refresh the list"))
+    }
+}
+
+impl std::error::Error for Replaced {}
+
+/// The server refused (a 4xx), rather than could not be reached.
+fn refused(e: &anyhow::Error) -> bool {
+    e.chain().filter_map(|cause| cause.downcast_ref::<Answered>()).any(|a| (400..500).contains(&a.status))
+}
+
 /// The finest splats of a PC tree (contracts `Docs/splat-tree.md`, version 2): its leaf boxes', in the renderer's
 /// coordinates, as their records decode. A file whose key is not `key` was replaced at its slot since the listing; one
 /// of version 1 (a capture shared before the 20-byte records) has to be shared again.
 pub fn tree_leaves(bytes: &[u8], key: u32) -> anyhow::Result<Gaussians> {
-    anyhow::ensure!(orbiters_reconstruct::tree_file::key(bytes)? == key, "this capture was replaced on Orbiters: refresh the list");
+    anyhow::ensure!(orbiters_reconstruct::tree_file::key(bytes)? == key, Replaced);
     Ok(orbiters_reconstruct::tree::Tree::parse(bytes)?.leaf_splats())
 }
 

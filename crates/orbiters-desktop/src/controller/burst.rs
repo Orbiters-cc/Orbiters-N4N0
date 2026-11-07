@@ -25,6 +25,7 @@ use crate::state::CaptureState;
 use orbiters_contracts::rig;
 use orbiters_core::osc::{OscValue, PARAMETERS_PREFIX};
 use orbiters_core::settings::{Photo3dLength, PictureMode};
+use orbiters_i18n::tr;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -503,7 +504,7 @@ impl super::Controller {
         let file = match super::dolly::write(&super::dolly::paths(flight, seconds, zoom, focus)) {
             Ok(file) => file,
             Err(e) => {
-                self.notify(NoticeKind::Warning, format!("The camera dolly's paths could not be written ({e}): the 3D picture uses the camera alone."));
+                self.notify(NoticeKind::Warning, tr!("The camera dolly's paths could not be written ({error}): the 3D picture uses the camera alone.", error = e));
                 return false;
             }
         };
@@ -521,14 +522,14 @@ impl super::Controller {
         let _ = self.with_osc(|o| o.send(super::dolly::PLAY, vec![rosc::OscType::Bool(false)]));
         let stats = self.snapshot.lock().unwrap().capture.stats.clone().unwrap_or_default();
         let message = if stats.extra_frames == 0 {
-            "The camera dolly's other cameras sent nothing: in VRChat set Camera › Dolly › Streaming to Multi (VRC+), then try again.".to_string()
+            tr("The camera dolly's other cameras sent nothing: in VRChat set Camera › Dolly › Streaming to Multi (VRC+), then try again.").to_string()
         } else if stats.extra_keyframes == 0 {
-            format!(
-                "The camera dolly's other cameras sent {} frames, none with your capture kit's strip: VRChat does not draw it in them, so they add nothing.",
-                stats.extra_frames
+            tr!(
+                "The camera dolly's other cameras sent {frames} frames, none with your capture kit's strip: VRChat does not draw it in them, so they add nothing.",
+                frames = stats.extra_frames
             )
         } else {
-            format!("The camera dolly's other cameras sent {} frames: {} more views for the reconstruction.", stats.extra_frames, stats.extra_keyframes)
+            tr!("The camera dolly's other cameras sent {frames} frames: {views} more views for the reconstruction.", frames = stats.extra_frames, views = stats.extra_keyframes)
         };
         self.notify(NoticeKind::Info, message);
     }
@@ -544,12 +545,12 @@ impl super::Controller {
         let left_out = self.snapshot.lock().unwrap().capture.left_out.clone();
         let picture = orbiters_core::picture::Picture { mode, length, wearer: left_out.wearer, others: left_out.others };
         if let Err(e) = picture.save(&dir) {
-            self.notify(NoticeKind::Warning, format!("Could not note what this 3D picture is of: {e}"));
+            self.notify(NoticeKind::Warning, tr!("Could not note what this 3D picture is of: {error}", error = e));
         }
         match self.queue_reconstruction(dir) {
-            Ok(false) => self.notify(NoticeKind::Success, "3D picture taken: it is being reconstructed."),
-            Ok(true) => self.notify(NoticeKind::Success, format!("3D picture taken: its reconstruction starts {}.", self.reconstruction_waits_for())),
-            Err(e) => self.notify(NoticeKind::Warning, format!("3D picture taken, not reconstructed: {e}")),
+            Ok(false) => self.notify(NoticeKind::Success, tr("3D picture taken: it is being reconstructed.")),
+            Ok(true) => self.notify(NoticeKind::Success, tr!("3D picture taken: its reconstruction starts {when}.", when = tr(self.reconstruction_waits_for()))),
+            Err(e) => self.notify(NoticeKind::Warning, tr!("3D picture taken, not reconstructed: {error}", error = e)),
         }
     }
 }

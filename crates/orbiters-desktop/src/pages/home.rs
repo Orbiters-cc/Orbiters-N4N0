@@ -15,9 +15,10 @@ use egui::epaint::RectShape;
 use egui::{pos2, vec2, Align, Align2, Color32, CursorIcon, Id, Key, Layout, Painter, Pos2, Rect, Sense, Stroke, TextureId, Ui, UiBuilder, Vec2};
 use orbiters_contracts::n4n0::{LIGHT_COLORS, LIGHT_LEVELS};
 use orbiters_core::settings::Settings;
-use orbiters_n4n0_core::menu::layout::{self, Content, Icon, Tint, HOME_TILES, LENGTH_LABELS, MORE_CARDS_QR, TIMER_LABELS};
-use orbiters_n4n0_core::menu::strings::Text;
-use orbiters_n4n0_core::menu::{Call, Effect, Media, MediaCommand, Menu, Page, PhotoLength, PhotoMode, Target, Volume, SMOOTHING_LABELS, TIMERS, TRACKING_KINDS};
+use orbiters_i18n::{mark, tr, tr_ctx};
+use orbiters_n4n0_core::menu::layout::{self, Content, Icon, Tint, HOME_TILES, MORE_CARDS_QR};
+use orbiters_n4n0_core::menu::strings::{self, Strings, Text};
+use orbiters_n4n0_core::menu::{Call, Effect, Media, MediaCommand, Menu, Page, PhotoLength, PhotoMode, Target, Volume, TIMERS};
 use orbiters_n4n0_core::youtube::Video;
 use orbiters_ui::anim::{self, Spring};
 use orbiters_ui::icons;
@@ -38,6 +39,12 @@ const INSET: f32 = 24.0;
 const THUMB: Vec2 = vec2(160.0, 90.0);
 /// How long a result's button says its link was copied.
 const COPIED_FOR: f64 = 2.0;
+
+/// A text of N4N0's own menu in the language now (`orbiters-n4n0-core/menu-strings`): the words the menu in VR and on the avatar uses, so
+/// the window and the menu say a timer, a flight, a colour of the light or a kind of tracker the same way.
+fn menu_text(text: Text) -> &'static str {
+    Strings::builtin(orbiters_i18n::language()).get(text)
+}
 
 /// The window's features: every Home tile, then previous instances and the QR code scanner (More's, on the avatar's
 /// screen).
@@ -172,9 +179,9 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
     }
     // The 3D picture as the Capture page allows it.
     let take_blocked = if !snap.settings.consent_acknowledged {
-        Some("Accept the capture notice on the Capture page first")
+        Some(tr("Accept the capture notice on the Capture page first"))
     } else if !snap.vrchat.running {
-        Some("Start VRChat first: its camera takes the picture")
+        Some(tr("Start VRChat first: its camera takes the picture"))
     } else {
         None
     };
@@ -289,14 +296,14 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
 fn idle_line(settings: &Settings) -> String {
     // Enzo: saying its name should not be the first thing offered: "almost nobody will want to do that".
     let _ = settings;
-    "Pick a feature, or hold Talk on N4N0's page to talk to it".into()
+    tr("Pick a feature, or hold Talk on N4N0's page to talk to it").into()
 }
 
 fn home(ui: &mut Ui, cx: &mut Cx, menu: &Menu, idle: &str, copied: Option<&str>, network: &mut super::network::State, acts: &mut Vec<Act>) {
     block(ui, cx, 0, 72.0, |ui, rect| {
         let p = ui.painter();
-        widgets::text(p, pos2(rect.left(), rect.top() + 7.0), Align2::LEFT_CENTER, &Txt::caps("N4N0 menu"));
-        widgets::text(p, pos2(rect.left(), rect.top() + 34.0), Align2::LEFT_CENTER, &Txt::new("Home", 30.0).weight(weight::SEMIBOLD).tracking(-0.015));
+        widgets::text(p, pos2(rect.left(), rect.top() + 7.0), Align2::LEFT_CENTER, &Txt::caps(tr("N4N0 menu")));
+        widgets::text(p, pos2(rect.left(), rect.top() + 34.0), Align2::LEFT_CENTER, &Txt::new(tr("Home"), 30.0).weight(weight::SEMIBOLD).tracking(-0.015));
         let y = rect.top() + 62.0;
         if menu.listening {
             // N4N0 listens: its dot breathes.
@@ -354,7 +361,7 @@ fn tile_height(width: f32) -> f32 {
 /// walk, the light), the Copy link of the YouTube video playing (music), or an arrow for what opens a page.
 fn feature(ui: &mut Ui, cx: &Cx, i: usize, tile: (Target, Icon, Text, Tint), rect: Rect, menu: &Menu, copied: Option<&str>, acts: &mut Vec<Act>) {
     let (target, icon, title, tint) = tile;
-    let title = title.en();
+    let title = menu_text(title);
     let state = layout::target_state(menu, target);
     let (rect, alpha) = super::entering(ui, cx, 1 + i, rect);
     let ctx = ui.ctx().clone();
@@ -411,7 +418,7 @@ fn feature(ui: &mut Ui, cx: &Cx, i: usize, tile: (Target, Icon, Text, Tint), rec
         _ => None,
     };
     if let Some(video) = playing {
-        let (glyph, label) = if copied == Some(video) { (icons::CHECK, "Link copied") } else { (icons::COPY, "Copy the video's link") };
+        let (glyph, label) = if copied == Some(video) { (icons::CHECK, tr("Link copied")) } else { (icons::COPY, tr("Copy the video's link")) };
         let br = Rect::from_center_size(pos2(r.right() - INSET - 12.0, chip.center().y), Vec2::splat(36.0));
         let mut bu = ui.new_child(UiBuilder::new().max_rect(br).id_salt(("orbiters-home-copy-playing", i)));
         bu.multiply_opacity(alpha);
@@ -455,13 +462,13 @@ fn said(ui: &mut Ui, cx: &Cx, index: usize, rect: Rect, menu: &Menu) {
     n4n0_face(&p, chip.center(), 10.0);
     let caption = match (&menu.heard, menu.heard_private) {
         (None, _) => "N4N0",
-        (Some(_), true) => "You said",
-        (Some(_), false) => "N4N0 says",
+        (Some(_), true) => tr("You said"),
+        (Some(_), false) => tr("N4N0 says"),
     };
     widgets::text(&p, pos2(chip.right() + 12.0, chip.center().y), Align2::LEFT_CENTER, &Txt::caps(caption));
     let (text, color) = match menu.heard.as_deref() {
         Some(text) => (format!("“{text}”"), theme::FG_2),
-        None => ("Nothing said yet: N4N0's answers show here.".to_string(), theme::FG_3),
+        None => (tr("Nothing said yet: N4N0's answers show here.").to_string(), theme::FG_3),
     };
     let mut job = Txt::new(text, 13.0).color(color).line_height(18.0).job(r.width() - 2.0 * INSET);
     job.wrap.max_rows = 2;
@@ -482,12 +489,12 @@ fn n4n0_face(p: &Painter, center: Pos2, radius: f32) {
 /// The top of a feature's page: back to Home, over its heading.
 fn top(ui: &mut Ui, cx: &Cx, title: &str, sub: &str, acts: &mut Vec<Act>) {
     block(ui, cx, 0, 116.0, |ui, rect| {
-        let back = Button::new("Home").icon(icons::ARROW_LEFT).variant(Variant::Ghost).size(Size::Sm);
+        let back = Button::new(tr("Home")).icon(icons::ARROW_LEFT).variant(Variant::Ghost).size(Size::Sm);
         let w = back.desired_width(ui);
         if back.show_at(ui, Rect::from_min_size(rect.min, vec2(w, 32.0))).clicked() {
             acts.push(Act::Home);
         }
-        super::heading(ui, Rect::from_min_max(pos2(rect.left(), rect.top() + 44.0), rect.max), "N4N0 menu", title, Some(sub));
+        super::heading(ui, Rect::from_min_max(pos2(rect.left(), rect.top() + 44.0), rect.max), tr("N4N0 menu"), title, Some(sub));
     });
 }
 
@@ -538,19 +545,19 @@ fn thumbnail(p: &Painter, r: Rect, texture: Option<TextureId>, radius: f32) {
 }
 
 fn youtube(ui: &mut Ui, cx: &Cx, menu: &Menu, picture: &dyn Fn(&str) -> Option<TextureId>, focus: &mut bool, copied: Option<&str>, acts: &mut Vec<Act>) {
-    top(ui, cx, "YouTube", "Find a video, then copy its link for the world's video player", acts);
+    top(ui, cx, "YouTube", tr("Find a video, then copy its link for the world's video player"), acts);
     let w = ui.available_width().min(MAX_W);
     block(ui, cx, 1, 40.0, |ui, rect| {
         let button_w = 104.0;
         let field = Rect::from_min_size(rect.min, vec2(w - button_w - 12.0, 40.0));
         let mut fu = ui.new_child(UiBuilder::new().max_rect(field).layout(Layout::left_to_right(Align::Center)));
         let mut text = menu.query.clone();
-        let resp = widgets::search_field(&mut fu, "orbiters-home-search", &mut text, "Search YouTube", field.width());
+        let resp = widgets::search_field(&mut fu, "orbiters-home-search", &mut text, tr("Search YouTube"), field.width());
         if std::mem::take(focus) {
             resp.request_focus();
         }
         let enter = resp.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
-        let search = Button::new("Search").variant(Variant::Primary).enabled(!text.trim().is_empty()).width(button_w);
+        let search = Button::new(tr("Search")).variant(Variant::Primary).enabled(!text.trim().is_empty()).width(button_w);
         let clicked = search.show_at(ui, Rect::from_min_size(pos2(field.right() + 12.0, rect.top()), vec2(button_w, 40.0))).clicked();
         if text != menu.query {
             acts.push(Act::Query(text.clone()));
@@ -572,15 +579,15 @@ fn youtube(ui: &mut Ui, cx: &Cx, menu: &Menu, picture: &dyn Fn(&str) -> Option<T
 fn card_out(ui: &mut Ui, cx: &Cx, index: usize, acts: &mut Vec<Act>) {
     let Some(card) = cx.snap.n4n0.card.as_ref() else { return };
     let left = match card.left {
-        0..60 => "less than a minute left".to_string(),
-        s => format!("{} min left", s.div_ceil(60)),
+        0..60 => tr("less than a minute left").to_string(),
+        s => tr!("{minutes} min left", minutes = s.div_ceil(60)),
     };
-    let sub = format!("In the world, where anyone near can grab it · {left}");
-    section(ui, cx, index, icons::HAND_DEPOSIT, "Your link card is out", Some(&sub), |ui| {
-        let title = if card.title.trim().is_empty() { "Link card" } else { card.title.as_str() };
+    let sub = tr!("In the world, where anyone near can grab it · {left}", left = left);
+    section(ui, cx, index, icons::HAND_DEPOSIT, tr("Your link card is out"), Some(&sub), |ui| {
+        let title = if card.title.trim().is_empty() { tr("Link card") } else { card.title.as_str() };
         let shown = card.link.strip_prefix("https://").unwrap_or(&card.link);
         widgets::field(ui, title, Some(shown.strip_prefix("www.").unwrap_or(shown)), 150.0, |ui| {
-            let take = Button::new("Take back").icon(icons::X_CIRCLE).size(Size::Sm).width(150.0).hint("Takes the card out of the world");
+            let take = Button::new(tr("Take back")).icon(icons::X_CIRCLE).size(Size::Sm).width(150.0).hint(tr("Takes the card out of the world"));
             if take.id_salt("orbiters-home-take-back").show(ui).clicked() {
                 acts.push(Act::Press(Target::TakeBack));
             }
@@ -626,9 +633,9 @@ fn timeline(ui: &mut Ui, media: &Media, acts: &mut Vec<Act>) {
     widgets::text(p, pos2(row.left(), row.center().y), Align2::LEFT_CENTER, &time(shown_at));
     widgets::text(p, pos2(row.right(), row.center().y), Align2::RIGHT_CENTER, &time(length as u64));
     if !media.can_seek {
-        let app = if media.app.is_empty() { "This player" } else { media.app.as_str() };
+        let app = if media.app.is_empty() { tr("This player") } else { media.app.as_str() };
         let (note, _) = ui.allocate_exact_size(vec2(ui.available_width(), 18.0), Sense::hover());
-        let txt = Txt::new(format!("{app} lets no app move in its timeline"), 12.0).color(theme::FG_4);
+        let txt = Txt::new(tr!("{app} lets no app move in its timeline", app = app), 12.0).color(theme::FG_4);
         widgets::text(ui.painter(), pos2(bar.left(), note.center().y), Align2::LEFT_CENTER, &txt);
     }
 }
@@ -636,10 +643,10 @@ fn timeline(ui: &mut Ui, media: &Media, acts: &mut Vec<Act>) {
 fn suggestions(ui: &mut Ui, cx: &Cx, menu: &Menu, acts: &mut Vec<Act>) {
     let shown: Vec<&str> = menu.shown_suggestions().collect();
     if shown.is_empty() {
-        let text = "Type what you want to watch and press Enter. A result's Copy link puts it in the clipboard, ready to paste in the world's video player.";
-        return note_card(ui, cx, 2, icons::YOUTUBE_LOGO, "Search YouTube", text);
+        let text = tr("Type what you want to watch and press Enter. A result's Copy link puts it in the clipboard, ready to paste in the world's video player.");
+        return note_card(ui, cx, 2, icons::YOUTUBE_LOGO, tr("Search YouTube"), text);
     }
-    section(ui, cx, 2, icons::MAGNIFYING_GLASS, "Suggestions", None, |ui| {
+    section(ui, cx, 2, icons::MAGNIFYING_GLASS, tr("Suggestions"), None, |ui| {
         ui.add_space(4.0);
         for (i, text) in shown.iter().enumerate() {
             let (r, hover, pressed) = press_row(ui, Id::unique(("orbiters-home-suggestion", i)), 44.0);
@@ -657,7 +664,7 @@ fn suggestions(ui: &mut Ui, cx: &Cx, menu: &Menu, acts: &mut Vec<Act>) {
 fn results(ui: &mut Ui, cx: &Cx, menu: &Menu, picture: &dyn Fn(&str) -> Option<TextureId>, copied: Option<&str>, acts: &mut Vec<Act>) {
     let sub = layout::text(menu, Content::ResultsTitle);
     // As wide as the page: the results go side by side on wide ones.
-    section_up_to(ui, cx, f32::INFINITY, 2, icons::YOUTUBE_LOGO, "Results", Some(&sub), |ui| {
+    section_up_to(ui, cx, f32::INFINITY, 2, icons::YOUTUBE_LOGO, tr("Results"), Some(&sub), |ui| {
         ui.add_space(4.0);
         if menu.loading() {
             row_columns(ui, "orbiters-home-results", ROW_MIN_W, ROW_GAP, 3, |ui, _, first| {
@@ -702,7 +709,9 @@ fn result_row(ui: &mut Ui, i: usize, video: &Video, texture: Option<TextureId>, 
     {
         let p = ui.painter();
         thumbnail(p, thumb, texture, 10.0);
-        let length = if video.live { Some(("LIVE", theme::REC, Color32::WHITE)) } else { video.duration.as_deref().map(|d| (d, theme::black(0.7), theme::FG)) };
+        // A badge in capitals, as the English one is.
+        let live = tr("LIVE").to_uppercase();
+        let length = if video.live { Some((live.as_str(), theme::REC, Color32::WHITE)) } else { video.duration.as_deref().map(|d| (d, theme::black(0.7), theme::FG)) };
         if let Some((label, bg, fg)) = length {
             super::sessions::badge(p, ui, pos2(thumb.right() - 6.0, thumb.bottom() - 28.0), label, bg, fg, true);
         }
@@ -714,15 +723,15 @@ fn result_row(ui: &mut Ui, i: usize, video: &Video, texture: Option<TextureId>, 
         p.galley(pos2(x, top), title, theme::FG);
         widgets::text_truncated(p, pos2(x, top + title_h + 14.0), Align2::LEFT_CENTER, &Txt::new(&video.channel, 12.5).color(theme::FG_3), text_w);
     }
-    let (label, glyph) = if copied { ("Copied", icons::CHECK) } else { ("Copy link", icons::COPY) };
+    let (label, glyph) = if copied { (tr("Copied"), icons::CHECK) } else { (tr("Copy link"), icons::COPY) };
     let copy = Button::new(label).icon(glyph).size(Size::Sm).width(button_w).id_salt(("orbiters-home-copy", i));
     let mut clicked = None;
     if copy.show_at(ui, Rect::from_min_size(pos2(row.right() - button_w, row.center().y - 16.0), vec2(button_w, 32.0))).clicked() {
         clicked = Some(Target::Copy(i as u8));
     }
     if drop {
-        let hint = "Drop it in the world as a card: whoever grabs it copies the link";
-        let button = Button::new("Drop").icon(icons::HAND_DEPOSIT).size(Size::Sm).variant(Variant::Primary).width(96.0).hint(hint);
+        let hint = tr("Drop it in the world as a card: whoever grabs it copies the link");
+        let button = Button::new(tr("Drop")).icon(icons::HAND_DEPOSIT).size(Size::Sm).variant(Variant::Primary).width(96.0).hint(hint);
         let at = Rect::from_min_size(pos2(row.right() - button_w - 8.0 - 96.0, row.center().y - 16.0), vec2(96.0, 32.0));
         if button.id_salt(("orbiters-home-drop", i)).show_at(ui, at).clicked() {
             clicked = Some(Target::Drop(i as u8));
@@ -746,14 +755,14 @@ fn placeholder_row(ui: &mut Ui) {
 /// The results' pages: the one before, where it is, the next; the one pressed.
 fn pager(ui: &mut Ui, menu: &Menu) -> Option<Target> {
     let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), 56.0), Sense::hover());
-    let label = Txt::new(format!("Page {}", layout::text(menu, Content::PageLabel)), 12.5).color(theme::FG_3);
+    let label = Txt::new(tr!("Page {page}", page = layout::text(menu, Content::PageLabel)), 12.5).color(theme::FG_3);
     widgets::text(ui.painter(), row.center(), Align2::CENTER_CENTER, &label);
     let mut pressed = None;
     for (target, glyph, name, dx, on) in [
-        (Target::Previous, icons::CARET_LEFT, "Previous page", -70.0, menu.has_previous()),
-        (Target::Next, icons::CARET_RIGHT, "Next page", 70.0, menu.has_next()),
+        (Target::Previous, icons::CARET_LEFT, mark("Previous page"), -70.0, menu.has_previous()),
+        (Target::Next, icons::CARET_RIGHT, mark("Next page"), 70.0, menu.has_next()),
     ] {
-        if icon_button(ui, Rect::from_center_size(row.center() + vec2(dx, 0.0), Vec2::splat(36.0)), glyph, name, on) {
+        if icon_button(ui, Rect::from_center_size(row.center() + vec2(dx, 0.0), Vec2::splat(36.0)), glyph, tr(name), on) {
             pressed = Some(target);
         }
     }
@@ -761,8 +770,8 @@ fn pager(ui: &mut Ui, menu: &Menu) -> Option<Target> {
 }
 
 fn call(ui: &mut Ui, cx: &Cx, menu: &Menu, acts: &mut Vec<Act>) {
-    let sub = if menu.calls_ready { layout::text(menu, Content::CallsTitle) } else { "Friends who are online, a press away".to_string() };
-    top(ui, cx, "Call", &sub, acts);
+    let sub = if menu.calls_ready { layout::text(menu, Content::CallsTitle) } else { tr("Friends who are online, a press away").to_string() };
+    top(ui, cx, tr_ctx("voice call", "Call"), &sub, acts);
     if let Some(call) = &menu.call {
         let ringing = matches!(call, Call::Ringing { .. });
         let name = layout::text(menu, Content::CallName);
@@ -772,14 +781,14 @@ fn call(ui: &mut Ui, cx: &Cx, menu: &Menu, acts: &mut Vec<Act>) {
             let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), 40.0), Sense::hover());
             let mut x = row.left();
             if ringing {
-                let answer = Button::new("Answer").icon(icons::PHONE).variant(Variant::Primary);
+                let answer = Button::new(tr("Answer")).icon(icons::PHONE).variant(Variant::Primary);
                 let w = answer.desired_width(ui);
                 if answer.show_at(ui, Rect::from_min_size(pos2(x, row.top()), vec2(w, 40.0))).clicked() {
                     acts.push(Act::Press(Target::Answer));
                 }
                 x += w + 8.0;
             }
-            let end = Button::new(if ringing { "Decline" } else { "Hang up" }).icon(icons::PHONE_X).variant(Variant::Danger).id_salt("orbiters-home-hang-up");
+            let end = Button::new(if ringing { tr("Decline") } else { tr("Hang up") }).icon(icons::PHONE_X).variant(Variant::Danger).id_salt("orbiters-home-hang-up");
             let w = end.desired_width(ui);
             if end.show_at(ui, Rect::from_min_size(pos2(x, row.top()), vec2(w, 40.0))).clicked() {
                 acts.push(Act::Press(Target::HangUp));
@@ -789,19 +798,19 @@ fn call(ui: &mut Ui, cx: &Cx, menu: &Menu, acts: &mut Vec<Act>) {
         return;
     }
     if !menu.calls_ready {
-        return note_card(ui, cx, 1, icons::PHONE, "Calls are not available", &menu.call_note);
+        return note_card(ui, cx, 1, icons::PHONE, tr("Calls are not available"), tr(&menu.call_note));
     }
     if menu.contacts.is_empty() {
-        return note_card(ui, cx, 1, icons::USERS, "No friend online", "Friends who can take a call show here as soon as they are online.");
+        return note_card(ui, cx, 1, icons::USERS, tr("No friend online"), tr("Friends who can take a call show here as soon as they are online."));
     }
-    section(ui, cx, 1, icons::USERS, "Friends", Some("Online, and able to take a call"), |ui| {
+    section(ui, cx, 1, icons::USERS, tr("Friends"), Some(tr("Online, and able to take a call")), |ui| {
         ui.add_space(4.0);
         for (i, contact) in menu.contacts.iter().enumerate() {
             if i > 0 {
                 widgets::separator(ui);
             }
             let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), 60.0), Sense::hover());
-            let call = Button::new("Call").icon(icons::PHONE).size(Size::Sm).id_salt(("orbiters-home-call", i));
+            let call = Button::new(tr("Call")).icon(icons::PHONE).size(Size::Sm).id_salt(("orbiters-home-call", i));
             let call_w = call.desired_width(ui);
             {
                 let p = ui.painter();
@@ -820,20 +829,20 @@ fn call(ui: &mut Ui, cx: &Cx, menu: &Menu, acts: &mut Vec<Act>) {
 
 fn photo(ui: &mut Ui, cx: &Cx, menu: &Menu, blocked: Option<&str>, acts: &mut Vec<Act>) {
     // What stopped the last picture ("Open the camera before") shows by the buttons, plainly.
-    let warning = menu.notice.as_deref().filter(|_| menu.countdown.is_none());
+    let warning = menu.notice.as_deref().filter(|_| menu.countdown.is_none()).map(tr);
     let sub = match menu.countdown {
-        Some(n) => format!("Starting in {n}\u{2026} hold still"),
-        None => "VRChat's camera flies, then comes back where it was".to_string(),
+        Some(n) => tr!("Starting in {n}… hold still", n = n),
+        None => tr("VRChat's camera flies, then comes back where it was").to_string(),
     };
-    top(ui, cx, "3D picture", &sub, acts);
+    top(ui, cx, tr("3D picture"), &sub, acts);
     // The two pictures, as on the Capture page.
     let w = ui.available_width();
     let gap = 16.0;
     let card_w = (w - gap) / 2.0;
     let (row, _) = ui.allocate_exact_size(vec2(w, 112.0), Sense::hover());
     let takes = [
-        (PhotoMode::People, icons::USERS, theme::VIOLET, "3D picture of people", "Goes around the people here"),
-        (PhotoMode::World, icons::GLOBE_HEMISPHERE_WEST, theme::ACCENT, "3D picture of the world", "Goes through the place, avatars left out"),
+        (PhotoMode::People, icons::USERS, theme::VIOLET, mark("3D picture of people"), mark("Goes around the people here")),
+        (PhotoMode::World, icons::GLOBE_HEMISPHERE_WEST, theme::ACCENT, mark("3D picture of the world"), mark("Goes through the place, avatars left out")),
     ];
     for (i, (mode, glyph, tint, title, note)) in takes.into_iter().enumerate() {
         let rect = Rect::from_min_size(row.min + vec2(i as f32 * (card_w + gap), 0.0), vec2(card_w, 112.0));
@@ -860,8 +869,8 @@ fn photo(ui: &mut Ui, cx: &Cx, menu: &Menu, blocked: Option<&str>, acts: &mut Ve
         p.rect_filled(chip, theme::radius(16.0), theme::alpha(tint, 0.18));
         widgets::icon(&p, chip.center(), glyph, 26.0, tint);
         let x = chip.right() + 18.0;
-        widgets::text_truncated(&p, pos2(x, r.center().y - 12.0), Align2::LEFT_CENTER, &Txt::new(title, 19.0).weight(weight::SEMIBOLD), r.right() - x - 16.0);
-        widgets::text_truncated(&p, pos2(x, r.center().y + 14.0), Align2::LEFT_CENTER, &Txt::new(note, 13.5).color(theme::FG_2), r.right() - x - 16.0);
+        widgets::text_truncated(&p, pos2(x, r.center().y - 12.0), Align2::LEFT_CENTER, &Txt::new(tr(title), 19.0).weight(weight::SEMIBOLD), r.right() - x - 16.0);
+        widgets::text_truncated(&p, pos2(x, r.center().y + 14.0), Align2::LEFT_CENTER, &Txt::new(tr(note), 13.5).color(theme::FG_2), r.right() - x - 16.0);
     }
     if let Some(warning) = warning {
         let galley = ui.painter().layout_job(Txt::new(warning, 14.0).weight(weight::SEMIBOLD).color(theme::WARN).line_height(20.0).job(w - 28.0));
@@ -870,10 +879,10 @@ fn photo(ui: &mut Ui, cx: &Cx, menu: &Menu, blocked: Option<&str>, acts: &mut Ve
         widgets::icon(p, pos2(row.left() + 9.0, row.top() + 10.0), icons::WARNING, 18.0, theme::WARN);
         p.galley(pos2(row.left() + 28.0, row.top()), galley, theme::WARN);
     }
-    section(ui, cx, 3, icons::CUBE_FOCUS, "Camera", Some("The timer and the flight stay as chosen"), |ui| {
+    section(ui, cx, 3, icons::CUBE_FOCUS, tr("Camera"), Some(tr("The timer and the flight stay as chosen")), |ui| {
         let mut timer = menu.photo_timer;
-        let timers: Vec<SegOption<u32>> = TIMERS.iter().zip(TIMER_LABELS).map(|(&t, label)| SegOption::new(t, label)).collect();
-        widgets::field(ui, "Timer", Some("Time to get ready after you press."), 240.0, |ui| {
+        let timers: Vec<SegOption<u32>> = TIMERS.iter().zip(strings::TIMERS).map(|(&t, label)| SegOption::new(t, menu_text(label))).collect();
+        widgets::field(ui, tr("Timer"), Some(tr("Time to get ready after you press.")), 240.0, |ui| {
             if widgets::segmented(ui, "orbiters-home-timer", &mut timer, &timers, true) {
                 if let Some(i) = TIMERS.iter().position(|&t| t == timer) {
                     acts.push(Act::Press(Target::Timer(i as u8)));
@@ -884,11 +893,11 @@ fn photo(ui: &mut Ui, cx: &Cx, menu: &Menu, blocked: Option<&str>, acts: &mut Ve
         let mut length = menu.photo_length;
         let lengths: Vec<SegOption<PhotoLength>> = PhotoLength::ALL
             .iter()
-            .zip(LENGTH_LABELS)
+            .zip(super::capture::flight_labels())
             .zip(super::capture::FLIGHT_HINTS)
-            .map(|((&l, label), hint)| SegOption::new(l, label).hint(hint))
+            .map(|((&l, label), hint)| SegOption::new(l, label).hint(tr(hint)))
             .collect();
-        widgets::field(ui, "Camera flight", Some("Longer flights see more."), 200.0, |ui| {
+        widgets::field(ui, tr("Camera flight"), Some(tr("Longer flights see more.")), 200.0, |ui| {
             if widgets::segmented(ui, "orbiters-home-length", &mut length, &lengths, true) {
                 if let Some(i) = PhotoLength::ALL.iter().position(|&l| l == length) {
                     acts.push(Act::Press(Target::Length(i as u8)));
@@ -902,13 +911,13 @@ fn music(ui: &mut Ui, cx: &Cx, menu: &Menu, picture: &dyn Fn(&str) -> Option<Tex
     let media = menu.media.as_ref().filter(|m| !m.title.is_empty());
     let sub = match media {
         Some(_) => layout::text(menu, Content::MediaState),
-        None => "What this computer plays, and its volume".to_string(),
+        None => tr("What this computer plays, and its volume").to_string(),
     };
-    top(ui, cx, "Music", &sub, acts);
-    let from = media.map(|m| m.app.as_str()).filter(|app| !app.is_empty()).map(|app| format!("From {app}"));
+    top(ui, cx, tr("Music"), &sub, acts);
+    let from = media.map(|m| m.app.as_str()).filter(|app| !app.is_empty()).map(|app| tr!("From {app}", app = app));
     let mut m = super::Masonry::new(ui, "home-music");
     m.add(1, |ui| {
-        section(ui, cx, 1, icons::MUSIC_NOTES, "Now playing", from.as_deref(), |ui| {
+        section(ui, cx, 1, icons::MUSIC_NOTES, tr("Now playing"), from.as_deref(), |ui| {
             ui.add_space(14.0);
             let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), 108.0), Sense::hover());
             let art = Rect::from_min_size(row.min, vec2(192.0, 108.0));
@@ -938,7 +947,7 @@ fn music(ui: &mut Ui, cx: &Cx, menu: &Menu, picture: &dyn Fn(&str) -> Option<Tex
                 let (cy, mut x) = (row.center().y, row.right() - controls_w);
                 // Previous, or back to the start of what has nothing before it.
                 let previous = !layout::target_state(menu, Target::MediaPrevious).hidden;
-                if icon_button(ui, Rect::from_min_size(pos2(x, cy - 20.0), Vec2::splat(40.0)), icons::SKIP_BACK, "Previous", previous) {
+                if icon_button(ui, Rect::from_min_size(pos2(x, cy - 20.0), Vec2::splat(40.0)), icons::SKIP_BACK, tr("Previous"), previous) {
                     acts.push(Act::Press(Target::MediaPrevious));
                 }
                 x += 50.0;
@@ -948,13 +957,13 @@ fn music(ui: &mut Ui, cx: &Cx, menu: &Menu, picture: &dyn Fn(&str) -> Option<Tex
                     .size(Size::Lg)
                     .width(48.0)
                     .enabled(m.can_play_pause)
-                    .hint(if m.playing { "Pause" } else { "Play" })
+                    .hint(if m.playing { tr("Pause") } else { tr("Play") })
                     .id_salt("orbiters-home-play");
                 if play.show_at(ui, Rect::from_min_size(pos2(x, cy - 24.0), Vec2::splat(48.0))).clicked() {
                     acts.push(Act::Press(Target::MediaPlayPause));
                 }
                 x += 58.0;
-                if icon_button(ui, Rect::from_min_size(pos2(x, cy - 20.0), Vec2::splat(40.0)), icons::SKIP_FORWARD, "Next", m.can_next) {
+                if icon_button(ui, Rect::from_min_size(pos2(x, cy - 20.0), Vec2::splat(40.0)), icons::SKIP_FORWARD, tr("Next"), m.can_next) {
                     acts.push(Act::Press(Target::MediaNext));
                 }
             }
@@ -971,16 +980,16 @@ fn music(ui: &mut Ui, cx: &Cx, menu: &Menu, picture: &dyn Fn(&str) -> Option<Tex
                 let was_copied = drop || copied == Some(video);
                 let width = 124.0 + if drop { 8.0 + 96.0 } else { 0.0 };
                 let shown = link.strip_prefix("https://www.").unwrap_or(&link);
-                widgets::field(ui, "On YouTube", Some(shown), width, |ui| {
+                widgets::field(ui, tr("On YouTube"), Some(shown), width, |ui| {
                     ui.spacing_mut().item_spacing = vec2(8.0, 0.0);
-                    let (label, glyph) = if was_copied { ("Copied", icons::CHECK) } else { ("Copy link", icons::COPY) };
+                    let (label, glyph) = if was_copied { (tr("Copied"), icons::CHECK) } else { (tr("Copy link"), icons::COPY) };
                     let copy = Button::new(label).icon(glyph).size(Size::Sm).width(124.0).id_salt("orbiters-home-copy-playing");
-                    if copy.hint("Paste it in a world's video player").show(ui).clicked() {
+                    if copy.hint(tr("Paste it in a world's video player")).show(ui).clicked() {
                         acts.push(Act::Press(Target::CopyPlaying));
                     }
                     if drop {
-                        let hint = "Drop it in the world as a card: whoever grabs it copies the link";
-                        let button = Button::new("Drop").icon(icons::HAND_DEPOSIT).size(Size::Sm).variant(Variant::Primary).width(96.0).hint(hint);
+                        let hint = tr("Drop it in the world as a card: whoever grabs it copies the link");
+                        let button = Button::new(tr("Drop")).icon(icons::HAND_DEPOSIT).size(Size::Sm).variant(Variant::Primary).width(96.0).hint(hint);
                         if button.id_salt("orbiters-home-drop-playing").show(ui).clicked() {
                             acts.push(Act::Press(Target::DropPlaying));
                         }
@@ -989,14 +998,14 @@ fn music(ui: &mut Ui, cx: &Cx, menu: &Menu, picture: &dyn Fn(&str) -> Option<Tex
             }
             if let Some(volume) = menu.volume {
                 widgets::separator(ui);
-                widgets::field(ui, "Volume", Some("This computer's speakers."), 340.0, |ui| {
+                widgets::field(ui, tr("Volume"), Some(tr("This computer's speakers.")), 340.0, |ui| {
                     let mut percent = volume.percent as f32;
-                    let format = |v: f32| if volume.muted { "Muted".to_string() } else { format!("{v:.0} %") };
+                    let format = |v: f32| if volume.muted { tr("Muted").to_string() } else { format!("{v:.0} %") };
                     if widgets::slider(ui, "orbiters-home-volume", &mut percent, 0.0..=100.0, 1.0, format) {
                         acts.push(Act::Volume(percent.round() as u8));
                     }
                     ui.add_space(6.0);
-                    let (glyph, label) = if volume.muted { (icons::SPEAKER_X, "Unmute") } else { (icons::SPEAKER_HIGH, "Mute") };
+                    let (glyph, label) = if volume.muted { (icons::SPEAKER_X, tr("Unmute")) } else { (icons::SPEAKER_HIGH, tr("Mute")) };
                     if IconButton::new(glyph, label).show(ui).clicked() {
                         acts.push(Act::Press(Target::Mute));
                     }
@@ -1009,17 +1018,17 @@ fn music(ui: &mut Ui, cx: &Cx, menu: &Menu, picture: &dyn Fn(&str) -> Option<Tex
     if let Some(video) = &menu.world_video {
         let title = video.title.clone().unwrap_or_else(|| video.url.clone());
         m.add(3, |ui| {
-            section(ui, cx, 3, icons::MONITOR_PLAY, "In the world", Some("What the world's video player plays now"), |ui| {
+            section(ui, cx, 3, icons::MONITOR_PLAY, tr("In the world"), Some(tr("What the world's video player plays now")), |ui| {
                 widgets::field(ui, &title, Some(&video.url), 260.0, |ui| {
                     ui.spacing_mut().item_spacing = vec2(8.0, 0.0);
-                    if Button::new("Save").icon(icons::FLOPPY_DISK).size(Size::Sm).show(ui).clicked() {
+                    if Button::new(tr("Save")).icon(icons::FLOPPY_DISK).size(Size::Sm).show(ui).clicked() {
                         acts.push(Act::Press(Target::SaveVideo));
                     }
-                    if Button::new("Watch")
+                    if Button::new(tr("Watch"))
                         .icon(icons::MONITOR_PLAY)
                         .variant(Variant::Primary)
                         .size(Size::Sm)
-                        .hint("Opens it in your browser, where the world's player is")
+                        .hint(tr("Opens it in your browser, where the world's player is"))
                         .show(ui)
                         .clicked()
                     {
@@ -1034,28 +1043,28 @@ fn music(ui: &mut Ui, cx: &Cx, menu: &Menu, picture: &dyn Fn(&str) -> Option<Tex
 
 fn light(ui: &mut Ui, cx: &Cx, menu: &Menu, acts: &mut Vec<Act>) {
     let Some(light) = menu.light else {
-        top(ui, cx, "Light", "N4N0 as a light everyone around sees", acts);
-        return note_card(ui, cx, 1, icons::LIGHTBULB, "No light on this N4N0", &layout::text(menu, Content::LightNote));
+        top(ui, cx, tr("Light"), tr("N4N0 as a light everyone around sees"), acts);
+        return note_card(ui, cx, 1, icons::LIGHTBULB, tr("No light on this N4N0"), &layout::text(menu, Content::LightNote));
     };
-    top(ui, cx, "Light", &layout::text(menu, Content::LightState), acts);
-    section(ui, cx, 1, icons::LIGHTBULB, "N4N0's light", Some(&layout::text(menu, Content::LightNote)), |ui| {
-        widgets::field(ui, "Light", None, 48.0, |ui| {
+    top(ui, cx, tr("Light"), &layout::text(menu, Content::LightState), acts);
+    section(ui, cx, 1, icons::LIGHTBULB, tr("N4N0's light"), Some(&layout::text(menu, Content::LightNote)), |ui| {
+        widgets::field(ui, tr("Light"), None, 48.0, |ui| {
             let mut on = light.on;
             if widgets::toggle(ui, "orbiters-home-light", &mut on) {
                 acts.push(Act::Press(Target::LightSwitch));
             }
         });
         widgets::separator(ui);
-        let name = LIGHT_COLORS.get(light.color as usize).map_or("", |c| c.0);
-        widgets::field(ui, "Colour", Some(name), swatches_width(), |ui| {
+        let name = strings::LIGHT_COLORS.get(light.color as usize).map_or("", |&t| menu_text(t));
+        widgets::field(ui, tr("Colour"), Some(name), swatches_width(), |ui| {
             if let Some(i) = swatches(ui, light.color) {
                 acts.push(Act::Press(Target::LightColor(i)));
             }
         });
         widgets::separator(ui);
         let mut level = light.level_choice();
-        let levels: Vec<SegOption<usize>> = LIGHT_LEVELS.iter().enumerate().map(|(i, (name, _))| SegOption::new(i, name)).collect();
-        widgets::field(ui, "Brightness", None, 260.0, |ui| {
+        let levels: Vec<SegOption<usize>> = (0..LIGHT_LEVELS.len()).map(|i| SegOption::new(i, strings::LIGHT_LEVELS.get(i).map_or("", |&t| menu_text(t)))).collect();
+        widgets::field(ui, tr_ctx("lamp", "Brightness"), None, 260.0, |ui| {
             if widgets::segmented(ui, "orbiters-home-light-level", &mut level, &levels, true) {
                 acts.push(Act::Press(Target::LightLevel(level as u8)));
             }
@@ -1066,24 +1075,24 @@ fn light(ui: &mut Ui, cx: &Cx, menu: &Menu, acts: &mut Vec<Act>) {
 /// Tracking smoothing: the switch, each kind of device's strength, and what the driver does now.
 fn tracking(ui: &mut Ui, cx: &Cx, menu: &Menu, acts: &mut Vec<Act>) {
     let Some(tracking) = menu.tracking.clone() else {
-        top(ui, cx, "Tracking", "Smoother trackers, controllers and headset", acts);
-        return note_card(ui, cx, 1, icons::VIRTUAL_REALITY, "Not on this computer", &layout::text(menu, Content::TrackingNote));
+        top(ui, cx, tr("Tracking"), tr("Smoother trackers, controllers and headset"), acts);
+        return note_card(ui, cx, 1, icons::VIRTUAL_REALITY, tr("Not on this computer"), &layout::text(menu, Content::TrackingNote));
     };
-    top(ui, cx, "Tracking", &tracking.note, acts);
-    let sub = "Less jitter, a little more lag: SteamVR's prediction is damped and each device's motion eased";
-    section(ui, cx, 1, icons::VIRTUAL_REALITY, "Smooth tracking", Some(sub), |ui| {
-        widgets::field(ui, "Smoothing", Some("Orbiters - N4N0's SteamVR driver: on, off and strengths at once"), 48.0, |ui| {
+    top(ui, cx, tr("Tracking"), &tracking.note, acts);
+    let sub = tr("Less jitter, a little more lag: SteamVR's prediction is damped and each device's motion eased");
+    section(ui, cx, 1, icons::VIRTUAL_REALITY, tr("Smooth tracking"), Some(sub), |ui| {
+        widgets::field(ui, tr("Smoothing"), Some(tr("Orbiters - N4N0's SteamVR driver: on, off and strengths at once")), 48.0, |ui| {
             let mut on = tracking.on;
             if widgets::toggle(ui, "orbiters-home-tracking", &mut on) {
                 acts.push(Act::Press(Target::TrackingSwitch));
             }
         });
-        let hints = ["Keep it low: a smoothed headset lags behind your head", "For your hands", "Full-body trackers jitter most"];
-        for (k, kind) in TRACKING_KINDS.iter().enumerate() {
+        let hints = [mark("Keep it low: a smoothed headset lags behind your head"), mark("For your hands"), mark("Full-body trackers jitter most")];
+        for (k, kind) in strings::TRACKING_KINDS.iter().enumerate() {
             widgets::separator(ui);
             let mut level = tracking.levels[k] as usize;
-            let levels: Vec<SegOption<usize>> = SMOOTHING_LABELS.iter().enumerate().map(|(i, name)| SegOption::new(i, name)).collect();
-            widgets::field(ui, kind, Some(hints[k]), 320.0, |ui| {
+            let levels: Vec<SegOption<usize>> = strings::SMOOTHING.iter().enumerate().map(|(i, &name)| SegOption::new(i, menu_text(name))).collect();
+            widgets::field(ui, menu_text(*kind), Some(tr(hints[k])), 320.0, |ui| {
                 if widgets::segmented(ui, &format!("orbiters-home-smoothing-{k}"), &mut level, &levels, tracking.on) {
                     acts.push(Act::Press(Target::Smoothing((k * 4 + level) as u8)));
                 }
@@ -1094,9 +1103,9 @@ fn tracking(ui: &mut Ui, cx: &Cx, menu: &Menu, acts: &mut Vec<Act>) {
 
 /// Suggest features: the idea written here, sent to the Orbiters team.
 fn suggest(ui: &mut Ui, cx: &Cx, menu: &Menu, acts: &mut Vec<Act>) {
-    top(ui, cx, "Suggest a feature", "What should N4N0 do next? The Orbiters team reads every idea", acts);
+    top(ui, cx, tr("Suggest a feature"), tr("What should N4N0 do next? The Orbiters team reads every idea"), acts);
     let note = layout::text(menu, Content::SuggestNote);
-    section(ui, cx, 1, icons::CHAT_TEARDROP_TEXT, "Your idea", (!note.is_empty()).then_some(note.as_str()), |ui| {
+    section(ui, cx, 1, icons::CHAT_TEARDROP_TEXT, tr("Your idea"), (!note.is_empty()).then_some(note.as_str()), |ui| {
         ui.add_space(4.0);
         let mut text = menu.suggestion.clone();
         let w = ui.available_width();
@@ -1104,7 +1113,7 @@ fn suggest(ui: &mut Ui, cx: &Cx, menu: &Menu, acts: &mut Vec<Act>) {
         frame.show(ui, |ui| {
             let edit = egui::TextEdit::multiline(&mut text)
                 .id_salt("orbiters-home-suggestion")
-                .hint_text("A feature, a fix, anything N4N0 or Orbiters - N4N0 could do better")
+                .hint_text(tr("A feature, a fix, anything N4N0 or Orbiters - N4N0 could do better"))
                 .frame(egui::Frame::NONE)
                 .desired_rows(5)
                 .desired_width(w - 24.0)
@@ -1117,7 +1126,7 @@ fn suggest(ui: &mut Ui, cx: &Cx, menu: &Menu, acts: &mut Vec<Act>) {
         }
         ui.add_space(12.0);
         let ready = !text.trim().is_empty() && !menu.sending;
-        let label = if menu.sending { "Sending…" } else { "Send" };
+        let label = if menu.sending { tr("Sending…") } else { tr("Send") };
         let button = Button::new(label).icon(icons::PAPER_PLANE_TILT).variant(Variant::Primary).enabled(ready);
         let bw = button.desired_width(ui);
         let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), 36.0), Sense::hover());
@@ -1130,7 +1139,7 @@ fn suggest(ui: &mut Ui, cx: &Cx, menu: &Menu, acts: &mut Vec<Act>) {
 /// The QR code scanner: what it does now (VRChat's stream camera is read while this page shows), how to turn the stream
 /// camera on, and the last link it opened with Copy link and Open again.
 fn qr(ui: &mut Ui, cx: &Cx, menu: &Menu, acts: &mut Vec<Act>) {
-    top(ui, cx, "QR code scanner", "Point VRChat's stream camera at a QR code: its web link opens in your browser", acts);
+    top(ui, cx, tr("QR code scanner"), tr("Point VRChat's stream camera at a QR code: its web link opens in your browser"), acts);
     let scanner = &menu.qr;
     let note = layout::qr_note(scanner);
     let mut m = super::Masonry::new(ui, "home-qr");
@@ -1140,8 +1149,8 @@ fn qr(ui: &mut Ui, cx: &Cx, menu: &Menu, acts: &mut Vec<Act>) {
             cx,
             1,
             icons::QR_CODE,
-            "VRChat's stream camera",
-            Some("Read about three times a second while this page shows, for two minutes at most"),
+            tr("VRChat's stream camera"),
+            Some(tr("Read about three times a second while this page shows, for two minutes at most")),
             |ui| {
                 use orbiters_n4n0_core::qr::QrPhase;
                 let tone = match scanner.phase {
@@ -1158,7 +1167,7 @@ fn qr(ui: &mut Ui, cx: &Cx, menu: &Menu, acts: &mut Vec<Act>) {
                 let room = row.width() - 200.0;
                 widgets::text_truncated(p, pos2(row.left() + 20.0, row.top() + 46.0), Align2::LEFT_CENTER, &Txt::new(&note, 12.5).color(theme::FG_3), room);
                 if !scanner.scanning() {
-                    let button = Button::new("Scan again").icon(icons::QR_CODE).variant(Variant::Primary);
+                    let button = Button::new(tr("Scan again")).icon(icons::QR_CODE).variant(Variant::Primary);
                     let bw = button.desired_width(ui);
                     if button.show_at(ui, Rect::from_min_size(pos2(row.right() - bw, row.center().y - 18.0), vec2(bw, 36.0))).clicked() {
                         acts.push(Act::Press(Target::QrAgain));
@@ -1168,17 +1177,17 @@ fn qr(ui: &mut Ui, cx: &Cx, menu: &Menu, acts: &mut Vec<Act>) {
         )
     });
     let link = scanner.link.as_deref();
-    let shown = link.map_or_else(|| "None yet".to_string(), |l| layout::short_link(l, 90));
-    let policy = "Only http and https links open, each once while it stays before the camera";
+    let shown = link.map_or_else(|| tr("None yet").to_string(), |l| layout::short_link(l, 90));
+    let policy = tr("Only http and https links open, each once while it stays before the camera");
     let notice = menu.notice.clone();
     m.add(2, |ui| {
-        section(ui, cx, 2, icons::LINK_SIMPLE, "Last link opened", Some(notice.as_deref().unwrap_or(policy)), |ui| {
+        section(ui, cx, 2, icons::LINK_SIMPLE, tr("Last link opened"), Some(notice.as_deref().map_or(policy, tr)), |ui| {
             widgets::field(ui, &shown, None, 260.0, |ui| {
-                if Button::new("Open again").icon(icons::ARROW_SQUARE_OUT).variant(Variant::Secondary).enabled(link.is_some()).show(ui).clicked() {
+                if Button::new(tr("Open again")).icon(icons::ARROW_SQUARE_OUT).variant(Variant::Secondary).enabled(link.is_some()).show(ui).clicked() {
                     acts.push(Act::Press(Target::QrOpen));
                 }
                 ui.add_space(8.0);
-                if Button::new("Copy link").icon(icons::COPY).variant(Variant::Secondary).enabled(link.is_some()).show(ui).clicked() {
+                if Button::new(tr("Copy link")).icon(icons::COPY).variant(Variant::Secondary).enabled(link.is_some()).show(ui).clicked() {
                     acts.push(Act::Press(Target::QrCopy));
                 }
             });
@@ -1190,8 +1199,8 @@ fn qr(ui: &mut Ui, cx: &Cx, menu: &Menu, acts: &mut Vec<Act>) {
             cx,
             3,
             icons::INFO,
-            "Turning the stream camera on",
-            "In VRChat, open the camera, choose Stream, then switch Spout Stream on in the camera's settings. Settings › Spout sender picks another sender.",
+            tr("Turning the stream camera on"),
+            tr("In VRChat, open the camera, choose Stream, then switch Spout Stream on in the camera's settings. Settings › Spout sender picks another sender."),
         )
     });
     m.finish(ui);
@@ -1200,24 +1209,24 @@ fn qr(ui: &mut Ui, cx: &Cx, menu: &Menu, acts: &mut Vec<Act>) {
 /// Previous instances: Orbiters' VRChat account invites the player back to one (Invite me), once it is their friend (Add
 /// Orbiters as a friend, with its name and page, shows above the list when Orbiters asked for it).
 fn instances(ui: &mut Ui, cx: &Cx, menu: &Menu, acts: &mut Vec<Act>) {
-    top(ui, cx, "Previous instances", &layout::text(menu, Content::InstancesTitle), acts);
+    top(ui, cx, tr("Previous instances"), &layout::text(menu, Content::InstancesTitle), acts);
     let mut index = 1;
     if let Some(account) = &menu.invite_account {
-        let why = "VRChat lets Orbiters invite only its friends: in VRChat, Social, search the name, Add friend; then Try again";
-        section_up_to(ui, cx, f32::INFINITY, index, icons::USER, "Add Orbiters as a friend", Some(why), |ui| {
+        let why = tr("VRChat lets Orbiters invite only its friends: in VRChat, Social, search the name, Add friend; then Try again");
+        section_up_to(ui, cx, f32::INFINITY, index, icons::USER, tr("Add Orbiters as a friend"), Some(why), |ui| {
             let link = layout::short_link(&account.link, 70);
             widgets::field(ui, &account.name, Some(&link), 420.0, |ui| {
                 let again =
-                    Button::new("Try again").icon(icons::PAPER_PLANE_TILT).variant(Variant::Primary).enabled(!menu.invite_waiting && menu.inviting.is_some());
+                    Button::new(tr("Try again")).icon(icons::PAPER_PLANE_TILT).variant(Variant::Primary).enabled(!menu.invite_waiting && menu.inviting.is_some());
                 if again.show(ui).clicked() {
                     acts.push(Act::Press(Target::InviteAgain));
                 }
                 ui.add_space(8.0);
-                if Button::new("Open link").icon(icons::ARROW_SQUARE_OUT).variant(Variant::Secondary).show(ui).clicked() {
+                if Button::new(tr("Open link")).icon(icons::ARROW_SQUARE_OUT).variant(Variant::Secondary).show(ui).clicked() {
                     acts.push(Act::Press(Target::OpenFriendLink));
                 }
                 ui.add_space(8.0);
-                if Button::new("Copy name").icon(icons::COPY).variant(Variant::Secondary).show(ui).clicked() {
+                if Button::new(tr("Copy name")).icon(icons::COPY).variant(Variant::Secondary).show(ui).clicked() {
                     acts.push(Act::Press(Target::CopyFriendName));
                 }
             });
@@ -1225,12 +1234,12 @@ fn instances(ui: &mut Ui, cx: &Cx, menu: &Menu, acts: &mut Vec<Act>) {
         index += 1;
     }
     if menu.instances.is_empty() {
-        let text = if menu.instances_ready { "Worlds you join in VRChat show here, newest first." } else { "Reading VRChat's logs…" };
-        return note_card(ui, cx, index, icons::GLOBE, "No instance yet", text);
+        let text = if menu.instances_ready { tr("Worlds you join in VRChat show here, newest first.") } else { tr("Reading VRChat's logs…") };
+        return note_card(ui, cx, index, icons::GLOBE, tr("No instance yet"), text);
     }
-    let sub = "Orbiters' VRChat account invites you back: open the invite in VRChat";
+    let sub = tr("Orbiters' VRChat account invites you back: open the invite in VRChat");
     // As wide as the page: the instances go side by side on wide ones.
-    section_up_to(ui, cx, f32::INFINITY, index, icons::GLOBE, "Instances you were in", Some(sub), |ui| {
+    section_up_to(ui, cx, f32::INFINITY, index, icons::GLOBE, tr("Instances you were in"), Some(sub), |ui| {
         ui.add_space(4.0);
         row_columns(ui, "orbiters-home-instances", ROW_MIN_W, ROW_GAP, menu.page_instances().len(), |ui, i, first| {
             if !first {
@@ -1238,7 +1247,7 @@ fn instances(ui: &mut Ui, cx: &Cx, menu: &Menu, acts: &mut Vec<Act>) {
             }
             let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), 60.0), Sense::hover());
             let invite =
-                Button::new("Invite me").icon(icons::PAPER_PLANE_TILT).size(Size::Sm).enabled(!menu.invite_waiting).id_salt(("orbiters-home-invite", i));
+                Button::new(tr("Invite me")).icon(icons::PAPER_PLANE_TILT).size(Size::Sm).enabled(!menu.invite_waiting).id_salt(("orbiters-home-invite", i));
             let invite_w = invite.desired_width(ui);
             {
                 let p = ui.painter();
@@ -1273,7 +1282,7 @@ fn swatches(ui: &mut Ui, chosen: u8) -> Option<u8> {
     let (rect, _) = ui.allocate_exact_size(vec2(swatches_width(), 36.0), Sense::hover());
     let ctx = ui.ctx().clone();
     let mut pressed = None;
-    for (i, (name, [r, g, b])) in LIGHT_COLORS.iter().enumerate() {
+    for (i, (_, [r, g, b])) in LIGHT_COLORS.iter().enumerate() {
         let center = pos2(rect.left() + 4.0 + SWATCH / 2.0 + i as f32 * (SWATCH + SWATCH_GAP), rect.center().y);
         let id = Id::unique(("orbiters-home-colour", i));
         let resp = ui.interact(Rect::from_center_size(center, Vec2::splat(SWATCH + 8.0)), id, Sense::click());
@@ -1289,7 +1298,7 @@ fn swatches(ui: &mut Ui, chosen: u8) -> Option<u8> {
             p.circle_stroke(center, SWATCH / 2.0 + 4.0, Stroke::new(2.0, ring));
         }
         p.circle_filled(center, SWATCH / 2.0 * (1.0 - 0.1 * down), Color32::from_rgb(*r, *g, *b));
-        resp.on_hover_cursor(CursorIcon::PointingHand).on_hover_text(*name);
+        resp.on_hover_cursor(CursorIcon::PointingHand).on_hover_text(strings::LIGHT_COLORS.get(i).map_or("", |&t| menu_text(t)));
     }
     pressed
 }

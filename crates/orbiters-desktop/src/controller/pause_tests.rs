@@ -37,7 +37,7 @@ fn running(ctl: &Shared, dir: &Path, integrated: bool, lines: &str) {
     });
 }
 
-const PAUSED: &str = r#"& echo {"event":"pausing"} & echo {"event":"paused","kept":true,"message":null}"#;
+const PAUSED: &str = r#"& echo {"event":"pausing"} & echo {"event":"paused","kept":true,"message":null}"#; // i18n: not shown
 
 /// How many stand-ins each controller started, and how many finished leaving. `on_reconstruct_exit` takes the run off
 /// `ctl.reconstruction` first and only then deletes what it leaves and clears what shows, so a run being gone from there

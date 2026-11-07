@@ -53,6 +53,7 @@ use orbiters_contracts::avatar::AvatarManifest;
 use orbiters_core::clock;
 use orbiters_core::osc::{OscValue, AVATAR_CHANGE, HIDE_SELF_PARAMETER, PARAMETERS_PREFIX, RECORD_PARAMETER};
 use orbiters_core::picture::Left;
+use orbiters_i18n::{mark, tr, tr_latin};
 use std::time::{Duration, Instant};
 
 /// VRChat's camera mask "Local User" (read and set; VRChat 2025.3.3 and later).
@@ -80,16 +81,16 @@ const OTHERS_COST_S: f32 = 1.0;
 /// The first Toolkit whose builds add the layer.
 const HIDE_SELF_TOOLKIT: (u32, u32, u32) = (0, 4, 18);
 
-const WITHOUT_YOU: &str = "Recording without your avatar, as Local User is off in VRChat's camera: it is hidden on your side while this records, and comes back after. Others still see you.";
+const WITHOUT_YOU: &str = mark("Recording without your avatar, as Local User is off in VRChat's camera: it is hidden on your side while this records, and comes back after. Others still see you.");
 const NOT_CONFIRMED: &str =
-    "VRChat did not confirm your avatar hid itself. Check this capture: if your avatar shows, Reconstruct without my avatar takes it out, and an upload with the current Orbiters Toolkit keeps it out cleanly.";
+    mark("VRChat did not confirm your avatar hid itself. Check this capture: if your avatar shows, Reconstruct without my avatar takes it out, and an upload with the current Orbiters Toolkit keeps it out cleanly.");
 const NOT_TAKEN: &str =
-    "VRChat kept Local User off, so your avatar is shown again and this recording has no keyframes. Turn Local User on in the camera's Mask menu.";
-const OTHERS_KEPT: &str = "VRChat kept Remote User on, so other players are in this picture.";
-const OTHERS_UNKNOWN: &str = "VRChat's camera has no Remote User mask to set here (OSC, or a VRChat before 2025.3.3), so other players are in this picture.";
+    mark("VRChat kept Local User off, so your avatar is shown again and this recording has no keyframes. Turn Local User on in the camera's Mask menu.");
+const OTHERS_KEPT: &str = mark("VRChat kept Remote User on, so other players are in this picture.");
+const OTHERS_UNKNOWN: &str = mark("VRChat's camera has no Remote User mask to set here (OSC, or a VRChat before 2025.3.3), so other players are in this picture.");
 /// For the menus' short line.
-const OTHERS_SHOW: &str = "Other players show in this picture";
-const OTHERS_COST: &str = "With Remote User off, N4N0's capture kit stopped drawing, so it was turned back on: other players are in this picture.";
+const OTHERS_SHOW: &str = mark("Other players show in this picture");
+const OTHERS_COST: &str = mark("With Remote User off, N4N0's capture kit stopped drawing, so it was turned back on: other players are in this picture.");
 
 /// What a recording does about its wearer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -124,21 +125,28 @@ fn toolkit_version(generator: &str) -> Option<(u32, u32, u32)> {
 
 /// What the person reads when the avatar could not hide: why, from what the upload's manifest says, and what to do.
 pub fn cannot_hide_text(name: Option<&str>, generator: Option<&str>) -> String {
-    let avatar = name.unwrap_or("this avatar");
     let (a, b, c) = HIDE_SELF_TOOLKIT;
-    const AFTER: &str = "It is in the frames, and comes out of the 3D view when this capture is reconstructed.";
+    let version = format!("{a}.{b}.{c}");
+    // Whole sentences, with or without the avatar's name: the order of the parts is each language's own.
     match generator.and_then(|g| toolkit_version(g).map(|v| (v, g))) {
-        Some((version, generator)) if version >= HIDE_SELF_TOOLKIT => {
+        Some((found, generator)) if found >= HIDE_SELF_TOOLKIT => {
             let toolkit = generator.strip_prefix("Orbiters ").unwrap_or(generator);
-            format!(
-                "{avatar} could not hide itself this time: it was uploaded with {toolkit}, but VRChat keeps an old list of its parameters. {AFTER} For a cleaner result, with nothing guessed and no shadow left: in VRChat's Action Menu press Options, OSC, Reset Config, then change avatar and back."
-            )
+            match name {
+                Some(avatar) => tr!("{avatar} could not hide itself this time: it was uploaded with {toolkit}, but VRChat keeps an old list of its parameters. It is in the frames, and comes out of the 3D view when this capture is reconstructed. For a cleaner result, with nothing guessed and no shadow left: in VRChat's Action Menu press Options, OSC, Reset Config, then change avatar and back.", avatar = avatar, toolkit = toolkit),
+                None => tr!("This avatar could not hide itself this time: it was uploaded with {toolkit}, but VRChat keeps an old list of its parameters. It is in the frames, and comes out of the 3D view when this capture is reconstructed. For a cleaner result, with nothing guessed and no shadow left: in VRChat's Action Menu press Options, OSC, Reset Config, then change avatar and back.", toolkit = toolkit),
+            }
         }
         Some((_, generator)) => {
             let toolkit = generator.strip_prefix("Orbiters ").unwrap_or(generator);
-            format!("{avatar} was uploaded with {toolkit}, which cannot hide it while the camera records. {AFTER} An upload with Orbiters Toolkit {a}.{b}.{c} or later gives a cleaner result, with nothing guessed and no shadow left.")
+            match name {
+                Some(avatar) => tr!("{avatar} was uploaded with {toolkit}, which cannot hide it while the camera records. It is in the frames, and comes out of the 3D view when this capture is reconstructed. An upload with Orbiters Toolkit {version} or later gives a cleaner result, with nothing guessed and no shadow left.", avatar = avatar, toolkit = toolkit, version = version),
+                None => tr!("This avatar was uploaded with {toolkit}, which cannot hide it while the camera records. It is in the frames, and comes out of the 3D view when this capture is reconstructed. An upload with Orbiters Toolkit {version} or later gives a cleaner result, with nothing guessed and no shadow left.", toolkit = toolkit, version = version),
+            }
         }
-        None => format!("{avatar} did not answer the message that hides it. {AFTER} An upload with Orbiters Toolkit {a}.{b}.{c} or later gives a cleaner result, with nothing guessed and no shadow left."),
+        None => match name {
+            Some(avatar) => tr!("{avatar} did not answer the message that hides it. It is in the frames, and comes out of the 3D view when this capture is reconstructed. An upload with Orbiters Toolkit {version} or later gives a cleaner result, with nothing guessed and no shadow left.", avatar = avatar, version = version),
+            None => tr!("This avatar did not answer the message that hides it. It is in the frames, and comes out of the 3D view when this capture is reconstructed. An upload with Orbiters Toolkit {version} or later gives a cleaner result, with nothing guessed and no shadow left.", version = version),
+        },
     }
 }
 
@@ -259,9 +267,9 @@ impl super::Controller {
             Some(proved) => {
                 self.update(|s| s.capture.left_out.wearer = Left::Out);
                 if !proved {
-                    self.tell_about_picture(NoticeKind::Warning, NOT_CONFIRMED, "Your avatar may show: check this picture");
+                    self.tell_about_picture(NoticeKind::Warning, tr(NOT_CONFIRMED), tr_latin("Your avatar may show: check this picture"));
                 } else if !world {
-                    self.notify(NoticeKind::Success, WITHOUT_YOU);
+                    self.notify(NoticeKind::Success, tr(WITHOUT_YOU));
                 }
             }
             None => self.say_cannot_hide(),
@@ -300,7 +308,7 @@ impl super::Controller {
         let manifest = self.worn_manifest();
         let text = cannot_hide_text(manifest.as_ref().and_then(|m| m.name.as_deref()), manifest.as_ref().and_then(|m| m.generator.as_deref()));
         self.update(|s| s.capture.left_out.wearer = Left::InPicture);
-        self.tell_about_picture(NoticeKind::Info, &text, "Your avatar comes out afterwards");
+        self.tell_about_picture(NoticeKind::Info, &text, tr_latin("Your avatar comes out afterwards"));
     }
 
     /// The manifest of the avatar worn, when its upload wrote one here.
@@ -339,7 +347,7 @@ impl super::Controller {
             Some(false) => self.update(|s| s.capture.left_out.others = Left::Out),
             Some(true) if cost => {
                 self.update(|s| s.capture.left_out.others = Left::InPicture);
-                self.tell_about_picture(NoticeKind::Warning, OTHERS_COST, OTHERS_SHOW);
+                self.tell_about_picture(NoticeKind::Warning, tr(OTHERS_COST), tr_latin(OTHERS_SHOW));
             }
             Some(true) => {
                 self.hide.lock().unwrap().others_off = true;
@@ -349,7 +357,7 @@ impl super::Controller {
             }
             None => {
                 self.update(|s| s.capture.left_out.others = Left::InPicture);
-                self.tell_about_picture(NoticeKind::Warning, OTHERS_UNKNOWN, OTHERS_SHOW);
+                self.tell_about_picture(NoticeKind::Warning, tr(OTHERS_UNKNOWN), tr_latin(OTHERS_SHOW));
             }
         }
     }
@@ -369,7 +377,7 @@ impl super::Controller {
             }
             ctl.hide.lock().unwrap().others_off = false;
             ctl.update(|s| s.capture.left_out.others = Left::InPicture);
-            ctl.tell_about_picture(NoticeKind::Warning, OTHERS_KEPT, OTHERS_SHOW);
+            ctl.tell_about_picture(NoticeKind::Warning, tr(OTHERS_KEPT), tr_latin(OTHERS_SHOW));
         });
         if let Err(e) = spawned {
             eprintln!("reading Remote User back: {e}");
@@ -388,7 +396,7 @@ impl super::Controller {
         }
         let _ = self.with_osc(|o| o.send(REMOTE_PLAYER, vec![rosc::OscType::Bool(true)]));
         self.update(|s| s.capture.left_out.others = Left::InPicture);
-        self.tell_about_picture(NoticeKind::Warning, OTHERS_COST, OTHERS_SHOW);
+        self.tell_about_picture(NoticeKind::Warning, tr(OTHERS_COST), tr_latin(OTHERS_SHOW));
         true
     }
 
@@ -464,7 +472,7 @@ impl super::Controller {
         }
         self.end_beat();
         self.update(|s| s.capture.left_out.wearer = Left::NotAsked);
-        self.notify(NoticeKind::Error, NOT_TAKEN);
+        self.notify(NoticeKind::Error, tr(NOT_TAKEN));
     }
 
     /// Stops holding the avatar hidden; the last value, off, keeps it from waiting for the clock.
@@ -649,7 +657,7 @@ mod tests {
         let stale = cannot_hide_text(Some("The 1MB Ultirex"), Some("Orbiters Toolkit 0.4.18"));
         assert!(stale.contains("comes out of the 3D view") && stale.contains("Reset Config") && !stale.contains("An upload"), "{stale}");
         let later = cannot_hide_text(None, Some("Orbiters Toolkit 0.5.0-dev.3"));
-        assert!(later.contains("Reset Config") && later.contains("this avatar"), "{later}");
+        assert!(later.contains("Reset Config") && later.contains("This avatar"), "{later}");
         let unknown = cannot_hide_text(None, None);
         assert!(unknown.contains("comes out of the 3D view") && unknown.contains("0.4.18 or later"), "{unknown}");
         assert!(toolkit_version("Unity").is_none());

@@ -49,7 +49,7 @@ pub const RUN_VALUE: &str = "Orbiters - N4N0";
 pub const STEAMVR_APP_KEY: &str = "cc.orbiters.n4n0";
 /// What SteamVR starts with itself: the app in the tray, as Windows does.
 pub const STEAMVR_ARGUMENTS: &str = "--hidden";
-pub const STEAMVR_DESCRIPTION: &str = "N4N0's menu for VRChat: fast walk, YouTube, calls, 3D pictures, music and the light";
+pub const STEAMVR_DESCRIPTION: &str = "N4N0's menu for VRChat: fast walk, YouTube, calls, 3D pictures, music and the light"; // i18n: not shown (written into the file SteamVR reads, in English)
 
 /// The app's SteamVR manifest, in its settings folder (`%APPDATA%\Orbiters\Desktop`), where SteamVR reads it from:
 /// the app and the setup write it there (the install folder's files are only the setup's payload).
@@ -117,7 +117,7 @@ pub fn release_url(feed: &str, channel: &str) -> String {
 }
 
 /// The application on the Mac, as the disk image and the update archive hold it.
-pub const MAC_APP: &str = "Orbiters - N4N0.app";
+pub const MAC_APP: &str = "Orbiters - N4N0.app"; // i18n: not shown (a file name)
 /// The Mac application's bundle identifier.
 pub const MAC_BUNDLE_ID: &str = "cc.orbiters.n4n0";
 

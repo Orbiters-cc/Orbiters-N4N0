@@ -85,7 +85,7 @@ pub fn banner(ui: &mut Ui, id: Id, tone: Tone, text: &str, dismiss: bool) -> boo
         let b = Rect::from_center_size(pos2(r.right() - 22.0, r.top() + 21.5), vec2(28.0, 28.0));
         let mut bu = ui.new_child(egui::UiBuilder::new().max_rect(b).id_salt(id.with("dismiss")));
         bu.multiply_opacity(k.clamp(0.0, 1.0));
-        return widgets::activated(&widgets::IconButton::new(icons::X, "Dismiss").size(28.0, 14.0).id_salt(id).show_at(&mut bu, b));
+        return widgets::activated(&widgets::IconButton::new(icons::X, orbiters_i18n::mark("Dismiss")).size(28.0, 14.0).id_salt(id).show_at(&mut bu, b));
     }
     false
 }
@@ -124,7 +124,7 @@ pub fn activity(ui: &mut Ui, id: Id, area: Rect, activity: Option<&Activity<'_>>
     let detail_t = detail.as_ref().map(|d| Txt::new(d, 11.5).color(theme::FG_3));
     let text_w = widgets::text_size(ui, &label_t).x.max(detail_t.as_ref().map(|t| widgets::text_size(ui, t).x.min(320.0)).unwrap_or(0.0));
     let bar_w = if fraction.is_some() { 140.0 } else { 0.0 };
-    let cancel_b = Button::new("Cancel").variant(Variant::Ghost).size(Size::Sm);
+    let cancel_b = Button::new(orbiters_i18n::tr("Cancel")).variant(Variant::Ghost).size(Size::Sm);
     let cancel_w = if cancel { cancel_b.desired_width(ui) + 8.0 } else { 0.0 };
     let w = (16.0 + 22.0 + 12.0 + text_w + if bar_w > 0.0 { 16.0 + bar_w } else { 0.0 } + 16.0 + cancel_w).min(area.width() - 32.0);
     let h = if detail.is_some() { 58.0 } else { 48.0 };

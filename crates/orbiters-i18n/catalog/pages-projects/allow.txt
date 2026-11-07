@@ -1,0 +1,3 @@
+Blender {a}.{b}
+# What a new project folder is first called: it stays in plain letters, as Unity projects can break on a path with accents or Japanese.
+{} copy

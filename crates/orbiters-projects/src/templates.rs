@@ -1,3 +1,4 @@
+use orbiters_i18n::{mark, tr};
 use anyhow::{bail, Context};
 use serde::{Deserialize, Serialize};
 use std::io::{Read, Write};
@@ -31,7 +32,7 @@ pub type SharedProgress = Arc<Mutex<Progress>>;
 
 pub fn list(root: &Path) -> Vec<Template> {
     let mut out = vec![];
-    for (dir, builtin) in [("VRCTemplates", true), ("Templates", false)] {
+    for (dir, builtin) in [("VRCTemplates", true), ("Templates", false)] { // i18n: not shown (folder names)
         let Ok(entries) = std::fs::read_dir(root.join(dir)) else { continue };
         for entry in entries.flatten() {
             let p = entry.path();
@@ -40,7 +41,7 @@ pub fn list(root: &Path) -> Vec<Template> {
             }
             let Ok(bytes) = std::fs::read(p.join("package.json")) else { continue };
             let Ok(v) = serde_json::from_slice::<serde_json::Value>(&bytes) else { continue };
-            let name = v["displayName"].as_str().or_else(|| v["name"].as_str()).unwrap_or("Unity template").to_string();
+            let name = v["displayName"].as_str().or_else(|| v["name"].as_str()).unwrap_or(tr("Unity template")).to_string();
             let unity = std::fs::read_to_string(p.join("ProjectSettings/ProjectVersion.txt"))
                 .ok()
                 .and_then(|s| crate::discovery::parse_version(&s))
@@ -57,8 +58,14 @@ pub fn list(root: &Path) -> Vec<Template> {
             t.banner = banner(&app, &t.id);
         }
     }
-    out.sort_by(|a, b| (!a.builtin, &a.name).cmp(&(!b.builtin, &b.name)));
+    order(&mut out);
     out
+}
+
+/// VRChat's own templates first, by id (the ones made here have translated names, so the order and the template the window opens on must not
+/// follow the language), then the person's by name.
+fn order(templates: &mut [Template]) {
+    templates.sort_by(|a, b| (!a.builtin, if a.builtin { &a.id } else { &a.name }).cmp(&(!b.builtin, if b.builtin { &b.id } else { &b.name })));
 }
 
 /// The cover Creator Companion (installed in `app`) shows on a template's card: VRChat's own templates have theirs,
@@ -92,7 +99,7 @@ pub fn builtins(cache: &Path) -> anyhow::Result<Vec<Template>> {
         }
         let avatars = id.starts_with("avatars");
         out.push(Template {
-            name: if avatars { "VRChat Avatar Project" } else { "VRChat World Project" }.into(),
+            name: if avatars { tr("VRChat Avatar Project") } else { tr("VRChat World Project") }.into(),
             path,
             unity: "2022.3.22f1".into(),
             builtin: true,
@@ -107,7 +114,7 @@ pub fn builtins(cache: &Path) -> anyhow::Result<Vec<Template>> {
     }
     crate::write_json(&path.join("Packages/vpm-manifest.json"), &serde_json::json!({"dependencies":{"com.vrchat.base":{"version":"3.x"}}}))?;
     out.push(Template {
-        name: "VRChat Base Project".into(),
+        name: String::from(tr("VRChat Base Project")),
         path,
         unity: "2022.3.22f1".into(),
         builtin: true,
@@ -223,7 +230,7 @@ pub fn copy_keeping(source: &Path, destination: &Path, keep: Keep, cancel: &Atom
                 output.set_permissions(permissions)?;
             }
         }
-        *progress.lock().unwrap() = Progress { copied: i + 1, total: files.len(), file: rel.display().to_string(), phase: "Copying project".into() };
+        *progress.lock().unwrap() = Progress { copied: i + 1, total: files.len(), file: rel.display().to_string(), phase: String::from(mark("Copying project")) };
     }
     Ok(())
 }
@@ -301,13 +308,13 @@ async fn make(
         bail!("Cancelled before resolving. The folder was kept and was not registered.");
     }
     // Register the completed copy before any optional restoration: a retained project must remain discoverable.
-    progress.lock().unwrap().phase = "Registering project".into();
+    progress.lock().unwrap().phase = mark("Registering project").into();
     crate::vpm::register(root, &destination, true).await
         .with_context(|| format!("The copy is at {}, but registration failed", destination.display()))?;
     // Duplication preserves installed package contents and exact locked versions, including packages whose
     // repositories are no longer available. Resolution is needed only for genuinely missing packages/templates.
     if copy.is_none() || !installed_dependencies_complete(&destination)? {
-        progress.lock().unwrap().phase = "Restoring missing packages".into();
+        progress.lock().unwrap().phase = mark("Restoring missing packages").into();
         crate::vpm::change(root, &destination, crate::vpm::Change::Resolve).await
             .with_context(|| format!("The copy is listed at {}, but missing packages could not be restored", destination.display()))?;
     }
@@ -421,6 +428,34 @@ fn unquote(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn templates_keep_their_order_in_every_language() {
+        // "Projet de monde VRChat" sorts before "Projet d’avatar VRChat": by name the avatar template would no longer be first in French.
+        for language in orbiters_i18n::Language::TRANSLATED.into_iter().chain([orbiters_i18n::Language::En]) {
+            let ids = orbiters_i18n::in_language(language, || {
+                let mut all = vec![
+                    Template { name: tr("VRChat World Project").into(), id: "com.vrchat.template.world".into(), builtin: true, ..Default::default() },
+                    Template { name: "Zeta".into(), id: "z".into(), ..Default::default() },
+                    Template { name: tr("VRChat Avatar Project").into(), id: "com.vrchat.template.avatar".into(), builtin: true, ..Default::default() },
+                    Template { name: "Alpha".into(), id: "a".into(), ..Default::default() },
+                ];
+                order(&mut all);
+                all.into_iter().map(|t| t.id).collect::<Vec<_>>()
+            });
+            assert_eq!(ids, ["com.vrchat.template.avatar", "com.vrchat.template.world", "a", "z"], "{language:?}");
+        }
+    }
+
+    #[test]
+    fn a_copy_phase_is_the_english_text_that_the_window_translates_where_it_draws_it() {
+        // The windows compare the phase with "Copying project" to show Stop: it must not be the translation.
+        let phase = String::from(mark("Copying project"));
+        let progress = Progress { phase: phase.clone(), ..Default::default() };
+        assert_eq!(progress.phase, "Copying project");
+        let drawn = orbiters_i18n::in_language(orbiters_i18n::Language::Fr, || tr(&progress.phase).to_string());
+        assert_ne!(drawn, "Copying project", "the French window shows its own words");
+    }
 
     #[test]
     fn external_local_dependencies_are_counted_and_materialized() {

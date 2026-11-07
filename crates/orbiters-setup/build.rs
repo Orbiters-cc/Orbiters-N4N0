@@ -49,9 +49,9 @@ fn main() {
         let mut res = winresource::WindowsResource::new();
         res.set_icon("../orbiters-desktop/assets/icon.ico");
         res.set("ProductName", "Orbiters - N4N0");
-        res.set("FileDescription", "Orbiters - N4N0 setup");
+        res.set("FileDescription", "Orbiters - N4N0 setup"); // i18n: not shown (the file properties the build writes into the program)
         res.set("CompanyName", "Orbiters");
-        res.set("LegalCopyright", "Copyright (c) 2026 Enzo DUTRA / blackorbit");
+        res.set("LegalCopyright", "Copyright (c) 2026 Enzo DUTRA / blackorbit"); // i18n: not shown (the file properties the build writes into the program)
         res.set_manifest(MANIFEST);
         if let Err(e) = res.compile() {
             // A release without its manifest would ask for administrator rights: not one to ship.

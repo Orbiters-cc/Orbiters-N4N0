@@ -65,6 +65,14 @@ impl Skin {
         SKIN.get_or_init(|| Skin::standard(Strings::english().clone()))
     }
 
+    /// Each look in its own colours, in the language now: what is drawn live. The avatar's own screen is a picture made beforehand, and is not this.
+    pub fn current() -> &'static Skin {
+        use orbiters_i18n::Language;
+        static SKINS: [OnceLock<Skin>; 5] = [const { OnceLock::new() }; 5];
+        let language: Language = orbiters_i18n::language();
+        SKINS[language as usize].get_or_init(|| Skin::standard(Strings::builtin(language).clone()))
+    }
+
     pub fn text(&self, text: Text) -> &str {
         self.strings.get(text)
     }

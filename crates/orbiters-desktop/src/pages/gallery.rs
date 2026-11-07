@@ -25,6 +25,7 @@ use orbiters_core::{
     shares::{Feed, Query},
     vrchat_log::WorldState,
 };
+use orbiters_i18n::{mark, tr, tr_ctx, tr_n};
 use orbiters_ui::{
     anim::{self, ease, Spring},
     feedback, icons, logo,
@@ -568,11 +569,11 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) -> bool {
     if let Some(r) = state.download_job.take() {
         match r {
             Ok(path) => {
-                state.select.say(&ctx, "Saved in Documents › Orbiters › Downloaded pictures");
+                state.select.say(&ctx, tr("Saved in Documents › Orbiters › Downloaded pictures"));
                 let result = super::editor::files::reveal(&path);
                 cx.run(&ctx, result);
             }
-            Err(e) => state.select.say(&ctx, &format!("The picture could not be saved: {e}")),
+            Err(e) => state.select.say(&ctx, &tr!("The picture could not be saved: {e}", e = e)),
         }
     }
     let requested = (state.filter, state.query.trim().to_string());
@@ -866,11 +867,11 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) -> bool {
                         ui,
                         Id::unique("gallery-community-error"),
                         Tone::Danger,
-                        &format!("Your communities' galleries could not be loaded: {error}"),
+                        &tr!("Your communities' galleries could not be loaded: {error}", error = error),
                         false,
                     );
                     ui.add_space(8.0);
-                    let b = Button::new("Try again").icon(icons::ARROW_CLOCKWISE).size(Size::Sm).enabled(!state.community.loading());
+                    let b = Button::new(tr("Try again")).icon(icons::ARROW_CLOCKWISE).size(Size::Sm).enabled(!state.community.loading());
                     let bw = b.desired_width(ui);
                     let (r, _) = ui.allocate_exact_size(vec2(width, 32.0), Sense::hover());
                     if sharing::pressed(b.show_at(ui, Rect::from_min_size(r.min, vec2(bw, 32.0)))) {
@@ -879,9 +880,9 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) -> bool {
                 }
                 if let Some(error) = state.assets.error().filter(|_| state.filter == Filter::Assets).map(str::to_owned) {
                     ui.add_space(12.0);
-                    feedback::banner(ui, Id::unique("gallery-assets-error"), Tone::Danger, &format!("Your assets could not be loaded: {error}"), false);
+                    feedback::banner(ui, Id::unique("gallery-assets-error"), Tone::Danger, &tr!("Your assets could not be loaded: {error}", error = error), false);
                     ui.add_space(8.0);
-                    let b = Button::new("Try again").icon(icons::ARROW_CLOCKWISE).size(Size::Sm).enabled(!state.assets.loading()).id_salt("gallery-assets-retry");
+                    let b = Button::new(tr("Try again")).icon(icons::ARROW_CLOCKWISE).size(Size::Sm).enabled(!state.assets.loading()).id_salt("gallery-assets-retry");
                     let bw = b.desired_width(ui);
                     let (r, _) = ui.allocate_exact_size(vec2(width, 32.0), Sense::hover());
                     if sharing::pressed(b.show_at(ui, Rect::from_min_size(r.min, vec2(bw, 32.0)))) {
@@ -890,9 +891,9 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) -> bool {
                 }
                 if let Some(error) = state.error.clone() {
                     ui.add_space(12.0);
-                    feedback::banner(ui, Id::unique("gallery-feed-error"), Tone::Danger, &format!("Shared moments could not be loaded: {error}"), false);
+                    feedback::banner(ui, Id::unique("gallery-feed-error"), Tone::Danger, &tr!("Shared moments could not be loaded: {error}", error = error), false);
                     ui.add_space(8.0);
-                    let b = Button::new("Try again").icon(icons::ARROW_CLOCKWISE).size(Size::Sm).enabled(!state.feed_job.running());
+                    let b = Button::new(tr("Try again")).icon(icons::ARROW_CLOCKWISE).size(Size::Sm).enabled(!state.feed_job.running());
                     let bw = b.desired_width(ui);
                     let (r, _) = ui.allocate_exact_size(vec2(width, 32.0), Sense::hover());
                     if sharing::pressed(b.show_at(ui, Rect::from_min_size(r.min, vec2(bw, 32.0)))) {
@@ -924,23 +925,26 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) -> bool {
         let shared = state.feed.items.iter().filter(|i| !i.mine).count();
         let communities = state.community.count();
         let assets = state.assets.count();
-        let from_communities = match (communities, assets) {
-            (0, 0) => String::new(),
-            (c, 0) => format!(" · {c} from your communities"),
-            (0, a) => format!(" · {a} of your assets"),
-            (c, a) => format!(" · {c} from your communities · {a} of your assets"),
-        };
         let sub = if loading {
-            "Gathering your pictures and captures…".to_string()
-        } else if narrow {
-            format!("{mine} on this computer · {shared} shared with you{from_communities}")
+            tr("Gathering your pictures and captures…").to_string()
         } else {
-            format!("{mine} on this computer · {shared} shared with you{from_communities} · grouped by where they were taken")
+            // Each part says all it says, so each language puts its own words around its number.
+            let mut parts = vec![tr!("{count} on this computer", count = mine), tr!("{count} shared with you", count = shared)];
+            if communities > 0 {
+                parts.push(tr!("{count} from your communities", count = communities));
+            }
+            if assets > 0 {
+                parts.push(tr!("{count} of your assets", count = assets));
+            }
+            if !narrow {
+                parts.push(tr("grouped by where they were taken").to_string());
+            }
+            parts.join(" · ")
         };
-        super::heading(&hu, head_r, "Library", "Photos & captures", Some(&sub));
+        super::heading(&hu, head_r, tr("Library"), tr("Photos & captures"), Some(&sub));
     }
     let mut manage = false;
-    let mb = Button::new("Manage captures").icon(icons::FOLDER_OPEN).hint("Reconstruct, free up space and import raw captures");
+    let mb = Button::new(tr("Manage captures")).icon(icons::FOLDER_OPEN).hint(tr("Reconstruct, free up space and import raw captures"));
     let mw = mb.desired_width(ui);
     let b = Rect::from_min_size(pos2(head.right() - mw, head.bottom() - 40.0), vec2(mw, 40.0));
     if sharing::pressed(mb.show_at(ui, b)) {
@@ -955,11 +959,11 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) -> bool {
         "gallery-filter",
         &mut state.filter,
         &[
-            SegOption::new(Filter::All, "All"),
-            SegOption::new(Filter::Mine, "Mine"),
-            SegOption::new(Filter::Shared, "Shared with me"),
-            SegOption::new(Filter::Communities, "Communities").hint("Pictures of your communities' galleries and their events"),
-            SegOption::new(Filter::Assets, "My assets").hint("Pictures of the avatars and other assets you made or own on Orbiters"),
+            SegOption::new(Filter::All, tr("All")),
+            SegOption::new(Filter::Mine, tr("Mine")),
+            SegOption::new(Filter::Shared, tr("Shared with me")),
+            SegOption::new(Filter::Communities, tr("Communities")).hint(tr("Pictures of your communities' galleries and their events")),
+            SegOption::new(Filter::Assets, tr("My assets")).hint(tr("Pictures of the avatars and other assets you made or own on Orbiters")),
         ],
         false,
     );
@@ -981,7 +985,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) -> bool {
         Rect::from_min_size(pos2(controls.right() - 260.0, controls.top()), vec2(260.0, 40.0))
     };
     let pending = state.requests.pending();
-    let rb = Button::new("Requests").icon(icons::TRAY).hint("People asking to share what you shared with them, and what you asked");
+    let rb = Button::new(tr("Requests")).icon(icons::TRAY).hint(tr("People asking to share what you shared with them, and what you asked"));
     let rw = rb.desired_width(ui);
     let request_button = Rect::from_min_size(pos2(if stacked { controls.right() - rw } else { search.left() - 12.0 - rw }, controls.top()), vec2(rw, 40.0));
     // The layout picker: before Requests, or before the search under the filters.
@@ -1015,9 +1019,9 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) -> bool {
     let mut su = ui.new_child(UiBuilder::new().max_rect(search).id_salt("gallery-search"));
     let before = state.query.clone();
     let hint = match state.filter {
-        Filter::Communities => "Search galleries and people",
-        Filter::Assets => "Search your assets",
-        _ => "Search worlds",
+        Filter::Communities => tr("Search galleries and people"),
+        Filter::Assets => tr("Search your assets"),
+        _ => tr("Search worlds"),
     };
     widgets::search_field(&mut su, "gallery-search", &mut state.query, hint, search.width());
     if state.query != before {
@@ -1212,7 +1216,7 @@ fn again_row(o: Offer, ready: bool) -> Option<(Menu, String, &'static str, Optio
     match o {
         Offer::Start { .. } => Some((Menu::Reconstruct, o.label().into(), icons::MAGIC_WAND, None)),
         Offer::Blocked { short, .. } => ready.then(|| (Menu::Reconstruct, o.label().into(), icons::MAGIC_WAND, Some(short))),
-        Offer::Running { fraction, .. } | Offer::Paused { fraction, .. } => Some((Menu::StopReconstruct, format!("Stop reconstruction · {:.0}%", fraction * 100.0), icons::X, None)),
+        Offer::Running { fraction, .. } | Offer::Paused { fraction, .. } => Some((Menu::StopReconstruct, tr!("Stop reconstruction · {percent}%", percent = format!("{:.0}", fraction * 100.0)), icons::X, None)),
         Offer::Waiting { .. } => Some((Menu::Unqueue, o.label().into(), icons::X, None)),
     }
 }
@@ -1224,37 +1228,37 @@ fn again_row(o: Offer, ready: bool) -> Option<(Menu, String, &'static str, Optio
 /// or the owner's shares, Copy, Download, Open on Orbiters; then the group's Instance… and World on VRChat, and Select
 /// (or Deselect). With the card in a selection of several, Copy copies the selection. The picked action, once.
 fn card_menu(ui: &Ui, resp: &egui::Response, e: &Entry, select: &super::gallery_select::Selection, cx: &Cx) -> Option<Menu> {
-    let mut acts: Vec<(Menu, String, &'static str)> = vec![(Menu::Open, "Open".into(), icons::ARROWS_OUT)];
+    let mut acts: Vec<(Menu, String, &'static str)> = vec![(Menu::Open, tr("Open").into(), icons::ARROWS_OUT)];
     // Why the row at this place takes no press.
     let mut off: Option<(usize, &'static str)> = None;
     let item = e.remote.as_ref();
     let public = item.is_some_and(|i| i.public);
     let several = select.has(&e.key) && select.keys.len() > 1;
-    let copy = |what: &str| if several { format!("Copy the {} selected", select.keys.len()) } else { what.to_string() };
+    let copy = |what: &str| if several { tr!("Copy the {count} selected", count = select.keys.len()) } else { tr(what).to_string() };
     let mine_shares = |acts: &mut Vec<(Menu, String, &'static str)>| {
         if e.edited_since_upload() && item.is_none_or(|i| i.hidden.is_none()) {
             // As its window says it: shared (publicly or with friends), or only uploaded.
-            let label = if item.is_some_and(|i| i.public || !i.grants.is_empty()) { "Update the shared capture" } else { "Update the uploaded copy" };
+            let label = if item.is_some_and(|i| i.public || !i.grants.is_empty()) { tr("Update the shared capture") } else { tr("Update the uploaded copy") };
             acts.push((Menu::Update, label.into(), icons::CLOUD_ARROW_UP));
         }
         if e.ready && item.is_none_or(|i| i.can_share && i.hidden.is_none()) {
             if !public {
-                acts.push((Menu::SharePublicly, "Share publicly".into(), icons::GLOBE));
+                acts.push((Menu::SharePublicly, tr("Share publicly").into(), icons::GLOBE));
             }
-            acts.push((Menu::ShareTo, "Share to …".into(), icons::USERS));
+            acts.push((Menu::ShareTo, tr("Share to …").into(), icons::USERS));
         }
     };
     match &e.local {
         Some(controller::Local::Picture(_)) => {
             if super::editor::source_of(e).is_some() {
-                acts.push((Menu::Edit, "Edit".into(), icons::SLIDERS_HORIZONTAL));
+                acts.push((Menu::Edit, tr("Edit").into(), icons::SLIDERS_HORIZONTAL));
             }
             mine_shares(&mut acts);
-            acts.push((Menu::Copy, copy("Copy"), icons::COPY));
+            acts.push((Menu::Copy, copy(mark("Copy")), icons::COPY));
             if !e.layers().is_empty() && !several {
-                acts.push((Menu::CopyLayers, "Copy with its layers".into(), icons::STACK));
+                acts.push((Menu::CopyLayers, tr("Copy with its layers").into(), icons::STACK));
             }
-            acts.push((Menu::Folder, "Show in folder".into(), icons::FOLDER_OPEN));
+            acts.push((Menu::Folder, tr("Show in folder").into(), icons::FOLDER_OPEN));
         }
         Some(controller::Local::Session(_)) => {
             let row = again::offer_of(e, cx.snap).and_then(|o| again_row(o, e.ready));
@@ -1271,14 +1275,14 @@ fn card_menu(ui: &Ui, resp: &egui::Response, e: &Entry, select: &super::gallery_
                 reconstruct(&mut acts);
             }
             if e.ready && cx.gpu.is_some() {
-                acts.push((Menu::Edit, "Edit in 3D".into(), icons::SLIDERS_HORIZONTAL));
+                acts.push((Menu::Edit, tr("Edit in 3D").into(), icons::SLIDERS_HORIZONTAL));
             }
             mine_shares(&mut acts);
             if public {
-                acts.push((Menu::CopyLink, "Copy public link".into(), icons::LINK_SIMPLE));
+                acts.push((Menu::CopyLink, tr("Copy public link").into(), icons::LINK_SIMPLE));
             }
             if e.ready {
-                acts.push((Menu::Export, "Export…".into(), icons::UPLOAD_SIMPLE));
+                acts.push((Menu::Export, tr("Export…").into(), icons::UPLOAD_SIMPLE));
                 reconstruct(&mut acts);
                 // Read at the right press and kept with the card: a menu is built every frame, for every card.
                 if let Some(controller::Local::Session(dir)) = &e.local {
@@ -1295,49 +1299,49 @@ fn card_menu(ui: &Ui, resp: &egui::Response, e: &Entry, select: &super::gallery_
                     }
                 }
             }
-            acts.push((Menu::Copy, copy("Copy its picture"), icons::COPY));
-            acts.push((Menu::Folder, "Open its folder".into(), icons::FOLDER_OPEN));
+            acts.push((Menu::Copy, copy(mark("Copy its picture")), icons::COPY));
+            acts.push((Menu::Folder, tr("Open its folder").into(), icons::FOLDER_OPEN));
         }
         None => {
             match item {
                 Some(i) if i.mine => mine_shares(&mut acts),
-                Some(i) if i.can_share && i.hidden.is_none() => acts.push((Menu::ShareTo, "Ask to share".into(), icons::PAPER_PLANE_TILT)),
+                Some(i) if i.can_share && i.hidden.is_none() => acts.push((Menu::ShareTo, tr("Ask to share").into(), icons::PAPER_PLANE_TILT)),
                 _ => {}
             }
             let capture = item.is_some_and(|i| i.kind == orbiters_core::shares::Kind::Capture);
             if capture && public {
-                acts.push((Menu::CopyLink, "Copy public link".into(), icons::LINK_SIMPLE));
+                acts.push((Menu::CopyLink, tr("Copy public link").into(), icons::LINK_SIMPLE));
             }
             // A copy of a picture from Orbiters edited (its full picture fetched), saved among this computer's.
             if !capture && super::editor::source_of(e).is_some() {
-                acts.push((Menu::Edit, "Edit".into(), icons::SLIDERS_HORIZONTAL));
+                acts.push((Menu::Edit, tr("Edit").into(), icons::SLIDERS_HORIZONTAL));
             }
             if select.can_hand_out(e) {
-                acts.push((Menu::Copy, copy(if capture { "Copy its picture" } else { "Copy" }), icons::COPY));
+                acts.push((Menu::Copy, copy(if capture { mark("Copy its picture") } else { mark("Copy") }), icons::COPY));
                 if !capture {
-                    acts.push((Menu::Download, "Download".into(), icons::DOWNLOAD_SIMPLE));
+                    acts.push((Menu::Download, tr("Download").into(), icons::DOWNLOAD_SIMPLE));
                 }
             }
             if super::community::owns(&e.key) || assets::owns(&e.key) || capture && public {
-                acts.push((Menu::OnOrbiters, "Open on Orbiters".into(), icons::ARROW_SQUARE_OUT));
+                acts.push((Menu::OnOrbiters, tr("Open on Orbiters").into(), icons::ARROW_SQUARE_OUT));
             }
         }
     }
     if e.instance.is_some() && !super::community::owns(&e.key) && !assets::owns(&e.key) {
-        acts.push((Menu::Instance, "Instance…".into(), icons::INFO));
+        acts.push((Menu::Instance, tr("Instance…").into(), icons::INFO));
     }
     if e.world_id.starts_with("wrld_") {
-        acts.push((Menu::World, "World on VRChat".into(), icons::GLOBE_HEMISPHERE_WEST));
+        acts.push((Menu::World, tr("World on VRChat").into(), icons::GLOBE_HEMISPHERE_WEST));
     }
     let selected = select.has(&e.key);
-    acts.push((Menu::Select, if selected { "Deselect" } else { "Select" }.into(), if selected { icons::X_CIRCLE } else { icons::CHECK_CIRCLE }));
+    acts.push((Menu::Select, if selected { tr("Deselect") } else { tr("Select") }.into(), if selected { icons::X_CIRCLE } else { icons::CHECK_CIRCLE }));
     let items: Vec<orbiters_ui::popup::Item<'_>> = acts
         .iter()
         .enumerate()
         .map(|(i, (_, label, glyph))| {
             let item = orbiters_ui::popup::Item::new(label).icon(glyph);
             match off {
-                Some((at, why)) if at == i => item.detail(why).disabled(),
+                Some((at, why)) if at == i => item.detail(tr(why)).disabled(),
                 _ => item,
             }
         })
@@ -1393,7 +1397,7 @@ fn act_menu(ctx: &egui::Context, cx: &mut Cx, state: &mut State, entries: &[Entr
             if let Some(item) = e.remote.as_ref().filter(|i| i.public) {
                 let world = if item.world.id.is_empty() { &e.world_id } else { &item.world.id };
                 ctx.copy_text(sharing::public_link(server, world, item.id));
-                state.select.say(ctx, "Public link copied: paste it in Discord or anywhere, its picture shows with it");
+                state.select.say(ctx, tr("Public link copied: paste it in Discord or anywhere, its picture shows with it"));
             }
         }
         Menu::Copy => {
@@ -1407,7 +1411,7 @@ fn act_menu(ctx: &egui::Context, cx: &mut Cx, state: &mut State, entries: &[Entr
                 files.push(p.clone());
             }
             files.extend(e.layers().iter().map(|l| l.path.clone()));
-            state.select.copy_paths(ctx, &files, "the picture and its layers");
+            state.select.copy_paths(ctx, &files);
         }
         Menu::Folder => {
             let result = match &e.local {
@@ -1443,7 +1447,7 @@ fn act_menu(ctx: &egui::Context, cx: &mut Cx, state: &mut State, entries: &[Entr
         Menu::Download => {
             if let Some(job) = state.select.download_job(&e) {
                 state.download_job = Job::spawn(ctx, job);
-                state.select.say(ctx, "Saving it from Orbiters…");
+                state.select.say(ctx, tr("Saving it from Orbiters…"));
             }
         }
         Menu::OnOrbiters => {
@@ -1541,7 +1545,7 @@ fn shimmer_cells(layout: GalleryLayout, width: f32, rows: usize) -> (Vec<Rect>, 
 fn group_header(ui: &mut Ui, first: &Entry, last: &Entry, count: usize) -> (Rect, bool) {
     let r = ui.max_rect();
     let p = ui.painter().clone();
-    let b = Button::new("Instance").icon(icons::INFO).variant(Variant::Secondary).size(Size::Sm).id_salt(("instance", &first.key));
+    let b = Button::new(tr("Instance")).icon(icons::INFO).variant(Variant::Secondary).size(Size::Sm).id_salt(("instance", &first.key));
     let bw = b.desired_width(ui);
     let br = Rect::from_min_size(pos2(r.right() - bw, r.top() + 6.0), vec2(bw, 32.0));
     widgets::text_truncated(
@@ -1562,11 +1566,11 @@ fn group_header(ui: &mut Ui, first: &Entry, last: &Entry, count: usize) -> (Rect
             _ => format!("{start} – {date}"),
         }
     };
-    let items = format!("{count} item{}", if count == 1 { "" } else { "s" });
+    let items = tr_n("{count} item", "{count} items", count as u64);
     let mut x = r.left();
     let y = r.top() + 36.0;
     if let Some(kind) = first.instance.as_deref().map(|i| instance_parts(i).1) {
-        let t = Txt::new(kind, 11.0).weight(weight::SEMIBOLD).color(theme::FG_2);
+        let t = Txt::new(tr_ctx("instance", kind), 11.0).weight(weight::SEMIBOLD).color(theme::FG_2);
         let tw = widgets::text_size(ui, &t).x;
         let pill = Rect::from_min_size(pos2(x, y - 10.0), vec2(tw + 30.0, 20.0));
         p.rect_filled(pill, theme::radius(10.0), theme::white(0.06));
@@ -1668,9 +1672,9 @@ fn card(ui: &mut Ui, cx: &Cx, i: usize, e: &Entry, rect: Rect, look: &CardLook<'
     };
     let queued = matches!(&e.local, Some(controller::Local::Session(d)) if cx.snap.reconstruct_queue.contains(d));
     let (kind_label, kind_color) = if e.is_picture() {
-        ("Picture", theme::FG_2)
+        (tr("Picture"), theme::FG_2)
     } else if e.no_keyframes {
-        ("No 3D", theme::DANGER)
+        (tr("No 3D"), theme::DANGER)
     } else {
         ("3D", theme::ACCENT)
     };
@@ -1690,21 +1694,21 @@ fn card(ui: &mut Ui, cx: &Cx, i: usize, e: &Entry, rect: Rect, look: &CardLook<'
         let (label, color) = super::sessions::job_badge(j, cx.snap);
         super::sessions::badge(&p, ui, pos2(x, thumb.top() + 12.0), &label, theme::black(0.55), color, false);
     } else if queued {
-        super::sessions::badge(&p, ui, pos2(x, thumb.top() + 12.0), "Waiting to reconstruct", theme::black(0.55), theme::FG_2, false);
+        super::sessions::badge(&p, ui, pos2(x, thumb.top() + 12.0), tr("Waiting to reconstruct"), theme::black(0.55), theme::FG_2, false);
     } else if look.updating {
-        super::sessions::badge(&p, ui, pos2(x, thumb.top() + 12.0), "Updating…", theme::black(0.55), theme::ACCENT, false);
+        super::sessions::badge(&p, ui, pos2(x, thumb.top() + 12.0), tr("Updating…"), theme::black(0.55), theme::ACCENT, false);
     } else if look.sharing {
-        super::sessions::badge(&p, ui, pos2(x, thumb.top() + 12.0), "Sharing…", theme::black(0.55), theme::ACCENT, false);
+        super::sessions::badge(&p, ui, pos2(x, thumb.top() + 12.0), tr("Sharing…"), theme::black(0.55), theme::ACCENT, false);
     }
     if let Some(item) = e.remote.as_ref().filter(|i| i.mine) {
         if item.public {
-            super::sessions::badge(&p, ui, pos2(thumb.right() - 12.0, thumb.top() + 12.0), "Public", theme::alpha(theme::OK, 0.22), theme::OK, true);
+            super::sessions::badge(&p, ui, pos2(thumb.right() - 12.0, thumb.top() + 12.0), tr("Public"), theme::alpha(theme::OK, 0.22), theme::OK, true);
         } else if !item.grants.is_empty() {
             super::sessions::badge(
                 &p,
                 ui,
                 pos2(thumb.right() - 12.0, thumb.top() + 12.0),
-                &format!("Shared · {}", item.grants.len()),
+                &tr!("Shared · {count}", count = item.grants.len()),
                 theme::black(0.55),
                 theme::FG_2,
                 true,
@@ -1726,17 +1730,17 @@ fn card(ui: &mut Ui, cx: &Cx, i: usize, e: &Entry, rect: Rect, look: &CardLook<'
     let title = if let Some((kind, _)) = &look.about {
         kind.as_str()
     } else if e.is_picture() {
-        "VRChat picture"
+        tr("VRChat picture")
     } else if e.picture_mode == Some(orbiters_core::settings::PictureMode::World) {
-        "3D picture of the world"
+        tr("3D picture of the world")
     } else if e.picture_mode == Some(orbiters_core::settings::PictureMode::People) {
-        "3D picture of people"
+        tr("3D picture of people")
     } else if e.ready {
-        "3D capture"
+        tr("3D capture")
     } else if e.no_keyframes {
-        "No keyframes"
+        tr("No keyframes")
     } else {
-        "Capture"
+        tr("Capture")
     };
     let time = super::local_time(&controller::iso(e.taken));
     let time = time.rsplit_once(", ").map_or(time.clone(), |(_, t)| t.to_string());
@@ -1756,7 +1760,7 @@ fn card(ui: &mut Ui, cx: &Cx, i: usize, e: &Entry, rect: Rect, look: &CardLook<'
             &p,
             pos2(ar.right() + 7.0, line_y),
             Align2::LEFT_CENTER,
-            &Txt::new(format!("from {}", from.name), 12.0).weight(weight::MEDIUM).color(theme::FG_2),
+            &Txt::new(tr!("from {name}", name = from.name), 12.0).weight(weight::MEDIUM).color(theme::FG_2),
             r.right() - ar.right() - 23.0,
         );
     } else {
@@ -1765,20 +1769,20 @@ fn card(ui: &mut Ui, cx: &Cx, i: usize, e: &Entry, rect: Rect, look: &CardLook<'
             _ if e.edited_since_upload() && !look.updating => {
                 let shared = e.remote.as_ref().is_some_and(|i| i.public || !i.grants.is_empty());
                 let label = match (e.reconstructed_since_upload(), shared) {
-                    (true, true) => "Reconstructed since shared: update it",
-                    (true, false) => "Reconstructed since uploaded: update it",
-                    (false, true) => "Edited since shared: update it",
-                    (false, false) => "Edited since uploaded: update it",
+                    (true, true) => tr("Reconstructed since shared: update it"),
+                    (true, false) => tr("Reconstructed since uploaded: update it"),
+                    (false, true) => tr("Edited since shared: update it"),
+                    (false, false) => tr("Edited since uploaded: update it"),
                 };
                 (icons::CLOUD_ARROW_UP, label.to_string(), theme::WARN)
             }
-            Some(i) if i.public => (icons::GLOBE, "Public on Orbiters".to_string(), theme::OK),
-            Some(i) if !i.grants.is_empty() => (icons::USERS, format!("Shared with {}", i.grants.len()), theme::FG_2),
-            Some(_) => (icons::LOCK_SIMPLE, "Only you".to_string(), theme::FG_3),
+            Some(i) if i.public => (icons::GLOBE, tr("Public on Orbiters").to_string(), theme::OK),
+            Some(i) if !i.grants.is_empty() => (icons::USERS, tr!("Shared with {count}", count = i.grants.len()), theme::FG_2),
+            Some(_) => (icons::LOCK_SIMPLE, tr("Only you").to_string(), theme::FG_3),
             None if look.about.is_some() => (icons::TAG, look.about.as_ref().map(|a| a.1.clone()).unwrap_or_default(), theme::ACCENT),
-            None if e.no_keyframes => (icons::WARNING, "Recorded without the capture strip: nothing to make 3D from".to_string(), theme::DANGER),
-            None if !e.ready && !e.is_picture() => (icons::MAGIC_WAND, "Reconstruct it to share it".to_string(), theme::FG_3),
-            None => (icons::HARD_DRIVE, "On this computer".to_string(), theme::FG_3),
+            None if e.no_keyframes => (icons::WARNING, tr("Recorded without the capture strip: nothing to make 3D from").to_string(), theme::DANGER),
+            None if !e.ready && !e.is_picture() => (icons::MAGIC_WAND, tr("Reconstruct it to share it").to_string(), theme::FG_3),
+            None => (icons::HARD_DRIVE, tr("On this computer").to_string(), theme::FG_3),
         };
         widgets::icon(&p, pos2(bx + 7.0, line_y), glyph, 13.0, color);
         widgets::text_truncated(&p, pos2(bx + 20.0, line_y), Align2::LEFT_CENTER, &Txt::new(label, 12.0).color(color), r.width() - 52.0);
@@ -1793,7 +1797,7 @@ fn tile_caption(p: &egui::Painter, ui: &Ui, thumb: Rect, title: &str, time: &str
     let tt = Txt::new(time, 11.5).weight(weight::MEDIUM).color(theme::FG_2);
     let tw = widgets::text_size(ui, &tt).x;
     if let Some((name, tex)) = from {
-        let t = Txt::new(format!("from {name}"), 11.5).weight(weight::SEMIBOLD).color(theme::FG);
+        let t = Txt::new(tr!("from {name}", name = name), 11.5).weight(weight::SEMIBOLD).color(theme::FG);
         let w = (widgets::text_size(ui, &t).x + 34.0).min(thumb.width() - 24.0);
         let pill = Rect::from_min_size(pos2(left, y - 11.0), vec2(w, 22.0));
         p.rect_filled(pill, theme::radius(11.0), theme::black(0.55));
@@ -1825,23 +1829,23 @@ fn empty_state(ui: &mut Ui, cx: &Cx, filter: Filter, searching: bool, height: f3
     let lr = Rect::from_center_size(rect.center() + vec2(0.0, -44.0 + bob), logo::size_for_width(70.0));
     logo::paint(&p, lr, logo::Look::default());
     let (title, text) = if searching {
-        ("No world matches", "Try another world name.")
+        (tr("No world matches"), tr("Try another world name."))
     } else if filter == Filter::Assets {
         (
-            "Your assets' pictures belong here",
-            "The pictures of the avatars and other assets you made or own on Orbiters show up here, one group for each.",
+            tr("Your assets' pictures belong here"),
+            tr("The pictures of the avatars and other assets you made or own on Orbiters show up here, one group for each."),
         )
     } else if filter == Filter::Communities {
         (
-            "Your communities' pictures belong here",
-            "Pictures posted in the galleries of the Discord servers you're in show up here, with the events they were taken at.",
+            tr("Your communities' pictures belong here"),
+            tr("Pictures posted in the galleries of the Discord servers you're in show up here, with the events they were taken at."),
         )
     } else if filter == Filter::Shared {
-        ("Nothing shared with you yet", "When friends share a picture or a 3D capture with you, it shows up here.")
+        (tr("Nothing shared with you yet"), tr("When friends share a picture or a 3D capture with you, it shows up here."))
     } else if cfg!(target_os = "macos") {
-        ("Your moments belong here", "VRChat and N4N0's captures come from a PC. Add the folder with your VRChat pictures through Manage folders, or copy captures into your Sessions folder, and they show up here together.")
+        (tr("Your moments belong here"), tr("VRChat and N4N0's captures come from a PC. Add the folder with your VRChat pictures through Manage folders, or copy captures into your Sessions folder, and they show up here together."))
     } else {
-        ("Your moments belong here", "VRChat pictures and N4N0's 3D captures show up here together, grouped by the instance you took them in.")
+        (tr("Your moments belong here"), tr("VRChat pictures and N4N0's 3D captures show up here together, grouped by the instance you took them in."))
     };
     widgets::text(&p, rect.center() + vec2(0.0, 18.0), Align2::CENTER_CENTER, &Txt::new(title, 17.0).weight(weight::SEMIBOLD));
     let g = p.layout_job({
@@ -1878,7 +1882,7 @@ fn instance_popover(ctx: &egui::Context, cx: &mut Cx, state: &mut State) {
                 use crate::controller::vrchat_data::{Request, Response};
                 match backend.vrchat_data(scope, Request::Instance { world, instance })? {
                     Response::Instance(alive) => Ok(alive),
-                    _ => Err("Unexpected instance response.".into()),
+                    _ => Err(tr("Unexpected instance response.").into()),
                 }
             });
         }
@@ -1919,7 +1923,7 @@ fn instance_popover(ctx: &egui::Context, cx: &mut Cx, state: &mut State) {
         widgets::panel(&p, rect, 18.0);
         let mut y = rect.top() + 20.0;
         let x = rect.left() + 20.0;
-        let (number, kind, region) = e.instance.as_deref().map(instance_parts).unwrap_or(("", "Instance not recorded", ""));
+        let (number, kind, region) = e.instance.as_deref().map(instance_parts).unwrap_or(("", mark("Instance not recorded"), ""));
         let tile = Rect::from_min_size(pos2(x, y + 2.0), vec2(40.0, 40.0));
         p.rect_filled(tile, theme::radius(12.0), theme::alpha(theme::ACCENT, 0.12));
         widgets::icon(&p, tile.center(), instance_glyph(kind), 19.0, theme::ACCENT);
@@ -1930,7 +1934,7 @@ fn instance_popover(ctx: &egui::Context, cx: &mut Cx, state: &mut State) {
             &Txt::new(&e.world_name, 15.5).weight(weight::SEMIBOLD),
             inner - 54.0,
         );
-        let mut meta = vec![kind.to_string()];
+        let mut meta = vec![tr_ctx("instance", kind).to_string()];
         if !number.is_empty() {
             meta.push(format!("#{number}"));
         }
@@ -1945,10 +1949,10 @@ fn instance_popover(ctx: &egui::Context, cx: &mut Cx, state: &mut State) {
             inner - 54.0,
         );
         y += 44.0 + 16.0;
-        widgets::text(&p, pos2(x, y + 7.0), Align2::LEFT_CENTER, &Txt::caps(if current { "Here now" } else { "Who was there" }));
+        widgets::text(&p, pos2(x, y + 7.0), Align2::LEFT_CENTER, &Txt::caps(if current { tr("Here now") } else { tr("Who was there") }));
         y += 14.0 + 10.0;
         if people.is_empty() {
-            widgets::text(&p, pos2(x, y + 10.0), Align2::LEFT_CENTER, &Txt::new("Not recorded: VRCX keeps who was there", 12.5).color(theme::FG_3));
+            widgets::text(&p, pos2(x, y + 10.0), Align2::LEFT_CENTER, &Txt::new(tr("Not recorded: VRCX keeps who was there"), 12.5).color(theme::FG_3));
         } else {
             for (n, name) in people.iter().enumerate() {
                 let cr = Rect::from_min_size(pos2(x, y) + at[n], vec2(widths[n].min(inner), widgets::CHIP_H));
@@ -1959,17 +1963,17 @@ fn instance_popover(ctx: &egui::Context, cx: &mut Cx, state: &mut State) {
         }
         y += people_h.max(20.0) + 18.0;
         let (dot, status) = if current {
-            (Tone::Ok, "You are in this instance now")
+            (Tone::Ok, tr("You are in this instance now"))
         } else if state.instance_alive == Some(true) {
-            (Tone::Ok, "Still open: you can join it again")
+            (Tone::Ok, tr("Still open: you can join it again"))
         } else if state.instance_alive == Some(false) {
-            (Tone::Off, "Not open any more")
+            (Tone::Off, tr("Not open any more"))
         } else if state.instance_job.running() {
-            (Tone::Info, "Checking whether it is still open…")
+            (Tone::Info, tr("Checking whether it is still open…"))
         } else if e.instance.is_none() {
-            (Tone::Off, "The instance was not recorded for this moment")
+            (Tone::Off, tr("The instance was not recorded for this moment"))
         } else {
-            (Tone::Off, "Joining works for instances still open")
+            (Tone::Off, tr("Joining works for instances still open"))
         };
         if state.instance_job.running() {
             feedback::spinner(&p, pos2(x + 5.0, y + 11.0), 5.0, 1.8, theme::CYAN);
@@ -1982,7 +1986,7 @@ fn instance_popover(ctx: &egui::Context, cx: &mut Cx, state: &mut State) {
             widgets::text_truncated(&p, pos2(x, y + 10.0), Align2::LEFT_CENTER, &Txt::new(err, 12.0).color(theme::DANGER), inner - 110.0);
             // The whole of a long answer on hover.
             ui.interact(Rect::from_min_size(pos2(x, y), vec2(inner - 110.0, 20.0)), Id::unique("instance-error"), Sense::hover()).on_hover_text(err);
-            let b = Button::new("Try again").size(Size::Sm).id_salt("instance-retry");
+            let b = Button::new(tr("Try again")).size(Size::Sm).id_salt("instance-retry");
             let bw = b.desired_width(ui);
             if sharing::pressed(b.show_at(ui, Rect::from_min_size(pos2(rect.right() - 20.0 - bw, y - 6.0), vec2(bw, 32.0)))) {
                 retry = true;
@@ -1991,13 +1995,13 @@ fn instance_popover(ctx: &egui::Context, cx: &mut Cx, state: &mut State) {
         }
         let br = Rect::from_min_size(pos2(x, y), vec2(inner, 40.0));
         // Green only while it can be joined: a closed or unknown instance keeps a quiet, disabled button.
-        let open = Button::new("Join in VRChat")
+        let open = Button::new(tr("Join in VRChat"))
             .icon(icons::ARROW_SQUARE_OUT)
             .variant(if join { Variant::Primary } else { Variant::Secondary })
             .enabled(join)
             .width(inner)
             .id_salt("instance-join");
-        let open = if join { open } else { open.hint("Only an instance that is still open can be joined") };
+        let open = if join { open } else { open.hint(tr("Only an instance that is still open can be joined")) };
         if sharing::pressed(open.show_at(ui, br)) {
             if let Some(instance) = &e.instance {
                 open_link = Some(format!("https://vrchat.com/home/launch?worldId={}&instanceId={}", e.world_id, encode(instance)));
@@ -2063,27 +2067,27 @@ fn instance_parts(instance: &str) -> (&str, &'static str, &str) {
 fn instance_type(instance: &str) -> &'static str {
     if instance.contains("~private(") {
         if instance.contains("~canRequestInvite") {
-            "Invite+"
+            mark("Invite+")
         } else {
-            "Invite only"
+            mark("Invite only")
         }
     } else if instance.contains("~friends(") {
-        "Friends"
+        mark("Friends")
     } else if instance.contains("~hidden(") {
-        "Friends+"
+        mark("Friends+")
     } else if instance.contains("~group(") {
-        "Group"
+        mark("Group")
     } else {
-        "Public"
+        mark("Public")
     }
 }
 
 fn instance_glyph(kind: &str) -> &'static str {
     match kind {
-        "Friends" | "Friends+" => icons::USERS,
-        "Invite only" | "Invite+" => icons::ENVELOPE_SIMPLE,
-        "Group" => icons::USERS,
-        "Public" => icons::GLOBE,
+        "Friends" | "Friends+" => icons::USERS, // i18n: not shown (matches instance_type's English)
+        "Invite only" | "Invite+" => icons::ENVELOPE_SIMPLE, // i18n: not shown
+        "Group" => icons::USERS, // i18n: not shown
+        "Public" => icons::GLOBE, // i18n: not shown
         _ => icons::INFO,
     }
 }

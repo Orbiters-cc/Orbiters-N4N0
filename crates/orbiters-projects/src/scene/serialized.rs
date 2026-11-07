@@ -19,14 +19,14 @@ const COMMON: &[&str] = &[
     "AnimationClip",
     "AnimationCurve",
     "AnimationState",
-    "Array",
-    "Base",
+    "Array", // i18n: not shown (Unity's own type names)
+    "Base", // i18n: not shown (Unity's own type names)
     "BitField",
     "bitset",
     "bool",
     "char",
     "ColorRGBA",
-    "Component",
+    "Component", // i18n: not shown (Unity's own type names)
     "data",
     "deque",
     "double",
@@ -34,15 +34,15 @@ const COMMON: &[&str] = &[
     "FastPropertyName",
     "first",
     "float",
-    "Font",
+    "Font", // i18n: not shown (Unity's own type names)
     "GameObject",
-    "Generic Mono",
+    "Generic Mono", // i18n: not shown (Unity's own type names)
     "GradientNEW",
     "GUID",
     "GUIStyle",
     "int",
     "list",
-    "long long",
+    "long long", // i18n: not shown (Unity's own type names)
     "map",
     "Matrix4x4f",
     "MdFour",
@@ -67,7 +67,7 @@ const COMMON: &[&str] = &[
     "m_StaticEditorFlags",
     "m_Type",
     "m_Version",
-    "Object",
+    "Object", // i18n: not shown (Unity's own type names)
     "pair",
     "PPtr<Component>",
     "PPtr<GameObject>",
@@ -81,9 +81,9 @@ const COMMON: &[&str] = &[
     "PPtr<Texture>",
     "PPtr<Texture2D>",
     "PPtr<Transform>",
-    "Prefab",
-    "Quaternionf",
-    "Rectf",
+    "Prefab", // i18n: not shown (Unity's own type names)
+    "Quaternionf", // i18n: not shown (Unity's own type names)
+    "Rectf", // i18n: not shown (Unity's own type names)
     "RectInt",
     "RectOffset",
     "second",
@@ -98,23 +98,23 @@ const COMMON: &[&str] = &[
     "string",
     "TextAsset",
     "TextMesh",
-    "Texture",
+    "Texture", // i18n: not shown (Unity's own type names)
     "Texture2D",
-    "Transform",
+    "Transform", // i18n: not shown (Unity's own type names)
     "TypelessData",
     "UInt16",
     "UInt32",
     "UInt64",
     "UInt8",
-    "unsigned int",
-    "unsigned long long",
-    "unsigned short",
+    "unsigned int", // i18n: not shown (Unity's own type names)
+    "unsigned long long", // i18n: not shown (Unity's own type names)
+    "unsigned short", // i18n: not shown (Unity's own type names)
     "vector",
     "Vector2f",
     "Vector3f",
     "Vector4f",
     "m_ScriptingClassIdentifier",
-    "Gradient",
+    "Gradient", // i18n: not shown (Unity's own type names)
     "Type*",
     "int2_storage",
     "int3_storage",
@@ -423,7 +423,7 @@ fn after(nodes: &[Node], i: usize) -> usize {
 /// A record of plain values only (no arrays, strings or alignment inside): its size in bytes.
 fn plain_size(nodes: &[Node], i: usize) -> Option<usize> {
     let kids = children(nodes, i);
-    if nodes[i].meta & 0x4000 != 0 || nodes[i].flags & 1 != 0 || nodes[i].ty == "Array" || nodes[i].ty == "string" {
+    if nodes[i].meta & 0x4000 != 0 || nodes[i].flags & 1 != 0 || nodes[i].ty == "Array" || nodes[i].ty == "string" { // i18n: not shown (Unity's own type names)
         return None;
     }
     if kids.is_empty() {
@@ -437,13 +437,13 @@ fn primitive(ty: &str, r: &mut Reader, size: i32) -> anyhow::Result<Value> {
         "bool" | "UInt8" | "char" => r.u8()?.to_string(),
         "SInt8" => (r.u8()? as i8).to_string(),
         "SInt16" | "short" => (r.u16()? as i16).to_string(),
-        "UInt16" | "unsigned short" => r.u16()?.to_string(),
+        "UInt16" | "unsigned short" => r.u16()?.to_string(), // i18n: not shown (Unity's own type names)
         "int" | "SInt32" | "Type*" => r.i32()?.to_string(),
-        "UInt32" | "unsigned int" => r.u32()?.to_string(),
+        "UInt32" | "unsigned int" => r.u32()?.to_string(), // i18n: not shown (Unity's own type names)
         "float" => f32::from_bits(r.u32()?).to_string(),
         "double" => f64::from_bits(r.u64()?).to_string(),
-        "SInt64" | "long long" => (r.u64()? as i64).to_string(),
-        "UInt64" | "unsigned long long" | "FileSize" => r.u64()?.to_string(),
+        "SInt64" | "long long" => (r.u64()? as i64).to_string(), // i18n: not shown (Unity's own type names)
+        "UInt64" | "unsigned long long" | "FileSize" => r.u64()?.to_string(), // i18n: not shown (Unity's own type names)
         _ => {
             r.take(size.max(0) as usize)?;
             String::new()
@@ -473,7 +473,7 @@ fn read(nodes: &[Node], i: usize, r: &mut Reader, depth: usize) -> anyhow::Resul
         let n = r.i32()?;
         ensure!(n >= 0, "{n} bytes");
         Value::Bytes(r.take(n as usize)?.to_vec())
-    } else if node.flags & 1 != 0 || node.ty == "Array" {
+    } else if node.flags & 1 != 0 || node.ty == "Array" { // i18n: not shown (Unity's own type names)
         let n = r.i32()?;
         ensure!(n >= 0, "an array of {n}");
         let element = *kids.get(1).context("an array without its element")?;
@@ -501,7 +501,7 @@ fn read(nodes: &[Node], i: usize, r: &mut Reader, depth: usize) -> anyhow::Resul
         return Ok((v, after(nodes, i)));
     } else if kids.is_empty() {
         primitive(&node.ty, r, node.size)?
-    } else if kids.len() == 1 && (nodes[kids[0]].flags & 1 != 0 || nodes[kids[0]].ty == "Array") {
+    } else if kids.len() == 1 && (nodes[kids[0]].flags & 1 != 0 || nodes[kids[0]].ty == "Array") { // i18n: not shown (Unity's own type names)
         // vector, set, map, staticvector: the array itself.
         read(nodes, kids[0], r, depth + 1)?.0
     } else if node.ty.starts_with("PPtr<") {

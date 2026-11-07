@@ -6,6 +6,7 @@
 
 use crate::account::Api;
 use orbiters_contracts::world_feedback::{self as contract, Refusal};
+use orbiters_i18n::tr;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -117,8 +118,8 @@ fn failure(status: u16, body: &str) -> Failure {
     match status {
         401 => Failure::SignedOut,
         429 => Failure::Later(if message.is_empty() { Refusal::RateLimited.text().into() } else { message }),
-        400..=499 => Failure::Refused { code, message: if message.is_empty() { format!("Orbiters refused it ({status})") } else { message } },
-        _ => Failure::Later(if message.is_empty() { format!("Orbiters could not answer ({status})") } else { message }),
+        400..=499 => Failure::Refused { code, message: if message.is_empty() { tr!("Orbiters refused it ({status})", status = status) } else { message } },
+        _ => Failure::Later(if message.is_empty() { tr!("Orbiters could not answer ({status})", status = status) } else { message }),
     }
 }
 
@@ -132,7 +133,7 @@ impl Client<'_> {
     fn call(&self, method: &str, path: &str, body: Option<serde_json::Value>) -> Result<(u16, String), Failure> {
         let url = self.api.url(path);
         let agent = self.api.agent();
-        let auth = self.token.map(|t| format!("Bearer {t}"));
+        let auth = self.token.map(|t| format!("Bearer {t}")); // i18n: not shown (an HTTP header)
         let result = match (method, body) {
             ("GET", _) => {
                 let mut r = agent.get(&url);
@@ -156,7 +157,7 @@ impl Client<'_> {
                 r.send_json(body.unwrap_or(serde_json::json!({})))
             }
         };
-        let response = result.map_err(|e| Failure::Later(format!("Orbiters could not be reached: {e}")))?;
+        let response = result.map_err(|e| Failure::Later(tr!("Orbiters could not be reached: {error}", error = e)))?;
         let status = response.status().as_u16();
         let text = response.into_body().with_config().limit(4 * 1024 * 1024).read_to_string().unwrap_or_default();
         if (200..300).contains(&status) {
@@ -167,7 +168,7 @@ impl Client<'_> {
     }
 
     fn json<T: serde::de::DeserializeOwned>(text: &str) -> Result<T, Failure> {
-        serde_json::from_str(text).map_err(|e| Failure::Later(format!("unexpected answer from Orbiters: {e}")))
+        serde_json::from_str(text).map_err(|e| Failure::Later(tr!("unexpected answer from Orbiters: {error}", error = e)))
     }
 
     /// A world's feedback (the member's own too when signed in).

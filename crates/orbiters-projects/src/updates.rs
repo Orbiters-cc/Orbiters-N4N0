@@ -3,6 +3,7 @@
 //! the other packages' declared dependency ranges and the project's Unity version allow, without changing the
 //! VRChat SDK behind the person's back. Nothing is written: applying an update is `vpm::Change::Install` with the
 //! versions found here.
+use orbiters_i18n::tr;
 use std::collections::HashMap;
 use std::path::Path;
 use vrc_get_vpm::io::DefaultProjectIo;
@@ -99,7 +100,7 @@ pub async fn check(root: &Path, path: &Path) -> anyhow::Result<Check> {
     let manifest = std::fs::read(path.join("Packages/vpm-manifest.json"))?;
     const REWRITTEN: &[u8] = br#""3.2-3.8""#;
     if manifest.windows(REWRITTEN.len()).any(|w| w == REWRITTEN) {
-        return Ok(Check { skipped: Some("Its package list uses an old range spelling; change a package once to check for updates.".into()), ..Default::default() });
+        return Ok(Check { skipped: Some(tr("Its package list uses an old range spelling; change a package once to check for updates.").into()), ..Default::default() });
     }
     let (_, packages) = crate::vpm::collection(root, false).await?;
     let project = UnityProject::load(DefaultProjectIo::new(path.into())).await?;
@@ -130,7 +131,10 @@ pub async fn find(project: &UnityProject, packages: &impl PackageCollection, pre
                     // its own row only.
                     if !is_sdk(name) {
                         if let Some(sdk) = steps.iter().find(|s| is_sdk(&s.name)) {
-                            first_why.get_or_insert_with(|| format!("needs {} {}", sdk.display_name, sdk.to.as_deref().unwrap_or("removed")));
+                            first_why.get_or_insert_with(|| match sdk.to.as_deref() {
+                                Some(version) => tr!("needs {package} {version}", package = sdk.display_name, version = version),
+                                None => tr!("needs {package} removed", package = sdk.display_name),
+                            });
                             continue;
                         }
                     }
@@ -159,7 +163,7 @@ pub async fn find(project: &UnityProject, packages: &impl PackageCollection, pre
                 name: name.clone(),
                 display_name: display,
                 version: newest.version().to_string(),
-                why: first_why.unwrap_or_else(|| "cannot be installed with the other packages".into()),
+                why: first_why.unwrap_or_else(|| tr("cannot be installed with the other packages").into()),
             }),
         }
     }
@@ -221,8 +225,8 @@ async fn attempt<'env>(
         }
         with.sort();
         return Err(match (with.is_empty(), unity) {
-            (true, _) => format!("needs another Unity version than {}", project.unity_version()),
-            (false, _) => format!("conflicts with {}", with.join(", ")),
+            (true, _) => tr!("needs another Unity version than {unity}", unity = project.unity_version()),
+            (false, _) => tr!("conflicts with {packages}", packages = with.join(", ")),
         });
     }
     let display = |n: &str| names.get(n).cloned().unwrap_or_else(|| n.to_string());

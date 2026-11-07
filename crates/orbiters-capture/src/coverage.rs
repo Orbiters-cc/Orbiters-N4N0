@@ -9,6 +9,7 @@
 use orbiters_contracts::coords::intrinsics_from_projection;
 use orbiters_contracts::depth::{self, DepthLayout};
 use orbiters_core::protocol::{coverage as cell_bits, CoverageMap};
+use orbiters_i18n::tr;
 use std::collections::HashMap;
 
 /// Cell size on the horizontal plane, metres.
@@ -221,33 +222,30 @@ impl Coverage {
                 grazing_floor += 1;
             }
         }
-        const WAYS: [&str; 8] = [
-            "ahead of you",
-            "ahead to your right",
-            "to your right",
-            "behind you to the right",
-            "behind you",
-            "behind you to the left",
-            "to your left",
-            "ahead to your left",
-        ];
         if let Some((k, &(n, total))) = one_sided.iter().enumerate().max_by_key(|(_, v)| v.0) {
             // At least 1.5 m² of it.
             if n >= 6 {
-                out.push(format!(
-                    "What is {} (about {:.0} m away) was only seen from one direction: look at it from another angle too.",
-                    WAYS[k],
-                    total / n as f32
-                ));
+                // One whole sentence for each direction: where a phrase goes in a sentence differs between languages.
+                let m = format!("{:.0}", total / n as f32);
+                out.push(match k {
+                    0 => tr!("What is ahead of you (about {m} m away) was only seen from one direction: look at it from another angle too.", m = m),
+                    1 => tr!("What is ahead to your right (about {m} m away) was only seen from one direction: look at it from another angle too.", m = m),
+                    2 => tr!("What is to your right (about {m} m away) was only seen from one direction: look at it from another angle too.", m = m),
+                    3 => tr!("What is behind you to the right (about {m} m away) was only seen from one direction: look at it from another angle too.", m = m),
+                    4 => tr!("What is behind you (about {m} m away) was only seen from one direction: look at it from another angle too.", m = m),
+                    5 => tr!("What is behind you to the left (about {m} m away) was only seen from one direction: look at it from another angle too.", m = m),
+                    6 => tr!("What is to your left (about {m} m away) was only seen from one direction: look at it from another angle too.", m = m),
+                    _ => tr!("What is ahead to your left (about {m} m away) was only seen from one direction: look at it from another angle too.", m = m),
+                });
             }
         }
         if grazing_floor >= 10 {
-            out.push("Look down at the floor around you: so far it was only seen from afar, at a grazing angle.".into());
+            out.push(tr("Look down at the floor around you: so far it was only seen from afar, at a grazing angle.").into());
         }
         if seconds >= 10.0 && self.path.len() >= 10 {
             let (lo, hi) = self.path.iter().fold((f32::MAX, f32::MIN), |(lo, hi), p| (lo.min(p[1]), hi.max(p[1])));
             if hi - lo < 0.3 {
-                out.push("Crouch or raise the camera for a moment: everything so far was seen from one height.".into());
+                out.push(tr("Crouch or raise the camera for a moment: everything so far was seen from one height.").into());
             }
         }
         out

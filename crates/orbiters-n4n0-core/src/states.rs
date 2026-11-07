@@ -6,7 +6,9 @@
 //! Data and planning only: Orbiters - N4N0 reads VRChat's values (its OSCQuery tree), keeps the file, and sends what
 //! [`plan`] says, paced ([`paced`]).
 
+use crate::text::latin;
 use orbiters_core::osc::OscValue;
+use orbiters_i18n::{tr, tr_latin, tr_n};
 use rosc::OscType;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -112,8 +114,8 @@ pub enum Refused {
 impl std::fmt::Display for Refused {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Refused::NoSuchState => f.write_str("That state is not saved for this avatar any more."),
-            Refused::Full => write!(f, "This avatar has {MAX_STATES} states already: delete one first."),
+            Refused::NoSuchState => f.write_str(tr_latin("That state is not saved for this avatar any more.")),
+            Refused::Full => f.write_str(&latin(|| tr!("This avatar has {max} states already: delete one first.", max = MAX_STATES))),
         }
     }
 }
@@ -341,17 +343,17 @@ impl Plan {
         let mut parts = Vec::new();
         if !self.missing.is_empty() {
             let n = self.missing.len();
-            parts.push(format!("{n} parameter{} this avatar no longer has left out", if n == 1 { "" } else { "s" }));
+            parts.push(latin(|| tr_n("{count} parameter this avatar no longer has left out", "{count} parameters this avatar no longer has left out", n as u64)));
         }
         match self.size {
-            Size::Forbidden => parts.push("this world does not allow changing your size".into()),
-            Size::NotSaved => parts.push("no size was saved with it".into()),
+            Size::Forbidden => parts.push(tr_latin("this world does not allow changing your size").into()),
+            Size::NotSaved => parts.push(tr_latin("no size was saved with it").into()),
             _ => {}
         }
         if parts.is_empty() {
-            format!("Applied \"{name}\"")
+            latin(|| tr!("Applied \"{name}\"", name = name))
         } else {
-            format!("Applied \"{name}\": {}", parts.join(", "))
+            latin(|| tr!("Applied \"{name}\": {details}", name = name, details = parts.join(", ")))
         }
     }
 }

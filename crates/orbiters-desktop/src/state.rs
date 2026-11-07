@@ -3,6 +3,7 @@
 use orbiters_core::protocol::{AudioDeviceInfo, CaptureStats, CoverageMap, SpoutSourceInfo};
 use orbiters_core::reconstruction::Stage;
 use orbiters_core::settings::Settings;
+use orbiters_i18n::{mark, tr};
 use orbiters_core::vrchat_log::WorldState;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -166,22 +167,27 @@ pub enum NoStrip {
 impl NoStrip {
     /// The sentence the person reads, once a stretch.
     pub fn message(self) -> &'static str {
+        tr(self.message_english())
+    }
+
+    /// The same in English, for what AI clients read (the bridge's state): never translated.
+    pub fn message_english(self) -> &'static str {
         match self {
-            Self::MaskOff => "VRChat's camera has Local User off, which hides your avatar from the camera and N4N0's capture kit with it, so there is no camera pose and there are no keyframes. Turn Local User on in the camera's Mask menu.",
-            Self::NoKit => "The avatar you are wearing has no N4N0 capture kit, so there is no camera pose and there are no keyframes. Wear an avatar with N4N0, or add N4N0 to this one in My Avatar and upload it.",
-            Self::NotDrawn => "N4N0's capture kit and Local User are on, but the capture strip is not in the picture, so there are no keyframes. A world's depth of field or motion blur can wipe it. If it never shows, update N4N0 in My Avatar and upload the avatar again.",
-            Self::Unknown => "No capture strip in the picture, so there is no camera pose and there are no keyframes. Check that you wear an avatar with N4N0 and that Local User is on in the camera's Mask menu.",
+            Self::MaskOff => mark("VRChat's camera has Local User off, which hides your avatar from the camera and N4N0's capture kit with it, so there is no camera pose and there are no keyframes. Turn Local User on in the camera's Mask menu."),
+            Self::NoKit => mark("The avatar you are wearing has no N4N0 capture kit, so there is no camera pose and there are no keyframes. Wear an avatar with N4N0, or add N4N0 to this one in My Avatar and upload it."),
+            Self::NotDrawn => mark("N4N0's capture kit and Local User are on, but the capture strip is not in the picture, so there are no keyframes. A world's depth of field or motion blur can wipe it. If it never shows, update N4N0 in My Avatar and upload the avatar again."),
+            Self::Unknown => mark("No capture strip in the picture, so there is no camera pose and there are no keyframes. Check that you wear an avatar with N4N0 and that Local User is on in the camera's Mask menu."),
         }
     }
 
     /// The few words the page's tile has room for.
     pub fn short(self) -> &'static str {
-        match self {
-            Self::MaskOff => "Local User is off",
-            Self::NoKit => "no capture kit on this avatar",
-            Self::NotDrawn => "the world may wipe it",
-            Self::Unknown => "no camera pose",
-        }
+        tr(match self {
+            Self::MaskOff => mark("Local User is off"),
+            Self::NoKit => mark("no capture kit on this avatar"),
+            Self::NotDrawn => mark("the world may wipe it"),
+            Self::Unknown => mark("no camera pose"),
+        })
     }
 }
 
@@ -588,17 +594,17 @@ impl Snapshot {
     /// reconstruction running or waiting, a call, an upload to the Map explorer, the speech models downloading.
     pub fn busy_with(&self) -> Option<&'static str> {
         if self.is_capturing() || self.capture.state == CaptureState::Stopping {
-            Some("the recording")
+            Some(mark("the recording"))
         } else if self.reconstruction.is_some() || !self.reconstruct_queue.is_empty() {
-            Some("the reconstruction")
+            Some(mark("the reconstruction"))
         } else if self.n4n0.calls.call.is_some() {
-            Some("the call")
+            Some(mark("the call"))
         } else if self.uploads.iter().any(UploadStatus::running) || self.capture_shares.iter().any(|j| j.outcome.is_none()) {
-            Some("the upload")
+            Some(mark("the upload"))
         } else if self.n4n0.voice.downloading.is_some() {
-            Some("the speech models' download")
+            Some(mark("the speech models' download"))
         } else if self.cleanup.is_some() {
-            Some("the clean-up")
+            Some(mark("the clean-up"))
         } else {
             None
         }

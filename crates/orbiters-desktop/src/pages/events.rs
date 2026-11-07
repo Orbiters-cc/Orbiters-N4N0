@@ -15,6 +15,7 @@ use crate::worlds::{Picture, Pictures};
 use egui::{pos2, vec2, Align2, Color32, CursorIcon, Id, Order, Painter, Pos2, Rect, Sense, TextureHandle, Ui, UiBuilder};
 use orbiters_core::account::{Api, Server};
 use orbiters_core::community::{self, Card, Cards, Friend, Invites, Overview, Refused, Signup};
+use orbiters_i18n::{mark, tr, tr_n};
 use orbiters_n4n0_core::menu::InviteAnswer;
 use orbiters_ui::anim::{self, ease, Spring};
 use orbiters_ui::paint::{self, Gradient};
@@ -62,9 +63,9 @@ fn local(t: OffsetDateTime) -> OffsetDateTime {
     t.to_offset(offset())
 }
 
-const MONTHS: [&str; 12] = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-const DAYS: [&str; 7] = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
-const DAYS_LONG: [&str; 7] = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
+const MONTHS: [&str; 12] = [mark("Jan"), mark("Feb"), mark("Mar"), mark("Apr"), mark("May"), mark("Jun"), mark("Jul"), mark("Aug"), mark("Sep"), mark("Oct"), mark("Nov"), mark("Dec")];
+const DAYS: [&str; 7] = [mark("Mon"), mark("Tue"), mark("Wed"), mark("Thu"), mark("Fri"), mark("Sat"), mark("Sun")];
+const DAYS_LONG: [&str; 7] = [mark("Monday"), mark("Tuesday"), mark("Wednesday"), mark("Thursday"), mark("Friday"), mark("Saturday"), mark("Sunday")];
 
 fn clock(t: OffsetDateTime) -> String {
     format!("{:02}:{:02}", t.hour(), t.minute())
@@ -72,21 +73,22 @@ fn clock(t: OffsetDateTime) -> String {
 
 /// "Sat 1 Nov" (and its year when it is not this one).
 fn date_short(t: OffsetDateTime, today: OffsetDateTime) -> String {
-    let mut s = format!("{} {} {}", DAYS[t.weekday().number_days_from_monday() as usize], t.day(), MONTHS[t.month() as usize - 1]);
+    let date = tr!("{weekday} {day} {month}", weekday = tr(DAYS[t.weekday().number_days_from_monday() as usize]), day = t.day(), month = tr(MONTHS[t.month() as usize - 1]));
     if t.year() != today.year() {
-        s.push_str(&format!(" {}", t.year()));
+        tr!("{date} {year}", date = date, year = t.year())
+    } else {
+        date
     }
-    s
 }
 
 /// The day of `t` as people say it from `today`: Today, Tomorrow, Yesterday, the weekday within a week, else the date.
 fn day_name(t: OffsetDateTime, today: OffsetDateTime) -> String {
     let days = (t.date() - today.date()).whole_days();
     match days {
-        0 => "Today".into(),
-        1 => "Tomorrow".into(),
-        -1 => "Yesterday".into(),
-        2..=6 => DAYS_LONG[t.weekday().number_days_from_monday() as usize].into(),
+        0 => tr("Today").into(),
+        1 => tr("Tomorrow").into(),
+        -1 => tr("Yesterday").into(),
+        2..=6 => tr(DAYS_LONG[t.weekday().number_days_from_monday() as usize]).into(),
         _ => date_short(t, today),
     }
 }
@@ -98,7 +100,7 @@ pub fn when(starts: Option<&str>, ends: Option<&str>) -> String {
 }
 
 fn when_at(starts: Option<&str>, ends: Option<&str>, now: i64) -> String {
-    let Some(s) = parse(starts).map(local) else { return "Time to be announced".into() };
+    let Some(s) = parse(starts).map(local) else { return tr("Time to be announced").into() };
     let today = local(OffsetDateTime::from_unix_timestamp(now).unwrap_or(OffsetDateTime::UNIX_EPOCH));
     match parse(ends).map(local).filter(|e| *e > s) {
         Some(e) if e.date() == s.date() => format!("{} · {} – {}", day_name(s, today), clock(s), clock(e)),
@@ -155,22 +157,22 @@ fn countdown(secs: i64) -> String {
     let minutes = ((secs as f64) / 60.0).round().max(1.0) as i64;
     let (days, hours) = (minutes / 1440, minutes % 1440 / 60);
     if days > 0 {
-        format!("{days} d {hours} h")
+        tr!("{days} d {hours} h", days = days, hours = hours)
     } else if hours > 0 {
-        format!("{hours} h {} min", minutes % 60)
+        tr!("{hours} h {minutes} min", hours = hours, minutes = minutes % 60)
     } else {
-        format!("{minutes} min")
+        tr!("{minutes} min", minutes = minutes)
     }
 }
 
 pub fn phase_label(p: Phase) -> String {
     match p {
-        Phase::Live => "Happening now".into(),
-        Phase::Soon(s) => format!("Starts in {}", countdown(s)),
-        Phase::Ended => "Ended".into(),
-        Phase::Cancelled => "Cancelled".into(),
-        Phase::Planning => "Voting open".into(),
-        Phase::Tba => "Time to be announced".into(),
+        Phase::Live => tr("Happening now").into(),
+        Phase::Soon(s) => tr!("Starts in {time}", time = countdown(s)),
+        Phase::Ended => tr("Ended").into(),
+        Phase::Cancelled => tr("Cancelled").into(),
+        Phase::Planning => tr("Voting open").into(),
+        Phase::Tba => tr("Time to be announced").into(),
     }
 }
 
@@ -180,8 +182,13 @@ fn card_phase(c: &Card, now: i64) -> Phase {
 
 fn category_label(id: &str) -> String {
     match id {
-        "film_media" => "Film & media".into(),
-        "roleplaying" => "Roleplay".into(),
+        "film_media" => tr("Film & media").into(),
+        "roleplaying" => tr("Roleplay").into(),
+        "education" => tr("Education").into(),
+        "avatars" => tr("Avatars").into(),
+        "hangout" => tr("Hangout").into(),
+        "music" => tr("Music").into(),
+        "exploration" => tr("Exploration").into(),
         other => {
             let mut s = other.replace('_', " ");
             if let Some(first) = s.get(..1) {
@@ -370,7 +377,7 @@ fn date_tile(p: &Painter, rect: Rect, starts: Option<&str>) {
         p,
         pos2(rect.center().x, rect.top() + 14.0),
         Align2::CENTER_CENTER,
-        &Txt::new(MONTHS[t.month() as usize - 1].to_uppercase(), 9.5).weight(weight::BOLD).tracking(0.06).color(theme::ACCENT),
+        &Txt::new(tr(MONTHS[t.month() as usize - 1]).to_uppercase(), 9.5).weight(weight::BOLD).tracking(0.06).color(theme::ACCENT),
     );
     widgets::text(
         p,
@@ -422,8 +429,8 @@ impl Ask {
     fn of_status(status: &str, reason: Option<&String>) -> Self {
         match status {
             "pending" => Ask::Listed { friend: None },
-            "sent" => Ask::Sent("Invite sent"),
-            "sending" | "uncertain" => Ask::Sent("Invite on its way"),
+            "sent" => Ask::Sent(mark("Invite sent")),
+            "sending" | "uncertain" => Ask::Sent(mark("Invite on its way")),
             "failed" => Ask::Failed(reason.cloned()),
             _ => Ask::Idle,
         }
@@ -448,7 +455,7 @@ impl Ask {
     fn of_error(e: &anyhow::Error) -> Self {
         match Refused::of(e) {
             Some(r) => Ask::of_refusal(r),
-            None => Ask::Error(format!("Orbiters could not be reached: {e}")),
+            None => Ask::Error(tr!("Orbiters could not be reached: {e}", e = e)),
         }
     }
 
@@ -485,7 +492,7 @@ fn invite_control(ui: &mut Ui, id: Id, at: Pos2, ask: &Ask, primary: bool, small
     let mut pressed = None;
     let (target_w, draw): (f32, Face) = match ask {
         Ask::Busy(label) => {
-            let t = Txt::new(*label, size).weight(weight::MEDIUM).color(theme::FG_2);
+            let t = Txt::new(tr(label), size).weight(weight::MEDIUM).color(theme::FG_2);
             let w = widgets::text_size(ui, &t).x + 50.0;
             (
                 w,
@@ -500,13 +507,13 @@ fn invite_control(ui: &mut Ui, id: Id, at: Pos2, ask: &Ask, primary: bool, small
         }
         Ask::Listed { .. } | Ask::Sent(_) | Ask::Invited => {
             let (glyph, label, cancel) = match ask {
-                Ask::Listed { .. } => (icons::CHECK, "Will invite you", true),
-                Ask::Sent(l) => (icons::CHECK_CIRCLE, *l, false),
-                _ => (icons::PAPER_PLANE_TILT, "Invite sent", false),
+                Ask::Listed { .. } => (icons::CHECK, tr("Will invite you"), true),
+                Ask::Sent(l) => (icons::CHECK_CIRCLE, tr(l), false),
+                _ => (icons::PAPER_PLANE_TILT, tr("Invite sent"), false),
             };
             let t = Txt::new(label, size).weight(weight::SEMIBOLD).color(theme::ACCENT);
             let chip_w = widgets::text_size(ui, &t).x + 46.0;
-            let c = Txt::new("Cancel", size).weight(weight::MEDIUM).color(theme::FG_3);
+            let c = Txt::new(tr("Cancel"), size).weight(weight::MEDIUM).color(theme::FG_3);
             let cancel_w = if cancel { widgets::text_size(ui, &c).x + 24.0 } else { 0.0 };
             let id2 = id.with("cancel");
             (
@@ -520,13 +527,13 @@ fn invite_control(ui: &mut Ui, id: Id, at: Pos2, ask: &Ask, primary: bool, small
                     if cancel {
                         let cr = Rect::from_min_max(pos2(chip.right(), r.top()), r.max);
                         let resp =
-                            ui.interact(cr, id2, Sense::click()).on_hover_cursor(CursorIcon::PointingHand).on_hover_text("Leave this step's invite list");
+                            ui.interact(cr, id2, Sense::click()).on_hover_cursor(CursorIcon::PointingHand).on_hover_text(tr("Leave this step's invite list"));
                         let hover = anim::toggle(ui.ctx(), id2.with("hover"), resp.hovered(), Spring::SNAPPY);
                         widgets::text(
                             &p,
                             pos2(cr.center().x + 2.0, cr.center().y),
                             Align2::CENTER_CENTER,
-                            &Txt::new("Cancel", size).weight(weight::MEDIUM).color(theme::mix(theme::FG_3, theme::FG, hover)),
+                            &Txt::new(tr("Cancel"), size).weight(weight::MEDIUM).color(theme::mix(theme::FG_3, theme::FG, hover)),
                         );
                         if sharing::pressed(resp) {
                             return Some(Press::Cancel);
@@ -537,7 +544,7 @@ fn invite_control(ui: &mut Ui, id: Id, at: Pos2, ask: &Ask, primary: bool, small
             )
         }
         _ => {
-            let b = Button::new("Invite me")
+            let b = Button::new(tr("Invite me"))
                 .icon(icons::PAPER_PLANE_TILT)
                 .variant(if primary { Variant::Primary } else { Variant::Secondary })
                 .size(if small { Size::Sm } else { Size::Md })
@@ -547,7 +554,7 @@ fn invite_control(ui: &mut Ui, id: Id, at: Pos2, ask: &Ask, primary: bool, small
             (
                 w,
                 Box::new(move |ui: &mut Ui, r: Rect| {
-                    let b = Button::new("Invite me")
+                    let b = Button::new(tr("Invite me"))
                         .icon(icons::PAPER_PLANE_TILT)
                         .variant(if primary { Variant::Primary } else { Variant::Secondary })
                         .size(if small { Size::Sm } else { Size::Md })
@@ -578,7 +585,7 @@ fn ask_note(ask: &Ask, page: Option<&Overview>) -> Option<(Tone, String, Vec<Not
     Some(match ask {
         Ask::Listed { friend } => match friend {
             Some(Friend { is_friend: Some(false), accepting: true, .. }) => {
-                (Tone::Info, "Orbiters is accepting your friend request: the invite follows.".into(), vec![])
+                (Tone::Info, tr("Orbiters is accepting your friend request: the invite follows.").into(), vec![])
             }
             Some(Friend { is_friend: Some(false), account: a, .. }) => {
                 let name = a.as_ref().and_then(|a| a.name.clone());
@@ -586,45 +593,49 @@ fn ask_note(ask: &Ask, page: Option<&Overview>) -> Option<(Tone, String, Vec<Not
                 (
                     Tone::Warn,
                     match name {
-                        Some(n) => format!("Add {n} as a friend on VRChat to receive the invite."),
-                        None => "Add the community's VRChat account as a friend to receive the invite.".into(),
+                        Some(n) => tr!("Add {name} as a friend on VRChat to receive the invite.", name = n),
+                        None => tr("Add the community's VRChat account as a friend to receive the invite.").into(),
                     },
-                    id.map(|id| vec![NoteAction::Url("Open the account", format!("https://vrchat.com/home/user/{id}"))]).unwrap_or_default(),
+                    id.map(|id| vec![NoteAction::Url(mark("Open the account"), format!("https://vrchat.com/home/user/{id}"))]).unwrap_or_default(),
                 )
             }
-            _ => (Tone::Ok, "You're on the invite list: the invite comes in VRChat when this step starts and its instance is ready.".into(), vec![]),
+            _ => (Tone::Ok, tr("You're on the invite list: the invite comes in VRChat when this step starts and its instance is ready.").into(), vec![]),
         },
-        Ask::Sent(_) => (Tone::Ok, "Your invite was sent: open it from VRChat's notifications.".into(), vec![]),
-        Ask::Invited => (Tone::Ok, "Orbiters sent you an invite into the instance: open it from VRChat's notifications.".into(), vec![]),
+        Ask::Sent(_) => (Tone::Ok, tr("Your invite was sent: open it from VRChat's notifications.").into(), vec![]),
+        Ask::Invited => (Tone::Ok, tr("Orbiters sent you an invite into the instance: open it from VRChat's notifications.").into(), vec![]),
         Ask::Failed(reason) => {
             let (text, profile) = match reason.as_deref() {
-                Some("not_friends") => ("Not sent: add the community's VRChat account as a friend, then ask again.", true),
-                Some("not_member") => ("Not sent: join the group and get its role, then ask again.", false),
-                _ => ("Your invite could not be sent. Ask again to retry.", false),
+                Some("not_friends") => (tr("Not sent: add the community's VRChat account as a friend, then ask again."), true),
+                Some("not_member") => (tr("Not sent: join the group and get its role, then ask again."), false),
+                _ => (tr("Your invite could not be sent. Ask again to retry."), false),
             };
             let actions = if profile {
-                account.map(|id| vec![NoteAction::Url("Open the account", format!("https://vrchat.com/home/user/{id}"))]).unwrap_or_default()
+                account.map(|id| vec![NoteAction::Url(mark("Open the account"), format!("https://vrchat.com/home/user/{id}"))]).unwrap_or_default()
             } else {
                 vec![]
             };
             (Tone::Warn, text.into(), actions)
         }
-        Ask::Link => (Tone::Warn, "Connect your VRChat account on Orbiters to get the invite.".into(), vec![NoteAction::Connect, NoteAction::Check]),
+        Ask::Link => (Tone::Warn, tr("Connect your VRChat account on Orbiters to get the invite.").into(), vec![NoteAction::Connect, NoteAction::Check]),
         Ask::Group => {
-            let name = group.map(|g| g.name.clone()).filter(|n| !n.is_empty()).unwrap_or_else(|| "the group".into());
+            let name = group.map(|g| g.name.clone()).filter(|n| !n.is_empty());
             let mut actions = vec![];
             if let Some(id) = group.and_then(|g| g.id.clone()) {
-                actions.push(NoteAction::Url("Open the group", format!("https://vrchat.com/home/group/{id}")));
+                actions.push(NoteAction::Url(mark("Open the group"), format!("https://vrchat.com/home/group/{id}")));
             }
             actions.push(NoteAction::Check);
-            (Tone::Warn, format!("Join {name} on VRChat and get the role the event asks for, then check again."), actions)
+            let said = match name {
+                Some(name) => tr!("Join {name} on VRChat and get the role the event asks for, then check again.", name = name),
+                None => tr("Join the group on VRChat and get the role the event asks for, then check again.").to_string(),
+            };
+            (Tone::Warn, said, actions)
         }
         Ask::Befriend { name, link } => (
             Tone::Warn,
-            format!("VRChat lets Orbiters invite only its friends: add {name} as a friend on VRChat, then try again."),
-            vec![NoteAction::Url("Open the account", link.clone())],
+            tr!("VRChat lets Orbiters invite only its friends: add {name} as a friend on VRChat, then try again.", name = name),
+            vec![NoteAction::Url(mark("Open the account"), link.clone())],
         ),
-        Ask::SignIn => (Tone::Info, "Sign in to Orbiters to get invites to events.".into(), vec![NoteAction::SignIn]),
+        Ask::SignIn => (Tone::Info, tr("Sign in to Orbiters to get invites to events.").into(), vec![NoteAction::SignIn]),
         Ask::Error(m) => (Tone::Danger, m.clone(), vec![]),
         Ask::Unknown | Ask::Idle | Ask::Busy(_) => return None,
     })
@@ -804,8 +815,8 @@ impl Window {
                     self.error = None;
                 }
                 Err(e) => {
-                    self.error =
-                        Some(Refused::of(&e).cloned().unwrap_or(Refused { status: 0, code: None, message: format!("Orbiters could not be reached: {e}") }))
+                    let unreachable = tr!("Orbiters could not be reached: {e}", e = e);
+                    self.error = Some(Refused::of(&e).cloned().unwrap_or(Refused { status: 0, code: None, message: unreachable }))
                 }
             }
         }
@@ -876,7 +887,7 @@ impl Window {
                     self.asks.insert(step, Ask::SignIn);
                     return;
                 };
-                self.asks.insert(step.clone(), Ask::Busy("Signing you up…"));
+                self.asks.insert(step.clone(), Ask::Busy(mark("Signing you up…")));
                 let id = self.id.clone();
                 self.action = Job::spawn(ctx, move || {
                     let r = Api::new(server).invite_me(&token, &id, &step);
@@ -889,7 +900,7 @@ impl Window {
                     self.asks.insert(step, Ask::SignIn);
                     return;
                 };
-                self.asks.insert(step.clone(), Ask::Busy("Checking with VRChat…"));
+                self.asks.insert(step.clone(), Ask::Busy(mark("Checking with VRChat…")));
                 let id = self.id.clone();
                 self.action = Job::spawn(ctx, move || {
                     let api = Api::new(server);
@@ -908,7 +919,7 @@ impl Window {
             Act::Withdraw(step) => {
                 self.focus = Some(step.clone());
                 let Some(token) = token() else { return };
-                self.asks.insert(step.clone(), Ask::Busy("Cancelling…"));
+                self.asks.insert(step.clone(), Ask::Busy(mark("Cancelling…")));
                 let id = self.id.clone();
                 self.action = Job::spawn(ctx, move || {
                     let r = Api::new(server).withdraw_invite(&token, &id, &step);
@@ -921,7 +932,7 @@ impl Window {
                     self.asks.insert(step, Ask::SignIn);
                     return;
                 };
-                self.asks.insert(step.clone(), Ask::Busy("Asking VRChat…"));
+                self.asks.insert(step.clone(), Ask::Busy(mark("Asking VRChat…")));
                 self.action = Job::spawn(ctx, move || {
                     let answer = orbiters_n4n0_core::invites::send(&Api::new(server), &token, &location);
                     (step, Outcome::N4n0(answer))
@@ -996,7 +1007,7 @@ impl Window {
             if closing || f.content < 0.05 {
                 cu.disable();
             }
-            if viewer::close_button(&mut cu, f.rect, "Close") {
+            if viewer::close_button(&mut cu, f.rect, tr("Close")) {
                 close = true;
             }
             // The body, laid out at the window's final width, under the hero; it scrolls when taller than the room.
@@ -1080,7 +1091,7 @@ impl Window {
         let when_y = hero.bottom() - 26.0;
         let title_top = when_y - 18.0 - galley.size().y;
         p.galley(pos2(x, title_top), galley, Color32::WHITE);
-        let when = format!("{} · your time ({})", when(starts, ends), zone());
+        let when = tr!("{time} · your time ({zone})", time = when(starts, ends), zone = zone());
         widgets::text_truncated(
             &p,
             pos2(x, when_y),
@@ -1126,7 +1137,7 @@ impl Window {
                 .filter(|u| u.starts_with("https://"))
                 .and_then(|u| pictures.get(&ctx, &Picture::Gallery { development: false, asset: 0, id: 0, url: u.clone(), large: false }));
             widgets::avatar(&p, ar, icon.as_ref(), &h.name);
-            widgets::text(&p, pos2(ar.right() + 12.0, ar.top() + 11.0), Align2::LEFT_CENTER, &Txt::caps("Hosted by"));
+            widgets::text(&p, pos2(ar.right() + 12.0, ar.top() + 11.0), Align2::LEFT_CENTER, &Txt::caps(tr("Hosted by")));
             widgets::text_truncated(
                 &p,
                 pos2(ar.right() + 12.0, ar.top() + 29.0),
@@ -1161,7 +1172,7 @@ impl Window {
             match which {
                 0 => {
                     if let Some(url) = instance.clone() {
-                        let b = Button::new("Join in VRChat").icon(icons::ARROW_SQUARE_OUT).variant(Variant::Primary).id_salt(wid.with("join"));
+                        let b = Button::new(tr("Join in VRChat")).icon(icons::ARROW_SQUARE_OUT).variant(Variant::Primary).id_salt(wid.with("join"));
                         let w = b.desired_width(ui);
                         let at = place(w);
                         if sharing::pressed(b.show_at(ui, Rect::from_min_size(pos2(at.x, at.y - 20.0), vec2(w, 40.0)))) {
@@ -1185,9 +1196,9 @@ impl Window {
                     if step.is_none() && self.page.is_some() {
                         let r = Rect::from_min_size(pos2(at.x, at.y - 20.0), vec2(probe, 40.0));
                         ui.interact(r, wid.with("no-invite"), Sense::hover()).on_hover_text(if matches!(ph, Phase::Ended | Phase::Cancelled) {
-                            "This event is over"
+                            tr("This event is over")
                         } else {
-                            "This event takes no invite sign-ups: join it in VRChat once it starts"
+                            tr("This event takes no invite sign-ups: join it in VRChat once it starts")
                         });
                     }
                     if let (Some(step), Some(press)) = (step, press) {
@@ -1209,7 +1220,7 @@ impl Window {
                     }
                 }
                 _ => {
-                    let b = widgets::IconButton::new(icons::ARROW_SQUARE_OUT, "Open on Orbiters")
+                    let b = widgets::IconButton::new(icons::ARROW_SQUARE_OUT, mark("Open on Orbiters"))
                         .size(40.0, 17.0)
                         .backdrop(theme::control())
                         .id_salt(wid.with("website"));
@@ -1247,10 +1258,10 @@ impl Window {
             ui.add_space(18.0);
             let (text, action) = match err.code.as_deref() {
                 Some("SIGN_IN_REQUIRED") => {
-                    ("This event is shared with its community's members: sign in to Orbiters to see it.".to_string(), Some(NoteAction::SignIn))
+                    (tr("This event is shared with its community's members: sign in to Orbiters to see it.").to_string(), Some(NoteAction::SignIn))
                 }
-                _ if err.status == 403 => (format!("This event isn't available to you: {}", err.message), None),
-                _ => (format!("The event's page could not load: {}", err.message), None),
+                _ if err.status == 403 => (tr!("This event isn't available to you: {message}", message = err.message), None),
+                _ => (tr!("The event's page could not load: {message}", message = err.message), None),
             };
             let mut actions: Vec<NoteAction> = action.into_iter().collect();
             if err.status != 403 {
@@ -1287,20 +1298,20 @@ impl Window {
         facts.push((
             Some(icons::DOOR_OPEN),
             match o.access.as_deref() {
-                Some("public") => "Open to everyone",
-                Some("plus") => "Group+",
-                _ => "Group members",
+                Some("public") => tr("Open to everyone"),
+                Some("plus") => tr("Group+"),
+                _ => tr("Group members"),
             }
             .to_string(),
         ));
         if o.steps.len() > 1 {
-            facts.push((Some(icons::LIST_CHECKS), format!("{} steps", o.steps.len())));
+            facts.push((Some(icons::LIST_CHECKS), tr_n("{count} step", "{count} steps", o.steps.len() as u64)));
         }
         if o.adult_only {
             facts.push((Some(icons::SHIELD_CHECK), "18+".into()));
         }
         if let Some(d) = &o.discord {
-            facts.push((Some(icons::DISCORD_LOGO), format!("Also on {}", d.name)));
+            facts.push((Some(icons::DISCORD_LOGO), tr!("Also on {name}", name = d.name)));
         }
         let widths: Vec<f32> = facts.iter().map(|(g, l)| widgets::text_size(ui, &Txt::new(l, 12.5)).x + 26.0 + if g.is_some() { 20.0 } else { 0.0 }).collect();
         let (at, h) = widgets::flow(&widths, width, 28.0, 8.0);
@@ -1334,7 +1345,7 @@ impl Window {
             ui.painter(),
             pos2(r.left(), r.center().y),
             Align2::LEFT_CENTER,
-            &Txt::new(if single { "Where we meet" } else { "Program" }, 17.0).weight(weight::SEMIBOLD),
+            &Txt::new(if single { tr("Where we meet") } else { tr("Program") }, 17.0).weight(weight::SEMIBOLD),
         );
         ui.add_space(10.0);
         for (i, s) in o.steps.iter().enumerate() {
@@ -1351,8 +1362,8 @@ impl Window {
             ui.add_space(26.0);
             let (r, _) = ui.allocate_exact_size(vec2(width, 26.0), Sense::hover());
             let p = ui.painter().clone();
-            widgets::text(&p, pos2(r.left(), r.center().y), Align2::LEFT_CENTER, &Txt::new("Pictures from this event", 17.0).weight(weight::SEMIBOLD));
-            widgets::text(&p, pos2(r.right(), r.center().y), Align2::RIGHT_CENTER, &Txt::new("Also in Photos & captures", 12.0).color(theme::FG_3));
+            widgets::text(&p, pos2(r.left(), r.center().y), Align2::LEFT_CENTER, &Txt::new(tr("Pictures from this event"), 17.0).weight(weight::SEMIBOLD));
+            widgets::text(&p, pos2(r.right(), r.center().y), Align2::RIGHT_CENTER, &Txt::new(tr("Also in Photos & captures"), 12.0).color(theme::FG_3));
             ui.add_space(10.0);
             let n = self.pictures.len().min(if width < 600.0 { 3 } else { 4 });
             let gap = 10.0;
@@ -1393,12 +1404,12 @@ impl Window {
         let live = s.live || phase(None, s.starts_at.as_deref(), s.ends_at.as_deref(), false, now) == Phase::Live && s.instance_url.is_some();
         widgets::frame(&p, r, 20.0, if live { theme::alpha(theme::ACCENT, 0.1) } else { theme::white(0.035) });
         // Time.
-        let time = if s.organizer_starts { "Later".to_string() } else { parse(s.starts_at.as_deref()).map(local).map(clock).unwrap_or_else(|| "—".into()) };
-        let tr = Rect::from_min_size(pos2(r.left() + 14.0, r.top() + 14.0), vec2(58.0, 28.0));
-        p.rect_filled(tr, theme::radius(14.0), theme::white(0.06));
-        widgets::text(&p, tr.center(), Align2::CENTER_CENTER, &Txt::new(time, 12.0).weight(weight::BOLD).color(theme::ACCENT));
+        let time = if s.organizer_starts { tr("Later").to_string() } else { parse(s.starts_at.as_deref()).map(local).map(clock).unwrap_or_else(|| "—".into()) };
+        let time_box = Rect::from_min_size(pos2(r.left() + 14.0, r.top() + 14.0), vec2(58.0, 28.0));
+        p.rect_filled(time_box, theme::radius(14.0), theme::white(0.06));
+        widgets::text(&p, time_box.center(), Align2::CENTER_CENTER, &Txt::new(time, 12.0).weight(weight::BOLD).color(theme::ACCENT));
         // World.
-        let wr = Rect::from_min_size(pos2(tr.right() + 12.0, r.top() + 12.0), vec2(96.0, 72.0));
+        let wr = Rect::from_min_size(pos2(time_box.right() + 12.0, r.top() + 12.0), vec2(96.0, 72.0));
         let world_tex = s
             .world
             .as_ref()
@@ -1419,27 +1430,25 @@ impl Window {
         let tt = Txt::new(&title, 15.0).weight(weight::SEMIBOLD);
         let title_r = widgets::text_truncated(&p, pos2(tx, r.top() + 26.0), Align2::LEFT_CENTER, &tt, text_w);
         if live {
-            let lr = Rect::from_min_size(pos2(title_r.right() + 10.0, r.top() + 15.0), vec2(48.0, 22.0));
+            // As wide as its word needs: "Live" fits 48 points, "En direct" does not.
+            let live_text = Txt::new(tr("Live"), 11.0).weight(weight::BOLD).color(Color32::WHITE);
+            let live_w = (widgets::text_size(ui, &live_text).x + 24.0).max(48.0);
+            let lr = Rect::from_min_size(pos2(title_r.right() + 10.0, r.top() + 15.0), vec2(live_w, 22.0));
             if lr.right() < tx + text_w + 60.0 {
                 p.rect_filled(lr, theme::radius(11.0), theme::alpha(theme::REC, 0.9));
                 p.circle_filled(pos2(lr.left() + 12.0, lr.center().y), 3.0, Color32::WHITE);
-                widgets::text(
-                    &p,
-                    pos2(lr.left() + 20.0, lr.center().y),
-                    Align2::LEFT_CENTER,
-                    &Txt::new("Live", 11.0).weight(weight::BOLD).color(Color32::WHITE),
-                );
+                widgets::text(&p, pos2(lr.left() + 20.0, lr.center().y), Align2::LEFT_CENTER, &live_text);
             }
         }
         let sub = match (&world_name, single) {
             (Some(w), false) => w.clone(),
             (Some(_), true) => s.title.clone(),
-            (None, _) => "World chosen by vote".into(),
+            (None, _) => tr("World chosen by vote").into(),
         };
         widgets::text_truncated(&p, pos2(tx, r.top() + 48.0), Align2::LEFT_CENTER, &Txt::new(&sub, 12.5).color(theme::FG_3), text_w);
         let ask = self.ask_of(&s.id);
         let line = if s.organizer_starts {
-            "Starts when the organizer is ready".to_string()
+            tr("Starts when the organizer is ready").to_string()
         } else {
             match (parse(s.starts_at.as_deref()).map(local), parse(s.ends_at.as_deref()).map(local)) {
                 (Some(a), Some(b)) => format!("{} – {}", clock(a), clock(b)),
@@ -1481,7 +1490,7 @@ impl Window {
             }
         }
         if let Some(url) = join {
-            let b = Button::new("Join").icon(icons::ARROW_SQUARE_OUT).variant(Variant::Primary).size(Size::Sm).id_salt(wid.with(("step-join", &s.id)));
+            let b = Button::new(tr("Join")).icon(icons::ARROW_SQUARE_OUT).variant(Variant::Primary).size(Size::Sm).id_salt(wid.with(("step-join", &s.id)));
             let w = b.desired_width(ui);
             let br = if narrow { Rect::from_min_size(pos2(ax, ay - 16.0), vec2(w, 32.0)) } else { Rect::from_min_size(pos2(ax - w, ay - 16.0), vec2(w, 32.0)) };
             if sharing::pressed(b.show_at(ui, br)) {
@@ -1513,16 +1522,16 @@ fn invite_width_now(ui: &Ui, id: Id, ask: &Ask, small: bool) -> f32 {
 fn invite_width(ui: &Ui, ask: &Ask, small: bool) -> f32 {
     let size = if small { 12.5 } else { 13.5 };
     match ask {
-        Ask::Busy(l) => widgets::text_size(ui, &Txt::new(*l, size).weight(weight::MEDIUM)).x + 50.0,
+        Ask::Busy(l) => widgets::text_size(ui, &Txt::new(tr(l), size).weight(weight::MEDIUM)).x + 50.0,
         Ask::Listed { .. } => {
-            widgets::text_size(ui, &Txt::new("Will invite you", size).weight(weight::SEMIBOLD)).x
+            widgets::text_size(ui, &Txt::new(tr("Will invite you"), size).weight(weight::SEMIBOLD)).x
                 + 46.0
-                + widgets::text_size(ui, &Txt::new("Cancel", size).weight(weight::MEDIUM)).x
+                + widgets::text_size(ui, &Txt::new(tr("Cancel"), size).weight(weight::MEDIUM)).x
                 + 24.0
         }
-        Ask::Sent(l) => widgets::text_size(ui, &Txt::new(*l, size).weight(weight::SEMIBOLD)).x + 46.0,
-        Ask::Invited => widgets::text_size(ui, &Txt::new("Invite sent", size).weight(weight::SEMIBOLD)).x + 46.0,
-        _ => Button::new("Invite me").icon(icons::PAPER_PLANE_TILT).size(if small { Size::Sm } else { Size::Md }).desired_width(ui),
+        Ask::Sent(l) => widgets::text_size(ui, &Txt::new(tr(l), size).weight(weight::SEMIBOLD)).x + 46.0,
+        Ask::Invited => widgets::text_size(ui, &Txt::new(tr("Invite sent"), size).weight(weight::SEMIBOLD)).x + 46.0,
+        _ => Button::new(tr("Invite me")).icon(icons::PAPER_PLANE_TILT).size(if small { Size::Sm } else { Size::Md }).desired_width(ui),
     }
 }
 
@@ -1533,10 +1542,10 @@ fn note(ui: &mut Ui, id: Id, tone: Tone, text: &str, actions: &[NoteAction]) -> 
     let labels: Vec<String> = actions
         .iter()
         .map(|a| match a {
-            NoteAction::Url(l, _) => (*l).to_string(),
-            NoteAction::Connect => "Connect on Orbiters".into(),
-            NoteAction::Check => "Check again".into(),
-            NoteAction::SignIn => "Sign in".into(),
+            NoteAction::Url(l, _) => tr(l).to_string(),
+            NoteAction::Connect => tr("Connect on Orbiters").into(),
+            NoteAction::Check => tr("Check again").into(),
+            NoteAction::SignIn => tr("Sign in").into(),
         })
         .collect();
     let bws: Vec<f32> = labels.iter().map(|l| Button::new(l).size(Size::Sm).desired_width(ui)).collect();
@@ -1640,7 +1649,8 @@ impl State {
         if name == "events-empty" {
             page.items.clear();
         }
-        self.error = (name == "events-error").then(|| "Orbiters could not be reached: connection refused".into());
+        let refused = "connection refused"; // i18n: not shown (the system's own English words, as the network layer reports them)
+        self.error = (name == "events-error").then(|| tr!("Orbiters could not be reached: {e}", e = refused));
         if name == "events-error" {
             page.items.clear();
         }
@@ -1792,23 +1802,24 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
     }
     let shown = state.shown();
     let now = now();
+    let title = tr("Events");
     let header = super::header::Header {
         caption: "Orbiters",
-        title: "Events",
+        title,
         sub: &if state.list.running() && state.cards.is_empty() {
-            "Finding what's on…".to_string()
+            tr("Finding what's on…").to_string()
         } else {
             let live = state.cards.iter().filter(|c| card_phase(c, now) == Phase::Live).count();
-            let mut s = format!("{} event{}", state.cards.len(), if state.cards.len() == 1 { "" } else { "s" });
+            let mut parts = vec![tr_n("{count} event", "{count} events", state.cards.len() as u64)];
             if live > 0 {
-                s.push_str(&format!(" · {live} happening now"));
+                parts.push(tr!("{count} happening now", count = live));
             }
-            s.push_str(&format!(" · times in your time zone ({})", zone()));
-            s
+            parts.push(tr!("times in your time zone ({zone})", zone = zone()));
+            parts.join(" · ")
         },
         busy: state.list.running(),
-        search: Some(("events-search", "Search events")),
-        actions: vec![super::header::Action::new("refresh", "Refresh", icons::ARROW_CLOCKWISE)
+        search: Some(("events-search", tr("Search events"))),
+        actions: vec![super::header::Action::new("refresh", tr("Refresh"), icons::ARROW_CLOCKWISE)
             .icon_only()
             .enabled(!state.list.running())
             .spinning(state.list.running())],
@@ -1844,9 +1855,9 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
                         }
                     } else if let Some(e) = state.error.clone() {
                         ui.add_space(12.0);
-                        feedback::banner(ui, Id::unique("events-error"), Tone::Danger, &format!("Orbiters' events could not be loaded: {e}"), false);
+                        feedback::banner(ui, Id::unique("events-error"), Tone::Danger, &tr!("Orbiters' events could not be loaded: {e}", e = e), false);
                         ui.add_space(10.0);
-                        let b = Button::new("Try again").icon(icons::ARROW_CLOCKWISE).size(Size::Sm);
+                        let b = Button::new(tr("Try again")).icon(icons::ARROW_CLOCKWISE).size(Size::Sm);
                         let bw = b.desired_width(ui);
                         let (r, _) = ui.allocate_exact_size(vec2(width, 32.0), Sense::hover());
                         if sharing::pressed(b.show_at(ui, Rect::from_min_size(r.min, vec2(bw, 32.0)))) {
@@ -1879,13 +1890,13 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
                 let rest: Vec<&Card> = shown.iter().skip(1).collect();
                 let mut index = 2usize;
                 for (period, group) in period_groups(&rest, now) {
-                    let label = period.label();
+                    let label = tr(period.label());
                     let (r, _) = ui.allocate_exact_size(vec2(width, 40.0), Sense::hover());
                     let (r, a) = super::entering(ui, cx, index.min(8), r);
                     let mut p = ui.painter().clone();
                     p.multiply_opacity(a);
                     widgets::text(&p, pos2(r.left(), r.top() + 14.0), Align2::LEFT_CENTER, &Txt::new(label, 18.0).weight(weight::SEMIBOLD).tracking(-0.01));
-                    let count = format!("{} event{}", group.len(), if group.len() == 1 { "" } else { "s" });
+                    let count = tr_n("{count} event", "{count} events", group.len() as u64);
                     widgets::text(&p, pos2(r.left(), r.top() + 35.0), Align2::LEFT_CENTER, &Txt::new(count, 12.0).color(theme::FG_3));
                     ui.add_space(14.0);
                     let (cols, w) = orbiters_ui::layout::columns(width, CARD_MIN, 16.0);
@@ -1912,7 +1923,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
                     ui.add_space(32.0);
                 }
                 if state.next.is_some() {
-                    let b = Button::new(if state.list.running() { "Loading…" } else { "Show more" }).variant(Variant::Ghost).enabled(!state.list.running());
+                    let b = Button::new(if state.list.running() { tr("Loading…") } else { tr("Show more") }).variant(Variant::Ghost).enabled(!state.list.running());
                     let bw = b.desired_width(ui);
                     let (r, _) = ui.allocate_exact_size(vec2(width, 40.0), Sense::hover());
                     if sharing::pressed(b.show_at(ui, Rect::from_center_size(r.center(), vec2(bw, 40.0)))) {
@@ -1979,9 +1990,9 @@ enum Period {
 impl Period {
     fn label(self) -> &'static str {
         match self {
-            Period::Now => "Happening now",
-            Period::Week => "This week",
-            Period::Later => "Later",
+            Period::Now => mark("Happening now"),
+            Period::Week => mark("This week"),
+            Period::Later => mark("Later"),
         }
     }
 }
@@ -2038,7 +2049,7 @@ fn hero_card(
     let x = r.left() + 36.0;
     let text_w = (r.width() * 0.6).max(320.0).min(r.width() - 72.0);
     let ph = card_phase(c, now);
-    let eyebrow = if ph == Phase::Live { "Happening now on Orbiters" } else { "Next on Orbiters" };
+    let eyebrow = if ph == Phase::Live { tr("Happening now on Orbiters") } else { tr("Next on Orbiters") };
     widgets::text(&p, pos2(x, r.top() + 36.0), Align2::LEFT_CENTER, &Txt::caps(eyebrow).color(theme::white(0.7)));
     let g = p.layout_job({
         let mut job = Txt::new(&c.title, if r.width() < 700.0 { 28.0 } else { 36.0 })
@@ -2070,15 +2081,15 @@ fn hero_card(
         let ar = Rect::from_center_size(pos2(fx + 9.0, y), vec2(18.0, 18.0));
         widgets::avatar(&p, ar, None, &h.name);
         let t = Txt::new(&h.name, 13.0).color(theme::white(0.8));
-        let tr = widgets::text_truncated(&p, pos2(ar.right() + 7.0, y), Align2::LEFT_CENTER, &t, text_w * 0.5);
-        fx = tr.right() + 16.0;
+        let by = widgets::text_truncated(&p, pos2(ar.right() + 7.0, y), Align2::LEFT_CENTER, &t, text_w * 0.5);
+        fx = by.right() + 16.0;
     }
     if let Some(w) = c.world.as_ref().and_then(|w| w.name.as_ref()) {
         widgets::icon(&p, pos2(fx + 7.0, y), icons::GLOBE, 13.0, theme::white(0.7));
         widgets::text_truncated(&p, pos2(fx + 21.0, y), Align2::LEFT_CENTER, &Txt::new(w, 13.0).color(theme::white(0.8)), (x + text_w - fx - 21.0).max(40.0));
     }
     // Join, bottom left (the whole hero opens the event too).
-    let b = Button::new(if signed { "On the invite list" } else { "Join" })
+    let b = Button::new(if signed { tr("On the invite list") } else { tr("Join") })
         .icon(if signed { icons::CHECK } else { icons::ARROW_RIGHT })
         .variant(if signed { Variant::Glass } else { Variant::Primary })
         .size(Size::Md)
@@ -2160,12 +2171,12 @@ fn event_card(
     let times = match (parse(c.starts_at.as_deref()).map(local), parse(c.ends_at.as_deref()).map(local)) {
         (Some(a), Some(b)) => format!("{} – {}", clock(a), clock(b)),
         (Some(a), None) => clock(a),
-        _ => "Time to be announced".into(),
+        _ => tr("Time to be announced").into(),
     };
     widgets::text_truncated(&p, pos2(tx, tile.top() + gh + 12.0), Align2::LEFT_CENTER, &Txt::new(times, 12.0).color(theme::FG_3), tw);
     // Host and world, then Join.
     let line_y = r.bottom() - 26.0;
-    let b = Button::new(if signed { "On the list" } else { "Join" })
+    let b = Button::new(if signed { tr("On the list") } else { tr("Join") })
         .icon(if signed { icons::CHECK } else { icons::ARROW_RIGHT })
         .variant(if signed { Variant::Secondary } else { Variant::Primary })
         .size(Size::Sm)
@@ -2179,14 +2190,14 @@ fn event_card(
         let ar = Rect::from_center_size(pos2(fx + 9.0, line_y), vec2(18.0, 18.0));
         widgets::avatar(&p, ar, None, &h.name);
         let has_world = c.world.as_ref().and_then(|w| w.name.as_ref()).is_some();
-        let tr = widgets::text_truncated(
+        let by = widgets::text_truncated(
             &p,
             pos2(ar.right() + 7.0, line_y),
             Align2::LEFT_CENTER,
             &Txt::new(&h.name, 12.0).weight(weight::MEDIUM).color(theme::FG_2),
             if has_world { (room - ar.right() - 7.0) * 0.5 } else { room - ar.right() - 7.0 },
         );
-        fx = tr.right() + 12.0;
+        fx = by.right() + 12.0;
     }
     if let Some(w) = c.world.as_ref().and_then(|w| w.name.as_ref()) {
         if room - fx > 40.0 {
@@ -2207,9 +2218,9 @@ fn empty_state(ui: &mut Ui, cx: &Cx, searching: bool, height: f32) {
     let lr = Rect::from_center_size(rect.center() + vec2(0.0, -44.0 + bob), logo::size_for_width(70.0));
     logo::paint(&p, lr, logo::Look::default());
     let (title, text) = if searching {
-        ("No event matches", "Try another name, community or world.")
+        (tr("No event matches"), tr("Try another name, community or world."))
     } else {
-        ("Nothing on right now", "Events communities publish on Orbiters show up here, soonest first, with the ones under way.")
+        (tr("Nothing on right now"), tr("Events communities publish on Orbiters show up here, soonest first, with the ones under way."))
     };
     widgets::text(&p, rect.center() + vec2(0.0, 18.0), Align2::CENTER_CENTER, &Txt::new(title, 17.0).weight(weight::SEMIBOLD));
     let g = p.layout_job({
@@ -2284,6 +2295,36 @@ mod tests {
         assert!(when_at(Some(&iso(T + 86400)), None, T).starts_with("Tomorrow"));
         assert_eq!(category_label("film_media"), "Film & media");
         assert_eq!(category_label("hangout"), "Hangout");
+    }
+
+    /// Dates, countdowns and where an event stands are said in the language of the moment (no English day or month in a Japanese
+    /// date), and what the code reads, the phase and the answers of the server, is the same in every language.
+    #[test]
+    fn dates_and_phases_speak_the_language() {
+        use orbiters_i18n::{in_language, Language};
+        let s = iso(T);
+        in_language(Language::Ja, || {
+            assert_eq!(phase_label(Phase::Soon(3 * 86400 + 4 * 3600)), "3日4時間後に開始");
+            assert_eq!(phase_label(Phase::Live), "開催中");
+            assert_eq!(when_at(None, None, T), "時間は未定");
+            let t = local(OffsetDateTime::from_unix_timestamp(T).unwrap());
+            let date = date_short(t, t);
+            assert!(date.contains('月') && date.ends_with('）'), "{date}");
+        });
+        in_language(Language::Fr, || {
+            assert_eq!(countdown(8100), "2 h 15 min");
+            assert_eq!(phase_label(Phase::Cancelled), "Annulé");
+            assert!(when_at(Some(&s), None, T).starts_with("Aujourd’hui"), "{}", when_at(Some(&s), None, T));
+            assert_eq!(category_label("music"), "Musique");
+        });
+        in_language(Language::Es, || {
+            assert_eq!(phase(Some("cancelled"), None, None, false, T), Phase::Cancelled);
+            // The state keeps its English; what draws it says it in Spanish.
+            let Ask::Sent(label) = Ask::of_status("sent", None) else { panic!("sent") };
+            assert_eq!(label, "Invite sent");
+            assert_eq!(tr(label), "Invitación enviada");
+        });
+        in_language(Language::PtBr, || assert_eq!(phase_label(Phase::Ended), "Encerrado"));
     }
 
     #[test]

@@ -7,6 +7,7 @@ use crate::ipc::UpdateAction;
 use crate::pages::{self, Page};
 use crate::state::{AccountState, CaptureState, Snapshot, UpdateState};
 use egui::{pos2, vec2, Align2, CursorIcon, Id, Rect, ResizeDirection, Sense, Ui, Vec2, ViewportCommand};
+use orbiters_i18n::{mark, tr};
 use orbiters_ui::anim::{self, ease, Spring};
 use orbiters_ui::glow::{self, Mood};
 use orbiters_ui::theme::{self, weight, Txt};
@@ -181,9 +182,11 @@ impl App {
                         self.toasts.push(
                             ctx,
                             toast::Kind::Success,
-                            format!(
-                                "Session saved: {} frames, {keyframes} keyframes, {depth_frames} depth frames.",
-                                orbiters_ui::format::integer(frames as f64)
+                            tr!(
+                                "Session saved: {frames} frames, {keyframes} keyframes, {depth_frames} depth frames.",
+                                frames = orbiters_ui::format::integer(frames as f64),
+                                keyframes = keyframes,
+                                depth_frames = depth_frames
                             ),
                         );
                     }
@@ -195,6 +198,7 @@ impl App {
     pub fn draw(&mut self, ui: &mut Ui) {
         let ctx = ui.ctx().clone();
         let snap = self.ctl.view();
+        crate::language::follow(&snap.settings);
         // This process reads Orbiters too (the Map explorer's public pages): from the environment the service uses.
         if snap.settings.development != orbiters_update::development() {
             crate::controller::use_environment(snap.settings.development);
@@ -260,8 +264,8 @@ impl App {
         let name = Txt::new("Orbiters - N4N0", 12.0).weight(weight::SEMIBOLD).tracking(0.025).color(theme::FG_2);
         let r = widgets::text(p, pos2(rect.left() + 16.0, rect.center().y), Align2::LEFT_CENTER, &name);
         let subtitle = match snap.capture.state {
-            CaptureState::Recording => Some("Recording".to_string()),
-            CaptureState::Importing => Some("Importing".to_string()),
+            CaptureState::Recording => Some(tr("Recording").to_string()),
+            CaptureState::Importing => Some(tr("Importing").to_string()),
             _ => snap.vrchat.world.world_name.clone(),
         };
         let sub = subtitle.map(|s| format!("·  {s}")).unwrap_or_default();
@@ -277,13 +281,13 @@ impl App {
 
         // Window buttons, platform order.
         let close = if cfg!(windows) {
-            "Close (Orbiters keeps running in the tray)"
+            tr("Close (Orbiters keeps running in the tray)")
         } else if cfg!(target_os = "macos") {
-            "Close (Orbiters keeps running in the menu bar)"
+            tr("Close (Orbiters keeps running in the menu bar)")
         } else {
-            "Quit"
+            tr("Quit")
         };
-        let buttons = [(icons::MINUS, "Minimize", 15.0, false), (icons::SQUARE, "Maximize", 12.0, false), (icons::X, close, 16.0, true)];
+        let buttons = [(icons::MINUS, tr("Minimize"), 15.0, false), (icons::SQUARE, tr("Maximize"), 12.0, false), (icons::X, close, 16.0, true)];
         for (i, (glyph, label, size, danger)) in buttons.into_iter().enumerate() {
             let b = Rect::from_min_size(pos2(rect.right() - 4.0 - 44.0 * (3 - i) as f32, rect.top() + 4.0), vec2(44.0, 32.0));
             let resp = ui.interact(b, id.with(i), Sense::click()).on_hover_text(label);
@@ -336,20 +340,21 @@ impl App {
             &Txt::new("N4N0", 17.0).weight(weight::SEMIBOLD).tracking(0.02),
         );
         widgets::text(p, pos2(logo_rect.right() + 12.0, logo_rect.center().y + 10.0), Align2::LEFT_CENTER, &Txt::new("Orbiters", 11.5).color(theme::FG_3));
-        self.update_button(ui, snap, pos2(inner.right(), logo_rect.center().y), id.with("update"));
+        let name_wide = widgets::text_size(ui, &Txt::new("N4N0", 17.0).weight(weight::SEMIBOLD).tracking(0.02)).x.max(widgets::text_size(ui, &Txt::new("Orbiters", 11.5)).x);
+        self.update_button(ui, snap, pos2(inner.right(), logo_rect.center().y), logo_rect.right() + 12.0 + name_wide + 8.0, id.with("update"));
 
         // Navigation with a pill that slides to the active page.
         let nav_top = logo_rect.bottom() + 28.0;
         let items = [
-            (Page::Home, "Home", icons::HOUSE),
+            (Page::Home, tr("Home"), icons::HOUSE),
             (Page::N4n0, "N4N0", icons::N4N0),
-            (Page::Capture, "Capture", icons::APERTURE),
-            (Page::Projects, "Unity projects", icons::CUBE),
-            (Page::Sessions, "Photos & captures", icons::IMAGES),
-            (Page::Worlds, "Visited worlds", icons::GLOBE),
-            (Page::Events, "Events", icons::CALENDAR_DOTS),
-            (Page::Videos, "Videos", icons::FILM_STRIP),
-            (Page::Settings, "Settings", icons::SLIDERS_HORIZONTAL),
+            (Page::Capture, tr("Capture"), icons::APERTURE),
+            (Page::Projects, tr("Unity projects"), icons::CUBE),
+            (Page::Sessions, tr("Photos & captures"), icons::IMAGES),
+            (Page::Worlds, tr("Visited worlds"), icons::GLOBE),
+            (Page::Events, tr("Events"), icons::CALENDAR_DOTS),
+            (Page::Videos, tr("Videos"), icons::FILM_STRIP),
+            (Page::Settings, tr("Settings"), icons::SLIDERS_HORIZONTAL),
         ];
         let item_rect = |i: usize| Rect::from_min_size(pos2(inner.left(), nav_top + i as f32 * 48.0), vec2(inner.width(), 44.0));
         let active = items.iter().position(|(pg, _, _)| *pg == self.page).unwrap_or(0);
@@ -395,7 +400,10 @@ impl App {
             if page == Page::Sessions && snap.storage.sessions > 0 {
                 let t = Txt::new(snap.storage.sessions.to_string(), 11.0).color(theme::FG_3);
                 let s = widgets::text_size(ui, &t);
-                let badge = Rect::from_min_size(pos2(r.right() - 12.0 - s.x - 16.0, r.center().y - 10.0), vec2(s.x + 16.0, 20.0));
+                // Off a long name (French's "Photos et captures"), closer to the row's end.
+                let name_end = x + 30.0 + widgets::text_size(ui, &Txt::new(label, 14.0).weight(weight::MEDIUM)).x;
+                let margin = if name_end + 4.0 > r.right() - 12.0 - s.x - 16.0 { 5.0 } else { 12.0 };
+                let badge = Rect::from_min_size(pos2(r.right() - margin - s.x - 16.0, r.center().y - 10.0), vec2(s.x + 16.0, 20.0));
                 p.rect_filled(badge, theme::radius(10.0), theme::white(0.07));
                 widgets::text(&p, badge.center(), Align2::CENTER_CENTER, &t);
             }
@@ -403,7 +411,7 @@ impl App {
 
         // Status at the bottom: the version, and the development environment when it is the one in use.
         let bottom = inner.bottom() - 16.0;
-        let version = if snap.settings.development { format!("v{} · development", snap.version) } else { format!("v{}", snap.version) };
+        let version = if snap.settings.development { tr!("v{version} · development", version = snap.version) } else { format!("v{}", snap.version) };
         let version = Txt::new(version, 11.0).color(if snap.settings.development { theme::WARN } else { theme::FG_4 });
         widgets::text(ui.painter(), pos2(inner.left() + 8.0, bottom - 6.0), Align2::LEFT_CENTER, &version);
         let osc = &snap.osc;
@@ -417,26 +425,29 @@ impl App {
             widgets::Tone::Off
         };
         let osc_text = if osc.listening {
-            format!("OSC ready{}", osc.port.map(|p| format!(" · {p}")).unwrap_or_default())
+            match osc.port {
+                Some(port) => tr!("OSC ready · {port}", port = port),
+                None => tr("OSC ready").into(),
+            }
         } else if osc.enabled {
-            "OSC unavailable".into()
+            tr("OSC unavailable").into()
         } else {
-            "OSC off".into()
+            tr("OSC off").into()
         };
         let (vrchat_text, vrchat_tone) = if orbiters_core::osc::VRCHAT_RUNS_HERE {
-            let text = if snap.vrchat.running { snap.vrchat.world.world_name.clone().unwrap_or_else(|| "Running".into()) } else { "Not running".into() };
+            let text = if snap.vrchat.running { snap.vrchat.world.world_name.clone().unwrap_or_else(|| tr("Running").into()) } else { tr("Not running").into() };
             (text, if snap.vrchat.running { widgets::Tone::Ok } else { widgets::Tone::Off })
         } else {
             pages::network::sidebar_status(&snap.lan)
         };
-        side_status(ui, pos2(inner.left(), bottom - 34.0 - 44.0), "Action Menu", &osc_text, osc_tone, inner.width());
+        side_status(ui, pos2(inner.left(), bottom - 34.0 - 44.0), tr("Action Menu"), &osc_text, osc_tone, inner.width());
         side_status(ui, pos2(inner.left(), bottom - 34.0 - 88.0), "VRChat", &vrchat_text, vrchat_tone, inner.width());
         let (account_text, account_tone) = match &snap.account.state {
             AccountState::SignedIn { username } => (username.clone(), widgets::Tone::Ok),
             AccountState::Checking { username } | AccountState::Offline { username } => (username.clone().unwrap_or_default(), widgets::Tone::Warn),
-            AccountState::Expired { .. } => ("Sign-in expired".into(), widgets::Tone::Warn),
-            AccountState::SigningIn => ("Finishing in your browser".into(), widgets::Tone::Warn),
-            AccountState::SignedOut | AccountState::Unknown => ("Not signed in".into(), widgets::Tone::Off),
+            AccountState::Expired { .. } => (tr("Sign-in expired").into(), widgets::Tone::Warn),
+            AccountState::SigningIn => (tr("Finishing in your browser").into(), widgets::Tone::Warn),
+            AccountState::SignedOut | AccountState::Unknown => (tr("Not signed in").into(), widgets::Tone::Off),
         };
         side_status(ui, pos2(inner.left(), bottom - 34.0 - 132.0), "Orbiters", &account_text, account_tone, inner.width());
     }
@@ -444,28 +455,35 @@ impl App {
     /// The Update button beside the name (its right edge at `right_center`), as soon as a newer version is found: a
     /// progress ring while it downloads, then the green button that restarts into it (or, while a recording or another
     /// job would be cut short, what it waits for). Nothing while the app is up to date.
-    fn update_button(&mut self, ui: &mut Ui, snap: &Snapshot, right_center: egui::Pos2, id: Id) {
+    fn update_button(&mut self, ui: &mut Ui, snap: &Snapshot, right_center: egui::Pos2, name_end: f32, id: Id) {
         let ctx = ui.ctx().clone();
         let u = &snap.update;
         let (label, tip, fraction, live) = match &u.state {
             UpdateState::Downloading { version, fraction } => {
-                ("Update", format!("Downloading version {version}: {:.0} %", fraction * 100.0), Some(*fraction), false)
+                (tr("Update"), tr!("Downloading version {version}: {percent} %", version = version, percent = format!("{:.0}", fraction * 100.0)), Some(*fraction), false)
             }
             UpdateState::Ready { version, .. } if u.restart_when_idle => {
-                ("Waiting", format!("Version {version} installs once {} ends (Settings, About)", snap.busy_with().unwrap_or("the running work")), None, false)
+                let work = tr(snap.busy_with().unwrap_or(mark("the running work")));
+                (tr("Waiting"), tr!("Version {version} installs once {work} ends (Settings, About)", version = version, work = work), None, false)
             }
             UpdateState::Ready { version, notes } => {
                 let first = notes.lines().map(str::trim).find(|l| !l.is_empty()).map(|l| format!("\n{l}")).unwrap_or_default();
                 let tip = match snap.busy_with() {
-                    Some(work) => format!("Version {version} is ready: it installs once {work} ends{first}"),
-                    None => format!("Version {version} is ready: Orbiters - N4N0 restarts to install it{first}"),
+                    Some(work) => tr!("Version {version} is ready: it installs once {work} ends{first}", version = version, work = tr(work), first = first),
+                    None => tr!("Version {version} is ready: Orbiters - N4N0 restarts to install it{first}", version = version, first = first),
                 };
-                ("Update", tip, None, true)
+                (tr("Update"), tip, None, true)
             }
             _ => return,
         };
-        let txt = Txt::new(label, 11.5).weight(weight::SEMIBOLD).color(if live { theme::ON_ACCENT } else { theme::ACCENT });
-        let w = widgets::text_size(ui, &txt).x + 34.0;
+        let words = |size: f32| Txt::new(label, size).weight(weight::SEMIBOLD).color(if live { theme::ON_ACCENT } else { theme::ACCENT });
+        // Beside the name, in the room it leaves: a longer word ("Mettre à jour") first gives up the icon (a download keeps its ring, which is its progress), then a little size.
+        let (room, wide) = (right_center.x - name_end, widgets::text_size(ui, &words(11.5)).x);
+        let with_icon = fraction.is_some() || wide + 34.0 <= room;
+        let lead = if with_icon { 23.0 } else { 11.0 };
+        let size = if lead + wide + 11.0 > room { (11.5 * (room - lead - 11.0) / wide).max(10.0) } else { 11.5 };
+        let txt = words(size);
+        let w = widgets::text_size(ui, &txt).x + lead + 11.0;
         let pill = Rect::from_min_size(pos2(right_center.x - w, right_center.y - 13.0), vec2(w, 26.0));
         let resp = ui.interact(pill, id, Sense::click()).on_hover_text(tip);
         let resp = if live { resp.on_hover_cursor(CursorIcon::PointingHand) } else { resp };
@@ -482,9 +500,10 @@ impl App {
                 orbiters_ui::paint::arc(p, at, 5.0, -std::f32::consts::FRAC_PI_2, std::f32::consts::TAU * f.clamp(0.0, 1.0), 2.0, theme::ACCENT);
                 ctx.request_repaint_after(std::time::Duration::from_millis(200));
             }
-            None => widgets::icon(p, at, icons::DOWNLOAD_SIMPLE, 12.5, if live { theme::ON_ACCENT } else { theme::ACCENT }),
+            None if with_icon => widgets::icon(p, at, icons::DOWNLOAD_SIMPLE, 12.5, if live { theme::ON_ACCENT } else { theme::ACCENT }),
+            None => {}
         }
-        widgets::text(p, pos2(shown.left() + 23.0, shown.center().y), Align2::LEFT_CENTER, &txt);
+        widgets::text(p, pos2(shown.left() + lead, shown.center().y), Align2::LEFT_CENTER, &txt);
         if live && widgets::pressed(&resp) {
             self.ctl.updates(UpdateAction::Restart { now: false });
         }

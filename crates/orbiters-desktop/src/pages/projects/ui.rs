@@ -3,6 +3,7 @@
 //! windows (the cards make room for it with a spring), sliding over them on narrow ones. Dialogs grow out of what
 //! opened them ([`super::dialogs`]).
 
+use orbiters_i18n::{mark, tr, tr_n};
 use super::art;
 use super::menus;
 use super::panel;
@@ -29,10 +30,6 @@ const CARD_BODY: f32 = 96.0;
 /// Projects found on the computer listed before "Show all".
 const FOUND_FIRST: usize = 6;
 
-fn plural(n: usize, one: &str, many: &str) -> String {
-    format!("{n} {}", if n == 1 { one } else { many })
-}
-
 fn now() -> u64 {
     orbiters_projects::discovery::now()
 }
@@ -57,23 +54,23 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
     let registered = state.scan.projects.iter().filter(listed).count();
     let avatars: usize = state.scan.projects.iter().filter(listed).map(|p| p.avatars.len()).sum();
     let sub = if state.scanning() && state.scan.projects.is_empty() {
-        "Looking for Unity projects…".to_string()
+        tr("Looking for Unity projects…").to_string()
     } else if state.scanning() {
-        format!("{} · looking for more…", plural(registered, "project", "projects"))
+        tr!("{projects} · looking for more…", projects = tr_n("{count} project", "{count} projects", registered as u64))
     } else {
-        format!("{} · {}", plural(registered, "project", "projects"), plural(avatars, "avatar", "avatars"))
+        tr!("{projects} · {avatars}", projects = tr_n("{count} project", "{count} projects", registered as u64), avatars = tr_n("{count} avatar", "{count} avatars", avatars as u64))
     };
     let header = Header {
-        caption: "Create & prepare",
-        title: "Unity projects",
+        caption: orbiters_i18n::tr("Create & prepare"),
+        title: orbiters_i18n::tr("Unity projects"),
         sub: &sub,
         busy: state.scanning(),
-        search: Some(("project-search", "Find a project")),
+        search: Some(("project-search", tr("Find a project"))),
         actions: vec![
-            Action::new("refresh", "Look for projects again", icons::ARROW_COUNTER_CLOCKWISE).icon_only().spinning(state.scanning()),
-            Action::new("repos", "Package repos", icons::STACK),
-            Action::new("add", "Add existing", icons::FOLDER_OPEN).enabled(!state.running()),
-            Action::new("new", "New project", icons::PLUS).primary(),
+            Action::new("refresh", tr("Look for projects again"), icons::ARROW_COUNTER_CLOCKWISE).icon_only().spinning(state.scanning()),
+            Action::new("repos", tr("Package repos"), icons::STACK),
+            Action::new("add", tr("Add existing"), icons::FOLDER_OPEN).enabled(!state.running()),
+            Action::new("new", tr("New project"), icons::PLUS).primary(),
         ],
     };
     let placed = header.place(ui, page, cx);
@@ -151,10 +148,10 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
 
 /// Asks for a Unity project's folder and adds it to the list VCC and ALCOM share; it opens once the scan lists it.
 pub(super) fn add_existing(ctx: &egui::Context, state: &mut State) {
-    state.task(ctx, "Choose a Unity project…", move || {
-        if let Some(p) = rfd::FileDialog::new().set_title("Add a Unity project").pick_folder() {
+    state.task(ctx, tr("Choose a Unity project…"), move || {
+        if let Some(p) = rfd::FileDialog::new().set_title(tr("Add a Unity project")).pick_folder() {
             orbiters_projects::runtime()?.block_on(vpm::register(&orbiters_projects::vcc_dir(), &p, true))?;
-            Ok(Outcome::Added(p, "Project added: VCC and ALCOM list it too".into()))
+            Ok(Outcome::Added(p, tr("Project added: VCC and ALCOM list it too").into()))
         } else {
             Ok(Outcome::Picked(None))
         }
@@ -182,9 +179,9 @@ fn section_title(ui: &mut Ui, title: &str, count: Option<usize>, sub: Option<&st
     let h = if sub.is_some() { 52.0 } else { 34.0 };
     let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), h), Sense::hover());
     let p = ui.painter();
-    let tr = widgets::text(p, pos2(r.left(), r.top() + 12.0), Align2::LEFT_CENTER, &Txt::new(title, 16.0).weight(weight::SEMIBOLD));
+    let title_end = widgets::text(p, pos2(r.left(), r.top() + 12.0), Align2::LEFT_CENTER, &Txt::new(title, 16.0).weight(weight::SEMIBOLD));
     if let Some(n) = count {
-        widgets::pill_at(p, ui, pos2(tr.right() + 8.0, tr.center().y), None, &n.to_string());
+        widgets::pill_at(p, ui, pos2(title_end.right() + 8.0, title_end.center().y), None, &n.to_string());
     }
     if let Some(s) = sub {
         widgets::text_truncated(p, pos2(r.left(), r.top() + 34.0), Align2::LEFT_CENTER, &Txt::new(s, 12.5).color(theme::FG_3), r.width());
@@ -194,14 +191,14 @@ fn section_title(ui: &mut Ui, title: &str, count: Option<usize>, sub: Option<&st
 
 /// The chip at the right of the projects' title that shows the hidden projects too (with how many), or not.
 fn hidden_filter(ui: &mut Ui, state: &mut State, row: Rect, n: usize) {
-    let label = format!("Hidden · {n}");
+    let label = tr!("Hidden · {n}", n = n);
     let chip = widgets::Chip::new(&label).icon(icons::EYE_SLASH).selected(state.show_hidden).id_salt("projects-hidden-filter");
     let w = chip.width(ui);
     let r = Rect::from_min_size(pos2(row.right() - w, row.top() + 12.0 - widgets::CHIP_H * 0.5), vec2(w, widgets::CHIP_H));
     state.anchors.insert("hidden-filter".into(), r);
     let out = chip.show_at(ui, r);
     let pressed = out.pressed;
-    let _ = out.response.on_hover_text(if state.show_hidden { "Leave the hidden projects out" } else { "Show the projects you hid, dimmed" });
+    let _ = out.response.on_hover_text(if state.show_hidden { tr("Leave the hidden projects out") } else { tr("Show the projects you hid, dimmed") });
     if pressed {
         state.show_hidden = !state.show_hidden;
     }
@@ -227,7 +224,7 @@ fn gallery(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
     let counted = |list: &[Project]| list.iter().filter(|p| !state.is_hidden(&p.path)).count();
     let (registered_n, proposals_n) = (counted(&registered), counted(&proposals));
 
-    let title = section_title(ui, "Your projects", (registered_n > 0).then_some(registered_n), None);
+    let title = section_title(ui, tr("Your projects"), (registered_n > 0).then_some(registered_n), None);
     if hidden_n > 0 || state.show_hidden {
         hidden_filter(ui, state, title, hidden_n);
     }
@@ -236,9 +233,9 @@ fn gallery(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
         if state.scanning() {
             skeletons(ui, 3);
         } else if !q.is_empty() {
-            quiet_empty(ui, cx, "No project matches", "Try another name, or clear the search.");
+            quiet_empty(ui, cx, tr("No project matches"), tr("Try another name, or clear the search."));
         } else if state.scan.projects.iter().any(|p| p.registered) {
-            quiet_empty(ui, cx, "Your projects are hidden", "Hidden, above the cards, shows them again.");
+            quiet_empty(ui, cx, tr("Your projects are hidden"), tr("Hidden, above the cards, shows them again."));
         } else {
             empty(ui, cx, state);
         }
@@ -247,7 +244,7 @@ fn gallery(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
     }
     if !proposals.is_empty() {
         ui.add_space(32.0);
-        section_title(ui, "Found on this computer", Some(proposals_n), Some("Add one to manage its avatars and packages here, in VCC and in ALCOM."));
+        section_title(ui, tr("Found on this computer"), Some(proposals_n), Some(tr("Add one to manage its avatars and packages here, in VCC and in ALCOM.")));
         ui.add_space(10.0);
         found(ui, cx, state, &proposals);
     }
@@ -340,13 +337,13 @@ fn card(ui: &mut Ui, cx: &Cx, state: &State, i: usize, p: &Project, rect: Rect) 
             ui,
             pos2(cover.right() - 12.0, cover.top() + 12.0),
             Some(icons::WARNING),
-            "Folder missing",
+            tr("Folder missing"),
             theme::alpha(theme::DANGER, 0.25),
             theme::DANGER,
             true,
         );
     } else if hidden {
-        badge(&pt, ui, pos2(cover.right() - 12.0, cover.top() + 12.0), Some(icons::EYE_SLASH), "Hidden", theme::black(0.6), theme::FG_2, true);
+        badge(&pt, ui, pos2(cover.right() - 12.0, cover.top() + 12.0), Some(icons::EYE_SLASH), tr("Hidden"), theme::black(0.6), theme::FG_2, true);
     }
     let x = r.left() + 16.0;
     widgets::text_truncated(&pt, pos2(x, cover.bottom() + 22.0), Align2::LEFT_CENTER, &Txt::new(&p.name, 15.0).weight(weight::SEMIBOLD), r.width() - 32.0);
@@ -354,7 +351,7 @@ fn card(ui: &mut Ui, cx: &Cx, state: &State, i: usize, p: &Project, rect: Rect) 
         &pt,
         pos2(x, cover.bottom() + 43.0),
         Align2::LEFT_CENTER,
-        &Txt::new(format!("Edited {}", format::relative_time(p.modified, now())), 12.0).color(theme::FG_3),
+        &Txt::new(tr!("Edited {when}", when = format::relative_time(p.modified, now())), 12.0).color(theme::FG_3),
         r.width() - 32.0,
     );
     let mut px = x;
@@ -362,9 +359,9 @@ fn card(ui: &mut Ui, cx: &Cx, state: &State, i: usize, p: &Project, rect: Rect) 
     let pills = [
         (Some(icons::CUBE), p.unity.clone()),
         if p.avatars.is_empty() {
-            (Some(icons::GLOBE), if p.kind == orbiters_projects::discovery::Kind::Worlds { "World".into() } else { "No avatar yet".into() })
+            (Some(icons::GLOBE), if p.kind == orbiters_projects::discovery::Kind::Worlds { tr("World").into() } else { tr("No avatar yet").into() })
         } else {
-            (Some(icons::PERSON), plural(p.avatars.len(), "avatar", "avatars"))
+            (Some(icons::PERSON), tr_n("{count} avatar", "{count} avatars", p.avatars.len() as u64))
         },
     ];
     for (g, label) in pills {
@@ -439,9 +436,9 @@ fn empty(ui: &mut Ui, cx: &Cx, state: &mut State) {
     let bob = -8.0 * ease::in_out(ease::mirror(t, 2.0));
     let lr = Rect::from_center_size(rect.center() + vec2(0.0, -96.0 + bob), logo::size_for_width(70.0));
     logo::paint(&p, lr, logo::Look::default());
-    widgets::text(&p, rect.center() + vec2(0.0, -24.0), Align2::CENTER_CENTER, &Txt::new("Your avatar starts here", 19.0).weight(weight::SEMIBOLD));
+    widgets::text(&p, rect.center() + vec2(0.0, -24.0), Align2::CENTER_CENTER, &Txt::new(tr("Your avatar starts here"), 19.0).weight(weight::SEMIBOLD));
     let g = p.layout_job({
-        let mut job = Txt::new("Create a project from a VRChat template, or add one you already have: its avatars and packages show up here.", 13.0)
+        let mut job = Txt::new(tr("Create a project from a VRChat template, or add one you already have: its avatars and packages show up here."), 13.0)
             .color(theme::FG_3)
             .line_height(20.0)
             .job(420.0);
@@ -449,8 +446,8 @@ fn empty(ui: &mut Ui, cx: &Cx, state: &mut State) {
         job
     });
     p.galley(pos2(rect.center().x, rect.center().y - 4.0), g, theme::FG_3);
-    let create = Button::new("New project").icon(icons::PLUS).variant(Variant::Primary);
-    let add = Button::new("Add existing").icon(icons::FOLDER_OPEN);
+    let create = Button::new(tr("New project")).icon(icons::PLUS).variant(Variant::Primary);
+    let add = Button::new(tr("Add existing")).icon(icons::FOLDER_OPEN);
     let (cw, aw) = (create.desired_width(ui), add.desired_width(ui));
     let x0 = rect.center().x - (cw + aw + 10.0) * 0.5;
     let y = rect.center().y + 60.0;
@@ -514,16 +511,16 @@ fn found(ui: &mut Ui, cx: &mut Cx, state: &mut State, list: &[Project]) {
         menus::project_act(&ctx, cx, state, &p, act, r, false);
     }
     if let Some(path) = add {
-        state.task(&ctx, "Adding the project…", move || {
+        state.task(&ctx, tr("Adding the project…"), move || {
             orbiters_projects::runtime()?.block_on(vpm::register(&orbiters_projects::vcc_dir(), &path, true))?;
-            Ok(Outcome::Added(path, "Project added: VCC and ALCOM list it too".into()))
+            Ok(Outcome::Added(path, tr("Project added: VCC and ALCOM list it too").into()))
         });
     } else if let Some(path) = open {
         state.open(&ctx, path);
     }
     if list.len() > FOUND_FIRST {
         ui.add_space(12.0);
-        let label = if state.all_proposals { "Show fewer".to_string() } else { format!("Show all {}", list.len()) };
+        let label = if state.all_proposals { tr("Show fewer").to_string() } else { tr!("Show all {count}", count = list.len()) };
         let b = Button::new(&label)
             .icon(if state.all_proposals { icons::CARET_LEFT } else { icons::CARET_DOWN })
             .variant(Variant::Ghost)
@@ -557,18 +554,18 @@ fn found_row(ui: &mut Ui, state: &State, p: &Project, rect: Rect) -> (Option<boo
     widgets::frame(pt, r, 16.0, theme::mix(theme::alpha(theme::INK_850, 0.6), theme::INK_800, hover.max(sel * 0.6)));
     let thumb = Rect::from_min_size(pos2(r.left() + 10.0, r.center().y - 28.0), vec2(56.0, 56.0));
     art::cover(pt, state, p, thumb, [12.0; 4], 1.0);
-    let add_b = Button::new("Add").icon(icons::PLUS).size(Size::Sm).id_salt(("found-add", &p.path)).enabled(!state.running());
+    let add_b = Button::new(tr("Add")).icon(icons::PLUS).size(Size::Sm).id_salt(("found-add", &p.path)).enabled(!state.running());
     let aw = add_b.desired_width(ui);
     let x = thumb.right() + 12.0;
     let tw = r.right() - 14.0 - aw - 12.0 - x;
     widgets::text_truncated(pt, pos2(x, r.center().y - 17.0), Align2::LEFT_CENTER, &Txt::new(&p.name, 14.0).weight(weight::SEMIBOLD), tw);
     widgets::text_truncated(pt, pos2(x, r.center().y + 1.0), Align2::LEFT_CENTER, &Txt::new(p.path.display().to_string(), 11.5).color(theme::FG_3), tw);
     let meta = if p.avatars.is_empty() {
-        format!("Unity {} · {}", p.unity, p.kind.label())
+        tr!("Unity {version} · {what}", version = p.unity, what = p.kind.label())
     } else {
-        format!("Unity {} · {}", p.unity, plural(p.avatars.len(), "avatar", "avatars"))
+        tr!("Unity {version} · {what}", version = p.unity, what = tr_n("{count} avatar", "{count} avatars", p.avatars.len() as u64))
     };
-    let meta = if hidden { format!("Hidden · {meta}") } else { meta };
+    let meta = if hidden { tr!("Hidden · {meta}", meta = meta) } else { meta };
     widgets::text_truncated(pt, pos2(x, r.center().y + 18.0), Align2::LEFT_CENTER, &Txt::new(meta, 11.5).color(theme::FG_4), tw);
     let br = Rect::from_min_size(pos2(r.right() - 14.0 - aw, r.center().y - 16.0), vec2(aw, 32.0));
     if widgets::activated(&add_b.show_at(ui, br)) {
@@ -584,12 +581,12 @@ fn activity(ui: &mut Ui, state: &mut State, area: Rect) {
     let label = state.acting().map(str::to_string).filter(|_| !shown_in_dialog);
     let p = state.copy_progress.lock().unwrap().clone();
     let copying = p.total > 0 && label.is_some();
-    let detail = copying.then(|| format!("{} of {} files · {}", format::integer(p.copied as f64), format::integer(p.total as f64), p.file));
+    let detail = copying.then(|| tr!("{copied} of {total} files · {file}", copied = format::integer(p.copied as f64), total = format::integer(p.total as f64), file = p.file));
     let a = label.as_deref().map(|l| feedback::Activity {
         label: l,
         detail: detail.as_deref(),
         fraction: copying.then(|| p.copied as f32 / p.total.max(1) as f32),
-        cancel: copying && p.phase == "Copying project",
+        cancel: copying && p.phase == mark("Copying project"),
     });
     // A Library move elsewhere than the panel on screen: an action of the page has the capsule while it runs, a moment.
     let repair = if a.is_none() && !shown_in_dialog { state.repair_capsule() } else { None };
@@ -617,20 +614,20 @@ pub fn capture_card(ui: &mut Ui, cx: &mut Cx, state: &mut State, rect: Rect) {
     let on_avatar = cx.snap.n4n0.manifest && cx.snap.n4n0.prop_sync.is_some();
     let waiting = state.flow.as_ref().is_some_and(|f| f.request.is_some() && f.result.is_none());
     let (value, tone, trailing) = if state.running() {
-        ("Setting up…", Tone::Info, None)
+        (tr("Setting up…"), Tone::Info, None)
     } else if waiting && !on_avatar {
-        ("Confirm in Unity", Tone::Warn, Some(art::glyph::ARROW_RIGHT))
+        (tr("Confirm in Unity"), Tone::Warn, Some(art::glyph::ARROW_RIGHT))
     } else if on_avatar {
-        ("On your avatar", Tone::Ok, Some(icons::CHECK))
+        (tr("On your avatar"), Tone::Ok, Some(icons::CHECK))
     } else {
-        ("Add to my avatar", Tone::Ok, Some(icons::PLUS))
+        (tr("Add to my avatar"), Tone::Ok, Some(icons::PLUS))
     };
     let id = Id::unique("capture-n4n0-card");
     let resp = ui.interact(rect, id, Sense::click()).on_hover_cursor(CursorIcon::PointingHand);
     let resp = resp.on_hover_text(if on_avatar {
-        "N4N0 is on your avatar: you're ready to capture. Press to put it on another avatar."
+        tr("N4N0 is on your avatar: you're ready to capture. Press to put it on another avatar.")
     } else {
-        "Put N4N0 on the avatar you capture with: Orbiters installs it in its Unity project, you confirm in Unity"
+        tr("Put N4N0 on the avatar you capture with: Orbiters installs it in its Unity project, you confirm in Unity")
     });
     let hover = anim::toggle(&ctx, id.with("hover"), resp.hovered(), Spring::SOFT);
     let press = anim::toggle(&ctx, id.with("press"), resp.is_pointer_button_down_on(), Spring::SNAPPY);

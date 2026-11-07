@@ -2,6 +2,7 @@
 //! N4N0, they reach the Orbiters team in the admin's N4N0 tab. Sent as the signed-in account.
 
 use orbiters_core::account::{Api, ApiError};
+use orbiters_i18n::tr;
 use std::time::Duration;
 
 /// How long a request waits for Orbiters.
@@ -25,7 +26,7 @@ pub struct About {
 /// Sends `text` to Orbiters as the account of `token`.
 pub fn send(api: &Api, token: &str, text: &str, about: &About) -> anyhow::Result<()> {
     let text = text.trim();
-    anyhow::ensure!(!text.is_empty(), "Write or say your idea first.");
+    anyhow::ensure!(!text.is_empty(), "{}", tr("Write or say your idea first."));
     let text: String = text.chars().take(TEXT_MAX).collect();
     let body = serde_json::json!({
         "text": text,
@@ -49,7 +50,7 @@ pub fn send(api: &Api, token: &str, text: &str, about: &About) -> anyhow::Result
 /// An error answer in the person's words: the server's own message, or its status.
 fn plain(e: anyhow::Error) -> anyhow::Error {
     match e.downcast::<ApiError>() {
-        Ok(api) if api.message.is_empty() => anyhow::anyhow!("Orbiters answered {}", api.status),
+        Ok(api) if api.message.is_empty() => anyhow::anyhow!("{}", tr!("Orbiters answered {status}", status = api.status)),
         Ok(api) => api.into(),
         Err(e) => e,
     }

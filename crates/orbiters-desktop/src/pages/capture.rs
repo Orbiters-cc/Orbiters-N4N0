@@ -7,7 +7,8 @@ use egui::{pos2, vec2, Align, Align2, Id, Layout, Rect, Sense, Ui, UiBuilder, Ve
 use orbiters_contracts::manifest::{CaptureMode, StorageQuality};
 use orbiters_core::picture::Left;
 use orbiters_core::settings::{Photo3dLength, PictureMode, Settings};
-use orbiters_n4n0_core::menu::layout::LENGTH_LABELS;
+use orbiters_i18n::{fill, mark, tr, tr_ctx, tr_n};
+use orbiters_n4n0_core::menu::strings::{Strings, FLIGHTS};
 use orbiters_ui::anim::{self, Spring};
 use orbiters_ui::format;
 use orbiters_ui::record::{self, RecState, RecordButton};
@@ -27,10 +28,16 @@ const GRID_H: f32 = 212.0;
 
 /// What each of a 3D picture's camera flights does (1 s, 4 s, 8 s), here and on Home's 3D picture page.
 pub(super) const FLIGHT_HINTS: [&str; 3] = [
-    "A gentle sweep around what the camera aims at",
-    "Looks around, then goes around the people or through the place, as far as it can see it goes",
-    "As 4 s, with more views of each person, or more of the place",
+    mark("A gentle sweep around what the camera aims at"),
+    mark("Looks around, then goes around the people or through the place, as far as it can see it goes"),
+    mark("As 4 s, with more views of each person, or more of the place"),
 ];
+
+/// The three flights' names (1 s, 4 s, 8 s) in the language now, as the menu on the avatar and in VR writes them (`menu-strings`).
+pub(super) fn flight_labels() -> [&'static str; 3] {
+    let strings = Strings::builtin(orbiters_i18n::language());
+    [strings.get(FLIGHTS[0]), strings.get(FLIGHTS[1]), strings.get(FLIGHTS[2])]
+}
 
 pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State, projects: &mut super::projects::State) {
     let from = orbiters_ui::blur::next_shape(ui);
@@ -78,17 +85,17 @@ fn header(ui: &mut Ui, cx: &mut Cx) {
     let recording = matches!(c.state, CaptureState::Recording | CaptureState::Paused);
     block(ui, cx, 0, 72.0, |ui, rect| {
         let caption = if recording {
-            "Live capture"
+            tr("Live capture")
         } else if world.in_world {
-            "VRChat world"
+            tr("VRChat world")
         } else {
-            "Capture"
+            tr("Capture")
         };
         let headline = match c.state {
-            CaptureState::Importing => "Importing a raw capture".to_string(),
-            CaptureState::Paused => "Paused".into(),
-            CaptureState::Recording => "Recording".into(),
-            _ => world.world_name.clone().filter(|_| world.in_world).unwrap_or_else(|| "Ready to capture".into()),
+            CaptureState::Importing => tr("Importing a raw capture").to_string(),
+            CaptureState::Paused => tr("Paused").into(),
+            CaptureState::Recording => tr("Recording").into(),
+            _ => world.world_name.clone().filter(|_| world.in_world).unwrap_or_else(|| tr("Ready to capture").into()),
         };
         let p = ui.painter();
         widgets::text(p, pos2(rect.left(), rect.top() + 7.0), Align2::LEFT_CENTER, &Txt::caps(caption));
@@ -109,11 +116,11 @@ fn header(ui: &mut Ui, cx: &mut Cx) {
             }
             None => {
                 let hint = if !orbiters_core::osc::VRCHAT_RUNS_HERE {
-                    "VRChat's camera comes over Spout, on Windows. Captures made there open here, in Photos & captures."
+                    tr("VRChat's camera comes over Spout, on Windows. Captures made there open here, in Photos & captures.")
                 } else if snap.vrchat.running {
-                    "VRChat is running; join a world to tag captures with it."
+                    tr("VRChat is running; join a world to tag captures with it.")
                 } else {
-                    "Start VRChat and enable Spout streaming on the Stream camera."
+                    tr("Start VRChat and enable Spout streaming on the Stream camera.")
                 };
                 widgets::text_truncated(p, pos2(rect.left(), sub_y), Align2::LEFT_CENTER, &Txt::new(hint, 13.0).color(theme::FG_3), rect.width() * 0.7);
             }
@@ -152,13 +159,19 @@ fn actions(ui: &mut Ui, cx: &mut Cx, state: &mut State, projects: &mut super::pr
     let mut row = ui.new_child(UiBuilder::new().max_rect(rect).id_salt("capture-actions"));
     row.multiply_opacity(alpha);
     let cell = |i: usize| Rect::from_min_size(rect.min + vec2(i as f32 * (card_w + gap), 0.0), vec2(card_w, ACTION_H));
-    let not_running = "Start VRChat first: its camera takes the picture";
-    let world_note = if cannot_hide { "Goes through the place; your avatar is taken out afterwards" } else { "Goes through the place, avatars left out" };
+    let not_running = tr("Start VRChat first: its camera takes the picture");
+    let world_note = if cannot_hide { tr("Goes through the place; your avatar is taken out afterwards") } else { tr("Goes through the place, avatars left out") };
+    // (A text written as `field: tr("…")` would not be read as a key by tests/coverage.rs's scan: a `let` is.)
+    let people_title = tr("3D picture of people");
+    let people_note = tr("Goes around the people here");
+    let place_title = tr("3D picture of the world");
+    let record_title = tr("Record");
+    let record_note = tr("You move the camera. Press again to stop");
     let people = BigAction {
         glyph: icons::USERS,
         tint: theme::VIOLET,
-        title: "3D picture of people",
-        note: "Goes around the people here",
+        title: people_title,
+        note: people_note,
         warn: false,
         enabled: vrchat,
         why_not: not_running,
@@ -166,7 +179,7 @@ fn actions(ui: &mut Ui, cx: &mut Cx, state: &mut State, projects: &mut super::pr
     let place = BigAction {
         glyph: icons::GLOBE_HEMISPHERE_WEST,
         tint: theme::ACCENT,
-        title: "3D picture of the world",
+        title: place_title,
         note: world_note,
         warn: false,
         enabled: vrchat,
@@ -175,8 +188,8 @@ fn actions(ui: &mut Ui, cx: &mut Cx, state: &mut State, projects: &mut super::pr
     let record = BigAction {
         glyph: icons::RECORD,
         tint: theme::REC,
-        title: "Record",
-        note: "You move the camera. Press again to stop",
+        title: record_title,
+        note: record_note,
         warn: false,
         enabled: true,
         why_not: "",
@@ -199,10 +212,10 @@ fn actions(ui: &mut Ui, cx: &mut Cx, state: &mut State, projects: &mut super::pr
 /// tries the whole path from the capture worker to a reconstruction.
 fn recording_elsewhere(ui: &mut Ui, cx: &mut Cx) {
     let mut test = false;
-    super::section(ui, cx, 1, icons::CUBE_FOCUS, "3D pictures and recordings", Some("Taken on the computer that runs VRChat"), |ui| {
-        let note = "Without a VRChat here, the test pattern records a generated picture through the capture worker, to try the whole path. It shows in Free up space, not among your pictures.";
-        widgets::field(ui, "Test pattern", Some(note), 150.0, |ui| {
-            test = Button::new("Test pattern").icon(icons::FLASK).size(Size::Sm).show(ui).clicked();
+    super::section(ui, cx, 1, icons::CUBE_FOCUS, tr("3D pictures and recordings"), Some(tr("Taken on the computer that runs VRChat")), |ui| {
+        let note = tr("Without a VRChat here, the test pattern records a generated picture through the capture worker, to try the whole path. It shows in Free up space, not among your pictures.");
+        widgets::field(ui, tr("Test pattern"), Some(note), 150.0, |ui| {
+            test = Button::new(tr("Test pattern")).icon(icons::FLASK).size(Size::Sm).show(ui).clicked();
         });
     });
     if test {
@@ -280,7 +293,7 @@ fn why_last(ui: &mut Ui, cx: &mut Cx, state: &mut State, projects: &mut super::p
     let name = worn.as_deref().and_then(crate::controller::uploaded_avatar_name);
     let tone = if wearer { Tone::Info.color() } else { theme::WARN };
     let (button, note) = match &offer {
-        Some(super::projects::ToolkitOffer::Project(name)) => (Some(format!("Update the Toolkit in {name}")), None),
+        Some(super::projects::ToolkitOffer::Project(name)) => (Some(tr!("Update the Toolkit in {name}", name = name)), None),
         Some(super::projects::ToolkitOffer::NotHere) => (None, Some(super::projects::toolkit_refusal(name.as_deref()))),
         _ => (None, None),
     };
@@ -303,7 +316,7 @@ fn why_last(ui: &mut Ui, cx: &mut Cx, state: &mut State, projects: &mut super::p
             .size(Size::Sm)
             .enabled(!running)
             .id_salt("update-toolkit")
-            .hint("Updates Orbiters Toolkit in that project and opens it in Unity. You upload from VRChat's SDK panel: N4N0 uploads nothing by itself.");
+            .hint(tr("Updates Orbiters Toolkit in that project and opens it in Unity. You upload from VRChat's SDK panel: N4N0 uploads nothing by itself."));
         let bw = b.desired_width(ui);
         let at = Rect::from_min_size(pos2(rect.left() + 48.0, text_bottom + 8.0), vec2(bw, 32.0));
         if widgets::activated(&b.show_at(ui, at)) {
@@ -320,12 +333,12 @@ fn quiet_row(ui: &mut Ui, cx: &mut Cx) {
     let mut test = false;
     block(ui, cx, 2, 36.0, |ui, rect| {
         let p = ui.painter();
-        let label = widgets::text(p, pos2(rect.left() + 2.0, rect.center().y), Align2::LEFT_CENTER, &Txt::new("Picture length", 13.0).color(theme::FG_3));
+        let label = widgets::text(p, pos2(rect.left() + 2.0, rect.center().y), Align2::LEFT_CENTER, &Txt::new(tr("Picture length"), 13.0).color(theme::FG_3));
         let mut length = snap.settings.photo_3d;
         let lengths = [Photo3dLength::Quick, Photo3dLength::Standard, Photo3dLength::Full]
             .into_iter()
-            .zip(LENGTH_LABELS.into_iter().zip(FLIGHT_HINTS))
-            .map(|(length, (label, hint))| SegOption::new(length, label).hint(hint))
+            .zip(flight_labels().into_iter().zip(FLIGHT_HINTS))
+            .map(|(length, (label, hint))| SegOption::new(length, label).hint(tr(hint)))
             .collect::<Vec<_>>();
         let seg_rect = Rect::from_min_size(pos2(label.right() + 12.0, rect.top()), vec2(150.0, 36.0));
         let mut seg = ui.new_child(UiBuilder::new().max_rect(seg_rect).layout(Layout::left_to_right(Align::Center)));
@@ -333,24 +346,24 @@ fn quiet_row(ui: &mut Ui, cx: &mut Cx) {
             super::form::save(cx.ctl, &snap.settings, &Settings { photo_3d: length, ..snap.settings.clone() });
         }
         let consent = snap.settings.consent_acknowledged;
-        let t = Button::new("Test pattern")
+        let t = Button::new(tr("Test pattern"))
             .icon(icons::FLASK)
             .variant(Variant::Ghost)
             .size(Size::Sm)
             .enabled(consent)
-            .hint("Record a generated test pattern (no VRChat needed)");
+            .hint(tr("Record a generated test pattern (no VRChat needed)"));
         let tw = t.desired_width(ui);
-        let tr = Rect::from_min_size(pos2(rect.right() - tw, rect.top() + 2.0), vec2(tw, 32.0));
-        test = t.show_at(ui, tr).clicked();
+        let test_at = Rect::from_min_size(pos2(rect.right() - tw, rect.top() + 2.0), vec2(tw, 32.0));
+        test = t.show_at(ui, test_at).clicked();
         // The camera looks around, then circles at three heights, looking in and out: views a walk never gives.
-        let s = Button::new("Scan")
+        let s = Button::new(tr("Scan"))
             .icon(icons::PATH)
             .variant(Variant::Ghost)
             .size(Size::Sm)
             .enabled(consent && snap.vrchat.running)
-            .hint("VRChat's camera looks around, then circles where it stands at three heights, looking in and out (about a minute); the recording is then reconstructed in 3D");
+            .hint(tr("VRChat's camera looks around, then circles where it stands at three heights, looking in and out (about a minute); the recording is then reconstructed in 3D"));
         let sw = s.desired_width(ui);
-        let sr = Rect::from_min_size(pos2(tr.left() - 8.0 - sw, rect.top() + 2.0), vec2(sw, 32.0));
+        let sr = Rect::from_min_size(pos2(test_at.left() - 8.0 - sw, rect.top() + 2.0), vec2(sw, 32.0));
         scan = s.show_at(ui, sr).clicked();
     });
     if test {
@@ -393,11 +406,11 @@ fn under_way(ui: &mut Ui, cx: &mut Cx) {
         cx.ctl.stop_capture();
     }
     let stop = match c.state {
-        CaptureState::Stopping => "Saving…",
-        CaptureState::Importing => "Importing…",
-        CaptureState::Starting => "Starting…",
-        _ if c.picture.is_some() => "Stop this picture",
-        _ => "Stop recording",
+        CaptureState::Stopping => tr("Saving…"),
+        CaptureState::Importing => tr("Importing…"),
+        CaptureState::Starting => tr("Starting…"),
+        _ if c.picture.is_some() => tr("Stop this picture"),
+        _ => tr("Stop recording"),
     };
     widgets::text(
         ui.painter(),
@@ -410,11 +423,11 @@ fn under_way(ui: &mut Ui, cx: &mut Cx) {
     let x = rect.left() + 26.0;
     let room = button.left() - 24.0 - x;
     let title = match c.picture {
-        Some(PictureMode::People) => "Taking a 3D picture of people",
-        Some(PictureMode::World) => "Taking a 3D picture of the world",
-        None if c.state == CaptureState::Importing => "Importing a raw capture",
-        None if c.state == CaptureState::Paused => "Recording paused",
-        None => "Recording",
+        Some(PictureMode::People) => tr("Taking a 3D picture of people"),
+        Some(PictureMode::World) => tr("Taking a 3D picture of the world"),
+        None if c.state == CaptureState::Importing => tr("Importing a raw capture"),
+        None if c.state == CaptureState::Paused => tr("Recording paused"),
+        None => tr("Recording"),
     };
     let p = ui.painter().clone();
     if recording {
@@ -422,20 +435,20 @@ fn under_way(ui: &mut Ui, cx: &mut Cx) {
         widgets::status_dot(&p, dot, Tone::Rec, c.state == CaptureState::Recording);
         let elapsed = format::duration(c.stats.as_ref().map(|s| s.elapsed_s).unwrap_or(0.0));
         let kept = c.stats.as_ref().map_or(0, |s| s.keyframes);
-        let line = format!("{elapsed}   ·   {} keyframes", format::integer(kept as f64));
+        let line = fill(&tr_n("{elapsed}   ·   {count} keyframe", "{elapsed}   ·   {count} keyframes", kept as u64), &[("elapsed", &elapsed)]);
         widgets::text(&p, pos2(x + 18.0, rect.top() + 28.0), Align2::LEFT_CENTER, &Txt::new(line, 13.0).weight(weight::MEDIUM).color(theme::FG));
     }
     widgets::text_truncated(&p, pos2(x, rect.top() + 60.0), Align2::LEFT_CENTER, &Txt::new(title, 24.0).weight(weight::SEMIBOLD).tracking(-0.01), room);
     let doing = match (c.picture, c.state) {
-        (_, CaptureState::Stopping) => "Saving the session…".to_string(),
-        (Some(PictureMode::People), _) => "VRChat's camera goes around the people here, then comes back where it was".to_string(),
-        (Some(PictureMode::World), _) => "VRChat's camera goes through the place, then comes back where it was".to_string(),
+        (_, CaptureState::Stopping) => tr("Saving the session…").to_string(),
+        (Some(PictureMode::People), _) => tr("VRChat's camera goes around the people here, then comes back where it was").to_string(),
+        (Some(PictureMode::World), _) => tr("VRChat's camera goes through the place, then comes back where it was").to_string(),
         // Nothing comes before VRChat's camera streams (the worker names the sender once it is connected).
         _ if snap.sources.is_empty() && c.stats.as_ref().is_none_or(|s| s.frames == 0) => {
             if snap.settings.osc.enabled && snap.settings.osc.drive_camera {
-                "Waiting for VRChat's camera: Orbiters asked for Stream mode with Spout Stream on (OSC must be on in VRChat)".to_string()
+                tr("Waiting for VRChat's camera: Orbiters asked for Stream mode with Spout Stream on (OSC must be on in VRChat)").to_string()
             } else {
-                "Waiting for VRChat's camera: open it in Stream mode and turn Spout Stream on".to_string()
+                tr("Waiting for VRChat's camera: open it in Stream mode and turn Spout Stream on").to_string()
             }
         }
         _ => c.source.clone().unwrap_or_default(),
@@ -447,21 +460,21 @@ fn under_way(ui: &mut Ui, cx: &mut Cx) {
         let galley = p.layout_job(Txt::new(warning, 13.0).color(ink).line_height(17.0).job(room));
         p.galley(pos2(x, rect.top() + 104.0), galley, ink);
     } else {
-        let mut out = Vec::new();
-        if c.left_out.wearer == Left::Out {
-            out.push("Your avatar is hidden on your side");
-        }
-        if c.left_out.others == Left::Out {
-            out.push("other players are hidden from the camera");
-        }
-        if !out.is_empty() {
-            widgets::text_truncated(&p, pos2(x, rect.top() + 114.0), Align2::LEFT_CENTER, &Txt::new(out.join(", "), 13.5).color(theme::ACCENT), room);
+        // Whole sentences for each case: a joined list could not be put in order or punctuated in every language.
+        let out = match (c.left_out.wearer == Left::Out, c.left_out.others == Left::Out) {
+            (true, true) => Some(tr("Your avatar is hidden on your side, other players are hidden from the camera")),
+            (true, false) => Some(tr("Your avatar is hidden on your side")),
+            (false, true) => Some(tr("other players are hidden from the camera")),
+            (false, false) => None,
+        };
+        if let Some(out) = out {
+            widgets::text_truncated(&p, pos2(x, rect.top() + 114.0), Align2::LEFT_CENTER, &Txt::new(out, 13.5).color(theme::ACCENT), room);
         }
     }
     // A free recording's pause, and its folder.
     if recording && c.picture.is_none() {
         let paused = c.state == CaptureState::Paused;
-        let pause = Button::new(if paused { "Resume" } else { "Pause" }).icon(if paused { icons::PLAY } else { icons::PAUSE }).size(Size::Sm);
+        let pause = Button::new(if paused { tr("Resume") } else { tr("Pause") }).icon(if paused { icons::PLAY } else { icons::PAUSE }).size(Size::Sm);
         let folder = c.session_dir.as_ref().map(|d| (d.clone(), format::folder_name(d)));
         let folder_btn = folder.as_ref().map(|(_, name)| Button::new(name).icon(icons::FOLDER_OPEN).variant(Variant::Ghost).size(Size::Sm));
         let pw = pause.desired_width(&ui);
@@ -498,12 +511,12 @@ fn chips(ui: &mut Ui, cx: &mut Cx, projects: &mut super::projects::State) {
                 "VRChat",
                 if snap.vrchat.running {
                     if world.in_world {
-                        "In a world".to_string()
+                        tr("In a world").to_string()
                     } else {
-                        "Running".into()
+                        tr("Running").into()
                     }
                 } else {
-                    "Not running".into()
+                    tr("Not running").into()
                 },
                 if snap.vrchat.running { Tone::Ok } else { Tone::Off },
             )
@@ -514,19 +527,19 @@ fn chips(ui: &mut Ui, cx: &mut Cx, projects: &mut super::projects::State) {
         if orbiters_core::osc::VRCHAT_RUNS_HERE {
             (
                 icons::BROADCAST,
-                "Spout source",
-                source.map(|s| format!("{} · {}×{}", s.name, s.width, s.height)).unwrap_or_else(|| "VRChat's camera: Stream mode, Spout Stream on".into()),
+                tr("Spout source"),
+                source.map(|s| format!("{} · {}×{}", s.name, s.width, s.height)).unwrap_or_else(|| tr("VRChat's camera: Stream mode, Spout Stream on").into()),
                 if source.is_some() { Tone::Ok } else { Tone::Warn },
             )
         } else {
-            (icons::BROADCAST, "Recording", "Where VRChat runs".into(), Tone::Off)
+            (icons::BROADCAST, tr_ctx("the noun", "Recording"), tr("Where VRChat runs").into(), Tone::Off)
         },
         (
             icons::SPARKLE,
-            "Action Menu",
+            tr("Action Menu"),
             osc.last_event
                 .clone()
-                .unwrap_or_else(|| if osc.listening { "N4N0 › Record".into() } else { osc.error.clone().unwrap_or_else(|| "OSC off".into()) }),
+                .unwrap_or_else(|| if osc.listening { tr("N4N0 › Record").into() } else { osc.error.clone().unwrap_or_else(|| tr("OSC off").into()) }),
             if osc.listening {
                 Tone::Ok
             } else if osc.enabled {
@@ -537,12 +550,11 @@ fn chips(ui: &mut Ui, cx: &mut Cx, projects: &mut super::projects::State) {
         ),
         (
             icons::HARD_DRIVE,
-            "Storage",
-            format!(
-                "{} used{}",
-                format::bytes(storage.used_bytes as f64),
-                storage.free_bytes.map(|f| format!(" · {} free", format::bytes(f as f64))).unwrap_or_default()
-            ),
+            tr("Storage"),
+            match storage.free_bytes {
+                Some(free) => tr!("{used} used · {free} free", used = format::bytes(storage.used_bytes as f64), free = format::bytes(free as f64)),
+                None => tr!("{used} used", used = format::bytes(storage.used_bytes as f64)),
+            },
             if storage.free_bytes.is_some_and(|f| f < 20_000_000_000) { Tone::Warn } else { Tone::Ok },
         ),
     ];
@@ -552,8 +564,9 @@ fn chips(ui: &mut Ui, cx: &mut Cx, projects: &mut super::projects::State) {
         14.0 + 36.0 + 12.0 + widgets::text_size(ui, &Txt::caps(label)).x.max(widgets::text_size(ui, &Txt::new(value, 13.0).weight(weight::MEDIUM)).x) + 14.0
     };
     let mut wanted: Vec<f32> = chips.iter().map(|(_, label, value, _)| want(label, value)).collect();
-    wanted.insert(1, want("N4N0", "Add to my avatar") + 26.0);
-    let one_row = orbiters_ui::layout::share_scale(&wanted, width, 12.0) >= 0.82;
+    wanted.insert(1, want("N4N0", tr("Add to my avatar")) + 26.0);
+    // One row only while the words fit whole (below 1 they are cut): a language with longer words (French) takes two rows rather than cut them.
+    let one_row = orbiters_ui::layout::share_scale(&wanted, width, 12.0) >= 1.0;
     let rows: Vec<std::ops::Range<usize>> = if one_row { vec![0..5] } else { vec![0..3, 3..5] };
     let (rect, _) = ui.allocate_exact_size(vec2(width, rows.len() as f32 * 74.0 - 12.0), Sense::hover());
     let (rect, alpha) = entering(ui, cx, 1, rect);
@@ -591,20 +604,20 @@ fn recording_settings(ui: &mut Ui, cx: &mut Cx) {
     block(ui, cx, 9, 76.0, |ui, card| {
         widgets::card(ui.painter(), card, theme::CARD_RADIUS);
         let p = ui.painter().clone();
-        widgets::text(&p, pos2(card.left() + 22.0, card.top() + 28.0), Align2::LEFT_CENTER, &Txt::caps("Recording"));
-        let sub = if snap.osc.listening { "Also from your Action Menu" } else { "Saved as a session" };
+        widgets::text(&p, pos2(card.left() + 22.0, card.top() + 28.0), Align2::LEFT_CENTER, &Txt::caps(tr_ctx("the noun", "Recording")));
+        let sub = if snap.osc.listening { tr("Also from your Action Menu") } else { tr("Saved as a session") };
         widgets::text_truncated(&p, pos2(card.left() + 22.0, card.top() + 50.0), Align2::LEFT_CENTER, &Txt::new(sub, 12.5).color(theme::FG_3), 180.0);
         let mut mode = settings.capture_mode;
         let mut quality = settings.storage_quality;
         let modes = [
-            SegOption::new(CaptureMode::RecordOnly, "Record").hint("Record now, reconstruct afterwards with the whole GPU"),
-            SegOption::new(CaptureMode::LiveRefine, "Live + refine").hint("Map live while playing, refine afterwards").disabled("soon"),
-            SegOption::new(CaptureMode::LiveOnly, "Live only").hint("The live map is the result").disabled("soon"),
+            SegOption::new(CaptureMode::RecordOnly, tr("Record")).hint(tr("Record now, reconstruct afterwards with the whole GPU")),
+            SegOption::new(CaptureMode::LiveRefine, tr("Live + refine")).hint(tr("Map live while playing, refine afterwards")).disabled(tr("soon")),
+            SegOption::new(CaptureMode::LiveOnly, tr("Live only")).hint(tr("The live map is the result")).disabled(tr("soon")),
         ];
         let qualities = [
-            SegOption::new(StorageQuality::Lossless, "Lossless").hint("Every frame saved losslessly (very large)"),
-            SegOption::new(StorageQuality::High, "High").hint("Lossless keyframes, poses and depth"),
-            SegOption::new(StorageQuality::Compact, "Compact").hint("Fewer keyframes, smaller sessions"),
+            SegOption::new(StorageQuality::Lossless, tr("Lossless")).hint(tr("Every frame saved losslessly (very large)")),
+            SegOption::new(StorageQuality::High, tr("High")).hint(tr("Lossless keyframes, poses and depth")),
+            SegOption::new(StorageQuality::Compact, tr("Compact")).hint(tr("Fewer keyframes, smaller sessions")),
         ];
         let area = Rect::from_min_max(pos2(card.left() + 200.0, card.top()), pos2(card.right() - 20.0, card.bottom()));
         let mut seg = ui.new_child(UiBuilder::new().max_rect(area).layout(Layout::right_to_left(Align::Center)));
@@ -621,12 +634,12 @@ fn recording_settings(ui: &mut Ui, cx: &mut Cx) {
 fn consent(ui: &mut Ui, cx: &mut Cx) {
     let w = ui.available_width();
     let mut bullets = vec![
-        "Capture your own worlds, or worlds whose creators agreed, and keep the results private.",
-        "Other players are left out: a 3D picture of the world hides them from the Stream camera, or turn Remote Players off.",
+        tr("Capture your own worlds, or worlds whose creators agreed, and keep the results private."),
+        tr("Other players are left out: a 3D picture of the world hides them from the Stream camera, or turn Remote Players off."),
     ];
     // With VRChat sign-in open to the member, the app can hold their VRChat session: the promise would not hold.
     if !cx.snap.vrchat_login.allowed {
-        bullets.push("Orbiters - N4N0 never asks for your VRChat login and only reads VRChat's local log, OSC and Spout.");
+        bullets.push(tr("Orbiters - N4N0 never asks for your VRChat login and only reads VRChat's local log, OSC and Spout."));
     }
     let galleys: Vec<_> = bullets.iter().map(|b| ui.painter().layout_job(Txt::new(*b, 13.0).color(theme::FG_2).line_height(20.0).job(w - 300.0))).collect();
     let text_h: f32 = galleys.iter().map(|g| g.size().y + 8.0).sum();
@@ -640,7 +653,7 @@ fn consent(ui: &mut Ui, cx: &mut Cx) {
     let tile = Rect::from_min_size(rect.min + vec2(24.0, 24.0), vec2(36.0, 36.0));
     p.rect_filled(tile, theme::radius(12.0), theme::alpha(theme::ACCENT, 0.12));
     widgets::icon(&p, tile.center(), icons::SHIELD_CHECK, 18.0, theme::ACCENT);
-    widgets::text(&p, pos2(tile.right() + 10.0, tile.center().y), Align2::LEFT_CENTER, &Txt::new("Before you capture", 16.0).weight(weight::SEMIBOLD));
+    widgets::text(&p, pos2(tile.right() + 10.0, tile.center().y), Align2::LEFT_CENTER, &Txt::new(tr("Before you capture"), 16.0).weight(weight::SEMIBOLD));
     let mut y = tile.bottom() + 16.0;
     for g in galleys {
         p.circle_filled(pos2(rect.left() + 30.0, y + 10.0), 2.0, theme::FG_3);
@@ -649,7 +662,7 @@ fn consent(ui: &mut Ui, cx: &mut Cx) {
         y += gh + 8.0;
     }
     let button = Rect::from_min_size(pos2(rect.right() - 24.0 - 200.0, rect.center().y - 22.0), vec2(200.0, 44.0));
-    if Button::new("I understand").variant(Variant::Primary).width(button.width()).show_at(&mut ui, button).clicked() {
+    if Button::new(tr("I understand")).variant(Variant::Primary).width(button.width()).show_at(&mut ui, button).clicked() {
         super::form::save(cx.ctl, &cx.snap.settings, &Settings { consent_acknowledged: true, ..cx.snap.settings.clone() });
     }
 }
@@ -677,55 +690,59 @@ fn tiles(ui: &mut Ui, cx: &mut Cx, rect: Rect) {
         }
     });
     let tiles: [(&str, &str, String, String, Option<egui::Color32>); 6] = [
-        (icons::STACK, "Frames", format::integer(frames), s.map(|s| format!("{}×{}", s.width, s.height)).unwrap_or_else(|| "–".into()), None),
+        (icons::STACK, tr("Frames"), format::integer(frames), s.map(|s| format!("{}×{}", s.width, s.height)).unwrap_or_else(|| "–".into()), None),
         (
             icons::SCAN,
-            "Strip decoded",
+            tr("Strip decoded"),
             s.map(|_| if decoded > 99.95 { format!("{decoded:.0}%") } else { format!("{decoded:.1}%") }).unwrap_or_else(|| "–".into()),
             match s {
                 // Gone for a while, and why: no keyframes come meanwhile.
                 Some(s) if s.strip_missing_s >= 2.0 => {
-                    format!("none for {:.0} s: {}", s.strip_missing_s, snap.capture.no_strip.unwrap_or(crate::state::NoStrip::Unknown).short())
+                    tr!(
+                        "none for {seconds} s: {reason}",
+                        seconds = format!("{:.0}", s.strip_missing_s),
+                        reason = snap.capture.no_strip.unwrap_or(crate::state::NoStrip::Unknown).short()
+                    )
                 }
-                Some(s) => format!("{} unreadable", format::integer(s.strip_failed as f64)),
-                None => "pose strip in every frame".into(),
+                Some(s) => tr!("{count} unreadable", count = format::integer(s.strip_failed as f64)),
+                None => tr("pose strip in every frame").into(),
             },
             if s.is_some_and(|s| s.strip_missing_s >= 2.0) { Some(theme::WARN) } else { accent },
         ),
         (
             icons::CUBE,
-            "Keyframes",
+            tr("Keyframes"),
             format::integer(keyframes),
             match s {
-                Some(s) if s.dropped > 0 => format!("{} dropped", s.dropped),
-                _ => "lossless images".into(),
+                Some(s) if s.dropped > 0 => tr!("{count} dropped", count = s.dropped),
+                _ => tr("lossless images").into(),
             },
             None,
         ),
         (
             icons::CPU,
-            "Depth frames",
+            tr("Depth frames"),
             format::integer(depth),
             match s {
                 // Decoding fell behind (a slow disk or a busy processor): the recording went on without those.
-                Some(s) if s.depth_dropped > 0 => format!("{} dropped", format::integer(s.depth_dropped as f64)),
-                Some(s) => format!("{} of frames", format::percent(s.depth_frames as f64, s.frames as f64)),
-                None => "exact depth samples".into(),
+                Some(s) if s.depth_dropped > 0 => tr!("{count} dropped", count = format::integer(s.depth_dropped as f64)),
+                Some(s) => tr!("{percent} of frames", percent = format::percent(s.depth_frames as f64, s.frames as f64)),
+                None => tr("exact depth samples").into(),
             },
             s.filter(|s| s.depth_dropped > 0).map(|_| theme::WARN),
         ),
         (
             icons::GAUGE,
-            "Frame rate",
+            tr("Frame rate"),
             s.map(|_| format!("{fps:.1} fps")).unwrap_or_else(|| "–".into()),
-            s.map(|s| format!("decode {:.1} ms", s.decode_ms)).unwrap_or_else(|| "per frame".into()),
+            s.map(|s| tr!("decode {ms} ms", ms = format!("{:.1}", s.decode_ms))).unwrap_or_else(|| tr("per frame").into()),
             None,
         ),
         (
             icons::HARD_DRIVE,
-            "Written",
+            tr("Written"),
             s.map(|_| format::bytes(written)).unwrap_or_else(|| "–".into()),
-            s.map(|s| format!("{} recorded", format::duration(s.elapsed_s))).unwrap_or_else(|| "this session".into()),
+            s.map(|s| tr!("{duration} recorded", duration = format::duration(s.elapsed_s))).unwrap_or_else(|| tr("this session").into()),
             None,
         ),
     ];
@@ -747,16 +764,16 @@ fn performance(ui: &mut Ui, cx: &mut Cx) {
     block(ui, cx, 9, 164.0, |ui, rect| {
         widgets::card(ui.painter(), rect, theme::CARD_RADIUS);
         let p = ui.painter().clone();
-        widgets::text(&p, pos2(rect.left() + 20.0, rect.top() + 26.0), Align2::LEFT_CENTER, &Txt::caps("Performance"));
+        widgets::text(&p, pos2(rect.left() + 20.0, rect.top() + 26.0), Align2::LEFT_CENTER, &Txt::caps(tr("Performance")));
         let vr = &snap.steamvr;
         let right = match (&vr.calibration, vr.running, vr.overlay) {
-            _ if capturing => "Switches apply to the next recording".to_string(),
-            (Some(c), _, _) => format!("T-pose: eyes at {:.2} m, hands {:.2} m apart", c.head_height_m, c.arm_span_m),
+            _ if capturing => tr("Switches apply to the next recording").to_string(),
+            (Some(c), _, _) => tr!("T-pose: eyes at {eyes} m, hands {hands} m apart", eyes = format!("{:.2}", c.head_height_m), hands = format!("{:.2}", c.arm_span_m)),
             // VRChat sends its head and hand poses: Mixer needs no T-pose for its sessions.
-            _ if snap.vrchat.running => "No T-pose needed: VRChat sends its head and hand poses".into(),
-            (None, true, true) => "Calibrate in the Orbiters tab of SteamVR's dashboard".into(),
-            (None, true, false) => "SteamVR is running".into(),
-            (None, false, _) => "Not calibrated: start SteamVR, then calibrate in its dashboard".into(),
+            _ if snap.vrchat.running => tr("No T-pose needed: VRChat sends its head and hand poses").into(),
+            (None, true, true) => tr("Calibrate in the Orbiters tab of SteamVR's dashboard").into(),
+            (None, true, false) => tr("SteamVR is running").into(),
+            (None, false, _) => tr("Not calibrated: start SteamVR, then calibrate in its dashboard").into(),
         };
         widgets::text_truncated(
             &p,
@@ -815,13 +832,14 @@ fn camera_path(ui: &mut Ui, cx: &mut Cx) {
     let snap = cx.snap;
     let c = &snap.capture;
     let s = c.stats.as_ref();
+    let empty_text = tr("The camera path appears here while you record");
     block(ui, cx, 10, 314.0, |ui, rect| {
         widgets::card(ui.painter(), rect, theme::CARD_RADIUS);
         let p = ui.painter();
-        widgets::text(p, pos2(rect.left() + 20.0, rect.top() + 26.0), Align2::LEFT_CENTER, &Txt::caps("Camera path"));
+        widgets::text(p, pos2(rect.left() + 20.0, rect.top() + 26.0), Align2::LEFT_CENTER, &Txt::caps(tr("Camera path")));
         let sub = match s.and_then(|s| s.position) {
             Some([x, y, z]) => format!("x {x:.1}   y {y:.1}   z {z:.1} m"),
-            None => "Exact positions from the capture strip, top-down".into(),
+            None => tr("Exact positions from the capture strip, top-down").into(),
         };
         widgets::text(p, pos2(rect.left() + 20.0, rect.top() + 46.0), Align2::LEFT_CENTER, &Txt::new(sub, 12.5).color(theme::FG_3));
         // What went wrong: the capture's error, else what the recording goes on without (a microphone that could not
@@ -854,7 +872,7 @@ fn camera_path(ui: &mut Ui, cx: &mut Cx) {
                 points: &c.trail,
                 heading: s.and_then(|s| s.heading_deg),
                 live: c.state == CaptureState::Recording,
-                empty_text: "The camera path appears here while you record",
+                empty_text,
             },
             coverage.as_ref(),
         );
@@ -864,12 +882,13 @@ fn camera_path(ui: &mut Ui, cx: &mut Cx) {
             if m.hints.is_empty() {
                 let mut x = map.left() + 12.0;
                 let y = map.top() + 14.0;
-                widgets::text(p, pos2(x, y), Align2::LEFT_CENTER, &Txt::new("Seen from", 11.5).color(theme::FG_3));
+                widgets::text(p, pos2(x, y), Align2::LEFT_CENTER, &Txt::new(tr("Seen from"), 11.5).color(theme::FG_3));
                 x += 62.0;
-                for (directions, label) in [(1u8, "1–2 directions"), (3, "3–5"), (6, "6 or more")] {
+                for (directions, label) in [(1u8, tr("1–2 directions")), (3, "3–5"), (6, tr("6 or more"))] {
                     p.rect_filled(Rect::from_center_size(pos2(x + 5.0, y), vec2(10.0, 10.0)), 2.0, theme::alpha(trail::coverage_colour(directions), 0.7));
                     widgets::text(p, pos2(x + 14.0, y), Align2::LEFT_CENTER, &Txt::new(label, 11.5).color(theme::FG_3));
-                    x += 24.0 + 6.5 * label.chars().count() as f32;
+                    // Wide letters (Japanese) take about twice a Latin letter's room.
+                    x += 24.0 + label.chars().map(|ch| if ch.is_ascii() || ch.len_utf8() < 3 { 6.5 } else { 11.5 }).sum::<f32>();
                 }
             } else {
                 for (k, hint) in m.hints.iter().take(2).enumerate() {

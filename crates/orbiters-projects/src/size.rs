@@ -60,7 +60,7 @@ fn read(file: &Path) -> HashMap<String, Entry> {
 /// What a change of size shows in: the latest modification time of the project's folder and the folders under it
 /// that hold its files.
 pub fn stamp(project: &Path) -> u64 {
-    ["", "Assets", "Packages", "ProjectSettings", "Library", "Packages/vpm-manifest.json"]
+    ["", "Assets", "Packages", "ProjectSettings", "Library", "Packages/vpm-manifest.json"] // i18n: not shown (Unity's folder names)
         .iter()
         .map(|p| discovery::fingerprint(&project.join(p)))
         .fold(0, u64::max)

@@ -119,7 +119,7 @@ impl Source {
         let dir = pictures_folder().join(format!("{:04}-{:02}", taken.year(), taken.month() as u8));
         let name: String = r.name.chars().map(|c| if c.is_alphanumeric() || " -_.,'()&".contains(c) { c } else { ' ' }).collect();
         let name = name.split_whitespace().collect::<Vec<_>>().join(" ");
-        let name: String = if name.is_empty() { format!("Orbiters picture {}", r.id) } else { name.chars().take(80).collect() };
+        let name: String = if name.is_empty() { format!("Orbiters picture {}", r.id) } else { name.chars().take(80).collect() }; // i18n: not shown
         copy_path(&dir.join(format!("{name}.png")))
     }
 
@@ -148,7 +148,7 @@ impl Source {
         let own = self.layers.iter().any(|l| l.path == self.picture);
         let mut out = Vec::new();
         if !world && !own {
-            out.push(SourceLayer { name: "Picture".into(), path: self.picture.clone() });
+            out.push(SourceLayer { name: "Picture".into(), path: self.picture.clone() }); // i18n: not shown
         }
         out.extend(self.layers.iter().cloned());
         out
@@ -229,7 +229,7 @@ pub fn reopen(png: &Path) -> Option<Saved> {
 
 /// A new copy's name beside `original`: `<name> (edited).png`, `(edited 2)` and on when taken.
 pub fn copy_path(original: &Path) -> PathBuf {
-    let stem = original.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "Picture".into());
+    let stem = original.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "Picture".into()); // i18n: not shown
     let dir = original.parent().map(Path::to_path_buf).unwrap_or_default();
     (1..)
         .map(|n| dir.join(if n == 1 { format!("{stem} (edited).png") } else { format!("{stem} (edited {n}).png") }))

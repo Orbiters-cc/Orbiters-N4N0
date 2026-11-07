@@ -10,3 +10,6 @@ windows = { workspace = true }
 
 [dev-dependencies]
 orbiters-contracts = { workspace = true }
+
+[dependencies]
+orbiters-i18n = { workspace = true }

@@ -101,7 +101,7 @@ impl RenderSide {
                 device.create_texture_from_hal::<wgpu::hal::api::Dx12>(
                     hal,
                     &wgpu::TextureDescriptor {
-                        label: Some("3d-worlds shared face"),
+                        label: Some("3d-worlds shared face"), // i18n: not shown (a GPU debug label)
                         size,
                         mip_level_count: 1,
                         sample_count: 1,

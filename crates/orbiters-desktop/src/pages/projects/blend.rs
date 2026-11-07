@@ -2,6 +2,7 @@
 //! row: each with the tool that linked it, when it was last saved, and Open in Blender (the newest Blender with
 //! Orbiters' add-on, else the newest, else what .blend files open with).
 
+use orbiters_i18n::tr;
 use super::art;
 use super::state::{Outcome, State};
 use egui::{pos2, vec2, Align2, Id, Rect, Sense, Ui};
@@ -22,17 +23,17 @@ pub(super) fn rows(ui: &mut Ui, state: &mut State, target: &Avatar, indent: f32)
     let ctx = ui.ctx().clone();
     let width = ui.available_width();
     // Indented only where the names keep room enough.
-    let button_w = Button::new("Open in Blender").icon(icons::BLENDER).size(Size::Sm).desired_width(ui);
+    let button_w = Button::new(tr("Open in Blender")).icon(icons::BLENDER).size(Size::Sm).desired_width(ui);
     let indent = if width - indent - 48.0 - button_w < 180.0 { 0.0 } else { indent };
     let (head, _) = ui.allocate_exact_size(vec2(width, 18.0), Sense::hover());
-    widgets::text(ui.painter(), pos2(head.left() + indent, head.center().y + 2.0), Align2::LEFT_CENTER, &Txt::caps("Blender files"));
+    widgets::text(ui.painter(), pos2(head.left() + indent, head.center().y + 2.0), Align2::LEFT_CENTER, &Txt::caps(tr("Blender files")));
     let now = orbiters_projects::discovery::now();
     for (k, l) in links.iter().enumerate() {
         let (row, _) = ui.allocate_exact_size(vec2(width, 40.0), Sense::hover());
         let row = Rect::from_min_max(pos2(row.left() + indent, row.top()), row.max);
         let tile = Rect::from_min_size(pos2(row.left(), row.center().y - 15.0), vec2(30.0, 30.0));
         art::tile(ui.painter(), tile, icons::BLENDER, BLENDER);
-        let b = Button::new("Open in Blender")
+        let b = Button::new(tr("Open in Blender"))
             .icon(icons::BLENDER)
             .variant(Variant::Ghost)
             .size(Size::Sm)
@@ -45,7 +46,7 @@ pub(super) fn rows(ui: &mut Ui, state: &mut State, target: &Avatar, indent: f32)
         let name = l.blend.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         let p = ui.painter();
         widgets::text_truncated(p, pos2(x, row.center().y - 8.0), Align2::LEFT_CENTER, &Txt::new(&name, 13.0).weight(weight::MEDIUM), tw);
-        let detail = format!("{} · saved {}", l.tool.label(), format::relative_time(l.modified, now));
+        let detail = tr!("{tool} · saved {when}", tool = l.tool.label(), when = format::relative_time(l.modified, now));
         widgets::text_truncated(p, pos2(x, row.center().y + 9.0), Align2::LEFT_CENTER, &Txt::new(detail, 11.5).color(theme::FG_3), tw);
         // Where it is, whole, on hover.
         let _ = ui
@@ -67,8 +68,8 @@ pub(super) fn links(state: &State, target: &Avatar) -> Vec<blender::Link> {
 pub(super) fn open(ctx: &egui::Context, state: &mut State, link: &blender::Link) {
     let blend = link.blend.clone();
     let name = blend.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-    state.task(ctx, "Opening Blender…", move || {
+    state.task(ctx, tr("Opening Blender…"), move || {
         let by = blender::open(&blend)?;
-        Ok(Outcome::Said(format!("{name} opened in {by}")))
+        Ok(Outcome::Said(tr!("{name} opened in {program}", name = name, program = by)))
     });
 }

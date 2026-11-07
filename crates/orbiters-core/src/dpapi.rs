@@ -48,7 +48,7 @@ mod mac {
     use security_framework::passwords::{get_generic_password, set_generic_password};
 
     const SERVICE: &str = "Orbiters - N4N0";
-    const ACCOUNT: &str = "session key";
+    const ACCOUNT: &str = "session key"; // i18n: not shown (the name of a Keychain item)
     const KEY_LEN: usize = 32;
     /// The Keychain's "item not found" (`errSecItemNotFound`).
     const NOT_FOUND: i32 = -25300;

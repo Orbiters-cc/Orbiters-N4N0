@@ -560,16 +560,16 @@ fn check(p: &Preview) -> anyhow::Result<()> {
         Ok(())
     };
     for (i, t) in h.textures.iter().enumerate() {
-        inside(t.data, &format!("texture {i}"))?;
+        inside(t.data, &format!("texture {i}"))?; // i18n: not shown (a GPU label)
     }
     for (i, m) in h.meshes.iter().enumerate() {
-        inside(m.data, &format!("mesh {i}"))?;
-        inside(m.indices, &format!("mesh {i}'s indices"))?;
+        inside(m.data, &format!("mesh {i}"))?; // i18n: not shown (a GPU label)
+        inside(m.indices, &format!("mesh {i}'s indices"))?; // i18n: not shown (error detail of a damaged preview file)
         ensure!(m.data.length == m.vertices as u64 * VERTEX_SIZE as u64, "mesh {i} has {} vertices in {} bytes", m.vertices, m.data.length);
         let count = m.indices.length / m.index_format.size() as u64;
         ensure!(m.indices.length % m.index_format.size() as u64 == 0, "mesh {i}'s indices are cut short");
         if let Some(uv) = m.lightmap_uv {
-            inside(uv, &format!("mesh {i}'s lightmap UVs"))?;
+            inside(uv, &format!("mesh {i}'s lightmap UVs"))?; // i18n: not shown (error detail of a damaged preview file)
             ensure!(uv.length == m.vertices as u64 * LIGHTMAP_UV_SIZE as u64, "mesh {i} has {} vertices in {} bytes of lightmap UVs", m.vertices, uv.length);
         }
         for s in &m.submeshes {

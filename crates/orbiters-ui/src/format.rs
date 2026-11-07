@@ -1,11 +1,39 @@
 //! Number and time formatting shared by the interfaces.
 
-/// Bytes in SI units, one decimal under ten: "8.2 MB", "82 MB".
+use orbiters_i18n::{language, mark, tr, Language};
+
+/// A decimal number as this language writes it: a comma in French, Spanish and Portuguese.
+fn decimal(number: String) -> String {
+    match language() {
+        Language::Fr | Language::Es | Language::PtBr => number.replace('.', ","),
+        Language::En | Language::Ja => number,
+    }
+}
+
+/// What groups thousands in this language. French's is a space that does not break.
+fn thousands() -> char {
+    match language() {
+        Language::Fr => '\u{a0}',
+        Language::Es | Language::PtBr => '.',
+        Language::En | Language::Ja => ',',
+    }
+}
+
+/// A percentage as this language writes it: with a space that does not break in French and Spanish.
+fn with_percent(number: String) -> String {
+    match language() {
+        Language::Fr | Language::Es => format!("{number}\u{a0}%"),
+        Language::En | Language::Ja | Language::PtBr => format!("{number}%"),
+    }
+}
+
+/// Bytes in SI units, one decimal under ten: "8.2 MB", "82 MB". French counts in octets: "8,2 Mo".
 pub fn bytes(n: f64) -> String {
     if !n.is_finite() {
         return "–".into();
     }
-    let units = ["B", "KB", "MB", "GB", "TB"];
+    let units = if language() == Language::Fr { ["o", "Ko", "Mo", "Go", "To"] } else { ["B", "KB", "MB", "GB", "TB"] }; // i18n: not shown (how French writes bytes: units, written where they are chosen)
+    let gap = if language() == Language::Fr { '\u{a0}' } else { ' ' };
     let sign = if n < 0.0 { "-" } else { "" };
     let mut v = n.abs();
     let mut i = 0;
@@ -14,7 +42,7 @@ pub fn bytes(n: f64) -> String {
         let digits = if i == 0 || v >= 9.95 { 0 } else { 1 };
         let shown = if digits == 0 { v.round() } else { (v * 10.0).round() / 10.0 };
         if shown < 1000.0 || i == units.len() - 1 {
-            return format!("{sign}{v:.digits$} {}", units[i]);
+            return format!("{sign}{}{gap}{}", decimal(format!("{v:.digits$}")), units[i]);
         }
         v /= 1000.0;
         i += 1;
@@ -35,7 +63,7 @@ pub fn duration(seconds: f64) -> String {
     }
 }
 
-/// Integer with thousands separators: "12,480".
+/// Integer with thousands separators: "12,480", as this language writes them ("12.480", and French's "12 480").
 pub fn integer(n: f64) -> String {
     if !n.is_finite() {
         return "0".into();
@@ -45,7 +73,7 @@ pub fn integer(n: f64) -> String {
     let mut out = String::new();
     for (i, ch) in digits.chars().enumerate() {
         if i > 0 && (digits.len() - i).is_multiple_of(3) {
-            out.push(',');
+            out.push(thousands());
         }
         out.push(ch);
     }
@@ -56,29 +84,30 @@ pub fn integer(n: f64) -> String {
     }
 }
 
-/// "92.5%", "100%" once complete: what is not complete never rounds up to it ("99.9%").
+/// "92.5%", "100%" once complete: what is not complete never rounds up to it ("99.9%"). As this language writes them: "92,5 %".
 pub fn percent(part: f64, total: f64) -> String {
     if total.is_nan() || total <= 0.0 || !part.is_finite() {
         return "–".into();
     }
     if part >= total {
-        return "100%".into();
+        return with_percent("100".into());
     }
-    format!("{:.1}%", (part / total * 100.0).min(99.9))
+    with_percent(decimal(format!("{:.1}", (part / total * 100.0).min(99.9))))
 }
 
 /// "just now", "5 min ago", "3 h ago", "2 d ago", then the date ("12 Oct 2026", UTC).
 pub fn relative_time(epoch_seconds: u64, now_seconds: u64) -> String {
     let diff = now_seconds.saturating_sub(epoch_seconds);
     match diff {
-        0..60 => "just now".into(),
-        60..3600 => format!("{} min ago", diff / 60),
-        3600..86400 => format!("{} h ago", diff / 3600),
-        86400..604800 => format!("{} d ago", diff / 86400),
+        0..60 => tr("just now").into(),
+        60..3600 => tr!("{minutes} min ago", minutes = diff / 60),
+        3600..86400 => tr!("{hours} h ago", hours = diff / 3600),
+        86400..604800 => tr!("{days} d ago", days = diff / 86400),
         _ => {
             let (y, m, d) = civil_from_days((epoch_seconds / 86400) as i64);
-            let months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-            format!("{d} {} {y}", months[(m - 1) as usize])
+            let months = [mark("Jan"), mark("Feb"), mark("Mar"), mark("Apr"), mark("May"), mark("Jun"), mark("Jul"), mark("Aug"), mark("Sep"), mark("Oct"), mark("Nov"), mark("Dec")];
+            // The whole date is one text: the order of day, month and year is each language's own.
+            tr!("{day} {month} {year}", day = d, month = tr(months[(m - 1) as usize]), year = y)
         }
     }
 }
@@ -104,6 +133,16 @@ pub fn folder_name(path: &std::path::Path) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn numbers_are_written_as_each_language_writes_them() {
+        use orbiters_i18n::in_language;
+        assert_eq!((bytes(8_200_000.0), integer(12_480.0), percent(925.0, 1000.0)), ("8.2 MB".to_string(), "12,480".to_string(), "92.5%".to_string()));
+        in_language(Language::Ja, || assert_eq!((bytes(8_200_000.0), integer(12_480.0), percent(925.0, 1000.0)), ("8.2 MB".to_string(), "12,480".to_string(), "92.5%".to_string())));
+        in_language(Language::Fr, || assert_eq!((bytes(8_200_000.0), integer(12_480.0), percent(925.0, 1000.0)), ("8,2\u{a0}Mo".to_string(), "12\u{a0}480".to_string(), "92,5\u{a0}%".to_string())));
+        in_language(Language::Es, || assert_eq!((bytes(8_200_000.0), integer(12_480.0), percent(925.0, 1000.0)), ("8,2 MB".to_string(), "12.480".to_string(), "92,5\u{a0}%".to_string())));
+        in_language(Language::PtBr, || assert_eq!((bytes(8_200_000.0), integer(12_480.0), percent(1000.0, 1000.0)), ("8,2 MB".to_string(), "12.480".to_string(), "100%".to_string())));
+    }
+
     use super::*;
 
     #[test]
@@ -144,5 +183,22 @@ mod tests {
         assert_eq!(relative_time(0, 7_200), "2 h ago");
         // 2026-10-12 00:00 UTC
         assert_eq!(relative_time(1_791_763_200, 1_791_763_200 + 30 * 86400), "12 Oct 2026");
+    }
+
+    /// The same moments in the other languages: the order of a date and the words of a time are each language's own.
+    #[test]
+    fn times_and_dates_read_in_the_language_now() {
+        use orbiters_i18n::{in_language, Language};
+        let old = (1_791_763_200, 1_791_763_200 + 30 * 86400);
+        in_language(Language::Ja, || {
+            assert_eq!(relative_time(0, 7_200), "2時間前");
+            assert_eq!(relative_time(old.0, old.1), "2026年10月12日");
+        });
+        in_language(Language::Fr, || {
+            assert_eq!(relative_time(0, 300), "il y a 5 min");
+            assert_eq!(relative_time(old.0, old.1), "12 oct. 2026");
+        });
+        in_language(Language::Es, || assert_eq!(relative_time(0, 86_400 * 2), "hace 2 d"));
+        in_language(Language::PtBr, || assert_eq!(relative_time(old.0, old.1), "12 out 2026"));
     }
 }

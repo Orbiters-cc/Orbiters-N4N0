@@ -1,3 +1,4 @@
+use orbiters_i18n::{mark, tr, tr_n};
 use super::thumb_cache;
 use crate::pages::{Cx, Job};
 use egui::{ColorImage, Id, Rect, TextureHandle};
@@ -193,6 +194,8 @@ pub struct State {
     pub(super) result_at: Option<Instant>,
     pub(super) action: Job<Result<Outcome, String>>,
     pub(super) action_label: String,
+    /// The running action adds repositories (the missing packages card shows its Retry busy meanwhile).
+    pub(super) adding_repositories: bool,
     pub(super) storage_job: Job<(PathBuf, orbiters_projects::storage::Health)>,
     pub(super) storage_health: Option<(PathBuf, orbiters_projects::storage::Health)>,
     pub(super) storage_checked: Option<Instant>,
@@ -361,6 +364,7 @@ impl Default for State {
             result_at: None,
             action: Job::default(),
             action_label: String::new(),
+            adding_repositories: false,
             storage_job: Job::default(),
             storage_health: None,
             storage_checked: None,
@@ -705,6 +709,7 @@ impl State {
         }
         if let Some(result) = self.action.take() {
             self.action_label.clear();
+            self.adding_repositories = false;
             self.busy_package = None;
             self.repo_adding = None;
             let change = self.last_change.take();
@@ -854,7 +859,7 @@ impl State {
             }
         }
         if let Some(Err(e)) = self.ack_job.take() {
-            self.error = Some(format!("Setup result was shown but could not be removed: {e}"));
+            self.error = Some(tr!("Setup result was shown but could not be removed: {error}", error = e));
         }
         self.poll_panel(ctx, cx);
     }
@@ -870,7 +875,10 @@ impl State {
             self.set_thumb(ctx, id, image, sum);
         }
         if !errors.is_empty() {
-            self.error = Some(format!("{} avatar picture(s) could not load: {}. Refresh to retry.", errors.len(), errors[0]));
+            self.error = Some(orbiters_i18n::fill(
+                &tr_n("{count} avatar picture could not load: {reason}. Refresh to retry.", "{count} avatar pictures could not load: {reason}. Refresh to retry.", errors.len() as u64),
+                &[("reason", &errors[0])],
+            ));
         }
     }
     fn pending_thumbnails(&self) -> Vec<String> {
@@ -1156,9 +1164,9 @@ impl State {
     pub(super) fn add_mixer(&mut self, ctx: &egui::Context, project: &Project) {
         let path = project.path.clone();
         self.busy_package = Some(MIXER.into());
-        self.task(ctx, "Adding Mixer…", move || {
+        self.task(ctx, tr("Adding Mixer…"), move || {
             orbiters_projects::runtime()?.block_on(vpm::install_orbiters(&orbiters_projects::vcc_dir(), &path, &[MIXER]))?;
-            Ok(Outcome::Changed("Mixer is in the project: open it in Unity to try it".into()))
+            Ok(Outcome::Changed(tr("Mixer is in the project: open it in Unity to try it").into()))
         });
     }
     pub(super) fn acknowledge_result(&mut self, ctx: &egui::Context) {
@@ -1176,13 +1184,13 @@ impl State {
     }
     pub(super) fn install(&mut self, ctx: &egui::Context, project: Project, avatar: Avatar, nano: bool, server: Server, origin: Rect) {
         if nano && server.n4n0_gallery_asset_id().is_none() {
-            self.error = Some("N4N0 has not been published on the production gallery yet. My Avatar can still be installed.".into());
+            self.error = Some(tr("N4N0 has not been published on the production gallery yet. My Avatar can still be installed.").into());
             return;
         }
         self.open_modal(ctx, Modal::Setup, origin);
         self.flow = None;
         self.pending = Some((project.name.clone(), avatar.name.clone(), nano));
-        self.task(ctx, if nano { "Installing My Avatar and preparing N4N0…" } else { "Installing My Avatar…" }, move || {
+        self.task(ctx, if nano { tr("Installing My Avatar and preparing N4N0…") } else { tr("Installing My Avatar…") }, move || {
             orbiters_projects::runtime()?.block_on(vpm::install_my_avatar(&orbiters_projects::vcc_dir(), &project.path))?;
             let request = if nano {
                 let r = setup::request(avatar.clone(), server.n4n0_gallery_asset_id().unwrap(), server.api(), env!("CARGO_PKG_VERSION"))?;
@@ -1215,28 +1223,28 @@ impl State {
         self.fixture = true;
         self.started = true;
         self.scan_rx = None;
-        let names = ["MasculineCanine", "Rexouium", "Nova", "Ultinova", "Kitsune", "Protogen"];
+        let names = ["MasculineCanine", "Rexouium", "Nova", "Ultinova", "Kitsune", "Protogen"]; // i18n: not shown (sample data of the screenshot scenes)
         let projects = [
-            ("My avatars", 4, discovery::Kind::Avatars, 0.2),
-            ("Weekend avatar", 1, discovery::Kind::Avatars, 26.0),
-            ("Moonlight world", 0, discovery::Kind::Worlds, 50.0),
-            ("Club outfits", 2, discovery::Kind::Avatars, 90.0),
-            ("Avatar backup", 1, discovery::Kind::Avatars, 200.0),
-            ("Old avatar project", 3, discovery::Kind::Avatars, 400.0),
-            ("Test world", 0, discovery::Kind::Worlds, 700.0),
+            ("My avatars", 4, discovery::Kind::Avatars, 0.2), // i18n: not shown (sample data of the screenshot scenes)
+            ("Weekend avatar", 1, discovery::Kind::Avatars, 26.0), // i18n: not shown (sample data of the screenshot scenes)
+            ("Moonlight world", 0, discovery::Kind::Worlds, 50.0), // i18n: not shown (sample data of the screenshot scenes)
+            ("Club outfits", 2, discovery::Kind::Avatars, 90.0), // i18n: not shown (sample data of the screenshot scenes)
+            ("Avatar backup", 1, discovery::Kind::Avatars, 200.0), // i18n: not shown (sample data of the screenshot scenes)
+            ("Old avatar project", 3, discovery::Kind::Avatars, 400.0), // i18n: not shown (sample data of the screenshot scenes)
+            ("Test world", 0, discovery::Kind::Worlds, 700.0), // i18n: not shown (sample data of the screenshot scenes)
         ];
         let found = if name == "projects-proposals" { 14 } else { 4 };
         self.scan.projects = (0..3 + found)
             .map(|i| {
                 let (label, count, kind, hours) = projects[i.min(projects.len() - 1)];
-                let label = if i < projects.len() { label.to_string() } else { format!("Avatar project {}", i - 2) };
+                let label = if i < projects.len() { label.to_string() } else { format!("Avatar project {}", i - 2) }; // i18n: not shown (sample data of the screenshot scenes)
                 let avatars = (0..count)
                     .map(|a| {
                         let k = (a + i) % names.len();
                         Avatar {
                             id: format!("avtr_00000000-0000-4000-8000-{:012}", k),
                             name: names[k].into(),
-                            scene: format!("Assets/{}/{}.unity", names[k], if a == 0 { "Avatar" } else { "Scenes/Main" }),
+                            scene: format!("Assets/{}/{}.unity", names[k], if a == 0 { "Avatar" } else { "Scenes/Main" }), // i18n: not shown (sample data of the screenshot scenes)
                             path: names[k].into(),
                             ..Default::default()
                         }
@@ -1301,14 +1309,14 @@ impl State {
         }
         self.view.repos = vec![
             vpm::Repository {
-                name: "VRChat official".into(),
+                name: "VRChat official".into(), // i18n: not shown (sample data of the screenshot scenes)
                 url: "https://packages.vrchat.com/official".into(),
                 id: "official".into(),
                 enabled: true,
                 builtin: true,
             },
             vpm::Repository {
-                name: "VRChat curated".into(),
+                name: "VRChat curated".into(), // i18n: not shown (sample data of the screenshot scenes)
                 url: "https://packages.vrchat.com/curated".into(),
                 id: "curated".into(),
                 enabled: false,
@@ -1317,14 +1325,14 @@ impl State {
             vpm::Repository { name: "Orbiters".into(), url: vpm::ORBITERS_REPOSITORY.into(), id: "orbiters".into(), enabled: true, builtin: false },
         ];
         self.view.packages = [
-            ("com.vrchat.avatars", "VRChat SDK – Avatars", Some("3.9.0"), vec!["3.9.0", "3.8.2", "3.8.1", "3.7.6"]),
-            ("com.vrchat.base", "VRChat SDK – Base", Some("3.9.0"), vec!["3.9.0", "3.8.2", "3.8.1", "3.7.6"]),
+            ("com.vrchat.avatars", "VRChat SDK – Avatars", Some("3.9.0"), vec!["3.9.0", "3.8.2", "3.8.1", "3.7.6"]), // i18n: not shown (sample data of the screenshot scenes)
+            ("com.vrchat.base", "VRChat SDK – Base", Some("3.9.0"), vec!["3.9.0", "3.8.2", "3.8.1", "3.7.6"]), // i18n: not shown (sample data of the screenshot scenes)
             ("orbiters.toolkit", "Orbiters Toolkit", Some("0.5.0"), vec!["0.6.0-beta.2", "0.5.0", "0.4.5"]),
             ("orbiters.myavatar", "My Avatar", Some("0.9.14"), vec!["0.9.14", "0.9.12", "0.8.0"]),
             ("com.vrcfury.vrcfury", "VRCFury", Some("1.1434.0"), vec!["1.1434.0", "1.1300.0"]),
             ("orbiters.mixer", "Mixer", None, vec!["0.7.0", "0.6.2"]),
             ("orbiters.refit", "ReFit", None, vec!["0.7.3", "0.7.2"]),
-            ("com.poiyomi.toon", "Poiyomi Toon Shader", None, vec!["9.2.67"]),
+            ("com.poiyomi.toon", "Poiyomi Toon Shader", None, vec!["9.2.67"]), // i18n: not shown (sample data of the screenshot scenes)
         ]
         .into_iter()
         .map(|(n, d, v, versions)| vpm::Package {
@@ -1346,9 +1354,9 @@ impl State {
             ..Default::default()
         };
         self.templates = vec![
-            template("VRChat Avatar Project", "com.vrchat.template.avatar", "2022.3.22f1", true),
-            template("VRChat World Project", "com.vrchat.template.world", "2022.3.22f1", true),
-            template("Studio base", "com.studio.template.base", "", false),
+            template(tr("VRChat Avatar Project"), "com.vrchat.template.avatar", "2022.3.22f1", true),
+            template(tr("VRChat World Project"), "com.vrchat.template.world", "2022.3.22f1", true),
+            template("Studio base", "com.studio.template.base", "", false), // i18n: not shown (sample data of the screenshot scenes)
         ];
         let app = orbiters_projects::vcc_app_dir().filter(|_| name == "projects-new-covers");
         for (i, t) in self.templates.iter_mut().enumerate() {
@@ -1384,25 +1392,25 @@ impl State {
             self.repo_icons.insert(url.into(), stand_in_icon(ctx, &format!("repo-{url}"), look));
         }
         self.new_location = STAND_IN_PROJECTS.into();
-        self.new_name = "My new avatar".into();
+        self.new_name = "My new avatar".into(); // i18n: not shown (sample data of the screenshot scenes)
         let known = vec![
             network::Listing {
                 name: "VRCFury".into(),
                 url: "https://vcc.vrcfury.com".into(),
-                description: "Avatar tools and setup helpers".into(),
+                description: "Avatar tools and setup helpers".into(), // i18n: not shown (sample data of the screenshot scenes)
                 ..Default::default()
             },
             network::Listing {
-                name: "Poiyomi".into(),
+                name: "Poiyomi".into(), // i18n: not shown (sample data of the screenshot scenes)
                 url: "https://poiyomi.github.io/vpm/index.json".into(),
-                description: "Poiyomi Toon and Pro shaders".into(),
+                description: "Poiyomi Toon and Pro shaders".into(), // i18n: not shown (sample data of the screenshot scenes)
                 ..Default::default()
             },
         ];
         let public = vec![network::Listing {
             name: "Orbiters".into(),
             url: vpm::ORBITERS_REPOSITORY.into(),
-            description: "My Avatar, Toolkit, Mixer and more".into(),
+            description: "My Avatar, Toolkit, Mixer and more".into(), // i18n: not shown (sample data of the screenshot scenes)
             ..Default::default()
         }];
         self.set_catalog(network::Catalog { known, public, errors: vec![] });
@@ -1442,21 +1450,21 @@ impl State {
             commits: vec![
                 commit(
                     "8e21f0a",
-                    "Enzo",
+                    "Enzo", // i18n: not shown (sample data of the screenshot scenes)
                     2 * 3600,
-                    "Save MasculineCanine's outfit with the new hoodie and its expression menu",
-                    "The hoodie's materials moved to Poiyomi 9.2, its toggles to the expression menu.\nChecked in Build & Test.",
+                    "Save MasculineCanine's outfit with the new hoodie and its expression menu", // i18n: not shown (sample data of the screenshot scenes)
+                    "The hoodie's materials moved to Poiyomi 9.2, its toggles to the expression menu.\nChecked in Build & Test.", // i18n: not shown (sample data of the screenshot scenes)
                 ),
-                commit("620df02", "Enzo", 26 * 3600, "Add the expression menu", ""),
-                commit("1b9c4d3", "Nova", 3 * 86400, "Texture pass on the hoodie", "Albedo and normal maps redone at 2K."),
-                commit("77aa310", "Enzo", 9 * 86400, "Import the base avatar", ""),
+                commit("620df02", "Enzo", 26 * 3600, "Add the expression menu", ""), // i18n: not shown (sample data of the screenshot scenes)
+                commit("1b9c4d3", "Nova", 3 * 86400, "Texture pass on the hoodie", "Albedo and normal maps redone at 2K."), // i18n: not shown (sample data of the screenshot scenes)
+                commit("77aa310", "Enzo", 9 * 86400, "Import the base avatar", ""), // i18n: not shown (sample data of the screenshot scenes)
             ],
             web: Some("https://github.com/Orbiters-cc/my-avatars".into()),
             host: Some("github.com".into()),
         });
         // The world project's own thumbnail (My World's), a stand-in.
         if let Some(w) = self.scan.projects.iter_mut().find(|p| p.kind == discovery::Kind::Worlds) {
-            w.worlds = vec![Avatar { id: "wrld_00000000-0000-4000-8000-000000000001".into(), name: "Moonlight".into(), ..Default::default() }];
+            w.worlds = vec![Avatar { id: "wrld_00000000-0000-4000-8000-000000000001".into(), name: "Moonlight".into(), ..Default::default() }]; // i18n: not shown (sample data of the screenshot scenes)
             let (wd, ht) = (480usize, 360usize);
             let mut pixels = vec![0u8; wd * ht * 3];
             for y in 0..ht {
@@ -1504,17 +1512,17 @@ impl State {
                 self.fixture_view_loading = true;
             }
             "projects-error" => {
-                self.error = Some("VCC's project list could not be read: settings.json is locked by another program. Close VCC and refresh.".into());
-                self.scan.warnings = vec!["D: could not be searched: access denied".into()];
+                self.error = Some("VCC's project list could not be read: settings.json is locked by another program. Close VCC and refresh.".into()); // i18n: not shown (sample data of the screenshot scenes)
+                self.scan.warnings = vec!["D: could not be searched: access denied".into()]; // i18n: not shown (sample data of the screenshot scenes)
             }
             "projects-busy" => {
                 self.selected = Some(first.path.clone());
-                self.fixture_action = Some("Duplicating My avatars…".into());
+                self.fixture_action = Some(tr!("Duplicating {name}…", name = SAMPLE_PROJECT));
                 *self.copy_progress.lock().unwrap() = templates::Progress {
                     copied: 1840,
                     total: 4310,
                     file: "Assets/MasculineCanine/Textures/Body_Albedo.png".into(),
-                    phase: "Copying project".into(),
+                    phase: String::from(mark("Copying project")),
                 };
             }
             "projects-search" => self.query = "avatar".into(),
@@ -1569,7 +1577,7 @@ impl State {
                 self.selected = Some(first.path.clone());
                 self.scroll_to_mixer = true;
                 self.busy_package = Some(MIXER.into());
-                self.fixture_action = Some("Adding Mixer…".into());
+                self.fixture_action = Some(tr("Adding Mixer…").into());
             }
             "projects-mixer-open-mid" | "projects-mixer-open" | "projects-mixer-fold-mid" => {
                 self.selected = Some(first.path.clone());
@@ -1631,18 +1639,18 @@ impl State {
             "projects-new-duplicate" => {
                 self.modal = Some(Modal::New);
                 self.duplicate = true;
-                self.new_name = "My avatars copy".into();
+                self.new_name = "My avatars copy".into(); // i18n: not shown (sample data of the screenshot scenes)
             }
             "projects-new-copying" => {
                 self.modal = Some(Modal::New);
                 self.duplicate = true;
-                self.new_name = "My avatars copy".into();
-                self.fixture_action = Some("Creating project…".into());
+                self.new_name = "My avatars copy".into(); // i18n: not shown (sample data of the screenshot scenes)
+                self.fixture_action = Some(tr("Creating project…").into());
                 *self.copy_progress.lock().unwrap() = templates::Progress {
                     copied: 1840,
                     total: 4310,
                     file: "Assets/MasculineCanine/Textures/Body_Albedo.png".into(),
-                    phase: "Copying project".into(),
+                    phase: String::from(mark("Copying project")),
                 };
             }
             "projects-avatars" => {
@@ -1668,7 +1676,7 @@ impl State {
             "projects-installing" => {
                 self.modal = Some(Modal::Setup);
                 self.pending = Some((first.name.clone(), first.avatars[0].name.clone(), true));
-                self.fixture_action = Some("Installing My Avatar and preparing N4N0…".into());
+                self.fixture_action = Some(tr("Installing My Avatar and preparing N4N0…").into());
             }
             "projects-setup" => {
                 self.modal = Some(Modal::Setup);
@@ -1680,17 +1688,17 @@ impl State {
             }
             "projects-setup-done" => {
                 self.modal = Some(Modal::Setup);
-                self.flow = Some(flow(true, Some((setup::Status::Done, "N4N0 was added to MasculineCanine and the scene was saved.")), false));
+                self.flow = Some(flow(true, Some((setup::Status::Done, "N4N0 was added to MasculineCanine and the scene was saved.")), false)); // i18n: not shown (sample data of the screenshot scenes)
             }
             "projects-setup-declined" => {
                 self.modal = Some(Modal::Setup);
-                self.flow = Some(flow(true, Some((setup::Status::Declined, "You chose Not now in Unity. Nothing was changed.")), false));
+                self.flow = Some(flow(true, Some((setup::Status::Declined, "You chose Not now in Unity. Nothing was changed.")), false)); // i18n: not shown (sample data of the screenshot scenes)
             }
             "projects-setup-failed" => {
                 self.modal = Some(Modal::Setup);
                 self.flow = Some(flow(
                     true,
-                    Some((setup::Status::Failed, "The avatar's descriptor could not be found in Assets/MasculineCanine/Avatar.unity.")),
+                    Some((setup::Status::Failed, "The avatar's descriptor could not be found in Assets/MasculineCanine/Avatar.unity.")), // i18n: not shown (sample data of the screenshot scenes)
                     false,
                 ));
             }
@@ -1720,7 +1728,8 @@ impl State {
             let total = (gb * 1e9) as u64;
             self.sizes.insert(p.path.clone(), size::Size { total, library: total / 10 * 6, files: 40_000 + 23_000 * i as u64 });
         }
-        let first = self.scan.projects[0].path.clone();
+        // Nothing listed in this scene.
+        let Some(first) = self.scan.projects.first().map(|p| p.path.clone()) else { return };
         let world = self.scan.projects.iter().find(|p| p.kind == discovery::Kind::Worlds).map(|p| p.path.clone());
         if let Some(w) = self.scan.projects.iter_mut().find(|p| p.kind == discovery::Kind::Worlds) {
             for a in &mut w.worlds {
@@ -1732,7 +1741,7 @@ impl State {
         let links = |project: &str| -> Vec<blender::Link> {
             let at = |file: &str| PathBuf::from(format!("{STAND_IN_PROJECTS}/{project}/{file}"));
             match project {
-                "My avatars" => vec![
+                "My avatars" => vec![ // i18n: not shown (sample data of the screenshot scenes)
                     blender::Link::new(
                         at("Assets/MCB/blenderProjects/MasculineCanine_a4d47dec0b66/blend~/MasculineCanine.blend"),
                         blender::Tool::Mcb,
@@ -1758,11 +1767,11 @@ impl State {
             }
         };
         let here = super::world_card::Here {
-            name: Some("Moonlight".into()),
+            name: Some("Moonlight".into()), // i18n: not shown (sample data of the screenshot scenes)
             captures: vec![
-                super::world_card::Capture { dir: PathBuf::from("captures/moonlight-2"), when: "28 Oct 2026, 21:14".into(), splats: Some(1_240_000) },
-                super::world_card::Capture { dir: PathBuf::from("captures/moonlight-1"), when: "21 Oct 2026, 19:02".into(), splats: Some(860_000) },
-                super::world_card::Capture { dir: PathBuf::from("captures/moonlight-0"), when: "20 Oct 2026, 22:40".into(), splats: None },
+                super::world_card::Capture { dir: PathBuf::from("captures/moonlight-2"), when: "28 Oct 2026, 21:14".into(), splats: Some(1_240_000) }, // i18n: not shown (sample data of the screenshot scenes)
+                super::world_card::Capture { dir: PathBuf::from("captures/moonlight-1"), when: "21 Oct 2026, 19:02".into(), splats: Some(860_000) }, // i18n: not shown (sample data of the screenshot scenes)
+                super::world_card::Capture { dir: PathBuf::from("captures/moonlight-0"), when: "20 Oct 2026, 22:40".into(), splats: None }, // i18n: not shown (sample data of the screenshot scenes)
             ],
             pictures: 23,
             folder: None,
@@ -1778,7 +1787,7 @@ impl State {
         let upload = |state: UploadState| UploadStatus {
             id: 7,
             world_id: world_id.clone(),
-            world_name: "Moonlight".into(),
+            world_name: "Moonlight".into(), // i18n: not shown (sample data of the screenshot scenes)
             kind: UploadKind::Pictures,
             paths: (0..4).map(|i| PathBuf::from(format!("VRChat/2026-10/VRChat_2026-10-28_21-1{i}.png"))).collect(),
             sent: 45,
@@ -1794,7 +1803,7 @@ impl State {
             }
             "projects-avatars-links" => {
                 self.selected = Some(first.clone());
-                self.links = links("My avatars");
+                self.links = links("My avatars"); // i18n: not shown (sample data of the screenshot scenes)
                 self.links_of = Some(first.clone());
             }
             "projects-worlds"
@@ -1806,21 +1815,21 @@ impl State {
             | "projects-worlds-capture-menu" => {
                 self.selected = world.clone();
                 self.git = None;
-                self.links = links("Moonlight world");
+                self.links = links("Moonlight world"); // i18n: not shown (sample data of the screenshot scenes)
                 self.links_of = world.clone();
                 self.here.insert(world_id.clone(), here);
                 self.fixture_maps = Some(if name == "projects-worlds-new" { MapsMine::default() } else { mine(true, 12) });
                 self.fixture_uploads = match name {
                     "projects-worlds-sharing" => vec![upload(UploadState::Sending)],
                     "projects-worlds-done" => vec![upload(UploadState::Done { added: 4, skipped: 1 })],
-                    "projects-worlds-failed" => vec![upload(UploadState::Failed { message: "Orbiters could not be reached. Try again shortly.".into() })],
+                    "projects-worlds-failed" => vec![upload(UploadState::Failed { message: "Orbiters could not be reached. Try again shortly.".into() })], // i18n: not shown (sample data of the screenshot scenes)
                     _ => vec![],
                 };
             }
             "projects-duplicate" | "projects-duplicate-taken" | "projects-duplicate-library" | "projects-duplicate-copying" => {
                 self.selected = Some(first.clone());
                 self.modal = Some(Modal::Duplicate(first.clone()));
-                let copy = if name == "projects-duplicate-taken" { "Weekend avatar" } else { "My avatars copy" };
+                let copy = if name == "projects-duplicate-taken" { "Weekend avatar" } else { "My avatars copy" }; // i18n: not shown (sample data of the screenshot scenes)
                 self.dup = Dup {
                     name: copy.into(),
                     location: STAND_IN_PROJECTS.into(),
@@ -1829,12 +1838,12 @@ impl State {
                     ..Default::default()
                 };
                 if name == "projects-duplicate-copying" {
-                    self.fixture_action = Some("Duplicating My avatars…".into());
+                    self.fixture_action = Some(tr!("Duplicating {name}…", name = SAMPLE_PROJECT));
                     *self.copy_progress.lock().unwrap() = templates::Progress {
                         copied: 1840,
                         total: 4310,
                         file: "Assets/MasculineCanine/Textures/Body_Albedo.png".into(),
-                        phase: "Copying project".into(),
+                        phase: String::from(mark("Copying project")),
                     };
                 }
             }
@@ -1929,7 +1938,8 @@ pub(super) enum Look {
 }
 
 /// Where screenshots' stand-in projects say they are.
-pub(super) const STAND_IN_PROJECTS: &str = if cfg!(target_os = "macos") { "/Users/enzo/Unity projects" } else { "H:/Unity projects" };
+const SAMPLE_PROJECT: &str = "My avatars"; // i18n: not shown (the sample project of the screenshot scenes)
+pub(super) const STAND_IN_PROJECTS: &str = if cfg!(target_os = "macos") { "/Users/enzo/Unity projects" } else { "H:/Unity projects" }; // i18n: not shown (sample data of the screenshot scenes)
 
 pub(super) fn stand_in_icon(ctx: &egui::Context, name: &str, look: Look) -> PackageIcon {
     let n = 96usize;

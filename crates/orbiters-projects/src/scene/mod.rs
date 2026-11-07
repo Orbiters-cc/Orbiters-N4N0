@@ -33,6 +33,7 @@ pub mod texture;
 pub mod world;
 pub mod yaml;
 
+use orbiters_i18n::tr;
 use crate::preview;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -102,13 +103,13 @@ impl Limits {
         }
     }
 
-    /// Fails once the time is up or the build was cancelled, saying what it was doing.
+    /// Fails once the time is up ([`TooLong`]) or the build was cancelled, saying what it was doing.
     pub fn check(&self, doing: &str) -> anyhow::Result<()> {
         if self.cancel.as_ref().is_some_and(|c| c.load(Ordering::Relaxed)) {
             anyhow::bail!("stopped");
         }
         if Instant::now() > self.deadline {
-            anyhow::bail!("it took too long ({doing})");
+            return Err(TooLong { doing: doing.to_string() }.into());
         }
         Ok(())
     }
@@ -256,6 +257,52 @@ const MAX_AGE: Duration = Duration::from_secs(14 * 86_400);
 /// are kept, so the next try gets further. Kept that long, a slow first try said "No preview" for two weeks.
 const RETRY_AFTER: Duration = Duration::from_secs(30 * 60);
 
+/// The time ran out, as an error of its own: what is done about it must not read its words, which are in the language now.
+#[derive(Debug)]
+pub struct TooLong {
+    doing: String,
+}
+
+impl std::fmt::Display for TooLong {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&tr!("it took too long ({doing})", doing = self.doing))
+    }
+}
+
+impl std::error::Error for TooLong {}
+
+/// Why a scene has no preview: what a person reads, and whether it is tried again because the time ran out.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Failure {
+    pub why: String,
+    pub out_of_time: bool,
+}
+
+impl std::ops::Deref for Failure {
+    type Target = str;
+    fn deref(&self) -> &str {
+        &self.why
+    }
+}
+
+impl std::fmt::Display for Failure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.why)
+    }
+}
+
+impl From<&str> for Failure {
+    fn from(why: &str) -> Self {
+        Failure { why: why.to_string(), out_of_time: false }
+    }
+}
+
+impl From<String> for Failure {
+    fn from(why: String) -> Self {
+        Failure { why, out_of_time: false }
+    }
+}
+
 /// What a build read and when, beside its preview (`<scene GUID>.json`).
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Record {
@@ -298,7 +345,7 @@ pub enum Source {
     /// Built here, but something it was built from changed: shown while it is built again.
     Stale(preview::Entry),
     /// The last build failed (and nothing changed since): why.
-    Failed(String),
+    Failed(Failure),
     /// None yet: to build.
     None,
 }
@@ -346,7 +393,7 @@ pub fn list(project: &Path) -> Vec<Slot> {
                 path: project.join(&h.path),
                 rel: h.path.clone(),
                 guid: h.guid.clone(),
-                name: if h.name.is_empty() { "Scene".into() } else { h.name.clone() },
+                name: if h.name.is_empty() { tr("Scene").into() } else { h.name.clone() },
                 modified: e.modified,
                 last_open: false,
                 in_build: false,
@@ -372,7 +419,7 @@ fn built(dir: &Path, guid: &str) -> Source {
     };
     let fresh = record.fresh();
     if let Some(e) = record.error.clone() {
-        return if fresh { Source::Failed(e) } else { Source::None };
+        return if fresh { Source::Failed(Failure { why: e, out_of_time: record.retry }) } else { Source::None };
     }
     let path = dir.join(format!("{guid}.{}", preview::EXTENSION));
     let entry = (|| {
@@ -413,7 +460,7 @@ pub fn keep_failure(project: &Path, scene: &SceneInfo, why: &str) {
 
 /// Builds the preview of `scene` and keeps it in the cache (a failure too, with its reason). The entry of the file,
 /// or why there is none.
-pub fn build_scene(project: &Path, scene: &SceneInfo, limits: &Limits) -> Result<preview::Entry, String> {
+pub fn build_scene(project: &Path, scene: &SceneInfo, limits: &Limits) -> Result<preview::Entry, Failure> {
     let dir = cache_dir(project);
     let _ = std::fs::create_dir_all(&dir);
     let start = Instant::now();
@@ -440,7 +487,8 @@ pub fn build_scene(project: &Path, scene: &SceneInfo, limits: &Limits) -> Result
     // Stopped (the app closing, a build wanted first) or out of time, whatever the message says (a model's reader
     // stopped by the deadline reports that it could not read the file).
     let stopped = error.is_some() && limits.cancel.as_ref().is_some_and(|c| c.load(Ordering::Relaxed));
-    let retry = error.is_some() && (Instant::now() > limits.deadline || error.as_deref().is_some_and(|e| e.starts_with("it took too long")));
+    let too_long = result.as_ref().err().is_some_and(|e| e.chain().any(|cause| cause.is::<TooLong>()));
+    let retry = error.is_some() && (Instant::now() > limits.deadline || too_long);
     files.sort();
     files.dedup();
     let record = Record {
@@ -461,9 +509,9 @@ pub fn build_scene(project: &Path, scene: &SceneInfo, limits: &Limits) -> Result
     };
     match result {
         Ok(b) => {
-            write_atomic(&preview_path, &b.bytes).map_err(|e| format!("could not keep it: {e}"))?;
+            write_atomic(&preview_path, &b.bytes).map_err(|e| Failure::from(tr!("could not keep it: {error}", error = e)))?;
             let _ = write_atomic(&dir.join(format!("{}.json", scene.guid)), &serde_json::to_vec_pretty(&record).unwrap_or_default());
-            let meta = std::fs::metadata(&preview_path).map_err(|e| e.to_string())?;
+            let meta = std::fs::metadata(&preview_path).map_err(|e| Failure::from(e.to_string()))?;
             trim(&cache_root());
             Ok(preview::Entry { path: preview_path, modified: meta.modified().unwrap_or_else(|_| SystemTime::now()), size: meta.len(), header: b.header })
         }
@@ -473,7 +521,7 @@ pub fn build_scene(project: &Path, scene: &SceneInfo, limits: &Limits) -> Result
                 return Err(STOPPED.into());
             }
             let _ = write_atomic(&dir.join(format!("{}.json", scene.guid)), &serde_json::to_vec_pretty(&record).unwrap_or_default());
-            Err(error.unwrap_or_default())
+            Err(Failure { why: error.unwrap_or_default(), out_of_time: retry })
         }
     }
 }
@@ -724,7 +772,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(cache_dir(p));
         let cancel = Arc::new(AtomicBool::new(true));
         let stopped = Limits { cancel: Some(cancel), ..Limits::default() };
-        assert_eq!(build_scene(p, &scene, &stopped).unwrap_err(), STOPPED);
+        assert_eq!(build_scene(p, &scene, &stopped).unwrap_err().why, STOPPED);
         assert!(!cache_dir(p).join(format!("{}.json", scene.guid)).exists());
         let _ = std::fs::remove_dir_all(cache_dir(p));
     }
@@ -737,7 +785,7 @@ mod tests {
         write(p, "Assets/Main.unity.meta", &format!("fileFormatVersion: 2\nguid: {}\n", "7".repeat(32)));
         let scene = scenes(p).remove(0);
         keep_failure(p, &scene, "an error while reading it");
-        assert!(matches!(&list(p)[0].source, Source::Failed(why) if why == "an error while reading it"), "not built again in a loop");
+        assert!(matches!(&list(p)[0].source, Source::Failed(why) if why.why == "an error while reading it"), "not built again in a loop");
         write(p, "Assets/Main.unity", "%YAML 1.1\n--- !u!1 &1\nGameObject:\n  m_Name: Saved again\n");
         assert!(matches!(list(p)[0].source, Source::None), "saved again: built again");
         let _ = std::fs::remove_dir_all(cache_dir(p));

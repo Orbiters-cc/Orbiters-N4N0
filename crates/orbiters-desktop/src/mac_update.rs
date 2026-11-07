@@ -6,6 +6,7 @@
 //! against the signed release's size and SHA-256 before it got here.
 
 use anyhow::Context as _;
+use orbiters_i18n::tr;
 use orbiters_update::{MAC_APP, MAC_BUNDLE_ID};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -34,7 +35,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
     // Whatever happened, an app opens at the end: this version if it went wrong.
     if let Err(e) = apply(&archive, &bundle) {
         eprintln!("the update did not install: {e:#}");
-        tell(&format!("The update could not be installed: {e:#}\n\nThis version opens again. You can install the new one by hand from the disk image."));
+        tell(&tr!("The update could not be installed: {error}\n\nThis version opens again. You can install the new one by hand from the disk image.", error = format!("{e:#}")));
     }
     let mut open = Command::new("/usr/bin/open");
     open.arg(&bundle);

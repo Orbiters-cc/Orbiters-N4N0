@@ -91,9 +91,9 @@ const RESAMPLE_WGSL: &str = include_str!("resample.wgsl");
 impl Resample {
     fn new(device: &wgpu::Device) -> Self {
         let module = device
-            .create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("3d-worlds resample"), source: wgpu::ShaderSource::Wgsl(RESAMPLE_WGSL.into()) });
+            .create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("3d-worlds resample"), source: wgpu::ShaderSource::Wgsl(RESAMPLE_WGSL.into()) }); // i18n: not shown (a GPU debug label)
         let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("3d-worlds resample"),
+            label: Some("3d-worlds resample"), // i18n: not shown (a GPU debug label)
             layout: None,
             module: &module,
             entry_point: Some("main"),
@@ -101,13 +101,13 @@ impl Resample {
             cache: None,
         });
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-            label: Some("3d-worlds wide"),
+            label: Some("3d-worlds wide"), // i18n: not shown (a GPU debug label)
             mag_filter: wgpu::FilterMode::Linear,
             min_filter: wgpu::FilterMode::Linear,
             ..Default::default()
         });
         let uniforms = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("3d-worlds resample uniforms"),
+            label: Some("3d-worlds resample uniforms"), // i18n: not shown (a GPU debug label)
             size: RESAMPLE_SLOTS * RESAMPLE_SLOT,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
@@ -186,7 +186,7 @@ impl FaceRenderer {
     fn scratch(&mut self, width: u32) -> &wgpu::TextureView {
         if self.scratch.as_ref().is_none_or(|s| s.0 != width) {
             let texture = self.device.create_texture(&wgpu::TextureDescriptor {
-                label: Some("3d-worlds eye picture"),
+                label: Some("3d-worlds eye picture"), // i18n: not shown (a GPU debug label)
                 size: wgpu::Extent3d { width, height: width, depth_or_array_layers: 1 },
                 mip_level_count: 1,
                 sample_count: 1,
@@ -245,7 +245,7 @@ impl FaceRenderer {
             self.masters = (0..6)
                 .map(|_| {
                     self.device.create_texture(&wgpu::TextureDescriptor {
-                        label: Some("3d-worlds face pictures"),
+                        label: Some("3d-worlds face pictures"), // i18n: not shown (a GPU debug label)
                         size: wgpu::Extent3d { width: 2 * width, height: width, depth_or_array_layers: 1 },
                         mip_level_count: 1,
                         sample_count: 1,
@@ -270,7 +270,7 @@ impl FaceRenderer {
     pub fn render_wide(&mut self, eye_index: usize, camera: &PlayCamera, placement: &Placement, count: usize) -> anyhow::Result<()> {
         if self.wide[eye_index].as_ref().is_none_or(|(t, _)| t.width() != camera.width || t.height() != camera.height) {
             let texture = self.device.create_texture(&wgpu::TextureDescriptor {
-                label: Some("3d-worlds wide view"),
+                label: Some("3d-worlds wide view"), // i18n: not shown (a GPU debug label)
                 size: wgpu::Extent3d { width: camera.width, height: camera.height, depth_or_array_layers: 1 },
                 mip_level_count: 1,
                 sample_count: 1,
@@ -311,7 +311,7 @@ impl FaceRenderer {
             self.queue.write_buffer(&self.resample.uniforms, offset, &bytes);
             let face_view = self.masters[face].create_view(&Default::default());
             let bind = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("3d-worlds resample"),
+                label: Some("3d-worlds resample"), // i18n: not shown (a GPU debug label)
                 layout: &self.resample.pipeline.get_bind_group_layout(0),
                 entries: &[
                     wgpu::BindGroupEntry {
@@ -360,7 +360,7 @@ impl FaceRenderer {
         self.gpu.count = count.min(self.total).max(1.min(self.total));
         self.gpu.step(camera, self.background, Target::None, None)?;
         let texture = self.device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("3d-worlds reference view"),
+            label: Some("3d-worlds reference view"), // i18n: not shown (a GPU debug label)
             size: wgpu::Extent3d { width: camera.width, height: camera.height, depth_or_array_layers: 1 },
             mip_level_count: 1,
             sample_count: 1,
@@ -377,7 +377,7 @@ impl FaceRenderer {
 /// A face texture: twice `width` across (left eye, right eye), `width` high, RGBA8 holding encoded sRGB.
 pub fn face_texture(device: &wgpu::Device, width: u32) -> wgpu::Texture {
     device.create_texture(&wgpu::TextureDescriptor {
-        label: Some("3d-worlds face"),
+        label: Some("3d-worlds face"), // i18n: not shown (a GPU debug label)
         size: wgpu::Extent3d { width: 2 * width, height: width, depth_or_array_layers: 1 },
         mip_level_count: 1,
         sample_count: 1,
@@ -393,7 +393,7 @@ pub fn read_texture(device: &wgpu::Device, queue: &wgpu::Queue, texture: &wgpu::
     let (w, h) = (texture.width(), texture.height());
     let row = (w * 4).div_ceil(256) * 256;
     let buffer = device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("3d-worlds readback"),
+        label: Some("3d-worlds readback"), // i18n: not shown (a GPU debug label)
         size: (row * h) as u64,
         usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
         mapped_at_creation: false,

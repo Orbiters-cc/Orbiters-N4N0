@@ -19,6 +19,7 @@ mod widgets;
 
 use super::Job;
 pub use files::Source;
+use orbiters_i18n::{mark, tr};
 use egui::{pos2, vec2, Align2, Color32, Id, Rect, Sense, Ui, UiBuilder};
 use orbiters_ui::anim::{self, Spring};
 use orbiters_ui::photo::render::{self, Renderer, Stage};
@@ -284,7 +285,7 @@ impl Editor {
         let fetch = source.clone();
         let loading = Job::spawn(ctx, move || {
             // A picture of Orbiters is downloaded first.
-            files::fetch(&fetch).map_err(|e| format!("The picture could not be downloaded: {e:#}"))?;
+            files::fetch(&fetch).map_err(|e| tr!("The picture could not be downloaded: {error}", error = format!("{e:#}")))?;
             load(&files).inspect(|_| c.request_repaint())
         });
         let mut e = Self::with(source, title.into(), doc, target, Some(loading));
@@ -448,19 +449,24 @@ impl Editor {
                         // Each save of a live picture is a picture of its own.
                         SAVED.fetch_add(1, Ordering::Relaxed);
                         let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-                        self.notice = Some((format!("Saved as “{name}”: it shows in Photos & captures."), Some(path)));
+                        self.notice = Some((tr!("Saved as “{name}”: it shows in Photos & captures.", name = name), Some(path)));
                         self.error = None;
                     }
                     Ok(path) => {
                         SAVED.fetch_add(1, Ordering::Relaxed);
                         let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-                        let place = if self.source.remote.is_some() { "in your VRChat pictures" } else { "beside the original" };
-                        self.notice = Some((format!("Saved as “{name}” {place}: it shows in Photos & captures."), Some(path.clone())));
+                        // A sentence for each place, never a piece put into one.
+                        let text = if self.source.remote.is_some() {
+                            tr!("Saved as “{name}” in your VRChat pictures: it shows in Photos & captures.", name = name)
+                        } else {
+                            tr!("Saved as “{name}” beside the original: it shows in Photos & captures.", name = name)
+                        };
+                        self.notice = Some((text, Some(path.clone())));
                         self.target = Some(path);
                         self.saved_doc = Some(self.doc.clone());
                         self.error = None;
                     }
-                    Err(e) => self.error = Some(format!("The picture could not be saved: {e}")),
+                    Err(e) => self.error = Some(tr!("The picture could not be saved: {error}", error = e)),
                 }
             } else {
                 ctx.request_repaint_after(std::time::Duration::from_millis(50));
@@ -606,16 +612,16 @@ impl Editor {
         let p = ui.painter().clone();
         let mid = bar.center().y;
         let back = Rect::from_center_size(pos2(bar.left() + GAP + 20.0, mid), vec2(40.0, 40.0));
-        if orbiters_ui::widgets::activated(&IconButton::new(icons::ARROW_LEFT, "Close the editor").size(40.0, 18.0).backdrop(theme::white(0.04)).show_at(ui, back)) {
+        if orbiters_ui::widgets::activated(&IconButton::new(icons::ARROW_LEFT, mark("Close the editor")).size(40.0, 18.0).backdrop(theme::white(0.04)).show_at(ui, back)) {
             self.close(&ctx);
         }
         let x = back.right() + 14.0;
         let caps = if self.live.is_some() {
-            "Edit in 3D"
+            tr("Edit in 3D")
         } else if self.target.is_some() {
-            "Edited copy"
+            tr("Edited copy")
         } else {
-            "Edit a copy"
+            tr("Edit a copy")
         };
         orbiters_ui::widgets::text(&p, pos2(x, mid - 10.0), Align2::LEFT_CENTER, &Txt::caps(caps));
         let name = match &self.source.remote {
@@ -630,14 +636,15 @@ impl Editor {
         let c = pos2(bar.center().x, mid);
         let can_undo = !self.history.past.is_empty() || self.doc != self.history.committed;
         let can_redo = !self.history.future.is_empty();
-        for (i, glyph, label, enabled) in [(-1.0, icons::ARROW_U_UP_LEFT, if cfg!(target_os = "macos") { "Undo (Cmd+Z)" } else { "Undo (Ctrl+Z)" }, can_undo), (0.0, icons::EYE, "Hold to see the original", true), (1.0, icons::ARROW_U_UP_RIGHT, if cfg!(target_os = "macos") { "Redo (Cmd+Shift+Z)" } else { "Redo (Ctrl+Shift+Z)" }, can_redo)] {
+        for (i, glyph, label, enabled) in [(-1.0, icons::ARROW_U_UP_LEFT, if cfg!(target_os = "macos") { mark("Undo (Cmd+Z)") } else { mark("Undo (Ctrl+Z)") }, can_undo), (0.0, icons::EYE, mark("Hold to see the original"), true), (1.0, icons::ARROW_U_UP_RIGHT, if cfg!(target_os = "macos") { mark("Redo (Cmd+Shift+Z)") } else { mark("Redo (Ctrl+Shift+Z)") }, can_redo)] {
             let r = Rect::from_center_size(c + vec2(i * 46.0, 0.0), vec2(40.0, 40.0));
             let mut bu = ui.new_child(UiBuilder::new().max_rect(r).id_salt(("editor-history", label)));
             if !enabled {
                 bu.disable();
                 bu.multiply_opacity(0.35);
             }
-            let resp = IconButton::new(glyph, label).size(40.0, 18.0).show_at(&mut bu, r);
+            // Its id from the English label: an open tooltip keeps its state when the language changes.
+            let resp = IconButton::new(glyph, label).size(40.0, 18.0).id_salt(label).show_at(&mut bu, r);
             if i == 0.0 {
                 self.comparing = resp.is_pointer_button_down_on();
             } else if orbiters_ui::widgets::activated(&resp) && enabled {
@@ -652,10 +659,10 @@ impl Editor {
         // Save on the right, saying how far it is.
         let saving = self.saving.as_ref().map(|s| s.progress.load(Ordering::Relaxed) as f32 / 1000.0);
         let label = match saving {
-            Some(k) => format!("Saving {:.0} %", k * 100.0),
-            None if self.live.is_some() => "Save picture".to_string(),
-            None if self.target.is_some() => "Save".to_string(),
-            None => "Save a copy".to_string(),
+            Some(k) => tr!("Saving {percent}", percent = format!("{:.0} %", k * 100.0)),
+            None if self.live.is_some() => tr("Save picture").to_string(),
+            None if self.target.is_some() => tr("Save").to_string(),
+            None => tr("Save a copy").to_string(),
         };
         let enabled = self.loaded.is_some() && saving.is_none() && (self.dirty() || self.live.is_some());
         let b = Button::new(&label).icon(icons::FLOPPY_DISK).variant(Variant::Primary).enabled(enabled).id_salt("editor-save");
@@ -672,9 +679,9 @@ impl Editor {
         // Looks, Save this view (live) or Edit in 3D (a copy made there), left of it.
         let msg_right = self.more_buttons(ui, r) - 12.0;
         let msg = if self.confirm_close && self.closing.is_none() {
-            Some(("Not saved: close again to leave without saving", theme::WARN))
+            Some((tr("Not saved: close again to leave without saving"), theme::WARN))
         } else if self.error.is_some() {
-            Some(("Something went wrong (see the canvas)", theme::DANGER))
+            Some((tr("Something went wrong (see the canvas)"), theme::DANGER))
         } else {
             None
         };
@@ -690,7 +697,7 @@ impl Editor {
         let mut left = save.left() - 10.0;
         let busy = self.saving.is_some();
         if self.live.is_some() {
-            let b = Button::new("Save this view").icon(icons::CAMERA).variant(Variant::Glass).enabled(!busy).hint("Saves the view as it is, without the layers").id_salt("editor-3d-view");
+            let b = Button::new(tr("Save this view")).icon(icons::CAMERA).variant(Variant::Glass).enabled(!busy).hint(tr("Saves the view as it is, without the layers")).id_salt("editor-3d-view");
             let w = b.desired_width(ui);
             let r = Rect::from_min_size(pos2(left - w, save.top()), vec2(w, save.height()));
             if super::sharing::pressed(b.show_at(ui, r)) && !busy {
@@ -700,7 +707,7 @@ impl Editor {
             }
             left = r.left() - 10.0;
         } else if self.view3d.is_some() {
-            let b = Button::new("Edit in 3D").icon(icons::CUBE).variant(Variant::Glass).hint("Opens its capture's 3D view where it was made, with these layers").id_salt("editor-to-3d");
+            let b = Button::new(tr("Edit in 3D")).icon(icons::CUBE).variant(Variant::Glass).hint(tr("Opens its capture's 3D view where it was made, with these layers")).id_salt("editor-to-3d");
             let w = b.desired_width(ui);
             let r = Rect::from_min_size(pos2(left - w, save.top()), vec2(w, save.height()));
             if super::sharing::pressed(b.show_at(ui, r)) {
@@ -730,7 +737,7 @@ impl Editor {
         }
         if let Some(path) = path {
             nu.add_space(8.0);
-            let b = Button::new("Show in its folder").icon(icons::FOLDER_OPEN).size(Size::Sm).id_salt("editor-reveal");
+            let b = Button::new(tr("Show in its folder")).icon(icons::FOLDER_OPEN).size(Size::Sm).id_salt("editor-reveal");
             let w = b.desired_width(&nu);
             let (r, _) = nu.allocate_exact_size(vec2(w, 32.0), Sense::hover());
             if super::sharing::pressed(b.show_at(&mut nu, r)) {
@@ -754,7 +761,7 @@ fn load(files: &[PathBuf]) -> Result<Loaded, String> {
     let mut inputs = Vec::new();
     let mut full = (0, 0);
     for (i, f) in files.iter().enumerate() {
-        let img = files::load(f).map_err(|e| format!("{} could not be read: {e:#}", f.file_name().map(|n| n.to_string_lossy()).unwrap_or_default()))?;
+        let img = files::load(f).map_err(|e| tr!("{file} could not be read: {error}", file = f.file_name().map(|n| n.to_string_lossy()).unwrap_or_default(), error = format!("{e:#}")))?;
         if i == 0 {
             full = (img.width, img.height);
         }

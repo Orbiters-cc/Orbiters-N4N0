@@ -14,6 +14,7 @@
 use super::detect::{self, Part, Seen, MenuKey, Watcher};
 use super::zones::{self, Around, Placed, Zone};
 use super::{Panel, Panels};
+use orbiters_i18n::mark;
 use crate::backend::Ctl;
 use crate::ipc::{Client, Endpoint, Role};
 use crate::state::{OrbitStatus, Snapshot};
@@ -98,7 +99,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         let found = game.find(&snap);
         // Exclusive full screen shows no other window: say so, and do nothing.
         let exclusive = found.is_some_and(|_| full_screen_exclusive());
-        let status = OrbitStatus { note: exclusive.then(|| "VRChat is in exclusive full screen, which no other window can be above. Use a window or borderless full screen.".to_string()), steamvr_overrides: None };
+        let status = OrbitStatus { note: exclusive.then(|| mark("VRChat is in exclusive full screen, which no other window can be above. Use a window or borderless full screen.").to_string()), steamvr_overrides: None };
         if said.as_ref() != Some(&status) {
             backend.orbit_status(status.clone());
             said = Some(status);
@@ -243,12 +244,12 @@ impl Hints {
     fn now(&self, open: Option<Around>, pointing: bool) -> Option<(&'static str, &'static str)> {
         match open {
             // Now the ring takes the mouse: it said so, it says so.
-            Some(Around::Wheel) if pointing && self.pointed <= Self::FULL => Some(("Click a tool", "")),
+            Some(Around::Wheel) if pointing && self.pointed <= Self::FULL => Some((mark("Click a tool"), "")),
             Some(Around::Wheel) if pointing => None,
-            Some(Around::Wheel) if self.pointed < Self::FULL => Some(("Hold Left Alt, then click a tool", "Or press its number")),
-            Some(Around::Wheel) => Some(("Left Alt to click, or a number", "")),
+            Some(Around::Wheel) if self.pointed < Self::FULL => Some((mark("Hold Left Alt, then click a tool"), mark("Or press its number"))),
+            Some(Around::Wheel) => Some((mark("Left Alt to click, or a number"), "")),
             // Says what this is, and that it is not VRChat's.
-            Some(Around::QuickMenu) if self.openings <= Self::FULL => Some(("Your tools", "Worlds in 3D, videos, instances and 3D pictures.")),
+            Some(Around::QuickMenu) if self.openings <= Self::FULL => Some((mark("Your tools"), mark("Worlds in 3D, videos, instances and 3D pictures."))),
             _ => None,
         }
     }
@@ -540,7 +541,7 @@ impl Gpu {
         // SAFETY: the outputs are valid.
         unsafe { D3D11CreateDevice(None, D3D_DRIVER_TYPE_HARDWARE, HMODULE::default(), D3D11_CREATE_DEVICE_BGRA_SUPPORT, None, D3D11_SDK_VERSION, Some(&mut device), None, Some(&mut context)) }
             .map_err(|e| text("Direct3D", e))?;
-        let (device, context) = (device.ok_or("no Direct3D device")?, context.ok_or("no Direct3D context")?);
+        let (device, context) = (device.ok_or("no Direct3D device")?, context.ok_or("no Direct3D context")?); // i18n: not shown (logged by the caller, never drawn)
         let dxgi: IDXGIDevice = device.cast().map_err(|e| text("DXGI", e))?;
         // SAFETY: the DXGI device is alive for the call.
         let winrt: IDirect3DDevice = unsafe { CreateDirect3D11DeviceFromDXGIDevice(&dxgi) }.and_then(|d| d.cast()).map_err(|e| text("device", e))?;
@@ -552,11 +553,11 @@ impl Capture {
     fn new(window: HWND, gpu: &Gpu) -> Result<Self, String> {
         let text = |what: &str, e: windows::core::Error| format!("{what}: {}", e.message());
         let Gpu { device, context, winrt } = gpu.clone();
-        let interop = windows::core::factory::<GraphicsCaptureItem, IGraphicsCaptureItemInterop>().map_err(|e| text("capture item", e))?;
+        let interop = windows::core::factory::<GraphicsCaptureItem, IGraphicsCaptureItemInterop>().map_err(|e| text("capture item", e))?; // i18n: not shown (logged, never drawn)
         // SAFETY: a window handle; asking for one that is gone only fails.
-        let item: GraphicsCaptureItem = unsafe { interop.CreateForWindow(window) }.map_err(|e| text("capture item", e))?;
+        let item: GraphicsCaptureItem = unsafe { interop.CreateForWindow(window) }.map_err(|e| text("capture item", e))?; // i18n: not shown
         let size = item.Size().map_err(|e| text("size", e))?;
-        let pool = Direct3D11CaptureFramePool::CreateFreeThreaded(&winrt, DirectXPixelFormat::B8G8R8A8UIntNormalized, 2, size).map_err(|e| text("frame pool", e))?;
+        let pool = Direct3D11CaptureFramePool::CreateFreeThreaded(&winrt, DirectXPixelFormat::B8G8R8A8UIntNormalized, 2, size).map_err(|e| text("frame pool", e))?; // i18n: not shown
         let session = pool.CreateCaptureSession(&item).map_err(|e| text("session", e))?;
         // No pointer in the picture, and Windows' yellow border off: this looks at the game, nobody is shown being recorded.
         let _ = session.SetIsCursorCaptureEnabled(false);

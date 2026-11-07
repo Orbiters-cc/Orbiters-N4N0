@@ -2,6 +2,7 @@
 //! Blocking methods belong on background threads. No credentials, codes, cookies or response bodies are logged.
 //! Reads, and one change: the picture of an avatar or world the signed-in account uploaded ([`replace_image`]).
 use base64::{engine::general_purpose::STANDARD, Engine as _};
+use orbiters_i18n::tr;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
@@ -61,20 +62,20 @@ pub enum Error {
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Disabled => f.write_str("VRChat sign-in is not available for this Orbiters account."),
-            Self::Unauthorized => f.write_str("Your VRChat session expired. Sign in again."),
-            Self::WrongCode => f.write_str("That code was not accepted. Check it and try again."),
-            Self::RateLimited(d) => write!(f, "VRChat is rate limiting requests. Try again in {} seconds.", d.as_secs().max(1)),
-            Self::Unavailable => f.write_str("VRChat could not be reached. Try again shortly."),
-            Self::InvalidResponse => f.write_str("VRChat returned an unexpected answer. Try again shortly."),
-            Self::Storage => f.write_str("The VRChat session could not be saved securely on this computer."),
-            Self::NotFound => f.write_str("VRChat does not show this item to your account."),
-            Self::UnsafeUrl => f.write_str("VRChat returned an unsupported image address."),
-            Self::NotYours => f.write_str("Only the VRChat account that uploaded it can change its picture."),
-            Self::Upload => f.write_str("VRChat's storage did not accept the picture. Try again shortly."),
-            Self::Processing => f.write_str("VRChat is still processing the picture. Try again in a minute."),
-            Self::Refused(status, message) if message.is_empty() => write!(f, "VRChat refused the request (HTTP {status}). Try again shortly."),
-            Self::Refused(status, message) => write!(f, "VRChat refused the request (HTTP {status}: {message})."),
+            Self::Disabled => f.write_str(tr("VRChat sign-in is not available for this Orbiters account.")),
+            Self::Unauthorized => f.write_str(tr("Your VRChat session expired. Sign in again.")),
+            Self::WrongCode => f.write_str(tr("That code was not accepted. Check it and try again.")),
+            Self::RateLimited(d) => f.write_str(&tr!("VRChat is rate limiting requests. Try again in {seconds} seconds.", seconds = d.as_secs().max(1))),
+            Self::Unavailable => f.write_str(tr("VRChat could not be reached. Try again shortly.")),
+            Self::InvalidResponse => f.write_str(tr("VRChat returned an unexpected answer. Try again shortly.")),
+            Self::Storage => f.write_str(tr("The VRChat session could not be saved securely on this computer.")),
+            Self::NotFound => f.write_str(tr("VRChat does not show this item to your account.")),
+            Self::UnsafeUrl => f.write_str(tr("VRChat returned an unsupported image address.")),
+            Self::NotYours => f.write_str(tr("Only the VRChat account that uploaded it can change its picture.")),
+            Self::Upload => f.write_str(tr("VRChat's storage did not accept the picture. Try again shortly.")),
+            Self::Processing => f.write_str(tr("VRChat is still processing the picture. Try again in a minute.")),
+            Self::Refused(status, message) if message.is_empty() => f.write_str(&tr!("VRChat refused the request (HTTP {status}). Try again shortly.", status = status)),
+            Self::Refused(status, message) => f.write_str(&tr!("VRChat refused the request (HTTP {status}: {message}).", status = status, message = message)),
         }
     }
 }
@@ -142,9 +143,9 @@ pub enum TwoFactor {
 impl TwoFactor {
     pub fn label(self) -> &'static str {
         match self {
-            Self::Totp => "Authenticator code",
-            Self::Email => "Email code",
-            Self::Recovery => "Recovery code",
+            Self::Totp => tr("Authenticator code"),
+            Self::Email => tr("Email code"),
+            Self::Recovery => tr("Recovery code"),
         }
     }
     fn path(self) -> &'static str {
@@ -260,8 +261,8 @@ impl Kind {
     }
     fn label(self) -> &'static str {
         match self {
-            Self::Avatar => "Avatar",
-            Self::World => "World",
+            Self::Avatar => tr("Avatar"),
+            Self::World => tr("World"),
         }
     }
 }
@@ -296,7 +297,7 @@ fn parse_login(body: &[u8]) -> Result<Login> {
 
 /// Individually URL-encode the two fields before joining them (VRChat's Basic auth contract).
 pub fn basic_header(username: &str, password: &str) -> String {
-    format!("Basic {}", STANDARD.encode(format!("{}:{}", encode(username), encode(password))))
+    format!("Basic {}", STANDARD.encode(format!("{}:{}", encode(username), encode(password)))) // i18n: not shown (an HTTP header)
 }
 /// A path segment as VRChat's firewall takes it: RFC 3986's path characters stay as they are (an instance's `~`, `(`,
 /// `)`, `,` and `:`, which VRChat refuses percent-encoded with 400 "malformed url"), anything else is percent-encoded.
@@ -1039,12 +1040,12 @@ pub enum Step {
 impl Step {
     pub fn label(self) -> &'static str {
         match self {
-            Self::Checking => "Checking it is yours…",
-            Self::Preparing => "Preparing the upload…",
-            Self::Uploading => "Uploading the picture…",
-            Self::Signing => "Uploading its signature…",
-            Self::Processing => "VRChat is checking it…",
-            Self::Saving => "Saving…",
+            Self::Checking => tr("Checking it is yours…"),
+            Self::Preparing => tr("Preparing the upload…"),
+            Self::Uploading => tr("Uploading the picture…"),
+            Self::Signing => tr("Uploading its signature…"),
+            Self::Processing => tr("VRChat is checking it…"),
+            Self::Saving => tr("Saving…"),
         }
     }
     /// How far the replacement is (0 to 1) once this step starts.
@@ -1761,33 +1762,33 @@ pub(crate) mod tests {
         ]);
         assert_eq!(c.instance_alive("wrld_a", "1"), Ok(Some(true)), "`active` is optional and true by default");
         assert_eq!(c.instance_alive("wrld_a", "2"), Ok(Some(false)));
-        assert_eq!(c.instance_alive("wrld_a", "3"), Ok(Some(false)));
+        assert_eq!(c.instance_alive("wrld_a", "3"), Ok(Some(false))); // i18n: not shown (inside a test the scan cannot skip)
         let refused = c.instance_alive("wrld_a", "4").unwrap_err();
         assert_eq!(refused, Error::Refused(400, "malformed url".into()));
         assert_eq!(refused.to_string(), "VRChat refused the request (HTTP 400: malformed url).");
         assert_eq!(c.instance_alive("wrld_a", "5"), Err(Error::InvalidResponse));
         assert_eq!(c.instance_alive("wrld_a", "6"), Err(Error::Refused(302, String::new())));
-        assert!(!c.instances.contains_key(&("wrld_a".into(), "4".into())), "errors are not cached");
+        assert!(!c.instances.contains_key(&("wrld_a".into(), "4".into())), "errors are not cached"); // i18n: not shown (inside a test the scan cannot skip)
     }
     #[cfg(windows)]
     #[test]
     fn encrypted_store_rotates_restores_and_is_deleted_even_when_logout_fails() {
         let path = std::env::temp_dir().join(format!("orbiters-vrchat-test-{}.bin", uuid::Uuid::new_v4()));
         let (mut c, _) = mock(vec![
-            response(200, r#"{"id":"usr_test","displayName":"Tester"}"#, &["auth=initial"]),
+            response(200, r#"{"id":"usr_test","displayName":"Tester"}"#, &["auth=initial"]), // i18n: not shown (inside a test the scan cannot skip)
             response(200, r#"{"id":"avtr_a","name":"A"}"#, &["auth=rotated"]),
             response(503, "", &[]),
         ]);
         c.store = Some(path.clone());
-        c.sign_in("test-user", "never-persist-this-password").unwrap();
+        c.sign_in("test-user", "never-persist-this-password").unwrap(); // i18n: not shown (inside a test the scan cannot skip)
         c.avatar("avtr_a").unwrap();
         let encrypted = std::fs::read(&path).unwrap();
         let plain = crate::dpapi::crypt(&encrypted, ENTROPY, false).unwrap();
         let v: serde_json::Value = serde_json::from_slice(&plain).unwrap();
         assert_eq!(v.as_object().unwrap().len(), 2);
         assert_eq!(v["auth"], "rotated");
-        assert!(!String::from_utf8_lossy(&plain).contains("never-persist"));
-        let (mut restored, seen) = mock(vec![response(200, r#"{"id":"usr_test","displayName":"Tester"}"#, &[])]);
+        assert!(!String::from_utf8_lossy(&plain).contains("never-persist")); // i18n: not shown (inside a test the scan cannot skip)
+        let (mut restored, seen) = mock(vec![response(200, r#"{"id":"usr_test","displayName":"Tester"}"#, &[])]); // i18n: not shown (inside a test the scan cannot skip)
         restored.cookies = Cookies::default();
         restored.user = None;
         restored.store = Some(path.clone());

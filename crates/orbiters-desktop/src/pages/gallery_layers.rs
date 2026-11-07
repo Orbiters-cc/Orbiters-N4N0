@@ -6,6 +6,7 @@
 use crate::controller::shares::{Entry, Layer};
 use crate::worlds::{Pictures, THUMB_WIDTH};
 use egui::{pos2, vec2, Align2, Color32, ColorImage, Id, Painter, Pos2, Rect, Sense, TextureHandle, TextureOptions, Ui};
+use orbiters_i18n::{tr, tr_n};
 use orbiters_ui::{
     anim::{self, Spring},
     feedback, icons, paint,
@@ -38,8 +39,8 @@ pub fn checkerboard(p: &Painter, rect: Rect, radii: [f32; 4], alpha: f32) {
 pub fn label(e: &Entry) -> Option<String> {
     match e.layers() {
         [] => None,
-        [one] if !e.has_composite() => Some(format!("{} layer", one.name)),
-        many => Some(format!("{} layers", many.len())),
+        [one] if !e.has_composite() => Some(tr!("{name} layer", name = one.name)),
+        many => Some(tr_n("{count} layer", "{count} layers", many.len() as u64)),
     }
 }
 
@@ -138,7 +139,7 @@ impl LayerView {
         // Each chip: the picture (an icon, its word), each layer (its thumbnail, its name, its eye).
         let mut chips: Vec<(Option<usize>, f32)> = Vec::new();
         if composite {
-            chips.push((None, 12.0 + 16.0 + 6.0 + widgets::text_size(ui, &name("Picture")).x + 12.0));
+            chips.push((None, 12.0 + 16.0 + 6.0 + widgets::text_size(ui, &name(tr("Picture"))).x + 12.0));
         }
         for (i, l) in layers.iter().enumerate() {
             chips.push((Some(i), 4.0 + 24.0 + 7.0 + widgets::text_size(ui, &name(&l.name)).x + 4.0 + 26.0 + 3.0));
@@ -183,8 +184,8 @@ impl LayerView {
             let eye = Rect::from_min_size(pos2(r.right() - 3.0 - 26.0, r.top() + 3.0), vec2(26.0, 26.0));
             let body = if chip.is_some() { Rect::from_min_max(r.min, pos2(eye.left(), r.bottom())) } else { r };
             let hint = match chip {
-                None => "The picture, all layers in one".to_string(),
-                Some(i) => format!("Only the {} layer (Share shares it)", layers[*i].name),
+                None => tr("The picture, all layers in one").to_string(),
+                Some(i) => tr!("Only the {layer} layer (Share shares it)", layer = layers[*i].name),
             };
             let resp = ui.interact(body, id.with(("chip", n)), if enabled { Sense::click() } else { Sense::hover() }).on_hover_text(hint);
             let hover = anim::toggle(&ctx, id.with(("hover", n)), resp.hovered() && enabled, Spring::SNAPPY);
@@ -198,7 +199,7 @@ impl LayerView {
                 None => {
                     widgets::icon(&fade, pos2(r.left() + 12.0 + 8.0, r.center().y), icons::IMAGES, 15.0, theme::FG);
                     if !compact {
-                        widgets::text(&fade, pos2(r.left() + 12.0 + 16.0 + 6.0, r.center().y), Align2::LEFT_CENTER, &name("Picture"));
+                        widgets::text(&fade, pos2(r.left() + 12.0 + 16.0 + 6.0, r.center().y), Align2::LEFT_CENTER, &name(tr("Picture")));
                     }
                 }
                 Some(i) => {
@@ -218,7 +219,7 @@ impl LayerView {
                         widgets::text(&fade, pos2(thumb.right() + 7.0, r.center().y), Align2::LEFT_CENTER, &t);
                     }
                     let er = ui.interact(eye, id.with(("eye", n)), if enabled { Sense::click() } else { Sense::hover() });
-                    let er = er.on_hover_text(if hidden { format!("Show the {} layer", l.name) } else { format!("Hide the {} layer", l.name) });
+                    let er = er.on_hover_text(if hidden { tr!("Show the {layer} layer", layer = l.name) } else { tr!("Hide the {layer} layer", layer = l.name) });
                     let eh = anim::toggle(&ctx, id.with(("eye-hover", n)), er.hovered() && enabled, Spring::SNAPPY);
                     fade.circle_filled(eye.center(), 13.0, theme::white(0.1 * eh));
                     let glyph = if hidden { icons::EYE_SLASH } else { icons::EYE };

@@ -348,7 +348,7 @@ impl<'a> Loader<'a> {
                 Err(e) => {
                     // Only worth saying when nothing else can read the model: an FBX is then read from its file.
                     if stale_too {
-                        let what = format!("{}: its import in Library could not be read: {e:#}", rel(self.assets, path));
+                        let what = format!("{}: its import in Library could not be read: {e:#}", rel(self.assets, path)); // i18n: not shown (an error detail)
                         self.note_missing(what);
                     }
                     None
@@ -386,7 +386,7 @@ impl<'a> Loader<'a> {
     }
 
     fn file_at(&mut self, path: &Path, depth: usize) -> anyhow::Result<Graph> {
-        self.limits.check("reading the scene")?;
+        self.limits.check("reading the scene")?; // i18n: not shown (what a time-limit error says it was doing)
         let text = self.read_text(path)?;
         let mut graph = Graph::default();
         let mut instances = Vec::new();
@@ -410,7 +410,7 @@ impl<'a> Loader<'a> {
                     let head: String = doc.body.lines().take(16).collect::<Vec<_>>().join("\n");
                     let v = yaml::parse(&head);
                     let v = v.entries().first().map(|(_, v)| v.clone()).unwrap_or_default();
-                    let avatar_fields = doc.mentions("\n  ViewPosition:") && doc.mentions("\n  Animations:");
+                    let avatar_fields = doc.mentions("\n  ViewPosition:") && doc.mentions("\n  Animations:"); // i18n: not shown (a key of Unity's YAML)
                     let script = v.get("m_Script").as_ref();
                     if script.as_ref().and_then(|s| s.guid.as_deref()) == Some(BAKERY_STORAGE) {
                         graph.bakery = bakery_of(&doc.parse());
@@ -560,7 +560,7 @@ impl<'a> Loader<'a> {
     }
 
     fn instantiate(&mut self, instance: i64, pi: &Value, into: &mut Graph, depth: usize) -> anyhow::Result<()> {
-        self.limits.check("resolving prefabs")?;
+        self.limits.check("resolving prefabs")?; // i18n: not shown (what a time-limit error says it was doing)
         self.prefab_instances += 1;
         anyhow::ensure!(self.prefab_instances <= self.limits.max_prefab_instances, "more than {} prefab instances", self.limits.max_prefab_instances);
         let Some(source) = pi.get("m_SourcePrefab").as_ref().and_then(|r| r.guid) else { return Ok(()) };
@@ -568,8 +568,8 @@ impl<'a> Loader<'a> {
             Ok(g) => g,
             Err(e) => {
                 // The time limit stops the whole preview; a missing or unreadable source only leaves its copy out.
-                self.limits.check("resolving prefabs")?;
-                let name = self.assets.path(&source).map(|p| rel(self.assets, &p)).unwrap_or_else(|| format!("a prefab ({source})"));
+                self.limits.check("resolving prefabs")?; // i18n: not shown (what a time-limit error says it was doing)
+                let name = self.assets.path(&source).map(|p| rel(self.assets, &p)).unwrap_or_else(|| format!("a prefab ({source})")); // i18n: not shown (an error detail)
                 self.note_missing(format!("{name}: {e:#}"));
                 return Ok(());
             }

@@ -1,6 +1,7 @@
 //! Unity text serialization reader: the uploaded avatars and worlds of a project's scenes (their PipelineManager
 //! blueprint IDs), and the world thumbnail My World keeps. Supports direct components and prefab-instance overrides
 //! (the Canine scene stores its uploaded blueprint in an override). Never writes scenes or opens them in Unity.
+use orbiters_i18n::tr;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -127,7 +128,7 @@ impl Model {
         Self { docs, names, transforms }
     }
     fn path(&self, go: &str) -> String {
-        let mut parts = vec![self.names.get(go).cloned().unwrap_or_else(|| "Avatar".into())];
+        let mut parts = vec![self.names.get(go).cloned().unwrap_or_else(|| tr("Avatar").into())];
         let mut parent = self.transforms.values().find(|(g, _)| g == go).map(|(_, p)| p.as_str()).unwrap_or("0");
         let mut seen = HashSet::new();
         while parent != "0" && seen.insert(parent.to_string()) {
@@ -152,7 +153,7 @@ impl Model {
                 let go = fileid(&value(d, "m_GameObject")?);
                 Some(Avatar {
                     id,
-                    name: self.names.get(&go).cloned().unwrap_or_else(|| "Avatar".into()),
+                    name: self.names.get(&go).cloned().unwrap_or_else(|| tr("Avatar").into()),
                     scene: scene.into(),
                     path: self.path(&go),
                     ..Default::default()

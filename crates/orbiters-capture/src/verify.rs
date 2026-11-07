@@ -55,7 +55,7 @@ pub fn verify(dir: &Path, max_frames: Option<u32>) -> anyhow::Result<VerifyRepor
             Ok(frame) => frame,
             Err(e) => {
                 report.frames_unreadable += 1;
-                report.first_failure.get_or_insert_with(|| format!("frame {i}: {e}"));
+                report.first_failure.get_or_insert_with(|| format!("frame {i}: {e}")); // i18n: not shown (the verify command line tool, for developers)
                 continue;
             }
         };
@@ -65,7 +65,7 @@ pub fn verify(dir: &Path, max_frames: Option<u32>) -> anyhow::Result<VerifyRepor
             Ok(d) => d,
             Err(e) => {
                 report.strip_failed += 1;
-                report.first_failure.get_or_insert_with(|| format!("frame {i}: {e}"));
+                report.first_failure.get_or_insert_with(|| format!("frame {i}: {e}")); // i18n: not shown (the verify command line tool, for developers)
                 continue;
             }
         };
@@ -81,7 +81,7 @@ pub fn verify(dir: &Path, max_frames: Option<u32>) -> anyhow::Result<VerifyRepor
                 report.pose_close += 1;
             } else {
                 report.pose_wrong += 1;
-                report.first_failure.get_or_insert_with(|| format!("frame {i}: pose differs from ground truth"));
+                report.first_failure.get_or_insert_with(|| format!("frame {i}: pose differs from ground truth")); // i18n: not shown (the verify command line tool, for developers)
             }
         }
         if decoded.payload.is_depth_frame() {
@@ -93,7 +93,7 @@ pub fn verify(dir: &Path, max_frames: Option<u32>) -> anyhow::Result<VerifyRepor
             let gt = match load_gt_depth(&gt_path, h.width, h.height) {
                 Ok(gt) => gt,
                 Err(e) => {
-                    report.first_failure.get_or_insert_with(|| format!("frame {i}: {e:#}"));
+                    report.first_failure.get_or_insert_with(|| format!("frame {i}: {e:#}")); // i18n: not shown (the verify command line tool, for developers)
                     continue;
                 }
             };

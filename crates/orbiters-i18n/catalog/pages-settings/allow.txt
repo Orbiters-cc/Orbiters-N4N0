@@ -1,0 +1,3 @@
+# Texts that read the same in every language.
+# A slider value: a number and a unit that is written the same in all four languages.
+{v:.0} Hz

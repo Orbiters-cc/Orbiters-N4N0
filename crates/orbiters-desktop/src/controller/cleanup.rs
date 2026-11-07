@@ -6,6 +6,7 @@
 
 use super::{CaptureState, Controller, NoticeKind, Shared};
 use orbiters_core::{bundle, cleanup};
+use orbiters_i18n::{mark, tr};
 use orbiters_ui::format;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -35,7 +36,7 @@ impl Controller {
             trim.into_iter().filter(|d| session_folder(&root, d) && cleanup::has_view(d)).collect(),
             delete.into_iter().filter(|d| session_folder(&root, d)).collect(),
         );
-        let busy: Vec<String> = trim.iter().chain(&delete).filter_map(|d| self.cleanup_blocked(d).map(|why| format!("{} ({why})", name(d)))).collect();
+        let busy: Vec<String> = trim.iter().chain(&delete).filter_map(|d| self.cleanup_blocked(d).map(|why| format!("{} ({})", name(d), tr(why)))).collect();
         let (trim, delete): (Vec<_>, Vec<_>) = (
             trim.into_iter().filter(|d| self.cleanup_blocked(d).is_none()).collect(),
             delete.into_iter().filter(|d| self.cleanup_blocked(d).is_none()).collect(),
@@ -80,11 +81,11 @@ impl Controller {
     pub(super) fn cleanup_blocked(&self, dir: &Path) -> Option<&'static str> {
         let s = self.snapshot.lock().unwrap();
         if s.capture.state != CaptureState::Idle && s.capture.session_dir.as_deref().is_some_and(|d| same(d, dir)) {
-            Some("it is being recorded")
+            Some(mark("it is being recorded"))
         } else if s.reconstruction.as_ref().is_some_and(|j| same(&j.session_dir, dir)) {
-            Some("it is being reconstructed")
+            Some(mark("it is being reconstructed"))
         } else if s.reconstruct_queue.iter().any(|d| same(d, dir)) {
-            Some("it waits to be reconstructed")
+            Some(mark("it waits to be reconstructed"))
         } else {
             None
         }
@@ -127,7 +128,7 @@ impl Controller {
                 Err(summary) => break summary,
             };
             if let Some(why) = self.cleanup_blocked(&dir) {
-                self.cleanup.lock().unwrap().skipped.push(format!("{} ({why})", name(&dir)));
+                self.cleanup.lock().unwrap().skipped.push(format!("{} ({})", name(&dir), tr(why)));
                 continue;
             }
             let mut published = Instant::now();
@@ -160,10 +161,10 @@ impl Controller {
             self.notify(NoticeKind::Success, freed_message(freed, done.trimmed, done.deleted));
         }
         if !done.skipped.is_empty() {
-            self.notify(NoticeKind::Warning, format!("Left alone: {}.", done.skipped.join(", ")));
+            self.notify(NoticeKind::Warning, tr!("Left alone: {list}.", list = done.skipped.join(tr(", "))));
         }
         if !done.failed.is_empty() {
-            self.notify(NoticeKind::Error, format!("Not everything could be deleted: {}", done.failed.join("; ")));
+            self.notify(NoticeKind::Error, tr!("Not everything could be deleted: {list}", list = done.failed.join("; ")));
         }
     }
 }
@@ -171,22 +172,17 @@ impl Controller {
 /// "Freed 3.1 GB: 12 captures keep only their 3D view and 5 were deleted."
 fn freed_message(freed: u64, trimmed: usize, deleted: usize) -> String {
     let bytes = format::bytes(freed as f64);
-    let kept = match trimmed {
-        0 => None,
-        1 => Some("1 capture keeps only its 3D view".to_string()),
-        n => Some(format!("{n} captures keep only their 3D view")),
-    };
-    let gone = match deleted {
-        0 => None,
-        1 if kept.is_some() => Some("1 was deleted".to_string()),
-        n if kept.is_some() => Some(format!("{n} were deleted")),
-        1 => Some("1 capture deleted".to_string()),
-        n => Some(format!("{n} captures deleted")),
-    };
-    match (kept, gone) {
-        (Some(k), Some(g)) => format!("Freed {bytes}: {k} and {g}."),
-        (Some(one), None) | (None, Some(one)) => format!("Freed {bytes}: {one}."),
-        (None, None) => format!("Freed {bytes}."),
+    // Whole sentences for each case: the order of the parts and the plural are each language's own.
+    match (trimmed, deleted) {
+        (0, 0) => tr!("Freed {bytes}.", bytes = bytes),
+        (1, 0) => tr!("Freed {bytes}: 1 capture keeps only its 3D view.", bytes = bytes),
+        (n, 0) => tr!("Freed {bytes}: {trimmed} captures keep only their 3D view.", bytes = bytes, trimmed = n),
+        (0, 1) => tr!("Freed {bytes}: 1 capture deleted.", bytes = bytes),
+        (0, n) => tr!("Freed {bytes}: {deleted} captures deleted.", bytes = bytes, deleted = n),
+        (1, 1) => tr!("Freed {bytes}: 1 capture keeps only its 3D view and 1 was deleted.", bytes = bytes),
+        (1, n) => tr!("Freed {bytes}: 1 capture keeps only its 3D view and {deleted} were deleted.", bytes = bytes, deleted = n),
+        (n, 1) => tr!("Freed {bytes}: {trimmed} captures keep only their 3D view and 1 was deleted.", bytes = bytes, trimmed = n),
+        (t, d) => tr!("Freed {bytes}: {trimmed} captures keep only their 3D view and {deleted} were deleted.", bytes = bytes, trimmed = t, deleted = d),
     }
 }
 

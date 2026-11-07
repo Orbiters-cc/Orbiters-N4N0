@@ -1,0 +1,1 @@
+# Copied from the website's translations by scripts/i18n/batches.py: this area covers no file of its own.

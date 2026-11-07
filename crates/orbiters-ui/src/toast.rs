@@ -83,7 +83,7 @@ impl Toasts {
             let mut bottom = screen.bottom() - 20.0;
             for t in self.items.iter().rev() {
                 let (glyph, color) = t.kind.icon();
-                let text = Txt::new(&t.message, 13.0).color(theme::FG).line_height(20.0);
+                let text = Txt::new(orbiters_i18n::tr(&t.message), 13.0).color(theme::FG).line_height(20.0);
                 let galley = ui.painter().layout_job(text.job(WIDTH - 16.0 - 17.0 - 12.0 - 16.0));
                 let h = galley.size().y + 28.0;
                 let id = Id::unique(("orbiters-toast", t.id));

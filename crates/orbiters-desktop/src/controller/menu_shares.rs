@@ -8,6 +8,7 @@ use super::shares::{self, Entry, Local, Operation, Outcome, Request};
 use super::Shared;
 use crate::state::{CaptureState, Snapshot};
 use orbiters_core::account::Server;
+use orbiters_i18n::{fill, tr_latin};
 use orbiters_n4n0_core::captures::{CapturePhase, CaptureRow, CapturesView, Friend, ShareAsk, Sharing, HISTORY_MAX, RECIPIENTS_MAX};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -180,7 +181,7 @@ impl MenuShares {
     fn list(&mut self, entries: Vec<Entry>) {
         let mut sessions: Vec<Entry> = entries.into_iter().filter(|e| matches!(e.local, Some(Local::Session(_)))).collect();
         sessions.truncate(HISTORY_MAX);
-        self.note = if sessions.is_empty() { "None on this computer yet: take a 3D picture".into() } else { String::new() };
+        self.note = if sessions.is_empty() { tr_latin("None on this computer yet: take a 3D picture").into() } else { String::new() };
         self.listed = sessions;
         self.listed_once = true;
     }
@@ -229,7 +230,7 @@ impl super::Controller {
             } else if busy {
                 *since = Instant::now();
             } else if since.elapsed() > WAIT_UNQUEUED {
-                *asked = Asked::Failed("Its 3D view could not be made: reconstruct it in Photos & captures".into());
+                *asked = Asked::Failed(tr_latin("Its 3D view could not be made: reconstruct it in Photos & captures").into());
             }
         }
         for (name, entry, ask) in go {
@@ -288,7 +289,7 @@ impl super::Controller {
             let dir = entry.local.as_ref().map(|l| l.path().to_path_buf()).unwrap_or_default();
             let busy = snap.reconstruction.as_ref().is_some_and(|j| folder(&j.session_dir) == name) || snap.reconstruct_queue.iter().any(|d| folder(d) == name);
             if !busy {
-                self.queue_reconstruction(dir).map_err(|e| format!("Its 3D view cannot be made: {e}"))?;
+                self.queue_reconstruction(dir).map_err(|e| fill(tr_latin("Its 3D view cannot be made: {error}"), &[("error", &e)]))?;
             }
             Asked::Waiting { entry: Box::new(entry), ask, since: Instant::now() }
         };
@@ -316,7 +317,7 @@ impl super::Controller {
 
     /// The VRChat friends a capture can go to: the member's VRChat session when there is one, else VRCX's or VRCNext's.
     pub(super) fn menu_friends(&self) -> Result<Vec<Friend>, String> {
-        let users = self.vrchat_source().friends().map_err(|e| format!("Friends could not be read: {e}"))?;
+        let users = self.vrchat_source().friends().map_err(|e| fill(tr_latin("Friends could not be read: {error}"), &[("error", &e)]))?;
         if users.is_empty() {
             return Err("No VRChat friends found: sign in to VRChat in Orbiters - N4N0, or use VRCX or VRCNext".into());
         }

@@ -11,6 +11,7 @@
 
 use crate::account::Api;
 use crate::community::{answer, Picture, Pictures, Refused};
+use orbiters_i18n::tr;
 use serde::{Deserialize, Serialize};
 
 /// An asset's showcase pictures read at most (two of the server's pages).
@@ -73,15 +74,15 @@ impl Owned {
 /// "Avatar", "Clothing"… for an asset's type.
 pub fn kind_label(kind: &str) -> &'static str {
     match kind.to_ascii_uppercase().as_str() {
-        "AVATAR" => "Avatar",
-        "ACCESSORY" => "Accessory",
-        "CLOTHING" => "Clothing",
-        "TEXTURE" => "Texture",
-        "PRODUCT" => "Product",
-        "COMMISSION" | "YCH" => "Commission",
-        "STICKERS" => "Stickers",
-        "PHYSICAL" => "Physical item",
-        _ => "Asset",
+        "AVATAR" => tr("Avatar"),
+        "ACCESSORY" => tr("Accessory"),
+        "CLOTHING" => tr("Clothing"),
+        "TEXTURE" => tr("Texture"),
+        "PRODUCT" => tr("Product"),
+        "COMMISSION" | "YCH" => tr("Commission"),
+        "STICKERS" => tr("Stickers"),
+        "PHYSICAL" => tr("Physical item"),
+        _ => tr("Asset"),
     }
 }
 

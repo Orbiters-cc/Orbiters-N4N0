@@ -3,6 +3,7 @@
 //! is replaced. Only the layers over the whole picture are kept, not the crop (it belongs to its picture) nor a VRChat
 //! multi-layer picture's own stacks.
 
+use orbiters_i18n::tr;
 use orbiters_ui::photo::{Edit, Layer};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -75,36 +76,36 @@ pub(super) fn menu(ed: &mut super::Editor, ui: &mut egui::Ui, rect: egui::Rect) 
     // Read again while the list is open (another editor may have saved one).
     let looks = list();
     let name = new_name(&looks);
-    let applying: Vec<String> = looks.iter().map(|l| format!("Apply \u{201c}{}\u{201d}", l.name)).collect();
-    let removing: Vec<String> = looks.iter().map(|l| format!("Remove \u{201c}{}\u{201d}", l.name)).collect();
-    let saving = format!("Save these layers as \u{201c}{name}\u{201d}");
+    let applying: Vec<String> = looks.iter().map(|l| tr!("Apply “{name}”", name = l.name)).collect();
+    let removing: Vec<String> = looks.iter().map(|l| tr!("Remove “{name}”", name = l.name)).collect();
+    let saving = tr!("Save these layers as “{name}”", name = name);
     let mut items: Vec<Item<'_>> = applying.iter().map(|a| Item::new(a).icon(orbiters_ui::icons::SPARKLE)).collect();
     if !ed.doc.layers.is_empty() {
         items.push(Item::new(&saving).icon(orbiters_ui::icons::FLOPPY_DISK));
     }
     items.extend(removing.iter().map(|r| Item::new(r).icon(orbiters_ui::icons::TRASH).danger()));
     if items.is_empty() {
-        items.push(Item::new("Add layers, then keep them here as a look").detail("none yet"));
+        items.push(Item::new(tr("Add layers, then keep them here as a look")).detail(tr("none yet")));
     }
-    let Some(i) = popup::menu_button(ui, "editor-looks", rect, orbiters_ui::icons::SPARKLE, "Looks", &items) else { return };
+    let Some(i) = popup::menu_button(ui, "editor-looks", rect, orbiters_ui::icons::SPARKLE, tr("Looks"), &items) else { return };
     let saves = !ed.doc.layers.is_empty();
     if i < looks.len() {
         apply(&mut ed.doc, &looks[i]);
         ed.selected = super::Selected::Nothing;
     } else if saves && i == looks.len() {
         if let Err(e) = save(&name, &ed.doc) {
-            ed.error = Some(format!("The look could not be saved: {e:#}"));
+            ed.error = Some(tr!("The look could not be saved: {error}", error = format!("{e:#}")));
         }
     } else if let Some(look) = looks.get(i - looks.len() - usize::from(saves)) {
         if let Err(e) = remove(&look.name) {
-            ed.error = Some(format!("The look could not be removed: {e:#}"));
+            ed.error = Some(tr!("The look could not be removed: {error}", error = format!("{e:#}")));
         }
     }
 }
 
 /// A name for a new look that no other has ("Look 3").
 pub fn new_name(looks: &[Look]) -> String {
-    (1..).map(|n| format!("Look {n}")).find(|n| !looks.iter().any(|l| l.name.eq_ignore_ascii_case(n))).expect("a free name")
+    (1..).map(|n| tr!("Look {n}", n = n)).find(|n| !looks.iter().any(|l| l.name.eq_ignore_ascii_case(n))).expect("a free name")
 }
 
 #[cfg(test)]

@@ -1,6 +1,7 @@
 //! What N4N0 shows the apps (their window, the SteamVR overlay, a phone's screen): [`N4n0Status`], republished on every
 //! change, with what the person is told ([`NoticeKind`]).
 
+use orbiters_i18n::mark;
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -416,10 +417,11 @@ impl CallsStatus {
     pub fn menu_ready(&self) -> (bool, &'static str) {
         match &self.link {
             CallLink::Linked { .. } => (true, ""),
-            CallLink::Off => (false, "Calls are off: Orbiters - N4N0 › N4N0 › Calls"),
-            CallLink::SignedOut => (false, "Sign in to Orbiters to call friends"),
-            CallLink::NoAccount => (false, "VRChat's account here is unknown: open VRChat"),
-            CallLink::NotLinked { .. } => (false, "Link this VRChat account on Orbiters to call"),
+            // Kept as English: the menu draws what it holds through `tr`, so the note follows the language.
+            CallLink::Off => (false, mark("Calls are off: Orbiters - N4N0 › N4N0 › Calls")),
+            CallLink::SignedOut => (false, mark("Sign in to Orbiters to call friends")),
+            CallLink::NoAccount => (false, mark("VRChat's account here is unknown: open VRChat")),
+            CallLink::NotLinked { .. } => (false, mark("Link this VRChat account on Orbiters to call")),
         }
     }
 

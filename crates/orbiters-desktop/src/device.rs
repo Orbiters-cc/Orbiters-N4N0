@@ -4,6 +4,8 @@
 //! Windows). The names say Windows for where they began; these are this computer's on macOS too.
 
 use orbiters_core::voice::{VoiceCommand, VoiceEvent};
+#[allow(unused_imports)] // Its macro, which only some systems use.
+use orbiters_i18n::tr;
 use orbiters_n4n0::{Browser, Clipboard, Ears, Locale, Mouse, MouseState, Platform, Sounds, VoiceEnded, VoiceEvents, VoiceWorker};
 use orbiters_n4n0_core::menu::KeyboardLayout;
 use std::io::{BufRead, BufReader, Write};
@@ -30,7 +32,7 @@ pub struct WindowsClipboard;
 impl Clipboard for WindowsClipboard {
     #[cfg(not(test))]
     fn copy(&self, text: &str) -> Result<(), String> {
-        arboard::Clipboard::new().and_then(|mut c| c.set_text(text.to_string())).map_err(|e| format!("Could not copy: {e}"))
+        arboard::Clipboard::new().and_then(|mut c| c.set_text(text.to_string())).map_err(|e| tr!("Could not copy: {error}", error = e))
     }
 
     #[cfg(test)]
@@ -179,7 +181,7 @@ mod mac_keyboard {
 
     /// AZERTY for French and Belgian layouts, as on Windows (Swiss French is QWERTZ, Canadian French is QWERTY).
     pub fn is_azerty(layout: &str) -> bool {
-        matches!(layout.rsplit('.').next().unwrap_or(layout), "French" | "French-PC" | "French-numerical" | "Belgian" | "ABC-AZERTY")
+        matches!(layout.rsplit('.').next().unwrap_or(layout), "French" | "French-PC" | "French-numerical" | "Belgian" | "ABC-AZERTY") // i18n: not shown
     }
 
     #[cfg(test)]

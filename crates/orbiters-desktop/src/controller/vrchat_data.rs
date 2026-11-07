@@ -3,6 +3,7 @@
 //! cross IPC.
 use super::{Controller, NoticeKind, Shared};
 use crate::state::Snapshot;
+use orbiters_i18n::tr;
 use orbiters_core::{
     account::Server,
     vrchat_api::{Kind, Step, User},
@@ -215,19 +216,19 @@ impl Controller {
         // Never repeats, even after an account change empties the snapshot's record: a page takes each outcome once.
         static SERIAL: AtomicU64 = AtomicU64::new(0);
         if scope != Scope::of(&self.view()) {
-            return self.notify(NoticeKind::Error, "The account changed. Please try again.");
+            return self.notify(NoticeKind::Error, tr("The account changed. Please try again."));
         }
         if Kind::of(&id).is_none() {
-            return self.notify(NoticeKind::Error, "Only avatars' and worlds' pictures can be changed.");
+            return self.notify(NoticeKind::Error, tr("Only avatars' and worlds' pictures can be changed."));
         }
         let serial = SERIAL.fetch_add(1, Ordering::Relaxed) + 1;
         let mut refused = None;
         self.update_if(|s| {
             let login = &mut s.vrchat_login;
             if !login.allowed || login.user.is_none() {
-                refused = Some("Sign in to VRChat in Settings to change pictures.");
+                refused = Some(tr("Sign in to VRChat in Settings to change pictures."));
             } else if login.upload.as_ref().is_some_and(PictureUpload::running) {
-                refused = Some("A picture is already uploading to VRChat. Try again once it is done.");
+                refused = Some(tr("A picture is already uploading to VRChat. Try again once it is done."));
             } else {
                 login.upload = Some(PictureUpload { serial, id: id.clone(), step: Some(Step::Checking), outcome: None });
             }
@@ -249,8 +250,8 @@ impl Controller {
             // An account change meanwhile discarded it with the rest of the session's state.
             if ours {
                 match result {
-                    Ok(()) => ctl.notify(NoticeKind::Success, "Picture changed on VRChat"),
-                    Err(e) => ctl.notify(NoticeKind::Error, format!("The picture could not be changed: {e}")),
+                    Ok(()) => ctl.notify(NoticeKind::Success, tr("Picture changed on VRChat")),
+                    Err(e) => ctl.notify(NoticeKind::Error, tr!("The picture could not be changed: {error}", error = e)),
                 }
             }
         };

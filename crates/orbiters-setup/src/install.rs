@@ -10,6 +10,7 @@
 
 use crate::system;
 use anyhow::Context as _;
+use orbiters_i18n::tr;
 use orbiters_update::{inside, payload, InstallRecord, PRODUCT, RECORD_FILE};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -111,7 +112,7 @@ fn close_app(dir: &Path, progress: &Progress, silent: bool) -> anyhow::Result<()
     if system::processes_in(dir).is_empty() {
         return Ok(());
     }
-    progress.label("Closing Orbiters - N4N0…");
+    progress.label(tr("Closing Orbiters - N4N0…"));
     if system::app_runs_from(dir) {
         system::ask_app_to_quit();
     }
@@ -149,9 +150,9 @@ pub fn install(bytes: &[u8], options: &Options, progress: &Progress, silent: boo
     remove_tree(&staging);
     remove_tree(&backup);
 
-    progress.set(0.02, "Unpacking…");
+    progress.set(0.02, tr("Unpacking…"));
     let unpacked = payload::unpack(bytes, &staging, |done, total, file| {
-        progress.set(0.02 + 0.78 * (done as f32 / total.max(1) as f32), format!("Unpacking {file}"));
+        progress.set(0.02 + 0.78 * (done as f32 / total.max(1) as f32), tr!("Unpacking {file}", file = file));
     });
     if let Err(e) = unpacked {
         remove_tree(&staging);
@@ -162,7 +163,7 @@ pub fn install(bytes: &[u8], options: &Options, progress: &Progress, silent: boo
         return Err(e);
     }
 
-    progress.set(0.82, "Putting the new version in place…");
+    progress.set(0.82, tr("Putting the new version in place…"));
     let previous = InstallRecord::read(dir);
     swap(dir, &staging, &backup, &index, previous.as_ref())?;
     let record = InstallRecord {
@@ -177,11 +178,11 @@ pub fn install(bytes: &[u8], options: &Options, progress: &Progress, silent: boo
     };
     record.write(dir).with_context(|| format!("{} cannot be written", dir.join(RECORD_FILE).display()))?;
 
-    progress.set(0.9, "Adding it to Windows…");
+    progress.set(0.9, tr("Adding it to Windows…"));
     integrate(dir, &record, previous.as_ref(), index.total(), fresh)?;
     remove_tree(&staging);
     remove_tree(&backup);
-    progress.set(1.0, "Installed");
+    progress.set(1.0, tr("Installed"));
     Ok(())
 }
 
@@ -282,10 +283,10 @@ pub fn update(bytes: &[u8], dir: &Path, progress: &Progress, silent: bool) -> an
 /// never touched.
 pub fn uninstall(dir: &Path, remove_data: bool, progress: &Progress, silent: bool) -> anyhow::Result<()> {
     let record = InstallRecord::read(dir).with_context(|| format!("Orbiters - N4N0 is not installed in {}.", dir.display()))?;
-    progress.set(0.05, "Closing Orbiters - N4N0…");
+    progress.set(0.05, tr("Closing Orbiters - N4N0…"));
     close_app(dir, progress, silent)?;
 
-    progress.set(0.2, "Removing it from Windows…");
+    progress.set(0.2, tr("Removing it from Windows…"));
     if system::registered_dir().is_some_and(|d| same_dir(&d, dir)) {
         system::unregister();
     }
@@ -308,7 +309,7 @@ pub fn uninstall(dir: &Path, remove_data: bool, progress: &Progress, silent: boo
     }
     system::refresh_shell();
 
-    progress.set(0.35, "Removing its files…");
+    progress.set(0.35, tr("Removing its files…"));
     let mut failed = Vec::new();
     let count = record.files.len().max(1);
     for (i, path) in record.files.iter().enumerate() {
@@ -317,7 +318,7 @@ pub fn uninstall(dir: &Path, remove_data: bool, progress: &Progress, silent: boo
                 failed.push(file.display().to_string());
             }
         }
-        progress.set(0.35 + 0.5 * (i + 1) as f32 / count as f32, format!("Removing {path}"));
+        progress.set(0.35 + 0.5 * (i + 1) as f32 / count as f32, tr!("Removing {path}", path = path));
     }
     remove_tree(&dir.join(STAGING));
     remove_tree(&dir.join(BACKUP));
@@ -335,7 +336,7 @@ pub fn uninstall(dir: &Path, remove_data: bool, progress: &Progress, silent: boo
     }
     let _ = std::fs::remove_dir(dir);
 
-    progress.set(0.9, "Tidying up…");
+    progress.set(0.9, tr("Tidying up…"));
     remove_tree(&orbiters_update::updates_dir());
     if remove_data {
         for folder in data_dirs() {
@@ -347,7 +348,7 @@ pub fn uninstall(dir: &Path, remove_data: bool, progress: &Progress, silent: boo
         }
     }
     anyhow::ensure!(failed.is_empty(), "These files could not be removed (in use?): {}", failed.join(", "));
-    progress.set(1.0, "Uninstalled");
+    progress.set(1.0, tr("Uninstalled"));
     Ok(())
 }
 

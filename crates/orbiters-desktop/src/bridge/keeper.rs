@@ -8,6 +8,7 @@ use super::mcp::Server;
 use super::person::Listener;
 use super::{Bridge, Command, Status};
 use orbiters_core::features::Grant;
+use orbiters_i18n::tr;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -185,7 +186,7 @@ impl Keeper {
                 inner.identity = identity.clone();
                 inner.grant.forget();
                 self.generation.fetch_add(1, Ordering::Relaxed);
-                self.close(&mut inner, "The Orbiters account or server changed: the bridge closed.");
+                self.close(&mut inner, tr("The Orbiters account or server changed: the bridge closed."));
             }
             identity.is_some() && inner.grant.due(now) && !self.asking.swap(true, Ordering::Relaxed)
         };
@@ -210,7 +211,7 @@ impl Keeper {
         if wanted && inner.open.is_none() {
             self.open(&mut inner);
         } else if !wanted && inner.open.is_some() {
-            let why = if allowed { "The bridge was turned off." } else { "Orbiters no longer says this account has the bridge: it closed." };
+            let why = if allowed { tr("The bridge was turned off.") } else { tr("Orbiters no longer says this account has the bridge: it closed.") };
             self.close(&mut inner, why);
         } else if !wanted {
             inner.problem = None;
@@ -225,14 +226,11 @@ impl Keeper {
     fn open(&self, inner: &mut Inner) {
         let mut keys = Keys::load_or_create(&self.keys_file);
         let Some(listener) = (self.hear)(&self.bridge) else {
-            inner.problem = Some(
-                "Windows would not let the bridge hear the keyboard and mouse, so it stays closed: an agent that cannot tell the person is here may not run."
-                    .into(),
-            );
+            inner.problem = Some(tr("Windows would not let the bridge hear the keyboard and mouse, so it stays closed: an agent that cannot tell the person is here may not run.").into());
             return;
         };
         if let Err(e) = self.bridge.start_guard() {
-            inner.problem = Some(format!("{e}, so the bridge stays closed: input could stay down if the app crashed."));
+            inner.problem = Some(tr!("{error}, so the bridge stays closed: input could stay down if the app crashed.", error = e));
             return;
         }
         self.bridge.tell_guard_target();
@@ -248,13 +246,13 @@ impl Keeper {
                 let hotkey_taken = listener.hotkey_taken;
                 inner.open = Some(Open { server, _listener: listener, hotkey_taken, token: keys.token });
                 inner.problem = None;
-                self.bridge.log(true, format!("Listening on 127.0.0.1:{}.", keys.port));
+                self.bridge.log(true, tr!("Listening on 127.0.0.1:{port}.", port = keys.port));
                 // Whatever moved since an agent was told, it is told now.
                 self.repair_due.store(true, Ordering::Relaxed);
             }
             Err(e) => {
                 self.bridge.stop_guard();
-                inner.problem = Some(format!("The bridge could not listen: {e}"));
+                inner.problem = Some(tr!("The bridge could not listen: {error}", error = e));
             }
         }
     }
@@ -274,7 +272,7 @@ impl Keeper {
             Command::Stop => {
                 self.flag.turn_off();
                 let mut inner = self.inner.lock().unwrap();
-                self.close(&mut inner, "Stopped from Settings: control is back with the person.");
+                self.close(&mut inner, tr("Stopped from Settings: control is back with the person."));
                 drop(inner);
                 // Whatever paused it is over with it: the next time it is on, it starts clean.
                 self.bridge.presence.lock().unwrap().resume();
@@ -287,7 +285,7 @@ impl Keeper {
                 keys.save(&self.keys_file);
                 let mut inner = self.inner.lock().unwrap();
                 if inner.open.is_some() {
-                    self.close(&mut inner, "A new token: the agents it was added to are updated, others have to be given it again.");
+                    self.close(&mut inner, tr("A new token: the agents it was added to are updated, others have to be given it again."));
                 }
                 // Also while closed: nothing else would ever tell them.
                 self.repair_due.store(true, Ordering::Relaxed);
@@ -305,7 +303,7 @@ impl Keeper {
     /// Ends it all when the app quits.
     pub fn shutdown(&self) {
         let mut inner = self.inner.lock().unwrap();
-        self.close(&mut inner, "The app is closing.");
+        self.close(&mut inner, tr("The app is closing."));
     }
 
     /// The address clients use, when open.

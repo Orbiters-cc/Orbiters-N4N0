@@ -19,6 +19,7 @@ mod drag_out;
 mod gpu;
 mod ipc;
 mod keys;
+mod language;
 #[cfg(target_os = "macos")]
 mod mac;
 #[cfg(target_os = "macos")]

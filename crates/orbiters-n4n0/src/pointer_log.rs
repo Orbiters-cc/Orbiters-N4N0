@@ -63,7 +63,7 @@ impl PointerLog {
         self.said = [None; 2];
         self.summary_at = None;
         self.write(&format!(
-            "menu open on {page}: pointing {pointing}, receivers' reach {:.3}, sender {:.4}, aim {:.3} (screen units)",
+            "menu open on {page}: pointing {pointing}, receivers' reach {:.3}, sender {:.4}, aim {:.3} (screen units)", // i18n: not shown
             geometry.reach, geometry.sender, geometry.aim
         ));
     }
@@ -85,10 +85,10 @@ impl PointerLog {
             self.said[hand] = Some(state);
             self.said_at[hand] = Some(now);
             let point = match r.point {
-                Ok((x, y)) => format!("points at {x:.0}, {y:.0}"),
-                Err(g) => format!("no point: {}", g.name()),
+                Ok((x, y)) => format!("points at {x:.0}, {y:.0}"), // i18n: not shown
+                Err(g) => format!("no point: {}", g.name()), // i18n: not shown
             };
-            let line = format!("{}: tip {}, aim {}, {point}{}", HANDS[hand], r.tip.name(), r.aim.name(), if r.kept { " (on the last direction)" } else { "" });
+            let line = format!("{}: tip {}, aim {}, {point}{}", HANDS[hand], r.tip.name(), r.aim.name(), if r.kept { " (on the last direction)" } else { "" }); // i18n: not shown
             self.write(&line);
         }
         self.summary(now);
@@ -102,7 +102,7 @@ impl PointerLog {
 
     /// A press came: by whom, where, on what.
     pub fn press(&mut self, who: &str, x: f32, y: f32, what: &str) {
-        let line = format!("{who} press at {x:.0}, {y:.0}: {what}");
+        let line = format!("{who} press at {x:.0}, {y:.0}: {what}"); // i18n: not shown
         self.write(&line);
     }
 
@@ -122,7 +122,7 @@ impl PointerLog {
             if c.readings > 0 {
                 let share = |n: u32| n * 100 / c.readings;
                 let line = format!(
-                    "{}: {} readings, {} % pointing, {} % on the last direction, tip silent {} %, aim silent {} %, mixed {} %, other {} %",
+                    "{}: {} readings, {} % pointing, {} % on the last direction, tip silent {} %, aim silent {} %, mixed {} %, other {} %", // i18n: not shown
                     HANDS[hand],
                     c.readings,
                     share(c.pointing),

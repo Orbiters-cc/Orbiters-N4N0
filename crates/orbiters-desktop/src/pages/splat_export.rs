@@ -9,6 +9,7 @@
 use super::Job;
 use crate::splat_export::{self as export, Edits, Exported, Failure, Format, Progress, Step};
 use egui::{Align2, CursorIcon, Id, Order, Rect, Sense, Ui, pos2, vec2};
+use orbiters_i18n::tr;
 use orbiters_ui::anim::{self, Spring};
 use orbiters_ui::dialog::{self, Dialog, Part};
 use orbiters_ui::theme::{self, Txt, weight};
@@ -158,7 +159,7 @@ impl Export {
                     }
                     self.note = None;
                 }
-                Err(e) => self.note = Some(format!("They could not be discarded: {e}")),
+                Err(e) => self.note = Some(tr!("They could not be discarded: {e}", e = e)),
             }
         }
     }
@@ -170,7 +171,8 @@ impl Export {
             _ => export::file_name(&self.session, &self.title, self.format),
         };
         let folder = if elsewhere { None } else { last().map(|(f, _)| f) };
-        let ask = Ask { title: format!("Export {} as {}", self.title, self.format.label()), format: self.format, name, folder };
+        let title = tr!("Export {title} as {format}", title = self.title, format = self.format.label());
+        let ask = Ask { title, format: self.format, name, folder };
         let pick = self.hooks.pick;
         self.note = None;
         self.picking = Job::spawn(ctx, move || pick(ask));
@@ -200,10 +202,10 @@ impl Export {
         if busy {
             ctx.request_repaint_after(std::time::Duration::from_millis(50));
         }
-        let title = format!("Export {}", self.title);
+        let title = tr!("Export {title}", title = self.title);
         let dialog = Dialog::new(self.id, self.origin, &title)
             .glyph(icons::UPLOAD_SIMPLE)
-            .subtitle("Its splats as a file for other tools")
+            .subtitle(tr("Its splats as a file for other tools"))
             .width(560.0)
             .footer(true)
             .busy(busy)
@@ -227,20 +229,20 @@ impl Export {
         let busy = self.running.is_some() || self.picking.running();
         let removed = edits.as_ref().map_or(0, |e| e.removed);
         let lead = match removed {
-            0 => "The file holds what its 3D view shows: every splat as trained. The sky stays in N4N0: other tools draw their own.".to_string(),
-            1 => "The file holds what its 3D view shows: the splat hidden or deleted there is left out, as from every share. The sky stays in N4N0: other tools draw their own.".to_string(),
-            n => format!(
-                "The file holds what its 3D view shows: the {} splats hidden or deleted there are left out, as from every share. The sky stays in N4N0: other tools draw their own.",
-                format::integer(n as f64)
+            0 => tr("The file holds what its 3D view shows: every splat as trained. The sky stays in N4N0: other tools draw their own.").to_string(),
+            1 => tr("The file holds what its 3D view shows: the splat hidden or deleted there is left out, as from every share. The sky stays in N4N0: other tools draw their own.").to_string(),
+            n => tr!(
+                "The file holds what its 3D view shows: the {count} splats hidden or deleted there are left out, as from every share. The sky stays in N4N0: other tools draw their own.",
+                count = format::integer(n as f64)
             ),
         };
         paragraph(ui, &lead, theme::FG_2);
 
         // Edits that cannot be applied: why, and the way on.
         if let Some(problem) = problem(edits.as_ref(), self.outcome.as_ref()) {
-            let text = format!("{problem} Discard them to export every splat as trained: Select splats in its 3D view can remove them again.");
+            let text = tr!("{problem} Discard them to export every splat as trained: Select splats in its 3D view can remove them again.", problem = problem);
             feedback::banner(ui, Id::unique(("export-problem", &self.session)), Tone::Warn, &text, false);
-            let b = Button::new(if self.discarding.running() { "Discarding…" } else { "Discard them" })
+            let b = Button::new(if self.discarding.running() { tr("Discarding…") } else { tr("Discard them") })
                 .icon(icons::TRASH)
                 .variant(Variant::Danger)
                 .size(Size::Sm)
@@ -253,7 +255,7 @@ impl Export {
             }
         }
 
-        caps(ui, "Format");
+        caps(ui, tr("Format"));
         let splats = edits.as_ref().and_then(|e| e.splats).map(|n| n.saturating_sub(removed));
         for f in Format::ALL {
             self.row(ui, f, splats, !busy);
@@ -262,12 +264,13 @@ impl Export {
         // Under way: how far.
         if let Some(r) = &self.running {
             let (step, done) = r.progress.get().unwrap_or((Step::Reading, 0.0));
-            let what = match step {
-                Step::Reading => "Reading the splats".to_string(),
-                Step::Making => format!("Making the {}", r.format.label()),
-                Step::Writing => "Writing the file".to_string(),
+            let percent = format!("{:.0}", done * 100.0);
+            let heading = match step {
+                Step::Reading => tr!("Reading the splats… {percent}%", percent = percent),
+                Step::Making => tr!("Making the {format}… {percent}%", format = r.format.label(), percent = percent),
+                Step::Writing => tr!("Writing the file… {percent}%", percent = percent),
             };
-            progress_card(ui, Id::unique(("export-progress", self.id)), &format!("{what}… {:.0}%", done * 100.0), done, self.dest.as_deref());
+            progress_card(ui, Id::unique(("export-progress", self.id)), &heading, done, self.dest.as_deref());
         }
 
         // Done, or why not.
@@ -275,14 +278,15 @@ impl Export {
             Some((_, Ok(done))) => {
                 let name = done.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
                 let folder = done.path.parent().map(|p| p.display().to_string()).unwrap_or_default();
-                let text = format!("Saved {name} in {folder}: {}, {} splats.", format::bytes(done.bytes as f64), format::integer(done.splats as f64));
+                let text = tr!("Saved {name} in {folder}: {size}, {count} splats.", name = name, folder = folder, size = format::bytes(done.bytes as f64), count = format::integer(done.splats as f64));
                 feedback::banner(ui, Id::unique(("export-saved", &done.path)), Tone::Ok, &text, false);
                 if let Some(s) = done.saturated.filter(|s| s.colors * 1000 > s.components) {
                     let share = s.colors as f64 / s.components.max(1) as f64 * 100.0;
                     note(
                         ui,
-                        &format!(
-                            "SPZ keeps colours in 8 bits: {share:.1}% of the colour values N4N0 learned were brighter or darker than it holds, and were clamped. GLB and PLY keep every value."
+                        &tr!(
+                            "SPZ keeps colours in 8 bits: {share}% of the colour values N4N0 learned were brighter or darker than it holds, and were clamped. GLB and PLY keep every value.",
+                            share = format!("{share:.1}")
                         ),
                     );
                 }
@@ -321,7 +325,7 @@ impl Export {
         let name = widgets::text(p, pos2(x, y), Align2::LEFT_CENTER, &Txt::new(f.label(), 14.0).weight(weight::SEMIBOLD));
         let kind = widgets::text(p, pos2(name.right() + 10.0, y), Align2::LEFT_CENTER, &Txt::new(f.kind(), 12.0).weight(weight::MEDIUM).color(theme::FG_2));
         if let Some(n) = splats {
-            let size = format!("about {}", format::bytes(f.estimate(n) as f64));
+            let size = tr!("about {size}", size = format::bytes(f.estimate(n) as f64));
             widgets::text(p, pos2(kind.right() + 10.0, y), Align2::LEFT_CENTER, &Txt::new(size, 12.0).color(theme::FG_4));
         }
         p.galley(pos2(x, r.top() + 14.0 + 20.0 + 4.0), hint, theme::FG_3);
@@ -340,13 +344,13 @@ impl Export {
         let close = |ctx: &egui::Context, id: Id| dialog::close(ctx, id);
         if let Some(r) = &self.running {
             let done = r.progress.get().map_or(0.0, |(_, d)| d);
-            Button::new(&format!("Exporting… {:.0}%", done * 100.0))
+            Button::new(&tr!("Exporting… {percent}%", percent = format!("{:.0}", done * 100.0)))
                 .icon(icons::UPLOAD_SIMPLE)
                 .variant(Variant::Primary)
                 .enabled(false)
                 .id_salt("export-go")
                 .show(ui);
-            if widgets::activated(&Button::new("Stop").variant(Variant::Ghost).id_salt("export-stop").show(ui)) {
+            if widgets::activated(&Button::new(tr("Stop")).variant(Variant::Ghost).id_salt("export-stop").show(ui)) {
                 r.progress.stop();
             }
             return;
@@ -354,37 +358,37 @@ impl Export {
         match &self.outcome {
             Some((f, Ok(done))) if *f == self.format => {
                 let path = done.path.clone();
-                if widgets::activated(&Button::new("Show in folder").icon(icons::FOLDER_OPEN).variant(Variant::Primary).id_salt("export-reveal").show(ui)) {
+                if widgets::activated(&Button::new(tr("Show in folder")).icon(icons::FOLDER_OPEN).variant(Variant::Primary).id_salt("export-reveal").show(ui)) {
                     if let Err(e) = (self.hooks.reveal)(&path) {
-                        self.note = Some(format!("Its folder could not be shown: {e:#}"));
+                        self.note = Some(tr!("Its folder could not be shown: {e}", e = format!("{e:#}")));
                     }
                 }
-                if widgets::activated(&Button::new("Done").variant(Variant::Ghost).id_salt("export-done").show(ui)) {
+                if widgets::activated(&Button::new(tr("Done")).variant(Variant::Ghost).id_salt("export-done").show(ui)) {
                     close(&ctx, self.id);
                 }
                 return;
             }
             Some((f, Err(e))) if *f == self.format && e.elsewhere() => {
                 let picking = self.picking.running();
-                let b = Button::new(if picking { "Choosing where…" } else { "Choose another place…" })
+                let b = Button::new(if picking { tr("Choosing where…") } else { tr("Choose another place…") })
                     .icon(icons::FOLDER_OPEN)
                     .variant(Variant::Primary)
                     .enabled(!picking);
                 if widgets::activated(&b.id_salt("export-elsewhere").show(ui)) {
                     self.ask(&ctx, true);
                 }
-                if widgets::activated(&Button::new("Close").variant(Variant::Ghost).id_salt("export-close").show(ui)) {
+                if widgets::activated(&Button::new(tr("Close")).variant(Variant::Ghost).id_salt("export-close").show(ui)) {
                     close(&ctx, self.id);
                 }
                 return;
             }
             Some((f, Err(Failure::Failed(_) | Failure::Changed))) if *f == self.format => {
-                if widgets::activated(&Button::new("Try again").icon(icons::ARROW_CLOCKWISE).variant(Variant::Primary).id_salt("export-retry").show(ui)) {
+                if widgets::activated(&Button::new(tr("Try again")).icon(icons::ARROW_CLOCKWISE).variant(Variant::Primary).id_salt("export-retry").show(ui)) {
                     if let Some(dest) = self.dest.clone() {
                         self.start(&ctx, dest);
                     }
                 }
-                if widgets::activated(&Button::new("Close").variant(Variant::Ghost).id_salt("export-close").show(ui)) {
+                if widgets::activated(&Button::new(tr("Close")).variant(Variant::Ghost).id_salt("export-close").show(ui)) {
                     close(&ctx, self.id);
                 }
                 return;
@@ -395,15 +399,20 @@ impl Export {
         let known = self.edits.poll().cloned();
         let ready = known.is_some() && problem(known.as_ref(), self.outcome.as_ref()).is_none() && !self.discarding.running();
         let picking = self.picking.running();
-        let label = if picking { "Choosing where…".to_string() } else { format!("Export {}…", self.format.label()) };
+        let label = if picking { tr("Choosing where…").to_string() } else { tr!("Export {format}…", format = self.format.label()) };
         let mut b = Button::new(&label).icon(icons::UPLOAD_SIMPLE).variant(Variant::Primary).enabled(ready && !picking).id_salt("export-go");
         if !ready && !self.edits.running() {
-            b = b.hint("Discard the splat edits that could not be applied first");
+            b = b.hint(tr("Discard the splat edits that could not be applied first"));
         }
-        if widgets::activated(&b.show(ui)) && ready && !picking {
+        let go = b.show(ui);
+        // Its name with a value in it has no English of its own to be found by, in a run in another language.
+        if !picking {
+            widgets::note_control(ui.ctx(), &format!("Export {}…", self.format.label()), go.rect, ready); // i18n: not shown
+        }
+        if widgets::activated(&go) && ready && !picking {
             self.ask(&ctx, false);
         }
-        if widgets::activated(&Button::new("Cancel").variant(Variant::Ghost).id_salt("export-cancel").show(ui)) {
+        if widgets::activated(&Button::new(tr("Cancel")).variant(Variant::Ghost).id_salt("export-cancel").show(ui)) {
             close(&ctx, self.id);
         }
     }
@@ -455,7 +464,7 @@ fn progress_card(ui: &mut Ui, id: Id, heading: &str, done: f32, dest: Option<&Pa
     let f = anim::value(&ctx, id, done, Spring::SOFT).clamp(0.0, 1.0);
     p.rect_filled(Rect::from_min_size(bar.min, vec2((bar.width() * f).max(6.0), 6.0)), theme::radius(3.0), theme::ACCENT);
     if let Some(d) = dest {
-        let line = format!("To {} · closing stops it", d.display());
+        let line = tr!("To {path} · closing stops it", path = d.display());
         widgets::text_truncated(p, pos2(r.left() + 16.0, r.top() + 74.0), Align2::LEFT_CENTER, &Txt::new(line, 11.5).color(theme::FG_3), r.width() - 32.0);
     }
 }

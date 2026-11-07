@@ -6,6 +6,7 @@ use super::super::{Canvas, Presenter};
 use super::stereo::{self, V3};
 use egui::epaint::{Mesh, Vertex, WHITE_UV};
 use egui::{pos2, vec2, Align2, Color32, Painter, Pos2, Rect, Shape, Vec2};
+use orbiters_i18n::{language, tr, Language};
 use orbiters_openvr as vr;
 use orbiters_ui::theme::{self, weight};
 use super::super::orbit::panels::look as orbit_look;
@@ -138,13 +139,13 @@ pub fn paint(p: &Painter, stage: Stage, seconds: f32) {
         Stage::Stick { hand } => {
             let push = stick_at(seconds);
             joystick(p, pos2(104.0, 186.0), push);
-            let which = if hand == 0 { "Left stick" } else { "Right stick" };
+            let which = if hand == 0 { tr("Left stick") } else { tr("Right stick") };
             edged_text(p, pos2(104.0, 28.0), Align2::CENTER_CENTER, which, theme::font(19.0, weight::SEMIBOLD), theme::FG);
             let up = ((push - 0.2) / 0.8).clamp(0.0, 1.0);
             let down = ((-push - 0.2) / 0.8).clamp(0.0, 1.0);
-            words(p, pos2(208.0, 26.0), icons::CARET_UP, "Push up", "to zoom in", up);
-            words(p, pos2(208.0, 126.0), icons::CARET_DOWN, "Pull down", "to zoom out", down);
-            edged_text(p, pos2(208.0, 214.0), Align2::LEFT_CENTER, "Touchpad: move around", theme::font(19.0, weight::SEMIBOLD), theme::FG);
+            words(p, pos2(208.0, 26.0), icons::CARET_UP, tr("Push up"), tr("to zoom in"), up);
+            words(p, pos2(208.0, 126.0), icons::CARET_DOWN, tr("Pull down"), tr("to zoom out"), down);
+            edged_text(p, pos2(208.0, 214.0), Align2::LEFT_CENTER, tr("Touchpad: move around"), theme::font(19.0, weight::SEMIBOLD), theme::FG);
             // Off the stick, the way it goes: in time with the words that light up.
             if up > 0.0 {
                 widgets::icon(p, pos2(104.0, 60.0), icons::CARET_UP, 46.0, theme::alpha(orbit_look::accent(), up));
@@ -158,7 +159,7 @@ pub fn paint(p: &Painter, stage: Stage, seconds: f32) {
             let phase = (seconds / 1.3).fract() * std::f32::consts::TAU;
             let beat = if near { 1.0 + 0.1 * phase.sin() } else { 1.0 + 0.05 * phase.sin() };
             edged_icon(p, card.left_center() + vec2(66.0, 0.0), icons::HAND_GRABBING, 66.0 * beat, if near { Color32::WHITE } else { orbit_look::accent() });
-            let (first, second) = if near { ("Close your grip", "It comes with your hand") } else { ("Grip to take it", "With either hand") };
+            let (first, second) = if near { (tr("Close your grip"), tr("It comes with your hand")) } else { (tr("Grip to take it"), tr("With either hand")) };
             let ink = if near { orbit_look::accent() } else { Color32::WHITE };
             edged_text(p, card.left_center() + vec2(122.0, -20.0), Align2::LEFT_CENTER, first, theme::font(32.0, weight::BOLD), ink);
             edged_text(p, card.left_center() + vec2(122.0, 22.0), Align2::LEFT_CENTER, second, theme::font(22.0, weight::MEDIUM), theme::FG);
@@ -185,15 +186,17 @@ pub struct HideChip {
     handle: vr::OverlayHandle,
     canvas: Canvas,
     shown: Option<bool>,
+    /// The language its picture was drawn in: a picture kept on the overlay does not change with the language, so it is drawn again.
+    drawn_in: Language,
 }
 
 impl HideChip {
     pub fn new(overlay: &vr::Overlay, key: &str) -> anyhow::Result<Self> {
-        let handle = overlay.create(&format!("{key}.small-hide"), "Hide a small 3D view").map_err(|c| anyhow::anyhow!("the small view's Hide: {c:?}"))?;
+        let handle = overlay.create(&format!("{key}.small-hide"), "Hide a small 3D view").map_err(|c| anyhow::anyhow!("the small view's Hide: {c:?}"))?; // i18n: not shown (the overlay's name in SteamVR)
         let _ = overlay.set_width_in_meters(handle, CHIP_WIDTH_M);
         let _ = overlay.set_flag(handle, vr::overlay_flag::IS_PREMULTIPLIED, true);
         let _ = overlay.set_sort_order(handle, 3);
-        Ok(Self { handle, canvas: Canvas::new(CHIP_PX[0], CHIP_PX[1]), shown: None })
+        Ok(Self { handle, canvas: Canvas::new(CHIP_PX[0], CHIP_PX[1]), shown: None, drawn_in: language() })
     }
 
     /// Where it shows, and whether a hand points at it; or nowhere.
@@ -204,10 +207,11 @@ impl HideChip {
             }
             return;
         };
-        if self.shown != Some(pointed) {
-            if self.shown.is_none() {
+        if self.shown != Some(pointed) || self.drawn_in != language() {
+            if self.shown.is_none() || self.drawn_in != language() {
                 self.canvas.invalidate();
             }
+            self.drawn_in = language();
             for _ in 0..2 {
                 self.canvas.paint(0.0, |p| paint_chip(p, pointed));
             }
@@ -259,16 +263,18 @@ pub struct SmallHint {
     born: Instant,
     painted: Option<Instant>,
     shown: Option<Stage>,
+    /// The language its picture was drawn in: it stands still with Reduce motion, so it is drawn again when the language changes.
+    drawn_in: Language,
 }
 
 impl SmallHint {
     pub fn new(overlay: &vr::Overlay, key: &str) -> anyhow::Result<Self> {
-        let handle = overlay.create(&format!("{key}.small-hint"), "How to handle a small 3D view").map_err(|c| anyhow::anyhow!("the small view's hint: {c:?}"))?;
+        let handle = overlay.create(&format!("{key}.small-hint"), "How to handle a small 3D view").map_err(|c| anyhow::anyhow!("the small view's hint: {c:?}"))?; // i18n: not shown (the overlay's name in SteamVR)
         let _ = overlay.set_width_in_meters(handle, WIDTH_M);
         let _ = overlay.set_flag(handle, vr::overlay_flag::IS_PREMULTIPLIED, true);
         // Over the capture, and under N4N0's menu and these panels.
         let _ = overlay.set_sort_order(handle, 3);
-        Ok(Self { handle, canvas: Canvas::new(PX[0], PX[1]), born: Instant::now(), painted: None, shown: None })
+        Ok(Self { handle, canvas: Canvas::new(PX[0], PX[1]), born: Instant::now(), painted: None, shown: None, drawn_in: language() })
     }
 
     /// Shows what is wanted, above where what it speaks of is and how far that reaches, facing `head`; or nothing.
@@ -280,11 +286,14 @@ impl SmallHint {
             return;
         };
         let due = self.painted.is_none_or(|t| t.elapsed().as_secs_f32() >= FRAME_S);
-        if self.shown != Some(stage) || (moves && due) {
+        if self.shown != Some(stage) || (moves && due) || self.drawn_in != language() {
             if self.shown.is_none() {
-                self.canvas.invalidate();
                 self.born = Instant::now();
             }
+            if self.shown.is_none() || self.drawn_in != language() {
+                self.canvas.invalidate();
+            }
+            self.drawn_in = language();
             self.painted = Some(Instant::now());
             // With Reduce motion it stands still, pushed up.
             let seconds = if moves { self.born.elapsed().as_secs_f32() } else { CYCLE_S * 0.25 };
@@ -356,7 +365,7 @@ impl Plate {
     const SIDE: u32 = 512;
 
     pub fn new(overlay: &vr::Overlay, key: &str) -> anyhow::Result<Self> {
-        let handle = overlay.create(&format!("{key}.small-plate"), "Under a small 3D view").map_err(|c| anyhow::anyhow!("the small view's plate: {c:?}"))?;
+        let handle = overlay.create(&format!("{key}.small-plate"), "Under a small 3D view").map_err(|c| anyhow::anyhow!("the small view's plate: {c:?}"))?; // i18n: not shown (the overlay's name in SteamVR)
         let _ = overlay.set_flag(handle, vr::overlay_flag::IS_PREMULTIPLIED, true);
         // Over a panel's pane, under the capture.
         let _ = overlay.set_sort_order(handle, 1);
@@ -414,7 +423,7 @@ impl Backdrop {
     const PX: [u32; 2] = BACKDROP_PX;
 
     pub fn new(overlay: &vr::Overlay, key: &str) -> anyhow::Result<Self> {
-        let handle = overlay.create(&format!("{key}.small-backdrop"), "Behind a small 3D view").map_err(|c| anyhow::anyhow!("the small view's backdrop: {c:?}"))?;
+        let handle = overlay.create(&format!("{key}.small-backdrop"), "Behind a small 3D view").map_err(|c| anyhow::anyhow!("the small view's backdrop: {c:?}"))?; // i18n: not shown (the overlay's name in SteamVR)
         let _ = overlay.set_flag(handle, vr::overlay_flag::IS_PREMULTIPLIED, true);
         // Under the capture.
         let _ = overlay.set_sort_order(handle, 0);
@@ -476,6 +485,14 @@ pub fn shots(out: &std::path::Path) -> anyhow::Result<()> {
             canvas.paint(seconds as f64, |p| paint(p, stage, seconds));
         }
         super::shots::write_png(&out.join(format!("small-hint-{name}.png")), PX[0], PX[1], canvas.pixels())?;
+    }
+    // The Hide under a view taken in a hand, away from and pointed at.
+    for (name, pointed) in [("hide", false), ("hide-pointed", true)] {
+        let mut canvas = Canvas::new(CHIP_PX[0], CHIP_PX[1]);
+        for _ in 0..2 {
+            canvas.paint(0.0, |p| paint_chip(p, pointed));
+        }
+        super::shots::write_png(&out.join(format!("small-hint-{name}.png")), CHIP_PX[0], CHIP_PX[1], canvas.pixels())?;
     }
     Ok(())
 }

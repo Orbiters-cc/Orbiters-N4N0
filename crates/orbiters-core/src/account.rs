@@ -14,6 +14,7 @@
 //! everywhere, and `unity-wizard/token` tells whether it still works.
 
 use anyhow::{bail, Context as _};
+use orbiters_i18n::tr;
 use serde::{Deserialize, Serialize};
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -149,7 +150,7 @@ pub struct Account {
 /// Without the credential: an account printed in a log or a test's failure shows who, never the token.
 impl std::fmt::Debug for Account {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Account")
+        f.debug_struct("Account") // i18n: not shown (a debug name)
             .field("token", &"(hidden)")
             .field("user", &self.user)
             .field("username", &self.username)
@@ -367,7 +368,7 @@ impl Link {
 impl std::fmt::Debug for Link {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let page = self.link_url.split(['?', '#']).next().unwrap_or_default();
-        f.debug_struct("Link")
+        f.debug_struct("Link") // i18n: not shown (a debug name)
             .field("link_url", &format_args!("{page}?(hidden)"))
             .field("connected_url", &self.connected_url)
             .field("exchange_token", &"(hidden)")
@@ -397,6 +398,21 @@ pub enum Check {
 }
 
 /// Calls to the Orbiters API of one server.
+/// How long the language may take: nothing waits on it, and it is tried again.
+const LANGUAGE_TIMEOUT: Duration = Duration::from_secs(10);
+
+#[derive(serde::Deserialize)]
+struct LanguageAnswer {
+    #[serde(rename = "preferredLanguage")]
+    preferred_language: Option<String>,
+}
+
+impl LanguageAnswer {
+    fn language(self) -> Option<orbiters_i18n::Language> {
+        self.preferred_language.as_deref().and_then(orbiters_i18n::normalize)
+    }
+}
+
 #[derive(Clone)]
 pub struct Api {
     agent: ureq::Agent,
@@ -478,6 +494,19 @@ impl Api {
         Ok(Check::Valid(account))
     }
 
+    /// The account's language (`GET /n4n0/language`): `None` when it has not chosen one, or chose one this build does not know.
+    pub fn language(&self, token: &str) -> anyhow::Result<Option<orbiters_i18n::Language>> {
+        let response = self.agent.get(&self.url("n4n0/language")).config().timeout_global(Some(LANGUAGE_TIMEOUT)).build().header("Authorization", &format!("Bearer {token}")).call()?;
+        Ok(Self::json::<LanguageAnswer>(response)?.language())
+    }
+
+    /// Changes the account's language; `None` clears the choice (`PUT /n4n0/language`). What the account has now.
+    pub fn set_language(&self, token: &str, language: Option<&str>) -> anyhow::Result<Option<orbiters_i18n::Language>> {
+        let body = serde_json::json!({ "preferredLanguage": language });
+        let response = self.agent.put(&self.url("n4n0/language")).config().timeout_global(Some(LANGUAGE_TIMEOUT)).build().header("Authorization", &format!("Bearer {token}")).send_json(&body)?;
+        Ok(Self::json::<LanguageAnswer>(response)?.language())
+    }
+
     /// Starts a browser sign-in whose Connect brings its code to this tool's [`Callback`] (its `port` and `path`).
     pub fn begin_link(&self, port: u16, path: &str) -> anyhow::Result<Link> {
         let device = std::env::var("COMPUTERNAME").or_else(|_| std::env::var("HOSTNAME")).unwrap_or_else(|_| "Orbiters - N4N0".into());
@@ -496,17 +525,17 @@ impl Api {
         let body = serde_json::json!({ "exchangeToken": exchange_token, "code": code });
         let response = match self.agent.post(&self.url("editor-links/exchange")).send_json(body) {
             Ok(response) => response,
-            Err(e) => return Exchange::Retry(format!("Orbiters could not be reached: {e}")),
+            Err(e) => return Exchange::Retry(tr!("Orbiters could not be reached: {error}", error = e)),
         };
         let status = response.status().as_u16();
         match Self::json::<Account>(response) {
             Ok(account) if !account.token.trim().is_empty() => Exchange::Done(account),
-            Ok(_) => Exchange::Ended("Orbiters did not return a credential. Sign in again.".into()),
+            Ok(_) => Exchange::Ended(tr("Orbiters did not return a credential. Sign in again.").into()),
             Err(e) => {
                 let said = e.downcast_ref::<ApiError>().map(|api| api.message.clone()).filter(|m| !m.is_empty());
                 match status {
-                    404 | 410 => Exchange::Ended(said.unwrap_or_else(|| "The sign-in expired. Sign in again.".into())),
-                    _ => Exchange::Retry(said.unwrap_or_else(|| format!("Orbiters could not finish the sign-in ({status})."))),
+                    404 | 410 => Exchange::Ended(said.unwrap_or_else(|| tr("The sign-in expired. Sign in again.").into())),
+                    _ => Exchange::Retry(said.unwrap_or_else(|| tr!("Orbiters could not finish the sign-in ({status}).", status = status))),
                 }
             }
         }
@@ -671,9 +700,9 @@ fn percent_decode(text: &str) -> Option<String> {
 fn respond(stream: &mut TcpStream, location: Option<&str>) {
     let answer = match location.filter(|l| !l.chars().any(char::is_control)) {
         Some(location) => format!(
-            "HTTP/1.1 302 Found\r\nLocation: {location}\r\nCache-Control: no-store\r\nReferrer-Policy: no-referrer\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            "HTTP/1.1 302 Found\r\nLocation: {location}\r\nCache-Control: no-store\r\nReferrer-Policy: no-referrer\r\nContent-Length: 0\r\nConnection: close\r\n\r\n" // i18n: not shown (an HTTP answer)
         ),
-        None => "HTTP/1.1 404 Not Found\r\nCache-Control: no-store\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_string(),
+        None => "HTTP/1.1 404 Not Found\r\nCache-Control: no-store\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_string(), // i18n: not shown (an HTTP answer)
     };
     let _ = stream.set_write_timeout(Some(CALLBACK_READ));
     let _ = stream.write_all(answer.as_bytes());
@@ -689,6 +718,73 @@ fn error(status: u16, body: &str) -> ApiError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// One answer each from a server on this computer, and what was asked of it.
+    fn serve(answers: Vec<(&'static str, &'static str)>) -> (Api, std::thread::JoinHandle<Vec<String>>) {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}/", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            let mut asked = Vec::new();
+            for (status, body) in answers {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = Vec::new();
+                let mut buffer = [0u8; 2048];
+                while let Ok(n) = stream.read(&mut buffer) {
+                    request.extend_from_slice(&buffer[..n]);
+                    let text = String::from_utf8_lossy(&request);
+                    if let Some(end) = text.find("\r\n\r\n") {
+                        let length = text.lines().find_map(|l| l.to_ascii_lowercase().strip_prefix("content-length:").map(|v| v.trim().parse::<usize>().unwrap_or(0))).unwrap_or(0);
+                        if request.len() >= end + 4 + length {
+                            break;
+                        }
+                    }
+                    if n == 0 {
+                        break;
+                    }
+                }
+                asked.push(String::from_utf8_lossy(&request).to_string());
+                let answer = format!("HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+                let _ = stream.write_all(answer.as_bytes());
+            }
+            asked
+        });
+        (Api::at(&base), server)
+    }
+
+    #[test]
+    fn the_accounts_language_is_read_and_changed_with_the_tools_credential() {
+        use orbiters_i18n::Language;
+        let (api, server) = serve(vec![
+            ("200 OK", r#"{"preferredLanguage":"pt-BR","languages":["en","ja","fr","es","pt-BR"]}"#),
+            ("200 OK", r#"{"preferredLanguage":null,"languages":[]}"#),
+            ("200 OK", r#"{"preferredLanguage":"tlh","languages":[]}"#),
+            ("200 OK", r#"{"preferredLanguage":"ja","languages":[]}"#),
+            ("200 OK", r#"{"preferredLanguage":null,"languages":[]}"#),
+        ]);
+        assert_eq!(api.language("orbit-x").unwrap(), Some(Language::PtBr));
+        assert_eq!(api.language("orbit-x").unwrap(), None, "no choice");
+        assert_eq!(api.language("orbit-x").unwrap(), None, "a language this build does not know");
+        assert_eq!(api.set_language("orbit-x", Some("ja")).unwrap(), Some(Language::Ja));
+        assert_eq!(api.set_language("orbit-x", None).unwrap(), None);
+        let asked = server.join().unwrap();
+        assert!(asked[0].starts_with("GET /n4n0/language ") && asked[0].to_ascii_lowercase().contains("authorization: bearer orbit-x"), "{}", asked[0]);
+        let body = |request: &str| serde_json::from_str::<serde_json::Value>(request.split("\r\n\r\n").nth(1).unwrap()).unwrap();
+        assert!(asked[3].starts_with("PUT /n4n0/language "), "{}", asked[3]);
+        assert_eq!(body(&asked[3]), serde_json::json!({ "preferredLanguage": "ja" }));
+        assert_eq!(body(&asked[4]), serde_json::json!({ "preferredLanguage": null }), "clearing says so");
+    }
+
+    /// A server down, or one without this route yet: an error for the caller to shrug at, never a language.
+    #[test]
+    fn a_server_that_cannot_answer_says_nothing_about_the_language() {
+        let (api, server) = serve(vec![("404 Not Found", r#"{"error":"no"}"#), ("401 Unauthorized", r#"{"error":"no"}"#), ("200 OK", "not json")]);
+        assert!(api.language("orbit-x").is_err());
+        assert!(api.set_language("orbit-x", Some("fr")).is_err());
+        assert!(api.language("orbit-x").is_err());
+        server.join().unwrap();
+        assert!(Api::at("http://127.0.0.1:9/").language("orbit-x").is_err(), "nobody there");
+    }
 
     #[test]
     fn editor_prefs_names_match_unity() {

@@ -10,6 +10,7 @@ name = "orbiters-capture"
 path = "src/main.rs"
 
 [dependencies]
+orbiters-i18n = { workspace = true }
 orbiters-core = { workspace = true }
 orbiters-contracts = { workspace = true }
 orbiters-openvr = { workspace = true }

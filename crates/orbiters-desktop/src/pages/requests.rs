@@ -2,6 +2,7 @@
 //! acknowledgement asked inline as for public sharing), and what you asked of others. The window grows out of the
 //! Requests button ([`orbiters_ui::dialog`]); answers run in the tray service.
 use super::{sharing, Cx, Job};
+use orbiters_i18n::{mark, tr, tr_ctx};
 use crate::controller::shares::{self as controller, Operation, Outcome, Request};
 use egui::{pos2, vec2, Align2, Id, Rect, Sense, Ui, UiBuilder};
 use orbiters_core::{
@@ -86,7 +87,7 @@ impl State {
         }
         if name == "gallery-requests-error" {
             let r = self.incoming[0].clone();
-            self.row_error = Some((r.id, "Orbiters could not be reached. This request is still pending.".into()));
+            self.row_error = Some((r.id, "Orbiters could not be reached. This request is still pending.".into())); // i18n: not shown (a staged scene; the real message comes from the service)
             self.last = Some((r, true, false));
         }
         if name == "gallery-requests-empty" {
@@ -154,7 +155,7 @@ impl State {
                         self.row_error = Some((before.id, message));
                     }
                 }
-                _ => self.row_error = Some((before.id, "Unexpected answer from the sharing service.".into())),
+                _ => self.row_error = Some((before.id, tr("Unexpected answer from the sharing service.").into())),
             }
         }
     }
@@ -206,10 +207,9 @@ impl State {
         }
         let mut picked = None;
         let server = if cx.snap.settings.development { Server::Development } else { Server::Production };
-        let sub =
-            if self.outgoing_box { "What you asked of the people who shared with you" } else { "People asking to share further what you shared with them" };
+        let sub = if self.outgoing_box { tr("What you asked of the people who shared with you") } else { tr("People asking to share further what you shared with them") };
         let busy = self.active.is_some();
-        let response = dialog::Dialog::new(id, button, "Sharing requests").glyph(icons::TRAY).subtitle(sub).width(640.0).show(&ctx, |ui, part| {
+        let response = dialog::Dialog::new(id, button, tr("Sharing requests")).glyph(icons::TRAY).subtitle(sub).width(640.0).show(&ctx, |ui, part| {
             if part != dialog::Part::Body {
                 return;
             }
@@ -218,18 +218,18 @@ impl State {
             let (bar, _) = ui.allocate_exact_size(vec2(w, 40.0), Sense::hover());
             let mut bu = ui.new_child(UiBuilder::new().max_rect(bar).id_salt("request-box-bar"));
             let incoming_label = match self.pending() {
-                0 => "Incoming".to_string(),
-                n => format!("Incoming · {n}"),
+                0 => tr_ctx("request", "Incoming").to_string(),
+                n => tr!("Incoming · {count}", count = n),
             };
-            widgets::segmented(&mut bu, "request-box", &mut self.outgoing_box, &[SegOption::new(false, &incoming_label), SegOption::new(true, "Sent")], true);
+            widgets::segmented(&mut bu, "request-box", &mut self.outgoing_box, &[SegOption::new(false, &incoming_label), SegOption::new(true, tr_ctx("request", "Sent"))], true);
             let rr = Rect::from_center_size(pos2(bar.right() - 18.0, bar.center().y), vec2(36.0, 36.0));
             if self.list.running() {
                 feedback::spinner(ui.painter(), rr.center(), 8.0, 2.0, theme::FG_2);
-            } else if sharing::pressed(IconButton::new(icons::ARROW_CLOCKWISE, "Look for new requests").id_salt("requests-refresh").show_at(ui, rr)) && !busy {
+            } else if sharing::pressed(IconButton::new(icons::ARROW_CLOCKWISE, mark("Look for new requests")).id_salt("requests-refresh").show_at(ui, rr)) && !busy {
                 self.refresh(&ctx, server);
             }
             if let Some(error) = self.error.clone() {
-                feedback::banner(ui, Id::unique(("requests-error", &error)), Tone::Danger, &format!("Requests could not be loaded: {error}"), false);
+                feedback::banner(ui, Id::unique(("requests-error", &error)), Tone::Danger, &tr!("Requests could not be loaded: {error}", error = error), false);
             }
             let entries = if self.outgoing_box { self.outgoing.clone() } else { self.incoming.clone() };
             if entries.is_empty() {
@@ -283,7 +283,7 @@ impl State {
         let inner = w - 32.0 - 48.0;
         let recipients: Vec<(Option<&str>, String)> = request
             .public
-            .then(|| (Some(icons::GLOBE), "Everyone on Orbiters".to_string()))
+            .then(|| (Some(icons::GLOBE), tr("Everyone on Orbiters").to_string()))
             .into_iter()
             .chain(request.recipients.iter().map(|r| (None, r.display_name.clone())))
             .collect();
@@ -294,9 +294,9 @@ impl State {
         let (pill_at, pills_h) = widgets::flow(&pill_w, inner, 28.0, 6.0);
         let message = (!request.message.trim().is_empty())
             .then(|| ui.painter().layout_job(Txt::new(request.message.trim(), 13.0).color(theme::FG).line_height(19.0).job(inner - 40.0)));
-        let warning = self.warning.as_ref().filter(|(r, _)| r.id == request.id).map(|(_, m)| m.clone());
+        let warning = self.warning.as_ref().filter(|(r, _)| r.id == request.id).map(|(_, m)| tr(m).to_string());
         let warning_g = warning.as_ref().map(|m| ui.painter().layout_job(Txt::new(m, 12.5).color(theme::FG_2).line_height(18.0).job(inner - 32.0)));
-        let row_error = self.row_error.as_ref().filter(|(id, _)| *id == request.id).map(|(_, m)| m.clone());
+        let row_error = self.row_error.as_ref().filter(|(id, _)| *id == request.id).map(|(_, m)| tr(m).to_string());
         let mut h = 16.0 + 40.0 + 12.0 + pills_h;
         if let Some(g) = &message {
             h += 12.0 + g.size().y + 20.0;
@@ -340,14 +340,14 @@ impl State {
             &Txt::new(&person.name, 14.0).weight(weight::SEMIBOLD),
             r.right() - 16.0 - when_w - 12.0 - x,
         );
-        let kind = match request.kind {
-            shares::Kind::Picture => "picture",
-            _ => "3D capture",
-        };
-        let what = match (&world, outgoing) {
-            (Some(w), false) => format!("wants to share your {kind} of {w}"),
-            (Some(w), true) => format!("You asked to share their {kind} of {w}"),
-            (None, _) => "The item is no longer available".to_string(),
+        // A whole sentence for each, so a language can word the kind of item and the world its own way.
+        let picture = request.kind == shares::Kind::Picture;
+        let what = match (&world, outgoing, picture) {
+            (Some(w), false, true) => tr!("wants to share your picture of {world}", world = w),
+            (Some(w), false, false) => tr!("wants to share your 3D capture of {world}", world = w),
+            (Some(w), true, true) => tr!("You asked to share their picture of {world}", world = w),
+            (Some(w), true, false) => tr!("You asked to share their 3D capture of {world}", world = w),
+            (None, _, _) => tr("The item is no longer available").to_string(),
         };
         widgets::text_truncated(&p, pos2(x, ar.top() + 29.0), Align2::LEFT_CENTER, &Txt::new(what, 12.5).color(theme::FG_3), r.right() - 16.0 - x);
 
@@ -386,17 +386,17 @@ impl State {
             let wr = Rect::from_min_size(pos2(x, y), vec2(inner, 16.0 + 22.0 + g.size().y + 12.0 + 32.0 + 16.0));
             widgets::frame(&p, wr, 16.0, theme::alpha(theme::WARN, 0.09));
             widgets::icon(&p, pos2(wr.left() + 24.0, wr.top() + 27.0), icons::SHIELD_WARNING, 16.0, theme::WARN);
-            widgets::text(&p, pos2(wr.left() + 42.0, wr.top() + 27.0), Align2::LEFT_CENTER, &Txt::new("Flagged as explicit", 13.5).weight(weight::SEMIBOLD));
+            widgets::text(&p, pos2(wr.left() + 42.0, wr.top() + 27.0), Align2::LEFT_CENTER, &Txt::new(tr("Flagged as explicit"), 13.5).weight(weight::SEMIBOLD));
             let gh = g.size().y;
             p.galley(pos2(wr.left() + 16.0, wr.top() + 16.0 + 22.0), g, theme::FG_2);
             let by = wr.top() + 16.0 + 22.0 + gh + 12.0;
-            let anyway = Button::new("Approve anyway")
+            let anyway = Button::new(tr("Approve anyway"))
                 .icon(icons::CHECK)
                 .variant(Variant::Warn)
                 .size(Size::Sm)
                 .enabled(self.active.is_none())
                 .id_salt(("approve-anyway", request.id));
-            let cancel = Button::new("Cancel").variant(Variant::Ghost).size(Size::Sm).id_salt(("warning-cancel", request.id));
+            let cancel = Button::new(tr("Cancel")).variant(Variant::Ghost).size(Size::Sm).id_salt(("warning-cancel", request.id));
             let (aw, cw) = (anyway.desired_width(ui), cancel.desired_width(ui));
             if sharing::pressed(anyway.show_at(ui, Rect::from_min_size(pos2(wr.right() - 16.0 - aw, by), vec2(aw, 32.0)))) {
                 action = Some(RowAction::ApproveAnyway);
@@ -420,17 +420,17 @@ impl State {
         let mut left = row.left();
         if answering {
             feedback::spinner(&p, pos2(left + 9.0, row.center().y), 7.0, 2.0, theme::ACCENT);
-            widgets::text(&p, pos2(left + 24.0, row.center().y), Align2::LEFT_CENTER, &Txt::new("Answering…", 12.5).color(theme::FG_2));
+            widgets::text(&p, pos2(left + 24.0, row.center().y), Align2::LEFT_CENTER, &Txt::new(tr("Answering…"), 12.5).color(theme::FG_2));
         } else if request.status == RequestStatus::Pending && !outgoing && warning.is_none() {
             let busy = self.active.is_some();
             let retry = row_error.is_some() && self.last.as_ref().is_some_and(|(r, _, _)| r.id == request.id);
-            let approve = Button::new(if retry { "Try again" } else { "Approve" })
+            let approve = Button::new(if retry { tr("Try again") } else { tr("Approve") })
                 .icon(if retry { icons::ARROW_CLOCKWISE } else { icons::CHECK })
                 .variant(Variant::Primary)
                 .size(Size::Sm)
                 .enabled(!busy && (retry || request.item.is_some()))
                 .id_salt(("approve", request.id));
-            let deny = Button::new("Deny").icon(icons::X).size(Size::Sm).enabled(!busy).id_salt(("deny", request.id));
+            let deny = Button::new(tr("Deny")).icon(icons::X).size(Size::Sm).enabled(!busy).id_salt(("deny", request.id));
             let (aw, dw) = (approve.desired_width(ui), deny.desired_width(ui));
             if sharing::pressed(approve.show_at(ui, Rect::from_min_size(row.min, vec2(aw, 32.0)))) {
                 action = Some(if retry { RowAction::Retry } else { RowAction::Approve });
@@ -441,13 +441,15 @@ impl State {
             left += aw + 8.0 + dw;
         } else if warning.is_none() {
             let (glyph, label, tone) = match request.status {
-                RequestStatus::Pending => (icons::CLOCK, format!("Waiting for {}", person.name), theme::WARN),
-                RequestStatus::Approved => (icons::CHECK_CIRCLE, "Approved".to_string(), theme::OK),
-                RequestStatus::Denied => (icons::X_CIRCLE, "Denied".to_string(), theme::DANGER),
-                RequestStatus::Cancelled => (icons::PROHIBIT, "Cancelled".to_string(), theme::FG_3),
+                RequestStatus::Pending => (icons::CLOCK, tr!("Waiting for {name}", name = person.name), theme::WARN),
+                RequestStatus::Approved => (icons::CHECK_CIRCLE, tr_ctx("request", "Approved").to_string(), theme::OK),
+                RequestStatus::Denied => (icons::X_CIRCLE, tr_ctx("request", "Denied").to_string(), theme::DANGER),
+                RequestStatus::Cancelled => (icons::PROHIBIT, tr_ctx("request", "Cancelled").to_string(), theme::FG_3),
             };
+            // When it was answered, the status and the time as one sentence.
             let label = match (&request.answered_at, request.status) {
-                (Some(at), RequestStatus::Approved | RequestStatus::Denied) => format!("{label} {}", format::relative_time(controller::unix(at), now_secs())),
+                (Some(at), RequestStatus::Approved) => tr!("Approved {time}", time = format::relative_time(controller::unix(at), now_secs())),
+                (Some(at), RequestStatus::Denied) => tr!("Denied {time}", time = format::relative_time(controller::unix(at), now_secs())),
                 _ => label,
             };
             let t = Txt::new(&label, 12.0).weight(weight::SEMIBOLD).color(tone);
@@ -462,7 +464,7 @@ impl State {
         }
         let _ = left;
         if request.item.is_some() {
-            let open = Button::new("Open").icon(icons::ARROW_SQUARE_OUT).variant(Variant::Ghost).size(Size::Sm).id_salt(("open-item", request.id));
+            let open = Button::new(tr("Open")).icon(icons::ARROW_SQUARE_OUT).variant(Variant::Ghost).size(Size::Sm).id_salt(("open-item", request.id));
             let ow = open.desired_width(ui);
             let or = Rect::from_min_size(pos2(row.right() - ow, row.top()), vec2(ow, 32.0));
             if sharing::pressed(open.show_at(ui, or)) {
@@ -495,9 +497,9 @@ fn empty(ui: &mut Ui, outgoing: bool) {
     p.rect_filled(tile, theme::radius(16.0), theme::white(0.05));
     widgets::icon(p, tile.center(), icons::TRAY, 24.0, theme::FG_3);
     let (title, text) = if outgoing {
-        ("Nothing asked yet", "Ask to share something a friend shared with you: their answer shows up here.")
+        (tr("Nothing asked yet"), tr("Ask to share something a friend shared with you: their answer shows up here."))
     } else {
-        ("No requests", "When someone asks to share further what you shared with them, you answer here.")
+        (tr("No requests"), tr("When someone asks to share further what you shared with them, you answer here."))
     };
     widgets::text(p, pos2(r.center().x, tile.bottom() + 24.0), Align2::CENTER_CENTER, &Txt::new(title, 15.0).weight(weight::SEMIBOLD));
     let g = p.layout_job({

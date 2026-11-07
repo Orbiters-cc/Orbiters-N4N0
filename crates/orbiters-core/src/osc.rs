@@ -310,9 +310,9 @@ fn serve_http(mut stream: TcpStream, tree: &str, host: &str) {
     } else if path == "/" || path.starts_with("/?") || path.starts_with("/avatar") || path.starts_with("/tracking") {
         ("200 OK", tree)
     } else {
-        ("404 Not Found", "{}")
+        ("404 Not Found", "{}") // i18n: not shown (an HTTP answer, a request, or a test-only error)
     };
-    let response = format!("HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+    let response = format!("HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()); // i18n: not shown (an HTTP answer, a request, or a test-only error)
     let _ = stream.write_all(response.as_bytes());
 }
 
@@ -348,7 +348,7 @@ fn http_request(addr: SocketAddr, path: &str, timeout: Duration) -> anyhow::Resu
     stream.set_write_timeout(Some(timeout))?;
     let path = encode_path(path);
     // One write: `write!` would send every piece in its own segment.
-    stream.write_all(format!("GET {path} HTTP/1.1\r\nHost: {addr}\r\nAccept: application/json\r\nConnection: close\r\n\r\n").as_bytes())?;
+    stream.write_all(format!("GET {path} HTTP/1.1\r\nHost: {addr}\r\nAccept: application/json\r\nConnection: close\r\n\r\n").as_bytes())?; // i18n: not shown (an HTTP answer, a request, or a test-only error)
     let mut raw = Vec::new();
     let mut chunk = vec![0u8; 64 * 1024];
     loop {
@@ -853,7 +853,7 @@ impl OscService {
                 (None, Some(announcement), Some(tx))
             } else {
                 // mdns-sd only browses: for VRChat's own service, and to answer for these again whenever a VRChat starts.
-                match no_network_listening().then(|| mdns_sd::Error::Msg("no network listening in this test run".into())).map_or_else(mdns_sd::ServiceDaemon::new, Err) {
+                match no_network_listening().then(|| mdns_sd::Error::Msg("no network listening in this test run".into())).map_or_else(mdns_sd::ServiceDaemon::new, Err) { // i18n: not shown (an HTTP answer, a request, or a test-only error)
                     Ok(d) => {
                         match d.browse("_oscjson._tcp.local.") {
                             Ok(events) => {

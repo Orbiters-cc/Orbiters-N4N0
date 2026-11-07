@@ -57,17 +57,17 @@ fn kind(action: &Action) -> Kind {
 /// How many calls of a kind one turn may make, and what they are called when refused.
 fn limit(kind: Kind) -> (usize, &'static str) {
     match kind {
-        Kind::Avatar => (12, "avatar changes"),
-        Kind::Find => (6, "control searches"),
-        Kind::Hold => (4, "held controls"),
+        Kind::Avatar => (12, "avatar changes"), // i18n: not shown
+        Kind::Find => (6, "control searches"), // i18n: not shown
+        Kind::Hold => (4, "held controls"), // i18n: not shown
         Kind::Photo => (1, "pictures"),
-        Kind::SaveVideo => (2, "saved videos"),
-        Kind::ListVideos => (2, "lists of saved videos"),
-        Kind::Clipboard => (1, "clipboard copies"),
-        Kind::Afk => (1, "AFK message changes"),
+        Kind::SaveVideo => (2, "saved videos"), // i18n: not shown
+        Kind::ListVideos => (2, "lists of saved videos"), // i18n: not shown
+        Kind::Clipboard => (1, "clipboard copies"), // i18n: not shown
+        Kind::Afk => (1, "AFK message changes"), // i18n: not shown
         Kind::Mood => (3, "moods"),
-        Kind::Media => (6, "music controls"),
-        Kind::Light => (4, "light changes"),
+        Kind::Media => (6, "music controls"), // i18n: not shown
+        Kind::Light => (4, "light changes"), // i18n: not shown
     }
 }
 
@@ -111,17 +111,17 @@ impl TurnPolicy {
         self.round += 1;
         self.turn += 1;
         if self.round > CALLS_PER_ROUND {
-            return Verdict::Refuse { why: format!("At most {CALLS_PER_ROUND} actions in one answer: do the rest in the next one.") };
+            return Verdict::Refuse { why: format!("At most {CALLS_PER_ROUND} actions in one answer: do the rest in the next one.") }; // i18n: not shown
         }
         if self.turn > CALLS_PER_TURN {
-            return Verdict::Refuse { why: "That is enough actions for one request: tell the owner what is left to do.".into() };
+            return Verdict::Refuse { why: "That is enough actions for one request: tell the owner what is left to do.".into() }; // i18n: not shown
         }
         let kind = kind(action);
         let used = self.kinds.entry(kind).or_default();
         *used += 1;
         let (most, words) = limit(kind);
         if *used > most {
-            return Verdict::Refuse { why: format!("No more {words} in this request (at most {most}).") };
+            return Verdict::Refuse { why: format!("No more {words} in this request (at most {most}).") }; // i18n: not shown
         }
         let confirm = match action {
             Action::Hold { release, .. } => !release,
@@ -147,40 +147,40 @@ pub fn what(action: &Action, control: Option<&Control>) -> String {
     };
     let setting = |on: Option<bool>, value: Option<f32>| match (on, value) {
         (_, Some(v)) => format!(" at {v:.2}"),
-        (Some(false), None) => " off".to_string(),
+        (Some(false), None) => " off".to_string(), // i18n: not shown (what the AI reads)
         _ => " on".to_string(),
     };
-    let nsfw = if control.is_some_and(|c| c.nsfw) { ", which the avatar's menu tags nsfw" } else { "" };
+    let nsfw = if control.is_some_and(|c| c.nsfw) { ", which the avatar's menu tags nsfw" } else { "" }; // i18n: not shown
     match action {
         Action::SetControl { control: name, on, value } => {
             let verb = match (on, value) {
-                (_, Some(v)) => return format!("set {} to {v:.2}{nsfw}", named(name)),
-                (Some(false), None) => "turn off",
-                _ => "turn on",
+                (_, Some(v)) => return format!("set {} to {v:.2}{nsfw}", named(name)), // i18n: not shown
+                (Some(false), None) => "turn off", // i18n: not shown
+                _ => "turn on", // i18n: not shown
             };
             format!("{verb} {}{nsfw}", named(name))
         }
         Action::Hold { control: name, on, value, .. } => {
-            format!("keep {}{} (put back after every reset and avatar change, until released){nsfw}", named(name), setting(*on, *value))
+            format!("keep {}{} (put back after every reset and avatar change, until released){nsfw}", named(name), setting(*on, *value)) // i18n: not shown
         }
-        Action::CopyToClipboard { text } => format!("copy to your clipboard: {}", quoted(text, ASKED_CHARS)),
+        Action::CopyToClipboard { text } => format!("copy to your clipboard: {}", quoted(text, ASKED_CHARS)), // i18n: not shown
         Action::SetAfkMessage { text, enabled } => {
             let text = text.as_deref().unwrap_or_default();
             let switch = match enabled {
-                Some(true) => ", and turn it on",
-                Some(false) => ", and keep it off",
+                Some(true) => ", and turn it on", // i18n: not shown
+                Some(false) => ", and keep it off", // i18n: not shown
                 None => "",
             };
-            format!("show {} to people while you are away{switch}", quoted(text, ASKED_CHARS))
+            format!("show {} to people while you are away{switch}", quoted(text, ASKED_CHARS)) // i18n: not shown
         }
-        Action::SetParameter { name, value } => format!("set {} to {value:.2}", named(name)),
-        Action::FindControls { .. } => "search the avatar's controls".into(),
-        Action::TakePhoto { .. } => "take a picture".into(),
-        Action::SaveVideo => "save the video".into(),
-        Action::ListSavedVideos => "read your saved videos".into(),
-        Action::Mood { .. } => "change N4N0's look".into(),
-        Action::Media { .. } => "control the music".into(),
-        Action::Light { .. } => "change N4N0's light".into(),
+        Action::SetParameter { name, value } => format!("set {} to {value:.2}", named(name)), // i18n: not shown
+        Action::FindControls { .. } => "search the avatar's controls".into(), // i18n: not shown
+        Action::TakePhoto { .. } => "take a picture".into(), // i18n: not shown
+        Action::SaveVideo => "save the video".into(), // i18n: not shown
+        Action::ListSavedVideos => "read your saved videos".into(), // i18n: not shown
+        Action::Mood { .. } => "change N4N0's look".into(), // i18n: not shown
+        Action::Media { .. } => "control the music".into(), // i18n: not shown
+        Action::Light { .. } => "change N4N0's light".into(), // i18n: not shown
     }
 }
 
@@ -194,19 +194,23 @@ pub fn changes(action: &Action) -> bool {
 pub fn question(whats: &[String]) -> String {
     match whats {
         [] => String::new(),
-        [one] => format!("N4N0 asks to {one}. Say yes to do it."),
-        [first @ .., last] => format!("N4N0 asks to {}, and to {last}. Say yes to do them.", first.join(", to ")),
+        [one] => format!("N4N0 asks to {one}. Say yes to do it."), // i18n: not shown
+        [first @ .., last] => format!("N4N0 asks to {}, and to {last}. Say yes to do them.", first.join(", to ")), // i18n: not shown
     }
 }
 
 /// Words that say yes, in the languages the owner may speak (lowercase, without accents).
-const YES: &str = "yes yeah yep yup ya yea sure ok okay okey kay confirm confirmed affirmative absolutely definitely course do go oui ouais \
-                   ouaip ouep accord dac vas allez fais confirme carrement evidemment bien si claro vale ja jawohl genau da да sim tak hai";
+const YES: &str = concat!(
+    "yes yeah yep yup ya yea sure ok okay okey kay confirm confirmed affirmative absolutely definitely course do go oui ouais ",
+    "ouaip ouep accord dac vas allez fais confirme carrement evidemment bien si claro vale ja jawohl genau da да sim tak hai"
+);
 /// Words that say no.
-const NO: &str = "no nope nah non cancel stop don dont not never annule annuler laisse pas nein nee нет nao nie";
+const NO: &str = "no nope nah non cancel stop don dont not never annule annuler laisse pas nein nee нет nao nie"; // i18n: not shown
 /// Words that may come with a yes or a no without changing it.
-const WITH: &str = "please pls plz it ahead for of thanks thank you then now nano n4n0 merci stp svp s il te plait y le la l d sur tomber \
-                    peine mind t por favor bitte пожалуйста thx alright right";
+const WITH: &str = concat!(
+    "please pls plz it ahead for of thanks thank you then now nano n4n0 merci stp svp s il te plait y le la l d sur tomber ",
+    "peine mind t por favor bitte пожалуйста thx alright right"
+);
 
 /// Whether `word` is one of `words` (separated by spaces).
 fn among(words: &str, word: &str) -> bool {

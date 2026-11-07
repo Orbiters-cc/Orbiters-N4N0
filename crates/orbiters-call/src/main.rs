@@ -20,6 +20,7 @@ mod protocol;
 
 use call::{Call, PeerEvent};
 use orbiters_core::call::{CallCommand, CallEvent, EndReason, IceCandidate, IceServer};
+use orbiters_i18n::{tr};
 use orbiters_sound::Duplex;
 use std::io::{BufRead, Write};
 use std::time::{Duration, Instant};
@@ -99,7 +100,7 @@ impl Worker {
             CallCommand::RemoteAnswer { call, sdp } if current == Some(call) => {
                 let c = self.call.as_mut().expect("current");
                 if let Err(e) = c.remote_answer(sdp).await {
-                    self.fail(format!("The call's answer could not be used: {e:#}")).await;
+                    self.fail(tr!("The call's answer could not be used: {error}", error = format!("{e:#}"))).await;
                 }
             }
             CallCommand::Candidates { call, candidates } if current == Some(call) => {
@@ -143,14 +144,14 @@ impl Worker {
             eprintln!("call: {} relay URL(s) left out (TURN over TCP or TLS, or unreadable)", servers.skipped);
         }
         if relay_only && !servers.relay {
-            error(id, "No relay server this computer can use was given: the call cannot start without showing your address.");
+            error(id, tr("No relay server this computer can use was given: the call cannot start without showing your address."));
             emit(&CallEvent::Ended { call: id, reason: EndReason::Failed });
             return;
         }
         let mut call = match Call::new(id, servers.servers, relay_only, &default_route_addr(), self.events.clone()).await {
             Ok(call) => call,
             Err(e) => {
-                error(id, format!("The call could not start: {e:#}"));
+                error(id, tr!("The call could not start: {error}", error = format!("{e:#}")));
                 emit(&CallEvent::Ended { call: id, reason: EndReason::Failed });
                 return;
             }
@@ -169,7 +170,7 @@ impl Worker {
         self.call = Some(call);
         match description {
             Ok(event) => emit(&event),
-            Err(e) => self.fail(format!("Could not set up the call: {e:#}")).await,
+            Err(e) => self.fail(tr!("Could not set up the call: {error}", error = format!("{e:#}"))).await,
         }
     }
 
@@ -207,7 +208,7 @@ impl Worker {
                 let call = self.call.as_ref().expect("checked above");
                 if call.relay_only && call.found.relay.load(std::sync::atomic::Ordering::Relaxed) == 0 && self.connected.is_none() {
                     // Waiting longer changes nothing: no relay answered.
-                    error(id, "The call relay could not be reached: this network may block calls (UDP).");
+                    error(id, tr("The call relay could not be reached: this network may block calls (UDP)."));
                     self.end(EndReason::Unreachable).await;
                 }
             }
@@ -216,7 +217,7 @@ impl Worker {
                 emit(&CallEvent::Connected { call: id });
                 let call = self.call.as_mut().expect("checked above");
                 if let Err(e) = call.start_sending().await {
-                    error(id, format!("The call's audio could not be sent: {e:#}"));
+                    error(id, tr!("The call's audio could not be sent: {error}", error = format!("{e:#}")));
                 }
                 if !self.no_sound {
                     self.audio = open_audio(call, self.mic_device.clone());
@@ -238,17 +239,17 @@ impl Worker {
             emit(&CallEvent::Levels { call: id, mic, remote });
             if let Some(trouble) = self.audio.as_ref().and_then(Duplex::error) {
                 if self.audio_error.as_ref() != Some(&trouble) {
-                    error(id, format!("Call sound: {trouble}"));
+                    error(id, tr!("Call sound: {trouble}", trouble = trouble));
                     self.audio_error = Some(trouble);
                 }
             }
             if call.quiet_for(connected) > SILENT_CALL {
-                error(id, "Nothing came from the other side for 15 s: the call dropped.");
+                error(id, tr("Nothing came from the other side for 15 s: the call dropped."));
                 self.end(EndReason::Failed).await;
             }
         } else if call.started.elapsed() > CONNECT_TIMEOUT {
             let reason = call.failure();
-            error(id, "The call did not connect.");
+            error(id, tr("The call did not connect."));
             self.end(reason).await;
         }
     }
@@ -262,7 +263,7 @@ fn open_audio(call: &Call, device: Option<String>) -> Option<Duplex> {
     let speaker = call.speaker.clone();
     // Waits up to 3 s for the devices.
     tokio::task::block_in_place(|| Duplex::start(device, move |samples: &[f32]| mic.push(samples), speaker))
-        .map_err(|e| error(call.id, format!("The call's sound could not start: {e:#}")))
+        .map_err(|e| error(call.id, tr!("The call's sound could not start: {error}", error = format!("{e:#}"))))
         .ok()
 }
 
@@ -373,6 +374,8 @@ async fn serve(no_sound: bool) {
 fn main() {
     orbiters_core::panic_log::install();
     orbiters_core::leave_with_parent();
+    // What it reports is written in the language of the app that reads it.
+    orbiters_core::settings::Settings::speak_saved_language();
     let args: Vec<String> = std::env::args().skip(1).collect();
     static LOG: Log = Log;
     if log::set_logger(&LOG).is_ok() {

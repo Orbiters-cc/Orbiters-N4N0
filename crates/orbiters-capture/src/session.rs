@@ -21,6 +21,7 @@ use orbiters_core::bundle::{self, BundleWriter};
 use orbiters_core::clock;
 use orbiters_core::keyframes::{self, KeyframeSelector};
 use orbiters_core::protocol::{CaptureStats, CoverageMap, OscSample, StartCapture};
+use orbiters_i18n::{mark, tr};
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex};
@@ -49,7 +50,7 @@ pub enum Warning {
 /// VRChat), and a 3D picture without its faces loses what it shows away from the camera's path, 5.9 dB on views of the rig
 /// (reports/rig-pixels.md). Thirty faces is five rig frames: a few late cameras at the start of the rig are normal.
 fn rig_faces_unread(read: u64, late: u64) -> Option<&'static str> {
-    (read == 0 && late >= 30).then_some("N4N0's rig pictures cannot be read in this recording, so the 3D picture will look worse from anywhere but the camera's path. Upload the avatar again; if this stays, the cameras of its rig are not working in VRChat.")
+    (read == 0 && late >= 30).then_some(tr("N4N0's rig pictures cannot be read in this recording, so the 3D picture will look worse from anywhere but the camera's path. Upload the avatar again; if this stays, the cameras of its rig are not working in VRChat."))
 }
 
 /// A stretch without the strip shorter than this is a moment's trouble (a fast turn, a flash): not counted.
@@ -591,8 +592,8 @@ fn finite_manifest(m: &mut SessionManifest) {
 /// The warning kind and the words for an audio track.
 fn audio_warning(kind: TrackKind) -> (Warning, &'static str) {
     match kind {
-        TrackKind::Mic => (Warning::Microphone, "microphone"),
-        TrackKind::Game => (Warning::GameSound, "VRChat sound"),
+        TrackKind::Mic => (Warning::Microphone, "microphone"), // i18n: not shown (for the log line; the warning is written whole below)
+        TrackKind::Game => (Warning::GameSound, "VRChat sound"), // i18n: not shown (for the log line; the warning is written whole below)
     }
 }
 
@@ -661,7 +662,8 @@ impl CaptureSession {
                 Err(e) => {
                     let (warning, what) = audio_warning(kind);
                     eprintln!("{what}: {e:#}");
-                    warnings.push((warning, format!("The {what} is not recorded: {e:#}")));
+                    let error = format!("{e:#}");
+                    warnings.push((warning, if kind == TrackKind::Mic { tr!("The microphone is not recorded: {error}", error = error) } else { tr!("The VRChat sound is not recorded: {error}", error = error) }));
                 }
             }
         }
@@ -669,7 +671,7 @@ impl CaptureSession {
             Some(hz) => match TrackingRecorder::start(tracking::steamvr(), writer.dir(), epoch_ns, hz) {
                 Ok(r) => Some(r),
                 Err(e) => {
-                    warnings.push((Warning::Tracking, format!("SteamVR tracking is not recorded: {e:#}")));
+                    warnings.push((Warning::Tracking, tr!("SteamVR tracking is not recorded: {error}", error = format!("{e:#}"))));
                     None
                 }
             },
@@ -824,7 +826,7 @@ impl CaptureSession {
             Some(f) if f.last.elapsed() <= FAILURE_RUN => (f.last, f.count, f.error) = (now, f.count + 1, error.clone()),
             _ => self.failing = Some(Failing { since: now, last: now, count: 1, error: error.clone() }),
         }
-        self.warn(Warning::Disk, format!("Files of the session could not be written ({what}: {error})"));
+        self.warn(Warning::Disk, tr!("Files of the session could not be written ({what}: {error})", what = tr(what), error = error));
     }
 
     /// Stops the recording while a little space is left (files cut short by a full disk are worse than a session
@@ -837,10 +839,10 @@ impl CaptureSession {
         let Some(free) = free_space(self.writer.dir()) else { return };
         let mb = free >> 20;
         if free < FREE_STOP && self.stop.is_none() {
-            self.stop = Some(format!("Recording stopped: only {mb} MB is free on the disk the sessions are saved to."));
+            self.stop = Some(tr!("Recording stopped: only {mb} MB is free on the disk the sessions are saved to.", mb = mb));
         } else if free < FREE_WARN && !self.free_warned {
             self.free_warned = true;
-            self.warn(Warning::Disk, format!("Only {mb} MB is free on the disk the sessions are saved to: the recording stops below 512 MB."));
+            self.warn(Warning::Disk, tr!("Only {mb} MB is free on the disk the sessions are saved to: the recording stops below 512 MB.", mb = mb));
         }
     }
 
@@ -848,7 +850,7 @@ impl CaptureSession {
     pub fn osc(&mut self, samples: &[OscSample], paused: bool) {
         for sample in samples {
             if let Err(e) = self.parameters.add(self.epoch_ns, sample, paused) {
-                self.warn(Warning::Streams, format!("Avatar parameters are not recorded: {e:#}"));
+                self.warn(Warning::Streams, tr!("Avatar parameters are not recorded: {error}", error = format!("{e:#}")));
                 break;
             }
         }
@@ -868,7 +870,7 @@ impl CaptureSession {
                 r.set_paused(self.performance_paused);
                 self.audio.push(r);
             }
-            Err(e) => self.warn(Warning::GameSound, format!("The VRChat sound is not recorded: {e:#}")),
+            Err(e) => self.warn(Warning::GameSound, tr!("The VRChat sound is not recorded: {error}", error = format!("{e:#}"))),
         }
     }
 
@@ -892,7 +894,7 @@ impl CaptureSession {
     /// Recording goes on after a pause: writes what changed meanwhile.
     pub fn resume(&mut self) {
         if let Err(e) = self.parameters.resume(self.time_ns()) {
-            self.warn(Warning::Streams, format!("Avatar parameters are not recorded: {e:#}"));
+            self.warn(Warning::Streams, tr!("Avatar parameters are not recorded: {error}", error = format!("{e:#}")));
         }
     }
 
@@ -1269,7 +1271,7 @@ impl CaptureSession {
             self.hips = Some((pose.hips, rotation));
         }
         if let Err(e) = self.skeleton.add(time_ns, &pose) {
-            self.warn(Warning::Streams, format!("The skeleton band is not recorded: {e:#}"));
+            self.warn(Warning::Streams, tr!("The skeleton band is not recorded: {error}", error = format!("{e:#}")));
         }
         Ok(())
     }
@@ -1296,7 +1298,7 @@ impl CaptureSession {
                             self.wrote();
                         }
                         Err(error) => {
-                            self.write_failed(if frame.is_some() { "a keyframe" } else { "a depth frame as received" }, error);
+                            self.write_failed(if frame.is_some() { mark("a keyframe") } else { mark("a depth frame as received") }, error);
                             if let Some(p) = frame.and_then(|f| pending_at(&mut self.pending, f)) {
                                 p.record.flags &= !record_flags::KEYFRAME;
                                 p.record.keyframe_index = -1;
@@ -1334,7 +1336,7 @@ impl CaptureSession {
                             }
                         }
                         Ok(None) => {}
-                        Err(error) => self.write_failed("a depth frame", error),
+                        Err(error) => self.write_failed(mark("a depth frame"), error),
                     }
                     if let Some(buffer) = buffer {
                         self.buffers.give(buffer);
@@ -1360,7 +1362,7 @@ impl CaptureSession {
                 front.record.keyframe_index = -1;
                 front.record.depth_index = -1;
                 front.waiting = 0;
-                self.warn(Warning::Pictures, "Keyframes or depth frames took too long to write and were left out.".into());
+                self.warn(Warning::Pictures, tr("Keyframes or depth frames took too long to write and were left out.").into());
                 continue;
             }
             let p = self.pending.pop_front().expect("a record");
@@ -1397,7 +1399,7 @@ impl CaptureSession {
         self.stats.parameter_changes = self.parameters.changes;
         self.stats.skeleton_frames = self.skeleton.frames;
         if let Err(e) = self.skeleton.flush() {
-            self.warn(Warning::Streams, format!("The skeleton band is not recorded: {e:#}"));
+            self.warn(Warning::Streams, tr!("The skeleton band is not recorded: {error}", error = format!("{e:#}")));
         }
         self.stats.mic_level = self.audio.iter().find(|a| a.kind == TrackKind::Mic).map(AudioRecorder::take_level);
         self.stats.game_level = self.audio.iter().find(|a| a.kind == TrackKind::Game).map(AudioRecorder::take_level);
@@ -1412,11 +1414,11 @@ impl CaptureSession {
             self.stats.bytes += c.samples * 64;
         }
         if let Err(e) = self.parameters.flush() {
-            self.warn(Warning::Streams, format!("Avatar parameters are not recorded: {e:#}"));
+            self.warn(Warning::Streams, tr!("Avatar parameters are not recorded: {error}", error = format!("{e:#}")));
         }
         if self.checkpointed.elapsed() >= CHECKPOINT_EVERY {
             if let Err(e) = self.checkpoint() {
-                self.write_failed("the session so far", format!("{e:#}"));
+                self.write_failed(mark("the session so far"), format!("{e:#}"));
             }
         }
         // What the saver wrote since, or could not.
@@ -1425,11 +1427,11 @@ impl CaptureSession {
             self.wrote();
         }
         for error in errors {
-            self.write_failed("the session so far", error);
+            self.write_failed(mark("the session so far"), error);
         }
         if let Some(f) = self.failing.as_ref().filter(|f| f.persistent()) {
             if self.stop.is_none() {
-                self.stop = Some(format!("Recording stopped: the session could not be written ({}).", f.error));
+                self.stop = Some(tr!("Recording stopped: the session could not be written ({error}).", error = f.error));
             }
         }
         self.check_free_space();
@@ -1503,22 +1505,22 @@ impl CaptureSession {
         // Long stretches without the strip leave parts of the walk without keyframes: how much. (No strip at all is the
         // service's to tell, knowing why: the manifest's keyframes say so.)
         if strip_since_ns > 0 && strip_missing_ns >= 5_000_000_000 && strip_missing_ns * 10 >= strip_since_ns {
-            warnings.push(format!(
-                "no camera pose for {:.0} s of {:.0} s: the capture strip was not seen, so those parts have no keyframes",
-                strip_missing_ns as f64 / 1e9,
-                strip_since_ns as f64 / 1e9
+            warnings.push(tr!(
+                "no camera pose for {missing} s of {total} s: the capture strip was not seen, so those parts have no keyframes",
+                missing = format!("{:.0}", strip_missing_ns as f64 / 1e9),
+                total = format!("{:.0}", strip_since_ns as f64 / 1e9)
             ));
         }
         writer.add_bytes(written);
         if write_errors > 0 {
-            warnings.push(format!("{write_errors} file(s) could not be written"));
+            warnings.push(tr!("{write_errors} file(s) could not be written", write_errors = write_errors));
         }
         match parameters.finish() {
             Ok((changes, bytes)) => {
                 writer.manifest_mut().performance.parameter_changes = changes;
                 writer.add_bytes(bytes);
             }
-            Err(e) => warnings.push(format!("avatar parameters: {e:#}")),
+            Err(e) => warnings.push(tr!("avatar parameters: {error}", error = format!("{e:#}"))),
         }
         match skeleton.finish() {
             Ok((frames, bytes)) => {
@@ -1577,7 +1579,7 @@ impl CaptureSession {
         }
         let (dir, mut manifest, error) = writer.finish_keeping();
         if let Some(e) = error {
-            warnings.push(format!("the session's manifest: {e:#}"));
+            warnings.push(tr!("the session's manifest: {error}", error = format!("{e:#}")));
         }
         finite_manifest(&mut manifest);
         for w in &warnings {

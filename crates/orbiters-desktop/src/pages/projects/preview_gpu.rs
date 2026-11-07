@@ -46,7 +46,7 @@ impl Layouts {
         };
         let both = wgpu::ShaderStages::VERTEX_FRAGMENT;
         let frame = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("preview frame"),
+            label: Some("preview frame"), // i18n: not shown (a debug label of the graphics driver)
             entries: &[
                 uniform(0, both),
                 wgpu::BindGroupLayoutEntry {
@@ -85,7 +85,7 @@ impl Layouts {
             ],
         });
         let shadow_frame =
-            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label: Some("preview shadow frame"), entries: &[uniform(0, both)] });
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label: Some("preview shadow frame"), entries: &[uniform(0, both)] }); // i18n: not shown (a debug label of the graphics driver)
         let picture = |binding| wgpu::BindGroupLayoutEntry {
             binding,
             visibility: wgpu::ShaderStages::FRAGMENT,
@@ -98,7 +98,7 @@ impl Layouts {
         };
         // The base colour, the sampler, then the normal, metallic-smoothness and emission pictures.
         let material = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("preview material"),
+            label: Some("preview material"), // i18n: not shown (a debug label of the graphics driver)
             entries: &[
                 uniform(0, both),
                 picture(1),
@@ -115,7 +115,7 @@ impl Layouts {
         });
         // A draw's lightmap: where in it (one uniform buffer, the draw's offset into it), and the picture.
         let lightmap = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("preview lightmap"),
+            label: Some("preview lightmap"), // i18n: not shown (a debug label of the graphics driver)
             entries: &[
                 wgpu::BindGroupLayoutEntry {
                     binding: 0,
@@ -154,19 +154,19 @@ fn cull_index(c: Option<wgpu::Face>) -> usize {
 impl Pipelines {
     fn new(device: &wgpu::Device, layouts: Arc<Layouts>) -> Self {
         let module =
-            device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("project preview"), source: wgpu::ShaderSource::Wgsl(SHADER.into()) });
+            device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("project preview"), source: wgpu::ShaderSource::Wgsl(SHADER.into()) }); // i18n: not shown (a debug label of the graphics driver)
         let scene_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("preview scene"),
+            label: Some("preview scene"), // i18n: not shown (a debug label of the graphics driver)
             bind_group_layouts: &[Some(&layouts.frame), Some(&layouts.material), Some(&layouts.lightmap)],
             immediate_size: 0,
         });
         let frame_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("preview frame"),
+            label: Some("preview frame"), // i18n: not shown (a debug label of the graphics driver)
             bind_group_layouts: &[Some(&layouts.frame)],
             immediate_size: 0,
         });
         let shadow_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("preview shadow"),
+            label: Some("preview shadow"), // i18n: not shown (a debug label of the graphics driver)
             bind_group_layouts: &[Some(&layouts.shadow_frame), Some(&layouts.material)],
             immediate_size: 0,
         });
@@ -228,9 +228,9 @@ impl Pipelines {
             })
         };
         let culls = [Some(wgpu::Face::Back), Some(wgpu::Face::Front), None];
-        let opaque = culls.map(|c| scene("preview opaque", c, "fs_scene", None, true));
-        let blend = culls.map(|c| scene("preview blend", c, "fs_scene", over, false));
-        let mirror = culls.map(|c| scene("preview mirror", c, "fs_mirror", over, true));
+        let opaque = culls.map(|c| scene("preview opaque", c, "fs_scene", None, true)); // i18n: not shown (a debug label of the graphics driver)
+        let blend = culls.map(|c| scene("preview blend", c, "fs_scene", over, false)); // i18n: not shown (a debug label of the graphics driver)
+        let mirror = culls.map(|c| scene("preview mirror", c, "fs_mirror", over, true)); // i18n: not shown (a debug label of the graphics driver)
         let flat = |label: &str, vs: &str, fs: &str, strip: bool, blend: Option<wgpu::BlendState>| {
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: Some(label),
@@ -252,10 +252,10 @@ impl Pipelines {
                 cache: None,
             })
         };
-        let background = flat("preview background", "vs_full", "fs_background", false, None);
-        let ground = flat("preview ground", "vs_ground", "fs_ground", true, over);
+        let background = flat("preview background", "vs_full", "fs_background", false, None); // i18n: not shown (a debug label of the graphics driver)
+        let ground = flat("preview ground", "vs_ground", "fs_ground", true, over); // i18n: not shown (a debug label of the graphics driver)
         let shadow = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("preview shadow"),
+            label: Some("preview shadow"), // i18n: not shown (a debug label of the graphics driver)
             layout: Some(&shadow_layout),
             vertex: wgpu::VertexState { module: &module, entry_point: Some("vs_shadow"), buffers: &vertex_buffers, compilation_options: Default::default() },
             primitive: wgpu::PrimitiveState { cull_mode: None, ..Default::default() },
@@ -543,7 +543,7 @@ fn upload_texture(device: &wgpu::Device, queue: &wgpu::Queue, img: image::RgbaIm
     let (w, h) = img.dimensions();
     let levels = 32 - w.max(h).max(1).leading_zeros();
     let texture = device.create_texture(&wgpu::TextureDescriptor {
-        label: Some("preview picture"),
+        label: Some("preview picture"), // i18n: not shown (a debug label of the graphics driver)
         size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
         mip_level_count: levels,
         sample_count: 1,
@@ -612,12 +612,12 @@ fn upload(device: &wgpu::Device, queue: &wgpu::Queue, p: &Preview, pipelines: &A
         .iter()
         .map(|m| MeshBuffers {
             vertices: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("preview vertices"),
+                label: Some("preview vertices"), // i18n: not shown (a debug label of the graphics driver)
                 contents: nonempty(p.blob(m.data)),
                 usage: wgpu::BufferUsages::VERTEX,
             }),
             indices: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("preview indices"),
+                label: Some("preview indices"), // i18n: not shown (a debug label of the graphics driver)
                 contents: nonempty(p.blob(m.indices)),
                 usage: wgpu::BufferUsages::INDEX,
             }),
@@ -627,7 +627,7 @@ fn upload(device: &wgpu::Device, queue: &wgpu::Queue, p: &Preview, pipelines: &A
             },
             lightmap_uv: m.lightmap_uv.map(|uv| {
                 device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("preview lightmap uvs"),
+                    label: Some("preview lightmap uvs"), // i18n: not shown (a debug label of the graphics driver)
                     contents: nonempty(p.blob(uv)),
                     usage: wgpu::BufferUsages::VERTEX,
                 })
@@ -636,20 +636,20 @@ fn upload(device: &wgpu::Device, queue: &wgpu::Queue, p: &Preview, pipelines: &A
         .collect();
     let longest = h.meshes.iter().map(|m| m.vertices as u64).max().unwrap_or(0).max(4);
     let no_lightmap_uv = device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("preview no lightmap uvs"),
+        label: Some("preview no lightmap uvs"), // i18n: not shown (a debug label of the graphics driver)
         size: longest * preview::LIGHTMAP_UV_SIZE as u64,
         usage: wgpu::BufferUsages::VERTEX,
         mapped_at_creation: false,
     });
     let instances = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-        label: Some("preview instances"),
+        label: Some("preview instances"), // i18n: not shown (a debug label of the graphics driver)
         contents: nonempty(p.blob(h.instances.matrices)),
         usage: wgpu::BufferUsages::VERTEX,
     });
 
     let white = upload_white(device, queue);
     let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-        label: Some("preview picture"),
+        label: Some("preview picture"), // i18n: not shown (a debug label of the graphics driver)
         address_mode_u: wgpu::AddressMode::Repeat,
         address_mode_v: wgpu::AddressMode::Repeat,
         mag_filter: wgpu::FilterMode::Linear,
@@ -666,12 +666,12 @@ fn upload(device: &wgpu::Device, queue: &wgpu::Queue, p: &Preview, pipelines: &A
             let (tex, normal, surface, emission) = (picture(m.texture), picture(m.normal_texture), picture(m.surface_texture), picture(m.emission_texture));
             let uniform = material_uniform(m, tex.is_some(), normal.is_some(), surface.is_some(), emission.is_some());
             let buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("preview material"),
+                label: Some("preview material"), // i18n: not shown (a debug label of the graphics driver)
                 contents: bytemuck::cast_slice(&uniform),
                 usage: wgpu::BufferUsages::UNIFORM,
             });
             let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("preview material"),
+                label: Some("preview material"), // i18n: not shown (a debug label of the graphics driver)
                 layout: &layouts.material,
                 entries: &[
                     wgpu::BindGroupEntry { binding: 0, resource: buffer.as_entire_binding() },
@@ -739,13 +739,13 @@ fn upload(device: &wgpu::Device, queue: &wgpu::Queue, p: &Preview, pipelines: &A
         place_bytes[i * align..i * align + 32].copy_from_slice(bytemuck::cast_slice(place));
     }
     let places_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-        label: Some("preview lightmap places"),
+        label: Some("preview lightmap places"), // i18n: not shown (a debug label of the graphics driver)
         contents: &place_bytes,
         usage: wgpu::BufferUsages::UNIFORM,
     });
     let lightmap_group = |view: &wgpu::TextureView| {
         device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("preview lightmap"),
+            label: Some("preview lightmap"), // i18n: not shown (a debug label of the graphics driver)
             layout: &layouts.lightmap,
             entries: &[
                 wgpu::BindGroupEntry {
@@ -762,7 +762,7 @@ fn upload(device: &wgpu::Device, queue: &wgpu::Queue, p: &Preview, pipelines: &A
     }
     let sky_view = h.sky.and_then(|s| usize::try_from(s.texture).ok()).and_then(|i| textures.get(i)).and_then(|t| t.as_ref()).unwrap_or(&white);
     let sky_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-        label: Some("preview sky"),
+        label: Some("preview sky"), // i18n: not shown (a debug label of the graphics driver)
         address_mode_u: wgpu::AddressMode::Repeat,
         address_mode_v: wgpu::AddressMode::ClampToEdge,
         mag_filter: wgpu::FilterMode::Linear,
@@ -778,9 +778,9 @@ fn upload(device: &wgpu::Device, queue: &wgpu::Queue, p: &Preview, pipelines: &A
             mapped_at_creation: false,
         })
     };
-    let (frame, mirror_frame, shadow_frame) = (frame_buffer("preview frame"), frame_buffer("preview mirror"), frame_buffer("preview shadow"));
+    let (frame, mirror_frame, shadow_frame) = (frame_buffer("preview frame"), frame_buffer("preview mirror"), frame_buffer("preview shadow")); // i18n: not shown (a debug label of the graphics driver)
     let shadow_texture = device.create_texture(&wgpu::TextureDescriptor {
-        label: Some("preview shadow map"),
+        label: Some("preview shadow map"), // i18n: not shown (a debug label of the graphics driver)
         size: wgpu::Extent3d { width: shadow_size(h), height: shadow_size(h), depth_or_array_layers: 1 },
         mip_level_count: 1,
         sample_count: 1,
@@ -791,7 +791,7 @@ fn upload(device: &wgpu::Device, queue: &wgpu::Queue, p: &Preview, pipelines: &A
     });
     let shadow_view = shadow_texture.create_view(&Default::default());
     let compare = device.create_sampler(&wgpu::SamplerDescriptor {
-        label: Some("preview shadow"),
+        label: Some("preview shadow"), // i18n: not shown (a debug label of the graphics driver)
         mag_filter: wgpu::FilterMode::Linear,
         min_filter: wgpu::FilterMode::Linear,
         compare: Some(wgpu::CompareFunction::LessEqual),
@@ -799,7 +799,7 @@ fn upload(device: &wgpu::Device, queue: &wgpu::Queue, p: &Preview, pipelines: &A
     });
     let group = |buffer: &wgpu::Buffer| {
         device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("preview frame"),
+            label: Some("preview frame"), // i18n: not shown (a debug label of the graphics driver)
             layout: &layouts.frame,
             entries: &[
                 wgpu::BindGroupEntry { binding: 0, resource: buffer.as_entire_binding() },
@@ -812,7 +812,7 @@ fn upload(device: &wgpu::Device, queue: &wgpu::Queue, p: &Preview, pipelines: &A
     };
     let (frame_group, mirror_group) = (group(&frame), group(&mirror_frame));
     let shadow_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some("preview shadow frame"),
+        label: Some("preview shadow frame"), // i18n: not shown (a debug label of the graphics driver)
         layout: &layouts.shadow_frame,
         entries: &[wgpu::BindGroupEntry { binding: 0, resource: shadow_frame.as_entire_binding() }],
     });
@@ -914,7 +914,7 @@ fn nonempty(b: &[u8]) -> &[u8] {
 
 fn upload_white(device: &wgpu::Device, queue: &wgpu::Queue) -> wgpu::TextureView {
     let texture = device.create_texture(&wgpu::TextureDescriptor {
-        label: Some("preview white"),
+        label: Some("preview white"), // i18n: not shown (a debug label of the graphics driver)
         size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
         mip_level_count: 1,
         sample_count: 1,
@@ -1188,12 +1188,12 @@ impl Scene {
         let draws = &self.draws;
         self.blend_order.sort_by(|&a, &b| dist(&draws[b]).total_cmp(&dist(&draws[a])));
 
-        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("project preview") });
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("project preview") }); // i18n: not shown (a debug label of the graphics driver)
         let pl = &self.pipelines;
         if shadow_needed {
             self.shadow_reveal = Some(reveal_y);
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("preview shadow"),
+                label: Some("preview shadow"), // i18n: not shown (a debug label of the graphics driver)
                 color_attachments: &[],
                 depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                     view: &self.shadow_view,
@@ -1307,10 +1307,10 @@ fn targets(device: &wgpu::Device, size: (u32, u32)) -> Targets {
             view_formats,
         })
     };
-    let color = make("preview color", COLOR, SAMPLES, wgpu::TextureUsages::RENDER_ATTACHMENT, &[]);
-    let depth = make("preview depth", DEPTH, SAMPLES, wgpu::TextureUsages::RENDER_ATTACHMENT, &[]);
+    let color = make("preview color", COLOR, SAMPLES, wgpu::TextureUsages::RENDER_ATTACHMENT, &[]); // i18n: not shown (a debug label of the graphics driver)
+    let depth = make("preview depth", DEPTH, SAMPLES, wgpu::TextureUsages::RENDER_ATTACHMENT, &[]); // i18n: not shown (a debug label of the graphics driver)
     let resolve = make(
-        "preview picture",
+        "preview picture", // i18n: not shown (a debug label of the graphics driver)
         COLOR,
         1,
         wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_SRC,

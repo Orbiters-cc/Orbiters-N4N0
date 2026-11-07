@@ -151,14 +151,14 @@ pub struct GlowResources {
 
 /// Creates the pipeline for render targets of `format` (call once per renderer).
 pub fn install(device: &wgpu::Device, format: wgpu::TextureFormat, msaa_samples: u32, resources: &mut egui_wgpu::CallbackResources) {
-    let module = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("orbiters glow"), source: wgpu::ShaderSource::Wgsl(SHADER.into()) });
+    let module = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("orbiters glow"), source: wgpu::ShaderSource::Wgsl(SHADER.into()) }); // i18n: not shown (names a graphics debugger shows)
     let buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-        label: Some("orbiters glow uniforms"),
+        label: Some("orbiters glow uniforms"), // i18n: not shown (names a graphics debugger shows)
         contents: bytemuck::bytes_of(&Uniforms::zeroed_default()),
         usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
     });
     let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-        label: Some("orbiters glow"),
+        label: Some("orbiters glow"), // i18n: not shown (names a graphics debugger shows)
         entries: &[wgpu::BindGroupLayoutEntry {
             binding: 0,
             visibility: wgpu::ShaderStages::FRAGMENT,
@@ -167,17 +167,17 @@ pub fn install(device: &wgpu::Device, format: wgpu::TextureFormat, msaa_samples:
         }],
     });
     let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some("orbiters glow"),
+        label: Some("orbiters glow"), // i18n: not shown (names a graphics debugger shows)
         layout: &layout,
         entries: &[wgpu::BindGroupEntry { binding: 0, resource: buffer.as_entire_binding() }],
     });
     let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-        label: Some("orbiters glow"),
+        label: Some("orbiters glow"), // i18n: not shown (names a graphics debugger shows)
         bind_group_layouts: &[Some(&layout)],
         immediate_size: 0,
     });
     let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-        label: Some("orbiters glow"),
+        label: Some("orbiters glow"), // i18n: not shown (names a graphics debugger shows)
         layout: Some(&pipeline_layout),
         vertex: wgpu::VertexState { module: &module, entry_point: Some("vs_main"), buffers: &[], compilation_options: Default::default() },
         primitive: wgpu::PrimitiveState::default(),

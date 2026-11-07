@@ -330,7 +330,7 @@ struct Targets {
 
 /// Creates the pipelines for render targets of `format` (call once per renderer).
 pub fn install(device: &wgpu::Device, format: wgpu::TextureFormat, msaa_samples: u32, resources: &mut egui_wgpu::CallbackResources) {
-    let module = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("orbiters blur"), source: wgpu::ShaderSource::Wgsl(SHADER.into()) });
+    let module = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("orbiters blur"), source: wgpu::ShaderSource::Wgsl(SHADER.into()) }); // i18n: not shown (names a graphics debugger shows)
     let texture = |binding| wgpu::BindGroupLayoutEntry {
         binding,
         visibility: wgpu::ShaderStages::FRAGMENT,
@@ -356,18 +356,18 @@ pub fn install(device: &wgpu::Device, format: wgpu::TextureFormat, msaa_samples:
         },
         texture(2),
     ];
-    let blur_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label: Some("orbiters blur pass"), entries: &common });
+    let blur_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label: Some("orbiters blur pass"), entries: &common }); // i18n: not shown (names a graphics debugger shows)
     let mut entries = common.to_vec();
     entries.extend((0..LEVELS as u32).map(|i| texture(3 + i)));
-    let composite_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label: Some("orbiters blur composite"), entries: &entries });
+    let composite_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label: Some("orbiters blur composite"), entries: &entries }); // i18n: not shown (names a graphics debugger shows)
     let pipeline = |layout: &wgpu::BindGroupLayout, entry: &str, format: wgpu::TextureFormat, blend: Option<wgpu::BlendState>, samples: u32| {
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("orbiters blur"),
+            label: Some("orbiters blur"), // i18n: not shown (names a graphics debugger shows)
             bind_group_layouts: &[Some(layout)],
             immediate_size: 0,
         });
         device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("orbiters blur"),
+            label: Some("orbiters blur"), // i18n: not shown (names a graphics debugger shows)
             layout: Some(&pipeline_layout),
             vertex: wgpu::VertexState { module: &module, entry_point: Some("vs_main"), buffers: &[], compilation_options: Default::default() },
             primitive: wgpu::PrimitiveState::default(),
@@ -386,7 +386,7 @@ pub fn install(device: &wgpu::Device, format: wgpu::TextureFormat, msaa_samples:
     let blur = pipeline(&blur_layout, "fs_blur", OFFSCREEN, None, 1);
     let composite = pipeline(&composite_layout, "fs_composite", format, Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING), msaa_samples.max(1));
     let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-        label: Some("orbiters blur"),
+        label: Some("orbiters blur"), // i18n: not shown (names a graphics debugger shows)
         mag_filter: wgpu::FilterMode::Linear,
         min_filter: wgpu::FilterMode::Linear,
         ..Default::default()
@@ -401,7 +401,7 @@ impl Band {
         let uniforms = (0..2 * LEVELS + 1)
             .map(|_| {
                 device.create_buffer(&wgpu::BufferDescriptor {
-                    label: Some("orbiters blur uniforms"),
+                    label: Some("orbiters blur uniforms"), // i18n: not shown (names a graphics debugger shows)
                     size: std::mem::size_of::<Uniforms>() as u64,
                     usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
                     mapped_at_creation: false,
@@ -453,7 +453,7 @@ impl Band {
         let view = || {
             device
                 .create_texture(&wgpu::TextureDescriptor {
-                    label: Some("orbiters blur"),
+                    label: Some("orbiters blur"), // i18n: not shown (names a graphics debugger shows)
                     size: wgpu::Extent3d { width: size[0], height: size[1], depth_or_array_layers: 1 },
                     mip_level_count: 1,
                     sample_count: 1,
@@ -474,7 +474,7 @@ impl Band {
             entries.extend(
                 textures.iter().enumerate().map(|(i, t)| wgpu::BindGroupEntry { binding: 2 + i as u32, resource: wgpu::BindingResource::TextureView(t) }),
             );
-            device.create_bind_group(&wgpu::BindGroupDescriptor { label: Some("orbiters blur"), layout, entries: &entries })
+            device.create_bind_group(&wgpu::BindGroupDescriptor { label: Some("orbiters blur"), layout, entries: &entries }) // i18n: not shown (names a graphics debugger shows)
         };
         let mut passes = Vec::with_capacity(2 * LEVELS);
         for k in 0..LEVELS {
@@ -499,7 +499,7 @@ fn sampler(o: TextureOptions) -> wgpu::SamplerDescriptor<'static> {
         TextureWrapMode::MirroredRepeat => wgpu::AddressMode::MirrorRepeat,
     };
     wgpu::SamplerDescriptor {
-        label: Some("orbiters blur mirror"),
+        label: Some("orbiters blur mirror"), // i18n: not shown (names a graphics debugger shows)
         mag_filter: filter(o.magnification),
         min_filter: filter(o.minification),
         address_mode_u: address,
@@ -540,7 +540,7 @@ fn forget_old(res: &mut BlurResources, pass: u64) {
 fn begin(encoder: &mut wgpu::CommandEncoder, view: &wgpu::TextureView) -> wgpu::RenderPass<'static> {
     encoder
         .begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some("orbiters blur"),
+            label: Some("orbiters blur"), // i18n: not shown (names a graphics debugger shows)
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                 view,
                 resolve_target: None,

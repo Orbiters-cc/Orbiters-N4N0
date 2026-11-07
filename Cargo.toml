@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/orbiters-projects", "crates/orbiters-core", "crates/orbiters-spout", "crates/orbiters-capture", "crates/orbiters-ui", "crates/orbiters-desktop", "crates/orbiters-openvr", "crates/orbiters-reconstruct", "crates/orbiters-sound", "crates/orbiters-n4n0-core", "crates/orbiters-n4n0", "crates/orbiters-n4n0-mobile", "crates/orbiters-audio", "crates/orbiters-voice", "crates/orbiters-call", "crates/orbiters-update", "crates/orbiters-setup", "crates/orbiters-smooth", "crates/orbiters-smooth-driver", "xtask"]
+members = ["crates/orbiters-projects", "crates/orbiters-core", "crates/orbiters-i18n", "crates/orbiters-spout", "crates/orbiters-capture", "crates/orbiters-ui", "crates/orbiters-desktop", "crates/orbiters-openvr", "crates/orbiters-reconstruct", "crates/orbiters-sound", "crates/orbiters-n4n0-core", "crates/orbiters-n4n0", "crates/orbiters-n4n0-mobile", "crates/orbiters-audio", "crates/orbiters-voice", "crates/orbiters-call", "crates/orbiters-update", "crates/orbiters-setup", "crates/orbiters-smooth", "crates/orbiters-smooth-driver", "xtask"]
 
 [workspace.package]
 version = "0.3.5-dev.15"
@@ -12,6 +12,7 @@ publish = false
 orbiters-projects = { path = "crates/orbiters-projects" }
 orbiters-contracts = { path = "contracts/Rust~" }
 orbiters-core = { path = "crates/orbiters-core" }
+orbiters-i18n = { path = "crates/orbiters-i18n" }
 orbiters-spout = { path = "crates/orbiters-spout" }
 orbiters-openvr = { path = "crates/orbiters-openvr" }
 orbiters-ui = { path = "crates/orbiters-ui" }

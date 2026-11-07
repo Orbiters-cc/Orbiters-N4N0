@@ -5,6 +5,7 @@
 //! [`State::task`], which greys out every other button while it runs: it has its own worker, the gallery and other
 //! projects stay usable, and the card (or, from elsewhere in the page, the capsule over the cards) shows how far it got
 //! and offers Cancel.
+use orbiters_i18n::{tr, tr_n};
 use super::state::{Poke, State};
 use crate::pages::{Cx, Job};
 use egui::{pos2, vec2, Align2, Id, Rect, Sense, Shape, Ui, UiBuilder};
@@ -66,7 +67,7 @@ fn drive_of(path: &Path) -> String {
 fn drive_of(path: &Path) -> String {
     match path.strip_prefix("/Volumes").ok().and_then(|p| p.components().next()) {
         Some(name) => name.as_os_str().to_string_lossy().into_owned(),
-        None => "the startup disk".to_string(),
+        None => tr("the startup disk").to_string(),
     }
 }
 
@@ -81,21 +82,18 @@ fn bytes(n: u64) -> String {
 }
 
 fn files(n: u64) -> String {
-    let count = format::integer(n as f64);
-    if n == 1 {
-        format!("{count} file")
-    } else {
-        format!("{count} files")
-    }
+    // The number is written with the language's separators, so it goes in after the plural was chosen.
+    let amount = format::integer(n as f64);
+    orbiters_i18n::fill(&tr_n("{amount} file", "{amount} files", n), &[("amount", &amount)])
 }
 
 /// "1 h 12 min", "4 min", "under a minute": how long is left, roughly.
 fn time_left(seconds: f64) -> String {
     let minutes = (seconds / 60.0).ceil() as u64;
     match minutes {
-        0..=1 => "under a minute left".to_string(),
-        2..=59 => format!("about {minutes} min left"),
-        _ => format!("about {} h {} min left", minutes / 60, minutes % 60),
+        0..=1 => tr("under a minute left").to_string(),
+        2..=59 => tr!("about {minutes} min left", minutes = minutes),
+        _ => tr!("about {hours} h {minutes} min left", hours = minutes / 60, minutes = minutes % 60),
     }
 }
 
@@ -108,26 +106,26 @@ impl State {
     /// Open in Unity, from wherever it is offered. `quiet`: no word when it worked (the setup dialog goes on by itself).
     pub(super) fn open_unity(&mut self, ctx: &egui::Context, project: &Project, quiet: bool) {
         if self.repairing(&project.path) {
-            self.error = Some(format!("Orbiters is moving the Library of {}. Unity can open it once that ends, or after Cancel.", project.name));
+            self.error = Some(tr!("Orbiters is moving the Library of {name}. Unity can open it once that ends, or after Cancel.", name = project.name));
             return;
         }
         // A menu's Open is not greyed out by another action, and saying nothing would look like a click that did nothing.
         if self.action.running() {
-            self.error = Some(format!("Unity was not opened: wait for this to end first ({}).", self.action_label.trim_end_matches('…')));
+            self.error = Some(tr!("Unity was not opened: wait for this to end first ({action}).", action = self.action_label.trim_end_matches('…')));
             return;
         }
         let p = project.clone();
-        self.task(ctx, "Opening Unity…", move || {
+        self.task(ctx, tr("Opening Unity…"), move || {
             let opened = orbiters_projects::open_project(&p)?;
             if quiet {
                 return Ok(super::state::Outcome::Picked(None));
             }
             Ok(if opened.already_open {
-                super::state::Outcome::Said(format!("Unity already has {} open", p.name))
+                super::state::Outcome::Said(tr!("Unity already has {name} open", name = p.name))
             } else if let Some(moved) = opened.moved {
-                super::state::Outcome::Changed(format!("Project sent to Unity. Its new Library is at {}, on a disk with room", moved.display()))
+                super::state::Outcome::Changed(tr!("Project sent to Unity. Its new Library is at {path}, on a disk with room", path = moved.display()))
             } else {
-                super::state::Outcome::Changed("Project sent to Unity".into())
+                super::state::Outcome::Changed(tr("Project sent to Unity").into())
             })
         });
     }
@@ -171,18 +169,18 @@ impl State {
         let name = run.name;
         match end {
             Ok(RepairEnd::Moved(moved)) => {
-                cx.toasts.push(ctx, toast::Kind::Success, format!("{name}: its Library is now at {}. Open it in Unity when you're ready.", moved.target.display()));
+                cx.toasts.push(ctx, toast::Kind::Success, tr!("{name}: its Library is now at {path}. Open it in Unity when you're ready.", name = name, path = moved.target.display()));
                 if let Some(old) = moved.old_left {
-                    cx.toasts.push(ctx, toast::Kind::Warning, format!("The old Library could not be fully deleted: {}. Orbiters tries again the next time its window opens.", old.display()));
+                    cx.toasts.push(ctx, toast::Kind::Warning, tr!("The old Library could not be fully deleted: {path}. Orbiters tries again the next time its window opens.", path = old.display()));
                 }
             }
             Ok(RepairEnd::Cancelled { left: None }) => {
-                cx.toasts.push(ctx, toast::Kind::Info, format!("Repair of {name} cancelled. Its Library stays where it was, and the partial copy is deleted."));
+                cx.toasts.push(ctx, toast::Kind::Info, tr!("Repair of {name} cancelled. Its Library stays where it was, and the partial copy is deleted.", name = name));
             }
             Ok(RepairEnd::Cancelled { left: Some(left) }) => {
-                cx.toasts.push(ctx, toast::Kind::Warning, format!("Repair of {name} cancelled. Its Library stays where it was. The partial copy at {} could not be deleted; Orbiters tries again the next time its window opens.", left.display()));
+                cx.toasts.push(ctx, toast::Kind::Warning, tr!("Repair of {name} cancelled. Its Library stays where it was. The partial copy at {path} could not be deleted; Orbiters tries again the next time its window opens.", name = name, path = left.display()));
             }
-            Err(e) => self.error = Some(format!("The storage of {name} was not repaired: {e}")),
+            Err(e) => self.error = Some(tr!("The storage of {name} was not repaired: {error}", name = name, error = e)),
         }
         // The project is still there, as it was or with its new Library: the gallery says so.
         self.load_view(ctx, false);
@@ -257,23 +255,23 @@ impl State {
 fn heading(p: &Progress, cancelling: bool) -> String {
     let to = p.destination.as_deref().map(drive_of).unwrap_or_default();
     match p.phase {
-        Phase::Starting => "Starting the repair…".into(),
-        _ if cancelling && p.cancellable() => "Cancelling…".into(),
-        Phase::Leftovers => "Clearing what an interrupted repair left…".into(),
-        Phase::Measuring => "Measuring the Library…".into(),
-        Phase::Copying => format!("Copying the Library to {to}"),
-        Phase::Switching => "Switching to the new copy…".into(),
-        Phase::RemovingOld => "Library moved. Deleting the old copy…".into(),
-        Phase::RemovingPartial => "Deleting the partial copy…".into(),
+        Phase::Starting => tr("Starting the repair…").into(),
+        _ if cancelling && p.cancellable() => tr("Cancelling…").into(),
+        Phase::Leftovers => tr("Clearing what an interrupted repair left…").into(),
+        Phase::Measuring => tr("Measuring the Library…").into(),
+        Phase::Copying => tr!("Copying the Library to {to}", to = to),
+        Phase::Switching => tr("Switching to the new copy…").into(),
+        Phase::RemovingOld => tr("Library moved. Deleting the old copy…").into(),
+        Phase::RemovingPartial => tr("Deleting the partial copy…").into(),
     }
 }
 
 /// How far it got.
 fn detail(p: &Progress) -> String {
     match p.phase {
-        Phase::Copying => format!("{} of {} checked · {} of {}", bytes(p.bytes_checked), bytes(p.bytes_total), format::integer(p.files_done as f64), files(p.files_total)),
-        Phase::Measuring => format!("{} so far · {}", bytes(p.bytes_total), files(p.files_total)),
-        Phase::RemovingOld | Phase::RemovingPartial => format!("{} of {} deleted", format::integer(p.files_removed as f64), files(p.files_to_remove)),
+        Phase::Copying => tr!("{done} of {total} checked · {files_done} of {files_total}", done = bytes(p.bytes_checked), total = bytes(p.bytes_total), files_done = format::integer(p.files_done as f64), files_total = files(p.files_total)),
+        Phase::Measuring => tr!("{size} so far · {files}", size = bytes(p.bytes_total), files = files(p.files_total)),
+        Phase::RemovingOld | Phase::RemovingPartial => tr!("{done} of {total} deleted", done = format::integer(p.files_removed as f64), total = files(p.files_to_remove)),
         _ => String::new(),
     }
 }
@@ -330,30 +328,30 @@ pub(super) fn card(ui: &mut Ui, state: &mut State, project: &Project) {
         }
     };
     let Some(notice) = health.notice() else { return };
-    let disk = health.disk.as_deref().map(drive_of).unwrap_or_else(|| "this disk".to_string());
-    let free = health.free.map(bytes).unwrap_or_else(|| "an unknown amount".to_string());
+    let disk = health.disk.as_deref().map(drive_of).unwrap_or_else(|| tr("this disk").to_string());
+    let free = health.free.map(bytes).unwrap_or_else(|| tr("an unknown amount").to_string());
     let (title, tint, icon, says) = match notice {
         Notice::RunningLow => (
-            "This disk is running low",
+            tr("This disk is running low"),
             theme::WARN,
             icons::WARNING,
-            format!("{} has {free} free. Unity opens as usual, but a large import can run out of room: Orbiters looks for at least {} GB free.", starting(&disk), storage::IMPORT_RESERVE >> 30),
+            tr!("{disk} has {free} free. Unity opens as usual, but a large import can run out of room: Orbiters looks for at least {gigabytes} GB free.", disk = starting(&disk), free = free, gigabytes = storage::IMPORT_RESERVE >> 30),
         ),
         Notice::OutOfSpace => (
-            "Unity ran out of disk space",
+            tr("Unity ran out of disk space"),
             theme::DANGER,
             icons::X_CIRCLE,
-            format!("Unity's log says it could not write this project's files, and {disk} has {free} free. Opening it again can stop at the same point until there is more room."),
+            tr!("Unity's log says it could not write this project's files, and {disk} has {free} free. Opening it again can stop at the same point until there is more room.", disk = disk, free = free),
         ),
         Notice::FailedEarlier => (
-            "Unity ran out of disk space earlier",
+            tr("Unity ran out of disk space earlier"),
             theme::BLUE,
             icons::INFO,
             {
-                let again = if health.open { "Quit Unity and open the project again" } else { "Open the project again" };
+                let again = if health.open { tr("Quit Unity and open the project again") } else { tr("Open the project again") };
                 match health.free {
-                    Some(free) => format!("Unity's log still shows that it could not write this project's files, but {disk} has {} free now, so there is nothing to move. {again} to let it finish.", bytes(free)),
-                    None => format!("Unity's log still shows that it could not write this project's files. Free some space on its disk if it stops there again. {again} to let it finish."),
+                    Some(free) => tr!("Unity's log still shows that it could not write this project's files, but {disk} has {free} free now, so there is nothing to move. {again} to let it finish.", disk = disk, free = bytes(free), again = again),
+                    None => tr!("Unity's log still shows that it could not write this project's files. Free some space on its disk if it stops there again. {again} to let it finish.", again = again),
                 }
             },
         ),
@@ -384,53 +382,57 @@ pub(super) fn card(ui: &mut Ui, state: &mut State, project: &Project) {
                 let p = measuring.clone().unwrap_or_default();
                 let (r, _) = cu.allocate_exact_size(vec2(cu.available_width(), 22.0), Sense::hover());
                 feedback::spinner(cu.painter(), pos2(r.left() + 8.0, r.center().y), 6.0, 1.8, theme::ACCENT);
-                let text = format!("Measuring the Library, to say what a repair would move: {}", detail(&Progress { phase: Phase::Measuring, ..p }));
+                let text = tr!("Measuring the Library, to say what a repair would move: {detail}", detail = detail(&Progress { phase: Phase::Measuring, ..p }));
                 widgets::text_truncated(cu.painter(), pos2(r.left() + 22.0, r.center().y), Align2::LEFT_CENTER, &note(text), r.width() - 22.0);
                 false
             }
             Some(Err(e)) => {
-                para(cu, body(format!("The Library could not be measured: {e}")));
-                if widgets::activated(&Button::new("Measure again").variant(Variant::Secondary).size(Size::Sm).id_salt("storage-measure").show(cu)) {
+                para(cu, body(tr!("The Library could not be measured: {error}", error = e)));
+                if widgets::activated(&Button::new(tr("Measure again")).variant(Variant::Secondary).size(Size::Sm).id_salt("storage-measure").show(cu)) {
                     measure_again = true;
                 }
                 false
             }
             Some(Ok(plan)) => match &plan.verdict {
                 Verdict::Ready { cache_root, free } => {
-                    para(cu, body(format!(
-                        "Repair storage moves this project's generated Library to a disk with room: {} in {} to {} ({} free there). Assets, Packages and settings stay where they are.",
-                        bytes(plan.bytes),
-                        files(plan.files),
-                        cache_root.display(),
-                        bytes(*free)
+                    para(cu, body(tr!(
+                        "Repair storage moves this project's generated Library to a disk with room: {size} in {files} to {folder} ({free} free there). Assets, Packages and settings stay where they are.",
+                        size = bytes(plan.bytes),
+                        files = files(plan.files),
+                        folder = cache_root.display(),
+                        free = bytes(*free)
                     )));
-                    para(cu, note(format!(
-                        "Every file is checked before the old Library goes, and you can cancel until then. {} has to be connected whenever you use this project.",
-                        starting(&drive_of(cache_root))
+                    para(cu, note(tr!(
+                        "Every file is checked before the old Library goes, and you can cancel until then. {disk} has to be connected whenever you use this project.",
+                        disk = starting(&drive_of(cache_root))
                     )));
                     true
                 }
                 Verdict::Redirected { to } => {
-                    let place = to.as_ref().map(|p| format!(" ({})", p.display())).unwrap_or_default();
-                    para(cu, body(format!("This project's Library is already on another disk{place}, and that is the one running low. Free some space there.")));
+                    let text = match to {
+                        Some(path) => tr!("This project's Library is already on another disk ({path}), and that is the one running low. Free some space there.", path = path.display()),
+                        None => tr("This project's Library is already on another disk, and that is the one running low. Free some space there.").to_string(),
+                    };
+                    para(cu, body(text));
                     false
                 }
                 Verdict::HasLink { at } => {
-                    para(cu, body(format!("Its Library holds a linked folder ({}), so Orbiters does not move it. Free some space on {disk}.", at.display())));
+                    para(cu, body(tr!("Its Library holds a linked folder ({path}), so Orbiters does not move it. Free some space on {disk}.", path = at.display(), disk = disk)));
                     false
                 }
                 Verdict::NoRoom { needed, best } => {
-                    let most = best.as_ref().map(|(root, free)| format!(" The most on another disk is {} on {}.", bytes(*free), drive_of(root))).unwrap_or_default();
                     if cfg!(target_os = "macos") && best.is_none() {
                         // Most Macs have the one disk.
-                        para(cu, body(format!("Moving it needs {} on another disk (the Library and room for Unity's imports), and none is connected. Free some space on {disk}, or connect a disk with room.", bytes(*needed))));
+                        para(cu, body(tr!("Moving it needs {size} on another disk (the Library and room for Unity's imports), and none is connected. Free some space on {disk}, or connect a disk with room.", size = bytes(*needed), disk = disk)));
+                    } else if let Some((root, free)) = best {
+                        para(cu, body(tr!("Moving it needs {size} on another disk (the Library and room for Unity's imports). The most on another disk is {free} on {disk}. Free some space on one of them.", size = bytes(*needed), free = bytes(*free), disk = drive_of(root))));
                     } else {
-                        para(cu, body(format!("Moving it needs {} on another disk (the Library and room for Unity's imports).{most} Free some space on one of them.", bytes(*needed))));
+                        para(cu, body(tr!("Moving it needs {size} on another disk (the Library and room for Unity's imports). Free some space on one of them.", size = bytes(*needed))));
                     }
                     false
                 }
                 Verdict::Unsupported => {
-                    para(cu, body(format!("Free some space on {disk}.")));
+                    para(cu, body(tr!("Free some space on {disk}.", disk = disk)));
                     false
                 }
             },
@@ -439,14 +441,14 @@ pub(super) fn card(ui: &mut Ui, state: &mut State, project: &Project) {
             return;
         }
         if health.open {
-            para(cu, note("Quit this project's Unity window first."));
+            para(cu, note(tr("Quit this project's Unity window first.")));
         } else if let Some(name) = &other_running {
-            para(cu, note(format!("Orbiters is moving the Library of {name}: one at a time.")));
+            para(cu, note(tr!("Orbiters is moving the Library of {name}: one at a time.", name = name)));
         }
         cu.add_space(2.0);
         let enabled = ready && !health.open && other_running.is_none() && !action_running;
         let variant = if notice == Notice::OutOfSpace { Variant::Primary } else { Variant::Secondary };
-        let resp = Button::new("Repair storage").icon(icons::HARD_DRIVE).variant(variant).size(Size::Sm).enabled(enabled).id_salt("storage-repair").show(cu);
+        let resp = Button::new(tr("Repair storage")).icon(icons::HARD_DRIVE).variant(variant).size(Size::Sm).enabled(enabled).id_salt("storage-repair").show(cu);
         anchor = Some(resp.rect);
         if widgets::activated(&resp) {
             repair = true;
@@ -506,14 +508,14 @@ fn progress_card(ui: &mut Ui, state: &mut State) {
             widgets::text_truncated(cu.painter(), pos2(r.left(), r.center().y), Align2::LEFT_CENTER, &note(p.file.clone()), r.width());
         }
         para(cu, note(match p.phase {
-            Phase::RemovingOld => "The project already uses its new Library. Unity can open it once the old copy is gone.",
-            Phase::RemovingPartial => "The project's Library was not touched.",
-            Phase::Switching => "This takes a moment and can no longer be cancelled.",
-            _ => "The project's Library stays as it is until the copy is checked. Unity cannot open the project until this ends; everything else stays usable.",
+            Phase::RemovingOld => tr("The project already uses its new Library. Unity can open it once the old copy is gone."),
+            Phase::RemovingPartial => tr("The project's Library was not touched."),
+            Phase::Switching => tr("This takes a moment and can no longer be cancelled."),
+            _ => tr("The project's Library stays as it is until the copy is checked. Unity cannot open the project until this ends; everything else stays usable."),
         }));
         if p.cancellable() && !cancelling {
             cu.add_space(2.0);
-            let resp = Button::new("Cancel").variant(Variant::Secondary).size(Size::Sm).id_salt("storage-cancel").show(cu);
+            let resp = Button::new(tr("Cancel")).variant(Variant::Secondary).size(Size::Sm).id_salt("storage-cancel").show(cu);
             anchor = Some(resp.rect);
             if widgets::activated(&resp) {
                 cancel = true;

@@ -1,6 +1,7 @@
 //! What can be done with a project from its menus: the panel's "…" menu and the right-click menus of the project
 //! cards and of the projects found on the computer (`orbiters_ui::popup::context_menu`) share these actions.
 
+use orbiters_i18n::tr;
 use super::art::glyph;
 use super::state::{server, Outcome, State};
 use crate::pages::Cx;
@@ -35,34 +36,34 @@ pub(super) fn project_items(state: &State, project: &Project, opening: bool) -> 
     if opening {
         let session = state.session(&project.path);
         if project.registered && session.open() {
-            acts.push((Item::new("Show in Unity").icon(icons::ARROW_SQUARE_OUT), ProjectAct::ShowUnity));
+            acts.push((Item::new(tr("Show in Unity")).icon(icons::ARROW_SQUARE_OUT), ProjectAct::ShowUnity));
             if matches!(session, orbiters_projects::editor::Session::Open { .. }) {
-                acts.push((Item::new("Save & Exit Unity").icon(icons::FLOPPY_DISK), ProjectAct::SaveExit));
-                acts.push((Item::new("Kill Unity…").icon(icons::X_CIRCLE).danger(), ProjectAct::Kill));
+                acts.push((Item::new(tr("Save & Exit Unity")).icon(icons::FLOPPY_DISK), ProjectAct::SaveExit));
+                acts.push((Item::new(tr("Kill Unity…")).icon(icons::X_CIRCLE).danger(), ProjectAct::Kill));
             }
         } else if project.registered && !project.missing && !busy {
-            acts.push((Item::new("Open in Unity").icon(icons::PLAY), ProjectAct::Open));
+            acts.push((Item::new(tr("Open in Unity")).icon(icons::PLAY), ProjectAct::Open));
         } else if !project.registered && !busy {
-            acts.push((Item::new("Add to my projects").icon(icons::PLUS), ProjectAct::Add));
+            acts.push((Item::new(tr("Add to my projects")).icon(icons::PLUS), ProjectAct::Add));
         }
         if !project.missing {
-            acts.push((Item::new("Open the folder").icon(icons::FOLDER_OPEN), ProjectAct::Folder));
+            acts.push((Item::new(tr("Open the folder")).icon(icons::FOLDER_OPEN), ProjectAct::Folder));
         }
     }
     // The panel's folder button gives its place to Unity's controls while the project is open.
     if !opening && !project.missing && state.session(&project.path).open() {
-        acts.push((Item::new("Open the folder").icon(icons::FOLDER_OPEN), ProjectAct::Folder));
+        acts.push((Item::new(tr("Open the folder")).icon(icons::FOLDER_OPEN), ProjectAct::Folder));
     }
-    acts.push((Item::new("Copy the folder's path").icon(icons::COPY), ProjectAct::CopyPath));
+    acts.push((Item::new(tr("Copy the folder's path")).icon(icons::COPY), ProjectAct::CopyPath));
     if !project.missing && !busy {
-        acts.push((Item::new("Duplicate…").icon(icons::COPY_SIMPLE), ProjectAct::Duplicate));
+        acts.push((Item::new(tr("Duplicate…")).icon(icons::COPY_SIMPLE), ProjectAct::Duplicate));
     }
     acts.push((
-        if state.is_hidden(&project.path) { Item::new("Show this project").icon(EYE) } else { Item::new("Hide this project").icon(icons::EYE_SLASH) },
+        if state.is_hidden(&project.path) { Item::new(tr("Show this project")).icon(EYE) } else { Item::new(tr("Hide this project")).icon(icons::EYE_SLASH) },
         ProjectAct::Hide,
     ));
     if project.registered && !busy {
-        acts.push((Item::new("Remove from the list").icon(glyph::TRASH_SIMPLE).danger(), ProjectAct::Remove));
+        acts.push((Item::new(tr("Remove from the list")).icon(glyph::TRASH_SIMPLE).danger(), ProjectAct::Remove));
     }
     acts
 }
@@ -83,30 +84,30 @@ pub(super) fn project_act(ctx: &egui::Context, cx: &mut Cx, state: &mut State, p
         }
         ProjectAct::Add => {
             let path = project.path.clone();
-            state.task(ctx, "Adding the project…", move || {
+            state.task(ctx, tr("Adding the project…"), move || {
                 orbiters_projects::runtime()?.block_on(vpm::register(&orbiters_projects::vcc_dir(), &path, true))?;
-                Ok(Outcome::Added(path, "Project added: VCC and ALCOM list it too".into()))
+                Ok(Outcome::Added(path, tr("Project added: VCC and ALCOM list it too").into()))
             });
         }
         ProjectAct::Folder => {
             let path = project.path.clone();
-            state.task(ctx, "Opening the folder…", move || {
+            state.task(ctx, tr("Opening the folder…"), move || {
                 orbiters_projects::reveal(&path)?;
                 Ok(Outcome::Picked(None))
             });
         }
         ProjectAct::CopyPath => {
             ctx.copy_text(project.path.display().to_string());
-            cx.toasts.push(ctx, orbiters_ui::toast::Kind::Success, "Path copied");
+            cx.toasts.push(ctx, orbiters_ui::toast::Kind::Success, tr("Path copied"));
         }
         ProjectAct::Duplicate => super::duplicate::open(ctx, state, project, anchor),
         ProjectAct::Hide => {
             let hidden = state.is_hidden(&project.path);
             state.set_hidden(&project.path, !hidden);
             if hidden {
-                cx.toasts.push(ctx, orbiters_ui::toast::Kind::Success, format!("{} is listed again", project.name));
+                cx.toasts.push(ctx, orbiters_ui::toast::Kind::Success, tr!("{name} is listed again", name = project.name));
             } else {
-                cx.toasts.push(ctx, orbiters_ui::toast::Kind::Info, format!("{} is hidden: Hidden, above the cards, shows it again", project.name));
+                cx.toasts.push(ctx, orbiters_ui::toast::Kind::Info, tr!("{name} is hidden: Hidden, above the cards, shows it again", name = project.name));
                 // Gone from the list: the panel showing it moves on (a sheet slides away).
                 if !state.show_hidden && state.selected.as_ref() == Some(&project.path) {
                     if sheet {
@@ -122,9 +123,9 @@ pub(super) fn project_act(ctx: &egui::Context, cx: &mut Cx, state: &mut State, p
             if state.selected.as_ref() == Some(&path) {
                 state.selected = None;
             }
-            state.task(ctx, "Removing from the list…", move || {
+            state.task(ctx, tr("Removing from the list…"), move || {
                 orbiters_projects::runtime()?.block_on(vpm::register(&orbiters_projects::vcc_dir(), &path, false))?;
-                Ok(Outcome::Changed("Removed from the shared project list. Its files stay.".into()))
+                Ok(Outcome::Changed(tr("Removed from the shared project list. Its files stay.").into()))
             });
         }
     }
@@ -148,21 +149,21 @@ pub(super) fn row_menu(ui: &Ui, cx: &mut Cx, state: &mut State, project: &Projec
     let world = a.is_world();
     let links = super::blend::links(state, a);
     let mut acts: Vec<(String, &'static str, RowAct)> = vec![
-        ("Open on VRChat".into(), icons::ARROW_SQUARE_OUT, RowAct::OpenVrchat),
-        (if world { "Copy the world's ID" } else { "Copy the avatar's ID" }.into(), icons::COPY, RowAct::CopyId),
+        (tr("Open on VRChat").into(), icons::ARROW_SQUARE_OUT, RowAct::OpenVrchat),
+        (if world { tr("Copy the world's ID") } else { tr("Copy the avatar's ID") }.into(), icons::COPY, RowAct::CopyId),
     ];
     if super::vrchat_picture::can_change(cx, state, &a.id) {
-        acts.push(("Change the picture on VRChat…".into(), icons::UPLOAD_SIMPLE, RowAct::ChangePicture));
+        acts.push((tr("Change the picture on VRChat…").into(), icons::UPLOAD_SIMPLE, RowAct::ChangePicture));
     }
     if !world && project.registered && !state.running() {
-        acts.push(("Add N4N0".into(), icons::N4N0_MARK, RowAct::AddN4n0));
-        acts.push(("Install My Avatar only".into(), icons::PERSON, RowAct::MyAvatar));
+        acts.push((tr("Add N4N0").into(), icons::N4N0_MARK, RowAct::AddN4n0));
+        acts.push((tr("Install My Avatar only").into(), icons::PERSON, RowAct::MyAvatar));
     }
     if !state.running() {
         for (k, l) in links.iter().enumerate() {
             let label = match l.blend.file_name() {
-                Some(n) if links.len() > 1 => format!("Open {} in Blender", n.to_string_lossy()),
-                _ => "Open in Blender".into(),
+                Some(n) if links.len() > 1 => tr!("Open {file} in Blender", file = n.to_string_lossy()),
+                _ => tr("Open in Blender").into(),
             };
             acts.push((label, icons::BLENDER, RowAct::Blender(k)));
         }
@@ -174,12 +175,12 @@ pub(super) fn row_menu(ui: &Ui, cx: &mut Cx, state: &mut State, project: &Projec
         RowAct::OpenVrchat => {
             let url = format!("https://vrchat.com/home/{}/{}", if world { "world" } else { "avatar" }, a.id);
             if let Err(e) = crate::controller::open_url(&url) {
-                cx.toasts.push(&ctx, orbiters_ui::toast::Kind::Error, format!("The page could not open: {e}"));
+                cx.toasts.push(&ctx, orbiters_ui::toast::Kind::Error, tr!("The page could not open: {error}", error = e));
             }
         }
         RowAct::CopyId => {
             ctx.copy_text(a.id.clone());
-            cx.toasts.push(&ctx, orbiters_ui::toast::Kind::Success, "ID copied");
+            cx.toasts.push(&ctx, orbiters_ui::toast::Kind::Success, tr("ID copied"));
         }
         RowAct::ChangePicture => super::vrchat_picture::change(&ctx, cx, state, a),
         RowAct::AddN4n0 | RowAct::MyAvatar => {

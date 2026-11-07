@@ -18,6 +18,7 @@
 //! its `reconstruction/` folder whole, and deleting the capture deletes the rest for good ([`Failure::OwnFiles`]).
 
 use orbiters_core::reconstruction as rec;
+use orbiters_i18n::{mark, tr, tr_ctx};
 use orbiters_reconstruct::{edit, export as encode};
 use std::io::{Read as _, Write as _};
 use std::path::{Path, PathBuf};
@@ -56,9 +57,9 @@ impl Format {
     /// What it is, in two words.
     pub fn kind(self) -> &'static str {
         match self {
-            Format::Spz => "Small",
-            Format::Glb => "glTF standard",
-            Format::Ply => "Full precision",
+            Format::Spz => tr_ctx("file", "Small"),
+            Format::Glb => tr("glTF standard"),
+            Format::Ply => tr("Full precision"),
         }
     }
 
@@ -68,18 +69,18 @@ impl Format {
     /// (GLTFGaussianSplatLoaderExtension) and Babylon.js read `KHR_gaussian_splatting`.
     pub fn hint(self) -> &'static str {
         match self {
-            Format::Spz => "For VRChat splat worlds (VRChat Gaussian Splatting), Unity splat importers, SuperSplat, Spark and web viewers.",
-            Format::Glb => "For Cesium, three.js and other glTF viewers that draw splats. Unity's and Blender's own importers cannot open it yet.",
-            Format::Ply => "The original splat training format, for every splat tool and Blender's splat add-ons.",
+            Format::Spz => tr("For VRChat splat worlds (VRChat Gaussian Splatting), Unity splat importers, SuperSplat, Spark and web viewers."),
+            Format::Glb => tr("For Cesium, three.js and other glTF viewers that draw splats. Unity's and Blender's own importers cannot open it yet."),
+            Format::Ply => tr("The original splat training format, for every splat tool and Blender's splat add-ons."),
         }
     }
 
     /// The save dialog's name for its files.
     pub fn filter(self) -> &'static str {
         match self {
-            Format::Spz => "SPZ splats",
-            Format::Glb => "glTF binary with splats",
-            Format::Ply => "PLY splats",
+            Format::Spz => tr("SPZ splats"),
+            Format::Glb => tr("glTF binary with splats"),
+            Format::Ply => tr("PLY splats"),
         }
     }
 
@@ -178,24 +179,26 @@ impl Failure {
     pub fn message(&self, format: Format) -> String {
         let mb = |b: u64| orbiters_ui::format::bytes(b as f64);
         match self {
-            Failure::Edits(why) => format!("{why} Discard them to export every splat as trained: Select splats in its 3D view can remove them again."),
-            Failure::NoRoom { needed, free, folder } => format!(
-                "Not enough room: the {} takes {}, and {} has {} left, with {} to leave free for {} and other programs. Choose another place, or free up space there.",
-                format.label(),
-                mb(needed.saturating_sub(ROOM_KEPT)),
-                folder.display(),
-                mb(*free),
-                mb(ROOM_KEPT),
-                if cfg!(target_os = "macos") { "macOS" } else { "Windows" },
-            ),
-            Failure::NotWritable { folder, why } => format!("N4N0 cannot write in {}: {why}. Choose another place.", folder.display()),
-            Failure::OwnFiles => {
-                "That is inside the capture's own folder: N4N0 replaces its files when it reconstructs it, and deletes them with it. Choose another place."
-                    .into()
+            Failure::Edits(why) => tr!("{why} Discard them to export every splat as trained: Select splats in its 3D view can remove them again.", why = why),
+            Failure::NoRoom { needed, free, folder } => {
+                let system = if cfg!(target_os = "macos") { "macOS" } else { "Windows" };
+                tr!(
+                    "Not enough room: the {format} takes {size}, and {folder} has {free} left, with {kept} to leave free for {system} and other programs. Choose another place, or free up space there.",
+                    format = format.label(),
+                    size = mb(needed.saturating_sub(ROOM_KEPT)),
+                    folder = folder.display(),
+                    free = mb(*free),
+                    kept = mb(ROOM_KEPT),
+                    system = system,
+                )
             }
-            Failure::Changed => "Its splat edits changed while the file was made: nothing was saved. Try again to export what its 3D view shows now.".into(),
-            Failure::Stopped => "The export was stopped: nothing was saved.".into(),
-            Failure::Failed(e) => format!("The export failed: {e}"),
+            Failure::NotWritable { folder, why } => tr!("N4N0 cannot write in {folder}: {why}. Choose another place.", folder = folder.display(), why = tr(why)),
+            Failure::OwnFiles => {
+                tr("That is inside the capture's own folder: N4N0 replaces its files when it reconstructs it, and deletes them with it. Choose another place.").into()
+            }
+            Failure::Changed => tr("Its splat edits changed while the file was made: nothing was saved. Try again to export what its 3D view shows now.").into(),
+            Failure::Stopped => tr("The export was stopped: nothing was saved.").into(),
+            Failure::Failed(e) => tr!("The export failed: {error}", error = e),
         }
     }
 
@@ -204,6 +207,11 @@ impl Failure {
         matches!(self, Failure::NoRoom { .. } | Failure::NotWritable { .. } | Failure::OwnFiles)
     }
 }
+
+/// Why a file cannot be written, as the end of "N4N0 cannot write in <folder>: …".
+const WHY_OPEN: &str = mark("a file of that name is open in another program");
+const WHY_PROTECTED: &str = mark("that place is read-only or protected");
+const WHY_GONE: &str = mark("that folder is no longer there");
 
 /// Room left free on the disk an export goes to, beyond the file: a full disk breaks whatever writes next (VRChat's
 /// cache, Unity, Windows itself).
@@ -219,11 +227,11 @@ pub struct Edits {
 }
 
 fn stale() -> String {
-    "Its splat edits were made on an earlier reconstruction of this capture: they cannot say which splats to leave out.".into()
+    tr("Its splat edits were made on an earlier reconstruction of this capture: they cannot say which splats to leave out.").into()
 }
 
 fn unreadable(e: impl std::fmt::Display) -> String {
-    format!("Its splat edits could not be read ({e}).")
+    tr!("Its splat edits could not be read ({error}).", error = e)
 }
 
 /// A file's modification time as the edit file records its PLY's (nanoseconds since 1970, 0 unknown).
@@ -248,7 +256,7 @@ pub fn edits_now(session: &Path) -> Edits {
         Err(err) => return problem(unreadable(format!("{err:#}"))),
     };
     let ply = result.join(rec::PLY_FILE);
-    let Ok(meta) = std::fs::metadata(&ply) else { return problem("This capture's splats are missing: reconstruct it again.".into()) };
+    let Ok(meta) = std::fs::metadata(&ply) else { return problem(tr("This capture's splats are missing: reconstruct it again.").into()) };
     let stamped = e.ply_modified != 0 && modified_ns(&meta) == e.ply_modified;
     let same = meta.len() == e.ply.bytes && (stamped || edit::Identity::read(&ply).is_ok_and(|id| id == e.ply));
     if !same {
@@ -264,7 +272,7 @@ pub fn file_name(session: &Path, title: &str, format: Format) -> String {
     let clean: String = base.chars().map(|c| if c.is_control() || r#"<>:"/\|?*"#.contains(c) { ' ' } else { c }).collect();
     let clean = clean.split_whitespace().collect::<Vec<_>>().join(" ");
     let clean = clean.trim_end_matches('.');
-    format!("{}.{}", if clean.is_empty() { "Capture" } else { clean }, format.extension())
+    format!("{}.{}", if clean.is_empty() { tr("Capture") } else { clean }, format.extension())
 }
 
 /// `path` with `format`'s extension: as it is when it has it already (in any case), else with it added (a name typed
@@ -292,13 +300,13 @@ pub fn export_with(session: &Path, format: Format, dest: &Path, progress: &Progr
     let result = rec::result_dir(session);
     let ply = result.join(rec::PLY_FILE);
     let folder = dest.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new(".")).to_path_buf();
-    let name = dest.file_name().ok_or_else(|| Failure::Failed(format!("{} is not a file name", dest.display())))?;
+    let name = dest.file_name().ok_or_else(|| Failure::Failed(tr!("{path} is not a file name", path = dest.display())))?;
     if std::fs::canonicalize(&folder).ok().zip(std::fs::canonicalize(session).ok()).is_some_and(|(a, b)| a.starts_with(b)) {
         return Err(Failure::OwnFiles);
     }
     // A rename replaces a read-only file on a Mac, where Windows refuses: the file in the way stays there too.
     if cfg!(not(windows)) && std::fs::metadata(dest).is_ok_and(|m| m.permissions().readonly()) {
-        return Err(Failure::NotWritable { folder, why: "that place is read-only or protected" });
+        return Err(Failure::NotWritable { folder, why: WHY_PROTECTED });
     }
     let bytes = read(&ply, progress)?;
     progress.set(Step::Making, 0.0);
@@ -364,8 +372,8 @@ pub fn export_with(session: &Path, format: Format, dest: &Path, progress: &Progr
 /// The PLY at `path` whole, read 8 MB at a time (saying how far, stopping when asked).
 fn read(path: &Path, progress: &Progress) -> Result<Vec<u8>, Failure> {
     let missing = |e: std::io::Error| match e.kind() {
-        std::io::ErrorKind::NotFound => Failure::Failed("this capture has no splats any more: reconstruct it again".into()),
-        _ => Failure::Failed(format!("reading {}: {e}", path.display())),
+        std::io::ErrorKind::NotFound => Failure::Failed(tr("this capture has no splats any more: reconstruct it again").into()),
+        _ => Failure::Failed(tr!("reading {path}: {error}", path = path.display(), error = e)),
     };
     let mut file = std::fs::File::open(path).map_err(missing)?;
     let len = file.metadata().map_err(missing)?.len();
@@ -427,10 +435,10 @@ fn failure(e: &std::io::Error, folder: &Path, needed: u64, free_space: &dyn Fn(&
     let windows_code = if cfg!(windows) { e.raw_os_error() } else { None };
     match (windows_code, e.kind()) {
         (Some(39 | 112), _) | (_, K::StorageFull) => Failure::NoRoom { needed, free: free_space(&folder).unwrap_or(0), folder },
-        (Some(32 | 33), _) => Failure::NotWritable { folder, why: "a file of that name is open in another program" },
-        (Some(5 | 19), _) | (_, K::PermissionDenied | K::ReadOnlyFilesystem) => Failure::NotWritable { folder, why: "that place is read-only or protected" },
-        (Some(2 | 3 | 21), _) | (_, K::NotFound) => Failure::NotWritable { folder, why: "that folder is no longer there" },
-        _ => Failure::Failed(format!("writing in {}: {e}", folder.display())),
+        (Some(32 | 33), _) => Failure::NotWritable { folder, why: WHY_OPEN },
+        (Some(5 | 19), _) | (_, K::PermissionDenied | K::ReadOnlyFilesystem) => Failure::NotWritable { folder, why: WHY_PROTECTED },
+        (Some(2 | 3 | 21), _) | (_, K::NotFound) => Failure::NotWritable { folder, why: WHY_GONE },
+        _ => Failure::Failed(tr!("writing in {path}: {error}", path = folder.display(), error = e)),
     }
 }
 

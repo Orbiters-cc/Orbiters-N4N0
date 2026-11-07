@@ -3,6 +3,7 @@
 //! when there are several, then the setup's steps until Unity confirms). The steps of one flow stay in one dialog,
 //! which follows their height and slides each step in.
 
+use orbiters_i18n::{mark, tr, tr_n};
 use super::art::{self, glyph};
 use super::state::{server, Modal, Outcome, State};
 use super::ui::errors;
@@ -27,27 +28,33 @@ pub fn modals(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
     let nano = state.flow.as_ref().map(|f| !f.packages_only).or(state.pending.as_ref().map(|p| p.2)).unwrap_or(true);
     let names = state.flow.as_ref().map(|f| (f.avatar.name.clone(), f.project.name.clone())).or(state.pending.as_ref().map(|p| (p.1.clone(), p.0.clone())));
     let (glyph, title, subtitle, width) = match &modal {
-        Modal::Repos => (icons::STACK, "Package repositories".to_string(), "Shared with VCC and ALCOM: what you add here, they list too".to_string(), 620.0),
-        Modal::New => (glyph::FOLDER_PLUS, "New Unity project".into(), "From a VRChat template, or a copy of one of your projects".into(), 640.0),
+        Modal::Repos => (icons::STACK, tr("Package repositories").to_string(), tr("Shared with VCC and ALCOM: what you add here, they list too").to_string(), 620.0),
+        Modal::New => (glyph::FOLDER_PLUS, tr("New Unity project").into(), tr("From a VRChat template, or a copy of one of your projects").into(), 640.0),
         Modal::Avatars => (
             icons::N4N0_MARK,
-            "Add N4N0 to your avatar".into(),
-            "Pick the avatar you capture with: Unity asks you to confirm before anything changes".into(),
+            tr("Add N4N0 to your avatar").into(),
+            tr("Pick the avatar you capture with: Unity asks you to confirm before anything changes").into(),
             720.0,
         ),
         Modal::ChooseProject(id) => {
-            let name = state.copies(id).first().map(|(_, a)| a.name.clone()).unwrap_or_else(|| "This avatar".into());
-            (icons::N4N0_MARK, "Which copy gets N4N0?".into(), format!("{name} is saved in more than one project or scene"), 620.0)
+            let subtitle = match state.copies(id).first().map(|(_, a)| a.name.clone()) {
+                Some(name) => tr!("{name} is saved in more than one project or scene", name = name),
+                None => tr("This avatar is saved in more than one project or scene").to_string(),
+            };
+            (icons::N4N0_MARK, tr("Which copy gets N4N0?").into(), subtitle, 620.0)
         }
         Modal::Setup => (
             if nano { icons::N4N0_MARK } else { icons::PERSON },
-            if nano { "Add N4N0 to your avatar".into() } else { "Add My Avatar".into() },
-            names.map(|(a, p)| format!("{a} in {p}")).unwrap_or_default(),
+            if nano { tr("Add N4N0 to your avatar").into() } else { tr("Add My Avatar").into() },
+            names.map(|(a, p)| tr!("{avatar} in {project}", avatar = a, project = p)).unwrap_or_default(),
             580.0,
         ),
         Modal::Duplicate(path) => {
-            let name = state.scan.projects.iter().find(|p| &p.path == path).map(|p| p.name.clone()).unwrap_or_else(|| "the project".into());
-            (icons::COPY, "Duplicate the project".into(), format!("A copy of {name}, beside it or anywhere you choose"), 600.0)
+            let subtitle = match state.scan.projects.iter().find(|p| &p.path == path).map(|p| p.name.clone()) {
+                Some(name) => tr!("A copy of {name}, beside it or anywhere you choose", name = name),
+                None => tr("A copy of the project, beside it or anywhere you choose").to_string(),
+            };
+            (icons::COPY, tr("Duplicate the project").into(), subtitle, 600.0)
         }
         Modal::Conflict => {
             let (t, s) = super::conflict::head(state);
@@ -138,7 +145,7 @@ fn repos(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
     errors(ui, state, "repos");
     let busy = state.running();
     let w = ui.available_width();
-    art::caps(ui, "Your repositories");
+    art::caps(ui, tr("Your repositories"));
     if state.view.repos.is_empty() && state.view_loading() {
         for _ in 0..2 {
             let (r, _) = ui.allocate_exact_size(vec2(w, 60.0), Sense::hover());
@@ -169,33 +176,33 @@ fn repos(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
                 repo.enabled = enabled;
             }
             let id = r.id.clone();
-            state.task(&ctx, if enabled { "Turning the repository on…" } else { "Turning the repository off…" }, move || {
+            state.task(&ctx, if enabled { tr("Turning the repository on…") } else { tr("Turning the repository off…") }, move || {
                 orbiters_projects::runtime()?.block_on(vpm::set_enabled(&orbiters_projects::vcc_dir(), &id, enabled))?;
-                Ok(Outcome::Changed(if enabled { "Repository on: its packages are listed again" } else { "Repository off: it stays saved" }.into()))
+                Ok(Outcome::Changed(if enabled { tr("Repository on: its packages are listed again") } else { tr("Repository off: it stays saved") }.into()))
             });
         }
         let slot = Rect::from_min_size(pos2(sw.left() - 12.0 - 90.0, row.center().y - 16.0), vec2(90.0, 32.0));
         if r.builtin {
-            let t = Txt::new("Built in", 11.0).color(theme::FG_3);
+            let t = Txt::new(tr("Built in"), 11.0).color(theme::FG_3);
             let tw = widgets::text_size(ui, &t).x + 18.0;
             let pr = Rect::from_min_size(pos2(slot.right() - tw, row.center().y - 10.0), vec2(tw, 20.0));
             ui.painter().rect_filled(pr, theme::radius(10.0), theme::white(0.05));
             widgets::text(ui.painter(), pr.center(), Align2::CENTER_CENTER, &t);
         } else {
-            let b = IconButton::new(glyph::TRASH_SIMPLE, "Remove the repository").size(32.0, 15.0).danger().id_salt(("repo-remove", &r.id));
+            let b = IconButton::new(glyph::TRASH_SIMPLE, mark("Remove the repository")).size(32.0, 15.0).danger().id_salt(("repo-remove", &r.id));
             if !busy && widgets::activated(&b.show_at(ui, Rect::from_min_size(pos2(slot.right() - 32.0, slot.top()), vec2(32.0, 32.0)))) {
                 let id = r.id.clone();
-                state.task(&ctx, "Removing the repository…", move || {
+                state.task(&ctx, tr("Removing the repository…"), move || {
                     orbiters_projects::runtime()?.block_on(vpm::remove_repo(&orbiters_projects::vcc_dir(), &id))?;
-                    Ok(Outcome::Changed("Repository removed".into()))
+                    Ok(Outcome::Changed(tr("Repository removed").into()))
                 });
             }
         }
     }
 
     ui.add_space(6.0);
-    art::caps(ui, "Add a repository");
-    let add_b = Button::new("Add").icon(icons::PLUS).variant(Variant::Primary).enabled(!state.repo_url.trim().is_empty() && !busy).id_salt("repo-add");
+    art::caps(ui, tr("Add a repository"));
+    let add_b = Button::new(tr("Add")).icon(icons::PLUS).variant(Variant::Primary).enabled(!state.repo_url.trim().is_empty() && !busy).id_salt("repo-add");
     let bw = add_b.desired_width(ui);
     let (row, _) = ui.allocate_exact_size(vec2(w, 36.0), Sense::hover());
     {
@@ -223,7 +230,7 @@ fn repos(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
         ui.painter(),
         pos2(hr.left() + 20.0, hr.center().y),
         Align2::LEFT_CENTER,
-        &Txt::new("Request headers, for a private repository", 12.5).color(fg),
+        &Txt::new(tr("Request headers, for a private repository"), 12.5).color(fg),
     );
     if k > 0.01 {
         let full = 96.0;
@@ -236,7 +243,7 @@ fn repos(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
         let edit = egui::TextEdit::multiline(&mut state.repo_headers)
             .id(Id::unique("repo-headers-text"))
             .frame(egui::Frame::NONE)
-            .hint_text(egui::RichText::new("One per line, e.g. Authorization: Bearer …").color(theme::FG_4))
+            .hint_text(egui::RichText::new(tr("One per line, e.g. Authorization: Bearer …")).color(theme::FG_4))
             .font(egui::FontId::new(12.0, egui::FontFamily::Monospace))
             .text_color(theme::FG)
             .desired_width(w - 24.0)
@@ -251,7 +258,7 @@ fn repos(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
             if let Some((k, v)) = line.split_once(':') {
                 headers.insert(k.trim().to_string(), v.trim().to_string());
             } else {
-                state.error = Some("Each header needs a name and a value separated by a colon.".into());
+                state.error = Some(tr("Each header needs a name and a value separated by a colon.").into());
                 valid = false;
             }
         }
@@ -269,9 +276,9 @@ fn repos(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
 }
 
 pub(super) fn add_repo(state: &mut State, ctx: &egui::Context, url: String, headers: BTreeMap<String, String>) {
-    state.task(ctx, "Adding the repository…", move || {
+    state.task(ctx, tr("Adding the repository…"), move || {
         orbiters_projects::runtime()?.block_on(vpm::add_repo(&orbiters_projects::vcc_dir(), &url, headers))?;
-        Ok(Outcome::Changed("Repository added: its packages are listed now".into()))
+        Ok(Outcome::Changed(tr("Repository added: its packages are listed now").into()))
     });
 }
 
@@ -295,13 +302,13 @@ fn new_project(ui: &mut Ui, state: &mut State) {
     if busy {
         ui.disable();
     }
-    let options = [SegOption::new(false, "From a template"), SegOption::new(true, "Copy a project")];
+    let options = [SegOption::new(false, tr("From a template")), SegOption::new(true, tr("Copy a project"))];
     widgets::segmented(ui, "new-mode", &mut state.duplicate, &options, false);
     let projects: Vec<Project> = state.scan.projects.iter().filter(|p| p.registered && !p.missing).cloned().collect();
     if state.duplicate {
-        art::caps(ui, "Project to copy");
+        art::caps(ui, tr("Project to copy"));
         if projects.is_empty() {
-            feedback::banner(ui, Id::unique("new-no-projects"), Tone::Info, "Add a project to your list first: it can then be copied here.", false);
+            feedback::banner(ui, Id::unique("new-no-projects"), Tone::Info, tr("Add a project to your list first: it can then be copied here."), false);
         }
         for (i, p) in projects.iter().enumerate() {
             let (r, _) = ui.allocate_exact_size(vec2(w, 64.0), Sense::hover());
@@ -310,28 +317,21 @@ fn new_project(ui: &mut Ui, state: &mut State) {
             art::cover(pt, state, p, Rect::from_min_size(pos2(r.left() + 10.0, r.center().y - 22.0), vec2(44.0, 44.0)), [10.0; 4], 1.0);
             let x = r.left() + 66.0;
             widgets::text_truncated(pt, pos2(x, r.center().y - 9.0), Align2::LEFT_CENTER, &Txt::new(&p.name, 13.5).weight(weight::MEDIUM), w - 90.0);
-            let meta = format!(
-                "Unity {} · {}",
-                p.unity,
-                if p.avatars.is_empty() {
-                    p.kind.label().to_string()
-                } else {
-                    format!("{} avatar{}", p.avatars.len(), if p.avatars.len() == 1 { "" } else { "s" })
-                }
-            );
+            let what = if p.avatars.is_empty() { p.kind.label().to_string() } else { tr_n("{count} avatar", "{count} avatars", p.avatars.len() as u64) };
+            let meta = tr!("Unity {version} · {what}", version = p.unity, what = what);
             widgets::text_truncated(pt, pos2(x, r.center().y + 10.0), Align2::LEFT_CENTER, &Txt::new(meta, 11.5).color(theme::FG_3), w - 90.0);
             if widgets::activated(&resp) {
                 state.duplicate_index = i;
-                if state.new_name.is_empty() || state.new_name.ends_with(" copy") || state.new_name == "My new avatar" {
+                if state.new_name.is_empty() || state.new_name.ends_with(" copy") || state.new_name == "My new avatar" { // i18n: not shown (the English suffix and default of a suggested folder name, matched as they were set)
                     state.new_name = format!("{} copy", p.name);
                 }
             }
         }
-        note(ui, "Copies Assets, Packages and the project's settings. Generated files (Library, Temp) and Git history stay behind.");
+        note(ui, tr("Copies Assets, Packages and the project's settings. Generated files (Library, Temp) and Git history stay behind."));
     } else {
-        art::caps(ui, "Template");
+        art::caps(ui, tr("Template"));
         if state.templates.is_empty() {
-            feedback::banner(ui, Id::unique("new-no-templates"), Tone::Info, "No VCC template was found in Templates or VRCTemplates.", false);
+            feedback::banner(ui, Id::unique("new-no-templates"), Tone::Info, tr("No VCC template was found in Templates or VRCTemplates."), false);
         }
         // With Creator Companion installed, its covers head the cards (as in VCC); without, an icon tile.
         let covers = state.templates.iter().any(|t| t.banner.is_some());
@@ -345,7 +345,8 @@ fn new_project(ui: &mut Ui, state: &mut State) {
             let selected = state.template_index == i;
             let id = Id::unique(("template", &t.name));
             let (resp, hover, sel) = selectable(ui, id, r, 16.0, selected);
-            let lower = t.name.to_lowercase();
+            // VRChat's own templates are told apart by their id: their names are translated.
+            let lower = if t.builtin { format!("{} {}", t.id, t.name) } else { t.name.clone() }.to_lowercase(); // i18n: not shown (the kind of template, matched in English)
             let (g, tint) = if lower.contains("world") {
                 (icons::GLOBE, theme::VIOLET)
             } else if lower.contains("avatar") {
@@ -355,9 +356,9 @@ fn new_project(ui: &mut Ui, state: &mut State) {
             };
             let pt = ui.painter();
             let sub = match (t.unity.is_empty(), t.builtin) {
-                (false, true) => format!("Unity {} · VRChat's", t.unity),
+                (false, true) => tr!("Unity {version} · VRChat's", version = t.unity),
                 (false, false) => format!("Unity {}", t.unity),
-                (true, _) => "Your template".into(),
+                (true, _) => tr("Your template").into(),
             };
             if covers {
                 let cover = Rect::from_min_size(r.min + vec2(6.0, 6.0), vec2(tw - 12.0, cover_h));
@@ -386,27 +387,27 @@ fn new_project(ui: &mut Ui, state: &mut State) {
         }
     }
 
-    art::caps(ui, "Name");
-    widgets::text_field(ui, "new-name", &mut state.new_name, "My avatar", w, false);
+    art::caps(ui, tr("Name"));
+    widgets::text_field(ui, "new-name", &mut state.new_name, tr("My avatar"), w, false);
     if let Err(e) = templates::validate_name(&state.new_name) {
         if !state.new_name.is_empty() {
             inline_warning(ui, &e.to_string());
         }
     }
-    art::caps(ui, "Location");
+    art::caps(ui, tr("Location"));
     let (row, _) = ui.allocate_exact_size(vec2(w, 36.0), Sense::hover());
     {
         let mut fu = ui.new_child(UiBuilder::new().max_rect(Rect::from_min_size(row.min, vec2(w - 44.0, 36.0))).id_salt("new-location-slot"));
-        widgets::text_field(&mut fu, "new-location", &mut state.new_location, "Choose a folder", w - 44.0, false);
+        widgets::text_field(&mut fu, "new-location", &mut state.new_location, tr("Choose a folder"), w - 44.0, false);
     }
-    let browse = IconButton::new(icons::FOLDER_OPEN, "Choose a folder").size(36.0, 16.0).backdrop(theme::control()).id_salt("new-browse");
+    let browse = IconButton::new(icons::FOLDER_OPEN, mark("Choose a folder")).size(36.0, 16.0).backdrop(theme::control()).id_salt("new-browse");
     if !busy && widgets::activated(&browse.show_at(ui, Rect::from_min_size(pos2(row.right() - 36.0, row.top()), vec2(36.0, 36.0)))) {
-        state.task(&ctx, "Choose a location…", move || Ok(Outcome::Picked(rfd::FileDialog::new().pick_folder())));
+        state.task(&ctx, tr("Choose a location…"), move || Ok(Outcome::Picked(rfd::FileDialog::new().pick_folder())));
     }
     let template = state.templates.get(state.template_index).cloned();
     if !state.duplicate && template.as_ref().is_some_and(|t| t.unity.is_empty()) {
-        art::caps(ui, "Unity version");
-        widgets::text_field(ui, "new-unity", &mut state.new_unity, "The exact editor version installed, e.g. 2022.3.22f1", w, false);
+        art::caps(ui, tr("Unity version"));
+        widgets::text_field(ui, "new-unity", &mut state.new_unity, tr("The exact editor version installed, e.g. 2022.3.22f1"), w, false);
     }
     if !state.new_name.is_empty() && !state.new_location.is_empty() {
         // As the location is written (forward or back slashes).
@@ -449,14 +450,14 @@ pub(super) fn creating(ui: &mut Ui, state: &State) {
         let pt = ui.painter();
         widgets::frame(pt, r, 14.0, theme::alpha(theme::ACCENT, 0.07));
         feedback::spinner(pt, pos2(r.left() + 22.0, r.top() + 26.0), 8.0, 2.2, theme::ACCENT);
-        let heading = if p.total > 0 { format!("{} · {:.0}%", p.phase, 100.0 * p.copied as f32 / p.total.max(1) as f32) } else { label };
+        let heading = if p.total > 0 { format!("{} · {:.0}%", tr(&p.phase), 100.0 * p.copied as f32 / p.total.max(1) as f32) } else { label };
         widgets::text(pt, pos2(r.left() + 42.0, r.top() + 26.0), Align2::LEFT_CENTER, &Txt::new(heading, 13.5).weight(weight::MEDIUM));
         if p.total > 0 {
             let bar = Rect::from_min_size(pos2(r.left() + 16.0, r.top() + 50.0), vec2(r.width() - 32.0, 6.0));
             pt.rect_filled(bar, theme::radius(3.0), theme::white(0.08));
             let f = anim::value(&ctx, Id::unique("new-copy-progress"), p.copied as f32 / p.total.max(1) as f32, Spring::SOFT).clamp(0.0, 1.0);
             pt.rect_filled(Rect::from_min_size(bar.min, vec2((bar.width() * f).max(6.0), 6.0)), theme::radius(3.0), theme::ACCENT);
-            let files = format!("{} of {} files · {}", format::integer(p.copied as f64), format::integer(p.total as f64), p.file);
+            let files = tr!("{copied} of {total} files · {file}", copied = format::integer(p.copied as f64), total = format::integer(p.total as f64), file = p.file);
             widgets::text_truncated(
                 pt,
                 pos2(r.left() + 16.0, r.top() + 74.0),
@@ -496,10 +497,10 @@ fn new_footer(ui: &mut Ui, state: &mut State) {
     let valid = templates::validate_name(&state.new_name).is_ok();
     let enabled = source.as_ref().is_some_and(|(_, u)| !u.is_empty()) && valid && !state.new_location.is_empty() && !state.running();
     let label = match (state.running(), state.duplicate) {
-        (true, true) => "Copying…",
-        (true, false) => "Creating…",
-        (false, true) => "Copy the project",
-        (false, false) => "Create the project",
+        (true, true) => tr("Copying…"),
+        (true, false) => tr("Creating…"),
+        (false, true) => tr("Copy the project"),
+        (false, false) => tr("Create the project"),
     };
     let b = Button::new(label).icon(icons::PLUS).variant(Variant::Primary).enabled(enabled).id_salt("new-create");
     if widgets::activated(&b.show(ui)) {
@@ -512,7 +513,7 @@ fn new_footer(ui: &mut Ui, state: &mut State) {
         let cancel = state.copy_cancel.clone();
         let progress = state.copy_progress.clone();
         let id = state.dialog_id();
-        state.task(&ctx, if duplicate { "Copying the project…" } else { "Creating the project…" }, move || {
+        state.task(&ctx, if duplicate { tr("Copying the project…") } else { tr("Creating the project…") }, move || {
             let path = orbiters_projects::runtime()?.block_on(templates::create(
                 &orbiters_projects::vcc_dir(),
                 &source,
@@ -525,17 +526,17 @@ fn new_footer(ui: &mut Ui, state: &mut State) {
             ))?;
             Ok(Outcome::Added(
                 path.clone(),
-                format!("{} is ready: VCC and ALCOM list it too", path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default()),
+                tr!("{name} is ready: VCC and ALCOM list it too", name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default()),
             ))
         });
         let _ = id;
     }
     if state.running() {
         let p = state.copy_progress.lock().unwrap().clone();
-        if p.phase == "Copying project" && widgets::activated(&Button::new("Stop copying").variant(Variant::Ghost).id_salt("new-stop").show(ui)) {
+        if p.phase == mark("Copying project") && widgets::activated(&Button::new(tr("Stop copying")).variant(Variant::Ghost).id_salt("new-stop").show(ui)) {
             state.copy_cancel.store(true, Ordering::Relaxed);
         }
-    } else if widgets::activated(&Button::new("Cancel").variant(Variant::Ghost).id_salt("new-cancel").show(ui)) {
+    } else if widgets::activated(&Button::new(tr("Cancel")).variant(Variant::Ghost).id_salt("new-cancel").show(ui)) {
         state.close_modal(&ctx);
     }
 }
@@ -579,16 +580,16 @@ fn avatar_picker(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
                 feedback::shimmer(ui.painter(), Rect::from_min_size(pos2(r.left() + 14.0, r.top() + th + 16.0), vec2(tw * 0.5, 12.0)), 6.0);
                 feedback::shimmer(ui.painter(), Rect::from_min_size(pos2(r.left() + 14.0, r.top() + th + 38.0), vec2(tw * 0.34, 10.0)), 5.0);
             }
-            progress_line(ui, "Finding the avatars of your projects…");
+            progress_line(ui, tr("Finding the avatars of your projects…"));
         } else {
             let (r, _) = ui.allocate_exact_size(vec2(w, 236.0), Sense::hover());
             let p = ui.painter();
             widgets::frame(p, r, 18.0, theme::white(0.02));
             art::tile(p, Rect::from_center_size(r.center() + vec2(0.0, -70.0), vec2(48.0, 48.0)), icons::PERSON_ARMS_SPREAD, theme::BLUE);
-            widgets::text(p, r.center() + vec2(0.0, -24.0), Align2::CENTER_CENTER, &Txt::new("No uploaded avatar found yet", 15.0).weight(weight::SEMIBOLD));
+            widgets::text(p, r.center() + vec2(0.0, -24.0), Align2::CENTER_CENTER, &Txt::new(tr("No uploaded avatar found yet"), 15.0).weight(weight::SEMIBOLD));
             let g = p.layout_job({
                 let mut job =
-                    Txt::new("Add your avatar's Unity project on the Unity projects page. An avatar shows up once it was uploaded and its scene saved.", 12.5)
+                    Txt::new(tr("Add your avatar's Unity project on the Unity projects page. An avatar shows up once it was uploaded and its scene saved."), 12.5)
                         .color(theme::FG_3)
                         .line_height(19.0)
                         .job(420.0);
@@ -596,7 +597,7 @@ fn avatar_picker(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
                 job
             });
             p.galley(pos2(r.center().x, r.center().y - 6.0), g, theme::FG_3);
-            let b = Button::new("Open Unity projects").icon(glyph::ARROW_RIGHT).size(Size::Sm).id_salt("avatars-go-projects");
+            let b = Button::new(tr("Open Unity projects")).icon(glyph::ARROW_RIGHT).size(Size::Sm).id_salt("avatars-go-projects");
             let bw = b.desired_width(ui);
             if widgets::activated(&b.show_at(ui, Rect::from_min_size(pos2(r.center().x - bw * 0.5, r.bottom() - 52.0), vec2(bw, 32.0)))) {
                 state.close_modal(&ctx);
@@ -617,7 +618,7 @@ fn avatar_picker(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
         let thumb = Rect::from_min_size(r.min + vec2(6.0, 6.0), vec2(tw - 12.0, th - 6.0));
         art::avatar(pt, state, a, thumb, [13.0; 4], 1.0 + 0.04 * hover);
         if worn.as_ref() == Some(&a.id) {
-            let t = Txt::new("Wearing now", 10.5).weight(weight::SEMIBOLD).color(theme::FG);
+            let t = Txt::new(tr("Wearing now"), 10.5).weight(weight::SEMIBOLD).color(theme::FG);
             let bw = widgets::text_size(ui, &t).x + 30.0;
             let br = Rect::from_min_size(thumb.min + vec2(8.0, 8.0), vec2(bw, 22.0));
             pt.rect_filled(br, theme::radius(11.0), theme::black(0.62));
@@ -632,7 +633,7 @@ fn avatar_picker(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
             &Txt::new(&a.name, 14.0).weight(weight::SEMIBOLD),
             tw - 28.0,
         );
-        let sub = if *n > 1 { format!("In {n} projects") } else { p.name.clone() };
+        let sub = if *n > 1 { tr!("In {n} projects", n = n) } else { p.name.clone() };
         widgets::text_truncated(pt, pos2(r.left() + 14.0, thumb.bottom() + 40.0), Align2::LEFT_CENTER, &Txt::new(sub, 12.0).color(theme::FG_3), tw - 28.0);
         if widgets::activated(&resp) {
             state.preselected = Some(a.id.clone());
@@ -651,14 +652,14 @@ fn avatar_footer(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
     let worn = cx.snap.n4n0.avatar_id.clone();
     let list = avatar_list(state, worn.as_ref());
     if list.is_empty() {
-        if widgets::activated(&Button::new("Close").variant(Variant::Ghost).id_salt("avatars-close").show(ui)) {
+        if widgets::activated(&Button::new(tr("Close")).variant(Variant::Ghost).id_salt("avatars-close").show(ui)) {
             state.close_modal(&ctx);
         }
         return;
     }
     let chosen = state.preselected.clone().filter(|id| list.iter().any(|(_, a, _)| &a.id == id));
     let copies = chosen.as_ref().map(|id| state.copies(id).len()).unwrap_or(0);
-    let label = if copies > 1 { "Choose the copy" } else { "Add N4N0" };
+    let label = if copies > 1 { tr("Choose the copy") } else { tr("Add N4N0") };
     let b = Button::new(label)
         .icon(if copies > 1 { glyph::ARROW_RIGHT } else { icons::N4N0_MARK })
         .variant(Variant::Primary)
@@ -669,7 +670,7 @@ fn avatar_footer(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
             state.choose_avatar(&ctx, id, server(cx));
         }
     }
-    if widgets::activated(&Button::new("Cancel").variant(Variant::Ghost).id_salt("avatars-cancel").show(ui)) {
+    if widgets::activated(&Button::new(tr("Cancel")).variant(Variant::Ghost).id_salt("avatars-cancel").show(ui)) {
         state.close_modal(&ctx);
     }
     if copies > 1 {
@@ -678,7 +679,7 @@ fn avatar_footer(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
             ui.painter(),
             pos2(left.left(), left.center().y),
             Align2::LEFT_CENTER,
-            &Txt::new(format!("Saved in {copies} places: you choose which next"), 12.0).color(theme::FG_3),
+            &Txt::new(tr!("Saved in {copies} places: you choose which next", copies = copies), 12.0).color(theme::FG_3),
             left.width() - 12.0,
         );
     }
@@ -707,7 +708,7 @@ fn project_choice(ui: &mut Ui, state: &mut State, avatar: &str) {
             pt,
             pos2(x, r.center().y + 18.0),
             Align2::LEFT_CENTER,
-            &Txt::new(format!("{} · edited {}", a.scene, format::relative_time(p.modified, orbiters_projects::discovery::now())), 11.5).color(theme::FG_4),
+            &Txt::new(tr!("{scene} · edited {when}", scene = a.scene, when = format::relative_time(p.modified, orbiters_projects::discovery::now())), 11.5).color(theme::FG_4),
             tw,
         );
         // A radio: a ring, filled with a check once chosen.
@@ -723,13 +724,13 @@ fn project_choice(ui: &mut Ui, state: &mut State, avatar: &str) {
 fn choice_footer(ui: &mut Ui, cx: &mut Cx, state: &mut State, avatar: &str) {
     let ctx = ui.ctx().clone();
     let picked = state.copies(avatar).into_iter().find(|(p, a)| state.choice.as_ref().is_some_and(|(cp, cs)| cp == &p.path && cs == &a.scene));
-    let b = Button::new("Add N4N0 here").icon(icons::N4N0_MARK).variant(Variant::Primary).enabled(picked.is_some() && !state.running()).id_salt("choice-go");
+    let b = Button::new(tr("Add N4N0 here")).icon(icons::N4N0_MARK).variant(Variant::Primary).enabled(picked.is_some() && !state.running()).id_salt("choice-go");
     if widgets::activated(&b.show(ui)) {
         if let Some((p, a)) = picked {
             state.install(&ctx, p, a, true, server(cx), Rect::NOTHING);
         }
     }
-    if widgets::activated(&Button::new("Back").icon(icons::ARROW_LEFT).variant(Variant::Ghost).id_salt("choice-back").show(ui)) {
+    if widgets::activated(&Button::new(tr("Back")).icon(icons::ARROW_LEFT).variant(Variant::Ghost).id_salt("choice-back").show(ui)) {
         state.modal = Some(Modal::Avatars);
     }
 }
@@ -780,34 +781,34 @@ fn setup_steps(ui: &mut Ui, state: &mut State) {
         Stage::Installing => (
             Tone::Info,
             None,
-            if nano { "Installing My Avatar and Toolkit" } else { "Installing My Avatar" },
-            "Orbiters adds the packages to the project through VCC's own files: Unity does not need to be open.".to_string(),
+            if nano { tr("Installing My Avatar and Toolkit") } else { tr("Installing My Avatar") },
+            tr("Orbiters adds the packages to the project through VCC's own files: Unity does not need to be open.").to_string(),
         ),
         Stage::Installed => {
-            (Tone::Ok, Some(icons::CHECK), "My Avatar is installed", "Open the project: My Avatar's window is in Unity's Tools menu.".to_string())
+            (Tone::Ok, Some(icons::CHECK), tr("My Avatar is installed"), tr("Open the project: My Avatar's window is in Unity's Tools menu.").to_string())
         }
         Stage::OpenUnity => (
             Tone::Warn,
             Some(icons::CUBE),
-            "Open the project to continue",
-            "My Avatar and Toolkit are in. Open the project in Unity: it asks you to confirm adding N4N0 to the avatar.".to_string(),
+            tr("Open the project to continue"),
+            tr("My Avatar and Toolkit are in. Open the project in Unity: it asks you to confirm adding N4N0 to the avatar.").to_string(),
         ),
         Stage::Confirm => (
             Tone::Info,
             Some(icons::N4N0_MARK),
-            "Confirm in Unity",
-            "Unity is open on this project: switch to it and accept adding N4N0 to the avatar. This page follows along.".to_string(),
+            tr("Confirm in Unity"),
+            tr("Unity is open on this project: switch to it and accept adding N4N0 to the avatar. This page follows along.").to_string(),
         ),
         Stage::Done => (
             Tone::Ok,
             Some(icons::CHECK),
-            "N4N0 is on your avatar in Unity",
-            format!("{result} Upload the avatar from the VRChat SDK panel that opened, then wear it in VRChat to capture.").trim().to_string(),
+            tr("N4N0 is on your avatar in Unity"),
+            tr!("{result} Upload the avatar from the VRChat SDK panel that opened, then wear it in VRChat to capture.", result = result).trim().to_string(),
         ),
         Stage::Declined => {
-            (Tone::Warn, Some(icons::X), "You said not now in Unity", if result.is_empty() { "Nothing was changed.".into() } else { result.clone() })
+            (Tone::Warn, Some(icons::X), tr("You said not now in Unity"), if result.is_empty() { tr("Nothing was changed.").into() } else { result.clone() })
         }
-        Stage::Failed => (Tone::Danger, Some(icons::WARNING), "The setup needs a look", result.clone()),
+        Stage::Failed => (Tone::Danger, Some(icons::WARNING), tr("The setup needs a look"), result.clone()),
     };
     // The state at the top: a big tinted disc whose icon pops in when the state changes.
     let w = ui.available_width();
@@ -834,10 +835,10 @@ fn setup_steps(ui: &mut Ui, state: &mut State) {
 
     // The steps, on a thread.
     let mut steps: Vec<(&str, Step)> =
-        vec![(if nano { "Install My Avatar and Toolkit" } else { "Install My Avatar" }, if s == Stage::Installing { Step::Now } else { Step::Done })];
+        vec![(if nano { tr("Install My Avatar and Toolkit") } else { tr("Install My Avatar") }, if s == Stage::Installing { Step::Now } else { Step::Done })];
     if nano {
         steps.push((
-            "Open the project in Unity",
+            tr("Open the project in Unity"),
             match s {
                 Stage::Installing => Step::Later,
                 Stage::OpenUnity => Step::Now,
@@ -845,7 +846,7 @@ fn setup_steps(ui: &mut Ui, state: &mut State) {
             },
         ));
         steps.push((
-            "Confirm adding N4N0 in Unity",
+            tr("Confirm adding N4N0 in Unity"),
             match s {
                 Stage::Installing | Stage::OpenUnity => Step::Later,
                 Stage::Confirm => Step::Waiting,
@@ -855,9 +856,9 @@ fn setup_steps(ui: &mut Ui, state: &mut State) {
                 Stage::Installed => Step::Done,
             },
         ));
-        steps.push(("Upload the avatar and wear it in VRChat", if s == Stage::Done { Step::Now } else { Step::Later }));
+        steps.push((tr("Upload the avatar and wear it in VRChat"), if s == Stage::Done { Step::Now } else { Step::Later }));
     } else {
-        steps.push(("Open the project and My Avatar's window", if s == Stage::Installed { Step::Now } else { Step::Later }));
+        steps.push((tr("Open the project and My Avatar's window"), if s == Stage::Installed { Step::Now } else { Step::Later }));
     }
     ui.add_space(4.0);
     let (area, _) = ui.allocate_exact_size(vec2(w, steps.len() as f32 * 40.0), Sense::hover());
@@ -917,7 +918,7 @@ fn setup_footer(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
     let s = stage(state);
     let open_project = |state: &mut State, ui: &mut Ui, primary: bool| {
         let Some(project) = state.flow.as_ref().map(|f| f.project.clone()) else { return };
-        let b = Button::new("Open project")
+        let b = Button::new(tr("Open project"))
             .icon(icons::PLAY)
             .variant(if primary { Variant::Primary } else { Variant::Secondary })
             .enabled(!state.running())
@@ -932,16 +933,16 @@ fn setup_footer(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
     };
     match s {
         Stage::Installing => {
-            Button::new("Working…").variant(Variant::Secondary).enabled(false).id_salt("setup-working").show(ui);
+            Button::new(tr("Working…")).variant(Variant::Secondary).enabled(false).id_salt("setup-working").show(ui);
         }
         Stage::Done => {
-            if widgets::activated(&Button::new("Done").icon(icons::CHECK).variant(Variant::Primary).id_salt("setup-done").show(ui)) {
+            if widgets::activated(&Button::new(tr("Done")).icon(icons::CHECK).variant(Variant::Primary).id_salt("setup-done").show(ui)) {
                 state.close_modal(&ctx);
             }
         }
         Stage::Declined | Stage::Failed => {
             let again =
-                Button::new("Try again").icon(icons::ARROW_COUNTER_CLOCKWISE).variant(Variant::Primary).enabled(!state.running()).id_salt("setup-again");
+                Button::new(tr("Try again")).icon(icons::ARROW_COUNTER_CLOCKWISE).variant(Variant::Primary).enabled(!state.running()).id_salt("setup-again");
             if widgets::activated(&again.show(ui)) {
                 if let Some((project, avatar)) = state.flow.as_ref().map(|f| (f.project.clone(), f.avatar.clone())) {
                     state.install(&ctx, project, avatar, true, server(cx), Rect::NOTHING);
@@ -951,15 +952,15 @@ fn setup_footer(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
         }
         Stage::Installed | Stage::OpenUnity => {
             open_project(state, ui, true);
-            if widgets::activated(&Button::new("Close").variant(Variant::Ghost).id_salt("setup-close").show(ui)) {
+            if widgets::activated(&Button::new(tr("Close")).variant(Variant::Ghost).id_salt("setup-close").show(ui)) {
                 state.close_modal(&ctx);
             }
         }
         Stage::Confirm => {
             open_project(state, ui, false);
-            let hub = Button::new("Unity Hub").icon(icons::CUBE).variant(Variant::Ghost).id_salt("setup-hub");
+            let hub = Button::new(tr("Unity Hub")).icon(icons::CUBE).variant(Variant::Ghost).id_salt("setup-hub");
             if widgets::activated(&hub.show(ui)) {
-                state.task(&ctx, "Opening Unity Hub…", move || {
+                state.task(&ctx, tr("Opening Unity Hub…"), move || {
                     orbiters_projects::open_hub()?;
                     Ok(Outcome::Picked(None))
                 });

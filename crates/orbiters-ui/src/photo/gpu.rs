@@ -235,7 +235,7 @@ fn layout(device: &wgpu::Device, dst: wgpu::TextureFormat) -> wgpu::BindGroupLay
         count: None,
     };
     device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-        label: Some("photo layers"),
+        label: Some("photo layers"), // i18n: not shown (names a graphics debugger shows)
         entries: &[
             texture(0),
             wgpu::BindGroupLayoutEntry {
@@ -264,10 +264,10 @@ impl Stack {
         let work_layout = layout(device, WORK);
         let out_layout = layout(device, FORMAT);
         let module = |format: &str| {
-            device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("photo layers"), source: wgpu::ShaderSource::Wgsl(SHADER.replace("DST_FORMAT", format).into()) })
+            device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("photo layers"), source: wgpu::ShaderSource::Wgsl(SHADER.replace("DST_FORMAT", format).into()) }) // i18n: not shown (names a graphics debugger shows)
         };
         let (work_module, out_module) = (module("rgba16float"), module("rgba8unorm"));
-        let pipeline_layout = |l: &wgpu::BindGroupLayout| device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("photo layers"), bind_group_layouts: &[Some(l)], immediate_size: 0 });
+        let pipeline_layout = |l: &wgpu::BindGroupLayout| device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("photo layers"), bind_group_layouts: &[Some(l)], immediate_size: 0 }); // i18n: not shown (names a graphics debugger shows)
         let (work_pl, out_pl) = (pipeline_layout(&work_layout), pipeline_layout(&out_layout));
         let pipelines = Entry::ALL
             .iter()
@@ -284,15 +284,15 @@ impl Stack {
             })
             .collect();
         let uniforms = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("photo layers' parameters"),
+            label: Some("photo layers' parameters"), // i18n: not shown (names a graphics debugger shows)
             size: PARAMS * 64,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
         Self {
-            data: storage_buffer(device, "photo layers' tables", 4096 * 4),
-            sums: storage_buffer(device, "lens blur sums", 16),
-            weights: storage_buffer(device, "lens blur weights", 16),
+            data: storage_buffer(device, "photo layers' tables", 4096 * 4), // i18n: not shown (names a graphics debugger shows)
+            sums: storage_buffer(device, "lens blur sums", 16), // i18n: not shown (names a graphics debugger shows)
+            weights: storage_buffer(device, "lens blur weights", 16), // i18n: not shown (names a graphics debugger shows)
             device: device.clone(),
             queue: queue.clone(),
             work_layout,
@@ -403,14 +403,14 @@ impl Stack {
         if self.working.as_ref().is_none_or(|w| w.size != size) {
             self.working = Some(Working {
                 size,
-                textures: (0..WORKING).map(|_| texture("photo layer", WORK, work)).collect(),
-                kept: texture("photo layer kept", WORK, work),
+                textures: (0..WORKING).map(|_| texture("photo layer", WORK, work)).collect(), // i18n: not shown (names a graphics debugger shows)
+                kept: texture("photo layer kept", WORK, work), // i18n: not shown (names a graphics debugger shows)
             });
             self.kept = None;
         }
         if self.output.as_ref().is_none_or(|o| o.0 != size) {
             let usage = wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::COPY_SRC;
-            let (t, v) = texture("photo layers' picture", FORMAT, usage);
+            let (t, v) = texture("photo layers' picture", FORMAT, usage); // i18n: not shown (names a graphics debugger shows)
             self.output = Some((size, t, v));
         }
     }
@@ -541,7 +541,7 @@ impl Stack {
             None => {
                 let d = text::draw(t, size.1)?;
                 let texture = self.device.create_texture(&wgpu::TextureDescriptor {
-                    label: Some("photo text"),
+                    label: Some("photo text"), // i18n: not shown (names a graphics debugger shows)
                     size: wgpu::Extent3d { width: d.width, height: d.height, depth_or_array_layers: 1 },
                     mip_level_count: 1,
                     sample_count: 1,
@@ -593,7 +593,7 @@ impl Stack {
         let bytes = params.len() as u64 * PARAMS;
         if self.uniforms.size() < bytes {
             self.uniforms = self.device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("photo layers' parameters"),
+                label: Some("photo layers' parameters"), // i18n: not shown (names a graphics debugger shows)
                 size: bytes.next_power_of_two(),
                 usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
                 mapped_at_creation: false,
@@ -602,22 +602,22 @@ impl Stack {
         self.queue.write_buffer(&self.uniforms, 0, bytemuck::cast_slice(&params));
         let data_bytes = (data.len() as u64 * 4).max(16);
         if self.data.size() < data_bytes {
-            self.data = storage_buffer(&self.device, "photo layers' tables", data_bytes.next_power_of_two());
+            self.data = storage_buffer(&self.device, "photo layers' tables", data_bytes.next_power_of_two()); // i18n: not shown (names a graphics debugger shows)
         }
         if !data.is_empty() {
             self.queue.write_buffer(&self.data, 0, bytemuck::cast_slice(data));
         }
         if lens_rows > 0 && self.weights.size() < lens_rows * 4 {
-            self.sums = storage_buffer(&self.device, "lens blur sums", lens_rows * 16);
-            self.weights = storage_buffer(&self.device, "lens blur weights", lens_rows * 4);
+            self.sums = storage_buffer(&self.device, "lens blur sums", lens_rows * 16); // i18n: not shown (names a graphics debugger shows)
+            self.weights = storage_buffer(&self.device, "lens blur weights", lens_rows * 4); // i18n: not shown (names a graphics debugger shows)
         }
-        let mut enc = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("photo layers") });
+        let mut enc = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("photo layers") }); // i18n: not shown (names a graphics debugger shows)
         let mut index = 0u64;
         let mut i = 0;
         while i < steps.len() {
             // Passes up to the next picture kept, in one compute pass.
             {
-                let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("photo layers"), timestamp_writes: None });
+                let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("photo layers"), timestamp_writes: None }); // i18n: not shown (names a graphics debugger shows)
                 while let Some(Step::Pass { entry, src, dst, aux, groups, .. }) = steps.get(i) {
                     let out = *entry == Entry::Out;
                     let bind = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -752,7 +752,7 @@ fn square_to_quad(q: [[f64; 2]; 4]) -> [[f32; 3]; 3] {
 /// A texture of `picture` for [`Stack::run`] (RGBA8, encoded, straight).
 pub fn upload(device: &wgpu::Device, queue: &wgpu::Queue, picture: &Rgba8) -> (wgpu::Texture, wgpu::TextureView) {
     let texture = device.create_texture(&wgpu::TextureDescriptor {
-        label: Some("photo source"),
+        label: Some("photo source"), // i18n: not shown (names a graphics debugger shows)
         size: wgpu::Extent3d { width: picture.width, height: picture.height, depth_or_array_layers: 1 },
         mip_level_count: 1,
         sample_count: 1,
@@ -776,7 +776,7 @@ pub fn read_texture(device: &wgpu::Device, queue: &wgpu::Queue, texture: &wgpu::
     let (w, h) = size;
     let row = (w * 4).next_multiple_of(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT);
     let buffer = device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("photo layers read back"),
+        label: Some("photo layers read back"), // i18n: not shown (names a graphics debugger shows)
         size: u64::from(row) * u64::from(h),
         usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
         mapped_at_creation: false,

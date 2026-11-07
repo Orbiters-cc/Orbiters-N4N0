@@ -232,7 +232,7 @@ pub fn register(dir: &Path, version: &str, size_bytes: u64) -> anyhow::Result<()
     let setup = dir.join(SETUP_EXE);
     key.set_text("DisplayName", DISPLAY_NAME)?;
     key.set_text("DisplayVersion", version)?;
-    key.set_text("Publisher", PUBLISHER)?;
+    key.set_text("Publisher", PUBLISHER)?; // i18n: not shown (a registry value name)
     key.set_text("DisplayIcon", &format!("{},0", dir.join(APP_EXE).display()))?;
     key.set_text("InstallLocation", &dir.display().to_string())?;
     key.set_text("UninstallString", &format!("\"{}\" --uninstall", setup.display()))?;
@@ -349,7 +349,7 @@ pub fn write_shortcut(at: &Path, dir: &Path) -> anyhow::Result<()> {
         link.SetPath(&HSTRING::from(target.as_os_str()))?;
         link.SetWorkingDirectory(&HSTRING::from(dir.as_os_str()))?;
         link.SetIconLocation(&HSTRING::from(target.as_os_str()), 0)?;
-        link.SetDescription(&HSTRING::from("N4N0's menu for VRChat: fast walk, YouTube, calls, 3D pictures, music and the light"))?;
+        link.SetDescription(&HSTRING::from(orbiters_i18n::tr("N4N0's menu for VRChat: fast walk, YouTube, calls, 3D pictures, music and the light")))?;
         if let Some(parent) = at.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -369,5 +369,5 @@ pub fn refresh_shell() {
 pub fn message(text: &str, question: bool, error: bool) -> bool {
     use windows::Win32::UI::WindowsAndMessaging::{MessageBoxW, IDOK, MB_ICONERROR, MB_ICONINFORMATION, MB_OK, MB_OKCANCEL, MB_SETFOREGROUND};
     let style = (if question { MB_OKCANCEL } else { MB_OK }) | (if error { MB_ICONERROR } else { MB_ICONINFORMATION }) | MB_SETFOREGROUND;
-    unsafe { MessageBoxW(None, &HSTRING::from(text), &HSTRING::from(format!("{DISPLAY_NAME} setup")), style) == IDOK }
+    unsafe { MessageBoxW(None, &HSTRING::from(text), &HSTRING::from(orbiters_i18n::tr("Orbiters - N4N0 setup")), style) == IDOK }
 }

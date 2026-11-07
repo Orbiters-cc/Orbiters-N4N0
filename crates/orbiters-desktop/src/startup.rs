@@ -5,6 +5,7 @@
 //! SteamVR says then, which its own settings may have changed.
 
 use orbiters_core::settings::StartupSettings;
+use orbiters_i18n::tr;
 use orbiters_openvr::applications::{self, Manifest};
 use orbiters_update::{DISPLAY_NAME, STEAMVR_APP_KEY, STEAMVR_ARGUMENTS, STEAMVR_DESCRIPTION};
 use std::path::{Path, PathBuf};
@@ -17,7 +18,7 @@ fn manifest(exe: &Path) -> Manifest<'_> {
 /// This program and where its SteamVR manifest goes.
 fn this_program() -> Result<(PathBuf, PathBuf), String> {
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-    let path = orbiters_update::steamvr_manifest_path().ok_or("no settings folder for SteamVR's manifest")?;
+    let path = orbiters_update::steamvr_manifest_path().ok_or_else(|| tr("no settings folder for SteamVR's manifest"))?;
     Ok((exe, path))
 }
 

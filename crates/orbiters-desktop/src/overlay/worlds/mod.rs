@@ -36,6 +36,7 @@ pub mod timing_lab;
 pub mod view;
 
 use super::{Canvas, Presenter};
+use orbiters_i18n::tr;
 use crate::backend::Ctl;
 use crate::controller::vrchat_data::{Request as DataRequest, Response as DataResponse, Scope};
 use crate::ipc::N4n0Command;
@@ -220,9 +221,9 @@ fn under_menu(at: &Matrix34, height_m: f32) -> Matrix34 {
 impl Worlds {
     /// The pill's and the bar's overlays; the panel draws on the menu's canvas, whose context `ctx` is.
     pub fn new(overlay: &vr::Overlay, key: &str, ctx: egui::Context) -> anyhow::Result<Self> {
-        let chip = overlay.create(&format!("{key}.worlds-chip"), "N4N0's 3D worlds").map_err(|c| anyhow::anyhow!("3D worlds pill: SteamVR overlay error {c}"))?;
+        let chip = overlay.create(&format!("{key}.worlds-chip"), "N4N0's 3D worlds").map_err(|c| anyhow::anyhow!("3D worlds pill: SteamVR overlay error {c}"))?; // i18n: not shown (the overlay's name in SteamVR)
         interactive(overlay, chip, CHIP_WIDTH_M);
-        let bar = overlay.create(&format!("{key}.worlds-bar"), "N4N0's 3D world controls").map_err(|c| anyhow::anyhow!("3D worlds bar: SteamVR overlay error {c}"))?;
+        let bar = overlay.create(&format!("{key}.worlds-bar"), "N4N0's 3D world controls").map_err(|c| anyhow::anyhow!("3D worlds bar: SteamVR overlay error {c}"))?; // i18n: not shown (the overlay's name in SteamVR)
         interactive(overlay, bar, BAR_WIDTH_M);
         Ok(Self {
             open: false,
@@ -453,9 +454,11 @@ impl Worlds {
         self.panel.dirty = true;
     }
 
-    /// All of it painted again: how it looks changed.
+    /// All of it painted again: how it looks changed, or the language did (the pill and the bar are drawn only when what they show changes).
     pub fn repaint(&mut self) {
         self.panel.dirty = true;
+        self.chip_drawn = None;
+        self.bar_drawn = None;
     }
 
     /// What turns on the side panel goes, with all it holds.
@@ -506,7 +509,7 @@ impl Worlds {
                         backend.show_window();
                     }
                     let time = self.time();
-                    self.panel.say("Opened in the Orbiters window, to walk around it", time);
+                    self.panel.say(tr("Opened in the Orbiters window, to walk around it"), time);
                 }
                 // On a sheet in VR: for the overlay's own 3D worlds, which has the view.
                 Action::Show(id) if self.relay.is_some() => {
@@ -520,7 +523,7 @@ impl Worlds {
                         backend.show_window();
                     }
                     let time = self.time();
-                    self.panel.say("Opened in the Orbiters window, where it shows in 3D", time);
+                    self.panel.say(tr("Opened in the Orbiters window, where it shows in 3D"), time);
                 }
                 Action::Hide | Action::Recenter | Action::SeeThrough(_) | Action::Small(_) | Action::SmallBack | Action::Quality(_) | Action::Open => {}
                 Action::Leave => self.open = false,
@@ -535,8 +538,8 @@ impl Worlds {
                     let tx = self.said.0.clone();
                     let _ = std::thread::Builder::new().name("3d-worlds-web".into()).spawn(move || {
                         let said = match crate::controller::open_url(&link) {
-                            Ok(()) => "Its page opened in the computer's browser".to_string(),
-                            Err(e) => format!("The browser did not open: {e}"),
+                            Ok(()) => tr("Its page opened in the computer's browser").to_string(),
+                            Err(e) => tr!("The browser did not open: {e}", e = e),
                         };
                         let _ = tx.send(said);
                     });
@@ -1001,22 +1004,30 @@ impl Worlds {
         if let Some(d) = &self.download {
             let (read, total) = (d.progress.read.load(Ordering::Relaxed), d.progress.total.load(Ordering::Relaxed));
             if d.progress.stage.load(Ordering::Relaxed) == catalog::STAGE_PREPARING {
-                s.stage = Some("Preparing the splats".into());
+                s.stage = Some(tr("Preparing the splats").into());
             } else {
                 s.download = Some(d.progress.fraction());
-                s.stage = Some(if total > 0 { format!("Downloading {:.1} of {:.1} MB", read as f64 / 1e6, total as f64 / 1e6) } else { "Downloading".into() });
+                s.stage = Some(if total > 0 {
+                    tr!("Downloading {read} of {total} MB", read = format!("{:.1}", read as f64 / 1e6), total = format!("{:.1}", total as f64 / 1e6))
+                } else {
+                    tr("Downloading").into()
+                });
             }
         } else if self.current.is_some() && self.view.active() {
             if self.view.preparing() {
-                s.stage = Some("Getting your graphics card ready".into());
+                s.stage = Some(tr("Getting your graphics card ready").into());
             } else {
                 s.shown = true;
             }
         }
         if s.shown {
             let splats = self.current.as_ref().map_or(0, |e| e.splats as u64);
-            let face = if self.view.batch_ms > 0.0 { format!(" · {:.1} ms a batch", self.view.batch_ms) } else { String::new() };
-            s.stats = Some(format!("{} splats{face} · {} px", panel::short_count(splats), self.view.quality().pixels()));
+            let (count, pixels) = (panel::short_count(splats), self.view.quality().pixels());
+            s.stats = Some(if self.view.batch_ms > 0.0 {
+                tr!("{count} splats · {ms} ms a batch · {pixels} px", count = count, ms = format!("{:.1}", self.view.batch_ms), pixels = pixels)
+            } else {
+                tr!("{count} splats · {pixels} px", count = count, pixels = pixels)
+            });
         }
         s
     }
@@ -1434,8 +1445,8 @@ impl Worlds {
                     let tx = self.said.0.clone();
                     let _ = std::thread::Builder::new().name("3d-worlds-web".into()).spawn(move || {
                         let said = match crate::controller::open_url(&link) {
-                            Ok(()) => "Its page opened in the computer's browser".to_string(),
-                            Err(e) => format!("The browser did not open: {e}"),
+                            Ok(()) => tr("Its page opened in the computer's browser").to_string(),
+                            Err(e) => tr!("The browser did not open: {e}", e = e),
                         };
                         let _ = tx.send(said);
                     });
@@ -1466,20 +1477,20 @@ impl Worlds {
         let time = self.time();
         if self.vrchat {
             let (Some(backend), Some(scope)) = (self.backend.clone(), self.scope.clone()) else { return };
-            self.panel.say("Sending you an invite…", time);
+            self.panel.say(tr("Sending you an invite…"), time);
             let _ = std::thread::Builder::new().name("3d-worlds-invite".into()).spawn(move || {
                 let said = match backend.vrchat_data(scope, DataRequest::InviteSelf { world, instance }) {
-                    Ok(_) => "Invite sent: accept it in VRChat's notifications".to_string(),
-                    Err(e) => format!("The invite could not be sent: {e}"),
+                    Ok(_) => tr("Invite sent: accept it in VRChat's notifications").to_string(),
+                    Err(e) => tr!("The invite could not be sent: {e}", e = e),
                 };
                 let _ = tx.send(said);
             });
         } else {
             let Some(link) = finder::launch_link(&world, &instance) else { return };
-            self.panel.say("Opening VRChat's launcher…", time);
+            self.panel.say(tr("Opening VRChat's launcher…"), time);
             let _ = std::thread::Builder::new().name("3d-worlds-launch".into()).spawn(move || {
                 let said = match finder::open_launch(&link) {
-                    Ok(()) => "VRChat's launcher has it: sign in to VRChat in the app to be invited instead".to_string(),
+                    Ok(()) => tr("VRChat's launcher has it: sign in to VRChat in the app to be invited instead").to_string(),
                     Err(e) => format!("{e}"),
                 };
                 let _ = tx.send(said);
@@ -1501,7 +1512,7 @@ impl Worlds {
             }
             FeedbackAsk::Comment { world, text } => {
                 let w = self.feedback.world_mut(world);
-                w.comments.insert(0, CommentRow { id: 0, by: "You".into(), text: text.clone(), at: unix_now(), mine: true });
+                w.comments.insert(0, CommentRow { id: 0, by: "You".into(), text: text.clone(), at: unix_now(), mine: true }); // i18n: not shown (data: the page writes a mine comment's author with tr)
                 w.comment_count += 1;
             }
             FeedbackAsk::Uncomment { world, comment } => {
@@ -1682,13 +1693,12 @@ struct Visible {
 
 /// A download's error in a line the panel can show.
 fn short_error(e: &anyhow::Error) -> String {
-    let text = format!("{e:#}");
-    let text = if text.contains("replaced") {
-        "This capture was replaced on Orbiters: go back and pick it again".to_string()
-    } else if text.contains("answered 404") {
-        "This capture is no longer on Orbiters".to_string()
+    let text = if e.chain().any(|cause| cause.is::<catalog::Replaced>()) {
+        tr("This capture was replaced on Orbiters: go back and pick it again").to_string()
+    } else if e.chain().filter_map(|cause| cause.downcast_ref::<catalog::Answered>()).any(|a| a.status == 404) {
+        tr("This capture is no longer on Orbiters").to_string()
     } else {
-        format!("Could not download it: {text}")
+        tr!("Could not download it: {text}", text = format!("{e:#}"))
     };
     text.chars().take(90).collect()
 }

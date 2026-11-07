@@ -3,6 +3,7 @@
 //! decoded straight from mapped GPU memory without an extra copy.
 
 use orbiters_contracts::image::{ImageView, PixelOrder, RgbaImage};
+use orbiters_i18n::tr;
 use orbiters_contracts::raw_capture::{self, RawCapture};
 use orbiters_contracts::{depth, qoi, rig, skeleton, strip};
 use std::path::{Path, PathBuf};
@@ -176,7 +177,7 @@ impl SpoutSource {
                 true
             }
             Err(e) => {
-                self.failed(format!("Spout: \"{name}\" could not be opened: {e}"));
+                self.failed(tr!("Spout: \"{name}\" could not be opened: {error}", name = name, error = e));
                 false
             }
         }
@@ -235,7 +236,7 @@ impl FrameAccess for SpoutFrame<'_, '_> {
 #[cfg(windows)]
 impl FrameSource for SpoutSource {
     fn describe(&self) -> String {
-        format!("Spout: {}", self.pinned.as_deref().unwrap_or(if self.wanted.is_empty() { "waiting for a sender" } else { &self.wanted }))
+        format!("Spout: {}", self.pinned.as_deref().unwrap_or(if self.wanted.is_empty() { "waiting for a sender" } else { &self.wanted })) // i18n: not shown (a name saved with the session and used in its folder name, not a text for a window)
     }
 
     fn folder_hint(&self) -> String {
@@ -266,7 +267,11 @@ impl FrameSource for SpoutSource {
                 Ok(Next::Timeout)
             }
             Err(e) => {
-                self.failed(format!("Spout: reading \"{}\" failed: {e}", self.pinned.as_deref().unwrap_or("the sender")));
+                let why = match self.pinned.as_deref() {
+                    Some(name) => tr!("Spout: reading \"{name}\" failed: {error}", name = name, error = e),
+                    None => tr!("Spout: reading the sender failed: {error}", error = e),
+                };
+                self.failed(why);
                 Ok(Next::Timeout)
             }
         }
@@ -462,7 +467,7 @@ impl RawSequenceSource {
 
 impl FrameSource for RawSequenceSource {
     fn describe(&self) -> String {
-        format!("Raw capture: {}", self.dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default())
+        format!("Raw capture: {}", self.dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()) // i18n: not shown (a name saved with the session and used in its folder name, not a text for a window)
     }
 
     fn folder_hint(&self) -> String {
@@ -470,7 +475,7 @@ impl FrameSource for RawSequenceSource {
             .world
             .as_ref()
             .and_then(|w| w.name.clone())
-            .unwrap_or_else(|| self.dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "Raw capture".into()))
+            .unwrap_or_else(|| self.dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "Raw capture".into())) // i18n: not shown (a name saved with the session and used in its folder name, not a text for a window)
     }
 
     fn next(&mut self, _timeout: Duration, f: &mut dyn FnMut(&mut dyn FrameAccess)) -> anyhow::Result<Next> {
@@ -484,9 +489,9 @@ impl FrameSource for RawSequenceSource {
                     self.skipped += 1;
                     self.bad_in_a_row += 1;
                     eprintln!("raw capture: frame {index} skipped: {why}");
-                    self.trouble = Some(format!("{} frame(s) of the raw capture could not be read ({why})", self.skipped));
+                    self.trouble = Some(tr!("{skipped} frame(s) of the raw capture could not be read ({why})", skipped = self.skipped, why = why));
                     if self.bad_in_a_row >= MAX_BAD_IN_A_ROW {
-                        self.trouble = Some(format!("The raw capture ends at frame {index}: {} frames in a row could not be read ({why})", self.bad_in_a_row));
+                        self.trouble = Some(tr!("The raw capture ends at frame {index}: {count} frames in a row could not be read ({why})", index = index, count = self.bad_in_a_row, why = why));
                         return Ok(Next::End);
                     }
                     continue;
@@ -673,11 +678,11 @@ impl TestPatternSource {
 
 impl FrameSource for TestPatternSource {
     fn describe(&self) -> String {
-        format!("Test pattern {}x{}", self.width, self.height)
+        format!("Test pattern {}x{}", self.width, self.height) // i18n: not shown (a name saved with the session and used in its folder name, not a text for a window)
     }
 
     fn folder_hint(&self) -> String {
-        "Test pattern".into()
+        "Test pattern".into() // i18n: not shown (a name saved with the session and used in its folder name, not a text for a window)
     }
 
     fn next(&mut self, _timeout: Duration, f: &mut dyn FnMut(&mut dyn FrameAccess)) -> anyhow::Result<Next> {

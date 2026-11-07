@@ -76,12 +76,12 @@ impl Hold {
     /// The line the guard reads for it (`guard.rs`).
     pub fn guard_line(&self) -> String {
         match self {
-            Hold::OscButton(a) => format!("osc-button {a}"),
-            Hold::OscAxis(a) => format!("osc-axis {a}"),
-            Hold::Key { scan, extended } => format!("key {scan} {extended}"),
-            Hold::Button(MouseButton::Left) => "button left".into(),
-            Hold::Button(MouseButton::Right) => "button right".into(),
-            Hold::Button(MouseButton::Middle) => "button middle".into(),
+            Hold::OscButton(a) => format!("osc-button {a}"), // i18n: not shown (the bridge's log)
+            Hold::OscAxis(a) => format!("osc-axis {a}"), // i18n: not shown (the bridge's log)
+            Hold::Key { scan, extended } => format!("key {scan} {extended}"), // i18n: not shown (the bridge's log)
+            Hold::Button(MouseButton::Left) => "button left".into(), // i18n: not shown
+            Hold::Button(MouseButton::Right) => "button right".into(), // i18n: not shown
+            Hold::Button(MouseButton::Middle) => "button middle".into(), // i18n: not shown
         }
     }
 }

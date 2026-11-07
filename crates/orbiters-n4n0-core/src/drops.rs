@@ -3,6 +3,7 @@
 //! there fetches its link (for twenty seconds, without an account). Only links a browser opens are ever copied.
 
 use orbiters_core::account::{Api, ApiError};
+use orbiters_i18n::tr;
 use serde::Deserialize;
 use std::time::Duration;
 
@@ -39,7 +40,7 @@ pub fn copyable(link: &str) -> bool {
 /// An error answer in the person's words: the server's own message, or its status.
 fn plain(e: anyhow::Error) -> anyhow::Error {
     match e.downcast::<ApiError>() {
-        Ok(api) if api.message.is_empty() => anyhow::anyhow!("Orbiters answered {}", api.status),
+        Ok(api) if api.message.is_empty() => anyhow::anyhow!("{}", tr!("Orbiters answered {status}", status = api.status)),
         Ok(api) => api.into(),
         Err(e) => e,
     }
@@ -49,7 +50,7 @@ fn plain(e: anyhow::Error) -> anyhow::Error {
 /// `orbiters_core::vrchat_log::WorldState::instance_hash`), as the account of `token`. Returns when the card expires
 /// there (ISO 8601).
 pub fn post(api: &Api, token: &str, instance: &str, link: &str, title: &str) -> anyhow::Result<String> {
-    anyhow::ensure!(copyable(link), "This card has no link that can be opened.");
+    anyhow::ensure!(copyable(link), "{}", tr("This card has no link that can be opened."));
     let response = api
         .agent()
         .post(&api.url("n4n0/drops"))

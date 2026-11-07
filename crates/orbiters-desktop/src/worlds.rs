@@ -12,6 +12,7 @@ use orbiters_core::account::{Api, Server};
 use orbiters_core::bundle::{self, SessionSummary};
 use orbiters_core::maps::WorldPage;
 use orbiters_core::visited::{self, Shot};
+use orbiters_i18n::tr;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::hash::{Hash, Hasher};
@@ -236,7 +237,7 @@ fn from_index(sessions_dir: &Path, index: visited::ShotIndex, unplaced: bool) ->
     for w in &mut out {
         w.sessions.sort_by_key(|s| std::cmp::Reverse(s.modified));
         if w.name.is_empty() {
-            w.name = if w.id.is_empty() { "Pictures without a world" } else { "Unnamed world" }.into();
+            w.name = if w.id.is_empty() { tr("Pictures without a world") } else { tr("Unnamed world") }.into();
         }
     }
     out.sort_by(|a, b| b.last.cmp(&a.last).then_with(|| a.name.cmp(&b.name)));

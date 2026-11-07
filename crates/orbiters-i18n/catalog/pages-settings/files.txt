@@ -1,0 +1,12 @@
+# The files this area covers: every text in them is wrapped and translated (tests/coverage.rs).
+crates/orbiters-desktop/src/pages/settings.rs
+crates/orbiters-desktop/src/pages/n4n0.rs
+crates/orbiters-desktop/src/pages/experimental.rs
+crates/orbiters-desktop/src/pages/storage.rs
+crates/orbiters-desktop/src/pages/network.rs
+crates/orbiters-desktop/src/pages/vr_audio.rs
+crates/orbiters-desktop/src/pages/requests.rs
+crates/orbiters-desktop/src/pages/mic.rs
+crates/orbiters-desktop/src/pages/mod.rs
+crates/orbiters-desktop/src/pages/form.rs
+crates/orbiters-desktop/src/pages/mic_grid.rs

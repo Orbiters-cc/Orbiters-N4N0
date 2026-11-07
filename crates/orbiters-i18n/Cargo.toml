@@ -1,0 +1,9 @@
+[package]
+name = "orbiters-i18n"
+description = "What Orbiters - N4N0 says, in the languages of the Orbiters website: English text is the key, and what has no translation stays English."
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+serde_json = { workspace = true }

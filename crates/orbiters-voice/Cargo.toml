@@ -10,6 +10,7 @@ name = "orbiters-voice"
 path = "src/main.rs"
 
 [dependencies]
+orbiters-i18n = { workspace = true }
 orbiters-core = { workspace = true }
 orbiters-audio = { workspace = true }
 # The wake word's rules: a long sentence is transcribed whole only when its start holds one.

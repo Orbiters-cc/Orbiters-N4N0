@@ -21,6 +21,7 @@
 
 use super::*;
 use egui::{PointerButton, Pos2};
+use orbiters_i18n::{mark, tr, tr_ctx};
 use orbiters_reconstruct::edit::{self, DELETED, Edit, Found, HIDDEN, History, Identity, SELECTED};
 use orbiters_reconstruct::select::{self as pick, Splats};
 use orbiters_ui::anim::{self, Spring};
@@ -45,7 +46,7 @@ fn writing() -> std::sync::MutexGuard<'static, ()> {
 }
 
 /// Why a view's splats or edits no longer go together with the PLY on the disk.
-const RECONSTRUCTED: &str = "The capture was reconstructed again since its 3D view opened: close the view and open it again.";
+const RECONSTRUCTED: &str = "The capture was reconstructed again since its 3D view opened: close the view and open it again."; // i18n: not shown (the text of errors, which a later pass decides)
 
 /// A PLY's length and modification time: what tells cheaply that it is still the one an edit was made on (it is hashed
 /// again only when they changed).
@@ -117,7 +118,7 @@ pub(super) struct Edits {
     stamp: Option<Stamp>,
     /// The edit found beside the PLY could not be applied (made on an earlier reconstruction, or damaged): why. Shares
     /// stop, pictures of the view are refused and selecting waits until it is discarded.
-    pub(super) problem: Option<String>,
+    pub(super) problem: Option<Problem>,
     /// The marks as the GPU draws them (orbiters_reconstruct::edit::Edit::view_marks) and their version; the version of
     /// what is drawn at all (hidden and deleted, which a pick's projection depends on).
     pub(super) version: u64,
@@ -134,16 +135,40 @@ pub(super) struct Edits {
     window: (wgpu::Device, wgpu::Queue),
 }
 
+/// Why the edits found beside the PLY cannot be applied, kept as what happened and said in the language now where it is drawn.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) enum Problem {
+    /// Made on an earlier reconstruction.
+    Stale,
+    /// Damaged or unreadable: what the reader said.
+    Unreadable(String),
+    /// Discard them failed: what went wrong.
+    NotDiscarded(String),
+}
+
+impl std::fmt::Display for Problem {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.text())
+    }
+}
+
+impl Problem {
+    pub(super) fn text(&self) -> String {
+        match self {
+            Problem::Stale => tr("Its splat edits were made on an earlier reconstruction: nothing they hid is hidden here, and sharing it stops until they are discarded.").to_string(),
+            Problem::Unreadable(e) => tr!("Its splat edits could not be read ({e}): sharing it stops until they are discarded.", e = e),
+            Problem::NotDiscarded(e) => tr!("They could not be discarded: {e}", e = e),
+        }
+    }
+}
+
 impl Edits {
     /// The edits of the `splats` splats of `session`'s PLY (`identity`) as `found` beside it.
     pub(super) fn new(session: &Path, splats: usize, identity: Identity, found: Found, window: (wgpu::Device, wgpu::Queue)) -> Self {
         let blank = Edit::new(splats, identity);
         let problem = match &found {
-            Found::Stale(_) => Some(
-                "Its splat edits were made on an earlier reconstruction: nothing they hid is hidden here, and sharing it stops until they are discarded."
-                    .to_string(),
-            ),
-            Found::Unreadable(e) => Some(format!("Its splat edits could not be read ({e}): sharing it stops until they are discarded.")),
+            Found::Stale(_) => Some(Problem::Stale),
+            Found::Unreadable(e) => Some(Problem::Unreadable(e.to_string())),
             _ => None,
         };
         let (edit, picture_stale) = match found {
@@ -407,7 +432,7 @@ impl Drop for Edits {
             return;
         }
         let (session, window) = (self.session.clone(), self.window.clone());
-        let spawned = std::thread::Builder::new().name("splat edits' picture".into()).spawn(move || {
+        let spawned = std::thread::Builder::new().name("splat edits' picture".into()).spawn(move || { // i18n: not shown
             if let Err(err) = redraw_picture(&session, window) {
                 eprintln!("The picture of {}: {err:#}", session.display());
             }
@@ -495,17 +520,17 @@ impl Tool {
         // (super::gestures).
         #[cfg(target_os = "macos")]
         return match self {
-            Tool::Pick => "Click a splat to select it · Shift adds, Cmd takes away · drag or two fingers to orbit, Shift and two fingers to pan",
-            Tool::Brush => "Paint over what to select · Shift adds, Cmd takes away · two fingers to orbit, Shift and two fingers to pan",
-            Tool::Box => "Drag a box: it selects at every depth · Shift adds, Cmd takes away · two fingers to orbit",
-            Tool::Sphere => "Press on a surface and drag out the sphere · Shift adds, Cmd takes away · two fingers to orbit",
+            Tool::Pick => tr("Click a splat to select it · Shift adds, Cmd takes away · drag or two fingers to orbit, Shift and two fingers to pan"),
+            Tool::Brush => tr("Paint over what to select · Shift adds, Cmd takes away · two fingers to orbit, Shift and two fingers to pan"),
+            Tool::Box => tr("Drag a box: it selects at every depth · Shift adds, Cmd takes away · two fingers to orbit"),
+            Tool::Sphere => tr("Press on a surface and drag out the sphere · Shift adds, Cmd takes away · two fingers to orbit"),
         };
         #[cfg(not(target_os = "macos"))]
         match self {
-            Tool::Pick => "Click a splat to select it · Shift adds, Ctrl takes away · drag to orbit, right-drag to pan",
-            Tool::Brush => "Paint over what to select · Shift adds, Ctrl takes away · right-drag to orbit, middle-drag to pan",
-            Tool::Box => "Drag a box: it selects at every depth · Shift adds, Ctrl takes away · right-drag to orbit",
-            Tool::Sphere => "Press on a surface and drag out the sphere · Shift adds, Ctrl takes away · right-drag to orbit",
+            Tool::Pick => tr("Click a splat to select it · Shift adds, Ctrl takes away · drag to orbit, right-drag to pan"),
+            Tool::Brush => tr("Paint over what to select · Shift adds, Ctrl takes away · right-drag to orbit, middle-drag to pan"),
+            Tool::Box => tr("Drag a box: it selects at every depth · Shift adds, Ctrl takes away · right-drag to orbit"),
+            Tool::Sphere => tr("Press on a surface and drag out the sphere · Shift adds, Ctrl takes away · right-drag to orbit"),
         }
     }
 }
@@ -601,11 +626,11 @@ enum On {
 }
 
 /// What Select splats is for, in one line, while nothing is selected.
-pub(super) const PURPOSE: &str = "For cleaning up: select floaters or stray splats, then hide or delete them from what is shown, shared and exported.";
+pub(super) const PURPOSE: &str = mark("For cleaning up: select floaters or stray splats, then hide or delete them from what is shown, shared and exported.");
 
 /// [`PURPOSE`] in a chip over the middle of the view, its bottom at `bottom`.
 fn purpose_line(p: &egui::Painter, ui: &Ui, rect: Rect, bottom: f32) {
-    let t = Txt::new(PURPOSE, 12.5).color(theme::FG);
+    let t = Txt::new(tr(PURPOSE), 12.5).color(theme::FG);
     let room = rect.width() - 32.0 - 56.0;
     let tw = widgets::text_size(ui, &t).x.min(room);
     let r = Rect::from_center_size(pos2(rect.center().x, bottom - 20.0), vec2(tw + 56.0, 40.0));
@@ -617,16 +642,17 @@ fn purpose_line(p: &egui::Painter, ui: &Ui, rect: Rect, bottom: f32) {
 /// The selection with what can be done to it, over the view's middle with its bottom at `bottom`, `k` of the way in.
 /// Hide and Delete, the reason to select anything, are the large ones; on a filled panel, unlike the view's chips.
 fn selection_bar(ui: &mut Ui, rect: Rect, bottom: f32, k: f32, selected: usize, ready: bool) -> Option<On> {
-    let count = Txt::new(if selected == 1 { "1 splat selected".to_string() } else { format!("{} splats selected", format::integer(selected as f64)) }, 13.5).weight(weight::SEMIBOLD);
+    let count = if selected == 1 { tr("1 splat selected").to_string() } else { tr!("{count} splats selected", count = format::integer(selected as f64)) };
+    let count = Txt::new(count, 13.5).weight(weight::SEMIBOLD);
     let count_w = widgets::text_size(ui, &count).x;
-    let hide = Button::new("Hide").icon(icons::EYE_SLASH).variant(Variant::Secondary).hint("Hides the selection: not drawn, not shared; Show all brings it back (H)").id_salt("splat-select-hide");
-    let delete = Button::new("Delete")
+    let hide = Button::new(tr("Hide")).icon(icons::EYE_SLASH).variant(Variant::Secondary).hint(tr("Hides the selection: not drawn, not shared; Show all brings it back (H)")).id_salt("splat-select-hide");
+    let delete = Button::new(tr("Delete"))
         .icon(icons::TRASH)
         .variant(Variant::Danger)
-        .hint("Deletes the selection from everything shared or exported; undo brings it back (Delete)")
+        .hint(tr("Deletes the selection from everything shared or exported; undo brings it back (Delete)"))
         .id_salt("splat-select-delete");
-    let grow = Button::new("Grow").icon(icons::ARROWS_OUT).variant(Variant::Ghost).size(Size::Sm).enabled(ready).hint("Adds the splats right beside the selection").id_salt("splat-select-grow");
-    let shrink = Button::new("Shrink").icon(icons::CORNERS_IN).variant(Variant::Ghost).size(Size::Sm).enabled(ready).hint("Takes the selection's edge away").id_salt("splat-select-shrink");
+    let grow = Button::new(tr("Grow")).icon(icons::ARROWS_OUT).variant(Variant::Ghost).size(Size::Sm).enabled(ready).hint(tr("Adds the splats right beside the selection")).id_salt("splat-select-grow");
+    let shrink = Button::new(tr("Shrink")).icon(icons::CORNERS_IN).variant(Variant::Ghost).size(Size::Sm).enabled(ready).hint(tr("Takes the selection's edge away")).id_salt("splat-select-shrink");
     let (hw, dw, gw, sw) = (hide.desired_width(ui), delete.desired_width(ui), grow.desired_width(ui), shrink.desired_width(ui));
     // The dot, the count, the large ones, then the small ones and the ×.
     let lead = 20.0 + 16.0 + count_w;
@@ -660,7 +686,7 @@ fn selection_bar(ui: &mut Ui, rect: Rect, bottom: f32, k: f32, selected: usize, 
         acted = Some(On::Shrink);
     }
     x += sw + 4.0;
-    if IconButton::new(icons::X, "Clear").size(32.0, 15.0).id_salt("splat-select-clear").show_at(&mut bu, small(x, 32.0)).clicked() {
+    if IconButton::new(icons::X, mark("Clear")).size(32.0, 15.0).id_salt("splat-select-clear").show_at(&mut bu, small(x, 32.0)).clicked() {
         acted = Some(On::Clear);
     }
     acted
@@ -740,7 +766,7 @@ impl Viewer {
 
     /// Why the edit found beside the splats could not be applied, while it waits to be discarded (screenshots).
     pub fn edits_problem(&self) -> Option<String> {
-        self.loaded.as_ref()?.edits.as_ref()?.problem.clone()
+        self.loaded.as_ref()?.edits.as_ref()?.problem.as_ref().map(Problem::text)
     }
 
     /// Why no picture of the view may be made now (Save this view, Edit in 3D's pictures: screenshots).
@@ -846,7 +872,7 @@ impl Viewer {
                         let [x, y] = px(at);
                         let ids = s.view.as_ref().map(|(_, _, v)| v.clicked(x, y)).unwrap_or_default();
                         if ids.is_empty() {
-                            say(s, "Nothing there to select");
+                            say(s, tr("Nothing there to select"));
                             if mode == Mode::Replace {
                                 edits.clear();
                             }
@@ -926,7 +952,7 @@ impl Viewer {
                         s.drag = None;
                         let ids = pick::in_rectangle(&splats, &edits.edit.marks, &camera, px(r.min), px(r.max));
                         if ids.is_empty() {
-                            say(s, "Nothing there to select");
+                            say(s, tr("Nothing there to select"));
                         }
                         edits.select(&ids, mode);
                     } else {
@@ -942,7 +968,7 @@ impl Viewer {
                         let [x, y] = px(from);
                         match s.view.as_ref().and_then(|(_, _, v)| v.pick(x, y)) {
                             Some(hit) => s.drag = Some(Drag::Sphere { centre: hit.point, depth: camera.to_camera(hit.point)[2], radius: 0.0, mode }),
-                            None => say(s, "Press on a surface to place the sphere"),
+                            None => say(s, tr("Press on a surface to place the sphere")),
                         }
                     }
                 }
@@ -958,7 +984,7 @@ impl Viewer {
                         s.drag = None;
                         let ids = pick::in_sphere(&splats, &edits.edit.marks, c3, r3);
                         if ids.is_empty() {
-                            say(s, "Nothing inside the sphere");
+                            say(s, tr("Nothing inside the sphere"));
                         }
                         edits.select(&ids, mode);
                     } else if let Some((cx, cy, _)) = camera.project(c3) {
@@ -967,7 +993,7 @@ impl Viewer {
                         p.circle_filled(c, r, theme::alpha(SELECTION, 0.12));
                         p.circle_stroke(c, r, egui::Stroke::new(1.5, SELECTION));
                         p.circle_filled(c, 3.0, SELECTION);
-                        let label = Txt::new(format!("{} across", metres(2.0 * r3)), 12.0).color(theme::FG);
+                        let label = Txt::new(tr!("{size} across", size = metres(2.0 * r3)), 12.0).color(theme::FG);
                         let size = widgets::text_size(ui, &label);
                         let lr = Rect::from_center_size(c + vec2(0.0, -r - 18.0), size + vec2(20.0, 10.0));
                         p.rect_filled(lr, theme::radius(lr.height() * 0.5), theme::black(0.6));
@@ -1059,7 +1085,7 @@ impl Viewer {
     /// is selected has its bar) and whether it is saved, up to `right`, where the view's own controls start.
     pub(super) fn select_bar(&mut self, ui: &mut Ui, p: &egui::Painter, title_r: Rect, right: f32) {
         let ctx = ui.ctx().clone();
-        let done = Button::new("Done").icon(icons::CHECK).variant(Variant::Primary).hint("Leaves Select splats (Esc)").id_salt("splat-select-done");
+        let done = Button::new(tr("Done")).icon(icons::CHECK).variant(Variant::Primary).hint(tr("Leaves Select splats (Esc)")).id_salt("splat-select-done");
         let dw = done.desired_width(ui);
         let done_r = Rect::from_min_size(pos2(title_r.right() + 10.0, title_r.top() + 2.0), vec2(dw, 40.0));
         if done.show_at(ui, done_r).clicked() {
@@ -1071,8 +1097,8 @@ impl Viewer {
         let chip_r = Rect::from_min_size(pos2(x, title_r.top()), vec2(92.0, 44.0));
         p.rect_filled(chip_r, theme::radius(22.0), theme::black(0.55));
         for (glyph, label, enabled, undo) in [
-            (icons::ARROW_U_UP_LEFT, if cfg!(target_os = "macos") { "Undo (Cmd+Z)" } else { "Undo (Ctrl+Z)" }, e.history.can_undo(), true),
-            (icons::ARROW_U_UP_RIGHT, if cfg!(target_os = "macos") { "Redo (Cmd+Shift+Z)" } else { "Redo (Ctrl+Shift+Z)" }, e.history.can_redo(), false),
+            (icons::ARROW_U_UP_LEFT, if cfg!(target_os = "macos") { mark("Undo (Cmd+Z)") } else { mark("Undo (Ctrl+Z)") }, e.history.can_undo(), true),
+            (icons::ARROW_U_UP_RIGHT, if cfg!(target_os = "macos") { mark("Redo (Cmd+Shift+Z)") } else { mark("Redo (Ctrl+Shift+Z)") }, e.history.can_redo(), false),
         ] {
             let r = Rect::from_center_size(pos2(x + 24.0, chip_r.center().y), vec2(36.0, 36.0));
             let mut bu = ui.new_child(UiBuilder::new().max_rect(r).id_salt(("splat-select-history", label)));
@@ -1090,11 +1116,11 @@ impl Viewer {
             x += 44.0;
         }
         // What is hidden and deleted; saved or not.
-        let counts = format!("{} hidden · {} deleted", format::integer(e.hidden() as f64), format::integer(e.deleted() as f64));
+        let counts = tr!("{hidden} hidden · {deleted} deleted", hidden = format::integer(e.hidden() as f64), deleted = format::integer(e.deleted() as f64));
         let (state, tone) = match (&e.save_error, e.drawing.is_some()) {
-            (Some(_), _) => ("Not saved", theme::DANGER),
-            (None, true) => ("Saved · drawing its picture again…", theme::FG_3),
-            (None, false) => ("Saved beside the splats", theme::FG_3),
+            (Some(_), _) => (tr("Not saved"), theme::DANGER),
+            (None, true) => (tr("Saved · drawing its picture again…"), theme::FG_3),
+            (None, false) => (tr("Saved beside the splats"), theme::FG_3),
         };
         let t1 = Txt::new(counts, 12.5).color(theme::FG);
         let t2 = Txt::new(state, 11.0).color(tone);
@@ -1109,7 +1135,7 @@ impl Viewer {
         widgets::text_truncated(p, pos2(status_r.left() + 20.0, status_r.center().y + 9.0), Align2::LEFT_CENTER, &t2, tw);
         if retry {
             let r = Rect::from_min_size(pos2(status_r.right() - 84.0, status_r.center().y - 16.0), vec2(76.0, 32.0));
-            if Button::new("Retry")
+            if Button::new(tr("Retry"))
                 .variant(Variant::Ghost)
                 .size(Size::Sm)
                 .hint(e.save_error.as_deref().unwrap_or_default())
@@ -1140,26 +1166,26 @@ impl Viewer {
         // What works on the whole capture, at the right: its width says how much room the tools have.
         type Act = (&'static str, &'static str, &'static str, bool, Whole);
         let whole: [Act; 4] = [
-            (icons::CIRCLE_HALF, "Invert", if cfg!(target_os = "macos") { "Selects everything else (Cmd+I)" } else { "Selects everything else (Ctrl+I)" }, true, Whole::Invert),
-            (icons::SQUARES_FOUR, "Select all", if cfg!(target_os = "macos") { "Selects every splat drawn (Cmd+A)" } else { "Selects every splat drawn (Ctrl+A)" }, true, Whole::SelectAll),
-            (icons::EYE, "Show all", if cfg!(target_os = "macos") { "Shows every hidden splat again (Option+H)" } else { "Shows every hidden splat again (Alt+H)" }, hidden > 0, Whole::ShowAll),
-            (icons::ARROW_COUNTER_CLOCKWISE, "Restore all", "Brings back every hidden and deleted splat: the capture as reconstructed", hidden + deleted > 0, Whole::RestoreAll),
+            (icons::CIRCLE_HALF, mark("Invert"), if cfg!(target_os = "macos") { mark("Selects everything else (Cmd+I)") } else { mark("Selects everything else (Ctrl+I)") }, true, Whole::Invert),
+            (icons::SQUARES_FOUR, mark("Select all"), if cfg!(target_os = "macos") { mark("Selects every splat drawn (Cmd+A)") } else { mark("Selects every splat drawn (Ctrl+A)") }, true, Whole::SelectAll),
+            (icons::EYE, mark("Show all"), if cfg!(target_os = "macos") { mark("Shows every hidden splat again (Option+H)") } else { mark("Shows every hidden splat again (Alt+H)") }, hidden > 0, Whole::ShowAll),
+            (icons::ARROW_COUNTER_CLOCKWISE, mark("Restore all"), mark("Brings back every hidden and deleted splat: the capture as reconstructed"), hidden + deleted > 0, Whole::RestoreAll),
         ];
         let buttons: Vec<Button> = whole
             .iter()
-            .map(|&(glyph, label, hint, enabled, _)| Button::new(label).icon(glyph).variant(Variant::Ghost).size(Size::Sm).enabled(enabled).hint(hint).id_salt(("splat-select-whole", label)))
+            .map(|&(glyph, label, hint, enabled, _)| Button::new(tr(label)).icon(glyph).variant(Variant::Ghost).size(Size::Sm).enabled(enabled).hint(tr(hint)).id_salt(("splat-select-whole", label)))
             .collect();
         let widths: Vec<f32> = buttons.iter().map(|b| b.desired_width(ui)).collect();
         let whole_w = widths.iter().sum::<f32>() + 6.0 * (widths.len() as f32 - 1.0) + 12.0;
 
         // The tools: a segmented control, and the brush's size in the room left beside what works on the whole capture.
-        let label = Txt::new("Select", 12.0).color(theme::FG_3);
+        let label = Txt::new(tr_ctx("tool", "Select"), 12.0).color(theme::FG_3);
         let label_w = widgets::text_size(ui, &label).x;
         let options = [
-            SegOption::new(Tool::Pick, "Pick").hint("Click the splats under the cursor (1)"),
-            SegOption::new(Tool::Brush, "Brush").hint("Paint over what you see (2)"),
-            SegOption::new(Tool::Box, "Box").hint("Drag a rectangle: every depth inside it (3)"),
-            SegOption::new(Tool::Sphere, "Sphere").hint("Press on a surface, drag out a sphere (4)"),
+            SegOption::new(Tool::Pick, tr("Pick")).hint(tr("Click the splats under the cursor (1)")),
+            SegOption::new(Tool::Brush, tr("Brush")).hint(tr("Paint over what you see (2)")),
+            SegOption::new(Tool::Box, tr("Box")).hint(tr("Drag a rectangle: every depth inside it (3)")),
+            SegOption::new(Tool::Sphere, tr("Sphere")).hint(tr("Press on a surface, drag out a sphere (4)")),
         ];
         let seg_w = options.iter().map(|o| widgets::text_size(ui, &Txt::new(o.label, 12.0).weight(weight::MEDIUM)).x + 24.0).sum::<f32>() + 8.0;
         let tools_w = 18.0 + label_w + 12.0 + seg_w + 6.0;
@@ -1195,8 +1221,8 @@ impl Viewer {
 
         // Above the tools: the hint, or what there is to say (the geometry still being read, why not, nothing there).
         let (text, color) = match (&self.select.error, ready, &self.select.notice) {
-            (Some(e), _, _) => (format!("The splats cannot be selected: {e}"), theme::DANGER),
-            (None, false, _) => ("Getting the splats ready to select…".to_string(), theme::FG_2),
+            (Some(e), _, _) => (tr!("The splats cannot be selected: {e}", e = e), theme::DANGER),
+            (None, false, _) => (tr("Getting the splats ready to select…").to_string(), theme::FG_2),
             (None, true, Some((n, _))) => (n.clone(), theme::WARN),
             (None, true, None) => (self.select.tool.hint().to_string(), theme::FG_2),
         };
@@ -1235,7 +1261,7 @@ impl Viewer {
                     let ids = if grow { pick::grow(&splats, &e.edit.marks, radius) } else { pick::shrink(&splats, &e.edit.marks, radius) };
                     let mode = if grow { Mode::Add } else { Mode::Remove };
                     if !e.select(&ids, mode) {
-                        self.select.notice = Some((if grow { "Nothing beside the selection to add" } else { "Nothing to take away" }.into(), ctx.input(|i| i.time)));
+                        self.select.notice = Some((if grow { tr("Nothing beside the selection to add") } else { tr("Nothing to take away") }.into(), ctx.input(|i| i.time)));
                     }
                 }
             }
@@ -1270,10 +1296,10 @@ impl Viewer {
     /// An edit that could not be applied: under the top bar, why, and Discard them. Returns whether one is shown.
     pub(super) fn problem_chip(&mut self, ui: &mut Ui, p: &egui::Painter, rect: Rect, title_r: Rect) -> bool {
         let Some(e) = self.loaded.as_mut().and_then(|l| l.edits.as_mut()) else { return false };
-        let Some(problem) = e.problem.clone() else { return false };
+        let Some(problem) = e.problem.as_ref().map(Problem::text) else { return false };
         let t = Txt::new(&problem, 12.5).color(theme::FG);
         let tw = widgets::text_size(ui, &t).x.min(rect.width() - 260.0);
-        let b = Button::new("Discard them").icon(icons::TRASH).variant(Variant::Danger).size(Size::Sm).id_salt("splat-edits-discard");
+        let b = Button::new(tr("Discard them")).icon(icons::TRASH).variant(Variant::Danger).size(Size::Sm).id_salt("splat-edits-discard");
         let bw = b.desired_width(ui);
         let chip_r = Rect::from_center_size(pos2(rect.center().x, title_r.bottom() + 16.0 + 22.0), vec2(42.0 + tw + 12.0 + bw + 8.0, 44.0));
         p.rect_filled(chip_r, theme::radius(22.0), theme::black(0.72));
@@ -1281,7 +1307,7 @@ impl Viewer {
         widgets::text_truncated(p, pos2(chip_r.left() + 42.0, chip_r.center().y), Align2::LEFT_CENTER, &t, tw);
         if b.show_at(ui, Rect::from_min_size(pos2(chip_r.right() - 8.0 - bw, chip_r.center().y - 16.0), vec2(bw, 32.0))).clicked() {
             if let Err(err) = e.discard() {
-                e.problem = Some(format!("They could not be discarded: {err:#}"));
+                e.problem = Some(Problem::NotDiscarded(format!("{err:#}")));
             }
         }
         true
@@ -1541,5 +1567,15 @@ mod tests {
         assert!(read_again(&dir, Some(loaded)).unwrap_err().to_string().contains("reconstructed again"));
         assert!(read_again(&dir, Some(Identity::read(&ply).unwrap())).is_ok());
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A problem is kept as what happened and said in the language where it is drawn, so a language change reaches an open chip.
+    #[test]
+    fn a_problem_is_said_in_the_language_now() {
+        use orbiters_i18n::{in_language, Language};
+        let problem = Problem::NotDiscarded("access denied".into());
+        assert_eq!(problem.text(), "They could not be discarded: access denied");
+        assert_eq!(in_language(Language::Fr, || problem.text()), "Impossible de les abandonner\u{a0}: access denied");
+        assert!(in_language(Language::Ja, || Problem::Stale.text()).starts_with("スプラットの編集"));
     }
 }

@@ -1,15 +1,16 @@
 //! The gallery's additional local picture sources. Folder I/O and the native folder picker stay on workers.
 use super::super::{Cx, Job};
 use egui::{Rect, Ui};
+use orbiters_i18n::{mark, tr};
 use orbiters_ui::{icons, widgets::{Button, Variant}};
 use std::path::PathBuf;
 
 /// The button's label (Enzo, 2026-10-30: "Manage folders", it was "Folders").
-pub const LABEL: &str = "Manage folders";
+pub const LABEL: &str = mark("Manage folders");
 
 /// The native folder picker, run on a worker (it blocks until the member chooses).
 fn pick_folder() -> Option<PathBuf> {
-    rfd::FileDialog::new().set_title("Add a picture folder").pick_folder()
+    rfd::FileDialog::new().set_title(tr("Add a picture folder")).pick_folder()
 }
 
 #[derive(Default)]
@@ -86,7 +87,7 @@ impl State {
     pub fn show(&mut self, ui: &mut Ui, cx: &Cx, anchor: Rect) {
         self.button = Some(anchor);
         // On the press, as the other buttons of the page's head (Manage captures).
-        if super::super::sharing::pressed(Button::new(LABEL).icon(icons::FOLDER_OPEN).show_at(ui, anchor)) {
+        if super::super::sharing::pressed(Button::new(tr(LABEL)).icon(icons::FOLDER_OPEN).show_at(ui, anchor)) {
             if self.open {
                 self.open = false;
                 self.closing = true;
@@ -132,12 +133,12 @@ impl State {
             orbiters_ui::widgets::panel(ui.painter(), pop.rect, 18.0);
             let mut inner = ui.new_child(egui::UiBuilder::new().max_rect(pop.rect.shrink(20.0)));
             let ui = &mut inner;
-            ui.heading("Picture folders");
+            ui.heading(tr("Picture folders"));
             ui.add_space(8.0);
             ui.label(if cfg!(target_os = "macos") {
-                "Pictures/VRChat is always included. Add the folders that hold your VRChat pictures to keep them in your library."
+                tr("Pictures/VRChat is always included. Add the folders that hold your VRChat pictures to keep them in your library.")
             } else {
-                "VRChat's picture folder is always included. Add archives to keep them in your library."
+                tr("VRChat's picture folder is always included. Add archives to keep them in your library.")
             });
             ui.add_space(12.0);
             egui::ScrollArea::vertical().max_height(190.0).show(ui, |ui| {
@@ -148,14 +149,14 @@ impl State {
                             // VRChat does not run on a Mac, so its folder not being there says nothing of a disk gone away.
                             let added = cx.snap.settings.picture_folders.contains(path);
                             ui.weak(if *online {
-                                "Available"
+                                tr("Available")
                             } else if cfg!(target_os = "macos") && !added {
-                                "Not made yet: what you save here will show up"
+                                tr("Not made yet: what you save here will show up")
                             } else {
-                                "Offline: showing remembered pictures"
+                                tr("Offline: showing remembered pictures")
                             });
                         });
-                        if cx.snap.settings.picture_folders.contains(path) && Button::new("Remove").variant(Variant::Ghost).show(ui).clicked() {
+                        if cx.snap.settings.picture_folders.contains(path) && Button::new(tr("Remove")).variant(Variant::Ghost).show(ui).clicked() {
                             let folders: Vec<_> = cx.snap.settings.picture_folders.iter().filter(|p| *p != path).collect();
                             cx.ctl.patch_settings(serde_json::json!({"picture_folders": folders}));
                             self.checked = f64::NEG_INFINITY;
@@ -164,18 +165,18 @@ impl State {
                     ui.separator();
                 }
             });
-            if self.status.running() { ui.weak("Checking folders..."); }
+            if self.status.running() { ui.weak(tr("Checking folders...")); }
             if self.picker.running() {
-                ui.weak("Choose a folder in the window that opened...");
+                ui.weak(tr("Choose a folder in the window that opened..."));
             } else {
-                let add = Button::new("Add folder").icon(icons::PLUS).show(ui);
+                let add = Button::new(tr("Add folder")).icon(icons::PLUS).show(ui);
                 self.add = Some(add.rect);
                 if add.clicked() {
                     let pick = self.pick.unwrap_or(pick_folder);
                     self.picker = Job::spawn(ui.ctx(), pick);
                 }
             }
-            ui.weak("Removing a source leaves its original files untouched.");
+            ui.weak(tr("Removing a source leaves its original files untouched."));
         });
         // The press that opened it is outside it too (and so is its release, a click): the button's own presses toggle
         // it above, so a click elsewhere means one off both.

@@ -12,6 +12,7 @@ use crate::worlds::{Picture, Pictures};
 use egui::{pos2, vec2, Align2, Color32, CursorIcon, Id, Order, Rect, Sense, TextureHandle, Ui, UiBuilder};
 use orbiters_core::account::{Api, Server};
 use orbiters_core::community::{self, Card, Galleries, Gallery};
+use orbiters_i18n::{mark, tr, tr_n};
 use orbiters_ui::anim::{self, ease, Spring};
 use orbiters_ui::paint::{self, Gradient};
 use orbiters_ui::theme::{self, weight, Txt};
@@ -39,9 +40,9 @@ fn gallery_of(e: &Entry) -> Option<u64> {
 
 fn visibility(g: Option<&Gallery>) -> (&'static str, &'static str, Color32) {
     match g.map(|g| g.visibility.as_str()) {
-        Some("public") => (icons::GLOBE, "Public", theme::OK),
-        Some("private") => (icons::LOCK_SIMPLE, "Yours", theme::FG_3),
-        _ => (icons::USERS_THREE, "Members", theme::CYAN),
+        Some("public") => (icons::GLOBE, tr("Public"), theme::OK),
+        Some("private") => (icons::LOCK_SIMPLE, tr("Yours"), theme::FG_3),
+        _ => (icons::USERS_THREE, tr("Members"), theme::CYAN),
     }
 }
 
@@ -170,7 +171,7 @@ impl State {
                 if account_changed {
                     self.galleries = None;
                     self.galleries_job = Job::spawn(ctx, move || {
-                        let account = orbiters_core::account::read(server).ok_or_else(|| anyhow::anyhow!("Sign in to Orbiters in Settings first."))?;
+                        let account = orbiters_core::account::read(server).ok_or_else(|| anyhow::anyhow!("{}", tr("Sign in to Orbiters in Settings first.")))?;
                         Api::new(server).galleries(&account.token)
                     });
                 }
@@ -227,7 +228,7 @@ impl State {
                 continue;
             }
             let g = self.gallery(p.gallery_id);
-            let name = g.map(|g| g.name.clone()).unwrap_or_else(|| "Community gallery".into());
+            let name = g.map(|g| g.name.clone()).unwrap_or_else(|| tr("Community gallery").into());
             let author = p.author.as_ref().map(|a| a.username.clone()).unwrap_or_default();
             if !q.is_empty() {
                 let event = p.event.as_ref().map(|e| e.title.to_lowercase()).unwrap_or_default();
@@ -295,7 +296,7 @@ impl State {
         let r = ui.max_rect();
         let g = self.gallery(gid).cloned();
         let span = span(first.taken, last.taken);
-        let items = format!("{count} picture{}", if count == 1 { "" } else { "s" });
+        let items = tr_n("{count} picture", "{count} pictures", count as u64);
         if let Some(event) = self.event_of(gid).cloned() {
             let card = Rect::from_min_size(r.min, vec2(r.width(), 100.0));
             let tex = self.covers.card(&event, CoverSize::Card).and_then(|p| pictures.get(ui.ctx(), &p));
@@ -319,7 +320,7 @@ impl State {
         }
         let p = ui.painter().clone();
         let site = format!("{}gallery?tab=gallery-{gid}", if cx.snap.settings.development { Server::Development } else { Server::Production }.website());
-        let b = IconButton::new(icons::ARROW_SQUARE_OUT, "Open on Orbiters").size(32.0, 15.0).backdrop(theme::control()).id_salt(("gallery-site", gid));
+        let b = IconButton::new(icons::ARROW_SQUARE_OUT, mark("Open on Orbiters")).size(32.0, 15.0).backdrop(theme::control()).id_salt(("gallery-site", gid));
         let br = Rect::from_min_size(pos2(r.right() - 32.0, r.top() + 6.0), vec2(32.0, 32.0));
         widgets::text_truncated(
             &p,
@@ -428,23 +429,24 @@ impl State {
             &pa,
             ui,
             pos2(x, thumb.top() + 12.0),
-            if p.event.is_some() { "Event" } else { label },
+            if p.event.is_some() { tr("Event") } else { label },
             theme::black(0.55),
             if p.event.is_some() { theme::ACCENT } else { color },
             false,
         ) + 6.0;
-        let _ = x;
         if p.reaction_count > 0 {
             let t = Txt::new(p.reaction_count.to_string(), 10.5).weight(weight::SEMIBOLD).color(theme::FG);
             let tw = widgets::text_size(ui, &t).x;
-            let br = Rect::from_min_size(pos2(thumb.right() - 12.0 - tw - 34.0, thumb.top() + 12.0), vec2(tw + 34.0, 22.0));
+            // Under a badge that reaches it (French's "ÉVÉNEMENT", on a narrow card).
+            let left = thumb.right() - 12.0 - tw - 34.0;
+            let br = Rect::from_min_size(pos2(left, thumb.top() + if x > left { 38.0 } else { 12.0 }), vec2(tw + 34.0, 22.0));
             pa.rect_filled(br, theme::radius(11.0), theme::black(0.55));
             widgets::icon_fill(&pa, pos2(br.left() + 14.0, br.center().y), icons::HEART, 11.0, theme::REC);
             widgets::text(&pa, pos2(br.left() + 24.0, br.center().y), Align2::LEFT_CENTER, &t);
         }
         // A tile: who posted it, over its bottom.
         if tile {
-            let name = p.author.as_ref().map(|a| a.username.clone()).unwrap_or_else(|| "Someone".into());
+            let name = p.author.as_ref().map(|a| a.username.clone()).unwrap_or_else(|| tr("Someone").into());
             let t = Txt::new(&name, 11.5).weight(weight::SEMIBOLD).color(theme::FG);
             let w = (widgets::text_size(ui, &t).x + 34.0).min(thumb.width() - 24.0);
             let pill = Rect::from_min_size(pos2(thumb.left() + 12.0, thumb.bottom() - 12.0 - 22.0), vec2(w, 22.0));
@@ -461,7 +463,7 @@ impl State {
         let tt = Txt::new(&time, 12.0).color(theme::FG_3);
         let tw = widgets::text_size(ui, &tt).x;
         widgets::text(&pa, pos2(r.right() - 16.0, thumb.bottom() + 22.0), Align2::RIGHT_CENTER, &tt);
-        let name = p.author.as_ref().map(|a| a.username.clone()).unwrap_or_else(|| "Someone".into());
+        let name = p.author.as_ref().map(|a| a.username.clone()).unwrap_or_else(|| tr("Someone").into());
         let ar = Rect::from_center_size(pos2(bx + 10.0, thumb.bottom() + 22.0), vec2(20.0, 20.0));
         widgets::avatar(&pa, ar, author_tex.as_ref(), &name);
         widgets::text_truncated(
@@ -484,7 +486,7 @@ impl State {
                     &pa,
                     pos2(bx + 20.0, line_y),
                     Align2::LEFT_CENTER,
-                    &Txt::new(format!("In {}", e.world_name), 12.0).color(theme::FG_3),
+                    &Txt::new(tr!("In {world}", world = e.world_name), 12.0).color(theme::FG_3),
                     r.width() - 52.0,
                 );
             }
@@ -558,7 +560,7 @@ impl State {
         egui::ScrollArea::horizontal().id_salt("community-chips-scroll").scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden).show(
             &mut cu,
             |ui| {
-                let mut options: Vec<(Option<u64>, String, &'static str, Option<Color32>)> = vec![(None, "All galleries".into(), icons::IMAGES_SQUARE, None)];
+                let mut options: Vec<(Option<u64>, String, &'static str, Option<Color32>)> = vec![(None, tr("All galleries").into(), icons::IMAGES_SQUARE, None)];
                 for g in galleries.all() {
                     let (glyph, _, color) = visibility(Some(g));
                     let (glyph, color) = if g.event.is_some() { (icons::CALENDAR_DOTS, theme::ACCENT) } else { (glyph, color) };
@@ -711,12 +713,15 @@ fn event_card(ui: &mut Ui, e: &Card, rect: Rect, tex: Option<&TextureHandle>, li
     let cover = Rect::from_min_size(r.min + vec2(10.0, 10.0), vec2(128.0, r.height() - 20.0));
     events::paint_cover(&p, cover, [16.0; 4], tex, &e.id, 1.0 + 0.05 * hover, 1.0);
     let x = cover.right() + 16.0;
-    let go_t = Txt::new("Event details", 13.0).weight(weight::SEMIBOLD).color(theme::ACCENT);
+    let go_t = Txt::new(tr("Event details"), 13.0).weight(weight::SEMIBOLD).color(theme::ACCENT);
     let go_w = widgets::text_size(ui, &go_t).x + 40.0;
     let narrow = r.width() < 560.0;
     let room = if narrow { r.right() - x - 52.0 } else { r.right() - x - go_w - 24.0 };
     // Event and its status.
-    widgets::text(&p, pos2(x, r.top() + 22.0), Align2::LEFT_CENTER, &Txt::caps("Event"));
+    let event_t = Txt::caps(tr("Event"));
+    widgets::text(&p, pos2(x, r.top() + 22.0), Align2::LEFT_CENTER, &event_t);
+    // The status sits after the word: 48 points does for "EVENT", not for "ÉVÉNEMENT".
+    let status_x = x + (widgets::text_size(ui, &event_t).x + 8.0).max(48.0);
     let ph = events::phase(e.status.as_deref(), e.starts_at.as_deref(), e.ends_at.as_deref(), false, events::now());
     let (fg, bg) = match ph {
         Phase::Live => (theme::REC, theme::alpha(theme::REC, 0.14)),
@@ -726,7 +731,7 @@ fn event_card(ui: &mut Ui, e: &Card, rect: Rect, tex: Option<&TextureHandle>, li
     };
     let st = Txt::new(events::phase_label(ph), 11.0).weight(weight::SEMIBOLD).color(fg);
     let sw = widgets::text_size(ui, &st).x;
-    let pill = Rect::from_min_size(pos2(x + 48.0, r.top() + 13.0), vec2(sw + if ph == Phase::Live { 28.0 } else { 18.0 }, 18.0));
+    let pill = Rect::from_min_size(pos2(status_x, r.top() + 13.0), vec2(sw + if ph == Phase::Live { 28.0 } else { 18.0 }, 18.0));
     p.rect_filled(pill, theme::radius(9.0), bg);
     let mut tx = pill.left() + 9.0;
     if ph == Phase::Live {
@@ -994,7 +999,7 @@ impl PictureWindow {
                 let resp = ui.interact(picture, wid.with("picture"), Sense::drag());
                 if self.drag.update(&resp) {
                     let name = self.about.get(self.index).map(|a| a.title.clone()).or_else(|| gallery.as_ref().map(|g| g.name.clone()));
-                    self.dragged = Some(picture_entry(self.key(), name.unwrap_or_else(|| "Community gallery".into()), &p, development, &self.stand_ins));
+                    self.dragged = Some(picture_entry(self.key(), name.unwrap_or_else(|| tr("Community gallery").into()), &p, development, &self.stand_ins));
                 }
                 resp.on_hover_cursor(if self.lifted || self.drag.dragging() { CursorIcon::Grabbing } else { CursorIcon::Grab });
             }
@@ -1029,7 +1034,7 @@ impl PictureWindow {
             let (vg, vl, vc) = if about.is_some() { (icons::TAG, "", theme::ACCENT) } else { visibility(gallery.as_ref()) };
             let label = match about {
                 Some(a) => a.title.clone(),
-                None => gallery.as_ref().map(|g| g.name.clone()).unwrap_or_else(|| "Community gallery".into()),
+                None => gallery.as_ref().map(|g| g.name.clone()).unwrap_or_else(|| tr("Community gallery").into()),
             };
             let t = Txt::new(&label, 11.5).weight(weight::SEMIBOLD).color(theme::FG);
             let tw = widgets::text_size(&cu, &t).x.min(picture.width() - 120.0);
@@ -1039,21 +1044,21 @@ impl PictureWindow {
             widgets::icon(&cp, pos2(badge.left() + 17.0, badge.center().y), vg, 14.0, vc);
             widgets::text_truncated(&cp, pos2(badge.left() + 29.0, badge.center().y), Align2::LEFT_CENTER, &t, tw);
             let _ = vl;
-            if viewer::close_button(&mut cu, f.rect, "Close") {
+            if viewer::close_button(&mut cu, f.rect, tr("Close")) {
                 close = true;
             }
             // Edit a copy of a gallery's picture, or of an asset's by its link.
             let linked = [&p.full_url, &p.src].into_iter().flatten().any(|u| u.starts_with("https://"));
             if p.id != 0 || linked {
-                let b = widgets::Button::new("Edit").icon(icons::SLIDERS_HORIZONTAL).variant(widgets::Variant::Glass).id_salt(wid.with("edit"));
+                let b = widgets::Button::new(tr("Edit")).icon(icons::SLIDERS_HORIZONTAL).variant(widgets::Variant::Glass).id_salt(wid.with("edit"));
                 let br = viewer::beside_close(f.rect, b.desired_width(&cu));
                 if sharing::pressed(b.show_at(&mut cu, br)) {
                     edit = true;
                 }
             }
             for (dir, glyph, label, x, there) in [
-                (-1i64, icons::CARET_LEFT, "Previous", picture.left() + 16.0 + 20.0, self.index > 0),
-                (1, icons::CARET_RIGHT, "Next", picture.right() - 16.0 - 20.0, self.index + 1 < self.list.len()),
+                (-1i64, icons::CARET_LEFT, tr("Previous"), picture.left() + 16.0 + 20.0, self.index > 0),
+                (1, icons::CARET_RIGHT, tr("Next"), picture.right() - 16.0 - 20.0, self.index + 1 < self.list.len()),
             ] {
                 if !there {
                     continue;
@@ -1189,7 +1194,7 @@ fn details(
     let pa = ui.painter().clone();
     let name = match about {
         Some(a) => a.title.clone(),
-        None => p.author.as_ref().map(|a| a.username.clone()).unwrap_or_else(|| "Someone".into()),
+        None => p.author.as_ref().map(|a| a.username.clone()).unwrap_or_else(|| tr("Someone").into()),
     };
     let face = if stand_ins.is_empty() { avatar_of(p.author.as_ref()).and_then(|a| pictures.get(&ctx, &a)) } else { None };
     let ar = Rect::from_min_size(pos2(row.left(), row.top() + 4.0), vec2(36.0, 36.0));
@@ -1205,8 +1210,8 @@ fn details(
     };
     let mut bx = row.right();
     for (glyph, label, url) in [
-        (icons::ARROW_SQUARE_OUT, "Open on Orbiters", Some(site)),
-        (icons::ARROWS_OUT, "Open the full picture", p.full_url.clone().filter(|u| u.starts_with("https://"))),
+        (icons::ARROW_SQUARE_OUT, mark("Open on Orbiters"), Some(site)),
+        (icons::ARROWS_OUT, mark("Open the full picture"), p.full_url.clone().filter(|u| u.starts_with("https://"))),
     ] {
         let Some(url) = url else { continue };
         let br = Rect::from_min_size(pos2(bx - 36.0, row.top() + 4.0), vec2(36.0, 36.0));
@@ -1219,7 +1224,7 @@ fn details(
     widgets::text_truncated(&pa, pos2(ar.right() + 12.0, ar.top() + 9.0), Align2::LEFT_CENTER, &Txt::new(&name, 15.0).weight(weight::SEMIBOLD), room);
     let posted = match about {
         Some(a) => a.line.clone(),
-        None => p.posted_at.as_deref().map(super::local_time).map(|t| format!("Posted {t}")).unwrap_or_default(),
+        None => p.posted_at.as_deref().map(super::local_time).map(|t| tr!("Posted {time}", time = t)).unwrap_or_default(),
     };
     widgets::text_truncated(&pa, pos2(ar.right() + 12.0, ar.top() + 28.0), Align2::LEFT_CENTER, &Txt::new(posted, 12.0).color(theme::FG_3), room);
     if about.is_some() {
@@ -1230,7 +1235,7 @@ fn details(
     let (grow, _) = ui.allocate_exact_size(vec2(w, 20.0), Sense::hover());
     let (vg, vl, vc) = visibility(gallery);
     widgets::icon(&pa, pos2(grow.left() + 7.0, grow.center().y), vg, 13.0, vc);
-    let gname = gallery.map(|g| g.name.clone()).unwrap_or_else(|| "Community gallery".into());
+    let gname = gallery.map(|g| g.name.clone()).unwrap_or_else(|| tr("Community gallery").into());
     widgets::text_truncated(
         &pa,
         pos2(grow.left() + 21.0, grow.center().y),
@@ -1265,7 +1270,7 @@ fn details(
         widgets::icon(&pa, tile.center(), icons::CALENDAR_DOTS, 18.0, theme::ACCENT);
         let tx = tile.right() + 12.0;
         let room = r.right() - tx - 34.0;
-        widgets::text(&pa, pos2(tx, r.top() + 15.0), Align2::LEFT_CENTER, &Txt::caps("Taken at"));
+        widgets::text(&pa, pos2(tx, r.top() + 15.0), Align2::LEFT_CENTER, &Txt::caps(tr("Taken at")));
         widgets::text_truncated(&pa, pos2(tx, r.top() + 31.0), Align2::LEFT_CENTER, &Txt::new(&e.title, 13.5).weight(weight::SEMIBOLD), room);
         widgets::text_truncated(
             &pa,

@@ -10,8 +10,10 @@ use crate::runtime::{N4n0, N4n0Runtime, Shared};
 use crate::status::{AvatarView, NoticeKind, StateAction, StateView, StatesNote, StatesView};
 use orbiters_core::osc::{OscValue, TreeNode, CAPTURE_PARAMETERS, PARAMETERS_PREFIX};
 use orbiters_core::vrchat_log::LogEvent;
+use orbiters_i18n::{tr, tr_latin};
 use orbiters_n4n0_core::menu::StateRow;
 use orbiters_n4n0_core::states::{self, Current, Loaded, Refused, Store};
+use orbiters_n4n0_core::text::latin;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -103,11 +105,14 @@ impl StatesRuntime {
                 Loaded::Whole => self.unreadable = None,
                 Loaded::Partial(aside) => {
                     self.unreadable = None;
-                    let kept = aside.map(|p| format!(": the file as it was is kept as {}", p.display())).unwrap_or_default();
-                    self.say(format!("Some saved states could not be read{kept}."), true);
+                    let said = match aside {
+                        Some(p) => latin(|| tr!("Some saved states could not be read: the file as it was is kept as {path}.", path = p.display())),
+                        None => tr_latin("Some saved states could not be read.").to_string(),
+                    };
+                    self.say(said, true);
                 }
                 Loaded::Unreadable(e) => {
-                    self.say(format!("The saved states could not be read ({e}): nothing is saved over them until they can be."), true);
+                    self.say(latin(|| tr!("The saved states could not be read ({error}): nothing is saved over them until they can be.", error = e)), true);
                     self.unreadable = Some(e);
                 }
             }
@@ -265,7 +270,7 @@ impl N4n0 {
     /// The avatar's nodes of VRChat's OSCQuery tree (empty when VRChat or its tree is not found), read without the OSC
     /// lock.
     fn vrchat_nodes(&self) -> anyhow::Result<Vec<TreeNode>> {
-        let query = self.osc.vrchat_query().flatten().ok_or_else(|| anyhow::anyhow!("VRChat's OSCQuery service was not found"))?;
+        let query = self.osc.vrchat_query().flatten().ok_or_else(|| anyhow::anyhow!("{}", tr_latin("VRChat's OSCQuery service was not found")))?;
         orbiters_core::osc::vrchat_nodes(query, TREE_TIMEOUT)
     }
 
@@ -282,11 +287,11 @@ impl N4n0 {
             let s = &mut rt.states;
             s.store();
             if let Some(e) = &s.unreadable {
-                return Err(format!("The saved states could not be read ({e}): nothing was saved, so they stay whole."));
+                return Err(latin(|| tr!("The saved states could not be read ({error}): nothing was saved, so they stay whole.", error = e)));
             }
             (s.store.clone().unwrap_or_default(), s.path.clone())
         };
-        store.save(&path).map_err(|e| format!("Could not save the states: {e}"))
+        store.save(&path).map_err(|e| latin(|| tr!("Could not save the states: {error}", error = e)))
     }
 
     /// What the interfaces and the menus ask of the saved states: the avatar worn's, or `avatar`'s (the window's States
@@ -296,7 +301,7 @@ impl N4n0 {
         let other = avatar.filter(|a| Some(a) != worn.as_ref());
         match action {
             StateAction::Save { .. } | StateAction::Apply { .. } if other.is_some() => {
-                let e = "Wear this avatar in VRChat to save or apply its states.";
+                let e = tr_latin("Wear this avatar in VRChat to save or apply its states.");
                 self.n4n0.lock().unwrap().states.say(e, true);
                 self.notify(NoticeKind::Info, e);
                 self.publish();
@@ -326,7 +331,7 @@ impl N4n0 {
         let refused = {
             let mut rt = self.n4n0.lock().unwrap();
             let Some(avatar) = avatar.or_else(|| rt.avatar_id.clone()) else {
-                rt.states.say("VRChat's avatar is not known yet.", true);
+                rt.states.say(tr_latin("VRChat's avatar is not known yet."), true);
                 drop(rt);
                 self.publish();
                 return;
@@ -334,7 +339,7 @@ impl N4n0 {
             let s = &mut rt.states;
             s.store();
             if let Some(e) = s.unreadable.clone() {
-                s.say(format!("The saved states could not be read ({e}): nothing was changed, so they stay whole."), true);
+                s.say(latin(|| tr!("The saved states could not be read ({error}): nothing was changed, so they stay whole.", error = e)), true);
                 drop(rt);
                 self.publish();
                 return;
@@ -382,11 +387,11 @@ impl N4n0 {
     }
 
     fn states_save_now(self: &Shared, name: Option<String>, options: SaveOptions) -> Result<String, String> {
-        let avatar = self.n4n0.lock().unwrap().avatar_id.clone().ok_or("VRChat's avatar is not known yet: change avatar (or rejoin), then save.")?;
-        let nodes = self.vrchat_nodes().map_err(|e| format!("VRChat did not say the avatar's parameters ({e:#}): is OSC on in VRChat?"))?;
+        let avatar = self.n4n0.lock().unwrap().avatar_id.clone().ok_or(tr_latin("VRChat's avatar is not known yet: change avatar (or rejoin), then save."))?;
+        let nodes = self.vrchat_nodes().map_err(|e| latin(|| tr!("VRChat did not say the avatar's parameters ({error}): is OSC on in VRChat?", error = format!("{e:#}"))))?;
         let (current, eye, _) = split(nodes);
         if current.is_empty() {
-            return Err("VRChat said no parameter of the avatar yet: wait for it to load, then save again.".into());
+            return Err(tr_latin("VRChat said no parameter of the avatar yet: wait for it to load, then save again.").into());
         }
         let parameters = states::capture(&current, &CAPTURE_PARAMETERS);
         let eye = eye.or_else(|| self.osc_latest_value(EYE_HEIGHT).as_ref().and_then(float));
@@ -397,12 +402,12 @@ impl N4n0 {
         let saved = {
             let mut rt = self.n4n0.lock().unwrap();
             if rt.avatar_id.as_deref() != Some(avatar.as_str()) {
-                return Err("The avatar changed while it was being saved: save again.".into());
+                return Err(tr_latin("The avatar changed while it was being saved: save again.").into());
             }
             let s = &mut rt.states;
             s.store();
             if let Some(e) = &s.unreadable {
-                return Err(format!("The saved states could not be read ({e}): nothing was saved, so they stay whole."));
+                return Err(latin(|| tr!("The saved states could not be read ({error}): nothing was saved, so they stay whole.", error = e)));
             }
             let saved = s.store().add(&avatar, avatar_name.as_deref(), name.as_deref(), parameters, eye, orbiters_core::now_utc_iso());
             let saved = saved.map(|s| (s.id.clone(), s.name.clone())).map_err(|e| e.to_string());
@@ -418,7 +423,10 @@ impl N4n0 {
             saved
         };
         self.states_write()?;
-        Ok(format!("Saved \"{saved}\": {count} parameter{}", if count == 1 { "" } else { "s" }))
+        Ok(latin(|| match count {
+            1 => tr!("Saved \"{saved}\": 1 parameter", saved = saved),
+            _ => tr!("Saved \"{saved}\": {count} parameters", saved = saved, count = count),
+        }))
     }
 
     /// Puts the avatar worn back as its state `id` holds it (`by_default`: its default, after a join or a switch), on a
@@ -451,8 +459,8 @@ impl N4n0 {
     fn states_apply_now(self: &Shared, id: &str) -> Result<String, String> {
         let (avatar, state) = {
             let mut rt = self.n4n0.lock().unwrap();
-            let avatar = rt.avatar_id.clone().ok_or("VRChat's avatar is not known yet.")?;
-            let state = rt.states.store().state(&avatar, id).cloned().ok_or("That state is not saved for this avatar.")?;
+            let avatar = rt.avatar_id.clone().ok_or(tr_latin("VRChat's avatar is not known yet."))?;
+            let state = rt.states.store().state(&avatar, id).cloned().ok_or(tr_latin("That state is not saved for this avatar."))?;
             (avatar, state)
         };
         // What the avatar holds now: its types, what it lacks, what is as saved already. Not read: as saved.
@@ -462,7 +470,7 @@ impl N4n0 {
         {
             let mut rt = self.n4n0.lock().unwrap();
             if rt.avatar_id.as_deref() != Some(avatar.as_str()) {
-                return Err("The avatar changed: the state was not applied.".into());
+                return Err(tr_latin("The avatar changed: the state was not applied.").into());
             }
             let now = Instant::now();
             for (k, step) in states::paced(plan.messages.clone()).into_iter().enumerate() {

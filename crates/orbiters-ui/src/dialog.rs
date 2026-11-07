@@ -233,7 +233,7 @@ impl<'a> Dialog<'a> {
             }
         }
         let close_r = Rect::from_center_size(pos2(head.right() - 16.0, head.center().y), vec2(32.0, 32.0));
-        if widgets::activated(&widgets::IconButton::new(icons::X, "Close").size(32.0, 16.0).id_salt(id).show_at(du, close_r)) {
+        if widgets::activated(&widgets::IconButton::new(icons::X, orbiters_i18n::mark("Close")).size(32.0, 16.0).id_salt(id).show_at(du, close_r)) {
             close(ctx, id);
         }
 

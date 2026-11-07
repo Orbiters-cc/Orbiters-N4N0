@@ -2,6 +2,7 @@
 
 use super::Job;
 use egui::{pos2, vec2, Align2, Rect, Sense, Ui};
+use orbiters_i18n::tr;
 use orbiters_ui::icons;
 use orbiters_ui::theme::{self, Txt};
 use orbiters_ui::widgets::{self, Button};
@@ -52,7 +53,7 @@ pub fn mic_test(ui: &mut Ui, test: &mut MicTest, device: &str) {
     let active = test.active();
     let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), 40.0), Sense::hover());
     let bw = 188.0;
-    let button = Button::new(if active { "Stop test" } else { "Test microphone" }).icon(if active { icons::X } else { icons::MICROPHONE }).width(bw);
+    let button = Button::new(if active { tr("Stop test") } else { tr("Test microphone") }).icon(if active { icons::X } else { icons::MICROPHONE }).width(bw);
     if button.show_at(ui, Rect::from_min_size(row.min, vec2(bw, 40.0))).clicked() {
         if active {
             *test = MicTest::default();
@@ -76,12 +77,17 @@ pub fn mic_test(ui: &mut Ui, test: &mut MicTest, device: &str) {
         p.rect_filled(fill, theme::radius(4.0), if peak > 0.98 { theme::DANGER } else { theme::ACCENT });
     }
     let (note, color) = match (&test.error, active) {
-        (Some(e), _) => (format!("The microphone did not start: {e}"), theme::DANGER),
+        (Some(e), _) => (tr!("The microphone did not start: {error}", error = e), theme::DANGER),
         (None, true) => {
-            let computer = if cfg!(target_os = "macos") { "this Mac's" } else { "this PC's" };
-            (format!("You hear your microphone on {computer} sound output: wear headphones to avoid feedback."), theme::FG_3)
+            // The whole sentence for each computer: the owner's word comes in different places in other languages.
+            let text = if cfg!(target_os = "macos") {
+                tr("You hear your microphone on this Mac's sound output: wear headphones to avoid feedback.")
+            } else {
+                tr("You hear your microphone on this PC's sound output: wear headphones to avoid feedback.")
+            };
+            (text.to_string(), theme::FG_3)
         }
-        (None, false) => ("Hear yourself to check the microphone and its level.".to_string(), theme::FG_3),
+        (None, false) => (tr("Hear yourself to check the microphone and its level.").to_string(), theme::FG_3),
     };
     if cfg!(target_os = "macos") && test.error.is_some() {
         // Where macOS wants the microphone turned on is long, and is the point: it wraps rather than being cut.

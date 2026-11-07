@@ -85,6 +85,7 @@ pub struct MenuHost<P: Pictures> {
     light_set: Option<(Light, Instant)>,
     /// Something the menu shows changed since it was last drawn.
     pub dirty: bool,
+    language_seen: orbiters_i18n::Language,
     /// The saved states as N4N0 last listed them (and whether the avatar is known), and the number of the last note of
     /// theirs seen.
     states_seen: Option<(Vec<StateRow>, bool)>,
@@ -111,6 +112,7 @@ impl<P: Pictures> MenuHost<P> {
     pub fn new(pictures: P, locale: Arc<dyn Locale>, media: Arc<Watcher>) -> Self {
         let (done_tx, done_rx) = mpsc::channel();
         Self {
+            language_seen: orbiters_i18n::language(),
             menu: Menu::default(),
             pictures,
             locale,
@@ -162,6 +164,10 @@ impl<P: Pictures> MenuHost<P> {
     /// countdown), field by field: the menu (its results and suggestions included) is not copied every frame to find a
     /// change.
     pub fn follow(&mut self, n4n0: &N4n0Status, settings: &Settings) {
+        // Another language: all of it is drawn again.
+        if std::mem::replace(&mut self.language_seen, orbiters_i18n::language()) != self.language_seen {
+            self.dirty = true;
+        }
         let m = &mut self.menu;
         let mut changed = set(&mut m.listening, n4n0.listening);
         // What N4N0 says shows on Home too.
@@ -207,7 +213,7 @@ impl<P: Pictures> MenuHost<P> {
             view.states.iter().map(|s| StateRow { id: s.id.clone(), name: s.name.clone(), default: s.default, pose: s.pose, size: s.size }).collect();
         let listed = (rows, view.avatar_id.is_some());
         if self.states_seen.as_ref() != Some(&listed) || m.saving() {
-            m.set_states(listed.0.clone(), listed.1, "VRChat's avatar is not known yet");
+            m.set_states(listed.0.clone(), listed.1, orbiters_i18n::mark("VRChat's avatar is not known yet"));
             self.states_seen = Some(listed);
             changed = true;
         }

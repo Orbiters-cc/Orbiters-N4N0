@@ -28,7 +28,7 @@ struct RealGame {
 
 impl RealGame {
     fn ctl(&self) -> Result<Shared, Failure> {
-        self.ctl.upgrade().ok_or_else(|| Failure::new("app_closing", "Orbiters - N4N0 is closing.", "Stop here."))
+        self.ctl.upgrade().ok_or_else(|| Failure::new("app_closing", "Orbiters - N4N0 is closing.", "Stop here.")) // i18n: not shown
     }
 
     /// Whether the game runs without VR, from the arguments VRChat's log starts with (`Arg: --no-vr`, `VR Disabled`).
@@ -70,24 +70,24 @@ fn api_failure(error: anyhow::Error, doing: &str) -> Failure {
     match error.downcast_ref::<VrchatError>() {
         Some(VrchatError::RateLimited(wait)) => {
             let seconds = wait.as_secs().max(1);
-            Failure::new("rate_limited", format!("VRChat's API asks to wait: {doing} was not done."), format!("Try again in {seconds} s, and ask less often."))
+            Failure::new("rate_limited", format!("VRChat's API asks to wait: {doing} was not done."), format!("Try again in {seconds} s, and ask less often.")) // i18n: not shown
                 .retry_after(seconds)
         }
         Some(VrchatError::Unauthorized | VrchatError::Disabled) => Failure::new(
             "vrchat_not_signed_in",
-            "VRChat's session here is not signed in, or it expired.",
-            "Tell the person to sign in to VRChat in Orbiters - N4N0's Settings.",
+            "VRChat's session here is not signed in, or it expired.", // i18n: not shown
+            "Tell the person to sign in to VRChat in Orbiters - N4N0's Settings.", // i18n: not shown
         ),
         Some(VrchatError::NotFound) => Failure::new(
             "world_not_found",
-            format!("VRChat does not know this: {doing} was not done."),
-            "Check the id with find_worlds, or go on with the next world.",
+            format!("VRChat does not know this: {doing} was not done."), // i18n: not shown
+            "Check the id with find_worlds, or go on with the next world.", // i18n: not shown
         ),
-        Some(VrchatError::Unavailable) => Failure::new("vrchat_unavailable", "VRChat's API could not be reached.", "Try again in a minute.").retry_after(60),
+        Some(VrchatError::Unavailable) => Failure::new("vrchat_unavailable", "VRChat's API could not be reached.", "Try again in a minute.").retry_after(60), // i18n: not shown
         Some(VrchatError::Refused(status, said)) => {
-            Failure::new("vrchat_refused", format!("VRChat refused ({status}): {said}"), "Go on with the next world. If it happens for all, tell the person.")
+            Failure::new("vrchat_refused", format!("VRChat refused ({status}): {said}"), "Go on with the next world. If it happens for all, tell the person.") // i18n: not shown
         }
-        _ => Failure::new("vrchat_api_error", format!("{doing} failed: {error}"), "Try again later, or go on with the next world."),
+        _ => Failure::new("vrchat_api_error", format!("{doing} failed: {error}"), "Try again later, or go on with the next world."), // i18n: not shown
     }
 }
 
@@ -134,7 +134,7 @@ impl Game for RealGame {
                 session: snap.capture.session_dir.clone(),
                 frames: stats.map_or(0, |s| s.frames),
                 keyframes: stats.map_or(0, |s| s.keyframes),
-                no_strip: snap.capture.no_strip.map(|n| n.message().to_string()),
+                no_strip: snap.capture.no_strip.map(|n| n.message_english().to_string()),
                 error: snap.capture.error.clone(),
             },
             reconstruction: snap.reconstruction.as_ref().map(|job| ReconstructionSeen {
@@ -157,7 +157,7 @@ impl Game for RealGame {
     }
 
     fn create_private_instance(&self, world: &str, region: &str) -> Result<String, Failure> {
-        self.ctl()?.vrchat_source().create_private_instance(world, region).map_err(|e| api_failure(e, "making the instance"))
+        self.ctl()?.vrchat_source().create_private_instance(world, region).map_err(|e| api_failure(e, "making the instance")) // i18n: not shown
     }
 
     fn find_worlds(&self, find: &Find, page: usize) -> Result<Vec<WorldCard>, Failure> {
@@ -180,7 +180,7 @@ impl Game for RealGame {
             Find::Active => WorldList::Active,
             Find::Trending => WorldList::Trending,
         };
-        let found = ctl.vrchat_source().worlds(&list, page).map_err(|e| api_failure(e, "finding worlds"))?;
+        let found = ctl.vrchat_source().worlds(&list, page).map_err(|e| api_failure(e, "finding worlds"))?; // i18n: not shown
         Ok(found
             .items
             .into_iter()
@@ -246,9 +246,9 @@ impl Game for RealGame {
         self.ctl()?.take_3d_picture_of(length, mode).map_err(|e| {
             let said = e.to_string();
             if said.contains(orbiters_n4n0::platform::CAMERA_CLOSED) {
-                Failure::new("camera_closed", "VRChat's camera is not open.", "press esc, screenshot, click the camera's icon with mouse, press esc.")
+                Failure::new("camera_closed", "VRChat's camera is not open.", "press esc, screenshot, click the camera's icon with mouse, press esc.") // i18n: not shown
             } else {
-                Failure::new("picture_did_not_start", said, "Call get_state and try again; if it stays, tell the person.")
+                Failure::new("picture_did_not_start", said, "Call get_state and try again; if it stays, tell the person.") // i18n: not shown
             }
         })
     }

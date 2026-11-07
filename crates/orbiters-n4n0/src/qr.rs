@@ -7,6 +7,8 @@ use crate::platform::{QrScan, QrSeen};
 use crate::runtime::{N4n0Runtime, Shared};
 use crate::status::NoticeKind;
 use orbiters_n4n0_core::qr::{self, QrPhase, QrView, Recent};
+use orbiters_i18n::{mark, tr};
+use orbiters_n4n0_core::text::latin;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -51,7 +53,7 @@ pub(crate) fn tick(rt: &mut N4n0Runtime, now: Instant) -> Option<Box<dyn QrScan>
     if rt.qr.run.as_ref().is_none_or(|r| now < r.until) {
         return None;
     }
-    let scan = rt.qr.stop(QrPhase::Stopped, "Stopped after two minutes without a link: press Scan again to read the camera");
+    let scan = rt.qr.stop(QrPhase::Stopped, mark("Stopped after two minutes without a link: press Scan again to read the camera"));
     shown(rt);
     scan
 }
@@ -163,7 +165,7 @@ impl crate::N4n0 {
                         Ok(_) => return,
                         Err(why) => {
                             // Said once per kind of code, never what it holds (the screen is seen by everyone).
-                            let note = format!("{why}: a QR code here opens only http or https pages");
+                            let note = latin(|| tr!("{reason}: a QR code here opens only http or https pages", reason = tr(why)));
                             if rt.qr.view.note == note {
                                 return;
                             }
@@ -175,7 +177,7 @@ impl crate::N4n0 {
                 };
                 if let Some(link) = open {
                     match self.host.watch(&link) {
-                        Ok(()) => self.notify(NoticeKind::Success, format!("Opened from a QR code: {}", orbiters_n4n0_core::menu::layout::short_link(&link, 60))),
+                        Ok(()) => self.notify(NoticeKind::Success, tr!("Opened from a QR code: {link}", link = orbiters_n4n0_core::menu::layout::short_link(&link, 60))),
                         Err(e) => self.notify(NoticeKind::Warning, e),
                     }
                 }

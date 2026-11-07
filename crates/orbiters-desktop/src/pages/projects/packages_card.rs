@@ -4,6 +4,7 @@
 //! changes, from → to; what is left out and why) above the rows. Updates come from `orbiters_projects::updates`
 //! (checked after each look at the project's packages; releases, or pre-releases too with the switch). Every change
 //! goes through `panel::package_action`, the version list's path.
+use orbiters_i18n::{mark, tr};
 use super::art::{self, glyph};
 use super::panel::{package_action, package_row, row_skeletons, versions};
 use super::state::State;
@@ -29,15 +30,15 @@ pub(super) fn packages(ui: &mut Ui, state: &mut State, project: &Project) {
         ui,
         "packages",
         glyph::PACKAGE,
-        "Packages",
+        tr("Packages"),
         count,
         |ui, slot| {
             let enabled = !busy && !project.missing;
-            let b = Button::new("Restore").icon(icons::ARROW_COUNTER_CLOCKWISE).variant(Variant::Ghost).size(Size::Sm).enabled(enabled).id_salt("restore");
-            let restore_hint = "Downloads the packages the project lists but does not have (VCC's Resolve)";
+            let b = Button::new(tr("Restore")).icon(icons::ARROW_COUNTER_CLOCKWISE).variant(Variant::Ghost).size(Size::Sm).enabled(enabled).id_salt("restore");
+            let restore_hint = tr("Downloads the packages the project lists but does not have (VCC's Resolve)");
             // Update all and Restore in what the title leaves: Update all's count, then Restore's word go first.
-            let full = format!("Update all · {all_n}");
-            let short = "Update all".to_string();
+            let full = tr!("Update all · {count}", count = all_n);
+            let short = tr("Update all").to_string();
             let u_w = |label: &str| Button::new(label).icon(glyph::ARROW_UP).size(Size::Sm).desired_width(ui);
             let room = slot.width();
             let bw = b.desired_width(ui);
@@ -65,7 +66,7 @@ pub(super) fn packages(ui: &mut Ui, state: &mut State, project: &Project) {
                 let uw = u.desired_width(ui);
                 let ur = Rect::from_min_size(pos2(r.left() - 8.0 - uw, slot.center().y - 16.0), vec2(uw, 32.0));
                 update_all_at = Some(ur);
-                if widgets::activated(&u.show_at(ui, ur).on_hover_text("Shows what changes, then updates them at once")) {
+                if widgets::activated(&u.show_at(ui, ur).on_hover_text(tr("Shows what changes, then updates them at once"))) {
                     open_plan = true;
                 }
             }
@@ -80,7 +81,7 @@ pub(super) fn packages(ui: &mut Ui, state: &mut State, project: &Project) {
                     ui.painter(),
                     ui.cursor().min + vec2(0.0, 10.0),
                     Align2::LEFT_CENTER,
-                    &Txt::new("No VPM package in this project yet.", 12.5).color(theme::FG_3),
+                    &Txt::new(tr("No VPM package in this project yet."), 12.5).color(theme::FG_3),
                 );
                 ui.add_space(22.0);
             }
@@ -94,13 +95,13 @@ pub(super) fn packages(ui: &mut Ui, state: &mut State, project: &Project) {
                 row(ui, state, project, pkg, &ups, i);
             }
             widgets::separator(ui);
-            widgets::field(ui, "Pre-release versions", Some("Beta versions in the version lists and updates"), 48.0, |ui| {
+            widgets::field(ui, tr("Pre-release versions"), Some(tr("Beta versions in the version lists and updates")), 48.0, |ui| {
                 widgets::toggle(ui, "prerelease", &mut state.prerelease);
             });
         },
     );
     if restore {
-        package_action(state, &ctx, project, vpm::Change::Resolve, "Restoring missing packages…", "");
+        package_action(state, &ctx, project, vpm::Change::Resolve, tr("Restoring missing packages…"), "");
     }
     if open_plan {
         state.plan_open = !state.plan_open;
@@ -123,11 +124,25 @@ fn row(ui: &mut Ui, state: &mut State, project: &Project, pkg: &vpm::Package, up
     let held = if update.is_none() { ups.held.iter().find(|h| h.name == pkg.name).cloned() } else { None };
     let (label, hint, to) = match (&update, &held) {
         (Some(u), _) => {
-            let also: Vec<String> = u.also().map(|s| format!("{} to {}", s.display_name, s.to.as_deref().unwrap_or("removed"))).collect();
-            let hint = if also.is_empty() { format!("Updates {} from {} to {}", pkg.display_name, u.from, u.to) } else { format!("Also updates {}", also.join(", ")) };
-            (Some(format!("Update to {}", u.to)), hint, u.to.clone())
+            let also: Vec<String> = u
+                .also()
+                .map(|s| match s.to.as_deref() {
+                    Some(version) => tr!("{package} to {version}", package = s.display_name, version = version),
+                    None => tr!("{package} removed", package = s.display_name),
+                })
+                .collect();
+            let hint = if also.is_empty() {
+                tr!("Updates {package} from {from} to {to}", package = pkg.display_name, from = u.from, to = u.to)
+            } else {
+                tr!("Also updates {list}", list = also.join(", "))
+            };
+            (Some(tr!("Update to {version}", version = u.to)), hint, u.to.clone())
         }
-        (None, Some(h)) => (Some(format!("Update to {}…", h.version)), format!("{} {} {}: shows what has to change with it first", pkg.display_name, h.version, h.why), h.version.clone()),
+        (None, Some(h)) => (
+            Some(tr!("Update to {version}…", version = h.version)),
+            tr!("{package} {version} {why}: shows what has to change with it first", package = pkg.display_name, version = h.version, why = h.why),
+            h.version.clone(),
+        ),
         _ => (None, String::new(), String::new()),
     };
     let sub = label.as_ref().map(|l| (l.clone(), if update.is_some() { theme::ACCENT } else { theme::WARN }, hint.clone()));
@@ -141,19 +156,19 @@ fn row(ui: &mut Ui, state: &mut State, project: &Project, pkg: &vpm::Package, up
         if working {
             feedback::spinner(ui.painter(), dd.center(), 8.0, 2.0, theme::ACCENT);
         } else {
-            let items: Vec<Item> = list.iter().map(|v| if v.contains('-') { Item::new(v).detail("Pre-release") } else { Item::new(v) }).collect();
+            let items: Vec<Item> = list.iter().map(|v| if v.contains('-') { Item::new(v).detail(tr("Pre-release")) } else { Item::new(v) }).collect();
             let selected = list.iter().position(|v| *v == current);
             if let Some(k) = popup::dropdown(ui, ("version", &pkg.name), dd, &current, &items, selected, !busy) {
                 if list[k] != current {
                     state.anchors.insert("conflict-origin".into(), dd);
                     let change = vpm::Change::Install { names: vec![(pkg.name.clone(), Some(list[k].clone()))], prerelease: state.prerelease };
-                    package_action(state, &ctx, project, change, &format!("Changing {} to {}…", pkg.display_name, list[k]), &pkg.name);
+                    package_action(state, &ctx, project, change, &tr!("Changing {package} to {version}…", package = pkg.display_name, version = list[k]), &pkg.name);
                 }
             }
         }
-        let rb = IconButton::new(glyph::TRASH_SIMPLE, "Remove the package").size(32.0, 15.0).danger().id_salt(("remove", &pkg.name));
+        let rb = IconButton::new(glyph::TRASH_SIMPLE, mark("Remove the package")).size(32.0, 15.0).danger().id_salt(("remove", &pkg.name));
         if !busy && widgets::activated(&rb.show_at(ui, rm)) {
-            package_action(state, &ctx, project, vpm::Change::Remove(pkg.name.clone()), &format!("Removing {}…", pkg.display_name), &pkg.name);
+            package_action(state, &ctx, project, vpm::Change::Remove(pkg.name.clone()), &tr!("Removing {package}…", package = pkg.display_name), &pkg.name);
         }
     });
     if let Some((r, pressed)) = update_pressed {
@@ -161,7 +176,7 @@ fn row(ui: &mut Ui, state: &mut State, project: &Project, pkg: &vpm::Package, up
         if pressed {
             state.anchors.insert("conflict-origin".into(), r);
             let change = vpm::Change::Install { names: vec![(pkg.name.clone(), Some(to.clone()))], prerelease: state.prerelease };
-            package_action(state, &ctx, project, change, &format!("Updating {} to {to}…", pkg.display_name), &pkg.name);
+            package_action(state, &ctx, project, change, &tr!("Updating {package} to {version}…", package = pkg.display_name, version = to), &pkg.name);
         }
     }
 }
@@ -225,16 +240,16 @@ fn plan(ui: &mut Ui, state: &mut State, project: &Project, ups: &updates::Update
     let mut cu = ui.new_child(UiBuilder::new().max_rect(inner).layout(egui::Layout::top_down(egui::Align::Min)).id_salt("update-plan"));
     cu.spacing_mut().item_spacing = vec2(8.0, 4.0);
     let n = ups.all.targets.len();
-    let (tr, _) = cu.allocate_exact_size(vec2(inner.width(), 20.0), Sense::hover());
-    let title = if n == 1 { "Update 1 package".to_string() } else { format!("Update {n} packages together") };
-    widgets::text(cu.painter(), tr.left_center(), Align2::LEFT_CENTER, &Txt::new(title, 13.0).weight(weight::SEMIBOLD));
+    let (title_row, _) = cu.allocate_exact_size(vec2(inner.width(), 20.0), Sense::hover());
+    let title = if n == 1 { tr("Update 1 package").to_string() } else { tr!("Update {n} packages together", n = n) };
+    widgets::text(cu.painter(), title_row.left_center(), Align2::LEFT_CENTER, &Txt::new(title, 13.0).weight(weight::SEMIBOLD));
     for s in &ups.all.steps {
         let (r, _) = cu.allocate_exact_size(vec2(inner.width(), 22.0), Sense::hover());
         let p = cu.painter();
         let label = match (&s.from, &s.to) {
             (Some(f), Some(t)) => format!("{f} → {t}"),
-            (None, Some(t)) => format!("added · {t}"),
-            (Some(f), None) => format!("{f} · removed"),
+            (None, Some(t)) => tr!("added · {version}", version = t),
+            (Some(f), None) => tr!("{version} · removed", version = f),
             _ => String::new(),
         };
         let v = Txt::new(&label, 12.0).weight(weight::MEDIUM).color(if s.to.is_some() { theme::ACCENT } else { theme::DANGER });
@@ -244,7 +259,7 @@ fn plan(ui: &mut Ui, state: &mut State, project: &Project, ups: &updates::Update
     }
     for name in &ups.all.left_out {
         let Some(u) = ups.of(name) else { continue };
-        let why = if u.sdk { "the VRChat SDK is updated from its own row" } else { "does not go together with the others: update it on its own" };
+        let why = if u.sdk { tr("the VRChat SDK is updated from its own row") } else { tr("does not go together with the others: update it on its own") };
         let galley = cu.painter().layout_job(Txt::new(format!("{} {}: {why}", u.display_name, u.to), 11.5).color(theme::FG_3).line_height(16.0).job(inner.width() - 20.0));
         let (r, _) = cu.allocate_exact_size(vec2(inner.width(), galley.size().y), Sense::hover());
         widgets::icon(cu.painter(), pos2(r.left() + 6.0, r.top() + 8.0), icons::INFO, 11.0, theme::FG_4);
@@ -255,11 +270,11 @@ fn plan(ui: &mut Ui, state: &mut State, project: &Project, ups: &updates::Update
     let mut cancel = false;
     let running = state.running();
     cu.horizontal(|ui| {
-        let label = if n == 1 { "Update it".to_string() } else { format!("Update {n} packages") };
+        let label = if n == 1 { tr("Update it").to_string() } else { tr!("Update {n} packages", n = n) };
         let b = Button::new(&label).icon(glyph::ARROW_UP).variant(Variant::Primary).size(Size::Sm).enabled(!running).id_salt("update-all-apply").show(ui);
         state.anchors.insert("update-all-apply".into(), b.rect);
         apply = widgets::activated(&b);
-        cancel = widgets::activated(&Button::new("Cancel").variant(Variant::Ghost).size(Size::Sm).id_salt("update-all-cancel").show(ui));
+        cancel = widgets::activated(&Button::new(tr("Cancel")).variant(Variant::Ghost).size(Size::Sm).id_salt("update-all-cancel").show(ui));
     });
     let h = cu.min_rect().height() + 12.0 + 12.0;
     let rect = Rect::from_min_size(top, vec2(w, h));
@@ -271,7 +286,7 @@ fn plan(ui: &mut Ui, state: &mut State, project: &Project, ups: &updates::Update
         let origin = state.anchor("update-all-apply");
         state.anchors.insert("conflict-origin".into(), origin);
         let change = vpm::Change::Install { names, prerelease: state.prerelease };
-        package_action(state, &ctx, project, change, &format!("Updating {n} packages…"), "");
+        package_action(state, &ctx, project, change, &tr!("Updating {n} packages…", n = n), "");
     }
     if cancel {
         state.plan_open = false;

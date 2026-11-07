@@ -273,6 +273,20 @@ impl Strings {
         ENGLISH.get_or_init(|| Strings { language: "en".into(), texts: vec![None; Text::ALL.len()] })
     }
 
+    /// The menu's texts in `language`, from the base files built in: Brazilian Portuguese is the `pt` file, whose own tag is `pt-BR`.
+    pub fn builtin(language: orbiters_i18n::Language) -> &'static Strings {
+        use orbiters_i18n::Language;
+        static BUILT: [OnceLock<Strings>; 4] = [const { OnceLock::new() }; 4];
+        let (slot, json) = match language {
+            Language::En => return Strings::english(),
+            Language::Ja => (0, include_str!("../../menu-strings/ja.json")),
+            Language::Fr => (1, include_str!("../../menu-strings/fr.json")),
+            Language::Es => (2, include_str!("../../menu-strings/es.json")),
+            Language::PtBr => (3, include_str!("../../menu-strings/pt.json")),
+        };
+        BUILT[slot].get_or_init(|| Strings::parse(json).map_or_else(|_| Strings::english().clone(), |p| p.strings))
+    }
+
     /// Its language (BCP 47: `fr`, `pt-BR`, `ja`).
     pub fn language(&self) -> &str {
         &self.language
@@ -393,6 +407,21 @@ pub fn keys() -> BTreeSet<&'static str> {
 
 #[cfg(test)]
 mod tests {
+    /// Every language of the website has the base file's texts: `pt` is `pt-BR`, none of its keys lost.
+    #[test]
+    fn the_base_files_are_built_in_under_the_websites_tags() {
+        use orbiters_i18n::Language;
+        assert_eq!(Strings::builtin(Language::En).language(), "en");
+        for language in Language::TRANSLATED {
+            let strings = Strings::builtin(language);
+            assert_eq!(strings.language(), language.tag());
+            let given = Text::ALL.iter().filter(|t| strings.given(**t).is_some()).count();
+            assert!(given >= 150, "{}: {given} of {}", language.tag(), Text::ALL.len());
+            assert_ne!(strings.get(Text::HomeFastWalk), Text::HomeFastWalk.en(), "{}", language.tag());
+        }
+        assert_eq!(Strings::builtin(Language::PtBr).get(Text::HomeFastWalk), "Andar r\u{e1}pido");
+    }
+
     use super::*;
 
     /// The base translations beside this crate, by file name.

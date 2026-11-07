@@ -4,6 +4,7 @@
 //! the panel says when it quit) and Kill (that project's editor ended after a confirmation; other editors untouched,
 //! nothing deleted). The editors are looked at on a worker every second and a half while the page is shown
 //! (`orbiters_projects::editor`).
+use orbiters_i18n::tr;
 use super::state::State;
 use crate::pages::{Cx, Job};
 use egui::{pos2, vec2, Align2, Rect, Ui};
@@ -82,11 +83,11 @@ impl State {
                 if now.duration_since(since) > QUITTING {
                     new = new.next(Event::Stayed);
                     at = None;
-                    cx.toasts.push(ctx, orbiters_ui::toast::Kind::Info, format!("Unity kept {name} open"));
+                    cx.toasts.push(ctx, orbiters_ui::toast::Kind::Info, tr!("Unity kept {name} open", name = name));
                 }
             }
             if old.ended(new) {
-                let said = if matches!(old, Session::Killing { .. }) { format!("Unity was ended: {name} can be opened again") } else { format!("Unity saved and closed {name}") };
+                let said = if matches!(old, Session::Killing { .. }) { tr!("Unity was ended: {name} can be opened again", name = name) } else { tr!("Unity saved and closed {name}", name = name) };
                 cx.toasts.push(ctx, orbiters_ui::toast::Kind::Success, said);
                 if self.kill_confirm.as_ref().is_some_and(|p| discovery::key(p) == key) {
                     self.kill_confirm = None;
@@ -162,13 +163,13 @@ pub(super) fn controls(ui: &mut Ui, state: &mut State, project: &Project, rect: 
             let p = ui.painter();
             widgets::frame(p, rect, rect.height() * 0.5, theme::alpha(theme::DANGER, 0.12));
             feedback::spinner(p, pos2(rect.left() + 20.0, rect.center().y), 7.0, 2.0, theme::DANGER);
-            widgets::text(p, pos2(rect.left() + 36.0, rect.center().y), Align2::LEFT_CENTER, &Txt::new("Ending Unity…", 12.5).color(theme::FG_2));
+            widgets::text(p, pos2(rect.left() + 36.0, rect.center().y), Align2::LEFT_CENTER, &Txt::new(tr("Ending Unity…"), 12.5).color(theme::FG_2));
         }
         _ if confirming => {
             // The longer words when they fit.
-            let long = Button::new("Kill, losing unsaved changes").icon(icons::X_CIRCLE).size(size).desired_width(ui);
-            let cancel_w = Button::new("Cancel").size(size).desired_width(ui);
-            let words = if long + gap + cancel_w <= rect.width() { "Kill, losing unsaved changes" } else { "Kill, losing changes" };
+            let long = Button::new(tr("Kill, losing unsaved changes")).icon(icons::X_CIRCLE).size(size).desired_width(ui);
+            let cancel_w = Button::new(tr("Cancel")).size(size).desired_width(ui);
+            let words = if long + gap + cancel_w <= rect.width() { tr("Kill, losing unsaved changes") } else { tr("Kill, losing changes") };
             let r = split(&[1.7, 1.0]);
             let kill = Button::new(words)
                 .icon(icons::X_CIRCLE)
@@ -176,24 +177,24 @@ pub(super) fn controls(ui: &mut Ui, state: &mut State, project: &Project, rect: 
                 .size(size)
                 .width(r[0].width())
                 .id_salt((salt, "kill-confirm"));
-            if widgets::activated(&kill.show_at(ui, r[0]).on_hover_text("Ends this project's Unity at once: what was not saved is lost. Other Unity windows stay.")) {
+            if widgets::activated(&kill.show_at(ui, r[0]).on_hover_text(tr("Ends this project's Unity at once: what was not saved is lost. Other Unity windows stay."))) {
                 state.kill_editor(&ctx, project);
             }
-            if widgets::activated(&Button::new("Cancel").variant(Variant::Secondary).size(size).width(r[1].width()).id_salt((salt, "kill-cancel")).show_at(ui, r[1])) {
+            if widgets::activated(&Button::new(tr("Cancel")).variant(Variant::Secondary).size(size).width(r[1].width()).id_salt((salt, "kill-cancel")).show_at(ui, r[1])) {
                 state.kill_confirm = None;
             }
         }
         _ => {
             let (label, hint, enabled) = match session {
-                Session::Closing { asking: true, .. } => ("Answer in Unity", "Unity asks whether to save: answer it there (Show brings it to the front)", true),
-                Session::Closing { .. } => ("Closing…", "Unity is saving and quitting", false),
-                _ => ("Save & Exit", "Asks Unity to quit as its close button does: it offers to save modified scenes first", true),
+                Session::Closing { asking: true, .. } => (tr("Answer in Unity"), tr("Unity asks whether to save: answer it there (Show brings it to the front)"), true),
+                Session::Closing { .. } => (tr("Closing…"), tr("Unity is saving and quitting"), false),
+                _ => (tr("Save & Exit"), tr("Asks Unity to quit as its close button does: it offers to save modified scenes first"), true),
             };
             // Each button as wide as its words, what is left shared by Show and Save & Exit; Kill becomes its icon
             // alone when the words do not fit.
-            let ws = Button::new("Show").icon(icons::ARROW_SQUARE_OUT).size(size).desired_width(ui);
+            let ws = Button::new(tr("Show")).icon(icons::ARROW_SQUARE_OUT).size(size).desired_width(ui);
             let wv = Button::new(label).icon(icons::FLOPPY_DISK).size(size).desired_width(ui);
-            let wk = Button::new("Kill").icon(icons::X_CIRCLE).size(size).desired_width(ui);
+            let wk = Button::new(tr("Kill")).icon(icons::X_CIRCLE).size(size).desired_width(ui);
             let icon_kill = ws + wv + wk + 2.0 * gap > rect.width();
             let kw = if icon_kill { rect.height() } else { wk };
             let extra = (rect.width() - ws - wv - kw - 2.0 * gap).max(0.0) * 0.5;
@@ -203,11 +204,11 @@ pub(super) fn controls(ui: &mut Ui, state: &mut State, project: &Project, rect: 
             let r = [r0, r1, r2];
             state.anchors.insert(format!("{salt}-show"), r[0]);
             state.anchors.insert(format!("{salt}-kill"), r[2]);
-            let show = Button::new("Show").icon(icons::ARROW_SQUARE_OUT).variant(Variant::Primary).size(size).width(r[0].width()).id_salt((salt, "show"));
-            if widgets::activated(&show.show_at(ui, r[0]).on_hover_text("Brings this project's Unity window to the front")) {
+            let show = Button::new(tr("Show")).icon(icons::ARROW_SQUARE_OUT).variant(Variant::Primary).size(size).width(r[0].width()).id_salt((salt, "show"));
+            if widgets::activated(&show.show_at(ui, r[0]).on_hover_text(tr("Brings this project's Unity window to the front"))) {
                 state.show_editor(&ctx, project);
             }
-            let save = Button::new(label).icon(icons::FLOPPY_DISK).variant(if label == "Answer in Unity" { Variant::Warn } else { Variant::Secondary }).size(size).width(r[1].width()).enabled(enabled).id_salt((salt, "save"));
+            let save = Button::new(label).icon(icons::FLOPPY_DISK).variant(if matches!(session, Session::Closing { asking: true, .. }) { Variant::Warn } else { Variant::Secondary }).size(size).width(r[1].width()).enabled(enabled).id_salt((salt, "save"));
             if widgets::activated(&save.show_at(ui, r[1]).on_hover_text(hint)) {
                 if matches!(session, Session::Closing { .. }) {
                     state.show_editor(&ctx, project);
@@ -215,12 +216,12 @@ pub(super) fn controls(ui: &mut Ui, state: &mut State, project: &Project, rect: 
                     state.save_and_exit(&ctx, project);
                 }
             }
-            let kill_hint = "Ends this project's Unity without saving (asks first)";
+            let kill_hint = tr("Ends this project's Unity without saving (asks first)");
             let pressed = if icon_kill {
                 let b = widgets::IconButton::new(icons::X_CIRCLE, kill_hint).size(rect.height(), if small { 15.0 } else { 17.0 }).danger().backdrop(theme::control()).id_salt((salt, "kill"));
                 widgets::activated(&b.show_at(ui, r[2]))
             } else {
-                let b = Button::new("Kill").icon(icons::X_CIRCLE).variant(Variant::Ghost).size(size).width(r[2].width()).id_salt((salt, "kill"));
+                let b = Button::new(tr("Kill")).icon(icons::X_CIRCLE).variant(Variant::Ghost).size(size).width(r[2].width()).id_salt((salt, "kill"));
                 widgets::activated(&b.show_at(ui, r[2]).on_hover_text(kill_hint))
             };
             if pressed {

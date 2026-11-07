@@ -6,6 +6,7 @@
 //! signs these in (the server's tool routes); signed out, only the public reads answer.
 
 use crate::account::Api;
+use orbiters_i18n::tr;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -393,10 +394,10 @@ fn refused(status: u16, text: &str) -> Refused {
     let said = if body.error.trim().is_empty() { body.message.trim().to_string() } else { body.error.trim().to_string() };
     let message = match (said.is_empty(), status) {
         (false, _) => said,
-        (true, 401) => "Sign in to Orbiters in Settings first.".into(),
-        (true, 404) => "This event is no longer on Orbiters.".into(),
-        (true, 429) => "Orbiters is busy with many requests: try again in a moment.".into(),
-        (true, _) => format!("Orbiters answered {status}."),
+        (true, 401) => tr("Sign in to Orbiters in Settings first.").into(),
+        (true, 404) => tr("This event is no longer on Orbiters.").into(),
+        (true, 429) => tr("Orbiters is busy with many requests: try again in a moment.").into(),
+        (true, _) => tr!("Orbiters answered {status}.", status = status),
     };
     Refused { status, code: body.code.filter(|c| !c.is_empty()), message }
 }

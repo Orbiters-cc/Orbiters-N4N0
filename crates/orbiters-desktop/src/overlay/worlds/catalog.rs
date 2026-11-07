@@ -609,7 +609,8 @@ impl Capture {
             heights.sort_by(f32::total_cmp);
             // A ceiling is a layer far denser than what stands under it: no one sees in through it.
             let ceiling = ceiling_in(&heights, (view.eye()[1] - ground).max(0.8));
-            let top = ceiling.map_or(heights[heights.len() * 9 / 10] * 1.15, |c| c - 0.15).max(1.6);
+            // The ragged top of what stands, where it fades out in the capture, is cut off clean.
+            let top = ceiling.map_or(heights[heights.len() * 9 / 10], |c| (c - 0.15).min(heights[heights.len() * 9 / 10])).max(1.2);
             let tall = heights.iter().copied().filter(|h| *h <= top).max_by(f32::total_cmp).unwrap_or(top).min(top);
             let share = standing.len() as f32 / inside.len() as f32;
             // Much that stands up, that stands high against how wide the plate is, seen from close enough to tell what it is.
@@ -647,8 +648,10 @@ impl Capture {
         // Flat patches are floors and walls, and may be larger than what is round.
         let most = (frame.reach * 0.05).clamp(0.04, 0.25);
         let flat = |i: usize| g.log_scales[i].iter().copied().fold(f32::MAX, f32::min).exp() < largest(i) * 0.3;
+        // Over where the camera was, no: there a large flat patch is a piece of ceiling, whatever was found of the rest of it.
+        let camera = frame.ground + (self.view.eye()[1] - frame.ground).max(0.8);
         let kept: Vec<usize> = (0..g.len())
-            .filter(|&i| g.is_finite(i) && g.means[i][1] > frame.ground - 0.25 && g.means[i][1] < frame.top && g.opacity_logits[i] > -2.0 && largest(i) < if flat(i) { most * 3.0 } else { most })
+            .filter(|&i| g.is_finite(i) && g.means[i][1] > frame.ground - 0.25 && g.means[i][1] < frame.top && g.opacity_logits[i] > -2.0 && largest(i) < if flat(i) && g.means[i][1] < camera { most * 3.0 } else { most })
             .collect();
         let kept = away_from_floaters(g, kept, frame.reach / 14.0);
         let mut order: Vec<(f32, usize)> = kept.into_iter().map(|i| (across(i), i)).collect();

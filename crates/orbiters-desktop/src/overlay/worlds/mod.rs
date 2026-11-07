@@ -17,6 +17,9 @@
 pub mod cache;
 pub mod catalog;
 pub mod small_hint;
+
+/// How much of a hole's width a capture lying in it fills: its top and foot are cut by the hole, as captures are wider than tall.
+pub const SMALL_FILLS_HOLE: f32 = 0.8;
 mod diagnostics;
 pub mod finder;
 #[cfg(windows)]
@@ -169,6 +172,8 @@ pub struct Worlds {
     key: String,
     /// What says how to handle what shows small; it has been used; a new opening of the menu asks it back for the next capture.
     hint: Option<small_hint::SmallHint>,
+    backdrop: Option<small_hint::Backdrop>,
+    small_place: Option<(vr::Matrix34, f32)>,
     hint_used: bool,
     hint_again: bool,
 }
@@ -262,6 +267,8 @@ impl Worlds {
             alone: false,
             key: key.to_string(),
             hint: None,
+            backdrop: None,
+            small_place: None,
             hint_used: false,
             hint_again: false,
         })
@@ -327,6 +334,8 @@ impl Worlds {
             alone: true,
             key: String::new(),
             hint: None,
+            backdrop: None,
+            small_place: None,
             hint_used: false,
             hint_again: false,
         }
@@ -483,6 +492,9 @@ impl Worlds {
         self.view.destroy(overlay);
         if let Some(hint) = self.hint.take() {
             hint.destroy(overlay);
+        }
+        if let Some(backdrop) = self.backdrop.take() {
+            backdrop.destroy(overlay);
         }
         let _ = overlay.destroy(self.chip);
         let _ = overlay.destroy(self.bar);
@@ -657,6 +669,14 @@ impl Worlds {
     fn update_hint(&mut self, overlay: &vr::Overlay, steamvr: &vr::Client, presenter: &mut Presenter, snap: &Snapshot) {
         let small = self.view.small_now().copied();
         self.hint_used |= small.is_some_and(|s| s.zoomed);
+        // The dark pane behind it in a panel's hole.
+        let pane = small.filter(|s| s.docked).and(self.small_place).map(|(at, radius)| (at, radius * 2.0 / SMALL_FILLS_HOLE + 0.012));
+        if pane.is_some() && self.backdrop.is_none() {
+            self.backdrop = small_hint::Backdrop::new(overlay, &self.key).map_err(|e| eprintln!("{e:#}")).ok();
+        }
+        if let Some(backdrop) = self.backdrop.as_mut() {
+            backdrop.update(overlay, presenter, pane);
+        }
         let wanted = small.filter(|s| !self.hint_used && !s.docked).map(|s| {
             let stage = if s.held() { small_hint::Stage::Stick } else { small_hint::Stage::Grip { near: s.near } };
             (stage, s.anchor, s.radius())
@@ -690,6 +710,7 @@ impl Worlds {
 
     /// Where a panel has a place for what shows small, and how large it is.
     pub fn small_place(&mut self, place: Option<(vr::Matrix34, f32)>) {
+        self.small_place = place;
         self.view.small_place(place);
     }
 
@@ -1337,13 +1358,22 @@ impl Worlds {
             panel::Page::Typing => (self.panel.results(&d).into_iter().take(panel::PER_ROW).collect(), true),
             panel::Page::Browse => (self.panel.results(&d).into_iter().skip(self.panel.results_page * panel::PER_PAGE).take(panel::PER_PAGE).collect(), true),
             panel::Page::Filter => (Vec::new(), true),
+            // The list beside the side panel, and the world on it.
+            panel::Page::Detail => {
+                let first = self.panel.results_page * panel::PER_PAGE;
+                let mut list: Vec<&Entry> = self.panel.results(&d).into_iter().skip(first).take(panel::PER_PAGE).collect();
+                if let Some(e) = self.panel.entry(&d).filter(|e| !list.iter().any(|l| l.id == e.id)) {
+                    list.push(e);
+                }
+                (list, true)
+            }
             _ => (self.panel.entry(&d).into_iter().collect(), false),
         };
         // A card of a list's world has what its list said; its page, or a capture's card, reads the world's page on
         // the Map explorer (Orbiters reads VRChat for it: asked only as needed).
         shown
             .into_iter()
-            .map(|e| Visible { id: e.id, world: e.world_id.clone(), thumbnail: e.thumbnail.clone(), page: !cards || e.capture || e.thumbnail.is_none() })
+            .map(|e| Visible { id: e.id, world: e.world_id.clone(), thumbnail: e.thumbnail.clone(), page: !cards || e.capture || e.thumbnail.is_none() || (self.panel.page == panel::Page::Detail && self.panel.selected == Some(e.id)) })
             .collect()
     }
 

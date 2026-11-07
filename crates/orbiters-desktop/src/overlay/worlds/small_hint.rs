@@ -12,7 +12,7 @@ use orbiters_ui::{icons, widgets};
 use std::time::Instant;
 
 pub const PX: [u32; 2] = [448, 256];
-const WIDTH_M: f32 = 0.2;
+pub const WIDTH_M: f32 = 0.24;
 /// How high above what it speaks of it floats, past its top.
 const ABOVE_M: f32 = 0.09;
 const FRAME_S: f32 = 1.0 / 45.0;
@@ -162,7 +162,7 @@ impl SmallHint {
         let _ = overlay.set_width_in_meters(handle, WIDTH_M);
         let _ = overlay.set_flag(handle, vr::overlay_flag::IS_PREMULTIPLIED, true);
         // Over the capture, and under N4N0's menu and these panels.
-        let _ = overlay.set_sort_order(handle, 1);
+        let _ = overlay.set_sort_order(handle, 2);
         Ok(Self { handle, canvas: Canvas::new(PX[0], PX[1]), born: Instant::now(), painted: None, shown: None })
     }
 
@@ -201,8 +201,61 @@ impl SmallHint {
     }
 }
 
+/// What lies behind a capture in a panel's hole, under it, so that VRChat's menu does not show through around it: a dark
+/// pane in the panel's plane, a little larger than the hole, whose edge the panel covers.
+pub struct Backdrop {
+    handle: vr::OverlayHandle,
+    pixels: Vec<u8>,
+    painted: bool,
+    shown: bool,
+}
+
+impl Backdrop {
+    const PX: [u32; 2] = [64, 36];
+
+    pub fn new(overlay: &vr::Overlay, key: &str) -> anyhow::Result<Self> {
+        let handle = overlay.create(&format!("{key}.small-backdrop"), "Behind a small 3D view").map_err(|c| anyhow::anyhow!("the small view's backdrop: {c:?}"))?;
+        let _ = overlay.set_flag(handle, vr::overlay_flag::IS_PREMULTIPLIED, true);
+        // Under the capture.
+        let _ = overlay.set_sort_order(handle, 0);
+        let mut pixels = Vec::with_capacity((Self::PX[0] * Self::PX[1] * 4) as usize);
+        for y in 0..Self::PX[1] {
+            for x in 0..Self::PX[0] {
+                // Lightest in its middle, as a lit stage.
+                let (u, v) = (x as f32 / (Self::PX[0] - 1) as f32 * 2.0 - 1.0, y as f32 / (Self::PX[1] - 1) as f32 * 2.0 - 1.0);
+                let light = (1.0 - (u * u + v * v) * 0.5).clamp(0.0, 1.0);
+                pixels.extend_from_slice(&[(14.0 + 18.0 * light) as u8, (16.0 + 20.0 * light) as u8, (20.0 + 26.0 * light) as u8, 255]);
+            }
+        }
+        Ok(Self { handle, pixels, painted: false, shown: false })
+    }
+
+    /// At `place` (the middle of the hole), `width` across; or nowhere.
+    pub fn update(&mut self, overlay: &vr::Overlay, presenter: &mut Presenter, place: Option<(vr::Matrix34, f32)>) {
+        let Some((at, width)) = place else {
+            if std::mem::take(&mut self.shown) {
+                let _ = overlay.hide(self.handle);
+            }
+            return;
+        };
+        if !self.painted {
+            self.painted = true;
+            presenter.show_part(overlay, self.handle, &self.pixels, Self::PX[0], Self::PX[1], [0, 0, Self::PX[0], Self::PX[1]]);
+        }
+        let _ = overlay.set_width_in_meters(self.handle, width);
+        let _ = overlay.set_transform_absolute(self.handle, &at);
+        if !std::mem::replace(&mut self.shown, true) {
+            let _ = overlay.show(self.handle);
+        }
+    }
+
+    pub fn destroy(&self, overlay: &vr::Overlay) {
+        let _ = overlay.destroy(self.handle);
+    }
+}
+
 /// Upright at `place`, its face towards `eye`.
-fn facing(place: V3, eye: V3) -> vr::Matrix34 {
+pub fn facing(place: V3, eye: V3) -> vr::Matrix34 {
     let to = stereo::sub(eye, place);
     let level = [to[0], 0.0, to[2]];
     let z = stereo::scale(level, 1.0 / stereo::length(level).max(1e-3));

@@ -625,8 +625,8 @@ impl View {
                 let _ = overlay.set_flag(*h, overlay_flag::SIDE_BY_SIDE_PARALLEL, true);
                 // A capture all around is opaque and this changes nothing; small, what is around it shows the room.
                 let _ = overlay.set_flag(*h, overlay_flag::IS_PREMULTIPLIED, true);
-                // Under N4N0's menu (10) and the pill.
-                let _ = overlay.set_sort_order(*h, 0);
+                // Under N4N0's menu (10) and the pill, and over what lies behind it in a panel.
+                let _ = overlay.set_sort_order(*h, 1);
             }
         }
         Ok(out)

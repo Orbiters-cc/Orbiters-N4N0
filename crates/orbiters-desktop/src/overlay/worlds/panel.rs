@@ -727,8 +727,8 @@ impl Panel {
                         out.push((Target::Show, SHOW_WHOLE));
                     }
                 } else if current {
-                    out.push((Target::Hide, SHOW));
-                    out.push(if status.small { (Target::Show, SHOW_SMALL) } else { (Target::ShowSmall, SHOW_SMALL) });
+                    // The other way to see it: the sheet's head, or N4N0's bar, hides it.
+                    out.push(if status.small { (Target::Show, SHOW_WHOLE) } else { (Target::ShowSmall, SHOW_WHOLE) });
                     if status.small && status.small_taken {
                         out.push((Target::SmallBack, SMALL_BACK));
                     }
@@ -884,8 +884,8 @@ impl Panel {
                     self.select(entry.id);
                     self.go(Page::Detail, time);
                 }
-                // A world without a capture: its page only.
-                if !entry.capture || status.current == Some(entry.id) && (status.shown || status.stage.is_some()) {
+                // A world without a capture: its details only. With no headset nothing shows around anyone, and its details have what opens the app's window.
+                if !status.headset || !entry.capture || status.current == Some(entry.id) && (status.shown || status.stage.is_some()) {
                     Vec::new()
                 } else {
                     vec![Action::Show(entry.id)]
@@ -1294,6 +1294,9 @@ impl Panel {
         if side {
             if results.is_empty() {
                 text(p, pos2(340.0, 330.0), Align2::CENTER_CENTER, Txt::new("Nothing else here", 18.0).color(theme::FG_3));
+            } else if !self.searching(d) && self.section == Section::Captures && results.len() <= 3 {
+                text(p, pos2(340.0, 452.0), Align2::CENTER_CENTER, Txt::new("Few worlds have a capture yet", 17.0).weight(weight::MEDIUM).color(theme::FG_2));
+                text(p, pos2(340.0, 480.0), Align2::CENTER_CENTER, Txt::new("Search any world, or look through Popular", 15.0).color(theme::FG_3));
             }
         } else if results.is_empty() {
             self.empty(p, d, shown, state(Target::Retry));
@@ -1472,10 +1475,9 @@ impl Panel {
                 }
                 Target::Show => {
                     let label = if !status.headset { "See it in 3D" } else { "Around me" };
-                    pill_button(p, on(*rect), Some(icons::CUBE), label, if status.small || !current { theme::ACCENT } else { RAISED }, theme::ON_ACCENT, h, pr, rest);
+                    pill_button(p, on(*rect), Some(icons::CUBE), label, theme::ACCENT, theme::ON_ACCENT, h, pr, rest);
                 }
                 Target::ShowSmall => pill_button(p, on(*rect), Some(icons::HAND_GRABBING), "Small here", if current { theme::ACCENT } else { RAISED2 }, if current { theme::ON_ACCENT } else { theme::FG }, h, pr, rest),
-                Target::Hide => pill_button(p, on(*rect), Some(icons::EYE_SLASH), "Hide 3D", RAISED2, theme::FG, h, pr, rest),
                 Target::SmallBack => pill_button(p, *rect, Some(icons::ARROW_U_UP_LEFT), "Back here", theme::ACCENT, theme::ON_ACCENT, h, pr, rest),
                 Target::Join => {
                     let (glyph, label) = if status.list.vrchat { (icons::ENVELOPE_SIMPLE, "Invite me") } else { (icons::PLAY, "Launch VRChat") };

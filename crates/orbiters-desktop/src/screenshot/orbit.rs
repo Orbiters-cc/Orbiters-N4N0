@@ -139,6 +139,16 @@ impl Eye {
         [d[0] / l, d[1] / l, d[2] / l]
     }
 
+    /// A picture of the whole view in premultiplied RGBA over what is there.
+    fn over(&mut self, picture: &[u8]) {
+        for (to, from) in self.pixels.chunks_exact_mut(4).zip(picture.chunks_exact(4)) {
+            let left = 255 - from[3] as u32;
+            for c in 0..3 {
+                to[c] = (from[c] as u32 + to[c] as u32 * left / 255).min(255) as u8;
+            }
+        }
+    }
+
     /// `picture` (premultiplied RGBA of `px`) on `quad`, seen from the eyes, each pixel sampled from it with four rays' worth of softness.
     fn quad(&mut self, quad: &Quad, picture: &[u8], px: [u32; 2], alpha: f32) {
         let (w, h) = (self.size[0], self.size[1]);
@@ -349,8 +359,78 @@ pub(super) fn vr_shots(out: &Path, refs: &Path) -> anyhow::Result<()> {
         qm_scene(&facts, None, None, &format!("vr-qm-{world}"))?;
         qm_scene(&pointing(Action::Worlds), Some(0), None, &format!("vr-qm-{world}-point-worlds"))?;
         qm_scene(&Facts { sheet: Some(Sheet::All), sheet_title: "All tools".into(), ..facts.clone() }, None, Some(Sheet::All), &format!("vr-sheet-{world}-all"))?;
-        qm_scene(&Facts { sheet: Some(Sheet::Pictures), sheet_title: "3D pictures".into(), ..facts.clone() }, None, Some(Sheet::Pictures), &format!("vr-sheet-{world}-pictures"))?;
+        qm_scene(&Facts { sheet: Some(Sheet::Pictures), sheet_title: "Pictures".into(), ..facts.clone() }, None, Some(Sheet::Pictures), &format!("vr-sheet-{world}-pictures"))?;
         let _ = Target::Close;
+        // A real capture standing small, drawn by the view's own renderer: in the hole of a world's side panel (the panel's picture
+        // beside the frames, `panel-small-docked.png` of --world-view), then in a hand with what says how to zoom it.
+        if let (true, Ok(session)) = (world == "forest", std::env::var("ORBIT_SESSION")) {
+            use crate::overlay::worlds::{catalog, render, small_hint, stereo};
+            let full = catalog::read_local(Path::new(&session), &Default::default())?;
+            let capture = full.around_subject();
+            let (_adapter, device, queue) = render::device(None)?;
+            let mut renderer = render::FaceRenderer::new(device, queue);
+            renderer.load(&capture)?;
+            renderer.make_transparent()?;
+            let tan = 50f32.to_radians().tan();
+            let (w, h) = (size[0], size[1]);
+            let tangents = [-tan, tan, -tan * h as f32 / w as f32, tan * h as f32 / w as f32];
+            let mut model = |small: &stereo::Small| -> anyhow::Result<Vec<u8>> {
+                let camera = stereo::eye_camera(&head, tangents, w, h, &small.placement(capture.view.eye()));
+                renderer.render_view(&camera, capture.within(small.reach()))
+            };
+            let panel = image::open(refs.join("panel-small-docked.png"))?.to_rgba8();
+            let panel_px = [panel.width(), panel.height()];
+            let mut panel_pixels = panel.into_raw();
+            for p in panel_pixels.chunks_exact_mut(4) {
+                let a = p[3] as u32;
+                for c in &mut p[..3] {
+                    *c = (*c as u32 * a / 255) as u8;
+                }
+            }
+            let page = zones::in_units(Zone::Takeover);
+            let page_quad = plane.quad(&page, 0.0, 0.02);
+            let hole = crate::overlay::worlds::panel::SIDE_HERO;
+            let (x, y) = ((hole.center().x / 1024.0 - 0.5) * page_quad.width, (0.5 - hole.center().y / 576.0) * page_quad.height);
+            let there = orbiters_openvr::Matrix34 { m: [[1.0, 0.0, 0.0, x], [0.0, 1.0, 0.0, y], [0.0, 0.0, 1.0, 0.0]] };
+            let at = space::compose(&page_quad.transform, &there);
+            let radius = hole.width() / 1024.0 * page_quad.width / 2.0 * crate::overlay::worlds::SMALL_FILLS_HOLE;
+            let dock = stereo::SmallDock::behind(&capture.view, &at, radius);
+            let small = stereo::Small::new(&capture.view, &head, capture.small_reach()).at_dock(&dock);
+            // Docked.
+            let worlds = Facts { sheet: Some(Sheet::Worlds), sheet_title: "Worlds in 3D".into(), view_showing: true, view_small: true, sheet_hole: Some(egui::Rect::from_min_max(pos2(hole.min.x * 0.6875, hole.min.y * 0.6875 + 52.0), pos2(hole.max.x * 0.6875, hole.max.y * 0.6875 + 52.0))), ..facts.clone() };
+            let center_units = zones::Placed { zone: Zone::SheetBack, rect: qm_units, center: pos2(0.0, 0.0), unit: 1.0 };
+            let mut eye = Eye::new(size, &ground, eyes);
+            eye.quad(&plane.quad(&center_units, 0.0, 0.0), &qm, qm_px, 1.0);
+            // The dark pane behind it.
+            let pane = vec![[32u8, 36, 46, 255]; 4].concat();
+            eye.quad(&Quad { transform: at, width: hole.width() / 1024.0 * page_quad.width + 0.012, height: hole.height() / 576.0 * page_quad.height + 0.012 }, &pane, [2, 2], 1.0);
+            eye.over(&model(&small)?);
+            for zone in Zone::QUICK_MENU {
+                let placed = zones::in_units(zone);
+                let (pixels, px) = sharp_picture(&placed, &worlds, None, 2.0);
+                eye.quad(&plane.quad(&placed, 0.0, 0.004), &pixels, px, 1.0);
+            }
+            let back = zones::in_units(Zone::SheetBack);
+            let (pixels, px) = sharp_picture(&back, &worlds, None, 2.0);
+            eye.quad(&plane.quad(&back, 0.0, 0.016), &pixels, px, 1.0);
+            eye.quad(&page_quad, &panel_pixels, panel_px, 1.0);
+            eye.save(out, "vr-small-in-the-panel")?;
+            // In a hand, with what says how to zoom it.
+            let mut held = stereo::Small::new(&capture.view, &head, capture.small_reach());
+            held.anchor = [0.02, 1.46, -0.70];
+            let mut eye = Eye::new(size, &ground, eyes);
+            eye.over(&model(&held)?);
+            let hint_px = small_hint::PX;
+            let mut canvas = Canvas::new(hint_px[0], hint_px[1]);
+            for _ in 0..2 {
+                canvas.paint(0.0, |p| small_hint::paint(p, small_hint::Stage::Stick, 0.65));
+            }
+            let up = [held.anchor[0], held.anchor[1] + held.radius() + 0.09, held.anchor[2]];
+            let hint_frame = small_hint::facing(up, space::position(&head));
+            let hint_w = small_hint::WIDTH_M;
+            eye.quad(&Quad { transform: hint_frame, width: hint_w, height: hint_w * hint_px[1] as f32 / hint_px[0] as f32 }, canvas.pixels(), hint_px, 1.0);
+            eye.save(out, "vr-small-in-a-hand")?;
+        }
     }
     Ok(())
 }
@@ -404,12 +484,12 @@ pub(super) fn shots(out: &Path) -> anyhow::Result<()> {
     qm_scene("orbit-qm-narrow", out, vec2(800.0, 800.0), &idle, None, None)?;
     qm_scene("orbit-sheet-all", out, hd, &Facts { sheet: Some(Sheet::All), sheet_title: "All tools".into(), ..idle.clone() }, None, Some(Sheet::All))?;
     qm_scene("orbit-sheet-all-vr", out, hd, &Facts { desktop: false, can_call: true, can_states: true, can_light: true, sheet: Some(Sheet::All), sheet_title: "All tools".into(), ..idle.clone() }, None, Some(Sheet::All))?;
-    qm_scene("orbit-sheet-pictures", out, hd, &Facts { sheet: Some(Sheet::Pictures), sheet_title: "3D pictures".into(), ..idle.clone() }, None, Some(Sheet::Pictures))?;
+    qm_scene("orbit-sheet-pictures", out, hd, &Facts { sheet: Some(Sheet::Pictures), sheet_title: "Pictures".into(), ..idle.clone() }, None, Some(Sheet::Pictures))?;
     let lines = vec![(true, "What's the weather like in Paris?".to_string()), (false, "It is 14 degrees and raining in Paris, with clear skies expected by this evening.".to_string()), (true, "Find a world with rain".to_string()), (false, "After The Rain has a 3D capture you can walk in. Open Worlds in 3D to see it.".to_string())];
     qm_scene("orbit-sheet-talk", out, hd, &Facts { sheet: Some(Sheet::Talk), sheet_title: "Ask N4N0".into(), talk_lines: lines.clone(), beside_wing: true, ..idle.clone() }, None, Some(Sheet::Talk))?;
     qm_scene("orbit-sheet-talk-listening", out, hd, &Facts { sheet: Some(Sheet::Talk), sheet_title: "Ask N4N0".into(), talk_lines: lines, talk: crate::overlay::orbit::panels::TalkNow::Listening(0.6), beside_wing: true, ..idle.clone() }, None, Some(Sheet::Talk))?;
-    qm_scene("orbit-sheet-countdown", out, hd, &Facts { sheet: Some(Sheet::Pictures), sheet_title: "3D pictures".into(), ..counting.clone() }, None, Some(Sheet::Pictures))?;
-    qm_scene("orbit-sheet-pictures-busy", out, hd, &Facts { sheet: Some(Sheet::Pictures), sheet_title: "3D pictures".into(), ..busy.clone() }, None, Some(Sheet::Pictures))?;
+    qm_scene("orbit-sheet-countdown", out, hd, &Facts { sheet: Some(Sheet::Pictures), sheet_title: "Pictures".into(), ..counting.clone() }, None, Some(Sheet::Pictures))?;
+    qm_scene("orbit-sheet-pictures-busy", out, hd, &Facts { sheet: Some(Sheet::Pictures), sheet_title: "Pictures".into(), ..busy.clone() }, None, Some(Sheet::Pictures))?;
     let _ = Target::Close;
     Ok(())
 }

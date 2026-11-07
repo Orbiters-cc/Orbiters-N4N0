@@ -12,6 +12,10 @@ Code: `crates/orbiters-desktop/src/overlay/orbit/`. Settings, Performance, "Orbi
 
 **No mod.** Nothing is injected, the game's files and memory are not touched. In desktop mode each panel is an ordinary topmost window; in VR an ordinary SteamVR overlay.
 
+## How they follow the hand in VR
+
+Rigid parts and sheets follow a filter with its own time constant on each menu, about what VRChat's own feel like (Enzo, in the headset): `vr_smoothing_quick_menu_ms` 35, `vr_smoothing_wheel_ms` 20. The tiles around the menus are on springs of their own whose character keeps changing, or rigid, as Settings chooses.
+
 ## Knowing a menu is open
 
 VRChat says nothing: OSC reports no menu state, its log nothing when a menu opens, and SteamVR no other application's action sets.
@@ -42,7 +46,27 @@ The block's rules (`block.rs`): blocked on hover, before any press. A press begu
 
 ## The gallery
 
-The 3D pictures sheet lays out every capture with the app's own `pages::gallery_layout::arrange`, in the layout chosen in Photos & captures, all at 16:9 so that nothing moves as pictures arrive. Only what shows is laid on the page, and only it paints as it scrolls. The list of captures comes off a thread once per change of the library; a second thread reads thumbnails for what shows and the next few, and those more than 36 away are let go. The mouse wheel reaches it through the window's own messages, or through the pointer's hook when the sheet came from the wheel. VR has no wheel here: up and down buttons.
+The Pictures sheet lists what the app's own Photos & captures lists on this computer: `worlds::load_gallery`, VRChat's pictures and the captures together, newest first, with **All** and **Only 3D** at its top right, in the layout chosen in the app (`pages::gallery_layout::arrange`). A list can hold tens of thousands: `panels::Gallery` holds the tiles and their places once, compares by being the same list, and each frame's facts only carry the words and pictures of the tiles on the page. Pictures are decoded by two threads, what was asked last first, and let go far from the page.
+
+A capture with a 3D view shows in 3D from its tile (`Relayed::ShowLocal`, `catalog::read_local`); on the desktop its press opens the app's window. A picture shows large on the sheet (`Look::BigPicture`), with Back and steps from picture to picture over the captures.
+
+## Lists
+
+The gallery, previous instances, YouTube's results and the conversation scroll by dragging on them, by a bar to grab, and thrown (`Drag`). Past an end they give less and less under the hand (`rubber_band`), run past it when thrown and come back to rest exactly there, without going beyond it the other way (`scroll_step`). A notch of the mouse's wheel at an end gives a little. With Reduce motion, no give at all.
+
+## A capture standing small (VR)
+
+`worlds::stereo::Small`: a capture stands small before the person, what is farther from its subject than it shows not drawn. A capture at a size needs nothing of the renderer but the camera's translation divided by that size (`Placement::size`). It is sorted anew around its subject (`Capture::around_subject`) so the first splats are those near it, and drawn over nothing: `Gpu::present_alpha` writes what the splats leave of the background as transparency, premultiplied.
+
+On a world's side panel it lies in a hole (`panel::Panel::hole`, the same hole in the sheet's back, `panels::Facts::sheet_hole`), behind which a dark pane (`small_hint::Backdrop`) hides VRChat's menu. It follows the panel until a grip closes near it (`Small::step`); then it follows that hand, grows, and that hand's stick zooms it. Let go near the hole, or asked with Back here, it returns. Taken, it stays when the menu closes, until Hide 3D.
+
+`small_hint`: above it, what says how to take it and then how to zoom it, with a little thumbstick pushed up and pulled down. A stick zooming it ends the hint, until a new capture opens from a new opening of the menu (`Relayed::MenuOpened`).
+
+The stick also reaches VRChat, as nothing takes it from the game while the capture is held: held in the left hand, its zoom also walks the avatar.
+
+## Worlds in 3D
+
+A press on a world opens its details on a side panel beside the list, which narrows to two columns of the same six results, so that another can be pressed at once (`Page::Detail`, `SIDE`). In a headset a press on a world with a capture shows it, around the person or small, whichever was chosen last.
 
 ## A 3D picture from these menus, on the desktop
 

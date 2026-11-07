@@ -864,7 +864,7 @@ impl OrbitVr {
             };
             let (x, y) = ((hole.center().x / 1024.0 - 0.5) * quad.width, (0.5 - hole.center().y / 576.0) * quad.height);
             let there = Matrix34 { m: [[1.0, 0.0, 0.0, x], [0.0, 1.0, 0.0, y], [0.0, 0.0, 1.0, 0.0]] };
-            Some((space::compose(&frame, &there), hole.height() / 576.0 * quad.height / 2.0 * 0.92))
+            Some((space::compose(&frame, &there), hole.width() / 1024.0 * quad.width / 2.0 * super::super::worlds::SMALL_FILLS_HOLE))
         });
         // Pictures, then each overlay where it goes.
         self.show(&mut cx, &quads, &placing);

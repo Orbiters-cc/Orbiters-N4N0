@@ -1166,7 +1166,8 @@ impl Panels {
 
     fn caption_dirty(&mut self) {
         for panel in &mut self.list {
-            if panel.zone.passes_clicks() {
+            // A sheet's head says it too.
+            if panel.zone.passes_clicks() || panel.zone == Zone::SheetBack {
                 panel.dirty = true;
             }
         }
@@ -1684,7 +1685,8 @@ impl Panels {
             panel.appear.step(dt);
         }
         // A list thrown goes on, slowing, past its end and back; or it glides to where its wheel sent it. Only its page paints.
-        if self.drag.is_none() {
+        // A picture shown large leaves the list where it was.
+        if self.drag.is_none() && self.facts.opened.is_none() {
             let max = self.facts.sheet.map_or(0.0, |sheet| panels::max_scroll(sheet, &self.facts));
             let was = self.facts.gallery_scroll;
             (self.facts.gallery_scroll, self.throw, self.gallery_to) = scroll_step(was, self.throw, self.gallery_to, max, dt, self.elastic);

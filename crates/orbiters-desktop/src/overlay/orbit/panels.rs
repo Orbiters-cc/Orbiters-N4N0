@@ -1101,7 +1101,7 @@ pub fn paint(p: &Painter, zone: Zone, size: Vec2, facts: &Facts, hover: Option<u
                 let small = theme::font(11.5, weight::MEDIUM);
                 p.text(pos2(from, 18.0), Align2::LEFT_CENTER, fit(p, &first, &big, room), big, look::LABEL);
                 p.text(pos2(from, 35.0), Align2::LEFT_CENTER, fit(p, &second, &small, room), small, look::MUTED);
-            } else if let (Some((name, playing)), false, false) = (&facts.music, facts.beside_wing, facts.sheet == Some(Sheet::All)) {
+            } else if let (Some((name, playing)), false, false) = (facts.music.as_ref().filter(|_| !facts.view_showing), facts.beside_wing, facts.sheet == Some(Sheet::All)) {
                 let font = theme::font(12.0, weight::SEMIBOLD);
                 let right = size.x - 56.0 - 26.0 * 3.0 - 8.0;
                 let name = fit(p, name, &font, (right - from).max(0.0));
@@ -1810,7 +1810,8 @@ fn draw_capture(p: &Painter, rect: Rect, n: usize, facts: &Facts, hovered: bool,
         }
         None => {
             orbiters_ui::paint::fill_convex(&clip, &points, |_| theme::INK_750);
-            widgets::icon(&clip, rect.center() - vec2(0.0, 14.0), icons::CUBE, 36.0, look::MUTED);
+            let glyph = if recent.kind == RecentKind::Picture { icons::IMAGE } else { icons::CUBE };
+            widgets::icon(&clip, rect.center() - vec2(0.0, 14.0), glyph, 36.0, look::MUTED);
         }
     }
     let foot = if hovered { 0.92 } else { 0.8 };

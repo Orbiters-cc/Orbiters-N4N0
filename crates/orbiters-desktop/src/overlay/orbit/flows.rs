@@ -234,3 +234,34 @@ fn the_stick_scrolls_what_is_on_the_sheet() {
     person.panels.stick(1.0, 10.0, &snap);
     assert_eq!(person.panels.gallery_to, 0.0, "and no further than its start");
 }
+
+/// Enzo: "the hole is glitchy and I don't see the 3D view behind it". What is submitted for the sheet's page and its back, by the same painting as in a headset, read back at the hole. This says
+/// the pictures are clear there: what becomes of them in the compositor only `vr-test.log` can say.
+#[test]
+fn the_hole_is_clear_in_what_is_submitted() {
+    use crate::overlay::worlds::panel::Status;
+    for retro in [false, true] {
+        let mut person = Person::new();
+        let mut snap = (*person.snap).clone();
+        if retro {
+            snap.settings.orbit.theme = orbiters_core::settings::MenuLook::Retro;
+        }
+        person.snap = Arc::new(snap);
+        person.around = Some(Around::QuickMenu);
+        person.turns(3);
+        person.press(Action::Worlds);
+        person.turns(2);
+        let docked = Status { headset: true, small: true, small_docked: true, shown: true, current: Some(7), ..Default::default() };
+        person.panels.stage.worlds.as_mut().unwrap().show_world_for_test(7);
+        for _ in 0..4 {
+            let _ = person.panels.world_relay(docked.clone());
+            person.turn();
+        }
+        let [page_middle, page_outside, back_middle, back_outside] = person.panels.hole_alphas();
+        println!("hole, retro {retro}: page {page_middle:?} outside {page_outside:?}, back {back_middle:?} outside {back_outside:?}");
+        assert_eq!(page_middle, Some(0), "the page, retro {retro}");
+        assert_eq!(back_middle, Some(0), "its back, retro {retro}");
+        assert!(page_outside.is_some_and(|a| a > 200), "and solid around it: {page_outside:?}");
+        assert!(back_outside.is_some_and(|a| a > 200), "{back_outside:?}");
+    }
+}

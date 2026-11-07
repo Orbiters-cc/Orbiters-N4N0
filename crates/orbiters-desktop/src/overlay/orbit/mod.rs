@@ -1309,7 +1309,7 @@ impl Panels {
     }
 
     /// What is submitted at the hole a capture shows through, read back: how solid the sheet's page and its back are at its middle and just outside it. Both must be 0 at its middle.
-    pub(in crate::overlay) fn hole_report(&self) -> String {
+    fn hole_alphas(&self) -> [Option<u8>; 4] {
         let sample = |panel: Option<&Panel>, at: Pos2| -> Option<u8> {
             let panel = panel?;
             let zoom = panel.px[0] as f32 / panel.logical.x;
@@ -1320,14 +1320,18 @@ impl Panels {
         let back = self.list.iter().find(|p| p.zone == Zone::SheetBack);
         let hole = self.stage.worlds.as_ref().and_then(|w| w.small_hole());
         let back_hole = self.facts.sheet_hole;
-        format!(
-            "page hole {hole:?} alpha at its middle {:?} outside {:?}; back hole {back_hole:?} alpha at its middle {:?} outside {:?}; sheet {:?}", // i18n: not shown (a log's line)
+        [
             hole.and_then(|h| sample(page, h.center())),
             hole.and_then(|h| sample(page, pos2(h.center().x, h.max.y + 8.0))),
             back_hole.and_then(|h| sample(back, h.center())),
             back_hole.and_then(|h| sample(back, pos2(h.center().x, h.max.y + 8.0))),
-            self.facts.sheet,
-        )
+        ]
+    }
+
+    pub(in crate::overlay) fn hole_report(&self) -> String {
+        let [page_middle, page_outside, back_middle, back_outside] = self.hole_alphas();
+        let hole = self.stage.worlds.as_ref().and_then(|w| w.small_hole());
+        format!("page hole {hole:?} alpha at its middle {page_middle:?} outside {page_outside:?}; back hole {:?} alpha at its middle {back_middle:?} outside {back_outside:?}; sheet {:?}", self.facts.sheet_hole, self.facts.sheet) // i18n: not shown (a log's line)
     }
 
     /// The stick's up and down, -1 to 1, for `seconds`: what is on the sheet scrolls, as a wheel does but as long as it is held. Enzo: "the up down joystick (same as the one for zoom in small 3D view) allow to scroll in scrollable pages".

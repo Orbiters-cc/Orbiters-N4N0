@@ -609,6 +609,13 @@ impl Worlds {
     }
 
     #[cfg(test)]
+    pub fn show_world_for_test(&mut self, id: u64) {
+        self.panel.page = panel::Page::Detail;
+        self.panel.selected = Some(id);
+        self.panel.dirty = true;
+    }
+
+    #[cfg(test)]
     pub fn status_for_test(&self) -> Status {
         self.status()
     }

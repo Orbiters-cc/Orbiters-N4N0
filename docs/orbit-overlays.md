@@ -155,3 +155,9 @@ A script cannot type in the search: the keyboard's hook (`keys.rs`) leaves out i
 ## Reading a headset test
 
 `vr-test.log` in the logs' folder has what no test here can see, a line a second at most for each thing while it goes on: `view:` what the 3D view submits (phase, alpha, how many faces are visible, how many were handed over), `panel:` the sheet's page and back read back at the hole (both alphas must be 0 at its middle), `small input:` and `turn:` what the sticks say and what was done with them.
+
+## Screens of the sheet
+
+`Panels::keep_screen` keeps each screen as it was left, by its sheet and name: its scroll, the picture it had open, and for N4N0's pages the page they were on (the menu itself keeps its results). The Worlds panel keeps its own search, list and page. Every sheet has its Back in one place on its head (`Action::Back`, `go_back`): within what shows first, then through `trail`, which records what opened each screen, then off the sheet. N4N0's own Back does not show on a sheet (`Menu::back_on_the_sheet`), nor does the Worlds panel's (`Panel::on_sheet`). The stick that does not walk scrolls what is on the sheet with its up and down (`Panels::stick`), unless a hand holds what shows small; its side to side turns a capture around the person.
+
+The Worlds list goes on as far as there are worlds wherever it shows, and asks for more as it nears its end. The side panel comes out on `Spring::EXPAND`, by `Panel::side_out`, while the cards go to their two columns. A long press with the Quick Menu open closes it over OSC at `CLOSE_AHEAD`, just before it is long, as VRChat opens its wheel only for a press that finds its Quick Menu closed and nothing here can open that wheel. Not yet seen working in a headset.

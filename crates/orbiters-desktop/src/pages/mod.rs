@@ -17,7 +17,7 @@ pub mod reconstruct_again;
 pub mod sessions;
 pub mod gallery;
 mod gallery_layers;
-mod gallery_layout;
+pub(crate) mod gallery_layout;
 mod gallery_select;
 pub mod sharing;
 pub mod requests;

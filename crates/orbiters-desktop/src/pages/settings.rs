@@ -1088,30 +1088,45 @@ pub(super) fn source_chip(ui: &mut Ui, label: &str, active: bool) -> egui::Respo
 fn orbit_settings(ui: &mut egui::Ui, snap: &Snapshot, orbit: &mut orbiters_core::settings::OrbitSettings) -> bool {
     use orbiters_core::settings::MenuDisplay;
     let mut apply = false;
-    let ways = [SegOption::new(MenuDisplay::AroundVrchat, "Around VRChat's menus"), SegOption::new(MenuDisplay::Floating, "Floating"), SegOption::new(MenuDisplay::AvatarScreen, "Avatar's screen")];
+    // Two different things, each whole without the other.
+    let ways = [SegOption::new(MenuDisplay::AvatarScreen, "Avatar's screen"), SegOption::new(MenuDisplay::Floating, "Floating")];
     let said = match orbit.display {
-        MenuDisplay::AroundVrchat => "Panels appear around VRChat's Action Menu wheel and Quick Menu as they open, and go when they close: worlds in 3D, YouTube, previous instances, what plays, 3D pictures and all of N4N0's tools. In desktop mode they are windows over VRChat's; hold Left Alt to point at them while the wheel has the mouse.",
-        MenuDisplay::Floating => "N4N0's menu floats before you in VR, opened by the watch on your wrist or its controller binding, even with an avatar that has N4N0's screen. No panels around VRChat's menus.",
-        MenuDisplay::AvatarScreen => "N4N0's menu shows on your avatar's N4N0 screen when it has one, and floats before you when it does not. No panels around VRChat's menus.",
+        MenuDisplay::AvatarScreen => "N4N0's own menu, opened by its dedicated button or the watch on your wrist, shows on your avatar's N4N0 screen when it has one, and floats before you when it does not.",
+        MenuDisplay::Floating => "N4N0's own menu, opened by its dedicated button or the watch on your wrist, floats before you, even with an avatar that has N4N0's screen.",
     };
-    widgets::field(ui, "Orbiters menu in VRChat", Some(said), 420.0, |ui| {
+    widgets::field(ui, "N4N0's menu", Some(said), 300.0, |ui| {
         apply |= widgets::segmented(ui, "orbit-display", &mut orbit.display, &ways, true);
     });
-    if orbit.display != MenuDisplay::AroundVrchat {
-        return apply;
-    }
     widgets::separator(ui);
-    widgets::field(ui, "Around the Action Menu's wheel", Some("Panels around the wheel, opened with R in desktop mode, or by holding the menu button in VR."), 48.0, |ui| {
+    widgets::field(ui, "Around the Action Menu's wheel", Some("Orbiters around VRChat's own wheel, with it, whatever N4N0's menu does: opened with R in desktop mode, or by holding the menu button in VR."), 48.0, |ui| {
         apply |= widgets::toggle(ui, "orbit-wheel", &mut orbit.wheel);
     });
     widgets::separator(ui);
-    widgets::field(ui, "Around the Quick Menu", Some("Panels around the Quick Menu, opened with Esc in desktop mode, or by a short press of the menu button in VR. N4N0's pages open in front of it."), 48.0, |ui| {
+    widgets::field(ui, "Around the Quick Menu", Some("Orbiters beside VRChat's own Quick Menu, with it, whatever N4N0's menu does: opened with Esc in desktop mode, or by a short press of the menu button in VR."), 48.0, |ui| {
         apply |= widgets::toggle(ui, "orbit-quick-menu", &mut orbit.quick_menu);
     });
     widgets::separator(ui);
     let sizes = [SegOption::new(0.8f32, "Smaller"), SegOption::new(1.0f32, "As measured"), SegOption::new(1.25f32, "Larger")];
     widgets::field(ui, "Panels' size in VR", Some("If they sit too near or too far from VRChat's menu in your headset."), 300.0, |ui| {
         apply |= widgets::segmented(ui, "orbit-vr-size", &mut orbit.vr_size, &sizes, true);
+    });
+    widgets::separator(ui);
+    use orbiters_core::settings::VrMotion;
+    let motions = [SegOption::new(VrMotion::Springy, "Springy"), SegOption::new(VrMotion::Matched, "Match VRChat")];
+    let said = match orbit.vr_motion {
+        VrMotion::Springy => "The tiles around VRChat's menus each follow your hand on a little spring of their own.",
+        VrMotion::Matched => "The tiles around VRChat's menus stay rigid, and trail your hand as VRChat's menu does.",
+    };
+    widgets::field(ui, "How they follow your hand in VR", Some(said), 300.0, |ui| {
+        apply |= widgets::segmented(ui, "orbit-vr-motion", &mut orbit.vr_motion, &motions, true);
+    });
+    widgets::separator(ui);
+    let smoothing = |v: f32| if v == 0.0 { "None".to_string() } else { format!("{v:.0} ms") };
+    widgets::field(ui, "Smoothing on the Quick Menu", Some("How softly what is rigid follows your hand: what opens in front of VRChat's menu, always, and the tiles when they match it. About 35 ms lines up with VRChat."), 300.0, |ui| {
+        apply |= widgets::slider(ui, "orbit-vr-smoothing-quick-menu", &mut orbit.vr_smoothing_quick_menu_ms, 0.0..=150.0, 5.0, smoothing);
+    });
+    widgets::field(ui, "Smoothing on the wheel", Some("The same around VRChat's Action Menu. About 20 ms lines up with VRChat."), 300.0, |ui| {
+        apply |= widgets::slider(ui, "orbit-vr-smoothing-wheel", &mut orbit.vr_smoothing_wheel_ms, 0.0..=150.0, 5.0, smoothing);
     });
     let now = if !orbiters_core::osc::VRCHAT_RUNS_HERE {
         Some("VRChat runs on another computer here, so nothing can appear around its menus.".to_string())

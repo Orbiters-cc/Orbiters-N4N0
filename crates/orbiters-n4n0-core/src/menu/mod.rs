@@ -930,6 +930,8 @@ pub struct Menu {
     /// `instances_note` says why there are none), and the page of them shown (from 0).
     pub instances: Vec<InstanceRow>,
     pub instances_ready: bool,
+    /// How the last invite went, once answered: for what shows it on the button pressed.
+    pub invite_went: Option<bool>,
     pub instances_note: String,
     pub instance_page: usize,
     /// The location an Invite me was asked for (Try again on Add Orbiters as a friend asks it again), and whether
@@ -2000,6 +2002,11 @@ impl Menu {
         }
     }
 
+    /// More results, for what shows them all in one list rather than page by page.
+    pub fn want_more_results(&mut self) -> Vec<Effect> {
+        self.fetch_more()
+    }
+
     /// Thumbnails of the results page shown, then of the next page (fetched ahead, so they show as it turns).
     pub fn thumbnails(&self) -> Vec<Effect> {
         let start = (self.result_page * RESULTS_PER_PAGE).min(self.results.len());
@@ -2345,7 +2352,17 @@ impl Menu {
         self.instance_page = self.instance_page.min(pages - 1);
     }
 
+    /// Invite me, to a given instance, from what lists them otherwise than this menu's page.
+    pub fn invite_to(&mut self, location: String, world: &str) -> Vec<Effect> {
+        if self.invite_waiting {
+            return Vec::new();
+        }
+        self.notice = Some(format!("Asking Orbiters to invite you to {world}…"));
+        self.ask_invite(location)
+    }
+
     fn ask_invite(&mut self, location: String) -> Vec<Effect> {
+        self.invite_went = None;
         self.inviting = Some(location.clone());
         self.invite_waiting = true;
         vec![Effect::InviteMe { location }]
@@ -2354,6 +2371,7 @@ impl Menu {
     /// Orbiters answered the last Invite me: sent, the page says so; its account to befriend first, Add Orbiters as a
     /// friend shows; failed, why.
     pub fn invite_answered(&mut self, answer: InviteAnswer) {
+        self.invite_went = Some(matches!(answer, InviteAnswer::Sent));
         self.invite_waiting = false;
         match answer {
             InviteAnswer::Sent => {

@@ -32,5 +32,5 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         return;
     }
     let c = textureSampleLevel(wide, wide_sampler, (xy + vec2<f32>(0.5)) / size, 0.0);
-    textureStore(face, vec2<i32>(i32(gid.x + params.size.w), i32(gid.y)), vec4<f32>(c.rgb, 1.0));
+    textureStore(face, vec2<i32>(i32(gid.x + params.size.w), i32(gid.y)), c);
 }

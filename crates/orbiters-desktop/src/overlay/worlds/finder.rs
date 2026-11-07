@@ -16,10 +16,10 @@ use std::time::{Duration, Instant};
 /// What the panel browses while nothing is typed.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum Section {
-    /// The worlds members captured in 3D (Orbiters' listing, as before).
+    /// The worlds members captured in 3D (Orbiters' listing, as before): what the panel opens on, as it is what it is for.
+    #[default]
     Captures,
     /// VRChat's popular worlds (Orbiters' featured worlds without a VRChat session).
-    #[default]
     Popular,
     /// The worlds with the most people now (VRChat only).
     Active,

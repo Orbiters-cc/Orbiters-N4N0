@@ -119,11 +119,14 @@ impl StartView {
 }
 
 /// Where a capture stands in the play space: renderer coordinates (Unity's) to SteamVR's standing ones,
-/// `p ↦ rotation · p + offset` (a reflection: Unity is left-handed).
+/// `p ↦ size · rotation · p + offset` (a reflection: Unity is left-handed). Seen from an eye, a capture at a size is the
+/// same picture as the capture at its own size seen from the eye's place divided by that size, all of it nearer or
+/// farther by the same factor: only the camera's translation knows of it.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Placement {
     pub rotation: [[f32; 3]; 3],
     pub offset: V3,
+    pub size: f32,
 }
 
 impl Placement {
@@ -143,20 +146,215 @@ impl Placement {
         let eye = view.eye();
         let ground_point = [eye[0], view.ground(), eye[2]];
         let anchor = [h[0], 0.0, h[2]];
-        Self { rotation, offset: sub(anchor, mat_vec(&rotation, ground_point)) }
+        Self { rotation, offset: sub(anchor, mat_vec(&rotation, ground_point)), size: 1.0 }
     }
 
     #[cfg(test)]
     pub fn apply(&self, p: V3) -> V3 {
-        add(mat_vec(&self.rotation, p), self.offset)
+        add(scale(mat_vec(&self.rotation, p), self.size), self.offset)
     }
 
     /// A play-space point back in the capture's coordinates (the rotation is orthonormal).
     #[cfg(test)]
     pub fn invert(&self, q: V3) -> V3 {
-        let d = sub(q, self.offset);
+        let d = scale(sub(q, self.offset), 1.0 / self.size);
         let r = &self.rotation;
         [r[0][0] * d[0] + r[1][0] * d[1] + r[2][0] * d[2], r[0][1] * d[0] + r[1][1] * d[1] + r[2][1] * d[2], r[0][2] * d[0] + r[1][2] * d[1] + r[2][2] * d[2]]
+    }
+}
+
+/// How far from its middle a capture standing small reaches, in the room, once out of the panel.
+pub const SMALL_RADIUS_M: f32 = 0.3;
+/// How much further than that a hand can take hold of it; how far from its place in the panel it goes back there when let go.
+const SMALL_REACH_M: f32 = 0.15;
+const SMALL_DOCKS_WITHIN_M: f32 = 0.12;
+/// How much a full stick zooms a second, and how far a thumb's rest does nothing.
+const SMALL_ZOOM_PER_S: f32 = 1.4;
+const SMALL_STICK_REST: f32 = 0.25;
+/// How much of a capture it can show around its middle, in the capture's metres: from a table to a town.
+const SMALL_REACHES: (f32, f32) = (0.5, 150.0);
+/// How fast it settles where it goes, and how near that is there.
+const SMALL_SETTLES_PER_S: f32 = 14.0;
+const SMALL_SETTLED_M: f32 = 0.002;
+
+/// Where a capture standing small lies in a panel: as that panel turns, this large, this far behind it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SmallDock {
+    pub rotation: [[f32; 3]; 3],
+    pub anchor: V3,
+    pub radius: f32,
+}
+
+impl SmallDock {
+    /// Behind the middle of a hole in a panel, whose place is `at` (its Z towards who looks), looking into the panel as its
+    /// start view looks.
+    pub fn behind(view: &StartView, at: &Matrix34, radius: f32) -> Self {
+        let (s, c) = (-view.yaw()).sin_cos();
+        let turned = [[c, 0.0, s], [0.0, 1.0, 0.0], [s, 0.0, -c]];
+        Self { rotation: mat_mul(&rotation_of(at), &turned), anchor: sub(position(at), scale(axis(at, 2), radius * 0.7)), radius }
+    }
+}
+
+/// A capture standing small before the person, as Enzo asked: "a small element in front of us that we can grab with the
+/// other hand, zoom using the joystick (up / down)". Zooming, it stays as large in the room: closer, it shows less of the
+/// capture, larger. What is farther from its middle than it reaches is not drawn. In a panel with a place for it, it
+/// follows that place until a hand takes it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Small {
+    pub rotation: [[f32; 3]; 3],
+    /// Where its middle is, in the room.
+    pub anchor: V3,
+    /// How far around its middle it shows the capture, in the capture's metres.
+    reach: f32,
+    /// How far it reaches in the room now.
+    radius: f32,
+    held: Option<SmallHold>,
+    grips: [bool; 2],
+    /// A hand took it out of its place, and it has not gone back.
+    pub taken: bool,
+    /// It is in a place in a panel, or on its way there; there.
+    pub docked: bool,
+    settled: bool,
+    /// A hand is near enough to take it.
+    pub near: bool,
+    /// A stick zoomed it.
+    pub zoomed: bool,
+}
+
+/// The hand holding it, and it as that hand holds it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct SmallHold {
+    hand: usize,
+    rotation: [[f32; 3]; 3],
+    anchor: V3,
+}
+
+fn rotation_of(m: &Matrix34) -> [[f32; 3]; 3] {
+    [[m.m[0][0], m.m[0][1], m.m[0][2]], [m.m[1][0], m.m[1][1], m.m[1][2]], [m.m[2][0], m.m[2][1], m.m[2][2]]]
+}
+
+fn transposed(m: &[[f32; 3]; 3]) -> [[f32; 3]; 3] {
+    [[m[0][0], m[1][0], m[2][0]], [m[0][1], m[1][1], m[2][1]], [m[0][2], m[1][2], m[2][2]]]
+}
+
+/// `k` of the way from rotation `a` to `b`, still a rotation (or reflection, as they both are).
+fn towards(a: &[[f32; 3]; 3], b: &[[f32; 3]; 3], k: f32) -> [[f32; 3]; 3] {
+    let mix: Vec<V3> = (0..3).map(|i| add(scale([a[0][i], a[1][i], a[2][i]], 1.0 - k), scale([b[0][i], b[1][i], b[2][i]], k))).collect();
+    let unit = |v: V3| scale(v, 1.0 / length(v).max(1e-5));
+    let x = unit(mix[0]);
+    let y = unit(sub(mix[1], scale(x, dot(mix[1], x))));
+    let z = unit(sub(sub(mix[2], scale(x, dot(mix[2], x))), scale(y, dot(mix[2], y))));
+    [[x[0], y[0], z[0]], [x[1], y[1], z[1]], [x[2], y[2], z[2]]]
+}
+
+impl Small {
+    /// Half a metre before `head`, at its chest, turned as the capture would be around it, showing `reach` metres of
+    /// the capture around its middle.
+    pub fn new(view: &StartView, head: &Matrix34, reach: f32) -> Self {
+        let rotation = Placement::at(view, head).rotation;
+        let back = axis(head, 2);
+        let level = length([back[0], 0.0, back[2]]).max(1e-3);
+        let ahead = [-back[0] / level, 0.0, -back[2] / level];
+        let anchor = add(add(position(head), scale(ahead, 0.55)), [0.0, -0.15, 0.0]);
+        Self { rotation, anchor, reach: reach.clamp(SMALL_REACHES.0, SMALL_REACHES.1), radius: SMALL_RADIUS_M, held: None, grips: [false; 2], taken: false, docked: false, settled: false, near: false, zoomed: false }
+    }
+
+    /// Already in its place in a panel, as when it first shows there.
+    pub fn at_dock(mut self, dock: &SmallDock) -> Self {
+        (self.rotation, self.anchor, self.radius) = (dock.rotation, dock.anchor, dock.radius);
+        (self.docked, self.settled) = (true, true);
+        self
+    }
+
+    /// How large it stands against the capture.
+    pub fn size(&self) -> f32 {
+        self.radius / self.reach
+    }
+
+    /// Where a capture whose middle is `middle` stands.
+    pub fn placement(&self, middle: V3) -> Placement {
+        let size = self.size();
+        Placement { rotation: self.rotation, offset: sub(self.anchor, scale(mat_vec(&self.rotation, middle), size)), size }
+    }
+
+    /// How far from its middle it shows the capture, in the capture's metres.
+    pub fn reach(&self) -> f32 {
+        self.reach
+    }
+
+    pub fn radius(&self) -> f32 {
+        self.radius
+    }
+
+    pub fn held(&self) -> bool {
+        self.held.is_some()
+    }
+
+    /// Back to its place in the panel, from wherever a hand left it.
+    pub fn bring_back(&mut self) {
+        (self.taken, self.settled, self.held) = (false, false, None);
+    }
+
+    /// One frame of the hands: their poses, grips and sticks' up and down, and where in a panel it may lie. A grip closing
+    /// near it takes it; it follows that hand until the grip opens, going back to its place if let go near it; that hand's
+    /// stick zooms it.
+    pub fn step(&mut self, hands: [Option<Matrix34>; 2], grips: [bool; 2], sticks: [f32; 2], seconds: f32, dock: Option<SmallDock>) {
+        let was = std::mem::replace(&mut self.grips, grips);
+        if let Some(hold) = self.held {
+            if !grips[hold.hand] || hands[hold.hand].is_none() {
+                self.held = None;
+                if dock.is_some_and(|d| length(sub(self.anchor, d.anchor)) <= SMALL_DOCKS_WITHIN_M) {
+                    self.taken = false;
+                    self.settled = false;
+                }
+            }
+        }
+        let grasp = self.radius.max(0.05) + SMALL_REACH_M;
+        let within = |pose: &Matrix34| length(sub(position(pose), self.anchor)) <= grasp;
+        self.near = self.held.is_none() && hands.iter().flatten().any(within);
+        if self.held.is_none() {
+            for hand in 0..2 {
+                let Some(pose) = hands[hand].as_ref().filter(|_| grips[hand] && !was[hand]) else { continue };
+                if within(pose) {
+                    let inverse = transposed(&rotation_of(pose));
+                    self.held = Some(SmallHold { hand, rotation: mat_mul(&inverse, &self.rotation), anchor: mat_vec(&inverse, sub(self.anchor, position(pose))) });
+                    self.taken = true;
+                    self.settled = false;
+                    self.near = false;
+                    break;
+                }
+            }
+        }
+        let settling = 1.0 - (-seconds * SMALL_SETTLES_PER_S).exp();
+        self.docked = false;
+        if let Some(hold) = self.held {
+            if let Some(pose) = hands[hold.hand].as_ref() {
+                let turned = rotation_of(pose);
+                self.rotation = mat_mul(&turned, &hold.rotation);
+                self.anchor = add(mat_vec(&turned, hold.anchor), position(pose));
+                let stick = sticks[hold.hand];
+                if stick.abs() > SMALL_STICK_REST {
+                    self.reach = (self.reach * (-stick * SMALL_ZOOM_PER_S * seconds).exp()).clamp(SMALL_REACHES.0, SMALL_REACHES.1);
+                    self.zoomed = true;
+                }
+            }
+            self.radius += (SMALL_RADIUS_M - self.radius) * settling;
+            return;
+        }
+        match dock.filter(|_| !self.taken) {
+            Some(d) => {
+                self.docked = true;
+                if self.settled {
+                    (self.rotation, self.anchor, self.radius) = (d.rotation, d.anchor, d.radius);
+                } else {
+                    self.rotation = towards(&self.rotation, &d.rotation, settling);
+                    self.anchor = add(self.anchor, scale(sub(d.anchor, self.anchor), settling));
+                    self.radius += (d.radius - self.radius) * settling;
+                    self.settled = length(sub(self.anchor, d.anchor)) < SMALL_SETTLED_M && (self.radius - d.radius).abs() < SMALL_SETTLED_M;
+                }
+            }
+            None => self.radius += (SMALL_RADIUS_M - self.radius) * settling,
+        }
     }
 }
 
@@ -233,7 +431,7 @@ impl Cube {
         // World (play space) to camera rows: right, down, forward; then the capture into the play space.
         let rows = [right, down, normal];
         let r = mat_mul(&rows, &placement.rotation);
-        let t = mat_vec(&rows, sub(placement.offset, eye));
+        let t = scale(mat_vec(&rows, sub(placement.offset, eye)), 1.0 / placement.size);
         Camera { r, t, fx: focal, fy: focal, cx: mid + dot(rel, right) * per_metre, cy: mid + dot(rel, down) * per_metre, width: w, height: w }
     }
 
@@ -353,7 +551,7 @@ impl PlayCamera {
     pub fn camera(&self, placement: &Placement) -> Camera {
         Camera {
             r: mat_mul(&self.rows, &placement.rotation),
-            t: mat_vec(&self.rows, sub(placement.offset, self.eye)),
+            t: scale(mat_vec(&self.rows, sub(placement.offset, self.eye)), 1.0 / placement.size),
             fx: self.fx,
             fy: self.fy,
             cx: self.cx,
@@ -424,7 +622,7 @@ pub fn eye_camera(view: &Matrix34, tangents: [f32; 4], width: u32, height: u32, 
     let fy = height as f32 / (hi - lo);
     Camera {
         r: mat_mul(&rows, &placement.rotation),
-        t: mat_vec(&rows, sub(placement.offset, position(view))),
+        t: scale(mat_vec(&rows, sub(placement.offset, position(view))), 1.0 / placement.size),
         fx,
         fy,
         cx: -l * fx - 0.5,
@@ -480,6 +678,139 @@ mod tests {
 
     fn close(a: V3, b: V3, tol: f32) -> bool {
         (0..3).all(|i| (a[i] - b[i]).abs() <= tol)
+    }
+
+    /// A capture at a size looks from an eye exactly as if it were that large: what the renderer is given says the same.
+    #[test]
+    fn a_placement_at_a_size_projects_where_the_point_stands_in_the_room() {
+        let view = StartView { position: [1.0, 2.0, 3.0], target: [4.0, 1.0, 2.0], floor: None, eye_height: None };
+        let head = head_at(0.3, 1.7, -0.2, 0.7);
+        let small = Small::new(&view, &head, 6.0);
+        let middle = view.eye();
+        let placement = small.placement(middle);
+        assert!(close(placement.apply(middle), small.anchor, 1e-5), "its middle stands at its anchor");
+        // A point as far from the middle as it shows is as far from its anchor as it reaches in the room.
+        let far = placement.apply(add(middle, [small.reach(), 0.0, 0.0]));
+        assert!((length(sub(far, small.anchor)) - SMALL_RADIUS_M).abs() < 1e-4);
+        // Through the camera, where the room says.
+        let tangents = [-1.39, 1.24, -1.47, 1.45];
+        let camera = eye_camera(&head, tangents, 800, 800, &placement);
+        let direct = eye_camera(&head, tangents, 800, 800, &Placement { rotation: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]], offset: [0.0; 3], size: 1.0 });
+        for p in [middle, add(middle, [0.5, 0.1, -0.2]), add(middle, [-1.0, 0.4, 0.8])] {
+            let at = mat_vec(&camera.r, p);
+            let (x, y, z) = (at[0] + camera.t[0], at[1] + camera.t[1], at[2] + camera.t[2]);
+            let (u, v) = (camera.fx * x / z + camera.cx, camera.fy * y / z + camera.cy);
+            let d = mat_vec(&direct.r, placement.apply(p));
+            let (dx, dy, dz) = (d[0] + direct.t[0], d[1] + direct.t[1], d[2] + direct.t[2]);
+            assert!(dz > 0.0, "in front");
+            assert!((u - (direct.fx * dx / dz + direct.cx)).abs() < 0.05 && (v - (direct.fy * dy / dz + direct.cy)).abs() < 0.05, "{u} {v}");
+        }
+    }
+
+    fn small_for_hands() -> Small {
+        let view = StartView { position: [0.0, 1.6, 0.0], target: [0.0, 1.6, -1.0], floor: None, eye_height: None };
+        Small::new(&view, &head_at(0.0, 1.7, 0.0, 0.0), 6.0)
+    }
+
+    #[test]
+    fn a_hand_near_it_takes_it_and_its_stick_zooms_it_and_only_that_hand() {
+        let mut small = small_for_hands();
+        let start = small;
+        let near = head_at(small.anchor[0] + 0.2, small.anchor[1], small.anchor[2], 0.0);
+        let away = head_at(small.anchor[0] + 2.0, small.anchor[1], small.anchor[2], 0.0);
+        // Too far: a grip does nothing, and a grip already closed when it comes near does not take it either.
+        small.step([Some(away), None], [true, false], [1.0, 0.0], 0.1, None);
+        assert!(!small.held() && !small.near);
+        small.step([Some(near), None], [true, false], [1.0, 0.0], 0.1, None);
+        assert!(!small.held() && small.near);
+        assert_eq!(small.reach(), start.reach(), "nothing held, the stick zooms nothing");
+        small.step([Some(near), None], [false, false], [0.0, 0.0], 0.1, None);
+        small.step([Some(near), None], [true, false], [0.0, 0.0], 0.1, None);
+        assert!(small.held() && small.taken && !small.near);
+        assert!(!small.zoomed);
+        // It stays where it was as it is taken, and follows the hand, turning with it.
+        assert!(close(small.anchor, start.anchor, 1e-5));
+        let moved = head_at(near.m[0][3] + 0.1, near.m[1][3] + 0.3, near.m[2][3], 1.0);
+        small.step([Some(moved), None], [true, false], [0.0, 0.0], 0.1, None);
+        assert!((length(sub(small.anchor, position(&moved))) - 0.2).abs() < 1e-4, "at the same distance from the hand");
+        assert!(small.rotation != start.rotation);
+        // The other hand's stick does nothing, a resting thumb neither, its own does.
+        let reach = small.reach();
+        small.step([Some(moved), None], [true, false], [0.1, 1.0], 0.5, None);
+        assert_eq!(small.reach(), reach);
+        assert!(!small.zoomed);
+        small.step([Some(moved), None], [true, false], [1.0, 0.0], 0.5, None);
+        assert!(small.reach() < reach, "up: closer, it shows less");
+        assert!(small.zoomed);
+        small.step([Some(moved), None], [true, false], [-1.0, 0.0], 0.5, None);
+        assert!((small.reach() - reach).abs() < reach * 0.01);
+        // Zooming, it stays as large in the room.
+        assert!((small.radius() - SMALL_RADIUS_M).abs() < 1e-3);
+        // Let go, it stays, and no stick moves it.
+        let anchor = small.anchor;
+        small.step([Some(near), None], [false, false], [1.0, 0.0], 0.5, None);
+        assert!(!small.held() && small.taken);
+        assert_eq!(small.anchor, anchor);
+    }
+
+    /// Enzo: "it follows the menu until we grab it".
+    #[test]
+    fn in_a_panel_it_follows_its_place_until_taken_and_goes_back_when_let_go_there() {
+        let view = StartView { position: [0.0, 1.6, 0.0], target: [0.0, 1.6, -1.0], floor: None, eye_height: None };
+        let sheet = head_at(0.3, 1.3, -0.4, 0.2);
+        let dock = SmallDock::behind(&view, &sheet, 0.08);
+        assert!(dot(sub(dock.anchor, position(&sheet)), axis(&sheet, 2)) < 0.0, "behind the panel, as seen by who faces it");
+        // Its start view looks into the panel.
+        let d = mat_vec(&dock.rotation, sub([view.target[0], view.target[1], -view.target[2]], view.eye()));
+        assert!(dot(d, axis(&sheet, 2)) < -0.99, "{d:?}");
+        let mut small = small_for_hands().at_dock(&dock);
+        assert!(small.docked);
+        assert_eq!(small.radius(), 0.08);
+        // The panel moves: so does it, at once.
+        let elsewhere = head_at(0.6, 1.5, -0.3, -0.4);
+        let dock2 = SmallDock::behind(&view, &elsewhere, 0.08);
+        small.step([None, None], [false; 2], [0.0; 2], 1.0 / 90.0, Some(dock2));
+        assert_eq!(small.anchor, dock2.anchor);
+        assert_eq!(small.rotation, dock2.rotation);
+        // A hand takes it: out of its place, growing; the panel no longer moves it.
+        let hand = head_at(dock2.anchor[0], dock2.anchor[1] + 0.1, dock2.anchor[2], 0.0);
+        small.step([Some(hand), None], [true, false], [0.0; 2], 1.0 / 90.0, Some(dock2));
+        assert!(small.taken && !small.docked);
+        for _ in 0..90 {
+            small.step([Some(hand), None], [true, false], [0.0; 2], 1.0 / 90.0, Some(dock));
+        }
+        assert!((small.radius() - SMALL_RADIUS_M).abs() < 1e-2, "{}", small.radius());
+        assert!(close(small.anchor, dock2.anchor, 1e-3), "it went with the hand, which stayed");
+        // Let go far from its place: it stays there, wherever the panel goes.
+        let far = head_at(hand.m[0][3] + 0.8, hand.m[1][3], hand.m[2][3], 0.0);
+        small.step([Some(far), None], [true, false], [0.0; 2], 1.0 / 90.0, Some(dock));
+        small.step([Some(far), None], [false, false], [0.0; 2], 1.0 / 90.0, Some(dock));
+        assert!(small.taken && !small.docked);
+        let there = small.anchor;
+        small.step([None, None], [false; 2], [0.0; 2], 0.1, Some(dock2));
+        assert_eq!(small.anchor, there);
+        // Asked back, it settles in its place and shrinks to it, and then follows it again.
+        small.bring_back();
+        for _ in 0..200 {
+            small.step([None, None], [false; 2], [0.0; 2], 1.0 / 90.0, Some(dock));
+        }
+        assert!(small.docked && !small.taken);
+        assert_eq!(small.anchor, dock.anchor);
+        assert_eq!(small.radius(), 0.08);
+        small.step([None, None], [false; 2], [0.0; 2], 1.0 / 90.0, Some(dock2));
+        assert_eq!(small.anchor, dock2.anchor);
+        // Let go near its place, it goes back by itself.
+        let at = head_at(dock2.anchor[0], dock2.anchor[1], dock2.anchor[2], 0.0);
+        small.step([Some(at), None], [true, false], [0.0; 2], 1.0 / 90.0, Some(dock2));
+        assert!(small.taken);
+        small.step([Some(at), None], [false, false], [0.0; 2], 1.0 / 90.0, Some(dock2));
+        assert!(!small.taken && small.docked);
+        // With no place to lie, it is simply free, at its full size.
+        let mut free = small_for_hands().at_dock(&dock);
+        for _ in 0..90 {
+            free.step([None, None], [false; 2], [0.0; 2], 1.0 / 90.0, None);
+        }
+        assert!(!free.docked && (free.radius() - SMALL_RADIUS_M).abs() < 1e-2);
     }
 
     fn head_at(x: f32, y: f32, z: f32, yaw: f32) -> Matrix34 {

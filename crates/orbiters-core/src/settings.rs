@@ -141,18 +141,28 @@ pub enum CoverageOverlay {
     RightHand,
 }
 
-/// How the Orbiters menu appears while VRChat runs (Settings, VRChat menus).
+/// Where N4N0's own menu shows, the one opened by its dedicated button or the watch. It has nothing to do with the panels around VRChat's menus ([`OrbitSettings::wheel`],
+/// [`OrbitSettings::quick_menu`]), which go on or off whatever this says (Enzo, 2026-11-07: "completely independent").
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MenuDisplay {
-    /// Panels around VRChat's Action Menu wheel and Quick Menu, appearing and going with them.
+    /// On the avatar's N4N0 screen when it has one, floating otherwise. (`around_vrchat`: what a setting from when this choice also held the panels says.)
     #[default]
-    AroundVrchat,
-    /// N4N0's menu floating in the play space, opened by the watch or the binding, even with an avatar that has N4N0's
-    /// screen.
-    Floating,
-    /// N4N0's menu on the avatar's N4N0 screen when it has one, floating otherwise.
+    #[serde(alias = "around_vrchat")]
     AvatarScreen,
+    /// Floating in the play space, even with an avatar that has N4N0's screen.
+    Floating,
+}
+
+/// How the panels around VRChat's menus follow the hand in VR. VRChat draws its menu from a pose taken a frame ago, so it trails the hand by what depends on each computer's frame rate.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VrMotion {
+    /// Each tile around VRChat's menus a little behind the hand on its own spring: never in step with VRChat's menu, on purpose, on any computer.
+    #[default]
+    Springy,
+    /// Rigid, following the hand as smoothly as [`OrbitSettings::vr_smoothing_quick_menu_ms`] and [`OrbitSettings::vr_smoothing_wheel_ms`] say, as what opens in front of VRChat's menu always is.
+    Matched,
 }
 
 /// The panels around VRChat's own menus (`overlay::orbit`).
@@ -167,6 +177,10 @@ pub struct OrbitSettings {
     /// How large the panels are in VR against where they are measured to be, one of [`OrbitSettings::VR_SIZES`]: VRChat
     /// scales its menus with things only the headset shows.
     pub vr_size: f32,
+    pub vr_motion: VrMotion,
+    /// How smoothly what is rigid follows the hand on the Quick Menu, and on the wheel: the time constants of their filters, in milliseconds. Enzo, in the headset: VRChat's own are about 35 ms and 20 ms. VRChat's menu moves as if smoothed, which no delay matched (Enzo: "even at 1.5 frames ahead").
+    pub vr_smoothing_quick_menu_ms: f32,
+    pub vr_smoothing_wheel_ms: f32,
 }
 
 impl OrbitSettings {
@@ -174,12 +188,12 @@ impl OrbitSettings {
 
     /// The wheel's panels are wanted.
     pub fn around_wheel(&self) -> bool {
-        self.display == MenuDisplay::AroundVrchat && self.wheel
+        self.wheel
     }
 
     /// The Quick Menu's panels are wanted.
     pub fn around_quick_menu(&self) -> bool {
-        self.display == MenuDisplay::AroundVrchat && self.quick_menu
+        self.quick_menu
     }
 
     /// Any of the panels are wanted.
@@ -190,7 +204,7 @@ impl OrbitSettings {
 
 impl Default for OrbitSettings {
     fn default() -> Self {
-        Self { display: MenuDisplay::AroundVrchat, wheel: true, quick_menu: true, vr_size: 1.0 }
+        Self { display: MenuDisplay::AvatarScreen, wheel: true, quick_menu: true, vr_size: 1.0, vr_motion: VrMotion::Springy, vr_smoothing_quick_menu_ms: 35.0, vr_smoothing_wheel_ms: 20.0 }
     }
 }
 

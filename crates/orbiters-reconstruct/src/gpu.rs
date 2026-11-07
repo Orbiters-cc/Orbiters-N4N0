@@ -238,6 +238,7 @@ struct Kernels {
     ranges: wgpu::ComputePipeline,
     forward: wgpu::ComputePipeline,
     present: wgpu::ComputePipeline,
+    present_alpha: wgpu::ComputePipeline,
     /// The sky map in place of the constant background (crate::sky::SkyMap).
     sky_composite: wgpu::ComputePipeline,
     /// Only on a training device (the backward pass needs subgroup operations).
@@ -766,6 +767,7 @@ fn kernel_sources(sums: Option<GradientSums>, sum_lanes: u32) -> Vec<KernelSourc
         source("ranges", &[common, include_str!("shaders/ranges.wgsl")], &["main"]),
         source("raster forward", &[common, raster, include_str!("shaders/raster_forward.wgsl")], &["forward"]),
         source("present", &[common, include_str!("shaders/present.wgsl")], &["main"]),
+        source("present alpha", &[common, include_str!("shaders/present_alpha.wgsl")], &["main"]),
         source("sky composite", &[common, include_str!("shaders/sky_lookup.wgsl"), include_str!("shaders/sky_composite.wgsl")], &["composite"]),
     ];
     if let Some(sums) = sums {
@@ -1051,6 +1053,7 @@ impl Gpu {
             ranges: pipe("ranges", "main"),
             forward: pipe("raster forward", "forward"),
             present: pipe("present", "main"),
+            present_alpha: pipe("present alpha", "main"),
             sky_composite: pipe("sky composite", "composite"),
             training,
         };
@@ -2518,6 +2521,30 @@ impl Gpu {
         });
         let mut enc = self.device.create_command_encoder(&Default::default());
         self.dispatch(&mut enc, &self.k.present, &bind, (i.width.div_ceil(16), i.height.div_ceil(16)));
+        self.queue.submit([enc.finish()]);
+        if let Some(e) = block_on(invalid.pop()) {
+            eprintln!("splat view: {e}");
+        }
+    }
+
+    /// [`Gpu::present`] with what the splats left of the background as transparency, in premultiplied colour: for a
+    /// render over black with no sky map.
+    pub fn present_alpha(&self, target: &wgpu::TextureView) {
+        let Some(i) = self.image.as_ref() else { return };
+        let invalid = self.device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let layout = self.k.present_alpha.get_bind_group_layout(0);
+        let bind = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("present alpha"),
+            layout: &layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: self.frame.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: i.out_color.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(target) },
+                wgpu::BindGroupEntry { binding: 3, resource: i.out_state.as_entire_binding() },
+            ],
+        });
+        let mut enc = self.device.create_command_encoder(&Default::default());
+        self.dispatch(&mut enc, &self.k.present_alpha, &bind, (i.width.div_ceil(16), i.height.div_ceil(16)));
         self.queue.submit([enc.finish()]);
         if let Some(e) = block_on(invalid.pop()) {
             eprintln!("splat view: {e}");

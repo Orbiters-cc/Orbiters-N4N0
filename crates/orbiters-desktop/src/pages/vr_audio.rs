@@ -7,6 +7,7 @@ use super::{section, Cx, Job};
 use crate::audio_devices::{self, AudioEndpoint, Flow};
 use egui::{pos2, vec2, Align2, Sense, Ui};
 use orbiters_core::settings::VrAudioSettings;
+use orbiters_i18n::{fill, mark, tr};
 use orbiters_ui::icons;
 use orbiters_ui::theme::{self, Txt};
 use orbiters_ui::widgets::{self, Button, Size};
@@ -14,13 +15,9 @@ use orbiters_ui::widgets::{self, Button, Size};
 type Listed = (Result<Vec<AudioEndpoint>, String>, Result<Vec<AudioEndpoint>, String>);
 
 /// What the section says: on Windows as written, elsewhere without naming a system. SteamVR runs on Windows only, so
-/// elsewhere the choices wait for a computer where it does.
+/// elsewhere the choices wait for a computer where it does. Both are written with `mark` where they are called, and translated here.
 fn words(windows: &'static str, elsewhere: &'static str) -> &'static str {
-    if cfg!(windows) {
-        windows
-    } else {
-        elsewhere
-    }
+    tr(if cfg!(windows) { windows } else { elsewhere })
 }
 
 #[derive(Default)]
@@ -65,23 +62,23 @@ pub fn show(ui: &mut Ui, cx: &Cx, index: usize, state: &mut State, draft: &mut V
     }
 
     let subtitle = match &cx.snap.vr_audio.last {
-        Some(e) => format!("{} {}", e.text, when(e.utc_ms)),
-        None => words("Windows' sound devices while SteamVR runs", "The sound devices while SteamVR runs, on a computer where it does").to_string(),
+        Some(e) => when(&e.text, e.utc_ms),
+        None => words(mark("Windows' sound devices while SteamVR runs"), mark("The sound devices while SteamVR runs, on a computer where it does")).to_string(),
     };
     let mut apply = false;
-    section(ui, cx, index, icons::SPEAKER_HIGH, "When SteamVR starts", Some(&subtitle), |ui| {
+    section(ui, cx, index, icons::SPEAKER_HIGH, tr("When SteamVR starts"), Some(&subtitle), |ui| {
         let testing = state.test.is_some();
         let output_id = draft.output.as_ref().map(|e| present(e, &state.outputs));
         widgets::field(
             ui,
-            "Output in VR",
+            tr("Output in VR"),
             Some(words(
-                "The speakers or headphones Windows makes every app's default when SteamVR starts, set again over its first seconds as Virtual Desktop and SteamVR put their own.",
-                "The speakers or headphones that become every app's default when SteamVR starts.",
+                mark("The speakers or headphones Windows makes every app's default when SteamVR starts, set again over its first seconds as Virtual Desktop and SteamVR put their own."),
+                mark("The speakers or headphones that become every app's default when SteamVR starts."),
             )),
             96.0,
             |ui| {
-                let label = if testing { "Playing…" } else { "Test" };
+                let label = if testing { tr("Playing…") } else { tr("Test") };
                 let test = Button::new(label).icon(icons::SPEAKER_HIGH).size(Size::Sm).enabled(output_id.is_some() && !testing);
                 if test.show(ui).clicked() {
                     if let Some(id) = output_id.clone() {
@@ -93,14 +90,14 @@ pub fn show(ui: &mut Ui, cx: &Cx, index: usize, state: &mut State, draft: &mut V
         );
         apply |= choices(ui, &mut draft.output, &state.outputs);
         if let Some(e) = &state.test_error {
-            caption(ui, &format!("The test did not play: {e}"), theme::DANGER);
+            caption(ui, &tr!("The test did not play: {error}", error = e), theme::DANGER);
         }
         widgets::separator(ui);
         let input = words(
-            "The microphone Windows makes every app's default when SteamVR starts.",
-            "The microphone that becomes every app's default when SteamVR starts.",
+            mark("The microphone Windows makes every app's default when SteamVR starts."),
+            mark("The microphone that becomes every app's default when SteamVR starts."),
         );
-        widgets::field(ui, "Input in VR", Some(input), 0.0, |_| {});
+        widgets::field(ui, tr("Input in VR"), Some(input), 0.0, |_| {});
         apply |= choices(ui, &mut draft.input, &state.inputs);
         if let Some(input) = &draft.input {
             ui.add_space(4.0);
@@ -110,16 +107,16 @@ pub fn show(ui: &mut Ui, cx: &Cx, index: usize, state: &mut State, draft: &mut V
             state.mic = MicTest::default();
         }
         if let Some(e) = &state.error {
-            let unlisted = words("Windows did not list its sound devices", "The sound devices could not be listed");
-            caption(ui, &format!("{unlisted}: {e}"), theme::DANGER);
+            let unlisted = words(mark("Windows did not list its sound devices: {error}"), mark("The sound devices could not be listed: {error}"));
+            caption(ui, &fill(unlisted, &[("error", e)]), theme::DANGER);
         }
         widgets::separator(ui);
         widgets::field(
             ui,
-            "Put back the devices before",
+            tr("Put back the devices before"),
             Some(words(
-                "When SteamVR closes, the output and input Windows had before it started come back.",
-                "When SteamVR closes, the output and input from before it started come back.",
+                mark("When SteamVR closes, the output and input Windows had before it started come back."),
+                mark("When SteamVR closes, the output and input from before it started come back."),
             )),
             48.0,
             |ui| {
@@ -136,13 +133,13 @@ fn choices(ui: &mut Ui, choice: &mut Option<AudioEndpoint>, devices: &[AudioEndp
     ui.add_space(4.0);
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing = vec2(8.0, 8.0);
-        if source_chip(ui, "Don't change", choice.is_none()).clicked() && choice.is_some() {
+        if source_chip(ui, tr("Don't change"), choice.is_none()).clicked() && choice.is_some() {
             *choice = None;
             changed = true;
         }
         let found = choice.as_ref().and_then(|c| crate::controller::vr_audio::resolve(c, devices)).map(|e| e.id.clone());
         if let Some(c) = choice.as_ref().filter(|_| found.is_none()) {
-            source_chip(ui, &format!("{} (not connected)", c.name), true);
+            source_chip(ui, &tr!("{name} (not connected)", name = c.name), true);
         }
         for d in devices {
             let active = found.as_deref() == Some(d.id.as_str());
@@ -167,15 +164,15 @@ fn caption(ui: &mut Ui, text: &str, color: egui::Color32) {
     ui.add_space(4.0);
 }
 
-/// "at 21:03" today, else "on 30 Oct 2026, 21:03".
-fn when(utc_ms: u64) -> String {
+/// What the service did last, then "at 21:03" if it was today, else "on 30 Oct 2026, 21:03": each a whole sentence, so a language can put the time where it likes.
+fn when(text: &str, utc_ms: u64) -> String {
     let local = |secs: i64| {
         let t = time::OffsetDateTime::from_unix_timestamp(secs).ok()?;
         Some(time::UtcOffset::current_local_offset().map(|o| t.to_offset(o)).unwrap_or(t))
     };
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
     match (local((utc_ms / 1000) as i64), local(now)) {
-        (Some(t), Some(today)) if t.date() == today.date() => format!("at {:02}:{:02}", t.hour(), t.minute()),
-        _ => format!("on {}", super::local_time_unix(utc_ms / 1000)),
+        (Some(t), Some(today)) if t.date() == today.date() => tr!("{text} at {time}", text = text, time = format!("{:02}:{:02}", t.hour(), t.minute())),
+        _ => tr!("{text} on {date}", text = text, date = super::local_time_unix(utc_ms / 1000)),
     }
 }

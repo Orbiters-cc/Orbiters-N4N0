@@ -21,6 +21,9 @@ use orbiters_core::settings::{MenuLook, OrbitLayout, OrbitSettings, VrMotion};
 use std::path::PathBuf;
 
 mod settings_sheet;
+mod tracking_sheet;
+pub use tracking_sheet::{smoothing_at, Smoothed};
+use tracking_sheet::{draw_smoothing_bar, draw_tracking, tracking_caption, tracking_items};
 use settings_sheet::{draw_settings, draw_stepper_name, hue_color, language_name, settings_items, settings_caption, sound_name};
 pub use settings_sheet::{hue_at, language_after};
 #[cfg(test)]
@@ -211,6 +214,8 @@ pub enum Sheet {
     Talk,
     /// How these menus lie, move, sound and look.
     Settings,
+    /// Tracking smoothing, in milliseconds.
+    Tracking,
 }
 
 /// What can be chosen on the sheet of settings.
@@ -229,6 +234,10 @@ pub enum Pick {
     Sound(bool),
     /// The next place in the language picker, or the one before.
     Language(bool),
+    /// Tracking smoothing on or off.
+    Smoothing(bool),
+    /// Along a smoothing slider.
+    SmoothingBar(Smoothed),
 }
 
 /// The colours to choose from at a press.
@@ -407,6 +416,8 @@ pub struct Facts {
     /// VRChat in desktop mode: no fast walk, no tracking, and a real keyboard.
     pub desktop: bool,
     pub fast_walk: bool,
+    /// What would make it the better way, when it is on and goes through the play space.
+    pub fast_walk_lesser: Option<&'static str>,
     /// N4N0 is on: Ask has someone to talk to.
     pub n4n0: bool,
     /// What plays on the computer.
@@ -439,6 +450,12 @@ pub struct Facts {
     /// Talking with N4N0: where it stands, the conversation (whether the person said it, what was said), what N4N0 says right now, and how to call it by name when that is on.
     pub talk: TalkNow,
     pub talk_lines: Vec<(bool, String)>,
+    /// Tracking smoothing: on or off and each kind's milliseconds, and what the driver does now (`None`: not here).
+    pub tracking: Option<(bool, [u16; 3], String)>,
+    /// Why not, when it is not here.
+    pub tracking_note: String,
+    /// The smoothing slider held, and where.
+    pub smoothing_held: Option<(Smoothed, u16)>,
     pub n4n0_says: Option<String>,
     pub wake_word: Option<String>,
     /// The ring's cells can be picked by the number keys: on the desktop's wheel.
@@ -501,6 +518,8 @@ pub struct Item {
 /// What an item is drawn as.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Look {
+    /// A smoothing slider.
+    SmoothingBar(Smoothed),
     /// What plays in a strip's tile: its picture, its play or pause.
     PlayingSmall,
     /// Hides these parts, in so many words.
@@ -896,6 +915,7 @@ fn sheet_page_items(sheet: Sheet, facts: &Facts) -> Vec<Item> {
             out
         }
         Sheet::Settings => settings_items(facts),
+        Sheet::Tracking => tracking_items(facts),
         Sheet::Menu | Sheet::Worlds => Vec::new(),
     }
 }
@@ -1326,6 +1346,7 @@ fn sheet_says(facts: &Facts) -> &'static str {
         Some(Sheet::Results) => tr("Copy a link for the world's player, or drop it in the world."),
         Some(Sheet::Talk) => tr("Press the button, and ask N4N0 anything."),
         Some(Sheet::Settings) => tr("How these menus lie, move, sound and look."),
+        Some(Sheet::Tracking) => tr("Less jitter, a little more lag, in milliseconds."),
         Some(Sheet::All) => tr("Everything Orbiters can do from here."),
         _ => tr("Orbiters, beside VRChat's menu."),
     }
@@ -1340,6 +1361,7 @@ fn sheet_mark(facts: &Facts) -> (&'static str, Color32) {
         Some(Sheet::Results) => (icons::YOUTUBE_LOGO, tool_tint(Action::Page(Target::YouTube))),
         Some(Sheet::Talk) => (icons::MICROPHONE, look::LABEL),
         Some(Sheet::Settings) => (icons::GEAR_SIX, look::LABEL),
+        Some(Sheet::Tracking) => (icons::VIRTUAL_REALITY, tool_tint(Action::Page(Target::Tracking))),
         Some(Sheet::All) => (icons::SQUARES_FOUR, look::LABEL),
         Some(Sheet::Menu) if facts.sheet_title == "YouTube" => (icons::YOUTUBE_LOGO, tool_tint(Action::Page(Target::YouTube))),
         _ => (icons::N4N0_MARK, look::LABEL),
@@ -1353,7 +1375,7 @@ pub fn hit(items: &[Item], p: Pos2) -> Option<usize> {
 
 /// What the caption says of what is pointed at, in words for someone who has never seen any of this: a title and what it does.
 pub fn caption(action: Action, facts: &Facts) -> Option<(String, String)> {
-    if let Some(said) = settings_caption(action) {
+    if let Some(said) = settings_caption(action).or_else(|| tracking_caption(action)) {
         return Some(said);
     }
     let (a, b): (String, String) = match action {
@@ -1398,7 +1420,7 @@ pub fn caption(action: Action, facts: &Facts) -> Option<(String, String)> {
         Action::Page(Target::Suggest) => (tr("Suggest").into(), tr("Tell the Orbiters team what you would like.").into()),
         Action::Page(_) => return None,
         Action::Set(_) => return None,
-        Action::FastWalk => (tr("Fast walk").into(), if facts.fast_walk { tr("On: you walk faster. Press to turn it off.").into() } else { tr("Walk faster than VRChat lets you.").to_string() }),
+        Action::FastWalk => (tr("Fast walk").into(), if let Some(words) = facts.fast_walk_lesser.filter(|_| facts.fast_walk) { tr(words).to_string() } else if facts.fast_walk { tr("On: you walk faster. Press to turn it off.").into() } else { tr("Walk faster than VRChat lets you.").to_string() }),
         Action::PlayPause => match &facts.music {
             Some((title, playing)) => (title.clone(), if *playing { tr("Playing on your computer. Press to pause.").into() } else { tr("Paused on your computer. Press to play.").to_string() }),
             None => (tr("Nothing playing").into(), tr("What your computer plays shows here.").into()),
@@ -1693,6 +1715,9 @@ pub fn paint_sheet(p: &Painter, sheet: Sheet, facts: &Facts, hover: Option<usize
     }
     if sheet == Sheet::Settings {
         draw_settings(p, facts);
+    }
+    if sheet == Sheet::Tracking {
+        draw_tracking(p, facts);
     }
     if sheet == Sheet::Instances && facts.worlds_visited.is_empty() {
         widgets::icon(p, page.center() - vec2(0.0, 30.0), icons::CLOCK, 54.0, look::MUTED);
@@ -2322,6 +2347,7 @@ fn draw(p: &Painter, zone: Zone, item: &Item, facts: &Facts, hovered: bool, pres
             widgets::icon(p, pos2(left + 12.0, rect.center().y), icon, 24.0, ink);
             p.text(pos2(left + 34.0, rect.center().y), Align2::LEFT_CENTER, label, font, ink);
         }
+        Look::SmoothingBar(which) => draw_smoothing_bar(p, rect, which, facts, hovered),
         Look::SoundName => draw_stepper_name(p, rect, icons::SPEAKER_HIGH, sound_name(facts)),
         Look::LanguageName => draw_stepper_name(p, rect, icons::GLOBE, &language_name(facts)),
         Look::Swatch(i) => {
@@ -3409,6 +3435,17 @@ mod tests {
     }
 
     /// When N4N0 speaks it shows, wherever the person is in these menus.
+    /// In a headset, where the one thing to do about the lesser Fast walk is seen: on its own tile.
+    #[test]
+    fn fast_walk_s_tile_says_what_would_make_it_better() {
+        let on = Facts { fast_walk: true, ..facts() };
+        let said = |f: &Facts| caption(Action::FastWalk, f).unwrap().1;
+        assert!(said(&on).contains("On: you walk faster"));
+        let lesser = Facts { fast_walk_lesser: Some("Restart SteamVR once for the better Fast walk."), ..on.clone() };
+        assert_eq!(said(&lesser), "Restart SteamVR once for the better Fast walk.");
+        assert!(said(&Facts { fast_walk: false, ..lesser }).contains("Walk faster"), "off: nothing to do about it");
+    }
+
     #[test]
     fn what_n4n0_says_shows_in_the_caption_and_a_sheet_s_head() {
         let facts = Facts { n4n0_says: Some("It is sunny".into()), ..facts() };

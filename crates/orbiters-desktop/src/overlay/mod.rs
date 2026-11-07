@@ -628,6 +628,7 @@ fn session(args: &[String]) -> anyhow::Result<Ended> {
     }
     let mut actions = actions::Actions::load(&steamvr);
     let mut walk = walk::WalkBoost::new(actions.walk, actions.failed.clone());
+    walk.set_driver(Box::new(walk::SmoothLink::default()));
     walk.set_frame(steamvr.float_property(0, vr::prop::DISPLAY_FREQUENCY).filter(|hz| *hz > 1.0).map(|hz| Duration::from_secs_f32(1.0 / hz)));
     let mut devices = crate::tracking::DeviceKindsWatch::default();
     let mut state = ui::OverlayUi::default();
@@ -792,6 +793,10 @@ fn session(args: &[String]) -> anyhow::Result<Ended> {
             input_read,
         };
         t.walk.update(&steamvr, &moment);
+        t.state.walk_taken = t.walk.taken_lately(Instant::now());
+        if let Some(path) = t.walk.path_changed() {
+            backend.walk_path(path);
+        }
         // The triggers press where the index fingers point on N4N0's screen (N4N0 reads them only while its menu is open
         // there): each change goes, nothing else. The floating panel reads them held (read whether N4N0 is on or not).
         if input_read {

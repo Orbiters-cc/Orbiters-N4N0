@@ -9,7 +9,7 @@
 use crate::openvr::{DriverPose, Quaternion};
 
 /// The time constant at strength 1, seconds.
-pub const MAX_TIME_CONSTANT: f64 = 0.120;
+pub const MAX_TIME_CONSTANT: f64 = orbiters_smooth::MAX_TIME_CONSTANT_MS as f64 / 1000.0;
 /// Longer between two poses and the state starts again, seconds.
 pub const RESET_GAP: f64 = 0.5;
 /// A world-from-driver translation that moves more than this between two poses is a new driver space, metres.
@@ -231,6 +231,27 @@ mod tests {
                 assert!((angle_lag - expected * std::f64::consts::FRAC_PI_2).abs() < 0.01, "{rate} Hz: angle lag {angle_lag}");
                 assert_eq!(last.vec_velocity[0], 1.0 * (1.0 - strength as f64));
                 assert_eq!(last.vec_angular_velocity[1], std::f64::consts::FRAC_PI_2 * (1.0 - strength as f64));
+            }
+        }
+    }
+
+    /// What a slider says in milliseconds is what a device in steady motion trails by, at 72 poses a second as at 1000.
+    #[test]
+    fn a_slider_s_milliseconds_are_the_lag_at_any_rate() {
+        for ms in [20.0f64, 35.0, 78.0, 120.0] {
+            let strength = (ms / orbiters_smooth::MAX_TIME_CONSTANT_MS as f64) as f32;
+            for rate in [72.0, 90.0, 120.0, 1000.0] {
+                let mut filter = DeviceFilter::new();
+                let mut last = DriverPose::at([0.0; 3], Quaternion::IDENTITY);
+                let n = (2.0 * rate) as usize;
+                for i in 0..=n {
+                    let mut pose = DriverPose::at([i as f64 / rate, 0.0, 0.0], Quaternion::IDENTITY);
+                    assert!(filter.apply(&mut pose, strength, i as f64 / rate));
+                    last = pose;
+                }
+                let lag_ms = (n as f64 / rate - last.vec_position[0]) * 1000.0;
+                // The discrete filter sits within half a pose of the time constant.
+                assert!((lag_ms - ms).abs() < 0.6 * 1000.0 / rate + 2.0, "{ms} ms at {rate} Hz: lags {lag_ms} ms");
             }
         }
     }

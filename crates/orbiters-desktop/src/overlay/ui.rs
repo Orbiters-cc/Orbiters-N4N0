@@ -56,6 +56,8 @@ pub struct OverlayUi {
     hear_error: Option<String>,
     /// Why walk boost cannot work here (SteamVR input refused the actions), if it cannot.
     pub walk_unavailable: Option<String>,
+    /// Another application moved the play space lately, and the distance walked went with it.
+    pub walk_taken: bool,
 }
 
 impl OverlayUi {
@@ -228,6 +230,10 @@ impl OverlayUi {
         widgets::text(&p, center, Align2::CENTER_CENTER, &Txt::new(big, 64.0).weight(weight::SEMIBOLD).color(tone));
         let (line, color) = if let Some(why) = &self.walk_unavailable {
             (tr!("SteamVR refused the controls: {why}", why = why), theme::WARN)
+        } else if self.walk_taken {
+            (tr("Another app moved the play space, so you went back.").to_string(), theme::WARN)
+        } else if let Some(words) = boost.enabled.then(|| snap.steamvr.walk_path.and_then(crate::state::WalkPath::lesser_short)).flatten() {
+            (tr(words).to_string(), theme::WARN)
         } else if !snap.vrchat.running {
             (tr("Works in VRChat: start it to walk faster.").to_string(), theme::FG_3)
         } else if !snap.vrchat.world.in_world {

@@ -214,6 +214,20 @@ pub struct TextSender {
     quick: bool,
     /// Until when something else (N4N0's screen) last took the channel.
     held_until: Option<Instant>,
+    /// An answer arriving: the pages of what came so far, and which of them is up.
+    arriving: Option<Arriving>,
+}
+
+/// An answer on its way to the panel ([`TextSender::stream`]).
+struct Arriving {
+    pages: Vec<Page>,
+    at: usize,
+}
+
+/// `text` up to its last whole word: what the server is still spelling stays back. Rows are wrapped at spaces from the first
+/// word on, so whole words added never move what is already written, and no block is sent twice for a word that grew.
+fn whole_words(text: &str) -> &str {
+    text.rfind(char::is_whitespace).map_or("", |i| &text[..i])
 }
 
 /// Between a block's pointer and the next block of a quick page ([`TextSender::show_quick`]).
@@ -242,6 +256,7 @@ impl TextSender {
             fresh: false,
             quick: false,
             held_until: None,
+            arriving: None,
         }
     }
 
@@ -274,6 +289,67 @@ impl TextSender {
         }
     }
 
+    /// An answer as far as it has arrived, every word of it from the start, as often as more comes: the panel grows at the
+    /// same pace as any text, a block a step, and only the latest counts. What goes next is always read from the latest
+    /// text, so however fast this is called nothing queues up, and nothing older than what arrived is ever sent. Its last
+    /// page stays up while more may come, and pages before it go as any text's do, when they were read.
+    ///
+    /// Text the panel has no glyphs for (Japanese) takes no place, as in [`TextSender::show`]: nothing shows until there
+    /// is something it can show.
+    pub fn stream(&mut self, text: &str) {
+        let folded = fold_more(text);
+        let pages = n4n0::pages(whole_words(&folded));
+        if pages.is_empty() {
+            return;
+        }
+        self.sticky = false;
+        self.quick = false;
+        self.take_pages(pages);
+    }
+
+    /// The whole answer after [`TextSender::stream`]: the panel ends up holding exactly what it would, a shorter answer
+    /// included, with what is already right left as it is and read from where it was. Without an answer under way, or when
+    /// it took another turn, as [`TextSender::show`].
+    pub fn stream_end(&mut self, text: &str) {
+        let folded = fold_more(text);
+        let pages = n4n0::pages(&folded);
+        if self.arriving.is_some() && !pages.is_empty() {
+            self.take_pages(pages);
+            self.arriving = None;
+        } else {
+            self.show(text);
+        }
+    }
+
+    /// Whether an answer is arriving on the panel.
+    pub fn streaming(&self) -> bool {
+        self.arriving.is_some()
+    }
+
+    /// The latest pages of the answer: the page up stays the one up while everything before it is still what was read. A
+    /// new page, or an answer that took another turn, starts as any text does, every block that holds text sent again.
+    fn take_pages(&mut self, pages: Vec<Page>) {
+        let at = match &self.arriving {
+            Some(a) if a.at < pages.len() && a.pages[..a.at] == pages[..a.at] => Some(a.at),
+            _ => None,
+        };
+        let new = at.is_none();
+        let at = at.unwrap_or(0);
+        let page = pages[at];
+        if new {
+            self.resync = 0;
+            self.fresh = true;
+            self.force = 0;
+        }
+        if new || self.current != Some(page) {
+            self.complete_at = None;
+        }
+        self.current = Some(page);
+        self.hold = reading_time(&page);
+        self.queue = pages[at + 1..].iter().copied().collect();
+        self.arriving = Some(Arriving { pages, at });
+    }
+
     /// Shows `text` and keeps its last page up until something replaces or hides it.
     pub fn show_sticky(&mut self, text: &str) {
         self.sticky = true;
@@ -288,6 +364,7 @@ impl TextSender {
 
     fn load(&mut self, text: &str) {
         let mut pages: VecDeque<Page> = n4n0::pages(&fold_more(text)).into();
+        self.arriving = None;
         self.complete_at = None;
         self.resync = 0;
         self.current = pages.pop_front();
@@ -304,6 +381,7 @@ impl TextSender {
     /// Clears and hides the panel at the next step.
     pub fn hide(&mut self) {
         self.sticky = false;
+        self.arriving = None;
         self.current = None;
         self.queue.clear();
         self.clear = true;
@@ -479,11 +557,15 @@ impl TextSender {
         }
         let complete = *self.complete_at.get_or_insert(now);
         let last = self.queue.is_empty();
-        if now.duration_since(complete) >= self.hold && !(last && self.sticky) {
+        // The last page of an answer still arriving stays up: more may come on it.
+        if now.duration_since(complete) >= self.hold && !(last && (self.sticky || self.arriving.is_some())) {
             self.complete_at = None;
             self.resync = 0;
             match self.queue.pop_front() {
                 Some(next) => {
+                    if let Some(arriving) = self.arriving.as_mut() {
+                        arriving.at += 1;
+                    }
                     self.hold = reading_time(&next);
                     self.current = Some(next);
                     self.fresh = true;
@@ -890,5 +972,292 @@ mod tests {
         let (_, visible) = run(&mut sender, &mut panel, t, BLOCK);
         assert_eq!(visible, Some(false));
         assert!(!sender.busy());
+    }
+
+    /// An answer arriving as `(seconds, what has come so far)` on a panel, ticked as the desktop's loop does, the messages
+    /// in reverse as VRChat may apply them. Returns the panel, the messages sent, and when the panel first held each block's
+    /// final words.
+    fn fed(sender: &mut TextSender, panel: &mut PanelModel, start: Instant, schedule: &[(f32, String)], until: Duration) -> (Instant, usize) {
+        let (mut t, mut sent, mut next) = (start, 0, 0);
+        while t < start + until {
+            while next < schedule.len() && start + Duration::from_secs_f32(schedule[next].0) <= t {
+                sender.stream(&schedule[next].1);
+                next += 1;
+            }
+            let mut out = sender.tick(t);
+            sent += out.len();
+            out.reverse();
+            panel.apply(sender.sync(), &out);
+            t += TICK;
+        }
+        (t, sent)
+    }
+
+    fn ready() -> (TextSender, PanelModel, Instant) {
+        let mut sender = TextSender::new(8, STEP);
+        let mut panel = PanelModel::new([9; TEXT_LENGTH]);
+        let t0 = Instant::now();
+        let (t, _) = run(&mut sender, &mut panel, t0, Duration::from_millis(100));
+        (sender, panel, t)
+    }
+
+    fn rows(panel: &PanelModel) -> String {
+        n4n0::page_text(&panel.cells).lines().map(str::trim_end).collect::<Vec<_>>().join("|").trim_end_matches('|').to_string()
+    }
+
+    /// What the words of a text become, one more each time: as a model sends them.
+    fn word_by_word(text: &str, every: f32) -> Vec<(f32, String)> {
+        let mut out = Vec::new();
+        let mut upto = 0;
+        for (i, word) in text.split_inclusive(' ').enumerate() {
+            upto += word.len();
+            out.push((i as f32 * every, text[..upto].to_string()));
+        }
+        out
+    }
+
+    /// The answer grows on the panel as it arrives. A server slower than the panel: each word appears a block or so after it
+    /// came, at any moment the panel holds only words that had arrived, and never half of one.
+    #[test]
+    fn a_slow_answer_grows_on_the_panel_and_ends_exactly() {
+        let (mut sender, mut panel, t) = ready();
+        let answer = "It is sunny in Paris today";
+        let schedule = word_by_word(answer, 1.5);
+        let words = schedule.len() as f32;
+        let mut at = t;
+        for (i, (_, so_far)) in schedule.iter().enumerate() {
+            sender.stream(so_far);
+            let (after, _) = run(&mut sender, &mut panel, at, Duration::from_millis(1500));
+            at = after;
+            let shown = rows(&panel);
+            // Everything but the word still arriving, which only a space after it shows whole.
+            let whole = so_far.rsplit_once(' ').map_or("", |(w, _)| w);
+            assert_eq!(shown, whole, "after word {i} of {words}");
+            assert!(sender.streaming());
+        }
+        // It stays up however long the next word takes.
+        let (after, visible) = run(&mut sender, &mut panel, at, Duration::from_secs(20));
+        assert_ne!(visible, Some(false), "not taken down while more may come");
+        assert!(sender.busy());
+        sender.stream_end(answer);
+        assert!(!sender.streaming());
+        let (after, _) = run(&mut sender, &mut panel, after, 3 * BLOCK);
+        assert_eq!(rows(&panel), answer);
+        // Then it goes as any text does.
+        let (_, visible) = run(&mut sender, &mut panel, after, Duration::from_secs(8));
+        assert_eq!(visible, Some(false));
+        assert_eq!(panel.cells, [0; TEXT_LENGTH]);
+    }
+
+    /// Faster than OSC can carry, in one burst or in many: only the latest counts. The messages are the same whether it came
+    /// in 1 piece or 400, and everything that reaches the panel comes from the answer as it stands.
+    #[test]
+    fn a_burst_builds_no_backlog() {
+        let answer = "The quick brown fox jumps over the lazy dog and keeps on going past the river until the page is full.";
+        let burst = vec![(0.0, format!("{answer} "))];
+        let many: Vec<(f32, String)> = (1..=400).map(|i| (i as f32 * 0.002, format!("{} ", &answer[..answer.len() * i / 400]))).collect();
+        for sync in n4n0::SYNC_COUNTS {
+            let mut sent = Vec::new();
+            for schedule in [&burst, &many] {
+                let mut sender = TextSender::new(sync, STEP);
+                let mut panel = PanelModel::new([0; TEXT_LENGTH]);
+                let t0 = Instant::now();
+                let (t, _) = run(&mut sender, &mut panel, t0, Duration::from_millis(100));
+                // Long enough for every block at this size, one step each.
+                let blocks = n4n0::pointer_count(sync) as u32;
+                let (t, count) = fed(&mut sender, &mut panel, t, schedule, BLOCK * blocks);
+                assert_eq!(rows(&panel), n4n0::page_text(&n4n0::pages(answer)[0]).lines().map(str::trim_end).collect::<Vec<_>>().join("|"), "{sync} values");
+                let _ = t;
+                sent.push(count);
+            }
+            // Pieces landing while a block is on its way may cost that block once more, never one per piece.
+            assert!(sent[1] <= sent[0] + 3 * (sync + 2), "{sync} values: {} messages for a burst, {} for 400 pieces", sent[0], sent[1]);
+        }
+    }
+
+    /// Never more than the panel's own pace: at most one block a step, whatever the server does. Prints the rates in the report.
+    #[test]
+    fn the_panel_keeps_to_its_step_while_an_answer_streams() {
+        let long = "word ".repeat(200);
+        for sync in n4n0::SYNC_COUNTS {
+            for (name, schedule) in [("slow", word_by_word(&long, 0.5)), ("burst", vec![(0.0, long.clone())]), ("fast", word_by_word(&long, 0.02))] {
+                let mut sender = TextSender::new(sync, STEP);
+                let mut panel = PanelModel::new([0; TEXT_LENGTH]);
+                let t0 = Instant::now();
+                let (mut t, _) = run(&mut sender, &mut panel, t0, Duration::from_millis(100));
+                let start = t;
+                let (mut next, mut messages, mut pointers, mut last_pointer) = (0, 0usize, Vec::new(), None::<Instant>);
+                let mut shortest = Duration::MAX;
+                while t < start + Duration::from_secs(30) {
+                    while next < schedule.len() && start + Duration::from_secs_f32(schedule[next].0) <= t {
+                        sender.stream(&schedule[next].1);
+                        next += 1;
+                    }
+                    let out = sender.tick(t);
+                    messages += out.len();
+                    let block = out.iter().any(|(a, v)| a.ends_with(params::TEXT_POINTER) && matches!(v, OscType::Int(p) if *p > 0 && *p != POINTER_CLEAR));
+                    if block {
+                        if let Some(last) = last_pointer {
+                            shortest = shortest.min(t - last);
+                        }
+                        last_pointer = Some(t);
+                        pointers.push(t);
+                    }
+                    t += TICK;
+                }
+                let per_second = pointers.len() as f32 / 30.0;
+                println!("{name:>5}, {sync:>2} values: {per_second:.2} blocks/s, {:.1} cells/s at most, {:.1} messages/s, shortest gap {shortest:?}", per_second * sync as f32, messages as f32 / 30.0);
+                assert!(shortest >= STEP, "{name}, {sync} values: two blocks {shortest:?} apart");
+                assert!(per_second <= 1.0 / STEP.as_secs_f32(), "{name}, {sync} values: {per_second} blocks a second");
+            }
+        }
+    }
+
+    /// The whole answer shorter than what had arrived: nothing of it stays, in any cell, without clearing the panel.
+    #[test]
+    fn a_shorter_final_answer_leaves_nothing_behind() {
+        let (mut sender, mut panel, t) = ready();
+        let long = "This answer goes on for quite a while and fills most of the rows of the panel with its many words ";
+        let (t, _) = fed(&mut sender, &mut panel, t, &[(0.0, long.to_string())], BLOCK * 16);
+        assert!(rows(&panel).len() > 80, "{}", rows(&panel));
+        sender.stream_end("Done.");
+        let (t, _) = run(&mut sender, &mut panel, t, BLOCK * 16);
+        assert_eq!(rows(&panel), "Done.");
+        assert_eq!(panel.cells, n4n0::pages("Done.")[0], "exactly, every cell");
+        // Whole in between too, sent while a block was on its way: a new answer in the middle of one.
+        let mut sender = TextSender::new(8, STEP);
+        let mut panel = PanelModel::new([0; TEXT_LENGTH]);
+        let (mut at, _) = run(&mut sender, &mut panel, t, Duration::from_millis(100));
+        sender.stream("Something quite different at first ");
+        // Into each moment of a block: the values gone, the pointer not yet.
+        for _ in 0..3 {
+            let out = sender.tick(at);
+            panel.apply(8, &out);
+            at += PHASE_GAP;
+        }
+        sender.stream_end("Hi");
+        let (_, _) = run(&mut sender, &mut panel, at, BLOCK * 6);
+        assert_eq!(panel.cells, n4n0::pages("Hi")[0]);
+    }
+
+    /// The final answer the same as what arrived: nothing goes again and nothing restarts: the reading time starts once.
+    #[test]
+    fn the_final_answer_does_not_send_again_what_is_right() {
+        let (mut sender, mut panel, t) = ready();
+        let answer = "One two three four";
+        let (t, _) = fed(&mut sender, &mut panel, t, &[(0.0, format!("{answer} "))], BLOCK * 3);
+        assert_eq!(rows(&panel), answer);
+        sender.stream_end(answer);
+        let out = sender.tick(t + TICK);
+        assert_eq!(rows(&panel), answer);
+        // Only the resends every page gets while it is up: the first block, with no clear and no hiding.
+        assert!(!out.iter().any(|(a, v)| a.ends_with(params::TEXT_POINTER) && matches!(v, OscType::Int(p) if *p == POINTER_CLEAR)), "{out:?}");
+        assert!(!out.iter().any(|(a, _)| a.ends_with(params::TEXT_VISIBLE)), "{out:?}");
+    }
+
+    /// A long answer: page one is read, then page two grows as it arrives, and the whole answer does not go back to the start.
+    #[test]
+    fn a_long_answer_goes_on_to_its_next_page() {
+        let (mut sender, mut panel, t) = ready();
+        let words: Vec<String> = (0..60).map(|i| format!("word{i}")).collect();
+        let answer = words.join(" ");
+        let pages = n4n0::pages(&answer);
+        assert!(pages.len() >= 3);
+        // The first page's words arrive, and it is read.
+        let first = n4n0::page_text(&pages[0]).split_whitespace().collect::<Vec<_>>().join(" ");
+        let second: String = n4n0::page_text(&pages[1]).split_whitespace().collect::<Vec<_>>().join(" ");
+        let so_far = format!("{first} {second} ");
+        let (t, _) = fed(&mut sender, &mut panel, t, &[(0.0, so_far)], BLOCK * 16 + reading_time(&pages[0]) + BLOCK * 16 + Duration::from_secs(1));
+        assert_eq!(panel.cells, pages[1], "on to page two, up while more may come");
+        assert!(sender.streaming());
+        // The whole answer: it goes on from there.
+        sender.stream_end(&answer);
+        let (_, _) = run(&mut sender, &mut panel, t, reading_time(&pages[1]) + BLOCK * 17);
+        assert_eq!(panel.cells, pages[2], "page three after it, never page one again");
+    }
+
+    /// The next round of a turn says something else: the page goes back to the top, whole, and nothing of the first stays.
+    #[test]
+    fn another_round_replaces_what_arrived() {
+        let (mut sender, mut panel, t) = ready();
+        let (t, _) = fed(&mut sender, &mut panel, t, &[(0.0, "One moment while I look that up ".to_string())], BLOCK * 8);
+        let (t, _) = fed(&mut sender, &mut panel, t, &[(0.0, "Your hoodie is on ".to_string())], BLOCK * 8);
+        assert_eq!(rows(&panel), "Your hoodie is on");
+        sender.stream_end("Your hoodie is on.");
+        let (_, _) = run(&mut sender, &mut panel, t, BLOCK * 4);
+        assert_eq!(rows(&panel), "Your hoodie is on.");
+    }
+
+    /// What was already up (the AFK message, another answer) goes with the first words, with no leftovers, even in cells the
+    /// sender no longer knows the state of.
+    #[test]
+    fn the_first_words_replace_what_was_up() {
+        let (mut sender, mut panel, t) = ready();
+        sender.show_sticky("Getting food, back in ten minutes, see you all soon my friends and have fun");
+        let (t, _) = run(&mut sender, &mut panel, t, BLOCK * 16);
+        sender.stream("Hello there ");
+        assert!(!sender.sticky());
+        let (_, _) = run(&mut sender, &mut panel, t, BLOCK * 16);
+        assert_eq!(rows(&panel), "Hello there");
+    }
+
+    /// Another text meanwhile (a tool's words, an error) ends the answer on the panel; the stream's own end still replaces it
+    /// exactly, as a show would.
+    #[test]
+    fn something_else_shown_takes_the_panel_from_the_answer() {
+        let (mut sender, mut panel, t) = ready();
+        let (t, _) = fed(&mut sender, &mut panel, t, &[(0.0, "Half an answer so far ".to_string())], BLOCK * 8);
+        sender.show("N4N0 could not answer");
+        assert!(!sender.streaming());
+        let (t, _) = run(&mut sender, &mut panel, t, BLOCK * 8);
+        assert_eq!(rows(&panel), "N4N0 could not answer");
+        sender.stream_end("Later");
+        let (_, _) = run(&mut sender, &mut panel, t, BLOCK * 8);
+        assert_eq!(rows(&panel), "Later");
+    }
+
+    /// Japanese has no glyphs on the panel: it shows what it always shows, nothing where there is nothing it can place, and
+    /// its Latin words where there are some. No flicker of the panel on the way there.
+    #[test]
+    fn japanese_falls_back_as_any_text_does() {
+        let (mut sender, mut panel, t) = ready();
+        let (t, _) = fed(&mut sender, &mut panel, t, &[(0.0, "こんにちは、今日は ".to_string()), (0.5, "こんにちは、今日は とても ".to_string())], BLOCK * 3);
+        assert_eq!(n4n0::pages(&fold_more("こんにちは、今日は とても")).len(), n4n0::pages("こんにちは、今日は とても").len());
+        let shown = rows(&panel);
+        // The same as the whole text shows, once it has ended.
+        let mut alone = TextSender::new(8, STEP);
+        let mut other = PanelModel::new([0; TEXT_LENGTH]);
+        let t0 = Instant::now();
+        let (t1, _) = run(&mut alone, &mut other, t0, Duration::from_millis(100));
+        alone.show("こんにちは、今日は とても");
+        let (_, _) = run(&mut alone, &mut other, t1, BLOCK * 3);
+        sender.stream_end("こんにちは、今日は とても");
+        let (_, _) = run(&mut sender, &mut panel, t, BLOCK * 3);
+        assert_eq!(panel.cells, other.cells, "whole, as the panel shows it (partly {shown:?})");
+
+        let (mut sender, mut panel, t) = ready();
+        let (t, _) = fed(&mut sender, &mut panel, t, &[(0.0, "Orbiters へようこそ N4N0 ".to_string())], BLOCK * 3);
+        assert!(rows(&panel).contains("Orbiters") && rows(&panel).contains("N4N0"), "{}", rows(&panel));
+        sender.stream_end("Orbiters へようこそ N4N0 です");
+        let (_, _) = run(&mut sender, &mut panel, t, BLOCK * 3);
+        assert_eq!(panel.cells, n4n0::pages("Orbiters へようこそ N4N0 です")[0]);
+    }
+
+    /// N4N0's screen takes the channel: the answer waits its turn, and goes on from the latest when it comes back.
+    #[test]
+    fn the_screen_s_turn_holds_the_answer_back_and_nothing_piles_up() {
+        let (mut sender, mut panel, t) = ready();
+        let (t, _) = fed(&mut sender, &mut panel, t, &[(0.0, "First words ".to_string())], BLOCK * 3);
+        sender.hold_until(t + Duration::from_secs(2));
+        // Words arrive while the screen has it: nothing goes.
+        sender.stream("First words and many more that came ");
+        let mut at = t;
+        while at < t + Duration::from_secs(2) {
+            assert!(sender.tick(at).is_empty(), "the channel is the screen's");
+            sender.stream("First words and many more that came meanwhile ");
+            at += TICK;
+        }
+        let (_, _) = run(&mut sender, &mut panel, at, BLOCK * 6);
+        assert_eq!(rows(&panel), "First words and many more that|came meanwhile");
     }
 }

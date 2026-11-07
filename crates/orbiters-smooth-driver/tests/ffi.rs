@@ -10,6 +10,9 @@
 //! The context also gives a fake `IVRDriverLog` laid out as SteamVR's (an object whose first word is its table): the
 //! driver's lines must reach its `Log`, as calling anything else crashes `vrserver.exe` (it did, up to 0.3.2-dev.5).
 //!
+//! Fast walk the same way: the overlay's side of the block asks, the host is hooked with smoothing off, a pose reaches the
+//! host's original moved by the walk, and nothing is added once the walk is zero or its writer has gone.
+//!
 //! Runs on Windows only; the driver is Windows-only (it patches a vtable with `VirtualProtect`).
 #![cfg(target_os = "windows")]
 

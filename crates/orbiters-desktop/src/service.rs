@@ -347,6 +347,7 @@ impl Service {
                 self.keep_tracking();
             }
             ToService::WalkBoost { strength } => ctl.set_walk_boost(strength, false),
+            ToService::WalkPath { path } => ctl.set_walk_path(crate::tracking::walk_path_said(path)),
             // Which Talk button is held matters: the service lets it go when that window or overlay goes away.
             ToService::N4n0 { command: N4n0Command::Talk { down } } => ctl.n4n0_app_talk(down, role == Role::Overlay),
             ToService::N4n0 { command } => ctl.n4n0_command(command),

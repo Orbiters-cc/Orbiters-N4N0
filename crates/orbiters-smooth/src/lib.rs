@@ -17,6 +17,13 @@
 //! folder). Only the very first registration, if SteamVR was already running, waits for SteamVR's next start. After
 //! SteamVR crashes it starts in Safe Mode, which turns add-on drivers like this one off until the person turns them
 //! on again (SteamVR, Settings, Startup / Shutdown, Manage Add-ons).
+//!
+//! Fast walk goes through the same driver: the SteamVR overlay writes how far it carried the person and how fast it
+//! carries them now ([`WalkLink`]), and the driver adds that to every device's pose, after the smoothing. Moving the poses
+//! rather than SteamVR's play space means another application's play space (OVR Advanced Settings' Space Drag and Turn)
+//! simply adds up with it: nobody overwrites anybody. The fields it uses are the block's first reserved ones, so the layout
+//! and [`VERSION`] stay: a SteamVR still running an older driver keeps smoothing, and says it cannot walk
+//! ([`DriverStatus::walk`]), until it is restarted.
 
 use std::sync::atomic::{fence, AtomicU32, AtomicU64, AtomicU8, Ordering};
 
@@ -27,7 +34,7 @@ pub mod install;
 #[cfg(windows)]
 pub mod win;
 
-pub use control::{Control, Mapping};
+pub use control::{Control, Mapping, WalkLink};
 #[cfg(feature = "install")]
 pub use install::{install, installed, uninstall, AddOnState, Installation};
 
@@ -39,8 +46,15 @@ pub const MAGIC: u32 = u32::from_le_bytes(*b"OSMT");
 pub const VERSION: u32 = 1;
 /// SteamVR's device indices (`k_unMaxTrackedDeviceCount`).
 pub const MAX_DEVICES: usize = 64;
+/// A strength of 1 eases each pose over this time constant: a strength is a time constant in milliseconds over this.
+pub const MAX_TIME_CONSTANT_MS: f32 = 120.0;
 /// The driver counts as running while its heartbeat is at most this old.
 pub const HEARTBEAT_TIMEOUT_MS: u64 = 3000;
+/// The driver goes on at the walk's last speed this long after the overlay last wrote, then holds. Also the longest the
+/// overlay counts for one of its turns: after a stall both agree on where the person is, so nothing jumps.
+pub const WALK_COAST_MS: u32 = 50;
+/// [`ControlBlock::driver_walk`]'s first bit: this driver moves poses for Fast walk. Its other bits count the poses it moved.
+pub const DRIVER_WALKS: u32 = 1;
 
 /// The memory shared by the app and the driver. Every field is an atomic: two processes read and write it at once.
 ///
@@ -61,7 +75,18 @@ pub struct ControlBlock {
     pub sequence: AtomicU32,
     /// Smoothing on (1) or off (0).
     pub enabled: AtomicU32,
-    _app_reserved: [AtomicU32; 10],
+    /// Fast walk may go through the driver (1): it hooks SteamVR's poses for that too, while `walk_pid` runs.
+    pub walk_on: AtomicU32,
+    /// The process writing the walk (the SteamVR overlay): when it is gone, so is the walk.
+    pub walk_pid: AtomicU32,
+    /// Odd while the overlay writes the walk.
+    pub walk_sequence: AtomicU32,
+    /// When it was written ([`crate::win::micros`], wrapping).
+    pub walk_at_us: AtomicU32,
+    /// How far the person was carried, metres in the raw tracking space, `f32` bits.
+    pub walk_offset: [AtomicU32; 3],
+    /// How fast they are carried now, metres a second in the raw tracking space, `f32` bits.
+    pub walk_velocity: [AtomicU32; 3],
     /// Each device index's strength, `f32` bits in `0.0..=1.0`.
     pub strengths: [AtomicU32; MAX_DEVICES],
     /// Bumped by the driver on each of SteamVR's frames.
@@ -78,7 +103,8 @@ pub struct ControlBlock {
     pub driver_hooks: AtomicU32,
     /// `vrserver.exe`'s process.
     pub driver_pid: AtomicU32,
-    _driver_reserved: AtomicU32,
+    /// 0 from a driver older than Fast walk's: see [`DRIVER_WALKS`].
+    pub driver_walk: AtomicU32,
     /// The driver's version (its crate version), UTF-8, NUL padded.
     pub driver_version: [AtomicU8; 32],
 }
@@ -100,6 +126,8 @@ pub struct DriverReport<'a> {
     pub pid: u32,
     pub poses: u64,
     pub smoothed: u64,
+    /// Poses it moved for Fast walk.
+    pub walked: u64,
 }
 
 /// The driver, as the app sees it ([`Control::driver_heartbeat`]).
@@ -119,6 +147,38 @@ pub struct DriverStatus {
     pub poses: u64,
     /// Pose updates it smoothed.
     pub smoothed: u64,
+    /// It can move poses for Fast walk: false from a driver SteamVR loaded before this version.
+    pub walk: bool,
+    /// Poses it moved for Fast walk (wrapping).
+    pub walked: u32,
+}
+
+/// Where Fast walk puts the person at a moment: added to every device's pose.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct WalkNow {
+    /// Metres in the raw tracking space.
+    pub offset: [f32; 3],
+    /// Metres a second in the raw tracking space.
+    pub velocity: [f32; 3],
+}
+
+impl WalkNow {
+    /// Nothing to add.
+    pub fn is_zero(&self) -> bool {
+        self.offset == [0.0; 3] && self.velocity == [0.0; 3]
+    }
+
+    /// Where the walk is `age_us` microseconds after it was written: on at its speed for [`WALK_COAST_MS`], then held. A
+    /// moving walk between two of the overlay's turns so reaches each device whenever its pose comes, as a tracker's at
+    /// 100 a second would otherwise lag the headset by up to 12 cm at full speed.
+    pub fn after(&self, age_us: u32) -> WalkNow {
+        // A clock read just before the write: not yet.
+        let age = if age_us > u32::MAX / 2 { 0 } else { age_us };
+        let coast = WALK_COAST_MS * 1000;
+        let seconds = age.min(coast) as f32 / 1_000_000.0;
+        let velocity = if age >= coast { [0.0; 3] } else { self.velocity };
+        WalkNow { offset: std::array::from_fn(|i| self.offset[i] + self.velocity[i] * seconds), velocity }
+    }
 }
 
 /// A strength as stored: in `0.0..=1.0`, anything else (NaN included) clamped, NaN to 0.
@@ -183,6 +243,43 @@ impl ControlBlock {
         self.sequence.store(start.wrapping_add(2), Ordering::Release);
     }
 
+    /// The walk as the overlay last wrote it (`None` while it writes, a few tries: the pose hook never waits, or numbers
+    /// that make no sense).
+    pub fn walk(&self) -> Option<(WalkNow, u32)> {
+        for _ in 0..4 {
+            let before = self.walk_sequence.load(Ordering::Acquire);
+            if before & 1 != 0 {
+                std::hint::spin_loop();
+                continue;
+            }
+            let read = |cells: &[AtomicU32; 3]| std::array::from_fn(|i| f32::from_bits(cells[i].load(Ordering::Relaxed)));
+            let walk = WalkNow { offset: read(&self.walk_offset), velocity: read(&self.walk_velocity) };
+            let at = self.walk_at_us.load(Ordering::Relaxed);
+            fence(Ordering::Acquire);
+            if self.walk_sequence.load(Ordering::Relaxed) == before {
+                return walk.offset.iter().chain(&walk.velocity).all(|v| v.is_finite()).then_some((walk, at));
+            }
+        }
+        None
+    }
+
+    /// Writes the walk. One writer only, the SteamVR overlay.
+    pub fn write_walk(&self, walk: &WalkNow, now_us: u32) {
+        let before = self.walk_sequence.load(Ordering::Relaxed);
+        // Whatever a writer that died left: odd until this write is done, then even.
+        let odd = before | 1;
+        self.walk_sequence.store(odd, Ordering::Relaxed);
+        fence(Ordering::Release);
+        for (cell, v) in self.walk_offset.iter().zip(walk.offset) {
+            cell.store(v.to_bits(), Ordering::Relaxed);
+        }
+        for (cell, v) in self.walk_velocity.iter().zip(walk.velocity) {
+            cell.store(v.to_bits(), Ordering::Relaxed);
+        }
+        self.walk_at_us.store(now_us, Ordering::Relaxed);
+        self.walk_sequence.store(odd.wrapping_add(1), Ordering::Release);
+    }
+
     /// The driver's heartbeat, with what it reports. `tick_ms` is `GetTickCount64()`.
     pub fn report_driver(&self, report: &DriverReport, tick_ms: u64) {
         self.driver_protocol.store(VERSION, Ordering::Relaxed);
@@ -190,6 +287,7 @@ impl ControlBlock {
         self.driver_pid.store(report.pid, Ordering::Relaxed);
         self.driver_poses.store(report.poses, Ordering::Relaxed);
         self.driver_smoothed.store(report.smoothed, Ordering::Relaxed);
+        self.driver_walk.store(DRIVER_WALKS | ((report.walked as u32) << 1), Ordering::Relaxed);
         let bytes = report.version.as_bytes();
         for (i, cell) in self.driver_version.iter().enumerate() {
             // The last byte stays NUL.
@@ -217,6 +315,8 @@ impl ControlBlock {
             heartbeat: self.driver_heartbeat.load(Ordering::Relaxed),
             poses: self.driver_poses.load(Ordering::Relaxed),
             smoothed: self.driver_smoothed.load(Ordering::Relaxed),
+            walk: self.driver_walk.load(Ordering::Relaxed) & DRIVER_WALKS != 0,
+            walked: self.driver_walk.load(Ordering::Relaxed) >> 1,
         })
     }
 }
@@ -235,6 +335,8 @@ mod tests {
         assert_eq!(offset_of!(ControlBlock, owner_pid), 12);
         assert_eq!(offset_of!(ControlBlock, sequence), 16);
         assert_eq!(offset_of!(ControlBlock, enabled), 20);
+        assert_eq!(offset_of!(ControlBlock, walk_on), 24);
+        assert_eq!(offset_of!(ControlBlock, walk_velocity), 52);
         assert_eq!(offset_of!(ControlBlock, strengths), 64);
         assert_eq!(offset_of!(ControlBlock, driver_heartbeat), 320);
         assert_eq!(offset_of!(ControlBlock, driver_tick_ms), 328);
@@ -253,5 +355,49 @@ mod tests {
         assert_eq!(sanitize_strength(2.0), 1.0);
         assert_eq!(sanitize_strength(0.25), 0.25);
         assert_eq!(sanitize_strength(f32::INFINITY), 1.0);
+    }
+
+    /// The walk at any moment after it was written: on at its speed, and held once the overlay has been quiet too long,
+    /// at the very place the overlay will count when it comes back.
+    #[test]
+    fn a_walk_coasts_a_moment_and_holds() {
+        let walk = WalkNow { offset: [1.0, 0.0, -2.0], velocity: [8.0, 0.0, 0.0] };
+        assert_eq!(walk.after(0), walk);
+        let later = walk.after(10_000);
+        assert!((later.offset[0] - 1.08).abs() < 1e-5 && later.velocity == walk.velocity, "{later:?}");
+        let held = walk.after(WALK_COAST_MS * 1000);
+        assert!((held.offset[0] - 1.4).abs() < 1e-5 && held.velocity == [0.0; 3], "{held:?}");
+        assert_eq!(walk.after(90_000_000).offset, held.offset, "however long");
+        assert_eq!(walk.after(u32::MAX - 5).offset, walk.offset, "a clock read just before the write");
+        assert!(WalkNow::default().is_zero() && !walk.is_zero());
+    }
+
+    #[test]
+    fn the_walk_is_read_whole_or_not_at_all() {
+        let block: Box<ControlBlock> = unsafe { Box::new(std::mem::zeroed()) };
+        let walk = WalkNow { offset: [1.0, 2.0, 3.0], velocity: [4.0, 5.0, 6.0] };
+        block.write_walk(&walk, 77);
+        assert_eq!(block.walk(), Some((walk, 77)));
+        // Mid-write: the pose hook passes it by rather than wait.
+        block.walk_sequence.fetch_add(1, Ordering::Relaxed);
+        assert_eq!(block.walk(), None);
+        // A writer that died there: the next write takes over.
+        block.write_walk(&walk, 78);
+        assert_eq!(block.walk(), Some((walk, 78)));
+        assert_eq!(block.walk_sequence.load(Ordering::Relaxed) & 1, 0);
+        block.write_walk(&WalkNow { offset: [f32::NAN, 0.0, 0.0], velocity: [0.0; 3] }, 79);
+        assert_eq!(block.walk(), None, "numbers that make no sense");
+    }
+
+    /// A driver older than Fast walk writes nothing to its field: the app can tell, with the block's layout unchanged.
+    #[test]
+    fn an_older_driver_says_it_cannot_walk() {
+        let block: Box<ControlBlock> = unsafe { Box::new(std::mem::zeroed()) };
+        block.driver_tick_ms.store(1000, Ordering::Release);
+        assert!(!block.driver_status(1000).unwrap().walk);
+        block.report_driver(&DriverReport { version: "x", hooks: 1, pid: 1, poses: 0, smoothed: 0, walked: 9 }, 1000);
+        let status = block.driver_status(1000).unwrap();
+        assert!(status.walk);
+        assert_eq!(status.walked, 9);
     }
 }

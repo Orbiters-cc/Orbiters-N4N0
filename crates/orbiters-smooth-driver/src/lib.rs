@@ -6,9 +6,13 @@
 //! reads what to do, without locks, from the control block the app shares (`orbiters_smooth`), every SteamVR frame:
 //! the app turns smoothing on and off and changes its strengths live, never a restart.
 //!
-//! Until smoothing is first turned on it touches nothing of SteamVR's: no table is patched, every pose goes from
-//! driver to SteamVR as if it were not loaded. The first frame smoothing is on (from the control block) it hooks the
-//! hosts, and stays hooked, passing poses on untouched while off, until SteamVR ends it (`Cleanup`).
+//! It also moves every device for Fast walk: the SteamVR overlay writes how far it carried the person and how fast
+//! (`orbiters_smooth::WalkLink`), and each pose gets that added after the smoothing, so the smoothing never sees it. Applications
+//! that move SteamVR's play space (OVR Advanced Settings) then simply add up with the walk.
+//!
+//! Until smoothing is first turned on, or Fast walk first asks, it touches nothing of SteamVR's: no table is patched, every
+//! pose goes from driver to SteamVR as if it were not loaded. The first frame either is on (from the control block) it hooks
+//! the hosts, and stays hooked, passing poses on untouched while off, until SteamVR ends it (`Cleanup`).
 //!
 //! Across the FFI boundary it never unwinds (every entry catches panics) and never blocks the pose thread (the hook
 //! takes no lock that another pose or a frame could hold, and allocates nothing per pose).
@@ -20,6 +24,7 @@
 
 pub mod filter;
 pub mod openvr;
+pub mod walk;
 
 use filter::DeviceFilter;
 use openvr::{
@@ -46,6 +51,9 @@ const MAX_HOOKS: usize = 2;
 /// Hooking found no host to patch: tried again this often (milliseconds) while smoothing is on.
 const HOOK_RETRY_MS: u64 = 1000;
 
+/// Whether the process writing Fast walk still runs is looked at this often (milliseconds).
+const WALK_WRITER_CHECK_MS: u64 = 500;
+
 /// The crate version, reported in the control block's heartbeat.
 const DRIVER_VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -62,6 +70,12 @@ struct State {
     /// Pose updates seen and smoothed, for the heartbeat.
     poses: AtomicU64,
     smoothed: AtomicU64,
+    /// Poses moved for Fast walk.
+    walked: AtomicU64,
+    /// The control block for the pose hook, which can take no lock: a view of it that stays mapped until the process ends.
+    walk_block: AtomicPtr<ControlBlock>,
+    /// The process writing the walk runs: without it, nothing is added.
+    walk_alive: AtomicBool,
     /// Host interfaces hooked.
     hooks_installed: AtomicU32,
     /// The context's `GetGenericInterface` (slot 0 of its table, read in `Init`, never patched).
@@ -91,6 +105,10 @@ struct Setup {
     last_open_attempt_ms: u64,
     /// `GetTickCount64()` at the last attempt to hook the hosts (0: never).
     last_hook_attempt_ms: u64,
+    /// `GetTickCount64()` at the last look at the process writing the walk.
+    last_walk_check_ms: u64,
+    /// Said in SteamVR's log that Fast walk moves poses.
+    walk_said: bool,
     /// Patched vtable entries to restore: (entry address, the detour we wrote).
     patched: Vec<(usize, usize)>,
 }
@@ -141,12 +159,15 @@ impl State {
             filters: FilterBank::new(),
             poses: AtomicU64::new(0),
             smoothed: AtomicU64::new(0),
+            walked: AtomicU64::new(0),
+            walk_block: AtomicPtr::new(ptr::null_mut()),
+            walk_alive: AtomicBool::new(false),
             hooks_installed: AtomicU32::new(0),
             get_interface_original: AtomicUsize::new(0),
             pose_originals: [ORIGINAL; MAX_HOOKS],
             context: AtomicPtr::new(ptr::null_mut()),
             log: AtomicPtr::new(ptr::null_mut()),
-            setup: Mutex::new(Setup { control: None, last_open_attempt_ms: 0, last_hook_attempt_ms: 0, patched: Vec::new() }),
+            setup: Mutex::new(Setup { control: None, last_open_attempt_ms: 0, last_hook_attempt_ms: 0, last_walk_check_ms: 0, walk_said: false, patched: Vec::new() }),
             clock: UnsafeCell::new(None),
         }
     }
@@ -161,6 +182,21 @@ impl State {
 }
 
 static STATE: State = State::new();
+
+/// What Fast walk adds now, for a pose hook: nothing unless the process writing it runs and it is not zero.
+fn walk_now() -> Option<orbiters_smooth::WalkNow> {
+    if !STATE.walk_alive.load(Ordering::Relaxed) {
+        return None;
+    }
+    let block = STATE.walk_block.load(Ordering::Relaxed);
+    if block.is_null() {
+        return None;
+    }
+    // SAFETY: a view leaked when it was made: it stays mapped until the process ends. Every field is atomic.
+    let (walk, at) = unsafe { &*block }.walk()?;
+    let now = walk.after(orbiters_smooth::win::micros().wrapping_sub(at));
+    (!now.is_zero()).then_some(now)
+}
 
 /// The control block's name (`CONTROL_NAME`), NUL-terminated UTF-16, unless a test chose another.
 static CONTROL_NAME_OVERRIDE: Mutex<Option<Vec<u16>>> = Mutex::new(None);
@@ -183,7 +219,8 @@ extern "system" fn detour<const INDEX: usize>(this: *mut c_void, device: u32, po
     let _ = catch_unwind(AssertUnwindSafe(|| {
         let mut smoothed = None;
         // Only our own struct layout is touched; any other size passes straight through.
-        if STATE.active.load(Ordering::Relaxed) && !pose.is_null() && pose_size as usize == std::mem::size_of::<DriverPose>() {
+        let ours = !pose.is_null() && pose_size as usize == std::mem::size_of::<DriverPose>();
+        if ours && STATE.active.load(Ordering::Relaxed) {
             STATE.poses.fetch_add(1, Ordering::Relaxed);
             let index = device as usize;
             let strength = STATE.strengths.get(index).map(|s| f32::from_bits(s.load(Ordering::Relaxed))).unwrap_or(0.0);
@@ -195,6 +232,16 @@ extern "system" fn detour<const INDEX: usize>(this: *mut c_void, device: u32, po
             if let Some(true) = STATE.filters.with(index, |f| f.apply(&mut copy, strength, now)) {
                 STATE.smoothed.fetch_add(1, Ordering::Relaxed);
                 smoothed = Some(copy);
+            }
+        }
+        // Fast walk, after the smoothing: it eases each device's own motion, and the walk is not a device's motion.
+        if ours {
+            if let Some(now) = walk_now() {
+                // SAFETY: SteamVR passes a readable `DriverPose_t` of the size checked above.
+                let mut moved = smoothed.unwrap_or_else(|| unsafe { ptr::read(pose) });
+                walk::apply(&mut moved, &now);
+                STATE.walked.fetch_add(1, Ordering::Relaxed);
+                smoothed = Some(moved);
             }
         }
         if let Some(call) = original {
@@ -305,7 +352,7 @@ unsafe fn install_host_hooks(setup: &mut Setup) {
         }
     }
     STATE.hooks_installed.store(hooked, Ordering::Relaxed);
-    log_line(&format!("Orbiters smoothing driver {DRIVER_VERSION}: smoothing turned on, {hooked} host hook(s) installed"));
+    log_line(&format!("Orbiters smoothing driver {DRIVER_VERSION}: smoothing or Fast walk turned on, {hooked} host hook(s) installed"));
 }
 
 /// A line in SteamVR's `vrserver.txt`, prefixed with the driver name, when the host gave us a log. Best effort.
@@ -359,6 +406,7 @@ extern "system" fn provider_init(_this: *mut c_void, context: *mut c_void) -> i3
 extern "system" fn provider_cleanup(_this: *mut c_void) {
     let _ = catch_unwind(|| {
         STATE.active.store(false, Ordering::Release);
+        STATE.walk_alive.store(false, Ordering::Release);
         if let Ok(mut setup) = STATE.setup.lock() {
             let pose = pose_detours();
             for (entry_addr, detour_ptr) in setup.patched.drain(..) {
@@ -423,6 +471,14 @@ fn try_open_control(setup: &mut Setup) {
     let name = CONTROL_NAME_OVERRIDE.lock().unwrap_or_else(|e| e.into_inner()).clone().unwrap_or_else(|| orbiters_smooth::win::wide(CONTROL_NAME));
     if let Ok(mapping) = Mapping::open(&name) {
         let valid = mapping.block().is_valid();
+        // A second view for the pose hook, which cannot take the lock `control` is behind and may run during `Cleanup`:
+        // never unmapped. One small view, once.
+        if STATE.walk_block.load(Ordering::Acquire).is_null() {
+            if let Ok(view) = Mapping::open(&name) {
+                let view: &'static Mapping = Box::leak(Box::new(view));
+                STATE.walk_block.store(view.block() as *const ControlBlock as *mut ControlBlock, Ordering::Release);
+            }
+        }
         setup.control = Some(mapping);
         if !valid {
             log_line("Orbiters smoothing: the control block is of another version; smoothing stays off");
@@ -447,8 +503,18 @@ fn refresh_from_control(setup: &mut Setup) {
     }
     let alive = owner_alive(block);
     let wanted = block.is_valid() && alive && settings.map(|s| s.enabled).unwrap_or(false);
+    // Fast walk has its own writer, the overlay: when that process goes, whatever it left is no longer added.
+    if now.saturating_sub(setup.last_walk_check_ms) >= WALK_WRITER_CHECK_MS {
+        setup.last_walk_check_ms = now;
+        let pid = block.walk_pid.load(Ordering::Acquire);
+        let writer = block.is_valid() && pid != 0 && process_alive(pid);
+        if STATE.walk_alive.swap(writer, Ordering::Release) && !writer {
+            log_line("Orbiters smoothing: the process writing Fast walk is gone, nothing is added to poses any more");
+        }
+    }
+    let walk_wanted = block.walk_on.load(Ordering::Relaxed) != 0 && STATE.walk_alive.load(Ordering::Relaxed);
     // Turned on: the hosts are hooked now (once; again a second later if none could be).
-    if wanted
+    if (wanted || walk_wanted)
         && STATE.hooks_installed.load(Ordering::Relaxed) == 0
         && (setup.last_hook_attempt_ms == 0 || now.saturating_sub(setup.last_hook_attempt_ms) >= HOOK_RETRY_MS)
     {
@@ -462,6 +528,11 @@ fn refresh_from_control(setup: &mut Setup) {
             STATE.filters.reset(i);
         }
     }
+    let walked = STATE.walked.load(Ordering::Relaxed);
+    if walked > 0 && !setup.walk_said {
+        setup.walk_said = true;
+        log_line("Orbiters smoothing: Fast walk moves poses");
+    }
     let Some(mapping) = setup.control.as_ref() else { return };
     let report = DriverReport {
         version: DRIVER_VERSION,
@@ -469,6 +540,7 @@ fn refresh_from_control(setup: &mut Setup) {
         pid: orbiters_smooth::win::current_pid(),
         poses: STATE.poses.load(Ordering::Relaxed),
         smoothed: STATE.smoothed.load(Ordering::Relaxed),
+        walked,
     };
     mapping.block().report_driver(&report, now);
 }
@@ -477,9 +549,11 @@ fn refresh_from_control(setup: &mut Setup) {
 /// 0 (not yet set) counts as alive.
 fn owner_alive(block: &ControlBlock) -> bool {
     let pid = block.owner_pid.load(Ordering::Acquire);
-    if pid == 0 {
-        return true;
-    }
+    pid == 0 || process_alive(pid)
+}
+
+/// Whether process `pid` runs.
+fn process_alive(pid: u32) -> bool {
     // SAFETY: OpenProcess with a pid and SYNCHRONIZE; the handle is closed before returning.
     unsafe {
         use orbiters_smooth::win::*;

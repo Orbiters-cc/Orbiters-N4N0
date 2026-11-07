@@ -431,6 +431,12 @@ impl Default for ScreenRuntime {
 }
 
 impl ScreenRuntime {
+    /// N4N0's answer is on the menu's Home, or waits to be (tests).
+    #[cfg(test)]
+    pub(crate) fn answer_showing(&self) -> bool {
+        !self.answer.is_empty() || self.answer_next.is_some()
+    }
+
     /// The avatar changed, or where the menu shows: whether the menu shows on its screen (`available`), whether it has
     /// one at all (`present`: a dropped card shows there), with `sync` text values and thumbnails of `thumbnail` bytes
     /// (its memory is unknown again). The same avatar looked at again changes nothing.
@@ -1947,9 +1953,9 @@ impl N4n0 {
                 Effect::ApplyState { id, .. } => self.states_apply(id, false),
                 Effect::Drop { link, title, video } => self.card_drop(link, title, video),
                 Effect::TakeBack => self.card_take_back(),
-                Effect::Tracking { on, levels } => self.update_settings(|s| {
+                Effect::Tracking { on, ms } => self.update_settings(|s| {
                     s.tracking.enabled = on;
-                    s.tracking.levels = levels;
+                    s.tracking.ms = ms;
                 }),
                 Effect::Dictate => self.menu_listen(),
                 Effect::SendSuggestion { text, voice } => self.suggestion_send(text, voice, true),
@@ -2072,7 +2078,7 @@ pub(crate) fn tick(
     let listening = rt.listening.is_some();
     let thinking = rt.thinking();
     let light = rt.light;
-    let tracking = rt.tracking.as_ref().map(|t| orbiters_n4n0_core::menu::Tracking { on: t.on, levels: t.levels, note: t.note.clone() });
+    let tracking = rt.tracking.as_ref().map(|t| orbiters_n4n0_core::menu::Tracking { on: t.on, ms: t.ms, note: t.note.clone() });
     let (tracking_note, versions) = (rt.tracking_note.clone(), rt.versions.clone());
     // The avatar's saved states, as the States page lists them (again while one saved there waits for the list).
     let states_key = (rt.states.version, rt.avatar_id.clone());

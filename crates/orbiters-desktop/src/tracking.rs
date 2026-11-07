@@ -19,7 +19,6 @@
 use orbiters_core::settings::TrackingSettings;
 use orbiters_i18n::tr;
 use orbiters_openvr::DeviceClass;
-use orbiters_n4n0_core::menu::SMOOTHING_STRENGTHS;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::time::{Duration, Instant, SystemTime};
@@ -143,9 +142,10 @@ fn shipped_driver() -> Option<PathBuf> {
     Some(exe.with_file_name(orbiters_smooth::install::DLL_NAME)).filter(|p| p.is_file())
 }
 
-/// Each device index's strength, from its kind and the settings' levels (headset, controllers, trackers).
-fn strengths(kinds: &[DeviceKind], levels: [u8; 3]) -> [f32; MAX_DEVICES] {
-    let level = |i: usize| SMOOTHING_STRENGTHS.get(levels[i] as usize).copied().unwrap_or(0.0);
+/// Each device index's strength, from its kind and the settings' milliseconds (headset, controllers, trackers): the
+/// driver's time constant is its strength × [`orbiters_smooth::MAX_TIME_CONSTANT_MS`].
+fn strengths(kinds: &[DeviceKind], ms: [u16; 3]) -> [f32; MAX_DEVICES] {
+    let level = |i: usize| orbiters_smooth::sanitize_strength(ms[i] as f32 / orbiters_smooth::MAX_TIME_CONSTANT_MS);
     let mut out = [0.0; MAX_DEVICES];
     for (slot, kind) in out.iter_mut().zip(kinds) {
         *slot = match kind {
@@ -156,6 +156,21 @@ fn strengths(kinds: &[DeviceKind], levels: [u8; 3]) -> [f32; MAX_DEVICES] {
         };
     }
     out
+}
+
+/// What the overlay says of Fast walk, with what the service can tell of why SteamVR did not load the driver: whether a
+/// restart would be enough, or the add-on must be turned on first.
+pub fn walk_path_said(path: crate::state::WalkPath) -> crate::state::WalkPath {
+    use crate::state::{WalkPath, WhyPlaySpace};
+    #[cfg(windows)]
+    if path == WalkPath::PlaySpace(WhyPlaySpace::NotRunning) {
+        match orbiters_smooth::Installation::for_user().map(|i| i.add_on_state()) {
+            Ok(orbiters_smooth::AddOnState::BlockedBySafeMode) => return WalkPath::PlaySpace(WhyPlaySpace::SafeMode),
+            Ok(orbiters_smooth::AddOnState::TurnedOff) => return WalkPath::PlaySpace(WhyPlaySpace::TurnedOff),
+            _ => {}
+        }
+    }
+    path
 }
 
 /// Why SteamVR, running, shows no heartbeat of the driver, as the Tracking page says it.
@@ -243,7 +258,7 @@ impl Smoothing {
             self.turned_on_at = Some(now);
         }
         self.on = enabled;
-        let wanted = strengths(&self.kinds, w.settings.levels);
+        let wanted = strengths(&self.kinds, w.settings.ms);
         let current = control.settings();
         // What the block holds, not what this process last wrote: nothing written over it is left standing.
         if current.strengths != wanted {
@@ -312,11 +327,13 @@ mod tests {
     fn each_kind_gets_its_strength() {
         use DeviceKind::*;
         let kinds = [Headset, Controller, Controller, Other, Tracker];
-        let s = strengths(&kinds, [0, 2, 3]);
-        assert_eq!(&s[..5], &[0.0, SMOOTHING_STRENGTHS[2], SMOOTHING_STRENGTHS[2], 0.0, SMOOTHING_STRENGTHS[3]]);
+        let s = strengths(&kinds, [0, 78, 108]);
+        let close = |a: f32, b: f32| (a - b).abs() < 1e-6;
+        assert!(close(s[0], 0.0) && close(s[1], 0.65) && close(s[2], 0.65) && close(s[3], 0.0) && close(s[4], 0.9), "{:?}", &s[..5]);
         assert!(s[5..].iter().all(|v| *v == 0.0), "devices not seen are left alone");
-        assert_eq!(strengths(&kinds, [9, 9, 9])[0], 0.0, "a level the menu has no choice for is off");
-        assert_eq!(strengths(&default_kinds(), [2, 2, 2])[0], SMOOTHING_STRENGTHS[2], "before any word, index 0 is the headset");
+        assert_eq!(strengths(&kinds, [999, 999, 999])[0], 1.0, "never past the driver's longest");
+        assert!(close(strengths(&default_kinds(), [35, 35, 35])[0], 35.0 / 120.0), "before any word, index 0 is the headset");
+        assert_eq!(orbiters_core::settings::TrackingSettings::MAX_MS as f32, orbiters_smooth::MAX_TIME_CONSTANT_MS);
     }
 
     #[test]

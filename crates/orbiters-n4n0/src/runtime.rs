@@ -49,6 +49,8 @@ const BUNDLE_MESSAGES: usize = 20;
 const MAX_WAIT: Duration = Duration::from_millis(250);
 const MAX_WAIT_OPEN: Duration = Duration::from_millis(100);
 const MIN_WAIT: Duration = Duration::from_millis(4);
+/// What has arrived of an answer goes to the windows and sheets this often at most: faster than it can be read.
+const STREAM_EVERY: Duration = Duration::from_millis(60);
 /// Lines of the conversation the window keeps.
 const MAX_LINES: usize = 60;
 /// Tool rounds of one turn: requests that bring tool results, after the first (contracts `Docs/n4n0-assistant.md`).
@@ -119,6 +121,8 @@ struct TurnTools {
 #[derive(Default)]
 pub(crate) struct N4n0Runtime {
     pub(crate) sender: Option<TextSender>,
+    /// Something else was shown on the panel in this turn: what arrives of the answer no longer goes there.
+    pub(crate) panel_taken: bool,
     pub(crate) avatar_id: Option<String>,
     /// The avatar's name as set in its SDK (VRChat's OSCQuery `/avatar/name`, whole in UTF-8), once read after its change.
     pub(crate) avatar_name: Option<String>,
@@ -355,7 +359,7 @@ impl N4n0Runtime {
             face
         } else if self.listening.is_some() {
             N4n0Face::Listening
-        } else if self.thinking() {
+        } else if self.thinking() && !self.sender.as_ref().is_some_and(TextSender::streaming) {
             N4n0Face::Thinking
         } else if self.sender.as_ref().is_some_and(TextSender::busy) {
             if self.afk_showing {
@@ -429,9 +433,27 @@ impl N4n0Runtime {
     }
 
     pub(crate) fn line(&mut self, who: N4n0Who, text: impl Into<String>) {
-        self.lines.push(N4n0Line { who, text: text.into(), at_ms: crate::unix_ms() });
+        self.lines.push(N4n0Line { who, text: text.into(), at_ms: crate::unix_ms(), streaming: false });
         let excess = self.lines.len().saturating_sub(MAX_LINES);
         self.lines.drain(..excess);
+    }
+
+    /// N4N0's answer as far as it has arrived, at the foot of the conversation: one line, replaced as more comes. What
+    /// a tool said since stays above it. The whole answer takes its place through [`Runtime::end_stream`] and
+    /// [`Runtime::line`], so that it is never there twice.
+    pub(crate) fn stream_line(&mut self, text: &str) {
+        let at_ms = match self.lines.iter().position(|l| l.streaming) {
+            Some(i) => self.lines.remove(i).at_ms,
+            None => crate::unix_ms(),
+        };
+        self.lines.push(N4n0Line { who: N4n0Who::N4n0, text: text.to_string(), at_ms, streaming: true });
+        let excess = self.lines.len().saturating_sub(MAX_LINES);
+        self.lines.drain(..excess);
+    }
+
+    /// The answer under way is over: its line goes, whatever came of it (the whole answer, an error, nothing).
+    pub(crate) fn end_stream(&mut self) {
+        self.lines.retain(|l| !l.streaming);
     }
 
     fn send_now(&mut self, messages: impl IntoIterator<Item = Message>) {
@@ -448,8 +470,39 @@ impl N4n0Runtime {
     /// Shows `text` on the panel (nothing without the prop), in place of what was up.
     pub(crate) fn show(&mut self, text: &str) {
         self.afk_showing = false;
+        self.panel_taken = true;
         if let Some(sender) = self.sender.as_mut() {
             sender.show(text);
+        }
+        self.wake();
+    }
+
+    /// The answer so far goes on the panel, at the panel's own pace ([`TextSender::stream`]). Not while N4N0's screen is open:
+    /// it stands where the panel would show, and has the answer whole at the end, a line at a time (each piece would start
+    /// its lines again). Not once something else took the panel in this turn.
+    pub(crate) fn stream_panel(&mut self, so_far: &str) {
+        if self.panel_taken || (self.screen.available && self.screen.menu.open) {
+            return;
+        }
+        if let Some(sender) = self.sender.as_mut() {
+            sender.stream(so_far);
+            self.afk_showing = false;
+        }
+        self.wake();
+    }
+
+    /// The turn's own text, whole, on the panel: over what arrived, exactly, or as any text when nothing did.
+    pub(crate) fn stream_panel_end(&mut self, text: &str) {
+        let streaming = self.sender.as_ref().is_some_and(TextSender::streaming);
+        if !streaming {
+            if !text.is_empty() {
+                self.show(text);
+            }
+            return;
+        }
+        self.afk_showing = false;
+        if let Some(sender) = self.sender.as_mut() {
+            sender.stream_end(text);
         }
         self.wake();
     }
@@ -728,7 +781,7 @@ impl N4n0 {
                 rt.forget_avatar();
             }
             rt.vrchat_running = vrchat;
-            rt.tracking = smoothing.map(|note| TrackingView { on: tracking.enabled, levels: tracking.levels, note });
+            rt.tracking = smoothing.map(|note| TrackingView { on: tracking.enabled, ms: tracking.ms, note });
             if rt.tracking.is_none() {
                 // Kept in English: the menus draw it through `tr`.
                 rt.tracking_note = mark("Smoothing SteamVR's tracking needs Orbiters - N4N0 on the computer running SteamVR").into();
@@ -1626,8 +1679,11 @@ impl N4n0 {
                 rt.notes.clear();
                 rt.pending.clear();
                 rt.pending_at = None;
-                // A turn under way stops, and nothing of it comes back.
+                // A turn under way stops, and nothing of it comes back: what arrived goes from the panel too.
                 rt.generation += 1;
+                if let Some(sender) = rt.sender.as_mut().filter(|s| s.streaming()) {
+                    sender.hide();
+                }
                 if let Some(turn) = rt.turn.take() {
                     turn.cancel.store(true, Ordering::Relaxed);
                 }
@@ -1709,9 +1765,9 @@ impl N4n0 {
                 self.n4n0.lock().unwrap().screen.overlay_keyboard = open && keyboard;
                 self.menu_overlay_state(open, dictation)
             }
-            Command::Tracking { on, levels } => self.update_settings(|s| {
+            Command::Tracking { on, ms } => self.update_settings(|s| {
                 s.tracking.enabled = on;
-                s.tracking.levels = levels;
+                s.tracking.ms = ms;
             }),
             Command::Suggest { text, voice } => self.suggestion_send(text, voice, false),
             Command::InviteMe { location } => self.invite_send(location, false),
@@ -1770,6 +1826,7 @@ impl N4n0 {
     pub fn hide_panel(&self) {
         let mut rt = self.n4n0.lock().unwrap();
         rt.afk_showing = false;
+        rt.panel_taken = true;
         if let Some(s) = rt.sender.as_mut() {
             s.hide();
         }
@@ -1805,6 +1862,7 @@ impl N4n0 {
             let (id, cancel) = (rt.turns, Arc::new(AtomicBool::new(false)));
             rt.turn = Some(Turn { id, cancel: cancel.clone() });
             rt.mood = None;
+            rt.panel_taken = false;
             rt.line(N4n0Who::You, text.clone());
             (id, cancel)
         };
@@ -1844,8 +1902,12 @@ impl N4n0 {
             let request =
                 Request { client: "desktop", messages: &conversation, input: input.take(), tool_results: std::mem::take(&mut results), tools: &tools, context };
             let mut answer = String::new();
+            let mut streamed_at = None::<Instant>;
             let done = assistant::send(&api, &token, &request, &cancel, |e| match e {
-                Event::Text(t) => answer.push_str(&t),
+                Event::Text(t) => {
+                    answer.push_str(&t);
+                    self.stream_answer(id, generation, &answer, &mut streamed_at);
+                }
                 Event::Tool { name, phase } => {
                     if phase == "running" {
                         self.add_line(N4n0Who::Note, format!("N4N0: {}…", tool_words(&name)));
@@ -1891,6 +1953,7 @@ impl N4n0 {
             return;
         }
         rt.turn = None;
+        rt.end_stream();
         match outcome {
             Ok(()) => {
                 rt.conversation = assistant::trim(conversation, MAX_CONVERSATION);
@@ -1918,9 +1981,7 @@ impl N4n0 {
                     });
                 }
                 let panel = [shown.as_str(), question.as_str()].into_iter().filter(|t| !t.is_empty()).collect::<Vec<_>>().join("\n");
-                if !panel.is_empty() {
-                    rt.show(&panel);
-                }
+                rt.stream_panel_end(&panel);
             }
             Err(e) => {
                 // Nothing of the turn stays in the conversation (calls without results would refuse every next turn),
@@ -1936,6 +1997,26 @@ impl N4n0 {
             }
         }
         drop(rt);
+        self.publish();
+    }
+
+    /// What has arrived of turn `id`'s answer goes to the conversation, every [`STREAM_EVERY`] at most: every window and
+    /// sheet is sent the whole status each time. A turn New conversation stopped shows nothing more.
+    fn stream_answer(&self, id: u64, generation: u64, so_far: &str, streamed_at: &mut Option<Instant>) {
+        let words = so_far.trim();
+        if words.is_empty() || streamed_at.is_some_and(|t| t.elapsed() < STREAM_EVERY) {
+            return;
+        }
+        {
+            let mut rt = self.n4n0.lock().unwrap();
+            if rt.turn.as_ref().is_none_or(|t| t.id != id) || rt.generation != generation {
+                return;
+            }
+            rt.stream_line(words);
+            // As it came: a space at its end says its last word is whole.
+            rt.stream_panel(so_far.trim_start());
+        }
+        *streamed_at = Some(Instant::now());
         self.publish();
     }
 
@@ -1971,6 +2052,10 @@ impl N4n0 {
         rt.stop = true;
         if let Some(turn) = rt.turn.take() {
             turn.cancel.store(true, Ordering::Relaxed);
+        }
+        rt.end_stream();
+        if let Some(sender) = rt.sender.as_mut().filter(|s| s.streaming()) {
+            sender.hide();
         }
         rt.wake();
     }

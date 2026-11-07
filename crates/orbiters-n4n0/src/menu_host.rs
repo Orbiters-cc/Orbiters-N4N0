@@ -239,7 +239,7 @@ impl<P: Pictures> MenuHost<P> {
         changed |= set(&mut m.photo_length, photo_length(settings.photo_3d));
         changed |= set(&mut m.photo_mode, photo_mode(settings.photo_3d_mode));
         // Tracking smoothing, the versions, and how the last suggestion sent from here went.
-        let tracking = n4n0.tracking.as_ref().map(|t| orbiters_n4n0_core::menu::Tracking { on: t.on, levels: t.levels, note: t.note.clone() });
+        let tracking = n4n0.tracking.as_ref().map(|t| orbiters_n4n0_core::menu::Tracking { on: t.on, ms: t.ms, note: t.note.clone() });
         changed |= set(&mut m.tracking, tracking);
         changed |= set(&mut m.tracking_note, n4n0.tracking_note.clone());
         changed |= set(&mut m.versions, n4n0.versions.clone());
@@ -499,7 +499,7 @@ impl<P: Pictures> MenuHost<P> {
                     service.command(Command::Drop { link, title, video });
                     self.dropped = true;
                 }
-                Effect::Tracking { on, levels } => service.command(Command::Tracking { on, levels }),
+                Effect::Tracking { on, ms } => service.command(Command::Tracking { on, ms }),
                 Effect::Dictate => service.command(Command::Dictate),
                 Effect::SendSuggestion { text, voice } => service.command(Command::Suggest { text, voice }),
                 Effect::WatchVideo { link } => service.command(Command::Watch { link }),

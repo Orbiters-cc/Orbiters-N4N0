@@ -476,7 +476,7 @@ fn shots(args: &[String], picture_folders: Vec<PathBuf>) -> anyhow::Result<()> {
         s.n4n0.light = Some(crate::state::N4n0Light { on: true, color: 1, level: 0.6 });
         s.settings.walk_boost.enabled = true;
         s.n4n0.states = sample_states(s.n4n0.avatar_id.clone());
-        s.n4n0.tracking = Some(orbiters_n4n0::status::TrackingView { on: true, levels: [0, 1, 2], note: "Smoothing your devices now".into() });
+        s.n4n0.tracking = Some(orbiters_n4n0::status::TrackingView { on: true, ms: [0, 35, 78], note: "Smoothing your devices now".into() });
         s.n4n0.versions = "N4N0 1.0.9 · App 0.4.0".into();
         s.n4n0.world_video = Some(("https://www.youtube.com/watch?v=36YnV9STBqc".into(), Some("Lo-fi beats to relax to".into()), None));
         s
@@ -1449,6 +1449,7 @@ fn shots(args: &[String], picture_folders: Vec<PathBuf>) -> anyhow::Result<()> {
             snapshot: {
                 let mut s = idle.clone();
                 s.settings.walk_boost.enabled = true;
+                s.steamvr.walk_path = Some(crate::state::WalkPath::PlaySpace(crate::state::WhyPlaySpace::OldDriver));
                 s.settings.world_performance = true;
                 s
             },
@@ -1457,7 +1458,7 @@ fn shots(args: &[String], picture_folders: Vec<PathBuf>) -> anyhow::Result<()> {
             open_detail: false,
             toasts: vec![],
             pointer: None,
-            scroll: 1750.0,
+            scroll: 3450.0,
             world: None,
             home: None,
             library: None,
@@ -3064,7 +3065,7 @@ fn n4n0_snapshot(base: &Snapshot) -> Snapshot {
     s.settings.n4n0.afk_message_enabled = true;
     s.settings.n4n0.afk_message = "Getting food, back in 10!".into();
     s.settings.n4n0.pins = vec![orbiters_core::settings::Pin { parameter: "Hoodie".into(), value: orbiters_core::osc::OscValue::Bool(true) }];
-    let line = |who, text: &str| N4n0Line { who, text: text.into(), at_ms: 0 };
+    let line = |who, text: &str| N4n0Line { who, text: text.into(), at_ms: 0, streaming: false };
     let o = &mut s.n4n0;
     o.avatar_id = Some("avtr_7f3c2b1e-0d4a-4a7b-9c55-1f0e9a2b6c11".into());
     o.prop_sync = Some(8);

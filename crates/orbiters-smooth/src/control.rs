@@ -1,6 +1,6 @@
 //! The control block in named shared memory: [`Mapping`] (both sides) and [`Control`] (the app).
 
-use crate::{sanitize_strength, ControlBlock, DriverStatus, Settings, CONTROL_NAME, MAGIC, MAX_DEVICES, VERSION};
+use crate::{sanitize_strength, ControlBlock, DriverStatus, Settings, WalkNow, CONTROL_NAME, MAGIC, MAX_DEVICES, VERSION};
 use std::io;
 use std::sync::atomic::Ordering;
 use std::sync::Mutex;
@@ -236,6 +236,72 @@ impl Control {
     }
 }
 
+/// The SteamVR overlay's side of the block: Fast walk's offset. The tray service owns the block and its settings; this
+/// writes only the walk's fields, so that the two processes never meet.
+pub struct WalkLink {
+    mapping: Mapping,
+}
+
+impl WalkLink {
+    /// Opens the block the service made, with nothing carried, this process its writer. An error until the service made
+    /// it (or everywhere but Windows, where the walk stays with the play space).
+    pub fn open() -> io::Result<WalkLink> {
+        Self::open_named(CONTROL_NAME)
+    }
+
+    /// [`WalkLink::open`] under another name (tests).
+    pub fn open_named(name: &str) -> io::Result<WalkLink> {
+        #[cfg(windows)]
+        {
+            let mapping = Mapping::open(&crate::win::wide(name))?;
+            if !mapping.block().is_valid() {
+                return Err(io::Error::new(io::ErrorKind::InvalidData, "the control block is not set up yet")); // i18n: not shown
+            }
+            let link = WalkLink { mapping };
+            link.send(&WalkNow::default());
+            link.mapping.block().walk_pid.store(crate::win::current_pid(), Ordering::Release);
+            Ok(link)
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = name;
+            Err(io::Error::new(io::ErrorKind::Unsupported, "the driver needs Windows")) // i18n: not shown
+        }
+    }
+
+    /// Fast walk may use the driver: it hooks SteamVR's poses from its next frame on, live.
+    pub fn set_wanted(&self, on: bool) {
+        self.mapping.block().walk_on.store(on as u32, Ordering::Release);
+    }
+
+    /// The driver now, as [`Control::driver_heartbeat`].
+    pub fn driver(&self) -> Option<DriverStatus> {
+        #[cfg(windows)]
+        {
+            self.mapping.block().driver_status(crate::win::tick_ms())
+        }
+        #[cfg(not(windows))]
+        {
+            None
+        }
+    }
+
+    /// Where the walk is now, and how fast it goes on.
+    pub fn send(&self, walk: &WalkNow) {
+        #[cfg(windows)]
+        self.mapping.block().write_walk(walk, crate::win::micros());
+        #[cfg(not(windows))]
+        let _ = walk;
+    }
+}
+
+impl Drop for WalkLink {
+    /// Carried nowhere any more. A process killed outside does not get here: the driver sees it gone.
+    fn drop(&mut self) {
+        self.send(&WalkNow::default());
+    }
+}
+
 #[cfg(all(test, windows))]
 mod tests {
     use super::*;
@@ -304,7 +370,7 @@ mod tests {
         let control = Control::open_or_create_named(&name).unwrap();
         assert_eq!(control.driver_heartbeat(), None);
         let driver = Mapping::open(&win::wide(&name)).unwrap();
-        let report = DriverReport { version: "1.2.3-test", hooks: 2, pid: 1234, poses: 10, smoothed: 7 };
+        let report = DriverReport { version: "1.2.3-test", hooks: 2, pid: 1234, walked: 0, poses: 10, smoothed: 7 };
         driver.block().report_driver(&report, win::tick_ms());
         let status = control.driver_heartbeat().unwrap();
         assert_eq!(status.version, "1.2.3-test");
@@ -377,5 +443,24 @@ mod tests {
         control.set_strength(0, 1.0);
         assert_eq!(control.block().sequence.load(Ordering::Relaxed) & 1, 0);
         assert_eq!(control.block().settings().unwrap().strengths[0], 1.0);
+    }
+
+    #[test]
+    fn the_overlay_writes_the_walk_beside_what_the_service_owns() {
+        let name = unique_name("walk");
+        assert!(WalkLink::open_named(&name).is_err(), "before the service made the block");
+        let control = Control::open_or_create_named(&name).unwrap();
+        control.set_enabled(true);
+        let link = WalkLink::open_named(&name).unwrap();
+        assert_eq!(control.block().walk_pid.load(Ordering::Relaxed), std::process::id());
+        link.set_wanted(true);
+        assert_eq!(control.block().walk_on.load(Ordering::Relaxed), 1);
+        let walk = WalkNow { offset: [1.0, 0.0, 2.0], velocity: [3.0, 0.0, 0.0] };
+        link.send(&walk);
+        assert_eq!(control.block().walk().unwrap().0, walk);
+        assert!(control.settings().enabled, "the service's own stays");
+        // Gone: nothing carried.
+        drop(link);
+        assert!(control.block().walk().unwrap().0.is_zero());
     }
 }

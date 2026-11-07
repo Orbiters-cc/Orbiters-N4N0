@@ -354,7 +354,7 @@ pub(crate) fn samples() -> Vec<(ScreenPage, Menu, Option<usize>, Option<usize>)>
     let ten = || {
         let mut m = seven();
         m.pages = Pages::Ten;
-        m.tracking = Some(Tracking { on: true, levels: [0, 1, 2], note: "Smoothing your devices now".into() });
+        m.tracking = Some(Tracking { on: true, ms: [0, 42, 78], note: "Smoothing your devices now".into() });
         m.versions = "N4N0 1.0.9 · App 0.4.0".into();
         m.world_video = Some(WorldVideo { url: sample_videos()[0].link(), title: Some(sample_videos()[0].title.clone()), at: None });
         m

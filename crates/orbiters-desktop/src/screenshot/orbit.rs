@@ -538,6 +538,11 @@ pub(super) fn shots(out: &Path) -> anyhow::Result<()> {
     qm_scene("orbit-sheet-results", out, hd, &Facts { sheet: Some(Sheet::Results), sheet_title: "YouTube".into(), videos, videos_for: "rain sounds".into(), beside_wing: true, ..idle.clone() }, None, Some(Sheet::Results))?;
     results_over_the_game(out, hd, &idle)?;
     settings_scenes(out, hd, &idle)?;
+    // An answer on its way: the words so far, and no second copy when it is whole.
+    let mut arriving = lines.clone();
+    arriving.push((false, "Thirteen people are in this world right now, and two of your".to_string()));
+    qm_scene("orbit-sheet-talk-arriving", out, hd, &Facts { sheet: Some(Sheet::Talk), sheet_title: "Ask N4N0".into(), talk_lines: arriving, talk: crate::overlay::orbit::panels::TalkNow::Thinking, beside_wing: true, ..idle.clone() }, None, Some(Sheet::Talk))?;
+    qm_scene("orbit-sheet-tracking", out, hd, &Facts { sheet: Some(Sheet::Tracking), sheet_title: orbiters_i18n::tr("Smooth tracking").into(), tracking: Some((true, [0, 35, 78], "Smoothing your devices now".to_string())), beside_wing: true, ..idle.clone() }, None, Some(Sheet::Tracking))?;
     qm_scene("orbit-sheet-talk", out, hd, &Facts { sheet: Some(Sheet::Talk), sheet_title: "Ask N4N0".into(), talk_lines: lines.clone(), beside_wing: true, ..idle.clone() }, None, Some(Sheet::Talk))?;
     qm_scene("orbit-sheet-talk-listening", out, hd, &Facts { sheet: Some(Sheet::Talk), sheet_title: "Ask N4N0".into(), talk_lines: lines, talk: crate::overlay::orbit::panels::TalkNow::Listening(0.6), beside_wing: true, ..idle.clone() }, None, Some(Sheet::Talk))?;
     qm_scene("orbit-sheet-countdown", out, hd, &Facts { sheet: Some(Sheet::Pictures), sheet_title: "Pictures".into(), ..counting.clone() }, None, Some(Sheet::Pictures))?;

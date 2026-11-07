@@ -156,6 +156,7 @@
   "On orbiters.cc/maps and in the world's viewer": "Sur orbiters.cc/maps et dans le visualiseur du monde",
   "On · {color}": "{color}",
   "On · {color} · {level}": "Allumée · {color} · {level}",
+  "On: {headset} / {controllers} / {trackers} ms": "Activé : {headset} / {controllers} / {trackers} ms",
   "Only in VR": "VR seulement",
   "Only web links can be dropped as cards.": "Seuls les liens web peuvent être posés en carte.",
   "Only you see the picture: others see this page. Aim again to move it.": "Toi seul vois l’image : les autres voient cette page. Vise à nouveau pour la déplacer.",

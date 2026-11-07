@@ -450,7 +450,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
                 widgets::field(
                     ui,
                     tr("Walk boost"),
-                    Some(tr("In VR, your play space moves along with your walking stick, so you walk faster in VRChat. Also in the SteamVR tab and N4N0's menu.")),
+                    Some(tr("In VR, your walking stick carries you further, so you walk faster in VRChat. Also in the SteamVR tab and N4N0's menu.")),
                     48.0,
                     |ui| {
                         apply |= widgets::toggle(ui, "walk-boost", &mut draft.walk_boost.enabled);
@@ -462,6 +462,15 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
                     widgets::field(ui, tr("Strength"), Some(tr("How much faster than VRChat's own walking.")), 284.0, |ui| {
                         apply |= widgets::slider(ui, "walk-strength", &mut draft.walk_boost.strength, 0.0..=1.0, 0.05, |v| format!("+{:.0} %", v * max));
                     });
+                    widgets::separator(ui);
+                    widgets::field(ui, tr("Through SteamVR's driver"), Some(tr("Moves every device rather than the play space, so OVR Advanced Settings' drag and turn add up with your walk. Turn it off only if Fast walk misbehaves.")), 48.0, |ui| {
+                        apply |= widgets::toggle(ui, "walk-through-driver", &mut draft.walk_boost.through_driver);
+                    });
+                    // One thing to do, where it is seen: why the better way is not in use, while it is not.
+                    if let Some(words) = cx.snap.steamvr.walk_path.and_then(crate::state::WalkPath::lesser_words) {
+                        widgets::separator(ui);
+                        widgets::field(ui, tr("Fast walk's lesser mode"), Some(tr(words)), 0.0, |_| {});
+                    }
                 }
             }));
             }
@@ -1164,10 +1173,10 @@ fn orbit_settings(ui: &mut egui::Ui, snap: &Snapshot, orbit: &mut orbiters_core:
     widgets::separator(ui);
     let smoothing = |v: f32| if v == 0.0 { tr_ctx("smoothing", "None").to_string() } else { format!("{v:.0} ms") };
     widgets::field(ui, tr("Smoothing on the Quick Menu"), Some(tr("How softly what is rigid follows your hand: what opens in front of VRChat's menu, always, and the tiles when they match it. About 35 ms lines up with VRChat.")), 300.0, |ui| {
-        apply |= widgets::slider(ui, "orbit-vr-smoothing-quick-menu", &mut orbit.vr_smoothing_quick_menu_ms, 0.0..=150.0, 5.0, smoothing);
+        apply |= widgets::slider(ui, "orbit-vr-smoothing-quick-menu", &mut orbit.vr_smoothing_quick_menu_ms, 0.0..=150.0, 1.0, smoothing);
     });
     widgets::field(ui, tr("Smoothing on the wheel"), Some(tr("The same around VRChat's Action Menu. About 20 ms lines up with VRChat.")), 300.0, |ui| {
-        apply |= widgets::slider(ui, "orbit-vr-smoothing-wheel", &mut orbit.vr_smoothing_wheel_ms, 0.0..=150.0, 5.0, smoothing);
+        apply |= widgets::slider(ui, "orbit-vr-smoothing-wheel", &mut orbit.vr_smoothing_wheel_ms, 0.0..=150.0, 1.0, smoothing);
     });
     let now = if !orbiters_core::osc::VRCHAT_RUNS_HERE {
         Some(tr("VRChat runs on another computer here, so nothing can appear around its menus.").to_string())

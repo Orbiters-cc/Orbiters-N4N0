@@ -685,6 +685,8 @@ pub struct Panels {
     videos_had: usize,
     /// How many lines the conversation had.
     talk_had: usize,
+    /// How far down its foot was then.
+    talk_foot: f32,
     /// The place held along what plays; where it was let go; where it was moved to, and when.
     seeking: Option<f32>,
     /// The sound devices to choose from on the sheet of settings, and those on their way.
@@ -701,6 +703,8 @@ pub struct Panels {
     turning: Option<Pos2>,
     /// A colour being chosen along the bar: seen at once, saved when let go, and when it last showed.
     hue_held: Option<([u8; 3], Instant)>,
+    /// A smoothing slider held, where it is seen; saved when let go.
+    smoothing_held: Option<(panels::Smoothed, u16)>,
     /// The wheel's keys show.
     key_caps: bool,
     /// The sheet and all with it are away for a moment.
@@ -771,6 +775,7 @@ impl Panels {
             videos_asked: None,
             videos_had: 0,
             talk_had: 0,
+            talk_foot: 0.0,
             seeking: None,
             audio_outputs: Vec::new(),
             audio_outputs_coming: None,
@@ -782,6 +787,7 @@ impl Panels {
             view_plate: Vec::new(),
             turning: None,
             hue_held: None,
+            smoothing_held: None,
             key_caps: false,
             peek: false,
             view_taken: false,
@@ -1045,9 +1051,12 @@ impl Panels {
             Target::Suggest => mark("Suggest"),
             _ => "",
         };
-        // Where the person was has a sheet of its own here, on the menu's own list and invites.
+        // Where the person was has a sheet of its own here, on the menu's own list and invites. Smoothing has too: its
+        // page on the menu has the avatar screen's fixed choices, and here there is room for sliders in milliseconds.
         if target == Target::Instances {
             self.open_sheet(Sheet::Instances, mark("Instances"), snap);
+        } else if target == Target::Tracking {
+            self.open_sheet(Sheet::Tracking, title, snap);
         } else {
             self.open_sheet(Sheet::Menu, title, snap);
         }
@@ -1314,10 +1323,15 @@ impl Panels {
                 panel.dirty = panel.dirty || self.stage.host.dirty;
             }
         }
-        // The conversation keeps its newest in view as it grows.
-        if self.facts.sheet == Some(Sheet::Talk) && self.talk_had != self.facts.talk_lines.len() {
-            self.talk_had = self.facts.talk_lines.len();
-            self.gallery_to = panels::max_scroll(Sheet::Talk, &self.facts);
+        // The conversation keeps its newest in view as it grows: at each new line, and as an answer arrives, unless the
+        // person scrolled up to read.
+        if self.facts.sheet == Some(Sheet::Talk) {
+            let foot = panels::max_scroll(Sheet::Talk, &self.facts);
+            let lines = self.facts.talk_lines.len();
+            if self.talk_had != lines || (foot > self.talk_foot && self.gallery_to >= self.talk_foot - 1.0) {
+                self.gallery_to = foot;
+            }
+            (self.talk_had, self.talk_foot) = (lines, foot);
         }
         // An invite that needs Orbiters as a friend first goes on the menu's own page.
         if self.facts.sheet == Some(Sheet::Instances) && self.stage.host.menu.page != Page::Instances {
@@ -1396,6 +1410,7 @@ impl Panels {
             waiting: snap.reconstruct_queue.len(),
             desktop: snap.n4n0.desktop_mode || !snap.steamvr.running,
             fast_walk: snap.settings.walk_boost.enabled,
+            fast_walk_lesser: snap.steamvr.walk_path.and_then(crate::state::WalkPath::lesser_short),
             n4n0: snap.settings.n4n0.enabled,
             music: menu.media.as_ref().map(|m| (m.title.clone(), m.playing)),
             music_by: menu.media.as_ref().map_or(String::new(), |m| m.artist.clone()),
@@ -1432,6 +1447,9 @@ impl Panels {
             },
             videos_for: menu.results_for.clone(),
             talk: talk_now(snap),
+            tracking: snap.n4n0.tracking.as_ref().map(|t| (t.on, t.ms, t.note.clone())),
+            tracking_note: snap.n4n0.tracking_note.clone(),
+            smoothing_held: self.smoothing_held,
             talk_lines: if self.facts.sheet == Some(Sheet::Talk) {
                 snap.n4n0.lines.iter().map(|l| (l.who == orbiters_n4n0::status::N4n0Who::You, l.text.clone())).collect()
             } else {
@@ -1527,6 +1545,9 @@ impl Panels {
         }
         if let (Some(_), Some(p)) = (self.seeking, self.sheet_pointer) {
             self.seeking = panels::timeline_fraction(&self.facts, p.x).or(self.seeking);
+        }
+        if let (Some((which, _)), Some(p)) = (self.smoothing_held, self.sheet_pointer) {
+            self.smoothing_held = Some((which, panels::smoothing_at(p.x)));
         }
         // All of it is painted for each colour: as fast as it can be seen to follow, and no faster.
         if let (Some((was, when)), Some(p)) = (self.hue_held, self.sheet_pointer) {
@@ -1707,6 +1728,13 @@ impl Panels {
             }
             return out;
         }
+        // Along a smoothing slider: seen as it moves, saved when let go.
+        if let Some(Action::Set(panels::Pick::SmoothingBar(which))) = action {
+            if let Some(p) = self.sheet_pointer {
+                self.smoothing_held = Some((which, panels::smoothing_at(p.x)));
+            }
+            return out;
+        }
         // Along what plays: where it is held, and moved there when let go.
         if action == Some(Action::Timeline) {
             if let Some(p) = self.sheet_pointer {
@@ -1759,7 +1787,8 @@ impl Panels {
             panels::Pick::Pictures(keep) => serde_json::json!({ "orbit": { "retro_pictures": keep } }),
             panels::Pick::Swatch(i) => colour(panels::SWATCHES[i]),
             // Pressed and dragged: see `press`, `hover` and `release`.
-            panels::Pick::Hue => return,
+            panels::Pick::Hue | panels::Pick::SmoothingBar(_) => return,
+            panels::Pick::Smoothing(on) => serde_json::json!({ "tracking": { "enabled": on } }),
             panels::Pick::Language(after) => crate::language::patch(panels::language_after(crate::language::chosen(&snap.settings), after)),
             panels::Pick::Sound(after) => {
                 let now = snap.settings.vr_audio.output.as_ref();
@@ -1972,6 +2001,13 @@ impl Panels {
 
     /// The pointer's button went up.
     pub fn release(&mut self) {
+        if let Some((which, held)) = self.smoothing_held.take() {
+            // Where it was let go.
+            let ms = self.sheet_pointer.map_or(held, |p| panels::smoothing_at(p.x));
+            if let Some(patch) = panels::Smoothed::patch(which, ms, self.facts.tracking.as_ref().map(|t| t.1)) {
+                self.backend.patch_settings(patch);
+            }
+        }
         if let Some((held, _)) = self.hue_held.take() {
             // Where it was let go, not the last colour a slow frame showed.
             let colour = self.sheet_pointer.map_or(held, |p| panels::hue_at(p.x));

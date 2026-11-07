@@ -220,6 +220,18 @@ fn on_hand(tilt: f32, ahead: f32, up: f32) -> Matrix34 {
     space::from_axes([1.0, 0.0, 0.0], [0.0, sin, -cos], [0.0, cos, sin], [0.0, up, -ahead])
 }
 
+/// How far a wing's tile stands off a sheet up beside it, in menu units: the sheet is nearer the eyes, and would seem to run into it.
+const WING_OFF_A_SHEET: f32 = 18.0;
+
+/// A wing's tile off a sheet, on the side it lies.
+pub fn clear_of_sheet(mut placed: Placed, sheet_up: bool) -> Placed {
+    if sheet_up && Zone::WING.contains(&placed.zone) {
+        let side = if placed.rect.center().x < 0.0 { -1.0 } else { 1.0 };
+        placed.rect = placed.rect.translate(egui::vec2(side * WING_OFF_A_SHEET, 0.0));
+    }
+    placed
+}
+
 /// The grip that would hold a plane lying `on_hand` as it is, for the pictures of a hand held where a person looks at its menu.
 pub fn grip_holding(frame: &Matrix34, on_hand: &Matrix34) -> Matrix34 {
     space::compose(frame, &space::inverse(on_hand))
@@ -719,7 +731,7 @@ impl OrbitVr {
                     _ if sheet_up => TAKEOVER_NEAR_M - 0.004,
                     _ => NEAR_M,
                 };
-                (on.quad(&p.placed, -p.outward(), near), p.placed)
+                (on.quad(&clear_of_sheet(p.placed, sheet_up), -p.outward(), near), p.placed)
             })
             .collect();
 
@@ -751,7 +763,7 @@ impl OrbitVr {
             .panels
             .all()
             .zip(&quads)
-            .map(|(p, (quad, _))| {
+            .map(|(p, _)| {
                 let sheet = matches!(p.zone, Zone::Takeover | Zone::SheetBack);
                 // A sheet from the wheel stays in the room. What is being laid on VRChat's menu goes with the other hand.
                 if aligning || (sheet && from_wheel) {
@@ -765,7 +777,7 @@ impl OrbitVr {
                     _ if sheet_up => TAKEOVER_NEAR_M - 0.004,
                     _ => NEAR_M,
                 };
-                let on_hand = Plane { frame, unit }.quad(&p.placed, -p.outward(), near).transform;
+                let on_hand = Plane { frame, unit }.quad(&clear_of_sheet(p.placed, sheet_up), -p.outward(), near).transform;
                 // What lies in front of VRChat's menu keeps with it. What lies around it can dance (Enzo).
                 if springy && !sheet {
                     let target = space::compose(&sharp, &on_hand);
@@ -943,6 +955,18 @@ impl OrbitVr {
 mod tests {
     use super::*;
     use orbiters_core::settings::OrbitSettings;
+
+    /// Round 5's judges: the wing's tiles ran into a sheet's right edge. It moves away, and only with a sheet up.
+    #[test]
+    fn a_wing_stands_off_a_sheet_and_only_a_wing() {
+        let place = |zone, x: f32| Placed { zone, rect: egui::Rect::from_min_size(egui::pos2(x, 0.0), egui::vec2(80.0, 80.0)), center: egui::Pos2::ZERO, unit: 1.0 };
+        let right = place(Zone::WingWorlds, 400.0);
+        assert!(clear_of_sheet(right, true).rect.left() > 400.0);
+        assert_eq!(clear_of_sheet(right, false).rect, right.rect);
+        assert!(clear_of_sheet(place(Zone::WingWorlds, -480.0), true).rect.left() < -480.0);
+        let sheet = place(Zone::Takeover, 0.0);
+        assert_eq!(clear_of_sheet(sheet, true).rect, sheet.rect);
+    }
 
     fn at(t0: Instant, ms: u64) -> Instant {
         t0 + Duration::from_millis(ms)

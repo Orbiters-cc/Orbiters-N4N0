@@ -271,6 +271,10 @@ pub(super) fn vr_shots(out: &Path, refs: &Path) -> anyhow::Result<()> {
     for world in ["forest", "dream"] {
         let read = |name: &str| -> anyhow::Result<image::RgbImage> { Ok(image::open(refs.join(format!("ref-{name}-{world}.jpg")))?.to_rgb8()) };
         let (ground, wheel_frame, qm_frame) = (read("world")?, read("wheel")?, read("qm")?);
+        if TILE_PICTURE.get().is_none() {
+            let small = image::imageops::resize(&ground, 480, 270, image::imageops::FilterType::Triangle);
+            let _ = TILE_PICTURE.set(ColorImage::from_rgb([480, 270], small.as_raw()));
+        }
         // Only the small view's, to try it on captures.
         let only_small = std::env::var_os("ORBIT_ONLY_SMALL").is_some();
         let client = vec2(1920.0, 1080.0);
@@ -422,7 +426,7 @@ pub(super) fn vr_shots(out: &Path, refs: &Path) -> anyhow::Result<()> {
             for zone in Zone::QUICK_MENU {
                 let placed = zones::in_units(zone);
                 let (pixels, px) = sharp_picture(&placed, &worlds, None, 2.0);
-                eye.quad(&plane.quad(&placed, 0.0, 0.016), &pixels, px, 1.0);
+                eye.quad(&plane.quad(&vr::clear_of_sheet(placed, true), 0.0, 0.016), &pixels, px, 1.0);
             }
             let back = zones::in_units(Zone::SheetBack);
             let (pixels, px) = sharp_picture(&back, &worlds, None, 2.0);
@@ -457,6 +461,9 @@ pub(super) fn vr_shots(out: &Path, refs: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// A real frame, for what the parts show of what they open.
+static TILE_PICTURE: std::sync::OnceLock<ColorImage> = std::sync::OnceLock::new();
+
 /// A panel's picture for the headset: `sharp` pixels a unit, cut to its shape, pictures of recent captures standing in.
 fn sharp_picture(placed: &Placed, facts: &Facts, hover: Option<usize>, sharp: f32) -> (Vec<u8>, [u32; 2]) {
     let px = [(placed.rect.width() * sharp).round() as u32, (placed.rect.height() * sharp).round() as u32];
@@ -465,6 +472,14 @@ fn sharp_picture(placed: &Placed, facts: &Facts, hover: Option<usize>, sharp: f3
     let textures: Vec<_> = (0..4).map(|i| canvas.ctx().load_texture("recent", stand_in(i), TextureOptions::LINEAR)).collect();
     let mut facts = facts.clone();
     facts.recent_pictures = textures.iter().enumerate().map(|(n, texture)| (n, texture.id())).collect();
+    facts.hero_captures = textures.iter().take(3).map(|texture| texture.id()).collect();
+    facts.hero_picture = textures.first().map(|texture| texture.id());
+    // What the parts open, from a real frame of the game.
+    if matches!(placed.zone, Zone::WheelWorlds | Zone::WingWorlds | Zone::WheelPictures | Zone::WingPictures | Zone::WheelInstances | Zone::WingInstances) {
+        if let Some(image) = TILE_PICTURE.get() {
+            facts.tile_picture = Some(canvas.ctx().load_texture("tile", image.clone(), TextureOptions::LINEAR).id());
+        }
+    }
     for _ in 0..2 {
         canvas.paint(0.0, |p| panels::paint(p, placed.zone, logical, &facts, hover, None));
     }

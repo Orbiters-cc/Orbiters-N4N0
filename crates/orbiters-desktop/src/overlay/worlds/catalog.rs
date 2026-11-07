@@ -612,7 +612,12 @@ impl Capture {
             // The ragged top of what stands, where it fades out in the capture, is cut off clean.
             let top = ceiling.map_or(heights[heights.len() * 9 / 10], |c| (c - 0.15).min(heights[heights.len() * 9 / 10])).max(1.2);
             let tall = heights.iter().copied().filter(|h| *h <= top).max_by(f32::total_cmp).unwrap_or(top).min(top);
-            let share = standing.len() as f32 / inside.len() as f32;
+            // A ceiling stands for nothing: a stage is chosen by what stands under it, or a plate of bare floor would win.
+            let standing: Vec<V3> = standing.into_iter().filter(|p| ceiling.is_none_or(|c| p[1] - ground < c - 0.15)).collect();
+            if standing.len() < 120 {
+                continue;
+            }
+            let share = standing.len() as f32 / inside.iter().filter(|p| ceiling.is_none_or(|c| p[1] - ground < c - 0.15)).count() as f32;
             // Much that stands up, that stands high against how wide the plate is, seen from close enough to tell what it is.
             let score = (share / 0.55).min(1.0) * (tall / reach / 0.7).min(1.0) * (standing.len() as f32 / 2500.0).min(1.0) * (1.0 - reach / 40.0);
             if score > best_score {
@@ -620,9 +625,9 @@ impl Capture {
                 let n = standing.len() as f32;
                 let (sx, sz) = standing.iter().fold((0.0, 0.0), |(x, z), p| (x + p[0] / n, z + p[2] / n));
                 // Towards what stands, and still around what the camera looked at.
-                let middle = [target[0] + (sx - target[0]) * 0.5, ground + tall * 0.34, target[2] + (sz - target[2]) * 0.5];
+                let middle = [target[0] + (sx - target[0]) * 0.8, ground + tall * 0.34, target[2] + (sz - target[2]) * 0.8];
                 // With some room around it, as a stage has.
-                best = SmallFrame { middle, reach: reach * 1.3, ground, top: ground + top };
+                best = SmallFrame { middle, reach: reach * 1.12, ground, top: ground + top };
             }
         }
         // What lies across it overhead is no part of a stage, however thin or fuzzy: it stops under the first such layer.
@@ -933,7 +938,9 @@ mod tests {
         assert!(frame.top < 2.8 && frame.top > 2.0, "{frame:?}");
         let small = closed.around_subject();
         assert!(small.gaussians.means.iter().all(|m| m[1] < frame.top), "no ceiling left");
-        assert!(small.within(frame.reach) > 300);
+        assert!(small.within(frame.reach) > 300, "{frame:?}");
+        // And it holds the figure, not a plate of floor beside it.
+        assert!(frame.reach > 2.0, "{frame:?}");
         assert!(small.gaussians.len() < closed.gaussians.len());
         // In order across the ground from its middle, and its view looks the way the capture's did.
         assert!(small.distances.windows(2).all(|w| w[0] <= w[1]));

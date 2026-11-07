@@ -1519,6 +1519,11 @@ impl Controller {
         }
     }
 
+    /// How Fast walk carries the person now, for the windows.
+    pub fn set_walk_path(self: &Shared, path: crate::state::WalkPath) {
+        self.update(|s| s.steamvr.walk_path = Some(path));
+    }
+
     /// Sets the walk boost's strength (0 to 1): the SteamVR tab's slider, or (`from_avatar`) the avatar's Walk boost
     /// radial, which is not sent its own value back.
     pub fn set_walk_boost(self: &Shared, strength: f32, from_avatar: bool) {

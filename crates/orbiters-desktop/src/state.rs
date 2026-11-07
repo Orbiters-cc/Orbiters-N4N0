@@ -301,6 +301,67 @@ pub struct AccountStatus {
     pub error: Option<String>,
 }
 
+/// How Fast walk carries the person now, as the SteamVR overlay says it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WalkPath {
+    /// Orbiters - N4N0's SteamVR driver moves every device: other applications that move the play space add up with it.
+    Driver,
+    /// The play space itself moves, the lesser way: another application that moves it puts the person back.
+    PlaySpace(WhyPlaySpace),
+}
+
+/// Why Fast walk moves the play space rather than going through the driver: what would change that.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WhyPlaySpace {
+    /// SteamVR did not load the driver: its next start will.
+    NotRunning,
+    /// SteamVR started before this version was installed and runs its older driver: its next start loads this one.
+    OldDriver,
+    /// SteamVR's Safe Mode turned the driver off.
+    SafeMode,
+    /// Turned off in SteamVR's Manage Add-ons.
+    TurnedOff,
+    /// The person turned it off in Settings.
+    Setting,
+    /// The driver did not move every device here.
+    Refused,
+}
+
+impl WalkPath {
+    /// The same in a few words, for where there is one line for it.
+    pub fn lesser_short(self) -> Option<&'static str> {
+        use orbiters_i18n::mark;
+        match self {
+            WalkPath::Driver | WalkPath::PlaySpace(WhyPlaySpace::Setting) => None,
+            WalkPath::PlaySpace(WhyPlaySpace::NotRunning | WhyPlaySpace::OldDriver) => Some(mark("Restart SteamVR once for the better Fast walk.")),
+            WalkPath::PlaySpace(WhyPlaySpace::SafeMode | WhyPlaySpace::TurnedOff) => Some(mark("Turn orbiters_smooth on in SteamVR for the better Fast walk.")),
+            WalkPath::PlaySpace(WhyPlaySpace::Refused) => Some(mark("The driver could not carry your devices here.")),
+        }
+    }
+
+    /// What to say and do about it: `None` while the walk goes through the driver, or the person chose not to.
+    pub fn lesser_words(self) -> Option<&'static str> {
+        use orbiters_i18n::mark;
+        match self {
+            WalkPath::Driver | WalkPath::PlaySpace(WhyPlaySpace::Setting) => None,
+            WalkPath::PlaySpace(WhyPlaySpace::NotRunning | WhyPlaySpace::OldDriver) => {
+                Some(mark("Restart SteamVR once for the better Fast walk. Until then it moves the play space, so OVR Advanced Settings' drag and turn put you back."))
+            }
+            WalkPath::PlaySpace(WhyPlaySpace::SafeMode) => {
+                Some(mark("SteamVR's Safe Mode turned the driver off: turn orbiters_smooth on in Manage Add-ons for the better Fast walk. Until then OVR Advanced Settings' drag and turn put you back."))
+            }
+            WalkPath::PlaySpace(WhyPlaySpace::TurnedOff) => {
+                Some(mark("Turn orbiters_smooth on in SteamVR's Manage Add-ons for the better Fast walk. Until then OVR Advanced Settings' drag and turn put you back."))
+            }
+            WalkPath::PlaySpace(WhyPlaySpace::Refused) => {
+                Some(mark("The driver could not carry all your devices, so Fast walk moves the play space. OVR Advanced Settings' drag and turn put you back. See walk-boost.log."))
+            }
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct SteamVrStatus {
     /// SteamVR's server runs.
@@ -310,6 +371,9 @@ pub struct SteamVrStatus {
     pub pid: Option<u32>,
     /// The Orbiters overlay is connected (a tab in SteamVR's dashboard).
     pub overlay: bool,
+    /// How Fast walk carries the person, as the overlay last said.
+    #[serde(default)]
+    pub walk_path: Option<WalkPath>,
     /// Someone wears the headset (SteamVR's activity level, read by the overlay); `None` without the overlay.
     #[serde(default)]
     pub headset_in_use: Option<bool>,
@@ -627,5 +691,24 @@ impl Snapshot {
                 self.capture.trail = keep;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every reason the lesser way is in use says what to do about it, and the better way, or the person's own choice, nothing.
+    #[test]
+    fn the_lesser_way_says_what_would_change_it() {
+        use WhyPlaySpace::*;
+        for why in [NotRunning, OldDriver, SafeMode, TurnedOff, Refused] {
+            assert!(WalkPath::PlaySpace(why).lesser_words().is_some() && WalkPath::PlaySpace(why).lesser_short().is_some(), "{why:?}");
+        }
+        for path in [WalkPath::Driver, WalkPath::PlaySpace(Setting)] {
+            assert!(path.lesser_words().is_none() && path.lesser_short().is_none(), "{path:?}");
+        }
+        let restart = WalkPath::PlaySpace(OldDriver).lesser_short().unwrap();
+        assert!(restart.contains("Restart SteamVR"), "one step: {restart}");
     }
 }

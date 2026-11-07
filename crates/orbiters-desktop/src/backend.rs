@@ -88,6 +88,8 @@ pub trait Backend: Send + Sync {
     fn headset(&self, in_use: bool);
     /// What each of SteamVR's device indices is (the overlay reads it), for tracking smoothing's strengths.
     fn steamvr_devices(&self, _kinds: Vec<crate::tracking::DeviceKind>) {}
+    /// How Fast walk carries the person now (the overlay decides it).
+    fn walk_path(&self, _path: crate::state::WalkPath) {}
     /// Sets the walk boost's strength (0 to 1), saved and sent to the avatar's `N4N0/WalkBoost`.
     fn walk_boost(&self, strength: f32);
     /// Makes VRChat find the OSC service again (it sends avatar parameters only to services it found).
@@ -273,6 +275,10 @@ impl Backend for Remote {
 
     fn steamvr_devices(&self, kinds: Vec<crate::tracking::DeviceKind>) {
         self.0.send(&ToService::SteamVrDevices { kinds });
+    }
+
+    fn walk_path(&self, path: crate::state::WalkPath) {
+        self.0.send(&ToService::WalkPath { path });
     }
 
     fn walk_boost(&self, strength: f32) {

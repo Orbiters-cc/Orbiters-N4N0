@@ -158,6 +158,21 @@ fn strengths(kinds: &[DeviceKind], ms: [u16; 3]) -> [f32; MAX_DEVICES] {
     out
 }
 
+/// What the overlay says of Fast walk, with what the service can tell of why SteamVR did not load the driver: whether a
+/// restart would be enough, or the add-on must be turned on first.
+pub fn walk_path_said(path: crate::state::WalkPath) -> crate::state::WalkPath {
+    use crate::state::{WalkPath, WhyPlaySpace};
+    #[cfg(windows)]
+    if path == WalkPath::PlaySpace(WhyPlaySpace::NotRunning) {
+        match orbiters_smooth::Installation::for_user().map(|i| i.add_on_state()) {
+            Ok(orbiters_smooth::AddOnState::BlockedBySafeMode) => return WalkPath::PlaySpace(WhyPlaySpace::SafeMode),
+            Ok(orbiters_smooth::AddOnState::TurnedOff) => return WalkPath::PlaySpace(WhyPlaySpace::TurnedOff),
+            _ => {}
+        }
+    }
+    path
+}
+
 /// Why SteamVR, running, shows no heartbeat of the driver, as the Tracking page says it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum NotLoaded {

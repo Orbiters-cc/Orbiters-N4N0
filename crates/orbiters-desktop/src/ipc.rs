@@ -176,6 +176,10 @@ pub enum ToService {
     SteamVrDevices {
         kinds: Vec<crate::tracking::DeviceKind>,
     },
+    /// How Fast walk carries the person now.
+    WalkPath {
+        path: crate::state::WalkPath,
+    },
     /// The overlay changed the walk boost's strength (also sent to the avatar's `N4N0/WalkBoost`).
     WalkBoost {
         strength: f32,

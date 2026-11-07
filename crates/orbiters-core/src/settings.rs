@@ -425,6 +425,9 @@ pub struct WalkBoostSettings {
     pub hand: Hand,
     /// Which way "forward" is: where the head looks (VRChat's default) or where that hand points.
     pub follow: Follow,
+    /// Through Orbiters - N4N0's SteamVR driver, which moves every device's pose, when it runs: other applications that move
+    /// the play space then add up with the walk. Off, or without the driver, the play space itself moves, as it used to.
+    pub through_driver: bool,
 }
 
 impl WalkBoostSettings {
@@ -433,7 +436,7 @@ impl WalkBoostSettings {
 
 impl Default for WalkBoostSettings {
     fn default() -> Self {
-        Self { enabled: false, strength: 0.5, hand: Hand::Left, follow: Follow::Head }
+        Self { enabled: false, strength: 0.5, hand: Hand::Left, follow: Follow::Head, through_driver: true }
     }
 }
 

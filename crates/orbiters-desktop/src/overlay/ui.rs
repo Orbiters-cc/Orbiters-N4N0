@@ -232,6 +232,8 @@ impl OverlayUi {
             (tr!("SteamVR refused the controls: {why}", why = why), theme::WARN)
         } else if self.walk_taken {
             (tr("Another app moved the play space, so you went back.").to_string(), theme::WARN)
+        } else if let Some(words) = boost.enabled.then(|| snap.steamvr.walk_path.and_then(crate::state::WalkPath::lesser_short)).flatten() {
+            (tr(words).to_string(), theme::WARN)
         } else if !snap.vrchat.running {
             (tr("Works in VRChat: start it to walk faster.").to_string(), theme::FG_3)
         } else if !snap.vrchat.world.in_world {

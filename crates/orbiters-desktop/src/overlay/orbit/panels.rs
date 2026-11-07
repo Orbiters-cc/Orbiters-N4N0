@@ -416,6 +416,8 @@ pub struct Facts {
     /// VRChat in desktop mode: no fast walk, no tracking, and a real keyboard.
     pub desktop: bool,
     pub fast_walk: bool,
+    /// What would make it the better way, when it is on and goes through the play space.
+    pub fast_walk_lesser: Option<&'static str>,
     /// N4N0 is on: Ask has someone to talk to.
     pub n4n0: bool,
     /// What plays on the computer.
@@ -1422,7 +1424,7 @@ pub fn caption(action: Action, facts: &Facts) -> Option<(String, String)> {
         Action::Page(Target::Suggest) => (tr("Suggest").into(), tr("Tell the Orbiters team what you would like.").into()),
         Action::Page(_) => return None,
         Action::Set(_) => return None,
-        Action::FastWalk => (tr("Fast walk").into(), if facts.fast_walk { tr("On: you walk faster. Press to turn it off.").into() } else { tr("Walk faster than VRChat lets you.").to_string() }),
+        Action::FastWalk => (tr("Fast walk").into(), if let Some(words) = facts.fast_walk_lesser.filter(|_| facts.fast_walk) { tr(words).to_string() } else if facts.fast_walk { tr("On: you walk faster. Press to turn it off.").into() } else { tr("Walk faster than VRChat lets you.").to_string() }),
         Action::PlayPause => match &facts.music {
             Some((title, playing)) => (title.clone(), if *playing { tr("Playing on your computer. Press to pause.").into() } else { tr("Paused on your computer. Press to play.").to_string() }),
             None => (tr("Nothing playing").into(), tr("What your computer plays shows here.").into()),
@@ -3441,6 +3443,17 @@ mod tests {
     }
 
     /// When N4N0 speaks it shows, wherever the person is in these menus.
+    /// In a headset, where the one thing to do about the lesser Fast walk is seen: on its own tile.
+    #[test]
+    fn fast_walk_s_tile_says_what_would_make_it_better() {
+        let on = Facts { fast_walk: true, ..facts() };
+        let said = |f: &Facts| caption(Action::FastWalk, f).unwrap().1;
+        assert!(said(&on).contains("On: you walk faster"));
+        let lesser = Facts { fast_walk_lesser: Some("Restart SteamVR once for the better Fast walk."), ..on.clone() };
+        assert_eq!(said(&lesser), "Restart SteamVR once for the better Fast walk.");
+        assert!(said(&Facts { fast_walk: false, ..lesser }).contains("Walk faster"), "off: nothing to do about it");
+    }
+
     #[test]
     fn what_n4n0_says_shows_in_the_caption_and_a_sheet_s_head() {
         let facts = Facts { n4n0_says: Some("It is sunny".into()), ..facts() };

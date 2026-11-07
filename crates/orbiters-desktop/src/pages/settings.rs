@@ -450,7 +450,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
                 widgets::field(
                     ui,
                     tr("Walk boost"),
-                    Some(tr("In VR, your play space moves along with your walking stick, so you walk faster in VRChat. Also in the SteamVR tab and N4N0's menu.")),
+                    Some(tr("In VR, your walking stick carries you further, so you walk faster in VRChat. Also in the SteamVR tab and N4N0's menu.")),
                     48.0,
                     |ui| {
                         apply |= widgets::toggle(ui, "walk-boost", &mut draft.walk_boost.enabled);
@@ -459,9 +459,18 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
                 if draft.walk_boost.enabled {
                     widgets::separator(ui);
                     let max = orbiters_core::settings::WalkBoostSettings::MAX_EXTRA * 100.0;
-                    widgets::field(ui, tr("Strength"), Some(tr("How much faster than VRChat's own walking. OVR Advanced Settings' Space Drag and Space Turn move the same play space: using them puts you back where they last left you, so turn off their bindings to keep the distance you walked.")), 284.0, |ui| {
+                    widgets::field(ui, tr("Strength"), Some(tr("How much faster than VRChat's own walking.")), 284.0, |ui| {
                         apply |= widgets::slider(ui, "walk-strength", &mut draft.walk_boost.strength, 0.0..=1.0, 0.05, |v| format!("+{:.0} %", v * max));
                     });
+                    widgets::separator(ui);
+                    widgets::field(ui, tr("Through SteamVR's driver"), Some(tr("Moves every device rather than the play space, so OVR Advanced Settings' drag and turn add up with your walk. Turn it off only if Fast walk misbehaves.")), 48.0, |ui| {
+                        apply |= widgets::toggle(ui, "walk-through-driver", &mut draft.walk_boost.through_driver);
+                    });
+                    // One thing to do, where it is seen: why the better way is not in use, while it is not.
+                    if let Some(words) = cx.snap.steamvr.walk_path.and_then(crate::state::WalkPath::lesser_words) {
+                        widgets::separator(ui);
+                        widgets::field(ui, tr("Fast walk's lesser mode"), Some(tr(words)), 0.0, |_| {});
+                    }
                 }
             }));
             }

@@ -76,6 +76,8 @@ extern "system" {
     pub fn VirtualAlloc(address: *const c_void, size: usize, kind: u32, protect: u32) -> *mut c_void;
     pub fn VirtualFree(address: *mut c_void, size: usize, kind: u32) -> i32;
     pub fn OpenProcess(access: u32, inherit: i32, pid: u32) -> HANDLE;
+    pub fn QueryPerformanceCounter(counter: *mut i64) -> i32;
+    pub fn QueryPerformanceFrequency(frequency: *mut i64) -> i32;
     pub fn WaitForSingleObject(handle: HANDLE, milliseconds: u32) -> u32;
     pub fn GetModuleHandleExW(flags: u32, name: *const u16, module: *mut HANDLE) -> i32;
     pub fn GetProcessTimes(process: HANDLE, creation: *mut u64, exit: *mut u64, kernel: *mut u64, user: *mut u64) -> i32;
@@ -106,6 +108,18 @@ pub fn process_started(pid: u32) -> Option<std::time::SystemTime> {
 /// `name` as a NUL-terminated UTF-16 string.
 pub fn wide(name: &str) -> Vec<u16> {
     name.encode_utf16().chain(std::iter::once(0)).collect()
+}
+
+/// Microseconds on the clock every process on this computer shares (wrapping every 71 minutes): what Fast walk times its
+/// writes and the poses it moves with.
+pub fn micros() -> u32 {
+    let (mut counter, mut frequency) = (0i64, 0i64);
+    // SAFETY: two writable 64-bit integers. They succeed on every Windows since XP.
+    unsafe {
+        QueryPerformanceCounter(&mut counter);
+        QueryPerformanceFrequency(&mut frequency);
+    }
+    ((counter as i128 * 1_000_000 / frequency.max(1) as i128) & 0xFFFF_FFFF) as u32
 }
 
 /// Milliseconds since Windows started, the same clock in every process.

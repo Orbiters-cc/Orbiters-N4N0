@@ -1388,6 +1388,7 @@ impl Panels {
             waiting: snap.reconstruct_queue.len(),
             desktop: snap.n4n0.desktop_mode || !snap.steamvr.running,
             fast_walk: snap.settings.walk_boost.enabled,
+            fast_walk_lesser: snap.steamvr.walk_path.and_then(crate::state::WalkPath::lesser_short),
             n4n0: snap.settings.n4n0.enabled,
             music: menu.media.as_ref().map(|m| (m.title.clone(), shown_playing(m.playing, self.play_asked, Instant::now()))),
             music_by: menu.media.as_ref().map_or(String::new(), |m| m.artist.clone()),

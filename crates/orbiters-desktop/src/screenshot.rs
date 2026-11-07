@@ -1449,6 +1449,7 @@ fn shots(args: &[String], picture_folders: Vec<PathBuf>) -> anyhow::Result<()> {
             snapshot: {
                 let mut s = idle.clone();
                 s.settings.walk_boost.enabled = true;
+                s.steamvr.walk_path = Some(crate::state::WalkPath::PlaySpace(crate::state::WhyPlaySpace::OldDriver));
                 s.settings.world_performance = true;
                 s
             },
@@ -1457,7 +1458,7 @@ fn shots(args: &[String], picture_folders: Vec<PathBuf>) -> anyhow::Result<()> {
             open_detail: false,
             toasts: vec![],
             pointer: None,
-            scroll: 1750.0,
+            scroll: 3450.0,
             world: None,
             home: None,
             library: None,

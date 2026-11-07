@@ -12,6 +12,7 @@ use super::{block, section, Cx};
 use crate::overlay::menu_ui;
 use crate::state::{AvatarView, StateAction, StateView, StatesView};
 use egui::{pos2, vec2, Align2, CursorIcon, Id, Key, Rect, Sense, Ui};
+use orbiters_i18n::{fill, tr, tr_n};
 use orbiters_n4n0_core::menu::layout::Tint;
 use orbiters_n4n0_core::menu::{next_state_name, StateRow};
 use orbiters_ui::anim::{self, Spring};
@@ -136,8 +137,8 @@ fn done(action: &StateAction, states: &[StateView]) -> bool {
 fn avatar_name(avatar: &AvatarView) -> String {
     match avatar.name.as_deref().map(str::trim).filter(|n| !n.is_empty()) {
         Some(name) => name.to_string(),
-        None if avatar.worn => "This avatar".to_string(),
-        None => format!("Avatar {}", short_id(&avatar.id)),
+        None if avatar.worn => tr("This avatar").to_string(),
+        None => tr!("Avatar {id}", id = short_id(&avatar.id)),
     }
 }
 
@@ -154,9 +155,16 @@ fn short_id(id: &str) -> String {
 /// "3 saved states", "1 saved state", "Nothing saved yet".
 fn count(n: usize) -> String {
     match n {
-        0 => "Nothing saved yet".into(),
-        1 => "1 saved state".into(),
-        n => format!("{n} saved states"),
+        0 => tr("Nothing saved yet").into(),
+        n => tr_n("{count} saved state", "{count} saved states", n as u64),
+    }
+}
+
+/// [`count`] after a "·" in the middle of a line: "3 saved states", "nothing saved yet".
+fn count_inline(n: usize) -> String {
+    match n {
+        0 => tr("nothing saved yet").into(),
+        n => count(n),
     }
 }
 
@@ -193,22 +201,21 @@ fn cards_page(ui: &mut Ui, cx: &mut Cx, page: &mut StatesPage, view: &StatesView
     let total: usize = view.avatars.iter().map(|a| a.states.len()).sum();
     let avatars = view.avatars.len();
     let sub = match (view.avatar_id.is_some(), avatars) {
-        (false, 0) => "VRChat's avatar is not known yet".to_string(),
-        (true, 1) => format!("Your avatar · {}", count(total).to_lowercase()),
-        (_, n) => format!("{n} avatar{} · {}", if n == 1 { "" } else { "s" }, count(total).to_lowercase()),
+        (false, 0) => tr("VRChat's avatar is not known yet").to_string(),
+        (true, 1) => tr!("Your avatar · {saved}", saved = count_inline(total)),
+        (_, n) => fill(&tr_n("{count} avatar · {saved}", "{count} avatars · {saved}", n as u64), &[("saved", &count_inline(total))]),
     };
     block(ui, cx, 0, 116.0, |ui, rect| {
-        let back = Button::new("Home").icon(icons::ARROW_LEFT).variant(Variant::Ghost).size(Size::Sm);
+        let back = Button::new(tr("Home")).icon(icons::ARROW_LEFT).variant(Variant::Ghost).size(Size::Sm);
         let w = back.desired_width(ui);
         if back.show_at(ui, Rect::from_min_size(rect.min, vec2(w, 32.0))).clicked() {
             out.push(Out::Home);
         }
-        super::heading(ui, Rect::from_min_max(pos2(rect.left(), rect.top() + 44.0), rect.max), "N4N0 menu", "States", Some(&sub));
+        super::heading(ui, Rect::from_min_max(pos2(rect.left(), rect.top() + 44.0), rect.max), tr("N4N0 menu"), tr("States"), Some(&sub));
     });
     if view.avatars.is_empty() {
-        let text = "Start VRChat with OSC on: the avatar you wear gets a card here, named as in its SDK. A state keeps every \
-                    parameter of it that OSC can set, and its size; applying one puts them back.";
-        return note(ui, cx, 1, icons::BOOKMARKS_SIMPLE, "No avatar yet", text);
+        let text = tr("Start VRChat with OSC on: the avatar you wear gets a card here, named as in its SDK. A state keeps every parameter of it that OSC can set, and its size; applying one puts them back.");
+        return note(ui, cx, 1, icons::BOOKMARKS_SIMPLE, tr("No avatar yet"), text);
     }
     let w = ui.available_width().min(MAX_W);
     let cols = if w >= 900.0 {
@@ -251,7 +258,7 @@ fn avatar_card(ui: &mut Ui, cx: &Cx, index: usize, rect: Rect, avatar: &AvatarVi
     p.rect_filled(chip, theme::radius(11.0), theme::alpha(tint, 0.12));
     widgets::icon(&p, chip.center(), if avatar.worn { icons::PERSON } else { icons::USER_CIRCLE }, 17.0, tint);
     if avatar.worn {
-        let pill = Txt::new("Wearing now", 11.5).weight(weight::SEMIBOLD).color(theme::ACCENT);
+        let pill = Txt::new(tr("Wearing now"), 11.5).weight(weight::SEMIBOLD).color(theme::ACCENT);
         let pw = widgets::text_size(ui, &pill).x + 20.0;
         let pr = Rect::from_min_size(pos2(r.right() - INSET - pw, chip.center().y - 10.0), vec2(pw, 20.0));
         p.rect_filled(pr, theme::radius(10.0), theme::alpha(theme::ACCENT, 0.14));
@@ -263,8 +270,13 @@ fn avatar_card(ui: &mut Ui, cx: &Cx, index: usize, rect: Rect, avatar: &AvatarVi
     let room = r.width() - 2.0 * INSET;
     let name = Txt::new(avatar_name(avatar), 15.5).weight(weight::SEMIBOLD);
     widgets::text_truncated(&p, pos2(x, r.bottom() - 46.0), Align2::LEFT_CENTER, &name, room);
-    let default = avatar.states.iter().find(|s| s.default).map(|s| format!(" · Default: {}", s.name)).unwrap_or_default();
-    let note = Txt::new(format!("{}{default}", count(avatar.states.len())), 12.5).color(if default.is_empty() { theme::FG_3 } else { theme::ACCENT });
+    let default = avatar.states.iter().find(|s| s.default).map(|s| s.name.as_str());
+    let saved = count(avatar.states.len());
+    let line = match default {
+        Some(name) => tr!("{saved} · Default: {name}", saved = saved, name = name),
+        None => saved,
+    };
+    let note = Txt::new(line, 12.5).color(if default.is_none() { theme::FG_3 } else { theme::ACCENT });
     widgets::text_truncated(&p, pos2(x, r.bottom() - 24.0), Align2::LEFT_CENTER, &note, room);
     pressed
 }
@@ -274,16 +286,16 @@ fn avatar_page(ui: &mut Ui, cx: &mut Cx, page: &mut StatesPage, view: &StatesVie
     let whose = Whose { id: avatar.id.clone(), worn: avatar.worn };
     let states = page.shown(&avatar.id, &avatar.states, now);
     let sub = if avatar.worn {
-        format!("Wearing now · {}", count(states.len()).to_lowercase())
+        tr!("Wearing now · {saved}", saved = count_inline(states.len()))
     } else {
-        format!("{} · wear it in VRChat to apply them", count(states.len()))
+        tr!("{saved} · wear it in VRChat to apply them", saved = count(states.len()))
     };
     let mut back_to_cards = false;
     block(ui, cx, 0, 116.0, |ui, rect| {
-        let back = Button::new("States").icon(icons::ARROW_LEFT).variant(Variant::Ghost).size(Size::Sm).id_salt("orbiters-states-cards");
+        let back = Button::new(tr("States")).icon(icons::ARROW_LEFT).variant(Variant::Ghost).size(Size::Sm).id_salt("orbiters-states-cards");
         let w = back.desired_width(ui);
         back_to_cards = back.show_at(ui, Rect::from_min_size(rect.min, vec2(w, 32.0))).clicked();
-        super::heading(ui, Rect::from_min_max(pos2(rect.left(), rect.top() + 44.0), rect.max), "States", &avatar_name(avatar), Some(&sub));
+        super::heading(ui, Rect::from_min_max(pos2(rect.left(), rect.top() + 44.0), rect.max), tr("States"), &avatar_name(avatar), Some(&sub));
     });
     if back_to_cards {
         page.show_cards();
@@ -295,9 +307,8 @@ fn avatar_page(ui: &mut Ui, cx: &mut Cx, page: &mut StatesPage, view: &StatesVie
         index += 1;
     }
     if states.is_empty() {
-        let text = "Save keeps how the avatar is now: its toggles, sliders and outfits. Make one the default and it is put back \
-                    after each world join, and each time you switch to this avatar.";
-        return note(ui, cx, index, icons::BOOKMARKS_SIMPLE, "Nothing saved for this avatar", text);
+        let text = tr("Save keeps how the avatar is now: its toggles, sliders and outfits. Make one the default and it is put back after each world join, and each time you switch to this avatar.");
+        return note(ui, cx, index, icons::BOOKMARKS_SIMPLE, tr("Nothing saved for this avatar"), text);
     }
     // The newest first.
     for (i, state) in states.iter().enumerate().rev() {
@@ -320,8 +331,8 @@ fn note(ui: &mut Ui, cx: &Cx, index: usize, glyph: &str, title: &str, text: &str
 fn save_card(ui: &mut Ui, cx: &Cx, page: &mut StatesPage, whose: &Whose, states: &[StateView], saving: bool, now: f64, out: &mut Vec<Out>) {
     let rows: Vec<StateRow> = states.iter().map(|s| StateRow { name: s.name.clone(), ..Default::default() }).collect();
     let placeholder = next_state_name(&rows);
-    let sub = "Every parameter OSC can set, GoGoLoco's pose and the avatar's size (N4N0's own stay out)";
-    section(ui, cx, 1, icons::FLOPPY_DISK, "Save how it is now", Some(sub), |ui| {
+    let sub = tr("Every parameter OSC can set, GoGoLoco's pose and the avatar's size (N4N0's own stay out)");
+    section(ui, cx, 1, icons::FLOPPY_DISK, tr("Save how it is now"), Some(sub), |ui| {
         ui.add_space(14.0);
         let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), 40.0), Sense::hover());
         let button_w = 112.0;
@@ -329,7 +340,7 @@ fn save_card(ui: &mut Ui, cx: &Cx, page: &mut StatesPage, whose: &Whose, states:
         let mut fu = ui.new_child(egui::UiBuilder::new().max_rect(field));
         let resp = widgets::text_field(&mut fu, "orbiters-states-name", &mut page.name, &placeholder, field.width(), false);
         let enter = resp.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
-        let label = if saving { "Saving…" } else { "Save" };
+        let label = if saving { tr("Saving…") } else { tr("Save") };
         let save = Button::new(label).icon(icons::FLOPPY_DISK).variant(Variant::Primary).width(button_w).id_salt("orbiters-states-save");
         let clicked = save.show_at(ui, Rect::from_min_size(pos2(row.right() - button_w, row.top()), vec2(button_w, 40.0))).clicked();
         if clicked || enter {
@@ -346,9 +357,13 @@ fn save_card(ui: &mut Ui, cx: &Cx, page: &mut StatesPage, whose: &Whose, states:
 #[allow(clippy::too_many_arguments)]
 fn state_card(ui: &mut Ui, cx: &Cx, index: usize, page: &mut StatesPage, whose: &Whose, state: &StateView, now: f64, out: &mut Vec<Out>) {
     let saving = state.id.is_empty();
-    let when = if saving { "Saving…".to_string() } else { super::local_time(&state.saved_utc) };
+    let when = if saving { tr("Saving…").to_string() } else { super::local_time(&state.saved_utc) };
     let others = state.parameters.saturating_sub(state.pose_parameters);
-    let sub = if saving { when } else { format!("Saved {when} · {others} parameter{}", if others == 1 { "" } else { "s" }) };
+    let sub = if saving {
+        when
+    } else {
+        fill(&tr_n("Saved {when} · {count} parameter", "Saved {when} · {count} parameters", others as u64), &[("when", &when)])
+    };
     let glyph = if state.default { icons::STAR } else { icons::BOOKMARKS_SIMPLE };
     let renaming = page.renaming.as_ref().is_some_and(|(id, _, _)| *id == state.id && !saving);
     section(ui, cx, index, glyph, &state.name, Some(&sub), |ui| {
@@ -360,11 +375,11 @@ fn state_card(ui: &mut Ui, cx: &Cx, index: usize, page: &mut StatesPage, whose: 
         }
         let id = state.id.clone();
         let pose_note = if state.pose_parameters == 0 {
-            "No GoGoLoco pose was saved with it".to_string()
+            tr("No GoGoLoco pose was saved with it").to_string()
         } else {
-            format!("Puts GoGoLoco's pose back too ({} of its parameters)", state.pose_parameters)
+            tr!("Puts GoGoLoco's pose back too ({count} of its parameters)", count = state.pose_parameters)
         };
-        widgets::field(ui, "Include GoGoLoco pose", Some(&pose_note), 48.0, |ui| {
+        widgets::field(ui, tr("Include GoGoLoco pose"), Some(&pose_note), 48.0, |ui| {
             if saving || state.pose_parameters == 0 {
                 ui.disable();
             }
@@ -375,10 +390,10 @@ fn state_card(ui: &mut Ui, cx: &Cx, index: usize, page: &mut StatesPage, whose: 
         });
         widgets::separator(ui);
         let size_note = match state.eye_height {
-            Some(h) => format!("Puts your size back too: eyes at {h:.2} m, where the world allows it"),
-            None => "VRChat did not say the avatar's size when it was saved".to_string(),
+            Some(h) => tr!("Puts your size back too: eyes at {height} m, where the world allows it", height = format!("{h:.2}")),
+            None => tr("VRChat did not say the avatar's size when it was saved").to_string(),
         };
-        widgets::field(ui, "Include avatar size", Some(&size_note), 48.0, |ui| {
+        widgets::field(ui, tr("Include avatar size"), Some(&size_note), 48.0, |ui| {
             if saving || state.eye_height.is_none() {
                 ui.disable();
             }
@@ -401,7 +416,7 @@ fn state_card(ui: &mut Ui, cx: &Cx, index: usize, page: &mut StatesPage, whose: 
 
 /// "Default", in the accent, at `left_top`.
 fn default_pill(ui: &Ui, left_top: egui::Pos2) {
-    let txt = Txt::new("Default", 11.5).weight(weight::SEMIBOLD).color(theme::ACCENT);
+    let txt = Txt::new(tr("Default"), 11.5).weight(weight::SEMIBOLD).color(theme::ACCENT);
     let w = widgets::text_size(ui, &txt).x + 14.0 + 16.0;
     let r = Rect::from_min_size(left_top, vec2(w, 18.0));
     let p = ui.painter();
@@ -415,10 +430,10 @@ fn default_pill(ui: &Ui, left_top: egui::Pos2) {
 fn buttons_row(ui: &mut Ui, row: Rect, page: &mut StatesPage, whose: &Whose, state: &StateView, saving: bool, now: f64, out: &mut Vec<Out>) {
     let id = state.id.clone();
     let mut x = row.left();
-    let apply = Button::new("Apply").icon(icons::ARROW_COUNTER_CLOCKWISE).variant(Variant::Primary).enabled(!saving && whose.worn);
+    let apply = Button::new(tr("Apply")).icon(icons::ARROW_COUNTER_CLOCKWISE).variant(Variant::Primary).enabled(!saving && whose.worn);
     let mut apply = apply.id_salt(("orbiters-state-apply", &id));
     if !whose.worn {
-        apply = apply.hint("Wear this avatar in VRChat to apply its states");
+        apply = apply.hint(tr("Wear this avatar in VRChat to apply its states"));
     }
     let w = apply.desired_width(ui).max(104.0);
     if apply.width(w).show_at(ui, Rect::from_min_size(pos2(x, row.top()), vec2(w, 40.0))).clicked() {
@@ -427,9 +442,9 @@ fn buttons_row(ui: &mut Ui, row: Rect, page: &mut StatesPage, whose: &Whose, sta
     x += w + 8.0;
     // The default is a choice: it acts on the press, as the switches do.
     let (label, hint) = if state.default {
-        ("Default", "Put back after each world join and each switch to this avatar. Press to stop.")
+        (tr("Default"), tr("Put back after each world join and each switch to this avatar. Press to stop."))
     } else {
-        ("Set as default", "Put back after each world join and each switch to this avatar")
+        (tr("Set as default"), tr("Put back after each world join and each switch to this avatar"))
     };
     let default = Button::new(label).icon(icons::STAR).variant(if state.default { Variant::Glass } else { Variant::Secondary });
     let default = default.enabled(!saving).hint(hint).id_salt(("orbiters-state-default", &id));
@@ -444,7 +459,7 @@ fn buttons_row(ui: &mut Ui, row: Rect, page: &mut StatesPage, whose: &Whose, sta
     }
     // At the right: Rename, then Delete (twice: the first press asks).
     let confirming = page.confirm.as_ref().is_some_and(|(c, _)| *c == id);
-    let delete = Button::new(if confirming { "Delete it?" } else { "Delete" }).icon(icons::TRASH).variant(Variant::Danger).enabled(!saving);
+    let delete = Button::new(if confirming { tr("Delete it?") } else { tr("Delete") }).icon(icons::TRASH).variant(Variant::Danger).enabled(!saving);
     let delete = delete.id_salt(("orbiters-state-delete", &id));
     let dw = delete.desired_width(ui);
     if delete.show_at(ui, Rect::from_min_size(pos2(row.right() - dw, row.top()), vec2(dw, 40.0))).clicked() {
@@ -456,7 +471,7 @@ fn buttons_row(ui: &mut Ui, row: Rect, page: &mut StatesPage, whose: &Whose, sta
             ui.ctx().request_repaint_after(std::time::Duration::from_secs_f64(CONFIRM_FOR));
         }
     }
-    let rename = Button::new("Rename").icon(icons::PENCIL_SIMPLE).variant(Variant::Ghost).enabled(!saving).id_salt(("orbiters-state-rename", &id));
+    let rename = Button::new(tr("Rename")).icon(icons::PENCIL_SIMPLE).variant(Variant::Ghost).enabled(!saving).id_salt(("orbiters-state-rename", &id));
     let rw = rename.desired_width(ui);
     if rename.show_at(ui, Rect::from_min_size(pos2(row.right() - dw - 8.0 - rw, row.top()), vec2(rw, 40.0))).clicked() {
         page.renaming = Some((id, state.name.clone(), true));
@@ -470,16 +485,16 @@ fn rename_row(ui: &mut Ui, row: Rect, page: &mut StatesPage, whose: &Whose, id: 
     let buttons_w = 96.0 + 8.0 + 96.0;
     let field = Rect::from_min_size(row.min + vec2(0.0, 2.0), vec2((row.width() - buttons_w - 12.0).min(420.0), 36.0));
     let mut fu = ui.new_child(egui::UiBuilder::new().max_rect(field));
-    let resp = widgets::text_field(&mut fu, ("orbiters-state-rename-field", id), name, "Name", field.width(), false);
+    let resp = widgets::text_field(&mut fu, ("orbiters-state-rename-field", id), name, tr("Name"), field.width(), false);
     if std::mem::take(focus) {
         resp.request_focus();
     }
     let enter = resp.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
     let escape = ui.input(|i| i.key_pressed(Key::Escape));
     let x = field.right() + 12.0;
-    let save = Button::new("Save").variant(Variant::Primary).width(96.0).id_salt(("orbiters-state-rename-save", id));
+    let save = Button::new(tr("Save")).variant(Variant::Primary).width(96.0).id_salt(("orbiters-state-rename-save", id));
     let saved = save.show_at(ui, Rect::from_min_size(pos2(x, row.top()), vec2(96.0, 40.0))).clicked();
-    let cancel = Button::new("Cancel").variant(Variant::Ghost).width(96.0).id_salt(("orbiters-state-rename-cancel", id));
+    let cancel = Button::new(tr("Cancel")).variant(Variant::Ghost).width(96.0).id_salt(("orbiters-state-rename-cancel", id));
     let cancelled = cancel.show_at(ui, Rect::from_min_size(pos2(x + 104.0, row.top()), vec2(96.0, 40.0))).clicked();
     if saved || enter {
         let name = name.trim().to_string();
@@ -543,5 +558,20 @@ mod tests {
         assert_eq!(avatar_name(&AvatarView { worn: true, ..unnamed.clone() }), "This avatar");
         assert_eq!(avatar_name(&AvatarView { name: Some("Ultirex ✨".into()), ..unnamed }), "Ultirex ✨");
         assert_eq!((count(0).as_str(), count(1).as_str(), count(3).as_str()), ("Nothing saved yet", "1 saved state", "3 saved states"));
+    }
+
+    #[test]
+    fn the_cards_words_follow_the_language_and_the_counts_follow_its_plurals() {
+        use orbiters_i18n::{in_language, Language};
+        let unnamed = AvatarView { id: "avtr_0123456789abcdef".into(), name: None, worn: false, states: Vec::new() };
+        in_language(Language::Fr, || {
+            assert_eq!((count(0).as_str(), count(1).as_str(), count(3).as_str()), ("Rien d’enregistré pour l’instant", "1 état enregistré", "3 états enregistrés"));
+            assert_eq!(count_inline(0), "rien d’enregistré pour l’instant", "after a dot, not capitalized");
+            assert_eq!(avatar_name(&unnamed), "Avatar avtr_01234567…");
+            assert_eq!(avatar_name(&AvatarView { worn: true, ..unnamed.clone() }), "Cet avatar");
+        });
+        in_language(Language::Ja, || assert_eq!(count(2), "保存済みの状態 2件"));
+        // A name the person chose is theirs, in any language.
+        in_language(Language::Es, || assert_eq!(avatar_name(&AvatarView { name: Some("Ultirex ✨".into()), ..unnamed }), "Ultirex ✨"));
     }
 }

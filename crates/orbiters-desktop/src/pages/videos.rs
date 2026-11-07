@@ -6,6 +6,7 @@
 use super::{Cx, Job};
 use crate::ipc::N4n0Command;
 use egui::{pos2, vec2, Align2, Color32, ColorImage, CursorIcon, Id, Key, Order, Rect, Sense, TextureHandle, TextureId, TextureOptions, Ui, UiBuilder};
+use orbiters_i18n::{fill, mark, tr, tr_n};
 use orbiters_core::video_history::{self, Bookmark, Bookmarks, History, Loaded, Played};
 use orbiters_ui::anim::{self, ease, Spring};
 use orbiters_ui::theme::{self, weight, Txt};
@@ -203,6 +204,8 @@ struct GroupsKey {
     query: String,
     shown: Shown,
     day: u64,
+    /// The day names are in this language.
+    language: orbiters_i18n::Language,
 }
 
 /// What a press asks, done once the page is drawn.
@@ -224,14 +227,6 @@ enum Act {
 
 fn now_secs() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs())
-}
-
-fn plural(n: usize) -> &'static str {
-    if n == 1 {
-        ""
-    } else {
-        "s"
-    }
 }
 
 impl State {
@@ -304,12 +299,12 @@ impl State {
         self.revision += 1;
         let Some(bookmarks) = &self.bookmarks else { return };
         if let Some(e) = &self.unreadable {
-            cx.toasts.push(ctx, toast::Kind::Error, format!("Your bookmarks could not be read ({e}): nothing is saved until they can be."));
+            cx.toasts.push(ctx, toast::Kind::Error, tr!("Your bookmarks could not be read ({error}): nothing is saved until they can be.", error = e));
             return;
         }
         let Some(path) = self.bookmarks_path() else { return };
         if let Err(e) = bookmarks.save(&path) {
-            cx.toasts.push(ctx, toast::Kind::Error, format!("Could not save your bookmarks: {e}"));
+            cx.toasts.push(ctx, toast::Kind::Error, tr!("Could not save your bookmarks: {error}", error = e));
         }
     }
 
@@ -322,6 +317,7 @@ impl State {
             query: self.query.trim().to_lowercase(),
             shown: self.shown.clone(),
             day: now / 3600,
+            language: orbiters_i18n::language(),
         };
         if let Some((made, groups)) = &self.groups {
             if *made == key {
@@ -362,15 +358,38 @@ fn day(secs: u64, now: u64) -> (i64, String) {
     let day_of = |s: u64| (s as i64 + offset).div_euclid(86_400);
     let (d, today) = (day_of(secs), day_of(now));
     let date = time::OffsetDateTime::from_unix_timestamp(secs as i64 + offset).unwrap_or(time::OffsetDateTime::UNIX_EPOCH);
-    let months = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+    let months = [
+        mark("January"),
+        mark("February"),
+        mark("March"),
+        mark("April"),
+        mark("May"),
+        mark("June"),
+        mark("July"),
+        mark("August"),
+        mark("September"),
+        mark("October"),
+        mark("November"),
+        mark("December"),
+    ];
+    let month = tr(months[date.month() as usize - 1]);
     let name = match today - d {
-        0 => "Today".to_string(),
-        1 => "Yesterday".to_string(),
-        2..=6 => format!("{}", date.weekday()),
+        0 => tr("Today").to_string(),
+        1 => tr("Yesterday").to_string(),
+        2..=6 => tr(match date.weekday() {
+            time::Weekday::Monday => "Monday",
+            time::Weekday::Tuesday => "Tuesday",
+            time::Weekday::Wednesday => "Wednesday",
+            time::Weekday::Thursday => "Thursday",
+            time::Weekday::Friday => "Friday",
+            time::Weekday::Saturday => "Saturday",
+            time::Weekday::Sunday => "Sunday",
+        })
+        .to_string(),
         _ if date.year() == time::OffsetDateTime::from_unix_timestamp(now as i64 + offset).map_or(0, |n| n.year()) => {
-            format!("{} {}", date.day(), months[date.month() as usize - 1])
+            tr!("{day} {month}", day = date.day(), month = month)
         }
-        _ => format!("{} {} {}", date.day(), months[date.month() as usize - 1], date.year()),
+        _ => tr!("{day} {month} {year}", day = date.day(), month = month, year = date.year()),
     };
     (d, name)
 }
@@ -438,19 +457,23 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
     let sub = match (&state.shown, &state.history) {
         (Shown::List(id), _) => {
             let n = state.bookmarks.as_ref().and_then(|b| b.list(id)).map_or(0, |l| l.videos.len());
-            format!("{n} video{} bookmarked in this list", plural(n))
+            tr_n("{count} video bookmarked in this list", "{count} videos bookmarked in this list", n as u64)
         }
-        (Shown::History, Some(_)) if videos == 0 => "What the worlds' video players play shows here".to_string(),
-        (Shown::History, Some(_)) => format!("{} video{} played in worlds, from VRChat's logs", format::integer(videos as f64), plural(videos)),
-        (Shown::History, None) => "Reading VRChat's logs…".to_string(),
+        (Shown::History, Some(_)) if videos == 0 => tr("What the worlds' video players play shows here").to_string(),
+        // The number is written with its separators, so the plural is chosen by `videos` and the number put in after.
+        (Shown::History, Some(_)) => fill(
+            &tr_n("{total} video played in worlds, from VRChat's logs", "{total} videos played in worlds, from VRChat's logs", videos as u64),
+            &[("total", &format::integer(videos as f64))],
+        ),
+        (Shown::History, None) => tr("Reading VRChat's logs…").to_string(),
     };
     {
         let mut tu = ui.new_child(UiBuilder::new().max_rect(head_r).id_salt("videos-title"));
         tu.multiply_opacity(head_a);
-        super::heading(&tu, head_r, "VRChat", "Videos", Some(&sub));
+        super::heading(&tu, head_r, "VRChat", tr("Videos"), Some(&sub));
     }
     let mut su = ui.new_child(UiBuilder::new().max_rect(search_r).id_salt("videos-search"));
-    widgets::search_field(&mut su, "videos-search", &mut state.query, "Search videos", 224.0);
+    widgets::search_field(&mut su, "videos-search", &mut state.query, tr("Search videos"), 224.0);
     let chips_origin = pos2(head.left(), chips_top);
     draw_chips(ui, cx, state, &chips, chips_origin, &mut acts);
 
@@ -465,6 +488,16 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
     }
     if let Some((_, at)) = &state.copied {
         ctx.request_repaint_after(Duration::from_secs_f64((COPIED_FOR - (t - at)).max(0.05)));
+    }
+}
+
+/// The name a new list is made with: the one typed, or, when none was typed and there is no list yet, "Favourites" in the language now
+/// (the field says so). Later blank names are left to the bookmarks, which number them.
+fn first_list_name(bookmarks: &Bookmarks, typed: &str) -> String {
+    if typed.trim().is_empty() && bookmarks.lists.is_empty() {
+        tr("Favourites").to_string()
+    } else {
+        typed.to_string()
     }
 }
 
@@ -499,7 +532,7 @@ fn apply(ctx: &egui::Context, cx: &mut Cx, state: &mut State, act: Act, t: f64, 
         Act::Create(name) => {
             state.naming = None;
             if let Some(b) = state.bookmarks.as_mut() {
-                let id = b.create(&name);
+                let id = b.create(&first_list_name(b, &name));
                 state.shown = Shown::List(id);
                 state.save(ctx, cx);
             }
@@ -509,24 +542,24 @@ fn apply(ctx: &egui::Context, cx: &mut Cx, state: &mut State, act: Act, t: f64, 
             let name = b.list(&id).map(|l| l.name.clone()).unwrap_or_default();
             let note = if b.holds(&id, &row.url) {
                 b.remove(&id, &row.url);
-                format!("Taken out of {name}")
+                tr!("Taken out of {name}", name = name)
             } else {
                 b.add(&id, row.bookmark(now));
-                format!("Saved in {name}")
+                tr!("Saved in {name}", name = name)
             };
             state.save(ctx, cx);
             cx.toasts.push(ctx, toast::Kind::Success, note);
         }
         Act::CreateWith(name, row) => {
             let Some(b) = state.bookmarks.as_mut() else { return };
-            let id = b.create(&name);
+            let id = b.create(&first_list_name(b, &name));
             b.add(&id, row.bookmark(now));
             let name = b.list(&id).map(|l| l.name.clone()).unwrap_or_default();
             state.save(ctx, cx);
             if let Some(p) = state.picker.as_mut() {
                 p.name.clear();
             }
-            cx.toasts.push(ctx, toast::Kind::Success, format!("Saved in {name}"));
+            cx.toasts.push(ctx, toast::Kind::Success, tr!("Saved in {name}", name = name));
         }
         Act::Rename(name) => {
             state.renaming = None;
@@ -547,7 +580,7 @@ fn apply(ctx: &egui::Context, cx: &mut Cx, state: &mut State, act: Act, t: f64, 
             if state.bookmarks.as_mut().is_some_and(|b| b.delete(&id)) {
                 state.shown = Shown::History;
                 state.save(ctx, cx);
-                cx.toasts.push(ctx, toast::Kind::Info, format!("Deleted the list {name}"));
+                cx.toasts.push(ctx, toast::Kind::Info, tr!("Deleted the list {name}", name = name));
             }
         }
     }
@@ -557,17 +590,32 @@ fn apply(ctx: &egui::Context, cx: &mut Cx, state: &mut State, act: Act, t: f64, 
 struct Chip {
     shown: Option<Shown>,
     label: String,
+    /// `label` is one of the page's own words (an English key to translate), not a list's name.
+    fixed: bool,
     count: Option<usize>,
     glyph: &'static str,
     /// Relative to the chips' top left.
     rect: Rect,
 }
 
+impl Chip {
+    /// What the chip says. Its ids stay on `label`, in English, so that a press in flight survives a change of language.
+    fn text(&self) -> &str {
+        if self.fixed {
+            tr(&self.label)
+        } else {
+            &self.label
+        }
+    }
+}
+
 /// The chips in rows across `width`.
 fn chip_layout(ui: &Ui, state: &State, width: f32) -> Vec<Chip> {
+    let (history, new_list) = (mark("History"), mark("New list"));
     let mut chips = vec![Chip {
         shown: Some(Shown::History),
-        label: "History".into(),
+        label: history.into(),
+        fixed: true,
         count: state.history.as_ref().map(|h| h.videos.len()),
         glyph: icons::CLOCK,
         rect: Rect::NOTHING,
@@ -577,19 +625,20 @@ fn chip_layout(ui: &Ui, state: &State, width: f32) -> Vec<Chip> {
             chips.push(Chip {
                 shown: Some(Shown::List(l.id.clone())),
                 label: l.name.clone(),
+                fixed: false,
                 count: Some(l.videos.len()),
                 glyph: icons::BOOKMARK_SIMPLE,
                 rect: Rect::NOTHING,
             });
         }
     }
-    chips.push(Chip { shown: None, label: "New list".into(), count: None, glyph: icons::PLUS, rect: Rect::NOTHING });
+    chips.push(Chip { shown: None, label: new_list.into(), fixed: true, count: None, glyph: icons::PLUS, rect: Rect::NOTHING });
     let (mut x, mut y) = (0.0, 0.0);
     for chip in &mut chips {
         let w = if chip.shown.is_none() && state.naming.is_some() {
             320.0
         } else {
-            let label = widgets::text_size(ui, &Txt::new(&chip.label, 13.0).weight(weight::MEDIUM)).x;
+            let label = widgets::text_size(ui, &Txt::new(chip.text(), 13.0).weight(weight::MEDIUM)).x;
             let count = chip.count.map_or(0.0, |n| widgets::text_size(ui, &Txt::new(n.to_string(), 12.0)).x + 8.0);
             14.0 + 16.0 + 8.0 + label + count + 16.0
         };
@@ -612,12 +661,12 @@ fn draw_chips(ui: &mut Ui, cx: &Cx, state: &mut State, chips: &[Chip], origin: e
                 // Naming the new list: a field, Enter makes it, Escape lets it be.
                 let field = Rect::from_min_size(r.min, vec2(r.width() - 84.0, CHIP_H)).shrink2(vec2(0.0, -2.0));
                 let mut fu = ui.new_child(UiBuilder::new().max_rect(field).id_salt("videos-new-list"));
-                let resp = widgets::text_field(&mut fu, "videos-new-list-name", name, "Name the list", field.width(), false);
+                let resp = widgets::text_field(&mut fu, "videos-new-list-name", name, tr("Name the list"), field.width(), false);
                 if std::mem::take(focus) {
                     resp.request_focus();
                 }
                 let enter = resp.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
-                let make = Button::new("Make").variant(Variant::Primary).size(Size::Sm).width(76.0).id_salt("videos-new-list-make");
+                let make = Button::new(tr("Make")).variant(Variant::Primary).size(Size::Sm).width(76.0).id_salt("videos-new-list-make");
                 if make.show_at(ui, Rect::from_min_size(pos2(field.right() + 8.0, r.top()), vec2(76.0, CHIP_H))).clicked() || enter {
                     acts.push(Act::Create(name.clone()));
                 } else if ui.input(|i| i.key_pressed(Key::Escape)) || (resp.lost_focus() && name.trim().is_empty()) {
@@ -636,7 +685,7 @@ fn draw_chips(ui: &mut Ui, cx: &Cx, state: &mut State, chips: &[Chip], origin: e
                 &p,
                 pos2(r.left() + 14.0 + 16.0 + 8.0, r.center().y),
                 Align2::LEFT_CENTER,
-                &Txt::new(&chip.label, 13.0).weight(weight::MEDIUM).color(color),
+                &Txt::new(chip.text(), 13.0).weight(weight::MEDIUM).color(color),
             );
             if widgets::pressed(&resp) {
                 acts.push(Act::NewList);
@@ -661,7 +710,7 @@ fn draw_chips(ui: &mut Ui, cx: &Cx, state: &mut State, chips: &[Chip], origin: e
             &p,
             pos2(r.left() + 14.0 + 16.0 + 8.0, r.center().y),
             Align2::LEFT_CENTER,
-            &Txt::new(&chip.label, 13.0).weight(weight::MEDIUM).color(fg),
+            &Txt::new(chip.text(), 13.0).weight(weight::MEDIUM).color(fg),
         );
         if let Some(n) = chip.count {
             widgets::text(
@@ -691,11 +740,11 @@ fn content(ui: &mut Ui, cx: &Cx, state: &mut State, groups: &[(String, Vec<Row>)
     }
     if groups.is_empty() {
         let (title, text) = if !state.query.trim().is_empty() {
-            ("No video matches", "Try a title, a channel, a world or a part of the link.")
+            (tr("No video matches"), tr("Try a title, a channel, a world or a part of the link."))
         } else if !cx.snap.vrchat.log_found {
-            ("VRChat was not found", "Videos show up here once VRChat ran on this computer.")
+            (tr("VRChat was not found"), tr("Videos show up here once VRChat ran on this computer."))
         } else {
-            ("No video yet", "Videos the worlds' video players play in VRChat show up here, with the world and when, ready to copy or bookmark.")
+            (tr("No video yet"), tr("Videos the worlds' video players play in VRChat show up here, with the world and when, ready to copy or bookmark."))
         };
         return empty_state(ui, cx, title, text, height * 0.6);
     }
@@ -703,7 +752,7 @@ fn content(ui: &mut Ui, cx: &Cx, state: &mut State, groups: &[(String, Vec<Row>)
     // The days side by side on wide pages.
     let mut m = super::Masonry::new(ui, "videos-history");
     for (g, (name, rows)) in groups.iter().enumerate() {
-        let sub = format!("{} video{}", rows.len(), plural(rows.len()));
+        let sub = tr_n("{count} video", "{count} videos", rows.len() as u64);
         m.add(g, |ui| {
             super::section(ui, cx, 1 + g, icons::CLOCK, name, Some(&sub), |ui| {
                 ui.add_space(6.0);
@@ -718,19 +767,19 @@ fn content(ui: &mut Ui, cx: &Cx, state: &mut State, groups: &[(String, Vec<Row>)
 fn list_view(ui: &mut Ui, cx: &Cx, state: &mut State, id: &str, rows: &[Row], now: u64, acts: &mut Vec<Act>) {
     let Some(list) = state.bookmarks.as_ref().and_then(|b| b.list(id)).cloned() else { return };
     let pick_first = std::mem::take(&mut state.pick_first);
-    let sub = if list.videos.is_empty() { "Empty for now" } else { "The latest saved first" };
+    let sub = if list.videos.is_empty() { tr("Empty for now") } else { tr("The latest saved first") };
     // As wide as the page: its videos go side by side on wide ones.
     super::section_up_to(ui, cx, f32::INFINITY, 1, icons::BOOKMARK_SIMPLE, &list.name, Some(sub), |ui| {
         // Rename and Delete in the card's heading, at its right.
         let header = Rect::from_min_size(ui.min_rect().min, vec2(ui.available_width(), 40.0));
         let confirming = state.confirm.is_some();
-        let delete = Button::new(if confirming { "Delete it?" } else { "Delete" }).icon(icons::TRASH).variant(Variant::Danger).size(Size::Sm);
+        let delete = Button::new(if confirming { tr("Delete it?") } else { tr("Delete") }).icon(icons::TRASH).variant(Variant::Danger).size(Size::Sm);
         let delete = delete.id_salt(("videos-list-delete", id));
         let dw = delete.desired_width(ui);
         if delete.show_at(ui, Rect::from_min_size(pos2(header.right() - dw, header.center().y - 16.0), vec2(dw, 32.0))).clicked() {
             acts.push(Act::Delete);
         }
-        let rename = Button::new("Rename").icon(icons::PENCIL_SIMPLE).variant(Variant::Ghost).size(Size::Sm).id_salt(("videos-list-rename", id));
+        let rename = Button::new(tr("Rename")).icon(icons::PENCIL_SIMPLE).variant(Variant::Ghost).size(Size::Sm).id_salt(("videos-list-rename", id));
         let rw = rename.desired_width(ui);
         if rename.show_at(ui, Rect::from_min_size(pos2(header.right() - dw - 8.0 - rw, header.center().y - 16.0), vec2(rw, 32.0))).clicked() {
             state.renaming = Some((list.name.clone(), true));
@@ -742,9 +791,9 @@ fn list_view(ui: &mut Ui, cx: &Cx, state: &mut State, id: &str, rows: &[Row], no
         ui.add_space(6.0);
         if rows.is_empty() {
             let text = if state.query.trim().is_empty() {
-                "Nothing here yet: press a video's bookmark in the history to keep it in this list."
+                tr("Nothing here yet: press a video's bookmark in the history to keep it in this list.")
             } else {
-                "No video of this list matches."
+                tr("No video of this list matches.")
             };
             let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), 44.0), Sense::hover());
             widgets::text(ui.painter(), pos2(r.left() + 48.0, r.center().y), Align2::LEFT_CENTER, &Txt::new(text, 12.5).color(theme::FG_3));
@@ -766,9 +815,9 @@ fn rename_row(ui: &mut Ui, state: &mut State, old: &str, acts: &mut Vec<Act>) {
     }
     let enter = resp.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
     let x = field.right() + 12.0;
-    let save = Button::new("Save").variant(Variant::Primary).width(96.0).id_salt("videos-rename-save");
+    let save = Button::new(tr("Save")).variant(Variant::Primary).width(96.0).id_salt("videos-rename-save");
     let saved = save.show_at(ui, Rect::from_min_size(pos2(x, row.top()), vec2(96.0, 40.0))).clicked();
-    let cancel = Button::new("Cancel").variant(Variant::Ghost).width(96.0).id_salt("videos-rename-cancel");
+    let cancel = Button::new(tr("Cancel")).variant(Variant::Ghost).width(96.0).id_salt("videos-rename-cancel");
     let cancelled = cancel.show_at(ui, Rect::from_min_size(pos2(x + 104.0, row.top()), vec2(96.0, 40.0))).clicked();
     if saved || enter {
         acts.push(Act::Rename(name.clone()));
@@ -845,14 +894,14 @@ fn video_row(ui: &mut Ui, r: Rect, row: &Row, texture: Option<TextureId>, held: 
         let title_h = galley.size().y;
         let top = r.center().y - (title_h + 22.0) / 2.0;
         p.galley(pos2(x, top), galley, title_c);
-        let when = if row.plays > 0 { format::relative_time(row.when, now) } else { format!("saved {}", format::relative_time(row.when, now)) };
+        let when = if row.plays > 0 { format::relative_time(row.when, now) } else { tr!("saved {when}", when = format::relative_time(row.when, now)) };
         let meta: Vec<&str> = [row.channel.as_deref(), row.world.as_deref(), Some(when.as_str())].into_iter().flatten().filter(|s| !s.is_empty()).collect();
         widgets::text_truncated(p, pos2(x, top + title_h + 14.0), Align2::LEFT_CENTER, &Txt::new(meta.join(" · "), 12.5).color(theme::FG_3), text_w);
     }
     let mut act = None;
     // At the right: the bookmark, Open, Copy link.
     let bookmark_r = bookmark_button(r);
-    let label = if held { "In your lists: change them" } else { "Bookmark in a list" };
+    let label = if held { tr("In your lists: change them") } else { tr("Bookmark in a list") };
     let resp = IconButton::new(icons::BOOKMARK_SIMPLE, label).id_salt(("videos-bookmark", &row.url)).show_at(ui, bookmark_r);
     if held {
         // Filled, in the accent, over the outline the button drew.
@@ -865,14 +914,14 @@ fn video_row(ui: &mut Ui, r: Rect, row: &Row, texture: Option<TextureId>, held: 
     }
     let open_r = Rect::from_min_size(pos2(bookmark_r.right() + 4.0, bookmark_r.top()), vec2(36.0, 36.0));
     if video_history::openable(&row.url) {
-        if IconButton::new(icons::ARROW_SQUARE_OUT, "Open in the browser").id_salt(("videos-open", &row.url)).show_at(ui, open_r).clicked() {
+        if IconButton::new(icons::ARROW_SQUARE_OUT, tr("Open in the browser")).id_salt(("videos-open", &row.url)).show_at(ui, open_r).clicked() {
             act = Some(Act::Open(row.url.clone()));
         }
     } else {
         widgets::icon(ui.painter(), open_r.center(), icons::ARROW_SQUARE_OUT, 17.0, theme::alpha(theme::FG_4, 0.5));
     }
-    let (label, glyph) = if copied { ("Copied", icons::CHECK) } else { ("Copy link", icons::COPY) };
-    let copy = Button::new(label).icon(glyph).size(Size::Sm).width(124.0).id_salt(("videos-copy", &row.url)).hint("Paste it in a world's video player");
+    let (label, glyph) = if copied { (tr("Copied"), icons::CHECK) } else { (tr("Copy link"), icons::COPY) };
+    let copy = Button::new(label).icon(glyph).size(Size::Sm).width(124.0).id_salt(("videos-copy", &row.url)).hint(tr("Paste it in a world's video player"));
     if copy.show_at(ui, Rect::from_min_size(pos2(r.right() - 124.0, r.center().y - 16.0), vec2(124.0, 32.0))).clicked() {
         act = Some(Act::Copy(row.url.clone()));
     }
@@ -936,7 +985,7 @@ fn picker(ctx: &egui::Context, state: &mut State, acts: &mut Vec<Act>) {
         }
         let painter = ui.painter().clone();
         widgets::panel(&painter, rect, 16.0);
-        widgets::text(&painter, pos2(rect.left() + 18.0, rect.top() + 24.0), Align2::LEFT_CENTER, &Txt::new("Save in a list", 13.5).weight(weight::SEMIBOLD));
+        widgets::text(&painter, pos2(rect.left() + 18.0, rect.top() + 24.0), Align2::LEFT_CENTER, &Txt::new(tr("Save in a list"), 13.5).weight(weight::SEMIBOLD));
         let title = p.row.title.clone().unwrap_or_else(|| short_link(&p.row.url));
         widgets::text_truncated(
             &painter,
@@ -980,10 +1029,10 @@ fn picker(ctx: &egui::Context, state: &mut State, acts: &mut Vec<Act>) {
         let y = rect.bottom() - 46.0;
         let field = Rect::from_min_size(pos2(rect.left() + 16.0, y), vec2(width - 32.0 - 72.0 - 8.0, 36.0));
         let mut fu = ui.new_child(UiBuilder::new().max_rect(field).id_salt("videos-picker-new"));
-        let hint = if lists.is_empty() { "Favourites" } else { "New list" };
+        let hint = if lists.is_empty() { tr("Favourites") } else { tr("New list") };
         let resp = widgets::text_field(&mut fu, "videos-picker-name", &mut p.name, hint, field.width(), false);
         let enter = resp.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
-        let add = Button::new("Add").icon(icons::PLUS).variant(Variant::Primary).size(Size::Sm).width(72.0).id_salt("videos-picker-add");
+        let add = Button::new(tr("Add")).icon(icons::PLUS).variant(Variant::Primary).size(Size::Sm).width(72.0).id_salt("videos-picker-add");
         if add.show_at(ui, Rect::from_min_size(pos2(field.right() + 8.0, y + 2.0), vec2(72.0, 32.0))).clicked() || enter {
             acts.push(Act::CreateWith(p.name.clone(), p.row.clone()));
         }
@@ -1184,5 +1233,38 @@ mod tests {
         h.settle();
         assert!(h.state.picker.is_none());
         std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn day_names_and_the_new_list_name_follow_the_language_and_so_do_the_rows_made_before() {
+        use orbiters_i18n::{in_language, Language};
+        let now = now_secs();
+        // The names of the days are made once and kept: a change of language makes them again.
+        let mut history = History::default();
+        history.record("https://www.youtube.com/watch?v=36YnV9STBqc", now - 60, None, Some("Movie Night"));
+        let mut state = State::default();
+        state.stand_in(history, Bookmarks::default(), None, false, Vec::new());
+        assert_eq!(state.groups(now)[0].0, "Today");
+        assert_eq!(in_language(Language::Fr, || state.groups(now)[0].0.clone()), "Aujourd’hui");
+        assert_eq!(in_language(Language::Ja, || state.groups(now)[0].0.clone()), "今日");
+        assert_eq!(state.groups(now)[0].0, "Today", "and back");
+        // A date far back is a whole phrase of the language, not English words in its order.
+        let (_, long_ago) = in_language(Language::Es, || day(now - 400 * 86_400, now));
+        assert!(long_ago.contains(" de "), "{long_ago}");
+        let (_, long_ago) = in_language(Language::Ja, || day(now - 400 * 86_400, now));
+        assert!(long_ago.contains('年') && long_ago.ends_with('日'), "{long_ago}");
+        // The chips' ids stay on the English words, whatever they say.
+        let chip = Chip { shown: Some(Shown::History), label: mark("History").into(), fixed: true, count: None, glyph: icons::CLOCK, rect: Rect::NOTHING };
+        assert_eq!(in_language(Language::Fr, || chip.text().to_string()), "Historique");
+        assert_eq!(chip.label, "History");
+        let own = Chip { label: "History".into(), fixed: false, ..chip };
+        assert_eq!(in_language(Language::Fr, || own.text().to_string()), "History", "a list called History is the person's word");
+        // Making the first list with no name: Favourites, in the language the field said it in.
+        let mut bookmarks = Bookmarks::default();
+        assert_eq!(first_list_name(&bookmarks, "  "), "Favourites");
+        assert_eq!(in_language(Language::Fr, || first_list_name(&bookmarks, "")), "Favoris");
+        assert_eq!(in_language(Language::Fr, || first_list_name(&bookmarks, "Musique")), "Musique");
+        bookmarks.create("Musique");
+        assert_eq!(in_language(Language::Fr, || first_list_name(&bookmarks, "")), "", "later blank names are numbered by the bookmarks");
     }
 }

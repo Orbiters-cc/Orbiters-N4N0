@@ -71,7 +71,8 @@ fn words(p: &Painter, at: Pos2, glyph: &str, first: &str, second: &str, on: f32)
     let text = Color32::WHITE;
     edged_icon(p, at + vec2(16.0, 32.0), glyph, 30.0, lit);
     edged_text(p, at + vec2(42.0, 18.0), Align2::LEFT_CENTER, first, theme::font(30.0, weight::BOLD), text);
-    edged_text(p, at + vec2(42.0, 49.0), Align2::LEFT_CENTER, second, theme::font(22.0, weight::SEMIBOLD), text);
+    // What it does as readable as what to do (round 12's judges found it the line least read).
+    edged_text(p, at + vec2(42.0, 50.0), Align2::LEFT_CENTER, second, theme::font(25.0, weight::BOLD), text);
 }
 
 /// The hint on a page of [`PX`], `seconds` into its animation.
@@ -368,7 +369,8 @@ impl Backdrop {
 /// Where the hint's middle lies, for what it speaks of at `at` reaching `radius`: just over its middle, as most captures are flatter than they are wide, its tail towards it.
 pub fn hint_place(at: V3, radius: f32) -> V3 {
     let height = WIDTH_M * PX[1] as f32 / PX[0] as f32;
-    stereo::add(at, [0.0, radius * 0.5 + height / 2.0 + ABOVE_M, 0.0])
+    // Over the capture's top, not on its roof (round 12's judges saw the stick sit on it): what stands in a capture reaches most of its radius up.
+    stereo::add(at, [0.0, radius * 0.9 + height / 2.0 + ABOVE_M, 0.0])
 }
 
 /// Upright at `place`, its face towards `eye`.

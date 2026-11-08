@@ -458,7 +458,8 @@ impl Recents {
             self.shown_index.push(i);
             items.push(Recent { dir: r.key.clone(), title: shown_title(&r.title), state: String::new(), progress: None, picture: None, aspect: r.aspect, kind: r.kind(), count: 1 });
         }
-        self.shown = panels::Gallery::new(items, layout);
+        // One place's captures, opened: as large as the app shows them, two or so a row (round 12's judges: three small ones on an empty sheet).
+        self.shown = panels::Gallery::with_density(items, layout, if self.set.is_some() { 1.0 } else { panels::GALLERY_DENSER });
         true
     }
 
@@ -621,7 +622,8 @@ impl Recents {
 
 /// A capture's title in the language now: the name of its world as it is, or the English stand-in kept for a world with none.
 fn shown_title(title: &str) -> String {
-    if title == mark("A VRChat world") { tr(title).to_string() } else { title.to_string() }
+    // Trimmed: a world name ending in a space put one before the colon of what says it (round 12's judges).
+    if title == mark("A VRChat world") { tr(title).to_string() } else { title.trim().to_string() }
 }
 
 /// How long ago, in a word.
@@ -1445,6 +1447,13 @@ impl Panels {
     /// Where on the sheet's page a capture standing small may lie.
     pub(in crate::overlay) fn small_place_on_sheet(&self) -> Option<egui::Rect> {
         self.stage.worlds.as_ref().filter(|_| self.facts.sheet == Some(Sheet::Worlds)).and_then(|w| w.small_place_on_panel())
+    }
+
+    /// Where a pointer on wheel cell `cell` (clockwise from the top) would be: its panel and a point in it, for [`Panels::hover`].
+    pub fn cell_point(&self, cell: usize) -> Option<(usize, egui::Pos2)> {
+        const CELLS: [Zone; 6] = [Zone::WheelWorlds, Zone::WheelYouTube, Zone::WheelPlaying, Zone::WheelAll, Zone::WheelInstances, Zone::WheelPictures];
+        let zone = *CELLS.get(cell)?;
+        self.all().enumerate().find(|(_, p)| p.zone == zone && p.shown).and_then(|(i, p)| p.items.first().map(|item| (i, item.rect.center())))
     }
 
     /// A number key on the wheel: as a press on that cell, clockwise from the top.
@@ -2805,7 +2814,8 @@ fn access_words(kind: &str) -> &str {
 
 /// When a capture was taken, as exactly as tells two of one place apart.
 fn taken_when(at: u64, now: u64) -> String {
-    if now.saturating_sub(at) < 86_400 {
+    // One form beside another: within the hour how long ago, else the day and time (round 12's judges read "13 h ago" beside "Fri 23:03").
+    if now.saturating_sub(at) < 3_600 {
         return ago(now.saturating_sub(at));
     }
     let day = day_and_time(at, now);

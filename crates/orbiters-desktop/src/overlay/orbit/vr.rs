@@ -383,8 +383,11 @@ pub fn strip_places() -> Vec<Placed> {
     vec![zones::in_units(Zone::QmStrip), words]
 }
 
-/// How much further out than on a screen the wing lies in a headset, in the menu's units.
-const VR_WING_CLEAR: f32 = 22.0;
+/// How much further out than on a screen the wing lies in a headset, in the menu's units: a clear gap from My Profile, which reaches past the main panel.
+const VR_WING_CLEAR: f32 = 40.0;
+/// Where the wing turns, in the menu's units from its middle (just inside its inner edge), and by how much, in radians: about as much as VRChat's side panels.
+const WING_HINGE: f32 = 400.0;
+const WING_YAW: f32 = 0.38;
 
 /// The Quick Menu's parts on this hand. The wing lies on the side of the menu away from the hand that holds it: on the right hand it is on the left (as Enzo laid it there). The sheet is not one of
 /// these: it stays on the menu.
@@ -438,6 +441,18 @@ impl Plane {
             |ring| zones::polar(1.0, ring.middle()),
         );
         let (x, y) = (c.x - way.x * back, c.y - way.y * back);
+        // The wing turns towards who looks about its inner edge, as VRChat's own side panels do (round 10's judges: flat beside an angled My Profile, it read as
+        // pasted in front rather than a neighbour).
+        if Zone::WING.contains(&placed.zone) || placed.zone == Zone::QmCaption {
+            let side = if x < 0.0 { -1.0 } else { 1.0 };
+            let hinge = side * WING_HINGE;
+            let out = x - hinge;
+            let (sin, cos) = WING_YAW.sin_cos();
+            let at = space::offset(&self.frame, [(hinge + out * cos) * self.unit, -y * self.unit, near + out.abs() * sin * self.unit]);
+            let (s, c) = (-side * WING_YAW).sin_cos();
+            let turn = Matrix34 { m: [[c, 0.0, s, 0.0], [0.0, 1.0, 0.0, 0.0], [-s, 0.0, c, 0.0]] };
+            return Quad { transform: space::compose(&at, &turn), width: placed.rect.width() * self.unit, height: placed.rect.height() * self.unit };
+        }
         Quad { transform: space::offset(&self.frame, [x * self.unit, -y * self.unit, near]), width: placed.rect.width() * self.unit, height: placed.rect.height() * self.unit }
     }
 }

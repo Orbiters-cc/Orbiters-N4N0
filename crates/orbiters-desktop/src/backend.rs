@@ -22,6 +22,14 @@ pub trait Backend: Send + Sync {
     fn stop_capture(&self);
     /// The Orbiters window to the front.
     fn show_window(&self) {}
+    /// The Orbiters window, on one of its pages (`"projects"`: where My Avatar is).
+    fn show_page(&self, _page: &str) {
+        self.show_window();
+    }
+    /// The page the service asked this window to show, once.
+    fn take_show_page(&self) -> Option<String> {
+        None
+    }
     /// What the panels around VRChat's menus say of themselves, for Settings.
     fn orbit_status(&self, _status: crate::state::OrbitStatus) {}
     fn pause_capture(&self, paused: bool);
@@ -123,6 +131,9 @@ pub struct Remote(pub Arc<Client>);
 impl Backend for Remote {
     fn show_window(&self) {
         self.0.send(&ToService::ShowWindow);
+    }
+    fn show_page(&self, page: &str) {
+        self.0.send(&ToService::ShowPage { page: page.to_string() });
     }
     fn orbit_status(&self, status: crate::state::OrbitStatus) {
         self.0.send(&ToService::Orbit { status });
@@ -319,6 +330,9 @@ impl Backend for Remote {
 
     fn take_show(&self) -> bool {
         self.0.take_show()
+    }
+    fn take_show_page(&self) -> Option<String> {
+        self.0.take_show_page()
     }
 
     fn set_background(&self, background: bool) {

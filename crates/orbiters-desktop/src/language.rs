@@ -12,8 +12,12 @@ pub fn computer() -> Language {
     normalize(&WindowsLocale.locale()).unwrap_or(Language::En)
 }
 
-/// The language `settings` ask for.
+/// The language `settings` ask for. `ORBITERS_LANGUAGE` (a tag) wins over it in this process and those it starts, and goes nowhere: for pictures taken in a
+/// language other than the account's, without changing the account.
 pub fn wanted(settings: &Settings, computer: Language) -> Language {
+    if let Some(forced) = std::env::var("ORBITERS_LANGUAGE").ok().as_deref().and_then(normalize) {
+        return forced;
+    }
     settings.language.as_deref().and_then(normalize).unwrap_or(computer)
 }
 

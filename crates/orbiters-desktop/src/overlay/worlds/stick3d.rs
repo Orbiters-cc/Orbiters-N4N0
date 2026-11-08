@@ -6,9 +6,9 @@ use super::stereo::{self, V3};
 use egui::Color32;
 
 /// One eye's picture.
-pub const EYE_PX: [u32; 2] = [200, 220];
+pub const EYE_PX: [u32; 2] = [240, 264];
 /// How large it is in the room.
-pub const WIDTH_M: f32 = 0.15;
+pub const WIDTH_M: f32 = 0.2;
 pub const HEIGHT_M: f32 = WIDTH_M * EYE_PX[1] as f32 / EYE_PX[0] as f32;
 
 /// One push up and pull down, in seconds.
@@ -50,8 +50,18 @@ fn leaned(p: V3) -> V3 {
     [p[0], p[1] * c - p[2] * s, p[1] * s + p[2] * c]
 }
 
+/// How much larger than a real stick it is shown, to be seen at arm's length.
+const LARGER: f32 = 1.45;
+
 fn parts(push: f32, accent: [f32; 3]) -> Vec<Part> {
-    const BODY: [f32; 3] = [0.30, 0.36, 0.46];
+    parts_of(push, accent)
+        .into_iter()
+        .map(|part| Part { a: stereo::scale(part.a, LARGER), b: stereo::scale(part.b, LARGER), radius: part.radius * LARGER, ..part })
+        .collect()
+}
+
+fn parts_of(push: f32, accent: [f32; 3]) -> Vec<Part> {
+    const BODY: [f32; 3] = [0.42, 0.48, 0.58];
     const LIGHT: [f32; 3] = [0.62, 0.68, 0.78];
     let tilt = push * 0.62;
     let (s, c) = tilt.sin_cos();
@@ -119,7 +129,7 @@ fn hit(part: &Part, from: V3, along: V3, pixel: f32) -> Option<(f32, [f32; 3], f
     let rim = (1.0 - facing).clamp(0.0, 1.0).powf(2.5);
     let shine = stereo::dot(n, halfway).max(0.0).powf(52.0);
     // Clearer through its middle, as glass, and solid towards its edge.
-    let solid = (part.solid * (0.62 + 0.38 * rim)).min(0.86) * cover;
+    let solid = (part.solid * (0.8 + 0.2 * rim) + 0.12).min(0.88) * cover;
     let lit = 0.34 + 0.66 * diffuse + part.glow;
     let colour: [f32; 3] = std::array::from_fn(|i| (part.colour[i] * lit + rim * 0.5) * solid + shine * 0.85 * cover);
     Some((t / scale, colour, (solid + shine * 0.3 * cover).min(0.92)))

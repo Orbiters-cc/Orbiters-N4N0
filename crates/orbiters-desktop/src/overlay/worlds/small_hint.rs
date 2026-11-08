@@ -45,7 +45,11 @@ fn mix(a: Color32, b: Color32, t: f32) -> Color32 {
 }
 
 /// The offsets of a dark edge round what floats on the world with nothing behind it (Enzo: no frame), to read on a bright world as on a dark one.
-const EDGE: [Vec2; 8] = [vec2(-2.0, 0.0), vec2(2.0, 0.0), vec2(0.0, -2.0), vec2(0.0, 2.0), vec2(-1.5, -1.5), vec2(1.5, -1.5), vec2(-1.5, 1.5), vec2(1.5, 1.5)];
+/// Two rings of them, a little wider than before: round 10's judges found the lines thin over a bright world (Enzo: still no frame).
+const EDGE: [Vec2; 16] = [
+    vec2(-2.0, 0.0), vec2(2.0, 0.0), vec2(0.0, -2.0), vec2(0.0, 2.0), vec2(-1.5, -1.5), vec2(1.5, -1.5), vec2(-1.5, 1.5), vec2(1.5, 1.5),
+    vec2(-3.0, 0.0), vec2(3.0, 0.0), vec2(0.0, -3.0), vec2(0.0, 3.0), vec2(-2.2, -2.2), vec2(2.2, -2.2), vec2(-2.2, 2.2), vec2(2.2, 2.2),
+];
 
 fn edged_text(p: &Painter, at: Pos2, align: Align2, text: &str, font: egui::FontId, color: Color32) {
     for by in EDGE {
@@ -63,7 +67,8 @@ fn edged_icon(p: &Painter, at: Pos2, glyph: &str, size: f32, color: Color32) {
 
 fn words(p: &Painter, at: Pos2, glyph: &str, first: &str, second: &str, on: f32) {
     let lit = mix(theme::FG, orbit_look::accent(), on);
-    let text = mix(theme::FG, Color32::WHITE, on);
+    // White, every line: grey over a bright world was what read least.
+    let text = Color32::WHITE;
     edged_icon(p, at + vec2(16.0, 32.0), glyph, 30.0, lit);
     edged_text(p, at + vec2(42.0, 18.0), Align2::LEFT_CENTER, first, theme::font(30.0, weight::BOLD), text);
     edged_text(p, at + vec2(42.0, 49.0), Align2::LEFT_CENTER, second, theme::font(22.0, weight::SEMIBOLD), text);
@@ -81,13 +86,10 @@ pub fn paint(p: &Painter, stage: Stage, seconds: f32) {
             edged_text(p, pos2(STICK_COLUMN_PX / 2.0, 22.0), Align2::CENTER_CENTER, which, theme::font(25.0, weight::BOLD), Color32::WHITE);
             let up = ((push - 0.2) / 0.8).clamp(0.0, 1.0);
             let down = ((-push - 0.2) / 0.8).clamp(0.0, 1.0);
-            words(p, pos2(STICK_COLUMN_PX + 4.0, 20.0), icons::CARET_UP, tr("Push up"), tr("to zoom in"), up);
-            words(p, pos2(STICK_COLUMN_PX + 4.0, 104.0), icons::CARET_DOWN, tr("Pull down"), tr("to zoom out"), down);
-            edged_icon(p, pos2(STICK_COLUMN_PX + 20.0, 214.0), icons::ARROWS_OUT, 26.0, theme::FG);
-            let room = PX[0] as f32 - STICK_COLUMN_PX - 50.0;
-            let font = theme::font(22.0, weight::SEMIBOLD);
-            let said = super::super::orbit::panels::fit(p, tr("Other stick: move around"), &font, room);
-            edged_text(p, pos2(STICK_COLUMN_PX + 46.0, 214.0), Align2::LEFT_CENTER, &said, font, theme::FG);
+            words(p, pos2(STICK_COLUMN_PX + 4.0, 8.0), icons::CARET_UP, tr("Push up"), tr("to zoom in"), up);
+            words(p, pos2(STICK_COLUMN_PX + 4.0, 92.0), icons::CARET_DOWN, tr("Pull down"), tr("to zoom out"), down);
+            // The other stick as large as the zoom, with its four ways (round 10's judges: the smallest line, with no direction).
+            words(p, pos2(STICK_COLUMN_PX + 4.0, 176.0), icons::ARROWS_OUT, tr("Other stick"), tr("to move around"), 0.0);
         }
         Stage::Grip { near } => {
             let card = Rect::from_center_size(page.center() + vec2(0.0, 30.0), vec2(PX[0] as f32 - 4.0, 140.0));

@@ -676,6 +676,12 @@ impl eframe::App for App {
         if self.ctl.take_show() {
             bring_to_front(ctx);
         }
+        // Asked from the menus around VRChat: My Avatar, to add the capture kit, is on Projects.
+        if let Some(page) = self.ctl.take_show_page() {
+            if page == "projects" {
+                self.set_page(Page::Projects, anim::time(ctx));
+            }
+        }
         let focused = ctx.input(|i| i.viewport().focused.unwrap_or(true));
         self.ctl.set_background(!focused && self.ctl.view().vrchat.runs_here());
         if self.ctl.should_close() {

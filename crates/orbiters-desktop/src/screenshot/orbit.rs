@@ -357,7 +357,8 @@ pub(super) fn vr_shots(out: &Path, refs: &Path) -> anyhow::Result<()> {
             eye.quad(&plane.quad(&center_units, 0.0, 0.0), &qm, qm_px, 1.0);
             let mut end = None;
             for zone in Zone::QUICK_MENU {
-                let placed = zones::in_units(zone);
+                // Where the headset has it: its gap from My Profile, as the app lays it (the renders had none, and judges saw it touch).
+                let placed = vr::quick_menu_places(0).into_iter().find(|p| p.zone == zone).unwrap_or_else(|| zones::in_units(zone));
                 let hovered = hover.filter(|_| zone == Zone::WingWorlds).map(|_| 0);
                 let (pixels, px) = sharp_picture(&placed, facts, hovered, 2.0);
                 eye.quad(&plane.quad(&vr::clear_of_sheet(placed, false), 0.0, 0.004), &pixels, px, 1.0);
@@ -435,7 +436,8 @@ pub(super) fn vr_shots(out: &Path, refs: &Path) -> anyhow::Result<()> {
             eye.quad(&Quad { transform: at, width: hole.width() / 1024.0 * page_quad.width + 0.012, height: hole.height() / 576.0 * page_quad.height + 0.012 }, &pane, small_hint::BACKDROP_PX, 1.0);
             eye.over(&model(&small)?);
             for zone in Zone::QUICK_MENU {
-                let placed = zones::in_units(zone);
+                // Where the headset has it: its gap from My Profile, as the app lays it (the renders had none, and judges saw it touch).
+                let placed = vr::quick_menu_places(0).into_iter().find(|p| p.zone == zone).unwrap_or_else(|| zones::in_units(zone));
                 let (pixels, px) = sharp_picture(&placed, &worlds, None, 2.0);
                 eye.quad(&plane.quad(&vr::clear_of_sheet(placed, true), 0.0, 0.016), &pixels, px, 1.0);
             }

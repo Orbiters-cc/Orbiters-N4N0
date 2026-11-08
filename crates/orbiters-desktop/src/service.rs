@@ -43,6 +43,8 @@ pub struct Service {
     unauthenticated: AtomicUsize,
     /// The window process we started and when (a second request while it starts does not start another).
     window: Mutex<Option<(Child, Instant)>>,
+    /// A page asked for while no window was there: the window starting now gets it once it is linked.
+    page_for_window: Mutex<Option<String>>,
     /// The overlay process we started, when, and for which SteamVR (its `vrserver` process id).
     overlay: Mutex<Option<(Child, Instant, Option<u32>)>>,
     /// The process of the panels around VRChat's menus in desktop mode, and when it started.
@@ -322,6 +324,19 @@ impl Service {
             }
             // Only the window picks picture files; the upload runs on a thread of its own.
             ToService::ShowWindow => self.show_window(false),
+            ToService::ShowPage { page } => {
+                let linked = self.links.lock().unwrap().iter().find(|l| l.role == Role::Window).map(|l| (l.pid, l.mailbox.clone()));
+                match linked {
+                    Some((pid, mailbox)) => {
+                        allow_foreground(pid);
+                        mailbox.post(ToClient::ShowPage { page });
+                    }
+                    None => {
+                        *self.page_for_window.lock().unwrap() = Some(page);
+                        self.show_window(false);
+                    }
+                }
+            }
             ToService::Orbit { status } => self.ctl.set_orbit_status(status),
             ToService::VrchatPicture { scope, id, path } if role == Role::Window => ctl.vrchat_picture(scope, id, path),
             ToService::VrchatPicture { .. } => {}
@@ -402,7 +417,12 @@ impl Service {
         let id = self.next_link.fetch_add(1, Ordering::Relaxed);
         self.links.lock().unwrap().push(Link { id, role, pid, mailbox: mailbox.clone() });
         match role {
-            Role::Window => *self.window.lock().unwrap() = None,
+            Role::Window => {
+                *self.window.lock().unwrap() = None;
+                if let Some(page) = self.page_for_window.lock().unwrap().take() {
+                    mailbox.post(ToClient::ShowPage { page });
+                }
+            }
             Role::Overlay => self.ctl.set_overlay_connected(true),
             Role::Orbit => {}
         }
@@ -510,6 +530,7 @@ pub fn run(hidden: bool) -> anyhow::Result<()> {
         next_link: AtomicU64::new(1),
         unauthenticated: AtomicUsize::new(0),
         window: Mutex::new(None),
+        page_for_window: Mutex::new(None),
         overlay: Mutex::new(None),
         orbit: Mutex::new(None),
         steamvr_start_seen: Mutex::new(None),

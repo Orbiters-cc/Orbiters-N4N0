@@ -304,6 +304,8 @@ fn shows_well(image: &ColorImage) -> f32 {
 struct LoadedRecent {
     /// Its session's folder, or its file.
     key: PathBuf,
+    /// Its world's id: its world's own picture stands in for a recording that kept no picture of its own.
+    world_id: String,
     title: String,
     image: Option<ColorImage>,
     asked: bool,
@@ -340,6 +342,7 @@ fn list_pictures(sessions: &std::path::Path, folders: &[PathBuf]) -> Vec<LoadedR
             let aspect = crate::controller::shares::session_picture_size(s.manifest.capture.width, s.manifest.capture.height).map_or(16.0 / 9.0, |[w, h]| w as f32 / h.max(1) as f32);
             list.push(LoadedRecent {
                 key: s.dir.clone(),
+                world_id: world.id.clone(),
                 title: title.clone(),
                 image: None,
                 asked: false,
@@ -357,6 +360,7 @@ fn list_pictures(sessions: &std::path::Path, folders: &[PathBuf]) -> Vec<LoadedR
             let aspect = if shot.info.width > 0 && shot.info.height > 0 { shot.info.width as f32 / shot.info.height as f32 } else { 16.0 / 9.0 };
             list.push(LoadedRecent {
                 key: shot.path.clone(),
+                world_id: world.id.clone(),
                 title: title.clone(),
                 image: None,
                 asked: false,
@@ -623,13 +627,12 @@ fn recent_state(r: &LoadedRecent, snap: &Snapshot, now: u64) -> String {
     if snap.reconstruct_queue.contains(&r.key) {
         return if r.picture { tr("3D picture, waiting") } else { tr("Recording, waiting") }.to_string();
     }
-    if r.has_view {
-        let when = ago(now.saturating_sub(r.taken));
-        if r.picture { tr!("3D picture, {when}", when = when) } else { tr!("Recording, {when}", when = when) }
-    } else if r.picture {
-        tr("3D picture, no 3D yet").to_string()
-    } else {
-        tr("Recording, no 3D yet").to_string()
+    // Its badge says what it is now (3D, Recording); this, how it was made and when, in the same words everywhere (round 10's judges found a 3D tile called a Recording).
+    let when = ago(now.saturating_sub(r.taken));
+    match (r.has_view, r.picture) {
+        (true, true) => tr!("3D picture, {when}", when = when),
+        (true, false) => tr!("Made from a recording, {when}", when = when),
+        (false, _) => tr!("No 3D yet, {when}", when = when),
     }
 }
 
@@ -763,6 +766,8 @@ pub struct Panels {
     mic_asked: Option<String>,
     /// The Instances sheet's worlds' pictures so far.
     visit_pictures: HashMap<String, egui::TextureId>,
+    /// The worlds' own pictures, for the gallery's recordings that kept none (round 10's judges: half a screen of empty cards).
+    gallery_world_pictures: HashMap<String, egui::TextureId>,
     /// The page on the sheet (its back is in `list`).
     pub takeover: Option<Panel>,
     open: Option<Around>,
@@ -848,6 +853,7 @@ impl Panels {
             mic_meters: None,
             mic_asked: None,
             visit_pictures: HashMap::new(),
+            gallery_world_pictures: HashMap::new(),
             open: None,
             recents: Recents::default(),
             facts: Facts::default(),
@@ -1597,6 +1603,23 @@ impl Panels {
             self.open_sheet(Sheet::Menu, mark("Add Orbiters as a friend"), snap);
         }
         if let Some(worlds) = self.stage.worlds.as_mut() {
+            // A recording with no picture of its own: its world's, once it has come.
+            if self.facts.sheet == Some(Sheet::Pictures) {
+                let mut came = false;
+                for loaded in self.recents.loaded.iter().filter(|r| r.session && !r.has_view && r.asked && r.image.is_none() && !r.world_id.is_empty()) {
+                    if !self.gallery_world_pictures.contains_key(&loaded.world_id) {
+                        if let Some(picture) = worlds.world_thumbnail(&loaded.world_id) {
+                            self.gallery_world_pictures.insert(loaded.world_id.clone(), picture);
+                            came = true;
+                        }
+                    }
+                }
+                if came {
+                    if let Some(panel) = self.takeover.as_mut() {
+                        panel.dirty = true;
+                    }
+                }
+            }
             if matches!(self.facts.sheet, Some(Sheet::Instances | Sheet::All)) {
                 let shown = panels::visits_shown(self.facts.gallery_scroll);
                 for visit in self.facts.worlds_visited.iter().skip(shown.start).take(shown.len()) {
@@ -2335,6 +2358,7 @@ impl Panels {
                 host.effects(effects, snap, &self.backend);
             }
             Action::OpenApp => self.backend.show_window(),
+            Action::AddKit => self.backend.show_page("projects"),
             Action::Booster => {
                 // Its Details page stays as it was left, as every sheet's state does; only its one question starts over.
                 self.booster_asking = false;
@@ -2551,6 +2575,8 @@ impl Panels {
                                 let name = loaded.key.to_string_lossy().to_string();
                                 let id = panel.pictures.entry(name).or_insert_with(|| ctx.load_texture("recent", image.clone(), TextureOptions::LINEAR)).id();
                                 facts.recent_pictures.push((n, id));
+                            } else if let Some(id) = self.gallery_world_pictures.get(&loaded.world_id).filter(|_| loaded.session && !loaded.has_view) {
+                                facts.recent_pictures.push((n, *id));
                             }
                         }
                         if let Some((crate::worlds::Picture::Shot { path, .. }, Some(image))) = &self.recents.big {
@@ -3012,6 +3038,7 @@ mod tests {
         LoadedRecent {
             source: if session { crate::worlds::Picture::Session(path.clone()) } else { crate::worlds::Picture::Shot { path: path.clone(), size: 1, width: 560 } },
             key: path,
+            world_id: String::new(),
             title: key.into(),
             image: None,
             asked: false,

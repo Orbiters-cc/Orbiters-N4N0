@@ -52,6 +52,10 @@ pub enum ToClient {
     },
     /// Come to the front.
     Show,
+    /// Come to the front on this page of the app's (`"projects"`, where My Avatar is), as the menus around VRChat ask.
+    ShowPage {
+        page: String,
+    },
     /// Close (the app quits, or another window replaced this one).
     Close,
 }
@@ -69,6 +73,10 @@ pub enum ToService {
     StopCapture,
     /// The Orbiters window to the front.
     ShowWindow,
+    /// The Orbiters window to the front, on one of its pages ([`ToClient::ShowPage`]).
+    ShowPage {
+        page: String,
+    },
     /// What the panels around VRChat's menus last said of themselves, for Settings.
     Orbit {
         status: crate::state::OrbitStatus,
@@ -353,6 +361,8 @@ pub struct Client {
     maps: Mutex<Option<MapsMine>>,
     vrchat_data: Mutex<std::collections::HashMap<String, std::sync::mpsc::Sender<crate::controller::vrchat_data::Result>>>,
     show: AtomicBool,
+    /// A page asked for with the last Show.
+    show_page: Mutex<Option<String>>,
     close: AtomicBool,
     connected: AtomicBool,
     /// The window is behind VRChat ([`Client::set_background`]).
@@ -398,6 +408,7 @@ impl Client {
             maps: Mutex::new(None),
             vrchat_data: Mutex::default(),
             show: AtomicBool::new(false),
+            show_page: Mutex::new(None),
             close: AtomicBool::new(false),
             connected: AtomicBool::new(true),
             background: AtomicBool::new(false),
@@ -421,6 +432,10 @@ impl Client {
                         }
                     }
                     ToClient::Show => c.show.store(true, Ordering::Relaxed),
+                    ToClient::ShowPage { page } => {
+                        *c.show_page.lock().unwrap() = Some(page);
+                        c.show.store(true, Ordering::Relaxed);
+                    }
                     ToClient::Close => {
                         c.close.store(true, Ordering::Relaxed);
                         leave_soon();
@@ -510,6 +525,10 @@ impl Client {
 
     pub fn take_show(&self) -> bool {
         self.show.swap(false, Ordering::Relaxed)
+    }
+
+    pub fn take_show_page(&self) -> Option<String> {
+        self.show_page.lock().unwrap().take()
     }
 
     pub fn should_close(&self) -> bool {

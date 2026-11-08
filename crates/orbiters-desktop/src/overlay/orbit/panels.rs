@@ -984,12 +984,15 @@ fn sheet_page_items(sheet: Sheet, facts: &Facts) -> Vec<Item> {
             }
             // Without the kit, not two buttons that refuse (all four round 10 judges): one line saying where to add it, and a button there.
             if facts.no_kit {
-                out.push(Item { action: Action::AddKit, rect: r(x0, y0, width * 2.0 + gap, h), look: Look::AddKit });
+                // Record takes what it needs, the line the rest: it says it whole.
+                let line = width * 3.0 + gap - RECORD_ALONE;
+                out.push(Item { action: Action::AddKit, rect: r(x0, y0, line, h), look: Look::AddKit });
+                out.push(Item { action: Action::Record, rect: r(x0 + line + gap, y0, RECORD_ALONE, h), look: Look::Record });
             } else {
                 out.push(Item { action: Action::Picture(PhotoMode::People), rect: r(x0, y0, width, h), look: Look::Picture(PhotoMode::People) });
                 out.push(Item { action: Action::Picture(PhotoMode::World), rect: r(x0 + width + gap, y0, width, h), look: Look::Picture(PhotoMode::World) });
+                out.push(Item { action: Action::Record, rect: r(x0 + (width + gap) * 2.0, y0, width, h), look: Look::Record });
             }
-            out.push(Item { action: Action::Record, rect: r(x0 + (width + gap) * 2.0, y0, width, h), look: Look::Record });
             let track = filter_track();
             out.push(Item { action: Action::Filter(GalleryFilter::All), rect: r(track.left() + 4.0, y0 + 4.0, 62.0, h - 8.0), look: Look::Filter(GalleryFilter::All) });
             out.push(Item { action: Action::Filter(GalleryFilter::Captures), rect: r(track.left() + 68.0, y0 + 4.0, track.width() - 72.0, h - 8.0), look: Look::Filter(GalleryFilter::Captures) });
@@ -1002,6 +1005,9 @@ fn sheet_page_items(sheet: Sheet, facts: &Facts) -> Vec<Item> {
         Sheet::Menu | Sheet::Worlds => Vec::new(),
     }
 }
+
+/// Record's width beside the line that says where the capture kit is.
+const RECORD_ALONE: f32 = 150.0;
 
 /// What the gallery's filter takes of its top row, from the buttons on: it is another kind of thing, set apart with a line and a word, in a track of its own.
 const FILTER_ROOM: f32 = 268.0;
@@ -2307,7 +2313,7 @@ fn draw(p: &Painter, zone: Zone, item: &Item, facts: &Facts, hovered: bool, pres
             widgets::icon(p, pos2(button.right() - 16.0, button.center().y), icons::ARROW_RIGHT, 15.0, look::ON_ACCENT);
             let font = look::font(14.5, weight::MEDIUM);
             let room = button.left() - rect.left() - 52.0;
-            p.text(pos2(rect.left() + 44.0, rect.center().y), Align2::LEFT_CENTER, fit(p, tr("Add the capture kit in My Avatar to take 3D pictures"), &font, room), font, look::LABEL);
+            p.text(pos2(rect.left() + 44.0, rect.center().y), Align2::LEFT_CENTER, fit(p, tr("For 3D pictures, add the capture kit"), &font, room), font, look::LABEL);
         }
         Look::Record => {
             let label = if facts.recording { tr("Stop") } else { tr_ctx("start recording", "Record") };

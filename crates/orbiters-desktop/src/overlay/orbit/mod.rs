@@ -433,7 +433,8 @@ impl Recents {
         let mut items = Vec::new();
         for (i, r) in self.loaded.iter_mut().enumerate() {
             r.at = None;
-            if filter == panels::GalleryFilter::All || r.session {
+            // Only 3D is what shows in 3D (Enzo: "a filter to only show the 3D ones"): a recording with none made yet is not one.
+            if filter == panels::GalleryFilter::All || (r.session && r.has_view) {
                 r.at = Some(self.shown_index.len());
                 self.shown_index.push(i);
                 items.push(Recent { dir: r.key.clone(), title: shown_title(&r.title), state: String::new(), progress: None, picture: None, aspect: r.aspect, kind: r.kind() });
@@ -3062,11 +3063,10 @@ mod tests {
         assert!(!recents.arrange(GalleryFilter::All, layout), "nothing changed: the same tiles");
         assert_eq!(recents.shown.iter().map(|r| r.kind).collect::<Vec<_>>(), [RecentKind::Picture, RecentKind::Capture, RecentKind::Picture, RecentKind::NoView]);
         assert!(recents.arrange(GalleryFilter::Captures, layout));
-        assert_eq!(recents.shown.iter().map(|r| r.kind).collect::<Vec<_>>(), [RecentKind::Capture, RecentKind::NoView]);
+        assert_eq!(recents.shown.iter().map(|r| r.kind).collect::<Vec<_>>(), [RecentKind::Capture], "a recording with no 3D yet is not in Only 3D");
         // A tile's number is its place among those shown.
         assert_eq!(recents.tile(0).unwrap().key, PathBuf::from("cap"));
-        assert_eq!(recents.tile(1).unwrap().key, PathBuf::from("raw"));
-        assert!(recents.tile(2).is_none());
+        assert!(recents.tile(1).is_none());
     }
 
     #[test]

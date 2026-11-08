@@ -43,7 +43,8 @@ struct Part {
 }
 
 /// How much the whole leans towards who looks, as a stick seen from a little above: at eye level its push would be lost.
-const LEANS: f32 = 0.5;
+/// Seen a little more from above than at first: round 11's judges could not tell it was pushed forward.
+const LEANS: f32 = 0.66;
 
 fn leaned(p: V3) -> V3 {
     let (s, c) = LEANS.sin_cos();
@@ -63,7 +64,8 @@ fn parts(push: f32, accent: [f32; 3]) -> Vec<Part> {
 fn parts_of(push: f32, accent: [f32; 3]) -> Vec<Part> {
     const BODY: [f32; 3] = [0.56, 0.61, 0.70];
     const LIGHT: [f32; 3] = [0.84, 0.88, 0.94];
-    let tilt = push * 0.62;
+    // As far as a thumb really pushes one, and a little more, to be seen.
+    let tilt = push * 0.95;
     let (s, c) = tilt.sin_cos();
     const FOOT: f32 = -0.034;
     let up = |height: f32| leaned([0.0, FOOT + height * c, -height * s]);

@@ -261,7 +261,9 @@ struct Recents {
     /// What the gallery shows of it, in its filter, and that as tiles.
     shown_index: Vec<usize>,
     shown: panels::Gallery,
-    arranged: Option<(panels::GalleryFilter, orbiters_core::settings::GalleryLayout, orbiters_i18n::Language)>,
+    arranged: Option<(panels::GalleryFilter, orbiters_core::settings::GalleryLayout, orbiters_i18n::Language, Option<String>)>,
+    /// The set open of one place's captures, by its name: one tile stood for them in the gallery.
+    set: Option<String>,
     seen: Option<(u64, u64)>,
     /// When it was last listed: a first scan of the pictures says it found more all the time.
     listed: Option<Instant>,
@@ -425,19 +427,36 @@ impl Recents {
     fn arrange(&mut self, filter: panels::GalleryFilter, layout: orbiters_core::settings::GalleryLayout) -> bool {
         // The language is part of what it was arranged for: a title the list makes up (a world with no name) is in it.
         let language = orbiters_i18n::language();
-        if self.arranged == Some((filter, layout, language)) {
+        if self.arranged == Some((filter, layout, language, self.set.clone())) {
             return false;
         }
-        self.arranged = Some((filter, layout, language));
+        self.arranged = Some((filter, layout, language, self.set.clone()));
         self.shown_index.clear();
-        let mut items = Vec::new();
+        let mut items: Vec<Recent> = Vec::new();
+        let mut last: Option<usize> = None;
+        // What makes two captures one place's, of one kind.
+        let keys: Vec<(bool, String, bool)> = self.loaded.iter().map(|l| (l.session, l.title.clone(), l.has_view)).collect();
+        let set = self.set.clone();
         for (i, r) in self.loaded.iter_mut().enumerate() {
             r.at = None;
-            if filter == panels::GalleryFilter::All || r.session {
-                r.at = Some(self.shown_index.len());
-                self.shown_index.push(i);
-                items.push(Recent { dir: r.key.clone(), title: shown_title(&r.title), state: String::new(), progress: None, picture: None, aspect: r.aspect, kind: r.kind() });
+            // Only 3D is what shows in 3D (Enzo: "a filter to only show the 3D ones"): a recording with none made yet is not one.
+            if !(filter == panels::GalleryFilter::All || (r.session && r.has_view)) {
+                continue;
             }
+            if set.as_ref().is_some_and(|set| *set != r.title) {
+                continue;
+            }
+            // Captures of one place one after the other are one tile, with how many (round 11's judges: three alike in a row could not be told apart); it opens to them.
+            if set.is_none() && r.session && !r.title.is_empty() && last.is_some_and(|j| keys[j] == keys[i]) {
+                let at = self.shown_index.len() - 1;
+                r.at = Some(at);
+                items[at].count += 1;
+                continue;
+            }
+            last = Some(i);
+            r.at = Some(self.shown_index.len());
+            self.shown_index.push(i);
+            items.push(Recent { dir: r.key.clone(), title: shown_title(&r.title), state: String::new(), progress: None, picture: None, aspect: r.aspect, kind: r.kind(), count: 1 });
         }
         self.shown = panels::Gallery::new(items, layout);
         true
@@ -628,7 +647,8 @@ fn recent_state(r: &LoadedRecent, snap: &Snapshot, now: u64) -> String {
         return if r.picture { tr("3D picture, waiting") } else { tr("Recording, waiting") }.to_string();
     }
     // Its badge says what it is now (3D, Recording); this, how it was made and when, in the same words everywhere (round 10's judges found a 3D tile called a Recording).
-    let when = ago(now.saturating_sub(r.taken));
+    // When, as exactly as tells two apart (round 11's judges: three alike said "3 d ago"): how long ago today, the day and time this week, the date and time before.
+    let when = taken_when(r.taken, now);
     match (r.has_view, r.picture) {
         (true, true) => tr!("3D picture, {when}", when = when),
         (true, false) => tr!("Made from a recording, {when}", when = when),
@@ -1169,6 +1189,14 @@ impl Panels {
             self.act(Action::PictureBack, snap, out);
             return;
         }
+        if self.facts.sheet == Some(Sheet::Pictures) && self.recents.set.is_some() {
+            self.recents.set = None;
+            self.facts.gallery_set = None;
+            self.facts.gallery_scroll = 0.0;
+            self.gallery_to = 0.0;
+            self.gallery_dirty();
+            return;
+        }
         match self.facts.sheet {
             Some(Sheet::Menu | Sheet::Results) if self.page_root.is_some_and(|root| root != self.stage.host.menu.page) => {
                 let host = &mut self.stage.host;
@@ -1682,6 +1710,7 @@ impl Panels {
                 .filter_map(|n| self.recents.tile(n).map(|r| (n, recent_state(r, snap, now), progress(&r.key))))
                 .collect(),
             recent_pictures: Vec::new(),
+            gallery_set: self.facts.gallery_set.clone(),
             view_said: self.facts.view_said.clone(),
             view_small: self.facts.view_small,
             sheet_hole: self.facts.sheet_hole,
@@ -2205,6 +2234,18 @@ impl Panels {
             Action::All => self.open_sheet(Sheet::All, mark("All tools"), snap),
             Action::Pictures => self.open_sheet(Sheet::Pictures, mark("Pictures"), snap),
             Action::Capture(n) => {
+                // A tile standing for several captures of one place opens to them; Back shows the whole gallery again.
+                if self.recents.set.is_none() && self.facts.recent.get(n).is_some_and(|t| t.count > 1) {
+                    if let Some(title) = self.recents.tile(n).map(|recent| recent.title.clone()) {
+                        self.facts.gallery_set = Some(shown_title(&title));
+                        self.recents.set = Some(title);
+                        self.facts.gallery_scroll = 0.0;
+                        self.gallery_to = 0.0;
+                        self.throw = 0.0;
+                        self.gallery_dirty();
+                    }
+                    return;
+                }
                 let Some(recent) = self.recents.tile(n) else { return };
                 match recent.kind() {
                     panels::RecentKind::Capture if self.worlds_here && !self.facts.desktop => {
@@ -2762,6 +2803,21 @@ fn access_words(kind: &str) -> &str {
     }
 }
 
+/// When a capture was taken, as exactly as tells two of one place apart.
+fn taken_when(at: u64, now: u64) -> String {
+    if now.saturating_sub(at) < 86_400 {
+        return ago(now.saturating_sub(at));
+    }
+    let day = day_and_time(at, now);
+    if now.saturating_sub(at) < 6 * 86_400 {
+        return day;
+    }
+    let offset = time::UtcOffset::current_local_offset().unwrap_or(time::UtcOffset::UTC);
+    let Ok(then) = time::OffsetDateTime::from_unix_timestamp(at as i64) else { return day };
+    let then = then.to_offset(offset);
+    format!("{day}, {:02}:{:02}", then.hour(), then.minute())
+}
+
 /// When a visit was, so that two are told apart: the day and time this week, the date before that.
 fn day_and_time(at: u64, now: u64) -> String {
     let offset = time::UtcOffset::current_local_offset().unwrap_or(time::UtcOffset::UTC);
@@ -3062,11 +3118,10 @@ mod tests {
         assert!(!recents.arrange(GalleryFilter::All, layout), "nothing changed: the same tiles");
         assert_eq!(recents.shown.iter().map(|r| r.kind).collect::<Vec<_>>(), [RecentKind::Picture, RecentKind::Capture, RecentKind::Picture, RecentKind::NoView]);
         assert!(recents.arrange(GalleryFilter::Captures, layout));
-        assert_eq!(recents.shown.iter().map(|r| r.kind).collect::<Vec<_>>(), [RecentKind::Capture, RecentKind::NoView]);
+        assert_eq!(recents.shown.iter().map(|r| r.kind).collect::<Vec<_>>(), [RecentKind::Capture], "a recording with no 3D yet is not in Only 3D");
         // A tile's number is its place among those shown.
         assert_eq!(recents.tile(0).unwrap().key, PathBuf::from("cap"));
-        assert_eq!(recents.tile(1).unwrap().key, PathBuf::from("raw"));
-        assert!(recents.tile(2).is_none());
+        assert!(recents.tile(1).is_none());
     }
 
     #[test]

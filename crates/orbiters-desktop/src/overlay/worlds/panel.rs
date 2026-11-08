@@ -2535,7 +2535,17 @@ fn card(p: &Painter, rect: Rect, entry: &Entry, d: &Data, hover: bool, pressed: 
     } else if let Some(n) = entry.occupants.filter(|n| *n > 0) {
         badge(p, pos2(thumb.max.x - 10.0, thumb.max.y - 34.0), true, icons::USERS, false, &short_count(n as u64), theme::FG_2, alpha);
     }
-    text_cut(p, pos2(rect.min.x + 16.0, rect.min.y + CARD_THUMB + 9.0), rect.width() - 32.0, orbit_look::txt(entry.name.clone(), 19.0).weight(weight::SEMIBOLD).color(fade(theme::FG, alpha)));
+    // Its whole name, on two lines where one does not hold it, and then nothing under it (round 11's judges: "Normal Capa..." could not be told from the next).
+    let room = rect.width() - 32.0;
+    let one = p.layout_job(orbit_look::txt(entry.name.clone(), 19.0).weight(weight::SEMIBOLD).job(f32::INFINITY));
+    if one.size().x > room {
+        let mut job = orbit_look::txt(entry.name.clone(), 17.0).weight(weight::SEMIBOLD).color(fade(theme::FG, alpha)).job(room);
+        job.wrap.max_rows = 2;
+        job.wrap.overflow_character = Some('\u{2026}');
+        p.galley(pos2(rect.min.x + 16.0, rect.min.y + CARD_THUMB + 6.0), p.layout_job(job), fade(theme::FG, alpha));
+        return;
+    }
+    text_cut(p, pos2(rect.min.x + 16.0, rect.min.y + CARD_THUMB + 9.0), room, orbit_look::txt(entry.name.clone(), 19.0).weight(weight::SEMIBOLD).color(fade(theme::FG, alpha)));
     // Its author, and the labels people gave its world most.
     let mut meta: Vec<String> = d.author(entry).map(str::to_string).into_iter().collect();
     let wf = d.world_feedback(entry);

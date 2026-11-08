@@ -398,6 +398,10 @@ pub fn quick_menu_places(hand: usize) -> Vec<Placed> {
             let mut placed = zones::in_units(*zone);
             // In a headset VRChat's My Profile reaches past the menu's main panel, and the tiles move on their springs: a clear gap from it (a judge saw them overlap).
             placed.rect = placed.rect.translate(egui::vec2(VR_WING_CLEAR, 0.0));
+            // Its caption over the name pill, which holds Hide tiles here.
+            if *zone == Zone::QmCaption {
+                placed.rect = placed.rect.translate(egui::vec2(0.0, -zones::QM_CAPTION_OVER_THE_NAME));
+            }
             if hand == 1 {
                 let rect = placed.rect;
                 // The wing as a whole, its tiles in the same order; the caption over it.

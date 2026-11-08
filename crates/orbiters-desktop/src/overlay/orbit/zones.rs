@@ -203,6 +203,9 @@ pub enum Zone {
     Takeover,
 }
 
+/// How far above its place the wing's caption lies in a headset, where the wing's name pill (with Hide tiles) is under it.
+pub const QM_CAPTION_OVER_THE_NAME: f32 = 34.0;
+
 impl Zone {
     pub const WHEEL: [Zone; 13] = [
         Zone::WheelVeil,
@@ -296,7 +299,8 @@ impl Zone {
         let r = |x0: f32, y0: f32, x1: f32, y1: f32| Rect::from_min_max(pos2(x0, y0), pos2(x1, y1));
         match self {
             // Right over the ring: what to do with it is said where the eyes are.
-            Zone::WheelCaption => r(-220.0, -234.0, 220.0, -178.0),
+            // Clear of the ring's top and its curved names (round 11's judges found it against them).
+            Zone::WheelCaption => r(-220.0, -254.0, 220.0, -196.0),
             Zone::WheelVeil => r(-109.0, -109.0, 109.0, 109.0),
             // Level with the caption over the ring, past its right end: clear of the ring and of either second ring (a judge found it sitting on the rim), and still beside them.
             Zone::WheelHide => r(232.0, -232.0, 344.0, -190.0),
@@ -312,7 +316,8 @@ impl Zone {
             Zone::WingPlaying => r(362.0, 132.0, 524.0, 186.0),
             Zone::QmStrip => r(-300.0, 266.0, 300.0, 318.0),
             // On the wing, as wide as it, right over its name: its words wrap, and it is as high as they take.
-            Zone::QmCaption => r(362.0, -262.0, 524.0, -154.0),
+            // Its foot where the wing's name pill is: on a screen the name heads it (the pill is not there); a headset keeps it above that pill ([`QM_CAPTION_OVER_THE_NAME`]).
+            Zone::QmCaption => r(362.0, -228.0, 524.0, -120.0),
             // The Quick Menu's panels and the FPS line over them, ending where its main panel ends: its tab row and badge stay VRChat's.
             // Clear of what VRChat has over its menu, down over its main panel's foot.
             Zone::SheetBack => r(-352.0, -240.0, 352.0, 205.5),
@@ -330,7 +335,7 @@ impl Zone {
         }
     }
 
-    /// Where it lies where its first place does not fit: the caption, under the strip.
+/// Where it lies where its first place does not fit: the caption, under the strip.
     fn fallback(self) -> Option<Rect> {
         let r = |x0: f32, y0: f32, x1: f32, y1: f32| Rect::from_min_max(pos2(x0, y0), pos2(x1, y1));
         match self {

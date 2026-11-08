@@ -468,7 +468,7 @@ pub struct Panel {
     /// Whether things move, or are simply there (Reduce motion).
     pub moves: bool,
     /// When the side panel last started to come or go.
-    side_at: f64,
+    pub(super) side_at: f64,
     /// A row and how many in it, as the list last measured, and for what.
     list_step: std::cell::Cell<(f32, usize)>,
     list_headset: std::cell::Cell<bool>,
@@ -1683,7 +1683,9 @@ impl Panel {
                 self.browse(p, d, &targets, time, 1.0);
                 // It comes out beside the list, which makes it room: the page changes its layout, and no other page comes (Enzo).
                 let out = self.side_out(time);
-                if out >= 0.999 && (out - 1.0).abs() < 0.001 {
+                // Where a capture shows through it, it stands where its hole is: drawn on its way, moved and see-through, its frame round the hole covered
+                // part of the capture lying there for most of a second (Enzo: "the part that should be see through is glitchy").
+                if (out >= 0.999 && (out - 1.0).abs() < 0.001) || self.hole(d.status).is_some() {
                     self.side_panel(p, d, time, &targets);
                 } else {
                     slid(p, vec2((1.0 - out) * 70.0, 0.0), out, |there| self.side_panel(there, d, time, &targets));

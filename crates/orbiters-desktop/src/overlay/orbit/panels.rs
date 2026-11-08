@@ -766,6 +766,9 @@ fn wing_name_busy(facts: &Facts) -> bool {
     facts.recording || facts.reconstructing.is_some()
 }
 
+/// A tab with its icon alone, in a headset: as wide as a laser needs.
+const COMPACT_TAB_VR: f32 = 46.0;
+
 /// Where every sheet has its Back.
 const BACK_AT: f32 = 8.0;
 
@@ -802,7 +805,7 @@ fn head_tabs(facts: &Facts) -> (Vec<Item>, f32) {
         // The Ask tab is cut for a word of three letters: where its name has more, it takes the room those need (English is as it was).
         let wide = if action == Action::Talk && label.chars().count() > 3 { wide + 10.0 } else { wide };
         // In a headset an icon alone is as wide as a laser needs (a judge found no way from a VR sheet to the others while a capture showed).
-        let width = if compact && !on { if facts.desktop { 36.0 } else { 46.0 } } else { wide };
+        let width = if compact && !on { if facts.desktop { 36.0 } else { COMPACT_TAB_VR } } else { wide };
         out.push(Item { action, rect: r(x, 7.0, width, 30.0), look: Look::HeadTab { icon, label, on } });
         x += width + 3.0;
     }
@@ -2454,7 +2457,8 @@ fn draw(p: &Painter, zone: Zone, item: &Item, facts: &Facts, hovered: bool, pres
             } else if hovered || pressed {
                 p.rect_filled(rect, radius, look::TILE_HOVER);
             }
-            if rect.width() > 40.0 {
+            // Named where it was made room for its name; a headset's icon-only tab is wider than a screen's, and still only an icon.
+            if rect.width() > COMPACT_TAB_VR + 1.0 {
                 widgets::icon(p, pos2(rect.left() + 16.0, rect.center().y), icon, 17.0, tint);
                 p.text(pos2(rect.left() + 29.0, rect.center().y), Align2::LEFT_CENTER, label, look::font(13.5, if on { weight::BOLD } else { weight::MEDIUM }), if on { Color32::WHITE } else { look::LABEL });
             } else {

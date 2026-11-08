@@ -6,9 +6,9 @@ use super::stereo::{self, V3};
 use egui::Color32;
 
 /// One eye's picture.
-pub const EYE_PX: [u32; 2] = [288, 300];
-/// How large it is in the room.
-pub const WIDTH_M: f32 = 0.24;
+pub const EYE_PX: [u32; 2] = [360, 300];
+/// How large it is in the room: wide enough for it seen from the side, pushed, whole.
+pub const WIDTH_M: f32 = 0.30;
 pub const HEIGHT_M: f32 = WIDTH_M * EYE_PX[1] as f32 / EYE_PX[0] as f32;
 
 /// One push up and pull down, in seconds.

@@ -146,6 +146,9 @@ pub struct Worlds {
     /// The worlds' pages on the Map explorer, as far as fetched (performance, tags, pictures).
     facts: HashMap<String, Facts>,
     facts_pending: bool,
+    /// The hole a capture shows through opened, closed or moved since the page was last painted: the page is painted at once, with the sheet's back that is
+    /// painted in the same turn, never a throttle's turn later (dev.21's test caught the page still solid there while its back was clear).
+    hole_changed: bool,
     /// On a sheet in VR: what the overlay's own 3D worlds say of their view, and what was asked of them.
     relay: Option<Status>,
     relayed: Vec<Relayed>,
@@ -265,6 +268,7 @@ impl Worlds {
             asked: None,
             facts: HashMap::new(),
             facts_pending: false,
+            hole_changed: false,
             relay: None,
             relayed: Vec::new(),
             me: None,
@@ -360,6 +364,7 @@ fn keep_an_eye_frame(steamvr: &vr::Client, n: u32) {
             asked: None,
             facts: HashMap::new(),
             facts_pending: false,
+            hole_changed: false,
             relay: None,
             relayed: Vec::new(),
             me: None,
@@ -632,9 +637,17 @@ fn keep_an_eye_frame(steamvr: &vr::Client, n: u32) {
     pub fn show_world_for_test(&mut self, id: u64) {
         self.panel.page = panel::Page::Detail;
         self.panel.selected = Some(id);
-        // Its side panel already out: on its way it is drawn moved, and the test would depend on how fast it runs.
+        // Its side panel already out.
         self.panel.moves = false;
         self.panel.dirty = true;
+    }
+
+    /// As [`Worlds::show_world_for_test`], its side panel on its way out now, as a press on a world brings it.
+    #[cfg(test)]
+    pub fn slide_world_in_for_test(&mut self, id: u64) {
+        self.show_world_for_test(id);
+        self.panel.moves = true;
+        self.panel.side_at = self.time();
     }
 
     #[cfg(test)]
@@ -864,8 +877,15 @@ fn keep_an_eye_frame(steamvr: &vr::Client, n: u32) {
     pub fn relay_to(&mut self, view: Status) -> Vec<Relayed> {
         // Only when it says something new. Called every turn, this painted the whole page 45 times a second for nothing: 41 ms turns in a headset, with hover waiting behind them.
         if self.relay.as_ref() != Some(&view) {
+            let hole = self.small_hole();
             self.relay = Some(view);
             self.panel.dirty = true;
+            self.hole_changed |= self.small_hole() != hole;
+            // A capture lying in the side panel's hole now: the panel and the list beside it are where they end, at once. On their way, the list's cards still
+            // reached over the hole and the panel round it was drawn moved, over the capture.
+            if hole.is_none() && self.small_hole().is_some() {
+                self.panel.side_at = self.time() - 10.0;
+            }
         }
         std::mem::take(&mut self.relayed)
     }
@@ -1609,13 +1629,14 @@ fn keep_an_eye_frame(steamvr: &vr::Client, n: u32) {
         let since = self.last_paint.map(|t| t.elapsed());
         let due = since.is_none_or(|t| t >= Duration::from_millis(22));
         let facts = self.facts_pending && since.is_none_or(|t| t >= FACTS_EVERY);
-        due && (self.panel.dirty || self.panel.animating(&self.status(), self.time()) || self.pictures.loading() || facts)
+        self.hole_changed || (due && (self.panel.dirty || self.panel.animating(&self.status(), self.time()) || self.pictures.loading() || facts))
     }
 
     /// Paints the panel on the menu's canvas.
     pub fn paint(&mut self, canvas: &mut Canvas) {
         self.panel.vr_coast(self.time());
         self.panel.dirty = false;
+        self.hole_changed = false;
         if let Some(frame) = self.live_frame.take() {
             let image = egui::ColorImage::from_rgba_premultiplied(frame.size, &frame.rgba);
             match &mut self.live_texture {

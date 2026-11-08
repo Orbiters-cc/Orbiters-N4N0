@@ -25,7 +25,7 @@ const STICK_FRAME_S: f32 = 1.0 / 36.0;
 /// Where it stands against the words' middle: in the part of their page left for it.
 /// How far round it someone may go before it turns to follow them, in radians.
 const STICK_TURNS_BY: f32 = 0.7;
-pub const STICK_AT: [f32; 2] = [-WIDTH_M / 2.0 + STICK_COLUMN_PX / PX[0] as f32 * WIDTH_M / 2.0, -0.004];
+pub const STICK_AT: [f32; 2] = [-WIDTH_M / 2.0 + STICK_COLUMN_PX / PX[0] as f32 * WIDTH_M / 2.0, -0.026];
 /// The part of the page the stick stands in, at its left, its name under it.
 const STICK_COLUMN_PX: f32 = 236.0;
 
@@ -77,8 +77,8 @@ pub fn paint(p: &Painter, stage: Stage, seconds: f32) {
             // The stick itself is a thing in the room beside these ([`super::stick3d`]).
             let push = stick3d::push_at(seconds);
             let which = if hand == 0 { tr("Left stick") } else { tr("Right stick") };
-            // Its name under the stick, as large as what it does (judges could hardly read it at 19).
-            edged_text(p, pos2(STICK_COLUMN_PX / 2.0, 236.0), Align2::CENTER_CENTER, which, theme::font(25.0, weight::BOLD), Color32::WHITE);
+            // Its name over the stick, as large as what it does (judges could hardly read it at 19): under it, its housing lay over it.
+            edged_text(p, pos2(STICK_COLUMN_PX / 2.0, 22.0), Align2::CENTER_CENTER, which, theme::font(25.0, weight::BOLD), Color32::WHITE);
             let up = ((push - 0.2) / 0.8).clamp(0.0, 1.0);
             let down = ((-push - 0.2) / 0.8).clamp(0.0, 1.0);
             words(p, pos2(STICK_COLUMN_PX + 4.0, 20.0), icons::CARET_UP, tr("Push up"), tr("to zoom in"), up);

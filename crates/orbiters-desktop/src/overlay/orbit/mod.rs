@@ -1304,6 +1304,8 @@ impl Panels {
             (None, Some(stage)) => Some((tr("Getting it ready").to_string(), stage.clone())),
             (None, None) => None,
         };
+        // What the view says goes to the page first: the back's hole is the page's, as of this status, or it came a turn after the page's.
+        let mut asked = self.stage.worlds.as_mut().map_or_else(Vec::new, |worlds| worlds.relay_to(status.clone()));
         // The sheet's back has the same hole as the page on it: page units to its own, the page lying 52 under its top.
         let hole = self.stage.worlds.as_ref().filter(|_| self.facts.sheet == Some(Sheet::Worlds)).and_then(|w| w.small_hole());
         let hole = hole.map(|h| egui::Rect::from_min_max(pos2(h.min.x * 0.6875, h.min.y * 0.6875 + panels::SHEET_HEAD), pos2(h.max.x * 0.6875, h.max.y * 0.6875 + panels::SHEET_HEAD)));
@@ -1316,7 +1318,6 @@ impl Panels {
                 panel.dirty = true;
             }
         }
-        let mut asked = self.stage.worlds.as_mut().map_or_else(Vec::new, |worlds| worlds.relay_to(status));
         asked.append(&mut self.local_asked);
         asked
     }
@@ -1339,6 +1340,25 @@ impl Panels {
             back_hole.and_then(|h| sample(back, h.center())),
             back_hole.and_then(|h| sample(back, pos2(h.center().x, h.max.y + 8.0))),
         ]
+    }
+
+    /// How solid the sheet's page and its back are across their holes, on a grid just inside each edge: all of a hole must be clear, not only its middle.
+    #[cfg(test)]
+    fn hole_alphas_across(&self) -> (Vec<Option<u8>>, Vec<Option<u8>>) {
+        let sample = |panel: Option<&Panel>, at: Pos2| -> Option<u8> {
+            let panel = panel?;
+            let zoom = panel.px[0] as f32 / panel.logical.x;
+            panel.pixels().get(((at.y * zoom) as usize * panel.px[0] as usize + (at.x * zoom) as usize) * 4 + 3).copied()
+        };
+        let grid = |hole: egui::Rect| -> Vec<Pos2> {
+            let inner = hole.shrink(10.0);
+            (0..5).flat_map(|i| (0..3).map(move |j| pos2(inner.left() + inner.width() * i as f32 / 4.0, inner.top() + inner.height() * j as f32 / 2.0))).collect()
+        };
+        let page = self.takeover.as_ref();
+        let back = self.list.iter().find(|p| p.zone == Zone::SheetBack);
+        let on_page = self.stage.worlds.as_ref().and_then(|w| w.small_hole()).map_or_else(Vec::new, |h| grid(h).into_iter().map(|at| sample(page, at)).collect());
+        let on_back = self.facts.sheet_hole.map_or_else(Vec::new, |h| grid(h).into_iter().map(|at| sample(back, at)).collect());
+        (on_page, on_back)
     }
 
     pub(in crate::overlay) fn hole_report(&self) -> String {

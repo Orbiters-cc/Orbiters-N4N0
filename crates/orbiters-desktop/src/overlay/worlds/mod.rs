@@ -877,8 +877,8 @@ fn keep_an_eye_frame(steamvr: &vr::Client, n: u32) {
         self.hint_used |= small.is_some_and(|s| s.zoomed);
         // Across a menu it stays: the menu is drawn over it by sort order (Enzo's diagram: menu, 3D view, backdrop, game). It never fades for that, which made it vanish.
         if self.small_logged.due(std::time::Duration::from_secs(1)) && self.view.small() {
-            let hint = self.hint.as_ref().map_or("no hint".to_string(), |h| h.report());
-            let chip = self.hide_chip.as_ref().map_or("no X".to_string(), |c| c.report());
+            let hint = self.hint.as_ref().map_or("no hint".to_string(), |h| h.report()); // i18n: not shown (a line of the VR test log)
+            let chip = self.hide_chip.as_ref().map_or("no X".to_string(), |c| c.report()); // i18n: not shown (a line of the VR test log)
             super::vr_log::line(&format!("{} | {hint} | {chip} | menus up {} | hint used {}", self.view.report(overlay), self.menu_boxes.len(), self.hint_used)); // i18n: not shown (a log's line)
             // And three times a session, what the eye itself shows while it lies in a hole: what no render can say. Kept in the logs' folder of this computer only.
             if small.is_some_and(|s| s.docked) && self.eye_frames_kept < 3 {

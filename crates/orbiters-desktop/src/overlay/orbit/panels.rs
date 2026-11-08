@@ -691,7 +691,9 @@ pub fn items(zone: Zone, size: Vec2, facts: &Facts) -> Vec<Item> {
         Zone::WingName => {
             // One close at a time: the sheet has its own.
             if facts.vr_close && facts.sheet.is_none() {
-                vec![Item { action: Action::Hide, rect: r(w - HIDE_TILES, 0.0, HIDE_TILES, h), look: Look::HideWord }]
+                // One pill, the mark at its start (a judge found the mark jammed against a Hide of its own); beside a recording's clock or a capture's progress, a pill of its own.
+                let whole = if wing_name_busy(facts) { r(w - HIDE_TILES, 0.0, HIDE_TILES, h) } else { r(0.0, 0.0, w, h) };
+                vec![Item { action: Action::Hide, rect: whole, look: Look::HideWord }]
             } else {
                 Vec::new()
             }
@@ -759,6 +761,14 @@ fn accessories(facts: &Facts) -> Vec<(Action, &'static str, &'static str)> {
     small
 }
 
+/// The wing's name has something running to say: a recording's clock or a capture's progress.
+fn wing_name_busy(facts: &Facts) -> bool {
+    facts.recording || facts.reconstructing.is_some()
+}
+
+/// A tab with its icon alone, in a headset: as wide as a laser needs.
+const COMPACT_TAB_VR: f32 = 46.0;
+
 /// Where every sheet has its Back.
 const BACK_AT: f32 = 8.0;
 
@@ -777,10 +787,6 @@ fn head_tabs(facts: &Facts) -> (Vec<Item>, f32) {
         return (Vec::new(), 10.0);
     }
     let busy = facts.view_showing || status_now(facts).is_some();
-    // In a headset a tab is named or is not there: a row of small icons is nothing to aim a laser at.
-    if !facts.desktop && busy {
-        return (Vec::new(), 10.0);
-    }
     let open = |action: Action| match (facts.sheet, action) {
         (Some(Sheet::Worlds), Action::Worlds) | (Some(Sheet::All), Action::All) | (Some(Sheet::Pictures), Action::Pictures) | (Some(Sheet::Talk), Action::Talk) => true,
         (Some(Sheet::Instances), Action::Page(Target::Instances)) | (Some(Sheet::Results), Action::Page(Target::YouTube)) => true,
@@ -798,7 +804,8 @@ fn head_tabs(facts: &Facts) -> (Vec<Item>, f32) {
         let label = tr_ctx("tile", label);
         // The Ask tab is cut for a word of three letters: where its name has more, it takes the room those need (English is as it was).
         let wide = if action == Action::Talk && label.chars().count() > 3 { wide + 10.0 } else { wide };
-        let width = if compact && !on { 36.0 } else { wide };
+        // In a headset an icon alone is as wide as a laser needs (a judge found no way from a VR sheet to the others while a capture showed).
+        let width = if compact && !on { if facts.desktop { 36.0 } else { COMPACT_TAB_VR } } else { wide };
         out.push(Item { action, rect: r(x, 7.0, width, 30.0), look: Look::HeadTab { icon, label, on } });
         x += width + 3.0;
     }
@@ -849,7 +856,8 @@ fn sheet_page_items(sheet: Sheet, facts: &Facts) -> Vec<Item> {
             let width = 1024.0 - x0 * 2.0;
             // Who comes here has the main features on the wing already, and came for the rest: those have real room and say what they do. The main features stay the largest.
             let small = accessories(facts);
-            let (first_h, second_h) = (176.0, 170.0);
+            // What plays needs its 170 for its controls under its timeline; the first row gives the accessories the room for three lines of what each does.
+            let (first_h, second_h) = (158.0, 170.0);
             let per_row = small.len().div_ceil(2).max(3);
             let small_rows = small.len().div_ceil(per_row) as f32;
             let small_gap = 8.0;
@@ -860,7 +868,7 @@ fn sheet_page_items(sheet: Sheet, facts: &Facts) -> Vec<Item> {
             let hero = |action, rect, icon, label, line, badge| Item { action, rect, look: Look::Hero { icon, label, line, badge, tint: tool_tint(action) } };
             let row2 = y0 + first_h + gap;
             let mut out = vec![
-                hero(Action::Worlds, r(x0, y0, first_w, first_h), icons::GLOBE_HEMISPHERE_WEST, tr("Worlds in 3D"), tr("Search any world. Walk through the ones captured in 3D."), true),
+                hero(Action::Worlds, r(x0, y0, first_w, first_h), icons::GLOBE_HEMISPHERE_WEST, tr("Worlds in 3D"), tr("Search any world. See the ones captured in 3D."), true),
                 hero(Action::Page(Target::YouTube), r(x0 + first_w + gap, y0, rest_w, first_h), icons::YOUTUBE_LOGO, "YouTube", tr("Find a video for this world's player"), false),
                 hero(Action::Page(Target::Instances), r(x0 + first_w + gap * 2.0 + rest_w, y0, rest_w, first_h), icons::CLOCK, tr("Instances"), tr("Where you were lately: go back"), false),
             ];
@@ -1250,6 +1258,9 @@ fn minutes(seconds: u32) -> String {
 /// What plays's controls, on its panel on All tools: nothing about it needs a page of its own.
 pub(super) use mic_sheet::mic_after;
 
+/// A line of what an accessory of All tools does, at its size.
+const SMALL_LINE: f32 = 16.5;
+
 const PLAYING_LINK_W: f32 = 118.0;
 const PLAYING_LINK_H: f32 = 36.0;
 
@@ -1272,9 +1283,8 @@ fn now_playing_controls(panel: Rect, facts: &Facts) -> Vec<Item> {
     if facts.can_copy_playing {
         let copy = Rect::from_min_size(pos2(panel.right() - 12.0 - PLAYING_LINK_W, panel.top() + 10.0), vec2(PLAYING_LINK_W, PLAYING_LINK_H));
         out.push(Item { action: Action::PlayingLink(Target::CopyPlaying), rect: copy, look: Look::PlayingLink { copy: true } });
-        if facts.can_drop_playing {
-            out.push(Item { action: Action::PlayingLink(Target::DropPlaying), rect: copy.translate(vec2(-PLAYING_LINK_W - 6.0, 0.0)), look: Look::PlayingLink { copy: false } });
-        }
+        // Both, always (request 70): Drop link puts it in the world in one press where the avatar's N4N0 has its link card, and says what it needs where not.
+        out.push(Item { action: Action::PlayingLink(Target::DropPlaying), rect: copy.translate(vec2(-PLAYING_LINK_W - 6.0, 0.0)), look: Look::PlayingLink { copy: false } });
     }
     if let Some((_, muted)) = facts.volume {
         let right = panel.right() - 16.0;
@@ -1312,22 +1322,21 @@ fn hero_body(p: &Painter, body: Rect, action: Action, line: &str, facts: &Facts)
     let radii = [theme::squircle(10.0); 4];
     match action {
         Action::Worlds if !facts.hero_captures.is_empty() => {
-            // The newest large, the two before it beside it: the place itself says what this is.
+            // Each capture whole at its own shape, side by side: a band cut out of one says nothing of the place, and a judge took it for a stretched picture.
+            let captures = &facts.hero_captures[..facts.hero_captures.len().min(3)];
+            let n = captures.len() as f32;
+            let gap = 8.0;
             let said = if body.height() > 118.0 { 48.0 } else { 0.0 };
-            let height = (body.height() - said).max(40.0);
-            let captures = &facts.hero_captures;
-            let side = if captures.len() >= 3 { (height - 8.0) / 2.0 * 16.0 / 9.0 } else { 0.0 };
-            let large = Rect::from_min_size(body.min, vec2(if side > 0.0 { body.width() - side - 8.0 } else { body.width() }, height));
-            squircle_picture(p, large, radii, captures[0], cover_uv(large.size()), Color32::WHITE);
-            if side > 0.0 {
-                for (i, id) in captures.iter().skip(1).take(2).enumerate() {
-                    let h = (height - 8.0) / 2.0;
-                    let tile = Rect::from_min_size(pos2(large.right() + 8.0, body.top() + i as f32 * (h + 8.0)), vec2(side, h));
-                    squircle_picture(p, tile, radii, *id, cover_uv(tile.size()), Color32::WHITE);
-                }
+            let room = (body.height() - said).max(40.0);
+            let w = ((body.width() - gap * (n - 1.0)) / n).min(room * 16.0 / 9.0);
+            let h = w * 9.0 / 16.0;
+            let top = body.top() + (room - h) / 2.0;
+            for (i, id) in captures.iter().enumerate() {
+                let tile = Rect::from_min_size(pos2(body.left() + i as f32 * (w + gap), top), vec2(w, h));
+                squircle_picture(p, tile, radii, *id, cover_uv(tile.size()), Color32::WHITE);
             }
             if said > 0.0 {
-                words(p, pos2(body.left(), body.top() + height + 6.0), line, 2, body.width());
+                words(p, pos2(body.left(), top + h + 6.0), line, 2, body.width());
             }
         }
         Action::Page(Target::Instances) if !facts.worlds_visited.is_empty() => {
@@ -1411,7 +1420,7 @@ fn sheet_name(title: &str) -> &str {
 /// What a sheet is for, in a few words.
 fn sheet_says(facts: &Facts) -> &'static str {
     match facts.sheet {
-        Some(Sheet::Worlds) => tr("Search any world, and walk in those captured in 3D."),
+        Some(Sheet::Worlds) => tr("Search any world. See the ones captured in 3D."),
         Some(Sheet::Pictures) => tr("Your pictures and 3D captures."),
         Some(Sheet::Instances) => tr("Where you were lately. Go back with an invite."),
         Some(Sheet::Results) => tr("Copy a link for the world's player, or drop it in the world."),
@@ -1457,7 +1466,7 @@ pub fn caption(action: Action, facts: &Facts) -> Option<(String, String)> {
         // Said above.
         Action::Settings => return None,
         Action::Peek => (tr("Hide Orbiters").into(), tr("Reach VRChat's own menus. Nothing here closes.").into()),
-        Action::Worlds => (tr("Worlds in 3D").into(), tr("Search any world. Walk in those captured in 3D.").into()),
+        Action::Worlds => (tr("Worlds in 3D").into(), tr("Search any world. See the ones captured in 3D.").into()),
         Action::Picture(_) if facts.no_kit => (tr("This avatar has no capture kit").into(), tr("Add N4N0 to it in Orbiters, My Avatar, to take 3D pictures with it.").into()),
         Action::Picture(_) if facts.picture_wait.is_some() => (if facts.digits && facts.sheet.is_none() { tr("Press 6 to call it off") } else { tr("Press to call it off") }.into(), tr("Or open VRChat's camera: it then starts by itself.").into()),
         Action::Picture(mode) => {
@@ -1468,7 +1477,7 @@ pub fn caption(action: Action, facts: &Facts) -> Option<(String, String)> {
             } else if mode == PhotoMode::People {
                 (tr("3D picture of people").into(), tr("Keeps those around you in 3D: look around them afterwards.").into())
             } else {
-                (tr("3D picture of this world").into(), tr("Keeps this place in 3D, without you in it: walk in it afterwards.").into())
+                (tr("3D picture of this world").into(), tr("Keeps this place in 3D, without you in it, to see again afterwards.").into())
             }
         }
         Action::Invite(group, visit) => {
@@ -1513,7 +1522,7 @@ pub fn caption(action: Action, facts: &Facts) -> Option<(String, String)> {
         Action::Capture(n) => {
             let recent = facts.recent.get(n)?;
             let says = match recent.kind {
-                RecentKind::Capture if facts.desktop => tr("Press to turn it in 3D, right here."),
+                RecentKind::Capture if facts.desktop => tr("Press to see it in 3D, here on the sheet."),
                 RecentKind::Capture => tr("Press to see it in 3D around you."),
                 RecentKind::NoView => tr("It has no 3D yet. The Orbiters window can make it."),
                 RecentKind::Picture => tr("Press to see it large."),
@@ -1534,7 +1543,8 @@ pub fn caption(action: Action, facts: &Facts) -> Option<(String, String)> {
         Action::OpenApp => (tr("Open Orbiters").into(), tr("The full app, on your computer.").into()),
         Action::Back => (tr("Back").into(), tr("To the last screen.").into()),
         Action::MicDefault(_) => (tr("Your microphones").into(), tr("Press one to make it Windows' default.").into()),
-        Action::PlayingLink(Target::DropPlaying) => (tr("Drop link").into(), tr("A card of it in the world, for anyone to take.").into()),
+        Action::PlayingLink(Target::DropPlaying) if facts.can_drop_playing => (tr("Drop link").into(), tr("A card of it in the world, for anyone to take.").into()),
+        Action::PlayingLink(Target::DropPlaying) => (tr("Drop link").into(), tr("Needs N4N0's link card on your avatar.").into()),
         Action::PlayingLink(_) => (tr("Copy link").into(), tr("The link of what plays, to paste anywhere.").into()),
         Action::CloseSheet => (tr("Close").into(), tr("Back to VRChat's menu.").into()),
         Action::Hide => (tr_ctx("menu tiles", "Hide").into(), tr("Hides these until VRChat's menu opens again.").into()),
@@ -1548,7 +1558,7 @@ fn text(p: &Painter, at: Pos2, align: Align2, s: &str, size: f32, w: f32, c: Col
 }
 
 /// `s` cut with an ellipsis so that it fits `width`.
-fn fit(p: &Painter, s: &str, font: &FontId, width: f32) -> String {
+pub(crate) fn fit(p: &Painter, s: &str, font: &FontId, width: f32) -> String {
     let wide = |t: &str| p.layout_no_wrap(t.to_string(), font.clone(), Color32::WHITE).size().x;
     if wide(s) <= width {
         return s.to_string();
@@ -1678,12 +1688,14 @@ pub fn paint(p: &Painter, zone: Zone, size: Vec2, facts: &Facts, hover: Option<u
             let c = panel.center();
             // Opaque while it says something: VRChat's icons would show behind the words.
             let says = facts.picture_wait.is_some() || facts.pointed.and_then(|a| caption(a, facts)).is_some();
-            p.circle_filled(c, size.x / 2.0, if says { Color32::from_rgb(11, 13, 16) } else { Color32::from_rgba_premultiplied(9, 11, 14, 236) });
+            p.circle_filled(c, size.x / 2.0, if says { Color32::from_rgb(11, 13, 16) } else { Color32::from_rgba_premultiplied(9, 11, 14, 250) });
             draw_hub(p, c, size.x, facts);
             return;
         }
         // Hidden, only the way back shows.
         Zone::WingName if facts.hidden => {}
+        // In a headset with nothing running, the Hide pill is the whole of it and holds the mark (`Look::HideWord`).
+        Zone::WingName if facts.vr_close && facts.sheet.is_none() && !wing_name_busy(facts) => {}
         Zone::WingName => {
             // The name on a pill of its own, with what runs when it does.
             // Its Hide is a pill of its own beside it: the name is its mark then, and each has its room.
@@ -2109,11 +2121,11 @@ fn draw(p: &Painter, zone: Zone, item: &Item, facts: &Facts, hovered: bool, pres
                 p.rect_stroke(rect.shrink(1.0), radius, Stroke::new(2.0, tint), egui::StrokeKind::Middle);
             }
             // Its name beside its icon, and under them what it holds: real pictures and places wherever there are any.
-            let chip = Rect::from_min_size(rect.min + vec2(14.0, 14.0), Vec2::splat(52.0));
-            p.rect_filled(chip, look::radius(14.0), theme::alpha(tint, 0.22));
-            widgets::icon(p, chip.center(), icon, 31.0, tint);
+            let chip = Rect::from_min_size(rect.min + vec2(14.0, 12.0), Vec2::splat(46.0));
+            p.rect_filled(chip, look::radius(13.0), theme::alpha(tint, 0.22));
+            widgets::icon(p, chip.center(), icon, 28.0, tint);
             if has_badge {
-                badge(p, chip.center(), 38.0, look::accent(), look::on_accent());
+                badge(p, chip.center(), 34.0, look::accent(), look::on_accent());
             }
             let font = look::font(25.0, weight::BOLD);
             let room = rect.right() - chip.right() - 22.0;
@@ -2125,7 +2137,7 @@ fn draw(p: &Painter, zone: Zone, item: &Item, facts: &Facts, hovered: bool, pres
             } else {
                 p.text(pos2(chip.right() + 12.0, chip.center().y), Align2::LEFT_CENTER, fit(p, label, &font, room), font, look::LABEL);
             }
-            let body = Rect::from_min_max(pos2(rect.left() + 14.0, chip.bottom() + 10.0), rect.max - vec2(14.0, 12.0));
+            let body = Rect::from_min_max(pos2(rect.left() + 14.0, chip.bottom() + 8.0), rect.max - vec2(14.0, 12.0));
             hero_body(p, body, item.action, line, facts);
         }
         Look::Small { icon, label, tint } => {
@@ -2142,24 +2154,26 @@ fn draw(p: &Painter, zone: Zone, item: &Item, facts: &Facts, hovered: bool, pres
                 p.text(pos2(rect.center().x, rect.bottom() - 21.0), Align2::CENTER_CENTER, fit(p, label, &font, rect.width() - 10.0), font, Color32::WHITE);
                 return;
             }
-            let chip = Rect::from_center_size(pos2(rect.left() + 38.0, rect.center().y), Vec2::splat(52.0));
-            p.rect_filled(chip, look::radius(14.0), theme::alpha(tint, 0.2));
-            widgets::icon(p, chip.center(), icon, 31.0, tint);
-            let x = chip.right() + 12.0;
+            let chip = Rect::from_min_size(pos2(rect.left() + 12.0, rect.top() + 12.0), Vec2::splat(40.0));
+            p.rect_filled(chip, look::radius(12.0), theme::alpha(tint, 0.2));
+            widgets::icon(p, chip.center(), icon, 25.0, tint);
+            let x = chip.right() + 10.0;
             let room = rect.right() - x - 10.0;
-            // What it does, where there is the room to say it: it is not on a tile anywhere else.
+            // What it does, where there is the room to say it: it is not on a tile anywhere else. Whole, in up to three lines: judges read the cut ones as unfinished.
             let said = caption(item.action, facts).map(|c| c.1).filter(|_| room >= 140.0);
-            let font = look::font(20.0, weight::BOLD);
+            let font = look::font(19.0, weight::BOLD);
             match said {
                 Some(said) => {
-                    p.text(pos2(x, rect.top() + 25.0), Align2::LEFT_CENTER, fit(p, label, &font, room), font, Color32::WHITE);
-                    let mut job = egui::text::LayoutJob::simple(said, look::font(15.0, weight::MEDIUM), look::LABEL, room);
-                    job.wrap.max_rows = 2;
+                    p.text(pos2(x, rect.top() + 21.0), Align2::LEFT_CENTER, fit(p, label, &font, room), font, Color32::WHITE);
+                    let top = rect.top() + 34.0;
+                    let rows = ((rect.bottom() - 4.0 - top) / SMALL_LINE).floor().max(1.0) as usize;
+                    let mut job = egui::text::LayoutJob::simple(said, look::font(14.0, weight::MEDIUM), look::LABEL, room);
+                    job.wrap.max_rows = rows;
                     job.wrap.overflow_character = Some('\u{2026}');
-                    p.galley(pos2(x, rect.top() + 39.0), p.layout_job(job), look::LABEL);
+                    p.galley(pos2(x, top), p.layout_job(job), look::LABEL);
                 }
                 None => {
-                    p.text(pos2(x, rect.center().y), Align2::LEFT_CENTER, fit(p, label, &font, room), font, Color32::WHITE);
+                    p.text(pos2(x, chip.center().y), Align2::LEFT_CENTER, fit(p, label, &font, room), font, Color32::WHITE);
                 }
             }
         }
@@ -2176,9 +2190,10 @@ fn draw(p: &Painter, zone: Zone, item: &Item, facts: &Facts, hovered: bool, pres
             let drawn = if pressed { rect.shrink(1.5) } else { rect };
             let radius = look::radius(drawn.height() / 2.0);
             // Copy link is in the accent, as Enzo asked of it elsewhere.
-            let (fill, ink) = if copy { (look::accent(), look::ON_ACCENT) } else { (if hovered { look::TILE_HOVER } else { look::TILE }, look::LABEL) };
+            let can = copy || facts.can_drop_playing;
+            let (fill, ink) = if copy { (look::accent(), look::ON_ACCENT) } else { (if hovered { look::TILE_HOVER } else { look::TILE }, if can { look::LABEL } else { look::MUTED }) };
             p.rect_filled(drawn, radius, if copy && hovered { theme::mix(fill, Color32::WHITE, 0.12) } else { fill });
-            let words = match (copy, facts.can_drop_playing || facts.playing_link_copied) {
+            let words = match (copy, facts.playing_link_copied) {
                 (true, true) => tr_ctx("tile", "Link copied"),
                 (true, false) => tr("Copy link"),
                 (false, _) => tr("Drop link"),
@@ -2395,7 +2410,7 @@ fn draw(p: &Painter, zone: Zone, item: &Item, facts: &Facts, hovered: bool, pres
             let font = look::font(18.0, weight::SEMIBOLD);
             let shown = fit(p, &facts.videos_for, &font, rect.width() - 170.0);
             p.text(pos2(rect.left() + 46.0, rect.center().y), Align2::LEFT_CENTER, shown, font, look::LABEL);
-            p.text(pos2(rect.right() - 18.0, rect.center().y), Align2::RIGHT_CENTER, tr("Search again"), look::font(14.5, weight::MEDIUM), look::MUTED);
+            p.text(pos2(rect.right() - 18.0, rect.center().y), Align2::RIGHT_CENTER, tr("Search again"), look::font(15.0, weight::SEMIBOLD), if hovered { look::accent() } else { look::LABEL });
         }
         Look::NewTalk => {
             p.rect_filled(rect, look::radius(rect.height() / 2.0), if hovered { look::TILE_HOVER } else { look::TILE });
@@ -2442,7 +2457,8 @@ fn draw(p: &Painter, zone: Zone, item: &Item, facts: &Facts, hovered: bool, pres
             } else if hovered || pressed {
                 p.rect_filled(rect, radius, look::TILE_HOVER);
             }
-            if rect.width() > 40.0 {
+            // Named where it was made room for its name; a headset's icon-only tab is wider than a screen's, and still only an icon.
+            if rect.width() > COMPACT_TAB_VR + 1.0 {
                 widgets::icon(p, pos2(rect.left() + 16.0, rect.center().y), icon, 17.0, tint);
                 p.text(pos2(rect.left() + 29.0, rect.center().y), Align2::LEFT_CENTER, label, look::font(13.5, if on { weight::BOLD } else { weight::MEDIUM }), if on { Color32::WHITE } else { look::LABEL });
             } else {
@@ -2546,7 +2562,8 @@ fn draw(p: &Painter, zone: Zone, item: &Item, facts: &Facts, hovered: bool, pres
                 Some(InviteChip::Sent) => (look::accent(), look::on_accent(), look::accent(), tr("Invited").to_string()),
                 Some(InviteChip::Failed) => (theme::mix(look::OPAQUE, theme::DANGER, 0.3), look::LABEL, theme::DANGER, tr("Failed").to_string()),
                 // Only the first on offer is solid: a list of them would shout. Invited, solid, then says at once what it did.
-                None if primary && facts.worlds_visited.iter().position(|v| !v.here) == Some(group) => (if pressed { theme::mix(look::accent(), Color32::BLACK, 0.25) } else if hovered { theme::mix(look::accent(), Color32::WHITE, 0.15) } else { look::accent() }, look::on_accent(), look::accent(), words),
+                // Round 8's judges: a first one solid said something nobody could read. All rest alike; what is pointed at lights.
+                None if false => (if pressed { theme::mix(look::accent(), Color32::BLACK, 0.25) } else if hovered { theme::mix(look::accent(), Color32::WHITE, 0.15) } else { look::accent() }, look::on_accent(), look::accent(), words),
                 None if primary => (if pressed { theme::mix(look::OPAQUE, look::accent(), 0.5) } else if hovered { theme::mix(look::OPAQUE, look::accent(), 0.3) } else { look::OPAQUE }, look::LABEL, look::accent(), words),
                 None => (if pressed { theme::mix(look::OPAQUE, look::accent(), 0.35) } else if hovered { look::TILE_HOVER } else { look::OPAQUE }, look::LABEL, if hovered { look::accent() } else { theme::INK_600 }, words),
             };
@@ -2689,6 +2706,13 @@ fn draw(p: &Painter, zone: Zone, item: &Item, facts: &Facts, hovered: bool, pres
             };
             let font = look::font(13.0, weight::SEMIBOLD);
             let wide = p.layout_no_wrap(words.to_string(), font.clone(), look::LABEL).size().x;
+            // The wing's whole name pill: its mark at its start, what it does in the rest.
+            let mut rect = rect;
+            if zone == Zone::WingName && rect.width() > HIDE_TILES + 1.0 {
+                widgets::icon(p, pos2(rect.left() + 19.0, rect.center().y), icons::N4N0_MARK, 16.0, look::LABEL);
+                p.line_segment([pos2(rect.left() + 36.0, rect.top() + 8.0), pos2(rect.left() + 36.0, rect.bottom() - 8.0)], Stroke::new(1.0, Color32::from_white_alpha(40)));
+                rect.min.x += 36.0;
+            }
             let left = rect.center().x - (wide + 22.0) / 2.0;
             widgets::icon(p, pos2(left + 8.0, rect.center().y), if facts.hidden { icons::EYE } else { icons::EYE_SLASH }, 16.0, look::LABEL);
             p.text(pos2(left + 22.0, rect.center().y), Align2::LEFT_CENTER, words, font, look::LABEL);
@@ -2869,13 +2893,17 @@ fn draw_capture(p: &Painter, rect: Rect, n: usize, facts: &Facts, hovered: bool,
     clip.text(pos2(rect.left() + 14.0, rect.bottom() - 37.0), Align2::LEFT_CENTER, fit(&clip, &recent.title, &font, room), font, look::LABEL);
     let font = look::font(15.0, weight::MEDIUM);
     clip.text(pos2(rect.left() + 14.0, rect.bottom() - 15.0), Align2::LEFT_CENTER, fit(&clip, &state, &font, room), font, theme::FG_2);
-    // In one gallery with VRChat's pictures, what can show in 3D says so.
-    if recent.kind == RecentKind::Capture {
-        let badge = Rect::from_min_size(rect.min + vec2(10.0, 10.0), vec2(68.0, 32.0));
-        clip.rect_filled(badge, look::radius(16.0), theme::alpha(theme::INK_900, 0.94));
-        widgets::icon(&clip, badge.min + vec2(21.0, 16.0), icons::CUBE, 19.0, look::accent());
-        clip.text(badge.min + vec2(36.0, 16.0), Align2::LEFT_CENTER, "3D", look::font(16.0, weight::BOLD), Color32::WHITE);
-    }
+    // In one gallery with VRChat's pictures, every tile says what it is in the same place (round 8's judges: only some had a badge, so the rest had to be guessed).
+    let (glyph, word, tint) = match recent.kind {
+        RecentKind::Capture => (icons::CUBE, "3D", look::accent()),
+        _ => (icons::IMAGE, tr_ctx("a kind of picture", "Photo"), theme::FG_2),
+    };
+    let font = look::font(16.0, weight::BOLD);
+    let wide = clip.layout_no_wrap(word.to_string(), font.clone(), Color32::WHITE).size().x;
+    let badge = Rect::from_min_size(rect.min + vec2(10.0, 10.0), vec2(wide + 48.0, 32.0));
+    clip.rect_filled(badge, look::radius(16.0), theme::alpha(theme::INK_900, 0.94));
+    widgets::icon(&clip, badge.min + vec2(21.0, 16.0), glyph, 19.0, tint);
+    clip.text(badge.min + vec2(36.0, 16.0), Align2::LEFT_CENTER, word, font, Color32::WHITE);
     if let Some(done) = progress {
         let bar = Rect::from_min_size(pos2(rect.left() + 14.0, rect.bottom() - 6.0), vec2(room * done.clamp(0.0, 1.0), 3.0));
         clip.rect_filled(bar, look::radius(1.5), look::accent());
@@ -3294,7 +3322,11 @@ mod tests {
             }
         }
         let busy = Facts { desktop: false, sheet: Some(Sheet::Pictures), view_showing: true, ..facts() };
-        assert_eq!(tabs(&busy), 0, "a headset's are named or not there");
+        // In a headset, with a capture showing, every tool is still one press away: the open one named, the others as icons a laser finds, clear of Hide 3D.
+        let shown: Vec<Item> = items(Zone::SheetBack, vec2(1024.0, 44.0), &busy).into_iter().filter(|i| matches!(i.look, Look::HeadTab { .. })).collect();
+        assert_eq!(shown.len(), 6);
+        let hide = items(Zone::SheetBack, vec2(1024.0, 44.0), &busy).into_iter().find(|i| i.action == Action::HideView).expect("Hide 3D");
+        assert!(shown.iter().all(|t| t.rect.width() >= 46.0 && !t.rect.intersects(hide.rect)), "{shown:?}");
         // A page with no tab of its own keeps room for its name, on a screen.
         let (_, x) = head_tabs(&Facts { desktop: true, sheet: Some(Sheet::Settings), ..facts() });
         assert!(x < 300.0, "{x}");

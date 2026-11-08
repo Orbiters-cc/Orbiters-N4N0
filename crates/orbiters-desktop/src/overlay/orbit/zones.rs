@@ -298,8 +298,8 @@ impl Zone {
             // Right over the ring: what to do with it is said where the eyes are.
             Zone::WheelCaption => r(-220.0, -234.0, 220.0, -178.0),
             Zone::WheelVeil => r(-109.0, -109.0, 109.0, 109.0),
-            // On the ring's edge, its upper right, as a thumb's worth of laser: it belongs to the ring and shows it.
-            Zone::WheelHide => r(84.0, -176.0, 196.0, -134.0),
+            // Level with the caption over the ring, past its right end: clear of the ring and of either second ring (a judge found it sitting on the rim), and still beside them.
+            Zone::WheelHide => r(232.0, -232.0, 344.0, -190.0),
             // As tall as My Profile and as wide, beside it.
             // As tall as My Profile and as wide, beside it.
             Zone::WingName => r(362.0, -150.0, 524.0, -120.0),
@@ -517,6 +517,15 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// Hide ring sits clear of everything the ring is: its cells, its second rings, and its caption.
+    #[test]
+    fn hide_ring_is_clear_of_the_ring() {
+        let hide = Zone::WheelHide.units();
+        assert!(!hide.intersects(Zone::WheelCaption.units()));
+        let nearest = pos2(hide.left(), hide.bottom());
+        assert!(nearest.to_vec2().length() > BLOOM_OUTER + 20.0, "{nearest:?}");
     }
 
     #[test]

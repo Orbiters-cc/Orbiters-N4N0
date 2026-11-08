@@ -246,7 +246,7 @@ impl Hints {
             // Now the ring takes the mouse: it said so, it says so.
             Some(Around::Wheel) if pointing && self.pointed <= Self::FULL => Some((mark("Click a tool"), "")),
             Some(Around::Wheel) if pointing => None,
-            Some(Around::Wheel) if self.pointed < Self::FULL => Some((mark("Hold Left Alt, then click a tool"), mark("Or press its number"))),
+            Some(Around::Wheel) if self.pointed < Self::FULL => Some((mark("Hold Left Alt, then click a tool"), mark("Alt also shows each one's key, 1 to 6"))),
             Some(Around::Wheel) => Some((mark("Left Alt to click, or a number"), "")),
             // Says what this is, and that it is not VRChat's.
             Some(Around::QuickMenu) if self.openings <= Self::FULL => Some((mark("Your tools"), mark("Worlds in 3D, videos, instances and 3D pictures."))),

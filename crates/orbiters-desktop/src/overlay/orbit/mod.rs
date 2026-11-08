@@ -286,13 +286,19 @@ const LIST_AGAIN: Duration = Duration::from_secs(5);
 const ALL_TOOLS_CHOOSES_FROM: usize = 16;
 
 /// How bright a picture is, 0 to 1, by a sample of it.
-fn lightness(image: &ColorImage) -> f32 {
-    let (mut sum, mut n) = (0.0f32, 0u32);
+/// How well a picture shows a place, 0 to 1: lit enough to be seen, and not one loud colour. The brightest alone chose a capture all orange, which read as a glitch.
+fn shows_well(image: &ColorImage) -> f32 {
+    let (mut light, mut colour, mut n) = (0.0f32, 0.0f32, 0u32);
     for pixel in image.pixels.iter().step_by(97) {
-        sum += 0.2126 * pixel.r() as f32 + 0.7152 * pixel.g() as f32 + 0.0722 * pixel.b() as f32;
+        let (r, g, b) = (pixel.r() as f32 / 255.0, pixel.g() as f32 / 255.0, pixel.b() as f32 / 255.0);
+        light += 0.2126 * r + 0.7152 * g + 0.0722 * b;
+        let (high, low) = (r.max(g).max(b), r.min(g).min(b));
+        colour += if high > 0.02 { (high - low) / high } else { 0.0 };
         n += 1;
     }
-    sum / n.max(1) as f32 / 255.0
+    let n = n.max(1) as f32;
+    let (light, colour) = (light / n, colour / n);
+    (1.0 - (light - 0.42).abs() * 1.8 - (colour - 0.45).max(0.0) * 1.6).max(0.0)
 }
 
 struct LoadedRecent {
@@ -509,11 +515,11 @@ impl Recents {
         self.loaded.iter().enumerate().filter(|(_, r)| r.has_view).map(|(i, _)| i).take(ALL_TOOLS_CHOOSES_FROM).collect()
     }
 
-    /// What All tools holds: three captures of different worlds, the brightest of those read so far (the newest, until then): the largest feature must not hang on the last dark
+    /// What All tools holds: three captures of different worlds, those of them read so far that show their place best (the newest, until then): the largest feature must not hang on the last dark
     /// world someone visited. And the newest picture of VRChat's (of anything, if there is none).
     fn newest(&self) -> (Vec<usize>, Option<usize>) {
         let candidates = self.candidates();
-        let mut read: Vec<(usize, f32)> = candidates.iter().filter_map(|i| self.loaded[*i].image.as_ref().map(|image| (*i, lightness(image)))).collect();
+        let mut read: Vec<(usize, f32)> = candidates.iter().filter_map(|i| self.loaded[*i].image.as_ref().map(|image| (*i, shows_well(image)))).collect();
         read.sort_by(|a, b| b.1.total_cmp(&a.1));
         let mut chosen: Vec<usize> = Vec::new();
         for (i, _) in read {
@@ -1298,6 +1304,8 @@ impl Panels {
             (None, Some(stage)) => Some((tr("Getting it ready").to_string(), stage.clone())),
             (None, None) => None,
         };
+        // What the view says goes to the page first: the back's hole is the page's, as of this status, or it came a turn after the page's.
+        let mut asked = self.stage.worlds.as_mut().map_or_else(Vec::new, |worlds| worlds.relay_to(status.clone()));
         // The sheet's back has the same hole as the page on it: page units to its own, the page lying 52 under its top.
         let hole = self.stage.worlds.as_ref().filter(|_| self.facts.sheet == Some(Sheet::Worlds)).and_then(|w| w.small_hole());
         let hole = hole.map(|h| egui::Rect::from_min_max(pos2(h.min.x * 0.6875, h.min.y * 0.6875 + panels::SHEET_HEAD), pos2(h.max.x * 0.6875, h.max.y * 0.6875 + panels::SHEET_HEAD)));
@@ -1310,7 +1318,6 @@ impl Panels {
                 panel.dirty = true;
             }
         }
-        let mut asked = self.stage.worlds.as_mut().map_or_else(Vec::new, |worlds| worlds.relay_to(status));
         asked.append(&mut self.local_asked);
         asked
     }
@@ -1333,6 +1340,25 @@ impl Panels {
             back_hole.and_then(|h| sample(back, h.center())),
             back_hole.and_then(|h| sample(back, pos2(h.center().x, h.max.y + 8.0))),
         ]
+    }
+
+    /// How solid the sheet's page and its back are across their holes, on a grid just inside each edge: all of a hole must be clear, not only its middle.
+    #[cfg(test)]
+    fn hole_alphas_across(&self) -> (Vec<Option<u8>>, Vec<Option<u8>>) {
+        let sample = |panel: Option<&Panel>, at: Pos2| -> Option<u8> {
+            let panel = panel?;
+            let zoom = panel.px[0] as f32 / panel.logical.x;
+            panel.pixels().get(((at.y * zoom) as usize * panel.px[0] as usize + (at.x * zoom) as usize) * 4 + 3).copied()
+        };
+        let grid = |hole: egui::Rect| -> Vec<Pos2> {
+            let inner = hole.shrink(10.0);
+            (0..5).flat_map(|i| (0..3).map(move |j| pos2(inner.left() + inner.width() * i as f32 / 4.0, inner.top() + inner.height() * j as f32 / 2.0))).collect()
+        };
+        let page = self.takeover.as_ref();
+        let back = self.list.iter().find(|p| p.zone == Zone::SheetBack);
+        let on_page = self.stage.worlds.as_ref().and_then(|w| w.small_hole()).map_or_else(Vec::new, |h| grid(h).into_iter().map(|at| sample(page, at)).collect());
+        let on_back = self.facts.sheet_hole.map_or_else(Vec::new, |h| grid(h).into_iter().map(|at| sample(back, at)).collect());
+        (on_page, on_back)
     }
 
     pub(in crate::overlay) fn hole_report(&self) -> String {
@@ -1658,7 +1684,8 @@ impl Panels {
             n4n0_mic: self.facts.n4n0_mic.clone(),
             can_states: menu.states_ready,
             can_copy_playing: !layout::target_state(menu, Target::CopyPlaying).hidden,
-            can_drop_playing: !layout::target_state(menu, Target::DropPlaying).hidden,
+            // Where a card can be dropped at all: Drop link then does it in one press, copied or not.
+            can_drop_playing: menu.can_drop,
             playing_link_copied: menu.media.as_ref().and_then(|m| m.video.as_deref()).is_some_and(|v| menu.copied.as_deref() == Some(v)),
             can_light: menu.light.is_some(),
             vr_close: self.sharp > 1.0,
@@ -2121,6 +2148,12 @@ impl Panels {
             // By the menu's own press, so it does here what it does on N4N0's page: that says so, and offers Drop once it was copied.
             Action::PlayingLink(target) => {
                 let host = &mut self.stage.host;
+                // Drop link is beside Copy link on All tools: it drops in one press, as the menu's own Drop does once copied (without touching the clipboard).
+                if target == Target::DropPlaying {
+                    if let Some(video) = host.menu.media.as_ref().and_then(|m| m.video.clone()) {
+                        host.menu.copied = Some(video);
+                    }
+                }
                 let effects = host.press(target);
                 host.effects(effects, snap, &self.backend);
                 if let Some(panel) = self.takeover.as_mut() {

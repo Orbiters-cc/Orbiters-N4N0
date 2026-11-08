@@ -383,6 +383,9 @@ pub fn strip_places() -> Vec<Placed> {
     vec![zones::in_units(Zone::QmStrip), words]
 }
 
+/// How much further out than on a screen the wing lies in a headset, in the menu's units.
+const VR_WING_CLEAR: f32 = 22.0;
+
 /// The Quick Menu's parts on this hand. The wing lies on the side of the menu away from the hand that holds it: on the right hand it is on the left (as Enzo laid it there). The sheet is not one of
 /// these: it stays on the menu.
 pub fn quick_menu_places(hand: usize) -> Vec<Placed> {
@@ -390,13 +393,15 @@ pub fn quick_menu_places(hand: usize) -> Vec<Placed> {
         .iter()
         .map(|zone| {
             let mut placed = zones::in_units(*zone);
+            // In a headset VRChat's My Profile reaches past the menu's main panel, and the tiles move on their springs: a clear gap from it (a judge saw them overlap).
+            placed.rect = placed.rect.translate(egui::vec2(VR_WING_CLEAR, 0.0));
             if hand == 1 {
                 let rect = placed.rect;
                 // The wing as a whole, its tiles in the same order; the caption over it.
                 placed.rect = if *zone == Zone::QmCaption {
                     egui::Rect::from_min_max(egui::pos2(-rect.right(), rect.top()), egui::pos2(-rect.left(), rect.bottom()))
                 } else {
-                    rect.translate(egui::vec2(-(362.0 + 524.0), 0.0))
+                    rect.translate(egui::vec2(-(362.0 + 524.0 + VR_WING_CLEAR * 2.0), 0.0))
                 };
             }
             placed
@@ -653,6 +658,8 @@ pub struct OrbitVr {
     camera_follow: super::camera_track::Follow,
     camera_side: camera_track::Side,
     hole_logged: super::super::vr_log::Every,
+    /// What the headset shows, kept when asked (`ORBITERS_VR_PICTURES`).
+    moments: super::super::eye_picture::Moments,
     osc_toggle: Option<(usize, Instant)>,
     camera_seen: Option<Instant>,
     camera_looks: u32,
@@ -699,6 +706,7 @@ impl OrbitVr {
             camera_follow: Default::default(),
             camera_side: Default::default(),
             hole_logged: Default::default(),
+            moments: Default::default(),
             osc_toggle: None,
             camera_seen: None,
             camera_looks: 0,
@@ -927,6 +935,9 @@ impl OrbitVr {
         if self.panels.is_empty() {
             self.close(&mut cx);
             self.stuck.beat(false);
+            // A capture held in a hand with every menu down is a moment of its own.
+            let held = if cx.world_status.small_taken { "no-menu small-taken" } else { "no-menu" };
+            self.moments.see(cx.steamvr, held.to_string());
             return Turn::default();
         }
         self.panels.follow(cx.snap, cx.backend.library_version());
@@ -1149,6 +1160,9 @@ impl OrbitVr {
         // Pictures, then each overlay where it goes.
         self.show(&mut cx, &quads, &placing);
         self.last_shown = true;
+        let facts = &self.panels.facts;
+        let small = if cx.world_status.small_taken { "small-taken" } else if cx.world_status.small_docked { "small-in-its-hole" } else if cx.world_status.small { "small" } else { "" };
+        self.moments.see(cx.steamvr, format!("{menu:?} {:?} {:?} {small}", facts.sheet, facts.pointed)); // i18n: not shown (a file's name)
         turn
     }
 

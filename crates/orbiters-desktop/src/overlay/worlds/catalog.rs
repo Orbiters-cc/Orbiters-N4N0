@@ -670,8 +670,19 @@ impl Capture {
     }
 
     /// The same capture to show small, around what [`Capture::small_frame`] says, in order of distance across the ground from its middle: what shows at any zoom is a round of the world seen from
-    /// above, and all of what is in that round, from its floor to its top (Enzo: "show everything"). Nothing is left out for its height, its size or for lying apart from the rest.
+    /// above, and all of what is in that round, from its floor to its top (Enzo: "show everything"). Nothing is left out for its height, its size or for lying apart from the rest alone.
+    ///
+    /// Only its floaters go ([`super::floaters`]): faint large splats and round blobs in nearly empty air, the haze its training left, which small shows as a cloud
+    /// over a room and fringes under its floor. They are told by what they are and what is around them, never by where they are: one goes only when the splats
+    /// around it, at its own size, cover little of a plane through it, which no surface allows however dark, blurred or high it is. Roofs, walls, floors, railings
+    /// and figures keep every splat, and a small or nearly opaque splat never goes.
     pub fn around_subject(&self) -> Self {
+        let floating = super::floaters::floating(&self.gaussians);
+        self.small_keeping(&floating.iter().map(|f| !f).collect::<Vec<_>>())
+    }
+
+    /// [`Capture::around_subject`] with the splats `keep` says (by index), framed on all of them.
+    pub fn small_keeping(&self, keep: &[bool]) -> Self {
         let frame = self.small_frame();
         let forward = [self.view.target[0] - self.view.position[0], self.view.target[1] - self.view.position[1], self.view.target[2] - self.view.position[2]];
         let flip = |p: V3| [p[0], p[1], -p[2]];
@@ -681,7 +692,7 @@ impl Capture {
         let largest = |i: usize| g.log_scales[i].iter().copied().fold(f32::MIN, f32::max).exp();
         // How far it reaches, its size counted: at any zoom what lies at the rim is what stays inside it.
         let across = |i: usize| (g.means[i][0] - frame.middle[0]).hypot(g.means[i][2] - frame.middle[2]) + largest(i) * 1.5;
-        let kept: Vec<usize> = (0..g.len()).filter(|&i| g.is_finite(i)).collect();
+        let kept: Vec<usize> = (0..g.len()).filter(|&i| g.is_finite(i) && keep[i]).collect();
         let mut order: Vec<(f32, usize)> = kept.into_iter().map(|i| (across(i), i)).collect();
         order.sort_by(|a, b| a.0.total_cmp(&b.0));
         let mut sorted = Gaussians::default();
@@ -840,7 +851,8 @@ mod tests {
         "recent":[{"by":"Kana","text":"The mirror room is perfect for photos.","at":"2026-10-29T21:04:00Z"},{"text":"no author"},{"by":"x"}]},
         "wrld_dawn":"not an object"}}"#;
 
-    /// Enzo: "the 3D small view cut out the upper part too, show everything", and the floor is the world's. Nothing goes for its height, its size or for lying apart.
+    /// Enzo: "the 3D small view cut out the upper part too, show everything", and the floor is the world's. Nothing goes for its height, its size or for lying apart:
+    /// none of this is haze (only floaters go, see `floaters`), not even a small opaque fragment alone in the air.
     #[test]
     fn a_small_capture_keeps_all_of_the_world() {
         let mut closed = scene(Some(2.8));

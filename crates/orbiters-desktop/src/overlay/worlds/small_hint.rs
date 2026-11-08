@@ -13,8 +13,8 @@ use super::super::orbit::panels::look as orbit_look;
 use orbiters_ui::{icons, widgets};
 use std::time::Instant;
 
-pub const PX: [u32; 2] = [448, 256];
-pub const WIDTH_M: f32 = 0.28;
+pub const PX: [u32; 2] = [560, 256];
+pub const WIDTH_M: f32 = 0.35;
 /// How high above what it speaks of it floats.
 const ABOVE_M: f32 = 0.06;
 const FRAME_S: f32 = 1.0 / 45.0;
@@ -25,7 +25,9 @@ const STICK_FRAME_S: f32 = 1.0 / 36.0;
 /// Where it stands against the words' middle: in the part of their page left for it.
 /// How far round it someone may go before it turns to follow them, in radians.
 const STICK_TURNS_BY: f32 = 0.7;
-const STICK_AT: [f32; 2] = [-(WIDTH_M - stick3d::WIDTH_M) / 2.0 + 0.004, -0.012];
+pub const STICK_AT: [f32; 2] = [-WIDTH_M / 2.0 + STICK_COLUMN_PX / PX[0] as f32 * WIDTH_M / 2.0, -0.026];
+/// The part of the page the stick stands in, at its left, its name under it.
+const STICK_COLUMN_PX: f32 = 236.0;
 
 /// What it says.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -75,12 +77,17 @@ pub fn paint(p: &Painter, stage: Stage, seconds: f32) {
             // The stick itself is a thing in the room beside these ([`super::stick3d`]).
             let push = stick3d::push_at(seconds);
             let which = if hand == 0 { tr("Left stick") } else { tr("Right stick") };
-            edged_text(p, pos2(104.0, 28.0), Align2::CENTER_CENTER, which, theme::font(19.0, weight::SEMIBOLD), theme::FG);
+            // Its name over the stick, as large as what it does (judges could hardly read it at 19): under it, its housing lay over it.
+            edged_text(p, pos2(STICK_COLUMN_PX / 2.0, 22.0), Align2::CENTER_CENTER, which, theme::font(25.0, weight::BOLD), Color32::WHITE);
             let up = ((push - 0.2) / 0.8).clamp(0.0, 1.0);
             let down = ((-push - 0.2) / 0.8).clamp(0.0, 1.0);
-            words(p, pos2(208.0, 26.0), icons::CARET_UP, tr("Push up"), tr("to zoom in"), up);
-            words(p, pos2(208.0, 126.0), icons::CARET_DOWN, tr("Pull down"), tr("to zoom out"), down);
-            edged_text(p, pos2(208.0, 214.0), Align2::LEFT_CENTER, tr("Other stick: move around"), theme::font(19.0, weight::SEMIBOLD), theme::FG);
+            words(p, pos2(STICK_COLUMN_PX + 4.0, 20.0), icons::CARET_UP, tr("Push up"), tr("to zoom in"), up);
+            words(p, pos2(STICK_COLUMN_PX + 4.0, 104.0), icons::CARET_DOWN, tr("Pull down"), tr("to zoom out"), down);
+            edged_icon(p, pos2(STICK_COLUMN_PX + 20.0, 214.0), icons::ARROWS_OUT, 26.0, theme::FG);
+            let room = PX[0] as f32 - STICK_COLUMN_PX - 50.0;
+            let font = theme::font(22.0, weight::SEMIBOLD);
+            let said = super::super::orbit::panels::fit(p, tr("Other stick: move around"), &font, room);
+            edged_text(p, pos2(STICK_COLUMN_PX + 46.0, 214.0), Align2::LEFT_CENTER, &said, font, theme::FG);
         }
         Stage::Grip { near } => {
             let card = Rect::from_center_size(page.center() + vec2(0.0, 30.0), vec2(PX[0] as f32 - 4.0, 140.0));
@@ -119,6 +126,11 @@ pub struct HideChip {
 }
 
 impl HideChip {
+    /// For `vr-test.log`.
+    pub fn report(&self) -> String {
+        format!("X {:?}", self.shown) // i18n: not shown (a log's line)
+    }
+
     pub fn new(overlay: &vr::Overlay, key: &str) -> anyhow::Result<Self> {
         let handle = overlay.create(&format!("{key}.small-hide"), "Hide a small 3D view").map_err(|c| anyhow::anyhow!("the small view's Hide: {c:?}"))?; // i18n: not shown (the overlay's name in SteamVR)
         let _ = overlay.set_width_in_meters(handle, CHIP_WIDTH_M);
@@ -284,6 +296,11 @@ impl SmallHint {
     pub fn destroy(&self, overlay: &vr::Overlay) {
         let _ = overlay.destroy(self.handle);
         let _ = overlay.destroy(self.stick);
+    }
+
+    /// For `vr-test.log`.
+    pub fn report(&self) -> String {
+        format!("hint {:?} stick shown {}", self.shown, self.stick_shown) // i18n: not shown (a log's line)
     }
 }
 

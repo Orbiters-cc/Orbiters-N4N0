@@ -13,13 +13,19 @@ struct Person {
     panels: Panels,
     snap: Arc<Snapshot>,
     around: Option<Around>,
+    /// One person at a time: the look chosen (modern or retro) is the whole process's, as the app has one, and a retro test on another thread laid All tools out
+    /// under a modern one's press, which then missed its tile (two of these failed so beside the hole's retro runs).
+    _alone: std::sync::MutexGuard<'static, ()>,
 }
+
+static ONE_AT_A_TIME: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 impl Person {
     fn new() -> Self {
+        let alone = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
         let panels = Panels::new(Arc::new(crate::screenshot::Still), 2.0, true);
         let snap = Arc::new(crate::screenshot::idle_snapshot(&Settings::default(), &[]));
-        Self { panels, snap, around: None }
+        Self { panels, snap, around: None, _alone: alone }
     }
 
     /// One turn of the overlay's loop, as `vr.rs` takes it.
@@ -88,7 +94,13 @@ fn saved_looks_with_real_looks_answers() {
         println!("saved looks {look:?}: open in {:?}", began.elapsed());
         assert_eq!(person.panels.facts.sheet, Some(Sheet::Menu));
         assert_eq!(person.panels.stage.host.menu.page, orbiters_n4n0_core::menu::Page::States);
-        // At rest it paints nothing, or nothing else would get a turn.
+        // At rest it paints nothing, or nothing else would get a turn. At rest is once the press's pop is over: it runs on the clock for `POP` (700 ms), and 43 turns
+        // took less than that on a fast run, which then still painted it (dev.21's test run failed here once).
+        let waited = Instant::now();
+        while person.panels.stage.host.menu.popping().is_some() {
+            assert!(waited.elapsed() < orbiters_n4n0_core::menu::POP * 3, "{look:?}: the pop never ends");
+            std::thread::sleep(Duration::from_millis(5));
+        }
         person.turns(40);
         let mut painted = 0;
         for _ in 0..10 {
@@ -240,7 +252,9 @@ fn the_stick_scrolls_what_is_on_the_sheet() {
 #[test]
 fn the_hole_is_clear_in_what_is_submitted() {
     use crate::overlay::worlds::panel::Status;
-    for retro in [false, true] {
+    // At rest, and with its side panel still on its way in (a capture shows docked at once, as a world is pressed): in the same turn the hole opens, all of it
+    // is clear on the page and on its back. dev.21's run once found the page still solid there: the page waited for its own 22 ms while the back did not.
+    for (retro, sliding) in [(false, false), (true, false), (false, true), (true, true)] {
         let mut person = Person::new();
         let mut snap = (*person.snap).clone();
         if retro {
@@ -251,17 +265,30 @@ fn the_hole_is_clear_in_what_is_submitted() {
         person.turns(3);
         person.press(Action::Worlds);
         person.turns(2);
+        let worlds = person.panels.stage.worlds.as_mut().unwrap();
+        if sliding {
+            worlds.slide_world_in_for_test(7);
+        } else {
+            worlds.show_world_for_test(7);
+        }
+        // Painted just now, without its hole: the next paint is within the page's own 22 ms, whatever the machine's speed.
+        person.turn();
         let docked = Status { headset: true, small: true, small_docked: true, shown: true, current: Some(7), ..Default::default() };
-        person.panels.stage.worlds.as_mut().unwrap().show_world_for_test(7);
-        for _ in 0..4 {
+        let _ = person.panels.world_relay(docked.clone());
+        person.turn();
+        let [page_middle, page_outside, back_middle, back_outside] = person.panels.hole_alphas();
+        let (page, back) = person.panels.hole_alphas_across();
+        println!("hole, retro {retro} sliding {sliding}: page {page_middle:?} outside {page_outside:?}, back {back_middle:?} outside {back_outside:?}; across {page:?} {back:?}");
+        assert!(!page.is_empty() && page.iter().all(|a| *a == Some(0)), "the page, retro {retro} sliding {sliding}: {page:?}");
+        assert!(!back.is_empty() && back.iter().all(|a| *a == Some(0)), "its back, retro {retro} sliding {sliding}: {back:?}");
+        assert!(page_outside.is_some_and(|a| a > 200), "and solid around it: {page_outside:?}");
+        assert!(back_outside.is_some_and(|a| a > 200), "{back_outside:?}");
+        // And it stays so, turn after turn.
+        for _ in 0..6 {
             let _ = person.panels.world_relay(docked.clone());
             person.turn();
         }
-        let [page_middle, page_outside, back_middle, back_outside] = person.panels.hole_alphas();
-        println!("hole, retro {retro}: page {page_middle:?} outside {page_outside:?}, back {back_middle:?} outside {back_outside:?}");
-        assert_eq!(page_middle, Some(0), "the page, retro {retro}");
-        assert_eq!(back_middle, Some(0), "its back, retro {retro}");
-        assert!(page_outside.is_some_and(|a| a > 200), "and solid around it: {page_outside:?}");
-        assert!(back_outside.is_some_and(|a| a > 200), "{back_outside:?}");
+        let (page, back) = person.panels.hole_alphas_across();
+        assert!(page.iter().chain(&back).all(|a| *a == Some(0)), "later, retro {retro} sliding {sliding}: {page:?} {back:?}");
     }
 }

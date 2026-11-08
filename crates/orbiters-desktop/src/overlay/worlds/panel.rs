@@ -468,7 +468,7 @@ pub struct Panel {
     /// Whether things move, or are simply there (Reduce motion).
     pub moves: bool,
     /// When the side panel last started to come or go.
-    side_at: f64,
+    pub(super) side_at: f64,
     /// A row and how many in it, as the list last measured, and for what.
     list_step: std::cell::Cell<(f32, usize)>,
     list_headset: std::cell::Cell<bool>,
@@ -1683,7 +1683,9 @@ impl Panel {
                 self.browse(p, d, &targets, time, 1.0);
                 // It comes out beside the list, which makes it room: the page changes its layout, and no other page comes (Enzo).
                 let out = self.side_out(time);
-                if out >= 0.999 && (out - 1.0).abs() < 0.001 {
+                // Where a capture shows through it, it stands where its hole is: drawn on its way, moved and see-through, its frame round the hole covered
+                // part of the capture lying there for most of a second (Enzo: "the part that should be see through is glitchy").
+                if (out >= 0.999 && (out - 1.0).abs() < 0.001) || self.hole(d.status).is_some() {
                     self.side_panel(p, d, time, &targets);
                 } else {
                     slid(p, vec2((1.0 - out) * 70.0, 0.0), out, |there| self.side_panel(there, d, time, &targets));
@@ -1904,7 +1906,7 @@ impl Panel {
             self.empty(p, d, shown, state(Target::Retry));
         } else if self.few_captures(d) {
             // Few worlds have a capture yet: the free space says what these are, and where the others are.
-            text(p, pos2(512.0, 424.0), Align2::CENTER_CENTER, orbit_look::txt(tr("Worlds people captured in 3D: open one to walk in it"), 19.0).weight(weight::MEDIUM).color(fade(theme::FG, shown)));
+            text(p, pos2(512.0, 424.0), Align2::CENTER_CENTER, orbit_look::txt(tr("Worlds people captured in 3D: open one to see it in 3D"), 19.0).weight(weight::MEDIUM).color(fade(theme::FG, shown)));
             text(p, pos2(512.0, 456.0), Align2::CENTER_CENTER, orbit_look::txt(tr("Few have one yet. Search any world above, or look through these"), 16.0).color(fade(theme::FG_3, shown)));
         }
     }
@@ -2024,12 +2026,12 @@ impl Panel {
                 text_cut(p, pos2(hero.min.x + 16.0, foot.center().y), hero.width() - 32.0, orbit_look::txt(line, 15.0).color(fade(theme::FG_2, rest)));
             }
         }
-        // Its way out, on its edge.
+        // Its way out, on its edge: it slides away to the right, so it says so. An X here, just under the sheet's own, was one close too many (a judge's).
         if !vr {
             let (h, pr) = state(Target::CloseSide);
             let tab = if pr { SIDE_CLOSE.shrink(1.0) } else { SIDE_CLOSE };
             p.circle_filled(tab.center(), tab.width() / 2.0, if h { theme::black(0.92) } else { theme::black(0.72) });
-            widgets::icon(p, tab.center(), icons::X, 20.0, theme::FG);
+            widgets::icon(p, tab.center(), icons::CARET_RIGHT, 22.0, theme::FG);
         }
         // Its name, as long as it is; who made it.
         let (x, width) = if vr { (VR_LEFT, SIDE_RIGHT - VR_LEFT) } else { (SIDE_LEFT, SIDE_RIGHT - SIDE_LEFT) };

@@ -6,9 +6,9 @@ use super::stereo::{self, V3};
 use egui::Color32;
 
 /// One eye's picture.
-pub const EYE_PX: [u32; 2] = [240, 264];
+pub const EYE_PX: [u32; 2] = [288, 300];
 /// How large it is in the room.
-pub const WIDTH_M: f32 = 0.2;
+pub const WIDTH_M: f32 = 0.24;
 pub const HEIGHT_M: f32 = WIDTH_M * EYE_PX[1] as f32 / EYE_PX[0] as f32;
 
 /// One push up and pull down, in seconds.
@@ -50,8 +50,8 @@ fn leaned(p: V3) -> V3 {
     [p[0], p[1] * c - p[2] * s, p[1] * s + p[2] * c]
 }
 
-/// How much larger than a real stick it is shown, to be seen at arm's length.
-const LARGER: f32 = 1.45;
+/// How much larger than a real stick it is shown, to be seen at arm's length: judges found it the least legible thing beside a capture at 1.45.
+const LARGER: f32 = 2.0;
 
 fn parts(push: f32, accent: [f32; 3]) -> Vec<Part> {
     parts_of(push, accent)
@@ -61,8 +61,8 @@ fn parts(push: f32, accent: [f32; 3]) -> Vec<Part> {
 }
 
 fn parts_of(push: f32, accent: [f32; 3]) -> Vec<Part> {
-    const BODY: [f32; 3] = [0.42, 0.48, 0.58];
-    const LIGHT: [f32; 3] = [0.62, 0.68, 0.78];
+    const BODY: [f32; 3] = [0.56, 0.61, 0.70];
+    const LIGHT: [f32; 3] = [0.84, 0.88, 0.94];
     let tilt = push * 0.62;
     let (s, c) = tilt.sin_cos();
     const FOOT: f32 = -0.034;
@@ -71,24 +71,22 @@ fn parts_of(push: f32, accent: [f32; 3]) -> Vec<Part> {
     let cap = up(0.06);
     let pushed = push.abs().clamp(0.0, 1.0);
     let cap_colour: [f32; 3] = std::array::from_fn(|i| LIGHT[i] + (accent[i] - LIGHT[i]) * pushed * 0.8);
-    let mut out = vec![
-        // Its housing, then its boot, its stem and its cap.
-        Part { a: base, b: base, radius: 0.036, flat: 0.16, colour: BODY, solid: 0.55, glow: 0.0 },
-        Part { a: base, b: up(0.012), radius: 0.013, flat: 0.7, colour: BODY, solid: 0.5, glow: 0.0 },
-        Part { a: base, b: cap, radius: 0.0042, flat: 1.0, colour: LIGHT, solid: 0.6, glow: 0.0 },
-        Part { a: cap, b: cap, radius: 0.0165, flat: 0.5, colour: cap_colour, solid: 0.72, glow: 0.1 * pushed },
+    let out = vec![
+        // Its housing, then its boot, its stem and its cap: one cap, at the top.
+        Part { a: base, b: base, radius: 0.036, flat: 0.16, colour: BODY, solid: 0.62, glow: 0.0 },
+        Part { a: base, b: up(0.012), radius: 0.013, flat: 0.7, colour: BODY, solid: 0.58, glow: 0.0 },
+        Part { a: base, b: cap, radius: 0.005, flat: 1.0, colour: LIGHT, solid: 0.7, glow: 0.0 },
+        Part { a: cap, b: cap, radius: 0.0175, flat: 0.5, colour: cap_colour, solid: 0.78, glow: 0.1 + 0.15 * pushed },
     ];
-    // Which way it goes: a chevron beyond it and one before it, lit as it goes that way.
-    for (at, point, lit) in [(-0.05f32, -0.01f32, ((push - 0.1) / 0.9).clamp(0.0, 1.0)), (0.05, 0.01, ((-push - 0.1) / 0.9).clamp(0.0, 1.0))] {
-        let tip = leaned([0.0, FOOT + 0.002, at + point]);
-        let colour: [f32; 3] = std::array::from_fn(|i| LIGHT[i] + (accent[i] - LIGHT[i]) * lit);
-        for side in [-0.011f32, 0.011] {
-            let end = leaned([side, FOOT + 0.002, at]);
-            out.push(Part { a: tip, b: end, radius: 0.0024, flat: 1.0, colour, solid: 0.22 + 0.6 * lit, glow: 0.45 * lit });
-        }
-    }
+    // Which way it goes is said by the words beside it, lit as it goes: chevrons on its housing were seen through it as a second cap halfway down its stem.
     out
 }
+
+/// How far the dark edge round it reaches, in pixels, and how dark it is at most: as the words beside it have one, it reads on a bright world as on a dark one.
+const HALO_PX: i32 = 3;
+const HALO: f32 = 0.5;
+/// The most solid any of it is.
+const MOST_SOLID: f32 = 0.92;
 
 /// The light it stands in, from above, to the left, towards who looks.
 const LIGHT_FROM: V3 = [-0.42, 0.79, 0.45];
@@ -163,10 +161,28 @@ fn eye_picture(out: &mut [u8], stride: usize, eye: V3, parts: &[Part]) {
             }
         }
     }
+    // How solid each pixel is, for the dark edge round all of it.
+    let mut solid_at = vec![0f32; w * h];
+    for (i, here) in layers.iter().enumerate() {
+        solid_at[i] = here.iter().fold(0f32, |s, (_, _, a)| a + s * (1.0 - a));
+    }
     for y in 0..h {
         for x in 0..w {
             let here = &mut layers[y * w + x];
             if here.is_empty() {
+                // Just outside it: its dark edge, nothing of a frame.
+                let mut near = 0f32;
+                for dy in -HALO_PX..=HALO_PX {
+                    for dx in -HALO_PX..=HALO_PX {
+                        let (nx, ny) = (x as i32 + dx, y as i32 + dy);
+                        let reach = ((dx * dx + dy * dy) as f32).sqrt();
+                        if nx < 0 || ny < 0 || nx >= w as i32 || ny >= h as i32 || reach > HALO_PX as f32 + 0.5 {
+                            continue;
+                        }
+                        near = near.max(solid_at[ny as usize * w + nx as usize] * (1.0 - reach / (HALO_PX as f32 + 1.0)));
+                    }
+                }
+                out[y * stride + x * 4 + 3] = (near * HALO * 255.0) as u8;
                 continue;
             }
             // Furthest first.
@@ -175,6 +191,12 @@ fn eye_picture(out: &mut [u8], stride: usize, eye: V3, parts: &[Part]) {
             for (_, c, a) in here.iter() {
                 colour = std::array::from_fn(|i| c[i] + colour[i] * (1.0 - a));
                 solid = a + solid * (1.0 - a);
+            }
+            // Never quite opaque, where its parts lie over each other too (Enzo: "not completely opaque"): the whole scaled down to it, which keeps it premultiplied.
+            if solid > MOST_SOLID {
+                let by = MOST_SOLID / solid;
+                colour = colour.map(|c| c * by);
+                solid = MOST_SOLID;
             }
             let at = y * stride + x * 4;
             for i in 0..3 {

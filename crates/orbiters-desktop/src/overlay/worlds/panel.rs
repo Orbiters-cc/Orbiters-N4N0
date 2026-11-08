@@ -1904,7 +1904,7 @@ impl Panel {
             self.empty(p, d, shown, state(Target::Retry));
         } else if self.few_captures(d) {
             // Few worlds have a capture yet: the free space says what these are, and where the others are.
-            text(p, pos2(512.0, 424.0), Align2::CENTER_CENTER, orbit_look::txt(tr("Worlds people captured in 3D: open one to walk in it"), 19.0).weight(weight::MEDIUM).color(fade(theme::FG, shown)));
+            text(p, pos2(512.0, 424.0), Align2::CENTER_CENTER, orbit_look::txt(tr("Worlds people captured in 3D: open one to see it in 3D"), 19.0).weight(weight::MEDIUM).color(fade(theme::FG, shown)));
             text(p, pos2(512.0, 456.0), Align2::CENTER_CENTER, orbit_look::txt(tr("Few have one yet. Search any world above, or look through these"), 16.0).color(fade(theme::FG_3, shown)));
         }
     }
@@ -2024,12 +2024,12 @@ impl Panel {
                 text_cut(p, pos2(hero.min.x + 16.0, foot.center().y), hero.width() - 32.0, orbit_look::txt(line, 15.0).color(fade(theme::FG_2, rest)));
             }
         }
-        // Its way out, on its edge.
+        // Its way out, on its edge: it slides away to the right, so it says so. An X here, just under the sheet's own, was one close too many (a judge's).
         if !vr {
             let (h, pr) = state(Target::CloseSide);
             let tab = if pr { SIDE_CLOSE.shrink(1.0) } else { SIDE_CLOSE };
             p.circle_filled(tab.center(), tab.width() / 2.0, if h { theme::black(0.92) } else { theme::black(0.72) });
-            widgets::icon(p, tab.center(), icons::X, 20.0, theme::FG);
+            widgets::icon(p, tab.center(), icons::CARET_RIGHT, 22.0, theme::FG);
         }
         // Its name, as long as it is; who made it.
         let (x, width) = if vr { (VR_LEFT, SIDE_RIGHT - VR_LEFT) } else { (SIDE_LEFT, SIDE_RIGHT - SIDE_LEFT) };

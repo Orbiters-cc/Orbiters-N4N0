@@ -88,7 +88,13 @@ fn saved_looks_with_real_looks_answers() {
         println!("saved looks {look:?}: open in {:?}", began.elapsed());
         assert_eq!(person.panels.facts.sheet, Some(Sheet::Menu));
         assert_eq!(person.panels.stage.host.menu.page, orbiters_n4n0_core::menu::Page::States);
-        // At rest it paints nothing, or nothing else would get a turn.
+        // At rest it paints nothing, or nothing else would get a turn. At rest is once the press's pop is over: it runs on the clock for `POP` (700 ms), and 43 turns
+        // took less than that on a fast run, which then still painted it (dev.21's test run failed here once).
+        let waited = Instant::now();
+        while person.panels.stage.host.menu.popping().is_some() {
+            assert!(waited.elapsed() < orbiters_n4n0_core::menu::POP * 3, "{look:?}: the pop never ends");
+            std::thread::sleep(Duration::from_millis(5));
+        }
         person.turns(40);
         let mut painted = 0;
         for _ in 0..10 {

@@ -184,7 +184,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         let sheet_on_wheel = open == Some(Around::Wheel) && panels.sheet_open();
         pointer.follow(open == Some(Around::Wheel) && (alt_held() || sheet_on_wheel), origin, size, window, sheet_on_wheel);
         // With no key held, the scroll wheel picks a cell (VRChat's wheel has no use for it), and the next click opens it.
-        scroller.follow(open == Some(Around::Wheel) && !pointer.active() && !panels.sheet_open());
+        scroller.follow(SCROLL_TO_PICK && open == Some(Around::Wheel) && !pointer.active() && !panels.sheet_open());
         let scrolled = scroller.lit();
         // Over VRChat's wheel too while a 3D picture waits: VRChat's lit slice has nothing to do with it, and two things would look chosen.
         panels.set_pointing((pointer.active() || scrolled.is_some() || panels.picture_waiting()) && !panels.sheet_open(), !snap.settings.reduce_motion);
@@ -232,6 +232,10 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
     }
 }
 
+/// Whether the scroll wheel picks a cell of the ring, with no key held ([`scroll`]). Off since dev.25: in dev.24 a scroll's click that opened a sheet froze the
+/// panels once on the real game, and the cause is not proven yet. Left Alt and the number keys work as ever.
+const SCROLL_TO_PICK: bool = false;
+
 /// What the caption says with nothing pointed at, which someone who has seen it often enough no longer needs in full.
 #[derive(Default)]
 struct Hints {
@@ -261,9 +265,11 @@ impl Hints {
             // Now the ring takes the mouse: it said so, it says so.
             Some(Around::Wheel) if pointing && self.pointed <= Self::FULL => Some((mark("Click a tool"), "")),
             Some(Around::Wheel) if pointing => None,
-            // The scroll wheel first: it needs no key (round 12's judges: Left Alt was the friction of the desktop's wheel).
-            Some(Around::Wheel) if self.pointed < Self::FULL => Some((mark("Scroll to pick a tool, then click"), mark("Or hold Left Alt to point; keys 1 to 6"))),
-            Some(Around::Wheel) => Some((mark("Scroll to pick, or hold Left Alt"), "")),
+            // The scroll wheel first, where it is on: it needs no key (round 12's judges: Left Alt was the friction of the desktop's wheel).
+            Some(Around::Wheel) if SCROLL_TO_PICK && self.pointed < Self::FULL => Some((mark("Scroll to pick a tool, then click"), mark("Or hold Left Alt to point; keys 1 to 6"))),
+            Some(Around::Wheel) if SCROLL_TO_PICK => Some((mark("Scroll to pick, or hold Left Alt"), "")),
+            Some(Around::Wheel) if self.pointed < Self::FULL => Some((mark("Hold Left Alt, then click a tool"), mark("Alt also shows each one's key, 1 to 6"))),
+            Some(Around::Wheel) => Some((mark("Left Alt to click, or a number"), "")),
             // Says what this is, and that it is not VRChat's.
             Some(Around::QuickMenu) if self.openings <= Self::FULL => Some((mark("Your tools"), mark("Worlds in 3D, videos, instances and 3D pictures."))),
             _ => None,

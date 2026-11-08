@@ -677,7 +677,8 @@ fn vr_card(p: &Painter, rect: Rect, entry: &Entry, d: &Data, hover: bool, presse
     };
     if let Some((word, tint)) = chip {
         let galley = p.layout_job(orbit_look::txt(word, 16.5).weight(weight::BOLD).color(orbit_look::on_accent()).job(f32::INFINITY));
-        let back = Rect::from_min_size(thumb.min + vec2(8.0, 8.0), vec2(galley.size().x + 18.0, 28.0));
+        // Inside the selection's frame, clear of it (round 12's judges found it crowding the first tile).
+        let back = Rect::from_min_size(thumb.min + vec2(13.0, 13.0), vec2(galley.size().x + 18.0, 28.0));
         p.rect_filled(back, CornerRadius::same(14), tint);
         p.galley(pos2(back.min.x + 9.0, back.center().y - galley.size().y / 2.0), galley, orbit_look::on_accent());
     }

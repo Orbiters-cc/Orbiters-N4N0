@@ -303,7 +303,8 @@ impl Zone {
             Zone::WheelCaption => r(-220.0, -254.0, 220.0, -196.0),
             Zone::WheelVeil => r(-109.0, -109.0, 109.0, 109.0),
             // Level with the caption over the ring, past its right end: clear of the ring and of either second ring (a judge found it sitting on the rim), and still beside them.
-            Zone::WheelHide => r(232.0, -232.0, 344.0, -190.0),
+            // Nearer the ring than it was (round 12's judges found it detached), still clear of the second rings and the caption.
+            Zone::WheelHide => r(224.0, -214.0, 336.0, -172.0),
             // As tall as My Profile and as wide, beside it.
             // As tall as My Profile and as wide, beside it.
             Zone::WingName => r(362.0, -150.0, 524.0, -120.0),

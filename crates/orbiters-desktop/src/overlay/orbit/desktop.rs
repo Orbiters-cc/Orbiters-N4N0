@@ -10,6 +10,9 @@
 //!   hover the panels with it. So **holding Left Alt points at them**: a low-level mouse hook, only while Alt is held with the wheel open, keeps the
 //!   mouse's movement and buttons from the game and moves a pointer of ours ([`pointer`]). Let go, the mouse is VRChat's again as it was.
 //! - **Tab frees nothing**: it is VRChat's own.
+//! - **VRChat's wheel does nothing with the mouse's scroll wheel** (2026-11-08: six notches either way, its lit slice stayed): so with no key held the scroll
+//!   wheel lights the ring's cells one by one and a click opens the one lit ([`scroll`]). The hook that sees it lets VRChat have every movement and click
+//!   but those: its click is ours only after a scroll, and a movement of the mouse gives it back.
 
 use super::detect::{self, Part, Seen, MenuKey, Watcher};
 use super::zones::{self, Around, Placed, Zone};
@@ -82,6 +85,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
     let mut hints = Hints::default();
     let mut pill = Pill::default();
     let mut pointer = pointer::Pointer::default();
+    let mut scroller = scroll::Scroller::default();
     let mut said: Option<OrbitStatus> = None;
     let mut last_turn = Instant::now();
     let mut last_look = None::<Instant>;
@@ -179,11 +183,17 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         let cursor = cursor_at();
         let sheet_on_wheel = open == Some(Around::Wheel) && panels.sheet_open();
         pointer.follow(open == Some(Around::Wheel) && (alt_held() || sheet_on_wheel), origin, size, window, sheet_on_wheel);
+        // With no key held, the scroll wheel picks a cell (VRChat's wheel has no use for it), and the next click opens it.
+        scroller.follow(open == Some(Around::Wheel) && !pointer.active() && !panels.sheet_open());
+        let scrolled = scroller.lit();
         // Over VRChat's wheel too while a 3D picture waits: VRChat's lit slice has nothing to do with it, and two things would look chosen.
-        panels.set_pointing((pointer.active() || panels.picture_waiting()) && !panels.sheet_open(), !snap.settings.reduce_motion);
+        panels.set_pointing((pointer.active() || scrolled.is_some() || panels.picture_waiting()) && !panels.sheet_open(), !snap.settings.reduce_motion);
         panels.set_key_caps(alt_held());
         let at = pointer.at().unwrap_or(pos2(cursor.0 as f32, cursor.1 as f32));
-        let on = (open != Some(Around::Wheel) || pointer.at().is_some()).then(|| hit(&panels, at - origin.to_vec2())).flatten();
+        let on = match scrolled {
+            Some(cell) => panels.cell_point(cell),
+            None => (open != Some(Around::Wheel) || pointer.at().is_some()).then(|| hit(&panels, at - origin.to_vec2())).flatten(),
+        };
         panels.hover(on);
         // With the wheel open, the mouse is VRChat's until Alt is held: what nobody can guess is said in the caption.
         hints.follow(open, pointer.active());
@@ -203,6 +213,11 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         }
         for down in pointer.take_buttons() {
             press(&mut panels, down, &snap, &mut windows, &clicks);
+        }
+        if let Some(cell) = scroller.take_click() {
+            if panels.press_cell(cell, &snap).clicked {
+                clicks.play();
+            }
         }
         // A button let go off a panel never reaches its window: what is held ends with it.
         if !pointer.active() && !button_down() && panels.all().any(|p| p.pressed.is_some()) {
@@ -246,8 +261,9 @@ impl Hints {
             // Now the ring takes the mouse: it said so, it says so.
             Some(Around::Wheel) if pointing && self.pointed <= Self::FULL => Some((mark("Click a tool"), "")),
             Some(Around::Wheel) if pointing => None,
-            Some(Around::Wheel) if self.pointed < Self::FULL => Some((mark("Hold Left Alt, then click a tool"), mark("Alt also shows each one's key, 1 to 6"))),
-            Some(Around::Wheel) => Some((mark("Left Alt to click, or a number"), "")),
+            // The scroll wheel first: it needs no key (round 12's judges: Left Alt was the friction of the desktop's wheel).
+            Some(Around::Wheel) if self.pointed < Self::FULL => Some((mark("Scroll to pick a tool, then click"), mark("Or hold Left Alt to point; keys 1 to 6"))),
+            Some(Around::Wheel) => Some((mark("Scroll to pick, or hold Left Alt"), "")),
             // Says what this is, and that it is not VRChat's.
             Some(Around::QuickMenu) if self.openings <= Self::FULL => Some((mark("Your tools"), mark("Worlds in 3D, videos, instances and 3D pictures."))),
             _ => None,
@@ -955,6 +971,166 @@ impl Pill {
 /// While the wheel is open VRChat holds the system's pointer (clipped to one pixel) and reads the mouse's movement for its slices. Holding Left Alt keeps the mouse
 /// from the game for that time and moves a pointer of ours over the panels. A low-level hook is the one means to keep it from the game; it is set only
 /// for as long as Alt is held with the wheel open, on a thread that does nothing else (a hook must answer at once), and anything that ends this ends the thread.
+/// The scroll wheel on the ring, with no key held: a hook that only keeps from the game what VRChat's wheel has no use for (the scroll wheel), and the next click
+/// after it. Any movement of the mouse ends it, and the click is VRChat's again.
+pub mod scroll {
+    use super::*;
+    use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, Ordering};
+    use windows::Win32::UI::WindowsAndMessaging::{
+        CallNextHookEx, GetMessageW, PostThreadMessageW, SetWindowsHookExW, UnhookWindowsHookEx, MSLLHOOKSTRUCT, WH_MOUSE_LL, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_QUIT,
+    };
+
+    static SET: AtomicBool = AtomicBool::new(false);
+    /// A scroll came, and no movement since: the next click is ours.
+    static ENGAGED: AtomicBool = AtomicBool::new(false);
+    static NOTCHES: AtomicI32 = AtomicI32::new(0);
+    static MOVED: AtomicI32 = AtomicI32::new(0);
+    static DOWNS: AtomicU32 = AtomicU32::new(0);
+    static REST_X: AtomicI32 = AtomicI32::new(0);
+    static REST_Y: AtomicI32 = AtomicI32::new(0);
+    /// How far the mouse moves, in pixels from where VRChat holds it, before the ring gives the click back.
+    const LEAVE: i32 = 24;
+
+    unsafe extern "system" fn hook(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+        if code >= 0 && SET.load(Ordering::Relaxed) {
+            // SAFETY: for WH_MOUSE_LL, lparam is a live MSLLHOOKSTRUCT.
+            let info = unsafe { &*(lparam.0 as *const MSLLHOOKSTRUCT) };
+            match wparam.0 as u32 {
+                WM_MOUSEWHEEL => {
+                    NOTCHES.fetch_add((info.mouseData >> 16) as u16 as i16 as i32, Ordering::Relaxed);
+                    MOVED.store(0, Ordering::Relaxed);
+                    ENGAGED.store(true, Ordering::Relaxed);
+                    return LRESULT(1);
+                }
+                // Passed on always: VRChat's wheel follows it. Enough of it, and the click is VRChat's again.
+                WM_MOUSEMOVE if ENGAGED.load(Ordering::Relaxed) => {
+                    let off = (info.pt.x - REST_X.load(Ordering::Relaxed)).abs() + (info.pt.y - REST_Y.load(Ordering::Relaxed)).abs();
+                    if MOVED.fetch_add(off, Ordering::Relaxed) + off > LEAVE {
+                        ENGAGED.store(false, Ordering::Relaxed);
+                    }
+                }
+                WM_LBUTTONDOWN if ENGAGED.load(Ordering::Relaxed) => {
+                    DOWNS.fetch_add(1, Ordering::Relaxed);
+                    return LRESULT(1);
+                }
+                WM_LBUTTONUP if ENGAGED.load(Ordering::Relaxed) => return LRESULT(1),
+                _ => {}
+            }
+        }
+        // SAFETY: passing on what the system passed.
+        unsafe { CallNextHookEx(None, code, wparam, lparam) }
+    }
+
+    #[derive(Default)]
+    pub struct Scroller {
+        thread: Option<(u32, std::thread::JoinHandle<()>)>,
+        /// The cell lit, clockwise from the top (0 Worlds in 3D), while engaged.
+        lit: Option<usize>,
+        taken_notches: i32,
+        downs: u32,
+    }
+
+    impl Scroller {
+        /// A turn: `wanted` says the wheel is open with no key held and no sheet.
+        pub fn follow(&mut self, wanted: bool) {
+            if !wanted {
+                self.stop();
+                return;
+            }
+            if self.thread.is_none() {
+                self.begin();
+            }
+            if !ENGAGED.load(Ordering::Relaxed) {
+                self.lit = None;
+            }
+            let notches = NOTCHES.load(Ordering::Relaxed);
+            let steps = (notches - self.taken_notches) / 120;
+            if steps != 0 {
+                self.taken_notches += steps * 120;
+                // Down goes clockwise, as a list goes down; the first notch lands on the first cell either way.
+                let next = match self.lit {
+                    None if steps < 0 => 0,
+                    None => CELLS - 1,
+                    Some(at) => (at as i32 - steps).rem_euclid(CELLS as i32) as usize,
+                };
+                self.lit = Some(next);
+            }
+        }
+
+        pub fn lit(&self) -> Option<usize> {
+            self.lit
+        }
+
+        /// The cell a click opened, once.
+        pub fn take_click(&mut self) -> Option<usize> {
+            let downs = DOWNS.load(Ordering::Relaxed);
+            if downs == self.downs {
+                return None;
+            }
+            self.downs = downs;
+            let cell = self.lit;
+            // Done: the click is VRChat's again until the next scroll.
+            ENGAGED.store(false, Ordering::Relaxed);
+            self.lit = None;
+            cell
+        }
+
+        fn begin(&mut self) {
+            ENGAGED.store(false, Ordering::Relaxed);
+            MOVED.store(0, Ordering::Relaxed);
+            self.taken_notches = NOTCHES.load(Ordering::Relaxed);
+            self.downs = DOWNS.load(Ordering::Relaxed);
+            self.lit = None;
+            let (x, y) = cursor_at();
+            REST_X.store(x, Ordering::Relaxed);
+            REST_Y.store(y, Ordering::Relaxed);
+            let (tx, rx) = std::sync::mpsc::channel();
+            let spawned = std::thread::Builder::new().name("orbit-scroll-hook".into()).spawn(move || {
+                // SAFETY: a low-level hook of this thread, unset below; its messages are pumped right here, as such a hook needs.
+                unsafe {
+                    let module = GetModuleHandleW(None).unwrap_or_default();
+                    let Ok(set) = SetWindowsHookExW(WH_MOUSE_LL, Some(hook), Some(module.into()), 0) else {
+                        let _ = tx.send(0);
+                        return;
+                    };
+                    SET.store(true, Ordering::Relaxed);
+                    let _ = tx.send(windows::Win32::System::Threading::GetCurrentThreadId());
+                    let mut msg = MSG::default();
+                    while GetMessageW(&mut msg, None, 0, 0).as_bool() {}
+                    SET.store(false, Ordering::Relaxed);
+                    let _ = UnhookWindowsHookEx(set);
+                }
+            });
+            if let (Ok(handle), Ok(id)) = (spawned, rx.recv_timeout(Duration::from_secs(1))) {
+                if id != 0 {
+                    self.thread = Some((id, handle));
+                }
+            }
+        }
+
+        pub fn stop(&mut self) {
+            if let Some((id, handle)) = self.thread.take() {
+                // SAFETY: a message to the hook's own thread.
+                unsafe {
+                    let _ = PostThreadMessageW(id, WM_QUIT, WPARAM(0), LPARAM(0));
+                }
+                let _ = handle.join();
+            }
+            ENGAGED.store(false, Ordering::Relaxed);
+            self.lit = None;
+        }
+    }
+
+    impl Drop for Scroller {
+        fn drop(&mut self) {
+            self.stop();
+        }
+    }
+
+    /// The ring's six cells.
+    const CELLS: usize = 6;
+}
+
 pub mod pointer {
     use super::*;
     use std::sync::atomic::{AtomicBool, AtomicI32, AtomicI64, AtomicU32, Ordering};

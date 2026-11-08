@@ -1068,6 +1068,7 @@ pub mod scroll {
                 return None;
             }
             self.downs = downs;
+            eprintln!("orbit: a scroll's click on cell {:?}", self.lit); // i18n: not shown (a log's line)
             let cell = self.lit;
             // Done: the click is VRChat's again until the next scroll.
             ENGAGED.store(false, Ordering::Relaxed);
@@ -1100,6 +1101,7 @@ pub mod scroll {
                     SET.store(false, Ordering::Relaxed);
                     let _ = UnhookWindowsHookEx(set);
                 }
+                eprintln!("orbit: the scroll wheel's hook ended"); // i18n: not shown (a log's line)
             });
             if let (Ok(handle), Ok(id)) = (spawned, rx.recv_timeout(Duration::from_secs(1))) {
                 if id != 0 {
@@ -1108,15 +1110,18 @@ pub mod scroll {
             }
         }
 
+        /// The hook lets everything through at once, and its thread ends on its own: nothing here waits for it (a sheet opened by a scroll's click once froze the
+        /// panels on the turn that stopped it, 2026-11-08).
         pub fn stop(&mut self) {
+            SET.store(false, Ordering::Relaxed);
+            ENGAGED.store(false, Ordering::Relaxed);
             if let Some((id, handle)) = self.thread.take() {
                 // SAFETY: a message to the hook's own thread.
                 unsafe {
                     let _ = PostThreadMessageW(id, WM_QUIT, WPARAM(0), LPARAM(0));
                 }
-                let _ = handle.join();
+                drop(handle);
             }
-            ENGAGED.store(false, Ordering::Relaxed);
             self.lit = None;
         }
     }

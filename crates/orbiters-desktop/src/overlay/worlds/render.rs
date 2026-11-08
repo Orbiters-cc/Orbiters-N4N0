@@ -476,4 +476,152 @@ mod small_tests {
         }
         super::super::shots::write_png(&out, w, h, &shown).unwrap();
     }
+
+    /// A camera at `eye` looking at `at` (play space), up kept up.
+    fn looking(eye: stereo::V3, at: stereo::V3) -> orbiters_openvr::Matrix34 {
+        let back = stereo::sub(eye, at);
+        let back = stereo::scale(back, 1.0 / stereo::length(back));
+        let right = stereo::cross([0.0, 1.0, 0.0], back);
+        let right = stereo::scale(right, 1.0 / stereo::length(right));
+        let up = stereo::cross(back, right);
+        orbiters_openvr::Matrix34 { m: [[right[0], up[0], back[0], eye[0]], [right[1], up[1], back[1], eye[1]], [right[2], up[2], back[2], eye[2]]] }
+    }
+
+    /// Floaters' evidence: `ORBIT_SESSION` drawn small before and after its floaters go, and only what went, from the same
+    /// cameras, into `ORBIT_OUT_DIR` as `<ORBIT_NAME>-<camera>-{before,after,removed}.png`, with what it took and how much of the
+    /// picture the removed splats made. `FLOATER_RULE` ("faint,large,round,blob,solid,around,empty") tries another rule, `ORBIT_MASK`
+    /// (a byte a splat) another choice; `ORBIT_MASK_OUT` writes the rule's; `ORBIT_DUMP` writes the capture and its small view.
+    #[test]
+    #[ignore = "needs a GPU and a real session"]
+    fn floaters_before_and_after() {
+        use super::super::floaters;
+        let dir = std::path::PathBuf::from(std::env::var("ORBIT_SESSION").unwrap());
+        let out = std::path::PathBuf::from(std::env::var("ORBIT_OUT_DIR").unwrap());
+        let name = std::env::var("ORBIT_NAME").unwrap_or_else(|_| "capture".into());
+        std::fs::create_dir_all(&out).unwrap();
+        let full = super::super::catalog::read_local(&dir, &Default::default()).unwrap();
+        let rule = match std::env::var("FLOATER_RULE") {
+            Ok(r) => {
+                let v: Vec<f32> = r.split(',').map(|x| x.trim().parse().unwrap()).collect();
+                floaters::Rule { faint: v[0], large: v[1], round: v[2], blob: v[3], solid: v[4], around: v[5], empty: v[6] }
+            }
+            Err(_) => floaters::Rule::default(),
+        };
+        // Timed as it runs when a capture opens, a few times.
+        let mut floating = Vec::new();
+        let mut times = Vec::new();
+        for _ in 0..5 {
+            let t = std::time::Instant::now();
+            floating = floaters::floating_by(&full.gaussians, &rule);
+            times.push(t.elapsed().as_secs_f64() * 1000.0);
+        }
+        if let Ok(out) = std::env::var("ORBIT_MASK_OUT") {
+            std::fs::write(out, floating.iter().map(|f| *f as u8).collect::<Vec<u8>>()).unwrap();
+        }
+        if let Ok(mask) = std::env::var("ORBIT_MASK") {
+            floating = std::fs::read(mask).unwrap().into_iter().map(|b| b != 0).collect();
+        }
+        times.sort_by(f64::total_cmp);
+        let removed = floating.iter().filter(|f| **f).count();
+        let n = full.gaussians.len();
+        let g = &full.gaussians;
+        let alpha = |i: usize| 1.0 / (1.0 + (-g.opacity_logits[i]).exp());
+        let weight = |i: usize| alpha(i) * g.log_scales[i].iter().map(|s| s.exp()).product::<f32>().powf(2.0 / 3.0);
+        let (mut all_w, mut gone_w) = (0.0f64, 0.0f64);
+        for i in 0..n {
+            all_w += weight(i) as f64;
+            if floating[i] {
+                gone_w += weight(i) as f64;
+            }
+        }
+        println!(
+            "{name}: {rule:?}: {n} splats in, {removed} removed ({:.2}%), {:.1} ms (median of 5, fastest {:.1}); removed share of opacity x area {:.2}%",
+            removed as f64 * 100.0 / n as f64,
+            times[2],
+            times[0],
+            gone_w * 100.0 / all_w
+        );
+        let before = full.small_keeping(&vec![true; n]);
+        let after = full.small_keeping(&floating.iter().map(|f| !f).collect::<Vec<_>>());
+        let only = full.small_keeping(&floating);
+        let head = orbiters_openvr::Matrix34 { m: [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 1.6], [0.0, 0.0, 1.0, 0.0]] };
+        let small = Small::new(&before.view, &head, before.small_reach());
+        let placement = small.placement(before.view.eye());
+        let middle = small.anchor;
+        if let Ok(dump) = std::env::var("ORBIT_DUMP") {
+            use std::io::Write;
+            let mut f = std::io::BufWriter::new(std::fs::File::create(&dump).unwrap());
+            f.write_all(&(n as u32).to_le_bytes()).unwrap();
+            for i in 0..n {
+                for v in g.means[i].iter().chain(&g.log_scales[i]).chain(&g.rotations[i]).chain(std::iter::once(&g.opacity_logits[i])).chain(&g.colors[i]) {
+                    f.write_all(&v.to_le_bytes()).unwrap();
+                }
+            }
+            let frame = full.small_frame();
+            let eye = placement.invert(head.m.map(|r| r[3]));
+            let at = placement.invert(middle);
+            std::fs::write(
+                format!("{dump}.json"),
+                format!(
+                    "{{\"middle\":{:?},\"reach\":{},\"ground\":{},\"eye\":{:?},\"at\":{:?},\"rule\":{:?}}}",
+                    frame.middle,
+                    frame.reach,
+                    frame.ground,
+                    eye,
+                    at,
+                    format!("{rule:?}")
+                ),
+            )
+            .unwrap();
+        }
+        let (_adapter, device, queue) = super::device(None).unwrap();
+        let mut renderer = FaceRenderer::new(device, queue);
+        let (w, h) = (1024u32, 1024u32);
+        let tan = 0.62;
+        // As held before the eyes, then from higher and from a side, closer.
+        let cameras = [
+            ("front", looking(head.m.map(|r| r[3]), middle)),
+            ("above", looking(stereo::add(middle, [0.0, 0.42, 0.42]), middle)),
+            ("side", looking(stereo::add(middle, [0.45, 0.25, 0.3]), middle)),
+        ];
+        // Each camera's picture before, to compare the others with.
+        let mut first: Vec<Vec<u8>> = Vec::new();
+        let shown_removed = only.within(small.reach());
+        println!("{name}: within the small view {} splats, {} of them removed", before.within(small.reach()), shown_removed);
+        for (which, capture) in [("before", &before), ("after", &after), ("removed", &only)] {
+            renderer.load(capture).unwrap();
+            renderer.make_transparent().unwrap();
+            let count = capture.within(small.reach());
+            for (c, (camera_name, view)) in cameras.iter().enumerate() {
+                let camera = stereo::eye_camera(view, [-tan, tan, -tan, tan], w, h, &placement);
+                let pixels = renderer.render_view(&camera, count).unwrap();
+                if which == "before" {
+                    first.push(pixels.clone());
+                } else {
+                    // Removed: how opaque what went is against what was there. After: how many pixels changed visibly.
+                    let solid = |p: &[u8]| p.chunks_exact(4).map(|q| q[3] as f64).sum::<f64>();
+                    let changed =
+                        pixels.chunks_exact(4).zip(first[c].chunks_exact(4)).filter(|(a, b)| a.iter().zip(b.iter()).any(|(x, y)| x.abs_diff(*y) > 24)).count();
+                    let seen = first[c].chunks_exact(4).filter(|p| p[3] > 8).count().max(1);
+                    match which {
+                        "removed" => println!(
+                            "{name} {camera_name}: what went is {:.1}% of the opacity drawn before",
+                            solid(&pixels) * 100.0 / solid(&first[c]).max(1.0)
+                        ),
+                        _ => println!("{name} {camera_name}: {:.1}% of the capture's pixels changed by more than 24/255", changed as f64 * 100.0 / seen as f64),
+                    }
+                }
+                let mut shown = pixels.clone();
+                for (i, p) in shown.chunks_exact_mut(4).enumerate() {
+                    let (x, y) = (i as u32 % w, i as u32 / w);
+                    let back: u32 = if (x / 32 + y / 32) % 2 == 0 { 70 } else { 110 };
+                    for c in 0..3 {
+                        p[c] = (p[c] as u32 + back * (255 - p[3] as u32) / 255).min(255) as u8;
+                    }
+                    p[3] = 255;
+                }
+                super::super::shots::write_png(&out.join(format!("{name}-{camera_name}-{which}.png")), w, h, &shown).unwrap();
+            }
+        }
+    }
 }

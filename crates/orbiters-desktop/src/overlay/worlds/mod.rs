@@ -16,6 +16,7 @@
 
 pub mod cache;
 pub mod catalog;
+pub mod floaters;
 pub mod small_hint;
 pub mod stick3d;
 

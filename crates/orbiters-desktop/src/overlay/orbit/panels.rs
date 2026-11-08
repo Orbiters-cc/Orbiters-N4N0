@@ -2222,7 +2222,8 @@ fn draw(p: &Painter, zone: Zone, item: &Item, facts: &Facts, hovered: bool, pres
             let room = rect.right() - x - 14.0;
             let font = look::font(13.0, weight::SEMIBOLD);
             // Its label gives way to the link's buttons in the corner; its title is under them.
-            let buttons = if facts.can_drop_playing { PLAYING_LINK_W * 2.0 + 6.0 } else if facts.can_copy_playing { PLAYING_LINK_W } else { 0.0 };
+            // Both, wherever there is a link: Drop link is there, dimmed or not, beside Copy link.
+            let buttons = if facts.can_copy_playing { PLAYING_LINK_W * 2.0 + 6.0 + 8.0 } else { 0.0 };
             p.text(pos2(x, rect.top() + 20.0), Align2::LEFT_CENTER, fit(p, tr("Now playing on this computer"), &font, room - buttons - 8.0), font, tint);
             match &facts.music {
                 Some((title, _)) => {
@@ -2896,7 +2897,9 @@ fn draw_capture(p: &Painter, rect: Rect, n: usize, facts: &Facts, hovered: bool,
     // In one gallery with VRChat's pictures, every tile says what it is in the same place (round 8's judges: only some had a badge, so the rest had to be guessed).
     let (glyph, word, tint) = match recent.kind {
         RecentKind::Capture => (icons::CUBE, "3D", look::accent()),
-        _ => (icons::IMAGE, tr_ctx("a kind of picture", "Photo"), theme::FG_2),
+        // A recording with no 3D made of it yet is no photo: its own word (round 10's live gallery called it Photo).
+        RecentKind::NoView => (icons::FILM_STRIP, tr_ctx("a kind of picture", "Recording"), theme::FG_2),
+        RecentKind::Picture => (icons::IMAGE, tr_ctx("a kind of picture", "Photo"), theme::FG_2),
     };
     let font = look::font(16.0, weight::BOLD);
     let wide = clip.layout_no_wrap(word.to_string(), font.clone(), Color32::WHITE).size().x;

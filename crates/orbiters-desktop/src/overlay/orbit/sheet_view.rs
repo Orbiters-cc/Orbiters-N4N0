@@ -199,15 +199,53 @@ fn rotation(start: &[[f32; 3]; 3], pose: Pose) -> [[f32; 3]; 3] {
     stereo::mat_mul(&tipped, &stereo::mat_mul(&turned, start))
 }
 
+/// How far and how high the capture stands: first far enough for any capture to show whole, then, from what the first picture shows, as near as fills
+/// [`FILLS`] of the frame (round 15's judges: a tall capture stood small in a large stage).
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Fit {
+    distance: f32,
+    lift: f32,
+}
+
+impl Default for Fit {
+    fn default() -> Self {
+        Self { distance: 1.6, lift: 0.0 }
+    }
+}
+
+/// How much of the frame a capture fills, in its larger direction.
+const FILLS: f32 = 0.8;
+
+impl Fit {
+    /// From a first picture at this fit: nearer, and centred, so that what shows fills [`FILLS`] of the frame. Never further than it was.
+    fn from_picture(self, rgba: &[u8], size: [u32; 2]) -> Self {
+        let [w, h] = size;
+        let (mut x0, mut y0, mut x1, mut y1) = (w, h, 0u32, 0u32);
+        for (i, px) in rgba.chunks_exact(4).enumerate() {
+            if px[3] > 40 {
+                let (x, y) = (i as u32 % w, i as u32 / w);
+                (x0, y0, x1, y1) = (x0.min(x), y0.min(y), x1.max(x), y1.max(y));
+            }
+        }
+        if x1 <= x0 || y1 <= y0 {
+            return self;
+        }
+        let filled = ((y1 - y0) as f32 / h as f32).max((x1 - x0) as f32 / w as f32);
+        let nearer = (FILLS / filled).clamp(1.0, 1.8);
+        // How far below the frame's middle what shows is centred, in metres at its distance: raised by that, it is centred.
+        let below = ((y0 + y1) as f32 / 2.0 / h as f32 - 0.5) * 2.0 * TANGENT * self.distance;
+        Self { distance: self.distance / nearer, lift: self.lift + below }
+    }
+}
+
 /// Where the capture stands in front of the fixed head, for `pose`.
-fn stands(capture: &Capture, head: &Matrix34, start: &[[f32; 3]; 3], pose: Pose, below: f32) -> Small {
+fn stands(capture: &Capture, head: &Matrix34, start: &[[f32; 3]; 3], pose: Pose, below: f32, fit: Fit) -> Small {
     let mut small = Small::new(&capture.view, head, capture.small_reach()).zoomed_in(pose.zoom);
     small.rotation = rotation(start, pose);
-    // A little further than at first: round 14's judges saw it reach the frame's top.
-    small.anchor = [0.0, 0.0, -1.6];
+    small.anchor = [0.0, 0.0, -fit.distance];
     // Its plate at the same height in the picture whatever the capture's ground is, and however it is tipped: what stands on it has the room over it.
     let (plate, _) = small.plate(below);
-    small.anchor[1] += PLATE_AT - stereo::position(&plate)[1];
+    small.anchor[1] += PLATE_AT - stereo::position(&plate)[1] + fit.lift;
     small
 }
 
@@ -248,6 +286,7 @@ fn run(shared: &Shared, load: impl FnOnce() -> anyhow::Result<Capture>, turning:
     let below = capture.view.eye()[1] - capture.view.ground();
     let middle = capture.view.eye();
     let (mut size, mut drawn, mut last, mut smooth_ms, mut swaying) = (START_SIZE.max(largest), None::<(Pose, usize)>, Instant::now(), 0.0f32, 0.0f32);
+    let mut fit: Option<Fit> = None;
     while !shared.stop.load(Ordering::Relaxed) {
         // It turns by itself, unless a hand has it or just had it.
         let pose = {
@@ -265,10 +304,15 @@ fn run(shared: &Shared, load: impl FnOnce() -> anyhow::Result<Capture>, turning:
         }
         let [w, h] = SIZES[size];
         let aspect = w as f32 / h as f32;
-        let small = stands(&capture, &head, &start, pose, below);
+        let small = stands(&capture, &head, &start, pose, below, fit.unwrap_or_default());
         let camera = stereo::eye_camera(&head, [-TANGENT * aspect, TANGENT * aspect, -TANGENT, TANGENT], w, h, &small.placement(middle));
         let began = Instant::now();
         let rgba = renderer.render_view(&camera, capture.within(small.reach()))?;
+        // The first picture says how much it fills: the next ones are nearer, centred, and that one is not shown.
+        if fit.is_none() {
+            fit = Some(Fit::default().from_picture(&rgba, [w, h]));
+            continue;
+        }
         let ms = began.elapsed().as_secs_f32() * 1000.0;
         smooth_ms = if smooth_ms == 0.0 { ms } else { smooth_ms * 0.8 + ms * 0.2 };
         {
@@ -304,6 +348,27 @@ fn pause_after(ms: f32) -> Duration {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Round 15's judges: a tall capture stood small in a large stage. From its first picture it comes nearer, centred, to fill about 80% of the frame.
+    #[test]
+    fn a_capture_comes_near_enough_to_fill_its_frame() {
+        let (w, h) = (160u32, 90u32);
+        let mut rgba = vec![0u8; (w * h * 4) as usize];
+        // What shows: about half the frame's height, low in it.
+        for y in 40..85 {
+            for x in 60..90 {
+                rgba[((y * w + x) * 4 + 3) as usize] = 255;
+            }
+        }
+        let fit = Fit::default().from_picture(&rgba, [w, h]);
+        let nearer = Fit::default().distance / fit.distance;
+        assert!((nearer - 0.8 / (44.0 / 90.0)).abs() < 0.05, "{nearer}");
+        assert!(fit.lift > 0.0, "raised, as it showed low: {fit:?}");
+        // Already filling it, it does not move away; empty, it stays as it was.
+        let full = vec![255u8; (w * h * 4) as usize];
+        assert_eq!(Fit::default().from_picture(&full, [w, h]).distance, Fit::default().distance);
+        assert_eq!(Fit::default().from_picture(&vec![0u8; (w * h * 4) as usize], [w, h]), Fit::default());
+    }
 
     #[test]
     fn it_holds_the_budget_of_the_3d_view_in_vr() {

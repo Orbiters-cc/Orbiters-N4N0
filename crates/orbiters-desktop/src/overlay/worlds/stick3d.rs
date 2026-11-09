@@ -70,7 +70,8 @@ fn parts_of(push: f32, accent: [f32; 3]) -> Vec<Part> {
     let (s, c) = tilt.sin_cos();
     const FOOT: f32 = -0.03;
     // A controller's thumbstick, as round 12's judges asked of what read as a mushroom: a short shaft, a dished cap with a rim, a ring round its opening.
-    const SHAFT: f32 = 0.034;
+    // Shorter, on a smaller base (round 15's judges): a thumbstick's proportions.
+    const SHAFT: f32 = 0.026;
     let up = |height: f32| leaned([0.0, FOOT + height * c, -height * s]);
     let base = leaned([0.0, FOOT, 0.0]);
     let cap = up(SHAFT);
@@ -81,8 +82,8 @@ fn parts_of(push: f32, accent: [f32; 3]) -> Vec<Part> {
     let top = up(SHAFT);
     let dish = up(SHAFT + 0.0045);
     let out = vec![
-        Part { a: base, b: base, radius: 0.037, flat: 0.12, colour: BODY, solid: 0.55, glow: 0.0 },
-        Part { a: base, b: base, radius: 0.019, flat: 0.55, colour: LIGHT, solid: 0.62, glow: 0.0 },
+        Part { a: base, b: base, radius: 0.029, flat: 0.16, colour: BODY, solid: 0.55, glow: 0.0 },
+        Part { a: base, b: base, radius: 0.017, flat: 0.55, colour: LIGHT, solid: 0.62, glow: 0.0 },
         Part { a: base, b: cap, radius: 0.0065, flat: 1.0, colour: LIGHT, solid: 0.72, glow: 0.0 },
         Part { a: top, b: top, radius: 0.0205, flat: 0.32, colour: cap_colour, solid: 0.8, glow: 0.1 + 0.15 * pushed },
         Part { a: dish, b: dish, radius: 0.0135, flat: 0.18, colour: BODY, solid: 0.7, glow: 0.0 },

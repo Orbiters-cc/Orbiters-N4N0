@@ -483,7 +483,7 @@ impl Recents {
             items.push(Recent { dir: r.key.clone(), title: shown_title(&r.title), state: String::new(), progress: None, picture: None, aspect: r.aspect, kind: r.kind(), count: 1 });
         }
         // One place's captures, opened: as large as the app shows them, two or so a row (round 12's judges: three small ones on an empty sheet).
-        self.shown = panels::Gallery::new(items, layout);
+        self.shown = panels::Gallery::shaped(items, layout, self.set.is_some());
         true
     }
 

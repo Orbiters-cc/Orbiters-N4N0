@@ -577,9 +577,10 @@ fn small_action(p: &Painter, rect: Rect, glyph: &str, filled: bool, count: u64, 
 const VR_LEFT: f32 = 464.0;
 const VR_SIDE: Rect = Rect { min: Pos2 { x: 452.0, y: 12.0 }, max: Pos2 { x: 1012.0, y: 564.0 } };
 /// Its picture; where a capture standing small is seen through it.
-pub const VR_HERO: Rect = Rect { min: Pos2 { x: VR_LEFT, y: 24.0 }, max: Pos2 { x: SIDE_RIGHT, y: 296.0 } };
-const VR_SMALL_BACK: Rect = Rect { min: Pos2 { x: 836.0, y: 244.0 }, max: Pos2 { x: 990.0, y: 288.0 } };
-const VR_GRIP: Rect = Rect { min: Pos2 { x: 774.0, y: 302.0 }, max: Pos2 { x: SIDE_RIGHT, y: 346.0 } };
+pub const VR_HERO: Rect = Rect { min: Pos2 { x: VR_LEFT, y: 24.0 }, max: Pos2 { x: SIDE_RIGHT, y: 282.0 } };
+const VR_SMALL_BACK: Rect = Rect { min: Pos2 { x: 836.0, y: 230.0 }, max: Pos2 { x: 990.0, y: 274.0 } };
+/// Centred right under the hole, the hand's cue for what is in it (round 15's judges found it far off at the right).
+const VR_GRIP: Rect = Rect { min: Pos2 { x: VR_LEFT, y: 286.0 }, max: Pos2 { x: SIDE_RIGHT, y: 318.0 } };
 const VR_SHOW: Rect = Rect { min: Pos2 { x: VR_LEFT, y: 372.0 }, max: Pos2 { x: 637.0, y: 434.0 } };
 const VR_SHOW_SMALL: Rect = Rect { min: Pos2 { x: 645.0, y: 372.0 }, max: Pos2 { x: 819.0, y: 434.0 } };
 const VR_GO: Rect = Rect { min: Pos2 { x: 827.0, y: 372.0 }, max: Pos2 { x: SIDE_RIGHT, y: 434.0 } };
@@ -665,7 +666,8 @@ struct VrHold {
 fn vr_card(p: &Painter, rect: Rect, entry: &Entry, d: &Data, hover: bool, pressed: bool, selected: bool) {
     let rect = if pressed { rect.shrink(2.0) } else { rect };
     p.rect_filled(rect, CornerRadius::same(16), if hover { RAISED2 } else { RAISED });
-    let thumb = Rect::from_min_max(rect.min, pos2(rect.max.x, rect.max.y - 56.0));
+    // Their names at a headset's size, on two lines (round 15's judges found them at a screen's).
+    let thumb = Rect::from_min_max(rect.min, pos2(rect.max.x, rect.max.y - 62.0));
     picture(p, thumb, (d.thumb)(entry), &entry.world_id, CornerRadius { nw: 16, ne: 16, sw: 0, se: 0 }, 1.0);
     let status = d.status;
     let chip = if status.current == Some(entry.id) {
@@ -683,10 +685,10 @@ fn vr_card(p: &Painter, rect: Rect, entry: &Entry, d: &Data, hover: bool, presse
         p.galley(pos2(back.min.x + 9.0, back.center().y - galley.size().y / 2.0), galley, orbit_look::on_accent());
     }
     // Its whole name, on two lines where it takes them: worlds are told apart by it.
-    let mut name = orbit_look::txt(entry.name.clone(), 18.5).weight(weight::SEMIBOLD).color(theme::FG).job(rect.width() - 18.0);
+    let mut name = orbit_look::txt(entry.name.clone(), 21.0).weight(weight::SEMIBOLD).color(theme::FG).job(rect.width() - 18.0);
     name.wrap.max_rows = 2;
     let galley = p.layout_job(name);
-    p.galley(pos2(rect.min.x + 9.0, rect.max.y - 28.0 - galley.size().y / 2.0), galley, theme::FG);
+    p.galley(pos2(rect.min.x + 9.0, rect.max.y - 31.0 - galley.size().y / 2.0), galley, theme::FG);
     if selected {
         p.rect_stroke(rect, CornerRadius::same(16), Stroke::new(3.0, orbit_look::accent()), StrokeKind::Inside);
     }
@@ -1985,7 +1987,7 @@ impl Panel {
             // Right under the hole, off the capture, and with nothing around it: this is done with a hand, and is no button for a laser.
             let ink = if near { orbit_look::accent() } else { theme::FG };
             let galley = p.layout_job(orbit_look::txt(words, 21.0).weight(weight::BOLD).color(ink).job(f32::INFINITY));
-            let left = VR_GRIP.max.x - galley.size().x - 34.0;
+            let left = VR_GRIP.center().x - (galley.size().x + 34.0) / 2.0;
             widgets::icon(p, pos2(left + 13.0, VR_GRIP.center().y), icons::HAND_GRABBING, 27.0, orbit_look::accent());
             p.galley(pos2(left + 34.0, VR_GRIP.center().y - galley.size().y / 2.0), galley, ink);
         } else {
@@ -2037,8 +2039,7 @@ impl Panel {
         // Its name, as long as it is; who made it.
         let (x, width) = if vr { (VR_LEFT, SIDE_RIGHT - VR_LEFT) } else { (SIDE_LEFT, SIDE_RIGHT - SIDE_LEFT) };
         if vr {
-            let room = if hole.is_some() { VR_GRIP.min.x - x - 14.0 } else { width };
-            text_cut(p, pos2(x, 302.0), room, orbit_look::txt(entry.name.clone(), 27.0).weight(weight::SEMIBOLD).color(fade(theme::FG, rest)));
+            text_cut(p, pos2(x, 318.0), width, orbit_look::txt(entry.name.clone(), 24.0).weight(weight::SEMIBOLD).color(fade(theme::FG, rest)));
         } else {
             let mut title = orbit_look::txt(entry.name.clone(), 21.0).weight(weight::SEMIBOLD).color(fade(theme::FG, rest)).job(width);
             title.wrap.max_rows = 2;
@@ -2063,7 +2064,7 @@ impl Panel {
         }
         // In a headset, who made it and no more.
         let under = if vr { under.first().cloned().unwrap_or_default() } else { under.join(" · ") };
-        text_cut(p, pos2(x, if vr { 340.0 } else { 266.0 }), width, orbit_look::txt(under, if vr { 19.0 } else { 16.5 }).color(fade(theme::FG, rest)));
+        text_cut(p, pos2(x, if vr { 349.0 } else { 266.0 }), width, orbit_look::txt(under, if vr { 17.0 } else { 16.5 }).color(fade(theme::FG, rest)));
         // What it can be seen as, and the rest.
         let wf = d.world_feedback(entry);
         for (t, rect) in targets {

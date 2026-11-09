@@ -306,7 +306,8 @@ impl Zone {
             // Level with the caption over the ring, past its right end: clear of the ring and of either second ring (a judge found it sitting on the rim), and still beside them.
             // Nearer the ring than it was (round 12's judges found it detached), still clear of the second rings and the caption.
             // Level with the caption's pill, in its row, as the wing's Hide sits beside its name (round 14's judges saw it lower and off to the side).
-            Zone::WheelHide => r(226.0, -246.0, 338.0, -204.0),
+            // In a headset the caption's pill ends at its zone's right edge, so this follows it at once (round 15's judges).
+            Zone::WheelHide => r(228.0, -244.0, 340.0, -206.0),
             // As tall as My Profile and as wide, beside it.
             // As tall as My Profile and as wide, beside it.
             Zone::WingName => r(362.0, -150.0, 524.0, -120.0),
@@ -316,7 +317,8 @@ impl Zone {
             Zone::WingPictures => wing_tile(1.0, 1.0),
             Zone::WingTalk => wing_tile(0.0, 2.0),
             Zone::WingAll => wing_tile(1.0, 2.0),
-            Zone::WingPlaying => r(362.0, 132.0, 524.0, 186.0),
+            // Its foot level with VRChat's main panel's (round 15's judges, mockup-sonnet-1): the sheet ends there too.
+            Zone::WingPlaying => r(362.0, 144.0, 524.0, 205.5),
             Zone::QmStrip => r(-300.0, 266.0, 300.0, 318.0),
             // On the wing, as wide as it, right over its name: its words wrap, and it is as high as they take.
             // Its foot where the wing's name pill is: on a screen the name heads it (the pill is not there); a headset keeps it above that pill ([`QM_CAPTION_OVER_THE_NAME`]).
@@ -353,7 +355,7 @@ impl Zone {
 /// A tile of the wing, in its column and row.
 fn wing_tile(column: f32, row: f32) -> Rect {
     const WIDTH: f32 = 78.0;
-    const HEIGHT: f32 = 76.0;
+    const HEIGHT: f32 = 80.0;
     const GAP: f32 = 6.0;
     let min = pos2(362.0 + column * (WIDTH + GAP), -114.0 + row * (HEIGHT + GAP));
     Rect::from_min_size(min, vec2(WIDTH, HEIGHT))

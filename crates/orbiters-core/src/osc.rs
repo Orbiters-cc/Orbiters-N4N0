@@ -280,6 +280,11 @@ pub fn host_info(name: &str, osc_ip: Ipv4Addr, osc_port: u16) -> serde_json::Val
     })
 }
 
+/// The OSC socket's read timeout: the receiving thread looks whether the service stopped this often, in case the wake-up
+/// of [`OscService`]'s `Drop` is lost. A minute in this crate's tests, so that a stop that waited for it rather than being
+/// woken takes a minute and shows, whatever the speed of the machine (with a second, a busy one could not tell them apart).
+const RECEIVE_TIMEOUT: Duration = if cfg!(test) { Duration::from_secs(60) } else { Duration::from_secs(1) };
+
 /// OSCQuery requests answered at once at most: each has a thread for up to a second and a half.
 const MAX_ANSWERING: usize = 8;
 
@@ -652,6 +657,8 @@ pub struct OscService {
     vrchat_query: Arc<Mutex<Option<SocketAddr>>>,
     /// When the last packet came in ([`crate::clock::now_ns`]; 0: none yet).
     last_received: Arc<AtomicU64>,
+    /// Datagrams read and dropped where they arrived ([`OscService::turned_away`]).
+    turned_away: Arc<AtomicU64>,
     threads: Vec<JoinHandle<()>>,
 }
 
@@ -728,7 +735,7 @@ impl OscService {
             udp_socket(SocketAddr::from((bound, 0)))
         })?;
         // Woken at once when the service stops (see `Drop`); the timeout only in case that wake-up is lost.
-        udp.set_read_timeout(Some(Duration::from_secs(1)))?;
+        udp.set_read_timeout(Some(RECEIVE_TIMEOUT))?;
         let osc_port = udp.local_addr()?.port();
         let http = TcpListener::bind(SocketAddr::from((bound, ports.query))).or_else(|e| {
             if ports.query == 0 {
@@ -741,12 +748,14 @@ impl OscService {
         let stop = Arc::new(AtomicBool::new(false));
         let vrchat_query = Arc::new(Mutex::new(None));
         let last_received = Arc::new(AtomicU64::new(0));
+        let turned_away = Arc::new(AtomicU64::new(0));
         let mut threads = Vec::new();
 
         {
             let stop = stop.clone();
             let udp = udp.try_clone()?;
             let last_received = last_received.clone();
+            let turned_away = turned_away.clone();
             let mut heard = Heard::of(&route);
             threads.push(std::thread::Builder::new().name("osc-receive".into()).spawn(move || {
                 let mut buf = vec![0u8; 65536];
@@ -764,6 +773,7 @@ impl OscService {
                         }
                     };
                     if n == 0 || !heard.datagram(from.ip()) || !nesting_within_limit(&buf[..n]) {
+                        turned_away.fetch_add(1, Ordering::Relaxed);
                         continue;
                     }
                     let at = crate::clock::now_ns();
@@ -889,7 +899,7 @@ impl OscService {
             (None, None, None)
         };
 
-        Ok(Self { sender: udp, osc_port, query_port, bound, route, stop, mdns, announcement, sightings, vrchat_query, last_received, threads })
+        Ok(Self { sender: udp, osc_port, query_port, bound, route, stop, mdns, announcement, sightings, vrchat_query, last_received, turned_away, threads })
     }
 
     /// Where the OSC socket listens (127.0.0.1, or this device's address on the network, and [`OscService::osc_port`]).
@@ -939,6 +949,13 @@ impl OscService {
     /// When VRChat (or anything else on this machine) last sent a packet ([`crate::clock::now_ns`]).
     pub fn last_received_ns(&self) -> Option<u64> {
         Some(self.last_received.load(Ordering::Relaxed)).filter(|&t| t != 0)
+    }
+
+    /// How many datagrams were read and dropped where they arrived: from a device that is not the one heard (on the network,
+    /// any before a VRChat is chosen), empty, or nested too deep. Its rise is the proof that a datagram was looked at and
+    /// refused, which no wait for nothing to happen can give.
+    pub fn turned_away(&self) -> u64 {
+        self.turned_away.load(Ordering::Relaxed)
     }
 
     /// VRChat's OSCQuery service when it was found.
@@ -1218,7 +1235,13 @@ fn is_vrchat_client(addr: SocketAddr) -> bool {
 
 /// The input port VRChat's OSCQuery service at `addr` says (its HOST_INFO's `OSC_PORT`), when it answers as VRChat.
 fn vrchat_client_port(addr: SocketAddr) -> Option<u16> {
-    let info = serde_json::from_str::<serde_json::Value>(&http_get(addr, "/?HOST_INFO", Duration::from_secs(1)).ok()?).ok()?;
+    vrchat_client_port_within(addr, Duration::from_secs(1))
+}
+
+/// [`vrchat_client_port`] with its answer waited for up to `limit`: a test's stand-in on a busy machine can take longer
+/// than the second VRChat is given, which is not what the test is about.
+fn vrchat_client_port_within(addr: SocketAddr, limit: Duration) -> Option<u16> {
+    let info = serde_json::from_str::<serde_json::Value>(&http_get(addr, "/?HOST_INFO", limit).ok()?).ok()?;
     let port = info["OSC_PORT"].as_u64().and_then(|p| u16::try_from(p).ok()).filter(|p| *p != 0)?;
     info["NAME"].as_str().is_some_and(|n| n.starts_with("VRChat")).then_some(port)
 }
@@ -1480,12 +1503,25 @@ mod platform_tests {
 mod tests {
     use super::*;
 
+    /// How long a test waits for what has to come: far longer than a machine running the whole test suite takes, and only
+    /// waited in full by a test that fails.
+    const PATIENCE: Duration = Duration::from_secs(30);
+
+    /// Waits for `n` events at least.
     fn wait_for(got: &Mutex<Vec<(OscEvent, u64)>>, n: usize) {
-        for _ in 0..100 {
-            if got.lock().unwrap().len() >= n {
-                return;
-            }
-            std::thread::sleep(Duration::from_millis(20));
+        let begin = Instant::now();
+        while got.lock().unwrap().len() < n {
+            assert!(begin.elapsed() < PATIENCE, "{n} events never came: {:?}", got.lock().unwrap());
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    /// Waits for the service to have read and dropped `n` datagrams in all.
+    fn wait_turned_away(svc: &OscService, n: u64) {
+        let begin = Instant::now();
+        while svc.turned_away() < n {
+            assert!(begin.elapsed() < PATIENCE, "the service never read the datagram it should drop ({} dropped)", svc.turned_away());
+            std::thread::sleep(Duration::from_millis(5));
         }
     }
 
@@ -1554,7 +1590,7 @@ mod tests {
             let body = format!("{:x}\r\n{a}\r\n{:x}\r\n{b}\r\n0\r\n\r\n", a.len(), b.len());
             s.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\n\r\n{body}").as_bytes()).unwrap();
         });
-        let mut values = vrchat_values(addr, Duration::from_secs(2)).unwrap();
+        let mut values = vrchat_values(addr, PATIENCE).unwrap();
         server.join().unwrap();
         values.sort_by(|a, b| a.0.cmp(&b.0));
         // With what OSC may write: VRChat's own are read only.
@@ -1816,7 +1852,7 @@ mod tests {
         // Stopping wakes the server: it ends at once.
         let started = Instant::now();
         drop(svc);
-        assert!(started.elapsed() < Duration::from_millis(900), "{:?}", started.elapsed());
+        assert!(started.elapsed() < PATIENCE, "the stop waited for the read timeout rather than waking the threads: {:?}", started.elapsed());
     }
 
     #[test]
@@ -1838,8 +1874,8 @@ mod tests {
                 s.write_all(answer.as_bytes()).unwrap();
             }
         });
-        assert_eq!(vrchat_value(addr, "/avatar/parameters/Orbiters Record", Duration::from_secs(2)).unwrap(), Some(OscValue::Bool(true)));
-        assert_eq!(vrchat_value(addr, "/avatar/parameters/Nope", Duration::from_secs(2)).unwrap(), None, "the avatar has no such parameter");
+        assert_eq!(vrchat_value(addr, "/avatar/parameters/Orbiters Record", PATIENCE).unwrap(), Some(OscValue::Bool(true)));
+        assert_eq!(vrchat_value(addr, "/avatar/parameters/Nope", PATIENCE).unwrap(), None, "the avatar has no such parameter");
         server.join().unwrap();
         // Nothing listens: VRChat cannot tell, which is not a no.
         let gone = TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap();
@@ -1859,6 +1895,8 @@ mod tests {
             });
             addr
         };
+        // Each stand-in answers at once, so only a failing test waits the whole limit.
+        let is_vrchat_client = |addr| vrchat_client_port_within(addr, PATIENCE).is_some();
         assert!(is_vrchat_client(host(r#"{"NAME":"VRChat-Client-A1B2C3","OSC_IP":"127.0.0.1","OSC_PORT":9000}"#)));
         assert!(!is_vrchat_client(host(r#"{"NAME":"VRCFT","OSC_IP":"127.0.0.1","OSC_PORT":9010}"#)), "another OSC app");
         assert!(!is_vrchat_client(host(r#"{"NAME":"Orbiters desktop","OSC_PORT":50000}"#)), "this one");
@@ -1901,14 +1939,16 @@ mod tests {
         socket
     }
 
-    /// An HTTP request to the service's OSCQuery from `from`; its answer (empty when it was refused).
+    /// An HTTP request to the service's OSCQuery from `from`; its answer (empty when it was refused). The service closes
+    /// the connection once it answered, and at once when it refuses, so the long limits are only ever waited by a failing
+    /// test (800 ms once ended before a busy machine's answer came: empty, as if refused).
     #[cfg_attr(target_vendor = "apple", allow(dead_code))]
     fn ask_from(from: Ipv4Addr, to: SocketAddr, path: &str) -> String {
         let socket = socket2::Socket::new(socket2::Domain::IPV4, socket2::Type::STREAM, Some(socket2::Protocol::TCP)).unwrap();
         socket.bind(&SocketAddr::from((from, 0)).into()).unwrap();
-        socket.connect_timeout(&to.into(), Duration::from_secs(1)).unwrap();
+        socket.connect_timeout(&to.into(), PATIENCE).unwrap();
         let mut stream: TcpStream = socket.into();
-        stream.set_read_timeout(Some(Duration::from_millis(800))).unwrap();
+        stream.set_read_timeout(Some(PATIENCE)).unwrap();
         stream.write_all(format!("GET {path} HTTP/1.1\r\nHost: x\r\n\r\n").as_bytes()).unwrap();
         let mut answer = String::new();
         let _ = stream.read_to_string(&mut answer);
@@ -1961,7 +2001,7 @@ mod tests {
         // Stopping wakes the threads bound on the network address: it ends at once.
         let started = Instant::now();
         drop(svc);
-        assert!(started.elapsed() < Duration::from_millis(900), "{:?}", started.elapsed());
+        assert!(started.elapsed() < PATIENCE, "the stop waited for the read timeout rather than waking the threads: {:?}", started.elapsed());
     }
 
     #[cfg(not(target_vendor = "apple"))]
@@ -1977,7 +2017,9 @@ mod tests {
         assert!(err.to_string().contains("not found on the network"), "{err}");
         let bytes = rosc::encoder::encode(&OscPacket::Message(OscMessage { addr: "/avatar/parameters/Early".into(), args: vec![OscType::Int(1)] })).unwrap();
         quest.send_to(&bytes, ("127.0.0.1", svc.osc_port)).unwrap();
-        std::thread::sleep(Duration::from_millis(200));
+        // Read and dropped before anything is chosen (a sleep here once ended before the service had read it: chosen in the
+        // meantime, the Quest's early datagram was then rightly heard).
+        wait_turned_away(&svc, 1);
         assert!(got.lock().unwrap().is_empty(), "no VRChat chosen: nothing is heard");
         // Chosen (entered, or among several): heard, and sent to.
         let quest_port = quest.local_addr().unwrap().port();

@@ -121,11 +121,26 @@ impl Client {
     }
 }
 
-/// The bridge on a free port with the lab game: no keeper, as if the flag said yes.
+/// How long a test waits for what has to happen sooner or later: far longer than any busy machine takes (the full test run
+/// keeps every core busy for ten minutes), and only ever waited in full by a test that fails. A wait that proves something
+/// is quick keeps its own short limit.
+const PATIENCE: Duration = Duration::from_secs(30);
+
+/// The bridge on a free port with the lab game: no keeper, as if the flag said yes. A start may take [`PATIENCE`] to arrive:
+/// the lab loads in 200 ms, which a busy machine stretched past the two seconds this used to allow.
 fn lab(name: &str) -> (Arc<LabGame>, Arc<Bridge>, Server, Client) {
+    lab_timed(name, PATIENCE)
+}
+
+/// [`lab`] for a test that wants a start that never arrives to be given up on: after two seconds.
+fn lab_giving_up(name: &str) -> (Arc<LabGame>, Arc<Bridge>, Server, Client) {
+    lab_timed(name, Duration::from_secs(2))
+}
+
+fn lab_timed(name: &str, start_limit: Duration) -> (Arc<LabGame>, Arc<Bridge>, Server, Client) {
     let dir = std::env::temp_dir().join(format!("orbiters-bridge-e2e-{name}-{}", uuid::Uuid::new_v4().simple()));
     let game = LabGame::new(&dir, None);
-    let bridge = Bridge::with_timing(game.clone(), None, Timing { instance_every: Duration::from_millis(50), start_limit: Duration::from_secs(2) });
+    let bridge = Bridge::with_timing(game.clone(), None, Timing { instance_every: Duration::from_millis(50), start_limit });
     let server = Server::start(bridge.clone(), 0, TOKEN.to_string()).expect("a free port");
     let client = Client { port: server.port() };
     (game, bridge, server, client)
@@ -224,45 +239,45 @@ fn settings_buttons_reach_the_client_and_a_new_token_or_an_open_keeps_it_right()
     let k = keeping("clients", Duration::from_secs(60));
     let fake = Arc::new(FakeClient::default());
     k.keeper.registrations.set(Registrations::new(vec![fake.clone()], Box::new(|_, _| {}))).ok().expect("first");
-    assert!(until(Duration::from_secs(5), || k.listening()));
+    assert!(until(PATIENCE, || k.listening()));
     let state = || k.status.lock().unwrap().clients.first().cloned();
     let registration = || state().map(|c| c.registration);
 
     // A look, and what Settings shows.
     k.keeper.command(Command::CheckClients);
-    assert!(until(Duration::from_secs(5), || registration() == Some(Registration::NotAdded)), "{:?}", state());
+    assert!(until(PATIENCE, || registration() == Some(Registration::NotAdded)), "{:?}", state());
 
     // The one click.
     k.keeper.command(Command::Client { client: Agent::ClaudeCode, change: Change::Add });
-    assert!(until(Duration::from_secs(5), || registration() == Some(Registration::Added)), "{:?}", state());
+    assert!(until(PATIENCE, || registration() == Some(Registration::Added)), "{:?}", state());
     let added = fake.0.lock().unwrap().clone().unwrap();
     assert_eq!(added.token.as_deref(), Some(TOKEN));
     assert_eq!(added.address, Some(format!("http://127.0.0.1:{}/mcp", k.keeper.port().unwrap())));
 
     // A new token: the entry follows, and the row says what still needs doing.
     k.keeper.command(Command::NewToken);
-    assert!(until(Duration::from_secs(5), || fake.0.lock().unwrap().as_ref().is_some_and(|e| e.token.as_deref() != Some(TOKEN))), "{:?}", state());
-    assert!(until(Duration::from_secs(5), || registration() == Some(Registration::Added) && state().is_some_and(|c| !c.busy)), "{:?}", state());
+    assert!(until(PATIENCE, || fake.0.lock().unwrap().as_ref().is_some_and(|e| e.token.as_deref() != Some(TOKEN))), "{:?}", state());
+    assert!(until(PATIENCE, || registration() == Some(Registration::Added) && state().is_some_and(|c| !c.busy)), "{:?}", state());
     assert!(state().unwrap().note.unwrap().contains("session already open"));
     assert_eq!(fake.0.lock().unwrap().as_ref().unwrap().token, k.status.lock().unwrap().token, "the one the bridge now wants");
 
     // The address changed behind its back, as a port moved by another program does: the next opening fixes it.
     fake.0.lock().unwrap().as_mut().unwrap().address = Some("http://127.0.0.1:1/mcp".into());
     k.flag.enabled.store(false, Ordering::Relaxed);
-    assert!(until(Duration::from_secs(5), || !k.listening()));
+    assert!(until(PATIENCE, || !k.listening()));
     k.flag.enabled.store(true, Ordering::Relaxed);
-    assert!(until(Duration::from_secs(5), || k.listening()));
+    assert!(until(PATIENCE, || k.listening()));
     let port = k.keeper.port().unwrap();
     assert!(
-        until(Duration::from_secs(5), || fake.0.lock().unwrap().as_ref().is_some_and(|e| e.address == Some(format!("http://127.0.0.1:{port}/mcp")))),
+        until(PATIENCE, || fake.0.lock().unwrap().as_ref().is_some_and(|e| e.address == Some(format!("http://127.0.0.1:{port}/mcp")))),
         "{:?}",
         state()
     );
 
     // And the way back.
-    assert!(until(Duration::from_secs(5), || state().is_some_and(|c| !c.busy)));
+    assert!(until(PATIENCE, || state().is_some_and(|c| !c.busy)));
     k.keeper.command(Command::Client { client: Agent::ClaudeCode, change: Change::Remove });
-    assert!(until(Duration::from_secs(5), || registration() == Some(Registration::NotAdded)), "{:?}", state());
+    assert!(until(PATIENCE, || registration() == Some(Registration::NotAdded)), "{:?}", state());
     assert!(fake.0.lock().unwrap().is_none());
 }
 
@@ -644,13 +659,13 @@ fn only_private_instances_of_ones_own_are_acted_in() {
         ("12345~private(usr_someone-else)~region(eu)", "someone else's"),
         ("12345~group(grp_1)~groupAccessType(public)~region(eu)", "a group's"),
     ] {
-        let (game, _bridge, _server, client) = lab("private");
+        let (game, _bridge, _server, client) = lab_giving_up("private");
         game.set_behaviour(|b| b.land_in = Some(instance.to_string()));
         // VRChat ended up elsewhere than asked: never counted as arrived.
         let answer = client.tool("go_to_world", json!({ "world_id": LAB_WORLD_A }));
         assert!(matches!(&answer, Err(f) if f["code"] == "start_timeout") || matches!(&answer, Ok(a) if a["arrived"] == false), "{instance}: {answer:?}");
         // Whatever the answer was, a look at the state shows where it is, and that nothing is allowed there.
-        assert!(until(Duration::from_secs(3), || client.state()["place"]["in_world"] == true), "{instance}");
+        assert!(until(PATIENCE, || client.state()["place"]["in_world"] == true), "{instance}");
         assert_eq!(client.state()["place"]["private"], false, "{instance}");
         assert!(client.state()["next"].as_str().unwrap().contains("not private") || client.state()["vrchat"]["started_by_bridge"] == true);
         for (tool, args) in [
@@ -701,7 +716,7 @@ fn a_vrchat_the_person_started_is_left_alone() {
 
 #[test]
 fn failures_say_what_happened_and_what_to_do() {
-    let (game, _bridge, _server, client) = lab("failures");
+    let (game, _bridge, _server, client) = lab_giving_up("failures");
     client.fails("walk", json!({ "direction": "forward", "seconds": 1 }), "vrchat_not_running");
     client.fails("screenshot", json!({}), "vrchat_not_running");
     client.fails("close_vrchat", json!({}), "vrchat_not_running");
@@ -990,7 +1005,7 @@ fn an_avatar_is_worn_when_asked_and_says_so_when_vrchat_does_not_take_it() {
 
 #[test]
 fn a_public_instance_changes_no_avatar() {
-    let (game, _bridge, _server, client) = lab("wear-public");
+    let (game, _bridge, _server, client) = lab_giving_up("wear-public");
     game.set_behaviour(|b| b.land_in = Some("12345~region(eu)".to_string()));
     let _ = client.tool("go_to_world", json!({ "world_id": LAB_WORLD_A }));
     assert!(until(Duration::from_secs(3), || client.state()["place"]["in_world"] == true));
@@ -1080,13 +1095,20 @@ fn a_picture_without_the_capture_kit_says_so() {
 
 #[test]
 fn an_answer_does_not_wait_for_the_look_at_its_socket() {
-    let (_game, _bridge, _server, client) = lab("latency");
-    // The watcher's look takes up to its read timeout of 200 ms: ten answers must not each pay for it.
+    // The watcher's look lasts up to the socket's read timeout (200 ms in the app): an answer must not wait for it. A minute
+    // here, so that one that did would take a minute, where ten answers take milliseconds on an idle machine and under two
+    // seconds on one running the whole test suite (once 1.78 s, which the 1.5 s this test allowed with the app's 200 ms
+    // could not tell from waiting).
+    let look = Duration::from_secs(60);
+    let dir = std::env::temp_dir().join(format!("orbiters-bridge-e2e-latency-{}", uuid::Uuid::new_v4().simple()));
+    let bridge = Bridge::with_timing(LabGame::new(&dir, None), None, Timing { instance_every: Duration::from_millis(50), start_limit: PATIENCE });
+    let server = Server::start_looking_every(bridge, 0, TOKEN.to_string(), look).expect("a free port");
+    let client = Client { port: server.port() };
     let begin = Instant::now();
     for _ in 0..10 {
         client.state();
     }
-    assert!(begin.elapsed() < Duration::from_millis(1500), "{:?}", begin.elapsed());
+    assert!(begin.elapsed() < look, "an answer waited for the look at its socket: {:?}", begin.elapsed());
 }
 
 #[test]

@@ -482,6 +482,20 @@ impl CodexCli {
 struct Slot {
     cli: Arc<dyn ClientCli>,
     status: ClientStatus,
+    /// What was asked while a command ran (`status.busy`): it runs next, on the same thread, once that one ends. Before this,
+    /// such a step was dropped: a look started when Settings opened, or the repair the keeper starts when the bridge opens,
+    /// made the person's Add click that came during it do nothing at all, and a new token that came during a look left the
+    /// client with the old one. Seen in the end-to-end test as `NotAdded` five seconds after the click on a busy machine.
+    next: Option<(Step, Wanted)>,
+}
+
+/// What runs for a client, one at a time.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Step {
+    /// What the person pressed.
+    Change(Change),
+    /// The address or the token changed ([`Registrations::repair`]).
+    Repair,
 }
 
 /// The clients as they stand, and the one command at a time each of them runs, on threads of their own: Settings never waits.
@@ -507,7 +521,7 @@ impl Registrations {
             .into_iter()
             .map(|cli| {
                 let client = cli.client();
-                Slot { cli, status: ClientStatus { client, registration: Registration::Unknown, busy: false, note: None, failed: false } }
+                Slot { cli, status: ClientStatus { client, registration: Registration::Unknown, busy: false, note: None, failed: false }, next: None }
             })
             .collect();
         Arc::new(Self { slots: Mutex::new(slots), last_check: Mutex::new(None), log, threads: AtomicBool::new(true) })
@@ -522,37 +536,61 @@ impl Registrations {
         self.slots.lock().unwrap().iter().map(|s| s.status.clone()).collect()
     }
 
-    /// Takes the turn of a client, or of all of them: those with a command running are left out.
-    fn begin(&self, client: Option<Client>) -> Vec<Arc<dyn ClientCli>> {
+    /// Takes the turn of a client, or of all of them. One with a command running is left out; unless this is only a look
+    /// (`step` `None`, and the running command ends with a look anyway), what is asked is kept as its next ([`Slot::next`]).
+    fn begin(&self, client: Option<Client>, step: Option<Step>, wanted: &Wanted) -> Vec<Arc<dyn ClientCli>> {
         let mut slots = self.slots.lock().unwrap();
-        slots
-            .iter_mut()
-            .filter(|s| client.is_none_or(|c| c == s.status.client) && !s.status.busy)
-            .map(|s| {
-                s.status.busy = true;
-                s.cli.clone()
-            })
-            .collect()
+        let mut free = Vec::new();
+        for slot in slots.iter_mut().filter(|s| client.is_none_or(|c| c == s.status.client)) {
+            if !slot.status.busy {
+                slot.status.busy = true;
+                free.push(slot.cli.clone());
+            } else if let Some(step) = step {
+                slot.next = Some(match (&slot.next, step) {
+                    // A repair never takes the place of a click: the click runs, with what is right by then.
+                    (Some((Step::Change(change), _)), Step::Repair) => (Step::Change(*change), wanted.clone()),
+                    _ => (step, wanted.clone()),
+                });
+            }
+        }
+        free
     }
 
-    fn end(&self, client: Client, outcome: Outcome) {
+    /// Ends a client's command. What was asked meanwhile, if anything, is the one it goes on with: the client stays busy.
+    fn end(&self, client: Client, outcome: Outcome) -> Option<(Step, Wanted)> {
         let mut slots = self.slots.lock().unwrap();
-        if let Some(slot) = slots.iter_mut().find(|s| s.status.client == client) {
-            slot.status.busy = false;
-            slot.status.registration = outcome.registration;
-            // A plain look leaves the last sentence as it was.
-            if outcome.note.is_some() {
-                slot.status.note = outcome.note;
-                slot.status.failed = outcome.failed;
-            }
+        let slot = slots.iter_mut().find(|s| s.status.client == client)?;
+        let next = slot.next.take();
+        slot.status.busy = next.is_some();
+        slot.status.registration = outcome.registration;
+        // A plain look leaves the last sentence as it was.
+        if outcome.note.is_some() {
+            slot.status.note = outcome.note;
+            slot.status.failed = outcome.failed;
+        }
+        next
+    }
+
+    /// Runs `step` (`None`: a look) for a client whose turn [`Registrations::begin`] took, on a thread of its own, and then
+    /// whatever was asked of it meanwhile.
+    fn run(self: &Arc<Self>, cli: Arc<dyn ClientCli>, step: Option<Step>, wanted: Wanted) {
+        let this = self.clone();
+        if self.threads.load(Ordering::Relaxed) {
+            let _ = std::thread::Builder::new().name("bridge-client".into()).spawn(move || this.steps(cli, step, wanted));
+        } else {
+            this.steps(cli, step, wanted);
         }
     }
 
-    fn go(self: &Arc<Self>, step: impl FnOnce() + Send + 'static) {
-        if self.threads.load(Ordering::Relaxed) {
-            let _ = std::thread::Builder::new().name("bridge-client".into()).spawn(step);
-        } else {
-            step();
+    fn steps(&self, cli: Arc<dyn ClientCli>, mut step: Option<Step>, mut wanted: Wanted) {
+        loop {
+            let outcome = match step {
+                None => Self::look(cli.as_ref(), &wanted),
+                Some(Step::Change(change)) => self.changed(cli.as_ref(), change, &wanted),
+                Some(Step::Repair) => self.repaired(cli.as_ref(), &wanted),
+            };
+            let Some((next, now_wanted)) = self.end(cli.client(), outcome) else { return };
+            (step, wanted) = (Some(next), now_wanted);
         }
     }
 
@@ -565,12 +603,8 @@ impl Registrations {
             }
             *last = Some(Instant::now());
         }
-        for cli in self.begin(None) {
-            let (this, wanted) = (self.clone(), wanted.clone());
-            self.go(move || {
-                let outcome = Self::look(cli.as_ref(), &wanted);
-                this.end(cli.client(), outcome);
-            });
+        for cli in self.begin(None, None, &wanted) {
+            self.run(cli, None, wanted.clone());
         }
     }
 
@@ -584,45 +618,45 @@ impl Registrations {
         }
     }
 
-    /// What a person pressed.
+    /// What a person pressed: at once, or right after the command the client is running.
     pub fn change(self: &Arc<Self>, client: Client, change: Change, wanted: Wanted) {
-        for cli in self.begin(Some(client)) {
-            let (this, wanted) = (self.clone(), wanted.clone());
-            self.go(move || {
-                let outcome = match change {
-                    Change::Add => Self::add_or_replace(cli.as_ref(), &wanted),
-                    Change::Remove => Self::take_away(cli.as_ref(), &wanted),
-                };
-                if let Some(note) = &outcome.note {
-                    (this.log)(!outcome.failed, format!("{}: {note}", cli.client().name()));
-                }
-                this.end(cli.client(), outcome);
-            });
+        for cli in self.begin(Some(client), Some(Step::Change(change)), &wanted) {
+            self.run(cli, Some(Step::Change(change)), wanted.clone());
         }
+    }
+
+    fn changed(&self, cli: &dyn ClientCli, change: Change, wanted: &Wanted) -> Outcome {
+        let outcome = match change {
+            Change::Add => Self::add_or_replace(cli, wanted),
+            Change::Remove => Self::take_away(cli, wanted),
+        };
+        if let Some(note) = &outcome.note {
+            (self.log)(!outcome.failed, format!("{}: {note}", cli.client().name()));
+        }
+        outcome
     }
 
     /// The address or the token changed, or the bridge just opened: an entry with old values is written again, as a person would
     /// otherwise have to find out why their agent stopped working. What has no entry stays without one.
     pub fn repair(self: &Arc<Self>, wanted: Wanted) {
-        for cli in self.begin(None) {
-            let (this, wanted) = (self.clone(), wanted.clone());
-            self.go(move || {
-                let looked = Self::look(cli.as_ref(), &wanted);
-                let outcome = if matches!(looked.registration, Registration::Outdated(_)) {
-                    let mut outcome = Self::add_or_replace(cli.as_ref(), &wanted);
-                    if !outcome.failed {
-                        outcome.note = Some(tr!("Its address or token was old, and is updated now. Restart any {name} session already open.", name = cli.client().name()));
-                    }
-                    if let Some(note) = &outcome.note {
-                        (this.log)(!outcome.failed, format!("{}: {note}", cli.client().name()));
-                    }
-                    outcome
-                } else {
-                    looked
-                };
-                this.end(cli.client(), outcome);
-            });
+        for cli in self.begin(None, Some(Step::Repair), &wanted) {
+            self.run(cli, Some(Step::Repair), wanted.clone());
         }
+    }
+
+    fn repaired(&self, cli: &dyn ClientCli, wanted: &Wanted) -> Outcome {
+        let looked = Self::look(cli, wanted);
+        if !matches!(looked.registration, Registration::Outdated(_)) {
+            return looked;
+        }
+        let mut outcome = Self::add_or_replace(cli, wanted);
+        if !outcome.failed {
+            outcome.note = Some(tr!("Its address or token was old, and is updated now. Restart any {name} session already open.", name = cli.client().name()));
+        }
+        if let Some(note) = &outcome.note {
+            (self.log)(!outcome.failed, format!("{}: {note}", cli.client().name()));
+        }
+        outcome
     }
 
     fn add_or_replace(cli: &dyn ClientCli, wanted: &Wanted) -> Outcome {
@@ -971,10 +1005,39 @@ mod tests {
         this.check(wanted());
         this.check(wanted());
         assert_eq!(fake.calls.lock().unwrap().len(), 1, "the second look was too soon");
-        // A command running: another one does not start beside it.
+        // A command running: another one does not start beside it, and a look asked meanwhile is not kept (the running one
+        // ends with a look).
         this.slots.lock().unwrap()[0].status.busy = true;
         this.change(Client::Codex, Change::Add, wanted());
+        *this.last_check.lock().unwrap() = None;
+        this.check(wanted());
         assert_eq!(fake.calls.lock().unwrap().len(), 1);
+        // The click runs once that command ends, on its thread: it is never lost.
+        this.steps(fake.clone(), None, wanted());
+        assert_eq!(*fake.calls.lock().unwrap(), ["read", "read", "read", "add", "read"], "the running look, then the click");
+        let status = &this.statuses()[0];
+        assert_eq!((&status.registration, status.busy), (&Registration::Added, false));
+    }
+
+    /// A repair asked while a click waits does not take its place: the click runs, with the newest address and token.
+    #[test]
+    fn a_repair_asked_meanwhile_leaves_the_click_waiting_and_updates_it() {
+        let fake = Arc::new(Fake::default());
+        let (this, _) = registrations(fake.clone());
+        this.slots.lock().unwrap()[0].status.busy = true;
+        this.change(Client::Codex, Change::Add, Wanted { token: "older".into(), ..wanted() });
+        this.repair(wanted());
+        assert!(fake.calls.lock().unwrap().is_empty());
+        this.steps(fake.clone(), None, wanted());
+        assert_eq!(this.statuses()[0].registration, Registration::Added);
+        assert_eq!(fake.entry.lock().unwrap().as_ref().unwrap().token.as_deref(), Some(WANTED.1));
+        // And a repair asked while only a look runs is done after it.
+        let fake = Arc::new(Fake { entry: Mutex::new(entry(WANTED.0, "old")), ..Default::default() });
+        let (this, _) = registrations(fake.clone());
+        this.slots.lock().unwrap()[0].status.busy = true;
+        this.repair(wanted());
+        this.steps(fake.clone(), None, wanted());
+        assert_eq!(fake.entry.lock().unwrap().as_ref().unwrap().token.as_deref(), Some(WANTED.1), "the new token reached it");
     }
 
     #[test]

@@ -33,6 +33,9 @@ const MAX_BODY: usize = 1 << 20;
 const MAX_CONNECTIONS: usize = 16;
 /// A connection that says nothing for this long goes.
 const IDLE: Duration = Duration::from_secs(120);
+/// A connection's socket is looked at this often: for the service stopping while it waits for a request, and during a call for
+/// the client going away. It is the socket's read timeout.
+const LOOK_EVERY: Duration = Duration::from_millis(200);
 
 /// How the server calls itself.
 fn server_info() -> Value {
@@ -56,13 +59,19 @@ pub struct Server {
 impl Server {
     /// Listens on 127.0.0.1:`port` (0: any free one).
     pub fn start(bridge: Arc<Bridge>, port: u16, token: String) -> std::io::Result<Self> {
+        Self::start_looking_every(bridge, port, token, LOOK_EVERY)
+    }
+
+    /// [`Server::start`] with its sockets looked at every `look` ([`LOOK_EVERY`]): a test makes it long, so that whether an
+    /// answer waits for a look is plain whatever the speed of the machine.
+    pub(super) fn start_looking_every(bridge: Arc<Bridge>, port: u16, token: String, look: Duration) -> std::io::Result<Self> {
         let listener = TcpListener::bind(("127.0.0.1", port))?;
         let port = listener.local_addr()?.port();
         listener.set_nonblocking(true)?;
         let stop = Arc::new(AtomicBool::new(false));
         let stopping = stop.clone();
         let connections = Arc::new(AtomicUsize::new(0));
-        let shared = Arc::new(Shared { bridge: bridge.clone(), token, port });
+        let shared = Arc::new(Shared { bridge: bridge.clone(), token, port, look });
         let thread = std::thread::Builder::new().name("bridge-listen".into()).spawn(move || {
             let mut ticked = Instant::now();
             while !stopping.load(Ordering::Relaxed) {
@@ -111,6 +120,7 @@ struct Shared {
     bridge: Arc<Bridge>,
     token: String,
     port: u16,
+    look: Duration,
 }
 
 /// An HTTP request as read.
@@ -178,7 +188,7 @@ pub fn token_ok(header: Option<&str>, token: &str) -> bool {
 fn serve(shared: &Shared, mut stream: TcpStream, stop: &AtomicBool) {
     let _ = stream.set_nonblocking(false);
     let _ = stream.set_nodelay(true);
-    let _ = stream.set_read_timeout(Some(Duration::from_millis(200)));
+    let _ = stream.set_read_timeout(Some(shared.look));
     let _ = stream.set_write_timeout(Some(Duration::from_secs(20)));
     let mut buffered = Vec::new();
     while let Some(request) = read_request(&mut stream, &mut buffered, stop) {
@@ -490,7 +500,7 @@ fn call_tool(shared: &Shared, message: &Value, stream: &TcpStream) -> Value {
         let (gone, finished) = (gone.clone(), finished.clone());
         std::thread::spawn(move || {
             let mut byte = [0u8; 1];
-            // The socket's short read timeout makes this a look every fifth of a second.
+            // The socket's short read timeout ([`LOOK_EVERY`]) makes this a look every fifth of a second.
             while !finished.load(Ordering::Relaxed) {
                 match socket.peek(&mut byte) {
                     Ok(0) => {

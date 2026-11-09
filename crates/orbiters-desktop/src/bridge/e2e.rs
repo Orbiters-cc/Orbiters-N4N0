@@ -1112,3 +1112,45 @@ fn the_guards_lines_follow_what_is_held() {
     reading.line(&format!("up {}", hold.guard_line()));
     assert!(reading.down.is_empty());
 }
+
+// ---- The Unity projects tools
+
+/// Over the wire as any client calls them: listed after the VRChat tools, their guide a resource, the server's
+/// instructions naming them, a refusal saying what to do next, the person's pause respected, and a token needed.
+#[test]
+fn the_unity_projects_tools_are_reached_like_the_others() {
+    let (_game, bridge, _server, client) = lab("unity-projects");
+    let (_, body) = client.rpc("tools/list", json!({}));
+    let names: Vec<String> = body["result"]["tools"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap().to_string()).collect();
+    let unity: Vec<&str> = names.iter().map(String::as_str).filter(|n| n.starts_with("unity_")).collect();
+    assert_eq!(unity, super::projects::NAMES);
+    assert_eq!(names.first().map(String::as_str), Some("get_state"), "the VRChat tools first");
+    let (_, body) = client.rpc("resources/list", json!({}));
+    let uris: Vec<&str> = body["result"]["resources"].as_array().unwrap().iter().map(|r| r["uri"].as_str().unwrap()).collect();
+    assert_eq!(uris, ["bridge://guide", "bridge://unity-projects"]);
+    let (_, body) = client.rpc("resources/read", json!({ "uri": "bridge://unity-projects" }));
+    assert!(body["result"]["contents"][0]["text"].as_str().unwrap().contains("unity_change_packages"));
+    let (_, body) = client.rpc("server/discover", json!({}));
+    assert!(body["result"]["instructions"].as_str().unwrap().contains("bridge://unity-projects"));
+
+    // Jobs are listed (none yet); a made-up project is refused with what to do.
+    assert_eq!(client.tool("unity_get_job", json!({})).unwrap()["jobs"], json!([]));
+    client.fails("unity_get_project", json!({ "path": "Z:/no/such/project" }), "not_a_project");
+    client.fails("unity_change_packages", json!({ "path": "relative" , "action": "restore" }), "bad_arguments");
+    client.fails("unity_cancel_job", json!({ "job": 7 }), "no_such_job");
+    // Nothing is taken out of the list without the exact path of a listed project.
+    let dir = std::env::temp_dir().join(format!("orbiters-bridge-e2e-unity-{}", uuid::Uuid::new_v4().simple()));
+    client.fails("unity_manage_project", json!({ "path": dir.join("Not listed"), "action": "remove_from_list", "confirm": true }), "not_listed");
+
+    // The person's pause: changes wait for them, reading does not.
+    bridge.hold(true);
+    client.fails("unity_change_packages", json!({ "path": "Z:/no/such/project", "action": "restore" }), "paused_held");
+    assert!(client.tool("unity_get_job", json!({})).is_ok());
+    bridge.hold(false);
+    // What was asked shows in Settings' log, as the VRChat tools' actions do.
+    assert!(bridge.log.lock().unwrap().iter().any(|l| !l.ok && l.text.starts_with("manage project remove_from_list")), "{:?}", bridge.log.lock().unwrap());
+
+    // Without the token, nothing.
+    let (status, _, _) = exchange(client.port, "POST", "/mcp", &[("Host", format!("127.0.0.1:{}", client.port)), ("Content-Type", "application/json".into())], &modern_message("tools/list", json!({}))).unwrap();
+    assert_eq!(status, 401);
+}

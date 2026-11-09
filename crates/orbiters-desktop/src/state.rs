@@ -603,6 +603,10 @@ pub struct Snapshot {
     /// Whether VRChat's camera is open, as VRChat last said: `None` when it has not said.
     #[serde(default)]
     pub camera_open_said: Option<bool>,
+    /// Bumped each time the VRChat bridge's Unity projects tools change something the Unity projects tab shows: the tab
+    /// looks again.
+    #[serde(default)]
+    pub projects_changed: u64,
 }
 
 impl Snapshot {
@@ -612,6 +616,7 @@ impl Snapshot {
             booster: Default::default(),
             worn_kit: None,
             camera_open_said: None,
+            projects_changed: 0,
             version: orbiters_core::APP_VERSION.into(),
             vrchat: VrchatStatus {
                 running: false,

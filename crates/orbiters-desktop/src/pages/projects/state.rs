@@ -295,6 +295,8 @@ pub struct State {
     pub(super) conflict: Option<super::conflict::View>,
     /// The Orbiters server the window uses (where missing packages are looked up), from the last frame.
     pub(super) server_now: Option<Server>,
+    /// The tray service's count of changes the VRChat bridge made to projects, as last seen: a new one looks again.
+    pub(super) bridge_changes: Option<u64>,
 }
 impl Default for State {
     fn default() -> Self {
@@ -432,6 +434,7 @@ impl Default for State {
             kill_confirm: None,
             conflict: None,
             server_now: None,
+            bridge_changes: None,
         }
     }
 }
@@ -637,6 +640,12 @@ impl State {
     }
     pub(super) fn poll(&mut self, ctx: &egui::Context, cx: &mut Cx) {
         self.server_now = Some(server(cx));
+        // An agent changed packages, repositories or projects through the bridge: the page looks again, as after its own.
+        let changes = cx.snap.projects_changed;
+        if self.bridge_changes.replace(changes).is_some_and(|seen| seen != changes) && self.started && !self.fixture {
+            self.load_view(ctx, false);
+            self.refresh(ctx, false);
+        }
         self.poll_thumbs(ctx);
         let environment = crate::controller::vrchat_data::Scope::of(cx.snap);
         // Another account or VRChat session: every picture is asked for again, the ones shown staying until their

@@ -14,7 +14,7 @@ use vrc_get_vpm::version::{PrereleaseAcceptance, Version, VersionRange};
 use vrc_get_vpm::{PackageCollection, PackageInfo, UnityProject, VersionSelector};
 
 /// A package the change would install at a version some installed packages do not accept.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize)]
 pub struct Conflict {
     pub name: String,
     pub display_name: String,
@@ -23,7 +23,7 @@ pub struct Conflict {
     /// Who needs another version, and the range each accepts.
     pub needed_by: Vec<Need>,
 }
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize)]
 pub struct Need {
     pub name: String,
     pub display_name: String,
@@ -32,7 +32,7 @@ pub struct Need {
 }
 /// A package no version of which works with the plan: it can be removed too (when nothing else needs it), or the
 /// change given up.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize)]
 pub struct Blocker {
     pub name: String,
     pub display_name: String,
@@ -45,7 +45,7 @@ pub struct Blocker {
     pub removable: bool,
 }
 /// A change that conflicted, made coherent: everything that has to change with it, why, and what still blocks it.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize)]
 pub struct Plan {
     /// What the person asked for.
     pub requested: Vec<(String, String)>,

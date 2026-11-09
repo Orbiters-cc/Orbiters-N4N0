@@ -10,6 +10,8 @@
 //!   person's own input pausing everything ([`person`]), and every press bounded and released ([`input`], [`guard`]).
 //! - It reads the game's log and window, and sends startup arguments, OSC and ordinary window input. It opens no handle to
 //!   the game's process, reads none of its memory, injects nothing, and does nothing around Easy Anti-Cheat.
+//! - It also does what the Unity projects tab does ([`projects`]): projects, packages, repositories, Unity's editors, new
+//!   projects and copies, the Library move, Orbiters' packages and world uploads, behind the same gate, address and token.
 
 pub mod capture;
 pub mod clients;
@@ -23,6 +25,7 @@ pub mod keeper;
 pub mod lab;
 pub mod mcp;
 pub mod person;
+pub mod projects;
 pub mod tools;
 pub mod win;
 
@@ -180,6 +183,8 @@ pub struct Bridge {
     in_flight: AtomicUsize,
     /// Bumped by every take-over: what started before it ends.
     stops: AtomicU64,
+    /// The Unity projects tools and their jobs.
+    pub projects: projects::Projects,
 }
 
 impl Bridge {
@@ -204,6 +209,7 @@ impl Bridge {
             client: Mutex::new(None),
             in_flight: AtomicUsize::new(0),
             stops: AtomicU64::new(0),
+            projects: projects::Projects::default(),
         })
     }
 
@@ -296,6 +302,8 @@ impl Bridge {
     pub fn take_over(&self, why: &str) {
         self.stops.fetch_add(1, Ordering::Relaxed);
         self.release_all();
+        // A copy, a Library move, a scan or a size ends where it safely can; a package change finishes.
+        self.projects.stop_all();
         let (was_running, was_going) = {
             let mut run = self.run.lock().unwrap();
             (run.pid.take().is_some(), run.going.take().is_some())

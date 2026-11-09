@@ -71,6 +71,39 @@ Needed as well: signed in to VRChat in Settings (private instances are made with
 The resource `bridge://guide` and the prompt `world_tour` explain the loop to an agent, including when to give up on a world. Every refusal has a
 `code`, a `message` and a `next` (and `retry_after_s` when that is the answer).
 
+### The Unity projects tools
+
+The same server, behind the same gate, address and token, also does what the **Unity projects** tab does
+(`crates/orbiters-desktop/src/bridge/projects.rs`). They run in the tray service and call what the tab's buttons call
+(`orbiters_projects`: the VCC environment through vrc-get, the projects found on the disks, Unity's editors, the Library
+move, the templates), so they work with the window closed and behave as the tab does; each change bumps the snapshot's
+`projects_changed`, and the tab looks again. Their guide is the resource `bridge://unity-projects`.
+
+| Tool | What for |
+| --- | --- |
+| `unity_list_projects` | The projects on this computer: name, path, Unity version, kind, listed or only found, hidden, avatars and worlds (blueprint ids), Unity open, size. `refresh` looks again (a job). |
+| `unity_get_project` | One project: installed packages and versions, updates and held updates with why, Update all's plan, Unity's editor, disk health, Git, Blender files, previews, worlds' captures and uploads, missing packages. |
+| `unity_find_packages` | What the enabled repositories offer, with versions (pre-releases on request) and the installed one. |
+| `unity_change_packages` | `install` (a version or the newest; also changes a version), `remove`, `update`, `update_all`, `restore` (Resolve), `apply_plan` (a conflict's plan), `solve` (a plan, nothing applied). A job. |
+| `unity_missing_packages` | After `packages_not_listed`: `lookup` finds the repositories that have them, `add` adds them and runs the change again. |
+| `unity_repositories` | `list`, `add` (URL, headers), `remove`, `enable`, `disable`, `refresh` (download again), `suggest` (Orbiters' catalog). |
+| `unity_editor` | `status`, `open` (Open in Unity), `show`, `save_and_exit`, `kill` (needs `confirm`). |
+| `unity_manage_project` | `add` to the list, `remove_from_list` (exact listed path and `confirm`; files stay), `hide`, `unhide`, `reveal`, `open_hub`, `open_blender`. |
+| `unity_list_templates` | Templates, their Unity version and whether it is installed, the default folder. |
+| `unity_create_project` | A project from a template, listed in VCC and ALCOM. A job. |
+| `unity_duplicate_project` | Duplicate with exact packages, Library optional; `check_only` gives bytes needed and free. A job. |
+| `unity_storage` | `check` the disk, `plan` and `repair` the Library move, `measure` the size. Jobs. |
+| `unity_add_orbiters` | `mixer`, `toolkit` (and open in Unity), `my_avatar`, `n4n0` on one of the project's avatars. A job. |
+| `unity_world` | A world project's world: `status`, `add_pictures`, `set_preview` (a capture recorded there). |
+| `unity_get_job`, `unity_cancel_job` | Follow a job (`wait_s`), stop a copy, a Library move before its switch, a scan or a size. |
+
+Rules: one package or project change at a time (as the tab), the Library move, a scan and a size each in a lane of their
+own; a pause held from the hotkey or Settings refuses every change (reading goes on), the person's own input refuses only
+what opens a window (`open`, `show`, `reveal`, `open_hub`, `open_blender`); Stop cancels what can be cancelled. Nothing
+deletes a project's files: the tab has no such action, and neither do the tools. Not covered: the 3D preview's own view
+(drawn on the window's GPU; the tools list the previews), and "Change the picture on VRChat" of a row's menu (a write to
+the VRChat account, which the bridge does not make).
+
 ## The protocol
 
 Streamable HTTP on `127.0.0.1`, one POST endpoint answering JSON, revision `2026-07-28` (stateless, `server/discover`, the `Mcp-Method` and `Mcp-Name`

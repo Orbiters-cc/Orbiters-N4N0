@@ -37,7 +37,7 @@ const PITCH: (f32, f32) = (0.05, 1.05);
 const TANGENT: f32 = 0.31;
 /// Where its plate's middle lies under the head's level, in metres at its distance.
 /// Lower and further than at first: round 12's judges saw the capture's top go under the sheet's head.
-const PLATE_AT: f32 = -0.1;
+const PLATE_AT: f32 = -0.32;
 /// What is left of what it shows, zoomed all the way out and in.
 const ZOOM: (f32, f32) = (0.35, 1.6);
 
@@ -203,7 +203,8 @@ fn rotation(start: &[[f32; 3]; 3], pose: Pose) -> [[f32; 3]; 3] {
 fn stands(capture: &Capture, head: &Matrix34, start: &[[f32; 3]; 3], pose: Pose, below: f32) -> Small {
     let mut small = Small::new(&capture.view, head, capture.small_reach()).zoomed_in(pose.zoom);
     small.rotation = rotation(start, pose);
-    small.anchor = [0.0, 0.0, -0.98];
+    // A little further than at first: round 14's judges saw it reach the frame's top.
+    small.anchor = [0.0, 0.0, -1.6];
     // Its plate at the same height in the picture whatever the capture's ground is, and however it is tipped: what stands on it has the room over it.
     let (plate, _) = small.plate(below);
     small.anchor[1] += PLATE_AT - stereo::position(&plate)[1];

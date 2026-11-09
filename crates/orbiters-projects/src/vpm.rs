@@ -142,14 +142,85 @@ impl vrc_get_vpm::PackageCollection for EnabledCollection {
         self.find_packages(name).filter(|p| selector.satisfies(p.package_json())).max_by_key(|p| p.version())
     }
 }
-/// VRChat's own repositories never downloaded: a computer without Creator Companion (or before its first start). A
-/// person's repositories are downloaded when added (a dead one must not hold every look at the packages).
-fn missing_cache(root: &Path, settings: &Settings) -> bool {
-    let predefined = [
+/// The predefined repositories VCC downloads itself, as cache files under `root`.
+fn predefined_caches(root: &Path, settings: &Settings) -> Vec<PathBuf> {
+    [
         (!settings.ignore_official_repository()).then_some("Repos/vrc-official.json"),
         (!settings.ignore_curated_repository()).then_some("Repos/vrc-curated.json"),
-    ];
-    predefined.into_iter().flatten().any(|p| !root.join(p).is_file())
+    ]
+    .into_iter()
+    .flatten()
+    .map(|p| root.join(p))
+    .collect()
+}
+/// Every cache of a repository that is downloaded from somewhere: VRChat's and the person's remote ones (a local
+/// repository's file is the repository itself, nothing to download).
+fn remote_caches(root: &Path, settings: &Settings) -> Vec<PathBuf> {
+    let mut caches = predefined_caches(root, settings);
+    caches.extend(settings.get_user_repos().iter().filter(|r| r.url().is_some()).map(|r| root.join(r.local_path())));
+    caches
+}
+/// A cache file that is there but cannot be used: empty (written while its disk was full: vrc-get writes it in place),
+/// cut short, or not a listing at all. vrc-get takes such a file for a repository never downloaded, and only a refresh
+/// downloads it again: until then its packages have no versions and no updates.
+fn unusable_cache(path: &Path) -> bool {
+    match std::fs::read(path) {
+        Ok(bytes) => {
+            let text = bytes.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(&bytes);
+            !serde_json::from_slice::<serde_json::Value>(text).is_ok_and(|v| v.is_object())
+        }
+        Err(_) => false,
+    }
+}
+/// The remote repositories' caches that are there and unusable ([`unusable_cache`]).
+fn broken_caches(root: &Path, settings: &Settings) -> Vec<PathBuf> {
+    remote_caches(root, settings).into_iter().filter(|p| unusable_cache(p)).collect()
+}
+/// The broken caches last downloaded again, and when: a repository whose server is down keeps its broken cache, and must
+/// not hold every look at the packages with a download.
+static BROKEN_TRIED: std::sync::Mutex<Vec<(PathBuf, std::time::Instant)>> = std::sync::Mutex::new(Vec::new());
+const BROKEN_RETRY: std::time::Duration = std::time::Duration::from_secs(5 * 60);
+/// Whether some of `broken` was not tried lately; those are counted as tried now.
+fn retry_broken(broken: &[PathBuf]) -> bool {
+    let mut tried = BROKEN_TRIED.lock().unwrap_or_else(|e| e.into_inner());
+    tried.retain(|(_, at)| at.elapsed() < BROKEN_RETRY);
+    let due: Vec<&PathBuf> = broken.iter().filter(|p| !tried.iter().any(|(t, _)| t == *p)).collect();
+    let any = !due.is_empty();
+    for p in due {
+        tried.push((p.clone(), std::time::Instant::now()));
+    }
+    any
+}
+/// VRChat's own repositories never downloaded: a computer without Creator Companion (or before its first start). A
+/// person's repositories are downloaded when added (a dead one must not hold every look at the packages), but one whose
+/// cache is broken counts as never downloaded (at most every few minutes each).
+fn missing_cache(root: &Path, settings: &Settings) -> bool {
+    predefined_caches(root, settings).iter().any(|p| !p.is_file()) || retry_broken(&broken_caches(root, settings))
+}
+/// The usable caches as they are now, to put back any that a download leaves broken.
+fn usable_caches(root: &Path, settings: &Settings) -> Vec<(PathBuf, Vec<u8>)> {
+    remote_caches(root, settings).into_iter().filter(|p| p.is_file() && !unusable_cache(p)).filter_map(|p| Some((p.clone(), std::fs::read(&p).ok()?))).collect()
+}
+/// Puts back each cache a download left unusable (vrc-get writes over the old file in place, so a full disk leaves it
+/// empty): through a file beside it, renamed over it, so that a disk still full leaves it as it is (downloaded again
+/// next time) rather than worse. The paths put back.
+fn restore_usable(before: &[(PathBuf, Vec<u8>)]) -> Vec<PathBuf> {
+    let mut restored = vec![];
+    for (path, bytes) in before {
+        if !unusable_cache(path) {
+            continue;
+        }
+        let tmp = path.with_extension("json.restore");
+        let put = std::fs::write(&tmp, bytes).and_then(|()| std::fs::rename(&tmp, path));
+        match put {
+            Ok(()) => restored.push(path.clone()),
+            Err(e) => {
+                let _ = std::fs::remove_file(&tmp);
+                eprintln!("the repository cache {} could not be put back: {e}", path.display()); // i18n: not shown (a log line)
+            }
+        }
+    }
+    restored
 }
 pub(crate) async fn collection(root: &Path, refresh: bool) -> anyhow::Result<(Settings, EnabledCollection)> {
     let io = DefaultEnvironmentIo::new(root.into());
@@ -157,10 +228,12 @@ pub(crate) async fn collection(root: &Path, refresh: bool) -> anyhow::Result<(Se
     // Disabled repositories remain in VCC's settings; only the collection supplied to the resolver omits them.
     let hidden = hidden(root);
     let mut packages = PackageCollection::load_cache(&settings, &io).await?;
-    // Without a cache the repository's packages are unknown: download it, as ALCOM does on its first start.
+    // Without a cache the repository's packages are unknown: download it, as ALCOM does on its first start. `load`
+    // downloads every remote repository and writes its cache (its `update_cache`).
     if refresh || missing_cache(root, &settings) {
+        let before = usable_caches(root, &settings);
         packages = PackageCollection::load(&settings, &io, Some(&http()?)).await?;
-        packages.update_cache(&io, &http()?).await;
+        restore_usable(&before);
     }
     Ok((settings, EnabledCollection { inner: packages, hidden }))
 }
@@ -422,4 +495,79 @@ pub async fn install_orbiters(root: &Path, path: &Path, names: &[&str]) -> anyho
 }
 pub async fn install_my_avatar(root: &Path, path: &Path) -> anyhow::Result<()> {
     install_orbiters(root, path, &["orbiters.toolkit", "orbiters.myavatar"]).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A VCC folder with VRChat's caches and one remote repository of the person's, its cache holding `cache`.
+    fn environment(cache: &[u8]) -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("Repos")).unwrap();
+        let listing = br#"{"name":"VRChat","url":"https://example.invalid/vrc.json","packages":{}}"#;
+        std::fs::write(root.join("Repos/vrc-official.json"), listing).unwrap();
+        std::fs::write(root.join("Repos/vrc-curated.json"), listing).unwrap();
+        let mine = root.join("Repos/cc.orbiters.vpm-11a3a2f7.json");
+        std::fs::write(&mine, cache).unwrap();
+        let settings = serde_json::json!({ "userRepos": [{ "localPath": mine, "name": "Orbiters", "url": ORBITERS_REPOSITORY, "id": "cc.orbiters.vpm" }] });
+        std::fs::write(root.join("settings.json"), serde_json::to_vec(&settings).unwrap()).unwrap();
+        (dir, mine)
+    }
+
+    fn settings(root: &Path) -> Settings {
+        runtime_for_tests().block_on(Settings::load(&DefaultEnvironmentIo::new(root.into()))).unwrap()
+    }
+
+    fn runtime_for_tests() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap()
+    }
+
+    /// 2026-11-09: the Orbiters repository's cache was a 0-byte file (written while C: was full), and orbiters.mcb showed
+    /// no versions and no update. An empty, cut or foreign cache counts as missing, and is downloaded again.
+    #[test]
+    fn a_broken_cache_of_a_persons_repository_is_downloaded_again() {
+        for broken in [&b""[..], b"  \r\n", b"{\"name\":\"Orbit", b"[]", b"\xEF\xBB\xBF"] {
+            let (dir, mine) = environment(broken);
+            let settings = settings(dir.path());
+            assert_eq!(broken_caches(dir.path(), &settings), vec![mine.clone()], "{broken:?}");
+            assert!(predefined_caches(dir.path(), &settings).iter().all(|p| p.is_file()));
+        }
+        let (dir, _) = environment(br#"{"name":"Orbiters","packages":{}}"#);
+        assert!(broken_caches(dir.path(), &settings(dir.path())).is_empty(), "a good cache is left alone");
+        // A local repository's file is the repository itself: nothing to download.
+        let (dir, mine) = environment(b"");
+        let local = serde_json::json!({ "userRepos": [{ "localPath": mine, "name": "Mine" }] });
+        std::fs::write(dir.path().join("settings.json"), serde_json::to_vec(&local).unwrap()).unwrap();
+        assert!(broken_caches(dir.path(), &settings(dir.path())).is_empty());
+    }
+
+    /// Asking again for the same broken cache waits a few minutes: a server that is down must not hold every look.
+    #[test]
+    fn a_broken_cache_is_tried_again_only_now_and_then() {
+        let path = PathBuf::from(format!("Z:/no/such/{}.json", uuid::Uuid::new_v4()));
+        assert!(retry_broken(std::slice::from_ref(&path)));
+        assert!(!retry_broken(std::slice::from_ref(&path)));
+        assert!(!retry_broken(&[]));
+    }
+
+    /// A download that leaves a cache empty (a full disk) never replaces a good one: the good one is put back.
+    #[test]
+    fn a_failed_write_never_replaces_a_good_cache() {
+        let good = br#"{"name":"Orbiters","url":"https://orbiters.cc/vpm/orbiters/index.json","packages":{"orbiters.mcb":{"versions":{}}}}"#;
+        let (dir, mine) = environment(good);
+        let settings = settings(dir.path());
+        let before = usable_caches(dir.path(), &settings);
+        assert_eq!(before.len(), 3, "VRChat's two and the person's");
+        std::fs::write(&mine, b"").unwrap();
+        assert_eq!(restore_usable(&before), vec![mine.clone()]);
+        assert_eq!(std::fs::read(&mine).unwrap(), good);
+        assert!(!mine.with_extension("json.restore").exists());
+        // A download that wrote a new good cache keeps it.
+        let newer = br#"{"name":"Orbiters","packages":{}}"#;
+        std::fs::write(&mine, newer).unwrap();
+        assert!(restore_usable(&before).is_empty());
+        assert_eq!(std::fs::read(&mine).unwrap(), newer);
+    }
 }

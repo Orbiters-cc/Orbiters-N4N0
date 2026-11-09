@@ -1,6 +1,6 @@
-//! A capture turning in 3D inside a sheet, on the desktop, where nothing can stand around the person (Enzo's request: a press on a capture
-//! shows it in 3D). The same splats and the same renderer as the small view in VR ([`Small`], [`FaceRenderer`]), drawn from its own thread
-//! into a picture the sheet paints: live, and turned by the mouse.
+//! A capture in 3D inside a sheet, on the desktop, where nothing can stand around the person (Enzo's request: a press on a capture shows it in 3D).
+//! Seen from inside, from where it was taken, as the Orbiters window's viewer shows it (Enzo, 2026-11-09: not the small cut-out round of it): the
+//! same renderer as VR's ([`FaceRenderer`]), drawn from its own thread into a picture the sheet paints, live, looked around with the mouse.
 //!
 //! What it may cost, beside a running game: the budget the 3D view holds in VR ([`DUTY`]), and no more frames a second than a slow turn needs.
 //! Nothing is drawn while nothing moves. The picture gets smaller, and later larger again, by what the last ones took. Everything of it,
@@ -9,10 +9,10 @@
 use super::super::worlds::catalog::{self, Capture};
 use super::super::worlds::pacing::DUTY;
 use super::super::worlds::render::{self, FaceRenderer};
-use super::super::worlds::stereo::{self, Small};
+use super::super::worlds::stereo;
 use orbiters_openvr::Matrix34;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -31,13 +31,10 @@ const STAYS_AFTER_A_DRAG: Duration = Duration::from_secs(4);
 /// A frame's cost over this makes the picture smaller; under the second, larger.
 const TOO_LONG_MS: f32 = 22.0;
 const ROOM_MS: f32 = 7.0;
-/// How steep it may be looked at from, in radians, from level to from above.
-const PITCH: (f32, f32) = (0.05, 1.05);
-/// The fixed head it is looked at from, and how far the frame reaches at the middle's distance.
-const TANGENT: f32 = 0.31;
-/// Where its plate's middle lies under the head's level, in metres at its distance.
-/// Lower and further than at first: round 12's judges saw the capture's top go under the sheet's head.
-const PLATE_AT: f32 = -0.32;
+/// How far down and up it may be looked, in radians from level.
+const PITCH: (f32, f32) = (-0.55, 0.75);
+/// Half the frame's height, as a tangent at zoom 1: about the Orbiters window's viewer's view.
+const TANGENT: f32 = 0.58;
 /// What is left of what it shows, zoomed all the way out and in.
 const ZOOM: (f32, f32) = (0.35, 1.6);
 
@@ -66,7 +63,7 @@ struct Pose {
 
 impl Default for Pose {
     fn default() -> Self {
-        Self { yaw: 0.0, pitch: 0.36, zoom: 1.0 }
+        Self { yaw: 0.0, pitch: 0.0, zoom: 1.0 }
     }
 }
 
@@ -99,6 +96,8 @@ struct Asked {
 struct Shared {
     asked: Mutex<Asked>,
     stop: AtomicBool,
+    /// The largest of [`SIZES`] worth drawing where it shows now (a side panel's frame, or the whole page).
+    largest: AtomicUsize,
     frame: Mutex<Option<Frame>>,
     state: Mutex<ViewState>,
     costs: Mutex<Costs>,
@@ -131,13 +130,14 @@ impl SheetView {
         let shared = Arc::new(Shared {
             asked: Mutex::new(Asked::default()),
             stop: AtomicBool::new(false),
+            largest: AtomicUsize::new(largest.min(SIZES.len() - 1)),
             frame: Mutex::new(None),
             state: Mutex::new(ViewState::Loading),
             costs: Mutex::new(Costs::default()),
         });
         let for_thread = shared.clone();
         let spawned = std::thread::Builder::new().name("orbit-sheet-view".into()).spawn(move || {
-            if let Err(e) = run(&for_thread, load, turning, largest) {
+            if let Err(e) = run(&for_thread, load, turning) {
                 eprintln!("the sheet's 3D view: {e:#}");
                 *for_thread.state.lock().unwrap_or_else(|e| e.into_inner()) = ViewState::Failed(format!("{e:#}"));
             }
@@ -146,6 +146,11 @@ impl SheetView {
             *shared.state.lock().unwrap_or_else(|e| e.into_inner()) = ViewState::Failed(e.to_string());
         }
         Self { shared }
+    }
+
+    /// Where it shows grew or shrank: `largest` is the largest of [`SIZES`] worth drawing now.
+    pub fn set_largest(&self, largest: usize) {
+        self.shared.largest.store(largest.min(SIZES.len() - 1), Ordering::Relaxed);
     }
 
     /// The newest picture, once.
@@ -190,32 +195,6 @@ impl Drop for SheetView {
     }
 }
 
-/// The picture's frame on the head: the capture's up tipped towards it by `pitch`, its start view turned by `yaw`.
-fn rotation(start: &[[f32; 3]; 3], pose: Pose) -> [[f32; 3]; 3] {
-    let (ys, yc) = pose.yaw.sin_cos();
-    let (ps, pc) = pose.pitch.sin_cos();
-    let turned = [[yc, 0.0, ys], [0.0, 1.0, 0.0], [-ys, 0.0, yc]];
-    let tipped = [[1.0, 0.0, 0.0], [0.0, pc, -ps], [0.0, ps, pc]];
-    stereo::mat_mul(&tipped, &stereo::mat_mul(&turned, start))
-}
-
-/// How far and how high the capture stands: first far enough for any capture to show whole, then, from what the first picture shows, as near as fills
-/// [`FILLS`] of the frame (round 15's judges: a tall capture stood small in a large stage).
-#[derive(Clone, Copy, Debug, PartialEq)]
-struct Fit {
-    distance: f32,
-    lift: f32,
-}
-
-impl Default for Fit {
-    fn default() -> Self {
-        Self { distance: 1.6, lift: 0.0 }
-    }
-}
-
-/// How much of the frame a capture fills, in its larger direction.
-const FILLS: f32 = 0.8;
-
 /// How bright what shows is brought to, at most, on average: a night capture stood dim on a flat stage (round 16's judges).
 const LIFT_TO: f32 = 0.4;
 
@@ -248,58 +227,10 @@ fn lift(rgba: &mut [u8], table: &[u8; 256]) {
     }
 }
 
-impl Fit {
-    /// From a first picture at this fit: nearer, and centred, so that what shows fills [`FILLS`] of the frame. Never further than it was.
-    fn from_picture(self, rgba: &[u8], size: [u32; 2]) -> Self {
-        let [w, h] = size;
-        let (mut x0, mut y0, mut x1, mut y1) = (w, h, 0u32, 0u32);
-        for (i, px) in rgba.chunks_exact(4).enumerate() {
-            if px[3] > 40 {
-                let (x, y) = (i as u32 % w, i as u32 / w);
-                (x0, y0, x1, y1) = (x0.min(x), y0.min(y), x1.max(x), y1.max(y));
-            }
-        }
-        if x1 <= x0 || y1 <= y0 {
-            return self;
-        }
-        let filled = ((y1 - y0) as f32 / h as f32).max((x1 - x0) as f32 / w as f32);
-        let nearer = (FILLS / filled).clamp(1.0, 1.8);
-        // How far below the frame's middle what shows is centred, in metres at its distance: raised by that, it is centred.
-        let below = ((y0 + y1) as f32 / 2.0 / h as f32 - 0.5) * 2.0 * TANGENT * self.distance;
-        Self { distance: self.distance / nearer, lift: self.lift + below }
-    }
-}
-
-/// Where the capture stands in front of the fixed head, for `pose`.
-fn stands(capture: &Capture, head: &Matrix34, start: &[[f32; 3]; 3], pose: Pose, below: f32, fit: Fit) -> Small {
-    let mut small = Small::new(&capture.view, head, capture.small_reach()).zoomed_in(pose.zoom);
-    small.rotation = rotation(start, pose);
-    small.anchor = [0.0, 0.0, -fit.distance];
-    // Its plate at the same height in the picture whatever the capture's ground is, and however it is tipped: what stands on it has the room over it.
-    let (plate, _) = small.plate(below);
-    small.anchor[1] += PLATE_AT - stereo::position(&plate)[1] + fit.lift;
-    small
-}
-
-/// The plate's rim as a line in the picture.
-fn plate_line(small: &Small, below: f32, aspect: f32) -> Vec<[f32; 2]> {
-    let (at, _) = small.plate(below);
-    let (x, y, middle) = (stereo::axis(&at, 0), stereo::axis(&at, 1), stereo::position(&at));
-    (0..72)
-        .filter_map(|i| {
-            let (s, c) = (i as f32 / 72.0 * std::f32::consts::TAU).sin_cos();
-            let p = stereo::add(stereo::add(middle, stereo::scale(x, c * small.radius())), stereo::scale(y, s * small.radius()));
-            // Behind the head: not in the picture.
-            (p[2] < -0.05).then(|| [0.5 + p[0] / -p[2] / (TANGENT * aspect) / 2.0, 0.5 - p[1] / -p[2] / TANGENT / 2.0])
-        })
-        .collect()
-}
-
-fn run(shared: &Shared, load: impl FnOnce() -> anyhow::Result<Capture>, turning: bool, largest: usize) -> anyhow::Result<()> {
+fn run(shared: &Shared, load: impl FnOnce() -> anyhow::Result<Capture>, turning: bool) -> anyhow::Result<()> {
     let started = Instant::now();
-    let full = load()?;
-    let capture = full.around_subject();
-    drop(full);
+    // All of it, as the Orbiters window shows it: nothing cut round its middle.
+    let capture = load()?;
     if shared.stop.load(Ordering::Relaxed) {
         return Ok(());
     }
@@ -313,17 +244,17 @@ fn run(shared: &Shared, load: impl FnOnce() -> anyhow::Result<Capture>, turning:
         costs.load_ms = started.elapsed().as_secs_f32() * 1000.0;
         costs.splats = capture.gaussians.len();
     }
-    let head = Matrix34 { m: [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0]] };
-    let start = stereo::Placement::at(&capture.view, &head).rotation;
-    let below = capture.view.eye()[1] - capture.view.ground();
-    let middle = capture.view.eye();
-    let (mut size, mut drawn, mut last, mut smooth_ms, mut swaying) = (START_SIZE.max(largest), None::<(Pose, usize)>, Instant::now(), 0.0f32, 0.0f32);
-    let mut fit: Option<Fit> = None;
+    // The eye where it was taken from, at its height over its ground, looking the way it looked.
+    let eye_height = capture.view.eye()[1] - capture.view.ground();
+    let level = Matrix34 { m: [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, eye_height], [0.0, 0.0, 1.0, 0.0]] };
+    let placement = stereo::Placement::at(&capture.view, &level);
+    let all = capture.gaussians.len();
+    let (mut size, mut drawn, mut last, mut smooth_ms, mut swaying) = (START_SIZE.max(shared.largest.load(Ordering::Relaxed)), None::<(Pose, usize)>, Instant::now(), 0.0f32, 0.0f32);
     let mut lifted: Option<Option<[u8; 256]>> = None;
     while !shared.stop.load(Ordering::Relaxed) {
-        // It turns by itself, unless a hand has it or just had it.
+        // It looks slowly around by itself, unless a hand has it or just had it.
         let pose = {
-            let mut asked = shared.asked.lock().unwrap_or_else(|e| e.into_inner());
+            let asked = shared.asked.lock().unwrap_or_else(|e| e.into_inner());
             let free = !asked.held && asked.let_go.is_none_or(|t| t.elapsed() >= STAYS_AFTER_A_DRAG);
             if turning && free {
                 swaying += last.elapsed().as_secs_f32();
@@ -335,17 +266,22 @@ fn run(shared: &Shared, load: impl FnOnce() -> anyhow::Result<Capture>, turning:
             std::thread::sleep(FRAME);
             continue;
         }
+        // Shown smaller now: no larger than it is worth.
+        let largest = shared.largest.load(Ordering::Relaxed);
+        if size < largest {
+            size = largest;
+        }
         let [w, h] = SIZES[size];
         let aspect = w as f32 / h as f32;
-        let small = stands(&capture, &head, &start, pose, below, fit.unwrap_or_default());
-        let camera = stereo::eye_camera(&head, [-TANGENT * aspect, TANGENT * aspect, -TANGENT, TANGENT], w, h, &small.placement(middle));
+        let head = looking(eye_height, pose);
+        // The wheel narrows the view: nearer what is in its middle.
+        let tangent = TANGENT * pose.zoom;
+        let camera = stereo::eye_camera(&head, [-tangent * aspect, tangent * aspect, -tangent, tangent], w, h, &placement);
         let began = Instant::now();
-        let mut rgba = renderer.render_view(&camera, capture.within(small.reach()))?;
-        // The first picture says how much it fills and how bright it is: the next ones are nearer, centred, lifted, and that one is not shown.
-        if fit.is_none() {
-            fit = Some(Fit::default().from_picture(&rgba, [w, h]));
+        let mut rgba = renderer.render_view(&camera, all)?;
+        // A dark capture is lifted, by what its first picture shows (round 16's judges).
+        if lifted.is_none() {
             lifted = Some(lift_table(&rgba));
-            continue;
         }
         if let Some(Some(table)) = &lifted {
             lift(&mut rgba, table);
@@ -359,7 +295,7 @@ fn run(shared: &Shared, load: impl FnOnce() -> anyhow::Result<Capture>, turning:
             costs.longest_ms = costs.longest_ms.max(ms);
             costs.width = w;
         }
-        *shared.frame.lock().unwrap_or_else(|e| e.into_inner()) = Some(Frame { size: [w as usize, h as usize], rgba, plate: plate_line(&small, below, aspect) });
+        *shared.frame.lock().unwrap_or_else(|e| e.into_inner()) = Some(Frame { size: [w as usize, h as usize], rgba, plate: Vec::new() });
         *shared.state.lock().unwrap_or_else(|e| e.into_inner()) = ViewState::Shown;
         drawn = Some((pose, size));
         // The budget: at most this share of the time on the GPU's side of it, as in VR.
@@ -373,6 +309,15 @@ fn run(shared: &Shared, load: impl FnOnce() -> anyhow::Result<Capture>, turning:
         std::thread::sleep(pause_after(ms));
     }
     Ok(())
+}
+
+/// The eye at `height` over the ground, turned by `pose`: its yaw about the up, then its pitch, up positive.
+fn looking(height: f32, pose: Pose) -> Matrix34 {
+    let (ys, yc) = pose.yaw.sin_cos();
+    let (ps, pc) = pose.pitch.sin_cos();
+    // Ry(yaw) * Rx(pitch), its columns the eye's right, up and back.
+    let r = [[yc, ys * ps, ys * pc], [0.0, pc, -ps], [-ys, yc * ps, yc * pc]];
+    Matrix34 { m: [[r[0][0], r[0][1], r[0][2], 0.0], [r[1][0], r[1][1], r[1][2], height], [r[2][0], r[2][1], r[2][2], 0.0]] }
 }
 
 /// How long to rest after a frame that took `ms`: at most [`DUTY`] of the time goes on drawing, and no more often than [`FRAME`].
@@ -403,27 +348,6 @@ mod tests {
         assert!(half[0] > 20);
     }
 
-    /// Round 15's judges: a tall capture stood small in a large stage. From its first picture it comes nearer, centred, to fill about 80% of the frame.
-    #[test]
-    fn a_capture_comes_near_enough_to_fill_its_frame() {
-        let (w, h) = (160u32, 90u32);
-        let mut rgba = vec![0u8; (w * h * 4) as usize];
-        // What shows: about half the frame's height, low in it.
-        for y in 40..85 {
-            for x in 60..90 {
-                rgba[((y * w + x) * 4 + 3) as usize] = 255;
-            }
-        }
-        let fit = Fit::default().from_picture(&rgba, [w, h]);
-        let nearer = Fit::default().distance / fit.distance;
-        assert!((nearer - 0.8 / (44.0 / 90.0)).abs() < 0.05, "{nearer}");
-        assert!(fit.lift > 0.0, "raised, as it showed low: {fit:?}");
-        // Already filling it, it does not move away; empty, it stays as it was.
-        let full = vec![255u8; (w * h * 4) as usize];
-        assert_eq!(Fit::default().from_picture(&full, [w, h]).distance, Fit::default().distance);
-        assert_eq!(Fit::default().from_picture(&vec![0u8; (w * h * 4) as usize], [w, h]), Fit::default());
-    }
-
     #[test]
     fn it_holds_the_budget_of_the_3d_view_in_vr() {
         // A cheap frame waits out the slow turn's rate.
@@ -440,6 +364,17 @@ mod tests {
         }
         assert!(SWAY < std::f32::consts::FRAC_PI_4);
         assert_eq!(sway(0.0), 0.0, "it starts from the view it was taken from");
+    }
+
+    /// Enzo: seen from inside, as the Orbiters window shows it. Level at rest, at the eye's height; looking up looks up, turning turns to its left.
+    #[test]
+    fn it_is_seen_from_inside_at_eye_height() {
+        let head = looking(1.6, Pose::default());
+        assert_eq!(stereo::position(&head), [0.0, 1.6, 0.0]);
+        let forward = |m: &Matrix34| stereo::scale(stereo::axis(m, 2), -1.0);
+        assert!((forward(&head)[2] + 1.0).abs() < 1e-5, "it looks ahead");
+        assert!(forward(&looking(1.6, Pose { pitch: 0.4, ..Pose::default() }))[1] > 0.3, "up is up");
+        assert!(forward(&looking(1.6, Pose { yaw: 0.4, ..Pose::default() }))[0] < -0.3, "a yaw turns it");
     }
 
     #[test]

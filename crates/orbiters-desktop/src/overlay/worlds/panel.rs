@@ -131,6 +131,8 @@ pub enum Target {
     Hero,
     /// Closes the side panel.
     CloseSide,
+    /// On a screen: what turns on the side panel fills the whole page, or comes back to its frame.
+    FullView,
     /// Shows it small, in the panel's picture.
     ShowSmall,
     /// What shows small goes back into the panel's picture.
@@ -336,6 +338,13 @@ pub struct Live {
     pub picture: Option<TextureId>,
     pub plate: Vec<[f32; 2]>,
     pub failed: bool,
+    /// It fills the whole page (Enzo's full-screen button), the rest of the page away.
+    pub full: bool,
+}
+
+/// The full-screen button, in the bottom right corner of the live view's frame `frame` (as the Orbiters window's viewer has it).
+pub fn full_button(frame: Rect) -> Rect {
+    Rect::from_min_size(frame.right_bottom() - vec2(52.0, 52.0), vec2(40.0, 40.0))
 }
 
 /// The feedback view's key of a world (the app keeps them lowercase).
@@ -559,7 +568,8 @@ fn small_action(p: &Painter, rect: Rect, glyph: &str, filled: bool, count: u64, 
     let number = count_or_nothing(count);
     // A headset's are larger: there is the room, and the need.
     let large = rect.height() > 56.0;
-    let (icon, count, said) = if large { (24.0, 20.0, 17.5) } else { (20.0, 16.5, 14.5) };
+    // A headset's at its size (round 17's judges found its labels at a screen's).
+    let (icon, count, said) = if large { (26.0, 22.0, 19.5) } else { (20.0, 16.5, 14.5) };
     let line = rect.min.y + rect.height() * 0.34;
     let at = if number.is_empty() { rect.center().x } else { rect.center().x - 16.0 };
     if filled {
@@ -686,7 +696,7 @@ fn vr_card(p: &Painter, rect: Rect, entry: &Entry, d: &Data, hover: bool, presse
         p.galley(pos2(back.min.x + 9.0, back.center().y - galley.size().y / 2.0), galley, orbit_look::on_accent());
     }
     // Its whole name, on two lines where it takes them: worlds are told apart by it.
-    let mut name = orbit_look::txt(entry.name.clone(), 21.0).weight(weight::SEMIBOLD).color(theme::FG).job(rect.width() - 18.0);
+    let mut name = orbit_look::txt(entry.name.clone(), 22.5).weight(weight::SEMIBOLD).color(theme::FG).job(rect.width() - 16.0);
     name.wrap.max_rows = 2;
     let galley = p.layout_job(name);
     p.galley(pos2(rect.min.x + 9.0, rect.max.y - 31.0 - galley.size().y / 2.0), galley, theme::FG);
@@ -736,6 +746,14 @@ fn more_slot(count: usize, n: usize, side: bool) -> Option<Rect> {
 }
 
 /// A capture turning on the side panel, where its picture lies: as on the gallery's sheet, smaller. Its picture stays until it is ready, and if it cannot be.
+/// The round full-screen button in the live view's corner: two corners out, or in when it fills the page.
+fn draw_full_button(p: &Painter, rect: Rect, full: bool, hovered: bool, pressed: bool) {
+    let fill = theme::black(if pressed { 0.9 } else if hovered { 0.82 } else { 0.66 });
+    p.circle_filled(rect.center(), rect.width() / 2.0, fill);
+    p.circle_stroke(rect.center(), rect.width() / 2.0, Stroke::new(1.0, Color32::from_white_alpha(if hovered { 110 } else { 50 })));
+    widgets::icon(p, rect.center(), if full { icons::CORNERS_IN } else { icons::CORNERS_OUT }, 20.0, Color32::WHITE);
+}
+
 fn draw_live(p: &Painter, hero: Rect, live: &Live) {
     let corner = CornerRadius::same(14);
     let say = |p: &Painter, words: &str| {
@@ -756,7 +774,7 @@ fn draw_live(p: &Painter, hero: Rect, live: &Live) {
     p.rect_filled(hero, corner, Color32::from_rgb(15, 17, 21));
     super::super::orbit::panels::keep_colour(p, hero);
     p.add(egui::epaint::RectShape::filled(hero, corner, Color32::WHITE).with_texture(id, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0))));
-    let txt = orbit_look::txt(tr("Drag to turn it"), 14.5).weight(weight::MEDIUM).color(Color32::WHITE);
+    let txt = orbit_look::txt(tr("Drag to look around"), 14.5).weight(weight::MEDIUM).color(Color32::WHITE);
     let galley = p.layout_job(txt.job(f32::INFINITY));
     let pill = Rect::from_min_size(pos2(hero.left() + 8.0, hero.bottom() - 8.0 - galley.size().y - 8.0), galley.size() + vec2(18.0, 8.0));
     p.rect_filled(pill, CornerRadius::same(10), theme::black(0.72));
@@ -1204,9 +1222,18 @@ impl Panel {
                     out.clear();
                 }
                 self.browse_targets(d, &mut out, true);
+                // Full: the view and its button back, and nothing else.
+                if live_here && self.live.as_ref().is_some_and(|l| l.full) {
+                    let page = Rect::from_min_size(Pos2::ZERO, vec2(WIDTH, HEIGHT));
+                    return vec![(Target::Hero, page), (Target::FullView, full_button(page))];
+                }
                 // A hand on the capture turning there, under what lies over it.
                 if live_here {
                     out.push((Target::Hero, SIDE_HERO));
+                    // Its full-screen button, once there is something to fill the page with.
+                    if self.live.as_ref().is_some_and(|l| l.picture.is_some()) {
+                        out.push((Target::FullView, full_button(SIDE_HERO)));
+                    }
                 }
                 if !vr {
                     out.push((Target::CloseSide, SIDE_CLOSE));
@@ -1294,6 +1321,9 @@ impl Panel {
         let status = d.status;
         match target {
             Target::CloseSide => {
+                if let Some(live) = self.live.as_mut() {
+                    live.full = false;
+                }
                 self.go(if self.query.is_empty() { Page::Browse } else { Page::Typing }, time);
                 Vec::new()
             }
@@ -1409,6 +1439,12 @@ impl Panel {
                 }
             }
             Target::Hero => Vec::new(),
+            Target::FullView => {
+                if let Some(live) = self.live.as_mut() {
+                    live.full = !live.full;
+                }
+                Vec::new()
+            }
             Target::Join => self.entry(d).map(|e| Action::Join(e.world_id.clone())).into_iter().collect(),
             Target::OpenWeb => self.entry(d).map(|e| Action::OpenWeb(e.world_id.clone())).into_iter().collect(),
             Target::Has3d => {
@@ -1641,6 +1677,14 @@ impl Panel {
     /// Draws the panel.
     pub fn draw(&self, p: &Painter, d: &Data, time: f64) {
         let page = Rect::from_min_size(Pos2::ZERO, vec2(WIDTH, HEIGHT));
+        // The live view on the whole page: only it, and the button that brings it back to its frame.
+        if let Some(live) = self.live.as_ref().filter(|l| l.full && !d.status.headset && self.page == Page::Detail && self.entry(d).is_some_and(|e| e.id == l.id)) {
+            p.rect_filled(page, CornerRadius::same(28), CARD);
+            draw_live(p, page, live);
+            let state = (self.hover == Some(Target::FullView), self.pressed == Some(Target::FullView));
+            draw_full_button(p, full_button(page), true, state.0, state.1);
+            return;
+        }
         // A hole where a capture standing small is seen through, or the page whole.
         match self.hole(d.status) {
             Some(hole) => fill_around(p, page, 28.0, hole, 14.0, CARD),
@@ -1997,6 +2041,9 @@ impl Panel {
             picture(p, hero, (d.thumb)(entry), &entry.world_id, CornerRadius::same(14), rest);
             if let Some(live) = self.live.as_ref().filter(|l| l.id == entry.id && !vr) {
                 draw_live(p, hero, live);
+                if live.picture.is_some() {
+                    draw_full_button(p, full_button(hero), false, self.hover == Some(Target::FullView), self.pressed == Some(Target::FullView));
+                }
             }
             let foot = Rect::from_min_max(pos2(hero.min.x, hero.max.y - 44.0), hero.max);
             if current || !entry.capture {
@@ -2069,7 +2116,7 @@ impl Panel {
         }
         // In a headset, who made it and no more.
         let under = if vr { under.first().cloned().unwrap_or_default() } else { under.join(" · ") };
-        text_cut(p, pos2(x, if vr { 349.0 } else { 266.0 }), width, orbit_look::txt(under, if vr { 17.0 } else { 16.5 }).color(fade(theme::FG, rest)));
+        text_cut(p, pos2(x, if vr { 349.0 } else { 266.0 }), width, orbit_look::txt(under, if vr { 18.5 } else { 16.5 }).color(fade(theme::FG, rest)));
         // What it can be seen as, and the rest.
         let wf = d.world_feedback(entry);
         for (t, rect) in targets {
@@ -2811,6 +2858,19 @@ mod tests {
         // Its close stays on top of it.
         let (x, y) = (SIDE_CLOSE.center().x, SIDE_CLOSE.center().y);
         assert_eq!(panel.hit(&d, x, y), Some(Target::CloseSide));
+        // Enzo: a full-screen button in its corner fills the page with it, and brings it back; once it shows something.
+        assert!(!has(&panel, Target::FullView));
+        panel.live = Some(Live { id: 1, picture: Some(TextureId::Managed(1)), ..Default::default() });
+        assert!(has(&panel, Target::FullView));
+        let (x, y) = (full_button(SIDE_HERO).center().x, full_button(SIDE_HERO).center().y);
+        assert_eq!(panel.hit(&d, x, y), Some(Target::FullView));
+        panel.press(Target::FullView, &d, 2.0);
+        assert!(panel.live.as_ref().is_some_and(|l| l.full));
+        let page = Rect::from_min_size(Pos2::ZERO, vec2(WIDTH, HEIGHT));
+        assert_eq!(panel.hit(&d, page.center().x, page.center().y), Some(Target::Hero), "the whole page turns it");
+        assert!(!has(&panel, Target::CloseSide), "nothing else on the page");
+        panel.press(Target::FullView, &d, 3.0);
+        assert!(panel.live.as_ref().is_some_and(|l| !l.full) && has(&panel, Target::CloseSide));
         // Another world's page: its own button again, until that one turns as well.
         panel.selected = Some(2);
         assert!(!has(&panel, Target::Hero));

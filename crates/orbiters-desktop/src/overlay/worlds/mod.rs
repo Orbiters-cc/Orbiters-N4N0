@@ -631,6 +631,10 @@ fn keep_an_eye_frame(steamvr: &vr::Client, n: u32) {
         if let (panel::Target::Hero, Some((_, view))) = (target, &self.live) {
             view.hold(true);
         }
+        // On the whole page it is worth drawing larger.
+        if let (Some((_, view)), Some(live)) = (&self.live, &self.panel.live) {
+            view.set_largest(if live.full { 0 } else { 2 });
+        }
         self.act_alone(actions, entries);
         self.follow_live(entries);
     }

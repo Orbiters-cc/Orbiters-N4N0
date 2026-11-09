@@ -1144,6 +1144,7 @@ impl Panels {
         self.gallery_to = kept.scroll;
         self.throw = 0.0;
         self.facts.opened = None;
+        self.facts.view_full = false;
         self.recents.big = None;
         // What was taken since shows when it opens.
         if sheet == Sheet::Pictures {
@@ -1729,6 +1730,7 @@ impl Panels {
             gallery_filter: self.facts.gallery_filter,
             gallery_reading: self.recents.rx.is_some() && self.recents.loaded.is_empty(),
             opened: self.facts.opened,
+            view_full: self.facts.view_full,
             opened_picture: None,
             opened_view: None,
             world_video_picture: if self.facts.sheet == Some(Sheet::All) { menu.world_video.as_ref().and_then(|v| orbiters_n4n0_core::videos::youtube_id(&v.url)).and_then(|id| self.stage.host.picture(&id, false)) } else { None },
@@ -1785,6 +1787,7 @@ impl Panels {
             can_light: menu.light.is_some(),
             vr_close: self.sharp > 1.0,
             picture_mode: self.facts.picture_mode,
+            bloomed: self.facts.bloomed,
             hint: self.facts.hint,
             view_showing: self.facts.view_showing,
             invite_chip: self.invited.as_ref().filter(|(_, at)| at.elapsed() < Duration::from_secs(6)).map(|(place, _)| {
@@ -1992,7 +1995,14 @@ impl Panels {
                 }
             }
         }
-        let _ = was;
+        // Its cell stays lit while its ring is out.
+        let bloomed = group.map(|g| g.parent());
+        if bloomed != self.facts.bloomed {
+            self.facts.bloomed = bloomed;
+            for panel in self.list.iter_mut().filter(|p| Some(p.zone) == bloomed || Some(p.zone) == was.map(|g| g.parent())) {
+                panel.dirty = true;
+            }
+        }
         // VRChat reacts to where the pointer is only while it is on what hides it.
         let on_parts = on.is_some();
         for panel in self.list.iter_mut().filter(|p| p.zone == Zone::SheetHint) {
@@ -2312,8 +2322,13 @@ impl Panels {
                     self.gallery_dirty();
                 }
             }
+            Action::FullView => {
+                self.facts.view_full = !self.facts.view_full;
+                self.gallery_dirty();
+            }
             Action::PictureBack => {
                 self.facts.opened = None;
+                self.facts.view_full = false;
                 self.recents.big = None;
                 self.gallery_dirty();
             }

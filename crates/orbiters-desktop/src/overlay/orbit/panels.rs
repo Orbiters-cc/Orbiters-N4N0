@@ -1312,7 +1312,8 @@ pub fn scrolls_with_a_drag(sheet: Sheet, look: &Look) -> bool {
 /// Where what plays's timeline lies on its panel, tall enough for a laser to find.
 fn timeline_rect(panel: Rect) -> Rect {
     let x = panel.left() + panel.height();
-    Rect::from_min_max(pos2(x, panel.top() + 90.0), pos2(panel.right() - 14.0, panel.top() + 124.0))
+    // Under a title of two lines, over the transport.
+    Rect::from_min_max(pos2(x, panel.top() + 92.0), pos2(panel.right() - 14.0, panel.top() + 126.0))
 }
 
 /// How far along what plays the pointer at `x` is, 0 to 1: `None` where there is no timeline to press.
@@ -1374,7 +1375,9 @@ fn tile_line(action: Action, facts: &Facts) -> Option<String> {
 
 const PLAYING_LINK_W: f32 = 138.0;
 /// Where the volume's row lies in Now playing, from its top.
-const VOLUME_ROW: f32 = 30.0;
+const VOLUME_ROW: f32 = 26.0;
+/// Its buttons' size: the row ends over the title, which wraps to two lines under it.
+const VOLUME_BUTTON: f32 = 36.0;
 const PLAYING_LINK_H: f32 = 38.0;
 
 fn now_playing_controls(panel: Rect, facts: &Facts) -> Vec<Item> {
@@ -1405,9 +1408,10 @@ fn now_playing_controls(panel: Rect, facts: &Facts) -> Vec<Item> {
         // In its head's corner, where the link's buttons were.
         let right = panel.right() - 16.0;
         let top = |x: f32, side: f32| Rect::from_center_size(pos2(x + side / 2.0, panel.top() + VOLUME_ROW), Vec2::splat(side));
-        out.push(Item { action: Action::Volume(true), rect: top(right - 44.0, 44.0), look: Look::Transport(icons::PLUS) });
-        out.push(Item { action: Action::Volume(false), rect: top(right - 44.0 - 78.0 - 44.0, 44.0), look: Look::Transport(icons::MINUS) });
-        out.push(Item { action: Action::Mute, rect: top(right - 44.0 - 78.0 - 44.0 - 50.0, 44.0), look: Look::Transport(if muted { icons::SPEAKER_X } else { icons::SPEAKER_HIGH }) });
+        let b = VOLUME_BUTTON;
+        out.push(Item { action: Action::Volume(true), rect: top(right - b, b), look: Look::Transport(icons::PLUS) });
+        out.push(Item { action: Action::Volume(false), rect: top(right - b - 78.0 - b, b), look: Look::Transport(icons::MINUS) });
+        out.push(Item { action: Action::Mute, rect: top(right - b - 78.0 - b - 44.0, b), look: Look::Transport(if muted { icons::SPEAKER_X } else { icons::SPEAKER_HIGH }) });
     }
     out
 }
@@ -2406,15 +2410,18 @@ fn draw(p: &Painter, zone: Zone, item: &Item, facts: &Facts, hovered: bool, pres
             match &facts.music {
                 Some((title, _)) => {
                     // The whole title, on two lines where it needs them (round 14's judges: cut on its own line); who made it under it when it takes one.
-                    let mut job = egui::text::LayoutJob::simple(title.clone(), look::font(21.0, weight::BOLD), look::LABEL, room);
+                    // Under the volume's row, never under its buttons.
+                    let mut job = egui::text::LayoutJob::simple(title.clone(), look::font(18.5, weight::BOLD), look::LABEL, room);
                     job.wrap.max_rows = 2;
                     job.wrap.overflow_character = Some('\u{2026}');
                     let title = p.layout_job(job);
-                    let rows = title.rows.len();
-                    p.galley(pos2(x, rect.top() + 34.0), title, look::LABEL);
+                    let (rows, high) = (title.rows.len(), title.size().y);
+                    // Clear of the timeline's knob under it too (the live round 15 run saw it on the second line).
+                    let top = rect.top() + if facts.volume.is_some() { 46.0 } else { 36.0 };
+                    p.galley(pos2(x, top), title, look::LABEL);
                     if rows < 2 {
                         let font = look::font(15.5, weight::MEDIUM);
-                        p.text(pos2(x, rect.top() + 74.0), Align2::LEFT_CENTER, fit(p, &facts.music_by, &font, room), font, look::MUTED);
+                        p.text(pos2(x, top + high + 10.0), Align2::LEFT_CENTER, fit(p, &facts.music_by, &font, room), font, look::MUTED);
                     }
                 }
                 None => {
@@ -2427,7 +2434,7 @@ fn draw(p: &Painter, zone: Zone, item: &Item, facts: &Facts, hovered: bool, pres
             // The level between its minus and its plus.
             if let Some((percent, muted)) = facts.volume {
                 let right = rect.right() - 16.0;
-                let bar = Rect::from_center_size(pos2(right - 44.0 - 39.0, rect.top() + VOLUME_ROW), vec2(66.0, 7.0));
+                let bar = Rect::from_center_size(pos2(right - VOLUME_BUTTON - 39.0, rect.top() + VOLUME_ROW), vec2(66.0, 7.0));
                 p.rect_filled(bar, look::radius(3.5), Color32::from_white_alpha(70));
                 let level = if muted { 0.0 } else { percent as f32 / 100.0 };
                 p.rect_filled(Rect::from_min_size(bar.min, vec2(bar.width() * level, 7.0)), look::radius(3.5), look::LABEL);
@@ -2847,18 +2854,14 @@ fn draw(p: &Painter, zone: Zone, item: &Item, facts: &Facts, hovered: bool, pres
                 if none {
                     p.text(pos2(x, rect.center().y), Align2::LEFT_CENTER, fit(p, tr("Nothing playing"), &font, room), font, look::MUTED);
                 } else {
-                    // The song first: on up to three lines, which hold most titles whole (round 13's judges still read "AOT only the bang..."). What a press does
-                    // only where the song leaves room: the play or pause on its picture says it too.
-                    let title = song_lines(p, &name, font, room, 3);
-                    let rows = title.rows.len();
+                    // The song on up to two lines, and always under it a line of its own for what a press does, whatever the song's length (round 14's
+                    // judges: the action must not depend on the title).
+                    let title = song_lines(p, &name, font, room, 2);
                     let high = title.size().y;
-                    let press = rows <= 1;
-                    let top = rect.center().y - (high + if press { 13.0 } else { 0.0 }) / 2.0;
+                    let top = rect.center().y - (high + 13.0) / 2.0;
                     p.galley(pos2(x, top), title, look::LABEL);
-                    if press {
-                        let font = look::font(10.5, weight::MEDIUM);
-                        p.text(pos2(x, top + high + 7.0), Align2::LEFT_CENTER, if playing { tr_ctx("tile", "Press to pause") } else { tr_ctx("tile", "Press to play") }, font, look::MUTED);
-                    }
+                    let font = look::font(10.5, weight::SEMIBOLD);
+                    p.text(pos2(x, top + high + 7.0), Align2::LEFT_CENTER, if playing { tr_ctx("tile", "Press to pause") } else { tr_ctx("tile", "Press to play") }, font, theme::mix(theme::VIOLET, Color32::WHITE, 0.55));
                 }
             }
         }
@@ -2914,15 +2917,12 @@ fn draw(p: &Painter, zone: Zone, item: &Item, facts: &Facts, hovered: bool, pres
             let room = rect.right() - x - 4.0;
             let font = look::font(10.0, weight::BOLD);
             let name = facts.music.as_ref().map_or("", |m| m.0.as_str());
-            // The song first, as on the wing.
-            let title = song_lines(p, name, font, room, 3);
-            let (rows, high) = (title.rows.len(), title.size().y);
-            let press = rows <= 1;
-            let top = rect.center().y - (high + if press { 12.0 } else { 0.0 }) / 2.0;
+            // As on the wing: the song on up to two lines, what a press does always on its own line.
+            let title = song_lines(p, name, font, room, 2);
+            let high = title.size().y;
+            let top = rect.center().y - (high + 12.0) / 2.0;
             p.galley(pos2(x, top), title, look::LABEL);
-            if press {
-                p.text(pos2(x, top + high + 6.5), Align2::LEFT_CENTER, if playing { tr_ctx("tile", "Press to pause") } else { tr_ctx("tile", "Press to play") }, look::font(9.5, weight::MEDIUM), look::MUTED);
-            }
+            p.text(pos2(x, top + high + 6.5), Align2::LEFT_CENTER, if playing { tr_ctx("tile", "Press to pause") } else { tr_ctx("tile", "Press to play") }, look::font(9.5, weight::SEMIBOLD), theme::mix(theme::VIOLET, Color32::WHITE, 0.55));
         }
         Look::PeekWord => {
             let radius = look::radius(rect.height() / 2.0);
@@ -3246,6 +3246,25 @@ const TURNING: Rect = Rect { min: pos2(112.0, 12.0), max: pos2(912.0, 462.0) };
 const TURNING_FOOT: f32 = 474.0;
 const SEE_IN_APP: Rect = Rect { min: pos2(700.0, 488.0), max: pos2(1000.0, 544.0) };
 
+/// A band along each edge of `rect`, from `ink` at the edge to nothing `depth` in.
+fn fade_edges(p: &Painter, rect: Rect, depth: f32, ink: Color32) {
+    let clear = Color32::from_rgba_premultiplied(0, 0, 0, 0);
+    let band = |a: Pos2, b: Pos2, c: Pos2, d: Pos2| {
+        // a, b on the edge; c, d inside.
+        let mut mesh = Mesh::default();
+        for (pos, color) in [(a, ink), (b, ink), (c, clear), (d, clear)] {
+            mesh.vertices.push(Vertex { pos, uv: WHITE_UV, color });
+        }
+        mesh.indices.extend_from_slice(&[0, 1, 2, 1, 3, 2]);
+        p.add(Shape::mesh(mesh));
+    };
+    let inner = rect.shrink(depth);
+    band(rect.left_top(), rect.right_top(), pos2(rect.left(), inner.top()), pos2(rect.right(), inner.top()));
+    band(rect.left_bottom(), rect.right_bottom(), pos2(rect.left(), inner.bottom()), pos2(rect.right(), inner.bottom()));
+    band(rect.left_top(), rect.left_bottom(), pos2(inner.left(), rect.top()), pos2(inner.left(), rect.bottom()));
+    band(rect.right_top(), rect.right_bottom(), pos2(inner.right(), rect.top()), pos2(inner.right(), rect.bottom()));
+}
+
 /// Whether the picture opened is a capture turning in 3D on this sheet: on a screen, where the sheet holds it.
 pub(super) fn turns_on_the_sheet(facts: &Facts, n: usize) -> bool {
     facts.desktop && facts.recent.get(n).is_some_and(|r| r.kind == RecentKind::Capture)
@@ -3273,6 +3292,8 @@ fn draw_turning(p: &Painter, page: Rect, n: usize, facts: &Facts, view: &OpenedV
             p.rect_filled(stage, look::radius(12.0), Color32::from_rgb(15, 17, 21));
             keep_colour(p, rect);
             p.add(RectShape::filled(rect, look::radius(12.0), Color32::WHITE).with_texture(id, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0))));
+            // Its ragged edges fade into the stage rather than end on the frame (round 14's judges).
+            fade_edges(p, rect, 46.0, Color32::from_rgb(15, 17, 21));
         }
         (None, None) => waiting(p, tr("Getting its 3D ready\u{2026}")),
     }

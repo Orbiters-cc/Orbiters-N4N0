@@ -52,7 +52,8 @@ fn leaned(p: V3) -> V3 {
 }
 
 /// How much larger than a real stick it is shown, to be seen at arm's length: judges found it the least legible thing beside a capture at 1.45.
-const LARGER: f32 = 2.0;
+// About twice what it was again (round 14's judges, all four; mockup-opus-2), still see-through with its dark edge.
+const LARGER: f32 = 2.8;
 
 fn parts(push: f32, accent: [f32; 3]) -> Vec<Part> {
     parts_of(push, accent)

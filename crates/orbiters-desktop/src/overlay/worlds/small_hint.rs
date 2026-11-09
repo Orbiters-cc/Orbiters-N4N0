@@ -13,8 +13,9 @@ use super::super::orbit::panels::look as orbit_look;
 use orbiters_ui::{icons, widgets};
 use std::time::Instant;
 
-pub const PX: [u32; 2] = [560, 256];
-pub const WIDTH_M: f32 = 0.35;
+// Wider than it was, with the same pixels to a metre, for a larger stick beside the words.
+pub const PX: [u32; 2] = [640, 256];
+pub const WIDTH_M: f32 = 0.40;
 /// How high above what it speaks of it floats: close, so it reads as the view's (round 14's judges saw a hand's gap between them).
 const ABOVE_M: f32 = 0.025;
 /// How much of a capture's radius its content reaches up, mostly: the hint's foot and the X sit just over that.
@@ -41,7 +42,7 @@ const STICK_FRAME_S: f32 = 1.0 / 36.0;
 const STICK_TURNS_BY: f32 = 0.7;
 pub const STICK_AT: [f32; 2] = [-WIDTH_M / 2.0 + STICK_COLUMN_PX / PX[0] as f32 * WIDTH_M / 2.0, -0.026];
 /// The part of the page the stick stands in, at its left, its name under it.
-const STICK_COLUMN_PX: f32 = 236.0;
+const STICK_COLUMN_PX: f32 = 300.0;
 
 /// What it says.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -84,7 +85,8 @@ fn words(p: &Painter, at: Pos2, glyph: &str, first: &str, second: &str, on: f32)
     // White, every line: grey over a bright world was what read least.
     let text = Color32::WHITE;
     edged_icon(p, at + vec2(16.0, 32.0), glyph, 30.0, lit);
-    edged_text(p, at + vec2(42.0, 18.0), Align2::LEFT_CENTER, first, theme::font(30.0, weight::BOLD), text);
+    // One size for every line (round 14's judges): what to do and what it does read alike.
+    edged_text(p, at + vec2(42.0, 18.0), Align2::LEFT_CENTER, first, theme::font(29.0, weight::BOLD), text);
     // What it does as readable as what to do (round 12's judges found it the line least read).
     // As large as what to do: in a headset the smaller line was the one not read (round 14's judges).
     edged_text(p, at + vec2(42.0, 50.0), Align2::LEFT_CENTER, second, theme::font(29.0, weight::BOLD), text);

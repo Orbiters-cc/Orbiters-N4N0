@@ -532,7 +532,13 @@ impl LabWindow {
     fn show_menu(window: &GameWindow, open: bool) {
         use windows::Win32::Foundation::HWND;
         use windows::Win32::Graphics::Gdi::{InvalidateRect, UpdateWindow};
-        window::MENU_OPEN.store(open, Ordering::Relaxed);
+        let mut menus = window::MENU_OPEN.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if open {
+            menus.insert(window.handle);
+        } else {
+            menus.remove(&window.handle);
+        }
+        drop(menus);
         // SAFETY: asks a window of this process to paint again; one gone meanwhile only makes this fail.
         unsafe {
             let handle = HWND(window.handle as *mut _);
@@ -558,7 +564,9 @@ impl LabWindow {
         let (ready_tx, ready_rx) = std::sync::mpsc::channel();
         let faint = title.contains("faint");
         std::thread::Builder::new().name("lab-window".into()).spawn(move || window::run(ready_tx, ending, &title, faint)).ok()?;
-        ready_rx.recv_timeout(Duration::from_secs(5)).ok().flatten()?;
+        // A window thread always answers, at once on an idle machine; one running the whole test suite took more than the five
+        // seconds this used to allow ("The fake window did not open.").
+        ready_rx.recv_timeout(Duration::from_secs(60)).ok().flatten()?;
         Some(Self { closed })
     }
 }
@@ -579,7 +587,9 @@ mod window {
         WS_EX_TRANSPARENT, WS_OVERLAPPEDWINDOW, WS_POPUP,
     };
 
-    pub(super) static MENU_OPEN: AtomicBool = AtomicBool::new(false);
+    /// The lab windows whose menu is open, by handle: each test has a window of its own, and they run side by side (one
+    /// flag for all of them painted one test's menu into another's screenshots).
+    pub(super) static MENU_OPEN: std::sync::Mutex<std::collections::BTreeSet<isize>> = std::sync::Mutex::new(std::collections::BTreeSet::new());
 
     /// Green above, magenta below: a screenshot can be checked for being this window, the right way up. With the menu
     /// open, a grey panel at the top left, and on it a camera button at [`CAMERA_ICON`].
@@ -598,7 +608,7 @@ mod window {
                         FillRect(dc, &rect, brush);
                         let _ = DeleteObject(brush.into());
                     }
-                    if MENU_OPEN.load(Ordering::Relaxed) {
+                    if MENU_OPEN.lock().unwrap_or_else(std::sync::PoisonError::into_inner).contains(&(window.0 as isize)) {
                         let (x, y) = (CAMERA_ICON.0 as i32, CAMERA_ICON.1 as i32);
                         let panel = RECT { left: 20, top: 20, right: 300, bottom: 240 };
                         let button = RECT { left: x - 40, top: y - 30, right: x + 40, bottom: y + 30 };
@@ -621,6 +631,8 @@ mod window {
                     LRESULT(0)
                 }
                 WM_DESTROY => {
+                    // A handle is used again by a later window, which starts with its menu closed.
+                    MENU_OPEN.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(&(window.0 as isize));
                     PostQuitMessage(0);
                     LRESULT(0)
                 }

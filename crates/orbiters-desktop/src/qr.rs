@@ -19,6 +19,11 @@ const VRCHAT_SENDER: &str = "VRCSender1";
 /// No frame for this long (from the start, or since the last): the camera is said to send none.
 #[cfg(windows)]
 const NO_PICTURE_AFTER: Duration = Duration::from_millis(2500);
+/// ...and only after as many looks without one as fit in that time. The scanner runs below normal priority, so a busy
+/// computer (VRChat itself, or the whole test suite) can leave it without a turn for seconds: the time alone then said the
+/// camera sent nothing when the scanner had not looked.
+#[cfg(windows)]
+const NO_PICTURE_LOOKS: u32 = (NO_PICTURE_AFTER.as_millis() / EVERY.as_millis()) as u32;
 
 /// A frame's pixels as Spout lends them: 4 bytes a pixel, `stride` bytes a row.
 pub struct Pixels<'a> {
@@ -141,6 +146,8 @@ fn run(wanted: &str, events: &QrEvents, stop: &AtomicBool) {
     // What was last said of the camera (nothing yet).
     let mut said: Option<bool> = None;
     let mut look = 0u64;
+    // Looks since the last frame (or the start) that found none.
+    let mut looks_without = 0u32;
     while !stop.load(Ordering::Relaxed) {
         let begun = Instant::now();
         if !connected {
@@ -157,6 +164,7 @@ fn run(wanted: &str, events: &QrEvents, stop: &AtomicBool) {
             }
         }
         let mut found = Vec::new();
+        let mut framed = false;
         if connected {
             let view = if look % 2 == 0 { View::Whole } else { View::Middle };
             let read = receiver.receive(Duration::from_millis(250), |f| {
@@ -172,6 +180,7 @@ fn run(wanted: &str, events: &QrEvents, stop: &AtomicBool) {
             match read {
                 Ok(Some((w, h, picture))) => {
                     last_frame = Some(Instant::now());
+                    framed = true;
                     look += 1;
                     found = decode(w, h, &picture);
                 }
@@ -185,9 +194,14 @@ fn run(wanted: &str, events: &QrEvents, stop: &AtomicBool) {
                 }
             }
         }
+        looks_without = if framed { 0 } else { looks_without.saturating_add(1) };
         let frames = last_frame.unwrap_or(started).elapsed() < NO_PICTURE_AFTER && last_frame.is_some();
-        // Frames come, or none came for a while (from the start too).
-        let camera = if frames { Some(true) } else { (started.elapsed() >= NO_PICTURE_AFTER).then_some(false) };
+        // Frames come, or none came for a while (from the start too) over enough looks.
+        let camera = if frames {
+            Some(true)
+        } else {
+            (last_frame.unwrap_or(started).elapsed() >= NO_PICTURE_AFTER && looks_without >= NO_PICTURE_LOOKS).then_some(false)
+        };
         if let Some(camera) = camera.filter(|c| said != Some(*c)) {
             said = Some(camera);
             events(QrSeen::Camera(camera));
@@ -290,11 +304,21 @@ mod tests {
                 }
             })
         };
+        // A busy machine (the whole test suite) leaves the below-normal scanner without a turn for seconds: what must come is
+        // waited for this long, which only a failing test waits in full.
+        let patience = Duration::from_secs(60);
+        // The scan starts once the sender is there: one that came later than the scanner's 2.5 s would rightly be said to
+        // send nothing first.
+        let deadline = std::time::Instant::now() + patience;
+        while !orbiters_spout::list_senders().contains(&name) {
+            assert!(std::time::Instant::now() < deadline, "the test's Spout sender never showed");
+            std::thread::sleep(Duration::from_millis(20));
+        }
         let (tx, rx) = mpsc::channel();
         let tx = std::sync::Mutex::new(tx);
         let scan = start(name, Box::new(move |seen| tx.lock().unwrap().send(seen).unwrap())).unwrap();
         let mut seen = Vec::new();
-        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let deadline = std::time::Instant::now() + patience;
         while !seen.contains(&QrSeen::Code(link.into())) && std::time::Instant::now() < deadline {
             if let Ok(s) = rx.recv_timeout(Duration::from_millis(200)) {
                 seen.push(s);
@@ -304,12 +328,12 @@ mod tests {
         assert!(seen.contains(&QrSeen::Code(link.into())), "{seen:?}");
         stop_sending.store(true, Ordering::Relaxed);
         sending.join().unwrap();
-        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let deadline = std::time::Instant::now() + patience;
         let mut gone = None;
         while gone.is_none() && std::time::Instant::now() < deadline {
             gone = rx.recv_timeout(Duration::from_millis(200)).ok().filter(|s| matches!(s, QrSeen::Camera(_)));
         }
-        assert_eq!(gone, Some(QrSeen::Camera(false)));
+        assert_eq!(gone, Some(QrSeen::Camera(false)), "the camera was never said to have stopped: {seen:?}");
         drop(scan);
     }
 

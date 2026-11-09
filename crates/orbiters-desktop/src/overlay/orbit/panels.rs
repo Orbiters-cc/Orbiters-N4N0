@@ -170,6 +170,8 @@ pub enum Action {
     Talk,
     /// The Orbiters window.
     OpenApp,
+    /// A capture's 3D on the sheet, to the whole page and back.
+    FullView,
     /// The capture opened on the sheet, in Orbiters' own 3D viewer.
     SeeInApp,
     /// No capture kit on this avatar: the Orbiters window, on Projects, where My Avatar adds it.
@@ -448,6 +450,8 @@ pub struct Facts {
     pub picture_flying: bool,
     /// Which the last press asked for: its button shows the countdown.
     pub picture_mode: Option<PhotoMode>,
+    /// The cell whose second ring is out: it stays lit while the pointer is on that ring (round 18's pre-check: Pictures unlit while 3D people was pointed).
+    pub bloomed: Option<Zone>,
     /// The newest captures, at most six.
     pub recent: Gallery,
     /// The set of one place's captures open in the gallery, by its name.
@@ -456,6 +460,8 @@ pub struct Facts {
     pub gallery_filter: GalleryFilter,
     pub gallery_reading: bool,
     pub opened: Option<usize>,
+    /// A capture opened in 3D fills the whole sheet's page (Enzo's full-screen button), its words and arrows away.
+    pub view_full: bool,
     pub opened_picture: Option<TextureId>,
     /// A capture shown on the sheet in 3D, on the desktop: how far it is, and its picture now.
     pub opened_view: Option<OpenedView>,
@@ -623,6 +629,8 @@ pub enum Look {
     SeeInApp,
     /// Now playing's play or pause, with its word.
     PlayButton,
+    /// The full-screen button in the 3D view's corner.
+    FullView,
     /// A cell of the ring: its icon over its label.
     Cell { icon: &'static str, label: &'static str, badge: bool },
     /// A small heading over a group of a sheet's tiles.
@@ -1027,6 +1035,11 @@ fn sheet_page_items(sheet: Sheet, facts: &Facts) -> Vec<Item> {
             let mut out = vec![Item { action: Action::Idle, rect: r(0.0, 0.0, 1024.0, 576.0), look: Look::BigPicture(n) }];
             // A capture turns in its own frame, its words and next step under it: the arrows beside the frame's middle.
             let turning = turns_on_the_sheet(facts, n);
+            // Full: the view and its button back, and nothing else.
+            if turning && facts.view_full {
+                out.push(Item { action: Action::FullView, rect: full_button(Rect::from_min_size(pos2(0.0, 0.0), vec2(1024.0, 576.0))), look: Look::FullView });
+                return out;
+            }
             let step_y = if turning { TURNING.center().y - 26.0 } else { 262.0 };
             if picture_beside(facts, n, false).is_some() {
                 out.push(Item { action: Action::PictureStep(false), rect: r(14.0, step_y, 52.0, 52.0), look: Look::Step(false) });
@@ -1036,6 +1049,7 @@ fn sheet_page_items(sheet: Sheet, facts: &Facts) -> Vec<Item> {
             }
             if turning {
                 out.push(Item { action: Action::SeeInApp, rect: SEE_IN_APP, look: Look::SeeInApp });
+                out.push(Item { action: Action::FullView, rect: full_button(TURNING), look: Look::FullView });
             }
             out
         }
@@ -1560,7 +1574,9 @@ fn hero_body(p: &Painter, body: Rect, action: Action, line: &str, facts: &Facts)
                     }
                     // Long: broken only between words, never inside one ("雨の摩天 / 楼", round 17's judges), when after the rest.
                     (first, Some(rest)) => {
-                        p.text(pos2(x, y + side * 0.3), Align2::LEFT_CENTER, first, font.clone(), look::LABEL);
+                        // Two lines in a row's height: a smaller size, so they do not run into each other (round 18's live 08).
+                        let font = look::font(14.0, weight::SEMIBOLD);
+                        p.text(pos2(x, y + side * 0.26), Align2::LEFT_CENTER, first, font.clone(), look::LABEL);
                         let rest_wide = p.layout_no_wrap(rest.clone(), font.clone(), look::LABEL).size().x;
                         let shown = fit(p, &rest, &font, room);
                         p.text(pos2(x, y + side * 0.8), Align2::LEFT_CENTER, shown, font.clone(), look::LABEL);
@@ -1783,6 +1799,7 @@ pub fn caption(action: Action, facts: &Facts) -> Option<(String, String)> {
         Action::Talk => (tr("Ask N4N0").into(), tr("Turn N4N0 on in Orbiters first.").into()),
         Action::OpenApp => (tr("Open Orbiters").into(), tr("The full app, on your computer.").into()),
         Action::SeeInApp => (tr("See it in 3D, in Orbiters").into(), tr("Opens it in Orbiters' own 3D viewer, on your computer.").into()),
+        Action::FullView => (if facts.view_full { tr("Back to its frame") } else { tr("Full screen") }.into(), tr("The 3D view fills the whole sheet, or comes back to its frame.").into()),
         Action::Back => (tr("Back").into(), tr("To the last screen.").into()),
         Action::MicDefault(_) => (tr("Your microphones").into(), tr("Press one to make it Windows' default.").into()),
         Action::PlayingLink(Target::DropPlaying) if facts.can_drop_playing => (tr("Drop link").into(), tr("A card of it in the world, for anyone to take.").into()),
@@ -2369,8 +2386,9 @@ fn draw(p: &Painter, zone: Zone, item: &Item, facts: &Facts, hovered: bool, pres
             let (ring, center) = shape.ring.expect("a cell is on a ring");
             let waiting = zone == Zone::WheelPictures && facts.picture_wait.is_some();
             let tint = cell_tint(if waiting { Action::Pictures } else { item.action });
-            ring_fill(p, ring, center, if pressed { 1.0 } else if hovered { 0.8 } else if waiting { 0.5 } else { 0.0 }, tint);
-            ring_rim(p, ring, center, hovered || waiting, tint);
+            let parent = facts.bloomed == Some(zone) && !hovered;
+            ring_fill(p, ring, center, if pressed { 1.0 } else if hovered { 0.8 } else if waiting || parent { 0.5 } else { 0.0 }, tint);
+            ring_rim(p, ring, center, hovered || waiting || parent, tint);
             let label = if waiting { tr("Waiting for the camera") } else { label };
             // Its icon upright toward the wheel, its name bent along its outer edge.
             let (at, size) = cell_icon(ring, center);
@@ -3104,6 +3122,13 @@ fn draw(p: &Painter, zone: Zone, item: &Item, facts: &Facts, hovered: bool, pres
             widgets::icon(p, pos2(from + 10.0, rect.center().y), if playing { icons::PAUSE } else { icons::PLAY }, 20.0, Color32::WHITE);
             p.text(pos2(from + 30.0, rect.center().y), Align2::LEFT_CENTER, words, font, Color32::WHITE);
         }
+        Look::FullView => {
+            // As the Orbiters window's viewer has it: a round button in the view's corner, two arrows out (or in, to come back).
+            let fill = if pressed { theme::alpha(theme::INK_900, 0.95) } else if hovered { theme::alpha(theme::INK_750, 0.95) } else { theme::alpha(theme::INK_900, 0.78) };
+            p.circle_filled(rect.center(), rect.width() / 2.0, fill);
+            p.circle_stroke(rect.center(), rect.width() / 2.0, Stroke::new(1.0, Color32::from_white_alpha(if hovered { 110 } else { 50 })));
+            widgets::icon(p, rect.center(), if facts.view_full { icons::CORNERS_IN } else { icons::CORNERS_OUT }, 22.0, look::LABEL);
+        }
         Look::SeeInApp => {
             // The page's one accent button: where to go from here.
             let fill = if pressed { theme::mix(look::accent(), Color32::BLACK, 0.2) } else if hovered { theme::mix(look::accent(), Color32::WHITE, 0.12) } else { look::accent() };
@@ -3383,21 +3408,6 @@ const TURNING_FOOT: f32 = 474.0;
 const STAGE: Color32 = Color32::from_rgb(22, 26, 31);
 const SEE_IN_APP: Rect = Rect { min: pos2(700.0, 488.0), max: pos2(1000.0, 544.0) };
 
-/// A soft ellipse of light, brightest in its middle, fading to nothing at its edge.
-fn floor_pool(p: &Painter, middle: Pos2, radii: Vec2) {
-    let mut mesh = Mesh::default();
-    mesh.vertices.push(Vertex { pos: middle, uv: WHITE_UV, color: Color32::from_white_alpha(22) });
-    let steps = 48;
-    for i in 0..=steps {
-        let a = i as f32 / steps as f32 * std::f32::consts::TAU;
-        mesh.vertices.push(Vertex { pos: middle + vec2(a.cos() * radii.x, a.sin() * radii.y), uv: WHITE_UV, color: Color32::TRANSPARENT });
-    }
-    for i in 0..steps {
-        mesh.indices.extend_from_slice(&[0, i + 1, i + 2]);
-    }
-    p.add(Shape::mesh(mesh));
-}
-
 /// A band along each edge of `rect`, from `ink` at the edge to nothing `depth` in.
 fn fade_edges(p: &Painter, rect: Rect, depth: f32, ink: Color32) {
     let clear = Color32::from_rgba_premultiplied(0, 0, 0, 0);
@@ -3417,6 +3427,11 @@ fn fade_edges(p: &Painter, rect: Rect, depth: f32, ink: Color32) {
     band(rect.right_top(), rect.right_bottom(), pos2(inner.right(), rect.top()), pos2(inner.right(), rect.bottom()));
 }
 
+/// The full-screen button, in the bottom right corner of the view's frame `frame` (as the Orbiters window's viewer has it).
+fn full_button(frame: Rect) -> Rect {
+    Rect::from_min_size(frame.right_bottom() - vec2(56.0, 56.0), vec2(44.0, 44.0))
+}
+
 /// Whether the picture opened is a capture turning in 3D on this sheet: on a screen, where the sheet holds it.
 pub(super) fn turns_on_the_sheet(facts: &Facts, n: usize) -> bool {
     facts.desktop && facts.recent.get(n).is_some_and(|r| r.kind == RecentKind::Capture)
@@ -3425,7 +3440,9 @@ pub(super) fn turns_on_the_sheet(facts: &Facts, n: usize) -> bool {
 /// A capture turning on the sheet: on a dark stage, on its plate, live; its own picture until that is ready, and if it cannot be.
 fn draw_turning(p: &Painter, page: Rect, n: usize, facts: &Facts, view: &OpenedView) {
     let Some(recent) = facts.recent.get(n) else { return };
-    let rect = TURNING.translate(page.min.to_vec2());
+    // Full screen: the whole page; else its frame under the head, its words under it.
+    let full = facts.view_full;
+    let rect = if full { page } else { TURNING.translate(page.min.to_vec2()) };
     let stage = rect;
     p.rect_filled(stage, look::radius(12.0), STAGE);
     let waiting = |p: &Painter, words: &str| {
@@ -3444,14 +3461,15 @@ fn draw_turning(p: &Painter, page: Rect, n: usize, facts: &Facts, view: &OpenedV
             // A frame that reads as one: a stage a step lighter than the sheet, with a hairline round it (round 15's pre-check saw no frame).
             p.rect_filled(stage, look::radius(12.0), STAGE);
             p.rect_stroke(stage, look::radius(12.0), Stroke::new(1.0, Color32::from_white_alpha(28)), egui::StrokeKind::Inside);
-            // A lit pool of floor under what turns, so it stands on something (round 16's judges: a flat grey stage).
-            floor_pool(p, pos2(stage.center().x, stage.bottom() - stage.height() * 0.16), vec2(stage.width() * 0.34, stage.height() * 0.1));
+            // Seen from inside, as the Orbiters window shows it (Enzo): the picture fills its frame, cut to the frame's shape.
             keep_colour(p, rect);
-            p.add(RectShape::filled(rect, look::radius(12.0), Color32::WHITE).with_texture(id, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0))));
-            // Its ragged edges fade into the stage rather than end on the frame (round 14's judges).
-            fade_edges(p, rect.shrink(1.0), 46.0, STAGE);
+            let uv = cover_uv_of(rect.size(), 16.0 / 9.0);
+            p.add(RectShape::filled(rect, look::radius(12.0), Color32::WHITE).with_texture(id, uv));
         }
         (None, None) => waiting(p, tr("Getting its 3D ready\u{2026}")),
+    }
+    if full {
+        return;
     }
     // Under the frame, never over it: what it is, when it was made, and how to turn it, a line each (round 12's judges read one run joined by commas); its next
     // step at their right.
@@ -3462,7 +3480,7 @@ fn draw_turning(p: &Painter, page: Rect, n: usize, facts: &Facts, view: &OpenedV
     let top = page.top() + TURNING_FOOT;
     p.text(pos2(left, top + 14.0), Align2::LEFT_CENTER, fit(p, &recent.title, &big, room), big, look::LABEL);
     p.text(pos2(left, top + 39.0), Align2::LEFT_CENTER, fit(p, state, &small, room), small.clone(), look::MUTED);
-    p.text(pos2(left, top + 62.0), Align2::LEFT_CENTER, fit(p, tr("Drag to turn it. The mouse's wheel brings it closer."), &small, room), small, look::LABEL);
+    p.text(pos2(left, top + 62.0), Align2::LEFT_CENTER, fit(p, tr("Drag to look around. The mouse's wheel brings it closer."), &small, room), small, look::LABEL);
 }
 
 /// The words about what is pointed at, or what to do first, in a pill as wide as they are. Nothing to say: nothing shows.

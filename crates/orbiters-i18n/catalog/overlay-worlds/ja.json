@@ -25,7 +25,7 @@
   "Downloading": "ダウンロード中",
   "Downloading {percent}%": "ダウンロード中 {percent}%",
   "Downloading {read} of {total} MB": "ダウンロード中 {read} / {total} MB",
-  "Drag to turn it": "ドラッグで回転",
+  "Drag to look around": "ドラッグで見回す",
   "Every VRChat world": "すべてのVRChatワールド",
   "Every VRChat world whose name matches": "名前が一致するすべてのVRChatワールド",
   "Every VRChat world, from your VRChat account": "VRChatアカウントの、すべてのワールド",

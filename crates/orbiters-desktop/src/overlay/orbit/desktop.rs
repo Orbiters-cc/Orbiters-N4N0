@@ -1404,7 +1404,8 @@ mod tests {
             window.hide();
         }
         let after = count();
-        assert!(after <= before + 4, "GDI objects {before} then {after}: a window leaks");
+        // Process-wide: tests on other threads make and free their own. A leak is one bitmap a window at least, 200 here.
+        assert!(after < before + 60, "GDI objects {before} then {after}: a window leaks");
     }
 
     #[test]

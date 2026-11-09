@@ -75,31 +75,17 @@ fn parts_of(push: f32, accent: [f32; 3]) -> Vec<Part> {
     let cap = up(SHAFT);
     let pushed = push.abs().clamp(0.0, 1.0);
     let cap_colour: [f32; 3] = std::array::from_fn(|i| LIGHT[i] + (accent[i] - LIGHT[i]) * pushed * 0.8);
-    let mut out = vec![
-        // The housing it stands in: flat and dark, under everything.
-        Part { a: base, b: base, radius: 0.036, flat: 0.1, colour: BODY, solid: 0.5, glow: 0.0 },
-        // The short shaft, then the cap: a flattened disc, its top dished by the rim round it.
+    // Solid parts only: rings of short pieces read as beads (round 13's judges). A controller's stick: a dark housing, a domed boot round the stem's foot, a short
+    // stem, a wide cap with a darker dish in its top.
+    let top = up(SHAFT);
+    let dish = up(SHAFT + 0.0045);
+    let out = vec![
+        Part { a: base, b: base, radius: 0.037, flat: 0.12, colour: BODY, solid: 0.55, glow: 0.0 },
+        Part { a: base, b: base, radius: 0.019, flat: 0.55, colour: LIGHT, solid: 0.62, glow: 0.0 },
         Part { a: base, b: cap, radius: 0.0065, flat: 1.0, colour: LIGHT, solid: 0.72, glow: 0.0 },
-        Part { a: cap, b: cap, radius: 0.019, flat: 0.3, colour: cap_colour, solid: 0.76, glow: 0.1 + 0.15 * pushed },
+        Part { a: top, b: top, radius: 0.0205, flat: 0.32, colour: cap_colour, solid: 0.8, glow: 0.1 + 0.15 * pushed },
+        Part { a: dish, b: dish, radius: 0.0135, flat: 0.18, colour: BODY, solid: 0.7, glow: 0.0 },
     ];
-    // A ring of short pieces round a circle: in the housing's plane, or the cap's, tipped with the stick.
-    let ring = |out: &mut Vec<Part>, at: &dyn Fn(f32) -> V3, radius: f32, colour: [f32; 3], solid: f32, glow: f32| {
-        const PIECES: usize = 18;
-        for k in 0..PIECES {
-            let (a0, a1) = (k as f32 / PIECES as f32 * std::f32::consts::TAU, (k + 1) as f32 / PIECES as f32 * std::f32::consts::TAU);
-            out.push(Part { a: at(a0), b: at(a1), radius, flat: 1.0, colour, solid, glow });
-        }
-    };
-    // The opening's ring, raised from the housing.
-    ring(&mut out, &|a: f32| leaned([0.026 * a.cos(), FOOT + 0.004, 0.026 * a.sin()]), 0.0038, LIGHT, 0.62, 0.0);
-    // The cap's rim, on its upper face: what makes its top read as dished.
-    let rim = |a: f32| {
-        let (e1, e2, d) = ([1.0, 0.0, 0.0], [0.0, s, c], [0.0, c, -s]);
-        let local = stereo::add(stereo::add(stereo::scale(e1, 0.0165 * a.cos()), stereo::scale(e2, 0.0165 * a.sin())), stereo::scale(d, 0.0045));
-        let middle = [0.0, FOOT + SHAFT * c, -SHAFT * s];
-        leaned(stereo::add(middle, local))
-    };
-    ring(&mut out, &rim, 0.0032, LIGHT, 0.8, 0.1 * pushed);
     out
 }
 

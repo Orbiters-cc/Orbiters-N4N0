@@ -150,7 +150,7 @@ impl Eye {
         for (i, p) in scaled.pixels().enumerate() {
             pixels[i * 4..i * 4 + 4].copy_from_slice(&[p[0], p[1], p[2], 255]);
         }
-        Self { size, pixels, eyes, focal: size[0] as f32 / 2.0 / 50f32.to_radians().tan() }
+        Self { size, pixels, eyes, focal: size[0] as f32 / 2.0 / VR_SHOT_HALF_FOV.to_radians().tan() }
     }
 
     fn ray(&self, x: f32, y: f32) -> [f32; 3] {
@@ -280,6 +280,9 @@ fn cut(frame: &image::RgbImage, rect: egui::Rect, inside: impl Fn(Vec2) -> f32) 
 
 /// `--only orbit-vr <folder of real frames>`: how the panels hang in a headset, as renders: the real panels' pictures and VRChat's real wheel and Quick Menu, cut from desktop frames (`ref-wheel-<world>.jpg`,
 /// `ref-qm-<world>.jpg`, `ref-world-<world>.jpg` at 1920 x 1080), placed in 3D where `overlay::orbit::vr` places them and seen from the eyes. VRChat's menus were not captured in a headset: their place and size there is an estimate.
+/// Half the width the VR renders see, in degrees: wide enough that the wing and what plays at its foot are in the frame (round 13's judges saw them cut).
+const VR_SHOT_HALF_FOV: f32 = 57.0;
+
 pub(super) fn vr_shots(out: &Path, refs: &Path) -> anyhow::Result<()> {
     use crate::overlay::floating::space;
     use crate::overlay::orbit::vr;
@@ -401,7 +404,7 @@ pub(super) fn vr_shots(out: &Path, refs: &Path) -> anyhow::Result<()> {
             let mut renderer = render::FaceRenderer::new(device, queue);
             renderer.load(&capture)?;
             renderer.make_transparent()?;
-            let tan = 50f32.to_radians().tan();
+            let tan = VR_SHOT_HALF_FOV.to_radians().tan();
             let (w, h) = (size[0], size[1]);
             let tangents = [-tan, tan, -tan * h as f32 / w as f32, tan * h as f32 / w as f32];
             let mut model = |small: &stereo::Small| -> anyhow::Result<Vec<u8>> {

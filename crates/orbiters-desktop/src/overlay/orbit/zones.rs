@@ -340,7 +340,8 @@ impl Zone {
     fn fallback(self) -> Option<Rect> {
         let r = |x0: f32, y0: f32, x1: f32, y1: f32| Rect::from_min_max(pos2(x0, y0), pos2(x1, y1));
         match self {
-            Zone::QmCaption => Some(r(-262.0, 326.0, 262.0, 364.0)),
+            // One line, close under the strip: two were squeezed against the window's foot.
+            Zone::QmCaption => Some(r(-300.0, 324.0, 300.0, 354.0)),
             Zone::SheetPeek => Some(r(-352.0, -276.0, -202.0, -244.0)),
             _ => None,
         }

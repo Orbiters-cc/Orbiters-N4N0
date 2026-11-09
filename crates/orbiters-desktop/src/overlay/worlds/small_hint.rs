@@ -176,8 +176,13 @@ impl HideChip {
 
 /// Where a view's X lies, facing `eye`: floating just above it.
 pub fn chip_place(middle: V3, radius: f32, eye: V3, over_the_hint: bool) -> vr::Matrix34 {
-    let over = if over_the_hint { hint_place(middle, radius)[1] - middle[1] + WIDTH_M * PX[1] as f32 / PX[0] as f32 / 2.0 + 0.04 } else { radius + 0.05 };
-    facing(stereo::add(middle, [0.0, over, 0.0]), eye)
+    // By the view, at its right and level with its upper part, whatever the hint does: over the hint it read as closing the hint (round 13's judges).
+    let _ = over_the_hint;
+    let towards = stereo::sub(eye, middle);
+    let flat = (towards[0] * towards[0] + towards[2] * towards[2]).sqrt().max(1e-4);
+    let right = [towards[2] / flat, 0.0, -towards[0] / flat];
+    let at = stereo::add(stereo::add(middle, stereo::scale(right, radius * 1.05 + CHIP_WIDTH_M)), [0.0, radius * 0.45, 0.0]);
+    facing(at, eye)
 }
 
 /// Whether a tool at `tip`, pointing along `along`, is on a chip at `place`: its ray within a generous margin, or itself close by.

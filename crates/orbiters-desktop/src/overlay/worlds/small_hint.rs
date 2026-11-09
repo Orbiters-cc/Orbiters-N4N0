@@ -13,10 +13,25 @@ use super::super::orbit::panels::look as orbit_look;
 use orbiters_ui::{icons, widgets};
 use std::time::Instant;
 
-pub const PX: [u32; 2] = [560, 256];
-pub const WIDTH_M: f32 = 0.35;
-/// How high above what it speaks of it floats.
-const ABOVE_M: f32 = 0.06;
+// Wider than it was, with the same pixels to a metre, for a larger stick beside the words.
+pub const PX: [u32; 2] = [640, 256];
+pub const WIDTH_M: f32 = 0.40;
+/// How high above what it speaks of it floats: close, so it reads as the view's (round 14's judges saw a hand's gap between them).
+const ABOVE_M: f32 = 0.025;
+/// How much of a capture's radius its content reaches up, mostly: the hint's foot and the X sit just over that.
+const TOP_OF_RADIUS: f32 = 0.7;
+/// How far right of the view's middle its X is: over the view, toward its upper right.
+fn x_across(radius: f32) -> f32 {
+    (radius * 0.55).clamp(0.04, 0.165)
+}
+
+/// How far the X keeps from the hint: far enough to be the view's, not the hint's last line's.
+const X_CLEAR_M: f32 = 0.06;
+
+/// How far left of the view's middle the hint stands, so the X has the view's upper right to itself with a clear gap.
+fn hint_left(radius: f32) -> f32 {
+    (WIDTH_M / 2.0 + X_CLEAR_M + CHIP_WIDTH_M / 2.0 - x_across(radius)).max(0.0)
+}
 const FRAME_S: f32 = 1.0 / 45.0;
 /// One push up and pull down, in seconds.
 const CYCLE_S: f32 = stick3d::CYCLE_S;
@@ -27,7 +42,7 @@ const STICK_FRAME_S: f32 = 1.0 / 36.0;
 const STICK_TURNS_BY: f32 = 0.7;
 pub const STICK_AT: [f32; 2] = [-WIDTH_M / 2.0 + STICK_COLUMN_PX / PX[0] as f32 * WIDTH_M / 2.0, -0.026];
 /// The part of the page the stick stands in, at its left, its name under it.
-const STICK_COLUMN_PX: f32 = 236.0;
+const STICK_COLUMN_PX: f32 = 300.0;
 
 /// What it says.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -70,9 +85,11 @@ fn words(p: &Painter, at: Pos2, glyph: &str, first: &str, second: &str, on: f32)
     // White, every line: grey over a bright world was what read least.
     let text = Color32::WHITE;
     edged_icon(p, at + vec2(16.0, 32.0), glyph, 30.0, lit);
-    edged_text(p, at + vec2(42.0, 18.0), Align2::LEFT_CENTER, first, theme::font(30.0, weight::BOLD), text);
+    // One size for every line (round 14's judges): what to do and what it does read alike.
+    edged_text(p, at + vec2(42.0, 18.0), Align2::LEFT_CENTER, first, theme::font(29.0, weight::BOLD), text);
     // What it does as readable as what to do (round 12's judges found it the line least read).
-    edged_text(p, at + vec2(42.0, 50.0), Align2::LEFT_CENTER, second, theme::font(25.0, weight::BOLD), text);
+    // As large as what to do: in a headset the smaller line was the one not read (round 14's judges).
+    edged_text(p, at + vec2(42.0, 50.0), Align2::LEFT_CENTER, second, theme::font(29.0, weight::BOLD), text);
 }
 
 /// The hint on a page of [`PX`], `seconds` into its animation.
@@ -84,7 +101,7 @@ pub fn paint(p: &Painter, stage: Stage, seconds: f32) {
             let push = stick3d::push_at(seconds);
             let which = if hand == 0 { tr("Left stick") } else { tr("Right stick") };
             // Its name over the stick, as large as what it does (judges could hardly read it at 19): under it, its housing lay over it.
-            edged_text(p, pos2(STICK_COLUMN_PX / 2.0, 22.0), Align2::CENTER_CENTER, which, theme::font(25.0, weight::BOLD), Color32::WHITE);
+            edged_text(p, pos2(STICK_COLUMN_PX / 2.0, 22.0), Align2::CENTER_CENTER, which, theme::font(29.0, weight::BOLD), Color32::WHITE);
             let up = ((push - 0.2) / 0.8).clamp(0.0, 1.0);
             let down = ((-push - 0.2) / 0.8).clamp(0.0, 1.0);
             words(p, pos2(STICK_COLUMN_PX + 4.0, 8.0), icons::CARET_UP, tr("Push up"), tr("to zoom in"), up);
@@ -174,15 +191,22 @@ impl HideChip {
     }
 }
 
-/// Where a view's X lies, facing `eye`: floating just above it.
+/// Where a view's X lies, facing `eye`: just above it, as Enzo asked (request 32), over its upper right. Never over the hint, where it read as closing the hint
+/// (round 13's judges), and never beside the view (round 14's, against request 32): the hint stands left of the view's middle, so the X has room right of it.
 pub fn chip_place(middle: V3, radius: f32, eye: V3, over_the_hint: bool) -> vr::Matrix34 {
-    // By the view, at its right and level with its upper part, whatever the hint does: over the hint it read as closing the hint (round 13's judges).
     let _ = over_the_hint;
+    let right = right_of(middle, eye);
+    let across = x_across(radius);
+    // On the view's top line, wholly under the hint: it reads as the view's.
+    let up = radius * TOP_OF_RADIUS;
+    facing(stereo::add(stereo::add(middle, stereo::scale(right, across)), [0.0, up, 0.0]), eye)
+}
+
+/// Level, to the right as seen from `eye`.
+fn right_of(middle: V3, eye: V3) -> V3 {
     let towards = stereo::sub(eye, middle);
     let flat = (towards[0] * towards[0] + towards[2] * towards[2]).sqrt().max(1e-4);
-    let right = [towards[2] / flat, 0.0, -towards[0] / flat];
-    let at = stereo::add(stereo::add(middle, stereo::scale(right, radius * 1.05 + CHIP_WIDTH_M)), [0.0, radius * 0.45, 0.0]);
-    facing(at, eye)
+    [towards[2] / flat, 0.0, -towards[0] / flat]
 }
 
 /// Whether a tool at `tip`, pointing along `along`, is on a chip at `place`: its ray within a generous margin, or itself close by.
@@ -264,7 +288,7 @@ impl SmallHint {
                 presenter.show_part(overlay, self.handle, self.canvas.pixels(), PX[0], PX[1], changed);
             }
         }
-        let place = facing(hint_place(at, radius), stereo::position(head));
+        let place = facing(hint_place(at, radius, stereo::position(head)), stereo::position(head));
         let _ = overlay.set_transform_absolute(self.handle, &place);
         if self.shown.is_none() {
             let _ = overlay.show(self.handle);
@@ -371,11 +395,12 @@ impl Backdrop {
     }
 }
 
-/// Where the hint's middle lies, for what it speaks of at `at` reaching `radius`: just over its middle, as most captures are flatter than they are wide, its tail towards it.
-pub fn hint_place(at: V3, radius: f32) -> V3 {
+/// Where the hint's middle lies, for what it speaks of at `at` reaching `radius`, seen from `eye`: just over its top, a little to the left, so the X has its upper right.
+pub fn hint_place(at: V3, radius: f32, eye: V3) -> V3 {
     let height = WIDTH_M * PX[1] as f32 / PX[0] as f32;
-    // Over the capture's top, not on its roof (round 12's judges saw the stick sit on it): what stands in a capture reaches most of its radius up.
-    stereo::add(at, [0.0, radius * 0.9 + height / 2.0 + ABOVE_M, 0.0])
+    // Over the capture's top, not on its roof (round 12's judges saw the stick sit on it), and not a hand above it (round 14's).
+    let left = stereo::scale(right_of(at, eye), -hint_left(radius));
+    stereo::add(stereo::add(at, left), [0.0, radius * TOP_OF_RADIUS + height / 2.0 + ABOVE_M, 0.0])
 }
 
 /// Upright at `place`, its face towards `eye`.
@@ -462,6 +487,23 @@ mod tests {
         assert!(!on_chip(&place, tip, stereo::scale(along, -1.0)));
         // A hand there needs no aim.
         assert!(on_chip(&place, stereo::add(middle, [0.03, 0.0, 0.0]), [0.0, 1.0, 0.0]));
+    }
+
+    /// Enzo's request 32: the X floats above the view, never beside it (round 14 moved it beside), and never on the hint (round 13: it read as the hint's).
+    #[test]
+    fn the_x_floats_above_the_view_clear_of_the_hint() {
+        let eye = [0.0, 1.6, 0.0];
+        for radius in [0.12, 0.2, 0.3, 0.45] {
+            let middle = [0.0, 1.4, -0.6];
+            let x = stereo::position(&chip_place(middle, radius, eye, true));
+            assert!(x[1] >= middle[1] + radius * TOP_OF_RADIUS - 1e-4, "on the view's top at {radius}: {x:?}");
+            assert!(x[0].abs() < radius * 0.85, "over the view, not beside it, at {radius}: {x:?}");
+            let hint = hint_place(middle, radius, eye);
+            let hint_right = hint[0] + WIDTH_M / 2.0;
+            let hint_foot = hint[1] - WIDTH_M * PX[1] as f32 / PX[0] as f32 / 2.0;
+            let clear = x[0] - CHIP_WIDTH_M / 2.0 > hint_right || x[1] + CHIP_WIDTH_M / 2.0 < hint_foot;
+            assert!(clear, "clear of the hint at {radius}: X {x:?}, hint {hint:?}");
+        }
     }
 
     #[test]

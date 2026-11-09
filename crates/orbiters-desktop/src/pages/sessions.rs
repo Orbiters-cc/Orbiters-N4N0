@@ -58,6 +58,8 @@ struct Detail {
     reconstructing: bool,
     /// What can be asked about its wearer (orbiters_core::picture::wearer_row), read once per result.
     wearer_row: Option<Option<orbiters_core::picture::WearerRow>>,
+    /// Opened before the list came (from the menus around VRChat): its view is chosen once the list says whether it has a 3D view.
+    view_waits: bool,
 }
 
 /// What the area under the stats shows.
@@ -204,6 +206,7 @@ impl State {
             preview: None,
             reconstructing: false,
             wearer_row: None,
+            view_waits: self.sessions.is_none(),
         });
     }
 }
@@ -952,10 +955,16 @@ fn import_popover(ctx: &egui::Context, cx: &mut Cx, state: &mut State, anchor: R
 
 fn detail(ctx: &egui::Context, cx: &mut Cx, state: &mut State, page: Rect) {
     let Some(d) = state.detail.as_mut() else { return };
-    let Some(session) = state.sessions.as_ref().and_then(|l| l.iter().find(|s| s.dir == d.dir)).cloned() else {
+    // A capture asked for before the list has come (from the menus around VRChat, a window just opened) waits for it: dropping it opened the page and not the capture.
+    let Some(list) = state.sessions.as_ref() else { return };
+    let Some(session) = list.iter().find(|s| s.dir == d.dir).cloned() else {
         state.detail = None;
         return;
     };
+    // Asked for as "See it in 3D": its 3D view, where it has one.
+    if std::mem::take(&mut d.view_waits) && session.reconstruction.is_some() {
+        d.view = View::Splats;
+    }
     let tex = match state.thumbs.get_mut(&d.dir) {
         Some(kept) => {
             // In use as long as the detail shows it, wherever the grid is scrolled.

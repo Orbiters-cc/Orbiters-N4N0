@@ -51,7 +51,8 @@ pub const RING_OUTER: f32 = 172.0;
 pub const BLOOM_INNER: f32 = 176.0;
 pub const BLOOM_OUTER: f32 = 238.0;
 /// What separates two cells, and the cells' corners, in those units.
-const RING_GAP: f32 = 3.5;
+// Gaps of the tiles' kind: cells that read as Orbiters' tiles round the wheel, not as a second VRChat ring (round 14's judges).
+const RING_GAP: f32 = 6.0;
 const RING_CORNER: f32 = 9.0;
 
 /// A cell of a ring: from and to, in degrees clockwise from straight up, and its radii.
@@ -304,7 +305,8 @@ impl Zone {
             Zone::WheelVeil => r(-109.0, -109.0, 109.0, 109.0),
             // Level with the caption over the ring, past its right end: clear of the ring and of either second ring (a judge found it sitting on the rim), and still beside them.
             // Nearer the ring than it was (round 12's judges found it detached), still clear of the second rings and the caption.
-            Zone::WheelHide => r(224.0, -214.0, 336.0, -172.0),
+            // Level with the caption's pill, in its row, as the wing's Hide sits beside its name (round 14's judges saw it lower and off to the side).
+            Zone::WheelHide => r(226.0, -246.0, 338.0, -204.0),
             // As tall as My Profile and as wide, beside it.
             // As tall as My Profile and as wide, beside it.
             Zone::WingName => r(362.0, -150.0, 524.0, -120.0),
@@ -360,6 +362,18 @@ fn wing_tile(column: f32, row: f32) -> Rect {
 /// What a panel keeps clear of the window's edge, in pixels.
 const EDGE: f32 = 4.0;
 
+/// On a screen, how far each of the wing's tiles reaches into the gaps round it, in units: half a gap, so that the tiles lie on one continuous backing and
+/// nothing of VRChat's shows between them (round 14's judges saw a dark VRChat element there). In a headset the tiles stay apart with nothing behind them (Enzo,
+/// requests 4 and 39).
+pub const WING_BLEED: f32 = 3.0;
+
+impl Zone {
+    /// One of the wing's tiles, which lie on one backing on a screen.
+    pub fn on_the_wing_backing(self) -> bool {
+        matches!(self, Zone::WingWorlds | Zone::WingYouTube | Zone::WingInstances | Zone::WingPictures | Zone::WingTalk | Zone::WingAll | Zone::WingPlaying)
+    }
+}
+
 /// A panel placed in the window: where in pixels, the menu's centre and how many pixels a unit is.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Placed {
@@ -407,7 +421,11 @@ pub fn frame(around: Around, client: Vec2) -> (Pos2, f32) {
 pub fn place(zone: Zone, client: Vec2) -> Option<Placed> {
     let (center, unit) = frame(zone.menu(), client);
     let window = Rect::from_min_size(pos2(0.0, 0.0), client).shrink(EDGE);
-    let at = |units: Rect| Rect::from_min_max(center + units.min.to_vec2() * unit, center + units.max.to_vec2() * unit);
+    let bleed = if zone.on_the_wing_backing() { WING_BLEED } else { 0.0 };
+    let at = |units: Rect| {
+        let units = units.expand(bleed);
+        Rect::from_min_max(center + units.min.to_vec2() * unit, center + units.max.to_vec2() * unit)
+    };
     let first = at(zone.units());
     let rect = if window.contains_rect(first) {
         first

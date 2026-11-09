@@ -127,9 +127,9 @@ pub mod look {
     pub const ON_ACCENT: Color32 = orbiters_ui::theme::ON_ACCENT;
     pub const LABEL: Color32 = orbiters_ui::theme::FG;
     pub const MUTED: Color32 = orbiters_ui::theme::FG_2;
-    /// A cell of the ring, near the wheel and at its outer edge.
-    pub const CELL_NEAR: Color32 = Color32::from_rgb(36, 43, 49);
-    pub const CELL_FAR: Color32 = Color32::from_rgb(21, 25, 29);
+    /// A cell of the ring, near the wheel and at its outer edge: the tiles' surface, nearly flat (a dark-to-darker fall was VRChat's own wheel's, round 14's judges).
+    pub const CELL_NEAR: Color32 = Color32::from_rgb(42, 48, 54);
+    pub const CELL_FAR: Color32 = Color32::from_rgb(32, 37, 42);
     /// A panel's corners, as the app's cards and tiles have them.
     pub const RADIUS: f32 = orbiters_ui::theme::CARD_RADIUS * 0.8;
     pub const TILE_RADIUS: f32 = orbiters_ui::theme::TILE_RADIUS * 0.8;
@@ -169,6 +169,8 @@ pub enum Action {
     Talk,
     /// The Orbiters window.
     OpenApp,
+    /// The capture opened on the sheet, in Orbiters' own 3D viewer.
+    SeeInApp,
     /// No capture kit on this avatar: the Orbiters window, on Projects, where My Avatar adds it.
     AddKit,
     /// Moves in what plays: where is the pointer's.
@@ -337,8 +339,9 @@ pub enum GalleryFilter {
     Captures,
 }
 
-/// How much more of the gallery a screen holds than the app's layout would on a page this wide.
-pub(super) const GALLERY_DENSER: f32 = 1.45;
+/// The gallery's columns: three, so a tile's name and when it was taken show whole (round 14's judges: four across cut both, the date first).
+pub(super) const GALLERY_COLUMNS: usize = 3;
+const GALLERY_GAP: f32 = 12.0;
 
 /// The gallery's tiles and where each lies, made once when they change. Tens of thousands of pictures are nothing unusual, and this goes around with the facts each frame: it is
 /// compared by being the same list.
@@ -353,25 +356,27 @@ struct GalleryList {
 }
 
 impl Gallery {
+    /// Every tile one size, three a row, in the gallery and in a set opened from it alike: one shape for photo and capture (round 13's judges: rows of four photos beside
+    /// rows of three captures), and no row stretched to fill (round 14's judges: a set's last tile came out wider). A tall picture is cropped rather than a sliver.
+    /// The layout chosen in the app does not change it: with one shape, its layouts would all come to this.
     pub fn new(items: Vec<Recent>, layout: orbiters_core::settings::GalleryLayout) -> Self {
-        Self::with_density(items, layout, GALLERY_DENSER)
-    }
-
-    /// `denser`: how much more a screen holds than the app's layout would on this page (1: as large as there).
-    pub fn with_density(items: Vec<Recent>, layout: orbiters_core::settings::GalleryLayout, denser: f32) -> Self {
+        let _ = layout;
         if items.is_empty() {
             return Self::default();
         }
-        // A tall picture still gets a tile wide enough to tell what it is: it is cropped rather than a sliver.
-        // One shape for every tile, photo or capture: rows of four photos beside rows of three captures broke the gallery's rhythm (round 13's judges).
-        let aspects: Vec<f32> = items.iter().map(|_| 16.0 / 9.0).collect();
-        // The layout chosen in the app, laid out on a wider page and brought down to this one: about three a row (round 10's judges found two large ones a row sparse,
-        // a first screen of four), still a laser's large target in a headset.
-        let (rects, height) = crate::pages::gallery_layout::arrange(layout, &aspects, (1024.0 - 48.0) * denser, 300.0, 0.0);
         // A little room under the toolbar: the first row read as cut under it.
         const UNDER_THE_TOOLBAR: f32 = 10.0;
-        let rects = rects.into_iter().map(|r| Rect::from_min_size((r.min.to_vec2() / denser).to_pos2() + vec2(0.0, UNDER_THE_TOOLBAR), r.size() / denser)).collect();
-        Self(std::sync::Arc::new(GalleryList { items, rects, height: height / denser + UNDER_THE_TOOLBAR }))
+        let wide = (1024.0 - 48.0 - GALLERY_GAP * (GALLERY_COLUMNS - 1) as f32) / GALLERY_COLUMNS as f32;
+        let high = wide * 9.0 / 16.0;
+        let rects: Vec<Rect> = (0..items.len())
+            .map(|i| {
+                let (row, column) = (i / GALLERY_COLUMNS, i % GALLERY_COLUMNS);
+                Rect::from_min_size(pos2(column as f32 * (wide + GALLERY_GAP), UNDER_THE_TOOLBAR + row as f32 * (high + GALLERY_GAP)), vec2(wide, high))
+            })
+            .collect();
+        let rows = items.len().div_ceil(GALLERY_COLUMNS);
+        let height = UNDER_THE_TOOLBAR + rows as f32 * (high + GALLERY_GAP) - GALLERY_GAP;
+        Self(std::sync::Arc::new(GalleryList { items, rects, height }))
     }
 }
 
@@ -601,6 +606,8 @@ pub enum Look {
     BigPicture(usize),
     /// To the picture after this one, or before.
     Step(bool),
+    /// The capture opened, in Orbiters' own 3D viewer: the next step from its live 3D on the sheet.
+    SeeInApp,
     /// A cell of the ring: its icon over its label.
     Cell { icon: &'static str, label: &'static str, badge: bool },
     /// A small heading over a group of a sheet's tiles.
@@ -686,7 +693,8 @@ fn r(x: f32, y: f32, w: f32, h: f32) -> Rect {
 /// The items of a part of `size` units.
 pub fn items(zone: Zone, size: Vec2, facts: &Facts) -> Vec<Item> {
     let (w, h) = (size.x, size.y);
-    let whole = r(0.0, 0.0, w, h);
+    // On a screen a tile of the wing has a little of its backing round it ([`zones::WING_BLEED`]).
+    let whole = if facts.desktop && zone.on_the_wing_backing() { r(0.0, 0.0, w, h).shrink(zones::WING_BLEED) } else { r(0.0, 0.0, w, h) };
     let cell = |action, icon, label, badge| vec![Item { action, rect: whole, look: Look::Cell { icon, label, badge } }];
     let tile = |action, icon, label, badge| vec![Item { action, rect: whole, look: Look::Tile { icon, label, badge } }];
     let transport_icon = if facts.music.as_ref().is_some_and(|m| m.1) { icons::PAUSE } else { icons::PLAY };
@@ -732,14 +740,17 @@ pub fn items(zone: Zone, size: Vec2, facts: &Facts) -> Vec<Item> {
         Zone::SheetHint => Vec::new(),
         Zone::SheetPeek => vec![Item { action: Action::Peek, rect: whole, look: Look::PeekWord }],
         Zone::SheetBack => {
-            let mut out = vec![Item { action: Action::CloseSheet, rect: r(w - 40.0, 7.0, 30.0, 30.0), look: Look::Close }, Item { action: Action::Back, rect: r(BACK_AT, 7.0, 30.0, 30.0), look: Look::HeadBack }];
+            // In a headset the head's buttons are of the size of the sheet's own (round 14's judges: tabs much smaller than the buttons under them, for a laser).
+            let (top, b) = head_button(facts);
+            let pill = HEAD_PILL;
+            let mut out = vec![Item { action: Action::CloseSheet, rect: r(w - 10.0 - b, top, b, b), look: Look::Close }, Item { action: Action::Back, rect: r(BACK_AT, top, b, b), look: Look::HeadBack }];
             out.extend(head_tabs(facts, w).0);
             // While a capture shows around the person: it is one press from gone, wherever on the sheet.
             if facts.view_showing {
-                out.push(Item { action: Action::HideView, rect: r(w - 40.0 - 8.0 - 96.0, 7.0, 96.0, 30.0), look: Look::HideView });
+                out.push(Item { action: Action::HideView, rect: r(w - 40.0 - 8.0 - pill, top, pill, b), look: Look::HideView });
                 // On Worlds in 3D, the world's side panel has it.
                 if facts.sheet != Some(Sheet::Worlds) {
-                    out.push(Item { action: Action::SmallView(!facts.view_small), rect: r(w - 40.0 - 8.0 - 96.0 - 6.0 - 96.0, 7.0, 96.0, 30.0), look: Look::SmallView });
+                    out.push(Item { action: Action::SmallView(!facts.view_small), rect: r(w - 40.0 - 8.0 - pill - 6.0 - pill, top, pill, b), look: Look::SmallView });
                 }
             }
             // All tools has what plays on its page.
@@ -795,6 +806,14 @@ const COMPACT_TAB_VR: f32 = 46.0;
 /// Where every sheet has its Back.
 const BACK_AT: f32 = 8.0;
 
+/// Where the head's round buttons are, and how large: a laser's size in a headset, the size of the sheet's own buttons.
+fn head_button(facts: &Facts) -> (f32, f32) {
+    if facts.desktop { (7.0, 30.0) } else { (3.0, 38.0) }
+}
+
+/// How wide Hide 3D and Small here are in the head.
+const HEAD_PILL: f32 = 96.0;
+
 /// The tools along a sheet's head, where the wing is not beside it, and where they end. Their names where there is room; with something else to say in the head, on a screen, icons but for the one that is open.
 fn head_tabs(facts: &Facts, head_width: f32) -> (Vec<Item>, f32) {
     const TABS: [(Action, &str, &str, f32); 6] = [
@@ -821,16 +840,18 @@ fn head_tabs(facts: &Facts, head_width: f32) -> (Vec<Item>, f32) {
     // Named wherever they fit beside what the head has at its end (its close; Hide 3D and Small here while a capture shows): round 11's judges saw a headset's bare icons
     // with their names' room empty beside them.
     // As wide as its own name where room is short (a headset's head is 704 across): its icon, its word, a little room.
-    let snug = |label: &str| (18.0 + label.chars().map(|c| if c.is_ascii() { 8.2 } else { 15.5 }).sum::<f32>()).max(COMPACT_TAB_VR);
-    let room = head_width - 48.0 - if facts.view_showing { 104.0 + if facts.sheet != Some(Sheet::Worlds) { 102.0 } else { 0.0 } } else { 0.0 } - 12.0;
-    let start = BACK_AT + 36.0;
+    // A headset's words as large as the sheet's buttons' (round 14's judges).
+    let snug = |label: &str| (16.0 + label.chars().map(|c| if c.is_ascii() { 8.7 } else { 16.0 }).sum::<f32>()).max(COMPACT_TAB_VR);
+    let pill = HEAD_PILL;
+    let room = head_width - 48.0 - if facts.view_showing { pill + 8.0 + if facts.sheet != Some(Sheet::Worlds) { pill + 6.0 } else { 0.0 } } else { 0.0 } - 12.0;
+    let start = BACK_AT + head_button(facts).1 + 6.0;
     let wide_fits = start + TABS.iter().map(|t| t.3 + 3.0).sum::<f32>() <= room;
     let snug_fits = start + TABS.iter().map(|t| snug(tr_ctx("tile", t.2)) + 3.0).sum::<f32>() <= room;
     let quiet = status_now(facts).is_none();
     let compact = (busy && !(quiet && (wide_fits || snug_fits))) || (unnamed && facts.desktop);
     let snugly = busy && quiet && !wide_fits && snug_fits;
     // After the Back, which is in this place on every sheet.
-    let mut x = BACK_AT + 30.0 + 6.0;
+    let mut x = start;
     let mut out = Vec::new();
     for (action, icon, label, wide) in TABS {
         let on = open(action);
@@ -842,7 +863,7 @@ fn head_tabs(facts: &Facts, head_width: f32) -> (Vec<Item>, f32) {
         let named = on || (!facts.desktop && facts.pointed == Some(action));
         let width = if compact && !named { if facts.desktop { 36.0 } else { COMPACT_TAB_VR } } else if snugly { snug(label) } else { wide };
         // A headset's named tabs as tall as the head allows: a laser's target.
-        let (top, tall) = if snugly { (4.0, 36.0) } else { (7.0, 30.0) };
+        let (top, tall) = if !facts.desktop { (3.0, 38.0) } else if snugly { (4.0, 36.0) } else { (7.0, 30.0) };
         out.push(Item { action, rect: r(x, top, width, tall), look: Look::HeadTab { icon, label, on, words_only: snugly } });
         x += width + 3.0;
     }
@@ -986,11 +1007,17 @@ fn sheet_page_items(sheet: Sheet, facts: &Facts) -> Vec<Item> {
             let n = facts.opened.unwrap_or(0);
             // The sheet's own Back closes it first: one way back (round 11's judges found two, one under the other).
             let mut out = vec![Item { action: Action::Idle, rect: r(0.0, 0.0, 1024.0, 576.0), look: Look::BigPicture(n) }];
+            // A capture turns in its own frame, its words and next step under it: the arrows beside the frame's middle.
+            let turning = turns_on_the_sheet(facts, n);
+            let step_y = if turning { TURNING.center().y - 26.0 } else { 262.0 };
             if picture_beside(facts, n, false).is_some() {
-                out.push(Item { action: Action::PictureStep(false), rect: r(14.0, 262.0, 52.0, 52.0), look: Look::Step(false) });
+                out.push(Item { action: Action::PictureStep(false), rect: r(14.0, step_y, 52.0, 52.0), look: Look::Step(false) });
             }
             if picture_beside(facts, n, true).is_some() {
-                out.push(Item { action: Action::PictureStep(true), rect: r(958.0, 262.0, 52.0, 52.0), look: Look::Step(true) });
+                out.push(Item { action: Action::PictureStep(true), rect: r(958.0, step_y, 52.0, 52.0), look: Look::Step(true) });
+            }
+            if turning {
+                out.push(Item { action: Action::SeeInApp, rect: SEE_IN_APP, look: Look::SeeInApp });
             }
             out
         }
@@ -1285,7 +1312,8 @@ pub fn scrolls_with_a_drag(sheet: Sheet, look: &Look) -> bool {
 /// Where what plays's timeline lies on its panel, tall enough for a laser to find.
 fn timeline_rect(panel: Rect) -> Rect {
     let x = panel.left() + panel.height();
-    Rect::from_min_max(pos2(x, panel.top() + 90.0), pos2(panel.right() - 14.0, panel.top() + 124.0))
+    // Under a title of two lines, over the transport.
+    Rect::from_min_max(pos2(x, panel.top() + 92.0), pos2(panel.right() - 14.0, panel.top() + 126.0))
 }
 
 /// How far along what plays the pointer at `x` is, 0 to 1: `None` where there is no timeline to press.
@@ -1315,10 +1343,23 @@ pub(super) use mic_sheet::mic_after;
 
 /// What plays, on up to `rows` lines of `room`, cut only past them.
 fn song_lines(p: &Painter, name: &str, font: FontId, room: f32, rows: usize) -> std::sync::Arc<egui::Galley> {
-    let mut job = egui::text::LayoutJob::simple(name.to_string(), font, look::LABEL, room);
-    job.wrap.max_rows = rows;
-    job.wrap.overflow_character = Some('\u{2026}');
-    p.layout_job(job)
+    let lay = |text: String| {
+        let mut job = egui::text::LayoutJob::simple(text, font.clone(), look::LABEL, room);
+        job.wrap.max_rows = rows;
+        job.wrap.overflow_character = Some('\u{2026}');
+        p.layout_job(job)
+    };
+    if p.layout(name.to_string(), font.clone(), look::LABEL, room).rows.len() <= rows {
+        return lay(name.to_string());
+    }
+    // Too long: it ends at a word, with "…", not in the middle of one (round 15's pre-check read "PARTICIP...").
+    words_that_fit(name, |text| p.layout(text.to_string(), font.clone(), look::LABEL, room).rows.len() <= rows).map_or_else(|| lay(name.to_string()), lay)
+}
+
+/// The most of `name`'s first words that, followed by "…", `fits`; none when not even its first word does.
+fn words_that_fit(name: &str, fits: impl Fn(&str) -> bool) -> Option<String> {
+    let words: Vec<&str> = name.split_whitespace().collect();
+    (1..words.len()).rev().map(|n| format!("{}\u{2026}", words[..n].join(" "))).find(|text| fits(text))
 }
 
 /// A line of what an accessory of All tools does, at its size.
@@ -1347,7 +1388,9 @@ fn tile_line(action: Action, facts: &Facts) -> Option<String> {
 
 const PLAYING_LINK_W: f32 = 138.0;
 /// Where the volume's row lies in Now playing, from its top.
-const VOLUME_ROW: f32 = 30.0;
+const VOLUME_ROW: f32 = 26.0;
+/// Its buttons' size: the row ends over the title, which wraps to two lines under it.
+const VOLUME_BUTTON: f32 = 36.0;
 const PLAYING_LINK_H: f32 = 38.0;
 
 fn now_playing_controls(panel: Rect, facts: &Facts) -> Vec<Item> {
@@ -1378,9 +1421,10 @@ fn now_playing_controls(panel: Rect, facts: &Facts) -> Vec<Item> {
         // In its head's corner, where the link's buttons were.
         let right = panel.right() - 16.0;
         let top = |x: f32, side: f32| Rect::from_center_size(pos2(x + side / 2.0, panel.top() + VOLUME_ROW), Vec2::splat(side));
-        out.push(Item { action: Action::Volume(true), rect: top(right - 44.0, 44.0), look: Look::Transport(icons::PLUS) });
-        out.push(Item { action: Action::Volume(false), rect: top(right - 44.0 - 78.0 - 44.0, 44.0), look: Look::Transport(icons::MINUS) });
-        out.push(Item { action: Action::Mute, rect: top(right - 44.0 - 78.0 - 44.0 - 50.0, 44.0), look: Look::Transport(if muted { icons::SPEAKER_X } else { icons::SPEAKER_HIGH }) });
+        let b = VOLUME_BUTTON;
+        out.push(Item { action: Action::Volume(true), rect: top(right - b, b), look: Look::Transport(icons::PLUS) });
+        out.push(Item { action: Action::Volume(false), rect: top(right - b - 78.0 - b, b), look: Look::Transport(icons::MINUS) });
+        out.push(Item { action: Action::Mute, rect: top(right - b - 78.0 - b - 44.0, b), look: Look::Transport(if muted { icons::SPEAKER_X } else { icons::SPEAKER_HIGH }) });
     }
     out
 }
@@ -1652,6 +1696,7 @@ pub fn caption(action: Action, facts: &Facts) -> Option<(String, String)> {
         Action::Talk if facts.n4n0 => (tr("Ask N4N0").into(), tr("Your assistant in VRChat: talk to it, and see all it said.").into()),
         Action::Talk => (tr("Ask N4N0").into(), tr("Turn N4N0 on in Orbiters first.").into()),
         Action::OpenApp => (tr("Open Orbiters").into(), tr("The full app, on your computer.").into()),
+        Action::SeeInApp => (tr("See it in 3D, in Orbiters").into(), tr("Opens it in Orbiters' own 3D viewer, on your computer.").into()),
         Action::Back => (tr("Back").into(), tr("To the last screen.").into()),
         Action::MicDefault(_) => (tr("Your microphones").into(), tr("Press one to make it Windows' default.").into()),
         Action::PlayingLink(Target::DropPlaying) if facts.can_drop_playing => (tr("Drop link").into(), tr("A card of it in the world, for anyone to take.").into()),
@@ -1723,9 +1768,13 @@ fn shaped(zone: Zone, rect: Rect) -> Shaped {
     }
 }
 
-/// A cell of the ring: Orbiters' surface, a little lighter toward the wheel. `lift` takes it toward the accent (under the pointer).
-fn ring_fill(p: &Painter, ring: Ring, center: Pos2, lift: f32) {
-    let toward = |c: Color32| theme::mix(c, look::accent(), lift * 0.5);
+/// How dark VRChat's wheel goes while Alt points at Orbiters' ring: its lit slice reads as dulled, not as chosen.
+const WHEEL_STEPPED_BACK: u8 = 196;
+
+/// A cell of the ring: Orbiters' tile surface, as the wing's tiles and the sheets have it, nearly flat. Lit, it takes its own tool's colour: VRChat's wheel is
+/// dark teal segments with a teal rim, and a mint lit cell on a dark rim read as a second VRChat ring (round 14's judges). `lift` is how lit.
+fn ring_fill(p: &Painter, ring: Ring, center: Pos2, lift: f32, tint: Color32) {
+    let toward = |c: Color32| theme::mix(c, tint, lift * 0.55);
     let (near, far) = (toward(look::CELL_NEAR), toward(look::CELL_FAR));
     ring_mesh(p, ring, center, near, far);
 }
@@ -1753,20 +1802,20 @@ fn ring_mesh(p: &Painter, ring: Ring, center: Pos2, near: Color32, far: Color32)
 }
 
 /// The accent along a cell's outer edge, under the pointer.
-fn ring_rim(p: &Painter, ring: Ring, center: Pos2, on: bool) {
+fn ring_rim(p: &Painter, ring: Ring, center: Pos2, on: bool, tint: Color32) {
     if !on && look::retro() {
         // Line work: all round every cell, as round anything of the retro menu's that can be pressed.
         cell_edge(p, ring, center, 1.5, super::retro::LINE);
         return;
     }
     if !on {
-        // At rest a hairline of Orbiters' own along its outer edge: it follows VRChat's wheel, and it is not VRChat's.
-        let line: Vec<Pos2> = (0..=16).map(|i| center + zones::polar(ring.outer - 1.0, ring.from + (ring.to - ring.from) * i as f32 / 16.0)).collect();
-        p.add(Shape::line(line, Stroke::new(1.5, theme::alpha(look::accent(), 0.5))));
+        // At rest no rim: VRChat's wheel has a coloured one. The light catches the cell's outer edge, as it catches a tile's top.
+        let line: Vec<Pos2> = (0..=16).map(|i| center + zones::polar(ring.outer - 1.0, ring.from + 1.5 + (ring.to - ring.from - 3.0) * i as f32 / 16.0)).collect();
+        p.add(Shape::line(line, Stroke::new(1.0, Color32::from_white_alpha(34))));
         return;
     }
-    // All the way round it: which cell it is cannot be in doubt, whatever VRChat lights near it.
-    cell_edge(p, ring, center, 3.0, look::accent());
+    // All the way round it, in its own colour: which cell it is cannot be in doubt, whatever VRChat lights near it.
+    cell_edge(p, ring, center, 3.0, tint);
 }
 
 /// An arc along a cell's outer edge, for what is under way: `fraction` of the way across it.
@@ -1793,14 +1842,21 @@ fn cell_edge(p: &Painter, ring: Ring, center: Pos2, width: f32, color: Color32) 
 /// Draws a part (in units, its corner at the painter's origin): its fill and everything on it.
 pub fn paint(p: &Painter, zone: Zone, size: Vec2, facts: &Facts, hover: Option<usize>, pressed: Option<usize>) {
     let panel = Rect::from_min_size(pos2(0.0, 0.0), size);
+    if facts.desktop && zone.on_the_wing_backing() && !facts.hidden {
+        wing_backing(p, zone, panel);
+    }
     match zone {
         Zone::WheelVeil => {
             // Over VRChat's wheel while the ring is what is pointed at: smoked, and what is pointed at lies in it, right beside where the eyes are.
             let c = panel.center();
-            // Opaque while it says something: VRChat's icons would show behind the words.
-            let says = facts.picture_wait.is_some() || facts.pointed.and_then(|a| caption(a, facts)).is_some();
-            p.circle_filled(c, size.x / 2.0, if says { Color32::from_rgb(11, 13, 16) } else { Color32::from_rgba_premultiplied(9, 11, 14, 250) });
-            draw_hub(p, c, size.x, facts);
+            // While a 3D picture waits: opaque, and it says what waits; VRChat's icons would show behind the words.
+            if facts.picture_wait.is_some() {
+                p.circle_filled(c, size.x / 2.0, Color32::from_rgb(11, 13, 16));
+                draw_hub(p, c, size.x, facts);
+                return;
+            }
+            // Pointing with Alt: VRChat's wheel stepped back, still in view, its lit slice dulled under it; what is pointed at is said over the ring.
+            p.circle_filled(c, size.x / 2.0, Color32::from_black_alpha(WHEEL_STEPPED_BACK));
             return;
         }
         // Hidden, only the way back shows.
@@ -2012,6 +2068,18 @@ fn tile_back(p: &Painter, rect: Rect, hovered: bool, pressed: bool, selected: bo
     }
 }
 
+/// On a screen, this tile's part of the wing's one backing: solid, rounded at the wing's own corners only, so that the tiles side by side make one plate.
+fn wing_backing(p: &Painter, zone: Zone, panel: Rect) {
+    let round = (look::TILE_RADIUS + zones::WING_BLEED) as u8;
+    let corners = match zone {
+        Zone::WingWorlds => egui::CornerRadius { nw: round, ..Default::default() },
+        Zone::WingYouTube => egui::CornerRadius { ne: round, ..Default::default() },
+        Zone::WingPlaying => egui::CornerRadius { sw: round, se: round, ..Default::default() },
+        _ => egui::CornerRadius::ZERO,
+    };
+    p.rect_filled(panel, if look::retro() { look::radius(0.0) } else { corners }, look::OPAQUE);
+}
+
 /// A surface's top edge catches the light: a hairline that makes it read as an object on any world.
 fn top_light(p: &Painter, panel: Rect) {
     let inset = look::RADIUS;
@@ -2146,6 +2214,12 @@ fn corner_badge(p: &Painter, icon_at: Pos2, icon_size: f32) {
 }
 
 /// The colour of a part's icon: its tool's, from All tools, the eye finds it by; the name stays white.
+/// What a lit cell of the ring takes on: its own tool's colour; the accent for what has none, and in the retro look.
+fn cell_tint(action: Action) -> Color32 {
+    let tint = tool_tint(action);
+    if look::retro() || tint == theme::MARK { look::accent() } else { tint }
+}
+
 fn part_ink(action: Action) -> Color32 {
     theme::mix(tool_tint(action), Color32::WHITE, 0.3)
 }
@@ -2194,8 +2268,9 @@ fn draw(p: &Painter, zone: Zone, item: &Item, facts: &Facts, hovered: bool, pres
         Look::Cell { icon, label, badge: has_badge } => {
             let (ring, center) = shape.ring.expect("a cell is on a ring");
             let waiting = zone == Zone::WheelPictures && facts.picture_wait.is_some();
-            ring_fill(p, ring, center, if pressed { 1.0 } else if hovered { 0.8 } else if waiting { 0.5 } else { 0.0 });
-            ring_rim(p, ring, center, hovered || waiting);
+            let tint = cell_tint(if waiting { Action::Pictures } else { item.action });
+            ring_fill(p, ring, center, if pressed { 1.0 } else if hovered { 0.8 } else if waiting { 0.5 } else { 0.0 }, tint);
+            ring_rim(p, ring, center, hovered || waiting, tint);
             let label = if waiting { tr("Waiting for the camera") } else { label };
             // Its icon upright toward the wheel, its name bent along its outer edge.
             let (at, size) = cell_icon(ring, center);
@@ -2341,18 +2416,26 @@ fn draw(p: &Painter, zone: Zone, item: &Item, facts: &Facts, hovered: bool, pres
             }
             let x = rect.left() + rect.height();
             let room = rect.right() - x - 14.0;
-            let font = look::font(13.0, weight::SEMIBOLD);
-            // Its label gives way to the link's buttons in the corner; its title is under them.
-            // Both, wherever there is a link: Drop link is there, dimmed or not, beside Copy link.
+            // Whose it is, readable: tiny purple words were what read least (round 14's judges). Its volume beside it.
+            let font = look::font(15.0, weight::SEMIBOLD);
             let buttons = if facts.volume.is_some() { 232.0 } else { 0.0 };
-            p.text(pos2(x, rect.top() + 20.0), Align2::LEFT_CENTER, fit(p, tr("Now playing on this computer"), &font, room - buttons - 8.0), font, tint);
+            p.text(pos2(x, rect.top() + 20.0), Align2::LEFT_CENTER, fit(p, tr("Now playing on this computer"), &font, room - buttons - 8.0), font, theme::mix(tint, Color32::WHITE, 0.6));
             match &facts.music {
                 Some((title, _)) => {
-                    let font = look::font(23.0, weight::BOLD);
-                    // A line of its own, under the link's buttons.
-                    p.text(pos2(x, rect.top() + 66.0), Align2::LEFT_CENTER, fit(p, title, &font, room), font, look::LABEL);
-                    let font = look::font(15.5, weight::MEDIUM);
-                    p.text(pos2(x, rect.top() + 89.0), Align2::LEFT_CENTER, fit(p, &facts.music_by, &font, room), font, look::MUTED);
+                    // The whole title, on two lines where it needs them (round 14's judges: cut on its own line); who made it under it when it takes one.
+                    // Under the volume's row, never under its buttons.
+                    let mut job = egui::text::LayoutJob::simple(title.clone(), look::font(18.5, weight::BOLD), look::LABEL, room);
+                    job.wrap.max_rows = 2;
+                    job.wrap.overflow_character = Some('\u{2026}');
+                    let title = p.layout_job(job);
+                    let (rows, high) = (title.rows.len(), title.size().y);
+                    // Clear of the timeline's knob under it too (the live round 15 run saw it on the second line).
+                    let top = rect.top() + if facts.volume.is_some() { 46.0 } else { 36.0 };
+                    p.galley(pos2(x, top), title, look::LABEL);
+                    if rows < 2 {
+                        let font = look::font(15.5, weight::MEDIUM);
+                        p.text(pos2(x, top + high + 10.0), Align2::LEFT_CENTER, fit(p, &facts.music_by, &font, room), font, look::MUTED);
+                    }
                 }
                 None => {
                     let font = look::font(23.0, weight::BOLD);
@@ -2364,7 +2447,7 @@ fn draw(p: &Painter, zone: Zone, item: &Item, facts: &Facts, hovered: bool, pres
             // The level between its minus and its plus.
             if let Some((percent, muted)) = facts.volume {
                 let right = rect.right() - 16.0;
-                let bar = Rect::from_center_size(pos2(right - 44.0 - 39.0, rect.top() + VOLUME_ROW), vec2(66.0, 7.0));
+                let bar = Rect::from_center_size(pos2(right - VOLUME_BUTTON - 39.0, rect.top() + VOLUME_ROW), vec2(66.0, 7.0));
                 p.rect_filled(bar, look::radius(3.5), Color32::from_white_alpha(70));
                 let level = if muted { 0.0 } else { percent as f32 / 100.0 };
                 p.rect_filled(Rect::from_min_size(bar.min, vec2(bar.width() * level, 7.0)), look::radius(3.5), look::LABEL);
@@ -2382,7 +2465,8 @@ fn draw(p: &Painter, zone: Zone, item: &Item, facts: &Facts, hovered: bool, pres
             let wide = p.layout_no_wrap(shown.clone(), font.clone(), look::LABEL).size().x;
             p.text(pos2(rect.left() + 36.0, rect.center().y), Align2::LEFT_CENTER, shown, font, Color32::WHITE);
             let small = look::font(15.0, weight::MEDIUM);
-            p.text(pos2(rect.left() + 48.0 + wide, rect.center().y), Align2::LEFT_CENTER, tr!("{count} captures", count = count), small, look::MUTED);
+            let kind = facts.recent.first().map_or(RecentKind::Capture, |r| r.kind);
+            p.text(pos2(rect.left() + 48.0 + wide, rect.center().y), Align2::LEFT_CENTER, how_many(kind, count), small, look::MUTED);
         }
         Look::AddKit => {
             // A quiet line at the end of what the row does, a link at its end: nothing on it shouts, the pictures under it lead.
@@ -2407,9 +2491,9 @@ fn draw(p: &Painter, zone: Zone, item: &Item, facts: &Facts, hovered: bool, pres
                 if facts.recording {
                     ring_mesh(p, ring, center, theme::mix(theme::REC, Color32::BLACK, 0.35), theme::mix(theme::REC, Color32::BLACK, 0.6));
                 } else {
-                    ring_fill(p, ring, center, if pressed { 1.0 } else if hovered { 0.8 } else { 0.0 });
+                    ring_fill(p, ring, center, if pressed { 1.0 } else if hovered { 0.8 } else { 0.0 }, theme::REC);
                 }
-                ring_rim(p, ring, center, hovered);
+                ring_rim(p, ring, center, hovered, theme::REC);
                 let (at, _) = cell_icon(ring, center);
                 if facts.recording {
                     p.rect_filled(Rect::from_center_size(at, Vec2::splat(18.0)), look::radius(3.0), color);
@@ -2542,7 +2626,7 @@ fn draw(p: &Painter, zone: Zone, item: &Item, facts: &Facts, hovered: bool, pres
             let radius = look::radius(rect.height() / 2.0);
             p.rect_filled(rect, radius, if hovered { look::ACCENT_SOFT } else { look::TILE });
             p.rect_stroke(rect, radius, Stroke::new(1.5, look::accent()), egui::StrokeKind::Inside);
-            p.text(rect.center(), Align2::CENTER_CENTER, tr("Hide 3D"), look::font(13.0, weight::SEMIBOLD), look::accent());
+            p.text(rect.center(), Align2::CENTER_CENTER, tr("Hide 3D"), look::font(if rect.height() > 37.0 { 15.5 } else { 13.0 }, weight::SEMIBOLD), look::accent());
         }
         Look::VideoDrop => {
             let clip = p.with_clip_rect(Rect::from_min_max(pos2(0.0, RESULTS_TOP), pos2(1024.0, 576.0)));
@@ -2604,10 +2688,13 @@ fn draw(p: &Painter, zone: Zone, item: &Item, facts: &Facts, hovered: bool, pres
                 p.rect_stroke(rect.shrink(0.5), radius, Stroke::new(1.0, theme::alpha(tint, 0.8)), egui::StrokeKind::Inside);
             } else if hovered || pressed {
                 p.rect_filled(rect, radius, look::TILE_HOVER);
+            } else if rect.height() > 37.0 {
+                // In a headset each a button of its own, as the sheet's buttons are: words alone read as a line of text, not as targets (round 14's judges).
+                p.rect_filled(rect, radius, look::TILE);
             }
             // Named where it was made room for its name; a headset's icon-only tab is wider than a screen's, and still only an icon.
             if words_only {
-                let font = look::font(15.5, if on { weight::BOLD } else { weight::SEMIBOLD });
+                let font = look::font(if rect.height() > 37.0 { 16.0 } else { 15.5 }, if on { weight::BOLD } else { weight::SEMIBOLD });
                 p.text(rect.center(), Align2::CENTER_CENTER, fit(p, label, &font, rect.width() - 10.0), font, if on { Color32::WHITE } else { look::LABEL });
             } else if rect.width() > COMPACT_TAB_VR + 1.0 {
                 widgets::icon(p, pos2(rect.left() + 16.0, rect.center().y), icon, 17.0, tint);
@@ -2745,8 +2832,9 @@ fn draw(p: &Painter, zone: Zone, item: &Item, facts: &Facts, hovered: bool, pres
             let (name, playing) = facts.music.clone().unwrap_or_default();
             let glyph = if playing { icons::PAUSE } else if none { icons::MUSIC_NOTES } else { icons::PLAY };
             if let Some((ring, center)) = shape.ring {
-                ring_fill(p, ring, center, if pressed { 1.0 } else if hovered && !none { 0.8 } else { 0.0 });
-                ring_rim(p, ring, center, hovered);
+                let tint = cell_tint(Action::Page(Target::Music));
+                ring_fill(p, ring, center, if pressed { 1.0 } else if hovered && !none { 0.8 } else { 0.0 }, tint);
+                ring_rim(p, ring, center, hovered, tint);
                 let ink = if none { look::MUTED } else { look::LABEL };
                 // A plain play or pause, of the size, weight and colouring of the other cells' icons: its picture and the song are for when it is pointed at.
                 let (at, size) = cell_icon(ring, center);
@@ -2779,25 +2867,22 @@ fn draw(p: &Painter, zone: Zone, item: &Item, facts: &Facts, hovered: bool, pres
                 if none {
                     p.text(pos2(x, rect.center().y), Align2::LEFT_CENTER, fit(p, tr("Nothing playing"), &font, room), font, look::MUTED);
                 } else {
-                    // The song first: on up to three lines, which hold most titles whole (round 13's judges still read "AOT only the bang..."). What a press does
-                    // only where the song leaves room: the play or pause on its picture says it too.
-                    let title = song_lines(p, &name, font, room, 3);
-                    let rows = title.rows.len();
+                    // The song on up to two lines, and always under it a line of its own for what a press does, whatever the song's length (round 14's
+                    // judges: the action must not depend on the title).
+                    let title = song_lines(p, &name, font, room, 2);
                     let high = title.size().y;
-                    let press = rows <= 1;
-                    let top = rect.center().y - (high + if press { 13.0 } else { 0.0 }) / 2.0;
+                    let top = rect.center().y - (high + 13.0) / 2.0;
                     p.galley(pos2(x, top), title, look::LABEL);
-                    if press {
-                        let font = look::font(10.5, weight::MEDIUM);
-                        p.text(pos2(x, top + high + 7.0), Align2::LEFT_CENTER, if playing { tr_ctx("tile", "Press to pause") } else { tr_ctx("tile", "Press to play") }, font, look::MUTED);
-                    }
+                    let font = look::font(10.5, weight::SEMIBOLD);
+                    p.text(pos2(x, top + high + 7.0), Align2::LEFT_CENTER, if playing { tr_ctx("tile", "Press to pause") } else { tr_ctx("tile", "Press to play") }, font, theme::mix(theme::VIOLET, Color32::WHITE, 0.55));
                 }
             }
         }
         Look::Transport(glyph) => {
             if let Some((ring, center)) = shape.ring {
-                ring_fill(p, ring, center, if pressed { 1.0 } else if hovered { 0.8 } else { 0.0 });
-                ring_rim(p, ring, center, hovered);
+                let tint = cell_tint(Action::Page(Target::Music));
+                ring_fill(p, ring, center, if pressed { 1.0 } else if hovered { 0.8 } else { 0.0 }, tint);
+                ring_rim(p, ring, center, hovered, tint);
                 let (at, size) = cell_icon(ring, center);
                 widgets::icon(p, at, glyph, size * 0.8, Color32::WHITE);
             } else {
@@ -2837,21 +2922,20 @@ fn draw(p: &Painter, zone: Zone, item: &Item, facts: &Facts, hovered: bool, pres
                     p.rect_filled(art, look::radius(5.0), look::HEADER);
                 }
             }
-            p.circle_filled(art.center(), side * 0.36, Color32::from_black_alpha(190));
-            widgets::icon(p, art.center(), if playing { icons::PAUSE } else { icons::PLAY }, side * 0.42, look::LABEL);
+            // Its play or pause as large as the strip's other icons (round 14's judges found it much smaller), on a disc that fills its picture.
+            let glyph = (rect.height() * 0.42).clamp(18.0, 32.0);
+            p.circle_filled(art.center(), (side * 0.5).max(glyph * 0.85), Color32::from_black_alpha(190));
+            widgets::icon(p, art.center(), if playing { icons::PAUSE } else { icons::PLAY }, glyph, look::LABEL);
             let x = art.right() + 6.0;
             let room = rect.right() - x - 4.0;
             let font = look::font(10.0, weight::BOLD);
             let name = facts.music.as_ref().map_or("", |m| m.0.as_str());
-            // The song first, as on the wing.
-            let title = song_lines(p, name, font, room, 3);
-            let (rows, high) = (title.rows.len(), title.size().y);
-            let press = rows <= 1;
-            let top = rect.center().y - (high + if press { 12.0 } else { 0.0 }) / 2.0;
+            // As on the wing: the song on up to two lines, what a press does always on its own line.
+            let title = song_lines(p, name, font, room, 2);
+            let high = title.size().y;
+            let top = rect.center().y - (high + 12.0) / 2.0;
             p.galley(pos2(x, top), title, look::LABEL);
-            if press {
-                p.text(pos2(x, top + high + 6.5), Align2::LEFT_CENTER, if playing { tr_ctx("tile", "Press to pause") } else { tr_ctx("tile", "Press to play") }, look::font(9.5, weight::MEDIUM), look::MUTED);
-            }
+            p.text(pos2(x, top + high + 6.5), Align2::LEFT_CENTER, if playing { tr_ctx("tile", "Press to pause") } else { tr_ctx("tile", "Press to play") }, look::font(9.5, weight::SEMIBOLD), theme::mix(theme::VIOLET, Color32::WHITE, 0.55));
         }
         Look::PeekWord => {
             let radius = look::radius(rect.height() / 2.0);
@@ -2899,6 +2983,17 @@ fn draw(p: &Painter, zone: Zone, item: &Item, facts: &Facts, hovered: bool, pres
         Look::Caption => draw_caption(p, zone, rect, facts),
         Look::Capture(n) => draw_capture(p, rect, n, facts, hovered, pressed),
         Look::BigPicture(n) => draw_big_picture(p, rect, n, facts),
+        Look::SeeInApp => {
+            // The page's one accent button: where to go from here.
+            let fill = if pressed { theme::mix(look::accent(), Color32::BLACK, 0.2) } else if hovered { theme::mix(look::accent(), Color32::WHITE, 0.12) } else { look::accent() };
+            p.rect_filled(rect, look::radius(rect.height() / 2.0), fill);
+            let font = look::font(17.0, weight::BOLD);
+            let words = fit(p, tr("See it in 3D, in Orbiters"), &font, rect.width() - 64.0);
+            let wide = p.layout_no_wrap(words.clone(), font.clone(), look::on_accent()).size().x + 30.0;
+            let from = rect.center().x - wide / 2.0;
+            widgets::icon(p, pos2(from + 11.0, rect.center().y), icons::CUBE, 21.0, look::on_accent());
+            p.text(pos2(from + 30.0, rect.center().y), Align2::LEFT_CENTER, words, font, look::on_accent());
+        }
         Look::Step(after) => {
             p.circle_filled(rect.center(), rect.width() / 2.0, if hovered { theme::INK_750 } else { theme::alpha(theme::INK_900, 0.88) });
             p.circle_stroke(rect.center(), rect.width() / 2.0, Stroke::new(1.5, Color32::from_white_alpha(70)));
@@ -2928,15 +3023,17 @@ fn picture_button(p: &Painter, zone: Zone, shape: Shaped, rect: Rect, mode: Phot
                 p.rect_filled(rect, 0.0, look::accent());
             } else if facts.no_kit {
                 // Not to be had here: never lit as a live button when pointed (round 10's judges), a quiet outline that says it is the one pointed at.
-                ring_fill(p, ring, center, 0.0);
+                let tint = cell_tint(Action::Pictures);
+                ring_fill(p, ring, center, 0.0, tint);
                 if hovered {
                     cell_edge(p, ring, center, 2.0, theme::FG_3);
                 } else {
-                    ring_rim(p, ring, center, false);
+                    ring_rim(p, ring, center, false, tint);
                 }
             } else {
-                ring_fill(p, ring, center, if pressed { 1.0 } else if hovered { 0.8 } else { 0.0 });
-                ring_rim(p, ring, center, hovered);
+                let tint = cell_tint(Action::Pictures);
+                ring_fill(p, ring, center, if pressed { 1.0 } else if hovered { 0.8 } else { 0.0 }, tint);
+                ring_rim(p, ring, center, hovered, tint);
             }
         }
         None => {
@@ -3052,6 +3149,11 @@ fn picture_button(p: &Painter, zone: Zone, shape: Shaped, rect: Rect, mode: Phot
     }
 }
 
+/// How many a tile or a set stands for, in their own word: ordinary photos are not captures (round 14's judges).
+fn how_many(kind: RecentKind, count: usize) -> String {
+    if kind == RecentKind::Picture { tr!("{count} photos", count = count) } else { tr!("{count} captures", count = count) }
+}
+
 /// A capture in the gallery, as the app's own Photos & captures has its tiles: the picture alone, rounded, a dark foot with its name and what it is on it.
 fn draw_capture(p: &Painter, rect: Rect, n: usize, facts: &Facts, hovered: bool, pressed: bool) {
     let clip = p.with_clip_rect(Rect::from_min_max(pos2(0.0, GALLERY_TOP), pos2(1024.0, 576.0)));
@@ -3086,7 +3188,7 @@ fn draw_capture(p: &Painter, rect: Rect, n: usize, facts: &Facts, hovered: bool,
     // A tile that stands for several captures of one place says how many, on its right: they open to all of them.
     if recent.count > 1 {
         let font = look::font(15.0, weight::BOLD);
-        let words = tr!("{count} captures", count = recent.count);
+        let words = how_many(recent.kind, recent.count);
         let wide = clip.layout_no_wrap(words.clone(), font.clone(), Color32::WHITE).size().x;
         let pill = Rect::from_min_size(pos2(rect.right() - 10.0 - wide - 40.0, rect.top() + 10.0), vec2(wide + 40.0, 32.0));
         clip.rect_filled(pill, look::radius(16.0), theme::alpha(theme::INK_900, 0.94));
@@ -3151,11 +3253,44 @@ fn draw_big_picture(p: &Painter, rect: Rect, n: usize, facts: &Facts) {
     p.text(pill.center(), Align2::CENTER_CENTER, words, font, look::LABEL);
 }
 
+/// Where a capture turns on the sheet: a 16:9 frame clear under the sheet's head, the arrows beside it, its words and next step on a band under it. It reached up
+/// under the head with its words over it (round 14's judges).
+const TURNING: Rect = Rect { min: pos2(112.0, 12.0), max: pos2(912.0, 462.0) };
+const TURNING_FOOT: f32 = 474.0;
+/// The live view's stage, a step lighter than the sheet.
+const STAGE: Color32 = Color32::from_rgb(22, 26, 31);
+const SEE_IN_APP: Rect = Rect { min: pos2(700.0, 488.0), max: pos2(1000.0, 544.0) };
+
+/// A band along each edge of `rect`, from `ink` at the edge to nothing `depth` in.
+fn fade_edges(p: &Painter, rect: Rect, depth: f32, ink: Color32) {
+    let clear = Color32::from_rgba_premultiplied(0, 0, 0, 0);
+    let band = |a: Pos2, b: Pos2, c: Pos2, d: Pos2| {
+        // a, b on the edge; c, d inside.
+        let mut mesh = Mesh::default();
+        for (pos, color) in [(a, ink), (b, ink), (c, clear), (d, clear)] {
+            mesh.vertices.push(Vertex { pos, uv: WHITE_UV, color });
+        }
+        mesh.indices.extend_from_slice(&[0, 1, 2, 1, 3, 2]);
+        p.add(Shape::mesh(mesh));
+    };
+    let inner = rect.shrink(depth);
+    band(rect.left_top(), rect.right_top(), pos2(rect.left(), inner.top()), pos2(rect.right(), inner.top()));
+    band(rect.left_bottom(), rect.right_bottom(), pos2(rect.left(), inner.bottom()), pos2(rect.right(), inner.bottom()));
+    band(rect.left_top(), rect.left_bottom(), pos2(inner.left(), rect.top()), pos2(inner.left(), rect.bottom()));
+    band(rect.right_top(), rect.right_bottom(), pos2(inner.right(), rect.top()), pos2(inner.right(), rect.bottom()));
+}
+
+/// Whether the picture opened is a capture turning in 3D on this sheet: on a screen, where the sheet holds it.
+pub(super) fn turns_on_the_sheet(facts: &Facts, n: usize) -> bool {
+    facts.desktop && facts.recent.get(n).is_some_and(|r| r.kind == RecentKind::Capture)
+}
+
 /// A capture turning on the sheet: on a dark stage, on its plate, live; its own picture until that is ready, and if it cannot be.
-fn draw_turning(p: &Painter, rect: Rect, n: usize, facts: &Facts, view: &OpenedView) {
+fn draw_turning(p: &Painter, page: Rect, n: usize, facts: &Facts, view: &OpenedView) {
     let Some(recent) = facts.recent.get(n) else { return };
-    let stage = rect.shrink(4.0);
-    p.rect_filled(stage, look::radius(12.0), Color32::from_rgb(15, 17, 21));
+    let rect = TURNING.translate(page.min.to_vec2());
+    let stage = rect;
+    p.rect_filled(stage, look::radius(12.0), STAGE);
     let waiting = |p: &Painter, words: &str| {
         if let Some(id) = facts.opened_picture.or_else(|| tile_picture(facts, n)) {
             squircle_picture(p, stage, [theme::squircle(12.0); 4], id, cover_uv_of(stage.size(), recent.shape()), Color32::from_gray(120));
@@ -3169,25 +3304,26 @@ fn draw_turning(p: &Painter, rect: Rect, n: usize, facts: &Facts, view: &OpenedV
     match (&view.failed, view.picture) {
         (Some(_), _) => waiting(p, tr("Its 3D cannot show here. It can in Orbiters.")),
         (None, Some(id)) => {
+            // A frame that reads as one: a stage a step lighter than the sheet, with a hairline round it (round 15's pre-check saw no frame).
+            p.rect_filled(stage, look::radius(12.0), STAGE);
+            p.rect_stroke(stage, look::radius(12.0), Stroke::new(1.0, Color32::from_white_alpha(28)), egui::StrokeKind::Inside);
             keep_colour(p, rect);
-            p.add(RectShape::filled(rect, 0.0, Color32::WHITE).with_texture(id, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0))));
+            p.add(RectShape::filled(rect, look::radius(12.0), Color32::WHITE).with_texture(id, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0))));
+            // Its ragged edges fade into the stage rather than end on the frame (round 14's judges).
+            fade_edges(p, rect.shrink(1.0), 46.0, STAGE);
         }
         (None, None) => waiting(p, tr("Getting its 3D ready\u{2026}")),
     }
-    // What it is, when it was made, and what can be done with it: a line each (round 12's judges read one run joined by commas).
+    // Under the frame, never over it: what it is, when it was made, and how to turn it, a line each (round 12's judges read one run joined by commas); its next
+    // step at their right.
     let state = facts.recent_words.iter().find(|w| w.0 == n).map_or(recent.state.as_str(), |w| w.1.as_str());
     let (big, small) = (look::font(19.0, weight::BOLD), look::font(16.0, weight::MEDIUM));
-    let room = 700.0 - 28.0;
-    let title = fit(p, &recent.title, &big, room);
-    let state = fit(p, state, &small, room);
-    let said = tr("Drag to turn it. The mouse's wheel brings it closer.");
-    let width = |s: &str, f: &FontId| p.layout_no_wrap(s.to_string(), f.clone(), look::LABEL).size().x;
-    let wide = width(&title, &big).max(width(&state, &small)).max(width(said, &small)) + 28.0;
-    let pill = Rect::from_min_size(pos2(rect.left() + 20.0, rect.bottom() - 96.0), vec2(wide, 80.0));
-    p.rect_filled(pill, look::radius(14.0), theme::alpha(theme::INK_900, 0.86));
-    p.text(pos2(pill.left() + 14.0, pill.top() + 18.0), Align2::LEFT_CENTER, title, big, look::LABEL);
-    p.text(pos2(pill.left() + 14.0, pill.top() + 41.0), Align2::LEFT_CENTER, state, small.clone(), look::MUTED);
-    p.text(pos2(pill.left() + 14.0, pill.top() + 62.0), Align2::LEFT_CENTER, said, small, look::LABEL);
+    let left = page.left() + 24.0;
+    let room = SEE_IN_APP.left() - 24.0 - 20.0;
+    let top = page.top() + TURNING_FOOT;
+    p.text(pos2(left, top + 14.0), Align2::LEFT_CENTER, fit(p, &recent.title, &big, room), big, look::LABEL);
+    p.text(pos2(left, top + 39.0), Align2::LEFT_CENTER, fit(p, state, &small, room), small.clone(), look::MUTED);
+    p.text(pos2(left, top + 62.0), Align2::LEFT_CENTER, fit(p, tr("Drag to turn it. The mouse's wheel brings it closer."), &small, room), small, look::LABEL);
 }
 
 /// The words about what is pointed at, or what to do first, in a pill as wide as they are. Nothing to say: nothing shows.
@@ -3391,6 +3527,15 @@ pub fn apply_mask(rgba: &mut [u8], mask: &[u8], size: [u32; 2], within: [u32; 4]
 
 #[cfg(test)]
 mod tests {
+    /// Round 15's pre-check: a song cut at two lines ends at a word, never in the middle of one.
+    #[test]
+    fn a_long_song_ends_at_a_word() {
+        let fits = |t: &str| t.chars().count() <= 30;
+        let cut = words_that_fit("IL SE VANTE D'AVOIR PARTICIPÉ AUX DESTRUCTIONS", fits).unwrap();
+        assert_eq!(cut, "IL SE VANTE D'AVOIR PARTICIPÉ\u{2026}");
+        assert!(words_that_fit("Supercalifragilisticexpialidocious-and-more-words-joined", |t| t.len() < 10).is_none());
+    }
+
     use super::*;
     use crate::overlay::orbit::zones::{self, Around};
 

@@ -141,16 +141,24 @@ struct Eye {
 impl Eye {
     /// The world behind everything: a real frame of the game, covering the view.
     fn new(size: [u32; 2], ground: &image::RgbImage, eyes: [f32; 3]) -> Self {
+        Self::seeing(size, ground, eyes, VR_SHOT_HALF_FOV)
+    }
+
+    /// The same, `half_fov` degrees each side.
+    fn seeing(size: [u32; 2], ground: &image::RgbImage, eyes: [f32; 3], half_fov: f32) -> Self {
         // The middle of the frame, past the desktop's HUD in its corners, covering the view without stretching.
         let (gw, gh) = (ground.width(), ground.height());
-        let (cw, ch) = (gw * 2 / 3, gw * 2 / 3 * size[1] / size[0]);
+        // Seen closer in, a smaller part of it, so that it keeps its size behind what floats.
+        let k = half_fov.to_radians().tan() / VR_SHOT_HALF_FOV.to_radians().tan();
+        let cw = ((gw * 2 / 3) as f32 * k) as u32;
+        let ch = cw * size[1] / size[0];
         let part = image::imageops::crop_imm(ground, (gw - cw) / 2, (gh.saturating_sub(ch)) / 2 + gh / 12, cw, ch.min(gh)).to_image();
         let scaled = image::imageops::resize(&part, size[0], size[1], image::imageops::FilterType::Triangle);
         let mut pixels = vec![0u8; size[0] as usize * size[1] as usize * 4];
         for (i, p) in scaled.pixels().enumerate() {
             pixels[i * 4..i * 4 + 4].copy_from_slice(&[p[0], p[1], p[2], 255]);
         }
-        Self { size, pixels, eyes, focal: size[0] as f32 / 2.0 / VR_SHOT_HALF_FOV.to_radians().tan() }
+        Self { size, pixels, eyes, focal: size[0] as f32 / 2.0 / half_fov.to_radians().tan() }
     }
 
     fn ray(&self, x: f32, y: f32) -> [f32; 3] {
@@ -282,6 +290,9 @@ fn cut(frame: &image::RgbImage, rect: egui::Rect, inside: impl Fn(Vec2) -> f32) 
 /// `ref-qm-<world>.jpg`, `ref-world-<world>.jpg` at 1920 x 1080), placed in 3D where `overlay::orbit::vr` places them and seen from the eyes. VRChat's menus were not captured in a headset: their place and size there is an estimate.
 /// Half the width the VR renders see, in degrees: wide enough that the wing and what plays at its foot are in the frame (round 13's judges saw them cut).
 const VR_SHOT_HALF_FOV: f32 = 57.0;
+/// The view in a hand, seen closer in: about a headset's pixels to a degree once the picture is brought to 1280 across (a Quest Pro has about 18), so that how
+/// its hint reads is what a headset shows, not what a wide frame shrinks it to (round 14's judges found its lines too small). A part of what the eye sees.
+const HAND_SHOT_HALF_FOV: f32 = 36.0;
 
 pub(super) fn vr_shots(out: &Path, refs: &Path) -> anyhow::Result<()> {
     use crate::overlay::floating::space;
@@ -404,11 +415,14 @@ pub(super) fn vr_shots(out: &Path, refs: &Path) -> anyhow::Result<()> {
             let mut renderer = render::FaceRenderer::new(device, queue);
             renderer.load(&capture)?;
             renderer.make_transparent()?;
-            let tan = VR_SHOT_HALF_FOV.to_radians().tan();
             let (w, h) = (size[0], size[1]);
-            let tangents = [-tan, tan, -tan * h as f32 / w as f32, tan * h as f32 / w as f32];
-            let mut model = |small: &stereo::Small| -> anyhow::Result<Vec<u8>> {
-                let camera = stereo::eye_camera(&head, tangents, w, h, &small.placement(capture.view.eye()));
+            let tangents_of = |half: f32| {
+                let tan = half.to_radians().tan();
+                [-tan, tan, -tan * h as f32 / w as f32, tan * h as f32 / w as f32]
+            };
+            let mut half_fov = VR_SHOT_HALF_FOV;
+            let mut model = |small: &stereo::Small, half: f32| -> anyhow::Result<Vec<u8>> {
+                let camera = stereo::eye_camera(&head, tangents_of(half), w, h, &small.placement(capture.view.eye()));
                 renderer.render_view(&camera, capture.within(small.reach()))
             };
             let panel = image::open(refs.join("panel-small-docked.png"))?.to_rgba8();
@@ -437,7 +451,7 @@ pub(super) fn vr_shots(out: &Path, refs: &Path) -> anyhow::Result<()> {
             // The dark pane behind it, then its plate.
             let pane = small_hint::backdrop_pixels();
             eye.quad(&Quad { transform: at, width: hole.width() / 1024.0 * page_quad.width + 0.012, height: hole.height() / 576.0 * page_quad.height + 0.012 }, &pane, small_hint::BACKDROP_PX, 1.0);
-            eye.over(&model(&small)?);
+            eye.over(&model(&small, half_fov)?);
             for zone in Zone::QUICK_MENU {
                 // Where the headset has it: its gap from My Profile, as the app lays it (the renders had none, and judges saw it touch).
                 let placed = vr::quick_menu_places(0).into_iter().find(|p| p.zone == zone).unwrap_or_else(|| zones::in_units(zone));
@@ -452,14 +466,15 @@ pub(super) fn vr_shots(out: &Path, refs: &Path) -> anyhow::Result<()> {
             // In a hand, with what says how to zoom it, and its Hide.
             let mut held = stereo::Small::new(&capture.view, &head, capture.small_reach());
             held.anchor = [0.0, 1.45, -0.62];
-            let mut eye = Eye::new(size, &ground, eyes);
-            eye.over(&model(&held)?);
+            half_fov = HAND_SHOT_HALF_FOV;
+            let mut eye = Eye::seeing(size, &ground, eyes, half_fov);
+            eye.over(&model(&held, half_fov)?);
             let hint_px = small_hint::PX;
             let mut canvas = Canvas::new(hint_px[0], hint_px[1]);
             for _ in 0..2 {
                 canvas.paint(0.0, |p| small_hint::paint(p, small_hint::Stage::Stick { hand: 1 }, 0.65));
             }
-            let up = small_hint::hint_place(held.anchor, held.radius());
+            let up = small_hint::hint_place(held.anchor, held.radius(), space::position(&head));
             let hint_frame = small_hint::facing(up, space::position(&head));
             let hint_w = small_hint::WIDTH_M;
             eye.quad(&Quad { transform: hint_frame, width: hint_w, height: hint_w * hint_px[1] as f32 / hint_px[0] as f32 }, canvas.pixels(), hint_px, 1.0);

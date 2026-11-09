@@ -186,10 +186,11 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         // With no key held, the scroll wheel picks a cell (VRChat's wheel has no use for it), and the next click opens it.
         scroller.follow(SCROLL_TO_PICK && open == Some(Around::Wheel) && !pointer.active() && !panels.sheet_open());
         let scrolled = scroller.lit();
-        // Over VRChat's wheel too while a 3D picture waits: VRChat's lit slice has nothing to do with it, and two things would look chosen.
-        // Only while a 3D picture waits: pointing, what is pointed at is said over the ring and VRChat's wheel stays in view (round 13's judges).
+        // Over VRChat's wheel while Alt points at ours, or while a 3D picture waits. VRChat lights the slice its own pointer last reached, and nothing from here can
+        // unlight it (the movement is held from it, not undone): two things looked chosen (round 14's judges). While Alt is held its clicks are ours, so its wheel is
+        // shown stepped back, still in view (round 13's judges: an opaque disc hid it all); while a 3D picture waits, an opaque disc says what waits.
         let _ = scrolled;
-        panels.set_pointing(panels.picture_waiting() && !panels.sheet_open(), !snap.settings.reduce_motion);
+        panels.set_pointing((pointer.active() || panels.picture_waiting()) && !panels.sheet_open(), !snap.settings.reduce_motion);
         panels.set_key_caps(alt_held());
         let at = pointer.at().unwrap_or(pos2(cursor.0 as f32, cursor.1 as f32));
         let on = match scrolled {

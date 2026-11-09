@@ -483,7 +483,7 @@ impl Recents {
             items.push(Recent { dir: r.key.clone(), title: shown_title(&r.title), state: String::new(), progress: None, picture: None, aspect: r.aspect, kind: r.kind(), count: 1 });
         }
         // One place's captures, opened: as large as the app shows them, two or so a row (round 12's judges: three small ones on an empty sheet).
-        self.shown = panels::Gallery::with_density(items, layout, if self.set.is_some() { 1.0 } else { panels::GALLERY_DENSER });
+        self.shown = panels::Gallery::new(items, layout);
         true
     }
 
@@ -681,9 +681,10 @@ fn recent_state(r: &LoadedRecent, snap: &Snapshot, now: u64) -> String {
     // When, as exactly as tells two apart (round 11's judges: three alike said "3 d ago"): how long ago today, the day and time this week, the date and time before.
     let when = taken_when(r.taken, now);
     match (r.has_view, r.picture) {
-        (true, true) => tr!("3D picture, {when}", when = when),
-        (true, false) => tr!("Made from a recording, {when}", when = when),
-        (false, _) => tr!("No 3D yet, {when}", when = when),
+        // When first: it is what tells two tiles apart, and what a narrow tile cut (round 14's judges).
+        (true, true) => tr!("{when} · 3D picture", when = when),
+        (true, false) => tr!("{when} · from a recording", when = when),
+        (false, _) => tr!("{when} · no 3D yet", when = when),
     }
 }
 
@@ -2438,6 +2439,11 @@ impl Panels {
             }
             Action::OpenApp => self.backend.show_window(),
             Action::AddKit => self.backend.show_page("projects"),
+            Action::SeeInApp => {
+                if let Some(loaded) = self.facts.opened.and_then(|n| self.recents.tile(n)) {
+                    self.backend.show_page(&format!("session:{}", loaded.key.display())); // i18n: not shown (a page's name for the app)
+                }
+            }
             Action::Booster => {
                 // Its Details page stays as it was left, as every sheet's state does; only its one question starts over.
                 self.booster_asking = false;

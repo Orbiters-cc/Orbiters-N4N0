@@ -680,6 +680,11 @@ impl eframe::App for App {
         if let Some(page) = self.ctl.take_show_page() {
             if page == "projects" {
                 self.set_page(Page::Projects, anim::time(ctx));
+            } else if let Some(dir) = page.strip_prefix("session:") {
+                // Asked from a capture turning on a sheet: it opens here, in the app's own 3D viewer.
+                self.set_page(Page::Sessions, anim::time(ctx));
+                let middle = ctx.content_rect().center();
+                self.sessions.open_session(ctx, std::path::PathBuf::from(dir), Rect::from_center_size(middle, vec2(300.0, 200.0)));
             }
         }
         let focused = ctx.input(|i| i.viewport().focused.unwrap_or(true));

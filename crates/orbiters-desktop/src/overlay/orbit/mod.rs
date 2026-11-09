@@ -638,8 +638,9 @@ fn ago(seconds: u64) -> String {
 
 /// What a recent capture reads as.
 fn recent_state(r: &LoadedRecent, snap: &Snapshot, now: u64) -> String {
+    // A picture says when in the same form as a capture beside it.
     if !r.session {
-        return ago(now.saturating_sub(r.taken));
+        return taken_when(r.taken, now);
     }
     // Whole sentences for each kind: the word order of "3D picture, waiting" is not the same everywhere.
     if let Some(job) = snap.reconstruction.as_ref().filter(|j| j.session_dir == r.key) {

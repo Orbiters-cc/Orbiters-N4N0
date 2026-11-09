@@ -363,12 +363,15 @@ impl Gallery {
             return Self::default();
         }
         // A tall picture still gets a tile wide enough to tell what it is: it is cropped rather than a sliver.
-        let aspects: Vec<f32> = items.iter().map(|r| r.shape().clamp(0.85, 2.4)).collect();
+        // One shape for every tile, photo or capture: rows of four photos beside rows of three captures broke the gallery's rhythm (round 13's judges).
+        let aspects: Vec<f32> = items.iter().map(|_| 16.0 / 9.0).collect();
         // The layout chosen in the app, laid out on a wider page and brought down to this one: about three a row (round 10's judges found two large ones a row sparse,
         // a first screen of four), still a laser's large target in a headset.
         let (rects, height) = crate::pages::gallery_layout::arrange(layout, &aspects, (1024.0 - 48.0) * denser, 300.0, 0.0);
-        let rects = rects.into_iter().map(|r| Rect::from_min_size((r.min.to_vec2() / denser).to_pos2(), r.size() / denser)).collect();
-        Self(std::sync::Arc::new(GalleryList { items, rects, height: height / denser }))
+        // A little room under the toolbar: the first row read as cut under it.
+        const UNDER_THE_TOOLBAR: f32 = 10.0;
+        let rects = rects.into_iter().map(|r| Rect::from_min_size((r.min.to_vec2() / denser).to_pos2() + vec2(0.0, UNDER_THE_TOOLBAR), r.size() / denser)).collect();
+        Self(std::sync::Arc::new(GalleryList { items, rects, height: height / denser + UNDER_THE_TOOLBAR }))
     }
 }
 
@@ -931,10 +934,12 @@ fn sheet_page_items(sheet: Sheet, facts: &Facts) -> Vec<Item> {
                 }
                 let rect = r(24.0 + c * (width + 12.0), y, width, height);
                 out.push(Item { action: Action::Video(i), rect, look: Look::Video(i) });
-                // What the page is for first: what it puts in the world; its link beside it.
-                let main = (rect.width() - 6.0) * 0.58;
-                out.push(Item { action: Action::VideoDrop(i), rect: r(rect.left(), rect.bottom() - 42.0, main, 40.0), look: Look::VideoDrop });
-                out.push(Item { action: Action::Video(i), rect: r(rect.left() + main + 6.0, rect.bottom() - 42.0, rect.width() - main - 6.0, 40.0), look: Look::VideoCopy(i) });
+                // What the page is for first: what it puts in the world; its link beside it. Under its words, beside its picture.
+                let left = rect.left() + RESULT_PICTURE + 12.0;
+                let room = rect.right() - left;
+                let main = (room - 6.0) * 0.55;
+                out.push(Item { action: Action::VideoDrop(i), rect: r(left, rect.bottom() - 42.0, main, 40.0), look: Look::VideoDrop });
+                out.push(Item { action: Action::Video(i), rect: r(left + main + 6.0, rect.bottom() - 42.0, room - main - 6.0, 40.0), look: Look::VideoCopy(i) });
             }
             out.push(Item { action: Action::ResultsBack, rect: r(24.0, 8.0, 520.0, 44.0), look: Look::Back });
             out
@@ -1006,7 +1011,7 @@ fn sheet_page_items(sheet: Sheet, facts: &Facts) -> Vec<Item> {
             // One place's captures, opened from their tile: their name and how many over them, and the way back to all of them (round 12's judges found only the band said it).
             if let Some(name) = &facts.gallery_set {
                 let _ = name;
-                out.push(Item { action: Action::Back, rect: r(x0, y0, 1024.0 - x0 * 2.0, h), look: Look::SetHead });
+                out.push(Item { action: Action::Idle, rect: r(x0, y0, 1024.0 - x0 * 2.0, h), look: Look::SetHead });
                 return out;
             }
             if facts.no_kit {
@@ -1169,23 +1174,28 @@ fn gallery_rects(facts: &Facts) -> (&[Rect], f32) {
     (&facts.recent.0.rects, facts.recent.0.height)
 }
 
-/// Under a result's picture: its title, who made it, and its two buttons.
-const VIDEO_FOOT: f32 = 128.0;
 
 /// Where YouTube's results start on their page, under the search they are of.
 const RESULTS_TOP: f32 = 60.0;
 
 /// YouTube's results' grid: columns, a tile's width and height, and where the first lies.
 fn video_grid() -> (usize, f32, f32, f32) {
-    let width = (1024.0 - 48.0 - 24.0) / 3.0;
-    (3, width, width * 9.0 / 16.0 + VIDEO_FOOT, RESULTS_TOP + 4.0)
+    // Two wide columns, each result its picture beside its words (round 13's judges found three columns dense).
+    let width = (1024.0 - 48.0 - 12.0) / 2.0;
+    (2, width, RESULT_HIGH, RESULTS_TOP + 4.0)
 }
+
+/// A result's height, and its picture's width beside its words.
+const RESULT_HIGH: f32 = 160.0;
+const RESULT_PICTURE: f32 = 240.0;
 
 /// Which of YouTube's results show, scrolled this far: what fetches their pictures, and the next ones.
 pub fn videos_shown(scroll: f32) -> std::ops::Range<usize> {
     let (columns, _, height, top) = video_grid();
     let row = (((scroll - top) / (height + 12.0)).floor().max(0.0)) as usize;
-    (row * columns)..((row + 4) * columns)
+    // As many rows as the sheet shows at this height, and the next.
+    let rows = (576.0 / (height + 12.0)).ceil() as usize + 1;
+    (row * columns)..((row + rows) * columns)
 }
 
 /// Where the conversation is on the talking sheet, and how wide.
@@ -1303,8 +1313,16 @@ fn minutes(seconds: u32) -> String {
 /// What plays's controls, on its panel on All tools: nothing about it needs a page of its own.
 pub(super) use mic_sheet::mic_after;
 
+/// What plays, on up to `rows` lines of `room`, cut only past them.
+fn song_lines(p: &Painter, name: &str, font: FontId, room: f32, rows: usize) -> std::sync::Arc<egui::Galley> {
+    let mut job = egui::text::LayoutJob::simple(name.to_string(), font, look::LABEL, room);
+    job.wrap.max_rows = rows;
+    job.wrap.overflow_character = Some('\u{2026}');
+    p.layout_job(job)
+}
+
 /// A line of what an accessory of All tools does, at its size.
-const SMALL_LINE: f32 = 18.5;
+const SMALL_LINE: f32 = 21.5;
 
 /// What an accessory of All tools does, in a few words for its tile: its caption says the whole of it.
 fn tile_line(action: Action, facts: &Facts) -> Option<String> {
@@ -1328,6 +1346,8 @@ fn tile_line(action: Action, facts: &Facts) -> Option<String> {
 }
 
 const PLAYING_LINK_W: f32 = 138.0;
+/// Where the volume's row lies in Now playing, from its top.
+const VOLUME_ROW: f32 = 30.0;
 const PLAYING_LINK_H: f32 = 38.0;
 
 fn now_playing_controls(panel: Rect, facts: &Facts) -> Vec<Item> {
@@ -1348,16 +1368,19 @@ fn now_playing_controls(panel: Rect, facts: &Facts) -> Vec<Item> {
     // In its corner, off what it says: its link once it is known, and what puts it in the world once it is copied.
     if facts.can_copy_playing {
         // In the row of what says what this is, over the title: the title has the panel's width to itself (round 10's judges found it cut by them).
-        let copy = Rect::from_min_size(pos2(panel.right() - 12.0 - PLAYING_LINK_W, panel.top() + 8.0), vec2(PLAYING_LINK_W, PLAYING_LINK_H));
+        // On its row of controls, beside its play and pause: whose link it is cannot be mistaken (round 13's judges saw them under YouTube's tile).
+        let copy = Rect::from_min_size(pos2(panel.right() - 12.0 - PLAYING_LINK_W, y - PLAYING_LINK_H / 2.0), vec2(PLAYING_LINK_W, PLAYING_LINK_H));
         out.push(Item { action: Action::PlayingLink(Target::CopyPlaying), rect: copy, look: Look::PlayingLink { copy: true } });
         // Both, always (request 70): Drop link puts it in the world in one press where the avatar's N4N0 has its link card, and says what it needs where not.
         out.push(Item { action: Action::PlayingLink(Target::DropPlaying), rect: copy.translate(vec2(-PLAYING_LINK_W - 6.0, 0.0)), look: Look::PlayingLink { copy: false } });
     }
     if let Some((_, muted)) = facts.volume {
+        // In its head's corner, where the link's buttons were.
         let right = panel.right() - 16.0;
-        out.push(Item { action: Action::Volume(true), rect: at(right - 48.0, 48.0), look: Look::Transport(icons::PLUS) });
-        out.push(Item { action: Action::Volume(false), rect: at(right - 48.0 - 78.0 - 48.0, 48.0), look: Look::Transport(icons::MINUS) });
-        out.push(Item { action: Action::Mute, rect: at(right - 48.0 - 78.0 - 48.0 - 54.0, 48.0), look: Look::Transport(if muted { icons::SPEAKER_X } else { icons::SPEAKER_HIGH }) });
+        let top = |x: f32, side: f32| Rect::from_center_size(pos2(x + side / 2.0, panel.top() + VOLUME_ROW), Vec2::splat(side));
+        out.push(Item { action: Action::Volume(true), rect: top(right - 44.0, 44.0), look: Look::Transport(icons::PLUS) });
+        out.push(Item { action: Action::Volume(false), rect: top(right - 44.0 - 78.0 - 44.0, 44.0), look: Look::Transport(icons::MINUS) });
+        out.push(Item { action: Action::Mute, rect: top(right - 44.0 - 78.0 - 44.0 - 50.0, 44.0), look: Look::Transport(if muted { icons::SPEAKER_X } else { icons::SPEAKER_HIGH }) });
     }
     out
 }
@@ -1871,16 +1894,8 @@ pub fn paint(p: &Painter, zone: Zone, size: Vec2, facts: &Facts, hover: Option<u
         _ => {}
     }
     for (i, item) in items(zone, size, facts).iter().enumerate() {
-        // On a screen with a sheet open beside it, the wing steps back: the sheet's head has the same tools as tabs, which Enzo asked for, and two navigations at one
-        // weight was what round 12's judges saw. The tile of what is open, and the one pointed at, stay as they are.
-        let quiet = facts.desktop && facts.sheet.is_some() && Zone::WING.contains(&zone) && hover != Some(i) && pressed != Some(i) && !is_selected(item, facts);
-        if quiet {
-            let mut back = p.clone();
-            back.set_opacity(0.5);
-            draw(&back, zone, item, facts, false, false);
-        } else {
-            draw(p, zone, item, facts, hover == Some(i), pressed == Some(i));
-        }
+        // The wing at full strength, solid, beside a sheet as anywhere: faded, the world showed through it (round 13's judges, all four).
+        draw(p, zone, item, facts, hover == Some(i), pressed == Some(i));
     }
     // A list goes on under its foot: it fades there, and is not cut.
     if zone == Zone::Takeover && facts.opened.is_none() {
@@ -2270,7 +2285,7 @@ fn draw(p: &Painter, zone: Zone, item: &Item, facts: &Facts, hovered: bool, pres
                     p.text(pos2(x, rect.top() + 21.0), Align2::LEFT_CENTER, fit(p, label, &font, room), font, Color32::WHITE);
                     let top = rect.top() + 34.0;
                     let rows = ((rect.bottom() - 4.0 - top) / SMALL_LINE).floor().max(1.0) as usize;
-                    let mut job = egui::text::LayoutJob::simple(said, look::font(15.5, weight::MEDIUM), Color32::from_gray(236), room);
+                    let mut job = egui::text::LayoutJob::simple(said, look::font(18.0, weight::SEMIBOLD), Color32::WHITE, room);
                     job.wrap.max_rows = rows;
                     job.wrap.overflow_character = Some('\u{2026}');
                     p.galley(pos2(x, top), p.layout_job(job), look::LABEL);
@@ -2329,7 +2344,7 @@ fn draw(p: &Painter, zone: Zone, item: &Item, facts: &Facts, hovered: bool, pres
             let font = look::font(13.0, weight::SEMIBOLD);
             // Its label gives way to the link's buttons in the corner; its title is under them.
             // Both, wherever there is a link: Drop link is there, dimmed or not, beside Copy link.
-            let buttons = if facts.can_copy_playing { PLAYING_LINK_W * 2.0 + 6.0 + 8.0 } else { 0.0 };
+            let buttons = if facts.volume.is_some() { 232.0 } else { 0.0 };
             p.text(pos2(x, rect.top() + 20.0), Align2::LEFT_CENTER, fit(p, tr("Now playing on this computer"), &font, room - buttons - 8.0), font, tint);
             match &facts.music {
                 Some((title, _)) => {
@@ -2349,7 +2364,7 @@ fn draw(p: &Painter, zone: Zone, item: &Item, facts: &Facts, hovered: bool, pres
             // The level between its minus and its plus.
             if let Some((percent, muted)) = facts.volume {
                 let right = rect.right() - 16.0;
-                let bar = Rect::from_center_size(pos2(right - 48.0 - 39.0, rect.bottom() - 31.0), vec2(66.0, 7.0));
+                let bar = Rect::from_center_size(pos2(right - 44.0 - 39.0, rect.top() + VOLUME_ROW), vec2(66.0, 7.0));
                 p.rect_filled(bar, look::radius(3.5), Color32::from_white_alpha(70));
                 let level = if muted { 0.0 } else { percent as f32 / 100.0 };
                 p.rect_filled(Rect::from_min_size(bar.min, vec2(bar.width() * level, 7.0)), look::radius(3.5), look::LABEL);
@@ -2360,17 +2375,14 @@ fn draw(p: &Painter, zone: Zone, item: &Item, facts: &Facts, hovered: bool, pres
         Look::SetHead => {
             let name = facts.gallery_set.as_deref().unwrap_or_default();
             let count = facts.recent.len();
-            if hovered || pressed {
-                p.rect_filled(rect, look::radius(rect.height() / 2.0), if pressed { look::TILE_DOWN } else { look::TILE_HOVER });
-            }
-            widgets::icon(p, pos2(rect.left() + 18.0, rect.center().y), icons::ARROW_LEFT, 18.0, look::LABEL);
+            // What it is and how many: the way back is the sheet's own Back, one place (round 13's judges counted three).
+            widgets::icon(p, pos2(rect.left() + 16.0, rect.center().y), icons::STACK, 18.0, look::MUTED);
             let font = look::font(19.0, weight::BOLD);
-            let shown = fit(p, name, &font, rect.width() * 0.6);
+            let shown = fit(p, name, &font, rect.width() * 0.7);
             let wide = p.layout_no_wrap(shown.clone(), font.clone(), look::LABEL).size().x;
-            p.text(pos2(rect.left() + 40.0, rect.center().y), Align2::LEFT_CENTER, shown, font, Color32::WHITE);
+            p.text(pos2(rect.left() + 36.0, rect.center().y), Align2::LEFT_CENTER, shown, font, Color32::WHITE);
             let small = look::font(15.0, weight::MEDIUM);
-            p.text(pos2(rect.left() + 52.0 + wide, rect.center().y), Align2::LEFT_CENTER, tr!("{count} captures", count = count), small, look::MUTED);
-            p.text(pos2(rect.right() - 12.0, rect.center().y), Align2::RIGHT_CENTER, tr("All pictures"), look::font(14.0, weight::SEMIBOLD), look::LABEL);
+            p.text(pos2(rect.left() + 48.0 + wide, rect.center().y), Align2::LEFT_CENTER, tr!("{count} captures", count = count), small, look::MUTED);
         }
         Look::AddKit => {
             // A quiet line at the end of what the row does, a link at its end: nothing on it shouts, the pictures under it lead.
@@ -2449,7 +2461,7 @@ fn draw(p: &Painter, zone: Zone, item: &Item, facts: &Facts, hovered: bool, pres
             let Some(video) = facts.videos.get(i) else { return };
             let clip = p.with_clip_rect(Rect::from_min_max(pos2(0.0, RESULTS_TOP), pos2(1024.0, 576.0)));
             let radii = [theme::squircle(14.0); 4];
-            let picture = Rect::from_min_size(rect.min, vec2(rect.width(), rect.width() * 9.0 / 16.0));
+            let picture = Rect::from_min_size(rect.min + vec2(0.0, (rect.height() - RESULT_PICTURE * 9.0 / 16.0) / 2.0), vec2(RESULT_PICTURE, RESULT_PICTURE * 9.0 / 16.0));
             match video.picture {
                 Some(id) => squircle_picture(&clip, picture, radii, id, cover_uv(picture.size()), if pressed { Color32::from_gray(200) } else { Color32::WHITE }),
                 None => {
@@ -2469,12 +2481,16 @@ fn draw(p: &Painter, zone: Zone, item: &Item, facts: &Facts, hovered: bool, pres
             }
             // Two lines: results for one search look alike, and their words are what tells them apart.
             // Three lines, always: results for one search are told apart by their words (round 12's judges still found them cut at two).
-            let mut job = egui::text::LayoutJob::simple(video.title.clone(), look::font(15.5, weight::BOLD), look::LABEL, rect.width() - 4.0);
+            let left = picture.right() + 12.0;
+            let room = rect.right() - left - 2.0;
+            let mut job = egui::text::LayoutJob::simple(video.title.clone(), look::font(17.0, weight::BOLD), look::LABEL, room);
             job.wrap.max_rows = 3;
             job.wrap.overflow_character = Some('\u{2026}');
-            clip.galley(pos2(rect.left() + 2.0, picture.bottom() + 5.0), clip.layout_job(job), look::LABEL);
-            let font = look::font(14.5, weight::MEDIUM);
-            clip.text(pos2(rect.left() + 2.0, picture.bottom() + 72.0), Align2::LEFT_CENTER, fit(&clip, &video.channel, &font, rect.width() - 4.0), font, look::MUTED);
+            let title = clip.layout_job(job);
+            let high = title.size().y;
+            clip.galley(pos2(left, rect.top() + 2.0), title, look::LABEL);
+            let font = look::font(15.5, weight::MEDIUM);
+            clip.text(pos2(left, rect.top() + high + 14.0), Align2::LEFT_CENTER, fit(&clip, &video.channel, &font, room), font, Color32::from_gray(200));
         }
         Look::VideoCopy(i) => {
             let clip = p.with_clip_rect(Rect::from_min_max(pos2(0.0, RESULTS_TOP), pos2(1024.0, 576.0)));
@@ -2763,16 +2779,18 @@ fn draw(p: &Painter, zone: Zone, item: &Item, facts: &Facts, hovered: bool, pres
                 if none {
                     p.text(pos2(x, rect.center().y), Align2::LEFT_CENTER, fit(p, tr("Nothing playing"), &font, room), font, look::MUTED);
                 } else {
-                    // The song on two lines where one does not hold it (round 12's judges: "AOT only the bang..." said too little of what plays).
-                    let mut job = egui::text::LayoutJob::simple(name.clone(), font, look::LABEL, room);
-                    job.wrap.max_rows = 2;
-                    job.wrap.overflow_character = Some('\u{2026}');
-                    let title = p.layout_job(job);
+                    // The song first: on up to three lines, which hold most titles whole (round 13's judges still read "AOT only the bang..."). What a press does
+                    // only where the song leaves room: the play or pause on its picture says it too.
+                    let title = song_lines(p, &name, font, room, 3);
+                    let rows = title.rows.len();
                     let high = title.size().y;
-                    let top = rect.center().y - (high + 13.0) / 2.0;
+                    let press = rows <= 1;
+                    let top = rect.center().y - (high + if press { 13.0 } else { 0.0 }) / 2.0;
                     p.galley(pos2(x, top), title, look::LABEL);
-                    let font = look::font(10.5, weight::MEDIUM);
-                    p.text(pos2(x, top + high + 7.0), Align2::LEFT_CENTER, if playing { tr_ctx("tile", "Press to pause") } else { tr_ctx("tile", "Press to play") }, font, look::MUTED);
+                    if press {
+                        let font = look::font(10.5, weight::MEDIUM);
+                        p.text(pos2(x, top + high + 7.0), Align2::LEFT_CENTER, if playing { tr_ctx("tile", "Press to pause") } else { tr_ctx("tile", "Press to play") }, font, look::MUTED);
+                    }
                 }
             }
         }
@@ -2825,15 +2843,15 @@ fn draw(p: &Painter, zone: Zone, item: &Item, facts: &Facts, hovered: bool, pres
             let room = rect.right() - x - 4.0;
             let font = look::font(10.0, weight::BOLD);
             let name = facts.music.as_ref().map_or("", |m| m.0.as_str());
-            // Two lines of the song where one does not hold it, as on the wing.
-            let mut job = egui::text::LayoutJob::simple(name.to_string(), font, look::LABEL, room);
-            job.wrap.max_rows = 2;
-            job.wrap.overflow_character = Some('\u{2026}');
-            let title = p.layout_job(job);
-            let high = title.size().y;
-            let top = rect.center().y - (high + 12.0) / 2.0;
+            // The song first, as on the wing.
+            let title = song_lines(p, name, font, room, 3);
+            let (rows, high) = (title.rows.len(), title.size().y);
+            let press = rows <= 1;
+            let top = rect.center().y - (high + if press { 12.0 } else { 0.0 }) / 2.0;
             p.galley(pos2(x, top), title, look::LABEL);
-            p.text(pos2(x, top + high + 6.5), Align2::LEFT_CENTER, if playing { tr_ctx("tile", "Press to pause") } else { tr_ctx("tile", "Press to play") }, look::font(9.5, weight::MEDIUM), look::MUTED);
+            if press {
+                p.text(pos2(x, top + high + 6.5), Align2::LEFT_CENTER, if playing { tr_ctx("tile", "Press to pause") } else { tr_ctx("tile", "Press to play") }, look::font(9.5, weight::MEDIUM), look::MUTED);
+            }
         }
         Look::PeekWord => {
             let radius = look::radius(rect.height() / 2.0);
@@ -3177,9 +3195,12 @@ fn draw_caption(p: &Painter, zone: Zone, rect: Rect, facts: &Facts) {
     let on_the_wheel = zone == Zone::WheelCaption;
     // On a desktop's wheel what is pointed at is said in the disc in its middle, nearer than any caption.
     // And on a sheet with its band up, in that: one place says it.
-    let pointed = facts.pointed.filter(|_| !(on_the_wheel && facts.digits) && !(facts.hint_band && facts.sheet.is_some()));
+    // On a desktop's wheel what is pointed at is said here, over the ring: a disc over VRChat's wheel hid all of it (round 13's judges). The disc is there only while a 3D
+    // picture waits.
+    let disc = on_the_wheel && facts.digits && facts.picture_wait.is_some();
+    let pointed = facts.pointed.filter(|_| !disc && !(facts.hint_band && facts.sheet.is_some()));
     let words = said_now(facts).or_else(|| pointed.and_then(|a| caption(a, facts))).or_else(|| facts.hint.map(|(a, b)| (tr(a).to_string(), tr(b).to_string())));
-    if on_the_wheel && facts.digits && facts.pointed.is_some() && words.is_none() {
+    if disc && facts.pointed.is_some() && words.is_none() {
         return;
     }
     // On the wheel, whose it is, whatever it has to say.
@@ -3193,6 +3214,11 @@ fn draw_caption(p: &Painter, zone: Zone, rect: Rect, facts: &Facts) {
     }
     if on_the_wing {
         draw_words_left(p, rect, &first, &second, facts.desktop && !facts.vr_close);
+        return;
+    }
+    // Under the strip of a narrow window, one line: two were squeezed against the window's foot (round 13's judges).
+    if zone == Zone::QmCaption && facts.strip_caption && !second.is_empty() {
+        draw_words_marked(p, rect, &format!("{first}: {second}"), "", false);
         return;
     }
     draw_words_marked(p, rect, &first, &second, on_the_wheel);

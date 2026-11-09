@@ -187,7 +187,9 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         scroller.follow(SCROLL_TO_PICK && open == Some(Around::Wheel) && !pointer.active() && !panels.sheet_open());
         let scrolled = scroller.lit();
         // Over VRChat's wheel too while a 3D picture waits: VRChat's lit slice has nothing to do with it, and two things would look chosen.
-        panels.set_pointing((pointer.active() || scrolled.is_some() || panels.picture_waiting()) && !panels.sheet_open(), !snap.settings.reduce_motion);
+        // Only while a 3D picture waits: pointing, what is pointed at is said over the ring and VRChat's wheel stays in view (round 13's judges).
+        let _ = scrolled;
+        panels.set_pointing(panels.picture_waiting() && !panels.sheet_open(), !snap.settings.reduce_motion);
         panels.set_key_caps(alt_held());
         let at = pointer.at().unwrap_or(pos2(cursor.0 as f32, cursor.1 as f32));
         let on = match scrolled {
@@ -268,7 +270,7 @@ impl Hints {
             // The scroll wheel first, where it is on: it needs no key (round 12's judges: Left Alt was the friction of the desktop's wheel).
             Some(Around::Wheel) if SCROLL_TO_PICK && self.pointed < Self::FULL => Some((mark("Scroll to pick a tool, then click"), mark("Or hold Left Alt to point; keys 1 to 6"))),
             Some(Around::Wheel) if SCROLL_TO_PICK => Some((mark("Scroll to pick, or hold Left Alt"), "")),
-            Some(Around::Wheel) if self.pointed < Self::FULL => Some((mark("Hold Left Alt, then click a tool"), mark("Alt also shows each one's key, 1 to 6"))),
+            Some(Around::Wheel) if self.pointed < Self::FULL => Some((mark("Hold Left Alt, then click a tool"), mark("Or press its number, 1 to 6, from the top clockwise"))),
             Some(Around::Wheel) => Some((mark("Left Alt to click, or a number"), "")),
             // Says what this is, and that it is not VRChat's.
             Some(Around::QuickMenu) if self.openings <= Self::FULL => Some((mark("Your tools"), mark("Worlds in 3D, videos, instances and 3D pictures."))),

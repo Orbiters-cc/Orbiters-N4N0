@@ -41,6 +41,11 @@ fn server_info() -> Value {
 
 const INSTRUCTIONS: &str = "Drives VRChat on this computer in desktop mode, in private instances only, to take 3D pictures from world to world. Read the resource bridge://guide (or the prompt world_tour) first, and call get_state whenever unsure: its `next` says what to do. The person at the computer always wins: a paused_by_person answer means wait.";
 
+/// What the server says of itself: the VRChat tools', then the Unity projects tools'.
+fn instructions() -> String {
+    format!("{INSTRUCTIONS} {}", super::projects::INSTRUCTIONS)
+}
+
 /// A running listener. Dropping it closes the port and ends its connections and calls.
 pub struct Server {
     port: u16,
@@ -391,7 +396,7 @@ fn rpc(shared: &Shared, request: &Request, message: &Value, stream: &TcpStream) 
                 "protocolVersion": version,
                 "capabilities": { "tools": {}, "resources": {}, "prompts": {} },
                 "serverInfo": server_info(),
-                "instructions": INSTRUCTIONS,
+                "instructions": instructions(),
             }))
         }
         "ping" => Ok(json!({})),
@@ -401,7 +406,7 @@ fn rpc(shared: &Shared, request: &Request, message: &Value, stream: &TcpStream) 
             Ok(json!({
                 "supportedVersions": supported,
                 "capabilities": { "tools": {}, "resources": {}, "prompts": {} },
-                "instructions": INSTRUCTIONS,
+                "instructions": instructions(),
                 "ttlMs": 300_000,
                 "cacheScope": "private",
                 "serverInfo": server_info(),
@@ -409,7 +414,10 @@ fn rpc(shared: &Shared, request: &Request, message: &Value, stream: &TcpStream) 
         }
         "tools/list" => Ok(with_cache(json!({ "tools": tools::list() }), modern.is_some())),
         "resources/list" => Ok(with_cache(
-            json!({ "resources": [{ "uri": "bridge://guide", "name": "guide", "title": "How to take 3D pictures from world to world", "description": "The loop, when to give up on a world, and what not to do. Read it first.", "mimeType": "text/markdown" }] }),
+            json!({ "resources": [
+                { "uri": "bridge://guide", "name": "guide", "title": "How to take 3D pictures from world to world", "description": "The loop, when to give up on a world, and what not to do. Read it first.", "mimeType": "text/markdown" },
+                super::projects::resource(),
+            ] }),
             modern.is_some(),
         )),
         "resources/templates/list" => Ok(with_cache(json!({ "resourceTemplates": [] }), modern.is_some())),
@@ -417,7 +425,11 @@ fn rpc(shared: &Shared, request: &Request, message: &Value, stream: &TcpStream) 
             Some("bridge://guide") => {
                 Ok(with_cache(json!({ "contents": [{ "uri": "bridge://guide", "mimeType": "text/markdown", "text": tools::GUIDE }] }), modern.is_some()))
             }
-            _ => Err((-32602, "There is no such resource: bridge://guide is the one there is.".to_string())),
+            Some(super::projects::GUIDE_URI) => Ok(with_cache(
+                json!({ "contents": [{ "uri": super::projects::GUIDE_URI, "mimeType": "text/markdown", "text": super::projects::GUIDE }] }),
+                modern.is_some(),
+            )),
+            _ => Err((-32602, super::projects::NO_SUCH_RESOURCE.to_string())),
         },
         "prompts/list" => Ok(with_cache(
             json!({ "prompts": [{ "name": "world_tour", "title": "A tour of worlds", "description": "Go from world to world and take 3D pictures, in private instances, unattended.", "arguments": [{ "name": "worlds", "description": "World ids to visit, or what kind of worlds to look for.", "required": false }] }] }),

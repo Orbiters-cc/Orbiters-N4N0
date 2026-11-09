@@ -19,7 +19,7 @@ const NOT_FOUND: &str = "Following dependencies are not found: "; // i18n: not s
 const LISTINGS_READ: usize = 40;
 
 /// A package the project needs and the versions it accepts (the resolver's range, `=1.1.5` for a locked one).
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 pub struct Missing {
     pub name: String,
     pub range: String,
@@ -51,7 +51,7 @@ pub fn accepts(range: &str, version: &str) -> bool {
     range.match_pre(&version, pre)
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
 pub enum Kind {
     /// Orbiters' Known VPM catalog.
     Known,
@@ -71,7 +71,7 @@ pub struct Source {
     pub packages: HashMap<String, Vec<String>>,
 }
 /// A package found: the version that will be installed and the repository adding it.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 pub struct Found {
     pub package: Missing,
     pub version: String,
@@ -81,20 +81,20 @@ pub struct Found {
     pub turn_on: Option<String>,
 }
 /// A package a repository provides, but not at a version the project accepts: the versions it lists (newest first).
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 pub struct NotListed {
     pub package: Missing,
     pub repository: String,
     pub versions: Vec<String>,
 }
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize)]
 pub struct Lookup {
     pub found: Vec<Found>,
     pub not_listed: Vec<NotListed>,
     pub not_provided: Vec<Missing>,
 }
 /// A repository to add (or turn back on) and the packages it brings, for the confirmation.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 pub struct Addition {
     pub name: String,
     pub url: String,

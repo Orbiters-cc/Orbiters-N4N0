@@ -16,7 +16,7 @@ use crate::discovery;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
 pub enum Tool {
     Mixer,
     Mcb,
@@ -31,7 +31,7 @@ impl Tool {
 }
 
 /// A .blend file linked to a project.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 pub struct Link {
     pub blend: PathBuf,
     /// The scene it was linked from, as [`Avatar::scene`] (project-relative, forward slashes), when known.

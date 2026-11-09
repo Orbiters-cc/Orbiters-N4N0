@@ -16,7 +16,7 @@ const TRIES: usize = 8;
 
 /// One package's change in a plan: from its installed version to another (`from` none: added as a dependency; `to`
 /// none: removed).
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize)]
 pub struct Step {
     pub name: String,
     pub display_name: String,
@@ -26,7 +26,7 @@ pub struct Step {
     pub why: Option<String>,
 }
 /// A newer version a package can take, and everything installing it changes (itself first).
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize)]
 pub struct Update {
     pub name: String,
     pub display_name: String,
@@ -43,7 +43,7 @@ impl Update {
     }
 }
 /// A newer version the project cannot take as it is, and why.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize)]
 pub struct Held {
     pub name: String,
     pub display_name: String,
@@ -51,14 +51,14 @@ pub struct Held {
     pub why: String,
 }
 /// Update all: the versions asked for at once and everything that changes.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize)]
 pub struct Plan {
     pub targets: Vec<(String, String)>,
     pub steps: Vec<Step>,
     /// Updates not in it: the VRChat SDK's, and those that cannot go together with the others.
     pub left_out: Vec<String>,
 }
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize)]
 pub struct Updates {
     pub updates: Vec<Update>,
     pub held: Vec<Held>,
@@ -70,7 +70,7 @@ impl Updates {
     }
 }
 /// The answer for releases only and with pre-releases (the panel's switch picks one; no new check when it turns).
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize)]
 pub struct Check {
     pub stable: Updates,
     pub prerelease: Updates,

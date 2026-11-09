@@ -281,6 +281,58 @@ impl Game for RealGame {
     }
 }
 
+/// What the bridge's Unity projects tools ask of the controller: world uploads, and telling the window its Unity projects
+/// tab changed.
+struct RealProjectsHost {
+    ctl: Weak<Controller>,
+}
+
+impl RealProjectsHost {
+    fn ctl(&self) -> Result<Shared, String> {
+        self.ctl.upgrade().ok_or_else(|| "Orbiters - N4N0 is closing.".to_string()) // i18n: not shown (an AI client reads it in the tool's answer)
+    }
+}
+
+impl crate::bridge::projects::Host for RealProjectsHost {
+    fn upload_pictures(&self, world_id: String, world_name: String, paths: Vec<PathBuf>) -> Result<(), String> {
+        self.ctl()?.upload_pictures(world_id, world_name, paths).map_err(|e| format!("{e:#}"))
+    }
+
+    fn upload_preview(&self, world_id: String, world_name: String, session: PathBuf) -> Result<(), String> {
+        self.ctl()?.upload_preview(world_id, world_name, session).map_err(|e| format!("{e:#}"))
+    }
+
+    fn uploads(&self, world_id: &str) -> serde_json::Value {
+        let Ok(ctl) = self.ctl() else { return serde_json::Value::Null };
+        let view = ctl.view();
+        serde_json::to_value(view.uploads.iter().filter(|u| u.world_id == world_id).collect::<Vec<_>>()).unwrap_or_default()
+    }
+
+    fn world_here(&self, world_id: &str) -> serde_json::Value {
+        let Ok(ctl) = self.ctl() else { return serde_json::Value::Null };
+        let sessions_dir = ctl.with_settings(|s| s.sessions_dir.clone());
+        let Some(world) = crate::worlds::load(&sessions_dir).into_iter().find(|w| w.id == world_id) else {
+            return serde_json::json!({ "name": null, "captures": [], "pictures": 0 });
+        };
+        serde_json::json!({
+            "name": world.name,
+            "captures": world.sessions.iter().map(|s| serde_json::json!({
+                "dir": s.dir,
+                "recorded_utc": s.manifest.created_utc,
+                "splats": s.reconstruction.as_ref().map(|r| r.gaussians),
+            })).collect::<Vec<_>>(),
+            "pictures": world.shots.len(),
+            "pictures_folder": world.shots.first().and_then(|s| s.path.parent().map(Path::to_path_buf)),
+        })
+    }
+
+    fn changed(&self) {
+        if let Some(ctl) = self.ctl.upgrade() {
+            ctl.update(|s| s.projects_changed = s.projects_changed.wrapping_add(1));
+        }
+    }
+}
+
 /// What the keeper asks of the controller.
 struct RealFlag {
     ctl: Weak<Controller>,
@@ -322,6 +374,7 @@ impl Controller {
         };
         let game = Arc::new(RealGame { ctl: Arc::downgrade(self), exe: exe.clone(), desktop_mode: Mutex::new((None, None)) });
         let bridge = Bridge::new(game, Some(exe));
+        bridge.projects.set_host(Arc::new(RealProjectsHost { ctl: Arc::downgrade(self) }));
         let flag = Arc::new(RealFlag { ctl: Arc::downgrade(self) });
         let ctl = Arc::downgrade(self);
         let keeper = Keeper::for_service(

@@ -21,7 +21,7 @@ pub struct Template {
     #[serde(default)]
     pub banner: Option<PathBuf>,
 }
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, serde::Serialize)]
 pub struct Progress {
     pub copied: usize,
     pub total: usize,

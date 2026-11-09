@@ -201,6 +201,13 @@ pub fn list() -> Value {
             "annotations": acts,
         },
     ])
+    .as_array()
+    .cloned()
+    .unwrap_or_default()
+    .into_iter()
+    .chain(super::projects::list())
+    .collect::<Vec<Value>>()
+    .into()
 }
 
 /// The failure for a pause.
@@ -235,8 +242,9 @@ fn file_name(path: &std::path::Path) -> String {
 impl Bridge {
     /// One tool call, whose outcome goes to the log (all but what only reads: those fill it with nothing).
     pub fn call(&self, name: &str, args: &Value, call: &Call) -> Result<Answer, Failure> {
-        let acts = !matches!(name, "get_state" | "wait_for" | "find_worlds");
+        let acts = !matches!(name, "get_state" | "wait_for" | "find_worlds") && !super::projects::reads(name);
         let result = match name {
+            unity if super::projects::NAMES.contains(&unity) => self.projects.call(unity, args, call, self.paused()),
             "get_state" => Ok(Answer::Data(self.state())),
             "find_worlds" => self.find_worlds(args),
             "go_to_world" => self.exclusively(|| self.go_to_world(args, call)),
@@ -276,6 +284,14 @@ impl Bridge {
             "wear_avatar" => format!("wear {}", args["avatar_id"].as_str().unwrap_or("?")),
             "take_3d_picture" => format!("3D picture of {} s", args["length_s"].as_u64().unwrap_or(4)),
             "screenshot" => "screenshot".into(),
+            unity if unity.starts_with("unity_") => {
+                let words: Vec<&str> = ["action", "what", "package", "path", "url", "id", "name", "template", "job"]
+                    .iter()
+                    .filter_map(|k| args[*k].as_str())
+                    .collect();
+                let job = args["job"].as_u64().map(|j| format!(" job {j}")).unwrap_or_default();
+                format!("{} {}{job}", unity.trim_start_matches("unity_").replace('_', " "), words.join(" ")).trim().to_string()
+            }
             other => other.to_string(),
         }
     }
@@ -1180,7 +1196,9 @@ mod tests {
     fn the_tools_are_few_and_say_when_to_use_them() {
         let tools = list();
         let tools = tools.as_array().unwrap();
-        assert!(tools.len() <= 13, "few: {}", tools.len());
+        let vrchat = tools.iter().filter(|t| !t["name"].as_str().unwrap().starts_with("unity_")).count();
+        assert!(vrchat <= 13, "few: {vrchat}");
+        assert_eq!(tools.len(), vrchat + super::super::projects::NAMES.len(), "the Unity projects tools after them");
         for tool in tools {
             assert!(tool["description"].as_str().unwrap().len() > 60, "{tool}");
             assert_eq!(tool["inputSchema"]["type"], "object");

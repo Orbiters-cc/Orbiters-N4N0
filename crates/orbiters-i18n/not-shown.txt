@@ -5,6 +5,7 @@ crates/orbiters-desktop/src/screenshot.rs
 crates/orbiters-desktop/src/bench.rs
 # What AI clients read, not people.
 crates/orbiters-desktop/src/bridge/tools.rs
+crates/orbiters-desktop/src/bridge/projects.rs
 # This crate, and the keyed menu texts it holds beside (crates/orbiters-n4n0-core/menu-strings are their translations).
 crates/orbiters-i18n
 crates/orbiters-n4n0-core/src/menu/strings.rs

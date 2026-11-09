@@ -34,7 +34,7 @@ pub const CACHE_DIR_VAR: &str = "ORBITERS_UNITY_CACHE_DIR";
 
 const BACKUP_PREFIX: &str = "Library.orbiters-relocation-"; // i18n: not shown (a folder name; an error text, English until errors are decided; a macOS path part)
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, serde::Serialize)]
 pub struct Health {
     pub free: Option<u64>,
     pub disk_error: bool,
@@ -45,7 +45,7 @@ pub struct Health {
 
 /// What the panel has to say about a project's disk. Running low and Unity having actually failed are different things
 /// to be told: the first does not stop anything, and the project opens as usual.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
 pub enum Notice {
     /// Under [`IMPORT_RESERVE`] free; Unity has not complained.
     RunningLow,
@@ -319,7 +319,7 @@ fn preflight_with(project: &Path, health: &Health, pick: impl FnOnce(&Path, u64)
 // ---------------------------------------------------------------------------------------------------------------------
 
 /// Where a repair is.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize)]
 pub enum Phase {
     #[default]
     Starting,
@@ -337,7 +337,7 @@ pub enum Phase {
     RemovingPartial,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, serde::Serialize)]
 pub struct Progress {
     pub phase: Phase,
     /// The Library's size, growing while [`Phase::Measuring`].
@@ -387,7 +387,7 @@ fn update(progress: &SharedProgress, f: impl FnOnce(&mut Progress)) {
 }
 
 /// What stops a repair from being offered, or where it would go.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 pub enum Verdict {
     /// Can run: copies into this folder, on a disk with this much room.
     Ready { cache_root: PathBuf, free: u64 },
@@ -402,7 +402,7 @@ pub enum Verdict {
 }
 
 /// What a repair would do, told before it is asked for.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 pub struct Plan {
     pub bytes: u64,
     pub files: u64,
@@ -488,7 +488,7 @@ fn verdict_for(bytes: u64, destinations: &[(PathBuf, u64)]) -> Verdict {
 }
 
 /// How a repair ended, short of an error.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 pub enum RepairEnd {
     Moved(Moved),
     /// Cancelled: Library is where it was. `left`: the partial copy, when it could not be deleted (it goes with the next
@@ -496,7 +496,7 @@ pub enum RepairEnd {
     Cancelled { left: Option<PathBuf> },
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 pub struct Moved {
     pub target: PathBuf,
     pub bytes: u64,

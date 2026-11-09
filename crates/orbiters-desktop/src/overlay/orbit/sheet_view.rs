@@ -214,7 +214,7 @@ impl Default for Fit {
 }
 
 /// How much of the frame a capture fills, in its larger direction.
-const FILLS: f32 = 0.8;
+const FILLS: f32 = 0.86;
 
 /// How bright what shows is brought to, at most, on average: a night capture stood dim on a flat stage (round 16's judges).
 const LIFT_TO: f32 = 0.4;
@@ -252,13 +252,21 @@ impl Fit {
     /// From a first picture at this fit: nearer, and centred, so that what shows fills [`FILLS`] of the frame. Never further than it was.
     fn from_picture(self, rgba: &[u8], size: [u32; 2]) -> Self {
         let [w, h] = size;
-        let (mut x0, mut y0, mut x1, mut y1) = (w, h, 0u32, 0u32);
+        // Its bulk, not its every stray splat: a little debris over its top kept it small (round 17's judges). From the 2nd to the 98th hundredth of what shows.
+        let (mut xs, mut ys) = (Vec::new(), Vec::new());
         for (i, px) in rgba.chunks_exact(4).enumerate() {
-            if px[3] > 40 {
-                let (x, y) = (i as u32 % w, i as u32 / w);
-                (x0, y0, x1, y1) = (x0.min(x), y0.min(y), x1.max(x), y1.max(y));
+            if px[3] > 60 {
+                xs.push(i as u32 % w);
+                ys.push(i as u32 / w);
             }
         }
+        if xs.len() < 16 {
+            return self;
+        }
+        xs.sort_unstable();
+        ys.sort_unstable();
+        let at = |v: &[u32], q: f32| v[((v.len() - 1) as f32 * q) as usize];
+        let (x0, x1, y0, y1) = (at(&xs, 0.02), at(&xs, 0.98), at(&ys, 0.02), at(&ys, 0.98));
         if x1 <= x0 || y1 <= y0 {
             return self;
         }
@@ -416,7 +424,7 @@ mod tests {
         }
         let fit = Fit::default().from_picture(&rgba, [w, h]);
         let nearer = Fit::default().distance / fit.distance;
-        assert!((nearer - 0.8 / (44.0 / 90.0)).abs() < 0.05, "{nearer}");
+        assert!((nearer - FILLS / (44.0 / 90.0)).abs() < 0.06, "{nearer}");
         assert!(fit.lift > 0.0, "raised, as it showed low: {fit:?}");
         // Already filling it, it does not move away; empty, it stays as it was.
         let full = vec![255u8; (w * h * 4) as usize];

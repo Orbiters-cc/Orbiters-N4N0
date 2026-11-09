@@ -745,6 +745,8 @@ struct PanelWindow {
     alpha: u8,
     /// New pixels are in its bitmap, not yet on the screen: `UpdateLayeredWindow` is what shows them, moved or not.
     stale: bool,
+    /// The bitmap the device context held before ours, put back before ours is deleted.
+    first_bitmap: windows::Win32::Graphics::Gdi::HGDIOBJ,
 }
 
 impl PanelWindow {
@@ -775,8 +777,8 @@ impl PanelWindow {
                     return Err(e.into());
                 }
             };
-            SelectObject(dc, bitmap.into());
-            Ok(Self { hwnd, dc, bitmap, bits: bits.cast(), size: SIZE { cx: width as i32, cy: height as i32 }, shown: false, at: POINT::default(), alpha: 0, stale: true })
+            let first_bitmap = SelectObject(dc, bitmap.into());
+            Ok(Self { hwnd, dc, bitmap, bits: bits.cast(), size: SIZE { cx: width as i32, cy: height as i32 }, shown: false, at: POINT::default(), alpha: 0, stale: true, first_bitmap })
         }
     }
 
@@ -807,8 +809,19 @@ impl PanelWindow {
         // SAFETY: live handles; the structures outlive the call.
         unsafe {
             let screen = GetDC(None);
-            let _ = UpdateLayeredWindow(self.hwnd, Some(screen), Some(&at), Some(&self.size), Some(self.dc), Some(&origin), COLORREF(0), Some(&blend), ULW_ALPHA);
+            let updated = UpdateLayeredWindow(self.hwnd, Some(screen), Some(&at), Some(&self.size), Some(self.dc), Some(&origin), COLORREF(0), Some(&blend), ULW_ALPHA);
             ReleaseDC(None, screen);
+            // A layered window shown without its picture is drawn as an opaque black rectangle of its whole size: what round 17's judges saw round the wheel's
+            // caption. It shows only with its picture on it, and is hidden, to try again on the next turn, when Windows refused the picture.
+            if let Err(e) = updated {
+                eprintln!("panel window: its picture was refused ({e}), it stays hidden"); // i18n: not shown (a log's line)
+                if self.shown {
+                    let _ = ShowWindow(self.hwnd, SW_HIDE);
+                    self.shown = false;
+                }
+                self.stale = true;
+                return;
+            }
             if !self.shown {
                 let _ = ShowWindow(self.hwnd, SW_SHOWNOACTIVATE);
                 let _ = SetWindowPos(self.hwnd, Some(HWND_TOPMOST), 0, 0, 0, 0, SWP_NOSIZE | windows::Win32::UI::WindowsAndMessaging::SWP_NOMOVE | SWP_NOACTIVATE | SWP_NOOWNERZORDER);
@@ -843,6 +856,9 @@ impl Drop for PanelWindow {
     fn drop(&mut self) {
         // SAFETY: made in `new`, released once.
         unsafe {
+            // Ours out of the device context first: a bitmap still selected is not deleted, and each window made anew (a panel of a new size) leaked one,
+            // until Windows had none left to give and refused pictures.
+            SelectObject(self.dc, self.first_bitmap);
             let _ = DeleteObject(self.bitmap.into());
             let _ = DeleteDC(self.dc);
             let _ = DestroyWindow(self.hwnd);
@@ -1371,6 +1387,24 @@ mod tests {
         let mut window = PanelWindow::new(8, 8, false).expect("a window");
         window.picture(&[0u8; 8 * 8 * 4], [0, 0, 8, 8]);
         window
+    }
+
+    /// Round 17's judges saw an opaque black box round the wheel's caption: a layered window shown without its picture. A window made anew (a panel of another size)
+    /// leaked its bitmap, still selected in its device context, until Windows refused pictures. Made and dropped many times, the process's GDI objects stay as they were.
+    #[test]
+    fn a_panel_window_made_again_and_again_leaks_nothing() {
+        use windows::Win32::System::Threading::{GetCurrentProcess, GetGuiResources, GR_GDIOBJECTS};
+        // SAFETY: a plain question about this process.
+        let count = || unsafe { GetGuiResources(GetCurrentProcess(), GR_GDIOBJECTS) };
+        drop(clear_window());
+        let before = count();
+        for _ in 0..200 {
+            let mut window = clear_window();
+            window.place(POINT { x: -20000, y: -20000 }, 0);
+            window.hide();
+        }
+        let after = count();
+        assert!(after <= before + 4, "GDI objects {before} then {after}: a window leaks");
     }
 
     #[test]

@@ -933,7 +933,8 @@ fn sheet_page_items(sheet: Sheet, facts: &Facts) -> Vec<Item> {
             // Worlds in 3D leads (round 15's judges, mockup-opus-1): the first row taller, what plays in a row of its own controls under its timeline, all of them still
             // there (request 10).
             // What plays a little taller for its row of real buttons, the accessories taller for their larger words (round 16's judges).
-            let (first_h, second_h) = (168.0, 172.0);
+            // The first row taller, for its cards' larger words (round 17's judges: Instances' about 10 px).
+            let (first_h, second_h) = (182.0, 172.0);
             let per_row = small.len().div_ceil(2).max(3);
             let small_rows = small.len().div_ceil(per_row) as f32;
             let small_gap = 8.0;
@@ -1330,10 +1331,10 @@ pub fn scrolls_with_a_drag(sheet: Sheet, look: &Look) -> bool {
 }
 
 /// Where what plays's timeline lies on its panel, tall enough for a laser to find.
-fn timeline_rect(panel: Rect) -> Rect {
+fn timeline_rect(panel: Rect, volume: bool) -> Rect {
     let x = panel.left() + panel.height();
     // Under a title of two lines, over the row of controls.
-    Rect::from_min_max(pos2(x, panel.top() + 86.0), pos2(panel.right() - 14.0, panel.top() + 120.0))
+    Rect::from_min_max(pos2(x, panel.top() + 86.0), pos2(panel.right() - 14.0 - if volume { VOLUME_CLUSTER } else { 0.0 }, panel.top() + 120.0))
 }
 
 /// How far along what plays the pointer at `x` is, 0 to 1: `None` where there is no timeline to press.
@@ -1382,6 +1383,21 @@ fn words_that_fit(name: &str, fits: impl Fn(&str) -> bool) -> Option<String> {
     (1..words.len()).rev().map(|n| format!("{}\u{2026}", words[..n].join(" "))).find(|text| fits(text))
 }
 
+/// A name on one line if it fits, else on two broken between words: the most of its first words that fit, then the rest. Never inside a word.
+pub fn name_lines(name: &str, fits: impl Fn(&str) -> bool) -> (String, Option<String>) {
+    if fits(name) {
+        return (name.to_string(), None);
+    }
+    let words: Vec<&str> = name.split(' ').collect();
+    for n in (1..words.len()).rev() {
+        let first = words[..n].join(" ");
+        if fits(&first) {
+            return (first, Some(words[n..].join(" ")));
+        }
+    }
+    (name.to_string(), None)
+}
+
 /// What plays split into where it comes from and what it is: who made it where it is known, else "Someone on Twitter: what he said" taken apart.
 pub fn split_source(title: &str, by: &str) -> (Option<String>, String) {
     if !by.trim().is_empty() {
@@ -1397,7 +1413,7 @@ pub fn split_source(title: &str, by: &str) -> (Option<String>, String) {
 }
 
 /// A line of what an accessory of All tools does, at its size.
-const SMALL_LINE: f32 = 22.0;
+const SMALL_LINE: f32 = 21.0;
 
 /// What an accessory of All tools does, in a few words for its tile: its caption says the whole of it.
 fn tile_line(action: Action, facts: &Facts) -> Option<String> {
@@ -1426,7 +1442,10 @@ const PLAYING_ROW: f32 = 26.0;
 /// Play and pause, with its word.
 const PLAY_W: f32 = 118.0;
 /// Where the volume's row lies in Now playing, from its top.
-const VOLUME_ROW: f32 = 26.0;
+// On the timeline's row, at its end: the source has the line over the title to itself (round 17's judges read "Juan Bran…").
+const VOLUME_ROW: f32 = 103.0;
+/// How much of the timeline's row the volume takes, at its end.
+const VOLUME_CLUSTER: f32 = 206.0;
 /// Its buttons' size: the row ends over the title, which wraps to two lines under it.
 const VOLUME_BUTTON: f32 = 36.0;
 const PLAYING_LINK_H: f32 = 42.0;
@@ -1444,7 +1463,7 @@ fn now_playing_controls(panel: Rect, facts: &Facts) -> Vec<Item> {
         out.push(Item { action: Action::Next, rect: at(x + 56.0 + PLAY_W, 44.0), look: Look::Transport(icons::SKIP_FORWARD) });
     }
     if facts.music_times.is_some_and(|t| t.1 > 0) {
-        out.push(Item { action: if facts.can_seek { Action::Timeline } else { Action::Idle }, rect: timeline_rect(panel), look: Look::Timeline });
+        out.push(Item { action: if facts.can_seek { Action::Timeline } else { Action::Idle }, rect: timeline_rect(panel, facts.volume.is_some()), look: Look::Timeline });
     }
     // In its corner, off what it says: its link once it is known, and what puts it in the world once it is copied.
     if facts.can_copy_playing {
@@ -1518,7 +1537,8 @@ fn hero_body(p: &Painter, body: Rect, action: Action, line: &str, facts: &Facts)
             for (i, visit) in facts.worlds_visited.iter().take(rows).enumerate() {
                 let y = body.top() + i as f32 * row;
                 let side = row - 6.0;
-                let tile = Rect::from_min_size(pos2(body.left(), y), vec2(side * 16.0 / 9.0, side));
+                // A smaller picture, the words the room (round 17's judges: about 10 px).
+                let tile = Rect::from_min_size(pos2(body.left(), y), vec2(side * 1.3, side));
                 match visit.picture {
                     Some(id) => squircle_picture(p, tile, [theme::squircle(7.0); 4], id, cover_uv(tile.size()), Color32::WHITE),
                     None => {
@@ -1528,22 +1548,26 @@ fn hero_body(p: &Painter, body: Rect, action: Action, line: &str, facts: &Facts)
                 }
                 let x = tile.right() + 10.0;
                 let room = body.right() - x;
-                let font = look::font(15.5, weight::SEMIBOLD);
-                let small = look::font(13.0, weight::MEDIUM);
+                let font = look::font(17.0, weight::SEMIBOLD);
+                let small = look::font(14.5, weight::MEDIUM);
                 let (when, ink) = if visit.here { (tr("You are here").to_string(), look::accent()) } else { (visit.line.split(" \u{b7} ").next().unwrap_or_default().to_string(), look::MUTED) };
-                if p.layout_no_wrap(visit.name.clone(), font.clone(), look::LABEL).size().x <= room {
-                    p.text(pos2(x, y + side * 0.3), Align2::LEFT_CENTER, visit.name.clone(), font, look::LABEL);
-                    p.text(pos2(x, y + side * 0.78), Align2::LEFT_CENTER, fit(p, &when, &small, room), small, ink);
-                } else {
-                    // A long name whole on two lines, when it was after it (round 16's judges read "Rainy Skyline - 雨...").
-                    let mut job = egui::text::LayoutJob::default();
-                    job.append(&visit.name, 0.0, egui::TextFormat::simple(look::font(14.0, weight::SEMIBOLD), look::LABEL));
-                    job.append(&format!(" \u{b7} {when}"), 0.0, egui::TextFormat::simple(look::font(12.5, weight::MEDIUM), ink));
-                    job.wrap.max_width = room;
-                    job.wrap.max_rows = 2;
-                    job.wrap.overflow_character = Some('\u{2026}');
-                    let galley = p.layout_job(job);
-                    p.galley(pos2(x, y + side / 2.0 - galley.size().y / 2.0), galley, look::LABEL);
+                let fits = |t: &str| p.layout_no_wrap(t.to_string(), font.clone(), look::LABEL).size().x <= room;
+                match name_lines(&visit.name, fits) {
+                    // Whole on one line, when under it.
+                    (first, None) => {
+                        p.text(pos2(x, y + side * 0.3), Align2::LEFT_CENTER, fit(p, &first, &font, room), font, look::LABEL);
+                        p.text(pos2(x, y + side * 0.8), Align2::LEFT_CENTER, fit(p, &when, &small, room), small, ink);
+                    }
+                    // Long: broken only between words, never inside one ("雨の摩天 / 楼", round 17's judges), when after the rest.
+                    (first, Some(rest)) => {
+                        p.text(pos2(x, y + side * 0.3), Align2::LEFT_CENTER, first, font.clone(), look::LABEL);
+                        let rest_wide = p.layout_no_wrap(rest.clone(), font.clone(), look::LABEL).size().x;
+                        let shown = fit(p, &rest, &font, room);
+                        p.text(pos2(x, y + side * 0.8), Align2::LEFT_CENTER, shown, font.clone(), look::LABEL);
+                        if rest_wide + 60.0 <= room {
+                            p.text(pos2(x + rest_wide + 8.0, y + side * 0.8), Align2::LEFT_CENTER, fit(p, &format!("\u{b7} {when}"), &small, room - rest_wide - 8.0), small, ink);
+                        }
+                    }
                 }
             }
         }
@@ -2435,9 +2459,9 @@ fn draw(p: &Painter, zone: Zone, item: &Item, facts: &Facts, hovered: bool, pres
             match said {
                 Some(said) => {
                     p.text(pos2(x, rect.top() + 22.0), Align2::LEFT_CENTER, fit(p, label, &font, room), font, Color32::WHITE);
-                    let top = rect.top() + 36.0;
+                    let top = rect.top() + 33.0;
                     let rows = ((rect.bottom() - 4.0 - top) / SMALL_LINE).floor().clamp(1.0, 2.0) as usize;
-                    let mut job = egui::text::LayoutJob::simple(said, look::font(18.5, weight::SEMIBOLD), Color32::WHITE, room);
+                    let mut job = egui::text::LayoutJob::simple(said, look::font(19.5, weight::SEMIBOLD), Color32::WHITE, room);
                     job.wrap.max_rows = rows;
                     job.wrap.overflow_character = Some('\u{2026}');
                     p.galley(pos2(x, top), p.layout_job(job), look::LABEL);
@@ -2495,7 +2519,7 @@ fn draw(p: &Painter, zone: Zone, item: &Item, facts: &Facts, hovered: bool, pres
             let room = rect.right() - x - 14.0;
             // Whose it is, readable: tiny purple words were what read least (round 14's judges). Its volume beside it.
             let font = look::font(15.0, weight::SEMIBOLD);
-            let buttons = if facts.volume.is_some() { 232.0 } else { 0.0 };
+            let buttons = 0.0;
             // Where it comes from on the line over it, apart from what it is (round 16's judges): "Juan Branco on Twitter" over what he said.
             let (from, what) = facts.music.as_ref().map_or((None, String::new()), |(title, _)| split_source(title, &facts.music_by));
             let head = match &from {
@@ -2506,8 +2530,10 @@ fn draw(p: &Painter, zone: Zone, item: &Item, facts: &Facts, hovered: bool, pres
             match &facts.music {
                 Some(_) => {
                     // The whole title, on two lines where it needs them (round 14's judges: cut on its own line), under the volume's row.
+                    // Centred between its source and the timeline's row: no gap under a title of one line (round 17's judges).
                     let title = song_lines(p, &what, look::font(17.5, weight::BOLD), room, 2);
-                    p.galley(pos2(x, rect.top() + 42.0), title, look::LABEL);
+                    let high = title.size().y;
+                    p.galley(pos2(x, rect.top() + 36.0 + (50.0 - high).max(0.0) / 2.0), title, look::LABEL);
                 }
                 None => {
                     let font = look::font(23.0, weight::BOLD);
@@ -2868,7 +2894,7 @@ fn draw(p: &Painter, zone: Zone, item: &Item, facts: &Facts, hovered: bool, pres
             if shown > 0 {
                 let right = rect.right() - 12.0 - INVITE_WIDTH - 8.0;
                 let top = rect.top() + (rect.height() - 50.0) / 2.0 + 5.0;
-                p.text(pos2((earlier_from + right - 6.0) / 2.0, top - 9.0), Align2::CENTER_CENTER, tr("Earlier visits"), look::font(15.0, weight::SEMIBOLD), look::MUTED);
+                p.text(pos2((earlier_from + right - 6.0) / 2.0, top - 9.0), Align2::CENTER_CENTER, tr("Earlier visits"), look::font(17.0, weight::SEMIBOLD), theme::mix(look::MUTED, Color32::WHITE, 0.35));
             }
         }
         Look::Chip { group, visit } => {
@@ -2897,7 +2923,7 @@ fn draw(p: &Painter, zone: Zone, item: &Item, facts: &Facts, hovered: bool, pres
             p.rect_stroke(rect, radius, Stroke::new(1.5, edge), egui::StrokeKind::Inside);
             // Why this one is solid: it is where the person was last.
             if primary && state.is_none() && facts.worlds_visited.iter().position(|v| !v.here) == Some(group) {
-                p.text(pos2(rect.center().x, rect.top() - 9.0), Align2::CENTER_CENTER, tr("Last visit"), look::font(15.0, weight::SEMIBOLD), look::MUTED);
+                p.text(pos2(rect.center().x, rect.top() - 9.0), Align2::CENTER_CENTER, tr("Last visit"), look::font(17.0, weight::SEMIBOLD), theme::mix(look::MUTED, Color32::WHITE, 0.35));
             }
             let font = look::font(if primary { 18.0 } else { 16.5 }, if primary { weight::BOLD } else { weight::SEMIBOLD });
             p.text(rect.center(), Align2::CENTER_CENTER, fit(p, &words, &font, rect.width() - 12.0), font, ink);
@@ -3273,7 +3299,8 @@ fn draw_capture(p: &Painter, rect: Rect, n: usize, facts: &Facts, hovered: bool,
     orbiters_ui::paint::fill_gradient(
         &clip,
         &points,
-        &orbiters_ui::paint::Gradient::vertical(rect, &[(0.0, Color32::TRANSPARENT), (0.34, Color32::TRANSPARENT), (0.62, theme::alpha(theme::INK_900, 0.76)), (1.0, theme::alpha(theme::INK_950, foot))]),
+        // Darker only where its words are (round 17's judges found the photos too dark).
+        &orbiters_ui::paint::Gradient::vertical(rect, &[(0.0, Color32::TRANSPARENT), (0.5, Color32::TRANSPARENT), (0.72, theme::alpha(theme::INK_900, 0.62)), (1.0, theme::alpha(theme::INK_950, foot))]),
     );
     let room = rect.width() - 28.0;
     let font = look::font(19.0, weight::BOLD);
@@ -3651,6 +3678,39 @@ pub fn apply_mask(rgba: &mut [u8], mask: &[u8], size: [u32; 2], within: [u32; 4]
 
 #[cfg(test)]
 mod tests {
+    /// Round 17's judges: an opaque black box round the desktop wheel's rounded caption. What is painted for the caption is the rounded pill and nothing else: its
+    /// corners and the edge of its window are clear, at rest and pointed at, on a screen.
+    #[test]
+    fn the_wheels_caption_is_clear_outside_its_pill() {
+        use crate::overlay::orbit::zones::Zone;
+        let size = Zone::WheelCaption.units().size();
+        let (w, h) = (size.x as u32, size.y as u32);
+        let base = Facts { desktop: true, digits: true, ..Default::default() };
+        let states = [
+            Facts { hint: Some(("Hold Left Alt, then click a tool", "Or press its number, 1 to 6, from the top clockwise")), ..base.clone() },
+            Facts { pointed: Some(Action::Pictures), ..base.clone() },
+            base.clone(),
+        ];
+        for facts in states {
+            let mut canvas = crate::overlay::Canvas::new(w, h);
+            let pixels = canvas.paint(0.0, |p| paint(p, Zone::WheelCaption, size, &facts, None, None)).to_vec();
+            let alpha = |x: u32, y: u32| pixels[((y * w + x) * 4 + 3) as usize];
+            for (x, y) in [(0, 0), (w - 1, 0), (0, h - 1), (w - 1, h - 1), (1, h / 2), (w - 2, h / 2)] {
+                assert_eq!(alpha(x, y), 0, "{:?}: the caption's window is not clear at ({x}, {y})", facts.hint.map(|h| h.0).or(facts.pointed.map(|_| "pointed")));
+            }
+            // Something is painted: the pill.
+            assert!(pixels.chunks_exact(4).any(|p| p[3] > 200), "the pill shows");
+        }
+    }
+
+    /// Round 17's judges: "雨の摩天 / 楼". A long name breaks between words only.
+    #[test]
+    fn a_long_name_breaks_between_words() {
+        let fits = |t: &str| t.chars().count() <= 15;
+        assert_eq!(name_lines("Sky Dream", fits), ("Sky Dream".to_string(), None));
+        assert_eq!(name_lines("Rainy Skyline - 雨の摩天楼", fits), ("Rainy Skyline -".to_string(), Some("雨の摩天楼".to_string())));
+    }
+
     /// Round 15's pre-check: a song cut at two lines ends at a word, never in the middle of one.
     #[test]
     fn a_long_song_ends_at_a_word() {

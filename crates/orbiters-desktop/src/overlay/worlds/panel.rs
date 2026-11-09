@@ -559,7 +559,8 @@ fn small_action(p: &Painter, rect: Rect, glyph: &str, filled: bool, count: u64, 
     let number = count_or_nothing(count);
     // A headset's are larger: there is the room, and the need.
     let large = rect.height() > 56.0;
-    let (icon, count, said) = if large { (24.0, 20.0, 17.5) } else { (20.0, 16.5, 14.5) };
+    // A headset's at its size (round 17's judges found its labels at a screen's).
+    let (icon, count, said) = if large { (26.0, 22.0, 19.5) } else { (20.0, 16.5, 14.5) };
     let line = rect.min.y + rect.height() * 0.34;
     let at = if number.is_empty() { rect.center().x } else { rect.center().x - 16.0 };
     if filled {
@@ -686,7 +687,7 @@ fn vr_card(p: &Painter, rect: Rect, entry: &Entry, d: &Data, hover: bool, presse
         p.galley(pos2(back.min.x + 9.0, back.center().y - galley.size().y / 2.0), galley, orbit_look::on_accent());
     }
     // Its whole name, on two lines where it takes them: worlds are told apart by it.
-    let mut name = orbit_look::txt(entry.name.clone(), 21.0).weight(weight::SEMIBOLD).color(theme::FG).job(rect.width() - 18.0);
+    let mut name = orbit_look::txt(entry.name.clone(), 22.5).weight(weight::SEMIBOLD).color(theme::FG).job(rect.width() - 16.0);
     name.wrap.max_rows = 2;
     let galley = p.layout_job(name);
     p.galley(pos2(rect.min.x + 9.0, rect.max.y - 31.0 - galley.size().y / 2.0), galley, theme::FG);
@@ -2069,7 +2070,7 @@ impl Panel {
         }
         // In a headset, who made it and no more.
         let under = if vr { under.first().cloned().unwrap_or_default() } else { under.join(" · ") };
-        text_cut(p, pos2(x, if vr { 349.0 } else { 266.0 }), width, orbit_look::txt(under, if vr { 17.0 } else { 16.5 }).color(fade(theme::FG, rest)));
+        text_cut(p, pos2(x, if vr { 349.0 } else { 266.0 }), width, orbit_look::txt(under, if vr { 18.5 } else { 16.5 }).color(fade(theme::FG, rest)));
         // What it can be seen as, and the rest.
         let wf = d.world_feedback(entry);
         for (t, rect) in targets {

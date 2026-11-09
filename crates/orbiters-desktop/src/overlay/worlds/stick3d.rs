@@ -40,6 +40,8 @@ struct Part {
     colour: [f32; 3],
     solid: f32,
     glow: f32,
+    /// What `flat` squashes along: the housing's up, or the stem's, so the cap tilts with it (round 16's judges saw no tilt: every part was flat along the room's up).
+    axis: V3,
 }
 
 /// How much the whole leans towards who looks, as a stick seen from a little above: at eye level its push would be lost.
@@ -63,29 +65,37 @@ fn parts(push: f32, accent: [f32; 3]) -> Vec<Part> {
 }
 
 fn parts_of(push: f32, accent: [f32; 3]) -> Vec<Part> {
-    const BODY: [f32; 3] = [0.56, 0.61, 0.70];
+    // A controller's thumbstick (round 16's judges, all four; mockup-astra-2, mockup-sol-2): a compact housing with a dark well, a domed rubber boot in it,
+    // a short stem hardly seen, and a wide dished cap close over the boot, tilting with the push. Glass over any world, with no frame.
+    const HOUSING: [f32; 3] = [0.50, 0.55, 0.64];
+    const WELL: [f32; 3] = [0.22, 0.25, 0.31];
+    const BOOT: [f32; 3] = [0.64, 0.68, 0.76];
     const LIGHT: [f32; 3] = [0.84, 0.88, 0.94];
+    const DISH: [f32; 3] = [0.36, 0.40, 0.48];
     // As far as a thumb really pushes one, and a little more, to be seen.
     let tilt = push * 0.95;
     let (s, c) = tilt.sin_cos();
-    const FOOT: f32 = -0.03;
-    // A controller's thumbstick, as round 12's judges asked of what read as a mushroom: a short shaft, a dished cap with a rim, a ring round its opening.
-    const SHAFT: f32 = 0.034;
-    let up = |height: f32| leaned([0.0, FOOT + height * c, -height * s]);
+    const FOOT: f32 = -0.026;
+    let up = leaned([0.0, 1.0, 0.0]);
+    let stem_axis = leaned([0.0, c, -s]);
     let base = leaned([0.0, FOOT, 0.0]);
-    let cap = up(SHAFT);
+    let along = |height: f32| stereo::add(base, stereo::scale(stem_axis, height));
+    let above = |height: f32| stereo::add(base, stereo::scale(up, height));
     let pushed = push.abs().clamp(0.0, 1.0);
-    let cap_colour: [f32; 3] = std::array::from_fn(|i| LIGHT[i] + (accent[i] - LIGHT[i]) * pushed * 0.8);
-    // Solid parts only: rings of short pieces read as beads (round 13's judges). A controller's stick: a dark housing, a domed boot round the stem's foot, a short
-    // stem, a wide cap with a darker dish in its top.
-    let top = up(SHAFT);
-    let dish = up(SHAFT + 0.0045);
+    let cap_colour: [f32; 3] = std::array::from_fn(|i| LIGHT[i] + (accent[i] - LIGHT[i]) * (0.55 + 0.35 * pushed));
+    let part = |a: V3, b: V3, radius: f32, flat: f32, colour: [f32; 3], solid: f32, glow: f32, axis: V3| Part { a, b, radius, flat, colour, solid, glow, axis };
     let out = vec![
-        Part { a: base, b: base, radius: 0.037, flat: 0.12, colour: BODY, solid: 0.55, glow: 0.0 },
-        Part { a: base, b: base, radius: 0.019, flat: 0.55, colour: LIGHT, solid: 0.62, glow: 0.0 },
-        Part { a: base, b: cap, radius: 0.0065, flat: 1.0, colour: LIGHT, solid: 0.72, glow: 0.0 },
-        Part { a: top, b: top, radius: 0.0205, flat: 0.32, colour: cap_colour, solid: 0.8, glow: 0.1 + 0.15 * pushed },
-        Part { a: dish, b: dish, radius: 0.0135, flat: 0.18, colour: BODY, solid: 0.7, glow: 0.0 },
+        // The housing: a compact ring, its well darker inside.
+        part(base, base, 0.026, 0.14, HOUSING, 0.5, 0.0, up),
+        part(above(0.0012), above(0.0012), 0.021, 0.12, WELL, 0.62, 0.0, up),
+        // The domed rubber boot round the stem's foot.
+        part(above(0.002), above(0.002), 0.0145, 0.62, BOOT, 0.6, 0.0, up),
+        // The stem, short.
+        // The stem shows between the boot and the cap, as on mockup-sol-2.
+        part(base, along(0.024), 0.0052, 1.0, LIGHT, 0.72, 0.0, stem_axis),
+        // The cap, wide and close over the boot, its dish darker: both tilt with the stem.
+        part(along(0.027), along(0.027), 0.017, 0.36, cap_colour, 0.82, 0.12 + 0.18 * pushed, stem_axis),
+        part(along(0.0328), along(0.0328), 0.0112, 0.15, DISH, 0.78, 0.0, stem_axis),
     ];
     out
 }
@@ -101,7 +111,8 @@ const LIGHT_FROM: V3 = [-0.42, 0.79, 0.45];
 
 /// Where along a ray a part is hit, and how much of a pixel it covers, and its colour there: premultiplied, with how solid.
 fn hit(part: &Part, from: V3, along: V3, pixel: f32) -> Option<(f32, [f32; 3], f32)> {
-    let squash = |p: V3| [p[0], p[1] / part.flat, p[2]];
+    let k = part.axis;
+    let squash = |p: V3| stereo::add(p, stereo::scale(k, stereo::dot(p, k) * (1.0 / part.flat - 1.0)));
     let (o, a, b) = (squash(from), squash(part.a), squash(part.b));
     let stretched = squash(along);
     let scale = stereo::length(stretched);
@@ -124,7 +135,7 @@ fn hit(part: &Part, from: V3, along: V3, pixel: f32) -> Option<(f32, [f32; 3], f
     let t = t_near - back;
     let at = stereo::add(o, stereo::scale(d, t));
     let out = stereo::sub(at, q);
-    let n = [out[0], out[1] * part.flat, out[2]];
+    let n = stereo::add(out, stereo::scale(k, stereo::dot(out, k) * (part.flat - 1.0)));
     let n = stereo::scale(n, 1.0 / stereo::length(n).max(1e-6));
     let view = stereo::scale(along, -1.0 / stereo::length(along));
     let light = stereo::scale(LIGHT_FROM, 1.0 / stereo::length(LIGHT_FROM));

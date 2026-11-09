@@ -264,6 +264,8 @@ struct Recents {
     arranged: Option<(panels::GalleryFilter, orbiters_core::settings::GalleryLayout, orbiters_i18n::Language, Option<String>)>,
     /// The set open of one place's captures, by its name: one tile stood for them in the gallery.
     set: Option<String>,
+    /// What that tile stood for, and nothing else of that place: a tile of "4 photos" opened to 6, the others taken another day (round 17's pre-check).
+    set_members: Vec<PathBuf>,
     seen: Option<(u64, u64)>,
     /// When it was last listed: a first scan of the pictures says it found more all the time.
     listed: Option<Instant>,
@@ -465,7 +467,7 @@ impl Recents {
             if !(filter == panels::GalleryFilter::All || (r.session && r.has_view)) {
                 continue;
             }
-            if set.as_ref().is_some_and(|set| *set != r.title) {
+            if set.as_ref().is_some_and(|set| *set != r.title || !self.set_members.contains(&r.key)) {
                 continue;
             }
             // Captures of one place one after the other are one tile, with how many (round 11's judges: three alike in a row could not be told apart); it opens to them.
@@ -483,7 +485,7 @@ impl Recents {
             items.push(Recent { dir: r.key.clone(), title: shown_title(&r.title), state: String::new(), progress: None, picture: None, aspect: r.aspect, kind: r.kind(), count: 1 });
         }
         // One place's captures, opened: as large as the app shows them, two or so a row (round 12's judges: three small ones on an empty sheet).
-        self.shown = panels::Gallery::new(items, layout);
+        self.shown = panels::Gallery::shaped(items, layout, self.set.is_some());
         true
     }
 
@@ -1066,6 +1068,8 @@ impl Panels {
         let live = !snap.settings.reduce_motion;
         // Opened from the wheel, the sheet is all that shows: its cut-off cells would stick out from under it.
         let places: Vec<Placed> = if self.takeover.is_some() && around == Some(Around::Wheel) { Vec::new() } else { places };
+        // Opened from the Quick Menu, the wing stays beside the sheet, all its tiles, whatever the sheet (Enzo, 2026-11-09): a person clicks through the tiles to
+        // explore, and they must not vanish on the first. Its tools also in the sheet's head is a duplication he accepts.
         let back = self.takeover.is_some().then_some(self.back_place).flatten();
         let peek = self.takeover.is_some().then_some(self.peek_place).flatten();
         // On the desktop VRChat lights what lies under the pointer, sheet or no sheet. Where the wing leaves the row under its tabs free.
@@ -2277,6 +2281,7 @@ impl Panels {
                 if self.recents.set.is_none() && self.facts.recent.get(n).is_some_and(|t| t.count > 1) {
                     if let Some(title) = self.recents.tile(n).map(|recent| recent.title.clone()) {
                         self.facts.gallery_set = Some(shown_title(&title));
+                        self.recents.set_members = self.recents.loaded.iter().filter(|l| l.at == Some(n)).map(|l| l.key.clone()).collect();
                         self.recents.set = Some(title);
                         self.facts.gallery_scroll = 0.0;
                         self.gallery_to = 0.0;

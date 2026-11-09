@@ -525,7 +525,8 @@ const SIDE_RIGHT: f32 = 1000.0;
 /// Its picture; where a capture standing small is seen through it.
 pub const SIDE_HERO: Rect = Rect { min: Pos2 { x: SIDE_LEFT, y: 24.0 }, max: Pos2 { x: SIDE_RIGHT, y: 206.0 } };
 /// Hides it: a tab on its edge, far from the sheet's own X.
-const SIDE_CLOSE: Rect = Rect { min: Pos2 { x: 948.0, y: 32.0 }, max: Pos2 { x: 992.0, y: 76.0 } };
+/// Its close says what it does: a chevron alone on the picture read as "next picture" (round 13's to 16's judges).
+const SIDE_CLOSE: Rect = Rect { min: Pos2 { x: 836.0, y: 32.0 }, max: Pos2 { x: 992.0, y: 72.0 } };
 const SMALL_BACK: Rect = Rect { min: Pos2 { x: 862.0, y: 162.0 }, max: Pos2 { x: 992.0, y: 198.0 } };
 /// What to do with it first; then going there; then its four small tiles.
 const SHOW: Rect = Rect { min: Pos2 { x: SIDE_LEFT, y: 296.0 }, max: Pos2 { x: 835.0, y: 340.0 } };
@@ -2033,8 +2034,12 @@ impl Panel {
         if !vr {
             let (h, pr) = state(Target::CloseSide);
             let tab = if pr { SIDE_CLOSE.shrink(1.0) } else { SIDE_CLOSE };
-            p.circle_filled(tab.center(), tab.width() / 2.0, if h { theme::black(0.92) } else { theme::black(0.72) });
-            widgets::icon(p, tab.center(), icons::CARET_RIGHT, 22.0, theme::FG);
+            p.rect_filled(tab, CornerRadius::same((tab.height() / 2.0) as u8), if h { theme::black(0.92) } else { theme::black(0.76) });
+            let galley = p.layout_job(orbit_look::txt(tr("Hide details"), 15.5).weight(weight::SEMIBOLD).color(theme::FG).job(tab.width() - 44.0));
+            let wide = galley.size().x + 26.0;
+            let from = tab.center().x - wide / 2.0;
+            p.galley(pos2(from, tab.center().y - galley.size().y / 2.0), galley, theme::FG);
+            widgets::icon(p, pos2(from + wide - 9.0, tab.center().y), icons::CARET_RIGHT, 18.0, theme::FG);
         }
         // Its name, as long as it is; who made it.
         let (x, width) = if vr { (VR_LEFT, SIDE_RIGHT - VR_LEFT) } else { (SIDE_LEFT, SIDE_RIGHT - SIDE_LEFT) };

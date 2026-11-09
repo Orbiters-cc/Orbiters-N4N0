@@ -101,7 +101,24 @@ fn saved_looks_with_real_looks_answers() {
             assert!(waited.elapsed() < orbiters_n4n0_core::menu::POP * 3, "{look:?}: the pop never ends");
             std::thread::sleep(Duration::from_millis(5));
         }
-        person.turns(40);
+        // What runs on the clock (a part coming in, a fade) ends in its own time, not in a number of turns: under load 40 turns ran before it had, and painted
+        // (dev.29's test run failed here). Turned until three turns in a row paint nothing, with a deadline far past any of them; a part that never comes to rest
+        // still fails here.
+        let quiet_turn = |person: &mut Person| {
+            let mut painted = 0;
+            person.panels.follow(&person.snap, 0);
+            person.panels.menu_turn(&person.snap);
+            person.panels.step_springs(0.011);
+            person.panels.paint(&person.snap, |_, _| painted += 1);
+            painted == 0
+        };
+        let settling = Instant::now();
+        let mut quiet = 0;
+        while quiet < 3 {
+            quiet = if quiet_turn(&mut person) { quiet + 1 } else { 0 };
+            assert!(settling.elapsed() < Duration::from_secs(10), "{look:?}: it never comes to rest");
+            std::thread::sleep(Duration::from_millis(10));
+        }
         let mut painted = 0;
         for _ in 0..10 {
             person.panels.follow(&person.snap, 0);

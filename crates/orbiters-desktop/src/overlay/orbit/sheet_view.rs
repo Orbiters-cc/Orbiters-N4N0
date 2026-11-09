@@ -216,6 +216,38 @@ impl Default for Fit {
 /// How much of the frame a capture fills, in its larger direction.
 const FILLS: f32 = 0.8;
 
+/// How bright what shows is brought to, at most, on average: a night capture stood dim on a flat stage (round 16's judges).
+const LIFT_TO: f32 = 0.4;
+
+/// A table that lifts a dark picture's middle tones toward [`LIFT_TO`], from what its first picture shows; none for one bright enough.
+fn lift_table(rgba: &[u8]) -> Option<[u8; 256]> {
+    let (mut sum, mut n) = (0.0f64, 0u64);
+    for px in rgba.chunks_exact(4).filter(|px| px[3] > 200) {
+        sum += (0.2126 * px[0] as f64 + 0.7152 * px[1] as f64 + 0.0722 * px[2] as f64) / 255.0;
+        n += 1;
+    }
+    let mean = (sum / n.max(1) as f64) as f32;
+    if n == 0 || mean >= LIFT_TO || mean <= 0.01 {
+        return None;
+    }
+    let gamma = (LIFT_TO.ln() / mean.ln()).clamp(0.5, 1.0);
+    Some(std::array::from_fn(|v| ((v as f32 / 255.0).powf(gamma) * 255.0).round() as u8))
+}
+
+/// Lifts a premultiplied picture by `table`.
+fn lift(rgba: &mut [u8], table: &[u8; 256]) {
+    for px in rgba.chunks_exact_mut(4) {
+        let a = px[3] as u32;
+        if a == 0 {
+            continue;
+        }
+        for c in &mut px[..3] {
+            let straight = ((*c as u32 * 255 + a / 2) / a).min(255) as usize;
+            *c = ((table[straight] as u32 * a + 127) / 255) as u8;
+        }
+    }
+}
+
 impl Fit {
     /// From a first picture at this fit: nearer, and centred, so that what shows fills [`FILLS`] of the frame. Never further than it was.
     fn from_picture(self, rgba: &[u8], size: [u32; 2]) -> Self {
@@ -287,6 +319,7 @@ fn run(shared: &Shared, load: impl FnOnce() -> anyhow::Result<Capture>, turning:
     let middle = capture.view.eye();
     let (mut size, mut drawn, mut last, mut smooth_ms, mut swaying) = (START_SIZE.max(largest), None::<(Pose, usize)>, Instant::now(), 0.0f32, 0.0f32);
     let mut fit: Option<Fit> = None;
+    let mut lifted: Option<Option<[u8; 256]>> = None;
     while !shared.stop.load(Ordering::Relaxed) {
         // It turns by itself, unless a hand has it or just had it.
         let pose = {
@@ -307,11 +340,15 @@ fn run(shared: &Shared, load: impl FnOnce() -> anyhow::Result<Capture>, turning:
         let small = stands(&capture, &head, &start, pose, below, fit.unwrap_or_default());
         let camera = stereo::eye_camera(&head, [-TANGENT * aspect, TANGENT * aspect, -TANGENT, TANGENT], w, h, &small.placement(middle));
         let began = Instant::now();
-        let rgba = renderer.render_view(&camera, capture.within(small.reach()))?;
-        // The first picture says how much it fills: the next ones are nearer, centred, and that one is not shown.
+        let mut rgba = renderer.render_view(&camera, capture.within(small.reach()))?;
+        // The first picture says how much it fills and how bright it is: the next ones are nearer, centred, lifted, and that one is not shown.
         if fit.is_none() {
             fit = Some(Fit::default().from_picture(&rgba, [w, h]));
+            lifted = Some(lift_table(&rgba));
             continue;
+        }
+        if let Some(Some(table)) = &lifted {
+            lift(&mut rgba, table);
         }
         let ms = began.elapsed().as_secs_f32() * 1000.0;
         smooth_ms = if smooth_ms == 0.0 { ms } else { smooth_ms * 0.8 + ms * 0.2 };
@@ -348,6 +385,23 @@ fn pause_after(ms: f32) -> Duration {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Round 16's judges: a night capture stood dim. A dark one is lifted toward a middle brightness; a bright one is left as it is.
+    #[test]
+    fn a_dark_capture_is_lifted_and_a_bright_one_left() {
+        let dark: Vec<u8> = (0..400).flat_map(|_| [40u8, 40, 40, 255]).collect();
+        let table = lift_table(&dark).expect("lifted");
+        let mut picture = dark.clone();
+        lift(&mut picture, &table);
+        assert!(picture[0] > 60 && picture[3] == 255, "{}", picture[0]);
+        let bright: Vec<u8> = (0..400).flat_map(|_| [200u8, 200, 200, 255]).collect();
+        assert!(lift_table(&bright).is_none());
+        // Half see-through stays as see-through, its colour lifted alike.
+        let mut half = vec![20u8, 20, 20, 128];
+        lift(&mut half, &table);
+        assert_eq!(half[3], 128);
+        assert!(half[0] > 20);
+    }
 
     /// Round 15's judges: a tall capture stood small in a large stage. From its first picture it comes nearer, centred, to fill about 80% of the frame.
     #[test]

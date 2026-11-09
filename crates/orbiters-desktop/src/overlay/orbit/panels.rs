@@ -621,6 +621,8 @@ pub enum Look {
     Step(bool),
     /// The capture opened, in Orbiters' own 3D viewer: the next step from its live 3D on the sheet.
     SeeInApp,
+    /// Now playing's play or pause, with its word.
+    PlayButton,
     /// A cell of the ring: its icon over its label.
     Cell { icon: &'static str, label: &'static str, badge: bool },
     /// A small heading over a group of a sheet's tiles.
@@ -930,7 +932,8 @@ fn sheet_page_items(sheet: Sheet, facts: &Facts) -> Vec<Item> {
             let small = accessories(facts);
             // Worlds in 3D leads (round 15's judges, mockup-opus-1): the first row taller, what plays in a row of its own controls under its timeline, all of them still
             // there (request 10).
-            let (first_h, second_h) = (184.0, 156.0);
+            // What plays a little taller for its row of real buttons, the accessories taller for their larger words (round 16's judges).
+            let (first_h, second_h) = (168.0, 172.0);
             let per_row = small.len().div_ceil(2).max(3);
             let small_rows = small.len().div_ceil(per_row) as f32;
             let small_gap = 8.0;
@@ -1330,7 +1333,7 @@ pub fn scrolls_with_a_drag(sheet: Sheet, look: &Look) -> bool {
 fn timeline_rect(panel: Rect) -> Rect {
     let x = panel.left() + panel.height();
     // Under a title of two lines, over the row of controls.
-    Rect::from_min_max(pos2(x, panel.top() + 82.0), pos2(panel.right() - 14.0, panel.top() + 116.0))
+    Rect::from_min_max(pos2(x, panel.top() + 86.0), pos2(panel.right() - 14.0, panel.top() + 120.0))
 }
 
 /// How far along what plays the pointer at `x` is, 0 to 1: `None` where there is no timeline to press.
@@ -1379,8 +1382,22 @@ fn words_that_fit(name: &str, fits: impl Fn(&str) -> bool) -> Option<String> {
     (1..words.len()).rev().map(|n| format!("{}\u{2026}", words[..n].join(" "))).find(|text| fits(text))
 }
 
+/// What plays split into where it comes from and what it is: who made it where it is known, else "Someone on Twitter: what he said" taken apart.
+pub fn split_source(title: &str, by: &str) -> (Option<String>, String) {
+    if !by.trim().is_empty() {
+        return (Some(by.trim().to_string()), title.to_string());
+    }
+    if let Some(i) = title.find(": ") {
+        let (from, rest) = (title[..i].trim(), title[i + 2..].trim());
+        if from.contains(" on ") && from.chars().count() <= 48 && !rest.is_empty() {
+            return (Some(from.to_string()), rest.trim_matches(['"', '\u{201c}', '\u{201d}']).to_string());
+        }
+    }
+    (None, title.to_string())
+}
+
 /// A line of what an accessory of All tools does, at its size.
-const SMALL_LINE: f32 = 21.5;
+const SMALL_LINE: f32 = 22.0;
 
 /// What an accessory of All tools does, in a few words for its tile: its caption says the whole of it.
 fn tile_line(action: Action, facts: &Facts) -> Option<String> {
@@ -1405,12 +1422,14 @@ fn tile_line(action: Action, facts: &Facts) -> Option<String> {
 
 const PLAYING_LINK_W: f32 = 138.0;
 /// Where Now playing's row of controls lies, from its foot.
-const PLAYING_ROW: f32 = 22.0;
+const PLAYING_ROW: f32 = 26.0;
+/// Play and pause, with its word.
+const PLAY_W: f32 = 118.0;
 /// Where the volume's row lies in Now playing, from its top.
 const VOLUME_ROW: f32 = 26.0;
 /// Its buttons' size: the row ends over the title, which wraps to two lines under it.
 const VOLUME_BUTTON: f32 = 36.0;
-const PLAYING_LINK_H: f32 = 36.0;
+const PLAYING_LINK_H: f32 = 42.0;
 
 fn now_playing_controls(panel: Rect, facts: &Facts) -> Vec<Item> {
     let mut out = Vec::new();
@@ -1419,10 +1438,10 @@ fn now_playing_controls(panel: Rect, facts: &Facts) -> Vec<Item> {
     let y = panel.bottom() - PLAYING_ROW;
     let at = |x: f32, side: f32| Rect::from_center_size(pos2(x + side / 2.0, y), Vec2::splat(side));
     if facts.music.is_some() {
-        let glyph = if facts.music.as_ref().is_some_and(|m| m.1) { icons::PAUSE } else { icons::PLAY };
-        out.push(Item { action: Action::Previous, rect: at(x, 36.0), look: Look::Transport(icons::SKIP_BACK) });
-        out.push(Item { action: Action::PlayPause, rect: at(x + 42.0, 40.0), look: Look::Transport(glyph) });
-        out.push(Item { action: Action::Next, rect: at(x + 88.0, 36.0), look: Look::Transport(icons::SKIP_FORWARD) });
+        // Real buttons, 44 tall, play and pause saying which it is (round 16's judges found small circles).
+        out.push(Item { action: Action::Previous, rect: at(x, 44.0), look: Look::Transport(icons::SKIP_BACK) });
+        out.push(Item { action: Action::PlayPause, rect: Rect::from_center_size(pos2(x + 50.0 + PLAY_W / 2.0, y), vec2(PLAY_W, 44.0)), look: Look::PlayButton });
+        out.push(Item { action: Action::Next, rect: at(x + 56.0 + PLAY_W, 44.0), look: Look::Transport(icons::SKIP_FORWARD) });
     }
     if facts.music_times.is_some_and(|t| t.1 > 0) {
         out.push(Item { action: if facts.can_seek { Action::Timeline } else { Action::Idle }, rect: timeline_rect(panel), look: Look::Timeline });
@@ -1510,10 +1529,22 @@ fn hero_body(p: &Painter, body: Rect, action: Action, line: &str, facts: &Facts)
                 let x = tile.right() + 10.0;
                 let room = body.right() - x;
                 let font = look::font(15.5, weight::SEMIBOLD);
-                p.text(pos2(x, y + side * 0.3), Align2::LEFT_CENTER, fit(p, &visit.name, &font, room), font, look::LABEL);
                 let small = look::font(13.0, weight::MEDIUM);
                 let (when, ink) = if visit.here { (tr("You are here").to_string(), look::accent()) } else { (visit.line.split(" \u{b7} ").next().unwrap_or_default().to_string(), look::MUTED) };
-                p.text(pos2(x, y + side * 0.78), Align2::LEFT_CENTER, fit(p, &when, &small, room), small, ink);
+                if p.layout_no_wrap(visit.name.clone(), font.clone(), look::LABEL).size().x <= room {
+                    p.text(pos2(x, y + side * 0.3), Align2::LEFT_CENTER, visit.name.clone(), font, look::LABEL);
+                    p.text(pos2(x, y + side * 0.78), Align2::LEFT_CENTER, fit(p, &when, &small, room), small, ink);
+                } else {
+                    // A long name whole on two lines, when it was after it (round 16's judges read "Rainy Skyline - 雨...").
+                    let mut job = egui::text::LayoutJob::default();
+                    job.append(&visit.name, 0.0, egui::TextFormat::simple(look::font(14.0, weight::SEMIBOLD), look::LABEL));
+                    job.append(&format!(" \u{b7} {when}"), 0.0, egui::TextFormat::simple(look::font(12.5, weight::MEDIUM), ink));
+                    job.wrap.max_width = room;
+                    job.wrap.max_rows = 2;
+                    job.wrap.overflow_character = Some('\u{2026}');
+                    let galley = p.layout_job(job);
+                    p.galley(pos2(x, y + side / 2.0 - galley.size().y / 2.0), galley, look::LABEL);
+                }
             }
         }
         Action::Pictures if facts.hero_picture.is_some() => {
@@ -1548,12 +1579,12 @@ fn hero_body(p: &Painter, body: Rect, action: Action, line: &str, facts: &Facts)
             match (&facts.world_video, facts.world_video_picture) {
                 (Some(title), Some(id)) => {
                     // Its picture small, its title beside it, never printed over it (round 15's judges).
-                    let side = room.height().min(64.0);
-                    let picture = Rect::from_min_size(pos2(room.left(), room.center().y - side / 2.0), vec2(side * 16.0 / 9.0, side).min(vec2(room.width() * 0.45, side)));
-                    squircle_picture(p, picture, [theme::squircle(8.0); 4], id, cover_uv(picture.size()), Color32::WHITE);
-                    let words = Rect::from_min_max(pos2(picture.right() + 10.0, room.top()), room.max);
-                    let mut job = egui::text::LayoutJob::simple(title.clone(), look::font(15.0, weight::SEMIBOLD), look::LABEL, words.width());
-                    job.wrap.max_rows = ((room.height() / 18.0).floor() as usize).clamp(1, 3);
+                    // Small, so its title has two lines of room beside it (round 16's judges).
+                    let picture = Rect::from_min_size(pos2(room.left(), room.center().y - 20.0), vec2(70.0, 40.0));
+                    squircle_picture(p, picture, [theme::squircle(7.0); 4], id, cover_uv(picture.size()), Color32::WHITE);
+                    let words = Rect::from_min_max(pos2(picture.right() + 9.0, room.top()), room.max);
+                    let mut job = egui::text::LayoutJob::simple(title.clone(), look::font(15.5, weight::SEMIBOLD), look::LABEL, words.width());
+                    job.wrap.max_rows = 2;
                     job.wrap.overflow_character = Some('\u{2026}');
                     let galley = p.layout_job(job);
                     p.galley(pos2(words.left(), room.center().y - galley.size().y / 2.0), galley, look::LABEL);
@@ -1800,13 +1831,15 @@ fn shaped(zone: Zone, rect: Rect) -> Shaped {
 }
 
 /// How dark VRChat's wheel goes while Alt points at Orbiters' ring: its lit slice reads as dulled, not as chosen.
-const WHEEL_STEPPED_BACK: u8 = 196;
+// Lighter than at first: VRChat's cells stay recognisable under it, ours the only coloured one (round 16's judges).
+const WHEEL_STEPPED_BACK: u8 = 150;
 
 /// A cell of the ring: Orbiters' tile surface, as the wing's tiles and the sheets have it, nearly flat. Lit, it takes its own tool's colour: VRChat's wheel is
 /// dark teal segments with a teal rim, and a mint lit cell on a dark rim read as a second VRChat ring (round 14's judges). `lift` is how lit.
 fn ring_fill(p: &Painter, ring: Ring, center: Pos2, lift: f32, tint: Color32) {
     // Lit, a gradient of its colour, deep toward the wheel and fading outward (round 15's judges: not a flat solid fill).
-    let (near, far) = (theme::mix(look::CELL_NEAR, tint, lift * 0.42), theme::mix(look::CELL_FAR, tint, lift * 0.14));
+    // Its own colour truly, toward the wheel (round 16's judges: Pictures read brown, not amber).
+    let (near, far) = (theme::mix(look::CELL_NEAR, tint, lift * 0.62), theme::mix(look::CELL_FAR, tint, lift * 0.22));
     ring_mesh(p, ring, center, near, far);
     // A dark gutter along its inner edge, between it and VRChat's wheel.
     if !look::retro() {
@@ -2397,13 +2430,14 @@ fn draw(p: &Painter, zone: Zone, item: &Item, facts: &Facts, hovered: bool, pres
             let room = rect.right() - x - 10.0;
             // What it does in a few words, large enough to read at 1280 x 720 (round 10's judges: three lines at 14 were too small); the whole of it is in the caption when pointed.
             let said = tile_line(item.action, facts).or_else(|| caption(item.action, facts).map(|c| c.1)).filter(|_| room >= 140.0);
-            let font = look::font(19.0, weight::BOLD);
+            // At 1280 x 720 its name about 14.5 px and what it does about 12.7 (round 16's judges).
+            let font = look::font(21.5, weight::BOLD);
             match said {
                 Some(said) => {
-                    p.text(pos2(x, rect.top() + 21.0), Align2::LEFT_CENTER, fit(p, label, &font, room), font, Color32::WHITE);
-                    let top = rect.top() + 34.0;
-                    let rows = ((rect.bottom() - 4.0 - top) / SMALL_LINE).floor().max(1.0) as usize;
-                    let mut job = egui::text::LayoutJob::simple(said, look::font(18.0, weight::SEMIBOLD), Color32::WHITE, room);
+                    p.text(pos2(x, rect.top() + 22.0), Align2::LEFT_CENTER, fit(p, label, &font, room), font, Color32::WHITE);
+                    let top = rect.top() + 36.0;
+                    let rows = ((rect.bottom() - 4.0 - top) / SMALL_LINE).floor().clamp(1.0, 2.0) as usize;
+                    let mut job = egui::text::LayoutJob::simple(said, look::font(18.5, weight::SEMIBOLD), Color32::WHITE, room);
                     job.wrap.max_rows = rows;
                     job.wrap.overflow_character = Some('\u{2026}');
                     p.galley(pos2(x, top), p.layout_job(job), look::LABEL);
@@ -2462,23 +2496,18 @@ fn draw(p: &Painter, zone: Zone, item: &Item, facts: &Facts, hovered: bool, pres
             // Whose it is, readable: tiny purple words were what read least (round 14's judges). Its volume beside it.
             let font = look::font(15.0, weight::SEMIBOLD);
             let buttons = if facts.volume.is_some() { 232.0 } else { 0.0 };
-            p.text(pos2(x, rect.top() + 20.0), Align2::LEFT_CENTER, fit(p, tr("Now playing on this computer"), &font, room - buttons - 8.0), font, theme::mix(tint, Color32::WHITE, 0.6));
+            // Where it comes from on the line over it, apart from what it is (round 16's judges): "Juan Branco on Twitter" over what he said.
+            let (from, what) = facts.music.as_ref().map_or((None, String::new()), |(title, _)| split_source(title, &facts.music_by));
+            let head = match &from {
+                Some(from) => format!("{} \u{b7} {from}", tr("Now playing on this computer")),
+                None => tr("Now playing on this computer").to_string(),
+            };
+            p.text(pos2(x, rect.top() + 20.0), Align2::LEFT_CENTER, fit(p, &head, &font, room - buttons - 8.0), font, theme::mix(tint, Color32::WHITE, 0.6));
             match &facts.music {
-                Some((title, _)) => {
-                    // The whole title, on two lines where it needs them (round 14's judges: cut on its own line); who made it under it when it takes one.
-                    // Under the volume's row, never under its buttons.
-                    let mut job = egui::text::LayoutJob::simple(title.clone(), look::font(17.5, weight::BOLD), look::LABEL, room);
-                    job.wrap.max_rows = 2;
-                    job.wrap.overflow_character = Some('\u{2026}');
-                    let title = p.layout_job(job);
-                    let (rows, high) = (title.rows.len(), title.size().y);
-                    // Clear of the timeline's knob under it too (the live round 15 run saw it on the second line).
-                    let top = rect.top() + if facts.volume.is_some() { 40.0 } else { 34.0 };
-                    p.galley(pos2(x, top), title, look::LABEL);
-                    if rows < 2 {
-                        let font = look::font(15.5, weight::MEDIUM);
-                        p.text(pos2(x, top + high + 10.0), Align2::LEFT_CENTER, fit(p, &facts.music_by, &font, room), font, look::MUTED);
-                    }
+                Some(_) => {
+                    // The whole title, on two lines where it needs them (round 14's judges: cut on its own line), under the volume's row.
+                    let title = song_lines(p, &what, look::font(17.5, weight::BOLD), room, 2);
+                    p.galley(pos2(x, rect.top() + 42.0), title, look::LABEL);
                 }
                 None => {
                     let font = look::font(23.0, weight::BOLD);
@@ -3038,6 +3067,17 @@ fn draw(p: &Painter, zone: Zone, item: &Item, facts: &Facts, hovered: bool, pres
         Look::Caption => draw_caption(p, zone, rect, facts),
         Look::Capture(n) => draw_capture(p, rect, n, facts, hovered, pressed),
         Look::BigPicture(n) => draw_big_picture(p, rect, n, facts),
+        Look::PlayButton => {
+            let playing = facts.music.as_ref().is_some_and(|m| m.1);
+            let fill = if pressed { theme::mix(theme::VIOLET, Color32::BLACK, 0.2) } else if hovered { theme::mix(theme::VIOLET, Color32::WHITE, 0.12) } else { theme::mix(look::TILE, theme::VIOLET, 0.55) };
+            p.rect_filled(rect, look::radius(rect.height() / 2.0), fill);
+            let words = if playing { tr_ctx("media", "Pause") } else { tr_ctx("media", "Play") };
+            let font = look::font(17.0, weight::BOLD);
+            let wide = p.layout_no_wrap(words.to_string(), font.clone(), Color32::WHITE).size().x + 30.0;
+            let from = rect.center().x - wide / 2.0;
+            widgets::icon(p, pos2(from + 10.0, rect.center().y), if playing { icons::PAUSE } else { icons::PLAY }, 20.0, Color32::WHITE);
+            p.text(pos2(from + 30.0, rect.center().y), Align2::LEFT_CENTER, words, font, Color32::WHITE);
+        }
         Look::SeeInApp => {
             // The page's one accent button: where to go from here.
             let fill = if pressed { theme::mix(look::accent(), Color32::BLACK, 0.2) } else if hovered { theme::mix(look::accent(), Color32::WHITE, 0.12) } else { look::accent() };
@@ -3316,6 +3356,21 @@ const TURNING_FOOT: f32 = 474.0;
 const STAGE: Color32 = Color32::from_rgb(22, 26, 31);
 const SEE_IN_APP: Rect = Rect { min: pos2(700.0, 488.0), max: pos2(1000.0, 544.0) };
 
+/// A soft ellipse of light, brightest in its middle, fading to nothing at its edge.
+fn floor_pool(p: &Painter, middle: Pos2, radii: Vec2) {
+    let mut mesh = Mesh::default();
+    mesh.vertices.push(Vertex { pos: middle, uv: WHITE_UV, color: Color32::from_white_alpha(22) });
+    let steps = 48;
+    for i in 0..=steps {
+        let a = i as f32 / steps as f32 * std::f32::consts::TAU;
+        mesh.vertices.push(Vertex { pos: middle + vec2(a.cos() * radii.x, a.sin() * radii.y), uv: WHITE_UV, color: Color32::TRANSPARENT });
+    }
+    for i in 0..steps {
+        mesh.indices.extend_from_slice(&[0, i + 1, i + 2]);
+    }
+    p.add(Shape::mesh(mesh));
+}
+
 /// A band along each edge of `rect`, from `ink` at the edge to nothing `depth` in.
 fn fade_edges(p: &Painter, rect: Rect, depth: f32, ink: Color32) {
     let clear = Color32::from_rgba_premultiplied(0, 0, 0, 0);
@@ -3362,6 +3417,8 @@ fn draw_turning(p: &Painter, page: Rect, n: usize, facts: &Facts, view: &OpenedV
             // A frame that reads as one: a stage a step lighter than the sheet, with a hairline round it (round 15's pre-check saw no frame).
             p.rect_filled(stage, look::radius(12.0), STAGE);
             p.rect_stroke(stage, look::radius(12.0), Stroke::new(1.0, Color32::from_white_alpha(28)), egui::StrokeKind::Inside);
+            // A lit pool of floor under what turns, so it stands on something (round 16's judges: a flat grey stage).
+            floor_pool(p, pos2(stage.center().x, stage.bottom() - stage.height() * 0.16), vec2(stage.width() * 0.34, stage.height() * 0.1));
             keep_colour(p, rect);
             p.add(RectShape::filled(rect, look::radius(12.0), Color32::WHITE).with_texture(id, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0))));
             // Its ragged edges fade into the stage rather than end on the frame (round 14's judges).

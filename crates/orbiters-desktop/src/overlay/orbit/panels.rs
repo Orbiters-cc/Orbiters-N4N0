@@ -1343,10 +1343,23 @@ pub(super) use mic_sheet::mic_after;
 
 /// What plays, on up to `rows` lines of `room`, cut only past them.
 fn song_lines(p: &Painter, name: &str, font: FontId, room: f32, rows: usize) -> std::sync::Arc<egui::Galley> {
-    let mut job = egui::text::LayoutJob::simple(name.to_string(), font, look::LABEL, room);
-    job.wrap.max_rows = rows;
-    job.wrap.overflow_character = Some('\u{2026}');
-    p.layout_job(job)
+    let lay = |text: String| {
+        let mut job = egui::text::LayoutJob::simple(text, font.clone(), look::LABEL, room);
+        job.wrap.max_rows = rows;
+        job.wrap.overflow_character = Some('\u{2026}');
+        p.layout_job(job)
+    };
+    if p.layout(name.to_string(), font.clone(), look::LABEL, room).rows.len() <= rows {
+        return lay(name.to_string());
+    }
+    // Too long: it ends at a word, with "…", not in the middle of one (round 15's pre-check read "PARTICIP...").
+    words_that_fit(name, |text| p.layout(text.to_string(), font.clone(), look::LABEL, room).rows.len() <= rows).map_or_else(|| lay(name.to_string()), lay)
+}
+
+/// The most of `name`'s first words that, followed by "…", `fits`; none when not even its first word does.
+fn words_that_fit(name: &str, fits: impl Fn(&str) -> bool) -> Option<String> {
+    let words: Vec<&str> = name.split_whitespace().collect();
+    (1..words.len()).rev().map(|n| format!("{}\u{2026}", words[..n].join(" "))).find(|text| fits(text))
 }
 
 /// A line of what an accessory of All tools does, at its size.
@@ -3244,6 +3257,8 @@ fn draw_big_picture(p: &Painter, rect: Rect, n: usize, facts: &Facts) {
 /// under the head with its words over it (round 14's judges).
 const TURNING: Rect = Rect { min: pos2(112.0, 12.0), max: pos2(912.0, 462.0) };
 const TURNING_FOOT: f32 = 474.0;
+/// The live view's stage, a step lighter than the sheet.
+const STAGE: Color32 = Color32::from_rgb(22, 26, 31);
 const SEE_IN_APP: Rect = Rect { min: pos2(700.0, 488.0), max: pos2(1000.0, 544.0) };
 
 /// A band along each edge of `rect`, from `ink` at the edge to nothing `depth` in.
@@ -3275,7 +3290,7 @@ fn draw_turning(p: &Painter, page: Rect, n: usize, facts: &Facts, view: &OpenedV
     let Some(recent) = facts.recent.get(n) else { return };
     let rect = TURNING.translate(page.min.to_vec2());
     let stage = rect;
-    p.rect_filled(stage, look::radius(12.0), Color32::from_rgb(15, 17, 21));
+    p.rect_filled(stage, look::radius(12.0), STAGE);
     let waiting = |p: &Painter, words: &str| {
         if let Some(id) = facts.opened_picture.or_else(|| tile_picture(facts, n)) {
             squircle_picture(p, stage, [theme::squircle(12.0); 4], id, cover_uv_of(stage.size(), recent.shape()), Color32::from_gray(120));
@@ -3289,11 +3304,13 @@ fn draw_turning(p: &Painter, page: Rect, n: usize, facts: &Facts, view: &OpenedV
     match (&view.failed, view.picture) {
         (Some(_), _) => waiting(p, tr("Its 3D cannot show here. It can in Orbiters.")),
         (None, Some(id)) => {
-            p.rect_filled(stage, look::radius(12.0), Color32::from_rgb(15, 17, 21));
+            // A frame that reads as one: a stage a step lighter than the sheet, with a hairline round it (round 15's pre-check saw no frame).
+            p.rect_filled(stage, look::radius(12.0), STAGE);
+            p.rect_stroke(stage, look::radius(12.0), Stroke::new(1.0, Color32::from_white_alpha(28)), egui::StrokeKind::Inside);
             keep_colour(p, rect);
             p.add(RectShape::filled(rect, look::radius(12.0), Color32::WHITE).with_texture(id, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0))));
             // Its ragged edges fade into the stage rather than end on the frame (round 14's judges).
-            fade_edges(p, rect, 46.0, Color32::from_rgb(15, 17, 21));
+            fade_edges(p, rect.shrink(1.0), 46.0, STAGE);
         }
         (None, None) => waiting(p, tr("Getting its 3D ready\u{2026}")),
     }
@@ -3510,6 +3527,15 @@ pub fn apply_mask(rgba: &mut [u8], mask: &[u8], size: [u32; 2], within: [u32; 4]
 
 #[cfg(test)]
 mod tests {
+    /// Round 15's pre-check: a song cut at two lines ends at a word, never in the middle of one.
+    #[test]
+    fn a_long_song_ends_at_a_word() {
+        let fits = |t: &str| t.chars().count() <= 30;
+        let cut = words_that_fit("IL SE VANTE D'AVOIR PARTICIPÉ AUX DESTRUCTIONS", fits).unwrap();
+        assert_eq!(cut, "IL SE VANTE D'AVOIR PARTICIPÉ\u{2026}");
+        assert!(words_that_fit("Supercalifragilisticexpialidocious-and-more-words-joined", |t| t.len() < 10).is_none());
+    }
+
     use super::*;
     use crate::overlay::orbit::zones::{self, Around};
 

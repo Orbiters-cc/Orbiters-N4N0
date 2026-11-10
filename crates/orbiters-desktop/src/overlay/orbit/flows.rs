@@ -13,6 +13,8 @@ struct Person {
     panels: Panels,
     snap: Arc<Snapshot>,
     around: Option<Around>,
+    /// The library's version, as the service says it: another one has the gallery's list read again.
+    library: u64,
     /// One person at a time: the look chosen (modern or retro) is the whole process's, as the app has one, and a retro test on another thread laid All tools out
     /// under a modern one's press, which then missed its tile (two of these failed so beside the hole's retro runs).
     _alone: std::sync::MutexGuard<'static, ()>,
@@ -25,7 +27,7 @@ impl Person {
         let alone = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
         let panels = Panels::new(Arc::new(crate::screenshot::Still), 2.0, true);
         let snap = Arc::new(crate::screenshot::idle_snapshot(&Settings::default(), &[]));
-        Self { panels, snap, around: None, _alone: alone }
+        Self { panels, snap, around: None, library: 0, _alone: alone }
     }
 
     /// One turn of the overlay's loop, as `vr.rs` takes it.
@@ -36,10 +38,20 @@ impl Person {
         self.panels.back_place = Some(zones::in_units(Zone::SheetBack));
         self.panels.peek_place = Some(zones::in_units(Zone::SheetPeek));
         self.panels.set_open(self.around, places, &self.snap);
-        self.panels.follow(&self.snap, 0);
+        self.panels.follow(&self.snap, self.library);
         self.panels.menu_turn(&self.snap);
         self.panels.step_springs(0.011);
         self.panels.paint(&self.snap, |_, _| {});
+    }
+
+    /// Turns until `done`, for what another thread brings (the gallery's list): it comes in its own time.
+    fn turns_until(&mut self, what: &str, done: impl Fn(&Person) -> bool) {
+        let began = Instant::now();
+        while !done(self) {
+            assert!(began.elapsed() < Duration::from_secs(10), "{what}: it never came");
+            std::thread::sleep(Duration::from_millis(2));
+            self.turn();
+        }
     }
 
     fn turns(&mut self, n: usize) {
@@ -157,6 +169,68 @@ fn saved_looks_with_real_looks_answers() {
         person.turns(3);
         assert_eq!(person.panels.stage.host.menu.page, orbiters_n4n0_core::menu::Page::States, "and in again");
     }
+}
+
+/// Two pictures of one world, taken together, as the gallery's list has them: under the name `world`.
+fn two_of(world: &str) -> Vec<super::LoadedRecent> {
+    ["one.png", "two.png"]
+        .into_iter()
+        .map(|file| {
+            let path = std::path::PathBuf::from(file);
+            super::LoadedRecent {
+                source: crate::worlds::Picture::Shot { path: path.clone(), size: 1, width: 560 },
+                key: path,
+                world_id: "wrld_renamed".into(),
+                title: world.into(),
+                image: None,
+                asked: false,
+                has_view: false,
+                session: false,
+                picture: false,
+                taken: 1_700_000_000,
+                modified: 1_700_000_000,
+                aspect: 16.0 / 9.0,
+                at: None,
+            }
+        })
+        .collect()
+}
+
+/// A set of one world's pictures open on the sheet, and the list read again with another name for that world (the visit history learns a name when the person joins; VRChat
+/// renames worlds): the set is still open with both its pictures, under the new name. It showed empty until Back and opening it again (the second review of `window-quick`, F2).
+#[test]
+fn a_set_open_in_the_gallery_stays_when_its_world_is_renamed() {
+    fn before(_: &std::path::Path, _: &[std::path::PathBuf]) -> Vec<super::LoadedRecent> {
+        two_of("Sky Dream")
+    }
+    fn after(_: &std::path::Path, _: &[std::path::PathBuf]) -> Vec<super::LoadedRecent> {
+        two_of("Sky Dream (Night)")
+    }
+    let mut person = Person::new();
+    person.panels.recents.lister = Some(before);
+    person.around = Some(Around::QuickMenu);
+    person.turns(3);
+    person.press(Action::Pictures);
+    person.turns_until("the gallery's list", |p| p.panels.facts.recent.iter().count() == 1);
+    assert_eq!(person.panels.facts.recent.get(0).map(|tile| tile.count), Some(2), "one tile for the two");
+    person.press(Action::Capture(0));
+    person.turns_until("the set, opened", |p| p.panels.facts.gallery_set.is_some());
+    person.turns(2);
+    assert_eq!(person.panels.facts.gallery_set.as_deref(), Some("Sky Dream"));
+    assert_eq!(person.panels.facts.recent.iter().count(), 2, "its two pictures");
+    // The library changed, and the world has another name in the list read for it.
+    person.panels.recents.lister = Some(after);
+    person.library = 1;
+    person.turns_until("the list read again", |p| p.panels.recents.loaded.iter().all(|r| r.title == "Sky Dream (Night)") && p.panels.recents.rx.is_none());
+    person.turns(2);
+    assert_eq!(person.panels.facts.sheet, Some(Sheet::Pictures));
+    assert_eq!(person.panels.facts.recent.iter().count(), 2, "both are still in the set");
+    assert_eq!(person.panels.facts.gallery_set.as_deref(), Some("Sky Dream (Night)"), "and its heading says the new name");
+    // Back shows the whole gallery again, as it did.
+    person.press(Action::Back);
+    person.turns(2);
+    assert_eq!(person.panels.facts.gallery_set, None);
+    assert_eq!(person.panels.facts.recent.iter().count(), 1);
 }
 
 /// A panel on a sheet in VR is a headset's: a press on a capture goes to the 3D view, with Around me and Small here, and is never a flat picture on the page.

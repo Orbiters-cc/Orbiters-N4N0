@@ -264,9 +264,11 @@ struct Recents {
     shown_index: Vec<usize>,
     shown: panels::Gallery,
     arranged: Option<(panels::GalleryFilter, orbiters_core::settings::GalleryLayout, orbiters_i18n::Language, Option<String>)>,
-    /// The set open of one place's captures, by its name: one tile stood for them in the gallery.
+    /// The set open of one place's captures: one tile stood for them in the gallery. This is its place's name, for its heading, as the list has it now; what is in it is
+    /// `set_members`.
     set: Option<String>,
-    /// What that tile stood for, and nothing else of that place: a tile of "4 photos" opened to 6, the others taken another day (round 17's pre-check).
+    /// What that tile stood for, and nothing else of that place: a tile of "4 photos" opened to 6, the others taken another day (round 17's pre-check). By where each lies on
+    /// the disk, which is its own; its place's name is not (the visit history learns it later, VRChat renames a world), and a set matched by it emptied when the list was read again.
     set_members: Vec<PathBuf>,
     seen: Option<(u64, u64)>,
     /// When it was last listed: a first scan of the pictures says it found more all the time.
@@ -433,6 +435,12 @@ impl Recents {
                     }
                 }
                 self.loaded = list;
+                // A set that is open keeps what it held, and says its place's name as the list has it now.
+                if self.set.is_some() {
+                    if let Some(named) = self.loaded.iter().find(|r| self.set_members.contains(&r.key)).map(|r| r.title.clone()) {
+                        self.set = Some(named);
+                    }
+                }
                 self.arranged = None;
                 self.rx = None;
                 changed = true;
@@ -472,7 +480,7 @@ impl Recents {
             if !(filter == panels::GalleryFilter::All || (r.session && r.has_view)) {
                 continue;
             }
-            if set.as_ref().is_some_and(|set| *set != r.title || !self.set_members.contains(&r.key)) {
+            if set.is_some() && !self.set_members.contains(&r.key) {
                 continue;
             }
             // Captures of one place one after the other are one tile, with how many (round 11's judges: three alike in a row could not be told apart); it opens to them.
@@ -1577,6 +1585,12 @@ impl Panels {
         // All tools shows the newest of them too.
         let in_gallery = matches!(self.facts.sheet, Some(Sheet::Pictures | Sheet::All));
         let listed = in_gallery && self.recents.follow((library, crate::worlds::picture_revision()), snap.settings.sessions_dir.clone(), snap.settings.picture_folders.clone());
+        // An open set's heading follows its place's name, when the list read again has another for it.
+        if listed && self.facts.gallery_set.is_some() {
+            if let Some(named) = self.recents.set.as_deref().map(shown_title) {
+                self.facts.gallery_set = Some(named);
+            }
+        }
         let arranged = in_gallery && self.recents.arrange(self.facts.gallery_filter, snap.settings.photos_layout);
         if listed || arranged {
             for panel in &mut self.list {
@@ -3163,6 +3177,41 @@ mod tests {
         assert!(recents.follow((0, 0), PathBuf::new(), Vec::new()));
         assert!(recents.loaded[0].image.is_some());
         assert!(recents.loaded[0].asked);
+    }
+
+    /// A set of one place's captures, open, when the list is read again with another name for that place (the visit history learned it, VRChat renamed the world): what it held
+    /// is still in it, and it goes by the new name. It emptied until Back and opening it again (the second review of `window-quick`, F2).
+    #[test]
+    fn an_open_set_keeps_its_captures_when_its_place_is_renamed() {
+        use panels::GalleryFilter;
+        fn renamed(_: &std::path::Path, _: &[PathBuf]) -> Vec<LoadedRecent> {
+            let mut list = vec![listed("cap-1", true, true), listed("cap-2", true, true), listed("elsewhere", true, true)];
+            list[0].title = "B".into();
+            list[1].title = "B".into();
+            list
+        }
+        let layout = Default::default();
+        let mut first = vec![listed("cap-1", true, true), listed("cap-2", true, true), listed("elsewhere", true, true)];
+        first[0].title = "A".into();
+        first[1].title = "A".into();
+        let mut recents = Recents { loaded: first, seen: Some((0, 0)), lister: Some(renamed), ..Default::default() };
+        recents.arrange(GalleryFilter::All, layout);
+        assert_eq!(recents.shown.iter().map(|r| r.count).collect::<Vec<_>>(), [2, 1], "one tile for the two of A");
+        // Opened, as a press on that tile does.
+        recents.set_members = recents.loaded.iter().filter(|l| l.at == Some(0)).map(|l| l.key.clone()).collect();
+        recents.set = Some("A".into());
+        recents.arrange(GalleryFilter::All, layout);
+        assert_eq!(recents.shown.len(), 2, "the set, opened");
+        // The library changed: the list is read again, and the place has another name in it.
+        let began = Instant::now();
+        while !recents.follow((1, 0), PathBuf::new(), Vec::new()) {
+            assert!(began.elapsed() < Duration::from_secs(10), "the list never came");
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert!(recents.arrange(GalleryFilter::All, layout));
+        assert_eq!(recents.shown.iter().map(|r| r.dir.clone()).collect::<Vec<_>>(), [PathBuf::from("cap-1"), PathBuf::from("cap-2")], "both are still in it, and nothing else");
+        assert_eq!(recents.set.as_deref(), Some("B"), "and it goes by the new name");
+        assert_eq!(recents.shown.iter().map(|r| r.title.as_str()).collect::<Vec<_>>(), ["B", "B"]);
     }
 
     fn listed(key: &str, session: bool, has_view: bool) -> LoadedRecent {

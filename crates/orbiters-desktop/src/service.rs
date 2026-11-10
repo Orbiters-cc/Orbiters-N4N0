@@ -24,8 +24,6 @@ struct Link {
     role: Role,
     pid: u32,
     mailbox: Arc<Mailbox>,
-    /// The client could not read a line of the state (`ToService::Resync`): the next state goes whole.
-    resync: Arc<AtomicBool>,
     #[cfg(test)]
     writes: Arc<AtomicU64>,
 }
@@ -337,14 +335,6 @@ impl Service {
         };
         match msg {
             ToService::Hello { .. } => {}
-            ToService::Resync => {
-                // Out of the links' lock first: handing the state out takes the controller's turn.
-                let found = self.links.lock().unwrap().iter().find(|l| l.id == link).map(|l| (l.resync.clone(), l.mailbox.clone()));
-                if let Some((resync, mailbox)) = found {
-                    resync.store(true, Ordering::Relaxed);
-                    ctl.repost(&mailbox);
-                }
-            }
             ToService::StartCapture => report(ctl.start_capture(false)),
             ToService::StopCapture => report(ctl.stop_capture()),
             ToService::Pause { paused } => report(ctl.pause_capture(paused)),
@@ -463,8 +453,6 @@ impl Service {
         // an answer arriving, the avatar's speed): the newest waits in the mailbox meanwhile. The overlay, in the
         // headset, gets every one it can read.
         let pace = (role == Role::Window).then_some(WINDOW_PACE);
-        let resync = Arc::new(AtomicBool::new(false));
-        let again = resync.clone();
         #[cfg(test)]
         let writes = Arc::new(AtomicU64::new(0));
         #[cfg(test)]
@@ -475,9 +463,6 @@ impl Service {
             let mut sent: Option<Arc<crate::state::Snapshot>> = None;
             while let Some((messages, snapshot)) = out.take() {
                 let paced = pace.filter(|_| snapshot.is_some());
-                if again.swap(false, Ordering::Relaxed) {
-                    sent = None;
-                }
                 let written = snapshot
                     .map_or(Ok(()), |s| {
                         let written = ipc::write_state(&mut writer, sent.as_ref(), &s);
@@ -499,7 +484,7 @@ impl Service {
         // Subscribed before it is listed: the snapshot is in its mailbox before anything else can be (a Show).
         self.ctl.subscribe(mailbox.clone());
         let id = self.next_link.fetch_add(1, Ordering::Relaxed);
-        self.links.lock().unwrap().push(Link { id, role, pid, mailbox: mailbox.clone(), resync,
+        self.links.lock().unwrap().push(Link { id, role, pid, mailbox: mailbox.clone(),
             #[cfg(test)]
             writes,
         });
@@ -856,16 +841,6 @@ mod tests {
         }
         assert!(in_step(&service, &overlay) && in_step(&service, &window));
         assert_eq!(window.snapshot().n4n0.calls.picked, 299);
-        // A client that lost step asks for everything again: it is sent the whole state, and changes go on from there.
-        let before = window.snapshot();
-        window.send(&ToService::Resync);
-        let started = Instant::now();
-        while Arc::ptr_eq(&before, &window.snapshot()) && started.elapsed() < Duration::from_secs(5) {
-            std::thread::sleep(Duration::from_millis(5));
-        }
-        let again = window.snapshot();
-        assert!(!Slice::same(&before.settings, &again.settings), "everything was sent again, the settings too");
-        assert_eq!(whole(&again), whole(&ctl.view()));
         ctl.update(|s| s.n4n0.afk = true);
         assert!(in_step(&service, &window) && in_step(&service, &overlay));
         assert!(window.snapshot().n4n0.afk);
@@ -910,42 +885,32 @@ mod tests {
         assert_eq!(service.linked(Role::Overlay), 1);
     }
 
-    /// Review S2 and B1, through the real service: lines cut short on their way between the service's link and the
-    /// client are asked for again, each time, however soon after the last; an answer cut short too is asked for by the
-    /// deadline; and a client that can read no answer gives the link up, which the service sees.
+    /// A damaged line terminates the real service link. A new client receives a full current baseline.
     #[test]
-    fn a_line_damaged_on_its_way_is_asked_for_again_through_the_service() {
+    fn a_damaged_line_closes_and_a_new_link_starts_whole() {
         let service = service();
-        let ctl = service.ctl.clone();
-        let (client, between) = linked_through(&service, Role::Overlay);
-        assert!(in_step(&service, &client));
-        // A change cut short: asked for again, sent whole, in step.
-        between.damage(&[Line::Changes]);
-        ctl.update(|s| s.n4n0.panel = Some("one".into()));
-        assert!(in_step(&service, &client));
-        assert_eq!(between.passed().1, 1);
-        // At once another (B1: within the second after the first asking), then a change that arrives whole, and nothing
-        // more from the service.
-        between.damage(&[Line::Changes]);
-        ctl.update(|s| s.n4n0.panel = Some("two".into()));
-        ctl.update(|s| s.n4n0.afk = true);
-        assert!(in_step(&service, &client), "the second loss, a moment after the first, recovers too");
-        assert_eq!(between.passed().1, 2);
-        // The change and the whole state sent in answer both cut short, then silence: asked again by the deadline.
-        between.damage(&[Line::Changes, Line::Whole]);
-        ctl.update(|s| s.n4n0.panel = Some("three".into()));
-        assert!(in_step(&service, &client), "asked again with no line to prompt it");
-        assert_eq!(between.passed().1, 4);
-        ctl.update(|s| s.settings.walk_boost.strength = 0.25);
-        assert!(in_step(&service, &client));
-        assert!(!client.should_close());
-        // Every answer cut short: the client gives the link up, and the service lets it go.
-        let mut lines = vec![Line::Changes];
-        lines.extend(std::iter::repeat_n(Line::Whole, ipc::RESYNC_TRIES as usize));
-        between.damage(&lines);
-        ctl.update(|s| s.n4n0.panel = Some("four".into()));
-        assert!(until(|| client.should_close()), "a client that can read no answer gives the link up");
-        assert!(until(|| service.linked(Role::Overlay) == 0), "and the service sees it go");
+        for round in 1..=2 {
+            let (client, between) = linked_through(&service, Role::Window);
+            assert!(in_step(&service, &client));
+            between.damage(&[Line::Changes]);
+            service.ctl.update(|s| s.projects_changed = round);
+            assert!(until(|| client.should_close()));
+            assert!(until(|| service.linked(Role::Window) == 0));
+            assert_eq!(between.passed().1, 1);
+        }
+        let again = linked(&service, Role::Window);
+        assert!(in_step(&service, &again));
+        assert_eq!(again.snapshot().projects_changed, 2);
+    }
+
+    #[test]
+    fn socket_regressions_twenty_rounds() {
+        for _ in 0..20 {
+            ipc::tests::unreadable_changes_close_without_the_writer_and_never_revive();
+            ipc::tests::unreadable_wire_lines_end_the_link();
+            a_damaged_line_closes_and_a_new_link_starts_whole();
+            a_client_that_comes_back_is_handed_everything_again();
+        }
     }
 
     /// Review S2: a reader that stops reading until the socket's buffers are full, then reads again. The service never

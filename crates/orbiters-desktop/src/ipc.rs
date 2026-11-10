@@ -6,11 +6,8 @@
 //! The state travels as what changed. A link's first line is the whole [`Snapshot`]; from then on, for each state the
 //! service publishes, it writes the parts that differ from the state it wrote last ([`write_state`]: the avatar's
 //! speed is 90 bytes, not the 74 kB of everything), and the client puts them into its copy ([`Client`]), which is then
-//! the state the service published, whole: a client never holds parts of two states. A line it cannot read makes it
-//! ask for everything again ([`ToService::Resync`]) and take no more changes until it has it; it asks again by a
-//! deadline while no whole state comes that it can read, and after a few askings closes the link, which ends its
-//! process as the service going away does. The service and its clients are one program, started together: there is no
-//! other version to talk to.
+//! the state the service published, whole. An unreadable line ends the link immediately, just as service EOF does.
+//! A newly made link starts with the whole state. Service and clients are one program: there is no other version to support.
 
 use crate::controller::Notice;
 use crate::state::{MapsMine, Snapshot};
@@ -78,8 +75,6 @@ pub enum ToService {
         role: Role,
         pid: u32,
     },
-    /// A line of the state could not be read: the whole state again, please.
-    Resync,
     StartCapture,
     StopCapture,
     /// The Orbiters window to the front.
@@ -400,12 +395,6 @@ impl Endpoint {
     }
 }
 
-/// A client that lost step asks for the whole state again this long after its last asking, for as long as none came that
-/// it could read: by this deadline, whether or not the service sends anything meanwhile.
-const RESYNC_RETRY: Duration = if cfg!(test) { Duration::from_millis(150) } else { Duration::from_secs(1) };
-/// How many times it asks in all before it gives the link up.
-pub(crate) const RESYNC_TRIES: u32 = 5;
-
 /// `--say-state` (a switch of `--link-smoke`): a client prints a digest of the state its link holds whenever it takes
 /// one, and says when it could not read a line and when its link ended.
 pub static SAY_STATE: AtomicBool = AtomicBool::new(false);
@@ -452,23 +441,16 @@ struct Held {
     /// What the interface reads: `service`, or that with a change shown before the service confirms it
     /// ([`Client::update_local`]), until the service's next line.
     shown: Arc<Snapshot>,
-    /// A line could not be read, so `service` may not be what the link believes it is: changes are not taken until the
-    /// whole state came again.
-    out_of_step: bool,
-    /// While out of step: when the whole state was last asked for, and how many times it has been. None and zero once
-    /// it came: a loss after that is a new one, asked for at once.
-    asked: Option<Instant>,
-    asks: u32,
-    /// A thread is asking again by the deadline ([`Client::keep_asking`]); one at most.
-    retrying: bool,
+    /// Terminal for this connection; protected by the same lock as both state replacement paths.
+    closed: bool,
 }
 
 /// What a client keeps of the service: the latest snapshot, queued notices and requests for the window.
 pub struct Client {
     writer: Mutex<TcpStream>,
     state: Mutex<Held>,
-    /// Told when the client is in step again, or its link ended: what waits to ask again stops waiting.
-    step: std::sync::Condvar,
+    /// Shutdown must never wait behind a blocked command writer.
+    shutdown: TcpStream,
     notices: Mutex<Vec<Notice>>,
     library: AtomicU64,
     worker_log: Mutex<Option<Vec<String>>>,
@@ -478,7 +460,6 @@ pub struct Client {
     /// A page asked for with the last Show.
     show_page: Mutex<Option<String>>,
     close: AtomicBool,
-    connected: AtomicBool,
     /// The window is behind VRChat ([`Client::set_background`]).
     background: AtomicBool,
     repaint: Mutex<Option<egui::Context>>,
@@ -515,8 +496,8 @@ impl Client {
         };
         let client = Arc::new(Self {
             writer: Mutex::new(writer),
-            state: Mutex::new(Held { service: first.clone(), shown: first, out_of_step: false, asked: None, asks: 0, retrying: false }),
-            step: std::sync::Condvar::new(),
+            state: Mutex::new(Held { service: first.clone(), shown: first, closed: false }),
+            shutdown: reader.get_ref().try_clone()?,
             notices: Mutex::new(Vec::new()),
             library: AtomicU64::new(0),
             worker_log: Mutex::new(None),
@@ -525,7 +506,6 @@ impl Client {
             show: AtomicBool::new(false),
             show_page: Mutex::new(None),
             close: AtomicBool::new(false),
-            connected: AtomicBool::new(true),
             background: AtomicBool::new(false),
             repaint: Mutex::new(None),
         });
@@ -538,13 +518,15 @@ impl Client {
                     // The state changed: its parts, and a frame for them as for a whole snapshot.
                     if c.take_changes(parts) {
                         c.repaint(true);
+                    } else {
+                        break;
                     }
                     continue;
                 }
                 let Ok(msg) = serde_json::from_str::<ToClient>(&line) else {
                     // It may have been the state: what this client holds can no longer be trusted to be it.
-                    c.lost_step();
-                    continue;
+                    c.disconnect();
+                    break;
                 };
                 let news = matches!(msg, ToClient::Snapshot { .. });
                 match msg {
@@ -570,16 +552,7 @@ impl Client {
                 }
                 c.repaint(news);
             }
-            // The service is gone: close too.
-            c.connected.store(false, Ordering::Relaxed);
-            c.step.notify_all();
-            c.vrchat_data.lock().unwrap().clear();
-            c.close.store(true, Ordering::Relaxed);
-            if SAY_STATE.load(Ordering::Relaxed) {
-                println!("link ended");
-            }
-            c.repaint(false);
-            leave_soon();
+            c.disconnect();
         })?;
         Ok(client)
     }
@@ -615,8 +588,9 @@ impl Client {
     }
 
     pub fn send(&self, msg: &ToService) {
-        if self.connected.load(Ordering::Relaxed) {
-            let _ = write_line(&mut *self.writer.lock().unwrap(), msg);
+        let mut writer = self.writer.lock().unwrap();
+        if !self.state.lock().unwrap().closed {
+            let _ = write_line(&mut *writer, msg);
         }
     }
 
@@ -628,38 +602,32 @@ impl Client {
     /// changed: what is shown is then the service's again, whole, as when every state came as a whole snapshot.
     pub fn update_local(&self, f: impl FnOnce(&mut Snapshot)) {
         let mut held = self.state.lock().unwrap();
+        if held.closed { return; }
         let mut s = (*held.shown).clone();
         f(&mut s);
         held.shown = Arc::new(s);
     }
 
-    /// The whole state, from the service: what this client holds from now on. In step again: the asking is over, so
-    /// a line that cannot be read after this is a new loss and is asked for at once.
+    /// Whole state replacement and closure are serialized. A terminated connection can never be revived by a
+    /// late readable line; a new connection gets its own full baseline in connect.
     fn take_snapshot(&self, snapshot: Arc<Snapshot>) {
         let mut held = self.state.lock().unwrap();
+        if held.closed { return; }
         held.service = snapshot.clone();
         held.shown = snapshot;
-        held.out_of_step = false;
-        held.asked = None;
-        held.asks = 0;
-        self.step.notify_all();
         drop(held);
         self.say_state();
     }
 
-    /// The parts that changed since the state this client holds: put into a copy of it (which shares every other
-    /// part), and the copy kept only when all of them were read. Returns whether the client holds a new state.
-    fn take_changes(self: &Arc<Self>, parts: &str) -> bool {
+    /// Apply atomically, or terminate this connection under the very same lock. There is no retry or recovery worker.
+    fn take_changes(&self, parts: &str) -> bool {
         let mut held = self.state.lock().unwrap();
-        if held.out_of_step {
-            // Still without the whole state, which is asked for by its deadline: these are changes to a state this
-            // client does not hold.
-            return false;
-        }
+        if held.closed { return false; }
         let mut next = (*held.service).clone();
         if orbiters_core::slice::apply_changes(&mut next, parts).is_err() {
+            self.close_locked(&mut held);
             drop(held);
-            self.lost_step();
+            self.finish_close();
             return false;
         }
         let next = Arc::new(next);
@@ -670,77 +638,28 @@ impl Client {
         true
     }
 
-    /// A line could not be read: the state held stays as it is (the last one known whole), no change is taken into it
-    /// any more, and the service is asked for everything again, at once. While already out of step nothing more is
-    /// asked here: the answer is awaited, and asked for again by its deadline ([`Client::keep_asking`]), so a link
-    /// whose every line is unreadable is asked a few times, not once a line.
-    fn lost_step(self: &Arc<Self>) {
-        if SAY_STATE.load(Ordering::Relaxed) {
-            println!("lost step");
-        }
-        let start = {
-            let mut held = self.state.lock().unwrap();
-            if held.out_of_step {
-                return;
-            }
-            held.out_of_step = true;
-            held.asked = Some(Instant::now());
-            held.asks = 1;
-            !std::mem::replace(&mut held.retrying, true)
-        };
-        self.send(&ToService::Resync);
-        if start {
-            let client = self.clone();
-            if std::thread::Builder::new().name("service-link-asking".into()).spawn(move || client.keep_asking()).is_err() {
-                self.state.lock().unwrap().retrying = false;
-                self.give_up();
-            }
-        }
-    }
-
-    /// While the client is out of step: asks for the whole state again each time [`RESYNC_RETRY`] has passed since the
-    /// last asking, whether or not any line comes meanwhile (the answer itself may have been unreadable, and the
-    /// service, which believes it was read, may then have nothing more to say). It sleeps until that deadline or until
-    /// the client is in step, and ends then. After [`RESYNC_TRIES`] askings without a whole state it could read, the
-    /// link is of no use: it is closed, which the link's thread takes as the service gone, so the window closes or the
-    /// overlay ends, and the service sees the client go, instead of a client left showing a state that no longer
-    /// follows.
-    fn keep_asking(self: Arc<Self>) {
-        let mut held = self.state.lock().unwrap();
-        loop {
-            if !held.out_of_step || !self.connected.load(Ordering::Relaxed) {
-                held.retrying = false;
-                return;
-            }
-            let since = held.asked.map_or(RESYNC_RETRY, |at| at.elapsed());
-            if since < RESYNC_RETRY {
-                held = self.step.wait_timeout(held, RESYNC_RETRY - since).unwrap().0;
-                continue;
-            }
-            if held.asks >= RESYNC_TRIES {
-                held.retrying = false;
-                drop(held);
-                self.give_up();
-                return;
-            }
-            held.asks += 1;
-            held.asked = Some(Instant::now());
-            drop(held);
-            self.send(&ToService::Resync);
-            held = self.state.lock().unwrap();
-        }
-    }
-
-    /// Windows socket shutdown need not wake the reader on its cloned handle. Mark the client closed here as well
-    /// as at reader EOF, so silence after an unreadable answer cannot leave a connected, stale window behind.
-    fn give_up(&self) {
-        self.connected.store(false, Ordering::Relaxed);
+    /// Record the terminal decision before waking socket users. This handle is independent of the writer mutex.
+    fn close_locked(&self, held: &mut Held) {
+        held.closed = true;
         self.close.store(true, Ordering::Relaxed);
-        self.step.notify_all();
+        let _ = self.shutdown.shutdown(std::net::Shutdown::Both);
+    }
+
+    /// EOF, unreadable input and I/O errors all use exactly the same disconnect path.
+    fn disconnect(&self) {
+        let mut held = self.state.lock().unwrap();
+        if held.closed { return; }
+        self.close_locked(&mut held);
+        drop(held);
+        self.finish_close();
+    }
+
+    fn finish_close(&self) {
+        // Cancels waiting receivers, not work the service has already accepted. Nothing is replayed.
         self.vrchat_data.lock().unwrap().clear();
+        if SAY_STATE.load(Ordering::Relaxed) { println!("link ended"); }
         self.repaint(false);
         leave_soon();
-        let _ = self.writer.lock().unwrap().shutdown(std::net::Shutdown::Both);
     }
 
     pub fn take_notices(&self) -> Vec<Notice> {
@@ -1016,48 +935,6 @@ pub(crate) mod tests {
         assert!(until(|| !client.snapshot().vrchat_login.busy));
     }
 
-    /// A line of changes that cannot be read is not taken for "nothing changed": the client keeps the last state it
-    /// knows whole, asks for everything again, takes no change meanwhile, and is in step again with the whole state.
-    #[test]
-    fn a_client_that_cannot_read_a_change_asks_for_everything_again() {
-        let first = Arc::new(Snapshot::new(Settings::default()));
-        let (client, mut writer, mut reader) = linked(&first);
-        let mut second = (*first).clone();
-        second.n4n0.afk = true;
-        second.osc.values = 7;
-        let second = Arc::new(second);
-        // The line is cut short on its way: one part is whole, the next is not.
-        writer.write_all(b"{\"type\":\"changes\",\"parts\":{\"n4n0.afk\":true,\"osc\":{\"enabled\":tr}}\n").unwrap();
-        let mut line = String::new();
-        reader.read_line(&mut line).unwrap();
-        assert!(matches!(serde_json::from_str::<ToService>(&line).unwrap(), ToService::Resync), "{line}");
-        assert!(!client.snapshot().n4n0.afk, "no part of a line that could not be read is kept");
-        // Changes that follow are for a state this client does not hold: not taken.
-        let mut third = (*second).clone();
-        third.n4n0.listening = true;
-        let third = Arc::new(third);
-        write_state(&mut writer, Some(&second), &third).unwrap();
-        write_line(&mut writer, &ToClient::Library { version: 3 }).unwrap();
-        assert!(until(|| client.library_version() == 3));
-        assert!(!client.snapshot().n4n0.listening && !client.snapshot().n4n0.afk);
-        // The whole state, as the service answers: in step again, and changes are taken from there.
-        write_state(&mut writer, None, &third).unwrap();
-        assert!(until(|| client.snapshot().n4n0.listening));
-        assert_eq!(json(&client.snapshot()), json(&third));
-        let mut fourth = (*third).clone();
-        fourth.n4n0.thinking = true;
-        let fourth = Arc::new(fourth);
-        write_state(&mut writer, Some(&third), &fourth).unwrap();
-        assert!(until(|| client.snapshot().n4n0.thinking));
-        assert_eq!(json(&client.snapshot()), json(&fourth));
-        // Any line that cannot be read may have been the state.
-        writer.write_all(b"not a line of the link\n").unwrap();
-        write_line(&mut writer, &ToClient::Library { version: 4 }).unwrap();
-        assert!(until(|| client.library_version() == 4));
-        assert!(client.state.lock().unwrap().out_of_step, "any line that cannot be read may have been the state");
-        assert!(asks_again(&mut reader), "and is asked for");
-    }
-
     /// A state in which every part differs from a new snapshot's: the busy evening of `--publish-cost`, and the rest.
     pub(crate) fn every_part_set() -> Snapshot {
         use crate::state::*;
@@ -1167,99 +1044,44 @@ pub(crate) mod tests {
         assert!(names.len() > 70, "{} parts", names.len());
     }
 
-    /// Whether the client's next line to the service, within the reader's time, asks for the whole state again.
-    fn asks_again(reader: &mut BufReader<TcpStream>) -> bool {
-        let mut line = String::new();
-        reader.read_line(&mut line).is_ok_and(|n| n > 0) && matches!(serde_json::from_str::<ToService>(&line), Ok(ToService::Resync))
-    }
-
-    /// A line of changes no client can read: the part is not what it should be.
-    const UNREADABLE: &[u8] = b"{\"type\":\"changes\",\"parts\":{\"osc\":7}}\n";
-
-    /// Review B1, as the reviewer wrote it: once the whole state came, the wait before asking again is over, so a new
-    /// loss asks at once, however soon after the last asking.
+    /// Neither a held writer mutex nor late valid snapshots can prevent or undo terminal closure.
     #[test]
-    fn a_loss_right_after_a_recovery_asks_for_everything_at_once() {
+    pub(crate) fn unreadable_changes_close_without_the_writer_and_never_revive() {
         let first = Arc::new(Snapshot::new(Settings::default()));
         let (client, _writer, mut reader) = linked(&first);
-        reader.get_mut().set_read_timeout(Some(Duration::from_millis(500))).unwrap();
-        client.lost_step();
-        assert!(asks_again(&mut reader));
-        client.take_snapshot(first.clone());
-        assert!(client.state.lock().unwrap().asked.is_none(), "a recovery ends the wait before asking again");
-        assert!(!client.take_changes(r#"{"n4n0.afk":true,"osc":false}"#));
-        assert!(asks_again(&mut reader), "a new loss after a recovery asks for the whole state at once");
+        reader.get_mut().set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+        let writer_held = client.writer.lock().unwrap();
+        let c = client.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let task = std::thread::spawn(move || {
+            assert!(!c.take_changes(r#"{"n4n0.afk":true,"osc":false}"#));
+            tx.send(()).unwrap();
+        });
+        rx.recv_timeout(Duration::from_secs(10)).expect("closure must not need the held writer");
+        assert!(client.should_close());
+        assert_eq!(json(&client.snapshot()), json(&first), "no partially applied state");
+        let mut later = (*first).clone(); later.n4n0.afk = true;
+        client.take_snapshot(Arc::new(later));
+        assert!(!client.take_changes(r#"{"n4n0.afk":true}"#));
+        assert_eq!(json(&client.snapshot()), json(&first), "late lines cannot revive a closed link");
+        let mut line = String::new();
+        assert_eq!(reader.read_line(&mut line).unwrap(), 0);
+        drop(writer_held);
+        task.join().unwrap();
     }
 
-    /// The same over the wire: a change that cannot be read, the whole state, and at once another change that cannot be
-    /// read, followed by one that can and then nothing. The second loss is asked for too, and the client ends up
-    /// holding the newest state.
     #[test]
-    fn two_losses_within_a_second_both_recover() {
-        let first = Arc::new(Snapshot::new(Settings::default()));
-        let (client, mut writer, mut reader) = linked(&first);
-        reader.get_mut().set_read_timeout(Some(Duration::from_secs(3))).unwrap();
-        writer.write_all(UNREADABLE).unwrap();
-        assert!(asks_again(&mut reader));
-        let mut second = (*first).clone();
-        second.n4n0.afk = true;
-        let second = Arc::new(second);
-        write_state(&mut writer, None, &second).unwrap();
-        assert!(until(|| client.snapshot().n4n0.afk));
-        // At once, another loss, then a change that can be read; the service writes nothing more by itself.
-        writer.write_all(UNREADABLE).unwrap();
-        let mut third = (*second).clone();
-        third.n4n0.listening = true;
-        let third = Arc::new(third);
-        write_state(&mut writer, Some(&second), &third).unwrap();
-        assert!(asks_again(&mut reader), "the second loss asks for the whole state, a moment after the first asking");
-        assert!(!client.snapshot().n4n0.listening, "no change is taken while out of step");
-        write_state(&mut writer, None, &third).unwrap();
-        assert!(until(|| client.snapshot().n4n0.listening));
-        assert_eq!(json(&client.snapshot()), json(&third));
-        assert!(!client.should_close());
-    }
-
-    /// The answer to the asking is itself unreadable, and then nothing more comes: the client asks again by its
-    /// deadline, with no line to prompt it. Once in step it asks no more. And when no answer it can read ever comes, it
-    /// asks a few times, then closes the link and says the service is gone, so that it is not left showing a state that
-    /// no longer follows.
-    #[test]
-    fn an_answer_that_cannot_be_read_is_asked_for_again_then_the_link_is_given_up() {
-        let first = Arc::new(Snapshot::new(Settings::default()));
-        let (client, mut writer, mut reader) = linked(&first);
-        reader.get_mut().set_read_timeout(Some(RESYNC_RETRY * 10)).unwrap();
-        writer.write_all(UNREADABLE).unwrap();
-        assert!(asks_again(&mut reader));
-        writer.write_all(b"{\"type\":\"snapshot\",\"snapshot\":{\"version\":\n").unwrap();
-        let answered = Instant::now();
-        assert!(asks_again(&mut reader), "asked again by its deadline, with no line to prompt it");
-        assert!(answered.elapsed() >= RESYNC_RETRY / 2, "by the deadline, not at once: {:?}", answered.elapsed());
-        let mut second = (*first).clone();
-        second.n4n0.afk = true;
-        let second = Arc::new(second);
-        write_state(&mut writer, None, &second).unwrap();
-        assert!(until(|| client.snapshot().n4n0.afk));
-        assert!(!client.state.lock().unwrap().out_of_step);
-        // In step: what it asked while it was not is read off, and nothing more is asked.
-        std::thread::sleep(RESYNC_RETRY * 2);
-        reader.get_mut().set_read_timeout(Some(Duration::from_millis(20))).unwrap();
-        let mut line = String::new();
-        while reader.read_line(&mut line).is_ok_and(|n| n > 0) {
-            line.clear();
+    pub(crate) fn unreadable_wire_lines_end_the_link() {
+        for line in [b"not json\n".as_slice(), b"{\"type\":\"changes\",\"parts\":{\"osc\":7}}\n", b"{\"type\":\"snapshot\",\"snapshot\":{} }\n"] {
+            let first = Arc::new(Snapshot::new(Settings::default()));
+            let (client, mut writer, mut reader) = linked(&first);
+            reader.get_mut().set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+            writer.write_all(line).unwrap();
+            let mut answer = String::new();
+            assert_eq!(reader.read_line(&mut answer).unwrap(), 0, "no resync command is sent");
+            assert!(client.should_close());
+            assert_eq!(json(&client.snapshot()), json(&first));
         }
-        reader.get_mut().set_read_timeout(Some(RESYNC_RETRY * 3)).unwrap();
-        line.clear();
-        assert!(reader.read_line(&mut line).is_err() && line.is_empty(), "nothing is asked once in step: {line}");
-        // Lost again, and never answered.
-        reader.get_mut().set_read_timeout(Some(RESYNC_RETRY * 10)).unwrap();
-        writer.write_all(UNREADABLE).unwrap();
-        for asking in 0..RESYNC_TRIES {
-            assert!(asks_again(&mut reader), "asking {asking}");
-        }
-        let mut line = String::new();
-        assert_eq!(reader.read_line(&mut line).unwrap_or(usize::MAX), 0, "the link is closed after the last asking: {line}");
-        assert!(until(|| client.should_close()), "and the client says the service is gone");
     }
 
     #[test]

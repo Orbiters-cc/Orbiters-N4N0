@@ -44,8 +44,6 @@ struct Said {
     /// The digest of the state it holds, and how many states it has taken.
     state: Option<String>,
     states: u64,
-    /// Lines it could not read.
-    lost: u64,
     ended: bool,
 }
 
@@ -86,8 +84,7 @@ fn start(name: &'static str, role: Role, mode: &str, extra: &[&str], service: &E
             if let Some(digest) = line.strip_prefix("state ") {
                 said.state = Some(digest.trim().to_string());
                 said.states += 1;
-            } else if line.starts_with("lost step") {
-                said.lost += 1;
+
             } else if line.starts_with("link ended") {
                 said.ended = true;
             }
@@ -162,6 +159,18 @@ impl Run {
     }
 }
 
+fn wait_closed(shown: &mut Shown, deadline: Instant) -> anyhow::Result<()> {
+    while Instant::now() < deadline {
+        if let Some(code) = shown.process.try_wait()? {
+            anyhow::ensure!(code.success() && shown.said.lock().unwrap().ended, "{} did not report a clean disconnect", shown.name);
+            println!("ok   {} reported disconnect and exited", shown.name);
+            return Ok(());
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    anyhow::bail!("{} did not exit before the harness deadline", shown.name)
+}
+
 pub fn run(args: &[String]) -> anyhow::Result<()> {
     if let Some(game) = game_running() {
         anyhow::bail!("{game} is running: this starts a window beside it and a process that looks for the game's window. Run it when neither VRChat nor SteamVR does.");
@@ -220,25 +229,21 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
     for round in 1..=3 {
         run.step(&format!("a publish with nothing changed ({round})"), &ctl, &shown, soon, &|_| ctl.update(|_| {}));
     }
-    let lost_before: Vec<u64> = shown.iter().map(|s| s.said.lock().unwrap().lost).collect();
-    run.step("a change cut short on its way", &ctl, &shown, soon, &|shown| {
-        shown.iter().for_each(|s| s.between.damage(&[Line::Changes]));
-        ctl.update(|s| s.n4n0.panel = Some("After a line cut short".into()));
-    });
-    run.step("at once, another change cut short", &ctl, &shown, soon, &|shown| {
-        shown.iter().for_each(|s| s.between.damage(&[Line::Changes]));
-        ctl.update(|s| s.n4n0.panel = Some("After a second line cut short".into()));
-    });
-    run.step("a change and the whole state sent in answer both cut short, then nothing", &ctl, &shown, soon, &|shown| {
-        shown.iter().for_each(|s| s.between.damage(&[Line::Changes, Line::Whole]));
-        ctl.update(|s| s.n4n0.panel = Some("After an answer cut short".into()));
-    });
-    for (s, before) in shown.iter().zip(&lost_before) {
-        let (lost, damaged) = (s.said.lock().unwrap().lost - before, s.between.passed().1);
-        println!("     the {}: {damaged} lines cut short on their way, {lost} it said it could not read", s.name);
-        run.failed += (damaged != 4 || lost < 3) as u32;
+    // A damaged state ends each real process exactly as EOF does. A new process gets the latest full baseline.
+    for s in &shown { s.between.damage(&[Line::Changes]); }
+    ctl.update(|s| s.projects_changed += 1);
+    for s in &mut shown {
+        wait_closed(s, started + Duration::from_secs(50))?;
+        anyhow::ensure!(s.between.passed().1 == 1, "the damaged line reached {}", s.name);
     }
-    run.step("a change after all that", &ctl, &shown, soon, &|_| ctl.update(|s| s.projects_changed += 1));
+    let roles: Vec<_> = shown.iter().map(|s| (s.name, s.role)).collect();
+    shown.clear();
+    for (name, role) in roles {
+        let mode = if role == Role::Window { "--window" } else { "--orbit-desktop" };
+        shown.push(start(name, role, mode, &["--no-focus"], &endpoint, &root)?);
+    }
+    run.step("fresh processes after the damaged line", &ctl, &shown, soon, &|_| {});
+    run.step("a change after reconnect", &ctl, &shown, soon, &|_| ctl.update(|s| s.projects_changed += 1));
 
     // The connection drops: each process says its link ended, and ends.
     for s in &shown {

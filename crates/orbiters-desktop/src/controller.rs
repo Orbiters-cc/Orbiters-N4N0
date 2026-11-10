@@ -516,12 +516,7 @@ impl Controller {
         self.subscribers.lock().unwrap().push(mailbox);
     }
 
-    /// Posts the current state to `mailbox` again (its client lost step with the link, and is sent everything), in turn
-    /// with the publishes: never an older state after a newer one.
-    pub fn repost(&self, mailbox: &Mailbox) {
-        let _turn = self.publishing.lock().unwrap();
-        mailbox.post_snapshot(self.view());
-    }
+
 
     /// Posts a message to every subscriber (forgetting those gone). Returns whether one that shows notices got it.
     fn broadcast(&self, msg: impl Fn() -> ToClient) -> bool {

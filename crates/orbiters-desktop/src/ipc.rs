@@ -693,6 +693,7 @@ impl Client {
             let client = self.clone();
             if std::thread::Builder::new().name("service-link-asking".into()).spawn(move || client.keep_asking()).is_err() {
                 self.state.lock().unwrap().retrying = false;
+                self.give_up();
             }
         }
     }
@@ -719,7 +720,7 @@ impl Client {
             if held.asks >= RESYNC_TRIES {
                 held.retrying = false;
                 drop(held);
-                let _ = self.writer.lock().unwrap().shutdown(std::net::Shutdown::Both);
+                self.give_up();
                 return;
             }
             held.asks += 1;
@@ -728,6 +729,18 @@ impl Client {
             self.send(&ToService::Resync);
             held = self.state.lock().unwrap();
         }
+    }
+
+    /// Windows socket shutdown need not wake the reader on its cloned handle. Mark the client closed here as well
+    /// as at reader EOF, so silence after an unreadable answer cannot leave a connected, stale window behind.
+    fn give_up(&self) {
+        self.connected.store(false, Ordering::Relaxed);
+        self.close.store(true, Ordering::Relaxed);
+        self.step.notify_all();
+        self.vrchat_data.lock().unwrap().clear();
+        self.repaint(false);
+        leave_soon();
+        let _ = self.writer.lock().unwrap().shutdown(std::net::Shutdown::Both);
     }
 
     pub fn take_notices(&self) -> Vec<Notice> {
@@ -774,7 +787,7 @@ impl Client {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::controller::NoticeKind;
     use std::net::TcpListener;
@@ -1046,7 +1059,7 @@ mod tests {
     }
 
     /// A state in which every part differs from a new snapshot's: the busy evening of `--publish-cost`, and the rest.
-    fn every_part_set() -> Snapshot {
+    pub(crate) fn every_part_set() -> Snapshot {
         use crate::state::*;
         let plain = Snapshot::new(Settings::default());
         let mut s = crate::controller::publish_cost::busy_evening();

@@ -57,6 +57,14 @@ struct Shown {
     between: Between,
 }
 
+impl Drop for Shown {
+    fn drop(&mut self) {
+        self.between.hang_up();
+        let _ = self.process.kill();
+        let _ = self.process.wait();
+    }
+}
+
 fn start(name: &'static str, role: Role, mode: &str, extra: &[&str], service: &Endpoint, root: &Path) -> anyhow::Result<Shown> {
     let between = Between::start(service.port)?;
     let endpoint = Endpoint { port: between.port(), token: service.token.clone() };
@@ -113,9 +121,9 @@ fn game_running() -> Option<String> {
 }
 
 /// How the run goes.
-#[derive(Default)]
 struct Run {
     failed: u32,
+    deadline: Instant,
     /// One of its processes had the foreground window at some moment.
     foreground: bool,
 }
@@ -126,6 +134,7 @@ impl Run {
     fn step(&mut self, what: &str, ctl: &crate::controller::Shared, shown: &[Shown], wait: Duration, act: &dyn Fn(&[Shown])) {
         let before: Vec<u64> = shown.iter().map(|s| s.said.lock().unwrap().states).collect();
         let began = Instant::now();
+        let wait = wait.min(self.deadline.saturating_duration_since(began));
         act(shown);
         let wanted = ipc::digest(&ctl.view());
         let mut took: Vec<Option<Duration>> = vec![None; shown.len()];
@@ -185,7 +194,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
     }
     anyhow::ensure!(!shown.is_empty(), "nothing to start");
 
-    let mut run = Run::default();
+    let mut run = Run { failed: 0, foreground: false, deadline: started + Duration::from_secs(45) };
     let soon = Duration::from_secs(8);
 
     run.step("linked, the first state (a process starting)", &ctl, &shown, Duration::from_secs(25), &|_| {});
@@ -238,7 +247,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
     for s in &mut shown {
         let began = Instant::now();
         let mut code = None;
-        while code.is_none() && began.elapsed() < Duration::from_secs(12) {
+        while code.is_none() && began.elapsed() < Duration::from_secs(5) && started.elapsed() < Duration::from_secs(50) {
             code = s.process.try_wait()?;
             std::thread::sleep(Duration::from_millis(20));
         }
@@ -246,8 +255,9 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         match code {
             Some(code) => println!("{} the connection dropped: the {} said its link ended: {ended}, and ended ({code}) after {} ms", if ended { "ok  " } else { "FAIL" }, s.name, began.elapsed().as_millis()),
             None => {
-                println!("FAIL the connection dropped: the {} said its link ended: {ended}, and was still running after 12 s (stopped here)", s.name);
+                println!("FAIL the connection dropped: the {} said its link ended: {ended}, and exceeded the shutdown deadline (stopped here)", s.name);
                 let _ = s.process.kill();
+                let _ = s.process.wait();
             }
         }
         run.failed += (code.is_none() || !ended) as u32;

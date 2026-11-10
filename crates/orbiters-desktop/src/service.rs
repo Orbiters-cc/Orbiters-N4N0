@@ -26,6 +26,8 @@ struct Link {
     mailbox: Arc<Mailbox>,
     /// The client could not read a line of the state (`ToService::Resync`): the next state goes whole.
     resync: Arc<AtomicBool>,
+    #[cfg(test)]
+    writes: Arc<AtomicU64>,
 }
 
 /// Connections that have not said their token yet, at most: each holds a thread for up to `HELLO_TIMEOUT`.
@@ -463,6 +465,10 @@ impl Service {
         let pace = (role == Role::Window).then_some(WINDOW_PACE);
         let resync = Arc::new(AtomicBool::new(false));
         let again = resync.clone();
+        #[cfg(test)]
+        let writes = Arc::new(AtomicU64::new(0));
+        #[cfg(test)]
+        let completed = writes.clone();
         std::thread::spawn(move || {
             // The state this link last wrote: the next one goes as what changed since (`ipc::write_state`), whatever
             // states the mailbox replaced in between. None yet, or the client lost step: the whole state.
@@ -483,6 +489,8 @@ impl Service {
                     out.close();
                     return;
                 }
+                #[cfg(test)]
+                completed.fetch_add(1, Ordering::Relaxed);
                 if let Some(pace) = paced {
                     std::thread::sleep(pace);
                 }
@@ -491,7 +499,10 @@ impl Service {
         // Subscribed before it is listed: the snapshot is in its mailbox before anything else can be (a Show).
         self.ctl.subscribe(mailbox.clone());
         let id = self.next_link.fetch_add(1, Ordering::Relaxed);
-        self.links.lock().unwrap().push(Link { id, role, pid, mailbox: mailbox.clone(), resync });
+        self.links.lock().unwrap().push(Link { id, role, pid, mailbox: mailbox.clone(), resync,
+            #[cfg(test)]
+            writes,
+        });
         match role {
             Role::Window => {
                 *self.window.lock().unwrap() = None;
@@ -867,7 +878,7 @@ mod tests {
         let service = service();
         let ctl = service.ctl.clone();
         let (first, between) = linked_through(&service, Role::Overlay);
-        ctl.update(|s| s.n4n0.panel = Some("before it went".into()));
+        ctl.update(|s| s.projects_changed = 42);
         assert!(in_step(&service, &first));
         assert!(ctl.view().steamvr.overlay && service.linked(Role::Overlay) == 1);
         // The connection drops: the client says the service is gone, the service lets the link go and no longer counts
@@ -883,7 +894,7 @@ mod tests {
         let again = linked(&service, Role::Overlay);
         assert!(in_step(&service, &again));
         assert_eq!(again.snapshot().n4n0.lines.len(), 1);
-        assert_eq!(again.snapshot().n4n0.panel.as_deref(), Some("before it went"));
+        assert_eq!(again.snapshot().projects_changed, 42);
         assert!(until(|| ctl.view().steamvr.overlay));
         ctl.update(|s| s.n4n0.afk = true);
         assert!(in_step(&service, &again));
@@ -949,6 +960,23 @@ mod tests {
         assert!(in_step(&service, &client));
         let before = between.passed().0;
         between.hold(true);
+        let writes = service.links.lock().unwrap()[0].writes.clone();
+        // Await each write before publishing another, until one cannot complete while the proxy is held. This avoids
+        // mistaking mailbox coalescing for full socket buffers. The overlay writer has no pacing delay.
+        let mut blocked = false;
+        for round in 0..100 {
+            let before = writes.load(Ordering::Relaxed);
+            ctl.update(|s| *s.n4n0.lines = vec![said(&format!("{} {}", round, "x".repeat(1_000_000)))]);
+            let began = Instant::now();
+            while writes.load(Ordering::Relaxed) == before && began.elapsed() < Duration::from_millis(300) {
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            if writes.load(Ordering::Relaxed) == before {
+                blocked = true;
+                break;
+            }
+        }
+        assert!(blocked, "the service writer must stall before the reader drains");
         // 200 kB that change every time, with a number in another part that goes with them: 60 MB in all, far more than
         // lies between two sockets.
         let big = "x".repeat(200_000);
@@ -1033,6 +1061,33 @@ mod tests {
         assert!(in_step(&service, &window) && in_step(&service, &overlay));
         assert_eq!(whole(&window.snapshot()), whole(&a), "back on A, whole");
         assert_ne!(window.snapshot().settings.walk_boost.strength, 0.9);
+    }
+
+    #[test]
+    fn every_declared_part_arrives_through_the_service() {
+        use orbiters_core::slice::{apply_changes, Parts};
+        let service = service();
+        // Publication intentionally clears VRChat login state without a signed-in account on the active server.
+        // Supply that prerequisite instead of expecting an invalid fixture to survive the real publisher.
+        service.ctl.update(|s| {
+            s.account.state = crate::state::AccountState::SignedIn { username: "wire fixture".into() };
+            s.account.development = orbiters_core::account::Server::current() == orbiters_core::account::Server::Development;
+        });
+        let client = linked(&service, Role::Window);
+        assert!(in_step(&service, &client));
+        let baseline = service.ctl.view();
+        let full = whole(&ipc::tests::every_part_set());
+        let mut names = Vec::new();
+        baseline.part_names("", &mut names);
+        for name in names {
+            let value = name.split('.').fold(&full, |at, key| &at[key]);
+            let mut next = (*baseline).clone();
+            apply_changes(&mut next, &serde_json::json!({name.as_str(): value}).to_string()).unwrap();
+            service.ctl.set_snapshot(next);
+            assert!(in_step(&service, &client), "{name} did not arrive whole");
+            let received = whole(&client.snapshot());
+            assert_eq!(name.split('.').fold(&received, |at, key| &at[key]), value, "{name}");
+        }
     }
 
     #[test]

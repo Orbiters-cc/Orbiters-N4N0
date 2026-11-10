@@ -49,7 +49,8 @@ pub const RING_INNER: f32 = 106.0;
 pub const RING_OUTER: f32 = 172.0;
 /// The ring that blooms outside it.
 pub const BLOOM_INNER: f32 = 176.0;
-pub const BLOOM_OUTER: f32 = 238.0;
+// Nearly as deep as the first ring and a little more: its cells are half as wide, and a name, an icon and a laser want the room (round 19's judges).
+pub const BLOOM_OUTER: f32 = 250.0;
 /// What separates two cells, and the cells' corners, in those units.
 // Gaps of the tiles' kind: cells that read as Orbiters' tiles round the wheel, not as a second VRChat ring (round 14's judges).
 const RING_GAP: f32 = 6.0;
@@ -309,7 +310,7 @@ impl Zone {
             // In a headset the caption's pill ends at its zone's right edge, so this follows it at once (round 15's judges).
             // Over the caption, on the ring's axis: the caption's pill centred over the ring's top and this right over it (rounds 14 and 16 to 18: both hung off to the
             // ring's upper right, whatever was tried beside the caption).
-            Zone::WheelHide => r(-56.0, -300.0, 56.0, -262.0),
+            Zone::WheelHide => r(-56.0, -306.0, 56.0, -268.0),
             // As tall as My Profile and as wide, beside it.
             // As tall as My Profile and as wide, beside it.
             Zone::WingName => r(362.0, -150.0, 524.0, -120.0),

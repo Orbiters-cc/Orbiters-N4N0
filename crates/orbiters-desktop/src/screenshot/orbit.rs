@@ -298,7 +298,9 @@ fn cut(frame: &image::RgbImage, rect: egui::Rect, inside: impl Fn(Vec2) -> f32) 
 /// `--only orbit-vr <folder of real frames>`: how the panels hang in a headset, as renders: the real panels' pictures and VRChat's real wheel and Quick Menu, cut from desktop frames (`ref-wheel-<world>.jpg`,
 /// `ref-qm-<world>.jpg`, `ref-world-<world>.jpg` at 1920 x 1080), placed in 3D where `overlay::orbit::vr` places them and seen from the eyes. VRChat's menus were not captured in a headset: their place and size there is an estimate.
 /// Half the width the VR renders see, in degrees: wide enough that the wing and what plays at its foot are in the frame (round 13's judges saw them cut).
-const VR_SHOT_HALF_FOV: f32 = 57.0;
+// About 13 pixels a degree at 1280 across: nearer what a headset shows (a Quest Pro, about 18) than the 11 of rounds 9 to 19, whose pictures showed every label a
+// quarter smaller than a headset does. The README says so.
+const VR_SHOT_HALF_FOV: f32 = 50.0;
 /// The view in a hand, seen closer in: about a headset's pixels to a degree once the picture is brought to 1280 across (a Quest Pro has about 18), so that how
 /// its hint reads is what a headset shows, not what a wide frame shrinks it to (round 14's judges found its lines too small). A part of what the eye sees.
 const HAND_SHOT_HALF_FOV: f32 = 36.0;
@@ -356,7 +358,8 @@ pub(super) fn vr_shots(out: &Path, refs: &Path) -> anyhow::Result<()> {
                 }
             }
             if let Some(end) = end {
-                eye.laser([-0.30, 1.12, -0.25], end);
+                // From the other hand, held low before the body: its beam crosses no cell's name on its way.
+                eye.laser([-0.02, 1.02, -0.22], end);
             }
             eye.save(out, name)
         };
@@ -374,7 +377,7 @@ pub(super) fn vr_shots(out: &Path, refs: &Path) -> anyhow::Result<()> {
         }
         // Held a little to the left of straight ahead, as the hand that holds it is: the menu, a sheet on it and the wing beside it are all in the picture.
         let mut held = space::before_eyes(&head, 0.5, 0.08);
-        held.m[0][3] -= 0.07;
+        held.m[0][3] -= 0.12;
         let plane = vr::quick_menu_plane(&vr::grip_holding(&held, &tune.quick_menu(1)), 1, &tune, 1.0);
         let qm_scene = |facts: &Facts, hover: Option<usize>, sheet: Option<Sheet>, name: &str| -> anyhow::Result<()> {
             let mut eye = Eye::new(size, &ground, eyes);
@@ -436,8 +439,10 @@ pub(super) fn vr_shots(out: &Path, refs: &Path) -> anyhow::Result<()> {
             let mut model = |small: &stereo::Small, half: f32| -> anyhow::Result<Vec<u8>> {
                 let camera = stereo::eye_camera(&head, tangents_of(half), w, h, &small.placement(capture.view.eye()));
                 // As the app draws it: only what it reaches, its floor fading at its edge.
-                renderer.clip(Some(&(small.middle(capture.view.eye()), small.reach(), shared.clone())));
-                renderer.render_view(&camera, capture.within(small.reach()))
+                let ceiling = if small.docked { capture.view.ground() + small.reach() * stereo::HOLE_CEILING_PER_REACH } else { f32::INFINITY };
+                renderer.clip(Some(&(small.middle(capture.view.eye()), small.reach(), ceiling, shared.clone())));
+                // As many as the app draws: what it reaches from where its middle is.
+                renderer.render_view(&camera, capture.within(small.reach() + small.moved_by()))
             };
             let panel = image::open(refs.join("panel-small-docked.png"))?.to_rgba8();
             let panel_px = [panel.width(), panel.height()];
@@ -455,8 +460,9 @@ pub(super) fn vr_shots(out: &Path, refs: &Path) -> anyhow::Result<()> {
             let there = orbiters_openvr::Matrix34 { m: [[1.0, 0.0, 0.0, x], [0.0, 1.0, 0.0, y], [0.0, 0.0, 1.0, 0.0]] };
             let at = space::compose(&page_quad.transform, &there);
             let radius = hole.width() / 1024.0 * page_quad.width / 2.0 * crate::overlay::worlds::SMALL_FILLS_HOLE;
-            let dock = stereo::SmallDock::behind(&capture.view, &at, radius);
-            let small = stereo::Small::new(&capture.view, &head, capture.small_reach()).at_dock(&dock);
+            let dock = stereo::SmallDock::behind(&capture.view, &at, radius, capture.hole_frame().1);
+            let small = stereo::Small::new(&capture.view, &head, capture.small_reach()).at_dock(&dock).framed(capture.hole_frame());
+            println!("in its hole: its middle {:?} from the start eye, reaching {} of {}", capture.hole_frame().0, small.reach(), capture.small_reach());
             // Docked.
             let worlds = Facts { sheet: Some(Sheet::Worlds), sheet_title: "Worlds in 3D".into(), view_showing: true, view_small: true, sheet_hole: Some(egui::Rect::from_min_max(pos2(hole.min.x * 0.6875, hole.min.y * 0.6875 + panels::SHEET_HEAD), pos2(hole.max.x * 0.6875, hole.max.y * 0.6875 + panels::SHEET_HEAD))), ..facts.clone() };
             let center_units = zones::Placed { zone: Zone::SheetBack, rect: qm_units, center: pos2(0.0, 0.0), unit: 1.0 };

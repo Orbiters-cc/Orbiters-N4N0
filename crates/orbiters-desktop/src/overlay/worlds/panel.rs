@@ -603,8 +603,9 @@ fn small_action(p: &Painter, rect: Rect, glyph: &str, filled: bool, count: u64, 
         text(p, pos2(left + 26.0 + number_wide, rect.center().y), Align2::LEFT_CENTER, word);
         return;
     }
-    // A headset's at its size (round 17's judges found its labels at a screen's).
-    let (icon, count, said) = (26.0, 22.0, 19.5);
+    // A headset's: its icon and its number, and its word under them, each word at one size and all at a headset's (round 19's judges: 14 to 15 px in its picture).
+    // On one line a long word was squeezed small beside a short one.
+    let (icon, count_size, said) = (26.0, 22.0, 20.5);
     let line = rect.min.y + rect.height() * 0.34;
     let at = if number.is_empty() { rect.center().x } else { rect.center().x - 16.0 };
     if filled {
@@ -613,7 +614,7 @@ fn small_action(p: &Painter, rect: Rect, glyph: &str, filled: bool, count: u64, 
         widgets::icon(p, pos2(at, line), glyph, icon, fade(fg, alpha));
     }
     if !number.is_empty() {
-        text(p, pos2(at + icon * 0.7, line), Align2::LEFT_CENTER, orbit_look::txt(number, count).weight(weight::SEMIBOLD).color(fade(fg, alpha)));
+        text(p, pos2(at + icon * 0.7, line), Align2::LEFT_CENTER, orbit_look::txt(number, count_size).weight(weight::SEMIBOLD).color(fade(fg, alpha)));
     }
     text(p, pos2(rect.center().x, rect.min.y + rect.height() * 0.75), Align2::CENTER_CENTER, fitted(p, orbit_look::txt(word, said).weight(weight::MEDIUM).color(fade(theme::FG, alpha)), rect.width() - 10.0));
 }
@@ -623,11 +624,16 @@ fn small_action(p: &Painter, rect: Rect, glyph: &str, filled: bool, count: u64, 
 const VR_LEFT: f32 = 464.0;
 const VR_SIDE: Rect = Rect { min: Pos2 { x: 452.0, y: 12.0 }, max: Pos2 { x: 1012.0, y: 564.0 } };
 /// Its picture; where a capture standing small is seen through it.
-pub const VR_HERO: Rect = Rect { min: Pos2 { x: VR_LEFT, y: 24.0 }, max: Pos2 { x: SIDE_RIGHT, y: 270.0 } };
-const VR_SMALL_BACK: Rect = Rect { min: Pos2 { x: 836.0, y: 218.0 }, max: Pos2 { x: 990.0, y: 262.0 } };
+// About 40% of the panel's height (round 19's judges): what is left under it holds its cue, then the name and who made it as a block of their own, well clear of the
+// buttons (a laser on Around me was on the byline).
+pub const VR_HERO: Rect = Rect { min: Pos2 { x: VR_LEFT, y: 24.0 }, max: Pos2 { x: SIDE_RIGHT, y: 250.0 } };
+const VR_SMALL_BACK: Rect = Rect { min: Pos2 { x: 836.0, y: 198.0 }, max: Pos2 { x: 990.0, y: 242.0 } };
 /// Centred right under the hole, the hand's cue for what is in it (round 15's judges found it far off at the right).
 // A clear line of its own between the hole and the name (the round 19 pre-check saw it on the name).
-const VR_GRIP: Rect = Rect { min: Pos2 { x: VR_LEFT, y: 272.0 }, max: Pos2 { x: SIDE_RIGHT, y: 304.0 } };
+const VR_GRIP: Rect = Rect { min: Pos2 { x: VR_LEFT, y: 254.0 }, max: Pos2 { x: SIDE_RIGHT, y: 286.0 } };
+/// Where a headset's name and who made it start.
+const VR_NAME: f32 = 292.0;
+const VR_UNDER: f32 = 325.0;
 const VR_SHOW: Rect = Rect { min: Pos2 { x: VR_LEFT, y: 372.0 }, max: Pos2 { x: 637.0, y: 434.0 } };
 const VR_SHOW_SMALL: Rect = Rect { min: Pos2 { x: 645.0, y: 372.0 }, max: Pos2 { x: 819.0, y: 434.0 } };
 const VR_GO: Rect = Rect { min: Pos2 { x: 827.0, y: 372.0 }, max: Pos2 { x: SIDE_RIGHT, y: 434.0 } };
@@ -1798,15 +1804,20 @@ impl Panel {
         if side && d.status.headset {
             let (h, pr) = state(Target::CloseSide);
             let head = vr_list_head(1);
-            p.rect_filled(if pr { head.shrink(2.0) } else { head }, CornerRadius::same(24), if h { RAISED2 } else { RAISED });
-            widgets::icon(p, pos2(head.min.x + 26.0, head.center().y), icons::CARET_LEFT, 24.0, theme::FG);
+            // Its name on a ground of its own, then search and the filters each on a square tile of theirs (round 19's judges: two small icons at the end of one
+            // bar). All of it is one press, which goes back to the full list where they are.
+            let tile = head.height();
+            let named = Rect::from_min_max(head.min, pos2(head.max.x - 2.0 * (tile + 6.0), head.max.y));
+            p.rect_filled(if pr { named.shrink(2.0) } else { named }, CornerRadius::same(16), if h { RAISED2 } else { RAISED });
+            widgets::icon(p, pos2(named.min.x + 24.0, named.center().y), icons::CARET_LEFT, 24.0, theme::FG);
             let name = if self.query.is_empty() { self.section.label(d.status.list.vrchat).to_string() } else { self.query.clone() };
-            let room = head.width() - 44.0 - 76.0;
-            let galley = p.layout_job(orbit_look::txt(name, 21.0).weight(weight::SEMIBOLD).color(theme::FG).job_truncated(room));
-            p.galley(pos2(head.min.x + 44.0, head.center().y - galley.size().y / 2.0), galley, theme::FG);
-            // What else is behind it.
-            widgets::icon(p, pos2(head.max.x - 58.0, head.center().y), icons::MAGNIFYING_GLASS, 23.0, theme::FG_2);
-            widgets::icon(p, pos2(head.max.x - 26.0, head.center().y), icons::SLIDERS_HORIZONTAL, 23.0, theme::FG_2);
+            let galley = p.layout_job(orbit_look::txt(name, 21.0).weight(weight::SEMIBOLD).color(theme::FG).job_truncated(named.width() - 52.0));
+            p.galley(pos2(named.min.x + 42.0, named.center().y - galley.size().y / 2.0), galley, theme::FG);
+            for (i, glyph) in [icons::MAGNIFYING_GLASS, icons::SLIDERS_HORIZONTAL].into_iter().enumerate() {
+                let at = Rect::from_min_size(pos2(head.max.x - (2 - i) as f32 * (tile + 6.0) + 6.0, head.min.y), egui::Vec2::splat(tile));
+                p.rect_filled(if pr { at.shrink(2.0) } else { at }, CornerRadius::same(16), if h { RAISED2 } else { RAISED });
+                widgets::icon(p, at.center(), glyph, 25.0, theme::FG);
+            }
             // While it is on its way to its two columns, it still has their room.
             let right = if self.side_out(time) < 0.995 { WIDTH } else { VR_LIST_RIGHT + 8.0 };
             let list = p.with_clip_rect(Rect::from_min_max(pos2(0.0, VR_LIST_TOP), pos2(right, VR_LIST_BOTTOM)));
@@ -2060,13 +2071,26 @@ impl Panel {
                 p.line_segment([at, at + vec2(x * arm, 0.0)], stroke);
                 p.line_segment([at, at + vec2(0.0, y * arm)], stroke);
             }
+            // A shade along the hole's top edge, under its frame: the panel's own thickness, so the capture reads as behind it in a still (round 19's judges).
+            // Not in the retro look, whose flat grounds have no shades.
+            for i in (0..7).filter(|_| !orbit_look::retro()) {
+                let band = Rect::from_min_size(pos2(h.left(), h.top() + i as f32 * 3.0), vec2(h.width(), 3.0));
+                p.rect_filled(band, CornerRadius::ZERO, theme::black(0.5 * (1.0 - i as f32 / 7.0).powi(2)));
+            }
             let words = if near { tr("Close your grip") } else { tr("Grip to take it") };
             // Right under the hole, off the capture, and with nothing around it: this is done with a hand, and is no button for a laser.
             let ink = if near { orbit_look::accent() } else { theme::FG };
             let galley = p.layout_job(orbit_look::txt(words, 21.0).weight(weight::BOLD).color(ink).job(f32::INFINITY));
-            let left = VR_GRIP.center().x - (galley.size().x + 34.0) / 2.0;
+            // And, quieter, what comes after: the panel promises the view in a hand (round 19's judges).
+            let then = (!near).then(|| p.layout_job(orbit_look::txt(format!("\u{b7}  {}", tr("then your stick zooms it")), 18.5).weight(weight::MEDIUM).color(theme::FG_3).job(f32::INFINITY)));
+            let then_wide = then.as_ref().map_or(0.0, |g| g.size().x + 10.0);
+            let left = VR_GRIP.center().x - (galley.size().x + 34.0 + then_wide) / 2.0;
             widgets::icon(p, pos2(left + 13.0, VR_GRIP.center().y), icons::HAND_GRABBING, 27.0, orbit_look::accent());
+            let words_wide = galley.size().x;
             p.galley(pos2(left + 34.0, VR_GRIP.center().y - galley.size().y / 2.0), galley, ink);
+            if let Some(then) = then {
+                p.galley(pos2(left + 34.0 + words_wide + 10.0, VR_GRIP.center().y - then.size().y / 2.0), then, theme::FG_3);
+            }
         } else {
             let hero = if vr { VR_HERO } else { SIDE_HERO };
             let small_back = if vr { VR_SMALL_BACK } else { SMALL_BACK };
@@ -2123,7 +2147,7 @@ impl Panel {
         // Its name, as long as it is; who made it.
         let (x, width) = if vr { (VR_LEFT, SIDE_RIGHT - VR_LEFT) } else { (SIDE_LEFT, SIDE_RIGHT - SIDE_LEFT) };
         if vr {
-            text_cut(p, pos2(x, 318.0), width, orbit_look::txt(entry.name.clone(), 24.0).weight(weight::SEMIBOLD).color(fade(theme::FG, rest)));
+            text_cut(p, pos2(x, VR_NAME), width, orbit_look::txt(entry.name.clone(), 24.0).weight(weight::SEMIBOLD).color(fade(theme::FG, rest)));
         } else {
             let mut title = orbit_look::txt(entry.name.clone(), 21.0).weight(weight::SEMIBOLD).color(fade(theme::FG, rest)).job(width);
             title.wrap.max_rows = 2;
@@ -2151,13 +2175,13 @@ impl Panel {
         let linked = !vr && !d.others(entry).is_empty();
         let under = if vr || linked { under.first().cloned().unwrap_or_default() } else { under.join(" · ") };
         let under_room = if linked { OTHER.min.x - 10.0 - x } else { width };
-        text_cut(p, pos2(x, if vr { 349.0 } else { SIDE_UNDER }), under_room, orbit_look::txt(under, if vr { 20.0 } else { 17.5 }).color(fade(if vr { theme::FG } else { theme::FG_2 }, rest)));
+        text_cut(p, pos2(x, if vr { VR_UNDER } else { SIDE_UNDER }), under_room, orbit_look::txt(under, if vr { 20.0 } else { 17.5 }).color(fade(if vr { theme::FG } else { theme::FG_2 }, rest)));
         // It shows in 3D on its picture: where See it in 3D was, how to look around it. Said here, not over the picture, and no second full-screen button (round 18's judges).
         if !vr && self.live.as_ref().is_some_and(|l| l.id == entry.id && l.picture.is_some()) {
             // Words from the panel's left edge, with nothing round them: in an outline with an icon it read as a button that did nothing (the round 19 pre-check).
-            let galley = p.layout_job(orbit_look::txt(tr("Drag the picture to look around"), 17.5).weight(weight::MEDIUM).color(fade(theme::FG_3, rest)).job_truncated(width - 28.0));
-            widgets::icon(p, pos2(x + 9.0, SHOW_WHOLE.center().y), icons::HAND_GRABBING, 19.0, fade(theme::FG_3, rest));
-            p.galley(pos2(x + 26.0, SHOW_WHOLE.center().y - galley.size().y / 2.0), galley, theme::FG_3);
+            let galley = p.layout_job(orbit_look::txt(tr("Drag the picture to look around"), 19.0).weight(weight::MEDIUM).color(fade(theme::FG_2, rest)).job_truncated(width - 28.0));
+            widgets::icon(p, pos2(x + 9.0, SHOW_WHOLE.center().y), icons::HAND_GRABBING, 20.0, fade(theme::FG_2, rest));
+            p.galley(pos2(x + 27.0, SHOW_WHOLE.center().y - galley.size().y / 2.0), galley, theme::FG_2);
         }
         // What it can be seen as, and the rest.
         let wf = d.world_feedback(entry);

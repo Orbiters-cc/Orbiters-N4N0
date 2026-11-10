@@ -21,8 +21,9 @@ const ABOVE_M: f32 = 0.025;
 /// How much of a capture's radius its content reaches up, mostly: the hint's foot and the X sit just over that.
 const TOP_OF_RADIUS: f32 = 0.7;
 /// Where on a capture's rim its X stands, in its radius: right of its middle and behind it, as seen from the eyes (on the round, 0.66 and 0.75 are on its edge).
-const RIM_ACROSS: f32 = 0.66;
-const RIM_BACK: f32 = 0.72;
+// Just inside where its floor starts to fade (0.8 of its radius): on the rim itself the stem stood on nothing that showed (the round 20 pre-check).
+const RIM_ACROSS: f32 = 0.5;
+const RIM_BACK: f32 = 0.55;
 /// How far right of the view's middle its X is: over the view, toward its upper right.
 fn x_across(radius: f32) -> f32 {
     (radius * 0.55).clamp(0.04, 0.165)
@@ -388,7 +389,8 @@ pub fn backdrop_pixels() -> Vec<u8> {
             let glow = (1.0 - ((v - 0.56) / if v < 0.56 { 0.56 } else { 0.2 }).abs()).clamp(0.0, 1.0);
             let glow = glow * glow;
             let under = if v > 0.56 { ((v - 0.56) / 0.44).clamp(0.0, 1.0) } else { 0.0 };
-            let c = [22.0 + 46.0 * glow - 8.0 * under, 28.0 + 50.0 * glow - 10.0 * under, 44.0 + 62.0 * glow - 18.0 * under];
+            // Light enough that a dark fence and a dark roof read against it (round 19's judges).
+            let c = [40.0 + 78.0 * glow - 12.0 * under, 54.0 + 88.0 * glow - 14.0 * under, 88.0 + 104.0 * glow - 28.0 * under];
             pixels.extend_from_slice(&[c[0] as u8, c[1] as u8, c[2] as u8, 255]);
         }
     }
@@ -534,7 +536,7 @@ mod tests {
             let x = stereo::position(&chip_place(middle, radius, eye, true));
             // On its rim, across the ground, and standing on it.
             let out = ((x[0] - middle[0]).powi(2) + (x[2] - middle[2]).powi(2)).sqrt();
-            assert!((out / radius - 1.0).abs() < 0.05, "on its rim at {radius}: {x:?}");
+            assert!(out / radius > 0.68 && out / radius < 0.8, "near its rim, on floor that shows, at {radius}: {x:?}");
             // Above it, by its stem (request 32), and no higher than the stem reaches down from.
             assert!(x[1] >= middle[1] + 0.07 && x[1] <= middle[1] + CHIP_STEM_M + CHIP_WIDTH_M / 2.0 + 1e-4, "above it on its stem at {radius}: {x:?}");
             // Its far side, to the right: over the view in what eyes above it see, not beside it.

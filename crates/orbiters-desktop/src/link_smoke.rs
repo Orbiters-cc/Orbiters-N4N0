@@ -38,6 +38,48 @@ pub fn sandbox(root: &Path) -> anyhow::Result<()> {
     orbiters_core::paths::set_roots(roots)
 }
 
+/// Own the directory before any fallible setup. Children and proxies are declared later and dropped first.
+pub(crate) struct Scratch {
+    pub(crate) path: std::path::PathBuf,
+    keep: bool,
+}
+
+impl Scratch {
+    pub(crate) fn new(name: &str, keep: bool) -> anyhow::Result<Self> {
+        let path = std::env::temp_dir().join(format!("{name}-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&path)?;
+        Ok(Self { path, keep })
+    }
+    fn cleanup(&self) -> std::io::Result<()> {
+        if !self.keep && self.path.exists() { std::fs::remove_dir_all(&self.path)?; }
+        Ok(())
+    }
+}
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        if let Err(error) = self.cleanup() {
+            eprintln!("harness cleanup failed for {}: {error}", self.path.display());
+        }
+    }
+}
+
+/// Installed immediately after spawn, before stdout extraction, job assignment or reader-thread setup can fail.
+struct ChildGuard(std::process::Child);
+impl std::ops::Deref for ChildGuard {
+    type Target = std::process::Child;
+    fn deref(&self) -> &Self::Target { &self.0 }
+}
+impl std::ops::DerefMut for ChildGuard {
+    fn deref_mut(&mut self) -> &mut Self::Target { &mut self.0 }
+}
+impl Drop for ChildGuard {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        if let Err(error) = self.0.wait() { eprintln!("harness child cleanup failed: {error}"); }
+    }
+}
+
 /// What a process said of its link.
 #[derive(Default)]
 struct Said {
@@ -50,7 +92,7 @@ struct Said {
 struct Shown {
     name: &'static str,
     role: Role,
-    process: std::process::Child,
+    process: ChildGuard,
     said: Arc<Mutex<Said>>,
     between: Between,
 }
@@ -74,7 +116,7 @@ fn start(name: &'static str, role: Role, mode: &str, extra: &[&str], service: &E
         use std::os::windows::process::CommandExt;
         command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW: no console of its own
     }
-    let mut process = command.spawn().with_context(|| format!("starting the {name}"))?;
+    let mut process = ChildGuard(command.spawn().with_context(|| format!("starting the {name}"))?);
     crate::worker::keep_with_service(&process);
     let said = Arc::new(Mutex::new(Said::default()));
     let (out, heard) = (process.stdout.take().context("its output")?, said.clone());
@@ -176,8 +218,9 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         anyhow::bail!("{game} is running: this starts a window beside it and a process that looks for the game's window. Run it when neither VRChat nor SteamVR does.");
     }
     let has = |flag: &str| args.iter().any(|a| a == flag);
-    let root = std::env::temp_dir().join(format!("orbiters-link-smoke-{}", std::process::id()));
-    sandbox(&root)?;
+    let scratch = Scratch::new("orbiters-link-smoke", has("--keep"))?;
+    let root = &scratch.path;
+    sandbox(root)?;
     let started = Instant::now();
 
     // The service: a controller that is never started, holding a state the size of a busy evening, with VRChat said
@@ -277,11 +320,57 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
     println!("{} no process of this run had the foreground window", if run.foreground { "FAIL" } else { "ok  " });
     run.failed += run.foreground as u32;
     println!("{} publishes, {:.1} s in all", ctl.publishes(), started.elapsed().as_secs_f32());
-    if has("--keep") {
-        println!("kept: {}", root.display());
-    } else {
-        let _ = std::fs::remove_dir_all(&root);
-    }
+    drop(shown);
+    drop(service);
+    if has("--keep") { println!("kept: {}", root.display()); }
+    scratch.cleanup().context("removing the harness directory")?;
     anyhow::ensure!(run.failed == 0, "{} steps failed", run.failed);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn scratch_is_removed_on_early_error_and_keep_is_deliberate() {
+        let scratch = Scratch::new("orbiters-cleanup-test", false).unwrap();
+        let path = scratch.path.clone();
+        let failed = (|| -> anyhow::Result<()> {
+            let _guard = scratch;
+            std::fs::write(path.join("setup.tmp"), b"partial setup")?;
+            anyhow::bail!("injected setup failure")
+        })();
+        assert!(failed.is_err());
+        assert!(!path.exists());
+        let kept = Scratch::new("orbiters-cleanup-test", true).unwrap();
+        let path = kept.path.clone();
+        drop(kept);
+        assert!(path.exists());
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn child_is_reaped_when_reader_setup_fails() {
+        if std::env::var_os("ORBITERS_CLEANUP_CHILD").is_some() {
+            loop { std::thread::park(); }
+        }
+        let mut command = Command::new(std::env::current_exe().unwrap());
+        command.args(["--exact", "link_smoke::tests::child_is_reaped_when_reader_setup_fails"])
+            .env("ORBITERS_CLEANUP_CHILD", "1").stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+        #[cfg(windows)] {
+            use std::os::windows::process::CommandExt;
+            command.creation_flags(0x0800_0000);
+        }
+        let child = ChildGuard(command.spawn().unwrap());
+        let pid = sysinfo::Pid::from_u32(child.id());
+        let failed = (|| -> anyhow::Result<()> {
+            let _guard = child;
+            anyhow::bail!("injected reader-thread setup failure")
+        })();
+        assert!(failed.is_err());
+        let mut system = sysinfo::System::new();
+        system.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[pid]), true);
+        assert!(system.process(pid).is_none(), "child was killed and reaped before the error returned");
+    }
 }

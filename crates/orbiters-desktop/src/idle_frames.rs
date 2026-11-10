@@ -11,7 +11,7 @@
 //!
 //! Each page prints its frames a minute and the lines that asked for them, the most frequent first. The settings and
 //! caches are a folder of the run's own (as the screenshots'), so nothing of the person's is written; their pictures,
-//! sessions and Unity projects are read as the window reads them.
+//! sessions and Unity projects also stay within the run's private roots.
 //!
 //! `states` is not a page of the sidebar: it is Home on the avatars' states, their cards showing, with something
 //! asked that the service never answers (what was asked there once kept the window drawing).
@@ -104,8 +104,8 @@ fn local_revision() -> anyhow::Result<()> {
 }
 
 pub fn run(args: &[String]) -> anyhow::Result<()> {
-    let root = std::env::temp_dir().join(format!("orbiters-idle-frames-{}", std::process::id()));
-    crate::link_smoke::sandbox(&root)?;
+    let scratch = crate::link_smoke::Scratch::new("orbiters-idle-frames", false)?;
+    crate::link_smoke::sandbox(&scratch.path)?;
     if args.first().map(String::as_str) == Some("--local-revision") {
         return local_revision();
     }
@@ -158,7 +158,6 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         }
     }
     let _ = std::io::Write::flush(&mut std::io::stdout());
-    let _ = std::fs::remove_dir_all(&root);
     Ok(())
 }
 

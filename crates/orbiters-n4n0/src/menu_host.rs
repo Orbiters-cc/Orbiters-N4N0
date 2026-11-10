@@ -352,16 +352,26 @@ impl<P: Pictures> MenuHost<P> {
     /// The music the menu shows, from this process's media reading (read only while a menu wants it), and its art as a
     /// picture.
     pub fn follow_media(&mut self) {
+        self.follow_media_at(Instant::now());
+    }
+
+    /// [`MenuHost::follow_media`] at `now`.
+    fn follow_media_at(&mut self, now: Instant) {
         let media = self.media.clone();
         media.want();
         let (version, reading) = media.reading();
-        if version == self.media_seen {
+        // What was asked of play or pause shows until the app agrees or has had its time. When that time is up the
+        // app is believed again, new reading or not: an interface drawn only when what it shows changed (the window's
+        // Home, which does not show where the music is) gets no other reading to do it on, and went on showing what
+        // was asked of an app that never did it.
+        let caught_up = self.play_asked.is_some_and(|(_, at)| now.saturating_duration_since(at) >= MEDIA_CATCHES_UP);
+        if version == self.media_seen && !caught_up {
             return;
         }
         self.media_seen = version;
         let mut read = reading.media;
         if let Some(media) = read.as_mut() {
-            media.playing = settled_playing(media.playing, &mut self.play_asked, Instant::now());
+            media.playing = settled_playing(media.playing, &mut self.play_asked, now);
         }
         self.menu.media = read;
         self.menu.volume = reading.volume;
@@ -433,14 +443,18 @@ impl<P: Pictures> MenuHost<P> {
     }
 
     /// How long from `now` until the clock alone gives the menu something to do, if anything waits: suggestions asked
-    /// once typing paused, a shown thumbnail tried again, a light set here given up for what N4N0 says. An interface
-    /// that draws only when something changed asks for its next frame then ([`MenuHost::follow`] and
-    /// [`MenuHost::poll`] do it there); what its threads fetch tells the [`Waker`] instead.
+    /// once typing paused, a shown thumbnail tried again, a light set here given up for what N4N0 says, play or pause
+    /// asked here given up for what the app says. An interface that draws only when something changed asks for its
+    /// next frame then ([`MenuHost::follow`], [`MenuHost::poll`] and [`MenuHost::follow_media`] do it there); what its
+    /// threads fetch tells the [`Waker`] instead.
     pub fn next_wake(&self, now: Instant) -> Option<Duration> {
         let suggestions = self.suggest.next_due();
         let retry = self.thumbs.values().any(|t| matches!(t, Thumb::Failed { tries, .. } if *tries < THUMB_TRIES)).then(|| self.shown_pictures().iter().filter_map(|id| self.retry_at(id)).min()).flatten();
         let light = self.light_set.map(|(_, at)| at + LIGHT_ECHO);
-        [suggestions, retry, light].into_iter().flatten().min().map(|at| at.saturating_duration_since(now))
+        // Only while it is still to come: [`MenuHost::follow_media`] takes it once due, and a page that does not
+        // follow the music would otherwise be asked for a frame at once, at every frame, for ever.
+        let play = self.play_asked.map(|(_, at)| at + MEDIA_CATCHES_UP).filter(|due| *due > now);
+        [suggestions, retry, light, play].into_iter().flatten().min().map(|at| at.saturating_duration_since(now))
     }
 
     /// Fetches the thumbnails among `ids` not here yet (one that failed is tried again a little later, a few times).
@@ -691,6 +705,56 @@ mod tests {
         h.effects(vec![Effect::Suggest { id: 1, text: "lofi".into() }], &settings, &service);
         let wait = h.next_wake(Instant::now()).expect("the suggestions wait for the pause");
         assert!(wait <= orbiters_n4n0_core::menu::SUGGEST_PAUSE, "{wait:?}");
+    }
+
+    /// Pause asked of an app that goes on playing: the menu shows the pause until the app has had its time, then
+    /// what the app says. The window's Home is drawn only when what it shows of the music changed, which the song
+    /// going on is not: without the clock's frame, and a reading taken again on it, Home went on showing the pause.
+    #[test]
+    fn play_or_pause_asked_is_given_up_by_the_clock_alone_when_the_app_never_did_it() {
+        use orbiters_n4n0_core::menu::Media;
+        let playing = |position| crate::media::Reading {
+            media: Some(Media { title: "Song".into(), playing: true, can_play_pause: true, position: Some(position), duration: Some(300), ..Default::default() }),
+            ..Default::default()
+        };
+        // Made-up readings: the device's music is never read.
+        let watcher = Arc::new(Watcher::new(|| Box::new(crate::media::NoMedia)));
+        watcher.stand_in(playing(10));
+        let mut h = MenuHost::new(Sizes, Arc::new(English), watcher.clone());
+        let (settings, service) = (Settings::default(), Recorder::default());
+        h.open(&settings);
+        h.follow_media();
+        assert!(h.menu.media.as_ref().unwrap().playing);
+        assert_eq!(h.next_wake(Instant::now()), None);
+        // Pause, shown at once; the app goes on playing, and says so.
+        let effects = h.press(Target::MediaPlayPause);
+        h.effects(effects, &settings, &service);
+        let asked = h.play_asked.expect("pause was asked").1;
+        watcher.stand_in(playing(11));
+        h.follow_media_at(asked + Duration::from_millis(100));
+        assert!(!h.menu.media.as_ref().unwrap().playing, "what was asked shows while the app has its time");
+        // The clock's frame is due when that time is up.
+        let wait = h.next_wake(asked + Duration::from_millis(100)).expect("a frame when the app has had its time");
+        assert_eq!(wait, MEDIA_CATCHES_UP - Duration::from_millis(100));
+        // On it, with no reading newer than the one taken: the app is believed.
+        h.dirty = false;
+        let seen = h.media_seen;
+        h.follow_media_at(asked + MEDIA_CATCHES_UP);
+        assert_eq!(h.media_seen, seen, "no new reading");
+        assert!(h.menu.media.as_ref().unwrap().playing && h.dirty, "the app went on playing: shown, and to be drawn");
+        assert!(h.play_asked.is_none());
+        assert_eq!(h.next_wake(asked + MEDIA_CATCHES_UP), None);
+        // Asked again, then a page that does not follow the music: once the time is up, no frame is asked for it (it
+        // would be asked at once, for ever); the music is put right when a page follows it again.
+        let effects = h.press(Target::MediaPlayPause);
+        h.effects(effects, &settings, &service);
+        let asked = h.play_asked.expect("pause was asked").1;
+        assert!(h.next_wake(asked).is_some());
+        assert_eq!(h.next_wake(asked + MEDIA_CATCHES_UP), None);
+        assert_eq!(h.next_wake(asked + MEDIA_CATCHES_UP * 4), None);
+        watcher.stand_in(playing(12));
+        h.follow_media_at(asked + MEDIA_CATCHES_UP * 4);
+        assert!(h.menu.media.as_ref().unwrap().playing && h.play_asked.is_none());
     }
 
     #[test]

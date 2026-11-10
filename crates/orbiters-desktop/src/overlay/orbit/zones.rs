@@ -307,7 +307,9 @@ impl Zone {
             // Nearer the ring than it was (round 12's judges found it detached), still clear of the second rings and the caption.
             // Level with the caption's pill, in its row, as the wing's Hide sits beside its name (round 14's judges saw it lower and off to the side).
             // In a headset the caption's pill ends at its zone's right edge, so this follows it at once (round 15's judges).
-            Zone::WheelHide => r(228.0, -244.0, 340.0, -206.0),
+            // Over the caption, on the ring's axis: the caption's pill centred over the ring's top and this right over it (rounds 14 and 16 to 18: both hung off to the
+            // ring's upper right, whatever was tried beside the caption).
+            Zone::WheelHide => r(-56.0, -300.0, 56.0, -262.0),
             // As tall as My Profile and as wide, beside it.
             // As tall as My Profile and as wide, beside it.
             Zone::WingName => r(362.0, -150.0, 524.0, -120.0),

@@ -22,7 +22,8 @@
 // log of the depth).
 @group(0) @binding(6) var<storage, read_write> probe_bins: array<atomic<u32>>;
 // A viewer's mark of each Gaussian, a byte each, four to a word (crate::gpu::Gpu::set_marks): 0 as trained, 1 selected
-// in the 3D view (tinted towards SELECTED), 2 or more hidden or deleted there (not drawn).
+// in the 3D view (tinted towards SELECTED), 2 to 127 hidden or deleted there (not drawn), 128 to 255 faded: as
+// opaque as trained at 128, down to nothing at 255 (the edge of a capture shown small).
 @group(0) @binding(7) var<storage, read> marks: array<u32>;
 
 const DOF_BINS: f32 = 256.0;
@@ -47,7 +48,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) 
     proj[o + 15u] = 0.0;
     counts[i] = 0u;
     let mark = (marks[i >> 2u] >> ((i & 3u) * 8u)) & 0xFFu;
-    if (mark >= 2u) {
+    if (mark >= 2u && mark < 128u) {
         return;
     }
     let b = i * PARAM;
@@ -65,6 +66,9 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) 
     let my = frame.focal.y * m.pc.y / m.pc.z + frame.focal.w;
     // The opacity the pixels see: both filters' compensations keep the Gaussian's weight.
     var op = sigmoid(params[b + 10u]) * m.c3 * m.c2;
+    if (mark >= 128u) {
+        op *= f32(255u - mark) / 127.0;
+    }
     var depth = m.pc.z;
     var color = vec3<f32>(params[b + 11u], params[b + 12u], params[b + 13u]);
     if (frame.counts.y != 0u) {

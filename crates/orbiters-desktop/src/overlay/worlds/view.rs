@@ -1013,7 +1013,8 @@ impl View {
         };
         // Small, only what it reaches is drawn.
         let count = self.small.as_ref().map_or(count, |small| count.min(capture.within(small.reach() + small.moved_by())));
-        let clip = self.small.as_ref().filter(|small| small.moved_by() > 0.0).map(|small| (small.middle(capture.view.eye()), small.reach(), capture.clone()));
+        // Always while it stands small, moved or not: its edge fades, which the marks say.
+        let clip = self.small.as_ref().map(|small| (small.middle(capture.view.eye()), small.reach(), capture.clone()));
         let pixels = self.width - 2 * MARGIN;
         let id = self.next_id;
         let active_holds = self.cubes[self.active].is_some_and(|c| c.pixels == pixels && eyes.iter().all(|e| c.holds(*e, REACH_M)));

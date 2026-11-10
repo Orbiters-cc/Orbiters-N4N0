@@ -646,49 +646,105 @@ fn check_buffers() -> [Vec<u8>; 2] {
     [vec![0u8; CHECK_CHUNK], vec![0u8; CHECK_CHUNK + CHECK_ALIGN]]
 }
 
-/// Opens a file just written to read back what the disk holds of it, and says whether that is what its reads give.
+/// How a copy just written is read back, and made to last: the file system's own ways ([`OnDisk`]), or a test's, which
+/// refuses a read or fails a flush where no disk at hand ever would.
 ///
-/// On Windows the file is opened past the system's file cache (`FILE_FLAG_NO_BUFFERING`): its first such read makes
-/// the file system write out what the cache still holds of it, and every read comes from the disk. Read back through
-/// the cache, as this did, a copy is compared with the very memory it was written from a moment earlier: a write that
-/// later failed on its way to a full or failing disk passed the check, and the original was deleted after it. A disk
-/// or driver that refuses such an open gets the file flushed first ([`open_flushed`]) and read through the cache; so
-/// does every other system, where flushing costs little. Flushing each file on Windows would do too, but asks the
-/// disk to empty its own cache each time: milliseconds a file, over a Library's hundred thousand.
+/// Two separate things are asked of a moved Library before its original goes, and neither stands for the other:
+///
+/// 1. **That the copy holds the original's bytes** ([`same_bytes`]). The copy is read back and compared. Read back
+///    through the system's file cache, as it used to be, it was compared with the very memory it had been written from
+///    a moment earlier, whatever became of the write. So it is read past the cache where that can be done
+///    ([`Written::past_cache`]): the file system then writes out what it still holds of the file and hands back what
+///    the disk answers. Elsewhere it is written out first, which reports a write that failed, and read through the
+///    cache ([`Written::flushed`]). Either way the comparison proves what the file system and the disk answer now. It
+///    does not prove that the bytes are on the platter or in the flash: a disk answers from its own write cache.
+/// 2. **That the copy lasts** ([`Written::persist`]). Once every file has passed, and before Library is switched and
+///    the original removed, the last file written is flushed: the file system commits what it has logged of the
+///    files before it, and asks the disk to empty its write cache. That is one flush a move, not one a file, which
+///    costs milliseconds each over a Library's hundred thousand. What it cannot reach is not checked by anything
+///    here: a disk that reports a flush it did not do, or what a network share's server does with its own cache.
 #[cfg(any(windows, unix))]
-fn open_written(path: &Path) -> std::io::Result<(std::fs::File, bool)> {
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::OpenOptionsExt;
-        use windows::Win32::Storage::FileSystem::{FILE_FLAG_NO_BUFFERING, FILE_FLAG_SEQUENTIAL_SCAN};
-        if let Ok(file) = std::fs::OpenOptions::new().read(true).custom_flags(FILE_FLAG_NO_BUFFERING.0 | FILE_FLAG_SEQUENTIAL_SCAN.0).open(path) {
-            return Ok((file, true));
+trait Written {
+    /// The copy, opened to be read past the system's file cache; `None` where that cannot be done.
+    fn past_cache(&self, path: &Path) -> Option<Box<dyn Read>>;
+    /// The copy, opened once the system has written it out (which reports a write that failed), to be read through
+    /// the cache.
+    fn flushed(&self, path: &Path) -> std::io::Result<Box<dyn Read>>;
+    /// Flushes the copy at `path` all the way: the file system's log and the disk's own write cache.
+    fn persist(&self, path: &Path) -> std::io::Result<()>;
+}
+
+/// The file system's own ways.
+#[cfg(any(windows, unix))]
+struct OnDisk;
+
+#[cfg(any(windows, unix))]
+impl Written for OnDisk {
+    /// On Windows, `FILE_FLAG_NO_BUFFERING`. A disk or a driver that refuses such an open has none.
+    fn past_cache(&self, path: &Path) -> Option<Box<dyn Read>> {
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt;
+            use windows::Win32::Storage::FileSystem::{FILE_FLAG_NO_BUFFERING, FILE_FLAG_SEQUENTIAL_SCAN};
+            let file = std::fs::OpenOptions::new().read(true).custom_flags(FILE_FLAG_NO_BUFFERING.0 | FILE_FLAG_SEQUENTIAL_SCAN.0).open(path).ok()?;
+            Some(Box::new(file))
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = path;
+            None
         }
     }
-    Ok((open_flushed(path)?, false))
+
+    fn flushed(&self, path: &Path) -> std::io::Result<Box<dyn Read>> {
+        // Write access only to have it written out: a read-only handle cannot on Windows.
+        written_out(&std::fs::OpenOptions::new().write(true).open(path)?)?;
+        Ok(Box::new(std::fs::File::open(path)?))
+    }
+
+    /// `FlushFileBuffers` on Windows, `F_FULLFSYNC` on a Mac, `fsync` elsewhere: what `sync_all` is on each.
+    fn persist(&self, path: &Path) -> std::io::Result<()> {
+        std::fs::OpenOptions::new().write(true).open(path)?.sync_all()
+    }
 }
 
-/// Opens a file just written once the system has written it out: the flush reports a write that failed
-/// (`FlushFileBuffers`, `fsync`), and the reads that follow may come from the cache.
+/// Has the system write a file out to its disk, and says so when that failed. Off Windows this is `fsync` itself and
+/// not `sync_all`, which on a Mac also has the disk empty its own cache (`F_FULLFSYNC`): milliseconds, for every file
+/// of a Library. That part is asked once a move ([`Written::persist`]).
 #[cfg(any(windows, unix))]
-fn open_flushed(path: &Path) -> std::io::Result<std::fs::File> {
-    // Write access only to flush it: a read-only handle cannot on Windows.
-    std::fs::OpenOptions::new().write(true).open(path)?.sync_all()?;
-    std::fs::File::open(path)
+fn written_out(file: &std::fs::File) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::fd::AsRawFd;
+        // SAFETY: `fsync` on a descriptor this function's caller holds open.
+        if unsafe { libc::fsync(file.as_raw_fd()) } != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(())
+    }
+    #[cfg(not(unix))]
+    {
+        file.sync_all()
+    }
 }
 
-/// Whether a read past the cache was refused for its shape (Windows' ERROR_INVALID_PARAMETER): the disk's sectors are
-/// larger than [`CHECK_ALIGN`], so neither the memory's start nor the lengths fit them.
+/// What a read past the cache fails with when its memory or its length does not fit the disk's sectors: Windows'
+/// ERROR_INVALID_PARAMETER, `EINVAL` elsewhere.
+const REFUSED_SHAPE: i32 = if cfg!(windows) { 87 } else { 22 };
+
+/// Whether a read past the cache was refused for its shape: the disk's sectors are larger than [`CHECK_ALIGN`], so
+/// neither the memory's start nor the lengths fit them.
 #[cfg(any(windows, unix))]
 fn refused_for_its_shape(error: &std::io::Error) -> bool {
-    cfg!(windows) && error.raw_os_error() == Some(87)
+    error.raw_os_error() == Some(REFUSED_SHAPE)
 }
 
-/// Copies one file and reads it back from the disk ([`open_written`]). `false` when cancelled, partway through it if it
-/// is a large one. The copy keeps the original's modification time and read-only flag, as Library's other readers (and
-/// `std::fs::copy`) expect.
+/// Copies one file and reads it back from the disk ([`Written`]). `false` when cancelled, partway through it if it is a
+/// large one. The copy keeps the original's modification time and read-only flag, as Library's other readers (and
+/// `std::fs::copy`) expect. `last`: the move's last file, which is flushed all the way once it has passed
+/// ([`Written::persist`]), while it can still be opened to be written to.
 #[cfg(any(windows, unix))]
-fn copy_and_check(from: &Path, to: &Path, buffers: &mut [Vec<u8>; 2], work: &Work) -> anyhow::Result<bool> {
+fn copy_and_check(disk: &dyn Written, from: &Path, to: &Path, buffers: &mut [Vec<u8>; 2], work: &Work, last: bool) -> anyhow::Result<bool> {
     let [left, right] = buffers;
     let mut source = std::fs::File::open(from)?;
     let meta = source.metadata()?;
@@ -709,7 +765,7 @@ fn copy_and_check(from: &Path, to: &Path, buffers: &mut [Vec<u8>; 2], work: &Wor
     }
     drop(copy);
     drop(source);
-    let same = same_bytes(from, to, left, right, |n| {
+    let same = same_bytes(disk, from, to, left, right, |n| {
         update(work.progress, |p| p.bytes_checked += n as u64);
         !is_cancelled(work.cancel)
     })?;
@@ -717,6 +773,9 @@ fn copy_and_check(from: &Path, to: &Path, buffers: &mut [Vec<u8>; 2], work: &Wor
         None => return Ok(false),
         Some(true) => {}
         Some(false) => bail!("{}", tr!("A copied file differs from its original: {path}", path = from.display())),
+    }
+    if last {
+        disk.persist(to)?;
     }
     // Here a new file is not executable either, and Library holds programs (Burst's compiler, in a package).
     if cfg!(unix) || meta.permissions().readonly() {
@@ -766,6 +825,20 @@ fn partial_note(left: &Option<PathBuf>) -> String {
 /// restores Library first.
 #[cfg(any(windows, unix))]
 fn relocate(project: &Path, target: &Path, files: &[(PathBuf, u64)], work: &Work, link: impl FnOnce(&Path, &Path) -> std::io::Result<()>) -> anyhow::Result<RepairEnd> {
+    relocate_on(&OnDisk, project, target, files, work, link)
+}
+
+/// [`relocate`], reading the copy back and flushing it through `disk`: each file compared with its original, and the
+/// last one flushed all the way before the switch ([`Written`]).
+#[cfg(any(windows, unix))]
+fn relocate_on(
+    disk: &dyn Written,
+    project: &Path,
+    target: &Path,
+    files: &[(PathBuf, u64)],
+    work: &Work,
+    link: impl FnOnce(&Path, &Path) -> std::io::Result<()>,
+) -> anyhow::Result<RepairEnd> {
     let library = project.join("Library");
     let bytes: u64 = files.iter().map(|(_, n)| *n).sum();
     anyhow::ensure!(!target.exists(), "{}", tr("Cache destination already exists"));
@@ -783,12 +856,14 @@ fn relocate(project: &Path, target: &Path, files: &[(PathBuf, u64)], work: &Work
     });
     let mut buffers = check_buffers();
     let mut copy_all = || -> anyhow::Result<bool> {
-        for (file, _) in files {
+        for (i, (file, _)) in files.iter().enumerate() {
             let relative = file.strip_prefix(&library)?;
             let to = target.join(relative);
             std::fs::create_dir_all(to.parent().with_context(|| tr("A file without a folder"))?)?;
             update(work.progress, |p| p.file = relative.display().to_string());
-            if !copy_and_check(file, &to, &mut buffers, work).with_context(|| tr!("Could not copy {path}", path = relative.display()))? {
+            // The last file is flushed all the way once it has passed: before the switch, and before the original goes.
+            let last = i + 1 == files.len();
+            if !copy_and_check(disk, file, &to, &mut buffers, work, last).with_context(|| tr!("Could not copy {path}", path = relative.display()))? {
                 return Ok(false);
             }
             update(work.progress, |p| p.files_done += 1);
@@ -853,17 +928,20 @@ fn relocate(project: &Path, target: &Path, files: &[(PathBuf, u64)], work: &Work
     Ok(RepairEnd::Moved(Moved { target: target.to_path_buf(), bytes, files: files.len() as u64, old_left }))
 }
 
-/// Whether the file just written at `b` holds on the disk ([`open_written`]) the bytes of `a`; `on_chunk` hears the
-/// bytes compared and answers whether to go on (`None` when it said to stop). `left` holds at least [`CHECK_CHUNK`]
-/// bytes and `right` [`CHECK_ALIGN`] more ([`check_buffers`]).
+/// Whether the file just written at `b` holds the bytes of `a`, as the disk answers them ([`Written`]); `on_chunk`
+/// hears the bytes compared and answers whether to go on (`None` when it said to stop). `left` holds at least
+/// [`CHECK_CHUNK`] bytes and `right` [`CHECK_ALIGN`] more ([`check_buffers`]).
 #[cfg(any(windows, unix))]
-fn same_bytes(a: &Path, b: &Path, left: &mut [u8], right: &mut [u8], mut on_chunk: impl FnMut(usize) -> bool) -> std::io::Result<Option<bool>> {
+fn same_bytes(disk: &dyn Written, a: &Path, b: &Path, left: &mut [u8], right: &mut [u8], mut on_chunk: impl FnMut(usize) -> bool) -> std::io::Result<Option<bool>> {
     if std::fs::metadata(a)?.len() != std::fs::metadata(b)?.len() {
         return Ok(Some(false));
     }
     let mut a = std::fs::File::open(a)?;
     let written = b;
-    let (mut b, mut from_disk) = open_written(written)?;
+    let (mut b, mut from_disk) = match disk.past_cache(written) {
+        Some(b) => (b, true),
+        None => (disk.flushed(written)?, false),
+    };
     let left = &mut left[..CHECK_CHUNK];
     // Past the cache a read takes memory that starts on a sector's boundary and a whole number of sectors.
     let start = right.as_ptr().align_offset(CHECK_ALIGN);
@@ -872,12 +950,13 @@ fn same_bytes(a: &Path, b: &Path, left: &mut [u8], right: &mut [u8], mut on_chun
     loop {
         // Whole chunks of both, so that only the last of each is short: the one that meets the file's end.
         let n = read_up_to(&mut a, left, false)?;
-        let m = match read_up_to(&mut b, right, from_disk) {
-            // A disk of larger sectors refuses the first read past the cache: flushed and through the cache instead.
+        let m = match read_up_to(&mut *b, right, from_disk) {
+            // A disk of larger sectors refuses the first read past the cache: written out and through the cache instead,
+            // from the file's start. A refusal later on is a failure like any other: part of the file is compared already.
             Err(e) if from_disk && !compared && refused_for_its_shape(&e) => {
-                b = open_flushed(written)?;
+                b = disk.flushed(written)?;
                 from_disk = false;
-                read_up_to(&mut b, right, false)?
+                read_up_to(&mut *b, right, false)?
             }
             m => m?,
         };
@@ -898,7 +977,7 @@ fn same_bytes(a: &Path, b: &Path, left: &mut [u8], right: &mut [u8], mut on_chun
 /// ends inside a sector met the file's end, and nothing more is asked: what is left of the buffer is no whole number
 /// of sectors, which such a read refuses.
 #[cfg(any(windows, unix))]
-fn read_up_to(file: &mut std::fs::File, buffer: &mut [u8], sectors: bool) -> std::io::Result<usize> {
+fn read_up_to(file: &mut dyn Read, buffer: &mut [u8], sectors: bool) -> std::io::Result<usize> {
     let mut filled = 0;
     while filled < buffer.len() {
         match file.read(&mut buffer[filled..]) {
@@ -1444,53 +1523,216 @@ mod tests {
         remove_redirect(&library).unwrap();
     }
 
+    /// The real disk, counting what is asked of it, and failing where a test says so: no disk at hand refuses a read
+    /// past the cache or fails a flush, so the branches for one would never run.
+    #[cfg(any(windows, unix))]
+    #[derive(Default)]
+    struct Probe {
+        /// Opens past the cache, opens after a flush, and the files flushed all the way, in order.
+        past_cache: std::cell::Cell<usize>,
+        flushed: std::cell::Cell<usize>,
+        persisted: std::cell::RefCell<Vec<PathBuf>>,
+        /// The read past the cache (0 the first) that is refused for its shape, as a disk of larger sectors refuses it.
+        refuse_read: Option<usize>,
+        fail_flush: bool,
+        fail_persist: bool,
+    }
+
+    /// A reader whose `refuse`-th read fails as a read past the cache does on a disk it does not fit.
+    #[cfg(any(windows, unix))]
+    struct Refusing {
+        inner: Box<dyn Read>,
+        reads: usize,
+        refuse: usize,
+    }
+
+    #[cfg(any(windows, unix))]
+    impl Read for Refusing {
+        fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+            self.reads += 1;
+            if self.reads - 1 == self.refuse {
+                return Err(std::io::Error::from_raw_os_error(REFUSED_SHAPE));
+            }
+            self.inner.read(buffer)
+        }
+    }
+
+    #[cfg(any(windows, unix))]
+    impl Written for Probe {
+        fn past_cache(&self, path: &Path) -> Option<Box<dyn Read>> {
+            let inner = match (OnDisk.past_cache(path), self.refuse_read) {
+                (Some(inner), _) => inner,
+                // Where nothing is read past the cache, a refusal is still injected, on a plain read.
+                (None, Some(_)) => Box::new(std::fs::File::open(path).ok()?) as Box<dyn Read>,
+                (None, None) => return None,
+            };
+            self.past_cache.set(self.past_cache.get() + 1);
+            Some(match self.refuse_read {
+                Some(refuse) => Box::new(Refusing { inner, reads: 0, refuse }),
+                None => inner,
+            })
+        }
+
+        fn flushed(&self, path: &Path) -> std::io::Result<Box<dyn Read>> {
+            self.flushed.set(self.flushed.get() + 1);
+            if self.fail_flush {
+                return Err(std::io::Error::other("injected: the copy could not be written out"));
+            }
+            OnDisk.flushed(path)
+        }
+
+        fn persist(&self, path: &Path) -> std::io::Result<()> {
+            self.persisted.borrow_mut().push(path.to_path_buf());
+            if self.fail_persist {
+                return Err(std::io::Error::other("injected: the disk did not flush"));
+            }
+            OnDisk.persist(path)
+        }
+    }
+
+    /// The bytes [`project`] writes into its `i`-th file.
+    fn bytes_of(i: usize, size: usize) -> Vec<u8> {
+        (0..size).map(|b| (b.wrapping_mul(i + 7) >> 3) as u8).collect()
+    }
+
     /// A copy is read back from the disk, not from the file cache it was just written through, at every size around a
     /// sector's and a chunk's: the same bytes pass, the whole of them counted for the progress; one byte changed in
-    /// the last sector, or one byte more or less, does not.
+    /// the last sector, or one byte more or less, does not. On Windows every one of these reads went past the cache and
+    /// none fell back to a flush: the disk the tests run on is one that can.
     #[cfg(any(windows, unix))]
     #[test]
     fn a_copy_is_read_back_from_the_disk() {
         let temp = tempfile::tempdir().unwrap();
         let (a, b) = (temp.path().join("original.bin"), temp.path().join("copy.bin"));
         let [mut left, mut right] = check_buffers();
+        let disk = Probe::default();
+        let mut checks = 0;
         for size in [0, 1, 511, 512, 4095, 4096, 4097, CHECK_CHUNK - 1, CHECK_CHUNK, CHECK_CHUNK + 1, 2 * CHECK_CHUNK + 123] {
             let bytes: Vec<u8> = (0..size).map(|i| (i.wrapping_mul(31) >> 2) as u8).collect();
             std::fs::write(&a, &bytes).unwrap();
             std::fs::write(&b, &bytes).unwrap();
-            if cfg!(windows) {
-                // What the check is for: on a disk Windows formats, the copy's reads go past the cache.
-                assert!(open_written(&b).unwrap().1, "the copy of {size} bytes was read through the file cache");
-            }
             let mut counted = 0;
-            let same = same_bytes(&a, &b, &mut left, &mut right, |n| {
+            let same = same_bytes(&disk, &a, &b, &mut left, &mut right, |n| {
                 counted += n;
                 true
             });
+            checks += 1;
             assert_eq!(same.unwrap(), Some(true), "{size} bytes");
             assert_eq!(counted, size, "bytes counted of {size}");
             if size > 0 {
                 let mut changed = bytes.clone();
                 changed[size - 1] ^= 0x40;
                 std::fs::write(&b, &changed).unwrap();
-                assert_eq!(same_bytes(&a, &b, &mut left, &mut right, |_| true).unwrap(), Some(false), "a changed last byte of {size}");
+                assert_eq!(same_bytes(&disk, &a, &b, &mut left, &mut right, |_| true).unwrap(), Some(false), "a changed last byte of {size}");
+                checks += 1;
+                // A byte short is seen in the lengths, before either is opened.
                 std::fs::write(&b, &bytes[..size - 1]).unwrap();
-                assert_eq!(same_bytes(&a, &b, &mut left, &mut right, |_| true).unwrap(), Some(false), "a byte short of {size}");
+                assert_eq!(same_bytes(&disk, &a, &b, &mut left, &mut right, |_| true).unwrap(), Some(false), "a byte short of {size}");
             }
             // Told to stop, it says so instead of answering.
             if size > CHECK_CHUNK {
                 std::fs::write(&b, &bytes).unwrap();
-                assert_eq!(same_bytes(&a, &b, &mut left, &mut right, |_| false).unwrap(), None);
+                assert_eq!(same_bytes(&disk, &a, &b, &mut left, &mut right, |_| false).unwrap(), None);
+                checks += 1;
             }
         }
-        // Where a read past the cache is refused, the copy is flushed and read through the cache: the same bytes.
-        let bytes: Vec<u8> = (0..CHECK_CHUNK + 77).map(|i| (i >> 3) as u8).collect();
-        std::fs::write(&b, &bytes).unwrap();
-        let mut flushed = open_flushed(&b).unwrap();
-        let mut back = vec![0u8; bytes.len() + 10];
-        assert_eq!(read_up_to(&mut flushed, &mut back, false).unwrap(), bytes.len());
-        assert!(back[..bytes.len()] == bytes[..]);
-        assert_eq!(refused_for_its_shape(&std::io::Error::from_raw_os_error(87)), cfg!(windows));
-        assert!(!refused_for_its_shape(&std::io::Error::from_raw_os_error(5)));
+        let (past_cache, flushed) = (disk.past_cache.get(), disk.flushed.get());
+        if cfg!(windows) {
+            assert_eq!((past_cache, flushed), (checks, 0), "every copy read past the cache, none through it");
+        } else {
+            assert_eq!((past_cache, flushed), (0, checks), "every copy written out, then read");
+        }
+        assert!(disk.persisted.borrow().is_empty(), "the comparison itself flushes nothing all the way");
+    }
+
+    /// A disk that refuses the first read past the cache (its sectors are larger than the check's memory fits) has
+    /// each copy written out and read through the cache instead, from its start, and the Library moves whole. A
+    /// refusal further into a file is a failure of the copy like any other: nothing is switched, Library stays.
+    #[cfg(any(windows, unix))]
+    #[test]
+    fn a_disk_that_refuses_the_read_past_the_cache_is_read_through_it() {
+        let temp = tempfile::tempdir().unwrap();
+        let size = CHECK_CHUNK + 300_000;
+        let project = project(temp.path(), "project", 4, size);
+        let library = project.join("Library");
+        let files = files_of(&project);
+        let progress = SharedProgress::default();
+        let cancel = AtomicBool::new(false);
+        let work = Work { progress: &progress, cancel: &cancel };
+
+        // The second read of a file refused: after its first megabyte was compared.
+        let late = Probe { refuse_read: Some(1), ..Default::default() };
+        let target = temp.path().join("late");
+        let error = relocate_on(&late, &project, &target, &files, &work, |t, l| redirect(t, l)).unwrap_err();
+        assert!(format!("{error:#}").contains("stays where it is"), "{error:#}");
+        assert_eq!((late.flushed.get(), late.persisted.borrow().len()), (0, 0), "no going back to the file's start once part of it is compared");
+        assert!(!target.exists() && !is_redirect(&library).unwrap_or(false));
+        assert_eq!(std::fs::read(library.join("Artifacts/ab/2.bin")).unwrap(), bytes_of(2, size));
+
+        // The first read refused, of every file: each is written out and read through the cache.
+        let disk = Probe { refuse_read: Some(0), ..Default::default() };
+        let target = temp.path().join("moved");
+        let RepairEnd::Moved(moved) = relocate_on(&disk, &project, &target, &files, &work, |t, l| redirect(t, l)).unwrap() else { panic!("not moved") };
+        assert_eq!((disk.past_cache.get(), disk.flushed.get()), (4, 4), "each file tried past the cache, then written out");
+        assert_eq!(moved.files, 4);
+        assert!(is_redirect(&library).unwrap());
+        for i in 0..4 {
+            assert!(std::fs::read(target.join(format!("Artifacts/ab/{i}.bin"))).unwrap() == bytes_of(i, size), "file {i} of the moved Library");
+        }
+        let end = progress.lock().unwrap().clone();
+        assert_eq!((end.bytes_copied, end.bytes_checked), (4 * size as u64, 4 * size as u64), "the bytes read again from the start are counted once");
+        remove_redirect(&library).unwrap();
+    }
+
+    /// Before Library is switched and its original removed, the last file written is flushed all the way, once a
+    /// move: the file system's log and the disk's own write cache, which a comparison of bytes does not reach. A flush
+    /// that fails, that one or the one a copy is written out with where it cannot be read past the cache, stops the
+    /// move with Library where it was and no copy left.
+    #[cfg(any(windows, unix))]
+    #[test]
+    fn the_copy_is_flushed_once_before_the_switch_and_a_failed_flush_keeps_the_library() {
+        let temp = tempfile::tempdir().unwrap();
+        let project = project(temp.path(), "project", 3, 5000);
+        let library = project.join("Library");
+        let files = files_of(&project);
+        let progress = SharedProgress::default();
+        let cancel = AtomicBool::new(false);
+        let work = Work { progress: &progress, cancel: &cancel };
+        let kept = |target: &Path, error: anyhow::Error| {
+            let said = format!("{error:#}");
+            assert!(said.contains("stays where it is") && said.contains("partial copy was deleted"), "{said}");
+            assert!(!target.exists() && !target.with_extension("json").exists(), "a copy left behind");
+            assert!(!is_redirect(&library).unwrap_or(false));
+            for i in 0..3 {
+                assert_eq!(std::fs::read(library.join(format!("Artifacts/ab/{i}.bin"))).unwrap(), bytes_of(i, 5000));
+            }
+            assert_eq!(backups(&project), Vec::<PathBuf>::new());
+        };
+        let never = |_: &Path, _: &Path| -> std::io::Result<()> { panic!("Library switched after a flush that failed") };
+
+        // The last flush fails: every file had passed its comparison.
+        let disk = Probe { fail_persist: true, ..Default::default() };
+        let target = temp.path().join("unflushed");
+        kept(&target, relocate_on(&disk, &project, &target, &files, &work, never).unwrap_err());
+        assert_eq!(disk.persisted.borrow().len(), 1);
+
+        // A copy cannot be written out, on a disk that refuses the read past the cache.
+        let disk = Probe { refuse_read: Some(0), fail_flush: true, ..Default::default() };
+        let target = temp.path().join("unwritten");
+        kept(&target, relocate_on(&disk, &project, &target, &files, &work, never).unwrap_err());
+        assert_eq!((disk.flushed.get(), disk.persisted.borrow().len()), (1, 0), "stopped at the first file");
+
+        // And as it goes when nothing fails: one flush, of the last file copied, before the switch.
+        let disk = Probe::default();
+        let target = temp.path().join("moved");
+        let last = target.join(files.last().unwrap().0.strip_prefix(&library).unwrap());
+        let moved = relocate_on(&disk, &project, &target, &files, &work, |t, l| {
+            assert_eq!(*disk.persisted.borrow(), [last.clone()], "flushed before Library is switched");
+            redirect(t, l)
+        });
+        assert!(matches!(moved.unwrap(), RepairEnd::Moved(_)));
+        assert_eq!(*disk.persisted.borrow(), [last], "once a move");
+        remove_redirect(&library).unwrap();
     }
 
     #[cfg(any(windows, unix))]

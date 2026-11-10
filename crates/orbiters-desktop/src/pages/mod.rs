@@ -349,6 +349,17 @@ pub fn ago(ctx: &egui::Context, epoch: u64, now: u64) -> String {
     orbiters_ui::format::relative_time(epoch, now)
 }
 
+/// Asks for a frame when something is due, `left` seconds from now, only while that is still to come. The rule for
+/// every deadline a page waits on: what is due is taken up on the frame it is due on, and a deadline already past
+/// asks for nothing. Asked for with a floor instead ("in 50 ms at the soonest"), a past deadline that nothing takes
+/// up, because another page shows or a job stands in its way, asks for a frame at every frame, for ever: the page
+/// never rests. What holds a past deadline up brings its own frame when it ends.
+pub fn frame_in(ctx: &egui::Context, left: f64) {
+    if left > 0.0 {
+        ctx.request_repaint_after(std::time::Duration::from_secs_f64(left + 0.05));
+    }
+}
+
 /// The wait for something due `seconds` after a clock read in whole seconds: a little more, so that the frame comes
 /// once the second has turned.
 pub fn after_seconds(seconds: u64) -> std::time::Duration {

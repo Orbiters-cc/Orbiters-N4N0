@@ -1612,6 +1612,63 @@ mod tests {
         assert_eq!(h.page(), Page::Home, "its card did not open the light's page");
     }
 
+    /// Something asked on an avatar's states, then Back to the avatars' cards before the service's list said it (or
+    /// the avatar gone from the list): its time was only counted on an avatar's page, so on the cards it stayed for
+    /// ever, and the frame asked "when its time is up" was asked at every frame: about twenty a second, at rest.
+    #[test]
+    fn what_was_asked_of_the_states_ends_on_the_cards_too_and_the_page_rests() {
+        use crate::state::{AvatarView, StateView, StatesView};
+        widgets::watch_controls();
+        for avatar_goes in [false, true] {
+            let mut h = Harness::new();
+            let states = vec![StateView { id: "s1".into(), name: "Hoodie on".into(), ..Default::default() }];
+            let party = StateView { id: "s9".into(), name: "Party".into(), ..Default::default() };
+            h.snap.n4n0.states = StatesView {
+                avatar_id: Some("avtr_a".into()),
+                avatar_name: Some("Rexouium".into()),
+                states: states.clone(),
+                avatars: vec![
+                    AvatarView { id: "avtr_a".into(), name: Some("Rexouium".into()), worn: true, states },
+                    AvatarView { id: "avtr_b".into(), name: Some("Ultirex ✨".into()), worn: false, states: vec![party] },
+                ],
+                ..Default::default()
+            };
+            h.settle();
+            let card = card_of(Target::States);
+            h.press(card);
+            h.release(card);
+            h.settle();
+            // The other avatar's states, and its default set: asked, and the service here never says it.
+            let (other, _) = widgets::control(&h.ctx, "Ultirex ✨").expect("its card");
+            h.press(other.center());
+            h.release(other.center());
+            h.settle();
+            let (default, _) = widgets::control(&h.ctx, "Set as default").expect("drawn");
+            h.press(default.center());
+            h.release(default.center());
+            assert_eq!(h.state.states.waiting(), 1, "asked, and waiting for the service's list");
+            if avatar_goes {
+                // Its last state deleted elsewhere, say: its card goes, and the cards show.
+                h.snap.n4n0.states.avatars.pop();
+                h.frame(Vec::new());
+            } else {
+                let (back, _) = widgets::control(&h.ctx, "States").expect("back to the cards");
+                h.press(back.center());
+                h.release(back.center());
+            }
+            // The cards come in (a second and a half: what was asked has four).
+            h.settle();
+            assert!(widgets::control(&h.ctx, "Rexouium").is_some(), "the cards");
+            assert!(widgets::control(&h.ctx, "Set as default").is_none(), "and no avatar's page");
+            assert_eq!(h.state.states.waiting(), 1, "still waiting, on the cards");
+            // Its time passes on the cards: it is let go, and the page asks for no frame.
+            let from = h.time;
+            let frames = crate::pages::rest::frames_a_minute(from, |t| h.frame_at(t, Vec::new()));
+            assert_eq!(h.state.states.waiting(), 0, "its time is up (the avatar gone: {avatar_goes})");
+            assert_eq!(frames, 0, "the cards at rest (the avatar gone: {avatar_goes})");
+        }
+    }
+
     #[test]
     fn the_states_page_saves_and_its_default_acts_on_the_press() {
         use crate::state::{AvatarView, StateView, StatesView};

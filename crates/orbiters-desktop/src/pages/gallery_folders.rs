@@ -32,8 +32,15 @@ pub struct State {
     folders: Vec<(PathBuf, bool)>,
     revision: u64,
     /// The folders walked again every [`RESCAN_EVERY`] while the page shows, on a thread, for the pictures taken
-    /// meanwhile: the page is drawn again only when a walk found something (the pictures' revision changes).
-    rescan: super::super::Watch<Vec<PathBuf>, ()>,
+    /// meanwhile: the page is drawn again only when a walk found something (the pictures' revision changes). The
+    /// same look gives the revision of what else the page's list is made from (the capture folders, the visit history,
+    /// the upload records: `controller::shares::LocalRevision`), for the settings' picture folders, captures' folder and
+    /// environment; and the last one seen.
+    rescan: super::super::Watch<(Vec<PathBuf>, PathBuf, bool), u64>,
+    local: Option<u64>,
+    /// The history and the upload records at these files, and no picture folder walked (tests).
+    #[cfg(test)]
+    sources: Option<(PathBuf, Option<PathBuf>)>,
     /// The folder scan was told which interface to wake.
     woken: bool,
     saved: Vec<PathBuf>,
@@ -65,23 +72,45 @@ impl State {
         self.button
     }
 
-    /// Whether the listing is to be made again (the scan found pictures, or the settings' folders changed), and whether
-    /// pictures changed. Asks for no frame: the scan does when it finds something ([`crate::worlds::wake_on_pictures`]).
+    /// Whether the listing is to be made again (the scan found pictures, the settings' folders changed, or what else
+    /// the list is made from did: a capture's folder, the visit history, the upload records), and whether pictures
+    /// changed. Asks for no frame: the scan does when it finds something ([`crate::worlds::wake_on_pictures`]), and
+    /// the watch when the rest changed.
     pub fn tick(&mut self, ui: &Ui, cx: &Cx) -> (bool, bool) {
         if !std::mem::replace(&mut self.woken, true) {
             crate::worlds::wake_on_pictures(ui.ctx());
         }
         let folders = &cx.snap.settings.picture_folders;
+        let mut local_changed = false;
+        #[cfg(not(test))]
+        let sources: Option<(PathBuf, Option<PathBuf>)> = None;
+        #[cfg(test)]
+        let sources = self.sources.clone();
         // Made-up folders (screenshots, tests) are not walked.
-        if !self.fixture {
-            self.rescan.keep(ui.ctx(), folders, RESCAN_EVERY, || {
-                let folders = folders.clone();
-                move || crate::worlds::rescan_pictures(&folders)
+        if !self.fixture || sources.is_some() {
+            let (root, development) = (&cx.snap.settings.sessions_dir, cx.snap.settings.development);
+            let key = (folders.clone(), root.clone(), development);
+            let looked = self.rescan.keep(ui.ctx(), &key, RESCAN_EVERY, || {
+                let (folders, root) = (folders.clone(), root.clone());
+                let server = if development { orbiters_core::account::Server::Development } else { orbiters_core::account::Server::Production };
+                let mut revision = crate::controller::shares::LocalRevision::default();
+                move || match &sources {
+                    Some((history, records)) => revision.look_at(&root, history, records.as_deref()),
+                    None => {
+                        crate::worlds::rescan_pictures(&folders);
+                        revision.look(&root, server)
+                    }
+                }
             });
+            // The first one seen says nothing: the page made its list as it came. Another one after says the list
+            // is out of date, though the app changed nothing itself (the library's version would have said).
+            if let Some(revision) = looked {
+                local_changed = self.local.replace(revision).is_some_and(|before| before != revision);
+            }
         }
         let revision = crate::worlds::picture_revision();
         let images_changed = revision != self.revision;
-        let changed = images_changed || self.saved != *folders;
+        let changed = images_changed || local_changed || self.saved != *folders;
         if changed {
             self.revision = revision;
             self.saved = folders.clone();
@@ -340,6 +369,7 @@ mod tests {
     /// architecture review's DUI-27): 600 frames a minute with nothing to show. The scan asks for the frame now.
     #[test]
     fn looking_for_new_pictures_asks_for_no_frame_and_the_scan_wakes_the_page() {
+        let _pictures = crate::worlds::tests::pictures_lock();
         let mut h = Harness::new();
         assert_eq!(crate::pages::rest::frames_a_minute(0.0, |t| h.frame_at(t, Vec::new())), 0);
         // The scan found pictures: the page is asked to draw, and is told once that its listing changed.
@@ -359,6 +389,112 @@ mod tests {
             output.textures_delta.clear();
         }
         assert_eq!(told, vec![(true, true), (false, false), (false, false)]);
+    }
+
+    /// The page made its whole list again every fifteen seconds, which also took in what changes outside the pictures'
+    /// index. Made again only when the folder walk found pictures, it kept a ghost card for a capture another program
+    /// had deleted, and did not file pictures under instances the visit history learned of meanwhile. The watch now
+    /// gives a revision of all the list reads: here the pictures' index never changes, nobody visits the page again,
+    /// and the list is said out of date exactly when a capture's folder or the visits changed.
+    #[test]
+    fn a_capture_deleted_elsewhere_or_new_visits_make_the_listing_again_without_a_visit() {
+        use orbiters_core::contracts::manifest::{SessionManifest, MANIFEST_FILE, MANIFEST_FORMAT};
+        use orbiters_core::visited::{History, InstanceVisit};
+        let root = std::env::temp_dir().join(format!("orbiters-gallery-revision-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let captures = root.join("Sessions");
+        for name in ["2026-11-09 one", "2026-11-10 two"] {
+            std::fs::create_dir_all(captures.join(name)).unwrap();
+            let manifest = SessionManifest { format: MANIFEST_FORMAT.into(), ..Default::default() };
+            std::fs::write(captures.join(name).join(MANIFEST_FILE), serde_json::to_vec(&manifest).unwrap()).unwrap();
+        }
+        let (history_file, records_file) = (root.join("visited-worlds.json"), root.join("capture-uploads.json"));
+        let mut history = History::default();
+        history.instances.push(InstanceVisit { world_id: "wrld_a".into(), instance: "1~private".into(), at: 100 });
+        history.save(&history_file).unwrap();
+
+        let mut h = Harness::new();
+        h.snap.settings.sessions_dir = captures.clone();
+        h.state.sources = Some((history_file.clone(), Some(records_file.clone())));
+        // One frame, and what it says of the list: `Some` when the frame came by itself within the wait.
+        let _pictures = crate::worlds::tests::pictures_lock();
+        let pictures = crate::worlds::picture_revision();
+        let tick = |h: &mut Harness| -> (bool, bool) {
+            h.time += 1.0 / 60.0;
+            let input = RawInput { time: Some(h.time), ..Default::default() };
+            let mut toasts = orbiters_ui::toast::Toasts::default();
+            let (ctl, snap, state) = (&h.ctl, &h.snap, &mut h.state);
+            let mut told = (false, false);
+            let mut output = h.ctx.run_ui(input, |ui| {
+                let cx = Cx { ctl, snap, toasts: &mut toasts, entered: 0.0, visit: 1, windowed: true, gpu: None, top: 40.0, go: None };
+                told = state.tick(ui, &cx);
+            });
+            output.textures_delta.clear();
+            told
+        };
+        let woken = |h: &Harness, what: &str| {
+            let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            while !h.ctx.has_requested_repaint() {
+                assert!(std::time::Instant::now() < until, "{what}");
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
+        };
+        // Frames until the page asks for no more (egui's own first frames ask for some): from then on a frame asked
+        // for is the watch's.
+        let rest = |h: &mut Harness| {
+            for _ in 0..50 {
+                if !h.ctx.has_requested_repaint() {
+                    return;
+                }
+                assert_eq!(tick(h), (false, false), "nothing changed");
+            }
+            panic!("the page does not come to rest");
+        };
+        // The first frame takes the pictures' revision as it stands (another test may have moved it before this one).
+        // The first look then says nothing of the list (the page has just made it), and the page rests.
+        tick(&mut h);
+        let first = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while h.state.local.is_none() {
+            assert!(std::time::Instant::now() < first, "the first look");
+            std::thread::sleep(std::time::Duration::from_millis(2));
+            assert_eq!(tick(&mut h), (false, false), "nothing changed yet");
+        }
+        rest(&mut h);
+        assert_eq!(crate::worlds::sessions(&captures).len(), 2);
+
+        // Another program deletes a capture's folder: the page is woken, and its list is to be made again.
+        std::fs::remove_dir_all(captures.join("2026-11-09 one")).unwrap();
+        h.state.rescan.look_now();
+        woken(&h, "a frame for the deleted capture");
+        assert_eq!(tick(&mut h), (true, false), "the list is out of date, the pictures are not");
+        assert_eq!(tick(&mut h), (false, false), "said once");
+        assert_eq!(crate::worlds::sessions(&captures).len(), 1, "what the list is made from has one capture less");
+        rest(&mut h);
+
+        // The service writes the history with nothing new but how far VRChat's log was read: no frame, no new list.
+        assert!(history.follow("output_log_2026-11-10_20-00-00.txt", 0, 4096, &[]));
+        history.save(&history_file).unwrap();
+        h.state.rescan.look_now();
+        std::thread::sleep(std::time::Duration::from_millis(150));
+        assert!(!h.ctx.has_requested_repaint(), "the log read further is no change of the list");
+        assert_eq!(tick(&mut h), (false, false));
+        rest(&mut h);
+
+        // It learns of another instance joined: the list is made again (pictures are filed by instance).
+        history.instances.push(InstanceVisit { world_id: "wrld_b".into(), instance: "2~friends".into(), at: 200 });
+        history.save(&history_file).unwrap();
+        h.state.rescan.look_now();
+        woken(&h, "a frame for the new visit");
+        assert_eq!(tick(&mut h), (true, false));
+        rest(&mut h);
+
+        // An upload recorded from elsewhere: the same.
+        std::fs::write(&records_file, b"[]").unwrap();
+        h.state.rescan.look_now();
+        woken(&h, "a frame for the upload record");
+        assert_eq!(tick(&mut h), (true, false));
+        assert_eq!(crate::worlds::picture_revision(), pictures, "the pictures' index never changed");
+        std::fs::remove_dir_all(&root).ok();
     }
 
     #[test]

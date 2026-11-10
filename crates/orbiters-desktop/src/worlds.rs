@@ -873,6 +873,12 @@ pub fn decode_png(bytes: &[u8]) -> Option<(u32, u32, Vec<u8>)> {
 pub(crate) mod tests {
     use super::*;
 
+    /// Held by a test that counts on the pictures' revision (one for the process) staying as it left it.
+    pub(crate) fn pictures_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: Mutex<()> = Mutex::new(());
+        LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     /// What the scan does for the pages when it found pictures, the index left as it is (the pages' tests).
     pub(crate) fn publish_for_test() {
         pictures_changed();

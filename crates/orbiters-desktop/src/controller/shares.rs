@@ -413,6 +413,61 @@ pub fn iso(unix: u64) -> String {
 pub fn instance_at(history: &visited::History, world: &str, taken: u64) -> Option<String> {
     history.instances.iter().filter(|i| i.at <= taken).max_by_key(|i| i.at).filter(|i| i.world_id == world).map(|i| i.instance.clone())
 }
+/// A number that changes when what [`local_entries_with_folders`] reads beyond the pictures' index does: the capture
+/// folders (one added, removed, or written in), the visit history (as [`visited::History::revision`]: not how far the
+/// logs were read), and this account's upload records. Cheap enough to ask every few seconds on a thread: it lists the
+/// captures' folder and asks three dates a capture, and reads the history only when its file changed. The app's own
+/// changes say so themselves (the library's version); this is for what changes them from outside, another program
+/// deleting a capture or the service writing the history.
+#[derive(Default)]
+pub struct LocalRevision {
+    /// The history file as it was when last read (its date and length), and its visits' revision then.
+    history: Option<((Option<std::time::SystemTime>, u64), u64)>,
+}
+
+impl LocalRevision {
+    /// The revision now, for the captures under `root` and the account of `server`.
+    pub fn look(&mut self, root: &Path, server: Server) -> u64 {
+        self.look_at(root, &visited::history_file(), records_path(server).ok().as_deref())
+    }
+
+    /// [`LocalRevision::look`] with the history and the upload records at these files.
+    pub fn look_at(&mut self, root: &Path, history: &Path, records: Option<&Path>) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let stamp = |path: &Path| std::fs::metadata(path).ok().map(|m| (m.modified().ok(), m.len()));
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        // The captures: which folders there are, and for each what a change in it moves: its own date (a file added,
+        // removed or written through a rename, as the app's files are), its manifest's, its reconstruction's folder's.
+        let mut captures: Vec<_> = std::fs::read_dir(root)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|e| e.path())
+            .filter_map(|dir| {
+                let manifest = stamp(&dir.join(orbiters_core::contracts::manifest::MANIFEST_FILE))?;
+                let result = stamp(&orbiters_core::reconstruction::result_dir(&dir)).map(|s| s.0);
+                Some((stamp(&dir).map(|s| s.0), manifest, result, dir))
+            })
+            .collect();
+        captures.sort_by(|a, b| a.3.cmp(&b.3));
+        captures.hash(&mut hasher);
+        // The history's file is written every few seconds while VRChat runs: read only when it was, and counted by
+        // what it says of the visits.
+        let written = stamp(history).unwrap_or_default();
+        let visits = match self.history {
+            Some((at, visits)) if at == written => visits,
+            _ => {
+                let visits = visited::History::load(history).revision();
+                self.history = Some((written, visits));
+                visits
+            }
+        };
+        visits.hash(&mut hasher);
+        records.and_then(stamp).hash(&mut hasher);
+        hasher.finish()
+    }
+}
+
 pub fn local_entries(root: &Path, server: Server) -> Vec<Entry> {
     local_entries_with_folders(root, server, &orbiters_core::settings::Settings::load().picture_folders)
 }

@@ -635,8 +635,45 @@ fn project_lock(project: &Path) -> anyhow::Result<std::fs::File> {
     Ok(file)
 }
 
-/// Copies one file and reads it back. `false` when cancelled, partway through it if it is a large one. The copy keeps
-/// the original's modification time and read-only flag, as Library's other readers (and `std::fs::copy`) expect.
+/// The bytes compared at a time when a copy is read back, and what a read past the file cache wants its memory and its
+/// lengths to be multiples of: the sector of the disk, 4096 bytes or a divisor of it on every disk Windows formats.
+const CHECK_CHUNK: usize = 1024 * 1024;
+const CHECK_ALIGN: usize = 4096;
+
+/// The two buffers of [`copy_and_check`]: the second has room to start on a [`CHECK_ALIGN`] boundary.
+#[cfg(any(windows, unix))]
+fn check_buffers() -> [Vec<u8>; 2] {
+    [vec![0u8; CHECK_CHUNK], vec![0u8; CHECK_CHUNK + CHECK_ALIGN]]
+}
+
+/// Opens a file just written to read back what the disk holds of it, and says whether that is what its reads give.
+///
+/// On Windows the file is opened past the system's file cache (`FILE_FLAG_NO_BUFFERING`): its first such read makes
+/// the file system write out what the cache still holds of it, and every read comes from the disk. Read back through
+/// the cache, as this did, a copy is compared with the very memory it was written from a moment earlier: a write that
+/// later failed on its way to a full or failing disk passed the check, and the original was deleted after it. A disk
+/// or driver that refuses such an open gets the file flushed first (`FlushFileBuffers` reports a write that failed)
+/// and read through the cache; so does every other system, where flushing costs little. Flushing each file on Windows
+/// would do too, but asks the disk to empty its own cache each time: milliseconds a file, over a Library's hundred
+/// thousand.
+#[cfg(any(windows, unix))]
+fn open_written(path: &Path) -> std::io::Result<(std::fs::File, bool)> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows::Win32::Storage::FileSystem::{FILE_FLAG_NO_BUFFERING, FILE_FLAG_SEQUENTIAL_SCAN};
+        if let Ok(file) = std::fs::OpenOptions::new().read(true).custom_flags(FILE_FLAG_NO_BUFFERING.0 | FILE_FLAG_SEQUENTIAL_SCAN.0).open(path) {
+            return Ok((file, true));
+        }
+    }
+    // Write access only to flush it: a read-only handle cannot on Windows.
+    std::fs::OpenOptions::new().write(true).open(path)?.sync_all()?;
+    Ok((std::fs::File::open(path)?, false))
+}
+
+/// Copies one file and reads it back from the disk ([`open_written`]). `false` when cancelled, partway through it if it
+/// is a large one. The copy keeps the original's modification time and read-only flag, as Library's other readers (and
+/// `std::fs::copy`) expect.
 #[cfg(any(windows, unix))]
 fn copy_and_check(from: &Path, to: &Path, buffers: &mut [Vec<u8>; 2], work: &Work) -> anyhow::Result<bool> {
     let [left, right] = buffers;
@@ -654,7 +691,6 @@ fn copy_and_check(from: &Path, to: &Path, buffers: &mut [Vec<u8>; 2], work: &Wor
         copy.write_all(&left[..n])?;
         update(work.progress, |p| p.bytes_copied += n as u64);
     }
-    copy.flush()?;
     if let Ok(modified) = meta.modified() {
         let _ = copy.set_modified(modified);
     }
@@ -732,7 +768,7 @@ fn relocate(project: &Path, target: &Path, files: &[(PathBuf, u64)], work: &Work
         p.files_done = 0;
         p.destination = Some(target.to_path_buf());
     });
-    let mut buffers = [vec![0u8; 1024 * 1024], vec![0u8; 1024 * 1024]];
+    let mut buffers = check_buffers();
     let mut copy_all = || -> anyhow::Result<bool> {
         for (file, _) in files {
             let relative = file.strip_prefix(&library)?;
@@ -804,28 +840,54 @@ fn relocate(project: &Path, target: &Path, files: &[(PathBuf, u64)], work: &Work
     Ok(RepairEnd::Moved(Moved { target: target.to_path_buf(), bytes, files: files.len() as u64, old_left }))
 }
 
-/// Whether two files hold the same bytes; `on_chunk` hears the bytes compared and answers whether to go on (`None` when
-/// it said to stop).
-#[cfg_attr(not(any(windows, unix)), allow(dead_code))]
+/// Whether the file just written at `b` holds on the disk ([`open_written`]) the bytes of `a`; `on_chunk` hears the
+/// bytes compared and answers whether to go on (`None` when it said to stop). `left` holds at least [`CHECK_CHUNK`]
+/// bytes and `right` [`CHECK_ALIGN`] more ([`check_buffers`]).
+#[cfg(any(windows, unix))]
 fn same_bytes(a: &Path, b: &Path, left: &mut [u8], right: &mut [u8], mut on_chunk: impl FnMut(usize) -> bool) -> std::io::Result<Option<bool>> {
     if std::fs::metadata(a)?.len() != std::fs::metadata(b)?.len() {
         return Ok(Some(false));
     }
     let mut a = std::fs::File::open(a)?;
-    let mut b = std::fs::File::open(b)?;
+    let (mut b, from_disk) = open_written(b)?;
+    let left = &mut left[..CHECK_CHUNK];
+    // Past the cache a read takes memory that starts on a sector's boundary and a whole number of sectors.
+    let start = right.as_ptr().align_offset(CHECK_ALIGN);
+    let right = &mut right[start..start + CHECK_CHUNK];
     loop {
-        let n = a.read(left)?;
-        if n == 0 {
-            return Ok(Some(true));
-        }
-        b.read_exact(&mut right[..n])?;
-        if left[..n] != right[..n] {
+        // Whole chunks of both, so that only the last of each is short: the one that meets the file's end.
+        let n = read_up_to(&mut a, left, false)?;
+        let m = read_up_to(&mut b, right, from_disk)?;
+        if n != m || left[..n] != right[..n] {
             return Ok(Some(false));
         }
-        if !on_chunk(n) {
+        if n > 0 && !on_chunk(n) {
             return Ok(None);
         }
+        if n < CHECK_CHUNK {
+            return Ok(Some(true));
+        }
     }
+}
+
+/// Fills `buffer` from `file`, short only at the file's end. With `sectors` (a file read past the cache), a read that
+/// ends inside a sector met the file's end, and nothing more is asked: what is left of the buffer is no whole number
+/// of sectors, which such a read refuses.
+#[cfg(any(windows, unix))]
+fn read_up_to(file: &mut std::fs::File, buffer: &mut [u8], sectors: bool) -> std::io::Result<usize> {
+    let mut filled = 0;
+    while filled < buffer.len() {
+        match file.read(&mut buffer[filled..]) {
+            Ok(0) => break,
+            Ok(n) => filled += n,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(e) => return Err(e),
+        }
+        if sectors && filled % CHECK_ALIGN != 0 {
+            break;
+        }
+    }
+    Ok(filled)
 }
 
 /// Deletes a folder this module made (never following a link out of it), telling `on_file` of each file, going on past a
@@ -1358,6 +1420,46 @@ mod tests {
         remove_redirect(&library).unwrap();
     }
 
+    /// A copy is read back from the disk, not from the file cache it was just written through, at every size around a
+    /// sector's and a chunk's: the same bytes pass, the whole of them counted for the progress; one byte changed in
+    /// the last sector, or one byte more or less, does not.
+    #[cfg(any(windows, unix))]
+    #[test]
+    fn a_copy_is_read_back_from_the_disk() {
+        let temp = tempfile::tempdir().unwrap();
+        let (a, b) = (temp.path().join("original.bin"), temp.path().join("copy.bin"));
+        let [mut left, mut right] = check_buffers();
+        for size in [0, 1, 511, 512, 4095, 4096, 4097, CHECK_CHUNK - 1, CHECK_CHUNK, CHECK_CHUNK + 1, 2 * CHECK_CHUNK + 123] {
+            let bytes: Vec<u8> = (0..size).map(|i| (i.wrapping_mul(31) >> 2) as u8).collect();
+            std::fs::write(&a, &bytes).unwrap();
+            std::fs::write(&b, &bytes).unwrap();
+            if cfg!(windows) {
+                // What the check is for: on a disk Windows formats, the copy's reads go past the cache.
+                assert!(open_written(&b).unwrap().1, "the copy of {size} bytes was read through the file cache");
+            }
+            let mut counted = 0;
+            let same = same_bytes(&a, &b, &mut left, &mut right, |n| {
+                counted += n;
+                true
+            });
+            assert_eq!(same.unwrap(), Some(true), "{size} bytes");
+            assert_eq!(counted, size, "bytes counted of {size}");
+            if size > 0 {
+                let mut changed = bytes.clone();
+                changed[size - 1] ^= 0x40;
+                std::fs::write(&b, &changed).unwrap();
+                assert_eq!(same_bytes(&a, &b, &mut left, &mut right, |_| true).unwrap(), Some(false), "a changed last byte of {size}");
+                std::fs::write(&b, &bytes[..size - 1]).unwrap();
+                assert_eq!(same_bytes(&a, &b, &mut left, &mut right, |_| true).unwrap(), Some(false), "a byte short of {size}");
+            }
+            // Told to stop, it says so instead of answering.
+            if size > CHECK_CHUNK {
+                std::fs::write(&b, &bytes).unwrap();
+                assert_eq!(same_bytes(&a, &b, &mut left, &mut right, |_| false).unwrap(), None);
+            }
+        }
+    }
+
     #[cfg(any(windows, unix))]
     #[test]
     fn the_copy_keeps_times_and_the_read_only_flag_and_can_be_deleted_again() {
@@ -1801,9 +1903,11 @@ mod tests {
     #[ignore]
     fn a_measured_repair() {
         let mb: usize = std::env::var("ORBITERS_REPAIR_MB").ok().and_then(|s| s.parse().ok()).unwrap_or(1024);
+        // The size of each file, KiB (4 MiB; Library's own are mostly a few KiB).
+        let kb: usize = std::env::var("ORBITERS_REPAIR_FILE_KB").ok().and_then(|s| s.parse().ok()).unwrap_or(4096);
         let temp = tempfile::tempdir().unwrap();
         let cache = temp.path().join("cache");
-        let project = project(temp.path(), "project", mb / 4, 4 * 1024 * 1024);
+        let project = project(temp.path(), "project", mb * 1024 / kb, kb * 1024);
         let progress = SharedProgress::default();
         let cancel = Arc::new(AtomicBool::new(false));
         let start = std::time::Instant::now();

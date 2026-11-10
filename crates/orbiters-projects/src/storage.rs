@@ -658,11 +658,12 @@ fn check_buffers() -> [Vec<u8>; 2] {
 ///    the disk answers. Elsewhere it is written out first, which reports a write that failed, and read through the
 ///    cache ([`Written::flushed`]). Either way the comparison proves what the file system and the disk answer now. It
 ///    does not prove that the bytes are on the platter or in the flash: a disk answers from its own write cache.
-/// 2. **That the copy lasts** ([`Written::persist`]). Once every file has passed, and before Library is switched and
-///    the original removed, the last file written is flushed: the file system commits what it has logged of the
-///    files before it, and asks the disk to empty its write cache. That is one flush a move, not one a file, which
-///    costs milliseconds each over a Library's hundred thousand. What it cannot reach is not checked by anything
-///    here: a disk that reports a flush it did not do, or what a network share's server does with its own cache.
+/// 2. **That the disk's cache is emptied** ([`Written::persist`]). Once every file has passed, and before Library is
+///    switched and the original removed, the last file written is flushed all the way. What that establishes: the
+///    disk empties its write cache, which holds every file's bytes, each having been written out to be compared.
+///    What it does not establish by any documented rule ([`PERSIST_EVERY_FILE`]): that the earlier files' own
+///    entries (their names, sizes, where their bytes lie) are on the disk too. What it cannot reach is not checked by
+///    anything here: a disk that reports a flush it did not do, or what a network share's server does with its cache.
 #[cfg(any(windows, unix))]
 trait Written {
     /// The copy, opened to be read past the system's file cache; `None` where that cannot be done.
@@ -672,6 +673,8 @@ trait Written {
     fn flushed(&self, path: &Path) -> std::io::Result<Box<dyn Read>>;
     /// Flushes the copy at `path` all the way: the file system's log and the disk's own write cache.
     fn persist(&self, path: &Path) -> std::io::Result<()>;
+    /// Whether every file is flushed all the way once it has passed, or the move's last file alone.
+    fn persists_every_file(&self) -> bool;
 }
 
 /// The file system's own ways.
@@ -706,7 +709,26 @@ impl Written for OnDisk {
     fn persist(&self, path: &Path) -> std::io::Result<()> {
         std::fs::OpenOptions::new().write(true).open(path)?.sync_all()
     }
+
+    fn persists_every_file(&self) -> bool {
+        PERSIST_EVERY_FILE
+    }
 }
+
+/// Whether every file of a moved Library is flushed all the way, or its last file alone. The last alone.
+///
+/// Windows documents `FlushFileBuffers` for the file it is given: its bytes and its entry, and the disk's cache with
+/// them. A flush of the last file therefore empties the disk's cache of every file's bytes, but that it also puts the
+/// earlier files' entries on the disk rests on how NTFS works, not on a documented guarantee: NTFS writes its journal
+/// in order, so committing it for one file commits what was logged before. exFAT and FAT have no journal, and there
+/// an earlier file's entry can still be in the system's memory when the original Library goes: a power cut at that
+/// moment can leave files of the copy missing or short. The documented way is a flush a file, and it was measured
+/// (2026-11-10, a release build, the SSD, two runs each, the last file against every file):
+/// 1 GiB of 4 MiB files 4.4 and 4.2 s against 6.2 and 6.0 s; 256 MiB of 16 KiB files (16,384 of them) 174 and 157 s
+/// against 198 and 231 s. About 3 ms a file, 30 % on small files, which is what a Library is made of: five more
+/// minutes on a hundred thousand files, on a move people watch. So the single flush stays, with that limit; the
+/// switch is here for the day it is decided otherwise, and the tests run both ways.
+const PERSIST_EVERY_FILE: bool = false;
 
 /// Has the system write a file out to its disk, and says so when that failed. Off Windows this is `fsync` itself and
 /// not `sync_all`, which on a Mac also has the disk empty its own cache (`F_FULLFSYNC`): milliseconds, for every file
@@ -741,10 +763,10 @@ fn refused_for_its_shape(error: &std::io::Error) -> bool {
 
 /// Copies one file and reads it back from the disk ([`Written`]). `false` when cancelled, partway through it if it is a
 /// large one. The copy keeps the original's modification time and read-only flag, as Library's other readers (and
-/// `std::fs::copy`) expect. `last`: the move's last file, which is flushed all the way once it has passed
-/// ([`Written::persist`]), while it can still be opened to be written to.
+/// `std::fs::copy`) expect. `persist`: the file is flushed all the way once it has passed ([`Written::persist`]), while
+/// it can still be opened to be written to.
 #[cfg(any(windows, unix))]
-fn copy_and_check(disk: &dyn Written, from: &Path, to: &Path, buffers: &mut [Vec<u8>; 2], work: &Work, last: bool) -> anyhow::Result<bool> {
+fn copy_and_check(disk: &dyn Written, from: &Path, to: &Path, buffers: &mut [Vec<u8>; 2], work: &Work, persist: bool) -> anyhow::Result<bool> {
     let [left, right] = buffers;
     let mut source = std::fs::File::open(from)?;
     let meta = source.metadata()?;
@@ -774,7 +796,7 @@ fn copy_and_check(disk: &dyn Written, from: &Path, to: &Path, buffers: &mut [Vec
         Some(true) => {}
         Some(false) => bail!("{}", tr!("A copied file differs from its original: {path}", path = from.display())),
     }
-    if last {
+    if persist {
         disk.persist(to)?;
     }
     // Here a new file is not executable either, and Library holds programs (Burst's compiler, in a package).
@@ -861,9 +883,10 @@ fn relocate_on(
             let to = target.join(relative);
             std::fs::create_dir_all(to.parent().with_context(|| tr("A file without a folder"))?)?;
             update(work.progress, |p| p.file = relative.display().to_string());
-            // The last file is flushed all the way once it has passed: before the switch, and before the original goes.
-            let last = i + 1 == files.len();
-            if !copy_and_check(disk, file, &to, &mut buffers, work, last).with_context(|| tr!("Could not copy {path}", path = relative.display()))? {
+            // Flushed all the way once it has passed, before the switch and before the original goes: every file, or the
+            // last one ([`Written::persists_every_file`]).
+            let persist = disk.persists_every_file() || i + 1 == files.len();
+            if !copy_and_check(disk, file, &to, &mut buffers, work, persist).with_context(|| tr!("Could not copy {path}", path = relative.display()))? {
                 return Ok(false);
             }
             update(work.progress, |p| p.files_done += 1);
@@ -1536,6 +1559,8 @@ mod tests {
         refuse_read: Option<usize>,
         fail_flush: bool,
         fail_persist: bool,
+        /// Every file flushed all the way, or the last alone.
+        every_file: bool,
     }
 
     /// A reader whose `refuse`-th read fails as a read past the cache does on a disk it does not fit.
@@ -1587,6 +1612,10 @@ mod tests {
                 return Err(std::io::Error::other("injected: the disk did not flush"));
             }
             OnDisk.persist(path)
+        }
+
+        fn persists_every_file(&self) -> bool {
+            self.every_file
         }
     }
 
@@ -1732,6 +1761,22 @@ mod tests {
         });
         assert!(matches!(moved.unwrap(), RepairEnd::Moved(_)));
         assert_eq!(*disk.persisted.borrow(), [last], "once a move");
+        remove_redirect(&library).unwrap();
+        assert!(!OnDisk.persists_every_file(), "the app flushes the last file: see PERSIST_EVERY_FILE before changing it");
+
+        // The other way, a flush a file: every file, in the order copied, all before the switch.
+        let project = self::project(temp.path(), "every file", 3, 5000);
+        let library = project.join("Library");
+        let files = files_of(&project);
+        let disk = Probe { every_file: true, ..Default::default() };
+        let target = temp.path().join("moved every file");
+        let copies: Vec<PathBuf> = files.iter().map(|(file, _)| target.join(file.strip_prefix(&library).unwrap())).collect();
+        let moved = relocate_on(&disk, &project, &target, &files, &work, |t, l| {
+            assert_eq!(*disk.persisted.borrow(), copies, "every file flushed before Library is switched");
+            redirect(t, l)
+        });
+        assert!(matches!(moved.unwrap(), RepairEnd::Moved(_)));
+        assert_eq!(*disk.persisted.borrow(), copies);
         remove_redirect(&library).unwrap();
     }
 
@@ -2173,6 +2218,41 @@ mod tests {
 
     /// A move at a size where progress can be read, on the temporary folder's disk:
     /// `ORBITERS_REPAIR_MB=1024 cargo test -p orbiters-projects a_measured_repair -- --ignored --nocapture`.
+    /// Lab: what flushing every file of a moved Library all the way costs against flushing its last file alone, on
+    /// the two shapes a Library has: large files and many small ones. Each move is of a Library made anew in the
+    /// temporary folder, the two ways in turn, `ORBITERS_REPAIR_RUNS` times (2).
+    /// `cargo test --release -p orbiters-projects --lib -- --ignored --nocapture a_measured_flush`.
+    #[cfg(any(windows, unix))]
+    #[test]
+    #[ignore]
+    fn a_measured_flush_of_every_file_or_the_last() {
+        let runs: usize = std::env::var("ORBITERS_REPAIR_RUNS").ok().and_then(|s| s.parse().ok()).unwrap_or(2);
+        for (megabytes, kilobytes) in [(1024usize, 4096usize), (256, 16)] {
+            let (files, size) = (megabytes * 1024 / kilobytes, kilobytes * 1024);
+            for run in 0..runs {
+                for every_file in [false, true] {
+                    let temp = tempfile::tempdir().unwrap();
+                    let project = project(temp.path(), "project", files, size);
+                    let listed = files_of(&project);
+                    let progress = SharedProgress::default();
+                    let cancel = AtomicBool::new(false);
+                    let disk = Probe { every_file, ..Default::default() };
+                    let start = std::time::Instant::now();
+                    let end = relocate_on(&disk, &project, &temp.path().join("cache"), &listed, &Work { progress: &progress, cancel: &cancel }, |t, l| redirect(t, l)).unwrap();
+                    let seconds = start.elapsed().as_secs_f64();
+                    assert!(matches!(end, RepairEnd::Moved(_)));
+                    println!(
+                        "{megabytes} MiB of {kilobytes} KiB files ({files}), run {run}, {}: {seconds:.1} s, {} flushed all the way, {} read past the cache",
+                        if every_file { "every file flushed" } else { "the last file flushed" },
+                        disk.persisted.borrow().len(),
+                        disk.past_cache.get()
+                    );
+                    remove_redirect(project.join("Library")).unwrap();
+                }
+            }
+        }
+    }
+
     #[cfg(any(windows, unix))]
     #[test]
     #[ignore]

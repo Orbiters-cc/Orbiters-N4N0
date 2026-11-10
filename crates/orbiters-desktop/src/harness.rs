@@ -102,7 +102,7 @@ mod tests {
             assert_eq!(orbiters_projects::vcc_dir(), roots.local_data.join("VCC"));
             assert_eq!(orbiters_projects::hub_data_dir(), Some(roots.local_data.join("UnityHub")));
             orbiters_core::panic_log::install();
-            let _controller = crate::controller::Controller::new(Default::default());
+            let _controller = crate::controller::Controller::new(orbiters_core::settings::Settings::default());
             // This writes a real panic note through the hook installed after bootstrap, then continues the test.
             assert!(std::panic::catch_unwind(|| panic!("contained harness panic")).is_err());
             assert!(std::fs::read_dir(orbiters_core::paths::logs_dir()).unwrap().next().is_some());

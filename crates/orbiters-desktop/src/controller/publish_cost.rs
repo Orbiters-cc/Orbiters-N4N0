@@ -12,7 +12,8 @@
 //! - **read**: one client taking that line in, as `ipc::Client`'s link thread does.
 //!
 //! A link writes every state it is handed while it keeps up (the overlay's), so write and read are per change here; the
-//! window's link is paced and skips states, never more than these. Times are the median of the rounds.
+//! window's link is paced and skips states, never more than these. Times are the median of the rounds. After each case
+//! the client's state is compared with the service's, whole.
 
 use super::n4n0::Link;
 use super::{Controller, Shared};
@@ -194,6 +195,8 @@ fn median<T: Copy + Ord + Default>(values: &mut [T]) -> T {
 /// One link's writing and one client's reading of the states the controller hands out.
 struct Wire {
     line: Vec<u8>,
+    /// The state the link last wrote, and the one the client holds.
+    sent: Option<Arc<Snapshot>>,
     client: Option<Arc<Snapshot>>,
 }
 
@@ -202,15 +205,32 @@ impl Wire {
     fn carry(&mut self, snapshot: &Arc<Snapshot>) -> anyhow::Result<(Duration, Duration, usize)> {
         self.line.clear();
         let started = Instant::now();
-        ipc::write_snapshot(&mut self.line, snapshot)?;
+        ipc::write_state(&mut self.line, self.sent.as_ref(), snapshot)?;
+        self.sent = Some(snapshot.clone());
         let wrote = started.elapsed();
-        let text = std::str::from_utf8(&self.line)?;
+        let text = std::str::from_utf8(&self.line)?.trim_end();
         let started = Instant::now();
-        match serde_json::from_str::<ipc::ToClient>(text)? {
-            ipc::ToClient::Snapshot { snapshot } => self.client = Some(Arc::new(*snapshot)),
-            other => anyhow::bail!("{other:?}"), // i18n: not shown (a developer's command line, in English)
-        }
-        Ok((wrote, started.elapsed(), self.line.len()))
+        // As `ipc::Client`'s link thread: the changed parts into a copy of the state held, or the whole state.
+        self.client = Some(match (ipc::changed_parts(text), &self.client) {
+            (Some(parts), Some(held)) => {
+                let mut next = (**held).clone();
+                orbiters_core::slice::apply_changes(&mut next, parts)?;
+                Arc::new(next)
+            }
+            (Some(_), None) => anyhow::bail!("changes before the whole state"), // i18n: not shown (a developer's command line, in English)
+            (None, _) => match serde_json::from_str::<ipc::ToClient>(text)? {
+                ipc::ToClient::Snapshot { snapshot } => Arc::new(*snapshot),
+                other => anyhow::bail!("{other:?}"), // i18n: not shown (a developer's command line, in English)
+            },
+        });
+        let read = started.elapsed();
+        Ok((wrote, read, self.line.len()))
+    }
+
+    /// Whether the client holds what the service published (checked once a case, outside the timing).
+    fn in_step(&self, published: &Snapshot) -> anyhow::Result<bool> {
+        let held = self.client.as_ref().map(|s| serde_json::to_value(&**s)).transpose()?;
+        Ok(held == Some(serde_json::to_value(published)?))
     }
 }
 
@@ -247,7 +267,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
     ctl.set_snapshot(busy_evening());
     let link = Link(Arc::downgrade(&ctl));
     let n4n0 = busy_n4n0();
-    let mut wire = Wire { line: Vec::new(), client: None };
+    let mut wire = Wire { line: Vec::new(), sent: None, client: None };
     // A client that connects is handed everything, once.
     let (wrote, read, bytes) = wire.carry(&ctl.view())?;
     println!("the whole state, as a client that connects gets it: {bytes} bytes, written in {:.1} µs, read in {:.1} µs", micros(wrote), micros(read));
@@ -304,6 +324,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
     ];
     for (name, mut change) in cases {
         let mut t = case(&ctl, &mut wire, rounds, &mut *change)?;
+        anyhow::ensure!(wire.in_step(&ctl.view())?, "{name}: the client does not hold what the service published"); // i18n: not shown (a developer's command line, in English)
         if t.publish.is_empty() {
             println!("{name:<44} published nothing ({} rounds)", t.silent);
             continue;

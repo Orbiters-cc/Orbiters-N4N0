@@ -24,6 +24,8 @@ struct Link {
     role: Role,
     pid: u32,
     mailbox: Arc<Mailbox>,
+    /// The client could not read a line of the state (`ToService::Resync`): the next state goes whole.
+    resync: Arc<AtomicBool>,
 }
 
 /// Connections that have not said their token yet, at most: each holds a thread for up to `HELLO_TIMEOUT`.
@@ -280,6 +282,14 @@ impl Service {
         };
         match msg {
             ToService::Hello { .. } => {}
+            ToService::Resync => {
+                // Out of the links' lock first: handing the state out takes the controller's turn.
+                let found = self.links.lock().unwrap().iter().find(|l| l.id == link).map(|l| (l.resync.clone(), l.mailbox.clone()));
+                if let Some((resync, mailbox)) = found {
+                    resync.store(true, Ordering::Relaxed);
+                    ctl.repost(&mailbox);
+                }
+            }
             ToService::StartCapture => report(ctl.start_capture(false)),
             ToService::StopCapture => report(ctl.stop_capture()),
             ToService::Pause { paused } => report(ctl.pause_capture(paused)),
@@ -394,14 +404,27 @@ impl Service {
         let mailbox = Mailbox::new(true);
         let out = mailbox.clone();
         let mut writer = stream;
-        // The window gets the state about 30 times a second at most (an open N4N0 menu republishes 70 times): the newest
-        // waits in the mailbox meanwhile. The overlay, in the headset, gets every one it can read.
+        // The window gets the state about 30 times a second at most (the service can publish faster: a voice's level,
+        // an answer arriving, the avatar's speed): the newest waits in the mailbox meanwhile. The overlay, in the
+        // headset, gets every one it can read.
         let pace = (role == Role::Window).then_some(WINDOW_PACE);
+        let resync = Arc::new(AtomicBool::new(false));
+        let again = resync.clone();
         std::thread::spawn(move || {
+            // The state this link last wrote: the next one goes as what changed since (`ipc::write_state`), whatever
+            // states the mailbox replaced in between. None yet, or the client lost step: the whole state.
+            let mut sent: Option<Arc<crate::state::Snapshot>> = None;
             while let Some((messages, snapshot)) = out.take() {
                 let paced = pace.filter(|_| snapshot.is_some());
+                if again.swap(false, Ordering::Relaxed) {
+                    sent = None;
+                }
                 let written = snapshot
-                    .map_or(Ok(()), |s| ipc::write_snapshot(&mut writer, &s))
+                    .map_or(Ok(()), |s| {
+                        let written = ipc::write_state(&mut writer, sent.as_ref(), &s);
+                        sent = Some(s);
+                        written
+                    })
                     .and_then(|_| messages.iter().try_for_each(|m| ipc::write_line(&mut writer, m)));
                 if written.is_err() {
                     out.close();
@@ -415,7 +438,7 @@ impl Service {
         // Subscribed before it is listed: the snapshot is in its mailbox before anything else can be (a Show).
         self.ctl.subscribe(mailbox.clone());
         let id = self.next_link.fetch_add(1, Ordering::Relaxed);
-        self.links.lock().unwrap().push(Link { id, role, pid, mailbox: mailbox.clone() });
+        self.links.lock().unwrap().push(Link { id, role, pid, mailbox: mailbox.clone(), resync });
         match role {
             Role::Window => {
                 *self.window.lock().unwrap() = None;

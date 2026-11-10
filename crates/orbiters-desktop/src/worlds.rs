@@ -511,6 +511,8 @@ const KEEP_BYTES: usize = 48 << 20;
 const STALE_REQUEST: f64 = 2.0;
 
 /// Pictures decoded by three loader threads (newest requests first), uploaded as textures on the interface thread.
+/// The threads start with the first picture asked for: a set made and never used (a picture window makes one that its
+/// first frame replaces) costs none.
 pub struct Pictures {
     slots: HashMap<Picture, Kept>,
     queue: Arc<(Mutex<Vec<Picture>>, std::sync::Condvar)>,
@@ -518,6 +520,8 @@ pub struct Pictures {
     /// When the pictures were last trimmed to [`KEEP_BYTES`] (egui's clock).
     trimmed: f64,
     stopped: Arc<std::sync::atomic::AtomicBool>,
+    /// What the loaders start with (the interface they wake, where profile pictures are read), until they started.
+    unstarted: Option<(egui::Context, Option<crate::backend::Ctl>)>,
 }
 
 impl Pictures {
@@ -525,13 +529,23 @@ impl Pictures {
         Self::with_backend(ctx, None)
     }
     pub fn with_backend(ctx: &egui::Context, backend: Option<crate::backend::Ctl>) -> Self {
-        let queue: Arc<(Mutex<Vec<Picture>>, std::sync::Condvar)> = Arc::default();
-        let done: Arc<Mutex<Vec<Loaded>>> = Arc::default();
-        let stopped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        Self {
+            slots: HashMap::new(),
+            queue: Arc::default(),
+            done: Arc::default(),
+            trimmed: f64::NEG_INFINITY,
+            stopped: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            unstarted: Some((ctx.clone(), backend)),
+        }
+    }
+
+    /// Starts the loaders, once.
+    fn start(&mut self) {
+        let Some((ctx, backend)) = self.unstarted.take() else { return };
         for i in 0..3 {
-            let (queue, done, ctx) = (queue.clone(), done.clone(), ctx.clone());
+            let (queue, done, ctx) = (self.queue.clone(), self.done.clone(), ctx.clone());
             let backend = backend.clone();
-            let stopped = stopped.clone();
+            let stopped = self.stopped.clone();
             std::thread::Builder::new()
                 .name(format!("pictures-{i}"))
                 .spawn(move || {
@@ -568,7 +582,12 @@ impl Pictures {
                 })
                 .expect("picture loader");
         }
-        Self { slots: HashMap::new(), queue, done, trimmed: f64::NEG_INFINITY, stopped }
+    }
+
+    /// Whether the loader threads were started (tests).
+    #[cfg(test)]
+    pub(crate) fn started(&self) -> bool {
+        self.unstarted.is_none()
     }
 
     /// The picture as a texture once decoded; asks for it the first time (and again to bring it forward while it
@@ -606,6 +625,7 @@ impl Pictures {
                 }
             }
             None => {
+                self.start();
                 self.slots.insert(picture.clone(), Kept { slot: Slot::Loading, used: now });
                 let (lock, ready) = &*self.queue;
                 lock.lock().unwrap().push(picture.clone());
@@ -1053,5 +1073,29 @@ pub(crate) mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
         assert!(sessions(&root).is_empty());
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Every picture window started three loader threads that its first frame threw away (the window makes its set
+    /// again once it knows whose pictures it shows). A set starts its loaders at the first picture asked for.
+    #[test]
+    fn pictures_start_their_loaders_at_the_first_picture_asked_for() {
+        let ctx = egui::Context::default();
+        let mut pictures = Pictures::new(&ctx);
+        assert!(!pictures.started(), "made, nothing asked: no thread");
+        let mut out = ctx.run_ui(egui::RawInput::default(), |ui| {
+            // A session folder that is not there: decoded to nothing, on a loader.
+            assert!(pictures.get(ui.ctx(), &Picture::Session(PathBuf::from("Z:/orbiters-test/no-such-session"))).is_none());
+        });
+        out.textures_delta.clear();
+        assert!(pictures.started());
+        let until = std::time::Instant::now() + Duration::from_secs(10);
+        while pictures.loading() {
+            assert!(std::time::Instant::now() < until, "the loader answers");
+            std::thread::sleep(Duration::from_millis(5));
+            let mut out = ctx.run_ui(egui::RawInput::default(), |ui| {
+                pictures.get(ui.ctx(), &Picture::Session(PathBuf::from("Z:/orbiters-test/no-such-session")));
+            });
+            out.textures_delta.clear();
+        }
     }
 }

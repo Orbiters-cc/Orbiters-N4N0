@@ -217,8 +217,10 @@ fn now_secs() -> u64 {
     visited::now()
 }
 
+/// The Orbiters the app is set to, as everything else on this page reads it (its world pages, its shares): Open on
+/// Orbiters read the account's server instead, which is another one for a moment after the environment is changed.
 fn server(cx: &Cx) -> Server {
-    if cx.snap.account.development {
+    if cx.snap.settings.development {
         Server::Development
     } else {
         Server::Production

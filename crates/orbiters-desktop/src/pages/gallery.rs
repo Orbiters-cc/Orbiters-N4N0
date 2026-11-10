@@ -908,8 +908,10 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) -> bool {
         });
     state.scroll_offset = output.state.clamped_offset().y;
     let visible_top = state.scroll_offset + top - page.top();
+    // The topmost item in view; of a row's items, all at the same height, always the same one (by its key): the map
+    // gives them in an order of its own at each frame, and the anchor went from one to another without a scroll.
     state.scroll_anchor = positions.iter().filter(|(_, y)| **y >= visible_top)
-        .min_by(|a, b| a.1.total_cmp(b.1)).map(|(key, y)| (key.clone(), *y));
+        .min_by(|a, b| a.1.total_cmp(b.1).then_with(|| a.0.cmp(b.0))).map(|(key, y)| (key.clone(), *y));
     state.layout_positions = positions;
     super::under_top(&gu, cx, "photos-captures", from, top);
     if let Some(background) = &background {

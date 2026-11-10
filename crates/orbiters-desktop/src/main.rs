@@ -18,6 +18,7 @@ mod coverage_window;
 mod device;
 mod drag_out;
 mod gpu;
+mod idle_frames;
 mod ipc;
 mod keys;
 mod language;
@@ -67,6 +68,7 @@ fn main() -> anyhow::Result<()> {
         // From RunOnce, at sign-in, after something died with a change of the FPS booster in force.
         Some(orbiters_booster::system::RESTORE_ARGUMENT) => controller::booster_restore_at_sign_in(),
         Some("--gpu-bench") => bench::run(&args[1..]),
+        Some("--idle-frames") => idle_frames::run(&args[1..]),
         Some("--window") => window::run(&args[1..]),
         Some("--overlay") => overlay::run(&args[1..]),
         #[cfg(windows)]

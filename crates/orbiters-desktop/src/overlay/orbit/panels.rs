@@ -1426,9 +1426,6 @@ pub fn split_source(title: &str, by: &str) -> (Option<String>, String) {
     (None, title.to_string())
 }
 
-/// A line of what an accessory of All tools does, at its size.
-const SMALL_LINE: f32 = 21.0;
-
 /// What an accessory of All tools does, in a few words for its tile: its caption says the whole of it.
 fn tile_line(action: Action, facts: &Facts) -> Option<String> {
     let line = match action {
@@ -1657,6 +1654,8 @@ fn sheet_name(title: &str) -> &str {
 fn sheet_how(facts: &Facts) -> Option<String> {
     Some(match facts.sheet? {
         Sheet::Worlds => tr("Press a world for its details. Scroll for more.").to_string(),
+        // A capture open in 3D: how to look around it, which is all there is to say while it fills the sheet.
+        Sheet::Pictures if facts.opened.is_some_and(|n| turns_on_the_sheet(facts, n)) => tr("Drag to look around. The mouse's wheel brings it closer.").to_string(),
         Sheet::Pictures => match &facts.gallery_set {
             Some(name) => tr!("{name}, every capture of it. Back shows all your pictures.", name = name),
             None => tr("A tile with a number opens to the captures it stands for.").to_string(),
@@ -2470,19 +2469,25 @@ fn draw(p: &Painter, zone: Zone, item: &Item, facts: &Facts, hovered: bool, pres
             widgets::icon(p, chip.center(), icon, 25.0, tint);
             let x = chip.right() + 10.0;
             let room = rect.right() - x - 10.0;
-            // What it does in a few words, large enough to read at 1280 x 720 (round 10's judges: three lines at 14 were too small); the whole of it is in the caption when pointed.
+            // What it does in a few words; the whole of it is in the caption when pointed.
             let said = tile_line(item.action, facts).or_else(|| caption(item.action, facts).map(|c| c.1)).filter(|_| room >= 140.0);
-            // At 1280 x 720 its name about 14.5 px and what it does about 12.7 (round 16's judges).
             let font = look::font(21.5, weight::BOLD);
             match said {
                 Some(said) => {
                     p.text(pos2(x, rect.top() + 22.0), Align2::LEFT_CENTER, fit(p, label, &font, room), font, Color32::WHITE);
-                    let top = rect.top() + 33.0;
-                    let rows = ((rect.bottom() - 4.0 - top) / SMALL_LINE).floor().clamp(1.0, 2.0) as usize;
-                    let mut job = egui::text::LayoutJob::simple(said, look::font(19.5, weight::SEMIBOLD), Color32::WHITE, room);
-                    job.wrap.max_rows = rows;
-                    job.wrap.overflow_character = Some('\u{2026}');
-                    p.galley(pos2(x, top), p.layout_job(job), look::LABEL);
+                    // Smaller than its name and quieter, and never past the tile's foot (Enzo, 2026-11-10: at the name's size it ran over the tile and was cut). As many
+                    // whole lines as the tile holds, by what they measure.
+                    let top = rect.top() + 34.0;
+                    let ink = theme::mix(look::MUTED, Color32::WHITE, 0.55);
+                    let lines = |rows: usize| {
+                        let mut job = egui::text::LayoutJob::simple(said.clone(), look::font(15.5, weight::MEDIUM), ink, room);
+                        job.wrap.max_rows = rows;
+                        job.wrap.overflow_character = Some('\u{2026}');
+                        p.layout_job(job)
+                    };
+                    let two = lines(2);
+                    let galley = if top + two.size().y <= rect.bottom() - 2.0 { two } else { lines(1) };
+                    p.galley(pos2(x, top), galley, ink);
                 }
                 None => {
                     p.text(pos2(x, chip.center().y), Align2::LEFT_CENTER, fit(p, label, &font, room), font, Color32::WHITE);

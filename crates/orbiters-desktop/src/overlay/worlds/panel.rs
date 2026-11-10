@@ -16,7 +16,7 @@ mod pages;
 mod shots;
 
 pub use bar::{bar_hit, bar_press, draw_bar, BAR_PX};
-pub use shots::shots;
+pub use shots::{shots, side_live};
 
 use super::catalog::Entry;
 pub use super::finder::Section;
@@ -1246,6 +1246,9 @@ impl Panel {
                 } else if !status.headset {
                     if !live_here && !current {
                         out.push((Target::Show, SHOW_WHOLE));
+                    } else if live_here && self.live.as_ref().is_some_and(|l| l.picture.is_some()) {
+                        // It shows in 3D now: where See it in 3D was, the next step, in words (the corner's button alone is small, and the row was left empty).
+                        out.push((Target::FullView, SHOW_WHOLE));
                     }
                 } else if current {
                     // The other way to see it: the sheet's head, or N4N0's bar, hides it.
@@ -1710,7 +1713,7 @@ impl Panel {
                 for (t, rect) in &targets {
                     if let Target::Card(i) = *t {
                         let (h, pr) = state(*t);
-                        compact_card(p, *rect, results[i], d, h, pr, shown);
+                        compact_card(p, *rect, results[i], d, h, pr, shown, false);
                     }
                 }
                 if results.is_empty() {
@@ -1911,16 +1914,13 @@ impl Panel {
                 } else if self.few_leading(d, &results).is_some() {
                     let lift = (1.0 - ease_out((time - self.page_at) / PAGE_FADE)) * 18.0;
                     if side {
-                        compact_card(p, *rect, results[i], d, h, pr, 1.0);
+                        compact_card(p, *rect, results[i], d, h, pr, 1.0, self.selected == Some(results[i].id));
                     } else {
                         card(p, rect.translate(vec2(0.0, lift)), results[i], d, h, pr, shown);
                     }
                 } else if side {
                     let whole = side_card_rect_flowing(i).translate(vec2(0.0, -self.vr_scroll));
-                    compact_card(&list, whole, results[i], d, h, pr, 1.0);
-                    if self.selected == Some(results[i].id) {
-                        list.rect_stroke(whole, CornerRadius::same(18), Stroke::new(2.5, orbit_look::accent()), StrokeKind::Inside);
-                    }
+                    compact_card(&list, whole, results[i], d, h, pr, 1.0, self.selected == Some(results[i].id));
                 } else {
                     card(&list, card_rect(i).translate(vec2(0.0, -self.vr_scroll)), results[i], d, h, pr, shown);
                 }
@@ -2128,6 +2128,8 @@ impl Panel {
                     let lit = !(current && status.small);
                     pill_button(p, *rect, Some(glyph), label, if lit { orbit_look::accent() } else { RAISED2 }, if lit { orbit_look::on_accent() } else { theme::FG }, h, pr, rest);
                 }
+                // The corner's button is drawn with the picture.
+                Target::FullView if rect.width() > 100.0 => pill_button(p, *rect, Some(icons::CORNERS_OUT), tr("Full screen"), RAISED2, theme::FG, h, pr, rest),
                 Target::ShowSmall => {
                     let lit = current && status.small;
                     pill_button(p, *rect, Some(icons::HAND_GRABBING), tr("Small here"), if lit { orbit_look::accent() } else { RAISED2 }, if lit { orbit_look::on_accent() } else { theme::FG }, h, pr, rest);
@@ -2262,10 +2264,12 @@ fn compact_rect(i: usize) -> Rect {
     Rect::from_min_size(pos2(32.0 + i as f32 * 328.0, 100.0), vec2(304.0, 120.0))
 }
 
-/// A card's picture beside the side panel: all of it, as its world made it, for its own words are often on it; small enough to leave its name two whole lines.
+/// A card's picture beside the side panel: a block as high as the card, an even margin round it, cut to that shape (Enzo, 2026-11-10: a small picture
+/// floating in a dark box read as rushed). Wide enough to show a place, narrow enough to leave its name two whole lines.
 fn compact_thumb(card: Rect) -> Rect {
-    const HIGH: f32 = 70.0;
-    Rect::from_min_size(pos2(card.min.x + 10.0, card.center().y - HIGH / 2.0), vec2(HIGH * 16.0 / 9.0, HIGH))
+    const MARGIN: f32 = 8.0;
+    let high = card.height() - 2.0 * MARGIN;
+    Rect::from_min_size(card.min + vec2(MARGIN, MARGIN), vec2((high * 1.2).round(), high))
 }
 
 /// The keyboard's keys: digits, three rows of letters (Backspace at the end of the last), then the space bar; with
@@ -2615,35 +2619,62 @@ fn card(p: &Painter, rect: Rect, entry: &Entry, d: &Data, hover: bool, pressed: 
     text_cut(p, pos2(rect.min.x + 16.0, rect.min.y + CARD_THUMB + 36.0), rect.width() - 32.0, orbit_look::txt(meta.join(" · "), 15.0).color(fade(theme::FG_3, alpha)));
 }
 
+/// A world beside the side panel (and over the keyboard): its picture as a block on the left, and beside it its name, who made it and how it is liked, one
+/// group centred on the picture, whatever its name's length. `selected`: its details are the ones open, the card in the accent.
 #[allow(clippy::too_many_arguments)]
-fn compact_card(p: &Painter, rect: Rect, entry: &Entry, d: &Data, hover: bool, pressed: bool, alpha: f32) {
+fn compact_card(p: &Painter, rect: Rect, entry: &Entry, d: &Data, hover: bool, pressed: bool, alpha: f32, selected: bool) {
     let status = d.status;
     let rect = if pressed { rect.shrink(3.0) } else { rect };
-    p.rect_filled(rect, CornerRadius::same(18), fade(if hover { RAISED } else { SURFACE }, alpha));
+    let (corner, accent) = (CornerRadius::same(16), orbit_look::accent());
+    let fill = if selected { theme::mix(SURFACE, accent, if hover { 0.2 } else { 0.13 }) } else if hover { RAISED } else { SURFACE };
+    p.rect_filled(rect, corner, fade(fill, alpha));
+    // An edge of its own: a hairline at rest, the accent while its details are open.
+    let edge = if selected { Stroke::new(2.0, fade(accent, alpha)) } else { Stroke::new(1.0, fade(theme::white(if hover { 0.16 } else { 0.07 }), alpha)) };
+    p.rect_stroke(rect, corner, edge, StrokeKind::Inside);
     let thumb = compact_thumb(rect);
     picture(p, thumb, (d.thumb)(entry), &entry.world_id, CornerRadius::same(10), alpha);
-    let x = thumb.max.x + 14.0;
+    if entry.capture {
+        // It has a 3D capture: on its picture's corner, as on the full list's cards.
+        let galley = p.layout_job(orbit_look::txt("3D", 12.5).weight(weight::BOLD).color(fade(orbit_look::on_accent(), alpha)).job(f32::INFINITY));
+        let chip = Rect::from_min_size(thumb.min + vec2(6.0, 6.0), vec2(galley.size().x + 29.0, 20.0));
+        p.rect_filled(chip, CornerRadius::same(10), fade(accent, alpha));
+        widgets::icon(p, pos2(chip.min.x + 12.0, chip.center().y), icons::CUBE, 12.5, fade(orbit_look::on_accent(), alpha));
+        p.galley(pos2(chip.min.x + 21.0, chip.center().y - galley.size().y / 2.0), galley, orbit_look::on_accent());
+    }
+    let x = thumb.max.x + 12.0;
     let width = rect.max.x - x - 12.0;
     let mut name = orbit_look::txt(entry.name.clone(), 16.5).weight(weight::SEMIBOLD).color(fade(theme::FG, alpha)).job(width);
     name.wrap.max_rows = 2;
-    p.galley(pos2(x, rect.min.y + 10.0), p.layout_job(name), theme::FG);
-    if let Some(a) = d.author(entry) {
-        text_cut(p, pos2(x, rect.min.y + 62.0), width, orbit_look::txt(a.to_string(), 16.0).color(fade(theme::FG_3, alpha)));
+    name.wrap.overflow_character = Some('\u{2026}');
+    let name = p.layout_job(name);
+    let author = d.author(entry).map(|a| p.layout_job(orbit_look::txt(a.trim().to_string(), 14.5).color(fade(theme::FG_3, alpha)).job_truncated(width)));
+    let current = status.current == Some(entry.id);
+    let likes = d.likes(entry);
+    let foot = current || likes > 0;
+    // One group, centred on the picture: a short name does not leave the rest hanging at the card's foot.
+    const FOOT: f32 = 18.0;
+    let high = name.size().y + author.as_ref().map_or(0.0, |a| 2.0 + a.size().y) + if foot { 7.0 + FOOT } else { 0.0 };
+    let mut y = rect.center().y - high / 2.0;
+    let name_high = name.size().y;
+    p.galley(pos2(x, y), name, theme::FG);
+    y += name_high;
+    if let Some(author) = author {
+        y += 2.0;
+        let author_high = author.size().y;
+        p.galley(pos2(x, y), author, theme::FG_3);
+        y += author_high;
     }
-    if status.current == Some(entry.id) {
-        p.circle_filled(pos2(x + 6.0, rect.min.y + 88.0), 5.0, fade(if status.shown { orbit_look::accent() } else { theme::WARN }, alpha));
-        text(p, pos2(x + 18.0, rect.min.y + 88.0), Align2::LEFT_CENTER, orbit_look::txt(if !status.shown { tr("Loading") } else if status.small { tr_ctx("view", "Small") } else { tr("Around you") }, 15.5).color(fade(theme::FG_2, alpha)));
+    if !foot {
+        return;
+    }
+    let line = y + 7.0 + FOOT / 2.0;
+    if current {
+        p.circle_filled(pos2(x + 5.0, line), 4.5, fade(if status.shown { accent } else { theme::WARN }, alpha));
+        text(p, pos2(x + 16.0, line), Align2::LEFT_CENTER, orbit_look::txt(if !status.shown { tr("Loading") } else if status.small { tr_ctx("view", "Small") } else { tr("Around you") }, 14.5).weight(weight::MEDIUM).color(fade(theme::FG_2, alpha)));
     } else {
-        let mut at = x;
-        if entry.capture {
-            widgets::icon(p, pos2(at + 7.0, rect.min.y + 88.0), icons::CUBE, 15.0, fade(orbit_look::accent(), alpha));
-            text(p, pos2(at + 20.0, rect.min.y + 88.0), Align2::LEFT_CENTER, orbit_look::txt("3D", 14.0).weight(weight::SEMIBOLD).color(fade(orbit_look::accent(), alpha)));
-            at += 50.0;
-        }
-        if d.likes(entry) > 0 {
-            widgets::icon_fill(p, pos2(at + 7.0, rect.min.y + 88.0), icons::HEART, 14.0, fade(theme::FG_3, alpha));
-            text(p, pos2(at + 20.0, rect.min.y + 88.0), Align2::LEFT_CENTER, orbit_look::txt(short_count(d.likes(entry) as u64), 15.5).color(fade(theme::FG_3, alpha)));
-        }
+        let liked = d.feedback.world(&world_key(&entry.world_id)).is_some_and(|w| w.liked);
+        widgets::icon_fill(p, pos2(x + 7.0, line), icons::HEART, 14.0, fade(if liked { theme::REC } else { theme::FG_3 }, alpha));
+        text(p, pos2(x + 19.0, line), Align2::LEFT_CENTER, orbit_look::txt(short_count(likes as u64), 14.5).weight(weight::MEDIUM).color(fade(theme::FG_2, alpha)));
     }
 }
 

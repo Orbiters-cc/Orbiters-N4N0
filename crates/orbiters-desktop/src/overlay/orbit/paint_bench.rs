@@ -774,12 +774,11 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
     let fonts_anew = args.iter().any(|a| a == "--fonts-anew");
     let out = value("--out").map(PathBuf::from);
     // Nothing of the app's own folders: all of it in a scratch that goes when this ends.
-    let scratch = std::env::temp_dir().join("orbiters-orbit-paint-bench").join(std::process::id().to_string());
-    let _ = std::fs::remove_dir_all(&scratch);
+    let roots = orbiters_core::paths::roots().context("paint bench requires the harness bootstrap")?;
+    let scratch = roots.config.parent().context("private root")?.to_path_buf();
     for sub in ["config", "local", "cache", "documents", "sessions"] {
         std::fs::create_dir_all(scratch.join(sub))?;
     }
-    orbiters_core::paths::set_roots(orbiters_core::paths::Roots { config: scratch.join("config"), local_data: scratch.join("local"), cache: scratch.join("cache"), documents: scratch.join("documents") })?;
     music(83);
     let pictures = make_pictures(&scratch.join("pictures"))?;
     let _ = PICTURES.set(pictures);
@@ -839,6 +838,5 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
     if let Some(out) = &out {
         std::fs::write(out.join("report.md"), &report)?;
     }
-    let _ = std::fs::remove_dir_all(&scratch);
     Ok(())
 }

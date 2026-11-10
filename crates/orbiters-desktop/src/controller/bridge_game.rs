@@ -142,7 +142,7 @@ impl Game for RealGame {
                 stage: format!("{:?}", job.stage).to_lowercase(),
                 progress: job.progress,
             }),
-            queue: snap.reconstruct_queue.clone(),
+            queue: (*snap.reconstruct_queue).clone(),
             queue_waits_for: ctl.reconstruction_waits_for().to_string(),
             steamvr: snap.steamvr.running,
         }

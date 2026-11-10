@@ -185,7 +185,7 @@ impl Backend for Remote {
     }
 
     fn patch_settings(&self, patch: serde_json::Value) {
-        self.0.update_local(|s| s.settings = s.settings.patched(&patch).0);
+        self.0.update_local(|s| s.settings = s.settings.patched(&patch).0.into());
         self.0.send(&ToService::PatchSettings { patch });
     }
 

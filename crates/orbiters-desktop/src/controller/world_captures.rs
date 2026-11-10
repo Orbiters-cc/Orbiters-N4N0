@@ -596,7 +596,7 @@ mod tests {
         session("other", "wrld_00000000-0000-0000-0000-000000000000", "spout");
         let ctl = super::super::Controller::new(orbiters_core::settings::Settings::default());
         let mut snapshot = Snapshot::new(orbiters_core::settings::Settings::default());
-        snapshot.reconstruct_queue = vec![waiting.clone()];
+        *snapshot.reconstruct_queue = vec![waiting.clone()];
         let sessions = bundle::list_sessions(&root);
         let item = orbiters_core::shares::Item {
             id: 5,

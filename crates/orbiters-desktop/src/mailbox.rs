@@ -16,6 +16,9 @@ struct State {
     snapshot: Option<Arc<Snapshot>>,
     messages: VecDeque<ToClient>,
     closed: bool,
+    /// For a reader that watches one thing ([`Mailbox::watching`]): whether a state differs in it from the last state it
+    /// was handed. It keeps that one value between states, never a state.
+    watch: Option<Box<dyn FnMut(&Snapshot) -> bool + Send>>,
 }
 
 pub struct Mailbox {
@@ -30,6 +33,26 @@ impl Mailbox {
         Arc::new(Self { state: Mutex::new(State::default()), ready: Condvar::new(), notices: shows_notices })
     }
 
+    /// A mailbox for a reader inside the service that follows one thing of the state (the tray's menu: whether a capture
+    /// runs; tracking smoothing: its settings), which `watched` reads from a state: it is handed the first state, then
+    /// only those where that thing differs from the last state it was handed. It sleeps through every other publish,
+    /// where it used to be woken for each to compare and go back to sleep. It shows no notices.
+    ///
+    /// Between two states the mailbox keeps the watched value alone. A whole state kept for comparison would stay
+    /// alive, with a conversation or a picture long gone from the service, until the watched thing changed: hours.
+    pub fn watching<K: PartialEq + Send + 'static>(watched: fn(&Snapshot) -> K) -> Arc<Self> {
+        let mut last: Option<K> = None;
+        let watch = move |snapshot: &Snapshot| {
+            let now = watched(snapshot);
+            let changed = last.as_ref() != Some(&now);
+            if changed {
+                last = Some(now);
+            }
+            changed
+        };
+        Arc::new(Self { state: Mutex::new(State { watch: Some(Box::new(watch)), ..Default::default() }), ready: Condvar::new(), notices: false })
+    }
+
     pub fn shows_notices(&self) -> bool {
         self.notices
     }
@@ -39,6 +62,9 @@ impl Mailbox {
         let mut state = self.state.lock().unwrap();
         if state.closed {
             return false;
+        }
+        if state.watch.as_mut().is_some_and(|changed| !changed(&snapshot)) {
+            return true;
         }
         state.snapshot = Some(snapshot);
         self.ready.notify_one();
@@ -75,6 +101,13 @@ impl Mailbox {
         Some((state.messages.drain(..).collect(), state.snapshot.take()))
     }
 
+    /// How much waits for the reader: states (one at most) and other messages.
+    #[cfg(test)]
+    pub fn waiting(&self) -> (usize, usize) {
+        let state = self.state.lock().unwrap();
+        (state.snapshot.is_some() as usize, state.messages.len())
+    }
+
     /// The reader is gone: what waits is dropped and nothing more is kept.
     pub fn close(&self) {
         let mut state = self.state.lock().unwrap();
@@ -106,5 +139,48 @@ mod tests {
         mailbox.close();
         assert!(!mailbox.post(ToClient::Show), "a closed mailbox takes nothing");
         assert!(mailbox.take().is_none());
+    }
+
+    #[test]
+    fn a_reader_that_watches_one_thing_is_handed_only_its_changes() {
+        let mailbox = Mailbox::watching(|s| s.settings.tracking.clone());
+        let first = Arc::new(Snapshot::new(Settings::default()));
+        // The first state, whatever it holds.
+        assert!(mailbox.post_snapshot(first.clone()));
+        let (_, handed) = mailbox.take().unwrap();
+        assert!(handed.is_some_and(|s| Arc::ptr_eq(&s, &first)));
+        // Once the reader has it and lets it go, the mailbox holds no state: only the value it watches (review N3: it
+        // kept the whole first state, with whatever it held, until that value changed).
+        let gone = Arc::downgrade(&first);
+        let copy = (*first).clone();
+        drop(first);
+        assert!(gone.upgrade().is_none(), "the state handed is kept by nobody once its reader let it go");
+        let first = copy;
+        // States that differ elsewhere: nothing waits, and the reader would sleep on.
+        let mut elsewhere = first.clone();
+        elsewhere.n4n0.afk = true;
+        elsewhere.settings.walk_boost.strength += 0.25;
+        let elsewhere = Arc::new(elsewhere);
+        assert!(mailbox.post_snapshot(elsewhere.clone()), "still subscribed");
+        assert!(mailbox.state.lock().unwrap().snapshot.is_none());
+        assert_eq!(Arc::strong_count(&elsewhere), 1, "a state it was not handed is not kept either");
+        // What it watches changed since the state it was handed, two publishes later: handed that newest state.
+        let mut changed = (*elsewhere).clone();
+        changed.settings.tracking.enabled = !changed.settings.tracking.enabled;
+        let changed = Arc::new(changed);
+        assert!(mailbox.post_snapshot(changed.clone()));
+        let mut later = (*changed).clone();
+        later.n4n0.afk = false;
+        assert!(mailbox.post_snapshot(Arc::new(later)));
+        let (_, handed) = mailbox.take().unwrap();
+        assert!(handed.is_some_and(|s| Arc::ptr_eq(&s, &changed)), "the state that changed it, not a later one that did not");
+        // Back to what it was: a change again.
+        assert!(mailbox.post_snapshot(elsewhere.clone()));
+        assert!(mailbox.take().unwrap().1.is_some_and(|s| Arc::ptr_eq(&s, &elsewhere)));
+        // Messages reach it as any other mailbox.
+        assert!(mailbox.post(ToClient::Library { version: 2 }));
+        let (messages, handed) = mailbox.take().unwrap();
+        assert!(messages.len() == 1 && handed.is_none());
+        assert!(!mailbox.shows_notices());
     }
 }

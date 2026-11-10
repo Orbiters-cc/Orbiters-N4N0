@@ -16,7 +16,7 @@ impl crate::N4n0 {
             if rt.captures == captures {
                 return;
             }
-            rt.captures = captures.clone();
+            rt.captures = captures.clone().into();
             let effects = rt.screen.menu.set_captures(captures);
             rt.wake();
             effects
@@ -32,11 +32,11 @@ impl crate::N4n0 {
             let mut rt = self.n4n0.lock().unwrap();
             rt.friends_asked = rt.friends_asked.wrapping_add(1);
             if !on {
-                rt.friends = Friends::None;
-            } else if !matches!(rt.friends, Friends::Ready { .. }) {
-                rt.friends = Friends::Loading;
+                rt.friends = Friends::None.into();
+            } else if !matches!(*rt.friends, Friends::Ready { .. }) {
+                rt.friends = Friends::Loading.into();
             }
-            let friends = rt.friends.clone();
+            let friends = (*rt.friends).clone();
             rt.screen.menu.set_friends(friends);
             rt.wake();
             rt.friends_asked
@@ -57,7 +57,7 @@ impl crate::N4n0 {
                 if rt.friends_asked != number {
                     return;
                 }
-                rt.friends = friends.clone();
+                rt.friends = friends.clone().into();
                 rt.screen.menu.set_friends(friends);
                 rt.wake();
             }

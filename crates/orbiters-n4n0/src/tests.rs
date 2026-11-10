@@ -37,6 +37,9 @@ pub(crate) struct TestHost {
     scene: Mutex<Scene>,
     world: Mutex<WorldState>,
     published: Mutex<N4n0Status>,
+    /// How often N4N0 handed its state over, and how often it differed from the one before (what the desktop publishes).
+    publishes: AtomicUsize,
+    changes: AtomicUsize,
     notices: Mutex<Vec<(NoticeKind, String)>>,
     /// A stand-in Orbiters and its credential.
     server: Mutex<Option<(String, String)>>,
@@ -192,7 +195,12 @@ impl Host for TestHost {
         if status.states.avatar_name.is_none() {
             status.states.avatar_name = self.world.lock().unwrap().avatar_name.clone();
         }
-        *self.published.lock().unwrap() = status;
+        let mut published = self.published.lock().unwrap();
+        self.publishes.fetch_add(1, Ordering::Relaxed);
+        if *published != status {
+            self.changes.fetch_add(1, Ordering::Relaxed);
+        }
+        *published = status;
     }
 
     fn notify(&self, kind: NoticeKind, message: String) {
@@ -1180,6 +1188,52 @@ fn menu_values(sent: &[Message]) -> Vec<bool> {
 
 fn menu_is_open(n: &Shared) -> bool {
     n.n4n0.lock().unwrap().screen.menu.open
+}
+
+/// A measure, not a check (architecture review 2026-11-10, DRT-1): how often N4N0 hands the app a state that differs
+/// from the last, which the desktop publishes to its window and overlay each time. Printed (`--nocapture`); the only
+/// thing held is that a screen nobody touches does not publish without end.
+#[test]
+fn how_often_n4n0_publishes_its_state() {
+    let (t, n, _vrchat) = n4n0_on_avatar(menu_tree("avtr_publish_rate", true));
+    let measure = |label: &str, seconds: f32, each: &dyn Fn(f32)| {
+        let (calls, changes) = (t.publishes.load(Ordering::Relaxed), t.changes.load(Ordering::Relaxed));
+        let started = Instant::now();
+        while started.elapsed().as_secs_f32() < seconds {
+            each(started.elapsed().as_secs_f32());
+            std::thread::sleep(Duration::from_millis(11));
+        }
+        let took = started.elapsed().as_secs_f32();
+        let (calls, changes) = (t.publishes.load(Ordering::Relaxed) - calls, t.changes.load(Ordering::Relaxed) - changes);
+        println!("publish rate, {label}: {:.1} states handed over a second, {:.1} of them changed", calls as f32 / took, changes as f32 / took);
+        changes as f32 / took
+    };
+    measure("screen closed, nothing happening", 3.0, &|_| {});
+    n.menu_open(true);
+    assert!(until(|| menu_is_open(&n)));
+    std::thread::sleep(Duration::from_millis(500));
+    let idle = measure("screen open, nobody touching it", 3.0, &|_| {});
+    assert!(idle < 5.0, "an open screen nobody touches publishes {idle} times a second");
+    // The owner's right index finger moving over the screen, as VRChat sends its four contacts at 90 Hz.
+    measure("screen open, a finger moving over it", 3.0, &|at| {
+        for i in 0..4 {
+            let value = 0.5 + 0.4 * (at * 3.0 + i as f32).sin();
+            n.on_parameter(&format!("{}R{i}", params::SCREEN_TOUCH_PREFIX), &OscValue::Float(value));
+        }
+    });
+    // N4N0 answering on its panel while the screen is open: the text goes up a step at a time.
+    n.command(Command::Say { text: "Hi, I'm N4N0. Yes, the one in the menu! And no, I am not your friend, but I will help you all the same today. Ask me anything you like, and I will do my best.".into() });
+    measure("screen open, N4N0 writing on its panel", 3.0, &|_| {});
+    // The avatar walking: VRChat's own VelocityMagnitude, as the host hears it (the desktop keeps it to 0.25 m/s).
+    let said = t.motion.lock().unwrap().len();
+    let started = Instant::now();
+    while started.elapsed() < Duration::from_secs(2) {
+        let at = started.elapsed().as_secs_f32();
+        n.on_parameter("VelocityMagnitude", &OscValue::Float(1.5 + 1.5 * (at * 2.0).sin()));
+        std::thread::sleep(Duration::from_millis(11));
+    }
+    println!("publish rate, walking: VelocityMagnitude reached the host {:.1} times a second", (t.motion.lock().unwrap().len() - said) as f32 / 2.0);
+    t.shutdown(&n);
 }
 
 #[test]
@@ -2312,9 +2366,9 @@ fn n4n0_hands_its_menus_the_3d_captures_shares_them_and_reads_friends_while_shar
     let f = |id: &str, name: &str| Friend { id: id.into(), name: name.into() };
     *host.friends.lock().unwrap() = Some(Ok(vec![f("usr_b", "bob"), f("usr_a", "Alice")]));
     n.command(Command::Friends { on: true });
-    assert!(until(|| matches!(host.view().friends, Friends::Ready { .. })));
+    assert!(until(|| matches!(*host.view().friends, Friends::Ready { .. })));
     assert_eq!(host.view().friends.list(), [f("usr_a", "Alice"), f("usr_b", "bob")]);
-    assert_eq!(n.n4n0.lock().unwrap().screen.menu.friends, host.view().friends);
+    assert_eq!(n.n4n0.lock().unwrap().screen.menu.friends, *host.view().friends);
     n.command(Command::Friends { on: false });
     assert_eq!(host.view().friends, Friends::None);
     *host.friends.lock().unwrap() = Some(Err("VRCX and VRCNext were not found".into()));

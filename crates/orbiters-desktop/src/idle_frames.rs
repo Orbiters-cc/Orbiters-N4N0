@@ -11,13 +11,13 @@
 //!
 //! Each page prints its frames a minute and the lines that asked for them, the most frequent first. The settings and
 //! caches are a folder of the run's own (as the screenshots'), so nothing of the person's is written; their pictures,
-//! sessions and Unity projects are read as the window reads them.
+//! sessions and Unity projects also stay within the run's private roots.
 //!
 //! `states` is not a page of the sidebar: it is Home on the avatars' states, their cards showing, with something
 //! asked that the service never answers (what was asked there once kept the window drawing).
 //!
 //! `orbiters-desktop --idle-frames --local-revision` times instead what Photos & captures' watch does every fifteen
-//! seconds on its thread (`controller::shares::LocalRevision`), on this computer's own library, which it only reads.
+//! seconds on its thread (`controller::shares::LocalRevision`), on its private fixture library, which it only reads.
 
 use crate::app::App;
 use crate::backend::{Ctl, Local};
@@ -25,7 +25,6 @@ use crate::controller::{self, Controller};
 use crate::pages::Page;
 use anyhow::Context as _;
 use egui::{vec2, Pos2, RawInput, Rect, ViewportId, ViewportInfo};
-use orbiters_core::paths;
 use orbiters_core::settings::Settings;
 use std::collections::HashMap;
 use std::sync::{mpsc, Arc};
@@ -128,11 +127,6 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
     }
     // Before any path is asked for: what the pages keep (the pictures' index, thumbnails, world pages) goes to a
     // folder of this run.
-    let root = std::env::temp_dir().join(format!("orbiters-idle-frames-{}", std::process::id()));
-    let (config, cache) = (root.join("config"), root.join("cache"));
-    std::fs::create_dir_all(&config)?;
-    std::fs::create_dir_all(&cache)?;
-    paths::set_roots(paths::Roots { config, local_data: paths::local_data_root(), cache, documents: paths::documents_root() })?;
 
     let settings = Settings { consent_acknowledged: true, ..Default::default() };
     let sessions = controller::list_sessions(&settings.sessions_dir);
@@ -162,7 +156,6 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         }
     }
     let _ = std::io::Write::flush(&mut std::io::stdout());
-    let _ = std::fs::remove_dir_all(&root);
     Ok(())
 }
 

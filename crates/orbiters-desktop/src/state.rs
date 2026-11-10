@@ -1,8 +1,11 @@
-//! Everything the interface shows lives in one [`Snapshot`], republished on every change.
+//! Everything the interface shows lives in one [`Snapshot`], republished on every change. Its parts are
+//! [`Slice`]s (`orbiters_core::slice`): a publish copies none of them, and a link sends the window and the overlay only
+//! the parts that changed (`crate::ipc`).
 
 use orbiters_core::protocol::{AudioDeviceInfo, CaptureStats, CoverageMap, SpoutSourceInfo};
 use orbiters_core::reconstruction::Stage;
 use orbiters_core::settings::Settings;
+use orbiters_core::slice::Slice;
 use orbiters_i18n::{mark, tr};
 use orbiters_core::vrchat_log::WorldState;
 use serde::{Deserialize, Serialize};
@@ -37,7 +40,8 @@ pub struct VrchatStatus {
     /// Process id while it runs (its sound can be recorded).
     #[serde(default)]
     pub pid: Option<u32>,
-    pub world: WorldState,
+    /// A slice: the people in the instance travel when the world's state changes, not with the avatar's speed.
+    pub world: Slice<WorldState>,
     pub log_found: bool,
     /// How VRChat moves the avatar, once its parameters said so: the SteamVR tab's walk boost carries only while VRChat
     /// walks the avatar itself.
@@ -47,6 +51,8 @@ pub struct VrchatStatus {
     #[serde(default)]
     pub remote: bool,
 }
+
+orbiters_core::parts!(VrchatStatus { plain: [running, pid, log_found, motion, remote], slices: [world], identity: [], nested: [] });
 
 impl VrchatStatus {
     /// Whether a VRChat runs on this very computer: what shares its GPU, and what its log, Spout and sound come from.
@@ -99,7 +105,7 @@ pub struct AvatarMotion {
     pub speed: f32,
 }
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct OscStatus {
     pub enabled: bool,
     pub listening: bool,
@@ -117,7 +123,7 @@ pub struct OscStatus {
     pub receiving: bool,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CaptureStatus {
     pub state: CaptureState,
     pub session_dir: Option<PathBuf>,
@@ -194,7 +200,7 @@ impl NoStrip {
     }
 }
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct StorageStatus {
     pub sessions_dir: PathBuf,
     pub used_bytes: u64,
@@ -295,7 +301,7 @@ impl AccountState {
     }
 }
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct AccountStatus {
     pub state: AccountState,
     /// The Unity tools are set to the development server.
@@ -365,7 +371,7 @@ impl WalkPath {
     }
 }
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct SteamVrStatus {
     /// SteamVR's server runs.
     pub running: bool,
@@ -549,54 +555,60 @@ pub enum UpdateState {
     },
 }
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct WorkerStatus {
     pub ready: bool,
     pub error: Option<String>,
 }
 
+/// The published state. A field that is a [`Slice`] is read as before (`snapshot.settings.sessions_dir`) and written as
+/// before where the state is the controller's own (`s.capture.state = …`); what it adds is that a copy of the snapshot
+/// shares it, and that [`Slice::same`] tells whether it changed between two snapshots without looking at it. The few
+/// plain fields are small, and compared by value.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Snapshot {
     pub version: String,
     pub vrchat: VrchatStatus,
-    pub sources: Vec<SpoutSourceInfo>,
+    pub sources: Slice<Vec<SpoutSourceInfo>>,
     /// Microphones the worker can record.
-    pub mics: Vec<AudioDeviceInfo>,
-    pub osc: OscStatus,
+    pub mics: Slice<Vec<AudioDeviceInfo>>,
+    pub osc: Slice<OscStatus>,
     #[serde(default)]
-    pub lan: LanStatus,
-    pub capture: CaptureStatus,
-    pub settings: Settings,
-    pub storage: StorageStatus,
-    pub worker: WorkerStatus,
-    pub steamvr: SteamVrStatus,
+    pub lan: Slice<LanStatus>,
+    pub capture: Slice<CaptureStatus>,
+    pub settings: Slice<Settings>,
+    pub storage: Slice<StorageStatus>,
+    pub worker: Slice<WorkerStatus>,
+    pub steamvr: Slice<SteamVrStatus>,
     pub reconstruction: Option<ReconstructionJob>,
     /// Sessions waiting to be reconstructed, next first.
-    pub reconstruct_queue: Vec<PathBuf>,
+    pub reconstruct_queue: Slice<Vec<PathBuf>>,
     #[serde(default)]
-    pub account: AccountStatus,
+    pub account: Slice<AccountStatus>,
+    /// A plain value for now, though it can hold a picture: the screenshots' scenarios assign it whole.
     pub vrchat_login: crate::controller::vrchat_login::Status,
-    pub uploads: Vec<UploadStatus>,
-    pub capture_shares: Vec<crate::controller::shares::ShareJob>,
+    pub uploads: Slice<Vec<UploadStatus>>,
+    /// Its jobs cannot be compared (what a share came to holds Orbiters' answers): sent whenever it was written to.
+    pub capture_shares: Slice<Vec<crate::controller::shares::ShareJob>>,
     #[serde(default)]
     pub n4n0: N4n0Status,
     #[serde(default)]
-    pub update: UpdateStatus,
+    pub update: Slice<UpdateStatus>,
     /// Space being freed in the library.
     #[serde(default)]
     pub cleanup: Option<CleanupJob>,
     /// What "When SteamVR starts" last did to Windows' sound devices (Settings).
     #[serde(default)]
-    pub vr_audio: crate::controller::vr_audio::Status,
+    pub vr_audio: Slice<crate::controller::vr_audio::Status>,
     /// The experimental VRChat bridge (`crate::bridge`): only filled in for an account the server says has it.
     #[serde(default)]
     pub bridge: crate::bridge::Status,
     /// What the panels around VRChat's menus last said of themselves.
     #[serde(default)]
-    pub orbit: OrbitStatus,
+    pub orbit: Slice<OrbitStatus>,
     /// The FPS booster, as both surfaces show it.
     #[serde(default)]
-    pub booster: crate::booster::Status,
+    pub booster: Slice<crate::booster::Status>,
     /// Whether the avatar worn has N4N0's capture kit, as VRChat's parameters say: `None` when they do not say.
     #[serde(default)]
     pub worn_kit: Option<bool>,
@@ -609,10 +621,22 @@ pub struct Snapshot {
     pub projects_changed: u64,
 }
 
+orbiters_core::parts!(Snapshot {
+    plain: [version, reconstruction, vrchat_login, cleanup, bridge, worn_kit, camera_open_said, projects_changed],
+    slices: [sources, mics, osc, lan, capture, settings, storage, worker, steamvr, reconstruct_queue, account, uploads, update, vr_audio, orbit, booster],
+    identity: [capture_shares],
+    nested: [vrchat, n4n0],
+});
+
 impl Snapshot {
     pub fn new(settings: Settings) -> Self {
+        Self::with(settings.into())
+    }
+
+    /// [`Snapshot::new`] with settings another snapshot holds: shared with it, not copied.
+    pub fn with(settings: Slice<Settings>) -> Self {
         Self {
-            orbit: OrbitStatus::default(),
+            orbit: Default::default(),
             booster: Default::default(),
             worn_kit: None,
             camera_open_said: None,
@@ -621,15 +645,15 @@ impl Snapshot {
             vrchat: VrchatStatus {
                 running: false,
                 pid: None,
-                world: WorldState::default(),
+                world: Default::default(),
                 log_found: orbiters_core::paths::vrchat_log_dir().is_some(),
                 motion: None,
                 remote: false,
             },
-            sources: Vec::new(),
-            mics: Vec::new(),
-            osc: OscStatus { enabled: settings.osc.enabled, ..Default::default() },
-            lan: LanStatus::default(),
+            sources: Default::default(),
+            mics: Default::default(),
+            osc: OscStatus { enabled: settings.osc.enabled, ..Default::default() }.into(),
+            lan: Default::default(),
             capture: CaptureStatus {
                 state: CaptureState::Idle,
                 session_dir: None,
@@ -643,19 +667,20 @@ impl Snapshot {
                 no_strip: None,
                 picture: None,
                 left_out: LeftOut::default(),
-            },
-            storage: StorageStatus { sessions_dir: settings.sessions_dir.clone(), limit_gb: settings.storage_limit_gb, ..Default::default() },
+            }
+            .into(),
+            storage: StorageStatus { sessions_dir: settings.sessions_dir.clone(), limit_gb: settings.storage_limit_gb, ..Default::default() }.into(),
             settings,
-            worker: WorkerStatus::default(),
-            steamvr: SteamVrStatus::default(),
+            worker: Default::default(),
+            steamvr: Default::default(),
             reconstruction: None,
-            reconstruct_queue: Vec::new(),
-            account: AccountStatus::default(),
+            reconstruct_queue: Default::default(),
+            account: Default::default(),
             vrchat_login: Default::default(),
-            uploads: Vec::new(),
-            capture_shares: Vec::new(),
+            uploads: Default::default(),
+            capture_shares: Default::default(),
             n4n0: N4n0Status::default(),
-            update: UpdateStatus::default(),
+            update: Default::default(),
             cleanup: None,
             vr_audio: Default::default(),
             bridge: Default::default(),
@@ -686,29 +711,81 @@ impl Snapshot {
         }
     }
 
-    /// Adds a camera position to the trail when it moved enough (keeps the trail light).
-    pub fn push_trail(&mut self, p: [f32; 3]) {
-        let far_enough = self.capture.trail.last().map(|q| {
+}
+
+/// The running capture's camera path as the service keeps it, up to 6000 points. The snapshot's
+/// [`CaptureStatus::trail`] is [`Trail::shown`] of it, 1500 points at most: what the interface draws, and all that is
+/// copied or sent when the recording's state changes.
+#[derive(Default)]
+pub struct Trail(Vec<[f32; 3]>);
+
+impl Trail {
+    /// Points the interface gets at most.
+    pub const SHOWN: usize = 1500;
+
+    pub fn of(points: Vec<[f32; 3]>) -> Self {
+        Self(points)
+    }
+
+    /// Adds a camera position when it moved enough (keeps the trail light). Returns whether it was added.
+    pub fn push(&mut self, p: [f32; 3]) -> bool {
+        let far_enough = self.0.last().map(|q| {
             let d = [p[0] - q[0], p[1] - q[1], p[2] - q[2]];
             d[0] * d[0] + d[1] * d[1] + d[2] * d[2] > 0.0025
         });
-        if far_enough.unwrap_or(true) {
-            self.capture.trail.push(p);
-            if self.capture.trail.len() > 6000 {
-                // Thin the older half (every other point) instead of dropping the start of the path: the recent part
-                // keeps its detail, the oldest is thinned most.
-                let half = self.capture.trail.len() / 2;
-                let mut keep: Vec<[f32; 3]> = self.capture.trail[..half].iter().step_by(2).copied().collect();
-                keep.extend_from_slice(&self.capture.trail[half..]);
-                self.capture.trail = keep;
-            }
+        if !far_enough.unwrap_or(true) {
+            return false;
         }
+        self.0.push(p);
+        if self.0.len() > 6000 {
+            // Thin the older half (every other point) instead of dropping the start of the path: the recent part
+            // keeps its detail, the oldest is thinned most.
+            let half = self.0.len() / 2;
+            let mut keep: Vec<[f32; 3]> = self.0[..half].iter().step_by(2).copied().collect();
+            keep.extend_from_slice(&self.0[half..]);
+            self.0 = keep;
+        }
+        true
+    }
+
+    pub fn clear(&mut self) {
+        self.0.clear();
+    }
+
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    /// The path thinned evenly to [`Trail::SHOWN`] points at most.
+    pub fn shown(&self) -> Vec<[f32; 3]> {
+        let step = self.0.len().div_ceil(Self::SHOWN).max(1);
+        self.0.iter().step_by(step).copied().collect()
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The camera path keeps what moved, thins its older half past 6000 points, and shows 1500 at most.
+    #[test]
+    fn the_camera_path_stays_light() {
+        let mut trail = Trail::default();
+        assert!(trail.push([0.0, 0.0, 0.0]));
+        assert!(!trail.push([0.01, 0.0, 0.0]), "not moved enough");
+        assert!(trail.push([0.1, 0.0, 0.0]));
+        assert_eq!(trail.shown(), vec![[0.0, 0.0, 0.0], [0.1, 0.0, 0.0]]);
+        for i in 2..6001 {
+            assert!(trail.push([i as f32 * 0.1, 0.0, 0.0]));
+        }
+        // 6001 points: the older half (3000) thinned to 1500, the newer 3001 kept.
+        assert_eq!(trail.len(), 4501);
+        let shown = trail.shown();
+        assert!(shown.len() <= Trail::SHOWN + 1 && shown.len() > 1000, "{}", shown.len());
+        assert_eq!(shown[0], [0.0, 0.0, 0.0]);
+        trail.clear();
+        assert!(trail.shown().is_empty());
+    }
 
     /// Every reason the lesser way is in use says what to do about it, and the better way, or the person's own choice, nothing.
     #[test]

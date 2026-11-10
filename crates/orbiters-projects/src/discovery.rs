@@ -170,6 +170,10 @@ pub fn seeds(registered: &[PathBuf]) -> Vec<PathBuf> {
             }
         }
     }
+    // A harness's private Hub/VCC lists are its complete environment; never augment them from the real editor.
+    if orbiters_core::paths::roots().is_some() {
+        return paths;
+    }
     #[cfg(target_os = "macos")]
     if let Some(prefs) = dirs::home_dir().map(|h| h.join("Library/Preferences/com.unity3d.UnityEditor5.x.plist")) {
         paths.extend(recent_projects(&prefs));
@@ -248,6 +252,9 @@ pub fn fixed_disks() -> Vec<PathBuf> {
 /// walking another volume makes the system ask for permission (it guards external disks): that waits for a press on
 /// Refresh, Spotlight finding what it has indexed there meanwhile.
 fn scan_roots(_force: bool) -> Vec<PathBuf> {
+    if let Some(roots) = orbiters_core::paths::roots() {
+        return vec![roots.documents.clone()];
+    }
     #[cfg(target_os = "macos")]
     return std::iter::once(PathBuf::from("/Users")).chain(if _force { fixed_disks() } else { vec![] }.into_iter().filter(|d| d != Path::new("/"))).collect();
     #[cfg(not(target_os = "macos"))]
@@ -341,7 +348,7 @@ pub fn discover(mut scan: Scan, force: bool, cancel: &AtomicBool, publish: impl 
         let mut count = 0;
         #[cfg(target_os = "macos")]
         {
-            for p in spotlight_projects() {
+            for p in if orbiters_core::paths::roots().is_none() { spotlight_projects() } else { Vec::new() } {
                 found.insert(key(&p), p);
             }
             rebuild(&mut scan, &found, &known);

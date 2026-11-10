@@ -92,8 +92,14 @@ fn initial_samples(vrchat: Vec<(String, OscValue)>, latest: &HashMap<String, (Ve
 
 pub struct Controller {
     snapshot: Mutex<Snapshot>,
-    /// What the interface reads: a copy of the snapshot with a light trail, swapped on every change.
+    /// What the interface reads: the snapshot as it was last handed out, swapped on every change. A copy shares every
+    /// part with the snapshot (`orbiters_core::slice`): none is copied until the snapshot changes it.
     published: Mutex<Arc<Snapshot>>,
+    /// The running capture's whole camera path; the snapshot holds it thinned ([`state::Trail`]). Taken after
+    /// `snapshot`, never before.
+    trail: Mutex<state::Trail>,
+    /// How many times the state was handed out (`--publish-cost` and tests read it).
+    publishes: AtomicU64,
     worker: Mutex<Option<WorkerHandle>>,
     osc: Mutex<Option<OscService>>,
     /// VRChat on the network, where it does not run on this computer.
@@ -297,6 +303,54 @@ fn calibration_info(stored: &StoredCalibration) -> CalibrationInfo {
 
 pub type Shared = Arc<Controller>;
 
+/// How often the service publishes its state, for `logs/publishes.log`: a real session's answer to what the
+/// architecture review could only estimate (DRT-1). Counts only, one line a minute at most.
+#[derive(Default)]
+pub(crate) struct PublishRate {
+    /// Publishes in all when last looked.
+    seen: u64,
+    /// In the minute under way: how many, the most in one second, and the seconds so far.
+    minute: u64,
+    most: u64,
+    seconds: u32,
+}
+
+impl PublishRate {
+    /// Another second went by, the controller having published `publishes` times in all, to `readers` subscribers.
+    /// Returns the minute's line once sixty have, when anything was published in them.
+    pub(crate) fn second(&mut self, publishes: u64, readers: usize) -> Option<String> {
+        let now = publishes.saturating_sub(self.seen);
+        self.seen = publishes;
+        self.minute += now;
+        self.most = self.most.max(now);
+        self.seconds += 1;
+        if self.seconds < 60 {
+            return None;
+        }
+        let line = (self.minute > 0).then(|| format!("{} publishes in a minute, at most {} in one second, to {readers} readers", self.minute, self.most)); // i18n: not shown (a log's line)
+        (self.minute, self.most, self.seconds) = (0, 0, 0);
+        line
+    }
+}
+
+/// A line in `%LOCALAPPDATA%/Orbiters/logs/publishes.log`, kept under 1 MB (the last one renamed .old). Tests write none.
+fn publish_log(line: &str) {
+    #[cfg(not(test))]
+    {
+        use std::io::Write;
+        let dir = orbiters_core::paths::logs_dir();
+        let path = dir.join("publishes.log");
+        if std::fs::metadata(&path).is_ok_and(|m| m.len() > 1 << 20) {
+            let _ = std::fs::rename(&path, dir.join("publishes.old.log"));
+        }
+        if let Ok(mut f) = std::fs::create_dir_all(&dir).and_then(|_| std::fs::OpenOptions::new().create(true).append(true).open(&path)) {
+            let _ = writeln!(f, "{} {line}", orbiters_core::now_utc_iso());
+        }
+    }
+    #[cfg(test)]
+    let _ = line;
+}
+
 mod account;
 mod around;
 mod booster;
@@ -316,6 +370,7 @@ mod maps;
 pub(crate) mod menu_shares;
 mod n4n0;
 mod performance;
+pub mod publish_cost;
 mod rig;
 mod scan;
 pub mod shares;
@@ -330,15 +385,19 @@ pub use account::open_url;
 pub(crate) use maps::{prepare as prepare_upload, Prepared};
 
 impl Controller {
-    pub fn new(settings: Settings) -> Shared {
+    /// `settings`: the settings, or a snapshot's own slice of them.
+    pub fn new(settings: impl Into<orbiters_core::slice::Slice<Settings>>) -> Shared {
+        let settings = settings.into();
         use_environment(settings.development);
-        let mut snapshot = Snapshot::new(settings);
+        let mut snapshot = Snapshot::with(settings);
         let calibration = read_calibration();
         snapshot.steamvr.calibration = calibration.as_ref().map(calibration_info);
         // N4N0 lives in the controller and reaches it through a weak link: no cycle keeps either alive.
         Arc::new_cyclic(|me| Self {
             published: Mutex::new(Arc::new(snapshot.clone())),
             snapshot: Mutex::new(snapshot),
+            trail: Mutex::default(),
+            publishes: AtomicU64::new(0),
             worker: Mutex::new(None),
             osc: Mutex::new(None),
             lan: Default::default(),
@@ -457,6 +516,8 @@ impl Controller {
         self.subscribers.lock().unwrap().push(mailbox);
     }
 
+
+
     /// Posts a message to every subscriber (forgetting those gone). Returns whether one that shows notices got it.
     fn broadcast(&self, msg: impl Fn() -> ToClient) -> bool {
         let mut subs = self.subscribers.lock().unwrap();
@@ -494,34 +555,52 @@ impl Controller {
         self.library_version.load(Ordering::Relaxed)
     }
 
-    /// Replaces the whole snapshot (screenshots and tests).
-    pub fn set_snapshot(&self, snapshot: Snapshot) {
-        *self.snapshot.lock().unwrap() = snapshot;
+    /// Replaces the whole snapshot (screenshots and tests). Its camera path becomes the running capture's, shown thinned
+    /// as a recorded one is.
+    pub fn set_snapshot(&self, mut snapshot: Snapshot) {
+        {
+            let mut s = self.snapshot.lock().unwrap();
+            let trail = state::Trail::of(snapshot.capture.trail.clone());
+            if trail.len() > state::Trail::SHOWN {
+                snapshot.capture.trail = trail.shown();
+            }
+            *self.trail.lock().unwrap() = trail;
+            *s = snapshot;
+        }
         self.publish();
+    }
+
+    /// How many times the state was handed out since the controller was made.
+    pub fn publishes(&self) -> u64 {
+        self.publishes.load(Ordering::Relaxed)
     }
 
     /// Hands the current state out: one copy, shared by every subscriber (each link writes the newest it has when it
     /// can). Taken and handed out in one turn, so a slower publisher never puts back an older state.
+    ///
+    /// The copy shares every part of the snapshot. A part that was written to since the last publish and holds what it
+    /// held (a flag set to what it was) becomes the published part again first ([`Parts::settle`]): from here on a
+    /// part is another allocation exactly when it changed.
     fn publish(&self) {
+        use orbiters_core::slice::Parts;
         let _turn = self.publishing.lock().unwrap();
+        let previous = self.view();
         let s = {
             let mut s = self.snapshot.lock().unwrap();
-            // Copied without its trail (up to 6000 points), which the interface gets thinned to 1500 at most.
             if !matches!(s.account.state, crate::state::AccountState::SignedIn { .. })
                 || s.account.development != (orbiters_core::account::Server::current() == orbiters_core::account::Server::Development)
             {
                 self.vrchat_login.lock().unwrap().suspend();
-                s.vrchat_login = vrchat_login::Status::default();
+                if s.vrchat_login != vrchat_login::Status::default() {
+                    s.vrchat_login = vrchat_login::Status::default();
+                }
             }
-            let trail = std::mem::take(&mut s.capture.trail);
-            let mut copy = s.clone();
-            let step = trail.len().div_ceil(1500).max(1);
-            copy.capture.trail = trail.iter().step_by(step).copied().collect();
-            s.capture.trail = trail;
-            copy
+            s.settle(&previous);
+            s.clone()
         };
         let s = Arc::new(s);
         *self.published.lock().unwrap() = s.clone();
+        self.publishes.fetch_add(1, Ordering::Relaxed);
         self.subscribers.lock().unwrap().retain(|m| m.post_snapshot(s.clone()));
         if let Some(ctx) = self.repaint.lock().unwrap().as_ref() {
             orbiters_ui::anim::request_frame(ctx);
@@ -553,7 +632,7 @@ impl Controller {
     }
 
     pub fn settings(&self) -> Settings {
-        self.snapshot.lock().unwrap().settings.clone()
+        (*self.snapshot.lock().unwrap().settings).clone()
     }
 
     pub fn is_capturing(&self) -> bool {
@@ -681,11 +760,7 @@ impl Controller {
             }
             // Spout senders are watched here (`spawn_watchers`); the worker knows the microphones.
             WorkerEvent::Sources { mics, .. } => {
-                self.update_if(|s| {
-                    let changed = s.mics != mics;
-                    s.mics = mics;
-                    changed
-                });
+                self.update_if(|s| s.mics.set(mics));
             }
             WorkerEvent::Started { session_dir, source } => {
                 // Worker events run off the UI thread. Save before publishing the new recording.
@@ -712,6 +787,7 @@ impl Controller {
                     s.capture.source = Some(source);
                     s.capture.error = None;
                     s.capture.trail.clear();
+                    self.trail.lock().unwrap().clear();
                     s.capture.coverage = None;
                 });
             }
@@ -723,7 +799,11 @@ impl Controller {
                 let over_limit = {
                     let mut s = self.snapshot.lock().unwrap();
                     if let Some(p) = stats.position {
-                        s.push_trail(p);
+                        // The snapshot's path only when the whole one grew: a camera standing still copies nothing.
+                        let mut trail = self.trail.lock().unwrap();
+                        if trail.push(p) {
+                            s.capture.trail = trail.shown();
+                        }
                     }
                     if s.capture.state == CaptureState::Recording && stats.paused {
                         s.capture.state = CaptureState::Paused;
@@ -867,6 +947,7 @@ impl Controller {
             s.capture.error = None;
             s.capture.stats = None;
             s.capture.trail.clear();
+            self.trail.lock().unwrap().clear();
             s.capture.coverage = None;
             s.capture.from_osc = from_osc;
             s.capture.photo_3d = self.burst.lock().unwrap().recording;
@@ -1108,7 +1189,9 @@ impl Controller {
     /// The overlay process connected or left (with it, whether the headset is worn is unknown).
     /// What the panels around VRChat's menus say of themselves, for Settings.
     pub fn set_orbit_status(self: &Shared, status: crate::state::OrbitStatus) {
-        self.update(|s| s.orbit = status);
+        self.update(|s| {
+            s.orbit.set(status);
+        });
     }
 
     /// Reads again whether the avatar worn has the capture kit, for what offers 3D pictures. Published only when it changed.
@@ -1454,7 +1537,7 @@ impl Controller {
             self.update_action(crate::ipc::UpdateAction::Check);
         }
         let (osc_changed, sessions_changed) = (previous.osc != settings.osc, previous.sessions_dir != settings.sessions_dir);
-        self.queue_save(settings);
+        self.queue_save((*settings).clone());
         if osc_changed || sessions_changed {
             let ctl = self.clone();
             std::thread::spawn(move || {
@@ -1566,7 +1649,7 @@ impl Controller {
         drop(before);
         let (enabled, vrchat_port) = self.with_settings(|s| (s.osc.enabled, s.osc.vrchat_port));
         if !enabled {
-            self.update(|s| s.osc = state::OscStatus { enabled: false, ..Default::default() });
+            self.update(|s| *s.osc = state::OscStatus { enabled: false, ..Default::default() });
             return;
         }
         // Where VRChat runs elsewhere, the network's keeper starts it, once it knows on which of this computer's networks
@@ -1595,9 +1678,9 @@ impl Controller {
                 let (port, adv) = (service.osc_port, service.advertising());
                 let replaced = self.osc.lock().unwrap().replace(service);
                 drop(replaced);
-                self.update(|s| s.osc = state::OscStatus { enabled: true, listening: true, advertising: adv, port: Some(port), ..Default::default() });
+                self.update(|s| *s.osc = state::OscStatus { enabled: true, listening: true, advertising: adv, port: Some(port), ..Default::default() });
             }
-            Err(e) => self.update(|s| s.osc = state::OscStatus { enabled: true, error: Some(e.to_string()), ..Default::default() }),
+            Err(e) => self.update(|s| *s.osc = state::OscStatus { enabled: true, error: Some(e.to_string()), ..Default::default() }),
         }
     }
 
@@ -1934,7 +2017,9 @@ impl Controller {
         let r = f(&mut queue);
         let waiting: Vec<PathBuf> = queue.iter().cloned().collect();
         drop(queue);
-        self.update(|s| s.reconstruct_queue = waiting);
+        self.update(|s| {
+            s.reconstruct_queue.set(waiting);
+        });
         r
     }
 
@@ -2354,6 +2439,7 @@ fn spawn_watchers(ctl: Shared) {
             let mut videos = videos::Videos::load();
             let mut system = sysinfo::System::new();
             let mut tick = 0u64;
+            let mut rate = PublishRate::default();
             let mut running = false;
             // Since when VRChat runs, and when VRChat was last asked to find the OSC service.
             let mut vrchat_since: Option<Instant> = None;
@@ -2442,7 +2528,7 @@ fn spawn_watchers(ctl: Shared) {
                 ctl.update_if(|s| {
                     let changed = world.as_ref().is_some_and(|w| s.vrchat.world != *w) || s.vrchat.log_found != log_found;
                     if let Some(world) = world {
-                        s.vrchat.world = world;
+                        s.vrchat.world.set(world);
                     }
                     s.vrchat.log_found = log_found;
                     changed
@@ -2493,11 +2579,7 @@ fn spawn_watchers(ctl: Shared) {
                             description: i.description,
                         })
                         .collect();
-                    ctl.update_if(|s| {
-                        let c = s.sources != sources;
-                        s.sources = sources;
-                        c
-                    });
+                    ctl.update_if(|s| s.sources.set(sources));
                 }
 
                 // OSC: the last values of a quiet second reach the worker, and the status follows VRChat.
@@ -2544,6 +2626,11 @@ fn spawn_watchers(ctl: Shared) {
                 if tick.is_multiple_of(30) {
                     refresh_storage(&ctl);
                 }
+                // How often the state was published, once a minute (this loop turns once a second, and a little more).
+                let readers = ctl.subscribers.lock().unwrap().len();
+                if let Some(line) = rate.second(ctl.publishes(), readers) {
+                    publish_log(&line);
+                }
                 tick += 1;
                 std::thread::sleep(Duration::from_secs(1));
             }
@@ -2553,6 +2640,81 @@ fn spawn_watchers(ctl: Shared) {
 
 #[cfg(test)]
 mod tests {
+    /// The publish-rate log says a minute's publishes once, with the busiest second, and nothing for a silent minute.
+    #[test]
+    fn the_publish_rate_is_said_once_a_minute() {
+        let mut rate = PublishRate::default();
+        let mut publishes = 100;
+        // What was published before it first looked counts in the first second.
+        assert_eq!(rate.second(publishes, 3), None);
+        let mut lines = Vec::new();
+        for second in 1..180u64 {
+            // The first minute: one a second, and a burst of 25; the second: nothing; the third: two.
+            publishes += match second {
+                1..=59 if second == 30 => 25,
+                1..=59 => 1,
+                130 | 131 => 1,
+                _ => 0,
+            };
+            lines.extend(rate.second(publishes, 3).map(|line| (second, line)));
+        }
+        assert_eq!(
+            lines,
+            [
+                (59, "183 publishes in a minute, at most 100 in one second, to 3 readers".to_string()),
+                (179, "2 publishes in a minute, at most 1 in one second, to 3 readers".to_string())
+            ]
+        );
+    }
+
+    /// A publish hands out a snapshot that shares every part with the one before, but those that changed; a part that
+    /// was written to and holds what it held is the same part still; the camera path is kept whole and shown thinned.
+    #[test]
+    fn a_publish_shares_what_did_not_change() {
+        use orbiters_core::slice::Slice;
+        let ctl = Controller::new(Settings::default());
+        let first = ctl.view();
+        let told = ctl.publishes();
+        ctl.update(|s| s.n4n0.afk = true);
+        let second = ctl.view();
+        assert_eq!(ctl.publishes(), told + 1);
+        assert!(!Arc::ptr_eq(&first, &second) && second.n4n0.afk && !first.n4n0.afk, "the state handed out before stays as it was");
+        assert!(Slice::same(&first.settings, &second.settings) && Slice::same(&first.capture, &second.capture) && Slice::same(&first.vrchat.world, &second.vrchat.world));
+        assert!(Slice::same(&first.n4n0.lines, &second.n4n0.lines));
+        // Written to, with what they held: the same parts again once published.
+        ctl.update(|s| {
+            s.osc.listening = first.osc.listening;
+            s.capture.trail.clear();
+            s.steamvr.overlay = false;
+            s.vrchat.world.players.clear();
+            s.settings.walk_boost.strength = first.settings.walk_boost.strength;
+        });
+        let third = ctl.view();
+        assert!(!Arc::ptr_eq(&second, &third), "a publish all the same");
+        for same in [
+            Slice::same(&second.osc, &third.osc),
+            Slice::same(&second.capture, &third.capture),
+            Slice::same(&second.steamvr, &third.steamvr),
+            Slice::same(&second.vrchat.world, &third.vrchat.world),
+            Slice::same(&second.settings, &third.settings),
+        ] {
+            assert!(same);
+        }
+        // One that changed is its own, and only that one.
+        ctl.update(|s| s.settings.walk_boost.strength = first.settings.walk_boost.strength + 0.25);
+        let fourth = ctl.view();
+        assert!(!Slice::same(&third.settings, &fourth.settings) && Slice::same(&third.osc, &fourth.osc));
+        assert_eq!(third.settings.walk_boost.strength, first.settings.walk_boost.strength, "the settings handed out before did not change under their readers");
+        // A long camera path: 1500 points at most are shown, the first and the newest part of it among them.
+        let mut recording = (*fourth).clone();
+        recording.capture.trail = (0..6000).map(|i| [i as f32, 0.0, 0.0]).collect();
+        ctl.set_snapshot(recording);
+        let shown = ctl.view().capture.trail.clone();
+        assert_eq!(shown.len(), 1500);
+        assert_eq!((shown[0], shown[1], shown[1499]), ([0.0, 0.0, 0.0], [4.0, 0.0, 0.0], [5996.0, 0.0, 0.0]));
+        assert_eq!(ctl.trail.lock().unwrap().len(), 6000, "the whole path stays with the controller");
+    }
+
     use super::*;
 
     /// OSC messages a stand-in VRChat received: (address, first argument).

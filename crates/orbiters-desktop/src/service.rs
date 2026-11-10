@@ -24,6 +24,8 @@ struct Link {
     role: Role,
     pid: u32,
     mailbox: Arc<Mailbox>,
+    #[cfg(test)]
+    writes: Arc<AtomicU64>,
 }
 
 /// Connections that have not said their token yet, at most: each holds a thread for up to `HELLO_TIMEOUT`.
@@ -61,6 +63,58 @@ pub struct Service {
 }
 
 impl Service {
+    /// A service around `ctl`, which clients find at `endpoint` and which starts its processes from `exe`: as [`run`]
+    /// makes it. `--link-smoke` and the tests make one around a controller that is never started.
+    pub(crate) fn around(ctl: controller::Shared, endpoint: Endpoint, exe: PathBuf) -> Arc<Self> {
+        Arc::new(Self {
+            ctl,
+            endpoint,
+            exe,
+            links: Mutex::new(Vec::new()),
+            next_link: AtomicU64::new(1),
+            unauthenticated: AtomicUsize::new(0),
+            window: Mutex::new(None),
+            page_for_window: Mutex::new(None),
+            overlay: Mutex::new(None),
+            orbit: Mutex::new(None),
+            steamvr_start_seen: Mutex::new(None),
+            smoothing: Mutex::new(Default::default()),
+            quitting: AtomicBool::new(false),
+            #[cfg(windows)]
+            main_thread: unsafe { windows::Win32::System::Threading::GetCurrentThreadId() },
+            #[cfg(not(windows))]
+            quit_tx: Mutex::new(None),
+        })
+    }
+
+    /// Serves every client that connects to `listener`, each on a thread of its own, for as long as the process runs.
+    pub(crate) fn accept(self: &Arc<Self>, listener: TcpListener) -> std::io::Result<()> {
+        let svc = self.clone();
+        std::thread::Builder::new()
+            .name("ipc".into())
+            .spawn(move || {
+                for stream in listener.incoming().flatten() {
+                    // Each one waits up to `HELLO_TIMEOUT` for its token on a thread: a flood of connections that never
+                    // say it is turned away rather than given threads.
+                    if svc.unauthenticated.fetch_add(1, Ordering::Relaxed) >= MAX_UNAUTHENTICATED {
+                        svc.unauthenticated.fetch_sub(1, Ordering::Relaxed);
+                        continue;
+                    }
+                    let s = svc.clone();
+                    let spawned = std::thread::Builder::new().name("ipc-client".into()).spawn(move || s.serve(stream));
+                    if spawned.is_err() {
+                        svc.unauthenticated.fetch_sub(1, Ordering::Relaxed);
+                    }
+                }
+            })
+            .map(|_| ())
+    }
+
+    /// How many clients of `role` are linked now.
+    pub(crate) fn linked(&self, role: Role) -> usize {
+        self.links.lock().unwrap().iter().filter(|l| l.role == role).count()
+    }
+
     /// Brings the window to the front, starting a window process when there is none.
     pub fn show_window(&self, splash: bool) {
         if self.quitting.load(Ordering::Relaxed) {
@@ -135,9 +189,10 @@ impl Service {
     }
 
     /// Smoothing's settings reach the driver the moment they change (it reads them on SteamVR's next frame), not at
-    /// the keeper's next turn: every published state is looked at, the tracking settings compared.
+    /// the keeper's next turn. Its mailbox hands it the states whose tracking settings differ from the last it was
+    /// handed: it is not woken for anything else the service publishes.
     fn follow_tracking(self: &Arc<Self>) {
-        let mailbox = Mailbox::new(false);
+        let mailbox = Mailbox::watching(|s| s.settings.tracking.clone());
         self.ctl.subscribe(mailbox.clone());
         let mut seen = None;
         while let Some((_, snapshot)) = mailbox.take() {
@@ -394,19 +449,33 @@ impl Service {
         let mailbox = Mailbox::new(true);
         let out = mailbox.clone();
         let mut writer = stream;
-        // The window gets the state about 30 times a second at most (an open N4N0 menu republishes 70 times): the newest
-        // waits in the mailbox meanwhile. The overlay, in the headset, gets every one it can read.
+        // The window gets the state about 30 times a second at most (the service can publish faster: a voice's level,
+        // an answer arriving, the avatar's speed): the newest waits in the mailbox meanwhile. The overlay, in the
+        // headset, gets every one it can read.
         let pace = (role == Role::Window).then_some(WINDOW_PACE);
+        #[cfg(test)]
+        let writes = Arc::new(AtomicU64::new(0));
+        #[cfg(test)]
+        let completed = writes.clone();
         std::thread::spawn(move || {
+            // The state this link last wrote: the next one goes as what changed since (`ipc::write_state`), whatever
+            // states the mailbox replaced in between. None yet, or the client lost step: the whole state.
+            let mut sent: Option<Arc<crate::state::Snapshot>> = None;
             while let Some((messages, snapshot)) = out.take() {
                 let paced = pace.filter(|_| snapshot.is_some());
                 let written = snapshot
-                    .map_or(Ok(()), |s| ipc::write_snapshot(&mut writer, &s))
+                    .map_or(Ok(()), |s| {
+                        let written = ipc::write_state(&mut writer, sent.as_ref(), &s);
+                        sent = Some(s);
+                        written
+                    })
                     .and_then(|_| messages.iter().try_for_each(|m| ipc::write_line(&mut writer, m)));
                 if written.is_err() {
                     out.close();
                     return;
                 }
+                #[cfg(test)]
+                completed.fetch_add(1, Ordering::Relaxed);
                 if let Some(pace) = paced {
                     std::thread::sleep(pace);
                 }
@@ -415,7 +484,10 @@ impl Service {
         // Subscribed before it is listed: the snapshot is in its mailbox before anything else can be (a Show).
         self.ctl.subscribe(mailbox.clone());
         let id = self.next_link.fetch_add(1, Ordering::Relaxed);
-        self.links.lock().unwrap().push(Link { id, role, pid, mailbox: mailbox.clone() });
+        self.links.lock().unwrap().push(Link { id, role, pid, mailbox: mailbox.clone(),
+            #[cfg(test)]
+            writes,
+        });
         match role {
             Role::Window => {
                 *self.window.lock().unwrap() = None;
@@ -522,25 +594,11 @@ pub fn run(hidden: bool) -> anyhow::Result<()> {
     let endpoint = Endpoint { port: listener.local_addr()?.port(), token: uuid::Uuid::new_v4().simple().to_string() };
     #[cfg(not(windows))]
     let (quit_tx, quit_rx) = mpsc::channel();
-    let service = Arc::new(Service {
-        ctl,
-        endpoint,
-        exe: std::env::current_exe()?,
-        links: Mutex::new(Vec::new()),
-        next_link: AtomicU64::new(1),
-        unauthenticated: AtomicUsize::new(0),
-        window: Mutex::new(None),
-        page_for_window: Mutex::new(None),
-        overlay: Mutex::new(None),
-        orbit: Mutex::new(None),
-        steamvr_start_seen: Mutex::new(None),
-        smoothing: Mutex::new(Default::default()),
-        quitting: AtomicBool::new(false),
-        #[cfg(windows)]
-        main_thread: unsafe { windows::Win32::System::Threading::GetCurrentThreadId() },
-        #[cfg(not(windows))]
-        quit_tx: Mutex::new(Some(quit_tx)),
-    });
+    let service = Service::around(ctl, endpoint, std::env::current_exe()?);
+    #[cfg(not(windows))]
+    {
+        *service.quit_tx.lock().unwrap() = Some(quit_tx);
+    }
     *slot.lock().unwrap() = Some(service.clone());
     let weak = Arc::downgrade(&service);
     service.ctl.set_restarter(Box::new(move |setup, dir| {
@@ -549,22 +607,7 @@ pub fn run(hidden: bool) -> anyhow::Result<()> {
         }
     }));
 
-    let svc = service.clone();
-    std::thread::Builder::new().name("ipc".into()).spawn(move || {
-        for stream in listener.incoming().flatten() {
-            // Each one waits up to `HELLO_TIMEOUT` for its token on a thread: a flood of connections that never
-            // say it is turned away rather than given threads.
-            if svc.unauthenticated.fetch_add(1, Ordering::Relaxed) >= MAX_UNAUTHENTICATED {
-                svc.unauthenticated.fetch_sub(1, Ordering::Relaxed);
-                continue;
-            }
-            let s = svc.clone();
-            let spawned = std::thread::Builder::new().name("ipc-client".into()).spawn(move || s.serve(stream));
-            if spawned.is_err() {
-                svc.unauthenticated.fetch_sub(1, Ordering::Relaxed);
-            }
-        }
-    })?;
+    service.accept(listener)?;
 
     if !hidden {
         service.show_window(true);
@@ -621,9 +664,10 @@ fn tray_loop(service: &Arc<Service>) -> anyhow::Result<()> {
             None
         }
     };
-    // Tell the loop when capturing starts or stops (menu items live on this thread). The tray shows no notice: one
-    // that comes while no window is open waits for the next.
-    let mailbox = Mailbox::new(false);
+    // Tell the loop when capturing starts or stops (menu items live on this thread): its mailbox hands it the states
+    // where that changed, and no other. The tray shows no notice: one that comes while no window is open waits for the
+    // next.
+    let mailbox = Mailbox::watching(|s| s.is_capturing());
     service.ctl.subscribe(mailbox.clone());
     let main_thread = service.main_thread;
     std::thread::Builder::new().name("tray-watch".into()).spawn(move || {
@@ -677,6 +721,341 @@ mod tests {
         assert!(!overlay_due(Some(Some(1)), soon, Some(7), Some(7)));
         assert!(overlay_due(Some(Some(1)), later, Some(7), Some(7)));
         assert!(overlay_due(Some(None), later, Some(7), Some(7)), "ended without a code");
+    }
+
+    use crate::link_between::{Between, Line};
+    use crate::state::{AvatarMotion, N4n0Line, N4n0Who, ReconstructionJob, Snapshot};
+
+    /// A service as `run` makes it and serving as `run` serves, around a controller that is never started.
+    fn service() -> Arc<Service> {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let endpoint = Endpoint { port: listener.local_addr().unwrap().port(), token: "link-test".into() };
+        let service = Service::around(Controller::new(Settings::default()), endpoint, PathBuf::new());
+        service.accept(listener).unwrap();
+        service
+    }
+
+    /// A client of `role` linked to `service`.
+    fn linked(service: &Arc<Service>, role: Role) -> Arc<ipc::Client> {
+        ipc::Client::connect(&service.endpoint, role).unwrap()
+    }
+
+    /// A client of `role` linked to `service` through what can damage or hold the service's lines, or drop the
+    /// connection.
+    fn linked_through(service: &Arc<Service>, role: Role) -> (Arc<ipc::Client>, Between) {
+        let between = Between::start(service.endpoint.port).unwrap();
+        let client = ipc::Client::connect(&Endpoint { port: between.port(), token: service.endpoint.token.clone() }, role).unwrap();
+        (client, between)
+    }
+
+    /// Waits up to five seconds for `done`.
+    fn until(done: impl Fn() -> bool) -> bool {
+        let started = Instant::now();
+        while !done() && started.elapsed() < Duration::from_secs(5) {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        done()
+    }
+
+    fn said(text: &str) -> N4n0Line {
+        N4n0Line { who: N4n0Who::N4n0, text: text.into(), at_ms: 1, streaming: false }
+    }
+
+    fn whole(snapshot: &crate::state::Snapshot) -> serde_json::Value {
+        serde_json::to_value(snapshot).unwrap()
+    }
+
+    /// Waits up to five seconds for `client` to hold what the service published, whole.
+    fn in_step(service: &Service, client: &ipc::Client) -> bool {
+        let started = Instant::now();
+        loop {
+            if whole(&client.snapshot()) == whole(&service.ctl.view()) {
+                return true;
+            }
+            if started.elapsed() > Duration::from_secs(5) {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    /// The whole way, as the app runs it: the controller publishes, each link's thread writes what changed since what
+    /// it last wrote, each client's thread takes it in. Every client holds what the service published, whichever part
+    /// changed, however fast, whenever it connected, and after it asked for everything again.
+    #[test]
+    fn every_client_holds_what_the_service_published() {
+        use orbiters_core::slice::Slice;
+        let service = service();
+        let ctl = service.ctl.clone();
+        ctl.update(|s| s.n4n0.lines.push(said("before anyone was linked")));
+        // The overlay's link: every state it can read.
+        let overlay = linked(&service, Role::Overlay);
+        assert!(in_step(&service, &overlay), "the first state, and the overlay counted as linked");
+        assert!(overlay.snapshot().steamvr.overlay);
+        // One part at a time: a plain value, a slice, a part inside a part, the settings.
+        let before = overlay.snapshot();
+        ctl.update(|s| s.vrchat.motion = Some(crate::state::AvatarMotion { in_station: false, seated: true, speed: 1.25 }));
+        assert!(in_step(&service, &overlay));
+        ctl.update(|s| s.n4n0.panel = Some("N4N0's panel".into()));
+        ctl.update(|s| {
+            s.vrchat.world.players.insert("usr_1".into(), "Ada".into());
+        });
+        ctl.update(|s| s.settings.walk_boost.strength = 0.75);
+        ctl.update(|s| s.projects_changed += 1);
+        assert!(in_step(&service, &overlay));
+        let after = overlay.snapshot();
+        assert_eq!(after.settings.walk_boost.strength, 0.75);
+        assert!(Slice::same(&before.n4n0.lines, &after.n4n0.lines) && Slice::same(&before.storage, &after.storage), "what did not change was not sent again");
+        // A publish that changes nothing is told all the same: the client holds a new snapshot, and draws for it.
+        let before = overlay.snapshot();
+        let told = ctl.publishes();
+        ctl.update(|_| {});
+        assert_eq!(ctl.publishes(), told + 1);
+        let started = Instant::now();
+        while Arc::ptr_eq(&before, &overlay.snapshot()) && started.elapsed() < Duration::from_secs(5) {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let after = overlay.snapshot();
+        assert!(!Arc::ptr_eq(&before, &after), "told of a publish that changed nothing");
+        assert!(Slice::same(&before.settings, &after.settings) && Slice::same(&before.capture, &after.capture));
+        // A window that opens later is handed everything, and then only what changes, at its own pace.
+        let window = linked(&service, Role::Window);
+        assert!(in_step(&service, &window));
+        assert_eq!(window.snapshot().n4n0.lines.len(), 1);
+        // Changes faster than the window's link writes (it skips states), of two parts that go together.
+        for round in 0..300u32 {
+            ctl.update(|s| {
+                s.account.state = crate::state::AccountState::SignedIn { username: format!("member-{round}") };
+                s.n4n0.calls.picked = round as usize;
+                if round % 50 == 0 {
+                    s.n4n0.lines.push(crate::state::N4n0Line { who: crate::state::N4n0Who::You, text: format!("line {round}"), at_ms: round as u64, streaming: false });
+                }
+            });
+            // Whatever state a client holds meanwhile is one the service published: the two parts agree.
+            for client in [&overlay, &window] {
+                let held = client.snapshot();
+                if let crate::state::AccountState::SignedIn { username } = &held.account.state {
+                    assert_eq!(*username, format!("member-{}", held.n4n0.calls.picked), "parts of two states");
+                }
+            }
+        }
+        assert!(in_step(&service, &overlay) && in_step(&service, &window));
+        assert_eq!(window.snapshot().n4n0.calls.picked, 299);
+        ctl.update(|s| s.n4n0.afk = true);
+        assert!(in_step(&service, &window) && in_step(&service, &overlay));
+        assert!(window.snapshot().n4n0.afk);
+    }
+
+    /// Review S2: a client whose connection drops is let go by the service, and the one that comes back is a new link,
+    /// handed everything as the service has it then.
+    #[test]
+    fn a_client_that_comes_back_is_handed_everything_again() {
+        let service = service();
+        let ctl = service.ctl.clone();
+        let (first, between) = linked_through(&service, Role::Overlay);
+        ctl.update(|s| s.projects_changed = 42);
+        assert!(in_step(&service, &first));
+        assert!(ctl.view().steamvr.overlay && service.linked(Role::Overlay) == 1);
+        // The connection drops: the client says the service is gone, the service lets the link go and no longer counts
+        // an overlay as linked.
+        between.hang_up();
+        assert!(until(|| first.should_close()));
+        assert!(until(|| service.linked(Role::Overlay) == 0 && !ctl.view().steamvr.overlay));
+        let held = first.snapshot();
+        // The service goes on, with nobody linked.
+        ctl.update(|s| s.n4n0.lines.push(said("said while nobody was linked")));
+        ctl.update(|s| s.settings.walk_boost.strength = 0.5);
+        // It comes back: handed everything, and then what changes.
+        let again = linked(&service, Role::Overlay);
+        assert!(in_step(&service, &again));
+        assert_eq!(again.snapshot().n4n0.lines.len(), 1);
+        assert_eq!(again.snapshot().projects_changed, 42);
+        assert!(until(|| ctl.view().steamvr.overlay));
+        ctl.update(|s| s.n4n0.afk = true);
+        assert!(in_step(&service, &again));
+        assert!(Arc::ptr_eq(&held, &first.snapshot()), "nothing of the new link reaches the client that went");
+        // Coming and going again and again leaves no link behind.
+        for _ in 0..3 {
+            let (window, between) = linked_through(&service, Role::Window);
+            assert!(in_step(&service, &window));
+            between.hang_up();
+            assert!(until(|| window.should_close()));
+        }
+        assert!(until(|| service.linked(Role::Window) == 0));
+        assert_eq!(service.linked(Role::Overlay), 1);
+    }
+
+    /// A damaged line terminates the real service link. A new client receives a full current baseline.
+    #[test]
+    fn a_damaged_line_closes_and_a_new_link_starts_whole() {
+        let service = service();
+        for round in 1..=2 {
+            let (client, between) = linked_through(&service, Role::Window);
+            assert!(in_step(&service, &client));
+            between.damage(&[Line::Changes]);
+            service.ctl.update(|s| s.projects_changed = round);
+            assert!(until(|| client.should_close()));
+            assert!(until(|| service.linked(Role::Window) == 0));
+            assert_eq!(between.passed().1, 1);
+        }
+        let again = linked(&service, Role::Window);
+        assert!(in_step(&service, &again));
+        assert_eq!(again.snapshot().projects_changed, 2);
+    }
+
+    #[test]
+    fn socket_regressions_twenty_rounds() {
+        for _ in 0..20 {
+            ipc::tests::unreadable_changes_close_without_the_writer_and_never_revive();
+            ipc::tests::unreadable_wire_lines_end_the_link();
+            a_damaged_line_closes_and_a_new_link_starts_whole();
+            a_client_that_comes_back_is_handed_everything_again();
+        }
+    }
+
+    /// Review S2: a reader that stops reading until the socket's buffers are full, then reads again. The service never
+    /// waits for it, keeps one state for it and not a queue, and the newest state arrives whole when it reads again; the
+    /// states it missed are never sent.
+    #[test]
+    fn a_reader_that_stalls_gets_the_newest_state_when_it_reads_again() {
+        const ROUNDS: u32 = 300;
+        let service = service();
+        let ctl = service.ctl.clone();
+        let (client, between) = linked_through(&service, Role::Overlay);
+        assert!(in_step(&service, &client));
+        let before = between.passed().0;
+        between.hold(true);
+        let writes = service.links.lock().unwrap()[0].writes.clone();
+        // Await each write before publishing another, until one cannot complete while the proxy is held. This avoids
+        // mistaking mailbox coalescing for full socket buffers. The overlay writer has no pacing delay.
+        let mut blocked = false;
+        for round in 0..100 {
+            let before = writes.load(Ordering::Relaxed);
+            ctl.update(|s| {
+                *s.n4n0.lines = vec![said(&format!("{} {}", round, "x".repeat(1_000_000)))];
+                s.projects_changed = round;
+            });
+            let began = Instant::now();
+            while writes.load(Ordering::Relaxed) == before && began.elapsed() < Duration::from_millis(300) {
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            if writes.load(Ordering::Relaxed) == before {
+                blocked = true;
+                break;
+            }
+        }
+        assert!(blocked, "the service writer must stall before the reader drains");
+        // 200 kB that change every time, with a number in another part that goes with them: 60 MB in all, far more than
+        // lies between two sockets.
+        let big = "x".repeat(200_000);
+        let started = Instant::now();
+        for round in 0..ROUNDS {
+            ctl.update(|s| {
+                *s.n4n0.lines = vec![said(&format!("{round} {big}"))];
+                s.projects_changed = round as u64;
+            });
+        }
+        let publishing = started.elapsed();
+        assert!(publishing < Duration::from_secs(20), "publishing waited for a reader that had stopped: {publishing:?}");
+        let waiting: Vec<(usize, usize)> = service.links.lock().unwrap().iter().map(|l| l.mailbox.waiting()).collect();
+        assert!(waiting.iter().all(|(states, messages)| *states <= 1 && *messages < 8), "one state waits, not a queue: {waiting:?}");
+        assert!(client.snapshot().projects_changed < (ROUNDS - 1) as u64, "the reader has stopped");
+        // It reads again. Whatever it holds on the way is a state the service published, and it ends on the newest.
+        between.hold(false);
+        let together = |s: &Snapshot| s.n4n0.lines.first().is_none_or(|line| line.text.starts_with(&format!("{} ", s.projects_changed)));
+        let started = Instant::now();
+        while client.snapshot().projects_changed < (ROUNDS - 1) as u64 && started.elapsed() < Duration::from_secs(20) {
+            assert!(together(&client.snapshot()), "parts of two states");
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert!(in_step(&service, &client));
+        assert_eq!(client.snapshot().projects_changed, (ROUNDS - 1) as u64);
+        let sent = between.passed().0 - before;
+        assert!(sent < ROUNDS as u64 / 2, "{sent} lines for {ROUNDS} states: what a stalled reader missed is skipped, not queued");
+    }
+
+    /// Review S2: parts that change in one publish arrive in one line (a world with who is in it; a capture with its
+    /// statistics and its 3D view's progress), on a link that writes every state and on the window's, which skips
+    /// some; and a change undone before the paced link wrote it ends undone on the client.
+    #[test]
+    fn parts_that_change_together_arrive_together_and_a_change_undone_ends_undone() {
+        let service = service();
+        let ctl = service.ctl.clone();
+        let (window, overlay) = (linked(&service, Role::Window), linked(&service, Role::Overlay));
+        let together = |s: &Snapshot| {
+            let world = s.vrchat.world.world_id.clone().unwrap_or_default();
+            let people = s.vrchat.world.players.keys().all(|id| id.ends_with(&world)) && (world.is_empty() || !s.vrchat.world.players.is_empty());
+            let frames = s.capture.stats.as_ref().map_or(0, |stats| stats.frames);
+            let capture = s.capture.session_dir.as_ref().map_or(frames == 0, |dir| *dir == PathBuf::from(format!("session-{frames}")))
+                && s.reconstruction.as_ref().map_or(frames == 0, |job| job.iteration as u64 == frames);
+            people && capture
+        };
+        for round in 1..=200u32 {
+            ctl.update(|s| {
+                let world = format!("wrld_{round}");
+                s.vrchat.world.players = (0..3).map(|i| (format!("usr_{i}_{world}"), format!("Someone {i}"))).collect();
+                s.vrchat.world.world_id = Some(world);
+                s.capture.session_dir = Some(PathBuf::from(format!("session-{round}")));
+                s.capture.stats.get_or_insert_with(Default::default).frames = round as u64;
+                let mut job = ReconstructionJob::new(PathBuf::from("a session"), false);
+                job.iteration = round;
+                s.reconstruction = Some(job);
+            });
+            for client in [&window, &overlay] {
+                assert!(together(&client.snapshot()), "round {round}: parts of two states");
+            }
+        }
+        assert!(in_step(&service, &window) && in_step(&service, &overlay));
+        assert_eq!(window.snapshot().capture.stats.as_ref().map(|stats| stats.frames), Some(200));
+        // A to B and back to A, faster than the window's link writes: a plain value, a slice, a part inside a part.
+        let a = ctl.view();
+        for round in 0..40u32 {
+            ctl.update(|s| {
+                s.settings.walk_boost.strength = 0.9;
+                s.worn_kit = Some(true);
+                s.vrchat.motion = Some(AvatarMotion { in_station: true, seated: false, speed: round as f32 });
+                s.n4n0.panel = Some("B".into());
+            });
+            ctl.update(|s| {
+                s.settings = a.settings.clone();
+                s.worn_kit = a.worn_kit;
+                s.vrchat.motion = a.vrchat.motion;
+                s.n4n0.panel = a.n4n0.panel.clone();
+            });
+            if round % 8 == 0 {
+                assert!(in_step(&service, &window) && in_step(&service, &overlay), "round {round}");
+            }
+        }
+        assert!(in_step(&service, &window) && in_step(&service, &overlay));
+        assert_eq!(whole(&window.snapshot()), whole(&a), "back on A, whole");
+        assert_ne!(window.snapshot().settings.walk_boost.strength, 0.9);
+    }
+
+    #[test]
+    fn every_declared_part_arrives_through_the_service() {
+        use orbiters_core::slice::{apply_changes, Parts};
+        let service = service();
+        // Publication intentionally clears VRChat login state without a signed-in account on the active server.
+        // Supply that prerequisite instead of expecting an invalid fixture to survive the real publisher.
+        service.ctl.update(|s| {
+            s.account.state = crate::state::AccountState::SignedIn { username: "wire fixture".into() };
+            s.account.development = orbiters_core::account::Server::current() == orbiters_core::account::Server::Development;
+        });
+        let client = linked(&service, Role::Window);
+        assert!(in_step(&service, &client));
+        let baseline = service.ctl.view();
+        let full = whole(&ipc::tests::every_part_set());
+        let mut names = Vec::new();
+        baseline.part_names("", &mut names);
+        for name in names {
+            let value = name.split('.').fold(&full, |at, key| &at[key]);
+            let mut next = (*baseline).clone();
+            apply_changes(&mut next, &serde_json::json!({name.as_str(): value}).to_string()).unwrap();
+            service.ctl.set_snapshot(next);
+            assert!(in_step(&service, &client), "{name} did not arrive whole");
+            let received = whole(&client.snapshot());
+            assert_eq!(name.split('.').fold(&received, |at, key| &at[key]), value, "{name}");
+        }
     }
 
     #[test]

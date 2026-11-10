@@ -18,10 +18,13 @@ mod coverage_window;
 mod device;
 mod drag_out;
 mod gpu;
+mod harness;
 mod idle_frames;
 mod ipc;
 mod keys;
 mod language;
+mod link_between;
+mod link_smoke;
 #[cfg(target_os = "macos")]
 mod mac;
 #[cfg(target_os = "macos")]
@@ -51,9 +54,13 @@ mod words;
 mod worker;
 
 fn main() -> anyhow::Result<()> {
-    orbiters_core::panic_log::install();
     let args: Vec<String> = std::env::args().skip(1).collect();
-    match args.first().map(String::as_str) {
+    let private_roots = harness::prepare(&args)?;
+    if args.iter().any(|a| a == "--say-state") {
+        ipc::SAY_STATE.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+    orbiters_core::panic_log::install();
+    let result = match args.first().map(String::as_str) {
         Some("--screenshot") => {
             // On a thread of its own: its table of scenarios and a page's frames outgrow the main thread's 1 MB stack in
             // debug builds (screenshot::run alone takes some 700 KB there).
@@ -69,6 +76,8 @@ fn main() -> anyhow::Result<()> {
         Some(orbiters_booster::system::RESTORE_ARGUMENT) => controller::booster_restore_at_sign_in(),
         Some("--gpu-bench") => bench::run(&args[1..]),
         Some("--idle-frames") => idle_frames::run(&args[1..]),
+        Some("--publish-cost") => controller::publish_cost::run(&args[1..]),
+        Some("--link-smoke") => link_smoke::run(&args[1..]),
         Some("--window") => window::run(&args[1..]),
         Some("--overlay") => overlay::run(&args[1..]),
         #[cfg(windows)]
@@ -95,5 +104,7 @@ fn main() -> anyhow::Result<()> {
             Ok(())
         }
         _ => service::run(args.iter().any(|a| a == "--hidden")),
-    }
+    };
+    if let Some(private_roots) = private_roots { private_roots.cleanup()?; }
+    result
 }

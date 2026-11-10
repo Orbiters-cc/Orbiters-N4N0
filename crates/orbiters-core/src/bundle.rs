@@ -413,6 +413,19 @@ pub fn capture_picture_rect(width: u32, height: u32) -> crate::contracts::image:
 
 /// The session thumbnail as top-down RGBA: (width, height, pixels).
 pub fn read_thumbnail(dir: &Path) -> Option<(u32, u32, Vec<u8>)> {
+    read_thumbnail_with_cache(dir, !READ_ONLY_THUMBNAIL_CACHE.load(std::sync::atomic::Ordering::Relaxed))
+}
+
+static READ_ONLY_THUMBNAIL_CACHE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// The screenshot harness reads capture libraries in place. It sets this before starting loaders so a missing or
+/// undecodable derived thumbnail is made in memory only. Normal launches still persist that cache as before.
+/// This controls only thumbnail-cache writes, not recording, reconstruction or explicit capture operations.
+pub fn disable_thumbnail_cache_writes() {
+    READ_ONLY_THUMBNAIL_CACHE.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
+fn read_thumbnail_with_cache(dir: &Path, write_cache: bool) -> Option<(u32, u32, Vec<u8>)> {
     let cached = dir.join(PICTURE_THUMBNAIL_FILE);
     if let Some((h, rgba)) = fs::read(&cached).ok().and_then(|data| qoi::decode_rgba_max(&data, THUMBNAIL_PIXELS).ok()) {
         return Some((h.width, h.height, rgba));
@@ -441,13 +454,37 @@ pub fn read_thumbnail(dir: &Path) -> Option<(u32, u32, Vec<u8>)> {
     let row = h.width as usize * 4;
     let rgba = rgba[top as usize * row..bottom as usize * row].to_vec();
     let height = bottom - top;
-    let _ = crate::write_atomic(&cached, &qoi::encode(&rgba, h.width, height, 4));
+    if write_cache {
+        let _ = crate::write_atomic(&cached, &qoi::encode(&rgba, h.width, height, 4));
+    }
     Some((h.width, height, rgba))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn read_only_thumbnail_decoding_preserves_missing_and_invalid_caches() {
+        let root = std::env::temp_dir().join(format!("orbiters-thumb-read-only-{}", uuid::Uuid::new_v4()));
+        fs::create_dir(&root).unwrap();
+        let thumbnail = qoi::encode(&[80; 64 * 32 * 4], 64, 32, 4);
+        fs::write(root.join(manifest::THUMBNAIL_FILE), &thumbnail).unwrap();
+        fs::write(root.join(manifest::MANIFEST_FILE), b"unreadable manifest sentinel").unwrap();
+        let cached = root.join(PICTURE_THUMBNAIL_FILE);
+        let decoded = read_thumbnail_with_cache(&root, false).unwrap();
+        assert!(!cached.exists());
+        fs::write(&cached, b"undecodable cache sentinel").unwrap();
+        let modified = fs::metadata(&cached).unwrap().modified().unwrap();
+        assert_eq!(read_thumbnail_with_cache(&root, false).unwrap(), decoded);
+        assert_eq!(fs::read(&cached).unwrap(), b"undecodable cache sentinel");
+        assert_eq!(fs::metadata(&cached).unwrap().modified().unwrap(), modified);
+        assert_eq!(fs::read(root.join(manifest::THUMBNAIL_FILE)).unwrap(), thumbnail);
+        assert_eq!(fs::read(root.join(manifest::MANIFEST_FILE)).unwrap(), b"unreadable manifest sentinel");
+        assert_eq!(read_thumbnail_with_cache(&root, true).unwrap(), decoded, "normal cache population produces the same pixels");
+        assert!(qoi::decode_rgba_max(&fs::read(&cached).unwrap(), THUMBNAIL_PIXELS).is_ok());
+        assert_eq!(read_thumbnail_with_cache(&root, false).unwrap(), decoded, "an existing good cache is still used");
+        fs::remove_dir_all(root).unwrap();
+    }
     #[test]
     fn picture_crop_uses_original_capture_layouts() {
         use crate::contracts::image::Rect;

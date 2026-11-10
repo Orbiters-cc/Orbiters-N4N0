@@ -341,7 +341,7 @@ mod tests {
     #[test]
     fn it_says_what_it_waits_for() {
         let mut waiting = snap();
-        waiting.reconstruct_queue = vec![PathBuf::from(DIR)];
+        *waiting.reconstruct_queue = vec![PathBuf::from(DIR)];
         waiting.vrchat.running = true;
         let hint = |s: &Snapshot| match offer_of(&entry(), s) {
             Some(Offer::Waiting { hint }) => hint,

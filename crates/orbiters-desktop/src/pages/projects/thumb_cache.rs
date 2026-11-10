@@ -173,6 +173,51 @@ pub(super) fn preload() -> std::sync::mpsc::Receiver<Vec<Cached>> {
 mod tests {
     use super::*;
 
+    /// Separate process: roots are set once at startup, before the actual preload worker is started.
+    #[test]
+    fn sandbox_preload_preserves_outside_sentinels() {
+        const CHILD: &str = "ORBITERS_SENTINEL_CHILD";
+        if let Some(root) = std::env::var_os(CHILD) {
+            let root = PathBuf::from(root);
+            crate::link_smoke::sandbox(&root).unwrap();
+            assert_eq!(orbiters_projects::data_dir(), root.join("local"));
+            assert_eq!(orbiters_projects::vcc_dir(), root.join("local/VCC"));
+            assert_eq!(orbiters_projects::hub_data_dir(), Some(root.join("local/UnityHub")));
+            assert!(orbiters_projects::discovery::seeds(&[]).is_empty());
+            std::fs::create_dir_all(dir()).unwrap();
+            let inside = dir().join("preload.tmp");
+            std::fs::write(&inside, b"remove this private cache temporary file").unwrap();
+            preload().recv_timeout(Duration::from_secs(10)).unwrap();
+            assert!(!inside.exists(), "the real preload ran and cleaned its own sandbox");
+            return;
+        }
+        let root = std::env::temp_dir().join(format!("orbiters-sentinel-{}", uuid::Uuid::new_v4()));
+        let outside = root.join("outside");
+        let mut sentinels = Vec::new();
+        for relative in ["project-pictures/sentinel.tmp", "project-pictures/avtr_sentinel.0000000000000001.jpg", "VCC/settings.json", "Hub/projects-v1.json"] {
+            let path = outside.join(relative);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            let bytes = format!("untouched sentinel: {relative}").into_bytes();
+            std::fs::write(&path, &bytes).unwrap();
+            let meta = std::fs::metadata(&path).unwrap();
+            sentinels.push((path, bytes, meta.modified().unwrap(), meta.created().ok()));
+        }
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "pages::projects::thumb_cache::tests::sandbox_preload_preserves_outside_sentinels", "--nocapture"])
+            .env(CHILD, root.join("sandbox"))
+            .env("ORBITERS_VCC_DIR", outside.join("VCC"))
+            .env("ORBITERS_UNITY_HUB_DIR", outside.join("Hub"))
+            .status().unwrap();
+        assert!(status.success());
+        for (path, bytes, modified, created) in sentinels {
+            let meta = std::fs::metadata(&path).unwrap();
+            assert_eq!(meta.modified().unwrap(), modified, "{}", path.display());
+            assert_eq!(meta.created().ok(), created, "{}", path.display());
+            assert_eq!(std::fs::read(&path).unwrap(), bytes, "{}", path.display());
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     fn picture(shade: u8) -> ColorImage {
         ColorImage::from_rgb([8, 6], &vec![shade; 8 * 6 * 3])
     }

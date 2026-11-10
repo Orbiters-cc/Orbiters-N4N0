@@ -1,6 +1,7 @@
 //! What N4N0 shows the apps (their window, the SteamVR overlay, a phone's screen): [`N4n0Status`], republished on every
 //! change, with what the person is told ([`NoticeKind`]).
 
+use orbiters_core::slice::Slice;
 use orbiters_i18n::mark;
 use serde::{Deserialize, Serialize};
 
@@ -113,6 +114,9 @@ pub enum PhotoWait {
     Move,
 }
 
+/// N4N0's state as the apps show it. It is published whole on every change, so its lists are [`Slice`]s (shared by every
+/// copy until one changes, and sent to the window and the overlay only when they did), and the rest is small values that
+/// travel one by one when they differ ([`orbiters_core::slice::Parts`]).
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct N4n0Status {
     /// The avatar VRChat loaded.
@@ -130,15 +134,15 @@ pub struct N4n0Status {
     pub thinking: bool,
     pub afk: bool,
     /// The conversation as shown, the newest last.
-    pub lines: Vec<N4n0Line>,
+    pub lines: Slice<Vec<N4n0Line>>,
     pub confirmations: Vec<N4n0Confirmation>,
     /// The free quota of N4N0's assistant, as the last answer told it.
     pub quota: Option<orbiters_n4n0_core::assistant::Quota>,
     pub voice: VoiceStatus,
     /// Saved videos, the newest first.
-    pub videos: Vec<orbiters_n4n0_core::videos::SavedVideo>,
+    pub videos: Slice<Vec<orbiters_n4n0_core::videos::SavedVideo>>,
     /// Orbiters' processes and VRChat's.
-    pub resources: Vec<ProcessUsage>,
+    pub resources: Slice<Vec<ProcessUsage>>,
     /// Testing: the state N4N0 is held in, every state shown in turn, the owner acted as away.
     #[serde(default)]
     pub test_face: Option<N4n0Face>,
@@ -154,7 +158,7 @@ pub struct N4n0Status {
     pub test_pictures: bool,
     /// Calls with VRChat friends (the app's own: [`crate::Host::calls`]).
     #[serde(default)]
-    pub calls: CallsStatus,
+    pub calls: Slice<CallsStatus>,
     /// The avatar's N4N0 prop has the projected screen: N4N0's menu opens there instead of in the overlay.
     #[serde(default)]
     pub screen: bool,
@@ -221,9 +225,9 @@ pub struct N4n0Status {
     /// The 3D captures as the app keeps them (the last one made, History's), and the VRChat friends a capture goes to
     /// while a menu's Share to … shows (contracts `Docs/n4n0.md`, Menu, from screen version 12).
     #[serde(default)]
-    pub captures: orbiters_n4n0_core::captures::CapturesView,
+    pub captures: Slice<orbiters_n4n0_core::captures::CapturesView>,
     #[serde(default)]
-    pub friends: orbiters_n4n0_core::captures::Friends,
+    pub friends: Slice<orbiters_n4n0_core::captures::Friends>,
     /// The worlds' feedback as the app keeps it, the player's actions not sent yet included (contracts `Docs/n4n0.md`,
     /// Menu, from screen version 13).
     #[serde(default)]
@@ -235,6 +239,19 @@ pub struct N4n0Status {
     #[serde(default)]
     pub mirror: orbiters_n4n0_core::mirror::MirrorView,
 }
+
+// The avatar's states and the world feedback stay plain values for now (copied with the state, compared by value):
+// `overlay/orbit` and `overlay/worlds`, which another change is rewriting, assign and keep them by their own type.
+orbiters_core::parts!(N4n0Status {
+    plain: [
+        avatar_id, prop_sync, manifest, controls, face, panel, listening, thinking, afk, confirmations, quota, voice, test_face, test_cycle, test_afk,
+        test_hidden, test_pictures, screen, screen_open, desktop_mode, menu_request, menu_toggle, dictation, photo_countdown, photo_wait, light, states,
+        can_drop, card, tracking, tracking_note, suggestion, versions, keys, world_video, photo_note, invite, qr, feedback, input_params, mirror,
+    ],
+    slices: [lines, videos, resources, calls, captures, friends],
+    identity: [],
+    nested: [],
+});
 
 /// Tracking smoothing (the app's SteamVR driver), as the Tracking page shows it.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]

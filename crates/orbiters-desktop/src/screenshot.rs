@@ -9,8 +9,10 @@
 //! many frames past its shot and `--sequence` writes its last frames too (`<name>-<frame>.png`), to check a motion frame
 //! by frame (a window closing back into its card).
 //!
-//! A run never writes this computer's own data ([`sandbox_user_data`]): its settings and caches folders are the run's
-//! own, under the temporary folder, seeded with copies of what scenarios read. It once refreshed the VRChat pictures'
+//! Startup data that may be cleaned or rewritten lives in private settings/cache/local-data folders, seeded with
+//! small copies. Capture libraries and VRChat pictures are read in place; thumbnail-cache writes are disabled by
+//! the harness bootstrap. Explicit end-to-end capture operations are separate from the default scenario set.
+//! The harness once refreshed the VRChat pictures'
 //! index in the person's cache with the harness's settings, which name no picture folder, so every picture of the
 //! folders the person added (2 TB on Enzo's archive disk) left the index, and the app read them all again.
 
@@ -56,7 +58,7 @@ fn network_snapshot(base: &crate::state::Snapshot, link: crate::state::LanLink) 
     let pc = FoundVrchat { name: "VRChat-Client-D4E5F6".into(), device: Some("DESKTOP-4F2K".into()), ip: Ipv4Addr::new(192, 168, 1, 40), query_port: 51120, osc_port: None };
     let mut snapshot = base.clone();
     let connected = link == crate::state::LanLink::Connected;
-    snapshot.lan = crate::state::LanStatus {
+    *snapshot.lan = crate::state::LanStatus {
         link,
         found: match link {
             crate::state::LanLink::Looking | crate::state::LanLink::NotAllowed => Vec::new(),
@@ -120,62 +122,16 @@ struct WorldShot {
     maps: Option<crate::state::MapsMine>,
 }
 
-/// Gives this run settings and caches folders of its own (`orbiters_core::paths::set_roots`, before any path is
-/// asked for), so that nothing it does writes the person's: the VRChat pictures' index and thumbnails, world pages,
-/// project previews and their cards' stills, settings a scenario saves. Seeded with copies of what scenarios read
-/// (the settings folder's files but the settings themselves, the world pages and 3D worlds kept from Orbiters); the
-/// session library, documents and this computer's local data stay the real ones, read only by the scenarios. The
-/// picture folders the person added are not read (the harness's settings name none); `ORBITERS_SCREENSHOT_PICTURE_FOLDERS`
-/// (separated by `;`) names some for the run. The run deletes its sandbox when it ends; those of runs that did not end
-/// (killed) go at a later run once over six hours old.
+/// Main copied mutable startup inputs into private roots before panic logging or any Controller/App. Large
+/// capture libraries are read in place, optionally from ORBITERS_HARNESS_FIXTURES, through screenshot Settings.
 fn sandbox_user_data() -> anyhow::Result<(PathBuf, Vec<PathBuf>)> {
-    use orbiters_core::paths;
-    let (real_config, real_cache) = (paths::config_dir(), paths::cache_dir());
-    let base = std::env::temp_dir().join("orbiters-screenshot-sandbox");
-    if let Ok(dir) = std::fs::read_dir(&base) {
-        for e in dir.flatten() {
-            if e.metadata().and_then(|m| m.modified()).is_ok_and(|t| t.elapsed().unwrap_or_default() > Duration::from_secs(6 * 3600)) {
-                let _ = std::fs::remove_dir_all(e.path());
-            }
-        }
-    }
-    let root = base.join(std::process::id().to_string());
-    let _ = std::fs::remove_dir_all(&root);
-    let (config, cache) = (root.join("config"), root.join("cache"));
-    std::fs::create_dir_all(&config)?;
-    std::fs::create_dir_all(&cache)?;
-    fn copy_tree(from: &Path, to: &Path, skip: &[&str]) {
-        let Ok(dir) = std::fs::read_dir(from) else { return };
-        let _ = std::fs::create_dir_all(to);
-        for e in dir.flatten() {
-            let name = e.file_name();
-            if skip.iter().any(|s| name.to_string_lossy().eq_ignore_ascii_case(s)) {
-                continue;
-            }
-            match e.file_type() {
-                Ok(t) if t.is_dir() => copy_tree(&e.path(), &to.join(&name), &[]),
-                Ok(t) if t.is_file() => {
-                    let _ = std::fs::copy(e.path(), to.join(&name));
-                }
-                _ => {}
-            }
-        }
-    }
-    // The settings' `.bad-` copies, the old cache inside the settings folder: not what scenarios read.
-    copy_tree(&real_config, &config, &["settings.json", "cache"]);
-    for sub in ["worlds", "3d-worlds"] {
-        copy_tree(&real_cache.join(sub), &cache.join(sub), &[]);
-    }
+    let roots = orbiters_core::paths::roots().context("screenshots require the harness bootstrap")?;
+    let root = roots.config.parent().context("private root")?.to_path_buf();
     let folders: Vec<PathBuf> = std::env::var("ORBITERS_SCREENSHOT_PICTURE_FOLDERS")
-        .unwrap_or_default()
-        .split(';')
-        .filter(|s| !s.trim().is_empty())
-        .map(|s| PathBuf::from(s.trim()))
-        .collect();
+        .unwrap_or_default().split(';').filter(|s| !s.trim().is_empty()).map(|s| PathBuf::from(s.trim())).collect();
     if !folders.is_empty() {
-        Settings { picture_folders: folders.clone(), ..Settings::default() }.save_to(&config.join("settings.json"))?;
+        Settings { picture_folders: folders.clone(), ..Settings::default() }.save_to(&roots.config.join("settings.json"))?;
     }
-    paths::set_roots(paths::Roots { config, local_data: paths::local_data_root(), cache, documents: paths::documents_root() })?;
     Ok((root, folders))
 }
 
@@ -193,19 +149,14 @@ impl Drop for TextReport {
 pub fn run(args: &[String]) -> anyhow::Result<()> {
     let (sandbox, picture_folders) = sandbox_user_data()?;
     eprintln!("screenshots: settings and caches in {}", sandbox.display());
-    let result = shots(args, picture_folders);
-    // The run's settings and caches go with it: each run copies some 40 MB of world pages, and a day of screenshots by
-    // several agents filled the system disk. `ORBITERS_SCREENSHOT_KEEP_SANDBOX` keeps them (to look at what a run wrote).
-    if std::env::var_os("ORBITERS_SCREENSHOT_KEEP_SANDBOX").is_none() {
-        let _ = std::fs::remove_dir_all(&sandbox);
-    }
-    result
+    shots(args, picture_folders)
 }
 
 fn shots(args: &[String], picture_folders: Vec<PathBuf>) -> anyhow::Result<()> {
     let out =
         PathBuf::from(args.first().context("usage: --screenshot <out folder> [--sessions <folder>] [--raw <folder>] [--scale <factor>] [--only <name>]")?);
-    let mut settings = Settings { picture_folders, ..Settings::default() };
+    let (sessions, raw) = crate::harness::screenshot_library().context("screenshots require library inputs from the harness bootstrap")?;
+    let mut settings = Settings { picture_folders, sessions_dir: sessions.clone(), raw_captures_dir: raw.clone(), ..Settings::default() };
     let mut scale = 1.0f32;
     let mut height = 820.0f32;
     let mut width = 1280.0f32;
@@ -3121,7 +3072,7 @@ fn n4n0_snapshot(base: &Snapshot) -> Snapshot {
     o.controls = 42;
     o.face = N4n0Face::Talking;
     o.panel = Some("Done, hoodie on. Now go find\nyour friends instead of\ntalking to a floating ball.".into());
-    o.lines = vec![
+    *o.lines = vec![
         line(N4n0Who::You, "Nano, mets mon sweat à capuche"),
         line(N4n0Who::Note, "N4N0 set Clothes / Hoodie"),
         line(N4n0Who::N4n0, "Done, hoodie on. Now go find your friends instead of talking to a floating ball."),
@@ -3137,7 +3088,7 @@ fn n4n0_snapshot(base: &Snapshot) -> Snapshot {
     }];
     o.quota = Some(orbiters_n4n0_core::assistant::Quota { used: 13, limit: 80, resets_at: None, own_key: false });
     o.voice = crate::state::VoiceStatus { installed: true, running: true, ..Default::default() };
-    o.videos = vec![
+    *o.videos = vec![
         orbiters_n4n0_core::videos::SavedVideo {
             url: "https://www.youtube.com/watch?v=36YnV9STBqc".into(),
             title: Some("Lo-fi beats to sit in a VRChat club to".into()),
@@ -3151,7 +3102,7 @@ fn n4n0_snapshot(base: &Snapshot) -> Snapshot {
             saved_utc: "2026-10-18T21:33:48Z".into(),
         },
     ];
-    o.resources = vec![
+    *o.resources = vec![
         ProcessUsage { name: "Orbiters - N4N0".into(), cpu_percent: 1.2, memory_mb: 148.0 },
         ProcessUsage { name: "N4N0's ears".into(), cpu_percent: 0.4, memory_mb: 912.0 },
         ProcessUsage { name: "VRChat".into(), cpu_percent: 187.0, memory_mb: 6840.0 },
@@ -3215,7 +3166,7 @@ pub(crate) fn idle_snapshot(settings: &Settings, sessions: &[orbiters_core::bund
     s.account.state = crate::state::AccountState::SignedIn { username: "Orbit".into() };
     s.vrchat.running = true;
     s.vrchat.log_found = true;
-    s.vrchat.world = WorldState {
+    *s.vrchat.world = WorldState {
         world_id: Some("wrld_4cf554b4-430c-4f8f-b53e-1f294eed230b".into()),
         world_name: Some("Canine Test Lab".into()),
         instance: Some("12345~private".into()),
@@ -3223,7 +3174,7 @@ pub(crate) fn idle_snapshot(settings: &Settings, sessions: &[orbiters_core::bund
         log_file: Some(PathBuf::from(r"C:\Users\Enzo\AppData\LocalLow\VRChat\VRChat\output_log_2026-10-20_01-12-44.txt")),
         ..Default::default()
     };
-    s.sources = vec![SpoutSourceInfo { name: "VRChat".into(), width: 1920, height: 1080, format: 87, description: String::new() }];
+    *s.sources = vec![SpoutSourceInfo { name: "VRChat".into(), width: 1920, height: 1080, format: 87, description: String::new() }];
     s.osc.enabled = true;
     s.osc.listening = true;
     s.osc.advertising = true;
@@ -3235,7 +3186,7 @@ pub(crate) fn idle_snapshot(settings: &Settings, sessions: &[orbiters_core::bund
     let now_ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0);
     s.steamvr.calibration = Some(crate::state::CalibrationInfo { head_height_m: 1.63, arm_span_m: 1.41, devices: 6, utc_ms: now_ms - 7 * 60_000 });
     s.settings.performance.record_mic = true;
-    s.mics = vec![
+    *s.mics = vec![
         orbiters_core::protocol::AudioDeviceInfo { id: "index".into(), name: "Microphone (Valve Index)".into(), default: true },
         orbiters_core::protocol::AudioDeviceInfo { id: "desk".into(), name: "Desk microphone (USB)".into(), default: false },
     ];
@@ -3393,7 +3344,7 @@ fn overlay_shots(out: &std::path::Path, settings: &Settings) -> anyhow::Result<(
     idle.osc.vrchat_found = true;
     idle.osc.values = 214;
     idle.settings.performance.record_mic = true;
-    idle.mics = vec![orbiters_core::protocol::AudioDeviceInfo { id: "1".into(), name: "Microphone (Valve Index)".into(), default: true }];
+    *idle.mics = vec![orbiters_core::protocol::AudioDeviceInfo { id: "1".into(), name: "Microphone (Valve Index)".into(), default: true }];
     let now_ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0);
     idle.steamvr.calibration = Some(CalibrationInfo { head_height_m: 1.63, arm_span_m: 1.41, devices: 6, utc_ms: now_ms - 7 * 60_000 });
     let mut recording = idle.clone();
@@ -3521,7 +3472,7 @@ fn overlay_menu_shots(out: &std::path::Path, snap: &Snapshot) -> anyhow::Result<
     use orbiters_n4n0_core::menu::Target;
     let backend: Ctl = std::sync::Arc::new(Still);
     let mut snap = snap.clone();
-    snap.n4n0.captures = sample_captures();
+    *snap.n4n0.captures = sample_captures();
     let mut canvas = crate::overlay::Canvas::new(1024, 576);
     let mut host = MenuHost::new(canvas.ctx().clone());
     for row in &snap.n4n0.captures.history {
@@ -3562,13 +3513,13 @@ fn overlay_menu_shots(out: &std::path::Path, snap: &Snapshot) -> anyhow::Result<
     // Share to …: the friends come with the next snapshot, two are chosen.
     press(&mut host, &snap, Target::ShareTo(0));
     shoot(&host, "overlay-menu-share-to-loading", Target::FindFriend)?;
-    snap.n4n0.friends = Friends::ready(sample_friends());
+    *snap.n4n0.friends = Friends::ready(sample_friends());
     host.follow(&snap);
     press(&mut host, &snap, Target::Friend(0));
     press(&mut host, &snap, Target::Friend(4));
     shoot(&host, "overlay-menu-share-to", Target::SendShare)?;
     press(&mut host, &snap, Target::SendShare);
-    snap.n4n0.friends = Friends::None;
+    *snap.n4n0.friends = Friends::None;
     // The flagged capture's Share publicly: the warning first.
     press(&mut host, &snap, Target::SharePublic(2));
     shoot(&host, "overlay-menu-explicit", Target::ShareAnyway)?;

@@ -2,6 +2,12 @@
 //! and the VR overlay. JSON lines over a loopback TCP socket; a client proves it was started by the service with
 //! the token the service passed on its command line. The service never loads a GPU driver, so its footprint while
 //! it waits in the tray stays small; a window exists only while it is shown.
+//!
+//! The state travels as what changed. A link's first line is the whole [`Snapshot`]; from then on, for each state the
+//! service publishes, it writes the parts that differ from the state it wrote last ([`write_state`]: the avatar's
+//! speed is 90 bytes, not the 74 kB of everything), and the client puts them into its copy ([`Client`]), which is then
+//! the state the service published, whole. An unreadable line ends the link immediately, just as service EOF does.
+//! A newly made link starts with the whole state. Service and clients are one program: there is no other version to support.
 
 use crate::controller::Notice;
 use crate::state::{MapsMine, Snapshot};
@@ -272,33 +278,71 @@ pub fn write_line<T: Serialize>(w: &mut impl Write, msg: &T) -> std::io::Result<
     w.flush()
 }
 
-/// [`ToClient::Snapshot`] written from a shared snapshot, without copying it, and made into JSON once however many
-/// links write it: the window and the overlay are handed the same published snapshot.
-pub fn write_snapshot(w: &mut impl Write, snapshot: &Arc<Snapshot>) -> std::io::Result<()> {
+/// How a line of changed parts starts; `{…}}` follows, the parts by name ([`orbiters_core::slice::changes_between`]).
+/// Not a [`ToClient`]: the client reads the parts straight into its snapshot, not into a message first.
+const CHANGES: &str = r#"{"type":"changes","parts":"#;
+
+/// The state `snapshot` written to a link that last wrote `sent`: the parts that changed since, or the whole
+/// [`ToClient::Snapshot`] to a link that wrote none yet. A line is written for every state, changed or not: the client
+/// hears of every publish, as it did when each one was the whole state.
+///
+/// Made into JSON once however many links write it: the window and the overlay are handed the same published
+/// snapshot, and while both keep up they last wrote the same one.
+pub fn write_state(w: &mut impl Write, sent: Option<&Arc<Snapshot>>, snapshot: &Arc<Snapshot>) -> std::io::Result<()> {
     #[derive(Serialize)]
     #[serde(tag = "type", rename_all = "snake_case")]
     enum Out<'a> {
         Snapshot { snapshot: &'a Snapshot },
     }
-    // The last snapshot written and its line. While it is alive the address names it: a snapshot published later is
-    // another allocation.
-    type Written = Option<(std::sync::Weak<Snapshot>, Arc<[u8]>)>;
-    static LAST: Mutex<Written> = Mutex::new(None);
+    /// The last line made: from which state (none: the whole one) to which. While a snapshot is alive its address
+    /// names it: one published later is another allocation.
+    struct Written {
+        since: Option<std::sync::Weak<Snapshot>>,
+        now: std::sync::Weak<Snapshot>,
+        line: Arc<[u8]>,
+    }
+    fn is(weak: &std::sync::Weak<Snapshot>, snapshot: &Arc<Snapshot>) -> bool {
+        weak.strong_count() > 0 && std::sync::Weak::as_ptr(weak) == Arc::as_ptr(snapshot)
+    }
+    static LAST: Mutex<Option<Written>> = Mutex::new(None);
     let line = {
         let mut last = LAST.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        match last.as_ref().filter(|(written, _)| written.strong_count() > 0 && std::sync::Weak::as_ptr(written) == Arc::as_ptr(snapshot)) {
-            Some((_, line)) => line.clone(),
+        let made = last.as_ref().filter(|made| {
+            is(&made.now, snapshot)
+                && match (&made.since, sent) {
+                    (None, None) => true,
+                    (Some(since), Some(sent)) => is(since, sent),
+                    _ => false,
+                }
+        });
+        match made {
+            Some(made) => made.line.clone(),
             None => {
-                let mut line = serde_json::to_vec(&Out::Snapshot { snapshot }).map_err(std::io::Error::other)?;
+                let mut line = match sent {
+                    None => serde_json::to_vec(&Out::Snapshot { snapshot }).map_err(std::io::Error::other)?,
+                    Some(sent) => {
+                        let (parts, _) = orbiters_core::slice::changes_between(&**snapshot, &**sent).map_err(std::io::Error::other)?;
+                        let mut line = Vec::with_capacity(CHANGES.len() + parts.len() + 2);
+                        line.extend_from_slice(CHANGES.as_bytes());
+                        line.extend_from_slice(&parts);
+                        line.push(b'}');
+                        line
+                    }
+                };
                 line.push(b'\n');
                 let line: Arc<[u8]> = line.into();
-                *last = Some((Arc::downgrade(snapshot), line.clone()));
+                *last = Some(Written { since: sent.map(Arc::downgrade), now: Arc::downgrade(snapshot), line: line.clone() });
                 line
             }
         }
     };
     w.write_all(&line)?;
     w.flush()
+}
+
+/// The changed parts of a line [`write_state`] wrote as such (a JSON object), or `None` for any other line.
+pub(crate) fn changed_parts(line: &str) -> Option<&str> {
+    line.strip_prefix(CHANGES)?.strip_suffix('}')
 }
 
 /// Reads one line of at most `max` bytes (without its end). `Ok(None)` at the end of the stream; a longer line is an
@@ -351,10 +395,62 @@ impl Endpoint {
     }
 }
 
+/// `--say-state` (a switch of `--link-smoke`): a client prints a digest of the state its link holds whenever it takes
+/// one, and says when it could not read a line and when its link ended.
+pub static SAY_STATE: AtomicBool = AtomicBool::new(false);
+
+/// A short name for a state, the same for equal states in any process of this program: what `--link-smoke` compares
+/// between the service and the processes it started. Its JSON with every object's keys in order, hashed.
+pub fn digest(snapshot: &Snapshot) -> String {
+    fn ordered(value: &serde_json::Value, out: &mut String) {
+        match value {
+            serde_json::Value::Object(fields) => {
+                let mut fields: Vec<_> = fields.iter().collect();
+                fields.sort_by(|a, b| a.0.cmp(b.0));
+                out.push('{');
+                for (name, value) in fields {
+                    out.push_str(name);
+                    out.push(':');
+                    ordered(value, out);
+                    out.push(',');
+                }
+                out.push('}');
+            }
+            serde_json::Value::Array(items) => {
+                out.push('[');
+                for item in items {
+                    ordered(item, out);
+                    out.push(',');
+                }
+                out.push(']');
+            }
+            other => out.push_str(&other.to_string()),
+        }
+    }
+    let mut text = String::new();
+    ordered(&serde_json::to_value(snapshot).unwrap_or_default(), &mut text);
+    // FNV-1a, 64 bits.
+    let hash = text.bytes().fold(0xcbf2_9ce4_8422_2325u64, |hash, byte| (hash ^ byte as u64).wrapping_mul(0x0000_0100_0000_01b3));
+    format!("{hash:016x}")
+}
+
+/// The state as a client holds it.
+struct Held {
+    /// What the service published, as its link last said: the snapshot it sent first, with every change since.
+    service: Arc<Snapshot>,
+    /// What the interface reads: `service`, or that with a change shown before the service confirms it
+    /// ([`Client::update_local`]), until the service's next line.
+    shown: Arc<Snapshot>,
+    /// Terminal for this connection; protected by the same lock as both state replacement paths.
+    closed: bool,
+}
+
 /// What a client keeps of the service: the latest snapshot, queued notices and requests for the window.
 pub struct Client {
     writer: Mutex<TcpStream>,
-    snapshot: Mutex<Arc<Snapshot>>,
+    state: Mutex<Held>,
+    /// Shutdown must never wait behind a blocked command writer.
+    shutdown: TcpStream,
     notices: Mutex<Vec<Notice>>,
     library: AtomicU64,
     worker_log: Mutex<Option<Vec<String>>>,
@@ -364,7 +460,6 @@ pub struct Client {
     /// A page asked for with the last Show.
     show_page: Mutex<Option<String>>,
     close: AtomicBool,
-    connected: AtomicBool,
     /// The window is behind VRChat ([`Client::set_background`]).
     background: AtomicBool,
     repaint: Mutex<Option<egui::Context>>,
@@ -401,7 +496,8 @@ impl Client {
         };
         let client = Arc::new(Self {
             writer: Mutex::new(writer),
-            snapshot: Mutex::new(first),
+            state: Mutex::new(Held { service: first.clone(), shown: first, closed: false }),
+            shutdown: reader.get_ref().try_clone()?,
             notices: Mutex::new(Vec::new()),
             library: AtomicU64::new(0),
             worker_log: Mutex::new(None),
@@ -410,18 +506,31 @@ impl Client {
             show: AtomicBool::new(false),
             show_page: Mutex::new(None),
             close: AtomicBool::new(false),
-            connected: AtomicBool::new(true),
             background: AtomicBool::new(false),
             repaint: Mutex::new(None),
         });
+        client.say_state();
         let c = client.clone();
         std::thread::Builder::new().name("service-link".into()).spawn(move || {
             for line in reader.lines() {
                 let Ok(line) = line else { break };
-                let Ok(msg) = serde_json::from_str::<ToClient>(&line) else { continue };
+                if let Some(parts) = changed_parts(&line) {
+                    // The state changed: its parts, and a frame for them as for a whole snapshot.
+                    if c.take_changes(parts) {
+                        c.repaint(true);
+                    } else {
+                        break;
+                    }
+                    continue;
+                }
+                let Ok(msg) = serde_json::from_str::<ToClient>(&line) else {
+                    // It may have been the state: what this client holds can no longer be trusted to be it.
+                    c.disconnect();
+                    break;
+                };
                 let news = matches!(msg, ToClient::Snapshot { .. });
                 match msg {
-                    ToClient::Snapshot { snapshot } => *c.snapshot.lock().unwrap() = Arc::new(*snapshot),
+                    ToClient::Snapshot { snapshot } => c.take_snapshot(Arc::new(*snapshot)),
                     ToClient::Notice { notice } => c.notices.lock().unwrap().push(notice),
                     ToClient::Library { version } => c.library.store(version, Ordering::Relaxed),
                     ToClient::WorkerLog { lines } => *c.worker_log.lock().unwrap() = Some(lines),
@@ -443,14 +552,17 @@ impl Client {
                 }
                 c.repaint(news);
             }
-            // The service is gone: close too.
-            c.connected.store(false, Ordering::Relaxed);
-            c.vrchat_data.lock().unwrap().clear();
-            c.close.store(true, Ordering::Relaxed);
-            c.repaint(false);
-            leave_soon();
+            c.disconnect();
         })?;
         Ok(client)
+    }
+
+    /// With `--say-state`: the state the link holds, by its digest.
+    fn say_state(&self) {
+        if SAY_STATE.load(Ordering::Relaxed) {
+            let held = self.state.lock().unwrap().service.clone();
+            println!("state {}", digest(&held));
+        }
     }
 
     /// A frame for what came; for the service's news, while the window is behind VRChat, at most [`BACKGROUND_PACE`]
@@ -476,21 +588,78 @@ impl Client {
     }
 
     pub fn send(&self, msg: &ToService) {
-        if self.connected.load(Ordering::Relaxed) {
-            let _ = write_line(&mut *self.writer.lock().unwrap(), msg);
+        let mut writer = self.writer.lock().unwrap();
+        if !self.state.lock().unwrap().closed {
+            let _ = write_line(&mut *writer, msg);
         }
     }
 
     pub fn snapshot(&self) -> Arc<Snapshot> {
-        self.snapshot.lock().unwrap().clone()
+        self.state.lock().unwrap().shown.clone()
     }
 
-    /// Shows a change before the service confirms it (the service's next snapshot replaces it).
+    /// Shows a change before the service confirms it. The service's next state replaces it, whatever that state
+    /// changed: what is shown is then the service's again, whole, as when every state came as a whole snapshot.
     pub fn update_local(&self, f: impl FnOnce(&mut Snapshot)) {
-        let mut guard = self.snapshot.lock().unwrap();
-        let mut s = (**guard).clone();
+        let mut held = self.state.lock().unwrap();
+        if held.closed { return; }
+        let mut s = (*held.shown).clone();
         f(&mut s);
-        *guard = Arc::new(s);
+        held.shown = Arc::new(s);
+    }
+
+    /// Whole state replacement and closure are serialized. A terminated connection can never be revived by a
+    /// late readable line; a new connection gets its own full baseline in connect.
+    fn take_snapshot(&self, snapshot: Arc<Snapshot>) {
+        let mut held = self.state.lock().unwrap();
+        if held.closed { return; }
+        held.service = snapshot.clone();
+        held.shown = snapshot;
+        drop(held);
+        self.say_state();
+    }
+
+    /// Apply atomically, or terminate this connection under the very same lock. There is no retry or recovery worker.
+    fn take_changes(&self, parts: &str) -> bool {
+        let mut held = self.state.lock().unwrap();
+        if held.closed { return false; }
+        let mut next = (*held.service).clone();
+        if orbiters_core::slice::apply_changes(&mut next, parts).is_err() {
+            self.close_locked(&mut held);
+            drop(held);
+            self.finish_close();
+            return false;
+        }
+        let next = Arc::new(next);
+        held.service = next.clone();
+        held.shown = next;
+        drop(held);
+        self.say_state();
+        true
+    }
+
+    /// Record the terminal decision before waking socket users. This handle is independent of the writer mutex.
+    fn close_locked(&self, held: &mut Held) {
+        held.closed = true;
+        self.close.store(true, Ordering::Relaxed);
+        let _ = self.shutdown.shutdown(std::net::Shutdown::Both);
+    }
+
+    /// EOF, unreadable input and I/O errors all use exactly the same disconnect path.
+    fn disconnect(&self) {
+        let mut held = self.state.lock().unwrap();
+        if held.closed { return; }
+        self.close_locked(&mut held);
+        drop(held);
+        self.finish_close();
+    }
+
+    fn finish_close(&self) {
+        // Cancels waiting receivers, not work the service has already accepted. Nothing is replayed.
+        self.vrchat_data.lock().unwrap().clear();
+        if SAY_STATE.load(Ordering::Relaxed) { println!("link ended"); }
+        self.repaint(false);
+        leave_soon();
     }
 
     pub fn take_notices(&self) -> Vec<Notice> {
@@ -537,7 +706,7 @@ impl Client {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::controller::NoticeKind;
     use std::net::TcpListener;
@@ -623,8 +792,8 @@ mod tests {
     fn a_snapshot_written_to_several_links_is_the_same_line() {
         let first = Arc::new(Snapshot::new(Settings::default()));
         let (mut a, mut b) = (Vec::new(), Vec::new());
-        write_snapshot(&mut a, &first).unwrap();
-        write_snapshot(&mut b, &first).unwrap();
+        write_state(&mut a, None, &first).unwrap();
+        write_state(&mut b, None, &first).unwrap();
         assert_eq!(a, b);
         assert!(matches!(serde_json::from_slice::<ToClient>(&a).unwrap(), ToClient::Snapshot { .. }));
         // A later snapshot is written as it is, not as the one before.
@@ -632,10 +801,286 @@ mod tests {
         changed.capture.trail = vec![[1.0, 2.0, 3.0]];
         let later = Arc::new(changed);
         let mut c = Vec::new();
-        write_snapshot(&mut c, &later).unwrap();
+        write_state(&mut c, None, &later).unwrap();
         match serde_json::from_slice::<ToClient>(&c).unwrap() {
             ToClient::Snapshot { snapshot } => assert_eq!(snapshot.capture.trail, vec![[1.0, 2.0, 3.0]]),
             other => panic!("{other:?}"),
+        }
+        // To a link that wrote the first: only what differs, the same line for every such link, and another line for
+        // a link that last wrote something else.
+        let (mut d, mut e, mut f) = (Vec::new(), Vec::new(), Vec::new());
+        write_state(&mut d, Some(&first), &later).unwrap();
+        write_state(&mut e, Some(&first), &later).unwrap();
+        assert_eq!(d, e);
+        let text = String::from_utf8(d).unwrap();
+        assert!(text.starts_with(r#"{"type":"changes","parts":{"capture":{"#) && text.ends_with("}}\n"), "{text}");
+        assert!(!text.contains("settings"), "what did not change does not travel: {text}");
+        write_state(&mut f, Some(&later), &later).unwrap();
+        assert_eq!(String::from_utf8(f).unwrap(), "{\"type\":\"changes\",\"parts\":{}}\n", "a publish that changed nothing is still told");
+    }
+
+    /// A stand-in service for one client: says hello back with `first`, then hands the test the stream to write on.
+    fn linked(first: &Arc<Snapshot>) -> (Arc<Client>, TcpStream, BufReader<TcpStream>) {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let endpoint = Endpoint { port: listener.local_addr().unwrap().port(), token: "state".into() };
+        let first = first.clone();
+        let server = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut writer = stream;
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            write_state(&mut writer, None, &first).unwrap();
+            (writer, reader)
+        });
+        let client = Client::connect(&endpoint, Role::Overlay).unwrap();
+        let (writer, reader) = server.join().unwrap();
+        (client, writer, reader)
+    }
+
+    /// Waits up to two seconds for `done`.
+    fn until(done: impl Fn() -> bool) -> bool {
+        let started = Instant::now();
+        while !done() && started.elapsed() < Duration::from_secs(2) {
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        done()
+    }
+
+    /// A snapshot as a value that compares whole, whatever order a map of its settings is walked in.
+    fn json(snapshot: &Snapshot) -> serde_json::Value {
+        serde_json::to_value(snapshot).unwrap()
+    }
+
+    /// A state with something in every kind of part, changed a little more at each `round`: what the service's own
+    /// changes look like (a plain value, a slice, a part inside a part, a list that cannot be compared).
+    fn changed(snapshot: &Snapshot, round: u32) -> Snapshot {
+        let mut s = snapshot.clone();
+        match round % 9 {
+            0 => s.vrchat.motion = Some(crate::state::AvatarMotion { in_station: false, seated: false, speed: round as f32 * 0.25 }),
+            1 => s.n4n0.panel = Some(format!("N4N0's panel, round {round}")),
+            2 => s.n4n0.lines.push(crate::state::N4n0Line { who: crate::state::N4n0Who::N4n0, text: format!("line {round}"), at_ms: round as u64, streaming: false }),
+            3 => {
+                s.vrchat.world.players.insert(format!("usr_{round}"), format!("Someone {round}"));
+            }
+            4 => s.settings.walk_boost.strength = (round % 10) as f32 / 10.0,
+            5 => s.projects_changed += 1,
+            6 => s.capture.trail.push([round as f32, 1.0, 2.0]),
+            7 => s.capture_shares.push(crate::controller::shares::ShareJob { id: format!("job-{round}"), key: "capture".into(), stage: Default::default(), outcome: None, update: false }),
+            _ => {
+                // Two parts that go together: the account and what it may do.
+                s.account.state = crate::state::AccountState::SignedIn { username: format!("member-{round}") };
+                s.bridge.allowed = round.is_multiple_of(2);
+                s.n4n0.calls.picked = round as usize;
+            }
+        }
+        s
+    }
+
+    /// Every state the service publishes reaches a client as that state, whole, however many of them the link skipped
+    /// in between, and the parts that did not change are the client's own parts still (nothing was read for them).
+    #[test]
+    fn a_client_holds_every_state_whole_from_the_changes_alone() {
+        let mut published = Arc::new(Snapshot::new(Settings::default()));
+        let (client, mut writer, _reader) = linked(&published);
+        assert_eq!(json(&client.snapshot()), json(&published));
+        let mut sent = published.clone();
+        for round in 0..400u32 {
+            published = Arc::new(changed(&published, round));
+            // A slow link: it writes one state in three (the mailbox keeps only the newest), from the one it last wrote.
+            if round % 3 != 0 && round % 7 != 0 {
+                continue;
+            }
+            let before = client.snapshot();
+            write_state(&mut writer, Some(&sent), &published).unwrap();
+            sent = published.clone();
+            let wanted = json(&published);
+            assert!(until(|| json(&client.snapshot()) == wanted), "round {round}: the client holds\n{}\nnot\n{wanted}", json(&client.snapshot()));
+            let after = client.snapshot();
+            assert!(!Arc::ptr_eq(&before, &after), "a new snapshot for every state told");
+            // What these rounds never touch was sent once, with the first snapshot.
+            assert!(orbiters_core::slice::Slice::same(&before.storage, &after.storage) && orbiters_core::slice::Slice::same(&before.n4n0.videos, &after.n4n0.videos));
+        }
+        // A state told again with nothing changed is a new snapshot all the same (a frame is drawn for it), sharing
+        // every part.
+        let before = client.snapshot();
+        write_state(&mut writer, Some(&sent), &published).unwrap();
+        assert!(until(|| !Arc::ptr_eq(&before, &client.snapshot())));
+        let after = client.snapshot();
+        assert!(orbiters_core::slice::Slice::same(&before.settings, &after.settings) && orbiters_core::slice::Slice::same(&before.vrchat.world, &after.vrchat.world));
+        assert_eq!(json(&after), json(&published));
+    }
+
+    /// A change shown before the service confirms it lasts until the service's next state, whatever that state
+    /// changed: a refusal that changes nothing of that part still puts back what the service holds.
+    #[test]
+    fn what_a_window_shows_ahead_goes_with_the_service_s_next_state() {
+        let first = Arc::new(Snapshot::new(Settings::default()));
+        let (client, mut writer, _reader) = linked(&first);
+        client.update_local(|s| s.vrchat_login.busy = true);
+        client.update_local(|s| s.account.state = crate::state::AccountState::SigningIn);
+        assert!(client.snapshot().vrchat_login.busy && client.snapshot().account.state == crate::state::AccountState::SigningIn);
+        // The service publishes something else entirely.
+        let mut next = (*first).clone();
+        next.n4n0.afk = true;
+        let next = Arc::new(next);
+        write_state(&mut writer, Some(&first), &next).unwrap();
+        assert!(until(|| client.snapshot().n4n0.afk));
+        let shown = client.snapshot();
+        assert!(!shown.vrchat_login.busy, "the service never said busy");
+        assert_eq!(shown.account.state, crate::state::AccountState::Unknown);
+        // Even a publish that changed nothing does.
+        client.update_local(|s| s.vrchat_login.busy = true);
+        write_state(&mut writer, Some(&next), &next).unwrap();
+        assert!(until(|| !client.snapshot().vrchat_login.busy));
+    }
+
+    /// A state in which every part differs from a new snapshot's: the busy evening of `--publish-cost`, and the rest.
+    pub(crate) fn every_part_set() -> Snapshot {
+        use crate::state::*;
+        let plain = Snapshot::new(Settings::default());
+        let mut s = crate::controller::publish_cost::busy_evening();
+        s.version = "another version".into();
+        s.vrchat.log_found = !plain.vrchat.log_found;
+        s.vrchat.remote = true;
+        s.lan.link = LanLink::Looking;
+        s.capture.state = CaptureState::Recording;
+        s.capture.trail = vec![[1.0, 2.0, 3.0]];
+        s.settings.walk_boost.strength += 0.25;
+        s.reconstruction = Some(ReconstructionJob::new(PathBuf::from("a session"), true));
+        s.vrchat_login.revision = 3;
+        s.capture_shares.push(crate::controller::shares::ShareJob { id: "job".into(), key: "capture".into(), stage: Default::default(), outcome: None, update: true });
+        s.update.channel = "another channel".into();
+        s.cleanup = Some(CleanupJob::default());
+        s.vr_audio.last = Some(crate::controller::vr_audio::Event { utc_ms: 1, text: "Set to the headset's".into(), error: false });
+        s.bridge.allowed = true;
+        s.orbit.note = Some("in the way".into());
+        s.worn_kit = Some(true);
+        s.camera_open_said = Some(false);
+        s.projects_changed = 5;
+        let o = &mut s.n4n0;
+        o.face = N4n0Face::Happy;
+        o.listening = true;
+        o.thinking = true;
+        o.afk = true;
+        o.confirmations = vec![N4n0Confirmation { id: "c1".into(), title: "Publish".into(), summary: "Saturday".into(), approve_url: "https://orbiters.cc/confirm/c1".into() }];
+        o.quota = Some(orbiters_n4n0_core::assistant::Quota { used: 13, limit: 80, resets_at: None, own_key: false });
+        o.test_face = Some(N4n0Face::Annoyed);
+        o.test_cycle = true;
+        o.test_afk = true;
+        o.test_hidden = true;
+        o.test_pictures = true;
+        o.desktop_mode = true;
+        o.menu_request = 4;
+        o.menu_toggle = true;
+        o.dictation = Some((2, "play some music".into()));
+        o.photo_countdown = Some(3);
+        o.photo_wait = Some(orbiters_n4n0::status::PhotoWait::Camera);
+        o.light = Some(N4n0Light { on: true, color: 2, level: 0.5 });
+        o.card = Some(orbiters_n4n0::status::CardView { title: "A link".into(), link: "https://orbiters.cc".into(), left: 40 });
+        o.tracking = Some(orbiters_n4n0::status::TrackingView { on: true, ms: [4, 8, 16], note: "smoothing".into() });
+        o.suggestion = Some((1, None));
+        o.keys = vec![(7, orbiters_n4n0_core::menu::KeyInput::Enter)];
+        o.world_video = Some(("https://youtu.be/36YnV9STBqc".into(), Some("A song".into()), Some(1_762_800_000)));
+        o.photo_note = Some((2, "Open the camera before".into()));
+        o.invite = Some((1, orbiters_n4n0_core::menu::InviteAnswer::Sent));
+        o.qr.note = "Turn the stream camera on".into();
+        o.mirror.zoom = 3;
+        o.calls.picked = 2;
+        s
+    }
+
+    /// Review S2: every part the wire declares, changed alone to something it is not by default, is the one part a link
+    /// writes and is what a client then holds. A part left off the wire, or travelling under a name the snapshot's own
+    /// JSON does not have, cannot pass; nor can a part added later that this fixture leaves as it is by default.
+    #[test]
+    fn every_part_of_the_state_travels_alone() {
+        use orbiters_core::slice::{apply_changes, Parts};
+        use serde_json::Value;
+        let plain = Arc::new(Snapshot::new(Settings::default()));
+        let (plain_json, full_json) = (json(&plain), json(&every_part_set()));
+        let mut names = Vec::new();
+        plain.part_names("", &mut names);
+        // The names are the snapshot's own JSON: each field is a part, or a state whose fields are parts.
+        let fields = |at: &Value, prefix: &str| at.as_object().unwrap().keys().map(|key| format!("{prefix}{key}")).collect::<Vec<_>>();
+        let mut expected = Vec::new();
+        for field in fields(&plain_json, "") {
+            if field == "vrchat" || field == "n4n0" {
+                expected.extend(fields(&plain_json[field.as_str()], &format!("{field}.")));
+            } else {
+                expected.push(field);
+            }
+        }
+        let (mut declared, mut wanted) = (names.clone(), expected);
+        declared.sort();
+        wanted.sort();
+        assert_eq!(declared, wanted, "the parts declared are the snapshot's fields");
+        let at = |json: &Value, name: &str| name.split('.').fold(json, |at, key| &at[key]).clone();
+        let mut as_by_default = Vec::new();
+        for name in &names {
+            let value = at(&full_json, name);
+            if value == at(&plain_json, name) {
+                as_by_default.push(name.clone());
+                continue;
+            }
+            // The plain state with this one part changed…
+            let mut one = (*plain).clone();
+            apply_changes(&mut one, &serde_json::json!({ name.as_str(): value }).to_string()).unwrap();
+            let one = Arc::new(one);
+            assert_eq!(at(&json(&one), name), value, "{name}: read into the state");
+            // …written by a link that last wrote the plain one: that part, and no other…
+            let mut line = Vec::new();
+            write_state(&mut line, Some(&plain), &one).unwrap();
+            let line = String::from_utf8(line).unwrap();
+            let parts = changed_parts(line.trim_end()).unwrap_or_else(|| panic!("{name}: {line}"));
+            let written: Value = serde_json::from_str(parts).unwrap();
+            assert_eq!(written.as_object().unwrap().keys().collect::<Vec<_>>(), [name], "{name}: the one part written");
+            // …and read by a client that holds the plain one, which then holds the same state, whole.
+            let mut held = (*plain).clone();
+            apply_changes(&mut held, parts).unwrap();
+            assert_eq!(json(&held), json(&one), "{name}: the client holds it");
+        }
+        assert!(as_by_default.is_empty(), "the fixture leaves these parts as a new snapshot has them: {as_by_default:?}");
+        assert!(names.len() > 70, "{} parts", names.len());
+    }
+
+    /// Neither a held writer mutex nor late valid snapshots can prevent or undo terminal closure.
+    #[test]
+    pub(crate) fn unreadable_changes_close_without_the_writer_and_never_revive() {
+        let first = Arc::new(Snapshot::new(Settings::default()));
+        let (client, _writer, mut reader) = linked(&first);
+        reader.get_mut().set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+        let writer_held = client.writer.lock().unwrap();
+        let c = client.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let task = std::thread::spawn(move || {
+            assert!(!c.take_changes(r#"{"n4n0.afk":true,"osc":false}"#));
+            tx.send(()).unwrap();
+        });
+        rx.recv_timeout(Duration::from_secs(10)).expect("closure must not need the held writer");
+        assert!(client.should_close());
+        assert_eq!(json(&client.snapshot()), json(&first), "no partially applied state");
+        let mut later = (*first).clone(); later.n4n0.afk = true;
+        client.take_snapshot(Arc::new(later));
+        assert!(!client.take_changes(r#"{"n4n0.afk":true}"#));
+        assert_eq!(json(&client.snapshot()), json(&first), "late lines cannot revive a closed link");
+        let mut line = String::new();
+        assert_eq!(reader.read_line(&mut line).unwrap(), 0);
+        drop(writer_held);
+        task.join().unwrap();
+    }
+
+    #[test]
+    pub(crate) fn unreadable_wire_lines_end_the_link() {
+        for line in [b"not json\n".as_slice(), b"{\"type\":\"changes\",\"parts\":{\"osc\":7}}\n", b"{\"type\":\"snapshot\",\"snapshot\":{} }\n"] {
+            let first = Arc::new(Snapshot::new(Settings::default()));
+            let (client, mut writer, mut reader) = linked(&first);
+            reader.get_mut().set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+            writer.write_all(line).unwrap();
+            let mut answer = String::new();
+            assert_eq!(reader.read_line(&mut answer).unwrap(), 0, "no resync command is sent");
+            assert!(client.should_close());
+            assert_eq!(json(&client.snapshot()), json(&first));
         }
     }
 

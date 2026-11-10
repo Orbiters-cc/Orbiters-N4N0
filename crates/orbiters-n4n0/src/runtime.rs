@@ -24,6 +24,7 @@ use orbiters_contracts::n4n0::{self as contract, params};
 use orbiters_core::account::{Api, Server};
 use orbiters_core::osc::{OscValue, AVATAR_CHANGE, AVATAR_NAME, CAPTURE_PARAMETERS, PARAMETERS_PREFIX};
 use orbiters_core::settings::{N4n0Settings, PictureMode, Pin, Settings};
+use orbiters_core::slice::Slice;
 use orbiters_i18n::{mark, tr, tr_latin};
 use orbiters_n4n0_core::assistant::{self, AssistantError, Display, Event, Input, Quota, Request, ToolCall, ToolResult};
 use orbiters_n4n0_core::context::{self, Moment, NAME_CHARS, URL_CHARS};
@@ -148,7 +149,9 @@ pub(crate) struct N4n0Runtime {
     pub(crate) conversation: Vec<Value>,
     /// Bumped by New conversation: a turn started before it never writes its conversation back.
     generation: u64,
-    lines: Vec<N4n0Line>,
+    /// The conversation, the saved videos' list and the processes' footprint as the apps show them: slices, so that making
+    /// the state to publish ([`N4n0Runtime::status`]) copies none of them.
+    lines: Slice<Vec<N4n0Line>>,
     confirmations: Vec<N4n0Confirmation>,
     /// What the assistant asked to do that waits for the owner's yes, since when, and its number.
     pending: Vec<Pending>,
@@ -162,7 +165,7 @@ pub(crate) struct N4n0Runtime {
     /// The saved videos could not be read at start-up: saving would replace them, so nothing is saved until they can.
     videos_unreadable: Option<String>,
     pub(crate) voice: VoiceStatus,
-    resources: Vec<ProcessUsage>,
+    resources: Slice<Vec<ProcessUsage>>,
     last_avatar_check: Option<Instant>,
     /// VRChat's tree said nothing of the avatar's parameters when it was last read (not found yet, or late).
     pub(crate) tree_unknown: bool,
@@ -216,8 +219,8 @@ pub(crate) struct N4n0Runtime {
     pub(crate) qr: crate::qr::QrRuntime,
     /// The 3D captures as the app last handed them, and the VRChat friends read for Share to … (captures.rs), the number
     /// of the last read asked for.
-    pub(crate) captures: orbiters_n4n0_core::captures::CapturesView,
-    pub(crate) friends: orbiters_n4n0_core::captures::Friends,
+    pub(crate) captures: Slice<orbiters_n4n0_core::captures::CapturesView>,
+    pub(crate) friends: Slice<orbiters_n4n0_core::captures::Friends>,
     pub(crate) friends_asked: u32,
     /// The worlds' feedback as the app last handed it (feedback.rs).
     pub(crate) feedback: orbiters_n4n0_core::feedback::FeedbackView,
@@ -2364,9 +2367,7 @@ impl N4n0 {
     pub fn set_resources(&self, usage: Vec<ProcessUsage>) {
         let changed = {
             let mut rt = self.n4n0.lock().unwrap();
-            let changed = rt.resources != usage;
-            rt.resources = usage;
-            changed
+            rt.resources.set(usage)
         };
         if changed {
             self.publish();

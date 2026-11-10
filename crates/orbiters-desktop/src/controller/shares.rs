@@ -413,6 +413,81 @@ pub fn iso(unix: u64) -> String {
 pub fn instance_at(history: &visited::History, world: &str, taken: u64) -> Option<String> {
     history.instances.iter().filter(|i| i.at <= taken).max_by_key(|i| i.at).filter(|i| i.world_id == world).map(|i| i.instance.clone())
 }
+/// A number that changes when what [`local_entries_with_folders`] reads beyond the pictures' index does: the capture
+/// folders (one added, removed, or written in), the visit history (as [`visited::History::revision`]: not how far the
+/// logs were read), and this account's upload records. Cheap enough to ask every few seconds on a thread: it lists the
+/// captures' folder and asks seven dates a capture (no file of a capture is opened), and reads the history only when
+/// its file changed. Measured on the library of the computer it was written on (`orbiters-desktop --idle-frames
+/// --local-revision`): see the stream's report. The app's own changes say so themselves (the library's version);
+/// this is for what changes them from outside, another program deleting a capture or the service writing the history.
+///
+/// A file of a capture that the list does not read (its frames, its video, its splats) changes nothing here, and a
+/// file written again with the same date and the same length is not seen.
+#[derive(Default)]
+pub struct LocalRevision {
+    /// The history file as it was when last read (its date and length), and its visits' revision then.
+    history: Option<((Option<std::time::SystemTime>, u64), u64)>,
+}
+
+impl LocalRevision {
+    /// The revision now, for the captures under `root` and the account of `server`.
+    pub fn look(&mut self, root: &Path, server: Server) -> u64 {
+        self.look_at(root, &visited::history_file(), records_path(server).ok().as_deref())
+    }
+
+    /// How many captures a look counts under `root` (the folders with a manifest).
+    pub fn captures(root: &Path) -> usize {
+        std::fs::read_dir(root).into_iter().flatten().flatten().filter(|e| e.path().join(orbiters_core::contracts::manifest::MANIFEST_FILE).is_file()).count()
+    }
+
+    /// [`LocalRevision::look`] with the history and the upload records at these files.
+    pub fn look_at(&mut self, root: &Path, history: &Path, records: Option<&Path>) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let stamp = |path: &Path| std::fs::metadata(path).ok().map(|m| (m.modified().ok(), m.len()));
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        // The captures: which folders there are, and for each what a change in it moves. Its own date and its
+        // reconstruction's folder's: a file added, removed or written through a rename, as the app's files are
+        // (its thumbnail, its keyframes trimmed, a result). And the date and length of each file the list reads of
+        // it, should one be written in place: its manifest, what it shows, how it was taken, the reconstruction's
+        // report and the splats' edits.
+        let mut captures: Vec<_> = std::fs::read_dir(root)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|e| e.path())
+            .filter_map(|dir| {
+                let manifest = stamp(&dir.join(orbiters_core::contracts::manifest::MANIFEST_FILE))?;
+                let result = orbiters_core::reconstruction::result_dir(&dir);
+                let read = [
+                    dir.join(orbiters_core::explicit::FILE),
+                    dir.join(orbiters_core::picture::FILE),
+                    result.join(orbiters_core::reconstruction::REPORT_FILE),
+                    result.join(orbiters_core::reconstruction::EDIT_FILE),
+                ]
+                .map(|file| stamp(&file));
+                Some((dir, stamp(&result).map(|s| s.0), manifest, read))
+            })
+            .map(|(dir, result, manifest, read)| (stamp(&dir).map(|s| s.0), manifest, result, read, dir))
+            .collect();
+        captures.sort_by(|a, b| a.4.cmp(&b.4));
+        captures.hash(&mut hasher);
+        // The history's file is written every few seconds while VRChat runs: read only when it was, and counted by
+        // what it says of the visits.
+        let written = stamp(history).unwrap_or_default();
+        let visits = match self.history {
+            Some((at, visits)) if at == written => visits,
+            _ => {
+                let visits = visited::History::load(history).revision();
+                self.history = Some((written, visits));
+                visits
+            }
+        };
+        visits.hash(&mut hasher);
+        records.and_then(stamp).hash(&mut hasher);
+        hasher.finish()
+    }
+}
+
 pub fn local_entries(root: &Path, server: Server) -> Vec<Entry> {
     local_entries_with_folders(root, server, &orbiters_core::settings::Settings::load().picture_folders)
 }
@@ -420,6 +495,21 @@ pub fn local_entries_with_folders(root: &Path, server: Server, folders: &[PathBu
     let worlds = crate::worlds::load_gallery(root, folders);
     let history = visited::History::load(&visited::history_file());
     let records = records_path(server).ok().map(|p| read_records(&p)).unwrap_or_default();
+    entries_of(worlds, &history, &records)
+}
+
+/// [`local_entries_with_folders`] from what is handed over, not read from where the app keeps it: the captures under
+/// `root`, these pictures, the visit history in the file `history` and the upload records in the file `records`. What
+/// the page's tests make their lists from, so that none reads the member's own.
+pub fn local_entries_at(root: &Path, index: visited::ShotIndex, history: &Path, records: Option<&Path>) -> Vec<Entry> {
+    let history = visited::History::load(history);
+    let worlds = crate::worlds::gallery_from(root, index, &history);
+    entries_of(worlds, &history, &records.map(read_records).unwrap_or_default())
+}
+
+/// The list's entries: each world's captures and pictures, the instance a picture was taken in from the visit history
+/// where its own record does not say, and what was uploaded of each from the upload records.
+fn entries_of(worlds: Vec<crate::worlds::VisitedWorld>, history: &visited::History, records: &[Record]) -> Vec<Entry> {
     let mut entries = Vec::new();
     for w in worlds {
         for s in &w.sessions {
@@ -438,7 +528,7 @@ pub fn local_entries_with_folders(root: &Path, server: Server, folders: &[PathBu
                 world_id: w.id.clone(),
                 world_name: w.name.clone(),
                 taken,
-                instance: s.manifest.world.as_ref().and_then(|w| w.instance.clone()).or_else(|| instance_at(&history, &w.id, taken)),
+                instance: s.manifest.world.as_ref().and_then(|w| w.instance.clone()).or_else(|| instance_at(history, &w.id, taken)),
                 source_key: s.dir.file_name().map(|s| s.to_string_lossy().into_owned()),
                 people: Vec::new(),
                 local: Some(local),
@@ -481,7 +571,7 @@ pub fn local_entries_with_folders(root: &Path, server: Server, folders: &[PathBu
                 world_id: w.id.clone(),
                 world_name: w.name.clone(),
                 taken: shot.info.taken,
-                instance: shot.info.instance.clone().or_else(|| instance_at(&history, &w.id, shot.info.taken)),
+                instance: shot.info.instance.clone().or_else(|| instance_at(history, &w.id, shot.info.taken)),
                 source_key: shot.sha256.clone(),
                 people: Vec::new(),
                 local: Some(Local::Picture(shot.path.clone())),
@@ -705,6 +795,15 @@ fn records_path(server: Server) -> anyhow::Result<PathBuf> {
 pub fn uploads(server: Server) -> Vec<(PathBuf, Item)> {
     records_path(server).map(|p| read_records(&p)).unwrap_or_default().into_iter().filter_map(|r| r.item.map(|item| (r.path, item))).collect()
 }
+/// Writes, as the upload records of an account, that the capture or picture at `path` was uploaded as `item` (tests
+/// of what is made from those records).
+#[cfg(test)]
+pub(crate) fn write_record_for_test(file: &Path, path: &Path, item: Item) {
+    let uploaded = Uploaded { kind: item.kind, id: item.id, visibility: "private".into() };
+    let records = vec![Record { path: path.to_path_buf(), item: Some(item), uploaded, edits: None }];
+    std::fs::write(file, serde_json::to_vec(&records).unwrap()).unwrap();
+}
+
 fn read_records(path: &Path) -> Vec<Record> {
     std::fs::read(path).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
 }

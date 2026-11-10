@@ -351,7 +351,7 @@ fn card(ui: &mut Ui, cx: &Cx, state: &State, i: usize, p: &Project, rect: Rect) 
         &pt,
         pos2(x, cover.bottom() + 43.0),
         Align2::LEFT_CENTER,
-        &Txt::new(tr!("Edited {when}", when = format::relative_time(p.modified, now())), 12.0).color(theme::FG_3),
+        &Txt::new(tr!("Edited {when}", when = crate::pages::ago(ui.ctx(), p.modified, now())), 12.0).color(theme::FG_3),
         r.width() - 32.0,
     );
     let mut px = x;

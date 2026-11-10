@@ -2,8 +2,9 @@
 //! menus), Show (its window to the front, restored when minimised, or the dialog it waits on), Save & Exit (Unity asked
 //! to quit as its close button does: it asks whether to save modified scenes, that question brought to the front, and
 //! the panel says when it quit) and Kill (that project's editor ended after a confirmation; other editors untouched,
-//! nothing deleted). The editors are looked at on a worker every second and a half while the page is shown
-//! (`orbiters_projects::editor`).
+//! nothing deleted). The editors are looked at on a thread every second and a half while the page is shown
+//! (`orbiters_projects::editor`, [`crate::pages::Watch`]): the page is drawn again only when a look differs from the
+//! last, or while Unity is quitting.
 use orbiters_i18n::tr;
 use super::state::State;
 use crate::pages::{Cx, Job};
@@ -31,24 +32,31 @@ impl State {
         if let Some(r) = self.editor_action.take() {
             if let Err(e) = r {
                 self.error = Some(e);
-                // What was asked did not happen: the next look says what Unity is doing.
+                // What was asked did not happen: a look, now, says what Unity is doing.
                 for s in self.sessions.values_mut() {
                     if let Session::Closing { pid, .. } | Session::Killing { pid } = s.0 {
                         s.0 = Session::Open { pid };
                     }
                 }
+                self.editors.stop();
             }
         }
         if self.fixture {
             return;
         }
-        if let Some(seen) = self.editors_job.take() {
-            self.apply_sessions(ctx, cx, seen);
-        }
-        if !self.editors_job.running() && self.editors_at.is_none_or(|t| t.elapsed() >= EVERY) {
-            self.editors_at = Some(Instant::now());
-            let projects: Vec<PathBuf> = self.scan.projects.iter().map(|p| p.path.clone()).collect();
-            self.editors_job = Job::spawn(ctx, move || {
+        // Which projects the looks are for: another list is another watch.
+        let listed = {
+            use std::hash::{Hash, Hasher};
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            for p in &self.scan.projects {
+                p.path.hash(&mut hasher);
+            }
+            hasher.finish()
+        };
+        let projects = &self.scan.projects;
+        let new = self.editors.keep(ctx, &listed, EVERY, || {
+            let projects: Vec<PathBuf> = projects.iter().map(|p| p.path.clone()).collect();
+            move || {
                 let editors = editor::running();
                 let unread = editors.iter().any(|e| e.project.as_os_str().is_empty());
                 projects
@@ -59,9 +67,25 @@ impl State {
                         (discovery::key(p), editor::of(&editors, p, locked).map(|e| (e.pid, e.asking)))
                     })
                     .collect()
-            });
+            }
+        });
+        // A look that differs is taken in at once. The same look says something more only while Unity quits after its
+        // save question was answered: how long that takes decides whether it stayed open (`QUITTING`), so the last
+        // look is taken in again at every period until then, on a frame asked for here.
+        let again = new.is_none() && self.quitting() && self.editors_at.is_none_or(|t| t.elapsed() >= EVERY);
+        if let Some(seen) = new.or_else(|| again.then(|| self.editors.seen()).flatten()) {
+            self.editors_at = Some(Instant::now());
+            self.apply_sessions(ctx, cx, seen);
         }
-        ctx.request_repaint_after(EVERY);
+        // While Unity quits, and while there is a look to take in again: with none (the watch starting again, or given
+        // up), a frame would have nothing to do, and the watch's own frame comes with its look.
+        if self.quitting() && self.editors.seen().is_some() {
+            ctx.request_repaint_after(EVERY);
+        }
+    }
+    /// Whether an editor is quitting after its save question was answered: timed, so looked at whatever the looks see.
+    fn quitting(&self) -> bool {
+        self.sessions.values().any(|s| matches!(s.0, Session::Closing { answered: true, asking: false, .. }))
     }
     fn apply_sessions(&mut self, ctx: &egui::Context, cx: &mut Cx, seen: HashMap<String, Option<(u32, bool)>>) {
         let now = Instant::now();

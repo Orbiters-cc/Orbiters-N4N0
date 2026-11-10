@@ -164,7 +164,7 @@ impl State {
         self.storage.plan = None;
         self.storage.plan_for = None;
         self.storage_health = None;
-        self.storage_checked = None;
+        self.storage_watch.stop();
         self.sizes_asked.remove(&run.project);
         let name = run.name;
         match end {
@@ -233,21 +233,41 @@ impl State {
         });
     }
 
-    /// Look at the logs and the disk on a worker, every few seconds, for editors opened outside Orbiters too.
+    /// Look at the logs and the disk on a thread, every few seconds while this project's panel shows, for editors opened
+    /// outside Orbiters too. The panel is drawn again only when what the card says of them changed.
     fn poll_health(&mut self, ctx: &egui::Context, project: &Project) {
-        if let Some(result) = self.storage_job.take() {
-            self.storage_health = Some(result);
+        let path = &project.path;
+        let new = self.storage_watch.keep(ctx, path, Duration::from_secs(3), || {
+            let path = path.clone();
+            move || Seen::of(storage::inspect(&path))
+        });
+        if let Some(seen) = new {
+            self.storage_health = Some((path.clone(), seen.health));
         }
-        let stale = self.storage_health.as_ref().is_none_or(|(p, _)| p != &project.path) || self.storage_checked.is_none_or(|t| t.elapsed().as_secs() >= 3);
-        if stale && !self.storage_job.running() {
-            self.storage_checked = Some(Instant::now());
-            let path = project.path.clone();
-            self.storage_job = Job::spawn(ctx, move || {
-                let health = storage::inspect(&path);
-                (path, health)
-            });
-        }
-        ctx.request_repaint_after(Duration::from_secs(1));
+    }
+}
+
+/// A look at a project's disk, the same as another when the card would say the same of both: the free space is never
+/// the same to the byte from one look to the next.
+#[derive(Clone)]
+pub(in crate::pages) struct Seen {
+    health: storage::Health,
+    /// What the card shows of it: its notice, the free space as written, the disk, whether Unity has it open.
+    shown: (Option<Notice>, Option<String>, Option<PathBuf>, bool),
+}
+
+impl Seen {
+    fn of(health: storage::Health) -> Self {
+        let notice = health.notice();
+        // Without a notice there is no card: the numbers do not show.
+        let free = notice.and(health.free).map(bytes);
+        Self { shown: (notice, free, health.disk.clone(), health.open), health }
+    }
+}
+
+impl PartialEq for Seen {
+    fn eq(&self, other: &Self) -> bool {
+        self.shown == other.shown
     }
 }
 

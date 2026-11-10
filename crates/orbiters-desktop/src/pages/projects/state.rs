@@ -196,9 +196,9 @@ pub struct State {
     pub(super) action_label: String,
     /// The running action adds repositories (the missing packages card shows its Retry busy meanwhile).
     pub(super) adding_repositories: bool,
-    pub(super) storage_job: Job<(PathBuf, orbiters_projects::storage::Health)>,
+    /// The shown project's disk and Unity's log, looked at on a thread while its panel shows, and the last look.
+    pub(super) storage_watch: crate::pages::Watch<PathBuf, super::storage_card::Seen>,
     pub(super) storage_health: Option<(PathBuf, orbiters_projects::storage::Health)>,
-    pub(super) storage_checked: Option<Instant>,
     pub(super) storage: super::storage_card::Storage,
     /// Screenshots: a real run's Repair storage was pressed.
     pub(super) stage_repair_started: bool,
@@ -285,7 +285,9 @@ pub struct State {
     pub(super) missing: Option<super::missing_card::Card>,
     /// Each project's Unity editor (by `discovery::key`), and since when Unity's save question was answered.
     pub(super) sessions: HashMap<String, (editor::Session, Option<Instant>)>,
-    pub(super) editors_job: Job<HashMap<String, Option<(u32, bool)>>>,
+    /// The editors as a look at the processes sees them, by project, taken on a thread while the page shows; and when
+    /// a look was last taken in.
+    pub(super) editors: crate::pages::Watch<u64, HashMap<String, Option<(u32, bool)>>>,
     pub(super) editors_at: Option<Instant>,
     /// Show, Save & Exit or Kill running (not the page's one action: Unity may be asked while packages change).
     pub(super) editor_action: Job<Result<(), String>>,
@@ -367,9 +369,8 @@ impl Default for State {
             action: Job::default(),
             action_label: String::new(),
             adding_repositories: false,
-            storage_job: Job::default(),
+            storage_watch: Default::default(),
             storage_health: None,
-            storage_checked: None,
             storage: Default::default(),
             stage_repair_started: false,
             error: None,
@@ -428,7 +429,7 @@ impl Default for State {
             last_change: None,
             missing: None,
             sessions: HashMap::new(),
-            editors_job: Job::default(),
+            editors: Default::default(),
             editors_at: None,
             editor_action: Job::default(),
             kill_confirm: None,
@@ -449,6 +450,10 @@ impl Drop for State {
 pub(super) const MIXER: &str = "orbiters.mixer";
 /// Mixer's presentation on the website.
 pub(super) const MIXER_PAGE: &str = "https://orbiters.cc/mixer";
+/// How often the repositories are downloaded again while a project is shown.
+const REPOS_EVERY: Duration = Duration::from_secs(30 * 60);
+/// How long the page's first frame waits for the pictures kept from the last window, at most.
+const PRELOAD_WAIT: Duration = Duration::from_millis(250);
 
 pub(super) fn server(cx: &Cx) -> Server {
     if cx.snap.account.development {
@@ -607,11 +612,18 @@ impl State {
             && !self.running()
             && !self.view_job.running()
             && !self.updates_job.running()
-            && self.repos_checked.is_none_or(|t| t.elapsed() > Duration::from_secs(30 * 60))
+            && self.repos_checked.is_none_or(|t| t.elapsed() > REPOS_EVERY)
         {
             self.repos_checked = Some(Instant::now());
             self.load_view(ctx, true);
             self.view_quiet = true;
+        }
+        // The half hour is the clock's alone to bring: a frame then, while a project is shown and while it is still
+        // to come. Once it is past and something above stands in the way (an action, a look at the packages, a check
+        // for updates), no frame is asked for: each of those wakes the page when it ends, and the download starts on
+        // that frame. Asked for with a floor, the page drew twenty frames a second for as long as the job took.
+        if let (false, Some(_), Some(checked)) = (self.fixture, &self.selected, self.repos_checked) {
+            crate::pages::frame_in(ctx, REPOS_EVERY.saturating_sub(checked.elapsed()).as_secs_f64());
         }
     }
     /// The selected project's updates, with pre-releases when the switch is on.
@@ -931,10 +943,12 @@ impl State {
     fn poll_thumbs(&mut self, ctx: &egui::Context) {
         if let Some(rx) = &self.thumb_preload {
             // The page's first visit waits for them (read on every core: a few tens of milliseconds) rather than
-            // drawing empty covers that fill in after.
+            // drawing empty covers that fill in after. Not for long: this is the interface's thread, and on a cold or
+            // busy disk the window stood frozen for up to three seconds at the click on the page. Past the wait the
+            // covers come as any late picture does.
             let kept = if self.started && !self.thumb_preload_waited {
                 self.thumb_preload_waited = true;
-                rx.recv_timeout(Duration::from_secs(3)).map_err(|e| match e {
+                rx.recv_timeout(PRELOAD_WAIT).map_err(|e| match e {
                     mpsc::RecvTimeoutError::Timeout => mpsc::TryRecvError::Empty,
                     mpsc::RecvTimeoutError::Disconnected => mpsc::TryRecvError::Disconnected,
                 })
@@ -2035,6 +2049,43 @@ mod thumbnail_tests {
         state.apply_thumb_batch(&ctx, (HashMap::from([(id.clone(), (old, 456))]), vec![], vec![], HashMap::new()));
         assert_eq!(state.thumbs[&id].id(), texture);
         assert_eq!(state.thumb_sums[&id], 123);
+    }
+
+    /// The repositories are downloaded again half an hour after the last time, on a frame asked for then. With the
+    /// half hour past and another job in the way, that frame was asked for again at every frame, twenty a second,
+    /// until the job ended.
+    #[test]
+    fn an_overdue_repository_refresh_held_up_by_a_job_asks_for_no_frame() {
+        let ctx = egui::Context::default();
+        let asked = |state: &mut State| -> Duration {
+            let mut asked = Duration::ZERO;
+            // egui's own first frames ask for more: what the last of a few asks is the page's.
+            for frame in 0..5 {
+                let mut out = ctx.run_ui(egui::RawInput { time: Some(frame as f64 / 60.0), ..Default::default() }, |ui| state.poll_updates(ui.ctx()));
+                out.textures_delta.clear();
+                asked = crate::pages::rest::asked(&out);
+            }
+            asked
+        };
+        let mut state = State::default();
+        state.selected = Some(PathBuf::from("C:/Projects/Avatar"));
+        // A check for updates that does not end: it stands in the refresh's way.
+        let (hold, held) = mpsc::channel::<()>();
+        state.updates_job = Job::spawn(&ctx, move || {
+            let _ = held.recv();
+            (PathBuf::new(), Err(String::new()))
+        });
+        // Twenty-nine minutes after the last download: a frame in a minute.
+        let Some(recent) = Instant::now().checked_sub(REPOS_EVERY - Duration::from_secs(60)) else { return };
+        state.repos_checked = Some(recent);
+        let wait = asked(&mut state);
+        assert!(wait > Duration::from_secs(50) && wait <= Duration::from_secs(61), "{wait:?}");
+        // Thirty-one minutes after it, the check still running: nothing to do yet, and no frame asked for.
+        let Some(overdue) = Instant::now().checked_sub(REPOS_EVERY + Duration::from_secs(60)) else { return };
+        state.repos_checked = Some(overdue);
+        assert_eq!(asked(&mut state), Duration::MAX, "an overdue refresh that cannot start asks for nothing");
+        assert_eq!(state.repos_checked, Some(overdue), "and has not started");
+        drop(hold);
     }
 
     #[test]

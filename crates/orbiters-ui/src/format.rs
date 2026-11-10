@@ -112,6 +112,24 @@ pub fn relative_time(epoch_seconds: u64, now_seconds: u64) -> String {
     }
 }
 
+/// Seconds from `now_seconds` until [`relative_time`] says something else of the same moment ("just now" becomes
+/// "1 min ago", "59 min ago" becomes "1 h ago"); `None` once it is a date, which stays. For an interface that draws
+/// only when something changed: its next frame for this text is due then.
+pub fn relative_time_changes_in(epoch_seconds: u64, now_seconds: u64) -> Option<u64> {
+    // A moment ahead of the clock (another computer's) says "just now" until a minute past it.
+    if epoch_seconds > now_seconds {
+        return Some(epoch_seconds - now_seconds + 60);
+    }
+    let diff = now_seconds - epoch_seconds;
+    let step = match diff {
+        0..3600 => 60,
+        3600..86400 => 3600,
+        86400..604800 => 86400,
+        _ => return None,
+    };
+    Some(step - diff % step)
+}
+
 /// Days since 1970-01-01 to (year, month, day) (Howard Hinnant's algorithm).
 fn civil_from_days(z: i64) -> (i64, u32, u32) {
     let z = z + 719_468;
@@ -133,6 +151,21 @@ pub fn folder_name(path: &std::path::Path) -> String {
 
 #[cfg(test)]
 mod tests {
+    /// The moment a relative time is said to change is the first second at which it reads otherwise, and not before.
+    #[test]
+    fn a_relative_time_changes_when_it_is_said_to() {
+        let then = 1_800_000_000;
+        for age in [0, 1, 59, 60, 61, 119, 3599, 3600, 3601, 7199, 86_399, 86_400, 100_000, 604_799] {
+            let now = then + age;
+            let wait = relative_time_changes_in(then, now).unwrap_or_else(|| panic!("{age} s old still changes"));
+            assert!(wait >= 1, "{age}");
+            assert_eq!(relative_time(then, now + wait - 1), relative_time(then, now), "{age} s old: the same until then");
+            assert_ne!(relative_time(then, now + wait), relative_time(then, now), "{age} s old: another text then");
+        }
+        assert_eq!(relative_time_changes_in(then, then + 604_800), None, "a date stays");
+        assert_eq!(relative_time_changes_in(then + 30, then), Some(90), "ahead of the clock: a minute past it");
+    }
+
     #[test]
     fn numbers_are_written_as_each_language_writes_them() {
         use orbiters_i18n::in_language;

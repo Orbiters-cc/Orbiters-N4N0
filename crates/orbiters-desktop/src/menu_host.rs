@@ -82,6 +82,14 @@ impl MenuHost {
         Self(host.with_capture_pictures(Arc::new(crate::controller::menu_shares::capture_picture)))
     }
 
+    /// The same for an interface that draws only when something changed (the window's Home): what the menu fetches
+    /// asks `ctx` for a frame when it arrives, so the page need not draw itself to look.
+    pub fn waking(ctx: egui::Context) -> Self {
+        let woken = ctx.clone();
+        let Self(host) = Self::new(ctx);
+        Self(host.with_waker(Arc::new(move || orbiters_ui::anim::request_frame(&woken))))
+    }
+
     /// Opens the menu on Home with the settings it starts from (keyboard, the 3D picture's timer and length).
     pub fn open(&mut self, snap: &Snapshot) {
         self.0.open(&snap.settings);

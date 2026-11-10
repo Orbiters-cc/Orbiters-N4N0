@@ -277,7 +277,7 @@ fn hero(ui: &mut Ui, cx: &mut Cx, state: &mut State, project: &Project, sheet: b
     y += 30.0;
     // What it is.
     let mut px = x;
-    let edited = tr!("Edited {when}", when = format::relative_time(project.modified, orbiters_projects::discovery::now()));
+    let edited = tr!("Edited {when}", when = crate::pages::ago(ui.ctx(), project.modified, orbiters_projects::discovery::now()));
     for (g, label) in [(Some(icons::CUBE), format!("Unity {}", project.unity)), (Some(icons::CLOCK), edited)] {
         px += widgets::pill_at(&p, ui, pos2(px, y + 11.0), g, &label) + 6.0;
     }
@@ -866,7 +866,7 @@ fn commits(ui: &mut Ui, cx: &mut Cx, state: &mut State, project: &Project) {
                 if widgets::activated(&hresp) {
                     copy = Some(c.hash.clone());
                 }
-                let when = format!("{} · {}", c.author, format::relative_time(c.time, now));
+                let when = format!("{} · {}", c.author, crate::pages::ago(ui.ctx(), c.time, now));
                 widgets::text_truncated(&p, pos2(x, row.top() + 39.0 + dy), Align2::LEFT_CENTER, &Txt::new(when, 11.5).color(theme::FG_3), hr.left() - x - 8.0);
                 // The caret turns as the commit opens.
                 let cc = pos2(row.right() - 9.0, row.top() + 18.0 + dy);

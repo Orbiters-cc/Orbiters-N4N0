@@ -89,10 +89,9 @@ pub struct Dialog {
     copied_at: Option<f64>,
     /// The picture shown whole over the window, its details folded away (a click on the picture).
     full: bool,
-    /// The capture's splat edits read again while the window is open (edited in its 3D view meanwhile), and when they
-    /// were last asked ([`EDITS_EVERY`]).
-    edits_job: Job<Result<String, String>>,
-    edits_asked: f64,
+    /// The capture's splat edits read again while the window is open (edited in its 3D view meanwhile), every
+    /// [`EDITS_EVERY`] seconds.
+    edits_watch: super::Watch<std::path::PathBuf, Result<String, String>>,
     pub changed: bool,
     pictures: crate::worlds::Pictures,
     viewer: Option<super::splats::Viewer>,
@@ -173,8 +172,7 @@ impl Dialog {
             error: None,
             notice: None,
             fixture_busy: false,
-            edits_job: Job::default(),
-            edits_asked: f64::NEG_INFINITY,
+            edits_watch: Default::default(),
             fixture_active: false,
             rollback: None,
             on_its_way: BTreeSet::new(),
@@ -464,24 +462,21 @@ impl Dialog {
         }
     }
 
-    /// The capture's splat edits, read on a worker every [`EDITS_EVERY`] seconds while the window is open on a capture of
+    /// The capture's splat edits, read on a thread every [`EDITS_EVERY`] seconds while the window is open on a capture of
     /// this computer that its owner uploaded: edited in its 3D view meanwhile, it offers to update the shared copy (and
-    /// edited back to what was uploaded, it no longer does).
+    /// edited back to what was uploaded, it no longer does). The window is drawn again only when they changed.
     fn watch_edits(&mut self, ctx: &egui::Context) {
-        if let Some(edits) = self.edits_job.take() {
-            self.entry.edits = Some(edits);
-        }
         let uploaded = self.entry.uploaded_edits.is_some() || self.entry.remote.as_ref().is_some_and(|i| i.mine);
         let Some(controller::Local::Session(dir)) = self.entry.local.as_ref().filter(|_| self.entry.ready && uploaded && !self.fixture_active) else {
             return;
         };
-        let now = anim::time(ctx);
-        if !self.edits_job.running() && now - self.edits_asked >= EDITS_EVERY {
-            self.edits_asked = now;
+        let new = self.edits_watch.keep(ctx, dir, std::time::Duration::from_secs_f64(EDITS_EVERY), || {
             let result = orbiters_core::reconstruction::result_dir(dir);
-            self.edits_job = Job::spawn(ctx, move || orbiters_reconstruct::edit::generation(&result).map_err(|e| e.to_string()));
+            move || orbiters_reconstruct::edit::generation(&result).map_err(|e| e.to_string())
+        });
+        if let Some(edits) = new {
+            self.entry.edits = Some(edits);
         }
-        ctx.request_repaint_after(std::time::Duration::from_secs_f64(EDITS_EVERY));
     }
 
     pub fn public(&mut self, ctx: &egui::Context, server: Server) {

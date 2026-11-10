@@ -9,7 +9,7 @@ use egui::{pos2, vec2, Align2, Id, Rect, Sense, Ui};
 use orbiters_projects::{avatars::Avatar, blender};
 use orbiters_ui::theme::{self, weight, Txt};
 use orbiters_ui::widgets::{self, Button, Size, Variant};
-use orbiters_ui::{format, icons};
+use orbiters_ui::icons;
 
 /// Blender's orange, on its files' tiles.
 const BLENDER: egui::Color32 = egui::Color32::from_rgb(234, 118, 0);
@@ -46,7 +46,7 @@ pub(super) fn rows(ui: &mut Ui, state: &mut State, target: &Avatar, indent: f32)
         let name = l.blend.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         let p = ui.painter();
         widgets::text_truncated(p, pos2(x, row.center().y - 8.0), Align2::LEFT_CENTER, &Txt::new(&name, 13.0).weight(weight::MEDIUM), tw);
-        let detail = tr!("{tool} · saved {when}", tool = l.tool.label(), when = format::relative_time(l.modified, now));
+        let detail = tr!("{tool} · saved {when}", tool = l.tool.label(), when = crate::pages::ago(ui.ctx(), l.modified, now));
         widgets::text_truncated(p, pos2(x, row.center().y + 9.0), Align2::LEFT_CENTER, &Txt::new(detail, 11.5).color(theme::FG_3), tw);
         // Where it is, whole, on hover.
         let _ = ui

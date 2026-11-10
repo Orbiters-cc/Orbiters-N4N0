@@ -777,7 +777,7 @@ fn session_card(ui: &mut Ui, cx: &Cx, i: usize, s: &SessionSummary, rect: Rect, 
 
     let x = r.left() + 16.0;
     widgets::text_truncated(&p, pos2(x, thumb.bottom() + 22.0), Align2::LEFT_CENTER, &Txt::new(title(s), 15.0).weight(weight::SEMIBOLD), r.width() - 32.0);
-    widgets::text(&p, pos2(x, thumb.bottom() + 42.0), Align2::LEFT_CENTER, &Txt::new(format::relative_time(s.modified, now_secs()), 12.0).color(theme::FG_3));
+    widgets::text(&p, pos2(x, thumb.bottom() + 42.0), Align2::LEFT_CENTER, &Txt::new(crate::pages::ago(ui.ctx(), s.modified, now_secs()), 12.0).color(theme::FG_3));
     let st = &s.manifest.stats;
     let mut px = x;
     let py = thumb.bottom() + 68.0;

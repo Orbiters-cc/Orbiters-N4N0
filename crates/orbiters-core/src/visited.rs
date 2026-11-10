@@ -233,6 +233,21 @@ impl History {
         changed | (self.logs.len() != before)
     }
 
+    /// A number that changes when what the history says of the visits does (the worlds, their names and visits, the
+    /// instances joined), and not with how far the logs were read: the file is saved every few seconds while VRChat
+    /// writes its log, with nothing new to show. For those who show the visits, to know when to read them again.
+    pub fn revision(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        for (id, world) in &self.worlds {
+            (id, &world.name, &world.visits).hash(&mut hasher);
+        }
+        for visit in &self.instances {
+            (&visit.world_id, &visit.instance, visit.at).hash(&mut hasher);
+        }
+        hasher.finish()
+    }
+
     /// What the log follower read of the log named `name`, bytes `from` to `to`, with its events: taken in place of
     /// reading them again once the visits are known up to `from` (until then [`History::read_logs_following`] reads
     /// that log itself). Returns whether anything changed.
@@ -629,6 +644,21 @@ pub fn sha256_file(path: &Path) -> std::io::Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The history's file is saved whenever VRChat's log was read further; those who show the visits make their lists
+    /// again only when the visits changed.
+    #[test]
+    fn the_revision_follows_the_visits_and_not_how_far_the_logs_were_read() {
+        let mut history = History::default();
+        let empty = history.revision();
+        assert!(history.follow("output_log_a.txt", 0, 100, &[]));
+        assert_eq!(history.revision(), empty, "a log read further");
+        assert!(history.follow("output_log_a.txt", 100, 200, &[LogEvent::Joining { world_id: "wrld_a".into(), instance: "1~private".into(), at: Some(50) }]));
+        let visited = history.revision();
+        assert_ne!(visited, empty, "a world joined");
+        assert!(history.follow("output_log_a.txt", 200, 300, &[LogEvent::EnteringRoom { name: "A".into() }, LogEvent::JoinedRoom { name: "A".into() }]));
+        assert_ne!(history.revision(), visited, "its name");
+    }
 
     fn png_with_xmp(xmp: &str) -> Vec<u8> { png_with_text("XML:com.adobe.xmp", xmp) }
 

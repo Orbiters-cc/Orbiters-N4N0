@@ -23,6 +23,7 @@ mod ipc;
 mod keys;
 mod language;
 mod link_between;
+mod link_smoke;
 #[cfg(target_os = "macos")]
 mod mac;
 #[cfg(target_os = "macos")]
@@ -52,8 +53,16 @@ mod words;
 mod worker;
 
 fn main() -> anyhow::Result<()> {
-    orbiters_core::panic_log::install();
     let args: Vec<String> = std::env::args().skip(1).collect();
+    // Two switches of `--link-smoke`, which passes them to the processes it starts; the app itself never does. Every
+    // folder of the app inside one given folder, and the state the link holds said on the output whenever it changes.
+    if let Some(folder) = args.iter().position(|a| a == "--sandbox").and_then(|i| args.get(i + 1)) {
+        link_smoke::sandbox(std::path::Path::new(folder))?;
+    }
+    if args.iter().any(|a| a == "--say-state") {
+        ipc::SAY_STATE.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+    orbiters_core::panic_log::install();
     match args.first().map(String::as_str) {
         Some("--screenshot") => {
             // On a thread of its own: its table of scenarios and a page's frames outgrow the main thread's 1 MB stack in
@@ -71,6 +80,7 @@ fn main() -> anyhow::Result<()> {
         Some("--gpu-bench") => bench::run(&args[1..]),
         Some("--idle-frames") => idle_frames::run(&args[1..]),
         Some("--publish-cost") => controller::publish_cost::run(&args[1..]),
+        Some("--link-smoke") => link_smoke::run(&args[1..]),
         Some("--window") => window::run(&args[1..]),
         Some("--overlay") => overlay::run(&args[1..]),
         #[cfg(windows)]

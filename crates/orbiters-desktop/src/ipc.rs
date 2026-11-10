@@ -406,6 +406,45 @@ const RESYNC_RETRY: Duration = if cfg!(test) { Duration::from_millis(150) } else
 /// How many times it asks in all before it gives the link up.
 pub(crate) const RESYNC_TRIES: u32 = 5;
 
+/// `--say-state` (a switch of `--link-smoke`): a client prints a digest of the state its link holds whenever it takes
+/// one, and says when it could not read a line and when its link ended.
+pub static SAY_STATE: AtomicBool = AtomicBool::new(false);
+
+/// A short name for a state, the same for equal states in any process of this program: what `--link-smoke` compares
+/// between the service and the processes it started. Its JSON with every object's keys in order, hashed.
+pub fn digest(snapshot: &Snapshot) -> String {
+    fn ordered(value: &serde_json::Value, out: &mut String) {
+        match value {
+            serde_json::Value::Object(fields) => {
+                let mut fields: Vec<_> = fields.iter().collect();
+                fields.sort_by(|a, b| a.0.cmp(b.0));
+                out.push('{');
+                for (name, value) in fields {
+                    out.push_str(name);
+                    out.push(':');
+                    ordered(value, out);
+                    out.push(',');
+                }
+                out.push('}');
+            }
+            serde_json::Value::Array(items) => {
+                out.push('[');
+                for item in items {
+                    ordered(item, out);
+                    out.push(',');
+                }
+                out.push(']');
+            }
+            other => out.push_str(&other.to_string()),
+        }
+    }
+    let mut text = String::new();
+    ordered(&serde_json::to_value(snapshot).unwrap_or_default(), &mut text);
+    // FNV-1a, 64 bits.
+    let hash = text.bytes().fold(0xcbf2_9ce4_8422_2325u64, |hash, byte| (hash ^ byte as u64).wrapping_mul(0x0000_0100_0000_01b3));
+    format!("{hash:016x}")
+}
+
 /// The state as a client holds it.
 struct Held {
     /// What the service published, as its link last said: the snapshot it sent first, with every change since.
@@ -490,6 +529,7 @@ impl Client {
             background: AtomicBool::new(false),
             repaint: Mutex::new(None),
         });
+        client.say_state();
         let c = client.clone();
         std::thread::Builder::new().name("service-link".into()).spawn(move || {
             for line in reader.lines() {
@@ -535,10 +575,21 @@ impl Client {
             c.step.notify_all();
             c.vrchat_data.lock().unwrap().clear();
             c.close.store(true, Ordering::Relaxed);
+            if SAY_STATE.load(Ordering::Relaxed) {
+                println!("link ended");
+            }
             c.repaint(false);
             leave_soon();
         })?;
         Ok(client)
+    }
+
+    /// With `--say-state`: the state the link holds, by its digest.
+    fn say_state(&self) {
+        if SAY_STATE.load(Ordering::Relaxed) {
+            let held = self.state.lock().unwrap().service.clone();
+            println!("state {}", digest(&held));
+        }
     }
 
     /// A frame for what came; for the service's news, while the window is behind VRChat, at most [`BACKGROUND_PACE`]
@@ -592,6 +643,8 @@ impl Client {
         held.asked = None;
         held.asks = 0;
         self.step.notify_all();
+        drop(held);
+        self.say_state();
     }
 
     /// The parts that changed since the state this client holds: put into a copy of it (which shares every other
@@ -612,6 +665,8 @@ impl Client {
         let next = Arc::new(next);
         held.service = next.clone();
         held.shown = next;
+        drop(held);
+        self.say_state();
         true
     }
 
@@ -620,6 +675,9 @@ impl Client {
     /// asked here: the answer is awaited, and asked for again by its deadline ([`Client::keep_asking`]), so a link
     /// whose every line is unreadable is asked a few times, not once a line.
     fn lost_step(self: &Arc<Self>) {
+        if SAY_STATE.load(Ordering::Relaxed) {
+            println!("lost step");
+        }
         let start = {
             let mut held = self.state.lock().unwrap();
             if held.out_of_step {

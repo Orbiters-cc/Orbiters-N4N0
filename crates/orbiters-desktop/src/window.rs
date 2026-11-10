@@ -14,7 +14,10 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
     // What a Library move interrupted by closing the window left, on a worker: never in the way of starting. Here and not
     // in the service, which goes on running after its window closed: a move runs in this process, so closing the window is
     // what ends one, and opening it again is the next start. Screenshot runs and benches never come through here.
-    let _ = std::thread::Builder::new().name("unity-cache-orphans".into()).spawn(|| {
+    // Not in a process given a folder of its own (`--sandbox`, by `--link-smoke`): it knows none of the person's
+    // projects, and must not judge their caches.
+    let sandboxed = args.iter().any(|a| a == "--sandbox");
+    let _ = (!sandboxed).then(|| std::thread::Builder::new().name("unity-cache-orphans".into()).spawn(|| {
         orbiters_projects::discovery::low_priority();
         let swept = orbiters_projects::storage::remove_orphans(&std::sync::atomic::AtomicBool::new(false));
         for cache in &swept.removed {
@@ -23,7 +26,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         for (path, why) in &swept.failed {
             eprintln!("could not remove {}: {why}", path.display());
         }
-    });
+    }));
     #[cfg(target_os = "macos")]
     crate::mac::stay_awake();
     let backend: Ctl = Arc::new(Remote(Client::connect(&endpoint, Role::Window)?));
@@ -33,6 +36,9 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         .with_inner_size([1280.0, 820.0])
         .with_min_inner_size([1040.0, 700.0])
         .with_icon(app::window_icon());
+    // `--link-smoke` starts a window to read what its link holds, on a computer someone may be using: it does not take
+    // the foreground. The service never passes this.
+    let viewport = if args.iter().any(|a| a == "--no-focus") { viewport.with_active(false) } else { viewport };
     // The app draws its own title bar. On Windows and elsewhere, a window without decorations. On the Mac such a window
     // would lose its rounded corners, shadow and edges: a titled window keeps them, with its title bar's every part
     // hidden under the app's.

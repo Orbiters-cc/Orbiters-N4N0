@@ -303,6 +303,54 @@ fn calibration_info(stored: &StoredCalibration) -> CalibrationInfo {
 
 pub type Shared = Arc<Controller>;
 
+/// How often the service publishes its state, for `logs/publishes.log`: a real session's answer to what the
+/// architecture review could only estimate (DRT-1). Counts only, one line a minute at most.
+#[derive(Default)]
+pub(crate) struct PublishRate {
+    /// Publishes in all when last looked.
+    seen: u64,
+    /// In the minute under way: how many, the most in one second, and the seconds so far.
+    minute: u64,
+    most: u64,
+    seconds: u32,
+}
+
+impl PublishRate {
+    /// Another second went by, the controller having published `publishes` times in all, to `readers` subscribers.
+    /// Returns the minute's line once sixty have, when anything was published in them.
+    pub(crate) fn second(&mut self, publishes: u64, readers: usize) -> Option<String> {
+        let now = publishes.saturating_sub(self.seen);
+        self.seen = publishes;
+        self.minute += now;
+        self.most = self.most.max(now);
+        self.seconds += 1;
+        if self.seconds < 60 {
+            return None;
+        }
+        let line = (self.minute > 0).then(|| format!("{} publishes in a minute, at most {} in one second, to {readers} readers", self.minute, self.most)); // i18n: not shown (a log's line)
+        (self.minute, self.most, self.seconds) = (0, 0, 0);
+        line
+    }
+}
+
+/// A line in `%LOCALAPPDATA%/Orbiters/logs/publishes.log`, kept under 1 MB (the last one renamed .old). Tests write none.
+fn publish_log(line: &str) {
+    #[cfg(not(test))]
+    {
+        use std::io::Write;
+        let dir = orbiters_core::paths::logs_dir();
+        let path = dir.join("publishes.log");
+        if std::fs::metadata(&path).is_ok_and(|m| m.len() > 1 << 20) {
+            let _ = std::fs::rename(&path, dir.join("publishes.old.log"));
+        }
+        if let Ok(mut f) = std::fs::create_dir_all(&dir).and_then(|_| std::fs::OpenOptions::new().create(true).append(true).open(&path)) {
+            let _ = writeln!(f, "{} {line}", orbiters_core::now_utc_iso());
+        }
+    }
+    #[cfg(test)]
+    let _ = line;
+}
+
 mod account;
 mod around;
 mod booster;
@@ -2396,6 +2444,7 @@ fn spawn_watchers(ctl: Shared) {
             let mut videos = videos::Videos::load();
             let mut system = sysinfo::System::new();
             let mut tick = 0u64;
+            let mut rate = PublishRate::default();
             let mut running = false;
             // Since when VRChat runs, and when VRChat was last asked to find the OSC service.
             let mut vrchat_since: Option<Instant> = None;
@@ -2582,6 +2631,11 @@ fn spawn_watchers(ctl: Shared) {
                 if tick.is_multiple_of(30) {
                     refresh_storage(&ctl);
                 }
+                // How often the state was published, once a minute (this loop turns once a second, and a little more).
+                let readers = ctl.subscribers.lock().unwrap().len();
+                if let Some(line) = rate.second(ctl.publishes(), readers) {
+                    publish_log(&line);
+                }
                 tick += 1;
                 std::thread::sleep(Duration::from_secs(1));
             }
@@ -2591,6 +2645,33 @@ fn spawn_watchers(ctl: Shared) {
 
 #[cfg(test)]
 mod tests {
+    /// The publish-rate log says a minute's publishes once, with the busiest second, and nothing for a silent minute.
+    #[test]
+    fn the_publish_rate_is_said_once_a_minute() {
+        let mut rate = PublishRate::default();
+        let mut publishes = 100;
+        // What was published before it first looked counts in the first second.
+        assert_eq!(rate.second(publishes, 3), None);
+        let mut lines = Vec::new();
+        for second in 1..180u64 {
+            // The first minute: one a second, and a burst of 25; the second: nothing; the third: two.
+            publishes += match second {
+                1..=59 if second == 30 => 25,
+                1..=59 => 1,
+                130 | 131 => 1,
+                _ => 0,
+            };
+            lines.extend(rate.second(publishes, 3).map(|line| (second, line)));
+        }
+        assert_eq!(
+            lines,
+            [
+                (59, "183 publishes in a minute, at most 100 in one second, to 3 readers".to_string()),
+                (179, "2 publishes in a minute, at most 1 in one second, to 3 readers".to_string())
+            ]
+        );
+    }
+
     /// A publish hands out a snapshot that shares every part with the one before, but those that changed; a part that
     /// was written to and holds what it held is the same part still; the camera path is kept whole and shown thinned.
     #[test]

@@ -129,7 +129,7 @@ fn busy_n4n0() -> N4n0Status {
         name: format!("Cosy evening {i}"),
         saved_utc: "2026-10-23T21:05:00Z".into(),
         default: i == 1,
-        pose: i % 2 == 0,
+        pose: i.is_multiple_of(2),
         size: false,
         parameters: 46,
         pose_parameters: 12,
@@ -364,6 +364,8 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         median(&mut t.bytes),
         micros(publish + write + read)
     );
+    println!();
+    println!("{} publishes in all", ctl.publishes());
     Ok(())
 }
 

@@ -815,11 +815,11 @@ mod tests {
             4 => s.settings.walk_boost.strength = (round % 10) as f32 / 10.0,
             5 => s.projects_changed += 1,
             6 => s.capture.trail.push([round as f32, 1.0, 2.0]),
-            7 => s.capture_shares.clear(),
+            7 => s.capture_shares.push(crate::controller::shares::ShareJob { id: format!("job-{round}"), key: "capture".into(), stage: Default::default(), outcome: None, update: false }),
             _ => {
                 // Two parts that go together: the account and what it may do.
                 s.account.state = crate::state::AccountState::SignedIn { username: format!("member-{round}") };
-                s.bridge.allowed = round % 2 == 0;
+                s.bridge.allowed = round.is_multiple_of(2);
                 s.n4n0.calls.picked = round as usize;
             }
         }

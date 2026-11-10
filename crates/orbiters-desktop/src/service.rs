@@ -704,6 +704,138 @@ mod tests {
         assert!(overlay_due(Some(None), later, Some(7), Some(7)), "ended without a code");
     }
 
+    /// A service as `run` makes it, around a controller that is never started, and the socket its clients find.
+    fn service() -> (Arc<Service>, TcpListener) {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let endpoint = Endpoint { port: listener.local_addr().unwrap().port(), token: "link-test".into() };
+        let service = Arc::new(Service {
+            ctl: Controller::new(Settings::default()),
+            endpoint,
+            exe: PathBuf::new(),
+            links: Mutex::new(Vec::new()),
+            next_link: AtomicU64::new(1),
+            unauthenticated: AtomicUsize::new(0),
+            window: Mutex::new(None),
+            page_for_window: Mutex::new(None),
+            overlay: Mutex::new(None),
+            orbit: Mutex::new(None),
+            steamvr_start_seen: Mutex::new(None),
+            smoothing: Mutex::new(Default::default()),
+            quitting: AtomicBool::new(false),
+            #[cfg(windows)]
+            main_thread: unsafe { windows::Win32::System::Threading::GetCurrentThreadId() },
+            #[cfg(not(windows))]
+            quit_tx: Mutex::new(None),
+        });
+        (service, listener)
+    }
+
+    /// A client of `role` linked to `service` as the accept loop links one.
+    fn linked(service: &Arc<Service>, listener: &TcpListener, role: Role) -> Arc<ipc::Client> {
+        let endpoint = service.endpoint.clone();
+        let connecting = std::thread::spawn(move || ipc::Client::connect(&endpoint, role).unwrap());
+        let (stream, _) = listener.accept().unwrap();
+        service.unauthenticated.fetch_add(1, Ordering::Relaxed);
+        let svc = service.clone();
+        std::thread::spawn(move || svc.serve(stream));
+        connecting.join().unwrap()
+    }
+
+    fn whole(snapshot: &crate::state::Snapshot) -> serde_json::Value {
+        serde_json::to_value(snapshot).unwrap()
+    }
+
+    /// Waits up to five seconds for `client` to hold what the service published, whole.
+    fn in_step(service: &Service, client: &ipc::Client) -> bool {
+        let started = Instant::now();
+        loop {
+            if whole(&client.snapshot()) == whole(&service.ctl.view()) {
+                return true;
+            }
+            if started.elapsed() > Duration::from_secs(5) {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    /// The whole way, as the app runs it: the controller publishes, each link's thread writes what changed since what
+    /// it last wrote, each client's thread takes it in. Every client holds what the service published, whichever part
+    /// changed, however fast, whenever it connected, and after it asked for everything again.
+    #[test]
+    fn every_client_holds_what_the_service_published() {
+        use orbiters_core::slice::Slice;
+        let (service, listener) = service();
+        let ctl = service.ctl.clone();
+        ctl.update(|s| s.n4n0.lines.push(crate::state::N4n0Line { who: crate::state::N4n0Who::N4n0, text: "before anyone was linked".into(), at_ms: 1, streaming: false }));
+        // The overlay's link: every state it can read.
+        let overlay = linked(&service, &listener, Role::Overlay);
+        assert!(in_step(&service, &overlay), "the first state, and the overlay counted as linked");
+        assert!(overlay.snapshot().steamvr.overlay);
+        // One part at a time: a plain value, a slice, a part inside a part, the settings.
+        let before = overlay.snapshot();
+        ctl.update(|s| s.vrchat.motion = Some(crate::state::AvatarMotion { in_station: false, seated: true, speed: 1.25 }));
+        assert!(in_step(&service, &overlay));
+        ctl.update(|s| s.n4n0.panel = Some("N4N0's panel".into()));
+        ctl.update(|s| {
+            s.vrchat.world.players.insert("usr_1".into(), "Ada".into());
+        });
+        ctl.update(|s| s.settings.walk_boost.strength = 0.75);
+        ctl.update(|s| s.projects_changed += 1);
+        assert!(in_step(&service, &overlay));
+        let after = overlay.snapshot();
+        assert_eq!(after.settings.walk_boost.strength, 0.75);
+        assert!(Slice::same(&before.n4n0.lines, &after.n4n0.lines) && Slice::same(&before.storage, &after.storage), "what did not change was not sent again");
+        // A publish that changes nothing is told all the same: the client holds a new snapshot, and draws for it.
+        let before = overlay.snapshot();
+        let told = ctl.publishes();
+        ctl.update(|_| {});
+        assert_eq!(ctl.publishes(), told + 1);
+        let started = Instant::now();
+        while Arc::ptr_eq(&before, &overlay.snapshot()) && started.elapsed() < Duration::from_secs(5) {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let after = overlay.snapshot();
+        assert!(!Arc::ptr_eq(&before, &after), "told of a publish that changed nothing");
+        assert!(Slice::same(&before.settings, &after.settings) && Slice::same(&before.capture, &after.capture));
+        // A window that opens later is handed everything, and then only what changes, at its own pace.
+        let window = linked(&service, &listener, Role::Window);
+        assert!(in_step(&service, &window));
+        assert_eq!(window.snapshot().n4n0.lines.len(), 1);
+        // Changes faster than the window's link writes (it skips states), of two parts that go together.
+        for round in 0..300u32 {
+            ctl.update(|s| {
+                s.account.state = crate::state::AccountState::SignedIn { username: format!("member-{round}") };
+                s.n4n0.calls.picked = round as usize;
+                if round % 50 == 0 {
+                    s.n4n0.lines.push(crate::state::N4n0Line { who: crate::state::N4n0Who::You, text: format!("line {round}"), at_ms: round as u64, streaming: false });
+                }
+            });
+            // Whatever state a client holds meanwhile is one the service published: the two parts agree.
+            for client in [&overlay, &window] {
+                let held = client.snapshot();
+                if let crate::state::AccountState::SignedIn { username } = &held.account.state {
+                    assert_eq!(*username, format!("member-{}", held.n4n0.calls.picked), "parts of two states");
+                }
+            }
+        }
+        assert!(in_step(&service, &overlay) && in_step(&service, &window));
+        assert_eq!(window.snapshot().n4n0.calls.picked, 299);
+        // A client that lost step asks for everything again: it is sent the whole state, and changes go on from there.
+        let before = window.snapshot();
+        window.send(&ToService::Resync);
+        let started = Instant::now();
+        while Arc::ptr_eq(&before, &window.snapshot()) && started.elapsed() < Duration::from_secs(5) {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let again = window.snapshot();
+        assert!(!Slice::same(&before.settings, &again.settings), "everything was sent again, the settings too");
+        assert_eq!(whole(&again), whole(&ctl.view()));
+        ctl.update(|s| s.n4n0.afk = true);
+        assert!(in_step(&service, &window) && in_step(&service, &overlay));
+        assert!(window.snapshot().n4n0.afk);
+    }
+
     #[test]
     fn update_actions_reach_the_service() {
         let line = serde_json::to_string(&ToService::Updates { action: ipc::UpdateAction::Restart { now: false } }).unwrap();

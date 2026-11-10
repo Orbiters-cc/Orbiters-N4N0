@@ -204,7 +204,7 @@ pub fn apply_changes<T: Parts>(state: &mut T, json: &str) -> serde_json::Result<
         type Value = ();
 
         fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            f.write_str("an object of changed parts")
+            f.write_str("an object of changed parts") // i18n: not shown (the wording of a line that could not be read; the client asks for the state again and tells nobody)
         }
 
         fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<(), A::Error> {
@@ -394,9 +394,10 @@ mod tests {
         assert_eq!(client, second);
         assert!(Slice::same(&client.lines, &first.lines), "a part that did not travel is not replaced");
         assert!(!Slice::same(&client.settings, &first.settings));
-        // Every part at once, against a state with nothing in common: the whole state arrives.
+        // Against a state with nothing in common, every part travels but the note, which is none in both: the whole
+        // state arrives.
         let (json, parts) = changes(&second, &State::default());
-        assert_eq!(parts, 7);
+        assert_eq!(parts, 6);
         let mut fresh = State::default();
         apply_changes(&mut fresh, &json).unwrap();
         assert_eq!(fresh, second);

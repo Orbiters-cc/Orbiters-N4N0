@@ -2591,6 +2591,54 @@ fn spawn_watchers(ctl: Shared) {
 
 #[cfg(test)]
 mod tests {
+    /// A publish hands out a snapshot that shares every part with the one before, but those that changed; a part that
+    /// was written to and holds what it held is the same part still; the camera path is kept whole and shown thinned.
+    #[test]
+    fn a_publish_shares_what_did_not_change() {
+        use orbiters_core::slice::Slice;
+        let ctl = Controller::new(Settings::default());
+        let first = ctl.view();
+        let told = ctl.publishes();
+        ctl.update(|s| s.n4n0.afk = true);
+        let second = ctl.view();
+        assert_eq!(ctl.publishes(), told + 1);
+        assert!(!Arc::ptr_eq(&first, &second) && second.n4n0.afk && !first.n4n0.afk, "the state handed out before stays as it was");
+        assert!(Slice::same(&first.settings, &second.settings) && Slice::same(&first.capture, &second.capture) && Slice::same(&first.vrchat.world, &second.vrchat.world));
+        assert!(Slice::same(&first.n4n0.lines, &second.n4n0.lines));
+        // Written to, with what they held: the same parts again once published.
+        ctl.update(|s| {
+            s.osc.listening = first.osc.listening;
+            s.capture.trail.clear();
+            s.steamvr.overlay = false;
+            s.vrchat.world.players.clear();
+            s.settings.walk_boost.strength = first.settings.walk_boost.strength;
+        });
+        let third = ctl.view();
+        assert!(!Arc::ptr_eq(&second, &third), "a publish all the same");
+        for same in [
+            Slice::same(&second.osc, &third.osc),
+            Slice::same(&second.capture, &third.capture),
+            Slice::same(&second.steamvr, &third.steamvr),
+            Slice::same(&second.vrchat.world, &third.vrchat.world),
+            Slice::same(&second.settings, &third.settings),
+        ] {
+            assert!(same);
+        }
+        // One that changed is its own, and only that one.
+        ctl.update(|s| s.settings.walk_boost.strength = first.settings.walk_boost.strength + 0.25);
+        let fourth = ctl.view();
+        assert!(!Slice::same(&third.settings, &fourth.settings) && Slice::same(&third.osc, &fourth.osc));
+        assert_eq!(third.settings.walk_boost.strength, first.settings.walk_boost.strength, "the settings handed out before did not change under their readers");
+        // A long camera path: 1500 points at most are shown, the first and the newest part of it among them.
+        let mut recording = (*fourth).clone();
+        recording.capture.trail = (0..6000).map(|i| [i as f32, 0.0, 0.0]).collect();
+        ctl.set_snapshot(recording);
+        let shown = ctl.view().capture.trail.clone();
+        assert_eq!(shown.len(), 1500);
+        assert_eq!((shown[0], shown[1], shown[1499]), ([0.0, 0.0, 0.0], [4.0, 0.0, 0.0], [5996.0, 0.0, 0.0]));
+        assert_eq!(ctl.trail.lock().unwrap().len(), 6000, "the whole path stays with the controller");
+    }
+
     use super::*;
 
     /// OSC messages a stand-in VRChat received: (address, first argument).

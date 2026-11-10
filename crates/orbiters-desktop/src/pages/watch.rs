@@ -70,7 +70,13 @@ struct Inner<T> {
     stop: bool,
     /// The thread ended.
     ended: bool,
+    /// It ended on a panic of its look.
+    panicked: bool,
 }
+
+/// A look that panics is started again at the next frame drawn, so many times in a row; then the watch is given up
+/// until the page asks for another key, with a line in the log, not started and lost again at every frame.
+const PANICS_MOST: u8 = 3;
 
 struct Shared<T> {
     inner: Mutex<Inner<T>>,
@@ -107,11 +113,13 @@ pub struct Watch<K, T> {
     changes: u64,
     /// The change the page took last ([`Watch::keep`]).
     taken: u64,
+    /// Threads in a row that ended on a panic of their look, with no look given to the page since.
+    panics: u8,
 }
 
 impl<K, T> Default for Watch<K, T> {
     fn default() -> Self {
-        Self { running: None, changes: 0, taken: 0 }
+        Self { running: None, changes: 0, taken: 0, panics: 0 }
     }
 }
 
@@ -156,8 +164,20 @@ impl<K: PartialEq + Clone, T: Clone + PartialEq + Send + 'static> Watch<K, T> {
                         return None;
                     }
                     self.taken = inner.changes;
+                    self.panics = 0;
                     return inner.seen.clone();
                 }
+                if std::mem::take(&mut inner.panicked) {
+                    self.panics += 1;
+                    if self.panics == PANICS_MOST {
+                        eprintln!("a page's watch is given up: its look panicked {PANICS_MOST} times in a row");
+                    }
+                }
+                if self.panics >= PANICS_MOST {
+                    return None;
+                }
+            } else {
+                self.panics = 0;
             }
         }
         // Not started, gone with the page or the window, or another key: a new thread, whose first look counts as a
@@ -165,7 +185,7 @@ impl<K: PartialEq + Clone, T: Clone + PartialEq + Send + 'static> Watch<K, T> {
         self.stop();
         let window = window(ctx);
         let shared = Arc::new(Shared {
-            inner: Mutex::new(Inner { seen: None, changes: self.changes, kept: frame, now: false, stop: false, ended: false }),
+            inner: Mutex::new(Inner { seen: None, changes: self.changes, kept: frame, now: false, stop: false, ended: false, panicked: false }),
             wake: Condvar::new(),
             window: window.clone(),
         });
@@ -190,21 +210,32 @@ impl<K: PartialEq + Clone, T: Clone + PartialEq + Send + 'static> Watch<K, T> {
     }
 }
 
+/// Says the thread ended, however it ends: a look that panicked left the watch looking alive (`ended` was set only
+/// where the thread returned), and no frame ever started it again, on this visit of the page or a later one.
+struct Ended<'a, T>(&'a Shared<T>);
+
+impl<T> Drop for Ended<'_, T> {
+    fn drop(&mut self) {
+        let mut inner = self.0.lock();
+        inner.ended = true;
+        inner.panicked = std::thread::panicking();
+    }
+}
+
 fn run<T: PartialEq>(shared: Arc<Shared<T>>, ctx: egui::Context, period: Duration, mut look: impl FnMut() -> T) {
+    let _ended = Ended(&shared);
     loop {
         // Frames drawn since the page kept the watch: it is no longer on screen. Or the window is not.
         let frame = ctx.cumulative_frame_nr();
         {
-            let mut inner = shared.lock();
+            let inner = shared.lock();
             if shared.over(&inner) || frame > inner.kept + 1 {
-                inner.ended = true;
                 return;
             }
         }
         let saw = look();
         let mut inner = shared.lock();
         if shared.over(&inner) {
-            inner.ended = true;
             return;
         }
         if inner.seen.as_ref() != Some(&saw) {
@@ -405,6 +436,58 @@ mod tests {
         out.textures_delta.clear();
         let _ = ctx.run_logic(&input, follow_window);
         wait_for("looks without the focus", || looks.load(Ordering::SeqCst) >= 5);
+    }
+
+    /// A look that panicked left its watch stranded: the thread was gone but never said so, and no frame started
+    /// another, on this visit or the next.
+    #[test]
+    fn a_look_that_panics_is_started_again_and_given_up_when_it_keeps_panicking() {
+        let ctx = egui::Context::default();
+        let looks = Arc::new(AtomicU32::new(0));
+        // How many of the first looks panic.
+        let failing = Arc::new(AtomicU32::new(1));
+        let mut watch: Watch<(), u32> = Watch::default();
+        let mut t = 0.0;
+        let mut frame = |watch: &mut Watch<(), u32>| -> Option<u32> {
+            t += 0.01;
+            let mut seen = None;
+            let mut out = ctx.run_ui(egui::RawInput { time: Some(t), ..Default::default() }, |ui| {
+                seen = watch.keep(ui.ctx(), &(), Duration::from_millis(5), || {
+                    let (looks, failing) = (looks.clone(), failing.clone());
+                    move || {
+                        let n = looks.fetch_add(1, Ordering::SeqCst);
+                        assert!(n >= failing.load(Ordering::SeqCst), "a look that fails (expected in this test)");
+                        n
+                    }
+                });
+            });
+            out.textures_delta.clear();
+            seen
+        };
+        let ended = |watch: &Watch<(), u32>| watch.running.as_ref().is_some_and(|(_, shared)| shared.lock().ended);
+        // The first look panics: its thread says it ended, and the next frame starts another, whose look is given.
+        frame(&mut watch);
+        wait_for("the panicked thread to say it ended", || ended(&watch));
+        assert_eq!(frame(&mut watch), None, "started again");
+        let mut seen = None;
+        wait_for("a look after the panic", || {
+            seen = frame(&mut watch);
+            seen.is_some()
+        });
+        assert!(seen.is_some_and(|n| n >= 1));
+        // A look that always panics is started so many times, then left alone: no thread a frame for ever.
+        let mut always: Watch<(), u32> = Watch::default();
+        failing.store(u32::MAX, Ordering::SeqCst);
+        let before = looks.load(Ordering::SeqCst);
+        for _ in 0..PANICS_MOST {
+            frame(&mut always);
+            wait_for("the panicked thread to say it ended", || ended(&always));
+        }
+        for _ in 0..5 {
+            assert_eq!(frame(&mut always), None);
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(looks.load(Ordering::SeqCst) - before, u32::from(PANICS_MOST), "given up after {PANICS_MOST} panics in a row");
     }
 
     #[test]

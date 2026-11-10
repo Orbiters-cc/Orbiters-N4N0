@@ -189,7 +189,7 @@ fn make_pictures(dir: &Path) -> anyhow::Result<Vec<(PathBuf, u64)>> {
 
 /// The gallery's list, in place of this computer's: the made-up pictures, each of a world of a few, a day apart, long ago (so that what says when is a date, the same on any day).
 fn list(_sessions: &Path, _folders: &[PathBuf]) -> Vec<LoadedRecent> {
-    const WORLDS: [&str; 5] = ["Sky Dream", "Rainy Skyline", "Pacific Dreams (Night)", "After The Rain", "Canine Test Lab"];
+    const WORLDS: [&str; 5] = ["Sky Dream", "Rainy Skyline", "Pacific Dreams (Night)", "After The Rain", "Canine Test Lab"]; // i18n: not shown (fixed synthetic world names for pixel comparisons)
     PICTURES
         .get()
         .map(|pictures| {
@@ -641,17 +641,17 @@ fn script(rig: &mut Rig) {
     rig.open("qm-open-1", Around::QuickMenu);
     rig.point_at_each("qm-point", false, Turns);
     rig.ticks("qm-ticks");
-    rig.facts_cost("the Quick Menu, no sheet");
+    rig.facts_cost("the Quick Menu, no sheet"); // i18n: not shown (benchmark report labels)
     rig.close("qm-close-1");
     rig.open("qm-open-2", Around::QuickMenu);
     // The sheets from it. Their lists are read on other threads: at rest only.
     rig.pressing("qm-sheet-all", Action::All, Rest);
     rig.point_at_each("qm-sheet-all-point", true, Rest);
     rig.ticks("qm-sheet-all-ticks");
-    rig.facts_cost("All tools");
+    rig.facts_cost("All tools"); // i18n: not shown (benchmark report labels)
     rig.scroll("qm-sheet-all-scroll", Rest);
     rig.pressing("qm-sheet-pictures", Action::Pictures, Rest);
-    rig.facts_cost("Pictures, 60 of them");
+    rig.facts_cost("Pictures, 60 of them"); // i18n: not shown (benchmark report labels)
     rig.scroll("qm-sheet-pictures-scroll", Rest);
     rig.point_at_each("qm-sheet-pictures-point", true, Rest);
     rig.pressing("qm-sheet-instances", Action::Page(Target::Instances), Rest);
@@ -672,7 +672,7 @@ fn script(rig: &mut Rig) {
     rig.open("wheel-open-1", Around::Wheel);
     rig.point_at_each("wheel-point", false, Rest);
     rig.ticks("wheel-ticks");
-    rig.facts_cost("the wheel, no sheet");
+    rig.facts_cost("the wheel, no sheet"); // i18n: not shown (benchmark report labels)
     rig.close("wheel-close-1");
     rig.open("wheel-open-2", Around::Wheel);
     rig.pressing("wheel-sheet-all", Action::All, Rest);
@@ -824,7 +824,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             }
             summary(mode, run, &rig, &mut report);
             if let Some(out) = &out {
-                let mut csv = String::from("step,turn,set_open_ms,follow_ms,hand_ms,paint_ms,upload_ms,shows,pixels\n");
+                let mut csv = String::from("step,turn,set_open_ms,follow_ms,hand_ms,paint_ms,upload_ms,shows,pixels\n"); // i18n: not shown (machine-readable benchmark column names)
                 for step in &rig.steps {
                     for (n, c) in step.turns.iter().enumerate() {
                         use std::fmt::Write as _;

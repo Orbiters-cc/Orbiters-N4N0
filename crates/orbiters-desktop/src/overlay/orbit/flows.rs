@@ -210,7 +210,7 @@ fn seen(panels: &Panels) -> Vec<String> {
                 p.pixels().hash(&mut picture);
             }
             format!(
-                "{:?} at {:?}, shown {}, painted {}, alpha {}, out {}, hover {:?}, pressed {:?}, items {:?}, picture {:x}",
+                "{:?} at {:?}, shown {}, painted {}, alpha {}, out {}, hover {:?}, pressed {:?}, items {:?}, picture {:x}", // i18n: not shown (test state comparison diagnostic)
                 p.zone,
                 p.placed,
                 p.shown,

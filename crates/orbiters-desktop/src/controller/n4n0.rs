@@ -60,7 +60,7 @@ impl Host for Link {
     }
 
     fn world(&self) -> WorldState {
-        self.with(|c| c.snapshot.lock().unwrap().vrchat.world.clone()).unwrap_or_default()
+        self.with(|c| (*c.snapshot.lock().unwrap().vrchat.world).clone()).unwrap_or_default()
     }
 
     fn capturing(&self) -> bool {
@@ -68,7 +68,8 @@ impl Host for Link {
     }
 
     /// Into the snapshot, with the calls' part (published by the calls themselves) and the avatar's name (VRChat's
-    /// log's, when N4N0 has none: VRChat's OSCQuery, its states), and only when it changed.
+    /// log's, when N4N0 has none: VRChat's OSCQuery, its states), and only when it changed. N4N0's lists come as the
+    /// slices it keeps: one it did not change is the snapshot's own part still, and is neither compared nor replaced.
     fn publish(&self, mut status: N4n0Status) {
         self.with(|c| {
             c.update_if(|s| {
@@ -77,7 +78,9 @@ impl Host for Link {
                     status.states.avatar_name = s.vrchat.world.avatar_name.clone();
                 }
                 let changed = s.n4n0 != status;
-                s.n4n0 = status;
+                if changed {
+                    s.n4n0 = status;
+                }
                 changed
             })
         });
@@ -97,7 +100,7 @@ impl Host for Link {
     }
 
     fn calls(&self) -> CallsStatus {
-        self.with(|c| c.snapshot.lock().unwrap().n4n0.calls.clone()).unwrap_or_default()
+        self.with(|c| (*c.snapshot.lock().unwrap().n4n0.calls).clone()).unwrap_or_default()
     }
 
     fn ringing_in(&self) -> bool {

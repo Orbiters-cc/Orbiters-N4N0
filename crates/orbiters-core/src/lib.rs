@@ -23,6 +23,7 @@ pub mod protocol;
 pub mod reconstruction;
 pub mod settings;
 pub mod shares;
+pub mod slice;
 pub mod video_history;
 pub mod visited;
 pub mod voice;

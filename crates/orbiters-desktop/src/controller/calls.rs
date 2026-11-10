@@ -1341,11 +1341,7 @@ impl super::Controller {
                 picked: rt.picked,
             }
         };
-        self.update_if(|s| {
-            let changed = s.n4n0.calls != status;
-            s.n4n0.calls = status;
-            changed
-        });
+        self.update_if(|s| s.n4n0.calls.set(status));
     }
 }
 

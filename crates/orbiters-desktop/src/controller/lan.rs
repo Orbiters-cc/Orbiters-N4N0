@@ -103,7 +103,7 @@ impl super::Controller {
             drop(service);
             self.update_if(|s| {
                 let changed = s.lan != LanStatus::default();
-                s.lan = LanStatus::default();
+                *s.lan = LanStatus::default();
                 changed
             });
             return;
@@ -151,7 +151,7 @@ impl super::Controller {
                     let network = Network::Lan { ip: next.here, vrchat };
                     self.start_osc_on(network, Discovery::Mdns, Ports { osc: lan::OSC_PORT, query: 0 });
                 }
-                None => self.update(|s| s.osc = crate::state::OscStatus { enabled: true, ..Default::default() }),
+                None => self.update(|s| *s.osc = crate::state::OscStatus { enabled: true, ..Default::default() }),
             }
             *running = wanted_service;
         } else if let Some(peer) = peer {
@@ -183,11 +183,7 @@ impl super::Controller {
             Choice::Nobody | Choice::Ask => None,
         };
         let status = LanStatus { link, found, peer, peer_label: label, this_computer: here };
-        self.update_if(|s| {
-            let changed = s.lan != status;
-            s.lan = status;
-            changed
-        });
+        self.update_if(|s| s.lan.set(status));
     }
 }
 

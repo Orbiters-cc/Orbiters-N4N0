@@ -2366,9 +2366,9 @@ fn n4n0_hands_its_menus_the_3d_captures_shares_them_and_reads_friends_while_shar
     let f = |id: &str, name: &str| Friend { id: id.into(), name: name.into() };
     *host.friends.lock().unwrap() = Some(Ok(vec![f("usr_b", "bob"), f("usr_a", "Alice")]));
     n.command(Command::Friends { on: true });
-    assert!(until(|| matches!(host.view().friends, Friends::Ready { .. })));
+    assert!(until(|| matches!(*host.view().friends, Friends::Ready { .. })));
     assert_eq!(host.view().friends.list(), [f("usr_a", "Alice"), f("usr_b", "bob")]);
-    assert_eq!(n.n4n0.lock().unwrap().screen.menu.friends, host.view().friends);
+    assert_eq!(n.n4n0.lock().unwrap().screen.menu.friends, *host.view().friends);
     n.command(Command::Friends { on: false });
     assert_eq!(host.view().friends, Friends::None);
     *host.friends.lock().unwrap() = Some(Err("VRCX and VRCNext were not found".into()));

@@ -2355,7 +2355,7 @@ mod tests {
         assert_eq!(h.control("Export…").map(|c| c.1), Some(false), "the file would hold the result going away");
         assert_eq!(h.control("Share publicly").map(|c| c.1), Some(false), "as would a share");
         snap.reconstruction = None;
-        snap.reconstruct_queue = vec![session];
+        *snap.reconstruct_queue = vec![session];
         h.ctl.set_snapshot(snap);
         h.settle();
         assert_eq!(h.control("Waiting · cancel").map(|c| c.1), Some(true));

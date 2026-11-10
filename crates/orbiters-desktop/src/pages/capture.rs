@@ -343,7 +343,7 @@ fn quiet_row(ui: &mut Ui, cx: &mut Cx) {
         let seg_rect = Rect::from_min_size(pos2(label.right() + 12.0, rect.top()), vec2(150.0, 36.0));
         let mut seg = ui.new_child(UiBuilder::new().max_rect(seg_rect).layout(Layout::left_to_right(Align::Center)));
         if widgets::segmented(&mut seg, "photo-3d-length", &mut length, &lengths, true) {
-            super::form::save(cx.ctl, &snap.settings, &Settings { photo_3d: length, ..snap.settings.clone() });
+            super::form::save(cx.ctl, &snap.settings, &Settings { photo_3d: length, ..Settings::clone(&snap.settings) });
         }
         let consent = snap.settings.consent_acknowledged;
         let t = Button::new(tr("Test pattern"))
@@ -625,7 +625,7 @@ fn recording_settings(ui: &mut Ui, cx: &mut Cx) {
         let quality_changed = widgets::segmented(&mut seg, "storage-quality", &mut quality, &qualities, true);
         let mode_changed = widgets::segmented(&mut seg, "capture-mode", &mut mode, &modes, false);
         if mode_changed || quality_changed {
-            super::form::save(cx.ctl, settings, &Settings { capture_mode: mode, storage_quality: quality, ..settings.clone() });
+            super::form::save(cx.ctl, settings, &Settings { capture_mode: mode, storage_quality: quality, ..Settings::clone(settings) });
         }
     });
 }
@@ -663,7 +663,7 @@ fn consent(ui: &mut Ui, cx: &mut Cx) {
     }
     let button = Rect::from_min_size(pos2(rect.right() - 24.0 - 200.0, rect.center().y - 22.0), vec2(200.0, 44.0));
     if Button::new(tr("I understand")).variant(Variant::Primary).width(button.width()).show_at(&mut ui, button).clicked() {
-        super::form::save(cx.ctl, &cx.snap.settings, &Settings { consent_acknowledged: true, ..cx.snap.settings.clone() });
+        super::form::save(cx.ctl, &cx.snap.settings, &Settings { consent_acknowledged: true, ..Settings::clone(&cx.snap.settings) });
     }
 }
 

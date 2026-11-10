@@ -46,7 +46,7 @@ fn busy_evening() -> Snapshot {
         world.players.insert(format!("usr_{i:08x}-6a55-4f07-9a0e-5b1d2b7f6c11"), name.clone());
         world.avatars.insert(name, format!("Some avatar {i:02} ✨"));
     }
-    s.sources = vec![orbiters_core::protocol::SpoutSourceInfo { name: "VRCSender1".into(), width: 1920, height: 1080, format: 87, description: String::new() }];
+    *s.sources = vec![orbiters_core::protocol::SpoutSourceInfo { name: "VRCSender1".into(), width: 1920, height: 1080, format: 87, description: String::new() }];
     s.mics = (0..4).map(|i| orbiters_core::protocol::AudioDeviceInfo { id: format!("{{0.0.1.00000000}}.{{device-{i}}}"), name: format!("Microphone {i} (USB audio)"), default: i == 0 }).collect();
     s.osc.enabled = true;
     s.osc.listening = true;
@@ -121,7 +121,7 @@ fn busy_n4n0() -> N4n0Status {
             saved_utc: "2026-10-20T22:14:03Z".into(),
         })
         .collect();
-    o.resources = usage(0);
+    *o.resources = usage(0);
     o.voice = crate::state::VoiceStatus { installed: true, running: true, ..Default::default() };
     let state = |i: usize| StateView {
         id: format!("state-{i}"),
@@ -140,13 +140,13 @@ fn busy_n4n0() -> N4n0Status {
     o.states.avatars = (0..8)
         .map(|a| crate::state::AvatarView { id: format!("avtr_{a:08x}-5f1a-4d90-8e3b-77a1c0d4e9f2"), name: Some(format!("Avatar {a} ✨")), worn: a == 0, states: (0..4).map(state).collect() })
         .collect();
-    o.captures = CapturesView {
+    *o.captures = CapturesView {
         latest: None,
         history: (0..60).map(|i| CaptureRow { key: format!("2026-11-10_21-{i:02}-12_The-Black-Cat"), world: "The Black Cat".into(), taken: 1_762_800_000 + i, ..Default::default() }).collect(),
         listed: true,
         note: String::new(),
     };
-    o.friends = Friends::Ready { friends: (0..120).map(|i| Friend { id: format!("usr_{i:08x}-6a55-4f07-9a0e-5b1d2b7f6c11"), name: format!("A friend of mine {i}") }).collect() };
+    *o.friends = Friends::Ready { friends: (0..120).map(|i| Friend { id: format!("usr_{i:08x}-6a55-4f07-9a0e-5b1d2b7f6c11"), name: format!("A friend of mine {i}") }).collect() };
     o.feedback = FeedbackView {
         signed_in: true,
         subjects: (0..12).map(|i| Subject { world: format!("wrld_{i:08x}-430c-4f8f-b53e-1f294eed230b"), name: format!("A world visited {i}"), ..Default::default() }).collect(),
@@ -270,7 +270,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         })),
         ("N4N0's screen open: its panel's text", Box::new(|round| handed(&link, &|s| s.panel = Some(format!("Step {round} of what N4N0 is writing on its panel"))))),
         ("N4N0's screen open: a picture's countdown", Box::new(|round| handed(&link, &|s| s.photo_countdown = Some(round as u32 % 10)))),
-        ("processes' footprint (every 3 s)", Box::new(|round| handed(&link, &|s| s.resources = usage(round + 1)))),
+        ("processes' footprint (every 3 s)", Box::new(|round| handed(&link, &|s| *s.resources = usage(round + 1)))),
         ("N4N0's answer arriving (a line replaced)", Box::new(|round| {
             handed(&link, &|s| {
                 if let Some(last) = s.lines.last_mut() {
@@ -322,11 +322,9 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         );
     }
     // What a recording adds: its camera path, as long as it gets, goes with each of its statistics.
-    ctl.update(|s| {
-        for i in 0..6000 {
-            s.push_trail([i as f32 * 0.3, 1.6, (i as f32 * 0.05).sin() * 4.0]);
-        }
-    });
+    let mut recording = (*ctl.view()).clone();
+    recording.capture.trail = (0..6000).map(|i| [i as f32 * 0.3, 1.6, (i as f32 * 0.05).sin() * 4.0]).collect();
+    ctl.set_snapshot(recording);
     let mut t = case(&ctl, &mut wire, rounds / 4, |round| {
         ctl.update(|s| {
             let stats = s.capture.stats.get_or_insert_with(Default::default);

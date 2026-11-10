@@ -283,12 +283,12 @@ impl<P: Pictures> MenuHost<P> {
         }
         // The 3D captures (their pictures fetched as they show) and Share to …'s friends.
         let mut pictures = Vec::new();
-        if m.captures != n4n0.captures {
-            pictures = m.set_captures(n4n0.captures.clone());
+        if m.captures != *n4n0.captures {
+            pictures = m.set_captures((*n4n0.captures).clone());
             changed = true;
         }
-        if m.friends != n4n0.friends {
-            m.set_friends(n4n0.friends.clone());
+        if m.friends != *n4n0.friends {
+            m.set_friends((*n4n0.friends).clone());
             changed = true;
         }
         // World feedback: taken when the app's changes (the menu's own presses show at once, before the app has them).
@@ -770,7 +770,8 @@ mod tests {
             contacts: vec![CallContact { id: "c1".into(), name: "Ada".into() }],
             call: Some(CallView { name: "Ada".into(), phase: CallPhase::Ringing, incoming: true, connected_at_ms: None, muted: false, mic_level: 0.0, remote_level: 0.0 }),
             ..Default::default()
-        };
+        }
+        .into();
         n4n0.states = StatesView {
             avatar_id: Some("avtr_a".into()),
             states: vec![StateView { id: "s1".into(), name: "Cosy".into(), default: true, ..Default::default() }],

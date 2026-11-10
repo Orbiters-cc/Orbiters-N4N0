@@ -56,7 +56,7 @@ fn network_snapshot(base: &crate::state::Snapshot, link: crate::state::LanLink) 
     let pc = FoundVrchat { name: "VRChat-Client-D4E5F6".into(), device: Some("DESKTOP-4F2K".into()), ip: Ipv4Addr::new(192, 168, 1, 40), query_port: 51120, osc_port: None };
     let mut snapshot = base.clone();
     let connected = link == crate::state::LanLink::Connected;
-    snapshot.lan = crate::state::LanStatus {
+    *snapshot.lan = crate::state::LanStatus {
         link,
         found: match link {
             crate::state::LanLink::Looking | crate::state::LanLink::NotAllowed => Vec::new(),
@@ -3121,7 +3121,7 @@ fn n4n0_snapshot(base: &Snapshot) -> Snapshot {
     o.controls = 42;
     o.face = N4n0Face::Talking;
     o.panel = Some("Done, hoodie on. Now go find\nyour friends instead of\ntalking to a floating ball.".into());
-    o.lines = vec![
+    *o.lines = vec![
         line(N4n0Who::You, "Nano, mets mon sweat à capuche"),
         line(N4n0Who::Note, "N4N0 set Clothes / Hoodie"),
         line(N4n0Who::N4n0, "Done, hoodie on. Now go find your friends instead of talking to a floating ball."),
@@ -3137,7 +3137,7 @@ fn n4n0_snapshot(base: &Snapshot) -> Snapshot {
     }];
     o.quota = Some(orbiters_n4n0_core::assistant::Quota { used: 13, limit: 80, resets_at: None, own_key: false });
     o.voice = crate::state::VoiceStatus { installed: true, running: true, ..Default::default() };
-    o.videos = vec![
+    *o.videos = vec![
         orbiters_n4n0_core::videos::SavedVideo {
             url: "https://www.youtube.com/watch?v=36YnV9STBqc".into(),
             title: Some("Lo-fi beats to sit in a VRChat club to".into()),
@@ -3151,7 +3151,7 @@ fn n4n0_snapshot(base: &Snapshot) -> Snapshot {
             saved_utc: "2026-10-18T21:33:48Z".into(),
         },
     ];
-    o.resources = vec![
+    *o.resources = vec![
         ProcessUsage { name: "Orbiters - N4N0".into(), cpu_percent: 1.2, memory_mb: 148.0 },
         ProcessUsage { name: "N4N0's ears".into(), cpu_percent: 0.4, memory_mb: 912.0 },
         ProcessUsage { name: "VRChat".into(), cpu_percent: 187.0, memory_mb: 6840.0 },
@@ -3215,7 +3215,7 @@ pub(crate) fn idle_snapshot(settings: &Settings, sessions: &[orbiters_core::bund
     s.account.state = crate::state::AccountState::SignedIn { username: "Orbit".into() };
     s.vrchat.running = true;
     s.vrchat.log_found = true;
-    s.vrchat.world = WorldState {
+    *s.vrchat.world = WorldState {
         world_id: Some("wrld_4cf554b4-430c-4f8f-b53e-1f294eed230b".into()),
         world_name: Some("Canine Test Lab".into()),
         instance: Some("12345~private".into()),
@@ -3223,7 +3223,7 @@ pub(crate) fn idle_snapshot(settings: &Settings, sessions: &[orbiters_core::bund
         log_file: Some(PathBuf::from(r"C:\Users\Enzo\AppData\LocalLow\VRChat\VRChat\output_log_2026-10-20_01-12-44.txt")),
         ..Default::default()
     };
-    s.sources = vec![SpoutSourceInfo { name: "VRChat".into(), width: 1920, height: 1080, format: 87, description: String::new() }];
+    *s.sources = vec![SpoutSourceInfo { name: "VRChat".into(), width: 1920, height: 1080, format: 87, description: String::new() }];
     s.osc.enabled = true;
     s.osc.listening = true;
     s.osc.advertising = true;
@@ -3235,7 +3235,7 @@ pub(crate) fn idle_snapshot(settings: &Settings, sessions: &[orbiters_core::bund
     let now_ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0);
     s.steamvr.calibration = Some(crate::state::CalibrationInfo { head_height_m: 1.63, arm_span_m: 1.41, devices: 6, utc_ms: now_ms - 7 * 60_000 });
     s.settings.performance.record_mic = true;
-    s.mics = vec![
+    *s.mics = vec![
         orbiters_core::protocol::AudioDeviceInfo { id: "index".into(), name: "Microphone (Valve Index)".into(), default: true },
         orbiters_core::protocol::AudioDeviceInfo { id: "desk".into(), name: "Desk microphone (USB)".into(), default: false },
     ];
@@ -3393,7 +3393,7 @@ fn overlay_shots(out: &std::path::Path, settings: &Settings) -> anyhow::Result<(
     idle.osc.vrchat_found = true;
     idle.osc.values = 214;
     idle.settings.performance.record_mic = true;
-    idle.mics = vec![orbiters_core::protocol::AudioDeviceInfo { id: "1".into(), name: "Microphone (Valve Index)".into(), default: true }];
+    *idle.mics = vec![orbiters_core::protocol::AudioDeviceInfo { id: "1".into(), name: "Microphone (Valve Index)".into(), default: true }];
     let now_ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0);
     idle.steamvr.calibration = Some(CalibrationInfo { head_height_m: 1.63, arm_span_m: 1.41, devices: 6, utc_ms: now_ms - 7 * 60_000 });
     let mut recording = idle.clone();
@@ -3521,7 +3521,7 @@ fn overlay_menu_shots(out: &std::path::Path, snap: &Snapshot) -> anyhow::Result<
     use orbiters_n4n0_core::menu::Target;
     let backend: Ctl = std::sync::Arc::new(Still);
     let mut snap = snap.clone();
-    snap.n4n0.captures = sample_captures();
+    *snap.n4n0.captures = sample_captures();
     let mut canvas = crate::overlay::Canvas::new(1024, 576);
     let mut host = MenuHost::new(canvas.ctx().clone());
     for row in &snap.n4n0.captures.history {
@@ -3562,13 +3562,13 @@ fn overlay_menu_shots(out: &std::path::Path, snap: &Snapshot) -> anyhow::Result<
     // Share to …: the friends come with the next snapshot, two are chosen.
     press(&mut host, &snap, Target::ShareTo(0));
     shoot(&host, "overlay-menu-share-to-loading", Target::FindFriend)?;
-    snap.n4n0.friends = Friends::ready(sample_friends());
+    *snap.n4n0.friends = Friends::ready(sample_friends());
     host.follow(&snap);
     press(&mut host, &snap, Target::Friend(0));
     press(&mut host, &snap, Target::Friend(4));
     shoot(&host, "overlay-menu-share-to", Target::SendShare)?;
     press(&mut host, &snap, Target::SendShare);
-    snap.n4n0.friends = Friends::None;
+    *snap.n4n0.friends = Friends::None;
     // The flagged capture's Share publicly: the warning first.
     press(&mut host, &snap, Target::SharePublic(2));
     shoot(&host, "overlay-menu-explicit", Target::ShareAnyway)?;

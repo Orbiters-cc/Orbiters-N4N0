@@ -18,7 +18,8 @@ pub struct SavedVideo {
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Videos {
-    pub videos: Vec<SavedVideo>,
+    /// A slice: N4N0's published state shares the list, never copies it (`orbiters_core::slice`).
+    pub videos: orbiters_core::slice::Slice<Vec<SavedVideo>>,
 }
 
 /// `<config>/n4n0/videos.json` (N4N0's earlier folder moved there first, [`migrate`]).
@@ -223,7 +224,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&config);
         let (legacy, dir) = (config.join(LEGACY_DIR), config.join(DIR));
         std::fs::create_dir_all(&legacy).unwrap();
-        let list = Videos { videos: vec![SavedVideo { url: "https://youtu.be/36YnV9STBqc".into(), title: None, world: None, saved_utc: "t".into() }] };
+        let list = Videos { videos: vec![SavedVideo { url: "https://youtu.be/36YnV9STBqc".into(), title: None, world: None, saved_utc: "t".into() }].into() };
         list.save(&legacy.join("videos.json")).unwrap();
         std::fs::write(legacy.join("videos.json.bad-1"), "{").unwrap();
         migrate(&config);

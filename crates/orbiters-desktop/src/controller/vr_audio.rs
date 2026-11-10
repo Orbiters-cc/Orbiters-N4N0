@@ -404,11 +404,7 @@ fn save(path: &Path, saved: &Saved) {
 
 impl Controller {
     fn set_vr_audio(&self, status: Status) {
-        self.update_if(|s| {
-            let changed = s.vr_audio != status;
-            s.vr_audio = status;
-            changed
-        });
+        self.update_if(|s| s.vr_audio.set(status));
     }
 }
 

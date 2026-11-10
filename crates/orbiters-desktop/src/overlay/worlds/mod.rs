@@ -25,7 +25,8 @@ const FEW_CAPTURES: usize = 3;
 
 /// How much of a hole's width a capture lying in it fills: its top and foot are cut by the hole, as captures are wider than tall.
 /// Nearer filling it (round 15's judges asked for most of the hole), still whole top to foot (request 60).
-pub const SMALL_FILLS_HOLE: f32 = 1.05;
+// Wider than the hole now that it lies a whole radius behind it and is seen from low: from the eyes it fills the hole side to side (round 18's judges: half of it).
+pub const SMALL_FILLS_HOLE: f32 = 1.25;
 mod diagnostics;
 pub mod finder;
 #[cfg(windows)]

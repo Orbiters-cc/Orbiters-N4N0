@@ -339,6 +339,30 @@ pub fn local_time(iso: &str) -> String {
     tr!("{day} {month} {year}, {time}", day = t.day(), month = month, year = t.year(), time = format!("{:02}:{:02}", t.hour(), t.minute()))
 }
 
+/// "5 min ago" for the moment `epoch` at `now` (Unix seconds; `orbiters_ui::format::relative_time`), and a frame asked
+/// for when that would read otherwise: the pages draw only when something changed, and this text changes by the clock
+/// alone. For text on screen: ask it for the rows in view.
+pub fn ago(ctx: &egui::Context, epoch: u64, now: u64) -> String {
+    if let Some(wait) = orbiters_ui::format::relative_time_changes_in(epoch, now) {
+        ctx.request_repaint_after(after_seconds(wait));
+    }
+    orbiters_ui::format::relative_time(epoch, now)
+}
+
+/// The wait for something due `seconds` after a clock read in whole seconds: a little more, so that the frame comes
+/// once the second has turned.
+pub fn after_seconds(seconds: u64) -> std::time::Duration {
+    std::time::Duration::from_millis(seconds * 1000 + 50)
+}
+
+/// The local day `now` (Unix seconds) is in, as a number that grows by one at each local midnight, and the seconds
+/// until the next one: what is said by the day ("Today", "Yesterday", "at 21:03" or a date) changes then.
+pub fn local_day(now: u64) -> (i64, u64) {
+    let offset = time::UtcOffset::current_local_offset().map_or(0, |o| o.whole_seconds() as i64);
+    let local = now as i64 + offset;
+    (local.div_euclid(86_400), (86_400 - local.rem_euclid(86_400)) as u64)
+}
+
 /// Unix seconds in local time, as [`local_time`].
 pub fn local_time_unix(secs: u64) -> String {
     let Ok(t) = time::OffsetDateTime::from_unix_timestamp(secs as i64) else { return String::new() };
@@ -379,6 +403,23 @@ pub(crate) mod rest {
     /// How soon the frame that gave `output` asked for the next.
     pub fn asked(output: &egui::FullOutput) -> Duration {
         output.viewport_output.get(&egui::ViewportId::ROOT).map_or(Duration::MAX, |v| v.repaint_delay)
+    }
+
+    /// Every text the frame that gave `output` painted, a line each.
+    pub fn texts(output: &egui::FullOutput) -> String {
+        fn of(shape: &egui::Shape, out: &mut String) {
+            match shape {
+                egui::Shape::Text(text) => {
+                    out.push_str(text.galley.text());
+                    out.push('\n');
+                }
+                egui::Shape::Vec(shapes) => shapes.iter().for_each(|s| of(s, out)),
+                _ => {}
+            }
+        }
+        let mut out = String::new();
+        output.shapes.iter().for_each(|clipped| of(&clipped.shape, &mut out));
+        out
     }
 }
 

@@ -197,6 +197,9 @@ pub struct State {
     /// only to `bookmarks_file` when it is given.
     fixed: bool,
     bookmarks_file: Option<std::path::PathBuf>,
+    /// The time it is, in place of the computer's clock (tests of what changes by the clock alone).
+    #[cfg(test)]
+    clock: Option<u64>,
 }
 
 #[derive(Clone, PartialEq)]
@@ -205,7 +208,8 @@ struct GroupsKey {
     revision: u64,
     query: String,
     shown: Shown,
-    day: u64,
+    /// The local day it is: "Today" and "Yesterday" are other days after midnight.
+    day: i64,
     /// The day names are in this language.
     language: orbiters_i18n::Language,
 }
@@ -324,7 +328,7 @@ impl State {
             revision: self.revision,
             query: self.query.trim().to_lowercase(),
             shown: self.shown.clone(),
-            day: now / 3600,
+            day: super::local_day(now).0,
             language: orbiters_i18n::language(),
         };
         if let Some((made, groups)) = &self.groups {
@@ -419,7 +423,10 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
     let ctx = ui.ctx().clone();
     let page = ui.max_rect();
     let t = anim::time(&ctx);
+    #[cfg(not(test))]
     let now = now_secs();
+    #[cfg(test)]
+    let now = state.clock.unwrap_or_else(now_secs);
     state.refresh(&ctx, cx.visit);
     state.thumbs.step(&ctx);
     if state.copied.as_ref().is_some_and(|(_, at)| t - at >= COPIED_FOR) {
@@ -444,6 +451,12 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
     let below = Rect::from_min_max(pos2(page.left(), content_top), page.max);
 
     let groups = state.groups(now);
+    // The history is told by the day: at midnight today's videos are yesterday's. (The rows in view ask for the frame
+    // their own "5 min ago" changes at.) The page looked at its file every five seconds and drew itself each time,
+    // which kept both right; now that it is drawn only when the file changed, the clock has to ask.
+    if state.shown == Shown::History && !groups.is_empty() {
+        ctx.request_repaint_after(super::after_seconds(super::local_day(now).1));
+    }
     let mut acts = Vec::new();
     let from = orbiters_ui::blur::next_shape(ui);
     let salt = match &state.shown {
@@ -899,7 +912,7 @@ fn video_row(ui: &mut Ui, r: Rect, row: &Row, texture: Option<TextureId>, held: 
         let title_h = galley.size().y;
         let top = r.center().y - (title_h + 22.0) / 2.0;
         p.galley(pos2(x, top), galley, title_c);
-        let when = if row.plays > 0 { format::relative_time(row.when, now) } else { tr!("saved {when}", when = format::relative_time(row.when, now)) };
+        let when = if row.plays > 0 { crate::pages::ago(ui.ctx(), row.when, now) } else { tr!("saved {when}", when = crate::pages::ago(ui.ctx(), row.when, now)) };
         let meta: Vec<&str> = [row.channel.as_deref(), row.world.as_deref(), Some(when.as_str())].into_iter().flatten().filter(|s| !s.is_empty()).collect();
         widgets::text_truncated(p, pos2(x, top + title_h + 14.0), Align2::LEFT_CENTER, &Txt::new(meta.join(" · "), 12.5).color(theme::FG_3), text_w);
     }
@@ -1176,6 +1189,17 @@ mod tests {
         }
 
         fn frame(&mut self, events: Vec<Event>) {
+            self.frame_said(events);
+        }
+
+        /// A frame with nothing done; how soon it asked for the next, and the texts it painted, in small letters.
+        fn frame_lower(&mut self) -> (std::time::Duration, String) {
+            let (asked, said) = self.frame_said(Vec::new());
+            (asked, said.to_lowercase())
+        }
+
+        /// A frame; how soon it asked for the next, and the texts it painted.
+        fn frame_said(&mut self, events: Vec<Event>) -> (std::time::Duration, String) {
             self.time += 1.0 / 60.0;
             let input =
                 RawInput { screen_rect: Some(Rect::from_min_size(egui::Pos2::ZERO, vec2(1048.0, 780.0))), time: Some(self.time), events, ..Default::default() };
@@ -1185,6 +1209,7 @@ mod tests {
                 show(ui, &mut cx, state);
             });
             output.textures_delta.clear();
+            (crate::pages::rest::asked(&output), crate::pages::rest::texts(&output))
         }
 
         fn settle(&mut self) {
@@ -1237,6 +1262,44 @@ mod tests {
         assert!(h.state.picker.as_ref().is_some_and(|p| p.closing));
         h.settle();
         assert!(h.state.picker.is_none());
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    /// The page drew itself every five seconds to look at its file, which also kept "5 min ago" and "Today" right.
+    /// Drawn only when the file changed, an untouched page went on saying "just now" of a video played an hour ago,
+    /// and kept yesterday's under Today. The clock asks for its frames now: here the file never changes, nobody
+    /// touches the page, and only the time moves.
+    #[test]
+    fn what_the_clock_alone_changes_asks_for_its_frame() {
+        let dir = std::env::temp_dir().join(format!("orbiters-videos-clock-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // Half a minute before the local midnight, a video played fifty seconds ago.
+        let (_, to_midnight) = crate::pages::local_day(now_secs());
+        let now = now_secs() + to_midnight - 30;
+        let mut history = History::default();
+        history.record("https://www.youtube.com/watch?v=36YnV9STBqc", now - 50, None, Some("Movie Night"));
+        let mut h = Harness::new(history, dir.join("video-bookmarks.json"));
+        h.state.clock = Some(now);
+        h.settle();
+        let (asked, said) = h.frame_lower();
+        assert!(said.contains("just now") && said.contains("today"), "{said}");
+        // In ten seconds it is a minute old.
+        assert!(asked > Duration::from_secs(9) && asked < Duration::from_secs(11), "the next frame is the text's: {asked:?}");
+        h.state.clock = Some(now + 10);
+        let (asked, said) = h.frame_lower();
+        assert!(said.contains("1 min ago") && !said.contains("just now") && said.contains("today"), "{said}");
+        // Twenty seconds later it is another day.
+        h.settle();
+        let (asked_settled, _) = h.frame_lower();
+        assert!(asked_settled > Duration::from_secs(19) && asked_settled < Duration::from_secs(21), "the next frame is midnight's: {asked:?} then {asked_settled:?}");
+        h.state.clock = Some(now + 30);
+        let (_, said) = h.frame_lower();
+        assert!(said.contains("yesterday") && !said.contains("today"), "{said}");
+        h.settle();
+        // Then the minutes, one frame each.
+        let (asked, said) = h.frame_lower();
+        assert!(said.contains("1 min ago"), "{said}");
+        assert!(asked > Duration::from_secs(39) && asked < Duration::from_secs(41), "{asked:?}");
         std::fs::remove_dir_all(dir).ok();
     }
 

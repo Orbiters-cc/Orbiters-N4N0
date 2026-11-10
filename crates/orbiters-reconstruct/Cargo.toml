@@ -24,7 +24,7 @@ fastrand = "2"
 ort = { version = "=2.0.0-rc.10", default-features = false, features = ["load-dynamic", "std"] }
 zstd = "0.13"
 # SPZ version 3's single gzip stream (crate::export::spz3), the version every SPZ reader opens.
-flate2 = "1"
+flate2 = { workspace = true }
 rayon = { workspace = true }
 # The sky map's sky.png (crate::sky).
 png = { workspace = true }

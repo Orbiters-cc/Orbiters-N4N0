@@ -22,6 +22,10 @@ orbiters-n4n0-core = { path = "crates/orbiters-n4n0-core" }
 orbiters-n4n0 = { path = "crates/orbiters-n4n0" }
 orbiters-audio = { path = "crates/orbiters-audio" }
 orbiters-update = { path = "crates/orbiters-update" }
+orbiters-reconstruct = { path = "crates/orbiters-reconstruct" }
+# The SteamVR driver takes this one by its path, without its default features: a member cannot switch off the
+# defaults of an entry here.
+orbiters-smooth = { path = "crates/orbiters-smooth" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 anyhow = "1"

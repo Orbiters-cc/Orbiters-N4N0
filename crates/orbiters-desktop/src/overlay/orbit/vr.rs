@@ -264,9 +264,20 @@ const WING_OFF_ITS_PANEL: f32 = 12.0;
 const WING_OFF_A_SHEET: f32 = 22.0 + (VR_SHEET_SCALE - 1.0) * 352.0;
 /// How much larger a sheet is in a headset than on a screen, about its foot's middle (its foot stays over VRChat's tab row): its tabs, names and labels read small at an
 /// arm's length (round 18's judges, four of five), and a larger sheet holds them all, names kept.
-pub const VR_SHEET_SCALE: f32 = 1.16;
-/// And the wing's tiles, about its inner edge's middle: their names read at about 11 px in a headset's picture, and at 14 now (round 18's judges).
-pub const VR_WING_SCALE: f32 = 1.25;
+pub const VR_SHEET_SCALE: f32 = 1.25;
+/// The wing's tiles against a screen's, about its inner edge's middle: at VRChat's own scale, a tile about 1.1 times a Launch Pad button and its name at most 1.3
+/// times VRChat's labels (round 19's judges, with Fable's figures: a quarter larger, the wing read as 1.5 times VRChat's buttons and louder than the menu it stands
+/// beside; round 18's had asked for readable names, not for larger tiles). Settled here: it is not to swing again.
+pub const VR_WING_SCALE: f32 = 1.08;
+/// How far up the wing lies in a headset against a screen, in the menu's units: turned towards the eyes it is nearer them than the menu, and its top and its foot
+/// then lie on VRChat's main panel's (round 19's judges).
+const VR_WING_RAISED: f32 = 30.0;
+/// What is read over the wheel's ring, its one head, against a screen's.
+const VR_WHEEL_HEAD_SCALE: f32 = 1.25;
+/// Where that head's caption ends and its Hide begins, in the wheel's units.
+const WHEEL_HEAD_SPLIT: f32 = 106.0;
+/// How far each side of the ring's axis that head reaches: wide enough for what a pointed cell says, whole.
+const WHEEL_HEAD_HALF: f32 = 190.0;
 
 /// `placed` scaled about `anchor`, what is drawn on it as large with it.
 fn scaled(mut placed: Placed, anchor: egui::Pos2, by: f32) -> Placed {
@@ -279,12 +290,16 @@ fn scaled(mut placed: Placed, anchor: egui::Pos2, by: f32) -> Placed {
 /// A part of the wheel where a headset has it: what is read over the ring, its caption and Hide ring, a quarter larger than on a screen about the ring's top (their
 /// words read at about 11 px in a headset's picture, the round 19 pre-check); the ring's cells as they are.
 pub fn wheel_place(zone: Zone) -> Placed {
-    let placed = zones::in_units(zone);
-    if matches!(zone, Zone::WheelCaption | Zone::WheelHide) {
-        scaled(placed, egui::pos2(0.0, -196.0), VR_WING_SCALE)
-    } else {
-        placed
+    let mut placed = zones::in_units(zone);
+    // One head over the ring (round 19's judges: two stacked pills rode on the hand): the caption, and Hide at its right end, side by side with nothing between.
+    let head = zones::in_units(Zone::WheelCaption).rect;
+    let head = egui::Rect::from_min_max(egui::pos2(-WHEEL_HEAD_HALF, head.min.y), egui::pos2(WHEEL_HEAD_HALF, head.max.y));
+    match zone {
+        Zone::WheelCaption => placed.rect = egui::Rect::from_min_max(head.min, egui::pos2(WHEEL_HEAD_SPLIT, head.max.y)),
+        Zone::WheelHide => placed.rect = egui::Rect::from_min_max(egui::pos2(WHEEL_HEAD_SPLIT, head.min.y), head.max),
+        _ => return placed,
     }
+    scaled(placed, egui::pos2(0.0, -196.0), VR_WHEEL_HEAD_SCALE)
 }
 
 /// A sheet's page or head (`Zone::Takeover`, `Zone::SheetBack`) where a headset has it.
@@ -413,10 +428,11 @@ pub fn strip_places() -> Vec<Placed> {
 }
 
 /// How much further out than on a screen the wing lies in a headset, in the menu's units: a clear gap from My Profile, which reaches past the main panel.
-const VR_WING_CLEAR: f32 = 40.0;
+// VRChat's own gap between its panels, with what the tiles stand off them (round 19's judges: it was four times that).
+const VR_WING_CLEAR: f32 = -10.0;
 /// Where the wing turns, in the menu's units from its middle (just inside its inner edge), and by how much, in radians: about as much as VRChat's side panels.
 const WING_HINGE: f32 = 400.0;
-const WING_YAW: f32 = 0.38;
+const WING_YAW: f32 = 0.3;
 
 /// The Quick Menu's parts on this hand. The wing lies on the side of the menu away from the hand that holds it: on the right hand it is on the left (as Enzo laid it there). The sheet is not one of
 /// these: it stays on the menu.
@@ -442,7 +458,9 @@ pub fn quick_menu_places(hand: usize) -> Vec<Placed> {
             }
             // Larger than on a screen, away from the menu: about the middle of the edge it has towards it.
             let inner = if hand == 1 { -(362.0 + VR_WING_CLEAR) } else { 362.0 + VR_WING_CLEAR };
-            scaled(placed, egui::pos2(inner, 27.0), VR_WING_SCALE)
+            let mut placed = scaled(placed, egui::pos2(inner, 27.0), VR_WING_SCALE);
+            placed.rect = placed.rect.translate(egui::vec2(0.0, -VR_WING_RAISED));
+            placed
         })
         .collect()
 }
@@ -1632,7 +1650,7 @@ mod tests {
         let tile = |hand: usize, zone: Zone| quick_menu_places(hand).into_iter().find(|p| p.zone == zone).unwrap().rect;
         for zone in Zone::WING {
             assert!(tile(0, zone).left() > 0.0 && tile(1, zone).right() < 0.0, "{zone:?}");
-            assert_eq!(tile(0, zone).size(), tile(1, zone).size());
+            assert!((tile(0, zone).size() - tile(1, zone).size()).length() < 1e-3, "{zone:?}");
         }
         // The same order on both: it reads the same, on the other side.
         assert!(tile(1, Zone::WingWorlds).left() < tile(1, Zone::WingYouTube).left());

@@ -57,7 +57,7 @@ pub fn adapter_luid(adapter: &wgpu::Adapter) -> Option<u64> {
 /// Draws a capture's faces into textures.
 pub struct FaceRenderer {
     /// The middle and reach of what is drawn, where marks leave the rest out.
-    clipped: Option<(V3, f32)>,
+    clipped: Option<(V3, f32, f32)>,
     pub device: wgpu::Device,
     pub queue: wgpu::Queue,
     gpu: Gpu,
@@ -129,8 +129,9 @@ impl FaceRenderer {
 
     /// Only what lies within `reach` of `middle` is drawn, with the middle moved away from where the splats are sorted from. `None`, all of them again. Asked with each batch, read
     /// again when it moved enough to see. On this thread, as a capture has millions: the marks themselves cost a frame nothing (`Gpu::set_marks`).
-    pub fn clip(&mut self, clip: Option<&(V3, f32, std::sync::Arc<Capture>)>) {
-        let Some((middle, reach, capture)) = clip else {
+    /// `ceiling`: nothing over that height either (its last part fading too), for a capture in a panel's hole.
+    pub fn clip(&mut self, clip: Option<&(V3, f32, f32, std::sync::Arc<Capture>)>) {
+        let Some((middle, reach, ceiling, capture)) = clip else {
             if self.clipped.take().is_some() {
                 self.gpu.count = self.total;
                 self.gpu.set_marks(&[]);
@@ -138,10 +139,12 @@ impl FaceRenderer {
             return;
         };
         let near = |a: f32, b: f32| (a - b).abs() < *reach * 0.02;
-        if self.clipped.is_some_and(|(c, r)| near(c[0], middle[0]) && near(c[2], middle[2]) && near(r, *reach)) {
+        if self.clipped.is_some_and(|(c, r, top)| near(c[0], middle[0]) && near(c[2], middle[2]) && near(r, *reach) && (top == *ceiling || near(top, *ceiling))) {
             return;
         }
-        self.clipped = Some((*middle, *reach));
+        self.clipped = Some((*middle, *reach, *ceiling));
+        // The last tenth of its reach under its ceiling fades as its edge does.
+        let fades = reach * 0.14;
         let within = reach * reach;
         // Its last part fades out (round 18's judges: a ragged cut through a shack and across the floor): whole to here, then thinner to nothing at its reach.
         let whole = (reach * SMALL_FADES_FROM) * (reach * SMALL_FADES_FROM);
@@ -153,14 +156,17 @@ impl FaceRenderer {
                 // Across the ground only: moved, it shows the same round as before, with nothing cut for its height.
                 let (x, z) = (m[0] - middle[0], m[2] - middle[2]);
                 let far = x * x + z * z;
-                if far <= whole {
+                if far > within || m[1] > *ceiling {
+                    return 2;
+                }
+                // How much of it is left, by its edge and by its ceiling: 128 whole to 255 nothing (the shader's faded marks).
+                let by_edge = if far <= whole { 0.0 } else { (far.sqrt() - reach * SMALL_FADES_FROM) / (reach * (1.0 - SMALL_FADES_FROM)) };
+                let by_top = if m[1] <= *ceiling - fades { 0.0 } else { (m[1] - (*ceiling - fades)) / fades };
+                let t = by_edge.max(by_top).clamp(0.0, 1.0);
+                if t <= 0.0 {
                     0
-                } else if far <= within {
-                    // 128 whole to 255 nothing (the shader's faded marks).
-                    let t = (far.sqrt() - reach * SMALL_FADES_FROM) / (reach * (1.0 - SMALL_FADES_FROM));
-                    128 + (t.clamp(0.0, 1.0) * 127.0) as u8
                 } else {
-                    2
+                    128 + (t * 127.0) as u8
                 }
             })
             .collect();
@@ -370,19 +376,29 @@ impl FaceRenderer {
     /// pictures are compared with offline.
     pub fn render_view(&mut self, camera: &orbiters_reconstruct::camera::Camera, count: usize) -> anyhow::Result<Vec<u8>> {
         self.gpu.count = count.min(self.total).max(1.min(self.total));
-        self.gpu.step(camera, self.background, Target::None, None)?;
-        let texture = self.device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("3d-worlds reference view"), // i18n: not shown (a GPU debug label)
-            size: wgpu::Extent3d { width: camera.width, height: camera.height, depth_or_array_layers: 1 },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba8Unorm,
-            usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::COPY_SRC,
-            view_formats: &[],
-        });
-        Self::present_on(&self.gpu, self.transparent, &texture.create_view(&Default::default()));
-        read_texture(&self.device, &self.queue, &texture)
+        // A picture asked once is drawn again where the renderer's sort was short for it: it is sized by the picture before, and one that shows far more (all of a
+        // capture after a near part of it) had its farther splats left out, with nothing to draw it again as [`FaceRenderer::finish`] has the headset's faces drawn
+        // again (round 20: a capture in a hand came out as the middle of itself).
+        let mut pixels = Vec::new();
+        for attempt in 0..3 {
+            self.gpu.step(camera, self.background, Target::None, None)?;
+            let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("3d-worlds reference view"), // i18n: not shown (a GPU debug label)
+                size: wgpu::Extent3d { width: camera.width, height: camera.height, depth_or_array_layers: 1 },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba8Unorm,
+                usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::COPY_SRC,
+                view_formats: &[],
+            });
+            Self::present_on(&self.gpu, self.transparent, &texture.create_view(&Default::default()));
+            pixels = read_texture(&self.device, &self.queue, &texture)?;
+            if attempt == 2 || !self.gpu.needs_redraw() {
+                break;
+            }
+        }
+        Ok(pixels)
     }
 }
 

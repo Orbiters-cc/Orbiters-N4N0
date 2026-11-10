@@ -191,7 +191,11 @@ const SMALL_TILT_IN_THE_ROOM: f32 = 14.0;
 
 /// How far under a hole's middle a capture's floor lies in it, in its radius: low enough that what stands as high as most captures do (0.7 of the radius) ends under the
 /// hole's top (Enzo's request 60: the upper part is not cut), the floor's near edge going under the hole's foot.
-const SMALL_FLOOR_UNDER_THE_MIDDLE: f32 = 0.14;
+const SMALL_FLOOR_UNDER_THE_MIDDLE: f32 = 0.2;
+/// How high over its floor a capture in a hole is drawn, in its reach: what is higher would be over the hole's top, behind the panel, and over the sheet's own top
+/// in the room. In a hand nothing is cut by its height (Enzo's request 60).
+// Over the hole's top by about the sheet's head: where it thins out is behind the panel, and no straight edge shows in the hole (the round 20 pre-check).
+pub const HOLE_CEILING_PER_REACH: f32 = 1.02;
 
 /// Where a capture standing small lies in a panel: as that panel turns, this large, this far behind it.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -203,18 +207,21 @@ pub struct SmallDock {
 
 impl SmallDock {
     /// Behind the middle of a hole in a panel, whose place is `at` (its Z towards who looks), looking into the panel as its
-    /// start view looks.
-    pub fn behind(view: &StartView, at: &Matrix34, radius: f32) -> Self {
+    /// start view looks, for a capture shown `reach` metres around its middle: its floor at one place in the hole however near it shows.
+    pub fn behind(view: &StartView, at: &Matrix34, radius: f32, reach: f32) -> Self {
         let (s, c) = (-view.yaw()).sin_cos();
         let turned = [[c, 0.0, s], [0.0, 1.0, 0.0], [s, 0.0, -c]];
         // Tipped towards who looks: a panel faces them, and a scene on it seen level would be seen edge on.
         let (ts, tc) = SMALL_TILT_IN_A_HOLE.to_radians().sin_cos();
         let tipped = [[1.0, 0.0, 0.0], [0.0, tc, -ts], [0.0, ts, tc]];
-        // Its floor in the hole's lower part: what stands on it has the rest.
-        let raised = sub(position(at), scale(axis(at, 1), radius * SMALL_FLOOR_UNDER_THE_MIDDLE));
+        // Its floor in the hole's lower part, clear of the hole's lower edge: what stands on it has the rest. Its middle is its eye, that high over its floor at its size.
+        let rotation = mat_mul(&rotation_of(at), &mat_mul(&tipped, &turned));
+        let floor = sub(position(at), scale(axis(at, 1), radius * SMALL_FLOOR_UNDER_THE_MIDDLE));
+        let up = [rotation[0][1], rotation[1][1], rotation[2][1]];
+        let raised = add(floor, scale(up, (view.eye()[1] - view.ground()) * radius / reach.max(1e-3)));
         // Its whole round behind the panel's plane: seen from low its near edge comes as far forward as its middle is back, and what is nearer than the panel while
         // the panel covers it would strain the eyes.
-        Self { rotation: mat_mul(&rotation_of(at), &mat_mul(&tipped, &turned)), anchor: sub(raised, scale(axis(at, 2), radius)), radius }
+        Self { rotation, anchor: sub(raised, scale(axis(at, 2), radius)), radius }
     }
 }
 
@@ -351,6 +358,12 @@ impl Small {
     pub fn at_dock(mut self, dock: &SmallDock) -> Self {
         (self.rotation, self.anchor, self.radius) = (dock.rotation, dock.anchor, dock.radius);
         (self.docked, self.settled) = (true, true);
+        self
+    }
+
+    /// Showing this of the capture: its middle so far from the start eye across the ground, reaching so far ([`Capture::hole_frame`], for its place in a panel).
+    pub fn framed(mut self, (moved, reach): ([f32; 2], f32)) -> Self {
+        (self.moved, self.reach) = (moved, reach.clamp(SMALL_REACHES.0, SMALL_REACHES.1));
         self
     }
 
@@ -960,7 +973,7 @@ mod tests {
     fn in_a_panel_it_follows_its_place_until_taken_and_goes_back_when_let_go_there() {
         let view = StartView { position: [0.0, 1.6, 0.0], target: [0.0, 1.6, -1.0], floor: None, eye_height: None };
         let sheet = head_at(0.3, 1.3, -0.4, 0.2);
-        let dock = SmallDock::behind(&view, &sheet, 0.08);
+        let dock = SmallDock::behind(&view, &sheet, 0.08, 3.0);
         assert!(dot(sub(dock.anchor, position(&sheet)), axis(&sheet, 2)) < 0.0, "behind the panel, as seen by who faces it");
         // Its start view looks into the panel.
         let d = mat_vec(&dock.rotation, sub([view.target[0], view.target[1], -view.target[2]], view.eye()));
@@ -971,7 +984,7 @@ mod tests {
         assert_eq!(small.radius(), 0.08);
         // The panel moves: so does it, at once.
         let elsewhere = head_at(0.6, 1.5, -0.3, -0.4);
-        let dock2 = SmallDock::behind(&view, &elsewhere, 0.08);
+        let dock2 = SmallDock::behind(&view, &elsewhere, 0.08, 3.0);
         small.step([None, None], [false; 2], [0.0; 2], 1.0 / 90.0, Some(dock2));
         assert_eq!(small.anchor, dock2.anchor);
         assert_eq!(small.rotation, dock2.rotation);

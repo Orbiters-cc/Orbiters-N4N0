@@ -834,7 +834,8 @@ const BACK_AT: f32 = 8.0;
 
 /// Where the head's round buttons are, and how large: a laser's size in a headset, the size of the sheet's own buttons.
 fn head_button(facts: &Facts) -> (f32, f32) {
-    if facts.desktop { (7.0, 30.0) } else { (3.0, 38.0) }
+    // In a headset everything in the head is 36 high: Back, the tabs, Hide 3D and the close (round 19's judges).
+    if facts.desktop { (7.0, 30.0) } else { (4.0, 36.0) }
 }
 
 /// How wide Hide 3D and Small here are in the head.
@@ -890,7 +891,7 @@ fn head_tabs(facts: &Facts, head_width: f32) -> (Vec<Item>, f32) {
         let named = on || (!facts.desktop && facts.pointed == Some(action));
         let width = if compact && !named { if facts.desktop { 36.0 } else { COMPACT_TAB_VR } } else if snugly { snug(label) } else { wide };
         // A headset's named tabs as tall as the head allows: a laser's target.
-        let (top, tall) = if !facts.desktop { (3.0, 38.0) } else if snugly { (4.0, 36.0) } else { (7.0, 30.0) };
+        let (top, tall) = if !facts.desktop || snugly { (4.0, 36.0) } else { (7.0, 30.0) };
         out.push(Item { action, rect: r(x, top, width, tall), look: Look::HeadTab { icon, label, on, words_only: snugly } });
         x += width + 3.0;
     }
@@ -2439,6 +2440,11 @@ fn draw(p: &Painter, zone: Zone, item: &Item, facts: &Facts, hovered: bool, pres
             let selected = is_selected(item, facts);
             tile_back(p, rect, hovered, pressed, selected);
             let ink = part_ink(item.action);
+            // Pointed or open, lit in its tool's colour, as the ring's pointed cell and the sheet's head are (rounds 18 and 19's judges: a green outline whatever the tool).
+            if (hovered || selected) && !look::retro() {
+                p.rect_filled(rect, look::radius(look::TILE_RADIUS), theme::alpha(ink, if pressed { 0.26 } else { 0.16 }));
+                p.rect_stroke(rect.shrink(0.75), look::radius(look::TILE_RADIUS), Stroke::new(2.0, ink), egui::StrokeKind::Middle);
+            }
             let size = (rect.height() * 0.42).clamp(18.0, 32.0);
             let top = rect.center().y - (size + 3.0 + 11.0) / 2.0;
             let at = pos2(rect.center().x, top + size / 2.0);
@@ -2447,7 +2453,8 @@ fn draw(p: &Painter, zone: Zone, item: &Item, facts: &Facts, hovered: bool, pres
                 badge(p, at, size, look::accent(), look::on_accent());
             }
             let font_size = {
-                let mut s = 11.0;
+                // In a headset at most 1.3 times VRChat's own labels beside it (round 19's judges).
+                let mut s = if facts.desktop { 11.0 } else { 10.5 };
                 while s > 8.5 && p.layout_no_wrap(label.to_string(), look::font(s, weight::BOLD), Color32::WHITE).size().x > rect.width() - 6.0 {
                     s -= 0.5;
                 }
@@ -2573,8 +2580,8 @@ fn draw(p: &Painter, zone: Zone, item: &Item, facts: &Facts, hovered: bool, pres
             }
             let x = playing_words_left(rect);
             let room = rect.right() - x - 14.0;
-            // Whose it is, readable: tiny purple words were what read least (round 14's judges). Its volume beside it.
-            let font = look::font(15.0, weight::SEMIBOLD);
+            // Whose it is, readable: tiny purple words were what read least (round 14's judges). At 12 px at 1280 x 720 (round 19's).
+            let font = look::font(17.5, weight::SEMIBOLD);
             let buttons = 0.0;
             // Where it comes from on the line over it, apart from what it is (round 16's judges): "Juan Branco on Twitter" over what he said.
             let (from, what) = facts.music.as_ref().map_or((None, String::new()), |(title, _)| split_source(title, &facts.music_by));
@@ -2860,7 +2867,7 @@ fn draw(p: &Painter, zone: Zone, item: &Item, facts: &Facts, hovered: bool, pres
             }
             // Named where it was made room for its name; a headset's icon-only tab is wider than a screen's, and still only an icon.
             if words_only {
-                let font = look::font(if rect.height() > 37.0 { 16.0 } else { 15.5 }, if on { weight::BOLD } else { weight::SEMIBOLD });
+                let font = look::font(if facts.desktop { 15.5 } else { 16.0 }, if on { weight::BOLD } else { weight::SEMIBOLD });
                 p.text(rect.center(), Align2::CENTER_CENTER, fit(p, label, &font, rect.width() - 10.0), font, if on { Color32::WHITE } else { look::LABEL });
             } else if rect.width() > COMPACT_TAB_VR + 1.0 {
                 widgets::icon(p, pos2(rect.left() + 16.0, rect.center().y), icon, 17.0, tint);
@@ -3115,6 +3122,19 @@ fn draw(p: &Painter, zone: Zone, item: &Item, facts: &Facts, hovered: bool, pres
             p.text(pos2(left + 22.0, rect.center().y), Align2::LEFT_CENTER, words, font, look::LABEL);
         }
         Look::HideWord => {
+            // In a headset the wheel's Hide is the right end of its one head: the caption's ground, a line between them, round at its right.
+            if zone == Zone::WheelHide && !facts.desktop && !facts.hidden {
+                let r = (rect.height() / 2.0) as u8;
+                p.rect_filled(rect, egui::CornerRadius { nw: 0, sw: 0, ne: r, se: r }, if pressed { look::TILE_DOWN } else if hovered { look::TILE_HOVER } else { look::PANEL });
+                p.line_segment([pos2(rect.left() + 0.5, rect.top() + 9.0), pos2(rect.left() + 0.5, rect.bottom() - 9.0)], Stroke::new(1.0, Color32::from_white_alpha(46)));
+                let font = look::font(14.0, weight::SEMIBOLD);
+                let words = tr("Hide");
+                let wide = p.layout_no_wrap(words.to_string(), font.clone(), look::LABEL).size().x;
+                let left = rect.center().x - (wide + 24.0) / 2.0 - 2.0;
+                widgets::icon(p, pos2(left + 9.0, rect.center().y), icons::EYE_SLASH, 18.0, look::LABEL);
+                p.text(pos2(left + 24.0, rect.center().y), Align2::LEFT_CENTER, words, font, look::LABEL);
+                return;
+            }
             // A real pill: it presses, and it says what goes, or what comes back.
             let radius = look::radius(rect.height() / 2.0);
             p.rect_filled(rect, radius, if pressed { look::TILE_DOWN } else if hovered { look::TILE_HOVER } else { look::TILE });
@@ -3559,7 +3579,11 @@ fn draw_caption(p: &Painter, zone: Zone, rect: Rect, facts: &Facts) {
         draw_words_marked(p, rect, &format!("{first}: {second}"), "", false);
         return;
     }
-    // In a headset as on a screen, centred over the ring's top: Hide ring is right over it, on the same axis (round 18's judges).
+    // In a headset the wheel has one head over the ring's top, on its axis: this, and Hide at its right end (round 19's judges: two stacked pills).
+    if on_the_wheel && !facts.desktop {
+        draw_wheel_head(p, rect, &first, &second);
+        return;
+    }
     draw_words_marked(p, rect, &first, &second, on_the_wheel);
 }
 
@@ -3601,6 +3625,30 @@ pub fn wait_words(wait: orbiters_n4n0::status::PhotoWait, mode: Option<PhotoMode
         }
         orbiters_n4n0::status::PhotoWait::Move => (tr("Move VRChat's camera a little").into(), tr("The 3D picture starts as soon as Orbiters sees where it is.").into()),
     }
+}
+
+/// The wheel's head in a headset: all of its part, round at its left where Hide ends it at its right, its mark and then its words from the left.
+fn draw_wheel_head(p: &Painter, rect: Rect, first: &str, second: &str) {
+    let r = (rect.height() / 2.0) as u8;
+    p.rect_filled(rect, egui::CornerRadius { nw: r, sw: r, ne: 0, se: 0 }, look::PANEL);
+    widgets::icon(p, pos2(rect.left() + 26.0, rect.center().y), icons::N4N0_MARK, 20.0, look::LABEL);
+    let (big, small) = (look::font(15.0, weight::BOLD), look::font(13.0, weight::MEDIUM));
+    let x = rect.left() + 48.0;
+    let room = rect.right() - x - 10.0;
+    if second.is_empty() {
+        // At rest its name alone, in the middle of its part.
+        p.text(pos2((x + rect.right()) / 2.0 - 8.0, rect.center().y), Align2::CENTER_CENTER, fit(p, first, &big, room), big, look::LABEL);
+        return;
+    }
+    // What a cell does whole, on two lines where one does not hold it: the head is no wider than the ring it lies over.
+    let mut job = egui::text::LayoutJob::simple(second.to_string(), small, look::MUTED, room);
+    job.wrap.max_rows = 2;
+    job.wrap.overflow_character = Some('\u{2026}');
+    let said = p.layout_job(job);
+    let high = 19.0 + said.size().y;
+    let top = rect.center().y - high / 2.0;
+    p.text(pos2(x, top + 9.0), Align2::LEFT_CENTER, fit(p, first, &big, room), big, look::LABEL);
+    p.galley(pos2(x, top + 19.0), said, look::MUTED);
 }
 
 /// Two lines in a pill as wide as they are.

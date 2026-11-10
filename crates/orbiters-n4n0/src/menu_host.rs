@@ -232,10 +232,17 @@ impl<P: Pictures> MenuHost<P> {
         // The avatar's saved states (a state saved here shows until N4N0 lists it), and what N4N0 said of the last save
         // or apply, on the States page.
         let view = &n4n0.states;
-        let rows: Vec<StateRow> =
-            view.states.iter().map(|s| StateRow { id: s.id.clone(), name: s.name.clone(), default: s.default, pose: s.pose, size: s.size }).collect();
-        let listed = (rows, view.avatar_id.is_some());
-        if self.states_seen.as_ref() != Some(&listed) || m.saving() {
+        // Compared with what was last listed where they are: this runs every turn of a menu that shows (90 a second in
+        // the headset), and the rows are made, with their names copied, only when they differ.
+        let as_seen = self.states_seen.as_ref().is_some_and(|(rows, known)| {
+            *known == view.avatar_id.is_some()
+                && rows.len() == view.states.len()
+                && rows.iter().zip(&view.states).all(|(row, s)| row.id == s.id && row.name == s.name && row.default == s.default && row.pose == s.pose && row.size == s.size)
+        });
+        if !as_seen || m.saving() {
+            let rows: Vec<StateRow> =
+                view.states.iter().map(|s| StateRow { id: s.id.clone(), name: s.name.clone(), default: s.default, pose: s.pose, size: s.size }).collect();
+            let listed = (rows, view.avatar_id.is_some());
             m.set_states(listed.0.clone(), listed.1, orbiters_i18n::mark("VRChat's avatar is not known yet"));
             self.states_seen = Some(listed);
             changed = true;
@@ -256,8 +263,15 @@ impl<P: Pictures> MenuHost<P> {
         // Tracking smoothing, the versions, and how the last suggestion sent from here went.
         let tracking = n4n0.tracking.as_ref().map(|t| orbiters_n4n0_core::menu::Tracking { on: t.on, ms: t.ms, note: t.note.clone() });
         changed |= set(&mut m.tracking, tracking);
-        changed |= set(&mut m.tracking_note, n4n0.tracking_note.clone());
-        changed |= set(&mut m.versions, n4n0.versions.clone());
+        // Compared before they are copied.
+        if m.tracking_note != n4n0.tracking_note {
+            m.tracking_note = n4n0.tracking_note.clone();
+            changed = true;
+        }
+        if m.versions != n4n0.versions {
+            m.versions = n4n0.versions.clone();
+            changed = true;
+        }
         let video = n4n0.world_video.as_ref().map(|(url, title, at)| orbiters_n4n0_core::menu::WorldVideo { url: url.clone(), title: title.clone(), at: *at });
         changed |= set(&mut m.world_video, video);
         if !n4n0.listening && m.dictating {

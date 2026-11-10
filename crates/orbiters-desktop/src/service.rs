@@ -137,9 +137,10 @@ impl Service {
     }
 
     /// Smoothing's settings reach the driver the moment they change (it reads them on SteamVR's next frame), not at
-    /// the keeper's next turn: every published state is looked at, the tracking settings compared.
+    /// the keeper's next turn. Its mailbox hands it the states whose tracking settings differ from the last it was
+    /// handed: it is not woken for anything else the service publishes.
     fn follow_tracking(self: &Arc<Self>) {
-        let mailbox = Mailbox::new(false);
+        let mailbox = Mailbox::watching(|a, b| !orbiters_core::slice::Slice::same(&a.settings, &b.settings) && a.settings.tracking != b.settings.tracking);
         self.ctl.subscribe(mailbox.clone());
         let mut seen = None;
         while let Some((_, snapshot)) = mailbox.take() {
@@ -644,9 +645,10 @@ fn tray_loop(service: &Arc<Service>) -> anyhow::Result<()> {
             None
         }
     };
-    // Tell the loop when capturing starts or stops (menu items live on this thread). The tray shows no notice: one
-    // that comes while no window is open waits for the next.
-    let mailbox = Mailbox::new(false);
+    // Tell the loop when capturing starts or stops (menu items live on this thread): its mailbox hands it the states
+    // where that changed, and no other. The tray shows no notice: one that comes while no window is open waits for the
+    // next.
+    let mailbox = Mailbox::watching(|a, b| a.is_capturing() != b.is_capturing());
     service.ctl.subscribe(mailbox.clone());
     let main_thread = service.main_thread;
     std::thread::Builder::new().name("tray-watch".into()).spawn(move || {

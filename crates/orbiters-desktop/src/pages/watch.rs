@@ -15,9 +15,18 @@
 //! its look held is let go (Settings' look keeps the microphones open), and each starts again, with a look, at the
 //! first frame drawn once the window shows. Not the focus: a window in view behind another goes on showing changes.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, Weak};
 use std::time::Duration;
+
+/// The watches' threads alive in this process ([`live`]).
+static LIVE: AtomicUsize = AtomicUsize::new(0);
+
+/// How many watches look now, over every window of the process: what `--gpu-bench --watches` prints each second, to
+/// see in the real window that they end when it is minimized and start again when it shows.
+pub fn live() -> usize {
+    LIVE.load(Ordering::Relaxed)
+}
 
 /// A window as its watches know it: whether it is shown, and the threads to wake when it no longer is.
 #[derive(Default)]
@@ -216,6 +225,7 @@ struct Ended<'a, T>(&'a Shared<T>);
 
 impl<T> Drop for Ended<'_, T> {
     fn drop(&mut self) {
+        LIVE.fetch_sub(1, Ordering::Relaxed);
         let mut inner = self.0.lock();
         inner.ended = true;
         inner.panicked = std::thread::panicking();
@@ -223,6 +233,7 @@ impl<T> Drop for Ended<'_, T> {
 }
 
 fn run<T: PartialEq>(shared: Arc<Shared<T>>, ctx: egui::Context, period: Duration, mut look: impl FnMut() -> T) {
+    LIVE.fetch_add(1, Ordering::Relaxed);
     let _ended = Ended(&shared);
     loop {
         // Frames drawn since the page kept the watch: it is no longer on screen. Or the window is not.

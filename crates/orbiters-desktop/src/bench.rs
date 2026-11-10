@@ -1,5 +1,6 @@
 //! `orbiters-desktop --gpu-bench <scenario> [--gpu integrated|graphics-card] [--seconds <s>] [--warmup <s>]
-//! [--session <name>] [--publish <hz> [--background]] [--size <w>x<h>] [--position <x>,<y>] [--alternate <s>]` opens
+//! [--session <name>] [--publish <hz> [--background]] [--size <w>x<h>] [--position <x>,<y>] [--alternate <s>]
+//! [--watches]` opens
 //! the real window on the GPU asked for, over a stand-in controller (the screenshots' made-up snapshot and the real
 //! session library; the controller is not started), without taking the focus, drives it with synthetic input and
 //! prints its frames each second and a summary: what docs/igpu-experiment.md measured with scripts/gpu-lab.
@@ -11,7 +12,9 @@
 //! the tray service does while recording or with N4N0's menu open; with `--background` it is drawn as a window behind
 //! VRChat draws it ([`crate::ipc::BACKGROUND_PACE`]). `--alternate` has `scroll` and `splats` move for that long, then
 //! rest as long, and so on. `--view-gpu always` draws the 3D view's splats on the integrated GPU while the window draws
-//! on the graphics card (`settings::ViewGpu`; `never`, the default here, keeps them on the window's GPU).
+//! on the graphics card (`settings::ViewGpu`; `never`, the default here, keeps them on the window's GPU). `--watches`
+//! adds, each second, how many of the pages' watches look (`pages::watch`): with `still` (Settings, whose watch keeps
+//! the microphones open) and the window minimized then restored by hand, it shows that they end and start again.
 
 use crate::app::App;
 use crate::backend::{Ctl, Local};
@@ -23,6 +26,9 @@ use orbiters_core::settings::{Settings, ViewGpu, WindowGpu};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+
+/// `--watches`: the count of the pages' watches is printed each second.
+static WATCHES: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Scenario {
@@ -74,6 +80,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             "--warmup" => warmup = it.next().context("--warmup <s>")?.parse()?,
             "--publish" => publish = it.next().context("--publish <hz>")?.parse()?,
             "--background" => background = true,
+            "--watches" => WATCHES.store(true, std::sync::atomic::Ordering::Relaxed),
             "--alternate" => alternate = it.next().context("--alternate <s>")?.parse()?,
             "--session" => session = it.next().context("--session <name>")?.clone(),
             "--size" => {
@@ -262,6 +269,9 @@ impl Bench {
                     println!("{n} frames, {k} of the 3D view from the integrated GPU");
                 } else {
                     println!("{n} frames");
+                }
+                if WATCHES.load(std::sync::atomic::Ordering::Relaxed) {
+                    println!("{} watches at {:.0} s", crate::pages::watch::live(), start.elapsed().as_secs_f64());
                 }
                 let _ = std::io::Write::flush(&mut std::io::stdout());
             }

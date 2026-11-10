@@ -1,4 +1,4 @@
-//! `orbiters-desktop --orbit-paint-bench [--out <folder>] [--runs <n>] [--only vr|desktop] [--upload]`: what these menus cost the loop that also reads the hands, with no headset, no
+//! `orbiters-desktop --orbit-paint-bench [--out <folder>] [--runs <n>] [--only vr|desktop] [--upload] [--fonts-anew]`: what these menus cost the loop that also reads the hands, with no headset, no
 //! SteamVR and no VRChat. The real [`Panels`] are taken turn by turn as `vr.rs` and `desktop.rs` take them (opened, pointed at, a sheet opened, scrolled, closed, opened again), over a
 //! backend that does nothing, and two things are written:
 //!
@@ -13,6 +13,8 @@
 //!
 //! With `--upload` each picture handed over is also written to a Direct3D texture as the headset's overlays have them (`orbiters_openvr::gpu`, two textures a part, only what
 //! changed), on this computer's default graphics card: the part of handing a picture to SteamVR that is this process's own work, timed apart. Run that one under the lab's GPU lock.
+//!
+//! With `--fonts-anew` a part kept from an earlier opening has its fonts' atlas made from nothing again (`Panels::fonts_anew`): slower, and every pixel as a new part's.
 //!
 //! What it does not measure: SteamVR taking the texture, a window taking its picture on the desktop (the count of pixels handed over is given instead), and anything of a headset.
 
@@ -128,6 +130,10 @@ struct Rig {
     log: Option<std::io::BufWriter<std::fs::File>>,
     pictures: Option<PathBuf>,
     notes: Vec<String>,
+    /// How often a part was painted in a turn that then handed nothing over, by step and part: work that changed no pixel.
+    for_nothing: std::collections::BTreeMap<(String, String), u32>,
+    /// The most parts kept from menus that closed at any turn of the script, and the most bytes they held.
+    most_kept: (usize, usize),
     /// What the facts cost, by where the script was: made again and compared, and copied, in microseconds.
     facts: Vec<(String, f64, f64)>,
     /// With `--upload`: the textures the pictures are written to, and each part's stand-in for its overlay.
@@ -252,6 +258,8 @@ impl Rig {
             log,
             pictures,
             notes: Vec::new(),
+            for_nothing: Default::default(),
+            most_kept: (0, 0),
             facts: Vec::new(),
             gpu: None,
             handles: Default::default(),
@@ -342,6 +350,8 @@ impl Rig {
                 let _ = self.panels.world_relay(crate::overlay::worlds::panel::Status { headset: true, ..Default::default() });
             }
             cost.hand = t.elapsed();
+            // What is due a picture now: painted for nothing, when the turn then hands nothing over.
+            let due: Vec<Zone> = self.panels.all().filter(|p| p.dirty).map(|p| p.zone).collect();
             let t = Instant::now();
             let (mut shows, mut pixels, mut upload) = (0u32, 0u64, Duration::ZERO);
             let (gpu, handles, notes) = (&mut self.gpu, &mut self.handles, &mut self.notes);
@@ -361,8 +371,17 @@ impl Rig {
             cost.upload = upload;
             cost.paint = t.elapsed().saturating_sub(upload);
             (cost.shows, cost.pixels) = (shows, pixels);
+            if shows == 0 {
+                for zone in due {
+                    *self.for_nothing.entry((self.step.clone(), format!("{zone:?}"))).or_default() += 1;
+                }
+            }
         }
         self.turn_in_step += 1;
+        if self.log.is_some() {
+            let (kept, bytes) = self.panels.resting();
+            self.most_kept = (self.most_kept.0.max(kept), self.most_kept.1.max(bytes));
+        }
         if let Some(step) = self.steps.last_mut() {
             step.turns.push(cost);
         }
@@ -687,8 +706,7 @@ fn memory(panels: &Panels) -> (usize, u64, u64) {
         parts += 1;
         let px = panel.px[0] as u64 * panel.px[1] as u64;
         pictures += px * 8 + panel.mask.as_ref().map_or(0, |m| m.len() as u64);
-        let atlas = panel.canvas.ctx().fonts(|f| f.font_image_size());
-        atlases += atlas[0] as u64 * atlas[1] as u64 * 8;
+        atlases += panel.canvas.atlas_bytes() as u64;
     };
     panels.all().for_each(&mut count);
     (parts, pictures, atlases)
@@ -723,6 +741,16 @@ fn summary(mode: Mode, run: usize, rig: &Rig, out: &mut String) {
     for (state, made, copied) in &rig.facts {
         let _ = writeln!(out, "\nFacts, {state}: made again and compared {made:.1} us a turn; copied {copied:.1} us a part painted.");
     }
+    if !rig.for_nothing.is_empty() {
+        let mut by_step: std::collections::BTreeMap<&str, Vec<String>> = Default::default();
+        for ((step, zone), times) in &rig.for_nothing {
+            by_step.entry(step).or_default().push(format!("{zone} {times}"));
+        }
+        let _ = writeln!(out, "\nParts painted in a turn that handed nothing over (times, by step):\n");
+        for (step, parts) in by_step {
+            let _ = writeln!(out, "- {step}: {}", parts.join(", "));
+        }
+    }
     let _ = writeln!(out, "\nOpenings: the work until every part has a picture and until none is due another, and when that is on the loop's clock (a turn every {turn:.0} ms, a longer one running late).\n");
     let _ = writeln!(out, "| opening | first turn ms | every part pictured: turn, work ms, on the clock ms | none due another: turn, work ms, on the clock ms |");
     let _ = writeln!(out, "|---|---:|---|---|");
@@ -743,6 +771,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
     let runs: usize = value("--runs").and_then(|v| v.parse().ok()).unwrap_or(5);
     let only = value("--only");
     let upload = args.iter().any(|a| a == "--upload");
+    let fonts_anew = args.iter().any(|a| a == "--fonts-anew");
     let out = value("--out").map(PathBuf::from);
     // Nothing of the app's own folders: all of it in a scratch that goes when this ends.
     let scratch = std::env::temp_dir().join("orbiters-orbit-paint-bench").join(std::process::id().to_string());
@@ -768,6 +797,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             std::fs::create_dir_all(&dir)?;
             let log = std::fs::File::create(out.join(format!("pictures-{}.txt", mode.name())))?; // i18n: not shown (a developer's benchmark command)
             let mut rig = Rig::new(mode, &scratch, Some((log, dir)));
+            rig.panels.fonts_anew = fonts_anew;
             script(&mut rig);
             if let Some(log) = rig.log.as_mut() {
                 log.flush()?;
@@ -775,12 +805,15 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             let (parts, pictures, atlases) = memory(&rig.panels);
             use std::fmt::Write as _;
             let _ = writeln!(report, "\n{}: {parts} parts at the end of the script hold {:.1} MB of pictures and {:.1} MB of font atlases.", mode.name(), pictures as f64 / 1e6, atlases as f64 / 1e6);
+            let (kept, bytes) = rig.panels.resting();
+            let _ = writeln!(report, "{}: {kept} parts of menus that closed are kept at the end of the script, holding {:.1} MB; most at once in the script {} parts, {:.1} MB.", mode.name(), bytes as f64 / 1e6, rig.most_kept.0, rig.most_kept.1 as f64 / 1e6);
             for note in &rig.notes {
                 let _ = writeln!(report, "note: {note}");
             }
         }
         for run in 1..=runs {
             let mut rig = Rig::new(mode, &scratch, None);
+            rig.panels.fonts_anew = fonts_anew;
             if upload {
                 rig.gpu = Some(orbiters_openvr::gpu::OverlayTextures::new(None).map_err(|e| anyhow::anyhow!(e))?);
             }

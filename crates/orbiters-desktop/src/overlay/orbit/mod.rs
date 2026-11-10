@@ -132,14 +132,56 @@ pub struct Panel {
     pub shown: bool,
     /// Textures of pictures, by name.
     pictures: HashMap<String, TextureHandle>,
+    /// Kept from an earlier opening ([`Panels::rest`]) and not yet painted in this one: its first picture is handed over whole, as a new part's is, whatever of it changed.
+    again: bool,
 }
 
 impl Panel {
-    /// `sharp` pixels of picture a pixel of the placed rectangle (1 on the desktop; more in the headset, whose overlays are looked at closely).
-    fn new(placed: Placed, sharp: f32, order: usize, live: bool) -> Self {
+    /// How many pixels a part placed at `placed` has, and its size in the units its content is drawn in.
+    fn size_of(placed: &Placed, sharp: f32) -> ([u32; 2], Vec2) {
         let size = placed.rect.size() * sharp;
         let px = [size.x.round().max(1.0) as u32, size.y.round().max(1.0) as u32];
         let logical = if placed.zone == Zone::Takeover { vec2(layout::WIDTH as f32, layout::HEIGHT as f32) } else { placed.logical() };
+        (px, logical)
+    }
+
+    /// Whether this part, made for an earlier opening, is the one `placed` asks for: the same part, of as many pixels, drawn in the same units.
+    fn fits(&self, placed: &Placed, sharp: f32) -> bool {
+        self.zone == placed.zone && (self.px, self.logical) == Self::size_of(placed, sharp)
+    }
+
+    /// For an opening after the one it was made for: all that a new part is to a person and to a pointer (nothing on it yet, nothing pointed at or pressed, no picture shown,
+    /// coming in from the start), and its interface with its fonts and textures, its buffers and its shape as they were. What it paints first is handed over whole.
+    fn wake(&mut self, placed: Placed, order: usize, live: bool, fonts_anew: bool) {
+        if fonts_anew {
+            self.renew();
+        }
+        self.placed = placed;
+        self.items = Vec::new();
+        self.hover = None;
+        self.pressed = None;
+        self.dirty = true;
+        self.appear = Appear::new(order, live);
+        self.painted = false;
+        self.shown = placed.zone.group().is_none() && placed.zone != Zone::WheelVeil;
+        self.again = true;
+    }
+
+    /// Its interface made anew, as a new part's: its fonts' atlas from nothing, so that its text is drawn from the same places in it as a new part's, to the last level of
+    /// grey. Its textures were the old interface's.
+    fn renew(&mut self) {
+        self.canvas.renew();
+        self.pictures.clear();
+    }
+
+    /// What it holds in memory, in bytes: its two pictures, its shape, and its interface's font atlas (once in the interface, once in what paints it).
+    fn bytes(&self) -> usize {
+        self.px[0] as usize * self.px[1] as usize * 8 + self.mask.as_ref().map_or(0, Vec::len) + self.canvas.atlas_bytes()
+    }
+
+    /// `sharp` pixels of picture a pixel of the placed rectangle (1 on the desktop; more in the headset, whose overlays are looked at closely).
+    fn new(placed: Placed, sharp: f32, order: usize, live: bool) -> Self {
+        let (px, logical) = Self::size_of(&placed, sharp);
         let zoom = px[0] as f32 / logical.x;
         let mask = placed.zone.ring().map(|ring| panels::cell_mask(ring, px, zoom));
         let shown = placed.zone.group().is_none() && placed.zone != Zone::WheelVeil;
@@ -159,6 +201,7 @@ impl Panel {
             painted: false,
             shown,
             pictures: HashMap::new(),
+            again: false,
         }
     }
 
@@ -167,13 +210,15 @@ impl Panel {
         &self.out
     }
 
-    /// Takes what the canvas painted: the changed part, cut to the panel's shape. Returns it (x0, y0, x1, y1).
+    /// Takes what the canvas painted: the changed part, cut to the panel's shape. Returns it (x0, y0, x1, y1). A part kept from an earlier opening takes all of it the first
+    /// time, changed or not: what it hands over is then made from what was just painted and from the look as it is now, and owes nothing to the opening before.
     fn take_picture(&mut self) -> Option<[u32; 4]> {
-        let Some(changed) = self.canvas.damage() else {
+        let [w, h] = self.px;
+        let changed = if std::mem::take(&mut self.again) { Some([0, 0, w, h]) } else { self.canvas.damage() };
+        let Some(changed) = changed else {
             panels::forget_pictures();
             return None;
         };
-        let [w, h] = self.px;
         let pixels = self.canvas.pixels();
         for y in changed[1]..changed[3].min(h) {
             let (a, b) = ((y * w + changed[0]) as usize * 4, (y * w + changed[2].min(w)) as usize * 4);
@@ -197,6 +242,20 @@ impl Panel {
         pos2(uv[0] * self.logical.x, uv[1] * self.logical.y)
     }
 }
+
+/// A part of a menu that closed, kept for the next opening with all that made it slow to make: its interface with its fonts' atlas, its buffers, its shape, and what it painted
+/// last, so that a part which says the same again paints nothing. Every opening made each part from nothing (the architecture review's DRT-23).
+struct Rested {
+    panel: Panel,
+    since: Instant,
+}
+
+/// How long a part of a menu that closed is kept. A person opens these menus every few minutes while they use them; past this, the memory goes back and the next opening
+/// makes its parts as a first one does.
+const RESTS_FOR: Duration = Duration::from_secs(600);
+/// How much the parts kept may hold together, in bytes ([`Panel::bytes`]): past it the ones kept longest go first. Every part of both menus and a sheet in a headset is under
+/// half of it (the report has the numbers).
+const RESTS_HOLD: usize = 160 << 20;
 
 /// How often a colour held on the bar shows: every part is painted for it.
 const HUE_EVERY: Duration = Duration::from_millis(60);
@@ -744,9 +803,9 @@ mod page_skin_tests {
 const DEFAULT_PAGE_ACCENT: [u8; 3] = orbiters_n4n0_core::menu::theme::Theme::MODERN.colors.accent;
 
 impl Stage {
-    fn new(px: [u32; 2], with_worlds: bool) -> Self {
+    fn new(px: [u32; 2], with_worlds: bool, media: &std::sync::Arc<crate::media::Watcher>) -> Self {
         let canvas = Canvas::zoomed(px[0], px[1], px[0] as f32 / layout::WIDTH as f32).in_orbit_look();
-        let host = MenuHost::new(canvas.ctx().clone());
+        let host = MenuHost::with_media(canvas.ctx().clone(), media.clone());
         let worlds = with_worlds.then(|| Worlds::alone(canvas.ctx().clone()));
         Self { canvas, host, worlds, px, retro: false, skin: page_skin(DEFAULT_PAGE_ACCENT), skin_for: (DEFAULT_PAGE_ACCENT, orbiters_i18n::language()) }
     }
@@ -755,6 +814,8 @@ impl Stage {
 /// The parts of whichever menu is open, and what they do. The platform says what is open, where the pointer is and when it presses; it takes the pictures.
 pub struct Panels {
     backend: Ctl,
+    /// What reads the computer's music for the menu on the sheet: this process's own ([`crate::media::watcher`]), but in a test, which says what plays.
+    media: std::sync::Arc<crate::media::Watcher>,
     stage: Stage,
     list: Vec<Panel>,
     /// What stopped a 3D picture, said for a moment.
@@ -835,6 +896,13 @@ pub struct Panels {
     visit_pictures: HashMap<String, egui::TextureId>,
     /// The worlds' own pictures, for the gallery's recordings that kept none (round 10's judges: half a screen of empty cards).
     gallery_world_pictures: HashMap<String, egui::TextureId>,
+    /// The parts of menus that closed, one for a zone at most ([`Panels::rest`]).
+    rested: Vec<Rested>,
+    /// A part kept from an earlier opening has its interface made anew, fonts' atlas and all ([`Panel::renew`]). Off: it keeps them, which is most of what makes an opening
+    /// quick. Kept, a letter can lie elsewhere in the part's atlas than in a new part's (the part drew other words before), and the edge of such a letter then comes out a
+    /// level or two of 255 lighter or darker on some pixels; the sheet's page, whose interface was always kept, has always been so. On: every pixel as a new part's, and an
+    /// opening saves only its buffers and its shapes. The report of the architecture review's `overlay-paint` stream has both measured.
+    pub fonts_anew: bool,
     /// The page on the sheet (its back is in `list`).
     pub takeover: Option<Panel>,
     open: Option<Around>,
@@ -869,10 +937,14 @@ const KEYS_TOP: f32 = 300.0;
 
 impl Panels {
     pub fn new(backend: Ctl, sharp: f32, worlds_here: bool) -> Self {
+        let media = crate::media::watcher().clone();
         Self {
             backend,
-            stage: Stage::new([1, 1], false),
+            stage: Stage::new([1, 1], false, &media),
+            media,
             list: Vec::new(),
+            rested: Vec::new(),
+            fonts_anew: false,
             takeover: None,
             note: PictureNote::default(),
             was_flying: false,
@@ -1055,6 +1127,58 @@ impl Panels {
         self.hidden
     }
 
+    /// Keeps a part that leaves the menu, for the next opening. One for a zone: the platform has one overlay or window for a zone, which holds the picture of the part last
+    /// shown there. Its pictures of the gallery go as they went (they are let go with the sheet); what plays's stays, so that the part need not paint for it again.
+    fn rest(&mut self, mut panel: Panel) {
+        let art = self.art.as_ref().map(|(key, _)| key.as_str());
+        panel.pictures.retain(|key, _| panel.zone != Zone::Takeover && art == Some(key.as_str()));
+        self.rested.retain(|r| r.panel.zone != panel.zone);
+        self.rested.push(Rested { panel, since: Instant::now() });
+        self.hold_at_most(RESTS_HOLD);
+    }
+
+    /// Lets go of the parts kept longest until those left hold `bytes` at most; the one kept last stays whatever it holds.
+    fn hold_at_most(&mut self, bytes: usize) {
+        let mut held: usize = self.rested.iter().map(|r| r.panel.bytes()).sum();
+        while held > bytes && self.rested.len() > 1 {
+            // In the order they were kept: the first is the one kept longest.
+            held -= self.rested.remove(0).panel.bytes();
+        }
+    }
+
+    /// A part for `placed`: the one kept from an earlier opening when it is the same part of the same size ([`Panel::wake`]), a new one otherwise. A part kept of another size
+    /// goes: the platform's picture for its zone is replaced now.
+    fn part(&mut self, placed: Placed, order: usize, live: bool) -> Panel {
+        if let Some(at) = self.rested.iter().position(|r| r.panel.zone == placed.zone) {
+            let mut kept = self.rested.remove(at).panel;
+            if kept.fits(&placed, self.sharp) {
+                kept.wake(placed, order, live, self.fonts_anew);
+                return kept;
+            }
+        }
+        Panel::new(placed, self.sharp, order, live)
+    }
+
+    /// Lets go of the parts kept for longer than [`RESTS_FOR`]. Every turn, menus up or not: with none kept it does nothing.
+    pub fn let_go(&mut self, now: Instant) {
+        if !self.rested.is_empty() {
+            self.rested.retain(|r| now.saturating_duration_since(r.since) < RESTS_FOR);
+        }
+    }
+
+    /// How many parts are kept from menus that closed, and the bytes they hold.
+    pub fn resting(&self) -> (usize, usize) {
+        (self.rested.len(), self.rested.iter().map(|r| r.panel.bytes()).sum())
+    }
+
+    /// Every part of the menu up, and the sheet's page, leave it.
+    fn rest_all(&mut self) {
+        let leaving: Vec<Panel> = self.list.drain(..).chain(self.takeover.take()).collect();
+        for panel in leaving {
+            self.rest(panel);
+        }
+    }
+
     /// What is open: parts for it in the places `places` gives, or none. Whatever was held lets go.
     pub fn set_open(&mut self, around: Option<Around>, places: Vec<Placed>, snap: &Snapshot) {
         if around != self.open {
@@ -1069,15 +1193,16 @@ impl Panels {
             self.facts.pointed = None;
             self.facts.sheet = None;
             self.release();
-            self.takeover = None;
+            self.rest_all();
             self.open = around;
-            self.list.clear();
             self.bloom = Bloom::default();
             self.show_keys = false;
         }
+        if !self.rested.is_empty() {
+            self.let_go(Instant::now());
+        }
         if around.is_none() {
-            self.list.clear();
-            self.takeover = None;
+            self.rest_all();
             self.facts.sheet = None;
             return;
         }
@@ -1096,21 +1221,23 @@ impl Panels {
         if !unchanged {
             let first = self.list.is_empty();
             let mut old: Vec<Panel> = std::mem::take(&mut self.list);
-            self.list = places
-                .into_iter()
-                .enumerate()
-                .map(|(i, placed)| {
-                    if let Some(at) = old.iter().position(|p| p.zone == placed.zone && p.placed.rect.size() == placed.rect.size()) {
-                        let mut kept = old.swap_remove(at);
-                        kept.placed = placed;
-                        kept
-                    } else {
-                        let mut panel = Panel::new(placed, self.sharp, i, live && first);
-                        panel.appear = if first { panel.appear } else { Appear::new(0, false) };
-                        panel
-                    }
-                })
-                .collect();
+            let mut list = Vec::with_capacity(places.len());
+            for (i, placed) in places.into_iter().enumerate() {
+                if let Some(at) = old.iter().position(|p| p.zone == placed.zone && p.placed.rect.size() == placed.rect.size()) {
+                    let mut kept = old.swap_remove(at);
+                    kept.placed = placed;
+                    list.push(kept);
+                } else {
+                    // The first parts of an opening come in one after the other; one that joins them later is there at once.
+                    let (order, live) = if first { (i, live) } else { (0, false) };
+                    list.push(self.part(placed, order, live));
+                }
+            }
+            self.list = list;
+            // What this opening no longer shows may come back in it, or in the next.
+            for panel in old {
+                self.rest(panel);
+            }
         }
         // The Quick Menu again, with a view still in a hand: where it was.
         if around == Some(Around::QuickMenu) && self.takeover.is_none() {
@@ -1150,7 +1277,7 @@ impl Panels {
         let size = place.rect.size() * self.sharp;
         let px = [size.x.round() as u32, size.y.round() as u32];
         if self.stage.px != px || (self.worlds_here && self.stage.worlds.is_none()) {
-            self.stage = Stage::new(px, self.worlds_here);
+            self.stage = Stage::new(px, self.worlds_here, &self.media);
         }
         self.facts.sheet = Some(sheet);
         self.facts.sheet_title = title.to_string();
@@ -1171,7 +1298,7 @@ impl Panels {
             }
         }
         if self.takeover.is_none() {
-            self.takeover = Some(Panel::new(place, self.sharp, 0, !snap.settings.reduce_motion));
+            self.takeover = Some(self.part(place, 0, !snap.settings.reduce_motion));
         }
         self.stage.host.dirty = true;
         // All tools says where you were lately, and shows what the world's player has.
@@ -1210,10 +1337,16 @@ impl Panels {
         self.keep_screen();
         self.trail.clear();
         self.here = None;
-        self.takeover = None;
+        if let Some(page) = self.takeover.take() {
+            self.rest(page);
+        }
         self.facts.sheet = None;
         self.facts.sheet_title.clear();
-        self.list.retain(|p| !matches!(p.zone, Zone::SheetBack | Zone::SheetHint));
+        let (stay, leave): (Vec<Panel>, Vec<Panel>) = std::mem::take(&mut self.list).into_iter().partition(|p| !matches!(p.zone, Zone::SheetBack | Zone::SheetHint));
+        self.list = stay;
+        for panel in leave {
+            self.rest(panel);
+        }
         for panel in &mut self.list {
             panel.dirty = true;
         }
@@ -1640,7 +1773,8 @@ impl Panels {
         if self.art.as_ref().map(|(k, _)| k) != key.as_ref() {
             self.art = key.and_then(|k| self.stage.host.image(&k).map(|i| (k, i)));
             if self.art.is_some() {
-                for panel in &mut self.list {
+                // All tools shows it too: its page was only painted for it because every part was painted every turn (see `facts_of`'s gallery).
+                for panel in self.list.iter_mut().chain(self.takeover.iter_mut()) {
                     panel.dirty = true;
                 }
             }
@@ -1748,7 +1882,9 @@ impl Panels {
             countdown: snap.n4n0.photo_countdown,
             picture_flying: snap.capture.photo_3d && !matches!(snap.capture.state, CaptureState::Idle),
             // Their pictures are looked up per part, in `paint`.
-            recent: if self.facts.sheet == Some(Sheet::Pictures) { self.recents.shown.clone() } else { Default::default() },
+            // Off the gallery, the one empty gallery: galleries are compared by being the same list, and a new empty one each turn made the facts differ each turn, so that
+            // every part was painted again every turn a menu was up, to change no pixel (the paint bench counted them).
+            recent: if self.facts.sheet == Some(Sheet::Pictures) { self.recents.shown.clone() } else { panels::Gallery::none() },
             gallery_filter: self.facts.gallery_filter,
             gallery_reading: self.recents.rx.is_some() && self.recents.loaded.is_empty(),
             opened: self.facts.opened,
@@ -1895,9 +2031,15 @@ impl Panels {
         }
     }
 
-    /// Every part painted again, in a look that changed.
+    /// Every part painted again, in a look that changed. Those kept from menus that closed are of the look before: they go, and are made anew when asked for.
     fn paint_all_again(&mut self) {
+        self.rested.clear();
         for panel in self.list.iter_mut().chain(self.takeover.iter_mut()) {
+            // One kept from an earlier opening and not painted in this one yet drew its text in the look before: its interface anew, as it was when every opening made
+            // its parts (a look or a language chosen in the app's window while the menus were closed).
+            if panel.again {
+                panel.renew();
+            }
             panel.dirty = true;
             panel.canvas.invalidate();
         }
@@ -2579,7 +2721,8 @@ impl Panels {
     pub fn paint(&mut self, snap: &Snapshot, mut show: impl FnMut(&Panel, [u32; 4])) {
         let time = self.clock.unwrap_or_else(|| self.started.elapsed().as_secs_f64());
         let live = !snap.settings.reduce_motion;
-        let art = self.art.clone();
+        // Borrowed: a copy of what plays's picture was made here every turn a menu was up, painting or not.
+        let art = &self.art;
         for panel in &mut self.list {
             if !panel.dirty {
                 continue;
@@ -2589,7 +2732,7 @@ impl Panels {
             panel.items = panels::items(panel.zone, panel.logical, &self.facts);
             let mut facts = self.facts.clone();
             if matches!(panel.zone, Zone::WheelPlaying | Zone::WingPlaying | Zone::QmStrip | Zone::WheelVeil | Zone::WheelCaption | Zone::QmCaption) {
-                if let Some((key, image)) = &art {
+                if let Some((key, image)) = art {
                     let ctx = panel.canvas.ctx();
                     facts.art = Some(panel.pictures.entry(key.clone()).or_insert_with(|| ctx.load_texture("art", image.clone(), TextureOptions::LINEAR)).id());
                 }
@@ -2714,7 +2857,7 @@ impl Panels {
                             facts.opened_picture = Some(panel.pictures.entry(name).or_insert_with(|| ctx.load_texture("large", image.clone(), TextureOptions::LINEAR)).id());
                         }
                     }
-                    if let (Some((key, image)), Sheet::All) = (&art, sheet) {
+                    if let (Some((key, image)), Sheet::All) = (art, sheet) {
                         let ctx = stage.canvas.ctx();
                         facts.art = Some(panel.pictures.entry(key.clone()).or_insert_with(|| ctx.load_texture("art", image.clone(), TextureOptions::LINEAR)).id());
                     }
@@ -2789,11 +2932,13 @@ impl Panels {
 impl Stage {
     /// What the canvas painted, to the page on the sheet.
     fn canvas_to(&mut self, panel: &mut Panel, show: &mut impl FnMut(&Panel, [u32; 4])) {
-        if self.canvas.damage().is_none() {
+        // A page kept from an earlier opening is handed over whole the first time, as a new one is.
+        let [w, h] = panel.px;
+        let changed = if std::mem::take(&mut panel.again) { Some([0, 0, w, h]) } else { self.canvas.damage() };
+        if changed.is_none() {
             panels::forget_pictures();
         }
-        if let Some(changed) = self.canvas.damage() {
-            let [w, h] = panel.px;
+        if let Some(changed) = changed {
             let pixels = self.canvas.pixels();
             for y in changed[1]..changed[3].min(h) {
                 let (a, b) = ((y * w + changed[0]) as usize * 4, (y * w + changed[2].min(w)) as usize * 4);

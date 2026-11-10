@@ -111,6 +111,8 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         // Only with VRChat itself in front, or a panel's window: anything else in front and it all goes at once.
         let in_front = found.filter(|h| !exclusive && foreground_is(*h, &windows));
         let Some(window) = in_front else {
+            // The parts of menus that closed are kept for a while; with the game behind another window nothing else comes by to let them go.
+            panels.let_go(turn);
             pill.show(None, pos2(0.0, 0.0), vec2(0.0, 0.0));
             if watcher.wants_frames() || !panels.is_empty() || capture.is_some() {
                 watcher.reset();

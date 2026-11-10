@@ -756,7 +756,7 @@ impl Capture {
 
 /// How far a capture in a panel's hole reaches for each metre its standing content is high: what stands then spans a little over 60% of the hole's height, with
 /// headroom over its top, its floor clear of the hole's lower edge (the hole's shape, the capture's size in it and the low view, taken together).
-const HOLE_REACH_PER_HEIGHT: f32 = 1.75;
+const HOLE_REACH_PER_HEIGHT: f32 = 1.45;
 
 /// What of a capture to show small.
 #[derive(Clone, Copy, Debug, PartialEq)]

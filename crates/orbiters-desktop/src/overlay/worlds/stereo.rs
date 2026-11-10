@@ -191,10 +191,11 @@ const SMALL_TILT_IN_THE_ROOM: f32 = 14.0;
 
 /// How far under a hole's middle a capture's floor lies in it, in its radius: low enough that what stands as high as most captures do (0.7 of the radius) ends under the
 /// hole's top (Enzo's request 60: the upper part is not cut), the floor's near edge going under the hole's foot.
-const SMALL_FLOOR_UNDER_THE_MIDDLE: f32 = 0.28;
+const SMALL_FLOOR_UNDER_THE_MIDDLE: f32 = 0.2;
 /// How high over its floor a capture in a hole is drawn, in its reach: what is higher would be over the hole's top, behind the panel, and over the sheet's own top
 /// in the room. In a hand nothing is cut by its height (Enzo's request 60).
-pub const HOLE_CEILING_PER_REACH: f32 = 0.74;
+// Over the hole's top by about the sheet's head: where it thins out is behind the panel, and no straight edge shows in the hole (the round 20 pre-check).
+pub const HOLE_CEILING_PER_REACH: f32 = 1.02;
 
 /// Where a capture standing small lies in a panel: as that panel turns, this large, this far behind it.
 #[derive(Clone, Copy, Debug, PartialEq)]

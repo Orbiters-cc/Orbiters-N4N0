@@ -3636,11 +3636,19 @@ fn draw_wheel_head(p: &Painter, rect: Rect, first: &str, second: &str) {
     let x = rect.left() + 48.0;
     let room = rect.right() - x - 10.0;
     if second.is_empty() {
-        p.text(pos2(x, rect.center().y), Align2::LEFT_CENTER, fit(p, first, &big, room), big, look::LABEL);
+        // At rest its name alone, in the middle of its part.
+        p.text(pos2((x + rect.right()) / 2.0 - 8.0, rect.center().y), Align2::CENTER_CENTER, fit(p, first, &big, room), big, look::LABEL);
         return;
     }
-    p.text(pos2(x, rect.center().y - 10.0), Align2::LEFT_CENTER, fit(p, first, &big, room), big, look::LABEL);
-    p.text(pos2(x, rect.center().y + 9.0), Align2::LEFT_CENTER, fit(p, second, &small, room), small, look::MUTED);
+    // What a cell does whole, on two lines where one does not hold it: the head is no wider than the ring it lies over.
+    let mut job = egui::text::LayoutJob::simple(second.to_string(), small, look::MUTED, room);
+    job.wrap.max_rows = 2;
+    job.wrap.overflow_character = Some('\u{2026}');
+    let said = p.layout_job(job);
+    let high = 19.0 + said.size().y;
+    let top = rect.center().y - high / 2.0;
+    p.text(pos2(x, top + 9.0), Align2::LEFT_CENTER, fit(p, first, &big, room), big, look::LABEL);
+    p.galley(pos2(x, top + 19.0), said, look::MUTED);
 }
 
 /// Two lines in a pill as wide as they are.

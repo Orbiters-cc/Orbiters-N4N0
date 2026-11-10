@@ -358,7 +358,8 @@ pub(super) fn vr_shots(out: &Path, refs: &Path) -> anyhow::Result<()> {
                 }
             }
             if let Some(end) = end {
-                eye.laser([-0.30, 1.12, -0.25], end);
+                // From the other hand, held low before the body: its beam crosses no cell's name on its way.
+                eye.laser([-0.02, 1.02, -0.22], end);
             }
             eye.save(out, name)
         };

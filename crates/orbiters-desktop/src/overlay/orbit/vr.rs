@@ -275,9 +275,9 @@ const VR_WING_RAISED: f32 = 30.0;
 /// What is read over the wheel's ring, its one head, against a screen's.
 const VR_WHEEL_HEAD_SCALE: f32 = 1.25;
 /// Where that head's caption ends and its Hide begins, in the wheel's units.
-const WHEEL_HEAD_SPLIT: f32 = 156.0;
+const WHEEL_HEAD_SPLIT: f32 = 106.0;
 /// How far each side of the ring's axis that head reaches: wide enough for what a pointed cell says, whole.
-const WHEEL_HEAD_HALF: f32 = 250.0;
+const WHEEL_HEAD_HALF: f32 = 190.0;
 
 /// `placed` scaled about `anchor`, what is drawn on it as large with it.
 fn scaled(mut placed: Placed, anchor: egui::Pos2, by: f32) -> Placed {

@@ -37,7 +37,8 @@ cargo xtask <command>
   dist [--unsigned] [--notes <file>] [--channel <name>] [--programs <folder>] [--dev]
                                builds, signs and packs target/dist/<version>/: the setup and the signed release
                                (--programs: packs the programs already built there instead, a test build;
-                               --dev: compiled as development builds are, much faster to build)
+                               --dev: compiled as development builds are, much faster to build, and only
+                               for a development version)
   publish [--channel <name>] [--force] [--dev]
                                uploads target/dist/<version>/ to orbiters.cc and makes it the channel's release
                                (--dev: copies it to the development environment's feed on this computer)
@@ -176,6 +177,20 @@ impl Profile {
             Profile::Stable
         }
     }
+
+    /// This profile for a build of `version`, or why not: only a development version (`0.3.6-dev.2`) is built as
+    /// development builds are. `dist` signs a release file for whatever it builds, in the same `dist/<version>` folder
+    /// for both profiles, and `publish` checks the version, the hash and the signature, not how the programs were
+    /// compiled: `dist --dev` on a stable version, then `publish`, would have put development-built programs out as
+    /// the stable release. Asked before anything is built, and again where the build is made.
+    pub fn for_version(self, version: &str) -> anyhow::Result<Self> {
+        anyhow::ensure!(
+            self == Profile::Stable || version.contains("-dev."),
+            "{version} is not a development version: --dev compiles the programs as development builds are, and a stable \
+             version's setup is only ever made with the full profile (cargo xtask bump --dev first, or leave --dev out)"
+        );
+        Ok(self)
+    }
 }
 
 /// The repository's root (this crate's parent).
@@ -275,6 +290,11 @@ fn main() {
 }
 
 fn run_command(args: &[String]) -> anyhow::Result<()> {
+    command(args, &workspace_version)
+}
+
+/// A command, on the workspace whose version `version` reads.
+fn command(args: &[String], version: &dyn Fn() -> anyhow::Result<String>) -> anyhow::Result<()> {
     let rest = args.get(1..).unwrap_or_default();
     let channel = value(rest, "--channel").unwrap_or_else(|| orbiters_update::STABLE.into());
     let notes = || -> anyhow::Result<String> {
@@ -287,10 +307,14 @@ fn run_command(args: &[String]) -> anyhow::Result<()> {
         Some("keygen") => keygen(&Config::load()?, flag(rest, "--force")),
         Some("bump") if flag(rest, "--dev") => bump(&next_dev_version(&workspace_version()?)?),
         Some("bump") => bump(rest.first().context("cargo xtask bump <version>")?),
-        Some("dist") if cfg!(target_os = "macos") => macos::dist(&Config::load()?, &macos::Options { channel, notes: notes()?, profile: Profile::of(rest) }).map(drop),
         Some("dist") => {
+            // On Windows and on a Mac alike, before a setting is read or a program built.
+            let profile = Profile::of(rest).for_version(&version()?)?;
+            if cfg!(target_os = "macos") {
+                return macos::dist(&Config::load()?, &macos::Options { channel, notes: notes()?, profile }).map(drop);
+            }
             let programs = value(rest, "--programs").map(PathBuf::from);
-            let options = dist::Options { unsigned: flag(rest, "--unsigned"), channel, notes: notes()?, programs, profile: Profile::of(rest) };
+            let options = dist::Options { unsigned: flag(rest, "--unsigned"), channel, notes: notes()?, programs, profile };
             dist::dist(&Config::load()?, &options).map(drop)
         }
         Some("publish") if flag(rest, "--dev") => publish::publish_dev(&Config::load()?, &workspace_version()?, &channel, flag(rest, "--force")),
@@ -482,6 +506,30 @@ mod tests {
         let args = |list: &[&str]| list.iter().map(|a| a.to_string()).collect::<Vec<_>>();
         assert_eq!(Profile::of(&args(&["--unsigned", "--dev"])), Profile::Dev);
         assert_eq!(Profile::of(&args(&["--unsigned"])), Profile::Stable);
+    }
+
+    /// `dist --dev` on a stable version is refused, as a command, before anything is read or built: with `publish` after
+    /// it, it shipped development-built programs as a stable release. A development version takes either profile, and
+    /// `release --dev`, which only runs on one, keeps building as development builds are.
+    #[test]
+    fn a_stable_version_is_never_built_as_a_development_build() {
+        let args = |list: &[&str]| list.iter().map(|a| a.to_string()).collect::<Vec<_>>();
+        for stable in ["0.3.5", "1.0.0", "0.4.0-beta.1"] {
+            let version = || Ok(stable.to_string());
+            for command_line in [&["dist", "--dev"][..], &["dist", "--dev", "--unsigned"], &["dist", "--unsigned", "--channel", "stable", "--dev"], &["dist", "--programs", "elsewhere", "--dev"]] {
+                let refused = command(&args(command_line), &version).expect_err("built a stable version as a development build");
+                let said = format!("{refused:#}");
+                assert!(said.contains(stable) && said.contains("not a development version"), "{said}");
+            }
+            assert!(Profile::Dev.for_version(stable).is_err());
+            assert_eq!(Profile::Stable.for_version(stable).unwrap(), Profile::Stable);
+        }
+        // The version is asked for the refusal alone: a failure to read it is the command's failure, not a build.
+        assert!(command(&args(&["dist", "--dev"]), &|| anyhow::bail!("no Cargo.toml")).is_err());
+        for development in ["0.3.6-dev.1", "0.3.5-dev.32"] {
+            assert_eq!(Profile::Dev.for_version(development).unwrap(), Profile::Dev);
+            assert_eq!(Profile::Stable.for_version(development).unwrap(), Profile::Stable);
+        }
     }
 
     #[test]

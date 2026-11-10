@@ -273,6 +273,8 @@ fn sign(identity: &Identity, entitlements: &Path, file: &Path, is_main: bool) ->
 
 pub fn dist(config: &Config, options: &Options) -> anyhow::Result<PathBuf> {
     let version = crate::workspace_version()?;
+    // Whoever asks: a stable version's programs are never compiled as development builds are.
+    options.profile.for_version(&version)?;
     let target = crate::target_dir();
     let dist = target.join("dist").join(&version);
     if dist.exists() {

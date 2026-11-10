@@ -4153,6 +4153,46 @@ mod tests {
         assert!(largest.iter().zip(&sums).all(|(l, s)| *l <= *s / 2.0 + 1e-3), "a largest weight above its sum");
     }
 
+    /// A viewer's marks under 128 draw as they always did, whatever the marks from 128 up come to mean (they fade a
+    /// splat, for the edge of a capture the overlay shows small, and only the overlay's own renderer writes them): 0 as
+    /// trained, 1 tinted, each of 2 to 127 left out, bit for bit the picture of the set without those splats. The
+    /// editor and the 3D views write 0, 1 and 2 alone (crate::edit::Edit::view_marks), and training reads no mark:
+    /// its projection is project_split.wgsl, and a run holds no marks at all. Prints a checksum of each picture, to
+    /// compare across a change of the projection on one computer.
+    #[test]
+    fn a_viewers_marks_under_128_draw_as_they_always_did() {
+        let Ok(gpu) = Gpu::new() else { return };
+        let mut viewer = Gpu::renderer(gpu.device.clone(), gpu.queue.clone());
+        let (w, h) = (150u32, 90u32);
+        let (g, cam) = scene(3000, w, h, 37);
+        let bg = [0.1, 0.2, 0.3];
+        let marked = |i: usize| i % 3 == 1;
+        let picture = |gpu: &mut Gpu| -> Vec<u32> { crate::train::render(gpu, &cam, bg).expect("render").iter().flat_map(|p| p.map(f32::to_bits)).collect() };
+        let checksum = |bits: &[u32]| bits.iter().fold(0xcbf2_9ce4_8422_2325u64, |hash, b| (hash ^ *b as u64).wrapping_mul(0x0000_0100_0000_01b3));
+        // The set without the marked splats, on its own.
+        let mut without = g.clone();
+        without.retain(&(0..g.len()).map(|i| !marked(i)).collect::<Vec<_>>());
+        viewer.upload(&without);
+        let left_out = picture(&mut viewer);
+        viewer.upload(&g);
+        let plain = picture(&mut viewer);
+        assert!(plain != left_out, "the marked splats show");
+        let mut draw = |mark: u8| {
+            viewer.set_marks(&(0..g.len()).map(|i| if marked(i) { mark } else { 0 }).collect::<Vec<u8>>());
+            let bits = picture(&mut viewer);
+            eprintln!("marks {mark:3}: picture {:016x}", checksum(&bits));
+            bits
+        };
+        assert!(draw(0) == plain, "a mark of 0 changes the picture");
+        let tinted = draw(1);
+        assert!(tinted != plain && tinted != left_out, "selected splats are tinted, not left out");
+        for mark in 2..128u8 {
+            assert!(draw(mark) == left_out, "a mark of {mark} draws something of its splat");
+        }
+        // And nothing of them stays: 0 again is the set as trained.
+        assert!(draw(0) == plain);
+    }
+
     /// The last colour step's loss gradients, a pixel's four floats as bits: what the loss kernels wrote, before any
     /// backward pass adds floats in an order of its own.
     fn pixel_gradients(gpu: &Gpu) -> Vec<u32> {

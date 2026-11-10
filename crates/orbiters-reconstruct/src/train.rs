@@ -1128,6 +1128,10 @@ struct Level {
     cameras: Vec<Camera>,
 }
 
+/// An image at half its size, each pixel the mean of the four under it. One of the four left out (alpha 0: it showed the
+/// wearer, crate::wearer::is_out) leaves the pixel out, as the least of the four makes its mask ([`half_mask`]): the
+/// loss reads who is left out from the target's alpha (crate::gpu::Target::Color), and a coarse level made opaque
+/// whatever was under it trained the wearer back in, at half and at a quarter of the size.
 fn half_image(image: &[u32], w: u32, h: u32) -> Vec<u32> {
     let (hw, hh) = (w / 2, h / 2);
     let mut out = vec![0u32; (hw * hh) as usize];
@@ -1135,7 +1139,7 @@ fn half_image(image: &[u32], w: u32, h: u32) -> Vec<u32> {
         for x in 0..hw {
             let at = |dx: u32, dy: u32| image[((2 * y + dy) * w + 2 * x + dx) as usize];
             let px = [at(0, 0), at(1, 0), at(0, 1), at(1, 1)];
-            let mut v = 255u32 << 24;
+            let mut v = if px.iter().any(|p| crate::wearer::is_out(*p)) { 0 } else { 255u32 << 24 };
             for c in 0..3 {
                 let sum: u32 = px.iter().map(|p| (p >> (8 * c)) & 255).sum();
                 v |= ((sum + 2) / 4) << (8 * c);
@@ -1494,6 +1498,44 @@ fn normal(rng: &mut fastrand::Rng) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The coarse levels keep the wearer out. The loss reads who is left out from the target's alpha, and a level's
+    /// pixel is left out when any pixel under it is, through both reductions (half, then a quarter); every other pixel
+    /// stays an opaque mean of its four. A level made opaque whatever was under it trained the wearer back in.
+    #[test]
+    fn coarse_levels_keep_out_what_shows_the_wearer() {
+        use crate::wearer::is_out;
+        let pixels = [0x00ff_ffff, 0xff11_2233, 0xff11_2233, 0xff11_2233];
+        assert!(is_out(half_image(&pixels, 2, 2)[0]));
+        assert_eq!(half_image(&[0xff10_2030, 0xff30_4050, 0xff10_2030, 0xff30_4050], 2, 2), [0xff20_3040]);
+        // A view of 8×4 with one pixel of the wearer, at (5, 2): out at (2, 1) of its half, at (1, 0) of its quarter.
+        let (w, h) = (8u32, 4u32);
+        let mut image = vec![0xff40_8020u32; (w * h) as usize];
+        image[(2 * w + 5) as usize] &= 0x00ff_ffff;
+        let whole = vec![0xff40_8020u32; (w * h) as usize];
+        let view = |image: Vec<u32>| crate::dataset::View { camera: Camera::look([0.0; 3], [0.0, 0.0, 1.0], [0.0, 1.0, 0.0], 1.0, w, h), image, game_time: 0.0, keyframe: 0 };
+        let data = Dataset {
+            dir: Default::default(),
+            views: vec![view(image), view(whole)],
+            depth_views: Vec::new(),
+            faces: None,
+            width: w,
+            height: h,
+            geometry: crate::camera::Geometry::new(w, h, 1),
+            mask: vec![1.0; (w * h) as usize],
+            loaded: Default::default(),
+        };
+        let levels = levels(&data);
+        assert_eq!(levels.iter().map(|l| (l.width, l.height)).collect::<Vec<_>>(), [(4, 2), (2, 1)]);
+        let out = |level: &Level, view: usize| level.images[view].iter().map(|p| is_out(*p)).collect::<Vec<_>>();
+        assert_eq!(out(&levels[0], 0), [false, false, false, false, false, false, true, false]);
+        assert_eq!(out(&levels[1], 0), [false, true]);
+        // The colours are the means they were, and a view nobody is in stays whole at both levels.
+        assert!(levels.iter().all(|l| l.images[0].iter().all(|p| p & 0x00ff_ffff == 0x0040_8020)));
+        assert!(levels.iter().all(|l| l.images[1].iter().all(|p| *p == 0xff40_8020)));
+        // The scene mask is the session's own, the same for every view: the wearer is in the targets alone.
+        assert!(levels.iter().all(|l| l.mask.iter().all(|m| *m == 1.0) && l.scene_pixels == (l.width * l.height) as f32));
+    }
 
     #[test]
     fn faces_get_their_share_of_the_steps_up_to_half() {

@@ -4164,6 +4164,7 @@ mod tests {
     #[test]
     fn a_viewers_marks_under_128_draw_as_they_always_did() {
         let Ok(gpu) = Gpu::new() else { return };
+        eprintln!("adapter {} (a renderer on its device)", gpu.adapter);
         let mut viewer = Gpu::renderer(gpu.device.clone(), gpu.queue.clone());
         let (w, h) = (150u32, 90u32);
         let (g, cam) = scene(3000, w, h, 37);
@@ -4209,6 +4210,7 @@ mod tests {
     #[test]
     fn a_keyframes_left_out_pixels_train_as_masked_ones() {
         for mut gpu in devices() {
+            eprintln!("adapter {}", gpu.adapter);
             let (w, h) = (150u32, 90u32);
             let (g, cam) = scene(3000, w, h, 31);
             gpu.upload(&g);
@@ -4252,6 +4254,7 @@ mod tests {
     #[test]
     fn a_steps_named_mask_leaves_its_sizes_own() {
         let Some(mut gpu) = devices().into_iter().next() else { return };
+        eprintln!("adapter {}", gpu.adapter);
         let (w, h) = (150u32, 90u32);
         let (g, cam) = scene(3000, w, h, 33);
         gpu.upload(&g);
@@ -4292,6 +4295,7 @@ mod tests {
     #[test]
     fn a_training_run_holds_only_what_its_steps_read() {
         let Some(mut gpu) = devices().into_iter().next() else { return };
+        eprintln!("adapter {}", gpu.adapter);
         let (w, h) = (150u32, 90u32);
         let (g, cam) = scene(3000, w, h, 35);
         let budget = 40_000usize;

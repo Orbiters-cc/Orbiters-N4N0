@@ -537,6 +537,11 @@ pub(super) fn shots(out: &Path) -> anyhow::Result<()> {
     use orbiters_n4n0_core::menu::{PhotoMode, Target};
     use panels::{Action, Sheet};
     let hd = vec2(1280.0, 720.0);
+    // `ORBIT_ONLY_OVER_THE_GAME`: only the states painted over a real frame of the game, which is quick.
+    if std::env::var_os("ORBIT_ONLY_OVER_THE_GAME").is_some() {
+        let idle = Facts { recent: recent(), timer: 3, n4n0: true, desktop: true, music: Some(("The Weeknd - Moth to a Flame".into(), true)), ..Default::default() };
+        return round_18_over_the_game(out, &idle);
+    }
     let idle = Facts { recent: recent(), timer: 3, n4n0: true, desktop: true, music: Some(("The Weeknd - Moth to a Flame".into(), true)), ..Default::default() };
     let hint = Some(("Hold Left Alt to use this ring", "Your mouse then points here instead of at VRChat's wheel."));
     let empty = Facts { recent: Default::default(), music: None, ..idle.clone() };
@@ -956,12 +961,13 @@ fn round_18_over_the_game(out: &Path, idle: &Facts) -> anyhow::Result<()> {
             })?;
         }
     }
-    // A world's side panel on Worlds in 3D, its capture live in its picture; and on the whole page.
+    // A world's side panel on Worlds in 3D, the list in two columns beside it; then its capture live in its picture; and on the whole page.
+    let worlds = Facts { sheet: Some(Sheet::Worlds), sheet_title: "Worlds in 3D".into(), beside_wing: true, ..idle.clone() };
+    over_the_game("orbit-r18-world-side", out, client, &ground, &worlds, |px| crate::overlay::worlds::panel::side_live(px, None))?;
     if let Ok(dir) = std::env::var("ORBIT_SESSION_WORLD") {
         let frames = live_frames(Path::new(&dir), &[])?;
-        let facts = Facts { sheet: Some(Sheet::Worlds), sheet_title: "Worlds in 3D".into(), beside_wing: true, ..idle.clone() };
         for (shot, full) in [("orbit-r18-world-side-live", false), ("orbit-r18-world-side-live-full", true)] {
-            over_the_game(shot, out, client, &ground, &facts, |px| crate::overlay::worlds::panel::side_live(px, &frames[0], full))?;
+            over_the_game(shot, out, client, &ground, &worlds, |px| crate::overlay::worlds::panel::side_live(px, Some((&frames[0], full))))?;
         }
     }
     Ok(())

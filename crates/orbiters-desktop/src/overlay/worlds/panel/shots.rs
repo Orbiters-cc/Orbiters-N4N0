@@ -164,10 +164,10 @@ fn gradient(ctx: &egui::Context, name: &str, hue: f32, w: usize, h: usize) -> eg
     ctx.load_texture(name, egui::ColorImage { size: [w, h], source_size: vec2(w as f32, h as f32), pixels: px }, egui::TextureOptions::LINEAR)
 }
 
-/// A world's side panel on a screen with its capture live in 3D in its picture (`frame`, as the sheet's 3D view drew it), its full-screen button in that
-/// picture's corner; `full`, the view on the whole page. As the sheet shows it, `px` pixels, premultiplied. The list is the stand-in captures', with the
+/// A world's side panel on a screen: with `live`, its capture live in 3D in its picture (the frame the sheet's 3D view drew), its full-screen button in that
+/// picture's corner, and whether the view is on the whole page; without, its picture and See it in 3D. As the sheet shows it, `px` pixels, premultiplied. The list is the stand-in captures', with the
 /// real worlds' names and pictures where `ORBIT_PANEL_WORLDS` gives them.
-pub fn side_live(px: [u32; 2], frame: &egui::ColorImage, full: bool) -> anyhow::Result<Vec<u8>> {
+pub fn side_live(px: [u32; 2], live: Option<(&egui::ColorImage, bool)>) -> anyhow::Result<Vec<u8>> {
     let mut entries = stand_ins()?;
     let real = real_worlds();
     for (entry, (name, _)) in entries.iter_mut().zip(&real) {
@@ -181,12 +181,12 @@ pub fn side_live(px: [u32; 2], frame: &egui::ColorImage, full: bool) -> anyhow::
             None => gradient(canvas.ctx(), &format!("stand-in-{i}"), (i.min(6) as f32 * 0.137 + 0.55).fract(), 320, 180),
         })
         .collect();
-    let live = canvas.ctx().load_texture("live", frame.clone(), egui::TextureOptions::LINEAR);
+    let live = live.map(|(frame, full)| (canvas.ctx().load_texture("live", frame.clone(), egui::TextureOptions::LINEAR), full));
     let thumb = |e: &Entry| -> Option<TextureId> { entries.iter().position(|x| x.id == e.id).map(|i| thumbs[i].id()) };
     let picture = |_: u64, _: bool| -> Option<TextureId> { None };
     let feedback = stand_in_feedback(true);
     let status = Status::default();
-    let panel = Panel { on_sheet: true, section: Section::Captures, page: Page::Detail, selected: Some(10), live: Some(Live { id: 10, picture: Some(live.id()), full, ..Default::default() }), ..Default::default() };
+    let panel = Panel { on_sheet: true, section: Section::Captures, page: Page::Detail, selected: Some(10), live: live.as_ref().map(|(texture, full)| Live { id: 10, picture: Some(texture.id()), full: *full, ..Default::default() }), ..Default::default() };
     let d = Data { entries: &entries, picked: None, status: &status, feedback: &feedback, facts: &facts, thumb: &thumb, picture: &picture, now: 1_793_310_000 };
     for _ in 0..2 {
         canvas.paint(5.0, |p| panel.draw(p, &d, 5.0));

@@ -26,7 +26,7 @@ const ROW_GAP: f32 = 32.0;
 const CHIP_H: f32 = 32.0;
 /// How long a row's button says its link was copied.
 const COPIED_FOR: f64 = 2.0;
-/// How often the page looks whether the tray service wrote new videos.
+/// How often the page's watch looks whether the tray service wrote new videos.
 const LOOK_EVERY: f64 = 5.0;
 /// Thumbnails fetched at once.
 const THUMBS_AT_ONCE: usize = 4;
@@ -165,10 +165,12 @@ struct Picker {
 pub struct State {
     history: Option<Arc<History>>,
     loading: Job<(History, Option<SystemTime>)>,
-    /// The file's time when it was read, when the page last looked at it, and the visit it was read for.
+    /// The file's time when it was read.
     read_at: Option<SystemTime>,
-    looked: f64,
-    visit: u64,
+    /// The file's time now, looked at on a thread while the page shows (a visit is a watch of its own, so each starts
+    /// with a look), and the time a look saw that no reading was started for yet.
+    file: super::Watch<u64, Option<SystemTime>>,
+    file_at: Option<Option<SystemTime>>,
     bookmarks: Option<Bookmarks>,
     /// The bookmarks file could not be read: nothing is saved over it.
     unreadable: Option<String>,
@@ -242,7 +244,6 @@ impl State {
         self.history = Some(Arc::new(history));
         self.bookmarks = Some(bookmarks);
         self.read_at = None;
-        self.looked = f64::INFINITY;
         self.thumbs.offline = true;
         self.thumbs.ready.extend(pictures);
         self.pick_first = picker;
@@ -260,8 +261,8 @@ impl State {
     }
 
     /// Reads the videos again when the tray service wrote them since (looked at every few seconds while the page
-    /// shows, and on each visit), and the bookmarks once.
-    fn refresh(&mut self, ctx: &egui::Context, now: f64, visit: u64) {
+    /// shows, and on each visit, by a thread that asks for a frame only when the file changed), and the bookmarks once.
+    fn refresh(&mut self, ctx: &egui::Context, visit: u64) {
         if self.fixed {
             return;
         }
@@ -279,18 +280,25 @@ impl State {
             self.bookmarks = Some(bookmarks);
             self.revision += 1;
         }
-        if self.loading.running() || (now - self.looked < LOOK_EVERY && visit == self.visit) {
+        let looked = self.file.keep(ctx, &visit, Duration::from_secs_f64(LOOK_EVERY), || {
+            let file = video_history::history_file();
+            move || std::fs::metadata(&file).and_then(|m| m.modified()).ok()
+        });
+        if looked.is_some() {
+            self.file_at = looked;
+        }
+        // One reading at a time: a change seen meanwhile is read once this one landed.
+        if self.loading.running() {
             return;
         }
-        self.looked = now;
-        self.visit = visit;
-        let file = video_history::history_file();
-        let at = std::fs::metadata(&file).and_then(|m| m.modified()).ok();
-        if self.history.is_none() || at != self.read_at {
-            self.loading = Job::spawn(ctx, move || {
-                let at = std::fs::metadata(&file).and_then(|m| m.modified()).ok();
-                (History::load(&file), at)
-            });
+        if let Some(at) = self.file_at.take() {
+            if self.history.is_none() || at != self.read_at {
+                let file = video_history::history_file();
+                self.loading = Job::spawn(ctx, move || {
+                    let at = std::fs::metadata(&file).and_then(|m| m.modified()).ok();
+                    (History::load(&file), at)
+                });
+            }
         }
     }
 
@@ -412,7 +420,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
     let page = ui.max_rect();
     let t = anim::time(&ctx);
     let now = now_secs();
-    state.refresh(&ctx, t, cx.visit);
+    state.refresh(&ctx, cx.visit);
     state.thumbs.step(&ctx);
     if state.copied.as_ref().is_some_and(|(_, at)| t - at >= COPIED_FOR) {
         state.copied = None;
@@ -482,9 +490,6 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
     }
     for act in acts {
         apply(&ctx, cx, state, act, t, now);
-    }
-    if state.history.is_some() && state.looked.is_finite() {
-        ctx.request_repaint_after(Duration::from_secs_f64(LOOK_EVERY));
     }
     if let Some((_, at)) = &state.copied {
         ctx.request_repaint_after(Duration::from_secs_f64((COPIED_FOR - (t - at)).max(0.05)));

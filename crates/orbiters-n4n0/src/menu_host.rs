@@ -36,6 +36,10 @@ pub trait Pictures {
 /// the desktop's overlay and window. Called on a thread of its own.
 pub type CapturePictures = Arc<dyn Fn(&str) -> Option<Rgb> + Send + Sync>;
 
+/// Tells an interface that draws only when something changed that what the menu fetches on its threads arrived
+/// (YouTube's suggestions and results, a thumbnail): [`MenuHost::poll`] has it. Called on those threads.
+pub type Waker = Arc<dyn Fn() + Send + Sync>;
+
 /// What the menu asks of N4N0 and of the app's settings, from where it is drawn.
 pub trait MenuService {
     /// Asks N4N0 for `command`.
@@ -106,6 +110,8 @@ pub struct MenuHost<P: Pictures> {
     capture_pictures: Option<CapturePictures>,
     /// The worlds' feedback in the last status taken: the app's changes replace the menu's (its own presses show at once).
     feedback_seen: orbiters_n4n0_core::feedback::FeedbackView,
+    /// Told when something fetched arrived (none: the interface draws all the time, as the overlay does).
+    waker: Option<Waker>,
 }
 
 impl<P: Pictures> MenuHost<P> {
@@ -136,7 +142,16 @@ impl<P: Pictures> MenuHost<P> {
             photo_note_seen: None,
             capture_pictures: None,
             feedback_seen: Default::default(),
+            waker: None,
         }
+    }
+
+    /// The same, telling `waker` when something fetched arrived: for an interface that is still until something
+    /// changes (the window), which then need not look by itself several times a second. Together with
+    /// [`MenuHost::next_wake`], which says when the clock alone brings something.
+    pub fn with_waker(mut self, waker: Waker) -> Self {
+        self.waker = Some(waker);
+        self
     }
 
     /// The same, reading the 3D captures' pictures with `read`.
@@ -385,29 +400,47 @@ impl<P: Pictures> MenuHost<P> {
             self.dirty = true;
         }
         if let Some((id, text)) = self.suggest.due(Instant::now()) {
-            let (tx, lang) = (self.done_tx.clone(), self.locale.language());
+            let (tx, lang, waker) = (self.done_tx.clone(), self.locale.language(), self.waker.clone());
             std::thread::spawn(move || {
                 let result = youtube::suggestions(&text, &lang);
                 let _ = tx.send(Done::Suggestions { id, text, result });
+                wake(&waker);
             });
         }
-        if matches!(self.menu.page, Page::Results | Page::History) {
-            let now = Instant::now();
-            let shown: Vec<String> = match self.menu.page {
-                Page::Results => self.menu.page_results().iter().map(|v| v.id.clone()).collect(),
-                _ => self.menu.page_captures().iter().map(orbiters_n4n0_core::captures::CaptureRow::picture_key).collect(),
-            };
-            let retry: Vec<String> = shown
-                .into_iter()
-                .filter(
-                    |id| matches!(self.thumbs.get(id), Some(Thumb::Failed { at, tries }) if *tries < THUMB_TRIES && now >= *at + THUMB_RETRY * *tries as u32),
-                )
-                .collect();
-            if !retry.is_empty() {
-                self.thumbnails(retry);
-            }
+        let now = Instant::now();
+        let retry: Vec<String> = self.shown_pictures().into_iter().filter(|id| self.retry_at(id).is_some_and(|at| now >= at)).collect();
+        if !retry.is_empty() {
+            self.thumbnails(retry);
         }
         effects
+    }
+
+    /// The pictures of the page shown that are fetched again when they failed: the results', the 3D captures'.
+    fn shown_pictures(&self) -> Vec<String> {
+        match self.menu.page {
+            Page::Results => self.menu.page_results().iter().map(|v| v.id.clone()).collect(),
+            Page::History => self.menu.page_captures().iter().map(orbiters_n4n0_core::captures::CaptureRow::picture_key).collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    /// When the picture `id` is tried again, if it failed and still has tries left.
+    fn retry_at(&self, id: &str) -> Option<Instant> {
+        match self.thumbs.get(id) {
+            Some(Thumb::Failed { at, tries }) if *tries < THUMB_TRIES => Some(*at + THUMB_RETRY * *tries as u32),
+            _ => None,
+        }
+    }
+
+    /// How long from `now` until the clock alone gives the menu something to do, if anything waits: suggestions asked
+    /// once typing paused, a shown thumbnail tried again, a light set here given up for what N4N0 says. An interface
+    /// that draws only when something changed asks for its next frame then ([`MenuHost::follow`] and
+    /// [`MenuHost::poll`] do it there); what its threads fetch tells the [`Waker`] instead.
+    pub fn next_wake(&self, now: Instant) -> Option<Duration> {
+        let suggestions = self.suggest.next_due();
+        let retry = self.thumbs.values().any(|t| matches!(t, Thumb::Failed { tries, .. } if *tries < THUMB_TRIES)).then(|| self.shown_pictures().iter().filter_map(|id| self.retry_at(id)).min()).flatten();
+        let light = self.light_set.map(|(_, at)| at + LIGHT_ECHO);
+        [suggestions, retry, light].into_iter().flatten().min().map(|at| at.saturating_duration_since(now))
     }
 
     /// Fetches the thumbnails among `ids` not here yet (one that failed is tried again a little later, a few times).
@@ -423,7 +456,7 @@ impl<P: Pictures> MenuHost<P> {
                 Some(_) => continue,
             };
             self.thumbs.insert(id.clone(), Thumb::Loading);
-            let tx = self.done_tx.clone();
+            let (tx, waker) = (self.done_tx.clone(), self.waker.clone());
             let captures = self.capture_pictures.clone();
             std::thread::spawn(move || {
                 // A 3D capture's picture is read where the interface runs; the rest are YouTube's.
@@ -432,6 +465,7 @@ impl<P: Pictures> MenuHost<P> {
                     None => youtube::thumbnail(&id).ok().and_then(|jpeg| picture::rgb_jpeg(&jpeg).ok()),
                 };
                 let _ = tx.send(Done::Thumbnail { id, tries, image });
+                wake(&waker);
             });
         }
     }
@@ -449,17 +483,19 @@ impl<P: Pictures> MenuHost<P> {
                 // Asked for once typing pauses, one request at a time ([`MenuHost::poll`] sends it).
                 Effect::Suggest { id, text } => self.suggest.want(id, text, Instant::now()),
                 Effect::Search { id, query } => {
-                    let (tx, lang) = (self.done_tx.clone(), self.locale.language());
+                    let (tx, lang, waker) = (self.done_tx.clone(), self.locale.language(), self.waker.clone());
                     std::thread::spawn(move || {
                         let result = youtube::search(&query, &lang);
                         let _ = tx.send(Done::Results { id, more: false, result });
+                        wake(&waker);
                     });
                 }
                 Effect::More { id, token, .. } => {
-                    let (tx, lang) = (self.done_tx.clone(), self.locale.language());
+                    let (tx, lang, waker) = (self.done_tx.clone(), self.locale.language(), self.waker.clone());
                     std::thread::spawn(move || {
                         let result = youtube::more(&token, &lang);
                         let _ = tx.send(Done::Results { id, more: true, result });
+                        wake(&waker);
                     });
                 }
                 Effect::Thumbnails(ids) => self.thumbnails(ids),
@@ -541,6 +577,13 @@ impl<P: Pictures> MenuHost<P> {
     }
 }
 
+/// Tells the interface, when it asked to be told, that something fetched is there for [`MenuHost::poll`].
+fn wake(waker: &Option<Waker>) {
+    if let Some(waker) = waker {
+        waker();
+    }
+}
+
 /// How long an app gets to do what it was asked before what it says is believed over what was asked.
 const MEDIA_CATCHES_UP: Duration = Duration::from_millis(2500);
 
@@ -611,6 +654,43 @@ mod tests {
 
     fn host() -> MenuHost<Sizes> {
         MenuHost::new(Sizes, Arc::new(English), Arc::new(Watcher::new(|| Box::new(crate::media::NoMedia))))
+    }
+
+    /// The window's Home drew itself two to ten times a second to look whether a thread had fetched something. A host
+    /// with a waker tells the interface instead, and says when the clock alone brings it something to do.
+    #[test]
+    fn what_is_fetched_wakes_the_interface_and_the_clock_says_when_it_is_next_needed() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        let woken = Arc::new(AtomicU32::new(0));
+        let told = woken.clone();
+        let mut h = host()
+            .with_capture_pictures(Arc::new(|_key| Some(Rgb { width: 2, height: 1, pixels: vec![0; 6] })))
+            .with_waker(Arc::new(move || {
+                told.fetch_add(1, Ordering::SeqCst);
+            }));
+        let (settings, service) = (Settings::default(), Recorder::default());
+        h.open(&settings);
+        assert_eq!(h.next_wake(Instant::now()), None, "nothing waits");
+        // A 3D capture's picture, read on a thread: the interface is told once it is there for `poll`.
+        let key = format!("{}abc", orbiters_n4n0_core::captures::PICTURE_PREFIX);
+        h.effects(vec![Effect::Thumbnails(vec![key.clone()])], &settings, &service);
+        let until = Instant::now() + Duration::from_secs(10);
+        while woken.load(Ordering::SeqCst) == 0 {
+            assert!(Instant::now() < until, "the interface was not told");
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert!(h.picture(&key).is_none(), "not before the interface looks");
+        h.poll();
+        assert!(h.picture(&key).is_some());
+        assert_eq!(h.next_wake(Instant::now()), None);
+        // The light set here shows until N4N0 says the same, or its time is up: a frame is due then.
+        h.effects(vec![Effect::Light(Light { on: true, color: 1, level: 0.5 })], &settings, &service);
+        let wait = h.next_wake(Instant::now()).expect("the light's echo ends by the clock");
+        assert!(wait <= LIGHT_ECHO && wait > LIGHT_ECHO / 2, "{wait:?}");
+        // Typing: the suggestions are asked for once it paused, which only the clock tells (and comes first).
+        h.effects(vec![Effect::Suggest { id: 1, text: "lofi".into() }], &settings, &service);
+        let wait = h.next_wake(Instant::now()).expect("the suggestions wait for the pause");
+        assert!(wait <= orbiters_n4n0_core::menu::SUGGEST_PAUSE, "{wait:?}");
     }
 
     #[test]

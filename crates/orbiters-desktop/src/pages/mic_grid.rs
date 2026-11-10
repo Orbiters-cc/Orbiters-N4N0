@@ -1,6 +1,7 @@
 //! Settings: every microphone and how much it hears, side by side, and pressing one makes it Windows' default. Enzo: "see at a glance where our mic sound goes and select the
 //! right one rather than testing successively all of them until we find the right one". The microphones are open only while this card is on screen
-//! ([`crate::audio_devices::Meters`]), and nothing they hear is kept: only how loud.
+//! ([`crate::audio_devices::Meters`]), and nothing they hear is kept: only how loud. The card is drawn again when a bar would move (a level changed by
+//! a step of its bar, a microphone came or went) and while a bar falls, not thirty times a second whatever the room.
 
 use orbiters_i18n::{tr, tr_ctx};
 use super::{section, Cx, Job};
@@ -9,6 +10,29 @@ use egui::{pos2, vec2, Align2, Rect, Sense, Stroke, StrokeKind, Ui};
 use orbiters_ui::theme::{self, weight, Txt};
 use orbiters_ui::{icons, widgets};
 use std::collections::HashMap;
+use std::sync::Arc;
+use std::time::Duration;
+
+/// How often the levels are looked at (as often as they are read, `audio_devices`), and a falling bar drawn.
+const LOOK_EVERY: Duration = Duration::from_millis(33);
+/// The steps of a bar told apart: about its points across.
+const BAR_STEPS: f32 = 256.0;
+
+/// The levels as the card shows them: the same as another reading when no bar would be drawn elsewhere and the same
+/// microphones are there, the same one Windows' default.
+#[derive(Clone)]
+struct Shown(MicLevels);
+
+impl PartialEq for Shown {
+    fn eq(&self, other: &Self) -> bool {
+        let step = |peak: Option<f32>| peak.map(|p| (fill_of(p) * BAR_STEPS).round() as i32);
+        let (a, b) = (&self.0, &other.0);
+        a.read == b.read
+            && a.default_id == b.default_id
+            && a.mics.len() == b.mics.len()
+            && a.mics.iter().zip(&b.mics).all(|(a, b)| a.endpoint == b.endpoint && step(a.peak) == step(b.peak))
+    }
+}
 
 const TILE_HIGH: f32 = 66.0;
 const TILE_WIDE: f32 = 230.0;
@@ -16,7 +40,10 @@ const GAP: f32 = 10.0;
 
 #[derive(Default)]
 pub struct State {
-    meters: Option<audio_devices::Meters>,
+    meters: Option<Arc<audio_devices::Meters>>,
+    /// The levels looked at on a thread while the card shows: it keeps the microphones open between frames (they
+    /// close when nothing looks) and asks for a frame when a bar would move.
+    looks: super::Watch<(), Shown>,
     /// What each bar shows now: it rises at once and falls slowly, to be read.
     shown: HashMap<String, f32>,
     /// The press that is being carried out, and what it asked for until the next reading says so.
@@ -29,6 +56,7 @@ pub struct State {
 impl State {
     /// Leaving the page: the microphones close.
     pub fn stop(&mut self) {
+        self.looks.stop();
         self.meters = None;
     }
 }
@@ -66,11 +94,18 @@ pub fn card(ui: &mut Ui, cx: &Cx, index: usize, state: &mut State) {
         }
     }
     section(ui, cx, index, icons::MICROPHONE, tr("Microphones"), Some(tr("Speak: the one that moves is the one hearing you. Press one to make it Windows' default.")), |ui| {
-        let meters = state.meters.get_or_insert_with(audio_devices::Meters::start);
-        // While something looks: off the screen or minimized, this is not drawn, and they close by themselves.
+        let meters = state.meters.get_or_insert_with(|| Arc::new(audio_devices::Meters::start()));
+        // While something looks: off the screen or minimized, this is not drawn, its watch ends, and they close by
+        // themselves.
         meters.looked_at();
+        state.looks.keep(&ctx, &(), LOOK_EVERY, || {
+            let meters = meters.clone();
+            move || {
+                meters.looked_at();
+                Shown(meters.levels())
+            }
+        });
         let levels: MicLevels = meters.levels();
-        ctx.request_repaint_after(std::time::Duration::from_millis(33));
         if levels.mics.is_empty() {
             let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), TILE_HIGH), Sense::hover());
             let said = if levels.read { tr("No microphone is plugged in or turned on.") } else { tr("Looking for microphones…") };
@@ -101,6 +136,10 @@ pub fn card(ui: &mut Ui, cx: &Cx, index: usize, state: &mut State) {
             let was = state.shown.get(&mic.endpoint.id).copied().unwrap_or(0.0);
             let bar = settled(was, fill, dt);
             state.shown.insert(mic.endpoint.id.clone(), bar);
+            // Falling to where the level is: drawn until it is there.
+            if bar > fill {
+                ctx.request_repaint_after(LOOK_EVERY);
+            }
             let hearing = bar > 0.45;
             let p = ui.painter();
             let back = if response.is_pointer_button_down_on() {
@@ -163,6 +202,26 @@ mod tests {
         let down = settled(0.8, 0.0, 0.1);
         assert!(down < 0.8 && down > 0.5, "down in a while: {down}");
         assert_eq!(settled(0.05, 0.0, 1.0), 0.0);
+    }
+
+    /// The card drew itself thirty times a second while Settings showed, whatever the microphones heard: it is drawn
+    /// again when a bar would move, or the microphones or the default changed.
+    #[test]
+    fn a_reading_is_new_only_when_a_bar_would_move() {
+        let mic = |id: &str, peak| audio_devices::MicLevel { endpoint: orbiters_core::settings::AudioEndpoint { id: id.into(), name: id.into() }, peak };
+        let levels = |peak| Shown(MicLevels { mics: vec![mic("a", peak), mic("b", Some(0.0))], default_id: Some("a".into()), read: true });
+        // A room's hiss wandering under -60 dB, and a level moving by less than a step of the bar: nothing to draw.
+        assert!(levels(Some(0.0002)) == levels(Some(0.0009)));
+        assert!(levels(Some(0.1)) == levels(Some(0.1001)));
+        // A voice, a microphone that can no longer be read, another default, one unplugged: drawn.
+        assert!(levels(Some(0.0002)) != levels(Some(0.05)));
+        assert!(levels(Some(0.1)) != levels(None));
+        let mut other = levels(Some(0.1));
+        other.0.default_id = Some("b".into());
+        assert!(levels(Some(0.1)) != other);
+        let mut fewer = levels(Some(0.1));
+        fewer.0.mics.pop();
+        assert!(levels(Some(0.1)) != fewer);
     }
 
     #[test]

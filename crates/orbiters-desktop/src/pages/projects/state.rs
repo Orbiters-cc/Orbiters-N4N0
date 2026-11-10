@@ -196,9 +196,9 @@ pub struct State {
     pub(super) action_label: String,
     /// The running action adds repositories (the missing packages card shows its Retry busy meanwhile).
     pub(super) adding_repositories: bool,
-    pub(super) storage_job: Job<(PathBuf, orbiters_projects::storage::Health)>,
+    /// The shown project's disk and Unity's log, looked at on a thread while its panel shows, and the last look.
+    pub(super) storage_watch: crate::pages::Watch<PathBuf, super::storage_card::Seen>,
     pub(super) storage_health: Option<(PathBuf, orbiters_projects::storage::Health)>,
-    pub(super) storage_checked: Option<Instant>,
     pub(super) storage: super::storage_card::Storage,
     /// Screenshots: a real run's Repair storage was pressed.
     pub(super) stage_repair_started: bool,
@@ -285,7 +285,9 @@ pub struct State {
     pub(super) missing: Option<super::missing_card::Card>,
     /// Each project's Unity editor (by `discovery::key`), and since when Unity's save question was answered.
     pub(super) sessions: HashMap<String, (editor::Session, Option<Instant>)>,
-    pub(super) editors_job: Job<HashMap<String, Option<(u32, bool)>>>,
+    /// The editors as a look at the processes sees them, by project, taken on a thread while the page shows; and when
+    /// a look was last taken in.
+    pub(super) editors: crate::pages::Watch<u64, HashMap<String, Option<(u32, bool)>>>,
     pub(super) editors_at: Option<Instant>,
     /// Show, Save & Exit or Kill running (not the page's one action: Unity may be asked while packages change).
     pub(super) editor_action: Job<Result<(), String>>,
@@ -367,9 +369,8 @@ impl Default for State {
             action: Job::default(),
             action_label: String::new(),
             adding_repositories: false,
-            storage_job: Job::default(),
+            storage_watch: Default::default(),
             storage_health: None,
-            storage_checked: None,
             storage: Default::default(),
             stage_repair_started: false,
             error: None,
@@ -428,7 +429,7 @@ impl Default for State {
             last_change: None,
             missing: None,
             sessions: HashMap::new(),
-            editors_job: Job::default(),
+            editors: Default::default(),
             editors_at: None,
             editor_action: Job::default(),
             kill_confirm: None,

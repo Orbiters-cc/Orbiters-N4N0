@@ -32,7 +32,10 @@ pub mod states;
 pub mod storage;
 pub mod videos;
 pub mod vr_audio;
+mod watch;
 pub mod worlds;
+
+pub use watch::Watch;
 
 use crate::backend::Ctl;
 use crate::state::Snapshot;
@@ -340,6 +343,43 @@ pub fn local_time(iso: &str) -> String {
 pub fn local_time_unix(secs: u64) -> String {
     let Ok(t) = time::OffsetDateTime::from_unix_timestamp(secs as i64) else { return String::new() };
     local_time(&t.format(&time::format_description::well_known::Rfc3339).unwrap_or_default())
+}
+
+/// What a page costs while nothing happens, for the pages' tests.
+#[cfg(test)]
+pub(crate) mod rest {
+    use std::time::Duration;
+
+    /// The frames a page draws by itself in a minute once it came to rest, from `from` seconds on: `frame(t)` draws
+    /// one at `t` and says how soon it asked for the next (`Duration::MAX`: it asked for none). Forty seconds pass
+    /// first, for entrances to end and looping decorations to rest (`orbiters_ui::anim::REST_AFTER`); then each frame
+    /// comes when the last one asked, as a window's would. What a worker asks for between frames is not a frame the
+    /// page asked for, and is not counted.
+    pub fn frames_a_minute(from: f64, mut frame: impl FnMut(f64) -> Duration) -> usize {
+        let mut t = from;
+        while t < from + 40.0 {
+            t += frame(t).as_secs_f64().clamp(1.0 / 60.0, 0.5);
+        }
+        let end = t + 60.0;
+        let mut frames = 0;
+        loop {
+            let wait = frame(t);
+            if wait == Duration::MAX {
+                break;
+            }
+            t += wait.as_secs_f64().max(1.0 / 60.0);
+            if t >= end {
+                break;
+            }
+            frames += 1;
+        }
+        frames
+    }
+
+    /// How soon the frame that gave `output` asked for the next.
+    pub fn asked(output: &egui::FullOutput) -> Duration {
+        output.viewport_output.get(&egui::ViewportId::ROOT).map_or(Duration::MAX, |v| v.repaint_delay)
+    }
 }
 
 #[cfg(test)]

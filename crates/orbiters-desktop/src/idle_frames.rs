@@ -148,12 +148,12 @@ fn count(backend: Ctl, page: Page, warmup: f64, seconds: f64, focused: bool) -> 
             ..Default::default()
         };
         input.viewports.insert(ViewportId::ROOT, ViewportInfo { native_pixels_per_point: Some(1.0), focused: Some(focused), ..Default::default() });
-        let out = ctx.run_ui(input, |ui| {
+        let mut out = ctx.run_ui(input, |ui| {
             app.logic_offline(ui.ctx());
             app.draw(ui);
         });
         // Nothing paints these frames.
-        drop(out);
+        out.textures_delta.clear();
         if Instant::now() >= measure_from {
             counted.frames += 1;
             // What asked for this frame was asked during the one before, or between the two.

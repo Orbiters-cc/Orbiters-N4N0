@@ -8,6 +8,9 @@ use std::path::PathBuf;
 /// The button's label (Enzo, 2026-10-30: "Manage folders", it was "Folders").
 pub const LABEL: &str = mark("Manage folders");
 
+/// How often the picture folders are walked again while Photos & captures shows.
+const RESCAN_EVERY: std::time::Duration = std::time::Duration::from_secs(15);
+
 /// The native folder picker, run on a worker (it blocks until the member chooses).
 fn pick_folder() -> Option<PathBuf> {
     rfd::FileDialog::new().set_title(tr("Add a picture folder")).pick_folder()
@@ -27,7 +30,11 @@ pub struct State {
     listed: Option<Vec<PathBuf>>,
     checked: f64,
     revision: u64,
-    scanned: f64,
+    /// The folders walked again every [`RESCAN_EVERY`] while the page shows, on a thread, for the pictures taken
+    /// meanwhile: the page is drawn again only when a walk found something (the pictures' revision changes).
+    rescan: super::super::Watch<Vec<PathBuf>, ()>,
+    /// The folder scan was told which interface to wake.
+    woken: bool,
     saved: Vec<PathBuf>,
     fixture: bool,
     /// Where the button was drawn last.
@@ -57,18 +64,28 @@ impl State {
         self.button
     }
 
+    /// Whether the listing is to be made again (the scan found pictures, or the settings' folders changed), and whether
+    /// pictures changed. Asks for no frame: the scan does when it finds something ([`crate::worlds::wake_on_pictures`]).
     pub fn tick(&mut self, ui: &Ui, cx: &Cx) -> (bool, bool) {
-        let now = ui.input(|i| i.time);
+        if !std::mem::replace(&mut self.woken, true) {
+            crate::worlds::wake_on_pictures(ui.ctx());
+        }
+        let folders = &cx.snap.settings.picture_folders;
+        // Made-up folders (screenshots, tests) are not walked.
+        if !self.fixture {
+            self.rescan.keep(ui.ctx(), folders, RESCAN_EVERY, || {
+                let folders = folders.clone();
+                move || crate::worlds::rescan_pictures(&folders)
+            });
+        }
         let revision = crate::worlds::picture_revision();
         let images_changed = revision != self.revision;
-        let changed = images_changed || self.saved != cx.snap.settings.picture_folders || now - self.scanned > 15.0;
+        let changed = images_changed || self.saved != *folders;
         if changed {
             self.revision = revision;
-            self.saved = cx.snap.settings.picture_folders.clone();
-            self.scanned = now;
+            self.saved = folders.clone();
         }
         self.take_picked(cx);
-        ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));
         (changed, images_changed)
     }
 
@@ -286,7 +303,12 @@ mod tests {
         }
 
         fn frame(&mut self, events: Vec<Event>) {
-            self.time += 1.0 / 60.0;
+            self.frame_at(self.time + 1.0 / 60.0, events);
+        }
+
+        /// A frame at `time`; how soon it asked for the next.
+        fn frame_at(&mut self, time: f64, events: Vec<Event>) -> std::time::Duration {
+            self.time = time;
             let input = RawInput { screen_rect: Some(Rect::from_min_size(egui::Pos2::ZERO, vec2(1100.0, 760.0))), time: Some(self.time), events, ..Default::default() };
             let mut toasts = orbiters_ui::toast::Toasts::default();
             let (ctl, snap, state) = (&self.ctl, &self.snap, &mut self.state);
@@ -296,6 +318,7 @@ mod tests {
                 state.show(ui, &cx, BUTTON);
             });
             output.textures_delta.clear();
+            crate::pages::rest::asked(&output)
         }
 
         fn settle(&mut self) {
@@ -313,6 +336,31 @@ mod tests {
 
     fn button(at: egui::Pos2, pressed: bool) -> Event {
         Event::PointerButton { pos: at, button: PointerButton::Primary, pressed, modifiers: Modifiers::NONE }
+    }
+
+    /// Photos & captures asked for a frame every 100 ms to see whether the folder scan had found pictures (the
+    /// architecture review's DUI-27): 600 frames a minute with nothing to show. The scan asks for the frame now.
+    #[test]
+    fn looking_for_new_pictures_asks_for_no_frame_and_the_scan_wakes_the_page() {
+        let mut h = Harness::new();
+        assert_eq!(crate::pages::rest::frames_a_minute(0.0, |t| h.frame_at(t, Vec::new())), 0);
+        // The scan found pictures: the page is asked to draw, and is told once that its listing changed.
+        assert!(!h.ctx.has_requested_repaint());
+        crate::worlds::tests::publish_for_test();
+        assert!(h.ctx.has_requested_repaint(), "the scan wakes the page that looks at its pictures");
+        let mut told = Vec::new();
+        for _ in 0..3 {
+            h.time += 1.0 / 60.0;
+            let input = RawInput { time: Some(h.time), ..Default::default() };
+            let mut toasts = orbiters_ui::toast::Toasts::default();
+            let (ctl, snap, state) = (&h.ctl, &h.snap, &mut h.state);
+            let mut output = h.ctx.run_ui(input, |ui| {
+                let cx = Cx { ctl, snap, toasts: &mut toasts, entered: 0.0, visit: 1, windowed: true, gpu: None, top: 40.0, go: None };
+                told.push(state.tick(ui, &cx));
+            });
+            output.textures_delta.clear();
+        }
+        assert_eq!(told, vec![(true, true), (false, false), (false, false)]);
     }
 
     #[test]

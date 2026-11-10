@@ -39,6 +39,20 @@ const INSET: f32 = 24.0;
 const THUMB: Vec2 = vec2(160.0, 90.0);
 /// How long a result's button says its link was copied.
 const COPIED_FOR: f64 = 2.0;
+/// How often the music is looked at while Home or the music page shows (on a thread: [`super::Watch`]).
+const MUSIC_EVERY: Duration = Duration::from_millis(500);
+
+/// The music as a page shows it: what plays, the volume and the art's key, with where it is in its timeline only for
+/// the music page (`positions`). Home's card names what plays and nothing more, so a song going on is no change there.
+type Music = (Option<Media>, Option<Volume>, Option<String>);
+
+fn music_shown(reading: &orbiters_n4n0::media::Reading, positions: bool) -> Music {
+    let mut media = reading.media.clone();
+    if let (Some(media), false) = (media.as_mut(), positions) {
+        media.position = None;
+    }
+    (media, reading.volume, reading.art.as_ref().map(|art| art.key.clone()))
+}
 
 /// A text of N4N0's own menu in the language now (`orbiters-n4n0-core/menu-strings`): the words the menu in VR and on the avatar uses, so
 /// the window and the menu say a timer, a flight, a colour of the light or a kind of tracker the same way.
@@ -100,6 +114,9 @@ pub struct State {
     /// What going back to Home asked of the menu's host from outside a frame (the sidebar's Home: the QR code scanner
     /// stops), done at the next one.
     pending: Vec<Effect>,
+    /// The music, looked at on a thread while a page shows it (`true`: with where it is in its timeline): the page is
+    /// drawn again only when what it shows of the music changed.
+    music: super::Watch<bool, Music>,
 }
 
 impl State {
@@ -144,16 +161,26 @@ fn go_home(host: &mut MenuHost) -> Vec<Effect> {
 pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
     let ctx = ui.ctx().clone();
     let snap = cx.snap;
-    let State { host, shown, since, opened, focus, copied, states, pending, network } = state;
+    let State { host, shown, since, opened, focus, copied, states, pending, network, music: music_watch } = state;
     let host = host.get_or_insert_with(|| {
-        let mut host = MenuHost::new(ctx.clone());
+        // What it fetches (YouTube's answers, thumbnails) asks for a frame when it arrives.
+        let mut host = MenuHost::waking(ctx.clone());
         host.open(snap);
         host
     });
     host.follow(snap);
-    // The music card names what plays, and the music page shows it: read while one of them shows.
+    // The music card names what plays, and the music page shows it: read while one of them shows. The watch keeps
+    // the readings coming between frames, and asks for one when what the page shows of them changed.
     if matches!(host.menu.page, Page::Home | Page::Music) {
         host.follow_media();
+        let positions = host.menu.page == Page::Music;
+        music_watch.keep(&ctx, &positions, MUSIC_EVERY, || {
+            let media = crate::media::watcher().clone();
+            move || {
+                media.want();
+                music_shown(&media.reading().1, positions)
+            }
+        });
     }
     let mut effects = host.poll();
     effects.append(pending);
@@ -276,16 +303,17 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
     }
     host.dropped = false;
 
-    // What arrives on its own: YouTube's answers and thumbnails, the music, a call's clock; a copied link's note ends.
+    // What arrives on its own asks for its frame itself: YouTube's answers and thumbnails (the menu's host), the music
+    // (its watch), what the service says (its news). Only what the clock alone brings is asked for here: what the
+    // host waits for (suggestions once typing paused, a thumbnail tried again), a call's clock, a copied link's note
+    // ending. The page used to draw itself two to ten times a second to look.
+    if let Some(wait) = host.next_wake(std::time::Instant::now()) {
+        ctx.request_repaint_after(wait.max(Duration::from_millis(1)));
+    }
     let menu = &host.menu;
-    let wait = match menu.page {
-        Page::Search | Page::Results => Some(Duration::from_millis(100)),
-        Page::Home | Page::Music => Some(Duration::from_millis(500)),
-        _ if matches!(menu.call, Some(Call::Connected { .. })) => Some(Duration::from_secs(1)),
-        _ => None,
-    };
-    if let Some(wait) = wait {
-        ctx.request_repaint_after(wait);
+    if matches!(menu.call, Some(Call::Connected { .. })) {
+        // Its seconds count on Home's card and on its page.
+        ctx.request_repaint_after(if matches!(menu.page, Page::Home | Page::Music) { Duration::from_millis(500) } else { Duration::from_secs(1) });
     }
     if let Some((_, at)) = copied {
         let left = COPIED_FOR - (now - *at);
@@ -1409,7 +1437,12 @@ mod tests {
         }
 
         fn frame(&mut self, events: Vec<Event>) {
-            self.time += 1.0 / 60.0;
+            self.frame_at(self.time + 1.0 / 60.0, events);
+        }
+
+        /// A frame at `time`; how soon it asked for the next.
+        fn frame_at(&mut self, time: f64, events: Vec<Event>) -> Duration {
+            self.time = time;
             let input =
                 RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1048.0, 780.0))), time: Some(self.time), events, ..Default::default() };
             let (ctl, snap, toasts, state) = (&self.ctl, &self.snap, &mut self.toasts, &mut self.state);
@@ -1419,6 +1452,7 @@ mod tests {
             });
             // Nothing paints these frames.
             output.textures_delta.clear();
+            crate::pages::rest::asked(&output)
         }
 
         /// Frames until what entered stands still.
@@ -1457,6 +1491,39 @@ mod tests {
     fn card_of(target: Target) -> Pos2 {
         let at = features().position(|t| t.0 == target).expect("a feature here");
         pos2(147.0 + 250.0 * (at % 4) as f32, 204.0 + 144.0 * (at / 4) as f32)
+    }
+
+    /// Home drew itself twice a second to look at the music, and YouTube's page ten times a second to look for
+    /// answers, whether anything had changed or not (the architecture review's DUI-27): the window's landing page
+    /// never rested. What changes now asks for its own frame.
+    #[test]
+    fn home_at_rest_asks_for_no_frame() {
+        let mut h = Harness::new();
+        assert_eq!(crate::pages::rest::frames_a_minute(0.0, |t| h.frame_at(t, Vec::new())), 0, "Home, untouched");
+        // YouTube's page, nothing typed: at most its field's caret blinking (it drew 600 frames a minute).
+        let youtube = card_of(Target::YouTube);
+        h.press(youtube);
+        h.release(youtube);
+        assert_eq!(h.page(), Page::Search);
+        let from = h.time;
+        let frames = crate::pages::rest::frames_a_minute(from, |t| h.frame_at(t, Vec::new()));
+        println!("YouTube's page at rest: {frames} frames a minute");
+        assert!(frames <= 300, "YouTube's page, untouched: {frames} frames a minute");
+    }
+
+    /// Home's card names what plays and no more: a song going on is no change there, and is one on the music page.
+    #[test]
+    fn a_song_going_on_changes_the_music_page_only() {
+        let playing = |position| orbiters_n4n0::media::Reading {
+            media: Some(Media { title: "Song".into(), position: Some(position), duration: Some(200), ..Default::default() }),
+            volume: Some(Volume { percent: 40, muted: false }),
+            art: None,
+        };
+        assert!(music_shown(&playing(10), false) == music_shown(&playing(11), false), "Home");
+        assert!(music_shown(&playing(10), true) != music_shown(&playing(11), true), "the music page");
+        let mut louder = playing(10);
+        louder.volume = Some(Volume { percent: 45, muted: false });
+        assert!(music_shown(&playing(10), false) != music_shown(&louder, false));
     }
 
     #[test]

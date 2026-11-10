@@ -244,7 +244,8 @@ fn from_index(sessions_dir: &Path, index: visited::ShotIndex, unplaced: bool) ->
     out
 }
 
-/// Changes when the background folder scan finishes. Pages may keep showing their cached listing meanwhile.
+/// Changes when the background folder scan found pictures (as it goes, and when it finishes). Pages may keep showing
+/// their cached listing meanwhile.
 pub fn picture_revision() -> u64 {
     PICTURE_REVISION.load(std::sync::atomic::Ordering::Acquire)
 }
@@ -252,28 +253,84 @@ static PICTURE_REVISION: std::sync::atomic::AtomicU64 = std::sync::atomic::Atomi
 
 static LIVE_PICTURES: Mutex<Option<visited::ShotIndex>> = Mutex::new(None);
 
+/// The interfaces drawn again when the scan found pictures ([`wake_on_pictures`]): the window's.
+static PICTURE_WAKE: Mutex<Vec<egui::Context>> = Mutex::new(Vec::new());
+
+/// Has the folder scan ask `ctx` for a frame whenever [`picture_revision`] changes. Nothing told a page that the scan
+/// had found pictures, so Photos & captures drew itself ten times a second to look.
+pub fn wake_on_pictures(ctx: &egui::Context) {
+    let mut woken = PICTURE_WAKE.lock().unwrap_or_else(|e| e.into_inner());
+    if !woken.contains(ctx) {
+        woken.push(ctx.clone());
+    }
+}
+
+/// What the scan found so far, for the pages: the index, a new revision, and a frame to show it.
+fn publish_pictures(index: &visited::ShotIndex) {
+    *LIVE_PICTURES.lock().unwrap_or_else(|e| e.into_inner()) = Some(index.clone());
+    pictures_changed();
+}
+
+/// A new revision of the pictures, and a frame for the pages that show them.
+fn pictures_changed() {
+    PICTURE_REVISION.fetch_add(1, std::sync::atomic::Ordering::Release);
+    for ctx in &*PICTURE_WAKE.lock().unwrap_or_else(|e| e.into_inner()) {
+        orbiters_ui::anim::request_frame(ctx);
+    }
+}
+
 fn picture_index(file: &Path, dirs: Vec<PathBuf>) -> visited::ShotIndex {
-    static SCANNING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
     let index = LIVE_PICTURES.lock().unwrap_or_else(|e| e.into_inner()).clone()
         .unwrap_or_else(|| visited::ShotIndex::load(file));
     picture_cache::set_index(&index);
-    if !SCANNING.swap(true, std::sync::atomic::Ordering::AcqRel) {
-        let file = file.to_path_buf();
-        std::thread::spawn(move || {
-            let _one = shot_index_lock();
-            let mut current = visited::ShotIndex::load(&file);
-            let publish = |index: &visited::ShotIndex| {
-                *LIVE_PICTURES.lock().unwrap_or_else(|e| e.into_inner()) = Some(index.clone());
-                PICTURE_REVISION.fetch_add(1, std::sync::atomic::Ordering::Release);
-            };
-            if current.refresh_progress(&dirs, publish) {
-                let _ = current.save(&file);
-                publish(&current);
-            }
-            SCANNING.store(false, std::sync::atomic::Ordering::Release);
-        });
-    }
+    scan_pictures(file, dirs);
     index
+}
+
+/// Walks the picture folders again on a thread, for what was taken or removed since the last walk: Photos & captures
+/// asks every few seconds while it shows. [`picture_revision`] changes if the walk found something, and only then.
+pub fn rescan_pictures(folders: &[PathBuf]) {
+    scan_pictures(&visited::shot_index_file(), visited::screenshot_dirs_with(folders));
+}
+
+/// One walk of `dirs` at a time, on a thread: a walk asked for while one runs is not started (the next one asked sees
+/// what it would have).
+fn scan_pictures(file: &Path, dirs: Vec<PathBuf>) {
+    static SCANNING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    let file = file.to_path_buf();
+    one_at_a_time(&SCANNING, "picture-scan", move || {
+        let _one = shot_index_lock();
+        let mut current = visited::ShotIndex::load(&file);
+        if current.refresh_progress(&dirs, publish_pictures) {
+            let _ = current.save(&file);
+            publish_pictures(&current);
+        }
+    });
+}
+
+/// Runs `work` on a thread named `name` unless one started with the same `running` flag still runs; says whether it
+/// started. The flag is cleared however the work ends: a panic in it (or a thread the system refuses) used to leave
+/// the flag set, and no folder scan ran again for the rest of the process.
+fn one_at_a_time(running: &'static std::sync::atomic::AtomicBool, name: &str, work: impl FnOnce() + Send + 'static) -> bool {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    struct Clear(&'static AtomicBool);
+    impl Drop for Clear {
+        fn drop(&mut self) {
+            self.0.store(false, Ordering::Release);
+        }
+    }
+    if running.swap(true, Ordering::AcqRel) {
+        return false;
+    }
+    // Dropped with the closure when the thread cannot start, at the end of the work, or as a panic unwinds through it.
+    let clear = Clear(running);
+    std::thread::Builder::new()
+        .name(name.into())
+        .spawn(move || {
+            let _clear = clear;
+            work();
+        })
+        .is_ok()
 }
 
 /// The SHA-256 of each screenshot (computed once, then kept in the index): Orbiters knows the pictures this member
@@ -791,8 +848,13 @@ pub fn decode_png(bytes: &[u8]) -> Option<(u32, u32, Vec<u8>)> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+
+    /// What the scan does for the pages when it found pictures, the index left as it is (the pages' tests).
+    pub(crate) fn publish_for_test() {
+        pictures_changed();
+    }
 
     fn shot(path: &str, world: Option<&str>, taken: u64) -> Shot {
         let info = visited::ShotInfo {
@@ -811,6 +873,37 @@ mod tests {
             .iter()
             .map(|(s, l)| (s.path.file_name().unwrap().to_string_lossy().into_owned(), l.iter().map(|l| l.name.clone()).collect()))
             .collect()
+    }
+
+    /// The folder scan ran once at a time behind a flag that only the end of the scan cleared: a scan that panicked left
+    /// it set, and none ran again until the app restarted.
+    #[test]
+    fn a_scan_that_panics_does_not_stop_the_next_one() {
+        use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+        static RUNNING: AtomicBool = AtomicBool::new(false);
+        static DONE: AtomicU32 = AtomicU32::new(0);
+        let wait = |what: &str, done: &dyn Fn() -> bool| {
+            let until = std::time::Instant::now() + Duration::from_secs(10);
+            while !done() {
+                assert!(std::time::Instant::now() < until, "{what}");
+                std::thread::sleep(Duration::from_millis(2));
+            }
+        };
+        // While one runs, another is not started.
+        let (go, held) = mpsc::channel::<()>();
+        assert!(one_at_a_time(&RUNNING, "test-scan", move || {
+            let _ = held.recv();
+        }));
+        assert!(!one_at_a_time(&RUNNING, "test-scan", || unreachable!("one at a time")));
+        go.send(()).unwrap();
+        wait("the first to end", &|| !RUNNING.load(Ordering::Acquire));
+        // One that panics clears the flag as it unwinds.
+        assert!(one_at_a_time(&RUNNING, "test-scan", || panic!("a walk that fails (expected in this test)")));
+        wait("the flag after a panic", &|| !RUNNING.load(Ordering::Acquire));
+        assert!(one_at_a_time(&RUNNING, "test-scan", || {
+            DONE.fetch_add(1, Ordering::SeqCst);
+        }));
+        wait("the next scan", &|| DONE.load(Ordering::SeqCst) == 1);
     }
 
     /// Set ORBITERS_PICTURE_BENCH to a disposable folder containing representative PNGs.

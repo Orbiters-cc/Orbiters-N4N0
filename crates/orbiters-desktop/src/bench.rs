@@ -4,8 +4,8 @@
 //! session library; the controller is not started), without taking the focus, drives it with synthetic input and
 //! prints its frames each second and a summary: what docs/igpu-experiment.md measured with scripts/gpu-lab.
 //!
-//! Scenarios: `idle` (Home, nothing moves but its twice-a-second look at the music), `still` (Settings, no frame at
-//! all), `live` (Home as if focused, so looping animations run), `scroll` (Settings scrolled up and down), `pages`
+//! Scenarios: `idle` (Home, nothing moves: its music is looked at on a thread, which asks for a frame when it
+//! changed; `--idle-frames` counts every page's frames at rest without a window), `still` (Settings, no frame at all), `live` (Home as if focused, so looping animations run), `scroll` (Settings scrolled up and down), `pages`
 //! (another page every second), `splats` (the 3D view of the session whose folder name contains `--session`,
 //! orbiting), `splats-still` (that 3D view, still). `--publish` republishes the snapshot that many times a second, as
 //! the tray service does while recording or with N4N0's menu open; with `--background` it is drawn as a window behind

@@ -44,6 +44,30 @@ const FADE_S: f64 = 0.28;
 /// How often the project's previews are looked at again besides the folder's watch (a save in Unity writes a new one;
 /// the watch sees it at once).
 const RELIST_S: f64 = 15.0;
+/// A scene's build is not asked for again sooner than this after it was asked.
+const REBUILD_S: f64 = 20.0;
+
+/// A project's scenes as listed, the same as another listing when they show the same: the same scenes, each with the
+/// same preview file (by its path, time and size; its header, every draw of the scene, is not compared) or the same
+/// failure.
+#[derive(Clone)]
+struct Listing(Vec<Slot>);
+
+impl PartialEq for Listing {
+    fn eq(&self, other: &Self) -> bool {
+        let same = |a: &file::Entry, b: &file::Entry| a.path == b.path && a.modified == b.modified && a.size == b.size;
+        self.0.len() == other.0.len()
+            && self.0.iter().zip(&other.0).all(|(a, b)| {
+                a.scene == b.scene
+                    && match (&a.source, &b.source) {
+                        (Source::Toolkit(a), Source::Toolkit(b)) | (Source::Built(a), Source::Built(b)) | (Source::Stale(a), Source::Stale(b)) => same(a, b),
+                        (Source::Failed(a), Source::Failed(b)) => a == b,
+                        (Source::None, Source::None) => true,
+                        _ => false,
+                    }
+            })
+    }
+}
 /// The first Orbiters Toolkit that writes previews.
 pub(super) const TOOLKIT_PREVIEWS: &str = "0.4.10";
 const TOOLKIT: &str = "orbiters.toolkit";
@@ -135,7 +159,9 @@ struct Current {
     project: PathBuf,
     /// The project's scenes and their previews (`orbiters_projects::scene::list`).
     slots: Vec<Slot>,
-    listing: Job<Vec<Slot>>,
+    /// The scenes listed again on a thread while the preview shows, every [`RELIST_S`] and when the project's
+    /// UserSettings changed: the panel is drawn again only when the list differs.
+    listing: crate::pages::Watch<PathBuf, Listing>,
     listed_at: f64,
     /// The scene the person picked in the window (its GUID; else the one the project opens on).
     chosen: Option<String>,
@@ -165,7 +191,7 @@ impl Current {
         Self {
             project: project.to_path_buf(),
             slots: vec![],
-            listing: Job::default(),
+            listing: Default::default(),
             listed_at: f64::NEG_INFINITY,
             chosen: None,
             requested: HashMap::new(),
@@ -386,10 +412,6 @@ impl Previews {
                 c.listed_at = now;
             }
         } else {
-            if let Some(slots) = c.listing.take() {
-                c.slots = slots;
-                c.listed_at = now;
-            }
             if c._watch.is_none() {
                 let (changed, ctx) = (c.changed.clone(), ctx.clone());
                 c._watch = Some(file::watch(project, move || {
@@ -397,13 +419,17 @@ impl Previews {
                     ctx.request_repaint();
                 }));
             }
-            let changed = c.changed.swap(false, std::sync::atomic::Ordering::Relaxed);
-            if !c.listing.running() && (changed || now - c.listed_at > RELIST_S) {
-                let folder = folder.clone();
-                c.listing = Job::spawn(ctx, move || native::list(&folder));
+            // Something changed in the project's UserSettings: listed now, not at the next period.
+            if c.changed.swap(false, std::sync::atomic::Ordering::Relaxed) {
+                c.listing.look_now();
             }
-            if c.listed() {
-                ctx.request_repaint_after(std::time::Duration::from_secs_f64(RELIST_S));
+            let listed = c.listing.keep(ctx, &folder, std::time::Duration::from_secs_f64(RELIST_S), || {
+                let folder = folder.clone();
+                move || Listing(native::list(&folder))
+            });
+            if let Some(Listing(slots)) = listed {
+                c.slots = slots;
+                c.listed_at = now;
             }
         }
         // The scene to show: built first when it has no preview yet (or an outdated one, shown meanwhile).
@@ -416,9 +442,16 @@ impl Previews {
                     let result = native::build_scene(&folder, &scene, &native::Limits::default());
                     apply_build(c, &guid, result);
                 }
-            } else if !self.builds.building(project, &guid) && c.requested.get(&guid).is_none_or(|t| now - t > 20.0) {
-                self.builds.build(project, &scene);
-                c.requested.insert(guid, now);
+            } else if !self.builds.building(project, &guid) {
+                match c.requested.get(&guid).map(|t| REBUILD_S - (now - t)).filter(|left| *left > 0.0) {
+                    // Just asked, and not building (it failed for want of time): asked again once that long passed, on
+                    // a frame asked for here.
+                    Some(left) => ctx.request_repaint_after(std::time::Duration::from_secs_f64(left)),
+                    None => {
+                        self.builds.build(project, &scene);
+                        c.requested.insert(guid, now);
+                    }
+                }
             }
         }
         let want = c.slot().and_then(|s| {

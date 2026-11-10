@@ -92,6 +92,17 @@ struct Shared<T> {
     wake: Condvar,
     /// The window the watch is drawn in.
     window: Arc<Window>,
+    /// Where a test holds the thread once it has decided to end ([`Gate`]).
+    #[cfg(test)]
+    gate: Mutex<Option<Arc<Gate>>>,
+}
+
+/// A test's hold on a watch's thread at the moment it has decided to end and is about to leave: the thread tells it is
+/// there (`reached`), and goes on when let go (`resume`).
+#[cfg(test)]
+struct Gate {
+    reached: std::sync::Barrier,
+    resume: std::sync::Barrier,
 }
 
 impl<T> Shared<T> {
@@ -103,6 +114,36 @@ impl<T> Shared<T> {
     /// Whether the thread has to end: the watch was dropped or replaced, or its window is no longer shown.
     fn over(&self, inner: &Inner<T>) -> bool {
         inner.stop || self.window.hidden.load(Ordering::Acquire)
+    }
+
+    /// Decides whether the thread ends (it has to, or `gone` says its page is) and, when it does, says so in the same
+    /// step, the lock held: a frame that keeps the watch finds either a thread that goes on, or one marked ended,
+    /// which it starts again. Marked only as the thread left, there was a moment between the two: a window shown
+    /// again just then kept a watch whose thread had decided to go, and nothing started it again until some other
+    /// frame came by.
+    fn leaves(&self, gone: impl FnOnce(&Inner<T>) -> bool) -> bool {
+        let mut inner = self.lock();
+        if !(self.over(&inner) || gone(&inner)) {
+            return false;
+        }
+        inner.ended = true;
+        drop(inner);
+        self.leaving();
+        true
+    }
+
+    /// The thread has decided to end and is about to leave.
+    #[cfg(not(test))]
+    fn leaving(&self) {}
+
+    /// The thread has decided to end and is about to leave: a test may hold it here.
+    #[cfg(test)]
+    fn leaving(&self) {
+        let gate = self.gate.lock().unwrap_or_else(|e| e.into_inner()).take();
+        if let Some(gate) = gate {
+            gate.reached.wait();
+            gate.resume.wait();
+        }
     }
 }
 
@@ -124,11 +165,21 @@ pub struct Watch<K, T> {
     taken: u64,
     /// Threads in a row that ended on a panic of their look, with no look given to the page since.
     panics: u8,
+    /// Holds the next thread started where it decides to end (tests).
+    #[cfg(test)]
+    gate: Option<Arc<Gate>>,
 }
 
 impl<K, T> Default for Watch<K, T> {
     fn default() -> Self {
-        Self { running: None, changes: 0, taken: 0, panics: 0 }
+        Self {
+            running: None,
+            changes: 0,
+            taken: 0,
+            panics: 0,
+            #[cfg(test)]
+            gate: None,
+        }
     }
 }
 
@@ -197,6 +248,8 @@ impl<K: PartialEq + Clone, T: Clone + PartialEq + Send + 'static> Watch<K, T> {
             inner: Mutex::new(Inner { seen: None, changes: self.changes, kept: frame, now: false, stop: false, ended: false, panicked: false }),
             wake: Condvar::new(),
             window: window.clone(),
+            #[cfg(test)]
+            gate: Mutex::new(self.gate.take()),
         });
         {
             let mut watches = window.watches.lock().unwrap_or_else(|e| e.into_inner());
@@ -238,17 +291,14 @@ fn run<T: PartialEq>(shared: Arc<Shared<T>>, ctx: egui::Context, period: Duratio
     loop {
         // Frames drawn since the page kept the watch: it is no longer on screen. Or the window is not.
         let frame = ctx.cumulative_frame_nr();
-        {
-            let inner = shared.lock();
-            if shared.over(&inner) || frame > inner.kept + 1 {
-                return;
-            }
-        }
-        let saw = look();
-        let mut inner = shared.lock();
-        if shared.over(&inner) {
+        if shared.leaves(|inner| frame > inner.kept + 1) {
             return;
         }
+        let saw = look();
+        if shared.leaves(|_| false) {
+            return;
+        }
+        let mut inner = shared.lock();
         if inner.seen.as_ref() != Some(&saw) {
             inner.seen = Some(saw);
             inner.changes += 1;
@@ -499,6 +549,44 @@ mod tests {
             std::thread::sleep(Duration::from_millis(5));
         }
         assert_eq!(looks.load(Ordering::SeqCst) - before, u32::from(PANICS_MOST), "given up after {PANICS_MOST} panics in a row");
+    }
+
+    /// The window shown again at the very moment a watch's thread, told the window was gone, has decided to end but has
+    /// not left yet: the frame that keeps the watch must start it again. The thread said it had ended only as it
+    /// left, so that frame took it for alive, and the watch stayed dead until some other frame came.
+    #[test]
+    fn a_window_shown_again_as_a_thread_decides_to_end_starts_the_watch_again() {
+        let ctx = egui::Context::default();
+        let looks = Arc::new(AtomicU32::new(0));
+        let gate = Arc::new(Gate { reached: std::sync::Barrier::new(2), resume: std::sync::Barrier::new(2) });
+        let mut watch: Watch<(), u32> = Watch::default();
+        watch.gate = Some(gate.clone());
+        let mut t = 0.0;
+        let mut frame = |watch: &mut Watch<(), u32>| -> Option<u32> {
+            t += 0.01;
+            logic_pass(&ctx, t, false);
+            let mut seen = None;
+            let mut out = ctx.run_ui(egui::RawInput { time: Some(t), ..Default::default() }, |ui| {
+                seen = watch.keep(ui.ctx(), &(), Duration::from_secs(3600), || {
+                    let looks = looks.clone();
+                    move || looks.fetch_add(1, Ordering::SeqCst)
+                });
+            });
+            out.textures_delta.clear();
+            seen
+        };
+        frame(&mut watch);
+        wait_for("the first look", || looks.load(Ordering::SeqCst) == 1);
+        frame(&mut watch);
+        // The window goes: the thread, asleep for an hour, is woken, decides to end, and is held there.
+        logic_pass(&ctx, 1.0, true);
+        gate.reached.wait();
+        // Shown again before it has left: this frame has to see that the thread is going, and start another.
+        frame(&mut watch);
+        gate.resume.wait();
+        wait_for("a look by the thread started as the window showed again", || looks.load(Ordering::SeqCst) == 2);
+        wait_for("its frame", || ctx.has_requested_repaint());
+        assert_eq!(frame(&mut watch), Some(1));
     }
 
     #[test]

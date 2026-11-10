@@ -702,6 +702,43 @@ impl Capture {
         Self { gaussians: sorted, distances: order.into_iter().map(|(d, _)| d).collect(), sky: None, view, small_reach: Some(frame.reach) }
     }
 
+    /// What of it to show in a panel's hole, seen from low: how far its middle lies from the start eye across the ground, and how far it reaches from there.
+    /// All of what shows small, seen from low, is mostly a strip of floor (round 19's judges, all five). So: around the thickest of what stands in it, and no
+    /// farther than shows that from its floor to its top over more than half a hole's height. A capture with nothing standing shows as it does small.
+    pub fn hole_frame(&self) -> ([f32; 2], f32) {
+        let g = &self.gaussians;
+        let (eye, ground, whole) = (self.view.eye(), self.view.ground(), self.small_reach());
+        let n = self.within(whole);
+        let step = (n / 60_000).max(1);
+        let standing: Vec<V3> = (0..n).step_by(step).filter(|&i| g.opacity_logits[i] > 0.0 && g.means[i][1] - ground > 0.35).map(|i| g.means[i]).collect();
+        if standing.len() < 80 {
+            return ([0.0; 2], whole);
+        }
+        let mut heights: Vec<f32> = standing.iter().map(|p| p[1] - ground).collect();
+        heights.sort_by(f32::total_cmp);
+        // Its top: the highest of what stands, short of the stray few over it.
+        let top = heights[heights.len() * 19 / 20].max(0.6);
+        let reach = (top * HOLE_REACH_PER_HEIGHT).max(0.5);
+        if reach >= whole * 0.95 {
+            return ([0.0; 2], whole);
+        }
+        // The thickest of what stands, from the middle of all of it: where most of it is within reach.
+        let k = standing.len() as f32;
+        let mut middle = standing.iter().fold([0.0f32, 0.0], |a, p| [a[0] + p[0] / k, a[1] + p[2] / k]);
+        for _ in 0..8 {
+            let inside: Vec<&V3> = standing.iter().filter(|p| (p[0] - middle[0]).hypot(p[2] - middle[1]) < reach).collect();
+            if inside.len() < 40 {
+                break;
+            }
+            let k = inside.len() as f32;
+            middle = inside.iter().fold([0.0, 0.0], |a, p| [a[0] + p[0] / k, a[1] + p[2] / k]);
+        }
+        // No farther out than what shows small holds.
+        let moved = [middle[0] - eye[0], middle[1] - eye[2]];
+        let (far, limit) = (moved[0].hypot(moved[1]), (whole - reach).max(0.0));
+        (if far > limit { [moved[0] * limit / far.max(1e-3), moved[1] * limit / far.max(1e-3)] } else { moved }, reach)
+    }
+
     /// What it shows small at first.
     pub fn small_reach(&self) -> f32 {
         self.small_reach.unwrap_or(3.0)
@@ -716,6 +753,10 @@ impl Capture {
         self.distances.last().copied().unwrap_or(1.0)
     }
 }
+
+/// How far a capture in a panel's hole reaches for each metre its standing content is high: what stands then spans a little over 60% of the hole's height, with
+/// headroom over its top, its floor clear of the hole's lower edge (the hole's shape, the capture's size in it and the low view, taken together).
+const HOLE_REACH_PER_HEIGHT: f32 = 1.75;
 
 /// What of a capture to show small.
 #[derive(Clone, Copy, Debug, PartialEq)]

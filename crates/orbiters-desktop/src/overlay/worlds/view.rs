@@ -139,7 +139,7 @@ pub struct Job {
     pub eyes: [V3; 2],
     pub work: Work,
     /// Small with its middle moved: only what it reaches from there, with the capture to read that from.
-    pub clip: Option<(V3, f32, Arc<Capture>)>,
+    pub clip: Option<(V3, f32, f32, Arc<Capture>)>,
     /// Splats drawn (the first ones: the reveal).
     pub count: usize,
     /// The shared fence value the GPU waits for first.
@@ -617,7 +617,8 @@ impl View {
         let seconds = self.small_read.map_or(0.0, |t| now.duration_since(t).as_secs_f32()).min(0.1);
         self.small_read = Some(now);
         let (Some(small), Some(capture)) = (self.small.as_mut(), self.capture.as_ref()) else { return };
-        let dock = self.small_place.map(|(at, radius)| stereo::SmallDock::behind(&capture.view, &at, radius));
+        let reach = small.reach();
+        let dock = self.small_place.map(|(at, radius)| stereo::SmallDock::behind(&capture.view, &at, radius, reach));
         small.step(hands, grips, sticks, seconds, dock);
         small.move_middle(hands, pads, seconds, capture.farthest());
         self.placement = Some(small.placement(capture.view.eye()));
@@ -797,7 +798,9 @@ impl View {
             self.small_coming = None;
             let mut small = stereo::Small::new(&sorted.view, &head_pose(steamvr, 0.0), sorted.small_reach());
             if let Some((at, radius)) = self.small_place {
-                small = small.at_dock(&stereo::SmallDock::behind(&sorted.view, &at, radius));
+                // In a panel's hole it shows what stands in it, nearer than it does in the room.
+                let frame = sorted.hole_frame();
+                small = small.at_dock(&stereo::SmallDock::behind(&sorted.view, &at, radius, frame.1)).framed(frame);
             }
             self.placement = Some(small.placement(sorted.view.eye()));
             self.small = Some(small);
@@ -1014,7 +1017,11 @@ impl View {
         // Small, only what it reaches is drawn.
         let count = self.small.as_ref().map_or(count, |small| count.min(capture.within(small.reach() + small.moved_by())));
         // Always while it stands small, moved or not: its edge fades, which the marks say.
-        let clip = self.small.as_ref().map(|small| (small.middle(capture.view.eye()), small.reach(), capture.clone()));
+        // In a panel's hole, no higher than shows under the hole's top.
+        let clip = self.small.as_ref().map(|small| {
+            let ceiling = if small.docked { capture.view.ground() + small.reach() * stereo::HOLE_CEILING_PER_REACH } else { f32::INFINITY };
+            (small.middle(capture.view.eye()), small.reach(), ceiling, capture.clone())
+        });
         let pixels = self.width - 2 * MARGIN;
         let id = self.next_id;
         let active_holds = self.cubes[self.active].is_some_and(|c| c.pixels == pixels && eyes.iter().all(|e| c.holds(*e, REACH_M)));

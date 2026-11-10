@@ -388,7 +388,8 @@ pub fn backdrop_pixels() -> Vec<u8> {
             let glow = (1.0 - ((v - 0.56) / if v < 0.56 { 0.56 } else { 0.2 }).abs()).clamp(0.0, 1.0);
             let glow = glow * glow;
             let under = if v > 0.56 { ((v - 0.56) / 0.44).clamp(0.0, 1.0) } else { 0.0 };
-            let c = [22.0 + 46.0 * glow - 8.0 * under, 28.0 + 50.0 * glow - 10.0 * under, 44.0 + 62.0 * glow - 18.0 * under];
+            // Light enough that a dark fence and a dark roof read against it (round 19's judges).
+            let c = [40.0 + 78.0 * glow - 12.0 * under, 54.0 + 88.0 * glow - 14.0 * under, 88.0 + 104.0 * glow - 28.0 * under];
             pixels.extend_from_slice(&[c[0] as u8, c[1] as u8, c[2] as u8, 255]);
         }
     }

@@ -316,6 +316,7 @@ mod maps;
 pub(crate) mod menu_shares;
 mod n4n0;
 mod performance;
+pub mod publish_cost;
 mod rig;
 mod scan;
 pub mod shares;

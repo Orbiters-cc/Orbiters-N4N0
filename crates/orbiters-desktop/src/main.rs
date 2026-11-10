@@ -69,6 +69,7 @@ fn main() -> anyhow::Result<()> {
         Some(orbiters_booster::system::RESTORE_ARGUMENT) => controller::booster_restore_at_sign_in(),
         Some("--gpu-bench") => bench::run(&args[1..]),
         Some("--idle-frames") => idle_frames::run(&args[1..]),
+        Some("--publish-cost") => controller::publish_cost::run(&args[1..]),
         Some("--window") => window::run(&args[1..]),
         Some("--overlay") => overlay::run(&args[1..]),
         #[cfg(windows)]

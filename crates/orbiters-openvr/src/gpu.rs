@@ -150,6 +150,15 @@ impl OverlayTextures {
         if let Err(e) = unsafe { self.device.GetDeviceRemovedReason() } {
             return Err(PresentError::DeviceLost(format!("the overlay's graphics device was lost: {e}"))); // i18n: not shown (the overlay writes it to its log and falls back on raw pixels)
         }
+        let texture = self.write_part(handle, rgba, width, height, changed)?;
+        overlay.set_texture_d3d11(handle, texture.as_raw()).map_err(|code| PresentError::Refused(format!("SetOverlayTexture: SteamVR overlay error {code}"))) // i18n: not shown (a graphics call named in a log or an error detail)
+    }
+
+    /// Writes what `changed` of the picture into the texture of `handle` that is not shown now, with what that
+    /// texture missed of the picture before, and gives that texture: all of [`OverlayTextures::present_part`] but
+    /// telling SteamVR, so that what handing a picture over costs this process can be timed with no SteamVR.
+    pub fn write_part(&mut self, handle: OverlayHandle, rgba: &[u8], width: u32, height: u32, changed: [u32; 4]) -> Result<ID3D11Texture2D, PresentError> {
+        assert_eq!(rgba.len(), (width * height * 4) as usize);
         if self.slots.get(&handle).is_none_or(|s| s.size != (width, height)) {
             let textures = [self.texture(width, height).map_err(PresentError::Refused)?, self.texture(width, height).map_err(PresentError::Refused)?];
             self.slots.insert(handle, Slot { textures, size: (width, height), next: 0, behind: Behind::whole(width, height) });
@@ -169,7 +178,7 @@ impl OverlayTextures {
             }
         }
         slot.next ^= 1;
-        overlay.set_texture_d3d11(handle, texture.as_raw()).map_err(|code| PresentError::Refused(format!("SetOverlayTexture: SteamVR overlay error {code}"))) // i18n: not shown (a graphics call named in a log or an error detail)
+        Ok(texture)
     }
 
     /// Forgets the textures of an overlay that was destroyed.

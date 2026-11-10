@@ -559,6 +559,9 @@ pub struct Cx<'a, 'o> {
     pub backend: &'a Ctl,
     pub actions: &'a mut Actions,
     pub input_read: bool,
+    /// The touchpads and sticks as this turn's read has them, once someone asked: the loop's own, which it and the 3D view read too. Fourteen actions asked of SteamVR each
+    /// time, and the same answer all through a turn (they change only at the loop's one `Actions::update`).
+    pub pads: &'a mut Option<Option<orbiters_n4n0::input::Pads>>,
     pub dashboard: bool,
     /// VRChat has the scene.
     pub in_game: bool,
@@ -874,6 +877,8 @@ impl OrbitVr {
         self.last_turn = now;
         let settings = cx.snap.settings.orbit;
         let wanted = settings.any() && cx.snap.vrchat.running;
+        // The parts of menus that closed are kept for a while; with no menu up nothing else comes by to let them go.
+        self.panels.let_go(now);
         if !wanted || !cx.in_game || cx.dashboard {
             // Free at once, whatever is held.
             if self.last_shown || self.block.blocked() != [false; 2] {
@@ -909,7 +914,7 @@ impl OrbitVr {
                 send_quick_menu_toggle(hand, 1, cx.snap.settings.osc.vrchat_port);
             }
             // Walking closes VRChat's Quick Menu. A moment's touch of the stick does not; laying the parts on it is not walking.
-            let stick = cx.actions.pads(cx.steamvr).map_or(0.0, |pads| pads.sticks[0].x.hypot(pads.sticks[0].y));
+            let stick = cx.pads.get_or_insert_with(|| cx.actions.pads(cx.steamvr)).map_or(0.0, |pads| pads.sticks[0].x.hypot(pads.sticks[0].y));
             self.walking_since = (stick >= WALKS_AT && self.aligning.is_none()).then(|| self.walking_since.unwrap_or(now));
             if self.walking_since.is_some_and(|since| now.duration_since(since) >= WALKS_AFTER) {
                 self.buttons.walking();
@@ -1209,7 +1214,7 @@ impl OrbitVr {
         // The stick's up and down scrolls what is on the sheet, unless a hand holds what shows small: that is zoomed with it. The stick that does not walk, as VRChat's turning one.
         if self.panels.sheet_open() && !cx.world_status.small_held && cx.input_read {
             let hand = if settings_walk_left(cx.snap) { 1 } else { 0 };
-            if let Some(pads) = cx.actions.pads(cx.steamvr) {
+            if let Some(pads) = *cx.pads.get_or_insert_with(|| cx.actions.pads(cx.steamvr)) {
                 self.panels.stick(pads.sticks[hand].y, dt, cx.snap);
             }
         }

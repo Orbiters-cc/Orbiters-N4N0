@@ -134,6 +134,12 @@ impl Software {
         self.stale = true;
     }
 
+    /// Lets go of every texture, for an interface made anew whose textures are other ones under the same numbers: the next frame brings its own, and is painted whole.
+    pub fn forget_textures(&mut self) {
+        self.textures.clear();
+        self.stale = true;
+    }
+
     /// The last frame painted: RGBA bytes, premultiplied, top row first.
     pub fn pixels(&self) -> &[u8] {
         self.pixels.as_flattened()

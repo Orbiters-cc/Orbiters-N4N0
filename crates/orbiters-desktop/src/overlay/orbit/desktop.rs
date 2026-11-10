@@ -111,6 +111,8 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         // Only with VRChat itself in front, or a panel's window: anything else in front and it all goes at once.
         let in_front = found.filter(|h| !exclusive && foreground_is(*h, &windows));
         let Some(window) = in_front else {
+            // The parts of menus that closed are kept for a while; with the game behind another window nothing else comes by to let them go.
+            panels.let_go(turn);
             pill.show(None, pos2(0.0, 0.0), vec2(0.0, 0.0));
             if watcher.wants_frames() || !panels.is_empty() || capture.is_some() {
                 watcher.reset();
@@ -241,7 +243,7 @@ const SCROLL_TO_PICK: bool = false;
 
 /// What the caption says with nothing pointed at, which someone who has seen it often enough no longer needs in full.
 #[derive(Default)]
-struct Hints {
+pub(super) struct Hints {
     /// How often Left Alt was used on the ring, and how often the Quick Menu opened, since this started.
     pointed: u32,
     openings: u32,
@@ -253,7 +255,7 @@ impl Hints {
     /// How many times the full words show.
     const FULL: u32 = 3;
 
-    fn follow(&mut self, open: Option<Around>, pointing: bool) {
+    pub(super) fn follow(&mut self, open: Option<Around>, pointing: bool) {
         if open != self.was_open && open == Some(Around::QuickMenu) {
             self.openings += 1;
         }
@@ -263,7 +265,7 @@ impl Hints {
         (self.was_open, self.was_pointing) = (open, pointing);
     }
 
-    fn now(&self, open: Option<Around>, pointing: bool) -> Option<(&'static str, &'static str)> {
+    pub(super) fn now(&self, open: Option<Around>, pointing: bool) -> Option<(&'static str, &'static str)> {
         match open {
             // Now the ring takes the mouse: it said so, it says so.
             Some(Around::Wheel) if pointing && self.pointed <= Self::FULL => Some((mark("Click a tool"), "")),

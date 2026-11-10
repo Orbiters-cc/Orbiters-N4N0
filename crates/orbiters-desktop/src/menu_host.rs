@@ -77,7 +77,12 @@ impl std::ops::DerefMut for MenuHost {
 impl MenuHost {
     /// A menu drawn by `ctx`, in this computer's language and keyboard, showing this process's music.
     pub fn new(ctx: egui::Context) -> Self {
-        let host = shared::MenuHost::new(Textures { ctx, images: Default::default() }, Arc::new(crate::device::WindowsLocale), crate::media::watcher().clone());
+        Self::with_media(ctx, crate::media::watcher().clone())
+    }
+
+    /// The same, showing what `media` reads: a test's own watcher, which plays what the test says and never what the computer does.
+    pub fn with_media(ctx: egui::Context, media: Arc<crate::media::Watcher>) -> Self {
+        let host = shared::MenuHost::new(Textures { ctx, images: Default::default() }, Arc::new(crate::device::WindowsLocale), media);
         // The 3D captures' pictures are the sessions' thumbnails, on this computer.
         Self(host.with_capture_pictures(Arc::new(crate::controller::menu_shares::capture_picture)))
     }

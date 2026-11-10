@@ -120,62 +120,16 @@ struct WorldShot {
     maps: Option<crate::state::MapsMine>,
 }
 
-/// Gives this run settings and caches folders of its own (`orbiters_core::paths::set_roots`, before any path is
-/// asked for), so that nothing it does writes the person's: the VRChat pictures' index and thumbnails, world pages,
-/// project previews and their cards' stills, settings a scenario saves. Seeded with copies of what scenarios read
-/// (the settings folder's files but the settings themselves, the world pages and 3D worlds kept from Orbiters); the
-/// session library, documents and this computer's local data stay the real ones, read only by the scenarios. The
-/// picture folders the person added are not read (the harness's settings name none); `ORBITERS_SCREENSHOT_PICTURE_FOLDERS`
-/// (separated by `;`) names some for the run. The run deletes its sandbox when it ends; those of runs that did not end
-/// (killed) go at a later run once over six hours old.
+/// Main installed private roots before panic logging or any fixture construction. Optional fixture copies are
+/// supplied explicitly through ORBITERS_HARNESS_FIXTURES; nothing is seeded implicitly from installed folders.
 fn sandbox_user_data() -> anyhow::Result<(PathBuf, Vec<PathBuf>)> {
-    use orbiters_core::paths;
-    let (real_config, real_cache) = (paths::config_dir(), paths::cache_dir());
-    let base = std::env::temp_dir().join("orbiters-screenshot-sandbox");
-    if let Ok(dir) = std::fs::read_dir(&base) {
-        for e in dir.flatten() {
-            if e.metadata().and_then(|m| m.modified()).is_ok_and(|t| t.elapsed().unwrap_or_default() > Duration::from_secs(6 * 3600)) {
-                let _ = std::fs::remove_dir_all(e.path());
-            }
-        }
-    }
-    let root = base.join(std::process::id().to_string());
-    let _ = std::fs::remove_dir_all(&root);
-    let (config, cache) = (root.join("config"), root.join("cache"));
-    std::fs::create_dir_all(&config)?;
-    std::fs::create_dir_all(&cache)?;
-    fn copy_tree(from: &Path, to: &Path, skip: &[&str]) {
-        let Ok(dir) = std::fs::read_dir(from) else { return };
-        let _ = std::fs::create_dir_all(to);
-        for e in dir.flatten() {
-            let name = e.file_name();
-            if skip.iter().any(|s| name.to_string_lossy().eq_ignore_ascii_case(s)) {
-                continue;
-            }
-            match e.file_type() {
-                Ok(t) if t.is_dir() => copy_tree(&e.path(), &to.join(&name), &[]),
-                Ok(t) if t.is_file() => {
-                    let _ = std::fs::copy(e.path(), to.join(&name));
-                }
-                _ => {}
-            }
-        }
-    }
-    // The settings' `.bad-` copies, the old cache inside the settings folder: not what scenarios read.
-    copy_tree(&real_config, &config, &["settings.json", "cache"]);
-    for sub in ["worlds", "3d-worlds"] {
-        copy_tree(&real_cache.join(sub), &cache.join(sub), &[]);
-    }
+    let roots = orbiters_core::paths::roots().context("screenshots require the harness bootstrap")?;
+    let root = roots.config.parent().context("private root")?.to_path_buf();
     let folders: Vec<PathBuf> = std::env::var("ORBITERS_SCREENSHOT_PICTURE_FOLDERS")
-        .unwrap_or_default()
-        .split(';')
-        .filter(|s| !s.trim().is_empty())
-        .map(|s| PathBuf::from(s.trim()))
-        .collect();
+        .unwrap_or_default().split(';').filter(|s| !s.trim().is_empty()).map(|s| PathBuf::from(s.trim())).collect();
     if !folders.is_empty() {
-        Settings { picture_folders: folders.clone(), ..Settings::default() }.save_to(&config.join("settings.json"))?;
+        Settings { picture_folders: folders.clone(), ..Settings::default() }.save_to(&roots.config.join("settings.json"))?;
     }
-    paths::set_roots(paths::Roots { config, local_data: paths::local_data_root(), cache, documents: paths::documents_root() })?;
     Ok((root, folders))
 }
 
@@ -193,13 +147,7 @@ impl Drop for TextReport {
 pub fn run(args: &[String]) -> anyhow::Result<()> {
     let (sandbox, picture_folders) = sandbox_user_data()?;
     eprintln!("screenshots: settings and caches in {}", sandbox.display());
-    let result = shots(args, picture_folders);
-    // The run's settings and caches go with it: each run copies some 40 MB of world pages, and a day of screenshots by
-    // several agents filled the system disk. `ORBITERS_SCREENSHOT_KEEP_SANDBOX` keeps them (to look at what a run wrote).
-    if std::env::var_os("ORBITERS_SCREENSHOT_KEEP_SANDBOX").is_none() {
-        let _ = std::fs::remove_dir_all(&sandbox);
-    }
-    result
+    shots(args, picture_folders)
 }
 
 fn shots(args: &[String], picture_folders: Vec<PathBuf>) -> anyhow::Result<()> {

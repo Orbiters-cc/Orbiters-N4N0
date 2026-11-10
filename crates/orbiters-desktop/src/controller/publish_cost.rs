@@ -14,6 +14,13 @@
 //! A link writes every state it is handed while it keeps up (the overlay's), so write and read are per change here; the
 //! window's link is paced and skips states, never more than these. Times are the median of the rounds. After each case
 //! the client's state is compared with the service's, whole.
+//!
+//! **What this is not.** These are times in memory, in one thread of one process: the line is written to a buffer and
+//! read from it. No socket, no link thread waking, no client's lock or frame, and no subscriber of the controller (a
+//! real service posts each state to every link's mailbox and its two watchers). "copy" is this harness copying its
+//! made-up N4N0 state, as a stand-in for `N4n0Runtime::status`, which also works out the face, the countdown, the
+//! states' view and more, and is not measured here. A recording's statistics with the camera moving go through the
+//! controller's real path (`on_worker_event`): the path grows and is thinned as in a recording.
 
 use super::n4n0::Link;
 use super::{Controller, Shared};
@@ -268,12 +275,22 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
     let link = Link(Arc::downgrade(&ctl));
     let n4n0 = busy_n4n0();
     let mut wire = Wire { line: Vec::new(), sent: None, client: None };
-    // A client that connects is handed everything, once.
-    let (wrote, read, bytes) = wire.carry(&ctl.view())?;
-    println!("the whole state, as a client that connects gets it: {bytes} bytes, written in {:.1} µs, read in {:.1} µs", micros(wrote), micros(read));
+    // A client that connects is handed everything: the median of fifty connections (each a snapshot of its own: a line
+    // already made for a snapshot is not made again).
+    let (mut wrote, mut read, mut bytes) = (Vec::new(), Vec::new(), 0);
+    for _ in 0..50 {
+        let mut connecting = Wire { line: Vec::new(), sent: None, client: None };
+        let (w, r, b) = connecting.carry(&Arc::new((*ctl.view()).clone()))?;
+        wrote.push(w);
+        read.push(r);
+        bytes = b;
+    }
+    println!("the whole state, as a client that connects gets it: {bytes} bytes, written in {:.1} µs, read in {:.1} µs", micros(median(&mut wrote)), micros(median(&mut read)));
+    wire.carry(&ctl.view())?;
     println!();
-    println!("{:<44} {:>9} {:>9} {:>9} {:>9} {:>10}   {:>9}", "one change (median of the rounds)", "state µs", "publish µs", "write µs", "read µs", "bytes", "total µs");
-    // What N4N0 hands over: its state made again whole, as `N4n0Runtime::status` makes it, with what changed.
+    println!("{:<44} {:>9} {:>9} {:>9} {:>9} {:>10}   {:>9}", "one change (median of the rounds)", "copy µs", "publish µs", "write µs", "read µs", "bytes", "total µs");
+    // What N4N0 hands over, stood in for by a copy of this harness's made-up state with what changed
+    // (`N4n0Runtime::status` itself is not measured here).
     let handed = |link: &Link, change: &dyn Fn(&mut N4n0Status)| {
         let started = Instant::now();
         let mut status = n4n0.clone();
@@ -353,10 +370,36 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         });
         None
     })?;
+    anyhow::ensure!(wire.in_step(&ctl.view())?, "a long camera path: the client does not hold what the service published"); // i18n: not shown (a developer's command line, in English)
     let (publish, write, read) = (median(&mut t.publish), median(&mut t.write), median(&mut t.read));
     println!(
         "{:<44} {:>9} {:>9.1} {:>9.1} {:>9.1} {:>10}   {:>9.1}",
         "… with a long camera path recorded",
+        "",
+        micros(publish),
+        micros(write),
+        micros(read),
+        median(&mut t.bytes),
+        micros(publish + write + read)
+    );
+    // The recording's real path: the capture worker's statistics as the controller takes them, the camera moving, so
+    // the path grows by a point each time and is thinned for the interface as it grows.
+    ctl.set_snapshot(busy_evening());
+    wire.carry(&ctl.view())?;
+    let mut t = case(&ctl, &mut wire, rounds, |round| {
+        let at = round as f32;
+        ctl.on_worker_event(orbiters_core::protocol::WorkerEvent::Stats(orbiters_core::protocol::CaptureStats {
+            frames: round as u64,
+            position: Some([at * 0.3, 1.6, (at * 0.05).sin() * 4.0]),
+            ..Default::default()
+        }));
+        None
+    })?;
+    anyhow::ensure!(wire.in_step(&ctl.view())?, "the camera moving: the client does not hold what the service published"); // i18n: not shown (a developer's command line, in English)
+    let (publish, write, read) = (median(&mut t.publish), median(&mut t.write), median(&mut t.read));
+    println!(
+        "{:<44} {:>9} {:>9.1} {:>9.1} {:>9.1} {:>10}   {:>9.1}",
+        "a recording's statistics, the camera moving",
         "",
         micros(publish),
         micros(write),

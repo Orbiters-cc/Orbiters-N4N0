@@ -231,13 +231,15 @@ pub struct Canvas {
     /// What its frames go through last: the look chosen for the menus around VRChat's. `restyle_off` leaves a page that has this drawing already.
     restyle: Option<orbit::retro::Pass>,
     restyle_off: bool,
+    /// A frame was painted: its interface has its fonts (egui has none to ask about before a first frame).
+    ran: bool,
 }
 
 impl Canvas {
     pub fn new(width: u32, height: u32) -> Self {
         let ctx = egui::Context::default();
         orbiters_ui::install(&ctx);
-        Self { ctx, painter: Software::new(width, height), size: egui::vec2(width as f32, height as f32), zoom: 1.0, restyle: None, restyle_off: false }
+        Self { ctx, painter: Software::new(width, height), size: egui::vec2(width as f32, height as f32), zoom: 1.0, restyle: None, restyle_off: false, ran: false }
     }
 
     /// One of `width` x `height` pixels drawn at `zoom` pixels a point (a panel that scales with what it stands beside: text
@@ -272,6 +274,25 @@ impl Canvas {
         &self.ctx
     }
 
+    /// Its interface made anew, with its fonts' atlas and its textures, as a new canvas has them; its buffers stay. What it paints next is painted whole, and is to the
+    /// pixel what a new canvas would paint: where a letter lies in the atlas depends on what the interface drew before, and the edge of a letter drawn from another place
+    /// in it can come out a level or two of 255 apart.
+    pub fn renew(&mut self) {
+        self.ctx = egui::Context::default();
+        orbiters_ui::install(&self.ctx);
+        self.painter.forget_textures();
+        self.ran = false;
+    }
+
+    /// How many bytes its fonts' atlas takes: once in its interface, once in what paints it. None before a first frame.
+    pub fn atlas_bytes(&self) -> usize {
+        if !self.ran {
+            return 0;
+        }
+        let [width, height] = self.ctx.fonts(|f| f.font_image_size());
+        width * height * 8
+    }
+
     /// Paints a frame (RGBA, premultiplied, transparent where nothing was drawn): only what changed is painted again,
     /// and [`Canvas::damage`] says where.
     pub fn paint(&mut self, time: f64, draw: impl FnMut(&egui::Painter)) -> &[u8] {
@@ -280,6 +301,7 @@ impl Canvas {
         input.viewports.insert(ViewportId::ROOT, ViewportInfo { native_pixels_per_point: Some(self.zoom), ..Default::default() });
         let (restyle, size) = (self.restyle.filter(|_| !self.restyle_off), self.size);
         orbiters_ui::fonts::follow_language(&self.ctx);
+        self.ran = true;
         let mut full = self.ctx.run_ui(input, |ui| {
             draw(ui.painter());
             if let Some(pass) = restyle {
@@ -303,6 +325,7 @@ impl Canvas {
         input.viewports.insert(ViewportId::ROOT, ViewportInfo { native_pixels_per_point: Some(self.zoom), ..Default::default() });
         let (restyle, size) = (self.restyle.filter(|_| !self.restyle_off), self.size);
         orbiters_ui::fonts::follow_language(&self.ctx);
+        self.ran = true;
         let mut full = self.ctx.run_ui(input, |ui| {
             draw(ui);
             if let Some(pass) = restyle {
@@ -844,7 +867,8 @@ fn session(args: &[String]) -> anyhow::Result<Ended> {
         // off (or VRChat gone), they go back to rest once.
         let pads_wanted = snap.settings.n4n0.enabled && snap.settings.n4n0.controller_input && snap.vrchat.running;
         // The touchpads and sticks as this turn's read has them (fourteen actions asked of SteamVR): read once, for the
-        // avatar's parameters here and for a held capture or the turning stick below, which each read them again.
+        // avatar's parameters here, for the menus around VRChat's (walking closes the Quick Menu, a stick scrolls a
+        // sheet) and for a held capture or the turning stick below, which each read them again.
         let mut pads_now: Option<Option<orbiters_n4n0::input::Pads>> = None;
         let paced = match (pads_wanted, input_read) {
             (true, true) => (*pads_now.insert(actions.pads(&steamvr))).and_then(|read| pads.step(Instant::now(), read)),
@@ -897,6 +921,7 @@ fn session(args: &[String]) -> anyhow::Result<Ended> {
                 backend: &backend,
                 actions: &mut actions,
                 input_read,
+                pads: &mut pads_now,
                 dashboard,
                 in_game: vrchat_scene,
                 frame,

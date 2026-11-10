@@ -359,6 +359,13 @@ struct GalleryList {
 }
 
 impl Gallery {
+    /// The gallery with nothing in it, the same one every time it is asked for: what the facts hold off the gallery's sheet. As a new [`Gallery::default`] in everything but
+    /// that two of these compare as the same.
+    pub fn none() -> Self {
+        static NONE: std::sync::OnceLock<Gallery> = std::sync::OnceLock::new();
+        NONE.get_or_init(Gallery::default).clone()
+    }
+
     /// Every tile one size, three a row, in the gallery and in a set opened from it alike: one shape for photo and capture (round 13's judges: rows of four photos beside
     /// rows of three captures), and no row stretched to fill (round 14's judges: a set's last tile came out wider). A tall picture is cropped rather than a sliver.
     /// The layout chosen in the app does not change it: with one shape, its layouts would all come to this.

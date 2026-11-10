@@ -77,7 +77,9 @@ impl State {
             self.editors_at = Some(Instant::now());
             self.apply_sessions(ctx, cx, seen);
         }
-        if self.quitting() {
+        // While Unity quits, and while there is a look to take in again: with none (the watch starting again, or given
+        // up), a frame would have nothing to do, and the watch's own frame comes with its look.
+        if self.quitting() && self.editors.seen().is_some() {
             ctx.request_repaint_after(EVERY);
         }
     }

@@ -345,7 +345,7 @@ pub(super) fn vr_shots(out: &Path, refs: &Path) -> anyhow::Result<()> {
                 if zone == Zone::WheelVeil || zone.group().is_some_and(|g| Some(g) != bloom) {
                     continue;
                 }
-                let placed = zones::in_units(zone);
+                let placed = vr::wheel_place(zone);
                 let hovered = hover == Some(zone);
                 let (pixels, px) = sharp_picture(&placed, facts, hovered.then_some(0), 2.0);
                 let quad = plane.quad(&vr::clear_of_sheet(placed, false), 0.0, 0.004);
@@ -519,7 +519,7 @@ pub(super) fn vr_shots(out: &Path, refs: &Path) -> anyhow::Result<()> {
                 canvas.paint(0.0, |p| small_hint::paint_chip(p, false));
             }
             let chip = small_hint::chip_place(held.anchor, held.radius(), space::position(&head), true);
-            eye.quad(&Quad { transform: chip, width: small_hint::CHIP_WIDTH_M, height: small_hint::CHIP_WIDTH_M * small_hint::CHIP_PX[1] as f32 / small_hint::CHIP_PX[0] as f32 }, canvas.pixels(), small_hint::CHIP_PX, 1.0);
+            eye.quad(&Quad { transform: small_hint::chip_quad(&chip), width: small_hint::CHIP_WIDTH_M, height: small_hint::CHIP_WIDTH_M * small_hint::CHIP_PX[1] as f32 / small_hint::CHIP_PX[0] as f32 }, canvas.pixels(), small_hint::CHIP_PX, 1.0);
             eye.save(out, &format!("vr-small-in-a-hand{names}"))?;
         }
     }

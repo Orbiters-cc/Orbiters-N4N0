@@ -2112,7 +2112,7 @@ pub fn paint_sheet(p: &Painter, sheet: Sheet, facts: &Facts, hover: Option<usize
     if sheet == Sheet::Pictures && facts.opened.is_none() && facts.gallery_set.is_none() {
         let track = filter_track();
         p.rect_filled(track, look::radius(track.height() / 2.0), look::TILE);
-        p.text(pos2(track.left() - 10.0, track.center().y), Align2::RIGHT_CENTER, tr_ctx("gallery filter", "Show"), look::font(15.5, weight::MEDIUM), look::MUTED);
+        p.text(pos2(track.left() - 10.0, track.center().y), Align2::RIGHT_CENTER, tr_ctx("gallery filter", "Show"), look::font(17.5, weight::MEDIUM), look::MUTED);
         let line = track.left() - 62.0;
         p.line_segment([pos2(line, track.top() + 6.0), pos2(line, track.bottom() - 6.0)], Stroke::new(1.5, Color32::from_white_alpha(44)));
     }
@@ -2632,7 +2632,7 @@ fn draw(p: &Painter, zone: Zone, item: &Item, facts: &Facts, hovered: bool, pres
             let link = format!("{} \u{203a}", tr("My Avatar"));
             let wide = p.layout_no_wrap(link.clone(), link_font.clone(), look::LABEL).size().x;
             p.text(pos2(rect.right() - 12.0, rect.center().y), Align2::RIGHT_CENTER, link, link_font, if hovered { Color32::WHITE } else { look::LABEL });
-            let font = look::font(15.5, weight::MEDIUM);
+            let font = look::font(17.5, weight::MEDIUM);
             let room = rect.width() - wide - 56.0;
             p.text(pos2(rect.left() + 34.0, rect.center().y), Align2::LEFT_CENTER, fit(p, tr("For 3D pictures, add the capture kit"), &font, room), font, look::LABEL);
         }
@@ -2804,7 +2804,7 @@ fn draw(p: &Painter, zone: Zone, item: &Item, facts: &Facts, hovered: bool, pres
             p.text(pos2(rect.right() - 18.0, rect.center().y), Align2::RIGHT_CENTER, tr("Search again"), look::font(15.0, weight::SEMIBOLD), if hovered { look::accent() } else { look::LABEL });
             // What the two buttons on every result are for, said once, beside the search (round 15's judges).
             // Large enough to read beside the buttons it explains (the round 16 pre-check found it about 9 px).
-            let font = look::font(16.0, weight::SEMIBOLD);
+            let font = look::font(17.5, weight::SEMIBOLD);
             let x = rect.right() + 16.0;
             let room = 1000.0 - x;
             p.text(pos2(x, rect.center().y - 10.0), Align2::LEFT_CENTER, fit(p, tr("Copy link: for the world's player"), &font, room), font.clone(), theme::mix(look::accent(), Color32::WHITE, 0.3));
@@ -2836,10 +2836,10 @@ fn draw(p: &Painter, zone: Zone, item: &Item, facts: &Facts, hovered: bool, pres
             let y = center.y + radius + 48.0;
             let color = if matches!(facts.talk, TalkNow::Listening(_)) { look::accent() } else { look::LABEL };
             text(p, pos2(rect.center().x, y), Align2::CENTER_CENTER, first, 30.0, weight::BOLD, color);
-            let font = look::font(16.0, weight::MEDIUM);
+            let font = look::font(17.5, weight::MEDIUM);
             p.text(pos2(rect.center().x, y + 34.0), Align2::CENTER_CENTER, fit(p, second, &font, rect.width() - 8.0), font, look::MUTED);
             if let Some(word) = &facts.wake_word {
-                let font = look::font(14.0, weight::MEDIUM);
+                let font = look::font(17.5, weight::MEDIUM);
                 p.text(pos2(rect.center().x, y + 62.0), Align2::CENTER_CENTER, fit(p, &tr!("You can also say \u{201c}{word}\u{201d}", word = word), &font, rect.width() - 8.0), font, look::MUTED);
             }
         }
@@ -2950,7 +2950,7 @@ fn draw(p: &Painter, zone: Zone, item: &Item, facts: &Facts, hovered: bool, pres
             if shown > 0 {
                 let right = rect.right() - 12.0 - INVITE_WIDTH - 8.0;
                 let top = rect.top() + (rect.height() - 50.0) / 2.0 + 5.0;
-                p.text(pos2((earlier_from + right - 6.0) / 2.0, top - 9.0), Align2::CENTER_CENTER, tr("Earlier visits"), look::font(17.0, weight::SEMIBOLD), theme::mix(look::MUTED, Color32::WHITE, 0.35));
+                p.text(pos2((earlier_from + right - 6.0) / 2.0, top - 9.0), Align2::CENTER_CENTER, tr("Earlier visits"), look::font(17.5, weight::SEMIBOLD), theme::mix(look::MUTED, Color32::WHITE, 0.35));
             }
         }
         Look::Chip { group, visit } => {
@@ -2979,7 +2979,7 @@ fn draw(p: &Painter, zone: Zone, item: &Item, facts: &Facts, hovered: bool, pres
             p.rect_stroke(rect, radius, Stroke::new(1.5, edge), egui::StrokeKind::Inside);
             // Why this one is solid: it is where the person was last.
             if primary && state.is_none() && facts.worlds_visited.iter().position(|v| !v.here) == Some(group) {
-                p.text(pos2(rect.center().x, rect.top() - 9.0), Align2::CENTER_CENTER, tr("Last visit"), look::font(17.0, weight::SEMIBOLD), theme::mix(look::MUTED, Color32::WHITE, 0.35));
+                p.text(pos2(rect.center().x, rect.top() - 9.0), Align2::CENTER_CENTER, tr("Last visit"), look::font(17.5, weight::SEMIBOLD), theme::mix(look::MUTED, Color32::WHITE, 0.35));
             }
             let font = look::font(if primary { 18.0 } else { 16.5 }, if primary { weight::BOLD } else { weight::SEMIBOLD });
             p.text(rect.center(), Align2::CENTER_CENTER, fit(p, &words, &font, rect.width() - 12.0), font, ink);

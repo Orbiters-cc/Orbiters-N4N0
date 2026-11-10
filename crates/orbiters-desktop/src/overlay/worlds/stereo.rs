@@ -189,8 +189,9 @@ const SMALL_TREMBLE_M: f32 = 0.003;
 const SMALL_TILT_IN_A_HOLE: f32 = 25.0;
 const SMALL_TILT_IN_THE_ROOM: f32 = 14.0;
 
-/// How far under a hole's middle a capture's floor lies in it, in its radius.
-const SMALL_FLOOR_UNDER_THE_MIDDLE: f32 = 0.08;
+/// How far under a hole's middle a capture's floor lies in it, in its radius: low enough that what stands as high as most captures do (0.7 of the radius) ends under the
+/// hole's top (Enzo's request 60: the upper part is not cut), the floor's near edge going under the hole's foot.
+const SMALL_FLOOR_UNDER_THE_MIDDLE: f32 = 0.14;
 
 /// Where a capture standing small lies in a panel: as that panel turns, this large, this far behind it.
 #[derive(Clone, Copy, Debug, PartialEq)]

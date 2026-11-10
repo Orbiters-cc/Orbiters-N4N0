@@ -130,15 +130,33 @@ pub fn paint(p: &Painter, stage: Stage, seconds: f32) {
 }
 
 /// The small X above a view, so that it can go where it is, with no menu to reopen.
-pub const CHIP_PX: [u32; 2] = [128, 128];
+/// Its picture: the X in a round, and under it the stem it stands on, down to the capture's rim.
+pub const CHIP_PX: [u32; 2] = [128, 320];
 pub const CHIP_WIDTH_M: f32 = 0.05;
+/// How long its stem is, in metres, by its picture.
+const CHIP_STEM_M: f32 = CHIP_WIDTH_M * (CHIP_PX[1] - CHIP_PX[0]) as f32 / CHIP_PX[0] as f32;
+
+/// Where its picture hangs for an X whose round is at `place`: the round at its top, the stem under it.
+pub fn chip_quad(place: &vr::Matrix34) -> vr::Matrix34 {
+    let mut at = *place;
+    at.m[1][3] -= CHIP_STEM_M / 2.0;
+    at
+}
 /// How far off its middle a laser still has it: the X is small, and with the menu off there is no beam to aim by.
 const CHIP_AIM_M: f32 = 0.08;
 
 /// [`HideChip`]'s picture.
 pub fn paint_chip(p: &Painter, pointed: bool) {
-    let page = Rect::from_min_size(Pos2::ZERO, vec2(CHIP_PX[0] as f32, CHIP_PX[1] as f32));
+    let page = Rect::from_min_size(Pos2::ZERO, vec2(CHIP_PX[0] as f32, CHIP_PX[0] as f32));
     let radius = page.height() / 2.0 - 2.0;
+    // Its stem first, from the round down to the capture's rim, a dot where it stands: what joins it to the capture (round 18's judges saw it attached to nothing,
+    // and Enzo asked for it above the capture, request 32).
+    let ink = if pointed { orbit_look::accent() } else { theme::white(0.7) };
+    let foot = pos2(page.center().x, CHIP_PX[1] as f32 - 9.0);
+    p.line_segment([page.center(), foot], egui::Stroke::new(7.0, theme::alpha(theme::INK_900, 0.8)));
+    p.line_segment([page.center(), foot], egui::Stroke::new(3.0, ink));
+    p.circle_filled(foot, 8.0, theme::alpha(theme::INK_900, 0.8));
+    p.circle_filled(foot, 5.5, ink);
     p.circle_filled(page.center(), radius, theme::alpha(theme::INK_900, 0.95));
     p.circle_stroke(page.center(), radius - 1.5, egui::Stroke::new(3.0, if pointed { orbit_look::accent() } else { theme::white(0.25) }));
     widgets::icon(p, page.center(), icons::X, radius * 1.05, if pointed { orbit_look::accent() } else { theme::FG });
@@ -186,7 +204,7 @@ impl HideChip {
                 presenter.show_part(overlay, self.handle, self.canvas.pixels(), CHIP_PX[0], CHIP_PX[1], changed);
             }
         }
-        let _ = overlay.set_transform_absolute(self.handle, &place);
+        let _ = overlay.set_transform_absolute(self.handle, &chip_quad(&place));
         if self.shown.is_none() {
             let _ = overlay.show(self.handle);
         }
@@ -202,14 +220,16 @@ impl HideChip {
 /// (round 13's judges), and never beside the view (round 14's, against request 32): the hint stands left of the view's middle, so the X has room right of it.
 pub fn chip_place(middle: V3, radius: f32, eye: V3, over_the_hint: bool) -> vr::Matrix34 {
     let _ = over_the_hint;
-    // On the capture's own rim, at its far right as seen from the eyes, standing on it: joined to it and moving with it, and still over it in the picture the eyes
-    // get (round 18's judges: it floated between the hint and the capture, attached to neither). Request 32 keeps it above.
+    // Over the capture's own rim, at its far right as seen from the eyes, on a stem that stands on the rim: above the capture as Enzo asked (request 32), from a hand
+    // held low as from one held high, and joined to it and moving with it (round 18's judges: it floated between the hint and the capture, attached to neither).
+    // Where the capture is small, lower, so that it stays under the hint.
     let right = right_of(middle, eye);
     let towards = stereo::sub(eye, middle);
     let flat = (towards[0] * towards[0] + towards[2] * towards[2]).sqrt().max(1e-4);
     let back = [-towards[0] / flat, 0.0, -towards[2] / flat];
     let on_the_rim = stereo::add(stereo::scale(right, radius * RIM_ACROSS), stereo::scale(back, radius * RIM_BACK));
-    facing(stereo::add(stereo::add(middle, on_the_rim), [0.0, CHIP_WIDTH_M * 0.62, 0.0]), eye)
+    let up = (CHIP_STEM_M + CHIP_WIDTH_M / 2.0).min(radius * TOP_OF_RADIUS + ABOVE_M - CHIP_WIDTH_M / 2.0 - 0.005);
+    facing(stereo::add(stereo::add(middle, on_the_rim), [0.0, up, 0.0]), eye)
 }
 
 /// Level, to the right as seen from `eye`.
@@ -507,7 +527,7 @@ mod tests {
     /// Enzo's request 32: the X is over the view as the eyes see it, at its upper right, never beside it (round 14 moved it beside), and never on the hint (round 13:
     /// it read as the hint's). Round 18's judges: joined to the capture, not floating between it and the hint. So it stands on the capture's own rim, on its far side.
     #[test]
-    fn the_x_stands_on_the_views_far_rim_over_it_as_seen_and_clear_of_the_hint() {
+    fn the_x_floats_over_the_views_far_rim_on_its_stem_and_clear_of_the_hint() {
         let eye = [0.0, 1.6, 0.0];
         for radius in [0.12, 0.2, 0.3, 0.45] {
             let middle = [0.0, 1.4, -0.6];
@@ -515,7 +535,8 @@ mod tests {
             // On its rim, across the ground, and standing on it.
             let out = ((x[0] - middle[0]).powi(2) + (x[2] - middle[2]).powi(2)).sqrt();
             assert!((out / radius - 1.0).abs() < 0.05, "on its rim at {radius}: {x:?}");
-            assert!(x[1] > middle[1] && x[1] < middle[1] + CHIP_WIDTH_M, "standing on it at {radius}: {x:?}");
+            // Above it, by its stem (request 32), and no higher than the stem reaches down from.
+            assert!(x[1] >= middle[1] + 0.07 && x[1] <= middle[1] + CHIP_STEM_M + CHIP_WIDTH_M / 2.0 + 1e-4, "above it on its stem at {radius}: {x:?}");
             // Its far side, to the right: over the view in what eyes above it see, not beside it.
             assert!(x[2] < middle[2] && x[0] > middle[0] && x[0] - middle[0] < radius * 0.85, "its far right at {radius}: {x:?}");
             let seen = |p: V3| (p[1] - eye[1]) / (eye[2] - p[2]);

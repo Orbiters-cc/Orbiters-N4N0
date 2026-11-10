@@ -63,7 +63,8 @@ struct Pose {
 
 impl Default for Pose {
     fn default() -> Self {
-        Self { yaw: 0.0, pitch: 0.0, zoom: 1.0 }
+        // A little down at rest: more of the place and less of its sky, which a capture knows least (the round 19 pre-check saw a smeared sky fill a whole page).
+        Self { yaw: 0.0, pitch: -0.14, zoom: 1.0 }
     }
 }
 
@@ -369,12 +370,13 @@ mod tests {
     /// Enzo: seen from inside, as the Orbiters window shows it. Level at rest, at the eye's height; looking up looks up, turning turns to its left.
     #[test]
     fn it_is_seen_from_inside_at_eye_height() {
-        let head = looking(1.6, Pose::default());
+        let level = Pose { pitch: 0.0, ..Pose::default() };
+        let head = looking(1.6, level);
         assert_eq!(stereo::position(&head), [0.0, 1.6, 0.0]);
         let forward = |m: &Matrix34| stereo::scale(stereo::axis(m, 2), -1.0);
         assert!((forward(&head)[2] + 1.0).abs() < 1e-5, "it looks ahead");
-        assert!(forward(&looking(1.6, Pose { pitch: 0.4, ..Pose::default() }))[1] > 0.3, "up is up");
-        assert!(forward(&looking(1.6, Pose { yaw: 0.4, ..Pose::default() }))[0] < -0.3, "a yaw turns it");
+        assert!(forward(&looking(1.6, Pose { pitch: 0.4, ..level }))[1] > 0.3, "up is up");
+        assert!(forward(&looking(1.6, Pose { yaw: 0.4, ..level }))[0] < -0.3, "a yaw turns it");
     }
 
     #[test]

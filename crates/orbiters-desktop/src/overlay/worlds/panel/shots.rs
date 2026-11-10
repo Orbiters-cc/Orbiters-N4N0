@@ -205,7 +205,9 @@ pub fn side_live(px: [u32; 2], live: Option<(&egui::ColorImage, bool)>) -> anyho
     let thumb = |e: &Entry| -> Option<TextureId> { entries.iter().position(|x| x.id == e.id).map(|i| thumbs[i].id()) };
     let picture = |_: u64, _: bool| -> Option<TextureId> { None };
     let feedback = stand_in_feedback(true);
-    let status = Status::default();
+    // Signed in to VRChat, as the live captures are: the same lists (Popular) and Invite me.
+    let mut status = Status::default();
+    status.list.vrchat = true;
     let panel = Panel { on_sheet: true, section: Section::Captures, page: Page::Detail, selected: Some(10), live: live.as_ref().map(|(texture, full)| Live { id: 10, picture: Some(texture.id()), full: *full, ..Default::default() }), ..Default::default() };
     let d = Data { entries: &entries, picked: None, status: &status, feedback: &feedback, facts: &facts, thumb: &thumb, picture: &picture, now: 1_793_310_000 };
     for _ in 0..2 {

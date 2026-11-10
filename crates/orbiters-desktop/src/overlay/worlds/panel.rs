@@ -623,10 +623,11 @@ fn small_action(p: &Painter, rect: Rect, glyph: &str, filled: bool, count: u64, 
 const VR_LEFT: f32 = 464.0;
 const VR_SIDE: Rect = Rect { min: Pos2 { x: 452.0, y: 12.0 }, max: Pos2 { x: 1012.0, y: 564.0 } };
 /// Its picture; where a capture standing small is seen through it.
-pub const VR_HERO: Rect = Rect { min: Pos2 { x: VR_LEFT, y: 24.0 }, max: Pos2 { x: SIDE_RIGHT, y: 282.0 } };
-const VR_SMALL_BACK: Rect = Rect { min: Pos2 { x: 836.0, y: 230.0 }, max: Pos2 { x: 990.0, y: 274.0 } };
+pub const VR_HERO: Rect = Rect { min: Pos2 { x: VR_LEFT, y: 24.0 }, max: Pos2 { x: SIDE_RIGHT, y: 270.0 } };
+const VR_SMALL_BACK: Rect = Rect { min: Pos2 { x: 836.0, y: 218.0 }, max: Pos2 { x: 990.0, y: 262.0 } };
 /// Centred right under the hole, the hand's cue for what is in it (round 15's judges found it far off at the right).
-const VR_GRIP: Rect = Rect { min: Pos2 { x: VR_LEFT, y: 286.0 }, max: Pos2 { x: SIDE_RIGHT, y: 318.0 } };
+// A clear line of its own between the hole and the name (the round 19 pre-check saw it on the name).
+const VR_GRIP: Rect = Rect { min: Pos2 { x: VR_LEFT, y: 272.0 }, max: Pos2 { x: SIDE_RIGHT, y: 304.0 } };
 const VR_SHOW: Rect = Rect { min: Pos2 { x: VR_LEFT, y: 372.0 }, max: Pos2 { x: 637.0, y: 434.0 } };
 const VR_SHOW_SMALL: Rect = Rect { min: Pos2 { x: 645.0, y: 372.0 }, max: Pos2 { x: 819.0, y: 434.0 } };
 const VR_GO: Rect = Rect { min: Pos2 { x: 827.0, y: 372.0 }, max: Pos2 { x: SIDE_RIGHT, y: 434.0 } };
@@ -1843,7 +1844,7 @@ impl Panel {
                 None if results.len() == 1 || !d.status.list.more => tr_n("{count} world", "{count} worlds", results.len() as u64),
                 None => tr!("{count}+ worlds", count = results.len()),
             };
-            text(p, pos2(self.field_here().max.x - 28.0, self.field_here().center().y), Align2::RIGHT_CENTER, orbit_look::txt(count, 16.0).color(theme::FG_4));
+            text(p, pos2(self.field_here().max.x - 28.0, self.field_here().center().y), Align2::RIGHT_CENTER, orbit_look::txt(count, 17.5).color(theme::FG_3));
         }
         // What is browsed (searching: every world, 3D only), the order, the labels kept to.
         if self.searching(d) {
@@ -2153,11 +2154,10 @@ impl Panel {
         text_cut(p, pos2(x, if vr { 349.0 } else { SIDE_UNDER }), under_room, orbit_look::txt(under, if vr { 20.0 } else { 17.5 }).color(fade(if vr { theme::FG } else { theme::FG_2 }, rest)));
         // It shows in 3D on its picture: where See it in 3D was, how to look around it. Said here, not over the picture, and no second full-screen button (round 18's judges).
         if !vr && self.live.as_ref().is_some_and(|l| l.id == entry.id && l.picture.is_some()) {
-            let galley = p.layout_job(orbit_look::txt(tr("Drag the picture to look around"), 17.5).weight(weight::MEDIUM).color(fade(theme::FG_2, rest)).job_truncated(width - 34.0));
-            let left = SHOW_WHOLE.center().x - (galley.size().x + 28.0) / 2.0;
-            p.rect_stroke(SHOW_WHOLE, CornerRadius::same((SHOW_WHOLE.height() / 2.0) as u8), Stroke::new(1.0, fade(theme::white(0.1), rest)), StrokeKind::Inside);
-            widgets::icon(p, pos2(left + 10.0, SHOW_WHOLE.center().y), icons::CUBE, 20.0, fade(orbit_look::accent(), rest));
-            p.galley(pos2(left + 28.0, SHOW_WHOLE.center().y - galley.size().y / 2.0), galley, theme::FG_2);
+            // Words from the panel's left edge, with nothing round them: in an outline with an icon it read as a button that did nothing (the round 19 pre-check).
+            let galley = p.layout_job(orbit_look::txt(tr("Drag the picture to look around"), 17.5).weight(weight::MEDIUM).color(fade(theme::FG_3, rest)).job_truncated(width - 28.0));
+            widgets::icon(p, pos2(x + 9.0, SHOW_WHOLE.center().y), icons::HAND_GRABBING, 19.0, fade(theme::FG_3, rest));
+            p.galley(pos2(x + 26.0, SHOW_WHOLE.center().y - galley.size().y / 2.0), galley, theme::FG_3);
         }
         // What it can be seen as, and the rest.
         let wf = d.world_feedback(entry);
@@ -2671,11 +2671,12 @@ fn compact_card(p: &Painter, rect: Rect, entry: &Entry, d: &Data, hover: bool, p
     picture(p, thumb, (d.thumb)(entry), &entry.world_id, CornerRadius::same(10), alpha);
     if entry.capture {
         // It has a 3D capture: on its picture's corner, as on the full list's cards.
-        let galley = p.layout_job(orbit_look::txt("3D", 12.5).weight(weight::BOLD).color(fade(orbit_look::on_accent(), alpha)).job(f32::INFINITY));
-        let chip = Rect::from_min_size(thumb.min + vec2(6.0, 6.0), vec2(galley.size().x + 29.0, 20.0));
-        p.rect_filled(chip, CornerRadius::same(10), fade(accent, alpha));
-        widgets::icon(p, pos2(chip.min.x + 12.0, chip.center().y), icons::CUBE, 12.5, fade(orbit_look::on_accent(), alpha));
-        p.galley(pos2(chip.min.x + 21.0, chip.center().y - galley.size().y / 2.0), galley, orbit_look::on_accent());
+        // At 12 px at 1280 x 720, as the rest of the card (it was the one thing on it under that).
+        let galley = p.layout_job(orbit_look::txt("3D", 17.5).weight(weight::BOLD).color(fade(orbit_look::on_accent(), alpha)).job(f32::INFINITY));
+        let chip = Rect::from_min_size(thumb.min + vec2(6.0, 6.0), vec2(galley.size().x + 34.0, 26.0));
+        p.rect_filled(chip, CornerRadius::same(13), fade(accent, alpha));
+        widgets::icon(p, pos2(chip.min.x + 14.0, chip.center().y), icons::CUBE, 16.0, fade(orbit_look::on_accent(), alpha));
+        p.galley(pos2(chip.min.x + 25.0, chip.center().y - galley.size().y / 2.0), galley, orbit_look::on_accent());
     }
     let x = thumb.max.x + 12.0;
     let width = rect.max.x - x - 12.0;

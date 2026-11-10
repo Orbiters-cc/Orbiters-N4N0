@@ -276,6 +276,17 @@ fn scaled(mut placed: Placed, anchor: egui::Pos2, by: f32) -> Placed {
     placed
 }
 
+/// A part of the wheel where a headset has it: what is read over the ring, its caption and Hide ring, a quarter larger than on a screen about the ring's top (their
+/// words read at about 11 px in a headset's picture, the round 19 pre-check); the ring's cells as they are.
+pub fn wheel_place(zone: Zone) -> Placed {
+    let placed = zones::in_units(zone);
+    if matches!(zone, Zone::WheelCaption | Zone::WheelHide) {
+        scaled(placed, egui::pos2(0.0, -196.0), VR_WING_SCALE)
+    } else {
+        placed
+    }
+}
+
 /// A sheet's page or head (`Zone::Takeover`, `Zone::SheetBack`) where a headset has it.
 pub fn sheet_place(zone: Zone) -> Placed {
     scaled(zones::in_units(zone), egui::pos2(0.0, 200.0), VR_SHEET_SCALE)
@@ -957,12 +968,13 @@ impl OrbitVr {
             (Some(Around::QuickMenu), Open::QuickMenu(_)) if settings.layout == orbiters_core::settings::OrbitLayout::Strip => strip_places(),
             (Some(Around::QuickMenu), Open::QuickMenu(hand)) => quick_menu_places(hand),
             (Some(Around::Camera), _) if self.camera_side == camera_track::Side::Right => Zone::CAMERA.iter().map(|z| zones::in_units(*z).mirrored()).collect(),
+            (Some(Around::Wheel), _) => Zone::around(Around::Wheel).iter().map(|z| wheel_place(*z)).collect(),
             (Some(m), _) => Zone::around(m).iter().map(|z| zones::in_units(*z)).collect(),
             (None, _) => Vec::new(),
         };
         // Here VRChat's wheel can close unseen: the ring has its own close.
         if menu == Some(Around::Wheel) && !self.panels.sheet_open() {
-            places.push(zones::in_units(Zone::WheelHide));
+            places.push(wheel_place(Zone::WheelHide));
         }
         // Hidden: only the way back, and nothing else, whatever VRChat's menu does.
         self.panels.way_back(menu, &mut places);

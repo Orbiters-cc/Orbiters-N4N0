@@ -178,8 +178,14 @@ fn quaternion(m: [[f64; 3]; 3]) -> [f32; 4] {
     q.map(|v| v as f32)
 }
 
-/// Clusters `group` on a grid over the cube (`lo`, `size`) into at most `target` cells, the finest grid that does:
-/// each cell's splats as one, and the cell's size.
+/// Clusters `group` on a grid over the cube (`lo`, `size`) into at most `target` cells: each cell's splats as one, and
+/// the cell's size. The grid is the one a bisection over the cells a side ends on. It never holds more than `target`
+/// cells (one a side always fits, and the search only ever moves up to a grid that does), but it is not always the
+/// finest that fits: grids of 3, 4 and 5 a side do not nest, so the count of occupied cells is not monotonic in the
+/// cells a side. Two splats at 0.59 and 0.70 of the cube share a cell at 2 and at 4 a side and none at 3 or 5: for one
+/// cell the search tries 5, then 3, then 2, and ends on 2. What that costs is a cell size coarser than it could be,
+/// never the budget; finding the finest takes a pass over the group for each grid tried, on export's slowest loop,
+/// and is left to the rewrite of this search (a sort of the cells' keys, counted at every size at once).
 fn cluster(group: &[Moment], lo: [f64; 3], size: f64, target: usize) -> (Vec<Moment>, f64) {
     let cells_at = |r: u64| {
         let cell = size / r as f64;
@@ -464,6 +470,27 @@ mod tests {
             g.push([k as f32, 3.0, 0.0], [-1.0; 3], [0.9, 0.1, 0.3, 0.2], 0.0, [1.0, 0.0, 0.0]);
         }
         g
+    }
+
+    /// A box's merged splats never outnumber what it may hold, on grids whose counts of occupied cells go down as well
+    /// as up with their size: the pair of [`cluster`]'s own example, and floors and clouds of splats at every budget.
+    #[test]
+    fn a_boxs_merged_splats_never_outnumber_its_budget() {
+        let moment = |mean: [f64; 3]| Moment { mean, cov: [1e-4, 0.0, 0.0, 1e-4, 0.0, 1e-4], color: [0.5; 3], alpha: 0.5 };
+        // One cell for the two: 2 a side (the search's answer) or 4 (the finest that fits), never 3 or 5.
+        let pair = [moment([0.59, 0.5, 0.5]), moment([0.70, 0.5, 0.5])];
+        let (merged, cell) = cluster(&pair, [0.0; 3], 1.0, 1);
+        assert_eq!(merged.len(), 1);
+        assert!(cell == 0.5 || cell == 0.25, "a cell of {cell}");
+        let mut rng = fastrand::Rng::with_seed(11);
+        for flat in [true, false] {
+            let group: Vec<Moment> = (0..3000).map(|_| moment([rng.f64(), if flat { 0.5 } else { rng.f64() }, rng.f64()])).collect();
+            for target in [1, 2, 3, 7, 50, 333, 750, 2999, 3000, 5000] {
+                let (merged, cell) = cluster(&group, [0.0; 3], 1.0, target);
+                assert!(!merged.is_empty() && merged.len() <= target, "{} merged splats for a budget of {target}", merged.len());
+                assert!(cell > 0.0 && cell <= 1.0);
+            }
+        }
     }
 
     /// What the server takes in a file (services/maps/mapTrees.js), for floaters as far as training threw them.

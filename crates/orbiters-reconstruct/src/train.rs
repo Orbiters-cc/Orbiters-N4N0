@@ -412,6 +412,11 @@ pub fn budget_for(views: usize) -> usize {
     (views * GAUSSIANS_PER_VIEW).clamp(FEWEST_GAUSSIANS, MOST_GAUSSIANS)
 }
 
+/// The masks colour steps name on the device beside each image size's own (crate::gpu::Gpu::set_step_mask): the one of
+/// a tile over a face, then one for each phase of the sub-grid.
+const TILE_MASK: u32 = 0;
+const PHASE_MASKS: u32 = 1;
+
 pub const GAUSSIANS_PER_VIEW: usize = 7_000;
 pub const FEWEST_GAUSSIANS: usize = 1_000_000;
 pub const MOST_GAUSSIANS: usize = 3_000_000;
@@ -474,12 +479,10 @@ pub fn evaluate(gpu: &mut Gpu, data: &Dataset, views: &[usize], background: [f32
         return Ok(None);
     }
     let mut sum = 0.0;
-    let mut masks = crate::wearer::LossMask::new(data);
     for &i in views {
-        masks.show(gpu, data.width, data.height, &data.mask, &data.views[i].image)?;
+        // Over the scene pixels the wearer does not show in (crate::gpu::Target::Color).
         sum += gpu.score(&data.views[i].camera, background, &data.views[i].image)?;
     }
-    masks.settle(gpu, data)?;
     Ok(Some(sum / views.len() as f32))
 }
 
@@ -697,25 +700,25 @@ pub fn train_from(data: &Dataset, gpu: &mut Gpu, from: Start, settings: &Setting
     gpu.noise_gate = settings.noise_gate;
     gpu.nested_forward = settings.nested_forward;
     let spawner = (settings.depth_births > 0.0).then(|| crate::births::Spawner::new(data, &held_out));
-    // Each phase of the colour steps' sub-grid (Settings::stride): its size, mask and scene pixels.
+    // Each phase of the colour steps' sub-grid (Settings::stride): its size and scene pixels, its mask on the device
+    // under a slot of its own (the four of a stride of two are as large as one keyframe's: 8 MB at 1080p). The device
+    // kept one mask a size, so each change of phase, three steps in four, uploaded its 2 MB again.
     let stride = settings.stride.max(1);
-    let phases: Vec<(u32, u32, Vec<f32>, f32)> = if settings.stride_until > 0.0 && stride > 1 {
+    let phases: Vec<(u32, u32, f32)> = if settings.stride_until > 0.0 && stride > 1 {
         (0..stride * stride)
             .map(|ph| {
                 let (ox, oy) = (ph % stride, ph / stride);
                 let (w, h) = ((data.width - ox).div_ceil(stride), (data.height - oy).div_ceil(stride));
                 let mask: Vec<f32> = (0..h).flat_map(|j| (0..w).map(move |i| data.mask[((stride * j + oy) * data.width + stride * i + ox) as usize])).collect();
                 let scene = mask.iter().filter(|m| **m > 0.5).count() as f32;
-                (w, h, mask, scene)
+                gpu.set_step_mask(PHASE_MASKS + ph, w, h, &mask)?;
+                Ok((w, h, scene))
             })
-            .collect()
+            .collect::<anyhow::Result<_>>()?
     } else {
         Vec::new()
     };
     let mut sub_grid: Vec<u32> = Vec::new();
-    let mut mask_phase = None;
-    // A session the wearer left: each colour step's own pixels (crate::wearer::LossMask); otherwise nothing changes.
-    let mut wearer_masks = crate::wearer::LossMask::new(data);
     // The keyframes on the device when its memory has room for them beside the set (with a GB to spare): steps then
     // upload no pixels. Not on a Mac, whose GPU reads the RAM they are in already: the second copy saved nothing there
     // (500 steps at 1080p on an M3: 74.3 s with it, 74.0 and 75.9 s without) and took their whole size from everything else.
@@ -828,8 +831,9 @@ pub fn train_from(data: &Dataset, gpu: &mut Gpu, from: Start, settings: &Setting
                 tile_target[j * t..(j + 1) * t].copy_from_slice(&v.image[row..row + t]);
                 tile_mask[j * t..(j + 1) * t].copy_from_slice(&data.mask[row..row + t]);
             }
-            crate::wearer::leave_out_of(&mut tile_mask, &tile_target);
-            gpu.set_mask(tile, tile, &tile_mask)?;
+            // The tile's own mask, under its own slot: no other mask of a tile's size is written over.
+            gpu.set_step_mask(TILE_MASK, tile, tile, &tile_mask)?;
+            gpu.step_mask = Some(TILE_MASK);
             let robust = if progress >= settings.robust_from { settings.robust } else { 0.0 };
             let sky_lr = std::mem::replace(&mut gpu.sky_lr, 0.0);
             // A tile's pixel counts as a whole frame's does: over its own few pixels the loss's gradient would be eight
@@ -851,11 +855,7 @@ pub fn train_from(data: &Dataset, gpu: &mut Gpu, from: Start, settings: &Setting
             let v = &f.views[rng.usize(..f.views.len())];
             let robust = if progress >= settings.robust_from { settings.robust } else { 0.0 };
             let sky_lr = std::mem::replace(&mut gpu.sky_lr, 0.0);
-            let size = f.size_of(&v.camera);
-            let scene_pixels = size.map_or(0.0, |s| s.scene_pixels);
-            if let Some(s) = size {
-                wearer_masks.show(gpu, s.width, s.height, &s.mask, &v.image)?;
-            }
+            let scene_pixels = f.size_of(&v.camera).map_or(0.0, |s| s.scene_pixels);
             let stepped = gpu.step(&v.camera, settings.background, Target::Color { rgba: &v.image, scene_pixels, weight: 1.0, ssim: settings.ssim, robust }, Some(lr));
             gpu.sky_lr = sky_lr;
             stepped?
@@ -869,11 +869,7 @@ pub fn train_from(data: &Dataset, gpu: &mut Gpu, from: Start, settings: &Setting
             if level == 0 && progress < settings.stride_until && !phases.is_empty() {
                 let ph = rng.u32(..stride * stride);
                 let (ox, oy) = (ph % stride, ph / stride);
-                let (w, h, mask, scene) = &phases[ph as usize];
-                if mask_phase != Some(ph) {
-                    gpu.set_mask(*w, *h, mask)?;
-                    mask_phase = Some(ph);
-                }
+                let (w, h, scene) = &phases[ph as usize];
                 let c = &data.views[v].camera;
                 let f = stride as f32;
                 let cam = Camera { r: c.r, t: c.t, fx: c.fx / f, fy: c.fy / f, cx: (c.cx - ox as f32) / f, cy: (c.cy - oy as f32) / f, width: *w, height: *h };
@@ -883,7 +879,7 @@ pub fn train_from(data: &Dataset, gpu: &mut Gpu, from: Start, settings: &Setting
                     let row = ((stride * j + oy) * data.width) as usize;
                     sub_grid.extend((0..*w).map(|i| img[row + (stride * i + ox) as usize]));
                 }
-                wearer_masks.show(gpu, *w, *h, mask, &sub_grid)?;
+                gpu.step_mask = Some(PHASE_MASKS + ph);
                 let full = gpu.filter_2d;
                 gpu.filter_2d = [full[0] / (f * f), full[1] / (f * f)];
                 let stepped = gpu.step(&cam, settings.background, Target::Color { rgba: &sub_grid, scene_pixels: *scene, weight: 1.0, ssim: settings.ssim, robust }, Some(lr));
@@ -893,9 +889,6 @@ pub fn train_from(data: &Dataset, gpu: &mut Gpu, from: Start, settings: &Setting
                 if resident && level == 0 {
                     gpu.resident_target = Some(v);
                 }
-                if level == 0 {
-                    wearer_masks.show(gpu, data.width, data.height, &data.mask, rgba)?;
-                }
                 gpu.step(camera, settings.background, Target::Color { rgba, scene_pixels: pixels, weight: 1.0, ssim: settings.ssim, robust }, Some(lr))?
             }
         };
@@ -903,7 +896,6 @@ pub fn train_from(data: &Dataset, gpu: &mut Gpu, from: Start, settings: &Setting
             let _sync = crate::timing::on().then(|| dev.poll(wgpu::PollType::wait_indefinitely()));
             let fade_start = Instant::now();
             let _cpu = crate::priority::CpuWork::start();
-            wearer_masks.settle(gpu, data)?;
             // The faces' views count: what only they see is not unseen.
             let cams: Vec<Camera> = train_views.iter().map(|&i| data.views[i].camera).chain(face_cams.iter().copied()).collect();
             let seen = match gpu.visibility(&cams, settings.background, settings.unseen_weight) {
@@ -981,8 +973,6 @@ pub fn train_from(data: &Dataset, gpu: &mut Gpu, from: Start, settings: &Setting
     if let Some(g) = &gpu.governor {
         eprintln!("governor: {:.1} s waiting for VRChat's frames, {} back-offs", g.waited.as_secs_f32(), g.backoffs);
     }
-    // The session's masks again: what follows the steps reads them, and a step's own stayed on the device.
-    wearer_masks.settle(gpu, data)?;
     let (mut wearer_left, mut floor_patched) = trained.as_ref().map_or((0, 0), |t| (t.wearer_left, t.floor_patched));
     let mut g = match trained {
         // The wearer went before this was kept: never twice.
@@ -1138,6 +1128,10 @@ struct Level {
     cameras: Vec<Camera>,
 }
 
+/// An image at half its size, each pixel the mean of the four under it. One of the four left out (alpha 0: it showed the
+/// wearer, crate::wearer::is_out) leaves the pixel out, as the least of the four makes its mask ([`half_mask`]): the
+/// loss reads who is left out from the target's alpha (crate::gpu::Target::Color), and a coarse level made opaque
+/// whatever was under it trained the wearer back in, at half and at a quarter of the size.
 fn half_image(image: &[u32], w: u32, h: u32) -> Vec<u32> {
     let (hw, hh) = (w / 2, h / 2);
     let mut out = vec![0u32; (hw * hh) as usize];
@@ -1145,7 +1139,7 @@ fn half_image(image: &[u32], w: u32, h: u32) -> Vec<u32> {
         for x in 0..hw {
             let at = |dx: u32, dy: u32| image[((2 * y + dy) * w + 2 * x + dx) as usize];
             let px = [at(0, 0), at(1, 0), at(0, 1), at(1, 1)];
-            let mut v = 255u32 << 24;
+            let mut v = if px.iter().any(|p| crate::wearer::is_out(*p)) { 0 } else { 255u32 << 24 };
             for c in 0..3 {
                 let sum: u32 = px.iter().map(|p| (p >> (8 * c)) & 255).sum();
                 v |= ((sum + 2) / 4) << (8 * c);
@@ -1504,6 +1498,44 @@ fn normal(rng: &mut fastrand::Rng) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The coarse levels keep the wearer out. The loss reads who is left out from the target's alpha, and a level's
+    /// pixel is left out when any pixel under it is, through both reductions (half, then a quarter); every other pixel
+    /// stays an opaque mean of its four. A level made opaque whatever was under it trained the wearer back in.
+    #[test]
+    fn coarse_levels_keep_out_what_shows_the_wearer() {
+        use crate::wearer::is_out;
+        let pixels = [0x00ff_ffff, 0xff11_2233, 0xff11_2233, 0xff11_2233];
+        assert!(is_out(half_image(&pixels, 2, 2)[0]));
+        assert_eq!(half_image(&[0xff10_2030, 0xff30_4050, 0xff10_2030, 0xff30_4050], 2, 2), [0xff20_3040]);
+        // A view of 8×4 with one pixel of the wearer, at (5, 2): out at (2, 1) of its half, at (1, 0) of its quarter.
+        let (w, h) = (8u32, 4u32);
+        let mut image = vec![0xff40_8020u32; (w * h) as usize];
+        image[(2 * w + 5) as usize] &= 0x00ff_ffff;
+        let whole = vec![0xff40_8020u32; (w * h) as usize];
+        let view = |image: Vec<u32>| crate::dataset::View { camera: Camera::look([0.0; 3], [0.0, 0.0, 1.0], [0.0, 1.0, 0.0], 1.0, w, h), image, game_time: 0.0, keyframe: 0 };
+        let data = Dataset {
+            dir: Default::default(),
+            views: vec![view(image), view(whole)],
+            depth_views: Vec::new(),
+            faces: None,
+            width: w,
+            height: h,
+            geometry: crate::camera::Geometry::new(w, h, 1),
+            mask: vec![1.0; (w * h) as usize],
+            loaded: Default::default(),
+        };
+        let levels = levels(&data);
+        assert_eq!(levels.iter().map(|l| (l.width, l.height)).collect::<Vec<_>>(), [(4, 2), (2, 1)]);
+        let out = |level: &Level, view: usize| level.images[view].iter().map(|p| is_out(*p)).collect::<Vec<_>>();
+        assert_eq!(out(&levels[0], 0), [false, false, false, false, false, false, true, false]);
+        assert_eq!(out(&levels[1], 0), [false, true]);
+        // The colours are the means they were, and a view nobody is in stays whole at both levels.
+        assert!(levels.iter().all(|l| l.images[0].iter().all(|p| p & 0x00ff_ffff == 0x0040_8020)));
+        assert!(levels.iter().all(|l| l.images[1].iter().all(|p| *p == 0xff40_8020)));
+        // The scene mask is the session's own, the same for every view: the wearer is in the targets alone.
+        assert!(levels.iter().all(|l| l.mask.iter().all(|m| *m == 1.0) && l.scene_pixels == (l.width * l.height) as f32));
+    }
 
     #[test]
     fn faces_get_their_share_of_the_steps_up_to_half() {

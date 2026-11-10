@@ -70,7 +70,7 @@ applications with two renames (the old one goes back if the second fails) and op
 |---|---|
 | `cargo xtask keygen` | Creates the release key, once. The private half goes to `~/.orbiters-release/update-signing-key`, the public half to `crates/orbiters-update/update-key.pub`, which is committed and built into every app. |
 | `cargo xtask bump <version>` | Sets `[workspace.package] version` and updates Cargo.lock. Every program and the release carry this version. |
-| `cargo xtask dist` | Writes `target/dist/<version>/` (details below). `--unsigned` makes a test build, and `--programs <folder>` packs programs already built there instead of building them. Neither gets a release file, so `publish` cannot put them out. |
+| `cargo xtask dist` | Writes `target/dist/<version>/` (details below). `--unsigned` makes a test build, and `--programs <folder>` packs programs already built there instead of building them. Neither gets a release file, so `publish` cannot put them out. `--dev` compiles as `release --dev` does (below), and is refused for a version that is not a development one (`0.3.6-dev.2`): a stable version's setup is only ever made with the full profile. |
 | `cargo xtask publish` | Uploads `target/dist/<version>/` to the server and makes it the channel's release (`--force` publishes a version that is not newer than the current one). Use it again after an upload that was cut. |
 | `cargo xtask release` | Runs the checks, `dist`, `publish`, the tag, then `github`. `--notes <file>` adds release notes (plain text, shown in the app's Settings and on GitHub). `--unsigned`: no Authenticode signatures, no `publish`. |
 | `cargo xtask github` | Makes the GitHub release of `desktop-v<version>` (the tag pushed already) with `target/dist/<version>/`'s setup, or replaces the setup of one that exists. |
@@ -79,7 +79,11 @@ All of them take `--channel <name>`, `stable` by default. An app follows the cha
 
 ### `dist` in detail
 
-1. Builds the five programs in release (`target/release`, like any other release build).
+1. Builds the five programs in release (`target/release`, like any other release build). A development build
+   (`release --dev`, or `dist --dev`) replaces two settings of the release profile on cargo's command line, `lto` off
+   and 16 codegen units: the same optimisation level, several times faster to build, a little larger and at most a few
+   percent slower. Stable releases keep the full profile (thin LTO, one codegen unit). `Profile` in
+   `xtask/src/main.rs` says why this is not a named profile in `Cargo.toml`.
 2. Builds the setup without programs inside, with the C runtime linked in (`+crt-static`, in its own target folder).
    This is the uninstaller kept in the install folder, so it must start on any Windows.
 3. Gathers the programs, the face detector (`crates/orbiters-reconstruct/assets/faces-v1-int8.onnx`), `onnxruntime.dll`, `onnxruntime_providers_shared.dll`, `sherpa-onnx-c-api.dll`, Visual

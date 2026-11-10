@@ -785,6 +785,24 @@ mod tests {
         assert_eq!(header["deleted"], 2000);
     }
 
+    /// Whatever bits a splat's mark holds, the GPU is handed 0, 1 or 2 for it: marks from 128 up mean something else to
+    /// the projection (they fade a splat: the edge of a capture the overlay shows small), and nothing of an edit may
+    /// ever reach them.
+    #[test]
+    fn an_edit_only_ever_draws_as_trained_selected_or_left_out() {
+        let mut edit = Edit::new(256, Identity::default());
+        for (i, m) in edit.marks.iter_mut().enumerate() {
+            *m = i as u8;
+        }
+        let drawn = edit.view_marks();
+        assert!(drawn.iter().all(|m| *m <= 2), "a mark above 2 for the GPU: {:?}", drawn.iter().max());
+        for (bits, m) in drawn.iter().enumerate() {
+            let bits = bits as u8;
+            let want = if bits & (HIDDEN | DELETED) != 0 { 2 } else { u8::from(bits & SELECTED != 0) };
+            assert_eq!(*m, want, "mark bits {bits:#010b}");
+        }
+    }
+
     #[test]
     fn undo_and_redo_walk_the_steps_and_a_new_step_drops_what_was_undone() {
         let mut edit = Edit::new(10, Identity::default());

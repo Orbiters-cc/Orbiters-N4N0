@@ -1,7 +1,9 @@
 // Robust colour loss: pixels inside coherent blobs of large error (other players, animated posters, particles: what
 // no static scene explains) leave the loss for this step. `residual` writes each scene pixel's mean absolute error
 // over the channels; `inliers` keeps a pixel unless more than half of its 7×7 neighbourhood errs by more than the
-// threshold (frame.loss.y, which colour steps do not use otherwise), so fine texture and edges still train.
+// threshold (frame.loss.y, which colour steps do not use otherwise), so fine texture and edges still train. A
+// keyframe's pixel left out (alpha 0: crate::gpu::Target::Color) gets a residual of −1: it is no scene pixel to its
+// neighbours' counts, and is never kept.
 
 @group(0) @binding(0) var<uniform> frame: Frame;
 @group(0) @binding(1) var<storage, read> out_color: array<vec4<f32>>;
@@ -19,7 +21,8 @@ fn residual(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgrou
     let packed = target_rgb[p];
     let t = vec3<f32>(f32(packed & 255u), f32((packed >> 8u) & 255u), f32((packed >> 16u) & 255u)) / 255.0;
     let d = abs(out_color[p].xyz - t);
-    resid[p] = select(0.0, (d.x + d.y + d.z) / 3.0, mask[p] > 0.5);
+    let scene = select(0.0, (d.x + d.y + d.z) / 3.0, mask[p] > 0.5);
+    resid[p] = select(-1.0, scene, (packed >> 24u) != 0u);
 }
 
 @compute @workgroup_size(16, 16)
@@ -40,7 +43,7 @@ fn inliers(@builtin(global_invocation_id) gid: vec3<u32>) {
             let yy = y + dy;
             if (xx >= 0 && yy >= 0 && xx < w && yy < h) {
                 let q = u32(yy * w + xx);
-                if (mask[q] > 0.5) {
+                if (mask[q] > 0.5 && resid[q] >= 0.0) {
                     all += 1u;
                     if (resid[q] > threshold) {
                         bad += 1u;
@@ -50,5 +53,5 @@ fn inliers(@builtin(global_invocation_id) gid: vec3<u32>) {
         }
     }
     let p = u32(y * w + x);
-    kept[p] = select(mask[p], 0.0, 2u * bad > all);
+    kept[p] = select(mask[p], 0.0, 2u * bad > all || resid[p] < 0.0);
 }

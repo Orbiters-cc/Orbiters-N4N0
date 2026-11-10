@@ -1,7 +1,8 @@
 //! `cargo xtask dist`: `target/dist/<version>/OrbitersSetup-<version>.exe` and the signed `<channel>.json` that
 //! announces it.
 //!
-//! 1. The programs are built in release (`target/release`, as every other release build here).
+//! 1. The programs are built in release (`target/release`, as every other release build here); a development build
+//!    with [`Profile::Dev`]'s settings, which compile several times faster.
 //! 2. The setup without programs inside is built with the C runtime linked in (`+crt-static`, its own target folder),
 //!    so that it starts on a Windows without Visual C++'s runtime: it is the uninstaller left in the install folder.
 //! 3. The programs, their libraries, Visual C++'s runtime (`vcruntime140.dll`, which they need and a clean Windows
@@ -10,7 +11,7 @@
 //! 5. The setup is built again with the payload inside, and signed: the one people download and apps update with.
 //! 6. The release file names it (size, SHA-256) and is signed with the release key.
 
-use crate::{cargo, pe, run, Config};
+use crate::{cargo, pe, run, Config, Profile};
 use anyhow::Context as _;
 use orbiters_update::{payload, Artifact, Release, SignedRelease, PRODUCT, SETUP_EXE};
 use std::path::{Path, PathBuf};
@@ -45,10 +46,14 @@ pub struct Options {
     /// Packs the programs (and their libraries) already in this folder instead of building them: a test of the
     /// setup with another build's programs. `release` never does.
     pub programs: Option<PathBuf>,
+    /// How the programs and the setup are compiled.
+    pub profile: Profile,
 }
 
 pub fn dist(config: &Config, options: &Options) -> anyhow::Result<PathBuf> {
     let version = crate::workspace_version()?;
+    // Whoever asks: a stable version's programs are never compiled as development builds are.
+    options.profile.for_version(&version)?;
     let target = crate::target_dir();
     let signer = Signer::new(config)?;
     anyhow::ensure!(signer.is_some() || options.unsigned, "{}", SIGNING_HELP);
@@ -73,7 +78,7 @@ pub fn dist(config: &Config, options: &Options) -> anyhow::Result<PathBuf> {
         }
         None => {
             let mut build = cargo();
-            build.args(["build", "--release", "--locked"]).env("CARGO_TARGET_DIR", &target).env_remove("ORBITERS_SETUP_PAYLOAD");
+            build.args(["build", "--release", "--locked"]).args(options.profile.cargo_args()).env("CARGO_TARGET_DIR", &target).env_remove("ORBITERS_SETUP_PAYLOAD");
             for program in PROGRAMS {
                 build.args(["-p", program]);
             }
@@ -103,7 +108,7 @@ pub fn dist(config: &Config, options: &Options) -> anyhow::Result<PathBuf> {
 
     println!("\n== Uninstaller");
     let setup_target = config.setup_target_dir.clone().unwrap_or_else(|| target.clone());
-    let stub = build_setup(&setup_target, None)?;
+    let stub = build_setup(&setup_target, None, options.profile)?;
     copy(&stub, &stage.join(SETUP_EXE))?;
     ours.push(stage.join(SETUP_EXE));
 
@@ -127,7 +132,7 @@ pub fn dist(config: &Config, options: &Options) -> anyhow::Result<PathBuf> {
     println!("{} files, {} MB, packed to {} MB", index.files.len(), index.total() >> 20, std::fs::metadata(&packed)?.len() >> 20);
 
     println!("\n== Setup");
-    let full = build_setup(&setup_target, Some(&packed))?;
+    let full = build_setup(&setup_target, Some(&packed), options.profile)?;
     let setup = dist.join(format!("OrbitersSetup-{version}.exe"));
     copy(&full, &setup)?;
     let missing = pe::missing(std::slice::from_ref(&setup), &[])?;
@@ -169,10 +174,11 @@ pub fn dist(config: &Config, options: &Options) -> anyhow::Result<PathBuf> {
 }
 
 /// Builds the setup with the C runtime inside, with `payload` in it or none (the uninstaller); returns where it is.
-fn build_setup(target: &Path, payload: Option<&Path>) -> anyhow::Result<PathBuf> {
+fn build_setup(target: &Path, payload: Option<&Path>, profile: Profile) -> anyhow::Result<PathBuf> {
     let mut build = cargo();
     build
         .args(["build", "--release", "--locked", "-p", "orbiters-setup", "--target", SETUP_TRIPLE])
+        .args(profile.cargo_args())
         .env("CARGO_TARGET_DIR", target)
         // Taken before the target's own flags: they would drop `+crt-static`.
         .env_remove("RUSTFLAGS")

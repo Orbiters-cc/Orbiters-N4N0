@@ -34,9 +34,11 @@ cargo xtask <command>
                                crates/orbiters-update/update-key.pub (commit it)
   bump <version>               sets the workspace's version (Cargo.toml, Cargo.lock)
   bump --dev                   the next development build's version (0.3.2-dev.1 after 0.3.1, then dev.2 ...)
-  dist [--unsigned] [--notes <file>] [--channel <name>] [--programs <folder>]
+  dist [--unsigned] [--notes <file>] [--channel <name>] [--programs <folder>] [--dev]
                                builds, signs and packs target/dist/<version>/: the setup and the signed release
-                               (--programs: packs the programs already built there instead, a test build)
+                               (--programs: packs the programs already built there instead, a test build;
+                               --dev: compiled as development builds are, much faster to build, and only
+                               for a development version)
   publish [--channel <name>] [--force] [--dev]
                                uploads target/dist/<version>/ to orbiters.cc and makes it the channel's release
                                (--dev: copies it to the development environment's feed on this computer)
@@ -44,8 +46,8 @@ cargo xtask <command>
                                checks the commit, then dist, publish, the desktop-v<version> tag and its GitHub
                                release with the setup (--unsigned: no Authenticode signature yet)
   release --dev [--notes <file>] [--allow-dirty]
-                               a development build (bump --dev first): dist, publish --dev, push, tag and a GitHub
-                               pre-release. Installed apps switched to the development environment update to it
+                               a development build (bump --dev first): dist --dev, publish --dev, push, tag and a
+                               GitHub pre-release. Installed apps switched to the development environment update to it
   github [--notes <file>] [--unsigned]
                                the GitHub release of target/dist/<version>/'s setup (its tag pushed already)
 
@@ -133,6 +135,70 @@ impl Config {
     pub fn remote_dir(&self) -> String {
         self.remote_dir.clone().unwrap_or_else(|| "/home/blackorbit/Orbiters/server/docker-data/downloads/desktop".into()).trim_end_matches('/').to_string()
     }
+}
+
+/// How a release's programs are compiled.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Profile {
+    /// The root Cargo.toml's release profile as it stands: thin LTO over one codegen unit a crate. What people install.
+    Stable,
+    /// The dev-release profile, for the builds Enzo tries (`release --dev`): the same optimisation level without the
+    /// two settings that make a build slow. One codegen unit compiles each crate on a single core, and thin LTO
+    /// optimises every dependency again at the link of each of the five programs and of the setup, at every version
+    /// bump. Without them a crate's code is generated on sixteen cores and a link is only a link. The programs come out
+    /// larger and at most a few percent slower (the reconstruction's time is the GPU's: the lab's "process speed"
+    /// report put every compiler setting together at about 1 % of a run).
+    ///
+    /// It is the release profile with those two settings replaced on cargo's command line, not a
+    /// `[profile.dev-release]` of its own in Cargo.toml. A named profile builds into `target/dev-release`, and
+    /// sherpa-onnx-sys's build script copies its DLLs into the folder named after cargo's `PROFILE`, which says
+    /// `release` for every profile that inherits it: it finds no such folder above its output and the build stops, or
+    /// it finds an older `target/release` and the setup packs whatever lies there. This way everything stays where
+    /// `dist` and every script look for it, `target/release`, and cargo keeps both sets of compiled dependencies there
+    /// side by side (their file names carry a hash of the settings), so a stable release after development builds
+    /// compiles nothing again but what changed.
+    Dev,
+}
+
+impl Profile {
+    /// What `cargo build --release` takes on top for this profile.
+    pub fn cargo_args(self) -> &'static [&'static str] {
+        match self {
+            Profile::Stable => &[],
+            Profile::Dev => &["--config", "profile.release.lto=false", "--config", "profile.release.codegen-units=16"],
+        }
+    }
+
+    /// From a command's arguments: `--dev` asks for the development builds' profile.
+    fn of(args: &[String]) -> Self {
+        if flag(args, "--dev") {
+            Profile::Dev
+        } else {
+            Profile::Stable
+        }
+    }
+
+    /// This profile for a build of `version`, or why not: only a development version (`0.3.6-dev.2`) is built as
+    /// development builds are. `dist` signs a release file for whatever it builds, in the same `dist/<version>` folder
+    /// for both profiles, and `publish` checks the version, the hash and the signature, not how the programs were
+    /// compiled: `dist --dev` on a stable version, then `publish`, would have put development-built programs out as
+    /// the stable release. Asked before anything is built, and again where the build is made.
+    pub fn for_version(self, version: &str) -> anyhow::Result<Self> {
+        anyhow::ensure!(
+            self == Profile::Stable || is_development(version),
+            "{version} is not a development version: --dev compiles the programs as development builds are, and a stable \
+             version's setup is only ever made with the full profile (cargo xtask bump --dev first, or leave --dev out)"
+        );
+        Ok(self)
+    }
+}
+
+/// Whether `version` is a development build's: a version whose pre-release part is `dev.<number>`, as
+/// [`next_dev_version`] writes it (`0.3.6-dev.2`). Read from the parsed version, never from its text: `1.0.0+build-dev.1`
+/// holds `-dev.` in its build metadata and is the stable 1.0.0, and looking for the text let it be built, and released,
+/// as a development build.
+pub fn is_development(version: &str) -> bool {
+    semver::Version::parse(version).is_ok_and(|v| v.pre.as_str().strip_prefix("dev.").is_some_and(|n| n.parse::<u64>().is_ok()))
 }
 
 /// The repository's root (this crate's parent).
@@ -232,6 +298,11 @@ fn main() {
 }
 
 fn run_command(args: &[String]) -> anyhow::Result<()> {
+    command(args, &workspace_version)
+}
+
+/// A command, on the workspace whose version `version` reads.
+fn command(args: &[String], version: &dyn Fn() -> anyhow::Result<String>) -> anyhow::Result<()> {
     let rest = args.get(1..).unwrap_or_default();
     let channel = value(rest, "--channel").unwrap_or_else(|| orbiters_update::STABLE.into());
     let notes = || -> anyhow::Result<String> {
@@ -244,10 +315,14 @@ fn run_command(args: &[String]) -> anyhow::Result<()> {
         Some("keygen") => keygen(&Config::load()?, flag(rest, "--force")),
         Some("bump") if flag(rest, "--dev") => bump(&next_dev_version(&workspace_version()?)?),
         Some("bump") => bump(rest.first().context("cargo xtask bump <version>")?),
-        Some("dist") if cfg!(target_os = "macos") => macos::dist(&Config::load()?, &macos::Options { channel, notes: notes()? }).map(drop),
         Some("dist") => {
+            // On Windows and on a Mac alike, before a setting is read or a program built.
+            let profile = Profile::of(rest).for_version(&version()?)?;
+            if cfg!(target_os = "macos") {
+                return macos::dist(&Config::load()?, &macos::Options { channel, notes: notes()?, profile }).map(drop);
+            }
             let programs = value(rest, "--programs").map(PathBuf::from);
-            let options = dist::Options { unsigned: flag(rest, "--unsigned"), channel, notes: notes()?, programs };
+            let options = dist::Options { unsigned: flag(rest, "--unsigned"), channel, notes: notes()?, programs, profile };
             dist::dist(&Config::load()?, &options).map(drop)
         }
         Some("publish") if flag(rest, "--dev") => publish::publish_dev(&Config::load()?, &workspace_version()?, &channel, flag(rest, "--force")),
@@ -311,7 +386,7 @@ fn bump(version: &str) -> anyhow::Result<()> {
     lines[line] = format!("version = \"{version}\"");
     std::fs::write(&path, lines.join("\n") + "\n")?;
     run(cargo().args(["update", "--workspace", "--offline"]))?;
-    if version.contains("-dev.") {
+    if is_development(version) {
         println!("Version {version}. Commit Cargo.toml and Cargo.lock, then: cargo xtask release --dev");
     } else {
         println!("Version {version}. Commit Cargo.toml and Cargo.lock, push, then: cargo xtask release");
@@ -338,7 +413,7 @@ fn release(config: &Config, channel: &str, notes: String, allow_dirty: bool, uns
     anyhow::ensure!(!pushed.is_empty(), "this commit is not pushed: push it first, the release names it");
     publish::ensure_newer(&version, channel)?;
 
-    let dist = dist::dist(config, &dist::Options { unsigned, channel: channel.into(), notes: notes.clone(), programs: None })?;
+    let dist = dist::dist(config, &dist::Options { unsigned, channel: channel.into(), notes: notes.clone(), programs: None, profile: Profile::Stable })?;
     publish::publish(config, &version, channel, false)?;
 
     let tagged = git(&["tag", "--annotate", &tag, "--message", &format!("Orbiters - N4N0 {version}")]).and_then(|_| git(&["push", "origin", &tag]));
@@ -370,12 +445,12 @@ fn next_dev_version(current: &str) -> anyhow::Result<String> {
     Ok(v.to_string())
 }
 
-/// A development build (`cargo xtask bump --dev` first, committed): built and signed as a release, then put in the
-/// development environment's feed on this computer, where installed apps switched to the development environment
-/// find it within two minutes. No push, no tag, no GitHub release: development builds stay on this computer.
+/// A development build (`cargo xtask bump --dev` first, committed): built with [`Profile::Dev`] and packed as a
+/// release, put in the development environment's feed on this computer, where installed apps switched to the
+/// development environment find it within two minutes, then pushed, tagged and made a GitHub pre-release.
 fn release_dev(config: &Config, channel: &str, notes: String, allow_dirty: bool) -> anyhow::Result<()> {
     let version = workspace_version()?;
-    anyhow::ensure!(version.contains("-dev."), "{version} is not a development version: cargo xtask bump --dev, commit, then release --dev");
+    anyhow::ensure!(is_development(&version), "{version} is not a development version: cargo xtask bump --dev, commit, then release --dev");
     if !allow_dirty {
         let changes = git(&["status", "--porcelain", "--untracked-files=no"])?;
         anyhow::ensure!(changes.is_empty(), "changes are not committed (--allow-dirty to build them anyway):\n{changes}");
@@ -384,9 +459,9 @@ fn release_dev(config: &Config, channel: &str, notes: String, allow_dirty: bool)
     publish::ensure_newer(&version, channel)?;
     let notes = if notes.is_empty() { format!("Development build {version} ({})", git(&["rev-parse", "--short", "HEAD"]).unwrap_or_default()) } else { notes };
     let dist = if cfg!(target_os = "macos") {
-        macos::dist(config, &macos::Options { channel: channel.into(), notes: notes.clone() })?
+        macos::dist(config, &macos::Options { channel: channel.into(), notes: notes.clone(), profile: Profile::Dev })?
     } else {
-        dist::dist(config, &dist::Options { unsigned: true, channel: channel.into(), notes: notes.clone(), programs: None })?
+        dist::dist(config, &dist::Options { unsigned: true, channel: channel.into(), notes: notes.clone(), programs: None, profile: Profile::Dev })?
     };
     publish::publish_dev(config, &version, channel, false)?;
     // Every build Enzo is to try is also on GitHub's releases (a pre-release), tagged on the pushed commit.
@@ -420,6 +495,55 @@ mod tests {
         assert_eq!(next_dev_version("0.3.2-dev.9").unwrap(), "0.3.2-dev.10");
         assert!(next_dev_version("0.4.0-beta.1").is_err(), "another pre-release is not a development build");
         assert!(orbiters_update::is_newer("0.3.2-dev.2", "0.3.2-dev.1") && orbiters_update::is_newer("0.3.2", "0.3.2-dev.9"));
+    }
+
+    /// A development build replaces the release profile's two slow settings and nothing else, and that profile still
+    /// has them: a stable release is compiled as it always was.
+    #[test]
+    fn development_builds_replace_only_the_slow_settings() {
+        assert!(Profile::Stable.cargo_args().is_empty(), "a stable release is the manifest's profile, untouched");
+        let dev = Profile::Dev.cargo_args();
+        assert!(dev.chunks(2).all(|pair| pair[0] == "--config"));
+        let settings: Vec<&str> = dev.chunks(2).map(|pair| pair[1]).collect();
+        assert_eq!(settings, ["profile.release.lto=false", "profile.release.codegen-units=16"]);
+        let toml = std::fs::read_to_string(root().join("Cargo.toml")).unwrap();
+        let release: Vec<&str> = toml.lines().skip_while(|l| l.trim() != "[profile.release]").skip(1).take_while(|l| !l.trim().starts_with('[')).map(str::trim).collect();
+        for kept in [r#"lto = "thin""#, "codegen-units = 1", "strip = true"] {
+            assert!(release.contains(&kept), "the release profile lost {kept}: {release:?}");
+        }
+        let args = |list: &[&str]| list.iter().map(|a| a.to_string()).collect::<Vec<_>>();
+        assert_eq!(Profile::of(&args(&["--unsigned", "--dev"])), Profile::Dev);
+        assert_eq!(Profile::of(&args(&["--unsigned"])), Profile::Stable);
+    }
+
+    /// `dist --dev` on a stable version is refused, as a command, before anything is read or built: with `publish` after
+    /// it, it shipped development-built programs as a stable release. A development version takes either profile, and
+    /// `release --dev`, which only runs on one, keeps building as development builds are.
+    #[test]
+    fn a_stable_version_is_never_built_as_a_development_build() {
+        let args = |list: &[&str]| list.iter().map(|a| a.to_string()).collect::<Vec<_>>();
+        // Stable versions, another pre-release, and stable versions whose build metadata or pre-release only looks like
+        // a development build's.
+        for stable in ["0.3.5", "1.0.0", "0.4.0-beta.1", "1.0.0+build-dev.1", "1.0.0+x-dev.2", "0.3.5-dev.x", "0.3.5-rc-dev.1", "0.3.5-dev"] {
+            let version = || Ok(stable.to_string());
+            for command_line in [&["dist", "--dev"][..], &["dist", "--dev", "--unsigned"], &["dist", "--unsigned", "--channel", "stable", "--dev"], &["dist", "--programs", "elsewhere", "--dev"]] {
+                let refused = command(&args(command_line), &version).expect_err("built a stable version as a development build");
+                let said = format!("{refused:#}");
+                assert!(said.contains(stable) && said.contains("not a development version"), "{said}");
+            }
+            assert!(Profile::Dev.for_version(stable).is_err());
+            assert_eq!(Profile::Stable.for_version(stable).unwrap(), Profile::Stable);
+        }
+        // The version is asked for the refusal alone: a failure to read it is the command's failure, not a build.
+        assert!(command(&args(&["dist", "--dev"]), &|| anyhow::bail!("no Cargo.toml")).is_err());
+        for development in ["0.3.6-dev.1", "0.3.5-dev.32", "0.3.5-dev.33", "0.3.5-dev.33+built.today"] {
+            assert!(is_development(development), "{development}");
+            assert_eq!(Profile::Dev.for_version(development).unwrap(), Profile::Dev);
+            assert_eq!(Profile::Stable.for_version(development).unwrap(), Profile::Stable);
+        }
+        // What `bump --dev` writes is what the guards take.
+        assert!(is_development(&next_dev_version("0.3.5").unwrap()) && is_development(&next_dev_version("0.3.5-dev.33").unwrap()));
+        assert!(!is_development("not a version") && !is_development("1.0.0+build-dev.1"));
     }
 
     #[test]

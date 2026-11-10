@@ -1,6 +1,7 @@
 // D-SSIM colour loss, as 3DGS trains it: loss = (1 − λ)·L1 + λ·(1 − SSIM), means over scene pixels and channels,
 // SSIM with an 11×11 Gaussian window (σ = 1.5), zero padding, C1 = 0.01², C2 = 0.03² (fused-ssim's formulation).
-// Masked pixels count as black in both images and get no gradient. λ is frame.loss.z.
+// Masked pixels count as black in both images and get no gradient, and so do the keyframe's pixels left out (alpha 0:
+// crate::gpu::Target::Color). λ is frame.loss.z.
 // Two passes over 16×16 tiles with a 5-pixel apron in workgroup memory, one channel at a time:
 //   partials: per pixel and channel, a = ∂S/∂μx, b = ∂S/∂E[x²], c = ∂S/∂E[xy] of the window centred there;
 //   gradient: ∂ΣS/∂x = G∗a + 2x·G∗b + y·G∗c, plus the L1 term, into d_pixel.
@@ -35,7 +36,7 @@ fn scene(px: i32, py: i32) -> i32 {
         return -1;
     }
     let p = u32(py) * frame.size.x + u32(px);
-    if (mask[p] < 0.5) {
+    if (mask[p] < 0.5 || (target_rgb[p] >> 24u) == 0u) {
         return -1;
     }
     return i32(p);

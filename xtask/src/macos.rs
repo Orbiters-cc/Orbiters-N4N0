@@ -42,6 +42,8 @@ const ENTITLEMENTS: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
 pub struct Options {
     pub channel: String,
     pub notes: String,
+    /// How the programs are compiled.
+    pub profile: crate::Profile,
 }
 
 /// How the application gets signed.
@@ -271,6 +273,8 @@ fn sign(identity: &Identity, entitlements: &Path, file: &Path, is_main: bool) ->
 
 pub fn dist(config: &Config, options: &Options) -> anyhow::Result<PathBuf> {
     let version = crate::workspace_version()?;
+    // Whoever asks: a stable version's programs are never compiled as development builds are.
+    options.profile.for_version(&version)?;
     let target = crate::target_dir();
     let dist = target.join("dist").join(&version);
     if dist.exists() {
@@ -280,7 +284,7 @@ pub fn dist(config: &Config, options: &Options) -> anyhow::Result<PathBuf> {
 
     println!("\n== Programs {version}");
     let mut build = crate::cargo();
-    build.args(["build", "--release", "--locked"]).env("CARGO_TARGET_DIR", &target).env("MACOSX_DEPLOYMENT_TARGET", MINIMUM_MACOS);
+    build.args(["build", "--release", "--locked"]).args(options.profile.cargo_args()).env("CARGO_TARGET_DIR", &target).env("MACOSX_DEPLOYMENT_TARGET", MINIMUM_MACOS);
     for program in PROGRAMS {
         build.args(["-p", program]);
     }

@@ -800,3 +800,62 @@ mod mac_tests {
         assert!(paths.contains(&PathBuf::from("/Users/enzo/Hub Avatar")) && paths.contains(&PathBuf::from("/Users/enzo/Unity Projects")));
     }
 }
+
+#[cfg(test)]
+mod retained_lists {
+    use super::*;
+
+    const AVATAR: &str = "avtr_11111111-2222-3333-4444-555555555555";
+    const OTHER_AVATAR: &str = "avtr_77777777-2222-3333-4444-555555555555";
+    const WORLD: &str = "wrld_99999999-2222-3333-4444-555555555555";
+
+    /// A scene with one uploaded avatar or world.
+    fn scene(name: &str, id: &str) -> String {
+        format!(
+            "%YAML 1.1\n--- !u!1 &100\nGameObject:\n  m_Name: {name}\n--- !u!4 &101\nTransform:\n  m_GameObject: {{fileID: 100}}\n  m_Father: {{fileID: 0}}\n--- !u!114 &102\nMonoBehaviour:\n  m_GameObject: {{fileID: 100}}\n  blueprintId: {id}\n"
+        )
+    }
+
+    /// What a project shows, its uploaded avatars and its worlds, stays what it showed while one of its scenes cannot
+    /// be read: a scene with bytes that are no text (damaged, or caught half written), or one with a line that is read
+    /// and longer than is looked at of a line. Such a scene answering "nothing uploaded" as a complete answer took the
+    /// avatar off its project, and the world with it. Once the scene reads again, the project shows what it holds.
+    #[test]
+    fn a_project_keeps_its_avatars_and_worlds_while_a_scene_cannot_be_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let assets = dir.path().join("Assets");
+        std::fs::create_dir(&assets).unwrap();
+        let (avatar, world) = (assets.join("Avatar.unity"), assets.join("World.unity"));
+        std::fs::write(&avatar, scene("Fox", AVATAR)).unwrap();
+        std::fs::write(&world, scene("VRCWorld", WORLD)).unwrap();
+        let mut scan = Scan { projects: vec![Project { path: dir.path().to_path_buf(), name: "Project".into(), kind: Kind::Avatars, ..Default::default() }], ..Default::default() };
+        let cancel = AtomicBool::new(false);
+        let read_again = |scan: &mut Scan| enrich(scan, &cancel, &mut HashSet::new(), &mut |_: &Scan| {});
+        let shown = |scan: &Scan| {
+            let ids = |list: &[Avatar]| list.iter().map(|a| a.id.clone()).collect::<Vec<_>>();
+            (ids(&scan.projects[0].avatars), ids(&scan.projects[0].worlds))
+        };
+        read_again(&mut scan);
+        assert_eq!(shown(&scan), (vec![AVATAR.to_string()], vec![WORLD.to_string()]));
+
+        // The avatar's scene with a byte that is no text in its blueprint ID.
+        let mut damaged = scene("Fox", AVATAR).into_bytes();
+        let at = damaged.windows(AVATAR.len()).position(|w| w == AVATAR.as_bytes()).unwrap();
+        damaged[at + 5] = 0xff;
+        damaged.push(b'\n');
+        std::fs::write(&avatar, &damaged).unwrap();
+        read_again(&mut scan);
+        assert_eq!(shown(&scan), (vec![AVATAR.to_string()], vec![WORLD.to_string()]), "a damaged scene took the project's avatar off it");
+
+        // The world's scene with a name longer than is looked at of a line, the avatar's still damaged.
+        std::fs::write(&world, scene(&"W".repeat(100_000), WORLD)).unwrap();
+        read_again(&mut scan);
+        assert_eq!(shown(&scan), (vec![AVATAR.to_string()], vec![WORLD.to_string()]), "a scene read short changed what the project shows");
+
+        // Both read again: the project shows what they hold now.
+        std::fs::write(&avatar, scene("Another fox", OTHER_AVATAR)).unwrap();
+        std::fs::write(&world, scene("VRCWorld again", WORLD)).unwrap();
+        read_again(&mut scan);
+        assert_eq!(shown(&scan), (vec![OTHER_AVATAR.to_string()], vec![WORLD.to_string()]));
+    }
+}

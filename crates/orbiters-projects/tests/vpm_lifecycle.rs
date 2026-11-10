@@ -91,6 +91,9 @@ fn repository() -> Repository {
                 }
                 Err(e) => panic!("{e}"),
             };
+            // On Windows a connection taken from a listener that does not wait does not wait either: a read before the
+            // request had come ended at once, and the answer was an empty body ("EOF while parsing a value").
+            stream.set_nonblocking(false).unwrap();
             stream.set_read_timeout(Some(std::time::Duration::from_secs(3))).unwrap();
             let mut data = vec![];
             let mut buf = [0; 2048];

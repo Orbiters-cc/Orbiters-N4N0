@@ -22,6 +22,10 @@ orbiters-n4n0-core = { path = "crates/orbiters-n4n0-core" }
 orbiters-n4n0 = { path = "crates/orbiters-n4n0" }
 orbiters-audio = { path = "crates/orbiters-audio" }
 orbiters-update = { path = "crates/orbiters-update" }
+orbiters-reconstruct = { path = "crates/orbiters-reconstruct" }
+# The SteamVR driver takes this one by its path, without its default features: a member cannot switch off the
+# defaults of an entry here.
+orbiters-smooth = { path = "crates/orbiters-smooth" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 anyhow = "1"
@@ -58,6 +62,9 @@ windows = { version = "0.62", features = [
     "Win32_System_SystemServices",
 ] }
 
+# What people install. A development build (`cargo xtask release --dev`, `cargo xtask dist --dev`) is this profile with
+# `lto` off and 16 codegen units, which xtask sets on cargo's command line (`Profile::Dev` in xtask/src/main.rs, which
+# says why it is not a profile of its own here): it builds several times faster.
 [profile.release]
 lto = "thin"
 codegen-units = 1

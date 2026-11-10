@@ -404,7 +404,7 @@ impl Endpoint {
 /// it could read: by this deadline, whether or not the service sends anything meanwhile.
 const RESYNC_RETRY: Duration = if cfg!(test) { Duration::from_millis(150) } else { Duration::from_secs(1) };
 /// How many times it asks in all before it gives the link up.
-const RESYNC_TRIES: u32 = 5;
+pub(crate) const RESYNC_TRIES: u32 = 5;
 
 /// The state as a client holds it.
 struct Held {
@@ -985,6 +985,115 @@ mod tests {
         assert!(until(|| client.library_version() == 4));
         assert!(client.state.lock().unwrap().out_of_step, "any line that cannot be read may have been the state");
         assert!(asks_again(&mut reader), "and is asked for");
+    }
+
+    /// A state in which every part differs from a new snapshot's: the busy evening of `--publish-cost`, and the rest.
+    fn every_part_set() -> Snapshot {
+        use crate::state::*;
+        let plain = Snapshot::new(Settings::default());
+        let mut s = crate::controller::publish_cost::busy_evening();
+        s.version = "another version".into();
+        s.vrchat.log_found = !plain.vrchat.log_found;
+        s.vrchat.remote = true;
+        s.lan.link = LanLink::Looking;
+        s.capture.state = CaptureState::Recording;
+        s.capture.trail = vec![[1.0, 2.0, 3.0]];
+        s.settings.walk_boost.strength += 0.25;
+        s.reconstruction = Some(ReconstructionJob::new(PathBuf::from("a session"), true));
+        s.vrchat_login.revision = 3;
+        s.capture_shares.push(crate::controller::shares::ShareJob { id: "job".into(), key: "capture".into(), stage: Default::default(), outcome: None, update: true });
+        s.update.channel = "another channel".into();
+        s.cleanup = Some(CleanupJob::default());
+        s.vr_audio.last = Some(crate::controller::vr_audio::Event { utc_ms: 1, text: "Set to the headset's".into(), error: false });
+        s.bridge.allowed = true;
+        s.orbit.note = Some("in the way".into());
+        s.worn_kit = Some(true);
+        s.camera_open_said = Some(false);
+        s.projects_changed = 5;
+        let o = &mut s.n4n0;
+        o.face = N4n0Face::Happy;
+        o.listening = true;
+        o.thinking = true;
+        o.afk = true;
+        o.confirmations = vec![N4n0Confirmation { id: "c1".into(), title: "Publish".into(), summary: "Saturday".into(), approve_url: "https://orbiters.cc/confirm/c1".into() }];
+        o.quota = Some(orbiters_n4n0_core::assistant::Quota { used: 13, limit: 80, resets_at: None, own_key: false });
+        o.test_face = Some(N4n0Face::Annoyed);
+        o.test_cycle = true;
+        o.test_afk = true;
+        o.test_hidden = true;
+        o.test_pictures = true;
+        o.desktop_mode = true;
+        o.menu_request = 4;
+        o.menu_toggle = true;
+        o.dictation = Some((2, "play some music".into()));
+        o.photo_countdown = Some(3);
+        o.photo_wait = Some(orbiters_n4n0::status::PhotoWait::Camera);
+        o.light = Some(N4n0Light { on: true, color: 2, level: 0.5 });
+        o.card = Some(orbiters_n4n0::status::CardView { title: "A link".into(), link: "https://orbiters.cc".into(), left: 40 });
+        o.tracking = Some(orbiters_n4n0::status::TrackingView { on: true, ms: [4, 8, 16], note: "smoothing".into() });
+        o.suggestion = Some((1, None));
+        o.keys = vec![(7, orbiters_n4n0_core::menu::KeyInput::Enter)];
+        o.world_video = Some(("https://youtu.be/36YnV9STBqc".into(), Some("A song".into()), Some(1_762_800_000)));
+        o.photo_note = Some((2, "Open the camera before".into()));
+        o.invite = Some((1, orbiters_n4n0_core::menu::InviteAnswer::Sent));
+        o.qr.note = "Turn the stream camera on".into();
+        o.mirror.zoom = 3;
+        o.calls.picked = 2;
+        s
+    }
+
+    /// Review S2: every part the wire declares, changed alone to something it is not by default, is the one part a link
+    /// writes and is what a client then holds. A part left off the wire, or travelling under a name the snapshot's own
+    /// JSON does not have, cannot pass; nor can a part added later that this fixture leaves as it is by default.
+    #[test]
+    fn every_part_of_the_state_travels_alone() {
+        use orbiters_core::slice::{apply_changes, Parts};
+        use serde_json::Value;
+        let plain = Arc::new(Snapshot::new(Settings::default()));
+        let (plain_json, full_json) = (json(&plain), json(&every_part_set()));
+        let mut names = Vec::new();
+        plain.part_names("", &mut names);
+        // The names are the snapshot's own JSON: each field is a part, or a state whose fields are parts.
+        let fields = |at: &Value, prefix: &str| at.as_object().unwrap().keys().map(|key| format!("{prefix}{key}")).collect::<Vec<_>>();
+        let mut expected = Vec::new();
+        for field in fields(&plain_json, "") {
+            if field == "vrchat" || field == "n4n0" {
+                expected.extend(fields(&plain_json[field.as_str()], &format!("{field}.")));
+            } else {
+                expected.push(field);
+            }
+        }
+        let (mut declared, mut wanted) = (names.clone(), expected);
+        declared.sort();
+        wanted.sort();
+        assert_eq!(declared, wanted, "the parts declared are the snapshot's fields");
+        let at = |json: &Value, name: &str| name.split('.').fold(json, |at, key| &at[key]).clone();
+        let mut as_by_default = Vec::new();
+        for name in &names {
+            let value = at(&full_json, name);
+            if value == at(&plain_json, name) {
+                as_by_default.push(name.clone());
+                continue;
+            }
+            // The plain state with this one part changed…
+            let mut one = (*plain).clone();
+            apply_changes(&mut one, &serde_json::json!({ name.as_str(): value }).to_string()).unwrap();
+            let one = Arc::new(one);
+            assert_eq!(at(&json(&one), name), value, "{name}: read into the state");
+            // …written by a link that last wrote the plain one: that part, and no other…
+            let mut line = Vec::new();
+            write_state(&mut line, Some(&plain), &one).unwrap();
+            let line = String::from_utf8(line).unwrap();
+            let parts = changed_parts(line.trim_end()).unwrap_or_else(|| panic!("{name}: {line}"));
+            let written: Value = serde_json::from_str(parts).unwrap();
+            assert_eq!(written.as_object().unwrap().keys().collect::<Vec<_>>(), [name], "{name}: the one part written");
+            // …and read by a client that holds the plain one, which then holds the same state, whole.
+            let mut held = (*plain).clone();
+            apply_changes(&mut held, parts).unwrap();
+            assert_eq!(json(&held), json(&one), "{name}: the client holds it");
+        }
+        assert!(as_by_default.is_empty(), "the fixture leaves these parts as a new snapshot has them: {as_by_default:?}");
+        assert!(names.len() > 70, "{} parts", names.len());
     }
 
     /// Whether the client's next line to the service, within the reader's time, asks for the whole state again.

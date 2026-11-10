@@ -22,6 +22,7 @@ mod idle_frames;
 mod ipc;
 mod keys;
 mod language;
+mod link_between;
 #[cfg(target_os = "macos")]
 mod mac;
 #[cfg(target_os = "macos")]

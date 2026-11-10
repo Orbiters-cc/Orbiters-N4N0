@@ -101,6 +101,13 @@ impl Mailbox {
         Some((state.messages.drain(..).collect(), state.snapshot.take()))
     }
 
+    /// How much waits for the reader: states (one at most) and other messages.
+    #[cfg(test)]
+    pub fn waiting(&self) -> (usize, usize) {
+        let state = self.state.lock().unwrap();
+        (state.snapshot.is_some() as usize, state.messages.len())
+    }
+
     /// The reader is gone: what waits is dropped and nothing more is kept.
     pub fn close(&self) {
         let mut state = self.state.lock().unwrap();

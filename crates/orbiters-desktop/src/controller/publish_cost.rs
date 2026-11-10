@@ -27,7 +27,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 /// The made-up state: what the service holds on a busy evening in VR.
-fn busy_evening() -> Snapshot {
+pub(crate) fn busy_evening() -> Snapshot {
     let mut s = Snapshot::new(Settings::default());
     s.account.state = crate::state::AccountState::SignedIn { username: "Orbit".into() };
     s.vrchat.running = true;

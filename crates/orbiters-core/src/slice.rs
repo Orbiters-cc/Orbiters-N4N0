@@ -157,6 +157,9 @@ pub trait Parts {
 
     /// [`Slice::settle`] for every slice of it, against the same state as it was last handed out.
     fn settle(&mut self, previous: &Self);
+
+    /// The name of every part, as it travels (`prefix` before each): what a test walks to change each one in turn.
+    fn part_names(&self, prefix: &str, out: &mut Vec<String>);
 }
 
 /// The parts that differ between two copies of a state, as a JSON object of each one's name and new value.
@@ -307,6 +310,13 @@ macro_rules! parts {
                 )*
                 let _ = previous;
             }
+
+            fn part_names(&self, prefix: &str, out: &mut ::std::vec::Vec<::std::string::String>) {
+                $( out.push(format!("{prefix}{}", stringify!($plain))); )*
+                $( out.push(format!("{prefix}{}", stringify!($slice))); )*
+                $( out.push(format!("{prefix}{}", stringify!($identity))); )*
+                $( $crate::slice::Parts::part_names(&self.$nested, &format!("{prefix}{}.", stringify!($nested)), out); )*
+            }
         }
     };
 }
@@ -445,6 +455,29 @@ mod tests {
         assert!(apply_changes(&mut state.clone(), r#"{"lines":["one""#).is_err());
         assert!(apply_changes(&mut state.clone(), r#"{"open":true} {"open":false}"#).is_err());
         assert!(apply_changes(&mut state.clone(), r#"[1,2]"#).is_err());
+    }
+
+    #[test]
+    fn every_part_has_a_name_and_travels_under_it() {
+        let mut names = Vec::new();
+        busy().part_names("", &mut names);
+        assert_eq!(names, ["open", "note", "lines", "settings", "job", "world.speed", "world.people"]);
+        // Each one, changed alone from a state that has none of them, is the one part written and is read back.
+        let (plain, busy) = (State::default(), serde_json::to_value(busy()).unwrap());
+        for name in &names {
+            let value = name.split('.').fold(&busy, |at, key| &at[key]);
+            if name == "note" {
+                continue; // The fixture's note is a text; the default is none: changed below.
+            }
+            let mut one = plain.clone();
+            apply_changes(&mut one, &serde_json::json!({ name.as_str(): value }).to_string()).unwrap();
+            let (json, parts) = changes(&one, &plain);
+            assert_eq!(parts, 1, "{name}: {json}");
+            assert_eq!(serde_json::from_str::<serde_json::Value>(&json).unwrap()[name.as_str()], *value, "{name}");
+        }
+        let mut one = plain.clone();
+        one.note = Some("said".into());
+        assert_eq!(changes(&one, &plain), (r#"{"note":"said"}"#.into(), 1));
     }
 
     #[test]

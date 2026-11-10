@@ -450,6 +450,8 @@ impl Drop for State {
 pub(super) const MIXER: &str = "orbiters.mixer";
 /// Mixer's presentation on the website.
 pub(super) const MIXER_PAGE: &str = "https://orbiters.cc/mixer";
+/// How long the page's first frame waits for the pictures kept from the last window, at most.
+const PRELOAD_WAIT: Duration = Duration::from_millis(250);
 
 pub(super) fn server(cx: &Cx) -> Server {
     if cx.snap.account.development {
@@ -932,10 +934,12 @@ impl State {
     fn poll_thumbs(&mut self, ctx: &egui::Context) {
         if let Some(rx) = &self.thumb_preload {
             // The page's first visit waits for them (read on every core: a few tens of milliseconds) rather than
-            // drawing empty covers that fill in after.
+            // drawing empty covers that fill in after. Not for long: this is the interface's thread, and on a cold or
+            // busy disk the window stood frozen for up to three seconds at the click on the page. Past the wait the
+            // covers come as any late picture does.
             let kept = if self.started && !self.thumb_preload_waited {
                 self.thumb_preload_waited = true;
-                rx.recv_timeout(Duration::from_secs(3)).map_err(|e| match e {
+                rx.recv_timeout(PRELOAD_WAIT).map_err(|e| match e {
                     mpsc::RecvTimeoutError::Timeout => mpsc::TryRecvError::Empty,
                     mpsc::RecvTimeoutError::Disconnected => mpsc::TryRecvError::Disconnected,
                 })

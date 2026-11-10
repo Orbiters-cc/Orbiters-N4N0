@@ -344,9 +344,15 @@ fn grid(ui: &mut Ui, cx: &mut Cx, state: &mut State, page: Rect, shown: f32, int
             .unwrap_or_default();
         state.shown = Some((q.clone(), shown));
     }
-    let filtered: Vec<Arc<VisitedWorld>> = match (&state.shown, &state.worlds) {
-        (Some((_, shown)), Some(l)) => shown.iter().filter_map(|&i| l.get(i).cloned()).collect(),
-        _ => Vec::new(),
+    // The worlds the search shows are read by their place in the list: only the cards in view take a reference, where
+    // every world of the list was copied into a new list at each frame.
+    let shown_count = match (&state.shown, &state.worlds) {
+        (Some((_, shown)), Some(_)) => shown.len(),
+        _ => 0,
+    };
+    let shown_world = |state: &State, i: usize| -> Option<Arc<VisitedWorld>> {
+        let (_, shown) = state.shown.as_ref()?;
+        state.worlds.as_ref()?.get(*shown.get(i)?).cloned()
     };
     let mut clicked = None;
     let mut share_clicked: Option<(Vec<PathBuf>, bool, Rect)> = None;
@@ -358,14 +364,14 @@ fn grid(ui: &mut Ui, cx: &mut Cx, state: &mut State, page: Rect, shown: f32, int
         egui::Frame::NONE.inner_margin(egui::Margin { left: 32, right: 32, top: 0, bottom: 32 }).show(ui, |ui| {
             ui.add_space(grid_top - page.top());
             let w = ui.available_width();
-            if state.worlds.is_some() && filtered.is_empty() {
+            if state.worlds.is_some() && shown_count == 0 {
                 empty_state(ui, cx, !q.is_empty(), below_head.height() * 0.6);
                 return;
             }
             let cols = (((w + 16.0) / (270.0 + 16.0)).floor() as usize).max(1);
             let card_w = (w - 16.0 * (cols - 1) as f32) / cols as f32;
             let card_h = card_w * 9.0 / 16.0 + 146.0;
-            let count = if state.worlds.is_none() { 6 } else { filtered.len() };
+            let count = if state.worlds.is_none() { 6 } else { shown_count };
             let rows = count.div_ceil(cols);
             let (area, _) = ui.allocate_exact_size(vec2(w, rows as f32 * (card_h + 16.0) - 16.0), Sense::hover());
             for i in 0..count {
@@ -376,10 +382,11 @@ fn grid(ui: &mut Ui, cx: &mut Cx, state: &mut State, page: Rect, shown: f32, int
                 if !ui.is_rect_visible(r) {
                     continue;
                 }
-                let Some(world) = filtered.get(i) else {
+                let Some(world) = shown_world(state, i) else {
                     shimmer_card(ui, r);
                     continue;
                 };
+                let world = &world;
                 let info = state.infos.as_mut().and_then(|i| i.get(&world.id));
                 let tex = cover(world, info.as_ref(), THUMB_WIDTH).and_then(|p| state.pictures.as_mut()?.get(&ctx, &p));
                 let open_here = state.open.as_ref().is_some_and(|o| o.id == world.id);

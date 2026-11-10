@@ -450,7 +450,9 @@ impl Infos {
 
     /// The world's page once fetched; asks for it the first time.
     pub fn get(&mut self, id: &str) -> Option<Info> {
-        if self.asked.insert(id.to_string()) {
+        // Called for every card in view at every frame: the id is copied only the first time.
+        if !self.asked.contains(id) {
+            self.asked.insert(id.to_string());
             let _ = self.tx.send(id.to_string());
         }
         self.known.lock().unwrap().get(id).cloned()

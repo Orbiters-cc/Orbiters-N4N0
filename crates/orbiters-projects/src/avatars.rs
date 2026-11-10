@@ -710,6 +710,201 @@ mod read_completeness_tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
 
+    /// What reading one real file both ways came to.
+    #[derive(Default)]
+    struct RealFile {
+        bytes: u64,
+        /// Its longest line, bytes, and its longest line among those some reader looks at.
+        longest_line: usize,
+        longest_read_line: usize,
+        /// Documents of the kinds that are read, uploaded avatars and worlds found in it, prefab instances whose
+        /// name or blueprint ID is overridden, objects named by their prefab instance (a variant's root), a My World
+        /// thumbnail.
+        documents: usize,
+        uploaded: usize,
+        overridden: usize,
+        named_by_instance: usize,
+        thumbnail: bool,
+        crlf: bool,
+        /// Unity's text, other text, or not text.
+        kind: &'static str,
+        /// How the two readings differ, if they do.
+        differs: Option<String>,
+        /// Not opened or not read (another program holds it, or it went away).
+        skipped: Option<String>,
+    }
+
+    /// Reads one real scene or prefab a line at a time ([`read_file`]) and whole, as it used to be read, and compares
+    /// everything discovery takes from it.
+    fn compare_real_file(path: &Path) -> RealFile {
+        let mut out = RealFile::default();
+        let bytes = match std::fs::read(path) {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                out.skipped = Some(e.to_string());
+                return out;
+            }
+        };
+        out.bytes = bytes.len() as u64;
+        let read = match read_file(path) {
+            Ok(read) => read,
+            Err(e) => {
+                out.skipped = Some(e.to_string());
+                return out;
+            }
+        };
+        // As it was read: the whole file as text, or not at all.
+        let text = match String::from_utf8(bytes) {
+            Ok(text) => text,
+            Err(_) => {
+                out.kind = "not text";
+                // Read whole, a file that is not text failed the read, and the scan was incomplete.
+                match read {
+                    ReadFile::Binary => {}
+                    ReadFile::Yaml(..) => out.differs = Some("Unity's text with bytes that are no text: could not be read whole (the scan stayed incomplete), read now".into()),
+                    ReadFile::OtherText => out.differs = Some("not text as a whole, taken for other text from its first line".into()),
+                }
+                return out;
+            }
+        };
+        out.crlf = text.contains("\r\n");
+        out.longest_line = text.lines().map(str::len).max().unwrap_or(0);
+        if !text.starts_with("%YAML") {
+            out.kind = "other text";
+            match read {
+                ReadFile::OtherText => {}
+                ReadFile::Binary => out.differs = Some("text that is not Unity's, taken for a file that is not text (a zero byte in its first line)".into()),
+                ReadFile::Yaml(..) => out.differs = Some("text that is not Unity's, read as Unity's".into()),
+            }
+            return out;
+        }
+        out.kind = "Unity's text";
+        let ReadFile::Yaml(model, blueprint) = read else {
+            out.differs = Some("Unity's text, not read as it".into());
+            return out;
+        };
+        let all: Vec<Doc> = whole(&text).into_iter().filter(|d| matches!(d.kind, 1 | 4 | 224 | 114 | 1001)).collect();
+        out.documents = all.len();
+        out.longest_read_line = model.docs.iter().flat_map(|d| &d.lines).map(String::len).max().unwrap_or(0);
+        out.overridden = all.iter().filter(|d| d.kind == 1001 && (!overrides(d, "m_Name").is_empty() || !overrides(d, "blueprintId").is_empty())).count();
+        let mut differs = Vec::new();
+        if model.docs.iter().map(|d| (&d.id, d.kind)).ne(all.iter().map(|d| (&d.id, d.kind))) {
+            differs.push(format!("{} documents kept of {}", model.docs.len(), all.len()));
+        } else {
+            for (kept, all) in model.docs.iter().zip(&all) {
+                if read_of(kept) != read_of(all) {
+                    differs.push(format!("document {} of kind {}: {:?} kept, {:?} whole", all.id, all.kind, read_of(kept), read_of(all)));
+                    break;
+                }
+            }
+        }
+        if blueprint != text.contains("blueprintId") {
+            differs.push(format!("blueprintId written in it: {blueprint} a line at a time, {} whole", !blueprint));
+        }
+        let of_all = Model::of(all);
+        out.named_by_instance = of_all.docs.iter().filter(|d| d.kind == 1 && value(d, "m_Name").is_none() && of_all.names.contains_key(&d.id)).count();
+        if model.names != of_all.names {
+            differs.push("the objects' names".into());
+        }
+        if model.transforms != of_all.transforms {
+            differs.push("the objects' parents".into());
+        }
+        let (found, found_whole) = (model.direct("scene"), of_all.direct("scene"));
+        if found != found_whole {
+            differs.push(format!("uploaded avatars and worlds: {found:?} a line at a time, {found_whole:?} whole"));
+        }
+        if model.world_thumbnail() != of_all.world_thumbnail() {
+            differs.push("the world's thumbnail".into());
+        }
+        out.uploaded = found_whole.len();
+        out.thumbnail = of_all.world_thumbnail().is_some();
+        out.differs = (!differs.is_empty()).then(|| differs.join("; "));
+        out
+    }
+
+    /// Lab: the line-at-a-time reader held against the whole-file reading on real Unity files. Every `.unity` and
+    /// `.prefab` under `ORBITERS_UNITY_FOLDER` (a folder of projects, or one project), outside `Library`, `Temp`, `Logs`
+    /// and `obj`, is read both ways, and everything discovery takes from it compared: per document what each reader
+    /// returns, then the names, parents, uploaded avatars and worlds with their blueprint IDs, and the world's
+    /// thumbnail. Read-only: nothing is written, and a file another program holds is passed over and counted. Fails
+    /// when a file reads differently, after saying which and how.
+    /// `ORBITERS_UNITY_FOLDER=<folder> cargo test --release -p orbiters-projects --lib -- --ignored --nocapture real_scenes_and_prefabs`.
+    #[test]
+    #[ignore]
+    fn real_scenes_and_prefabs_read_as_the_whole_of_them() {
+        let Some(folder) = std::env::var_os("ORBITERS_UNITY_FOLDER").map(PathBuf::from) else {
+            println!("ORBITERS_UNITY_FOLDER names no folder: nothing read");
+            return;
+        };
+        let start = std::time::Instant::now();
+        let files: Vec<PathBuf> = walkdir::WalkDir::new(&folder)
+            .follow_links(false)
+            .into_iter()
+            .filter_entry(|e| !(e.file_type().is_dir() && ["library", "temp", "logs", "obj"].contains(&e.file_name().to_string_lossy().to_ascii_lowercase().as_str())))
+            .filter_map(Result::ok)
+            .filter(|e| e.file_type().is_file() && e.path().extension().is_some_and(|x| x == "unity" || x == "prefab"))
+            .map(|e| e.into_path())
+            .collect();
+        println!("{} scenes and prefabs under {} (listed in {:.0} s)", files.len(), folder.display(), start.elapsed().as_secs_f32());
+        let next = std::sync::atomic::AtomicUsize::new(0);
+        let results = std::sync::Mutex::new(Vec::with_capacity(files.len()));
+        std::thread::scope(|scope| {
+            for _ in 0..6 {
+                scope.spawn(|| loop {
+                    let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    let Some(path) = files.get(i) else { break };
+                    let result = compare_real_file(path);
+                    results.lock().unwrap().push((i, result));
+                });
+            }
+        });
+        let mut results = results.into_inner().unwrap();
+        results.sort_by_key(|(i, _)| *i);
+        let of = |i: &usize| files[*i].strip_prefix(&folder).unwrap_or(&files[*i]).display().to_string();
+        let read: Vec<&(usize, RealFile)> = results.iter().filter(|(_, r)| r.skipped.is_none()).collect();
+        let count = |kind: &str| read.iter().filter(|(_, r)| r.kind == kind).count();
+        let sum = |f: fn(&RealFile) -> usize| read.iter().map(|(_, r)| f(r)).sum::<usize>();
+        println!("read both ways: {} files, {} MB, in {:.0} s", read.len(), read.iter().map(|(_, r)| r.bytes).sum::<u64>() >> 20, start.elapsed().as_secs_f32());
+        println!("  Unity's text {}, other text {}, not text {}; with Windows line ends {}", count("Unity's text"), count("other text"), count("not text"), read.iter().filter(|(_, r)| r.crlf).count());
+        println!(
+            "  documents of the kinds read {}, uploaded avatars and worlds {}, prefab instances with a name or blueprint ID overridden {}, objects named by their prefab instance {}, My World thumbnails {}",
+            sum(|r| r.documents),
+            sum(|r| r.uploaded),
+            sum(|r| r.overridden),
+            sum(|r| r.named_by_instance),
+            read.iter().filter(|(_, r)| r.thumbnail).count()
+        );
+        if let Some((i, r)) = read.iter().max_by_key(|(_, r)| r.bytes) {
+            println!("  largest file: {} MB, {}", r.bytes >> 20, of(i));
+        }
+        if let Some((i, r)) = read.iter().max_by_key(|(_, r)| r.longest_line) {
+            println!("  longest line: {} bytes, {} ({} files have a line longer than the {LINE_HEAD} bytes looked at)", r.longest_line, of(i), read.iter().filter(|(_, r)| r.longest_line > LINE_HEAD).count());
+        }
+        if let Some((i, r)) = read.iter().max_by_key(|(_, r)| r.longest_read_line) {
+            println!("  longest line that is read: {} bytes, {}", r.longest_read_line, of(i));
+        }
+        // By project: the folder's own subfolders.
+        let mut projects: std::collections::BTreeMap<String, (usize, usize)> = Default::default();
+        for (i, r) in &read {
+            let project = files[*i].strip_prefix(&folder).ok().and_then(|p| p.components().next()).map(|c| c.as_os_str().to_string_lossy().into_owned()).unwrap_or_default();
+            let entry = projects.entry(project).or_default();
+            entry.0 += 1;
+            entry.1 += r.uploaded;
+        }
+        println!("  {} projects: {}", projects.len(), projects.iter().map(|(name, (files, uploaded))| format!("{name} ({files} files, {uploaded} uploaded)")).collect::<Vec<_>>().join(", "));
+        let skipped: Vec<&(usize, RealFile)> = results.iter().filter(|(_, r)| r.skipped.is_some()).collect();
+        println!("passed over (held by another program, or gone): {}", skipped.len());
+        for (i, r) in skipped.iter().take(20) {
+            println!("  {}: {}", of(i), r.skipped.as_deref().unwrap_or_default());
+        }
+        let differing: Vec<&&(usize, RealFile)> = read.iter().filter(|(_, r)| r.differs.is_some()).collect();
+        println!("read differently: {}", differing.len());
+        for (i, r) in differing.iter().take(100) {
+            println!("  {} ({} bytes): {}", of(i), r.bytes, r.differs.as_deref().unwrap_or_default());
+        }
+        assert!(differing.is_empty(), "{} of {} real files read differently a line at a time", differing.len(), read.len());
+    }
+
     /// The memory this process holds now, bytes.
     fn memory_now(system: &mut sysinfo::System) -> u64 {
         use sysinfo::{ProcessRefreshKind, ProcessesToUpdate};

@@ -41,8 +41,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-/// The largest scene or prefab file read as text: a preview's build refuses a larger one ([`Limits::max_yaml_bytes`]),
-/// and so does the search for a project's uploaded avatars and worlds (crate::avatars).
+/// The largest scene or prefab file a preview's build reads as text ([`Limits::max_yaml_bytes`]): it holds the whole
+/// file and every object of it. The search for a project's uploaded avatars and worlds has no such limit: it reads a
+/// file of any size a line at a time and keeps a few lines of it (crate::avatars).
 pub const MAX_YAML_BYTES: u64 = 256 << 20;
 
 /// How far a build may go before it gives up with a reason.

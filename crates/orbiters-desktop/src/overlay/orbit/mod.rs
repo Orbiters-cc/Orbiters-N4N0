@@ -174,7 +174,7 @@ impl Panel {
         self.pictures.clear();
     }
 
-    /// What it holds in memory, in bytes: its two pictures, its shape, and its interface's font atlas (once in the interface, once in what paints it).
+    /// Accounted pixel storage, in bytes: its two pictures, shape and font atlas copies. This estimate excludes egui bookkeeping and non-font textures; it is not process memory.
     fn bytes(&self) -> usize {
         self.px[0] as usize * self.px[1] as usize * 8 + self.mask.as_ref().map_or(0, Vec::len) + self.canvas.atlas_bytes()
     }
@@ -1137,10 +1137,10 @@ impl Panels {
         self.hold_at_most(RESTS_HOLD);
     }
 
-    /// Lets go of the parts kept longest until those left hold `bytes` at most; the one kept last stays whatever it holds.
+    /// Lets go of the parts kept longest until the accounted storage is at most `bytes`, including when the newest part alone exceeds the budget.
     fn hold_at_most(&mut self, bytes: usize) {
         let mut held: usize = self.rested.iter().map(|r| r.panel.bytes()).sum();
-        while held > bytes && self.rested.len() > 1 {
+        while held > bytes && !self.rested.is_empty() {
             // In the order they were kept: the first is the one kept longest.
             held -= self.rested.remove(0).panel.bytes();
         }

@@ -746,3 +746,16 @@ fn the_hole_is_clear_in_what_is_submitted() {
         assert!(page.iter().chain(&back).all(|a| *a == Some(0)), "later, retro {retro} sliding {sliding}: {page:?} {back:?}");
     }
 }
+
+/// A cache budget smaller than its newest part must evict that part too.
+#[test]
+fn a_resting_part_larger_than_the_budget_is_dropped() {
+    let mut person = Person::new();
+    let panel = super::Panel::new(zones::in_units(Zone::WingWorlds), 2.0, 0, false);
+    let bytes = panel.bytes();
+    assert!(bytes > 0);
+    person.panels.rest(panel);
+    person.panels.hold_at_most(bytes - 1);
+    assert_eq!(person.panels.resting(), (0, 0));
+}
+

@@ -185,12 +185,20 @@ impl Profile {
     /// the stable release. Asked before anything is built, and again where the build is made.
     pub fn for_version(self, version: &str) -> anyhow::Result<Self> {
         anyhow::ensure!(
-            self == Profile::Stable || version.contains("-dev."),
+            self == Profile::Stable || is_development(version),
             "{version} is not a development version: --dev compiles the programs as development builds are, and a stable \
              version's setup is only ever made with the full profile (cargo xtask bump --dev first, or leave --dev out)"
         );
         Ok(self)
     }
+}
+
+/// Whether `version` is a development build's: a version whose pre-release part is `dev.<number>`, as
+/// [`next_dev_version`] writes it (`0.3.6-dev.2`). Read from the parsed version, never from its text: `1.0.0+build-dev.1`
+/// holds `-dev.` in its build metadata and is the stable 1.0.0, and looking for the text let it be built, and released,
+/// as a development build.
+pub fn is_development(version: &str) -> bool {
+    semver::Version::parse(version).is_ok_and(|v| v.pre.as_str().strip_prefix("dev.").is_some_and(|n| n.parse::<u64>().is_ok()))
 }
 
 /// The repository's root (this crate's parent).
@@ -378,7 +386,7 @@ fn bump(version: &str) -> anyhow::Result<()> {
     lines[line] = format!("version = \"{version}\"");
     std::fs::write(&path, lines.join("\n") + "\n")?;
     run(cargo().args(["update", "--workspace", "--offline"]))?;
-    if version.contains("-dev.") {
+    if is_development(version) {
         println!("Version {version}. Commit Cargo.toml and Cargo.lock, then: cargo xtask release --dev");
     } else {
         println!("Version {version}. Commit Cargo.toml and Cargo.lock, push, then: cargo xtask release");
@@ -442,7 +450,7 @@ fn next_dev_version(current: &str) -> anyhow::Result<String> {
 /// development environment find it within two minutes, then pushed, tagged and made a GitHub pre-release.
 fn release_dev(config: &Config, channel: &str, notes: String, allow_dirty: bool) -> anyhow::Result<()> {
     let version = workspace_version()?;
-    anyhow::ensure!(version.contains("-dev."), "{version} is not a development version: cargo xtask bump --dev, commit, then release --dev");
+    anyhow::ensure!(is_development(&version), "{version} is not a development version: cargo xtask bump --dev, commit, then release --dev");
     if !allow_dirty {
         let changes = git(&["status", "--porcelain", "--untracked-files=no"])?;
         anyhow::ensure!(changes.is_empty(), "changes are not committed (--allow-dirty to build them anyway):\n{changes}");
@@ -514,7 +522,9 @@ mod tests {
     #[test]
     fn a_stable_version_is_never_built_as_a_development_build() {
         let args = |list: &[&str]| list.iter().map(|a| a.to_string()).collect::<Vec<_>>();
-        for stable in ["0.3.5", "1.0.0", "0.4.0-beta.1"] {
+        // Stable versions, another pre-release, and stable versions whose build metadata or pre-release only looks like
+        // a development build's.
+        for stable in ["0.3.5", "1.0.0", "0.4.0-beta.1", "1.0.0+build-dev.1", "1.0.0+x-dev.2", "0.3.5-dev.x", "0.3.5-rc-dev.1", "0.3.5-dev"] {
             let version = || Ok(stable.to_string());
             for command_line in [&["dist", "--dev"][..], &["dist", "--dev", "--unsigned"], &["dist", "--unsigned", "--channel", "stable", "--dev"], &["dist", "--programs", "elsewhere", "--dev"]] {
                 let refused = command(&args(command_line), &version).expect_err("built a stable version as a development build");
@@ -526,10 +536,14 @@ mod tests {
         }
         // The version is asked for the refusal alone: a failure to read it is the command's failure, not a build.
         assert!(command(&args(&["dist", "--dev"]), &|| anyhow::bail!("no Cargo.toml")).is_err());
-        for development in ["0.3.6-dev.1", "0.3.5-dev.32"] {
+        for development in ["0.3.6-dev.1", "0.3.5-dev.32", "0.3.5-dev.33", "0.3.5-dev.33+built.today"] {
+            assert!(is_development(development), "{development}");
             assert_eq!(Profile::Dev.for_version(development).unwrap(), Profile::Dev);
             assert_eq!(Profile::Stable.for_version(development).unwrap(), Profile::Stable);
         }
+        // What `bump --dev` writes is what the guards take.
+        assert!(is_development(&next_dev_version("0.3.5").unwrap()) && is_development(&next_dev_version("0.3.5-dev.33").unwrap()));
+        assert!(!is_development("not a version") && !is_development("1.0.0+build-dev.1"));
     }
 
     #[test]

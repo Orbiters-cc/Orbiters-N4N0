@@ -190,7 +190,7 @@ pub fn github(version: &str, notes: &str, unsigned: bool) -> anyhow::Result<()> 
     } else {
         run(Command::new("gh")
             .args(["release", "create", &tag, "--repo", GITHUB_REPO, "--verify-tag", "--title", &format!("Orbiters - N4N0 {version}")])
-            .args(version.contains("-dev.").then_some("--prerelease"))
+            .args(crate::is_development(version).then_some("--prerelease"))
             .arg("--notes-file")
             .arg(&notes_file)
             .args(&assets))?;

@@ -17,7 +17,7 @@
 //! asked that the service never answers (what was asked there once kept the window drawing).
 //!
 //! `orbiters-desktop --idle-frames --local-revision` times instead what Photos & captures' watch does every fifteen
-//! seconds on its thread (`controller::shares::LocalRevision`), on this computer's own library, which it only reads.
+//! seconds on its thread (`controller::shares::LocalRevision`), on its private fixture library, which it only reads.
 
 use crate::app::App;
 use crate::backend::{Ctl, Local};
@@ -104,8 +104,6 @@ fn local_revision() -> anyhow::Result<()> {
 }
 
 pub fn run(args: &[String]) -> anyhow::Result<()> {
-    let scratch = crate::link_smoke::Scratch::new("orbiters-idle-frames", false)?;
-    crate::link_smoke::sandbox(&scratch.path)?;
     if args.first().map(String::as_str) == Some("--local-revision") {
         return local_revision();
     }

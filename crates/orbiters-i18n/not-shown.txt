@@ -21,3 +21,5 @@ errors-only crates/orbiters-reconstruct
 crates/orbiters-n4n0-mobile
 # The FPS booster without its interface: logs, a journal and a test harness; its words are in orbiters-desktop/src/booster.rs.
 crates/orbiters-booster
+
+crates/orbiters-desktop/src/harness.rs

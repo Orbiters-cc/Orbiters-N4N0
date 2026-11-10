@@ -652,10 +652,9 @@ fn check_buffers() -> [Vec<u8>; 2] {
 /// the file system write out what the cache still holds of it, and every read comes from the disk. Read back through
 /// the cache, as this did, a copy is compared with the very memory it was written from a moment earlier: a write that
 /// later failed on its way to a full or failing disk passed the check, and the original was deleted after it. A disk
-/// or driver that refuses such an open gets the file flushed first (`FlushFileBuffers` reports a write that failed)
-/// and read through the cache; so does every other system, where flushing costs little. Flushing each file on Windows
-/// would do too, but asks the disk to empty its own cache each time: milliseconds a file, over a Library's hundred
-/// thousand.
+/// or driver that refuses such an open gets the file flushed first ([`open_flushed`]) and read through the cache; so
+/// does every other system, where flushing costs little. Flushing each file on Windows would do too, but asks the
+/// disk to empty its own cache each time: milliseconds a file, over a Library's hundred thousand.
 #[cfg(any(windows, unix))]
 fn open_written(path: &Path) -> std::io::Result<(std::fs::File, bool)> {
     #[cfg(windows)]
@@ -666,9 +665,23 @@ fn open_written(path: &Path) -> std::io::Result<(std::fs::File, bool)> {
             return Ok((file, true));
         }
     }
+    Ok((open_flushed(path)?, false))
+}
+
+/// Opens a file just written once the system has written it out: the flush reports a write that failed
+/// (`FlushFileBuffers`, `fsync`), and the reads that follow may come from the cache.
+#[cfg(any(windows, unix))]
+fn open_flushed(path: &Path) -> std::io::Result<std::fs::File> {
     // Write access only to flush it: a read-only handle cannot on Windows.
     std::fs::OpenOptions::new().write(true).open(path)?.sync_all()?;
-    Ok((std::fs::File::open(path)?, false))
+    std::fs::File::open(path)
+}
+
+/// Whether a read past the cache was refused for its shape (Windows' ERROR_INVALID_PARAMETER): the disk's sectors are
+/// larger than [`CHECK_ALIGN`], so neither the memory's start nor the lengths fit them.
+#[cfg(any(windows, unix))]
+fn refused_for_its_shape(error: &std::io::Error) -> bool {
+    cfg!(windows) && error.raw_os_error() == Some(87)
 }
 
 /// Copies one file and reads it back from the disk ([`open_written`]). `false` when cancelled, partway through it if it
@@ -849,15 +862,26 @@ fn same_bytes(a: &Path, b: &Path, left: &mut [u8], right: &mut [u8], mut on_chun
         return Ok(Some(false));
     }
     let mut a = std::fs::File::open(a)?;
-    let (mut b, from_disk) = open_written(b)?;
+    let written = b;
+    let (mut b, mut from_disk) = open_written(written)?;
     let left = &mut left[..CHECK_CHUNK];
     // Past the cache a read takes memory that starts on a sector's boundary and a whole number of sectors.
     let start = right.as_ptr().align_offset(CHECK_ALIGN);
     let right = &mut right[start..start + CHECK_CHUNK];
+    let mut compared = false;
     loop {
         // Whole chunks of both, so that only the last of each is short: the one that meets the file's end.
         let n = read_up_to(&mut a, left, false)?;
-        let m = read_up_to(&mut b, right, from_disk)?;
+        let m = match read_up_to(&mut b, right, from_disk) {
+            // A disk of larger sectors refuses the first read past the cache: flushed and through the cache instead.
+            Err(e) if from_disk && !compared && refused_for_its_shape(&e) => {
+                b = open_flushed(written)?;
+                from_disk = false;
+                read_up_to(&mut b, right, false)?
+            }
+            m => m?,
+        };
+        compared = true;
         if n != m || left[..n] != right[..n] {
             return Ok(Some(false));
         }
@@ -1458,6 +1482,15 @@ mod tests {
                 assert_eq!(same_bytes(&a, &b, &mut left, &mut right, |_| false).unwrap(), None);
             }
         }
+        // Where a read past the cache is refused, the copy is flushed and read through the cache: the same bytes.
+        let bytes: Vec<u8> = (0..CHECK_CHUNK + 77).map(|i| (i >> 3) as u8).collect();
+        std::fs::write(&b, &bytes).unwrap();
+        let mut flushed = open_flushed(&b).unwrap();
+        let mut back = vec![0u8; bytes.len() + 10];
+        assert_eq!(read_up_to(&mut flushed, &mut back, false).unwrap(), bytes.len());
+        assert!(back[..bytes.len()] == bytes[..]);
+        assert_eq!(refused_for_its_shape(&std::io::Error::from_raw_os_error(87)), cfg!(windows));
+        assert!(!refused_for_its_shape(&std::io::Error::from_raw_os_error(5)));
     }
 
     #[cfg(any(windows, unix))]

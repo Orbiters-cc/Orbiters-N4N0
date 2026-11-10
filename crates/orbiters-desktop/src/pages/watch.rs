@@ -81,10 +81,14 @@ struct Inner<T> {
     ended: bool,
     /// It ended on a panic of its look.
     panicked: bool,
+    /// A look of this thread came back (whether or not the page has had what it saw).
+    looked: bool,
 }
 
-/// A look that panics is started again at the next frame drawn, so many times in a row; then the watch is given up
-/// until the page asks for another key, with a line in the log, not started and lost again at every frame.
+/// A look that panics is started again at the next frame drawn, so many times in a row; then the watch is given up,
+/// with a line in the log, not started and lost again at every frame. In a row: a thread that looked before it
+/// panicked starts the count again, whether the page had taken what it saw or not. Given up, a watch stays so until
+/// the page asks for another key or stops it ([`Watch::stop`]); leaving the page and coming back does not try again.
 const PANICS_MOST: u8 = 3;
 
 struct Shared<T> {
@@ -163,7 +167,7 @@ pub struct Watch<K, T> {
     changes: u64,
     /// The change the page took last ([`Watch::keep`]).
     taken: u64,
-    /// Threads in a row that ended on a panic of their look, with no look given to the page since.
+    /// Threads in a row that ended on a panic of their first look.
     panics: u8,
     /// Holds the next thread started where it decides to end (tests).
     #[cfg(test)]
@@ -185,13 +189,20 @@ impl<K, T> Default for Watch<K, T> {
 
 impl<K, T> Drop for Watch<K, T> {
     fn drop(&mut self) {
-        self.stop();
+        self.halt();
     }
 }
 
 impl<K, T> Watch<K, T> {
-    /// Ends the looks (the next [`Watch::keep`] starts them again, and gives the page its first look as a new one).
+    /// Ends the looks (the next [`Watch::keep`] starts them again, and gives the page its first look as a new one). A
+    /// watch given up after its look kept panicking is tried again too: the page asks for a fresh start.
     pub fn stop(&mut self) {
+        self.halt();
+        self.panics = 0;
+    }
+
+    /// Ends the thread, the count of its panics kept.
+    fn halt(&mut self) {
         if let Some((_, shared)) = self.running.take() {
             let mut inner = shared.lock();
             self.changes = self.changes.max(inner.changes);
@@ -228,6 +239,12 @@ impl<K: PartialEq + Clone, T: Clone + PartialEq + Send + 'static> Watch<K, T> {
                     return inner.seen.clone();
                 }
                 if std::mem::take(&mut inner.panicked) {
+                    // In a row: not when this thread looked before it panicked. Counted only by what the page had
+                    // taken, a look that worked and then failed before the next frame was drawn (the window busy, or
+                    // not drawn at all) counted as a failure, and three such threads gave up a watch that worked.
+                    if std::mem::take(&mut inner.looked) {
+                        self.panics = 0;
+                    }
                     self.panics += 1;
                     if self.panics == PANICS_MOST {
                         eprintln!("a page's watch is given up: its look panicked {PANICS_MOST} times in a row");
@@ -242,10 +259,10 @@ impl<K: PartialEq + Clone, T: Clone + PartialEq + Send + 'static> Watch<K, T> {
         }
         // Not started, gone with the page or the window, or another key: a new thread, whose first look counts as a
         // change.
-        self.stop();
+        self.halt();
         let window = window(ctx);
         let shared = Arc::new(Shared {
-            inner: Mutex::new(Inner { seen: None, changes: self.changes, kept: frame, now: false, stop: false, ended: false, panicked: false }),
+            inner: Mutex::new(Inner { seen: None, changes: self.changes, kept: frame, now: false, stop: false, ended: false, panicked: false, looked: false }),
             wake: Condvar::new(),
             window: window.clone(),
             #[cfg(test)]
@@ -295,6 +312,7 @@ fn run<T: PartialEq>(shared: Arc<Shared<T>>, ctx: egui::Context, period: Duratio
             return;
         }
         let saw = look();
+        shared.lock().looked = true;
         if shared.leaves(|_| false) {
             return;
         }
@@ -587,6 +605,44 @@ mod tests {
         wait_for("a look by the thread started as the window showed again", || looks.load(Ordering::SeqCst) == 2);
         wait_for("its frame", || ctx.has_requested_repaint());
         assert_eq!(frame(&mut watch), Some(1));
+    }
+
+    /// A look that works, then panics before the page is drawn again, thread after thread: each thread did look, so
+    /// none of these is a failure "in a row", and the watch goes on being started. Counted by what the page had taken,
+    /// the third such thread gave the watch up for good.
+    #[test]
+    fn a_look_that_worked_before_it_panicked_does_not_count_towards_giving_up() {
+        let ctx = egui::Context::default();
+        let looks = Arc::new(AtomicU32::new(0));
+        let mut watch: Watch<(), u32> = Watch::default();
+        let mut t = 0.0;
+        let mut frame = |watch: &mut Watch<(), u32>| {
+            t += 0.01;
+            let mut out = ctx.run_ui(egui::RawInput { time: Some(t), ..Default::default() }, |ui| {
+                watch.keep(ui.ctx(), &(), Duration::from_millis(2), || {
+                    let looks = looks.clone();
+                    let mut calls = 0;
+                    move || {
+                        calls += 1;
+                        assert!(calls < 2, "a second look that fails (expected in this test)");
+                        looks.fetch_add(1, Ordering::SeqCst)
+                    }
+                });
+            });
+            out.textures_delta.clear();
+        };
+        let ended = |watch: &Watch<(), u32>| watch.running.as_ref().is_some_and(|(_, shared)| shared.lock().ended);
+        // No frame is drawn between a thread's look and its panic: the page never takes what it saw.
+        for round in 0..u32::from(PANICS_MOST) * 2 {
+            frame(&mut watch);
+            wait_for("the thread to look, panic and say it ended", || ended(&watch));
+            assert_eq!(looks.load(Ordering::SeqCst), round + 1, "started again, round {round}");
+        }
+        // Stopped by its page, a watch given up is tried again.
+        let mut given_up: Watch<(), u32> = Watch::default();
+        given_up.panics = PANICS_MOST;
+        given_up.stop();
+        assert_eq!(given_up.panics, 0);
     }
 
     #[test]

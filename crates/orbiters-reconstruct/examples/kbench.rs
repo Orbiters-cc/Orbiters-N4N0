@@ -119,9 +119,10 @@ fn main() -> anyhow::Result<()> {
     for (name, (ms, passes)) in p.totals.borrow().iter() {
         println!("  {name:<18} {:>8.3} ms  ({:.1} passes)", ms / n.max(1) as f64, *passes as f64 / n.max(1) as f64);
     }
-    // Gradient checksum of one fixed colour step.
+    // Gradient checksum of one fixed colour step, taken without an Adam step: that is the step that writes the
+    // gradients. With one (as this was) the buffer read here was never written, and every checksum printed was zero.
     let v = &data.views[1];
-    gpu.step(&v.camera, [0.0; 3], Target::Color { rgba: &v.image, scene_pixels: px, weight: 1.0, ssim: 0.2, robust: 0.0 }, Some(zero))?;
+    gpu.step(&v.camera, [0.0; 3], Target::Color { rgba: &v.image, scene_pixels: px, weight: 1.0, ssim: 0.2, robust: 0.0 }, None)?;
     let grads = gpu.read_grads()?;
     let mut sums = [0f64; 5];
     for chunk in grads.chunks(16) {

@@ -25,8 +25,8 @@
 //!
 //! **Taking it out** ([`remove`]): depth samples on the body say nothing from then on (no seeds, no depth targets:
 //! [`DepthView::unknown`](crate::dataset::DepthView)). A keyframe's or a rig face's pixels that show it get alpha 0
-//! ([`is_out`]), which is otherwise unused and survives the aberration's realignment, and the colour steps leave them out
-//! through the loss mask ([`crate::train`]), seeds take no colour from them. What was behind the wearer gets what other
+//! ([`is_out`]), which is otherwise unused and survives the aberration's realignment, and the colour steps leave them out:
+//! their loss reads the alpha off the keyframe it trains on (crate::gpu::Target::Color). Seeds take no colour from them. What was behind the wearer gets what other
 //! frames saw of it. What stays inside the wearer's volume when training ends goes too ([`Volume`]), and so does whatever around
 //! them only their own pixels showed ([`leave_out_unseen`]). What nothing saw (under the feet) stays empty, or takes the floor's
 //! colour around it when the wearer stood on a floor ([`patch_floor`]).
@@ -840,60 +840,13 @@ pub fn remove(data: &mut Dataset, track: &Track) -> Option<(Volume, Stats)> {
     Some((volume, stats))
 }
 
-/// The loss mask of a session the wearer left. The device keeps one mask per image size (crate::gpu::Gpu::set_mask), and here
-/// each view has its own: a step writes its view's before it renders. Writing them costs a pass over a view's pixels and an
-/// upload as large as a keyframe's, so a session nobody left never does either: [`LossMask::new`] sees no pixel left out, and the
-/// run is the same step for step as before.
-pub struct LossMask {
-    active: bool,
-    buffer: Vec<f32>,
-}
-
-impl LossMask {
-    pub fn new(data: &Dataset) -> Self {
-        let any = |views: &[View]| views.par_iter().any(|v| v.image.par_iter().any(|p| is_out(*p)));
-        let active = any(&data.views) || data.faces.as_ref().is_some_and(|f| any(&f.views));
-        Self { active, buffer: Vec::new() }
-    }
-
-    /// Sets the mask for this step's `target` pixels of `width × height`: `base`, less what shows the wearer.
-    pub fn show(&mut self, gpu: &mut crate::gpu::Gpu, width: u32, height: u32, base: &[f32], target: &[u32]) -> anyhow::Result<()> {
-        if !self.active {
-            return Ok(());
-        }
-        self.buffer.clear();
-        self.buffer.extend(base.iter().zip(target).map(|(m, p)| if is_out(*p) { 0.0 } else { *m }));
-        gpu.set_mask(width, height, &self.buffer)
-    }
-
-    /// Puts back the session's masks: what scores and visibility rounds read between the steps.
-    pub fn settle(&mut self, gpu: &mut crate::gpu::Gpu, data: &Dataset) -> anyhow::Result<()> {
-        if !self.active {
-            return Ok(());
-        }
-        gpu.set_mask(data.width, data.height, &data.mask)?;
-        for s in data.faces.iter().flat_map(|f| &f.sizes).filter(|s| (s.width, s.height) != (data.width, data.height)) {
-            gpu.set_mask(s.width, s.height, &s.mask)?;
-        }
-        Ok(())
-    }
-}
-
-/// `mask` less what shows the wearer in `image`, for a score on the CPU.
+/// `mask` less what shows the wearer in `image`, for a score on the CPU (on the device the loss and score kernels read
+/// the same off the keyframe's alpha: crate::gpu::Target::Color).
 pub fn scene<'a>(mask: &'a [f32], image: &[u32]) -> std::borrow::Cow<'a, [f32]> {
     if image.iter().any(|p| is_out(*p)) {
         std::borrow::Cow::Owned(mask.iter().zip(image).map(|(m, p)| if is_out(*p) { 0.0 } else { *m }).collect())
     } else {
         std::borrow::Cow::Borrowed(mask)
-    }
-}
-
-/// Clears from `mask` the pixels of `image` that show the wearer.
-pub fn leave_out_of(mask: &mut [f32], image: &[u32]) {
-    for (m, p) in mask.iter_mut().zip(image) {
-        if is_out(*p) {
-            *m = 0.0;
-        }
     }
 }
 

@@ -199,6 +199,12 @@ pub struct LearningRates {
 pub enum Target<'a> {
     /// Colour loss (1 − ssim)·L1 + ssim·(1 − SSIM) over the scene pixels. With `robust` > 0, pixels inside blobs that
     /// err by more than it (mean absolute error, 0–1) leave this step's loss: what no static scene explains.
+    ///
+    /// A pixel of `rgba` whose alpha is 0 was left out of the keyframe (crate::wearer::is_out: it showed the wearer of
+    /// the capture kit) and trains nothing, as a masked one, here and in [`Gpu::score`]: the loss kernels read it off
+    /// the target they already hold, so a session the wearer left needs no mask of its own per view (it took a pass
+    /// over the keyframe on one core and an upload as large as the keyframe before every colour step). Every other
+    /// pixel has alpha 255: whatever makes a target sets it.
     Color { rgba: &'a [u32], scene_pixels: f32, weight: f32, ssim: f32, robust: f32 },
     Depth { samples: &'a [[f32; 4]], weight: f32 },
     /// No loss (forward only).
@@ -313,7 +319,10 @@ pub struct Relocation {
 struct SplatBuffers {
     cap: usize,
     params: wgpu::Buffer,
-    grads: wgpu::Buffer,
+    /// The parameter gradients of a step without an Adam step (tests and the lab: [`Gpu::read_grads`]), made by the
+    /// first such step. A training run takes none: its Adam step is fused into the projection backward, and 64 bytes
+    /// a Gaussian of the budget stayed allocated for nothing.
+    grads: Option<wgpu::Buffer>,
     m1: wgpu::Buffer,
     m2: wgpu::Buffer,
     proj: wgpu::Buffer,
@@ -323,11 +332,35 @@ struct SplatBuffers {
     stats: wgpu::Buffer,
     /// Each Gaussian's 3D filter variance ([`Gaussians::filter_3d`]).
     filter: wgpu::Buffer,
+    /// What only a viewer's projection reads ([`Gpu::shows_as_a_viewer`]): a training run's own projection never
+    /// does, and holds none (32 bytes a Gaussian of the budget).
+    viewer: Option<ViewerBuffers>,
+}
+
+/// What a viewer's projection reads of each Gaussian beside its parameters (shaders/project.wgsl).
+struct ViewerBuffers {
     /// What the keyframes saw of each ([`Gaussians::seen`], eight floats), for a viewer's [`Confidence`] and
     /// [`FarField`].
     seen: wgpu::Buffer,
     /// A viewer's mark of each ([`Gpu::set_marks`]), a byte each, four to a word.
     marks: wgpu::Buffer,
+}
+
+impl ViewerBuffers {
+    fn new(device: &wgpu::Device, cap: usize) -> Self {
+        Self { seen: storage(device, "seen", (cap * 8 * 4) as u64), marks: storage(device, "marks", (cap.div_ceil(4) * 4) as u64) }
+    }
+}
+
+#[cfg(test)]
+impl SplatBuffers {
+    /// The bytes these buffers take on the device.
+    fn bytes(&self) -> u64 {
+        let viewer = self.viewer.as_ref().map_or(0, |v| v.seen.size() + v.marks.size());
+        [&self.params, &self.m1, &self.m2, &self.proj, &self.counts, &self.offsets, &self.grad2d, &self.stats, &self.filter].iter().map(|b| b.size()).sum::<u64>()
+            + self.grads.as_ref().map_or(0, wgpu::Buffer::size)
+            + viewer
+    }
 }
 
 /// Buffers for one image size (its loss mask lives apart, in [`Gpu::masks`], so dropping these never loses it).
@@ -438,7 +471,9 @@ pub struct Gpu {
     pub noise_visible: bool,
     /// A viewer's guards (project.wgsl; [`Gpu::renderer`] sets them): splats fade in over the first 20 cm from the eye,
     /// those holding the eye are left out, none reaches further than 1024 px on screen, and they sort by distance from
-    /// the eye. Training never uses them: what they hide there would never be corrected.
+    /// the eye. Training never uses them: what they hide there would never be corrected. A training device that is to
+    /// show as a viewer (tests, the lab) has them on before its set is uploaded: the upload makes what a viewer's
+    /// projection reads ([`ViewerBuffers`]), which a training run does without.
     pub guards: bool,
     /// With the guards: how the splats the keyframes saw poorly show, and the far field.
     pub confidence: Confidence,
@@ -500,8 +535,11 @@ pub struct Gpu {
     /// nested (shaders/raster_forward_nested.wgsl) instead of `forward`: the same entries, order and outputs.
     pub nested_forward: bool,
     pub(crate) reference_backward: bool,
-    /// Loss masks per image size ([`Gpu::set_mask`]).
-    masks: Vec<((u32, u32), wgpu::Buffer)>,
+    /// Loss masks: each image size's own ([`Gpu::set_mask`]), and those colour steps name ([`Gpu::set_step_mask`]).
+    masks: Vec<(MaskKey, wgpu::Buffer)>,
+    /// The mask the next colour step reads instead of its image size's own: a slot of [`Gpu::set_step_mask`], taken
+    /// by the step.
+    pub step_mask: Option<u32>,
     /// Gaussians the splat buffers make room for at least ([`Gpu::reserve`]).
     reserved: usize,
     /// The steps' small parameter blocks, one buffer per use, rewritten each step.
@@ -515,6 +553,11 @@ pub struct Gpu {
 
 /// A bind group's pipeline and its (binding, buffer) entries.
 type BindKey = (wgpu::ComputePipeline, Vec<(u32, wgpu::Buffer)>);
+
+/// Which loss mask: of images this wide and high, the size's own (no slot) or the one colour steps name by this slot.
+/// Masks used to be kept by size alone, so the mask of a sub-grid phase or of a face tile replaced whatever other mask
+/// had its size: a rig face as large as a phase would have trained through the phase's mask.
+type MaskKey = (Option<u32>, u32, u32);
 
 /// Relocation weights on their way back from the device ([`Gpu::request_relocation_weights`]).
 pub struct PendingWeights {
@@ -944,13 +987,28 @@ impl Gpu {
         }
     }
 
-    /// Graphics memory a training run of `budget` Gaussians takes about, bytes: its per-Gaussian buffers (parameters,
-    /// gradients, Adam moments, projections, sums, statistics) with half again for sort entries, and 256 MB of images
-    /// and sort histograms.
+    /// Graphics memory a training run of `budget` Gaussians takes about, bytes: its per-Gaussian buffers
+    /// ([`Gpu::training_bytes_per_gaussian`]) with half again for sort entries, and 256 MB of images and sort
+    /// histograms.
     pub fn training_memory(&self, budget: usize) -> u64 {
+        (budget * self.training_bytes_per_gaussian() * 3 / 2) as u64 + (256 << 20)
+    }
+
+    /// The bytes a training run's buffers hold per Gaussian of its budget: parameters and the two Adam moments,
+    /// projections, tile counts and offsets, gradient sums, statistics, the 3D filter. 340 with four-byte sums. It
+    /// counted 420 while a run also held the gradients of steps without Adam (64 bytes, which training never takes)
+    /// and what a viewer's projection reads (32 bytes, of which it counted 16): at the three million of a long
+    /// recording the run holds 290 MB less and this estimate is 360 MB lower, room for the budget beside VRChat
+    /// (the worker cuts it to what is free) and for the keyframes on the device.
+    fn training_bytes_per_gaussian(&self) -> usize {
         let sums = self.k.training.as_ref().map_or(4, |t| t.sums.slot_bytes()) as usize;
-        let per = 4 * PACKED * 4 + 16 * 4 + 8 + GRAD2D * sums + 16 + 4 + 32;
-        (budget * per * 3 / 2) as u64 + (256 << 20)
+        3 * PACKED * 4 + 16 * 4 + 2 * 4 + GRAD2D * sums + 8 * 4 + 4
+    }
+
+    /// Whether this device projects as a viewer does (shaders/project.wgsl: the guards, the confidence, the far field,
+    /// the marks): a renderer always, a training device while its guards are on.
+    fn shows_as_a_viewer(&self) -> bool {
+        self.k.training.is_none() || self.guards
     }
 
     /// The gradient sums of a training device.
@@ -1161,6 +1219,7 @@ impl Gpu {
             nested_forward: false,
             reference_backward: false,
             masks: Vec::new(),
+            step_mask: None,
             reserved: 0,
             uniforms: Default::default(),
             binds: Default::default(),
@@ -1304,15 +1363,18 @@ impl Gpu {
                 gpu.splats = Some(gpu.splat_buffers(n));
                 gpu.forget_binds();
             }
+            gpu.ensure_viewer_buffers();
             let s = gpu.splats.as_ref().expect("allocated");
             gpu.queue.write_buffer(&s.params, 0, bytemuck::cast_slice(&state.params));
             gpu.queue.write_buffer(&s.m1, 0, bytemuck::cast_slice(&state.m1));
             gpu.queue.write_buffer(&s.m2, 0, bytemuck::cast_slice(&state.m2));
             gpu.queue.write_buffer(&s.stats, 0, bytemuck::cast_slice(&state.stats));
-            let unknown = Seen::UNKNOWN;
-            let seen = vec![[unknown.weight, unknown.views as f32, unknown.sectors as f32, unknown.rate, unknown.beyond, 0.0, 0.0, 0.0]; n];
-            gpu.queue.write_buffer(&s.seen, 0, bytemuck::cast_slice(&seen));
-            gpu.queue.write_buffer(&s.marks, 0, &vec![0u8; n.div_ceil(4) * 4]);
+            if let Some(v) = &s.viewer {
+                let unknown = Seen::UNKNOWN;
+                let seen = vec![[unknown.weight, unknown.views as f32, unknown.sectors as f32, unknown.rate, unknown.beyond, 0.0, 0.0, 0.0]; n];
+                gpu.queue.write_buffer(&v.seen, 0, bytemuck::cast_slice(&seen));
+                gpu.queue.write_buffer(&v.marks, 0, &vec![0u8; n.div_ceil(4) * 4]);
+            }
             let mut enc = gpu.device.create_command_encoder(&Default::default());
             enc.clear_buffer(&s.grad2d, 0, None);
             enc.clear_buffer(&s.filter, 0, None);
@@ -1357,11 +1419,22 @@ impl Gpu {
     /// them. A quarter of the bytes of one float per Gaussian: 0.75 MB for three million, written again whole with
     /// each change of a selection (a brush stroke's), which costs a frame nothing.
     pub fn set_marks(&mut self, marks: &[u8]) {
-        let Some(s) = self.splats.as_ref() else { return };
+        let Some(v) = self.splats.as_ref().and_then(|s| s.viewer.as_ref()) else { return };
         let n = self.count.min(marks.len());
         let mut words = vec![0u8; self.count.div_ceil(4) * 4];
         words[..n].copy_from_slice(&marks[..n]);
-        self.queue.write_buffer(&s.marks, 0, &words);
+        self.queue.write_buffer(&v.marks, 0, &words);
+    }
+
+    /// Makes what a viewer's projection reads for the set's buffers, on a device that shows as one and has none yet (a
+    /// training device whose guards came on since its buffers were made).
+    fn ensure_viewer_buffers(&mut self) {
+        if !self.shows_as_a_viewer() {
+            return;
+        }
+        if let Some(s) = self.splats.as_mut().filter(|s| s.viewer.is_none()) {
+            s.viewer = Some(ViewerBuffers::new(&self.device, s.cap));
+        }
     }
 
     /// Uploads Gaussians with their Adam moments (packed like the parameters): the same set after relocation. A set
@@ -1388,14 +1461,17 @@ impl Gpu {
             self.splats = Some(self.splat_buffers(n));
             self.forget_binds();
         }
+        self.ensure_viewer_buffers();
         let s = self.splats.as_ref().expect("allocated");
         self.queue.write_buffer(&s.params, 0, bytemuck::cast_slice(&g.pack()));
         let filter: Vec<f32> = (0..n).map(|i| g.filter(i)).collect();
         self.queue.write_buffer(&s.filter, 0, bytemuck::cast_slice(&filter));
-        let seen: Vec<[f32; 8]> = (0..n).map(|i| g.seen(i)).map(|s| [s.weight, s.views as f32, s.sectors as f32, s.rate, s.beyond, 0.0, 0.0, 0.0]).collect();
-        self.queue.write_buffer(&s.seen, 0, bytemuck::cast_slice(&seen));
-        // A new set: nothing marked.
-        self.queue.write_buffer(&s.marks, 0, &vec![0u8; n.div_ceil(4) * 4]);
+        if let Some(v) = &s.viewer {
+            let seen: Vec<[f32; 8]> = (0..n).map(|i| g.seen(i)).map(|s| [s.weight, s.views as f32, s.sectors as f32, s.rate, s.beyond, 0.0, 0.0, 0.0]).collect();
+            self.queue.write_buffer(&v.seen, 0, bytemuck::cast_slice(&seen));
+            // A new set: nothing marked.
+            self.queue.write_buffer(&v.marks, 0, &vec![0u8; n.div_ceil(4) * 4]);
+        }
         if training {
             let mut enc = self.device.create_command_encoder(&Default::default());
             match moments {
@@ -1510,7 +1586,8 @@ impl Gpu {
     }
 
     /// Buffers for at least `n` Gaussians (or the room [`Gpu::reserve`] asked for), else half again. A renderer keeps
-    /// no room to spare (a viewer loads once) and no training buffers.
+    /// no room to spare (a viewer loads once) and no training buffers; a training device none of a viewer's unless
+    /// it shows as one, and no gradients until a step asks for them alone.
     fn splat_buffers(&self, n: usize) -> SplatBuffers {
         let slot_bytes = self.k.training.as_ref().map(|t| t.sums.slot_bytes());
         let cap = match slot_bytes {
@@ -1524,7 +1601,7 @@ impl Gpu {
         SplatBuffers {
             cap,
             params: storage(d, "params", f(cap * PACKED)),
-            grads: storage(d, "grads", t(cap * PACKED)),
+            grads: None,
             m1: storage(d, "moment1", t(cap * PACKED)),
             m2: storage(d, "moment2", t(cap * PACKED)),
             proj: storage(d, "projected", f(cap * 16)),
@@ -1533,8 +1610,7 @@ impl Gpu {
             grad2d: storage(d, "grad2d", slot_bytes.unwrap_or(0) * (cap * GRAD2D) as u64),
             stats: storage(d, "stats", t(cap * 8)),
             filter: storage(d, "3D filter", f(cap)),
-            seen: storage(d, "seen", f(cap * 8)),
-            marks: storage(d, "marks", f(cap.div_ceil(4))),
+            viewer: self.shows_as_a_viewer().then(|| ViewerBuffers::new(d, cap)),
         }
     }
 
@@ -1624,10 +1700,11 @@ impl Gpu {
         Ok(())
     }
 
-    /// The last step's parameter gradients (packed), for tests.
+    /// The parameter gradients (packed) of the last step taken without an Adam step, for tests.
     pub fn read_grads(&self) -> anyhow::Result<Vec<f32>> {
         let s = self.splats.as_ref().with_context(|| tr("nothing uploaded"))?;
-        self.read(&s.grads, self.count * PACKED)
+        let grads = s.grads.as_ref().context("no step without an Adam step left its gradients")?; // i18n: not shown (tests and the lab read gradients: no window does)
+        self.read(grads, self.count * PACKED)
     }
 
     fn ensure_image(&mut self, w: u32, h: u32) {
@@ -1673,12 +1750,24 @@ impl Gpu {
     /// The loss mask (1 scene, 0 strip and band) for images of this size: colour steps, scores and visibility rounds
     /// at that size need one.
     pub fn set_mask(&mut self, w: u32, h: u32, mask: &[f32]) -> anyhow::Result<()> {
+        self.write_mask((None, w, h), mask)
+    }
+
+    /// A loss mask for the colour steps that name `slot` ([`Gpu::step_mask`]) on images of this size, beside that
+    /// size's own, which scores, visibility rounds and every other step go on reading: the sub-grid's phases (written
+    /// once each, where three steps in four used to upload theirs over the last one's) and the tiles over faces.
+    pub fn set_step_mask(&mut self, slot: u32, w: u32, h: u32, mask: &[f32]) -> anyhow::Result<()> {
+        self.write_mask((Some(slot), w, h), mask)
+    }
+
+    fn write_mask(&mut self, key: MaskKey, mask: &[f32]) -> anyhow::Result<()> {
+        let (_, w, h) = key;
         anyhow::ensure!(mask.len() == (w * h) as usize, "{}", tr!("a mask of {pixels} pixels for {width}×{height} images", pixels = mask.len(), width = w, height = h));
-        let buffer = match self.masks.iter().find(|(s, _)| *s == (w, h)) {
+        let buffer = match self.masks.iter().find(|(k, _)| *k == key) {
             Some((_, b)) => b.clone(),
             None => {
                 let b = storage(&self.device, "mask", (w * h) as u64 * 4);
-                self.masks.push(((w, h), b.clone()));
+                self.masks.push((key, b.clone()));
                 b
             }
         };
@@ -1686,9 +1775,9 @@ impl Gpu {
         Ok(())
     }
 
-    /// The loss mask set for images of this size.
-    fn mask_for(&self, w: u32, h: u32) -> anyhow::Result<wgpu::Buffer> {
-        self.masks.iter().find(|(s, _)| *s == (w, h)).map(|(_, b)| b.clone()).with_context(|| tr!("no loss mask was set for {width}×{height} images", width = w, height = h))
+    /// The loss mask set for images of this size: the one a step named by its `slot`, or the size's own.
+    fn mask_for(&self, slot: Option<u32>, w: u32, h: u32) -> anyhow::Result<wgpu::Buffer> {
+        self.masks.iter().find(|(k, _)| *k == (slot, w, h)).map(|(_, b)| b.clone()).with_context(|| tr!("no loss mask was set for {width}×{height} images", width = w, height = h))
     }
 
     fn ensure_sort(&mut self, n: usize) {
@@ -1696,8 +1785,9 @@ impl Gpu {
             return;
         }
         let cap = (n + n / 2).max(1 << 16);
-        // Histograms for 4-bit digits over blocks of 256, or 8-bit digits over blocks of 1024 (sort8.wgsl).
-        let blocks = cap.div_ceil(256).max(cap.div_ceil(1024) * 16);
+        // Histograms of 4-bit digits over blocks of 256 entries (shaders/sort.wgsl): sixteen counters a block. They
+        // were sized four times that, for an 8-bit sort over blocks of 1024 that is gone.
+        let blocks = cap.div_ceil(256);
         let d = &self.device;
         self.sort = Some(SortBuffers {
             cap,
@@ -1895,6 +1985,8 @@ impl Gpu {
     /// What [`Gpu::step`] does, or with `seen` a visibility round (raster_visibility.wgsl) in place of the forward pass,
     /// sorted over its exact count: a round that dropped entries would leave their Gaussians unseen, and fade them.
     fn run(&mut self, cam: &Camera, background: [f32; 3], target: Target<'_>, lr: Option<LearningRates>, seen: Option<&wgpu::Buffer>) -> anyhow::Result<u32> {
+        // The mask this step named, for this step only, whatever becomes of it.
+        let step_mask = self.step_mask.take();
         let n = self.count;
         if n == 0 {
             return Ok(0);
@@ -1905,13 +1997,13 @@ impl Gpu {
         self.check()?;
         anyhow::ensure!(cam.width > 0 && cam.height > 0, "{}", tr!("a view of {width}×{height} pixels", width = cam.width, height = cam.height));
         // A colour target is a keyframe of the camera's size, and like a visibility round it needs the loss mask of
-        // that size (a size whose mask was never set would train on nothing).
+        // that size (a size whose mask was never set would train on nothing); a colour step may name its own.
         let mask = match &target {
             Target::Color { rgba, .. } => {
                 anyhow::ensure!(rgba.len() == (cam.width * cam.height) as usize, "{}", tr!("a keyframe of {pixels} pixels for a {width}×{height} camera", pixels = rgba.len(), width = cam.width, height = cam.height));
-                Some(self.mask_for(cam.width, cam.height)?)
+                Some(self.mask_for(step_mask, cam.width, cam.height)?)
             }
-            _ if seen.is_some() => Some(self.mask_for(cam.width, cam.height)?),
+            _ if seen.is_some() => Some(self.mask_for(None, cam.width, cam.height)?),
             _ => None,
         };
         self.ensure_image(cam.width, cam.height);
@@ -1939,10 +2031,16 @@ impl Gpu {
             _ => 0.0,
         };
         self.queue.write_buffer(&self.frame, 0, bytemuck::bytes_of(&frame));
-        let (params, proj, counts, offsets, filter, seen_buf, marks) = {
+        // A training device's own projection has no viewer's guards, confidence or far field: with them (a viewer on
+        // a training device) it renders as viewers do.
+        let split = !self.shows_as_a_viewer();
+        let (params, proj, counts, offsets, filter, viewer) = {
             let s = self.splats.as_ref().with_context(|| tr("no Gaussians"))?;
-            (s.params.clone(), s.proj.clone(), s.counts.clone(), s.offsets.clone(), s.filter.clone(), s.seen.clone(), s.marks.clone())
+            let viewer = s.viewer.as_ref().map(|v| (v.seen.clone(), v.marks.clone()));
+            (s.params.clone(), s.proj.clone(), s.counts.clone(), s.offsets.clone(), s.filter.clone(), viewer)
         };
+        // An upload makes them on a device that shows as a viewer: only guards switched on after it leave none.
+        anyhow::ensure!(split || viewer.is_some(), "a training device's guards came on after its set was uploaded: upload the set again"); // i18n: not shown (tests and the lab show a training device as a viewer: no window does)
         // A training device sizes the sort from the counts read back for this image size, without waiting: entries
         // past the end are dropped for this step and counted as an overflow when its count arrives, and the buffers
         // grow for the next steps. A viewer goes without waiting only while its sort holds half again the count it last
@@ -1973,9 +2071,6 @@ impl Gpu {
         self.pace_wait(0);
         let mut enc = self.device.create_command_encoder(&Default::default());
         self.section("project");
-        // A training device's own projection has no viewer's guards, confidence or far field: with them (a viewer on
-        // a training device) it renders as viewers do.
-        let split = !self.guards && self.k.training.is_some();
         match self.k.training.as_ref().filter(|_| split) {
             Some(t) => {
                 // Large Gaussians' tiles are counted by whole workgroups (shaders/project_split.wgsl).
@@ -1995,7 +2090,8 @@ impl Gpu {
                     enc.clear_buffer(&self.probe_bins, 0, None);
                 }
                 let bins = self.probe_bins.clone();
-                let bind = self.bind_cached(&self.k.project, &[(0, &self.frame), (1, &params), (2, &proj), (3, &counts), (4, &filter), (5, &seen_buf), (6, &bins), (7, &marks)]);
+                let (seen_buf, marks) = viewer.as_ref().expect("checked above");
+                let bind = self.bind_cached(&self.k.project, &[(0, &self.frame), (1, &params), (2, &proj), (3, &counts), (4, &filter), (5, seen_buf), (6, &bins), (7, marks)]);
                 self.dispatch(&mut enc, &self.k.project, &bind, groups(n));
             }
         }
@@ -2301,6 +2397,13 @@ impl Gpu {
         // colours stay within 0–1.
         let (noise, gate) = (self.noise, u32::from(self.noise_gate) | u32::from(self.noise_visible) << 1 | u32::from(self.clamp_colors) << 2);
         let info = lr.map(|lr| self.uniform_at(("adam", 0), &AdamInfo { lr: rates_of(lr), beta: [0.9, 0.999, 1e-15, noise * lr.means], n: [(self.count * PACKED) as u32, self.step, gate, 0x5eed] }));
+        if info.is_none() {
+            // The gradients alone: where they go, made by the first step that asks (the kernel writes every slot).
+            let s = self.splats.as_mut().expect("splats");
+            if s.grads.is_none() {
+                s.grads = Some(storage(&self.device, "grads", (s.cap * PACKED * 4) as u64));
+            }
+        }
         let s = self.splats.as_ref().expect("splats");
         // No clear of grad2d: it is zero here, as the projection backward zeroes the sums it reads (new buffers start
         // zeroed).
@@ -2323,7 +2426,8 @@ impl Gpu {
             }
             None => {
                 self.section("project_backward");
-                let bind = self.bind_cached(&t.project_backward, &[(0, &self.frame), (1, &s.params), (2, proj), (3, &s.grad2d), (4, &s.grads), (5, &s.stats), (6, &s.filter)]);
+                let grads = s.grads.as_ref().expect("made above");
+                let bind = self.bind_cached(&t.project_backward, &[(0, &self.frame), (1, &s.params), (2, proj), (3, &s.grad2d), (4, grads), (5, &s.stats), (6, &s.filter)]);
                 self.dispatch(enc, &t.project_backward, &bind, groups(self.count));
             }
         }
@@ -2665,7 +2769,7 @@ impl Gpu {
     pub fn score(&mut self, cam: &Camera, background: [f32; 3], rgba: &[u32]) -> anyhow::Result<f32> {
         self.training()?;
         anyhow::ensure!(rgba.len() == (cam.width * cam.height) as usize, "{}", tr!("a keyframe of {pixels} pixels for a {width}×{height} camera", pixels = rgba.len(), width = cam.width, height = cam.height));
-        let mask = self.mask_for(cam.width, cam.height)?;
+        let mask = self.mask_for(None, cam.width, cam.height)?;
         self.step(cam, background, Target::None, None)?;
         let t = self.training()?;
         let i = self.image.as_ref().with_context(|| tr("nothing rendered"))?;
@@ -4027,5 +4131,140 @@ mod tests {
         // The visibility round's largest weight is never more than the sum.
         let largest = gpu.visibility(&[cam], [0.0; 3], 0.0).expect("visibility");
         assert!(largest.iter().zip(&sums).all(|(l, s)| *l <= *s / 2.0 + 1e-3), "a largest weight above its sum");
+    }
+
+    /// The last colour step's loss gradients, a pixel's four floats as bits: what the loss kernels wrote, before any
+    /// backward pass adds floats in an order of its own.
+    fn pixel_gradients(gpu: &Gpu) -> Vec<u32> {
+        let i = gpu.image.as_ref().expect("image");
+        gpu.read::<u32>(&i.d_pixel, (i.width * i.height * 4) as usize).expect("pixel gradients")
+    }
+
+    /// A keyframe's pixels left out (alpha 0: crate::wearer) train and score as masked ones did. A session the wearer
+    /// left used to clear them from a mask of its own for every colour step, a pass over the keyframe and an upload as
+    /// large as it; the loss kernels now read them off the keyframe. Bit for bit the same pixel gradients, kept pixels
+    /// and score, with L1 alone, with D-SSIM and with the robust loss, on every kind of device.
+    #[test]
+    fn a_keyframes_left_out_pixels_train_as_masked_ones() {
+        for mut gpu in devices() {
+            let (w, h) = (150u32, 90u32);
+            let (g, cam) = scene(3000, w, h, 31);
+            gpu.upload(&g);
+            let mut rng = fastrand::Rng::with_seed(32);
+            let whole: Vec<u32> = (0..w * h).map(|_| rng.u32(..) | 0xff00_0000).collect();
+            // A strip that is no scene, and the wearer across it and across several tiles' borders.
+            let strip = |p: u32| p / w < 10;
+            let wearer = |p: u32| (40..75).contains(&(p % w)) && (5..60).contains(&(p / w));
+            let scene_mask: Vec<f32> = (0..w * h).map(|p| if strip(p) { 0.0 } else { 1.0 }).collect();
+            let cut_mask: Vec<f32> = (0..w * h).map(|p| if strip(p) || wearer(p) { 0.0 } else { 1.0 }).collect();
+            let left_out: Vec<u32> = whole.iter().enumerate().map(|(p, c)| if wearer(p as u32) { c & 0x00ff_ffff } else { *c }).collect();
+            let px = scene_mask.iter().sum::<f32>();
+            let bg = [0.1, 0.2, 0.3];
+            for (ssim, robust) in [(0.0, 0.0), (0.2, 0.0), (0.2, 0.3), (0.0, 0.3)] {
+                let mut step = |mask: &[f32], target: &[u32]| {
+                    gpu.set_mask(w, h, mask).expect("mask");
+                    gpu.step(&cam, bg, Target::Color { rgba: target, scene_pixels: px, weight: 1.0, ssim, robust }, None).expect("step");
+                    (pixel_gradients(&gpu), if robust > 0.0 { gpu.read_kept().expect("kept") } else { Vec::new() })
+                };
+                let masked = step(&cut_mask, &whole);
+                let by_alpha = step(&scene_mask, &left_out);
+                let with_the_wearer = step(&scene_mask, &whole);
+                assert!(masked.0 == by_alpha.0, "{}: ssim {ssim}, robust {robust}: pixel gradients differ from the masked step's", gpu.adapter);
+                assert!(masked.1 == by_alpha.1, "{}: ssim {ssim}, robust {robust}: the robust loss keeps other pixels", gpu.adapter);
+                assert!(masked.0 != with_the_wearer.0, "{}: the wearer's pixels must weigh on the step they are left in", gpu.adapter);
+                let out = (0..w * h).filter(|p| wearer(*p) && !strip(*p)).all(|p| by_alpha.0[p as usize * 4..p as usize * 4 + 3].iter().all(|bits| f32::from_bits(*bits) == 0.0));
+                assert!(out, "{}: ssim {ssim}, robust {robust}: a pixel left out has a gradient", gpu.adapter);
+            }
+            gpu.set_mask(w, h, &cut_mask).expect("mask");
+            let masked = gpu.score(&cam, bg, &whole).expect("score");
+            gpu.set_mask(w, h, &scene_mask).expect("mask");
+            let by_alpha = gpu.score(&cam, bg, &left_out).expect("score");
+            assert_eq!(masked.to_bits(), by_alpha.to_bits(), "{}: the score counts other pixels", gpu.adapter);
+            assert_ne!(masked.to_bits(), gpu.score(&cam, bg, &whole).expect("score").to_bits());
+        }
+    }
+
+    /// A colour step that names a mask reads it, and leaves its size's own for everything else: the next step, the
+    /// scores, the visibility rounds. Masks were kept by size alone, so a sub-grid phase's or a face tile's replaced
+    /// any other mask as large (a rig face of a phase's size would have trained through the phase's mask).
+    #[test]
+    fn a_steps_named_mask_leaves_its_sizes_own() {
+        let Some(mut gpu) = devices().into_iter().next() else { return };
+        let (w, h) = (150u32, 90u32);
+        let (g, cam) = scene(3000, w, h, 33);
+        gpu.upload(&g);
+        let mut rng = fastrand::Rng::with_seed(34);
+        let target: Vec<u32> = (0..w * h).map(|_| rng.u32(..) | 0xff00_0000).collect();
+        let own: Vec<f32> = (0..w * h).map(|p| if p / w < 10 { 0.0 } else { 1.0 }).collect();
+        let named: Vec<f32> = (0..w * h).map(|p| if p % w < 60 { 0.0 } else { 1.0 }).collect();
+        let bg = [0.1, 0.2, 0.3];
+        let color = || Target::Color { rgba: &target, scene_pixels: 1000.0, weight: 1.0, ssim: 0.2, robust: 0.0 };
+        // What each mask gives alone, as its size's own.
+        gpu.set_mask(w, h, &named).expect("mask");
+        gpu.step(&cam, bg, color(), None).expect("step");
+        let by_named = pixel_gradients(&gpu);
+        gpu.set_mask(w, h, &own).expect("mask");
+        gpu.step(&cam, bg, color(), None).expect("step");
+        let by_own = pixel_gradients(&gpu);
+        let score = gpu.score(&cam, bg, &target).expect("score");
+        assert!(by_named != by_own);
+        // Named by a step, for that step only.
+        gpu.set_step_mask(7, w, h, &named).expect("mask");
+        gpu.step_mask = Some(7);
+        gpu.step(&cam, bg, color(), None).expect("step");
+        assert!(pixel_gradients(&gpu) == by_named, "the step did not read the mask it named");
+        assert_eq!(gpu.step_mask, None);
+        gpu.step(&cam, bg, color(), None).expect("step");
+        assert!(pixel_gradients(&gpu) == by_own, "the size's own mask was written over");
+        assert_eq!(gpu.score(&cam, bg, &target).expect("score").to_bits(), score.to_bits());
+        // A slot nothing wrote at this size is an error, and names nothing for the step after it.
+        gpu.step_mask = Some(8);
+        assert!(gpu.step(&cam, bg, color(), None).is_err());
+        gpu.step(&cam, bg, color(), None).expect("step");
+        assert!(pixel_gradients(&gpu) == by_own);
+    }
+
+    /// A training run holds what its steps read, and its memory estimate counts just that: no gradients of steps
+    /// without Adam (made by the first of those, for tests and the lab) and nothing of a viewer's projection unless the
+    /// device shows as one. 97 bytes a Gaussian of the budget stayed allocated for nothing: 290 MB at three million.
+    #[test]
+    fn a_training_run_holds_only_what_its_steps_read() {
+        let Some(mut gpu) = devices().into_iter().next() else { return };
+        let (w, h) = (150u32, 90u32);
+        let (g, cam) = scene(3000, w, h, 35);
+        let budget = 40_000usize;
+        gpu.reserve(budget);
+        gpu.upload(&g);
+        gpu.set_mask(w, h, &vec![1.0; (w * h) as usize]).expect("mask");
+        let target = vec![0xff40_8040u32; (w * h) as usize];
+        let color = || Target::Color { rgba: &target, scene_pixels: (w * h) as f32, weight: 1.0, ssim: 0.2, robust: 0.0 };
+        let lr = LearningRates { means: 1e-4, log_scales: 5e-3, rotations: 1e-3, opacity: 5e-2, colors: 2.5e-3 };
+        gpu.step(&cam, [0.0; 3], color(), Some(lr)).expect("step");
+        let per = gpu.training_bytes_per_gaussian() as u64;
+        let held = |gpu: &Gpu| {
+            let s = gpu.splats.as_ref().expect("splats");
+            assert_eq!(s.cap, budget);
+            (s.grads.is_some(), s.viewer.is_some(), s.bytes())
+        };
+        let (grads, viewer, bytes) = held(&gpu);
+        assert!(!grads && !viewer, "a training step made gradients ({grads}) or a viewer's buffers ({viewer})");
+        // Each of the nine buffers rounds up to 16 bytes.
+        assert!(bytes >= budget as u64 * per && bytes <= budget as u64 * per + 9 * 16, "{bytes} bytes for {budget} Gaussians at {per} each");
+        assert_eq!(gpu.training_memory(budget), (budget as u64 * per * 3 / 2) + (256 << 20));
+        assert!(gpu.read_grads().is_err(), "gradients no step left");
+        // The first step without Adam makes its gradients.
+        gpu.step(&cam, [0.0; 3], color(), None).expect("gradients");
+        assert_eq!(gpu.read_grads().expect("gradients").len(), g.len() * PACKED);
+        assert_eq!(held(&gpu), (true, false, bytes + (budget * PACKED * 4) as u64));
+        // A viewer on a training device: its buffers come with the upload that follows its guards.
+        gpu.guards = true;
+        assert!(crate::train::render(&mut gpu, &cam, [0.0; 3]).is_err(), "a viewer's projection without what it reads");
+        gpu.upload(&g);
+        crate::train::render(&mut gpu, &cam, [0.0; 3]).expect("render");
+        assert!(held(&gpu).1);
+        // The sort's histograms: sixteen counters for each block of 256 entries.
+        let sort = gpu.sort.as_ref().expect("sort");
+        assert_eq!(sort.hist.size(), (sort.cap.div_ceil(256) * 16 * 4) as u64);
+        assert_eq!(sort.hist_offsets.size(), sort.hist.size());
     }
 }

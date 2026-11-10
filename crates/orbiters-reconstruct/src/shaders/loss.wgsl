@@ -1,5 +1,6 @@
 // Loss gradients per pixel (d_pixel: r, g, b, depth).
-//   colour: masked L1 against the keyframe, weight frame.loss.x over frame.loss.w scene pixels;
+//   colour: masked L1 against the keyframe, weight frame.loss.x over frame.loss.w scene pixels; a keyframe's pixel of
+//           alpha 0 was left out (crate::gpu::Target::Color) and counts as a masked one, here and in the score;
 //   depth:  relative L1 against exact depth samples (u, v, z, 0) at their nearest pixel, weight frame.loss.y over
 //           frame.loss.w samples (added with float atomics: two samples may share a pixel).
 
@@ -15,8 +16,8 @@ fn color(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups)
     if (p >= frame.size.x * frame.size.y) {
         return;
     }
-    let m = mask[p];
     let packed = target_rgb[p];
+    let m = select(0.0, mask[p], (packed >> 24u) != 0u);
     let target_c = vec3<f32>(f32(packed & 255u), f32((packed >> 8u) & 255u), f32((packed >> 16u) & 255u)) / 255.0;
     let diff = out_color[p].xyz - target_c;
     let k = m * frame.loss.x / (3.0 * max(frame.loss.w, 1.0));
@@ -33,7 +34,7 @@ var<workgroup> s_error: array<vec2<f32>, 256>;
 fn squared_error(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>, @builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_index) li: u32) {
     let p = flat_index(gid, nwg);
     var e = vec2<f32>(0.0);
-    if (p < frame.size.x * frame.size.y && mask[p] > 0.5) {
+    if (p < frame.size.x * frame.size.y && mask[p] > 0.5 && (target_rgb[p] >> 24u) != 0u) {
         let packed = target_rgb[p];
         let target_c = vec3<f32>(f32(packed & 255u), f32((packed >> 8u) & 255u), f32((packed >> 16u) & 255u)) / 255.0;
         let d = clamp(out_color[p].xyz, vec3<f32>(0.0), vec3<f32>(1.0)) - target_c;

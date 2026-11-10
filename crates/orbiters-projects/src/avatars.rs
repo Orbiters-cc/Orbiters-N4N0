@@ -60,8 +60,6 @@ struct Wanted {
     target: Option<String>,
     target_kept: bool,
     keep_value: bool,
-    /// Whether `blueprintId` is written anywhere in the file (a prefab without it has nothing uploaded).
-    blueprint: bool,
 }
 
 impl Wanted {
@@ -74,20 +72,18 @@ impl Wanted {
         wanted
     }
 
-    /// The next line of the file, without its end.
-    fn line(&mut self, l: &str) {
-        if !self.blueprint && l.contains("blueprintId") {
-            self.blueprint = true;
-        }
+    /// The next line of the file, without its end. Whether it is a line some reader looks at: one that is kept, or one
+    /// that decides what is (a modification's target, the property of one that is read).
+    fn line(&mut self, l: &str) -> bool {
         if let Some(h) = l.strip_prefix("--- !u!") {
             self.end();
             self.current = h.split_once(" &").and_then(|(kind, id)| {
                 let kind = kind.parse().unwrap_or(0);
                 matches!(kind, 1 | 4 | 224 | 114 | 1001).then(|| Doc { id: id.split_whitespace().next().unwrap_or_default().into(), kind, lines: vec![] })
             });
-            return;
+            return false;
         }
-        let Some(d) = self.current.as_mut() else { return };
+        let Some(d) = self.current.as_mut() else { return false };
         let t = l.trim();
         let keys: &[&str] = match d.kind {
             1 => &["m_Name:", "m_CorrespondingSourceObject:", "m_PrefabInstance:"],
@@ -97,20 +93,28 @@ impl Wanted {
         };
         if keys.iter().any(|k| t.starts_with(k)) {
             d.lines.push(l.into());
-        } else if d.kind == 1001 {
-            if t.starts_with("- target:") {
-                self.target = Some(l.into());
-                self.target_kept = false;
-            } else if let Some(property) = t.strip_prefix("propertyPath:") {
-                self.keep_value = matches!(property.trim(), "m_Name" | "blueprintId");
-                if self.keep_value {
-                    self.keep_target();
-                    self.current.as_mut().expect("being read").lines.push(l.into());
-                }
-            } else if self.keep_value && t.starts_with("value:") {
+            return true;
+        }
+        if d.kind != 1001 {
+            return false;
+        }
+        if t.starts_with("- target:") {
+            self.target = Some(l.into());
+            self.target_kept = false;
+            true
+        } else if let Some(property) = t.strip_prefix("propertyPath:") {
+            self.keep_value = matches!(property.trim(), "m_Name" | "blueprintId");
+            if self.keep_value {
                 self.keep_target();
                 self.current.as_mut().expect("being read").lines.push(l.into());
             }
+            self.keep_value
+        } else if self.keep_value && t.starts_with("value:") {
+            self.keep_target();
+            self.current.as_mut().expect("being read").lines.push(l.into());
+            true
+        } else {
+            false
         }
     }
 
@@ -137,54 +141,184 @@ enum ReadFile {
     Yaml(Model, bool),
     /// Other text: nothing to find, and nothing wrong.
     OtherText,
-    /// Not text (Asset Serialization is not Force Text, or the file is damaged): it cannot be read here.
-    Binary,
+    /// It cannot be read here, and so is not known to hold nothing: it is not text (Asset Serialization is not Force
+    /// Text), it holds bytes that are no text (a file damaged, or caught half written), or a line some reader looks at
+    /// is longer than is looked at of a line. The scan it is part of is incomplete, and the project keeps what it showed.
+    Unreadable,
 }
 
 /// How much of a line is looked at: the lines read are keys and short values, and a line longer than this is a mesh's or
 /// a terrain's data, megabytes without a line end.
 const LINE_HEAD: usize = 64 * 1024;
 
-/// Reads a scene or a prefab through, a line at a time, keeping what [`Wanted`] keeps: the memory it takes does not
-/// grow with the file (a 64 KiB read buffer, the head of the line being read, and the kept lines).
-fn read_file(path: &Path) -> std::io::Result<ReadFile> {
+/// Whether bytes handed over a piece at a time are text (UTF-8) as a whole: a character a piece ends in the middle of is
+/// finished with the next piece, so where the pieces are cut makes no difference.
+#[derive(Default)]
+struct Utf8 {
+    /// The start of a character the last piece ended inside.
+    partial: [u8; 4],
+    held: usize,
+}
+
+impl Utf8 {
+    /// Takes the next piece; `false` once the bytes so far cannot be text.
+    fn take(&mut self, mut piece: &[u8]) -> bool {
+        while self.held > 0 {
+            let Some((next, rest)) = piece.split_first() else { return true };
+            self.partial[self.held] = *next;
+            self.held += 1;
+            piece = rest;
+            match std::str::from_utf8(&self.partial[..self.held]) {
+                Ok(_) => self.held = 0,
+                Err(e) if e.error_len().is_some() || self.held == self.partial.len() => return false,
+                Err(_) => {}
+            }
+        }
+        match std::str::from_utf8(piece) {
+            Ok(_) => true,
+            Err(e) if e.error_len().is_some() => false,
+            Err(e) => {
+                let start = &piece[e.valid_up_to()..];
+                self.partial[..start.len()].copy_from_slice(start);
+                self.held = start.len();
+                true
+            }
+        }
+    }
+
+    /// Whether the bytes ended on a whole character.
+    fn ended_whole(&self) -> bool {
+        self.held == 0
+    }
+}
+
+/// Whether `blueprintId` is written anywhere in bytes handed over a piece at a time, across their cuts too.
+#[derive(Default)]
+struct Mention {
+    found: bool,
+    /// The last bytes of what came before: one fewer than the word is long.
+    before: Vec<u8>,
+}
+
+impl Mention {
+    const WORD: &'static [u8] = b"blueprintId";
+
+    fn take(&mut self, piece: &[u8]) {
+        if self.found {
+            return;
+        }
+        let most = Self::WORD.len() - 1;
+        // Across the cut: the end of what came before, with as much of the start of this piece.
+        let reach = piece.len().min(most);
+        self.before.extend_from_slice(&piece[..reach]);
+        self.found = self.before.windows(Self::WORD.len()).any(|w| w == Self::WORD) || piece.windows(Self::WORD.len()).any(|w| w == Self::WORD);
+        // The end of everything so far, for the next cut.
+        if piece.len() >= most {
+            self.before.clear();
+            self.before.extend_from_slice(&piece[piece.len() - most..]);
+        } else {
+            let more = self.before.len().saturating_sub(most);
+            self.before.drain(..more);
+        }
+    }
+}
+
+/// A file being read, every byte of which is looked at on its way: whether the whole of it is text ([`Utf8`]), whatever
+/// of it the reading keeps or passes over, and, for a prefab, whether it says `blueprintId` ([`Mention`]).
+struct Looked<R> {
+    inner: R,
+    utf8: Utf8,
+    text: bool,
+    mention: Option<Mention>,
+}
+
+impl<R: std::io::Read> std::io::Read for Looked<R> {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        let n = self.inner.read(buffer)?;
+        self.text = self.text && self.utf8.take(&buffer[..n]);
+        if let Some(mention) = &mut self.mention {
+            mention.take(&buffer[..n]);
+        }
+        Ok(n)
+    }
+}
+
+/// Reads a scene or a prefab through, a line at a time, keeping what [`Wanted`] keeps. The memory it takes is a 64 KiB
+/// read buffer, the head of the line being read, and the kept lines: a few an object, whatever the file weighs.
+///
+/// What it answers is what reading the whole file as text answered, or [`ReadFile::Unreadable`], never something else:
+/// - Every byte is checked to be text, those of the lines passed over too. Read whole, a file with a byte that is no
+///   text failed to be read, the scan was incomplete and the project kept its list. Converted leniently instead, a
+///   damaged blueprint ID was no ID, and the scene answered, complete, that nothing was uploaded.
+/// - A line is looked at up to [`LINE_HEAD`]. The rest of a mesh's data is passed over; a line some reader looks at
+///   that is longer (a name, a blueprint ID behind 64 KiB of spaces) cannot be read short: the file is unreadable.
+///
+/// `mention`: also whether the file says `blueprintId` anywhere (asked of prefabs: one that never says it is not read
+/// further into).
+fn read_file_looking(path: &Path, mention: bool) -> std::io::Result<ReadFile> {
     use std::io::{BufRead, Read};
-    let mut reader = std::io::BufReader::with_capacity(LINE_HEAD, std::fs::File::open(path)?);
+    let looked = Looked { inner: std::fs::File::open(path)?, utf8: Utf8::default(), text: true, mention: mention.then(Mention::default) };
+    let mut reader = std::io::BufReader::with_capacity(LINE_HEAD, looked);
     let mut line = Vec::with_capacity(256);
     let mut wanted = Wanted::default();
-    let mut first = true;
+    let (mut first, mut yaml, mut cut_short) = (true, false, false);
     loop {
         line.clear();
         let read = (&mut reader).take(LINE_HEAD as u64).read_until(b'\n', &mut line)?;
         if read == 0 {
             break;
         }
+        let mut cut = false;
         if line.last() == Some(&b'\n') {
             line.pop();
         } else if read == LINE_HEAD {
-            // The rest of a long line: passed over, never held.
-            reader.skip_until(b'\n')?;
+            // A line of just that length ends here; the rest of a longer one is passed over, never held (and looked
+            // at on its way, as every byte is).
+            match reader.fill_buf()?.first().copied() {
+                None => {}
+                Some(b'\n') => reader.consume(1),
+                Some(_) => {
+                    cut = true;
+                    reader.skip_until(b'\n')?;
+                }
+            }
         }
         if line.last() == Some(&b'\r') {
             line.pop();
         }
-        if std::mem::take(&mut first) && !line.starts_with(b"%YAML") {
-            // No text holds a zero byte; a cut at the head's end may split a character, which is no fault of the text.
-            let text = !line.contains(&0) && std::str::from_utf8(&line).map_or_else(|e| e.error_len().is_none(), |_| true);
-            return Ok(if text { ReadFile::OtherText } else { ReadFile::Binary });
+        if std::mem::take(&mut first) {
+            yaml = line.starts_with(b"%YAML");
         }
-        match std::str::from_utf8(&line) {
-            Ok(l) => wanted.line(l),
-            Err(_) => wanted.line(&String::from_utf8_lossy(&line)),
+        if !yaml {
+            // Nothing is read of it: only whether all of it is text.
+            continue;
         }
+        // The head of a line cut inside a character is text up to that character; bytes that are no text at all are
+        // the file's fault, found on their way in.
+        let head = match std::str::from_utf8(&line) {
+            Ok(head) => head,
+            Err(e) => std::str::from_utf8(&line[..e.valid_up_to()]).unwrap_or_default(),
+        };
+        let read_by_some = wanted.line(head);
+        // A cut line that is read, or whose head is all blank (what it starts with is past what was looked at).
+        cut_short |= cut && (read_by_some || head.trim().is_empty());
     }
-    if first {
+    let looked = reader.into_inner();
+    if !looked.text || !looked.utf8.ended_whole() || cut_short {
+        return Ok(ReadFile::Unreadable);
+    }
+    if !yaml {
         return Ok(ReadFile::OtherText);
     }
     wanted.end();
-    let blueprint = wanted.blueprint;
-    Ok(ReadFile::Yaml(Model::of(wanted.docs), blueprint))
+    Ok(ReadFile::Yaml(Model::of(wanted.docs), looked.mention.is_some_and(|m| m.found)))
 }
+
+/// A scene's file ([`read_file_looking`]).
+fn read_file(path: &Path) -> std::io::Result<ReadFile> {
+    read_file_looking(path, false)
+}
+
 fn value(d: &Doc, key: &str) -> Option<String> {
     let prefix = format!("{key}:");
     d.lines.iter().find_map(|l| l.trim().strip_prefix(&prefix).map(|s| unquote(s.trim())))
@@ -373,7 +507,7 @@ pub(crate) fn in_project_checked(project: &Path, cache: &mut SceneCache) -> (Vec
             Ok(ReadFile::Yaml(model, _)) => model,
             Ok(ReadFile::OtherText) => continue,
             // What cannot be read is not known to hold nothing: the project keeps what it showed.
-            Ok(ReadFile::Binary) | Err(_) => {
+            Ok(ReadFile::Unreadable) | Err(_) => {
                 complete = false;
                 continue;
             }
@@ -399,10 +533,10 @@ pub(crate) fn in_project_checked(project: &Path, cache: &mut SceneCache) -> (Vec
         for d in model.docs.iter().filter(|d| d.kind == 1001) {
             let Some(source) = value(d, "m_SourcePrefab").and_then(|s| guid(&s)).and_then(|g| prefabs.get(&g)) else { continue };
             dependencies.push((source.clone(), crate::discovery::fingerprint(source)));
-            let prefab = prefab_models.entry(source.clone()).or_insert_with(|| match read_file(source) {
+            let prefab = prefab_models.entry(source.clone()).or_insert_with(|| match read_file_looking(source, true) {
                 Ok(ReadFile::Yaml(model, blueprint)) => blueprint.then_some(model),
                 Ok(ReadFile::OtherText) => None,
-                Ok(ReadFile::Binary) | Err(_) => {
+                Ok(ReadFile::Unreadable) | Err(_) => {
                     complete = false;
                     None
                 }
@@ -663,7 +797,6 @@ mod read_completeness_tests {
                 assert_eq!(read_of(k), read_of(a), "document {} of kind {}:\n{}", a.id, a.kind, a.lines.join("\n"));
                 assert!(k.lines.len() <= a.lines.len());
             }
-            assert_eq!(kept.blueprint, text.contains("blueprintId"));
             documents += all.len();
             kept_lines += kept.docs.iter().map(|d| d.lines.len()).sum::<usize>();
             all_lines += text.lines().count();
@@ -694,20 +827,177 @@ mod read_completeness_tests {
             text.insert_str(at, &format!("--- !u!43 &9{end}Mesh:{end}  _typelessdata: {}{end}", "0f".repeat(LINE_HEAD * 3 / 2)));
             let text = text.trim_end().to_string();
             std::fs::write(&file, &text).unwrap();
-            let ReadFile::Yaml(read, blueprint) = read_file(&file).unwrap() else { panic!("not read as Unity's text") };
+            let ReadFile::Yaml(read, blueprint) = read_file_looking(&file, true).unwrap() else { panic!("not read as Unity's text") };
             let of_text = Model::new(&text);
             assert!(read.docs == of_text.docs && read.names == of_text.names && read.transforms == of_text.transforms, "seed {seed}");
             assert_eq!(blueprint, text.contains("blueprintId"));
             assert!(!read.docs.is_empty());
         }
-        let files: [(&[u8], bool); 4] = [(b"", true), (b"just a note\nabout the scene", true), (b"\x00\x00\x00\x16binary scene", false), (b"\xff\xfe\x00binary", false)];
+        // Other text holds nothing and is no failure, zero bytes and all (they are text to whoever reads text). Bytes
+        // that are no text make the file unreadable wherever they are, as reading it whole failed on them.
+        let files: [(&[u8], bool); 6] = [
+            (b"", true),
+            (b"just a note\nabout the scene", true),
+            (b"\x00\x00\x00\x16zero bytes are text", true),
+            (b"\xff\xfe\x00binary", false),
+            (b"a first line that reads as text\nand then \x9a\x3c, which is none", false),
+            (b"text that ends inside a character: \xc3", false),
+        ];
         for (bytes, text) in files {
             std::fs::write(&file, bytes).unwrap();
             assert_eq!(matches!(read_file(&file).unwrap(), ReadFile::OtherText), text, "{bytes:?}");
-            assert_eq!(matches!(read_file(&file).unwrap(), ReadFile::Binary), !text, "{bytes:?}");
+            assert_eq!(matches!(read_file(&file).unwrap(), ReadFile::Unreadable), !text, "{bytes:?}");
             assert_eq!(in_project_checked(&dir, &mut SceneCache::default()), (vec![], text), "{bytes:?}");
         }
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// A scene with bytes that are no text is not read as a scene with nothing uploaded: the scan is incomplete, and the
+    /// project keeps what it showed. Read whole, such a file failed to be read; converted leniently, as the
+    /// line-at-a-time reader first did, a damaged blueprint ID was no ID and the scan answered, complete, with an empty
+    /// list, which discovery put in place of the project's own. Wherever the bytes are: in what is read, in a document
+    /// that is not, past what is looked at of a mesh's line, and at the file's end inside a character (a scene caught
+    /// half written).
+    #[test]
+    fn a_damaged_scene_leaves_the_scan_incomplete() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("Assets")).unwrap();
+        let scene = dir.path().join("Assets").join("Avatar.unity");
+        let text = scene_with("Fox", AVATAR);
+        std::fs::write(&scene, &text).unwrap();
+        let mut cache = SceneCache::default();
+        let (known, complete) = in_project_checked(dir.path(), &mut cache);
+        assert!(complete && known.len() == 1);
+        let kept = cache.get(&scene).cloned().expect("the scene's answer is kept");
+
+        let id = text.find(AVATAR).unwrap();
+        let mesh = format!("--- !u!43 &7\nMesh:\n  _typelessdata: {}\n", "0f".repeat(LINE_HEAD));
+        let mut in_the_id = text.clone().into_bytes();
+        in_the_id[id + 5] = 0xff;
+        in_the_id.push(b'\n');
+        let mut in_the_mesh = [text.as_bytes(), mesh.as_bytes()].concat();
+        let near_its_end = in_the_mesh.len() - 10;
+        in_the_mesh[near_its_end] = 0xff;
+        let damaged: [(&str, Vec<u8>); 4] = [
+            ("in its blueprint ID", in_the_id),
+            ("in a document that is not read", [text.as_bytes(), b"--- !u!23 &9\nMeshRenderer:\n  m_Note: \xff\n"].concat()),
+            ("past what is looked at of a mesh's line", in_the_mesh),
+            ("at its end, inside a character", [text.as_bytes(), b"# caf\xc3"].concat()),
+        ];
+        for (place, bytes) in &damaged {
+            std::fs::write(&scene, bytes).unwrap();
+            assert!(matches!(read_file(&scene).unwrap(), ReadFile::Unreadable), "damaged {place}: read as text");
+            let (_, complete) = in_project_checked(dir.path(), &mut cache);
+            assert!(!complete, "damaged {place}: the project must keep its previous list");
+            let now = cache.get(&scene).expect("the answer kept before");
+            assert_eq!((now.len, &now.avatars), (kept.len, &kept.avatars), "damaged {place}: nothing is kept of an unreadable scene");
+        }
+
+        // Not damage: a character cut in two by how much of a line is looked at, in a line nobody reads.
+        let note = format!("--- !u!43 &7\nMesh:\n  _note: {}\u{e9}{}\n--- !u!1 &200\nGameObject:\n  m_Name: After\n", "x".repeat(LINE_HEAD - 10), "y".repeat(500));
+        assert_eq!(note.lines().nth(2).map(|l| (l.len() > LINE_HEAD, l.is_char_boundary(LINE_HEAD))), Some((true, false)), "the character must lie across the cut");
+        let whole_characters = format!("{text}{note}");
+        std::fs::write(&scene, &whole_characters).unwrap();
+        let ReadFile::Yaml(read, _) = read_file(&scene).unwrap() else { panic!("a character across the cut taken for damage") };
+        let of_text = Model::new(&whole_characters);
+        assert!(read.docs == of_text.docs && read.names == of_text.names && read.names.values().any(|n| n == "After"));
+        let (found, complete) = in_project_checked(dir.path(), &mut cache);
+        assert!(complete && found.len() == 1 && found[0].id == AVATAR);
+    }
+
+    /// A line some reader looks at that is longer than is looked at of a line is never read short: the file is
+    /// unreadable, the scan incomplete, and the project keeps its list. Cut and accepted, a long name came out
+    /// shortened, and a blueprint ID behind 64 KiB of spaces came out as no avatar at all. A line of just the length
+    /// looked at is whole. Long lines nobody reads change nothing: a mesh's data, the megabytes of a modification of
+    /// some other property.
+    #[test]
+    fn a_line_that_is_read_is_never_read_short() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("Assets")).unwrap();
+        let scene = dir.path().join("Assets").join("Avatar.unity");
+        let name_line = |name: &str| format!("  m_Name: {name}");
+        let just = "N".repeat(LINE_HEAD - name_line("").len());
+        assert_eq!(name_line(&just).len(), LINE_HEAD);
+        // Read short: each of these is unreadable.
+        let instance = |property: &str, value: &str| {
+            format!("--- !u!1001 &300\nPrefabInstance:\n  m_Modification:\n    m_Modifications:\n    - target: {{fileID: 100, guid: 0123456789abcdef0123456789abcdef, type: 3}}\n      propertyPath: {property}\n      value: {value}\n      objectReference: {{fileID: 0}}\n")
+        };
+        let cut: [(&str, String); 6] = [
+            ("a name a byte longer", scene_with(&format!("{just}N"), AVATAR)),
+            ("a name far longer", scene_with(&"N".repeat(3 * LINE_HEAD), AVATAR)),
+            ("a blueprint ID behind spaces", scene_with("Fox", AVATAR).replace("blueprintId: ", &format!("blueprintId:{}", " ".repeat(LINE_HEAD)))),
+            ("a name with a character across the cut", scene_with(&format!("{}\u{e9}tail", &just[1..]), AVATAR)),
+            ("a line whose start is past what is looked at", scene_with("Fox", AVATAR).replace("  m_Name: Fox", &format!("{}m_Name: Fox", " ".repeat(LINE_HEAD + 2)))),
+            ("an overridden name longer than is looked at", format!("{}{}", scene_with("Fox", AVATAR), instance("m_Name", &"V".repeat(LINE_HEAD)))),
+        ];
+        for (what, text) in &cut {
+            std::fs::write(&scene, text).unwrap();
+            assert!(matches!(read_file(&scene).unwrap(), ReadFile::Unreadable), "{what}: read short");
+            let (_, complete) = in_project_checked(dir.path(), &mut SceneCache::default());
+            assert!(!complete, "{what}: the scan must be incomplete");
+            // Read whole, it had the avatar: read short it must not answer anything else.
+            assert_eq!(Model::new(text).direct("scene").len(), 1, "{what}");
+        }
+        // Whole: a line of just the length looked at, at a line's end and at the file's; and long lines nobody reads.
+        let whole: [(&str, String); 4] = [
+            ("a name of just the length looked at", scene_with(&just, AVATAR)),
+            ("the same as the file's last line", format!("{}--- !u!1 &200\nGameObject:\n{}", scene_with("Fox", AVATAR), name_line(&just))),
+            ("a mesh's data", format!("{}--- !u!43 &7\nMesh:\n  _typelessdata: {}\n  m_Name: A mesh\n", scene_with("Fox", AVATAR), "0f".repeat(2 * LINE_HEAD))),
+            ("megabytes in a modification of another property", format!("{}{}{}", scene_with("Fox", AVATAR), instance("m_Text", &"T".repeat(1 << 20)), instance("m_Name", "Renamed"))),
+        ];
+        for (what, text) in &whole {
+            std::fs::write(&scene, text).unwrap();
+            let ReadFile::Yaml(read, _) = read_file(&scene).unwrap() else { panic!("{what}: not read") };
+            let of_text = Model::new(text);
+            assert!(read.docs == of_text.docs && read.names == of_text.names && read.transforms == of_text.transforms, "{what}");
+            assert_eq!(read.direct("scene"), of_text.direct("scene"), "{what}");
+            let (found, complete) = in_project_checked(dir.path(), &mut SceneCache::default());
+            assert!(complete && found.len() == 1, "{what}");
+        }
+    }
+
+    /// Text is told from what is not, and `blueprintId` found, wherever the bytes are cut into pieces: between any two
+    /// bytes of a character of two, three or four bytes, and of the word. A file that ends inside a character is not
+    /// text. And a prefab's file says the word when it is only written past what is looked at of a line, as its text
+    /// read whole did: a prefab that never says it is not read further into.
+    #[test]
+    fn text_and_the_word_looked_for_are_found_across_any_cut() {
+        let text = "h\u{e9}llo w\u{f6}rld \u{2713} \u{1f98a} m_blueprintId \u{1f98a}\u{2713}\u{e9}".as_bytes();
+        for first in 0..=text.len() {
+            for second in first..=text.len() {
+                let pieces = [&text[..first], &text[first..second], &text[second..]];
+                let (mut utf8, mut mention) = (Utf8::default(), Mention::default());
+                assert!(pieces.iter().all(|p| utf8.take(p)) && utf8.ended_whole(), "cut at {first} and {second}");
+                pieces.iter().for_each(|p| mention.take(p));
+                assert!(mention.found, "the word cut at {first} and {second}");
+                // The same bytes with one that is no text, and without the word's last letter.
+                let mut bad = text.to_vec();
+                bad[second.min(text.len() - 1)] = 0xff;
+                let mut utf8 = Utf8::default();
+                assert!(![&bad[..first], &bad[first..second], &bad[second..]].iter().all(|p| utf8.take(p)), "a byte that is no text, cut at {first} and {second}");
+                let (without, mut mention) = (String::from_utf8_lossy(text).replace("blueprintId", "blueprintI_"), Mention::default());
+                let without = without.as_bytes();
+                [&without[..first], &without[first..second], &without[second..]].iter().for_each(|p| mention.take(p));
+                assert!(!mention.found);
+            }
+        }
+        let mut utf8 = Utf8::default();
+        assert!(utf8.take(&text[..text.len() - 1]) && !utf8.ended_whole(), "ended inside its last character");
+
+        // In a file: the word only past what is looked at of a line, across every cut of the 64 KiB the file is read by.
+        let dir = tempfile::tempdir().unwrap();
+        let prefab = dir.path().join("Thing.prefab");
+        let head = "%YAML 1.1\n--- !u!43 &1\nMesh:\n  _typelessdata: ";
+        for before_the_cut in 0..=Mention::WORD.len() {
+            let filler = 2 * LINE_HEAD - head.len() - before_the_cut;
+            let text = format!("{head}{}blueprintId{}\n--- !u!1 &2\nGameObject:\n  m_Name: Thing\n", "0".repeat(filler), "f".repeat(300));
+            assert_eq!(text.find("blueprintId"), Some(2 * LINE_HEAD - before_the_cut));
+            std::fs::write(&prefab, &text).unwrap();
+            assert!(matches!(read_file_looking(&prefab, true).unwrap(), ReadFile::Yaml(_, true)), "the word {before_the_cut} bytes before a cut");
+            assert!(matches!(read_file_looking(&prefab, false).unwrap(), ReadFile::Yaml(_, false)), "not looked for unless asked");
+            std::fs::write(&prefab, text.replace("blueprintId", "blueprintI_")).unwrap();
+            assert!(matches!(read_file_looking(&prefab, true).unwrap(), ReadFile::Yaml(_, false)));
+        }
     }
 
     /// What reading one real file both ways came to.
@@ -746,23 +1036,20 @@ mod read_completeness_tests {
             }
         };
         out.bytes = bytes.len() as u64;
-        let read = match read_file(path) {
+        let read = match read_file_looking(path, true) {
             Ok(read) => read,
             Err(e) => {
                 out.skipped = Some(e.to_string());
                 return out;
             }
         };
-        // As it was read: the whole file as text, or not at all.
+        // As it was read: the whole file as text, or not at all (the scan was then incomplete).
         let text = match String::from_utf8(bytes) {
             Ok(text) => text,
             Err(_) => {
                 out.kind = "not text";
-                // Read whole, a file that is not text failed the read, and the scan was incomplete.
-                match read {
-                    ReadFile::Binary => {}
-                    ReadFile::Yaml(..) => out.differs = Some("Unity's text with bytes that are no text: could not be read whole (the scan stayed incomplete), read now".into()),
-                    ReadFile::OtherText => out.differs = Some("not text as a whole, taken for other text from its first line".into()),
+                if !matches!(read, ReadFile::Unreadable) {
+                    out.differs = Some("bytes that are no text: could not be read whole, read now".into());
                 }
                 return out;
             }
@@ -771,21 +1058,27 @@ mod read_completeness_tests {
         out.longest_line = text.lines().map(str::len).max().unwrap_or(0);
         if !text.starts_with("%YAML") {
             out.kind = "other text";
-            match read {
-                ReadFile::OtherText => {}
-                ReadFile::Binary => out.differs = Some("text that is not Unity's, taken for a file that is not text (a zero byte in its first line)".into()),
-                ReadFile::Yaml(..) => out.differs = Some("text that is not Unity's, read as Unity's".into()),
+            if !matches!(read, ReadFile::OtherText) {
+                out.differs = Some("text that is not Unity's, not taken for it".into());
             }
             return out;
         }
         out.kind = "Unity's text";
-        let ReadFile::Yaml(model, blueprint) = read else {
-            out.differs = Some("Unity's text, not read as it".into());
-            return out;
+        // The lines some reader looks at, from the text itself.
+        out.longest_read_line = Wanted::of_text(&text).docs.iter().flat_map(|d| &d.lines).map(String::len).max().unwrap_or(0);
+        let (model, blueprint) = match read {
+            ReadFile::Yaml(model, blueprint) => (model, blueprint),
+            ReadFile::Unreadable => {
+                out.differs = Some("unreadable a line at a time: a line that is read, or its start, is past what is looked at of a line".into());
+                return out;
+            }
+            ReadFile::OtherText => {
+                out.differs = Some("Unity's text, not read as it".into());
+                return out;
+            }
         };
         let all: Vec<Doc> = whole(&text).into_iter().filter(|d| matches!(d.kind, 1 | 4 | 224 | 114 | 1001)).collect();
         out.documents = all.len();
-        out.longest_read_line = model.docs.iter().flat_map(|d| &d.lines).map(String::len).max().unwrap_or(0);
         out.overridden = all.iter().filter(|d| d.kind == 1001 && (!overrides(d, "m_Name").is_empty() || !overrides(d, "blueprintId").is_empty())).count();
         let mut differs = Vec::new();
         if model.docs.iter().map(|d| (&d.id, d.kind)).ne(all.iter().map(|d| (&d.id, d.kind))) {
@@ -881,7 +1174,12 @@ mod read_completeness_tests {
             println!("  longest line: {} bytes, {} ({} files have a line longer than the {LINE_HEAD} bytes looked at)", r.longest_line, of(i), read.iter().filter(|(_, r)| r.longest_line > LINE_HEAD).count());
         }
         if let Some((i, r)) = read.iter().max_by_key(|(_, r)| r.longest_read_line) {
-            println!("  longest line that is read: {} bytes, {}", r.longest_read_line, of(i));
+            let near = read.iter().filter(|(_, r)| r.longest_read_line > LINE_HEAD / 10).count();
+            println!(
+                "  longest line that is read: {} bytes of the {LINE_HEAD} looked at, {} ({near} files have one longer than a tenth of that; a longer one than all of it makes its file unreadable)",
+                r.longest_read_line,
+                of(i)
+            );
         }
         // By project: the folder's own subfolders.
         let mut projects: std::collections::BTreeMap<String, (usize, usize)> = Default::default();

@@ -14,6 +14,8 @@ pub mod camera_track;
 pub mod detect;
 #[cfg(windows)]
 pub mod desktop;
+#[cfg(windows)]
+pub mod paint_bench;
 pub mod panels;
 pub mod retro;
 pub mod sheet_view;
@@ -276,6 +278,8 @@ struct Recents {
     reader: Option<(PicturesAsked, mpsc::Receiver<(crate::worlds::Picture, Option<ColorImage>)>)>,
     /// The picture shown large, as it is asked for, and it when it came.
     big: Option<(crate::worlds::Picture, Option<ColorImage>)>,
+    /// What lists them instead of [`list_pictures`]: the headless bench's own pictures ([`paint_bench`]), so that what it measures and compares is not this computer's library.
+    lister: Option<fn(&std::path::Path, &[PathBuf]) -> Vec<LoadedRecent>>,
 }
 
 type PicturesAsked = std::sync::Arc<(std::sync::Mutex<Vec<crate::worlds::Picture>>, std::sync::Condvar)>;
@@ -439,8 +443,9 @@ impl Recents {
             self.listed = Some(Instant::now());
             let (tx, rx) = mpsc::channel();
             self.rx = Some(rx);
+            let list = self.lister.unwrap_or(list_pictures);
             let _ = std::thread::Builder::new().name("orbit-recent".into()).spawn(move || {
-                let _ = tx.send(list_pictures(&sessions, &folders));
+                let _ = tx.send(list(&sessions, &folders));
             });
         }
         changed
@@ -836,6 +841,8 @@ pub struct Panels {
     /// Talk is held.
     talking: bool,
     started: Instant,
+    /// The time its pictures are painted at, when not the clock's: the headless bench's ([`paint_bench`]), whose turns must paint the same from one run to the next.
+    clock: Option<f64>,
     bloom: Bloom,
     /// Where the sheet's back and its page go.
     pub back_place: Option<Placed>,
@@ -916,6 +923,7 @@ impl Panels {
             hidden: false,
             talking: false,
             started: Instant::now(),
+            clock: None,
             bloom: Bloom::default(),
             back_place: None,
             hint_place: None,
@@ -2555,7 +2563,7 @@ impl Panels {
 
     /// Paints what changed and hands each new picture to `show`, with the part that changed. Nothing changed: nothing happens, at no cost.
     pub fn paint(&mut self, snap: &Snapshot, mut show: impl FnMut(&Panel, [u32; 4])) {
-        let time = self.started.elapsed().as_secs_f64();
+        let time = self.clock.unwrap_or_else(|| self.started.elapsed().as_secs_f64());
         let live = !snap.settings.reduce_motion;
         let art = self.art.clone();
         for panel in &mut self.list {

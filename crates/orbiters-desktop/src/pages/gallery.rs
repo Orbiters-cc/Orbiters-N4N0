@@ -89,8 +89,15 @@ pub struct State {
     shown_key: Option<(Filter, String)>,
     shown: Vec<Entry>,
     key: Option<(u64, u64, std::path::PathBuf, bool, String, u64)>,
-    local_job: Job<Vec<Entry>>,
+    /// This computer's entries being made, with the revision of what they are made from beyond the pictures, taken
+    /// (and when) before any of it was read.
+    local_job: Job<(std::time::Instant, u64, Vec<Entry>)>,
     locals: Vec<Entry>,
+    /// The revision `locals` was made from, and when it was taken ([`list_is_stale`]).
+    listed: Option<(std::time::Instant, u64)>,
+    /// The visit history and the upload records at these files, no picture read (tests).
+    #[cfg(test)]
+    sources: Option<(std::path::PathBuf, Option<std::path::PathBuf>)>,
     feed: Feed,
     feed_job: Job<Result<Feed, anyhow::Error>>,
     asked: Option<(Filter, String)>,
@@ -462,27 +469,35 @@ impl State {
     }
 }
 
-/// `true` opens the existing capture-management surface (reconstruction, storage, import).
-pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) -> bool {
-    let ctx = ui.ctx().clone();
+/// Keeps this computer's pictures and captures as the list shows them: made again, on a worker, when what they are made
+/// from changed (the folders' watch says so: pictures found, a capture's folder, the visits, the upload records), when
+/// the app says its library did, on a visit, another account or environment, or a copy the editor saved; and taken in
+/// when they land. What the person does on the page (a selection, a search, where the list is scrolled) is not
+/// touched.
+fn follow_locals(state: &mut State, ui: &Ui, cx: &Cx, server: Server) {
+    let ctx = ui.ctx();
     if !state.fixture {
         let (listing_changed, _images_changed) = state.folders.tick(ui, cx);
-        if listing_changed { state.local_dirty = true; }
+        if listing_changed {
+            state.local_dirty = true;
+        }
         // Progressive discoveries keep existing decoded pictures visible.
     }
-    state.requests.poll(&ctx, cx);
-    let page = ui.max_rect();
-    let now = anim::time(&ctx);
-    let development = cx.snap.settings.development;
-    let server = if development { Server::Development } else { Server::Production };
-    // The layout the settings keep, unless it was just chosen here (the tray saves it a moment later).
-    let saved = cx.snap.settings.photos_layout;
-    if !state.fixture && state.layout_saved != Some(saved) {
-        state.layout_saved = Some(saved);
-        state.layout = saved;
+    if let Some((made, revision, entries)) = state.local_job.take() {
+        state.locals = entries;
+        state.listed = Some((made, revision));
+        state.shown_key = None;
+        // Screenshots: this computer's items, as the fixture has them, whenever they land.
+        if state.fixture_locals {
+            state.stage_locals();
+        }
     }
-    let layout = state.layout;
-    let tiles = arrangement::tiles(layout);
+    // What the list is made from changed outside the app since the list was made (a capture's folder, the visits, an
+    // upload record): made again. Not while one is being made: what it was made from is known when it lands.
+    if !state.local_job.running() && list_is_stale(state.folders.local_seen(), state.listed) {
+        state.local_dirty = true;
+    }
+    let development = cx.snap.settings.development;
     // The editor's saves too: a copy saved beside its original shows at once.
     let key = (
         cx.ctl.library_version(),
@@ -497,7 +512,23 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) -> bool {
         state.observe_context(key);
         let dir = cx.snap.settings.sessions_dir.clone();
         let folders = cx.snap.settings.picture_folders.clone();
-        state.local_job = Job::spawn(&ctx, move || controller::local_entries_with_folders(&dir, server, &folders));
+        #[cfg(not(test))]
+        let sources: Option<(std::path::PathBuf, Option<std::path::PathBuf>)> = None;
+        #[cfg(test)]
+        let sources = state.sources.clone();
+        state.local_job = Job::spawn(ctx, move || {
+            // The revision first, then the list: a change in between is in the list or not, and a later look, which
+            // sees it, differs from this revision either way.
+            let made = std::time::Instant::now();
+            let mut revision = controller::LocalRevision::default();
+            match sources {
+                Some((history, records)) => {
+                    let revision = revision.look_at(&dir, &history, records.as_deref());
+                    (made, revision, controller::local_entries_at(&dir, Default::default(), &history, records.as_deref()))
+                }
+                None => (made, revision.look(&dir, server), controller::local_entries_with_folders(&dir, server, &folders)),
+            }
+        });
         if changed_account {
             state.feed_job = Job::default();
             state.hash_job = Job::default();
@@ -511,16 +542,35 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) -> bool {
             state.hash_asked.clear();
         }
     }
+}
+
+/// Whether the list is out of date: the watch saw (`looked`: when its look began, and the revision it saw) another
+/// revision than the one the list was made from (`listed`: when that was taken, and what it was), in a look begun after
+/// that one was taken. A look begun before says nothing: the list is the newer of the two, and the next look tells.
+/// With no look yet, or no list, there is nothing to compare.
+fn list_is_stale(looked: Option<(std::time::Instant, u64)>, listed: Option<(std::time::Instant, u64)>) -> bool {
+    matches!((looked, listed), (Some((looked, seen)), Some((made, from))) if looked > made && seen != from)
+}
+
+/// `true` opens the existing capture-management surface (reconstruction, storage, import).
+pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) -> bool {
+    let ctx = ui.ctx().clone();
+    state.requests.poll(&ctx, cx);
+    let page = ui.max_rect();
+    let now = anim::time(&ctx);
+    let development = cx.snap.settings.development;
+    let server = if development { Server::Development } else { Server::Production };
+    // The layout the settings keep, unless it was just chosen here (the tray saves it a moment later).
+    let saved = cx.snap.settings.photos_layout;
+    if !state.fixture && state.layout_saved != Some(saved) {
+        state.layout_saved = Some(saved);
+        state.layout = saved;
+    }
+    let layout = state.layout;
+    let tiles = arrangement::tiles(layout);
+    follow_locals(state, ui, cx, server);
     if state.pictures.is_none() {
         state.pictures = Some(crate::worlds::Pictures::new(&ctx));
-    }
-    if let Some(l) = state.local_job.take() {
-        state.locals = l;
-        state.shown_key = None;
-        // Screenshots: this computer's items, as the fixture has them, whenever they land.
-        if state.fixture_locals {
-            state.stage_locals();
-        }
     }
     if let Some(r) = state.feed_job.take() {
         match r {
@@ -908,8 +958,10 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) -> bool {
         });
     state.scroll_offset = output.state.clamped_offset().y;
     let visible_top = state.scroll_offset + top - page.top();
+    // The topmost item in view; of a row's items, all at the same height, always the same one (by its key): the map
+    // gives them in an order of its own at each frame, and the anchor went from one to another without a scroll.
     state.scroll_anchor = positions.iter().filter(|(_, y)| **y >= visible_top)
-        .min_by(|a, b| a.1.total_cmp(b.1)).map(|(key, y)| (key.clone(), *y));
+        .min_by(|a, b| a.1.total_cmp(b.1).then_with(|| a.0.cmp(b.0))).map(|(key, y)| (key.clone(), *y));
     state.layout_positions = positions;
     super::under_top(&gu, cx, "photos-captures", from, top);
     if let Some(background) = &background {
@@ -2117,6 +2169,115 @@ mod tests {
     }
 
     use super::*;
+    /// The list is made again when the watch saw, after the list was made, another revision than the one it was made
+    /// from; a look begun before the list says nothing of it. (The first look used to be taken as the list's own
+    /// state: a capture deleted between the list and that look stayed on the page.)
+    #[test]
+    fn a_list_is_out_of_date_when_a_later_look_saw_something_else() {
+        let t = std::time::Instant::now();
+        let later = t + std::time::Duration::from_secs(1);
+        assert!(!list_is_stale(None, None));
+        assert!(!list_is_stale(Some((t, 1)), None), "no list yet: it is being made");
+        assert!(!list_is_stale(None, Some((t, 1))), "no look yet");
+        assert!(!list_is_stale(Some((later, 1)), Some((t, 1))), "the same");
+        assert!(list_is_stale(Some((later, 2)), Some((t, 1))), "changed since the list was made");
+        assert!(!list_is_stale(Some((t, 2)), Some((later, 1))), "a look from before the list: the list is the newer");
+    }
+
+    /// The whole way from a change outside the app to the list on the page, with nothing of the member's read: the
+    /// captures, the visit history and the upload records are files of the test's. A capture's folder is deleted, the
+    /// history learns of an instance and an upload is recorded, all from outside, the pictures' index untouched and
+    /// the page not visited again: the page's list is made again by itself, without the deleted capture, the other
+    /// one filed under the instance it was taken in and marked as uploaded, and what the person had typed and where
+    /// they had scrolled is as it was.
+    #[test]
+    fn a_change_from_outside_reaches_the_list_on_the_page_without_a_visit() {
+        use orbiters_core::contracts::manifest::{SessionManifest, WorldInfo, MANIFEST_FILE, MANIFEST_FORMAT};
+        use orbiters_core::visited::{History, InstanceVisit};
+        let root = std::env::temp_dir().join(format!("orbiters-gallery-delivery-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let captures = root.join("Sessions");
+        let capture = |name: &str, created: &str| {
+            let dir = captures.join(name);
+            std::fs::create_dir_all(&dir).unwrap();
+            let world = WorldInfo { id: Some("wrld_a".into()), name: Some("World A".into()), ..Default::default() };
+            let manifest = SessionManifest { format: MANIFEST_FORMAT.into(), created_utc: created.into(), world: Some(world), ..Default::default() };
+            std::fs::write(dir.join(MANIFEST_FILE), serde_json::to_vec(&manifest).unwrap()).unwrap();
+            dir
+        };
+        let (one, two) = (capture("one", "2026-11-09T20:00:00Z"), capture("two", "2026-11-10T20:00:00Z"));
+        let (history_file, records_file) = (root.join("visited-worlds.json"), root.join("capture-uploads.json"));
+        let mut history = History::default();
+        history.save(&history_file).unwrap();
+
+        let ctx = egui::Context::default();
+        orbiters_ui::install(&ctx);
+        let ctl: crate::backend::Ctl =
+            std::sync::Arc::new(crate::backend::Local::new(crate::controller::Controller::new(orbiters_core::settings::Settings::default())));
+        let mut snap = (*ctl.view()).clone();
+        snap.settings.sessions_dir = captures.clone();
+        let _pictures = crate::worlds::tests::pictures_lock();
+        let pictures = crate::worlds::picture_revision();
+        // With what the person did on the page: a search typed, the list scrolled.
+        let mut state = State { sources: Some((history_file.clone(), Some(records_file.clone()))), query: "world".into(), scroll_offset: 240.0, ..Default::default() };
+        state.folders.set_sources(history_file.clone(), Some(records_file.clone()));
+        let mut time = 0.0;
+        let mut frame = |state: &mut State| {
+            time += 1.0 / 60.0;
+            let mut toasts = orbiters_ui::toast::Toasts::default();
+            let mut output = ctx.run_ui(egui::RawInput { time: Some(time), ..Default::default() }, |ui| {
+                let cx = Cx { ctl: &ctl, snap: &snap, toasts: &mut toasts, entered: 0.0, visit: 1, windowed: true, gpu: None, top: 0.0, go: None };
+                follow_locals(state, ui, &cx, Server::Production);
+            });
+            output.textures_delta.clear();
+        };
+        // Frames as they are asked for, until the list is as `done` wants it.
+        let mut until = |state: &mut State, what: &str, done: &dyn Fn(&State) -> bool| {
+            let limit = std::time::Instant::now() + std::time::Duration::from_secs(20);
+            loop {
+                frame(state);
+                if done(state) {
+                    return;
+                }
+                assert!(std::time::Instant::now() < limit, "{what}: {} entries", state.locals.len());
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
+        };
+        let is = |entry: &Entry, dir: &std::path::Path| matches!(&entry.local, Some(controller::Local::Session(d)) if d == dir);
+
+        until(&mut state, "the first list", &|s| s.locals.len() == 2 && s.folders.local_seen().is_some());
+        assert!(state.locals.iter().any(|e| is(e, &one)) && state.locals.iter().any(|e| is(e, &two)));
+        assert!(state.locals.iter().all(|e| e.instance.is_none() && e.remote.is_none()), "no instance known, nothing uploaded");
+        let made = state.listed;
+
+        // From outside: a capture's folder goes, the history learns where the other was taken, its upload is recorded.
+        std::fs::remove_dir_all(&one).unwrap();
+        history.instances.push(InstanceVisit { world_id: "wrld_a".into(), instance: "77~private".into(), at: controller::unix("2026-11-10T19:30:00Z") });
+        history.save(&history_file).unwrap();
+        let item = orbiters_core::shares::Item { kind: orbiters_core::shares::Kind::Capture, id: 9, mine: true, ..Default::default() };
+        controller::write_record_for_test(&records_file, &two, item);
+        state.folders.look_now();
+
+        until(&mut state, "the list made again", &|s| s.listed != made && !s.local_job.running());
+        assert_eq!(state.locals.len(), 1, "the deleted capture is gone from the page");
+        let left = &state.locals[0];
+        assert!(is(left, &two));
+        assert_eq!(left.instance.as_deref(), Some("77~private"), "filed under the instance the history learned of");
+        assert_eq!(left.remote.as_ref().map(|item| item.id), Some(9), "and marked as uploaded");
+        // Nothing the person did was touched, the pictures' index did not change, and no visit was needed.
+        assert_eq!((state.query.as_str(), state.scroll_offset), ("world", 240.0));
+        assert_eq!(crate::worlds::picture_revision(), pictures);
+        // And it rests: the look that follows sees what the list was made from.
+        let settled = state.listed;
+        state.folders.look_now();
+        std::thread::sleep(std::time::Duration::from_millis(150));
+        for _ in 0..5 {
+            frame(&mut state);
+        }
+        assert!(state.listed == settled && !state.local_job.running(), "made once, not again and again");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
     /// A capture of this computer shared publicly, then edited: its card says so where it says who sees it ("Edited since
     /// shared: update it"), and "Updating…" while the update runs; painted on the CPU into `ORBITERS_TEST_OUT`
     /// (`card-edited.png`, `card-updating.png`) when it is set.

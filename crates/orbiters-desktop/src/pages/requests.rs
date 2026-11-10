@@ -11,10 +11,17 @@ use orbiters_core::{
 };
 use orbiters_ui::{
     anim::{self, Spring},
-    dialog, feedback, format, icons,
+    dialog, feedback, icons,
     theme::{self, weight, Txt},
     widgets::{self, Button, IconButton, SegOption, Size, Tone, Variant},
 };
+
+/// How often the requests are asked for again while the page shows.
+const REFRESH_EVERY: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// The requests as Orbiters gave them when asked again (received, sent), or why it could not be asked; `None` for the
+/// look a watch starts with, which asks nothing (the page has just asked).
+type Again = Option<Result<(Vec<ShareRequest>, Vec<ShareRequest>), String>>;
 
 #[derive(Default)]
 pub struct State {
@@ -24,7 +31,10 @@ pub struct State {
     outgoing_box: bool,
     loaded: Option<(bool, String, u64)>,
     list: Job<anyhow::Result<(shares::Requests, shares::Requests)>>,
-    refreshed: f64,
+    /// The requests asked for again every [`REFRESH_EVERY`] on a thread while the page shows (for an environment and
+    /// an account), and what it brought that could not be taken in yet. The page is drawn when the answer differs.
+    again: super::Watch<(bool, String), Again>,
+    fresh: Again,
     error: Option<String>,
     row_error: Option<(u64, String)>,
     active: Option<(String, ShareRequest)>,
@@ -94,8 +104,9 @@ impl State {
             self.incoming.clear();
         }
     }
+    /// Asks Orbiters for the requests now (a visit, Look for new requests).
     fn refresh(&mut self, ctx: &egui::Context, server: Server) {
-        self.refreshed = orbiters_ui::anim::time(ctx);
+        self.fresh = None;
         self.error = None;
         self.list = Job::spawn(ctx, move || {
             let (api, token) = controller::api(server)?;
@@ -117,10 +128,42 @@ impl State {
             self.active = None;
         }
         let server = if key.0 { Server::Development } else { Server::Production };
-        let now = orbiters_ui::anim::time(ctx);
-        if !self.fixture && self.active.is_none() && !self.list.running() && (self.loaded.as_ref() != Some(&key) || now - self.refreshed >= 60.0) {
+        // Asked again every minute while the page shows, on a thread that asks for a frame only when the answer
+        // differs. (The page asked itself, on the ten frames a second Photos & captures drew whatever happened.)
+        if !self.fixture {
+            let asked = (key.0, key.1.clone());
+            let brought = self.again.keep(ctx, &asked, REFRESH_EVERY, || {
+                let mut first = true;
+                move || -> Again {
+                    if std::mem::take(&mut first) {
+                        return None;
+                    }
+                    let ask = || -> anyhow::Result<_> {
+                        let (api, token) = controller::api(server)?;
+                        Ok((api.capture_requests(&token, true)?.requests, api.capture_requests(&token, false)?.requests))
+                    };
+                    Some(ask().map_err(|e| e.to_string()))
+                }
+            });
+            if let Some(brought @ Some(_)) = brought {
+                self.fresh = brought;
+            }
+        }
+        if !self.fixture && self.active.is_none() && !self.list.running() && self.loaded.as_ref() != Some(&key) {
             self.loaded = Some(key);
             self.refresh(ctx, server);
+        }
+        // Not over an answer on its way, nor over a reading under way: once they are done.
+        if self.active.is_none() && !self.list.running() {
+            match self.fresh.take() {
+                Some(Ok((incoming, outgoing))) => {
+                    self.incoming = incoming;
+                    self.outgoing = outgoing;
+                    self.error = None;
+                }
+                Some(Err(e)) => self.error = Some(e),
+                None => {}
+            }
         }
         if let Some(result) = self.list.take() {
             match result {
@@ -329,7 +372,7 @@ impl State {
         });
         widgets::avatar(&p, ar, tex.as_ref(), &person.name);
         let x = ar.right() + 12.0;
-        let when = format::relative_time(controller::unix(&request.created_at), now_secs());
+        let when = crate::pages::ago(ui.ctx(), controller::unix(&request.created_at), now_secs());
         let when_t = Txt::new(&when, 11.5).color(theme::FG_4);
         let when_w = widgets::text_size(ui, &when_t).x;
         widgets::text(&p, pos2(r.right() - 16.0, ar.top() + 9.0), Align2::RIGHT_CENTER, &when_t);
@@ -448,8 +491,8 @@ impl State {
             };
             // When it was answered, the status and the time as one sentence.
             let label = match (&request.answered_at, request.status) {
-                (Some(at), RequestStatus::Approved) => tr!("Approved {time}", time = format::relative_time(controller::unix(at), now_secs())),
-                (Some(at), RequestStatus::Denied) => tr!("Denied {time}", time = format::relative_time(controller::unix(at), now_secs())),
+                (Some(at), RequestStatus::Approved) => tr!("Approved {time}", time = crate::pages::ago(ui.ctx(), controller::unix(at), now_secs())),
+                (Some(at), RequestStatus::Denied) => tr!("Denied {time}", time = crate::pages::ago(ui.ctx(), controller::unix(at), now_secs())),
                 _ => label,
             };
             let t = Txt::new(&label, 12.0).weight(weight::SEMIBOLD).color(tone);

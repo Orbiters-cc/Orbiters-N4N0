@@ -64,9 +64,6 @@ const SHORTEST_TURN: Duration = Duration::from_millis(3);
 #[cfg(windows)]
 const DEVICE_RETRY: Duration = Duration::from_secs(5);
 
-/// How long raw pixels last after the `refusals`-th refusal in a row: 5 s, 10 s, 20 s… up to about ten minutes.
-#[cfg(windows)]
-
 /// A turn of the menus that took long enough to be felt, in the log with what was up: what a person calls unresponsive leaves no other mark. At most one line each few seconds, and nothing
 /// otherwise.
 #[derive(Default)]
@@ -95,6 +92,10 @@ impl Stalls {
     }
 }
 
+/// How long raw pixels last after the `refusals`-th refusal in a row: 5 s, 10 s, 20 s… up to about ten minutes.
+// (Its `cfg` and these words had come to sit on `Stalls`, which every platform's session uses: off Windows that left
+// no `Stalls`, and this function with no `DEVICE_RETRY`.)
+#[cfg(windows)]
 fn after_refusals(refusals: u32) -> Duration {
     DEVICE_RETRY * 2u32.pow(refusals.saturating_sub(1).min(7))
 }
@@ -842,8 +843,11 @@ fn session(args: &[String]) -> anyhow::Result<Ended> {
         // The touchpads and sticks reach the avatar's N4N0 input parameters (contracts `Docs/n4n0-input.md`), paced; turned
         // off (or VRChat gone), they go back to rest once.
         let pads_wanted = snap.settings.n4n0.enabled && snap.settings.n4n0.controller_input && snap.vrchat.running;
+        // The touchpads and sticks as this turn's read has them (fourteen actions asked of SteamVR): read once, for the
+        // avatar's parameters here and for a held capture or the turning stick below, which each read them again.
+        let mut pads_now: Option<Option<orbiters_n4n0::input::Pads>> = None;
         let paced = match (pads_wanted, input_read) {
-            (true, true) => actions.pads(&steamvr).and_then(|read| pads.step(Instant::now(), read)),
+            (true, true) => (*pads_now.insert(actions.pads(&steamvr))).and_then(|read| pads.step(Instant::now(), read)),
             (true, false) => None,
             (false, _) => pads.stop(),
         };
@@ -911,7 +915,7 @@ fn session(args: &[String]) -> anyhow::Result<Ended> {
             let menu_hand = turn.menu_hand;
             t.menu.worlds.menus_up(turn.menus_up);
             if t.menu.worlds.small_showing() {
-                let read = actions.pads(&steamvr);
+                let read = *pads_now.get_or_insert_with(|| actions.pads(&steamvr));
                 let sticks = read.as_ref().map_or([0.0; 2], |pads| [pads.sticks[0].y, pads.sticks[1].y]);
                 // What moves what shows, for the hand holding it: a touchpad where there is one, else the other hand's stick. SteamVR's profile for Enzo's controllers has only a button at the
                 // thumb rest (`trackpad` is an invalid input on them), so no thumb position ever comes.
@@ -931,7 +935,7 @@ fn session(args: &[String]) -> anyhow::Result<Ended> {
                 // Around the person: VRChat's turning stick is the hand that does not walk, side to side. It turns with a menu up too: a capture shown from these menus goes when they close, so
                 // holding it still then meant it never turned at all. Their lists take the stick's up and down.
                 let hand = if snap.settings.walk_boost.hand == orbiters_core::settings::Hand::Left { 1 } else { 0 };
-                let read = actions.pads(&steamvr);
+                let read = *pads_now.get_or_insert_with(|| actions.pads(&steamvr));
                 let stick = read.as_ref().map_or(0.0, |pads| pads.sticks[hand].x);
                 let turned = t.menu.worlds.turn_stick(stick, &steamvr);
                 let every = if turned != 0.0 || stick.abs() > 0.2 { Duration::from_millis(250) } else { Duration::from_secs(2) };

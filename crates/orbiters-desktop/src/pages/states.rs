@@ -70,6 +70,17 @@ impl StatesPage {
         self.confirm = None;
     }
 
+    /// What was asked and still waits for the service's list (tests).
+    #[cfg(test)]
+    pub(crate) fn waiting(&self) -> usize {
+        self.pending.len()
+    }
+
+    /// Something asked of avatar `id` at `now` that the service never answers (the count of frames at rest).
+    pub fn stage_asked(&mut self, id: &str, now: f64) {
+        self.pending.push((id.to_string(), StateAction::Default { id: None }, now));
+    }
+
     /// Opens avatar `id`'s states (the screenshot review).
     pub fn open_avatar(&mut self, id: &str) {
         self.show_cards();
@@ -184,6 +195,14 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, page: &mut StatesPage, out: &mut Vec<Out>)
     }
     if page.confirm.as_ref().is_some_and(|(_, at)| now - at >= CONFIRM_FOR) {
         page.confirm = None;
+    }
+    // What was asked shows until the service's list says it, or its time is up: a frame then, should the list say
+    // nothing. Its time is counted here, whichever page shows: an avatar's page also takes out what its list says, but
+    // the cards never look at what was asked, and one left there with its time up (Back before the service answered, an
+    // avatar that went) asked for a frame at every frame for as long as the cards showed.
+    page.pending.retain(|(_, _, at)| now - at < PENDING_FOR);
+    if let Some(oldest) = page.pending.iter().map(|(_, _, at)| *at).min_by(f64::total_cmp) {
+        super::frame_in(ui.ctx(), PENDING_FOR - (now - oldest));
     }
     // An avatar whose card went (its last state deleted, no longer worn) shows the cards again.
     let opened = page.open.as_ref().and_then(|id| view.avatars.iter().find(|a| a.id == *id)).cloned();

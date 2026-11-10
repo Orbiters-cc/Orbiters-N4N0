@@ -470,11 +470,16 @@ impl Actions {
             return false;
         }
         let Ok(input) = steamvr.input() else { return false };
-        let mut active: Vec<ActiveSet> = self.sets.iter().map(|&set| ActiveSet { set, ..Default::default() }).collect();
-        if let Some(orbit) = self.orbit {
-            active.extend(blocked_sets(orbit.block, orbit.hands, self.blocked));
+        // Every turn of the overlay's loop (some ninety a second): on the stack, as SteamVR's own copy of them is.
+        let mut active = [ActiveSet::default(); MOST_SETS];
+        let mut count = 0;
+        let own = self.sets.iter().map(|&set| ActiveSet { set, ..Default::default() });
+        let blocking = self.orbit.into_iter().flat_map(|orbit| blocked_sets(orbit.block, orbit.hands, self.blocked));
+        for (slot, set) in active.iter_mut().zip(own.chain(blocking)) {
+            *slot = set;
+            count += 1;
         }
-        input.update_active(&active).is_ok()
+        input.update_active(&active[..count]).is_ok()
     }
 
     /// Which hands' triggers VRChat does not get from the next read on (`overlay::orbit::block`). Said anew at each read: it ends by not being said.
@@ -565,9 +570,13 @@ impl Actions {
 }
 
 /// The set that takes a trigger from VRChat, for each hand blocked and that hand only: the other keeps its trigger.
-fn blocked_sets(set: ActionSetHandle, hands: [orbiters_openvr::input::InputSourceHandle; 2], blocked: [bool; 2]) -> Vec<ActiveSet> {
-    (0..2).filter(|&hand| blocked[hand]).map(|hand| ActiveSet { set, device: hands[hand], priority: OVERLAY_GLOBAL_PRIORITY_MIN + 1 }).collect()
+fn blocked_sets(set: ActionSetHandle, hands: [orbiters_openvr::input::InputSourceHandle; 2], blocked: [bool; 2]) -> impl Iterator<Item = ActiveSet> {
+    (0..2).filter(move |&hand| blocked[hand]).map(move |hand| ActiveSet { set, device: hands[hand], priority: OVERLAY_GLOBAL_PRIORITY_MIN + 1 })
 }
+
+/// The sets made active in a turn at most: the five of [`Actions`], and the one that takes a trigger from VRChat for
+/// each hand.
+const MOST_SETS: usize = 7;
 
 /// Two quick taps on a touch sensor (a thumbrest, a trackpad touched without pressing it): what opens N4N0's menu
 /// by default. A tap is a touch from [`TAP_SHORTEST`] to [`TAP_LONGEST`] long; the second must start within
@@ -797,11 +806,11 @@ mod tests {
 
     #[test]
     fn the_trigger_is_taken_from_vrchat_only_for_the_hand_pointing_and_above_scene_priority() {
-        let sets = blocked_sets(7, [11, 22], [false, true]);
+        let sets: Vec<ActiveSet> = blocked_sets(7, [11, 22], [false, true]).collect();
         assert_eq!(sets, vec![ActiveSet { set: 7, device: 22, priority: OVERLAY_GLOBAL_PRIORITY_MIN + 1 }]);
         assert!(sets[0].priority >= 0x0100_0000 && sets[0].priority < 0x0200_0000, "openvr.h's overlay global range");
-        assert!(blocked_sets(7, [11, 22], [false, false]).is_empty(), "free: nothing said");
-        assert_eq!(blocked_sets(7, [11, 22], [true, true]).len(), 2);
+        assert_eq!(blocked_sets(7, [11, 22], [false, false]).count(), 0, "free: nothing said");
+        assert_eq!(blocked_sets(7, [11, 22], [true, true]).count(), 2);
     }
 
     #[test]

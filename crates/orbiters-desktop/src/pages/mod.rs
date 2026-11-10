@@ -32,7 +32,10 @@ pub mod states;
 pub mod storage;
 pub mod videos;
 pub mod vr_audio;
+pub mod watch;
 pub mod worlds;
+
+pub use watch::Watch;
 
 use crate::backend::Ctl;
 use crate::state::Snapshot;
@@ -336,16 +339,184 @@ pub fn local_time(iso: &str) -> String {
     tr!("{day} {month} {year}, {time}", day = t.day(), month = month, year = t.year(), time = format!("{:02}:{:02}", t.hour(), t.minute()))
 }
 
+/// "5 min ago" for the moment `epoch` at `now` (Unix seconds; `orbiters_ui::format::relative_time`), and a frame asked
+/// for when that would read otherwise: the pages draw only when something changed, and this text changes by the clock
+/// alone. For text on screen: ask it for the rows in view.
+pub fn ago(ctx: &egui::Context, epoch: u64, now: u64) -> String {
+    if let Some(wait) = orbiters_ui::format::relative_time_changes_in(epoch, now) {
+        ctx.request_repaint_after(after_seconds(wait));
+    }
+    orbiters_ui::format::relative_time(epoch, now)
+}
+
+/// Asks for a frame when something is due, `left` seconds from now, only while that is still to come. The rule for
+/// every deadline a page waits on: what is due is taken up on the frame it is due on, and a deadline already past
+/// asks for nothing. Asked for with a floor instead ("in 50 ms at the soonest"), a past deadline that nothing takes
+/// up, because another page shows or a job stands in its way, asks for a frame at every frame, for ever: the page
+/// never rests. What holds a past deadline up brings its own frame when it ends.
+pub fn frame_in(ctx: &egui::Context, left: f64) {
+    if left > 0.0 {
+        ctx.request_repaint_after(std::time::Duration::from_secs_f64(left + 0.05));
+    }
+}
+
+/// The wait for something due `seconds` after a clock read in whole seconds: a little more, so that the frame comes
+/// once the second has turned.
+pub fn after_seconds(seconds: u64) -> std::time::Duration {
+    std::time::Duration::from_millis(seconds * 1000 + 50)
+}
+
+/// The local day `now` (Unix seconds) is in, as a number that grows by one at each local midnight, and the seconds
+/// until what is said by the day ("Today", "Yesterday", "at 21:03" or a date) is to be worked out again: the next
+/// local midnight, or the moment the zone's offset changes if that comes first (see [`local_day_in`]).
+pub fn local_day(now: u64) -> (i64, u64) {
+    local_day_in(now, &|at| {
+        let local = time::OffsetDateTime::from_unix_timestamp(at).ok().and_then(|t| time::UtcOffset::local_offset_at(t).ok());
+        local.or_else(|| time::UtcOffset::current_local_offset().ok()).map_or(0, |o| i64::from(o.whole_seconds()))
+    })
+}
+
+/// [`local_day`] in a zone whose offset from UTC at a moment (Unix seconds) is `offset_at`, in seconds.
+///
+/// Midnight is reckoned with the offset now. When the offset changes before that (daylight saving time starts or
+/// ends), midnight comes an hour sooner or later than reckoned, or the day turns at the change itself where a zone
+/// changes at midnight: the wait is then until the change, to the second, and the frame asked for there reckons
+/// again with the new offset. Reckoned with today's offset alone, the day's headings were an hour late on the night
+/// the clocks go forward.
+fn local_day_in(now: u64, offset_at: &dyn Fn(i64) -> i64) -> (i64, u64) {
+    let now = now as i64;
+    let offset = offset_at(now);
+    let local = now + offset;
+    let midnight = now + 86_400 - local.rem_euclid(86_400);
+    let until = if offset_at(midnight) == offset {
+        midnight
+    } else {
+        // The first second with another offset: the offset holds at `still`, and no longer at `changed`.
+        let (mut still, mut changed) = (now, midnight);
+        while changed - still > 1 {
+            let middle = still + (changed - still) / 2;
+            if offset_at(middle) == offset {
+                still = middle;
+            } else {
+                changed = middle;
+            }
+        }
+        changed
+    };
+    (local.div_euclid(86_400), (until - now).max(1) as u64)
+}
+
 /// Unix seconds in local time, as [`local_time`].
 pub fn local_time_unix(secs: u64) -> String {
     let Ok(t) = time::OffsetDateTime::from_unix_timestamp(secs as i64) else { return String::new() };
     local_time(&t.format(&time::format_description::well_known::Rfc3339).unwrap_or_default())
 }
 
+/// What a page costs while nothing happens, for the pages' tests.
+#[cfg(test)]
+pub(crate) mod rest {
+    use std::time::Duration;
+
+    /// The frames a page draws by itself in a minute once it came to rest, from `from` seconds on: `frame(t)` draws
+    /// one at `t` and says how soon it asked for the next (`Duration::MAX`: it asked for none). Forty seconds pass
+    /// first, for entrances to end and looping decorations to rest (`orbiters_ui::anim::REST_AFTER`); then each frame
+    /// comes when the last one asked, as a window's would. What a worker asks for between frames is not a frame the
+    /// page asked for, and is not counted.
+    pub fn frames_a_minute(from: f64, mut frame: impl FnMut(f64) -> Duration) -> usize {
+        let mut t = from;
+        while t < from + 40.0 {
+            t += frame(t).as_secs_f64().clamp(1.0 / 60.0, 0.5);
+        }
+        let end = t + 60.0;
+        let mut frames = 0;
+        loop {
+            let wait = frame(t);
+            if wait == Duration::MAX {
+                break;
+            }
+            t += wait.as_secs_f64().max(1.0 / 60.0);
+            if t >= end {
+                break;
+            }
+            frames += 1;
+        }
+        frames
+    }
+
+    /// How soon the frame that gave `output` asked for the next.
+    pub fn asked(output: &egui::FullOutput) -> Duration {
+        output.viewport_output.get(&egui::ViewportId::ROOT).map_or(Duration::MAX, |v| v.repaint_delay)
+    }
+
+    /// Every text the frame that gave `output` painted, a line each.
+    pub fn texts(output: &egui::FullOutput) -> String {
+        fn of(shape: &egui::Shape, out: &mut String) {
+            match shape {
+                egui::Shape::Text(text) => {
+                    out.push_str(text.galley.text());
+                    out.push('\n');
+                }
+                egui::Shape::Vec(shapes) => shapes.iter().for_each(|s| of(s, out)),
+                _ => {}
+            }
+        }
+        let mut out = String::new();
+        output.shapes.iter().for_each(|clipped| of(&clipped.shape, &mut out));
+        out
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use orbiters_i18n::{in_language, Language};
+
+    /// What is said by the day is worked out again at each wait [`local_day_in`] gives. Followed from wait to wait
+    /// through a change of the zone's offset, the day believed must be the day it is at every moment in between:
+    /// with made-up zones and clocks, not this computer's zone today (whose offset is the same tomorrow most days of
+    /// the year, which is how reckoning midnight with today's offset passed its test).
+    #[test]
+    fn the_day_is_right_at_every_moment_through_a_change_of_the_zones_offset() {
+        // A day in each zone: the true local day at a moment.
+        let day_at = |zone: &dyn Fn(i64) -> i64, at: i64| (at + zone(at)).div_euclid(86_400);
+        // 2027-03-28 01:00 UTC, when Central Europe's clocks go forward; any moment does for the made-up ones.
+        let change = 1_806_195_600_i64;
+        type Zone = Box<dyn Fn(i64) -> i64>;
+        let zones: [(&str, Zone); 5] = [
+            ("no change", Box::new(|_| 3600)),
+            ("forward at 02:00 local", Box::new(move |at| if at < change { 3600 } else { 7200 })),
+            ("back at 03:00 local", Box::new(move |at| if at < change { 7200 } else { 3600 })),
+            // Zones that change at midnight: 00:00 becomes 01:00 (that midnight never comes), or 24:00 becomes 23:00.
+            ("forward at midnight", Box::new(move |at| if at < change { -3600 } else { 0 })),
+            ("back at midnight", Box::new(move |at| if at < change { -3600 } else { -7200 })),
+        ];
+        for (name, zone) in &zones {
+            // From two days before the change to two days after, from wait to wait.
+            let (mut at, end) = (change - 2 * 86_400 - 1234, change + 2 * 86_400);
+            let mut waits = 0;
+            while at < end {
+                let (day, wait) = local_day_in(at as u64, zone.as_ref());
+                assert!((1..=90_000).contains(&wait), "{name}: {wait}");
+                assert_eq!(day, day_at(zone.as_ref(), at), "{name}");
+                // The day believed holds until the wait is over, second by second.
+                for second in (at..at + wait as i64).step_by(61).chain([at + wait as i64 - 1]) {
+                    assert_eq!(day_at(zone.as_ref(), second), day, "{name}: at {second}, {} s after a look at {at} that waits {wait} s", second - at);
+                }
+                at += wait as i64;
+                waits += 1;
+            }
+            // One wait a midnight, and one more for the change where there is one: nothing like a frame a second.
+            assert!(waits <= 6, "{name}: {waits} waits in four days");
+        }
+        // The case the review gave: just past midnight on the night the clocks go forward, the next midnight is 23
+        // hours away, not 24. The wait ends at the change (02:00 local), and the one after it at midnight.
+        let forward = |at: i64| if at < change { 3600 } else { 7200 };
+        let just_past_midnight = change - 2 * 3600 + 60;
+        let (_, to_change) = local_day_in(just_past_midnight as u64, &forward);
+        assert_eq!(to_change as i64, change - just_past_midnight);
+        let (_, to_midnight) = local_day_in(change as u64, &forward);
+        assert_eq!(to_change + to_midnight, 23 * 3600 - 60, "23 hours from midnight to midnight");
+    }
 
     /// Each language writes the date its own way, but keeps the date and the time apart by ", " (the gallery and community pages split them there),
     /// and leaves no `{name}` of its template unfilled.

@@ -213,7 +213,8 @@ impl App {
         anim::set_live(&ctx, focused && !snap.settings.reduce_motion);
 
         let full = ui.max_rect();
-        // A minimized window still runs a pass with a tiny rect: nothing to lay out.
+        // Too small to lay out. (Not how a minimized window is known: no frame is drawn for one at all, only the logic
+        // runs, where the pages' watches are told: `pages::watch::follow_window`.)
         if full.width() < 640.0 || full.height() < 400.0 {
             return;
         }
@@ -689,6 +690,9 @@ impl eframe::App for App {
         }
         let focused = ctx.input(|i| i.viewport().focused.unwrap_or(true));
         self.ctl.set_background(!focused && self.ctl.view().vrchat.runs_here());
+        // Minimized, no frame is drawn and only this runs: what the pages watch on their threads stops until the window
+        // shows again (the microphones Settings listens to, Unity's editors, the folders).
+        pages::watch::follow_window(ctx);
         if self.ctl.should_close() {
             ctx.send_viewport_cmd(ViewportCommand::Close);
         }
@@ -729,6 +733,7 @@ fn bring_to_front(ctx: &egui::Context) {
 impl App {
     /// Offscreen frames call this instead of eframe's `logic`.
     pub fn logic_offline(&mut self, ctx: &egui::Context) {
+        pages::watch::follow_window(ctx);
         self.drain_notices(ctx);
     }
 }

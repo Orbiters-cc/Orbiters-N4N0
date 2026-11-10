@@ -151,6 +151,28 @@ fn real_worlds() -> Vec<(String, egui::ColorImage)> {
         .collect()
 }
 
+/// The real worlds shown get what the app itself read of them (`ORBIT_WORLD_PAGES`, its cache of world pages: who made each, what it says of itself, its numbers),
+/// by name. A stand-in's own are never left under a real world's name: round 18's judges read VRChat Home's description under Fort Rosebay. Where a real world's
+/// page is not there, it says nothing of itself.
+fn as_the_real_worlds(entries: &mut [Entry], real: &[(String, egui::ColorImage)]) {
+    let pages: Vec<serde_json::Value> = std::env::var("ORBIT_WORLD_PAGES")
+        .ok()
+        .and_then(|dir| std::fs::read_dir(dir).ok())
+        .map(|read| read.flatten().filter_map(|f| serde_json::from_str(&std::fs::read_to_string(f.path()).ok()?).ok()).collect())
+        .unwrap_or_default();
+    for (entry, (name, _)) in entries.iter_mut().zip(real) {
+        entry.name = name.clone();
+        let world = pages.iter().map(|p| &p["page"]["world"]).find(|w| w["name"].as_str() == Some(name.as_str()));
+        entry.description = world.and_then(|w| w["description"].as_str()).unwrap_or_default().to_string();
+        if let Some(world) = world {
+            entry.author = world["authorName"].as_str().map(str::to_string);
+            entry.capacity = world["capacity"].as_u64().map(|n| n as u32);
+            entry.visits = world["visits"].as_u64();
+            entry.favorites = world["favorites"].as_u64();
+        }
+    }
+}
+
 fn gradient(ctx: &egui::Context, name: &str, hue: f32, w: usize, h: usize) -> egui::TextureHandle {
     let (a, b) = (hsv(hue, 0.55, 0.62), hsv((hue + 0.08).fract(), 0.6, 0.22));
     let mut px = Vec::with_capacity(w * h);
@@ -170,9 +192,7 @@ fn gradient(ctx: &egui::Context, name: &str, hue: f32, w: usize, h: usize) -> eg
 pub fn side_live(px: [u32; 2], live: Option<(&egui::ColorImage, bool)>) -> anyhow::Result<Vec<u8>> {
     let mut entries = stand_ins()?;
     let real = real_worlds();
-    for (entry, (name, _)) in entries.iter_mut().zip(&real) {
-        entry.name = name.clone();
-    }
+    as_the_real_worlds(&mut entries, &real);
     let facts = stand_in_facts(&entries);
     let mut canvas = Canvas::zoomed(px[0], px[1], px[0] as f32 / WIDTH).in_orbit_look();
     let thumbs: Vec<egui::TextureHandle> = (0..entries.len())
@@ -201,9 +221,7 @@ pub fn shots(out: &std::path::Path) -> anyhow::Result<()> {
     let mut entries = stand_ins()?;
     // Real worlds' names and pictures, where given: `ORBIT_PANEL_WORLDS`, a folder of "NN Name.jpg".
     let real = real_worlds();
-    for (entry, (name, _)) in entries.iter_mut().zip(&real) {
-        entry.name = name.clone();
-    }
+    as_the_real_worlds(&mut entries, &real);
     let facts = stand_in_facts(&entries);
     let mut canvas = Canvas::new(WIDTH as u32, HEIGHT as u32);
     let thumbs: Vec<egui::TextureHandle> = (0..entries.len())

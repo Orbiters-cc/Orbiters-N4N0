@@ -1761,6 +1761,7 @@ impl Panels {
             sheet_hole: self.facts.sheet_hole,
             hint_band: self.list.iter().any(|p| p.zone == Zone::SheetHint),
             hero_captures: Vec::new(),
+            hero_capture_names: Vec::new(),
             hero_picture: None,
             reconstructing: snap.reconstruction.as_ref().map(|j| j.progress.clamp(0.0, 1.0)),
             waiting: snap.reconstruct_queue.len(),
@@ -2650,7 +2651,9 @@ impl Panels {
                             let name = loaded.key.to_string_lossy().to_string();
                             Some(panel.pictures.entry(name).or_insert_with(|| ctx.load_texture("recent", image.clone(), TextureOptions::LINEAR)).id())
                         };
-                        facts.hero_captures = captures.into_iter().filter_map(|i| texture(i, panel)).collect();
+                        let shown: Vec<(TextureId, String)> = captures.into_iter().filter_map(|i| Some((texture(i, panel)?, self.recents.loaded.get(i)?.title.clone()))).collect();
+                        facts.hero_capture_names = shown.iter().map(|s| s.1.clone()).collect();
+                        facts.hero_captures = shown.into_iter().map(|s| s.0).collect();
                         facts.hero_picture = any.and_then(|i| texture(i, panel));
                     }
                     if let Some(view) = &self.sheet_view {

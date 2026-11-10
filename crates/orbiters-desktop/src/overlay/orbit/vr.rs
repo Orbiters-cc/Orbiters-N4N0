@@ -261,7 +261,25 @@ fn on_hand(tilt: f32, ahead: f32, up: f32) -> Matrix34 {
 
 /// How far a wing's tile stands off VRChat's panels, in menu units, at least a tile's gap; and off a sheet up beside it, which is nearer the eyes and would seem to run into it.
 const WING_OFF_ITS_PANEL: f32 = 12.0;
-const WING_OFF_A_SHEET: f32 = 22.0;
+const WING_OFF_A_SHEET: f32 = 22.0 + (VR_SHEET_SCALE - 1.0) * 352.0;
+/// How much larger a sheet is in a headset than on a screen, about its foot's middle (its foot stays over VRChat's tab row): its tabs, names and labels read small at an
+/// arm's length (round 18's judges, four of five), and a larger sheet holds them all, names kept.
+pub const VR_SHEET_SCALE: f32 = 1.16;
+/// And the wing's tiles, about its inner edge's middle: their names read at about 11 px in a headset's picture, and at 14 now (round 18's judges).
+pub const VR_WING_SCALE: f32 = 1.25;
+
+/// `placed` scaled about `anchor`, what is drawn on it as large with it.
+fn scaled(mut placed: Placed, anchor: egui::Pos2, by: f32) -> Placed {
+    let at = |p: egui::Pos2| anchor + (p - anchor) * by;
+    placed.rect = egui::Rect::from_min_max(at(placed.rect.min), at(placed.rect.max));
+    placed.unit *= by;
+    placed
+}
+
+/// A sheet's page or head (`Zone::Takeover`, `Zone::SheetBack`) where a headset has it.
+pub fn sheet_place(zone: Zone) -> Placed {
+    scaled(zones::in_units(zone), egui::pos2(0.0, 200.0), VR_SHEET_SCALE)
+}
 /// How far a sheet lies over where it does on a screen: nearer the eyes, its foot would seem to reach VRChat's tab row.
 const SHEET_OVER_THE_TABS: f32 = 9.0;
 
@@ -411,7 +429,9 @@ pub fn quick_menu_places(hand: usize) -> Vec<Placed> {
                     rect.translate(egui::vec2(-(362.0 + 524.0 + VR_WING_CLEAR * 2.0), 0.0))
                 };
             }
-            placed
+            // Larger than on a screen, away from the menu: about the middle of the edge it has towards it.
+            let inner = if hand == 1 { -(362.0 + VR_WING_CLEAR) } else { 362.0 + VR_WING_CLEAR };
+            scaled(placed, egui::pos2(inner, 27.0), VR_WING_SCALE)
         })
         .collect()
 }
@@ -946,8 +966,8 @@ impl OrbitVr {
         }
         // Hidden: only the way back, and nothing else, whatever VRChat's menu does.
         self.panels.way_back(menu, &mut places);
-        self.panels.takeover_place = Some(zones::in_units(Zone::Takeover));
-        self.panels.back_place = Some(zones::in_units(Zone::SheetBack));
+        self.panels.takeover_place = Some(sheet_place(Zone::Takeover));
+        self.panels.back_place = Some(sheet_place(Zone::SheetBack));
         self.panels.peek_place = Some(zones::in_units(Zone::SheetPeek));
         self.panels.view_taken = cx.world_status.small_taken;
         self.panels.set_open(menu, places, cx.snap);

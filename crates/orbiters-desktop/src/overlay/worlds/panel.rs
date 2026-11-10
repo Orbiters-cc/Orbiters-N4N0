@@ -532,20 +532,30 @@ pub const SIDE: Rect = Rect { min: Pos2 { x: 664.0, y: 12.0 }, max: Pos2 { x: 10
 const SIDE_LEFT: f32 = 676.0;
 const SIDE_RIGHT: f32 = 1000.0;
 /// Its picture; where a capture standing small is seen through it.
-pub const SIDE_HERO: Rect = Rect { min: Pos2 { x: SIDE_LEFT, y: 24.0 }, max: Pos2 { x: SIDE_RIGHT, y: 206.0 } };
-/// Hides it: a tab on its edge, far from the sheet's own X.
-/// Its close says what it does: a chevron alone on the picture read as "next picture" (round 13's to 16's judges).
-const SIDE_CLOSE: Rect = Rect { min: Pos2 { x: 836.0, y: 32.0 }, max: Pos2 { x: 992.0, y: 72.0 } };
-const SMALL_BACK: Rect = Rect { min: Pos2 { x: 862.0, y: 162.0 }, max: Pos2 { x: 992.0, y: 198.0 } };
-/// What to do with it first; then going there; then its four small tiles.
-const SHOW: Rect = Rect { min: Pos2 { x: SIDE_LEFT, y: 296.0 }, max: Pos2 { x: 835.0, y: 340.0 } };
-const SHOW_SMALL: Rect = Rect { min: Pos2 { x: 841.0, y: 296.0 }, max: Pos2 { x: SIDE_RIGHT, y: 340.0 } };
-const SHOW_WHOLE: Rect = Rect { min: Pos2 { x: SIDE_LEFT, y: 296.0 }, max: Pos2 { x: SIDE_RIGHT, y: 340.0 } };
-const GO: Rect = Rect { min: Pos2 { x: SIDE_LEFT, y: 346.0 }, max: Pos2 { x: 835.0, y: 386.0 } };
-const WEB: Rect = Rect { min: Pos2 { x: 841.0, y: 346.0 }, max: Pos2 { x: SIDE_RIGHT, y: 386.0 } };
-const WEB_WHOLE: Rect = Rect { min: Pos2 { x: SIDE_LEFT, y: 346.0 }, max: Pos2 { x: SIDE_RIGHT, y: 386.0 } };
-const OTHER: Rect = Rect { min: Pos2 { x: 860.0, y: 490.0 }, max: Pos2 { x: SIDE_RIGHT, y: 524.0 } };
-const TEASER: Rect = Rect { min: Pos2 { x: SIDE_LEFT, y: 526.0 }, max: Pos2 { x: SIDE_RIGHT, y: 558.0 } };
+///
+/// On a screen it reads in four parts, top to bottom (round 18's judges counted eight stacked rows, and a last line cut by the sheet's foot):
+/// its head (how it runs, and Hide details) with its picture, name and who made it; what to do; what people gave it; what it says of itself.
+/// Nothing lies on the picture but its full-screen button, and nothing is drawn that does not end over the panel's foot.
+pub const SIDE_HERO: Rect = Rect { min: Pos2 { x: SIDE_LEFT, y: 54.0 }, max: Pos2 { x: SIDE_RIGHT, y: 234.0 } };
+/// Hides it, in its head: off the picture (round 18's judges counted three things lying on it), and far from the sheet's own X.
+/// Its close says what it does: a chevron alone read as "next picture" (round 13's to 16's judges).
+const SIDE_CLOSE: Rect = Rect { min: Pos2 { x: 848.0, y: 18.0 }, max: Pos2 { x: SIDE_RIGHT, y: 48.0 } };
+const SMALL_BACK: Rect = Rect { min: Pos2 { x: 862.0, y: 190.0 }, max: Pos2 { x: 992.0, y: 226.0 } };
+/// Where its name's last line ends, and where who made it starts.
+const SIDE_NAME_FOOT: f32 = 290.0;
+const SIDE_UNDER: f32 = 293.0;
+/// What to do with it first; then going there.
+const SHOW: Rect = Rect { min: Pos2 { x: SIDE_LEFT, y: 326.0 }, max: Pos2 { x: 835.0, y: 368.0 } };
+const SHOW_SMALL: Rect = Rect { min: Pos2 { x: 841.0, y: 326.0 }, max: Pos2 { x: SIDE_RIGHT, y: 368.0 } };
+const SHOW_WHOLE: Rect = Rect { min: Pos2 { x: SIDE_LEFT, y: 326.0 }, max: Pos2 { x: SIDE_RIGHT, y: 368.0 } };
+const GO: Rect = Rect { min: Pos2 { x: SIDE_LEFT, y: 374.0 }, max: Pos2 { x: 835.0, y: 410.0 } };
+const WEB: Rect = Rect { min: Pos2 { x: 841.0, y: 374.0 }, max: Pos2 { x: SIDE_RIGHT, y: 410.0 } };
+const WEB_WHOLE: Rect = Rect { min: Pos2 { x: SIDE_LEFT, y: 374.0 }, max: Pos2 { x: SIDE_RIGHT, y: 410.0 } };
+/// The way to this world's other captures: a link at the end of the line that says who made it.
+const OTHER: Rect = Rect { min: Pos2 { x: 846.0, y: 290.0 }, max: Pos2 { x: SIDE_RIGHT, y: 318.0 } };
+/// What it says of itself, from here down to the panel's foot, in whole lines.
+const SIDE_SAYS: f32 = 506.0;
+const SIDE_FOOT: f32 = 556.0;
 
 /// Tile `i` of the `n` small tiles under what to do, spread across the whole width.
 fn small_tile(i: usize, n: usize, vr: bool) -> Rect {
@@ -553,10 +563,17 @@ fn small_tile(i: usize, n: usize, vr: bool) -> Rect {
     let width = (SIDE_RIGHT - left - 6.0 * (n as f32 - 1.0)) / n as f32;
     let x = left + i as f32 * (width + 6.0);
     if vr {
-        Rect::from_min_max(pos2(x, 442.0), pos2(x + width, 504.0))
-    } else {
-        Rect::from_min_max(pos2(x, 392.0), pos2(x + width, 444.0))
+        return Rect::from_min_max(pos2(x, 442.0), pos2(x + width, 504.0));
     }
+    // On a screen two a row, each with its word beside its number at a size that reads (four a row left their words at 10 px, round 18's judges).
+    let half = (SIDE_RIGHT - SIDE_LEFT - 6.0) / 2.0;
+    let (col, row) = ((i % 2) as f32, (i / 2) as f32);
+    let top = 420.0 + row * 42.0;
+    // An odd last one takes the whole row.
+    if n % 2 == 1 && i == n - 1 {
+        return Rect::from_min_max(pos2(SIDE_LEFT, top), pos2(SIDE_RIGHT, top + 36.0));
+    }
+    Rect::from_min_max(pos2(SIDE_LEFT + col * (half + 6.0), top), pos2(SIDE_LEFT + col * (half + 6.0) + half, top + 36.0))
 }
 
 /// One of them: what it is, how many if any, and its word: no one has to guess what an icon alone means.
@@ -568,8 +585,26 @@ fn small_action(p: &Painter, rect: Rect, glyph: &str, filled: bool, count: u64, 
     let number = count_or_nothing(count);
     // A headset's are larger: there is the room, and the need.
     let large = rect.height() > 56.0;
+    if !large {
+        // On a screen: its icon, its number and its word on one line, none under 12 px at 1280 x 720.
+        let number = orbit_look::txt(number.clone(), 17.5).weight(weight::BOLD).color(fade(fg, alpha));
+        let number_wide = if count == 0 { 0.0 } else { p.layout_job(number.job(f32::INFINITY)).size().x + 6.0 };
+        let word = fitted(p, orbit_look::txt(word, 17.5).weight(weight::MEDIUM).color(fade(if fg == theme::FG { theme::FG_2 } else { fg }, alpha)), rect.width() - 46.0 - number_wide);
+        let wide = 26.0 + number_wide + p.layout_job(word.job(f32::INFINITY)).size().x;
+        let left = rect.center().x - wide / 2.0;
+        if filled {
+            widgets::icon_fill(p, pos2(left + 9.0, rect.center().y), glyph, 19.0, fade(fg, alpha));
+        } else {
+            widgets::icon(p, pos2(left + 9.0, rect.center().y), glyph, 19.0, fade(fg, alpha));
+        }
+        if count > 0 {
+            text(p, pos2(left + 26.0, rect.center().y), Align2::LEFT_CENTER, number);
+        }
+        text(p, pos2(left + 26.0 + number_wide, rect.center().y), Align2::LEFT_CENTER, word);
+        return;
+    }
     // A headset's at its size (round 17's judges found its labels at a screen's).
-    let (icon, count, said) = if large { (26.0, 22.0, 19.5) } else { (20.0, 16.5, 14.5) };
+    let (icon, count, said) = (26.0, 22.0, 19.5);
     let line = rect.min.y + rect.height() * 0.34;
     let at = if number.is_empty() { rect.center().x } else { rect.center().x - 16.0 };
     if filled {
@@ -754,7 +789,7 @@ fn draw_full_button(p: &Painter, rect: Rect, full: bool, hovered: bool, pressed:
     widgets::icon(p, rect.center(), if full { icons::CORNERS_IN } else { icons::CORNERS_OUT }, 20.0, Color32::WHITE);
 }
 
-fn draw_live(p: &Painter, hero: Rect, live: &Live) {
+fn draw_live(p: &Painter, hero: Rect, live: &Live, named: Option<&str>) {
     let corner = CornerRadius::same(14);
     let say = |p: &Painter, words: &str| {
         let txt = orbit_look::txt(words, 15.0).weight(weight::SEMIBOLD).color(Color32::WHITE);
@@ -774,11 +809,13 @@ fn draw_live(p: &Painter, hero: Rect, live: &Live) {
     p.rect_filled(hero, corner, Color32::from_rgb(15, 17, 21));
     super::super::orbit::panels::keep_colour(p, hero);
     p.add(egui::epaint::RectShape::filled(hero, corner, Color32::WHITE).with_texture(id, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0))));
-    let txt = orbit_look::txt(tr("Drag to look around"), 14.5).weight(weight::MEDIUM).color(Color32::WHITE);
-    let galley = p.layout_job(txt.job(f32::INFINITY));
-    let pill = Rect::from_min_size(pos2(hero.left() + 8.0, hero.bottom() - 8.0 - galley.size().y - 8.0), galley.size() + vec2(18.0, 8.0));
-    p.rect_filled(pill, CornerRadius::same(10), theme::black(0.72));
-    p.galley(pill.min + vec2(9.0, 4.0), galley, Color32::WHITE);
+    // In its frame nothing lies on it but its full-screen button (round 18's judges counted three things on a small picture); how to look around is said under it.
+    let Some(named) = named else { return };
+    let txt = orbit_look::txt(named, 18.0).weight(weight::SEMIBOLD).color(Color32::WHITE);
+    let galley = p.layout_job(txt.job_truncated(hero.width() - 140.0));
+    let pill = Rect::from_min_size(pos2(hero.left() + 14.0, hero.bottom() - 14.0 - galley.size().y - 12.0), galley.size() + vec2(28.0, 12.0));
+    p.rect_filled(pill, CornerRadius::same((pill.height() / 2.0) as u8), theme::black(0.72));
+    p.galley(pos2(pill.min.x + 14.0, pill.min.y + 6.0), galley, Color32::WHITE);
 }
 
 /// Beside the side panel: the row of what is browsed gets narrower, and the field and its pages.
@@ -1141,7 +1178,7 @@ impl Panel {
             }
             return;
         }
-        out.push((Target::Field, if side { side_field_rect() } else { self.field_here() }));
+        out.push((Target::Field, if side { side_field_rect(self.on_sheet) } else { self.field_here() }));
         if self.searching(d) {
             out.push((Target::Has3d, ONLY_3D));
         } else {
@@ -1246,9 +1283,6 @@ impl Panel {
                 } else if !status.headset {
                     if !live_here && !current {
                         out.push((Target::Show, SHOW_WHOLE));
-                    } else if live_here && self.live.as_ref().is_some_and(|l| l.picture.is_some()) {
-                        // It shows in 3D now: where See it in 3D was, the next step, in words (the corner's button alone is small, and the row was left empty).
-                        out.push((Target::FullView, SHOW_WHOLE));
                     }
                 } else if current {
                     // The other way to see it: the sheet's head, or N4N0's bar, hides it.
@@ -1285,10 +1319,6 @@ impl Panel {
                 let n = tiles.len();
                 for (i, t) in tiles.into_iter().enumerate() {
                     out.push((t, small_tile(i, n, vr)));
-                }
-                // What was last said, when anything was.
-                if !vr && !d.world_feedback(e).comments.is_empty() {
-                    out.push((Target::Comments, TEASER));
                 }
                 if !d.others(e).is_empty() {
                     out.push((Target::Other, if vr { VR_OTHER } else { OTHER }));
@@ -1683,7 +1713,8 @@ impl Panel {
         // The live view on the whole page: only it, and the button that brings it back to its frame.
         if let Some(live) = self.live.as_ref().filter(|l| l.full && !d.status.headset && self.page == Page::Detail && self.entry(d).is_some_and(|e| e.id == l.id)) {
             p.rect_filled(page, CornerRadius::same(28), CARD);
-            draw_live(p, page, live);
+            // Its world's name stays in view (round 18's judges: on the whole page nothing said what was looked at).
+            draw_live(p, page, live, self.entry(d).map(|e| e.name.as_str()));
             let state = (self.hover == Some(Target::FullView), self.pressed == Some(Target::FullView));
             draw_full_button(p, full_button(page), true, state.0, state.1);
             return;
@@ -1803,7 +1834,7 @@ impl Panel {
             }
             return;
         }
-        field(p, if side { side_field_rect() } else { self.field_here() }, &self.query, tr("Search VRChat worlds"), icons::MAGNIFYING_GLASS, false, state(Target::Field), time, 1.0);
+        field(p, if side { side_field_rect(self.on_sheet) } else { self.field_here() }, &self.query, tr("Search VRChat worlds"), icons::MAGNIFYING_GLASS, false, state(Target::Field), time, 1.0);
         // How many, at the field's end (while what is typed leaves room).
         if !side && self.query.chars().count() <= 28 && !results.is_empty() {
             // How many of what the filter that is on shows.
@@ -2040,7 +2071,7 @@ impl Panel {
             let small_back = if vr { VR_SMALL_BACK } else { SMALL_BACK };
             picture(p, hero, (d.thumb)(entry), &entry.world_id, CornerRadius::same(14), rest);
             if let Some(live) = self.live.as_ref().filter(|l| l.id == entry.id && !vr) {
-                draw_live(p, hero, live);
+                draw_live(p, hero, live, None);
                 if live.picture.is_some() {
                     draw_full_button(p, full_button(hero), false, self.hover == Some(Target::FullView), self.pressed == Some(Target::FullView));
                 }
@@ -2081,8 +2112,8 @@ impl Panel {
         if !vr {
             let (h, pr) = state(Target::CloseSide);
             let tab = if pr { SIDE_CLOSE.shrink(1.0) } else { SIDE_CLOSE };
-            p.rect_filled(tab, CornerRadius::same((tab.height() / 2.0) as u8), if h { theme::black(0.92) } else { theme::black(0.76) });
-            let galley = p.layout_job(orbit_look::txt(tr("Hide details"), 15.5).weight(weight::SEMIBOLD).color(theme::FG).job(tab.width() - 44.0));
+            p.rect_filled(tab, CornerRadius::same((tab.height() / 2.0) as u8), fade(if h { RAISED2 } else { RAISED }, rest));
+            let galley = p.layout_job(orbit_look::txt(tr("Hide details"), 17.5).weight(weight::SEMIBOLD).color(theme::FG).job_truncated(tab.width() - 36.0));
             let wide = galley.size().x + 26.0;
             let from = tab.center().x - wide / 2.0;
             p.galley(pos2(from, tab.center().y - galley.size().y / 2.0), galley, theme::FG);
@@ -2097,7 +2128,7 @@ impl Panel {
             title.wrap.max_rows = 2;
             let galley = p.layout_job(title);
             // Its last line just over who made it, however many it has.
-            p.galley(pos2(x, 262.0 - galley.size().y), galley, theme::FG);
+            p.galley(pos2(x, SIDE_NAME_FOOT - galley.size().y), galley, theme::FG);
         }
         let facts = d.facts_of(entry);
         let mut under = Vec::new();
@@ -2115,8 +2146,19 @@ impl Panel {
             }
         }
         // In a headset, who made it and no more.
-        let under = if vr { under.first().cloned().unwrap_or_default() } else { under.join(" · ") };
-        text_cut(p, pos2(x, if vr { 349.0 } else { 266.0 }), width, orbit_look::txt(under, if vr { 18.5 } else { 16.5 }).color(fade(theme::FG, rest)));
+        // On a screen the way to its other captures ends this line, which then says who made it and no more: nothing on it is cut.
+        let linked = !vr && !d.others(entry).is_empty();
+        let under = if vr || linked { under.first().cloned().unwrap_or_default() } else { under.join(" · ") };
+        let under_room = if linked { OTHER.min.x - 10.0 - x } else { width };
+        text_cut(p, pos2(x, if vr { 349.0 } else { SIDE_UNDER }), under_room, orbit_look::txt(under, if vr { 20.0 } else { 17.5 }).color(fade(if vr { theme::FG } else { theme::FG_2 }, rest)));
+        // It shows in 3D on its picture: where See it in 3D was, how to look around it. Said here, not over the picture, and no second full-screen button (round 18's judges).
+        if !vr && self.live.as_ref().is_some_and(|l| l.id == entry.id && l.picture.is_some()) {
+            let galley = p.layout_job(orbit_look::txt(tr("Drag the picture to look around"), 17.5).weight(weight::MEDIUM).color(fade(theme::FG_2, rest)).job_truncated(width - 34.0));
+            let left = SHOW_WHOLE.center().x - (galley.size().x + 28.0) / 2.0;
+            p.rect_stroke(SHOW_WHOLE, CornerRadius::same((SHOW_WHOLE.height() / 2.0) as u8), Stroke::new(1.0, fade(theme::white(0.1), rest)), StrokeKind::Inside);
+            widgets::icon(p, pos2(left + 10.0, SHOW_WHOLE.center().y), icons::CUBE, 20.0, fade(orbit_look::accent(), rest));
+            p.galley(pos2(left + 28.0, SHOW_WHOLE.center().y - galley.size().y / 2.0), galley, theme::FG_2);
+        }
         // What it can be seen as, and the rest.
         let wf = d.world_feedback(entry);
         for (t, rect) in targets {
@@ -2128,8 +2170,6 @@ impl Panel {
                     let lit = !(current && status.small);
                     pill_button(p, *rect, Some(glyph), label, if lit { orbit_look::accent() } else { RAISED2 }, if lit { orbit_look::on_accent() } else { theme::FG }, h, pr, rest);
                 }
-                // The corner's button is drawn with the picture.
-                Target::FullView if rect.width() > 100.0 => pill_button(p, *rect, Some(icons::CORNERS_OUT), tr("Full screen"), RAISED2, theme::FG, h, pr, rest),
                 Target::ShowSmall => {
                     let lit = current && status.small;
                     pill_button(p, *rect, Some(icons::HAND_GRABBING), tr("Small here"), if lit { orbit_look::accent() } else { RAISED2 }, if lit { orbit_look::on_accent() } else { theme::FG }, h, pr, rest);
@@ -2151,7 +2191,7 @@ impl Panel {
                     let (bg, fg) = if wf.liked { (theme::alpha(theme::REC, 0.22), theme::REC) } else { (RAISED, theme::FG) };
                     small_action(p, *rect, icons::HEART, wf.liked, wf.likes as u64, if wf.likes == 0 { tr("Like") } else { tr("Likes") }, bg, fg, h, pr, rest * if wf.loading { 0.75 } else { 1.0 });
                 }
-                Target::Comments if *rect != TEASER => small_action(p, *rect, icons::CHAT_CIRCLE_TEXT, false, wf.comment_count as u64, if wf.comment_count == 0 { tr_ctx("count", "Comment") } else { tr("Comments") }, RAISED, theme::FG, h, pr, rest),
+                Target::Comments => small_action(p, *rect, icons::CHAT_CIRCLE_TEXT, false, wf.comment_count as u64, if wf.comment_count == 0 { tr_ctx("count", "Comment") } else { tr("Comments") }, RAISED, theme::FG, h, pr, rest),
                 Target::Pictures => {
                     let n = facts.map_or(entry.pictures as usize, |f| f.picture_count.max(entry.pictures as usize));
                     small_action(p, *rect, icons::IMAGES, false, n as u64, tr("Pictures"), RAISED, theme::FG, h, pr, rest);
@@ -2168,7 +2208,7 @@ impl Panel {
                         continue;
                     }
                     let label = if n == 1 { tr("1 more capture ›").to_string() } else { tr!("{count} more ›", count = n) };
-                    text(p, pos2(rect.max.x, rect.center().y), Align2::RIGHT_CENTER, orbit_look::txt(label, 15.5).weight(weight::SEMIBOLD).color(fade(if h { theme::FG } else { orbit_look::accent() }, rest)));
+                    text(p, pos2(rect.max.x, SIDE_UNDER + 12.0), Align2::RIGHT_CENTER, orbit_look::txt(label, 17.5).weight(weight::SEMIBOLD).color(fade(if h { theme::FG } else { orbit_look::accent() }, rest)));
                 }
                 _ => {}
             }
@@ -2176,13 +2216,24 @@ impl Panel {
         // As much of the world's description as fits. In a headset, larger, and no more than that under it: its numbers are on the tiles over it.
         let description = if entry.description.trim().is_empty() { facts.and_then(|f| f.description.as_deref()).unwrap_or("") } else { entry.description.as_str() };
         if !description.trim().is_empty() {
-            let mut job = orbit_look::txt(description.split_whitespace().collect::<Vec<_>>().join(" "), if vr { 18.0 } else { 16.0 }).color(fade(theme::FG, rest)).job(width);
-            // More of it where nobody has said anything yet.
-            let quiet = wf.comments.is_empty() && wf.comment_count == 0;
-            job.wrap.max_rows = if !vr && d.others(entry).is_empty() && (quiet || d.performance(entry).is_none()) { 3 } else { 2 };
-            // In a headset it has what the row of other captures leaves.
-            if !vr || d.others(entry).is_empty() {
-                p.galley(pos2(x, if vr { 510.0 } else { 452.0 }), p.layout_job(job), theme::FG);
+            let said = description.split_whitespace().collect::<Vec<_>>().join(" ");
+            if vr {
+                let mut job = orbit_look::txt(said, 18.0).color(fade(theme::FG, rest)).job(width);
+                job.wrap.max_rows = 2;
+                // In a headset it has what the row of other captures leaves.
+                if d.others(entry).is_empty() {
+                    p.galley(pos2(x, 510.0), p.layout_job(job), theme::FG);
+                }
+            } else if self.note(time).is_none() && wf.error.is_none() && (current || status.error.is_none()) {
+                // On a screen: as many whole lines as end over the panel's foot, by what they measure, and its last one cut with an ellipsis.
+                let lines = |rows: usize| {
+                    let mut job = orbit_look::txt(said.clone(), 17.5).color(fade(theme::FG_2, rest)).job(width);
+                    job.wrap.max_rows = rows;
+                    job.wrap.overflow_character = Some('\u{2026}');
+                    p.layout_job(job)
+                };
+                let galley = (1..=3).rev().map(&lines).find(|g| SIDE_SAYS + g.size().y <= SIDE_FOOT).unwrap_or_else(|| lines(1));
+                p.galley(pos2(x, SIDE_SAYS), galley, theme::FG_2);
             }
         }
         if vr {
@@ -2193,40 +2244,25 @@ impl Panel {
             }
             return;
         }
-        // How smoothly VRChat runs there.
+        // How smoothly VRChat runs there: in its head, the first thing known of it.
         if let Some(perf) = d.performance(entry) {
             let (word, tint) = verdict(perf);
-            chip(p, pos2(x, if wf.comments.is_empty() && wf.comment_count == 0 { 530.0 } else { 496.0 }), icons::GAUGE, &tr!("{fps} fps · {verdict}", fps = perf.fps, verdict = word), tint, rest);
+            chip(p, pos2(x, SIDE_CLOSE.min.y), icons::GAUGE, &tr!("{fps} fps · {verdict}", fps = perf.fps, verdict = word), tint, rest);
         }
-        // Why a press did nothing, what Orbiters refused, what went wrong with the capture; else the newest comment.
-        let note = self.note(time).map(str::to_string).or_else(|| wf.error.clone()).or_else(|| status.error.clone().filter(|_| !current));
-        let teaser_hover = self.hover == Some(Target::Comments);
-        if let Some(note) = note {
-            text_cut(p, pos2(x, TEASER.center().y), width, orbit_look::txt(note, 15.5).color(fade(theme::WARN, rest)));
-        } else {
-            let teaser = TEASER;
-            if wf.comments.is_empty() && !(wf.loading && wf.comment_count > 0) {
-                return;
-            }
-            if teaser_hover {
-                p.rect_filled(teaser, CornerRadius::same(12), fade(RAISED, rest));
-            }
-            widgets::icon(p, pos2(teaser.min.x + 12.0, teaser.center().y), icons::QUOTES, 15.0, fade(theme::FG_3, rest));
-            let line = match wf.comments.first() {
-                Some(c) => {
-                    let by = if c.mine { tr("You") } else if c.by.is_empty() { tr("Someone") } else { c.by.as_str() };
-                    tr!("{name}: {text}", name = by, text = c.text.split_whitespace().collect::<Vec<_>>().join(" "))
-                }
-                None if wf.loading && wf.comment_count > 0 => tr("Reading the comments…").to_string(),
-                None => tr("No comment yet: be the first").to_string(),
-            };
-            text_cut(p, pos2(teaser.min.x + 28.0, teaser.center().y), teaser.width() - 34.0, orbit_look::txt(line, 15.5).color(fade(theme::FG, rest)));
+        // Why a press did nothing, what Orbiters refused, what went wrong with the capture: where its description is, for as long as it is said. What was last said of
+        // it is behind Comments: one more line here was the one the sheet's foot cut (round 18's judges).
+        if let Some(note) = self.note(time).map(str::to_string).or_else(|| wf.error.clone()).or_else(|| status.error.clone().filter(|_| !current)) {
+            let mut job = orbit_look::txt(note, 17.5).color(fade(theme::WARN, rest)).job(width);
+            job.wrap.max_rows = 2;
+            job.wrap.overflow_character = Some('\u{2026}');
+            p.galley(pos2(x, SIDE_SAYS), p.layout_job(job), theme::WARN);
         }
     }
 }
 
-fn side_field_rect() -> Rect {
-    Rect::from_min_max(pos2(100.0, 24.0), pos2(540.0, 80.0))
+/// The search beside the side panel: from the list's left edge to its right one on a sheet (round 18's judges: it shared neither), after the Back button where there is one.
+fn side_field_rect(on_sheet: bool) -> Rect {
+    Rect::from_min_max(pos2(if on_sheet { 32.0 } else { 100.0 }, 24.0), pos2(652.0, 80.0))
 }
 
 /// A number on a small tile, or nothing where it is nought: a row of noughts reads as a row of faults.
@@ -2269,7 +2305,7 @@ fn compact_rect(i: usize) -> Rect {
 fn compact_thumb(card: Rect) -> Rect {
     const MARGIN: f32 = 8.0;
     let high = card.height() - 2.0 * MARGIN;
-    Rect::from_min_size(card.min + vec2(MARGIN, MARGIN), vec2((high * 1.2).round(), high))
+    Rect::from_min_size(card.min + vec2(MARGIN, MARGIN), vec2((high * 1.1).round(), high))
 }
 
 /// The keyboard's keys: digits, three rows of letters (Backspace at the end of the last), then the space bar; with
@@ -2402,7 +2438,7 @@ fn segment(p: &Painter, rect: Rect, label: &str, on: bool, hover: bool, pressed:
     let fg = if on { CARD } else { theme::FG_2 };
     let r = if pressed { rect.shrink(2.0) } else { rect.shrink(1.0) };
     p.rect_filled(r, CornerRadius::same((r.height() / 2.0) as u8), fade(bg, alpha));
-    text(p, r.center(), Align2::CENTER_CENTER, orbit_look::txt(label, 17.0).weight(weight::MEDIUM).color(fade(fg, alpha)));
+    text(p, r.center(), Align2::CENTER_CENTER, orbit_look::txt(label, 17.5).weight(weight::MEDIUM).color(fade(fg, alpha)));
 }
 
 /// A label as a chip: its name and how many gave it; lit when the member gave it.
@@ -2514,7 +2550,7 @@ fn hsv(h: f32, s: f32, v: f32) -> Color32 {
 
 /// A tinted chip at `at`; returns its width.
 fn chip(p: &Painter, at: Pos2, glyph: &str, label: &str, tint: Color32, alpha: f32) -> f32 {
-    let txt = orbit_look::txt(label, 15.0).weight(weight::MEDIUM).color(fade(tint, alpha));
+    let txt = orbit_look::txt(label, 17.5).weight(weight::MEDIUM).color(fade(tint, alpha));
     let galley = p.layout_job(txt.job(f32::INFINITY));
     let rect = Rect::from_min_size(at, vec2(galley.size().x + 42.0, 30.0));
     p.rect_filled(rect, CornerRadius::same(15), fade(theme::alpha(tint, 0.14), alpha));
@@ -2643,23 +2679,24 @@ fn compact_card(p: &Painter, rect: Rect, entry: &Entry, d: &Data, hover: bool, p
     }
     let x = thumb.max.x + 12.0;
     let width = rect.max.x - x - 12.0;
-    let mut name = orbit_look::txt(entry.name.clone(), 16.5).weight(weight::SEMIBOLD).color(fade(theme::FG, alpha)).job(width);
+    // Nothing on it under 12 px at 1280 x 720 (round 18's judges): its name a little over, the rest at that.
+    let mut name = orbit_look::txt(entry.name.clone(), 18.0).weight(weight::SEMIBOLD).color(fade(theme::FG, alpha)).job(width);
     name.wrap.max_rows = 2;
     name.wrap.overflow_character = Some('\u{2026}');
     let name = p.layout_job(name);
-    let author = d.author(entry).map(|a| p.layout_job(orbit_look::txt(a.trim().to_string(), 14.5).color(fade(theme::FG_3, alpha)).job_truncated(width)));
+    let author = d.author(entry).map(|a| p.layout_job(orbit_look::txt(a.trim().to_string(), 17.5).color(fade(theme::FG_3, alpha)).job_truncated(width)));
     let current = status.current == Some(entry.id);
     let likes = d.likes(entry);
     let foot = current || likes > 0;
     // One group, centred on the picture: a short name does not leave the rest hanging at the card's foot.
-    const FOOT: f32 = 18.0;
-    let high = name.size().y + author.as_ref().map_or(0.0, |a| 2.0 + a.size().y) + if foot { 7.0 + FOOT } else { 0.0 };
+    const FOOT: f32 = 20.0;
+    let high = name.size().y + author.as_ref().map_or(0.0, |a| 1.0 + a.size().y) + if foot { 4.0 + FOOT } else { 0.0 };
     let mut y = rect.center().y - high / 2.0;
     let name_high = name.size().y;
     p.galley(pos2(x, y), name, theme::FG);
     y += name_high;
     if let Some(author) = author {
-        y += 2.0;
+        y += 1.0;
         let author_high = author.size().y;
         p.galley(pos2(x, y), author, theme::FG_3);
         y += author_high;
@@ -2667,14 +2704,14 @@ fn compact_card(p: &Painter, rect: Rect, entry: &Entry, d: &Data, hover: bool, p
     if !foot {
         return;
     }
-    let line = y + 7.0 + FOOT / 2.0;
+    let line = y + 4.0 + FOOT / 2.0;
     if current {
         p.circle_filled(pos2(x + 5.0, line), 4.5, fade(if status.shown { accent } else { theme::WARN }, alpha));
-        text(p, pos2(x + 16.0, line), Align2::LEFT_CENTER, orbit_look::txt(if !status.shown { tr("Loading") } else if status.small { tr_ctx("view", "Small") } else { tr("Around you") }, 14.5).weight(weight::MEDIUM).color(fade(theme::FG_2, alpha)));
+        text(p, pos2(x + 16.0, line), Align2::LEFT_CENTER, orbit_look::txt(if !status.shown { tr("Loading") } else if status.small { tr_ctx("view", "Small") } else { tr("Around you") }, 17.5).weight(weight::MEDIUM).color(fade(theme::FG_2, alpha)));
     } else {
         let liked = d.feedback.world(&world_key(&entry.world_id)).is_some_and(|w| w.liked);
-        widgets::icon_fill(p, pos2(x + 7.0, line), icons::HEART, 14.0, fade(if liked { theme::REC } else { theme::FG_3 }, alpha));
-        text(p, pos2(x + 19.0, line), Align2::LEFT_CENTER, orbit_look::txt(short_count(likes as u64), 14.5).weight(weight::MEDIUM).color(fade(theme::FG_2, alpha)));
+        widgets::icon_fill(p, pos2(x + 8.0, line), icons::HEART, 16.0, fade(if liked { theme::REC } else { theme::FG_3 }, alpha));
+        text(p, pos2(x + 21.0, line), Align2::LEFT_CENTER, orbit_look::txt(short_count(likes as u64), 17.5).weight(weight::MEDIUM).color(fade(theme::FG_2, alpha)));
     }
 }
 

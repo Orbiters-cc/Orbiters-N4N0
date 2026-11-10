@@ -19,6 +19,15 @@ fn recent() -> panels::Gallery {
         .collect()
 }
 
+/// The names of the real pictures `stand_in` gives, in its order (`ORBIT_PANEL_WORLDS`, files named "NN Name.jpg"); none without them.
+fn stand_in_names() -> Vec<String> {
+    let Ok(dir) = std::env::var("ORBIT_PANEL_WORLDS") else { return Vec::new() };
+    let Ok(read) = std::fs::read_dir(dir) else { return Vec::new() };
+    let mut paths: Vec<PathBuf> = read.flatten().map(|e| e.path()).filter(|p| image::ImageFormat::from_path(p).is_ok()).collect();
+    paths.sort();
+    paths.iter().filter_map(|p| Some(p.file_stem()?.to_string_lossy().split_once(' ')?.1.to_string())).collect()
+}
+
 fn stand_in(seed: u8) -> ColorImage {
     // Real pictures where there are some to hand: dots and colours are judged on those.
     static REAL: std::sync::OnceLock<Vec<ColorImage>> = std::sync::OnceLock::new();
@@ -363,7 +372,9 @@ pub(super) fn vr_shots(out: &Path, refs: &Path) -> anyhow::Result<()> {
         wheel_scene(&counting, None, Some(bloom), &format!("vr-wheel-{world}-countdown"))?;
         // The Quick Menu where it opens before the eyes, the wing beside it.
         }
-        let held = space::before_eyes(&head, 0.5, 0.08);
+        // Held a little to the left of straight ahead, as the hand that holds it is: the menu, a sheet on it and the wing beside it are all in the picture.
+        let mut held = space::before_eyes(&head, 0.5, 0.08);
+        held.m[0][3] -= 0.07;
         let plane = vr::quick_menu_plane(&vr::grip_holding(&held, &tune.quick_menu(1)), 1, &tune, 1.0);
         let qm_scene = |facts: &Facts, hover: Option<usize>, sheet: Option<Sheet>, name: &str| -> anyhow::Result<()> {
             let mut eye = Eye::new(size, &ground, eyes);
@@ -382,10 +393,10 @@ pub(super) fn vr_shots(out: &Path, refs: &Path) -> anyhow::Result<()> {
                 }
             }
             if let Some(sheet) = sheet {
-                let back = zones::in_units(Zone::SheetBack);
+                let back = vr::sheet_place(Zone::SheetBack);
                 let (pixels, px) = sharp_picture(&back, facts, None, 2.0);
                 eye.quad(&plane.quad(&vr::clear_of_sheet(back, true), 0.0, 0.016), &pixels, px, 1.0);
-                let page = zones::in_units(Zone::Takeover);
+                let page = vr::sheet_place(Zone::Takeover);
                 let px = [1408u32, 792u32];
                 let pixels = sheet_picture(sheet, facts, px);
                 eye.quad(&plane.quad(&vr::clear_of_sheet(page, true), 0.0, 0.02), &pixels, px, 1.0);
@@ -421,8 +432,11 @@ pub(super) fn vr_shots(out: &Path, refs: &Path) -> anyhow::Result<()> {
                 [-tan, tan, -tan * h as f32 / w as f32, tan * h as f32 / w as f32]
             };
             let mut half_fov = VR_SHOT_HALF_FOV;
+            let shared = std::sync::Arc::new(full.around_subject());
             let mut model = |small: &stereo::Small, half: f32| -> anyhow::Result<Vec<u8>> {
                 let camera = stereo::eye_camera(&head, tangents_of(half), w, h, &small.placement(capture.view.eye()));
+                // As the app draws it: only what it reaches, its floor fading at its edge.
+                renderer.clip(Some(&(small.middle(capture.view.eye()), small.reach(), shared.clone())));
                 renderer.render_view(&camera, capture.within(small.reach()))
             };
             let panel = image::open(refs.join("panel-small-docked.png"))?.to_rgba8();
@@ -434,7 +448,7 @@ pub(super) fn vr_shots(out: &Path, refs: &Path) -> anyhow::Result<()> {
                     *c = (*c as u32 * a / 255) as u8;
                 }
             }
-            let page = zones::in_units(Zone::Takeover);
+            let page = vr::sheet_place(Zone::Takeover);
             let page_quad = plane.quad(&vr::clear_of_sheet(page, true), 0.0, 0.02);
             let hole = crate::overlay::worlds::panel::VR_HERO;
             let (x, y) = ((hole.center().x / 1024.0 - 0.5) * page_quad.width, (0.5 - hole.center().y / 576.0) * page_quad.height);
@@ -458,7 +472,7 @@ pub(super) fn vr_shots(out: &Path, refs: &Path) -> anyhow::Result<()> {
                 let (pixels, px) = sharp_picture(&placed, &worlds, None, 2.0);
                 eye.quad(&plane.quad(&vr::clear_of_sheet(placed, true), 0.0, 0.016), &pixels, px, 1.0);
             }
-            let back = zones::in_units(Zone::SheetBack);
+            let back = vr::sheet_place(Zone::SheetBack);
             let (pixels, px) = sharp_picture(&back, &worlds, None, 2.0);
             eye.quad(&plane.quad(&vr::clear_of_sheet(back, true), 0.0, 0.016), &pixels, px, 1.0);
             eye.quad(&page_quad, &panel_pixels, panel_px, 1.0);
@@ -920,6 +934,7 @@ fn round_18_over_the_game(out: &Path, idle: &Facts) -> anyhow::Result<()> {
         let textures: Vec<_> = (0..6).map(|i| canvas.ctx().load_texture("real", stand_in(i), TextureOptions::LINEAR)).collect();
         let mut facts = all.clone();
         facts.hero_captures = textures[..3].iter().map(|t| t.id()).collect();
+        facts.hero_capture_names = stand_in_names().into_iter().take(3).collect();
         facts.hero_picture = Some(textures[1].id());
         for (visit, n) in facts.worlds_visited.iter_mut().zip([5, 3, 4]) {
             visit.picture = Some(textures[n].id());

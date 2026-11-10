@@ -475,6 +475,8 @@ pub struct Facts {
     pub sheet_hole: Option<Rect>,
     /// What All tools' large tiles hold, for real: the newest 3D captures, the newest picture.
     pub hero_captures: Vec<TextureId>,
+    /// The worlds those captures are of, in their order.
+    pub hero_capture_names: Vec<String>,
     pub hero_picture: Option<TextureId>,
     /// What the 3D view says of what was asked of it, and whether captures show small.
     pub view_said: Option<(String, String)>,
@@ -765,15 +767,16 @@ pub fn items(zone: Zone, size: Vec2, facts: &Facts) -> Vec<Item> {
         Zone::SheetBack => {
             // In a headset the head's buttons are of the size of the sheet's own (round 14's judges: tabs much smaller than the buttons under them, for a laser).
             let (top, b) = head_button(facts);
-            let pill = HEAD_PILL;
+            let pill = head_pill(facts);
             let mut out = vec![Item { action: Action::CloseSheet, rect: r(w - 10.0 - b, top, b, b), look: Look::Close }, Item { action: Action::Back, rect: r(BACK_AT, top, b, b), look: Look::HeadBack }];
             out.extend(head_tabs(facts, w).0);
             // While a capture shows around the person: it is one press from gone, wherever on the sheet.
             if facts.view_showing {
-                out.push(Item { action: Action::HideView, rect: r(w - 40.0 - 8.0 - pill, top, pill, b), look: Look::HideView });
+                let gap = hide_view_gap(facts);
+                out.push(Item { action: Action::HideView, rect: r(w - 40.0 - gap - pill, top, pill, b), look: Look::HideView });
                 // On Worlds in 3D, the world's side panel has it.
                 if facts.sheet != Some(Sheet::Worlds) {
-                    out.push(Item { action: Action::SmallView(!facts.view_small), rect: r(w - 40.0 - 8.0 - pill - 6.0 - pill, top, pill, b), look: Look::SmallView });
+                    out.push(Item { action: Action::SmallView(!facts.view_small), rect: r(w - 40.0 - gap - pill - 6.0 - pill, top, pill, b), look: Look::SmallView });
                 }
             }
             // All tools has what plays on its page.
@@ -866,8 +869,8 @@ fn head_tabs(facts: &Facts, head_width: f32) -> (Vec<Item>, f32) {
     // As wide as its own name where room is short (a headset's head is 704 across): its icon, its word, a little room.
     // A headset's words as large as the sheet's buttons' (round 14's judges).
     let snug = |label: &str| (16.0 + label.chars().map(|c| if c.is_ascii() { 8.7 } else { 16.0 }).sum::<f32>()).max(COMPACT_TAB_VR);
-    let pill = HEAD_PILL;
-    let room = head_width - 48.0 - if facts.view_showing { pill + 8.0 + if facts.sheet != Some(Sheet::Worlds) { pill + 6.0 } else { 0.0 } } else { 0.0 } - 12.0;
+    let pill = head_pill(facts);
+    let room = head_width - 48.0 - if facts.view_showing { pill + hide_view_gap(facts) + if facts.sheet != Some(Sheet::Worlds) { pill + 6.0 } else { 0.0 } } else { 0.0 } - 12.0;
     let start = BACK_AT + head_button(facts).1 + 6.0;
     let wide_fits = start + TABS.iter().map(|t| t.3 + 3.0).sum::<f32>() <= room;
     let snug_fits = start + TABS.iter().map(|t| snug(tr_ctx("tile", t.2)) + 3.0).sum::<f32>() <= room;
@@ -922,6 +925,16 @@ fn strip(w: f32, h: f32, facts: &Facts) -> Vec<Item> {
     items
 }
 
+/// How far Hide 3D stands from the sheet's close: in a headset about a third of a pill, so that a laser on one is not on the other (round 18's judges: they touched).
+/// A pill of the sheet's head: in a headset a little narrower, by what its gap from the close takes, so that the tabs keep their names.
+fn head_pill(facts: &Facts) -> f32 {
+    if facts.desktop { HEAD_PILL } else { HEAD_PILL - 10.0 }
+}
+
+fn hide_view_gap(facts: &Facts) -> f32 {
+    if facts.desktop { 8.0 } else { 18.0 }
+}
+
 /// What the sheet's page holds, in N4N0's page's units (1024 x 576).
 pub fn sheet_items(sheet: Sheet, facts: &Facts) -> Vec<Item> {
     let mut items = sheet_page_items(sheet, facts);
@@ -934,7 +947,8 @@ pub fn sheet_items(sheet: Sheet, facts: &Facts) -> Vec<Item> {
 fn sheet_page_items(sheet: Sheet, facts: &Facts) -> Vec<Item> {
     match sheet {
         Sheet::All => {
-            let (x0, y0, gap) = (24.0, 10.0, 12.0);
+            // A little less air between its rows than at first: the accessories' rows take it, for two whole lines of what each does at a size that reads (round 18's judges).
+            let (x0, y0, gap) = (24.0, 8.0, 10.0);
             let width = 1024.0 - x0 * 2.0;
             // Who comes here has the main features on the wing already, and came for the rest: those have real room and say what they do. The main features stay the largest.
             let small = accessories(facts);
@@ -943,27 +957,32 @@ fn sheet_page_items(sheet: Sheet, facts: &Facts) -> Vec<Item> {
             // What plays a little taller for its row of real buttons, the accessories taller for their larger words (round 16's judges).
             // The first row taller, for its cards' larger words (round 17's judges: Instances' about 10 px).
             let (first_h, second_h) = (182.0, 172.0);
-            let per_row = small.len().div_ceil(2).max(3);
+            // One grid for both their rows: four columns on a screen, a short last row ending where its tiles do, so every edge stays on the grid (round 18's judges:
+            // three tiles under four, no column lining up). None takes two columns: an accessory would then be larger than a main feature. A headset's many: two
+            // even rows.
+            let per_row = if small.len() <= 8 { 4 } else { small.len().div_ceil(2) };
             let small_rows = small.len().div_ceil(per_row) as f32;
             let small_gap = 8.0;
             let small_h = (576.0 - y0 * 2.0 - gap * 2.0 - first_h - second_h - gap - (small_rows - 1.0) * small_gap) / small_rows;
             // Worlds in 3D largest, then what people come for; what plays with all its controls, there, with no page of its own.
-            let first_w = (width - gap * 2.0) * 0.5;
-            let rest_w = (width - gap * 2.0 - first_w) / 2.0;
+            // Instances wider than YouTube: its places' names want the room (round 18's judges: a long one fell to 9 px), YouTube's two lines and a button do not.
+            let first_w = ((width - gap * 2.0) * 0.46).round();
+            let tube_w = ((width - gap * 2.0) * 0.22).round();
+            let rest_w = width - gap * 2.0 - first_w - tube_w;
             let hero = |action, rect, icon, label, line, badge| Item { action, rect, look: Look::Hero { icon, label, line, badge, tint: tool_tint(action) } };
             let row2 = y0 + first_h + gap;
             let mut out = vec![
                 hero(Action::Worlds, r(x0, y0, first_w, first_h), icons::GLOBE_HEMISPHERE_WEST, tr("Worlds in 3D"), tr("Search any world. See the ones captured in 3D."), true),
-                hero(Action::Page(Target::YouTube), r(x0 + first_w + gap, y0, rest_w, first_h), icons::YOUTUBE_LOGO, "YouTube", tr("Find a video for this world's player"), false),
-                hero(Action::Page(Target::Instances), r(x0 + first_w + gap * 2.0 + rest_w, y0, rest_w, first_h), icons::CLOCK, tr("Instances"), tr("Where you were lately: go back"), false),
+                hero(Action::Page(Target::YouTube), r(x0 + first_w + gap, y0, tube_w, first_h), icons::YOUTUBE_LOGO, "YouTube", tr("Find a video for this world's player"), false),
+                hero(Action::Page(Target::Instances), r(x0 + first_w + gap * 2.0 + tube_w, y0, rest_w, first_h), icons::CLOCK, tr("Instances"), tr("Where you were lately: go back"), false),
             ];
-            let playing = r(x0, row2, first_w + gap + rest_w, second_h);
+            let playing = r(x0, row2, first_w + gap + tube_w, second_h);
             out.push(Item { action: Action::Idle, rect: playing, look: Look::NowPlaying });
             out.extend(now_playing_controls(playing, facts));
             out.push(hero(Action::Pictures, r(playing.right() + gap, row2, rest_w, second_h), icons::IMAGES, tr("Pictures"), tr("Your pictures and 3D captures"), false));
             let top = row2 + second_h + gap;
+            let w = (width - small_gap * (per_row as f32 - 1.0)) / per_row as f32;
             for (i, row) in small.chunks(per_row).enumerate() {
-                let w = (width - small_gap * (row.len() as f32 - 1.0)) / row.len() as f32;
                 let y = top + i as f32 * (small_h + small_gap);
                 for (c, (action, icon, label)) in row.iter().enumerate() {
                     out.push(Item { action: *action, rect: r(x0 + c as f32 * (w + small_gap), y, w, small_h), look: Look::Small { icon, label, tint: tool_tint(*action) } });
@@ -1346,7 +1365,7 @@ pub fn scrolls_with_a_drag(sheet: Sheet, look: &Look) -> bool {
 
 /// Where what plays's timeline lies on its panel, tall enough for a laser to find.
 fn timeline_rect(panel: Rect, volume: bool) -> Rect {
-    let x = panel.left() + panel.height();
+    let x = playing_words_left(panel);
     // Under a title of two lines, over the row of controls.
     Rect::from_min_max(pos2(x, panel.top() + 86.0), pos2(panel.right() - 14.0 - if volume { VOLUME_CLUSTER } else { 0.0 }, panel.top() + 120.0))
 }
@@ -1370,6 +1389,10 @@ pub fn clean_title(title: &str) -> String {
 
 /// `seconds` as a clock's digits.
 fn minutes(seconds: u32) -> String {
+    // Hours as hours: eight of them read "480:12" (round 18's judges).
+    if seconds >= 3600 {
+        return format!("{}:{:02}:{:02}", seconds / 3600, seconds / 60 % 60, seconds % 60);
+    }
     format!("{}:{:02}", seconds / 60, seconds % 60)
 }
 
@@ -1461,9 +1484,16 @@ const VOLUME_CLUSTER: f32 = 206.0;
 const VOLUME_BUTTON: f32 = 36.0;
 const PLAYING_LINK_H: f32 = 42.0;
 
+/// Where Now playing's words and controls start, after its picture: the picture as high as the panel where that leaves the row of controls its room (previous, play, next,
+/// Drop link and Copy link, none over another), and smaller where the panel is narrower.
+fn playing_words_left(panel: Rect) -> f32 {
+    const CONTROLS: f32 = 56.0 + PLAY_W + 44.0 + 14.0 + PLAYING_LINK_W * 2.0 + 6.0 + 12.0;
+    panel.left() + panel.height().min(panel.width() - CONTROLS).max(96.0)
+}
+
 fn now_playing_controls(panel: Rect, facts: &Facts) -> Vec<Item> {
     let mut out = Vec::new();
-    let x = panel.left() + panel.height();
+    let x = playing_words_left(panel);
     // One row under the timeline: previous, play, next, then Drop link and Copy link (round 15's judges, mockup-opus-1). Each large enough for a laser.
     let y = panel.bottom() - PLAYING_ROW;
     let at = |x: f32, side: f32| Rect::from_center_size(pos2(x + side / 2.0, y), Vec2::splat(side));
@@ -1516,7 +1546,7 @@ fn tool_tint(action: Action) -> Color32 {
 /// What a large tile of All tools holds under its name.
 fn hero_body(p: &Painter, body: Rect, action: Action, line: &str, facts: &Facts) {
     let words = |p: &Painter, at: Pos2, text: &str, rows: usize, width: f32| {
-        let mut job = egui::text::LayoutJob::simple(text.to_string(), look::font(16.5, weight::MEDIUM), look::MUTED, width);
+        let mut job = egui::text::LayoutJob::simple(text.to_string(), look::font(17.5, weight::MEDIUM), look::MUTED, width);
         job.wrap.max_rows = rows;
         job.wrap.overflow_character = Some('\u{2026}');
         p.galley(at, p.layout_job(job), look::MUTED);
@@ -1524,64 +1554,62 @@ fn hero_body(p: &Painter, body: Rect, action: Action, line: &str, facts: &Facts)
     let radii = [theme::squircle(10.0); 4];
     match action {
         Action::Worlds if !facts.hero_captures.is_empty() => {
-            // Each capture whole at its own shape, side by side: a band cut out of one says nothing of the place, and a judge took it for a stretched picture.
+            // The captures fill their card, side by side, each saying its world (round 18's judges: three small pictures in a half-empty card). Each is cut to its
+            // tile about its middle, never stretched.
+            let _ = line;
             let captures = &facts.hero_captures[..facts.hero_captures.len().min(3)];
             let n = captures.len() as f32;
             let gap = 8.0;
-            let said = if body.height() > 118.0 { 48.0 } else { 0.0 };
-            let room = (body.height() - said).max(40.0);
-            let w = ((body.width() - gap * (n - 1.0)) / n).min(room * 16.0 / 9.0);
-            let h = w * 9.0 / 16.0;
-            let top = body.top() + (room - h) / 2.0;
+            let w = (body.width() - gap * (n - 1.0)) / n;
             for (i, id) in captures.iter().enumerate() {
-                let tile = Rect::from_min_size(pos2(body.left() + i as f32 * (w + gap), top), vec2(w, h));
+                let tile = Rect::from_min_size(pos2(body.left() + i as f32 * (w + gap), body.top()), vec2(w, body.height()));
                 squircle_picture(p, tile, radii, *id, cover_uv(tile.size()), Color32::WHITE);
-            }
-            if said > 0.0 {
-                words(p, pos2(body.left(), top + h + 6.0), line, 2, body.width());
+                let Some(name) = facts.hero_capture_names.get(i).filter(|n| !n.is_empty()) else { continue };
+                // Its world's name on its foot, on a shade of its own: whole, on two lines where one does not hold it.
+                let mut job = egui::text::LayoutJob::simple(name.clone(), look::font(17.5, weight::SEMIBOLD), Color32::WHITE, tile.width() - 18.0);
+                job.wrap.max_rows = 2;
+                job.wrap.overflow_character = Some('\u{2026}');
+                let galley = p.layout_job(job);
+                let foot = Rect::from_min_max(pos2(tile.left(), tile.bottom() - galley.size().y - 10.0), tile.max);
+                p.rect_filled(foot, egui::CornerRadius { nw: 0, ne: 0, sw: 10, se: 10 }, theme::black(0.62));
+                p.galley(pos2(foot.left() + 9.0, foot.top() + 5.0), galley, Color32::WHITE);
             }
         }
         Action::Page(Target::Instances) if !facts.worlds_visited.is_empty() => {
-            // The last three places, as FEATURES says (round 15's judges found two), each with when, the one you are in marked.
-            let row = ((body.height() + 6.0) / 3.0).clamp(30.0, 56.0);
-            let rows = ((body.height() + 6.0) / row).floor().max(1.0) as usize;
-            for (i, visit) in facts.worlds_visited.iter().take(rows).enumerate() {
-                let y = body.top() + i as f32 * row;
-                let side = row - 6.0;
-                // A smaller picture, the words the room (round 17's judges: about 10 px).
-                let tile = Rect::from_min_size(pos2(body.left(), y), vec2(side * 1.3, side));
+            // The last places, up to three, each with when, the one you are in marked. Every name at one size, one a screen reads (12 px at 1280 x 720), a long one on
+            // two lines broken between words, when at its row's end (round 18's judges: two sizes in one card, and a long name at about 9 px). As many as end inside the card.
+            let font = look::font(17.5, weight::SEMIBOLD);
+            let small = look::font(17.5, weight::MEDIUM);
+            let line = p.layout_no_wrap("Ag".to_string(), font.clone(), look::LABEL).size().y; // i18n: not shown (measures a line's height)
+            let (thumb, between) = (vec2(34.0, 25.0), 3.0);
+            let mut y = body.top();
+            for visit in facts.worlds_visited.iter().take(3) {
+                let (when, ink) = if visit.here { (tr("You are here").to_string(), look::accent()) } else { (visit.line.split(" \u{b7} ").next().unwrap_or_default().to_string(), look::MUTED) };
+                let when_wide = p.layout_no_wrap(when.clone(), small.clone(), ink).size().x;
+                let x = body.left() + thumb.x + 10.0;
+                let room = body.right() - x - when_wide - 10.0;
+                let fits = |t: &str| p.layout_no_wrap(t.to_string(), font.clone(), look::LABEL).size().x <= room;
+                let (first, rest) = name_lines(&visit.name, fits);
+                let lines = if rest.is_some() { 2.0 } else { 1.0 };
+                let high = (line * lines).max(thumb.y);
+                if y + high > body.bottom() + 1.0 {
+                    break;
+                }
+                let tile = Rect::from_min_size(pos2(body.left(), y + (high - thumb.y) / 2.0), thumb);
                 match visit.picture {
                     Some(id) => squircle_picture(p, tile, [theme::squircle(7.0); 4], id, cover_uv(tile.size()), Color32::WHITE),
                     None => {
                         p.rect_filled(tile, look::radius(7.0), look::HEADER);
-                        widgets::icon(p, tile.center(), icons::GLOBE, side * 0.5, look::MUTED);
+                        widgets::icon(p, tile.center(), icons::GLOBE, thumb.y * 0.6, look::MUTED);
                     }
                 }
-                let x = tile.right() + 10.0;
-                let room = body.right() - x;
-                let font = look::font(17.0, weight::SEMIBOLD);
-                let small = look::font(14.5, weight::MEDIUM);
-                let (when, ink) = if visit.here { (tr("You are here").to_string(), look::accent()) } else { (visit.line.split(" \u{b7} ").next().unwrap_or_default().to_string(), look::MUTED) };
-                let fits = |t: &str| p.layout_no_wrap(t.to_string(), font.clone(), look::LABEL).size().x <= room;
-                match name_lines(&visit.name, fits) {
-                    // Whole on one line, when under it.
-                    (first, None) => {
-                        p.text(pos2(x, y + side * 0.3), Align2::LEFT_CENTER, fit(p, &first, &font, room), font, look::LABEL);
-                        p.text(pos2(x, y + side * 0.8), Align2::LEFT_CENTER, fit(p, &when, &small, room), small, ink);
-                    }
-                    // Long: broken only between words, never inside one ("雨の摩天 / 楼", round 17's judges), when after the rest.
-                    (first, Some(rest)) => {
-                        // Two lines in a row's height: a smaller size, so they do not run into each other (round 18's live 08).
-                        let font = look::font(14.0, weight::SEMIBOLD);
-                        p.text(pos2(x, y + side * 0.26), Align2::LEFT_CENTER, first, font.clone(), look::LABEL);
-                        let rest_wide = p.layout_no_wrap(rest.clone(), font.clone(), look::LABEL).size().x;
-                        let shown = fit(p, &rest, &font, room);
-                        p.text(pos2(x, y + side * 0.8), Align2::LEFT_CENTER, shown, font.clone(), look::LABEL);
-                        if rest_wide + 60.0 <= room {
-                            p.text(pos2(x + rest_wide + 8.0, y + side * 0.8), Align2::LEFT_CENTER, fit(p, &format!("\u{b7} {when}"), &small, room - rest_wide - 8.0), small, ink);
-                        }
-                    }
+                let top = y + (high - line * lines) / 2.0;
+                p.text(pos2(x, top + line / 2.0), Align2::LEFT_CENTER, fit(p, &first, &font, room), font.clone(), look::LABEL);
+                if let Some(rest) = rest {
+                    p.text(pos2(x, top + line * 1.5), Align2::LEFT_CENTER, fit(p, &rest, &font, room), font.clone(), look::LABEL);
                 }
+                p.text(pos2(body.right(), y + high / 2.0), Align2::RIGHT_CENTER, when, small.clone(), ink);
+                y += high + between;
             }
         }
         Action::Pictures if facts.hero_picture.is_some() => {
@@ -1848,6 +1876,10 @@ fn badge(p: &Painter, icon_at: Pos2, icon_size: f32, fill: Color32, ink: Color32
 
 /// The time in a recording's or a countdown's form.
 fn clock(seconds: u32) -> String {
+    // Hours as hours: eight of them read "480:12" (round 18's judges).
+    if seconds >= 3600 {
+        return format!("{}:{:02}:{:02}", seconds / 3600, seconds / 60 % 60, seconds % 60);
+    }
     format!("{:02}:{:02}", seconds / 60, seconds % 60)
 }
 
@@ -2476,11 +2508,11 @@ fn draw(p: &Painter, zone: Zone, item: &Item, facts: &Facts, hovered: bool, pres
                 Some(said) => {
                     p.text(pos2(x, rect.top() + 22.0), Align2::LEFT_CENTER, fit(p, label, &font, room), font, Color32::WHITE);
                     // Smaller than its name and quieter, and never past the tile's foot (Enzo, 2026-11-10: at the name's size it ran over the tile and was cut). As many
-                    // whole lines as the tile holds, by what they measure.
+                    // whole lines as the tile holds, by what they measure. Not under 12 px at 1280 x 720 either (round 18's judges), which the taller rows make room for.
                     let top = rect.top() + 34.0;
                     let ink = theme::mix(look::MUTED, Color32::WHITE, 0.55);
                     let lines = |rows: usize| {
-                        let mut job = egui::text::LayoutJob::simple(said.clone(), look::font(15.5, weight::MEDIUM), ink, room);
+                        let mut job = egui::text::LayoutJob::simple(said.clone(), look::font(17.5, weight::MEDIUM), ink, room);
                         job.wrap.max_rows = rows;
                         job.wrap.overflow_character = Some('\u{2026}');
                         p.layout_job(job)
@@ -2526,8 +2558,9 @@ fn draw(p: &Painter, zone: Zone, item: &Item, facts: &Facts, hovered: bool, pres
             let tint = theme::VIOLET;
             let radius = look::radius(look::TILE_RADIUS + 4.0);
             p.rect_filled(rect, radius, theme::mix(look::TILE, tint, 0.14));
-            let side = rect.height() - 24.0;
-            let art = Rect::from_min_size(rect.min + vec2(12.0, 12.0), Vec2::splat(side));
+            // Its picture a square, as large as leaves its row of controls whole.
+            let side = playing_words_left(rect) - rect.left() - 24.0;
+            let art = Rect::from_min_size(pos2(rect.left() + 12.0, rect.center().y - side / 2.0), Vec2::splat(side));
             match (facts.art, &facts.music) {
                 (Some(id), Some(_)) => {
                     keep_colour(p, art);
@@ -2538,7 +2571,7 @@ fn draw(p: &Painter, zone: Zone, item: &Item, facts: &Facts, hovered: bool, pres
                     widgets::icon(p, art.center(), icons::MUSIC_NOTES, side * 0.4, tint);
                 }
             }
-            let x = rect.left() + rect.height();
+            let x = playing_words_left(rect);
             let room = rect.right() - x - 14.0;
             // Whose it is, readable: tiny purple words were what read least (round 14's judges). Its volume beside it.
             let font = look::font(15.0, weight::SEMIBOLD);
@@ -3474,6 +3507,13 @@ fn draw_turning(p: &Painter, page: Rect, n: usize, facts: &Facts, view: &OpenedV
         (None, None) => waiting(p, tr("Getting its 3D ready\u{2026}")),
     }
     if full {
+        // What is looked at stays said (round 18's judges: on the whole sheet nothing named it), in its lower left corner, clear of the button that brings it back.
+        let font = look::font(18.0, weight::SEMIBOLD);
+        let name = fit(p, &recent.title, &font, rect.width() - 150.0);
+        let wide = p.layout_no_wrap(name.clone(), font.clone(), Color32::WHITE).size().x + 28.0;
+        let pill = Rect::from_min_size(pos2(rect.left() + 14.0, rect.bottom() - 14.0 - 36.0), vec2(wide, 36.0));
+        p.rect_filled(pill, look::radius(18.0), theme::alpha(theme::INK_900, 0.78));
+        p.text(pos2(pill.left() + 14.0, pill.center().y), Align2::LEFT_CENTER, name, font, Color32::WHITE);
         return;
     }
     // Under the frame, never over it: what it is, when it was made, and how to turn it, a line each (round 12's judges read one run joined by commas); its next
@@ -3519,11 +3559,7 @@ fn draw_caption(p: &Painter, zone: Zone, rect: Rect, facts: &Facts) {
         draw_words_marked(p, rect, &format!("{first}: {second}"), "", false);
         return;
     }
-    // In a headset the wheel's Hide ring sits right after this pill, level with it (round 14's and 15's judges): the pill ends at its zone's right edge, beside it.
-    if on_the_wheel && !facts.desktop {
-        draw_words_marked_to(p, rect, &first, &second, true, true);
-        return;
-    }
+    // In a headset as on a screen, centred over the ring's top: Hide ring is right over it, on the same axis (round 18's judges).
     draw_words_marked(p, rect, &first, &second, on_the_wheel);
 }
 

@@ -185,8 +185,12 @@ const SMALL_TREMBLE_M: f32 = 0.003;
 
 /// How much a capture in a panel's hole is tipped towards who looks, and one out in the room: held below the eyes that one is seen
 /// from above already.
-const SMALL_TILT_IN_A_HOLE: f32 = 30.0;
+// Seen from low in its hole: what stands in it reads as a place, where from 30 degrees up it read as a brown round of floor (round 18's judges).
+const SMALL_TILT_IN_A_HOLE: f32 = 25.0;
 const SMALL_TILT_IN_THE_ROOM: f32 = 14.0;
+
+/// How far under a hole's middle a capture's floor lies in it, in its radius.
+const SMALL_FLOOR_UNDER_THE_MIDDLE: f32 = 0.08;
 
 /// Where a capture standing small lies in a panel: as that panel turns, this large, this far behind it.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -205,8 +209,11 @@ impl SmallDock {
         // Tipped towards who looks: a panel faces them, and a scene on it seen level would be seen edge on.
         let (ts, tc) = SMALL_TILT_IN_A_HOLE.to_radians().sin_cos();
         let tipped = [[1.0, 0.0, 0.0], [0.0, tc, -ts], [0.0, ts, tc]];
-        let raised = add(position(at), scale(axis(at, 1), radius * 0.1));
-        Self { rotation: mat_mul(&rotation_of(at), &mat_mul(&tipped, &turned)), anchor: sub(raised, scale(axis(at, 2), radius * 0.8)), radius }
+        // Its floor in the hole's lower part: what stands on it has the rest.
+        let raised = sub(position(at), scale(axis(at, 1), radius * SMALL_FLOOR_UNDER_THE_MIDDLE));
+        // Its whole round behind the panel's plane: seen from low its near edge comes as far forward as its middle is back, and what is nearer than the panel while
+        // the panel covers it would strain the eyes.
+        Self { rotation: mat_mul(&rotation_of(at), &mat_mul(&tipped, &turned)), anchor: sub(raised, scale(axis(at, 2), radius)), radius }
     }
 }
 

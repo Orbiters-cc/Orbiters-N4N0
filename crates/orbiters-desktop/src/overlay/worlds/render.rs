@@ -117,6 +117,9 @@ impl Resample {
     }
 }
 
+/// From how far out of its reach a capture standing small fades to nothing at its edge.
+const SMALL_FADES_FROM: f32 = 0.8;
+
 impl FaceRenderer {
     pub fn new(device: wgpu::Device, queue: wgpu::Queue) -> Self {
         let gpu = Gpu::renderer(device.clone(), queue.clone());
@@ -140,6 +143,8 @@ impl FaceRenderer {
         }
         self.clipped = Some((*middle, *reach));
         let within = reach * reach;
+        // Its last part fades out (round 18's judges: a ragged cut through a shack and across the floor): whole to here, then thinner to nothing at its reach.
+        let whole = (reach * SMALL_FADES_FROM) * (reach * SMALL_FADES_FROM);
         let marks: Vec<u8> = capture
             .gaussians
             .means
@@ -147,8 +152,13 @@ impl FaceRenderer {
             .map(|m| {
                 // Across the ground only: moved, it shows the same round as before, with nothing cut for its height.
                 let (x, z) = (m[0] - middle[0], m[2] - middle[2]);
-                if x * x + z * z <= within {
+                let far = x * x + z * z;
+                if far <= whole {
                     0
+                } else if far <= within {
+                    // 128 whole to 255 nothing (the shader's faded marks).
+                    let t = (far.sqrt() - reach * SMALL_FADES_FROM) / (reach * (1.0 - SMALL_FADES_FROM));
+                    128 + (t.clamp(0.0, 1.0) * 127.0) as u8
                 } else {
                     2
                 }

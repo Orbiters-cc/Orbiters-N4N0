@@ -20,6 +20,9 @@ pub const WIDTH_M: f32 = 0.40;
 const ABOVE_M: f32 = 0.025;
 /// How much of a capture's radius its content reaches up, mostly: the hint's foot and the X sit just over that.
 const TOP_OF_RADIUS: f32 = 0.7;
+/// Where on a capture's rim its X stands, in its radius: right of its middle and behind it, as seen from the eyes (on the round, 0.66 and 0.75 are on its edge).
+const RIM_ACROSS: f32 = 0.66;
+const RIM_BACK: f32 = 0.72;
 /// How far right of the view's middle its X is: over the view, toward its upper right.
 fn x_across(radius: f32) -> f32 {
     (radius * 0.55).clamp(0.04, 0.165)
@@ -30,7 +33,10 @@ const X_CLEAR_M: f32 = 0.06;
 
 /// How far left of the view's middle the hint stands, so the X has the view's upper right to itself with a clear gap.
 fn hint_left(radius: f32) -> f32 {
-    (WIDTH_M / 2.0 + X_CLEAR_M + CHIP_WIDTH_M / 2.0 - x_across(radius)).max(0.0)
+    // Over its middle: the X is on the capture's rim now, and needs no room beside the hint.
+    // A little to the right of it, by what its page leaves empty at its right.
+    let _ = (radius, X_CLEAR_M, x_across(radius));
+    -0.04
 }
 const FRAME_S: f32 = 1.0 / 45.0;
 /// One push up and pull down, in seconds.
@@ -42,7 +48,8 @@ const STICK_FRAME_S: f32 = 1.0 / 36.0;
 const STICK_TURNS_BY: f32 = 0.7;
 pub const STICK_AT: [f32; 2] = [-WIDTH_M / 2.0 + STICK_COLUMN_PX / PX[0] as f32 * WIDTH_M / 2.0, -0.026];
 /// The part of the page the stick stands in, at its left, its name under it.
-const STICK_COLUMN_PX: f32 = 300.0;
+// Narrower than at first: the stick right beside what it does, one group (round 18's judges saw them apart).
+const STICK_COLUMN_PX: f32 = 236.0;
 
 /// What it says.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -195,11 +202,14 @@ impl HideChip {
 /// (round 13's judges), and never beside the view (round 14's, against request 32): the hint stands left of the view's middle, so the X has room right of it.
 pub fn chip_place(middle: V3, radius: f32, eye: V3, over_the_hint: bool) -> vr::Matrix34 {
     let _ = over_the_hint;
+    // On the capture's own rim, at its far right as seen from the eyes, standing on it: joined to it and moving with it, and still over it in the picture the eyes
+    // get (round 18's judges: it floated between the hint and the capture, attached to neither). Request 32 keeps it above.
     let right = right_of(middle, eye);
-    let across = x_across(radius);
-    // On the view's top line, wholly under the hint: it reads as the view's.
-    let up = radius * TOP_OF_RADIUS;
-    facing(stereo::add(stereo::add(middle, stereo::scale(right, across)), [0.0, up, 0.0]), eye)
+    let towards = stereo::sub(eye, middle);
+    let flat = (towards[0] * towards[0] + towards[2] * towards[2]).sqrt().max(1e-4);
+    let back = [-towards[0] / flat, 0.0, -towards[2] / flat];
+    let on_the_rim = stereo::add(stereo::scale(right, radius * RIM_ACROSS), stereo::scale(back, radius * RIM_BACK));
+    facing(stereo::add(stereo::add(middle, on_the_rim), [0.0, CHIP_WIDTH_M * 0.62, 0.0]), eye)
 }
 
 /// Level, to the right as seen from `eye`.
@@ -351,10 +361,15 @@ pub fn backdrop_pixels() -> Vec<u8> {
     let mut pixels = Vec::with_capacity((BACKDROP_PX[0] * BACKDROP_PX[1] * 4) as usize);
     for y in 0..BACKDROP_PX[1] {
         for x in 0..BACKDROP_PX[0] {
-            // Lightest in its middle, as a lit stage.
-            let (u, v) = (x as f32 / (BACKDROP_PX[0] - 1) as f32 * 2.0 - 1.0, y as f32 / (BACKDROP_PX[1] - 1) as f32 * 2.0 - 1.0);
-            let light = (1.0 - (u * u + v * v) * 0.5).clamp(0.0, 1.0);
-            pixels.extend_from_slice(&[(26.0 + 44.0 * light) as u8, (30.0 + 48.0 * light) as u8, (38.0 + 58.0 * light) as u8, 255]);
+            // A dusk behind what stands in it, lightest along where its floor ends: seen from low the capture has a far side, and one flat grey read as a pane
+            // (round 18's judges).
+            let _ = x;
+            let v = y as f32 / (BACKDROP_PX[1] - 1) as f32;
+            let glow = (1.0 - ((v - 0.56) / if v < 0.56 { 0.56 } else { 0.2 }).abs()).clamp(0.0, 1.0);
+            let glow = glow * glow;
+            let under = if v > 0.56 { ((v - 0.56) / 0.44).clamp(0.0, 1.0) } else { 0.0 };
+            let c = [22.0 + 46.0 * glow - 8.0 * under, 28.0 + 50.0 * glow - 10.0 * under, 44.0 + 62.0 * glow - 18.0 * under];
+            pixels.extend_from_slice(&[c[0] as u8, c[1] as u8, c[2] as u8, 255]);
         }
     }
     pixels
@@ -489,15 +504,22 @@ mod tests {
         assert!(on_chip(&place, stereo::add(middle, [0.03, 0.0, 0.0]), [0.0, 1.0, 0.0]));
     }
 
-    /// Enzo's request 32: the X floats above the view, never beside it (round 14 moved it beside), and never on the hint (round 13: it read as the hint's).
+    /// Enzo's request 32: the X is over the view as the eyes see it, at its upper right, never beside it (round 14 moved it beside), and never on the hint (round 13:
+    /// it read as the hint's). Round 18's judges: joined to the capture, not floating between it and the hint. So it stands on the capture's own rim, on its far side.
     #[test]
-    fn the_x_floats_above_the_view_clear_of_the_hint() {
+    fn the_x_stands_on_the_views_far_rim_over_it_as_seen_and_clear_of_the_hint() {
         let eye = [0.0, 1.6, 0.0];
         for radius in [0.12, 0.2, 0.3, 0.45] {
             let middle = [0.0, 1.4, -0.6];
             let x = stereo::position(&chip_place(middle, radius, eye, true));
-            assert!(x[1] >= middle[1] + radius * TOP_OF_RADIUS - 1e-4, "on the view's top at {radius}: {x:?}");
-            assert!(x[0].abs() < radius * 0.85, "over the view, not beside it, at {radius}: {x:?}");
+            // On its rim, across the ground, and standing on it.
+            let out = ((x[0] - middle[0]).powi(2) + (x[2] - middle[2]).powi(2)).sqrt();
+            assert!((out / radius - 1.0).abs() < 0.05, "on its rim at {radius}: {x:?}");
+            assert!(x[1] > middle[1] && x[1] < middle[1] + CHIP_WIDTH_M, "standing on it at {radius}: {x:?}");
+            // Its far side, to the right: over the view in what eyes above it see, not beside it.
+            assert!(x[2] < middle[2] && x[0] > middle[0] && x[0] - middle[0] < radius * 0.85, "its far right at {radius}: {x:?}");
+            let seen = |p: V3| (p[1] - eye[1]) / (eye[2] - p[2]);
+            assert!(seen(x) > seen(middle), "over its middle as seen at {radius}: {x:?}");
             let hint = hint_place(middle, radius, eye);
             let hint_right = hint[0] + WIDTH_M / 2.0;
             let hint_foot = hint[1] - WIDTH_M * PX[1] as f32 / PX[0] as f32 / 2.0;

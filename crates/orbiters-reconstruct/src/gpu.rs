@@ -1415,9 +1415,11 @@ impl Gpu {
     }
 
     /// A viewer's marks of the Gaussians uploaded, one byte each in their order (crate::edit::Edit::view_marks): 0 as
-    /// trained, 1 selected (tinted, project.wgsl's SELECTED), 2 or more left out (hidden or deleted). An upload clears
-    /// them. A quarter of the bytes of one float per Gaussian: 0.75 MB for three million, written again whole with
-    /// each change of a selection (a brush stroke's), which costs a frame nothing.
+    /// trained, 1 selected (tinted, project.wgsl's SELECTED), 2 to 127 left out (hidden or deleted; an edit only ever
+    /// writes 2), 128 to 255 faded, as opaque as trained at 128 down to nothing at 255 (the edge of a capture the
+    /// overlay shows small: its own renderer is the only writer of those). An upload clears them. A quarter of the
+    /// bytes of one float per Gaussian: 0.75 MB for three million, written again whole with each change of a selection
+    /// (a brush stroke's), which costs a frame nothing.
     pub fn set_marks(&mut self, marks: &[u8]) {
         let Some(v) = self.splats.as_ref().and_then(|s| s.viewer.as_ref()) else { return };
         let n = self.count.min(marks.len());

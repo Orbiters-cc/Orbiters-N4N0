@@ -2350,8 +2350,6 @@ fn spawn_watchers(ctl: Shared) {
             let history_file = visited::history_file();
             let mut history = visited::History::load(&history_file);
             let mut history_changed = false;
-            // The visits as the windows last heard of them ([`visited::History::revision`]).
-            let mut history_told = history.revision();
             // The videos the worlds played, the same way (the Videos page).
             let mut videos = videos::Videos::load();
             let mut system = sysinfo::System::new();
@@ -2537,13 +2535,6 @@ fn spawn_watchers(ctl: Shared) {
                         if std::mem::take(&mut history_changed) {
                             if let Err(e) = history.save(&history_file) {
                                 eprintln!("visited worlds: {e}");
-                            }
-                            // A visit, a world's name, an instance: what the windows made from the history is made
-                            // again (Photos & captures files a picture under the instance it was taken in). Not for
-                            // the logs read a little further, which is all most saves hold.
-                            let visits = history.revision();
-                            if std::mem::replace(&mut history_told, visits) != visits {
-                                ctl.bump_library();
                             }
                         }
                     }

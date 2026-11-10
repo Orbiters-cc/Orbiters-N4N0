@@ -11,6 +11,7 @@ pub const PRIVATE: &[&str] = &[
 ];
 
 /// Production subprocesses/control commands, not developer harnesses. They must retain normal installed behavior.
+#[cfg(test)]
 const RUNTIME: &[&str] = &[
     "--window", "--overlay", "--orbit-desktop", "--prepare-upload", "--apply-update",
     "--bridge-shot", "--bridge-guard", "--quit", "--hidden",
@@ -81,6 +82,9 @@ mod tests {
         assert!(main.find("harness::prepare(&args)").unwrap() < main.find("panic_log::install()").unwrap());
         assert!(main.find("panic_log::install()").unwrap() < main.find("match args.first()").unwrap());
         assert!(dispatch.contains("Some(orbiters_booster::system::RESTORE_ARGUMENT)"), "the production RunOnce restore remains explicit");
+        for source in [include_str!("screenshot.rs"), include_str!("idle_frames.rs"), include_str!("controller/publish_cost.rs"), include_str!("overlay/orbit/paint_bench.rs")] {
+            assert!(!source.contains("paths::set_roots("), "harnesses consume the startup roots rather than replacing them");
+        }
     }
 
     #[test]

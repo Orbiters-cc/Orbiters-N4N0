@@ -9,8 +9,10 @@
 //! many frames past its shot and `--sequence` writes its last frames too (`<name>-<frame>.png`), to check a motion frame
 //! by frame (a window closing back into its card).
 //!
-//! A run never writes this computer's own data ([`sandbox_user_data`]): its settings and caches folders are the run's
-//! own, under the temporary folder, seeded with copies of what scenarios read. It once refreshed the VRChat pictures'
+//! Startup data that may be cleaned or rewritten lives in private settings/cache/local-data folders, seeded with
+//! small copies. Capture libraries and VRChat pictures are read in place; thumbnail-cache writes are disabled by
+//! the harness bootstrap. Explicit end-to-end capture operations are separate from the default scenario set.
+//! The harness once refreshed the VRChat pictures'
 //! index in the person's cache with the harness's settings, which name no picture folder, so every picture of the
 //! folders the person added (2 TB on Enzo's archive disk) left the index, and the app read them all again.
 
@@ -120,8 +122,8 @@ struct WorldShot {
     maps: Option<crate::state::MapsMine>,
 }
 
-/// Main copied screenshot inputs into private roots before panic logging or any Controller/App. An explicit
-/// ORBITERS_HARNESS_FIXTURES pack replaces those source inputs; no worker receives an installed root.
+/// Main copied mutable startup inputs into private roots before panic logging or any Controller/App. Large
+/// capture libraries are read in place, optionally from ORBITERS_HARNESS_FIXTURES, through screenshot Settings.
 fn sandbox_user_data() -> anyhow::Result<(PathBuf, Vec<PathBuf>)> {
     let roots = orbiters_core::paths::roots().context("screenshots require the harness bootstrap")?;
     let root = roots.config.parent().context("private root")?.to_path_buf();
@@ -153,7 +155,8 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
 fn shots(args: &[String], picture_folders: Vec<PathBuf>) -> anyhow::Result<()> {
     let out =
         PathBuf::from(args.first().context("usage: --screenshot <out folder> [--sessions <folder>] [--raw <folder>] [--scale <factor>] [--only <name>]")?);
-    let mut settings = Settings { picture_folders, ..Settings::default() };
+    let (sessions, raw) = crate::harness::screenshot_library().context("screenshots require library inputs from the harness bootstrap")?;
+    let mut settings = Settings { picture_folders, sessions_dir: sessions.clone(), raw_captures_dir: raw.clone(), ..Settings::default() };
     let mut scale = 1.0f32;
     let mut height = 820.0f32;
     let mut width = 1280.0f32;

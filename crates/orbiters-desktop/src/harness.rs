@@ -1,5 +1,5 @@
 //! Developer entry points share one bootstrap, before panic logging and before any Controller, App or GPU.
-//! Screenshots copy their library inputs before any worker starts. All roots remain private; other harnesses use explicit fixtures.
+//! Mutable startup data stays private. Screenshots alone read large capture/picture inputs in place.
 
 use std::path::Path;
 use crate::link_smoke::Scratch;
@@ -9,6 +9,14 @@ pub const PRIVATE: &[&str] = &[
     "--orbit-bench", "--orbit-paint-bench", "--n4n0-menu", "--world-view", "--world-timing",
     "--n4n0-menu-strings", "--eye-picture", "--bridge-lab",
 ];
+
+/// Screenshot inputs are captured before private roots replace the platform paths. Keep documents private for
+/// everything else; only the screenshot Settings receive these two large read-in-place libraries.
+static SCREENSHOT_LIBRARY: std::sync::OnceLock<(std::path::PathBuf, std::path::PathBuf)> = std::sync::OnceLock::new();
+
+pub fn screenshot_library() -> Option<&'static (std::path::PathBuf, std::path::PathBuf)> {
+    SCREENSHOT_LIBRARY.get()
+}
 
 /// Production subprocesses/control commands, not developer harnesses. They must retain normal installed behavior.
 #[cfg(test)]
@@ -31,7 +39,13 @@ pub fn prepare(args: &[String]) -> anyhow::Result<Option<Scratch>> {
     let scratch = Scratch::new("orbiters-harness", keep)?;
     let seed = std::env::var_os("ORBITERS_HARNESS_FIXTURES");
     if mode == "--screenshot" {
+        let library = seed.as_ref().map_or_else(
+            || (orbiters_core::paths::default_sessions_dir(), orbiters_core::paths::default_raw_captures_dir()),
+            |p| (Path::new(p).join("documents/Sessions"), Path::new(p).join("documents/Raw captures")),
+        );
+        SCREENSHOT_LIBRARY.set(library).map_err(|_| anyhow::anyhow!("screenshot inputs were given already"))?;
         seed_screenshot(seed.as_deref().map(Path::new), &scratch.path)?;
+        orbiters_core::bundle::disable_thumbnail_cache_writes();
     } else if let Some(seed) = seed {
         seed_fixtures(Path::new(&seed), &scratch.path)?;
     }
@@ -70,15 +84,13 @@ fn copy_tree(from: &Path, to: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Main used these inputs for populated capture/world scenarios and the installed VCC cover-art scenario. Copy
-/// them rather than replacing them with an empty library, and never give a worker a source directory. Explicit
-/// fixture packs use the same layout and take precedence over the installed inputs.
+/// Copy only the small startup inputs that may be cleaned or rewritten. Sessions and raw captures stay in place;
+/// explicit fixture packs replace their source paths as well as these copied inputs.
 fn seed_screenshot(seed: Option<&Path>, root: &Path) -> anyhow::Result<()> {
     use orbiters_core::paths;
     let config = seed.map_or_else(paths::config_dir, |p| p.join("config"));
     let cache = seed.map_or_else(paths::cache_dir, |p| p.join("cache"));
     let local = seed.map_or_else(paths::local_data_root, |p| p.join("local"));
-    let documents = seed.map_or_else(paths::documents_root, |p| p.join("documents"));
     let vcc_app = seed.map(|p| p.join("local/VCC-app")).or_else(orbiters_projects::vcc_app_dir);
     let mut copies = Vec::new();
     if config.is_dir() {
@@ -91,27 +103,10 @@ fn seed_screenshot(seed: Option<&Path>, root: &Path) -> anyhow::Result<()> {
     }
     for name in ["worlds", "3d-worlds"] { copies.push((cache.join(name), root.join("cache").join(name))); }
     for name in ["Avatars", "project-pictures"] { copies.push((local.join(name), root.join("local").join(name))); }
-    for name in ["Sessions", "Raw captures"] { copies.push((documents.join(name), root.join("documents").join(name))); }
     if let Some(app) = vcc_app {
         copies.push((app.join("WebApp/Dist/template-covers"), root.join("local/VCC-app/WebApp/Dist/template-covers")));
     }
     copies.retain(|(from, _)| from.exists());
-    fn bytes(path: &Path) -> std::io::Result<u64> {
-        let meta = std::fs::symlink_metadata(path)?;
-        if meta.file_type().is_symlink() { return Err(std::io::Error::other("fixture links are not copied")); }
-        #[cfg(windows)] {
-            use std::os::windows::fs::MetadataExt;
-            if meta.file_attributes() & 0x400 != 0 { return Err(std::io::Error::other("fixture reparse points are not copied")); }
-        }
-        if meta.is_file() { return Ok(meta.len()); }
-        let mut total = 0u64;
-        for entry in std::fs::read_dir(path)? { total = total.saturating_add(bytes(&entry?.path())?); }
-        Ok(total)
-    }
-    let required = copies.iter().try_fold(0u64, |total, (from, _)| bytes(from).map(|n| total.saturating_add(n)))?;
-    let free = orbiters_projects::size::free_space(root).ok_or_else(|| anyhow::anyhow!("cannot check room for private screenshot inputs"))?;
-    anyhow::ensure!(free >= required.saturating_add(12 << 30), "private screenshot inputs need {required} bytes plus 12 GiB free; temporary volume has {free}. Choose a larger TEMP folder or an explicit ORBITERS_HARNESS_FIXTURES pack.");
-    eprintln!("screenshots: copying {required} bytes of input files into private roots");
     for (from, to) in copies { copy_tree(&from, &to)?; }
     Ok(())
 }
@@ -121,19 +116,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn screenshot_library_inputs_are_independent_complete_copies() {
+    fn screenshot_copies_small_mutable_inputs_but_not_capture_payloads() {
         let source = Scratch::new("orbiters-screenshot-source", false).unwrap();
         let target = Scratch::new("orbiters-screenshot-copy", false).unwrap();
         let inputs = [
             "config/visited-worlds.json", "config/avatar-states.json", "config/calibration.json",
             "config/n4n0/state.json", "cache/worlds/world.png", "cache/3d-worlds/world.json",
             "local/Avatars/avatar.json", "local/project-pictures/thumbnail.tmp",
-            "local/project-pictures/undecodable.jpg", "documents/Sessions/capture/manifest.json",
-            "documents/Sessions/capture/images/frame.png", "documents/Raw captures/raw/points.bin",
+            "local/project-pictures/undecodable.jpg",
             "local/VCC-app/WebApp/Dist/template-covers/template-avatar-2022.png",
         ];
         let modified = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
-        for name in inputs.iter().chain(["config/settings.json", "config/cache/old.json"].iter()) {
+        for name in inputs.iter().chain(["config/settings.json", "config/cache/old.json", "documents/Sessions/capture/payload", "documents/Raw captures/raw/payload"].iter()) {
             let path = source.path.join(name);
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
             std::fs::write(&path, name.as_bytes()).unwrap();
@@ -142,6 +136,7 @@ mod tests {
         seed_screenshot(Some(&source.path), &target.path).unwrap();
         assert!(!target.path.join("config/settings.json").exists());
         assert!(!target.path.join("config/cache").exists());
+        assert!(!target.path.join("documents").exists(), "capture payloads are not copied or walked");
         for name in inputs {
             let copied = target.path.join(name);
             assert_eq!(std::fs::read(&copied).unwrap(), name.as_bytes());
@@ -159,6 +154,11 @@ mod tests {
     /// precedes both panic-hook capture and dispatch, including platform-specific branches on this test platform.
     #[test]
     fn every_dispatch_switch_has_an_isolation_policy() {
+        const READS_IN_PLACE: &[(&str, &str)] = &[
+            ("--screenshot", "reads the capture library (Sessions, Raw captures) and VRChat's pictures in place"),
+        ];
+        assert_eq!(READS_IN_PLACE.len(), 1);
+        assert!(READS_IN_PLACE.iter().all(|(mode, why)| PRIVATE.contains(mode) && !why.is_empty()));
         let main = include_str!("main.rs");
         let dispatch = main.split("match args.first()").nth(1).unwrap();
         for part in dispatch.split("Some(\"").skip(1) {
@@ -178,11 +178,18 @@ mod tests {
         const CHILD: &str = "ORBITERS_BOOTSTRAP_CHILD";
         if let Ok(mode) = std::env::var(CHILD) {
             let outside = std::path::PathBuf::from(std::env::var_os("ORBITERS_HARNESS_FIXTURES").unwrap());
-            let guard = prepare(&[mode]).unwrap().unwrap();
+            let guard = prepare(&[mode.clone()]).unwrap().unwrap();
             let roots = orbiters_core::paths::roots().unwrap();
             for path in [&roots.config, &roots.local_data, &roots.cache, &roots.documents] {
                 assert!(path.starts_with(&guard.path));
                 assert!(!path.starts_with(&outside));
+            }
+            if mode == "--screenshot" {
+                assert_eq!(screenshot_library().unwrap(), &(outside.join("documents/Sessions"), outside.join("documents/Raw captures")));
+                assert!(!guard.path.join("documents/Sessions").exists());
+                assert!(!guard.path.join("documents/Raw captures").exists());
+            } else {
+                assert!(screenshot_library().is_none());
             }
             assert_eq!(orbiters_projects::data_dir(), roots.local_data);
             assert_eq!(orbiters_projects::vcc_dir(), roots.local_data.join("VCC"));

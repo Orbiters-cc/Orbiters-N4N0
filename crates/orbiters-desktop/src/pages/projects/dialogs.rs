@@ -708,7 +708,7 @@ fn project_choice(ui: &mut Ui, state: &mut State, avatar: &str) {
             pt,
             pos2(x, r.center().y + 18.0),
             Align2::LEFT_CENTER,
-            &Txt::new(tr!("{scene} · edited {when}", scene = a.scene, when = format::relative_time(p.modified, orbiters_projects::discovery::now())), 11.5).color(theme::FG_4),
+            &Txt::new(tr!("{scene} · edited {when}", scene = a.scene, when = crate::pages::ago(ui.ctx(), p.modified, orbiters_projects::discovery::now())), 11.5).color(theme::FG_4),
             tw,
         );
         // A radio: a ring, filled with a check once chosen.

@@ -185,6 +185,10 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, page: &mut StatesPage, out: &mut Vec<Out>)
     if page.confirm.as_ref().is_some_and(|(_, at)| now - at >= CONFIRM_FOR) {
         page.confirm = None;
     }
+    // What was asked shows until the service's list says it, or its time is up: a frame then, should the list say nothing.
+    if let Some(oldest) = page.pending.iter().map(|(_, _, at)| *at).min_by(f64::total_cmp) {
+        ui.ctx().request_repaint_after(std::time::Duration::from_secs_f64((PENDING_FOR - (now - oldest)).max(0.0) + 0.05));
+    }
     // An avatar whose card went (its last state deleted, no longer worn) shows the cards again.
     let opened = page.open.as_ref().and_then(|id| view.avatars.iter().find(|a| a.id == *id)).cloned();
     match opened {

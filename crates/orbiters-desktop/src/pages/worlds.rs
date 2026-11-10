@@ -617,9 +617,9 @@ fn world_card(
     let x = r.left() + 16.0;
     widgets::text_truncated(&p, pos2(x, thumb.bottom() + 22.0), Align2::LEFT_CENTER, &Txt::new(&w.name, 15.0).weight(weight::SEMIBOLD), r.width() - 32.0);
     let when = if w.visits > 0 {
-        tr!("Visited {when}", when = format::relative_time(w.last, now_secs()))
+        tr!("Visited {when}", when = crate::pages::ago(ui.ctx(), w.last, now_secs()))
     } else {
-        tr!("Last seen {when}", when = format::relative_time(w.last, now_secs()))
+        tr!("Last seen {when}", when = crate::pages::ago(ui.ctx(), w.last, now_secs()))
     };
     let author = match info {
         Some(Info::Listed(page)) => page.world.author_name.clone(),
@@ -820,7 +820,7 @@ fn detail(ui: &mut Ui, cx: &mut Cx, state: &mut State, page: Rect) {
                 let stats_r = stats_r.translate(vec2(0.0, dy));
                 // Visits count from when the app started keeping them; a world only seen in pictures or sessions has none.
                 let (visits, last_visit) = if world.visits > 0 {
-                    (world.visits.to_string(), Some(tr!("last {when}", when = format::relative_time(world.last, now_secs()))))
+                    (world.visits.to_string(), Some(tr!("last {when}", when = crate::pages::ago(ui.ctx(), world.last, now_secs()))))
                 } else {
                     ("–".to_string(), Some(tr("before Orbiters kept them").to_string()))
                 };

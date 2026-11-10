@@ -30,7 +30,7 @@ use orbiters_ui::anim::{self, Spring};
 use orbiters_ui::theme::{self, weight, Txt};
 use orbiters_ui::viewer::{self, Morph};
 use orbiters_ui::widgets::{self, Button, IconButton, Size, Variant};
-use orbiters_ui::{feedback, format, icons, paint};
+use orbiters_ui::{feedback, icons, paint};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -1140,7 +1140,7 @@ fn chrome(
     let scene_name = if h.scene.name.is_empty() { project.name.clone() } else { h.scene.name.clone() };
     let saved = written
         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|d| tr!("Saved {when}", when = format::relative_time(d.as_secs(), orbiters_projects::discovery::now())))
+        .map(|d| tr!("Saved {when}", when = crate::pages::ago(ui.ctx(), d.as_secs(), orbiters_projects::discovery::now())))
         .unwrap_or_default();
     let sub = [project.name.as_str(), saved.as_str()].iter().filter(|s| !s.is_empty()).copied().collect::<Vec<_>>().join("  ·  ");
     let title = Txt::new(&scene_name, 16.0).weight(weight::SEMIBOLD).tracking(-0.01);

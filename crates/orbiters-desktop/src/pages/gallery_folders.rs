@@ -8,6 +8,8 @@ use std::path::PathBuf;
 /// The button's label (Enzo, 2026-10-30: "Manage folders", it was "Folders").
 pub const LABEL: &str = mark("Manage folders");
 
+/// How often the popover looks whether each folder can be read.
+const STATUS_EVERY: std::time::Duration = std::time::Duration::from_secs(10);
 /// How often the picture folders are walked again while Photos & captures shows.
 const RESCAN_EVERY: std::time::Duration = std::time::Duration::from_secs(15);
 
@@ -24,11 +26,10 @@ pub struct State {
     picker: Job<Option<PathBuf>>,
     /// Stands in for [`pick_folder`] (tests).
     pick: Option<fn() -> Option<PathBuf>>,
-    status: Job<Vec<(PathBuf, bool)>>,
+    /// Whether each folder can be read, looked at on a thread every [`STATUS_EVERY`] while the popover is open (a
+    /// disk plugged in or gone): drawn again when that changed.
+    status: super::super::Watch<Vec<PathBuf>, Vec<(PathBuf, bool)>>,
     folders: Vec<(PathBuf, bool)>,
-    /// The settings' folders the shown list was checked for.
-    listed: Option<Vec<PathBuf>>,
-    checked: f64,
     revision: u64,
     /// The folders walked again every [`RESCAN_EVERY`] while the page shows, on a thread, for the pictures taken
     /// meanwhile: the page is drawn again only when a walk found something (the pictures' revision changes).
@@ -96,7 +97,6 @@ impl State {
             if !folders.iter().any(|p| p.to_string_lossy().eq_ignore_ascii_case(&path.to_string_lossy())) {
                 folders.push(path);
                 cx.ctl.patch_settings(serde_json::json!({"picture_folders": folders}));
-                self.checked = f64::NEG_INFINITY;
             }
         }
     }
@@ -124,22 +124,21 @@ impl State {
             self.closing = false;
             return;
         }
-        let now = ui.input(|i| i.time);
-        // Checked again when the settings' folders changed (a folder just added or removed), else every ten seconds.
+        // Checked again when the settings' folders changed (a folder just added or removed: another watch), else every
+        // ten seconds, on a thread. The popover rode on the page's ten frames a second to do it.
         let folders = &cx.snap.settings.picture_folders;
-        let stale = self.listed.as_ref() != Some(folders);
-        if self.open && !self.fixture && !self.status.running() && (stale || now - self.checked > 10.0) {
-            self.checked = now;
-            self.listed = Some(folders.clone());
-            let extra = folders.clone();
-            self.status = Job::spawn(ui.ctx(), move || {
-                orbiters_core::visited::screenshot_dirs_with(&extra).into_iter().map(|p| {
-                    let online = std::fs::read_dir(&p).is_ok();
-                    (p, online)
-                }).collect()
+        if self.open && !self.fixture {
+            let checked = self.status.keep(ui.ctx(), folders, STATUS_EVERY, || {
+                let extra = folders.clone();
+                move || {
+                    orbiters_core::visited::screenshot_dirs_with(&extra).into_iter().map(|p| {
+                        let online = std::fs::read_dir(&p).is_ok();
+                        (p, online)
+                    }).collect()
+                }
             });
+            if let Some(folders) = checked { self.folders = folders; }
         }
-        if let Some(folders) = self.status.take() { self.folders = folders; }
         let open = self.open;
         let shown = egui::Area::new(id).order(egui::Order::Foreground).fixed_pos(pop.rect.min).interactable(open).show(ui.ctx(), |ui| {
             ui.set_min_size(pop.rect.size());
@@ -176,13 +175,12 @@ impl State {
                         if cx.snap.settings.picture_folders.contains(path) && Button::new(tr("Remove")).variant(Variant::Ghost).show(ui).clicked() {
                             let folders: Vec<_> = cx.snap.settings.picture_folders.iter().filter(|p| *p != path).collect();
                             cx.ctl.patch_settings(serde_json::json!({"picture_folders": folders}));
-                            self.checked = f64::NEG_INFINITY;
                         }
                     });
                     ui.separator();
                 }
             });
-            if self.status.running() { ui.weak(tr("Checking folders...")); }
+            if !self.fixture && self.status.seen().is_none() { ui.weak(tr("Checking folders...")); }
             if self.picker.running() {
                 ui.weak(tr("Choose a folder in the window that opened..."));
             } else {

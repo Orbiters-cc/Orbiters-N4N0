@@ -450,6 +450,8 @@ impl Drop for State {
 pub(super) const MIXER: &str = "orbiters.mixer";
 /// Mixer's presentation on the website.
 pub(super) const MIXER_PAGE: &str = "https://orbiters.cc/mixer";
+/// How often the repositories are downloaded again while a project is shown.
+const REPOS_EVERY: Duration = Duration::from_secs(30 * 60);
 /// How long the page's first frame waits for the pictures kept from the last window, at most.
 const PRELOAD_WAIT: Duration = Duration::from_millis(250);
 
@@ -610,11 +612,15 @@ impl State {
             && !self.running()
             && !self.view_job.running()
             && !self.updates_job.running()
-            && self.repos_checked.is_none_or(|t| t.elapsed() > Duration::from_secs(30 * 60))
+            && self.repos_checked.is_none_or(|t| t.elapsed() > REPOS_EVERY)
         {
             self.repos_checked = Some(Instant::now());
             self.load_view(ctx, true);
             self.view_quiet = true;
+        }
+        // The half hour is the clock's alone to bring: a frame then, while a project is shown.
+        if let (false, Some(_), Some(checked)) = (self.fixture, &self.selected, self.repos_checked) {
+            ctx.request_repaint_after(REPOS_EVERY.saturating_sub(checked.elapsed()) + Duration::from_millis(50));
         }
     }
     /// The selected project's updates, with pre-releases when the switch is on.

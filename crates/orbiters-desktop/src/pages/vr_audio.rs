@@ -62,7 +62,7 @@ pub fn show(ui: &mut Ui, cx: &Cx, index: usize, state: &mut State, draft: &mut V
     }
 
     let subtitle = match &cx.snap.vr_audio.last {
-        Some(e) => when(&e.text, e.utc_ms),
+        Some(e) => when(ui.ctx(), &e.text, e.utc_ms),
         None => words(mark("Windows' sound devices while SteamVR runs"), mark("The sound devices while SteamVR runs, on a computer where it does")).to_string(),
     };
     let mut apply = false;
@@ -165,14 +165,18 @@ fn caption(ui: &mut Ui, text: &str, color: egui::Color32) {
 }
 
 /// What the service did last, then "at 21:03" if it was today, else "on 30 Oct 2026, 21:03": each a whole sentence, so a language can put the time where it likes.
-fn when(text: &str, utc_ms: u64) -> String {
+fn when(ctx: &egui::Context, text: &str, utc_ms: u64) -> String {
     let local = |secs: i64| {
         let t = time::OffsetDateTime::from_unix_timestamp(secs).ok()?;
         Some(time::UtcOffset::current_local_offset().map(|o| t.to_offset(o)).unwrap_or(t))
     };
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
     match (local((utc_ms / 1000) as i64), local(now)) {
-        (Some(t), Some(today)) if t.date() == today.date() => tr!("{text} at {time}", text = text, time = format!("{:02}:{:02}", t.hour(), t.minute())),
+        (Some(t), Some(today)) if t.date() == today.date() => {
+            // Said otherwise from midnight on: a frame then.
+            ctx.request_repaint_after(super::after_seconds(super::local_day(now as u64).1));
+            tr!("{text} at {time}", text = text, time = format!("{:02}:{:02}", t.hour(), t.minute()))
+        }
         _ => tr!("{text} on {date}", text = text, date = super::local_time_unix(utc_ms / 1000)),
     }
 }

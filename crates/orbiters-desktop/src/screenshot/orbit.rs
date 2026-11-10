@@ -588,6 +588,10 @@ pub(super) fn shots(out: &Path) -> anyhow::Result<()> {
     .collect();
     qm_scene("orbit-sheet-results", out, hd, &Facts { sheet: Some(Sheet::Results), sheet_title: "YouTube".into(), videos, videos_for: "rain sounds".into(), beside_wing: true, ..idle.clone() }, None, Some(Sheet::Results))?;
     results_over_the_game(out, hd, &idle)?;
+    round_18_over_the_game(out, &idle)?;
+    // Round 18's pre-check: the cell whose second ring is out stays lit while a cell of that ring is pointed (here one this avatar cannot take, with no kit).
+    let locked = Facts { no_kit: true, bloomed: Some(Zone::WheelPictures), ..pointing(Action::Picture(PhotoMode::People)) };
+    wheel_scene("orbit-wheel-parent-lit", out, vec2(1920.0, 1080.0), &locked, Some((Zone::BloomPeople, 0)), Some(bloom), true)?;
     settings_scenes(out, hd, &idle)?;
     // An answer on its way: the words so far, and no second copy when it is whole.
     let mut arriving = lines.clone();
@@ -825,6 +829,141 @@ fn results_over_the_game(out: &Path, client: Vec2, idle: &Facts) -> anyhow::Resu
     let path = out.join("orbit-sheet-results-real.png");
     save_png(&path, &over_ground(&image, w, h))?;
     println!("{}", path.display());
+    Ok(())
+}
+
+/// A sheet over a real frame of the game: the wing beside it, the sheet's head, and `page` as the sheet's page (premultiplied, the page's pixels).
+fn over_the_game(name: &str, out: &Path, client: Vec2, ground: &image::RgbaImage, facts: &Facts, page: impl FnOnce([u32; 2]) -> anyhow::Result<Vec<u8>>) -> anyhow::Result<()> {
+    let (w, h) = (client.x as u32, client.y as u32);
+    let ground = image::imageops::resize(ground, w, h, image::imageops::FilterType::Triangle);
+    let mut image = ground.as_raw().clone();
+    for placed in zones::layout(Around::QuickMenu, client).into_iter().chain(zones::place(Zone::SheetHint, client)) {
+        let (pixels, px) = picture(&placed, facts, None, None);
+        blit(&mut image, w, &pixels, px, placed.rect.min);
+    }
+    let back = zones::place(Zone::SheetBack, client).expect("it fits");
+    let (pixels, back_px) = picture(&back, facts, None, None);
+    blit(&mut image, w, &pixels, back_px, back.rect.min);
+    let place = zones::place(Zone::Takeover, client).expect("it fits");
+    let px = [place.rect.width() as u32, place.rect.height() as u32];
+    blit(&mut image, w, &page(px)?, px, place.rect.min);
+    let path = out.join(format!("{name}.png"));
+    save_png(&path, &over_ground(&image, w, h))?;
+    println!("{}", path.display());
+    Ok(())
+}
+
+/// What the sheet's live 3D view draws of the capture in `dir`, at rest and after a drag of `drag` (the page's units): real frames, from the renderer the
+/// app uses. It does not look around by itself here, so a frame is the last one once no other comes.
+fn live_frames(dir: &Path, drags: &[(f32, f32)]) -> anyhow::Result<Vec<ColorImage>> {
+    use crate::overlay::orbit::sheet_view::{SheetView, ViewState};
+    use std::time::{Duration, Instant};
+    let view = SheetView::open(dir.to_path_buf(), false);
+    let settled = |view: &SheetView| -> anyhow::Result<ColorImage> {
+        let (began, mut last, mut newest) = (Instant::now(), Instant::now(), None);
+        loop {
+            if let Some(frame) = view.take_frame() {
+                newest = Some(frame);
+                last = Instant::now();
+            }
+            if let ViewState::Failed(why) = view.state() {
+                anyhow::bail!("the capture's 3D: {why}");
+            }
+            if (newest.is_some() && last.elapsed() > Duration::from_millis(1500)) || began.elapsed() > Duration::from_secs(90) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let frame = newest.ok_or_else(|| anyhow::anyhow!("the capture's 3D drew nothing"))?;
+        Ok(ColorImage::from_rgba_premultiplied(frame.size, &frame.rgba))
+    };
+    let mut out = vec![settled(&view)?];
+    for (dx, dy) in drags {
+        view.hold(true);
+        view.turn(*dx, *dy);
+        out.push(settled(&view)?);
+    }
+    Ok(out)
+}
+
+/// Round 18's states that could not be photographed in the game (someone was at the computer), over a real frame of it (`ORBIT_QM_FRAME`), with real 3D
+/// frames of real captures (`ORBIT_SESSION` on Pictures, `ORBIT_SESSION_WORLD` on a world's side panel): All tools, a capture in live 3D on Pictures in its
+/// frame, dragged, and on the whole sheet, and a world's side panel with its capture live and on the whole page. Painted, and said so where they are shown.
+fn round_18_over_the_game(out: &Path, idle: &Facts) -> anyhow::Result<()> {
+    use panels::{OpenedView, RecentKind, Sheet, WorldVisit};
+    let Ok(frame) = std::env::var("ORBIT_QM_FRAME") else { return Ok(()) };
+    let ground = image::open(&frame)?.to_rgba8();
+    let client = vec2(1920.0, 1080.0);
+    // All tools: what plays with where it comes from on its own line, and the last places, a long name on two lines.
+    let visit = |name: &str, line: &str, here: bool| WorldVisit { name: name.into(), line: line.into(), here, ..Default::default() };
+    let all = Facts {
+        sheet: Some(Sheet::All),
+        sheet_title: "All tools".into(),
+        beside_wing: true,
+        music: Some(("Rain on a forest cabin, 8 hours".into(), true)),
+        music_by: "Quiet Hours".into(),
+        can_copy_playing: true,
+        can_drop_playing: true,
+        music_times: Some((754, 28_812)),
+        volume: Some((62, false)),
+        worlds_visited: vec![visit("VRChat Home", "Invite \u{b7} now", true), visit("everyone is asleep except you", "Fri 23:03 \u{b7} Friends", false), visit("\u{3086}\u{3063}\u{305f}\u{308a}House", "Fri 22:41 \u{b7} Invite", false)],
+        ..idle.clone()
+    };
+    over_the_game("orbit-r18-all-tools", out, client, &ground, &all, |px| {
+        // Its large tiles hold real pictures, as in the app: three captures on Worlds in 3D, the newest on Pictures, each place's own.
+        let mut canvas = Canvas::zoomed(px[0], px[1], px[0] as f32 / 1024.0).in_orbit_look();
+        let textures: Vec<_> = (0..6).map(|i| canvas.ctx().load_texture("real", stand_in(i), TextureOptions::LINEAR)).collect();
+        let mut facts = all.clone();
+        facts.hero_captures = textures[..3].iter().map(|t| t.id()).collect();
+        facts.hero_picture = Some(textures[1].id());
+        for (visit, n) in facts.worlds_visited.iter_mut().zip([5, 3, 4]) {
+            visit.picture = Some(textures[n].id());
+        }
+        for _ in 0..2 {
+            canvas.paint(0.0, |p| panels::paint_sheet(p, Sheet::All, &facts, None, None));
+        }
+        let from = canvas.pixels().to_vec();
+        let mut pixels = from.clone();
+        panels::finish_picture(&mut pixels, &from, px, px[0] as f32 / 1024.0, [0, 0, px[0], px[1]]);
+        Ok(pixels)
+    })?;
+    // A capture in live 3D on Pictures: seen from inside, its full-screen button in its frame's corner; dragged; and on the whole sheet.
+    if let Ok(dir) = std::env::var("ORBIT_SESSION") {
+        let dir = PathBuf::from(dir);
+        let frames = live_frames(&dir, &[(-150.0, 20.0)])?;
+        let title = dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        // "Palm Point - Night 2026-10-21 15-48-59": its name, without when.
+        let name = title.rsplitn(3, ' ').nth(2).unwrap_or(&title).to_string();
+        let capture = Recent { dir: dir.clone(), title: name, state: "Wed 15:48 \u{b7} 3D picture".into(), kind: RecentKind::Capture, count: 1, ..Default::default() };
+        let others = [("Sky Dream", "Sun 08:21 \u{b7} 3D picture"), ("After The Rain", "Fri 23:03 \u{b7} 3D picture")];
+        let recent: panels::Gallery = std::iter::once(capture).chain(others.iter().map(|(title, state)| Recent { dir: PathBuf::from(title), title: title.to_string(), state: state.to_string(), ..Default::default() })).collect();
+        for (shot, frame, full) in [("orbit-r18-capture-3d", &frames[0], false), ("orbit-r18-capture-3d-dragged", &frames[1], false), ("orbit-r18-capture-3d-full", &frames[1], true)] {
+            let facts = Facts { sheet: Some(Sheet::Pictures), sheet_title: "Pictures".into(), beside_wing: true, recent: recent.clone(), opened: Some(0), view_full: full, ..idle.clone() };
+            over_the_game(shot, out, client, &ground, &facts, |px| {
+                let mut canvas = Canvas::zoomed(px[0], px[1], px[0] as f32 / 1024.0).in_orbit_look();
+                let texture = canvas.ctx().load_texture("live", frame.clone(), TextureOptions::LINEAR);
+                let facts = Facts { opened_view: Some(OpenedView { picture: Some(texture.id()), plate: Vec::new(), failed: None }), ..facts.clone() };
+                let items = panels::sheet_items(Sheet::Pictures, &facts);
+                // Full: the button that brings it back, pointed.
+                let hover = full.then(|| items.iter().position(|i| i.action == panels::Action::FullView)).flatten();
+                for _ in 0..2 {
+                    canvas.paint(0.0, |p| panels::paint_sheet(p, Sheet::Pictures, &facts, hover, None));
+                }
+                let from = canvas.pixels().to_vec();
+                let mut pixels = from.clone();
+                panels::finish_picture(&mut pixels, &from, px, px[0] as f32 / 1024.0, [0, 0, px[0], px[1]]);
+                Ok(pixels)
+            })?;
+        }
+    }
+    // A world's side panel on Worlds in 3D, its capture live in its picture; and on the whole page.
+    if let Ok(dir) = std::env::var("ORBIT_SESSION_WORLD") {
+        let frames = live_frames(Path::new(&dir), &[])?;
+        let facts = Facts { sheet: Some(Sheet::Worlds), sheet_title: "Worlds in 3D".into(), beside_wing: true, ..idle.clone() };
+        for (shot, full) in [("orbit-r18-world-side-live", false), ("orbit-r18-world-side-live-full", true)] {
+            over_the_game(shot, out, client, &ground, &facts, |px| crate::overlay::worlds::panel::side_live(px, &frames[0], full))?;
+        }
+    }
     Ok(())
 }
 

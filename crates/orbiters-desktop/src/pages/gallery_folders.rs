@@ -8,6 +8,20 @@ use std::path::PathBuf;
 /// The button's label (Enzo, 2026-10-30: "Manage folders", it was "Folders").
 pub const LABEL: &str = mark("Manage folders");
 
+/// What a look of the page's watch saw of what its list is made from: its revision, and when the look began. One look
+/// is the same as another when the revision is: the watch then asks for no frame.
+#[derive(Clone, Copy, Debug)]
+struct Looked {
+    at: std::time::Instant,
+    revision: u64,
+}
+
+impl PartialEq for Looked {
+    fn eq(&self, other: &Self) -> bool {
+        self.revision == other.revision
+    }
+}
+
 /// How often the popover looks whether each folder can be read.
 const STATUS_EVERY: std::time::Duration = std::time::Duration::from_secs(10);
 /// How often the picture folders are walked again while Photos & captures shows.
@@ -35,9 +49,9 @@ pub struct State {
     /// meanwhile: the page is drawn again only when a walk found something (the pictures' revision changes). The
     /// same look gives the revision of what else the page's list is made from (the capture folders, the visit history,
     /// the upload records: `controller::shares::LocalRevision`), for the settings' picture folders, captures' folder and
-    /// environment; and the last one seen.
-    rescan: super::super::Watch<(Vec<PathBuf>, PathBuf, bool), u64>,
-    local: Option<u64>,
+    /// environment; and the last one seen ([`State::local_seen`]).
+    rescan: super::super::Watch<(Vec<PathBuf>, PathBuf, bool), Looked>,
+    local: Option<Looked>,
     /// The history and the upload records at these files, and no picture folder walked (tests).
     #[cfg(test)]
     sources: Option<(PathBuf, Option<PathBuf>)>,
@@ -67,21 +81,38 @@ impl State {
         self.open
     }
 
+    /// The visit history and the upload records at these files, and no picture folder walked (the page's tests).
+    #[cfg(test)]
+    pub fn set_sources(&mut self, history: PathBuf, records: Option<PathBuf>) {
+        self.sources = Some((history, records));
+    }
+
+    /// The watch looks now, not at its next period (the page's tests).
+    #[cfg(test)]
+    pub fn look_now(&self) {
+        self.rescan.look_now();
+    }
+
     /// Where the button was drawn on the last frame.
     pub fn button(&self) -> Option<Rect> {
         self.button
     }
 
-    /// Whether the listing is to be made again (the scan found pictures, the settings' folders changed, or what else
-    /// the list is made from did: a capture's folder, the visit history, the upload records), and whether pictures
-    /// changed. Asks for no frame: the scan does when it finds something ([`crate::worlds::wake_on_pictures`]), and
-    /// the watch when the rest changed.
+    /// The revision of what the page's list is made from beyond the pictures (a capture's folder, the visit history,
+    /// the upload records) as the watch last saw it change, and when that look began: the page makes its list again
+    /// when this is another revision than the one its list was made from, seen after it (`gallery::list_is_stale`).
+    pub fn local_seen(&self) -> Option<(std::time::Instant, u64)> {
+        self.local.map(|looked| (looked.at, looked.revision))
+    }
+
+    /// Whether the listing is to be made again (the scan found pictures, or the settings' folders changed), and whether
+    /// pictures changed; and keeps the watch whose looks [`State::local_seen`] gives. Asks for no frame: the scan does
+    /// when it finds something ([`crate::worlds::wake_on_pictures`]), and the watch when the rest changed.
     pub fn tick(&mut self, ui: &Ui, cx: &Cx) -> (bool, bool) {
         if !std::mem::replace(&mut self.woken, true) {
             crate::worlds::wake_on_pictures(ui.ctx());
         }
         let folders = &cx.snap.settings.picture_folders;
-        let mut local_changed = false;
         #[cfg(not(test))]
         let sources: Option<(PathBuf, Option<PathBuf>)> = None;
         #[cfg(test)]
@@ -94,23 +125,26 @@ impl State {
                 let (folders, root) = (folders.clone(), root.clone());
                 let server = if development { orbiters_core::account::Server::Development } else { orbiters_core::account::Server::Production };
                 let mut revision = crate::controller::shares::LocalRevision::default();
-                move || match &sources {
-                    Some((history, records)) => revision.look_at(&root, history, records.as_deref()),
-                    None => {
-                        crate::worlds::rescan_pictures(&folders);
-                        revision.look(&root, server)
-                    }
+                move || {
+                    // When the look began: what it sees is at least as new as that.
+                    let at = std::time::Instant::now();
+                    let revision = match &sources {
+                        Some((history, records)) => revision.look_at(&root, history, records.as_deref()),
+                        None => {
+                            crate::worlds::rescan_pictures(&folders);
+                            revision.look(&root, server)
+                        }
+                    };
+                    Looked { at, revision }
                 }
             });
-            // The first one seen says nothing: the page made its list as it came. Another one after says the list
-            // is out of date, though the app changed nothing itself (the library's version would have said).
-            if let Some(revision) = looked {
-                local_changed = self.local.replace(revision).is_some_and(|before| before != revision);
+            if looked.is_some() {
+                self.local = looked;
             }
         }
         let revision = crate::worlds::picture_revision();
         let images_changed = revision != self.revision;
-        let changed = images_changed || local_changed || self.saved != *folders;
+        let changed = images_changed || self.saved != *folders;
         if changed {
             self.revision = revision;
             self.saved = folders.clone();
@@ -393,11 +427,12 @@ mod tests {
 
     /// The page made its whole list again every fifteen seconds, which also took in what changes outside the pictures'
     /// index. Made again only when the folder walk found pictures, it kept a ghost card for a capture another program
-    /// had deleted, and did not file pictures under instances the visit history learned of meanwhile. The watch now
-    /// gives a revision of all the list reads: here the pictures' index never changes, nobody visits the page again,
-    /// and the list is said out of date exactly when a capture's folder or the visits changed.
+    /// had deleted, and did not file pictures under instances the visit history learned of meanwhile. The watch gives
+    /// a revision of all the list reads: here the pictures' index never changes, and the revision the page is handed
+    /// changes, with a frame asked for, exactly when a capture's folder, the visits or the upload records did. (That
+    /// the page then makes its list again, and what the new list holds: `gallery`'s own test.)
     #[test]
-    fn a_capture_deleted_elsewhere_or_new_visits_make_the_listing_again_without_a_visit() {
+    fn a_capture_deleted_elsewhere_new_visits_or_an_upload_change_the_revision_the_page_is_handed() {
         use orbiters_core::contracts::manifest::{SessionManifest, MANIFEST_FILE, MANIFEST_FORMAT};
         use orbiters_core::visited::{History, InstanceVisit};
         let root = std::env::temp_dir().join(format!("orbiters-gallery-revision-{}", std::process::id()));
@@ -415,11 +450,11 @@ mod tests {
 
         let mut h = Harness::new();
         h.snap.settings.sessions_dir = captures.clone();
-        h.state.sources = Some((history_file.clone(), Some(records_file.clone())));
-        // One frame, and what it says of the list: `Some` when the frame came by itself within the wait.
+        h.state.set_sources(history_file.clone(), Some(records_file.clone()));
         let _pictures = crate::worlds::tests::pictures_lock();
         let pictures = crate::worlds::picture_revision();
-        let tick = |h: &mut Harness| -> (bool, bool) {
+        // One frame: whether the pictures or the folders say the list is to be made again, and the revision seen.
+        let tick = |h: &mut Harness| -> ((bool, bool), Option<u64>) {
             h.time += 1.0 / 60.0;
             let input = RawInput { time: Some(h.time), ..Default::default() };
             let mut toasts = orbiters_ui::toast::Toasts::default();
@@ -430,7 +465,7 @@ mod tests {
                 told = state.tick(ui, &cx);
             });
             output.textures_delta.clear();
-            told
+            (told, h.state.local_seen().map(|(_, revision)| revision))
         };
         let woken = |h: &Harness, what: &str| {
             let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
@@ -446,53 +481,54 @@ mod tests {
                 if !h.ctx.has_requested_repaint() {
                     return;
                 }
-                assert_eq!(tick(h), (false, false), "nothing changed");
+                tick(h);
             }
             panic!("the page does not come to rest");
         };
         // The first frame takes the pictures' revision as it stands (another test may have moved it before this one).
-        // The first look then says nothing of the list (the page has just made it), and the page rests.
         tick(&mut h);
         let first = std::time::Instant::now() + std::time::Duration::from_secs(10);
-        while h.state.local.is_none() {
+        while h.state.local_seen().is_none() {
             assert!(std::time::Instant::now() < first, "the first look");
             std::thread::sleep(std::time::Duration::from_millis(2));
-            assert_eq!(tick(&mut h), (false, false), "nothing changed yet");
+            tick(&mut h);
         }
         rest(&mut h);
+        let (_, before) = tick(&mut h);
         assert_eq!(crate::worlds::sessions(&captures).len(), 2);
 
-        // Another program deletes a capture's folder: the page is woken, and its list is to be made again.
+        // Another program deletes a capture's folder: the page is woken, and handed another revision.
         std::fs::remove_dir_all(captures.join("2026-11-09 one")).unwrap();
-        h.state.rescan.look_now();
+        h.state.look_now();
         woken(&h, "a frame for the deleted capture");
-        assert_eq!(tick(&mut h), (true, false), "the list is out of date, the pictures are not");
-        assert_eq!(tick(&mut h), (false, false), "said once");
-        assert_eq!(crate::worlds::sessions(&captures).len(), 1, "what the list is made from has one capture less");
+        let (told, deleted) = tick(&mut h);
+        assert_eq!(told, (false, false), "the pictures and the folders did not change");
+        assert_ne!(deleted, before, "a capture's folder gone");
         rest(&mut h);
 
-        // The service writes the history with nothing new but how far VRChat's log was read: no frame, no new list.
+        // The service writes the history with nothing new but how far VRChat's log was read: no frame, the same revision.
         assert!(history.follow("output_log_2026-11-10_20-00-00.txt", 0, 4096, &[]));
         history.save(&history_file).unwrap();
-        h.state.rescan.look_now();
+        h.state.look_now();
         std::thread::sleep(std::time::Duration::from_millis(150));
         assert!(!h.ctx.has_requested_repaint(), "the log read further is no change of the list");
-        assert_eq!(tick(&mut h), (false, false));
+        assert_eq!(tick(&mut h).1, deleted);
         rest(&mut h);
 
-        // It learns of another instance joined: the list is made again (pictures are filed by instance).
+        // It learns of another instance joined (pictures are filed by instance): another revision, and a frame.
         history.instances.push(InstanceVisit { world_id: "wrld_b".into(), instance: "2~friends".into(), at: 200 });
         history.save(&history_file).unwrap();
-        h.state.rescan.look_now();
+        h.state.look_now();
         woken(&h, "a frame for the new visit");
-        assert_eq!(tick(&mut h), (true, false));
+        let (_, visited) = tick(&mut h);
+        assert_ne!(visited, deleted, "a new visit");
         rest(&mut h);
 
         // An upload recorded from elsewhere: the same.
         std::fs::write(&records_file, b"[]").unwrap();
-        h.state.rescan.look_now();
+        h.state.look_now();
         woken(&h, "a frame for the upload record");
-        assert_eq!(tick(&mut h), (true, false));
+        assert_ne!(tick(&mut h).1, visited, "an upload record");
         assert_eq!(crate::worlds::picture_revision(), pictures, "the pictures' index never changed");
         std::fs::remove_dir_all(&root).ok();
     }

@@ -495,6 +495,21 @@ pub fn local_entries_with_folders(root: &Path, server: Server, folders: &[PathBu
     let worlds = crate::worlds::load_gallery(root, folders);
     let history = visited::History::load(&visited::history_file());
     let records = records_path(server).ok().map(|p| read_records(&p)).unwrap_or_default();
+    entries_of(worlds, &history, &records)
+}
+
+/// [`local_entries_with_folders`] from what is handed over, not read from where the app keeps it: the captures under
+/// `root`, these pictures, the visit history in the file `history` and the upload records in the file `records`. What
+/// the page's tests make their lists from, so that none reads the member's own.
+pub fn local_entries_at(root: &Path, index: visited::ShotIndex, history: &Path, records: Option<&Path>) -> Vec<Entry> {
+    let history = visited::History::load(history);
+    let worlds = crate::worlds::gallery_from(root, index, &history);
+    entries_of(worlds, &history, &records.map(read_records).unwrap_or_default())
+}
+
+/// The list's entries: each world's captures and pictures, the instance a picture was taken in from the visit history
+/// where its own record does not say, and what was uploaded of each from the upload records.
+fn entries_of(worlds: Vec<crate::worlds::VisitedWorld>, history: &visited::History, records: &[Record]) -> Vec<Entry> {
     let mut entries = Vec::new();
     for w in worlds {
         for s in &w.sessions {
@@ -513,7 +528,7 @@ pub fn local_entries_with_folders(root: &Path, server: Server, folders: &[PathBu
                 world_id: w.id.clone(),
                 world_name: w.name.clone(),
                 taken,
-                instance: s.manifest.world.as_ref().and_then(|w| w.instance.clone()).or_else(|| instance_at(&history, &w.id, taken)),
+                instance: s.manifest.world.as_ref().and_then(|w| w.instance.clone()).or_else(|| instance_at(history, &w.id, taken)),
                 source_key: s.dir.file_name().map(|s| s.to_string_lossy().into_owned()),
                 people: Vec::new(),
                 local: Some(local),
@@ -556,7 +571,7 @@ pub fn local_entries_with_folders(root: &Path, server: Server, folders: &[PathBu
                 world_id: w.id.clone(),
                 world_name: w.name.clone(),
                 taken: shot.info.taken,
-                instance: shot.info.instance.clone().or_else(|| instance_at(&history, &w.id, shot.info.taken)),
+                instance: shot.info.instance.clone().or_else(|| instance_at(history, &w.id, shot.info.taken)),
                 source_key: shot.sha256.clone(),
                 people: Vec::new(),
                 local: Some(Local::Picture(shot.path.clone())),
@@ -780,6 +795,15 @@ fn records_path(server: Server) -> anyhow::Result<PathBuf> {
 pub fn uploads(server: Server) -> Vec<(PathBuf, Item)> {
     records_path(server).map(|p| read_records(&p)).unwrap_or_default().into_iter().filter_map(|r| r.item.map(|item| (r.path, item))).collect()
 }
+/// Writes, as the upload records of an account, that the capture or picture at `path` was uploaded as `item` (tests
+/// of what is made from those records).
+#[cfg(test)]
+pub(crate) fn write_record_for_test(file: &Path, path: &Path, item: Item) {
+    let uploaded = Uploaded { kind: item.kind, id: item.id, visibility: "private".into() };
+    let records = vec![Record { path: path.to_path_buf(), item: Some(item), uploaded, edits: None }];
+    std::fs::write(file, serde_json::to_vec(&records).unwrap()).unwrap();
+}
+
 fn read_records(path: &Path) -> Vec<Record> {
     std::fs::read(path).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
 }

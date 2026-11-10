@@ -188,8 +188,16 @@ pub fn load_gallery(sessions_dir: &Path, folders: &[PathBuf]) -> Vec<VisitedWorl
     from_index(sessions_dir, picture_index(&visited::shot_index_file(), visited::screenshot_dirs_with(folders)), true)
 }
 
+/// [`load_gallery`] from a pictures' index and a visit history handed over, not read from where the app keeps them.
+pub fn gallery_from(sessions_dir: &Path, index: visited::ShotIndex, history: &visited::History) -> Vec<VisitedWorld> {
+    from_index_with(sessions_dir, index, history, true)
+}
+
 fn from_index(sessions_dir: &Path, index: visited::ShotIndex, unplaced: bool) -> Vec<VisitedWorld> {
-    let history = visited::History::load(&visited::history_file());
+    from_index_with(sessions_dir, index, &visited::History::load(&visited::history_file()), unplaced)
+}
+
+fn from_index_with(sessions_dir: &Path, index: visited::ShotIndex, history: &visited::History, unplaced: bool) -> Vec<VisitedWorld> {
     let mut worlds: BTreeMap<String, VisitedWorld> = BTreeMap::new();
     fn entry<'a>(worlds: &'a mut BTreeMap<String, VisitedWorld>, id: &str) -> &'a mut VisitedWorld {
         worlds.entry(id.to_string()).or_insert_with(|| VisitedWorld {

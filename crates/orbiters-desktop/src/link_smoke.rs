@@ -50,7 +50,7 @@ impl Scratch {
         std::fs::create_dir(&path)?;
         Ok(Self { path, keep })
     }
-    fn cleanup(&self) -> std::io::Result<()> {
+    pub(crate) fn cleanup(&self) -> std::io::Result<()> {
         if !self.keep && self.path.exists() { std::fs::remove_dir_all(&self.path)?; }
         Ok(())
     }
@@ -95,6 +95,7 @@ struct Shown {
     process: ChildGuard,
     said: Arc<Mutex<Said>>,
     between: Between,
+    output_done: std::sync::mpsc::Receiver<()>,
 }
 
 impl Drop for Shown {
@@ -120,6 +121,7 @@ fn start(name: &'static str, role: Role, mode: &str, extra: &[&str], service: &E
     crate::worker::keep_with_service(&process);
     let said = Arc::new(Mutex::new(Said::default()));
     let (out, heard) = (process.stdout.take().context("its output")?, said.clone());
+    let (done, output_done) = std::sync::mpsc::channel();
     std::thread::Builder::new().name("link-smoke-reader".into()).spawn(move || {
         for line in BufReader::new(out).lines().map_while(Result::ok) {
             let mut said = heard.lock().unwrap();
@@ -131,8 +133,9 @@ fn start(name: &'static str, role: Role, mode: &str, extra: &[&str], service: &E
                 said.ended = true;
             }
         }
+        let _ = done.send(());
     })?;
-    Ok(Shown { name, role, process, said, between })
+    Ok(Shown { name, role, process, said, between, output_done })
 }
 
 /// Whether the foreground window is `process`'s.
@@ -201,9 +204,14 @@ impl Run {
     }
 }
 
+fn drain_output(done: &std::sync::mpsc::Receiver<()>, deadline: Instant) -> anyhow::Result<()> {
+    done.recv_timeout(deadline.saturating_duration_since(Instant::now())).context("draining child output")
+}
+
 fn wait_closed(shown: &mut Shown, deadline: Instant) -> anyhow::Result<()> {
     while Instant::now() < deadline {
         if let Some(code) = shown.process.try_wait()? {
+            drain_output(&shown.output_done, deadline)?;
             anyhow::ensure!(code.success() && shown.said.lock().unwrap().ended, "{} did not report a clean disconnect", shown.name);
             println!("ok   {} reported disconnect and exited", shown.name);
             return Ok(());
@@ -218,9 +226,8 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         anyhow::bail!("{game} is running: this starts a window beside it and a process that looks for the game's window. Run it when neither VRChat nor SteamVR does.");
     }
     let has = |flag: &str| args.iter().any(|a| a == flag);
-    let scratch = Scratch::new("orbiters-link-smoke", has("--keep"))?;
-    let root = &scratch.path;
-    sandbox(root)?;
+    let roots = orbiters_core::paths::roots().context("link-smoke requires the harness bootstrap")?;
+    let root = roots.config.parent().context("private root")?;
     let started = Instant::now();
 
     // The service: a controller that is never started, holding a state the size of a busy evening, with VRChat said
@@ -293,22 +300,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         s.between.hang_up();
     }
     for s in &mut shown {
-        let began = Instant::now();
-        let mut code = None;
-        while code.is_none() && began.elapsed() < Duration::from_secs(5) && started.elapsed() < Duration::from_secs(50) {
-            code = s.process.try_wait()?;
-            std::thread::sleep(Duration::from_millis(20));
-        }
-        let ended = s.said.lock().unwrap().ended;
-        match code {
-            Some(code) => println!("{} the connection dropped: the {} said its link ended: {ended}, and ended ({code}) after {} ms", if ended { "ok  " } else { "FAIL" }, s.name, began.elapsed().as_millis()),
-            None => {
-                println!("FAIL the connection dropped: the {} said its link ended: {ended}, and exceeded the shutdown deadline (stopped here)", s.name);
-                let _ = s.process.kill();
-                let _ = s.process.wait();
-            }
-        }
-        run.failed += (code.is_none() || !ended) as u32;
+        wait_closed(s, started + Duration::from_secs(50))?;
     }
     let began = Instant::now();
     while shown.iter().any(|s| service.linked(s.role) > 0) && began.elapsed() < Duration::from_secs(5) {
@@ -323,7 +315,6 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
     drop(shown);
     drop(service);
     if has("--keep") { println!("kept: {}", root.display()); }
-    scratch.cleanup().context("removing the harness directory")?;
     anyhow::ensure!(run.failed == 0, "{} steps failed", run.failed);
     Ok(())
 }
@@ -331,6 +322,28 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn exit_observation_waits_for_the_output_reader() {
+        let said = Arc::new(Mutex::new(Said::default()));
+        let (release, released) = std::sync::mpsc::channel();
+        let (done, drained) = std::sync::mpsc::channel();
+        let reader_said = said.clone();
+        let reader = std::thread::spawn(move || {
+            released.recv().unwrap();
+            reader_said.lock().unwrap().ended = true;
+            done.send(()).unwrap();
+        });
+        // The child has exited, but its buffered output has deliberately not been observed yet.
+        assert!(!said.lock().unwrap().ended);
+        let observer = std::thread::spawn(move || {
+            drain_output(&drained, Instant::now() + Duration::from_secs(10)).unwrap();
+            assert!(said.lock().unwrap().ended);
+        });
+        release.send(()).unwrap();
+        observer.join().unwrap();
+        reader.join().unwrap();
+    }
 
     #[test]
     fn scratch_is_removed_on_early_error_and_keep_is_deliberate() {

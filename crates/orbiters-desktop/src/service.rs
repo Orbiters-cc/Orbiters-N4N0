@@ -966,7 +966,10 @@ mod tests {
         let mut blocked = false;
         for round in 0..100 {
             let before = writes.load(Ordering::Relaxed);
-            ctl.update(|s| *s.n4n0.lines = vec![said(&format!("{} {}", round, "x".repeat(1_000_000)))]);
+            ctl.update(|s| {
+                *s.n4n0.lines = vec![said(&format!("{} {}", round, "x".repeat(1_000_000)))];
+                s.projects_changed = round;
+            });
             let began = Instant::now();
             while writes.load(Ordering::Relaxed) == before && began.elapsed() < Duration::from_millis(300) {
                 std::thread::sleep(Duration::from_millis(2));

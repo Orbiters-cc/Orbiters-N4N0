@@ -120,8 +120,8 @@ struct WorldShot {
     maps: Option<crate::state::MapsMine>,
 }
 
-/// Main installed private roots before panic logging or any fixture construction. Optional fixture copies are
-/// supplied explicitly through ORBITERS_HARNESS_FIXTURES; nothing is seeded implicitly from installed folders.
+/// Main copied screenshot inputs into private roots before panic logging or any Controller/App. An explicit
+/// ORBITERS_HARNESS_FIXTURES pack replaces those source inputs; no worker receives an installed root.
 fn sandbox_user_data() -> anyhow::Result<(PathBuf, Vec<PathBuf>)> {
     let roots = orbiters_core::paths::roots().context("screenshots require the harness bootstrap")?;
     let root = roots.config.parent().context("private root")?.to_path_buf();

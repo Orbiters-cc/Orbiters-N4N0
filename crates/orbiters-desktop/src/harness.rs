@@ -1,5 +1,5 @@
 //! Developer entry points share one bootstrap, before panic logging and before any Controller, App or GPU.
-//! Defaults never seed from installed data. Explicit fixture trees are copied, never handed to a cache worker.
+//! Screenshots copy their library inputs before any worker starts. All roots remain private; other harnesses use explicit fixtures.
 
 use std::path::Path;
 use crate::link_smoke::Scratch;
@@ -29,8 +29,10 @@ pub fn prepare(args: &[String]) -> anyhow::Result<Option<Scratch>> {
     if !PRIVATE.contains(&mode) { return Ok(None); }
     let keep = args.iter().any(|a| a == "--keep") || (mode == "--screenshot" && std::env::var_os("ORBITERS_SCREENSHOT_KEEP_SANDBOX").is_some());
     let scratch = Scratch::new("orbiters-harness", keep)?;
-    // Copy only explicitly supplied scenario inputs. No directory is implicitly read from the installed app.
-    if let Some(seed) = std::env::var_os("ORBITERS_HARNESS_FIXTURES") {
+    let seed = std::env::var_os("ORBITERS_HARNESS_FIXTURES");
+    if mode == "--screenshot" {
+        seed_screenshot(seed.as_deref().map(Path::new), &scratch.path)?;
+    } else if let Some(seed) = seed {
         seed_fixtures(Path::new(&seed), &scratch.path)?;
     }
     crate::link_smoke::sandbox(&scratch.path)?;
@@ -39,35 +41,119 @@ pub fn prepare(args: &[String]) -> anyhow::Result<Option<Scratch>> {
 }
 
 fn seed_fixtures(seed: &Path, root: &Path) -> anyhow::Result<()> {
-    fn copy(from: &Path, to: &Path) -> std::io::Result<()> {
-        let meta = std::fs::symlink_metadata(from)?;
+    for relative in ["config/calibration.json", "cache/worlds", "cache/3d-worlds", "local/project-pictures", "documents/Sessions", "documents/Raw captures"] {
+        let from = seed.join(relative);
+        if from.exists() { copy_tree(&from, &root.join(relative))?; }
+    }
+    Ok(())
+}
+
+fn copy_tree(from: &Path, to: &Path) -> std::io::Result<()> {
+    let meta = std::fs::symlink_metadata(from)?;
+    if meta.file_type().is_symlink() { return Err(std::io::Error::other("fixture links are not copied")); }
+    #[cfg(windows)] {
+        use std::os::windows::fs::MetadataExt;
+        if meta.file_attributes() & 0x400 != 0 { return Err(std::io::Error::other("fixture reparse points are not copied")); }
+    }
+    if meta.is_dir() {
+        std::fs::create_dir_all(to)?;
+        for entry in std::fs::read_dir(from)? {
+            let entry = entry?;
+            copy_tree(&entry.path(), &to.join(entry.file_name()))?;
+        }
+    } else if meta.is_file() {
+        if let Some(parent) = to.parent() { std::fs::create_dir_all(parent)?; }
+        std::fs::copy(from, to)?;
+        // Session order, age labels and cache freshness are part of the fixture, not the time this copy was made.
+        std::fs::File::options().write(true).open(to)?.set_modified(meta.modified()?)?;
+    }
+    Ok(())
+}
+
+/// Main used these inputs for populated capture/world scenarios and the installed VCC cover-art scenario. Copy
+/// them rather than replacing them with an empty library, and never give a worker a source directory. Explicit
+/// fixture packs use the same layout and take precedence over the installed inputs.
+fn seed_screenshot(seed: Option<&Path>, root: &Path) -> anyhow::Result<()> {
+    use orbiters_core::paths;
+    let config = seed.map_or_else(paths::config_dir, |p| p.join("config"));
+    let cache = seed.map_or_else(paths::cache_dir, |p| p.join("cache"));
+    let local = seed.map_or_else(paths::local_data_root, |p| p.join("local"));
+    let documents = seed.map_or_else(paths::documents_root, |p| p.join("documents"));
+    let vcc_app = seed.map(|p| p.join("local/VCC-app")).or_else(orbiters_projects::vcc_app_dir);
+    let mut copies = Vec::new();
+    if config.is_dir() {
+        for entry in std::fs::read_dir(&config)? {
+            let entry = entry?;
+            let name = entry.file_name();
+            if name.to_string_lossy().eq_ignore_ascii_case("settings.json") || name.to_string_lossy().eq_ignore_ascii_case("cache") { continue; }
+            copies.push((entry.path(), root.join("config").join(name)));
+        }
+    }
+    for name in ["worlds", "3d-worlds"] { copies.push((cache.join(name), root.join("cache").join(name))); }
+    for name in ["Avatars", "project-pictures"] { copies.push((local.join(name), root.join("local").join(name))); }
+    for name in ["Sessions", "Raw captures"] { copies.push((documents.join(name), root.join("documents").join(name))); }
+    if let Some(app) = vcc_app {
+        copies.push((app.join("WebApp/Dist/template-covers"), root.join("local/VCC-app/WebApp/Dist/template-covers")));
+    }
+    copies.retain(|(from, _)| from.exists());
+    fn bytes(path: &Path) -> std::io::Result<u64> {
+        let meta = std::fs::symlink_metadata(path)?;
         if meta.file_type().is_symlink() { return Err(std::io::Error::other("fixture links are not copied")); }
         #[cfg(windows)] {
             use std::os::windows::fs::MetadataExt;
             if meta.file_attributes() & 0x400 != 0 { return Err(std::io::Error::other("fixture reparse points are not copied")); }
         }
-        if meta.is_dir() {
-            std::fs::create_dir_all(to)?;
-            for entry in std::fs::read_dir(from)? {
-                let entry = entry?;
-                copy(&entry.path(), &to.join(entry.file_name()))?;
-            }
-        } else if meta.is_file() {
-            if let Some(parent) = to.parent() { std::fs::create_dir_all(parent)?; }
-            std::fs::copy(from, to)?;
-        }
-        Ok(())
+        if meta.is_file() { return Ok(meta.len()); }
+        let mut total = 0u64;
+        for entry in std::fs::read_dir(path)? { total = total.saturating_add(bytes(&entry?.path())?); }
+        Ok(total)
     }
-    for relative in ["config/calibration.json", "cache/worlds", "cache/3d-worlds", "local/project-pictures", "documents/Sessions", "documents/Raw captures"] {
-        let from = seed.join(relative);
-        if from.exists() { copy(&from, &root.join(relative))?; }
-    }
+    let required = copies.iter().try_fold(0u64, |total, (from, _)| bytes(from).map(|n| total.saturating_add(n)))?;
+    let free = orbiters_projects::size::free_space(root).ok_or_else(|| anyhow::anyhow!("cannot check room for private screenshot inputs"))?;
+    anyhow::ensure!(free >= required.saturating_add(12 << 30), "private screenshot inputs need {required} bytes plus 12 GiB free; temporary volume has {free}. Choose a larger TEMP folder or an explicit ORBITERS_HARNESS_FIXTURES pack.");
+    eprintln!("screenshots: copying {required} bytes of input files into private roots");
+    for (from, to) in copies { copy_tree(&from, &to)?; }
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn screenshot_library_inputs_are_independent_complete_copies() {
+        let source = Scratch::new("orbiters-screenshot-source", false).unwrap();
+        let target = Scratch::new("orbiters-screenshot-copy", false).unwrap();
+        let inputs = [
+            "config/visited-worlds.json", "config/avatar-states.json", "config/calibration.json",
+            "config/n4n0/state.json", "cache/worlds/world.png", "cache/3d-worlds/world.json",
+            "local/Avatars/avatar.json", "local/project-pictures/thumbnail.tmp",
+            "local/project-pictures/undecodable.jpg", "documents/Sessions/capture/manifest.json",
+            "documents/Sessions/capture/images/frame.png", "documents/Raw captures/raw/points.bin",
+            "local/VCC-app/WebApp/Dist/template-covers/template-avatar-2022.png",
+        ];
+        let modified = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+        for name in inputs.iter().chain(["config/settings.json", "config/cache/old.json"].iter()) {
+            let path = source.path.join(name);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, name.as_bytes()).unwrap();
+            std::fs::File::options().write(true).open(path).unwrap().set_modified(modified).unwrap();
+        }
+        seed_screenshot(Some(&source.path), &target.path).unwrap();
+        assert!(!target.path.join("config/settings.json").exists());
+        assert!(!target.path.join("config/cache").exists());
+        for name in inputs {
+            let copied = target.path.join(name);
+            assert_eq!(std::fs::read(&copied).unwrap(), name.as_bytes());
+            assert_eq!(std::fs::metadata(&copied).unwrap().modified().unwrap(), modified);
+            // Exercise the operations preload/keep_aside can perform, on the copies only.
+            std::fs::write(&copied, b"changed private data").unwrap();
+            std::fs::remove_file(&copied).unwrap();
+            let original = source.path.join(name);
+            assert_eq!(std::fs::read(&original).unwrap(), name.as_bytes());
+            assert_eq!(std::fs::metadata(original).unwrap().modified().unwrap(), modified);
+        }
+    }
 
     /// An added dispatch switch must be classified here. Source ordering plus subprocess checks ensures bootstrap
     /// precedes both panic-hook capture and dispatch, including platform-specific branches on this test platform.

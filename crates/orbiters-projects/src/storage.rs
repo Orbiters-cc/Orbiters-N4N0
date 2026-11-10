@@ -661,9 +661,10 @@ fn check_buffers() -> [Vec<u8>; 2] {
 /// 2. **That the disk's cache is emptied** ([`Written::persist`]). Once every file has passed, and before Library is
 ///    switched and the original removed, the last file written is flushed all the way. What that establishes: the
 ///    disk empties its write cache, which holds every file's bytes, each having been written out to be compared.
-///    What it does not establish by any documented rule ([`PERSIST_EVERY_FILE`]): that the earlier files' own
-///    entries (their names, sizes, where their bytes lie) are on the disk too. What it cannot reach is not checked by
-///    anything here: a disk that reports a flush it did not do, or what a network share's server does with its cache.
+///    What it does not establish by any documented rule: that the earlier files' own entries (their names, sizes,
+///    where their bytes lie) are on the disk too. On NTFS and ReFS that rests on the file system's journal; on a disk
+///    without one every file is flushed all the way instead ([`flushes_every_file`]). What nothing here can reach:
+///    a disk that reports a flush it did not do, or what a network share's server does with its cache.
 #[cfg(any(windows, unix))]
 trait Written {
     /// The copy, opened to be read past the system's file cache; `None` where that cannot be done.
@@ -677,9 +678,22 @@ trait Written {
     fn persists_every_file(&self) -> bool;
 }
 
-/// The file system's own ways.
+/// The file system's own ways, on the disk a Library is moved to.
 #[cfg(any(windows, unix))]
-struct OnDisk;
+struct OnDisk {
+    /// Every file flushed all the way, or the move's last file alone: by the destination's file system
+    /// ([`flushes_every_file`]).
+    every_file: bool,
+}
+
+#[cfg(any(windows, unix))]
+impl OnDisk {
+    /// For a move to the folder `destination`, there yet or not. Off Windows each copy is written out before it is
+    /// read back, and the last one flushed all the way ([`written_out`]): as it was.
+    fn to(destination: &Path) -> Self {
+        Self { every_file: cfg!(windows) && flushes_every_file(file_system_of(destination).as_deref()) }
+    }
+}
 
 #[cfg(any(windows, unix))]
 impl Written for OnDisk {
@@ -711,24 +725,65 @@ impl Written for OnDisk {
     }
 
     fn persists_every_file(&self) -> bool {
-        PERSIST_EVERY_FILE
+        self.every_file
     }
 }
 
-/// Whether every file of a moved Library is flushed all the way, or its last file alone. The last alone.
+/// The file systems whose journal a flush of one file commits for the files before it.
+const JOURNALED: [&str; 2] = ["NTFS", "ReFS"];
+
+/// Whether a Library moved to a disk of this file system (as Windows names it; `None` when it could not be asked) has
+/// every file flushed all the way before its original goes, or its last file alone.
+///
+/// | The destination's file system | What is flushed all the way |
+/// |---|---|
+/// | NTFS, ReFS | the last file, once a move |
+/// | exFAT, FAT32, FAT, any other name, and a disk that cannot be asked | every file |
 ///
 /// Windows documents `FlushFileBuffers` for the file it is given: its bytes and its entry, and the disk's cache with
 /// them. A flush of the last file therefore empties the disk's cache of every file's bytes, but that it also puts the
 /// earlier files' entries on the disk rests on how NTFS works, not on a documented guarantee: NTFS writes its journal
-/// in order, so committing it for one file commits what was logged before. exFAT and FAT have no journal, and there
-/// an earlier file's entry can still be in the system's memory when the original Library goes: a power cut at that
-/// moment can leave files of the copy missing or short. The documented way is a flush a file, and it was measured
-/// (2026-11-10, a release build, the SSD, two runs each, the last file against every file):
-/// 1 GiB of 4 MiB files 4.4 and 4.2 s against 6.2 and 6.0 s; 256 MiB of 16 KiB files (16,384 of them) 174 and 157 s
-/// against 198 and 231 s. About 3 ms a file, 30 % on small files, which is what a Library is made of: five more
-/// minutes on a hundred thousand files, on a move people watch. So the single flush stays, with that limit; the
-/// switch is here for the day it is decided otherwise, and the tests run both ways.
-const PERSIST_EVERY_FILE: bool = false;
+/// in order, so committing it for one file commits what was logged before (ReFS is trusted the same way). exFAT and
+/// FAT have no journal: there an earlier file's entry can still be in the system's memory when the original Library
+/// goes, and a power cut at that moment can leave files of the copy missing or short. A Library is often moved to an
+/// external drive, and those are often exFAT.
+///
+/// What a flush a file costs was measured on NTFS (2026-11-10, a release build, the SSD, two runs each, the last file
+/// against every file): 1 GiB of 4 MiB files 4.4 and 4.2 s against 6.2 and 6.0 s; 256 MiB of 16 KiB files (16,384 of
+/// them) 174 and 157 s against 198 and 231 s. About 3 ms a file, 30 % on the small files a Library is made of: five
+/// more minutes on a hundred thousand, on a move people watch. So it is paid only where the journal is not there to
+/// do it. Not timed on an exFAT disk: none was at hand (`a_measured_flush_of_every_file_or_the_last` takes a folder).
+fn flushes_every_file(file_system: Option<&str>) -> bool {
+    !file_system.is_some_and(|name| JOURNALED.iter().any(|journaled| name.eq_ignore_ascii_case(journaled)))
+}
+
+/// The file system of the disk the folder `path` is on, or will be (asked of the nearest folder that is there), as
+/// Windows names it: `NTFS`, `ReFS`, `exFAT`, `FAT32`. `None` when it cannot be asked, and off Windows.
+#[cfg(any(windows, unix))]
+fn file_system_of(path: &Path) -> Option<String> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        use windows::core::PCWSTR;
+        use windows::Win32::Storage::FileSystem::{GetVolumeInformationW, GetVolumePathNameW};
+        let there = path.ancestors().find(|p| p.exists())?;
+        let wide: Vec<u16> = there.as_os_str().encode_wide().chain(Some(0)).collect();
+        // The disk's root (or the folder a disk is mounted at): never longer than the path it is the start of.
+        let mut root = vec![0u16; wide.len().max(260) + 2];
+        // SAFETY: a null-terminated path, and a buffer whose length is given with it.
+        unsafe { GetVolumePathNameW(PCWSTR(wide.as_ptr()), &mut root) }.ok()?;
+        let mut name = [0u16; 64];
+        // SAFETY: the null-terminated root just written, and a buffer whose length is given with it.
+        unsafe { GetVolumeInformationW(PCWSTR(root.as_ptr()), None, None, None, None, Some(&mut name[..])) }.ok()?;
+        let length = name.iter().position(|unit| *unit == 0).unwrap_or(name.len());
+        Some(String::from_utf16_lossy(&name[..length])).filter(|name| !name.is_empty())
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = path;
+        None
+    }
+}
 
 /// Has the system write a file out to its disk, and says so when that failed. Off Windows this is `fsync` itself and
 /// not `sync_all`, which on a Mac also has the disk empty its own cache (`F_FULLFSYNC`): milliseconds, for every file
@@ -847,7 +902,7 @@ fn partial_note(left: &Option<PathBuf>) -> String {
 /// restores Library first.
 #[cfg(any(windows, unix))]
 fn relocate(project: &Path, target: &Path, files: &[(PathBuf, u64)], work: &Work, link: impl FnOnce(&Path, &Path) -> std::io::Result<()>) -> anyhow::Result<RepairEnd> {
-    relocate_on(&OnDisk, project, target, files, work, link)
+    relocate_on(&OnDisk::to(target), project, target, files, work, link)
 }
 
 /// [`relocate`], reading the copy back and flushing it through `disk`: each file compared with its original, and the
@@ -1563,6 +1618,10 @@ mod tests {
         every_file: bool,
     }
 
+    /// The real disk behind a [`Probe`], which has its own say on what is flushed.
+    #[cfg(any(windows, unix))]
+    const ON_DISK: OnDisk = OnDisk { every_file: false };
+
     /// A reader whose `refuse`-th read fails as a read past the cache does on a disk it does not fit.
     #[cfg(any(windows, unix))]
     struct Refusing {
@@ -1585,7 +1644,7 @@ mod tests {
     #[cfg(any(windows, unix))]
     impl Written for Probe {
         fn past_cache(&self, path: &Path) -> Option<Box<dyn Read>> {
-            let inner = match (OnDisk.past_cache(path), self.refuse_read) {
+            let inner = match (ON_DISK.past_cache(path), self.refuse_read) {
                 (Some(inner), _) => inner,
                 // Where nothing is read past the cache, a refusal is still injected, on a plain read.
                 (None, Some(_)) => Box::new(std::fs::File::open(path).ok()?) as Box<dyn Read>,
@@ -1603,7 +1662,7 @@ mod tests {
             if self.fail_flush {
                 return Err(std::io::Error::other("injected: the copy could not be written out"));
             }
-            OnDisk.flushed(path)
+            ON_DISK.flushed(path)
         }
 
         fn persist(&self, path: &Path) -> std::io::Result<()> {
@@ -1611,7 +1670,7 @@ mod tests {
             if self.fail_persist {
                 return Err(std::io::Error::other("injected: the disk did not flush"));
             }
-            OnDisk.persist(path)
+            ON_DISK.persist(path)
         }
 
         fn persists_every_file(&self) -> bool {
@@ -1622,6 +1681,33 @@ mod tests {
     /// The bytes [`project`] writes into its `i`-th file.
     fn bytes_of(i: usize, size: usize) -> Vec<u8> {
         (0..size).map(|b| (b.wrapping_mul(i + 7) >> 3) as u8).collect()
+    }
+
+    /// Which of the two a move does is chosen by the file system of the disk it goes to: the last file alone where a
+    /// journal commits the files before it (NTFS, ReFS), every file anywhere else: exFAT and FAT32, which external
+    /// drives often are, a file system of any other name, and a disk that cannot be asked. Off Windows, as it was.
+    #[cfg(any(windows, unix))]
+    #[test]
+    fn a_disk_without_a_journal_has_every_file_flushed() {
+        for journaled in ["NTFS", "ntfs", "ReFS", "REFS"] {
+            assert!(!flushes_every_file(Some(journaled)), "{journaled}: the last file alone");
+        }
+        for other in ["exFAT", "EXFAT", "FAT32", "FAT", "FAT12", "UDF", "CDFS", "Btrfs", "NTFS3", "Re", "something new", ""] {
+            assert!(flushes_every_file(Some(other)), "{other:?}: every file");
+        }
+        assert!(flushes_every_file(None), "a disk that cannot be asked: every file");
+
+        // The disk the tests run on, asked for real: a folder that is not there yet is asked through one that is.
+        let temp = tempfile::tempdir().unwrap();
+        let named = file_system_of(temp.path());
+        assert_eq!(file_system_of(&temp.path().join("not").join("there yet")), named);
+        if cfg!(windows) {
+            let named = named.expect("Windows names the file system of the temporary folder's disk");
+            assert_eq!(OnDisk::to(&temp.path().join("cache")).persists_every_file(), flushes_every_file(Some(&named)), "{named}");
+        } else {
+            assert_eq!(named, None);
+            assert!(!OnDisk::to(temp.path()).persists_every_file());
+        }
     }
 
     /// A copy is read back from the disk, not from the file cache it was just written through, at every size around a
@@ -1762,7 +1848,6 @@ mod tests {
         assert!(matches!(moved.unwrap(), RepairEnd::Moved(_)));
         assert_eq!(*disk.persisted.borrow(), [last], "once a move");
         remove_redirect(&library).unwrap();
-        assert!(!OnDisk.persists_every_file(), "the app flushes the last file: see PERSIST_EVERY_FILE before changing it");
 
         // The other way, a flush a file: every file, in the order copied, all before the switch.
         let project = self::project(temp.path(), "every file", 3, 5000);
@@ -2220,18 +2305,26 @@ mod tests {
     /// `ORBITERS_REPAIR_MB=1024 cargo test -p orbiters-projects a_measured_repair -- --ignored --nocapture`.
     /// Lab: what flushing every file of a moved Library all the way costs against flushing its last file alone, on
     /// the two shapes a Library has: large files and many small ones. Each move is of a Library made anew in the
-    /// temporary folder, the two ways in turn, `ORBITERS_REPAIR_RUNS` times (2).
+    /// temporary folder, or in `ORBITERS_REPAIR_FOLDER` (a folder on the disk to time: an exFAT drive), the two ways in
+    /// turn, `ORBITERS_REPAIR_RUNS` times (2). Says the disk's file system and which way the app takes there.
     /// `cargo test --release -p orbiters-projects --lib -- --ignored --nocapture a_measured_flush`.
     #[cfg(any(windows, unix))]
     #[test]
     #[ignore]
     fn a_measured_flush_of_every_file_or_the_last() {
         let runs: usize = std::env::var("ORBITERS_REPAIR_RUNS").ok().and_then(|s| s.parse().ok()).unwrap_or(2);
+        let folder = std::env::var_os("ORBITERS_REPAIR_FOLDER").map(PathBuf::from).unwrap_or_else(std::env::temp_dir);
+        println!(
+            "{}: {:?}, where the app flushes {}",
+            folder.display(),
+            file_system_of(&folder),
+            if OnDisk::to(&folder).persists_every_file() { "every file" } else { "the last file" }
+        );
         for (megabytes, kilobytes) in [(1024usize, 4096usize), (256, 16)] {
             let (files, size) = (megabytes * 1024 / kilobytes, kilobytes * 1024);
             for run in 0..runs {
                 for every_file in [false, true] {
-                    let temp = tempfile::tempdir().unwrap();
+                    let temp = tempfile::tempdir_in(&folder).unwrap();
                     let project = project(temp.path(), "project", files, size);
                     let listed = files_of(&project);
                     let progress = SharedProgress::default();

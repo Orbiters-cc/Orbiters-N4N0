@@ -128,6 +128,8 @@ struct Rig {
     log: Option<std::io::BufWriter<std::fs::File>>,
     pictures: Option<PathBuf>,
     notes: Vec<String>,
+    /// What the facts cost, by where the script was: made again and compared, and copied, in microseconds.
+    facts: Vec<(String, f64, f64)>,
     /// With `--upload`: the textures the pictures are written to, and each part's stand-in for its overlay.
     gpu: Option<orbiters_openvr::gpu::OverlayTextures>,
     handles: std::collections::HashMap<Zone, orbiters_openvr::OverlayHandle>,
@@ -211,6 +213,15 @@ fn list(_sessions: &Path, _folders: &[PathBuf]) -> Vec<LoadedRecent> {
         .unwrap_or_default()
 }
 
+/// What plays on the computer, for the run: the menus' sample song at `position` seconds, never what this computer plays.
+fn music(position: u32) {
+    static ART: OnceLock<Arc<crate::media::Art>> = OnceLock::new();
+    let art = ART.get_or_init(|| Arc::new(crate::media::Art { key: crate::overlay::menu_pages::SAMPLE_ART.into(), rgb: crate::overlay::menu_pages::sample_art() }));
+    let mut media = crate::overlay::menu_pages::sample_media();
+    media.position = Some(position);
+    crate::media::watcher().stand_in(crate::media::Reading { media: Some(media), volume: Some(orbiters_n4n0_core::menu::Volume { percent: 40, muted: false }), art: Some(art.clone()) });
+}
+
 impl Rig {
     fn new(mode: Mode, scratch: &Path, log: Option<(std::fs::File, PathBuf)>) -> Self {
         let settings = Settings { sessions_dir: scratch.join("sessions"), picture_folders: Vec::new(), ..Settings::default() };
@@ -241,6 +252,7 @@ impl Rig {
             log,
             pictures,
             notes: Vec::new(),
+            facts: Vec::new(),
             gpu: None,
             handles: Default::default(),
         }
@@ -365,6 +377,48 @@ impl Rig {
         }
     }
 
+    /// Whether a part is due a picture, is still coming in, or was handed one in the turn just taken. (Not `Panels::busy`: that also counts N4N0's menu being due a picture, which
+    /// it stays while it is on no sheet.)
+    fn moving(&self) -> bool {
+        self.panels.all().any(|p| p.dirty || !p.appear.settled()) || self.steps.last().and_then(|s| s.turns.last()).is_some_and(|c| c.shows > 0)
+    }
+
+    /// The seconds to a 3D picture counting down, then where the music is moving on, eight turns a second's worth: what one part says changes, and nothing else.
+    fn ticks(&mut self, name: &str) {
+        self.begin(name, Logged::Turns);
+        for seconds in [Some(3), Some(2), Some(1), None] {
+            let mut snap = (*self.snap).clone();
+            snap.n4n0.photo_countdown = seconds;
+            self.snap = Arc::new(snap);
+            self.turns(8);
+        }
+        for position in [84, 85, 86, 83] {
+            music(position);
+            self.turns(8);
+        }
+        self.rest();
+    }
+
+    /// What making the parts' facts again and comparing them costs a turn, and copying them for a part to paint from, in microseconds, as things stand now.
+    fn facts_cost(&mut self, state: &str) {
+        if self.log.is_some() {
+            return;
+        }
+        const TIMES: u32 = 2000;
+        let t = Instant::now();
+        for _ in 0..TIMES {
+            let facts = self.panels.facts_of(&self.snap);
+            std::hint::black_box(facts != self.panels.facts);
+        }
+        let made = t.elapsed().as_secs_f64() * 1e6 / TIMES as f64;
+        let t = Instant::now();
+        for _ in 0..TIMES {
+            std::hint::black_box(self.panels.facts.clone());
+        }
+        let copied = t.elapsed().as_secs_f64() * 1e6 / TIMES as f64;
+        self.facts.push((state.to_string(), made, copied));
+    }
+
     /// What every part shows now, to the pictures' log: one line a part, and one for what the sheet is on.
     fn write(&mut self, kind: &str) {
         let Some(log) = self.log.as_mut() else { return };
@@ -422,7 +476,7 @@ impl Rig {
         for n in 0..4000 {
             self.turn(None);
             let waiting = self.panels.recents.rx.is_some();
-            quiet = if self.panels.busy() || waiting { 0 } else { quiet + 1 };
+            quiet = if self.moving() || waiting { 0 } else { quiet + 1 };
             if quiet >= 3 {
                 if self.logged == Logged::Turns {
                     break;
@@ -432,7 +486,7 @@ impl Rig {
                 let before = self.steps.last().map_or(0, |s| s.turns.iter().map(|c| c.shows).sum::<u32>());
                 self.turns(3);
                 let after = self.steps.last().map_or(0, |s| s.turns.iter().map(|c| c.shows).sum::<u32>());
-                if before == after && !self.panels.busy() && self.panels.recents.rx.is_none() {
+                if before == after && !self.moving() && self.panels.recents.rx.is_none() {
                     break;
                 }
                 quiet = 0;
@@ -466,7 +520,7 @@ impl Rig {
             if complete && step.complete.is_none() {
                 step.complete = Some(n);
             }
-            quiet = if self.panels.busy() { 0 } else { quiet + 1 };
+            quiet = if self.moving() { 0 } else { quiet + 1 };
             if quiet >= 3 {
                 break;
             }
@@ -567,13 +621,18 @@ fn script(rig: &mut Rig) {
     // The Quick Menu, three times: the first opening of the process, and two more as a person opens it all evening.
     rig.open("qm-open-1", Around::QuickMenu);
     rig.point_at_each("qm-point", false, Turns);
+    rig.ticks("qm-ticks");
+    rig.facts_cost("the Quick Menu, no sheet");
     rig.close("qm-close-1");
     rig.open("qm-open-2", Around::QuickMenu);
     // The sheets from it. Their lists are read on other threads: at rest only.
     rig.pressing("qm-sheet-all", Action::All, Rest);
     rig.point_at_each("qm-sheet-all-point", true, Rest);
+    rig.ticks("qm-sheet-all-ticks");
+    rig.facts_cost("All tools");
     rig.scroll("qm-sheet-all-scroll", Rest);
     rig.pressing("qm-sheet-pictures", Action::Pictures, Rest);
+    rig.facts_cost("Pictures, 60 of them");
     rig.scroll("qm-sheet-pictures-scroll", Rest);
     rig.point_at_each("qm-sheet-pictures-point", true, Rest);
     rig.pressing("qm-sheet-instances", Action::Page(Target::Instances), Rest);
@@ -593,6 +652,8 @@ fn script(rig: &mut Rig) {
     // The wheel, the same.
     rig.open("wheel-open-1", Around::Wheel);
     rig.point_at_each("wheel-point", false, Rest);
+    rig.ticks("wheel-ticks");
+    rig.facts_cost("the wheel, no sheet");
     rig.close("wheel-close-1");
     rig.open("wheel-open-2", Around::Wheel);
     rig.pressing("wheel-sheet-all", Action::All, Rest);
@@ -659,6 +720,9 @@ fn summary(mode: Mode, run: usize, rig: &Rig, out: &mut String) {
             step.turns.iter().map(|c| c.pixels).sum::<u64>() as f64 / 1e6,
         );
     }
+    for (state, made, copied) in &rig.facts {
+        let _ = writeln!(out, "\nFacts, {state}: made again and compared {made:.1} us a turn; copied {copied:.1} us a part painted.");
+    }
     let _ = writeln!(out, "\nOpenings: the work until every part has a picture and until none is due another, and when that is on the loop's clock (a turn every {turn:.0} ms, a longer one running late).\n");
     let _ = writeln!(out, "| opening | first turn ms | every part pictured: turn, work ms, on the clock ms | none due another: turn, work ms, on the clock ms |");
     let _ = writeln!(out, "|---|---:|---|---|");
@@ -687,6 +751,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         std::fs::create_dir_all(scratch.join(sub))?;
     }
     orbiters_core::paths::set_roots(orbiters_core::paths::Roots { config: scratch.join("config"), local_data: scratch.join("local"), cache: scratch.join("cache"), documents: scratch.join("documents") })?;
+    music(83);
     let pictures = make_pictures(&scratch.join("pictures"))?;
     let _ = PICTURES.set(pictures);
     if let Some(out) = &out {

@@ -759,3 +759,40 @@ fn a_resting_part_larger_than_the_budget_is_dropped() {
     assert_eq!(person.panels.resting(), (0, 0));
 }
 
+/// Removing artwork must repaint even when the song and its position stay unchanged.
+#[test]
+fn the_song_s_picture_disappearing_paints_all_tools_again() {
+    use crate::overlay::menu_pages::sample_media;
+    fn none(_: &std::path::Path, _: &[std::path::PathBuf]) -> Vec<super::LoadedRecent> {
+        Vec::new()
+    }
+    let mut person = Person::with_a_song();
+    person.panels.recents.lister = Some(none);
+    person.around = Some(Around::QuickMenu);
+    person.turns(3);
+    person.press(Action::All);
+    person.turns_until("its parts at rest", |p| p.panels.all().all(|part| part.appear.settled() && part.painted) && p.panels.recents.rx.is_none());
+    person.turns(10);
+    assert_eq!(turn_of(&mut person.panels, &person.snap, person.around, 0), [], "at rest");
+    // Only the artwork disappears; all other facts stay the same.
+    let mut media = sample_media();
+    media.art = None;
+    person.panels.media.stand_in(crate::media::Reading { media: Some(media), volume: Some(orbiters_n4n0_core::menu::Volume { percent: 40, muted: false }), art: None });
+    let mut handed = Vec::new();
+    for _ in 0..20 {
+        handed.extend(turn_of(&mut person.panels, &person.snap, person.around, 0).into_iter().map(|h| h.0));
+    }
+    assert!(handed.contains(&Zone::WingPlaying), "what plays beside the menu: {handed:?}");
+    assert!(handed.contains(&Zone::Takeover), "and All tools: {handed:?}");
+    // An announced image which has not arrived must not bring back painting every turn.
+    let mut media = sample_media();
+    media.art = Some("art:unavailable".into());
+    person.panels.media.stand_in(crate::media::Reading { media: Some(media), volume: Some(orbiters_n4n0_core::menu::Volume { percent: 40, muted: false }), art: None });
+    person.turns(10);
+    for _ in 0..10 {
+        person.panels.follow(&person.snap, 0);
+        assert!(person.panels.all().all(|p| !p.dirty), "unavailable art must stay at rest");
+        person.turn();
+    }
+
+}

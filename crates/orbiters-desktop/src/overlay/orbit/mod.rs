@@ -1771,8 +1771,11 @@ impl Panels {
         // What plays's picture, for the panels' own textures.
         let key = self.stage.host.menu.media.as_ref().and_then(|m| m.art.clone());
         if self.art.as_ref().map(|(k, _)| k) != key.as_ref() {
+            let had_art = self.art.is_some();
             self.art = key.and_then(|k| self.stage.host.image(&k).map(|i| (k, i)));
-            if self.art.is_some() {
+            // Removing a picture changes what is drawn too. While a new picture is unavailable,
+            // both sides are empty: do not turn that wait into a repaint on every loop turn.
+            if had_art || self.art.is_some() {
                 // All tools shows it too: its page was only painted for it because every part was painted every turn (see `facts_of`'s gallery).
                 for panel in self.list.iter_mut().chain(self.takeover.iter_mut()) {
                     panel.dirty = true;

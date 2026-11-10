@@ -183,6 +183,14 @@ pub fn in_project(project: &Path, cache: &mut SceneCache) -> Vec<Avatar> {
 
 /// Also reports incomplete reads, so discovery can retain the previous list during transient I/O failures.
 pub(crate) fn in_project_checked(project: &Path, cache: &mut SceneCache) -> (Vec<Avatar>, bool) {
+    in_project_within(project, cache, crate::scene::MAX_YAML_BYTES)
+}
+
+/// [`in_project_checked`] reading no scene and no prefab larger than `max_bytes`. Each is read whole and then kept a
+/// `String` a line, two to three times its size in memory, on a background thread of the app's own window: without a
+/// limit a scene of several gigabytes (Unity writes meshes and terrains into scenes as text) could take the app down
+/// with it. A scene past the limit lists nothing, and that is remembered as its answer, as a preview refuses to build it.
+fn in_project_within(project: &Path, cache: &mut SceneCache, max_bytes: u64) -> (Vec<Avatar>, bool) {
     let mut complete = true;
     let assets = project.join("Assets");
     let mut scenes = vec![];
@@ -237,6 +245,11 @@ pub(crate) fn in_project_checked(project: &Path, cache: &mut SceneCache) -> (Vec
             out.extend(c.avatars.clone());
             continue;
         }
+        if meta.len() > max_bytes {
+            eprintln!("{}: {} MB, more than is read to find uploaded avatars and worlds", p.display(), meta.len() >> 20);
+            cache.insert(p, CachedScene { modified, len: meta.len(), avatars: Vec::new(), dependencies: Vec::new() });
+            continue;
+        }
         let Ok(text) = std::fs::read_to_string(&p) else {
             complete = false;
             continue;
@@ -267,6 +280,11 @@ pub(crate) fn in_project_checked(project: &Path, cache: &mut SceneCache) -> (Vec
             let Some(source) = value(d, "m_SourcePrefab").and_then(|s| guid(&s)).and_then(|g| prefabs.get(&g)) else { continue };
             dependencies.push((source.clone(), crate::discovery::fingerprint(source)));
             let prefab = prefab_models.entry(source.clone()).or_insert_with(|| {
+                // A prefab past the limit is not read either: its instances list nothing.
+                if std::fs::metadata(source).is_ok_and(|m| m.len() > max_bytes) {
+                    eprintln!("{}: more than is read to find uploaded avatars and worlds", source.display());
+                    return None;
+                }
                 let s = match std::fs::read_to_string(source) {
                     Ok(s) => s,
                     Err(_) => {
@@ -364,6 +382,51 @@ mod read_completeness_tests {
         assert!(!in_project_checked(&dir, &mut cache).1);
         std::fs::create_dir_all(dir.join("Assets")).unwrap();
         assert!(in_project_checked(&dir, &mut cache).1);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// A scene with one uploaded avatar, as Unity writes it.
+    fn scene_with(id: &str) -> String {
+        let lines = [
+            "%YAML 1.1",
+            "%TAG !u! tag:unity3d.com,2011:",
+            "--- !u!1 &100",
+            "GameObject:",
+            "  m_Name: Fox",
+            "--- !u!4 &101",
+            "Transform:",
+            "  m_GameObject: {fileID: 100}",
+            "  m_Father: {fileID: 0}",
+            "--- !u!114 &102",
+            "MonoBehaviour:",
+            "  m_GameObject: {fileID: 100}",
+            &format!("  blueprintId: {id}"),
+        ];
+        lines.join("\n") + "\n"
+    }
+
+    /// A scene larger than what is read lists nothing instead of being read whole, the scan is still complete (it is
+    /// no failure to try again), and the answer is kept until the file changes: it is not weighed again at each scan.
+    #[test]
+    fn a_scene_past_the_size_limit_is_not_read() {
+        let dir = std::env::temp_dir().join(format!("orbiters-scene-limit-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("Assets")).unwrap();
+        let small = scene_with("avtr_11111111-2222-3333-4444-555555555555");
+        let large = scene_with("avtr_99999999-2222-3333-4444-555555555555") + &"# padding\n".repeat(200);
+        std::fs::write(dir.join("Assets/Small.unity"), &small).unwrap();
+        std::fs::write(dir.join("Assets/Large.unity"), &large).unwrap();
+        let limit = small.len() as u64 + 10;
+        assert!((large.len() as u64) > limit);
+        let mut cache = SceneCache::default();
+        let (found, complete) = in_project_within(&dir, &mut cache, limit);
+        assert!(complete, "a scene too large is an answer, not a failed read");
+        assert_eq!(found.iter().map(|a| a.id.as_str()).collect::<Vec<_>>(), ["avtr_11111111-2222-3333-4444-555555555555"]);
+        let kept = cache.get(&dir.join("Assets").join("Large.unity")).expect("the large scene's answer is kept");
+        assert!(kept.avatars.is_empty() && kept.len == large.len() as u64);
+        // With room for it, the same scene lists its avatar: only its size held it back.
+        let (found, _) = in_project_within(&dir, &mut SceneCache::default(), u64::MAX);
+        assert_eq!(found.len(), 2);
         std::fs::remove_dir_all(dir).unwrap();
     }
 }

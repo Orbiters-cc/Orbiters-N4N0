@@ -12,6 +12,12 @@
 //! Each page prints its frames a minute and the lines that asked for them, the most frequent first. The settings and
 //! caches are a folder of the run's own (as the screenshots'), so nothing of the person's is written; their pictures,
 //! sessions and Unity projects are read as the window reads them.
+//!
+//! `states` is not a page of the sidebar: it is Home on the avatars' states, their cards showing, with something
+//! asked that the service never answers (what was asked there once kept the window drawing).
+//!
+//! `orbiters-desktop --idle-frames --local-revision` times instead what Photos & captures' watch does every fifteen
+//! seconds on its thread (`controller::shares::LocalRevision`), on this computer's own library, which it only reads.
 
 use crate::app::App;
 use crate::backend::{Ctl, Local};
@@ -25,8 +31,9 @@ use std::collections::HashMap;
 use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant};
 
-const PAGES: [(&str, Page); 9] = [
+const PAGES: [(&str, Page); 10] = [
     ("home", Page::Home),
+    (STATES, Page::Home),
     ("n4n0", Page::N4n0),
     ("capture", Page::Capture),
     ("projects", Page::Projects),
@@ -37,7 +44,70 @@ const PAGES: [(&str, Page); 9] = [
     ("settings", Page::Settings),
 ];
 
+/// Home on the avatars' states (see the module's words).
+const STATES: &str = "states";
+
+/// Times the look of Photos & captures' watch on this computer's library (read only): how many captures it counts,
+/// and how long a look takes the first time, again, and with the visit history read and parsed anew, which a look
+/// does when the service wrote the history since the last one (every ten seconds while VRChat writes its log).
+fn local_revision() -> anyhow::Result<()> {
+    use crate::controller::shares::LocalRevision;
+    use orbiters_core::account::Server;
+    use orbiters_core::visited;
+    let settings = Settings::load();
+    let server = if settings.development { Server::Development } else { Server::Production };
+    let root = &settings.sessions_dir;
+    let history = visited::history_file();
+    let ms = |from: Instant| from.elapsed().as_secs_f64() * 1e3;
+    let middle = |mut times: Vec<f64>| {
+        times.sort_by(f64::total_cmp);
+        (times[0], times[times.len() / 2], times[times.len() - 1])
+    };
+    println!("captures under {}: {}", root.display(), LocalRevision::captures(root));
+    println!("visit history: {} bytes", std::fs::metadata(&history).map(|m| m.len()).unwrap_or(0));
+    let mut revision = LocalRevision::default();
+    let from = Instant::now();
+    let first = revision.look(root, server);
+    println!("first look of the process: {:.2} ms", ms(from));
+    let mut same = true;
+    let again = middle(
+        (0..50)
+            .map(|_| {
+                let from = Instant::now();
+                same &= revision.look(root, server) == first;
+                ms(from)
+            })
+            .collect(),
+    );
+    println!("the look again, the history not read (50 times): {:.2} ms at least, {:.2} in the middle, {:.2} at most", again.0, again.1, again.2);
+    let parsed = middle(
+        (0..50)
+            .map(|_| {
+                let from = Instant::now();
+                same &= LocalRevision::default().look(root, server) == first;
+                ms(from)
+            })
+            .collect(),
+    );
+    println!("the look with the history read and parsed (50 times): {:.2} ms at least, {:.2} in the middle, {:.2} at most", parsed.0, parsed.1, parsed.2);
+    let alone = middle(
+        (0..50)
+            .map(|_| {
+                let from = Instant::now();
+                std::hint::black_box(visited::History::load(&history).revision());
+                ms(from)
+            })
+            .collect(),
+    );
+    println!("the history alone, read, parsed and counted (50 times): {:.2} ms at least, {:.2} in the middle, {:.2} at most", alone.0, alone.1, alone.2);
+    println!("the same revision every time: {same}");
+    Ok(())
+}
+
 pub fn run(args: &[String]) -> anyhow::Result<()> {
+    if args.first().map(String::as_str) == Some("--local-revision") {
+        return local_revision();
+    }
     let (mut seconds, mut warmup, mut focused) = (60.0f64, 8.0f64, false);
     let mut pages: Vec<(&str, Page)> = PAGES.to_vec();
     let mut it = args.iter();
@@ -77,7 +147,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
                 let ctl = Controller::new(settings);
                 ctl.set_snapshot(snapshot);
                 let backend: Ctl = Arc::new(Local::new(ctl));
-                (name, count(backend, page, warmup, seconds, focused))
+                (name, count(backend, page, name == STATES, warmup, seconds, focused))
             })
         })
         .collect::<Result<_, _>>()?;
@@ -102,8 +172,9 @@ struct Counted {
     causes: HashMap<String, u32>,
 }
 
-/// Runs `page` for `warmup` seconds, then counts its frames for `seconds`.
-fn count(backend: Ctl, page: Page, warmup: f64, seconds: f64, focused: bool) -> Counted {
+/// Runs `page` for `warmup` seconds, then counts its frames for `seconds`. `states`: Home, on the avatars' states
+/// with something asked of them.
+fn count(backend: Ctl, page: Page, states: bool, warmup: f64, seconds: f64, focused: bool) -> Counted {
     let ctx = egui::Context::default();
     orbiters_ui::install(&ctx);
     // When the next frame was asked for: what an integration is told (only requests that bring it nearer).
@@ -119,6 +190,7 @@ fn count(backend: Ctl, page: Page, warmup: f64, seconds: f64, focused: bool) -> 
     let measure_from = start + Duration::from_secs_f64(warmup);
     let end = measure_from + Duration::from_secs_f64(seconds);
     let mut counted = Counted { frames: 0, causes: HashMap::new() };
+    let mut staged = false;
     let mut next = Some(start);
     // A display shows so many frames a second at most: frames asked for "now" come at its rate.
     let display = Duration::from_secs_f64(1.0 / 60.0);
@@ -154,6 +226,15 @@ fn count(backend: Ctl, page: Page, warmup: f64, seconds: f64, focused: bool) -> 
         });
         // Nothing paints these frames.
         out.textures_delta.clear();
+        // Home's menu is made by its first frame: then its States page, and something asked there.
+        if states && !staged {
+            if let Some(host) = app.home_mut().menu_host() {
+                host.press(orbiters_n4n0_core::menu::Target::States);
+                app.home_mut().states_mut().stage_asked("avtr_idle", start.elapsed().as_secs_f64());
+                staged = true;
+                ctx.request_repaint();
+            }
+        }
         if Instant::now() >= measure_from {
             counted.frames += 1;
             // What asked for this frame was asked during the one before, or between the two.

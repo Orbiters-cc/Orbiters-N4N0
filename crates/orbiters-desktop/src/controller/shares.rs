@@ -416,9 +416,13 @@ pub fn instance_at(history: &visited::History, world: &str, taken: u64) -> Optio
 /// A number that changes when what [`local_entries_with_folders`] reads beyond the pictures' index does: the capture
 /// folders (one added, removed, or written in), the visit history (as [`visited::History::revision`]: not how far the
 /// logs were read), and this account's upload records. Cheap enough to ask every few seconds on a thread: it lists the
-/// captures' folder and asks three dates a capture, and reads the history only when its file changed. The app's own
-/// changes say so themselves (the library's version); this is for what changes them from outside, another program
-/// deleting a capture or the service writing the history.
+/// captures' folder and asks seven dates a capture (no file of a capture is opened), and reads the history only when
+/// its file changed. Measured on the library of the computer it was written on (`orbiters-desktop --idle-frames
+/// --local-revision`): see the stream's report. The app's own changes say so themselves (the library's version);
+/// this is for what changes them from outside, another program deleting a capture or the service writing the history.
+///
+/// A file of a capture that the list does not read (its frames, its video, its splats) changes nothing here, and a
+/// file written again with the same date and the same length is not seen.
 #[derive(Default)]
 pub struct LocalRevision {
     /// The history file as it was when last read (its date and length), and its visits' revision then.
@@ -431,13 +435,21 @@ impl LocalRevision {
         self.look_at(root, &visited::history_file(), records_path(server).ok().as_deref())
     }
 
+    /// How many captures a look counts under `root` (the folders with a manifest).
+    pub fn captures(root: &Path) -> usize {
+        std::fs::read_dir(root).into_iter().flatten().flatten().filter(|e| e.path().join(orbiters_core::contracts::manifest::MANIFEST_FILE).is_file()).count()
+    }
+
     /// [`LocalRevision::look`] with the history and the upload records at these files.
     pub fn look_at(&mut self, root: &Path, history: &Path, records: Option<&Path>) -> u64 {
         use std::hash::{Hash, Hasher};
         let stamp = |path: &Path| std::fs::metadata(path).ok().map(|m| (m.modified().ok(), m.len()));
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        // The captures: which folders there are, and for each what a change in it moves: its own date (a file added,
-        // removed or written through a rename, as the app's files are), its manifest's, its reconstruction's folder's.
+        // The captures: which folders there are, and for each what a change in it moves. Its own date and its
+        // reconstruction's folder's: a file added, removed or written through a rename, as the app's files are
+        // (its thumbnail, its keyframes trimmed, a result). And the date and length of each file the list reads of
+        // it, should one be written in place: its manifest, what it shows, how it was taken, the reconstruction's
+        // report and the splats' edits.
         let mut captures: Vec<_> = std::fs::read_dir(root)
             .into_iter()
             .flatten()
@@ -445,11 +457,19 @@ impl LocalRevision {
             .map(|e| e.path())
             .filter_map(|dir| {
                 let manifest = stamp(&dir.join(orbiters_core::contracts::manifest::MANIFEST_FILE))?;
-                let result = stamp(&orbiters_core::reconstruction::result_dir(&dir)).map(|s| s.0);
-                Some((stamp(&dir).map(|s| s.0), manifest, result, dir))
+                let result = orbiters_core::reconstruction::result_dir(&dir);
+                let read = [
+                    dir.join(orbiters_core::explicit::FILE),
+                    dir.join(orbiters_core::picture::FILE),
+                    result.join(orbiters_core::reconstruction::REPORT_FILE),
+                    result.join(orbiters_core::reconstruction::EDIT_FILE),
+                ]
+                .map(|file| stamp(&file));
+                Some((dir, stamp(&result).map(|s| s.0), manifest, read))
             })
+            .map(|(dir, result, manifest, read)| (stamp(&dir).map(|s| s.0), manifest, result, read, dir))
             .collect();
-        captures.sort_by(|a, b| a.3.cmp(&b.3));
+        captures.sort_by(|a, b| a.4.cmp(&b.4));
         captures.hash(&mut hasher);
         // The history's file is written every few seconds while VRChat runs: read only when it was, and counted by
         // what it says of the visits.

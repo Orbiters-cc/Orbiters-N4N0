@@ -25,7 +25,12 @@ pub mod vpm;
 use orbiters_i18n::tr;
 use std::path::{Path, PathBuf};
 
+/// Explicit app roots also own the projects environment. They take precedence over machine defaults and the
+/// standalone VCC/Hub overrides, so every startup worker uses the same isolated tree as its host application.
 pub fn data_dir() -> PathBuf {
+    if let Some(roots) = orbiters_core::paths::roots() {
+        return roots.local_data.clone();
+    }
     dirs::data_local_dir().unwrap_or_else(std::env::temp_dir).join("Orbiters")
 }
 
@@ -33,6 +38,9 @@ pub fn data_dir() -> PathBuf {
 /// Companion it starts empty and VPM creates what it needs, as ALCOM does. `ORBITERS_VCC_DIR` points it elsewhere
 /// (tests of a computer without VCC; never the person's real folder).
 pub fn vcc_dir() -> PathBuf {
+    if let Some(roots) = orbiters_core::paths::roots() {
+        return roots.local_data.join("VCC");
+    }
     match std::env::var_os("ORBITERS_VCC_DIR") {
         Some(dir) if !dir.is_empty() => PathBuf::from(dir),
         _ => vcc_parent().join("VRChatCreatorCompanion"),
@@ -56,6 +64,9 @@ fn vcc_parent() -> PathBuf {
 
 /// Unity Hub's own files (its project and editor lists). `ORBITERS_UNITY_HUB_DIR` points them elsewhere, for stand-ins.
 pub fn hub_data_dir() -> Option<PathBuf> {
+    if let Some(roots) = orbiters_core::paths::roots() {
+        return Some(roots.local_data.join("UnityHub"));
+    }
     match std::env::var_os("ORBITERS_UNITY_HUB_DIR") {
         Some(dir) if !dir.is_empty() => Some(PathBuf::from(dir)),
         _ => dirs::config_dir().map(|d| d.join("UnityHub")),
@@ -64,6 +75,9 @@ pub fn hub_data_dir() -> Option<PathBuf> {
 
 /// Where Unity writes the log of the editor last started.
 pub fn editor_log() -> Option<PathBuf> {
+    if let Some(roots) = orbiters_core::paths::roots() {
+        return Some(roots.local_data.join("Unity/Editor/Editor.log"));
+    }
     if cfg!(target_os = "macos") {
         dirs::home_dir().map(|p| p.join("Library/Logs/Unity/Editor.log"))
     } else if cfg!(windows) {
@@ -85,6 +99,9 @@ const EDITOR_LOG: &str = if cfg!(target_os = "macos") {
 /// Where Creator Companion itself is installed (its template covers), from its uninstall entry; none when it is not.
 /// `ORBITERS_VCC_APP_DIR` replaces it (empty: not installed).
 pub fn vcc_app_dir() -> Option<PathBuf> {
+    if let Some(roots) = orbiters_core::paths::roots() {
+        return Some(roots.local_data.join("VCC-app")).filter(|p| p.is_dir());
+    }
     if let Some(dir) = std::env::var_os("ORBITERS_VCC_APP_DIR") {
         return (!dir.is_empty()).then(|| PathBuf::from(dir)).filter(|p| p.is_dir());
     }

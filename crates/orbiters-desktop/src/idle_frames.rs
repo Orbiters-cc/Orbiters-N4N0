@@ -25,7 +25,6 @@ use crate::controller::{self, Controller};
 use crate::pages::Page;
 use anyhow::Context as _;
 use egui::{vec2, Pos2, RawInput, Rect, ViewportId, ViewportInfo};
-use orbiters_core::paths;
 use orbiters_core::settings::Settings;
 use std::collections::HashMap;
 use std::sync::{mpsc, Arc};
@@ -105,6 +104,8 @@ fn local_revision() -> anyhow::Result<()> {
 }
 
 pub fn run(args: &[String]) -> anyhow::Result<()> {
+    let root = std::env::temp_dir().join(format!("orbiters-idle-frames-{}", std::process::id()));
+    crate::link_smoke::sandbox(&root)?;
     if args.first().map(String::as_str) == Some("--local-revision") {
         return local_revision();
     }
@@ -128,11 +129,6 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
     }
     // Before any path is asked for: what the pages keep (the pictures' index, thumbnails, world pages) goes to a
     // folder of this run.
-    let root = std::env::temp_dir().join(format!("orbiters-idle-frames-{}", std::process::id()));
-    let (config, cache) = (root.join("config"), root.join("cache"));
-    std::fs::create_dir_all(&config)?;
-    std::fs::create_dir_all(&cache)?;
-    paths::set_roots(paths::Roots { config, local_data: paths::local_data_root(), cache, documents: paths::documents_root() })?;
 
     let settings = Settings { consent_acknowledged: true, ..Default::default() };
     let sessions = controller::list_sessions(&settings.sessions_dir);

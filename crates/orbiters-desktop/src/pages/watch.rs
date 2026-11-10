@@ -6,11 +6,57 @@
 //!
 //! Nothing tells a page it left the screen, so the watch works it out from egui's count of frames: the page keeps it
 //! ([`Watch::keep`]) on every frame it is drawn, and a frame drawn without that means the page is gone (another page,
-//! a closed dialog, a minimized window). No frame at all means the page is still what the window shows, at rest: the
-//! looks go on. The thread ends when the page is gone and starts again, with a look at once, when it is back.
+//! a closed dialog). No frame at all means the page is still what the window shows, at rest: the looks go on. The
+//! thread ends when the page is gone and starts again, with a look at once, when it is back.
+//!
+//! A window that is not shown (minimized, or hidden by the system) is another matter: its integration draws no frame
+//! at all while it is so (eframe runs only the app's logic then, `App::logic`), which the count of frames cannot tell
+//! from a window at rest. The app's logic says it ([`follow_window`]): every watch of that window ends at once, what
+//! its look held is let go (Settings' look keeps the microphones open), and each starts again, with a look, at the
+//! first frame drawn once the window shows. Not the focus: a window in view behind another goes on showing changes.
 
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Condvar, Mutex, Weak};
 use std::time::Duration;
+
+/// A window as its watches know it: whether it is shown, and the threads to wake when it no longer is.
+#[derive(Default)]
+struct Window {
+    hidden: AtomicBool,
+    watches: Mutex<Vec<Weak<dyn Sleeper>>>,
+}
+
+/// A watch's thread, asleep until its next look, that can be woken to see that it has to end.
+trait Sleeper: Send + Sync {
+    fn wake(&self);
+}
+
+/// The window `ctx` draws, kept with the context: a process may draw several (the idle count runs one a page).
+fn window(ctx: &egui::Context) -> Arc<Window> {
+    ctx.data_mut(|d| d.get_temp_mut_or_default::<Arc<Window>>(egui::Id::unique("orbiters-page-watch-window")).clone())
+}
+
+/// Tells the watches whether the window is shown, from what the integration says of it now (minimized, hidden by the
+/// system). Call at every pass of the app's logic, which runs whether a frame is drawn or not.
+pub fn follow_window(ctx: &egui::Context) {
+    window_shown(ctx, ctx.input(|i| i.viewport().visible()) != Some(false));
+}
+
+/// The window is shown, or no longer: then every watch's thread ends now, not at its next look.
+fn window_shown(ctx: &egui::Context, shown: bool) {
+    let window = window(ctx);
+    if window.hidden.swap(!shown, Ordering::AcqRel) == !shown || shown {
+        return;
+    }
+    let mut watches = window.watches.lock().unwrap_or_else(|e| e.into_inner());
+    watches.retain(|watch| match watch.upgrade() {
+        Some(watch) => {
+            watch.wake();
+            true
+        }
+        None => false,
+    });
+}
 
 struct Inner<T> {
     /// What the last look saw, and how many times a look differed from the one before (the first counts).
@@ -29,12 +75,27 @@ struct Inner<T> {
 struct Shared<T> {
     inner: Mutex<Inner<T>>,
     wake: Condvar,
+    /// The window the watch is drawn in.
+    window: Arc<Window>,
 }
 
 impl<T> Shared<T> {
     /// A worker that panicked while it held the lock leaves what it had: the page goes on with the last look.
     fn lock(&self) -> std::sync::MutexGuard<'_, Inner<T>> {
         self.inner.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Whether the thread has to end: the watch was dropped or replaced, or its window is no longer shown.
+    fn over(&self, inner: &Inner<T>) -> bool {
+        inner.stop || self.window.hidden.load(Ordering::Acquire)
+    }
+}
+
+impl<T: Send> Sleeper for Shared<T> {
+    fn wake(&self) {
+        // With the lock: the thread is either before its check of `over`, or waiting.
+        let _held = self.lock();
+        self.wake.notify_all();
     }
 }
 
@@ -99,12 +160,21 @@ impl<K: PartialEq + Clone, T: Clone + PartialEq + Send + 'static> Watch<K, T> {
                 }
             }
         }
-        // Not started, gone with the page, or another key: a new thread, whose first look counts as a change.
+        // Not started, gone with the page or the window, or another key: a new thread, whose first look counts as a
+        // change.
         self.stop();
+        let window = window(ctx);
         let shared = Arc::new(Shared {
             inner: Mutex::new(Inner { seen: None, changes: self.changes, kept: frame, now: false, stop: false, ended: false }),
             wake: Condvar::new(),
+            window: window.clone(),
         });
+        {
+            let mut watches = window.watches.lock().unwrap_or_else(|e| e.into_inner());
+            watches.retain(|watch| watch.strong_count() > 0);
+            let sleeper: Arc<dyn Sleeper> = shared.clone();
+            watches.push(Arc::downgrade(&sleeper));
+        }
         let (theirs, ctx, look) = (shared.clone(), ctx.clone(), make());
         if std::thread::Builder::new().name("page-watch".into()).spawn(move || run(theirs, ctx, period, look)).is_err() {
             // No thread to be had: tried again at the next frame drawn.
@@ -122,18 +192,18 @@ impl<K: PartialEq + Clone, T: Clone + PartialEq + Send + 'static> Watch<K, T> {
 
 fn run<T: PartialEq>(shared: Arc<Shared<T>>, ctx: egui::Context, period: Duration, mut look: impl FnMut() -> T) {
     loop {
-        // Frames drawn since the page kept the watch: it is no longer on screen.
+        // Frames drawn since the page kept the watch: it is no longer on screen. Or the window is not.
         let frame = ctx.cumulative_frame_nr();
         {
             let mut inner = shared.lock();
-            if inner.stop || frame > inner.kept + 1 {
+            if shared.over(&inner) || frame > inner.kept + 1 {
                 inner.ended = true;
                 return;
             }
         }
         let saw = look();
         let mut inner = shared.lock();
-        if inner.stop {
+        if shared.over(&inner) {
             inner.ended = true;
             return;
         }
@@ -142,7 +212,7 @@ fn run<T: PartialEq>(shared: Arc<Shared<T>>, ctx: egui::Context, period: Duratio
             inner.changes += 1;
             orbiters_ui::anim::request_frame(&ctx);
         }
-        let (mut inner, _) = shared.wake.wait_timeout_while(inner, period, |inner| !inner.stop && !inner.now).unwrap_or_else(|e| e.into_inner());
+        let (mut inner, _) = shared.wake.wait_timeout_while(inner, period, |inner| !shared.over(inner) && !inner.now).unwrap_or_else(|e| e.into_inner());
         inner.now = false;
     }
 }
@@ -150,7 +220,7 @@ fn run<T: PartialEq>(shared: Arc<Shared<T>>, ctx: egui::Context, period: Duratio
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::sync::atomic::AtomicU32;
     use std::time::Instant;
 
     /// One frame of a page that keeps `watch` (or not), at `t`.
@@ -237,6 +307,104 @@ mod tests {
         let shared = watch.running.as_ref().unwrap().1.clone();
         drop(watch);
         wait_for("the thread to end with its watch", || shared.lock().ended);
+    }
+
+    /// What a look holds while it runs (Settings' holds the microphones open): counted when it is let go.
+    struct Lease(Arc<AtomicU32>);
+
+    impl Drop for Lease {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    /// A pass of the app's logic alone, as eframe runs it for a window that is not shown (`minimized`) and before
+    /// every frame of one that is: no frame is drawn, and egui's count of frames does not move.
+    fn logic_pass(ctx: &egui::Context, t: f64, minimized: bool) {
+        let mut input = egui::RawInput { time: Some(t), ..Default::default() };
+        input.viewports.insert(egui::ViewportId::ROOT, egui::ViewportInfo { minimized: Some(minimized), occluded: Some(false), ..Default::default() });
+        let _ = ctx.run_logic(&input, follow_window);
+    }
+
+    /// Minimizing the window ended no watch: eframe draws no frame for a window that is not shown, so no frame was
+    /// ever drawn "without the page", and Settings' watch kept the microphones open for as long as the window stayed
+    /// minimized. The app's logic, which eframe still runs then, tells the watches.
+    #[test]
+    fn a_window_no_longer_shown_ends_its_watches_and_they_look_again_once_it_shows() {
+        let ctx = egui::Context::default();
+        let (looks, released) = (Arc::new(AtomicU32::new(0)), Arc::new(AtomicU32::new(0)));
+        let (others, others_released) = (Arc::new(AtomicU32::new(0)), Arc::new(AtomicU32::new(0)));
+        // Two watches of one page: the second looks rarely, and is asleep when the window goes. Each look holds a
+        // lease made when its thread starts.
+        let mut watch: Watch<(), u32> = Watch::default();
+        let mut other: Watch<(), u32> = Watch::default();
+        let mut t = 0.0;
+        let mut frame = |watch: &mut Watch<(), u32>, other: &mut Watch<(), u32>| -> (Option<u32>, Option<u32>) {
+            t += 0.01;
+            logic_pass(&ctx, t, false);
+            let mut seen = (None, None);
+            let mut out = ctx.run_ui(egui::RawInput { time: Some(t), ..Default::default() }, |ui| {
+                seen.0 = watch.keep(ui.ctx(), &(), Duration::from_millis(5), || {
+                    let (looks, lease) = (looks.clone(), Lease(released.clone()));
+                    move || {
+                        let _held = &lease;
+                        looks.fetch_add(1, Ordering::SeqCst)
+                    }
+                });
+                seen.1 = other.keep(ui.ctx(), &(), Duration::from_secs(3600), || {
+                    let (looks, lease) = (others.clone(), Lease(others_released.clone()));
+                    move || {
+                        let _held = &lease;
+                        looks.fetch_add(1, Ordering::SeqCst)
+                    }
+                });
+            });
+            out.textures_delta.clear();
+            seen
+        };
+        let let_go = || (released.load(Ordering::SeqCst), others_released.load(Ordering::SeqCst));
+        // Shown: both look, the page at rest, the leases held.
+        frame(&mut watch, &mut other);
+        wait_for("both to look", || looks.load(Ordering::SeqCst) > 0 && others.load(Ordering::SeqCst) == 1);
+        frame(&mut watch, &mut other);
+        assert_eq!(let_go(), (0, 0), "the looks hold their leases");
+        // Minimized: a pass of the logic and no frame. The looks stop and both let go of what they held, the one
+        // asleep for an hour too.
+        logic_pass(&ctx, 1.0, true);
+        wait_for("both leases to be let go", || let_go() == (1, 1));
+        let stopped_at = looks.load(Ordering::SeqCst);
+        std::thread::sleep(Duration::from_millis(40));
+        assert_eq!(looks.load(Ordering::SeqCst), stopped_at, "no look while the window is not shown");
+        assert_eq!(others.load(Ordering::SeqCst), 1);
+        // More passes of the logic while minimized change nothing.
+        logic_pass(&ctx, 1.1, true);
+        std::thread::sleep(Duration::from_millis(20));
+        assert_eq!((looks.load(Ordering::SeqCst), let_go()), (stopped_at, (1, 1)));
+        // Shown again: the first frame starts both anew, and each gives the page a new look.
+        assert_eq!(frame(&mut watch, &mut other), (None, None), "starting again");
+        wait_for("both to look again", || looks.load(Ordering::SeqCst) > stopped_at && others.load(Ordering::SeqCst) == 2);
+        wait_for("a frame for the new looks", || ctx.has_requested_repaint());
+        let seen = frame(&mut watch, &mut other);
+        assert!(seen.0.is_some_and(|n| n >= stopped_at) && seen.1 == Some(1), "{seen:?}");
+        assert_eq!(let_go(), (1, 1), "and hold new leases");
+    }
+
+    /// A window in view behind another (not focused) is shown: its watches go on.
+    #[test]
+    fn a_window_without_the_focus_keeps_its_watches() {
+        let ctx = egui::Context::default();
+        let looks = Arc::new(AtomicU32::new(0));
+        let mut watch: Watch<(), u32> = Watch::default();
+        let mut input = egui::RawInput { time: Some(0.01), focused: false, ..Default::default() };
+        input.viewports.insert(egui::ViewportId::ROOT, egui::ViewportInfo { minimized: Some(false), occluded: Some(false), focused: Some(false), ..Default::default() });
+        let _ = ctx.run_logic(&input, follow_window);
+        let mut out = ctx.run_ui(input.clone(), |ui| {
+            let looks = looks.clone();
+            watch.keep(ui.ctx(), &(), Duration::from_millis(5), move || move || looks.fetch_add(1, Ordering::SeqCst));
+        });
+        out.textures_delta.clear();
+        let _ = ctx.run_logic(&input, follow_window);
+        wait_for("looks without the focus", || looks.load(Ordering::SeqCst) >= 5);
     }
 
     #[test]

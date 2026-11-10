@@ -32,7 +32,7 @@ pub mod states;
 pub mod storage;
 pub mod videos;
 pub mod vr_audio;
-mod watch;
+pub mod watch;
 pub mod worlds;
 
 pub use watch::Watch;

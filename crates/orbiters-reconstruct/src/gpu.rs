@@ -2851,6 +2851,26 @@ mod tests {
             .collect()
     }
 
+    /// The kernels of depth steps are built on 8×8 tiles, every other one on 16×16. Theirs are the same sources with
+    /// one line of common.wgsl replaced as text: reformat that line and the replace matches nothing, without a word,
+    /// and the "8" kernels are built on 16×16 tiles while the host sizes their tiles for 8.
+    #[test]
+    fn the_depth_steps_kernels_are_built_on_their_own_tiles() {
+        let (sixteen, eight) = ("const TILE: u32 = 16u;", "const TILE: u32 = 8u;");
+        for sums in GradientSums::ALL {
+            let sources = kernel_sources(Some(sums), 0);
+            let on_eight: Vec<&KernelSource> = sources.iter().filter(|k| k.name.ends_with(" 8")).collect();
+            assert_eq!(on_eight.len(), 5, "{:?}", on_eight.iter().map(|k| k.name).collect::<Vec<_>>());
+            for k in &sources {
+                let (has, lacks) = if k.name.ends_with(" 8") { (eight, sixteen) } else { (sixteen, eight) };
+                assert!(!k.code.contains(lacks), "{}: {lacks}", k.name);
+                // Not every module has tiles (the scan, the sort): those that do say their size once.
+                assert!(k.code.matches(has).count() <= 1, "{}: {has} more than once", k.name);
+                assert!(!k.name.ends_with(" 8") || k.code.contains(has), "{}: built on 16×16 tiles", k.name);
+            }
+        }
+    }
+
     /// On D3D12 the nested forward's modules are the flattened forward under the nested entry name, and still validate.
     #[test]
     fn d3d12_builds_the_flattened_forward_under_the_nested_name() {

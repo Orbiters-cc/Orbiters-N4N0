@@ -49,6 +49,13 @@ fn scan_event(state: &mut Qr, event: orbiters_n4n0::QrSeen) {
         _ => {}
     }
 }
+fn begin_demo(state: &mut crate::state::Snapshot) -> bool {
+    if !state.can_switch_demo_avatar() {
+        return false;
+    }
+    state.camera_tools.demo = Demo::Busy;
+    true
+}
 impl Controller {
     pub fn camera_qr(self: &Shared, active: bool) {
         let mut scan = self.camera_scan.lock().unwrap();
@@ -58,26 +65,40 @@ impl Controller {
             s.camera_tools.qr = if active { Qr::Looking } else { Qr::Off };
         });
         if !active {
+            self.release_camera_stream(1);
             return;
         }
-        if self.view().camera_open_said != Some(true) {
+        if self.require_live_camera().is_err() {
             self.update(|s| s.camera_tools.qr = Qr::NoStream);
+            self.release_camera_stream(1);
             return;
         }
+        let values = self.camera_values();
+        if self.view().camera_open_said != Some(true) || !values.iter().any(|(p,v)|p==super::CAMERA_MODE && matches!(v,orbiters_core::osc::OscValue::Int(m) if *m != 0)) {
+            self.release_camera_stream(1); self.update(|s|s.camera_tools.qr=Qr::NoStream); return;
+        }
+        if !self.acquire_camera_stream(1, &values) { self.update(|s|s.camera_tools.qr=Qr::NoStream); return; }
         let generation = self.view().camera_tools.qr_generation;
         let weak = std::sync::Arc::downgrade(self);
-        let events = Box::new(move |event| {
+        let events: orbiters_n4n0::QrEvents = Box::new(move |event| {
             if let Some(ctl) = weak.upgrade() {
+                let mut scan=ctl.camera_scan.lock().unwrap();
+                let mut finished = false;
                 ctl.update(|s| {
-                    if s.camera_tools.qr_generation == generation {
+                    if s.camera_tools.qr_generation == generation && matches!(s.camera_tools.qr,Qr::Looking|Qr::NoStream) {
                         scan_event(&mut s.camera_tools.qr, event);
+                        finished = matches!(s.camera_tools.qr, Qr::Found { .. } | Qr::Error(_));
                     }
                 });
+                if finished { scan.take(); ctl.release_camera_stream(1); }
             }
         });
-        match crate::qr::start(self.settings().spout_sender.clone(), events) {
+        #[cfg(test)]
+        { *self.test_qr_events.lock().unwrap() = Some(events); return; }
+        #[cfg(not(test))]
+        match crate::qr::start(String::new(), events) {
             Ok(handle) => *scan = Some(handle),
-            Err(e) => self.update(|s| s.camera_tools.qr = Qr::Error(e)),
+            Err(e) => { self.update(|s| s.camera_tools.qr = Qr::Error(e)); self.release_camera_stream(1); },
         }
     }
 
@@ -88,10 +109,7 @@ impl Controller {
         }
         let mut start = false;
         self.update(|s| {
-            if s.camera_tools.demo != Demo::Busy {
-                s.camera_tools.demo = Demo::Busy;
-                start = true;
-            }
+            start = begin_demo(s);
         });
         if !start {
             return;
@@ -130,6 +148,26 @@ impl Controller {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn demo_selection_requires_a_live_matching_session_at_the_controller() {
+        let mut state = crate::state::Snapshot::new(orbiters_core::settings::Settings::default());
+        state.camera_tools.demo_avatar = Some("avtr_mock".into());
+        state.vrchat.running = true;
+        state.vrchat.world.local_player = Some("Tester".into());
+        state.vrchat.world.players.insert("usr_test".into(), "Tester".into());
+        state.vrchat_login.allowed = true;
+        state.vrchat_login.user = Some(serde_json::from_value(serde_json::json!({"id":"usr_test","displayName":"Tester"})).unwrap());
+        state.vrchat.running = false;
+        assert!(!begin_demo(&mut state));
+        assert_eq!(state.camera_tools.demo, Demo::Idle);
+        state.vrchat.running = true;
+        state.vrchat_login.user.as_mut().unwrap().id = "usr_other".into();
+        assert!(!begin_demo(&mut state));
+        state.vrchat_login.user.as_mut().unwrap().id = "usr_test".into();
+        assert!(begin_demo(&mut state));
+        assert_eq!(state.camera_tools.demo, Demo::Busy);
+        assert!(!begin_demo(&mut state));
+    }
     #[test]
     fn scan_only_accepts_web_links_and_retains_found_result() {
         let mut state = Qr::Looking;

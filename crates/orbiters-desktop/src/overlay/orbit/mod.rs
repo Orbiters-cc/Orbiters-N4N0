@@ -2986,7 +2986,7 @@ impl Panels {
 
     /// Whether any picture is due or any part still moving.
     pub fn busy(&self) -> bool {
-        self.all().any(|p| p.dirty || !p.appear.settled()) || self.stage.host.dirty || self.stage.painter.busy()
+        self.all().any(|p| p.dirty || !p.appear.settled()) || self.stage.host.dirty || (self.takeover.is_some() && self.stage.painter.busy())
     }
 
     /// Moves each part's spring on.

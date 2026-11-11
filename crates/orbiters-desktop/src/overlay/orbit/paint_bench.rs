@@ -414,7 +414,7 @@ impl Rig {
     /// Whether a part is due a picture, is still coming in, or was handed one in the turn just taken. (Not `Panels::busy`: that also counts N4N0's menu being due a picture, which
     /// it stays while it is on no sheet.)
     fn moving(&self) -> bool {
-        self.panels.stage.painter.busy() || self.panels.all().any(|p| p.dirty || !p.appear.settled()) || self.steps.last().and_then(|s| s.turns.last()).is_some_and(|c| c.shows > 0)
+        (self.panels.takeover.is_some() && self.panels.stage.painter.busy()) || self.panels.all().any(|p| p.dirty || !p.appear.settled()) || self.steps.last().and_then(|s| s.turns.last()).is_some_and(|c| c.shows > 0)
     }
 
     /// The seconds to a 3D picture counting down, then where the music is moving on, eight turns a second's worth: what one part says changes, and nothing else.
@@ -692,6 +692,7 @@ fn script(rig: &mut Rig) {
             match sheet {
                 super::panels::Sheet::Worlds => { rig.panels.act(Action::Worlds, &rig.snap, &mut super::Pressed::default()); }
                 _ => {
+                    if sheet == super::panels::Sheet::Menu { rig.panels.stage.host.menu.page = orbiters_n4n0_core::menu::Menu::default().page; }
                     if sheet == super::panels::Sheet::Instances { rig.panels.stage.host.menu.page = orbiters_n4n0_core::menu::Page::Instances; }
                     if sheet == super::panels::Sheet::Results { rig.panels.stage.host.menu.page = orbiters_n4n0_core::menu::Page::Results; }
                     rig.panels.open_sheet(sheet, "", &rig.snap);

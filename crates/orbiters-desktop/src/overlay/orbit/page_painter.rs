@@ -139,4 +139,13 @@ mod tests {
         }
     }
 
+    #[test]
+    fn a_closed_page_does_not_stay_busy_for_an_unused_result() {
+        let mut panels = super::super::Panels::new(Arc::new(crate::screenshot::Still), 2.0, true).with_page_worker();
+        panels.stage.host.dirty = false;
+        panels.stage.painter.submit(request(0, Sheet::Settings));
+        assert!(panels.takeover.is_none());
+        assert!(!panels.busy());
+    }
+
 }

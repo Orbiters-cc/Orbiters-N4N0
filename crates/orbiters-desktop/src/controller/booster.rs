@@ -13,7 +13,7 @@ use orbiters_booster::guided::{Item, Known, ToPutBack};
 use orbiters_booster::journal::{Store, Target};
 use orbiters_booster::programs::{self, RealOs, Seen};
 use orbiters_booster::{system, vrchat_read, Level};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -36,6 +36,8 @@ pub(crate) struct Hub {
     /// Preparing shares waits while VRChat has the scene.
     holds_preparing: AtomicBool,
     inner: Mutex<Inner>,
+    generation: AtomicU64,
+    worker: Mutex<Option<std::thread::Thread>>,
 }
 
 #[derive(Default)]
@@ -50,6 +52,11 @@ struct Inner {
 }
 
 impl Hub {
+    pub(crate) fn cancel_work(&self) {
+        self.generation.fetch_add(1, Ordering::SeqCst);
+        if let Some(worker) = self.worker.lock().unwrap().as_ref() { worker.unpark(); }
+    }
+
     pub(crate) fn holds_reconstructions(&self) -> bool {
         self.holds_reconstructions.load(Ordering::Relaxed)
     }
@@ -111,10 +118,12 @@ impl super::Controller {
         inner.pending = None;
         drop(inner);
         self.booster_publish();
+        self.booster.cancel_work();
     }
 
     /// What a surface asked.
     pub fn booster_command(self: &Shared, command: Command) {
+        let cancelling = matches!(command, Command::Overlay(Request::StopTest) | Command::PutBack);
         match command {
             Command::Overlay(request) => {
                 let mut inner = self.booster.inner.lock().unwrap();
@@ -154,6 +163,7 @@ impl super::Controller {
             }
         }
         self.booster_publish();
+        if cancelling { self.booster.cancel_work(); }
     }
 
     fn booster_publish(self: &Shared) {
@@ -204,6 +214,7 @@ impl super::Controller {
     }
 
     fn booster_thread(self: Shared, store: Store) {
+        *self.booster.worker.lock().unwrap() = Some(std::thread::current());
         let mut os = RealOs;
         let mut last_seen: Option<(Instant, Vec<Seen>)> = None;
         let mut last_lower: Option<Instant> = None;
@@ -216,14 +227,15 @@ impl super::Controller {
         let mut slower = programs::Slower::default();
         let mut level = Level::Off;
         loop {
-            std::thread::sleep(Duration::from_secs(1));
+            std::thread::park_timeout(Duration::from_secs(1));
             if self.quitting.load(Ordering::Relaxed) {
                 let _ = programs::restore_all(&store, &mut os);
                 return;
             }
             self.booster_publish();
             let snap = self.view();
-            let wants = effective_wants(&snap);
+            let generation = self.booster.generation.load(Ordering::SeqCst);
+            let mut wants = effective_wants(&snap);
             let here = snap.vrchat.runs_here();
             if snap.settings.booster.level != level {
                 // A program taken out of efficiency mode by hand is left so until the step changes.
@@ -259,7 +271,9 @@ impl super::Controller {
             if wants.lower_programs && here {
                 if last_lower.is_none_or(|at| at.elapsed() >= RELOWER_EVERY) {
                     // It lists the system afresh itself, and opens nothing it did not find there.
-                    let _ = slower.slow(&store, &mut os);
+                    let allowed = || self.booster.generation.load(Ordering::SeqCst) == generation
+                        && !self.quitting.load(Ordering::Relaxed) && effective_wants(&self.view()).lower_programs;
+                    let _ = slower.slow_while(&store, &mut os, &allowed);
                     last_lower = Some(Instant::now());
                     lowered_any = true;
                     self.booster_note_lowered(&store);
@@ -270,6 +284,15 @@ impl super::Controller {
                     lowered_any = programs::restore_all(&store, &mut os).map_or(true, |r| !r.waiting.is_empty());
                     self.booster_note_lowered(&store);
                 }
+            }
+
+            if self.booster.generation.load(Ordering::SeqCst) != generation || !effective_wants(&self.view()).lower_programs {
+                if lowered_any {
+                    lowered_any = programs::restore_all(&store, &mut os).map_or(true, |r| !r.waiting.is_empty());
+                    self.booster_note_lowered(&store);
+                }
+                last_lower = None;
+                wants = effective_wants(&self.view());
             }
 
             // Preparing shares: stopped once, started again when no longer held.
@@ -284,6 +307,7 @@ impl super::Controller {
             stopping_prep = stop_prep;
 
             // 3D pictures wait, through the same pause a running job already has, and start again by themselves.
+            let snap = self.view();
             let hold = snap.settings.booster.level >= Level::Picture && snap.booster.watching && here && !wants.release_hold;
             self.booster.holds_reconstructions.store(hold, Ordering::Relaxed);
             if hold && !holding {

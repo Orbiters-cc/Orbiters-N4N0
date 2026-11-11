@@ -1145,3 +1145,55 @@ fn the_booster_s_test_stops_from_its_page() {
     let asked = heard.boosters.lock().unwrap().clone();
     assert!(asked.iter().any(|c| c.contains("StopTest")), "{asked:?}");
 }
+
+#[test]
+fn review_slider_releases_round_trip_through_service_with_delayed_state() {
+    use super::panels::Smoothed;
+    use crate::backend::Backend;
+    use crate::service::tests::{service, linked_through, until};
+    let service = service();
+    let (client, wire) = linked_through(&service, crate::ipc::Role::Overlay);
+    let backend = Arc::new(crate::backend::Remote(client.clone()));
+    let mut panels = Panels::new(backend.clone(), 2.0, true);
+    let mut clock = 0.0;
+    let mut turn = |panels: &mut Panels| {
+        clock += 0.011;
+        panels.clock = Some(clock);
+        let mut snap = (*backend.view()).clone();
+        // Driver status deliberately lags configured settings throughout the real UI/IPC path.
+        snap.n4n0.tracking = Some(orbiters_n4n0::status::TrackingView { on: false, ms: [0; 3], note: String::new() });
+        turn_of(panels, &snap, Some(Around::QuickMenu), 0);
+        snap
+    };
+    let snap = turn(&mut panels);
+    panels.open_sheet(Sheet::Tracking, "", &snap);
+    turn(&mut panels);
+    let unchanged_tracker = backend.view().settings.tracking.ms[2];
+    wire.hold(true);
+    for (which, value) in [(Smoothed::Device(0), 90), (Smoothed::Device(1), 70), (Smoothed::QuickMenu, 60), (Smoothed::Wheel, 75)] {
+        let snap = turn(&mut panels);
+        let mut at = find_on(&panels, Action::Set(super::panels::Pick::SmoothingBar(which))).unwrap();
+        at.1.x = (0..=1024).find(|x| super::panels::smoothing_at(*x as f32) == value).unwrap() as f32;
+        panels.hover(Some(at));
+        turn(&mut panels);
+        panels.press(&snap);
+        assert_eq!(panels.smoothing_held, Some((which, value)));
+        turn(&mut panels);
+        panels.release();
+        panels.release();
+        turn(&mut panels);
+    }
+    assert_eq!(backend.view().settings.tracking.ms, [90,70,unchanged_tracker]);
+    assert_eq!(backend.view().settings.orbit.vr_smoothing_quick_menu_ms, 60.0);
+    assert_eq!(backend.view().settings.orbit.vr_smoothing_wheel_ms, 75.0);
+    wire.hold(false);
+    assert!(until(|| client.snapshot().smoothing_revision == 4));
+    assert_eq!(client.snapshot().settings.tracking.ms, [90,70,unchanged_tracker]);
+    client.patch_smoothing(serde_json::json!({"tracking":{"ms":[65535,70,0]}}));
+    assert!(until(|| client.snapshot().smoothing_revision == 5));
+    assert_eq!(client.snapshot().settings.tracking.ms[0], orbiters_core::settings::TrackingSettings::MAX_MS);
+    let before = client.snapshot().settings.tracking.ms;
+    client.patch_smoothing(serde_json::json!({"tracking":{"ms":"invalid"}}));
+    assert!(until(|| client.snapshot().smoothing_revision == 6));
+    assert_eq!(client.snapshot().settings.tracking.ms, before);
+}

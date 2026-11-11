@@ -81,6 +81,9 @@ impl Classifier {
         self.confirmed = Limit::NotSure;
     }
 
+    #[cfg(test)]
+    pub(crate) fn has_decision_window(&self) -> bool { self.last_look.is_some() }
+
     pub fn confirmed(&self) -> Limit {
         self.confirmed
     }

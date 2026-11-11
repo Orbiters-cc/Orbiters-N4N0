@@ -10,6 +10,9 @@
 
 use orbiters_openvr::Matrix34;
 
+// The X/chevron pair only seeds recognition. A spread landmark homography and rigid-plane
+// reprojection determine the live pose; panel_in_room is retained solely for the older fixture tests.
+
 /// The panel in its own units, as a picture of it 410 across has them, from its middle: its X, and its chevron.
 pub const PANEL_X: [f32; 2] = [-181.0, -83.0];
 pub const PANEL_CHEVRON: [f32; 2] = [-8.0, 100.0];
@@ -48,6 +51,8 @@ const SUPPORT_SMALL: usize = 4;
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Found {
     pub perspective: Option<[[f32; 3]; 3]>,
+    pub residual_px: f32,
+    pub landmarks: Option<(usize, [([f32;2],[f32;2]);10])>,
     pub x: [f32; 2],
     pub chevron: [f32; 2],
     pub middle: [f32; 2],
@@ -65,6 +70,10 @@ impl Found {
         (self.x, self.chevron, self.middle) = (at(self.x), at(self.chevron), at(self.middle));
         self.across /= scale;
         self.tall /= scale;
+        self.residual_px /= scale;
+        if let Some((count,points)) = self.landmarks.as_mut() {
+            for (_,q) in points.iter_mut().take(*count) { *q=at(*q); }
+        }
         if let Some(h) = self.perspective.as_mut() {
             for k in 0..3 {
                 h[0][k] = h[0][k] / scale + by[0] * h[2][k];
@@ -322,9 +331,6 @@ fn look(light: &Light, needs: usize) -> Option<Found> {
             }
             // Seen straight on, the two say its size and how it leans.
             let lean = v[1].atan2(v[0]) - panel_angle;
-            if lean.abs() > LEANS_AT_MOST.to_radians() {
-                continue;
-            }
             let (s, co) = lean.sin_cos();
             let (right, down) = ([co, s], [-s, co]);
             // The chevron lies along the panel's right.
@@ -366,10 +372,12 @@ fn look(light: &Light, needs: usize) -> Option<Found> {
                 if support < needs {
                     continue;
                 }
+                let fitted = landmark_fit(&reading, &all, x.middle, c.middle);
+                if lean.abs() > LEANS_AT_MOST.to_radians() && fitted.is_none() { continue; }
+                let (perspective,residual_px,landmarks) = fitted.map_or((None,f32::INFINITY,None), |(h,e,p)| (Some(h),e,Some(p)));
                 let score = looks + support as f32 * 0.2 - (x_share - X_IS).abs() * 3.0 - (c_share - CHEVRON_IS).abs() * 2.0;
                 if best.as_ref().is_none_or(|b| score > b.0) {
-                    let perspective = landmark_fit(&reading, &all, x.middle, c.middle);
-                    let found = Found { perspective, x: x.middle, chevron: c.middle, middle: reading.middle, right: reading.right, down: reading.down, across: reading.across, tall: reading.tall };
+                    let found = Found { perspective, residual_px, landmarks, x: x.middle, chevron: c.middle, middle: reading.middle, right: reading.right, down: reading.down, across: reading.across, tall: reading.tall };
                     best = Some((score, found));
                 }
             }
@@ -407,7 +415,7 @@ pub fn fit(points: &[([f32; 2], [f32; 2])]) -> Option<[[f32; 3]; 3]> {
     (error.is_finite() && error.sqrt() <= 2.5).then_some(h)
 }
 
-fn landmark_fit(r: &Reading, blobs: &[Blob], x: [f32;2], chevron: [f32;2]) -> Option<[[f32;3];3]> {
+fn landmark_fit(r: &Reading, blobs: &[Blob], x: [f32;2], chevron: [f32;2]) -> Option<([[f32;3];3],f32,(usize,[([f32;2],[f32;2]);10]))> {
     let mut points = vec![(PANEL_X,x),(PANEL_CHEVRON,chevron)];
     // Fixed icon centres, rather than the variable slider thumbs or mode-dependent button labels.
     for p in [[-154.,-84.],[-190.,36.],[-190.,54.],[-190.,74.],[-190.,93.],[-148.,131.],[-35.,133.],[82.,135.]] {
@@ -419,7 +427,11 @@ fn landmark_fit(r: &Reading, blobs: &[Blob], x: [f32;2], chevron: [f32;2]) -> Op
     }
     // Both horizontal and vertical spread are essential; the left icon column alone is degenerate.
     if !points.iter().any(|(p,_)| p[0] > 50.) { return None; }
-    fit(&points)
+    let h=fit(&points)?;
+    let residual=(points.iter().map(|&(p,q)| { let r=project(h,p); (r[0]-q[0]).powi(2)+(r[1]-q[1]).powi(2) }).sum::<f32>()/points.len() as f32).sqrt();
+    let mut landmarks=[([0.;2],[0.;2]);10];
+    for (out,p) in landmarks.iter_mut().zip(&points) { *out=*p; }
+    Some((h,residual,(points.len(),landmarks)))
 }
 
 /// Perspective pose using the actual eye projection, with rigid-plane consistency rejection.
@@ -445,6 +457,23 @@ pub fn perspective_pose(found: &Found, size: [f32;2], mirror: &Mirror, eye: &Mat
     let z=[right[1]*up[2]-right[2]*up[1],right[2]*up[0]-right[0]*up[2],right[0]*up[1]-right[1]*up[0]];
     let position=t.map(|x|x*scale);
     if !(0.15..=4.).contains(&-position[2]) { return None; }
+    // A texture homography can fit a sheared quadrilateral perfectly. Verify the recovered
+    // rigid plane itself through the eye projection before accepting it as a physical panel.
+    let mut errors=Vec::new();
+    let check = |p:[f32;2],q:[f32;2]| -> Option<f32> {
+        let v: [f32;3]=std::array::from_fn(|i| position[i]+right[i]*p[0]*unit-up[i]*p[1]*unit);
+        if -v[2] <= 0.0001 { return None; }
+        let tangent=[v[0]/-v[2],-v[1]/-v[2]];
+        let px=[(tangent[0]-mirror.from[0])/mirror.spans[0]*size[0],(tangent[1]-mirror.from[1])/mirror.spans[1]*size[1]];
+        Some((px[0]-q[0]).powi(2)+(px[1]-q[1]).powi(2))
+    };
+    if let Some((count,landmarks))=found.landmarks {
+        for (p,q) in landmarks.into_iter().take(count) { errors.push(check(p,q)?); }
+    } else {
+        for &(p,_) in &points { errors.push(check(p,project(found.perspective?,p))?); }
+    }
+    let rms=(errors.iter().sum::<f32>()/errors.len().max(1) as f32).sqrt();
+    if !rms.is_finite() || rms>2.5 || errors.iter().any(|e| *e>36.) { return None; }
     let local=Matrix34 { m: std::array::from_fn(|i| [right[i],up[i],z[i],position[i]]) };
     Some((then(eye,&local),unit))
 }
@@ -543,8 +572,15 @@ pub fn side_with_room(at: impl Fn([f32; 2]) -> [f32; 2], sides: [f32; 4], was: S
     }
 }
 
+/// A column crossing the eye's projection plane cannot be placed on that side.
+pub fn side_projects(found: &Found, side: Side) -> bool {
+    let Some(h) = found.perspective else { return false; };
+    [side.sign()*215., side.sign()*330.].into_iter().all(|x| [-135.,135.].into_iter().all(|y| h[2][0]*x+h[2][1]*y+h[2][2] > 0.05))
+}
+
 /// Where a panel seen by the eye lies in the room, and what one of its units is there. `eye` is that eye's pose then. In the plane facing it, turned as it is seen turned, its middle moved so
 /// that the tiles on `side` lie next to its edge even when a turn makes it narrower.
+#[cfg(test)]
 pub fn panel_in_room(found: &Found, size: [f32; 2], mirror: &Mirror, eye: &Matrix34, panel_m: f32, side: Side) -> (Matrix34, f32) {
     let on = |p: [f32; 2]| mirror.tangent(p[0] / size[0], p[1] / size[1]);
     // A place on the picture is a place in tangents; so is a way along it, and how long.
@@ -961,7 +997,7 @@ mod tests {
     }
 
     fn straight_found(at: impl Fn([f32; 2]) -> [f32; 2], per_pixel: f32) -> Found {
-        Found { perspective: None, x: at(PANEL_X), chevron: at(PANEL_CHEVRON), middle: at([0.0, 0.0]), right: [1.0, 0.0], down: [0.0, 1.0], across: per_pixel, tall: per_pixel }
+        Found { perspective: None, residual_px: 0., landmarks: None, x: at(PANEL_X), chevron: at(PANEL_CHEVRON), middle: at([0.0, 0.0]), right: [1.0, 0.0], down: [0.0, 1.0], across: per_pixel, tall: per_pixel }
     }
 
     #[test]
@@ -989,16 +1025,19 @@ mod tests {
                             assert!((pose.m[2][3]+distance).abs()<0.002);
                             assert!((got_unit-unit).abs()<1e-6);
                             for side in [-1.,1.] {
+                                let which = if side < 0. { Side::Left } else { Side::Right };
+                                if !side_projects(&found,which) { continue; }
                                 // Tile hull and panel hull have a separating line at their common plane's edge,
                                 // preserved by perspective for positive depth, including both horizontal sides.
                                 for y in [-110.,0.,110.] {
-                                    let tile_x=side*225.;
+                                    for tile_x in [side*215.,side*301.] {
                                     let q=tangent([tile_x,y]);
                                     let edge0=tangent([side*205.,-110.]);
                                     let edge1=tangent([side*205.,110.]);
                                     let centre=tangent([0.,0.]);
                                     let cross=|p:[f32;2]| (edge1[0]-edge0[0])*(p[1]-edge0[1])-(edge1[1]-edge0[1])*(p[0]-edge0[0]);
                                     assert!(cross(q)*cross(centre)<0.);
+                                    }
                                 }
                             }
                         }
@@ -1007,6 +1046,12 @@ mod tests {
             }
         }
         assert!(fit(&[([0.,0.],[0.,0.]);5]).is_none());
+    }
+    #[test]
+    fn a_sheared_texture_is_not_a_rigid_camera_panel() {
+        let found=Found { perspective:Some([[1.,0.18,500.],[0.,1.,500.],[0.,0.,1.]]), ..straight_found(|p|p,1.) };
+        let mirror=Mirror { from:[-1.,-1.],spans:[2.,2.] };
+        assert!(perspective_pose(&found,[1000.,1000.],&mirror,&STILL,PANEL_M).is_none());
     }
 
     fn mirror() -> Mirror {
@@ -1044,7 +1089,7 @@ mod tests {
             let (s, c) = lean.to_radians().sin_cos();
             let (right, down) = ([c, s], [-s, c]);
             let at = |p: [f32; 2]| [px + (p[0] * right[0] + p[1] * down[0]) * per_pixel, py + (p[0] * right[1] + p[1] * down[1]) * per_pixel];
-            let found = Found { perspective: None, x: at(PANEL_X), chevron: at(PANEL_CHEVRON), middle: at([0.0, 0.0]), right, down, across: per_pixel, tall: per_pixel };
+            let found = Found { perspective: None, residual_px: 0., landmarks: None, x: at(PANEL_X), chevron: at(PANEL_CHEVRON), middle: at([0.0, 0.0]), right, down, across: per_pixel, tall: per_pixel };
             for panel_m in [0.2, 0.3, 0.45] {
                 for side in [Side::Left, Side::Right] {
                     let (frame, unit) = panel_in_room(&found, size, &eye, &STILL, panel_m, side);
@@ -1089,7 +1134,7 @@ mod tests {
         let size = [1000.0, 1000.0];
         let per_pixel = PANEL_M / PANEL_SIZE[0] / 0.5 * 500.0;
         let at = |p: [f32; 2]| [500.0 + (p[0] * right[0] + p[1] * down[0]) * per_pixel, 700.0 + (p[0] * right[1] + p[1] * down[1]) * per_pixel];
-        let found = Found { perspective: None, x: at(PANEL_X), chevron: at(PANEL_CHEVRON), middle: at([0.0, 0.0]), right, down, across: per_pixel, tall: per_pixel };
+        let found = Found { perspective: None, residual_px: 0., landmarks: None, x: at(PANEL_X), chevron: at(PANEL_CHEVRON), middle: at([0.0, 0.0]), right, down, across: per_pixel, tall: per_pixel };
         let (frame, _) = panel_in_room(&found, size, &mirror(), &STILL, PANEL_M, Side::Left);
         assert!(frame.m[1][0] < -0.3, "the panel's right goes down: {:?}", frame.m);
         assert!(frame.m[1][3] < 1.5, "below the eye: {:?}", frame.m);

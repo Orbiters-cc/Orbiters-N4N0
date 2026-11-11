@@ -676,14 +676,19 @@ impl OrbitVr {
                 let sides = camera_track::eye_sides(raw);
                 let within = (sides[1] - sides[0]) * CAMERA_VIEW_MARGIN;
                 self.camera_side = camera_track::side_with_room(tangent_of, [sides[0] + within, sides[1] - within, sides[2], sides[3]], self.camera_side);
+                if !camera_track::side_projects(&seen.found,self.camera_side) {
+                    self.camera_side = if self.camera_side == camera_track::Side::Left { camera_track::Side::Right } else { camera_track::Side::Left };
+                }
                 let _ = whole;
-                if let Some((mut frame, unit)) = camera_track::perspective_pose(&seen.found, seen.size, &mirror, &space::compose(&head, &eye_on_head), self.tune.camera_panel_m) {
+                if let Some((mut frame, unit)) = camera_track::perspective_pose(&seen.found, seen.size, &mirror, &space::compose(&head, &eye_on_head), self.tune.camera_panel_m).filter(|_| camera_track::side_projects(&seen.found,self.camera_side)) {
                 // 2.5 pixels fit tolerance, converted through the observed scale, plus a minimum safe gap.
-                let gap = (2.5 / seen.found.across.min(seen.found.tall).max(0.01) * unit).max(0.012);
+                let gap = ((2.5 + seen.found.residual_px) / seen.found.across.min(seen.found.tall).max(0.01) * unit).max(0.012);
                 let sign = if self.camera_side == camera_track::Side::Left { -1. } else { 1. };
                 for i in 0..3 { frame.m[i][3] += frame.m[i][0] * gap * sign; }
-                super::super::vr_log::line(&format!("camera pose: captured {:?}, accepted {:?}, side {:?}, unit {}, gap {}, pose {:?}, landmarks {:?}", seen.at, now, self.camera_side, unit, gap, frame, seen.found)); // i18n: not shown (diagnostics)
+                let depth=-(0..3).map(|i| head.m[i][2]*(frame.m[i][3]-head.m[i][3])).sum::<f32>();
+                super::super::vr_log::line(&format!("camera pose: ns={}, captured {:?}, accepted {:?}, depth {}, side {:?}, unit {}, gap {}, pose {:?}, landmarks {:?}", orbiters_core::clock::now_ns(), seen.at, now, depth, self.camera_side, unit, gap, frame, seen.found)); // i18n: not shown (diagnostics)
                 self.camera_follow.seen(frame, unit);
+                self.camera_panel_seen_ns = Some(orbiters_core::clock::now_ns());
                 self.camera_seen = Some(now);
                 self.camera_looks = self.camera_looks.saturating_add(1);
                 }
@@ -739,6 +744,8 @@ pub struct OrbitVr {
     takeover_plane: Option<Plane>,
     /// VRChat's camera panel: what reads its window while its camera is open, where it was last seen, and how many looks in a row saw it.
     camera_watch: Option<CameraWatch>,
+    camera_retired: Vec<CameraWatch>,
+    camera_panel_seen_ns: Option<u64>,
     camera_follow: super::camera_track::Follow,
     camera_side: camera_track::Side,
     hole_logged: super::super::vr_log::Every,
@@ -760,6 +767,15 @@ pub struct OrbitVr {
     /// The hand whose laser moves the pointer.
     active: Option<usize>,
     last_shown: bool,
+}
+
+impl Drop for OrbitVr {
+    fn drop(&mut self) {
+        // Teardown owns this OrbitVr while borrowing the live SteamVR Client. Normal camera
+        // closing only retires readers; shutdown joins before Client::drop cleans its interfaces.
+        if let Some(watch) = self.camera_watch.as_mut() { watch.finish(); }
+        for watch in &mut self.camera_retired { watch.finish(); }
+    }
 }
 
 impl OrbitVr {
@@ -786,6 +802,8 @@ impl OrbitVr {
             plane: None,
             takeover_plane: None,
             camera_watch: None,
+            camera_retired: Vec::new(),
+            camera_panel_seen_ns: None,
             pointers: [None; 2],
             camera_follow: Default::default(),
             camera_side: Default::default(),
@@ -827,6 +845,7 @@ impl OrbitVr {
             steamvr_overrides: on,
             camera_note: self.camera_note(cx.snap),
             camera_provisional: self.camera_watch.is_some() && self.camera_looks <= CAMERA_LOOKS_TO_SHOW,
+            camera_panel_seen_ns: self.camera_panel_seen_ns,
         };
         if self.told.as_ref() != Some(&status) {
             cx.backend.orbit_status(status.clone());
@@ -945,7 +964,14 @@ impl OrbitVr {
         // VRChat's camera panel, seen on its window while it says its camera is open, with neither of its menus up.
         // Looked for even with a menu up: VRChat's camera is opened from one, and what follows the buttons may still say it is open.
         let camera_wanted = settings.camera_tiles && camera == Some(true);
+        self.camera_retired.retain_mut(|watch| {
+            if watch.finished() { watch.finish(); false } else { true }
+        });
         if camera_wanted != self.camera_watch.is_some() {
+            if let Some(watch) = self.camera_watch.take() {
+                watch.stop();
+                self.camera_retired.push(watch);
+            }
             self.camera_watch = camera_wanted.then(|| {
                 let mirror = if self.tune.camera_use_window { None } else { cx.steamvr.compositor().ok().map(|c| c.mirror_source()) };
                 CameraWatch::start(super::camera_frames::From { mirror, adapter: cx.steamvr.dxgi_adapter_index(), keep_frames: self.tune.camera_keep_frames })
@@ -953,8 +979,19 @@ impl OrbitVr {
             self.camera_follow.clear();
             self.camera_seen = None;
             self.camera_looks = 0;
+            self.camera_side = camera_track::Side::Left;
+            self.camera_panel_seen_ns = None;
         }
         let camera_plane = self.camera_turn(cx.steamvr, &*cx.actions, cx.input_read, cx.prediction, now, dt);
+        // Camera status changes independently of SteamVR's one-time input override setup.
+        let mut status=self.told.clone().unwrap_or_default();
+        status.camera_note=self.camera_note(cx.snap);
+        status.camera_provisional=camera_wanted && self.camera_looks <= CAMERA_LOOKS_TO_SHOW;
+        status.camera_panel_seen_ns=self.camera_panel_seen_ns;
+        if self.told.as_ref()!=Some(&status) {
+            cx.backend.orbit_status(status.clone());
+            self.told=Some(status);
+        }
         let menu = match open {
             Open::QuickMenu(_) if settings.around_quick_menu() => Some(Around::QuickMenu),
             Open::Wheel(_) if settings.around_wheel() => Some(Around::Wheel),

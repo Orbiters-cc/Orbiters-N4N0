@@ -33,6 +33,7 @@ pub struct OrbitStatus {
     #[serde(default)]
     pub camera_note: Option<String>,
     pub camera_provisional: bool,
+    pub camera_panel_seen_ns: Option<u64>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -645,6 +646,13 @@ impl Snapshot {
             Some(false) => "avatar_has_no_capture_kit",
             None => "avatar_capture_kit_unknown",
         }
+    }
+    pub fn can_switch_demo_avatar(&self) -> bool {
+        let playing = self.vrchat.world.local_player.as_ref().and_then(|name| self.vrchat.world.players.iter().find(|(_,n)| *n == name).map(|(id,_)| id));
+        self.camera_tools.demo_avatar.is_some() && self.vrchat.running && self.vrchat_login.allowed
+            && self.vrchat_login.user.as_ref().is_some_and(|u| playing == Some(&u.id))
+            && !self.is_capturing() && self.capture.state != CaptureState::Stopping
+            && self.camera_tools.demo != crate::controller::camera_tools::Demo::Busy
     }
     pub fn new(settings: Settings) -> Self {
         Self::with(settings.into())

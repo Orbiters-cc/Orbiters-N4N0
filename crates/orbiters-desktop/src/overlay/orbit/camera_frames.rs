@@ -2,7 +2,8 @@
 //!
 //! The compositor's picture of the eye comes first: what it covers is known from SteamVR, so nothing has to be guessed to place the tiles. Only around the last place while it is seen, ten
 //! times a second; all of it four times a second while it is not. If it cannot be read, or `camera_use_window` asks for it, VRChat's own window instead, by Windows Graphics Capture, which
-//! `Tune` says the share of. Dropped, it costs nothing, and it waits for its thread, which uses the SteamVR client. The picture goes no further than the reading of it.
+//! `Tune` says the share of. Closing signals the reader without waiting or logging on the overlay turn. OrbitVr retains it until it finishes, and joins any remainder at teardown before
+//! the borrowed SteamVR client dies. The picture goes no further than the reading of it.
 
 use super::camera_track::{self, Found};
 use orbiters_i18n::mark;
@@ -83,8 +84,21 @@ impl CameraWatch {
         let (seen, stop) = (Arc::new(Mutex::new(None)), Arc::new(AtomicBool::new(false)));
         let health = Arc::new(Mutex::new(Health::default()));
         let (s, st, h) = (seen.clone(), stop.clone(), health.clone());
-        let thread = std::thread::Builder::new().name("camera panel".into()).spawn(move || run(&s, &st, &h, from)).ok(); // i18n: not shown (a thread's name)
-        Self { health, began: Instant::now(), seen, stop, thread }
+        let began = Instant::now();
+        let thread = std::thread::Builder::new().name("camera panel".into()).spawn(move || { // i18n: not shown (thread name)
+            run(&s, &st, &h, from);
+            let health = *h.lock().unwrap_or_else(|e| e.into_inner());
+            note(&format!("{:?}: {} looks, {} found the panel, over {} s", health.source, health.looks, health.finds, began.elapsed().as_secs())); // i18n: not shown (diagnostics)
+        }).ok();
+        Self { health, began, seen, stop, thread }
+    }
+
+    pub fn stop(&self) { self.stop.store(true, Ordering::Relaxed); }
+    pub fn finished(&self) -> bool { self.thread.as_ref().is_none_or(|t| t.is_finished()) }
+    /// Only during teardown (before the borrowed SteamVR client dies), or after finished().
+    pub fn finish(&mut self) {
+        self.stop();
+        if let Some(thread) = self.thread.take() { let _ = thread.join(); }
     }
 
     /// Why no tile can show, as far as reading goes: for Settings, which translates it.
@@ -101,18 +115,13 @@ impl CameraWatch {
 
 impl Drop for CameraWatch {
     fn drop(&mut self) {
-        self.stop.store(true, Ordering::Relaxed);
-        if let Some(thread) = self.thread.take() {
-            // The reader owns its SteamVR resources. Reap them off the overlay's turn.
-            let _ = std::thread::Builder::new().name("camera-reaper".into()).spawn(move || { let _ = thread.join(); }); // i18n: not shown (thread name)
-        }
-        let health = *self.health.lock().unwrap_or_else(|e| e.into_inner());
-        note(&format!("{:?}: {} looks, {} found the panel, over {} s", health.source, health.looks, health.finds, self.began.elapsed().as_secs())); // i18n: not shown (a log's line)
+        // OrbitVr retains unfinished readers and calls finish before its borrowed Client can die.
+        self.stop();
     }
 }
 
 /// A line in `camera-tiles.log`, which is how a run in a headset can be read afterwards.
-pub(super) fn note(line: &str) {
+fn note(line: &str) {
     let dir = orbiters_core::paths::logs_dir();
     if std::fs::create_dir_all(&dir).is_ok() {
         if let Ok(mut file) = std::fs::OpenOptions::new().append(true).create(true).open(dir.join("camera-tiles.log")) {
@@ -266,6 +275,29 @@ fn run_on_window(seen: &Mutex<Option<Seen>>, stop: &AtomicBool, health: &Mutex<H
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn retired_readers_are_joined_before_the_owner_finishes() {
+        use super::*;
+        let (release,wait)=std::sync::mpsc::channel();
+        let thread=std::thread::spawn(move || { let _=wait.recv_timeout(Duration::from_secs(1)); });
+        let mut watch=CameraWatch { health:Arc::new(Mutex::new(Health::default())),began:Instant::now(),seen:Arc::new(Mutex::new(None)),stop:Arc::new(AtomicBool::new(false)),thread:Some(thread) };
+        watch.stop();
+        assert!(!watch.finished());
+        release.send(()).unwrap();
+        watch.finish();
+        assert!(watch.finished() && watch.thread.is_none());
+    }
+    #[test]
+    fn closing_does_not_wait_for_a_reader() {
+        use super::*;
+        let (release, wait) = std::sync::mpsc::channel();
+        let thread = std::thread::spawn(move || { let _ = wait.recv_timeout(Duration::from_secs(1)); });
+        let watch = CameraWatch { health: Arc::new(Mutex::new(Health::default())), began: Instant::now(), seen: Arc::new(Mutex::new(None)), stop: Arc::new(AtomicBool::new(false)), thread: Some(thread) };
+        let began = Instant::now();
+        drop(watch);
+        assert!(began.elapsed() < Duration::from_millis(150));
+        release.send(()).unwrap();
+    }
     use super::*;
     use std::time::Duration;
 

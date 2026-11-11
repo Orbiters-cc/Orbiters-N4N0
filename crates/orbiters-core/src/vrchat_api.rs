@@ -1523,10 +1523,10 @@ pub(crate) mod tests {
     #[test]
     fn selecting_avatar_refuses_missing_or_mismatched_playing_account() {
         for playing in [None, Some("usr_other")] {
-            let (c, seen) = mock(vec![]);
+            let (c, seen) = mock(vec![response(200, r#"{"id":"usr_test","displayName":"Tester"}"#, &[])]);
             let source = crate::vrchat_source::Source::new(Some(Arc::new(Mutex::new(c))),None,playing.map(str::to_owned));
             assert!(source.select_avatar("avtr_4432ea9b-729c-46e3-8eaf-846aa0a37fdd").is_err());
-            assert!(seen.lock().unwrap().is_empty());
+            assert!(seen.lock().unwrap().iter().all(|r| r.method == "GET" && r.url.ends_with("/auth/user")), "identity lookup is allowed; selection is not");
         }
     }
     #[test]

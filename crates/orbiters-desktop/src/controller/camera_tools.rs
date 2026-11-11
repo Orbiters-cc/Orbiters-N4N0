@@ -11,7 +11,9 @@ pub enum Qr {
     Off,
     Looking,
     NoStream,
-    Found { url: String },
+    Found {
+        url: String,
+    },
     Error(String),
 }
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -30,7 +32,9 @@ pub struct Status {
     pub qr_generation: u64,
 }
 impl Default for Status {
-    fn default() -> Self { Self { qr: Qr::Off, demo: Demo::Idle, demo_avatar: DEMO_AVATAR.map(str::to_owned), qr_generation: 0 } }
+    fn default() -> Self {
+        Self { qr: Qr::Off, demo: Demo::Idle, demo_avatar: DEMO_AVATAR.map(str::to_owned), qr_generation: 0 }
+    }
 }
 fn scan_event(state: &mut Qr, event: orbiters_n4n0::QrSeen) {
     use orbiters_n4n0::QrSeen;
@@ -53,7 +57,9 @@ impl Controller {
             s.camera_tools.qr_generation += 1;
             s.camera_tools.qr = if active { Qr::Looking } else { Qr::Off };
         });
-        if !active { return; }
+        if !active {
+            return;
+        }
         if self.view().camera_open_said != Some(true) {
             self.update(|s| s.camera_tools.qr = Qr::NoStream);
             return;
@@ -63,7 +69,9 @@ impl Controller {
         let events = Box::new(move |event| {
             if let Some(ctl) = weak.upgrade() {
                 ctl.update(|s| {
-                    if s.camera_tools.qr_generation == generation { scan_event(&mut s.camera_tools.qr, event); }
+                    if s.camera_tools.qr_generation == generation {
+                        scan_event(&mut s.camera_tools.qr, event);
+                    }
                 });
             }
         });
@@ -75,14 +83,21 @@ impl Controller {
 
     pub fn switch_demo_avatar(self: &Shared) {
         let Some(id) = DEMO_AVATAR else { return };
-        if self.view().live_recording_running() { return; }
+        if self.is_capturing() || self.view().capture.state == crate::state::CaptureState::Stopping {
+            return;
+        }
         let mut start = false;
         self.update(|s| {
-            if s.camera_tools.demo != Demo::Busy { s.camera_tools.demo = Demo::Busy; start = true; }
+            if s.camera_tools.demo != Demo::Busy {
+                s.camera_tools.demo = Demo::Busy;
+                start = true;
+            }
         });
-        if !start { return; }
+        if !start {
+            return;
+        }
         let ctl = self.clone();
-        let account = ctl.view().vrchat_login.user.as_ref().map(|u|u.id.clone());
+        let account = ctl.view().vrchat_login.user.as_ref().map(|u| u.id.clone());
         std::thread::spawn(move || {
             let requested = orbiters_core::clock::now_ns();
             if let Err(e) = ctl.vrchat_source().select_avatar(id) {
@@ -91,11 +106,17 @@ impl Controller {
             }
             let began = std::time::Instant::now();
             while began.elapsed() < std::time::Duration::from_secs(30) {
-                if ctl.view().vrchat_login.user.as_ref().map(|u|u.id.clone()) != account {
+                if ctl.view().vrchat_login.user.as_ref().map(|u| u.id.clone()) != account {
                     ctl.update(|s| s.camera_tools.demo = Demo::Error(orbiters_i18n::tr("The account changed. Please try again.").into()));
                     return;
                 }
-                let observed = ctl.osc_values.lock().unwrap().latest.get(super::AVATAR_CHANGE).is_some_and(|(v, at)| *at >= requested && matches!(v.first(), Some(orbiters_core::osc::OscValue::Text(a)) if a == id));
+                let observed = ctl
+                    .osc_values
+                    .lock()
+                    .unwrap()
+                    .latest
+                    .get(super::AVATAR_CHANGE)
+                    .is_some_and(|(v, at)| *at >= requested && matches!(v.first(), Some(orbiters_core::osc::OscValue::Text(a)) if a == id));
                 if observed && ctl.view().worn_kit == Some(true) {
                     ctl.update(|s| s.camera_tools.demo = Demo::Done);
                     return;

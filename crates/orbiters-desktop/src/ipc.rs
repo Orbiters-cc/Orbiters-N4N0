@@ -1054,6 +1054,9 @@ pub(crate) mod tests {
         s.orbit.note = Some("in the way".into());
         s.worn_kit = Some(true);
         s.camera_open_said = Some(false);
+        s.camera_tools.qr = crate::controller::camera_tools::Qr::Found { url: "https://orbiters.cc".into() };
+        s.camera_tools.demo = crate::controller::camera_tools::Demo::Busy;
+        s.camera_tools.qr_generation = 3;
         s.projects_changed = 5;
         let o = &mut s.n4n0;
         o.face = N4n0Face::Happy;

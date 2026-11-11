@@ -40,6 +40,11 @@ static RETRO: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new
 static GALLERY: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(60);
 
 const FONT_FIXTURE: &str = "orbit-paint-bench-header-font-fixture";
+type PageFonts = Arc<(Vec<String>, Vec<String>)>;
+const PAGE_FONTS: &str = "orbit-paint-bench-page-font-fixture";
+pub(super) fn take_page_fonts(ctx: &egui::Context) -> Option<PageFonts> {
+    ctx.data_mut(|d| { let id = egui::Id::new(PAGE_FONTS); let corpus = d.get_temp::<PageFonts>(id); if corpus.is_some() { d.remove::<PageFonts>(id); } corpus })
+}
 fn mark_font_fixture(ctx: &egui::Context) { ctx.data_mut(|d| d.insert_temp(egui::Id::new(FONT_FIXTURE), true)); }
 pub(super) fn take_font_fixture(ctx: &egui::Context) -> bool {
     ctx.data_mut(|d| {
@@ -140,6 +145,7 @@ fn register_world_fixture(panels: &mut Panels, fixture: &mut Option<WorldFixture
 struct Rig {
     world_fixture: Option<WorldFixture>,
     fixture_fonts: std::collections::HashSet<u64>,
+    page_fonts: Option<PageFonts>,
     mode: Mode,
     panels: Panels,
     snap: Arc<Snapshot>,
@@ -270,6 +276,17 @@ impl Rig {
         snap.steamvr.running = mode == Mode::Vr;
         snap.steamvr.overlay = mode == Mode::Vr;
         let mut panels = Panels::new(Arc::new(crate::screenshot::Still), if mode == Mode::Vr { 2.0 } else { 1.0 }, true);
+        let page_fonts = log.as_ref().map(|_| {
+            // Only the untimed visual replay. The full fixture corpus prevents skipped
+            // intermediate scroll rows from changing the date/title glyph allocations.
+            let mut titles = std::collections::BTreeSet::new();
+            let mut dates = std::collections::BTreeSet::new();
+            for entry in list(&scratch.join("sessions"), &[]) {
+                titles.insert(entry.title.clone());
+                dates.insert(super::recent_state(&entry, &snap, 1_800_000_000));
+            }
+            Arc::new((titles.into_iter().collect(), dates.into_iter().collect()))
+        });
         let world_fixture = {
             let previews: Vec<_> = (0..6).map(|i| serde_json::json!({"slot": i, "key": i+1, "id": i+1, "worldId": format!("wrld_00000000-0000-4000-8000-{i:012}"), "name": format!("Replay world {i}"), "author": "Replay", "uploader": "fixture", "view": {"position": [0,1,0], "target": [0,1,1]}})).collect();
             let entries = crate::overlay::worlds::catalog::parse(&serde_json::json!({"previews": previews}).to_string()).expect("local world fixtures");
@@ -288,6 +305,7 @@ impl Rig {
         Self {
             world_fixture,
             fixture_fonts: Default::default(),
+            page_fonts,
             mode,
             panels: panels.with_page_worker(),
             snap: Arc::new(snap),
@@ -405,6 +423,10 @@ impl Rig {
             if self.log.is_some() {
                 for panel in self.panels.all().filter(|p| p.zone == Zone::SheetBack) {
                     if self.fixture_fonts.insert(panel.canvas.id) { mark_font_fixture(panel.canvas.ctx()); }
+                }
+                if self.fixture_fonts.insert(self.panels.stage.canvas.id) {
+                    let corpus = self.page_fonts.as_ref().unwrap().clone();
+                    self.panels.stage.canvas.ctx().data_mut(|d| d.insert_temp(egui::Id::new(PAGE_FONTS), corpus));
                 }
             }
             let due: Vec<Zone> = self.panels.all().filter(|p| p.dirty).map(|p| p.zone).collect();

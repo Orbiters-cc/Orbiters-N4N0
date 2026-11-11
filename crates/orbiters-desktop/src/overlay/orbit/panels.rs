@@ -2635,6 +2635,10 @@ pub fn paint(p: &Painter, zone: Zone, size: Vec2, facts: &Facts, hover: Option<u
 
 /// Draws a sheet's page (in N4N0's page's units): native to these menus, in VRChat's manner.
 pub fn paint_sheet(p: &Painter, sheet: Sheet, facts: &Facts, hover: Option<usize>, pressed: Option<usize>) {
+    if let Some(corpus) = super::paint_bench::take_page_fonts(p.ctx()) {
+        for title in &corpus.0 { let _ = p.layout_no_wrap(title.clone(), look::font(19.0, weight::BOLD), Color32::WHITE); }
+        for date in &corpus.1 { let _ = p.layout_no_wrap(date.clone(), look::font(15.0, weight::MEDIUM), Color32::WHITE); }
+    }
     let page = Rect::from_min_size(pos2(0.0, 0.0), vec2(1024.0, 576.0));
     p.rect_filled(page, 0.0, look::OPAQUE);
     if sheet == Sheet::Pictures && facts.opened.is_none() && facts.gallery_set.is_none() {

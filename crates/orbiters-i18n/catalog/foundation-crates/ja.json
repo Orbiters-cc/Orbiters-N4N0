@@ -280,5 +280,7 @@
   "the tracking smoothing control is in use by another version of Orbiters - N4N0 (layout {layout}, this one {version})": "トラッキング補正の制御は別のバージョンのOrbiters - N4N0が使用中です（レイアウト{layout}、このバージョンは{version}）",
   "SteamVR no longer loads the smoothing driver, but its folder {path} could not be removed (SteamVR may still be using it; close SteamVR and try again)": "SteamVRはスムージングドライバーを読み込まなくなりましたが、フォルダー{path}を削除できませんでした（SteamVRが使用中の可能性があります。SteamVRを閉じてもう一度お試しください）",
   "Spout sender \"{name}\" not found": "Spoutセンダー「{name}」が見つかりません",
-  "unsupported Spout texture format (DXGI {format})": "対応していないSpoutテクスチャ形式です（DXGI {format}）"
+  "unsupported Spout texture format (DXGI {format})": "対応していないSpoutテクスチャ形式です（DXGI {format}）",
+  "The request expired before it could be sent. Please try again.": "送信前にリクエストの有効期限が切れました。もう一度お試しください。",
+  "VRChat may have received the request. Check VRChat before trying again.": "VRChatがリクエストを受信した可能性があります。再試行する前にVRChatで確認してください。"
 }

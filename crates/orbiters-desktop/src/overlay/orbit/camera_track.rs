@@ -639,6 +639,28 @@ pub fn side_projects(found: &Found, side: Side) -> bool {
     [side.sign()*215., side.sign()*330.].into_iter().all(|x| [-135.,135.].into_iter().all(|y| h[2][0]*x+h[2][1]*y+h[2][2] > 0.05))
 }
 
+/// A low landmark RMS alone does not bound extrapolation at an oblique panel edge.
+/// Check the recovered column against the observed edge before it can replace the detached fallback.
+pub fn column_clear(found: &Found, size: [f32;2], mirror: &Mirror, eye: &Matrix34, frame: &Matrix34, unit: f32, side: Side) -> bool {
+    if !side_projects(found,side) { return false; }
+    let sign=side.sign();
+    let a=found.at([sign*205.,-110.]);
+    let b=found.at([sign*205.,110.]);
+    let cross=|p:[f32;2]| (b[0]-a[0])*(p[1]-a[1])-(b[1]-a[1])*(p[0]-a[0]);
+    let inside=cross(found.at([0.,0.]));
+    if !inside.is_finite() || inside.abs()<1e-8 { return false; }
+    let local=then(&undone(eye),frame);
+    // Enclose the old and new camera columns, including QR and their lower caption/action.
+    [sign*215.,sign*330.].into_iter().all(|x| [-220.,240.].into_iter().all(|y| {
+        let v:[f32;3]=std::array::from_fn(|i|local.m[i][3]+local.m[i][0]*x*unit-local.m[i][1]*y*unit);
+        if v[2]>=-0.0001 { return false; }
+        let t=[v[0]/-v[2],-v[1]/-v[2]];
+        let p=[(t[0]-mirror.from[0])/mirror.spans[0]*size[0],(t[1]-mirror.from[1])/mirror.spans[1]*size[1]];
+        let outside=cross(p);
+        outside.is_finite() && outside*inside<0.
+    }))
+}
+
 /// Where a panel seen by the eye lies in the room, and what one of its units is there. `eye` is that eye's pose then. In the plane facing it, turned as it is seen turned, its middle moved so
 /// that the tiles on `side` lie next to its edge even when a turn makes it narrower.
 #[cfg(test)]
@@ -1097,6 +1119,12 @@ mod tests {
                             let (pose,got_unit)=perspective_pose(&found,[1.,1.],&mirror,&STILL,width).expect("physical plane");
                             assert!((pose.m[2][3]+distance).abs()<0.002);
                             assert!((got_unit-unit).abs()<1e-6);
+                            for i in 0..3 {
+                                assert!((pose.m[i][0]-right[i]).abs()<0.0001, "recovered right axis differs from ground truth");
+                                assert!((pose.m[i][1]-up[i]).abs()<0.0001, "recovered up axis differs from ground truth");
+                                let wanted=STILL.m[i][3]-if i==2 {distance} else {0.};
+                                assert!((pose.m[i][3]-wanted).abs()<0.002, "recovered position differs from ground truth");
+                            }
                             for side in [-1.,1.] {
                                 let which = if side < 0. { Side::Left } else { Side::Right };
                                 if !side_projects(&found,which) { continue; }
@@ -1111,7 +1139,7 @@ mod tests {
                                     for sx in [-1.,1.] { for sy in [-1.,1.] {
                                         let v: [f32;3]=std::array::from_fn(|i| quad.transform.m[i][3]+quad.transform.m[i][0]*sx*quad.width/2.+quad.transform.m[i][1]*sy*quad.height/2.-STILL.m[i][3]);
                                         assert!(v[2]<0.);
-                                        assert!(cross([v[0]/-v[2],-v[1]/-v[2]])*cross(centre)<0., "submitted camera quad crosses the panel edge");
+                                        assert!(cross([v[0]/-v[2],-v[1]/-v[2]])*cross(centre)<0., "submitted camera quad crosses the panel edge: {pitch} {yaw} {roll} {distance} {width} {side} {zone:?} ({sx},{sy})");
                                     } }
                                 }
                                 // Tile hull and panel hull have a separating line at their common plane's edge,
@@ -1139,6 +1167,22 @@ mod tests {
         let found=Found { perspective:Some([[1.,0.18,500.],[0.,1.,500.],[0.,0.,1.]]), ..straight_found(|p|p,1.) };
         let mirror=Mirror { from:[-1.,-1.],spans:[2.,2.] };
         assert!(perspective_pose(&found,[1000.,1000.],&mirror,&STILL,PANEL_M).is_none());
+    }
+
+    #[test]
+    fn a_low_residual_does_not_authorize_a_column_that_crosses_the_observed_edge() {
+        let size=[1000.,1000.];
+        let mirror=mirror();
+        let scale=PANEL_M/410./0.5*500.;
+        let found=Found { perspective:Some([[scale,0.,500.],[0.,scale,500.],[0.,0.,1.]]), ..straight_found(|p|[500.+p[0]*scale,500.+p[1]*scale],scale) };
+        let (pose,unit)=perspective_pose(&found,size,&mirror,&STILL,PANEL_M).unwrap();
+        assert!(column_clear(&found,size,&mirror,&STILL,&pose,unit,Side::Left));
+        assert!(column_clear(&found,size,&mirror,&STILL,&pose,unit,Side::Right));
+        let mut bad=pose;
+        bad.m[0][3]-=0.03;
+        assert!(!column_clear(&found,size,&mirror,&STILL,&bad,unit,Side::Right));
+        bad.m[0][3]+=0.06;
+        assert!(!column_clear(&found,size,&mirror,&STILL,&bad,unit,Side::Left));
     }
 
     #[test]

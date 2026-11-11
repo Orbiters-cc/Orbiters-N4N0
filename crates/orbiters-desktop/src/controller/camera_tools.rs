@@ -49,6 +49,13 @@ fn scan_event(state: &mut Qr, event: orbiters_n4n0::QrSeen) {
         _ => {}
     }
 }
+fn begin_demo(state: &mut crate::state::Snapshot) -> bool {
+    if !state.can_switch_demo_avatar() {
+        return false;
+    }
+    state.camera_tools.demo = Demo::Busy;
+    true
+}
 impl Controller {
     pub fn camera_qr(self: &Shared, active: bool) {
         let mut scan = self.camera_scan.lock().unwrap();
@@ -88,10 +95,7 @@ impl Controller {
         }
         let mut start = false;
         self.update(|s| {
-            if s.camera_tools.demo != Demo::Busy {
-                s.camera_tools.demo = Demo::Busy;
-                start = true;
-            }
+            start = begin_demo(s);
         });
         if !start {
             return;
@@ -130,6 +134,26 @@ impl Controller {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn demo_selection_requires_a_live_matching_session_at_the_controller() {
+        let mut state = crate::state::Snapshot::new(orbiters_core::settings::Settings::default());
+        state.camera_tools.demo_avatar = Some("avtr_mock".into());
+        state.vrchat.running = true;
+        state.vrchat.world.local_player = Some("Tester".into());
+        state.vrchat.world.players.insert("usr_test".into(), "Tester".into());
+        state.vrchat_login.allowed = true;
+        state.vrchat_login.user = Some(serde_json::from_value(serde_json::json!({"id":"usr_test","displayName":"Tester"})).unwrap());
+        state.vrchat.running = false;
+        assert!(!begin_demo(&mut state));
+        assert_eq!(state.camera_tools.demo, Demo::Idle);
+        state.vrchat.running = true;
+        state.vrchat_login.user.as_mut().unwrap().id = "usr_other".into();
+        assert!(!begin_demo(&mut state));
+        state.vrchat_login.user.as_mut().unwrap().id = "usr_test".into();
+        assert!(begin_demo(&mut state));
+        assert_eq!(state.camera_tools.demo, Demo::Busy);
+        assert!(!begin_demo(&mut state));
+    }
     #[test]
     fn scan_only_accepts_web_links_and_retains_found_result() {
         let mut state = Qr::Looking;

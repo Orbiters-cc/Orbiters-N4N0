@@ -1,6 +1,6 @@
 //! An independent VRChat transport. Cookies never enter the Orbiters HTTP agent or API.
 //! Blocking methods belong on background threads. No credentials, codes, cookies or response bodies are logged.
-//! Reads, and one change: the picture of an avatar or world the signed-in account uploaded ([`replace_image`]).
+//! Reads, picture updates ([`replace_image`]), deliberate instance creation and self-invites.
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use orbiters_i18n::tr;
 use serde::{Deserialize, Serialize};
@@ -1034,8 +1034,8 @@ impl Client {
         let reply: serde_json::Value = serde_json::from_slice(&r.body).map_err(|_| Error::InvalidResponse)?;
         created_instance(&reply, world, &owner).ok_or(Error::InvalidResponse)
     }
-    /// Sends the signed-in account an invite to `world`'s instance `instance` (`48213~region(eu)`: a public one, made
-    /// when someone joins it), which VRChat shows in the game: the one way to join from outside it while it runs.
+    /// Sends the signed-in account an invite to an exact instance. UI callers must use the service's scoped
+    /// listed/created destination validation before reaching this transport operation.
     pub fn invite_self(&mut self, world: &str, instance: &str) -> Result<()> {
         self.authenticated()?;
         let url = format!("{BASE}/invite/myself/to/{}:{}", path_segment(world), path_segment(instance));
@@ -1627,6 +1627,27 @@ pub(crate) mod tests {
         }
         assert!(instance_details(&chooser_instance("2","public"),"wrld_test",Some("1")).is_err());
         assert!(instance_details(&chooser_instance("1","public"),"wrld_other",Some("1")).is_err());
+    }
+    #[test]
+    fn chooser_scope_change_during_mocked_http_discards_the_answer() {
+        struct ChangeScope { current: Arc<AtomicBool>, calls: Arc<std::sync::atomic::AtomicUsize> }
+        impl Transport for ChangeScope {
+            fn send(&self, _: Request) -> Result<Response> {
+                self.calls.fetch_add(1, Ordering::Relaxed);
+                self.current.store(false, Ordering::Release);
+                Ok(json(serde_json::json!({"instances":[]})))
+            }
+        }
+        let (mut c,_) = mock(vec![]);
+        let current=Arc::new(AtomicBool::new(true));
+        let calls=Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        c.transport=Arc::new(ChangeScope {current:current.clone(),calls:calls.clone()});
+        let source=crate::vrchat_source::Source::new(Some(Arc::new(Mutex::new(c))),None,None);
+        assert_eq!(source.personal("usr_test",|| current.load(Ordering::Acquire),|c| c.world_instances("wrld_test")),Err(Error::Disabled));
+        assert_eq!(calls.load(Ordering::Relaxed),1);
+        assert_eq!(source.personal("usr_test",|| false,|c| c.world_instances("wrld_test")),Err(Error::Disabled));
+        assert_eq!(calls.load(Ordering::Relaxed),1,"stale work never reaches HTTP");
+        assert_eq!(source.personal("usr_other",|| true,|c| c.world_instances("wrld_test")),Err(Error::Unauthorized));
     }
     #[test]
     fn world_lists_are_asked_a_page_at_a_time_and_kept() {

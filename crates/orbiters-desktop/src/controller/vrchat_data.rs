@@ -1,6 +1,5 @@
-//! Read-only data requests, and the one change a page can ask for: a new picture for an avatar or world of the
-//! signed-in VRChat account ([`Controller::vrchat_picture`]). Only workers call this module; session credentials never
-//! cross IPC.
+//! Scoped data requests, picture updates and deliberate instance creation/self-invites for the signed-in account.
+//! Only workers call this module; session credentials never cross IPC.
 use super::{Controller, NoticeKind, Shared};
 use crate::state::Snapshot;
 use orbiters_i18n::tr;
@@ -592,13 +591,22 @@ mod tests {
         // Without a personal session: the lists only VRChat has say to sign in, and nothing is sent.
         assert!(ask(Request::WorldList { list: WorldList::Favorites, page: 0 }).contains("Sign in to VRChat"));
         let home = "wrld_4432ea9b-729c-46e3-8eaf-846aa0a37fdd";
-        assert!(ask(Request::InviteSelf { world: home.into(), instance: "48213~region(eu)".into() }).contains("Sign in to VRChat"));
+        assert!(matches!(c.vrchat_data(scope.clone(), Request::InviteSelf { world: home.into(), instance: "48213~region(eu)".into() }),
+            Ok(Response::WorldError(WorldError::SignInRequired))));
         for bad in ["48213~private(usr_x)", "123456", "", "1~region(mars)", "12a"] {
             assert!(!public_instance(bad), "{bad}");
-            assert!(ask(Request::InviteSelf { world: home.into(), instance: bad.into() }).contains("Not a public instance"));
+            assert!(matches!(c.vrchat_data(scope.clone(), Request::InviteSelf { world: home.into(), instance: bad.into() }),
+                Ok(Response::WorldError(WorldError::SignInRequired))));
         }
         assert!(public_instance("7") && public_instance("48213~region(use)"));
-        assert!(ask(Request::InviteSelf { world: "wrld_../x".into(), instance: "1".into() }).contains("Not a public instance"));
+        c.update(|s| {
+            s.account.state = crate::state::AccountState::SignedIn { username: "tester".into() };
+            s.account.development = Server::current() == Server::Development;
+            s.vrchat_login.allowed = true;
+            s.vrchat_login.user = Some(User { id: "usr_test".into(), ..Default::default() });
+        });
+        assert!(matches!(c.vrchat_data(Scope::of(&c.view()), Request::InviteSelf { world: "wrld_../x".into(), instance: "1".into() }),
+            Ok(Response::WorldError(WorldError::InvalidWorld))));
     }
     fn encoded(picture: image::RgbaImage) -> Vec<u8> {
         let mut bytes = std::io::Cursor::new(Vec::new());
@@ -733,7 +741,11 @@ mod tests {
     #[test]
     fn chooser_service_refuses_unlisted_ids_before_any_http() {
         let c = Controller::new(orbiters_core::settings::Settings::default());
-        c.update(|s| { s.vrchat_login.allowed=true; s.vrchat_login.user=Some(User {id:"usr_test".into(),..Default::default()}); });
+        c.update(|s| {
+            s.account.state=crate::state::AccountState::SignedIn {username:"tester".into()};
+            s.account.development=Server::current()==Server::Development;
+            s.vrchat_login.allowed=true; s.vrchat_login.user=Some(User {id:"usr_test".into(),..Default::default()});
+        });
         let result=c.vrchat_data(Scope::of(&c.view()),Request::InviteSelf {
             world:"wrld_4cf554b4-430c-4f8f-b53e-1f294eed230b".into(),instance:"12345".into()
         }).unwrap();

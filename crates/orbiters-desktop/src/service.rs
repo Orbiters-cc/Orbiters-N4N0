@@ -343,6 +343,14 @@ impl Service {
             ToService::ImportRaw { dir } => report(ctl.import_raw_capture(dir)),
             ToService::SaveSettings { settings } => ctl.save_settings(*settings),
             ToService::PatchSettings { patch } => ctl.patch_settings(&patch),
+            ToService::PatchSmoothing { id, patch } => {
+                ctl.patch_settings(&patch);
+                ctl.update(|s| s.smoothing_revision += 1);
+                let revision = ctl.view().smoothing_revision;
+                if let Some(l) = self.links.lock().unwrap().iter().find(|l| l.id == link) {
+                    l.mailbox.post(ToClient::SmoothingAck { id, revision });
+                }
+            }
             ToService::Trash { dir } => {
                 let r = ctl.trash_session(&dir);
                 if r.is_ok() {
@@ -794,7 +802,7 @@ mod tests {
         assert!(overlay.snapshot().steamvr.overlay);
         // One part at a time: a plain value, a slice, a part inside a part, the settings.
         let before = overlay.snapshot();
-        ctl.update(|s| s.vrchat.motion = Some(crate::state::AvatarMotion { in_station: false, seated: true, speed: 1.25 }));
+        ctl.update(|s| s.vrchat.motion = Some(crate::state::AvatarMotion { in_station: false, seated: true, speed: 1.25, speed_at_ms: None }));
         assert!(in_step(&service, &overlay));
         ctl.update(|s| s.n4n0.panel = Some("N4N0's panel".into()));
         ctl.update(|s| {
@@ -1013,7 +1021,7 @@ mod tests {
             ctl.update(|s| {
                 s.settings.walk_boost.strength = 0.9;
                 s.worn_kit = Some(true);
-                s.vrchat.motion = Some(AvatarMotion { in_station: true, seated: false, speed: round as f32 });
+                s.vrchat.motion = Some(AvatarMotion { in_station: true, seated: false, speed: round as f32, speed_at_ms: None });
                 s.n4n0.panel = Some("B".into());
             });
             ctl.update(|s| {

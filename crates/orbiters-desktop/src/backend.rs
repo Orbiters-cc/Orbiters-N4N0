@@ -40,6 +40,7 @@ pub trait Backend: Send + Sync {
     /// Changes only the fields in `patch` ([`Settings::diff`], [`Settings::patched`]), on the settings as they are when
     /// it arrives.
     fn patch_settings(&self, patch: serde_json::Value);
+    fn patch_smoothing(&self, patch: serde_json::Value) { self.patch_settings(patch); }
     /// Saves what `settings` changed against `base`, the copy it was changed from (a snapshot's): only those fields,
     /// so that whatever changed meanwhile (the avatar's radial, N4N0, the other window) stays.
     fn save_changes(&self, base: &Settings, settings: &Settings) {
@@ -183,6 +184,8 @@ impl Backend for Remote {
     fn import_raw_capture(&self, dir: PathBuf) {
         self.0.send(&ToService::ImportRaw { dir });
     }
+
+    fn patch_smoothing(&self, patch: serde_json::Value) { self.0.patch_smoothing(patch); }
 
     fn patch_settings(&self, patch: serde_json::Value) {
         self.0.update_local(|s| s.settings = s.settings.patched(&patch).0.into());

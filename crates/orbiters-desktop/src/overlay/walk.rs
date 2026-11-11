@@ -64,10 +64,8 @@ const MENU_QUIET: Duration = Duration::from_millis(1500);
 const ROOM_SETUP: Duration = Duration::from_secs(180);
 /// VRChat moves an avatar it walks at least this fast (m/s), before the boost adds anything.
 const VRCHAT_WALKS: f32 = 0.4;
-/// Slower than this on its own (the boost's drag taken out), VRChat stands the avatar still.
+/// Explicit near-zero raw speed indicates the avatar is standing still.
 const VRCHAT_STILL: f32 = 0.15;
-/// VRChat's speed reaches Orbiters this late (OSC, then the service): the boost's own drag shows in it after this.
-const MOTION_LAG: Duration = Duration::from_millis(500);
 /// VRChat's own walking this long below [`VRCHAT_STILL`] stops the carry (a change of push shows late, briefly).
 const STILL_FOR: Duration = Duration::from_millis(300);
 /// Setups this close (metres, and rotation terms) are the same one: SteamVR may hand its numbers back a little off.
@@ -418,55 +416,35 @@ fn turned_back(m: &Matrix34, v: [f32; 3]) -> [f32; 3] {
 pub struct Motion {
     /// In a station (a chair, a vehicle), seated or not: VRChat does not walk the avatar.
     pub in_station: bool,
-    /// How fast the avatar moves (m/s): VRChat's walking, and the boost's own drag (room-scale motion counts).
+    /// Raw VRChat velocity magnitude (m/s). Its room-motion contribution is not established.
     pub speed: f32,
+    pub speed_at_ms: Option<u64>,
 }
 
-/// Whether VRChat walks the avatar, as far as walk boost can tell, push by push.
+/// A scalar OSC magnitude cannot be decomposed into native and injected movement.
+/// Positive/missing telemetry never subtracts our speed; explicit zero and station stop.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Gate {
-    /// Carrying since then, in this push.
     since: Option<Instant>,
-    /// VRChat's own walking (its speed less the boost's) has stayed below walking since then.
     still_since: Option<Instant>,
-    /// Carrying stopped with the stick still pushed: VRChat's reports still count the boost's drag until then, so
-    /// they cannot start it again before.
-    resume_after: Option<Instant>,
+    observed: bool,
+    logged: Option<Instant>,
 }
-
 impl Gate {
-    /// Whether the boost carries the person at `now`: only while the stick is pushed (`pushed`), and, when VRChat
-    /// says how the avatar moves, while it walks it. A push starts carrying once VRChat moves the avatar on its own
-    /// (nothing of the boost in its speed yet). Carrying, VRChat's speed counts the boost's drag, `boost` (m/s, the
-    /// last frame's): it is taken out once VRChat's reports caught up with it, and carrying stops when what is left
-    /// stays below walking a moment (an Action Menu opened mid-walk took the stick, the world froze the avatar) or
-    /// VRChat seats the avatar. Stopped so, it starts again only once VRChat's reports no longer carry the boost's
-    /// drag (else that drag, reported late, restarted it at once and the boost never stopped, in fits).
-    pub fn carries(&mut self, now: Instant, pushed: bool, motion: Option<&Motion>, boost: f32) -> bool {
-        let since = |t: Instant| now.saturating_duration_since(t);
-        if !pushed {
-            *self = Gate::default();
+    pub fn carries(&mut self, now: Instant, pushed: bool, motion: Option<&Motion>, _boost: f32) -> bool {
+        if !pushed || motion.is_some_and(|m| m.in_station) {
+            *self = Self::default();
             return false;
         }
-        let carrying = match (motion, self.since) {
-            (None, _) => true,
-            (Some(m), _) if m.in_station => false,
-            (Some(m), None) => m.speed >= VRCHAT_WALKS && self.resume_after.is_none_or(|t| now >= t),
-            (Some(m), Some(start)) => {
-                if since(start) < MOTION_LAG || m.speed - boost >= VRCHAT_STILL {
-                    self.still_since = None;
-                    true
-                } else {
-                    since(*self.still_since.get_or_insert(now)) < STILL_FOR
-                }
-            }
+        self.observed |= motion.is_some();
+        let carrying = match motion {
+            None => !self.observed || self.since.is_some(),
+            Some(m) if !m.speed.is_finite() => self.since.is_some(),
+            Some(m) if self.since.is_none() => m.speed >= VRCHAT_WALKS,
+            Some(m) if m.speed >= VRCHAT_STILL => { self.still_since = None; true }
+            Some(_) => now.saturating_duration_since(*self.still_since.get_or_insert(now)) < STILL_FOR,
         };
-        if carrying {
-            self.since.get_or_insert(now);
-        } else {
-            let resume_after = if self.since.is_some() { Some(now + MOTION_LAG) } else { self.resume_after };
-            *self = Gate { resume_after, ..Gate::default() };
-        }
+        if carrying { self.since.get_or_insert(now); } else { self.since = None; }
         carrying
     }
 }
@@ -873,13 +851,13 @@ impl WalkBoost {
             Ok(()) => {
                 if self.run.is_none() {
                     self.run = Some(now);
-                    let carried = self.carried.as_ref().map_or(0.0, |c| length(&c.offset));
+                    let carried = self.through.as_ref().map_or_else(|| self.carried.as_ref().map_or(0.0, |c| length(&c.offset)), |t| length(&t.offset));
                     self.log.say(format!("walking: {carried:.2} m from where the carry began")); // i18n: not shown (the walk's log)
                 }
             }
             Err(why) => {
                 if let Some(start) = self.run.take() {
-                    let carried = self.carried.as_ref().map_or(0.0, |c| length(&c.offset));
+                    let carried = self.through.as_ref().map_or_else(|| self.carried.as_ref().map_or(0.0, |c| length(&c.offset)), |t| length(&t.offset));
                     let lasted = now.saturating_duration_since(start).as_secs_f32();
                     self.log.say(format!("stopped after {lasted:.2} s, {carried:.2} m from where the carry began: {why}")); // i18n: not shown (the walk's log)
                 }
@@ -899,7 +877,16 @@ impl WalkBoost {
         let held = self.held_back(m, now);
         let stick = if held.is_none() && m.input_read { stick() } else { None };
         let pushed = stick.is_some_and(|s| push(s) > 0.0);
-        let carries = self.gate.carries(now, pushed, m.motion.as_ref(), std::mem::take(&mut self.boost));
+        let was_carrying = self.gate.since.is_some();
+        let boost = std::mem::take(&mut self.boost);
+        let carries = self.gate.carries(now, pushed, m.motion.as_ref(), boost);
+        if was_carrying != carries || (pushed && self.gate.logged.is_none_or(|at| now.saturating_duration_since(at) >= Duration::from_secs(1))) {
+            self.gate.logged = Some(now);
+            let age = m.motion.and_then(|m| m.speed_at_ms).map(|at| {
+                (std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as u64).saturating_sub(at)
+            });
+            self.log.say(format!("motion gate={carries} stick={stick:?} raw={:?} age_ms={age:?} held={held:?} input={} boost={}", m.motion, m.input_read, boost)); // i18n: not shown (diagnostic log)
+        }
         if let Some(why) = held {
             return Err(why);
         }
@@ -1238,40 +1225,30 @@ mod tests {
 
     #[test]
     fn carries_only_while_vrchat_walks() {
-        let t0 = Instant::now();
-        let at = |ms: u64| t0 + Duration::from_millis(ms);
-        let speed = |speed: f32| Motion { in_station: false, speed };
-        // Nothing from VRChat: the stick alone.
-        let mut g = Gate::default();
-        assert!(g.carries(at(0), true, None, 0.0) && !g.carries(at(10), false, None, 0.0));
-        // A push starts carrying once VRChat moves the avatar itself.
-        let mut g = Gate::default();
-        assert!(!g.carries(at(0), true, Some(&speed(0.0)), 0.0));
-        assert!(g.carries(at(10), true, Some(&speed(3.0)), 0.0));
-        // Carrying, VRChat's speed counts the boost's own drag: 4.05 m/s with 4 of boost is VRChat standing still.
-        assert!(g.carries(at(100), true, Some(&speed(4.05)), 4.0), "its reports lag the boost at first");
-        assert!(g.carries(at(700), true, Some(&speed(4.05)), 4.0), "a moment below walking is not a stop");
-        assert!(!g.carries(at(1100), true, Some(&speed(4.05)), 4.0), "the Action Menu took the stick: the boost stops");
-        // VRChat still reports the boost's drag a moment: that does not start it again (it did, the next frame, so the
-        // boost never stopped and went in fits).
-        assert!(!g.carries(at(1110), true, Some(&speed(4.05)), 0.0), "the boost's own drag, reported late");
-        assert!(!g.carries(at(1400), true, Some(&speed(2.0)), 0.0));
-        assert!(!g.carries(at(1650), true, Some(&speed(0.05)), 0.0), "VRChat stands the avatar still: still stopped");
-        assert!(g.carries(at(1700), true, Some(&speed(3.0)), 0.0), "VRChat walks it again: carrying again");
-        // Letting go of the stick forgets the stop: the next push starts at once.
-        let mut g = Gate::default();
-        assert!(g.carries(at(0), true, Some(&speed(3.0)), 0.0));
-        assert!(g.carries(at(1000), true, Some(&speed(4.05)), 4.0));
-        assert!(!g.carries(at(1400), true, Some(&speed(4.05)), 4.0));
-        assert!(!g.carries(at(1410), false, Some(&speed(4.05)), 0.0));
-        assert!(g.carries(at(1420), true, Some(&speed(3.0)), 0.0));
-        // Walking: VRChat's own 4 m/s on top of the boost's 4.
-        let mut g = Gate::default();
-        assert!(g.carries(at(0), true, Some(&speed(3.0)), 0.0));
-        assert!(g.carries(at(2000), true, Some(&speed(8.0)), 4.0));
-        // In a station, never; a speed that is not a number starts nothing.
-        assert!(!g.carries(at(2010), true, Some(&Motion { in_station: true, speed: 3.0 }), 4.0));
-        assert!(!Gate::default().carries(at(0), true, Some(&speed(f32::NAN)), 0.0));
+        let start = Instant::now();
+        for hz in [72, 90] {
+            for strength in [0.2, 0.5, 1.0] {
+                let mut g = Gate::default();
+                let mut m = Motion { speed: 4.0 * strength, ..Motion::default() };
+                for frame in 0..30 * hz {
+                    let now = start + Duration::from_secs_f64(frame as f64 / hz as f64);
+                    // Delayed, unchanged and missing OSC samples must not create a boost cycle.
+                    let motion = if frame % 19 == 0 { None } else { Some(&m) };
+                    assert!(g.carries(now, true, motion, 8.0 * strength));
+                }
+                let now = start + Duration::from_secs(30);
+                m.speed = 0.0;
+                assert!(g.carries(now, true, Some(&m), 8.0));
+                assert!(!g.carries(now + STILL_FOR, true, Some(&m), 8.0));
+                m.speed = 4.0;
+                assert!(g.carries(now + Duration::from_secs(1), true, Some(&m), 0.0));
+                m.in_station = true;
+                assert!(!g.carries(now, true, Some(&m), 8.0));
+                m.in_station = false;
+                assert!(!g.carries(now, false, Some(&m), 0.0));
+                assert!(g.carries(now, true, Some(&m), 0.0));
+            }
+        }
     }
 
     /// How SteamVR's working copy, preview and saved setup relate. Without a headset that cannot be checked, so walk
@@ -1573,7 +1550,7 @@ mod tests {
         walk.step(&mut room, &away, || FORWARD, || Some(yaw(0.0)), at(1620));
         assert!(!walk.moving());
         // VRChat says the avatar stands still: a push does not start the carry.
-        let still = Moment { motion: Some(Motion { in_station: false, speed: 0.0 }), ..moment(&s, None) };
+        let still = Moment { motion: Some(Motion { in_station: false, speed: 0.0, speed_at_ms: None }), ..moment(&s, None) };
         walk.step(&mut room, &still, || FORWARD, || Some(yaw(0.0)), at(1630));
         assert!(!walk.moving());
     }
@@ -1781,7 +1758,7 @@ mod tests {
                 let place = if event == 4 { "wrld_2" } else { "wrld_1" };
                 moved_by_someone |= walk.place.as_deref() != Some(place);
                 let speed = (noise(&mut state) % 8) as f32;
-                let m = Moment { place: Some(place), motion: Some(Motion { in_station: false, speed }), ..moment(&s, None) };
+                let m = Moment { place: Some(place), motion: Some(Motion { in_station: false, speed, speed_at_ms: None }), ..moment(&s, None) };
                 walk.step(&mut room, &m, || stick, || tracked.then(|| yaw(heading)), now);
                 let at = carried_by(&room);
                 let jump = metres([at[0] - last[0], at[1] - last[1], at[2] - last[2]]);
@@ -1923,6 +1900,28 @@ mod tests {
         let mut walk = boost();
         walk.set_driver(Box::new(fake.clone()));
         walk
+    }
+
+    #[test]
+    fn continuous_push_never_interrupts_driver_at_72_or_90_hz() {
+        for hz in [72, 90] {
+            for stick in [0.3, 0.6, 1.0] {
+                let fake = Fake::new();
+                let s = settings();
+                let mut walk = through_driver(&fake);
+                let mut rig = Rig::new(Matrix34::IDENTITY, &fake);
+                let start = Instant::now();
+                for frame in 0..=30 * hz {
+                    let now = start + Duration::from_secs_f64(frame as f64 / hz as f64);
+                    let motion = (frame % 19 != 0).then_some(Motion { speed: 4.0 * stick, speed_at_ms: Some(1), ..Motion::default() });
+                    let m = Moment { motion, ..moment(&s, None) };
+                    let head = rig.head_frame(0.0);
+                    walk.step(&mut rig, &m, || Some([0.0, stick]), || Some(head), now);
+                    if frame > hz { assert!(walk.moving(), "{hz} Hz, stick {stick}, frame {frame}"); }
+                }
+                assert!(!walk.log.said.iter().any(|s| s.contains("VRChat does not walk")));
+            }
+        }
     }
 
     fn minus(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
@@ -2138,7 +2137,7 @@ mod tests {
                 walk.play_space_event_in(&mut rig, PlaySpaceEvent::StandingReset, now);
             }
             let speed = (noise(&mut state) % 16) as f32;
-            let m = Moment { place: None, motion: Some(Motion { in_station: false, speed }), ..moment(&s, None) };
+            let m = Moment { place: None, motion: Some(Motion { in_station: false, speed, speed_at_ms: None }), ..moment(&s, None) };
             let frame = rig.head_frame(heading);
             walk.step(&mut rig, &m, || stick, || tracked.then_some(frame), now);
             let head = rig.head_standing();

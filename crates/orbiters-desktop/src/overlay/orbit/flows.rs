@@ -796,3 +796,96 @@ fn the_song_s_picture_disappearing_paints_all_tools_again() {
     }
 
 }
+
+/// Enzo (F13, F15): nothing on the wheel, the Quick Menu or a sheet starts a recording; beside VRChat's camera, Record does. While one runs, Stop is in reach on the
+/// wheel, beside the Quick Menu, on a sheet's head and at the camera; pressed, it says Stopping at once and a second press does nothing.
+#[test]
+fn a_recording_starts_beside_the_camera_alone_and_stops_from_anywhere() {
+    use crate::state::CaptureState;
+    let mut person = Person::new();
+    for around in [Around::Wheel, Around::QuickMenu] {
+        person.around = Some(around);
+        person.turns(3);
+        assert!(person.find(Action::Record).is_none(), "{around:?} offers to record");
+        assert!(person.find(Action::StopRecording).is_none(), "{around:?} has a Stop with nothing to stop");
+    }
+    person.press(Action::Pictures);
+    person.turns(3);
+    assert_eq!(person.panels.facts.sheet, Some(Sheet::Pictures));
+    assert!(person.find(Action::Record).is_none(), "the Pictures sheet offers to record");
+    person.around = None;
+    person.turns(2);
+    person.around = Some(Around::Camera);
+    person.turns(3);
+    assert!(person.find(Action::Record).is_some(), "no Record beside the camera");
+
+    let mut snap = (*person.snap).clone();
+    snap.capture.state = CaptureState::Recording;
+    person.snap = Arc::new(snap);
+    for around in [Around::Wheel, Around::QuickMenu, Around::Camera] {
+        person.around = Some(around);
+        person.turns(3);
+        assert!(person.find(Action::StopRecording).is_some(), "no Stop {around:?}");
+        assert!(person.find(Action::Record).is_none(), "a start in disguise {around:?}");
+    }
+    person.around = Some(Around::QuickMenu);
+    person.turns(2);
+    person.press(Action::All);
+    person.turns(3);
+    let head = person.panels.all().find(|p| p.zone == Zone::SheetBack).expect("a sheet's head");
+    assert!(head.items.iter().any(|i| i.action == Action::StopRecording), "no Stop on the sheet's head");
+    let pressed = person.press(Action::StopRecording);
+    assert!(pressed.clicked);
+    person.turns(2);
+    assert!(person.panels.facts.rec_stopping, "it says Stopping at once");
+    assert!(person.find(Action::StopRecording).is_none(), "pressed, nothing more to press");
+    assert!(person.find(Action::Record).is_none());
+}
+
+/// Enzo (F16): beside the camera, an avatar with no capture kit has its two 3D pictures greyed, saying why, and a press takes none; one not known yet is not said
+/// to have none.
+#[test]
+fn the_camera_s_3d_pictures_say_the_kit_is_missing_only_when_it_is() {
+    use super::panels::camera_words;
+    let mut person = Person::new();
+    person.around = Some(Around::Camera);
+    for (kit, missing) in [(None, false), (Some(true), false), (Some(false), true)] {
+        let mut snap = (*person.snap).clone();
+        snap.worn_kit = kit;
+        person.snap = Arc::new(snap);
+        person.turns(3);
+        assert_eq!(person.panels.facts.no_kit, missing, "{kit:?}");
+        assert_eq!(person.panels.facts.camera.kit, kit);
+        let said = camera_words(&person.panels.facts).map(|w| w.0);
+        assert_eq!(said.as_deref() == Some(orbiters_i18n::tr("This avatar has no capture kit")), missing, "{kit:?}: {said:?}");
+    }
+    let pressed = person.press(Action::Picture(orbiters_n4n0_core::menu::PhotoMode::People));
+    assert!(!pressed.clicked, "a greyed 3D picture took one");
+}
+
+/// Enzo (F17): the camera's QR code opens no page: it looks around the camera, with corners round its picture, and a second press stops it.
+#[test]
+fn the_camera_s_qr_code_looks_around_the_camera_and_opens_no_page() {
+    use super::panels::CameraQr;
+    let mut person = Person::new();
+    person.around = Some(Around::Camera);
+    person.turns(3);
+    assert!(!person.panels.all().any(|p| p.zone == Zone::CameraScan), "corners with nothing looked for");
+    person.press(Action::CameraQr);
+    // What the scanner says once it runs.
+    let mut snap = (*person.snap).clone();
+    snap.n4n0.qr.phase = orbiters_n4n0_core::qr::QrPhase::Looking;
+    person.snap = Arc::new(snap);
+    person.turns(3);
+    assert_eq!(person.panels.facts.sheet, None, "the QR code page opened");
+    assert!(person.panels.takeover.is_none());
+    assert_eq!(person.panels.facts.camera.qr, CameraQr::Looking);
+    assert!(person.panels.all().any(|p| p.zone == Zone::CameraScan && p.shown), "no corners round the camera");
+    person.press(Action::CameraQr);
+    let mut snap = (*person.snap).clone();
+    snap.n4n0.qr.phase = orbiters_n4n0_core::qr::QrPhase::Off;
+    person.snap = Arc::new(snap);
+    person.turns(3);
+    assert_eq!(person.panels.facts.camera.qr, CameraQr::Off);
+    assert!(!person.panels.all().any(|p| p.zone == Zone::CameraScan), "the corners stayed");
+}

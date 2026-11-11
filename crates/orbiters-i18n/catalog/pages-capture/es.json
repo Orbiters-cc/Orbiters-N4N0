@@ -417,5 +417,7 @@
   "lamp\u0004Brightness": "Brillo",
   "tool\u0004Select": "Selección",
   "the noun\u0004Recording": "Grabación",
-  "stat tile\u0004Depth frames": "Profundidad"
+  "stat tile\u0004Depth frames": "Profundidad",
+  "Record a 3D scene": "Grabar una escena 3D",
+  "In VR, open VRChat's camera: Record is beside it.": "En VR, abre la cámara de VRChat: Grabar está al lado."
 }

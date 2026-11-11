@@ -150,8 +150,18 @@ pub enum Action {
     Worlds,
     /// A 3D picture of people, of the world.
     Picture(PhotoMode),
-    /// Starts or stops a recording.
+    /// Starts a recording: only beside VRChat's camera, whose picture it records (Enzo, F14 and F15).
     Record,
+    /// Stops the recording under way. Nothing that shows it ever starts one (Enzo, F13).
+    StopRecording,
+    /// The camera's QR code: looks for one through VRChat's camera, or stops looking.
+    CameraQr,
+    /// Puts on the public demo avatar, which has the capture kit.
+    DemoAvatar,
+    /// The page a code opened: to the computer's browser, away, or the pointer on it.
+    WebOpen,
+    WebClose,
+    WebPage,
     /// A page of N4N0's menu on the sheet.
     Page(Target),
     /// Everything, on the sheet.
@@ -506,6 +516,11 @@ pub struct Facts {
     pub art: Option<TextureId>,
     /// The avatar worn has no capture kit, as VRChat's parameters say: a 3D picture cannot be taken, and the buttons say so.
     pub no_kit: bool,
+    /// A recording being started, or being stopped: its Stop says so, and a second press does nothing.
+    pub rec_starting: bool,
+    pub rec_stopping: bool,
+    /// What the parts around VRChat's camera show.
+    pub camera: CameraNow,
     /// A 3D picture's timer, in seconds.
     pub timer: u32,
     /// How far the sheet's list is scrolled, in its page's units, and the layout the app's own gallery uses.
@@ -595,6 +610,78 @@ pub struct OpenedView {
     pub plate: Vec<[f32; 2]>,
     /// Why it cannot show.
     pub failed: Option<String>,
+}
+
+/// What the parts beside VRChat's camera show, besides its tiles.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct CameraNow {
+    /// Where its panel is not seen yet: the parts show where it most likely is, say so, and settle on it once it is seen.
+    pub finding: bool,
+    /// The worn avatar's capture kit: there, missing, or not known yet (said as nothing: unknown is not missing).
+    pub kit: Option<bool>,
+    /// Putting on the public demo avatar, which has the kit: offered only where it can be done (signed in to VRChat through Orbiters).
+    pub demo: Option<DemoSwitch>,
+    /// Its own QR code scan.
+    pub qr: CameraQr,
+    /// The page a code opened, over the camera.
+    pub web: Option<WebPage>,
+    /// The tiles are on the camera's right: what they say lines up on that side.
+    pub on_the_right: bool,
+}
+
+/// The demo avatar, asked for from beside the camera.
+#[derive(Clone, Debug, PartialEq)]
+pub enum DemoSwitch {
+    Offered,
+    Busy,
+    Done,
+    /// Why not.
+    Failed(String),
+}
+
+/// What the camera's QR code tile is doing.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub enum CameraQr {
+    #[default]
+    Off,
+    Looking,
+    /// VRChat's camera sends no picture to read: how to make it.
+    NoPicture(String),
+}
+
+/// A page opened from a code, as its bar and its view show it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct WebPage {
+    pub url: String,
+    pub title: String,
+    pub state: WebState,
+    /// The page as drawn, once it is.
+    pub picture: Option<TextureId>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum WebState {
+    Loading,
+    Shown,
+    /// Why not.
+    Failed(String),
+}
+
+/// Whether a part that shows only while it has something to do has it now ([`Zone::only_while_needed`]).
+pub fn needed(zone: Zone, facts: &Facts) -> bool {
+    let camera = &facts.camera;
+    match zone {
+        Zone::WheelStop | Zone::QmStop => stop_shown(facts),
+        Zone::CameraAct => facts.no_kit && matches!(camera.demo, Some(DemoSwitch::Offered | DemoSwitch::Busy | DemoSwitch::Failed(_))),
+        Zone::CameraScan => camera.qr != CameraQr::Off,
+        Zone::CameraWebBar | Zone::CameraWeb => camera.web.is_some(),
+        _ => true,
+    }
+}
+
+/// A recording runs, or is starting or stopping: a Stop is in reach (Enzo, F13). Not a 3D picture's short flight, which has its own way to call it off.
+pub fn stop_shown(facts: &Facts) -> bool {
+    facts.recording || facts.rec_starting || facts.rec_stopping
 }
 
 /// Something to point at on a panel.
@@ -694,8 +781,22 @@ pub enum Look {
     Picture(PhotoMode),
     /// A recent capture, the `n`-th.
     Capture(usize),
-    /// Record: its icon and state.
+    /// A recording on the Pictures sheet: how to start one (beside VRChat's camera), and its Stop while it runs.
     Record,
+    /// Stop with a recording's clock; Stopping once pressed.
+    Stop,
+    /// A tile beside VRChat's camera: a 3D picture, Record, the QR code.
+    CameraPicture(PhotoMode),
+    CameraRecord,
+    CameraQr,
+    /// The button under the camera's tiles.
+    CameraAct,
+    /// Corners round the camera's picture while it looks for a code.
+    Scan,
+    /// The page's bar over the camera: its name and how it is going, its buttons; and the page.
+    WebTitle,
+    WebButton { icon: &'static str, label: &'static str },
+    Web,
     /// No capture kit: one line saying where to add it, and a button there.
     AddKit,
     /// Over one place's captures: their name, how many, and the way back to every picture.
@@ -740,14 +841,28 @@ pub fn items(zone: Zone, size: Vec2, facts: &Facts) -> Vec<Item> {
         Zone::WheelPictures => cell(if facts.picture_wait.is_some() { Action::Picture(facts.picture_mode.unwrap_or(PhotoMode::World)) } else { Action::Pictures }, icons::IMAGES, tr("Pictures"), false),
         Zone::BloomPeople => vec![Item { action: Action::Picture(PhotoMode::People), rect: whole, look: Look::Picture(PhotoMode::People) }],
         Zone::BloomWorld => vec![Item { action: Action::Picture(PhotoMode::World), rect: whole, look: Look::Picture(PhotoMode::World) }],
-        Zone::BloomRecord => vec![Item { action: Action::Record, rect: whole, look: Look::Record }],
         Zone::BloomPrevious => vec![Item { action: Action::Previous, rect: whole, look: Look::Transport(icons::SKIP_BACK) }],
         Zone::BloomNext => vec![Item { action: Action::Next, rect: whole, look: Look::Transport(icons::SKIP_FORWARD) }],
         Zone::WheelCaption | Zone::QmCaption | Zone::CameraCaption => vec![Item { action: Action::Idle, rect: whole, look: Look::Caption }],
         // Enzo: what takes a picture or reads a code, at the camera that does it.
-        Zone::CameraPeople => tile(Action::Picture(PhotoMode::People), icons::USERS, tr("3D of people"), false),
-        Zone::CameraWorld => tile(Action::Picture(PhotoMode::World), icons::GLOBE_HEMISPHERE_WEST, tr("3D of world"), false),
-        Zone::CameraQr => tile(Action::Page(Target::Qr), icons::QR_CODE, tr("QR code"), false),
+        Zone::CameraPeople => vec![Item { action: Action::Picture(PhotoMode::People), rect: whole, look: Look::CameraPicture(PhotoMode::People) }],
+        Zone::CameraWorld => vec![Item { action: Action::Picture(PhotoMode::World), rect: whole, look: Look::CameraPicture(PhotoMode::World) }],
+        Zone::CameraRecord => vec![Item { action: camera_record_action(facts), rect: whole, look: Look::CameraRecord }],
+        // It looks for a code around the camera itself, and stops: no page of its own (Enzo, F17).
+        Zone::CameraQr => vec![Item { action: Action::CameraQr, rect: whole, look: Look::CameraQr }],
+        Zone::CameraAct => match facts.camera.demo {
+            Some(DemoSwitch::Offered | DemoSwitch::Failed(_)) => vec![Item { action: Action::DemoAvatar, rect: whole, look: Look::CameraAct }],
+            Some(DemoSwitch::Busy) => vec![Item { action: Action::Idle, rect: whole, look: Look::CameraAct }],
+            _ => Vec::new(),
+        },
+        Zone::CameraScan => vec![Item { action: Action::Idle, rect: whole, look: Look::Scan }],
+        Zone::CameraWebBar => web_bar(w, h, facts),
+        Zone::CameraWeb => {
+            let shown = facts.camera.web.as_ref().is_some_and(|web| web.state == WebState::Shown);
+            vec![Item { action: if shown { Action::WebPage } else { Action::Idle }, rect: whole, look: Look::Web }]
+        }
+        Zone::WheelStop | Zone::QmStop if stop_shown(facts) => vec![Item { action: stop_action(facts), rect: whole, look: Look::Stop }],
+        Zone::WheelStop | Zone::QmStop => Vec::new(),
         Zone::WheelVeil => vec![Item { action: Action::Idle, rect: whole, look: Look::Blank }],
         Zone::WheelHide => vec![Item { action: Action::Hide, rect: whole, look: Look::HideWord }],
         // The wing's tiles, each a part of its own.
@@ -777,6 +892,11 @@ pub fn items(zone: Zone, size: Vec2, facts: &Facts) -> Vec<Item> {
             let pill = head_pill(facts);
             let mut out = vec![Item { action: Action::CloseSheet, rect: r(w - 10.0 - b, top, b, b), look: Look::Close }, Item { action: Action::Back, rect: r(BACK_AT, top, b, b), look: Look::HeadBack }];
             out.extend(head_tabs(facts, w).0);
+            // While a recording runs, its Stop on every sheet's head, left of what the head has at its end (Enzo, F13).
+            if stop_shown(facts) {
+                let end = if facts.view_showing { w - 40.0 - head_end(facts) } else { w - 10.0 - b } - 8.0;
+                out.push(Item { action: stop_action(facts), rect: r(end - head_stop(facts), top, head_stop(facts), b), look: Look::Stop });
+            }
             // While a capture shows around the person: it is one press from gone, wherever on the sheet.
             if facts.view_showing {
                 let gap = hide_view_gap(facts);
@@ -847,6 +967,59 @@ fn head_button(facts: &Facts) -> (f32, f32) {
 
 /// How wide Hide 3D and Small here are in the head.
 const HEAD_PILL: f32 = 96.0;
+/// How wide a recording's Stop is in the head.
+const HEAD_STOP: f32 = 118.0;
+
+/// The head's Stop: narrower beside Hide 3D and Small here, where the tabs need the room.
+fn head_stop(facts: &Facts) -> f32 {
+    if facts.view_showing { 64.0 } else { HEAD_STOP }
+}
+
+/// What the head's right end holds before its close: Hide 3D and Small here while a capture shows.
+fn head_end(facts: &Facts) -> f32 {
+    if facts.view_showing {
+        head_pill(facts) + hide_view_gap(facts) + if facts.sheet != Some(Sheet::Worlds) { head_pill(facts) + 6.0 } else { 0.0 }
+    } else {
+        0.0
+    }
+}
+
+/// Room the head's Stop takes, with its gap, while a recording runs.
+fn head_stop_room(facts: &Facts) -> f32 {
+    if stop_shown(facts) { head_stop(facts) + 8.0 } else { 0.0 }
+}
+
+/// What Stop does now: nothing once it was pressed and the recording is being saved.
+fn stop_action(facts: &Facts) -> Action {
+    if facts.rec_stopping { Action::Idle } else { Action::StopRecording }
+}
+
+/// What the camera's Record does now: start, stop, or nothing while another capture is under way or this one stops.
+fn camera_record_action(facts: &Facts) -> Action {
+    if facts.rec_stopping {
+        Action::Idle
+    } else if facts.recording || facts.rec_starting {
+        Action::StopRecording
+    } else if facts.capture_busy {
+        Action::Idle
+    } else {
+        Action::Record
+    }
+}
+
+/// The bar over the camera's page: its name, Open in browser, and its close, each a laser's size.
+fn web_bar(w: f32, h: f32, facts: &Facts) -> Vec<Item> {
+    if facts.camera.web.is_none() {
+        return Vec::new();
+    }
+    let b = h - 4.0;
+    let open = 176.0;
+    vec![
+        Item { action: Action::Idle, rect: r(0.0, 2.0, w - b - open - 12.0, b), look: Look::WebTitle },
+        Item { action: Action::WebOpen, rect: r(w - b - open - 6.0, 2.0, open, b), look: Look::WebButton { icon: icons::ARROW_SQUARE_OUT, label: tr("Open in browser") } },
+        Item { action: Action::WebClose, rect: r(w - b, 2.0, b, b), look: Look::Close },
+    ]
+}
 
 /// The tools along a sheet's head, where the wing is not beside it, and where they end. Their names where there is room; with something else to say in the head, on a screen, icons but for the one that is open.
 fn head_tabs(facts: &Facts, head_width: f32) -> (Vec<Item>, f32) {
@@ -863,7 +1036,7 @@ fn head_tabs(facts: &Facts, head_width: f32) -> (Vec<Item>, f32) {
         // Its name after the Back, which is larger in a headset (the round 16 render had the name under it).
         return (Vec::new(), 10.0 + head_button(facts).1 - 30.0);
     }
-    let busy = facts.view_showing || status_now(facts).is_some();
+    let busy = facts.view_showing || status_now(facts).is_some() || stop_shown(facts);
     let open = |action: Action| match (facts.sheet, action) {
         (Some(Sheet::Worlds), Action::Worlds) | (Some(Sheet::All), Action::All) | (Some(Sheet::Pictures), Action::Pictures) | (Some(Sheet::Talk), Action::Talk) => true,
         (Some(Sheet::Instances), Action::Page(Target::Instances)) | (Some(Sheet::Results), Action::Page(Target::YouTube)) => true,
@@ -878,7 +1051,7 @@ fn head_tabs(facts: &Facts, head_width: f32) -> (Vec<Item>, f32) {
     // A headset's words as large as the sheet's buttons' (round 14's judges).
     let snug = |label: &str| (16.0 + label.chars().map(|c| if c.is_ascii() { 8.7 } else { 16.0 }).sum::<f32>()).max(COMPACT_TAB_VR);
     let pill = head_pill(facts);
-    let room = head_width - 48.0 - if facts.view_showing { pill + hide_view_gap(facts) + if facts.sheet != Some(Sheet::Worlds) { pill + 6.0 } else { 0.0 } } else { 0.0 } - 12.0;
+    let room = head_width - 48.0 - if facts.view_showing { pill + hide_view_gap(facts) + if facts.sheet != Some(Sheet::Worlds) { pill + 6.0 } else { 0.0 } } else { 0.0 } - 12.0 - head_stop_room(facts);
     let start = BACK_AT + head_button(facts).1 + 6.0;
     let wide_fits = start + TABS.iter().map(|t| t.3 + 3.0).sum::<f32>() <= room;
     let snug_fits = start + TABS.iter().map(|t| snug(tr_ctx("tile", t.2)) + 3.0).sum::<f32>() <= room;
@@ -1100,14 +1273,16 @@ fn sheet_page_items(sheet: Sheet, facts: &Facts) -> Vec<Item> {
                 out.push(Item { action: Action::Idle, rect: r(x0, y0, 1024.0 - x0 * 2.0, h), look: Look::SetHead });
                 return out;
             }
+            // A recording starts beside VRChat's camera alone (Enzo, F15): here it says so, and while one runs it is its Stop.
+            let record = if stop_shown(facts) { stop_action(facts) } else { Action::Idle };
             if facts.no_kit {
-                // Record first, as it works; then, quietly, where the kit is (round 11's judges: the banner and its green button were the loudest thing on the sheet).
-                out.push(Item { action: Action::Record, rect: r(x0, y0, width, h), look: Look::Record });
+                // Recording first, as it works; then, quietly, where the kit is (round 11's judges: the banner and its green button were the loudest thing on the sheet).
+                out.push(Item { action: record, rect: r(x0, y0, width, h), look: Look::Record });
                 out.push(Item { action: Action::AddKit, rect: r(x0 + width + gap, y0, width * 2.0 + gap, h), look: Look::AddKit });
             } else {
                 out.push(Item { action: Action::Picture(PhotoMode::People), rect: r(x0, y0, width, h), look: Look::Picture(PhotoMode::People) });
                 out.push(Item { action: Action::Picture(PhotoMode::World), rect: r(x0 + width + gap, y0, width, h), look: Look::Picture(PhotoMode::World) });
-                out.push(Item { action: Action::Record, rect: r(x0 + (width + gap) * 2.0, y0, width, h), look: Look::Record });
+                out.push(Item { action: record, rect: r(x0 + (width + gap) * 2.0, y0, width, h), look: Look::Record });
             }
             let track = filter_track();
             out.push(Item { action: Action::Filter(GalleryFilter::All), rect: r(track.left() + 4.0, y0 + 4.0, 62.0, h - 8.0), look: Look::Filter(GalleryFilter::All) });
@@ -1781,8 +1956,14 @@ pub fn caption(action: Action, facts: &Facts) -> Option<(String, String)> {
         Action::Mute => (tr("Mute").into(), tr("Your computer's sound, on or off.").into()),
         Action::Pictures => (tr("Pictures").into(), tr("Take a 3D picture, record a scene, see your captures.").into()),
         Action::All => (tr("All tools").into(), tr("Everything Orbiters can do from here.").into()),
-        Action::Record if facts.recording => (tr("Stop recording").into(), tr("Orbiters then turns it into a 3D scene.").into()),
         Action::Record => (tr("Record a 3D scene").into(), tr("Walk around with VRChat's camera; Orbiters makes a 3D scene of what it saw.").into()),
+        Action::StopRecording => (tr("Stop recording").into(), tr("Orbiters then turns it into a 3D scene.").into()),
+        Action::CameraQr if facts.camera.qr != CameraQr::Off => (tr("Stop looking for a code").into(), tr("The camera goes back to being only a camera.").into()),
+        Action::CameraQr => (tr("QR code").into(), tr("Point VRChat's camera at a code: its page opens right above the camera.").into()),
+        Action::DemoAvatar => (tr("Wear the demo avatar").into(), tr("A public avatar with the capture kit, to take 3D pictures now. Change back in VRChat's menu.").into()),
+        Action::WebOpen => (tr("Open in browser").into(), tr("This page in your computer's browser.").into()),
+        Action::WebClose => (tr("Close the page").into(), tr("The camera stays as it is.").into()),
+        Action::WebPage => (tr("The page").into(), tr("Scroll with your stick, or point and press.").into()),
         Action::Page(Target::Instances) => (tr("Instances").into(), tr("Where you were lately. Go back with an invite.").into()),
         Action::Page(Target::History) => (tr("Your captures").into(), tr("Your 3D pictures and scenes: see them, share them.").into()),
         Action::Page(Target::YouTube) => ("YouTube".into(), tr("Find a video, and put its link in the world's video player.").into()),
@@ -2076,7 +2257,7 @@ pub fn paint(p: &Painter, zone: Zone, size: Vec2, facts: &Facts, hover: Option<u
             let from = x + 12.0;
             // The head is where this sheet says what is going on: nothing lies over or under it.
             if let Some((first, second)) = status_now(facts) {
-                let room = size.x - 50.0 - if facts.view_showing { 206.0 } else { 0.0 } - from;
+                let room = size.x - 50.0 - if facts.view_showing { 206.0 } else { 0.0 } - head_stop_room(facts) - from;
                 let big = look::font(14.5, weight::BOLD);
                 let small = look::font(12.5, weight::MEDIUM);
                 p.text(pos2(from, if second.is_empty() { 22.0 } else { 13.0 }), Align2::LEFT_CENTER, fit(p, &first, &big, room), big, look::accent());
@@ -2084,7 +2265,7 @@ pub fn paint(p: &Painter, zone: Zone, size: Vec2, facts: &Facts, hover: Option<u
             // What is pointed at is said in one place: where the band under the tabs is up, there.
             } else if let Some((first, second)) = facts.pointed.filter(|_| !facts.hint_band && matches!(facts.sheet, Some(Sheet::All | Sheet::Pictures))).and_then(|a| caption(a, facts)) {
                 // What a small tile does, which it does not say itself.
-                let room = size.x - 50.0 - if facts.view_showing { 206.0 } else { 0.0 } - from;
+                let room = size.x - 50.0 - if facts.view_showing { 206.0 } else { 0.0 } - head_stop_room(facts) - from;
                 let big = look::font(14.5, weight::BOLD);
                 let small = look::font(12.5, weight::MEDIUM);
                 p.text(pos2(from, 13.0), Align2::LEFT_CENTER, fit(p, &first, &big, room), big, look::LABEL);
@@ -2348,7 +2529,7 @@ fn hub_icon(action: Action) -> Option<&'static str> {
         Action::Next => icons::SKIP_FORWARD,
         Action::Picture(PhotoMode::People) => icons::USERS,
         Action::Picture(PhotoMode::World) => icons::IMAGE,
-        Action::Record => icons::RECORD,
+        Action::Record | Action::StopRecording => icons::RECORD,
         _ => return None,
     })
 }
@@ -2400,7 +2581,6 @@ pub fn key_of(zone: Zone) -> Option<&'static str> {
         Zone::WheelPictures => "6",
         Zone::BloomPeople => "7",
         Zone::BloomWorld => "8",
-        Zone::BloomRecord => "9",
         _ => return None,
     })
 }
@@ -2651,62 +2831,208 @@ fn draw(p: &Painter, zone: Zone, item: &Item, facts: &Facts, hovered: bool, pres
             p.text(pos2(rect.left() + 34.0, rect.center().y), Align2::LEFT_CENTER, fit(p, tr("For 3D pictures, add the capture kit"), &font, room), font, look::LABEL);
         }
         Look::Record => {
-            let label = if facts.recording { tr("Stop") } else { tr_ctx("start recording", "Record") };
-            let dim = facts.capture_busy && !facts.recording;
-            let time = facts.recording_seconds.filter(|_| facts.recording).map_or(label.to_string(), clock);
-            let color = if dim { theme::FG_4 } else { look::LABEL };
-            if let Some((ring, center)) = shape.ring {
-                if facts.recording {
-                    ring_mesh(p, ring, center, theme::mix(theme::REC, Color32::BLACK, 0.35), theme::mix(theme::REC, Color32::BLACK, 0.6));
-                } else {
-                    ring_fill(p, ring, center, if pressed { 1.0 } else if hovered { 0.8 } else { 0.0 }, theme::REC);
+            // On the Pictures sheet: a recording starts beside VRChat's camera alone (Enzo, F15). This says how, and is the recording's Stop while it runs.
+            let live = stop_shown(facts);
+            let can_stop = live && !facts.rec_stopping;
+            let (hovered, pressed) = (hovered && can_stop, pressed && can_stop);
+            let tint = theme::REC;
+            p.rect_filled(rect, look::radius(rect.height() / 2.0), if pressed { theme::mix(look::TILE, tint, 0.5) } else if hovered { theme::mix(look::TILE, tint, 0.4) } else if live { theme::mix(look::TILE, tint, 0.3) } else { theme::alpha(look::TILE, 0.7) });
+            if hovered {
+                p.rect_stroke(rect.shrink(1.0), look::radius(rect.height() / 2.0), Stroke::new(1.5, tint), egui::StrokeKind::Middle);
+            }
+            let at = pos2(rect.left() + 26.0, rect.center().y);
+            if live {
+                p.rect_filled(Rect::from_center_size(at, Vec2::splat(15.0)), look::radius(3.0), Color32::WHITE);
+            } else {
+                p.circle_filled(at, 8.5, theme::mix(tint, look::TILE, 0.35));
+            }
+            let room = rect.width() - 56.0;
+            if live {
+                let font = look::font(15.5, weight::SEMIBOLD);
+                p.text(pos2(rect.left() + 48.0, rect.center().y), Align2::LEFT_CENTER, fit(p, &stop_words(facts), &font, room), font, look::LABEL);
+            } else {
+                let (big, small) = (look::font(14.5, weight::SEMIBOLD), look::font(12.0, weight::MEDIUM));
+                p.text(pos2(rect.left() + 48.0, rect.center().y - 8.0), Align2::LEFT_CENTER, fit(p, tr("Record a 3D scene"), &big, room), big, look::LABEL);
+                p.text(pos2(rect.left() + 48.0, rect.center().y + 9.0), Align2::LEFT_CENTER, fit(p, tr("Open VRChat's camera: Record is beside it"), &small, room), small, look::MUTED);
+            }
+        }
+        Look::Stop => {
+            // Red, as recording is everywhere in Orbiters; the clock, and the word that says what a press does.
+            let stopping = facts.rec_stopping;
+            let (hovered, pressed) = (hovered && !stopping, pressed && !stopping);
+            let tint = theme::REC;
+            let fill = if stopping { theme::mix(look::TILE, tint, 0.25) } else if pressed { theme::mix(tint, Color32::BLACK, 0.25) } else if hovered { theme::mix(tint, Color32::WHITE, 0.1) } else { theme::mix(look::TILE, tint, 0.72) };
+            let round = look::radius(rect.height() / 2.0);
+            p.rect_filled(rect, round, fill);
+            if hovered {
+                p.rect_stroke(rect.shrink(1.0), round, Stroke::new(1.5, Color32::from_white_alpha(150)), egui::StrokeKind::Middle);
+            }
+            let high = rect.height();
+            let square = (high * 0.36).clamp(10.0, 15.0);
+            let at = pos2(rect.left() + high * 0.5, rect.center().y);
+            if stopping {
+                widgets::icon(p, at, icons::CIRCLE_NOTCH, square + 4.0, look::MUTED);
+            } else {
+                p.rect_filled(Rect::from_center_size(at, Vec2::splat(square)), look::radius(2.5), Color32::WHITE);
+            }
+            let size = (high * 0.4).clamp(12.0, 16.0);
+            let (big, small) = (look::font(size, weight::BOLD), look::font(size - 1.0, weight::SEMIBOLD));
+            let from = rect.left() + high * 0.5 + square / 2.0 + 8.0;
+            // Narrow, in a head crowded by Hide 3D and Small here: the square and the clock, what a press does said when pointed at.
+            if rect.width() < 90.0 {
+                if !stopping && !facts.rec_starting {
+                    p.text(pos2(from, rect.center().y), Align2::LEFT_CENTER, clock(facts.recording_seconds.unwrap_or(0)), small, Color32::WHITE);
                 }
-                ring_rim(p, ring, center, hovered, theme::REC);
-                let (at, _) = cell_icon(ring, center);
-                if facts.recording {
-                    p.rect_filled(Rect::from_center_size(at, Vec2::splat(18.0)), look::radius(3.0), color);
+                return;
+            }
+            if stopping || facts.rec_starting {
+                let words = if stopping { tr("Stopping…") } else { tr("Starting…") };
+                let room = rect.right() - from - 10.0 - if stopping { 0.0 } else { 40.0 };
+                p.text(pos2(from, rect.center().y), Align2::LEFT_CENTER, fit(p, words, &small, room), small, if stopping { look::MUTED } else { look::LABEL });
+            } else {
+                p.text(pos2(from, rect.center().y), Align2::LEFT_CENTER, clock(facts.recording_seconds.unwrap_or(0)), small, Color32::WHITE);
+            }
+            if !stopping {
+                let word = tr_ctx("stop recording", "Stop");
+                p.text(pos2(rect.right() - high * 0.42, rect.center().y), Align2::RIGHT_CENTER, word, big, Color32::WHITE);
+            }
+        }
+        Look::CameraPicture(mode) => {
+            let (icon, label) = if mode == PhotoMode::People { (icons::USERS, tr("3D of people")) } else { (icons::GLOBE_HEMISPHERE_WEST, tr("3D of world")) };
+            let tint = if mode == PhotoMode::People { theme::VIOLET } else { look::accent() };
+            // Greyed where the worn avatar has no capture kit: what is missing is said under the tiles, and when pointed at.
+            let off = facts.no_kit;
+            let mine = facts.picture_mode == Some(mode);
+            let counting = facts.countdown.filter(|_| mine);
+            let flying = facts.picture_flying && mine;
+            camera_tile_back(p, rect, hovered, pressed, (counting.is_some() || flying).then_some(tint), off);
+            match counting {
+                Some(seconds) => camera_tile_face(p, rect, None, &seconds.to_string(), label, tint, off),
+                None => camera_tile_face(p, rect, Some(icon), "", label, tint, off),
+            }
+            if off {
+                widgets::icon(p, rect.right_top() + vec2(-11.0, 11.0), icons::LOCK_SIMPLE, 11.0, look::MUTED);
+            }
+        }
+        Look::CameraRecord => {
+            let tint = theme::REC;
+            let live = stop_shown(facts);
+            let dim = facts.rec_stopping || (!live && facts.capture_busy);
+            camera_tile_back(p, rect, hovered && !dim, pressed && !dim, live.then_some(tint), dim);
+            if live {
+                // What a press does now is Stop: a square, the clock over it.
+                let top = rect.center().y - 9.0;
+                let words = if facts.rec_stopping {
+                    tr("Stopping…").to_string()
+                } else if facts.rec_starting {
+                    tr("Starting…").to_string()
                 } else {
-                    p.circle_filled(at, 11.0, if dim { theme::FG_4 } else { theme::REC });
-                }
-                curved(p, center, ring.outer - 11.5, ring.middle(), &time, CELL_WORDS - 1.0, weight::BOLD, color, true);
-                if facts.key_caps {
-                    digit(p, zone, ring, center);
+                    clock(facts.recording_seconds.unwrap_or(0))
+                };
+                let font = look::font(13.0, weight::BOLD);
+                let words = fit(p, &words, &font, rect.width() - 30.0);
+                let wide = p.layout_no_wrap(words.clone(), font.clone(), Color32::WHITE).size().x;
+                let from = rect.center().x - (wide + 18.0) / 2.0;
+                p.rect_filled(Rect::from_center_size(pos2(from + 5.5, top), Vec2::splat(11.0)), look::radius(2.0), if dim { look::MUTED } else { Color32::WHITE });
+                p.text(pos2(from + 18.0, top), Align2::LEFT_CENTER, words, font, if dim { look::MUTED } else { Color32::WHITE });
+                if !facts.rec_stopping {
+                    camera_label(p, rect, tr_ctx("stop recording", "Stop"), look::LABEL);
                 }
             } else {
-                let tint = theme::REC;
-                let radius = look::radius(if rect.height() < 60.0 { rect.height() / 2.0 } else { look::TILE_RADIUS + 2.0 });
-                if rect.height() < 60.0 {
-                    p.rect_filled(rect, radius, if pressed { look::TILE_DOWN } else if hovered { look::TILE_HOVER } else { theme::alpha(look::TILE, 0.7) });
-                } else {
-                p.rect_filled(rect, radius, theme::mix(look::TILE, tint, if pressed { 0.28 } else if hovered { 0.22 } else if dim { 0.04 } else { 0.14 }));
+                let at = pos2(rect.center().x, rect.center().y - 9.0);
+                p.circle_stroke(at, 10.5, Stroke::new(2.0, if dim { theme::FG_4 } else { theme::alpha(tint, 0.6) }));
+                p.circle_filled(at, 6.5, if dim { theme::FG_4 } else { tint });
+                camera_label(p, rect, tr_ctx("start recording", "Record"), if dim { theme::FG_4 } else { look::LABEL });
+            }
+        }
+        Look::CameraQr => {
+            let looking = facts.camera.qr != CameraQr::Off;
+            let tint = if matches!(facts.camera.qr, CameraQr::NoPicture(_)) { theme::WARN } else { theme::INDIGO };
+            camera_tile_back(p, rect, hovered, pressed, looking.then_some(tint), false);
+            let label = if looking { tr_ctx("stop looking for a code", "Stop") } else { tr("QR code") };
+            camera_tile_face(p, rect, Some(icons::QR_CODE), "", label, if looking { Color32::WHITE } else { theme::mix(tint, Color32::WHITE, 0.3) }, false);
+        }
+        Look::CameraAct => {
+            let busy = facts.camera.demo == Some(DemoSwitch::Busy);
+            let (hovered, pressed) = (hovered && !busy, pressed && !busy);
+            let tint = look::accent();
+            let round = look::radius(rect.height() / 2.0);
+            let fill = if busy { look::TILE } else if pressed { theme::mix(tint, Color32::BLACK, 0.2) } else if hovered { theme::mix(tint, Color32::WHITE, 0.12) } else { tint };
+            p.rect_filled(rect, round, fill);
+            let ink = if busy { look::MUTED } else { look::on_accent() };
+            let words = match facts.camera.demo {
+                Some(DemoSwitch::Busy) => tr("Switching avatar…"),
+                Some(DemoSwitch::Failed(_)) => tr("Try again"),
+                _ => tr("Wear the demo avatar"),
+            };
+            let font = look::font(13.0, weight::BOLD);
+            let words = fit(p, words, &font, rect.width() - 40.0);
+            let wide = p.layout_no_wrap(words.clone(), font.clone(), ink).size().x + 22.0;
+            let from = rect.center().x - wide / 2.0;
+            widgets::icon(p, pos2(from + 8.0, rect.center().y), if busy { icons::CIRCLE_NOTCH } else { icons::USER_CIRCLE }, 16.0, ink);
+            p.text(pos2(from + 22.0, rect.center().y), Align2::LEFT_CENTER, words, font, ink);
+        }
+        Look::Scan => {
+            // Four corners just off the camera's picture: it is looking for a code, and nothing lies over what it sees. A dark edge under each keeps it on a bright world.
+            let tint = if matches!(facts.camera.qr, CameraQr::NoPicture(_)) { theme::WARN } else { theme::mix(theme::INDIGO, Color32::WHITE, 0.25) };
+            let arm = 30.0;
+            let r = rect.shrink(2.5);
+            for (corner, (dx, dy)) in [(r.left_top(), (1.0, 1.0)), (r.right_top(), (-1.0, 1.0)), (r.left_bottom(), (1.0, -1.0)), (r.right_bottom(), (-1.0, -1.0))] {
+                let points = vec![corner + vec2(0.0, dy * arm), corner, corner + vec2(dx * arm, 0.0)];
+                p.add(egui::Shape::line(points.clone(), Stroke::new(7.0, Color32::from_black_alpha(110))));
+                p.add(egui::Shape::line(points, Stroke::new(4.0, tint)));
+            }
+        }
+        Look::WebTitle => {
+            let Some(web) = &facts.camera.web else { return };
+            let round = look::radius(rect.height() / 2.0);
+            p.rect_filled(rect, round, look::PANEL);
+            let (icon, ink) = match web.state {
+                WebState::Loading => (icons::CIRCLE_NOTCH, look::MUTED),
+                WebState::Shown => (icons::GLOBE, theme::mix(theme::INDIGO, Color32::WHITE, 0.3)),
+                WebState::Failed(_) => (icons::WARNING, theme::WARN),
+            };
+            widgets::icon(p, pos2(rect.left() + 18.0, rect.center().y), icon, 16.0, ink);
+            let name = if web.title.trim().is_empty() { web_host(&web.url) } else { web.title.clone() };
+            let font = look::font(13.5, weight::SEMIBOLD);
+            p.text(pos2(rect.left() + 34.0, rect.center().y), Align2::LEFT_CENTER, fit(p, &name, &font, rect.width() - 46.0), font, look::LABEL);
+        }
+        Look::WebButton { icon, label } => {
+            let round = look::radius(rect.height() / 2.0);
+            p.rect_filled(rect, round, if pressed { look::TILE_DOWN } else if hovered { look::TILE_HOVER } else { look::TILE });
+            if hovered {
+                p.rect_stroke(rect.shrink(0.75), round, Stroke::new(1.5, look::accent()), egui::StrokeKind::Middle);
+            }
+            let font = look::font(13.0, weight::SEMIBOLD);
+            let words = fit(p, label, &font, rect.width() - 42.0);
+            let wide = p.layout_no_wrap(words.clone(), font.clone(), look::LABEL).size().x + 24.0;
+            let from = rect.center().x - wide / 2.0;
+            widgets::icon(p, pos2(from + 8.0, rect.center().y), icon, 16.0, look::LABEL);
+            p.text(pos2(from + 24.0, rect.center().y), Align2::LEFT_CENTER, words, font, look::LABEL);
+        }
+        Look::Web => {
+            let Some(web) = &facts.camera.web else { return };
+            let round = look::radius(look::RADIUS);
+            match (&web.state, web.picture) {
+                (WebState::Shown, Some(id)) => {
+                    p.add(egui::epaint::RectShape::filled(rect, round, Color32::WHITE).with_texture(id, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0))));
                 }
-                if hovered {
-                    p.rect_stroke(rect.shrink(1.0), radius, Stroke::new(1.5, tint), egui::StrokeKind::Middle);
+                (WebState::Failed(why), _) => {
+                    p.rect_filled(rect, round, look::OPAQUE);
+                    let c = rect.center();
+                    widgets::icon(p, c - vec2(0.0, 46.0), icons::WARNING_CIRCLE, 40.0, theme::WARN);
+                    text(p, c, Align2::CENTER_CENTER, &fit(p, tr("This page could not open"), &look::font(17.0, weight::BOLD), rect.width() - 40.0), 17.0, weight::BOLD, look::LABEL);
+                    wrapped_center(p, c + vec2(0.0, 26.0), why, rect.width() - 60.0);
+                    wrapped_center(p, c + vec2(0.0, 70.0), tr("Open in browser shows it on your computer."), rect.width() - 60.0);
                 }
-                if rect.height() < 60.0 {
-                    let at = pos2(rect.left() + 26.0, rect.center().y);
-                    if facts.recording {
-                        p.rect_filled(Rect::from_center_size(at, Vec2::splat(15.0)), look::radius(3.0), tint);
-                    } else {
-                        p.circle_filled(at, 8.5, if dim { theme::FG_4 } else { tint });
-                    }
-                    let font = look::font(15.5, weight::SEMIBOLD);
-                    let words = if facts.recording { time.clone() } else { tr_ctx("start recording", "Record").to_string() };
-                    p.text(pos2(rect.left() + 48.0, rect.center().y), Align2::LEFT_CENTER, fit(p, &words, &font, rect.width() - 56.0), font, color);
-                    return;
+                _ => {
+                    p.rect_filled(rect, round, look::OPAQUE);
+                    let c = rect.center();
+                    widgets::icon(p, c - vec2(0.0, 30.0), icons::CIRCLE_NOTCH, 34.0, look::MUTED);
+                    text(p, c + vec2(0.0, 12.0), Align2::CENTER_CENTER, tr("Opening the page…"), 16.0, weight::SEMIBOLD, look::LABEL);
+                    let small = look::font(12.5, weight::MEDIUM);
+                    p.text(c + vec2(0.0, 36.0), Align2::CENTER_CENTER, fit(p, &web_host(&web.url), &small, rect.width() - 40.0), small, look::MUTED);
                 }
-                let at = pos2(rect.left() + 44.0, rect.center().y);
-                p.rect_filled(Rect::from_center_size(at, Vec2::splat(56.0)), look::radius(14.0), theme::alpha(tint, 0.22));
-                if facts.recording {
-                    p.rect_filled(Rect::from_center_size(at, Vec2::splat(22.0)), look::radius(4.0), tint);
-                } else {
-                    p.circle_filled(at, 13.0, if dim { theme::FG_4 } else { tint });
-                }
-                let x = rect.left() + 84.0;
-                let room = rect.right() - x - 8.0;
-                text(p, pos2(x, rect.center().y - 12.0), Align2::LEFT_CENTER, &time, 20.0, weight::BOLD, color);
-                let small = look::font(15.0, weight::MEDIUM);
-                p.text(pos2(x, rect.center().y + 14.0), Align2::LEFT_CENTER, fit(p, tr("A 3D scene of where you walk"), &small, room), small, look::MUTED);
             }
         }
         Look::Video(i) => {
@@ -3221,6 +3547,138 @@ fn draw(p: &Painter, zone: Zone, item: &Item, facts: &Facts, hovered: bool, pres
     }
 }
 
+/// A tile beside VRChat's camera: solid, as the wing's are in a headset; lit in its colour while what it started runs; greyed when it cannot work.
+fn camera_tile_back(p: &Painter, rect: Rect, hovered: bool, pressed: bool, lit: Option<Color32>, off: bool) {
+    let round = look::radius(look::TILE_RADIUS);
+    match lit {
+        Some(tint) => {
+            p.rect_filled(rect, round, theme::mix(look::TILE, tint, if pressed { 0.62 } else if hovered { 0.55 } else { 0.42 }));
+            p.rect_stroke(rect.shrink(0.75), round, Stroke::new(2.0, tint), egui::StrokeKind::Middle);
+        }
+        None if off => p.rect_filled(rect, round, theme::alpha(look::TILE, 0.82)),
+        None => {
+            tile_back(p, rect, hovered, pressed, false);
+            if hovered && !look::retro() {
+                p.rect_stroke(rect.shrink(0.75), round, Stroke::new(2.0, look::accent()), egui::StrokeKind::Middle);
+            }
+        }
+    }
+}
+
+/// A camera tile's icon (or a big number in its place) over its name.
+fn camera_tile_face(p: &Painter, rect: Rect, icon: Option<&str>, number: &str, label: &str, tint: Color32, off: bool) {
+    let at = pos2(rect.center().x, rect.center().y - 9.0);
+    match icon {
+        Some(icon) => widgets::icon(p, at, icon, 24.0, if off { theme::FG_4 } else { tint }),
+        None => text(p, at, Align2::CENTER_CENTER, number, 22.0, weight::BOLD, Color32::WHITE),
+    }
+    camera_label(p, rect, label, if off { theme::FG_4 } else { look::LABEL });
+}
+
+/// A camera tile's name, at its foot, as large as fits: at most 1.3 times VRChat's own labels beside it.
+fn camera_label(p: &Painter, rect: Rect, label: &str, ink: Color32) {
+    let mut size = 10.5;
+    while size > 8.5 && p.layout_no_wrap(label.to_string(), look::font(size, weight::SEMIBOLD), ink).size().x > rect.width() - 8.0 {
+        size -= 0.5;
+    }
+    let font = look::font(size, weight::SEMIBOLD);
+    p.text(pos2(rect.center().x, rect.bottom() - 13.0), Align2::CENTER_CENTER, fit(p, label, &font, rect.width() - 6.0), font, ink);
+}
+
+/// What a recording's Stop says beside its square: its clock, or what it is doing.
+fn stop_words(facts: &Facts) -> String {
+    if facts.rec_stopping {
+        tr("Stopping…").into()
+    } else if facts.rec_starting {
+        tr("Starting…").into()
+    } else {
+        tr!("Stop recording · {time}", time = clock(facts.recording_seconds.unwrap_or(0)))
+    }
+}
+
+/// A page's site, from its link: what its bar says until the page names itself.
+fn web_host(url: &str) -> String {
+    let rest = url.split_once("://").map_or(url, |(_, rest)| rest);
+    rest.split(['/', '?', '#']).next().unwrap_or(rest).to_string()
+}
+
+/// Words in a few centred lines.
+fn wrapped_center(p: &Painter, top: Pos2, words: &str, width: f32) {
+    let mut job = egui::text::LayoutJob::simple(words.to_string(), look::font(13.5, weight::MEDIUM), look::MUTED, width);
+    job.wrap.max_rows = 3;
+    job.wrap.overflow_character = Some('\u{2026}');
+    job.halign = egui::Align::Center;
+    let galley = p.layout_job(job);
+    p.galley(top, galley, look::MUTED);
+}
+
+/// What the words under the camera's tiles say, most pressing first: what stopped a picture, what is pointed at, where the camera is, what the QR code does, the
+/// recording, the capture kit. Nothing when all is well and nothing is pointed at: the tiles say enough.
+pub fn camera_words(facts: &Facts) -> Option<(String, String)> {
+    let camera = &facts.camera;
+    let no_kit_words = || {
+        let second = if matches!(camera.demo, Some(DemoSwitch::Offered | DemoSwitch::Failed(_))) {
+            tr("3D pictures need it. Wear the demo avatar to try them now.")
+        } else {
+            tr("3D pictures need it: add it in Orbiters, My Avatar.")
+        };
+        (tr("This avatar has no capture kit").to_string(), second.to_string())
+    };
+    if let Some(said) = facts.note.clone() {
+        return Some(said);
+    }
+    if let Some(pointed) = facts.pointed {
+        if matches!(pointed, Action::Picture(_)) && facts.no_kit {
+            return Some(no_kit_words());
+        }
+        if let Some(said) = caption(pointed, facts) {
+            return Some(said);
+        }
+    }
+    if camera.finding {
+        return Some((tr("Finding VRChat's camera…").into(), tr("These settle beside it as soon as Orbiters sees it.").into()));
+    }
+    match &camera.qr {
+        CameraQr::NoPicture(how) => return Some((tr("VRChat's camera sends no picture to read").into(), how.clone())),
+        CameraQr::Looking => return Some((tr("Looking for a QR code…").into(), tr("Point the camera at it. Its page opens above the camera.").into())),
+        CameraQr::Off => {}
+    }
+    if facts.rec_stopping {
+        return Some((tr("Stopping…").into(), tr("Saving the recording.").into()));
+    }
+    if facts.recording {
+        return Some((tr!("Recording · {time}", time = clock(facts.recording_seconds.unwrap_or(0))), tr("Walk around with the camera. Stop when you are done.").into()));
+    }
+    match &camera.demo {
+        Some(DemoSwitch::Busy) => return Some((tr("Switching to the demo avatar…").into(), tr("3D pictures work as soon as VRChat has loaded it.").into())),
+        Some(DemoSwitch::Done) => return Some((tr("You wear the demo avatar").into(), tr("3D pictures work now.").into())),
+        Some(DemoSwitch::Failed(why)) if facts.no_kit => return Some((tr("The demo avatar could not be put on").into(), why.clone())),
+        _ => {}
+    }
+    facts.no_kit.then(no_kit_words)
+}
+
+/// The camera's words: a pill against the tiles' side, its second line on two rows where one does not hold it; nothing over the camera.
+fn draw_camera_words(p: &Painter, rect: Rect, first: &str, second: &str, right: bool) {
+    let big = look::font(13.5, weight::BOLD);
+    let room = rect.width() - 24.0;
+    let first = fit(p, first, &big, room);
+    let mut job = egui::text::LayoutJob::simple(second.to_string(), look::font(12.0, weight::MEDIUM), look::MUTED, room);
+    job.wrap.max_rows = 2;
+    job.wrap.overflow_character = Some('\u{2026}');
+    let said = p.layout_job(job);
+    let width = p.layout_no_wrap(first.clone(), big.clone(), Color32::WHITE).size().x.max(if second.is_empty() { 0.0 } else { said.size().x }) + 24.0;
+    let high = if second.is_empty() { 30.0 } else { 28.0 + said.size().y };
+    let pill = if right { Rect::from_min_size(pos2(rect.right() - width, rect.top()), vec2(width, high)) } else { Rect::from_min_size(rect.left_top(), vec2(width, high)) };
+    p.rect_filled(pill, look::radius(look::RADIUS + 2.0), look::PANEL);
+    if second.is_empty() {
+        p.text(pill.left_center() + vec2(12.0, 0.0), Align2::LEFT_CENTER, first, big, look::LABEL);
+        return;
+    }
+    p.text(pill.left_top() + vec2(12.0, 14.0), Align2::LEFT_CENTER, first, big, look::LABEL);
+    p.galley(pill.left_top() + vec2(12.0, 23.0), said, look::MUTED);
+}
+
 /// A 3D picture's button: says "3D picture" on itself, a 3D badge on its icon, and what of. Under way, it is the countdown.
 #[allow(clippy::too_many_arguments)]
 fn picture_button(p: &Painter, zone: Zone, shape: Shaped, rect: Rect, mode: PhotoMode, facts: &Facts, hovered: bool, pressed: bool) {
@@ -3557,6 +4015,13 @@ fn draw_turning(p: &Painter, page: Rect, n: usize, facts: &Facts, view: &OpenedV
 
 /// The words about what is pointed at, or what to do first, in a pill as wide as they are. Nothing to say: nothing shows.
 fn draw_caption(p: &Painter, zone: Zone, rect: Rect, facts: &Facts) {
+    // Under the camera's tiles: its own words ([`camera_words`]), on the tiles' side.
+    if zone == Zone::CameraCaption {
+        if let Some((first, second)) = camera_words(facts) {
+            draw_camera_words(p, rect, &first, &second, facts.camera.on_the_right);
+        }
+        return;
+    }
     let on_the_wheel = zone == Zone::WheelCaption;
     // On a desktop's wheel what is pointed at is said in the disc in its middle, nearer than any caption.
     // And on a sheet with its band up, in that: one place says it.
@@ -3889,7 +4354,7 @@ mod tests {
         }
         // And the two choices are a hover away on the wheel, whose second ring holds them.
         let bloom: Vec<Action> = zones::Group::Pictures.cells().iter().flat_map(|z| items(*z, z.units().size(), &facts())).map(|i| i.action).collect();
-        assert!(bloom.contains(&Action::Picture(PhotoMode::People)) && bloom.contains(&Action::Picture(PhotoMode::World)) && bloom.contains(&Action::Record));
+        assert!(bloom.contains(&Action::Picture(PhotoMode::People)) && bloom.contains(&Action::Picture(PhotoMode::World)) && !bloom.contains(&Action::Record), "a recording starts beside the camera alone");
     }
 
     #[test]
@@ -4380,5 +4845,87 @@ mod tests {
         let i = (middle.y as u32 * px[0] + middle.x as u32) as usize * 4;
         assert_eq!(rgba[i..i + 4], [200, 200, 200, 200]);
         assert!(rgba.chunks_exact(4).any(|c| c == [0, 0, 0, 0]));
+    }
+    /// Enzo (F13, F15): a recording starts beside VRChat's camera alone, and while one runs every menu has its Stop, which never starts anything. Every part of every menu
+    /// and every sheet, idle, recording and stopping.
+    #[test]
+    fn only_the_camera_starts_a_recording_and_every_menu_can_stop_one() {
+        use crate::overlay::orbit::zones::Zone;
+        let idle = facts();
+        let recording = Facts { recording: true, recording_seconds: Some(42), capture_busy: true, ..facts() };
+        let stopping = Facts { rec_stopping: true, capture_busy: true, ..facts() };
+        let sheets = [Sheet::All, Sheet::Pictures, Sheet::Menu, Sheet::Worlds, Sheet::Instances, Sheet::Results, Sheet::Talk, Sheet::Settings, Sheet::Tracking, Sheet::Mics, Sheet::Booster];
+        let every = |facts: &Facts| -> Vec<(String, Action)> {
+            let mut out = Vec::new();
+            let zones = Zone::WHEEL.iter().chain(&Zone::QUICK_MENU).chain(&Zone::CAMERA).chain(&[Zone::QmStrip, Zone::WheelHide]);
+            for zone in zones {
+                out.extend(items(*zone, zone.units().size(), facts).into_iter().map(|i| (format!("{zone:?}"), i.action)));
+            }
+            for sheet in sheets {
+                let facts = Facts { sheet: Some(sheet), ..facts.clone() };
+                out.extend(items(Zone::SheetBack, Zone::SheetBack.units().size(), &facts).into_iter().map(|i| (format!("{sheet:?}'s head"), i.action)));
+                out.extend(sheet_items(sheet, &facts).into_iter().map(|i| (format!("{sheet:?}"), i.action)));
+            }
+            // Without the capture kit, the Pictures sheet has its other row.
+            let no_kit = Facts { sheet: Some(Sheet::Pictures), no_kit: true, ..facts.clone() };
+            out.extend(sheet_items(Sheet::Pictures, &no_kit).into_iter().map(|i| ("Pictures without the kit".to_string(), i.action)));
+            out
+        };
+        let starts = |facts: &Facts| every(facts).into_iter().filter(|(_, a)| *a == Action::Record).map(|(at, _)| at).collect::<Vec<_>>();
+        let stops = |facts: &Facts| every(facts).into_iter().filter(|(_, a)| *a == Action::StopRecording).map(|(at, _)| at).collect::<Vec<_>>();
+        assert_eq!(starts(&idle), ["CameraRecord"], "Record beside the camera, and nowhere else");
+        assert!(stops(&idle).is_empty(), "nothing to stop: {:?}", stops(&idle));
+        assert!(starts(&recording).is_empty(), "no start in disguise while one runs: {:?}", starts(&recording));
+        let reach = stops(&recording);
+        for place in ["WheelStop", "QmStop", "CameraRecord", "Pictures", "All's head", "Menu's head", "Worlds's head", "Settings's head"] {
+            assert!(reach.iter().any(|at| at == place), "no Stop on {place}: {reach:?}");
+        }
+        // Pressed once, it says Stopping and does nothing more.
+        assert!(starts(&stopping).is_empty() && stops(&stopping).is_empty(), "{:?} {:?}", starts(&stopping), stops(&stopping));
+        // The head's Stop keeps clear of its close and of Hide 3D.
+        for view_showing in [false, true] {
+            let facts = Facts { sheet: Some(Sheet::Pictures), view_showing, ..recording.clone() };
+            let head = items(Zone::SheetBack, Zone::SheetBack.units().size(), &facts);
+            let stop = head.iter().find(|i| i.action == Action::StopRecording).expect("a Stop in the head").rect;
+            for other in head.iter().filter(|i| i.action != Action::StopRecording) {
+                assert!(!stop.intersects(other.rect), "Stop over {:?} (Hide 3D showing: {view_showing})", other.action);
+            }
+        }
+    }
+
+    /// Enzo (F16): the camera's two 3D pictures are greyed and say why where the avatar has no capture kit; not known yet says nothing; the demo avatar is offered
+    /// only where it can be put on, and says when it is busy.
+    #[test]
+    fn the_camera_says_when_the_avatar_has_no_kit_and_offers_the_demo_avatar_only_where_it_can() {
+        use crate::overlay::orbit::zones::Zone;
+        let unknown = Facts { no_kit: false, camera: CameraNow { kit: None, ..Default::default() }, ..facts() };
+        assert_eq!(camera_words(&unknown), None, "unknown is not missing");
+        let missing = Facts { no_kit: true, camera: CameraNow { kit: Some(false), ..Default::default() }, ..facts() };
+        let (first, second) = camera_words(&missing).expect("it says the kit is missing");
+        assert_eq!(first, tr("This avatar has no capture kit"));
+        assert!(!second.contains(tr("Wear the demo avatar")), "nothing offered where it cannot be done: {second}");
+        assert!(items(Zone::CameraAct, Zone::CameraAct.units().size(), &missing).is_empty());
+        let offered = Facts { camera: CameraNow { demo: Some(DemoSwitch::Offered), ..missing.camera.clone() }, ..missing.clone() };
+        assert_eq!(items(Zone::CameraAct, Zone::CameraAct.units().size(), &offered).first().map(|i| i.action), Some(Action::DemoAvatar));
+        let busy = Facts { camera: CameraNow { demo: Some(DemoSwitch::Busy), ..missing.camera.clone() }, ..missing.clone() };
+        assert_eq!(items(Zone::CameraAct, Zone::CameraAct.units().size(), &busy).first().map(|i| i.action), Some(Action::Idle), "a second press while it switches does nothing");
+        let failed = Facts { camera: CameraNow { demo: Some(DemoSwitch::Failed("VRChat said no".into())), ..missing.camera.clone() }, ..missing.clone() };
+        assert_eq!(camera_words(&failed).map(|w| w.1), Some("VRChat said no".to_string()));
+        // Pointed at, a greyed tile says the same.
+        let pointed = Facts { pointed: Some(Action::Picture(PhotoMode::People)), ..offered.clone() };
+        assert_eq!(camera_words(&pointed).map(|w| w.0), Some(tr("This avatar has no capture kit").to_string()));
+    }
+
+    /// Enzo (F17): the camera's QR code tile looks for a code around the camera and stops; while it looks, the words under the tiles say so, and say when VRChat's
+    /// camera sends no picture.
+    #[test]
+    fn the_camera_s_qr_code_says_it_is_looking_and_stops() {
+        use crate::overlay::orbit::zones::Zone;
+        let looking = Facts { camera: CameraNow { qr: CameraQr::Looking, ..Default::default() }, ..facts() };
+        assert_eq!(items(Zone::CameraQr, Zone::CameraQr.units().size(), &looking).first().map(|i| i.action), Some(Action::CameraQr));
+        assert_eq!(camera_words(&looking).map(|w| w.0), Some(tr("Looking for a QR code…").to_string()));
+        let dark = Facts { camera: CameraNow { qr: CameraQr::NoPicture("Choose Stream".into()), ..Default::default() }, ..facts() };
+        assert_eq!(camera_words(&dark), Some((tr("VRChat's camera sends no picture to read").to_string(), "Choose Stream".to_string())));
+        assert!(!items(Zone::CameraQr, Zone::CameraQr.units().size(), &facts()).iter().any(|i| matches!(i.action, Action::Page(_))), "no page of its own");
     }
 }

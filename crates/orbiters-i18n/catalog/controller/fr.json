@@ -339,5 +339,7 @@
   "{path} is not a raw capture of this world.": "{path} n’est pas une capture brute de ce monde.",
   "{path} is not a session in Orbiters - N4N0's sessions folder.": "{path} n’est pas une session du dossier des sessions d’Orbiters - N4N0.",
   "{why} Discard them to export every splat as trained: Select splats in its 3D view can remove them again.": "{why} Abandonne-les pour exporter tous les splats tels qu’entraînés : tu pourras les retirer de nouveau en sélectionnant des splats dans sa vue 3D.",
-  "file\u0004Small": "Léger"
+  "file\u0004Small": "Léger",
+  "Record beside VRChat's camera": "Enregistrer depuis la caméra de VRChat",
+  "Stopping…": "Arrêt…"
 }

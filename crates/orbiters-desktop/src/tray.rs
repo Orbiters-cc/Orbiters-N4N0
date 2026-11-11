@@ -40,7 +40,8 @@ mod win {
         /// Creates the icon; its events arrive on this thread's message loop.
         pub fn new(service: Arc<Service>) -> anyhow::Result<Self> {
             let show = MenuItem::with_id("show", tr("Show Orbiters - N4N0"), true, None);
-            let toggle = MenuItem::with_id("toggle", tr("Start recording"), true, None);
+            // Stop only: a recording starts beside VRChat's camera in VR (Enzo, F15). Greyed with nothing to stop, it says where.
+            let toggle = MenuItem::with_id("toggle", tr("Record beside VRChat's camera"), false, None);
             let quit = MenuItem::with_id("quit", tr("Quit Orbiters - N4N0"), true, None);
             let menu = Menu::with_items(&[&show, &toggle, &PredefinedMenuItem::separator(), &quit])?;
             let tray =
@@ -54,8 +55,10 @@ mod win {
                     let svc = svc.clone();
                     std::thread::spawn(move || {
                         let ctl = &svc.ctl;
-                        let r = if ctl.is_capturing() { ctl.stop_capture() } else { ctl.start_capture(false) };
-                        if let Err(err) = r {
+                        if !ctl.is_capturing() {
+                            return;
+                        }
+                        if let Err(err) = ctl.stop_capture() {
                             ctl.notify(NoticeKind::Error, err.to_string());
                             svc.show_window(false);
                         }
@@ -78,7 +81,8 @@ mod win {
             if capturing != self.capturing || language() != self.language {
                 self.capturing = capturing;
                 self.language = language();
-                self.toggle.set_text(if capturing { tr("Stop recording") } else { tr("Start recording") });
+                self.toggle.set_text(if capturing { tr("Stop recording") } else { tr("Record beside VRChat's camera") });
+                self.toggle.set_enabled(capturing);
                 self.show.set_text(tr("Show Orbiters - N4N0"));
                 self.quit.set_text(tr("Quit Orbiters - N4N0"));
             }

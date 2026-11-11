@@ -930,7 +930,18 @@ pub struct Panels {
     reported: Option<(bool, bool, bool)>,
     /// What plays's picture as last made, by its name: panels make their own textures of it.
     art: Option<(String, ColorImage)>,
+    /// The camera's tiles lie on its right ([`super::vr`]): what they say lines up on that side.
+    pub camera_right: bool,
+    /// When Stop was pressed: it says Stopping at once, and another press does nothing.
+    stop_asked: Option<Instant>,
+    /// When a QR code was asked to be looked for from beside the camera: the camera's own scan, not the QR code page's.
+    camera_scan: Option<Instant>,
 }
+
+/// How long Stop says Stopping after a press while the service has not said so yet; and how long a QR code scan asked from the camera is taken as looking before
+/// the scanner says it started.
+const STOP_SAID_FOR: Duration = Duration::from_secs(4);
+const CAMERA_SCAN_STARTS: Duration = Duration::from_secs(2);
 
 /// Where on the page the keyboard starts (N4N0's search page: `layout::KEY_ROWS_Y`, a little over its first row).
 const KEYS_TOP: f32 = 300.0;
@@ -1011,6 +1022,9 @@ impl Panels {
             show_keys: false,
             reported: None,
             art: None,
+            camera_right: false,
+            stop_asked: None,
+            camera_scan: None,
         }
     }
 
@@ -1206,6 +1220,8 @@ impl Panels {
             self.facts.sheet = None;
             return;
         }
+        // What has nothing to do now is not there: a Stop with no recording, the camera's scanning corners, its page, its button.
+        let places: Vec<Placed> = places.into_iter().filter(|p| !p.zone.only_while_needed() || self.needed(p.zone)).collect();
         let live = !snap.settings.reduce_motion;
         // Opened from the wheel, the sheet is all that shows: its cut-off cells would stick out from under it.
         let places: Vec<Placed> = if self.takeover.is_some() && around == Some(Around::Wheel) { Vec::new() } else { places };
@@ -1642,7 +1658,7 @@ impl Panels {
 
     /// A number key on the wheel: as a press on that cell, clockwise from the top.
     pub fn press_cell(&mut self, cell: usize, snap: &Snapshot) -> Pressed {
-        const CELLS: [Zone; 9] = [Zone::WheelWorlds, Zone::WheelYouTube, Zone::WheelPlaying, Zone::WheelAll, Zone::WheelInstances, Zone::WheelPictures, Zone::BloomPeople, Zone::BloomWorld, Zone::BloomRecord];
+        const CELLS: [Zone; 8] = [Zone::WheelWorlds, Zone::WheelYouTube, Zone::WheelPlaying, Zone::WheelAll, Zone::WheelInstances, Zone::WheelPictures, Zone::BloomPeople, Zone::BloomWorld];
         let Some(zone) = CELLS.get(cell) else { return Pressed::default() };
         // The second ring's keys while it is out, and only then.
         if !self.list.iter().any(|p| p.zone == *zone && p.shown) {
@@ -1661,7 +1677,33 @@ impl Panels {
         away_words(snap, &self.facts.note, self.facts.picture_mode)
     }
 
+    /// Whether a part that shows only while it has something to do has it now ([`Zone::only_while_needed`]).
+    fn needed(&self, zone: Zone) -> bool {
+        panels::needed(zone, &self.facts)
+    }
+
+    /// What the parts beside VRChat's camera show, besides its tiles.
+    fn camera_now(&self, snap: &Snapshot) -> panels::CameraNow {
+        let qr = &snap.n4n0.qr;
+        let qr = match self.camera_scan {
+            Some(_) if qr.phase == orbiters_n4n0_core::qr::QrPhase::NoCamera => panels::CameraQr::NoPicture(orbiters_i18n::tr(&qr.note).to_string()),
+            Some(_) if qr.scanning() => panels::CameraQr::Looking,
+            // Asked a moment ago, not started yet: it is looking.
+            Some(at) if at.elapsed() < CAMERA_SCAN_STARTS && qr.phase != orbiters_n4n0_core::qr::QrPhase::Stopped => panels::CameraQr::Looking,
+            _ => panels::CameraQr::Off,
+        };
+        panels::CameraNow { finding: false, kit: snap.worn_kit, demo: None, qr, web: None, on_the_right: self.camera_right }
+    }
+
     pub fn follow(&mut self, snap: &Snapshot, library: u64) {
+        // The camera's scan ended by itself (found a code, ran out of time): its tile is off again.
+        if self.camera_scan.is_some_and(|at| at.elapsed() >= CAMERA_SCAN_STARTS) && !snap.n4n0.qr.scanning() {
+            self.camera_scan = None;
+        }
+        // A recording that is no longer running needs its Stop no more.
+        if self.stop_asked.is_some() && matches!(snap.capture.state, CaptureState::Idle) {
+            self.stop_asked = None;
+        }
         // Along what plays, now it was let go.
         if let Some(fraction) = self.seek_late.take() {
             let host = &mut self.stage.host;
@@ -1878,8 +1920,12 @@ impl Panels {
             let here = world.in_world.then(|| world.world_id.as_deref().zip(world.instance.as_deref()).map(|(w, i)| format!("{w}:{i}"))).flatten();
             visited_worlds(&menu.instances, now, &self.visit_pictures, here.as_deref())
         } else { Vec::new() };
+        let live = !snap.capture.photo_3d;
         Facts {
             recording,
+            rec_starting: live && snap.capture.state == CaptureState::Starting,
+            rec_stopping: live && (snap.capture.state == CaptureState::Stopping || (self.stop_asked.is_some_and(|at| at.elapsed() < STOP_SAID_FOR) && snap.capture.state != CaptureState::Idle)),
+            camera: self.camera_now(snap),
             recording_seconds: recording.then(|| snap.capture.stats.as_ref().map_or(0, |s| s.elapsed_s as u32)),
             capture_busy: !matches!(snap.capture.state, CaptureState::Idle),
             countdown: snap.n4n0.photo_countdown,
@@ -2529,11 +2575,35 @@ impl Panels {
                     self.backend.n4n0(crate::ipc::N4n0Command::Photo3DWhenCamera { seconds });
                 }
             }
+            // Beside VRChat's camera alone, whose picture it records (Enzo, F14 and F15): no other part has Record, and this one does nothing elsewhere.
             Action::Record => {
-                if self.facts.recording {
-                    self.backend.stop_capture();
-                } else if !self.facts.capture_busy {
+                if self.open == Some(Around::Camera) && !self.facts.capture_busy {
                     self.backend.start_capture();
+                } else {
+                    out.clicked = false;
+                }
+            }
+            // Stop only, never a start: pressed again while it stops, nothing.
+            Action::StopRecording => {
+                let live = !snap.capture.photo_3d && matches!(snap.capture.state, CaptureState::Starting | CaptureState::Recording | CaptureState::Paused);
+                if live && self.stop_asked.is_none_or(|at| at.elapsed() >= STOP_SAID_FOR) {
+                    self.stop_asked = Some(Instant::now());
+                    self.backend.stop_capture();
+                    for panel in self.list.iter_mut().chain(self.takeover.iter_mut()) {
+                        panel.dirty = true;
+                    }
+                } else {
+                    out.clicked = false;
+                }
+            }
+            // The camera's own scan: around the camera, no page (Enzo, F17).
+            Action::CameraQr => {
+                let on = !(self.camera_scan.is_some() && self.facts.camera.qr != panels::CameraQr::Off);
+                self.camera_scan = on.then(Instant::now);
+                let host = &mut self.stage.host;
+                host.effects(vec![Effect::QrScan(on)], snap, &self.backend);
+                for panel in self.list.iter_mut() {
+                    panel.dirty = true;
                 }
             }
             Action::Page(target) => self.open_page(target, snap),
@@ -2658,6 +2728,8 @@ impl Panels {
                 out.hide = self.hidden;
                 self.release();
             }
+            // WIRING: the demo avatar's switch and the camera's page come with `vr1111/camera-core` and `vr1111/camera-web`.
+            Action::DemoAvatar | Action::WebOpen | Action::WebClose | Action::WebPage => {}
             Action::Idle => {}
         }
     }

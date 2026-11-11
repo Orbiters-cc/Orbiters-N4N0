@@ -311,7 +311,7 @@ const SHEET_OVER_THE_TABS: f32 = 9.0;
 
 /// Where a part lies in a headset, from where it does on a screen.
 pub fn clear_of_sheet(mut placed: Placed, sheet_up: bool) -> Placed {
-    if Zone::WING.contains(&placed.zone) || placed.zone == Zone::QmCaption {
+    if Zone::WING.contains(&placed.zone) || matches!(placed.zone, Zone::QmCaption | Zone::QmStop) {
         let side = if placed.rect.center().x < 0.0 { -1.0 } else { 1.0 };
         placed.rect = placed.rect.translate(egui::vec2(side * if sheet_up { WING_OFF_A_SHEET } else { WING_OFF_ITS_PANEL }, 0.0));
     } else if matches!(placed.zone, Zone::Takeover | Zone::SheetBack) {
@@ -496,7 +496,7 @@ impl Plane {
         let (x, y) = (c.x - way.x * back, c.y - way.y * back);
         // The wing turns towards who looks about its inner edge, as VRChat's own side panels do (round 10's judges: flat beside an angled My Profile, it read as
         // pasted in front rather than a neighbour).
-        if Zone::WING.contains(&placed.zone) || placed.zone == Zone::QmCaption {
+        if Zone::WING.contains(&placed.zone) || matches!(placed.zone, Zone::QmCaption | Zone::QmStop) {
             let side = if x < 0.0 { -1.0 } else { 1.0 };
             let hinge = side * WING_HINGE;
             let out = x - hinge;
@@ -508,6 +508,87 @@ impl Plane {
         }
         Quad { transform: space::offset(&self.frame, [x * self.unit, -y * self.unit, near]), width: placed.rect.width() * self.unit, height: placed.rect.height() * self.unit }
     }
+}
+
+/// The plane of the page a code opened, over VRChat's camera: hinged on the camera's top edge and stood up as far as it can be towards upright, so that it reads as
+/// a page however the camera is held, and lies over the camera and never in front of it (Enzo, F17). Upright already, the camera's own plane. Its units go from that
+/// edge: a zone's place there is from the camera's middle, moved by [`zones::CAMERA_HALF`] (`on_camera_top`).
+pub fn camera_top_plane(camera: &Plane) -> Plane {
+    let (y, z) = (space::axis(&camera.frame, 1), space::axis(&camera.frame, 2));
+    let up = [0.0, 1.0, 0.0];
+    // A camera upside down keeps its own plane: a page flipped over it would read upside down.
+    let turn = space::dot(z, up).atan2(space::dot(y, up)).clamp(-CAMERA_PAGE_STANDS, CAMERA_PAGE_STANDS);
+    let (s, c) = turn.sin_cos();
+    let edge = space::offset(&camera.frame, [0.0, zones::CAMERA_HALF[1] * camera.unit, 0.0]);
+    let hinge = Matrix34 { m: [[1.0, 0.0, 0.0, 0.0], [0.0, c, -s, 0.0], [0.0, s, c, 0.0]] };
+    Plane { frame: space::compose(&edge, &hinge), unit: camera.unit }
+}
+
+/// How far the page over the camera turns up from the camera's plane: about upright from a camera lying flat, short of folding over one held upside down.
+const CAMERA_PAGE_STANDS: f32 = 1.4;
+
+/// A zone over the camera's top edge, in that edge's units ([`camera_top_plane`]).
+pub fn on_camera_top(mut placed: Placed) -> Placed {
+    placed.rect = placed.rect.translate(egui::vec2(0.0, zones::CAMERA_HALF[1]));
+    placed
+}
+
+/// What shows of the camera's parts on the way from one place to another: a jump (where it was guessed, then where it was seen) is crossed in a moment rather
+/// than in one frame, and a camera held and moved is followed at once.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Settle {
+    shown: Option<Plane>,
+    target: Option<Plane>,
+    from: Option<(Plane, f32)>,
+}
+
+/// A move of the camera's place this far in one turn is a jump.
+const SETTLE_JUMP_M: f32 = 0.04;
+/// (One less the cosine of the turn, as [`space::near`] takes it: about 15 degrees.)
+const SETTLE_JUMP_TURN: f32 = 0.034;
+/// How long a jump takes to cross.
+pub const SETTLE_S: f32 = 0.28;
+
+impl Settle {
+    pub fn clear(&mut self) {
+        *self = Self::default();
+    }
+
+    /// Where the parts show this turn, the camera being at `target`.
+    pub fn step(&mut self, target: Plane, dt: f32) -> Plane {
+        if let (Some(shown), Some(last)) = (self.shown, self.target) {
+            if !space::near(&last.frame, &target.frame, SETTLE_JUMP_M, SETTLE_JUMP_TURN) {
+                self.from = Some((shown, 0.0));
+            }
+        }
+        self.target = Some(target);
+        let shown = match self.from.as_mut() {
+            Some((from, t)) => {
+                *t += dt / SETTLE_S;
+                if *t >= 1.0 {
+                    self.from = None;
+                    target
+                } else {
+                    // Eased out: it leaves quickly and arrives softly.
+                    let k = 1.0 - (1.0 - *t).powi(3);
+                    blend_plane(from, &target, k)
+                }
+            }
+            None => target,
+        };
+        self.shown = Some(shown);
+        shown
+    }
+}
+
+/// Between two planes, `k` of the way.
+fn blend_plane(a: &Plane, b: &Plane, k: f32) -> Plane {
+    let mix = |p: V3, q: V3| [p[0] + (q[0] - p[0]) * k, p[1] + (q[1] - p[1]) * k, p[2] + (q[2] - p[2]) * k];
+    let (x, y) = (mix(space::axis(&a.frame, 0), space::axis(&b.frame, 0)), mix(space::axis(&a.frame, 1), space::axis(&b.frame, 1)));
+    let at = mix(space::position(&a.frame), space::position(&b.frame));
+    let unit = a.unit + (b.unit - a.unit) * k;
+    let (Some(x), Some(z)) = (space::unit(x), space::unit(space::cross(x, y))) else { return *b };
+    Plane { frame: space::from_axes(x, space::cross(z, x), z, at), unit }
 }
 
 /// The wheel on the hand that opened it, turning with it as VRChat's does.
@@ -728,6 +809,8 @@ pub struct OrbitVr {
     camera_watch: Option<CameraWatch>,
     camera_follow: super::camera_track::Follow,
     camera_side: camera_track::Side,
+    /// What shows of where the camera is ([`Settle`]).
+    camera_settle: Settle,
     hole_logged: super::super::vr_log::Every,
     /// What the headset shows, kept when asked (`ORBITERS_VR_PICTURES`).
     moments: super::super::eye_picture::Moments,
@@ -776,6 +859,7 @@ impl OrbitVr {
             pointers: [None; 2],
             camera_follow: Default::default(),
             camera_side: Default::default(),
+            camera_settle: Default::default(),
             hole_logged: Default::default(),
             moments: Default::default(),
             osc_toggle: None,
@@ -979,7 +1063,8 @@ impl OrbitVr {
         }
         let plane = match (menu, open) {
             (Some(Around::Wheel), Open::Wheel(hand)) => devices[hand].map(|d| wheel_plane(&poses[d as usize].device_to_absolute, hand, &self.tune, settings.vr_size)),
-            (Some(Around::Camera), _) => camera_plane,
+            // Where the camera is, crossing a jump in a moment (Enzo, F19: settling without a jarring jump).
+            (Some(Around::Camera), _) => camera_plane.map(|target| self.camera_settle.step(target, dt)),
             (Some(Around::QuickMenu), Open::QuickMenu(hand)) => devices[hand].map(|d| quick_menu_plane(&poses[d as usize].device_to_absolute, hand, &self.tune, settings.vr_size)),
             _ => None,
         };
@@ -998,6 +1083,11 @@ impl OrbitVr {
         // Here VRChat's wheel can close unseen: the ring has its own close.
         if menu == Some(Around::Wheel) && !self.panels.sheet_open() {
             places.push(wheel_place(Zone::WheelHide));
+        }
+        // What the camera's tiles say lines up on their side.
+        self.panels.camera_right = self.camera_side == camera_track::Side::Right;
+        if menu != Some(Around::Camera) {
+            self.camera_settle.clear();
         }
         // Hidden: only the way back, and nothing else, whatever VRChat's menu does.
         self.panels.way_back(menu, &mut places);
@@ -1043,6 +1133,10 @@ impl OrbitVr {
             .all()
             .map(|p| {
                 let sheet = matches!(p.zone, Zone::Takeover | Zone::SheetBack);
+                // The page a code opened, and its bar: stood up on the camera's top edge.
+                if matches!(p.zone, Zone::CameraWeb | Zone::CameraWebBar) {
+                    return (camera_top_plane(&plane).quad(&on_camera_top(p.placed), -p.outward(), NEAR_M), p.placed);
+                }
                 let on = if sheet { self.takeover_plane.unwrap_or(plane) } else { plane };
                 let near = match p.zone {
                     Zone::Takeover => TAKEOVER_NEAR_M,
@@ -1700,5 +1794,67 @@ mod tests {
         let quads = [(plane.quad(&under, 0.0, 0.0), under), (plane.quad(&back, 0.0, TAKEOVER_NEAR_M - 0.004), back), (plane.quad(&front, 0.0, TAKEOVER_NEAR_M), front)];
         let target = space::position(&quads[2].0.transform);
         assert_eq!(laser_on(&quads, eyes, space::unit(space::sub(target, eyes)).unwrap()).map(|h| h.0), Some(2));
+    }
+    /// A camera's plane: its middle at `at`, its picture's right along `x`, its up along `y`, facing along `x` cross `y`.
+    fn camera_at(x: V3, y: V3, at: V3) -> Plane {
+        Plane { frame: space::from_axes(x, y, space::cross(x, y), at), unit: camera_track::PANEL_M / camera_track::PANEL_SIZE[0] }
+    }
+
+    /// Enzo (F17): the page a code opened lies over the camera's top edge and never in front of the camera: in its plane over a camera held upright, stood up over
+    /// one lying flat, and over one tilted back.
+    #[test]
+    fn the_page_from_a_code_stands_on_the_camera_s_top_edge() {
+        let held = [
+            ("upright", camera_at([1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 1.2, -0.4])),
+            ("flat", camera_at([1.0, 0.0, 0.0], [0.0, 0.0, -1.0], [0.0, 1.0, -0.4])),
+            ("tilted back", camera_at([1.0, 0.0, 0.0], [0.0, 0.6, -0.8], [0.0, 1.1, -0.4])),
+            ("rolled", camera_at([0.94, 0.34, 0.0], [-0.34, 0.94, 0.0], [0.0, 1.2, -0.4])),
+        ];
+        for (name, camera) in held {
+            let top = camera_top_plane(&camera);
+            let edge = zones::CAMERA_HALF[1] * camera.unit;
+            let to_camera = space::inverse(&camera.frame);
+            let edge_height = space::apply(&camera.frame, [0.0, edge, 0.0])[1];
+            for zone in [Zone::CameraWebBar, Zone::CameraWeb] {
+                let quad = top.quad(&on_camera_top(zones::in_units(zone)), 0.0, NEAR_M);
+                for (u, v) in [(-0.5, -0.5), (0.5, -0.5), (-0.5, 0.5), (0.5, 0.5)] {
+                    let corner = space::apply(&quad.transform, [u * quad.width, v * quad.height, 0.0]);
+                    let local = space::apply(&to_camera, corner);
+                    assert!(local[1] >= edge - 0.005, "{name}: {zone:?} reaches over the camera ({local:?})");
+                    assert!(corner[1] >= edge_height - 0.005, "{name}: {zone:?} hangs below the camera's top edge");
+                }
+            }
+            let (page_up, camera_up) = (space::axis(&top.frame, 1), space::axis(&camera.frame, 1));
+            match name {
+                "upright" | "rolled" => assert!(space::dot(page_up, camera_up) > 0.999, "{name}: in the camera's own plane"),
+                _ => assert!(page_up[1] > 0.95, "{name}: stood up ({page_up:?})"),
+            }
+            assert!(space::axis(&top.frame, 2)[2] > 0.5, "{name}: it faces the person");
+        }
+    }
+
+    /// Enzo (F19): from where the camera was guessed to where it was seen, the tiles cross in a moment and not in one frame; a camera held and moved, they follow at once.
+    #[test]
+    fn the_camera_s_parts_cross_a_jump_in_a_moment_and_follow_a_held_camera_at_once() {
+        let at = |x: f32| camera_at([1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [x, 1.2, -0.4]);
+        let mut settle = Settle::default();
+        assert_eq!(settle.step(at(0.0), 0.011), at(0.0));
+        for i in 1..20 {
+            assert_eq!(settle.step(at(i as f32 * 0.01), 0.011), at(i as f32 * 0.01), "a hand's move, frame {i}");
+        }
+        let seen = at(0.5);
+        let first = space::position(&settle.step(seen, 0.011).frame)[0];
+        assert!(first > 0.19 && first < 0.3, "a jump crossed in one frame: {first}");
+        let mut x = first;
+        let mut frames = 1;
+        while x < 0.5 {
+            let next = space::position(&settle.step(seen, 0.011).frame)[0];
+            assert!(next >= x, "it goes back");
+            x = next;
+            frames += 1;
+            assert!(frames < 40, "it never arrives");
+        }
+        assert!(frames as f32 * 0.011 >= SETTLE_S * 0.9, "it arrived in {frames} frames");
+        assert_eq!(settle.step(seen, 0.011), seen);
     }
 }

@@ -108,7 +108,9 @@ pub(super) fn tracking_items(facts: &Facts) -> Vec<Item> {
 pub(super) fn draw_tracking(p: &Painter, facts: &Facts) {
     let mut named = |i: usize, name: &str, about: &str| {
         let y = row(i);
-        p.text(pos2(26.0, y + 15.0), Align2::LEFT_CENTER, name, look::font(20.0, weight::BOLD), look::LABEL);
+        // Whole before its slider, smaller where a language's name is long ("Mosaicos en el menú rápido" ran into it).
+        let (name, font) = fitted(p, name, 20.0, weight::BOLD, X - 26.0 - 10.0, 15.0);
+        p.text(pos2(26.0, y + 15.0), Align2::LEFT_CENTER, name, font, look::LABEL);
         let mut job = egui::text::LayoutJob::simple(about.to_string(), look::font(15.0, weight::MEDIUM), look::LABEL, X - 40.0);
         job.wrap.max_rows = 2;
         p.galley(pos2(26.0, y + 28.0), p.layout_job(job), look::LABEL);
@@ -140,7 +142,9 @@ pub(super) fn draw_smoothing_bar(p: &Painter, rect: Rect, which: Smoothed, facts
     }
     p.circle_filled(pos2(x, bar.center().y), 12.0, look::LABEL);
     let words = if ms == 0 { tr("Off").to_string() } else { orbiters_i18n::tr!("{ms} ms", ms = ms) };
-    p.text(pos2(rect.right(), rect.center().y), Align2::RIGHT_CENTER, words, look::font(20.0, weight::SEMIBOLD), look::LABEL);
+    // In its column after the slider: "Desactivado" ran onto the slider's end.
+    let (words, font) = fitted(p, &words, 20.0, weight::SEMIBOLD, VALUE_WIDTH - 12.0, 14.0);
+    p.text(pos2(rect.right(), rect.center().y), Align2::RIGHT_CENTER, words, font, look::LABEL);
 }
 
 /// What this sheet's things do, where they are pointed at.

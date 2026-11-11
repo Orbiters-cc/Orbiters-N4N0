@@ -4776,6 +4776,11 @@ mod tests {
                                 }
                             }
                         }
+                        // Smooth tracking: its rows' names before their sliders, their values after them, one off.
+                        let facts = Facts { desktop, sheet: Some(Sheet::Tracking), sheet_title: "Smooth tracking".into(), tracking: Some((true, [0, 35, 78], "Smoothing your devices now".into())), ..base.clone() };
+                        let controls = sheet_items(Sheet::Tracking, &facts);
+                        let texts = painted_texts(page, |p| paint_sheet(p, Sheet::Tracking, &facts, None, None));
+                        check(&at("Smooth tracking"), &controls, &texts, page, &mut failures);
                         let facts = Facts { desktop, sheet: Some(Sheet::Results), sheet_title: "YouTube".into(), ..base.clone() };
                         let controls = sheet_items(Sheet::Results, &facts);
                         let texts = painted_texts(page, |p| paint_sheet(p, Sheet::Results, &facts, None, None));

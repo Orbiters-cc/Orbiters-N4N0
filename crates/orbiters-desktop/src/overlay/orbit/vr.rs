@@ -615,6 +615,13 @@ const CAMERA_LOST_AFTER: Duration = Duration::from_secs(20);
 const CAMERA_VIEW_MARGIN: f32 = 0.1;
 const CAMERA_LOOKS_TO_SHOW: u32 = 1;
 
+fn camera_takeover_view(turn: &mut Turn, menu_view: &mut bool, held: bool) {
+    if *menu_view {
+        *menu_view=false;
+        if !held { turn.worlds.push(super::super::worlds::Relayed::View(super::super::worlds::panel::Action::Hide)); }
+    }
+}
+
 impl OrbitVr {
     /// What is up, for a note in the log when a turn took too long.
     pub fn doing(&self) -> String {
@@ -904,7 +911,15 @@ impl OrbitVr {
     }
 
     /// A turn of the overlay's loop.
-    pub fn update(&mut self, mut cx: Cx<'_, '_>) -> Turn {
+    pub fn update(&mut self, cx: Cx<'_, '_>) -> Turn {
+        let camera_opened=cx.snap.camera_open_said==Some(true) && self.camera_was!=Some(true);
+        let held=cx.world_status.small_taken;
+        let mut turn=self.update_inner(cx);
+        if camera_opened { camera_takeover_view(&mut turn,&mut self.showed_view,held); }
+        turn
+    }
+
+    fn update_inner(&mut self, mut cx: Cx<'_, '_>) -> Turn {
         let now = Instant::now();
         let dt = now.duration_since(self.last_turn).as_secs_f32();
         self.last_turn = now;
@@ -1359,6 +1374,20 @@ impl OrbitVr {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn camera_takeover_preserves_held_and_independent_views() {
+        let mut turn=super::Turn::default();
+        let mut borrowed=true;
+        super::camera_takeover_view(&mut turn,&mut borrowed,false);
+        assert!(!borrowed);
+        assert!(matches!(turn.worlds.as_slice(),[super::super::super::worlds::Relayed::View(super::super::super::worlds::panel::Action::Hide)]));
+        let mut turn=super::Turn::default();
+        let mut borrowed=true;
+        super::camera_takeover_view(&mut turn,&mut borrowed,true);
+        assert!(turn.worlds.is_empty() && !borrowed);
+        super::camera_takeover_view(&mut turn,&mut borrowed,false);
+        assert!(turn.worlds.is_empty(), "taking the view gave it independent ownership");
+    }
     use super::*;
     use orbiters_core::settings::OrbitSettings;
 

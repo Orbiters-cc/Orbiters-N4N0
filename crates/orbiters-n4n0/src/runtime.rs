@@ -1467,6 +1467,11 @@ impl N4n0 {
         if !settings.enabled || !settings.assistant {
             return;
         }
+        let ask_busy = { let rt = self.n4n0.lock().unwrap(); rt.voice.ask_open && rt.ask_busy() };
+        if down && ask_busy {
+            self.publish();
+            return;
+        }
         if down {
             if !self.can_listen() {
                 return;
@@ -1675,6 +1680,7 @@ impl N4n0 {
             Command::Ask { text } => self.ask(text, "typed"),
             Command::Talk { down } => self.talk(down, Source::Window),
             Command::AskPage { open } => self.ask_page(open),
+            Command::AskRetry => self.ask_retry(),
             Command::AskTalk { down } => self.ask_talk(down),
             Command::AskPlayback { active } => {
                 self.n4n0.lock().unwrap().voice.output_playing = active;

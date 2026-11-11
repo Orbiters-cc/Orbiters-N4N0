@@ -498,7 +498,10 @@ impl Worker {
 
     /// A whole sentence: transcribed now, or once the recogniser has loaded.
     fn sentence(&mut self, samples: Vec<f32>, for_n4n0: bool, listen: u64) {
-        if for_n4n0 { self.partial_id.store(0, Ordering::Relaxed); }
+        if for_n4n0 {
+            self.partial_id.store(0, Ordering::Relaxed);
+            emit(&VoiceEvent::Finalizing { listen });
+        }
         // Less than a quarter of a second holds no word.
         if samples.len() < RATE / 4 {
             if for_n4n0 {
@@ -548,8 +551,7 @@ impl Worker {
         // Measured CPU re-decode exceeds the live budget beyond eight seconds. Fall back to the meter,
         // rather than queue old words or spend two CPU cores repeatedly decoding a long utterance.
         if self.held.len() > RATE * 8 {
-            self.partial_id.store(0, Ordering::Relaxed);
-            if self.held.len().saturating_sub(RATE * 8) < RATE / 10 {
+            if self.partial_id.swap(0, Ordering::Relaxed) != 0 {
                 emit(&VoiceEvent::Provisional { listen: self.listen.as_ref().unwrap().id, text: String::new() });
             }
             return;
@@ -610,7 +612,13 @@ impl Worker {
         } else if (waited > NO_SPEECH && !self.speaking) || waited > LONGEST {
             let id = listen.id;
             self.listen = None;
-            emit(&VoiceEvent::Heard { text: String::new(), for_n4n0: true, seconds: 0.0, decode_ms: 0, listen: id });
+            if waited > LONGEST && !self.held.is_empty() {
+                let samples = std::mem::take(&mut self.held);
+                self.sentence(samples, true, id);
+            } else {
+                self.partial_id.store(0, Ordering::Relaxed);
+                emit(&VoiceEvent::Heard { text: String::new(), for_n4n0: true, seconds: 0.0, decode_ms: 0, listen: id });
+            }
             self.follow_mic();
         }
         true

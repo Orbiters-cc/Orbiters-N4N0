@@ -2524,6 +2524,11 @@ fn ask_auto_final_stream_pause_rearm_manual_exit_and_stale_words() {
     assert_eq!(t.view().voice.provisional.unwrap().text, "Hi");
     assert!(t.view().lines.is_empty());
     let heard = || VoiceEvent::Heard { listen: 1, text: "Hi there".into(), for_n4n0: true, seconds: 1.0, decode_ms: 2 };
+    worker.say(VoiceEvent::Finalizing { listen: 1 });
+    assert!(t.view().voice.finalizing);
+    assert!(!t.view().listening);
+    n.ask_follow();
+    assert_eq!(worker.commands().iter().filter(|c| matches!(c, VoiceCommand::Listen { .. })).count(), 1);
     worker.say(heard());
     let first = status_when(&t, |s| !the_answers(s).is_empty());
     assert!(first.thinking);
@@ -2576,5 +2581,53 @@ fn ask_signout_and_crash_cancel_without_automatic_restart() {
     assert!(!t.view().listening);
     assert!(!t.view().voice.automatic);
     assert_eq!(t.view().voice.readiness, VoiceReadiness::MicrophoneProblem);
+    t.shutdown(&n);
+}
+
+#[test]
+fn ask_output_gate_pauses_capture_and_retry_is_explicit() {
+    let (t, n, d) = n4n0_on(Settings::default(), Arc::new(Watcher::new(|| Box::new(NoMedia))));
+    *d.ears.allowed.lock().unwrap() = true;
+    t.sign_in("http://127.0.0.1:1/".into(), "test");
+    n.n4n0.lock().unwrap().voice.installed = true;
+    n.ask_page(true);
+    let worker = d.ears.workers.lock().unwrap()[0].clone();
+    n.command(Command::AskPlayback { active: true });
+    assert!(!t.view().listening);
+    assert!(worker.commands().contains(&VoiceCommand::Cancel));
+    n.ask_follow();
+    assert_eq!(worker.commands().iter().filter(|c| matches!(c, VoiceCommand::Listen { .. })).count(), 1);
+    n.command(Command::AskPlayback { active: false });
+    assert!(worker.commands().contains(&VoiceCommand::Listen { hold: false, id: 2 }));
+    worker.crash(3, "fixture failure");
+    assert!(!t.view().voice.automatic);
+    n.command(Command::AskRetry);
+    assert_eq!(d.ears.workers.lock().unwrap().len(), 2);
+    assert!(t.view().listening);
+    n.ask_page(false);
+    t.shutdown(&n);
+}
+
+#[test]
+fn ask_waits_for_approval_then_rearms() {
+    let (t, n, d) = n4n0_on(Settings::default(), Arc::new(Watcher::new(|| Box::new(NoMedia))));
+    *d.ears.allowed.lock().unwrap() = true;
+    let calls = json!([{ "id":"c1", "name":"set_afk_message", "input":{"text":"tea", "enabled":true} }]);
+    let (base, bodies) = orbiters(vec![done(json!([]), calls), done(json!([]), json!([]))]);
+    t.sign_in(base, "test");
+    n.n4n0.lock().unwrap().voice.installed = true;
+    n.ask_page(true);
+    let worker = d.ears.workers.lock().unwrap()[0].clone();
+    worker.say(VoiceEvent::Heard { text:"set my away message".into(), for_n4n0:true, seconds:1.0, decode_ms:1, listen:1 });
+    let status = status_when(&t, |s| !s.thinking && !s.confirmations.is_empty());
+    assert!(!status.confirmations.is_empty());
+    n.ask_follow(); n.publish();
+    assert!(!t.view().listening);
+    assert_eq!(worker.commands().iter().filter(|c| matches!(c, VoiceCommand::Listen { .. })).count(), 1);
+    n.ask("yes".into(), "typed");
+    n.ask_follow(); n.publish();
+    assert!(t.view().listening);
+    assert_eq!(bodies.lock().unwrap().len(), 2, "approval never starts an assistant request");
+    n.ask_page(false);
     t.shutdown(&n);
 }

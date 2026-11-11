@@ -48,6 +48,7 @@ struct Worker {
 pub(crate) struct VoiceRuntime {
     handle: Option<Worker>,
     ask_owned: bool,
+    wake_requested: bool,
     installer: Option<Worker>,
     /// The last worker's number.
     workers: u64,
@@ -134,7 +135,12 @@ impl N4n0 {
 
     pub(crate) fn ask_page(self: &Shared, open: bool) {
         self.voice_cancel();
-        self.voice.lock().unwrap().ask_owned = true;
+        {
+            let wake = self.with_settings(|s| s.n4n0.wake_word);
+            let mut voice = self.voice.lock().unwrap();
+            voice.ask_owned = true;
+            voice.wake_requested = wake;
+        }
         {
             let mut rt = self.n4n0.lock().unwrap();
             rt.listening = None;
@@ -150,6 +156,18 @@ impl N4n0 {
         if let Some(h) = self.voice.lock().unwrap().handle.as_mut() {
             let _ = h.inner.send(&VoiceCommand::WakeWord { on: false, words: vec![] });
         }
+        self.ask_follow();
+        self.publish();
+    }
+
+    pub(crate) fn ask_retry(self: &Shared) {
+        { let mut rt = self.n4n0.lock().unwrap();
+          if !rt.voice.ask_open { return; }
+          rt.voice.error = None;
+          rt.voice.automatic = true;
+          rt.voice.finalizing = false;
+        }
+        self.voice.lock().unwrap().ended_at = None;
         self.ask_follow();
         self.publish();
     }
@@ -172,7 +190,8 @@ impl N4n0 {
         let ready = self.voice_readiness() == crate::status::VoiceReadiness::Ready;
         let (cancel, arm) = {
             let mut rt = self.n4n0.lock().unwrap();
-            let cancel = (!ready || (rt.voice.ask_open && rt.ask_busy())) && rt.listening.is_some();
+            let cancel = (!ready && (rt.listening.is_some() || rt.voice.finalizing))
+                || (rt.voice.ask_open && rt.ask_busy() && rt.listening.is_some());
             if cancel { rt.listening = None; }
             let arm = ready && rt.voice.ask_open && rt.voice.automatic && rt.listening.is_none()
                 && !rt.ask_busy();
@@ -186,6 +205,7 @@ impl N4n0 {
             }
             let mut rt = self.n4n0.lock().unwrap();
             rt.voice.provisional = None; rt.voice.level = 0.0; rt.voice.speech = false;
+            rt.voice.finalizing = false;
             if !ready { rt.voice.automatic = false; }
         }
         if arm { self.voice_listen(Source::AskAuto); }
@@ -220,10 +240,15 @@ impl N4n0 {
         self.ask_follow();
         let settings = self.with_settings(|s| s.n4n0.clone());
         let vrchat = self.host.scene().vrchat;
-        let installed = self.n4n0.lock().unwrap().voice.installed;
+        let (installed, ask_open) = {
+            let n = self.n4n0.lock().unwrap(); (n.voice.installed, n.voice.ask_open)
+        };
+        let ready = self.voice_readiness() == crate::status::VoiceReadiness::Ready;
         let mut rt = self.voice.lock().unwrap();
+        if !ask_open && rt.wake_requested != settings.wake_word { rt.ask_owned = false; }
+        rt.wake_requested = settings.wake_word;
         let leased = rt.lease_until.is_some_and(|t| Instant::now() < t);
-        let wanted = settings.enabled && settings.assistant && installed && self.host.account().is_some() && (vrchat || leased);
+        let wanted = ready && settings.enabled && settings.assistant && installed && (vrchat || leased);
         if !wanted {
             if let Some(handle) = rt.handle.take() {
                 drop(rt);
@@ -289,6 +314,7 @@ impl N4n0 {
         let settings = self.with_settings(|s| s.n4n0.clone());
         let ask = self.n4n0.lock().unwrap().voice.ask_open;
         let mut rt = self.voice.lock().unwrap();
+        if !ask { rt.ask_owned = false; }
         rt.lease_until = Some(Instant::now() + LISTEN_LIMIT + LISTEN_LEASE);
         if rt.handle.is_none() {
             rt.ended_at = None;
@@ -379,10 +405,17 @@ impl N4n0 {
     /// What a voice worker said.
     pub(crate) fn on_voice_event(self: &Shared, event: VoiceEvent) {
         match event {
+            VoiceEvent::Finalizing { listen } => {
+                let rt = self.voice.lock().unwrap();
+                if rt.current != Some(listen) { return; }
+                { let mut n = self.n4n0.lock().unwrap(); n.listening = None; n.voice.finalizing = true; }
+                drop(rt);
+                self.publish();
+            }
             VoiceEvent::Provisional { listen, text } => {
                 if self.voice_readiness() != crate::status::VoiceReadiness::Ready { return; }
                 let rt = self.voice.lock().unwrap();
-                if rt.current != Some(listen) { return; }
+                if rt.current != Some(listen) || self.n4n0.lock().unwrap().voice.finalizing { return; }
                 self.voice_status(|v| v.provisional = (!text.is_empty()).then_some(crate::status::ProvisionalSpeech { listen, text }));
             }
             VoiceEvent::Ready { engine, load_ms } => {
@@ -450,7 +483,7 @@ impl N4n0 {
             }
             VoiceEvent::Error { message } => {
                 self.voice_cancel();
-                { let mut rt = self.n4n0.lock().unwrap(); rt.listening = None; rt.voice.automatic = false; rt.voice.provisional = None; }
+                { let mut rt = self.n4n0.lock().unwrap(); rt.listening = None; rt.voice.automatic = false; rt.voice.finalizing = false; rt.voice.provisional = None; }
                 self.n4n0.lock().unwrap().line(N4n0Who::Error, message.clone());
                 self.voice_status(|v| v.error = Some(message));
             }
@@ -498,6 +531,7 @@ impl N4n0 {
         self.voice_status(|v| {
             v.running = false;
             v.automatic = false;
+            v.finalizing = false;
             v.provisional = None;
             v.speech = false;
             v.level = 0.0;

@@ -2738,10 +2738,11 @@ fn draw(p: &Painter, zone: Zone, item: &Item, facts: &Facts, hovered: bool, pres
             let room = rect.right() - x - 10.0;
             // What it does in a few words; the whole of it is in the caption when pointed.
             let said = tile_line(item.action, facts).or_else(|| caption(item.action, facts).map(|c| c.1)).filter(|_| room >= 140.0);
-            let font = look::font(21.5, weight::BOLD);
+            // Its name whole, as large as it fits from 21.5 down to 16 (the retro look's French ran out at 21.5: "AVIS SUR LE M…").
+            let (label, font) = fitted(p, label, 21.5, weight::BOLD, room, 16.0);
             match said {
                 Some(said) => {
-                    p.text(pos2(x, rect.top() + 22.0), Align2::LEFT_CENTER, fit(p, label, &font, room), font, Color32::WHITE);
+                    p.text(pos2(x, rect.top() + 22.0), Align2::LEFT_CENTER, label, font, Color32::WHITE);
                     // Smaller than its name and quieter, and never past the tile's foot (Enzo, 2026-11-10: at the name's size it ran over the tile and was cut). As many
                     // whole lines as the tile holds, by what they measure. Not under 12 px at 1280 x 720 either (round 18's judges), which the taller rows make room for.
                     let top = rect.top() + 34.0;
@@ -2757,7 +2758,7 @@ fn draw(p: &Painter, zone: Zone, item: &Item, facts: &Facts, hovered: bool, pres
                     p.galley(pos2(x, top), galley, ink);
                 }
                 None => {
-                    p.text(pos2(x, chip.center().y), Align2::LEFT_CENTER, fit(p, label, &font, room), font, Color32::WHITE);
+                    p.text(pos2(x, chip.center().y), Align2::LEFT_CENTER, label, font, Color32::WHITE);
                 }
             }
         }
@@ -4754,8 +4755,9 @@ mod tests {
                         check(&at("Show Orbiters"), &controls, &texts, pill.size(), &mut failures);
                         // All tools, what plays at 0 and 100 and muted, and YouTube's results.
                         let page = vec2(1024.0, 576.0);
-                        for volume in [(0, false), (100, false), (40, true)] {
-                            let facts = Facts { desktop, sheet: Some(Sheet::All), sheet_title: "All tools".into(), volume: Some(volume), ..base.clone() };
+                        // With every accessory (two rows of narrow tiles) and with few (wide tiles with a line under their names).
+                        for (volume, few) in [((0, false), false), ((100, false), false), ((40, true), true)] {
+                            let facts = Facts { desktop, sheet: Some(Sheet::All), sheet_title: "All tools".into(), volume: Some(volume), can_states: !few, can_light: !few, can_call: !few, ..base.clone() };
                             let mut controls = sheet_items(Sheet::All, &facts);
                             // YouTube's search, a pill on its card.
                             let card = controls.iter().find(|i| i.action == Action::Page(Target::YouTube)).map(|i| i.rect).expect("YouTube's card");

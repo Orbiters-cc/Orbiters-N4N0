@@ -530,6 +530,15 @@ pub fn camera_top_plane(camera: &Plane) -> Plane {
 /// How far the page over the camera turns up from the camera's plane: about upright from a camera lying flat, short of folding over one held upside down.
 const CAMERA_PAGE_STANDS: f32 = 1.4;
 
+/// The camera's column, and what it says under the camera, moved out by what the fit is unsure of beyond the 10 units its gap already allowed for it
+/// (camera-core's clearance is measured from that older gap). The scanning corners and the page stay on the camera.
+pub fn camera_column_out(places: &mut [Placed], clearance: f32, right: bool) {
+    let out = (clearance + 10.0 - zones::CAMERA_GAP).max(0.0) * if right { 1.0 } else { -1.0 };
+    for placed in places.iter_mut().filter(|p| matches!(p.zone, Zone::CameraPeople | Zone::CameraWorld | Zone::CameraRecord | Zone::CameraQr | Zone::CameraCaption | Zone::CameraAct)) {
+        placed.rect = placed.rect.translate(egui::vec2(out, 0.0));
+    }
+}
+
 /// A zone over the camera's top edge, in that edge's units ([`camera_top_plane`]).
 pub fn on_camera_top(mut placed: Placed) -> Placed {
     placed.rect = placed.rect.translate(egui::vec2(0.0, zones::CAMERA_HALF[1]));
@@ -772,11 +781,11 @@ impl OrbitVr {
                     self.camera_side = if self.camera_side == camera_track::Side::Left { camera_track::Side::Right } else { camera_track::Side::Left };
                 }
                 let _ = whole;
-                if let Some((mut frame, unit)) = camera_track::perspective_pose(&seen.found, seen.size, &mirror, &space::compose(&head, &eye_on_head), self.tune.camera_panel_m).filter(|_| camera_track::side_projects(&seen.found,self.camera_side)) {
+                if let Some((frame, unit)) = camera_track::perspective_pose(&seen.found, seen.size, &mirror, &space::compose(&head, &eye_on_head), self.tune.camera_panel_m).filter(|_| camera_track::side_projects(&seen.found,self.camera_side)) {
                 // 2.5 pixels fit tolerance, converted through the observed scale, plus a minimum safe gap.
                 let gap = ((2.5 + seen.found.residual_px) / seen.found.across.min(seen.found.tall).max(0.01) * unit).max(0.012);
-                let sign = if self.camera_side == camera_track::Side::Left { -1. } else { 1. };
-                for i in 0..3 { frame.m[i][3] += frame.m[i][0] * gap * sign; }
+                // The column alone stands off by it ([`camera_column_out`]): the scanning corners and the page over the camera stay on the camera itself.
+                self.camera_clearance = gap / unit.max(1e-6);
                 let depth=-(0..3).map(|i| head.m[i][2]*(frame.m[i][3]-head.m[i][3])).sum::<f32>();
                 super::super::vr_log::line(&format!("camera pose: ns={}, captured {:?}, accepted {:?}, depth {}, side {:?}, unit {}, gap {}, pose {:?}, landmarks {:?}", orbiters_core::clock::now_ns(), seen.at, now, depth, self.camera_side, unit, gap, frame, seen.found)); // i18n: not shown (diagnostics)
                 self.camera_follow.seen(frame, unit);
@@ -842,6 +851,8 @@ pub struct OrbitVr {
     camera_side: camera_track::Side,
     /// What shows of where the camera is ([`Settle`]).
     camera_settle: Settle,
+    /// How far the last fit says the column must stand off the camera's picture beyond its own gap, in the panel's units: its uncertainty.
+    camera_clearance: f32,
     hole_logged: super::super::vr_log::Every,
     /// What the headset shows, kept when asked (`ORBITERS_VR_PICTURES`).
     moments: super::super::eye_picture::Moments,
@@ -902,6 +913,7 @@ impl OrbitVr {
             camera_follow: Default::default(),
             camera_side: Default::default(),
             camera_settle: Default::default(),
+            camera_clearance: 0.0,
             hole_logged: Default::default(),
             moments: Default::default(),
             osc_toggle: None,
@@ -1155,8 +1167,12 @@ impl OrbitVr {
         if menu == Some(Around::Wheel) && !self.panels.sheet_open() {
             places.push(wheel_place(Zone::WheelHide));
         }
-        // What the camera's tiles say lines up on their side.
+        // What the camera's tiles say lines up on their side; they say where the camera is not seen yet; the column stands off by what the fit is unsure of.
         self.panels.camera_right = self.camera_side == camera_track::Side::Right;
+        self.panels.camera_finding = self.camera_watch.is_some() && self.camera_looks <= CAMERA_LOOKS_TO_SHOW;
+        if menu == Some(Around::Camera) {
+            camera_column_out(&mut places, self.camera_clearance, self.camera_side == camera_track::Side::Right);
+        }
         if menu != Some(Around::Camera) {
             self.camera_settle.clear();
         }
@@ -1206,7 +1222,7 @@ impl OrbitVr {
                 let sheet = matches!(p.zone, Zone::Takeover | Zone::SheetBack);
                 // The page a code opened, and its bar: stood up on the camera's top edge.
                 if matches!(p.zone, Zone::CameraWeb | Zone::CameraWebBar) {
-                    return (camera_top_plane(&plane).quad(&on_camera_top(p.placed), -p.outward(), NEAR_M), p.placed);
+                    return (camera_top_plane(&plane).camera_quad(&on_camera_top(p.placed)), p.placed);
                 }
                 let on = if sheet { self.takeover_plane.unwrap_or(plane) } else { plane };
                 let near = match p.zone {
@@ -1379,7 +1395,7 @@ impl OrbitVr {
             Some((space::compose(&frame, &there), hole.width() / 1024.0 * quad.width / 2.0 * super::super::worlds::SMALL_FILLS_HOLE))
         });
         // The stick's up and down scrolls what is on the sheet, unless a hand holds what shows small: that is zoomed with it. The stick that does not walk, as VRChat's turning one.
-        if self.panels.sheet_open() && !cx.world_status.small_held && cx.input_read {
+        if (self.panels.sheet_open() || self.panels.web_pointed()) && !cx.world_status.small_held && cx.input_read {
             let hand = if settings_walk_left(cx.snap) { 1 } else { 0 };
             if let Some(pads) = *cx.pads.get_or_insert_with(|| cx.actions.pads(cx.steamvr)) {
                 self.panels.stick(pads.sticks[hand].y, dt, cx.snap);

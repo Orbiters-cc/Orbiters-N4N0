@@ -126,3 +126,10 @@ impl MenuHost {
         self.0.put_picture(key, picture);
     }
 }
+
+impl MenuHost {
+    pub(crate) fn paint_pictures(&self, retro: bool) -> std::collections::HashMap<String, egui::TextureId> {
+        let names: Vec<_> = self.0.pictures().images.lock().unwrap_or_else(|e| e.into_inner()).keys().cloned().collect();
+        names.into_iter().filter_map(|key| self.picture(&key, retro).map(|id| (key, id))).collect()
+    }
+}

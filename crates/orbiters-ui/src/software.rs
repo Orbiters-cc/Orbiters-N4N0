@@ -253,11 +253,12 @@ impl Software {
                 }
                 for (p, clip) in primitives.iter().zip(&clips) {
                     let Primitive::Mesh(mesh) = &p.primitive else { continue };
-                    let Some(clip) = clip.and_then(|c| within(c, area)) else { continue };
+                    let Some(original_clip) = *clip else { continue };
+                    let Some(clip) = within(original_clip, area) else { continue };
                     let Some(texture) = textures.get(&mesh.texture_id) else { continue };
                     for t in mesh.indices.as_chunks::<3>().0 {
                         let v = t.map(|i| &mesh.vertices[i as usize]);
-                        Self::triangle_rows(pixels, width, from, clip, v, pixels_per_point, texture);
+                        Self::triangle_rows(pixels, width, from, clip, original_clip, v, pixels_per_point, texture);
                     }
                 }
             }
@@ -337,7 +338,7 @@ impl Software {
         areas
     }
 
-    fn triangle_rows(pixels: &mut [[u8; 4]], width: usize, from: usize, clip: [usize; 4], v: [&Vertex; 3], ppp: f32, texture: &Texture) {
+    fn triangle_rows(pixels: &mut [[u8; 4]], width: usize, from: usize, clip: [usize; 4], original_clip: [usize; 4], v: [&Vertex; 3], ppp: f32, texture: &Texture) {
         let mut p = v.map(|v| [v.pos.x * ppp, v.pos.y * ppp]);
         let mut v = v;
         let edge = |a: [f32; 2], b: [f32; 2], c: [f32; 2]| (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]);
@@ -352,6 +353,7 @@ impl Software {
             area = -area;
         }
         let Some([min_x, min_y, max_x, max_y]) = bounds(p, clip) else { return };
+        let Some([origin_min_x, _, origin_max_x, _]) = bounds(p, original_clip) else { return };
         // Edge functions w_i(x, y) = A_i x + B_i y + C_i, positive inside; w_0 is opposite vertex 0.
         let coeffs = |a: [f32; 2], b: [f32; 2]| (a[1] - b[1], b[0] - a[0], a[0] * b[1] - a[1] * b[0]);
         let e = [coeffs(p[1], p[2]), coeffs(p[2], p[0]), coeffs(p[0], p[1])];
@@ -420,9 +422,26 @@ impl Software {
                 }
                 None => {
                     // Colour and texture coordinates are linear across the triangle: step them along the run.
-                    let l = w_at(first).map(|w| w * inv_area);
+                    // Start at the full primitive's sample: a damage clip must not change f32 accumulation.
+                    let origin = if min_x == origin_min_x { first } else {
+                        let (mut left, mut right) = (origin_min_x as f32, origin_max_x as f32);
+                        for i in 0..3 {
+                            let a = e[i].0;
+                            if a > 0.0 { left = left.max(-k[i] / a - 1.5); }
+                            else if a < 0.0 { right = right.min(-k[i] / a + 1.5); }
+                            else if k[i] < 0.0 || (k[i] == 0.0 && !tl[i]) { right = left; }
+                        }
+                        let x0 = left.floor().max(origin_min_x as f32) as usize;
+                        let x1 = (right.ceil() as usize).min(origin_max_x);
+                        (x0..x1).find(|&x| inside(w_at(x))).unwrap_or(first)
+                    };
+                    let l = w_at(origin).map(|w| w * inv_area);
                     let mut c: [f32; 4] = std::array::from_fn(|i| color[0][i] * l[0] + color[1][i] * l[1] + color[2][i] * l[2]);
                     let mut t_uv = [0, 1].map(|j| uv[0][j] * l[0] + uv[1][j] * l[1] + uv[2][j] * l[2]);
+                    for _ in origin..first {
+                        for i in 0..4 { c[i] += dc[i]; }
+                        t_uv[0] += duv[0]; t_uv[1] += duv[1];
+                    }
                     if flat_uv {
                         // One texel (egui's white for shapes): it only scales the colour.
                         let texel = texture.sample(uv[0][0], uv[0][1], false);
@@ -799,4 +818,21 @@ mod tests {
         assert_eq!(areas.len(), 2);
         assert!(tile_areas(&[f; 6], 3, 2).is_empty());
     }
+    #[test]
+    fn review_triangle_redraw_is_independent_of_damage_clip() {
+        let texture = Texture { width: 64, height: 64, texels: (0..4096).map(|n| Color32::from_rgb((n * 37 % 256) as u8, (n * 73 % 256) as u8, (n * 19 % 256) as u8)).collect(), nearest_magnified: false, nearest_minified: false, wrap: TextureWrapMode::ClampToEdge, plain: None };
+        let vertices = [
+            Vertex { pos: pos2(3.3, 2.2), uv: pos2(0.0013, 0.0024), color: Color32::WHITE },
+            Vertex { pos: pos2(510.8, 8.1), uv: pos2(0.982, 0.2), color: Color32::WHITE },
+            Vertex { pos: pos2(220.2, 127.9), uv: pos2(0.25, 0.875), color: Color32::WHITE },
+        ];
+        let mut full = vec![[0; 4]; 512 * 128];
+        let mut split = full.clone();
+        Software::triangle_rows(&mut full, 512, 0, [0, 0, 512, 128], [0, 0, 512, 128], vertices.each_ref(), 1.0, &texture);
+        Software::triangle_rows(&mut split, 512, 0, [0, 0, 211, 128], [0, 0, 512, 128], vertices.each_ref(), 1.0, &texture);
+        Software::triangle_rows(&mut split, 512, 0, [211, 0, 512, 128], [0, 0, 512, 128], vertices.each_ref(), 1.0, &texture);
+        let different = full.iter().zip(&split).filter(|(a,b)| a != b).count();
+        assert!(full == split, "damage clipping changed {different} pixels from the identical full redraw");
+    }
+
 }

@@ -3379,3 +3379,21 @@ mod tests {
         assert_eq!(panel.selected, Some(1));
     }
 }
+
+impl Panel {
+    // i18n: not shown (render cache identity)
+    pub(crate) fn paint_key(&self) -> String {
+        format!("worlds {:?} {:?} {} {:?} {:?} {:?} {} {} {} {:?}", self.page, self.selected, self.results_page, self.sort, self.section, self.labels, self.comments_page, self.pictures_page, self.go_page, self.picture)
+    }
+    pub(crate) fn adopt_metrics(&self, from: &Self) {
+        self.list_step.set(from.list_step.get()); self.list_headset.set(from.list_headset.get()); self.vr_most.set(from.vr_most.get());
+    }
+    pub(crate) fn same_input(&self, b: &Self, target: Target) -> bool {
+        if self.page != b.page || self.selected != b.selected || self.layout != b.layout { return false; }
+        if matches!(target, Target::Key(_) | Target::Space | Target::Backspace) { return true; }
+        self.query == b.query && self.results_page == b.results_page && self.sort == b.sort && self.section == b.section
+            && self.labels == b.labels && self.official == b.official && self.has_3d == b.has_3d && self.draft == b.draft
+            && self.comments_page == b.comments_page && self.pictures_page == b.pictures_page && self.go_page == b.go_page
+            && self.go_region == b.go_region && self.picture == b.picture && self.vr_scroll == b.vr_scroll
+    }
+}

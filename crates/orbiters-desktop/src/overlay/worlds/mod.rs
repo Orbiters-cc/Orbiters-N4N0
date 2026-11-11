@@ -39,6 +39,9 @@ pub mod stereo;
 pub mod timing_lab;
 pub mod view;
 
+mod paint_snapshot;
+pub(crate) use paint_snapshot::PaintSnapshot;
+
 use super::{Canvas, Presenter};
 use orbiters_i18n::tr;
 use crate::backend::Ctl;
@@ -101,6 +104,10 @@ struct Download {
 type BarLook = (Option<Target>, Option<Target>, Option<u64>, bool, bool, Quality, Option<u16>, Option<String>, Option<String>);
 
 pub struct Worlds {
+    paint_fixture: Option<paint_snapshot::PaintFixture>,
+    snapshot_mode: bool,
+    presented_paint: Option<PaintSnapshot>,
+    pressed_paint: Option<PaintSnapshot>,
     /// The panel shows in the menu's place.
     pub open: bool,
     panel: Panel,
@@ -277,6 +284,7 @@ impl Worlds {
         let bar = overlay.create(&format!("{key}.worlds-bar"), "N4N0's 3D world controls").map_err(|c| anyhow::anyhow!("3D worlds bar: SteamVR overlay error {c}"))?; // i18n: not shown (the overlay's name in SteamVR)
         interactive(overlay, bar, BAR_WIDTH_M);
         Ok(Self {
+            paint_fixture: None, snapshot_mode: false, presented_paint: None, pressed_paint: None,
             open: false,
             panel: Panel::default(),
             catalog: Catalog::default(),
@@ -375,6 +383,7 @@ fn keep_an_eye_frame(steamvr: &vr::Client, n: u32) {
     /// and its feedback work as ever; a capture opens in the Orbiters window instead ([`Worlds::mouse_alone`]).
     pub fn alone(ctx: egui::Context) -> Self {
         Self {
+            paint_fixture: None, snapshot_mode: false, presented_paint: None, pressed_paint: None,
             open: false,
             panel: { let mut panel = Panel::default(); panel.on_sheet = true; panel },
             catalog: Catalog::default(),
@@ -642,7 +651,8 @@ fn keep_an_eye_frame(steamvr: &vr::Client, n: u32) {
         let (no_thumb, no_picture) = (|_: &Entry| -> Option<TextureId> { None }, |_: u64, _: bool| -> Option<TextureId> { None });
         let picked = self.picked().cloned();
         let d = Data { entries: &entries, picked: picked.as_ref(), status: &status, feedback: &self.feedback, facts: &self.facts, thumb: &no_thumb, picture: &no_picture, now: unix_now() };
-        let hover = at.and_then(|(x, y)| self.panel.hit(&d, x, y));
+        let hover = if self.snapshot_mode { self.presented_paint.as_ref().and_then(|shown| shown.hit(at)) }
+            else { at.and_then(|(x, y)| self.panel.hit(&d, x, y)) };
         // A hand on what turns on the panel turns it.
         if let (Some(panel::Target::Hero), Some((_, view)), Some(from), Some(now)) = (self.panel.pressed, &self.live, self.live_pointer, at) {
             view.turn(now.0 - from.0, now.1 - from.1);
@@ -665,6 +675,12 @@ fn keep_an_eye_frame(steamvr: &vr::Client, n: u32) {
         let status = self.status();
         let time = self.time();
         let picked = self.picked().cloned();
+        if self.snapshot_mode {
+            let Some(shown) = self.presented_paint.as_ref() else { return false };
+            let Some(target) = self.panel.hover else { return false };
+            if !shown.compatible(self, &entries, &status, picked.as_ref(), target) { return false; }
+            self.pressed_paint = Some(shown.clone());
+        }
         // On a headset's endless list a press waits: it may be a drag of the list.
         if let Some((_, y)) = self.live_pointer.filter(|at| self.panel.vr_list_on(&status) && self.panel.vr_list_holds(&status, at.0, at.1)) {
             if matches!(self.panel.hover, None | Some(panel::Target::Card(_))) {
@@ -679,6 +695,10 @@ fn keep_an_eye_frame(steamvr: &vr::Client, n: u32) {
     }
 
     fn press_target(&mut self, target: panel::Target, entries: &[Entry], status: &panel::Status, picked: Option<&Entry>, time: f64) {
+        if self.snapshot_mode {
+            let shown = self.pressed_paint.as_ref().or(self.presented_paint.as_ref());
+            if !shown.is_some_and(|s| s.compatible(self, entries, status, picked, target)) { return; }
+        }
         let (no_thumb, no_picture) = (|_: &Entry| -> Option<TextureId> { None }, |_: u64, _: bool| -> Option<TextureId> { None });
         self.panel.pressed = Some(target);
         let actions = {
@@ -768,6 +788,7 @@ fn keep_an_eye_frame(steamvr: &vr::Client, n: u32) {
         }
         self.panel.pressed = None;
         self.panel.dirty = true;
+        self.pressed_paint = None;
     }
 
     /// The pill and the bar while they show, for the controllers' lasers: each overlay, where it is and its pixels
@@ -822,6 +843,7 @@ fn keep_an_eye_frame(steamvr: &vr::Client, n: u32) {
 
     /// What the panel lists: the list shown, its worlds that have captures as their captures ([`finder::merge`]).
     fn entries(&self) -> Vec<Entry> {
+        if let Some(fixture) = &self.paint_fixture { return fixture.entries.clone(); }
         let captures = self.captures();
         let feedback = |w: &str| self.catalog.feedback(w);
         match self.shown() {
@@ -1892,54 +1914,13 @@ fn keep_an_eye_frame(steamvr: &vr::Client, n: u32) {
 
     /// Paints the panel on the menu's canvas.
     pub fn paint(&mut self, canvas: &mut Canvas) {
-        self.panel.vr_coast(self.time());
-        self.panel.dirty = false;
-        self.hole_changed = false;
-        if let Some(frame) = self.live_frame.take() {
-            let image = egui::ColorImage::from_rgba_premultiplied(frame.size, &frame.rgba);
-            match &mut self.live_texture {
-                Some(texture) => texture.set(image, egui::TextureOptions::LINEAR),
-                None => self.live_texture = Some(canvas.ctx().load_texture("side-panel-view", image, egui::TextureOptions::LINEAR)),
-            }
-            if let Some(live) = self.panel.live.as_mut() {
-                live.picture = self.live_texture.as_ref().map(|t| t.id());
-                live.plate = frame.plate;
-            }
-        }
-        self.last_paint = Some(Instant::now());
-        let entries = self.entries();
-        let status = self.status();
-        // The worlds' pages the panel shows (the captures' all, to order by frame rate; a list's worlds come with theirs).
-        self.facts_pending = false;
-        if self.panel.sort == panel::Sort::Smooth {
-            for e in entries.iter().filter(|e| e.capture) {
-                self.facts_for(&e.world_id);
-            }
-        }
-        let visible = self.visible(&entries, &status);
-        for v in &visible {
-            if v.page {
-                self.facts_for(&v.world);
-            }
-        }
-        let thumbs = self.thumbnails(&visible);
-        let pictures = self.world_pictures(&entries);
-        let time = self.time();
-        let thumb = |e: &Entry| -> Option<TextureId> { thumbs.get(&e.id).copied() };
-        let picture = |id: u64, large: bool| -> Option<TextureId> { pictures.get(&(id, large)).copied() };
-        let d = Data {
-            entries: &entries,
-            picked: self.picked(),
-            status: &status,
-            feedback: &self.feedback,
-            facts: &self.facts,
-            thumb: &thumb,
-            picture: &picture,
-            now: unix_now(),
-        };
-        let panel = &self.panel;
-        canvas.paint(time, |p| panel.draw(p, &d, time));
+        let snapshot = self.prepare_paint(canvas.ctx());
+        canvas.paint(snapshot.time, |p| snapshot.draw(p));
+        self.panel.adopt_metrics(&snapshot.panel);
+        if self.snapshot_mode { self.presented_paint = Some(snapshot); }
     }
+
+    pub(crate) fn paint_key(&self) -> String { self.panel.paint_key() }
 
     /// A world's page on the Map explorer, once fetched (asked for the first time).
     fn facts_for(&mut self, world_id: &str) {

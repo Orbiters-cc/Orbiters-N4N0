@@ -74,6 +74,7 @@ impl Person {
     /// Points at `target` on the 3D worlds sheet's page, presses and lets go, a turn each, the page told each turn that it is on a sheet in VR (`relay`), as
     /// `vr.rs` tells it; the hand then goes.
     fn press_world(&mut self, target: crate::overlay::worlds::panel::Target, relay: &crate::overlay::worlds::panel::Status) {
+        if self.panels.stage.async_pages { self.turns_until("the displayed worlds page", |p| !p.panels.stage.painter.busy() && p.panels.takeover.as_ref().is_some_and(|p| p.painted && !p.dirty)); }
         let at = self.panels.stage.worlds.as_ref().and_then(|w| w.target_for_test(target)).unwrap_or_else(|| panic!("nothing is {target:?} on the page"));
         let sheet = self.panels.all().count() - 1;
         let snap = self.snap.clone();
@@ -93,6 +94,7 @@ impl Person {
 
     /// Points at what does `action`, presses and lets go, with turns between as a hand takes them.
     fn press(&mut self, action: Action) -> super::Pressed {
+        if self.panels.stage.async_pages { self.turns_until("the displayed control", |p| p.find(action).is_some()); }
         let (part, at) = self.find(action).unwrap_or_else(|| panic!("nothing does {action:?}"));
         self.panels.hover(Some((part, at)));
         self.turn();
@@ -891,8 +893,9 @@ fn write_a_comment_opens_its_keyboard_on_the_sheet_in_vr() {
     use crate::overlay::worlds::panel::{Compose, Page, Status, Target as WorldTarget};
     use orbiters_n4n0_core::feedback::FeedbackView;
     const LISTING: &str = r#"{"previews":[{"slot":0,"key":1,"id":7,"worldId":"wrld_4432ea9b-729c-46e3-8eaf-846aa0a37fdd","name":"Silent Dawn","author":"Mei","uploader":"a","view":{"position":[0,1,0],"target":[0,1,1]}}]}"#;
-    for signed_in in [true, false] {
+    for (signed_in, worker) in [(true, false), (false, false), (true, true), (false, true)] {
         let (mut person, heard) = Person::heard();
+        person.panels.stage.async_pages = worker;
         let mut snap = (*person.snap).clone();
         snap.n4n0.feedback = FeedbackView { signed_in, ..Default::default() };
         person.snap = Arc::new(snap);
@@ -1448,5 +1451,81 @@ fn special_pages_consume_the_outer_paint_request() {
         panel.painted = false;
         person.panels.paint(&person.snap, |_, _| {});
         assert!(!person.panels.takeover.as_ref().unwrap().dirty, "{sheet:?} left a consumed paint request pending");
+    }
+}
+
+
+#[test]
+fn review_every_page_paints_off_the_overlay_thread() {
+    for sheet in [Sheet::Menu, Sheet::Worlds] {
+        let mut person = Person::new();
+        person.panels.stage.async_pages = true;
+        person.around = Some(Around::QuickMenu);
+        person.turns(4);
+        if sheet == Sheet::Worlds { person.panels.act(Action::Worlds, &person.snap, &mut super::Pressed::default()); }
+        else { person.panels.stage.host.menu.page = orbiters_n4n0_core::menu::Page::States; person.panels.open_sheet(sheet, "", &person.snap); }
+        let before = person.panels.stage.canvas.direct_paints;
+        person.panels.takeover.as_mut().unwrap().painted = false;
+        person.panels.paint(&person.snap, |_, _| {});
+        assert_eq!(person.panels.stage.canvas.direct_paints, before, "{sheet:?} painted on the overlay thread");
+        person.turns_until("the worker paints its page", |p| p.panels.takeover.as_ref().is_some_and(|p| p.painted));
+    }
+}
+
+#[test]
+fn review_a_stale_invite_press_never_invites_a_new_row() {
+    for cached in [false, true] {
+        let (mut person, _heard) = Person::heard();
+        person.panels.stage.async_pages = true;
+        person.around = Some(Around::QuickMenu);
+        person.turns(4);
+        person.panels.open_sheet(Sheet::Instances, "Instances", &person.snap);
+        person.panels.stage.host.menu.page = orbiters_n4n0_core::menu::Page::Instances;
+        person.turn();
+        person.panels.takeover.as_mut().unwrap().dirty = true;
+        let a = super::panels::WorldVisit { world_id: "wrld_a".into(), name: "Shown A".into(), location: "wrld_a:111".into(), ..Default::default() };
+        person.panels.facts.worlds_visited = vec![a];
+        let began = Instant::now();
+        while !person.panels.takeover.as_ref().unwrap().painted || person.panels.stage.painter.busy() {
+            assert!(began.elapsed() < Duration::from_secs(10));
+            person.panels.paint(&person.snap, |_, _| {});
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        person.panels.facts.worlds_visited = vec![super::panels::WorldVisit { world_id: "wrld_b".into(), name: "New B".into(), location: "wrld_b:222".into(), ..Default::default() }];
+        if cached {
+            person.panels.open_sheet(Sheet::Settings, "", &person.snap);
+            person.panels.open_sheet(Sheet::Instances, "Instances", &person.snap);
+            person.panels.paint(&person.snap, |_, _| {});
+        }
+        let i = person.panels.list.len();
+        let at = person.panels.takeover.as_ref().unwrap().items.iter().find(|x| x.action == Action::Invite(0, 0)).unwrap().rect.center();
+        person.panels.hover(Some((i, at)));
+        person.panels.press(&person.snap);
+        person.panels.release();
+        if let Some(action) = person.panels.pressed_late.take() { person.panels.act(action, &person.snap, &mut super::Pressed::default()); }
+        assert_ne!(person.panels.invited.as_ref().map(|x| x.0.as_str()), Some("wrld_b:222"), "cached {cached}: shown A invited B");
+    }
+}
+
+#[test]
+fn review_shell_pictures_are_rendered_off_the_overlay_thread() {
+    let mut person = Person::with_a_song(); person.panels.stage.async_pages = true; person.around = Some(Around::QuickMenu);
+    person.turns_until("shell pictures", |p| !p.panels.is_empty() && p.panels.all().all(|p| p.painted));
+    assert!(person.panels.all().all(|p| p.canvas.direct_paints == 0));
+}
+#[test]
+fn review_streamed_ask_words_and_answers_reach_the_published_picture() {
+    use orbiters_n4n0::status::{N4n0Line, N4n0Who, ProvisionalSpeech, VoiceReadiness};
+    let mut person = Person::new(); person.panels.stage.async_pages = true; person.around = Some(Around::QuickMenu); person.turns(4);
+    person.panels.open_sheet(Sheet::Talk, "Ask", &person.snap);
+    for words in ["what", "what is", "what is new"] {
+        let s = Arc::make_mut(&mut person.snap); s.settings.n4n0.enabled = true; s.n4n0.voice.readiness = VoiceReadiness::Ready; s.n4n0.voice.speech = true; s.n4n0.voice.automatic = true; s.n4n0.voice.provisional = Some(ProvisionalSpeech { listen: 3, text: words.into() });
+        person.turn();
+        person.turns_until("live words on the picture", |p| p.panels.stage.presented.as_ref().is_some_and(|(_,f,_)| f.talk_heard.as_deref() == Some(words)));
+    }
+    for words in ["Here", "Here is", "Here is the answer."] {
+        Arc::make_mut(&mut person.snap).n4n0.lines = vec![N4n0Line { who: N4n0Who::N4n0, text: words.into(), at_ms: 0, streaming: true }].into();
+        person.turn();
+        person.turns_until("streamed answer on the picture", |p| p.panels.stage.presented.as_ref().is_some_and(|(_,f,_)| f.talk_lines.last().is_some_and(|(_,s)| s == words)));
     }
 }

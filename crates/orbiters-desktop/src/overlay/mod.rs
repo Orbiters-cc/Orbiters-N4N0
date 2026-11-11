@@ -250,6 +250,7 @@ fn record_phase(phase: usize, took: Duration) {
 
 /// An egui canvas painted on the CPU for one of the world overlays.
 pub struct Canvas {
+    id: u64,
     ctx: egui::Context,
     painter: Software,
     /// In points.
@@ -261,13 +262,17 @@ pub struct Canvas {
     restyle_off: bool,
     /// A frame was painted: its interface has its fonts (egui has none to ask about before a first frame).
     ran: bool,
+    #[cfg(test)]
+    pub(crate) direct_paints: usize,
 }
 
 impl Canvas {
+    fn next_id() -> u64 { static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1); NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed) }
+    fn pixel_size(&self) -> [u32; 2] { [(self.size.x * self.zoom).round() as u32, (self.size.y * self.zoom).round() as u32] }
     pub fn new(width: u32, height: u32) -> Self {
         let ctx = egui::Context::default();
         orbiters_ui::install(&ctx);
-        Self { ctx, painter: Software::new(width, height), size: egui::vec2(width as f32, height as f32), zoom: 1.0, restyle: None, restyle_off: false, ran: false }
+        Self { id: Self::next_id(), ctx, painter: Software::new(width, height), size: egui::vec2(width as f32, height as f32), zoom: 1.0, restyle: None, restyle_off: false, ran: false, #[cfg(test)] direct_paints: 0 }
     }
 
     /// One of `width` x `height` pixels drawn at `zoom` pixels a point (a panel that scales with what it stands beside: text
@@ -306,6 +311,7 @@ impl Canvas {
     /// pixel what a new canvas would paint: where a letter lies in the atlas depends on what the interface drew before, and the edge of a letter drawn from another place
     /// in it can come out a level or two of 255 apart.
     pub fn renew(&mut self) {
+        self.id = Self::next_id();
         self.ctx = egui::Context::default();
         orbiters_ui::install(&self.ctx);
         self.painter.forget_textures();
@@ -324,6 +330,7 @@ impl Canvas {
     /// Paints a frame (RGBA, premultiplied, transparent where nothing was drawn): only what changed is painted again,
     /// and [`Canvas::damage`] says where.
     pub fn paint(&mut self, time: f64, draw: impl FnMut(&egui::Painter)) -> &[u8] {
+        #[cfg(test)] { self.direct_paints += 1; }
         let mut draw = draw;
         let mut input = RawInput { screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), self.size)), time: Some(time), ..Default::default() };
         input.viewports.insert(ViewportId::ROOT, ViewportInfo { native_pixels_per_point: Some(self.zoom), ..Default::default() });
@@ -354,6 +361,7 @@ impl Canvas {
 
     /// The same with a whole `Ui` to draw in (widgets that lay out or animate).
     pub fn paint_ui(&mut self, time: f64, draw: impl FnMut(&mut egui::Ui)) -> &[u8] {
+        #[cfg(test)] { self.direct_paints += 1; }
         let mut draw = draw;
         let mut input = RawInput { screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), self.size)), time: Some(time), ..Default::default() };
         input.viewports.insert(ViewportId::ROOT, ViewportInfo { native_pixels_per_point: Some(self.zoom), ..Default::default() });

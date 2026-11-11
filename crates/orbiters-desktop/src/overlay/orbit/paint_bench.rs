@@ -246,6 +246,15 @@ impl Rig {
         snap.steamvr.running = mode == Mode::Vr;
         snap.steamvr.overlay = mode == Mode::Vr;
         let mut panels = Panels::new(Arc::new(crate::screenshot::Still), if mode == Mode::Vr { 2.0 } else { 1.0 }, true);
+        if let Some(worlds) = panels.stage.worlds.as_mut() {
+            let previews: Vec<_> = (0..6).map(|i| serde_json::json!({"slot": i, "key": i+1, "id": i+1, "worldId": format!("wrld_00000000-0000-4000-8000-{i:012}"), "name": format!("Replay world {i}"), "author": "Replay", "uploader": "fixture", "view": {"position": [0,1,0], "target": [0,1,1]}})).collect();
+            let entries = crate::overlay::worlds::catalog::parse(&serde_json::json!({"previews": previews}).to_string()).expect("local world fixtures");
+            let images = (0..entries.len()).map(|i| {
+                let image = image::open(&PICTURES.get().expect("local pictures")[i].0).expect("fixture image").to_rgba8();
+                ColorImage::from_rgba_unmultiplied([image.width() as usize, image.height() as usize], image.as_raw())
+            }).collect();
+            assert!(worlds.freeze_paint_fixture(entries, images) && worlds.paint_fixture_ready(), "local thumbnails must be ready before replay");
+        }
         panels.recents.lister = Some(list);
         panels.clock = Some(0.0);
         let (log, pictures) = match log {
@@ -446,7 +455,7 @@ impl Rig {
     /// Whether a part is due a picture, is still coming in, or was handed one in the turn just taken. (Not `Panels::busy`: that also counts N4N0's menu being due a picture, which
     /// it stays while it is on no sheet.)
     fn moving(&self) -> bool {
-        (self.panels.takeover.is_some() && self.panels.stage.painter.busy()) || self.panels.all().any(|p| p.dirty || !p.appear.settled()) || self.steps.last().and_then(|s| s.turns.last()).is_some_and(|c| c.shows > 0)
+        (!self.panels.is_empty() && self.panels.stage.painter.busy()) || self.panels.all().any(|p| p.dirty || !p.appear.settled()) || self.steps.last().and_then(|s| s.turns.last()).is_some_and(|c| c.shows > 0)
     }
 
     /// The seconds to a 3D picture counting down, then where the music is moving on, eight turns a second's worth: what one part says changes, and nothing else.
@@ -518,6 +527,23 @@ impl Rig {
     /// Each part's picture as a file, where the script rests.
     fn save_pictures(&mut self) {
         let Some(dir) = self.pictures.clone() else { return };
+        // The logged replay is untimed. Audit the same frozen draw inputs, fonts and textures
+        // through full serial and parallel redraws before saving the shown picture.
+        if self.panels.stage.async_pages {
+            if let Some(frame) = self.panels.stage.cache.iter().rev().find(|f| self.panels.facts.sheet == Some(f.sheet)) {
+                let rx = self.panels.stage.painter.audit(frame.clone());
+                match rx.recv_timeout(Duration::from_secs(20)) {
+                    Ok(audit) => {
+                        let line = format!("{} {} frozen pixels={} header={} parallel={} parallel_header={} geometry={} hash={:016x}\n", self.mode.name(), self.step, audit.pixels, audit.header_pixels, audit.parallel_pixels, audit.parallel_header_pixels, audit.items, audit.hash);
+                        use std::io::Write;
+                        if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(dir.parent().unwrap().join("frozen-parity.txt")) { let _ = file.write_all(line.as_bytes()); }
+                        if audit.pixels != 0 || audit.header_pixels != 0 || audit.parallel_pixels != 0 || audit.parallel_header_pixels != 0 || !audit.items { self.notes.push(line); }
+                    }
+                    Err(e) => self.notes.push(format!("frozen parity did not finish: {e}")),
+                }
+            }
+        }
+
         if self.mode == Mode::Vr && self.panels.sheet_open() && !self.sheet.pixels.is_empty() {
             let image = egui::ColorImage::from_rgba_premultiplied([self.sheet.px[0] as usize, self.sheet.px[1] as usize], &self.sheet.pixels);
             let path = dir.join(format!("{}-{}-Composed.png", self.mode.name(), self.step)); // i18n: not shown (benchmark artifact path)

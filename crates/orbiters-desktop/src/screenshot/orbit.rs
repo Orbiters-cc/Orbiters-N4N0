@@ -645,7 +645,7 @@ pub(super) fn shots(out: &Path) -> anyhow::Result<()> {
         ("A walk through a rainy city at night", "Wander", "22:09"),
     ]
     .iter()
-    .map(|(title, channel, duration)| panels::VideoTile { title: title.to_string(), channel: channel.to_string(), duration: Some(duration.to_string()), picture: None })
+    .map(|(title, channel, duration)| panels::VideoTile { id: String::new(), title: title.to_string(), channel: channel.to_string(), duration: Some(duration.to_string()), picture: None })
     .collect();
     qm_scene("orbit-sheet-results", out, hd, &Facts { sheet: Some(Sheet::Results), sheet_title: "YouTube".into(), videos, videos_for: "rain sounds".into(), beside_wing: true, ..idle.clone() }, None, Some(Sheet::Results))?;
     results_over_the_game(out, hd, &idle)?;
@@ -877,6 +877,7 @@ fn results_over_the_game(out: &Path, client: Vec2, idle: &Facts) -> anyhow::Resu
         .iter()
         .take(9)
         .map(|v| panels::VideoTile {
+            id: v.id.clone(),
             title: v.title.clone(),
             channel: v.channel.clone(),
             duration: v.duration.clone(),

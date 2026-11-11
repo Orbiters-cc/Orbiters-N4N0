@@ -273,7 +273,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
     run.step("a setting changes", &ctl, &shown, soon, &|_| ctl.update(|s| s.settings.walk_boost.strength = if s.settings.walk_boost.strength > 0.5 { 0.25 } else { 0.75 }));
     run.step("the avatar's speed changes 200 times at once", &ctl, &shown, soon, &|_| {
         for round in 0..200 {
-            ctl.update(|s| s.vrchat.motion = Some(crate::state::AvatarMotion { in_station: false, seated: false, speed: 0.25 * (round % 12) as f32 }));
+            ctl.update(|s| s.vrchat.motion = Some(crate::state::AvatarMotion { in_station: false, seated: false, speed: 0.25 * (round % 12) as f32, speed_at_ms: None }));
         }
     });
     for round in 1..=3 {

@@ -73,6 +73,14 @@ pub fn restore_at_sign_in() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Off is authoritative even while the overlay still publishes an older enabled-level report.
+fn effective_wants(snap: &crate::state::Snapshot) -> Wants {
+    let report = &snap.booster.overlay.report;
+    let stopping = snap.booster.request.is_some_and(|(_, r)| r == orbiters_booster::engine::Request::StopTest);
+    let explicit_off_test = !stopping && report.level == Level::Off && report.testing.is_some_and(|t| t.manual);
+    if snap.booster.watching && !stopping && (snap.settings.booster.level != Level::Off || explicit_off_test) { report.wants } else { Wants::default() }
+}
+
 impl super::Controller {
     /// The app is quitting: other programs come back now, as this process will not be there a second from now.
     pub fn booster_quit(self: &Shared) {
@@ -113,7 +121,10 @@ impl super::Controller {
                 inner.next_request += 1;
                 inner.pending = Some((inner.next_request, request));
             }
-            Command::PutBack => self.patch_settings(&serde_json::json!({ "booster": { "level": Level::Off } })),
+            Command::PutBack => {
+                self.patch_settings(&serde_json::json!({ "booster": { "level": Level::Off } }));
+                self.booster_command(Command::Overlay(orbiters_booster::engine::Request::StopTest));
+            },
             Command::OpenLogs => open_folder(&orbiters_core::paths::logs_dir()),
             Command::GuidedDone(item) => {
                 let was = current_of(item, &self.view());
@@ -212,7 +223,7 @@ impl super::Controller {
             }
             self.booster_publish();
             let snap = self.view();
-            let wants = if snap.booster.watching { snap.booster.overlay.report.wants } else { Wants::default() };
+            let wants = effective_wants(&snap);
             let here = snap.vrchat.runs_here();
             if snap.settings.booster.level != level {
                 // A program taken out of efficiency mode by hand is left so until the step changes.
@@ -256,8 +267,7 @@ impl super::Controller {
             } else {
                 last_lower = None;
                 if lowered_any {
-                    let _ = programs::restore_all(&store, &mut os);
-                    lowered_any = false;
+                    lowered_any = programs::restore_all(&store, &mut os).map_or(true, |r| !r.waiting.is_empty());
                     self.booster_note_lowered(&store);
                 }
             }
@@ -433,6 +443,23 @@ mod tests {
     }
 
     /// One state: a level set from either surface is the settings' own, in the snapshot both draw from.
+    #[test]
+    fn off_rejects_stale_trial_wants_but_allows_a_new_manual_test() {
+        use orbiters_booster::engine::{Request, Testing};
+        use orbiters_booster::trial::{Kind, Side};
+        let mut snap = crate::state::Snapshot::new(orbiters_core::settings::Settings::default());
+        snap.booster.watching = true;
+        snap.booster.overlay.report.level = Level::Background;
+        snap.booster.overlay.report.wants.lower_programs = true;
+        snap.booster.overlay.report.testing = Some(Testing { kind: Kind::Programs, seconds_left: 20.0, side: Side::With, manual: false });
+        assert_eq!(effective_wants(&snap), Wants::default());
+        snap.booster.overlay.report.level = Level::Off;
+        snap.booster.overlay.report.testing.as_mut().unwrap().manual = true;
+        assert!(effective_wants(&snap).lower_programs);
+        snap.booster.request = Some((1, Request::StopTest));
+        assert_eq!(effective_wants(&snap), Wants::default());
+    }
+
     #[test]
     fn a_level_set_anywhere_is_in_the_one_snapshot() {
         let ctl = Controller::new(Settings::default());

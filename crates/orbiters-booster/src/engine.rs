@@ -58,6 +58,8 @@ pub struct Inputs {
 pub enum Request {
     /// Test this now, whatever the limit says.
     TestAnyway(Kind),
+    /// Cancel the current test and restore its changes, including at Off.
+    StopTest,
     /// "Done" on step 3's list.
     GuidedDone,
     GuidedNext,
@@ -133,6 +135,8 @@ pub enum LeftAlone {
 /// What is known right now, without comparing anything.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Now {
+    /// Observed pacing near half the display refresh; does not identify its cause.
+    pub half_rate_pacing: bool,
     pub real_fps: f32,
     pub refresh_hz: f32,
     pub filled_share: f32,
@@ -149,11 +153,20 @@ pub struct Testing {
     pub kind: Kind,
     pub seconds_left: f32,
     pub side: Side,
+    /// Explicitly requested by the person, rather than started automatically.
+    pub manual: bool,
 }
+
+/// Persistent trial lifecycle; result details remain in `comparisons`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TrialStatus { #[default] Idle, Automatic, Manual, Cancelled, Completed, Interrupted }
 
 /// What the overlay says of itself, about once a second. Both surfaces draw from this one report.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Report {
+    pub level: Level,
+    pub trial_status: TrialStatus,
     pub limit: Limit,
     pub line: Line,
     pub now: Option<Now>,
@@ -216,6 +229,8 @@ pub struct Engine {
     raw: Vec<Frame>,
     raw_kind: Option<Kind>,
     level: Level,
+    manual_trial: bool,
+    trial_status: TrialStatus,
 }
 
 impl Default for Engine {
@@ -251,6 +266,8 @@ impl Engine {
             raw: Vec::new(),
             raw_kind: None,
             level: Level::Off,
+            manual_trial: false,
+            trial_status: TrialStatus::Idle,
         }
     }
 
@@ -301,6 +318,7 @@ impl Engine {
         self.sharpness_steps = 0;
         self.hold_test = false;
         if self.trial.as_ref().is_some_and(|t| t.kind == Kind::Sharpness) {
+            self.trial_status = TrialStatus::Interrupted;
             self.trial = None;
         }
     }
@@ -308,6 +326,14 @@ impl Engine {
     pub fn request(&mut self, inputs: &Inputs, request: Request) {
         let now = inputs.now;
         match request {
+            Request::StopTest => {
+                self.trial_status = TrialStatus::Cancelled;
+                self.trial = None;
+                self.hold_test = false;
+                self.last_result = None;
+                self.programs_at = Some(now);
+                self.sharpness_at = Some(now);
+            }
             Request::TestAnyway(kind) => {
                 if self.trial.is_some() || !inputs.scene || inputs.dashboard || inputs.recording || (kind == Kind::Sharpness && self.left_alone.is_some()) {
                     self.last_result = Some((Line::CannotTestNow, now));
@@ -319,6 +345,8 @@ impl Engine {
                     Kind::PanelQuality | Kind::ReconstructionHold => false,
                 };
                 self.start(kind, inputs, keep);
+                self.manual_trial = true;
+                self.trial_status = TrialStatus::Manual;
             }
             Request::GuidedDone => {
                 let Some(item) = self.guide.item() else { return };
@@ -337,6 +365,8 @@ impl Engine {
     }
 
     fn start(&mut self, kind: Kind, inputs: &Inputs, keep: bool) {
+        self.trial_status = TrialStatus::Automatic;
+        self.manual_trial = false;
         self.raw_kind = Some(kind);
         self.trial = Some(Trial::new(kind, inputs.now, inputs.refresh_hz, inputs.people, keep));
         if kind == Kind::Sharpness {
@@ -351,6 +381,7 @@ impl Engine {
             self.abandon(trial.kind, inputs.now);
             return;
         };
+        self.trial_status = TrialStatus::Completed;
         result.kept = result.verdict == Verdict::Kept && trial.keep_if_better;
         self.comparisons.retain(|c| c.kind != result.kind);
         self.comparisons.insert(0, result);
@@ -378,6 +409,7 @@ impl Engine {
 
     /// Stopped because the scene stopped being the same: nothing can be said, and it may try again soon.
     fn abandon(&mut self, kind: Kind, now: f64) {
+        self.trial_status = TrialStatus::Interrupted;
         self.trial = None;
         self.last_result = Some((Line::TooMuchChanging, now));
         if kind == Kind::Programs {
@@ -396,6 +428,14 @@ impl Engine {
         let now = inputs.now;
         if inputs.level != self.level {
             // A choice the person made by hand is respected until the step is changed, not for good.
+            if inputs.level == Level::Off {
+                if self.trial.is_some() { self.trial_status = TrialStatus::Cancelled; }
+                self.trial = None;
+                self.programs = Judged::Not;
+                self.sharpness_steps = 0;
+                self.hold_test = false;
+                self.last_result = None;
+            }
             self.level = inputs.level;
             self.left_alone = None;
         }
@@ -566,9 +606,10 @@ impl Engine {
     pub fn report(&self, inputs: &Inputs, wants: &Wants) -> Report {
         let now = inputs.now;
         let limit = self.classifier.confirmed();
-        let testing = self.trial.as_ref().map(|t| Testing { kind: t.kind, seconds_left: t.seconds_left(now), side: t.side(now) });
+        let testing = self.trial.as_ref().map(|t| Testing { kind: t.kind, seconds_left: t.seconds_left(now), side: t.side(now), manual: self.manual_trial });
         let frames = self.since(now, crate::classify::WINDOW_S);
         let right_now = summarize(&frames, inputs.refresh_hz).filter(|_| inputs.scene).map(|s| Now {
+            half_rate_pacing: (s.real_fps * 2.0 / inputs.refresh_hz - 1.0).abs() < 0.05 && s.filled_share > 0.4,
             real_fps: s.real_fps,
             refresh_hz: inputs.refresh_hz,
             filled_share: s.filled_share,
@@ -600,6 +641,8 @@ impl Engine {
             Line::Limit
         };
         Report {
+            level: inputs.level,
+            trial_status: self.trial_status,
             limit,
             line,
             now: right_now,
@@ -646,6 +689,59 @@ mod tests {
 
     const HZ: f32 = 72.0;
     const WORLD: u64 = 7;
+
+    #[test]
+    fn refused_sharpness_is_no_longer_a_running_trial() {
+        let mut e = Engine::new();
+        let inputs = Inputs { scene: true, ..Inputs::default() };
+        e.request(&inputs, Request::TestAnyway(Kind::Sharpness));
+        e.leave_sharpness_alone(LeftAlone::Refused);
+        let report = e.report(&inputs, &Wants::default());
+        assert_eq!(report.trial_status, TrialStatus::Interrupted);
+        assert!(report.testing.is_none());
+    }
+
+    #[test]
+    fn off_cancels_a_running_trial_and_explicit_off_test_has_a_stop() {
+        let mut r = Run::new(Level::Background, programs_help);
+        r.run(50.0);
+        assert!(r.engine.trial.is_some());
+        r.inputs.level = Level::Off;
+        r.wants = r.engine.tick(&r.inputs, None);
+        assert_eq!(r.wants, Wants::default());
+        assert!(r.report().testing.is_none());
+        r.engine.tick(&r.inputs, Some(Request::TestAnyway(Kind::Programs)));
+        assert!(r.engine.report(&r.inputs, &Wants::default()).testing.unwrap().manual);
+        r.inputs.now += 16.0;
+        assert!(r.engine.tick(&r.inputs, None).lower_programs);
+        assert_eq!(r.engine.tick(&r.inputs, Some(Request::StopTest)), Wants::default());
+    }
+
+    #[test]
+    fn replay_november_11_block_summaries() {
+        // The log has summaries, not per-frame timings. Reconstruct constant frames from each
+        // measured block for policy replay; this does not reproduce its timing distribution.
+        let mut e = Engine::new();
+        let mut now = 0.0;
+        for line in include_str!("../tests/fixtures/2026-11-11.jsonl").lines() {
+            let row: serde_json::Value = serde_json::from_str(line).unwrap();
+            let summary: Summary = serde_json::from_value(row["summary"].clone()).unwrap();
+            let inputs = Inputs { now, scene: true, world: 1, level: serde_json::from_value(row["level"].clone()).unwrap(), refresh_hz: 72.0, ..Inputs::default() };
+            let frames: Vec<_> = (0..summary.frames).map(|i| Frame {
+                time_s: now + i as f64 / summary.real_fps as f64,
+                presents: 2, frame_ready_ms: summary.app_cpu.median,
+                pre_submit_gpu_ms: summary.app_gpu.median, ..Frame::default()
+            }).collect();
+            e.push(&inputs, &frames);
+            let wants = e.tick(&inputs, None);
+            let report = e.report(&inputs, &wants);
+            assert_ne!(report.limit, Limit::Processor);
+            if inputs.level == Level::Off { assert_eq!(wants, Wants::default()); }
+            assert!(report.comparisons.is_empty(), "no measured gain exists in these blocks");
+            now += summary.seconds as f64;
+        }
+        assert!(now > 60.0);
+    }
 
     /// A pretend session: time passes in steps of a fifth of a second, as the overlay's reads do, and the frames say what
     /// the test wants them to.

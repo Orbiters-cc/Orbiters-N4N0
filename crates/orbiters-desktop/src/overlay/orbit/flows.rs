@@ -96,6 +96,19 @@ impl Person {
     }
 }
 
+#[test]
+fn tracking_thumbs_use_configured_values_while_the_driver_view_lags() {
+    let mut person = Person::new();
+    let mut snap = (*person.snap).clone();
+    snap.settings.tracking.enabled = true;
+    snap.settings.tracking.ms = [90, 70, 40];
+    snap.n4n0.tracking = Some(orbiters_n4n0::status::TrackingView { on: false, ms: [0, 0, 0], note: String::new() });
+    person.snap = Arc::new(snap);
+    person.around = Some(Around::QuickMenu);
+    person.turns(3);
+    assert_eq!(person.panels.facts.tracking.as_ref().map(|t| (t.0, t.1)), Some((true, [90, 70, 40])));
+}
+
 /// Enzo: "When I click the saved looks tile, it makes the whole menu bug and become unresponsive": with real saved looks on the list, in both looks, everything on the page pressed.
 #[test]
 fn saved_looks_with_real_looks_answers() {

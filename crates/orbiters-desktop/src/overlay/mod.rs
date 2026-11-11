@@ -843,7 +843,7 @@ fn session(args: &[String]) -> anyhow::Result<Ended> {
                 .vrchat
                 .motion
                 .filter(|_| snap.vrchat.running && snap.osc.receiving)
-                .map(|m| walk::Motion { in_station: m.in_station || m.seated, speed: m.speed }),
+                .map(|m| walk::Motion { in_station: m.in_station || m.seated, speed: if m.speed_at_ms.is_some() { m.speed } else { f32::NAN }, speed_at_ms: m.speed_at_ms }),
             input_read,
         };
         t.walk.update(&steamvr, &moment);

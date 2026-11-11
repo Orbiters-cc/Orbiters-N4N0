@@ -1110,3 +1110,22 @@ fn booster_scenes(out: &std::path::Path, size: egui::Vec2, idle: &Facts) -> anyh
     qm_scene("orbit-booster-details", out, size, &at(&details, true, false), None, Some(Sheet::Booster))?;
     Ok(())
 }
+
+/// Behaviour regression pictures; event/ack ordering is verified separately in IPC and flow tests.
+pub fn behaviour_shots(out: &Path) -> anyhow::Result<()> {
+    use panels::{Sheet, Smoothed};
+    let base = Facts { sheet: Some(Sheet::Tracking), sheet_title: orbiters_i18n::tr("Smooth tracking").into(), tracking: Some((true, [0, 35, 78], String::new())), ..Facts::default() };
+    for (name, values, held) in [
+        ("held", [0, 35, 78], Some((Smoothed::Device(1), 90))),
+        ("released", [0, 90, 78], None),
+        ("stale-driver", [0, 90, 78], None),
+        ("two-sliders", [60, 90, 78], None),
+        ("clamped", [60, 80, 78], None),
+    ] {
+        let mut facts = base.clone();
+        facts.tracking = Some((true, values, String::new()));
+        facts.smoothing_held = held;
+        qm_scene(&format!("tracking-{name}"), out, vec2(1920.0, 1080.0), &facts, None, Some(Sheet::Tracking))?;
+    }
+    Ok(())
+}

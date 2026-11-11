@@ -819,18 +819,19 @@ fn review_slider_releases_round_trip_through_service_with_delayed_state() {
     let (client, wire) = linked_through(&service, crate::ipc::Role::Window);
     let backend = Arc::new(crate::backend::Remote(client.clone()));
     let mut panels = Panels::new(backend.clone(), 2.0, true);
+    let unchanged_tracker = backend.view().settings.tracking.ms[2];
     wire.hold(true);
     for (which, value) in [(Smoothed::Device(0), 90), (Smoothed::Device(1), 70), (Smoothed::QuickMenu, 60), (Smoothed::Wheel, 75)] {
         panels.smoothing_held = Some((which, value));
         panels.release();
         panels.release();
     }
-    assert_eq!(backend.view().settings.tracking.ms, [90,70,0]);
+    assert_eq!(backend.view().settings.tracking.ms, [90,70,unchanged_tracker]);
     assert_eq!(backend.view().settings.orbit.vr_smoothing_quick_menu_ms, 60.0);
     assert_eq!(backend.view().settings.orbit.vr_smoothing_wheel_ms, 75.0);
     wire.hold(false);
     assert!(until(|| client.snapshot().smoothing_revision == 4));
-    assert_eq!(client.snapshot().settings.tracking.ms, [90,70,0]);
+    assert_eq!(client.snapshot().settings.tracking.ms, [90,70,unchanged_tracker]);
     client.patch_smoothing(serde_json::json!({"tracking":{"ms":[65535,70,0]}}));
     assert!(until(|| client.snapshot().smoothing_revision == 5));
     assert_eq!(client.snapshot().settings.tracking.ms[0], orbiters_core::settings::TrackingSettings::MAX_MS);

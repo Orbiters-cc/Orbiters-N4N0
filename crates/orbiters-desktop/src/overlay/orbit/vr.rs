@@ -89,6 +89,8 @@ impl MenuButtons {
     /// VRChat's camera opened: its wheel goes then (Enzo).
     pub fn camera_opened(&mut self) {
         self.open = Open::Closed;
+        self.press = None;
+        self.closed_ahead = None;
         self.toggle = None;
     }
 
@@ -1791,6 +1793,12 @@ mod tests {
         assert_eq!(run(&mut b, t0, &[(1, 1100, 1200)], 1300), Open::QuickMenu(1), "and the next press is the Quick Menu's");
         b.camera_opened();
         assert_eq!(b.open(), Open::Closed);
+        b.step([false,true],t0+Duration::from_millis(1500));
+        assert_eq!(b.step([false,true],t0+Duration::from_millis(2000)),Open::Wheel(1));
+        b.camera_opened();
+        assert_eq!(b.step([false,true],t0+Duration::from_millis(2100)),Open::Closed,"the held press must not reopen the wheel over the camera");
+        assert_eq!(b.step([false,false],t0+Duration::from_millis(2200)),Open::Closed,"its release must not reopen a companion either");
+        assert!(b.quick_menu_to_toggle().is_none());
     }
 
     /// As Enzo laid them.

@@ -885,10 +885,10 @@ fn a_previous_instance_opens_its_world_s_page_and_back_comes_to_where_it_was() {
     use orbiters_n4n0_core::menu::InstanceRow;
     // The second world has a 3D capture on Orbiters.
     let world = |i: usize| format!("wrld_00000000-0000-4000-8000-{i:012}");
-    let listing = format!(
-        r#"{{"previews":[{{"slot":0,"key":1,"id":7,"worldId":"{}","name":"World 1","author":"Mei","uploader":"a","view":{{"position":[0,1,0],"target":[0,1,1]}}}}]}}"#,
-        world(1)
-    );
+    // The world the scrolled list shows first has a 3D capture on Orbiters.
+    let listing = |n: usize| {
+        format!(r#"{{"previews":[{{"slot":0,"key":1,"id":7,"worldId":"{}","name":"World","author":"Mei","uploader":"a","view":{{"position":[0,1,0],"target":[0,1,1]}}}}]}}"#, world(n))
+    };
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
     let mut person = Person::new();
     person.around = Some(Around::QuickMenu);
@@ -897,20 +897,23 @@ fn a_previous_instance_opens_its_world_s_page_and_back_comes_to_where_it_was() {
     person.turns(2);
     assert_eq!(person.panels.facts.sheet, Some(Sheet::Instances));
     let rows: Vec<InstanceRow> = (0..12).map(|i| InstanceRow { location: format!("{}:1234{i}~region(eu)", world(i)), world: format!("World {i}"), at: now - i as u64 * 3600 }).collect();
-    person.panels.stage.worlds.as_ref().expect("the worlds' panel").listing_for_test(crate::overlay::worlds::catalog::parse(&listing).unwrap());
-    for (n, capture) in [(0, false), (1, true)] {
+    for capture in [false, true] {
         // These instances, whatever this computer's history has (opening Instances reads it).
         person.panels.stage.host.menu.set_instances(rows.clone(), true, "");
         person.turns(2);
         assert_eq!(person.panels.facts.worlds_visited.len(), 12);
         // Scrolled down by the wheel, as a person reading the list is, and come to rest (a list still gliding takes a press for a drag).
-        if n > 0 {
+        if capture {
             person.panels.wheel(-2.0);
             person.turns_until("the list at rest", |p| (p.panels.facts.gallery_scroll - p.panels.gallery_to).abs() < 0.01 && p.panels.throw == 0.0);
             person.turns(2);
         }
         let scroll = person.panels.gallery_to;
-        assert!(n == 0 || scroll > 0.0, "{scroll}");
+        assert!(!capture || scroll > 0.0, "{scroll}");
+        // The first row wholly in sight (past the list's head).
+        let n = (0..12).find(|&i| person.find(Action::WorldInfo(i)).is_some_and(|(_, at)| at.y > 120.0)).expect("a row in sight");
+        let listed = if capture { vec![crate::overlay::worlds::catalog::parse(&listing(n)).unwrap().remove(0)] } else { Vec::new() };
+        person.panels.stage.worlds.as_ref().expect("the worlds' panel").listing_for_test(listed);
         person.press(Action::WorldInfo(n));
         person.turns(2);
         assert_eq!(person.panels.facts.sheet, Some(Sheet::Worlds), "world {n}: its page");
@@ -932,7 +935,8 @@ fn a_previous_instance_opens_its_world_s_page_and_back_comes_to_where_it_was() {
     person.panels.stage.host.menu.set_instances(rows.clone(), true, "");
     person.turns(2);
     // The chips still invite.
-    person.press(Action::Invite(0, 0));
+    let shown = (0..12).find(|&i| person.find(Action::Invite(i, 0)).is_some_and(|(_, at)| at.y > 120.0)).expect("an invite in sight");
+    person.press(Action::Invite(shown, 0));
     assert!(person.panels.invited.is_some(), "an invite asked for");
 }
 

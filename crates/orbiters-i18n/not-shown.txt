@@ -24,3 +24,6 @@ crates/orbiters-booster
 
 crates/orbiters-desktop/src/harness.rs
 crates/orbiters-desktop/src/overlay/orbit/paint_bench.rs
+
+# Browser engine diagnostics are mapped by camera UI; no user wording here.
+crates/orbiters-web

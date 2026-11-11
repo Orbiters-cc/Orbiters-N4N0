@@ -3,7 +3,7 @@
 //! captured and shared on Orbiters (the listing the VRChat world "N4N0 - 3D picture viewer" shows) badged 3D, and see
 //! one of those around you in SteamVR, placed as that world places it (its ground on your floor, its start view where
 //! you stand, facing your way) and drawn from the same files (docs/world-view-overlay.md). A world without a capture
-//! has its page: Invite me (an invite to oneself in VRChat) or Launch VRChat, and Open on VRChat.
+//! has its page: Invite me when signed in to VRChat (an invite to oneself), and Open on VRChat.
 //!
 //! A pill under N4N0's menu ("3D worlds") opens the panel ([`panel`]) in the menu's place; the menu's Back comes back
 //! to it. Once a capture shows or loads, a bar takes the pill's place, under the menu or the panel whatever page shows:
@@ -210,6 +210,8 @@ pub struct Worlds {
 /// What Go there's threads answer, with the world and the account they were asked for.
 enum GoSaid {
     Listed { world: String, scope: Scope, read: Result<orbiters_core::vrchat_api::WorldInstances, String> },
+    /// The next batch of the list.
+    More { world: String, scope: Scope, read: Result<orbiters_core::vrchat_api::WorldInstances, String> },
     /// The invite went out to this instance, or why not (and whether the list changed under it).
     Invited { world: String, scope: Scope, sent: Result<orbiters_core::vrchat_api::WorldInstance, (String, bool)> },
 }
@@ -1740,6 +1742,28 @@ fn keep_an_eye_frame(steamvr: &vr::Client, n: u32) {
         });
     }
 
+    /// The next batch of Go there's list, by the exact ids VRChat left for it, when the page shown nears the end of what was read.
+    fn go_more(&mut self) {
+        let wanted = (self.panel.go_page + 2) * panel::go::GO_ROWS;
+        let Some(list) = self.go.list.as_ref().filter(|l| !l.remaining.is_empty() && l.items.len() < wanted) else { return };
+        if self.go.loading || self.go.more_loading {
+            return;
+        }
+        let (Some(backend), Some(scope)) = (self.backend.clone(), self.scope.clone()) else { return };
+        let (world, instances) = (self.go.world.clone(), list.remaining.clone());
+        self.go.more_loading = true;
+        let tx = self.go_said.0.clone();
+        let _ = std::thread::Builder::new().name("3d-worlds-instances".into()).spawn(move || {
+            let read = match backend.vrchat_data(scope.clone(), DataRequest::WorldInstancesNext { world: world.clone(), instances }) {
+                Ok(DataResponse::WorldInstances(list)) => Ok(list),
+                Ok(DataResponse::WorldError(e)) => Err(go_words(&e)),
+                Ok(_) => Err(tr("VRChat answered something unexpected.").to_string()),
+                Err(e) => Err(e),
+            };
+            let _ = tx.send(GoSaid::More { world, scope, read });
+        });
+    }
+
     /// The invite to an instance of `world` listed, or a new instance of it and then the invite to that, on a thread (F5).
     fn go_invite(&mut self, world: String, target: GoTarget) {
         let (Some(backend), Some(scope)) = (self.backend.clone(), self.scope.clone()) else { return };
@@ -1786,7 +1810,7 @@ fn keep_an_eye_frame(steamvr: &vr::Client, n: u32) {
     fn follow_go(&mut self) {
         while let Ok(said) = self.go_said.1.try_recv() {
             let (world, scope) = match &said {
-                GoSaid::Listed { world, scope, .. } | GoSaid::Invited { world, scope, .. } => (world.clone(), scope.clone()),
+                GoSaid::Listed { world, scope, .. } | GoSaid::More { world, scope, .. } | GoSaid::Invited { world, scope, .. } => (world.clone(), scope.clone()),
             };
             if world != self.go.world || self.scope.as_ref() != Some(&scope) {
                 continue;
@@ -1798,6 +1822,25 @@ fn keep_an_eye_frame(steamvr: &vr::Client, n: u32) {
                         Ok(list) => self.go.list = Some(list),
                         Err(e) => {
                             self.go.list = None;
+                            self.go.error = Some(e);
+                        }
+                    }
+                }
+                // Added to what was read, where the person is in it untouched.
+                GoSaid::More { read, .. } => {
+                    self.go.more_loading = false;
+                    match (read, self.go.list.as_mut()) {
+                        (Ok(more), Some(list)) => {
+                            list.items.extend(more.items);
+                            list.unavailable += more.unavailable;
+                            list.remaining = more.remaining;
+                        }
+                        (Ok(_), None) => {}
+                        (Err(e), list) => {
+                            // The rest cannot be read now: what was read stays, and says so.
+                            if let Some(list) = list {
+                                list.remaining.clear();
+                            }
                             self.go.error = Some(e);
                         }
                     }
@@ -1821,6 +1864,7 @@ fn keep_an_eye_frame(steamvr: &vr::Client, n: u32) {
             }
             self.panel.dirty = true;
         }
+        self.go_more();
     }
 
     /// The panel's own ask, shown at once (the app's answer replaces it).
@@ -2059,7 +2103,7 @@ mod go_tests {
         worlds.scope = Some(ours.clone());
         worlds.vrchat = true;
         worlds.go = panel::go::GoView { world: WORLD.into(), loading: true, ..Default::default() };
-        let list = || Ok(WorldInstances { items: vec![instance("1~region(eu)")], unavailable: 0 });
+        let list = || Ok(WorldInstances { items: vec![instance("1~region(eu)")], unavailable: 0, remaining: Vec::new() });
         let tx = worlds.go_said.0.clone();
         tx.send(GoSaid::Listed { world: "wrld_00000000-0000-4000-8000-000000000002".into(), scope: ours.clone(), read: list() }).unwrap();
         tx.send(GoSaid::Listed { world: WORLD.into(), scope: other.clone(), read: list() }).unwrap();
@@ -2077,9 +2121,22 @@ mod go_tests {
         assert_eq!(worlds.go.error.as_deref(), Some("That instance is full now."));
         worlds.go.loading = false;
         worlds.go.busy = Some(panel::go::GoBusy::Inviting);
-        tx.send(GoSaid::Invited { world: WORLD.into(), scope: ours, sent: Ok(instance("1~region(eu)")) }).unwrap();
+        tx.send(GoSaid::Invited { world: WORLD.into(), scope: ours.clone(), sent: Ok(instance("1~region(eu)")) }).unwrap();
         worlds.follow_go();
         assert_eq!(worlds.go.invited.as_ref().map(|i| i.id.as_str()), Some("1~region(eu)"));
+        // VRChat's list comes a batch at a time: the next batch is added to what was read; one that cannot be read leaves what was, and says so.
+        worlds.go.list.as_mut().unwrap().remaining = vec!["2~region(eu)".into(), "3~region(eu)".into()];
+        assert_eq!(panel::go::go_pages(&worlds.go), 1, "five a page: one, the batch still to come with it");
+        tx.send(GoSaid::More { world: WORLD.into(), scope: other, read: Ok(WorldInstances { items: vec![instance("9")], unavailable: 0, remaining: Vec::new() }) }).unwrap();
+        tx.send(GoSaid::More { world: WORLD.into(), scope: ours.clone(), read: Ok(WorldInstances { items: vec![instance("2~region(eu)")], unavailable: 1, remaining: vec!["3~region(eu)".into()] }) }).unwrap();
+        worlds.follow_go();
+        let list = worlds.go.list.clone().unwrap();
+        assert_eq!(list.items.iter().map(|i| i.id.as_str()).collect::<Vec<_>>(), ["1~region(eu)", "2~region(eu)"]);
+        assert_eq!((list.unavailable, list.remaining.len()), (1, 1));
+        tx.send(GoSaid::More { world: WORLD.into(), scope: ours.clone(), read: Err("VRChat asks to wait".into()) }).unwrap();
+        worlds.follow_go();
+        assert!(worlds.go.list.as_ref().is_some_and(|l| l.items.len() == 2 && l.remaining.is_empty()), "what was read stays");
+        assert!(worlds.go.error.is_some());
         // Signed out of VRChat: the page says so, whatever it read.
         worlds.vrchat = false;
         let status = worlds.status();

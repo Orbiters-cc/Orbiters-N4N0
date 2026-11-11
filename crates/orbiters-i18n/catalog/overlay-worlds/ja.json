@@ -253,5 +253,6 @@
   "That instance is no longer on the list: here it is again.": "そのインスタンスはもうリストにありません。最新のリストです。",
   "That instance is full now.": "そのインスタンスは満員になりました。",
   "That instance has closed.": "そのインスタンスは終了しました。",
-  "You cannot join that instance.": "そのインスタンスには参加できません。"
+  "You cannot join that instance.": "そのインスタンスには参加できません。",
+  "Looking for more instances…": "ほかのインスタンスを探しています…"
 }

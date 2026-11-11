@@ -24,6 +24,13 @@ pub struct GoView {
     pub invited: Option<WorldInstance>,
     /// The region of the instance the player is in: new instances are made there unless another is picked.
     pub region: Option<InstanceRegion>,
+    /// The next batch of the list is being read (VRChat's list comes a batch at a time).
+    pub more_loading: bool,
+}
+
+/// Pages of the list: those read, and one more while VRChat has more to give.
+pub fn go_pages(go: &GoView) -> usize {
+    go.list.as_ref().map_or(1, |l| (l.items.len() + usize::from(!l.remaining.is_empty())).div_ceil(GO_ROWS).max(1))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -145,7 +152,7 @@ impl Panel {
             return;
         }
         if let Some(list) = &go.list {
-            let pages = list.items.len().div_ceil(GO_ROWS).max(1);
+            let pages = go_pages(go);
             let first = self.go_page.min(pages - 1) * GO_ROWS;
             // One that cannot be joined is shown, greyed, and cannot be pressed.
             for i in first..(first + GO_ROWS).min(list.items.len()) {
@@ -213,8 +220,12 @@ impl Panel {
                     text(p, pos2(LIST.center().x, LIST.center().y + 38.0), Align2::CENTER_CENTER, orbit_look::txt(tr("Make a new one on the right."), 17.0).color(fade(theme::FG_3, shown)));
                 }
                 (Some(list), _) => {
-                    let pages = list.items.len().div_ceil(GO_ROWS).max(1);
+                    let pages = go_pages(go);
                     let first = self.go_page.min(pages - 1) * GO_ROWS;
+                    // A page past what was read: the next batch is on its way.
+                    if first >= list.items.len() {
+                        text(p, pos2(LIST.center().x, LIST.center().y), Align2::CENTER_CENTER, orbit_look::txt(tr("Looking for more instances…"), 19.0).color(fade(theme::FG_3, shown)));
+                    }
                     for (slot, i) in (first..(first + GO_ROWS).min(list.items.len())).enumerate() {
                         let item = &list.items[i];
                         let (h, pr) = state(Target::GoInstance(i));
@@ -241,7 +252,7 @@ impl Panel {
                         };
                         text(p, pos2(rect.max.x - 20.0, rect.center().y), Align2::RIGHT_CENTER, orbit_look::txt(word, 17.0).weight(weight::SEMIBOLD).color(fade(tint, alpha)));
                     }
-                    if list.unavailable > 0 && pages == 1 {
+                    if list.unavailable > 0 && pages == 1 && list.remaining.is_empty() {
                         let line = tr_n("{count} more is hidden from you", "{count} more are hidden from you", list.unavailable as u64);
                         let y = row_rect((list.items.len() - first).min(GO_ROWS)).min.y + 14.0;
                         text(p, pos2(48.0, y), Align2::LEFT_CENTER, orbit_look::txt(line, 15.0).color(fade(theme::FG_4, shown)));
@@ -297,7 +308,7 @@ impl Panel {
             _ => (String::new(), theme::FG_3),
         };
         if !line.is_empty() {
-            let room = if go.list.as_ref().is_some_and(|l| l.items.len() > GO_ROWS) { 380.0 } else { 760.0 };
+            let room = if go_pages(go) > 1 { 380.0 } else { 760.0 };
             text_cut(p, pos2(32.0, 520.0), room, orbit_look::txt(line, 16.0).color(fade(tint, shown)));
         }
     }

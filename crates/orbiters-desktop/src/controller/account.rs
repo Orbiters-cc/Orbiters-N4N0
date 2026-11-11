@@ -483,3 +483,12 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+impl Controller {
+    pub(super) fn test_account(&self) {
+        self.account_runtime.lock().unwrap().read = Some((Server::current(), None));
+        self.account_runtime.lock().unwrap().account = Some(Account { token: "fake".into(), user: None, username: Some("tester".into()), avatar_url: None });
+        self.update(|s| { s.account.state = AccountState::SignedIn { username: "tester".into() }; s.account.development = Server::current() == Server::Development; });
+    }
+}

@@ -253,5 +253,6 @@
   "That instance is no longer on the list: here it is again.": "Cette instance n’est plus dans la liste : la voici à jour.",
   "That instance is full now.": "Cette instance est pleine maintenant.",
   "That instance has closed.": "Cette instance est fermée.",
-  "You cannot join that instance.": "Tu ne peux pas rejoindre cette instance."
+  "You cannot join that instance.": "Tu ne peux pas rejoindre cette instance.",
+  "Looking for more instances…": "Recherche d’autres instances…"
 }

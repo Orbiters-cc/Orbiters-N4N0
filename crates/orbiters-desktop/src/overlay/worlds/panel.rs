@@ -1503,8 +1503,7 @@ impl Panel {
                         self.pictures_page = step(self.pictures_page, n.div_ceil(PICTURES_PER_PAGE).max(1));
                     }
                     Page::Go => {
-                        let n = status.go.list.as_ref().map_or(0, |l| l.items.len());
-                        self.go_page = step(self.go_page, n.div_ceil(go::GO_ROWS).max(1));
+                        self.go_page = step(self.go_page, go::go_pages(&status.go));
                     }
                     _ => self.results_page = step(self.results_page, self.pages(d, self.results(d).len())),
                 }
@@ -1547,7 +1546,8 @@ impl Panel {
             }
             // Its instances, read: nothing is sent to VRChat until one is pressed (F5).
             Target::Join => {
-                let Some(e) = self.entry(d) else { return Vec::new() };
+                // A press left over from before signing out of VRChat does nothing (the button is gone).
+                let Some(e) = self.entry(d).filter(|_| d.status.list.vrchat) else { return Vec::new() };
                 self.go_page = 0;
                 self.go(Page::Go, time);
                 vec![Action::Join(e.world_id.clone())]
@@ -3272,7 +3272,7 @@ mod tests {
         };
         let listed = super::go::GoView {
             world: HOME.into(),
-            list: Some(WorldInstances { items: vec![instance("48213~hidden(usr_a)~region(eu)~nonce(x)", true), instance("1~region(eu)", false)], unavailable: 1 }),
+            list: Some(WorldInstances { items: vec![instance("48213~hidden(usr_a)~region(eu)~nonce(x)", true), instance("1~region(eu)", false)], unavailable: 1, remaining: Vec::new() }),
             region: Some(InstanceRegion::Eu),
             ..Default::default()
         };
@@ -3332,6 +3332,10 @@ mod tests {
         assert!(targets.contains(&Target::Join) && targets.contains(&Target::OpenWeb) && !targets.contains(&Target::Show), "{targets:?}");
         assert!(targets.contains(&Target::Like), "its feedback is given as a capture's");
         assert_eq!(panel.press(Target::Join, &d, 3.0), [Action::Join(cat.into())]);
+        let signed_out = Status { list: ListStatus { vrchat: false, ..searched.list.clone() }, ..searched.clone() };
+        let out = data(&entries, &signed_out, &feedback, &facts);
+        assert!(!panel.targets(&out).iter().any(|(t, _)| *t == Target::Join));
+        assert!(panel.press(Target::Join, &out, 3.0).is_empty());
         assert_eq!(panel.press(Target::OpenWeb, &d, 3.0), [Action::OpenWeb(cat.into())]);
         assert!(panel.press(Target::Show, &d, 3.0).is_empty());
         // Another list shows: its page stays, kept by the host.

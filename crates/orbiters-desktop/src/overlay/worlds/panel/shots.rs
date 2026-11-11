@@ -306,6 +306,9 @@ pub fn shots(out: &std::path::Path) -> anyhow::Result<()> {
     paint("small-docked", &entries, &detail, &docked, &feedback, 5.0)?;
     paint("small-near", &entries, &detail, &Status { small_near: true, ..docked.clone() }, &feedback, 5.0)?;
     paint("small-taken", &entries, &detail, &Status { small_docked: false, small_taken: true, ..docked.clone() }, &feedback, 5.0)?;
+    paint("review-signed-in", &entries, &detail, &docked, &feedback, 5.0)?;
+    let mut signed_out_review = docked.clone(); signed_out_review.list.vrchat = false;
+    paint("review-signed-out", &entries, &detail, &signed_out_review, &feedback, 5.0)?;
     paint("side-headset", &entries, &detail, &Status { headset: true, ..Default::default() }, &feedback, 5.0)?;
     // A headset's list with no side panel, on a sheet: endless, with no arrows and no Back of its own; and part way through the side panel coming out.
     let sheet = Panel { on_sheet: true, ..base.clone() };
@@ -429,7 +432,7 @@ pub fn shots(out: &std::path::Path) -> anyhow::Result<()> {
         let go = |view: GoView| Status { go: GoView { world: world.clone(), region: Some(InstanceRegion::Eu), ..view }, ..listed.clone() };
         let chooser = Panel { page: Page::Go, selected: Some(rooftop.id), ..Default::default() };
         let pointed = Panel { hover: Some(Target::GoInstance(0)), ..chooser.clone() };
-        let list = |items: Vec<WorldInstance>, unavailable: usize| Some(WorldInstances { items, unavailable });
+        let list = |items: Vec<WorldInstance>, unavailable: usize| Some(WorldInstances { items, unavailable, remaining: Vec::new() });
         paint("go-loading", &rooftop_list, &chooser, &go(GoView { loading: true, ..Default::default() }), &stand_in_feedback(true), 5.0)?;
         paint("go-list", &rooftop_list, &pointed, &go(GoView { list: list(items[..4].to_vec(), 2), ..Default::default() }), &stand_in_feedback(true), 5.0)?;
         paint("go-empty", &rooftop_list, &chooser, &go(GoView { list: list(Vec::new(), 0), ..Default::default() }), &stand_in_feedback(true), 5.0)?;
@@ -439,6 +442,9 @@ pub fn shots(out: &std::path::Path) -> anyhow::Result<()> {
         paint("go-refused", &rooftop_list, &chooser, &go(GoView { list: list(items.clone(), 0), error: Some(full.into()), ..Default::default() }), &stand_in_feedback(true), 5.0)?;
         paint("go-invited", &rooftop_list, &chooser, &go(GoView { list: list(items.clone(), 0), invited: Some(items[1].clone()), ..Default::default() }), &stand_in_feedback(true), 5.0)?;
         let many: Vec<WorldInstance> = (0..12).map(|i| one(&format!("m{i}"), InstanceAccess::Public, "eu", i, Some(32), None, false)).collect();
+        let first_batch: Vec<WorldInstance> = (0..5).map(|i| one(&format!("b{i}"), InstanceAccess::Public, "eu", i + 3, Some(32), None, false)).collect();
+        let partial = Some(WorldInstances { items: first_batch, unavailable: 0, remaining: vec!["rest".into()] });
+        paint("go-more-coming", &rooftop_list, &Panel { go_page: 1, ..chooser.clone() }, &go(GoView { list: partial, more_loading: true, ..Default::default() }), &stand_in_feedback(true), 5.0)?;
         paint("go-pages", &rooftop_list, &Panel { go_page: 1, ..chooser.clone() }, &go(GoView { list: list(many, 0), ..Default::default() }), &stand_in_feedback(true), 5.0)?;
     }
     // The chip under N4N0's menu (no capture).

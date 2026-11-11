@@ -897,7 +897,8 @@ impl WalkBoost {
         let pushed = stick.is_some_and(|s| push(s) > 0.0);
         let was_carrying = self.gate.since.is_some();
         let boost = std::mem::take(&mut self.boost);
-        let carries = self.gate.carries(now, pushed || (self.gate.stopped && !stick.is_some_and(|s| s.iter().all(|v| v.is_finite()) && push(s) == 0.0)), m.motion.as_ref(), boost);
+        let released = stick.is_some_and(|s| s.iter().all(|v| v.is_finite()) && push(s) == 0.0);
+        let carries = self.gate.carries(now, pushed || (self.gate.stopped && !released), m.motion.as_ref(), boost);
         if was_carrying != carries || (pushed && self.gate.logged.is_none_or(|at| now.saturating_duration_since(at) >= Duration::from_secs(1))) {
             self.gate.logged = Some(now);
             let age = m.motion.and_then(|m| m.speed_at_ms).map(|at| {
@@ -916,7 +917,7 @@ impl WalkBoost {
             return Err("the stick was let go"); // i18n: not shown (the walk's log)
         }
         if !carries {
-            return Err("VRChat does not walk the avatar"); // i18n: not shown (the walk's log)
+            return Err("VRChat motion is stopped or uncertain; release the stick to try again"); // i18n: not shown (the walk's log)
         }
         let Some(frame) = frame() else { return Err("forward is not tracked") }; // i18n: not shown (the walk's log)
         let dir = direction(stick, &frame);
@@ -1974,7 +1975,7 @@ mod tests {
                     walk.step(&mut rig, &m, || Some([0.0, stick]), || Some(head), now);
                     if frame > hz { assert!(walk.moving(), "{hz} Hz, stick {stick}, frame {frame}"); }
                 }
-                assert!(!walk.log.said.iter().any(|s| s.contains("VRChat does not walk")));
+                assert!(!walk.log.said.iter().any(|s| s.contains("motion is stopped or uncertain")));
             }
         }
     }
@@ -1994,7 +1995,14 @@ mod tests {
                     else { Some(Motion { speed: if frame < 150 { 4.0 } else { 12.0 }, ..Motion::default() }) };
                 let m = Moment { motion, ..moment(&s, None) };
                 let head = rig.head_frame(0.0);
-                walk.step(&mut rig, &m, || FORWARD, || Some(head), t + Duration::from_millis(frame * 10));
+                // Station survives release; a motion stop survives unavailable/nonfinite input.
+                let stick = match (station, frame) {
+                    (true, 200) => Some([0.0, 0.0]),
+                    (false, 200) => None,
+                    (false, 201) => Some([f32::NAN, 1.0]),
+                    _ => FORWARD,
+                };
+                walk.step(&mut rig, &m, || stick, || Some(head), t + Duration::from_millis(frame * 10));
                 if frame > 200 { assert!(!walk.moving(), "station={station}, frame={frame}"); }
             }
             let stopped = fake.at(Duration::ZERO).offset;

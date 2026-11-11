@@ -101,7 +101,11 @@ pub fn dist(config: &Config, options: &Options) -> anyhow::Result<PathBuf> {
     copy(&face_model, &stage.join(face_model.file_name().expect("a file")))?;
     copy(&bin.join(DRIVER), &stage.join(DRIVER))?;
     ours.push(stage.join(DRIVER));
-    copy(&vcruntime(config)?, &stage.join(VCRUNTIME))?;
+    let runtime = vcruntime(config)?;
+    copy(&runtime, &stage.join(VCRUNTIME))?;
+    // The camera/WebView desktop also imports the x64 exception-handling runtime. Keep both from the same redist.
+    let companion = "vcruntime140_1.dll";
+    copy(&runtime.with_file_name(companion), &stage.join(companion))?;
     for document in DOCUMENTS {
         copy(&crate::root().join(document), &stage.join(document))?;
     }

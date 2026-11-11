@@ -1,0 +1,108 @@
+[
+  {
+    "name": "IMG3",
+    "suffix": "509e9d56-6806-42da-ac0c-e42e88c01af6",
+    "panel": [
+      [
+        729,
+        265
+      ],
+      [
+        1285,
+        248
+      ],
+      [
+        1290,
+        565
+      ],
+      [
+        730,
+        575
+      ]
+    ],
+    "tiles": [
+      [
+        711,
+        175
+      ],
+      [
+        838,
+        196
+      ],
+      [
+        779,
+        485
+      ],
+      [
+        663,
+        458
+      ]
+    ],
+    "note": "Old tiles overlap the upper-left rim and viewfinder; their roll differs from the panel."
+  },
+  {
+    "name": "IMG4",
+    "suffix": "e9442b3d-2d30-498e-8d71-4f75aef6cd19",
+    "panel": [
+      [
+        685,
+        326
+      ],
+      [
+        1081,
+        450
+      ],
+      [
+        1164,
+        604
+      ],
+      [
+        611,
+        451
+      ]
+    ],
+    "tiles": [
+      [
+        752,
+        239
+      ],
+      [
+        802,
+        278
+      ],
+      [
+        669,
+        396
+      ],
+      [
+        591,
+        344
+      ]
+    ],
+    "note": "Foreshortened panel: old tile plane differs. A billboard cannot represent this pitch."
+  },
+  {
+    "name": "IMG5",
+    "suffix": "2f798f11-17d5-4315-8394-f665f5f3e603",
+    "panel": [
+      [
+        680,
+        254
+      ],
+      [
+        1191,
+        260
+      ],
+      [
+        1192,
+        544
+      ],
+      [
+        674,
+        540
+      ]
+    ],
+    "tiles": [],
+    "note": "Camera visible, no tools. No elapsed-time inference is possible from this single frame."
+  }
+]

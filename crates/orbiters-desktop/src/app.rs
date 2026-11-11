@@ -281,6 +281,17 @@ impl App {
             420.0,
         );
 
+        // While a recording runs, its Stop from every page (Enzo, F13): never a start.
+        let live = !snap.capture.photo_3d && matches!(snap.capture.state, CaptureState::Starting | CaptureState::Recording | CaptureState::Paused | CaptureState::Stopping);
+        if live {
+            let stopping = snap.capture.state == CaptureState::Stopping;
+            let b = widgets::Button::new(if stopping { tr("Stopping…") } else { tr("Stop recording") }).icon(icons::RECORD).variant(widgets::Variant::Stop).size(widgets::Size::Sm).enabled(!stopping);
+            let w = b.desired_width(ui);
+            let at = Rect::from_min_size(pos2(rect.right() - 4.0 - 44.0 * 3.0 - 12.0 - w, rect.top() + 6.0), vec2(w, 28.0));
+            if widgets::activated(&b.show_at(ui, at)) {
+                self.ctl.stop_capture();
+            }
+        }
         // Window buttons, platform order.
         let close = if cfg!(windows) {
             tr("Close (Orbiters keeps running in the tray)")

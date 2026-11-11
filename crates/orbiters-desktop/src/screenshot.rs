@@ -249,6 +249,9 @@ fn shots(args: &[String], picture_folders: Vec<PathBuf>) -> anyhow::Result<()> {
     if only.as_deref() == Some("orbit") {
         return orbit::shots(&out);
     }
+    if only.as_deref() == Some("orbit-camera") {
+        return orbit::camera_shots(&out);
+    }
     if let Some(refs) = only.as_deref().and_then(|o| o.strip_prefix("orbit-vr=")) {
         return orbit::vr_shots(&out, std::path::Path::new(refs));
     }
@@ -3565,4 +3568,50 @@ fn with_calls(snap: &Snapshot, ringing: bool) -> Snapshot {
         });
     }
     s
+}
+
+#[cfg(test)]
+mod dashboard_tests {
+    use super::*;
+
+    /// The SteamVR dashboard as it is painted, settled: its pixels.
+    fn dashboard(snap: &Snapshot) -> Vec<u8> {
+        use crate::overlay::ui::{OverlayUi, SIZE};
+        let ctx = egui::Context::default();
+        orbiters_ui::install(&ctx);
+        let backend: Ctl = std::sync::Arc::new(Still);
+        let mut ui_state = OverlayUi::default();
+        let mut body = StandInBody { t_pose: false };
+        let mut sw = crate::overlay::painter();
+        let mut image = Vec::new();
+        for f in 0..90 {
+            let t = f as f64 / 60.0;
+            ui_state.tick(t, false, &mut body, &backend);
+            let mut input = RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, SIZE)), time: Some(t), ..Default::default() };
+            input.viewports.insert(ViewportId::ROOT, ViewportInfo { native_pixels_per_point: Some(1.0), focused: Some(true), ..Default::default() });
+            let mut full = ctx.run_ui(input, |ui| ui_state.show(ui, snap, &backend, &mut body));
+            sw.set_textures(&mut full.textures_delta);
+            if f == 89 {
+                let prims = ctx.tessellate(std::mem::take(&mut full.shapes), full.pixels_per_point);
+                image = sw.paint(&prims, full.pixels_per_point, orbiters_ui::theme::INK_950).to_vec();
+            }
+            sw.free_textures(&mut full.textures_delta);
+        }
+        image
+    }
+
+    /// Enzo (F15): with nothing to stop, the dashboard's recorder starts nothing, and its button looks so: no bright red dot that reads as Record.
+    #[test]
+    fn the_dashboard_s_record_button_looks_disabled_with_nothing_to_stop() {
+        let mut idle = idle_snapshot(&Settings::default(), &[]);
+        idle.steamvr.running = true;
+        idle.steamvr.overlay = true;
+        let rec = orbiters_ui::theme::REC;
+        let reddish = |image: &[u8]| image.chunks_exact(4).filter(|p| (p[0] as i32 - rec.r() as i32).abs() < 40 && (p[1] as i32 - rec.g() as i32).abs() < 40 && (p[2] as i32 - rec.b() as i32).abs() < 40).count();
+        assert!(reddish(&dashboard(&idle)) < 40, "a record-red dot on a button that does nothing");
+        // Recording, its Stop is live and red as ever.
+        let mut recording = idle.clone();
+        recording.capture.state = CaptureState::Recording;
+        assert!(reddish(&dashboard(&recording)) > 40, "the live recorder lost its colour");
+    }
 }

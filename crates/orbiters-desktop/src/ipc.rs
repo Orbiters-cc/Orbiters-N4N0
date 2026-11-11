@@ -67,6 +67,14 @@ pub enum ToClient {
     Close,
 }
 
+/// A long recording can only be started by the camera overlay. Other UI surfaces remain stop-only.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RecordingOrigin {
+    CameraOverlay,
+    OtherUi,
+}
+
 /// Client → service.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -77,7 +85,9 @@ pub enum ToService {
         role: Role,
         pid: u32,
     },
-    StartCapture,
+    StartCapture { origin: RecordingOrigin },
+    CameraQr { active: bool },
+    SwitchDemoAvatar,
     StopCapture,
     /// The Orbiters window to the front.
     ShowWindow,
@@ -1044,6 +1054,9 @@ pub(crate) mod tests {
         s.orbit.note = Some("in the way".into());
         s.worn_kit = Some(true);
         s.camera_open_said = Some(false);
+        s.camera_tools.qr = crate::controller::camera_tools::Qr::Found { url: "https://orbiters.cc".into() };
+        s.camera_tools.demo = crate::controller::camera_tools::Demo::Busy;
+        s.camera_tools.qr_generation = 3;
         s.projects_changed = 5;
         let o = &mut s.n4n0;
         o.face = N4n0Face::Happy;

@@ -68,6 +68,13 @@ pub struct MirrorSource {
 unsafe impl Send for MirrorSource {}
 
 impl MirrorSource {
+    /// Latest compositor frame, for rejecting eye reads that straddle a frame boundary.
+    pub fn frame_index(&self) -> Option<u32> {
+        type F = unsafe extern "system" fn(*mut FrameTiming, u32) -> bool;
+        let mut timing=FrameTiming { size:std::mem::size_of::<FrameTiming>() as u32,..Default::default() };
+        // SAFETY: IVRCompositor_029 entry 10 is GetFrameTiming. The caller retains the live Client.
+        unsafe { entry::<F>(self.table,10)(&mut timing,0) }.then_some(timing.frame_index)
+    }
     /// See [`Compositor::mirror_d3d11`].
     ///
     /// # Safety
@@ -128,6 +135,18 @@ impl Compositor<'_> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn mirror_frame_index_uses_the_sized_timing_record() {
+        unsafe extern "system" fn timing(out:*mut super::FrameTiming, ago:u32)->bool {
+            assert_eq!(ago,0);
+            // SAFETY: frame_index supplies a valid initialized timing record.
+            unsafe { assert_eq!((*out).size,std::mem::size_of::<super::FrameTiming>() as u32); (*out).frame_index=77; }
+            true
+        }
+        let mut table=[0usize;11]; table[10]=timing as *const () as usize;
+        let source=super::MirrorSource { table:table.as_ptr() };
+        assert_eq!(source.frame_index(),Some(77));
+    }
     #[test]
     fn frame_timing_matches_openvr() {
         assert_eq!(std::mem::size_of::<super::FrameTiming>(), 192);

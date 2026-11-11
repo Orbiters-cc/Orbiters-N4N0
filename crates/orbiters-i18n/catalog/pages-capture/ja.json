@@ -417,5 +417,7 @@
   "lamp\u0004Brightness": "明るさ",
   "tool\u0004Select": "選択",
   "the noun\u0004Recording": "録画",
-  "stat tile\u0004Depth frames": "深度フレーム"
+  "stat tile\u0004Depth frames": "深度フレーム",
+  "Record a 3D scene": "3Dシーンを録画",
+  "In VR, open VRChat's camera: Record is beside it.": "VRでVRChatのカメラを開くと、その横に録画があります。"
 }

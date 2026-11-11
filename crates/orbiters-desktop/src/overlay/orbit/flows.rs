@@ -529,7 +529,8 @@ fn the_parts_kept_are_one_a_zone_and_are_let_go() {
     assert_eq!(person.panels.resting().0, 0, "nothing closed yet");
     person.around = None;
     person.turns(2);
-    let quick_menu = Zone::around(Around::QuickMenu).len();
+    // Its Stop is there only while a recording runs.
+    let quick_menu = Zone::around(Around::QuickMenu).iter().filter(|z| !z.only_while_needed()).count();
     assert_eq!(person.panels.resting().0, quick_menu);
     // Opened and closed again: the same ones, not more.
     person.around = Some(Around::QuickMenu);
@@ -544,7 +545,7 @@ fn the_parts_kept_are_one_a_zone_and_are_let_go() {
     person.turns(3);
     person.around = None;
     person.turns(2);
-    let both = quick_menu + Zone::around(Around::Wheel).len();
+    let both = quick_menu + Zone::around(Around::Wheel).iter().filter(|z| !z.only_while_needed()).count();
     assert_eq!(person.panels.resting().0, both);
     // A part asked for at another size (the game's window resized on a desktop) is made anew, and the one kept for its zone goes.
     let mut larger = zones::in_units(Zone::WingWorlds);
@@ -882,6 +883,187 @@ fn unchanged_world_video_reuses_its_page_texture() {
     person.panels.takeover.as_mut().unwrap().dirty = true;
     person.turn();
     assert_eq!(person.panels.takeover.as_ref().unwrap().pictures.get(key).unwrap().id(), first, "unchanged video recreated its texture");
+}
+
+/// Enzo (F13, F15): nothing on the wheel, the Quick Menu or a sheet starts a recording; beside VRChat's camera, Record does. While one runs, Stop is in reach on the
+/// wheel, beside the Quick Menu, on a sheet's head and at the camera; pressed, it says Stopping at once and a second press does nothing.
+#[test]
+fn a_recording_starts_beside_the_camera_alone_and_stops_from_anywhere() {
+    use crate::state::CaptureState;
+    let mut person = Person::new();
+    for around in [Around::Wheel, Around::QuickMenu] {
+        person.around = Some(around);
+        person.turns(3);
+        assert!(person.find(Action::Record).is_none(), "{around:?} offers to record");
+        assert!(person.find(Action::StopRecording).is_none(), "{around:?} has a Stop with nothing to stop");
+    }
+    person.press(Action::Pictures);
+    person.turns(3);
+    assert_eq!(person.panels.facts.sheet, Some(Sheet::Pictures));
+    assert!(person.find(Action::Record).is_none(), "the Pictures sheet offers to record");
+    person.around = None;
+    person.turns(2);
+    person.around = Some(Around::Camera);
+    person.turns(3);
+    assert!(person.find(Action::Record).is_some(), "no Record beside the camera");
+
+    let mut snap = (*person.snap).clone();
+    snap.capture.state = CaptureState::Recording;
+    person.snap = Arc::new(snap);
+    for around in [Around::Wheel, Around::QuickMenu, Around::Camera] {
+        person.around = Some(around);
+        person.turns(3);
+        assert!(person.find(Action::StopRecording).is_some(), "no Stop {around:?}");
+        assert!(person.find(Action::Record).is_none(), "a start in disguise {around:?}");
+    }
+    person.around = Some(Around::QuickMenu);
+    person.turns(2);
+    person.press(Action::All);
+    person.turns(3);
+    let head = person.panels.all().find(|p| p.zone == Zone::SheetBack).expect("a sheet's head");
+    assert!(head.items.iter().any(|i| i.action == Action::StopRecording), "no Stop on the sheet's head");
+    let pressed = person.press(Action::StopRecording);
+    assert!(pressed.clicked);
+    person.turns(2);
+    assert!(person.panels.facts.rec_stopping, "it says Stopping at once");
+    assert!(person.find(Action::StopRecording).is_none(), "pressed, nothing more to press");
+    assert!(person.find(Action::Record).is_none());
+}
+
+/// Enzo (F16): beside the camera, an avatar with no capture kit has its two 3D pictures greyed, saying why, and a press takes none; one not known yet is not said
+/// to have none.
+#[test]
+fn the_camera_s_3d_pictures_say_the_kit_is_missing_only_when_it_is() {
+    use super::panels::camera_words;
+    let mut person = Person::new();
+    person.around = Some(Around::Camera);
+    for (kit, missing) in [(None, false), (Some(true), false), (Some(false), true)] {
+        let mut snap = (*person.snap).clone();
+        snap.worn_kit = kit;
+        person.snap = Arc::new(snap);
+        person.turns(3);
+        assert_eq!(person.panels.facts.no_kit, missing, "{kit:?}");
+        assert_eq!(person.panels.facts.camera.kit, kit);
+        let said = camera_words(&person.panels.facts).map(|w| w.0);
+        assert_eq!(said.as_deref() == Some(orbiters_i18n::tr("This avatar has no capture kit")), missing, "{kit:?}: {said:?}");
+    }
+    person.press(Action::Picture(orbiters_n4n0_core::menu::PhotoMode::People));
+    assert_eq!(person.panels.facts.picture_mode, None, "a greyed 3D picture took one");
+}
+
+/// Enzo (F17): the camera's QR code opens no page: it looks around the camera, with corners round its picture, and a second press stops it.
+#[test]
+fn the_camera_s_qr_code_looks_around_the_camera_and_opens_no_page() {
+    use super::panels::CameraQr;
+    let mut person = Person::new();
+    person.around = Some(Around::Camera);
+    person.turns(3);
+    assert!(!person.panels.all().any(|p| p.zone == Zone::CameraScan), "corners with nothing looked for");
+    person.press(Action::CameraQr);
+    // What the camera's own scan says once it runs (camera-core).
+    let mut snap = (*person.snap).clone();
+    snap.camera_tools.qr = crate::controller::camera_tools::Qr::Looking;
+    person.snap = Arc::new(snap);
+    person.turns(3);
+    assert_eq!(person.panels.facts.sheet, None, "the QR code page opened");
+    assert!(person.panels.takeover.is_none());
+    assert_eq!(person.panels.facts.camera.qr, CameraQr::Looking);
+    assert!(person.panels.all().any(|p| p.zone == Zone::CameraScan && p.shown), "no corners round the camera");
+    person.press(Action::CameraQr);
+    let mut snap = (*person.snap).clone();
+    snap.camera_tools.qr = crate::controller::camera_tools::Qr::Off;
+    person.snap = Arc::new(snap);
+    person.turns(3);
+    assert_eq!(person.panels.facts.camera.qr, CameraQr::Off);
+    assert!(!person.panels.all().any(|p| p.zone == Zone::CameraScan), "the corners stayed");
+}
+
+/// Enzo (F17): a code found beside the camera opens its page over the camera, once for that scan, with its bar; closed, it does not come back for the same code;
+/// VRChat's camera closing takes it away.
+#[test]
+fn a_code_found_beside_the_camera_opens_its_page_over_it_once() {
+    use crate::controller::camera_tools::Qr;
+    let mut person = Person::new();
+    person.around = Some(Around::Camera);
+    let mut snap = (*person.snap).clone();
+    snap.camera_open_said = Some(true);
+    person.snap = Arc::new(snap);
+    person.turns(3);
+    assert!(!person.panels.all().any(|p| p.zone == Zone::CameraWeb), "a page with no code");
+    let mut snap = (*person.snap).clone();
+    snap.camera_tools.qr = Qr::Found { url: "https://orbiters.cc/w/silent-dawn".into() };
+    snap.camera_tools.qr_generation = 3;
+    person.snap = Arc::new(snap);
+    person.turns(3);
+    for zone in [Zone::CameraWeb, Zone::CameraWebBar] {
+        assert!(person.panels.all().any(|p| p.zone == zone && p.shown), "no {zone:?}");
+    }
+    assert_eq!(person.panels.facts.camera.web.as_ref().map(|w| w.url.as_str()), Some("https://orbiters.cc/w/silent-dawn"));
+    assert_eq!(person.panels.facts.sheet, None, "the QR code page opened");
+    assert!(person.find(Action::WebOpen).is_some() && person.find(Action::WebClose).is_some());
+    person.press(Action::WebClose);
+    person.turns(3);
+    assert!(person.panels.facts.camera.web.is_none(), "it did not close");
+    assert!(!person.panels.all().any(|p| p.zone == Zone::CameraWeb), "it came back for the same code");
+    // Another scan finds one: it opens; the camera closes: it goes.
+    let mut snap = (*person.snap).clone();
+    snap.camera_tools.qr_generation = 4;
+    person.snap = Arc::new(snap);
+    person.turns(3);
+    assert!(person.panels.facts.camera.web.is_some(), "a new scan's code did not open");
+    let mut snap = (*person.snap).clone();
+    snap.camera_open_said = Some(false);
+    person.snap = Arc::new(snap);
+    person.turns(3);
+    assert!(person.panels.facts.camera.web.is_none(), "the page outlived the camera");
+}
+
+/// Enzo (F16): the demo avatar is offered beside the camera only to someone signed in to VRChat through Orbiters as the one playing, with an avatar to put on and
+/// no kit on theirs; while it switches it says so and takes no second press.
+#[test]
+fn the_demo_avatar_is_offered_only_where_it_can_be_put_on() {
+    use crate::controller::camera_tools::Demo;
+    use super::panels::DemoSwitch;
+    let mut person = Person::new();
+    person.around = Some(Around::Camera);
+    let mut snap = (*person.snap).clone();
+    snap.worn_kit = Some(false);
+    snap.vrchat.running = true;
+    snap.camera_tools.demo_avatar = Some("avtr_demo".into());
+    person.snap = Arc::new(snap);
+    person.turns(3);
+    assert_eq!(person.panels.facts.camera.demo, None, "offered while signed out");
+    assert!(person.find(Action::DemoAvatar).is_none());
+    let mut snap = (*person.snap).clone();
+    snap.vrchat_login.allowed = true;
+    snap.vrchat_login.user = Some(orbiters_core::vrchat_api::User { id: "usr_me".into(), display_name: "Me".into(), ..Default::default() });
+    snap.vrchat.world.local_player = Some("Me".into());
+    snap.vrchat.world.players.insert("usr_me".into(), "Me".into());
+    person.snap = Arc::new(snap);
+    person.turns(3);
+    assert_eq!(person.panels.facts.camera.demo, Some(DemoSwitch::Offered));
+    assert!(person.find(Action::DemoAvatar).is_some(), "no button where it can be done");
+    // Another account than the one playing: not offered.
+    let mut other = (*person.snap).clone();
+    other.vrchat_login.user = Some(orbiters_core::vrchat_api::User { id: "usr_other".into(), ..Default::default() });
+    let mine = std::mem::replace(&mut person.snap, Arc::new(other));
+    person.turns(3);
+    assert_eq!(person.panels.facts.camera.demo, None, "offered to another account than the one playing");
+    person.snap = mine;
+    person.turns(3);
+    let mut snap = (*person.snap).clone();
+    snap.camera_tools.demo = Demo::Busy;
+    person.snap = Arc::new(snap);
+    person.turns(3);
+    assert_eq!(person.panels.facts.camera.demo, Some(DemoSwitch::Busy));
+    assert!(person.find(Action::DemoAvatar).is_none(), "a second press while it switches");
+    // No avatar to put on (none configured): nothing offered, whatever else.
+    let mut snap = (*person.snap).clone();
+    snap.camera_tools.demo = Demo::Idle;
+    snap.camera_tools.demo_avatar = None;
+    person.snap = Arc::new(snap);
+    person.turns(3);
+    assert_eq!(person.panels.facts.camera.demo, None);
 }
 
 /// Enzo (VR feedback F6): "Clicking Write a comment does nothing". A capture's page on the sheet in VR, small in its frame as he had it, its comments opened and

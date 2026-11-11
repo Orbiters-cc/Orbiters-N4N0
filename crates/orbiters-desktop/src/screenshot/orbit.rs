@@ -67,6 +67,10 @@ fn picture(placed: &Placed, facts: &Facts, hover: Option<usize>, pressed: Option
     let textures: Vec<_> = (0..4).map(|i| canvas.ctx().load_texture("recent", stand_in(i), TextureOptions::LINEAR)).collect();
     let mut facts = facts.clone();
     facts.recent_pictures = textures.iter().enumerate().map(|(n, texture)| (n, texture.id())).collect();
+    // A page shown over the camera: a stand-in of what it drew.
+    if let Some(web) = facts.camera.web.as_mut().filter(|w| w.state == panels::WebState::Shown) {
+        web.picture = textures.first().map(|t| t.id());
+    }
     for _ in 0..2 {
         canvas.paint(0.0, |p| panels::paint(p, placed.zone, logical, &facts, hover, pressed));
     }
@@ -747,6 +751,9 @@ fn camera_scene(out: &Path, facts: &Facts) -> anyhow::Result<()> {
         let shift = [(-side.sign()) * 205.0 * (1.0 - found.across / found.tall).max(0.0), 0.0];
         let facts = Facts { pointed: Some(panels::Action::Picture(orbiters_n4n0_core::menu::PhotoMode::People)), ..facts.clone() };
         for zone in Zone::CAMERA {
+            if zone.only_while_needed() && !panels::needed(zone, &facts) {
+                continue;
+            }
             let units = if side == camera_track::Side::Right { zones::in_units(zone).mirrored().rect } else { zone.units() };
             let size = units.size() * unit;
             let px = [size.x.round().max(1.0) * 2.0, size.y.round().max(1.0) * 2.0];
@@ -787,6 +794,103 @@ fn camera_scene(out: &Path, facts: &Facts) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// The parts beside VRChat's camera in each of their states, round a plain stand-in of its panel (its picture, and the row of buttons VRChat draws under it), two
+/// pixels a unit, the plane seen square on: the column beside it, what it says under it, the corners while it looks for a code, the page over its top edge. Then the
+/// Stop on the wheel, beside the Quick Menu and on a sheet's head while a recording runs.
+pub(super) fn camera_shots(out: &Path) -> anyhow::Result<()> {
+    use orbiters_n4n0_core::menu::PhotoMode;
+    use panels::{Action, CameraNow, CameraQr, DemoSwitch, Sheet, WebPage, WebState};
+    let idle = Facts { recent: recent(), timer: 3, n4n0: true, desktop: false, vr_close: true, camera: CameraNow { kit: Some(true), ..Default::default() }, ..Default::default() };
+    let camera = |change: &dyn Fn(&mut CameraNow)| {
+        let mut camera = idle.camera.clone();
+        change(&mut camera);
+        Facts { camera, ..idle.clone() }
+    };
+    let no_kit = |demo: Option<DemoSwitch>| Facts { no_kit: true, camera: CameraNow { kit: Some(false), demo, ..Default::default() }, ..idle.clone() };
+    let page = |state: WebState| Some(WebPage { url: "https://orbiters.cc/w/silent-dawn?from=qr".into(), title: String::new(), state, picture: None });
+    let recording = Facts { recording: true, recording_seconds: Some(42), capture_busy: true, ..idle.clone() };
+    let states: Vec<(&str, Facts, bool)> = vec![
+        ("orbit-camera-idle", idle.clone(), false),
+        ("orbit-camera-right", camera(&|c| c.on_the_right = true), true),
+        ("orbit-camera-point-record", Facts { pointed: Some(Action::Record), ..idle.clone() }, false),
+        ("orbit-camera-finding", camera(&|c| c.finding = true), false),
+        ("orbit-camera-countdown", Facts { countdown: Some(3), picture_mode: Some(PhotoMode::People), capture_busy: true, ..idle.clone() }, false),
+        ("orbit-camera-no-kit", no_kit(Some(DemoSwitch::Offered)), false),
+        ("orbit-camera-no-kit-right", Facts { camera: CameraNow { on_the_right: true, ..no_kit(Some(DemoSwitch::Offered)).camera }, ..no_kit(Some(DemoSwitch::Offered)) }, true),
+        ("orbit-camera-no-kit-signed-out", no_kit(None), false),
+        ("orbit-camera-no-kit-pointed", Facts { pointed: Some(Action::Picture(PhotoMode::World)), ..no_kit(Some(DemoSwitch::Offered)) }, false),
+        ("orbit-camera-demo-busy", no_kit(Some(DemoSwitch::Busy)), false),
+        ("orbit-camera-demo-failed", no_kit(Some(DemoSwitch::Failed("VRChat did not answer: check your connection, then try again.".into()))), false),
+        ("orbit-camera-demo-done", Facts { camera: CameraNow { demo: Some(DemoSwitch::Done), ..idle.camera.clone() }, ..idle.clone() }, false),
+        ("orbit-camera-qr-looking", camera(&|c| c.qr = CameraQr::Looking), false),
+        ("orbit-camera-qr-no-picture", camera(&|c| c.qr = CameraQr::NoPicture(orbiters_i18n::tr(&orbiters_n4n0_core::qr::no_camera_note(Some(true))).into())), false),
+        ("orbit-camera-web-loading", camera(&|c| c.web = page(WebState::Loading)), false),
+        ("orbit-camera-web-page", camera(&|c| c.web = Some(WebPage { title: "Silent Dawn · Orbiters".into(), ..page(WebState::Shown).expect("a page") })), false),
+        ("orbit-camera-web-failed", camera(&|c| c.web = page(WebState::Failed("The site did not answer.".into()))), false),
+        ("orbit-camera-recording", recording.clone(), false),
+        ("orbit-camera-starting", Facts { rec_starting: true, capture_busy: true, ..idle.clone() }, false),
+        ("orbit-camera-stopping", Facts { rec_stopping: true, capture_busy: true, ..idle.clone() }, false),
+    ];
+    for (name, facts, right) in &states {
+        camera_state(name, out, facts, *right)?;
+    }
+    let hd = vec2(1280.0, 720.0);
+    let desk = Facts { desktop: true, vr_close: false, ..recording.clone() };
+    wheel_scene("orbit-wheel-recording", out, hd, &desk, None, None, false)?;
+    qm_scene("orbit-qm-recording", out, hd, &desk, None, None)?;
+    qm_scene("orbit-sheet-head-stop", out, hd, &Facts { sheet: Some(Sheet::Pictures), sheet_title: "Pictures".into(), beside_wing: true, ..desk.clone() }, None, Some(Sheet::Pictures))?;
+    qm_scene("orbit-sheet-head-stop-view", out, hd, &Facts { sheet: Some(Sheet::Pictures), sheet_title: "Pictures".into(), view_showing: true, beside_wing: true, ..desk.clone() }, None, Some(Sheet::Pictures))?;
+    // In a headset, with Hide 3D and Small here: its Stop is a round button beside them.
+    qm_scene("orbit-sheet-head-stop-view-vr", out, hd, &Facts { desktop: false, vr_close: true, sheet: Some(Sheet::Pictures), sheet_title: "Pictures".into(), view_showing: true, ..desk.clone() }, None, Some(Sheet::Pictures))?;
+    qm_scene("orbit-sheet-head-stop-vr", out, hd, &Facts { desktop: false, vr_close: true, sheet: Some(Sheet::Instances), sheet_title: "Instances".into(), ..desk.clone() }, None, Some(Sheet::Instances))?;
+    qm_scene("orbit-sheet-head-stopping", out, hd, &Facts { sheet: Some(Sheet::All), sheet_title: "All tools".into(), recording: false, rec_stopping: true, beside_wing: true, ..desk.clone() }, None, Some(Sheet::All))?;
+    qm_scene("orbit-sheet-pictures-idle", out, hd, &Facts { sheet: Some(Sheet::Pictures), sheet_title: "Pictures".into(), beside_wing: true, ..Facts { desktop: true, ..idle.clone() } }, None, Some(Sheet::Pictures))?;
+    Ok(())
+}
+
+/// One state of the camera's parts round the stand-in panel.
+fn camera_state(name: &str, out: &Path, facts: &Facts, right: bool) -> anyhow::Result<()> {
+    const PX: f32 = 2.0;
+    let (x0, y0, x1, y1) = (-340.0f32, -660.0f32, 340.0f32, 240.0f32);
+    let (w, h) = (((x1 - x0) * PX) as u32, ((y1 - y0) * PX) as u32);
+    let at = move |x: f32, y: f32| pos2((x - x0) * PX, (y - y0) * PX);
+    let mut ground = Canvas::new(w, h);
+    ground.paint(0.0, |p| {
+        p.rect_filled(egui::Rect::from_min_max(pos2(0.0, 0.0), pos2(w as f32, h as f32)), 0.0, Color32::from_rgb(58, 62, 70));
+        // The camera's picture in its rim, its close at the top left, its arrow at the foot; its buttons under it.
+        let picture = egui::Rect::from_min_max(at(-205.0, -110.0), at(205.0, 110.0));
+        p.rect_filled(picture.expand(5.0 * PX), 16.0 * PX, Color32::from_rgb(18, 20, 24));
+        p.rect_filled(picture, 12.0 * PX, Color32::from_rgb(112, 124, 136));
+        let x = at(-181.0, -83.0);
+        let stroke = egui::Stroke::new(3.0 * PX, Color32::WHITE);
+        p.line_segment([x + vec2(-8.0, -8.0) * PX, x + vec2(8.0, 8.0) * PX], stroke);
+        p.line_segment([x + vec2(-8.0, 8.0) * PX, x + vec2(8.0, -8.0) * PX], stroke);
+        let chevron = at(-8.0, 100.0);
+        p.line_segment([chevron + vec2(-9.0, 4.0) * PX, chevron + vec2(0.0, -4.0) * PX], stroke);
+        p.line_segment([chevron + vec2(0.0, -4.0) * PX, chevron + vec2(9.0, 4.0) * PX], stroke);
+        for i in 0..6 {
+            let left = -165.0 + i as f32 * 52.0;
+            p.rect_filled(egui::Rect::from_min_max(at(left, 114.0), at(left + 44.0, 156.0)), 6.0 * PX, Color32::from_rgb(34, 40, 46));
+        }
+    });
+    let mut image = ground.pixels().to_vec();
+    for zone in Zone::CAMERA {
+        if zone.only_while_needed() && !panels::needed(zone, facts) {
+            continue;
+        }
+        let units = if right { zones::in_units(zone).mirrored().rect } else { zone.units() };
+        let rect = egui::Rect::from_min_max(at(units.min.x, units.min.y), at(units.max.x, units.max.y));
+        let placed = Placed { zone, rect, center: at(0.0, 0.0), unit: PX };
+        let hovered = facts.pointed.and_then(|a| panels::items(zone, units.size(), facts).iter().position(|i| i.action == a));
+        let (pixels, px) = picture(&placed, facts, hovered, None);
+        blit(&mut image, w, &pixels, px, rect.min);
+    }
+    let path = out.join(format!("{name}.png"));
+    save_png(&path, &over_ground(&image, w, h))?;
+    println!("{}", path.display());
+    Ok(())
+}
+
 fn picture_of(placed: &Placed, facts: &Facts) -> (Vec<u8>, [u32; 2]) {
     picture(placed, facts, None, None)
 }
@@ -798,6 +902,7 @@ fn settings_scenes(out: &Path, client: Vec2, idle: &Facts) -> anyhow::Result<()>
     let sheet = |orbit: OrbitSettings, which: Sheet, title: &str| Facts { orbit, sheet: Some(which), sheet_title: orbiters_i18n::tr(title).into(), beside_wing: true, vr_output: Some("Speakers (Realtek Audio)".into()), ..idle.clone() };
     let plain = OrbitSettings::default();
     camera_scene(out, idle)?;
+    camera_shots(out)?;
     qm_scene("orbit-settings", out, client, &sheet(plain, Sheet::Settings, "Settings"), None, Some(Sheet::Settings))?;
     let pink = OrbitSettings { accent: panels::SWATCHES[4], ..plain };
     panels::set_style(&pink);

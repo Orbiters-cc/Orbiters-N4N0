@@ -706,9 +706,10 @@ impl OrbitVr {
                     [eye_on_head,steamvr.eye_to_head(vr::compositor::Eye::Right)],&head));
                 let width=stereo.map(|(_,unit,_)|unit*camera_track::PANEL_SIZE[0]).or(self.camera_measured_width).unwrap_or(self.tune.camera_panel_m);
                 let pose=stereo.map(|(frame,unit,_)|(frame,unit)).or_else(||camera_track::perspective_pose(&seen.found, seen.size, &mirror, &space::compose(&head, &eye_on_head), width));
+                let clearance=|unit:f32| ((2.5+seen.found.residual_px)/seen.found.across.min(seen.found.tall).max(0.01)).max(0.012/unit.max(1e-6));
                 let clear=|frame:&Matrix34,unit:f32,side| {
-                    camera_track::column_clear(&seen.found,seen.size,&mirror,&space::compose(&head,&eye_on_head),frame,unit,side)
-                    && (stereo.is_none() || seen.right.is_some_and(|right|camera_track::column_clear(&right.found,right.size,&camera_track::Mirror::whole_eye(steamvr.projection_raw(vr::compositor::Eye::Right)),&space::compose(&head,&steamvr.eye_to_head(vr::compositor::Eye::Right)),frame,unit,side)))
+                    camera_track::column_clear(&seen.found,seen.size,&mirror,&space::compose(&head,&eye_on_head),frame,unit,side,clearance(unit))
+                    && (stereo.is_none() || seen.right.is_some_and(|right|camera_track::column_clear(&right.found,right.size,&camera_track::Mirror::whole_eye(steamvr.projection_raw(vr::compositor::Eye::Right)),&space::compose(&head,&steamvr.eye_to_head(vr::compositor::Eye::Right)),frame,unit,side,clearance(unit))))
                 };
                 if let Some((frame,unit))=pose {
                     if !clear(&frame,unit,self.camera_side) {
@@ -722,8 +723,8 @@ impl OrbitVr {
                     self.camera_stereo_at=Some(now);
                 }
                 // 2.5 pixels fit tolerance, converted through the observed scale, plus a minimum safe gap.
-                let gap = ((2.5 + seen.found.residual_px) / seen.found.across.min(seen.found.tall).max(0.01) * unit).max(0.012);
-                self.camera_clearance=gap/unit.max(1e-6);
+                let gap = clearance(unit)*unit;
+                self.camera_clearance=clearance(unit);
                 let depth=-(0..3).map(|i| head.m[i][2]*(frame.m[i][3]-head.m[i][3])).sum::<f32>();
                 super::super::vr_log::line(&format!("camera pose: ns={}, captured {:?}, accepted {:?}, depth {}, side {:?}, unit {}, gap {}, stereo_rms {:?}, measured_width {:?}, pose {:?}, landmarks {:?}", orbiters_core::clock::now_ns(), seen.at, now, depth, self.camera_side, unit, gap, stereo.map(|(_,_,rms)|rms), self.camera_measured_width, frame, seen.found)); // i18n: not shown (diagnostics)
                 let adopted=self.camera_follow.seen(frame, unit);

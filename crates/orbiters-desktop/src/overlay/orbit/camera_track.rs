@@ -641,7 +641,7 @@ pub fn side_projects(found: &Found, side: Side) -> bool {
 
 /// A low landmark RMS alone does not bound extrapolation at an oblique panel edge.
 /// Check the recovered column against the observed edge before it can replace the detached fallback.
-pub fn column_clear(found: &Found, size: [f32;2], mirror: &Mirror, eye: &Matrix34, frame: &Matrix34, unit: f32, side: Side) -> bool {
+pub fn column_clear(found: &Found, size: [f32;2], mirror: &Mirror, eye: &Matrix34, frame: &Matrix34, unit: f32, side: Side, clearance: f32) -> bool {
     if !side_projects(found,side) { return false; }
     let sign=side.sign();
     let a=found.at([sign*205.,-110.]);
@@ -651,7 +651,7 @@ pub fn column_clear(found: &Found, size: [f32;2], mirror: &Mirror, eye: &Matrix3
     if !inside.is_finite() || inside.abs()<1e-8 { return false; }
     let local=then(&undone(eye),frame);
     // Enclose the old and new camera columns, including QR and their lower caption/action.
-    [sign*215.,sign*330.].into_iter().all(|x| [-220.,240.].into_iter().all(|y| {
+    [sign*215.,sign*(330.+clearance.max(0.))].into_iter().all(|x| [-220.,240.].into_iter().all(|y| {
         let v:[f32;3]=std::array::from_fn(|i|local.m[i][3]+local.m[i][0]*x*unit-local.m[i][1]*y*unit);
         if v[2]>=-0.0001 { return false; }
         let t=[v[0]/-v[2],-v[1]/-v[2]];
@@ -1176,13 +1176,28 @@ mod tests {
         let scale=PANEL_M/410./0.5*500.;
         let found=Found { perspective:Some([[scale,0.,500.],[0.,scale,500.],[0.,0.,1.]]), ..straight_found(|p|[500.+p[0]*scale,500.+p[1]*scale],scale) };
         let (pose,unit)=perspective_pose(&found,size,&mirror,&STILL,PANEL_M).unwrap();
-        assert!(column_clear(&found,size,&mirror,&STILL,&pose,unit,Side::Left));
-        assert!(column_clear(&found,size,&mirror,&STILL,&pose,unit,Side::Right));
+        assert!(column_clear(&found,size,&mirror,&STILL,&pose,unit,Side::Left,0.));
+        assert!(column_clear(&found,size,&mirror,&STILL,&pose,unit,Side::Right,0.));
         let mut bad=pose;
         bad.m[0][3]-=0.03;
-        assert!(!column_clear(&found,size,&mirror,&STILL,&bad,unit,Side::Right));
+        assert!(!column_clear(&found,size,&mirror,&STILL,&bad,unit,Side::Right,0.));
         bad.m[0][3]+=0.06;
-        assert!(!column_clear(&found,size,&mirror,&STILL,&bad,unit,Side::Left));
+        assert!(!column_clear(&found,size,&mirror,&STILL,&bad,unit,Side::Left,0.));
+    }
+
+    #[test]
+    fn the_uncertainty_clearance_must_not_push_the_column_through_the_eye_plane() {
+        let unit=PANEL_M/410.;
+        let (s,c)=70f32.to_radians().sin_cos();
+        let frame=Matrix34 {m:[[c,0.,-s,0.],[0.,1.,0.,1.5],[s,0.,c,-0.3]]};
+        let size=[1000.,1000.]; let mirror=mirror();
+        let pts:Vec<_>=[[-205.,-110.],[205.,-110.],[205.,110.],[-205.,110.],[0.,0.]].into_iter().map(|p| {
+            let v=[c*p[0]*unit,-p[1]*unit,s*p[0]*unit-0.3];
+            (p,[(v[0]/-v[2]+1.)*500.,(-v[1]/-v[2]+1.)*500.])
+        }).collect();
+        let found=Found {perspective:Some(fit(&pts).unwrap()),..straight_found(|p|p,1.)};
+        assert!(column_clear(&found,size,&mirror,&STILL,&frame,unit,Side::Right,0.));
+        assert!(!column_clear(&found,size,&mirror,&STILL,&frame,unit,Side::Right,200.));
     }
 
     #[test]

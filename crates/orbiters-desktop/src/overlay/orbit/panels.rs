@@ -208,6 +208,8 @@ pub enum Action {
     ResultsBack,
     /// Invites the person to a world's instance: the group's, and which of its visits.
     Invite(usize, usize),
+    /// A world of the Instances sheet (its row): its page, as the 3D worlds sheet shows a world (Enzo, VR feedback F10). Never an invite.
+    WorldInfo(usize),
     /// The computer's volume up or down, and muted or not.
     Volume(bool),
     Mute,
@@ -300,13 +302,60 @@ pub enum InviteChip {
 /// Where talking with N4N0 stands: what its button shows, so that it is clear as day.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub enum TalkNow {
+    /// Pressed, it listens until pressed again (the person took over from automatic, F24).
     #[default]
     Ready,
-    /// With how loud the microphone is, 0 to 1.
+    /// Automatic: listening for the person to start talking (F24).
+    Waiting,
+    /// It hears: with how loud the microphone is, 0 to 1.
     Listening(f32),
+    /// The sentence is over; its words are being made out.
+    Finalizing,
     Thinking,
+    /// Automatic waits while N4N0 answers aloud or waits for an approval; then it listens again.
+    Paused,
+    /// Signed out of Orbiters: nothing to answer as, said before a word (F23). Pressed, it signs in.
+    SignIn,
+    /// The microphone or the speech worker stopped. Pressed, it tries again.
+    Failed,
     /// It cannot now, and why.
     Off(&'static str),
+}
+
+/// Why Drop link cannot put a card of what plays in the world.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum DropWhy {
+    /// It can: the avatar's N4N0 has its link card.
+    #[default]
+    Can,
+    /// VRChat has not said yet which avatar is worn (it loads one).
+    NoAvatarYet,
+    /// The avatar worn has no N4N0 at all.
+    NoN4n0,
+    /// The avatar's N4N0 is from before the link card.
+    NoCard,
+}
+
+impl DropWhy {
+    /// What N4N0's state says of the avatar worn, `can_drop` being what the menu was told.
+    pub fn of(can_drop: bool, avatar_known: bool, n4n0_on_avatar: bool) -> Self {
+        match (can_drop, avatar_known, n4n0_on_avatar) {
+            (true, ..) => DropWhy::Can,
+            (false, false, _) => DropWhy::NoAvatarYet,
+            (false, true, false) => DropWhy::NoN4n0,
+            (false, true, true) => DropWhy::NoCard,
+        }
+    }
+
+    /// Why not, in a sentence that says what to do about it.
+    pub fn says(self) -> &'static str {
+        match self {
+            DropWhy::Can => tr("A card of it in the world, for anyone to take."),
+            DropWhy::NoAvatarYet => tr("Waiting for VRChat to say which avatar you wear."),
+            DropWhy::NoN4n0 => tr("Your avatar has no N4N0: add N4N0 to it to drop links."),
+            DropWhy::NoCard => tr("Your avatar's N4N0 has no link card: update it."),
+        }
+    }
 }
 
 /// A world the person was in, with its instances: how the Instances sheet shows them.
@@ -532,6 +581,12 @@ pub struct Facts {
     pub videos_for: String,
     /// Talking with N4N0: where it stands, the conversation (whether the person said it, what was said), what N4N0 says right now, and how to call it by name when that is on.
     pub talk: TalkNow,
+    /// Listening by itself (it hears when the person starts and stops), or by the button (F24).
+    pub talk_auto: bool,
+    /// The words heard so far of the sentence being said, replaced as more come (F23): not yet in the conversation.
+    pub talk_heard: Option<String>,
+    /// The browser was opened to sign in, from this page.
+    pub talk_signing_in: bool,
     pub talk_lines: Vec<(bool, String)>,
     /// Tracking smoothing: on or off and each kind's milliseconds, and what the driver does now (`None`: not here).
     pub tracking: Option<(bool, [u16; 3], String)>,
@@ -584,6 +639,8 @@ pub struct Facts {
     /// What plays has a link to copy, and it was copied where a card can be dropped.
     pub can_copy_playing: bool,
     pub can_drop_playing: bool,
+    /// Why Drop link cannot put a card in the world, when it cannot (Enzo, VR feedback F3: greyed, saying why).
+    pub drop_why: DropWhy,
     pub playing_link_copied: bool,
     pub can_call: bool,
     pub can_states: bool,
@@ -1180,7 +1237,8 @@ fn sheet_page_items(sheet: Sheet, facts: &Facts) -> Vec<Item> {
                 if y + height < VISIT_HEAD || y > 576.0 {
                     continue;
                 }
-                out.push(Item { action: Action::Idle, rect: r(x0, y, 1024.0 - x0 * 2.0, height), look: Look::Visit(i) });
+                // The row itself opens the world's page (F10); its invites lie on top of it and are hit first.
+                out.push(Item { action: Action::WorldInfo(i), rect: r(x0, y, 1024.0 - x0 * 2.0, height), look: Look::Visit(i) });
                 // The last time at the end, its large button; before it the times before, the newest first: each goes to that instance.
                 let right = 1024.0 - x0 - 12.0;
                 let width = INVITE_WIDTH;
@@ -1492,7 +1550,7 @@ pub fn max_scroll(sheet: Sheet, facts: &Facts) -> f32 {
             let (columns, _, height, top) = video_grid();
             (top + facts.videos.len().div_ceil(columns) as f32 * (height + 12.0) + 8.0 - 576.0).max(0.0)
         }
-        Sheet::Talk => (TALK_TOP + facts.talk_lines.iter().map(|(_, t)| talk_line_height(t)).sum::<f32>() + 8.0 - 576.0).max(0.0),
+        Sheet::Talk => (TALK_TOP + facts.talk_lines.iter().map(|(_, t)| talk_line_height(t)).sum::<f32>() + facts.talk_heard.as_deref().map_or(0.0, talk_line_height) + 8.0 - 576.0).max(0.0),
         _ => 0.0,
     }
 }
@@ -1970,6 +2028,10 @@ pub fn caption(action: Action, facts: &Facts) -> Option<(String, String)> {
             let when = place.and_then(|v| if visit == 0 { None } else { v.earlier.get(visit - 1).map(|e| e.1.clone()) });
             (tr("Invite me").into(), when.map_or_else(|| tr("Orbiters invites you to the instance you were last in here.").to_string(), |w| tr!("To the instance you were in {when}.", when = w)))
         }
+        Action::WorldInfo(group) => (
+            facts.worlds_visited.get(group).map_or_else(|| tr("A world").to_string(), |v| v.name.clone()),
+            tr("Its page: comments, labels, pictures, who made it.").into(),
+        ),
         Action::Volume(up) => (if up { tr("Louder") } else { tr("Quieter") }.into(), tr("Your computer's volume.").into()),
         Action::Mute => (tr("Mute").into(), tr("Your computer's sound, on or off.").into()),
         Action::Pictures => (tr("Pictures").into(), tr("Take a 3D picture, record a scene, see your captures.").into()),
@@ -1997,7 +2059,11 @@ pub fn caption(action: Action, facts: &Facts) -> Option<(String, String)> {
         Action::Previous => (tr_ctx("track", "Previous").into(), tr("The previous track on your computer.").into()),
         Action::Next => (tr_ctx("track", "Next").into(), tr("The next track on your computer.").into()),
         Action::TalkToggle => match facts.talk {
+            TalkNow::Listening(_) if facts.talk_auto => (tr("Listening").into(), tr("It stops by itself when you do.").into()),
             TalkNow::Listening(_) => (tr("Listening").into(), tr("Press when you are done.").into()),
+            TalkNow::Waiting => (tr("Listening for you").into(), tr("Just talk. Press to talk with the button instead.").into()),
+            TalkNow::SignIn => (tr("Sign in to Orbiters").into(), tr("Your browser opens on your computer.").into()),
+            TalkNow::Failed => (tr("Try again").into(), tr("The microphone stopped: press to listen again.").into()),
             _ => (tr("Talk to N4N0").into(), tr("Press, speak, and press again.").into()),
         },
         Action::NewConversation => (tr("New conversation").into(), tr("N4N0 starts over.").into()),
@@ -2030,8 +2096,12 @@ pub fn caption(action: Action, facts: &Facts) -> Option<(String, String)> {
         Action::FullView => (if facts.view_full { tr("Back to its frame") } else { tr("Full screen") }.into(), tr("The 3D view fills the whole sheet, or comes back to its frame.").into()),
         Action::Back => (tr("Back").into(), tr("To the last screen.").into()),
         Action::MicDefault(_) => (tr("Your microphones").into(), tr("Press one to make it Windows' default.").into()),
-        Action::PlayingLink(Target::DropPlaying) if facts.can_drop_playing => (tr("Drop link").into(), tr("A card of it in the world, for anyone to take.").into()),
-        Action::PlayingLink(Target::DropPlaying) => (tr("Drop link").into(), tr("Needs N4N0's link card on your avatar.").into()),
+        Action::PlayingLink(Target::DropPlaying) if facts.can_drop_playing => (tr("Drop link").into(), DropWhy::Can.says().into()),
+        // Greyed: why, and what to do about it (F3).
+        Action::PlayingLink(Target::DropPlaying) => {
+            let why = if facts.drop_why == DropWhy::Can { DropWhy::NoCard } else { facts.drop_why };
+            (tr("Drop link: not available").into(), why.says().into())
+        }
         Action::PlayingLink(_) => (tr("Copy link").into(), tr("The link of what plays, to paste anywhere.").into()),
         Action::CloseSheet => (tr("Close").into(), tr("Back to VRChat's menu.").into()),
         Action::Hide => (tr_ctx("menu tiles", "Hide").into(), tr("Hides these until VRChat's menu opens again.").into()),
@@ -2384,11 +2454,12 @@ pub fn paint_sheet(p: &Painter, sheet: Sheet, facts: &Facts, hover: Option<usize
 fn draw_conversation(p: &Painter, facts: &Facts) {
     text(p, pos2(TALK_LEFT + 2.0, 30.0), Align2::LEFT_CENTER, tr("Conversation"), 20.0, weight::BOLD, look::LABEL);
     let area = Rect::from_min_max(pos2(TALK_LEFT, TALK_TOP), pos2(1024.0 - 20.0, 576.0));
-    if facts.talk_lines.is_empty() {
-        let (first, second) = if matches!(facts.talk, TalkNow::Listening(_)) {
-            (tr("Go ahead"), tr("N4N0 is listening. Press the button again when you are done."))
-        } else {
-            (tr("Nothing said yet"), tr("Press the button, and ask N4N0 anything."))
+    if facts.talk_lines.is_empty() && facts.talk_heard.is_none() {
+        let (first, second) = match facts.talk {
+            TalkNow::SignIn => (tr("Sign in first"), tr("N4N0 answers as your Orbiters account: sign in, then talk.")),
+            TalkNow::Waiting | TalkNow::Listening(_) if facts.talk_auto => (tr("Go ahead"), tr("N4N0 hears when you start talking, and when you stop.")),
+            TalkNow::Listening(_) => (tr("Go ahead"), tr("N4N0 is listening. Press the button again when you are done.")),
+            _ => (tr("Nothing said yet"), tr("Press the button, and ask N4N0 anything.")),
         };
         text(p, pos2(TALK_LEFT + 2.0, TALK_TOP + 22.0), Align2::LEFT_CENTER, first, 27.0, weight::BOLD, look::LABEL);
         let font = look::font(18.5, weight::MEDIUM);
@@ -2418,6 +2489,16 @@ fn draw_conversation(p: &Painter, facts: &Facts) {
             clip.galley(bubble.min + vec2(14.0, 10.0), galley, look::LABEL);
         }
         y += height;
+    }
+    // What is being said, as it is heard: the person's side, outlined and fainter, replaced as more comes (F23).
+    if let Some(heard) = &facts.talk_heard {
+        let line = if heard.trim().is_empty() { "…".to_string() } else { format!("{}…", heard.trim()) };
+        let wide = TALK_WIDTH * 0.86;
+        let galley = clip.layout(line, look::font(17.0, weight::MEDIUM), look::MUTED, wide - 28.0);
+        let size = galley.size() + vec2(28.0, 20.0);
+        let bubble = Rect::from_min_size(pos2(TALK_LEFT + TALK_WIDTH - size.x, y), size);
+        clip.rect_stroke(bubble, look::radius(14.0), Stroke::new(1.5, theme::alpha(look::accent(), 0.7)), egui::StrokeKind::Inside);
+        clip.galley(bubble.min + vec2(14.0, 10.0), galley, look::MUTED);
     }
 }
 
@@ -2774,6 +2855,17 @@ fn draw(p: &Painter, zone: Zone, item: &Item, facts: &Facts, hovered: bool, pres
         Look::PlayingLink { copy } => {
             // Two buttons of one weight (round 12's judges: Drop link was a small dimmed pill): Copy link in the accent, Drop link outlined. Without a link card Drop
             // link says why when pointed or pressed, rather than looking dead.
+            // Enzo (F3): where the avatar cannot drop a card, Drop link is greyed: no fill, a faint edge, its words dim, and nothing gives under a press; pointed at, the
+            // caption says why and what to do.
+            if !copy && !facts.can_drop_playing {
+                let radius = look::radius(rect.height() / 2.0);
+                p.rect_stroke(rect, radius, Stroke::new(1.5, Color32::from_white_alpha(if hovered { 60 } else { 34 })), egui::StrokeKind::Inside);
+                let ink = theme::FG_3;
+                widgets::icon(p, pos2(rect.left() + 21.0, rect.center().y), icons::PROHIBIT, 17.0, theme::FG_4);
+                let (words, font) = fitted(p, tr("Drop link"), 15.0, weight::SEMIBOLD, rect.width() - 48.0, 12.5);
+                p.text(pos2(rect.left() + 36.0, rect.center().y), Align2::LEFT_CENTER, words, font, ink);
+                return;
+            }
             let drawn = if pressed { rect.shrink(1.5) } else { rect };
             let radius = look::radius(drawn.height() / 2.0);
             let (fill, ink) = if copy { (look::accent(), look::ON_ACCENT) } else { (if hovered { look::TILE_HOVER } else { look::TILE }, look::LABEL) };
@@ -3061,27 +3153,67 @@ fn draw(p: &Painter, zone: Zone, item: &Item, facts: &Facts, hovered: bool, pres
             // Clear as day: the one thing on this page that changes with whether N4N0 hears you.
             let center = pos2(rect.center().x, rect.top() + 170.0);
             let radius = 118.0;
+            let rest = if pressed { look::TILE_DOWN } else if hovered { look::TILE_HOVER } else { look::TILE };
             let (fill, ink, first, second): (Color32, Color32, &str, &str) = match facts.talk {
                 // Green is for when it hears you, and for nothing else on this page.
-                TalkNow::Ready => (if pressed { look::TILE_DOWN } else if hovered { look::TILE_HOVER } else { look::TILE }, look::LABEL, tr("Press to talk"), tr("Press again when you are done")),
+                TalkNow::Ready => (rest, look::LABEL, tr("Press to talk"), tr("Press again when you are done")),
+                TalkNow::Waiting => (rest, look::accent(), tr("Listening for you"), tr("Just start talking")),
+                TalkNow::Listening(_) if facts.talk_auto => (look::accent(), look::on_accent(), tr("I hear you"), tr("It stops when you do")),
                 TalkNow::Listening(_) => (look::accent(), look::on_accent(), tr("Listening"), tr("Press when you are done")),
+                TalkNow::Finalizing => (theme::mix(look::TILE, look::accent(), 0.35), look::LABEL, tr("Heard you"), tr("Reading what you said")),
                 TalkNow::Thinking => (look::TILE, look::LABEL, tr("Thinking"), tr("N4N0 answers on the right")),
+                TalkNow::Paused => (look::TILE, look::LABEL, tr("N4N0 is answering"), tr("Then it listens again")),
+                TalkNow::SignIn => (rest, look::LABEL, tr("Sign in to Orbiters"), tr("N4N0 answers as your account")),
+                TalkNow::Failed => (rest, theme::WARN, tr("The microphone stopped"), tr("Press to try again")),
                 TalkNow::Off(why) => (look::TILE, theme::FG_4, tr("Not available"), tr(why)),
             };
+            // How it listens, always in sight, over the button: by itself, or by the button (F24).
+            if !matches!(facts.talk, TalkNow::SignIn | TalkNow::Off(_)) {
+                let (glyph, words) = if facts.talk_auto { (icons::WAVEFORM, tr("Hands-free")) } else { (icons::CIRCLE, tr("By the button")) };
+                let font = look::font(16.0, weight::SEMIBOLD);
+                let wide = p.layout_no_wrap(words.to_string(), font.clone(), look::LABEL).size().x.min(rect.width() - 70.0);
+                let chip = Rect::from_center_size(pos2(rect.center().x, rect.top() + 18.0), vec2(wide + 52.0, 34.0));
+                p.rect_filled(chip, look::radius(17.0), if facts.talk_auto { theme::alpha(look::accent(), 0.18) } else { look::TILE });
+                widgets::icon(p, pos2(chip.left() + 20.0, chip.center().y), glyph, 18.0, if facts.talk_auto { look::accent() } else { look::MUTED });
+                p.text(pos2(chip.left() + 36.0, chip.center().y), Align2::LEFT_CENTER, fit(p, words, &font, wide), font, look::LABEL);
+            }
             if let TalkNow::Listening(level) = facts.talk {
                 p.circle_filled(center, radius + 12.0 + level.clamp(0.0, 1.0) * 28.0, theme::alpha(look::accent(), 0.22));
             }
             p.circle_filled(center, radius, fill);
-            if matches!(facts.talk, TalkNow::Ready) {
-                p.circle_stroke(center, radius, Stroke::new(3.0, Color32::from_white_alpha(if hovered { 110 } else { 54 })));
+            match facts.talk {
+                TalkNow::Ready | TalkNow::SignIn | TalkNow::Failed => {
+                    p.circle_stroke(center, radius, Stroke::new(3.0, Color32::from_white_alpha(if hovered { 110 } else { 54 })));
+                }
+                // Hands-free and waiting: a green ring, the microphone open.
+                TalkNow::Waiting => {
+                    p.circle_stroke(center, radius, Stroke::new(4.0, look::accent()));
+                }
+                _ => {}
             }
-            widgets::icon(p, center, if matches!(facts.talk, TalkNow::Thinking) { icons::CHAT_TEARDROP_TEXT } else { icons::MICROPHONE }, 96.0, ink);
+            let glyph = match facts.talk {
+                TalkNow::Thinking | TalkNow::Paused => icons::CHAT_TEARDROP_TEXT,
+                TalkNow::SignIn => icons::SIGN_IN,
+                TalkNow::Failed => icons::WARNING,
+                _ => icons::MICROPHONE,
+            };
+            widgets::icon(p, center, glyph, 96.0, ink);
             let y = center.y + radius + 48.0;
-            let color = if matches!(facts.talk, TalkNow::Listening(_)) { look::accent() } else { look::LABEL };
-            text(p, pos2(rect.center().x, y), Align2::CENTER_CENTER, first, 30.0, weight::BOLD, color);
+            let color = if matches!(facts.talk, TalkNow::Listening(_) | TalkNow::Waiting) { look::accent() } else { look::LABEL };
+            let big = look::font(30.0, weight::BOLD);
+            p.text(pos2(rect.center().x, y), Align2::CENTER_CENTER, fit(p, first, &big, rect.width() - 8.0), big, color);
             let font = look::font(17.5, weight::MEDIUM);
-            p.text(pos2(rect.center().x, y + 34.0), Align2::CENTER_CENTER, fit(p, second, &font, rect.width() - 8.0), font, look::MUTED);
-            if let Some(word) = &facts.wake_word {
+            p.text(pos2(rect.center().x, y + 34.0), Align2::CENTER_CENTER, fit(p, second, &font, rect.width() - 8.0), font.clone(), look::MUTED);
+            // What a press does here, when it is not plain: the way out of signed out, back to by the button, again after a failure.
+            let third = match facts.talk {
+                TalkNow::SignIn if facts.talk_signing_in => Some(tr("Finish in your browser, on your computer")),
+                TalkNow::SignIn => Some(tr("Press: your browser opens on your computer")),
+                TalkNow::Waiting => Some(tr("Or press to talk with the button")),
+                _ => None,
+            };
+            if let Some(third) = third {
+                p.text(pos2(rect.center().x, y + 62.0), Align2::CENTER_CENTER, fit(p, third, &font, rect.width() - 8.0), font.clone(), if matches!(facts.talk, TalkNow::SignIn) { look::accent() } else { look::MUTED });
+            } else if let Some(word) = &facts.wake_word {
                 let font = look::font(17.5, weight::MEDIUM);
                 p.text(pos2(rect.center().x, y + 62.0), Align2::CENTER_CENTER, fit(p, &tr!("You can also say \u{201c}{word}\u{201d}", word = word), &font, rect.width() - 8.0), font, look::MUTED);
             }
@@ -3149,7 +3281,7 @@ fn draw(p: &Painter, zone: Zone, item: &Item, facts: &Facts, hovered: bool, pres
         }
         Look::VisitHead => {
             // What the rows offer, as large as what is in them; what each column is, on each row over it (round 10's judges found these small and loose).
-            p.text(pos2(26.0, 20.0), Align2::LEFT_CENTER, tr("Invite me: your last visit. Or pick an earlier time."), look::font(19.0, weight::SEMIBOLD), look::LABEL);
+            p.text(pos2(26.0, 20.0), Align2::LEFT_CENTER, tr("A world: its page. Invite me: your last visit, or an earlier time."), look::font(19.0, weight::SEMIBOLD), look::LABEL);
 
         }
         Look::HereNow => {
@@ -3160,7 +3292,8 @@ fn draw(p: &Painter, zone: Zone, item: &Item, facts: &Facts, hovered: bool, pres
         Look::Visit(i) => {
             let p = &p.with_clip_rect(Rect::from_min_max(pos2(0.0, VISIT_HEAD), pos2(1024.0, 576.0)));
             let Some(visit) = facts.worlds_visited.get(i) else { return };
-            tile_back(p, rect, false, false, false);
+            // It opens the world's page: pointed at, it lights as any tile does.
+            tile_back(p, rect, hovered, pressed, false);
             // The world itself across its row, fading out under what is to read.
             if let Some(id) = visit.picture {
                 let points = orbiters_ui::paint::squircle_points_corners(rect, [theme::squircle(look::TILE_RADIUS); 4]);
@@ -3186,7 +3319,11 @@ fn draw(p: &Painter, zone: Zone, item: &Item, facts: &Facts, hovered: bool, pres
             let earlier_from = rect.right() - 12.0 - INVITE_WIDTH - 8.0 - shown as f32 * (EARLIER_WIDTH + 6.0);
             let room = earlier_from - x - 10.0;
             let font = look::font(20.0, weight::BOLD);
-            p.text(pos2(x, rect.center().y - 14.0), Align2::LEFT_CENTER, fit(p, &visit.name, &font, room), font, look::LABEL);
+            // Its name, then what pressing it does: the world's page (F10). The mark stays with the name, however long it is.
+            let name = fit(p, &visit.name, &font, room - 30.0);
+            let wide = p.layout_no_wrap(name.clone(), font.clone(), look::LABEL).size().x;
+            p.text(pos2(x, rect.center().y - 14.0), Align2::LEFT_CENTER, name, font, look::LABEL);
+            widgets::icon(p, pos2(x + wide + 17.0, rect.center().y - 14.0), icons::INFO, 22.0, if hovered { look::accent() } else { look::LABEL });
             let font = look::font(16.0, weight::MEDIUM);
             p.text(pos2(x, rect.center().y + 14.0), Align2::LEFT_CENTER, fit(p, &visit.line, &font, room), font, look::MUTED);
             // Over its earlier visits' times, on the row: what they are (round 10's judges found it small and loose over the list).

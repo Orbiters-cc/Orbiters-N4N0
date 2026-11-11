@@ -2957,7 +2957,9 @@ fn draw(p: &Painter, zone: Zone, item: &Item, facts: &Facts, hovered: bool, pres
                     p.circle_stroke(center, radius, Stroke::new(3.0, Color32::from_white_alpha(if hovered { 110 } else { 54 })));
                 }
                 // Hands-free and waiting: a green ring, the microphone open.
-                TalkNow::Waiting => p.circle_stroke(center, radius, Stroke::new(4.0, look::accent())),
+                TalkNow::Waiting => {
+                    p.circle_stroke(center, radius, Stroke::new(4.0, look::accent()));
+                }
                 _ => {}
             }
             let glyph = match facts.talk {

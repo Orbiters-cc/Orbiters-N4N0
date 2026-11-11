@@ -12,6 +12,17 @@ pub struct Source {
     log_account: Option<String>,
 }
 impl Source {
+    /// Personal-only operations preserve 401/expiry and rate-limit errors; never fall back to Orbiters.
+    pub fn personal<T>(&self, user: &str, current: impl Fn() -> bool, f: impl FnOnce(&mut Client) -> crate::vrchat_api::Result<T>) -> crate::vrchat_api::Result<T> {
+        let mut client = self.direct.as_ref().ok_or(Error::Unauthorized)?.lock().unwrap();
+        if !client.signed_in() { return Err(Error::Unauthorized); }
+        // Cached authenticated identity, no additional HTTP request.
+        if client.signed_in_user_id() != Some(user) { return Err(Error::Unauthorized); }
+        if !current() { return Err(Error::Disabled); }
+        let result = f(&mut client);
+        if !current() { return Err(Error::Disabled); }
+        result
+    }
     pub fn direct_available(&self) -> bool {
         self.direct.as_ref().is_some_and(|c| c.lock().unwrap().signed_in())
     }

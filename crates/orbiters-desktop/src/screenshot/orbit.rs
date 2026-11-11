@@ -384,7 +384,7 @@ pub(super) fn vr_shots(out: &Path, refs: &Path) -> anyhow::Result<()> {
             let center_units = zones::Placed { zone: Zone::SheetBack, rect: qm_units, center: pos2(0.0, 0.0), unit: 1.0 };
             eye.quad(&plane.quad(&center_units, 0.0, 0.0), &qm, qm_px, 1.0);
             let mut end = None;
-            for zone in Zone::QUICK_MENU {
+            for zone in Zone::QUICK_MENU.into_iter().filter(|_| sheet.is_none()) {
                 // Where the headset has it: its gap from My Profile, as the app lays it (the renders had none, and judges saw it touch).
                 let placed = vr::quick_menu_places(0).into_iter().find(|p| p.zone == zone).unwrap_or_else(|| zones::in_units(zone));
                 let hovered = hover.filter(|_| zone == Zone::WingWorlds).map(|_| 0);
@@ -395,14 +395,20 @@ pub(super) fn vr_shots(out: &Path, refs: &Path) -> anyhow::Result<()> {
                     end = Some(space::apply(&plane.frame, [item.x * plane.unit, -item.y * plane.unit, 0.01]));
                 }
             }
-            if let Some(sheet) = sheet {
-                let back = vr::sheet_place(Zone::SheetBack);
-                let (pixels, px) = sharp_picture(&back, facts, None, 2.0);
-                eye.quad(&plane.quad(&vr::clear_of_sheet(back, true), 0.0, 0.016), &pixels, px, 1.0);
-                let page = vr::sheet_place(Zone::Takeover);
-                let px = [1408u32, 792u32];
-                let pixels = sheet_picture(sheet, facts, px);
-                eye.quad(&plane.quad(&vr::clear_of_sheet(page, true), 0.0, 0.02), &pixels, px, 1.0);
+            match sheet {
+                // VRChat's own menus reached: only the way back, where the head's button was.
+                Some(_) if facts.peek => {
+                    let back = vr::clear_of_sheet(vr::sheet_place(Zone::SheetBack), true);
+                    let at = panels::peek_place(facts, back.logical().x);
+                    let pill = zones::Placed { zone: Zone::SheetPeek, rect: egui::Rect::from_min_size(back.rect.min + at.min.to_vec2() * back.unit, at.size() * back.unit), center: back.center, unit: back.unit };
+                    let (pixels, px) = sharp_picture(&pill, facts, None, 2.0);
+                    eye.quad(&plane.quad(&pill, 0.0, 0.02), &pixels, px, 1.0);
+                }
+                Some(sheet) => {
+                    let (quad, pixels, px) = vr_sheet(facts, sheet, &plane);
+                    eye.quad(&quad, &pixels, px, 1.0);
+                }
+                None => {}
             }
             if let Some(end) = end {
                 eye.laser([0.26, 1.05, -0.25], end);
@@ -414,6 +420,17 @@ pub(super) fn vr_shots(out: &Path, refs: &Path) -> anyhow::Result<()> {
         qm_scene(&pointing(Action::Worlds), Some(0), None, &format!("vr-qm-{world}-point-worlds"))?;
         qm_scene(&Facts { sheet: Some(Sheet::All), sheet_title: "All tools".into(), ..facts.clone() }, None, Some(Sheet::All), &format!("vr-sheet-{world}-all"))?;
         qm_scene(&Facts { sheet: Some(Sheet::Pictures), sheet_title: "Pictures".into(), ..facts.clone() }, None, Some(Sheet::Pictures), &format!("vr-sheet-{world}-pictures"))?;
+        // Enzo's IMG1 (2026-11-11): All tools with what plays, its timeline, its volume at 0 and its two links.
+        let playing = Facts { sheet: Some(Sheet::All), sheet_title: "All tools".into(), music: Some(("DJ Brace - 2016 DMC Online Finals (Winning Routine)".into(), true)), music_times: Some((364, 364)), volume: Some((0, false)), can_copy_playing: true, can_drop_playing: true, ..facts.clone() };
+        qm_scene(&playing, None, Some(Sheet::All), &format!("vr-sheet-{world}-all-playing"))?;
+        // A capture around the person: Hide 3D and Small here in the head, the tabs as icons where their names do not fit.
+        let around = Facts { sheet: Some(Sheet::Instances), sheet_title: "Instances".into(), view_showing: true, ..facts.clone() };
+        qm_scene(&around, None, Some(Sheet::Instances), &format!("vr-sheet-{world}-instances-capture"))?;
+        qm_scene(&Facts { view_small: true, ..around.clone() }, None, Some(Sheet::Instances), &format!("vr-sheet-{world}-instances-capture-small"))?;
+        // A page of N4N0's own: its name after the tabs.
+        qm_scene(&Facts { sheet: Some(Sheet::Settings), sheet_title: "Settings".into(), ..facts.clone() }, None, Some(Sheet::Settings), &format!("vr-sheet-{world}-settings"))?;
+        // VRChat's own menus reached from a sheet: the way back alone.
+        qm_scene(&Facts { sheet: Some(Sheet::Pictures), sheet_title: "Pictures".into(), peek: true, ..facts.clone() }, None, Some(Sheet::Pictures), &format!("vr-sheet-{world}-peek"))?;
         }
         let _ = Target::Close;
         // A real capture standing small, drawn by the view's own renderer: in the hole of a world's side panel (the panel's picture
@@ -468,20 +485,19 @@ pub(super) fn vr_shots(out: &Path, refs: &Path) -> anyhow::Result<()> {
             let center_units = zones::Placed { zone: Zone::SheetBack, rect: qm_units, center: pos2(0.0, 0.0), unit: 1.0 };
             let mut eye = Eye::new(size, &ground, eyes);
             eye.quad(&plane.quad(&center_units, 0.0, 0.0), &qm, qm_px, 1.0);
-            // The dark pane behind it, then its plate.
-            let pane = small_hint::backdrop_pixels();
-            eye.quad(&Quad { transform: at, width: hole.width() / 1024.0 * page_quad.width + 0.012, height: hole.height() / 576.0 * page_quad.height + 0.012 }, &pane, small_hint::BACKDROP_PX, 1.0);
+            // Nothing behind it in the hole (Enzo, 2026-11-11): the capture, then the sheet, its back and its page one picture, the wing away.
             eye.over(&model(&small, half_fov)?);
-            for zone in Zone::QUICK_MENU {
-                // Where the headset has it: its gap from My Profile, as the app lays it (the renders had none, and judges saw it touch).
-                let placed = vr::quick_menu_places(0).into_iter().find(|p| p.zone == zone).unwrap_or_else(|| zones::in_units(zone));
-                let (pixels, px) = sharp_picture(&placed, &worlds, None, 2.0);
-                eye.quad(&plane.quad(&vr::clear_of_sheet(placed, true), 0.0, 0.016), &pixels, px, 1.0);
+            let back = vr::clear_of_sheet(vr::sheet_place(Zone::SheetBack), true);
+            let (back_pixels, back_px) = sharp_picture(&back, &worlds, None, 2.0);
+            let mut panel_pixels = panel_pixels;
+            panels::cut_page_corners(&mut panel_pixels, panel_px, [0, 0, panel_px[0], panel_px[1]]);
+            if panel_px[0] == back_px[0] {
+                let whole = vr::compose_sheet(&back_pixels, back_px, &panel_pixels, panel_px, back_px[1] - panel_px[1] - 11);
+                eye.quad(&plane.quad(&back, 0.0, 0.02), &whole, back_px, 1.0);
+            } else {
+                eye.quad(&plane.quad(&back, 0.0, 0.02), &back_pixels, back_px, 1.0);
+                eye.quad(&page_quad, &panel_pixels, panel_px, 1.0);
             }
-            let back = vr::sheet_place(Zone::SheetBack);
-            let (pixels, px) = sharp_picture(&back, &worlds, None, 2.0);
-            eye.quad(&plane.quad(&vr::clear_of_sheet(back, true), 0.0, 0.016), &pixels, px, 1.0);
-            eye.quad(&page_quad, &panel_pixels, panel_px, 1.0);
             eye.save(out, &format!("vr-small-in-the-panel{names}"))?;
             // In a hand, with what says how to zoom it, and its Hide.
             let mut held = stereo::Small::new(&capture.view, &head, capture.small_reach());
@@ -659,16 +675,13 @@ fn qm_scene(name: &str, out: &Path, client: Vec2, facts: &Facts, hover: Option<u
     let mut ground = Canvas::new(w, h);
     stand_in_menu(Around::QuickMenu, client, &mut ground);
     let mut image = ground.pixels().to_vec();
-    for placed in zones::layout_as(Around::QuickMenu, client, facts.orbit.layout == orbiters_core::settings::OrbitLayout::Strip) {
+    // With a sheet up the wing is away (Enzo, 2026-11-11): the sheet's head has its tools.
+    for placed in zones::layout_as(Around::QuickMenu, client, facts.orbit.layout == orbiters_core::settings::OrbitLayout::Strip).into_iter().filter(|_| sheet.is_none()) {
         let hovered = hover.filter(|_| placed.zone == Zone::WingWorlds).map(|_| 0);
         let (pixels, px) = picture(&placed, facts, hovered, None);
         blit(&mut image, w, &pixels, px, placed.rect.min);
     }
     if let Some(sheet) = sheet {
-        if let Some(peek) = zones::place(Zone::SheetPeek, client) {
-            let (pixels, px) = picture(&peek, facts, None, None);
-            blit(&mut image, w, &pixels, px, peek.rect.min);
-        }
         let back = zones::place(Zone::SheetBack, client).expect("it fits");
         let (pixels, px) = picture(&back, facts, None, None);
         blit(&mut image, w, &pixels, px, back.rect.min);
@@ -1008,7 +1021,21 @@ fn sheet_picture(sheet: panels::Sheet, facts: &Facts, px: [u32; 2]) -> Vec<u8> {
     let from = canvas.pixels().to_vec();
     let mut out = from.clone();
     panels::finish_picture(&mut out, &from, px, px[0] as f32 / 1024.0, [0, 0, px[0], px[1]]);
+    panels::cut_page_corners(&mut out, px, [0, 0, px[0], px[1]]);
     out
+}
+
+/// The sheet as the headset is given it: its back and its page in one picture ([`vr::compose_sheet`]), and where it goes.
+fn vr_sheet(facts: &Facts, sheet: panels::Sheet, plane: &crate::overlay::orbit::vr::Plane) -> (Quad, Vec<u8>, [u32; 2]) {
+    use crate::overlay::orbit::vr;
+    let back = vr::clear_of_sheet(vr::sheet_place(Zone::SheetBack), true);
+    let (back_pixels, back_px) = sharp_picture(&back, facts, None, 2.0);
+    let page = vr::sheet_place(Zone::Takeover);
+    let page_px = [(page.rect.width() * 2.0).round() as u32, (page.rect.height() * 2.0).round() as u32];
+    let page_pixels = sheet_picture(sheet, facts, page_px);
+    let top = ((page.rect.top() - vr::sheet_place(Zone::SheetBack).rect.top()) * 2.0).round() as u32;
+    let whole = vr::compose_sheet(&back_pixels, back_px, &page_pixels, page_px, top);
+    (plane.quad(&back, 0.0, 0.02), whole, back_px)
 }
 
 /// A snapshot the FPS booster's sheet can be drawn from: VR running, the overlay watching, at Background unless changed.
@@ -1088,5 +1115,24 @@ fn booster_scenes(out: &std::path::Path, size: egui::Vec2, idle: &Facts) -> anyh
         s.booster.test_tools = true;
     });
     qm_scene("orbit-booster-details", out, size, &at(&details, true, false), None, Some(Sheet::Booster))?;
+    Ok(())
+}
+
+/// Behaviour regression pictures; event/ack ordering is verified separately in IPC and flow tests.
+pub fn behaviour_shots(out: &Path) -> anyhow::Result<()> {
+    use panels::{Sheet, Smoothed};
+    let base = Facts { sheet: Some(Sheet::Tracking), sheet_title: orbiters_i18n::tr("Smooth tracking").into(), tracking: Some((true, [0, 35, 78], String::new())), ..Facts::default() };
+    for (name, values, held) in [
+        ("held", [0, 35, 78], Some((Smoothed::Device(1), 90))),
+        ("released", [0, 90, 78], None),
+        ("stale-driver", [0, 90, 78], None),
+        ("two-sliders", [60, 90, 78], None),
+        ("clamped", [60, 80, 78], None),
+    ] {
+        let mut facts = base.clone();
+        facts.tracking = Some((true, values, String::new()));
+        facts.smoothing_held = held;
+        qm_scene(&format!("tracking-{name}"), out, vec2(1920.0, 1080.0), &facts, None, Some(Sheet::Tracking))?;
+    }
     Ok(())
 }

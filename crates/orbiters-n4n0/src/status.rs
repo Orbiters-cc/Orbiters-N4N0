@@ -80,6 +80,16 @@ impl N4n0Confirmation {
 /// The speech models and the voice worker.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct VoiceStatus {
+    /// Ask's preflight result; checked again before every capture.
+    pub readiness: VoiceReadiness,
+    /// This visit is open and defaults to automatic listening until manual takeover.
+    pub ask_open: bool,
+    pub automatic: bool,
+    pub speech: bool,
+    pub output_playing: bool,
+    pub finalizing: bool,
+    /// Replaceable recognition, never part of conversation history.
+    pub provisional: Option<ProvisionalSpeech>,
     /// The speech models are on this device.
     pub installed: bool,
     /// The voice worker runs (listening for the wake word, or ready for the Talk button).
@@ -92,6 +102,24 @@ pub struct VoiceStatus {
     /// The models stopped loading (the worker stopped twice while loading them): installing again repairs them.
     #[serde(default)]
     pub repair: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ProvisionalSpeech {
+    pub listen: u64,
+    pub text: String,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VoiceReadiness {
+    Ready,
+    SignIn,
+    ModelsMissing,
+    ModelsDownloading,
+    #[default]
+    AssistantOff,
+    MicrophoneProblem,
 }
 
 /// A process's share of this computer.

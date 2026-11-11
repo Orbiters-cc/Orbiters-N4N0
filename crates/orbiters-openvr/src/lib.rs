@@ -892,6 +892,15 @@ impl Overlay<'_> {
         overlay_result(unsafe { entry::<F>(self.table, 20)(handle, order) })
     }
 
+    /// The order SteamVR has for the overlay.
+    pub fn sort_order(&self, handle: OverlayHandle) -> Result<u32, i32> {
+        type F = unsafe extern "system" fn(u64, *mut u32) -> i32;
+        let mut order = 0u32;
+        // SAFETY: entry 21 is GetOverlaySortOrder; the out parameter is valid.
+        overlay_result(unsafe { entry::<F>(self.table, 21)(handle, &mut order) })?;
+        Ok(order)
+    }
+
     /// Places the overlay relative to a device (`0` is the headset).
     pub fn set_transform_device_relative(&self, handle: OverlayHandle, device: u32, transform: &Matrix34) -> Result<(), i32> {
         type F = unsafe extern "system" fn(u64, u32, *const Matrix34) -> i32;

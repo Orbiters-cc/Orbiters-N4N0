@@ -869,8 +869,6 @@ pub struct Panels {
     pub view_taken: bool,
     /// The sheet left with such a view out: what the Quick Menu opens on when it comes back.
     resume: Option<(Sheet, String, f32)>,
-    /// Where the way to do so lies.
-    pub peek_place: Option<Placed>,
     seek_late: Option<f32>,
     seek_asked: Option<(u32, Instant)>,
     /// Captures of this computer's gallery asked to show in 3D, for the view that shows them.
@@ -982,7 +980,6 @@ impl Panels {
             peek: false,
             view_taken: false,
             resume: None,
-            peek_place: None,
             seek_late: None,
             seek_asked: None,
             local_asked: Vec::new(),
@@ -1217,12 +1214,16 @@ impl Panels {
             return;
         }
         let live = !snap.settings.reduce_motion;
-        // Opened from the wheel, the sheet is all that shows: its cut-off cells would stick out from under it.
-        let places: Vec<Placed> = if self.takeover.is_some() && around == Some(Around::Wheel) { Vec::new() } else { places };
-        // Opened from the Quick Menu, the wing stays beside the sheet, all its tiles, whatever the sheet (Enzo, 2026-11-09): a person clicks through the tiles to
-        // explore, and they must not vanish on the first. Its tools also in the sheet's head is a duplication he accepts.
+        // Opened from the wheel, the sheet is all that shows: its cut-off cells would stick out from under it. Opened from the Quick Menu the wing goes too, for the eyes
+        // and for the lasers (Enzo, 2026-11-11, after 2026-11-09's "the wing stays"): the sheet's head has the same tools as tabs, its Back and its close, and the wing
+        // comes back as the sheet closes. Around VRChat's camera its tiles stay: what it reads is beside them.
+        let places: Vec<Placed> = if self.takeover.is_some() && around != Some(Around::Camera) { Vec::new() } else { places };
         let back = self.takeover.is_some().then_some(self.back_place).flatten();
-        let peek = self.takeover.is_some().then_some(self.peek_place).flatten();
+        // The way to VRChat's own menus and back is on the sheet's head; while they are reached it is all that shows, where it was.
+        let peek = back.map(|back| {
+            let at = panels::peek_place(&self.facts, back.logical().x);
+            Placed { zone: Zone::SheetPeek, rect: egui::Rect::from_min_size(back.rect.min + at.min.to_vec2() * back.unit, at.size() * back.unit), center: back.center, unit: back.unit }
+        });
         // On the desktop VRChat lights what lies under the pointer, sheet or no sheet. Where the wing leaves the row under its tabs free.
         let band = self.hint_place.filter(|_| back.is_some() && around == Some(Around::QuickMenu) && self.facts.desktop && !places.iter().any(|p| p.zone == Zone::QmStrip));
         let places: Vec<Placed> = places.into_iter().chain(back).chain(band).chain(peek).collect();
@@ -1248,6 +1249,11 @@ impl Panels {
             for panel in old {
                 self.rest(panel);
             }
+        }
+        // The way back from VRChat's own menus shows only while they are reached: the head has its button the rest of the time.
+        let peek = self.peek;
+        for panel in self.list.iter_mut().filter(|p| p.zone == Zone::SheetPeek) {
+            panel.shown = peek;
         }
         // The Quick Menu again, with a view still in a hand: where it was.
         if around == Some(Around::QuickMenu) && self.takeover.is_none() {
@@ -1283,6 +1289,8 @@ impl Panels {
     /// Opens `sheet` on the sheet, with `title`.
     fn open_sheet(&mut self, sheet: Sheet, title: &str, snap: &Snapshot) {
         let Some(place) = self.takeover_place else { return };
+        let ask_enter = sheet == Sheet::Talk && self.facts.sheet != Some(Sheet::Talk);
+        if self.facts.sheet == Some(Sheet::Talk) && sheet != Sheet::Talk { self.stop_talking(); }
         self.keep_screen();
         let size = place.rect.size() * self.sharp;
         let px = [size.x.round() as u32, size.y.round() as u32];
@@ -1294,6 +1302,7 @@ impl Panels {
         self.stage.epoch = self.stage.epoch.wrapping_add(1);
         self.stage.restore = true;
         self.facts.sheet = Some(sheet);
+        if ask_enter { self.backend.n4n0(N4n0Command::AskPage { open: true }); }
         self.facts.sheet_title = title.to_string();
         // As it was left, whichever way this comes back to it.
         let kept = self.kept.get(&(sheet, title.to_string())).copied().unwrap_or_default();
@@ -1340,6 +1349,7 @@ impl Panels {
 
     /// What is being said ends with its page: nobody should be listened to with no sign of it.
     fn stop_talking(&mut self) {
+        if self.facts.sheet == Some(Sheet::Talk) { self.backend.n4n0(N4n0Command::AskPage { open: false }); }
         if std::mem::take(&mut self.talking) {
             self.backend.n4n0(N4n0Command::Talk { down: false });
         }
@@ -2006,7 +2016,7 @@ impl Panels {
             },
             videos_for: menu.results_for.clone(),
             talk: talk_now(snap),
-            tracking: snap.n4n0.tracking.as_ref().map(|t| (t.on, t.ms, t.note.clone())),
+            tracking: snap.n4n0.tracking.as_ref().map(|t| (snap.settings.tracking.enabled, snap.settings.tracking.ms, t.note.clone())),
             tracking_note: snap.n4n0.tracking_note.clone(),
             smoothing_held: self.smoothing_held,
             booster: if self.facts.sheet == Some(Sheet::Booster) { panels::BoosterFacts::of(snap, self.booster_details, self.booster_asking, self.booster_held) } else { Default::default() },
@@ -2037,7 +2047,7 @@ impl Panels {
             hidden: self.hidden,
             peek: self.peek,
             digits: self.open == Some(Around::Wheel) && self.takeover.is_none() && (snap.n4n0.desktop_mode || !snap.steamvr.running),
-            beside_wing: self.open == Some(Around::QuickMenu),
+            beside_wing: self.open == Some(Around::QuickMenu) && self.list.iter().any(|p| Zone::WING.contains(&p.zone) || p.zone == Zone::QmStrip),
             worlds_visited: visited,
             invite_said: matches!(self.facts.sheet, Some(Sheet::Instances | Sheet::Results)).then(|| menu.notice.as_deref().map(|said| tr(said).to_string())).flatten(),
             note: self.facts.note.clone(),
@@ -2277,13 +2287,25 @@ impl Panels {
         }
         let mut action = None;
         let mut look = None;
+        let mut from = None;
         for panel in self.list.iter_mut().chain(self.takeover.iter_mut()) {
             if let Some(i) = panel.hover {
                 panel.pressed = Some(i);
                 panel.dirty = true;
                 action = panel.items.get(i).map(|item| item.action);
                 look = panel.items.get(i).map(|item| item.look);
+                from = Some(panel.zone);
                 break;
+            }
+        }
+        // A tool's tile or tab pressed while its page is open closes it, and VRChat's menu is there again under it (Enzo, 2026-11-11). Only a tool's own tile or tab:
+        // what is pressed on the page goes on as it does.
+        if let (Some(action), Some(zone)) = (action, from) {
+            let a_tool = zone == Zone::SheetBack || zone == Zone::QmStrip || Zone::WING.contains(&zone) || zone.ring().is_some();
+            if a_tool && panels::tool_is_open(&self.facts, action) {
+                out.clicked = true;
+                self.close_sheet();
+                return out;
             }
         }
         // A capture turning on the sheet: dragged, it turns as the hand does.
@@ -2616,9 +2638,9 @@ impl Panels {
             }
             Action::TalkToggle => {
                 if !matches!(self.facts.talk, panels::TalkNow::Off(_)) {
-                    let down = !snap.n4n0.listening;
+                    let down = snap.n4n0.voice.automatic || !snap.n4n0.listening;
                     self.talking = down;
-                    self.backend.n4n0(N4n0Command::Talk { down });
+                    self.backend.n4n0(N4n0Command::AskTalk { down });
                 }
             }
             Action::NewConversation => self.backend.n4n0(N4n0Command::NewConversation),
@@ -2626,9 +2648,9 @@ impl Panels {
                 self.peek = !self.peek;
                 let peek = self.peek;
                 for panel in self.list.iter_mut().chain(self.takeover.iter_mut()) {
-                    // Those that say when they show say so again next turn.
-                    panel.shown = !peek || panel.zone == Zone::SheetPeek;
-                    panel.dirty |= panel.zone == Zone::SheetPeek;
+                    // Those that say when they show say so again next turn. The way back takes the place of the head's button, alone.
+                    panel.shown = if peek { panel.zone == Zone::SheetPeek } else { panel.zone != Zone::SheetPeek };
+                    panel.dirty |= matches!(panel.zone, Zone::SheetPeek | Zone::SheetBack);
                 }
                 self.facts.peek = peek;
             }
@@ -2706,8 +2728,8 @@ impl Panels {
         if let Some((which, held)) = self.smoothing_held.take() {
             // Where it was let go.
             let ms = self.sheet_pointer.map_or(held, |p| panels::smoothing_at(p.x));
-            if let Some(patch) = panels::Smoothed::patch(which, ms, self.facts.tracking.as_ref().map(|t| t.1)) {
-                self.backend.patch_settings(patch);
+            if let Some(patch) = panels::Smoothed::patch(which, ms, Some(self.backend.view().settings.tracking.ms)) {
+                self.backend.patch_smoothing(patch);
             }
         }
         if let Some((held, _)) = self.hue_held.take() {
@@ -3052,6 +3074,8 @@ impl Stage {
             }
             let zoom = panel.px[0] as f32 / panel.logical.x;
             panels::finish_picture(&mut panel.out, pixels, panel.px, zoom, changed);
+            // Its corners are its sheet's, whatever drew it.
+            panels::cut_page_corners(&mut panel.out, panel.px, changed);
             panel.painted = true;
             super::record_phase(3, phase.elapsed());
             show(panel, changed);
@@ -3089,6 +3113,7 @@ fn type_hint(p: &egui::Painter, playing: Option<&str>) {
 
 impl Drop for Panels {
     fn drop(&mut self) {
+        self.stop_talking();
         self.release();
         if self.reported.is_some_and(|r| r.0) {
             self.backend.n4n0(N4n0Command::MenuState { open: false, dictation: false, keyboard: false });
@@ -3099,6 +3124,12 @@ impl Drop for Panels {
 /// Where talking with N4N0 stands, and why it cannot when it cannot.
 fn talk_now(snap: &Snapshot) -> panels::TalkNow {
     let settings = &snap.settings.n4n0;
+    if snap.n4n0.voice.readiness == orbiters_n4n0::status::VoiceReadiness::SignIn {
+        return panels::TalkNow::Off(mark("Sign in to Orbiters to talk to N4N0."));
+    }
+    if snap.n4n0.voice.readiness == orbiters_n4n0::status::VoiceReadiness::MicrophoneProblem {
+        return panels::TalkNow::Off(mark("N4N0's ears stopped."));
+    }
     if snap.n4n0.listening {
         return panels::TalkNow::Listening((snap.n4n0.voice.level * 20.0).round() / 20.0);
     }

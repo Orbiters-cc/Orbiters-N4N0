@@ -306,6 +306,9 @@ pub fn shots(out: &std::path::Path) -> anyhow::Result<()> {
     paint("small-docked", &entries, &detail, &docked, &feedback, 5.0)?;
     paint("small-near", &entries, &detail, &Status { small_near: true, ..docked.clone() }, &feedback, 5.0)?;
     paint("small-taken", &entries, &detail, &Status { small_docked: false, small_taken: true, ..docked.clone() }, &feedback, 5.0)?;
+    paint("review-signed-in", &entries, &detail, &docked, &feedback, 5.0)?;
+    let mut signed_out_review = docked.clone(); signed_out_review.list.vrchat = false;
+    paint("review-signed-out", &entries, &detail, &signed_out_review, &feedback, 5.0)?;
     paint("side-headset", &entries, &detail, &Status { headset: true, ..Default::default() }, &feedback, 5.0)?;
     // A headset's list with no side panel, on a sheet: endless, with no arrows and no Back of its own; and part way through the side panel coming out.
     let sheet = Panel { on_sheet: true, ..base.clone() };

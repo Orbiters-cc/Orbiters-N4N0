@@ -185,10 +185,13 @@ fn circle_shape(circle: CircleShape, out: &mut Vec<Shape>) {
     out.push(outline(cut_corners(rect, CornerRadius::same(1), r * 0.55), circle.fill, stroke));
 }
 
+/// How far a sheet's ground has its corners cut, in its units: its head and the page on it are cut the same (one outline, Enzo's IMG6).
+pub const SHEET_CUT: f32 = 14.0;
+
 /// The ground of a whole page: dark, a grid of dots, and (`framed`) a double frame with ticks along its foot.
 fn page_ground(shape: &RectShape, canvas: Rect, framed: bool, out: &mut Vec<Shape>) {
     let rect = shape.rect.intersect(canvas);
-    out.push(outline(cut_corners(rect, shape.corner_radius, 14.0), GROUND, Stroke::NONE));
+    out.push(outline(cut_corners(rect, shape.corner_radius, SHEET_CUT), GROUND, Stroke::NONE));
     out.push(Shape::Mesh(std::sync::Arc::new(grid_mesh(rect.shrink(FRAME_INNER + 2.0)))));
     let any = CornerRadius::same(1);
     if !framed {

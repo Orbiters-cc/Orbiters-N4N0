@@ -206,17 +206,18 @@ pub struct ProcessAccess<'a> {
     os: &'a mut dyn ProcessOs,
     list: Vec<Seen>,
     lowering: bool,
+    allowed: Option<&'a dyn Fn() -> bool>,
 }
 
 impl<'a> ProcessAccess<'a> {
     /// For a restore: lists the system now.
     pub fn new(os: &'a mut dyn ProcessOs) -> Self {
         let list = os.list();
-        Self { os, list, lowering: false }
+        Self { os, list, lowering: false, allowed: None }
     }
 
     fn lowering(os: &'a mut dyn ProcessOs, list: Vec<Seen>) -> Self {
-        Self { os, list, lowering: true }
+        Self { os, list, lowering: true, allowed: None }
     }
 }
 
@@ -228,6 +229,7 @@ impl Access for ProcessAccess<'_> {
         }
     }
     fn write(&mut self, target: &Target, value: &Value) -> bool {
+        if self.lowering && self.allowed.is_some_and(|allowed| !allowed()) { return false; }
         match (target, value) {
             (Target::Process { pid, created, name }, Value::Int(state)) => set_state(self.os, &self.list, *pid, *created, name, *state, self.lowering),
             _ => false,
@@ -267,6 +269,12 @@ impl Slower {
     /// and of what ended; puts back what has started playing or recording sound. Lists the system afresh itself. How many
     /// were set now.
     pub fn slow(&mut self, store: &Store, os: &mut dyn ProcessOs) -> Result<usize, Unreadable> {
+        self.slow_while(store, os, &|| true)
+    }
+
+    /// Cancellation is rechecked after scans and before each journalled OS write.
+    /// The caller restores the journal immediately after cancellation, including failed writes.
+    pub fn slow_while(&mut self, store: &Store, os: &mut dyn ProcessOs, allowed: &dyn Fn() -> bool) -> Result<usize, Unreadable> {
         for target in store.release_changed(&mut ProcessAccess::new(os), &is_process)? {
             if let Target::Process { pid, created, .. } = target {
                 self.respected.insert((pid, created));
@@ -301,7 +309,9 @@ impl Slower {
         if changes.is_empty() {
             return Ok(0);
         }
-        let applied = store.apply(&mut ProcessAccess::lowering(os, list), &changes, &mut |_| {})?;
+        let mut access = ProcessAccess::lowering(os, list);
+        access.allowed = Some(allowed);
+        let applied = store.apply(&mut access, &changes, &mut |_| {})?;
         for (change, applied) in changes.iter().zip(&applied) {
             if let (Applied::ChangedSince, Target::Process { pid, created, .. }) = (applied, &change.target) {
                 self.respected.insert((*pid, *created));
@@ -766,6 +776,43 @@ pub(crate) mod tests {
             assert_eq!(got.gone.len(), 1, "{now}");
             assert!(os.opened.is_empty() && os.set.is_empty(), "{now}: opened {:?}", os.opened);
             assert!(store.entries().unwrap().is_empty());
+        }
+    }
+
+    #[test]
+    fn review_cancel_during_scan_or_batch_restores_and_retries() {
+        use std::cell::Cell;
+        struct CancelOs<'a> { table: Table, allowed: &'a Cell<bool>, scan: bool, fail_restore: bool }
+        impl ProcessOs for CancelOs<'_> {
+            fn list(&mut self) -> Vec<Seen> { self.table.list() }
+            fn open(&mut self, p: u32, c: u64, n: &str) -> Option<Opened> { self.table.open(p,c,n) }
+            fn audible(&mut self) -> Option<Vec<u32>> {
+                if self.scan { self.allowed.set(false); }
+                self.table.audible()
+            }
+            fn set_state(&mut self, p: u32, c: u64, n: &str, v: i64) -> bool {
+                if !slows(v) && self.fail_restore { return false; }
+                let result = self.table.set_state(p,c,n,v);
+                if slows(v) { self.allowed.set(false); }
+                result
+            }
+        }
+        for scan in [false, true] {
+            let dir = Scratch::new(if scan { "cancel-scan" } else { "cancel-batch" });
+            let store = Store::new(&dir.0, Box::new(NotArmed));
+            let allowed = Cell::new(true);
+            let mut os = CancelOs { table: Table::new(), allowed: &allowed, scan, fail_restore: false };
+            for pid in 1..=3 { os.table.add(pid, "chrome.exe", SYSTEM_DECIDES); }
+            let got = Slower::default().slow_while(&store, &mut os, &|| allowed.get()).unwrap();
+            assert_eq!(got, if scan { 0 } else { 1 });
+            assert_eq!(os.table.set.iter().filter(|(_, v)| slows(*v)).count(), got);
+            os.fail_restore = true;
+            let pending = restore_all(&store, &mut os).unwrap();
+            if !scan { assert!(!pending.waiting.is_empty()); }
+            os.fail_restore = false;
+            assert!(restore_all(&store, &mut os).unwrap().waiting.is_empty());
+            assert!(store.entries().unwrap().is_empty());
+            assert!(os.table.processes.values().all(|p| p.state == SYSTEM_DECIDES));
         }
     }
 

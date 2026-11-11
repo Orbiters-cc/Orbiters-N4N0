@@ -201,7 +201,10 @@ impl Host for Link {
                     match (name, value) {
                         ("InStation", v) => motion.in_station = v.truthy(),
                         ("Seated", v) => motion.seated = v.truthy(),
-                        ("VelocityMagnitude", OscValue::Float(v)) if v.is_finite() => motion.speed = (v.abs() * 4.0).round() / 4.0,
+                        ("VelocityMagnitude", OscValue::Float(v)) if v.is_finite() => {
+                            motion.speed = v.abs();
+                            motion.speed_at_ms = Some(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as u64);
+                        },
                         _ => return false,
                     }
                     let changed = s.vrchat.motion != Some(motion);

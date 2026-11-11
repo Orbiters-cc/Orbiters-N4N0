@@ -3,7 +3,7 @@
 //! captured and shared on Orbiters (the listing the VRChat world "N4N0 - 3D picture viewer" shows) badged 3D, and see
 //! one of those around you in SteamVR, placed as that world places it (its ground on your floor, its start view where
 //! you stand, facing your way) and drawn from the same files (docs/world-view-overlay.md). A world without a capture
-//! has its page: Invite me (an invite to oneself in VRChat) or Launch VRChat, and Open on VRChat.
+//! has its page: Invite me when signed in to VRChat (an invite to oneself), and Open on VRChat.
 //!
 //! A pill under N4N0's menu ("3D worlds") opens the panel ([`panel`]) in the menu's place; the menu's Back comes back
 //! to it. Once a capture shows or loads, a bar takes the pill's place, under the menu or the panel whatever page shows:
@@ -187,7 +187,6 @@ pub struct Worlds {
     key: String,
     /// What says how to handle what shows small; it has been used; a new opening of the menu asks it back for the next capture.
     hint: Option<small_hint::SmallHint>,
-    backdrop: Option<small_hint::Backdrop>,
     small_logged: super::vr_log::Every,
     eye_frames_kept: u32,
     hide_chip: Option<small_hint::HideChip>,
@@ -300,7 +299,6 @@ impl Worlds {
             small_rays: [None; 2],
             small_triggers: [false; 2],
             small_triggers_were: [false; 2],
-            backdrop: None,
             small_logged: Default::default(),
             eye_frames_kept: 0,
             small_place: None,
@@ -396,7 +394,6 @@ fn keep_an_eye_frame(steamvr: &vr::Client, n: u32) {
             small_rays: [None; 2],
             small_triggers: [false; 2],
             small_triggers_were: [false; 2],
-            backdrop: None,
             small_logged: Default::default(),
             eye_frames_kept: 0,
             small_place: None,
@@ -704,9 +701,6 @@ fn keep_an_eye_frame(steamvr: &vr::Client, n: u32) {
         if let Some(hint) = self.hint.take() {
             hint.destroy(overlay);
         }
-        if let Some(backdrop) = self.backdrop.take() {
-            backdrop.destroy(overlay);
-        }
         if let Some(chip) = self.hide_chip.take() {
             chip.destroy(overlay);
         }
@@ -902,7 +896,7 @@ fn keep_an_eye_frame(steamvr: &vr::Client, n: u32) {
     fn update_hint(&mut self, overlay: &vr::Overlay, steamvr: &vr::Client, presenter: &mut Presenter, snap: &Snapshot) {
         let small = self.view.small_now().copied();
         self.hint_used |= small.is_some_and(|s| s.zoomed);
-        // Across a menu it stays: the menu is drawn over it by sort order (Enzo's diagram: menu, 3D view, backdrop, game). It never fades for that, which made it vanish.
+        // Across a menu it stays: the menu is drawn over it (Enzo's diagram: menu, 3D view, game). It never fades for that, which made it vanish.
         if self.small_logged.due(std::time::Duration::from_secs(1)) && self.view.small() {
             let hint = self.hint.as_ref().map_or("no hint".to_string(), |h| h.report()); // i18n: not shown (a line of the VR test log)
             let chip = self.hide_chip.as_ref().map_or("no X".to_string(), |c| c.report()); // i18n: not shown (a line of the VR test log)
@@ -913,14 +907,8 @@ fn keep_an_eye_frame(steamvr: &vr::Client, n: u32) {
                 Self::keep_an_eye_frame(steamvr, self.eye_frames_kept);
             }
         }
-        // The dark pane behind it in a panel's hole.
-        let pane = small.filter(|s| s.docked).and(self.small_place).map(|(at, radius)| (at, radius * 2.0 / SMALL_FILLS_HOLE + 0.012));
-        if pane.is_some() && self.backdrop.is_none() {
-            self.backdrop = small_hint::Backdrop::new(overlay, &self.key).map_err(|e| eprintln!("{e:#}")).ok();
-        }
-        if let Some(backdrop) = self.backdrop.as_mut() {
-            backdrop.update(overlay, presenter, pane);
-        }
+        // Nothing lies behind it in a panel's hole: the hole is a window onto it (Enzo, 2026-11-11, IMG2). The opaque pane that was there, of order 0, was drawn over the
+        // sheet's head and page and over the capture, which only an order by distance does: what SteamVR did there, whatever the orders said.
         let wanted = small.filter(|s| !self.hint_used && !s.docked).map(|s| {
             let stage = match s.held_by() {
                 Some(hand) => small_hint::Stage::Stick { hand },
@@ -1574,34 +1562,20 @@ fn keep_an_eye_frame(steamvr: &vr::Client, n: u32) {
         self.panel.dirty = true;
     }
 
-    /// Joins `world` in a new public instance in the region the player is in: an invite to oneself, which VRChat shows
-    /// in the game, when signed in to VRChat in the app; else VRChat's launcher with the world (VRChat running, it may
-    /// ask to switch). What happened is said on the world's page.
+    /// The pages stream supplies the chooser. This existing action must never claim a refused invite succeeded.
     fn join(&mut self, world: String) {
-        let instance = finder::new_instance(self.region, uuid::Uuid::new_v4().as_u128() as u64);
+        if !self.vrchat { return; }
+        let (Some(backend), Some(scope)) = (self.backend.clone(), self.scope.clone()) else { return };
         let tx = self.said.0.clone();
+        let region = self.region;
         let time = self.time();
-        if self.vrchat {
-            let (Some(backend), Some(scope)) = (self.backend.clone(), self.scope.clone()) else { return };
-            self.panel.say(tr("Sending you an invite…"), time);
-            let _ = std::thread::Builder::new().name("3d-worlds-invite".into()).spawn(move || {
-                let said = match backend.vrchat_data(scope, DataRequest::InviteSelf { world, instance }) {
-                    Ok(_) => tr("Invite sent: accept it in VRChat's notifications").to_string(),
-                    Err(e) => tr!("The invite could not be sent: {e}", e = e),
-                };
-                let _ = tx.send(said);
-            });
-        } else {
-            let Some(link) = finder::launch_link(&world, &instance) else { return };
-            self.panel.say(tr("Opening VRChat's launcher…"), time);
-            let _ = std::thread::Builder::new().name("3d-worlds-launch".into()).spawn(move || {
-                let said = match finder::open_launch(&link) {
-                    Ok(()) => tr("VRChat's launcher has it: sign in to VRChat in the app to be invited instead").to_string(),
-                    Err(e) => format!("{e}"),
-                };
-                let _ = tx.send(said);
-            });
-        }
+        self.panel.say(tr("Sending you an invite…"), time);
+        let _ = std::thread::Builder::new().name("3d-worlds-invite".into()).spawn(move || {
+            // The chooser in vr1111/pages replaces this legacy destination selection.
+            let instance = finder::new_instance(region, uuid::Uuid::new_v4().as_u128() as u64);
+            let said = invite_outcome(backend.vrchat_data(scope, DataRequest::InviteSelf { world, instance }));
+            let _ = tx.send(said);
+        });
     }
 
     /// The panel's own ask, shown at once (the app's answer replaces it).
@@ -1820,4 +1794,29 @@ fn short_error(e: &anyhow::Error) -> String {
         tr!("Could not download it: {text}", text = format!("{e:#}"))
     };
     text.chars().take(90).collect()
+}
+
+fn invite_outcome(result: crate::controller::vrchat_data::Result) -> String {
+    match result {
+        Ok(DataResponse::Invited) => tr("Invite sent: accept it in VRChat's notifications").to_string(),
+        result => {
+            let error = match result {
+                Err(e) => e,
+                Ok(DataResponse::WorldError(crate::controller::vrchat_data::WorldError::Api(e))) => e.to_string(),
+                _ => orbiters_core::vrchat_api::Error::InvalidResponse.to_string(),
+            };
+            tr!("The invite could not be sent: {e}", e = error)
+        }
+    }
+}
+#[cfg(test)]
+mod invite_review_tests {
+    use super::*;
+    #[test]
+    fn typed_refusal_is_never_invite_success() {
+        let refused = invite_outcome(Ok(DataResponse::WorldError(crate::controller::vrchat_data::WorldError::NotListed)));
+        assert!(refused.contains("could not be sent"), "{refused}");
+        assert!(invite_outcome(Ok(DataResponse::Invited)).starts_with("Invite sent:"));
+        assert!(invite_outcome(Ok(DataResponse::Owned(vec![]))).contains("could not be sent"));
+    }
 }

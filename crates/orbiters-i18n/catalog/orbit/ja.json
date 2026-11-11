@@ -168,6 +168,7 @@
   "Scroll": "スクロール",
   "Scroll to pick a tool, then click": "ホイールでツールを選んで、クリック",
   "Scroll to pick, or hold Left Alt": "ホイールで選ぶか、左Altを押す",
+  "Search": "検索",
   "Search YouTube": "YouTubeを検索",
   "Search again": "再検索",
   "Search any world. See the ones captured in 3D.": "好きなワールドを検索。3Dキャプチャ済みのワールドを3Dで見られます。",
@@ -288,5 +289,7 @@
   "“Pause the music”": "「音楽を一時停止して」",
   "“Take a picture in five seconds”": "「5秒後に写真を撮って」",
   "“Tell people I'll be back soon”": "「すぐ戻ると伝えて」",
-  "“Turn your light on, in blue”": "「ライトを青でつけて」"
+  "“Turn your light on, in blue”": "「ライトを青でつけて」",
+  "Sign in to Orbiters to talk to N4N0.": "N4N0と話すにはOrbitersにログインしてください。",
+  "N4N0's ears stopped.": "N4N0の耳が停止しました。"
 }

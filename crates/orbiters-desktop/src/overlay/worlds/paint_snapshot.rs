@@ -24,12 +24,39 @@ impl PaintSnapshot {
     pub(crate) fn hole(&self) -> Option<egui::Rect> { self.panel.hole(&self.status) }
     pub(super) fn compatible(&self, live: &Worlds, entries: &[Entry], status: &panel::Status, picked: Option<&Entry>, target: panel::Target) -> bool {
         if !self.panel.same_input(&live.panel, target) || self.picked.as_ref().map(|e| (e.id, &e.world_id)) != picked.map(|e| (e.id, &e.world_id)) { return false; }
-        if matches!(target, panel::Target::Key(_) | panel::Target::Space | panel::Target::Backspace) { return true; }
+        if matches!(target, panel::Target::Key(_) | panel::Target::Space | panel::Target::Backspace | panel::Target::Comments | panel::Target::Join) { return true; }
         self.entries.len() == entries.len()
             && self.entries.iter().zip(entries).all(|(a, b)| (a.id, &a.world_id, a.capture) == (b.id, &b.world_id, b.capture))
             && self.picked.as_ref().map(|e| (e.id, &e.world_id)) == picked.map(|e| (e.id, &e.world_id))
             && self.status.list.vrchat == status.list.vrchat && self.status.go == status.go
             && self.feedback == live.feedback && *self.facts == live.facts
+    }
+}
+
+#[cfg(test)]
+mod review_navigation {
+    use super::*;
+    #[test]
+    fn review_world_navigation_survives_arrivals_but_never_changes_its_world() {
+        let ctx = egui::Context::default(); orbiters_ui::install(&ctx);
+        let mut worlds = Worlds::alone(ctx.clone());
+        let entry = |id: &str| {
+            let found = orbiters_core::maps::FoundWorld { world: orbiters_core::maps::World { world_id: id.into(), name: id.into(), ..Default::default() }, ..Default::default() };
+            Entry::world(&found, None, Default::default())
+        };
+        worlds.pick_for_test(entry("wrld_shown"));
+        let shown = worlds.prepare_paint(&ctx);
+        // The comments/description may arrive while a finger is pressing the still
+        // shown navigation button. Data-changing controls must still reject this.
+        worlds.feedback.signed_in = !shown.feedback.signed_in;
+        worlds.panel.vr_scroll += 17.0;
+        let accepts = |worlds: &Worlds, target| shown.compatible(worlds, &worlds.entries(), &worlds.status(), worlds.picked(), target);
+        assert!(accepts(&worlds, panel::Target::Comments));
+        assert!(accepts(&worlds, panel::Target::Join));
+        assert!(!accepts(&worlds, panel::Target::WriteComment));
+        worlds.pick_for_test(entry("wrld_other"));
+        assert!(!accepts(&worlds, panel::Target::Comments));
+        assert!(!accepts(&worlds, panel::Target::Join));
     }
 }
 impl Worlds {

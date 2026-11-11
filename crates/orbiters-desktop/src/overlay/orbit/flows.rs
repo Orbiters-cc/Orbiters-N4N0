@@ -1106,3 +1106,24 @@ fn worker_switches_publish_matching_page_header_and_hit_geometry() {
     assert!(person.panels.stage.epoch > before);
     assert!(person.panels.stage.cache.is_empty());
 }
+
+
+#[test]
+fn special_pages_consume_the_outer_paint_request() {
+    for sheet in [Sheet::Menu, Sheet::Worlds] {
+        let mut person = Person::new();
+        person.around = Some(Around::QuickMenu);
+        person.turns(4);
+        if sheet == Sheet::Worlds {
+            person.panels.act(Action::Worlds, &person.snap, &mut super::Pressed::default());
+        } else {
+            person.panels.stage.host.menu.page = orbiters_n4n0_core::menu::Page::States;
+            person.panels.open_sheet(sheet, "", &person.snap);
+        }
+        let panel = person.panels.takeover.as_mut().unwrap();
+        panel.dirty = true;
+        panel.painted = false;
+        person.panels.paint(&person.snap, |_, _| {});
+        assert!(!person.panels.takeover.as_ref().unwrap().dirty, "{sheet:?} left a consumed paint request pending");
+    }
+}

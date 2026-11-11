@@ -3098,6 +3098,9 @@ impl Stage {
     /// What the canvas painted, to the page on the sheet.
     fn canvas_to(&mut self, panel: &mut Panel, show: &mut impl FnMut(&Panel, [u32; 4])) {
         let phase = Instant::now();
+        // MenuHost and Worlds track their own next paint. This request was consumed even
+        // when their canvas found no pixel damage; an outer dirty bit must not stay stuck.
+        panel.dirty = false;
         // A page kept from an earlier opening is handed over whole the first time, as a new one is.
         let [w, h] = panel.px;
         let changed = if std::mem::take(&mut panel.again) { Some([0, 0, w, h]) } else { self.canvas.damage() };

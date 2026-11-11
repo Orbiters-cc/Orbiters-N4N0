@@ -297,13 +297,23 @@ pub enum InviteChip {
 /// Where talking with N4N0 stands: what its button shows, so that it is clear as day.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub enum TalkNow {
+    /// Pressed, it listens until pressed again (the person took over from automatic, F24).
     #[default]
     Ready,
-    /// With how loud the microphone is, 0 to 1.
+    /// Automatic: listening for the person to start talking (F24).
+    Waiting,
+    /// It hears: with how loud the microphone is, 0 to 1.
     Listening(f32),
+    /// The sentence is over; its words are being made out.
+    Finalizing,
     Thinking,
+    /// Automatic waits while N4N0 answers aloud or waits for an approval; then it listens again.
+    Paused,
+    /// Signed out of Orbiters: nothing to answer as, said before a word (F23). Pressed, it signs in.
+    SignIn,
+    /// The microphone or the speech worker stopped. Pressed, it tries again.
+    Failed,
     /// It cannot now, and why.
-    Off(&'static str),
 }
 
 /// Why Drop link cannot put a card of what plays in the world.
@@ -565,6 +575,12 @@ pub struct Facts {
     pub videos_for: String,
     /// Talking with N4N0: where it stands, the conversation (whether the person said it, what was said), what N4N0 says right now, and how to call it by name when that is on.
     pub talk: TalkNow,
+    /// Listening by itself (it hears when the person starts and stops), or by the button (F24).
+    pub talk_auto: bool,
+    /// The words heard so far of the sentence being said, replaced as more come (F23): not yet in the conversation.
+    pub talk_heard: Option<String>,
+    /// The browser was opened to sign in, from this page.
+    pub talk_signing_in: bool,
     pub talk_lines: Vec<(bool, String)>,
     /// Tracking smoothing: on or off and each kind's milliseconds, and what the driver does now (`None`: not here).
     pub tracking: Option<(bool, [u16; 3], String)>,
@@ -1382,7 +1398,7 @@ pub fn max_scroll(sheet: Sheet, facts: &Facts) -> f32 {
             let (columns, _, height, top) = video_grid();
             (top + facts.videos.len().div_ceil(columns) as f32 * (height + 12.0) + 8.0 - 576.0).max(0.0)
         }
-        Sheet::Talk => (TALK_TOP + facts.talk_lines.iter().map(|(_, t)| talk_line_height(t)).sum::<f32>() + 8.0 - 576.0).max(0.0),
+        Sheet::Talk => (TALK_TOP + facts.talk_lines.iter().map(|(_, t)| talk_line_height(t)).sum::<f32>() + facts.talk_heard.as_deref().map_or(0.0, talk_line_height) + 8.0 - 576.0).max(0.0),
         _ => 0.0,
     }
 }
@@ -1849,7 +1865,11 @@ pub fn caption(action: Action, facts: &Facts) -> Option<(String, String)> {
         Action::Previous => (tr_ctx("track", "Previous").into(), tr("The previous track on your computer.").into()),
         Action::Next => (tr_ctx("track", "Next").into(), tr("The next track on your computer.").into()),
         Action::TalkToggle => match facts.talk {
+            TalkNow::Listening(_) if facts.talk_auto => (tr("Listening").into(), tr("It stops by itself when you do.").into()),
             TalkNow::Listening(_) => (tr("Listening").into(), tr("Press when you are done.").into()),
+            TalkNow::Waiting => (tr("Listening for you").into(), tr("Just talk. Press to talk with the button instead.").into()),
+            TalkNow::SignIn => (tr("Sign in to Orbiters").into(), tr("Your browser opens on your computer.").into()),
+            TalkNow::Failed => (tr("Try again").into(), tr("The microphone stopped: press to listen again.").into()),
             _ => (tr("Talk to N4N0").into(), tr("Press, speak, and press again.").into()),
         },
         Action::NewConversation => (tr("New conversation").into(), tr("N4N0 starts over.").into()),
@@ -2212,11 +2232,12 @@ pub fn paint_sheet(p: &Painter, sheet: Sheet, facts: &Facts, hover: Option<usize
 fn draw_conversation(p: &Painter, facts: &Facts) {
     text(p, pos2(TALK_LEFT + 2.0, 30.0), Align2::LEFT_CENTER, tr("Conversation"), 20.0, weight::BOLD, look::LABEL);
     let area = Rect::from_min_max(pos2(TALK_LEFT, TALK_TOP), pos2(1024.0 - 20.0, 576.0));
-    if facts.talk_lines.is_empty() {
-        let (first, second) = if matches!(facts.talk, TalkNow::Listening(_)) {
-            (tr("Go ahead"), tr("N4N0 is listening. Press the button again when you are done."))
-        } else {
-            (tr("Nothing said yet"), tr("Press the button, and ask N4N0 anything."))
+    if facts.talk_lines.is_empty() && facts.talk_heard.is_none() {
+        let (first, second) = match facts.talk {
+            TalkNow::SignIn => (tr("Sign in first"), tr("N4N0 answers as your Orbiters account: sign in, then talk.")),
+            TalkNow::Waiting | TalkNow::Listening(_) if facts.talk_auto => (tr("Go ahead"), tr("N4N0 hears when you start talking, and when you stop.")),
+            TalkNow::Listening(_) => (tr("Go ahead"), tr("N4N0 is listening. Press the button again when you are done.")),
+            _ => (tr("Nothing said yet"), tr("Press the button, and ask N4N0 anything.")),
         };
         text(p, pos2(TALK_LEFT + 2.0, TALK_TOP + 22.0), Align2::LEFT_CENTER, first, 27.0, weight::BOLD, look::LABEL);
         let font = look::font(18.5, weight::MEDIUM);
@@ -2246,6 +2267,16 @@ fn draw_conversation(p: &Painter, facts: &Facts) {
             clip.galley(bubble.min + vec2(14.0, 10.0), galley, look::LABEL);
         }
         y += height;
+    }
+    // What is being said, as it is heard: the person's side, outlined and fainter, replaced as more comes (F23).
+    if let Some(heard) = &facts.talk_heard {
+        let line = if heard.trim().is_empty() { "…".to_string() } else { format!("{}…", heard.trim()) };
+        let wide = TALK_WIDTH * 0.86;
+        let galley = clip.layout(line, look::font(17.0, weight::MEDIUM), look::MUTED, wide - 28.0);
+        let size = galley.size() + vec2(28.0, 20.0);
+        let bubble = Rect::from_min_size(pos2(TALK_LEFT + TALK_WIDTH - size.x, y), size);
+        clip.rect_stroke(bubble, look::radius(14.0), Stroke::new(1.5, theme::alpha(look::accent(), 0.7)), egui::StrokeKind::Inside);
+        clip.galley(bubble.min + vec2(14.0, 10.0), galley, look::MUTED);
     }
 }
 
@@ -2892,27 +2923,65 @@ fn draw(p: &Painter, zone: Zone, item: &Item, facts: &Facts, hovered: bool, pres
             // Clear as day: the one thing on this page that changes with whether N4N0 hears you.
             let center = pos2(rect.center().x, rect.top() + 170.0);
             let radius = 118.0;
+            let rest = if pressed { look::TILE_DOWN } else if hovered { look::TILE_HOVER } else { look::TILE };
             let (fill, ink, first, second): (Color32, Color32, &str, &str) = match facts.talk {
                 // Green is for when it hears you, and for nothing else on this page.
-                TalkNow::Ready => (if pressed { look::TILE_DOWN } else if hovered { look::TILE_HOVER } else { look::TILE }, look::LABEL, tr("Press to talk"), tr("Press again when you are done")),
+                TalkNow::Ready => (rest, look::LABEL, tr("Press to talk"), tr("Press again when you are done")),
+                TalkNow::Waiting => (rest, look::accent(), tr("Listening for you"), tr("Just start talking")),
+                TalkNow::Listening(_) if facts.talk_auto => (look::accent(), look::on_accent(), tr("I hear you"), tr("It stops when you do")),
                 TalkNow::Listening(_) => (look::accent(), look::on_accent(), tr("Listening"), tr("Press when you are done")),
+                TalkNow::Finalizing => (theme::mix(look::TILE, look::accent(), 0.35), look::LABEL, tr("Heard you"), tr("Reading what you said")),
                 TalkNow::Thinking => (look::TILE, look::LABEL, tr("Thinking"), tr("N4N0 answers on the right")),
+                TalkNow::Paused => (look::TILE, look::LABEL, tr("N4N0 is answering"), tr("Then it listens again")),
+                TalkNow::SignIn => (rest, look::LABEL, tr("Sign in to Orbiters"), tr("N4N0 answers as your account")),
+                TalkNow::Failed => (rest, theme::WARN, tr("The microphone stopped"), tr("Press to try again")),
                 TalkNow::Off(why) => (look::TILE, theme::FG_4, tr("Not available"), tr(why)),
             };
+            // How it listens, always in sight, over the button: by itself, or by the button (F24).
+            if !matches!(facts.talk, TalkNow::SignIn | TalkNow::Off(_)) {
+                let (glyph, words) = if facts.talk_auto { (icons::WAVEFORM, tr("Hands-free")) } else { (icons::CIRCLE, tr("By the button")) };
+                let font = look::font(16.0, weight::SEMIBOLD);
+                let wide = p.layout_no_wrap(words.to_string(), font.clone(), look::LABEL).size().x.min(rect.width() - 70.0);
+                let chip = Rect::from_center_size(pos2(rect.center().x, rect.top() + 18.0), vec2(wide + 52.0, 34.0));
+                p.rect_filled(chip, look::radius(17.0), if facts.talk_auto { theme::alpha(look::accent(), 0.18) } else { look::TILE });
+                widgets::icon(p, pos2(chip.left() + 20.0, chip.center().y), glyph, 18.0, if facts.talk_auto { look::accent() } else { look::MUTED });
+                p.text(pos2(chip.left() + 36.0, chip.center().y), Align2::LEFT_CENTER, fit(p, words, &font, wide), font, look::LABEL);
+            }
             if let TalkNow::Listening(level) = facts.talk {
                 p.circle_filled(center, radius + 12.0 + level.clamp(0.0, 1.0) * 28.0, theme::alpha(look::accent(), 0.22));
             }
             p.circle_filled(center, radius, fill);
-            if matches!(facts.talk, TalkNow::Ready) {
-                p.circle_stroke(center, radius, Stroke::new(3.0, Color32::from_white_alpha(if hovered { 110 } else { 54 })));
+            match facts.talk {
+                TalkNow::Ready | TalkNow::SignIn | TalkNow::Failed => {
+                    p.circle_stroke(center, radius, Stroke::new(3.0, Color32::from_white_alpha(if hovered { 110 } else { 54 })));
+                }
+                // Hands-free and waiting: a green ring, the microphone open.
+                TalkNow::Waiting => p.circle_stroke(center, radius, Stroke::new(4.0, look::accent())),
+                _ => {}
             }
-            widgets::icon(p, center, if matches!(facts.talk, TalkNow::Thinking) { icons::CHAT_TEARDROP_TEXT } else { icons::MICROPHONE }, 96.0, ink);
+            let glyph = match facts.talk {
+                TalkNow::Thinking | TalkNow::Paused => icons::CHAT_TEARDROP_TEXT,
+                TalkNow::SignIn => icons::SIGN_IN,
+                TalkNow::Failed => icons::WARNING,
+                _ => icons::MICROPHONE,
+            };
+            widgets::icon(p, center, glyph, 96.0, ink);
             let y = center.y + radius + 48.0;
-            let color = if matches!(facts.talk, TalkNow::Listening(_)) { look::accent() } else { look::LABEL };
-            text(p, pos2(rect.center().x, y), Align2::CENTER_CENTER, first, 30.0, weight::BOLD, color);
+            let color = if matches!(facts.talk, TalkNow::Listening(_) | TalkNow::Waiting) { look::accent() } else { look::LABEL };
+            let big = look::font(30.0, weight::BOLD);
+            p.text(pos2(rect.center().x, y), Align2::CENTER_CENTER, fit(p, first, &big, rect.width() - 8.0), big, color);
             let font = look::font(17.5, weight::MEDIUM);
             p.text(pos2(rect.center().x, y + 34.0), Align2::CENTER_CENTER, fit(p, second, &font, rect.width() - 8.0), font, look::MUTED);
-            if let Some(word) = &facts.wake_word {
+            // What a press does here, when it is not plain: the way out of signed out, back to by the button, again after a failure.
+            let third = match facts.talk {
+                TalkNow::SignIn if facts.talk_signing_in => Some(tr("Finish in your browser, on your computer")),
+                TalkNow::SignIn => Some(tr("Press: your browser opens on your computer")),
+                TalkNow::Waiting => Some(tr("Or press to talk with the button")),
+                _ => None,
+            };
+            if let Some(third) = third {
+                p.text(pos2(rect.center().x, y + 62.0), Align2::CENTER_CENTER, fit(p, third, &font, rect.width() - 8.0), font.clone(), if matches!(facts.talk, TalkNow::SignIn) { look::accent() } else { look::MUTED });
+            } else if let Some(word) = &facts.wake_word {
                 let font = look::font(17.5, weight::MEDIUM);
                 p.text(pos2(rect.center().x, y + 62.0), Align2::CENTER_CENTER, fit(p, &tr!("You can also say \u{201c}{word}\u{201d}", word = word), &font, rect.width() - 8.0), font, look::MUTED);
             }

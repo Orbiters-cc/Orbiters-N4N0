@@ -646,7 +646,24 @@ pub(super) fn shots(out: &Path) -> anyhow::Result<()> {
     booster_scenes(out, hd, &idle)?;
     qm_scene("orbit-sheet-tracking", out, hd, &Facts { sheet: Some(Sheet::Tracking), sheet_title: orbiters_i18n::tr("Smooth tracking").into(), tracking: Some((true, [0, 35, 78], "Smoothing your devices now".to_string())), beside_wing: true, ..idle.clone() }, None, Some(Sheet::Tracking))?;
     qm_scene("orbit-sheet-talk", out, hd, &Facts { sheet: Some(Sheet::Talk), sheet_title: "Ask N4N0".into(), talk_lines: lines.clone(), beside_wing: true, ..idle.clone() }, None, Some(Sheet::Talk))?;
-    qm_scene("orbit-sheet-talk-listening", out, hd, &Facts { sheet: Some(Sheet::Talk), sheet_title: "Ask N4N0".into(), talk_lines: lines, talk: crate::overlay::orbit::panels::TalkNow::Listening(0.6), beside_wing: true, ..idle.clone() }, None, Some(Sheet::Talk))?;
+    qm_scene("orbit-sheet-talk-listening", out, hd, &Facts { sheet: Some(Sheet::Talk), sheet_title: "Ask N4N0".into(), talk_lines: lines.clone(), talk: crate::overlay::orbit::panels::TalkNow::Listening(0.6), beside_wing: true, ..idle.clone() }, None, Some(Sheet::Talk))?;
+    // VR feedback F23/F24: Ask signed out (said before a word), hands-free waiting, hearing with the words so far, making them out, by the button, and the
+    // microphone stopped.
+    {
+        use crate::overlay::orbit::panels::TalkNow;
+        let ask = |name: &str, talk: TalkNow, auto: bool, heard: Option<&str>, said: Vec<(bool, String)>| {
+            let facts = Facts { sheet: Some(Sheet::Talk), sheet_title: "Ask N4N0".into(), talk, talk_auto: auto, talk_heard: heard.map(String::from), talk_lines: said, beside_wing: true, ..idle.clone() };
+            qm_scene(name, out, hd, &facts, None, Some(Sheet::Talk))
+        };
+        ask("orbit-ask-sign-in", TalkNow::SignIn, true, None, Vec::new())?;
+        ask("orbit-ask-waiting", TalkNow::Waiting, true, None, Vec::new())?;
+        ask("orbit-ask-hearing", TalkNow::Listening(0.55), true, Some("What's the weather like in"), Vec::new())?;
+        ask("orbit-ask-hearing-more", TalkNow::Listening(0.4), true, Some("And tomorrow"), lines.clone())?;
+        ask("orbit-ask-finalizing", TalkNow::Finalizing, true, None, Vec::new())?;
+        ask("orbit-ask-paused", TalkNow::Paused, true, None, lines.clone())?;
+        ask("orbit-ask-manual", TalkNow::Ready, false, None, lines.clone())?;
+        ask("orbit-ask-failed", TalkNow::Failed, true, None, Vec::new())?;
+    }
     qm_scene("orbit-sheet-countdown", out, hd, &Facts { sheet: Some(Sheet::Pictures), sheet_title: "Pictures".into(), ..counting.clone() }, None, Some(Sheet::Pictures))?;
     qm_scene("orbit-sheet-pictures-busy", out, hd, &Facts { sheet: Some(Sheet::Pictures), sheet_title: "Pictures".into(), ..busy.clone() }, None, Some(Sheet::Pictures))?;
     let _ = Target::Close;
@@ -1108,6 +1125,26 @@ fn booster_scenes(out: &std::path::Path, size: egui::Vec2, idle: &Facts) -> anyh
         s.booster.test_tools = true;
     });
     qm_scene("orbit-booster-details", out, size, &at(&details, true, false), None, Some(Sheet::Booster))?;
+    // VR feedback F4: Off, measured and nothing changed; a test asked for at Off, with its Stop; measured, with no gain; step 3's advice.
+    let off = booster_snapshot(|s| {
+        s.settings.booster.level = Level::Off;
+        s.booster.overlay.report.now = Some(orbiters_booster::engine::Now { real_fps: 35.9, refresh_hz: 72.0, half_rate_pacing: true, filled_share: 0.48, ..Default::default() });
+    });
+    qm_scene("orbit-booster-off", out, size, &at(&off, false, false), None, Some(Sheet::Booster))?;
+    let testing = booster_snapshot(|s| {
+        s.settings.booster.level = Level::Off;
+        s.booster.lowered = vec![("chrome".into(), 22)];
+        s.booster.overlay.report.now = Some(orbiters_booster::engine::Now { real_fps: 35.9, refresh_hz: 72.0, half_rate_pacing: true, filled_share: 0.48, ..Default::default() });
+        s.booster.overlay.report.testing = Some(orbiters_booster::engine::Testing { kind: orbiters_booster::trial::Kind::Programs, seconds_left: 12.0, side: orbiters_booster::trial::Side::With, manual: true });
+    });
+    qm_scene("orbit-booster-testing", out, size, &at(&testing, false, false), None, Some(Sheet::Booster))?;
+    let measured_none = booster_snapshot(|s| {
+        s.booster.overlay.report.line = Line::NoGain;
+        s.booster.overlay.report.now = Some(orbiters_booster::engine::Now { real_fps: 35.9, refresh_hz: 72.0, half_rate_pacing: true, filled_share: 0.48, ..Default::default() });
+        s.booster.overlay.report.comparisons = vec![sample_comparison(Verdict::NoGain)];
+        s.booster.overlay.report.wants.stop_preparing = true;
+    });
+    qm_scene("orbit-booster-measured-no-gain", out, size, &at(&measured_none, false, false), None, Some(Sheet::Booster))?;
     Ok(())
 }
 

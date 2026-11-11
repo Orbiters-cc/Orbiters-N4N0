@@ -30,6 +30,14 @@ impl Person {
         Self { panels, snap, around: None, library: 0, _alone: alone }
     }
 
+    /// A person whose presses reach a backend that keeps what it was asked: N4N0's commands and sign-ins.
+    fn heard() -> (Self, Arc<Heard>) {
+        let mut person = Self::new();
+        let heard = Arc::new(Heard::default());
+        person.panels = Panels::new(heard.clone(), 2.0, true);
+        (person, heard)
+    }
+
     /// One turn of the overlay's loop, as `vr.rs` takes it.
     fn turn(&mut self) {
         turn_of(&mut self.panels, &self.snap, self.around, self.library);
@@ -840,7 +848,7 @@ fn write_a_comment_opens_its_keyboard_on_the_sheet_in_vr() {
     use orbiters_n4n0_core::feedback::FeedbackView;
     const LISTING: &str = r#"{"previews":[{"slot":0,"key":1,"id":7,"worldId":"wrld_4432ea9b-729c-46e3-8eaf-846aa0a37fdd","name":"Silent Dawn","author":"Mei","uploader":"a","view":{"position":[0,1,0],"target":[0,1,1]}}]}"#;
     for signed_in in [true, false] {
-        let mut person = Person::new();
+        let (mut person, heard) = Person::heard();
         let mut snap = (*person.snap).clone();
         snap.n4n0.feedback = FeedbackView { signed_in, ..Default::default() };
         person.snap = Arc::new(snap);
@@ -864,6 +872,7 @@ fn write_a_comment_opens_its_keyboard_on_the_sheet_in_vr() {
         } else {
             assert_eq!(page(&person), Page::Comments, "nothing to write as, yet");
             assert!(person.panels.stage.worlds.as_ref().unwrap().target_for_test(WorldTarget::WriteComment).is_some(), "the way to sign in stays there");
+            assert_eq!(heard.sign_ins.load(std::sync::atomic::Ordering::Relaxed), 1, "and the press started signing in");
         }
     }
 }
@@ -981,4 +990,158 @@ fn ask_streamed_snapshot_marks_the_page_for_repaint() {
         assert!(person.panels.list.iter().any(|p| p.dirty), "each intermediate snapshot repaints");
         assert_eq!(person.panels.facts.talk_lines.last().unwrap().1, words);
     }
+}
+
+/// A backend that keeps what the menus asked of it (N4N0's commands, sign-ins), and is otherwise the screenshots' still one.
+#[derive(Default)]
+struct Heard {
+    n4n0: std::sync::Mutex<Vec<crate::ipc::N4n0Command>>,
+    sign_ins: std::sync::atomic::AtomicUsize,
+    boosters: std::sync::Mutex<Vec<String>>,
+}
+
+impl Heard {
+    fn said(&self) -> Vec<String> {
+        self.n4n0.lock().unwrap().iter().map(|c| format!("{c:?}")).collect()
+    }
+}
+
+impl crate::backend::Backend for Heard {
+    fn n4n0(&self, command: crate::ipc::N4n0Command) {
+        self.n4n0.lock().unwrap().push(command);
+    }
+    fn sign_in(&self) {
+        self.sign_ins.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+    fn booster(&self, command: crate::booster::Command) {
+        self.boosters.lock().unwrap().push(format!("{command:?}"));
+    }
+    fn view(&self) -> Arc<Snapshot> {
+        Arc::new(crate::state::Snapshot::new(Settings::default()))
+    }
+    fn take_notices(&self) -> Vec<crate::controller::Notice> {
+        Vec::new()
+    }
+    fn library_version(&self) -> u64 {
+        0
+    }
+    fn attach(&self, _ctx: &egui::Context) {}
+    fn start_capture(&self) {}
+    fn stop_capture(&self) {}
+    fn pause_capture(&self, _paused: bool) {}
+    fn start_test_capture(&self) {}
+    fn import_raw_capture(&self, _dir: std::path::PathBuf) {}
+    fn patch_settings(&self, _patch: serde_json::Value) {}
+    fn trash_session(&self, _dir: std::path::PathBuf) {}
+    fn clean_up(&self, _trim: Vec<std::path::PathBuf>, _delete: Vec<std::path::PathBuf>) {}
+    fn reconstruct(&self, _dir: std::path::PathBuf) {}
+    fn stop_reconstruction(&self) {}
+    fn unqueue_reconstruction(&self, _dir: std::path::PathBuf) {}
+    fn send_to_mixer(&self, _dir: std::path::PathBuf, _title: String) {}
+    fn reopen_sign_in(&self) {}
+    fn cancel_sign_in(&self) {}
+    fn sign_out(&self) {}
+    fn request_worker_log(&self) {}
+    fn worker_log(&self) -> Option<Vec<String>> {
+        None
+    }
+    fn upload_pictures(&self, _world_id: String, _world_name: String, _paths: Vec<std::path::PathBuf>) {}
+    fn upload_preview(&self, _world_id: String, _world_name: String, _session: std::path::PathBuf) {}
+    fn request_maps(&self) {}
+    fn maps(&self) -> Option<crate::state::MapsMine> {
+        None
+    }
+    fn calibrated(&self, _calibration: orbiters_contracts::performance::calibration::Calibration) {}
+    fn frames(&self, _chunk: crate::state::FrameChunk) {}
+    fn headset(&self, _in_use: bool) {}
+    fn walk_boost(&self, _strength: f32) {}
+    fn osc_reconnect(&self) {}
+    fn updates(&self, _action: crate::ipc::UpdateAction) {}
+    fn quit(&self) {}
+}
+
+/// Enzo (VR feedback F23, F24): Ask "does not update live while I talk" and "should say I must sign in before I can speak"; listening "automatic by default on
+/// entering the page, until I press the talk button myself". Through the hand and the host: entering asks for the page's hands-free listening and leaving lets it
+/// go; signed out, the button says so before a word and a press signs in, never listens; hands-free waits for the person, shows what it hears as it hears it,
+/// and the person's own press takes over by the button; a stopped microphone is tried again with a press.
+#[test]
+fn ask_listens_by_itself_says_what_it_hears_and_asks_for_a_sign_in_first() {
+    use orbiters_n4n0::status::{ProvisionalSpeech, VoiceReadiness};
+    use super::panels::TalkNow;
+    let (mut person, heard) = Person::heard();
+    let set = |person: &mut Person, change: &dyn Fn(&mut crate::state::Snapshot)| {
+        let mut snap = (*person.snap).clone();
+        snap.settings.n4n0.enabled = true;
+        change(&mut snap);
+        person.snap = Arc::new(snap);
+        person.turns(2);
+    };
+    set(&mut person, &|s| s.n4n0.voice.readiness = VoiceReadiness::SignIn);
+    person.around = Some(Around::QuickMenu);
+    person.turns(3);
+    person.press(Action::Talk);
+    person.turns(2);
+    assert_eq!(person.panels.facts.sheet, Some(Sheet::Talk));
+    assert!(heard.said().iter().any(|c| c.contains("AskPage") && c.contains("true")), "entering asks for the page's listening: {:?}", heard.said());
+    // Signed out: said before a word, and the press is the way to sign in.
+    assert_eq!(person.panels.facts.talk, TalkNow::SignIn);
+    let before = heard.said().len();
+    person.press(Action::TalkToggle);
+    assert_eq!(heard.sign_ins.load(std::sync::atomic::Ordering::Relaxed), 1, "the browser opens to sign in");
+    assert!(!heard.said()[before..].iter().any(|c| c.contains("AskTalk")), "nothing listened to");
+    // Signed in, hands-free: waiting for the person, then what it hears as it hears it.
+    set(&mut person, &|s| {
+        s.n4n0.voice.readiness = VoiceReadiness::Ready;
+        s.n4n0.voice.ask_open = true;
+        s.n4n0.voice.automatic = true;
+        s.n4n0.listening = true;
+    });
+    assert_eq!(person.panels.facts.talk, TalkNow::Waiting);
+    assert!(person.panels.facts.talk_auto, "the mode shows");
+    for words in ["what's", "what's the weather", "what's the weather in Paris"] {
+        set(&mut person, &|s| {
+            s.n4n0.voice.speech = true;
+            s.n4n0.voice.level = 0.4;
+            s.n4n0.voice.provisional = Some(ProvisionalSpeech { listen: 3, text: words.into() });
+        });
+        assert!(matches!(person.panels.facts.talk, TalkNow::Listening(_)));
+        assert_eq!(person.panels.facts.talk_heard.as_deref(), Some(words), "the words so far, replaced");
+        assert!(person.panels.facts.talk_lines.is_empty(), "and not in the conversation until said");
+    }
+    // The person's own press: by the button.
+    let before = heard.said().len();
+    person.press(Action::TalkToggle);
+    assert!(heard.said()[before..].iter().any(|c| c.contains("AskTalk") && c.contains("true")), "{:?}", &heard.said()[before..]);
+    // A stopped microphone: a press tries again.
+    set(&mut person, &|s| s.n4n0.voice.readiness = VoiceReadiness::MicrophoneProblem);
+    assert_eq!(person.panels.facts.talk, TalkNow::Failed);
+    let before = heard.said().len();
+    person.press(Action::TalkToggle);
+    assert!(heard.said()[before..].iter().any(|c| c.contains("AskRetry")), "{:?}", &heard.said()[before..]);
+    // Leaving lets the microphone go.
+    let before = heard.said().len();
+    person.press(Action::All);
+    person.turns(2);
+    assert!(heard.said()[before..].iter().any(|c| c.contains("AskPage") && c.contains("false")), "{:?}", &heard.said()[before..]);
+}
+
+/// Enzo (VR feedback F4): a test the booster runs can be stopped from its page, through the hand and the host: the engine is asked to stop it.
+#[test]
+fn the_booster_s_test_stops_from_its_page() {
+    use orbiters_booster::engine::Testing;
+    use orbiters_booster::trial::{Kind, Side};
+    let (mut person, heard) = Person::heard();
+    let mut snap = (*person.snap).clone();
+    snap.booster.overlay.report.testing = Some(Testing { kind: Kind::Programs, seconds_left: 20.0, side: Side::With, manual: true });
+    person.snap = Arc::new(snap);
+    person.around = Some(Around::QuickMenu);
+    person.turns(3);
+    person.press(Action::All);
+    person.turns(2);
+    person.press(Action::Booster);
+    person.turns(2);
+    assert_eq!(person.panels.facts.sheet, Some(Sheet::Booster));
+    person.press(Action::Set(super::panels::Pick::Booster(super::panels::BoosterPick::StopTest)));
+    let asked = heard.boosters.lock().unwrap().clone();
+    assert!(asked.iter().any(|c| c.contains("StopTest")), "{asked:?}");
 }

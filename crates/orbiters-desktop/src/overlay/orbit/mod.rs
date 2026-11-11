@@ -1980,6 +1980,9 @@ impl Panels {
             },
             videos_for: menu.results_for.clone(),
             talk: talk_now(snap),
+            talk_auto: snap.n4n0.voice.automatic,
+            talk_heard: snap.n4n0.voice.provisional.as_ref().filter(|_| self.facts.sheet == Some(Sheet::Talk)).map(|p| p.text.clone()),
+            talk_signing_in: snap.account.state == crate::state::AccountState::SigningIn,
             tracking: snap.n4n0.tracking.as_ref().map(|t| (snap.settings.tracking.enabled, snap.settings.tracking.ms, t.note.clone())),
             tracking_note: snap.n4n0.tracking_note.clone(),
             smoothing_held: self.smoothing_held,
@@ -2368,6 +2371,7 @@ impl Panels {
             P::Crash => self.backend.booster(Command::Overlay(Request::SimulateCrash)),
             P::TestLoad(on) => self.backend.booster(Command::TestLoad(on)),
             P::Report => self.backend.booster(Command::WriteTestReport),
+            P::StopTest => self.backend.booster(Command::Overlay(Request::StopTest)),
         }
     }
 
@@ -2610,13 +2614,18 @@ impl Panels {
                     self.open_sheet(Sheet::Talk, mark("Ask N4N0"), snap);
                 }
             }
-            Action::TalkToggle => {
-                if !matches!(self.facts.talk, panels::TalkNow::Off(_)) {
+            Action::TalkToggle => match self.facts.talk {
+                panels::TalkNow::Off(_) => {}
+                // Signed out of Orbiters: the way to sign in, at once (F23).
+                panels::TalkNow::SignIn => self.backend.sign_in(),
+                panels::TalkNow::Failed => self.backend.n4n0(N4n0Command::AskRetry),
+                // The person's own press: by the button from now on, for this visit of the page (F24).
+                _ => {
                     let down = snap.n4n0.voice.automatic || !snap.n4n0.listening;
                     self.talking = down;
                     self.backend.n4n0(N4n0Command::AskTalk { down });
                 }
-            }
+            },
             Action::NewConversation => self.backend.n4n0(N4n0Command::NewConversation),
             Action::Peek => {
                 self.peek = !self.peek;
@@ -3025,27 +3034,34 @@ impl Drop for Panels {
 
 /// Where talking with N4N0 stands, and why it cannot when it cannot.
 fn talk_now(snap: &Snapshot) -> panels::TalkNow {
-    let settings = &snap.settings.n4n0;
-    if snap.n4n0.voice.readiness == orbiters_n4n0::status::VoiceReadiness::SignIn {
-        return panels::TalkNow::Off(mark("Sign in to Orbiters to talk to N4N0."));
+    use orbiters_n4n0::status::VoiceReadiness;
+    let voice = &snap.n4n0.voice;
+    // What stops it is said first, before a word (F23): the runtime checks the same before it opens the microphone.
+    match voice.readiness {
+        VoiceReadiness::SignIn => return panels::TalkNow::SignIn,
+        VoiceReadiness::AssistantOff => return panels::TalkNow::Off(mark("Turn on N4N0's assistant in Orbiters")),
+        VoiceReadiness::ModelsDownloading => return panels::TalkNow::Off(mark("Its speech models are downloading")),
+        VoiceReadiness::ModelsMissing => return panels::TalkNow::Off(mark("Install its speech in Orbiters, N4N0")),
+        VoiceReadiness::MicrophoneProblem => return panels::TalkNow::Failed,
+        VoiceReadiness::Ready => {}
     }
-    if snap.n4n0.voice.readiness == orbiters_n4n0::status::VoiceReadiness::MicrophoneProblem {
-        return panels::TalkNow::Off(mark("N4N0's ears stopped."));
-    }
+    let level = (voice.level * 20.0).round() / 20.0;
     if snap.n4n0.listening {
-        return panels::TalkNow::Listening((snap.n4n0.voice.level * 20.0).round() / 20.0);
+        // Hands-free and nobody talking yet: waiting for the person; else it hears them.
+        return if voice.automatic && !voice.speech { panels::TalkNow::Waiting } else { panels::TalkNow::Listening(level) };
     }
-    if !settings.enabled || !settings.assistant {
-        return panels::TalkNow::Off(mark("Turn on N4N0's assistant in Orbiters"));
-    }
-    if snap.n4n0.voice.downloading.is_some() {
-        return panels::TalkNow::Off(mark("Its speech models are downloading"));
-    }
-    if !snap.n4n0.voice.installed {
-        return panels::TalkNow::Off(mark("Install its speech in Orbiters, N4N0"));
+    if voice.finalizing {
+        return panels::TalkNow::Finalizing;
     }
     if snap.n4n0.thinking {
         return panels::TalkNow::Thinking;
+    }
+    if voice.automatic && voice.ask_open {
+        // Hands-free holds its ears while N4N0 answers aloud or an approval waits, then listens again.
+        if voice.output_playing || !snap.n4n0.confirmations.is_empty() {
+            return panels::TalkNow::Paused;
+        }
+        return panels::TalkNow::Waiting;
     }
     panels::TalkNow::Ready
 }

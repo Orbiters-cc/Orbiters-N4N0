@@ -126,6 +126,8 @@ pub struct Controller {
     reconstruct_queue: Mutex<VecDeque<PathBuf>>,
     /// VRChat's camera as it was before a recording opened it in Stream mode (put back when recording ends).
     camera_before: Mutex<Option<CameraState>>,
+    camera_scan: Mutex<Option<Box<dyn orbiters_n4n0::QrScan>>>,
+    stop_generation: AtomicU64,
     /// The capture kit's toggles as they were before a recording started from the app switched them on (Some while
     /// the app drives them), and when the avatar last (re)loaded, which resets them.
     avatar_before: Mutex<Option<AvatarToggles>>,
@@ -378,6 +380,7 @@ pub mod update;
 mod videos;
 pub mod vrchat_data;
 pub mod vrchat_login;
+pub mod camera_tools;
 pub mod vr_audio;
 mod world_captures;
 mod world_feedback;
@@ -414,6 +417,8 @@ impl Controller {
             headset_off_since: Mutex::new(None),
             reconstruct_queue: Mutex::new(VecDeque::new()),
             camera_before: Mutex::new(None),
+            camera_scan: Mutex::new(None),
+            stop_generation: AtomicU64::new(0),
             avatar_before: Mutex::new(None),
             hide: Mutex::new(hide_self::HideRuntime::default()),
             avatar_changed_at: Mutex::new(None),
@@ -920,9 +925,14 @@ impl Controller {
     }
 
     fn start_with(self: &Shared, source: SourceSpec, importing: bool, from_osc: bool) -> anyhow::Result<()> {
+        let stop_generation = self.stop_generation.load(Ordering::Acquire);
         anyhow::ensure!(!self.quitting.load(Ordering::Relaxed), "{}", tr("Orbiters - N4N0 is quitting."));
         let settings = self.settings();
         let spout = matches!(source, SourceSpec::Spout { .. });
+        if spout && !importing {
+            self.require_live_camera()?;
+        }
+        anyhow::ensure!(self.stop_generation.load(Ordering::Acquire) == stop_generation, "{}", tr("Finish the current capture first."));
         if !importing && !settings.consent_acknowledged {
             anyhow::bail!("{}", tr("Please read and accept the capture notice first (Capture page)."));
         }
@@ -944,6 +954,7 @@ impl Controller {
         };
         self.update(|s| {
             s.capture.state = if importing { CaptureState::Importing } else { CaptureState::Starting };
+            s.capture.live = spout && !importing;
             s.capture.error = None;
             s.capture.stats = None;
             s.capture.trail.clear();
@@ -1200,13 +1211,16 @@ impl Controller {
         if self.view().worn_kit != kit {
             self.update(|s| s.worn_kit = kit);
         }
-        // What VRChat sent when it last changed: no asking, this comes round often.
-        let camera = self.osc_values.lock().unwrap().latest.get(CAMERA_MODE).and_then(|(v, _)| match v.first() {
-            Some(OscValue::Int(mode)) => Some(*mode != 0),
-            _ => None,
-        });
-        if self.view().camera_open_said != camera {
-            self.update(|s| s.camera_open_said = camera);
+        if self.view().camera_open_said.is_none() {
+            let camera = self.camera_values().into_iter().find_map(|(p,v)| match v {
+                OscValue::Int(mode) if p == CAMERA_MODE => Some(mode != 0),
+                _ => None,
+            });
+            if camera.is_some() { self.update_if(|s| {
+                if s.camera_open_said.is_some() { return false; }
+                s.camera_open_said = camera;
+                true
+            }); }
         }
     }
 
@@ -1355,6 +1369,11 @@ impl Controller {
     /// Keeps what VRChat said (and passes it to a session recording it). An avatar change forgets the last avatar's
     /// parameters: a session started now lists the avatar worn, not every avatar worn before.
     fn on_osc(&self, messages: Vec<(String, Vec<OscValue>)>, at_ns: u64) {
+        let avatar_changed = messages.iter().any(|(p,_)| p == AVATAR_CHANGE);
+        let camera = messages.iter().rev().find(|(p, _)| p == CAMERA_MODE).and_then(|(_, v)| match v.first() {
+            Some(OscValue::Int(mode)) => Some(*mode != 0),
+            _ => None,
+        });
         let mut osc = self.osc_values.lock().unwrap();
         for (address, values) in messages {
             if osc.forwarding {
@@ -1365,6 +1384,23 @@ impl Controller {
         }
         if osc.forwarding && osc.last_flush.is_none_or(|t| t.elapsed() >= Duration::from_millis(50)) {
             self.flush_osc(&mut osc);
+        }
+        drop(osc);
+        if avatar_changed { self.update(|s| s.worn_kit = None); }
+        if let Some(open) = camera {
+            eprintln!("camera Mode received at {at_ns}, publishing open={open}"); // i18n: not shown (diagnostics)
+            if !open {
+                self.camera_scan.lock().unwrap().take();
+            }
+            self.update_if(|s| {
+                let changed = s.camera_open_said != Some(open);
+                s.camera_open_said = Some(open);
+                if !open {
+                    s.camera_tools.qr_generation += 1;
+                    s.camera_tools.qr = camera_tools::Qr::Off;
+                }
+                changed
+            });
         }
     }
 
@@ -1430,6 +1466,19 @@ impl Controller {
         self.start_with(SourceSpec::Spout { name, extra }, false, from_osc)
     }
 
+    /// All UI long-recording requests carry their surface through IPC.
+    pub fn start_capture_from(self: &Shared, origin: crate::ipc::RecordingOrigin) -> anyhow::Result<()> {
+        anyhow::ensure!(origin == crate::ipc::RecordingOrigin::CameraOverlay, "{}", tr("Open VRChat's camera first"));
+        self.start_capture(false)
+    }
+
+    /// A new query, never a value written by the app or a cached Mode from an earlier connection.
+    fn require_live_camera(&self) -> anyhow::Result<()> {
+        let open = self.camera_values().iter().any(|(p, v)| p == CAMERA_MODE && matches!(v, OscValue::Int(_)) && v.truthy());
+        anyhow::ensure!(open && self.view().camera_open_said == Some(true), "{}", tr("Open VRChat's camera first"));
+        Ok(())
+    }
+
     pub fn start_test_capture(self: &Shared) -> anyhow::Result<()> {
         self.start_with(SourceSpec::TestPattern { width: 1920, height: 1080, fps: 30.0, depth_every: 4, frames: 0 }, false, false)
     }
@@ -1442,6 +1491,7 @@ impl Controller {
     }
 
     pub fn stop_capture(self: &Shared) -> anyhow::Result<()> {
+        self.stop_generation.fetch_add(1, Ordering::AcqRel);
         // A start waiting for the last session to be saved is called off too.
         self.pending_start.lock().unwrap().take();
         if !self.is_capturing() {
@@ -1469,6 +1519,7 @@ impl Controller {
     }
 
     pub fn pause_capture(self: &Shared, paused: bool) -> anyhow::Result<()> {
+        if !paused && self.view().capture.live { self.require_live_camera()?; }
         self.send(if paused { &WorkerCommand::Pause } else { &WorkerCommand::Resume })?;
         self.update(|s| {
             if s.capture.state == CaptureState::Recording || s.capture.state == CaptureState::Paused {
@@ -1665,6 +1716,7 @@ impl Controller {
 
     /// Starts OSC for the VRChat `network` says, replacing any that runs.
     fn start_osc_on(self: &Shared, network: Network, discovery: orbiters_core::osc::Discovery, ports: orbiters_core::osc::Ports) {
+        self.update(|s| s.camera_open_said = None);
         let parameter = RECORD_PARAMETER.to_string();
         let ctl = self.clone();
         let wanted = vec![parameter.clone()];
@@ -1679,6 +1731,25 @@ impl Controller {
                 let replaced = self.osc.lock().unwrap().replace(service);
                 drop(replaced);
                 self.update(|s| *s.osc = state::OscStatus { enabled: true, listening: true, advertising: adv, port: Some(port), ..Default::default() });
+                let ctl = self.clone();
+                std::thread::spawn(move || {
+                    for _ in 0..100 {
+                        if ctl.view().camera_open_said.is_some() { break; }
+                        let camera = ctl.camera_values().into_iter().find_map(|(p,v)| match v {
+                            OscValue::Int(mode) if p == CAMERA_MODE => Some(mode != 0),
+                            _ => None,
+                        });
+                        if let Some(open) = camera {
+                            ctl.update_if(|s| {
+                                if s.camera_open_said.is_some() { return false; }
+                                s.camera_open_said = Some(open);
+                                true
+                            });
+                            break;
+                        }
+                        std::thread::sleep(Duration::from_millis(100));
+                    }
+                });
             }
             Err(e) => self.update(|s| *s.osc = state::OscStatus { enabled: true, error: Some(e.to_string()), ..Default::default() }),
         }
@@ -2716,6 +2787,19 @@ mod tests {
     }
 
     use super::*;
+    #[test]
+    fn camera_mode_is_published_on_receive_and_unknown_cannot_record() {
+        let ctl = Controller::new(Settings::default());
+        assert!(ctl.require_live_camera().is_err());
+        assert!(ctl.start_capture_from(crate::ipc::RecordingOrigin::OtherUi).is_err());
+        ctl.on_osc(vec![(CAMERA_MODE.into(),vec![OscValue::Int(1)])],clock::now_ns());
+        assert_eq!(ctl.view().camera_open_said,Some(true));
+        assert!(ctl.require_live_camera().is_err(), "cached received Mode without a fresh query cannot authorize recording");
+        ctl.on_osc(vec![(CAMERA_MODE.into(),vec![OscValue::Int(0)])],clock::now_ns());
+        assert_eq!(ctl.view().camera_open_said,Some(false));
+        assert!(ctl.stop_capture().is_ok());
+        assert!(!ctl.view().live_recording_running());
+    }
 
     /// OSC messages a stand-in VRChat received: (address, first argument).
     fn received(socket: &std::net::UdpSocket, wait: Duration) -> Vec<(String, rosc::OscType)> {

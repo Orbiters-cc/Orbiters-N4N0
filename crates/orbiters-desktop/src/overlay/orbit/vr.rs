@@ -88,9 +88,8 @@ impl MenuButtons {
 
     /// VRChat's camera opened: its wheel goes then (Enzo).
     pub fn camera_opened(&mut self) {
-        if matches!(self.open, Open::Wheel(_)) {
-            self.open = Open::Closed;
-        }
+        self.open = Open::Closed;
+        self.toggle = None;
     }
 
     /// VRChat's Quick Menu to toggle now, on which hand, once.
@@ -614,7 +613,7 @@ fn settings_walk_left(snap: &Snapshot) -> bool {
 const CAMERA_LOST_AFTER: Duration = Duration::from_secs(20);
 /// How far within the eye's view the tiles must lie, of its width: its very edge is not seen through the lens.
 const CAMERA_VIEW_MARGIN: f32 = 0.1;
-const CAMERA_LOOKS_TO_SHOW: u32 = 2;
+const CAMERA_LOOKS_TO_SHOW: u32 = 1;
 
 impl OrbitVr {
     /// What is up, for a note in the log when a turn took too long.
@@ -642,6 +641,14 @@ impl OrbitVr {
         let watch = self.camera_watch.as_ref()?;
         let mut poses = [Pose::default(); MAX_DEVICES];
         steamvr.predicted_poses(Universe::Standing, prediction, &mut poses);
+        if self.camera_seen.is_none() && poses[0].pose_is_valid {
+            // Detached provisional tools: world-locked where the head was on opening, never a claimed panel pose.
+            let mut frame = space::before_eyes(&poses[0].device_to_absolute, 0.65, 0.22);
+            for i in 0..3 { frame.m[i][3] += frame.m[i][0] * 0.36; }
+            self.camera_follow.seen(frame, self.tune.camera_panel_m / camera_track::PANEL_SIZE[0]);
+            self.camera_seen = Some(now);
+            self.camera_looks = CAMERA_LOOKS_TO_SHOW;
+        }
         if poses[0].pose_is_valid {
             // Where the head will be `prediction` from now, which is when this pose is for.
             self.camera_heads.push_back((now + Duration::from_secs_f32(prediction.max(0.0)), poses[0].device_to_absolute));
@@ -670,10 +677,16 @@ impl OrbitVr {
                 let within = (sides[1] - sides[0]) * CAMERA_VIEW_MARGIN;
                 self.camera_side = camera_track::side_with_room(tangent_of, [sides[0] + within, sides[1] - within, sides[2], sides[3]], self.camera_side);
                 let _ = whole;
-                let (frame, unit) = camera_track::panel_in_room(&seen.found, seen.size, &mirror, &space::compose(&head, &eye_on_head), self.tune.camera_panel_m, self.camera_side);
+                if let Some((mut frame, unit)) = camera_track::perspective_pose(&seen.found, seen.size, &mirror, &space::compose(&head, &eye_on_head), self.tune.camera_panel_m) {
+                // 2.5 pixels fit tolerance, converted through the observed scale, plus a minimum safe gap.
+                let gap = (2.5 / seen.found.across.min(seen.found.tall).max(0.01) * unit).max(0.012);
+                let sign = if self.camera_side == camera_track::Side::Left { -1. } else { 1. };
+                for i in 0..3 { frame.m[i][3] += frame.m[i][0] * gap * sign; }
+                super::super::vr_log::line(&format!("camera pose: captured {:?}, accepted {:?}, side {:?}, unit {}, gap {}, pose {:?}, landmarks {:?}", seen.at, now, self.camera_side, unit, gap, frame, seen.found)); // i18n: not shown (diagnostics)
                 self.camera_follow.seen(frame, unit);
                 self.camera_seen = Some(now);
                 self.camera_looks = self.camera_looks.saturating_add(1);
+                }
             }
         }
         // What tracking knows, and what grabs it. Only while it shows: a grip means nothing to it otherwise.
@@ -813,6 +826,7 @@ impl OrbitVr {
             note: (on != Some(true)).then(|| mark("SteamVR's \"Experimental overlay input overrides\" (Settings, Developer) is off: pointing at a panel still presses in VRChat too.").to_string()),
             steamvr_overrides: on,
             camera_note: self.camera_note(cx.snap),
+            camera_provisional: self.camera_watch.is_some() && self.camera_looks <= CAMERA_LOOKS_TO_SHOW,
         };
         if self.told.as_ref() != Some(&status) {
             cx.backend.orbit_status(status.clone());
@@ -922,8 +936,9 @@ impl OrbitVr {
         }
         // VRChat's wheel goes when its camera opens.
         let camera = cx.snap.camera_open_said;
-        if camera == Some(true) && self.camera_was == Some(false) {
+        if camera == Some(true) && self.camera_was != Some(true) {
             self.buttons.camera_opened();
+            self.panels.close_sheet();
         }
         self.camera_was = camera;
         let open = self.buttons.open();
@@ -1269,6 +1284,9 @@ impl OrbitVr {
                 let _ = cx.overlay.set_alpha(*handle, panel.appear.alpha());
                 if !cx.overlay.is_visible(*handle) {
                     let _ = cx.overlay.show(*handle);
+                    if matches!(panel.zone, Zone::CameraPeople | Zone::CameraWorld | Zone::CameraQr) {
+                        super::super::vr_log::line(&format!("camera first shown: ns={}, zone={:?}, provisional={}", orbiters_core::clock::now_ns(), panel.zone, self.camera_looks <= CAMERA_LOOKS_TO_SHOW)); // i18n: not shown (diagnostics)
+                    }
                 }
             }
         }
@@ -1633,7 +1651,7 @@ mod tests {
 
     /// Enzo: "when I open the camera, the wheel menu disappears".
     #[test]
-    fn the_camera_opening_closes_the_wheel_and_not_the_quick_menu() {
+    fn the_camera_opening_closes_both_companion_menus() {
         let t0 = Instant::now();
         let mut b = fresh(t0);
         assert_eq!(run(&mut b, t0, &[(1, 100, 900)], 1000), Open::Wheel(1));
@@ -1641,7 +1659,7 @@ mod tests {
         assert_eq!(b.open(), Open::Closed);
         assert_eq!(run(&mut b, t0, &[(1, 1100, 1200)], 1300), Open::QuickMenu(1), "and the next press is the Quick Menu's");
         b.camera_opened();
-        assert_eq!(b.open(), Open::QuickMenu(1));
+        assert_eq!(b.open(), Open::Closed);
     }
 
     /// As Enzo laid them.

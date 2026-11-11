@@ -103,7 +103,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         let found = game.find(&snap);
         // Exclusive full screen shows no other window: say so, and do nothing.
         let exclusive = found.is_some_and(|_| full_screen_exclusive());
-        let status = OrbitStatus { note: exclusive.then(|| mark("VRChat is in exclusive full screen, which no other window can be above. Use a window or borderless full screen.").to_string()), steamvr_overrides: None, camera_note: None };
+        let status = OrbitStatus { note: exclusive.then(|| mark("VRChat is in exclusive full screen, which no other window can be above. Use a window or borderless full screen.").to_string()), steamvr_overrides: None, camera_note: None, camera_provisional: false };
         if said.as_ref() != Some(&status) {
             backend.orbit_status(status.clone());
             said = Some(status);

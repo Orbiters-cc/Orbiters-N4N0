@@ -103,7 +103,8 @@ impl Drop for CameraWatch {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
         if let Some(thread) = self.thread.take() {
-            let _ = thread.join();
+            // The reader owns its SteamVR resources. Reap them off the overlay's turn.
+            let _ = std::thread::Builder::new().name("camera-reaper".into()).spawn(move || { let _ = thread.join(); }); // i18n: not shown (thread name)
         }
         let health = *self.health.lock().unwrap_or_else(|e| e.into_inner());
         note(&format!("{:?}: {} looks, {} found the panel, over {} s", health.source, health.looks, health.finds, self.began.elapsed().as_secs())); // i18n: not shown (a log's line)
@@ -111,7 +112,7 @@ impl Drop for CameraWatch {
 }
 
 /// A line in `camera-tiles.log`, which is how a run in a headset can be read afterwards.
-fn note(line: &str) {
+pub(super) fn note(line: &str) {
     let dir = orbiters_core::paths::logs_dir();
     if std::fs::create_dir_all(&dir).is_ok() {
         if let Ok(mut file) = std::fs::OpenOptions::new().append(true).create(true).open(dir.join("camera-tiles.log")) {
@@ -136,6 +137,9 @@ fn looked(pixels: &[u8], width: usize, height: usize, stride: usize, offset: [f3
         _ => camera_track::find_in(pixels, width, height, stride, [0, 0, width, height], width <= 1400),
     };
     let found = found.map(|f| f.shifted(offset));
+    if let Some(found) = found {
+        note(&format!("landmarks: ns={}, captured={:?}, source={:?}, fit={:?}", orbiters_core::clock::now_ns(), at, source, found)); // i18n: not shown (diagnostics)
+    }
     let mut h = health.lock().unwrap_or_else(|e| e.into_inner());
     h.framed = Some(at);
     h.looks = h.looks.saturating_add(1);

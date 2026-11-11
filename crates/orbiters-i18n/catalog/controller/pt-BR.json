@@ -339,5 +339,6 @@
   "{path} is not a raw capture of this world.": "{path} não é uma captura bruta deste mundo.",
   "{path} is not a session in Orbiters - N4N0's sessions folder.": "{path} não é uma sessão da pasta de sessões do Orbiters - N4N0.",
   "{why} Discard them to export every splat as trained: Select splats in its 3D view can remove them again.": "{why} Descarte-as para exportar todos os splats como foram treinados: selecionando splats na visão 3D dela, você poderá removê-los de novo.",
-  "file\u0004Small": "Pequeno"
+  "file\u0004Small": "Pequeno",
+  "VRChat did not confirm the capture avatar. Try again.": "O VRChat n?o confirmou o avatar de captura. Tente novamente."
 }

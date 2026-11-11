@@ -47,6 +47,7 @@ const SUPPORT_SMALL: usize = 4;
 /// One frame's reading, in pixels of what was given.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Found {
+    pub perspective: Option<[[f32; 3]; 3]>,
     pub x: [f32; 2],
     pub chevron: [f32; 2],
     pub middle: [f32; 2],
@@ -64,6 +65,12 @@ impl Found {
         (self.x, self.chevron, self.middle) = (at(self.x), at(self.chevron), at(self.middle));
         self.across /= scale;
         self.tall /= scale;
+        if let Some(h) = self.perspective.as_mut() {
+            for k in 0..3 {
+                h[0][k] = h[0][k] / scale + by[0] * h[2][k];
+                h[1][k] = h[1][k] / scale + by[1] * h[2][k];
+            }
+        }
         self
     }
 
@@ -74,6 +81,7 @@ impl Found {
 
     /// Where a place on the panel in its units lies in the picture.
     pub fn at(&self, unit: [f32; 2]) -> [f32; 2] {
+        if let Some(h) = self.perspective { return project(h, unit); }
         [
             self.middle[0] + self.right[0] * unit[0] * self.across + self.down[0] * unit[1] * self.tall,
             self.middle[1] + self.right[1] * unit[0] * self.across + self.down[1] * unit[1] * self.tall,
@@ -360,7 +368,8 @@ fn look(light: &Light, needs: usize) -> Option<Found> {
                 }
                 let score = looks + support as f32 * 0.2 - (x_share - X_IS).abs() * 3.0 - (c_share - CHEVRON_IS).abs() * 2.0;
                 if best.as_ref().is_none_or(|b| score > b.0) {
-                    let found = Found { x: x.middle, chevron: c.middle, middle: reading.middle, right: reading.right, down: reading.down, across: reading.across, tall: reading.tall };
+                    let perspective = landmark_fit(&reading, &all, x.middle, c.middle);
+                    let found = Found { perspective, x: x.middle, chevron: c.middle, middle: reading.middle, right: reading.right, down: reading.down, across: reading.across, tall: reading.tall };
                     best = Some((score, found));
                 }
             }
@@ -370,6 +379,76 @@ fn look(light: &Light, needs: usize) -> Option<Found> {
 }
 
 /// The panel in a picture of 4-byte pixels, whichever way round its colours are, or `None`.
+fn project(h: [[f32; 3]; 3], p: [f32; 2]) -> [f32; 2] {
+    let q = h.map(|r| r[0] * p[0] + r[1] * p[1] + r[2]);
+    [q[0] / q[2], q[1] / q[2]]
+}
+
+/// Least squares homography from independently located, spread landmarks. Reprojection is in pixels.
+pub fn fit(points: &[([f32; 2], [f32; 2])]) -> Option<[[f32; 3]; 3]> {
+    if points.len() < 5 { return None; }
+    let mut a = [[0.0f64; 9]; 8];
+    for &(p, q) in points {
+        let (x, y, u, v) = (p[0] as f64, p[1] as f64, q[0] as f64, q[1] as f64);
+        for row in [[x,y,1.,0.,0.,0.,-u*x,-u*y,u], [0.,0.,0.,x,y,1.,-v*x,-v*y,v]] {
+            for i in 0..8 { for j in 0..9 { a[i][j] += row[i] * row[j]; } }
+        }
+    }
+    for k in 0..8 {
+        let pivot = (k..8).max_by(|&i,&j| a[i][k].abs().total_cmp(&a[j][k].abs()))?;
+        a.swap(k,pivot);
+        if a[k][k].abs() < 1e-8 { return None; }
+        let d = a[k][k];
+        for j in k..9 { a[k][j] /= d; }
+        for i in 0..8 { if i != k { let d = a[i][k]; for j in k..9 { a[i][j] -= d * a[k][j]; } } }
+    }
+    let h = [[a[0][8] as f32,a[1][8] as f32,a[2][8] as f32], [a[3][8] as f32,a[4][8] as f32,a[5][8] as f32], [a[6][8] as f32,a[7][8] as f32,1.]];
+    let error = points.iter().map(|&(p,q)| { let r=project(h,p); (r[0]-q[0]).powi(2)+(r[1]-q[1]).powi(2) }).sum::<f32>() / points.len() as f32;
+    (error.is_finite() && error.sqrt() <= 2.5).then_some(h)
+}
+
+fn landmark_fit(r: &Reading, blobs: &[Blob], x: [f32;2], chevron: [f32;2]) -> Option<[[f32;3];3]> {
+    let mut points = vec![(PANEL_X,x),(PANEL_CHEVRON,chevron)];
+    // Fixed icon centres, rather than the variable slider thumbs or mode-dependent button labels.
+    for p in [[-154.,-84.],[-190.,36.],[-190.,54.],[-190.,74.],[-190.,93.],[-148.,131.],[-35.,133.],[82.,135.]] {
+        let expected = [r.middle[0]+r.right[0]*p[0]*r.across+r.down[0]*p[1]*r.tall, r.middle[1]+r.right[1]*p[0]*r.across+r.down[1]*p[1]*r.tall];
+        let distance = |b: &Blob| (b.middle[0]-expected[0]).hypot(b.middle[1]-expected[1]);
+        if let Some(b) = blobs.iter().filter(|b| distance(b) < 8.0*r.across.max(r.tall)).min_by(|a,b| distance(a).total_cmp(&distance(b))) {
+            if !points.iter().any(|(_,q)| *q == b.middle) { points.push((p,b.middle)); }
+        }
+    }
+    // Both horizontal and vertical spread are essential; the left icon column alone is degenerate.
+    if !points.iter().any(|(p,_)| p[0] > 50.) { return None; }
+    fit(&points)
+}
+
+/// Perspective pose using the actual eye projection, with rigid-plane consistency rejection.
+pub fn perspective_pose(found: &Found, size: [f32;2], mirror: &Mirror, eye: &Matrix34, width: f32) -> Option<(Matrix34,f32)> {
+    let h = found.perspective?;
+    let points: Vec<_> = [[-205.,-110.],[205.,-110.],[205.,110.],[-205.,110.],[0.,0.]].into_iter().map(|p| {
+        let q=project(h,p); let t=mirror.tangent(q[0]/size[0],q[1]/size[1]); (p,t)
+    }).collect();
+    let h=fit(&points)?;
+    let col = |k:usize| [h[0][k],-h[1][k],-h[2][k]];
+    let norm = |v:[f32;3]| v.iter().map(|x|x*x).sum::<f32>().sqrt();
+    let (a,b,t)=(col(0),col(1),col(2));
+    let (na,nb)=(norm(a),norm(b));
+    let dot: f32=a.iter().zip(b).map(|(x,y)|x*y).sum();
+    if na.min(nb) <= 0. || (na/nb-1.).abs()>0.25 || dot.abs()/(na*nb)>0.2 { return None; }
+    let unit=width/PANEL_SIZE[0];
+    let scale=2.*unit/(na+nb);
+    let right=a.map(|x|x/na);
+    let mut down=b.map(|x|x/nb);
+    let d: f32=right.iter().zip(down).map(|(x,y)|x*y).sum();
+    down=std::array::from_fn(|i| down[i]-d*right[i]);
+    let n=norm(down); let up=down.map(|x|-x/n);
+    let z=[right[1]*up[2]-right[2]*up[1],right[2]*up[0]-right[0]*up[2],right[0]*up[1]-right[1]*up[0]];
+    let position=t.map(|x|x*scale);
+    if !(0.15..=4.).contains(&-position[2]) { return None; }
+    let local=Matrix34 { m: std::array::from_fn(|i| [right[i],up[i],z[i],position[i]]) };
+    Some((then(eye,&local),unit))
+}
+
 pub fn find(pixels: &[u8], width: usize, height: usize, stride: usize) -> Option<Found> {
     find_in(pixels, width, height, stride, [0, 0, width, height], width <= LOOKS_TWICE_UP_TO)
 }
@@ -613,7 +692,6 @@ impl Follow {
         if far > JUMPS_M {
             if self.unsure.is_some_and(|(was, _)| apart(&was, &frame) <= JUMPS_M) {
                 self.unsure = None;
-                self.at = Some((local, unit));
                 self.wanted = Some((local, unit));
             } else {
                 self.unsure = Some((frame, unit));
@@ -883,7 +961,52 @@ mod tests {
     }
 
     fn straight_found(at: impl Fn([f32; 2]) -> [f32; 2], per_pixel: f32) -> Found {
-        Found { x: at(PANEL_X), chevron: at(PANEL_CHEVRON), middle: at([0.0, 0.0]), right: [1.0, 0.0], down: [0.0, 1.0], across: per_pixel, tall: per_pixel }
+        Found { perspective: None, x: at(PANEL_X), chevron: at(PANEL_CHEVRON), middle: at([0.0, 0.0]), right: [1.0, 0.0], down: [0.0, 1.0], across: per_pixel, tall: per_pixel }
+    }
+
+    #[test]
+    fn perspective_ground_truth_recovers_tilted_plane_and_separates_tiles() {
+        for pitch in [-60f32, -25., 0., 40., 65.] {
+            for yaw in [-55f32,0.,55.] {
+                for roll in [-45f32,0.,70.] {
+                    for distance in [0.3,0.7,1.8] {
+                        for width in [0.2,0.3,0.5] {
+                            let (sp,cp)=pitch.to_radians().sin_cos();
+                            let (sy,cy)=yaw.to_radians().sin_cos();
+                            let (sr,cr)=roll.to_radians().sin_cos();
+                            let right=[cy*cr,cp*sr+sp*sy*cr,sp*sr-cp*sy*cr];
+                            let up=[-cy*sr,cp*cr-sp*sy*sr,sp*cr+cp*sy*sr];
+                            let unit=width/410.;
+                            let tangent=|p:[f32;2]| {
+                                let v: [f32;3]=std::array::from_fn(|i| right[i]*p[0]*unit-up[i]*p[1]*unit-if i==2 {distance} else {0.});
+                                [v[0]/-v[2],-v[1]/-v[2]]
+                            };
+                            let pts:Vec<_>=[[-205.,-110.],[205.,-110.],[205.,110.],[-205.,110.],[0.,0.],[82.,135.]].into_iter().map(|p|(p,tangent(p))).collect();
+                            let Some(h)=fit(&pts) else { panic!("ground truth fit"); };
+                            let found=Found { perspective:Some(h), ..straight_found(|p|p,1.) };
+                            let mirror=Mirror {from:[0.,0.],spans:[1.,1.]};
+                            let (pose,got_unit)=perspective_pose(&found,[1.,1.],&mirror,&STILL,width).expect("physical plane");
+                            assert!((pose.m[2][3]+distance).abs()<0.002);
+                            assert!((got_unit-unit).abs()<1e-6);
+                            for side in [-1.,1.] {
+                                // Tile hull and panel hull have a separating line at their common plane's edge,
+                                // preserved by perspective for positive depth, including both horizontal sides.
+                                for y in [-110.,0.,110.] {
+                                    let tile_x=side*225.;
+                                    let q=tangent([tile_x,y]);
+                                    let edge0=tangent([side*205.,-110.]);
+                                    let edge1=tangent([side*205.,110.]);
+                                    let centre=tangent([0.,0.]);
+                                    let cross=|p:[f32;2]| (edge1[0]-edge0[0])*(p[1]-edge0[1])-(edge1[1]-edge0[1])*(p[0]-edge0[0]);
+                                    assert!(cross(q)*cross(centre)<0.);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert!(fit(&[([0.,0.],[0.,0.]);5]).is_none());
     }
 
     fn mirror() -> Mirror {
@@ -921,7 +1044,7 @@ mod tests {
             let (s, c) = lean.to_radians().sin_cos();
             let (right, down) = ([c, s], [-s, c]);
             let at = |p: [f32; 2]| [px + (p[0] * right[0] + p[1] * down[0]) * per_pixel, py + (p[0] * right[1] + p[1] * down[1]) * per_pixel];
-            let found = Found { x: at(PANEL_X), chevron: at(PANEL_CHEVRON), middle: at([0.0, 0.0]), right, down, across: per_pixel, tall: per_pixel };
+            let found = Found { perspective: None, x: at(PANEL_X), chevron: at(PANEL_CHEVRON), middle: at([0.0, 0.0]), right, down, across: per_pixel, tall: per_pixel };
             for panel_m in [0.2, 0.3, 0.45] {
                 for side in [Side::Left, Side::Right] {
                     let (frame, unit) = panel_in_room(&found, size, &eye, &STILL, panel_m, side);
@@ -966,7 +1089,7 @@ mod tests {
         let size = [1000.0, 1000.0];
         let per_pixel = PANEL_M / PANEL_SIZE[0] / 0.5 * 500.0;
         let at = |p: [f32; 2]| [500.0 + (p[0] * right[0] + p[1] * down[0]) * per_pixel, 700.0 + (p[0] * right[1] + p[1] * down[1]) * per_pixel];
-        let found = Found { x: at(PANEL_X), chevron: at(PANEL_CHEVRON), middle: at([0.0, 0.0]), right, down, across: per_pixel, tall: per_pixel };
+        let found = Found { perspective: None, x: at(PANEL_X), chevron: at(PANEL_CHEVRON), middle: at([0.0, 0.0]), right, down, across: per_pixel, tall: per_pixel };
         let (frame, _) = panel_in_room(&found, size, &mirror(), &STILL, PANEL_M, Side::Left);
         assert!(frame.m[1][0] < -0.3, "the panel's right goes down: {:?}", frame.m);
         assert!(frame.m[1][3] < 1.5, "below the eye: {:?}", frame.m);
@@ -1002,10 +1125,13 @@ mod tests {
             }
         }
         assert!((follow.step(0.011, [None; 2], [false; 2], NOBODY).unwrap().0.m[0][3] - 0.02).abs() < 0.008);
-        // Two looks agreeing it is elsewhere: it flew, so it is there at once.
+        // Two agreeing looks change the target; the rendered plane settles without teleporting.
         follow.seen(at(1.0), 0.001);
         follow.seen(at(1.0), 0.001);
-        assert_eq!(follow.step(0.011, [None; 2], [false; 2], NOBODY).unwrap().0.m[0][3], 1.0);
+        let first = follow.step(0.011, [None; 2], [false; 2], NOBODY).unwrap().0.m[0][3];
+        assert!(first > 0.02 && first < 0.2);
+        for _ in 0..180 { follow.step(0.011, [None; 2], [false; 2], NOBODY); }
+        assert!((follow.step(0.011, [None; 2], [false; 2], NOBODY).unwrap().0.m[0][3] - 1.).abs() < 0.001);
     }
 
     /// Enzo: "use the tracking of the controller that grabbed it + the headset tracking ... until the user drops it".

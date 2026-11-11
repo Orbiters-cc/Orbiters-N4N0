@@ -20,7 +20,7 @@ struct Person {
     _alone: std::sync::MutexGuard<'static, ()>,
 }
 
-static ONE_AT_A_TIME: std::sync::Mutex<()> = std::sync::Mutex::new(());
+pub(super) static ONE_AT_A_TIME: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 impl Person {
     fn new() -> Self {
@@ -159,7 +159,7 @@ fn saved_looks_with_real_looks_answers() {
             assert!(clicked, "{what}");
             assert_eq!(person.panels.facts.sheet, Some(Sheet::Menu), "{what}: it stays");
         }
-        assert!(person.find(Action::Pictures).is_some(), "the wing is there");
+        assert!(person.find(Action::Pictures).is_some(), "the head's tabs are there");
         assert!(person.press(Action::Back).clicked, "back");
         person.turns(3);
         assert_eq!(person.panels.facts.sheet, Some(Sheet::All), "back to All tools");
@@ -175,7 +175,6 @@ fn turn_of(panels: &mut Panels, snap: &Snapshot, around: Option<Around>, library
     panels.way_back(around, &mut places);
     panels.takeover_place = Some(zones::in_units(Zone::Takeover));
     panels.back_place = Some(zones::in_units(Zone::SheetBack));
-    panels.peek_place = Some(zones::in_units(Zone::SheetPeek));
     panels.set_open(around, places, snap);
     panels.follow(snap, library);
     panels.menu_turn(snap);
@@ -472,8 +471,8 @@ fn the_song_s_picture_arriving_paints_all_tools_again() {
     for _ in 0..20 {
         handed.extend(turn_of(&mut person.panels, &person.snap, person.around, 0).into_iter().map(|h| h.0));
     }
-    assert!(handed.contains(&Zone::WingPlaying), "what plays beside the menu: {handed:?}");
-    assert!(handed.contains(&Zone::Takeover), "and All tools: {handed:?}");
+    // The wing is away while a sheet is up (Enzo, 2026-11-11): All tools has what plays.
+    assert!(handed.contains(&Zone::Takeover), "All tools: {handed:?}");
 }
 
 /// The parts kept are bounded: one for a zone, those in use not among them, a part of another size made anew in its zone's place, all of them let go after
@@ -782,8 +781,8 @@ fn the_song_s_picture_disappearing_paints_all_tools_again() {
     for _ in 0..20 {
         handed.extend(turn_of(&mut person.panels, &person.snap, person.around, 0).into_iter().map(|h| h.0));
     }
-    assert!(handed.contains(&Zone::WingPlaying), "what plays beside the menu: {handed:?}");
-    assert!(handed.contains(&Zone::Takeover), "and All tools: {handed:?}");
+    // The wing is away while a sheet is up (Enzo, 2026-11-11): All tools has what plays.
+    assert!(handed.contains(&Zone::Takeover), "All tools: {handed:?}");
     // An announced image which has not arrived must not bring back painting every turn.
     let mut media = sample_media();
     media.art = Some("art:unavailable".into());
@@ -795,4 +794,152 @@ fn the_song_s_picture_disappearing_paints_all_tools_again() {
         person.turn();
     }
 
+}
+
+/// Enzo, 2026-11-11 (F8): a page opened from the Quick Menu's tiles hides the tiles beside it, for the eyes and for the lasers alike, and they come back as it closes. The
+/// way out is always there: its head's Back, its close and its tabs.
+#[test]
+fn the_wing_goes_while_a_sheet_is_up_and_comes_back() {
+    let mut person = Person::new();
+    person.around = Some(Around::QuickMenu);
+    person.turns(3);
+    let wing = |person: &Person| person.panels.all().filter(|p| Zone::WING.contains(&p.zone) || p.zone == Zone::QmCaption).count();
+    assert!(wing(&person) >= 7, "the wing at first");
+    for tile in [Action::Worlds, Action::Page(Target::YouTube), Action::Page(Target::Instances), Action::Pictures, Action::All] {
+        person.press(tile);
+        person.turns(2);
+        assert!(person.panels.sheet_open(), "{tile:?} opens its sheet");
+        assert_eq!(wing(&person), 0, "{tile:?}: no tile of the wing beside it, to see or to point at");
+        assert!(!person.panels.facts.beside_wing, "{tile:?}");
+        let ways_out: Vec<Action> = person.panels.all().filter(|p| p.zone == Zone::SheetBack).flat_map(|p| p.items.iter().map(|i| i.action)).collect();
+        assert!(ways_out.contains(&Action::Back) && ways_out.contains(&Action::CloseSheet), "{tile:?}: a way out in its head: {ways_out:?}");
+        person.press(Action::CloseSheet);
+        person.turns(2);
+        assert!(!person.panels.sheet_open());
+        assert!(wing(&person) >= 7, "{tile:?}: the wing is back");
+    }
+}
+
+/// Enzo, 2026-11-11 (F22): the tile or tab of the tool whose page is open, pressed again, closes the page and VRChat's menu is there under it. Pressed on another tool it
+/// goes there; pressed within the page it does what it does there.
+#[test]
+fn the_open_tool_pressed_again_closes_its_page() {
+    let mut person = Person::new();
+    person.around = Some(Around::QuickMenu);
+    person.turns(3);
+    // From the wing, then its own tab in the head.
+    person.press(Action::Pictures);
+    person.turns(2);
+    assert_eq!(person.panels.facts.sheet, Some(Sheet::Pictures));
+    let (part, _) = person.find(Action::Pictures).expect("its tab");
+    assert_eq!(person.panels.all().nth(part).map(|p| p.zone), Some(Zone::SheetBack), "the tab is in the head");
+    let pressed = person.press(Action::Pictures);
+    person.turns(2);
+    assert!(pressed.clicked, "it clicks");
+    assert_eq!(person.panels.facts.sheet, None, "Pictures pressed again: closed");
+    assert!(person.panels.all().any(|p| p.zone == Zone::WingPictures), "the menu as it was");
+    // Another tool's tab goes there, and that one again closes it.
+    person.press(Action::Page(Target::Instances));
+    person.turns(2);
+    assert_eq!(person.panels.facts.sheet, Some(Sheet::Instances));
+    person.press(Action::Worlds);
+    person.turns(2);
+    assert_eq!(person.panels.facts.sheet, Some(Sheet::Worlds), "another tab: another page");
+    person.press(Action::Worlds);
+    person.turns(2);
+    assert_eq!(person.panels.facts.sheet, None, "Worlds pressed again: closed");
+    // YouTube is the menu's page of that name, or its results.
+    person.press(Action::Page(Target::YouTube));
+    person.turns(2);
+    assert_eq!(person.panels.facts.sheet, Some(Sheet::Menu));
+    person.press(Action::Page(Target::YouTube));
+    person.turns(2);
+    assert_eq!(person.panels.facts.sheet, None, "YouTube pressed again: closed");
+    // All tools has no tabs: what is on its page opens what it says.
+    person.press(Action::All);
+    person.turns(2);
+    assert_eq!(person.panels.facts.sheet, Some(Sheet::All));
+    assert!(person.find(Action::All).is_none(), "nothing on All tools is All tools");
+    person.press(Action::Pictures);
+    person.turns(2);
+    assert_eq!(person.panels.facts.sheet, Some(Sheet::Pictures), "a card of All tools opens its tool");
+    // And the next opening of the menu is a menu with nothing open.
+    person.press(Action::Pictures);
+    person.turns(2);
+    assert_eq!(person.panels.facts.sheet, None);
+    person.around = None;
+    person.turns(2);
+    person.around = Some(Around::QuickMenu);
+    person.turns(2);
+    assert_eq!(person.panels.facts.sheet, None);
+}
+
+/// The way to VRChat's own menus has one place: a button on the sheet's head, beside its close, inside the frame (IMG1 had its words float off the frame's right). Pressed,
+/// everything goes but a pill in the same place, its eye where the button was, which brings it all back.
+#[test]
+fn the_way_to_vrchat_s_menus_keeps_its_place_on_the_head() {
+    let mut person = Person::new();
+    person.around = Some(Around::QuickMenu);
+    person.turns(3);
+    person.press(Action::Pictures);
+    person.turns(2);
+    let back = person.panels.all().find(|p| p.zone == Zone::SheetBack).map(|p| p.placed).expect("the back");
+    let button = person.panels.all().find(|p| p.zone == Zone::SheetBack).and_then(|p| p.items.iter().find(|i| i.action == Action::Peek)).map(|i| i.rect).expect("on the head");
+    assert!(button.top() >= 0.0 && button.bottom() <= super::panels::SHEET_HEAD, "in the head: {button:?}");
+    let pill = person.panels.all().find(|p| p.zone == Zone::SheetPeek).map(|p| (p.placed, p.shown)).expect("the pill");
+    assert!(!pill.1, "the pill shows only while VRChat's menus are reached");
+    assert!(back.rect.contains_rect(pill.0.rect), "inside the frame: {:?} in {:?}", pill.0.rect, back.rect);
+    let button_right = back.rect.left() + button.right() * back.unit;
+    assert!((pill.0.rect.right() - button_right).abs() < 0.01, "it ends where the button does");
+    person.press(Action::Peek);
+    person.turns(2);
+    let shown: Vec<Zone> = person.panels.all().filter(|p| p.shown).map(|p| p.zone).collect();
+    assert_eq!(shown, vec![Zone::SheetPeek], "only the way back");
+    person.press(Action::Peek);
+    person.turns(2);
+    assert!(person.panels.all().all(|p| p.shown != (p.zone == Zone::SheetPeek)), "all back, the pill away");
+    assert_eq!(person.panels.facts.sheet, Some(Sheet::Pictures));
+}
+
+/// Enzo's IMG6 (F25): one silhouette whatever the page, in either look. The page as submitted lies inside its sheet's shape: nothing of it outside the back's corners,
+/// as the headset is given them in one picture ([`super::vr::compose_sheet`]).
+#[test]
+fn every_page_has_its_sheet_s_corners() {
+    use orbiters_core::settings::MenuLook;
+    for look in [MenuLook::Modern, MenuLook::Retro] {
+        for opens in [Action::All, Action::Worlds, Action::Pictures, Action::Page(Target::YouTube), Action::Page(Target::Instances)] {
+            let mut person = Person::new();
+            let mut snap = (*person.snap).clone();
+            snap.settings.orbit.theme = look;
+            person.snap = Arc::new(snap);
+            person.around = Some(Around::QuickMenu);
+            person.turns(3);
+            person.press(opens);
+            person.turns_until("its parts painted", |p| p.panels.all().all(|part| part.painted || !part.shown));
+            person.turns(3);
+            let back = person.panels.all().find(|p| p.zone == Zone::SheetBack).expect("a back");
+            let page = person.panels.takeover.as_ref().expect("a page");
+            let top = super::vr::page_row(back, page).expect("one picture");
+            let whole = super::vr::compose_sheet(back.pixels(), back.px, page.pixels(), page.px, top);
+            let [w, h] = back.px;
+            let alpha = |pixels: &[u8], x: u32, y: u32| pixels[((y * w + x) * 4 + 3) as usize];
+            // At the foot's corners, where the page reaches: nothing of it where its back is not. (Off a pixel and a half of the straight sides, whose outer pixel the
+            // back's edge feathers; along the corners' arcs two edges smoothed two ways differ by a part of a pixel.)
+            let corner = 40;
+            let mut worst = (0i32, 0, 0);
+            for y in top..top + page.px[1] {
+                for x in (2..corner).chain(w - corner..w - 2) {
+                    let past = alpha(&whole, x, y) as i32 - alpha(back.pixels(), x, y) as i32;
+                    if past > worst.0 {
+                        worst = (past, x, y);
+                    }
+                }
+            }
+            assert!(worst.0 <= 64, "{look:?} {opens:?}: the page reaches {} past its sheet's corners at ({}, {})", worst.0, worst.1, worst.2);
+            for (x, y) in [(0, 0), (w - 1, 0), (0, h - 1), (w - 1, h - 1)] {
+                assert_eq!(alpha(&whole, x, y), 0, "{look:?} {opens:?}: its corner ({x}, {y}) is round");
+            }
+            assert!(alpha(&whole, w / 2, h / 2) > 250, "{look:?} {opens:?}: solid in its middle");
+        }
+    }
 }

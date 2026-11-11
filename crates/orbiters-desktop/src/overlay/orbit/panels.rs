@@ -133,6 +133,11 @@ pub mod look {
     pub const CELL_FAR: Color32 = Color32::from_rgb(29, 28, 38);
     /// A panel's corners, as the app's cards and tiles have them.
     pub const RADIUS: f32 = orbiters_ui::theme::CARD_RADIUS * 0.8;
+
+    /// A sheet's outer corners, in its head's units: one for its head and its foot, whatever page is on it; the retro look's are hard.
+    pub fn sheet_radius() -> f32 {
+        if retro() { 3.0 } else { (RADIUS + 2.0).round() }
+    }
     pub const TILE_RADIUS: f32 = orbiters_ui::theme::TILE_RADIUS * 0.8;
 }
 
@@ -665,6 +670,8 @@ pub enum Look {
     Visit(usize),
     /// Takes everything away for a moment, or brings it back.
     PeekWord,
+    /// The head's way to VRChat's own menus: a round button beside its close.
+    HeadPeek,
     /// One of the tools, in a sheet's head: from any sheet to any other, with or without the wing.
     /// `words_only`: its name alone, where six names and their icons would not fit (a headset's head with a capture showing).
     HeadTab { icon: &'static str, label: &'static str, on: bool, words_only: bool },
@@ -773,26 +780,27 @@ pub fn items(zone: Zone, size: Vec2, facts: &Facts) -> Vec<Item> {
         Zone::SheetPeek => vec![Item { action: Action::Peek, rect: whole, look: Look::PeekWord }],
         Zone::SheetBack => {
             // In a headset the head's buttons are of the size of the sheet's own (round 14's judges: tabs much smaller than the buttons under them, for a laser).
-            let (top, b) = head_button(facts);
-            let pill = head_pill(facts);
-            let mut out = vec![Item { action: Action::CloseSheet, rect: r(w - 10.0 - b, top, b, b), look: Look::Close }, Item { action: Action::Back, rect: r(BACK_AT, top, b, b), look: Look::HeadBack }];
-            out.extend(head_tabs(facts, w).0);
+            let head = head(facts, w);
+            let mut out = vec![
+                Item { action: Action::CloseSheet, rect: head.close, look: Look::Close },
+                Item { action: Action::Back, rect: head.back, look: Look::HeadBack },
+                Item { action: Action::Peek, rect: head.peek, look: Look::HeadPeek },
+            ];
+            out.extend(head.tabs);
             // While a capture shows around the person: it is one press from gone, wherever on the sheet.
-            if facts.view_showing {
-                let gap = hide_view_gap(facts);
-                out.push(Item { action: Action::HideView, rect: r(w - 40.0 - gap - pill, top, pill, b), look: Look::HideView });
-                // On Worlds in 3D, the world's side panel has it.
-                if facts.sheet != Some(Sheet::Worlds) {
-                    out.push(Item { action: Action::SmallView(!facts.view_small), rect: r(w - 40.0 - gap - pill - 6.0 - pill, top, pill, b), look: Look::SmallView });
-                }
+            if let Some(rect) = head.hide_view {
+                out.push(Item { action: Action::HideView, rect, look: Look::HideView });
             }
-            // All tools has what plays on its page.
-            if facts.music.is_some() && !facts.beside_wing && !facts.view_showing && status_now(facts).is_none() && facts.sheet != Some(Sheet::All) {
-                // Alone, from the wheel: what plays, in its head.
-                let (y, b) = (9.0, 26.0);
-                out.push(Item { action: Action::Next, rect: r(w - 48.0 - b, y, b, b), look: Look::Transport(icons::SKIP_FORWARD) });
-                out.push(Item { action: Action::PlayPause, rect: r(w - 52.0 - b * 2.0, y, b, b), look: Look::Transport(transport_icon) });
-                out.push(Item { action: Action::Previous, rect: r(w - 56.0 - b * 3.0, y, b, b), look: Look::Transport(icons::SKIP_BACK) });
+            // On Worlds in 3D, the world's side panel has it.
+            if let Some(rect) = head.small_view {
+                out.push(Item { action: Action::SmallView(!facts.view_small), rect, look: Look::SmallView });
+            }
+            // What plays, where the head has room for it beside its tabs (All tools has it on its page).
+            if let Some(at) = head.transport {
+                let b = HEAD_TRANSPORT;
+                out.push(Item { action: Action::Previous, rect: r(at, head.close.center().y - b / 2.0, b, b), look: Look::Transport(icons::SKIP_BACK) });
+                out.push(Item { action: Action::PlayPause, rect: r(at + b + 4.0, head.close.center().y - b / 2.0, b, b), look: Look::Transport(transport_icon) });
+                out.push(Item { action: Action::Next, rect: r(at + (b + 4.0) * 2.0, head.close.center().y - b / 2.0, b, b), look: Look::Transport(icons::SKIP_FORWARD) });
             }
             out
         }
@@ -845,64 +853,207 @@ fn head_button(facts: &Facts) -> (f32, f32) {
     if facts.desktop { (7.0, 30.0) } else { (4.0, 36.0) }
 }
 
-/// How wide Hide 3D and Small here are in the head.
-const HEAD_PILL: f32 = 96.0;
+/// The least a pill of the sheet's head is across, and what it holds on each side of its words.
+const HEAD_PILL_LEAST: f32 = 72.0;
+const HEAD_PILL_PAD: f32 = 14.0;
+/// What plays's three buttons in the head, and how far apart the head's round buttons stand: a laser on one is not on the other.
+const HEAD_TRANSPORT: f32 = 26.0;
+fn head_gap(facts: &Facts) -> f32 {
+    if facts.desktop { 6.0 } else { 10.0 }
+}
 
-/// The tools along a sheet's head, where the wing is not beside it, and where they end. Their names where there is room; with something else to say in the head, on a screen, icons but for the one that is open.
-fn head_tabs(facts: &Facts, head_width: f32) -> (Vec<Item>, f32) {
-    const TABS: [(Action, &str, &str, f32); 6] = [
-        (Action::Worlds, icons::GLOBE_HEMISPHERE_WEST, mark("Worlds"), 84.0),
-        (Action::Page(Target::YouTube), icons::YOUTUBE_LOGO, "YouTube", 90.0),
-        (Action::Page(Target::Instances), icons::CLOCK, mark("Instances"), 100.0),
-        (Action::Pictures, icons::IMAGES, mark("Pictures"), 90.0),
-        (Action::Talk, icons::MICROPHONE, mark("Ask"), 62.0),
-        (Action::All, icons::SQUARES_FOUR, mark("All tools"), 90.0),
-    ];
-    // All tools has them, as large tiles, right under them.
-    if facts.sheet == Some(Sheet::All) {
-        // Its name after the Back, which is larger in a headset (the round 16 render had the name under it).
-        return (Vec::new(), 10.0 + head_button(facts).1 - 30.0);
+/// Text measured with the fonts it is drawn with, in the language now: what a control needs to say it whole. Enzo, 2026-11-11 (IMG1): French ran out of the head's pills
+/// and over the title, which were laid out for English, by a count of letters.
+pub fn measure(text: &str, font: &FontId) -> f32 {
+    thread_local! {
+        static FONTS: (egui::Context, std::cell::Cell<Option<orbiters_i18n::Language>>) = {
+            let ctx = egui::Context::default();
+            orbiters_ui::install(&ctx);
+            (ctx, std::cell::Cell::new(None))
+        };
     }
-    let busy = facts.view_showing || status_now(facts).is_some();
-    let open = |action: Action| match (facts.sheet, action) {
+    FONTS.with(|(ctx, seen)| {
+        // Fonts are there after a first frame, and a language's own (Japanese's) after one in it.
+        let now = orbiters_i18n::language();
+        if seen.get() != Some(now) {
+            orbiters_ui::fonts::follow_language(ctx);
+            // Nothing is painted from it: its fonts' atlas is let go.
+            ctx.run_ui(egui::RawInput::default(), |_| {}).textures_delta.clear();
+            seen.set(Some(now));
+        }
+        Painter::new(ctx.clone(), egui::LayerId::background(), Rect::EVERYTHING).layout_no_wrap(text.to_string(), font.clone(), Color32::WHITE).size().x
+    })
+}
+
+/// The words of a pill in the head, and its font.
+fn head_pill_font(facts: &Facts) -> FontId {
+    look::font(if facts.desktop { 13.0 } else { 13.5 }, weight::SEMIBOLD)
+}
+
+/// How wide a pill of the head is that says the longest of `labels`: whichever it says, it does not change size under the laser.
+fn head_pill_width(facts: &Facts, labels: &[&str]) -> f32 {
+    let font = head_pill_font(facts);
+    let words = labels.iter().map(|l| measure(l, &font)).fold(0.0, f32::max);
+    (words + HEAD_PILL_PAD * 2.0).max(HEAD_PILL_LEAST).ceil()
+}
+
+/// A tab of the head: the room its name takes beside its icon, in the weight it has open.
+fn head_tab_font(on: bool) -> FontId {
+    look::font(13.5, if on { weight::BOLD } else { weight::MEDIUM })
+}
+
+fn head_tab_named(label: &str) -> f32 {
+    (29.0 + measure(label, &head_tab_font(true)) + 12.0).ceil().max(COMPACT_TAB_VR)
+}
+
+/// A tab's words where they stand without its icon.
+fn head_words_font(_facts: &Facts, on: bool) -> FontId {
+    look::font(15.5, if on { weight::BOLD } else { weight::SEMIBOLD })
+}
+
+/// What the head's title says, and its font, where no tab is the page's.
+fn head_title_font() -> FontId {
+    look::font(18.0, weight::SEMIBOLD)
+}
+
+/// Where everything in a sheet's head lies, each as wide as what it says measures in the language now: Back, the tools as tabs (named where they all fit, else icons with the
+/// open one named), or the page's own name; at the right end its close, the way to VRChat's own menus beside it, and while a capture shows its Hide 3D and its Small
+/// here. Nothing is laid by a count of letters.
+pub struct Head {
+    pub back: Rect,
+    pub close: Rect,
+    pub peek: Rect,
+    pub hide_view: Option<Rect>,
+    pub small_view: Option<Rect>,
+    /// Where what plays's three buttons start, when the head shows them.
+    pub transport: Option<f32>,
+    pub tabs: Vec<Item>,
+    /// Where the page's name starts (its mark first), when no tab is the page's, and where whatever is said in the head must end.
+    pub title_x: f32,
+    pub end: f32,
+}
+
+/// The way to VRChat's own menus on the head of a sheet `head_width` wide: its button there, and, while those menus are reached, a pill saying how to come back that
+/// ends where the button does, its eye where the button's was.
+pub fn peek_place(facts: &Facts, head_width: f32) -> Rect {
+    let button = head(facts, head_width).peek;
+    let font = head_pill_font(facts);
+    let wide = (measure(tr("Show Orbiters"), &font) + 22.0 + HEAD_PILL_PAD * 2.0).ceil();
+    Rect::from_min_max(pos2(button.right() - wide.max(button.width()), button.top()), button.max)
+}
+
+/// The tools named on the tabs, and which is open.
+const HEAD_TOOLS: [(Action, &str, &str); 6] = [
+    (Action::Worlds, icons::GLOBE_HEMISPHERE_WEST, mark("Worlds")),
+    (Action::Page(Target::YouTube), icons::YOUTUBE_LOGO, "YouTube"),
+    (Action::Page(Target::Instances), icons::CLOCK, mark("Instances")),
+    (Action::Pictures, icons::IMAGES, mark("Pictures")),
+    (Action::Talk, icons::MICROPHONE, mark("Ask")),
+    (Action::All, icons::SQUARES_FOUR, mark("All tools")),
+];
+
+/// Whether the page up is this tool's own, whatever it shows of it now (a world's page is still Worlds in 3D, a picture shown large still Pictures): what its tile or
+/// its tab pressed again closes.
+pub fn tool_is_open(facts: &Facts, action: Action) -> bool {
+    match (facts.sheet, action) {
         (Some(Sheet::Worlds), Action::Worlds) | (Some(Sheet::All), Action::All) | (Some(Sheet::Pictures), Action::Pictures) | (Some(Sheet::Talk), Action::Talk) => true,
         (Some(Sheet::Instances), Action::Page(Target::Instances)) | (Some(Sheet::Results), Action::Page(Target::YouTube)) => true,
         (Some(Sheet::Menu), Action::Page(Target::YouTube)) => facts.sheet_title == "YouTube",
         _ => false,
-    };
-    // A page that is none of them says its name after them: on a screen they make it room, as small icons. In a headset they are named, and the name has what is left.
-    let unnamed = !TABS.iter().any(|t| open(t.0));
-    // Named wherever they fit beside what the head has at its end (its close; Hide 3D and Small here while a capture shows): round 11's judges saw a headset's bare icons
-    // with their names' room empty beside them.
-    // As wide as its own name where room is short (a headset's head is 704 across): its icon, its word, a little room.
-    // A headset's words as large as the sheet's buttons' (round 14's judges).
-    let snug = |label: &str| (16.0 + label.chars().map(|c| if c.is_ascii() { 8.7 } else { 16.0 }).sum::<f32>()).max(COMPACT_TAB_VR);
-    let pill = head_pill(facts);
-    let room = head_width - 48.0 - if facts.view_showing { pill + hide_view_gap(facts) + if facts.sheet != Some(Sheet::Worlds) { pill + 6.0 } else { 0.0 } } else { 0.0 } - 12.0;
-    let start = BACK_AT + head_button(facts).1 + 6.0;
-    let wide_fits = start + TABS.iter().map(|t| t.3 + 3.0).sum::<f32>() <= room;
-    let snug_fits = start + TABS.iter().map(|t| snug(tr_ctx("tile", t.2)) + 3.0).sum::<f32>() <= room;
+    }
+}
+
+pub fn head(facts: &Facts, w: f32) -> Head {
+    let (top, b) = head_button(facts);
+    let gap = head_gap(facts);
+    let back = r(BACK_AT, top, b, b);
+    let close = r(w - 10.0 - b, top, b, b);
+    let peek = r(close.left() - gap - b, top, b, b);
+    let mut end = peek.left() - hide_view_gap(facts);
+    let (mut hide_view, mut small_view) = (None, None);
+    if facts.view_showing {
+        let wide = head_pill_width(facts, &[tr("Hide 3D")]);
+        let rect = r(end - wide, top, wide, b);
+        end = rect.left() - 6.0;
+        hide_view = Some(rect);
+        if facts.sheet != Some(Sheet::Worlds) {
+            let wide = head_pill_width(facts, &[tr("Around you"), tr_ctx("view", "Small")]);
+            let rect = r(end - wide, top, wide, b);
+            end = rect.left() - 6.0;
+            small_view = Some(rect);
+        }
+    }
+    end -= 6.0;
+    let start = back.right() + 6.0;
+    // All tools has the tools as large tiles right under its head: its name after the Back.
+    if facts.sheet == Some(Sheet::All) {
+        return Head { back, close, peek, hide_view, small_view, transport: None, tabs: Vec::new(), title_x: back.right() + 8.0, end };
+    }
+    let unnamed = !HEAD_TOOLS.iter().any(|t| tool_is_open(facts, t.0));
+    // A page that is none of the tools says its name after them: its mark and its words want this.
+    let title_need = if unnamed { 28.0 + measure(sheet_name(&facts.sheet_title), &head_title_font()).min(240.0) + 12.0 } else { 0.0 };
     let quiet = status_now(facts).is_none();
-    let compact = (busy && !(quiet && (wide_fits || snug_fits))) || (unnamed && facts.desktop);
-    let snugly = busy && quiet && !wide_fits && snug_fits;
-    // After the Back, which is in this place on every sheet.
+    let compact_w = if facts.desktop { 36.0 } else { COMPACT_TAB_VR };
+    let named_all: f32 = HEAD_TOOLS.iter().map(|t| head_tab_named(tr_ctx("tile", t.2)) + 3.0).sum();
+    // What plays has three buttons in the head where everything else still has its room: the tabs keep their names first.
+    let transport_w = HEAD_TRANSPORT * 3.0 + 8.0 + 8.0;
+    let with_music = facts.music.is_some() && !facts.beside_wing && !facts.view_showing && quiet;
+    let transport = (with_music && start + named_all + title_need <= end - transport_w).then(|| end - transport_w + 8.0);
+    if transport.is_some() {
+        end -= transport_w;
+    }
+    // Named wherever all fit beside what the head has at its end; else, in a headset, their words without their icons where those fit (round 11's judges: every tool
+    // one press away and named); else icons, with the open one, and in a headset the one a laser is on, named (round 10's judges could not tell the clock and the four
+    // squares apart). A status in the head takes the room of the names.
+    // On a screen a page of its own makes room for its name: its tools as small icons.
+    let compact = !(quiet && start + named_all + title_need <= end) || (unnamed && facts.desktop);
+    let words_w = |label: &str, on: bool| (measure(label, &head_words_font(facts, on)) + 16.0).ceil().max(compact_w);
+    let words_all: f32 = HEAD_TOOLS.iter().map(|t| words_w(tr_ctx("tile", t.2), tool_is_open(facts, t.0)) + 3.0).sum();
+    let words_only = compact && quiet && !facts.desktop && start + words_all + title_need <= end;
     let mut x = start;
-    let mut out = Vec::new();
-    for (action, icon, label, wide) in TABS {
-        let on = open(action);
+    let mut tabs = Vec::new();
+    for (action, icon, label) in HEAD_TOOLS {
+        let on = tool_is_open(facts, action);
         let label = tr_ctx("tile", label);
-        // The Ask tab is cut for a word of three letters: where its name has more, it takes the room those need (English is as it was).
-        let wide = if action == Action::Talk && label.chars().count() > 3 { wide + 10.0 } else { wide };
-        // In a headset an icon alone is as wide as a laser needs (a judge found no way from a VR sheet to the others while a capture showed).
-        // In a headset the one a laser is on says its name too (round 10's judges could not tell the clock and the four squares apart): it grows from where the laser is.
-        let named = on || (!facts.desktop && facts.pointed == Some(action));
-        let width = if compact && !named { if facts.desktop { 36.0 } else { COMPACT_TAB_VR } } else if snugly { snug(label) } else { wide };
-        // A headset's named tabs as tall as the head allows: a laser's target.
-        let (top, tall) = if !facts.desktop || snugly { (4.0, 36.0) } else { (7.0, 30.0) };
-        out.push(Item { action, rect: r(x, top, width, tall), look: Look::HeadTab { icon, label, on, words_only: snugly } });
+        let named = !compact || on || (!facts.desktop && facts.pointed == Some(action));
+        let width = if words_only { words_w(label, on) } else if named { head_tab_named(label) } else { compact_w };
+        let (top, tall) = if facts.desktop { (7.0, 30.0) } else { (4.0, 36.0) };
+        tabs.push(Item { action, rect: r(x, top, width, tall), look: Look::HeadTab { icon, label, on, words_only } });
         x += width + 3.0;
     }
-    (out, x)
+    // Named ones that do not fit even so become icons, the last first, the open one last: never a name cut short.
+    if x - 3.0 > end {
+        let mut over = x - 3.0 - end;
+        for open_too in [false, true] {
+            for item in tabs.iter_mut().rev() {
+                let Look::HeadTab { on, .. } = item.look else { continue };
+                if over <= 0.0 || on != open_too || item.rect.width() <= compact_w {
+                    continue;
+                }
+                over -= item.rect.width() - compact_w;
+                item.rect.max.x = item.rect.min.x + compact_w;
+                item.look = match item.look {
+                    Look::HeadTab { icon, label, on, .. } => Look::HeadTab { icon, label, on, words_only: false },
+                    other => other,
+                };
+            }
+        }
+        let mut x = start;
+        for item in &mut tabs {
+            let width = item.rect.width();
+            item.rect = r(x, item.rect.top(), width, item.rect.height());
+            x += width + 3.0;
+        }
+    }
+    let title_x = tabs.last().map_or(start, |t| t.rect.right() + 6.0);
+    Head { back, close, peek, hide_view, small_view, transport, tabs, title_x, end }
+}
+
+/// The tools along a sheet's head and where they end, as [`head`] lays them.
+#[cfg(test)]
+fn head_tabs(facts: &Facts, head_width: f32) -> (Vec<Item>, f32) {
+    let head = head(facts, head_width);
+    (head.tabs, head.title_x)
 }
 
 /// The wing's tiles in a row: its mark, then the six.
@@ -933,12 +1084,7 @@ fn strip(w: f32, h: f32, facts: &Facts) -> Vec<Item> {
     items
 }
 
-/// How far Hide 3D stands from the sheet's close: in a headset about a third of a pill, so that a laser on one is not on the other (round 18's judges: they touched).
-/// A pill of the sheet's head: in a headset a little narrower, by what its gap from the close takes, so that the tabs keep their names.
-fn head_pill(facts: &Facts) -> f32 {
-    if facts.desktop { HEAD_PILL } else { HEAD_PILL - 10.0 }
-}
-
+/// How far Hide 3D stands from the sheet's round buttons: in a headset about a third of a pill, so that a laser on one is not on the other (round 18's judges: they touched).
 fn hide_view_gap(facts: &Facts) -> f32 {
     if facts.desktop { 8.0 } else { 18.0 }
 }
@@ -1231,6 +1377,10 @@ pub fn set_style(o: &OrbitSettings) {
 
 /// How high a sheet's head is, above its page.
 pub const SHEET_HEAD: f32 = 44.0;
+/// How many of a sheet's units one of its page's is: the page is N4N0's 1024 across, the sheet 704.
+pub const PAGE_TO_SHEET: f32 = 704.0 / 1024.0;
+/// The corners of a capture's hole in the sheet's back, in its units: the page's own hole's ([`super::super::worlds::panel::HOLE_RADIUS`]), so that the two are one shape.
+const HOLE_RADIUS: f32 = super::super::worlds::panel::HOLE_RADIUS * PAGE_TO_SHEET;
 
 /// How wide a list's scroll bar takes the pointer: 2 degrees at arm's length in the headset.
 const SCROLL_BAR_GRAB: f32 = 34.0;
@@ -1272,7 +1422,8 @@ fn video_grid() -> (usize, f32, f32, f32) {
 }
 
 /// A result's actions at the end of its row, one over the other.
-const RESULT_ACTION_W: f32 = 168.0;
+/// YouTube's results' two buttons, wide enough for "Déposer dans le monde".
+const RESULT_ACTION_W: f32 = 184.0;
 
 /// A result's height, and its picture's width beside its words.
 const RESULT_HIGH: f32 = 116.0;
@@ -1478,7 +1629,8 @@ fn tile_line(action: Action, facts: &Facts) -> Option<String> {
     Some(line.to_string())
 }
 
-const PLAYING_LINK_W: f32 = 138.0;
+/// Copy link and Drop link: as wide as the languages' words for them need at the least size that reads (French and Spanish ran out at 138).
+const PLAYING_LINK_W: f32 = 150.0;
 /// Where Now playing's row of controls lies, from its foot.
 const PLAYING_ROW: f32 = 26.0;
 /// Play and pause, with its word.
@@ -1490,7 +1642,17 @@ const VOLUME_ROW: f32 = 103.0;
 const VOLUME_CLUSTER: f32 = 206.0;
 /// Its buttons' size: the row ends over the title, which wraps to two lines under it.
 const VOLUME_BUTTON: f32 = 36.0;
+/// What lies between its minus and its plus.
+const VOLUME_TRACK: f32 = 78.0;
 const PLAYING_LINK_H: f32 = 42.0;
+
+/// Where the volume's level lies between its minus and its plus: its thumb (8 across its middle) stays clear of both at 0 and at 100 (IMG1: on the minus).
+fn volume_bar(panel: Rect) -> Rect {
+    const THUMB: f32 = 8.0;
+    let right = panel.right() - 16.0;
+    let (minus_right, plus_left) = (right - VOLUME_BUTTON - VOLUME_TRACK, right - VOLUME_BUTTON);
+    Rect::from_min_max(pos2(minus_right + THUMB + 5.0, panel.top() + VOLUME_ROW - 3.5), pos2(plus_left - THUMB - 5.0, panel.top() + VOLUME_ROW + 3.5))
+}
 
 /// Where Now playing's words and controls start, after its picture: the picture as high as the panel where that leaves the row of controls its room (previous, play, next,
 /// Drop link and Copy link, none over another), and smaller where the panel is narrower.
@@ -1529,8 +1691,8 @@ fn now_playing_controls(panel: Rect, facts: &Facts) -> Vec<Item> {
         let top = |x: f32, side: f32| Rect::from_center_size(pos2(x + side / 2.0, panel.top() + VOLUME_ROW), Vec2::splat(side));
         let b = VOLUME_BUTTON;
         out.push(Item { action: Action::Volume(true), rect: top(right - b, b), look: Look::Transport(icons::PLUS) });
-        out.push(Item { action: Action::Volume(false), rect: top(right - b - 78.0 - b, b), look: Look::Transport(icons::MINUS) });
-        out.push(Item { action: Action::Mute, rect: top(right - b - 78.0 - b - 44.0, b), look: Look::Transport(if muted { icons::SPEAKER_X } else { icons::SPEAKER_HIGH }) });
+        out.push(Item { action: Action::Volume(false), rect: top(right - b - VOLUME_TRACK - b, b), look: Look::Transport(icons::MINUS) });
+        out.push(Item { action: Action::Mute, rect: top(right - b - VOLUME_TRACK - b - 44.0, b), look: Look::Transport(if muted { icons::SPEAKER_X } else { icons::SPEAKER_HIGH }) });
     }
     out
 }
@@ -1549,6 +1711,23 @@ fn tool_tint(action: Action) -> Color32 {
         Action::Page(Target::Light) | Action::Page(Target::Suggest) => theme::WARN,
         _ => theme::MARK,
     }
+}
+
+/// Where a large tile of All tools (at `rect`) holds what it holds, under its name.
+fn hero_body_rect(rect: Rect) -> Rect {
+    Rect::from_min_max(pos2(rect.left() + 14.0, rect.top() + 12.0 + 46.0 + 8.0), rect.max - vec2(14.0, 12.0))
+}
+
+/// YouTube's search at the foot of what its card holds, as large as a button is.
+fn search_in(body: Rect) -> Rect {
+    let foot = 30.0f32.min(body.height() * 0.4);
+    Rect::from_min_max(pos2(body.left(), body.bottom() - foot), body.max)
+}
+
+/// YouTube's search on its card at `rect`.
+#[cfg(test)]
+fn hero_search(rect: Rect) -> Rect {
+    search_in(hero_body_rect(rect))
 }
 
 /// What a large tile of All tools holds under its name.
@@ -1631,15 +1810,22 @@ fn hero_body(p: &Painter, body: Rect, action: Action, line: &str, facts: &Facts)
         }
         Action::Page(Target::YouTube) => {
             // What is in this world's player, as itself where its picture is known; and at its foot where this leads, as large as a button is.
-            let foot = 30.0f32.min(body.height() * 0.4);
-            let search = Rect::from_min_max(pos2(body.left(), body.bottom() - foot), body.max);
-            p.rect_filled(search, look::radius(foot / 2.0), theme::mix(look::TILE, tool_tint(action), 0.6));
-            let font = look::font(18.0, weight::SEMIBOLD);
-            let wide = p.layout_no_wrap(tr("Search YouTube").to_string(), font.clone(), look::LABEL).size().x;
+            let search = search_in(body);
+            p.rect_filled(search, look::radius(search.height() / 2.0), theme::mix(look::TILE, tool_tint(action), 0.6));
+            // Its icon and its words as one group inside the pill: where the whole of "Search YouTube" does not fit (French's "Rechercher sur YouTube" ran out of both
+            // ends, IMG1), "Search" alone, as the card says YouTube over it.
+            let room = search.width() - 28.0 - 24.0;
+            let wide_at = |words: &str, size: f32| p.layout_no_wrap(words.to_string(), look::font(size, weight::SEMIBOLD), look::LABEL).size().x;
+            let words = if wide_at(tr("Search YouTube"), 15.5) <= room { tr("Search YouTube") } else { tr("Search") };
+            let (words, font) = fitted(p, words, 18.0, weight::SEMIBOLD, room, 15.5);
+            let wide = p.layout_no_wrap(words.clone(), font.clone(), look::LABEL).size().x;
             let left = search.center().x - (wide + 28.0) / 2.0;
             widgets::icon(p, pos2(left + 10.0, search.center().y), icons::MAGNIFYING_GLASS, 20.0, look::LABEL);
-            p.text(pos2(left + 28.0, search.center().y), Align2::LEFT_CENTER, tr("Search YouTube"), font, look::LABEL);
+            p.text(pos2(left + 28.0, search.center().y), Align2::LEFT_CENTER, words, font, look::LABEL);
             let room = Rect::from_min_max(body.min, pos2(body.right(), search.top() - 6.0));
+            // As many lines as the room above the pill holds, by what a line measures: three of 21 ran into the pill (IMG1, "ce monde").
+            let line_high = p.layout_no_wrap("Ag".to_string(), look::font(18.0, weight::SEMIBOLD), look::LABEL).size().y; // i18n: not shown (measures a line's height)
+            let rows_in = |height: f32| ((height / line_high).floor() as usize).max(1);
             let lines = |p: &Painter, at: Pos2, words: &str, size: f32, w: f32, ink: Color32, rows: usize| -> f32 {
                 let mut job = egui::text::LayoutJob::simple(words.to_string(), look::font(size, w), ink, room.width() - 20.0);
                 job.wrap.max_rows = rows;
@@ -1663,10 +1849,10 @@ fn hero_body(p: &Painter, body: Rect, action: Action, line: &str, facts: &Facts)
                     p.galley(pos2(words.left(), room.center().y - galley.size().y / 2.0), galley, look::LABEL);
                 }
                 (Some(title), None) => {
-                    lines(p, room.min, title, 18.0, weight::SEMIBOLD, look::LABEL, ((room.height() / 21.0).floor() as usize).max(1));
+                    lines(p, room.min, title, 18.0, weight::SEMIBOLD, look::LABEL, rows_in(room.height()));
                 }
                 (None, _) => {
-                    lines(p, room.min, line, 18.0, weight::SEMIBOLD, look::LABEL, ((room.height() / 21.0).floor() as usize).max(1));
+                    lines(p, room.min, line, 18.0, weight::SEMIBOLD, look::LABEL, rows_in(room.height()));
                 }
             }
         }
@@ -1868,6 +2054,18 @@ pub(crate) fn fit(p: &Painter, s: &str, font: &FontId, width: f32) -> String {
     String::new()
 }
 
+/// `s` at `size` where it fits `width`; else as large as it fits, down to `least` and no smaller (smaller does not read in a headset), and cut with an ellipsis only past
+/// that, as a last guard.
+pub(crate) fn fitted(p: &Painter, s: &str, size: f32, weight: f32, width: f32, least: f32) -> (String, FontId) {
+    let mut at = size;
+    loop {
+        let font = look::font(at, weight);
+        if p.layout_no_wrap(s.to_string(), font.clone(), Color32::WHITE).size().x <= width || at - 0.5 < least {
+            return (fit(p, s, &font, width), font);
+        }
+        at -= 0.5;
+    }
+}
 
 /// A label in VRChat's manner: bold, with a soft dark edge, readable on anything behind it.
 fn bold(p: &Painter, at: Pos2, align: Align2, s: &str, size: f32, c: Color32) {
@@ -2048,35 +2246,48 @@ pub fn paint(p: &Painter, zone: Zone, size: Vec2, facts: &Facts, hover: Option<u
             p.text(panel.center(), Align2::CENTER_CENTER, fit(p, &words, &font, panel.width() - 28.0), font, look::LABEL);
         }
         Zone::SheetBack => {
+            // One silhouette for every sheet, whatever its page and its look: its head's top corners and its foot's are this one radius, and the page on it is cut to it
+            // ([`page_mask`]). Enzo's IMG6: rounded here, square there.
+            let radius = look::sheet_radius();
             match facts.sheet_hole {
-                Some(hole) => super::super::worlds::panel::fill_around(p, panel, look::RADIUS + 2.0, hole, 10.0, look::OPAQUE),
+                Some(hole) => super::super::worlds::panel::fill_around(p, panel, radius, hole, HOLE_RADIUS, look::OPAQUE),
                 None => {
-                    p.rect_filled(panel, look::radius(look::RADIUS + 2.0), look::OPAQUE);
+                    p.rect_filled(panel, theme::radius(radius), look::OPAQUE);
                 }
             }
             // Its head has the colour of what it is, as on All tools.
             let (glyph, tint) = sheet_mark(facts);
-            let round = (look::RADIUS + 2.0) as u8;
+            let round = radius as u8;
             // Each sheet's head has its tool's colour, as All tools has it: the eye finds a tool by it, there and here. What has none of its own has the accent, not a grey.
             let band = if tint == theme::MARK { look::accent() } else { tint };
-            p.rect_filled(Rect::from_min_max(panel.min, pos2(panel.right(), panel.top() + SHEET_HEAD)), egui::CornerRadius { nw: round, ne: round, sw: 0, se: 0 }, theme::mix(theme::alpha(tint, 0.11), band, 0.16));
+            let head_band = Rect::from_min_max(panel.min, pos2(panel.right(), panel.top() + SHEET_HEAD));
+            let head_fill = theme::mix(theme::alpha(tint, 0.11), band, 0.16);
+            if look::retro() {
+                // Its top corners cut as the retro look cuts the sheet's ground under it: one outline.
+                let points = super::retro::cut_corners(head_band, egui::CornerRadius { nw: 1, ne: 1, sw: 0, se: 0 }, super::retro::SHEET_CUT);
+                p.add(Shape::convex_polygon(points, head_fill, Stroke::NONE));
+            } else {
+                p.rect_filled(head_band, egui::CornerRadius { nw: round, ne: round, sw: 0, se: 0 }, head_fill);
+            }
             p.rect_filled(Rect::from_min_size(pos2(panel.left(), panel.top() + SHEET_HEAD - 2.0), vec2(panel.width(), 2.0)), 0.0, theme::alpha(band, 0.55));
             top_light(p, panel);
             // The tools along it say which page this is; a page of N4N0's own says so after them.
-            let (tabs, mut x) = head_tabs(facts, size.x);
-            if !tabs.iter().any(|t| matches!(t.look, Look::HeadTab { on: true, .. })) {
+            let head = head(facts, size.x);
+            let mut x = head.title_x;
+            if !head.tabs.iter().any(|t| matches!(t.look, Look::HeadTab { on: true, .. })) {
                 widgets::icon(p, pos2(x + 10.0, 22.0), glyph, 21.0, tint);
                 x += 28.0;
-                let font = look::font(18.0, weight::SEMIBOLD);
-                let title = fit(p, sheet_name(&facts.sheet_title), &font, size.x - 50.0 - x);
-                x += p.layout_no_wrap(title.clone(), font.clone(), Color32::WHITE).size().x;
-                p.text(pos2(x - p.layout_no_wrap(title.clone(), font.clone(), Color32::WHITE).size().x, 22.0), Align2::LEFT_CENTER, title, font, look::LABEL);
+                let font = head_title_font();
+                let title = fit(p, sheet_name(&facts.sheet_title), &font, (head.end - x).max(0.0));
+                let wide = p.layout_no_wrap(title.clone(), font.clone(), Color32::WHITE).size().x;
+                p.text(pos2(x, 22.0), Align2::LEFT_CENTER, title, font, look::LABEL);
+                x += wide;
             }
             // Well clear of them, in a column of its own.
             let from = x + 12.0;
             // The head is where this sheet says what is going on: nothing lies over or under it.
             if let Some((first, second)) = status_now(facts) {
-                let room = size.x - 50.0 - if facts.view_showing { 206.0 } else { 0.0 } - from;
+                let room = head.end - from;
                 let big = look::font(14.5, weight::BOLD);
                 let small = look::font(12.5, weight::MEDIUM);
                 p.text(pos2(from, if second.is_empty() { 22.0 } else { 13.0 }), Align2::LEFT_CENTER, fit(p, &first, &big, room), big, look::accent());
@@ -2084,16 +2295,19 @@ pub fn paint(p: &Painter, zone: Zone, size: Vec2, facts: &Facts, hover: Option<u
             // What is pointed at is said in one place: where the band under the tabs is up, there.
             } else if let Some((first, second)) = facts.pointed.filter(|_| !facts.hint_band && matches!(facts.sheet, Some(Sheet::All | Sheet::Pictures))).and_then(|a| caption(a, facts)) {
                 // What a small tile does, which it does not say itself.
-                let room = size.x - 50.0 - if facts.view_showing { 206.0 } else { 0.0 } - from;
+                let room = head.end - from;
                 let big = look::font(14.5, weight::BOLD);
                 let small = look::font(12.5, weight::MEDIUM);
                 p.text(pos2(from, 13.0), Align2::LEFT_CENTER, fit(p, &first, &big, room), big, look::LABEL);
                 p.text(pos2(from, 31.0), Align2::LEFT_CENTER, fit(p, &second, &small, room), small, look::MUTED);
-            } else if let (Some((name, playing)), false, false) = (facts.music.as_ref().filter(|_| !facts.view_showing), facts.beside_wing, facts.sheet == Some(Sheet::All)) {
+            } else if let (Some((name, playing)), Some(right)) = (facts.music.as_ref(), head.transport) {
+                // What plays, before its buttons, in what the tabs leave.
                 let font = look::font(12.0, weight::SEMIBOLD);
-                let right = size.x - 56.0 - 26.0 * 3.0 - 8.0;
+                let right = right - 8.0;
                 let name = fit(p, name, &font, (right - from).max(0.0));
-                p.text(pos2(right, 22.0), Align2::RIGHT_CENTER, name, font, if *playing { look::LABEL } else { look::MUTED });
+                if !name.is_empty() && right - from >= 60.0 {
+                    p.text(pos2(right, 22.0), Align2::RIGHT_CENTER, name, font, if *playing { look::LABEL } else { look::MUTED });
+                }
             }
         }
         _ => {}
@@ -2493,7 +2707,7 @@ fn draw(p: &Painter, zone: Zone, item: &Item, facts: &Facts, hovered: bool, pres
             } else {
                 p.text(pos2(chip.right() + 12.0, chip.center().y), Align2::LEFT_CENTER, fit(p, label, &font, room), font, look::LABEL);
             }
-            let body = Rect::from_min_max(pos2(rect.left() + 14.0, chip.bottom() + 8.0), rect.max - vec2(14.0, 12.0));
+            let body = hero_body_rect(rect);
             hero_body(p, body, item.action, line, facts);
         }
         Look::Small { icon, label, tint } => {
@@ -2506,8 +2720,8 @@ fn draw(p: &Painter, zone: Zone, item: &Item, facts: &Facts, hovered: bool, pres
             // Many of them, in a headset: its icon over its name.
             if rect.width() < 200.0 {
                 widgets::icon(p, pos2(rect.center().x, rect.top() + 28.0), icon, 30.0, tint);
-                let font = look::font(16.5, weight::BOLD);
-                p.text(pos2(rect.center().x, rect.bottom() - 21.0), Align2::CENTER_CENTER, fit(p, label, &font, rect.width() - 10.0), font, Color32::WHITE);
+                let (label, font) = fitted(p, label, 16.5, weight::BOLD, rect.width() - 14.0, 13.5);
+                p.text(pos2(rect.center().x, rect.bottom() - 21.0), Align2::CENTER_CENTER, label, font, Color32::WHITE);
                 return;
             }
             let chip = Rect::from_min_size(pos2(rect.left() + 12.0, rect.top() + 12.0), Vec2::splat(40.0));
@@ -2565,8 +2779,8 @@ fn draw(p: &Painter, zone: Zone, item: &Item, facts: &Facts, hovered: bool, pres
                 (false, _) => tr("Drop link"),
             };
             widgets::icon(p, pos2(drawn.left() + 21.0, drawn.center().y), if copy { icons::LINK_SIMPLE } else { icons::HAND_GRABBING }, 18.0, ink);
-            let font = look::font(15.0, weight::SEMIBOLD);
-            p.text(pos2(drawn.left() + 36.0, drawn.center().y), Align2::LEFT_CENTER, fit(p, words, &font, drawn.width() - 44.0), font, ink);
+            let (words, font) = fitted(p, words, 15.0, weight::SEMIBOLD, drawn.width() - 48.0, 12.5);
+            p.text(pos2(drawn.left() + 36.0, drawn.center().y), Align2::LEFT_CENTER, words, font, ink);
         }
         Look::NowPlaying => {
             let tint = theme::VIOLET;
@@ -2614,8 +2828,7 @@ fn draw(p: &Painter, zone: Zone, item: &Item, facts: &Facts, hovered: bool, pres
             }
             // The level between its minus and its plus.
             if let Some((percent, muted)) = facts.volume {
-                let right = rect.right() - 16.0;
-                let bar = Rect::from_center_size(pos2(right - VOLUME_BUTTON - 39.0, rect.top() + VOLUME_ROW), vec2(66.0, 7.0));
+                let bar = volume_bar(rect);
                 p.rect_filled(bar, look::radius(3.5), Color32::from_white_alpha(70));
                 let level = if muted { 0.0 } else { percent as f32 / 100.0 };
                 p.rect_filled(Rect::from_min_size(bar.min, vec2(bar.width() * level, 7.0)), look::radius(3.5), look::LABEL);
@@ -2757,11 +2970,13 @@ fn draw(p: &Painter, zone: Zone, item: &Item, facts: &Facts, hovered: bool, pres
             if copied || pressed || hovered {
                 let fill = if copied { theme::mix(look::accent(), Color32::WHITE, 0.6) } else if pressed { theme::mix(look::accent(), Color32::BLACK, 0.25) } else { look::accent() };
                 clip.rect_filled(rect, radius, fill);
-                clip.text(rect.center(), Align2::CENTER_CENTER, if copied { tr("Copied") } else { tr("Copy link") }, look::font(16.0, weight::BOLD), look::on_accent());
+                let (words, font) = fitted(p, if copied { tr("Copied") } else { tr("Copy link") }, 16.0, weight::BOLD, rect.width() - 24.0, 13.5);
+                clip.text(rect.center(), Align2::CENTER_CENTER, words, font, look::on_accent());
             } else {
                 clip.rect_filled(rect, radius, theme::alpha(look::accent(), 0.16));
                 clip.rect_stroke(rect.shrink(0.75), radius, Stroke::new(1.5, look::accent()), egui::StrokeKind::Middle);
-                clip.text(rect.center(), Align2::CENTER_CENTER, tr("Copy link"), look::font(16.0, weight::BOLD), theme::mix(look::accent(), Color32::WHITE, 0.25));
+                let (words, font) = fitted(p, tr("Copy link"), 16.0, weight::BOLD, rect.width() - 24.0, 13.5);
+                clip.text(rect.center(), Align2::CENTER_CENTER, words, font, theme::mix(look::accent(), Color32::WHITE, 0.25));
             }
         }
         Look::Timeline => {
@@ -2791,20 +3006,25 @@ fn draw(p: &Painter, zone: Zone, item: &Item, facts: &Facts, hovered: bool, pres
         Look::SmallView => {
             let radius = look::radius(rect.height() / 2.0);
             p.rect_filled(rect, radius, if hovered { look::TILE_HOVER } else { look::TILE });
-            p.text(rect.center(), Align2::CENTER_CENTER, if facts.view_small { tr("Around you") } else { tr_ctx("view", "Small") }, look::font(13.0, weight::SEMIBOLD), look::LABEL);
+            // As wide as its longer words ([`head`]); cut only should a font not be the one measured.
+            let font = head_pill_font(facts);
+            let words = if facts.view_small { tr("Around you") } else { tr_ctx("view", "Small") };
+            p.text(rect.center(), Align2::CENTER_CENTER, fit(p, words, &font, rect.width() - HEAD_PILL_PAD), font, look::LABEL);
         }
         Look::HideView => {
             let radius = look::radius(rect.height() / 2.0);
             p.rect_filled(rect, radius, if hovered { look::ACCENT_SOFT } else { look::TILE });
             p.rect_stroke(rect, radius, Stroke::new(1.5, look::accent()), egui::StrokeKind::Inside);
-            p.text(rect.center(), Align2::CENTER_CENTER, tr("Hide 3D"), look::font(if rect.height() > 37.0 { 15.5 } else { 13.0 }, weight::SEMIBOLD), look::accent());
+            let font = head_pill_font(facts);
+            p.text(rect.center(), Align2::CENTER_CENTER, fit(p, tr("Hide 3D"), &font, rect.width() - HEAD_PILL_PAD), font, look::accent());
         }
         Look::VideoDrop => {
             let clip = p.with_clip_rect(Rect::from_min_max(pos2(0.0, RESULTS_TOP), pos2(1024.0, 576.0)));
             let radius = look::radius(rect.height() / 2.0);
             clip.rect_filled(rect, radius, if pressed { look::TILE_DOWN } else if hovered { look::TILE_HOVER } else { look::TILE });
             clip.rect_stroke(rect.shrink(0.5), radius, Stroke::new(1.0, Color32::from_white_alpha(46)), egui::StrokeKind::Middle);
-            clip.text(rect.center(), Align2::CENTER_CENTER, tr("Drop in world"), look::font(16.0, weight::SEMIBOLD), look::LABEL);
+            let (words, font) = fitted(p, tr("Drop in world"), 16.0, weight::SEMIBOLD, rect.width() - 24.0, 13.5);
+            clip.text(rect.center(), Align2::CENTER_CENTER, words, font, look::LABEL);
         }
         Look::Back => {
             // What was searched, as a field: it can be changed from here.
@@ -2826,7 +3046,8 @@ fn draw(p: &Painter, zone: Zone, item: &Item, facts: &Facts, hovered: bool, pres
         }
         Look::NewTalk => {
             p.rect_filled(rect, look::radius(rect.height() / 2.0), if hovered { look::TILE_HOVER } else { look::TILE });
-            p.text(rect.center(), Align2::CENTER_CENTER, tr("New conversation"), look::font(15.0, weight::SEMIBOLD), look::LABEL);
+            let (words, font) = fitted(p, tr("New conversation"), 15.0, weight::SEMIBOLD, rect.width() - 24.0, 13.0);
+            p.text(rect.center(), Align2::CENTER_CENTER, words, font, look::LABEL);
         }
         Look::TalkButton => {
             // Clear as day: the one thing on this page that changes with whether N4N0 hears you.
@@ -2874,11 +3095,11 @@ fn draw(p: &Painter, zone: Zone, item: &Item, facts: &Facts, hovered: bool, pres
             }
             // Named where it was made room for its name; a headset's icon-only tab is wider than a screen's, and still only an icon.
             if words_only {
-                let font = look::font(if facts.desktop { 15.5 } else { 16.0 }, if on { weight::BOLD } else { weight::SEMIBOLD });
+                let font = head_words_font(facts, on);
                 p.text(rect.center(), Align2::CENTER_CENTER, fit(p, label, &font, rect.width() - 10.0), font, if on { Color32::WHITE } else { look::LABEL });
             } else if rect.width() > COMPACT_TAB_VR + 1.0 {
                 widgets::icon(p, pos2(rect.left() + 16.0, rect.center().y), icon, 17.0, tint);
-                let font = look::font(13.5, if on { weight::BOLD } else { weight::MEDIUM });
+                let font = head_tab_font(on);
                 p.text(pos2(rect.left() + 29.0, rect.center().y), Align2::LEFT_CENTER, fit(p, label, &font, rect.width() - 33.0), font, if on { Color32::WHITE } else { look::LABEL });
             } else {
                 widgets::icon(p, rect.center(), icon, 18.0, tint);
@@ -3118,15 +3339,22 @@ fn draw(p: &Painter, zone: Zone, item: &Item, facts: &Facts, hovered: bool, pres
             p.text(pos2(x, top + high + 6.5), Align2::LEFT_CENTER, if playing { tr_ctx("tile", "Press to pause") } else { tr_ctx("tile", "Press to play") }, look::font(9.5, weight::SEMIBOLD), theme::mix(theme::VIOLET, Color32::WHITE, 0.55));
         }
         Look::PeekWord => {
+            // Where the head's button was, alone while VRChat's own menus are reached: its eye where the button's was, at its right end, what it does before it.
             let radius = look::radius(rect.height() / 2.0);
-            p.rect_filled(rect, radius, if pressed { look::TILE_DOWN } else if hovered { look::TILE_HOVER } else { look::TILE });
+            p.rect_filled(rect, radius, if pressed { look::TILE_DOWN } else if hovered { look::TILE_HOVER } else { look::PANEL });
             p.rect_stroke(rect.shrink(0.5), radius, Stroke::new(1.0, Color32::from_white_alpha(if hovered { 120 } else { 54 })), egui::StrokeKind::Inside);
             let (icon, words) = if facts.peek { (icons::EYE, tr("Show Orbiters")) } else { (icons::EYE_SLASH, tr("Hide Orbiters")) };
-            let font = look::font(13.0, weight::SEMIBOLD);
-            let wide = p.layout_no_wrap(words.to_string(), font.clone(), look::LABEL).size().x;
-            let left = rect.center().x - (wide + 22.0) / 2.0;
-            widgets::icon(p, pos2(left + 8.0, rect.center().y), icon, 16.0, look::LABEL);
-            p.text(pos2(left + 22.0, rect.center().y), Align2::LEFT_CENTER, words, font, look::LABEL);
+            let eye = pos2(rect.right() - rect.height() / 2.0, rect.center().y);
+            widgets::icon(p, eye, icon, rect.height() * 0.5, look::LABEL);
+            let font = head_pill_font(facts);
+            let room = eye.x - rect.height() * 0.4 - rect.left() - HEAD_PILL_PAD;
+            if room > 20.0 {
+                p.text(pos2(eye.x - rect.height() * 0.4, rect.center().y), Align2::RIGHT_CENTER, fit(p, words, &font, room), font, look::LABEL);
+            }
+        }
+        Look::HeadPeek => {
+            p.circle_filled(rect.center(), rect.width() / 2.0, if pressed { look::TILE_DOWN } else if hovered { look::TILE_HOVER } else { look::TILE });
+            widgets::icon(p, rect.center(), icons::EYE_SLASH, rect.width() * 0.5, look::LABEL);
         }
         Look::HideWord => {
             // In a headset the wheel's Hide is the right end of its one head: the caption's ground, a line between them, round at its right.
@@ -3773,6 +4001,48 @@ pub fn cell_mask(ring: Ring, px: [u32; 2], pixels_per_unit: f32) -> Vec<u8> {
     out
 }
 
+/// How much of the pixel at `x`, `y` (in a page's pixels, `zoom` a unit) lies inside the sheet it is on: the sheet's back reaches a little under the page's foot, and its
+/// corners are [`look::sheet_radius`]. Only its foot's corners reach the page.
+fn on_the_sheet(x: f32, y: f32, zoom: f32) -> f32 {
+    let foot = 576.0 + (Zone::SheetBack.units().max.y - Zone::Takeover.units().max.y) / PAGE_TO_SHEET;
+    let (u, v) = (x / zoom, y / zoom);
+    // The retro look's corners are cut straight across, as it draws the sheet's ground ([`super::retro::SHEET_CUT`]).
+    if look::retro() {
+        let cut = super::retro::SHEET_CUT / PAGE_TO_SHEET;
+        let along = u.min(1024.0 - u) + (foot - v);
+        return (((along - cut) / std::f32::consts::SQRT_2) * zoom - 0.25).clamp(0.0, 1.0).min(if v <= foot { 1.0 } else { 0.0 });
+    }
+    let radius = look::sheet_radius() / PAGE_TO_SHEET;
+    let cx = u.clamp(radius, 1024.0 - radius);
+    let cy = v.min(foot - radius);
+    if v <= foot - radius || (cx - u).abs() < f32::EPSILON {
+        return if v <= foot { 1.0 } else { 0.0 };
+    }
+    let off = ((u - cx).powi(2) + (v - cy).powi(2)).sqrt();
+    // A quarter of a pixel inside the arc, as egui's own edge of the back lies.
+    ((radius - off) * zoom - 0.25).clamp(0.0, 1.0)
+}
+
+/// A page's picture cut to its sheet's corners, in the part `within` of it, whatever drew the page (native, a world's, N4N0's own; either look): one silhouette for the
+/// sheet and its page (Enzo's IMG6: a square page on a rounded frame).
+pub fn cut_page_corners(rgba: &mut [u8], size: [u32; 2], within: [u32; 4]) {
+    let [w, h] = size;
+    let zoom = w as f32 / 1024.0;
+    let reach = ((look::sheet_radius().max(super::retro::SHEET_CUT) / PAGE_TO_SHEET) * zoom).ceil() as u32 + 1;
+    for y in within[1].max(h.saturating_sub(reach))..within[3].min(h) {
+        for x in (within[0]..within[2].min(w)).filter(|x| *x < reach || *x >= w.saturating_sub(reach)) {
+            let m = on_the_sheet(x as f32 + 0.5, y as f32 + 0.5, zoom);
+            if m >= 1.0 {
+                continue;
+            }
+            let i = (y * w + x) as usize * 4;
+            for v in &mut rgba[i..i + 4] {
+                *v = (*v as f32 * m).round() as u8;
+            }
+        }
+    }
+}
+
 /// `mask` multiplied into the part `within` (x0, y0, x1, y1) of premultiplied `rgba`.
 pub fn apply_mask(rgba: &mut [u8], mask: &[u8], size: [u32; 2], within: [u32; 4]) {
     let [w, h] = size;
@@ -4380,5 +4650,161 @@ mod tests {
         let i = (middle.y as u32 * px[0] + middle.x as u32) as usize * 4;
         assert_eq!(rgba[i..i + 4], [200, 200, 200, 200]);
         assert!(rgba.chunks_exact(4).any(|c| c == [0, 0, 0, 0]));
+    }
+
+    /// What a part paints with the fonts it is painted with, in the language and the look now: each text's words and where its letters lie.
+    fn painted_texts(size: Vec2, draw: impl FnOnce(&Painter)) -> Vec<(String, Rect)> {
+        let ctx = egui::Context::default();
+        orbiters_ui::install(&ctx);
+        let input = || egui::RawInput { screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), size)), ..Default::default() };
+        ctx.run_ui(input(), |_| {}).textures_delta.clear();
+        orbiters_ui::fonts::follow_language(&ctx);
+        ctx.run_ui(input(), |_| {}).textures_delta.clear();
+        let mut draw = Some(draw);
+        let mut full = ctx.run_ui(input(), |ui| {
+            if let Some(draw) = draw.take() {
+                draw(ui.painter());
+            }
+            super::super::retro::pass(ui.ctx(), ui.layer_id(), size);
+        });
+        fn walk(shape: &Shape, out: &mut Vec<(String, Rect)>) {
+            match shape {
+                Shape::Vec(list) => list.iter().for_each(|s| walk(s, out)),
+                Shape::Text(t) => {
+                    let text = t.galley.job.text.clone();
+                    // Icons are glyphs of their own, laid by their middle.
+                    if !text.trim().is_empty() && !text.chars().any(|c| ('\u{E000}'..='\u{F8FF}').contains(&c)) {
+                        out.push((text, t.galley.rect.translate(t.pos.to_vec2())));
+                    }
+                }
+                _ => {}
+            }
+        }
+        full.textures_delta.clear();
+        let mut out = Vec::new();
+        for clipped in &full.shapes {
+            walk(&clipped.shape, &mut out);
+        }
+        out
+    }
+
+    /// Enzo, 2026-11-11 (F2, IMG1): in French the head's title began under its Back, Hide 3D ran out of its pill into Around you, Search YouTube out of both ends of its
+    /// pill. In every language and both looks, on a headset and a screen, what each control says is painted inside it, whole (no ellipsis on a control: it is made as
+    /// wide as its words, or they are said shorter); text of no control lies inside the part and on none. Letters, not rectangles: what is measured is what is painted.
+    #[test]
+    fn what_each_control_says_is_painted_inside_it_in_every_language() {
+        use orbiters_core::settings::MenuLook;
+        use orbiters_i18n::Language;
+        let _alone = super::super::flows::ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+        let videos = (0..4).map(|i| VideoTile { title: format!("Rain sounds for sleeping {i} hours, a long title that wraps"), channel: "Calm Channel".into(), duration: Some("3:02:11".into()), picture: None }).collect::<Vec<_>>();
+        let base = Facts {
+            n4n0: true,
+            music: Some(("DJ Brace - 2016 DMC Online Finals (Winning Routine)".into(), true)),
+            music_times: Some((364, 364)),
+            volume: Some((0, false)),
+            can_copy_playing: true,
+            can_drop_playing: true,
+            can_states: true,
+            can_light: true,
+            can_call: true,
+            videos,
+            videos_for: "rain sounds".into(),
+            ..facts()
+        };
+        let mut failures = Vec::new();
+        for look in [MenuLook::Modern, MenuLook::Retro] {
+            set_style(&OrbitSettings { theme: look, ..Default::default() });
+            for language in Language::ALL {
+                orbiters_i18n::in_language(language, || {
+                    for desktop in [false, true] {
+                        let at = |what: &str| format!("{look:?} {} {} {what}", language.tag(), if desktop { "screen" } else { "headset" });
+                        // The head of every sheet, with and without a capture showing, with what plays.
+                        let sheets = [
+                            (Sheet::All, "All tools"),
+                            (Sheet::Worlds, "Worlds in 3D"),
+                            (Sheet::Pictures, "Pictures"),
+                            (Sheet::Instances, "Instances"),
+                            (Sheet::Talk, "Ask N4N0"),
+                            (Sheet::Results, "YouTube"),
+                            (Sheet::Menu, "Saved looks"),
+                            (Sheet::Menu, "World feedback"),
+                            (Sheet::Settings, "Settings"),
+                        ];
+                        let size = Zone::SheetBack.units().size();
+                        for (sheet, title) in sheets {
+                            for (showing, small) in [(false, false), (true, false), (true, true)] {
+                                let facts = Facts { desktop, sheet: Some(sheet), sheet_title: title.into(), view_showing: showing, view_small: small, ..base.clone() };
+                                let controls = items(Zone::SheetBack, size, &facts);
+                                let texts = painted_texts(size, |p| paint(p, Zone::SheetBack, size, &facts, None, None));
+                                check(&at(&format!("head of {title}, capture {showing} small {small}")), &controls, &texts, size, &mut failures);
+                            }
+                        }
+                        // The way back from VRChat's menus, as large as the head lays it.
+                        let facts = Facts { desktop, sheet: Some(Sheet::Pictures), peek: true, ..base.clone() };
+                        let pill = peek_place(&facts, size.x);
+                        let controls = items(Zone::SheetPeek, pill.size(), &facts);
+                        let texts = painted_texts(pill.size(), |p| paint(p, Zone::SheetPeek, pill.size(), &facts, None, None));
+                        check(&at("Show Orbiters"), &controls, &texts, pill.size(), &mut failures);
+                        // All tools, what plays at 0 and 100 and muted, and YouTube's results.
+                        let page = vec2(1024.0, 576.0);
+                        for volume in [(0, false), (100, false), (40, true)] {
+                            let facts = Facts { desktop, sheet: Some(Sheet::All), sheet_title: "All tools".into(), volume: Some(volume), ..base.clone() };
+                            let mut controls = sheet_items(Sheet::All, &facts);
+                            // YouTube's search, a pill on its card.
+                            let card = controls.iter().find(|i| i.action == Action::Page(Target::YouTube)).map(|i| i.rect).expect("YouTube's card");
+                            controls.push(Item { action: Action::Page(Target::YouTube), rect: hero_search(card), look: Look::Heading("search") });
+                            let texts = painted_texts(page, |p| paint_sheet(p, Sheet::All, &facts, None, None));
+                            check(&at(&format!("All tools, volume {volume:?}")), &controls, &texts, page, &mut failures);
+                            // The volume's thumb never on its buttons.
+                            let panel = controls.iter().find(|i| matches!(i.look, Look::NowPlaying)).map(|i| i.rect).expect("what plays");
+                            let bar = volume_bar(panel);
+                            for b in controls.iter().filter(|i| matches!(i.action, Action::Volume(_))) {
+                                for level in [bar.left(), bar.right()] {
+                                    let thumb = Rect::from_center_size(pos2(level, bar.center().y), Vec2::splat(16.0));
+                                    if thumb.intersects(b.rect) {
+                                        failures.push(format!("{}: the volume's thumb at {level} is on its button {:?}", at("All tools"), b.rect));
+                                    }
+                                }
+                            }
+                        }
+                        let facts = Facts { desktop, sheet: Some(Sheet::Results), sheet_title: "YouTube".into(), ..base.clone() };
+                        let controls = sheet_items(Sheet::Results, &facts);
+                        let texts = painted_texts(page, |p| paint_sheet(p, Sheet::Results, &facts, None, None));
+                        check(&at("YouTube's results"), &controls, &texts, page, &mut failures);
+                    }
+                });
+            }
+        }
+        set_style(&OrbitSettings::default());
+        assert!(failures.is_empty(), "{} texts out of their controls:\n{}", failures.len(), failures.join("\n"));
+
+        /// Each text in the smallest control its middle is on, whole, a point and a half of slack for a letter's edge; one in no control in the part and on none.
+        fn check(scene: &str, items: &[Item], texts: &[(String, Rect)], size: Vec2, failures: &mut Vec<String>) {
+            // A line box is a little taller than its letters.
+            const SLACK: f32 = 1.5;
+            let part = Rect::from_min_size(pos2(0.0, 0.0), size).expand(SLACK);
+            for (text, rect) in texts {
+                let ink = rect.shrink2(vec2(0.0, (rect.height() * 0.12).min(3.0)));
+                let home = items.iter().filter(|i| i.rect.contains(ink.center()) && !matches!(i.look, Look::NowPlaying | Look::Hero { .. } | Look::Video(_) | Look::Visit(_) | Look::VisitHead)).min_by(|a, b| a.rect.area().total_cmp(&b.rect.area()));
+                match home {
+                    Some(item) if !item.rect.expand(SLACK).contains_rect(ink) => failures.push(format!("{scene}: {text:?} at {ink:?} out of its {:?} {:?}", item.look, item.rect)),
+                    // A control's words are whole: it is as wide as they are, or they are said shorter.
+                    Some(item) if text.ends_with('\u{2026}') && matches!(item.look, Look::HeadTab { .. } | Look::HideView | Look::SmallView | Look::PeekWord | Look::PlayingLink { .. } | Look::VideoCopy(_) | Look::VideoDrop | Look::Small { .. } | Look::NewTalk | Look::Heading(_)) => {
+                        failures.push(format!("{scene}: {text:?} cut on its {:?}", item.look))
+                    }
+                    Some(_) => {}
+                    None => {
+                        if !part.contains_rect(ink) {
+                            failures.push(format!("{scene}: {text:?} at {ink:?} out of the part {size:?}"));
+                        }
+                        // What no control says is on none of them (a title under its Back).
+                        let pressable = |i: &&Item| i.action != Action::Idle && !matches!(i.look, Look::NowPlaying | Look::Hero { .. } | Look::Video(_) | Look::Visit(_) | Look::Back | Look::BigPicture(_) | Look::Capture(_));
+                        if let Some(item) = items.iter().filter(pressable).find(|i| i.rect.shrink(SLACK).intersects(ink)) {
+                            failures.push(format!("{scene}: {text:?} at {ink:?} lies on its {:?} {:?}", item.look, item.rect));
+                        }
+                    }
+                }
+            }
+        }
     }
 }

@@ -54,6 +54,8 @@ const PAGE_FADE: f64 = 0.22;
 const CARD_STAGGER: f64 = 0.035;
 
 const CARD: Color32 = theme::INK_900;
+/// The corners of the hole a capture standing small is seen through: the sheet's back cuts its own to the same shape.
+pub const HOLE_RADIUS: f32 = 14.0;
 const SURFACE: Color32 = theme::INK_800;
 const RAISED: Color32 = theme::INK_750;
 const RAISED2: Color32 = theme::INK_700;
@@ -1728,7 +1730,7 @@ impl Panel {
         }
         // A hole where a capture standing small is seen through, or the page whole.
         match self.hole(d.status) {
-            Some(hole) => fill_around(p, page, 28.0, hole, 14.0, CARD),
+            Some(hole) => fill_around(p, page, 28.0, hole, HOLE_RADIUS, CARD),
             None => {
                 p.rect_filled(page, CornerRadius::same(28), CARD);
             }

@@ -797,10 +797,14 @@ fn script(rig: &mut Rig) {
     rig.begin("return-pictures-after-menu", Rest);
     rig.panels.open_sheet(super::panels::Sheet::Pictures, "", &rig.snap); rig.turns(1); rig.rest();
     rig.begin("live-color-scroll", Rest);
+    let from_scroll = rig.panels.facts.gallery_scroll;
+    let mut moved = false;
     for n in 0..90 {
         if n % 15 == 0 { Arc::make_mut(&mut rig.snap).settings.orbit.retro_color = if n % 30 == 0 { [170,30,210] } else { [0,190,160] }; }
-        rig.turn(Some(Act::Wheel(-0.08)));
+        rig.turn(Some(Act::Wheel(-1.0)));
+        moved |= (rig.panels.facts.gallery_scroll - from_scroll).abs() > 0.01;
     }
+    assert!(moved, "live color scrolling must move the gallery, not snap to the same row");
     rig.rest();
     rig.point_at_each("qm-sheet-pictures-point", true, Rest);
     rig.pressing("qm-sheet-instances", Action::Page(Target::Instances), Rest);

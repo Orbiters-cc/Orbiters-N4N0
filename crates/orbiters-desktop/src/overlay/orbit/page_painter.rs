@@ -38,6 +38,7 @@ pub(super) struct PartPicture {
     pub hover: Option<usize>,
     pub pressed: Option<usize>,
     pub facts: Facts,
+    #[cfg(test)] pub finish_pixels: usize,
 }
 pub(super) struct PartRequest { pub spec: PartSpec, pub facts: Facts, pub time: f64, pub language: orbiters_i18n::Language }
 #[derive(Clone)]
@@ -72,29 +73,38 @@ struct Mailbox {
     #[cfg(test)] gate: Option<(std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>)>,
 }
 pub(super) struct Painter { shared: Arc<(Mutex<Mailbox>, Condvar)>, pub ctx: egui::Context }
-struct Engine { page: Canvas, parts: HashMap<Zone, (u64, Canvas, Option<Arc<Vec<u8>>>)>, parallel: bool }
+struct PartCanvas { id: u64, canvas: Canvas, mask: Option<Arc<Vec<u8>>>, pixels: Vec<u8>, style: Option<orbiters_core::settings::OrbitSettings> }
+struct Engine { page: Canvas, parts: HashMap<Zone, PartCanvas>, parallel: bool }
 impl Engine {
     fn part(&mut self, spec: &PartSpec, facts: &Facts, time: f64) -> PartPicture {
-        let slot = self.parts.entry(spec.zone).or_insert_with(|| (0, Canvas::new(1, 1), None));
-        if slot.0 != spec.canvas_id {
+        let slot = self.parts.entry(spec.zone).or_insert_with(|| PartCanvas { id: 0, canvas: Canvas::new(1, 1), mask: None, pixels: Vec::new(), style: None });
+        if slot.id != spec.canvas_id {
             let mut canvas = Canvas::zoomed(spec.px[0], spec.px[1], spec.px[0] as f32 / spec.logical.x).in_orbit_look();
             canvas.ctx = spec.ctx.clone();
             canvas.painter.set_parallel(self.parallel);
-            *slot = (spec.canvas_id, canvas, spec.zone.ring().map(|ring| Arc::new(panels::cell_mask(ring, spec.px, spec.px[0] as f32 / spec.logical.x))));
+            *slot = PartCanvas { id: spec.canvas_id, canvas, mask: spec.zone.ring().map(|ring| Arc::new(panels::cell_mask(ring, spec.px, spec.px[0] as f32 / spec.logical.x))), pixels: vec![0; spec.px[0] as usize * spec.px[1] as usize * 4], style: None };
         }
         let items = panels::items(spec.zone, spec.logical, facts);
         let hover = spec.pointer.and_then(|p| panels::hit(&items, p));
         let pressed = spec.pressed.and_then(|a| items.iter().position(|i| i.action == a));
-        slot.1.paint(time, |p| panels::paint(p, spec.zone, spec.logical, facts, hover, pressed));
+        slot.canvas.paint(time, |p| panels::paint(p, spec.zone, spec.logical, facts, hover, pressed));
         let began = Instant::now();
-        let from = slot.1.pixels();
-        let mut pixels = from.to_vec();
         let all = [0, 0, spec.px[0], spec.px[1]];
-        panels::finish_picture(&mut pixels, from, spec.px, spec.px[0] as f32 / spec.logical.x, all);
-        if let Some(mask) = &slot.2 { panels::apply_mask(&mut pixels, mask, spec.px, all); }
+        let changed = if slot.style != Some(facts.orbit) { all } else { slot.canvas.damage().unwrap_or([0, 0, 0, 0]) };
+        let from = slot.canvas.pixels();
+        for y in changed[1]..changed[3] {
+            let (a, b) = (((y * spec.px[0] + changed[0]) * 4) as usize, ((y * spec.px[0] + changed[2]) * 4) as usize);
+            slot.pixels[a..b].copy_from_slice(&from[a..b]);
+        }
+        // Also consumes this draw's preserved-picture rectangles when there is no damage.
+        panels::finish_picture(&mut slot.pixels, from, spec.px, spec.px[0] as f32 / spec.logical.x, changed);
+        if let Some(mask) = &slot.mask { panels::apply_mask(&mut slot.pixels, mask, spec.px, changed); }
+        slot.style = Some(facts.orbit);
+        let pixels = slot.pixels.clone();
         super::super::record_phase(3, began.elapsed());
-        PartPicture { zone: spec.zone, token: spec.token, pixels, mask: slot.2.clone(), items, hover, pressed, facts: facts.clone() }
+        PartPicture { zone: spec.zone, token: spec.token, pixels, mask: slot.mask.clone(), items, hover, pressed, facts: facts.clone(), #[cfg(test)] finish_pixels: (changed[2] - changed[0]) as usize * (changed[3] - changed[1]) as usize }
     }
+
     fn page(&mut self, mut request: Request) -> Frame {
         if self.page.pixel_size() != request.px {
             let ctx = self.page.ctx().clone();
@@ -150,7 +160,7 @@ impl Audit {
 impl Engine {
     fn mode(&mut self, parallel: bool) {
         self.parallel = parallel; self.page.painter.set_parallel(parallel); self.page.painter.invalidate();
-        for (_, canvas, _) in self.parts.values_mut() { canvas.painter.set_parallel(parallel); canvas.painter.invalidate(); }
+        for slot in self.parts.values_mut() { slot.canvas.painter.set_parallel(parallel); slot.canvas.painter.invalidate(); }
     }
 }
 impl Painter {
@@ -405,5 +415,27 @@ mod review_stage_lifetime {
         panels.hover(None); panels.follow(&snap, 0); panels.menu_turn(&snap); panels.step_springs(0.011); panels.paint(&snap, |_,_| {});
         go.send(()).unwrap();
         assert!(same, "a second painter can race the first through shared shell contexts");
+    }
+}
+
+#[cfg(test)]
+mod review_header_finish {
+    use super::*;
+    #[test]
+    fn review_an_unchanged_retro_header_does_no_pixel_finishing_and_a_new_look_does() {
+        let source = super::super::Panel::new(super::super::zones::in_units(Zone::SheetBack), 2.0, 0, false);
+        let spec = super::super::Panels::paint_spec(&source);
+        let mut engine = Engine { page: Canvas::new(1, 1), parts: HashMap::new(), parallel: true };
+        let mut facts = Facts { sheet: Some(Sheet::Pictures), ..Default::default() }; facts.orbit.theme = orbiters_core::settings::MenuLook::Retro;
+        let first = panels::with_render_style(facts.orbit, || engine.part(&spec, &facts, 1.0));
+        assert!(first.finish_pixels > 0);
+        facts.gallery_scroll = 120.0;
+        let second = panels::with_render_style(facts.orbit, || engine.part(&spec, &facts, 1.0));
+        assert_eq!(second.finish_pixels, 0, "the page's scrolling did not change its header");
+        assert_eq!(first.pixels, second.pixels);
+        facts.orbit.retro_color = [170, 30, 210];
+        let third = panels::with_render_style(facts.orbit, || engine.part(&spec, &facts, 1.0));
+        assert_eq!(third.finish_pixels, spec.px[0] as usize * spec.px[1] as usize);
+        assert_ne!(second.pixels, third.pixels);
     }
 }

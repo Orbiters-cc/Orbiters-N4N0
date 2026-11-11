@@ -873,9 +873,9 @@ fn the_camera_s_qr_code_looks_around_the_camera_and_opens_no_page() {
     person.turns(3);
     assert!(!person.panels.all().any(|p| p.zone == Zone::CameraScan), "corners with nothing looked for");
     person.press(Action::CameraQr);
-    // What the scanner says once it runs.
+    // What the camera's own scan says once it runs (camera-core).
     let mut snap = (*person.snap).clone();
-    snap.n4n0.qr.phase = orbiters_n4n0_core::qr::QrPhase::Looking;
+    snap.camera_tools.qr = crate::controller::camera_tools::Qr::Looking;
     person.snap = Arc::new(snap);
     person.turns(3);
     assert_eq!(person.panels.facts.sheet, None, "the QR code page opened");
@@ -884,9 +884,97 @@ fn the_camera_s_qr_code_looks_around_the_camera_and_opens_no_page() {
     assert!(person.panels.all().any(|p| p.zone == Zone::CameraScan && p.shown), "no corners round the camera");
     person.press(Action::CameraQr);
     let mut snap = (*person.snap).clone();
-    snap.n4n0.qr.phase = orbiters_n4n0_core::qr::QrPhase::Off;
+    snap.camera_tools.qr = crate::controller::camera_tools::Qr::Off;
     person.snap = Arc::new(snap);
     person.turns(3);
     assert_eq!(person.panels.facts.camera.qr, CameraQr::Off);
     assert!(!person.panels.all().any(|p| p.zone == Zone::CameraScan), "the corners stayed");
+}
+
+/// Enzo (F17): a code found beside the camera opens its page over the camera, once for that scan, with its bar; closed, it does not come back for the same code;
+/// VRChat's camera closing takes it away.
+#[test]
+fn a_code_found_beside_the_camera_opens_its_page_over_it_once() {
+    use crate::controller::camera_tools::Qr;
+    let mut person = Person::new();
+    person.around = Some(Around::Camera);
+    let mut snap = (*person.snap).clone();
+    snap.camera_open_said = Some(true);
+    person.snap = Arc::new(snap);
+    person.turns(3);
+    assert!(!person.panels.all().any(|p| p.zone == Zone::CameraWeb), "a page with no code");
+    let mut snap = (*person.snap).clone();
+    snap.camera_tools.qr = Qr::Found { url: "https://orbiters.cc/w/silent-dawn".into() };
+    snap.camera_tools.qr_generation = 3;
+    person.snap = Arc::new(snap);
+    person.turns(3);
+    for zone in [Zone::CameraWeb, Zone::CameraWebBar] {
+        assert!(person.panels.all().any(|p| p.zone == zone && p.shown), "no {zone:?}");
+    }
+    assert_eq!(person.panels.facts.camera.web.as_ref().map(|w| w.url.as_str()), Some("https://orbiters.cc/w/silent-dawn"));
+    assert_eq!(person.panels.facts.sheet, None, "the QR code page opened");
+    assert!(person.find(Action::WebOpen).is_some() && person.find(Action::WebClose).is_some());
+    person.press(Action::WebClose);
+    person.turns(3);
+    assert!(person.panels.facts.camera.web.is_none(), "it did not close");
+    assert!(!person.panels.all().any(|p| p.zone == Zone::CameraWeb), "it came back for the same code");
+    // Another scan finds one: it opens; the camera closes: it goes.
+    let mut snap = (*person.snap).clone();
+    snap.camera_tools.qr_generation = 4;
+    person.snap = Arc::new(snap);
+    person.turns(3);
+    assert!(person.panels.facts.camera.web.is_some(), "a new scan's code did not open");
+    let mut snap = (*person.snap).clone();
+    snap.camera_open_said = Some(false);
+    person.snap = Arc::new(snap);
+    person.turns(3);
+    assert!(person.panels.facts.camera.web.is_none(), "the page outlived the camera");
+}
+
+/// Enzo (F16): the demo avatar is offered beside the camera only to someone signed in to VRChat through Orbiters as the one playing, with an avatar to put on and
+/// no kit on theirs; while it switches it says so and takes no second press.
+#[test]
+fn the_demo_avatar_is_offered_only_where_it_can_be_put_on() {
+    use crate::controller::camera_tools::Demo;
+    use super::panels::DemoSwitch;
+    let mut person = Person::new();
+    person.around = Some(Around::Camera);
+    let mut snap = (*person.snap).clone();
+    snap.worn_kit = Some(false);
+    snap.vrchat.running = true;
+    snap.camera_tools.demo_avatar = Some("avtr_demo".into());
+    person.snap = Arc::new(snap);
+    person.turns(3);
+    assert_eq!(person.panels.facts.camera.demo, None, "offered while signed out");
+    assert!(person.find(Action::DemoAvatar).is_none());
+    let mut snap = (*person.snap).clone();
+    snap.vrchat_login.allowed = true;
+    snap.vrchat_login.user = Some(orbiters_core::vrchat_api::User { id: "usr_me".into(), display_name: "Me".into(), ..Default::default() });
+    snap.vrchat.world.local_player = Some("Me".into());
+    snap.vrchat.world.players.insert("usr_me".into(), "Me".into());
+    person.snap = Arc::new(snap);
+    person.turns(3);
+    assert_eq!(person.panels.facts.camera.demo, Some(DemoSwitch::Offered));
+    assert!(person.find(Action::DemoAvatar).is_some(), "no button where it can be done");
+    // Another account than the one playing: not offered.
+    let mut other = (*person.snap).clone();
+    other.vrchat_login.user = Some(orbiters_core::vrchat_api::User { id: "usr_other".into(), ..Default::default() });
+    let mine = std::mem::replace(&mut person.snap, Arc::new(other));
+    person.turns(3);
+    assert_eq!(person.panels.facts.camera.demo, None, "offered to another account than the one playing");
+    person.snap = mine;
+    person.turns(3);
+    let mut snap = (*person.snap).clone();
+    snap.camera_tools.demo = Demo::Busy;
+    person.snap = Arc::new(snap);
+    person.turns(3);
+    assert_eq!(person.panels.facts.camera.demo, Some(DemoSwitch::Busy));
+    assert!(person.find(Action::DemoAvatar).is_none(), "a second press while it switches");
+    // No avatar to put on (none configured): nothing offered, whatever else.
+    let mut snap = (*person.snap).clone();
+    snap.camera_tools.demo = Demo::Idle;
+    snap.camera_tools.demo_avatar = None;
+    person.snap = Arc::new(snap);
+    person.turns(3);
+    assert_eq!(person.panels.facts.camera.demo, None);
 }

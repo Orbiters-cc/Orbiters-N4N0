@@ -43,7 +43,8 @@ impl CameraWeb {
     /// Opens `url` in a page of its own.
     pub fn open(url: &str) -> Self {
         let mut web = Self { #[cfg(windows)] page: None, url: url.to_string(), title: String::new(), state: WebState::Loading, frame: None, fresh: false, at: None, held: None, waiting: Vec::new() };
-        #[cfg(windows)]
+        // Tests drive what shows around it, with no browser of their own (camera-web proves the engine).
+        #[cfg(all(windows, not(test)))]
         match orbiters_web::WebPage::new(PAGE_PX[0], PAGE_PX[1]).and_then(|page| page.navigate(url).map(|_| page)) {
             Ok(page) => web.page = Some(page),
             Err(e) => {

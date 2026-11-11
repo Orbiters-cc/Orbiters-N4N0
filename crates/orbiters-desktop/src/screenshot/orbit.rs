@@ -67,6 +67,10 @@ fn picture(placed: &Placed, facts: &Facts, hover: Option<usize>, pressed: Option
     let textures: Vec<_> = (0..4).map(|i| canvas.ctx().load_texture("recent", stand_in(i), TextureOptions::LINEAR)).collect();
     let mut facts = facts.clone();
     facts.recent_pictures = textures.iter().enumerate().map(|(n, texture)| (n, texture.id())).collect();
+    // A page shown over the camera: a stand-in of what it drew.
+    if let Some(web) = facts.camera.web.as_mut().filter(|w| w.state == panels::WebState::Shown) {
+        web.picture = textures.first().map(|t| t.id());
+    }
     for _ in 0..2 {
         canvas.paint(0.0, |p| panels::paint(p, placed.zone, logical, &facts, hover, pressed));
     }
@@ -771,6 +775,7 @@ pub(super) fn camera_shots(out: &Path) -> anyhow::Result<()> {
         ("orbit-camera-qr-looking", camera(&|c| c.qr = CameraQr::Looking), false),
         ("orbit-camera-qr-no-picture", camera(&|c| c.qr = CameraQr::NoPicture(orbiters_i18n::tr(&orbiters_n4n0_core::qr::no_camera_note(Some(true))).into())), false),
         ("orbit-camera-web-loading", camera(&|c| c.web = page(WebState::Loading)), false),
+        ("orbit-camera-web-page", camera(&|c| c.web = Some(WebPage { title: "Silent Dawn · Orbiters".into(), ..page(WebState::Shown).expect("a page") })), false),
         ("orbit-camera-web-failed", camera(&|c| c.web = page(WebState::Failed("The site did not answer.".into()))), false),
         ("orbit-camera-recording", recording.clone(), false),
         ("orbit-camera-starting", Facts { rec_starting: true, capture_busy: true, ..idle.clone() }, false),

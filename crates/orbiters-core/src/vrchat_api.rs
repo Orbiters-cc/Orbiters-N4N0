@@ -39,7 +39,7 @@ impl Gate {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Error {
     Disabled,
     Unauthorized,
@@ -200,6 +200,77 @@ pub struct World {
     pub thumbnail_image_url: String,
     pub image_url: String,
     pub author_id: String,
+    pub author_name: String,
+    pub description: String,
+    pub capacity: Option<u32>,
+    pub recommended_capacity: Option<u32>,
+    pub tags: Vec<String>,
+    pub visits: Option<u64>,
+    pub favorites: Option<u64>,
+    /// Live enumeration uses a fresh world response, never the day-long metadata cache.
+    pub instances: Vec<(String, u32, serde_json::Value)>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum InstanceAccess { Public, FriendsPlus, Friends, InvitePlus, Invite, GroupPublic, GroupPlus, Group, Unknown }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CreateAccess { Public, FriendsPlus, Friends, InvitePlus, Invite }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum InstanceRegion { Us, Use, Eu, Jp }
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct WorldInstance {
+    pub world: String,
+    /// Exact opaque instanceId supplied by VRChat; never rebuild it from its number.
+    pub id: String,
+    pub access: InstanceAccess,
+    pub region: String,
+    pub occupants: u32,
+    pub capacity: Option<u32>,
+    pub friends: Option<u32>,
+    pub full: bool,
+    pub closed: bool,
+    pub can_join: bool,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct WorldInstances {
+    pub items: Vec<WorldInstance>,
+    /// A lookup was hidden, missing or null; this is not evidence of closure.
+    pub unavailable: usize,
+}
+
+fn instance_details(v: &serde_json::Value, world: &str, id: Option<&str>) -> Result<WorldInstance> {
+    let instance = v["instanceId"].as_str().filter(|s| !s.is_empty()).ok_or(Error::InvalidResponse)?;
+    if v["worldId"].as_str() != Some(world) || id.is_some_and(|id| id != instance) { return Err(Error::InvalidResponse); }
+    let access = match v["accessType"].as_str() {
+        Some("public") => InstanceAccess::Public, Some("friendsPlus") => InstanceAccess::FriendsPlus,
+        Some("friends") => InstanceAccess::Friends, Some("invitePlus") => InstanceAccess::InvitePlus,
+        Some("invite") => InstanceAccess::Invite, Some("groupPublic") => InstanceAccess::GroupPublic,
+        Some("groupPlus") => InstanceAccess::GroupPlus, Some("group") => InstanceAccess::Group,
+        _ => InstanceAccess::Unknown,
+    };
+    let occupants = v["n_users"].as_u64().and_then(|n| n.try_into().ok()).ok_or(Error::InvalidResponse)?;
+    let capacity = v["capacity"].as_u64().or_else(|| v["world"]["capacity"].as_u64()).and_then(|n| u32::try_from(n).ok());
+    let full = v["full"].as_bool().unwrap_or(false) || v["hasCapacityForYou"].as_bool() == Some(false)
+        || capacity.is_some_and(|c| occupants >= c);
+    let closed = v["active"].as_bool() == Some(false) || v["closedAt"].as_str().is_some_and(|s|
+        time::OffsetDateTime::parse(s, &time::format_description::well_known::Rfc3339)
+            .map_or(true, |t| t <= time::OffsetDateTime::now_utc()));
+    let friends = v["users"].as_array().filter(|users| users.iter().all(|u| u["isFriend"].is_boolean()))
+        .map(|users| users.iter().filter(|u| u["isFriend"].as_bool() == Some(true)).count() as u32);
+    Ok(WorldInstance { world: world.into(), id: instance.into(), access, region: v["region"].as_str().unwrap_or_default().into(),
+        occupants, capacity, friends, full, closed, can_join: !full && !closed && access != InstanceAccess::Unknown })
+}
+
+fn instance_body(world: &str, owner: &str, access: CreateAccess, region: InstanceRegion) -> serde_json::Value {
+    let kind = match access { CreateAccess::Public => "public", CreateAccess::FriendsPlus => "hidden", CreateAccess::Friends => "friends", _ => "private" };
+    let mut body = serde_json::json!({"worldId": world, "type": kind, "region": region, "canRequestInvite": access == CreateAccess::InvitePlus});
+    if access != CreateAccess::Public { body["ownerId"] = owner.into(); }
+    body
 }
 /// Whether `instance` (as VRChat's log writes it: `11027~private(usr_…)~region(eu)~nonce(…)`) is a private instance
 /// `owner` owns: the strict kind only. Invite+ (`~canRequestInvite`), friends, hidden (friends+), group and public
@@ -556,6 +627,9 @@ impl Client {
     }
     pub fn signed_in(&self) -> bool {
         self.allowed.allowed() && self.user.is_some()
+    }
+    pub fn signed_in_user_id(&self) -> Option<&str> {
+        self.signed_in().then(|| self.user.as_ref().map(|u| u.id.as_str())).flatten()
     }
     fn authenticated(&self) -> Result<()> {
         self.permitted()?;
@@ -914,6 +988,40 @@ impl Client {
         }
         self.world_lists.insert(path, (Instant::now(), worlds.clone(), more));
         Ok((worlds, more))
+    }
+    /// Fresh instances visible to this personal session, with lookup details.
+    pub fn world_instances(&mut self, world: &str) -> Result<WorldInstances> {
+        self.authenticated()?;
+        let w = self.fetch_world(world)?;
+        let mut result = WorldInstances::default();
+        for (id, _, _) in w.instances {
+            match self.world_instance(world, &id) {
+                Ok(Some(i)) => result.items.push(i),
+                Ok(None) | Err(Error::NotFound) => result.unavailable += 1,
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(result)
+    }
+    pub fn world_instance(&mut self, world: &str, id: &str) -> Result<Option<WorldInstance>> {
+        self.authenticated()?;
+        let r = self.get("instances", &format!("/instances/{}:{}", path_segment(world), path_segment(id)))?;
+        let v: serde_json::Value = serde_json::from_slice(&r.body).map_err(|_| Error::InvalidResponse)?;
+        if v.is_null() { return Ok(None); }
+        instance_details(&v, world, Some(id)).map(Some)
+    }
+    pub fn create_instance(&mut self, world: &str, access: CreateAccess, region: InstanceRegion) -> Result<WorldInstance> {
+        self.authenticated()?;
+        let owner = self.user.as_ref().ok_or(Error::Unauthorized)?.id.clone();
+        let body = instance_body(world, &owner, access, region);
+        let r = self.request("instances", "POST", format!("{BASE}/instances"), None, Some(body.to_string()))?;
+        let v: serde_json::Value = serde_json::from_slice(&r.body).map_err(|_| Error::InvalidResponse)?;
+        let i = instance_details(&v, world, None)?;
+        let expected = match access { CreateAccess::Public => InstanceAccess::Public, CreateAccess::FriendsPlus => InstanceAccess::FriendsPlus,
+            CreateAccess::Friends => InstanceAccess::Friends, CreateAccess::InvitePlus => InstanceAccess::InvitePlus, CreateAccess::Invite => InstanceAccess::Invite };
+        if i.access != expected || v["region"] != serde_json::to_value(region).map_err(|_| Error::InvalidResponse)?
+            || (access != CreateAccess::Public && v["ownerId"].as_str() != Some(owner.as_str())) { return Err(Error::InvalidResponse); }
+        Ok(i)
     }
     /// A new private instance of `world` in `region`, owned by the signed-in account (`12345~private(usr_…)~region(eu)~nonce(…)`):
     /// invite only, nobody can ask to join it. An answer that names anything else is refused here, so that what comes
@@ -1451,6 +1559,74 @@ pub(crate) mod tests {
     }
     pub(crate) fn expired_session() -> Client {
         mock(vec![response(401, "", &[])]).0
+    }
+    fn chooser_instance(id: &str, access: &str) -> serde_json::Value {
+        serde_json::json!({"worldId":"wrld_test", "instanceId":id, "accessType":access, "region":"eu", "n_users":3,
+            "capacity":20,"full":false,"active":true,"ownerId":"usr_test", "users":[{"isFriend":true},{"isFriend":false}]})
+    }
+    #[test]
+    fn chooser_lists_exact_ids_kinds_and_world_details_without_a_capture() {
+        let ids = ["123~region(eu)", "456~hidden(usr_test)~region(eu)", "789~private(usr_test)~canRequestInvite~region(eu)"];
+        let body = serde_json::json!({"id":"wrld_test","name":"World","authorName":"Creator","description":"A place", "capacity":20,
+            "tags":["author_tag_chill"],"visits":12,"favorites":7,"instances":ids.map(|id| serde_json::json!([id,3,{"en":1.0}]))});
+        let mut answers = vec![json(body)];
+        answers.extend(ids.iter().zip(["public","friendsPlus","invitePlus"]).map(|(id,a)| json(chooser_instance(id,a))));
+        let (mut c, seen) = mock(answers);
+        c.limiter.lock().unwrap().unpaced = true;
+        let list = c.world_instances("wrld_test").unwrap();
+        assert_eq!(list.items.iter().map(|i| i.id.as_str()).collect::<Vec<_>>(), ids);
+        assert_eq!(list.items[1].access, InstanceAccess::FriendsPlus);
+        assert_eq!(list.items[2].access, InstanceAccess::InvitePlus);
+        assert_eq!(list.items[0].friends, Some(1));
+        assert!(list.items.iter().all(|i| i.can_join));
+        let w = c.world("wrld_test").unwrap();
+        assert_eq!((w.author_name.as_str(),w.description.as_str(),w.capacity,w.visits,w.favorites), ("Creator","A place",Some(20),Some(12),Some(7)));
+        assert_eq!(seen.lock().unwrap().len(),4);
+    }
+    #[test]
+    fn chooser_empty_hidden_expired_errors_and_no_session() {
+        let (mut c, _) = mock(vec![json(serde_json::json!({"instances":[]}))]);
+        assert!(c.world_instances("wrld_test").unwrap().items.is_empty());
+        for status in [401,500,429] {
+            let (mut c, _) = mock(vec![response(status,"",&[])]);
+            let error = c.world_instances("wrld_test").unwrap_err();
+            assert!(match status {401=>error==Error::Unauthorized,500=>error==Error::Unavailable,_=>matches!(error,Error::RateLimited(_))});
+        }
+        let (mut c, seen) = mock(vec![]);
+        c.user = None;
+        assert_eq!(c.world_instances("wrld_test"),Err(Error::Unauthorized));
+        assert!(seen.lock().unwrap().is_empty());
+        let (mut c, _) = mock(vec![json(serde_json::json!({"instances":[["1",0,{}],["2",0,{}]]})),response(403,"",&[]),json(serde_json::Value::Null)]);
+        c.limiter.lock().unwrap().unpaced=true;
+        let list=c.world_instances("wrld_test").unwrap();
+        assert_eq!(list.unavailable,2);
+        assert!(list.items.is_empty());
+    }
+    #[test]
+    fn chooser_creation_bodies_and_exact_selected_invite() {
+        for (access,kind,label,requestable) in [(CreateAccess::Public,"public","public",false),
+            (CreateAccess::FriendsPlus,"hidden","friendsPlus",false),(CreateAccess::Friends,"friends","friends",false),
+            (CreateAccess::InvitePlus,"private","invitePlus",true),(CreateAccess::Invite,"private","invite",false)] {
+            let id="123~private(usr_test)~region(eu)~nonce(opaque)";
+            let (mut c,seen)=mock(vec![json(chooser_instance(id,label)),response(200,"{}",&[])]);
+            let created=c.create_instance("wrld_test",access,InstanceRegion::Eu).unwrap();
+            c.invite_self("wrld_test",&created.id).unwrap();
+            let calls=seen.lock().unwrap();
+            let body:serde_json::Value=serde_json::from_str(calls[0].body.as_ref().unwrap()).unwrap();
+            let mut expected=serde_json::json!({"worldId":"wrld_test","type":kind,"region":"eu","canRequestInvite":requestable});
+            if access!=CreateAccess::Public {expected["ownerId"]="usr_test".into();}
+            assert_eq!(body,expected);
+            assert!(calls[1].url.ends_with(&format!("/invite/myself/to/wrld_test:{}",path_segment(id))));
+        }
+    }
+    #[test]
+    fn chooser_full_closed_and_unknown_are_not_joinable() {
+        for (field,value) in [("full",serde_json::json!(true)),("active",serde_json::json!(false)),("hasCapacityForYou",serde_json::json!(false)),("accessType",serde_json::json!("new-kind"))] {
+            let mut v=chooser_instance("1","friendsPlus"); v[field]=value;
+            assert!(!instance_details(&v,"wrld_test",Some("1")).unwrap().can_join);
+        }
+        assert!(instance_details(&chooser_instance("2","public"),"wrld_test",Some("1")).is_err());
+        assert!(instance_details(&chooser_instance("1","public"),"wrld_other",Some("1")).is_err());
     }
     #[test]
     fn world_lists_are_asked_a_page_at_a_time_and_kept() {

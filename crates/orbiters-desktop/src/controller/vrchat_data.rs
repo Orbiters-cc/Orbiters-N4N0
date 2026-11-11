@@ -33,6 +33,9 @@ impl Scope {
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum Request {
+    WorldDetails { world: String },
+    WorldInstances { world: String },
+    CreateInstance { world: String, access: orbiters_core::vrchat_api::CreateAccess, region: orbiters_core::vrchat_api::InstanceRegion },
     Avatars {
         ids: Vec<String>,
     },
@@ -59,9 +62,8 @@ pub enum Request {
         list: orbiters_core::maps::WorldList,
         page: usize,
     },
-    /// An invite to oneself to a public instance of a world (`instance`: `48213~region(eu)`), which VRChat shows in the
-    /// game, answered as [`Response::Invited`]. Besides a picture, the one thing sent that is not a read: it needs the
-    /// personal session and goes nowhere else.
+    /// Invite to an exact destination listed or created in this scope within five minutes.
+    /// A fresh lookup checks capacity/closure before sending. Answer: Invited or WorldError.
     InviteSelf {
         world: String,
         instance: String,
@@ -69,6 +71,10 @@ pub enum Request {
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum Response {
+    WorldDetails(orbiters_core::vrchat_api::World),
+    WorldInstances(orbiters_core::vrchat_api::WorldInstances),
+    CreatedInstance(orbiters_core::vrchat_api::WorldInstance),
+    WorldError(WorldError),
     Avatars { pictures: Vec<(String, super::vrchat_login::Picture)>, errors: Vec<String> },
     Friends(Vec<User>),
     Instance(Option<bool>),
@@ -76,6 +82,36 @@ pub enum Response {
     Owned(Vec<String>),
     Worlds(orbiters_core::maps::FoundWorlds),
     Invited,
+}
+
+/// Structured failures for WorldDetails, WorldInstances, CreateInstance and InviteSelf. No UI wording here.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum WorldError { AccountChanged, SignInRequired, InvalidWorld, NotListed, Full, Closed, NotJoinable, Api(orbiters_core::vrchat_api::Error) }
+
+#[derive(Default)]
+struct InstancePermits {
+    entries: Vec<(Scope, String, String, std::time::Instant)>,
+}
+impl InstancePermits {
+    fn allow(&mut self, scope: &Scope, world: &str, items: &[orbiters_core::vrchat_api::WorldInstance]) {
+        self.entries.retain(|(s, w, _, at)| s == scope && w != world && at.elapsed().as_secs() < 300);
+        self.entries.extend(items.iter().filter(|i| i.can_join).map(|i| (scope.clone(), world.into(), i.id.clone(), std::time::Instant::now())));
+    }
+    fn contains(&self, scope: &Scope, world: &str, id: &str) -> bool {
+        self.entries.iter().any(|(s, w, i, at)| s == scope && w == world && i == id && at.elapsed().as_secs() < 300)
+    }
+}
+static INSTANCE_PERMITS: std::sync::Mutex<InstancePermits> = std::sync::Mutex::new(InstancePermits { entries: Vec::new() });
+
+fn scoped_world_work(
+    scope: &Scope,
+    current: impl Fn() -> Scope,
+    work: impl FnOnce() -> std::result::Result<Response, WorldError>,
+) -> Response {
+    if *scope != current() { return Response::WorldError(WorldError::AccountChanged); }
+    let result = work();
+    if *scope != current() { return Response::WorldError(WorldError::AccountChanged); }
+    result.unwrap_or_else(Response::WorldError)
 }
 /// IDs one [`Request::Owned`] may ask about (VRChat's answers are kept a day, so a page asks once).
 pub const OWNED_BATCH: usize = 16;
@@ -86,6 +122,9 @@ static PICTURE_CACHE: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 impl Controller {
     pub fn vrchat_data(&self, scope: Scope, request: Request) -> Result {
+        if matches!(&request, Request::WorldDetails { .. } | Request::WorldInstances { .. } | Request::CreateInstance { .. } | Request::InviteSelf { .. }) {
+            return Ok(self.vrchat_world_data(scope, request));
+        }
         if scope != Scope::of(&self.view()) {
             return Err(tr("The account changed. Please try again.").into());
         }
@@ -178,11 +217,7 @@ impl Controller {
                     }
                     Response::Worlds(source.worlds(&list, page)?)
                 }
-                Request::InviteSelf { world, instance } => {
-                    anyhow::ensure!(orbiters_core::vrchat_log::is_world_id(&world) && public_instance(&instance), "{}", tr("Not a public instance of a world."));
-                    source.invite_self(&world, &instance)?;
-                    Response::Invited
-                }
+                Request::WorldDetails { .. } | Request::WorldInstances { .. } | Request::CreateInstance { .. } | Request::InviteSelf { .. } => unreachable!(),
             })
         })()
         .map_err(|e| e.to_string());
@@ -190,6 +225,48 @@ impl Controller {
             return Err(tr("The account changed. Please try again.").into());
         }
         result
+    }
+
+    fn vrchat_world_data(&self, scope: Scope, request: Request) -> Response {
+        scoped_world_work(&scope, || Scope::of(&self.view()), || {
+            if !scope.allowed { return Err(WorldError::SignInRequired); }
+            let user = scope.user.as_deref().ok_or(WorldError::SignInRequired)?;
+            let world = match &request {
+                Request::WorldDetails { world } | Request::WorldInstances { world } | Request::CreateInstance { world, .. } | Request::InviteSelf { world, .. } => world,
+                _ => unreachable!(),
+            };
+            if !orbiters_core::vrchat_log::is_world_id(world) { return Err(WorldError::InvalidWorld); }
+            let source = self.vrchat_source();
+            match request {
+                Request::WorldDetails { world } => source.personal(user, || scope == Scope::of(&self.view()), |c| c.world(&world)).map(Response::WorldDetails).map_err(WorldError::Api),
+                Request::WorldInstances { world } => {
+                    // A failed refresh must not leave the old choices authorized.
+                    INSTANCE_PERMITS.lock().unwrap().allow(&scope, &world, &[]);
+                    let list = source.personal(user, || scope == Scope::of(&self.view()), |c| c.world_instances(&world)).map_err(WorldError::Api)?;
+                    if scope != Scope::of(&self.view()) { return Err(WorldError::AccountChanged); }
+                    INSTANCE_PERMITS.lock().unwrap().allow(&scope, &world, &list.items);
+                    Ok(Response::WorldInstances(list))
+                }
+                Request::CreateInstance { world, access, region } => {
+                    let instance = source.personal(user, || scope == Scope::of(&self.view()), |c| c.create_instance(&world, access, region)).map_err(WorldError::Api)?;
+                    if scope != Scope::of(&self.view()) { return Err(WorldError::AccountChanged); }
+                    INSTANCE_PERMITS.lock().unwrap().allow(&scope, &world, std::slice::from_ref(&instance));
+                    Ok(Response::CreatedInstance(instance))
+                }
+                Request::InviteSelf { world, instance } => {
+                    if !INSTANCE_PERMITS.lock().unwrap().contains(&scope, &world, &instance) { return Err(WorldError::NotListed); }
+                    let fresh = source.personal(user, || scope == Scope::of(&self.view()), |c| c.world_instance(&world, &instance)).map_err(WorldError::Api)?
+                        .ok_or(WorldError::NotJoinable)?;
+                    if fresh.full { return Err(WorldError::Full); }
+                    if fresh.closed { return Err(WorldError::Closed); }
+                    if !fresh.can_join { return Err(WorldError::NotJoinable); }
+                    if scope != Scope::of(&self.view()) { return Err(WorldError::AccountChanged); }
+                    source.personal(user, || scope == Scope::of(&self.view()), |c| c.invite_self(&world, &instance)).map_err(WorldError::Api)?;
+                    Ok(Response::Invited)
+                }
+                _ => unreachable!(),
+            }
+        })
     }
 }
 
@@ -622,5 +699,44 @@ mod tests {
         assert!(c.take_notices().iter().any(|n| format!("{n:?}").contains("already uploading")));
         c.vrchat_picture(Scope::of(&c.view()), "usr_test".into(), "picture.png".into());
         assert!(c.take_notices().iter().any(|n| format!("{n:?}").contains("Only avatars")));
+    }
+    #[test]
+    fn chooser_scope_changes_before_and_during_work_discard_results() {
+        use std::cell::Cell;
+        let c = Controller::new(orbiters_core::settings::Settings::default());
+        let scope = Scope::of(&c.view());
+        let mut changed = scope.clone(); changed.revision += 1;
+        assert!(matches!(scoped_world_work(&scope, || changed.clone(), || panic!("stale work ran")), Response::WorldError(WorldError::AccountChanged)));
+        let finished = Cell::new(false);
+        let result = scoped_world_work(&scope, || if finished.get() { changed.clone() } else { scope.clone() }, || {
+            finished.set(true); Ok(Response::Invited)
+        });
+        assert!(matches!(result, Response::WorldError(WorldError::AccountChanged)));
+    }
+    #[test]
+    fn chooser_permits_only_exact_listed_world_account_and_revision() {
+        let c = Controller::new(orbiters_core::settings::Settings::default());
+        let scope = Scope::of(&c.view());
+        let item = orbiters_core::vrchat_api::WorldInstance {world:"wrld_test".into(),id:"1~hidden(usr_test)".into(),
+            access:orbiters_core::vrchat_api::InstanceAccess::FriendsPlus,region:"eu".into(),occupants:1,capacity:Some(20),friends:None,full:false,closed:false,can_join:true};
+        let mut permits = InstancePermits::default();
+        assert!(!permits.contains(&scope,"wrld_test",&item.id));
+        permits.allow(&scope,"wrld_test",std::slice::from_ref(&item));
+        assert!(permits.contains(&scope,"wrld_test",&item.id));
+        assert!(!permits.contains(&scope,"wrld_test","2"));
+        assert!(!permits.contains(&scope,"wrld_other",&item.id));
+        let mut changed=scope.clone();changed.revision+=1;
+        assert!(!permits.contains(&changed,"wrld_test",&item.id));
+        permits.allow(&scope,"wrld_test",&[]);
+        assert!(!permits.contains(&scope,"wrld_test",&item.id));
+    }
+    #[test]
+    fn chooser_service_refuses_unlisted_ids_before_any_http() {
+        let c = Controller::new(orbiters_core::settings::Settings::default());
+        c.update(|s| { s.vrchat_login.allowed=true; s.vrchat_login.user=Some(User {id:"usr_test".into(),..Default::default()}); });
+        let result=c.vrchat_data(Scope::of(&c.view()),Request::InviteSelf {
+            world:"wrld_4cf554b4-430c-4f8f-b53e-1f294eed230b".into(),instance:"12345".into()
+        }).unwrap();
+        assert!(matches!(result,Response::WorldError(WorldError::NotListed)));
     }
 }

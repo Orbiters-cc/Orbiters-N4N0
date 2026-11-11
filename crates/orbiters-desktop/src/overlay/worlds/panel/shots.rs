@@ -324,6 +324,22 @@ pub fn shots(out: &std::path::Path) -> anyhow::Result<()> {
     paint("comments", &entries, &comments, &shown, &feedback, 5.0)?;
     let comment = Panel { page: Page::Compose(Compose::Comment), selected: Some(10), draft: "Lovely at sunset, ".into(), ..base.clone() }; // i18n: not shown (a typed draft)
     paint("comment", &entries, &comment, &shown, &feedback, 5.2)?;
+    // VR feedback F6: signed out, Write a comment is the way to sign in, and what it did is said under it; a read Orbiters did not answer is said, with Try
+    // again, and a comment can still be written.
+    let browser = tr("Your browser opens on your computer: sign in to Orbiters there, then write your comment.");
+    let comments_signed_out = Panel { page: Page::Comments, selected: Some(10), hover: Some(Target::WriteComment), note: Some((browser.into(), 4.5)), ..base.clone() };
+    paint("comments-signed-out", &entries, &comments_signed_out, &shown, &stand_in_feedback(false), 5.0)?;
+    let world_10 = entries.iter().find(|e| e.id == 10).map(|e| world_key(&e.world_id)).unwrap_or_default();
+    let unanswered = tr("Orbiters did not answer for this world's feedback. It tries again by itself.");
+    let unread = FeedbackView {
+        signed_in: true,
+        worlds: vec![orbiters_n4n0_core::feedback::WorldFeedback { world: world_10, loading: true, error: Some(unanswered.into()), ..Default::default() }],
+        ..Default::default()
+    };
+    let comments_unread = Panel { page: Page::Comments, selected: Some(10), hover: Some(Target::RetryFeedback), ..base.clone() };
+    paint("comments-unread", &entries, &comments_unread, &shown, &unread, 5.0)?;
+    let comment_signed_out = Panel { note: Some((browser.into(), 4.9)), ..comment.clone() };
+    paint("comment-signed-out", &entries, &comment_signed_out, &shown, &stand_in_feedback(false), 5.2)?;
     let pictures_page = Panel { page: Page::Pictures, selected: Some(10), hover: Some(Target::Picture(1)), ..base.clone() };
     paint("pictures", &entries, &pictures_page, &shown, &feedback, 5.0)?;
     let picture_open = Panel { page: Page::Pictures, selected: Some(10), picture: Some(2), ..base.clone() };

@@ -590,6 +590,26 @@ pub(super) fn shots(out: &Path) -> anyhow::Result<()> {
     qm_scene("orbit-sheet-all-vr", out, hd, &Facts { desktop: false, can_call: true, can_states: true, can_light: true, sheet: Some(Sheet::All), sheet_title: "All tools".into(), ..idle.clone() }, None, Some(Sheet::All))?;
     // What plays with its link known, then copied; the page of microphones, with made-up ones.
     qm_scene("orbit-sheet-all-link", out, hd, &Facts { desktop: false, can_states: true, can_copy_playing: true, can_drop_playing: true, playing_link_copied: true, sheet: Some(Sheet::All), sheet_title: "All tools".into(), ..idle.clone() }, None, Some(Sheet::All))?;
+    // VR feedback F3: no link card on the avatar: Drop link greyed; pointed at, the head says why and what to do (no N4N0 at all, an N4N0 from before the card).
+    let no_card = Facts { desktop: false, can_states: true, can_copy_playing: true, can_drop_playing: false, drop_why: panels::DropWhy::NoN4n0, sheet: Some(Sheet::All), sheet_title: "All tools".into(), ..idle.clone() };
+    qm_scene("orbit-sheet-all-link-no-n4n0", out, hd, &Facts { pointed: Some(Action::PlayingLink(Target::DropPlaying)), ..no_card.clone() }, None, Some(Sheet::All))?;
+    qm_scene("orbit-sheet-all-link-old-n4n0", out, hd, &Facts { drop_why: panels::DropWhy::NoCard, pointed: Some(Action::PlayingLink(Target::DropPlaying)), ..no_card.clone() }, None, Some(Sheet::All))?;
+    // VR feedback F10: a previous instance's row opens its world's page; its mark says so beside its name.
+    let names = ["The Black Cat", "Midnight Rooftop ~ a very long world name that goes on", "Japan Shrine", "Cozy Cabin", "Just B Club", "Murder 4"];
+    let visits = names
+        .iter()
+        .enumerate()
+        .map(|(i, name)| panels::WorldVisit {
+            world_id: format!("wrld_{i}"),
+            name: name.to_string(),
+            line: format!("{} h · eu · Public", i * 3 + 1),
+            location: format!("wrld_{i}:1~region(eu)"),
+            here: i == 0,
+            earlier: if i == 1 { vec![("wrld_1:2".into(), "Mon 21:04".into()), ("wrld_1:3".into(), "Sun 18:40".into())] } else { Vec::new() },
+            picture: None,
+        })
+        .collect();
+    qm_scene("orbit-sheet-instances", out, hd, &Facts { desktop: false, worlds_visited: visits, sheet: Some(Sheet::Instances), sheet_title: "Instances".into(), ..idle.clone() }, None, Some(Sheet::Instances))?;
     let mics = vec![
         panels::MicTile { id: "a".into(), name: "Quest Pro microphone".into(), level: 0.72, can_hear: true, default: true },
         panels::MicTile { id: "b".into(), name: "Headset (Virtual Desktop Audio)".into(), level: 0.08, can_hear: true, default: false },

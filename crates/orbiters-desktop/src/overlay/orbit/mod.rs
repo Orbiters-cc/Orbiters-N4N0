@@ -1355,7 +1355,7 @@ impl Panels {
 
     /// What opens a screen of the sheet, for the way back. What brought them there is what brings them back: everything else about it is kept by [`Panels::keep_screen`].
     fn opens_a_screen(action: Action) -> bool {
-        matches!(action, Action::Worlds | Action::All | Action::Pictures | Action::Talk | Action::Settings | Action::Page(_))
+        matches!(action, Action::Worlds | Action::All | Action::Pictures | Action::Talk | Action::Settings | Action::Page(_) | Action::WorldInfo(_))
     }
 
     /// Before leaving a screen, or showing another of the same name: what it has.
@@ -1945,6 +1945,7 @@ impl Panels {
             can_copy_playing: !layout::target_state(menu, Target::CopyPlaying).hidden,
             // Where a card can be dropped at all: Drop link then does it in one press, copied or not.
             can_drop_playing: menu.can_drop,
+            drop_why: panels::DropWhy::of(menu.can_drop, snap.n4n0.avatar_id.is_some(), snap.n4n0.prop_sync.is_some()),
             playing_link_copied: menu.media.as_ref().and_then(|m| m.video.as_deref()).is_some_and(|v| menu.copied.as_deref() == Some(v)),
             can_light: menu.light.is_some(),
             vr_close: self.sharp > 1.0,
@@ -2419,6 +2420,9 @@ impl Panels {
         match action {
             Action::Back => self.go_back(snap, out),
             // By the menu's own press, so it does here what it does on N4N0's page: that says so, and offers Drop once it was copied.
+            // Greyed where the avatar cannot drop a card (F3): pointed at, it says why; pressed, it does nothing, and above all does not mark the link copied
+            // when the clipboard never had it.
+            Action::PlayingLink(Target::DropPlaying) if !self.stage.host.menu.can_drop => {}
             Action::PlayingLink(target) => {
                 let host = &mut self.stage.host;
                 // Drop link is beside Copy link on All tools: it drops in one press, as the menu's own Drop does once copied (without touching the clipboard).
@@ -2537,6 +2541,28 @@ impl Panels {
                 }
             }
             Action::Page(target) => self.open_page(target, snap),
+            // A previous instance's world: its page on the 3D worlds sheet (F10). Nothing is sent to VRChat: only the chips invite.
+            Action::WorldInfo(group) => {
+                let Some(visit) = self.facts.worlds_visited.get(group).cloned() else { return };
+                if !self.worlds_here {
+                    return;
+                }
+                self.open_sheet(Sheet::Worlds, mark("Worlds in 3D"), snap);
+                let first = !self.worlds_opened;
+                self.worlds_opened = true;
+                let layout = self.stage.host.menu.layout;
+                if let Some(worlds) = self.stage.worlds.as_mut() {
+                    worlds.set_moves(!snap.settings.reduce_motion);
+                    if first {
+                        worlds.open_panel(layout);
+                    } else {
+                        worlds.come_back(layout);
+                    }
+                    worlds.open_world(&visit.world_id, &visit.name);
+                }
+                // The way back from further on is the sheet as it is, whatever world it shows then.
+                self.here = Some(Action::Worlds);
+            }
             Action::Invite(group, visit) => {
                 let asked = self.facts.worlds_visited.get(group).and_then(|w| {
                     let location = if visit == 0 { Some(w.location.clone()) } else { w.earlier.get(visit - 1).map(|e| e.0.clone()) };

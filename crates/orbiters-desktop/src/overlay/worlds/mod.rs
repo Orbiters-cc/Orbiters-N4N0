@@ -199,6 +199,9 @@ pub struct Worlds {
     hint_used: bool,
     /// The menus up now.
     menu_boxes: Vec<stereo::MenuBox>,
+    /// A world's page opened from elsewhere (a previous instance's row, F10): what the panel showed before, which its Back
+    /// brings back as it leaves for where the page was opened from.
+    opened_from: Option<(panel::Page, Option<u64>)>,
 }
 
 /// Now, in Unix seconds.
@@ -306,6 +309,7 @@ impl Worlds {
             small_place: None,
             hint_used: false,
             menu_boxes: Vec::new(),
+            opened_from: None,
         })
     }
 
@@ -402,6 +406,7 @@ fn keep_an_eye_frame(steamvr: &vr::Client, n: u32) {
             small_place: None,
             hint_used: false,
             menu_boxes: Vec::new(),
+            opened_from: None,
         }
     }
 
@@ -572,6 +577,13 @@ fn keep_an_eye_frame(steamvr: &vr::Client, n: u32) {
                     self.apply(&ask);
                     self.outbox.push(ask);
                 }
+                Action::SignIn => {
+                    if let Some(backend) = &self.backend {
+                        backend.sign_in();
+                    }
+                }
+                // Asked again on the next turn.
+                Action::RetryFeedback => self.asked = None,
             }
         }
         let _ = entries;
@@ -655,6 +667,35 @@ fn keep_an_eye_frame(steamvr: &vr::Client, n: u32) {
         self.show_world_for_test(id);
         self.panel.moves = true;
         self.panel.side_at = self.time();
+    }
+
+    /// `entry`'s page, as a press on it in a list opens it.
+    #[cfg(test)]
+    pub fn pick_for_test(&mut self, entry: Entry) {
+        self.show_world_for_test(entry.id);
+        self.picked = Some(entry);
+    }
+
+    /// Where `target` is on the panel now, in its units: where a hand points to press it.
+    #[cfg(test)]
+    pub fn target_for_test(&self, target: panel::Target) -> Option<egui::Pos2> {
+        let entries = self.entries();
+        let status = self.status();
+        let (no_thumb, no_picture) = (|_: &Entry| -> Option<TextureId> { None }, |_: u64, _: bool| -> Option<TextureId> { None });
+        let picked = self.picked().cloned();
+        let d = Data { entries: &entries, picked: picked.as_ref(), status: &status, feedback: &self.feedback, facts: &self.facts, thumb: &no_thumb, picture: &no_picture, now: unix_now() };
+        self.panel.targets(&d).into_iter().find(|(t, _)| *t == target).map(|(_, r)| r.center())
+    }
+
+    /// The 3D captures Orbiters lists, as if it had just answered.
+    #[cfg(test)]
+    pub fn listing_for_test(&self, entries: Vec<Entry>) {
+        self.catalog.put_for_test(entries);
+    }
+
+    #[cfg(test)]
+    pub fn page_for_test(&self) -> panel::Page {
+        self.panel.page
     }
 
     #[cfg(test)]
@@ -1104,6 +1145,7 @@ fn keep_an_eye_frame(steamvr: &vr::Client, n: u32) {
     pub fn open_panel(&mut self, layout: KeyboardLayout) {
         self.catalog.refresh(&self.source);
         self.open = true;
+        self.opened_from = None;
         self.panel.layout = layout;
         let status = self.status();
         let time = self.time();
@@ -1115,16 +1157,52 @@ fn keep_an_eye_frame(steamvr: &vr::Client, n: u32) {
         self.panel.moves = moves;
     }
 
+    /// The page of the world `world_id` (named `name`), opened from elsewhere on the sheet: a previous instance's row
+    /// (Enzo, VR feedback F10). A world Orbiters has a 3D capture of shows its capture's page, the newest; any other its
+    /// world's page, its author, description and pictures read as the Visited list reads them. Nothing shows around the
+    /// person and nothing is sent to VRChat: the page has its own buttons for that. Its Back comes back here.
+    pub fn open_world(&mut self, world_id: &str, name: &str) {
+        let was = (self.panel.page, self.panel.selected);
+        let captures = self.captures();
+        let capture = captures.iter().filter(|e| e.world_id.eq_ignore_ascii_case(world_id)).max_by(|a, b| a.captured_at.cmp(&b.captured_at)).cloned();
+        let entry = capture.unwrap_or_else(|| {
+            let found = orbiters_core::maps::FoundWorld { world: orbiters_core::maps::World { world_id: world_id.to_string(), name: name.to_string(), ..Default::default() }, ..Default::default() };
+            Entry::world(&found, None, self.catalog.feedback(world_id))
+        });
+        self.facts_for(&entry.world_id);
+        let time = self.time();
+        self.panel.show_detail(entry.id, time);
+        self.picked = Some(entry);
+        self.opened_from = Some(was);
+        self.panel.dirty = true;
+    }
+
+    /// The world whose page shows, for the tests.
+    #[cfg(test)]
+    pub fn shown_world_for_test(&self) -> Option<(panel::Page, String, bool)> {
+        let picked = self.picked()?;
+        Some((self.panel.page, picked.world_id.clone(), picked.capture))
+    }
+
     /// Back to it on a sheet: as it was left. Only its list is read again.
     pub fn come_back(&mut self, layout: KeyboardLayout) {
         self.catalog.refresh(&self.source);
         self.open = true;
+        self.opened_from = None;
         self.panel.layout = layout;
         self.panel.dirty = true;
     }
 
     /// The head's Back, if there is somewhere to go within this panel. Its own does not show on a sheet.
     pub fn back_within(&mut self) -> bool {
+        // A world's page opened from elsewhere: Back goes back there, and the panel is left as it was before.
+        if self.panel.page == panel::Page::Detail {
+            if let Some((page, selected)) = self.opened_from.take() {
+                let time = self.time();
+                self.panel.restore(page, selected, time);
+                return false;
+            }
+        }
         if !self.panel.goes_back_within() {
             return false;
         }
@@ -1561,6 +1639,13 @@ fn keep_an_eye_frame(steamvr: &vr::Client, n: u32) {
                     self.apply(&ask);
                     self.outbox.push(ask);
                 }
+                Action::SignIn => {
+                    if let Some(backend) = &self.backend {
+                        backend.sign_in();
+                    }
+                }
+                // Asked again on the next turn.
+                Action::RetryFeedback => self.asked = None,
                 Action::Open => {
                     if self.open {
                         let (status, time) = (self.status(), self.time());

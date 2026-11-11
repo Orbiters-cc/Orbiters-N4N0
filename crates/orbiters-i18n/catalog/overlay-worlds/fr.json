@@ -194,5 +194,14 @@
   "{have} of {need} words · public, beside the label": "{have} mots sur {need} · public, à côté de l’étiquette",
   "{name}: {text}": "{name} : {text}",
   "{number} of {total}": "{number} sur {total}",
-  "{url} answered {status}": "{url} a répondu {status}"
+  "{url} answered {status}": "{url} a répondu {status}",
+  "Your browser opens on your computer: sign in to Orbiters there, then write your comment.": "Ton navigateur s'ouvre sur ton ordinateur : connecte-toi à Orbiters là-bas, puis écris ton commentaire.",
+  "This world is no longer listed: go back and pick it again.": "Ce monde n'est plus dans la liste : reviens en arrière et choisis-le à nouveau.",
+  "Asking Orbiters again…": "Nouvelle demande à Orbiters…",
+  "Sign in to comment": "Connexion pour commenter",
+  "Try again": "Réessayer",
+  "The comments could not be read": "Les commentaires n'ont pas pu être lus",
+  "Orbiters did not answer. You can still write one.": "Orbiters n'a pas répondu. Tu peux quand même en écrire un.",
+  "button\u0004Sign in": "Se connecter",
+  "Orbiters did not answer for this world's feedback. It tries again by itself.": "Orbiters n'a pas répondu pour les avis de ce monde. Nouvel essai automatique."
 }

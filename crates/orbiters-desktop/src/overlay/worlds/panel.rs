@@ -182,6 +182,8 @@ pub enum Target {
     Join,
     /// The world's page on vrchat.com.
     OpenWeb,
+    /// Reads the world's feedback again, after Orbiters did not answer.
+    RetryFeedback,
 }
 
 /// What a press asks of the overlay.
@@ -211,6 +213,10 @@ pub enum Action {
     Join(String),
     /// A world's page on vrchat.com (its id), in the computer's browser.
     OpenWeb(String),
+    /// Signing in to Orbiters, in the computer's browser: the way out of "sign in to write a comment" (F6).
+    SignIn,
+    /// The world's feedback asked for again (Orbiters did not answer).
+    RetryFeedback,
 }
 
 /// How the capture view goes, as the panel shows it.
@@ -1349,10 +1355,25 @@ impl Panel {
         }
         let wf = d.world_feedback(e);
         if wf.loading {
-            self.say(tr("Reading this world's feedback from Orbiters…"), time);
+            // Orbiters did not answer: that is what is said, not a wait that never ends.
+            match &wf.error {
+                Some(error) => self.say(error.clone(), time),
+                None => self.say(tr("Reading this world's feedback from Orbiters…"), time),
+            }
             return None;
         }
         Some(wf)
+    }
+
+    /// Whether a comment can be written on `e`'s world now: signed in to Orbiters is all it takes (a comment is added to the others, so what the member gave
+    /// before need not be read first; VR feedback F6 found Write a comment refused for good where Orbiters did not answer that read). Otherwise the way to
+    /// sign in, said beside the button.
+    fn can_comment(&mut self, d: &Data, e: &Entry, time: f64) -> Result<WorldFeedback, Vec<Action>> {
+        if !d.feedback.signed_in {
+            self.say(tr("Your browser opens on your computer: sign in to Orbiters there, then write your comment."), time);
+            return Err(vec![Action::SignIn]);
+        }
+        Ok(d.world_feedback(e))
     }
 
     /// The person pressed `target`.
@@ -1570,12 +1591,23 @@ impl Panel {
                 Vec::new()
             }
             Target::WriteComment => {
-                let Some(e) = self.entry(d) else { return Vec::new() };
-                if self.can_give(d, e, time).is_some() {
-                    self.draft.clear();
-                    self.go(Page::Compose(Compose::Comment), time);
+                let Some(e) = self.entry(d) else {
+                    self.say(tr("This world is no longer listed: go back and pick it again."), time);
+                    return Vec::new();
+                };
+                match self.can_comment(d, e, time) {
+                    Ok(_) => {
+                        self.draft.clear();
+                        self.note = None;
+                        self.go(Page::Compose(Compose::Comment), time);
+                        Vec::new()
+                    }
+                    Err(way_out) => way_out,
                 }
-                Vec::new()
+            }
+            Target::RetryFeedback => {
+                self.say(tr("Asking Orbiters again…"), time);
+                vec![Action::RetryFeedback]
             }
             Target::DeleteComment(id) => {
                 let Some(e) = self.entry(d) else { return Vec::new() };
@@ -1616,6 +1648,24 @@ impl Panel {
         }
     }
 
+    /// The page of the world `id` (picked by the caller), opened from elsewhere: no list press brought it.
+    pub fn show_detail(&mut self, id: u64, time: f64) {
+        self.select(id);
+        self.note = None;
+        self.confirm = None;
+        self.go(Page::Detail, time);
+        self.selected_at = time;
+    }
+
+    /// Back to what showed before [`Panel::show_detail`].
+    pub fn restore(&mut self, page: Page, selected: Option<u64>, time: f64) {
+        self.go(page, time);
+        match selected {
+            Some(id) => self.select(id),
+            None => self.selected = None,
+        }
+    }
+
     fn select(&mut self, id: u64) {
         if self.selected != Some(id) {
             self.comments_page = 0;
@@ -1630,7 +1680,17 @@ impl Panel {
     /// Sends what a compose page typed, as the contract wants it; says why not otherwise.
     fn send(&mut self, compose: Compose, d: &Data, time: f64) -> Vec<Action> {
         let Some(e) = self.entry(d) else { return Vec::new() };
-        let Some(wf) = self.can_give(d, e, time) else { return Vec::new() };
+        let wf = match compose {
+            // What was typed stays: signed in, it is sent with Send again.
+            Compose::Comment => match self.can_comment(d, e, time) {
+                Ok(wf) => wf,
+                Err(way_out) => return way_out,
+            },
+            Compose::Reason => match self.can_give(d, e, time) {
+                Some(wf) => wf,
+                None => return Vec::new(),
+            },
+        };
         let ask = match compose {
             Compose::Comment => contract::comment(&self.draft).map(|text| FeedbackAsk::Comment { world: wf.world.clone(), text }),
             Compose::Reason => {
@@ -3072,6 +3132,38 @@ mod tests {
             panel.press(Target::DeleteComment(12), &d, 9.0 + CONFIRM_FOR + 2.0),
             [Action::Feedback(FeedbackAsk::Uncomment { world: HOME.into(), comment: 12 })]
         );
+    }
+
+    /// VR feedback F6: a comment needs a signed-in member, not the world's feedback read (Orbiters may not answer that read); signed out, Write a comment says
+    /// so and starts signing in; a read Orbiters did not answer is said, with a way to ask again, and the comment can still be written and sent.
+    #[test]
+    fn a_comment_needs_a_sign_in_and_nothing_else() {
+        let entries = super::super::catalog::parse(LISTING).unwrap();
+        let (status, facts) = (Status::default(), HashMap::new());
+        let mut panel = Panel { page: Page::Comments, selected: Some(1), ..Default::default() };
+        let out = FeedbackView::default();
+        assert_eq!(panel.press(Target::WriteComment, &data(&entries, &status, &out, &facts), 1.0), [Action::SignIn], "signed out: the way to sign in");
+        assert_eq!(panel.page, Page::Comments);
+        assert!(panel.note(1.0).is_some_and(|n| n.contains("sign in")), "{:?}", panel.note(1.0));
+        // Signed in, the read never answered: said, with Try again, and Write a comment opens its keyboard all the same.
+        let unread = FeedbackView {
+            signed_in: true,
+            worlds: vec![WorldFeedback { world: HOME.into(), loading: true, error: Some("Orbiters did not answer".into()), ..Default::default() }],
+            ..Default::default()
+        };
+        let d = data(&entries, &status, &unread, &facts);
+        assert!(panel.targets(&d).iter().any(|(t, _)| *t == Target::RetryFeedback));
+        assert_eq!(panel.press(Target::RetryFeedback, &d, 2.0), [Action::RetryFeedback]);
+        assert!(panel.press(Target::WriteComment, &d, 3.0).is_empty());
+        assert_eq!(panel.page, Page::Compose(Compose::Comment));
+        panel.type_text("Lovely at sunset");
+        let sent = panel.press(Target::Done, &d, 4.0);
+        assert!(matches!(&sent[..], [Action::Feedback(FeedbackAsk::Comment { world, .. })] if world == HOME), "{sent:?}");
+        // Signed out while writing: what was typed stays, and Send is the way to sign in.
+        panel.page = Page::Compose(Compose::Comment);
+        panel.type_text("Kept");
+        assert_eq!(panel.press(Target::Done, &data(&entries, &status, &out, &facts), 5.0), [Action::SignIn]);
+        assert_eq!(panel.draft, "Kept");
     }
 
     #[test]

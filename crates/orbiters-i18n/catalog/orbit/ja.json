@@ -288,5 +288,10 @@
   "“Pause the music”": "「音楽を一時停止して」",
   "“Take a picture in five seconds”": "「5秒後に写真を撮って」",
   "“Tell people I'll be back soon”": "「すぐ戻ると伝えて」",
-  "“Turn your light on, in blue”": "「ライトを青でつけて」"
+  "“Turn your light on, in blue”": "「ライトを青でつけて」",
+  "Waiting for VRChat to say which avatar you wear.": "VRChatが着ているアバターを伝えるのを待っています。",
+  "Your avatar has no N4N0: add N4N0 to it to drop links.": "アバターにN4N0がありません。リンクを置くにはN4N0を追加してください。",
+  "Your avatar's N4N0 has no link card: update N4N0 on it.": "アバターのN4N0にリンクカードがありません。N4N0を更新してください。",
+  "Drop link: not available": "リンクを置く：利用できません",
+  "Its page: comments, labels, pictures, who made it.": "ワールドのページ：コメント、ラベル、写真、作者。"
 }

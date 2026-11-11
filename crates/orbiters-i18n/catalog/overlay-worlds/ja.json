@@ -194,5 +194,14 @@
   "{have} of {need} words · public, beside the label": "{have} / {need}語 · ラベルの横に公開されます",
   "{name}: {text}": "{name}：{text}",
   "{number} of {total}": "{number} / {total}",
-  "{url} answered {status}": "{url}の応答：{status}"
+  "{url} answered {status}": "{url}の応答：{status}",
+  "Your browser opens on your computer: sign in to Orbiters there, then write your comment.": "パソコンでブラウザーが開きます。そこでOrbitersにログインしてから、コメントを書いてください。",
+  "This world is no longer listed: go back and pick it again.": "このワールドはリストにありません。戻ってもう一度選んでください。",
+  "Asking Orbiters again…": "Orbitersにもう一度問い合わせています…",
+  "Sign in to comment": "ログインしてコメント",
+  "Try again": "もう一度試す",
+  "The comments could not be read": "コメントを読み込めませんでした",
+  "Orbiters did not answer. You can still write one.": "Orbitersから応答がありません。コメントは書けます。",
+  "button\u0004Sign in": "ログイン",
+  "Orbiters did not answer for this world's feedback. It tries again by itself.": "このワールドの評価をOrbitersから取得できませんでした。自動で再試行します。"
 }

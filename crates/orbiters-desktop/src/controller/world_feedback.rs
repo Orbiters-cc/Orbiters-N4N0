@@ -346,8 +346,12 @@ impl WorldFeedbackRuntime {
                 }
             }
             (Call::Read { world }, Err(_)) => {
-                // Tried again after READ_AGAIN.
+                // Tried again after READ_AGAIN. Meanwhile the menus say Orbiters did not answer, rather than reading for ever (VR feedback F6: the development
+                // server answered 500 to every read, and Write a comment waited on it without a word).
                 self.known.entry(world.clone()).or_default().read_at = now;
+                if self.known.get(world).is_none_or(|k| k.view.is_none()) {
+                    self.menu_errors.insert(world.clone(), tr("Orbiters did not answer for this world's feedback. It tries again by itself.").to_string());
+                }
             }
         }
     }
@@ -784,6 +788,28 @@ mod tests {
         let view = rt.view(None, true);
         assert_eq!(view.worlds.len(), ASKED_MAX);
         assert_eq!(view.worlds[0].world, format!("wrld_4432ea9b-729c-46e3-8eaf-{:012x}", ASKED_MAX + 1));
+        let _ = std::fs::remove_file(&rt.queue_path);
+    }
+
+    /// VR feedback F6: the development server answered 500 to every read of a world's feedback, and the menus showed it as read for ever, refusing Write a
+    /// comment without a word. A read Orbiters did not answer is said; one that works takes it back.
+    #[test]
+    fn a_read_orbiters_did_not_answer_is_said_and_one_that_works_takes_it_back() {
+        let mut rt = WorldFeedbackRuntime {
+            queue: Queue::default(),
+            queue_path: std::env::temp_dir().join(format!("orbiters-feedback-unread-{}.json", std::process::id())),
+            instances: (Vec::new(), Some(Instant::now())),
+            ..Default::default()
+        };
+        rt.asked(WORLD);
+        let read = Call::Read { world: WORLD.into() };
+        rt.answered(&read, Err(Failure::Later("500".into())));
+        let unread = rt.view(None, true).worlds[0].clone();
+        assert!(unread.loading, "nothing read");
+        assert!(unread.error.is_some(), "and that is said");
+        rt.answered(&read, Ok(Some(orbiters_core::world_feedback::ServerView::default())));
+        let read_now = rt.view(None, true).worlds[0].clone();
+        assert!(!read_now.loading && read_now.error.is_none(), "{read_now:?}");
         let _ = std::fs::remove_file(&rt.queue_path);
     }
 

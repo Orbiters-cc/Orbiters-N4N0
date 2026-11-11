@@ -203,6 +203,8 @@ pub enum Action {
     ResultsBack,
     /// Invites the person to a world's instance: the group's, and which of its visits.
     Invite(usize, usize),
+    /// A world of the Instances sheet (its row): its page, as the 3D worlds sheet shows a world (Enzo, VR feedback F10). Never an invite.
+    WorldInfo(usize),
     /// The computer's volume up or down, and muted or not.
     Volume(bool),
     Mute,
@@ -302,6 +304,42 @@ pub enum TalkNow {
     Thinking,
     /// It cannot now, and why.
     Off(&'static str),
+}
+
+/// Why Drop link cannot put a card of what plays in the world.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum DropWhy {
+    /// It can: the avatar's N4N0 has its link card.
+    #[default]
+    Can,
+    /// VRChat has not said yet which avatar is worn (it loads one).
+    NoAvatarYet,
+    /// The avatar worn has no N4N0 at all.
+    NoN4n0,
+    /// The avatar's N4N0 is from before the link card.
+    NoCard,
+}
+
+impl DropWhy {
+    /// What N4N0's state says of the avatar worn, `can_drop` being what the menu was told.
+    pub fn of(can_drop: bool, avatar_known: bool, n4n0_on_avatar: bool) -> Self {
+        match (can_drop, avatar_known, n4n0_on_avatar) {
+            (true, ..) => DropWhy::Can,
+            (false, false, _) => DropWhy::NoAvatarYet,
+            (false, true, false) => DropWhy::NoN4n0,
+            (false, true, true) => DropWhy::NoCard,
+        }
+    }
+
+    /// Why not, in a sentence that says what to do about it.
+    pub fn says(self) -> &'static str {
+        match self {
+            DropWhy::Can => tr("A card of it in the world, for anyone to take."),
+            DropWhy::NoAvatarYet => tr("Waiting for VRChat to say which avatar you wear."),
+            DropWhy::NoN4n0 => tr("Your avatar has no N4N0: add N4N0 to it to drop links."),
+            DropWhy::NoCard => tr("Your avatar's N4N0 has no link card: update N4N0 on it."),
+        }
+    }
 }
 
 /// A world the person was in, with its instances: how the Instances sheet shows them.
@@ -579,6 +617,8 @@ pub struct Facts {
     /// What plays has a link to copy, and it was copied where a card can be dropped.
     pub can_copy_playing: bool,
     pub can_drop_playing: bool,
+    /// Why Drop link cannot put a card in the world, when it cannot (Enzo, VR feedback F3: greyed, saying why).
+    pub drop_why: DropWhy,
     pub playing_link_copied: bool,
     pub can_call: bool,
     pub can_states: bool,
@@ -1034,7 +1074,8 @@ fn sheet_page_items(sheet: Sheet, facts: &Facts) -> Vec<Item> {
                 if y + height < VISIT_HEAD || y > 576.0 {
                     continue;
                 }
-                out.push(Item { action: Action::Idle, rect: r(x0, y, 1024.0 - x0 * 2.0, height), look: Look::Visit(i) });
+                // The row itself opens the world's page (F10); its invites lie on top of it and are hit first.
+                out.push(Item { action: Action::WorldInfo(i), rect: r(x0, y, 1024.0 - x0 * 2.0, height), look: Look::Visit(i) });
                 // The last time at the end, its large button; before it the times before, the newest first: each goes to that instance.
                 let right = 1024.0 - x0 - 12.0;
                 let width = INVITE_WIDTH;
@@ -1777,6 +1818,10 @@ pub fn caption(action: Action, facts: &Facts) -> Option<(String, String)> {
             let when = place.and_then(|v| if visit == 0 { None } else { v.earlier.get(visit - 1).map(|e| e.1.clone()) });
             (tr("Invite me").into(), when.map_or_else(|| tr("Orbiters invites you to the instance you were last in here.").to_string(), |w| tr!("To the instance you were in {when}.", when = w)))
         }
+        Action::WorldInfo(group) => (
+            facts.worlds_visited.get(group).map_or_else(|| tr("A world").to_string(), |v| v.name.clone()),
+            tr("Its page: comments, labels, pictures, who made it.").into(),
+        ),
         Action::Volume(up) => (if up { tr("Louder") } else { tr("Quieter") }.into(), tr("Your computer's volume.").into()),
         Action::Mute => (tr("Mute").into(), tr("Your computer's sound, on or off.").into()),
         Action::Pictures => (tr("Pictures").into(), tr("Take a 3D picture, record a scene, see your captures.").into()),
@@ -1837,8 +1882,12 @@ pub fn caption(action: Action, facts: &Facts) -> Option<(String, String)> {
         Action::FullView => (if facts.view_full { tr("Back to its frame") } else { tr("Full screen") }.into(), tr("The 3D view fills the whole sheet, or comes back to its frame.").into()),
         Action::Back => (tr("Back").into(), tr("To the last screen.").into()),
         Action::MicDefault(_) => (tr("Your microphones").into(), tr("Press one to make it Windows' default.").into()),
-        Action::PlayingLink(Target::DropPlaying) if facts.can_drop_playing => (tr("Drop link").into(), tr("A card of it in the world, for anyone to take.").into()),
-        Action::PlayingLink(Target::DropPlaying) => (tr("Drop link").into(), tr("Needs N4N0's link card on your avatar.").into()),
+        Action::PlayingLink(Target::DropPlaying) if facts.can_drop_playing => (tr("Drop link").into(), DropWhy::Can.says().into()),
+        // Greyed: why, and what to do about it (F3).
+        Action::PlayingLink(Target::DropPlaying) => {
+            let why = if facts.drop_why == DropWhy::Can { DropWhy::NoCard } else { facts.drop_why };
+            (tr("Drop link: not available").into(), why.says().into())
+        }
         Action::PlayingLink(_) => (tr("Copy link").into(), tr("The link of what plays, to paste anywhere.").into()),
         Action::CloseSheet => (tr("Close").into(), tr("Back to VRChat's menu.").into()),
         Action::Hide => (tr_ctx("menu tiles", "Hide").into(), tr("Hides these until VRChat's menu opens again.").into()),
@@ -2552,6 +2601,17 @@ fn draw(p: &Painter, zone: Zone, item: &Item, facts: &Facts, hovered: bool, pres
         Look::PlayingLink { copy } => {
             // Two buttons of one weight (round 12's judges: Drop link was a small dimmed pill): Copy link in the accent, Drop link outlined. Without a link card Drop
             // link says why when pointed or pressed, rather than looking dead.
+            // Enzo (F3): where the avatar cannot drop a card, Drop link is greyed: no fill, a faint edge, its words dim, and nothing gives under a press; pointed at, the
+            // caption says why and what to do.
+            if !copy && !facts.can_drop_playing {
+                let radius = look::radius(rect.height() / 2.0);
+                p.rect_stroke(rect, radius, Stroke::new(1.5, Color32::from_white_alpha(if hovered { 60 } else { 34 })), egui::StrokeKind::Inside);
+                let ink = theme::FG_3;
+                widgets::icon(p, pos2(rect.left() + 21.0, rect.center().y), icons::PROHIBIT, 17.0, theme::FG_4);
+                let font = look::font(15.0, weight::SEMIBOLD);
+                p.text(pos2(rect.left() + 36.0, rect.center().y), Align2::LEFT_CENTER, fit(p, tr("Drop link"), &font, rect.width() - 44.0), font, ink);
+                return;
+            }
             let drawn = if pressed { rect.shrink(1.5) } else { rect };
             let radius = look::radius(drawn.height() / 2.0);
             let (fill, ink) = if copy { (look::accent(), look::ON_ACCENT) } else { (if hovered { look::TILE_HOVER } else { look::TILE }, look::LABEL) };
@@ -2931,7 +2991,8 @@ fn draw(p: &Painter, zone: Zone, item: &Item, facts: &Facts, hovered: bool, pres
         Look::Visit(i) => {
             let p = &p.with_clip_rect(Rect::from_min_max(pos2(0.0, VISIT_HEAD), pos2(1024.0, 576.0)));
             let Some(visit) = facts.worlds_visited.get(i) else { return };
-            tile_back(p, rect, false, false, false);
+            // It opens the world's page: pointed at, it lights as any tile does.
+            tile_back(p, rect, hovered, pressed, false);
             // The world itself across its row, fading out under what is to read.
             if let Some(id) = visit.picture {
                 let points = orbiters_ui::paint::squircle_points_corners(rect, [theme::squircle(look::TILE_RADIUS); 4]);
@@ -2957,7 +3018,11 @@ fn draw(p: &Painter, zone: Zone, item: &Item, facts: &Facts, hovered: bool, pres
             let earlier_from = rect.right() - 12.0 - INVITE_WIDTH - 8.0 - shown as f32 * (EARLIER_WIDTH + 6.0);
             let room = earlier_from - x - 10.0;
             let font = look::font(20.0, weight::BOLD);
-            p.text(pos2(x, rect.center().y - 14.0), Align2::LEFT_CENTER, fit(p, &visit.name, &font, room), font, look::LABEL);
+            // Its name, then what pressing it does: the world's page (F10). The mark stays with the name, however long it is.
+            let name = fit(p, &visit.name, &font, room - 30.0);
+            let wide = p.layout_no_wrap(name.clone(), font.clone(), look::LABEL).size().x;
+            p.text(pos2(x, rect.center().y - 14.0), Align2::LEFT_CENTER, name, font, look::LABEL);
+            widgets::icon(p, pos2(x + wide + 16.0, rect.center().y - 14.0), icons::INFO, 19.0, if hovered { look::accent() } else { look::MUTED });
             let font = look::font(16.0, weight::MEDIUM);
             p.text(pos2(x, rect.center().y + 14.0), Align2::LEFT_CENTER, fit(p, &visit.line, &font, room), font, look::MUTED);
             // Over its earlier visits' times, on the row: what they are (round 10's judges found it small and loose over the list).

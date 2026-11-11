@@ -478,6 +478,67 @@ pub fn perspective_pose(found: &Found, size: [f32;2], mirror: &Mirror, eye: &Mat
     Some((then(eye,&local),unit))
 }
 
+/// Metric panel pose from a frame-coherent stereo pair. No physical panel width is assumed.
+pub fn stereo_pose(left:&Found,right:&Found,sizes:[[f32;2];2],mirrors:[Mirror;2],eyes:[Matrix34;2],head:&Matrix34) -> Option<(Matrix34,f32,f32)> {
+    let dot=|a:[f32;3],b:[f32;3]| (0..3).map(|i|a[i]*b[i]).sum::<f32>();
+    let norm=|v:[f32;3]| dot(v,v).sqrt();
+    let normalized=|v:[f32;3]| { let n=norm(v); v.map(|x|x/n.max(1e-9)) };
+    let samples=[[-205.,-110.],[205.,-110.],[205.,110.],[-205.,110.]];
+    let found=[left,right];
+    let mut points=[[0.;3];4];
+    for (out,p) in points.iter_mut().zip(samples) {
+        let mut origins=[[0.;3];2]; let mut rays=[[0.;3];2];
+        for k in 0..2 {
+            let q=project(found[k].perspective?,p);
+            let t=mirrors[k].tangent(q[0]/sizes[k][0],q[1]/sizes[k][1]);
+            let ray=[t[0],-t[1],-1.];
+            origins[k]=std::array::from_fn(|i|eyes[k].m[i][3]);
+            rays[k]=normalized(std::array::from_fn(|i| (0..3).map(|j|eyes[k].m[i][j]*ray[j]).sum()));
+        }
+        let w=std::array::from_fn(|i|origins[0][i]-origins[1][i]);
+        let b=dot(rays[0],rays[1]); let d=dot(rays[0],w); let e=dot(rays[1],w);
+        let denominator=1.-b*b;
+        if denominator<1e-5 { return None; }
+        let (s,t)=((b*e-d)/denominator,(e-b*d)/denominator);
+        if s<=0. || t<=0. { return None; }
+        let a:[f32;3]=std::array::from_fn(|i|origins[0][i]+s*rays[0][i]);
+        let b:[f32;3]=std::array::from_fn(|i|origins[1][i]+t*rays[1][i]);
+        if norm(std::array::from_fn(|i|a[i]-b[i]))>0.01 { return None; }
+        *out=std::array::from_fn(|i|(a[i]+b[i])*0.5);
+    }
+    let across:[f32;3]=std::array::from_fn(|i|(points[1][i]-points[0][i]+points[2][i]-points[3][i])*0.5);
+    let down:[f32;3]=std::array::from_fn(|i|(points[3][i]-points[0][i]+points[2][i]-points[1][i])*0.5);
+    let (width,height)=(norm(across),norm(down));
+    if width<=0. || height<=0. || (width/height/(410./220.)-1.).abs()>0.15 { return None; }
+    let r=normalized(across); let along=dot(r,down);
+    let u=normalized(std::array::from_fn(|i| -down[i]+r[i]*along));
+    let z=[r[1]*u[2]-r[2]*u[1],r[2]*u[0]-r[0]*u[2],r[0]*u[1]-r[1]*u[0]];
+    let centre:[f32;3]=std::array::from_fn(|i|points.iter().map(|p|p[i]).sum::<f32>()*0.25);
+    if !(0.15..=4.).contains(&-centre[2]) { return None; }
+    let unit=(width/410.+height/220.)*0.5;
+    let mut errors=Vec::new();
+    for k in 0..2 {
+        let inverse=undone(&eyes[k]);
+        let check=|p:[f32;2],q:[f32;2]| -> Option<f32> {
+            let world:[f32;3]=std::array::from_fn(|i|centre[i]+r[i]*p[0]*unit-u[i]*p[1]*unit);
+            let v:[f32;3]=std::array::from_fn(|i|inverse.m[i][3]+(0..3).map(|j|inverse.m[i][j]*world[j]).sum::<f32>());
+            if v[2]>=0. { return None; }
+            let t=[v[0]/-v[2],-v[1]/-v[2]];
+            let px=[(t[0]-mirrors[k].from[0])/mirrors[k].spans[0]*sizes[k][0],(t[1]-mirrors[k].from[1])/mirrors[k].spans[1]*sizes[k][1]];
+            Some((px[0]-q[0]).powi(2)+(px[1]-q[1]).powi(2))
+        };
+        if let Some((count,landmarks))=found[k].landmarks {
+            for (p,q) in landmarks.into_iter().take(count) { errors.push(check(p,q)?); }
+        } else {
+            for p in samples { errors.push(check(p,project(found[k].perspective?,p))?); }
+        }
+    }
+    let rms=(errors.iter().sum::<f32>()/errors.len().max(1) as f32).sqrt();
+    if !rms.is_finite() || rms>2.5 || errors.iter().any(|e|*e>36.) { return None; }
+    let local=Matrix34 {m:std::array::from_fn(|i|[r[i],u[i],z[i],centre[i]])};
+    Some((then(head,&local),unit,rms))
+}
+
 pub fn find(pixels: &[u8], width: usize, height: usize, stride: usize) -> Option<Found> {
     find_in(pixels, width, height, stride, [0, 0, width, height], width <= LOOKS_TWICE_UP_TO)
 }
@@ -736,7 +797,7 @@ impl Follow {
             return false;
         }
         self.unsure = None;
-        if far < LOOK_SAYS_NOTHING_M && turned_apart(&wanted, &local) < 2f32.to_radians() {
+        if far < LOOK_SAYS_NOTHING_M && turned_apart(&wanted, &local) < 2f32.to_radians() && (unit/wanted_unit-1.).abs()<0.01 {
             return true;
         }
         let k = if far > CLEARLY_OFF_M { LOOK_CORRECTS } else { LOOK_NUDGES };
@@ -747,7 +808,7 @@ impl Follow {
     pub fn awaiting_confirmation(&self) -> bool { self.unsure.is_some() }
 
     pub fn settled(&self) -> bool {
-        self.at.zip(self.wanted).is_some_and(|((at,_),(wanted,_))| apart(&at,&wanted)<0.01 && turned_apart(&at,&wanted)<2f32.to_radians())
+        self.at.zip(self.wanted).is_some_and(|((at,unit),(wanted,wanted_unit))| apart(&at,&wanted)<0.01 && turned_apart(&at,&wanted)<2f32.to_radians() && (unit/wanted_unit-1.).abs()<0.01)
     }
 
     pub fn can_bind_hand(&self) -> bool {
@@ -1048,7 +1109,7 @@ mod tests {
                                     let centre=tangent([0.,0.]);
                                     let cross=|p:[f32;2]| (edge1[0]-edge0[0])*(p[1]-edge0[1])-(edge1[1]-edge0[1])*(p[0]-edge0[0]);
                                     for sx in [-1.,1.] { for sy in [-1.,1.] {
-                                        let v: [f32;3]=std::array::from_fn(|i| quad.transform.m[i][3]+quad.transform.m[i][0]*sx*quad.width/2.+quad.transform.m[i][1]*sy*quad.height/2.);
+                                        let v: [f32;3]=std::array::from_fn(|i| quad.transform.m[i][3]+quad.transform.m[i][0]*sx*quad.width/2.+quad.transform.m[i][1]*sy*quad.height/2.-STILL.m[i][3]);
                                         assert!(v[2]<0.);
                                         assert!(cross([v[0]/-v[2],-v[1]/-v[2]])*cross(centre)<0., "submitted camera quad crosses the panel edge");
                                     } }
@@ -1078,6 +1139,62 @@ mod tests {
         let found=Found { perspective:Some([[1.,0.18,500.],[0.,1.,500.],[0.,0.,1.]]), ..straight_found(|p|p,1.) };
         let mirror=Mirror { from:[-1.,-1.],spans:[2.,2.] };
         assert!(perspective_pose(&found,[1000.,1000.],&mirror,&STILL,PANEL_M).is_none());
+    }
+
+    #[test]
+    fn stereo_measures_scale_with_asymmetric_eyes_and_rejects_mismatches() {
+        let sizes=[[1200.,1000.];2];
+        let mirrors=[Mirror {from:[-0.85,-1.1],spans:[2.2,2.]},Mirror {from:[-1.3,-0.9],spans:[2.2,2.]}];
+        for pitch in [-50f32,0.,50.] { for yaw in [-50f32,0.,50.] { for roll in [-60f32,0.,60.] {
+            for distance in [0.4,0.8,1.8] { for width in [0.2,0.3,0.5] {
+                let (sp,cp)=pitch.to_radians().sin_cos(); let (sy,cy)=yaw.to_radians().sin_cos(); let (sr,cr)=roll.to_radians().sin_cos();
+                let r=[cy*cr,cp*sr+sp*sy*cr,sp*sr-cp*sy*cr];
+                let u=[-cy*sr,cp*cr-sp*sy*sr,sp*cr+cp*sy*sr];
+                let (s,c)=0.06f32.sin_cos();
+                let eyes=[Matrix34 {m:[[c,0.,s,-0.032],[0.,1.,0.,0.],[-s,0.,c,0.]]},Matrix34 {m:[[c,0.,-s,0.032],[0.,1.,0.,0.],[s,0.,c,0.]]}];
+                let unit=width/410.;
+                let observations:[Found;2]=std::array::from_fn(|k| {
+                    let points:Vec<_>=[[-205.,-110.],[205.,-110.],[205.,110.],[-205.,110.],[0.,0.],[82.,135.]].into_iter().map(|p| {
+                        let world:[f32;3]=std::array::from_fn(|i|r[i]*p[0]*unit-u[i]*p[1]*unit+if i==2 {-distance} else {0.});
+                        let inverse=undone(&eyes[k]);
+                        let v:[f32;3]=std::array::from_fn(|i|inverse.m[i][3]+(0..3).map(|j|inverse.m[i][j]*world[j]).sum::<f32>());
+                        let t=[v[0]/-v[2],-v[1]/-v[2]];
+                        (p,[(t[0]-mirrors[k].from[0])/mirrors[k].spans[0]*sizes[k][0],(t[1]-mirrors[k].from[1])/mirrors[k].spans[1]*sizes[k][1]])
+                    }).collect();
+                    Found {perspective:Some(fit(&points).unwrap()),..straight_found(|p|p,1.)}
+                });
+                let (pose,measured,_)=stereo_pose(&observations[0],&observations[1],sizes,mirrors,eyes,&STILL).expect("frame-coherent physical stereo plane");
+                assert!((pose.m[2][3]+distance).abs()<0.005,"{pitch} {yaw} {roll} {distance} {width}: {pose:?}");
+                assert!((measured*410.-width).abs()<0.003);
+                let mut wrong=observations[1];
+                let mut h=wrong.perspective.unwrap();
+                for j in 0..3 { h[1][j]+=40.*h[2][j]; }
+                wrong.perspective=Some(h);
+                assert!(stereo_pose(&observations[0],&wrong,sizes,mirrors,eyes,&STILL).is_none());
+            } }
+        } } }
+    }
+
+    #[test]
+    fn a_metric_size_change_is_not_discarded_as_pose_jitter() {
+        let mut follow=Follow::default();
+        follow.seen(at(0.),0.001);
+        follow.seen(at(0.),0.002);
+        assert!(!follow.settled());
+        for _ in 0..100 {
+            follow.seen(at(0.),0.002);
+            follow.step(0.1,[None;2],[false;2],NOBODY);
+        }
+        assert!((follow.step(0.1,[None;2],[false;2],NOBODY).unwrap().1-0.002).abs()<0.00002);
+    }
+
+    #[test]
+    fn real_camera_fixtures_supply_spread_landmarks() {
+        for picture in headset_pictures() {
+            let found=find(&picture.pixels,picture.width,picture.height,picture.width*4).expect("camera candidate");
+            assert!(found.perspective.is_some(),"camera candidate did not produce a spread fit: {found:?}");
+            assert!(found.landmarks.is_some_and(|(count,_)|count>=5));
+        }
     }
 
     fn mirror() -> Mirror {

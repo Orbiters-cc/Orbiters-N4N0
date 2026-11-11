@@ -27,6 +27,15 @@ pub struct Seen {
     pub size: [f32; 2],
     pub source: Source,
     pub at: Instant,
+    pub right: Option<RightSeen>,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct RightSeen {
+    pub found: Found,
+    pub size: [f32;2],
+    pub at: Instant,
+    pub frame_index: u32,
 }
 
 /// What it reads from, and how.
@@ -138,7 +147,7 @@ const LOOK_WHOLE_EVERY: Duration = Duration::from_millis(250);
 const EYE_TRIES: u32 = 8;
 
 /// One look on a picture read: `area` is where it is in the whole.
-fn looked(pixels: &[u8], width: usize, height: usize, stride: usize, offset: [f32; 2], whole: [usize; 2], last: Option<Found>, seen: &Mutex<Option<Seen>>, health: &Mutex<Health>, source: Source, at: Instant) -> Option<Found> {
+fn looked(pixels: &[u8], width: usize, height: usize, stride: usize, offset: [f32; 2], whole: [usize; 2], last: Option<Found>, seen: &Mutex<Option<Seen>>, health: &Mutex<Health>, source: Source, at: Instant, right: Option<RightSeen>) -> Option<Found> {
     let in_part = pixels.len() < whole[0] * whole[1] * 4 && stride == width * 4 && width < whole[0];
     let found = match last {
         // Around the last place in what was read, unless what was read is that already.
@@ -156,7 +165,7 @@ fn looked(pixels: &[u8], width: usize, height: usize, stride: usize, offset: [f3
         h.found = Some(at);
         h.finds = h.finds.saturating_add(1);
         drop(h);
-        *seen.lock().unwrap_or_else(|e| e.into_inner()) = Some(Seen { found, size: [whole[0] as f32, whole[1] as f32], source, at });
+        *seen.lock().unwrap_or_else(|e| e.into_inner()) = Some(Seen { found, size: [whole[0] as f32, whole[1] as f32], source, at, right });
     }
     found
 }
@@ -191,6 +200,7 @@ fn run(seen: &Mutex<Option<Seen>>, stop: &AtomicBool, health: &Mutex<Health>, fr
             Ok(reader) => {
                 health.lock().unwrap_or_else(|e| e.into_inner()).source = Some(Source::Eye);
                 let (mut errors, mut last, mut said) = (0, None, false);
+                let mut last_right: Option<(Found,[u32;2])>=None;
                 while !stop.load(Ordering::Relaxed) && errors < EYE_TRIES {
                     let began = Instant::now();
                     // Around the last place while it is seen.
@@ -198,7 +208,27 @@ fn run(seen: &Mutex<Option<Seen>>, stop: &AtomicBool, health: &Mutex<Health>, fr
                         let a = camera_track::around(&f, whole[0] as usize, whole[1] as usize);
                         (a[2] > 0 && a[3] > 0).then_some([a[0] as u32, a[1] as u32, a[2] as u32, a[3] as u32])
                     });
-                    match reader.read_part(mirror, Eye::Left, area) {
+                    let frame_before=mirror.frame_index();
+                    let left=reader.read_part(mirror, Eye::Left, area);
+                    // Only acquire stereo after a left-eye candidate. Read both eyes before CPU
+                    // recognition, and accept metric correspondence only within one compositor frame.
+                    let right_at=Instant::now();
+                    let right_picture=last.and_then(|_| {
+                        let area=last_right.map(|(f,size)| {
+                            let a=camera_track::around(&f,size[0] as usize,size[1] as usize);
+                            [a[0] as u32,a[1] as u32,a[2] as u32,a[3] as u32]
+                        });
+                        reader.read_part(mirror,Eye::Right,area).ok()
+                    });
+                    let frame_after=mirror.frame_index();
+                    let right=right_picture.and_then(|picture| {
+                        let found=camera_track::find(&picture.rgba,picture.width as usize,picture.height as usize,picture.width as usize*4)
+                            .map(|f|f.shifted([picture.from[0] as f32,picture.from[1] as f32]));
+                        last_right=found.map(|f|(f,picture.whole));
+                        if frame_before.is_none() || frame_before!=frame_after { return None; }
+                        found.map(|found|RightSeen {found,size:[picture.whole[0] as f32,picture.whole[1] as f32],at:right_at,frame_index:frame_after.unwrap()})
+                    });
+                    match left {
                         Ok(picture) => {
                             errors = 0;
                             let whole = picture.whole;
@@ -209,7 +239,8 @@ fn run(seen: &Mutex<Option<Seen>>, stop: &AtomicBool, health: &Mutex<Health>, fr
                                 keep(&picture.rgba, picture.width as usize, picture.height as usize, picture.width as usize * 4, Source::Eye, &mut kept);
                             }
                             let offset = [picture.from[0] as f32, picture.from[1] as f32];
-                            let found = looked(&picture.rgba, picture.width as usize, picture.height as usize, picture.width as usize * 4, offset, [whole[0] as usize, whole[1] as usize], None, seen, health, Source::Eye, began);
+                            if let Some(right)=right { note(&format!("stereo frame {}: left {:?}, right {:?}, landmarks {:?}",right.frame_index,began,right.at,right.found)); } // i18n: not shown (diagnostics)
+                            let found = looked(&picture.rgba, picture.width as usize, picture.height as usize, picture.width as usize * 4, offset, [whole[0] as usize, whole[1] as usize], None, seen, health, Source::Eye, began, right);
                             last = found.map(|f| (f, whole));
                         }
                         Err(e) => {
@@ -256,7 +287,7 @@ fn run_on_window(seen: &Mutex<Option<Seen>>, stop: &AtomicBool, health: &Mutex<H
                             if keep_frames {
                                 keep(game, client[0] as usize, client[1] as usize, stride, Source::Window, kept);
                             }
-                            last = looked(game, client[0] as usize, client[1] as usize, stride, [0.0, 0.0], [client[0] as usize, client[1] as usize], last, seen, health, Source::Window, began);
+                            last = looked(game, client[0] as usize, client[1] as usize, stride, [0.0, 0.0], [client[0] as usize, client[1] as usize], last, seen, health, Source::Window, began, None);
                         }
                     }
                     std::thread::sleep(LOOK_EVERY.saturating_sub(began.elapsed()));

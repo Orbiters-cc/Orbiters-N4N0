@@ -34,6 +34,7 @@ pub struct OrbitStatus {
     pub camera_note: Option<String>,
     pub camera_provisional: bool,
     pub camera_panel_seen_ns: Option<u64>,
+    pub camera_scale_measured: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

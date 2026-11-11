@@ -349,6 +349,12 @@ impl N4n0 {
         if let Some(handle) = rt.handle.as_mut() {
             let _ = handle.inner.send(&VoiceCommand::Cancel);
         }
+        drop(rt);
+        let mut n = self.n4n0.lock().unwrap();
+        n.voice.provisional = None;
+        n.voice.level = 0.0;
+        n.voice.speech = false;
+        n.voice.finalizing = false;
     }
 
     /// Downloads the speech models in a worker of their own, its progress on the N4N0 page: what is missing or cut
@@ -426,8 +432,11 @@ impl N4n0 {
                 });
             }
             VoiceEvent::Mic { .. } => {}
-            VoiceEvent::Speech { active } => self.voice_status(|v| v.speech = active),
+            VoiceEvent::Speech { active } => {
+                if self.voice.lock().unwrap().current.is_some() { self.voice_status(|v| v.speech = active); }
+            },
             VoiceEvent::Level { level } => {
+                if self.voice.lock().unwrap().current.is_none() { return; }
                 // Coarse steps: the meter moves, and an unchanged level is not published again.
                 let level = (level.clamp(0.0, 1.0) * 20.0).round() / 20.0;
                 let changed = {
@@ -441,6 +450,8 @@ impl N4n0 {
                 }
             }
             VoiceEvent::Heard { text, for_n4n0, seconds, decode_ms, listen } => {
+                // Wake sentences decoded before Ask took ownership must not interrupt this visit or its answer.
+                if !for_n4n0 && self.voice.lock().unwrap().ask_owned { return; }
                 if self.voice_readiness() != crate::status::VoiceReadiness::Ready {
                     self.ask_follow(); self.publish(); return;
                 }
@@ -483,7 +494,7 @@ impl N4n0 {
             }
             VoiceEvent::Error { message } => {
                 self.voice_cancel();
-                { let mut rt = self.n4n0.lock().unwrap(); rt.listening = None; rt.voice.automatic = false; rt.voice.finalizing = false; rt.voice.provisional = None; }
+                { let mut rt = self.n4n0.lock().unwrap(); rt.listening = None; rt.voice.automatic = false; rt.voice.finalizing = false; rt.voice.provisional = None; rt.voice.level = 0.0; rt.voice.speech = false; }
                 self.n4n0.lock().unwrap().line(N4n0Who::Error, message.clone());
                 self.voice_status(|v| v.error = Some(message));
             }

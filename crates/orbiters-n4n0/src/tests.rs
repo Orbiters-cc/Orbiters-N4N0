@@ -2544,7 +2544,9 @@ fn ask_auto_final_stream_pause_rearm_manual_exit_and_stale_words() {
     assert!(worker.commands().contains(&VoiceCommand::Listen { hold: false, id: 2 }));
     assert_eq!(bodies.lock().unwrap().len(), 1);
     assert_eq!(t.view().lines.iter().filter(|l| l.who == N4n0Who::You).count(), 1);
+    worker.say(VoiceEvent::Provisional { listen: 2, text: "cancel this".into() });
     n.ask_talk(true);
+    assert!(t.view().voice.provisional.is_none());
     assert!(worker.commands().contains(&VoiceCommand::Cancel));
     assert!(worker.commands().contains(&VoiceCommand::Listen { hold: true, id: 3 }));
     assert!(!t.view().voice.automatic);
@@ -2552,10 +2554,17 @@ fn ask_auto_final_stream_pause_rearm_manual_exit_and_stale_words() {
     assert_eq!(worker.commands().last(), Some(&VoiceCommand::Finish));
     n.ask_page(false);
     worker.say(VoiceEvent::Provisional { listen: 3, text: "late".into() });
+    worker.say(VoiceEvent::Level { level: 0.9 });
+    worker.say(VoiceEvent::Speech { active: true });
+    assert_eq!(t.view().voice.level, 0.0);
+    assert!(!t.view().voice.speech);
     assert!(!t.view().listening);
     assert!(t.view().voice.provisional.is_none());
     n.ask_follow();
     assert!(!t.view().voice.ask_open);
+    t.settings.lock().unwrap().n4n0.wake_word = true;
+    worker.say(VoiceEvent::Heard { text: "Nano, old words".into(), for_n4n0: false, seconds: 1.0, decode_ms: 1, listen: 0 });
+    assert_eq!(bodies.lock().unwrap().len(), 1, "a wake sentence from before the page cannot replay");
     t.shutdown(&n);
 }
 

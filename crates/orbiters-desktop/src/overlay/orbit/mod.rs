@@ -2582,7 +2582,6 @@ impl Panels {
             Action::Talk => {
                 if self.facts.n4n0 {
                     self.open_sheet(Sheet::Talk, mark("Ask N4N0"), snap);
-
                 }
             }
             Action::TalkToggle => {
@@ -2990,6 +2989,7 @@ fn type_hint(p: &egui::Painter, playing: Option<&str>) {
 
 impl Drop for Panels {
     fn drop(&mut self) {
+        self.stop_talking();
         self.release();
         if self.reported.is_some_and(|r| r.0) {
             self.backend.n4n0(N4n0Command::MenuState { open: false, dictation: false, keyboard: false });

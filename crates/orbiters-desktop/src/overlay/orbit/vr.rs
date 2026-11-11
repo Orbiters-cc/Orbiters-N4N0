@@ -1814,14 +1814,15 @@ mod tests {
             let top = camera_top_plane(&camera);
             let edge = zones::CAMERA_HALF[1] * camera.unit;
             let to_camera = space::inverse(&camera.frame);
-            let edge_height = space::apply(&camera.frame, [0.0, edge, 0.0])[1];
             for zone in [Zone::CameraWebBar, Zone::CameraWeb] {
                 let quad = top.quad(&on_camera_top(zones::in_units(zone)), 0.0, NEAR_M);
                 for (u, v) in [(-0.5, -0.5), (0.5, -0.5), (-0.5, 0.5), (0.5, 0.5)] {
                     let corner = space::apply(&quad.transform, [u * quad.width, v * quad.height, 0.0]);
                     let local = space::apply(&to_camera, corner);
                     assert!(local[1] >= edge - 0.005, "{name}: {zone:?} reaches over the camera ({local:?})");
-                    assert!(corner[1] >= edge_height - 0.005, "{name}: {zone:?} hangs below the camera's top edge");
+                    // Over the camera's top edge where it is, however the camera is rolled.
+                    let edge_under = space::apply(&camera.frame, [local[0], edge, 0.0])[1];
+                    assert!(corner[1] >= edge_under - 0.005, "{name}: {zone:?} hangs below the camera's top edge");
                 }
             }
             let (page_up, camera_up) = (space::axis(&top.frame, 1), space::axis(&camera.frame, 1));

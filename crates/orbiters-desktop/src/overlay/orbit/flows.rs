@@ -487,7 +487,8 @@ fn the_parts_kept_are_one_a_zone_and_are_let_go() {
     assert_eq!(person.panels.resting().0, 0, "nothing closed yet");
     person.around = None;
     person.turns(2);
-    let quick_menu = Zone::around(Around::QuickMenu).len();
+    // Its Stop is there only while a recording runs.
+    let quick_menu = Zone::around(Around::QuickMenu).iter().filter(|z| !z.only_while_needed()).count();
     assert_eq!(person.panels.resting().0, quick_menu);
     // Opened and closed again: the same ones, not more.
     person.around = Some(Around::QuickMenu);
@@ -502,7 +503,7 @@ fn the_parts_kept_are_one_a_zone_and_are_let_go() {
     person.turns(3);
     person.around = None;
     person.turns(2);
-    let both = quick_menu + Zone::around(Around::Wheel).len();
+    let both = quick_menu + Zone::around(Around::Wheel).iter().filter(|z| !z.only_while_needed()).count();
     assert_eq!(person.panels.resting().0, both);
     // A part asked for at another size (the game's window resized on a desktop) is made anew, and the one kept for its zone goes.
     let mut larger = zones::in_units(Zone::WingWorlds);
@@ -859,8 +860,8 @@ fn the_camera_s_3d_pictures_say_the_kit_is_missing_only_when_it_is() {
         let said = camera_words(&person.panels.facts).map(|w| w.0);
         assert_eq!(said.as_deref() == Some(orbiters_i18n::tr("This avatar has no capture kit")), missing, "{kit:?}: {said:?}");
     }
-    let pressed = person.press(Action::Picture(orbiters_n4n0_core::menu::PhotoMode::People));
-    assert!(!pressed.clicked, "a greyed 3D picture took one");
+    person.press(Action::Picture(orbiters_n4n0_core::menu::PhotoMode::People));
+    assert_eq!(person.panels.facts.picture_mode, None, "a greyed 3D picture took one");
 }
 
 /// Enzo (F17): the camera's QR code opens no page: it looks around the camera, with corners round its picture, and a second press stops it.

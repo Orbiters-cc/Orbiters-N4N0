@@ -73,3 +73,31 @@ For Enzo's VR acceptance after the orchestrator's combined release: hold forward
 The pages stream must consume the fields above and render the manual-test stop and persistent verdict/no-gain states. Merge shared-file hunks carefully, then run the integrated release/headset checks. These are acceptance dependencies, not compile/test blockers in this branch. The QA executable is an isolated verification artifact, not a build for Enzo to try. No push, tag, bump, release or merge was performed.
 
 Commits before this report: `7e9065d8` (F4), `82cf7e6c` (F21/F20), `472b302a` (review and regressions), `6d73b7f7` (translated slider spacing). The report is committed separately; its final branch head is recorded in the external done file after that commit.
+
+## Gate correction
+
+This section supersedes the Review fixes motion-interlock model and its positive-residual/latch acceptance claims. Scope is F21 only, on vr1111/behaviour from 7f97aad5c5b1c66ad3dd1bf3ade159670ea46aa2, in its existing t3-e5f2db86-40156b52483716b7 worktree. The main checkout was not edited.
+
+Verified the finding in overlay/walk.rs: raw speed <= previous injection + 0.15 started the 300 ms debounce, then stopped until release. The owner's 13:04:30-13:04:41 log records repeated 0.81/0.82 s motion-gate stops. That comparison rejects native-only speed below injection and recreates the original error; a release latch makes it persist for the rest of the push. The earlier research correctly identified the subtraction problem; the first review's conservative replacement was wrong for the requested continuous walking.
+
+Gate now treats VelocityMagnitude as VRChat's own locomotion permission. Its API no longer accepts injected speed. Start requires finite speed >= 0.4 m/s; after starting, speeds >= 0.15 retain permission, while lower speed, missing Motion, or nonfinite speed stops after 300 ms. It resumes at >= 0.4 on the same push. Old timestamps do not invalidate a present value. A stationary initial push waits for native motion rather than getting a timed 500 ms allowance; no allowance is necessary because normal joystick locomotion starts independently of pose injection. No retry timer or release latch remains. A station/seated prohibition still survives missing telemetry, release and re-push until a present report says non-station. All existing scene/menu/away/input/tracking and driver acceleration rules remain. The diagnostic no longer tells the user to release to retry.
+
+No solid evidence of an additive injected component on either path was found in the inspected source or feedback analysis. Both paths consume the same VRChat OSC scalar; neither constructs native-plus-injected telemetry. The same native gate is used for the play-space fallback, without a speculative compatibility comparison. A frozen world continuing to report a positive scalar is still indistinguishable from walking with these inputs.
+
+Tests changed and why:
+- continuous_push_never_interrupts_driver_at_72_or_90_hz now supplies native-only 4, 2 and 1 m/s while full injection reaches 8 m/s, plus partial-stick 2/1 m/s cases. Every frame after the initial zero-time frame must move throughout 30 s; driver speed and Driver path are asserted. Constant timestamp 1 is intentional.
+- carries_only_while_vrchat_walks uses native-only 1/2/4 instead of 12*strength, retains transient missing samples and now requires recovery without release.
+- review_positive_residual_stop_latches_until_release is replaced by native_speed_resumes_without_release_and_threshold_rounding_does_not_flap. The old test asserted the wrong residual model and wrong release latch. Replacement tests start threshold, 0.25/0.5 rounding, the 300 ms zero stop, 30 s of remaining stopped, and recovery while still pushing.
+- review_driver_station_missing_and_positive_frozen_motion_never_cycle is replaced by review_driver_station_missing_and_zero_motion_stop_and_resume. Controlled clocks at 72/90 Hz verify gate rejection by 300 ms plus one frame, unchanged offset after deceleration during sustained zero/station, station persistence across release/re-push and missing telemetry, and recovery on a positive native/non-station report without release.
+- driver_quarter_metre_speed_rounding_does_not_flap verifies exactly one permission transition over 30 s of 0.25/0.5 m/s samples.
+- The common Moment fixture now uses native 4 rather than artificial 100 m/s. The play-space long-walk noise fixture no longer adds a synthetic 8 m/s to native speed. Existing distance, continuity and jump assertions are preserved.
+
+Validation: one queued batch, gate-batch.sh, using the existing shared deskcargo target with CARGO_INCREMENTAL=0. Sources remained frozen throughout queue waits and execution. No new target directory was created.
+
+1. deskcargo.sh <behaviour-worktree> test -p orbiters-desktop overlay::walk -- --test-threads=1: 32 passed, 0 failed, 0 ignored; 0.83 s test runtime; captured Cargo exit 0. Log: C:/Users/Enzo/.orbiters-build/vr-feedback-1111/gate-walk.log; exit: gate-walk.exit.
+2. deskcargo.sh <behaviour-worktree> test -p orbiters-desktop -p orbiters-i18n --no-fail-fast -- --test-threads=1: desktop 816 passed, 0 failed, 25 ignored, 308.10 s; i18n 10 unit + 7 coverage passed, 0 failed; doc tests passed. The desktop child-process test also reports its one selected test passed. Captured Cargo exit 0; batch exit 0. Log: C:/Users/Enzo/.orbiters-build/vr-feedback-1111/gate-desktop.log; exit: gate-desktop.exit. Existing unrelated warnings remain; clippy was not run.
+3. git diff --check passed. No UI layout or user-facing wording changed, so no screenshot rendering was needed.
+
+The new driver continuity assertions directly reject the previous comparison/latch implementation; an old-production Cargo rebuild was not performed this round. The full suite naturally executes the walk module again; the dedicated walk command and the full-suite command were each invoked once.
+
+Headset acceptance remains: continuous low/mid/full-stick walking for 30 s at 72/90 Hz; wall/menu/world-zero stop and same-push recovery; station entry/exit and telemetry interruption; acceleration comfort and OVRAS interactions. No live app, SteamVR or VRChat launch/settings change, GPU benchmark, macOS build, push, release, bump, tag or merge was performed.

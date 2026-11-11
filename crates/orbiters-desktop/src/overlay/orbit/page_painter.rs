@@ -41,26 +41,27 @@ pub(super) struct PartPicture {
     #[cfg(test)] pub finish_pixels: usize,
 }
 pub(super) struct PartRequest { pub spec: PartSpec, pub facts: Facts, pub time: f64, pub language: orbiters_i18n::Language }
+pub(super) type CompleteSheet = (Arc<Vec<u8>>, [u32; 2], u32);
 #[derive(Clone)]
 pub(super) struct Request {
     pub px: [u32; 2], pub epoch: u64, pub sheet: Sheet, pub facts: Facts,
     pub hover: Option<usize>, pub pressed: Option<usize>,
     pub time: f64, pub language: orbiters_i18n::Language,
-    pub scene: Scene, pub header: Option<PartSpec>, pub pointer: Option<egui::Pos2>,
+    pub scene: Scene, pub header: Option<PartSpec>, pub top: Option<u32>, pub pointer: Option<egui::Pos2>,
 }
 #[derive(Clone)]
 pub(super) struct Frame {
     pub px: [u32; 2], pub epoch: u64, pub sheet: Sheet, pub facts: Facts, pub items: Vec<Item>, pub pixels: Vec<u8>,
     pub phases: crate::overlay::PaintPhases, pub time: f64, pub hover: Option<usize>, pub pressed: Option<usize>,
     pub scene: Scene, pub header: Option<PartPicture>,
-    pub header_spec: Option<PartSpec>, pub pointer: Option<egui::Pos2>, pub language: orbiters_i18n::Language,
+    pub header_spec: Option<PartSpec>, pub top: Option<u32>, pub composed: Option<CompleteSheet>, pub pointer: Option<egui::Pos2>, pub language: orbiters_i18n::Language,
 }
 impl Frame {
     pub fn matches(&self, epoch: u64, sheet: Option<Sheet>, gallery: &panels::Gallery) -> bool {
         self.epoch == epoch && Some(self.sheet) == sheet && self.facts.recent == *gallery
     }
-    fn request(&self) -> Request { Request { px: self.px, epoch: self.epoch, sheet: self.sheet, facts: self.facts.clone(), hover: self.hover, pressed: self.pressed, time: self.time, language: self.language, scene: self.scene.clone(), header: self.header_spec.clone(), pointer: self.pointer } }
-    pub fn bytes(&self) -> usize { self.pixels.len() + self.header.as_ref().map_or(0, |h| h.pixels.len()) }
+    fn request(&self) -> Request { Request { px: self.px, epoch: self.epoch, sheet: self.sheet, facts: self.facts.clone(), hover: self.hover, pressed: self.pressed, time: self.time, language: self.language, scene: self.scene.clone(), header: self.header_spec.clone(), top: self.top, pointer: self.pointer } }
+    pub fn bytes(&self) -> usize { self.pixels.len() + self.header.as_ref().map_or(0, |h| h.pixels.len()) + self.composed.as_ref().map_or(0, |c| c.0.len()) }
     pub fn key(&self) -> String { self.scene.key(self.sheet) }
 }
 #[derive(Default)]
@@ -142,19 +143,23 @@ impl Engine {
         panels::cut_page_corners(&mut pixels, px, [0, 0, px[0], px[1]]);
         super::super::record_phase(3, at.elapsed());
         let header = request.header.as_ref().map(|spec| self.part(spec, &request.facts, request.time));
-        Frame { px: request.px, epoch: request.epoch, sheet: request.sheet, facts: request.facts, items, pixels, phases: crate::overlay::paint_phases(false), time: request.time, hover, pressed: request.pressed, scene: request.scene, header, header_spec: request.header, pointer: request.pointer, language: request.language }
+        let at = Instant::now();
+        let composed = header.as_ref().zip(request.header.as_ref()).zip(request.top).map(|((header, spec), top)| (Arc::new(super::vr::compose_sheet(&header.pixels, spec.px, &pixels, px, top)), spec.px, top));
+        super::super::record_phase(3, at.elapsed());
+        Frame { px: request.px, epoch: request.epoch, sheet: request.sheet, facts: request.facts, items, pixels, phases: crate::overlay::paint_phases(false), time: request.time, hover, pressed: request.pressed, scene: request.scene, header, header_spec: request.header, top: request.top, composed, pointer: request.pointer, language: request.language }
     }
 }
 
 #[derive(Debug)]
-pub(super) struct Audit { pub pixels: usize, pub header_pixels: usize, pub parallel_pixels: usize, pub parallel_header_pixels: usize, pub items: bool, pub hash: u64 }
+pub(super) struct Audit { pub pixels: usize, pub header_pixels: usize, pub parallel_pixels: usize, pub parallel_header_pixels: usize, pub items: bool, pub sheet_pixels: usize, pub parallel_sheet_pixels: usize, pub hash: u64 }
 impl Audit {
     fn compare(expected: &Frame, serial: &Frame, parallel: &Frame) -> Self {
         let diff = |a: &[u8], b: &[u8]| a.chunks_exact(4).zip(b.chunks_exact(4)).filter(|(a,b)| a != b).count() + a.len().abs_diff(b.len()) / 4;
         fn header(f: &Frame) -> &[u8] { f.header.as_ref().map(|h| h.pixels.as_slice()).unwrap_or(&[]) }
+        fn sheet(f: &Frame) -> &[u8] { f.composed.as_ref().map(|c| c.0.as_slice()).unwrap_or(&[]) }
         let mut hash = 0xcbf2_9ce4_8422_2325u64;
         for b in &serial.pixels { hash = (hash ^ *b as u64).wrapping_mul(0x100000001b3); }
-        Self { pixels: diff(&expected.pixels, &serial.pixels), header_pixels: diff(header(expected), header(serial)), parallel_pixels: diff(&serial.pixels, &parallel.pixels), parallel_header_pixels: diff(header(serial), header(parallel)), items: expected.items == serial.items && serial.items == parallel.items && expected.header.as_ref().map(|h| &h.items) == serial.header.as_ref().map(|h| &h.items), hash }
+        Self { sheet_pixels: diff(sheet(expected), sheet(serial)), parallel_sheet_pixels: diff(sheet(serial), sheet(parallel)), pixels: diff(&expected.pixels, &serial.pixels), header_pixels: diff(header(expected), header(serial)), parallel_pixels: diff(&serial.pixels, &parallel.pixels), parallel_header_pixels: diff(header(serial), header(parallel)), items: expected.items == serial.items && serial.items == parallel.items && expected.header.as_ref().map(|h| &h.items) == serial.header.as_ref().map(|h| &h.items), hash }
     }
 }
 impl Engine {
@@ -285,7 +290,7 @@ mod tests {
     use std::time::Duration;
 
     fn request(epoch: u64, sheet: Sheet) -> Request {
-        Request { px: [512,288], epoch, sheet, facts: Facts::default(), hover: None, pressed: None, time: 1.0, language: orbiters_i18n::Language::En, scene: Scene::Native, header: None, pointer: None }
+        Request { px: [512,288], epoch, sheet, facts: Facts::default(), hover: None, pressed: None, time: 1.0, language: orbiters_i18n::Language::En, scene: Scene::Native, header: None, top: None, pointer: None }
     }
     #[test]
     fn mailbox_replaces_pending_work_instead_of_queuing_scroll_frames() {
@@ -357,7 +362,7 @@ mod tests {
 mod review_scheduler {
     use super::*;
     use std::time::Duration;
-    fn request(epoch: u64) -> Request { Request { px: [512,288], epoch, sheet: Sheet::Settings, facts: Facts::default(), hover: None, pressed: None, time: 1.0, language: orbiters_i18n::Language::En, scene: Scene::Native, header: None, pointer: None } }
+    fn request(epoch: u64) -> Request { Request { px: [512,288], epoch, sheet: Sheet::Settings, facts: Facts::default(), hover: None, pressed: None, time: 1.0, language: orbiters_i18n::Language::En, scene: Scene::Native, header: None, top: None, pointer: None } }
     #[test]
     fn review_cancellation_discards_pending_work_and_inflight_publication() {
         let painter = Painter::new([512, 288]);

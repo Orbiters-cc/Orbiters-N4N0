@@ -787,6 +787,7 @@ struct Stage {
     epoch: u64,
     cache: Vec<page_painter::Frame>,
     retired: Vec<page_painter::Frame>,
+    sheet_picture: Option<page_painter::CompleteSheet>,
     restore: bool,
     /// The snapshot actually shown, including the head and the capture hole.
     presented: Option<(u64, Facts, f64)>,
@@ -830,7 +831,7 @@ impl Stage {
         let canvas = Canvas::zoomed(px[0], px[1], px[0] as f32 / layout::WIDTH as f32).in_orbit_look();
         let host = MenuHost::with_media(canvas.ctx().clone(), media.clone());
         let worlds = with_worlds.then(|| Worlds::alone(canvas.ctx().clone()));
-        Self { remote_pictures: crate::worlds::Pictures::new(&canvas.ctx()), async_pages: false, worker_phases: Default::default(), painter: page_painter::Painter::with_context(px, canvas.ctx().clone()), epoch: 0, cache: Vec::new(), retired: Vec::new(), restore: false, presented: None, presented_scene: None, navigation: None, canvas, host, worlds, px, retro: false, skin: page_skin(DEFAULT_PAGE_ACCENT), skin_for: (DEFAULT_PAGE_ACCENT, orbiters_i18n::language()) }
+        Self { remote_pictures: crate::worlds::Pictures::new(&canvas.ctx()), async_pages: false, worker_phases: Default::default(), painter: page_painter::Painter::with_context(px, canvas.ctx().clone()), epoch: 0, cache: Vec::new(), retired: Vec::new(), sheet_picture: None, restore: false, presented: None, presented_scene: None, navigation: None, canvas, host, worlds, px, retro: false, skin: page_skin(DEFAULT_PAGE_ACCENT), skin_for: (DEFAULT_PAGE_ACCENT, orbiters_i18n::language()) }
     }
 }
 
@@ -1243,6 +1244,7 @@ impl Panels {
             self.stage.epoch = self.stage.epoch.wrapping_add(1);
             self.stage.painter.cancel_page(self.stage.epoch);
             self.stage.painter.retain_parts(&[]);
+            self.stage.sheet_picture = None;
             self.stage.navigation = None;
             self.rest_all();
             self.open = around;
@@ -1352,6 +1354,7 @@ impl Panels {
         }
         self.stage.epoch = self.stage.epoch.wrapping_add(1);
         self.stage.painter.cancel_page(self.stage.epoch);
+        self.stage.sheet_picture = None;
         self.stage.navigation = None;
         self.stage.restore = true;
         self.facts.sheet = Some(sheet);
@@ -1411,6 +1414,7 @@ impl Panels {
     fn close_sheet(&mut self) {
         self.stage.epoch = self.stage.epoch.wrapping_add(1);
         self.stage.painter.cancel_page(self.stage.epoch);
+        self.stage.sheet_picture = None;
         self.stage.navigation = None;
         self.pressed_late = None; self.pressed_facts = None; self.drag = None;
         self.stop_talking();
@@ -2225,6 +2229,7 @@ impl Panels {
     fn paint_all_again(&mut self) {
         self.stage.epoch = self.stage.epoch.wrapping_add(1);
         self.stage.painter.cancel_page(self.stage.epoch);
+        self.stage.sheet_picture = None;
         self.stage.retired.append(&mut self.stage.cache);
         // Each paint accepts at most one new frame; each follow retires one. The cap also
         // bounds callers that invalidate repeatedly without taking normal input turns.
@@ -2404,11 +2409,15 @@ impl Panels {
     /// drag, sheets, N4N0's pages and the world's panel alike.
     pub fn press(&mut self, snap: &Snapshot) -> Pressed {
         let on_something = self.on_something();
-        self.pressed_facts = self.stage.presented.as_ref().map(|(_, facts, _)| facts.clone());
+        self.pressed_facts = self.list.iter().chain(self.takeover.iter()).find(|p| p.hover.is_some()).and_then(|p| p.displayed.clone()).or_else(|| self.stage.presented.as_ref().map(|(_, facts, _)| facts.clone()));
         let mut out = self.press_what(snap);
         if self.drag.is_none() { self.pressed_facts = None; }
         out.clicked |= on_something;
         out
+    }
+
+    fn web_picture_is_current(&self) -> bool {
+        !self.stage.async_pages || self.action_facts().camera.web.as_ref().map(|w| &w.url) == self.web.as_ref().map(|w| &w.url)
     }
 
     fn action_facts(&self) -> &Facts {
@@ -2946,6 +2955,7 @@ impl Panels {
             }
             // The page in the computer's browser: only when asked, here.
             Action::WebOpen => {
+                if !self.web_picture_is_current() { return; }
                 if let Some(url) = self.web.as_ref().map(|w| w.url.clone()) {
                     if let Err(e) = crate::controller::open_url(&url) {
                         super::vr_log::line(&format!("camera page: the browser did not open: {e:#}")); // i18n: not shown (a log's line)
@@ -2953,10 +2963,12 @@ impl Panels {
                 }
             }
             Action::WebClose => {
+                if !self.web_picture_is_current() { return; }
                 self.web = None;
                 self.camera_dirty();
             }
             Action::WebPage => {
+                if !self.web_picture_is_current() { return; }
                 if let Some(web) = self.web.as_mut() {
                     web.press();
                 }
@@ -3140,6 +3152,7 @@ impl Panels {
         self.stage.canvas.ran = true;
         self.stage.presented = Some((self.stage.epoch, frame.facts.clone(), frame.time));
         self.stage.presented_scene = Some(frame.scene.clone());
+        self.stage.sheet_picture = frame.composed.clone();
         true
     }
     fn paint_async(&mut self, snap: &Snapshot, mut show: impl FnMut(&Panel, [u32; 4])) {
@@ -3197,7 +3210,7 @@ impl Panels {
                     self.stage.worker_phases = frame.phases;
                     self.stage.cache.retain(|f| f.key() != key);
                     self.stage.cache.push(frame);
-                    while self.stage.cache.iter().map(|f| f.bytes()).sum::<usize>() > 384 * 1024 * 1024 { self.stage.cache.remove(0); }
+                    while self.stage.cache.iter().map(|f| f.bytes()).sum::<usize>() > 512 * 1024 * 1024 { self.stage.cache.remove(0); }
                 } else { self.takeover.as_mut().unwrap().dirty = true; }
             }
         }
@@ -3212,7 +3225,9 @@ impl Panels {
                 if let Some(back) = self.list.iter_mut().find(|p| p.zone == Zone::SheetBack) { back.items.clear(); back.hover = None; back.pressed = None; back.painted = false; back.dirty = true; }
             }
         }
-        let Some(header) = self.list.iter().find(|p| p.zone == Zone::SheetBack).map(Self::paint_spec) else { return };
+        let Some(back) = self.list.iter().find(|p| p.zone == Zone::SheetBack) else { return };
+        let top = self.takeover.as_ref().and_then(|page| vr::page_row(back, page));
+        let header = Self::paint_spec(back);
         let needs = self.takeover.as_ref().is_some_and(|p| p.dirty || !p.painted)
             || self.list.iter().any(|p| p.zone == Zone::SheetBack && p.dirty)
             || match sheet { Sheet::Menu => self.stage.host.dirty || self.stage.host.menu.listening || self.stage.host.menu.popping().is_some(), Sheet::Worlds => self.stage.worlds.as_ref().is_some_and(|w| w.wants_paint()), _ => self.stage.remote_pictures.loading() };
@@ -3240,11 +3255,13 @@ impl Panels {
             _ => { if sheet == Sheet::Results { self.stage.host.dirty = false; } page_painter::Scene::Native }
         };
         let page = self.takeover.as_mut().unwrap();
-        let request = page_painter::Request { px: self.stage.px, epoch: self.stage.epoch, sheet, facts, hover: page.hover, pressed: page.pressed, pointer: self.sheet_pointer, scene, header: Some(header), time, language: orbiters_i18n::language() };
+        let request = page_painter::Request { px: self.stage.px, epoch: self.stage.epoch, sheet, facts, hover: page.hover, pressed: page.pressed, pointer: self.sheet_pointer, scene, header: Some(header), top, time, language: orbiters_i18n::language() };
         page.dirty = false;
         if let Some(back) = self.list.iter_mut().find(|p| p.zone == Zone::SheetBack) { back.dirty = false; }
         self.stage.painter.submit(request);
     }
+
+    pub(super) fn take_sheet_picture(&mut self) -> Option<page_painter::CompleteSheet> { self.stage.sheet_picture.take() }
 
     pub fn paint(&mut self, snap: &Snapshot, mut show: impl FnMut(&Panel, [u32; 4])) {
         if self.stage.async_pages { self.paint_async(snap, show); return; }
@@ -3505,7 +3522,7 @@ impl Panels {
                             if !visible.contains(&i) { tile.picture = None; continue; }
                             tile.picture = stage.host.image(&result.id).map(|image| panel.pictures.entry(format!("video {}", result.id)).or_insert_with(|| ctx.load_texture("video", image, TextureOptions::LINEAR)).id()); // i18n: not shown (texture cache keys)
                         }
-                        stage.painter.submit(page_painter::Request { px: stage.px, epoch: stage.epoch, sheet, facts, hover, pressed, time, language: orbiters_i18n::language(), scene: page_painter::Scene::Native, header: None, pointer: self.sheet_pointer });
+                        stage.painter.submit(page_painter::Request { px: stage.px, epoch: stage.epoch, sheet, facts, hover, pressed, time, language: orbiters_i18n::language(), scene: page_painter::Scene::Native, header: None, top: None, pointer: self.sheet_pointer });
                     } else {
                         panel.items = items;
                         stage.canvas.paint(time, |p| panels::paint_sheet(p, sheet, &facts, hover, pressed));

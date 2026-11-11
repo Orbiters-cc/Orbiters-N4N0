@@ -1821,3 +1821,32 @@ fn review_invalidated_pictures_are_retired_one_pair_per_input_turn() {
     person.panels.follow(&person.snap, 0);
     assert_eq!(person.panels.stage.retired.len(), 2, "free one pair, not the whole cache on the input thread");
 }
+
+#[test]
+fn review_the_worker_publishes_the_complete_sheet_and_matching_geometry() {
+    let mut person = Person::new(); person.panels.stage.async_pages = true; person.around = Some(Around::QuickMenu); person.turns(3);
+    person.panels.open_sheet(Sheet::Settings, "", &person.snap);
+    person.turns_until("complete worker sheet", |p| p.panels.stage.sheet_picture.is_some());
+    let picture = person.panels.take_sheet_picture().unwrap();
+    let back = person.panels.list.iter().find(|p| p.zone == Zone::SheetBack).unwrap();
+    let page = person.panels.takeover.as_ref().unwrap();
+    assert_eq!(picture.0.as_slice(), super::vr::compose_sheet(back.pixels(), back.px, page.pixels(), page.px, picture.2));
+    let mut sheet = super::vr::SheetPicture::default(); let original = picture.0.clone(); let size = picture.1;
+    sheet.adopt(picture);
+    assert_eq!(sheet.pixels().as_ptr(), original.as_ptr(), "input adopts the worker allocation without pixel work");
+    assert_eq!(sheet.changed, Some([0,0,size[0],size[1]]), "damage covers the entire composed picture");
+    assert_eq!(page.items, super::panels::sheet_items(Sheet::Settings, &page.displayed.as_ref().unwrap()));
+}
+#[test]
+fn review_a_camera_bar_for_a_previous_url_cannot_act_on_the_new_page() {
+    let mut person = Person::new(); person.panels.stage.async_pages = true; person.around = Some(Around::Camera);
+    Arc::make_mut(&mut person.snap).camera_open_said = Some(true);
+    person.panels.web = Some(super::camera_web::CameraWeb::open("https://orbiters.cc/a"));
+    person.turns_until("camera bar A", |p| p.find(Action::WebClose).is_some());
+    person.panels.web.as_mut().unwrap().url = "https://orbiters.cc/b".into();
+    let at = person.find(Action::WebClose).unwrap(); person.panels.hover(Some(at)); person.panels.press(&person.snap); person.panels.release();
+    assert_eq!(person.panels.web.as_ref().map(|w| w.url.as_str()), Some("https://orbiters.cc/b"), "the old bar must not close a different page");
+    person.turns_until("camera bar B", |p| p.panels.list.iter().find(|p| p.zone == Zone::CameraWebBar).is_some_and(|p| p.displayed.as_ref().and_then(|f| f.camera.web.as_ref()).is_some_and(|w| w.url == "https://orbiters.cc/b")));
+    let at = person.find(Action::WebClose).unwrap(); person.panels.hover(Some(at)); person.panels.press(&person.snap);
+    assert!(person.panels.web.is_none(), "the current bar still closes its own page");
+}

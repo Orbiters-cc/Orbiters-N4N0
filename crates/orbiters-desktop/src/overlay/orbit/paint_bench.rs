@@ -380,10 +380,12 @@ impl Rig {
             let (gpu, handles, notes) = (&mut self.gpu, &mut self.handles, &mut self.notes);
             let page_top = (self.mode == Mode::Vr).then(|| self.panels.all().find(|p| p.zone == Zone::SheetBack).zip(self.panels.takeover.as_ref()).and_then(|(b, p)| vr::page_row(b, p))).flatten();
             let mode = self.mode;
+            let worker_sheet = mode == Mode::Vr && self.panels.stage.async_pages && page_top.is_some();
             let sheet = &mut self.sheet;
             if page_top.is_none() { sheet.page = false; }
             self.panels.paint(&self.snap, |panel, changed| {
                 if let (Some(top), Zone::SheetBack | Zone::Takeover) = (page_top, panel.zone) {
+                    if worker_sheet { return; }
                     let at = Instant::now();
                     if panel.zone == Zone::SheetBack { sheet.back(panel.pixels(), panel.px, top, changed); }
                     else { sheet.page(panel.pixels(), panel.px, top, changed); }
@@ -403,7 +405,8 @@ impl Rig {
                     upload += t.elapsed();
                 }
             });
-            if let Some(top) = page_top {
+            if worker_sheet { if let Some(picture) = self.panels.take_sheet_picture() { sheet.adopt(picture); } }
+            if let Some(top) = page_top.filter(|_| !worker_sheet) {
                 if !sheet.page {
                     if let Some(page) = self.panels.takeover.as_ref().filter(|p| p.painted) {
                         sheet.page(page.pixels(), page.px, top, [0, 0, page.px[0], page.px[1]]);
@@ -417,7 +420,7 @@ impl Rig {
                     let at = Instant::now();
                     let next = handles.len() as orbiters_openvr::OverlayHandle + 1;
                     let handle = *handles.entry(Zone::SheetBack).or_insert(next);
-                    if let Err(e) = textures.write_part(handle, &sheet.pixels, sheet.px[0], sheet.px[1], changed) {
+                    if let Err(e) = textures.write_part(handle, sheet.pixels(), sheet.px[0], sheet.px[1], changed) {
                         notes.push(format!("a composed texture could not be written: {e}")); // i18n: not shown (benchmark diagnostics)
                     }
                     upload += at.elapsed();
@@ -536,18 +539,18 @@ impl Rig {
                 let rx = self.panels.stage.painter.audit(frame.clone());
                 match rx.recv_timeout(Duration::from_secs(20)) {
                     Ok(audit) => {
-                        let line = format!("{} {} frozen pixels={} header={} parallel={} parallel_header={} geometry={} hash={:016x}\n", self.mode.name(), self.step, audit.pixels, audit.header_pixels, audit.parallel_pixels, audit.parallel_header_pixels, audit.items, audit.hash);
+                        let line = format!("{} {} frozen pixels={} header={} parallel={} parallel_header={} geometry={} hash={:016x} sheet_pixels={} parallel_sheet_pixels={}\n", self.mode.name(), self.step, audit.pixels, audit.header_pixels, audit.parallel_pixels, audit.parallel_header_pixels, audit.items, audit.hash, audit.sheet_pixels, audit.parallel_sheet_pixels);
                         use std::io::Write;
                         if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(dir.parent().unwrap().join("frozen-parity.txt")) { let _ = file.write_all(line.as_bytes()); }
-                        if audit.pixels != 0 || audit.header_pixels != 0 || audit.parallel_pixels != 0 || audit.parallel_header_pixels != 0 || !audit.items { self.notes.push(line); }
+                        if audit.sheet_pixels != 0 || audit.parallel_sheet_pixels != 0 || audit.pixels != 0 || audit.header_pixels != 0 || audit.parallel_pixels != 0 || audit.parallel_header_pixels != 0 || !audit.items { self.notes.push(line); }
                     }
                     Err(e) => self.notes.push(format!("frozen parity did not finish: {e}")),
                 }
             }
         }
 
-        if self.mode == Mode::Vr && self.panels.sheet_open() && !self.sheet.pixels.is_empty() {
-            let image = egui::ColorImage::from_rgba_premultiplied([self.sheet.px[0] as usize, self.sheet.px[1] as usize], &self.sheet.pixels);
+        if self.mode == Mode::Vr && self.panels.sheet_open() && !self.sheet.pixels().is_empty() {
+            let image = egui::ColorImage::from_rgba_premultiplied([self.sheet.px[0] as usize, self.sheet.px[1] as usize], self.sheet.pixels());
             let path = dir.join(format!("{}-{}-Composed.png", self.mode.name(), self.step)); // i18n: not shown (benchmark artifact path)
             if let Err(e) = orbiters_ui::offscreen::save_png(&path, &image) { self.notes.push(e.to_string()); }
         }

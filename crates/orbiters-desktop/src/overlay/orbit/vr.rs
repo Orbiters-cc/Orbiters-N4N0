@@ -876,6 +876,7 @@ pub fn page_row(back: &super::Panel, page: &super::Panel) -> Option<u32> {
 #[derive(Default)]
 pub struct SheetPicture {
     pub pixels: Vec<u8>,
+    complete_pixels: Option<std::sync::Arc<Vec<u8>>>,
     pub px: [u32; 2],
     /// What each part last gave: the back's whole picture, and the page's with where it lies.
     under: Vec<u8>,
@@ -889,6 +890,13 @@ pub struct SheetPicture {
 }
 
 impl SheetPicture {
+    pub fn pixels(&self) -> &[u8] { self.complete_pixels.as_ref().map_or(self.pixels.as_slice(), |p| p.as_slice()) }
+    /// Accept the worker's complete picture without compositing or copying pixels on input.
+    pub(super) fn adopt(&mut self, picture: super::page_painter::CompleteSheet) {
+        let (pixels, px, top) = picture;
+        self.complete_pixels = Some(pixels); self.px = px; self.top = top; self.page = true;
+        self.changed = Some([0, 0, px[0], px[1]]);
+    }
     /// The whole again in `rect` (x0, y0, x1, y1 of the back's pixels), and it is to be shown.
     fn redo(&mut self, rect: [u32; 4]) {
         let w = self.px[0] as usize;
@@ -915,7 +923,7 @@ impl SheetPicture {
 
     /// The back's picture changed in `changed`.
     pub fn back(&mut self, back: &[u8], px: [u32; 2], page_top: u32, changed: [u32; 4]) {
-        if self.px != px {
+        if self.complete_pixels.take().is_some() || self.px != px {
             self.px = px;
             self.pixels = vec![0; back.len()];
             self.under = vec![0; back.len()];
@@ -952,10 +960,18 @@ impl SheetPicture {
 
 /// The whole sheet as one picture, from its back's and its page's: for the renders and the tests, as [`SheetPicture`] makes it.
 pub fn compose_sheet(back: &[u8], back_px: [u32; 2], page: &[u8], page_px: [u32; 2], top: u32) -> Vec<u8> {
-    let mut sheet = SheetPicture::default();
-    sheet.back(back, back_px, top, [0, 0, back_px[0], back_px[1]]);
-    sheet.page(page, page_px, top, [0, 0, page_px[0], page_px[1]]);
-    sheet.pixels
+    let mut pixels = back.to_vec();
+    if back_px[0] != page_px[0] || top + page_px[1] > back_px[1] { return pixels; }
+    let width = back_px[0] as usize * 4;
+    for y in 0..page_px[1] as usize {
+        let (dst, src) = ((y + top as usize) * width, y * width);
+        for (out, over) in pixels[dst..dst + width].chunks_exact_mut(4).zip(page[src..src + width].chunks_exact(4)) {
+            if over[3] == 255 { out.copy_from_slice(over); continue; }
+            let left = 255 - over[3] as u32;
+            for c in 0..4 { out[c] = (over[c] as u32 + (out[c] as u32 * left + 127) / 255).min(255) as u8; }
+        }
+    }
+    pixels
 }
 
 pub struct OrbitVr {
@@ -1571,12 +1587,14 @@ impl OrbitVr {
         let (handles, key) = (&mut self.handles, &self.key);
         // The sheet's back and its page are one picture, shown by the back's overlay.
         let page_at = self.panels.all().find(|p| p.zone == Zone::SheetBack).zip(self.panels.takeover.as_ref()).and_then(|(back, page)| page_row(back, page));
+        let worker_sheet = self.panels.stage.async_pages && page_at.is_some();
         let sheet = &mut self.sheet;
         if page_at.is_none() {
             sheet.page = false;
         }
         self.panels.paint(cx.snap, |panel, changed| {
             if let (Some(top), Zone::SheetBack | Zone::Takeover) = (page_at, panel.zone) {
+                if worker_sheet { return; }
                 match panel.zone {
                     Zone::SheetBack => sheet.back(panel.pixels(), panel.px, top, changed),
                     _ => sheet.page(panel.pixels(), panel.px, top, changed),
@@ -1591,7 +1609,8 @@ impl OrbitVr {
                 presenter.show_part(overlay, handle, panel.pixels(), panel.px[0], panel.px[1], changed);
             }
         });
-        if let Some(top) = page_at {
+        if worker_sheet { if let Some(picture) = self.panels.take_sheet_picture() { self.sheet.adopt(picture); } }
+        if let Some(top) = page_at.filter(|_| !worker_sheet) {
             if !self.sheet.page {
                 if let Some(page) = self.panels.takeover.as_ref().filter(|p| p.painted) {
                     self.sheet.page(page.pixels(), page.px, top, [0, 0, page.px[0], page.px[1]]);
@@ -1601,7 +1620,7 @@ impl OrbitVr {
         if let Some(changed) = self.sheet.changed.take() {
             let handle = part_handle(&mut self.handles, overlay, &self.key, Zone::SheetBack);
             if handle != 0 {
-                presenter.show_part(overlay, handle, &self.sheet.pixels, self.sheet.px[0], self.sheet.px[1], changed);
+                presenter.show_part(overlay, handle, self.sheet.pixels(), self.sheet.px[0], self.sheet.px[1], changed);
             }
         }
         let shown: Vec<Zone> = self.panels.all().map(|p| p.zone).filter(|z| *z != Zone::Takeover).collect();

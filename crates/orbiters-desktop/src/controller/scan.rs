@@ -200,7 +200,7 @@ impl super::Controller {
         };
         let pose: [f32; 6] = pose.try_into().expect("six values");
         self.scan.lock().unwrap().recording = true;
-        if let Err(e) = self.start_capture(false) {
+        if let Err(e) = self.start_capture(super::CapturePurpose::Short) {
             self.scan.lock().unwrap().recording = false;
             return Err(e);
         }

@@ -665,13 +665,6 @@ impl OrbitVr {
         let watch = self.camera_watch.as_ref()?;
         let mut poses = [Pose::default(); MAX_DEVICES];
         steamvr.predicted_poses(Universe::Standing, prediction, &mut poses);
-        if self.camera_seen.is_none() && poses[0].pose_is_valid {
-            // Detached provisional tools: world-locked where the head was on opening, never a claimed panel pose.
-            let frame = space::before_eyes(&poses[0].device_to_absolute, 0.65, 0.22);
-            self.camera_follow.seen(frame, self.camera_measured_width.unwrap_or(self.tune.camera_panel_m) / camera_track::PANEL_SIZE[0]);
-            self.camera_seen = Some(now);
-            self.camera_looks = CAMERA_LOOKS_TO_SHOW;
-        }
         if poses[0].pose_is_valid {
             // Where the head will be `prediction` from now, which is when this pose is for.
             self.camera_heads.push_back((now + Duration::from_secs_f32(prediction.max(0.0)), poses[0].device_to_absolute));
@@ -729,21 +722,20 @@ impl OrbitVr {
                 self.camera_clearance=clearance(unit);
                 let depth=-(0..3).map(|i| head.m[i][2]*(frame.m[i][3]-head.m[i][3])).sum::<f32>();
                 super::super::vr_log::line(&format!("camera pose: ns={}, captured {:?}, accepted {:?}, depth {}, side {:?}, unit {}, gap {}, stereo_rms {:?}, measured_width {:?}, pose {:?}, landmarks {:?}", orbiters_core::clock::now_ns(), seen.at, now, depth, self.camera_side, unit, gap, stereo.map(|(_,_,rms)|rms), self.camera_measured_width, frame, seen.found)); // i18n: not shown (diagnostics)
+                self.camera_exclusion = vec![(seen.found, seen.size, mirror, space::compose(&head,&eye_on_head))];
+                if let Some(right) = seen.right { self.camera_exclusion.push((right.found, right.size, camera_track::Mirror::whole_eye(steamvr.projection_raw(vr::compositor::Eye::Right)), space::compose(&head,&steamvr.eye_to_head(vr::compositor::Eye::Right)))); }
+                // First acquisition adopts its validated pose immediately, without a detached guess.
+                if self.camera_looks <= CAMERA_LOOKS_TO_SHOW { self.camera_follow.clear(); }
                 let adopted=self.camera_follow.seen(frame, unit);
                 self.camera_panel_seen_ns = Some(orbiters_core::clock::now_ns());
                 self.camera_seen = Some(now);
                 if adopted { self.camera_looks = self.camera_looks.saturating_add(1); }
                 } else if !self.camera_follow.is_held() {
-                    // A rejected fit never keeps a claimed, possibly overlapping attachment alive.
-                    // Retain the detached fallback while finding the camera again.
-                    if self.camera_looks>CAMERA_LOOKS_TO_SHOW {
-                        self.camera_follow.clear();
-                        self.camera_follow.seen(space::before_eyes(&head,0.65,0.22),width/camera_track::PANEL_SIZE[0]);
-                    }
-                    self.camera_looks=CAMERA_LOOKS_TO_SHOW;
+                    self.camera_follow.clear();
+                    self.camera_exclusion.clear();
+                    self.camera_looks=0;
                     self.camera_stereo_at=None;
                     self.camera_panel_seen_ns=None;
-                    self.camera_seen=Some(now);
                     super::super::vr_log::line("camera pose rejected: recovered column is not safely outside the observed panel"); // i18n: not shown (diagnostics)
                 }
             }
@@ -760,16 +752,15 @@ impl OrbitVr {
         if self.camera_follow.is_held() {
             self.camera_seen = Some(now);
         }
-        if self.camera_looks>CAMERA_LOOKS_TO_SHOW && self.camera_seen.is_none_or(|at| now.duration_since(at) > CAMERA_LOST_AFTER) {
-            if poses[0].pose_is_valid {
-                self.camera_follow.clear();
-                self.camera_follow.seen(space::before_eyes(&poses[0].device_to_absolute,0.65,0.22),self.camera_measured_width.unwrap_or(self.tune.camera_panel_m)/camera_track::PANEL_SIZE[0]);
-                placed=self.camera_follow.step(0.,[None;2],[false;2],[None;2]);
-            }
-            self.camera_looks=CAMERA_LOOKS_TO_SHOW;
+        if self.camera_seen.is_none_or(|at| now.duration_since(at) > CAMERA_LOST_AFTER) {
+            self.camera_follow.clear();
+            self.camera_exclusion.clear();
+            self.camera_looks=0;
             self.camera_stereo_at=None;
             self.camera_panel_seen_ns=None;
         }
+        let clear = |frame: &Matrix34, unit| camera_track::binocular_clear(&self.camera_exclusion,frame,unit,self.camera_side,self.camera_clearance);
+        placed = self.camera_follow.safe_display(placed, clear);
         if self.camera_looks < CAMERA_LOOKS_TO_SHOW {
             return None;
         }
@@ -808,6 +799,7 @@ pub struct OrbitVr {
     camera_panel_seen_ns: Option<u64>,
     camera_measured_width: Option<f32>,
     camera_clearance: f32,
+    camera_exclusion: Vec<(camera_track::Found, [f32;2], camera_track::Mirror, Matrix34)>,
     camera_stereo_at: Option<Instant>,
     camera_follow: super::camera_track::Follow,
     camera_side: camera_track::Side,
@@ -869,6 +861,7 @@ impl OrbitVr {
             camera_panel_seen_ns: None,
             camera_measured_width: None,
             camera_clearance: 0.,
+            camera_exclusion: Vec::new(),
             camera_stereo_at: None,
             pointers: [None; 2],
             camera_follow: Default::default(),
@@ -1052,6 +1045,8 @@ impl OrbitVr {
                 CameraWatch::start(super::camera_frames::From { mirror, adapter: cx.steamvr.dxgi_adapter_index(), keep_frames: self.tune.camera_keep_frames })
             });
             self.camera_follow.clear();
+            self.camera_exclusion.clear();
+            self.camera_measured_width=None;
             self.camera_seen = None;
             self.camera_looks = 0;
             self.camera_side = camera_track::Side::Left;

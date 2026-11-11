@@ -372,7 +372,7 @@ impl super::Controller {
         // N4N0's menu and link card stand in front of their owner: while the capture kit records (N4N0/Capture/Record),
         // the avatar hides them on its owner's client, out of the picture, and shows them again after it.
         *self.burst.lock().unwrap() = BurstRuntime { recording: true, mode, length };
-        if let Err(e) = self.start_capture(false) {
+        if let Err(e) = self.start_capture(super::CapturePurpose::Short) {
             self.burst.lock().unwrap().recording = false;
             return Err(e);
         }

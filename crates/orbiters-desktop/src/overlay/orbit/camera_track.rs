@@ -1027,6 +1027,20 @@ mod tests {
                             for side in [-1.,1.] {
                                 let which = if side < 0. { Side::Left } else { Side::Right };
                                 if !side_projects(&found,which) { continue; }
+                                for zone in [super::super::zones::Zone::CameraPeople,super::super::zones::Zone::CameraWorld,super::super::zones::Zone::CameraQr] {
+                                    let placed=super::super::zones::in_units(zone);
+                                    let placed=if side>0. {placed.mirrored()} else {placed};
+                                    let quad=super::super::vr::Plane {frame:pose,unit:got_unit}.camera_quad(&placed);
+                                    let edge0=tangent([side*205.,-110.]);
+                                    let edge1=tangent([side*205.,110.]);
+                                    let centre=tangent([0.,0.]);
+                                    let cross=|p:[f32;2]| (edge1[0]-edge0[0])*(p[1]-edge0[1])-(edge1[1]-edge0[1])*(p[0]-edge0[0]);
+                                    for sx in [-1.,1.] { for sy in [-1.,1.] {
+                                        let v: [f32;3]=std::array::from_fn(|i| quad.transform.m[i][3]+quad.transform.m[i][0]*sx*quad.width/2.+quad.transform.m[i][1]*sy*quad.height/2.);
+                                        assert!(v[2]<0.);
+                                        assert!(cross([v[0]/-v[2],-v[1]/-v[2]])*cross(centre)<0., "submitted camera quad crosses the panel edge");
+                                    } }
+                                }
                                 // Tile hull and panel hull have a separating line at their common plane's edge,
                                 // preserved by perspective for positive depth, including both horizontal sides.
                                 for y in [-110.,0.,110.] {

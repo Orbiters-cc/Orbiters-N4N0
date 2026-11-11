@@ -482,6 +482,10 @@ pub struct Plane {
 }
 
 impl Plane {
+    /// Camera tools share the detected panel plane. No shell depth offset or radial spring
+    /// may move their hull back over the panel at a grazing angle.
+    pub fn camera_quad(&self, placed: &Placed) -> Quad { self.quad(placed,0.0,0.0) }
+
     /// Where a panel's quad is, at `back` units toward the plane's centre (its spring).
     pub fn quad(&self, placed: &Placed, back: f32, near: f32) -> Quad {
         let c = placed.rect.center();
@@ -1118,7 +1122,9 @@ impl OrbitVr {
                     _ if sheet_up => TAKEOVER_NEAR_M - 0.004,
                     _ => NEAR_M,
                 };
-                (on.quad(&clear_of_sheet(p.placed, sheet_up), -p.outward(), near), p.placed)
+                let placed=clear_of_sheet(p.placed,sheet_up);
+                let quad=if menu==Some(Around::Camera) && !sheet { on.camera_quad(&placed) } else { on.quad(&placed,-p.outward(),near) };
+                (quad, p.placed)
             })
             .collect();
 

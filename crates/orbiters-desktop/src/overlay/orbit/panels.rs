@@ -3203,7 +3203,10 @@ fn draw(p: &Painter, zone: Zone, item: &Item, facts: &Facts, hovered: bool, pres
             }
             let from = rect.left() + high * 0.5 + square / 2.0 + 8.0;
             // Narrow: as round as the close, its square alone (what a press does is said when pointed at); else the word that says it, where it fits, else the clock.
-            if rect.width() < stop_width(high, true) - 1.0 {
+            // What it says now, beside its Stop: the clock, or Starting, Stopping (a pill made for the longest of them, as the head's, has room for any).
+            let now_said = if stopping { tr("Stopping…").to_string() } else if facts.rec_starting { tr("Starting…").to_string() } else { clock(facts.recording_seconds.unwrap_or(0)) };
+            let worded = from + measure(&now_said, &small) + 14.0 + if stopping { 0.0 } else { measure(tr_ctx("stop recording", "Stop"), &big) } + high * 0.42 <= rect.right() + 0.5;
+            if !worded {
                 if rect.width() <= high + 1.0 {
                     return;
                 }

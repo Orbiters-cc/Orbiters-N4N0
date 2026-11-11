@@ -17,6 +17,7 @@ pub mod desktop;
 #[cfg(windows)]
 pub mod paint_bench;
 pub mod panels;
+mod page_painter;
 pub mod retro;
 pub mod sheet_view;
 pub mod vr;
@@ -570,13 +571,13 @@ impl Recents {
     fn pictures_came(&mut self) -> bool {
         let Some((_, got)) = &self.reader else { return false };
         let mut any = false;
-        while let Ok((picture, image)) = got.try_recv() {
+        for (picture, image) in got.try_iter().take(2) {
             if let Some(big) = self.big.as_mut().filter(|b| b.0 == picture) {
                 big.1 = image;
                 any = true;
             } else if let Some(i) = self.asked.iter().copied().find(|i| self.loaded.get(*i).is_some_and(|r| r.session && r.source == picture)) {
                 // A capture's thumbnail of a dark world, lifted for the tile only: most could not be told apart (round 13's judges).
-                self.loaded[i].image = image.map(lifted);
+                self.loaded[i].image = image;
                 any = true;
             } else if let Some(i) = self.asked.iter().copied().find(|i| self.loaded.get(*i).is_some_and(|r| r.source == picture)) {
                 self.loaded[i].image = image;
@@ -592,7 +593,7 @@ impl Recents {
             .reader
             .get_or_insert_with(|| {
                 let asked: PicturesAsked = Default::default();
-                let (give, got) = mpsc::channel();
+                let (give, got) = mpsc::sync_channel(4);
                 for _ in 0..PICTURE_READERS {
                     let (asked, give) = (asked.clone(), give.clone());
                     let _ = std::thread::Builder::new().name("orbit-pictures".into()).spawn(move || loop {
@@ -609,7 +610,7 @@ impl Recents {
                                 queue = asked.1.wait_timeout(queue, Duration::from_secs(1)).unwrap_or_else(|e| e.into_inner()).0;
                             }
                         };
-                        let image = crate::worlds::decode_local(&picture);
+                        let image = crate::worlds::decode_local(&picture).map(|image| if matches!(picture, crate::worlds::Picture::Session(_)) { lifted(image) } else { image });
                         if give.send((picture, image)).is_err() {
                             return;
                         }
@@ -772,6 +773,13 @@ struct Stage {
     /// What N4N0's pages on the sheet are drawn with: the accent chosen for these menus.
     skin: Skin,
     skin_for: ([u8; 3], orbiters_i18n::Language),
+    painter: page_painter::Painter,
+    epoch: u64,
+    cache: Vec<page_painter::Frame>,
+    restore: bool,
+    async_pages: bool,
+    remote_pictures: crate::worlds::Pictures,
+    worker_phases: super::PaintPhases,
 }
 
 /// N4N0's pages inside a sheet are drawn here, so what is chosen reaches them with nothing to update on the avatar's screen, which is another drawing altogether. Where a page has a colour of its own (a tile's tint, a danger's red), that stays.
@@ -807,7 +815,7 @@ impl Stage {
         let canvas = Canvas::zoomed(px[0], px[1], px[0] as f32 / layout::WIDTH as f32).in_orbit_look();
         let host = MenuHost::with_media(canvas.ctx().clone(), media.clone());
         let worlds = with_worlds.then(|| Worlds::alone(canvas.ctx().clone()));
-        Self { canvas, host, worlds, px, retro: false, skin: page_skin(DEFAULT_PAGE_ACCENT), skin_for: (DEFAULT_PAGE_ACCENT, orbiters_i18n::language()) }
+        Self { remote_pictures: crate::worlds::Pictures::new(&canvas.ctx()), async_pages: false, worker_phases: Default::default(), painter: page_painter::Painter::new(px), epoch: 0, cache: Vec::new(), restore: false, canvas, host, worlds, px, retro: false, skin: page_skin(DEFAULT_PAGE_ACCENT), skin_for: (DEFAULT_PAGE_ACCENT, orbiters_i18n::language()) }
     }
 }
 
@@ -936,6 +944,8 @@ pub struct Panels {
 const KEYS_TOP: f32 = 300.0;
 
 impl Panels {
+    /// Keeps CPU page painting away from the controller loop.
+    pub fn with_page_worker(mut self) -> Self { self.stage.async_pages = true; self }
     pub fn new(backend: Ctl, sharp: f32, worlds_here: bool) -> Self {
         let media = crate::media::watcher().clone();
         Self {
@@ -1277,8 +1287,12 @@ impl Panels {
         let size = place.rect.size() * self.sharp;
         let px = [size.x.round() as u32, size.y.round() as u32];
         if self.stage.px != px || (self.worlds_here && self.stage.worlds.is_none()) {
+            let async_pages = self.stage.async_pages;
             self.stage = Stage::new(px, self.worlds_here, &self.media);
+            self.stage.async_pages = async_pages;
         }
+        self.stage.epoch = self.stage.epoch.wrapping_add(1);
+        self.stage.restore = true;
         self.facts.sheet = Some(sheet);
         self.facts.sheet_title = title.to_string();
         // As it was left, whichever way this comes back to it.
@@ -1291,8 +1305,7 @@ impl Panels {
         self.recents.big = None;
         // What was taken since shows when it opens.
         if sheet == Sheet::Pictures {
-            self.recents.seen = None;
-            self.recents.listed = None;
+
             if let Some(n) = kept.opened {
                 self.open_tile(n, snap);
             }
@@ -1317,7 +1330,7 @@ impl Panels {
         if let Some(panel) = self.takeover.as_mut() {
             panel.dirty = true;
             panel.hover = None;
-            panel.items = panels::sheet_items(sheet, &self.facts);
+            if self.stage.async_pages { panel.items.clear(); } else { panel.items = panels::sheet_items(sheet, &self.facts); }
         }
         for panel in &mut self.list {
             panel.dirty = true;
@@ -1724,8 +1737,23 @@ impl Panels {
                 self.facts.gallery_set = Some(named);
             }
         }
+        let old_gallery = self.facts.recent.clone();
         let arranged = in_gallery && self.recents.arrange(self.facts.gallery_filter, snap.settings.photos_layout);
         if listed || arranged {
+            if let Some(panel) = self.takeover.as_mut() { panel.items.clear(); panel.hover = None; }
+            self.pressed_late = None;
+            self.drag = None;
+            if self.facts.sheet == Some(Sheet::Pictures) && self.facts.gallery_scroll > 0.0 {
+                let before = self.facts.gallery_scroll;
+                if let Some((i, rect)) = old_gallery.0.rects.iter().enumerate().find(|(_, r)| r.bottom() > before) {
+                    if let Some(n) = self.recents.shown.iter().position(|r| r.dir == old_gallery[i].dir) {
+                        let after = self.recents.shown.0.rects[n].top() + before - rect.top();
+                        let delta = after - before;
+                        self.facts.gallery_scroll = after;
+                        self.gallery_to += delta;
+                    }
+                }
+            }
             for panel in &mut self.list {
                 panel.dirty = true;
             }
@@ -2036,6 +2064,9 @@ impl Panels {
 
     /// Every part painted again, in a look that changed. Those kept from menus that closed are of the look before: they go, and are made anew when asked for.
     fn paint_all_again(&mut self) {
+        self.stage.epoch = self.stage.epoch.wrapping_add(1);
+        self.stage.cache.clear();
+        self.stage.restore = false;
         self.rested.clear();
         for panel in self.list.iter_mut().chain(self.takeover.iter_mut()) {
             // One kept from an earlier opening and not painted in this one yet drew its text in the look before: its interface anew, as it was when every opening made
@@ -2755,6 +2786,7 @@ impl Panels {
         }
         let sheet = self.facts.sheet;
         let stage = &mut self.stage;
+        stage.worker_phases = Default::default();
         let panel = self.takeover.as_mut().expect("just looked");
         // The retro look chosen here draws N4N0's pages with N4N0's retro drawing, under its one colour: their pictures come plain, as the look draws them itself.
         let chosen = self.facts.orbit;
@@ -2771,6 +2803,30 @@ impl Panels {
             stage.host.dirty = true;
         }
         stage.canvas.set_restyle_off(sheet == Some(Sheet::Menu));
+        if let Some(frame) = stage.painter.take() {
+            if frame.matches(stage.epoch, sheet, &self.facts.recent) {
+                panel.out.clone_from(&frame.pixels);
+                panel.items.clone_from(&frame.items);
+                panel.hover = self.sheet_pointer.and_then(|p| panels::hit(&frame.items, p));
+                let first = !panel.painted;
+                panel.painted = true;
+                panel.dirty |= first;
+                show(panel, [0, 0, panel.px[0], panel.px[1]]);
+                stage.worker_phases = frame.phases;
+                stage.cache.retain(|f| f.sheet != frame.sheet);
+                stage.cache.push(frame);
+                while stage.cache.iter().map(|f| f.pixels.len()).sum::<usize>() > 96 * 1024 * 1024 { stage.cache.remove(0); }
+            }
+        }
+        if std::mem::take(&mut stage.restore) {
+            if let Some(frame) = stage.cache.iter().find(|f| Some(f.sheet) == sheet && f.facts.recent == self.facts.recent) {
+                panel.out.clone_from(&frame.pixels);
+                panel.items.clone_from(&frame.items);
+                panel.hover = self.sheet_pointer.and_then(|p| panels::hit(&frame.items, p));
+                panel.painted = true;
+                show(panel, [0, 0, panel.px[0], panel.px[1]]);
+            }
+        }
         match sheet {
             Some(Sheet::Worlds) => {
                 if let Some(worlds) = stage.worlds.as_mut() {
@@ -2804,15 +2860,16 @@ impl Panels {
                 }
             }
             Some(sheet) => {
-                if panel.dirty || !panel.painted {
+                if panel.dirty {
                     let first = !panel.painted;
                     panel.dirty = false;
-                    panel.items = panels::sheet_items(sheet, &self.facts);
+                    let items = panels::sheet_items(sheet, &self.facts);
+                    let ctx = if stage.async_pages { stage.painter.ctx.clone() } else { stage.canvas.ctx().clone() };
                     let mut facts = self.facts.clone();
                     if sheet == Sheet::All {
                         // What All tools' large tiles hold, for real.
                         let (captures, any) = self.recents.newest();
-                        let ctx = stage.canvas.ctx();
+                        let ctx = &ctx;
                         let texture = |i: usize, panel: &mut Panel| -> Option<TextureId> {
                             let loaded = self.recents.loaded.get(i)?;
                             let image = loaded.image.as_ref()?;
@@ -2829,7 +2886,7 @@ impl Panels {
                             let image = ColorImage::from_rgba_premultiplied(frame.size, &frame.rgba);
                             match &mut self.view_texture {
                                 Some(texture) => texture.set(image, TextureOptions::LINEAR),
-                                None => self.view_texture = Some(stage.canvas.ctx().load_texture("sheet-view", image, TextureOptions::LINEAR)),
+                                None => self.view_texture = Some(ctx.load_texture("sheet-view", image, TextureOptions::LINEAR)),
                             }
                             self.view_plate = frame.plate;
                         }
@@ -2843,8 +2900,8 @@ impl Panels {
                         });
                     }
                     if sheet == Sheet::Pictures {
-                        let ctx = stage.canvas.ctx();
-                        for item in &panel.items {
+                        let ctx = &ctx;
+                        for item in &items {
                             let (panels::Look::Capture(n) | panels::Look::BigPicture(n)) = item.look else { continue };
                             let Some(loaded) = self.recents.tile(n) else { continue };
                             if let Some(image) = &loaded.image {
@@ -2861,13 +2918,40 @@ impl Panels {
                         }
                     }
                     if let (Some((key, image)), Sheet::All) = (art, sheet) {
-                        let ctx = stage.canvas.ctx();
+                        let ctx = &ctx;
                         facts.art = Some(panel.pictures.entry(key.clone()).or_insert_with(|| ctx.load_texture("art", image.clone(), TextureOptions::LINEAR)).id());
                     }
                     let (hover, pressed) = (panel.hover, panel.pressed);
-                    stage.canvas.paint(time, |p| panels::paint_sheet(p, sheet, &facts, hover, pressed));
-                    stage.canvas_to(panel, &mut show);
-                    panel.dirty = first;
+                    if stage.async_pages {
+                        if let Some(worlds) = stage.worlds.as_mut() {
+                            for visit in &mut facts.worlds_visited {
+                                visit.picture = worlds.world_thumbnail_source(&visit.world_id).and_then(|p| stage.remote_pictures.get(&ctx, &p)).map(|t| t.id());
+                            }
+                            for (n, id) in &mut facts.recent_pictures {
+                                if let Some(loaded) = self.recents.tile(*n).filter(|r| r.image.is_none()) {
+                                    *id = egui::TextureId::User(u64::MAX);
+                                    if let Some(source) = worlds.world_thumbnail_source(&loaded.world_id) {
+                                        *id = stage.remote_pictures.get(&ctx, &source).map(|t| t.id()).unwrap_or(egui::TextureId::User(u64::MAX));
+                                    }
+                                }
+                            }
+                        }
+                        facts.world_video_picture = stage.host.menu.world_video.as_ref().and_then(|v| orbiters_n4n0_core::videos::youtube_id(&v.url)).and_then(|id| stage.host.image(&id).map(|image| panel.pictures.entry(format!("world-video {id}")).or_insert_with(|| ctx.load_texture("world-video", image, TextureOptions::LINEAR)).id()));
+                        facts.recent_pictures.retain(|(_, id)| *id != egui::TextureId::User(u64::MAX));
+                        let visible = panels::videos_shown(facts.gallery_scroll);
+                        let video_keys: std::collections::HashSet<String> = stage.host.menu.results.iter().skip(visible.start).take(visible.len()).map(|r| format!("video {}", r.id)).collect();
+                        panel.pictures.retain(|key, _| !key.starts_with("video ") || video_keys.contains(key));
+                        for (i, (tile, result)) in facts.videos.iter_mut().zip(&stage.host.menu.results).enumerate() {
+                            if !visible.contains(&i) { tile.picture = None; continue; }
+                            tile.picture = stage.host.image(&result.id).map(|image| panel.pictures.entry(format!("video {}", result.id)).or_insert_with(|| ctx.load_texture("video", image, TextureOptions::LINEAR)).id());
+                        }
+                        stage.painter.submit(page_painter::Request { epoch: stage.epoch, sheet, facts, hover, pressed, time, language: orbiters_i18n::language() });
+                    } else {
+                        panel.items = items;
+                        stage.canvas.paint(time, |p| panels::paint_sheet(p, sheet, &facts, hover, pressed));
+                        stage.canvas_to(panel, &mut show);
+                        panel.dirty = first;
+                    }
                 }
             }
             None => {}
@@ -2898,7 +2982,7 @@ impl Panels {
 
     /// Whether any picture is due or any part still moving.
     pub fn busy(&self) -> bool {
-        self.all().any(|p| p.dirty || !p.appear.settled()) || self.stage.host.dirty
+        self.all().any(|p| p.dirty || !p.appear.settled()) || self.stage.host.dirty || self.stage.painter.busy()
     }
 
     /// Moves each part's spring on.
@@ -2935,6 +3019,7 @@ impl Panels {
 impl Stage {
     /// What the canvas painted, to the page on the sheet.
     fn canvas_to(&mut self, panel: &mut Panel, show: &mut impl FnMut(&Panel, [u32; 4])) {
+        let phase = Instant::now();
         // A page kept from an earlier opening is handed over whole the first time, as a new one is.
         let [w, h] = panel.px;
         let changed = if std::mem::take(&mut panel.again) { Some([0, 0, w, h]) } else { self.canvas.damage() };
@@ -2950,6 +3035,7 @@ impl Stage {
             let zoom = panel.px[0] as f32 / panel.logical.x;
             panels::finish_picture(&mut panel.out, pixels, panel.px, zoom, changed);
             panel.painted = true;
+            super::record_phase(3, phase.elapsed());
             show(panel, changed);
         }
     }

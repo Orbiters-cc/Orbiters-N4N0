@@ -36,7 +36,7 @@ use std::time::{Duration, Instant};
 /// VRChat's window in desktop mode, for where the parts go and how large they are.
 const CLIENT: Vec2 = vec2(1920.0, 1080.0);
 /// How many pictures the made-up gallery holds: several pages of it, so that it scrolls.
-const GALLERY: usize = 60;
+static GALLERY: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(60);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Mode {
@@ -82,6 +82,9 @@ struct Cost {
     /// Pointing and pressing.
     hand: Duration,
     paint: Duration,
+    phases: crate::overlay::PaintPhases,
+    worker: crate::overlay::PaintPhases,
+    wall: Duration,
     /// Writing the pictures to their textures, with `--upload` (not part of `paint`).
     upload: Duration,
     /// Pictures handed to the platform, and their pixels.
@@ -164,8 +167,14 @@ static PICTURES: OnceLock<Vec<(PathBuf, u64)>> = OnceLock::new();
 /// Writes the made-up pictures: skies of a few colours with a sun somewhere, told apart at a glance.
 fn make_pictures(dir: &Path) -> anyhow::Result<Vec<(PathBuf, u64)>> {
     std::fs::create_dir_all(dir)?;
-    let mut out = Vec::new();
-    for n in 0..GALLERY {
+    let mut out: Vec<(PathBuf, u64)> = Vec::new();
+    for n in 0..GALLERY.load(std::sync::atomic::Ordering::Relaxed) {
+        if n >= 60 {
+            let path = dir.join(format!("bench-picture-{n:04}.png"));
+            std::fs::hard_link(&out[n % 60].0, &path)?;
+            out.push((path, out[n % 60].1));
+            continue;
+        }
         let (w, h) = (640u32, 360u32);
         let mut image = image::RgbImage::new(w, h);
         let (sx, sy) = (((n * 97) % 640) as f32, ((n * 53) % 300) as f32);
@@ -244,7 +253,7 @@ impl Rig {
         };
         Self {
             mode,
-            panels,
+            panels: panels.with_page_worker(),
             snap: Arc::new(snap),
             hints: Hints::default(),
             around: None,
@@ -285,6 +294,8 @@ impl Rig {
 
     /// One turn of the loop, as `vr.rs` and `desktop.rs` take it, with what a hand does in it.
     fn turn(&mut self, act: Option<Act>) {
+        let wall = Instant::now();
+        std::thread::sleep(Duration::from_millis(11));
         let dt = self.mode.turn();
         self.clock += dt as f64;
         self.panels.clock = Some(self.clock);
@@ -355,6 +366,7 @@ impl Rig {
             let t = Instant::now();
             let (mut shows, mut pixels, mut upload) = (0u32, 0u64, Duration::ZERO);
             let (gpu, handles, notes) = (&mut self.gpu, &mut self.handles, &mut self.notes);
+            crate::overlay::paint_phases(true);
             self.panels.paint(&self.snap, |panel, changed| {
                 shows += 1;
                 pixels += (changed[2].saturating_sub(changed[0]) as u64) * (changed[3].saturating_sub(changed[1]) as u64);
@@ -368,6 +380,8 @@ impl Rig {
                     upload += t.elapsed();
                 }
             });
+            cost.phases = crate::overlay::paint_phases(false);
+            cost.worker = self.panels.stage.worker_phases;
             cost.upload = upload;
             cost.paint = t.elapsed().saturating_sub(upload);
             (cost.shows, cost.pixels) = (shows, pixels);
@@ -377,6 +391,7 @@ impl Rig {
                 }
             }
         }
+        cost.wall = wall.elapsed();
         self.turn_in_step += 1;
         if self.log.is_some() {
             let (kept, bytes) = self.panels.resting();
@@ -399,7 +414,7 @@ impl Rig {
     /// Whether a part is due a picture, is still coming in, or was handed one in the turn just taken. (Not `Panels::busy`: that also counts N4N0's menu being due a picture, which
     /// it stays while it is on no sheet.)
     fn moving(&self) -> bool {
-        self.panels.all().any(|p| p.dirty || !p.appear.settled()) || self.steps.last().and_then(|s| s.turns.last()).is_some_and(|c| c.shows > 0)
+        self.panels.stage.painter.busy() || self.panels.all().any(|p| p.dirty || !p.appear.settled()) || self.steps.last().and_then(|s| s.turns.last()).is_some_and(|c| c.shows > 0)
     }
 
     /// The seconds to a 3D picture counting down, then where the music is moving on, eight turns a second's worth: what one part says changes, and nothing else.
@@ -651,8 +666,27 @@ fn script(rig: &mut Rig) {
     rig.facts_cost("All tools"); // i18n: not shown (benchmark report labels)
     rig.scroll("qm-sheet-all-scroll", Rest);
     rig.pressing("qm-sheet-pictures", Action::Pictures, Rest);
-    rig.facts_cost("Pictures, 60 of them"); // i18n: not shown (benchmark report labels)
+    rig.panels.recents.keep(1, 0);
+    if let Some(panel) = rig.panels.takeover.as_mut() { panel.pictures.clear(); panel.dirty = true; }
+    rig.scroll("pictures-cold-ingestion-scroll", Rest);
+    rig.facts_cost("Pictures, loaded"); // i18n: not shown (benchmark report labels)
     rig.scroll("qm-sheet-pictures-scroll", Rest);
+    rig.begin("pictures-fling", Rest);
+    rig.panels.throw = 1800.0;
+    rig.turns(90);
+    rig.rest();
+    for round in 0..2 {
+        for sheet in [super::panels::Sheet::All, super::panels::Sheet::Pictures, super::panels::Sheet::Settings, super::panels::Sheet::Tracking, super::panels::Sheet::Mics, super::panels::Sheet::Booster, super::panels::Sheet::Talk, super::panels::Sheet::Instances, super::panels::Sheet::Results, super::panels::Sheet::Menu, super::panels::Sheet::Worlds, super::panels::Sheet::Pictures] {
+            rig.begin(&format!("switch-{round}-{sheet:?}"), Rest);
+            let opening = Instant::now();
+            rig.panels.open_sheet(sheet, "", &rig.snap);
+            let opening = opening.elapsed();
+            rig.turns(1);
+            rig.steps.last_mut().unwrap().turns.last_mut().unwrap().open += opening;
+            if round == 0 { rig.rest(); }
+        }
+    }
+    rig.rest();
     rig.point_at_each("qm-sheet-pictures-point", true, Rest);
     rig.pressing("qm-sheet-instances", Action::Page(Target::Instances), Rest);
     rig.pressing("qm-sheet-all-again", Action::All, Rest);
@@ -738,6 +772,28 @@ fn summary(mode: Mode, run: usize, rig: &Rig, out: &mut String) {
             step.turns.iter().map(|c| c.pixels).sum::<u64>() as f64 / 1e6,
         );
     }
+    let _ = writeln!(out, "\n| step | completed page frames | active wall seconds | completed page frames/s |\n|---|---:|---:|---:|");
+    for step in &rig.steps {
+        let frames = step.turns.iter().filter(|c| c.worker.raster > Duration::ZERO).count();
+        let wall: Duration = step.turns.iter().map(|c| c.wall).sum();
+        let _ = writeln!(out, "| {} | {frames} | {:.3} | {:.2} |", step.name, wall.as_secs_f64(), frames as f64 / wall.as_secs_f64().max(0.001));
+    }
+    let _ = writeln!(out, "\n| step | phase | p50 ms | p95 ms | p99 ms | max ms |\n|---|---|---:|---:|---:|---:|");
+    for step in &rig.steps {
+        for phase in 0..7 {
+            let mut values: Vec<f64> = step.turns.iter().map(|c| ms(match phase {
+                0 => c.whole(), 1 => c.phases.text, 2 => c.phases.tessellation,
+                3 => c.phases.raster, 4 => c.phases.finish,
+                6 => c.worker.text + c.worker.tessellation + c.worker.raster + c.worker.finish,
+                _ => c.paint.saturating_sub(c.phases.text + c.phases.tessellation + c.phases.raster + c.phases.finish),
+            })).collect();
+            values.sort_by(f64::total_cmp);
+            if values.is_empty() { continue; }
+            let percentile = |p: f64| values[((values.len() as f64 * p).ceil() as usize).saturating_sub(1)];
+            let label = ["turn", "text/layout", "textures/tessellation", "raster", "finish/copy", "facts/items/other", "worker"][phase];
+            let _ = writeln!(out, "| {} | {label} | {:.3} | {:.3} | {:.3} | {:.3} |", step.name, percentile(0.50), percentile(0.95), percentile(0.99), values[values.len()-1]);
+        }
+    }
     for (state, made, copied) in &rig.facts {
         let _ = writeln!(out, "\nFacts, {state}: made again and compared {made:.1} us a turn; copied {copied:.1} us a part painted.");
     }
@@ -769,8 +825,11 @@ fn summary(mode: Mode, run: usize, rig: &Rig, out: &mut String) {
 pub fn run(args: &[String]) -> anyhow::Result<()> {
     let value = |name: &str| args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).cloned();
     let runs: usize = value("--runs").and_then(|v| v.parse().ok()).unwrap_or(5);
+    GALLERY.store(value("--entries").and_then(|v| v.parse().ok()).unwrap_or(60), std::sync::atomic::Ordering::Relaxed);
+    if let Some(tag) = value("--language") { if let Some(language) = orbiters_i18n::normalize(&tag) { orbiters_i18n::pin_language(language); orbiters_ui::fonts::prefer_language(language.tag()); } }
     let only = value("--only");
     let upload = args.iter().any(|a| a == "--upload");
+    let synchronous = args.iter().any(|a| a == "--sync");
     let fonts_anew = args.iter().any(|a| a == "--fonts-anew");
     let out = value("--out").map(PathBuf::from);
     // Nothing of the app's own folders: all of it in a scratch that goes when this ends.
@@ -797,6 +856,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             let log = std::fs::File::create(out.join(format!("pictures-{}.txt", mode.name())))?; // i18n: not shown (a developer's benchmark command)
             let mut rig = Rig::new(mode, &scratch, Some((log, dir)));
             rig.panels.fonts_anew = fonts_anew;
+            rig.panels.stage.async_pages = !synchronous;
             script(&mut rig);
             if let Some(log) = rig.log.as_mut() {
                 log.flush()?;
@@ -813,6 +873,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         for run in 1..=runs {
             let mut rig = Rig::new(mode, &scratch, None);
             rig.panels.fonts_anew = fonts_anew;
+            rig.panels.stage.async_pages = !synchronous;
             if upload {
                 rig.gpu = Some(orbiters_openvr::gpu::OverlayTextures::new(None).map_err(|e| anyhow::anyhow!(e))?);
             }
@@ -823,11 +884,11 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             }
             summary(mode, run, &rig, &mut report);
             if let Some(out) = &out {
-                let mut csv = String::from("step,turn,set_open_ms,follow_ms,hand_ms,paint_ms,upload_ms,shows,pixels\n"); // i18n: not shown (machine-readable benchmark column names)
+                let mut csv = String::from("step,turn,set_open_ms,follow_ms,hand_ms,paint_ms,upload_ms,shows,pixels,wall_ms,worker_text_ms,worker_tess_ms,worker_raster_ms,worker_finish_ms\n"); // i18n: not shown (machine-readable benchmark column names)
                 for step in &rig.steps {
                     for (n, c) in step.turns.iter().enumerate() {
                         use std::fmt::Write as _;
-                        let _ = writeln!(csv, "{},{n},{:.4},{:.4},{:.4},{:.4},{:.4},{},{}", step.name, ms(c.open), ms(c.follow), ms(c.hand), ms(c.paint), ms(c.upload), c.shows, c.pixels);
+                        let _ = writeln!(csv, "{},{n},{:.4},{:.4},{:.4},{:.4},{:.4},{},{},{:.4},{:.4},{:.4},{:.4},{:.4}", step.name, ms(c.open), ms(c.follow), ms(c.hand), ms(c.paint), ms(c.upload), c.shows, c.pixels, ms(c.wall), ms(c.worker.text), ms(c.worker.tessellation), ms(c.worker.raster), ms(c.worker.finish));
                     }
                 }
                 std::fs::write(out.join(format!("turns-{}-{run}.csv", mode.name())), csv)?; // i18n: not shown (a developer's benchmark command)

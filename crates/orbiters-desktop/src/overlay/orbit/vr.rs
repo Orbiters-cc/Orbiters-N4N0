@@ -754,7 +754,7 @@ impl OrbitVr {
         let now = Instant::now();
         Ok(Self {
             key: format!("{key}.orbit"),
-            panels: Panels::new(backend, 2.0, true),
+            panels: Panels::new(backend, 2.0, true).with_page_worker(),
             tune: Tune::read().unwrap_or_default(),
             tune_seen: None,
             tune_read: now,

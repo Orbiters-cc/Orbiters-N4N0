@@ -349,12 +349,12 @@ const GALLERY_GAP: f32 = 12.0;
 /// The gallery's tiles and where each lies, made once when they change. Tens of thousands of pictures are nothing unusual, and this goes around with the facts each frame: it is
 /// compared by being the same list.
 #[derive(Clone, Debug, Default)]
-pub struct Gallery(std::sync::Arc<GalleryList>);
+pub struct Gallery(pub(super) std::sync::Arc<GalleryList>);
 
 #[derive(Debug, Default)]
-struct GalleryList {
+pub(super) struct GalleryList {
     items: Vec<Recent>,
-    rects: Vec<Rect>,
+    pub(super) rects: Vec<Rect>,
     height: f32,
 }
 

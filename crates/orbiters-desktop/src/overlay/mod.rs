@@ -220,6 +220,33 @@ impl Presenter {
     }
 }
 
+/// CPU paint phases accumulated by the headless harness only.
+#[derive(Clone, Copy, Default, Debug)]
+pub(crate) struct PaintPhases {
+    pub text: Duration,
+    pub tessellation: Duration,
+    pub raster: Duration,
+    pub finish: Duration,
+}
+thread_local! {
+    static PAINT_PHASES: std::cell::Cell<Option<PaintPhases>> = const { std::cell::Cell::new(None) };
+}
+pub(crate) fn paint_phases(reset: bool) -> PaintPhases {
+    PAINT_PHASES.with(|p| {
+        let old = p.get().unwrap_or_default();
+        p.set(if reset { Some(PaintPhases::default()) } else { None });
+        old
+    })
+}
+fn record_phase(phase: usize, took: Duration) {
+    PAINT_PHASES.with(|p| {
+        if let Some(mut v) = p.get() {
+            match phase { 0 => v.text += took, 1 => v.tessellation += took, 2 => v.raster += took, _ => v.finish += took }
+            p.set(Some(v));
+        }
+    });
+}
+
 /// An egui canvas painted on the CPU for one of the world overlays.
 pub struct Canvas {
     ctx: egui::Context,
@@ -302,6 +329,7 @@ impl Canvas {
         let (restyle, size) = (self.restyle.filter(|_| !self.restyle_off), self.size);
         orbiters_ui::fonts::follow_language(&self.ctx);
         self.ran = true;
+        let phase = Instant::now();
         let mut full = self.ctx.run_ui(input, |ui| {
             draw(ui.painter());
             if let Some(pass) = restyle {
@@ -309,11 +337,16 @@ impl Canvas {
             }
         });
         orbiters_ui::text_audit::record(&full.shapes);
+        record_phase(0, phase.elapsed());
         self.pictures_now();
+        let phase = Instant::now();
         self.painter.set_textures(&mut full.textures_delta);
         let primitives = self.ctx.tessellate(std::mem::take(&mut full.shapes), full.pixels_per_point);
+        record_phase(1, phase.elapsed());
+        let phase = Instant::now();
         // Textures egui let go of are freed once painted with (the frame may still draw them).
         self.painter.paint(&primitives, full.pixels_per_point, egui::Color32::TRANSPARENT);
+        record_phase(2, phase.elapsed());
         self.painter.free_textures(&mut full.textures_delta);
         self.painter.pixels()
     }
@@ -326,6 +359,7 @@ impl Canvas {
         let (restyle, size) = (self.restyle.filter(|_| !self.restyle_off), self.size);
         orbiters_ui::fonts::follow_language(&self.ctx);
         self.ran = true;
+        let phase = Instant::now();
         let mut full = self.ctx.run_ui(input, |ui| {
             draw(ui);
             if let Some(pass) = restyle {
@@ -333,10 +367,15 @@ impl Canvas {
             }
         });
         orbiters_ui::text_audit::record(&full.shapes);
+        record_phase(0, phase.elapsed());
         self.pictures_now();
+        let phase = Instant::now();
         self.painter.set_textures(&mut full.textures_delta);
         let primitives = self.ctx.tessellate(std::mem::take(&mut full.shapes), full.pixels_per_point);
+        record_phase(1, phase.elapsed());
+        let phase = Instant::now();
         self.painter.paint(&primitives, full.pixels_per_point, egui::Color32::TRANSPARENT);
+        record_phase(2, phase.elapsed());
         self.painter.free_textures(&mut full.textures_delta);
         self.painter.pixels()
     }

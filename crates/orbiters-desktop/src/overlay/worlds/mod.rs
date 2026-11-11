@@ -1754,6 +1754,13 @@ fn keep_an_eye_frame(steamvr: &vr::Client, n: u32) {
     }
 
     /// A world's thumbnail, from its id alone, once it is here: for what lists worlds outside this panel.
+    /// A source can be loaded in another canvas without borrowing this canvas's texture id.
+    pub fn world_thumbnail_source(&mut self, world_id: &str) -> Option<crate::worlds::Picture> {
+        self.facts_for(world_id);
+        let url = self.facts.get(world_id).and_then(|f| f.thumbnail.clone())?;
+        Some(crate::worlds::Picture::Remote { world_id: world_id.to_string(), url, large: false })
+    }
+
     pub fn world_thumbnail(&mut self, world_id: &str) -> Option<TextureId> {
         self.facts_for(world_id);
         let url = self.facts.get(world_id).and_then(|f| f.thumbnail.clone())?;

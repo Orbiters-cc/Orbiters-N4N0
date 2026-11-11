@@ -100,6 +100,7 @@ pub struct Software {
     clear: Option<Color32>,
     /// What the last frame changed (x0, y0, x1, y1).
     damage: Option<[u32; 4]>,
+    parallel: bool,
 }
 
 impl Software {
@@ -116,6 +117,7 @@ impl Software {
             stale: true,
             clear: None,
             damage: None,
+            parallel: false,
         }
     }
 
@@ -124,6 +126,9 @@ impl Software {
         self.backdrop = Some(self.pixels.clone());
         self.stale = true;
     }
+
+    /// Independent rows preserve triangle order and the exact sampling arithmetic.
+    pub fn set_parallel(&mut self, on: bool) { self.parallel = on; }
 
     pub fn size(&self) -> (u32, u32) {
         (self.width as u32, self.height as u32)
@@ -230,19 +235,45 @@ impl Software {
     pub fn paint(&mut self, primitives: &[ClippedPrimitive], pixels_per_point: f32, clear: Color32) -> &[u8] {
         let areas = self.changed_areas(primitives, pixels_per_point, clear);
         self.damage = areas.iter().copied().reduce(around).map(|a| a.map(|v| v as u32));
-        for area in areas {
-            self.fill(area, clear);
-            for p in primitives {
-                let Primitive::Mesh(mesh) = &p.primitive else { continue };
-                let Some(clip) = self.clip(p, pixels_per_point).and_then(|c| within(c, area)) else { continue };
-                // A mesh whose texture is not there (never set, or freed) is skipped, as egui's GPU painters do.
-                let Some(texture) = self.textures.remove(&mesh.texture_id) else { continue };
-                for t in mesh.indices.as_chunks::<3>().0 {
-                    let (a, b, c) = (&mesh.vertices[t[0] as usize], &mesh.vertices[t[1] as usize], &mesh.vertices[t[2] as usize]);
-                    self.triangle(clip, [a, b, c], pixels_per_point, &texture);
+        let width = self.width;
+        let height = self.height;
+        let backdrop = self.backdrop.as_deref();
+        let textures = &self.textures;
+        let clips: Vec<_> = primitives.iter().map(|p| self.clip(p, pixels_per_point)).collect();
+        let paint_rows = |pixels: &mut [[u8; 4]], from: usize| {
+            let band = [0, from, width, from + pixels.len() / width];
+            for area in &areas {
+                let Some(area) = within(*area, band) else { continue };
+                for y in area[1]..area[3] {
+                    let row = &mut pixels[(y-from)*width+area[0]..(y-from)*width+area[2]];
+                    match backdrop {
+                        Some(b) => row.copy_from_slice(&b[y*width+area[0]..y*width+area[2]]),
+                        None => row.fill([clear.r(), clear.g(), clear.b(), clear.a()]),
+                    }
                 }
-                self.textures.insert(mesh.texture_id, texture);
+                for (p, clip) in primitives.iter().zip(&clips) {
+                    let Primitive::Mesh(mesh) = &p.primitive else { continue };
+                    let Some(clip) = clip.and_then(|c| within(c, area)) else { continue };
+                    let Some(texture) = textures.get(&mesh.texture_id) else { continue };
+                    for t in mesh.indices.as_chunks::<3>().0 {
+                        let v = t.map(|i| &mesh.vertices[i as usize]);
+                        Self::triangle_rows(pixels, width, from, clip, v, pixels_per_point, texture);
+                    }
+                }
             }
+        };
+        // Small damage stays serial. The page worker alone opts in, keeping the input thread free of thread setup.
+        let damaged: usize = areas.iter().map(|a| (a[2]-a[0])*(a[3]-a[1])).sum();
+        if self.parallel && damaged > 128 * 1024 {
+            let rows = height.div_ceil(4);
+            std::thread::scope(|scope| {
+                for (n, pixels) in self.pixels.chunks_mut(rows * width).enumerate() {
+                    let paint_rows = &paint_rows;
+                    scope.spawn(move || paint_rows(pixels, n * rows));
+                }
+            });
+        } else {
+            paint_rows(&mut self.pixels, 0);
         }
         self.pixels.as_flattened()
     }
@@ -306,18 +337,7 @@ impl Software {
         areas
     }
 
-    /// The backdrop (or `clear`) back over `area`.
-    fn fill(&mut self, [x0, y0, x1, y1]: [usize; 4], clear: Color32) {
-        for y in y0..y1 {
-            let row = y * self.width;
-            match &self.backdrop {
-                Some(b) => self.pixels[row + x0..row + x1].copy_from_slice(&b[row + x0..row + x1]),
-                None => self.pixels[row + x0..row + x1].fill([clear.r(), clear.g(), clear.b(), clear.a()]),
-            }
-        }
-    }
-
-    fn triangle(&mut self, clip: [usize; 4], v: [&Vertex; 3], ppp: f32, texture: &Texture) {
+    fn triangle_rows(pixels: &mut [[u8; 4]], width: usize, from: usize, clip: [usize; 4], v: [&Vertex; 3], ppp: f32, texture: &Texture) {
         let mut p = v.map(|v| [v.pos.x * ppp, v.pos.y * ppp]);
         let mut v = v;
         let edge = |a: [f32; 2], b: [f32; 2], c: [f32; 2]| (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]);
@@ -384,7 +404,7 @@ impl Software {
             // A triangle covers one run of a row: find its ends.
             let Some(first) = (x0..x1).find(|&x| inside(w_at(x))) else { continue };
             let last = (first..x1).rev().find(|&x| inside(w_at(x))).unwrap_or(first);
-            let row = &mut self.pixels[y * self.width + first..=y * self.width + last];
+            let row = &mut pixels[(y - from) * width + first..=(y - from) * width + last];
             match flat {
                 Some(c) => {
                     let src = to_u32(c);
@@ -432,7 +452,7 @@ impl Software {
 }
 
 /// The pixels a triangle (its corners in pixels) can touch inside `clip` (x0, y0, x1, y1), as
-/// [`Software::triangle`] scans them; `None` when none (a corner that is not a number touches none).
+/// [`Software::triangle_rows`] scans them; `None` when none (a corner that is not a number touches none).
 fn bounds(p: [[f32; 2]; 3], clip: [usize; 4]) -> Option<[usize; 4]> {
     if !p.as_flattened().iter().all(|v| v.is_finite()) {
         return None;
@@ -578,6 +598,31 @@ mod tests {
         let out = sw.paint(&prims, full.pixels_per_point, Color32::BLACK).to_vec();
         sw.free_textures(&mut full.textures_delta);
         out
+    }
+
+    #[test]
+    fn parallel_rows_are_pixel_identical_including_damage_and_textures() {
+        let ctx = egui::Context::default();
+        let mut serial = Software::new(512, 513);
+        let mut parallel = Software::new(512, 513);
+        parallel.set_parallel(true);
+        let image = ColorImage::filled([64, 64], Color32::from_rgba_premultiplied(75, 30, 50, 100));
+        let texture = ctx.load_texture("test-image", image, egui::TextureOptions::LINEAR);
+        for offset in [0.0, 13.25, -4.75, 0.0] {
+            let input = egui::RawInput { screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(512.0, 513.0))), ..Default::default() };
+            let mut full = ctx.run_ui(input, |ui| {
+                let p = ui.painter();
+                p.rect_filled(Rect::from_min_max(pos2(0.0, 0.0), pos2(512.0, 513.0)), 0.0, Color32::DARK_BLUE);
+                p.image(texture.id(), Rect::from_min_max(pos2(7.5, offset), pos2(510.0, 510.0+offset)), Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
+                p.text(pos2(20.25, 120.5+offset), egui::Align2::LEFT_TOP, "Pictures", egui::FontId::proportional(32.0), Color32::WHITE);
+                p.circle_filled(pos2(250.0, 256.0+offset), 90.0, Color32::from_white_alpha(80));
+            });
+            serial.set_textures(&mut full.textures_delta.clone());
+            parallel.set_textures(&mut full.textures_delta);
+            let primitives = ctx.tessellate(full.shapes, full.pixels_per_point);
+            assert_eq!(serial.paint(&primitives, full.pixels_per_point, Color32::TRANSPARENT), parallel.paint(&primitives, full.pixels_per_point, Color32::TRANSPARENT));
+            assert_eq!(serial.damage(), parallel.damage());
+        }
     }
 
     #[test]

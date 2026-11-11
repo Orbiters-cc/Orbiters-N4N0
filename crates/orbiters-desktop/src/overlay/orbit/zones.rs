@@ -356,7 +356,7 @@ impl Zone {
             Zone::CameraQr => camera_tile(3),
             // Under VRChat's row of buttons, from the column's outer edge: what the tiles have to say, and a button for it at its end.
             Zone::CameraCaption => r(CAMERA_COLUMN_OUT, CAMERA_UNDER[0], 64.0, CAMERA_UNDER[1]),
-            Zone::CameraAct => r(72.0, CAMERA_UNDER[0], 262.0, CAMERA_UNDER[0] + 34.0),
+            Zone::CameraAct => r(72.0, CAMERA_UNDER[0], 296.0, CAMERA_UNDER[0] + 34.0),
             // Corners just off the picture's own while a code is looked for: outside it, clear of the column and of VRChat's buttons.
             Zone::CameraScan => r(-CAMERA_HALF[0] - CAMERA_SCAN_OUT, -CAMERA_HALF[1] - CAMERA_SCAN_OUT, CAMERA_HALF[0] + CAMERA_SCAN_OUT, CAMERA_HALF[1] + CAMERA_SCAN_OUT),
             // Over the camera's top edge, never in front of it: its bar nearest the camera, the page above. Stood up on that edge in a headset ([`super::vr`]).

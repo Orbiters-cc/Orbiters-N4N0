@@ -1013,7 +1013,7 @@ fn web_bar(w: f32, h: f32, facts: &Facts) -> Vec<Item> {
         return Vec::new();
     }
     let b = h - 4.0;
-    let open = 176.0;
+    let open = 218.0;
     vec![
         Item { action: Action::Idle, rect: r(0.0, 2.0, w - b - open - 12.0, b), look: Look::WebTitle },
         Item { action: Action::WebOpen, rect: r(w - b - open - 6.0, 2.0, open, b), look: Look::WebButton { icon: icons::ARROW_SQUARE_OUT, label: tr("Open in browser") } },
@@ -2849,11 +2849,16 @@ fn draw(p: &Painter, zone: Zone, item: &Item, facts: &Facts, hovered: bool, pres
             let room = rect.width() - 56.0;
             if live {
                 let font = look::font(15.5, weight::SEMIBOLD);
-                p.text(pos2(rect.left() + 48.0, rect.center().y), Align2::LEFT_CENTER, fit(p, &stop_words(facts), &font, room), font, look::LABEL);
+                // Its clock, and at its end what a press does.
+                let words = if facts.rec_stopping || facts.rec_starting { stop_words(facts) } else { clock(facts.recording_seconds.unwrap_or(0)) };
+                p.text(pos2(rect.left() + 48.0, rect.center().y), Align2::LEFT_CENTER, fit(p, &words, &font, room - 90.0), font, look::LABEL);
+                if !facts.rec_stopping {
+                    p.text(pos2(rect.right() - 16.0, rect.center().y), Align2::RIGHT_CENTER, tr_ctx("stop recording", "Stop"), look::font(15.5, weight::BOLD), Color32::WHITE);
+                }
             } else {
                 let (big, small) = (look::font(14.5, weight::SEMIBOLD), look::font(12.0, weight::MEDIUM));
                 p.text(pos2(rect.left() + 48.0, rect.center().y - 8.0), Align2::LEFT_CENTER, fit(p, tr("Record a 3D scene"), &big, room), big, look::LABEL);
-                p.text(pos2(rect.left() + 48.0, rect.center().y + 9.0), Align2::LEFT_CENTER, fit(p, tr("Open VRChat's camera: Record is beside it"), &small, room), small, look::MUTED);
+                p.text(pos2(rect.left() + 48.0, rect.center().y + 9.0), Align2::LEFT_CENTER, fit(p, tr("Beside VRChat's camera"), &small, room), small, look::MUTED);
             }
         }
         Look::Stop => {
@@ -3017,12 +3022,13 @@ fn draw(p: &Painter, zone: Zone, item: &Item, facts: &Facts, hovered: bool, pres
                 (WebState::Shown, Some(id)) => {
                     p.add(egui::epaint::RectShape::filled(rect, round, Color32::WHITE).with_texture(id, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0))));
                 }
-                (WebState::Failed(why), _) => {
+                (WebState::Failed(_), _) => {
                     p.rect_filled(rect, round, look::OPAQUE);
                     let c = rect.center();
                     widgets::icon(p, c - vec2(0.0, 46.0), icons::WARNING_CIRCLE, 40.0, theme::WARN);
                     text(p, c, Align2::CENTER_CENTER, &fit(p, tr("This page could not open"), &look::font(17.0, weight::BOLD), rect.width() - 40.0), 17.0, weight::BOLD, look::LABEL);
-                    wrapped_center(p, c + vec2(0.0, 26.0), why, rect.width() - 60.0);
+                    // What the engine says is for the log: here, plain words.
+                    wrapped_center(p, c + vec2(0.0, 26.0), tr("The site did not answer, or the link no longer works."), rect.width() - 60.0);
                     wrapped_center(p, c + vec2(0.0, 70.0), tr("Open in browser shows it on your computer."), rect.width() - 60.0);
                 }
                 _ => {

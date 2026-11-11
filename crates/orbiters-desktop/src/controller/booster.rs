@@ -113,7 +113,10 @@ impl super::Controller {
                 inner.next_request += 1;
                 inner.pending = Some((inner.next_request, request));
             }
-            Command::PutBack => self.patch_settings(&serde_json::json!({ "booster": { "level": Level::Off } })),
+            Command::PutBack => {
+                self.patch_settings(&serde_json::json!({ "booster": { "level": Level::Off } }));
+                self.booster_command(Command::Overlay(orbiters_booster::engine::Request::StopTest));
+            },
             Command::OpenLogs => open_folder(&orbiters_core::paths::logs_dir()),
             Command::GuidedDone(item) => {
                 let was = current_of(item, &self.view());
@@ -212,7 +215,10 @@ impl super::Controller {
             }
             self.booster_publish();
             let snap = self.view();
-            let wants = if snap.booster.watching { snap.booster.overlay.report.wants } else { Wants::default() };
+            let report = &snap.booster.overlay.report;
+            let stopping = snap.booster.request.is_some_and(|(_, r)| r == orbiters_booster::engine::Request::StopTest);
+            let explicit_off_test = !stopping && report.level == Level::Off && report.testing.is_some_and(|t| t.manual);
+            let wants = if snap.booster.watching && (snap.settings.booster.level != Level::Off || explicit_off_test) { report.wants } else { Wants::default() };
             let here = snap.vrchat.runs_here();
             if snap.settings.booster.level != level {
                 // A program taken out of efficiency mode by hand is left so until the step changes.

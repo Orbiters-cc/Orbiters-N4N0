@@ -1038,7 +1038,7 @@ mod tests {
                                     for sx in [-1.,1.] { for sy in [-1.,1.] {
                                         let v: [f32;3]=std::array::from_fn(|i| quad.transform.m[i][3]+quad.transform.m[i][0]*sx*quad.width/2.+quad.transform.m[i][1]*sy*quad.height/2.);
                                         assert!(v[2]<0.);
-                                        assert!(cross([v[0]/-v[2],-v[1]/-v[2]])*cross(centre)<0., "submitted camera quad crosses the panel edge");
+                                        assert!(cross([v[0]/-v[2],-v[1]/-v[2]])*cross(centre)<0., "submitted camera quad crosses the panel edge: pitch {pitch} yaw {yaw} roll {roll} at {distance} m, {width} m wide, side {side}, {zone:?} corner {sx} {sy}");
                                     } }
                                 }
                                 // Tile hull and panel hull have a separating line at their common plane's edge,

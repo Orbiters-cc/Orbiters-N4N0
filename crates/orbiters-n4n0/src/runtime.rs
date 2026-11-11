@@ -85,6 +85,7 @@ const CONTROLS_CHARS: usize = 3500;
 /// Who is listening for a sentence.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Source {
+    AskAuto,
     /// The avatar menu's Talk button, held.
     Menu,
     /// A hand on N4N0: one sentence.
@@ -243,6 +244,11 @@ impl N4n0Runtime {
     }
 
     /// A turn is under way.
+    pub(crate) fn ask_busy(&self) -> bool {
+        self.thinking() || !self.confirmations.is_empty() || !self.pending.is_empty()
+            || self.voice.output_playing || self.voice.finalizing
+    }
+
     pub(crate) fn thinking(&self) -> bool {
         self.turn.is_some()
     }
@@ -732,7 +738,8 @@ impl N4n0 {
         let _ = std::thread::Builder::new().name("n4n0-watch".into()).spawn(move || {
             while !n.stopped() {
                 n.voice_follow();
-                std::thread::sleep(Duration::from_secs(1));
+                n.publish();
+                std::thread::sleep(Duration::from_millis(100));
             }
         });
     }
@@ -992,8 +999,10 @@ impl N4n0 {
 
     /// Publishes N4N0's state, and wakes the N4N0 thread: what changed (listening, an answer) shows at its next step.
     pub(crate) fn publish(&self) {
+        let readiness = self.voice_readiness();
         let status = {
             let mut rt = self.n4n0.lock().unwrap();
+            rt.voice.readiness = readiness;
             rt.wake();
             rt.status()
         };
@@ -1453,6 +1462,7 @@ impl N4n0 {
     /// The avatar menu's Talk button (or the window's, or the overlay's), pressed or let go. Letting go ends the
     /// sentence: the worker transcribes it and answers that listen by its number ([`N4n0::heard`]).
     pub(crate) fn talk(self: &Shared, down: bool, source: Source) {
+        if down && self.voice_readiness() != crate::status::VoiceReadiness::Ready { self.publish(); return; }
         let settings = self.with_settings(|s| s.n4n0.clone());
         if !settings.enabled || !settings.assistant {
             return;
@@ -1505,6 +1515,7 @@ impl N4n0 {
     /// The window or the overlay went away: a Talk button it held is let go without its sentence (the window may
     /// have crashed with the button down: nothing it heard since goes anywhere), and the overlay's menu is closed.
     pub fn link_closed(self: &Shared, overlay: bool) {
+        if overlay { self.ask_page(false); }
         let source = if overlay { Source::Overlay } else { Source::Window };
         let held = {
             let mut rt = self.n4n0.lock().unwrap();
@@ -1663,6 +1674,13 @@ impl N4n0 {
         match command {
             Command::Ask { text } => self.ask(text, "typed"),
             Command::Talk { down } => self.talk(down, Source::Window),
+            Command::AskPage { open } => self.ask_page(open),
+            Command::AskTalk { down } => self.ask_talk(down),
+            Command::AskPlayback { active } => {
+                self.n4n0.lock().unwrap().voice.output_playing = active;
+                self.ask_follow();
+                self.publish();
+            }
             Command::Say { text } => {
                 let shown = {
                     let mut rt = self.n4n0.lock().unwrap();

@@ -1327,6 +1327,7 @@ impl Panels {
 
     /// What is being said ends with its page: nobody should be listened to with no sign of it.
     fn stop_talking(&mut self) {
+        if self.facts.sheet == Some(Sheet::Talk) { self.backend.n4n0(N4n0Command::AskPage { open: false }); }
         if std::mem::take(&mut self.talking) {
             self.backend.n4n0(N4n0Command::Talk { down: false });
         }
@@ -2578,13 +2579,14 @@ impl Panels {
             Action::Talk => {
                 if self.facts.n4n0 {
                     self.open_sheet(Sheet::Talk, mark("Ask N4N0"), snap);
+                    self.backend.n4n0(N4n0Command::AskPage { open: true });
                 }
             }
             Action::TalkToggle => {
                 if !matches!(self.facts.talk, panels::TalkNow::Off(_)) {
-                    let down = !snap.n4n0.listening;
+                    let down = snap.n4n0.voice.automatic || !snap.n4n0.listening;
                     self.talking = down;
-                    self.backend.n4n0(N4n0Command::Talk { down });
+                    self.backend.n4n0(N4n0Command::AskTalk { down });
                 }
             }
             Action::NewConversation => self.backend.n4n0(N4n0Command::NewConversation),

@@ -47,6 +47,7 @@ struct Worker {
 #[derive(Default)]
 pub(crate) struct VoiceRuntime {
     handle: Option<Worker>,
+    ask_owned: bool,
     installer: Option<Worker>,
     /// The last worker's number.
     workers: u64,
@@ -120,6 +121,76 @@ impl VoiceRuntime {
 }
 
 impl N4n0 {
+    pub(crate) fn voice_readiness(&self) -> crate::status::VoiceReadiness {
+        use crate::status::VoiceReadiness::*;
+        if !self.with_settings(|s| s.n4n0.enabled && s.n4n0.assistant) { return AssistantOff; }
+        if self.host.account().is_none() { return SignIn; }
+        let rt = self.n4n0.lock().unwrap();
+        if rt.voice.downloading.is_some() { ModelsDownloading }
+        else if !rt.voice.installed { ModelsMissing }
+        else if rt.voice.error.is_some() { MicrophoneProblem }
+        else { Ready }
+    }
+
+    pub(crate) fn ask_page(self: &Shared, open: bool) {
+        self.voice_cancel();
+        self.voice.lock().unwrap().ask_owned = true;
+        {
+            let mut rt = self.n4n0.lock().unwrap();
+            rt.listening = None;
+            rt.voice.ask_open = open;
+            rt.voice.output_playing = false;
+            rt.voice.finalizing = false;
+            rt.voice.automatic = open;
+            rt.voice.provisional = None;
+            rt.voice.speech = false;
+            rt.voice.level = 0.0;
+        }
+        // Even wake-word capture must release the microphone when this page leaves.
+        if let Some(h) = self.voice.lock().unwrap().handle.as_mut() {
+            let _ = h.inner.send(&VoiceCommand::WakeWord { on: false, words: vec![] });
+        }
+        self.ask_follow();
+        self.publish();
+    }
+
+    pub(crate) fn ask_talk(self: &Shared, down: bool) {
+        let takeover = {
+            let mut rt = self.n4n0.lock().unwrap();
+            if !rt.voice.ask_open { return; }
+            let takeover = rt.voice.automatic;
+            rt.voice.automatic = false;
+            if takeover { rt.listening = None; }
+            takeover
+        };
+        if takeover { self.voice_cancel(); }
+        self.talk(down, Source::Overlay);
+    }
+
+    /// Called by the runtime watcher, independently of page paint and audio callbacks.
+    pub(crate) fn ask_follow(self: &Shared) {
+        let ready = self.voice_readiness() == crate::status::VoiceReadiness::Ready;
+        let (cancel, arm) = {
+            let mut rt = self.n4n0.lock().unwrap();
+            let cancel = (!ready || (rt.voice.ask_open && rt.ask_busy())) && rt.listening.is_some();
+            if cancel { rt.listening = None; }
+            let arm = ready && rt.voice.ask_open && rt.voice.automatic && rt.listening.is_none()
+                && !rt.ask_busy();
+            if arm { rt.listening = Some((Source::AskAuto, Instant::now())); }
+            (cancel, arm)
+        };
+        if cancel {
+            self.voice_cancel();
+            if let Some(h) = self.voice.lock().unwrap().handle.as_mut() {
+                let _ = h.inner.send(&VoiceCommand::WakeWord { on: false, words: vec![] });
+            }
+            let mut rt = self.n4n0.lock().unwrap();
+            rt.voice.provisional = None; rt.voice.level = 0.0; rt.voice.speech = false;
+            if !ready { rt.voice.automatic = false; }
+        }
+        if arm { self.voice_listen(Source::AskAuto); }
+    }
+
     /// Whether the speech models are on this device.
     pub(crate) fn models_installed(&self) -> bool {
         voice::installed(&self.files.models)
@@ -146,12 +217,13 @@ impl N4n0 {
     /// the assistant is on, the models are here), stops it otherwise, and passes on a changed microphone or wake
     /// word (without loading anything again). Called once a second.
     pub(crate) fn voice_follow(self: &Shared) {
+        self.ask_follow();
         let settings = self.with_settings(|s| s.n4n0.clone());
         let vrchat = self.host.scene().vrchat;
         let installed = self.n4n0.lock().unwrap().voice.installed;
         let mut rt = self.voice.lock().unwrap();
         let leased = rt.lease_until.is_some_and(|t| Instant::now() < t);
-        let wanted = settings.enabled && settings.assistant && installed && (vrchat || leased);
+        let wanted = settings.enabled && settings.assistant && installed && self.host.account().is_some() && (vrchat || leased);
         if !wanted {
             if let Some(handle) = rt.handle.take() {
                 drop(rt);
@@ -161,16 +233,17 @@ impl N4n0 {
             }
             return;
         }
+        let wake_word = settings.wake_word && !rt.ask_owned;
         if let Some(handle) = rt.handle.as_mut() {
             if handle.mic != settings.mic_device {
                 handle.mic = settings.mic_device.clone();
                 let mic = (!handle.mic.is_empty()).then(|| handle.mic.clone());
                 let _ = handle.inner.send(&VoiceCommand::Mic { mic });
             }
-            if handle.wake_word != settings.wake_word || handle.wake_words != settings.wake_words {
-                handle.wake_word = settings.wake_word;
+            if handle.wake_word != wake_word || handle.wake_words != settings.wake_words {
+                handle.wake_word = wake_word;
                 handle.wake_words = settings.wake_words.clone();
-                let _ = handle.inner.send(&VoiceCommand::WakeWord { on: settings.wake_word, words: settings.wake_words.clone() });
+                let _ = handle.inner.send(&VoiceCommand::WakeWord { on: wake_word, words: settings.wake_words.clone() });
             }
             return;
         }
@@ -181,7 +254,7 @@ impl N4n0 {
         if rt.ended_at.is_some_and(|t| t.elapsed() < rt.restart_delay()) {
             return;
         }
-        self.voice_start(&mut rt, &settings.mic_device, settings.wake_word, &settings.wake_words);
+        self.voice_start(&mut rt, &settings.mic_device, wake_word, &settings.wake_words);
     }
 
     fn voice_start(self: &Shared, rt: &mut VoiceRuntime, mic: &str, wake_word: bool, wake_words: &[String]) {
@@ -212,12 +285,14 @@ impl N4n0 {
     /// N4N0 listens for a sentence from `source` (the worker starts if it was not running, as for the window's Talk
     /// button with VRChat closed, and stays a while after).
     pub(crate) fn voice_listen(self: &Shared, source: Source) {
+        if self.voice_readiness() != crate::status::VoiceReadiness::Ready { return; }
         let settings = self.with_settings(|s| s.n4n0.clone());
+        let ask = self.n4n0.lock().unwrap().voice.ask_open;
         let mut rt = self.voice.lock().unwrap();
         rt.lease_until = Some(Instant::now() + LISTEN_LIMIT + LISTEN_LEASE);
         if rt.handle.is_none() {
             rt.ended_at = None;
-            self.voice_start(&mut rt, &settings.mic_device, settings.wake_word, &settings.wake_words);
+            self.voice_start(&mut rt, &settings.mic_device, settings.wake_word && !ask, &settings.wake_words);
         }
         let hold = matches!(source, Source::Menu | Source::Window | Source::Overlay);
         rt.next_listen += 1;
@@ -304,6 +379,12 @@ impl N4n0 {
     /// What a voice worker said.
     pub(crate) fn on_voice_event(self: &Shared, event: VoiceEvent) {
         match event {
+            VoiceEvent::Provisional { listen, text } => {
+                if self.voice_readiness() != crate::status::VoiceReadiness::Ready { return; }
+                let rt = self.voice.lock().unwrap();
+                if rt.current != Some(listen) { return; }
+                self.voice_status(|v| v.provisional = (!text.is_empty()).then_some(crate::status::ProvisionalSpeech { listen, text }));
+            }
             VoiceEvent::Ready { engine, load_ms } => {
                 eprintln!("voice: {engine} ready in {load_ms} ms");
                 self.voice_status(|v| {
@@ -311,7 +392,8 @@ impl N4n0 {
                     v.error = None;
                 });
             }
-            VoiceEvent::Mic { .. } | VoiceEvent::Speech { .. } => {}
+            VoiceEvent::Mic { .. } => {}
+            VoiceEvent::Speech { active } => self.voice_status(|v| v.speech = active),
             VoiceEvent::Level { level } => {
                 // Coarse steps: the meter moves, and an unchanged level is not published again.
                 let level = (level.clamp(0.0, 1.0) * 20.0).round() / 20.0;
@@ -326,14 +408,17 @@ impl N4n0 {
                 }
             }
             VoiceEvent::Heard { text, for_n4n0, seconds, decode_ms, listen } => {
+                if self.voice_readiness() != crate::status::VoiceReadiness::Ready {
+                    self.ask_follow(); self.publish(); return;
+                }
                 if for_n4n0 {
                     eprintln!("voice: {seconds:.1} s transcribed in {decode_ms} ms");
                 }
                 // A sentence for a cancelled listen goes nowhere; one for the latest listen ends N4N0's listening.
                 let (dropped, current) = {
                     let mut rt = self.voice.lock().unwrap();
-                    let dropped = for_n4n0 && listen != 0 && rt.cancelled_take(listen);
-                    let current = for_n4n0 && (listen == 0 || rt.current == Some(listen));
+                    let dropped = for_n4n0 && (rt.cancelled_take(listen) || rt.current != Some(listen));
+                    let current = for_n4n0 && rt.current == Some(listen);
                     if current {
                         rt.current = None;
                     }
@@ -341,10 +426,10 @@ impl N4n0 {
                     rt.crashes = 0;
                     (dropped, current)
                 };
-                self.voice_status(|v| v.level = 0.0);
-                if !dropped {
-                    self.heard(text, for_n4n0, current);
-                }
+                if dropped { return; }
+                self.voice_status(|v| { v.finalizing = true; v.level = 0.0; if current { v.provisional = None; v.speech = false; } });
+                self.heard(text, for_n4n0, current);
+                self.voice_status(|v| v.finalizing = false);
             }
             VoiceEvent::Installing { fraction } => self.voice_status(|v| v.downloading = Some(fraction)),
             VoiceEvent::Installed => {
@@ -364,6 +449,8 @@ impl N4n0 {
                 self.notify(NoticeKind::Success, tr("N4N0 can hear now."));
             }
             VoiceEvent::Error { message } => {
+                self.voice_cancel();
+                { let mut rt = self.n4n0.lock().unwrap(); rt.listening = None; rt.voice.automatic = false; rt.voice.provisional = None; }
                 self.n4n0.lock().unwrap().line(N4n0Who::Error, message.clone());
                 self.voice_status(|v| v.error = Some(message));
             }
@@ -410,6 +497,9 @@ impl N4n0 {
         }
         self.voice_status(|v| {
             v.running = false;
+            v.automatic = false;
+            v.provisional = None;
+            v.speech = false;
             v.level = 0.0;
             v.error = Some(message);
             if damaged {

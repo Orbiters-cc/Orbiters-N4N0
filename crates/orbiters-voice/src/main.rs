@@ -18,7 +18,7 @@ use std::collections::VecDeque;
 use std::io::{BufRead, Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
-use std::sync::{mpsc, Arc};
+use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
 
 const RATE: usize = voice::SAMPLE_RATE as usize;
@@ -123,7 +123,7 @@ enum Recognizer {
     Unloaded,
     /// Loading on a thread of its own (load number), the sentences meanwhile waiting.
     Loading(u64),
-    Ready(OfflineRecognizer),
+    Ready(Arc<Mutex<OfflineRecognizer>>),
 }
 
 /// A sentence to transcribe: for N4N0 (answering listen `listen`), or heard for the wake word.
@@ -172,6 +172,9 @@ struct Worker {
     listen: Option<Listen>,
     /// The held sentence so far.
     held: Vec<f32>,
+    partial_at: Instant,
+    partial_busy: Arc<AtomicBool>,
+    partial_id: Arc<AtomicU64>,
     /// Samples waiting for a whole VAD window.
     pending: Vec<f32>,
     preroll: VecDeque<f32>,
@@ -200,6 +203,9 @@ impl Worker {
             wake_words: Vec::new(),
             listen: None,
             held: Vec::new(),
+            partial_at: Instant::now(),
+            partial_busy: Arc::new(AtomicBool::new(false)),
+            partial_id: Arc::new(AtomicU64::new(0)),
             pending: Vec::new(),
             preroll: VecDeque::new(),
             speaking: false,
@@ -331,6 +337,8 @@ impl Worker {
                 self.pending.clear();
                 self.speaking = false;
                 self.held = if hold { self.preroll.iter().copied().collect() } else { Vec::new() };
+                self.partial_id.store(id, Ordering::Relaxed);
+                self.partial_at = Instant::now();
                 self.listen = Some(Listen { hold, since: Instant::now(), id });
                 // Someone speaks now: a microphone that failed a moment ago is tried again at once, and the
                 // recogniser loads while they speak.
@@ -338,12 +346,14 @@ impl Worker {
                 self.need_recognizer();
             }
             VoiceCommand::Finish => {
+                self.partial_id.store(0, Ordering::Relaxed);
                 if let Some(listen) = self.listen.take_if(|l| l.hold) {
                     let held = std::mem::take(&mut self.held);
                     self.sentence(held, true, listen.id);
                 }
             }
             VoiceCommand::Cancel => {
+                self.partial_id.store(0, Ordering::Relaxed);
                 if self.installing.is_some() {
                     // Stops the install: what was downloaded stays for the next one.
                     return false;
@@ -403,7 +413,7 @@ impl Worker {
         match result {
             Ok(recognizer) => {
                 eprintln!("voice: speech recogniser loaded in {} ms", took.as_millis());
-                self.recognizer = Recognizer::Ready(recognizer);
+                self.recognizer = Recognizer::Ready(Arc::new(Mutex::new(recognizer)));
                 self.used_at = Instant::now();
                 while let Some(s) = self.waiting.pop_front() {
                     self.decode(s);
@@ -439,10 +449,11 @@ impl Worker {
                 (*sum, *n) = (0.0, 0);
             }
         }
+        if self.listen.as_ref().is_some_and(|l| l.hold || self.speaking) && self.held.len() < LONGEST.as_secs() as usize * RATE {
+            self.held.extend_from_slice(&samples);
+            self.partial();
+        }
         if self.listen.as_ref().is_some_and(|l| l.hold) {
-            if self.held.len() < LONGEST.as_secs() as usize * RATE {
-                self.held.extend_from_slice(&samples);
-            }
             return;
         }
         self.preroll.extend(samples.iter().copied());
@@ -467,6 +478,9 @@ impl Worker {
         if speaking != self.speaking {
             self.speaking = speaking;
             emit(&VoiceEvent::Speech { active: speaking });
+            if speaking && self.listen.is_some() {
+                self.held = self.preroll.iter().copied().collect();
+            }
             if speaking && self.wake_word {
                 // A sentence starts: the recogniser loads while it goes on.
                 self.need_recognizer();
@@ -484,6 +498,7 @@ impl Worker {
 
     /// A whole sentence: transcribed now, or once the recogniser has loaded.
     fn sentence(&mut self, samples: Vec<f32>, for_n4n0: bool, listen: u64) {
+        if for_n4n0 { self.partial_id.store(0, Ordering::Relaxed); }
         // Less than a quarter of a second holds no word.
         if samples.len() < RATE / 4 {
             if for_n4n0 {
@@ -513,15 +528,48 @@ impl Worker {
     fn decode(&mut self, s: Sentence) {
         let Recognizer::Ready(recognizer) = &self.recognizer else { return };
         self.used_at = Instant::now();
-        let seconds = s.samples.len() as f32 / RATE as f32;
-        if !s.for_n4n0 && !self.wake_words.is_empty() && s.samples.len() > PREFIX {
-            let (start, _) = transcribe(recognizer, &s.samples[..PREFIX]);
-            if orbiters_n4n0_core::wake::command(&start, &self.wake_words).is_none() {
-                return;
+        let recognizer = recognizer.clone();
+        let wake_words = self.wake_words.clone();
+        // Final decode also runs away from the audio/VAD loop. The single recognizer serializes inference.
+        std::thread::spawn(move || {
+            let recognizer = recognizer.lock().unwrap();
+            let seconds = s.samples.len() as f32 / RATE as f32;
+            if !s.for_n4n0 && !wake_words.is_empty() && s.samples.len() > PREFIX {
+                let (start, _) = transcribe(&recognizer, &s.samples[..PREFIX]);
+                if orbiters_n4n0_core::wake::command(&start, &wake_words).is_none() { return; }
             }
+            let (text, decode_ms) = transcribe(&recognizer, &s.samples);
+            emit(&VoiceEvent::Heard { text, for_n4n0: s.for_n4n0, seconds, decode_ms, listen: s.listen });
+        });
+    }
+
+    /// At most one provisional job, with no backlog: a busy decoder skips the snapshot.
+    fn partial(&mut self) {
+        // Measured CPU re-decode exceeds the live budget beyond eight seconds. Fall back to the meter,
+        // rather than queue old words or spend two CPU cores repeatedly decoding a long utterance.
+        if self.held.len() > RATE * 8 {
+            self.partial_id.store(0, Ordering::Relaxed);
+            if self.held.len().saturating_sub(RATE * 8) < RATE / 10 {
+                emit(&VoiceEvent::Provisional { listen: self.listen.as_ref().unwrap().id, text: String::new() });
+            }
+            return;
         }
-        let (text, decode_ms) = transcribe(recognizer, &s.samples);
-        emit(&VoiceEvent::Heard { text, for_n4n0: s.for_n4n0, seconds, decode_ms, listen: s.listen });
+        if self.held.len() < RATE || self.partial_at.elapsed() < Duration::from_millis(1000) { return; }
+        let Recognizer::Ready(recognizer) = &self.recognizer else { return };
+        if self.partial_busy.swap(true, Ordering::Relaxed) { return; }
+        self.partial_at = Instant::now();
+        let (recognizer, samples, busy) = (recognizer.clone(), self.held.clone(), self.partial_busy.clone());
+        let listen = self.listen.as_ref().unwrap().id;
+        let current = self.partial_id.clone();
+        std::thread::spawn(move || {
+            // A final sentence may own inference; a partial never queues behind it.
+            if let Ok(recognizer) = recognizer.try_lock() {
+                let (text, ms) = transcribe(&recognizer, &samples);
+                // Do not display recognitions that have already become visibly stale.
+                if ms <= 750 && current.load(Ordering::Relaxed) == listen { emit(&VoiceEvent::Provisional { listen, text }); }
+            }
+            busy.store(false, Ordering::Relaxed);
+        });
     }
 
     /// A sentence for N4N0 that never started, or went on too long; a microphone due to open again; a recogniser
@@ -801,6 +849,12 @@ fn transcribe_files(files: &[String]) -> anyhow::Result<()> {
     for file in files {
         let wave = sherpa_onnx::Wave::read(file).ok_or_else(|| anyhow::anyhow!("cannot read {file}"))?; // i18n: not shown (the `--transcribe` command line, for developers)
         anyhow::ensure!(wave.sample_rate() == RATE as i32, "{file}: {} Hz (16000 needed)", wave.sample_rate()); // i18n: not shown (the `--transcribe` command line, for developers)
+        for seconds in [1usize, 2, 4, 6, 8, 12, 20, 30] {
+            let count = (seconds * RATE).min(wave.samples().len());
+            let (_, ms) = transcribe(&recognizer, &wave.samples()[..count]);
+            println!("prefix {count} samples: {ms} ms");
+            if count == wave.samples().len() { break; }
+        }
         let (text, ms) = transcribe(&recognizer, wave.samples());
         println!("{file}: {:.1} s of audio in {ms} ms: {text}", wave.samples().len() as f32 / RATE as f32);
     }
@@ -1012,5 +1066,28 @@ mod tests {
         assert!(e.to_string().contains("SHA-256"), "{e}");
         assert!(!part.exists());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod fixture_tests {
+    use super::*;
+
+    #[test]
+    #[ignore = "requires installed Silero and ORBITERS_VOICE_FIXTURE (16 kHz PCM), never a microphone"]
+    fn fixture_vad_ends_one_automatic_sentence() {
+        let path = std::env::var("ORBITERS_VOICE_FIXTURE").unwrap();
+        let wave = sherpa_onnx::Wave::read(&path).unwrap();
+        assert_eq!(wave.sample_rate(), RATE as i32);
+        let (tx, _) = mpsc::channel();
+        let mut worker = Worker::new(tx);
+        worker.vad = Some(load_vad(&orbiters_core::paths::models_dir()).unwrap());
+        worker.listen = Some(Listen { hold: false, since: Instant::now(), id: 41 });
+        for chunk in wave.samples().chunks(WINDOW) { worker.audio(chunk.to_vec()); }
+        for _ in 0..40 { worker.audio(vec![0.0; WINDOW]); }
+        assert!(worker.listen.is_none(), "Silero ended the sentence");
+        assert_eq!(worker.waiting.len(), 1, "exactly one final decode request");
+        assert_eq!(worker.waiting[0].listen, 41);
+        assert!(worker.mic.is_none(), "fixture never opened a microphone");
     }
 }

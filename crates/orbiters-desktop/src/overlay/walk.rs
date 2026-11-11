@@ -1794,7 +1794,8 @@ mod tests {
                 }
                 push_for = push_for.saturating_sub(1);
                 heading += (noise(&mut state) % 7) as f32 - 3.0;
-                let stick = (push_for > 0).then_some([0.0, 1.0]);
+                // A neutral reading is release; unavailable input must not rearm a safety stop.
+                let stick = Some([0.0, if push_for > 0 { 1.0 } else { 0.0 }]);
                 let tracked = noise(&mut state) % 500 != 0;
                 room.untracked = !tracked;
                 // Another application's drag, a recenter, another world: all may move the play space in one go.
@@ -1809,7 +1810,9 @@ mod tests {
                 }
                 let place = if event == 4 { "wrld_2" } else { "wrld_1" };
                 moved_by_someone |= walk.place.as_deref() != Some(place);
-                let speed = (noise(&mut state) % 8) as f32;
+                // This fixture models total speed including injection; zero still models a freeze.
+                let native = (noise(&mut state) % 8) as f32;
+                let speed = if native > 0.0 { native + 8.0 } else { 0.0 };
                 let m = Moment { place: Some(place), motion: Some(Motion { in_station: false, speed, speed_at_ms: None }), ..moment(&s, None) };
                 walk.step(&mut room, &m, || stick, || tracked.then(|| yaw(heading)), now);
                 let at = carried_by(&room);

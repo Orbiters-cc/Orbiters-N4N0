@@ -777,6 +777,8 @@ struct Stage {
     epoch: u64,
     cache: Vec<page_painter::Frame>,
     restore: bool,
+    /// The snapshot actually shown, including the head and the capture hole.
+    presented: Option<(u64, Facts, f64)>,
     async_pages: bool,
     remote_pictures: crate::worlds::Pictures,
     worker_phases: super::PaintPhases,
@@ -815,7 +817,7 @@ impl Stage {
         let canvas = Canvas::zoomed(px[0], px[1], px[0] as f32 / layout::WIDTH as f32).in_orbit_look();
         let host = MenuHost::with_media(canvas.ctx().clone(), media.clone());
         let worlds = with_worlds.then(|| Worlds::alone(canvas.ctx().clone()));
-        Self { remote_pictures: crate::worlds::Pictures::new(&canvas.ctx()), async_pages: false, worker_phases: Default::default(), painter: page_painter::Painter::new(px), epoch: 0, cache: Vec::new(), restore: false, canvas, host, worlds, px, retro: false, skin: page_skin(DEFAULT_PAGE_ACCENT), skin_for: (DEFAULT_PAGE_ACCENT, orbiters_i18n::language()) }
+        Self { remote_pictures: crate::worlds::Pictures::new(&canvas.ctx()), async_pages: false, worker_phases: Default::default(), painter: page_painter::Painter::new(px), epoch: 0, cache: Vec::new(), restore: false, presented: None, canvas, host, worlds, px, retro: false, skin: page_skin(DEFAULT_PAGE_ACCENT), skin_for: (DEFAULT_PAGE_ACCENT, orbiters_i18n::language()) }
     }
 }
 
@@ -883,6 +885,7 @@ pub struct Panels {
     /// A press on a list, which may yet be a drag; where the pointer is on the sheet; and what it turned out to press.
     drag: Option<Drag>,
     sheet_pointer: Option<Pos2>,
+    header_pointer: Option<Pos2>,
     pressed_late: Option<Action>,
     /// Each screen as it was left: by its sheet and its name. N4N0's pages keep their results in the menu itself, which goes on being there, and the page they were on here.
     kept: HashMap<(Sheet, String), Kept>,
@@ -989,6 +992,7 @@ impl Panels {
             copied: None,
             drag: None,
             sheet_pointer: None,
+            header_pointer: None,
             pressed_late: None,
             kept: HashMap::new(),
             kept_pages: HashMap::new(),
@@ -2117,6 +2121,7 @@ impl Panels {
         let (sheet, show_keys, desktop) = (self.facts.sheet, self.show_keys, self.facts.desktop);
         let mut worlds_hover = None;
         let mut on_zone = None;
+        self.header_pointer = on.filter(|(at, _)| self.list.get(*at).is_some_and(|p| p.zone == Zone::SheetBack)).map(|(_, p)| p);
         self.sheet_pointer = on.filter(|(at, _)| *at == count).map(|(_, p)| p);
         if let (Some(from), Some(p), Some(view)) = (self.turning, self.sheet_pointer, &self.sheet_view) {
             view.turn(p.x - from.x, p.y - from.y);
@@ -2782,8 +2787,9 @@ impl Panels {
         let live = !snap.settings.reduce_motion;
         // Borrowed: a copy of what plays's picture was made here every turn a menu was up, painting or not.
         let art = &self.art;
+        let threaded = self.stage.async_pages && self.takeover.is_some() && self.facts.sheet.is_some_and(|s| !matches!(s, Sheet::Worlds | Sheet::Menu));
         for panel in &mut self.list {
-            if !panel.dirty {
+            if !panel.dirty || (threaded && panel.zone == Zone::SheetBack) {
                 continue;
             }
             let first = !panel.painted;
@@ -2830,6 +2836,8 @@ impl Panels {
         stage.canvas.set_restyle_off(sheet == Some(Sheet::Menu));
         if let Some(frame) = stage.painter.take() {
             if frame.matches(stage.epoch, sheet, &self.facts.recent) {
+                stage.presented = Some((stage.epoch, frame.facts.clone(), frame.time));
+                for back in self.list.iter_mut().filter(|p| p.zone == Zone::SheetBack) { back.dirty = true; }
                 panel.out.clone_from(&frame.pixels);
                 panel.items.clone_from(&frame.items);
                 panel.hover = self.sheet_pointer.and_then(|p| panels::hit(&frame.items, p));
@@ -2845,12 +2853,27 @@ impl Panels {
         }
         if std::mem::take(&mut stage.restore) {
             if let Some(frame) = stage.cache.iter().find(|f| Some(f.sheet) == sheet && f.facts.recent == self.facts.recent) {
+                stage.presented = Some((stage.epoch, frame.facts.clone(), frame.time));
+                for back in self.list.iter_mut().filter(|p| p.zone == Zone::SheetBack) { back.dirty = true; }
                 panel.out.clone_from(&frame.pixels);
                 panel.items.clone_from(&frame.items);
                 panel.hover = self.sheet_pointer.and_then(|p| panels::hit(&frame.items, p));
                 panel.painted = true;
                 show(panel, [0, 0, panel.px[0], panel.px[1]]);
             }
+        }
+        // A cold page has no hit targets until its first picture arrives. Never leave A's pixels
+        // beneath B's header while the worker paints B. A visited page was restored above.
+        if threaded && stage.presented.as_ref().is_none_or(|(epoch, _, _)| *epoch != stage.epoch) {
+            panel.out.fill(0);
+            panel.items.clear();
+            panel.hover = None;
+            panel.pressed = None;
+            panel.painted = false;
+            panel.dirty = true;
+            stage.presented = Some((stage.epoch, self.facts.clone(), time));
+            for back in self.list.iter_mut().filter(|p| p.zone == Zone::SheetBack) { back.dirty = true; }
+            show(panel, [0, 0, panel.px[0], panel.px[1]]);
         }
         match sheet {
             Some(Sheet::Worlds) => {
@@ -2888,7 +2911,9 @@ impl Panels {
                 if panel.dirty || (stage.async_pages && stage.remote_pictures.loading()) {
                     let first = !panel.painted;
                     panel.dirty = false;
+                    let items_at = Instant::now();
                     let items = panels::sheet_items(sheet, &self.facts);
+                    super::record_phase(4, items_at.elapsed());
                     let ctx = if stage.async_pages { stage.painter.ctx.clone() } else { stage.canvas.ctx().clone() };
                     let mut facts = self.facts.clone();
                     if sheet == Sheet::All {
@@ -2995,6 +3020,19 @@ impl Panels {
                 }
             }
             None => {}
+        }
+        if threaded {
+            let (_, facts, shown_at) = stage.presented.as_ref().expect("a page snapshot");
+            for back in self.list.iter_mut().filter(|p| p.zone == Zone::SheetBack && p.dirty) {
+                let pressed = back.pressed.and_then(|n| back.items.get(n)).map(|i| i.action);
+                back.items = panels::items(back.zone, back.logical, facts);
+                back.hover = self.header_pointer.and_then(|p| panels::hit(&back.items, p));
+                back.pressed = pressed.and_then(|a| back.items.iter().position(|i| i.action == a));
+                orbiters_ui::anim::set_live(back.canvas.ctx(), live);
+                back.canvas.paint(*shown_at, |p| panels::paint(p, back.zone, back.logical, facts, back.hover, back.pressed));
+                if let Some(changed) = back.take_picture() { back.painted = true; show(back, changed); }
+                back.dirty = false;
+            }
         }
     }
 

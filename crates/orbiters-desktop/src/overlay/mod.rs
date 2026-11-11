@@ -223,6 +223,7 @@ impl Presenter {
 /// CPU paint phases accumulated by the headless harness only.
 #[derive(Clone, Copy, Default, Debug)]
 pub(crate) struct PaintPhases {
+    pub facts: Duration,
     pub text: Duration,
     pub tessellation: Duration,
     pub raster: Duration,
@@ -241,7 +242,7 @@ pub(crate) fn paint_phases(reset: bool) -> PaintPhases {
 fn record_phase(phase: usize, took: Duration) {
     PAINT_PHASES.with(|p| {
         if let Some(mut v) = p.get() {
-            match phase { 0 => v.text += took, 1 => v.tessellation += took, 2 => v.raster += took, _ => v.finish += took }
+            match phase { 0 => v.text += took, 1 => v.tessellation += took, 2 => v.raster += took, 3 => v.finish += took, _ => v.facts += took }
             p.set(Some(v));
         }
     });

@@ -748,9 +748,9 @@ pub struct SheetPicture {
     page_px: [u32; 2],
     top: u32,
     /// The page is in it.
-    page: bool,
+    pub(super) page: bool,
     /// What changed since it was last shown.
-    changed: Option<[u32; 4]>,
+    pub(super) changed: Option<[u32; 4]>,
 }
 
 impl SheetPicture {
@@ -1368,22 +1368,32 @@ impl OrbitVr {
                 }
                 return;
             }
+            // A newly opened sheet gets its back on the next layout turn; wait for that
+            // rather than submitting its page as a second, overlapping overlay.
+            if panel.zone == Zone::Takeover { return; }
             let handle = part_handle(&mut *handles, overlay, key, panel.zone);
             if handle != 0 {
                 presenter.show_part(overlay, handle, panel.pixels(), panel.px[0], panel.px[1], changed);
             }
         });
+        if let Some(top) = page_at {
+            if !self.sheet.page {
+                if let Some(page) = self.panels.takeover.as_ref().filter(|p| p.painted) {
+                    self.sheet.page(page.pixels(), page.px, top, [0, 0, page.px[0], page.px[1]]);
+                }
+            }
+        }
         if let Some(changed) = self.sheet.changed.take() {
             let handle = part_handle(&mut self.handles, overlay, &self.key, Zone::SheetBack);
             if handle != 0 {
                 presenter.show_part(overlay, handle, &self.sheet.pixels, self.sheet.px[0], self.sheet.px[1], changed);
             }
         }
-        let shown: Vec<Zone> = self.panels.all().map(|p| p.zone).filter(|z| page_at.is_none() || *z != Zone::Takeover).collect();
+        let shown: Vec<Zone> = self.panels.all().map(|p| p.zone).filter(|z| *z != Zone::Takeover).collect();
         for (((quad, _), panel), place) in quads.iter().zip(self.panels.all()).zip(placing) {
             if let Some(handle) = self.handles.get(&panel.zone) {
                 // In the back's picture.
-                if panel.zone == Zone::Takeover && page_at.is_some() {
+                if panel.zone == Zone::Takeover {
                     continue;
                 }
                 if !panel.painted || !panel.shown {
@@ -1922,6 +1932,7 @@ mod tests {
         assert_eq!(sheet.changed, Some([0, 88, 1, 89]));
         assert_eq!(&sheet.pixels[((88 * bw) * 4) as usize..((88 * bw) * 4 + 4) as usize], &[1, 2, 3, 255]);
         sheet.back(&back_pixels, back.px, 88, [0, 0, bw, 1]);
+        assert_eq!(sheet.changed, Some([0, 0, bw, 89]), "one submission covers header and translated page damage");
         assert_eq!(&sheet.pixels[((88 * bw) * 4) as usize..((88 * bw) * 4 + 4) as usize], &[1, 2, 3, 255], "the page stays over a back painted again");
     }
 }

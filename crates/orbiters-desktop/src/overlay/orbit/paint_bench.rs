@@ -125,6 +125,7 @@ struct Rig {
     pointer: Option<(usize, Pos2)>,
     clock: f64,
     was_shown: bool,
+    sheet: vr::SheetPicture,
     step: String,
     logged: Logged,
     turn_in_step: usize,
@@ -260,6 +261,7 @@ impl Rig {
             pointer: None,
             clock: 0.0,
             was_shown: false,
+            sheet: vr::SheetPicture::default(),
             step: String::new(),
             logged: Logged::Turns,
             turn_in_step: 0,
@@ -364,8 +366,20 @@ impl Rig {
             let t = Instant::now();
             let (mut shows, mut pixels, mut upload) = (0u32, 0u64, Duration::ZERO);
             let (gpu, handles, notes) = (&mut self.gpu, &mut self.handles, &mut self.notes);
+            let page_top = (self.mode == Mode::Vr).then(|| self.panels.all().find(|p| p.zone == Zone::SheetBack).zip(self.panels.takeover.as_ref()).and_then(|(b, p)| vr::page_row(b, p))).flatten();
+            let mode = self.mode;
+            let sheet = &mut self.sheet;
+            if page_top.is_none() { sheet.page = false; }
             crate::overlay::paint_phases(true);
             self.panels.paint(&self.snap, |panel, changed| {
+                if let (Some(top), Zone::SheetBack | Zone::Takeover) = (page_top, panel.zone) {
+                    let at = Instant::now();
+                    if panel.zone == Zone::SheetBack { sheet.back(panel.pixels(), panel.px, top, changed); }
+                    else { sheet.page(panel.pixels(), panel.px, top, changed); }
+                    super::super::record_phase(3, at.elapsed());
+                    return;
+                }
+                if mode == Mode::Vr && panel.zone == Zone::Takeover { return; }
                 shows += 1;
                 pixels += (changed[2].saturating_sub(changed[0]) as u64) * (changed[3].saturating_sub(changed[1]) as u64);
                 if let Some(textures) = gpu.as_mut() {
@@ -378,6 +392,26 @@ impl Rig {
                     upload += t.elapsed();
                 }
             });
+            if let Some(top) = page_top {
+                if !sheet.page {
+                    if let Some(page) = self.panels.takeover.as_ref().filter(|p| p.painted) {
+                        sheet.page(page.pixels(), page.px, top, [0, 0, page.px[0], page.px[1]]);
+                    }
+                }
+            }
+            if let Some(changed) = sheet.changed.take() {
+                shows += 1;
+                pixels += (changed[2] - changed[0]) as u64 * (changed[3] - changed[1]) as u64;
+                if let Some(textures) = gpu.as_mut() {
+                    let at = Instant::now();
+                    let next = handles.len() as orbiters_openvr::OverlayHandle + 1;
+                    let handle = *handles.entry(Zone::SheetBack).or_insert(next);
+                    if let Err(e) = textures.write_part(handle, &sheet.pixels, sheet.px[0], sheet.px[1], changed) {
+                        notes.push(format!("a composed texture could not be written: {e}")); // i18n: not shown (benchmark diagnostics)
+                    }
+                    upload += at.elapsed();
+                }
+            }
             cost.phases = crate::overlay::paint_phases(false);
             cost.worker = self.panels.stage.worker_phases;
             cost.upload = upload;
@@ -484,6 +518,11 @@ impl Rig {
     /// Each part's picture as a file, where the script rests.
     fn save_pictures(&mut self) {
         let Some(dir) = self.pictures.clone() else { return };
+        if self.mode == Mode::Vr && self.panels.sheet_open() && !self.sheet.pixels.is_empty() {
+            let image = egui::ColorImage::from_rgba_premultiplied([self.sheet.px[0] as usize, self.sheet.px[1] as usize], &self.sheet.pixels);
+            let path = dir.join(format!("{}-{}-Composed.png", self.mode.name(), self.step)); // i18n: not shown (benchmark artifact path)
+            if let Err(e) = orbiters_ui::offscreen::save_png(&path, &image) { self.notes.push(e.to_string()); }
+        }
         for panel in self.panels.all().filter(|p| p.painted && p.shown) {
             let image = egui::ColorImage::from_rgba_premultiplied([panel.px[0] as usize, panel.px[1] as usize], panel.pixels());
             let path = dir.join(format!("{}-{}-{:?}.png", self.mode.name(), self.step, panel.zone)); // i18n: not shown (a developer's benchmark command)
@@ -576,6 +615,11 @@ impl Rig {
 
     /// Points at what does `action`, presses and lets go, a turn each as a hand takes them, and the hand goes. Says whether there was such a thing.
     fn press(&mut self, action: Action) -> bool {
+        // The wing is hidden with a page up: go back through its real Close control first.
+        if self.find(action).is_none() && self.panels.sheet_open() && action != Action::CloseSheet {
+            self.press(Action::CloseSheet);
+            self.rest();
+        }
         let Some(at) = self.find(action) else {
             self.notes.push(format!("{} {}: nothing does {action:?}", self.mode.name(), self.step)); // i18n: not shown (a developer's benchmark command)
             return false;
@@ -797,17 +841,18 @@ fn summary(mode: Mode, run: usize, rig: &Rig, out: &mut String) {
     }
     let _ = writeln!(out, "\n| step | phase | p50 ms | p95 ms | p99 ms | max ms |\n|---|---|---:|---:|---:|---:|");
     for step in &rig.steps {
-        for phase in 0..7 {
+        for phase in 0..9 {
             let mut values: Vec<f64> = step.turns.iter().map(|c| ms(match phase {
                 0 => c.whole(), 1 => c.phases.text, 2 => c.phases.tessellation,
                 3 => c.phases.raster, 4 => c.phases.finish,
-                6 => c.worker.text + c.worker.tessellation + c.worker.raster + c.worker.finish,
+                7 => c.phases.facts, 8 => c.worker.facts,
+                6 => c.worker.facts + c.worker.text + c.worker.tessellation + c.worker.raster + c.worker.finish,
                 _ => c.paint.saturating_sub(c.phases.text + c.phases.tessellation + c.phases.raster + c.phases.finish),
             })).collect();
             values.sort_by(f64::total_cmp);
             if values.is_empty() { continue; }
             let percentile = |p: f64| values[((values.len() as f64 * p).ceil() as usize).saturating_sub(1)];
-            let label = ["turn", "text/layout", "textures/tessellation", "raster", "finish/copy", "facts/items/other", "worker"][phase];
+            let label = ["turn", "text/layout", "textures/tessellation", "raster", "finish/copy", "facts/items/other", "worker", "items", "worker items"][phase];
             let _ = writeln!(out, "| {} | {label} | {:.3} | {:.3} | {:.3} | {:.3} |", step.name, percentile(0.50), percentile(0.95), percentile(0.99), values[values.len()-1]);
         }
     }
@@ -901,11 +946,11 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             }
             summary(mode, run, &rig, &mut report);
             if let Some(out) = &out {
-                let mut csv = String::from("step,turn,set_open_ms,follow_ms,hand_ms,paint_ms,upload_ms,shows,pixels,wall_ms,worker_text_ms,worker_tess_ms,worker_raster_ms,worker_finish_ms\n"); // i18n: not shown (machine-readable benchmark column names)
+                let mut csv = String::from("step,turn,set_open_ms,follow_ms,hand_ms,paint_ms,upload_ms,shows,pixels,wall_ms,worker_text_ms,worker_tess_ms,worker_raster_ms,worker_finish_ms,facts_items_ms,text_ms,tess_ms,raster_ms,finish_ms,worker_items_ms\n"); // i18n: not shown (machine-readable benchmark column names)
                 for step in &rig.steps {
                     for (n, c) in step.turns.iter().enumerate() {
                         use std::fmt::Write as _;
-                        let _ = writeln!(csv, "{},{n},{:.4},{:.4},{:.4},{:.4},{:.4},{},{},{:.4},{:.4},{:.4},{:.4},{:.4}", step.name, ms(c.open), ms(c.follow), ms(c.hand), ms(c.paint), ms(c.upload), c.shows, c.pixels, ms(c.wall), ms(c.worker.text), ms(c.worker.tessellation), ms(c.worker.raster), ms(c.worker.finish));
+                        let _ = writeln!(csv, "{},{n},{:.4},{:.4},{:.4},{:.4},{:.4},{},{},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4}", step.name, ms(c.open), ms(c.follow), ms(c.hand), ms(c.paint), ms(c.upload), c.shows, c.pixels, ms(c.wall), ms(c.worker.text), ms(c.worker.tessellation), ms(c.worker.raster), ms(c.worker.finish), ms(c.phases.facts), ms(c.phases.text), ms(c.phases.tessellation), ms(c.phases.raster), ms(c.phases.finish), ms(c.worker.facts));
                     }
                 }
                 std::fs::write(out.join(format!("turns-{}-{run}.csv", mode.name())), csv)?; // i18n: not shown (a developer's benchmark command)

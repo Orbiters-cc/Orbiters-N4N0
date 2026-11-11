@@ -19,6 +19,7 @@ pub(super) struct Frame {
     pub items: Vec<Item>,
     pub pixels: Vec<u8>,
     pub phases: crate::overlay::PaintPhases,
+    pub time: f64,
     pub hover: Option<usize>,
     pub pressed: Option<usize>,
 }
@@ -51,13 +52,16 @@ impl Painter {
                 };
                 let frame = orbiters_i18n::in_language(request.language, || {
                     crate::overlay::paint_phases(true);
+                    let items_at = Instant::now();
                     let items = panels::sheet_items(request.sheet, &request.facts);
+                    super::super::record_phase(4, items_at.elapsed());
                     canvas.paint(request.time, |p| panels::paint_sheet(p, request.sheet, &request.facts, request.hover, request.pressed));
                     let start = Instant::now();
                     let mut pixels = canvas.pixels().to_vec();
                     panels::finish_picture(&mut pixels, canvas.pixels(), px, px[0] as f32 / orbiters_n4n0_core::menu::layout::WIDTH as f32, [0, 0, px[0], px[1]]);
+                    panels::cut_page_corners(&mut pixels, px, [0, 0, px[0], px[1]]);
                     super::super::record_phase(3, start.elapsed());
-                    Frame { epoch: request.epoch, sheet: request.sheet, facts: request.facts, items, pixels, hover: request.hover, pressed: request.pressed, phases: crate::overlay::paint_phases(false) }
+                    Frame { time: request.time, epoch: request.epoch, sheet: request.sheet, facts: request.facts, items, pixels, hover: request.hover, pressed: request.pressed, phases: crate::overlay::paint_phases(false) }
                 });
                 let retired = {
                     let mut state = thread.0.lock().unwrap_or_else(|e| e.into_inner());
@@ -138,6 +142,7 @@ mod tests {
                     serial.paint(1.0, |p| panels::paint_sheet(p, sheet, &facts, None, None));
                     let mut pixels = serial.pixels().to_vec();
                     panels::finish_picture(&mut pixels, serial.pixels(), [512, 288], 512.0 / orbiters_n4n0_core::menu::layout::WIDTH as f32, [0, 0, 512, 288]);
+                    panels::cut_page_corners(&mut pixels, [512, 288], [0, 0, 512, 288]);
                     assert_eq!(frame.pixels, pixels);
                 });
             }

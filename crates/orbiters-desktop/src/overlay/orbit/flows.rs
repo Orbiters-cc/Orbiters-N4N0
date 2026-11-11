@@ -1033,9 +1033,10 @@ fn the_way_to_vrchat_s_menus_keeps_its_place_on_the_head() {
 #[test]
 fn every_page_has_its_sheet_s_corners() {
     use orbiters_core::settings::MenuLook;
-    for look in [MenuLook::Modern, MenuLook::Retro] {
+    for (look, worker) in [(MenuLook::Modern, false), (MenuLook::Retro, false), (MenuLook::Modern, true), (MenuLook::Retro, true)] {
         for opens in [Action::All, Action::Worlds, Action::Pictures, Action::Page(Target::YouTube), Action::Page(Target::Instances)] {
             let mut person = Person::new();
+            person.panels.stage.async_pages = worker;
             let mut snap = (*person.snap).clone();
             snap.settings.orbit.theme = look;
             person.snap = Arc::new(snap);
@@ -1069,4 +1070,39 @@ fn every_page_has_its_sheet_s_corners() {
             assert!(alpha(&whole, w / 2, h / 2) > 250, "{look:?} {opens:?}: solid in its middle");
         }
     }
+}
+
+
+#[test]
+fn worker_switches_publish_matching_page_header_and_hit_geometry() {
+    let mut person = Person::new();
+    person.panels.stage.async_pages = true;
+    person.around = Some(Around::QuickMenu);
+    person.turns(4);
+    person.panels.open_sheet(Sheet::Settings, "Settings", &person.snap);
+    person.turns_until("settings worker frame", |p| p.panels.takeover.as_ref().is_some_and(|p| p.painted) && !p.panels.stage.painter.busy());
+    let settings = person.panels.takeover.as_ref().unwrap().out.clone();
+    let epoch = person.panels.stage.epoch;
+    person.panels.open_sheet(Sheet::Tracking, "Tracking", &person.snap);
+    person.turn();
+    if !person.panels.takeover.as_ref().unwrap().painted {
+        assert!(person.panels.takeover.as_ref().unwrap().items.is_empty(), "a cold blank page has no targets");
+    }
+    person.turns_until("tracking worker frame", |p| p.panels.takeover.as_ref().is_some_and(|p| p.painted) && !p.panels.stage.painter.busy());
+    person.panels.open_sheet(Sheet::Settings, "Settings", &person.snap);
+    person.turn();
+    assert!(person.panels.stage.epoch > epoch);
+    let page = person.panels.takeover.as_ref().unwrap();
+    assert_eq!(page.out, settings, "A-B-A restores A on the next turn");
+    let (_, shown, _) = person.panels.stage.presented.as_ref().unwrap();
+    assert_eq!(shown.sheet, Some(Sheet::Settings));
+    assert_eq!(page.items, super::panels::sheet_items(Sheet::Settings, shown));
+    let back = person.panels.list.iter().find(|p| p.zone == Zone::SheetBack).unwrap();
+    assert_eq!(back.items, super::panels::items(back.zone, back.logical, shown));
+    assert!(super::vr::page_row(back, page).is_some());
+    // Invalidation also invalidates the page-cache identity, so old language/look results cannot return.
+    let before = person.panels.stage.epoch;
+    person.panels.paint_all_again();
+    assert!(person.panels.stage.epoch > before);
+    assert!(person.panels.stage.cache.is_empty());
 }

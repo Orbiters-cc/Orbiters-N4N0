@@ -646,7 +646,10 @@ pub fn column_clear(found: &Found, size: [f32;2], mirror: &Mirror, eye: &Matrix3
     // The caption is above the panel; a separating-axis test handles both above and beside.
     let panel = [[-205.,-110.],[205.,-110.],[205.,110.],[-205.,110.]].map(|p|found.at(p));
     let inverse = undone(eye);
-    let mut places: Vec<_> = super::zones::Zone::CAMERA.into_iter().map(super::zones::in_units).collect();
+    // The opaque parts beside and under the camera: not the scanning corners (round the picture by design, transparent but for their strokes off it) nor the page,
+    // which stands on the top edge in a plane of its own.
+    let opaque = [super::zones::Zone::CameraPeople, super::zones::Zone::CameraWorld, super::zones::Zone::CameraRecord, super::zones::Zone::CameraQr, super::zones::Zone::CameraCaption, super::zones::Zone::CameraAct];
+    let mut places: Vec<_> = opaque.into_iter().map(super::zones::in_units).collect();
     if side == Side::Right { for placed in &mut places { *placed=placed.mirrored(); } }
     super::vr::camera_column_out(&mut places,clearance,side==Side::Right);
     places.iter().all(|placed| {

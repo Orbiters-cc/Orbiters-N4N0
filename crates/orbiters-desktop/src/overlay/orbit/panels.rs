@@ -1070,7 +1070,8 @@ pub fn stop_width(high: f32, worded: bool) -> f32 {
     if worded {
         (lead + said + 14.0 + measure(tr_ctx("stop recording", "Stop"), &big) + high * 0.42).ceil()
     } else {
-        (lead + measure(&clock(3599), &small) + 12.0).ceil()
+        // Beside Hide 3D and Small here in a headset's head there is room for no words: a round red button with its square, as wide as the close.
+        high
     }
 }
 
@@ -1212,7 +1213,7 @@ pub fn head(facts: &Facts, w: f32) -> Head {
             small_view = Some(rect);
         }
     }
-    // A recording's Stop, as wide as what it says measures in the language now; with Hide 3D and Small here beside it, its square and clock alone.
+    // A recording's Stop, as wide as what it says measures in the language now; with Hide 3D and Small here beside it, a round button with its square.
     let stop = stop_shown(facts).then(|| {
         let wide = stop_width(b, !facts.view_showing);
         let rect = r(end - wide, top, wide, b);
@@ -3194,15 +3195,18 @@ fn draw(p: &Painter, zone: Zone, item: &Item, facts: &Facts, hovered: bool, pres
             let high = rect.height();
             let (square, small, big) = stop_parts(high);
             let at = pos2(rect.left() + high * 0.5, rect.center().y);
+            let (square, at) = if rect.width() <= high + 1.0 { (square * 0.9, rect.center()) } else { (square, at) };
             if stopping {
                 widgets::icon(p, at, icons::CIRCLE_NOTCH, square + 4.0, look::MUTED);
             } else {
                 p.rect_filled(Rect::from_center_size(at, Vec2::splat(square)), look::radius(2.5), Color32::WHITE);
             }
             let from = rect.left() + high * 0.5 + square / 2.0 + 8.0;
-            // Narrow, in a head crowded by Hide 3D and Small here: the square and the clock, what a press does said when pointed at.
+            // Narrow: as round as the close, its square alone (what a press does is said when pointed at); else the word that says it, where it fits, else the clock.
             if rect.width() < stop_width(high, true) - 1.0 {
-                // The word that says what a press does first, where it fits; else the clock.
+                if rect.width() <= high + 1.0 {
+                    return;
+                }
                 if !stopping && !facts.rec_starting {
                     let word = tr_ctx("stop recording", "Stop");
                     if from + measure(word, &big) + 10.0 <= rect.right() {

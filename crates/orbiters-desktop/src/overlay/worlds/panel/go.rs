@@ -180,7 +180,7 @@ impl Panel {
             p.rect_stroke(card, CornerRadius::same(24), Stroke::new(1.5, fade(orbit_look::accent(), shown)), StrokeKind::Inside);
             widgets::icon(p, pos2(card.center().x, 176.0), icons::CHECK_CIRCLE, 48.0, fade(orbit_look::accent(), shown));
             text(p, pos2(card.center().x, 228.0), Align2::CENTER_CENTER, orbit_look::txt(tr("Invite sent"), 28.0).weight(weight::BOLD).color(fade(theme::FG, shown)));
-            text_cut(p, pos2(card.min.x + 28.0, 262.0), card.width() - 56.0, orbit_look::txt(instance_line(sent), 18.0).color(fade(theme::FG_2, shown)));
+            text(p, pos2(card.center().x, 272.0), Align2::CENTER_CENTER, orbit_look::txt(instance_line(sent), 18.0).color(fade(theme::FG_2, shown)));
             let mut job = orbit_look::txt(tr("In VRChat, open the Quick Menu's notifications and accept the invite. It takes you there."), 19.0).color(fade(theme::FG, shown)).line_height(26.0).job(card.width() - 56.0);
             job.wrap.max_rows = 3;
             job.halign = egui::Align::Center;
@@ -252,8 +252,10 @@ impl Panel {
                 }
             }
         }
-        // Making one: where, then which kind. A press makes it and sends the invite to it.
-        head(p, NEW_LEFT, tr("Make a new one"));
+        // Making one: where, then which kind. A press makes it and sends the invite to it. Not beside the invite sent.
+        if go.invited.is_none() {
+            head(p, NEW_LEFT, tr("Make a new one"));
+        }
         let busy = go.busy.is_some();
         let region = self.go_region_now(go);
         for (t, rect) in targets {

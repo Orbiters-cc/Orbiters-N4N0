@@ -337,7 +337,7 @@ impl DropWhy {
             DropWhy::Can => tr("A card of it in the world, for anyone to take."),
             DropWhy::NoAvatarYet => tr("Waiting for VRChat to say which avatar you wear."),
             DropWhy::NoN4n0 => tr("Your avatar has no N4N0: add N4N0 to it to drop links."),
-            DropWhy::NoCard => tr("Your avatar's N4N0 has no link card: update N4N0 on it."),
+            DropWhy::NoCard => tr("Your avatar's N4N0 has no link card: update it."),
         }
     }
 }
@@ -2980,7 +2980,7 @@ fn draw(p: &Painter, zone: Zone, item: &Item, facts: &Facts, hovered: bool, pres
         }
         Look::VisitHead => {
             // What the rows offer, as large as what is in them; what each column is, on each row over it (round 10's judges found these small and loose).
-            p.text(pos2(26.0, 20.0), Align2::LEFT_CENTER, tr("Invite me: your last visit. Or pick an earlier time."), look::font(19.0, weight::SEMIBOLD), look::LABEL);
+            p.text(pos2(26.0, 20.0), Align2::LEFT_CENTER, tr("A world: its page. Invite me: your last visit, or an earlier time."), look::font(19.0, weight::SEMIBOLD), look::LABEL);
 
         }
         Look::HereNow => {
@@ -3022,7 +3022,7 @@ fn draw(p: &Painter, zone: Zone, item: &Item, facts: &Facts, hovered: bool, pres
             let name = fit(p, &visit.name, &font, room - 30.0);
             let wide = p.layout_no_wrap(name.clone(), font.clone(), look::LABEL).size().x;
             p.text(pos2(x, rect.center().y - 14.0), Align2::LEFT_CENTER, name, font, look::LABEL);
-            widgets::icon(p, pos2(x + wide + 16.0, rect.center().y - 14.0), icons::INFO, 19.0, if hovered { look::accent() } else { look::MUTED });
+            widgets::icon(p, pos2(x + wide + 17.0, rect.center().y - 14.0), icons::INFO, 22.0, if hovered { look::accent() } else { look::LABEL });
             let font = look::font(16.0, weight::MEDIUM);
             p.text(pos2(x, rect.center().y + 14.0), Align2::LEFT_CENTER, fit(p, &visit.line, &font, room), font, look::MUTED);
             // Over its earlier visits' times, on the row: what they are (round 10's judges found it small and loose over the list).

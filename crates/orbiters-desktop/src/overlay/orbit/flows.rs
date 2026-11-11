@@ -882,12 +882,14 @@ fn a_previous_instance_opens_its_world_s_page_and_back_comes_to_where_it_was() {
         person.panels.stage.host.menu.set_instances(rows.clone(), true, "");
         person.turns(2);
         assert_eq!(person.panels.facts.worlds_visited.len(), 12);
-        // Scrolled down, as a person reading the list is, to where a list comes to rest (a list still gliding takes a press for a drag).
-        let scroll = if n == 0 { 0.0 } else { super::panels::snap_scroll(Sheet::Instances, &person.panels.facts, 150.0) };
+        // Scrolled down by the wheel, as a person reading the list is, and come to rest (a list still gliding takes a press for a drag).
+        if n > 0 {
+            person.panels.wheel(-2.0);
+            person.turns_until("the list at rest", |p| (p.panels.facts.gallery_scroll - p.panels.gallery_to).abs() < 0.01 && p.panels.throw == 0.0);
+            person.turns(2);
+        }
+        let scroll = person.panels.gallery_to;
         assert!(n == 0 || scroll > 0.0, "{scroll}");
-        (person.panels.facts.gallery_scroll, person.panels.gallery_to) = (scroll, scroll);
-        person.turns(2);
-        assert_eq!(person.panels.facts.gallery_scroll, scroll, "at rest there");
         person.press(Action::WorldInfo(n));
         person.turns(2);
         assert_eq!(person.panels.facts.sheet, Some(Sheet::Worlds), "world {n}: its page");

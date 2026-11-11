@@ -1797,3 +1797,27 @@ fn review_the_instance_chooser_paints_and_returns_on_the_page_worker() {
     person.press(Action::Back);
     person.turns_until("detail picture after chooser", |p| matches!(&p.panels.stage.presented_scene, Some(super::page_painter::Scene::Worlds(s)) if s.panel.page == Page::Detail));
 }
+
+#[test]
+fn review_new_shell_parts_build_masks_on_the_raster_owner() {
+    let mut person = Person::new(); person.panels.stage.async_pages = true; person.around = Some(Around::Wheel);
+    let places = Zone::around(Around::Wheel).iter().map(|z| zones::in_units(*z)).collect();
+    person.panels.set_open(person.around, places, &person.snap);
+    assert!(person.panels.list.iter().filter(|p| p.zone.ring().is_some()).all(|p| p.mask.is_none()));
+    person.turns_until("ring masks with their pictures", |p| p.panels.list.iter().filter(|p| p.zone.ring().is_some()).all(|p| p.painted && p.mask.is_some()));
+    assert!(person.panels.list.iter().all(|p| p.canvas.direct_paints == 0));
+}
+#[test]
+fn review_invalidated_pictures_are_retired_one_pair_per_input_turn() {
+    let mut person = Person::new(); person.panels.stage.async_pages = true; person.around = Some(Around::QuickMenu); person.turns(3);
+    for sheet in [Sheet::Settings, Sheet::Tracking, Sheet::Mics] {
+        person.panels.open_sheet(sheet, "", &person.snap);
+        person.turns_until("cached picture", |p| p.panels.stage.cache.iter().any(|f| f.sheet == sheet) && !p.panels.stage.painter.busy());
+    }
+    assert_eq!(person.panels.stage.cache.len(), 3);
+    person.panels.paint_all_again();
+    assert!(person.panels.stage.cache.is_empty(), "old look/language pictures cannot be restored");
+    assert_eq!(person.panels.stage.retired.len(), 3);
+    person.panels.follow(&person.snap, 0);
+    assert_eq!(person.panels.stage.retired.len(), 2, "free one pair, not the whole cache on the input thread");
+}

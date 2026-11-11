@@ -25,7 +25,6 @@ pub(super) struct PartSpec {
     pub ctx: egui::Context,
     pub px: [u32; 2],
     pub logical: egui::Vec2,
-    pub mask: Option<Vec<u8>>,
     pub pointer: Option<egui::Pos2>,
     pub pressed: Option<panels::Action>,
 }
@@ -34,6 +33,7 @@ pub(super) struct PartPicture {
     pub zone: Zone,
     pub token: u64,
     pub pixels: Vec<u8>,
+    pub mask: Option<Arc<Vec<u8>>>,
     pub items: Vec<Item>,
     pub hover: Option<usize>,
     pub pressed: Option<usize>,
@@ -72,15 +72,15 @@ struct Mailbox {
     #[cfg(test)] gate: Option<(std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>)>,
 }
 pub(super) struct Painter { shared: Arc<(Mutex<Mailbox>, Condvar)>, pub ctx: egui::Context }
-struct Engine { page: Canvas, parts: HashMap<Zone, (u64, Canvas)>, parallel: bool }
+struct Engine { page: Canvas, parts: HashMap<Zone, (u64, Canvas, Option<Arc<Vec<u8>>>)>, parallel: bool }
 impl Engine {
     fn part(&mut self, spec: &PartSpec, facts: &Facts, time: f64) -> PartPicture {
-        let slot = self.parts.entry(spec.zone).or_insert_with(|| (0, Canvas::new(1, 1)));
+        let slot = self.parts.entry(spec.zone).or_insert_with(|| (0, Canvas::new(1, 1), None));
         if slot.0 != spec.canvas_id {
             let mut canvas = Canvas::zoomed(spec.px[0], spec.px[1], spec.px[0] as f32 / spec.logical.x).in_orbit_look();
             canvas.ctx = spec.ctx.clone();
             canvas.painter.set_parallel(self.parallel);
-            *slot = (spec.canvas_id, canvas);
+            *slot = (spec.canvas_id, canvas, spec.zone.ring().map(|ring| Arc::new(panels::cell_mask(ring, spec.px, spec.px[0] as f32 / spec.logical.x))));
         }
         let items = panels::items(spec.zone, spec.logical, facts);
         let hover = spec.pointer.and_then(|p| panels::hit(&items, p));
@@ -91,9 +91,9 @@ impl Engine {
         let mut pixels = from.to_vec();
         let all = [0, 0, spec.px[0], spec.px[1]];
         panels::finish_picture(&mut pixels, from, spec.px, spec.px[0] as f32 / spec.logical.x, all);
-        if let Some(mask) = &spec.mask { panels::apply_mask(&mut pixels, mask, spec.px, all); }
+        if let Some(mask) = &slot.2 { panels::apply_mask(&mut pixels, mask, spec.px, all); }
         super::super::record_phase(3, began.elapsed());
-        PartPicture { zone: spec.zone, token: spec.token, pixels, items, hover, pressed, facts: facts.clone() }
+        PartPicture { zone: spec.zone, token: spec.token, pixels, mask: slot.2.clone(), items, hover, pressed, facts: facts.clone() }
     }
     fn page(&mut self, mut request: Request) -> Frame {
         if self.page.pixel_size() != request.px {
@@ -150,7 +150,7 @@ impl Audit {
 impl Engine {
     fn mode(&mut self, parallel: bool) {
         self.parallel = parallel; self.page.painter.set_parallel(parallel); self.page.painter.invalidate();
-        for (_, canvas) in self.parts.values_mut() { canvas.painter.set_parallel(parallel); canvas.painter.invalidate(); }
+        for (_, canvas, _) in self.parts.values_mut() { canvas.painter.set_parallel(parallel); canvas.painter.invalidate(); }
     }
 }
 impl Painter {

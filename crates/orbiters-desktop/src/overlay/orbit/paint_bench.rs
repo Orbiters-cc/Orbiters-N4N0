@@ -794,6 +794,7 @@ fn script(rig: &mut Rig) {
         }
     }
     rig.rest();
+    rig.begin("return-pictures-after-menu", Rest);
     rig.panels.open_sheet(super::panels::Sheet::Pictures, "", &rig.snap); rig.turns(1); rig.rest();
     rig.begin("live-color-scroll", Rest);
     for n in 0..90 {

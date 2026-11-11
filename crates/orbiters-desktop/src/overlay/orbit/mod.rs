@@ -124,7 +124,7 @@ pub struct Panel {
     /// The picture as the platform takes it: the canvas's, cut to its shape.
     out: Vec<u8>,
     /// Its shape as a cell of the ring, one byte a pixel, multiplied into each picture.
-    mask: Option<Vec<u8>>,
+    mask: Option<std::sync::Arc<Vec<u8>>>,
     pub items: Vec<Item>,
     pub hover: Option<usize>,
     pub pressed: Option<usize>,
@@ -183,14 +183,14 @@ impl Panel {
 
     /// Accounted pixel storage, in bytes: its two pictures, shape and font atlas copies. This estimate excludes egui bookkeeping and non-font textures; it is not process memory.
     fn bytes(&self) -> usize {
-        self.px[0] as usize * self.px[1] as usize * 8 + self.mask.as_ref().map_or(0, Vec::len) + self.canvas.atlas_bytes()
+        self.px[0] as usize * self.px[1] as usize * 8 + self.mask.as_ref().map_or(0, |m| m.len()) + self.canvas.atlas_bytes()
     }
 
     /// `sharp` pixels of picture a pixel of the placed rectangle (1 on the desktop; more in the headset, whose overlays are looked at closely).
     fn new(placed: Placed, sharp: f32, order: usize, live: bool) -> Self {
         let (px, logical) = Self::size_of(&placed, sharp);
         let zoom = px[0] as f32 / logical.x;
-        let mask = placed.zone.ring().map(|ring| panels::cell_mask(ring, px, zoom));
+        let mask = None; // The raster owner builds a ring mask on its first paint.
         let shown = placed.zone.group().is_none() && placed.zone != Zone::WheelVeil;
         Self {
             token: Canvas::next_id(), pointer: None, displayed: None,
@@ -222,6 +222,7 @@ impl Panel {
     /// time, changed or not: what it hands over is then made from what was just painted and from the look as it is now, and owes nothing to the opening before.
     fn take_picture(&mut self) -> Option<[u32; 4]> {
         let phase = Instant::now();
+        if self.mask.is_none() { self.mask = self.zone.ring().map(|ring| std::sync::Arc::new(panels::cell_mask(ring, self.px, self.px[0] as f32 / self.logical.x))); }
         let [w, h] = self.px;
         let changed = if std::mem::take(&mut self.again) { Some([0, 0, w, h]) } else { self.canvas.damage() };
         let Some(changed) = changed else {
@@ -785,6 +786,7 @@ struct Stage {
     painter: page_painter::Painter,
     epoch: u64,
     cache: Vec<page_painter::Frame>,
+    retired: Vec<page_painter::Frame>,
     restore: bool,
     /// The snapshot actually shown, including the head and the capture hole.
     presented: Option<(u64, Facts, f64)>,
@@ -828,7 +830,7 @@ impl Stage {
         let canvas = Canvas::zoomed(px[0], px[1], px[0] as f32 / layout::WIDTH as f32).in_orbit_look();
         let host = MenuHost::with_media(canvas.ctx().clone(), media.clone());
         let worlds = with_worlds.then(|| Worlds::alone(canvas.ctx().clone()));
-        Self { remote_pictures: crate::worlds::Pictures::new(&canvas.ctx()), async_pages: false, worker_phases: Default::default(), painter: page_painter::Painter::with_context(px, canvas.ctx().clone()), epoch: 0, cache: Vec::new(), restore: false, presented: None, presented_scene: None, navigation: None, canvas, host, worlds, px, retro: false, skin: page_skin(DEFAULT_PAGE_ACCENT), skin_for: (DEFAULT_PAGE_ACCENT, orbiters_i18n::language()) }
+        Self { remote_pictures: crate::worlds::Pictures::new(&canvas.ctx()), async_pages: false, worker_phases: Default::default(), painter: page_painter::Painter::with_context(px, canvas.ctx().clone()), epoch: 0, cache: Vec::new(), retired: Vec::new(), restore: false, presented: None, presented_scene: None, navigation: None, canvas, host, worlds, px, retro: false, skin: page_skin(DEFAULT_PAGE_ACCENT), skin_for: (DEFAULT_PAGE_ACCENT, orbiters_i18n::language()) }
     }
 }
 
@@ -1787,6 +1789,8 @@ impl Panels {
     }
 
     pub fn follow(&mut self, snap: &Snapshot, library: u64) {
+        // Amortize invalidated cache destruction: one picture pair per input turn.
+        drop(self.stage.retired.pop());
         // A code found beside the camera: its page opens over the camera, once for each scan, and the camera stops looking (Enzo, F17).
         if let crate::controller::camera_tools::Qr::Found { url } = &snap.camera_tools.qr {
             if self.web_for != Some(snap.camera_tools.qr_generation) {
@@ -1870,6 +1874,7 @@ impl Panels {
         }
         // All tools shows the newest of them too.
         let in_gallery = matches!(self.facts.sheet, Some(Sheet::Pictures | Sheet::All));
+        let gallery_navigation_changed = self.recents.arranged.as_ref().is_some_and(|(filter, _, _, set)| *filter != self.facts.gallery_filter || set != &self.recents.set);
         let listed = in_gallery && self.recents.follow((library, crate::worlds::picture_revision()), snap.settings.sessions_dir.clone(), snap.settings.picture_folders.clone());
         // An open set's heading follows its place's name, when the list read again has another for it.
         if listed && self.facts.gallery_set.is_some() {
@@ -1890,7 +1895,7 @@ impl Panels {
                 if let Some(drag) = self.drag.as_mut() { drag.action = drag.action.map(action); }
                 self.facts.opened = self.facts.opened.and_then(index);
             }
-            if self.facts.sheet == Some(Sheet::Pictures) {
+            if self.facts.sheet == Some(Sheet::Pictures) && !gallery_navigation_changed {
                 let before = self.facts.gallery_scroll;
                 if let Some(after) = panels::anchored_scroll(&old_gallery, &self.recents.shown, before) {
                     self.facts.gallery_scroll = after;
@@ -2220,7 +2225,10 @@ impl Panels {
     fn paint_all_again(&mut self) {
         self.stage.epoch = self.stage.epoch.wrapping_add(1);
         self.stage.painter.cancel_page(self.stage.epoch);
-        self.stage.cache.clear();
+        self.stage.retired.append(&mut self.stage.cache);
+        // Each paint accepts at most one new frame; each follow retires one. The cap also
+        // bounds callers that invalidate repeatedly without taking normal input turns.
+        if self.stage.retired.len() > 64 { self.stage.retired.drain(..self.stage.retired.len() - 64); }
         self.stage.restore = false;
         self.rested.clear();
         for panel in self.list.iter_mut().chain(self.takeover.iter_mut()) {
@@ -3096,7 +3104,7 @@ impl Panels {
     }
 
     fn paint_spec(panel: &Panel) -> page_painter::PartSpec {
-        page_painter::PartSpec { zone: panel.zone, token: panel.token, canvas_id: panel.canvas.id, ctx: panel.canvas.ctx().clone(), px: panel.px, logical: panel.logical, mask: panel.mask.clone(), pointer: panel.pointer, pressed: panel.pressed.and_then(|i| panel.items.get(i)).map(|i| i.action) }
+        page_painter::PartSpec { zone: panel.zone, token: panel.token, canvas_id: panel.canvas.id, ctx: panel.canvas.ctx().clone(), px: panel.px, logical: panel.logical, pointer: panel.pointer, pressed: panel.pressed.and_then(|i| panel.items.get(i)).map(|i| i.action) }
     }
     fn publish_page(&mut self, frame: &page_painter::Frame, show: &mut impl FnMut(&Panel, [u32; 4])) -> bool {
         let Some(page) = self.takeover.as_ref() else { return false };
@@ -3143,7 +3151,7 @@ impl Panels {
             if let Some(panel) = self.list.iter_mut().find(|p| p.zone == frame.zone && p.token == frame.token) {
                 if panel.out.len() != frame.pixels.len() { continue; }
                 let first = !panel.painted;
-                panel.out = frame.pixels; panel.items = frame.items;
+                panel.out = frame.pixels; panel.items = frame.items; panel.mask = frame.mask;
                 panel.hover = panel.pointer.and_then(|p| panels::hit(&panel.items, p));
                 panel.dirty |= first || panel.hover != frame.hover || panel.pressed != frame.pressed;
                 panel.canvas.ran = true;
@@ -4301,6 +4309,23 @@ mod flows;
 mod review_gallery_follow {
     use super::*;
     fn entry(n: usize) -> LoadedRecent { let key = PathBuf::from(format!("anchor-{n}.png")); LoadedRecent { source: crate::worlds::Picture::Shot { path: key.clone(), size: 1, width: 64 }, key, world_id: String::new(), title: n.to_string(), image: None, asked: false, has_view: false, session: false, picture: false, taken: (1000-n) as u64, modified: 0, aspect: [0.75, 1.8, 1.0][n%3], at: None } }
+    #[test]
+    fn review_an_intentional_filter_reset_starts_at_the_top() {
+        let _one = super::flows::ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+        let mut panels = Panels::new(std::sync::Arc::new(crate::screenshot::Still), 2.0, false);
+        let snap = crate::screenshot::idle_snapshot(&orbiters_core::settings::Settings::default(), &[]);
+        panels.open = Some(Around::QuickMenu); panels.facts.sheet = Some(Sheet::Pictures);
+        panels.facts.gallery_filter = panels::GalleryFilter::Captures;
+        panels.recents.loaded = (0..27).map(|n| { let mut e = entry(n); if n >= 9 { e.session = true; e.has_view = true; } e }).collect();
+        panels.recents.arrange(panels::GalleryFilter::Captures, snap.settings.photos_layout);
+        panels.recents.seen = Some((0, crate::worlds::picture_revision())); panels.recents.listed = Some(Instant::now());
+        panels.facts.recent = panels.recents.shown.clone();
+        assert_eq!(panels.facts.recent[0].dir, PathBuf::from("anchor-9.png"));
+        panels.act(Action::Filter(panels::GalleryFilter::All), &snap, &mut Pressed::default());
+        panels.follow(&snap, 0);
+        assert_eq!(panels.facts.recent[0].dir, PathBuf::from("anchor-0.png"));
+        assert_eq!((panels.facts.gallery_scroll, panels.gallery_to), (0.0, 0.0), "a deliberate filter change is not progressive insertion");
+    }
     #[test]
     fn review_follow_preserves_the_top_source_during_insertion_and_an_active_drag() {
         let _one = super::flows::ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());

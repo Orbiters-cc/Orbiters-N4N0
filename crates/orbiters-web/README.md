@@ -42,7 +42,7 @@ Windows 11 host). Failure is reported asynchronously through Failed.
 A composition controller uses a message-only HWND, with no desktop visual tree.
 Chromium Page.screencastFrame supplies PNGs on paint, decoded on the worker;
 acks are limited to 10 per second, identical pixels do not advance sequence.
-Software rendering (`--disable-gpu`) avoids loading the VR GPU. This is intended
+The launch requests software rendering (`--disable-gpu`); GPU usage has not been measured. This is intended
 for browsing QR pages, not video or WebGL throughput. There is no WGC desktop
 capture, screen permission prompt, capture border or visible hidden-window trick.
 
@@ -58,26 +58,31 @@ runtime's normal sandbox; the app itself must not be assumed sandboxed.
 
 ## Proof
 
-Run through the shared deskcargo queue:
+Build and test through the shared deskcargo queue:
 
 ```
-cargo run -p orbiters-web --example proof -- C:/Users/Enzo/.orbiters-build/vr-feedback-1111/shots-camera-web
-cargo test -p orbiters-web -p orbiters-i18n
+cargo test -p orbiters-web -p orbiters-i18n -- --test-threads=1
 ```
 
-The proof starts an ephemeral loopback HTTP fixture, validates the loaded pixels,
-scrolls to a known section and saves a different PNG, clicks a fixed link and
-checks URL/title/pixels, resizes, reports a refused connection and closes the
-controller/profile and fixture server. It never starts VRChat, SteamVR or Orbiters.
-Inspect all three PNGs. See done-camera-web.md in the feedback folder for measured
-results and limitations. The camera-ui stream owns placement, chrome, localized
-wording, desktop-browser action and VR validation.
+The engine tests include a real in-process DOM fixture with a four-million-character title,
+known content pixels, repeated bounded polling, local subresource attempts, resize and an
+asynchronously rejected CDP method. Test-only commands are absent from the public build.
+The queue's test command also builds the `review` example. Copy that executable out of the
+shared target immediately, then run it to verify immediate close and close after navigation
+failure. Run these additional harnesses from this crate (supply the copied executable):
 
-To test unavailable-runtime reporting without uninstalling anything, set
-`WEBVIEW2_BROWSER_EXECUTABLE_FOLDER` to a nonexistent directory **only in the
-proof process environment**, then run `proof OUTPUT --expect-unavailable`.
-Close remains nonblocking after this startup failure; no browser was created.
-The failed diagnostic remains available (Closed is the normal cleanup outcome).
+```
+python examples/watcher_check.py
+python examples/browser_check.py C:/path/to/copied-review.exe
+```
+
+The watcher harness checks normal cleanup, host death, stale sweep, delayed unlock and a
+bootstrap orphan. The browser harness starts only its own example processes, crashes their
+host/browser, checks profile removal and process exit, rejects an effective profile override
+while preserving an external sentinel, and checks unavailable-runtime startup cleanup.
+It never targets the installed application. Tests use controlled local listeners and do not
+probe live local services. The older `proof` loopback rendering fixture is denied by the new
+public-network policy. Camera-ui owns placement, localized chrome and headset validation.
 
 ## Review hardening
 

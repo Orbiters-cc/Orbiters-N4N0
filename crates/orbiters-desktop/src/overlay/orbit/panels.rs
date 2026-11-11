@@ -2974,7 +2974,7 @@ fn draw(p: &Painter, zone: Zone, item: &Item, facts: &Facts, hovered: bool, pres
             let big = look::font(30.0, weight::BOLD);
             p.text(pos2(rect.center().x, y), Align2::CENTER_CENTER, fit(p, first, &big, rect.width() - 8.0), big, color);
             let font = look::font(17.5, weight::MEDIUM);
-            p.text(pos2(rect.center().x, y + 34.0), Align2::CENTER_CENTER, fit(p, second, &font, rect.width() - 8.0), font, look::MUTED);
+            p.text(pos2(rect.center().x, y + 34.0), Align2::CENTER_CENTER, fit(p, second, &font, rect.width() - 8.0), font.clone(), look::MUTED);
             // What a press does here, when it is not plain: the way out of signed out, back to by the button, again after a failure.
             let third = match facts.talk {
                 TalkNow::SignIn if facts.talk_signing_in => Some(tr("Finish in your browser, on your computer")),

@@ -342,5 +342,6 @@
   "file\u0004Small": "Léger",
   "Record beside VRChat's camera": "Enregistrer depuis la caméra de VRChat",
   "Stopping…": "Arrêt…",
-  "VRChat did not confirm the capture avatar. Try again.": "VRChat n’a pas confirmé l’avatar de capture. Réessaie."
+  "VRChat did not confirm the capture avatar. Try again.": "VRChat n’a pas confirmé l’avatar de capture. Réessaie.",
+  "Orbiters did not answer for this world's feedback. It tries again by itself.": "Orbiters n'a pas répondu pour les avis de ce monde. Nouvel essai automatique."
 }

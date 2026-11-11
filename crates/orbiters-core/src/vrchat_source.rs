@@ -10,8 +10,26 @@ pub struct Source {
     direct: Option<Arc<Mutex<Client>>>,
     orbiters: Option<(Api, String)>,
     log_account: Option<String>,
+    operation: Option<crate::vrchat_api::Operation>,
 }
 impl Source {
+    /// Personal-only operations preserve 401/expiry and rate-limit errors; never fall back to Orbiters.
+    pub fn personal<T>(&self, user: &str, current: impl Fn() -> bool, f: impl FnOnce(&mut Client) -> crate::vrchat_api::Result<T>) -> crate::vrchat_api::Result<T> {
+        self.personal_until(user, current, std::time::Instant::now() + std::time::Duration::from_secs(60), f)
+    }
+    pub fn personal_until<T>(&self, user: &str, current: impl Fn() -> bool, deadline: std::time::Instant, f: impl FnOnce(&mut Client) -> crate::vrchat_api::Result<T>) -> crate::vrchat_api::Result<T> {
+        // Capture cancellation before contending for the mutex.
+        let direct = self.direct.as_ref().ok_or(Error::Unauthorized)?;
+        let operation = self.operation.as_ref().copied().ok_or(Error::Disabled)?;
+        let mut client = direct.lock().unwrap();
+        if !client.signed_in() { return Err(Error::Unauthorized); }
+        // Cached authenticated identity, no additional HTTP request.
+        if client.signed_in_user_id() != Some(user) { return Err(Error::Unauthorized); }
+        if !current() { return Err(Error::Disabled); }
+        let result = client.with_operation(operation.with_deadline(deadline), f);
+        if !current() { return Err(Error::Disabled); }
+        result
+    }
     pub fn direct_available(&self) -> bool {
         self.direct.as_ref().is_some_and(|c| c.lock().unwrap().signed_in())
     }
@@ -24,7 +42,11 @@ impl Source {
         }).ok_or(Error::Unauthorized)?
     }
     pub fn new(direct: Option<Arc<Mutex<Client>>>, orbiters: Option<(Api, String)>, log_account: Option<String>) -> Self {
-        Self { direct, orbiters, log_account }
+        let operation = direct.as_ref().map(|c| c.lock().unwrap().operation(std::time::Instant::now() + std::time::Duration::from_secs(60)));
+        Self { direct, orbiters, log_account, operation }
+    }
+    pub fn scoped(direct: Option<Arc<Mutex<Client>>>, orbiters: Option<(Api, String)>, log_account: Option<String>, operation: crate::vrchat_api::Operation) -> Self {
+        Self { direct, orbiters, log_account, operation: Some(operation) }
     }
     fn direct<T>(&self, f: impl FnOnce(&mut Client) -> crate::vrchat_api::Result<T>) -> Option<anyhow::Result<T>> {
         let mut c = self.direct.as_ref()?.lock().unwrap();

@@ -35,6 +35,7 @@ pub enum Role {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ToClient {
+    SmoothingAck { id: u64, revision: u64 },
     Snapshot {
         snapshot: Box<Snapshot>,
     },
@@ -78,6 +79,7 @@ pub enum RecordingOrigin {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ToService {
+    PatchSmoothing { id: u64, patch: serde_json::Value },
     Hello {
         token: String,
         role: Role,
@@ -446,6 +448,8 @@ pub fn digest(snapshot: &Snapshot) -> String {
 
 /// The state as a client holds it.
 struct Held {
+    smoothing: Vec<(u64, serde_json::Value, Option<u64>)>,
+    next_smoothing: u64,
     /// What the service published, as its link last said: the snapshot it sent first, with every change since.
     service: Arc<Snapshot>,
     /// What the interface reads: `service`, or that with a change shown before the service confirms it
@@ -453,6 +457,71 @@ struct Held {
     shown: Arc<Snapshot>,
     /// Terminal for this connection; protected by the same lock as both state replacement paths.
     closed: bool,
+}
+
+impl Held {
+    fn follow_smoothing(&mut self) {
+        let revision = self.service.smoothing_revision;
+        self.smoothing.retain(|p| p.2.is_none_or(|ack| revision < ack));
+        let mut shown = (*self.service).clone();
+        for (_, patch, _) in &self.smoothing { shown.settings = shown.settings.patched(patch).0.into(); }
+        self.shown = Arc::new(shown);
+    }
+}
+
+#[cfg(test)]
+mod smoothing_ack_tests {
+    use super::*;
+    #[test]
+    fn two_device_sliders_and_both_menu_sliders_survive_a_stale_snapshot() {
+        let first = Arc::new(Snapshot::new(orbiters_core::settings::Settings::default()));
+        let mut h = Held { service: first.clone(), shown: first, closed: false, next_smoothing: 0, smoothing: Vec::new() };
+        for patch in [
+            serde_json::json!({"tracking":{"ms":[90,0,0]}}),
+            serde_json::json!({"tracking":{"ms":[90,70,0]}}),
+            serde_json::json!({"orbit":{"vr_smoothing_quick_menu_ms":60}}),
+            serde_json::json!({"orbit":{"vr_smoothing_wheel_ms":75}}),
+        ] {
+            h.next_smoothing += 1;
+            h.smoothing.push((h.next_smoothing, patch, None));
+            h.follow_smoothing();
+        }
+        for _ in 0..90 { h.follow_smoothing(); }
+        assert_eq!(h.shown.settings.tracking.ms, [90,70,0]);
+        assert_eq!(h.shown.settings.orbit.vr_smoothing_quick_menu_ms, 60.0);
+        assert_eq!(h.shown.settings.orbit.vr_smoothing_wheel_ms, 75.0);
+    }
+
+    #[test]
+    fn releases_survive_stale_snapshots_and_settle_on_clamp_or_refusal() {
+        let first = Arc::new(Snapshot::new(orbiters_core::settings::Settings::default()));
+        let mut h = Held { service: first.clone(), shown: first.clone(), closed: false, next_smoothing: 2, smoothing: vec![
+            (1, serde_json::json!({"tracking":{"ms":[90,0,0]}}), None),
+            (2, serde_json::json!({"orbit":{"vr_smoothing_wheel_ms":75}}), None),
+        ] };
+        h.follow_smoothing();
+        assert_eq!(h.shown.settings.tracking.ms[0], 90);
+        h.service = first.clone(); // unrelated stale state after release
+        h.follow_smoothing();
+        assert_eq!(h.shown.settings.orbit.vr_smoothing_wheel_ms, 75.0);
+        h.smoothing[0].2 = Some(1);
+        h.follow_smoothing(); // acknowledgement ahead of its snapshot
+        assert_eq!(h.shown.settings.tracking.ms[0], 90);
+        let mut accepted = (*first).clone();
+        accepted.smoothing_revision = 1;
+        accepted.settings.tracking.ms[0] = 80; // clamped
+        h.service = Arc::new(accepted);
+        h.follow_smoothing();
+        assert_eq!(h.shown.settings.tracking.ms[0], 80);
+        assert_eq!(h.shown.settings.orbit.vr_smoothing_wheel_ms, 75.0);
+        h.smoothing[0].2 = Some(2);
+        let mut refused = (*h.service).clone();
+        refused.smoothing_revision = 2;
+        h.service = Arc::new(refused);
+        h.follow_smoothing();
+        assert!(h.smoothing.is_empty());
+        assert_eq!(h.shown.settings.orbit.vr_smoothing_wheel_ms, first.settings.orbit.vr_smoothing_wheel_ms);
+    }
 }
 
 /// What a client keeps of the service: the latest snapshot, queued notices and requests for the window.
@@ -506,7 +575,7 @@ impl Client {
         };
         let client = Arc::new(Self {
             writer: Mutex::new(writer),
-            state: Mutex::new(Held { service: first.clone(), shown: first, closed: false }),
+            state: Mutex::new(Held { service: first.clone(), shown: first, closed: false, smoothing: Vec::new(), next_smoothing: 0 }),
             shutdown: reader.get_ref().try_clone()?,
             notices: Mutex::new(Vec::new()),
             library: AtomicU64::new(0),
@@ -540,6 +609,11 @@ impl Client {
                 };
                 let news = matches!(msg, ToClient::Snapshot { .. });
                 match msg {
+                    ToClient::SmoothingAck { id, revision } => {
+                        let mut held = c.state.lock().unwrap();
+                        if let Some(p) = held.smoothing.iter_mut().find(|p| p.0 == id) { p.2 = Some(revision); }
+                        held.follow_smoothing();
+                    }
                     ToClient::Snapshot { snapshot } => c.take_snapshot(Arc::new(*snapshot)),
                     ToClient::Notice { notice } => c.notices.lock().unwrap().push(notice),
                     ToClient::Library { version } => c.library.store(version, Ordering::Relaxed),
@@ -608,8 +682,18 @@ impl Client {
         self.state.lock().unwrap().shown.clone()
     }
 
-    /// Shows a change before the service confirms it. The service's next state replaces it, whatever that state
-    /// changed: what is shown is then the service's again, whole, as when every state came as a whole snapshot.
+    /// Keep released slider values until both their acknowledgement and its authoritative state arrive.
+    pub fn patch_smoothing(&self, patch: serde_json::Value) {
+        let mut held = self.state.lock().unwrap();
+        held.next_smoothing += 1;
+        let id = held.next_smoothing;
+        held.smoothing.push((id, patch.clone(), None));
+        held.follow_smoothing();
+        drop(held);
+        self.send(&ToService::PatchSmoothing { id, patch });
+        self.say_state();
+    }
+
     pub fn update_local(&self, f: impl FnOnce(&mut Snapshot)) {
         let mut held = self.state.lock().unwrap();
         if held.closed { return; }
@@ -625,6 +709,7 @@ impl Client {
         if held.closed { return; }
         held.service = snapshot.clone();
         held.shown = snapshot;
+        held.follow_smoothing();
         drop(held);
         self.say_state();
     }
@@ -643,6 +728,7 @@ impl Client {
         let next = Arc::new(next);
         held.service = next.clone();
         held.shown = next;
+        held.follow_smoothing();
         drop(held);
         self.say_state();
         true
@@ -867,7 +953,7 @@ pub(crate) mod tests {
     fn changed(snapshot: &Snapshot, round: u32) -> Snapshot {
         let mut s = snapshot.clone();
         match round % 9 {
-            0 => s.vrchat.motion = Some(crate::state::AvatarMotion { in_station: false, seated: false, speed: round as f32 * 0.25 }),
+            0 => s.vrchat.motion = Some(crate::state::AvatarMotion { in_station: false, seated: false, speed: round as f32 * 0.25, speed_at_ms: None }),
             1 => s.n4n0.panel = Some(format!("N4N0's panel, round {round}")),
             2 => s.n4n0.lines.push(crate::state::N4n0Line { who: crate::state::N4n0Who::N4n0, text: format!("line {round}"), at_ms: round as u64, streaming: false }),
             3 => {
@@ -950,6 +1036,7 @@ pub(crate) mod tests {
         use crate::state::*;
         let plain = Snapshot::new(Settings::default());
         let mut s = crate::controller::publish_cost::busy_evening();
+        s.smoothing_revision = 3;
         s.version = "another version".into();
         s.vrchat.log_found = !plain.vrchat.log_found;
         s.vrchat.remote = true;

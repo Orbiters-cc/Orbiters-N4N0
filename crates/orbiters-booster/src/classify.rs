@@ -1,6 +1,6 @@
 //! What is limiting this PC, from the last ten seconds of frames. The thresholds are starting values for a test to correct,
 //! none measured. Whether the reason flags fire at all over Virtual Desktop is not known, so the timing rules are there for
-//! that case. Processor and graphics card time overlap, so they are never added, and `1000 / GPU ms` is never called a frame
+//! that case. Wait-inclusive processor time never establishes a processor limit. Processor and graphics card time overlap, so they are never added, and `1000 / GPU ms` is never called a frame
 //! rate.
 
 use crate::frames::{summarize, Frame, Summary};
@@ -34,17 +34,17 @@ pub fn classify(s: &Summary, refresh_hz: f32) -> Limit {
     }
     let budget = crate::frames::budget_ms(refresh_hz);
     let (cpu, gpu) = (s.late_cpu_share, s.late_gpu_share);
-    let (cpu_ms, gpu_ms) = (s.app_cpu.median, s.app_gpu.median);
+    let gpu_ms = s.app_gpu.median;
     if cpu.max(gpu) < 0.05 && s.filled_share < 0.05 {
         return Limit::Fine;
     }
-    if (cpu >= 0.05 && cpu >= 2.0 * gpu) || (cpu_ms >= 0.9 * budget && gpu_ms < 0.8 * budget) {
+    if cpu >= 0.05 && cpu >= 2.0 * gpu {
         return Limit::Processor;
     }
-    if (gpu >= 0.05 && gpu >= 2.0 * cpu) || (gpu_ms >= 0.85 * budget && cpu_ms < 0.8 * budget) {
+    if (gpu >= 0.05 && gpu >= 2.0 * cpu) || (gpu_ms >= 0.85 * budget && cpu < 0.05) {
         return Limit::GraphicsCard;
     }
-    if (cpu >= 0.05 && gpu >= 0.05) || (cpu_ms >= 0.9 * budget && gpu_ms >= 0.85 * budget) {
+    if cpu >= 0.05 && gpu >= 0.05 {
         return Limit::Both;
     }
     Limit::NotSure
@@ -80,6 +80,9 @@ impl Classifier {
         self.ignore();
         self.confirmed = Limit::NotSure;
     }
+
+    #[cfg(test)]
+    pub(crate) fn has_decision_window(&self) -> bool { self.last_look.is_some() }
 
     pub fn confirmed(&self) -> Limit {
         self.confirmed
@@ -136,9 +139,9 @@ mod tests {
         assert_eq!(classify(&summary(0.05, 0.40, 0.4, 10.0, 8.0), HZ), Limit::GraphicsCard);
         assert_eq!(classify(&summary(0.30, 0.20, 0.4, 10.0, 8.0), HZ), Limit::Both);
         // By timing, with flags that never fire, as may be the case over a streamer.
-        assert_eq!(classify(&summary(0.0, 0.0, 0.48, B, 9.0), HZ), Limit::Processor, "this PC's sessions read this way");
+        assert_eq!(classify(&summary(0.0, 0.0, 0.48, B, 9.0), HZ), Limit::NotSure, "wait-inclusive timing cannot identify a processor limit");
         assert_eq!(classify(&summary(0.0, 0.0, 0.48, 6.0, B), HZ), Limit::GraphicsCard);
-        assert_eq!(classify(&summary(0.0, 0.0, 0.48, B, B), HZ), Limit::Both);
+        assert_eq!(classify(&summary(0.0, 0.0, 0.48, B, B), HZ), Limit::GraphicsCard);
         // Repeating, with neither flag nor time saying why.
         assert_eq!(classify(&summary(0.0, 0.0, 0.48, 6.0, 6.0), HZ), Limit::NotSure);
     }

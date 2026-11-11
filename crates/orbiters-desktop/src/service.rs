@@ -345,6 +345,14 @@ impl Service {
             ToService::ImportRaw { dir } => report(ctl.import_raw_capture(dir)),
             ToService::SaveSettings { settings } => ctl.save_settings(*settings),
             ToService::PatchSettings { patch } => ctl.patch_settings(&patch),
+            ToService::PatchSmoothing { id, patch } => {
+                ctl.patch_settings(&patch);
+                ctl.update(|s| s.smoothing_revision += 1);
+                let revision = ctl.view().smoothing_revision;
+                if let Some(l) = self.links.lock().unwrap().iter().find(|l| l.id == link) {
+                    l.mailbox.post(ToClient::SmoothingAck { id, revision });
+                }
+            }
             ToService::Trash { dir } => {
                 let r = ctl.trash_session(&dir);
                 if r.is_ok() {
@@ -373,8 +381,9 @@ impl Service {
                 let mailbox = self.links.lock().unwrap().iter().find(|l| l.id == link).map(|l| l.mailbox.clone());
                 if let Some(mailbox) = mailbox {
                     let ctl = ctl.clone();
+                    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
                     std::thread::spawn(move || {
-                        let result = ctl.vrchat_data(scope, request);
+                        let result = ctl.vrchat_data_until(scope, request, deadline);
                         mailbox.post(ToClient::VrchatData { id, result });
                     });
                 }
@@ -707,7 +716,7 @@ fn tray_loop(service: &Arc<Service>) -> anyhow::Result<()> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     #[test]
@@ -729,7 +738,7 @@ mod tests {
     use crate::state::{AvatarMotion, N4n0Line, N4n0Who, ReconstructionJob, Snapshot};
 
     /// A service as `run` makes it and serving as `run` serves, around a controller that is never started.
-    fn service() -> Arc<Service> {
+    pub(crate) fn service() -> Arc<Service> {
         let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let endpoint = Endpoint { port: listener.local_addr().unwrap().port(), token: "link-test".into() };
         let service = Service::around(Controller::new(Settings::default()), endpoint, PathBuf::new());
@@ -744,14 +753,14 @@ mod tests {
 
     /// A client of `role` linked to `service` through what can damage or hold the service's lines, or drop the
     /// connection.
-    fn linked_through(service: &Arc<Service>, role: Role) -> (Arc<ipc::Client>, Between) {
+    pub(crate) fn linked_through(service: &Arc<Service>, role: Role) -> (Arc<ipc::Client>, Between) {
         let between = Between::start(service.endpoint.port).unwrap();
         let client = ipc::Client::connect(&Endpoint { port: between.port(), token: service.endpoint.token.clone() }, role).unwrap();
         (client, between)
     }
 
     /// Waits up to five seconds for `done`.
-    fn until(done: impl Fn() -> bool) -> bool {
+    pub(crate) fn until(done: impl Fn() -> bool) -> bool {
         let started = Instant::now();
         while !done() && started.elapsed() < Duration::from_secs(5) {
             std::thread::sleep(Duration::from_millis(5));
@@ -796,7 +805,7 @@ mod tests {
         assert!(overlay.snapshot().steamvr.overlay);
         // One part at a time: a plain value, a slice, a part inside a part, the settings.
         let before = overlay.snapshot();
-        ctl.update(|s| s.vrchat.motion = Some(crate::state::AvatarMotion { in_station: false, seated: true, speed: 1.25 }));
+        ctl.update(|s| s.vrchat.motion = Some(crate::state::AvatarMotion { in_station: false, seated: true, speed: 1.25, speed_at_ms: None }));
         assert!(in_step(&service, &overlay));
         ctl.update(|s| s.n4n0.panel = Some("N4N0's panel".into()));
         ctl.update(|s| {
@@ -1015,7 +1024,7 @@ mod tests {
             ctl.update(|s| {
                 s.settings.walk_boost.strength = 0.9;
                 s.worn_kit = Some(true);
-                s.vrchat.motion = Some(AvatarMotion { in_station: true, seated: false, speed: round as f32 });
+                s.vrchat.motion = Some(AvatarMotion { in_station: true, seated: false, speed: round as f32, speed_at_ms: None });
                 s.n4n0.panel = Some("B".into());
             });
             ctl.update(|s| {

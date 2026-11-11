@@ -3,7 +3,7 @@
 //! captured and shared on Orbiters (the listing the VRChat world "N4N0 - 3D picture viewer" shows) badged 3D, and see
 //! one of those around you in SteamVR, placed as that world places it (its ground on your floor, its start view where
 //! you stand, facing your way) and drawn from the same files (docs/world-view-overlay.md). A world without a capture
-//! has its page: Invite me (an invite to oneself in VRChat) or Launch VRChat, and Open on VRChat.
+//! has its page: Invite me when signed in to VRChat (an invite to oneself), and Open on VRChat.
 //!
 //! A pill under N4N0's menu ("3D worlds") opens the panel ([`panel`]) in the menu's place; the menu's Back comes back
 //! to it. Once a capture shows or loads, a bar takes the pill's place, under the menu or the panel whatever page shows:
@@ -187,7 +187,6 @@ pub struct Worlds {
     key: String,
     /// What says how to handle what shows small; it has been used; a new opening of the menu asks it back for the next capture.
     hint: Option<small_hint::SmallHint>,
-    backdrop: Option<small_hint::Backdrop>,
     small_logged: super::vr_log::Every,
     eye_frames_kept: u32,
     hide_chip: Option<small_hint::HideChip>,
@@ -199,6 +198,50 @@ pub struct Worlds {
     hint_used: bool,
     /// The menus up now.
     menu_boxes: Vec<stereo::MenuBox>,
+    /// A world's page opened from elsewhere (a previous instance's row, F10): what the panel showed before, which its Back
+    /// brings back as it leaves for where the page was opened from.
+    opened_from: Option<(panel::Page, Option<u64>)>,
+    /// Go there (F5): the instances of the world whose page shows, and what its threads answered.
+    go: panel::go::GoView,
+    go_said: (mpsc::Sender<GoSaid>, mpsc::Receiver<GoSaid>),
+}
+
+/// What Go there's threads answer, with the world and the account they were asked for.
+enum GoSaid {
+    Listed { world: String, scope: Scope, read: Result<orbiters_core::vrchat_api::WorldInstances, String> },
+    /// The next batch of the list.
+    More { world: String, scope: Scope, read: Result<orbiters_core::vrchat_api::WorldInstances, String> },
+    /// The invite went out to this instance, or why not (and whether the list changed under it).
+    Invited { world: String, scope: Scope, sent: Result<orbiters_core::vrchat_api::WorldInstance, (String, bool)> },
+}
+
+/// Where Go there sends the person.
+enum GoTarget {
+    /// An instance of the list, by its exact id.
+    Listed(String),
+    New(orbiters_core::vrchat_api::CreateAccess, orbiters_core::vrchat_api::InstanceRegion),
+}
+
+/// Why Go there could not, in words.
+fn go_words(e: &crate::controller::vrchat_data::WorldError) -> String {
+    use crate::controller::vrchat_data::WorldError;
+    match e {
+        WorldError::AccountChanged => tr("Your VRChat account changed: try again."),
+        WorldError::SignInRequired => tr("Sign in to VRChat in Orbiters to go there."),
+        WorldError::InvalidWorld => tr("VRChat does not know this world."),
+        WorldError::NotListed => tr("That instance is no longer on the list: here it is again."),
+        WorldError::Full => tr("That instance is full now."),
+        WorldError::Closed => tr("That instance has closed."),
+        WorldError::NotJoinable => tr("You cannot join that instance."),
+        WorldError::Api(e) => return e.to_string(),
+    }
+    .to_string()
+}
+
+/// Whether the list Go there shows is out of date after this answer.
+fn go_list_changed(e: &crate::controller::vrchat_data::WorldError) -> bool {
+    use crate::controller::vrchat_data::WorldError;
+    matches!(e, WorldError::NotListed | WorldError::Full | WorldError::Closed | WorldError::NotJoinable)
 }
 
 /// Now, in Unix seconds.
@@ -300,12 +343,14 @@ impl Worlds {
             small_rays: [None; 2],
             small_triggers: [false; 2],
             small_triggers_were: [false; 2],
-            backdrop: None,
             small_logged: Default::default(),
             eye_frames_kept: 0,
             small_place: None,
             hint_used: false,
             menu_boxes: Vec::new(),
+            opened_from: None,
+            go: Default::default(),
+            go_said: mpsc::channel(),
         })
     }
 
@@ -396,12 +441,14 @@ fn keep_an_eye_frame(steamvr: &vr::Client, n: u32) {
             small_rays: [None; 2],
             small_triggers: [false; 2],
             small_triggers_were: [false; 2],
-            backdrop: None,
             small_logged: Default::default(),
             eye_frames_kept: 0,
             small_place: None,
             hint_used: false,
             menu_boxes: Vec::new(),
+            opened_from: None,
+            go: Default::default(),
+            go_said: mpsc::channel(),
         }
     }
 
@@ -464,6 +511,7 @@ fn keep_an_eye_frame(steamvr: &vr::Client, n: u32) {
             self.panel.dirty = true;
         }
         self.ask_feedback();
+        self.follow_go();
         for ask in self.outbox.drain(..) {
             backend.n4n0(N4n0Command::Feedback { ask });
         }
@@ -556,7 +604,9 @@ fn keep_an_eye_frame(steamvr: &vr::Client, n: u32) {
                     self.finder.retry();
                 }
                 Action::Search => self.search_now = true,
-                Action::Join(world) => self.join(world),
+                Action::Join(world) => self.go_load(world),
+                Action::GoTo { world, instance } => self.go_invite(world, GoTarget::Listed(instance)),
+                Action::NewInstance { world, access, region } => self.go_invite(world, GoTarget::New(access, region)),
                 Action::OpenWeb(world) => {
                     let Some(link) = finder::web_link(&world) else { continue };
                     let tx = self.said.0.clone();
@@ -572,6 +622,13 @@ fn keep_an_eye_frame(steamvr: &vr::Client, n: u32) {
                     self.apply(&ask);
                     self.outbox.push(ask);
                 }
+                Action::SignIn => {
+                    if let Some(backend) = &self.backend {
+                        backend.sign_in();
+                    }
+                }
+                // Asked again on the next turn.
+                Action::RetryFeedback => self.asked = None,
             }
         }
         let _ = entries;
@@ -657,6 +714,35 @@ fn keep_an_eye_frame(steamvr: &vr::Client, n: u32) {
         self.panel.side_at = self.time();
     }
 
+    /// `entry`'s page, as a press on it in a list opens it.
+    #[cfg(test)]
+    pub fn pick_for_test(&mut self, entry: Entry) {
+        self.show_world_for_test(entry.id);
+        self.picked = Some(entry);
+    }
+
+    /// Where `target` is on the panel now, in its units: where a hand points to press it.
+    #[cfg(test)]
+    pub fn target_for_test(&self, target: panel::Target) -> Option<egui::Pos2> {
+        let entries = self.entries();
+        let status = self.status();
+        let (no_thumb, no_picture) = (|_: &Entry| -> Option<TextureId> { None }, |_: u64, _: bool| -> Option<TextureId> { None });
+        let picked = self.picked().cloned();
+        let d = Data { entries: &entries, picked: picked.as_ref(), status: &status, feedback: &self.feedback, facts: &self.facts, thumb: &no_thumb, picture: &no_picture, now: unix_now() };
+        self.panel.targets(&d).into_iter().find(|(t, _)| *t == target).map(|(_, r)| r.center())
+    }
+
+    /// The 3D captures Orbiters lists, as if it had just answered.
+    #[cfg(test)]
+    pub fn listing_for_test(&self, entries: Vec<Entry>) {
+        self.catalog.put_for_test(entries);
+    }
+
+    #[cfg(test)]
+    pub fn page_for_test(&self) -> panel::Page {
+        self.panel.page
+    }
+
     #[cfg(test)]
     pub fn status_for_test(&self) -> Status {
         self.status()
@@ -703,9 +789,6 @@ fn keep_an_eye_frame(steamvr: &vr::Client, n: u32) {
         self.view.destroy(overlay);
         if let Some(hint) = self.hint.take() {
             hint.destroy(overlay);
-        }
-        if let Some(backdrop) = self.backdrop.take() {
-            backdrop.destroy(overlay);
         }
         if let Some(chip) = self.hide_chip.take() {
             chip.destroy(overlay);
@@ -870,7 +953,7 @@ fn keep_an_eye_frame(steamvr: &vr::Client, n: u32) {
         // On a sheet in VR the 3D view is the overlay's own: what shows is what it says.
         // All of it: this panel has no view of its own there. It said it was on a screen, and so a capture pressed in a headset turned flat on the page, with no way to be around you.
         if let Some(view) = &self.relay {
-            status = Status { fetching: status.fetching, listing_error: status.listing_error, list: status.list, error: view.error.clone().or(status.error), ..view.clone() };
+            status = Status { fetching: status.fetching, listing_error: status.listing_error, list: status.list, go: status.go, error: view.error.clone().or(status.error), ..view.clone() };
         }
         status
     }
@@ -902,7 +985,7 @@ fn keep_an_eye_frame(steamvr: &vr::Client, n: u32) {
     fn update_hint(&mut self, overlay: &vr::Overlay, steamvr: &vr::Client, presenter: &mut Presenter, snap: &Snapshot) {
         let small = self.view.small_now().copied();
         self.hint_used |= small.is_some_and(|s| s.zoomed);
-        // Across a menu it stays: the menu is drawn over it by sort order (Enzo's diagram: menu, 3D view, backdrop, game). It never fades for that, which made it vanish.
+        // Across a menu it stays: the menu is drawn over it (Enzo's diagram: menu, 3D view, game). It never fades for that, which made it vanish.
         if self.small_logged.due(std::time::Duration::from_secs(1)) && self.view.small() {
             let hint = self.hint.as_ref().map_or("no hint".to_string(), |h| h.report()); // i18n: not shown (a line of the VR test log)
             let chip = self.hide_chip.as_ref().map_or("no X".to_string(), |c| c.report()); // i18n: not shown (a line of the VR test log)
@@ -913,14 +996,8 @@ fn keep_an_eye_frame(steamvr: &vr::Client, n: u32) {
                 Self::keep_an_eye_frame(steamvr, self.eye_frames_kept);
             }
         }
-        // The dark pane behind it in a panel's hole.
-        let pane = small.filter(|s| s.docked).and(self.small_place).map(|(at, radius)| (at, radius * 2.0 / SMALL_FILLS_HOLE + 0.012));
-        if pane.is_some() && self.backdrop.is_none() {
-            self.backdrop = small_hint::Backdrop::new(overlay, &self.key).map_err(|e| eprintln!("{e:#}")).ok();
-        }
-        if let Some(backdrop) = self.backdrop.as_mut() {
-            backdrop.update(overlay, presenter, pane);
-        }
+        // Nothing lies behind it in a panel's hole: the hole is a window onto it (Enzo, 2026-11-11, IMG2). The opaque pane that was there, of order 0, was drawn over the
+        // sheet's head and page and over the capture, which only an order by distance does: what SteamVR did there, whatever the orders said.
         let wanted = small.filter(|s| !self.hint_used && !s.docked).map(|s| {
             let stage = match s.held_by() {
                 Some(hand) => small_hint::Stage::Stick { hand },
@@ -1061,8 +1138,18 @@ fn keep_an_eye_frame(steamvr: &vr::Client, n: u32) {
             fetching,
             listing_error,
             list: self.list_status(),
+            go: self.go.clone(),
             ..Default::default()
         };
+        // Signed out of VRChat meanwhile: nothing of Go there can happen now, and it says so.
+        if !self.vrchat && !s.go.world.is_empty() {
+            s.go = panel::go::GoView {
+                world: s.go.world.clone(),
+                error: Some(go_words(&crate::controller::vrchat_data::WorldError::SignInRequired)),
+                region: s.go.region,
+                ..Default::default()
+            };
+        }
         if let Some(d) = &self.download {
             let (read, total) = (d.progress.read.load(Ordering::Relaxed), d.progress.total.load(Ordering::Relaxed));
             if d.progress.stage.load(Ordering::Relaxed) == catalog::STAGE_PREPARING {
@@ -1104,6 +1191,7 @@ fn keep_an_eye_frame(steamvr: &vr::Client, n: u32) {
     pub fn open_panel(&mut self, layout: KeyboardLayout) {
         self.catalog.refresh(&self.source);
         self.open = true;
+        self.opened_from = None;
         self.panel.layout = layout;
         let status = self.status();
         let time = self.time();
@@ -1115,16 +1203,52 @@ fn keep_an_eye_frame(steamvr: &vr::Client, n: u32) {
         self.panel.moves = moves;
     }
 
+    /// The page of the world `world_id` (named `name`), opened from elsewhere on the sheet: a previous instance's row
+    /// (Enzo, VR feedback F10). A world Orbiters has a 3D capture of shows its capture's page, the newest; any other its
+    /// world's page, its author, description and pictures read as the Visited list reads them. Nothing shows around the
+    /// person and nothing is sent to VRChat: the page has its own buttons for that. Its Back comes back here.
+    pub fn open_world(&mut self, world_id: &str, name: &str) {
+        let was = (self.panel.page, self.panel.selected);
+        let captures = self.captures();
+        let capture = captures.iter().filter(|e| e.world_id.eq_ignore_ascii_case(world_id)).max_by(|a, b| a.captured_at.cmp(&b.captured_at)).cloned();
+        let entry = capture.unwrap_or_else(|| {
+            let found = orbiters_core::maps::FoundWorld { world: orbiters_core::maps::World { world_id: world_id.to_string(), name: name.to_string(), ..Default::default() }, ..Default::default() };
+            Entry::world(&found, None, self.catalog.feedback(world_id))
+        });
+        self.facts_for(&entry.world_id);
+        let time = self.time();
+        self.panel.show_detail(entry.id, time);
+        self.picked = Some(entry);
+        self.opened_from = Some(was);
+        self.panel.dirty = true;
+    }
+
+    /// The world whose page shows, for the tests.
+    #[cfg(test)]
+    pub fn shown_world_for_test(&self) -> Option<(panel::Page, String, bool)> {
+        let picked = self.picked()?;
+        Some((self.panel.page, picked.world_id.clone(), picked.capture))
+    }
+
     /// Back to it on a sheet: as it was left. Only its list is read again.
     pub fn come_back(&mut self, layout: KeyboardLayout) {
         self.catalog.refresh(&self.source);
         self.open = true;
+        self.opened_from = None;
         self.panel.layout = layout;
         self.panel.dirty = true;
     }
 
     /// The head's Back, if there is somewhere to go within this panel. Its own does not show on a sheet.
     pub fn back_within(&mut self) -> bool {
+        // A world's page opened from elsewhere: Back goes back there, and the panel is left as it was before.
+        if self.panel.page == panel::Page::Detail {
+            if let Some((page, selected)) = self.opened_from.take() {
+                let time = self.time();
+                self.panel.restore(page, selected, time);
+                return false;
+            }
+        }
         if !self.panel.goes_back_within() {
             return false;
         }
@@ -1205,6 +1329,7 @@ fn keep_an_eye_frame(steamvr: &vr::Client, n: u32) {
             self.panel.dirty = true;
         }
         self.ask_feedback();
+        self.follow_go();
         let (mut opened, mut clicked) = self.update_chip(overlay, presenter, menu_at);
         let (bar_opened, bar_clicked) = self.update_bar(overlay, steamvr, presenter, menu_at);
         opened |= bar_opened;
@@ -1545,7 +1670,9 @@ fn keep_an_eye_frame(steamvr: &vr::Client, n: u32) {
                     self.finder.retry();
                 }
                 Action::Search => self.search_now = true,
-                Action::Join(world) => self.join(world),
+                Action::Join(world) => self.go_load(world),
+                Action::GoTo { world, instance } => self.go_invite(world, GoTarget::Listed(instance)),
+                Action::NewInstance { world, access, region } => self.go_invite(world, GoTarget::New(access, region)),
                 Action::OpenWeb(world) => {
                     let Some(link) = finder::web_link(&world) else { continue };
                     let tx = self.said.0.clone();
@@ -1561,6 +1688,13 @@ fn keep_an_eye_frame(steamvr: &vr::Client, n: u32) {
                     self.apply(&ask);
                     self.outbox.push(ask);
                 }
+                Action::SignIn => {
+                    if let Some(backend) = &self.backend {
+                        backend.sign_in();
+                    }
+                }
+                // Asked again on the next turn.
+                Action::RetryFeedback => self.asked = None,
                 Action::Open => {
                     if self.open {
                         let (status, time) = (self.status(), self.time());
@@ -1574,34 +1708,151 @@ fn keep_an_eye_frame(steamvr: &vr::Client, n: u32) {
         self.panel.dirty = true;
     }
 
-    /// Joins `world` in a new public instance in the region the player is in: an invite to oneself, which VRChat shows
-    /// in the game, when signed in to VRChat in the app; else VRChat's launcher with the world (VRChat running, it may
-    /// ask to switch). What happened is said on the world's page.
-    fn join(&mut self, world: String) {
-        let instance = finder::new_instance(self.region, uuid::Uuid::new_v4().as_u128() as u64);
-        let tx = self.said.0.clone();
-        let time = self.time();
-        if self.vrchat {
-            let (Some(backend), Some(scope)) = (self.backend.clone(), self.scope.clone()) else { return };
-            self.panel.say(tr("Sending you an invite…"), time);
-            let _ = std::thread::Builder::new().name("3d-worlds-invite".into()).spawn(move || {
-                let said = match backend.vrchat_data(scope, DataRequest::InviteSelf { world, instance }) {
-                    Ok(_) => tr("Invite sent: accept it in VRChat's notifications").to_string(),
-                    Err(e) => tr!("The invite could not be sent: {e}", e = e),
-                };
-                let _ = tx.send(said);
-            });
-        } else {
-            let Some(link) = finder::launch_link(&world, &instance) else { return };
-            self.panel.say(tr("Opening VRChat's launcher…"), time);
-            let _ = std::thread::Builder::new().name("3d-worlds-launch".into()).spawn(move || {
-                let said = match finder::open_launch(&link) {
-                    Ok(()) => tr("VRChat's launcher has it: sign in to VRChat in the app to be invited instead").to_string(),
-                    Err(e) => format!("{e}"),
-                };
-                let _ = tx.send(said);
-            });
+    /// Go there's list of `world`'s instances, read on a thread (F5). Nothing is sent to VRChat but the read.
+    fn go_load(&mut self, world: String) {
+        let region = panel::go::region_of(self.region);
+        let kept = self.go.list.take().filter(|_| self.go.world == world);
+        self.go = panel::go::GoView { world: world.clone(), loading: true, list: kept, region, ..Default::default() };
+        let (Some(backend), Some(scope)) = (self.backend.clone(), self.scope.clone()) else {
+            self.go.loading = false;
+            self.go.error = Some(go_words(&crate::controller::vrchat_data::WorldError::SignInRequired));
+            return;
+        };
+        let tx = self.go_said.0.clone();
+        let _ = std::thread::Builder::new().name("3d-worlds-instances".into()).spawn(move || {
+            let read = match backend.vrchat_data(scope.clone(), DataRequest::WorldInstances { world: world.clone() }) {
+                Ok(DataResponse::WorldInstances(list)) => Ok(list),
+                Ok(DataResponse::WorldError(e)) => Err(go_words(&e)),
+                Ok(_) => Err(tr("VRChat answered something unexpected.").to_string()),
+                Err(e) => Err(e),
+            };
+            let _ = tx.send(GoSaid::Listed { world, scope, read });
+        });
+    }
+
+    /// The next batch of Go there's list, by the exact ids VRChat left for it, when the page shown nears the end of what was read.
+    fn go_more(&mut self) {
+        let wanted = (self.panel.go_page + 2) * panel::go::GO_ROWS;
+        let Some(list) = self.go.list.as_ref().filter(|l| !l.remaining.is_empty() && l.items.len() < wanted) else { return };
+        if self.go.loading || self.go.more_loading {
+            return;
         }
+        let (Some(backend), Some(scope)) = (self.backend.clone(), self.scope.clone()) else { return };
+        let (world, instances) = (self.go.world.clone(), list.remaining.clone());
+        self.go.more_loading = true;
+        let tx = self.go_said.0.clone();
+        let _ = std::thread::Builder::new().name("3d-worlds-instances".into()).spawn(move || {
+            let read = match backend.vrchat_data(scope.clone(), DataRequest::WorldInstancesNext { world: world.clone(), instances }) {
+                Ok(DataResponse::WorldInstances(list)) => Ok(list),
+                Ok(DataResponse::WorldError(e)) => Err(go_words(&e)),
+                Ok(_) => Err(tr("VRChat answered something unexpected.").to_string()),
+                Err(e) => Err(e),
+            };
+            let _ = tx.send(GoSaid::More { world, scope, read });
+        });
+    }
+
+    /// The invite to an instance of `world` listed, or a new instance of it and then the invite to that, on a thread (F5).
+    fn go_invite(&mut self, world: String, target: GoTarget) {
+        let (Some(backend), Some(scope)) = (self.backend.clone(), self.scope.clone()) else { return };
+        if self.go.world != world || self.go.busy.is_some() {
+            return;
+        }
+        self.go.error = None;
+        self.go.busy = Some(match target {
+            GoTarget::Listed(_) => panel::go::GoBusy::Inviting,
+            GoTarget::New(..) => panel::go::GoBusy::Creating,
+        });
+        let listed = match &target {
+            GoTarget::Listed(id) => self.go.list.as_ref().and_then(|l| l.items.iter().find(|i| &i.id == id)).cloned(),
+            GoTarget::New(..) => None,
+        };
+        let tx = self.go_said.0.clone();
+        let _ = std::thread::Builder::new().name("3d-worlds-invite".into()).spawn(move || {
+            let ask = |request| match backend.vrchat_data(scope.clone(), request) {
+                Ok(DataResponse::WorldError(e)) => Err((go_words(&e), go_list_changed(&e))),
+                Ok(answer) => Ok(answer),
+                Err(e) => Err((e, false)),
+            };
+            let instance = match (target, listed) {
+                (GoTarget::Listed(_), Some(instance)) => Ok(instance),
+                (GoTarget::Listed(_), None) => Err((go_words(&crate::controller::vrchat_data::WorldError::NotListed), true)),
+                // Made for this one press, then invited to: the person asked to go to a new one.
+                (GoTarget::New(access, region), _) => match ask(DataRequest::CreateInstance { world: world.clone(), access, region }) {
+                    Ok(DataResponse::CreatedInstance(made)) => Ok(made),
+                    Ok(_) => Err((tr("VRChat answered something unexpected.").to_string(), false)),
+                    Err(e) => Err(e),
+                },
+            };
+            let sent = instance.and_then(|instance| match ask(DataRequest::InviteSelf { world: world.clone(), instance: instance.id.clone() }) {
+                // Only an explicit Invited is an invite sent.
+                Ok(DataResponse::Invited) => Ok(instance),
+                Ok(_) => Err((tr("VRChat answered something unexpected.").to_string(), false)),
+                Err(e) => Err(e),
+            });
+            let _ = tx.send(GoSaid::Invited { world, scope, sent });
+        });
+    }
+
+    /// What Go there's threads answered: kept only for the world and the account it was asked for.
+    fn follow_go(&mut self) {
+        while let Ok(said) = self.go_said.1.try_recv() {
+            let (world, scope) = match &said {
+                GoSaid::Listed { world, scope, .. } | GoSaid::More { world, scope, .. } | GoSaid::Invited { world, scope, .. } => (world.clone(), scope.clone()),
+            };
+            if world != self.go.world || self.scope.as_ref() != Some(&scope) {
+                continue;
+            }
+            match said {
+                GoSaid::Listed { read, .. } => {
+                    self.go.loading = false;
+                    match read {
+                        Ok(list) => self.go.list = Some(list),
+                        Err(e) => {
+                            self.go.list = None;
+                            self.go.error = Some(e);
+                        }
+                    }
+                }
+                // Added to what was read, where the person is in it untouched.
+                GoSaid::More { read, .. } => {
+                    self.go.more_loading = false;
+                    match (read, self.go.list.as_mut()) {
+                        (Ok(more), Some(list)) => {
+                            list.items.extend(more.items);
+                            list.unavailable += more.unavailable;
+                            list.remaining = more.remaining;
+                        }
+                        (Ok(_), None) => {}
+                        (Err(e), list) => {
+                            // The rest cannot be read now: what was read stays, and says so.
+                            if let Some(list) = list {
+                                list.remaining.clear();
+                            }
+                            self.go.error = Some(e);
+                        }
+                    }
+                }
+                GoSaid::Invited { sent, .. } => {
+                    self.go.busy = None;
+                    match sent {
+                        Ok(instance) => {
+                            self.go.invited = Some(instance);
+                            self.go.error = None;
+                        }
+                        // The list changed under it (full, closed, gone): read again, and said why.
+                        Err((e, changed)) => {
+                            if changed {
+                                self.go_load(world);
+                            }
+                            self.go.error = Some(e);
+                        }
+                    }
+                }
+            }
+            self.panel.dirty = true;
+        }
+        self.go_more();
     }
 
     /// The panel's own ask, shown at once (the app's answer replaces it).
@@ -1813,4 +2064,70 @@ fn short_error(e: &anyhow::Error) -> String {
         tr!("Could not download it: {text}", text = format!("{e:#}"))
     };
     text.chars().take(90).collect()
+}
+
+
+#[cfg(test)]
+mod go_tests {
+    use super::*;
+    use orbiters_core::vrchat_api::{InstanceAccess, WorldInstance, WorldInstances};
+
+    const WORLD: &str = "wrld_4432ea9b-729c-46e3-8eaf-846aa0a37fdd";
+
+    fn instance(id: &str) -> WorldInstance {
+        WorldInstance { world: WORLD.into(), id: id.into(), access: InstanceAccess::Public, region: "eu".into(), occupants: 3, capacity: Some(16), friends: None, full: false, closed: false, can_join: true }
+    }
+
+    /// F5: Go there's threads answer late; what they say is kept only for the world and the VRChat account it was asked for, and an invite refused because
+    /// the list changed says why.
+    #[test]
+    fn go_there_keeps_only_answers_for_its_world_and_account() {
+        let mut snap = crate::state::Snapshot::new(orbiters_core::settings::Settings::default());
+        let ours = Scope::of(&snap);
+        snap.vrchat_login.revision += 1;
+        let other = Scope::of(&snap);
+        assert_ne!(ours, other);
+        let mut worlds = Worlds::alone(egui::Context::default());
+        worlds.scope = Some(ours.clone());
+        worlds.vrchat = true;
+        worlds.go = panel::go::GoView { world: WORLD.into(), loading: true, ..Default::default() };
+        let list = || Ok(WorldInstances { items: vec![instance("1~region(eu)")], unavailable: 0, remaining: Vec::new() });
+        let tx = worlds.go_said.0.clone();
+        tx.send(GoSaid::Listed { world: "wrld_00000000-0000-4000-8000-000000000002".into(), scope: ours.clone(), read: list() }).unwrap();
+        tx.send(GoSaid::Listed { world: WORLD.into(), scope: other.clone(), read: list() }).unwrap();
+        worlds.follow_go();
+        assert!(worlds.go.loading && worlds.go.list.is_none(), "another world's, another account's: not this list");
+        tx.send(GoSaid::Listed { world: WORLD.into(), scope: ours.clone(), read: list() }).unwrap();
+        worlds.follow_go();
+        assert!(!worlds.go.loading && worlds.go.list.as_ref().is_some_and(|l| l.items.len() == 1));
+        assert!(worlds.status().go.list.is_some(), "and the panel sees it");
+        // The invite refused, the list having changed: said, and the list read again.
+        worlds.go.busy = Some(panel::go::GoBusy::Inviting);
+        tx.send(GoSaid::Invited { world: WORLD.into(), scope: ours.clone(), sent: Err(("That instance is full now.".into(), true)) }).unwrap();
+        worlds.follow_go();
+        assert_eq!(worlds.go.busy, None);
+        assert_eq!(worlds.go.error.as_deref(), Some("That instance is full now."));
+        worlds.go.loading = false;
+        worlds.go.busy = Some(panel::go::GoBusy::Inviting);
+        tx.send(GoSaid::Invited { world: WORLD.into(), scope: ours.clone(), sent: Ok(instance("1~region(eu)")) }).unwrap();
+        worlds.follow_go();
+        assert_eq!(worlds.go.invited.as_ref().map(|i| i.id.as_str()), Some("1~region(eu)"));
+        // VRChat's list comes a batch at a time: the next batch is added to what was read; one that cannot be read leaves what was, and says so.
+        worlds.go.list.as_mut().unwrap().remaining = vec!["2~region(eu)".into(), "3~region(eu)".into()];
+        assert_eq!(panel::go::go_pages(&worlds.go), 1, "five a page: one, the batch still to come with it");
+        tx.send(GoSaid::More { world: WORLD.into(), scope: other, read: Ok(WorldInstances { items: vec![instance("9")], unavailable: 0, remaining: Vec::new() }) }).unwrap();
+        tx.send(GoSaid::More { world: WORLD.into(), scope: ours.clone(), read: Ok(WorldInstances { items: vec![instance("2~region(eu)")], unavailable: 1, remaining: vec!["3~region(eu)".into()] }) }).unwrap();
+        worlds.follow_go();
+        let list = worlds.go.list.clone().unwrap();
+        assert_eq!(list.items.iter().map(|i| i.id.as_str()).collect::<Vec<_>>(), ["1~region(eu)", "2~region(eu)"]);
+        assert_eq!((list.unavailable, list.remaining.len()), (1, 1));
+        tx.send(GoSaid::More { world: WORLD.into(), scope: ours.clone(), read: Err("VRChat asks to wait".into()) }).unwrap();
+        worlds.follow_go();
+        assert!(worlds.go.list.as_ref().is_some_and(|l| l.items.len() == 2 && l.remaining.is_empty()), "what was read stays");
+        assert!(worlds.go.error.is_some());
+        // Signed out of VRChat: the page says so, whatever it read.
+        worlds.vrchat = false;
+        let status = worlds.status();
+        assert!(status.go.list.is_none() && status.go.invited.is_none() && status.go.error.is_some());
+    }
 }

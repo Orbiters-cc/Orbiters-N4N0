@@ -243,6 +243,9 @@ fn shots(args: &[String], picture_folders: Vec<PathBuf>) -> anyhow::Result<()> {
     if only.as_deref() == Some("overlay") {
         return overlay_shots(&out, &settings);
     }
+    if only.as_deref() == Some("orbit-behaviour") {
+        return orbit::behaviour_shots(&out);
+    }
     if only.as_deref() == Some("orbit") {
         return orbit::shots(&out);
     }

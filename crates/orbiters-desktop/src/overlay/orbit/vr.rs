@@ -263,9 +263,10 @@ fn on_hand(tilt: f32, ahead: f32, up: f32) -> Matrix34 {
 /// How far a wing's tile stands off VRChat's panels, in menu units, at least a tile's gap; and off a sheet up beside it, which is nearer the eyes and would seem to run into it.
 const WING_OFF_ITS_PANEL: f32 = 12.0;
 const WING_OFF_A_SHEET: f32 = 22.0 + (VR_SHEET_SCALE - 1.0) * 352.0;
-/// How much larger a sheet is in a headset than on a screen, about its foot's middle (its foot stays over VRChat's tab row): its tabs, names and labels read small at an
-/// arm's length (round 18's judges, four of five), and a larger sheet holds them all, names kept.
-pub const VR_SHEET_SCALE: f32 = 1.25;
+/// How much larger a sheet is in a headset than on a screen, about its foot's middle (its foot stays over VRChat's tab row). Enzo, 2026-11-11: at 1.25 (and 1.16 before
+/// it, both from judges' renders) the pages were "in the face", larger than VRChat's own Quick Menu; they are its size again, as until Nov 10, and their words are made to
+/// read at that size rather than the surfaces larger.
+pub const VR_SHEET_SCALE: f32 = 1.0;
 /// The wing's tiles against a screen's, about its inner edge's middle: at VRChat's own scale, a tile about 1.1 times a Launch Pad button and its name at most 1.3
 /// times VRChat's labels (round 19's judges, with Fable's figures: a quarter larger, the wing read as 1.5 times VRChat's buttons and louder than the menu it stands
 /// beside; round 18's had asked for readable names, not for larger tiles). Settled here: it is not to swing again.
@@ -315,7 +316,7 @@ pub fn clear_of_sheet(mut placed: Placed, sheet_up: bool) -> Placed {
     if Zone::WING.contains(&placed.zone) || matches!(placed.zone, Zone::QmCaption | Zone::QmStop) {
         let side = if placed.rect.center().x < 0.0 { -1.0 } else { 1.0 };
         placed.rect = placed.rect.translate(egui::vec2(side * if sheet_up { WING_OFF_A_SHEET } else { WING_OFF_ITS_PANEL }, 0.0));
-    } else if matches!(placed.zone, Zone::Takeover | Zone::SheetBack) {
+    } else if matches!(placed.zone, Zone::Takeover | Zone::SheetBack | Zone::SheetPeek) {
         placed.rect = placed.rect.translate(egui::vec2(0.0, -SHEET_OVER_THE_TABS));
     }
     placed
@@ -466,13 +467,24 @@ pub fn quick_menu_places(hand: usize) -> Vec<Placed> {
         .collect()
 }
 
-/// The sheet opened from the wheel: it stays where it opened, before the eyes, with no menu of VRChat's under it to ride with.
+/// The sheet opened from the wheel: it stays where it opened, before the eyes, with no menu of VRChat's under it to ride with. At 0.0015 a unit its page was 1.06 m wide at
+/// 0.75 m (70 degrees, 82 with the 1.25 of Nov 10): 0.001 makes it 0.70 m, about 50 degrees, the width the Quick Menu's own page takes held at a forearm's length.
 pub const SHEET_DISTANCE_M: f32 = 0.75;
 pub const SHEET_BELOW_M: f32 = 0.1;
-pub const SHEET_UNIT_M: f32 = 0.0015;
-/// Panels hang this little in front of the plane of what they are around, the takeover in front of them.
+pub const SHEET_UNIT_M: f32 = 0.001;
+/// Panels hang this little in front of the plane of what they are around; a sheet (its head and its page, one picture) further, clear of VRChat's own menu.
 const NEAR_M: f32 = 0.004;
 const TAKEOVER_NEAR_M: f32 = 0.02;
+
+/// How far in front of its plane a part hangs. The sheet's page and its back with its head lie in one plane, as one picture ([`compose_sheet`]): Enzo saw the page float over
+/// its frame, 4 mm apart (IMG6). With a sheet up the rest is in that plane too: nearer than it, it would seem to run into it.
+fn near(zone: Zone, sheet_up: bool) -> f32 {
+    match zone {
+        Zone::Takeover | Zone::SheetBack => TAKEOVER_NEAR_M,
+        _ if sheet_up => TAKEOVER_NEAR_M,
+        _ => NEAR_M,
+    }
+}
 /// Overlays' order: over N4N0's menu, under the lasers.
 const SORT_ORDER: u32 = 15;
 
@@ -576,12 +588,16 @@ fn seen_at(quad: Quad, place: &Placing, shown: bool) -> Quad {
     }
 }
 
+/// Hits nearer than this to each other are on one plane.
+const SAME_PLANE_M: f32 = 0.0005;
+
 fn laser_on(quads: &[(Quad, Placed)], origin: V3, direction: V3) -> Option<(usize, [f32; 2], space::Hit)> {
     let mut best: Option<(usize, [f32; 2], space::Hit)> = None;
     for (i, (quad, placed)) in quads.iter().enumerate() {
         let Some(hit) = quad.hit(origin, direction, 0.0) else { continue };
         let at = placed.rect.min + egui::vec2(hit.uv[0], hit.uv[1]) * placed.rect.size();
-        if placed.contains(at) && best.is_none_or(|(_, _, b)| hit.distance < b.distance) {
+        // In one plane the later is in front (the page is the last part, over its back): a tie is not decided by rounding.
+        if placed.contains(at) && best.is_none_or(|(_, _, b)| hit.distance < b.distance + SAME_PLANE_M) {
             best = Some((i, hit.uv, hit));
         }
     }
@@ -834,6 +850,111 @@ impl OrbitVr {
     }
 }
 
+/// A part's overlay, made the first time it shows. Its order is said to SteamVR and read back into the VR test log: Enzo's IMG2 had a pane of order 0 drawn over the
+/// sheet's head (15) and page (16), which only an order by distance does, and the log says what SteamVR took.
+fn part_handle(handles: &mut HashMap<Zone, vr::OverlayHandle>, overlay: &vr::Overlay, key: &str, zone: Zone) -> vr::OverlayHandle {
+    *handles.entry(zone).or_insert_with(|| {
+        let made = overlay.create(&format!("{key}.{zone:?}"), &format!("Orbiters {zone:?}")).unwrap_or(0);
+        let _ = overlay.set_flag(made, vr::overlay_flag::IS_PREMULTIPLIED, true);
+        let order = SORT_ORDER + u32::from(zone == Zone::Takeover);
+        let said = overlay.set_sort_order(made, order);
+        super::super::vr_log::line(&format!("overlay {zone:?}: handle {made} sort order {order} set {said:?} read back {:?}", overlay.sort_order(made))); // i18n: not shown (a log's line)
+        made
+    })
+}
+
+/// Where a sheet's page lies on its back's picture, in rows from its top: one picture only where they are of one width and the page lies whole inside it.
+pub fn page_row(back: &super::Panel, page: &super::Panel) -> Option<u32> {
+    let rows_a_unit = back.px[1] as f32 / back.placed.rect.height();
+    let top = ((page.placed.rect.top() - back.placed.rect.top()) * rows_a_unit).round();
+    let fits = back.px[0] == page.px[0] && (page.placed.rect.left() - back.placed.rect.left()).abs() < 0.01 && top >= 0.0 && top as u32 + page.px[1] <= back.px[1];
+    fits.then_some(top as u32)
+}
+
+/// The sheet as SteamVR is given it: the back's picture (its head, its foot, its hole) with the page's over it in its place, premultiplied. The back is cut where the page
+/// is (a capture's hole) and the page to the back's corners ([`super::panels::page_mask`]): one shape.
+#[derive(Default)]
+pub struct SheetPicture {
+    pub pixels: Vec<u8>,
+    pub px: [u32; 2],
+    /// What each part last gave: the back's whole picture, and the page's with where it lies.
+    under: Vec<u8>,
+    over: Vec<u8>,
+    page_px: [u32; 2],
+    top: u32,
+    /// The page is in it.
+    page: bool,
+    /// What changed since it was last shown.
+    changed: Option<[u32; 4]>,
+}
+
+impl SheetPicture {
+    /// The whole again in `rect` (x0, y0, x1, y1 of the back's pixels), and it is to be shown.
+    fn redo(&mut self, rect: [u32; 4]) {
+        let w = self.px[0] as usize;
+        let page_rows = self.top..self.top + if self.page { self.page_px[1] } else { 0 };
+        for y in rect[1]..rect[3].min(self.px[1]) {
+            let (a, b) = ((y as usize * w + rect[0] as usize) * 4, (y as usize * w + rect[2].min(self.px[0]) as usize) * 4);
+            if !page_rows.contains(&y) {
+                self.pixels[a..b].copy_from_slice(&self.under[a..b]);
+                continue;
+            }
+            let from = (y - self.top) as usize * w * 4 + rect[0] as usize * 4;
+            for ((out, under), over) in self.pixels[a..b].chunks_exact_mut(4).zip(self.under[a..b].chunks_exact(4)).zip(self.over[from..from + (b - a)].chunks_exact(4)) {
+                let left = 255 - over[3] as u32;
+                for c in 0..4 {
+                    out[c] = (over[c] as u32 + (under[c] as u32 * left + 127) / 255).min(255) as u8;
+                }
+            }
+        }
+        self.changed = Some(self.changed.map_or(rect, |c| [c[0].min(rect[0]), c[1].min(rect[1]), c[2].max(rect[2]), c[3].max(rect[3])]));
+    }
+
+    /// The back's picture changed in `changed`.
+    pub fn back(&mut self, back: &[u8], px: [u32; 2], page_top: u32, changed: [u32; 4]) {
+        if self.px != px {
+            self.px = px;
+            self.pixels = vec![0; back.len()];
+            self.under = vec![0; back.len()];
+            self.page = false;
+        }
+        self.top = page_top;
+        let w = px[0] as usize;
+        for y in changed[1]..changed[3].min(px[1]) {
+            let (a, b) = ((y as usize * w + changed[0] as usize) * 4, (y as usize * w + changed[2].min(px[0]) as usize) * 4);
+            self.under[a..b].copy_from_slice(&back[a..b]);
+        }
+        self.redo(changed);
+    }
+
+    /// The page's picture changed in `changed`; it lies `top` rows down the back's.
+    pub fn page(&mut self, page: &[u8], px: [u32; 2], top: u32, changed: [u32; 4]) {
+        if self.px[0] != px[0] || top + px[1] > self.px[1] {
+            return;
+        }
+        // The first picture of a page goes in whole.
+        let changed = if self.page && self.page_px == px && self.top == top { changed } else { [0, 0, px[0], px[1]] };
+        if self.over.len() != page.len() {
+            self.over = vec![0; page.len()];
+        }
+        (self.page, self.page_px, self.top) = (true, px, top);
+        let w = px[0] as usize;
+        for y in changed[1]..changed[3].min(px[1]) {
+            let (a, b) = ((y as usize * w + changed[0] as usize) * 4, (y as usize * w + changed[2].min(px[0]) as usize) * 4);
+            self.over[a..b].copy_from_slice(&page[a..b]);
+        }
+        self.redo([changed[0], changed[1] + top, changed[2], changed[3] + top]);
+    }
+}
+
+/// The whole sheet as one picture, from its back's and its page's: for the renders and the tests, as [`SheetPicture`] makes it.
+pub fn compose_sheet(back: &[u8], back_px: [u32; 2], page: &[u8], page_px: [u32; 2], top: u32) -> Vec<u8> {
+    let mut sheet = SheetPicture::default();
+    sheet.back(back, back_px, top, [0, 0, back_px[0], back_px[1]]);
+    sheet.page(page, page_px, top, [0, 0, page_px[0], page_px[1]]);
+    sheet.pixels
+}
+
 pub struct OrbitVr {
     key: String,
     panels: Panels,
@@ -890,6 +1011,8 @@ pub struct OrbitVr {
     /// The hand whose laser moves the pointer.
     active: Option<usize>,
     last_shown: bool,
+    /// The sheet as one picture: its back with its head, its page on it.
+    sheet: SheetPicture,
 }
 
 impl Drop for OrbitVr {
@@ -950,6 +1073,7 @@ impl OrbitVr {
             overrides_asked: false,
             active: None,
             last_shown: false,
+            sheet: SheetPicture::default(),
         })
     }
 
@@ -1208,7 +1332,6 @@ impl OrbitVr {
         self.panels.way_back(menu, &mut places);
         self.panels.takeover_place = Some(sheet_place(Zone::Takeover));
         self.panels.back_place = Some(sheet_place(Zone::SheetBack));
-        self.panels.peek_place = Some(zones::in_units(Zone::SheetPeek));
         self.panels.view_taken = cx.world_status.small_taken;
         self.panels.set_open(menu, places, cx.snap);
         if self.panels.is_empty() {
@@ -1247,21 +1370,16 @@ impl OrbitVr {
             .panels
             .all()
             .map(|p| {
-                let sheet = matches!(p.zone, Zone::Takeover | Zone::SheetBack);
+                let sheet = matches!(p.zone, Zone::Takeover | Zone::SheetBack | Zone::SheetPeek);
                 // The page a code opened, and its bar: stood up on the camera's top edge.
                 if matches!(p.zone, Zone::CameraWeb | Zone::CameraWebBar) {
                     return (camera_top_plane(&plane).camera_quad(&on_camera_top(p.placed)), p.placed);
                 }
                 let on = if sheet { self.takeover_plane.unwrap_or(plane) } else { plane };
-                let near = match p.zone {
-                    Zone::Takeover => TAKEOVER_NEAR_M,
-                    Zone::SheetBack => TAKEOVER_NEAR_M - 0.004,
-                    // With a sheet up, in its plane: nearer than the wing, it would seem to run into it.
-                    _ if sheet_up => TAKEOVER_NEAR_M - 0.004,
-                    _ => NEAR_M,
-                };
-                let placed=clear_of_sheet(p.placed,sheet_up);
-                let quad=if menu==Some(Around::Camera) && !sheet { on.camera_quad(&placed) } else { on.quad(&placed,-p.outward(),near) };
+                let near = near(p.zone, sheet_up);
+                let placed = clear_of_sheet(p.placed, sheet_up);
+                // Camera tools lie in the fitted panel's own plane, with no spring or depth (camera-core).
+                let quad = if menu == Some(Around::Camera) && !sheet { on.camera_quad(&placed) } else { on.quad(&placed, -p.outward(), near) };
                 (quad, p.placed)
             })
             .collect();
@@ -1295,19 +1413,13 @@ impl OrbitVr {
             .all()
             .zip(&quads)
             .map(|(p, _)| {
-                let sheet = matches!(p.zone, Zone::Takeover | Zone::SheetBack);
+                let sheet = matches!(p.zone, Zone::Takeover | Zone::SheetBack | Zone::SheetPeek);
                 // A sheet from the wheel stays in the room. What is being laid on VRChat's menu goes with the other hand.
                 if aligning || (sheet && from_wheel) {
                     return Placing::Room;
                 }
                 let (Some((sharp, smooth)), Some((frame, unit))) = (hand_shown, on_this_hand) else { return Placing::Room };
-                let near = match p.zone {
-                    Zone::Takeover => TAKEOVER_NEAR_M,
-                    Zone::SheetBack => TAKEOVER_NEAR_M - 0.004,
-                    // With a sheet up, in its plane: nearer than the wing, it would seem to run into it.
-                    _ if sheet_up => TAKEOVER_NEAR_M - 0.004,
-                    _ => NEAR_M,
-                };
+                let near = near(p.zone, sheet_up);
                 let on_hand = Plane { frame, unit }.quad(&clear_of_sheet(p.placed, sheet_up), -p.outward(), near).transform;
                 // What lies in front of VRChat's menu keeps with it. What lies around it can dance (Enzo).
                 if springy && !sheet {
@@ -1454,20 +1566,38 @@ impl OrbitVr {
     fn show(&mut self, cx: &mut Cx<'_, '_>, quads: &[(Quad, Placed)], placing: &[Placing]) {
         let (overlay, presenter) = (cx.overlay, &mut *cx.presenter);
         let (handles, key) = (&mut self.handles, &self.key);
+        // The sheet's back and its page are one picture, shown by the back's overlay.
+        let page_at = self.panels.all().find(|p| p.zone == Zone::SheetBack).zip(self.panels.takeover.as_ref()).and_then(|(back, page)| page_row(back, page));
+        let sheet = &mut self.sheet;
+        if page_at.is_none() {
+            sheet.page = false;
+        }
         self.panels.paint(cx.snap, |panel, changed| {
-            let handle = *handles.entry(panel.zone).or_insert_with(|| {
-                let made = overlay.create(&format!("{key}.{:?}", panel.zone), &format!("Orbiters {:?}", panel.zone)).unwrap_or(0);
-                let _ = overlay.set_flag(made, vr::overlay_flag::IS_PREMULTIPLIED, true);
-                let _ = overlay.set_sort_order(made, SORT_ORDER + u32::from(panel.zone == Zone::Takeover));
-                made
-            });
+            if let (Some(top), Zone::SheetBack | Zone::Takeover) = (page_at, panel.zone) {
+                match panel.zone {
+                    Zone::SheetBack => sheet.back(panel.pixels(), panel.px, top, changed),
+                    _ => sheet.page(panel.pixels(), panel.px, top, changed),
+                }
+                return;
+            }
+            let handle = part_handle(&mut *handles, overlay, key, panel.zone);
             if handle != 0 {
                 presenter.show_part(overlay, handle, panel.pixels(), panel.px[0], panel.px[1], changed);
             }
         });
-        let shown: Vec<Zone> = self.panels.all().map(|p| p.zone).collect();
+        if let Some(changed) = self.sheet.changed.take() {
+            let handle = part_handle(&mut self.handles, overlay, &self.key, Zone::SheetBack);
+            if handle != 0 {
+                presenter.show_part(overlay, handle, &self.sheet.pixels, self.sheet.px[0], self.sheet.px[1], changed);
+            }
+        }
+        let shown: Vec<Zone> = self.panels.all().map(|p| p.zone).filter(|z| page_at.is_none() || *z != Zone::Takeover).collect();
         for (((quad, _), panel), place) in quads.iter().zip(self.panels.all()).zip(placing) {
             if let Some(handle) = self.handles.get(&panel.zone) {
+                // In the back's picture.
+                if panel.zone == Zone::Takeover && page_at.is_some() {
+                    continue;
+                }
                 if !panel.painted || !panel.shown {
                     let _ = cx.overlay.hide(*handle);
                     continue;
@@ -1495,6 +1625,7 @@ impl OrbitVr {
 
     /// Everything down and the trigger free, at once.
     fn close(&mut self, cx: &mut Cx<'_, '_>) {
+        self.sheet.page = false;
         self.block.release();
         cx.actions.set_block([false; 2]);
         self.panels.set_open(None, Vec::new(), cx.snap);
@@ -1894,7 +2025,7 @@ mod tests {
         // The same order on both: it reads the same, on the other side.
         assert!(tile(1, Zone::WingWorlds).left() < tile(1, Zone::WingYouTube).left());
         // The sheet is not moved: it stays on the menu, whichever hand.
-        assert!(quick_menu_places(1).iter().all(|p| !matches!(p.zone, Zone::Takeover | Zone::SheetBack)));
+        assert!(quick_menu_places(1).iter().all(|p| !matches!(p.zone, Zone::Takeover | Zone::SheetBack | Zone::SheetPeek)));
     }
 
     #[test]
@@ -1934,6 +2065,99 @@ mod tests {
         let quads = [(plane.quad(&under, 0.0, 0.0), under), (plane.quad(&back, 0.0, TAKEOVER_NEAR_M - 0.004), back), (plane.quad(&front, 0.0, TAKEOVER_NEAR_M), front)];
         let target = space::position(&quads[2].0.transform);
         assert_eq!(laser_on(&quads, eyes, space::unit(space::sub(target, eyes)).unwrap()).map(|h| h.0), Some(2));
+        // In one plane, the page (the last) over its back: a tie is the page's, from either side of its middle.
+        let page = sheet_place(Zone::Takeover);
+        let back = sheet_place(Zone::SheetBack);
+        let quads = [(plane.quad(&back, 0.0, near(Zone::SheetBack, true)), back), (plane.quad(&page, 0.0, near(Zone::Takeover, true)), page)];
+        for at in [[0.1, 0.2], [0.5, 0.5], [0.9, 0.9]] {
+            let target = space::apply(&quads[1].0.transform, [(at[0] - 0.5) * quads[1].0.width, (0.5 - at[1]) * quads[1].0.height, 0.0]);
+            assert_eq!(laser_on(&quads, eyes, space::unit(space::sub(target, eyes)).unwrap()).map(|h| h.0), Some(1), "{at:?}");
+        }
+        // Its head is still its back's.
+        let head = space::apply(&quads[0].0.transform, [0.0, quads[0].0.height / 2.0 - 0.01, 0.0]);
+        assert_eq!(laser_on(&quads, eyes, space::unit(space::sub(head, eyes)).unwrap()).map(|h| h.0), Some(0));
+    }
+
+    /// Enzo, 2026-11-11 (F1): the pages were "in the face", 1.25 times VRChat's Quick Menu since Nov 10. On the hand the sheet is the Quick Menu's own size again, 704 of its
+    /// units (0.634 m at the calibrated unit), whichever hand and at every size setting; the wing's tiles keep their own scale; a sheet from the wheel is 0.70 m at 0.75 m.
+    #[test]
+    fn a_sheet_is_the_size_of_vrchat_s_quick_menu() {
+        let tune = Tune::default();
+        for hand in 0..2 {
+            for size in OrbitSettings::VR_SIZES {
+                let plane = quick_menu_plane(&grip(), hand, &tune, size);
+                let page = plane.quad(&clear_of_sheet(sheet_place(Zone::Takeover), true), 0.0, near(Zone::Takeover, true));
+                let back = plane.quad(&clear_of_sheet(sheet_place(Zone::SheetBack), true), 0.0, near(Zone::SheetBack, true));
+                let menu = 704.0 * tune.qm_unit * size;
+                assert!((page.width - menu).abs() < 1e-4 && (back.width - menu).abs() < 1e-4, "hand {hand} size {size}: page {} back {} menu {menu}", page.width, back.width);
+                assert!((page.height - 396.0 * tune.qm_unit * size).abs() < 1e-4);
+            }
+        }
+        assert!((tune.qm_unit * 704.0 - 0.6336).abs() < 1e-4, "the calibrated unit");
+        assert_eq!(VR_SHEET_SCALE, 1.0);
+        let head = space::from_axes([1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0], [0.0, 1.6, 0.0]);
+        let alone = sheet_plane(&head, 1.0).quad(&sheet_place(Zone::Takeover), 0.0, near(Zone::Takeover, true));
+        let degrees = 2.0 * (alone.width / 2.0 / SHEET_DISTANCE_M).atan().to_degrees();
+        assert!((0.65..0.75).contains(&alone.width) && (45.0..55.0).contains(&degrees), "from the wheel: {} m, {degrees} degrees", alone.width);
+    }
+
+    /// Enzo's IMG6 (F25): the page floated 4 mm over its frame. The page, its back with its head and the way back to VRChat's menus lie in one plane, on the hand and
+    /// before the eyes alike, and SteamVR is given them as one picture: the page's pixels over the back's, in their place, with nothing between them at any angle.
+    #[test]
+    fn a_sheet_and_its_page_are_one_flat_picture() {
+        let tune = Tune::default();
+        let head = space::from_axes([1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0], [0.0, 1.6, 0.0]);
+        for plane in [quick_menu_plane(&grip(), 0, &tune, 1.0), quick_menu_plane(&grip(), 1, &tune, 1.2), sheet_plane(&head, 1.0)] {
+            let quad = |zone| plane.quad(&clear_of_sheet(sheet_place(zone), true), 0.0, near(zone, true));
+            let (page, back, peek) = (quad(Zone::Takeover), quad(Zone::SheetBack), quad(Zone::SheetPeek));
+            let normal = space::axis(&back.transform, 2);
+            for other in [page, peek] {
+                assert!(space::dot(space::axis(&other.transform, 2), normal) > 0.99999);
+                let apart = space::dot(space::sub(space::position(&other.transform), space::position(&back.transform)), normal);
+                assert!(apart.abs() < 1e-5, "{apart} m off the back's plane");
+            }
+        }
+        // The pictures: the page lies whole on the back's, 44 of its units (the head) down, of its width.
+        let page = super::super::Panel::new(clear_of_sheet(sheet_place(Zone::Takeover), true), 2.0, 0, false);
+        let back = super::super::Panel::new(clear_of_sheet(sheet_place(Zone::SheetBack), true), 2.0, 0, false);
+        assert_eq!(page_row(&back, &page), Some(88));
+        let (bw, bh) = (back.px[0], back.px[1]);
+        let mut back_pixels = vec![0u8; (bw * bh * 4) as usize];
+        for y in 0..bh {
+            for x in 0..bw {
+                let i = ((y * bw + x) * 4) as usize;
+                back_pixels[i..i + 4].copy_from_slice(&[10, 20, 30, 255]);
+            }
+        }
+        let (pw, ph) = (page.px[0], page.px[1]);
+        let mut page_pixels = vec![0u8; (pw * ph * 4) as usize];
+        for (i, p) in page_pixels.chunks_exact_mut(4).enumerate() {
+            let (x, y) = (i as u32 % pw, i as u32 / pw);
+            // A hole through it, clear on the back too.
+            let hole = (100..200).contains(&x) && (100..200).contains(&y);
+            p.copy_from_slice(if hole { &[0, 0, 0, 0] } else { &[200, 100, 50, 255] });
+            if hole {
+                let j = (((y + 88) * bw + x) * 4) as usize;
+                back_pixels[j..j + 4].copy_from_slice(&[0, 0, 0, 0]);
+            }
+        }
+        let whole = compose_sheet(&back_pixels, back.px, &page_pixels, page.px, 88);
+        let at = |x: u32, y: u32| &whole[((y * bw + x) * 4) as usize..((y * bw + x) * 4 + 4) as usize];
+        assert_eq!(at(10, 10), &[10, 20, 30, 255], "its head");
+        assert_eq!(at(10, 88 + 10), &[200, 100, 50, 255], "its page");
+        assert_eq!(at(150, 88 + 150), &[0, 0, 0, 0], "its hole, through both");
+        assert_eq!(at(10, bh - 2), &[10, 20, 30, 255], "its foot");
+        // Changed a little later, only what changed moves, and the rest stays.
+        let mut sheet = SheetPicture::default();
+        sheet.back(&back_pixels, back.px, 88, [0, 0, bw, bh]);
+        sheet.page(&page_pixels, page.px, 88, [0, 0, pw, ph]);
+        sheet.changed = None;
+        page_pixels[0..4].copy_from_slice(&[1, 2, 3, 255]);
+        sheet.page(&page_pixels, page.px, 88, [0, 0, 1, 1]);
+        assert_eq!(sheet.changed, Some([0, 88, 1, 89]));
+        assert_eq!(&sheet.pixels[((88 * bw) * 4) as usize..((88 * bw) * 4 + 4) as usize], &[1, 2, 3, 255]);
+        sheet.back(&back_pixels, back.px, 88, [0, 0, bw, 1]);
+        assert_eq!(&sheet.pixels[((88 * bw) * 4) as usize..((88 * bw) * 4 + 4) as usize], &[1, 2, 3, 255], "the page stays over a back painted again");
     }
     /// A camera's plane: its middle at `at`, its picture's right along `x`, its up along `y`, facing along `x` cross `y`.
     fn camera_at(x: V3, y: V3, at: V3) -> Plane {

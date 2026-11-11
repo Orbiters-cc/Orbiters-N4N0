@@ -251,11 +251,15 @@ impl Controller {
                     return;
                 }
             }
+            rt.gate.cancel_operations();
             rt.generation += 1;
             rt.busy = true;
             (rt.client.clone(), rt.generation)
         };
+        let replacing_session = matches!(&command, Command::SignOut | Command::SignIn { .. } | Command::Cancel);
         self.update(|s| {
+            if replacing_session { s.vrchat_login.user = None; s.vrchat_login.picture = None; s.vrchat_login.methods.clear(); }
+            s.vrchat_login.revision = s.vrchat_login.revision.wrapping_add(1);
             s.vrchat_login.busy = true;
             s.vrchat_login.error = None;
         });
@@ -367,7 +371,8 @@ impl Controller {
         let snap = self.view();
         let w = &snap.vrchat.world;
         let log = w.local_player.as_ref().and_then(|me| w.players.iter().find(|(_, n)| *n == me).map(|(id, _)| id.clone()));
-        orbiters_core::vrchat_source::Source::new(direct, orbiters, log)
+        let operation = self.vrchat_login.lock().unwrap().gate.operation(Instant::now() + Duration::from_secs(60));
+        orbiters_core::vrchat_source::Source::scoped(direct, orbiters, log, operation)
     }
 }
 
@@ -418,5 +423,23 @@ mod tests {
         });
         assert!(!gate.allowed());
         assert!(!c.view().vrchat_login.allowed);
+    }
+}
+
+#[cfg(test)]
+impl Controller {
+    pub(super) fn test_vrchat(&self, replies: Vec<(u16, serde_json::Value)>) -> (Arc<Mutex<Client>>, Arc<Mutex<Vec<(String, String)>>>) {
+        self.test_account();
+        let identity = self.vrchat_identity().unwrap();
+        let mut rt = self.vrchat_login.lock().unwrap();
+        rt.grant();
+        rt.identity = Some((identity.0.url(""), identity.1));
+        rt.feature.set(true);
+        let (client, calls) = orbiters_core::vrchat_api::test_client(rt.gate.clone(), replies);
+        rt.client = Arc::new(Mutex::new(client));
+        let client = rt.client.clone();
+        drop(rt);
+        self.update(|s| { s.vrchat_login.allowed = true; s.vrchat_login.user = Some(User { id: "usr_test".into(), ..Default::default() }); });
+        (client, calls)
     }
 }

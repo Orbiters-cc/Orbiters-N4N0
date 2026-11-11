@@ -914,7 +914,8 @@ fn the_wake_word_starts_a_turn_and_other_sentences_stay_here() {
 
 #[test]
 fn a_held_sentence_reaches_n4n0_after_the_button_is_let_go() {
-    let (t, n) = n4n0(Settings::default());
+    let (t, n, device) = n4n0_on(Settings::default(), Arc::new(Watcher::new(|| Box::new(NoMedia))));
+    *device.ears.allowed.lock().unwrap() = true;
     let done = format!("event: done\ndata: {}\n\n", json!({ "messages": [], "tool_calls": [] }));
     let (base, bodies) = orbiters(vec![done]);
     t.sign_in(base, "orbit-test");
@@ -2186,6 +2187,7 @@ fn the_ears_start_with_vrchat_listen_and_stop_and_a_crash_is_told() {
     let (t, n, device) = n4n0_on(Settings::default(), media);
     *device.ears.allowed.lock().unwrap() = true;
     n.n4n0.lock().unwrap().voice.installed = true;
+    t.sign_in("http://127.0.0.1:1/".into(), "test");
     // VRChat closed: no worker; open: one, started with the models' folder.
     n.voice_follow();
     assert!(device.ears.workers.lock().unwrap().is_empty());
@@ -2484,5 +2486,253 @@ fn the_controllers_touchpads_reach_only_the_input_parameters_the_avatar_has() {
     assert_eq!(rest.len(), 3, "{rest:?}");
     assert!(rest.contains(&(parameter(right[0]), OscType::Float(0.0))));
     assert!(rest.contains(&(parameter(right[2]), OscType::Bool(false))));
+    t.shutdown(&n);
+}
+
+#[test]
+fn ask_preflight_blocks_capture_and_reports_each_reason() {
+    let (t, n, d) = n4n0_on(Settings::default(), Arc::new(Watcher::new(|| Box::new(NoMedia))));
+    *d.ears.allowed.lock().unwrap() = true;
+    n.ask_page(true);
+    assert_eq!(t.view().voice.readiness, VoiceReadiness::SignIn);
+    n.app_talk(true, true);
+    assert!(d.ears.workers.lock().unwrap().is_empty());
+    t.sign_in("http://127.0.0.1:1/".into(), "test");
+    n.publish();
+    assert_eq!(t.view().voice.readiness, VoiceReadiness::ModelsMissing);
+    n.n4n0.lock().unwrap().voice.downloading = Some(0.2);
+    n.publish();
+    assert_eq!(t.view().voice.readiness, VoiceReadiness::ModelsDownloading);
+    t.settings.lock().unwrap().n4n0.assistant = false;
+    n.publish();
+    assert_eq!(t.view().voice.readiness, VoiceReadiness::AssistantOff);
+    assert!(d.ears.workers.lock().unwrap().is_empty());
+}
+
+#[test]
+fn review_touch_obeys_pauses_and_playback_survives_navigation() {
+    let (t, n, d) = n4n0_on(Settings::default(), Arc::new(Watcher::new(|| Box::new(NoMedia))));
+    *d.ears.allowed.lock().unwrap() = true;
+    t.sign_in("http://127.0.0.1:1/".into(), "test");
+    t.settings.lock().unwrap().n4n0.menu.touch = false;
+    n.n4n0.lock().unwrap().voice.installed = true;
+    n.ask_page(true);
+    let worker = d.ears.workers.lock().unwrap()[0].clone();
+    for gate in 0..2 {
+        n.voice_cancel();
+        { let mut rt = n.n4n0.lock().unwrap(); rt.listening = None;
+          rt.voice.output_playing = gate == 0; rt.voice.finalizing = gate == 1;
+
+        }
+        let before = worker.commands().len();
+        n.touch(); n.menu_listen();
+        assert_eq!(worker.commands().len(), before, "gate {gate} admitted touch");
+        assert!(n.n4n0.lock().unwrap().listening.is_none());
+    }
+    n.n4n0.lock().unwrap().voice.output_playing = true;
+    n.ask_page(false); n.ask_page(true);
+    assert!(t.view().voice.output_playing);
+    assert!(!t.view().listening);
+}
+
+#[test]
+fn review_lifecycle_serializes_arm_manual_and_final_with_exit() {
+    let (t, n, d) = n4n0_on(Settings::default(), Arc::new(Watcher::new(|| Box::new(NoMedia))));
+    *d.ears.allowed.lock().unwrap() = true;
+    t.sign_in("http://127.0.0.1:1/".into(), "test");
+    n.n4n0.lock().unwrap().voice.installed = true;
+    n.ask_page(true);
+    let worker = d.ears.workers.lock().unwrap()[0].clone();
+    for operation in 0..6 {
+        t.sign_in("http://127.0.0.1:1/".into(), "test");
+        n.ask_page(true);
+        let listen = worker.commands().iter().rev().find_map(|c| match c { VoiceCommand::Listen { id, .. } => Some(*id), _ => None }).unwrap();
+        let gate = n.voice_lifecycle.lock();
+        let other = n.clone();
+        let (started, ready) = std::sync::mpsc::channel();
+        let (done, finished) = std::sync::mpsc::channel();
+        let thread = std::thread::spawn(move || {
+            started.send(()).unwrap();
+            match operation % 3 {
+                0 => other.ask_follow(),
+                1 => other.ask_talk(true),
+                _ => other.on_voice_event(VoiceEvent::Heard { listen, text: "discarded".into(), for_n4n0: true, seconds: 1.0, decode_ms: 1 }),
+            }
+            done.send(()).unwrap();
+        });
+        ready.recv().unwrap();
+        assert!(finished.recv_timeout(Duration::from_millis(50)).is_err(), "transition escaped lifecycle owner");
+        if operation < 3 { n.ask_page(false); } else { *t.server.lock().unwrap() = None; n.ask_follow(); n.publish(); }
+        let before = worker.commands().len();
+        drop(gate);
+        thread.join().unwrap();
+        assert_eq!(worker.commands().len(), before);
+        assert!(!t.view().listening);
+        assert!(t.view().lines.iter().all(|l| l.who != N4n0Who::You));
+    }
+}
+
+#[test]
+fn review_wake_followup_is_admitted_only_outside_pause_gates() {
+    let (t, n, d) = n4n0_on(Settings::default(), Arc::new(Watcher::new(|| Box::new(NoMedia))));
+    *d.ears.allowed.lock().unwrap() = true;
+    t.sign_in("http://127.0.0.1:1/".into(), "test");
+    { let mut settings = t.settings.lock().unwrap();
+      settings.n4n0.wake_word = true;
+      settings.n4n0.wake_words = vec!["testwake".into()];
+      settings.n4n0.menu.wake_word = false;
+    }
+    n.n4n0.lock().unwrap().voice.installed = true;
+    n.app_talk(true, true);
+    let worker = d.ears.workers.lock().unwrap()[0].clone();
+    n.voice_cancel();
+    n.n4n0.lock().unwrap().listening = None;
+    let wake = || VoiceEvent::Heard { listen: 0, text: "testwake".into(), for_n4n0: false, seconds: 1.0, decode_ms: 1 };
+    for gate in 0..2 {
+        { let mut rt = n.n4n0.lock().unwrap(); rt.voice.output_playing = gate == 0; rt.voice.finalizing = gate == 1; }
+        let before = worker.commands().len();
+        worker.say(wake());
+        assert_eq!(before, worker.commands().len());
+        assert!(n.n4n0.lock().unwrap().listening.is_none());
+    }
+    { let mut rt = n.n4n0.lock().unwrap(); rt.voice.output_playing = false; rt.voice.finalizing = false; }
+    worker.say(wake());
+    assert!(worker.commands().contains(&VoiceCommand::Listen { hold: false, id: 2 }));
+    assert!(t.view().listening);
+}
+
+#[test]
+fn ask_auto_final_stream_pause_rearm_manual_exit_and_stale_words() {
+    let (t, n, d) = n4n0_on(Settings::default(), Arc::new(Watcher::new(|| Box::new(NoMedia))));
+    *d.ears.allowed.lock().unwrap() = true;
+    let (base, bodies) = orbiters(vec![format!("{}{}{}", delta("Hello "), delta("there."), done(json!([]), json!([])))]);
+    t.sign_in(base, "test");
+    n.n4n0.lock().unwrap().voice.installed = true;
+    n.ask_page(true);
+    let worker = d.ears.workers.lock().unwrap()[0].clone();
+    assert!(worker.commands().contains(&VoiceCommand::Listen { hold: false, id: 1 }));
+    worker.say(VoiceEvent::Speech { active: true });
+    worker.say(VoiceEvent::Provisional { listen: 1, text: "Hi".into() });
+    assert_eq!(t.view().voice.provisional.unwrap().text, "Hi");
+    assert!(t.view().lines.is_empty());
+    let heard = || VoiceEvent::Heard { listen: 1, text: "Hi there".into(), for_n4n0: true, seconds: 1.0, decode_ms: 2 };
+    worker.say(VoiceEvent::Finalizing { listen: 1 });
+    assert!(t.view().voice.finalizing);
+    assert!(!t.view().listening);
+    n.ask_follow();
+    assert_eq!(worker.commands().iter().filter(|c| matches!(c, VoiceCommand::Listen { .. })).count(), 1);
+    worker.say(heard());
+    let first = status_when(&t, |s| !the_answers(s).is_empty());
+    assert!(first.thinking);
+    assert_eq!(the_answers(&first), vec![("Hello".into(), true)]);
+    assert!(first.voice.provisional.is_none());
+    n.ask_follow();
+    assert_eq!(worker.commands().iter().filter(|c| matches!(c, VoiceCommand::Listen { .. })).count(), 1);
+    worker.say(heard());
+    worker.say(VoiceEvent::Provisional { listen: 1, text: "stale".into() });
+    assert!(t.view().voice.provisional.is_none());
+    status_when(&t, |s| !s.thinking);
+    n.ask_follow(); n.publish();
+    assert!(worker.commands().contains(&VoiceCommand::Listen { hold: false, id: 2 }));
+    assert_eq!(bodies.lock().unwrap().len(), 1);
+    assert_eq!(t.view().lines.iter().filter(|l| l.who == N4n0Who::You).count(), 1);
+    worker.say(VoiceEvent::Provisional { listen: 2, text: "cancel this".into() });
+    n.ask_talk(true);
+    assert!(t.view().voice.provisional.is_none());
+    assert!(worker.commands().contains(&VoiceCommand::Cancel));
+    assert!(worker.commands().contains(&VoiceCommand::Listen { hold: true, id: 3 }));
+    assert!(!t.view().voice.automatic);
+    n.ask_talk(false);
+    assert_eq!(worker.commands().last(), Some(&VoiceCommand::Finish));
+    n.ask_page(false);
+    worker.say(VoiceEvent::Provisional { listen: 3, text: "late".into() });
+    worker.say(VoiceEvent::Level { level: 0.9 });
+    worker.say(VoiceEvent::Speech { active: true });
+    assert_eq!(t.view().voice.level, 0.0);
+    assert!(!t.view().voice.speech);
+    assert!(!t.view().listening);
+    assert!(t.view().voice.provisional.is_none());
+    n.ask_follow();
+    assert!(!t.view().voice.ask_open);
+    t.settings.lock().unwrap().n4n0.wake_word = true;
+    worker.say(VoiceEvent::Heard { text: "Nano, old words".into(), for_n4n0: false, seconds: 1.0, decode_ms: 1, listen: 0 });
+    assert_eq!(bodies.lock().unwrap().len(), 1, "a wake sentence from before the page cannot replay");
+    t.shutdown(&n);
+}
+
+#[test]
+fn ask_signout_and_crash_cancel_without_automatic_restart() {
+    let (t, n, d) = n4n0_on(Settings::default(), Arc::new(Watcher::new(|| Box::new(NoMedia))));
+    *d.ears.allowed.lock().unwrap() = true;
+    t.sign_in("http://127.0.0.1:1/".into(), "test");
+    n.n4n0.lock().unwrap().voice.installed = true;
+    n.ask_page(true);
+    let worker = d.ears.workers.lock().unwrap()[0].clone();
+    *t.server.lock().unwrap() = None;
+    n.voice_follow(); n.publish();
+    assert!(!t.view().listening);
+    assert_eq!(t.view().voice.readiness, VoiceReadiness::SignIn);
+    assert!(worker.commands().contains(&VoiceCommand::Cancel));
+    assert!(*worker.dropped.lock().unwrap());
+    t.sign_in("http://127.0.0.1:1/".into(), "test");
+    n.ask_page(true);
+    let worker = d.ears.workers.lock().unwrap().last().unwrap().clone();
+    worker.crash(3, "fixture failure");
+    n.ask_follow(); n.publish();
+    assert!(!t.view().listening);
+    assert!(!t.view().voice.automatic);
+    assert_eq!(t.view().voice.readiness, VoiceReadiness::MicrophoneProblem);
+    t.shutdown(&n);
+}
+
+#[test]
+fn ask_output_gate_pauses_capture_and_retry_is_explicit() {
+    let (t, n, d) = n4n0_on(Settings::default(), Arc::new(Watcher::new(|| Box::new(NoMedia))));
+    *d.ears.allowed.lock().unwrap() = true;
+    t.sign_in("http://127.0.0.1:1/".into(), "test");
+    n.n4n0.lock().unwrap().voice.installed = true;
+    n.ask_page(true);
+    let worker = d.ears.workers.lock().unwrap()[0].clone();
+    n.command(Command::AskPlayback { active: true });
+    assert!(!t.view().listening);
+    assert!(worker.commands().contains(&VoiceCommand::Cancel));
+    n.ask_follow();
+    assert_eq!(worker.commands().iter().filter(|c| matches!(c, VoiceCommand::Listen { .. })).count(), 1);
+    n.command(Command::AskPlayback { active: false });
+    assert!(worker.commands().contains(&VoiceCommand::Listen { hold: false, id: 2 }));
+    worker.crash(3, "fixture failure");
+    assert!(!t.view().voice.automatic);
+    n.command(Command::AskRetry);
+    assert_eq!(d.ears.workers.lock().unwrap().len(), 2);
+    assert!(t.view().listening);
+    n.ask_page(false);
+    t.shutdown(&n);
+}
+
+#[test]
+fn ask_waits_for_approval_then_rearms() {
+    let (t, n, d) = n4n0_on(Settings::default(), Arc::new(Watcher::new(|| Box::new(NoMedia))));
+    *d.ears.allowed.lock().unwrap() = true;
+    let calls = json!([{ "id":"c1", "name":"set_afk_message", "input":{"text":"tea", "enabled":true} }]);
+    let (base, bodies) = orbiters(vec![done(json!([]), calls), done(json!([]), json!([]))]);
+    t.sign_in(base, "test");
+    n.n4n0.lock().unwrap().voice.installed = true;
+    n.ask_page(true);
+    let worker = d.ears.workers.lock().unwrap()[0].clone();
+    worker.say(VoiceEvent::Heard { text:"set my away message".into(), for_n4n0:true, seconds:1.0, decode_ms:1, listen:1 });
+    let status = status_when(&t, |s| !s.thinking && !s.confirmations.is_empty());
+    assert!(!status.confirmations.is_empty());
+    t.settings.lock().unwrap().n4n0.menu.touch = false;
+    let before = worker.commands().len();
+    n.touch();
+    assert_eq!(worker.commands().len(), before, "approval must reject touch before capture");
+    n.ask_follow(); n.publish();
+    assert!(!t.view().listening);
+    assert_eq!(worker.commands().iter().filter(|c| matches!(c, VoiceCommand::Listen { .. })).count(), 1);
+    n.ask("yes".into(), "typed");
+    n.ask_follow(); n.publish();
+    assert!(t.view().listening);
+    assert_eq!(bodies.lock().unwrap().len(), 2, "approval never starts an assistant request");
+    n.ask_page(false);
     t.shutdown(&n);
 }

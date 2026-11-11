@@ -99,13 +99,14 @@ pub struct LanStatus {
 }
 
 /// What VRChat's own avatar parameters (`InStation`, `Seated`, `VelocityMagnitude`) say of its moving. The speed is
-/// kept to a quarter metre a second, so that walking does not publish the state at the rate VRChat sends it.
+/// kept unrounded, with the local receive time. OSC can send only changes: age alone is not a stop.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct AvatarMotion {
     pub in_station: bool,
     pub seated: bool,
     /// Metres a second.
     pub speed: f32,
+    pub speed_at_ms: Option<u64>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -571,6 +572,7 @@ pub struct WorkerStatus {
 /// plain fields are small, and compared by value.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Snapshot {
+    pub smoothing_revision: u64,
     pub version: String,
     pub vrchat: VrchatStatus,
     pub sources: Slice<Vec<SpoutSourceInfo>>,
@@ -627,7 +629,7 @@ pub struct Snapshot {
 }
 
 orbiters_core::parts!(Snapshot {
-    plain: [version, reconstruction, vrchat_login, cleanup, bridge, worn_kit, camera_open_said, camera_tools, projects_changed],
+    plain: [smoothing_revision, version, reconstruction, vrchat_login, cleanup, bridge, worn_kit, camera_open_said, camera_tools, projects_changed],
     slices: [sources, mics, osc, lan, capture, settings, storage, worker, steamvr, reconstruct_queue, account, uploads, update, vr_audio, orbit, booster],
     identity: [capture_shares],
     nested: [vrchat, n4n0],
@@ -662,6 +664,7 @@ impl Snapshot {
     /// [`Snapshot::new`] with settings another snapshot holds: shared with it, not copied.
     pub fn with(settings: Slice<Settings>) -> Self {
         Self {
+            smoothing_revision: 0,
             orbit: Default::default(),
             booster: Default::default(),
             worn_kit: None,

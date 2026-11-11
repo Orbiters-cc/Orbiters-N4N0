@@ -296,14 +296,12 @@ impl Rig {
                 self.panels.way_back(self.around, &mut places);
                 self.panels.takeover_place = Some(vr::sheet_place(Zone::Takeover));
                 self.panels.back_place = Some(vr::sheet_place(Zone::SheetBack));
-                self.panels.peek_place = Some(zones::in_units(Zone::SheetPeek));
                 self.panels.view_taken = false;
             }
             Mode::Desktop => {
                 self.panels.takeover_place = zones::place(Zone::Takeover, CLIENT);
                 self.panels.back_place = zones::place(Zone::SheetBack, CLIENT);
                 self.panels.hint_place = zones::place(Zone::SheetHint, CLIENT);
-                self.panels.peek_place = zones::place(Zone::SheetPeek, CLIENT);
             }
         }
         self.panels.set_open(self.around, places, &self.snap);

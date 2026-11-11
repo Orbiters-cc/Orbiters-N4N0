@@ -1710,6 +1710,9 @@ impl Controller {
             if s.settings == previous {
                 return;
             }
+            if previous.booster.level != s.settings.booster.level && s.settings.booster.level == orbiters_booster::Level::Off {
+                self.booster.cancel_work();
+            }
             s.storage.limit_gb = s.settings.storage_limit_gb;
             (previous, s.settings.clone())
         };

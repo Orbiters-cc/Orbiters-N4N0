@@ -1489,6 +1489,7 @@ impl N4n0 {
 
     /// N4N0 listens to one sentence (as a hand on N4N0 does), unless it already listens.
     pub(crate) fn menu_listen(self: &Shared) {
+        let _lifecycle = self.voice_lifecycle.lock();
         let settings = self.with_settings(|s| s.n4n0.clone());
         if !settings.enabled || !settings.assistant {
             return;
@@ -1499,7 +1500,6 @@ impl N4n0 {
                 return;
             }
         }
-        self.n4n0.lock().unwrap().listening = Some((Source::Touch, Instant::now()));
         self.voice_listen(Source::Touch);
     }
 

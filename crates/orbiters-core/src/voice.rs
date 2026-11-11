@@ -115,6 +115,10 @@ impl VoiceCommand {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum VoiceEvent {
+    /// Replaceable words for the current listen; never a committed sentence.
+    Provisional { listen: u64, text: String },
+    /// Capture has ended; the final decode is running without holding the microphone.
+    Finalizing { listen: u64 },
     /// The models are loaded.
     Ready {
         engine: String,

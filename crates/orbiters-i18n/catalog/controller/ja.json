@@ -342,5 +342,6 @@
   "file\u0004Small": "軽量",
   "Record beside VRChat's camera": "VRChatのカメラの横で録画",
   "Stopping…": "停止中…",
-  "VRChat did not confirm the capture avatar. Try again.": "VRChatで撮影用アバターへの変更を確認できませんでした。もう一度お試しください。"
+  "VRChat did not confirm the capture avatar. Try again.": "VRChatで撮影用アバターへの変更を確認できませんでした。もう一度お試しください。",
+  "Orbiters did not answer for this world's feedback. It tries again by itself.": "このワールドの評価をOrbitersから取得できませんでした。自動で再試行します。"
 }

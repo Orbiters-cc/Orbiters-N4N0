@@ -840,12 +840,12 @@ fn session(args: &[String]) -> anyhow::Result<Ended> {
             held: t.menu.host.menu.open || t.state.busy() || t.state.calibrator.in_world(now),
             away: snap.n4n0.afk,
             // VRChat's InStation, Seated and VelocityMagnitude tell whether it walks the avatar; without them (VRChat
-            // not talking to Orbiters, or not lately) the stick alone says it.
+            // not talking to Orbiters, or not lately) a sustained unknown state stops and requires stick release.
             motion: snap
                 .vrchat
                 .motion
                 .filter(|_| snap.vrchat.running && snap.osc.receiving)
-                .map(|m| walk::Motion { in_station: m.in_station || m.seated, speed: m.speed }),
+                .map(|m| walk::Motion { in_station: m.in_station || m.seated, speed: if m.speed_at_ms.is_some() { m.speed } else { f32::NAN }, speed_at_ms: m.speed_at_ms }),
             input_read,
         };
         t.walk.update(&steamvr, &moment);

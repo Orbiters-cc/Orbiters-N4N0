@@ -1,13 +1,13 @@
 //! An independent VRChat transport. Cookies never enter the Orbiters HTTP agent or API.
 //! Blocking methods belong on background threads. No credentials, codes, cookies or response bodies are logged.
-//! Reads, and one change: the picture of an avatar or world the signed-in account uploaded ([`replace_image`]).
+//! Reads, picture updates ([`replace_image`]), deliberate instance creation and self-invites.
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use orbiters_i18n::tr;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicU64, Ordering},
     Arc, Mutex, OnceLock,
 };
 use std::time::{Duration, Instant};
@@ -21,6 +21,7 @@ const ENTROPY: &[u8] = b"Orbiters.N4N0 VRChat session";
 pub struct Gate {
     revoked: AtomicBool,
     expires: Instant,
+    operations: AtomicU64,
 }
 impl Default for Gate {
     fn default() -> Self {
@@ -29,19 +30,33 @@ impl Default for Gate {
 }
 impl Gate {
     pub fn for_duration(lifetime: Duration) -> Self {
-        Self { revoked: AtomicBool::new(false), expires: Instant::now() + lifetime }
+        Self { revoked: AtomicBool::new(false), expires: Instant::now() + lifetime, operations: AtomicU64::new(0) }
     }
     pub fn allowed(&self) -> bool {
         !self.revoked.load(Ordering::Acquire) && Instant::now() < self.expires
+    }
+    /// Cancel queued personal work without disabling the separate logout transport.
+    pub fn cancel_operations(&self) {
+        self.operations.fetch_add(1, Ordering::AcqRel);
+    }
+    pub fn operation(&self, deadline: Instant) -> Operation {
+        Operation { gate: self.operations.load(Ordering::Acquire), deadline }
     }
     pub fn revoke(&self) {
         self.revoked.store(true, Ordering::Release);
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// Local dispatch authorization captured before waiting for the client lock.
+#[derive(Clone, Copy)]
+pub struct Operation { gate: u64, deadline: Instant }
+impl Operation { pub fn with_deadline(self, deadline: Instant) -> Self { Self { deadline: self.deadline.min(deadline), ..self } } }
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Error {
     Disabled,
+    DeadlineExceeded,
+    OutcomeUnknown,
     Unauthorized,
     WrongCode,
     RateLimited(Duration),
@@ -62,6 +77,8 @@ pub enum Error {
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::DeadlineExceeded => f.write_str(tr("The request expired before it could be sent. Please try again.")),
+            Self::OutcomeUnknown => f.write_str(tr("VRChat may have received the request. Check VRChat before trying again.")),
             Self::Disabled => f.write_str(tr("VRChat sign-in is not available for this Orbiters account.")),
             Self::Unauthorized => f.write_str(tr("Your VRChat session expired. Sign in again.")),
             Self::WrongCode => f.write_str(tr("That code was not accepted. Check it and try again.")),
@@ -200,6 +217,79 @@ pub struct World {
     pub thumbnail_image_url: String,
     pub image_url: String,
     pub author_id: String,
+    pub author_name: String,
+    pub description: String,
+    pub capacity: Option<u32>,
+    pub recommended_capacity: Option<u32>,
+    pub tags: Vec<String>,
+    pub visits: Option<u64>,
+    pub favorites: Option<u64>,
+    /// Live enumeration uses a fresh world response, never the day-long metadata cache.
+    pub instances: Vec<(String, u32, serde_json::Value)>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum InstanceAccess { Public, FriendsPlus, Friends, InvitePlus, Invite, GroupPublic, GroupPlus, Group, Unknown }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CreateAccess { Public, FriendsPlus, Friends, InvitePlus, Invite }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum InstanceRegion { Us, Use, Eu, Jp }
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct WorldInstance {
+    pub world: String,
+    /// Exact opaque instanceId supplied by VRChat; never rebuild it from its number.
+    pub id: String,
+    pub access: InstanceAccess,
+    pub region: String,
+    pub occupants: u32,
+    pub capacity: Option<u32>,
+    pub friends: Option<u32>,
+    pub full: bool,
+    pub closed: bool,
+    pub can_join: bool,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct WorldInstances {
+    pub items: Vec<WorldInstance>,
+    /// A lookup was hidden, missing or null; this is not evidence of closure.
+    pub unavailable: usize,
+    /// Exact remaining IDs for the next bounded batch. Never invite without a returned permit.
+    pub remaining: Vec<String>,
+}
+
+fn instance_details(v: &serde_json::Value, world: &str, id: Option<&str>) -> Result<WorldInstance> {
+    let instance = v["instanceId"].as_str().filter(|s| !s.is_empty()).ok_or(Error::InvalidResponse)?;
+    if v["worldId"].as_str() != Some(world) || id.is_some_and(|id| id != instance) { return Err(Error::InvalidResponse); }
+    let access = match v["accessType"].as_str() {
+        Some("public") => InstanceAccess::Public, Some("friendsPlus") => InstanceAccess::FriendsPlus,
+        Some("friends") => InstanceAccess::Friends, Some("invitePlus") => InstanceAccess::InvitePlus,
+        Some("invite") => InstanceAccess::Invite, Some("groupPublic") => InstanceAccess::GroupPublic,
+        Some("groupPlus") => InstanceAccess::GroupPlus, Some("group") => InstanceAccess::Group,
+        _ => InstanceAccess::Unknown,
+    };
+    let occupants = v["n_users"].as_u64().and_then(|n| n.try_into().ok()).ok_or(Error::InvalidResponse)?;
+    let capacity = v["capacity"].as_u64().or_else(|| v["world"]["capacity"].as_u64()).and_then(|n| u32::try_from(n).ok());
+    let full = v["full"].as_bool().unwrap_or(false) || v["hasCapacityForYou"].as_bool() == Some(false)
+        || capacity.is_some_and(|c| occupants >= c);
+    let closed = v["active"].as_bool() == Some(false) || v["closedAt"].as_str().is_some_and(|s|
+        time::OffsetDateTime::parse(s, &time::format_description::well_known::Rfc3339)
+            .map_or(true, |t| t <= time::OffsetDateTime::now_utc()));
+    let friends = v["users"].as_array().filter(|users| users.iter().all(|u| u["isFriend"].is_boolean()))
+        .map(|users| users.iter().filter(|u| u["isFriend"].as_bool() == Some(true)).count() as u32);
+    Ok(WorldInstance { world: world.into(), id: instance.into(), access, region: v["region"].as_str().unwrap_or_default().into(),
+        occupants, capacity, friends, full, closed, can_join: !full && !closed && access != InstanceAccess::Unknown })
+}
+
+fn instance_body(world: &str, owner: &str, access: CreateAccess, region: InstanceRegion) -> serde_json::Value {
+    let kind = match access { CreateAccess::Public => "public", CreateAccess::FriendsPlus => "hidden", CreateAccess::Friends => "friends", _ => "private" };
+    let mut body = serde_json::json!({"worldId": world, "type": kind, "region": region, "canRequestInvite": access == CreateAccess::InvitePlus});
+    if access != CreateAccess::Public { body["ownerId"] = owner.into(); }
+    body
 }
 /// Whether `instance` (as VRChat's log writes it: `11027~private(usr_…)~region(eu)~nonce(…)`) is a private instance
 /// `owner` owns: the strict kind only. Invite+ (`~canRequestInvite`), friends, hidden (friends+), group and public
@@ -477,7 +567,7 @@ struct Limiter {
     next: HashMap<&'static str, Instant>,
     blocked: Option<Instant>,
     /// Tests of long request sequences go without the one-second spacing.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     unpaced: bool,
 }
 impl Limiter {
@@ -485,7 +575,7 @@ impl Limiter {
         self.next.get(family).copied().into_iter().chain(self.blocked).max().map_or(Duration::ZERO, |t| t.saturating_duration_since(now))
     }
     fn used(&mut self, family: &'static str, now: Instant) {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         if self.unpaced {
             return;
         }
@@ -508,6 +598,9 @@ pub struct Client {
     transport: Arc<dyn Transport>,
     cookies: Cookies,
     allowed: Arc<Gate>,
+    operation: Option<Operation>,
+    #[cfg(test)]
+    pacing_pause: Option<Arc<std::sync::Barrier>>,
     limiter: Arc<Mutex<Limiter>>,
     user: Option<User>,
     pending_methods: Vec<TwoFactor>,
@@ -536,6 +629,9 @@ impl Client {
             transport: Arc::new(Http(agent)),
             cookies: Cookies::default(),
             allowed,
+            operation: None,
+            #[cfg(test)]
+            pacing_pause: None,
             limiter: LIMITER.get_or_init(Default::default).clone(),
             user: None,
             pending_methods: Vec::new(),
@@ -547,8 +643,16 @@ impl Client {
             store: dirs::data_local_dir().map(|d| d.join("Orbiters/vrchat-session.bin")),
         }
     }
+    pub fn operation(&self, deadline: Instant) -> Operation { self.allowed.operation(deadline) }
+    pub fn with_operation<T>(&mut self, operation: Operation, work: impl FnOnce(&mut Self) -> Result<T>) -> Result<T> {
+        self.operation = Some(operation);
+        let result = self.permitted().and_then(|_| work(self));
+        self.operation = None;
+        result
+    }
     fn permitted(&self) -> Result<()> {
-        if self.allowed.allowed() {
+        if self.operation.is_some_and(|o| Instant::now() >= o.deadline) { return Err(Error::DeadlineExceeded); }
+        if self.allowed.allowed() && self.operation.is_none_or(|o| o.gate == self.allowed.operations.load(Ordering::Acquire)) {
             Ok(())
         } else {
             Err(Error::Disabled)
@@ -556,6 +660,9 @@ impl Client {
     }
     pub fn signed_in(&self) -> bool {
         self.allowed.allowed() && self.user.is_some()
+    }
+    pub fn signed_in_user_id(&self) -> Option<&str> {
+        self.signed_in().then(|| self.user.as_ref().map(|u| u.id.as_str())).flatten()
     }
     fn authenticated(&self) -> Result<()> {
         self.permitted()?;
@@ -628,7 +735,9 @@ impl Client {
                 }
                 wait
             };
-            std::thread::sleep(wait);
+            #[cfg(test)]
+            if let Some(pause) = &self.pacing_pause { if self.operation.is_none_or(|o| o.gate == self.allowed.operations.load(Ordering::Acquire)) { pause.wait(); pause.wait(); } }
+            std::thread::sleep(wait.min(Duration::from_millis(50)));
         }
     }
     fn back_off(&self, response: &Response) -> Error {
@@ -655,12 +764,13 @@ impl Client {
         let verifying = family == "auth" && url.contains("/twofactorauth/") && url.ends_with("/verify");
         let session_host = url.starts_with("https://api.vrchat.cloud/") || url.starts_with("https://files.vrchat.cloud/");
         let cookie = if session_host { self.cookies.header() } else { String::new() };
-        let response = self.transport.send(Request { method, url, cookie, basic, body, upload: None })?;
+        self.permitted()?;
+        let response = self.transport.send(Request { method, url, cookie, basic, body, upload: None }).map_err(|e| if method == "POST" && matches!(family, "instances" | "invites") { Error::OutcomeUnknown } else { e })?;
         // Backoff survives a revoked grant. No response data or cookies do.
         if response.status == 429 {
             return Err(self.back_off(&response));
         }
-        self.permitted()?;
+        self.permitted().map_err(|e| if method == "POST" && matches!(family, "instances" | "invites") { Error::OutcomeUnknown } else { e })?;
         let before = self.cookies.clone();
         if session_host {
             self.cookies.absorb(&response.cookies);
@@ -680,6 +790,7 @@ impl Client {
                 Err(Error::Unauthorized)
             }
             404 | 403 => Err(Error::NotFound),
+            500..=599 if method == "POST" && matches!(family, "instances" | "invites") => Err(Error::OutcomeUnknown),
             500..=599 => Err(Error::Unavailable),
             200..=399 => {
                 if self.cookies != before && self.user.is_some() {
@@ -922,6 +1033,48 @@ impl Client {
         self.world_lists.insert(path, (Instant::now(), worlds.clone(), more));
         Ok((worlds, more))
     }
+    /// The first bounded batch of fresh visible instances; remaining holds the exact IDs for continuation.
+    pub fn world_instances(&mut self, world: &str) -> Result<WorldInstances> {
+        self.authenticated()?;
+        let w = self.fetch_world(world)?;
+        self.world_instance_batch(world, w.instances.into_iter().map(|(id, _, _)| id).collect())
+    }
+    pub fn world_instance_ids(&mut self, world: &str) -> Result<Vec<String>> {
+        self.authenticated()?;
+        Ok(self.fetch_world(world)?.instances.into_iter().map(|(id, _, _)| id).collect())
+    }
+    pub fn world_instance_batch(&mut self, world: &str, ids: Vec<String>) -> Result<WorldInstances> {
+        let mut result = WorldInstances::default();
+        result.remaining = ids.iter().skip(16).cloned().collect();
+        for id in ids.into_iter().take(16) {
+            match self.world_instance(world, &id) {
+                Ok(Some(i)) => result.items.push(i),
+                Ok(None) | Err(Error::NotFound) => result.unavailable += 1,
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(result)
+    }
+    pub fn world_instance(&mut self, world: &str, id: &str) -> Result<Option<WorldInstance>> {
+        self.authenticated()?;
+        let r = self.get("instances", &format!("/instances/{}:{}", path_segment(world), path_segment(id)))?;
+        let v: serde_json::Value = serde_json::from_slice(&r.body).map_err(|_| Error::InvalidResponse)?;
+        if v.is_null() { return Ok(None); }
+        instance_details(&v, world, Some(id)).map(Some)
+    }
+    pub fn create_instance(&mut self, world: &str, access: CreateAccess, region: InstanceRegion) -> Result<WorldInstance> {
+        self.authenticated()?;
+        let owner = self.user.as_ref().ok_or(Error::Unauthorized)?.id.clone();
+        let body = instance_body(world, &owner, access, region);
+        let r = self.request("instances", "POST", format!("{BASE}/instances"), None, Some(body.to_string()))?;
+        let v: serde_json::Value = serde_json::from_slice(&r.body).map_err(|_| Error::OutcomeUnknown)?;
+        let i = instance_details(&v, world, None).map_err(|_| Error::OutcomeUnknown)?;
+        let expected = match access { CreateAccess::Public => InstanceAccess::Public, CreateAccess::FriendsPlus => InstanceAccess::FriendsPlus,
+            CreateAccess::Friends => InstanceAccess::Friends, CreateAccess::InvitePlus => InstanceAccess::InvitePlus, CreateAccess::Invite => InstanceAccess::Invite };
+        if i.access != expected || v["region"] != serde_json::to_value(region).map_err(|_| Error::OutcomeUnknown)?
+            || (access != CreateAccess::Public && v["ownerId"].as_str() != Some(owner.as_str())) { return Err(Error::OutcomeUnknown); }
+        Ok(i)
+    }
     /// A new private instance of `world` in `region`, owned by the signed-in account (`12345~private(usr_…)~region(eu)~nonce(…)`):
     /// invite only, nobody can ask to join it. An answer that names anything else is refused here, so that what comes
     /// out of this is always such an instance ([`private_instance_of`]).
@@ -933,8 +1086,8 @@ impl Client {
         let reply: serde_json::Value = serde_json::from_slice(&r.body).map_err(|_| Error::InvalidResponse)?;
         created_instance(&reply, world, &owner).ok_or(Error::InvalidResponse)
     }
-    /// Sends the signed-in account an invite to `world`'s instance `instance` (`48213~region(eu)`: a public one, made
-    /// when someone joins it), which VRChat shows in the game: the one way to join from outside it while it runs.
+    /// Sends the signed-in account an invite to an exact instance. UI callers must use the service's scoped
+    /// listed/created destination validation before reaching this transport operation.
     pub fn invite_self(&mut self, world: &str, instance: &str) -> Result<()> {
         self.authenticated()?;
         let url = format!("{BASE}/invite/myself/to/{}:{}", path_segment(world), path_segment(instance));
@@ -1458,6 +1611,139 @@ pub(crate) mod tests {
     }
     pub(crate) fn expired_session() -> Client {
         mock(vec![response(401, "", &[])]).0
+    }
+    fn chooser_instance(id: &str, access: &str) -> serde_json::Value {
+        serde_json::json!({"worldId":"wrld_test", "instanceId":id, "accessType":access, "region":"eu", "n_users":3,
+            "capacity":20,"full":false,"active":true,"ownerId":if access == "public" { serde_json::Value::Null } else if access.starts_with("group") { serde_json::json!("grp_test") } else { serde_json::json!("usr_test") }, "users":[{"isFriend":true},{"isFriend":false}]})
+    }
+    #[test]
+    fn chooser_lists_exact_ids_kinds_and_world_details_without_a_capture() {
+        let ids = ["123~region(eu)", "456~hidden(usr_test)~region(eu)~nonce(a)", "789~private(usr_test)~canRequestInvite~region(eu)~nonce(b)"];
+        let body = serde_json::json!({"id":"wrld_test","name":"World","authorName":"Creator","description":"A place", "capacity":20,
+            "tags":["author_tag_chill"],"visits":12,"favorites":7,"instances":ids.map(|id| serde_json::json!([id,3,{"en":1.0}]))});
+        let mut answers = vec![json(body)];
+        answers.extend(ids.iter().zip(["public","friendsPlus","invitePlus"]).map(|(id,a)| json(chooser_instance(id,a))));
+        let (mut c, seen) = mock(answers);
+        c.limiter.lock().unwrap().unpaced = true;
+        let list = c.world_instances("wrld_test").unwrap();
+        assert_eq!(list.items.iter().map(|i| i.id.as_str()).collect::<Vec<_>>(), ids);
+        assert_eq!(list.items[1].access, InstanceAccess::FriendsPlus);
+        assert_eq!(list.items[2].access, InstanceAccess::InvitePlus);
+        assert_eq!(list.items[0].friends, Some(1));
+        assert!(list.items.iter().all(|i| i.can_join));
+        let w = c.world("wrld_test").unwrap();
+        assert_eq!((w.author_name.as_str(),w.description.as_str(),w.capacity,w.visits,w.favorites), ("Creator","A place",Some(20),Some(12),Some(7)));
+        assert_eq!(seen.lock().unwrap().len(),4);
+    }
+    #[test]
+    fn chooser_empty_hidden_expired_errors_and_no_session() {
+        let (mut c, _) = mock(vec![json(serde_json::json!({"instances":[]}))]);
+        assert!(c.world_instances("wrld_test").unwrap().items.is_empty());
+        for status in [401,500,429] {
+            let (mut c, _) = mock(vec![response(status,"",&[])]);
+            let error = c.world_instances("wrld_test").unwrap_err();
+            assert!(match status {401=>error==Error::Unauthorized,500=>error==Error::Unavailable,_=>matches!(error,Error::RateLimited(_))});
+        }
+        let (mut c, seen) = mock(vec![]);
+        c.user = None;
+        assert_eq!(c.world_instances("wrld_test"),Err(Error::Unauthorized));
+        assert!(seen.lock().unwrap().is_empty());
+        let (mut c, _) = mock(vec![json(serde_json::json!({"instances":[["1",0,{}],["2",0,{}]]})),response(403,"",&[]),json(serde_json::Value::Null)]);
+        c.limiter.lock().unwrap().unpaced=true;
+        let list=c.world_instances("wrld_test").unwrap();
+        assert_eq!(list.unavailable,2);
+        assert!(list.items.is_empty());
+    }
+    #[test]
+    fn chooser_creation_bodies_and_exact_selected_invite() {
+        for (access,kind,label,requestable) in [(CreateAccess::Public,"public","public",false),
+            (CreateAccess::FriendsPlus,"hidden","friendsPlus",false),(CreateAccess::Friends,"friends","friends",false),
+            (CreateAccess::InvitePlus,"private","invitePlus",true),(CreateAccess::Invite,"private","invite",false)] {
+            let id = if access == CreateAccess::Public { "123~region(eu)".to_string() } else { format!("123~{kind}(usr_test){}~region(eu)~nonce(opaque)", if requestable { "~canRequestInvite" } else { "" }) };
+            let (mut c,seen)=mock(vec![json(chooser_instance(&id,label)),response(200,"{}",&[])]);
+            let created=c.create_instance("wrld_test",access,InstanceRegion::Eu).unwrap();
+            c.invite_self("wrld_test",&created.id).unwrap();
+            let calls=seen.lock().unwrap();
+            let body:serde_json::Value=serde_json::from_str(calls[0].body.as_ref().unwrap()).unwrap();
+            let mut expected=serde_json::json!({"worldId":"wrld_test","type":kind,"region":"eu","canRequestInvite":requestable});
+            if access!=CreateAccess::Public {expected["ownerId"]="usr_test".into();}
+            assert_eq!(body,expected);
+            assert!(calls[1].url.ends_with(&format!("/invite/myself/to/wrld_test:{}",path_segment(&id))));
+        }
+    }
+    #[test]
+    fn chooser_full_closed_and_unknown_are_not_joinable() {
+        for (field,value) in [("full",serde_json::json!(true)),("active",serde_json::json!(false)),("hasCapacityForYou",serde_json::json!(false)),("accessType",serde_json::json!("new-kind"))] {
+            let mut v=chooser_instance("1","friendsPlus"); v[field]=value;
+            assert!(!instance_details(&v,"wrld_test",Some("1")).unwrap().can_join);
+        }
+        assert!(instance_details(&chooser_instance("2","public"),"wrld_test",Some("1")).is_err());
+        assert!(instance_details(&chooser_instance("1","public"),"wrld_other",Some("1")).is_err());
+    }
+    #[test]
+    fn chooser_scope_change_during_mocked_http_discards_the_answer() {
+        struct ChangeScope { current: Arc<AtomicBool>, calls: Arc<std::sync::atomic::AtomicUsize> }
+        impl Transport for ChangeScope {
+            fn send(&self, _: Request) -> Result<Response> {
+                self.calls.fetch_add(1, Ordering::Relaxed);
+                self.current.store(false, Ordering::Release);
+                Ok(json(serde_json::json!({"instances":[]})))
+            }
+        }
+        let (mut c,_) = mock(vec![]);
+        let current=Arc::new(AtomicBool::new(true));
+        let calls=Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        c.transport=Arc::new(ChangeScope {current:current.clone(),calls:calls.clone()});
+        let source=crate::vrchat_source::Source::new(Some(Arc::new(Mutex::new(c))),None,None);
+        assert_eq!(source.personal("usr_test",|| current.load(Ordering::Acquire),|c| c.world_instances("wrld_test")),Err(Error::Disabled));
+        assert_eq!(calls.load(Ordering::Relaxed),1);
+        assert_eq!(source.personal("usr_test",|| false,|c| c.world_instances("wrld_test")),Err(Error::Disabled));
+        assert_eq!(calls.load(Ordering::Relaxed),1,"stale work never reaches HTTP");
+        assert_eq!(source.personal("usr_other",|| true,|c| c.world_instances("wrld_test")),Err(Error::Unauthorized));
+    }
+
+
+    #[test]
+    fn review_all_access_kinds_preserve_coherent_opaque_ids() {
+        for (fragment,label) in [("","public"),("~hidden(usr_test)","friendsPlus"),("~friends(usr_test)","friends"),("~private(usr_test)~canRequestInvite","invitePlus"),("~private(usr_test)","invite"),("~group(grp_test)~groupAccessType(public)","groupPublic"),("~group(grp_test)~groupAccessType(plus)","groupPlus"),("~group(grp_test)~groupAccessType(members)","group")] {
+            let id=format!("123{fragment}~region(eu){}",if fragment.is_empty(){""}else{"~nonce(opaque)"});
+            let (mut c,calls)=mock(vec![json(chooser_instance(&id,label))]);
+            let row=c.world_instance("wrld_test",&id).unwrap().unwrap();
+            assert_eq!(row.id,id);assert!(row.can_join);assert_ne!(row.access,InstanceAccess::Unknown);
+            assert!(calls.lock().unwrap()[0].url.ends_with(&path_segment(&id)));
+        }
+    }
+    #[test]
+    fn review_large_listing_is_bounded_and_preserves_remaining_ids() {
+        let ids:Vec<_>=(0..122).map(|n|format!("{n}~region(eu)")).collect();
+        let mut answers=vec![json(serde_json::json!({"instances":ids.iter().map(|id|serde_json::json!([id,1,{}])).collect::<Vec<_>>()}))];
+        answers.extend(ids.iter().take(16).map(|id|json(chooser_instance(id,"public"))));
+        let (mut c,calls)=mock(answers);c.limiter.lock().unwrap().unpaced=true;
+        let batch=c.world_instances("wrld_test").unwrap();
+        assert_eq!(batch.items.len(),16);assert_eq!(batch.remaining,ids[16..]);assert_eq!(calls.lock().unwrap().len(),17);
+    }
+    #[test]
+    fn review_future_closure_embedded_capacity_and_unknown_region() {
+        let mut v=chooser_instance("1~region(moon)","public");
+        v["closedAt"]="2099-01-01T00:00:00Z".into();v["region"]="moon".into();v.as_object_mut().unwrap().remove("capacity");v["world"]=serde_json::json!({"capacity":25});
+        let i=instance_details(&v,"wrld_test",None).unwrap();assert!(!i.closed);assert_eq!(i.capacity,Some(25));assert_eq!(i.region,"moon");
+    }
+    #[test]
+    fn review_revocation_during_pacing_prevents_create_and_invite_dispatch() {
+        for invite in [false,true] {
+            let (mut c,calls)=mock(vec![response(200,"{}",&[])]);
+            let gate=c.allowed.clone();
+            let operation=c.operation(Instant::now()+Duration::from_secs(60));
+            c.limiter.lock().unwrap().next.insert(if invite {"invites"} else {"instances"},Instant::now()+Duration::from_millis(200));
+            let pause = Arc::new(std::sync::Barrier::new(2));
+            c.pacing_pause = Some(pause.clone());
+            let worker=std::thread::spawn(move || c.with_operation(operation,|c| if invite {c.invite_self("wrld_test","123~region(eu)")} else {c.create_instance("wrld_test",CreateAccess::Public,InstanceRegion::Eu).map(drop)}));
+            pause.wait();
+            gate.cancel_operations();
+            pause.wait();
+            assert_eq!(worker.join().unwrap(),Err(Error::Disabled));
+            assert!(calls.lock().unwrap().is_empty());
+        }
     }
     #[test]
     fn world_lists_are_asked_a_page_at_a_time_and_kept() {
@@ -2048,4 +2334,25 @@ pub(crate) mod tests {
             assert_eq!((s.len(), md5_base64(&s).as_str()), (len, md5), "{n} bytes");
         }
     }
+}
+
+/// In-memory HTTP seam for cross-crate regression tests. No cookies or session files leave this fake.
+#[cfg(feature = "test-support")]
+pub fn test_client(gate: Arc<Gate>, replies: Vec<(u16, serde_json::Value)>) -> (Client, Arc<Mutex<Vec<(String, String)>>>) {
+    struct Fake { replies: Mutex<std::collections::VecDeque<(u16, serde_json::Value)>>, calls: Arc<Mutex<Vec<(String, String)>>> }
+    impl Transport for Fake {
+        fn send(&self, r: Request) -> Result<Response> {
+            self.calls.lock().unwrap().push((r.method.into(), r.url));
+            let (status, body) = self.replies.lock().unwrap().pop_front().expect("unexpected HTTP");
+            Ok(Response { status, body: body.to_string().into_bytes(), cookies: vec![], retry_after: None, location: None })
+        }
+    }
+    let calls = Arc::new(Mutex::new(vec![]));
+    let mut c = Client::new(gate);
+    c.store = None;
+    c.limiter = Arc::new(Mutex::new(Limiter { unpaced: true, ..Default::default() }));
+    c.cookies.auth = "fake".into();
+    c.user = Some(User { id: "usr_test".into(), ..Default::default() });
+    c.transport = Arc::new(Fake { replies: Mutex::new(replies.into()), calls: calls.clone() });
+    (c, calls)
 }

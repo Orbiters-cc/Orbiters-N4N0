@@ -39,6 +39,17 @@ const CLIENT: Vec2 = vec2(1920.0, 1080.0);
 static RETRO: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 static GALLERY: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(60);
 
+const FONT_FIXTURE: &str = "orbit-paint-bench-header-font-fixture";
+fn mark_font_fixture(ctx: &egui::Context) { ctx.data_mut(|d| d.insert_temp(egui::Id::new(FONT_FIXTURE), true)); }
+pub(super) fn take_font_fixture(ctx: &egui::Context) -> bool {
+    ctx.data_mut(|d| {
+        let id = egui::Id::new(FONT_FIXTURE);
+        let marked = d.get_temp::<bool>(id).unwrap_or(false);
+        if marked { d.remove::<bool>(id); }
+        marked
+    })
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Mode {
     Vr,
@@ -128,6 +139,7 @@ fn register_world_fixture(panels: &mut Panels, fixture: &mut Option<WorldFixture
 }
 struct Rig {
     world_fixture: Option<WorldFixture>,
+    fixture_fonts: std::collections::HashSet<u64>,
     mode: Mode,
     panels: Panels,
     snap: Arc<Snapshot>,
@@ -275,6 +287,7 @@ impl Rig {
         };
         Self {
             world_fixture,
+            fixture_fonts: Default::default(),
             mode,
             panels: panels.with_page_worker(),
             snap: Arc::new(snap),
@@ -386,6 +399,14 @@ impl Rig {
             cost.hand = t.elapsed();
             // What is due a picture now: painted for nothing, when the turn then hands nothing over.
             assert!(self.panels.facts.sheet != Some(super::panels::Sheet::Worlds) || self.world_fixture.is_none(), "Worlds fixture must be registered before its first paint");
+            // The picture replay controls atlas allocation as well as Facts/time/assets. This
+            // marker is absent from timing runs and from the application. Priming happens in
+            // the real draw, so its texture delta reaches that canvas's raster owner.
+            if self.log.is_some() {
+                for panel in self.panels.all().filter(|p| p.zone == Zone::SheetBack) {
+                    if self.fixture_fonts.insert(panel.canvas.id) { mark_font_fixture(panel.canvas.ctx()); }
+                }
+            }
             let due: Vec<Zone> = self.panels.all().filter(|p| p.dirty).map(|p| p.zone).collect();
             let t = Instant::now();
             let (mut shows, mut pixels, mut upload) = (0u32, 0u64, Duration::ZERO);
@@ -1044,6 +1065,29 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
 #[cfg(test)]
 mod review_fixture {
     use super::*;
+    #[test]
+    fn review_header_fixture_controls_glyph_history_without_drawing_extra_pixels() {
+        let _one = super::super::flows::ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+        use super::super::{panels, Canvas, Facts};
+        let style = orbiters_core::settings::OrbitSettings::default();
+        panels::with_render_style(style, || {
+            let size = Zone::SheetBack.units().size();
+            let make = || Canvas::zoomed((size.x * 2.0) as u32, (size.y * 2.0) as u32, 2.0).in_orbit_look();
+            let (mut a, mut b) = (make(), make());
+            for canvas in [&mut a, &mut b] { mark_font_fixture(canvas.ctx()); }
+            let draw = |canvas: &mut Canvas, sheet, title: &str| {
+                let facts = Facts { sheet: Some(sheet), sheet_title: title.into(), orbit: style, ..Default::default() };
+                canvas.paint(1.0, |p| panels::paint(p, Zone::SheetBack, size, &facts, None, None));
+            };
+            draw(&mut a, panels::Sheet::Pictures, "Pictures");
+            draw(&mut a, panels::Sheet::Worlds, "Worlds");
+            draw(&mut b, panels::Sheet::Settings, "Settings");
+            draw(&mut b, panels::Sheet::Instances, "Instances");
+            for canvas in [&mut a, &mut b] { draw(canvas, panels::Sheet::Settings, "Settings"); }
+            assert_eq!(a.pixels(), b.pixels(), "different transient headings must not change settled fixture pixels");
+            assert!(!take_font_fixture(a.ctx()) && !take_font_fixture(b.ctx()), "prime once per atlas");
+        });
+    }
     #[test]
     fn review_world_fixture_waits_for_lazy_initialization_and_cannot_be_skipped() {
         let _one = super::super::flows::ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());

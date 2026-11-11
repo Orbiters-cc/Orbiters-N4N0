@@ -2474,6 +2474,18 @@ fn cell_edge(p: &Painter, ring: Ring, center: Pos2, width: f32, color: Color32) 
 
 /// Draws a part (in units, its corner at the painter's origin): its fill and everything on it.
 pub fn paint(p: &Painter, zone: Zone, size: Vec2, facts: &Facts, hover: Option<usize>, pressed: Option<usize>) {
+    if zone == Zone::SheetBack && super::paint_bench::take_font_fixture(p.ctx()) {
+        // Untimed benchmark pictures only. Latest-only jobs skip transient headings, so
+        // uncontrolled atlas histories are different inputs to an exact pixel comparison.
+        // Allocate the fixture's header glyphs in a fixed order, without adding shapes.
+        let mut words: String = (' '..='~').chain("…".chars()).collect();
+        for (_, _, label) in HEAD_TOOLS { words.push_str(tr_ctx("tile", label)); }
+        for (size, weight) in [(13.5, weight::MEDIUM), (13.5, weight::BOLD), (15.5, weight::SEMIBOLD), (15.5, weight::BOLD), (18.0, weight::SEMIBOLD), (14.5, weight::BOLD), (12.5, weight::MEDIUM), (12.0, weight::SEMIBOLD), (13.5, weight::SEMIBOLD)] {
+            p.layout_no_wrap(words.clone(), look::font(size, weight), Color32::WHITE);
+        }
+        let glyphs: String = HEAD_TOOLS.iter().map(|t| t.1).chain([icons::ARROW_LEFT, icons::X, icons::EYE, icons::SQUARE]).collect();
+        for size in [17.0, 18.0, 21.0] { p.layout_no_wrap(glyphs.clone(), FontId::new(size, orbiters_ui::fonts::icons()), Color32::WHITE); }
+    }
     let panel = Rect::from_min_size(pos2(0.0, 0.0), size);
     if facts.desktop && zone.on_the_wing_backing() && !facts.hidden {
         wing_backing(p, zone, panel);

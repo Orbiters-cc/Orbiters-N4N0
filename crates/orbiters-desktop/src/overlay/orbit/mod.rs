@@ -1344,12 +1344,13 @@ impl Panels {
         let px = [size.x.round() as u32, size.y.round() as u32];
         if self.stage.px != px {
             let ctx = self.stage.canvas.ctx().clone();
+            let textures = self.stage.canvas.textures.clone();
             self.stage.canvas = Canvas::zoomed(px[0], px[1], px[0] as f32 / layout::WIDTH as f32).in_orbit_look();
-            self.stage.canvas.ctx = ctx;
+            self.stage.canvas.ctx = ctx; self.stage.canvas.textures = textures;
             self.stage.px = px; self.stage.cache.clear(); self.stage.presented = None; self.stage.presented_scene = None;
         }
         if self.worlds_here && self.stage.worlds.is_none() {
-            self.stage.worlds = Some(Worlds::alone(self.stage.canvas.ctx().clone()));
+            self.stage.worlds = Some(Worlds::alone_with_textures(self.stage.canvas.ctx().clone(), self.stage.canvas.textures.clone()));
             self.stage.worlds.as_mut().unwrap().snapshot_mode(self.stage.async_pages);
         }
         self.stage.epoch = self.stage.epoch.wrapping_add(1);
@@ -3046,7 +3047,7 @@ impl Panels {
                     let items_at = Instant::now();
                     let items = panels::sheet_items(sheet, &self.facts);
                     super::record_phase(4, items_at.elapsed());
-                    let ctx = stage.painter.ctx.clone();
+                    let ctx = stage.canvas.textures.clone();
                     let mut facts = self.facts.clone();
                     if sheet == Sheet::All {
                         // What All tools' large tiles hold, for real.
@@ -3177,14 +3178,14 @@ impl Panels {
             let mut facts = self.facts.clone();
             if let (Zone::CameraWeb, Some(web)) = (panel.zone, self.web.as_mut()) {
                 if let Some(image) = web.frame.as_ref() {
-                    let texture = panel.pictures.entry("web".to_string()).or_insert_with(|| panel.canvas.ctx().load_texture("web", image.clone(), TextureOptions::LINEAR));
+                    let texture = panel.pictures.entry("web".to_string()).or_insert_with(|| panel.canvas.textures.load_texture("web", image.clone(), TextureOptions::LINEAR));
                     if web.fresh { texture.set(image.clone(), TextureOptions::LINEAR); web.fresh = false; }
                     if let Some(page) = facts.camera.web.as_mut() { page.picture = Some(texture.id()); }
                 }
             }
             if matches!(panel.zone, Zone::WheelPlaying | Zone::WingPlaying | Zone::QmStrip | Zone::WheelVeil | Zone::WheelCaption | Zone::QmCaption) {
                 if let Some((key, image)) = &self.art {
-                    facts.art = Some(panel.pictures.entry(key.clone()).or_insert_with(|| panel.canvas.ctx().load_texture("art", image.clone(), TextureOptions::LINEAR)).id());
+                    facts.art = Some(panel.pictures.entry(key.clone()).or_insert_with(|| panel.canvas.textures.load_texture("art", image.clone(), TextureOptions::LINEAR)).id());
                 }
             }
             let spec = Self::paint_spec(panel);

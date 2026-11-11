@@ -22,6 +22,8 @@ impl PaintSnapshot {
     pub(crate) fn point(&mut self, at: Option<egui::Pos2>) { self.panel.hover = self.hit(at.map(|p| (p.x, p.y))); }
     pub(crate) fn key(&self) -> String { self.panel.paint_key() }
     pub(crate) fn hole(&self) -> Option<egui::Rect> { self.panel.hole(&self.status) }
+    #[cfg(test)]
+    pub(super) fn target_for_test(&self, target: panel::Target) -> Option<egui::Pos2> { self.with_data(|panel, d| panel.targets(d).into_iter().find(|(t, _)| *t == target).map(|(_, r)| r.center())) }
     pub(super) fn compatible(&self, live: &Worlds, entries: &[Entry], status: &panel::Status, picked: Option<&Entry>, target: panel::Target) -> bool {
         if !self.panel.same_input(&live.panel, target) || self.picked.as_ref().map(|e| (e.id, &e.world_id)) != picked.map(|e| (e.id, &e.world_id)) { return false; }
         if matches!(target, panel::Target::Key(_) | panel::Target::Space | panel::Target::Backspace | panel::Target::Comments | panel::Target::Join) { return true; }
@@ -49,7 +51,7 @@ mod review_navigation {
         // The comments/description may arrive while a finger is pressing the still
         // shown navigation button. Data-changing controls must still reject this.
         worlds.feedback.signed_in = !shown.feedback.signed_in;
-        worlds.panel.vr_scroll += 17.0;
+        worlds.panel.scroll_by(17.0);
         let accepts = |worlds: &Worlds, target| shown.compatible(worlds, &worlds.entries(), &worlds.status(), worlds.picked(), target);
         assert!(accepts(&worlds, panel::Target::Comments));
         assert!(accepts(&worlds, panel::Target::Join));
@@ -65,7 +67,7 @@ impl Worlds {
         self.panel.adopt_metrics(&picture.panel);
         self.presented_paint = Some(picture);
     }
-    pub(crate) fn prepare_paint(&mut self, ctx: &egui::Context) -> PaintSnapshot {
+    pub(crate) fn prepare_paint(&mut self, _ctx: &egui::Context) -> PaintSnapshot {
         self.panel.vr_coast(self.time());
         self.panel.dirty = false;
         self.hole_changed = false;
@@ -73,7 +75,7 @@ impl Worlds {
             let image = egui::ColorImage::from_rgba_premultiplied(frame.size, &frame.rgba);
             match &mut self.live_texture {
                 Some(texture) => texture.set(image, egui::TextureOptions::LINEAR),
-                None => self.live_texture = Some(ctx.load_texture("side-panel-view", image, egui::TextureOptions::LINEAR)),
+                None => self.live_texture = Some(self.textures.load_texture("side-panel-view", image, egui::TextureOptions::LINEAR)),
             }
             if let Some(live) = self.panel.live.as_mut() { live.picture = self.live_texture.as_ref().map(|t| t.id()); live.plate = frame.plate; }
         }

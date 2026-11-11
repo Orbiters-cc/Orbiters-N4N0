@@ -81,7 +81,7 @@ impl Engine {
         let slot = self.parts.entry(spec.zone).or_insert_with(|| PartCanvas { id: 0, canvas: Canvas::new(1, 1), mask: None, pixels: Vec::new(), style: None });
         if slot.id != spec.canvas_id {
             let mut canvas = Canvas::zoomed(spec.px[0], spec.px[1], spec.px[0] as f32 / spec.logical.x).in_orbit_look();
-            canvas.ctx = spec.ctx.clone();
+            canvas.textures = crate::overlay::PaintTextures::of(&spec.ctx); canvas.ctx = spec.ctx.clone();
             canvas.painter.set_parallel(self.parallel);
             *slot = PartCanvas { id: spec.canvas_id, canvas, mask: spec.zone.ring().map(|ring| Arc::new(panels::cell_mask(ring, spec.px, spec.px[0] as f32 / spec.logical.x))), pixels: vec![0; spec.px[0] as usize * spec.px[1] as usize * 4], style: None };
         }
@@ -110,7 +110,7 @@ impl Engine {
         if self.page.pixel_size() != request.px {
             let ctx = self.page.ctx().clone();
             self.page = Canvas::zoomed(request.px[0], request.px[1], request.px[0] as f32 / orbiters_n4n0_core::menu::layout::WIDTH as f32).in_orbit_look();
-            self.page.ctx = ctx; self.page.painter.set_parallel(self.parallel);
+            self.page.textures = crate::overlay::PaintTextures::of(&ctx); self.page.ctx = ctx; self.page.painter.set_parallel(self.parallel);
         }
         let px = self.page.pixel_size();
         crate::overlay::paint_phases(true);
@@ -172,7 +172,7 @@ impl Painter {
     pub fn new(px: [u32; 2]) -> Self { Self::with_context(px, Canvas::new(1, 1).ctx().clone()) }
     pub fn with_context(px: [u32; 2], ctx: egui::Context) -> Self {
         let mut page = Canvas::zoomed(px[0], px[1], px[0] as f32 / orbiters_n4n0_core::menu::layout::WIDTH as f32).in_orbit_look();
-        page.ctx = ctx.clone(); page.painter.set_parallel(true);
+        page.textures = crate::overlay::PaintTextures::of(&ctx); page.ctx = ctx.clone(); page.painter.set_parallel(true);
         let shared = Arc::new((Mutex::new(Mailbox::default()), Condvar::new()));
         let thread = shared.clone();
         std::thread::Builder::new().name("orbit-page-paint".into()).spawn(move || {

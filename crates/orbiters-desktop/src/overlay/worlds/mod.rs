@@ -186,6 +186,7 @@ pub struct Worlds {
     /// What a Join or an Open on VRChat said, from its thread.
     said: (mpsc::Sender<String>, mpsc::Receiver<String>),
     ctx: egui::Context,
+    textures: crate::overlay::PaintTextures,
     epoch: Instant,
     keys_seen: Option<u32>,
     last_paint: Option<Instant>,
@@ -340,6 +341,7 @@ impl Worlds {
             search_now: false,
             picked: None,
             said: mpsc::channel(),
+            textures: crate::overlay::PaintTextures::of(&ctx),
             ctx,
             epoch: Instant::now(),
             keys_seen: None,
@@ -382,6 +384,11 @@ fn keep_an_eye_frame(steamvr: &vr::Client, n: u32) {
 /// The panel alone, for the desktop's panels around VRChat's menus (`overlay::orbit`): no SteamVR, no pill, no bar, nothing shown around the person. Its lists, a world's page
     /// and its feedback work as ever; a capture opens in the Orbiters window instead ([`Worlds::mouse_alone`]).
     pub fn alone(ctx: egui::Context) -> Self {
+        let textures = crate::overlay::PaintTextures::of(&ctx);
+        Self::alone_with_textures(ctx, textures)
+    }
+
+    pub(crate) fn alone_with_textures(ctx: egui::Context, textures: crate::overlay::PaintTextures) -> Self {
         Self {
             paint_fixture: None, snapshot_mode: false, presented_paint: None, pressed_paint: None,
             open: false,
@@ -439,6 +446,7 @@ fn keep_an_eye_frame(steamvr: &vr::Client, n: u32) {
             search_now: false,
             picked: None,
             said: mpsc::channel(),
+            textures,
             ctx,
             epoch: Instant::now(),
             keys_seen: None,
@@ -744,6 +752,7 @@ fn keep_an_eye_frame(steamvr: &vr::Client, n: u32) {
     /// Where `target` is on the panel now, in its units: where a hand points to press it.
     #[cfg(test)]
     pub fn target_for_test(&self, target: panel::Target) -> Option<egui::Pos2> {
+        if self.snapshot_mode { return self.presented_paint.as_ref().and_then(|p| p.target_for_test(target)); }
         let entries = self.entries();
         let status = self.status();
         let (no_thumb, no_picture) = (|_: &Entry| -> Option<TextureId> { None }, |_: u64, _: bool| -> Option<TextureId> { None });
@@ -1977,11 +1986,12 @@ fn keep_an_eye_frame(steamvr: &vr::Client, n: u32) {
     /// The thumbnails of the worlds the panel shows now (their picture on VRChat, through the window's cache of world
     /// pages and pictures).
     fn thumbnails(&mut self, visible: &[Visible]) -> HashMap<u64, TextureId> {
+        let now = self.time();
         let mut out = HashMap::new();
         for v in visible {
             let Some(url) = v.thumbnail.clone().or_else(|| self.facts.get(&v.world).and_then(|f| f.thumbnail.clone())) else { continue };
             let picture = crate::worlds::Picture::Remote { world_id: v.world.clone(), url, large: false };
-            if let Some(t) = self.pictures.get(&self.ctx, &picture) {
+            if let Some(t) = self.pictures.get_at(&self.textures, now, &picture) {
                 out.insert(v.id, t.id());
             }
         }
@@ -1997,14 +2007,16 @@ fn keep_an_eye_frame(steamvr: &vr::Client, n: u32) {
     }
 
     pub fn world_thumbnail(&mut self, world_id: &str) -> Option<TextureId> {
+        let now = self.time();
         self.facts_for(world_id);
         let url = self.facts.get(world_id).and_then(|f| f.thumbnail.clone())?;
         let picture = crate::worlds::Picture::Remote { world_id: world_id.to_string(), url, large: false };
-        self.pictures.get(&self.ctx, &picture).map(|t| t.id())
+        self.pictures.get_at(&self.textures, now, &picture).map(|t| t.id())
     }
 
     /// The selected capture's world's pictures on the pictures page: the page's thumbnails, the one shown whole.
     fn world_pictures(&mut self, entries: &[Entry]) -> HashMap<(u64, bool), TextureId> {
+        let now = self.time();
         let mut out = HashMap::new();
         if self.panel.page != panel::Page::Pictures {
             return out;
@@ -2029,7 +2041,7 @@ fn keep_an_eye_frame(steamvr: &vr::Client, n: u32) {
             })
             .collect();
         for (id, large, picture) in asks {
-            if let Some(t) = self.pictures.get(&self.ctx, &picture) {
+            if let Some(t) = self.pictures.get_at(&self.textures, now, &picture) {
                 out.insert((id, large), t.id());
             }
         }

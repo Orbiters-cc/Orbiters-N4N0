@@ -7,6 +7,14 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Command {
+    /// Page-scoped Ask lifecycle. Enter defaults to Auto; leaving cancels and releases capture.
+    AskPage { open: bool },
+    /// First user Talk press takes over this visit; `down` holds/releases the manual sentence.
+    AskTalk { down: bool },
+    /// Audio output owns this gate until playback drains, so the answer cannot become input.
+    AskPlayback { active: bool },
+    /// Explicit retry after a microphone/worker failure; rechecks every preflight requirement.
+    AskRetry,
     /// A question typed in the window or the overlay.
     Ask {
         text: String,

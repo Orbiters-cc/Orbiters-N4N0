@@ -2510,6 +2510,98 @@ fn ask_preflight_blocks_capture_and_reports_each_reason() {
 }
 
 #[test]
+fn review_touch_obeys_pauses_and_playback_survives_navigation() {
+    let (t, n, d) = n4n0_on(Settings::default(), Arc::new(Watcher::new(|| Box::new(NoMedia))));
+    *d.ears.allowed.lock().unwrap() = true;
+    t.sign_in("http://127.0.0.1:1/".into(), "test");
+    t.settings.lock().unwrap().n4n0.menu.touch = false;
+    n.n4n0.lock().unwrap().voice.installed = true;
+    n.ask_page(true);
+    let worker = d.ears.workers.lock().unwrap()[0].clone();
+    for gate in 0..2 {
+        n.voice_cancel();
+        { let mut rt = n.n4n0.lock().unwrap(); rt.listening = None;
+          rt.voice.output_playing = gate == 0; rt.voice.finalizing = gate == 1;
+
+        }
+        let before = worker.commands().len();
+        n.touch(); n.menu_listen();
+        assert_eq!(worker.commands().len(), before, "gate {gate} admitted touch");
+        assert!(n.n4n0.lock().unwrap().listening.is_none());
+    }
+    n.n4n0.lock().unwrap().voice.output_playing = true;
+    n.ask_page(false); n.ask_page(true);
+    assert!(t.view().voice.output_playing);
+    assert!(!t.view().listening);
+}
+
+#[test]
+fn review_lifecycle_serializes_arm_manual_and_final_with_exit() {
+    let (t, n, d) = n4n0_on(Settings::default(), Arc::new(Watcher::new(|| Box::new(NoMedia))));
+    *d.ears.allowed.lock().unwrap() = true;
+    t.sign_in("http://127.0.0.1:1/".into(), "test");
+    n.n4n0.lock().unwrap().voice.installed = true;
+    n.ask_page(true);
+    let worker = d.ears.workers.lock().unwrap()[0].clone();
+    for operation in 0..6 {
+        t.sign_in("http://127.0.0.1:1/".into(), "test");
+        n.ask_page(true);
+        let listen = worker.commands().iter().rev().find_map(|c| match c { VoiceCommand::Listen { id, .. } => Some(*id), _ => None }).unwrap();
+        let gate = n.voice_lifecycle.lock();
+        let other = n.clone();
+        let (started, ready) = std::sync::mpsc::channel();
+        let (done, finished) = std::sync::mpsc::channel();
+        let thread = std::thread::spawn(move || {
+            started.send(()).unwrap();
+            match operation % 3 {
+                0 => other.ask_follow(),
+                1 => other.ask_talk(true),
+                _ => other.on_voice_event(VoiceEvent::Heard { listen, text: "discarded".into(), for_n4n0: true, seconds: 1.0, decode_ms: 1 }),
+            }
+            done.send(()).unwrap();
+        });
+        ready.recv().unwrap();
+        assert!(finished.recv_timeout(Duration::from_millis(50)).is_err(), "transition escaped lifecycle owner");
+        if operation < 3 { n.ask_page(false); } else { *t.server.lock().unwrap() = None; n.ask_follow(); n.publish(); }
+        let before = worker.commands().len();
+        drop(gate);
+        thread.join().unwrap();
+        assert_eq!(worker.commands().len(), before);
+        assert!(!t.view().listening);
+        assert!(t.view().lines.iter().all(|l| l.who != N4n0Who::You));
+    }
+}
+
+#[test]
+fn review_wake_followup_is_admitted_only_outside_pause_gates() {
+    let (t, n, d) = n4n0_on(Settings::default(), Arc::new(Watcher::new(|| Box::new(NoMedia))));
+    *d.ears.allowed.lock().unwrap() = true;
+    t.sign_in("http://127.0.0.1:1/".into(), "test");
+    { let mut settings = t.settings.lock().unwrap();
+      settings.n4n0.wake_word = true;
+      settings.n4n0.wake_words = vec!["testwake".into()];
+      settings.n4n0.menu.wake_word = false;
+    }
+    n.n4n0.lock().unwrap().voice.installed = true;
+    n.app_talk(true, true);
+    let worker = d.ears.workers.lock().unwrap()[0].clone();
+    n.voice_cancel();
+    n.n4n0.lock().unwrap().listening = None;
+    let wake = || VoiceEvent::Heard { listen: 0, text: "testwake".into(), for_n4n0: false, seconds: 1.0, decode_ms: 1 };
+    for gate in 0..2 {
+        { let mut rt = n.n4n0.lock().unwrap(); rt.voice.output_playing = gate == 0; rt.voice.finalizing = gate == 1; }
+        let before = worker.commands().len();
+        worker.say(wake());
+        assert_eq!(before, worker.commands().len());
+        assert!(n.n4n0.lock().unwrap().listening.is_none());
+    }
+    { let mut rt = n.n4n0.lock().unwrap(); rt.voice.output_playing = false; rt.voice.finalizing = false; }
+    worker.say(wake());
+    assert!(worker.commands().contains(&VoiceCommand::Listen { hold: false, id: 2 }));
+    assert!(t.view().listening);
+}
+
+#[test]
 fn ask_auto_final_stream_pause_rearm_manual_exit_and_stale_words() {
     let (t, n, d) = n4n0_on(Settings::default(), Arc::new(Watcher::new(|| Box::new(NoMedia))));
     *d.ears.allowed.lock().unwrap() = true;
@@ -2630,6 +2722,10 @@ fn ask_waits_for_approval_then_rearms() {
     worker.say(VoiceEvent::Heard { text:"set my away message".into(), for_n4n0:true, seconds:1.0, decode_ms:1, listen:1 });
     let status = status_when(&t, |s| !s.thinking && !s.confirmations.is_empty());
     assert!(!status.confirmations.is_empty());
+    t.settings.lock().unwrap().n4n0.menu.touch = false;
+    let before = worker.commands().len();
+    n.touch();
+    assert_eq!(worker.commands().len(), before, "approval must reject touch before capture");
     n.ask_follow(); n.publish();
     assert!(!t.view().listening);
     assert_eq!(worker.commands().iter().filter(|c| matches!(c, VoiceCommand::Listen { .. })).count(), 1);

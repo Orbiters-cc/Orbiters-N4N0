@@ -335,7 +335,9 @@ impl Service {
         };
         match msg {
             ToService::Hello { .. } => {}
-            ToService::StartCapture => report(ctl.start_capture(false)),
+            ToService::StartCapture { origin } => ctl.request_capture_from(origin),
+            ToService::CameraQr { active } => ctl.camera_qr(active),
+            ToService::SwitchDemoAvatar => ctl.switch_demo_avatar(),
             ToService::StopCapture => report(ctl.stop_capture()),
             ToService::Pause { paused } => report(ctl.pause_capture(paused)),
             ToService::TestPattern => report(ctl.start_test_capture()),

@@ -329,7 +329,7 @@ impl super::Controller {
 
     /// VRChat's camera's values as its OSCQuery tree has them now (`/usercamera/Mode`, `/usercamera/Zoom`…): empty when
     /// VRChat does not say (not found, or before 2025.3.3, whose tree has no camera).
-    fn camera_values(&self) -> Vec<(String, OscValue)> {
+    pub(super) fn camera_values(&self) -> Vec<(String, OscValue)> {
         let query = self.with_osc(|o| o.vrchat_query()).flatten();
         query.map(|addr| orbiters_core::osc::vrchat_camera_values(addr, Duration::from_millis(500))).unwrap_or_default()
     }

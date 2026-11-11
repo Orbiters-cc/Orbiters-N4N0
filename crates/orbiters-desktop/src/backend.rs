@@ -19,6 +19,9 @@ pub trait Backend: Send + Sync {
     /// Repaint `ctx` whenever something changes.
     fn attach(&self, ctx: &egui::Context);
     fn start_capture(&self);
+    fn start_camera_recording(&self) {}
+    fn camera_qr(&self, _active: bool) {}
+    fn switch_demo_avatar(&self) {}
     fn stop_capture(&self);
     /// The Orbiters window to the front.
     fn show_window(&self) {}
@@ -129,6 +132,8 @@ pub type Ctl = Arc<dyn Backend>;
 pub struct Remote(pub Arc<Client>);
 
 impl Backend for Remote {
+    fn camera_qr(&self, active: bool) { self.0.send(&ToService::CameraQr { active }); }
+    fn switch_demo_avatar(&self) { self.0.send(&ToService::SwitchDemoAvatar); }
     fn show_window(&self) {
         self.0.send(&ToService::ShowWindow);
     }
@@ -161,7 +166,11 @@ impl Backend for Remote {
     }
 
     fn start_capture(&self) {
-        self.0.send(&ToService::StartCapture);
+        self.0.send(&ToService::StartCapture { origin: crate::ipc::RecordingOrigin::OtherUi });
+    }
+
+    fn start_camera_recording(&self) {
+        self.0.send(&ToService::StartCapture { origin: crate::ipc::RecordingOrigin::CameraOverlay });
     }
 
     fn stop_capture(&self) {
@@ -363,6 +372,8 @@ impl Local {
 }
 
 impl Backend for Local {
+    fn camera_qr(&self, active: bool) { self.ctl.camera_qr(active); }
+    fn switch_demo_avatar(&self) { self.ctl.switch_demo_avatar(); }
     fn vrchat_data(&self, scope: controller::vrchat_data::Scope, request: controller::vrchat_data::Request) -> controller::vrchat_data::Result {
         self.ctl.vrchat_data(scope, request)
     }
@@ -386,7 +397,11 @@ impl Backend for Local {
     }
 
     fn start_capture(&self) {
-        self.report(self.ctl.start_capture(false));
+        self.report(self.ctl.start_capture_from(crate::ipc::RecordingOrigin::OtherUi));
+    }
+
+    fn start_camera_recording(&self) {
+        self.report(self.ctl.start_capture_from(crate::ipc::RecordingOrigin::CameraOverlay));
     }
 
     fn stop_capture(&self) {

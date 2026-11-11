@@ -790,6 +790,13 @@ impl Client {
         let r = self.get("avatars", &format!("/avatars/{}", encode(id)))?;
         self.keep_avatar(id, &r.body)
     }
+    /// Community specification: PUT /avatars/{avatarId}/select, authenticated session only.
+    pub fn select_avatar(&mut self, id: &str) -> Result<()> {
+        self.authenticated()?;
+        if !id.starts_with("avtr_") || id.len() != 41 { return Err(Error::InvalidResponse); }
+        self.request("avatars", "PUT", format!("{BASE}/avatars/{}/select", encode(id)), None, None)?;
+        Ok(())
+    }
     fn keep_avatar(&mut self, id: &str, body: &[u8]) -> Result<Avatar> {
         let a: Avatar = serde_json::from_slice(body).map_err(|_| Error::InvalidResponse)?;
         if self.avatars.len() >= 512 {
@@ -1502,6 +1509,25 @@ pub(crate) mod tests {
         let calls = seen.lock().unwrap();
         assert_eq!(calls[0].method, "POST");
         assert_eq!(calls[0].url, format!("{BASE}/invite/myself/to/wrld_4432ea9b-729c-46e3-8eaf-846aa0a37fdd:48213~region(eu)"));
+    }
+    #[test]
+    fn selecting_avatar_uses_authenticated_put() {
+        let (mut c, seen) = mock(vec![response(200, "{}", &[])]);
+        c.select_avatar("avtr_4432ea9b-729c-46e3-8eaf-846aa0a37fdd").unwrap();
+        let calls = seen.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].method, "PUT");
+        assert!(calls[0].url.ends_with("/avatars/avtr_4432ea9b-729c-46e3-8eaf-846aa0a37fdd/select"));
+        assert!(calls[0].cookie.contains("mock-session"));
+    }
+    #[test]
+    fn selecting_avatar_refuses_missing_or_mismatched_playing_account() {
+        for playing in [None, Some("usr_other")] {
+            let (c, seen) = mock(vec![response(200, r#"{"id":"usr_test","displayName":"Tester"}"#, &[])]);
+            let source = crate::vrchat_source::Source::new(Some(Arc::new(Mutex::new(c))),None,playing.map(str::to_owned));
+            assert!(source.select_avatar("avtr_4432ea9b-729c-46e3-8eaf-846aa0a37fdd").is_err());
+            assert!(seen.lock().unwrap().iter().all(|r| r.method == "GET" && r.url.ends_with("/auth/user")), "identity lookup is allowed; selection is not");
+        }
     }
     #[test]
     fn source_routes_avatar_image_and_instance_through_the_personal_session() {

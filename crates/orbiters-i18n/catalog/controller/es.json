@@ -341,5 +341,6 @@
   "{why} Discard them to export every splat as trained: Select splats in its 3D view can remove them again.": "{why} Descártalas para exportar todos los splats tal como se entrenaron: con la selección de splats en su vista 3D podrás quitarlos otra vez.",
   "file\u0004Small": "Pequeño",
   "Record beside VRChat's camera": "Grabar junto a la cámara de VRChat",
-  "Stopping…": "Deteniendo…"
+  "Stopping…": "Deteniendo…",
+  "VRChat did not confirm the capture avatar. Try again.": "VRChat no confirmó el avatar de captura. Inténtalo de nuevo."
 }

@@ -66,6 +66,14 @@ pub enum ToClient {
     Close,
 }
 
+/// A long recording can only be started by the camera overlay. Other UI surfaces remain stop-only.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RecordingOrigin {
+    CameraOverlay,
+    OtherUi,
+}
+
 /// Client → service.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -75,7 +83,9 @@ pub enum ToService {
         role: Role,
         pid: u32,
     },
-    StartCapture,
+    StartCapture { origin: RecordingOrigin },
+    CameraQr { active: bool },
+    SwitchDemoAvatar,
     StopCapture,
     /// The Orbiters window to the front.
     ShowWindow,

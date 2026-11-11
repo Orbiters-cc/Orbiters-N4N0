@@ -3131,7 +3131,7 @@ impl Panels {
         back.items.clone_from(&header.items);
         back.hover = back.pointer.and_then(|p| panels::hit(&back.items, p)); back.pressed = pressed.and_then(|a| back.items.iter().position(|i| i.action == a));
         back.canvas.ran = true;
-        back.painted = true; back.dirty = header.hover != back.hover || header.pressed != back.pressed;
+        back.painted = true; back.again = false; back.dirty = header.hover != back.hover || header.pressed != back.pressed;
         back.displayed = Some(frame.facts.clone());
         super::record_phase(3, at.elapsed());
         if changed { show(back, [0, 0, back.px[0], back.px[1]]); }
@@ -3144,7 +3144,7 @@ impl Panels {
             page_painter::Scene::Menu { menu, .. } => self.sheet_pointer.and_then(|p| layout::hit_pointable(layout::cached(ScreenPage::of(menu)), menu, p.x, p.y).map(|(n, _)| n)),
             page_painter::Scene::Worlds(_) => None,
         };
-        page.painted = true; page.dirty |= first || page.hover != frame.hover || page.pressed != frame.pressed;
+        page.painted = true; page.again = false; page.dirty |= first || page.hover != frame.hover || page.pressed != frame.pressed;
         page.displayed = Some(frame.facts.clone());
         super::record_phase(3, at.elapsed());
         show(page, [0, 0, page.px[0], page.px[1]]);
@@ -3168,7 +3168,7 @@ impl Panels {
                 panel.hover = panel.pointer.and_then(|p| panels::hit(&panel.items, p));
                 panel.dirty |= first || panel.hover != frame.hover || panel.pressed != frame.pressed;
                 panel.canvas.ran = true;
-                panel.painted = true; panel.displayed = Some(frame.facts);
+                panel.painted = true; panel.again = false; panel.displayed = Some(frame.facts);
                 show(panel, [0, 0, panel.px[0], panel.px[1]]);
             }
         }

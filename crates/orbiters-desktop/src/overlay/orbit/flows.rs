@@ -1850,3 +1850,18 @@ fn review_a_camera_bar_for_a_previous_url_cannot_act_on_the_new_page() {
     let at = person.find(Action::WebClose).unwrap(); person.panels.hover(Some(at)); person.panels.press(&person.snap);
     assert!(person.panels.web.is_none(), "the current bar still closes its own page");
 }
+
+#[test]
+fn review_accepted_worker_pictures_consume_the_opening_flag_and_keep_the_atlas() {
+    let mut person = Person::new(); person.panels.stage.async_pages = true; person.around = Some(Around::QuickMenu); person.turns(3);
+    person.panels.open_sheet(Sheet::Settings, "", &person.snap);
+    person.turns_until("first picture", |p| p.panels.takeover.as_ref().is_some_and(|p| p.painted) && !p.panels.stage.painter.busy());
+    person.panels.close_sheet(); person.turns(2);
+    person.panels.open_sheet(Sheet::Settings, "", &person.snap);
+    person.turns_until("reopened picture", |p| p.panels.list.iter().find(|p| p.zone == Zone::SheetBack).is_some_and(|p| p.painted) && !p.panels.stage.painter.busy());
+    let header = person.panels.list.iter().find(|p| p.zone == Zone::SheetBack).unwrap();
+    let atlas = header.canvas.id;
+    assert!(!header.again && !person.panels.takeover.as_ref().unwrap().again, "a published picture has completed the new opening");
+    person.panels.paint_all_again();
+    assert_eq!(person.panels.list.iter().find(|p| p.zone == Zone::SheetBack).unwrap().canvas.id, atlas, "an already painted header must keep its atlas through a color repaint");
+}

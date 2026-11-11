@@ -214,6 +214,7 @@ impl Panel {
     /// Takes what the canvas painted: the changed part, cut to the panel's shape. Returns it (x0, y0, x1, y1). A part kept from an earlier opening takes all of it the first
     /// time, changed or not: what it hands over is then made from what was just painted and from the look as it is now, and owes nothing to the opening before.
     fn take_picture(&mut self) -> Option<[u32; 4]> {
+        let phase = Instant::now();
         let [w, h] = self.px;
         let changed = if std::mem::take(&mut self.again) { Some([0, 0, w, h]) } else { self.canvas.damage() };
         let Some(changed) = changed else {
@@ -230,6 +231,7 @@ impl Panel {
         if let Some(mask) = &self.mask {
             panels::apply_mask(&mut self.out, mask, self.px, changed);
         }
+        super::record_phase(3, phase.elapsed());
         Some(changed)
     }
 
@@ -1827,7 +1829,9 @@ impl Panels {
                 }
             }
         }
+        let facts_at = Instant::now();
         let facts = self.facts_of(snap);
+        super::record_phase(4, facts_at.elapsed());
         if facts != self.facts {
             self.facts = facts;
             for panel in &mut self.list {
@@ -2794,7 +2798,9 @@ impl Panels {
             }
             let first = !panel.painted;
             panel.dirty = false;
+            let items_at = Instant::now();
             panel.items = panels::items(panel.zone, panel.logical, &self.facts);
+            super::record_phase(4, items_at.elapsed());
             let mut facts = self.facts.clone();
             if matches!(panel.zone, Zone::WheelPlaying | Zone::WingPlaying | Zone::QmStrip | Zone::WheelVeil | Zone::WheelCaption | Zone::QmCaption) {
                 if let Some((key, image)) = art {
@@ -2838,12 +2844,14 @@ impl Panels {
             if frame.matches(stage.epoch, sheet, &self.facts.recent) {
                 stage.presented = Some((stage.epoch, frame.facts.clone(), frame.time));
                 for back in self.list.iter_mut().filter(|p| p.zone == Zone::SheetBack) { back.dirty = true; }
+                let copy_at = Instant::now();
                 panel.out.clone_from(&frame.pixels);
                 panel.items.clone_from(&frame.items);
                 panel.hover = self.sheet_pointer.and_then(|p| panels::hit(&frame.items, p));
                 let first = !panel.painted;
                 panel.painted = true;
                 panel.dirty |= first || frame.hover != panel.hover || frame.pressed != panel.pressed;
+                super::record_phase(3, copy_at.elapsed());
                 show(panel, [0, 0, panel.px[0], panel.px[1]]);
                 stage.worker_phases = frame.phases;
                 stage.cache.retain(|f| f.sheet != frame.sheet);
@@ -2855,16 +2863,19 @@ impl Panels {
             if let Some(frame) = stage.cache.iter().find(|f| Some(f.sheet) == sheet && f.facts.recent == self.facts.recent) {
                 stage.presented = Some((stage.epoch, frame.facts.clone(), frame.time));
                 for back in self.list.iter_mut().filter(|p| p.zone == Zone::SheetBack) { back.dirty = true; }
+                let copy_at = Instant::now();
                 panel.out.clone_from(&frame.pixels);
                 panel.items.clone_from(&frame.items);
                 panel.hover = self.sheet_pointer.and_then(|p| panels::hit(&frame.items, p));
                 panel.painted = true;
+                super::record_phase(3, copy_at.elapsed());
                 show(panel, [0, 0, panel.px[0], panel.px[1]]);
             }
         }
         // A cold page has no hit targets until its first picture arrives. Never leave A's pixels
         // beneath B's header while the worker paints B. A visited page was restored above.
         if threaded && stage.presented.as_ref().is_none_or(|(epoch, _, _)| *epoch != stage.epoch) {
+            let copy_at = Instant::now();
             panel.out.fill(0);
             panel.items.clear();
             panel.hover = None;
@@ -2873,6 +2884,7 @@ impl Panels {
             panel.dirty = true;
             stage.presented = Some((stage.epoch, self.facts.clone(), time));
             for back in self.list.iter_mut().filter(|p| p.zone == Zone::SheetBack) { back.dirty = true; }
+            super::record_phase(3, copy_at.elapsed());
             show(panel, [0, 0, panel.px[0], panel.px[1]]);
         }
         match sheet {
@@ -3025,7 +3037,9 @@ impl Panels {
             let (_, facts, shown_at) = stage.presented.as_ref().expect("a page snapshot");
             for back in self.list.iter_mut().filter(|p| p.zone == Zone::SheetBack && p.dirty) {
                 let pressed = back.pressed.and_then(|n| back.items.get(n)).map(|i| i.action);
+                let items_at = Instant::now();
                 back.items = panels::items(back.zone, back.logical, facts);
+                super::record_phase(4, items_at.elapsed());
                 back.hover = self.header_pointer.and_then(|p| panels::hit(&back.items, p));
                 back.pressed = pressed.and_then(|a| back.items.iter().position(|i| i.action == a));
                 orbiters_ui::anim::set_live(back.canvas.ctx(), live);

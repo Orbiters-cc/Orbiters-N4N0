@@ -766,6 +766,9 @@ impl SheetPicture {
             }
             let from = (y - self.top) as usize * w * 4 + rect[0] as usize * 4;
             for ((out, under), over) in self.pixels[a..b].chunks_exact_mut(4).zip(self.under[a..b].chunks_exact(4)).zip(self.over[from..from + (b - a)].chunks_exact(4)) {
+                // Pages are opaque across almost all their area. Preserve the exact blend
+                // at their cut corners and holes, and copy an opaque pixel directly.
+                if over[3] == 255 { out.copy_from_slice(over); continue; }
                 let left = 255 - over[3] as u32;
                 for c in 0..4 {
                     out[c] = (over[c] as u32 + (under[c] as u32 * left + 127) / 255).min(255) as u8;
@@ -1935,4 +1938,20 @@ mod tests {
         assert_eq!(sheet.changed, Some([0, 0, bw, 89]), "one submission covers header and translated page damage");
         assert_eq!(&sheet.pixels[((88 * bw) * 4) as usize..((88 * bw) * 4 + 4) as usize], &[1, 2, 3, 255], "the page stays over a back painted again");
     }
+    #[test]
+    fn composed_opaque_and_translucent_pixels_match_the_scalar_reference() {
+        let under = [17, 33, 61, 255].repeat(256 * 3);
+        let mut page = Vec::new();
+        let mut expected = under.clone();
+        for y in 0..2 {
+            for alpha in 0..=255u32 {
+                let over = [(93 * alpha / 255) as u8, (47 * alpha / 255) as u8, (211 * alpha / 255) as u8, alpha as u8];
+                page.extend_from_slice(&over);
+                let at = ((y + 1) * 256 + alpha as usize) * 4;
+                for c in 0..4 { expected[at + c] = (over[c] as u32 + (under[at + c] as u32 * (255 - alpha) + 127) / 255).min(255) as u8; }
+            }
+        }
+        assert_eq!(compose_sheet(&under, [256, 3], &page, [256, 2], 1), expected);
+    }
+
 }

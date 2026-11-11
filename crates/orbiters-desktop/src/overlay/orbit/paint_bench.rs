@@ -302,6 +302,7 @@ impl Rig {
         self.clock += dt as f64;
         self.panels.clock = Some(self.clock);
         let mut cost = Cost::default();
+        crate::overlay::paint_phases(true);
         let t = Instant::now();
         let mut places = self.places(self.around);
         match self.mode {
@@ -370,7 +371,6 @@ impl Rig {
             let mode = self.mode;
             let sheet = &mut self.sheet;
             if page_top.is_none() { sheet.page = false; }
-            crate::overlay::paint_phases(true);
             self.panels.paint(&self.snap, |panel, changed| {
                 if let (Some(top), Zone::SheetBack | Zone::Takeover) = (page_top, panel.zone) {
                     let at = Instant::now();
@@ -412,7 +412,6 @@ impl Rig {
                     upload += at.elapsed();
                 }
             }
-            cost.phases = crate::overlay::paint_phases(false);
             cost.worker = self.panels.stage.worker_phases;
             cost.upload = upload;
             cost.paint = t.elapsed().saturating_sub(upload);
@@ -423,6 +422,7 @@ impl Rig {
                 }
             }
         }
+        cost.phases = crate::overlay::paint_phases(false);
         cost.wall = wall.elapsed();
         self.turn_in_step += 1;
         if self.log.is_some() {
@@ -618,6 +618,10 @@ impl Rig {
         // The wing is hidden with a page up: go back through its real Close control first.
         if self.find(action).is_none() && self.panels.sheet_open() && action != Action::CloseSheet {
             self.press(Action::CloseSheet);
+            self.rest();
+        }
+        if self.find(action).is_none() && !matches!(action, Action::All | Action::Back | Action::CloseSheet) && self.find(Action::All).is_some() {
+            self.press(Action::All);
             self.rest();
         }
         let Some(at) = self.find(action) else {
@@ -852,7 +856,7 @@ fn summary(mode: Mode, run: usize, rig: &Rig, out: &mut String) {
             values.sort_by(f64::total_cmp);
             if values.is_empty() { continue; }
             let percentile = |p: f64| values[((values.len() as f64 * p).ceil() as usize).saturating_sub(1)];
-            let label = ["turn", "text/layout", "textures/tessellation", "raster", "finish/copy", "facts/items/other", "worker", "items", "worker items"][phase];
+            let label = ["turn", "text/layout", "textures/tessellation", "raster", "finish/copy", "paint remainder", "worker", "facts/items", "worker items"][phase];
             let _ = writeln!(out, "| {} | {label} | {:.3} | {:.3} | {:.3} | {:.3} |", step.name, percentile(0.50), percentile(0.95), percentile(0.99), values[values.len()-1]);
         }
     }

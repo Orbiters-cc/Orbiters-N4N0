@@ -345,7 +345,7 @@ fn draw_measured(p: &Painter, card: Rect, b: &BoosterFacts) {
         }
     }
     if b.streamer {
-        lines(p, pos2(x, card.bottom() - 28.0), booster::streamer_line(), 14.0, weight::MEDIUM, look::MUTED, width, 1);
+        lines(p, pos2(x, card.bottom() - 42.0), booster::streamer_line(), 14.0, weight::MEDIUM, look::MUTED, width, 2);
     }
 }
 

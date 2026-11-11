@@ -70,7 +70,7 @@ impl Smoothed {
 const MAX_MS: u16 = TrackingSettings::MAX_MS;
 const X: f32 = 276.0;
 /// Room right of a slider for what it says.
-const VALUE_WIDTH: f32 = 96.0;
+const VALUE_WIDTH: f32 = 132.0;
 const BAR_RIGHT: f32 = 1000.0 - VALUE_WIDTH;
 
 fn row(i: usize) -> f32 {
@@ -108,7 +108,8 @@ pub(super) fn tracking_items(facts: &Facts) -> Vec<Item> {
 pub(super) fn draw_tracking(p: &Painter, facts: &Facts) {
     let mut named = |i: usize, name: &str, about: &str| {
         let y = row(i);
-        p.text(pos2(26.0, y + 15.0), Align2::LEFT_CENTER, name, look::font(20.0, weight::BOLD), look::LABEL);
+        let font = look::font(20.0, weight::BOLD);
+        p.text(pos2(26.0, y + 15.0), Align2::LEFT_CENTER, fit(p, name, &font, X - 48.0), font, look::LABEL);
         let mut job = egui::text::LayoutJob::simple(about.to_string(), look::font(15.0, weight::MEDIUM), look::LABEL, X - 40.0);
         job.wrap.max_rows = 2;
         p.galley(pos2(26.0, y + 28.0), p.layout_job(job), look::LABEL);

@@ -840,6 +840,9 @@ pub(super) fn camera_shots(out: &Path) -> anyhow::Result<()> {
     qm_scene("orbit-qm-recording", out, hd, &desk, None, None)?;
     qm_scene("orbit-sheet-head-stop", out, hd, &Facts { sheet: Some(Sheet::Pictures), sheet_title: "Pictures".into(), beside_wing: true, ..desk.clone() }, None, Some(Sheet::Pictures))?;
     qm_scene("orbit-sheet-head-stop-view", out, hd, &Facts { sheet: Some(Sheet::Pictures), sheet_title: "Pictures".into(), view_showing: true, beside_wing: true, ..desk.clone() }, None, Some(Sheet::Pictures))?;
+    // In a headset, with Hide 3D and Small here: its Stop is a round button beside them.
+    qm_scene("orbit-sheet-head-stop-view-vr", out, hd, &Facts { desktop: false, vr_close: true, sheet: Some(Sheet::Pictures), sheet_title: "Pictures".into(), view_showing: true, ..desk.clone() }, None, Some(Sheet::Pictures))?;
+    qm_scene("orbit-sheet-head-stop-vr", out, hd, &Facts { desktop: false, vr_close: true, sheet: Some(Sheet::Instances), sheet_title: "Instances".into(), ..desk.clone() }, None, Some(Sheet::Instances))?;
     qm_scene("orbit-sheet-head-stopping", out, hd, &Facts { sheet: Some(Sheet::All), sheet_title: "All tools".into(), recording: false, rec_stopping: true, beside_wing: true, ..desk.clone() }, None, Some(Sheet::All))?;
     qm_scene("orbit-sheet-pictures-idle", out, hd, &Facts { sheet: Some(Sheet::Pictures), sheet_title: "Pictures".into(), beside_wing: true, ..Facts { desktop: true, ..idle.clone() } }, None, Some(Sheet::Pictures))?;
     Ok(())

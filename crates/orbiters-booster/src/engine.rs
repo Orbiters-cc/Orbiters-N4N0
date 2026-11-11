@@ -328,6 +328,8 @@ impl Engine {
         match request {
             Request::StopTest => {
                 self.trial_status = TrialStatus::Cancelled;
+                self.programs = Judged::Not;
+                self.sharpness_steps = 0;
                 self.trial = None;
                 self.hold_test = false;
                 self.last_result = None;
@@ -718,22 +720,54 @@ mod tests {
     }
 
     #[test]
-    fn replay_november_11_block_summaries() {
+    fn review_cancel_matrix_for_every_trial_side_and_settling_period() {
+        for kind in [Kind::Programs, Kind::Sharpness] {
+            for elapsed in [0.0, 1.0, 6.0, 15.0, 16.0, 21.0, 30.0, 31.0, 36.0, 45.0, 46.0, 51.0] {
+                for off in [false, true] {
+                    let mut r = Run::new(Level::Picture, programs_help);
+                    r.run(40.0);
+                    r.engine.trial = None;
+                    r.engine.left_alone = None;
+                    r.engine.tick(&r.inputs, Some(Request::TestAnyway(kind)));
+                    assert_eq!(r.engine.trial.as_ref().unwrap().kind, kind);
+                    r.inputs.now += elapsed;
+                    r.engine.programs = Judged::Kept;
+                    r.engine.sharpness_steps = 1;
+                    r.engine.hold_test = true;
+                    if off { r.inputs.level = Level::Off; }
+                    let wants = r.engine.tick(&r.inputs, if off { None } else { Some(Request::StopTest) });
+                    assert!(r.engine.trial.is_none(), "{kind:?}, {elapsed}, {off}");
+                    assert!(!wants.lower_programs);
+                    assert_eq!(wants.sharpness, 1.0);
+                    assert!(!r.engine.hold_test);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn replay_november_11_policy_approximation_from_block_summaries() {
         // The log has summaries, not per-frame timings. Reconstruct constant frames from each
         // measured block for policy replay; this does not reproduce its timing distribution.
         let mut e = Engine::new();
         let mut now = 0.0;
+        let mut decided = false;
         for line in include_str!("../tests/fixtures/2026-11-11.jsonl").lines() {
             let row: serde_json::Value = serde_json::from_str(line).unwrap();
             let summary: Summary = serde_json::from_value(row["summary"].clone()).unwrap();
-            let inputs = Inputs { now, scene: true, world: 1, level: serde_json::from_value(row["level"].clone()).unwrap(), refresh_hz: 72.0, ..Inputs::default() };
+            let mut inputs = Inputs { now, scene: true, world: 1, level: serde_json::from_value(row["level"].clone()).unwrap(), refresh_hz: 72.0, ..Inputs::default() };
             let frames: Vec<_> = (0..summary.frames).map(|i| Frame {
                 time_s: now + i as f64 / summary.real_fps as f64,
                 presents: 2, frame_ready_ms: summary.app_cpu.median,
                 pre_submit_gpu_ms: summary.app_gpu.median, ..Frame::default()
             }).collect();
-            e.push(&inputs, &frames);
-            let wants = e.tick(&inputs, None);
+            let mut wants = Wants::default();
+            for frame in &frames {
+                inputs.now = frame.time_s;
+                e.push(&inputs, std::slice::from_ref(frame));
+                wants = e.tick(&inputs, None);
+                decided |= e.classifier.has_decision_window();
+            }
             let report = e.report(&inputs, &wants);
             assert_ne!(report.limit, Limit::Processor);
             if inputs.level == Level::Off { assert_eq!(wants, Wants::default()); }
@@ -741,6 +775,7 @@ mod tests {
             now += summary.seconds as f64;
         }
         assert!(now > 60.0);
+        assert!(decided, "the approximation must actually reach a classifier decision window");
     }
 
     /// A pretend session: time passes in steps of a fifth of a second, as the overlay's reads do, and the frames say what

@@ -76,6 +76,19 @@ impl Person {
     }
 }
 
+#[test]
+fn tracking_thumbs_use_configured_values_while_the_driver_view_lags() {
+    let mut person = Person::new();
+    let mut snap = (*person.snap).clone();
+    snap.settings.tracking.enabled = true;
+    snap.settings.tracking.ms = [90, 70, 40];
+    snap.n4n0.tracking = Some(orbiters_n4n0::status::TrackingView { on: false, ms: [0, 0, 0], note: String::new() });
+    person.snap = Arc::new(snap);
+    person.around = Some(Around::QuickMenu);
+    person.turns(3);
+    assert_eq!(person.panels.facts.tracking.as_ref().map(|t| (t.0, t.1)), Some((true, [90, 70, 40])));
+}
+
 /// Enzo: "When I click the saved looks tile, it makes the whole menu bug and become unresponsive": with real saved looks on the list, in both looks, everything on the page pressed.
 #[test]
 fn saved_looks_with_real_looks_answers() {
@@ -812,4 +825,56 @@ fn ask_streamed_snapshot_marks_the_page_for_repaint() {
         assert!(person.panels.list.iter().any(|p| p.dirty), "each intermediate snapshot repaints");
         assert_eq!(person.panels.facts.talk_lines.last().unwrap().1, words);
     }
+}
+
+#[test]
+fn review_slider_releases_round_trip_through_service_with_delayed_state() {
+    use super::panels::Smoothed;
+    use crate::backend::Backend;
+    use crate::service::tests::{service, linked_through, until};
+    let service = service();
+    let (client, wire) = linked_through(&service, crate::ipc::Role::Overlay);
+    let backend = Arc::new(crate::backend::Remote(client.clone()));
+    let mut panels = Panels::new(backend.clone(), 2.0, true);
+    let mut clock = 0.0;
+    let mut turn = |panels: &mut Panels| {
+        clock += 0.011;
+        panels.clock = Some(clock);
+        let mut snap = (*backend.view()).clone();
+        // Driver status deliberately lags configured settings throughout the real UI/IPC path.
+        snap.n4n0.tracking = Some(orbiters_n4n0::status::TrackingView { on: false, ms: [0; 3], note: String::new() });
+        turn_of(panels, &snap, Some(Around::QuickMenu), 0);
+        snap
+    };
+    let snap = turn(&mut panels);
+    panels.open_sheet(Sheet::Tracking, "", &snap);
+    turn(&mut panels);
+    let unchanged_tracker = backend.view().settings.tracking.ms[2];
+    wire.hold(true);
+    for (which, value) in [(Smoothed::Device(0), 90), (Smoothed::Device(1), 70), (Smoothed::QuickMenu, 60), (Smoothed::Wheel, 75)] {
+        let snap = turn(&mut panels);
+        let mut at = find_on(&panels, Action::Set(super::panels::Pick::SmoothingBar(which))).unwrap();
+        at.1.x = (0..=1024).find(|x| super::panels::smoothing_at(*x as f32) == value).unwrap() as f32;
+        panels.hover(Some(at));
+        turn(&mut panels);
+        panels.press(&snap);
+        assert_eq!(panels.smoothing_held, Some((which, value)));
+        turn(&mut panels);
+        panels.release();
+        panels.release();
+        turn(&mut panels);
+    }
+    assert_eq!(backend.view().settings.tracking.ms, [90,70,unchanged_tracker]);
+    assert_eq!(backend.view().settings.orbit.vr_smoothing_quick_menu_ms, 60.0);
+    assert_eq!(backend.view().settings.orbit.vr_smoothing_wheel_ms, 75.0);
+    wire.hold(false);
+    assert!(until(|| client.snapshot().smoothing_revision == 4));
+    assert_eq!(client.snapshot().settings.tracking.ms, [90,70,unchanged_tracker]);
+    client.patch_smoothing(serde_json::json!({"tracking":{"ms":[65535,70,0]}}));
+    assert!(until(|| client.snapshot().smoothing_revision == 5));
+    assert_eq!(client.snapshot().settings.tracking.ms[0], orbiters_core::settings::TrackingSettings::MAX_MS);
+    let before = client.snapshot().settings.tracking.ms;
+    client.patch_smoothing(serde_json::json!({"tracking":{"ms":"invalid"}}));
+    assert!(until(|| client.snapshot().smoothing_revision == 6));
+    assert_eq!(client.snapshot().settings.tracking.ms, before);
 }

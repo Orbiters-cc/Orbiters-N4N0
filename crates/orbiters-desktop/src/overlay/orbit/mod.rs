@@ -1979,7 +1979,7 @@ impl Panels {
             },
             videos_for: menu.results_for.clone(),
             talk: talk_now(snap),
-            tracking: snap.n4n0.tracking.as_ref().map(|t| (t.on, t.ms, t.note.clone())),
+            tracking: snap.n4n0.tracking.as_ref().map(|t| (snap.settings.tracking.enabled, snap.settings.tracking.ms, t.note.clone())),
             tracking_note: snap.n4n0.tracking_note.clone(),
             smoothing_held: self.smoothing_held,
             booster: if self.facts.sheet == Some(Sheet::Booster) { panels::BoosterFacts::of(snap, self.booster_details, self.booster_asking, self.booster_held) } else { Default::default() },
@@ -2676,8 +2676,8 @@ impl Panels {
         if let Some((which, held)) = self.smoothing_held.take() {
             // Where it was let go.
             let ms = self.sheet_pointer.map_or(held, |p| panels::smoothing_at(p.x));
-            if let Some(patch) = panels::Smoothed::patch(which, ms, self.facts.tracking.as_ref().map(|t| t.1)) {
-                self.backend.patch_settings(patch);
+            if let Some(patch) = panels::Smoothed::patch(which, ms, Some(self.backend.view().settings.tracking.ms)) {
+                self.backend.patch_smoothing(patch);
             }
         }
         if let Some((held, _)) = self.hue_held.take() {

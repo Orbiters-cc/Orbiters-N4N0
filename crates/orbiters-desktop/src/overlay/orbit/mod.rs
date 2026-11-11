@@ -1338,11 +1338,15 @@ impl Panels {
         self.keep_screen();
         let size = place.rect.size() * self.sharp;
         let px = [size.x.round() as u32, size.y.round() as u32];
-        if self.stage.px != px || (self.worlds_here && self.stage.worlds.is_none()) {
-            let async_pages = self.stage.async_pages;
-            self.stage = Stage::new(px, self.worlds_here, &self.media);
-            self.stage.async_pages = async_pages;
-            if let Some(w) = self.stage.worlds.as_mut() { w.snapshot_mode(async_pages); }
+        if self.stage.px != px {
+            let ctx = self.stage.canvas.ctx().clone();
+            self.stage.canvas = Canvas::zoomed(px[0], px[1], px[0] as f32 / layout::WIDTH as f32).in_orbit_look();
+            self.stage.canvas.ctx = ctx;
+            self.stage.px = px; self.stage.cache.clear(); self.stage.presented = None; self.stage.presented_scene = None;
+        }
+        if self.worlds_here && self.stage.worlds.is_none() {
+            self.stage.worlds = Some(Worlds::alone(self.stage.canvas.ctx().clone()));
+            self.stage.worlds.as_mut().unwrap().snapshot_mode(self.stage.async_pages);
         }
         self.stage.epoch = self.stage.epoch.wrapping_add(1);
         self.stage.painter.cancel_page(self.stage.epoch);
@@ -2423,7 +2427,7 @@ impl Panels {
                         let page = layout::cached(ScreenPage::of(shown));
                         if let Some(e) = page.elements.get(element) {
                             let typing = matches!(e.target, Target::Key(_) | Target::Space | Target::Backspace);
-                            let compatible = if typing { shown.page == host.menu.page && shown.layout == host.menu.layout && shown.typing == host.menu.typing && shown.subject == host.menu.subject && shown.sharing == host.menu.sharing }
+                            let compatible = if typing { shown.page == host.menu.page && shown.layout == host.menu.layout && shown.typing == host.menu.typing && shown.subject == host.menu.subject && shown.feedback.subjects.get(shown.subject) == host.menu.feedback.subjects.get(host.menu.subject) && shown.sharing == host.menu.sharing }
                                 else { *shown == host.menu };
                             if !compatible { return out; }
                             panel.pressed = Some(element);
@@ -3150,6 +3154,13 @@ impl Panels {
         for panel in &mut self.list {
             if !panel.dirty || (panel.zone == Zone::SheetBack && self.takeover.is_some()) { continue; }
             let mut facts = self.facts.clone();
+            if let (Zone::CameraWeb, Some(web)) = (panel.zone, self.web.as_mut()) {
+                if let Some(image) = web.frame.as_ref() {
+                    let texture = panel.pictures.entry("web".to_string()).or_insert_with(|| panel.canvas.ctx().load_texture("web", image.clone(), TextureOptions::LINEAR));
+                    if web.fresh { texture.set(image.clone(), TextureOptions::LINEAR); web.fresh = false; }
+                    if let Some(page) = facts.camera.web.as_mut() { page.picture = Some(texture.id()); }
+                }
+            }
             if matches!(panel.zone, Zone::WheelPlaying | Zone::WingPlaying | Zone::QmStrip | Zone::WheelVeil | Zone::WheelCaption | Zone::QmCaption) {
                 if let Some((key, image)) = &self.art {
                     facts.art = Some(panel.pictures.entry(key.clone()).or_insert_with(|| panel.canvas.ctx().load_texture("art", image.clone(), TextureOptions::LINEAR)).id());
@@ -3178,7 +3189,7 @@ impl Panels {
                     self.stage.worker_phases = frame.phases;
                     self.stage.cache.retain(|f| f.key() != key);
                     self.stage.cache.push(frame);
-                    while self.stage.cache.iter().map(|f| f.bytes()).sum::<usize>() > 128 * 1024 * 1024 { self.stage.cache.remove(0); }
+                    while self.stage.cache.iter().map(|f| f.bytes()).sum::<usize>() > 384 * 1024 * 1024 { self.stage.cache.remove(0); }
                 } else { self.takeover.as_mut().unwrap().dirty = true; }
             }
         }
@@ -3221,7 +3232,7 @@ impl Panels {
             _ => { if sheet == Sheet::Results { self.stage.host.dirty = false; } page_painter::Scene::Native }
         };
         let page = self.takeover.as_mut().unwrap();
-        let request = page_painter::Request { epoch: self.stage.epoch, sheet, facts, hover: page.hover, pressed: page.pressed, pointer: self.sheet_pointer, scene, header: Some(header), time, language: orbiters_i18n::language() };
+        let request = page_painter::Request { px: self.stage.px, epoch: self.stage.epoch, sheet, facts, hover: page.hover, pressed: page.pressed, pointer: self.sheet_pointer, scene, header: Some(header), time, language: orbiters_i18n::language() };
         page.dirty = false;
         if let Some(back) = self.list.iter_mut().find(|p| p.zone == Zone::SheetBack) { back.dirty = false; }
         self.stage.painter.submit(request);
@@ -3486,7 +3497,7 @@ impl Panels {
                             if !visible.contains(&i) { tile.picture = None; continue; }
                             tile.picture = stage.host.image(&result.id).map(|image| panel.pictures.entry(format!("video {}", result.id)).or_insert_with(|| ctx.load_texture("video", image, TextureOptions::LINEAR)).id()); // i18n: not shown (texture cache keys)
                         }
-                        stage.painter.submit(page_painter::Request { epoch: stage.epoch, sheet, facts, hover, pressed, time, language: orbiters_i18n::language(), scene: page_painter::Scene::Native, header: None, pointer: self.sheet_pointer });
+                        stage.painter.submit(page_painter::Request { px: stage.px, epoch: stage.epoch, sheet, facts, hover, pressed, time, language: orbiters_i18n::language(), scene: page_painter::Scene::Native, header: None, pointer: self.sheet_pointer });
                     } else {
                         panel.items = items;
                         stage.canvas.paint(time, |p| panels::paint_sheet(p, sheet, &facts, hover, pressed));
@@ -4309,5 +4320,13 @@ mod review_gallery_follow {
         assert_eq!(after, before, "incoming entries moved the top visible source");
         assert!(panels.facts.gallery_scroll > 0.0);
         assert_eq!(panels.drag.unwrap().scroll, panels.facts.gallery_scroll, "the held drag must inherit the anchor correction");
+        let neighbor = panels.facts.recent.iter().position(|r| r.dir == PathBuf::from("anchor-4.png")).unwrap();
+        let old_y = panels::sheet_items(Sheet::Pictures, &panels.facts).into_iter().find(|i| i.action == Action::Capture(neighbor)).unwrap().rect.top();
+        let (tx, rx) = mpsc::channel(); panels.recents.rx = Some(rx); tx.send((0..21).filter(|n| *n != 3).map(entry).collect()).unwrap();
+        panels.follow(&snap, 0);
+        let neighbor = panels.facts.recent.iter().position(|r| r.dir == PathBuf::from("anchor-4.png")).unwrap();
+        assert_eq!(panels::sheet_items(Sheet::Pictures, &panels.facts).into_iter().find(|i| i.action == Action::Capture(neighbor)).unwrap().rect.top(), old_y, "removing the anchor must preserve its nearest surviving neighbor");
+        assert_eq!(panels.drag.unwrap().scroll, panels.facts.gallery_scroll);
+
     }
 }

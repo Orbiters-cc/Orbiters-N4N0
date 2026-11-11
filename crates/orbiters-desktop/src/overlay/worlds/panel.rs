@@ -3383,7 +3383,7 @@ mod tests {
 impl Panel {
     // i18n: not shown (render cache identity)
     pub(crate) fn paint_key(&self) -> String {
-        format!("worlds {:?} {:?} {} {:?} {:?} {:?} {} {} {} {:?}", self.page, self.selected, self.results_page, self.sort, self.section, self.labels, self.comments_page, self.pictures_page, self.go_page, self.picture)
+        format!("worlds {:?} {:?} {} {:?} {:?} {:?} {} {} {} {:?}", self.page, self.selected, self.results_page, self.sort, self.section, self.labels, self.comments_page, self.pictures_page, self.go_page, self.picture) // i18n: not shown (render cache identity)
     }
     pub(crate) fn adopt_metrics(&self, from: &Self) {
         self.list_step.set(from.list_step.get()); self.list_headset.set(from.list_headset.get()); self.vr_most.set(from.vr_most.get());

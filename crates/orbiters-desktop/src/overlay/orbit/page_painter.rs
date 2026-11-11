@@ -42,14 +42,14 @@ pub(super) struct PartPicture {
 pub(super) struct PartRequest { pub spec: PartSpec, pub facts: Facts, pub time: f64, pub language: orbiters_i18n::Language }
 #[derive(Clone)]
 pub(super) struct Request {
-    pub epoch: u64, pub sheet: Sheet, pub facts: Facts,
+    pub px: [u32; 2], pub epoch: u64, pub sheet: Sheet, pub facts: Facts,
     pub hover: Option<usize>, pub pressed: Option<usize>,
     pub time: f64, pub language: orbiters_i18n::Language,
     pub scene: Scene, pub header: Option<PartSpec>, pub pointer: Option<egui::Pos2>,
 }
 #[derive(Clone)]
 pub(super) struct Frame {
-    pub epoch: u64, pub sheet: Sheet, pub facts: Facts, pub items: Vec<Item>, pub pixels: Vec<u8>,
+    pub px: [u32; 2], pub epoch: u64, pub sheet: Sheet, pub facts: Facts, pub items: Vec<Item>, pub pixels: Vec<u8>,
     pub phases: crate::overlay::PaintPhases, pub time: f64, pub hover: Option<usize>, pub pressed: Option<usize>,
     pub scene: Scene, pub header: Option<PartPicture>,
     pub header_spec: Option<PartSpec>, pub pointer: Option<egui::Pos2>, pub language: orbiters_i18n::Language,
@@ -58,7 +58,7 @@ impl Frame {
     pub fn matches(&self, epoch: u64, sheet: Option<Sheet>, gallery: &panels::Gallery) -> bool {
         self.epoch == epoch && Some(self.sheet) == sheet && self.facts.recent == *gallery
     }
-    fn request(&self) -> Request { Request { epoch: self.epoch, sheet: self.sheet, facts: self.facts.clone(), hover: self.hover, pressed: self.pressed, time: self.time, language: self.language, scene: self.scene.clone(), header: self.header_spec.clone(), pointer: self.pointer } }
+    fn request(&self) -> Request { Request { px: self.px, epoch: self.epoch, sheet: self.sheet, facts: self.facts.clone(), hover: self.hover, pressed: self.pressed, time: self.time, language: self.language, scene: self.scene.clone(), header: self.header_spec.clone(), pointer: self.pointer } }
     pub fn bytes(&self) -> usize { self.pixels.len() + self.header.as_ref().map_or(0, |h| h.pixels.len()) }
     pub fn key(&self) -> String { self.scene.key(self.sheet) }
 }
@@ -96,6 +96,11 @@ impl Engine {
         PartPicture { zone: spec.zone, token: spec.token, pixels, items, hover, pressed, facts: facts.clone() }
     }
     fn page(&mut self, mut request: Request) -> Frame {
+        if self.page.pixel_size() != request.px {
+            let ctx = self.page.ctx().clone();
+            self.page = Canvas::zoomed(request.px[0], request.px[1], request.px[0] as f32 / orbiters_n4n0_core::menu::layout::WIDTH as f32).in_orbit_look();
+            self.page.ctx = ctx; self.page.painter.set_parallel(self.parallel);
+        }
         let px = self.page.pixel_size();
         crate::overlay::paint_phases(true);
         let at = Instant::now();
@@ -127,7 +132,7 @@ impl Engine {
         panels::cut_page_corners(&mut pixels, px, [0, 0, px[0], px[1]]);
         super::super::record_phase(3, at.elapsed());
         let header = request.header.as_ref().map(|spec| self.part(spec, &request.facts, request.time));
-        Frame { epoch: request.epoch, sheet: request.sheet, facts: request.facts, items, pixels, phases: crate::overlay::paint_phases(false), time: request.time, hover, pressed: request.pressed, scene: request.scene, header, header_spec: request.header, pointer: request.pointer, language: request.language }
+        Frame { px: request.px, epoch: request.epoch, sheet: request.sheet, facts: request.facts, items, pixels, phases: crate::overlay::paint_phases(false), time: request.time, hover, pressed: request.pressed, scene: request.scene, header, header_spec: request.header, pointer: request.pointer, language: request.language }
     }
 }
 
@@ -270,7 +275,7 @@ mod tests {
     use std::time::Duration;
 
     fn request(epoch: u64, sheet: Sheet) -> Request {
-        Request { epoch, sheet, facts: Facts::default(), hover: None, pressed: None, time: 1.0, language: orbiters_i18n::Language::En, scene: Scene::Native, header: None, pointer: None }
+        Request { px: [512,288], epoch, sheet, facts: Facts::default(), hover: None, pressed: None, time: 1.0, language: orbiters_i18n::Language::En, scene: Scene::Native, header: None, pointer: None }
     }
     #[test]
     fn mailbox_replaces_pending_work_instead_of_queuing_scroll_frames() {
@@ -342,7 +347,7 @@ mod tests {
 mod review_scheduler {
     use super::*;
     use std::time::Duration;
-    fn request(epoch: u64) -> Request { Request { epoch, sheet: Sheet::Settings, facts: Facts::default(), hover: None, pressed: None, time: 1.0, language: orbiters_i18n::Language::En, scene: Scene::Native, header: None, pointer: None } }
+    fn request(epoch: u64) -> Request { Request { px: [512,288], epoch, sheet: Sheet::Settings, facts: Facts::default(), hover: None, pressed: None, time: 1.0, language: orbiters_i18n::Language::En, scene: Scene::Native, header: None, pointer: None } }
     #[test]
     fn review_cancellation_discards_pending_work_and_inflight_publication() {
         let painter = Painter::new([512, 288]);
@@ -375,5 +380,30 @@ mod review_scheduler {
         let audit = painter.audit(frame).recv_timeout(Duration::from_secs(10)).unwrap();
         assert_eq!((audit.pixels, audit.header_pixels, audit.parallel_pixels, audit.parallel_header_pixels), (0, 0, 0, 0));
         assert!(audit.items);
+    }
+}
+
+#[cfg(test)]
+mod review_stage_lifetime {
+    use super::*;
+    use super::super::zones::{self, Around};
+    use std::time::Duration;
+    #[test]
+    fn review_opening_the_first_page_keeps_one_worker_while_input_continues() {
+        let _one = super::super::flows::ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+        let mut panels = super::super::Panels::new(Arc::new(crate::screenshot::Still), 2.0, false).with_page_worker();
+        let snap = crate::screenshot::idle_snapshot(&orbiters_core::settings::Settings::default(), &[]);
+        let shared = panels.stage.painter.shared.clone();
+        let (ready, began) = std::sync::mpsc::channel(); let (go, wait) = std::sync::mpsc::channel();
+        shared.0.lock().unwrap().gate = Some((ready, wait));
+        panels.set_open(Some(Around::QuickMenu), Zone::around(Around::QuickMenu).iter().map(|z| zones::in_units(*z)).collect(), &snap);
+        panels.paint(&snap, |_,_| {}); began.recv_timeout(Duration::from_secs(10)).unwrap();
+        panels.takeover_place = Some(zones::in_units(Zone::Takeover)); panels.back_place = Some(zones::in_units(Zone::SheetBack));
+        panels.open_sheet(Sheet::Settings, "", &snap);
+        let same = Arc::ptr_eq(&shared, &panels.stage.painter.shared);
+        // A blocked paint must not prevent the remaining input/state work of a turn.
+        panels.hover(None); panels.follow(&snap, 0); panels.menu_turn(&snap); panels.step_springs(0.011); panels.paint(&snap, |_,_| {});
+        go.send(()).unwrap();
+        assert!(same, "a second painter can race the first through shared shell contexts");
     }
 }

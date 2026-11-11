@@ -23,7 +23,7 @@ impl PaintSnapshot {
     pub(crate) fn key(&self) -> String { self.panel.paint_key() }
     pub(crate) fn hole(&self) -> Option<egui::Rect> { self.panel.hole(&self.status) }
     pub(super) fn compatible(&self, live: &Worlds, entries: &[Entry], status: &panel::Status, picked: Option<&Entry>, target: panel::Target) -> bool {
-        if !self.panel.same_input(&live.panel, target) { return false; }
+        if !self.panel.same_input(&live.panel, target) || self.picked.as_ref().map(|e| (e.id, &e.world_id)) != picked.map(|e| (e.id, &e.world_id)) { return false; }
         if matches!(target, panel::Target::Key(_) | panel::Target::Space | panel::Target::Backspace) { return true; }
         self.entries.len() == entries.len()
             && self.entries.iter().zip(entries).all(|(a, b)| (a.id, &a.world_id, a.capture) == (b.id, &b.world_id, b.capture))

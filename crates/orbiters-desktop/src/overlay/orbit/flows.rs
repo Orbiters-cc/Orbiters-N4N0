@@ -1098,6 +1098,14 @@ fn write_a_comment_opens_its_keyboard_on_the_sheet_in_vr() {
         if signed_in {
             assert_eq!(page(&person), Page::Compose(Compose::Comment), "the keyboard, though the world's feedback was never read");
             assert!(person.panels.stage.worlds.as_ref().unwrap().typing(), "the computer's keys type there too");
+            // Physical keys and a laser key arrive while older pictures may still be pending.
+            let worlds = person.panels.stage.worlds.as_mut().unwrap();
+            worlds.keys(&[]);
+            worlds.keys(&[(1, orbiters_n4n0_core::menu::KeyInput::Text("hello".into()))]);
+            person.press_world(WorldTarget::Space, &docked);
+            person.press_world(WorldTarget::Key('a'), &docked);
+            assert_eq!(person.panels.stage.worlds.as_ref().unwrap().draft_for_test(), "hello a");
+
         } else {
             assert_eq!(page(&person), Page::Comments, "nothing to write as, yet");
             assert!(person.panels.stage.worlds.as_ref().unwrap().target_for_test(WorldTarget::WriteComment).is_some(), "the way to sign in stays there");
@@ -1657,7 +1665,7 @@ fn review_every_page_paints_off_the_overlay_thread() {
 #[test]
 fn review_a_stale_invite_press_never_invites_a_new_row() {
     for cached in [false, true] {
-        let (mut person, _heard) = Person::heard();
+        let (mut person, heard) = Person::heard();
         person.panels.stage.async_pages = true;
         person.around = Some(Around::QuickMenu);
         person.turns(4);
@@ -1680,12 +1688,13 @@ fn review_a_stale_invite_press_never_invites_a_new_row() {
             person.panels.paint(&person.snap, |_, _| {});
         }
         let i = person.panels.list.len();
-        let at = person.panels.takeover.as_ref().unwrap().items.iter().find(|x| x.action == Action::Invite(0, 0)).unwrap().rect.center();
+        let at = person.panels.takeover.as_ref().unwrap().items.iter().find(|x| x.action == Action::Invite(0, 0)).unwrap_or_else(|| panic!("cached={cached}, items={:?}, cache={:?}", person.panels.takeover.as_ref().unwrap().items, person.panels.stage.cache.iter().map(|f| (f.key(), f.items.len())).collect::<Vec<_>>())).rect.center();
         person.panels.hover(Some((i, at)));
         person.panels.press(&person.snap);
         person.panels.release();
         if let Some(action) = person.panels.pressed_late.take() { person.panels.act(action, &person.snap, &mut super::Pressed::default()); }
-        assert_ne!(person.panels.invited.as_ref().map(|x| x.0.as_str()), Some("wrld_b:222"), "cached {cached}: shown A invited B");
+        assert_eq!(person.panels.invited.as_ref().map(|x| x.0.as_str()), Some("wrld_a:111"), "cached {cached}: the shown row must retain its source");
+        assert!(heard.said().iter().any(|s| s.contains("wrld_a:111")), "the backend must receive A");
     }
 }
 
@@ -1710,4 +1719,81 @@ fn review_streamed_ask_words_and_answers_reach_the_published_picture() {
         person.turn();
         person.turns_until("streamed answer on the picture", |p| p.panels.stage.presented.as_ref().is_some_and(|(_,f,_)| f.talk_lines.last().is_some_and(|(_,s)| s == words)));
     }
+}
+
+#[test]
+fn review_camera_web_frames_and_header_stop_repaint_on_the_worker() {
+    use super::panels::WebState;
+    let mut person = Person::new(); person.panels.stage.async_pages = true;
+    person.around = Some(Around::Camera);
+    Arc::make_mut(&mut person.snap).camera_open_said = Some(true);
+    person.panels.web = Some(super::camera_web::CameraWeb::open("https://orbiters.cc"));
+    for color in [egui::Color32::RED, egui::Color32::BLUE] {
+        let web = person.panels.web.as_mut().unwrap(); web.frame = Some(egui::ColorImage::filled([32,32], color)); web.state = WebState::Shown; web.fresh = true;
+        for panel in &mut person.panels.list { panel.dirty = true; }
+        person.turn();
+        person.turns_until("camera web frame", |p| p.panels.list.iter().find(|p| p.zone == Zone::CameraWeb).is_some_and(|p| p.painted && !p.dirty) && !p.panels.stage.painter.busy());
+        let panel = person.panels.list.iter().find(|p| p.zone == Zone::CameraWeb).unwrap();
+        assert_eq!(panel.canvas.direct_paints, 0);
+        assert!(panel.displayed.as_ref().unwrap().camera.web.as_ref().unwrap().picture.is_some());
+        assert!(panel.out.chunks_exact(4).any(|p| p == color.to_array()), "camera web texture did not reach the shown picture");
+    }
+    person.around = Some(Around::QuickMenu); person.turns(2);
+    person.panels.open_sheet(Sheet::Settings, "", &person.snap);
+    Arc::make_mut(&mut person.snap).capture.state = crate::state::CaptureState::Recording;
+    person.turns_until("header Stop", |p| p.find(Action::StopRecording).is_some());
+    let head = person.panels.list.iter().find(|p| p.zone == Zone::SheetBack).unwrap();
+    assert_eq!(head.canvas.direct_paints, 0); assert!(head.displayed.as_ref().unwrap().recording);
+    person.press(Action::StopRecording);
+    person.turns_until("Stopping header", |p| p.panels.list.iter().find(|p| p.zone == Zone::SheetBack).is_some_and(|p| p.displayed.as_ref().is_some_and(|f| f.rec_stopping)));
+    assert!(person.find(Action::StopRecording).is_none());
+}
+
+#[test]
+fn review_a_held_or_cached_video_press_keeps_the_shown_source() {
+    use orbiters_n4n0_core::youtube::Video;
+    let video = |id: &str| Video { id: id.into(), title: id.into(), channel: String::new(), duration: None, live: false };
+    for cached in [false, true] { for reorder in [false, true] {
+        let (mut person, heard) = Person::heard(); person.panels.stage.async_pages = true; person.around = Some(Around::QuickMenu); person.turns(4);
+        person.panels.open_sheet(Sheet::Results, "", &person.snap);
+        person.panels.stage.host.menu.page = orbiters_n4n0_core::menu::Page::Results; person.turn();
+        person.panels.stage.host.menu.open = true;
+        person.panels.stage.host.menu.can_drop = true; person.panels.stage.host.menu.copied = Some("aaaaaaaaaaa".into());
+        person.panels.stage.host.menu.results = vec![video("aaaaaaaaaaa")];
+        person.panels.facts.videos = vec![super::panels::VideoTile { id: "aaaaaaaaaaa".into(), title: "Shown A".into(), channel: String::new(), duration: None, picture: None }];
+        person.panels.facts.video_copied = Some(0); person.panels.takeover.as_mut().unwrap().dirty = true;
+        let start = Instant::now();
+        loop { person.panels.paint(&person.snap, |_,_| {}); if person.panels.stage.presented.as_ref().is_some_and(|(_,f,_)| f.videos.first().is_some_and(|v| v.id == "aaaaaaaaaaa")) && !person.panels.stage.painter.busy() { break; } assert!(start.elapsed() < Duration::from_secs(10)); std::thread::sleep(Duration::from_millis(2)); }
+        if cached { person.panels.open_sheet(Sheet::Settings, "", &person.snap); person.panels.open_sheet(Sheet::Results, "", &person.snap); person.panels.paint(&person.snap, |_,_| {}); }
+        let i = person.panels.list.len();
+        let at = person.panels.takeover.as_ref().unwrap().items.iter().find(|i| i.action == Action::VideoDrop(0)).unwrap_or_else(|| panic!("cached={cached}, items={:?}, cache={:?}", person.panels.takeover.as_ref().unwrap().items, person.panels.stage.cache.iter().map(|f| (f.key(), f.items.len())).collect::<Vec<_>>())).rect.center();
+        person.panels.hover(Some((i, at))); person.panels.press(&person.snap);
+        assert!(person.panels.drag.is_some(), "the press waits for release");
+        person.panels.stage.host.menu.results = if reorder { vec![video("bbbbbbbbbbb"), video("aaaaaaaaaaa")] } else { vec![video("bbbbbbbbbbb")] };
+        if !reorder { person.panels.stage.host.menu.copied = Some("bbbbbbbbbbb".into()); }
+        person.panels.release();
+        let action = person.panels.pressed_late.take().unwrap(); person.panels.act(action, &person.snap, &mut super::Pressed::default());
+        let said = heard.said();
+        assert!(!said.iter().any(|s| s.contains("bbbbbbbbbbb")), "cached={cached}, reorder={reorder}: shown A dispatched B: {said:?}");
+        assert_eq!(said.iter().filter(|s| s.contains("aaaaaaaaaaa")).count(), usize::from(reorder), "a surviving shown source must still work");
+    } }
+}
+
+#[test]
+fn review_the_instance_chooser_paints_and_returns_on_the_page_worker() {
+    use crate::overlay::worlds::panel::{Page, Status, Target as WTarget};
+    let (mut person, heard) = Person::heard(); person.panels.stage.async_pages = true;
+    let snap = Arc::make_mut(&mut person.snap); snap.vrchat_login.allowed = true;
+    snap.vrchat_login.user = Some(orbiters_core::vrchat_api::User { id: "usr_replay".into(), display_name: "Replay".into(), ..Default::default() });
+    person.around = Some(Around::QuickMenu); person.turns(3); person.press(Action::Worlds);
+    let found = orbiters_core::maps::FoundWorld { world: orbiters_core::maps::World { world_id: "wrld_replay".into(), name: "Replay".into(), ..Default::default() }, ..Default::default() };
+    let entry = crate::overlay::worlds::catalog::Entry::world(&found, None, Default::default());
+    person.panels.stage.worlds.as_mut().unwrap().pick_for_test(entry);
+    let status = Status { headset: true, ..Default::default() }; let _ = person.panels.world_relay(status.clone()); person.turn();
+    person.press_world(WTarget::Join, &status);
+    person.turns_until("instance chooser picture", |p| matches!(&p.panels.stage.presented_scene, Some(super::page_painter::Scene::Worlds(s)) if s.panel.page == Page::Go));
+    assert_eq!(person.panels.stage.canvas.direct_paints, 0);
+    assert!(!heard.said().iter().any(|s| s.contains("InviteMe")), "opening a chooser must not invite");
+    person.press(Action::Back);
+    person.turns_until("detail picture after chooser", |p| matches!(&p.panels.stage.presented_scene, Some(super::page_painter::Scene::Worlds(s)) if s.panel.page == Page::Detail));
 }

@@ -36,6 +36,7 @@ use std::time::{Duration, Instant};
 /// VRChat's window in desktop mode, for where the parts go and how large they are.
 const CLIENT: Vec2 = vec2(1920.0, 1080.0);
 /// How many pictures the made-up gallery holds: several pages of it, so that it scrolls.
+static RETRO: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 static GALLERY: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(60);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -240,7 +241,8 @@ fn music(position: u32) {
 
 impl Rig {
     fn new(mode: Mode, scratch: &Path, log: Option<(std::fs::File, PathBuf)>) -> Self {
-        let settings = Settings { sessions_dir: scratch.join("sessions"), picture_folders: Vec::new(), ..Settings::default() };
+        let mut settings = Settings { sessions_dir: scratch.join("sessions"), picture_folders: Vec::new(), ..Settings::default() };
+        if RETRO.load(std::sync::atomic::Ordering::Relaxed) { settings.orbit.theme = orbiters_core::settings::MenuLook::Retro; }
         let mut snap = crate::screenshot::idle_snapshot(&settings, &[]);
         // In a headset SteamVR runs; on the desktop it does not, which is what the parts go by.
         snap.steamvr.running = mode == Mode::Vr;
@@ -251,7 +253,7 @@ impl Rig {
             let entries = crate::overlay::worlds::catalog::parse(&serde_json::json!({"previews": previews}).to_string()).expect("local world fixtures");
             let images = (0..entries.len()).map(|i| {
                 let image = image::open(&PICTURES.get().expect("local pictures")[i].0).expect("fixture image").to_rgba8();
-                ColorImage::from_rgba_unmultiplied([image.width() as usize, image.height() as usize], image.as_raw())
+                egui::ColorImage::from_rgba_unmultiplied([image.width() as usize, image.height() as usize], image.as_raw())
             }).collect();
             assert!(worlds.freeze_paint_fixture(entries, images) && worlds.paint_fixture_ready(), "local thumbnails must be ready before replay");
         }
@@ -778,6 +780,27 @@ fn script(rig: &mut Rig) {
         }
     }
     rig.rest();
+    // Every shared menu screen, with first visits settled and a second rapid sweep.
+    use orbiters_n4n0_core::menu::Page;
+    for round in 0..2 {
+        for page in [Page::Home, Page::Search, Page::Results, Page::Call, Page::Photo, Page::Music, Page::Light, Page::States, Page::Card, Page::NewState, Page::Type, Page::Tracking, Page::Suggest, Page::More, Page::Instances, Page::AddFriend, Page::Qr, Page::History, Page::ShareTo, Page::Explicit, Page::Feedback, Page::FeedbackLabels, Page::Comments, Page::Mirror, Page::States] {
+            rig.begin(&format!("menu-switch-{round}-{page:?}"), Rest);
+            let at = Instant::now();
+            rig.panels.stage.host.menu.page = page;
+            rig.panels.open_sheet(super::panels::Sheet::Menu, "", &rig.snap);
+            let opening = at.elapsed(); rig.turns(1);
+            rig.steps.last_mut().unwrap().turns.last_mut().unwrap().open += opening;
+            rig.write("switch-next-turn"); if round == 0 { rig.rest(); }
+        }
+    }
+    rig.rest();
+    rig.panels.open_sheet(super::panels::Sheet::Pictures, "", &rig.snap); rig.turns(1); rig.rest();
+    rig.begin("live-color-scroll", Rest);
+    for n in 0..90 {
+        if n % 15 == 0 { Arc::make_mut(&mut rig.snap).settings.orbit.retro_color = if n % 30 == 0 { [170,30,210] } else { [0,190,160] }; }
+        rig.turn(Some(Act::Wheel(-0.08)));
+    }
+    rig.rest();
     rig.point_at_each("qm-sheet-pictures-point", true, Rest);
     rig.pressing("qm-sheet-instances", Action::Page(Target::Instances), Rest);
     rig.pressing("qm-sheet-all-again", Action::All, Rest);
@@ -921,6 +944,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
     if let Some(tag) = value("--language") { if let Some(language) = orbiters_i18n::normalize(&tag) { orbiters_i18n::pin_language(language); orbiters_ui::fonts::prefer_language(language.tag()); } }
     let only = value("--only");
     let upload = args.iter().any(|a| a == "--upload");
+    RETRO.store(args.iter().any(|a| a == "--retro"), std::sync::atomic::Ordering::Relaxed);
     let synchronous = args.iter().any(|a| a == "--sync");
     let fonts_anew = args.iter().any(|a| a == "--fonts-anew");
     let out = value("--out").map(PathBuf::from);

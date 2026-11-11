@@ -187,7 +187,6 @@ pub struct Worlds {
     key: String,
     /// What says how to handle what shows small; it has been used; a new opening of the menu asks it back for the next capture.
     hint: Option<small_hint::SmallHint>,
-    backdrop: Option<small_hint::Backdrop>,
     small_logged: super::vr_log::Every,
     eye_frames_kept: u32,
     hide_chip: Option<small_hint::HideChip>,
@@ -344,7 +343,6 @@ impl Worlds {
             small_rays: [None; 2],
             small_triggers: [false; 2],
             small_triggers_were: [false; 2],
-            backdrop: None,
             small_logged: Default::default(),
             eye_frames_kept: 0,
             small_place: None,
@@ -443,7 +441,6 @@ fn keep_an_eye_frame(steamvr: &vr::Client, n: u32) {
             small_rays: [None; 2],
             small_triggers: [false; 2],
             small_triggers_were: [false; 2],
-            backdrop: None,
             small_logged: Default::default(),
             eye_frames_kept: 0,
             small_place: None,
@@ -793,9 +790,6 @@ fn keep_an_eye_frame(steamvr: &vr::Client, n: u32) {
         if let Some(hint) = self.hint.take() {
             hint.destroy(overlay);
         }
-        if let Some(backdrop) = self.backdrop.take() {
-            backdrop.destroy(overlay);
-        }
         if let Some(chip) = self.hide_chip.take() {
             chip.destroy(overlay);
         }
@@ -991,7 +985,7 @@ fn keep_an_eye_frame(steamvr: &vr::Client, n: u32) {
     fn update_hint(&mut self, overlay: &vr::Overlay, steamvr: &vr::Client, presenter: &mut Presenter, snap: &Snapshot) {
         let small = self.view.small_now().copied();
         self.hint_used |= small.is_some_and(|s| s.zoomed);
-        // Across a menu it stays: the menu is drawn over it by sort order (Enzo's diagram: menu, 3D view, backdrop, game). It never fades for that, which made it vanish.
+        // Across a menu it stays: the menu is drawn over it (Enzo's diagram: menu, 3D view, game). It never fades for that, which made it vanish.
         if self.small_logged.due(std::time::Duration::from_secs(1)) && self.view.small() {
             let hint = self.hint.as_ref().map_or("no hint".to_string(), |h| h.report()); // i18n: not shown (a line of the VR test log)
             let chip = self.hide_chip.as_ref().map_or("no X".to_string(), |c| c.report()); // i18n: not shown (a line of the VR test log)
@@ -1002,14 +996,8 @@ fn keep_an_eye_frame(steamvr: &vr::Client, n: u32) {
                 Self::keep_an_eye_frame(steamvr, self.eye_frames_kept);
             }
         }
-        // The dark pane behind it in a panel's hole.
-        let pane = small.filter(|s| s.docked).and(self.small_place).map(|(at, radius)| (at, radius * 2.0 / SMALL_FILLS_HOLE + 0.012));
-        if pane.is_some() && self.backdrop.is_none() {
-            self.backdrop = small_hint::Backdrop::new(overlay, &self.key).map_err(|e| eprintln!("{e:#}")).ok();
-        }
-        if let Some(backdrop) = self.backdrop.as_mut() {
-            backdrop.update(overlay, presenter, pane);
-        }
+        // Nothing lies behind it in a panel's hole: the hole is a window onto it (Enzo, 2026-11-11, IMG2). The opaque pane that was there, of order 0, was drawn over the
+        // sheet's head and page and over the capture, which only an order by distance does: what SteamVR did there, whatever the orders said.
         let wanted = small.filter(|s| !self.hint_used && !s.docked).map(|s| {
             let stage = match s.held_by() {
                 Some(hand) => small_hint::Stage::Stick { hand },

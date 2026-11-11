@@ -861,8 +861,6 @@ pub struct Panels {
     pub view_taken: bool,
     /// The sheet left with such a view out: what the Quick Menu opens on when it comes back.
     resume: Option<(Sheet, String, f32)>,
-    /// Where the way to do so lies.
-    pub peek_place: Option<Placed>,
     seek_late: Option<f32>,
     seek_asked: Option<(u32, Instant)>,
     /// Captures of this computer's gallery asked to show in 3D, for the view that shows them.
@@ -972,7 +970,6 @@ impl Panels {
             peek: false,
             view_taken: false,
             resume: None,
-            peek_place: None,
             seek_late: None,
             seek_asked: None,
             local_asked: Vec::new(),
@@ -1207,12 +1204,16 @@ impl Panels {
             return;
         }
         let live = !snap.settings.reduce_motion;
-        // Opened from the wheel, the sheet is all that shows: its cut-off cells would stick out from under it.
-        let places: Vec<Placed> = if self.takeover.is_some() && around == Some(Around::Wheel) { Vec::new() } else { places };
-        // Opened from the Quick Menu, the wing stays beside the sheet, all its tiles, whatever the sheet (Enzo, 2026-11-09): a person clicks through the tiles to
-        // explore, and they must not vanish on the first. Its tools also in the sheet's head is a duplication he accepts.
+        // Opened from the wheel, the sheet is all that shows: its cut-off cells would stick out from under it. Opened from the Quick Menu the wing goes too, for the eyes
+        // and for the lasers (Enzo, 2026-11-11, after 2026-11-09's "the wing stays"): the sheet's head has the same tools as tabs, its Back and its close, and the wing
+        // comes back as the sheet closes. Around VRChat's camera its tiles stay: what it reads is beside them.
+        let places: Vec<Placed> = if self.takeover.is_some() && around != Some(Around::Camera) { Vec::new() } else { places };
         let back = self.takeover.is_some().then_some(self.back_place).flatten();
-        let peek = self.takeover.is_some().then_some(self.peek_place).flatten();
+        // The way to VRChat's own menus and back is on the sheet's head; while they are reached it is all that shows, where it was.
+        let peek = back.map(|back| {
+            let at = panels::peek_place(&self.facts, back.logical().x);
+            Placed { zone: Zone::SheetPeek, rect: egui::Rect::from_min_size(back.rect.min + at.min.to_vec2() * back.unit, at.size() * back.unit), center: back.center, unit: back.unit }
+        });
         // On the desktop VRChat lights what lies under the pointer, sheet or no sheet. Where the wing leaves the row under its tabs free.
         let band = self.hint_place.filter(|_| back.is_some() && around == Some(Around::QuickMenu) && self.facts.desktop && !places.iter().any(|p| p.zone == Zone::QmStrip));
         let places: Vec<Placed> = places.into_iter().chain(back).chain(band).chain(peek).collect();
@@ -1238,6 +1239,11 @@ impl Panels {
             for panel in old {
                 self.rest(panel);
             }
+        }
+        // The way back from VRChat's own menus shows only while they are reached: the head has its button the rest of the time.
+        let peek = self.peek;
+        for panel in self.list.iter_mut().filter(|p| p.zone == Zone::SheetPeek) {
+            panel.shown = peek;
         }
         // The Quick Menu again, with a view still in a hand: where it was.
         if around == Some(Around::QuickMenu) && self.takeover.is_none() {
@@ -2014,7 +2020,7 @@ impl Panels {
             hidden: self.hidden,
             peek: self.peek,
             digits: self.open == Some(Around::Wheel) && self.takeover.is_none() && (snap.n4n0.desktop_mode || !snap.steamvr.running),
-            beside_wing: self.open == Some(Around::QuickMenu),
+            beside_wing: self.open == Some(Around::QuickMenu) && self.list.iter().any(|p| Zone::WING.contains(&p.zone) || p.zone == Zone::QmStrip),
             worlds_visited: visited,
             invite_said: matches!(self.facts.sheet, Some(Sheet::Instances | Sheet::Results)).then(|| menu.notice.as_deref().map(|said| tr(said).to_string())).flatten(),
             note: self.facts.note.clone(),
@@ -2251,13 +2257,25 @@ impl Panels {
         }
         let mut action = None;
         let mut look = None;
+        let mut from = None;
         for panel in self.list.iter_mut().chain(self.takeover.iter_mut()) {
             if let Some(i) = panel.hover {
                 panel.pressed = Some(i);
                 panel.dirty = true;
                 action = panel.items.get(i).map(|item| item.action);
                 look = panel.items.get(i).map(|item| item.look);
+                from = Some(panel.zone);
                 break;
+            }
+        }
+        // A tool's tile or tab pressed while its page is open closes it, and VRChat's menu is there again under it (Enzo, 2026-11-11). Only a tool's own tile or tab:
+        // what is pressed on the page goes on as it does.
+        if let (Some(action), Some(zone)) = (action, from) {
+            let a_tool = zone == Zone::SheetBack || zone == Zone::QmStrip || Zone::WING.contains(&zone) || zone.ring().is_some();
+            if a_tool && panels::tool_is_open(&self.facts, action) {
+                out.clicked = true;
+                self.close_sheet();
+                return out;
             }
         }
         // A capture turning on the sheet: dragged, it turns as the hand does.
@@ -2631,9 +2649,9 @@ impl Panels {
                 self.peek = !self.peek;
                 let peek = self.peek;
                 for panel in self.list.iter_mut().chain(self.takeover.iter_mut()) {
-                    // Those that say when they show say so again next turn.
-                    panel.shown = !peek || panel.zone == Zone::SheetPeek;
-                    panel.dirty |= panel.zone == Zone::SheetPeek;
+                    // Those that say when they show say so again next turn. The way back takes the place of the head's button, alone.
+                    panel.shown = if peek { panel.zone == Zone::SheetPeek } else { panel.zone != Zone::SheetPeek };
+                    panel.dirty |= matches!(panel.zone, Zone::SheetPeek | Zone::SheetBack);
                 }
                 self.facts.peek = peek;
             }
@@ -2988,6 +3006,8 @@ impl Stage {
             }
             let zoom = panel.px[0] as f32 / panel.logical.x;
             panels::finish_picture(&mut panel.out, pixels, panel.px, zoom, changed);
+            // Its corners are its sheet's, whatever drew it.
+            panels::cut_page_corners(&mut panel.out, panel.px, changed);
             panel.painted = true;
             show(panel, changed);
         }

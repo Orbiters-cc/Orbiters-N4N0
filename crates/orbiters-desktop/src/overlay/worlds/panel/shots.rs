@@ -401,6 +401,46 @@ pub fn shots(out: &std::path::Path) -> anyhow::Result<()> {
     paint("world", &rooftop_list, &page, &signed_out, &stand_in_feedback(true), 5.0)?;
     let invited = Panel { note: Some((tr("Invite sent: accept it in VRChat's notifications").into(), 4.5)), hover: Some(Target::Join), ..page.clone() };
     paint("world-invite", &rooftop_list, &invited, &listed, &stand_in_feedback(true), 5.0)?;
+    // VR feedback F5: Go there, signed in to VRChat in Orbiters: reading the list, the list (a full one greyed, some hidden), none, not read, a new one on
+    // its way, the invite sent; and more than a page of them.
+    {
+        use super::go::{GoBusy, GoView};
+        use orbiters_core::vrchat_api::{InstanceAccess, InstanceRegion, WorldInstance, WorldInstances};
+        let world = rooftop.world_id.clone();
+        let one = |id: &str, access: InstanceAccess, region: &str, occupants: u32, capacity: Option<u32>, friends: Option<u32>, full: bool| WorldInstance {
+            world: world.clone(),
+            id: id.into(),
+            access,
+            region: region.into(),
+            occupants,
+            capacity,
+            friends,
+            full,
+            closed: false,
+            can_join: !full,
+        };
+        let items = vec![
+            one("1", InstanceAccess::Public, "eu", 14, Some(32), Some(2), false),
+            one("2", InstanceAccess::FriendsPlus, "eu", 5, Some(32), Some(1), false),
+            one("3", InstanceAccess::Public, "us", 32, Some(32), None, true),
+            one("4", InstanceAccess::GroupPublic, "jp", 9, Some(40), None, false),
+            one("5", InstanceAccess::InvitePlus, "use", 2, None, Some(0), false),
+        ];
+        let go = |view: GoView| Status { go: GoView { world: world.clone(), region: Some(InstanceRegion::Eu), ..view }, ..listed.clone() };
+        let chooser = Panel { page: Page::Go, selected: Some(rooftop.id), ..Default::default() };
+        let pointed = Panel { hover: Some(Target::GoInstance(0)), ..chooser.clone() };
+        let list = |items: Vec<WorldInstance>, unavailable: usize| Some(WorldInstances { items, unavailable });
+        paint("go-loading", &rooftop_list, &chooser, &go(GoView { loading: true, ..Default::default() }), &stand_in_feedback(true), 5.0)?;
+        paint("go-list", &rooftop_list, &pointed, &go(GoView { list: list(items[..4].to_vec(), 2), ..Default::default() }), &stand_in_feedback(true), 5.0)?;
+        paint("go-empty", &rooftop_list, &chooser, &go(GoView { list: list(Vec::new(), 0), ..Default::default() }), &stand_in_feedback(true), 5.0)?;
+        paint("go-unread", &rooftop_list, &Panel { hover: Some(Target::GoRetry), ..chooser.clone() }, &go(GoView::default()), &stand_in_feedback(true), 5.0)?;
+        paint("go-creating", &rooftop_list, &chooser, &go(GoView { list: list(items.clone(), 0), busy: Some(GoBusy::Creating), ..Default::default() }), &stand_in_feedback(true), 5.0)?;
+        let full = tr("That instance is full now.");
+        paint("go-refused", &rooftop_list, &chooser, &go(GoView { list: list(items.clone(), 0), error: Some(full.into()), ..Default::default() }), &stand_in_feedback(true), 5.0)?;
+        paint("go-invited", &rooftop_list, &chooser, &go(GoView { list: list(items.clone(), 0), invited: Some(items[1].clone()), ..Default::default() }), &stand_in_feedback(true), 5.0)?;
+        let many: Vec<WorldInstance> = (0..12).map(|i| one(&format!("m{i}"), InstanceAccess::Public, "eu", i, Some(32), None, false)).collect();
+        paint("go-pages", &rooftop_list, &Panel { go_page: 1, ..chooser.clone() }, &go(GoView { list: list(many, 0), ..Default::default() }), &stand_in_feedback(true), 5.0)?;
+    }
     // The chip under N4N0's menu (no capture).
     let mut chip_canvas = Canvas::new(CHIP_PX[0], CHIP_PX[1]);
     for (name, hover) in [("chip", false), ("chip-hover", true)] {

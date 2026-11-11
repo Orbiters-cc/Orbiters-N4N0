@@ -12,6 +12,7 @@
 //! their own under the panel ([`bar`]), there whatever the page while a capture shows or loads.
 
 mod bar;
+pub mod go;
 mod pages;
 mod shots;
 
@@ -122,6 +123,8 @@ pub enum Page {
     Compose(Compose),
     /// Its world's pictures on Orbiters.
     Pictures,
+    /// Its instances to go to, and new ones to make (F5).
+    Go,
 }
 
 /// What can be pressed.
@@ -184,6 +187,14 @@ pub enum Target {
     OpenWeb,
     /// Reads the world's feedback again, after Orbiters did not answer.
     RetryFeedback,
+    /// An instance of the Go there list (its place in the list): the invite to it.
+    GoInstance(usize),
+    /// A new instance of this kind ([`go::NEW_KINDS`]), then the invite to it.
+    NewInstance(u8),
+    /// The region a new instance is made in: the next one.
+    GoRegion,
+    /// The list of instances read again.
+    GoRetry,
 }
 
 /// What a press asks of the overlay.
@@ -217,6 +228,10 @@ pub enum Action {
     SignIn,
     /// The world's feedback asked for again (Orbiters did not answer).
     RetryFeedback,
+    /// An invite to oneself to this exact instance of this world (listed or made in this scope).
+    GoTo { world: String, instance: String },
+    /// A new instance of `world`, then the invite to it.
+    NewInstance { world: String, access: orbiters_core::vrchat_api::CreateAccess, region: orbiters_core::vrchat_api::InstanceRegion },
 }
 
 /// How the capture view goes, as the panel shows it.
@@ -250,6 +265,8 @@ pub struct Status {
     pub stats: Option<String>,
     /// The world list shown (a search, a section).
     pub list: ListStatus,
+    /// Go there's instances (F5).
+    pub go: go::GoView,
 }
 
 /// How the world list shown goes ([`super::finder`]).
@@ -510,6 +527,9 @@ pub struct Panel {
     pub draft: String,
     pub comments_page: usize,
     pub pictures_page: usize,
+    /// The page of Go there's list, and the region a new instance is made in, when one was picked.
+    pub go_page: usize,
+    pub go_region: Option<orbiters_core::vrchat_api::InstanceRegion>,
     /// The picture shown whole on the pictures page.
     pub picture: Option<usize>,
     /// The member's comment whose Delete was pressed once, and when: a second press deletes it.
@@ -645,6 +665,10 @@ const VR_SHOW_SMALL: Rect = Rect { min: Pos2 { x: 645.0, y: 372.0 }, max: Pos2 {
 const VR_GO: Rect = Rect { min: Pos2 { x: 827.0, y: 372.0 }, max: Pos2 { x: SIDE_RIGHT, y: 434.0 } };
 const VR_GO_HALF: Rect = Rect { min: Pos2 { x: VR_LEFT, y: 372.0 }, max: Pos2 { x: 728.0, y: 434.0 } };
 const VR_WEB_HALF: Rect = Rect { min: Pos2 { x: 736.0, y: 372.0 }, max: Pos2 { x: SIDE_RIGHT, y: 434.0 } };
+/// Without Go there (no VRChat session in Orbiters, F5): what is left shares its row.
+const VR_WEB_WHOLE: Rect = Rect { min: Pos2 { x: VR_LEFT, y: 372.0 }, max: Pos2 { x: SIDE_RIGHT, y: 434.0 } };
+const VR_SHOW_WIDE: Rect = Rect { min: Pos2 { x: VR_LEFT, y: 372.0 }, max: Pos2 { x: 728.0, y: 434.0 } };
+const VR_SHOW_SMALL_WIDE: Rect = Rect { min: Pos2 { x: 736.0, y: 372.0 }, max: Pos2 { x: SIDE_RIGHT, y: 434.0 } };
 const VR_OTHER: Rect = Rect { min: Pos2 { x: VR_LEFT, y: 512.0 }, max: Pos2 { x: SIDE_RIGHT, y: 556.0 } };
 /// The list's one head: where it is, and through it search and the filters.
 const VR_LIST_RIGHT: f32 = 440.0;
@@ -1291,8 +1315,12 @@ impl Panel {
                 let Some(e) = self.entry(d) else { return out };
                 let status = d.status;
                 let current = status.current == Some(e.id) && (status.shown || status.stage.is_some());
+                // Going there needs the member's own VRChat session in Orbiters (Enzo, F5): without it there is no list to choose from, and no button.
+                let go_ok = status.list.vrchat;
                 if !e.capture {
-                    out.push((Target::Join, if vr { VR_GO_HALF } else { SHOW_WHOLE }));
+                    if go_ok {
+                        out.push((Target::Join, if vr { VR_GO_HALF } else { SHOW_WHOLE }));
+                    }
                 } else if !status.headset {
                     if !live_here && !current {
                         out.push((Target::Show, SHOW_WHOLE));
@@ -1300,29 +1328,35 @@ impl Panel {
                 } else if current {
                     // The other way to see it: the sheet's head, or N4N0's bar, hides it.
                     // Both ways stay, the one it is in lit.
-                    out.push((Target::Show, VR_SHOW));
-                    out.push((Target::ShowSmall, VR_SHOW_SMALL));
+                    out.push((Target::Show, if go_ok { VR_SHOW } else { VR_SHOW_WIDE }));
+                    out.push((Target::ShowSmall, if go_ok { VR_SHOW_SMALL } else { VR_SHOW_SMALL_WIDE }));
                     if status.small && status.small_taken {
                         out.push((Target::SmallBack, VR_SMALL_BACK));
                     }
                 } else {
-                    out.push((Target::Show, VR_SHOW));
-                    out.push((Target::ShowSmall, VR_SHOW_SMALL));
+                    out.push((Target::Show, if go_ok { VR_SHOW } else { VR_SHOW_WIDE }));
+                    out.push((Target::ShowSmall, if go_ok { VR_SHOW_SMALL } else { VR_SHOW_SMALL_WIDE }));
                 }
                 // Going there, from a capture as from any world; else its page on VRChat alone.
                 let web = super::finder::web_link(&e.world_id).is_some();
                 if e.capture {
-                    out.push((Target::Join, match (web, vr) {
-                        (_, true) => VR_GO,
-                        (true, false) => GO,
-                        (false, false) => WEB_WHOLE,
-                    }));
+                    if go_ok {
+                        out.push((Target::Join, match (web, vr) {
+                            (_, true) => VR_GO,
+                            (true, false) => GO,
+                            (false, false) => WEB_WHOLE,
+                        }));
+                    }
                     // A page on VRChat's site is for a screen.
                     if web && !vr {
-                        out.push((Target::OpenWeb, WEB));
+                        out.push((Target::OpenWeb, if go_ok { WEB } else { WEB_WHOLE }));
                     }
                 } else if web {
-                    out.push((Target::OpenWeb, if vr { VR_WEB_HALF } else { WEB_WHOLE }));
+                    out.push((Target::OpenWeb, match (vr, go_ok) {
+                        (true, true) => VR_WEB_HALF,
+                        (true, false) => VR_WEB_WHOLE,
+                        (false, _) => WEB_WHOLE,
+                    }));
                 }
                 let mut tiles = vec![Target::Like, Target::Comments];
                 if d.facts_of(e).is_some_and(|f| f.picture_count > 0) || e.pictures > 0 {
@@ -1338,6 +1372,7 @@ impl Panel {
                 }
             }
             Page::Filter | Page::Labels | Page::Comments | Page::Compose(_) | Page::Pictures => self.page_targets(d, &mut out),
+            Page::Go => self.go_targets(d, &mut out),
         }
         out
     }
@@ -1410,7 +1445,7 @@ impl Panel {
                     self.picture = None;
                     Vec::new()
                 }
-                Page::Labels | Page::Comments | Page::Pictures => {
+                Page::Labels | Page::Comments | Page::Pictures | Page::Go => {
                     self.go(Page::Detail, time);
                     Vec::new()
                 }
@@ -1467,6 +1502,10 @@ impl Panel {
                         let n = self.entry(d).and_then(|e| d.facts_of(e)).map_or(0, |f| f.pictures.len());
                         self.pictures_page = step(self.pictures_page, n.div_ceil(PICTURES_PER_PAGE).max(1));
                     }
+                    Page::Go => {
+                        let n = status.go.list.as_ref().map_or(0, |l| l.items.len());
+                        self.go_page = step(self.go_page, n.div_ceil(go::GO_ROWS).max(1));
+                    }
                     _ => self.results_page = step(self.results_page, self.pages(d, self.results(d).len())),
                 }
                 self.page_at = time;
@@ -1506,7 +1545,39 @@ impl Panel {
                 }
                 Vec::new()
             }
-            Target::Join => self.entry(d).map(|e| Action::Join(e.world_id.clone())).into_iter().collect(),
+            // Its instances, read: nothing is sent to VRChat until one is pressed (F5).
+            Target::Join => {
+                let Some(e) = self.entry(d) else { return Vec::new() };
+                self.go_page = 0;
+                self.go(Page::Go, time);
+                vec![Action::Join(e.world_id.clone())]
+            }
+            Target::GoRetry => {
+                self.go_page = 0;
+                let world = if status.go.world.is_empty() { self.entry(d).map(|e| e.world_id.clone()) } else { Some(status.go.world.clone()) };
+                world.map(Action::Join).into_iter().collect()
+            }
+            Target::GoInstance(i) => {
+                let go = &status.go;
+                if go.busy.is_some() {
+                    return Vec::new();
+                }
+                match go.list.as_ref().and_then(|l| l.items.get(i)).filter(|x| x.can_join) {
+                    Some(x) => vec![Action::GoTo { world: go.world.clone(), instance: x.id.clone() }],
+                    None => Vec::new(),
+                }
+            }
+            Target::NewInstance(k) => {
+                let go = &status.go;
+                let Some(access) = go::NEW_KINDS.get(k as usize).copied().filter(|_| go.busy.is_none() && !go.world.is_empty()) else { return Vec::new() };
+                vec![Action::NewInstance { world: go.world.clone(), access, region: self.go_region_now(go) }]
+            }
+            Target::GoRegion => {
+                let now = self.go_region_now(&status.go);
+                let at = go::REGIONS.iter().position(|r| *r == now).unwrap_or(0);
+                self.go_region = Some(go::REGIONS[(at + 1) % go::REGIONS.len()]);
+                Vec::new()
+            }
             Target::OpenWeb => self.entry(d).map(|e| Action::OpenWeb(e.world_id.clone())).into_iter().collect(),
             Target::Has3d => {
                 self.has_3d = !self.has_3d;
@@ -1841,6 +1912,7 @@ impl Panel {
                 }
             }
             Page::Filter | Page::Labels | Page::Comments | Page::Compose(_) | Page::Pictures => self.draw_page(p, d, time, &targets, shown),
+            Page::Go => self.draw_go(p, d, time, &targets, shown),
         }
     }
 
@@ -3166,6 +3238,67 @@ mod tests {
         assert_eq!(panel.draft, "Kept");
     }
 
+    /// Enzo (VR feedback F5): "Make the Go to world button give choices of instance. If the user is not using their VRChat account in Orbiters N4N0, hide
+    /// the button." Hidden signed out of VRChat; pressed, its list is read and nothing else; an instance pressed is invited to by its exact id, one that
+    /// cannot be joined cannot be pressed; a new one is made of the kind pressed, in the player's region or the one picked; nothing while one is on its way.
+    #[test]
+    fn go_there_offers_the_instances_and_new_ones_signed_in_to_vrchat_only() {
+        use orbiters_core::vrchat_api::{CreateAccess, InstanceAccess, InstanceRegion, WorldInstance, WorldInstances};
+        let entries = super::super::catalog::parse(LISTING).unwrap();
+        let (feedback, facts) = (FeedbackView::default(), HashMap::new());
+        let mut panel = Panel { page: Page::Detail, selected: Some(1), ..Default::default() };
+        for headset in [false, true] {
+            let out = Status { headset, ..Default::default() };
+            let targets: Vec<Target> = panel.targets(&data(&entries, &out, &feedback, &facts)).into_iter().map(|(t, _)| t).collect();
+            assert!(!targets.contains(&Target::Join), "headset {headset}: no VRChat session in Orbiters, no Go there: {targets:?}");
+            let signed_in = Status { headset, list: ListStatus { vrchat: true, ..Default::default() }, ..Default::default() };
+            let targets: Vec<Target> = panel.targets(&data(&entries, &signed_in, &feedback, &facts)).into_iter().map(|(t, _)| t).collect();
+            assert!(targets.contains(&Target::Join), "headset {headset}: {targets:?}");
+        }
+        let signed_in = Status { list: ListStatus { vrchat: true, ..Default::default() }, ..Default::default() };
+        assert_eq!(panel.press(Target::Join, &data(&entries, &signed_in, &feedback, &facts), 1.0), [Action::Join(HOME.into())], "the list asked for, nothing sent");
+        assert_eq!(panel.page, Page::Go);
+        let instance = |id: &str, can_join: bool| WorldInstance {
+            world: HOME.into(),
+            id: id.into(),
+            access: InstanceAccess::FriendsPlus,
+            region: "eu".into(),
+            occupants: if can_join { 7 } else { 32 },
+            capacity: Some(32),
+            friends: Some(2),
+            full: !can_join,
+            closed: false,
+            can_join,
+        };
+        let listed = super::go::GoView {
+            world: HOME.into(),
+            list: Some(WorldInstances { items: vec![instance("48213~hidden(usr_a)~region(eu)~nonce(x)", true), instance("1~region(eu)", false)], unavailable: 1 }),
+            region: Some(InstanceRegion::Eu),
+            ..Default::default()
+        };
+        let ready = Status { go: listed.clone(), ..signed_in.clone() };
+        let d = data(&entries, &ready, &feedback, &facts);
+        let targets: Vec<Target> = panel.targets(&d).into_iter().map(|(t, _)| t).collect();
+        assert!(targets.contains(&Target::GoInstance(0)) && !targets.contains(&Target::GoInstance(1)), "a full one cannot be pressed: {targets:?}");
+        assert_eq!(panel.press(Target::GoInstance(0), &d, 2.0), [Action::GoTo { world: HOME.into(), instance: "48213~hidden(usr_a)~region(eu)~nonce(x)".into() }]);
+        assert!(panel.press(Target::GoInstance(1), &d, 2.0).is_empty());
+        assert_eq!(panel.press(Target::NewInstance(1), &d, 3.0), [Action::NewInstance { world: HOME.into(), access: CreateAccess::FriendsPlus, region: InstanceRegion::Eu }]);
+        assert!(panel.press(Target::GoRegion, &d, 3.0).is_empty());
+        assert_eq!(panel.press(Target::NewInstance(4), &d, 3.0), [Action::NewInstance { world: HOME.into(), access: CreateAccess::Invite, region: InstanceRegion::Us }], "the region picked");
+        // One on its way: nothing more is sent.
+        let busy = Status { go: super::go::GoView { busy: Some(super::go::GoBusy::Inviting), ..listed.clone() }, ..signed_in.clone() };
+        let d = data(&entries, &busy, &feedback, &facts);
+        assert!(panel.press(Target::GoInstance(0), &d, 4.0).is_empty() && panel.press(Target::NewInstance(0), &d, 4.0).is_empty());
+        // Sent: the way back to the list; Back, the world's page.
+        let sent = Status { go: super::go::GoView { invited: Some(instance("48213~hidden(usr_a)~region(eu)~nonce(x)", true)), ..listed }, ..signed_in.clone() };
+        let d = data(&entries, &sent, &feedback, &facts);
+        let targets: Vec<Target> = panel.targets(&d).into_iter().map(|(t, _)| t).filter(|t| *t != Target::Back).collect();
+        assert_eq!(targets, [Target::GoRetry], "the invite's card, and the way back to the list");
+        assert_eq!(panel.press(Target::GoRetry, &d, 5.0), [Action::Join(HOME.into())]);
+        panel.press(Target::Back, &d, 6.0);
+        assert_eq!(panel.page, Page::Detail);
+    }
+
     #[test]
     fn a_world_without_a_capture_opens_its_page_to_join_it() {
         let captures = super::super::catalog::parse(LISTING).unwrap();
@@ -3180,7 +3313,7 @@ mod tests {
         assert_eq!(entries.iter().map(|e| e.id).collect::<Vec<_>>()[..2], [1, 4], "the search's captures first, both of Home");
         let world = entries.last().unwrap().clone();
         let (feedback, facts) = (FeedbackView::default(), HashMap::new());
-        let searched = Status { list: ListStatus { searching: true, more: true, ..Default::default() }, ..Default::default() };
+        let searched = Status { list: ListStatus { searching: true, more: true, vrchat: true, ..Default::default() }, ..Default::default() };
         let d = data(&entries, &searched, &feedback, &facts);
         let mut panel = Panel { query: "ho".into(), ..Default::default() };
         // Searching: 3D only instead of the sections, and a page more while the list has more.

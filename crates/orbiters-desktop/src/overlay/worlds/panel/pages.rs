@@ -116,12 +116,12 @@ impl Panel {
                     out.push((Target::Picture(i), picture_rect(i - first)));
                 }
             }
-            Page::Browse | Page::Typing | Page::Detail => {}
+            Page::Browse | Page::Typing | Page::Detail | Page::Go => {}
         }
     }
 
     /// The page's title beside Back: `title`, then the world's name fainter.
-    fn title(&self, p: &Painter, title: &str, world: Option<&str>, until: f32, shown: f32) {
+    pub(super) fn title(&self, p: &Painter, title: &str, world: Option<&str>, until: f32, shown: f32) {
         let mut job = orbit_look::txt(title, 28.0).weight(weight::SEMIBOLD).color(fade(theme::FG, shown)).job_truncated(until - 108.0);
         if let Some(w) = world {
             job.append(&format!("  {w}"), 0.0, orbit_look::txt("", 20.0).color(fade(theme::FG_3, shown)).format());
@@ -408,7 +408,7 @@ impl Panel {
                     text(p, pos2(512.0, 552.0), Align2::CENTER_CENTER, orbit_look::txt(line, 15.0).color(fade(theme::FG_4, shown)));
                 }
             }
-            Page::Browse | Page::Typing | Page::Detail => {}
+            Page::Browse | Page::Typing | Page::Detail | Page::Go => {}
         }
     }
 }

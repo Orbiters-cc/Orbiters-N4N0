@@ -131,6 +131,7 @@ pub struct Controller {
     camera_scan: Mutex<Option<Box<dyn orbiters_n4n0::QrScan>>>,
     stop_generation: AtomicU64,
     capture_start_gate: Mutex<()>,
+    kit_epoch: Mutex<(u64,Option<String>)>,
     /// The capture kit's toggles as they were before a recording started from the app switched them on (Some while
     /// the app drives them), and when the avatar last (re)loaded, which resets them.
     avatar_before: Mutex<Option<AvatarToggles>>,
@@ -423,6 +424,7 @@ impl Controller {
             camera_scan: Mutex::new(None),
             stop_generation: AtomicU64::new(0),
             capture_start_gate: Mutex::new(()),
+            kit_epoch: Mutex::default(),
             avatar_before: Mutex::new(None),
             hide: Mutex::new(hide_self::HideRuntime::default()),
             avatar_changed_at: Mutex::new(None),
@@ -1225,10 +1227,9 @@ impl Controller {
 
     /// Reads again whether the avatar worn has the capture kit, for what offers 3D pictures. Published only when it changed.
     pub fn follow_worn_kit(self: &Shared) {
+        let epoch=self.kit_epoch.lock().unwrap().clone();
         let kit = if self.view().vrchat.running { self.worn_avatar_has_kit() } else { None };
-        if self.view().worn_kit != kit {
-            self.update(|s| s.worn_kit = kit);
-        }
+        self.apply_kit_observation(&epoch,kit);
         if self.view().camera_open_said.is_none() {
             let camera = self.camera_values().into_iter().find_map(|(p,v)| match v {
                 OscValue::Int(mode) if p == CAMERA_MODE => Some(mode != 0),
@@ -1240,6 +1241,27 @@ impl Controller {
                 true
             }); }
         }
+    }
+
+    fn invalidate_kit(&self, avatar: Option<String>) {
+        let mut epoch=self.kit_epoch.lock().unwrap();
+        epoch.0=epoch.0.wrapping_add(1);
+        epoch.1=avatar;
+        self.update(|s| s.worn_kit=None);
+    }
+
+    fn apply_kit_observation(&self, observed: &(u64,Option<String>), kit: Option<bool>) -> bool {
+        let epoch=self.kit_epoch.lock().unwrap();
+        if *epoch != *observed { return false; }
+        if let Some(expected)=&epoch.1 {
+            if !self.osc_values.lock().unwrap().latest.get(AVATAR_CHANGE).is_some_and(|(v,_)| matches!(v.first(),Some(OscValue::Text(id)) if id==expected)) { return false; }
+        }
+        self.update_if(|s| {
+            let changed=s.worn_kit!=kit;
+            s.worn_kit=kit;
+            changed
+        });
+        true
     }
 
     pub fn set_overlay_connected(self: &Shared, connected: bool) {
@@ -1359,6 +1381,7 @@ impl Controller {
                     messages.push((format!("{PARAMETERS_PREFIX}{name}"), vec![value]));
                 }
                 OscEvent::AvatarChanged { id } => {
+                    self.invalidate_kit(Some(id.clone()));
                     self.on_avatar_changed();
                     // N4N0 reads the parameters the last avatar held before they go (`on_osc`).
                     self.n4n0.on_avatar(id.clone());
@@ -1388,6 +1411,11 @@ impl Controller {
     /// parameters: a session started now lists the avatar worn, not every avatar worn before.
     fn on_osc(&self, messages: Vec<(String, Vec<OscValue>)>, at_ns: u64) {
         let avatar_changed = messages.iter().any(|(p,_)| p == AVATAR_CHANGE);
+        if avatar_changed {
+            let avatar=messages.iter().rev().find(|(p,_)| p==AVATAR_CHANGE).and_then(|(_,v)| match v.first() { Some(OscValue::Text(id))=>Some(id.clone()), _=>None });
+            // Invalidate before the new id becomes observable to the demo completion watcher.
+            self.invalidate_kit(avatar);
+        }
         let camera = messages.iter().rev().find(|(p, _)| p == CAMERA_MODE).and_then(|(_, v)| match v.first() {
             Some(OscValue::Int(mode)) => Some(*mode != 0),
             _ => None,
@@ -1410,7 +1438,6 @@ impl Controller {
             self.flush_osc(&mut osc);
         }
         drop(osc);
-        if avatar_changed { self.update(|s| s.worn_kit = None); }
         if let Some(open) = camera {
             eprintln!("camera Mode received at {at_ns}, publishing open={open}"); // i18n: not shown (diagnostics)
             if !open {
@@ -1764,6 +1791,7 @@ impl Controller {
 
     /// Starts OSC for the VRChat `network` says, replacing any that runs.
     fn start_osc_on(self: &Shared, network: Network, discovery: orbiters_core::osc::Discovery, ports: orbiters_core::osc::Ports) {
+        self.invalidate_kit(None);
         self.update(|s| { s.camera_open_said = None; s.orbit.camera_panel_seen_ns = None; });
         { let mut osc=self.osc_values.lock().unwrap(); osc.camera_received=None; osc.camera_command=None; }
         let parameter = RECORD_PARAMETER.to_string();
@@ -2876,6 +2904,27 @@ mod tests {
         ctl.on_osc(vec![(CAMERA_MODE.into(),vec![OscValue::Int(1)])],clock::now_ns());
         assert!(ctl.require_live_camera().is_ok());
         ctl.shutdown();
+    }
+
+    #[test]
+    fn a_kit_lookup_cannot_cross_an_avatar_change() {
+        let ctl=Controller::new(Settings::default());
+        let old=ctl.kit_epoch.lock().unwrap().clone();
+        ctl.on_osc(vec![(AVATAR_CHANGE.into(),vec![OscValue::Text("avtr_first".into())])],clock::now_ns());
+        assert!(!ctl.apply_kit_observation(&old,Some(true)));
+        assert_eq!(ctl.view().worn_kit,None);
+        let first=ctl.kit_epoch.lock().unwrap().clone();
+        assert!(ctl.apply_kit_observation(&first,Some(false)));
+        assert_eq!(ctl.view().worn_kit,Some(false));
+        ctl.invalidate_kit(Some("avtr_second".into()));
+        let second=ctl.kit_epoch.lock().unwrap().clone();
+        assert!(!ctl.apply_kit_observation(&first,Some(true)));
+        assert!(!ctl.apply_kit_observation(&second,Some(true)), "new avatar payload has not arrived yet");
+        assert_eq!(ctl.view().worn_kit,None);
+        ctl.on_osc(vec![(AVATAR_CHANGE.into(),vec![OscValue::Text("avtr_second".into())])],clock::now_ns());
+        let second=ctl.kit_epoch.lock().unwrap().clone();
+        assert!(ctl.apply_kit_observation(&second,Some(true)));
+        assert_eq!(ctl.view().worn_kit,Some(true));
     }
 
     #[test]

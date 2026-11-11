@@ -2481,10 +2481,10 @@ pub fn paint(p: &Painter, zone: Zone, size: Vec2, facts: &Facts, hover: Option<u
         let mut words: String = (' '..='~').chain("…".chars()).collect();
         for (_, _, label) in HEAD_TOOLS { words.push_str(tr_ctx("tile", label)); }
         for (size, weight) in [(13.5, weight::MEDIUM), (13.5, weight::BOLD), (15.5, weight::SEMIBOLD), (15.5, weight::BOLD), (18.0, weight::SEMIBOLD), (14.5, weight::BOLD), (12.5, weight::MEDIUM), (12.0, weight::SEMIBOLD), (13.5, weight::SEMIBOLD)] {
-            p.layout_no_wrap(words.clone(), look::font(size, weight), Color32::WHITE);
+            let _ = p.layout_no_wrap(words.clone(), look::font(size, weight), Color32::WHITE);
         }
-        let glyphs: String = HEAD_TOOLS.iter().map(|t| t.1).chain([icons::ARROW_LEFT, icons::X, icons::EYE, icons::SQUARE]).collect();
-        for size in [17.0, 18.0, 21.0] { p.layout_no_wrap(glyphs.clone(), FontId::new(size, orbiters_ui::fonts::icons()), Color32::WHITE); }
+        let glyphs: String = HEAD_TOOLS.iter().map(|t| t.1).chain([icons::ARROW_LEFT, icons::X, icons::EYE, icons::EYE_SLASH, icons::SQUARE, icons::GEAR_SIX, icons::PLAY, icons::PAUSE, icons::SKIP_BACK, icons::SKIP_FORWARD]).collect();
+        for size in [16.5, 17.0, 18.0, 19.8, 21.0, 21.6] { let _ = p.layout_no_wrap(glyphs.clone(), FontId::new(size, orbiters_ui::fonts::icons()), Color32::WHITE); }
     }
     let panel = Rect::from_min_size(pos2(0.0, 0.0), size);
     if facts.desktop && zone.on_the_wing_backing() && !facts.hidden {

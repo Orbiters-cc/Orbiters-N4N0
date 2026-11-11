@@ -1084,7 +1084,11 @@ mod review_fixture {
             draw(&mut b, panels::Sheet::Settings, "Settings");
             draw(&mut b, panels::Sheet::Instances, "Instances");
             for canvas in [&mut a, &mut b] { draw(canvas, panels::Sheet::Settings, "Settings"); }
-            assert_eq!(a.pixels(), b.pixels(), "different transient headings must not change settled fixture pixels");
+            let different = |a: &Canvas, b: &Canvas| a.pixels().chunks_exact(4).zip(b.pixels().chunks_exact(4)).filter(|(a,b)| a != b).count();
+            let incremental = different(&a, &b);
+            for canvas in [&mut a, &mut b] { canvas.invalidate(); draw(canvas, panels::Sheet::Settings, "Settings"); }
+            let full = different(&a, &b);
+            assert_eq!((incremental, full), (0,0), "different transient headings must not change settled fixture pixels (incremental/full redraw)");
             assert!(!take_font_fixture(a.ctx()) && !take_font_fixture(b.ctx()), "prime once per atlas");
         });
     }

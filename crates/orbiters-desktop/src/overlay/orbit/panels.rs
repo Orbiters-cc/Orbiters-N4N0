@@ -314,6 +314,7 @@ pub enum TalkNow {
     /// The microphone or the speech worker stopped. Pressed, it tries again.
     Failed,
     /// It cannot now, and why.
+    Off(&'static str),
 }
 
 /// Why Drop link cannot put a card of what plays in the world.

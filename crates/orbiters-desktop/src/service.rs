@@ -713,7 +713,7 @@ fn tray_loop(service: &Arc<Service>) -> anyhow::Result<()> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     #[test]
@@ -735,7 +735,7 @@ mod tests {
     use crate::state::{AvatarMotion, N4n0Line, N4n0Who, ReconstructionJob, Snapshot};
 
     /// A service as `run` makes it and serving as `run` serves, around a controller that is never started.
-    fn service() -> Arc<Service> {
+    pub(crate) fn service() -> Arc<Service> {
         let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let endpoint = Endpoint { port: listener.local_addr().unwrap().port(), token: "link-test".into() };
         let service = Service::around(Controller::new(Settings::default()), endpoint, PathBuf::new());
@@ -750,14 +750,14 @@ mod tests {
 
     /// A client of `role` linked to `service` through what can damage or hold the service's lines, or drop the
     /// connection.
-    fn linked_through(service: &Arc<Service>, role: Role) -> (Arc<ipc::Client>, Between) {
+    pub(crate) fn linked_through(service: &Arc<Service>, role: Role) -> (Arc<ipc::Client>, Between) {
         let between = Between::start(service.endpoint.port).unwrap();
         let client = ipc::Client::connect(&Endpoint { port: between.port(), token: service.endpoint.token.clone() }, role).unwrap();
         (client, between)
     }
 
     /// Waits up to five seconds for `done`.
-    fn until(done: impl Fn() -> bool) -> bool {
+    pub(crate) fn until(done: impl Fn() -> bool) -> bool {
         let started = Instant::now();
         while !done() && started.elapsed() < Duration::from_secs(5) {
             std::thread::sleep(Duration::from_millis(5));

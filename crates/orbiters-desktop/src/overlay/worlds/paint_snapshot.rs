@@ -52,12 +52,12 @@ impl Worlds {
         }
         self.last_paint = Some(Instant::now());
         let entries = self.entries(); let mut status = self.status();
+        self.facts_pending = false;
         if let Some(fixture) = &self.paint_fixture {
             status.fetching = false; status.listing_error = None; status.list.loading = false; status.list.more = false; status.list.error = None;
             let mut panel = self.panel.clone(); panel.moves = false;
             return PaintSnapshot { panel, entries: entries.into(), picked: self.picked().cloned(), status, feedback: self.feedback.clone(), facts: Arc::new(self.facts.clone()), thumbs: fixture.thumbs.iter().map(|(id, tex)| (*id, tex.id())).collect(), pictures: HashMap::new(), time: 1.0, now: fixture.now };
         }
-        self.facts_pending = false;
         if self.panel.sort == panel::Sort::Smooth { for e in entries.iter().filter(|e| e.capture) { self.facts_for(&e.world_id); } }
         let visible = self.visible(&entries, &status);
         for v in &visible { if v.page { self.facts_for(&v.world); } }

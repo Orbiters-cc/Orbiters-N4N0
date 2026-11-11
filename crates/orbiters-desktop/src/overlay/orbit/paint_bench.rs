@@ -117,7 +117,17 @@ struct Step {
     complete: Option<usize>,
 }
 
+type WorldFixture = (Vec<crate::overlay::worlds::catalog::Entry>, Vec<egui::ColorImage>);
+fn register_world_fixture(panels: &mut Panels, fixture: &mut Option<WorldFixture>) {
+    // The real lazy module constructor remains inside its measured opening turn.
+    if let Some(worlds) = panels.stage.worlds.as_mut() {
+        if let Some((entries, images)) = fixture.take() {
+            assert!(worlds.freeze_paint_fixture(entries, images) && worlds.paint_fixture_ready(), "local thumbnails must be ready before replay");
+        }
+    }
+}
 struct Rig {
+    world_fixture: Option<WorldFixture>,
     mode: Mode,
     panels: Panels,
     snap: Arc<Snapshot>,
@@ -248,15 +258,15 @@ impl Rig {
         snap.steamvr.running = mode == Mode::Vr;
         snap.steamvr.overlay = mode == Mode::Vr;
         let mut panels = Panels::new(Arc::new(crate::screenshot::Still), if mode == Mode::Vr { 2.0 } else { 1.0 }, true);
-        if let Some(worlds) = panels.stage.worlds.as_mut() {
+        let world_fixture = {
             let previews: Vec<_> = (0..6).map(|i| serde_json::json!({"slot": i, "key": i+1, "id": i+1, "worldId": format!("wrld_00000000-0000-4000-8000-{i:012}"), "name": format!("Replay world {i}"), "author": "Replay", "uploader": "fixture", "view": {"position": [0,1,0], "target": [0,1,1]}})).collect();
             let entries = crate::overlay::worlds::catalog::parse(&serde_json::json!({"previews": previews}).to_string()).expect("local world fixtures");
             let images = (0..entries.len()).map(|i| {
                 let image = image::open(&PICTURES.get().expect("local pictures")[i].0).expect("fixture image").to_rgba8();
                 egui::ColorImage::from_rgba_unmultiplied([image.width() as usize, image.height() as usize], image.as_raw())
             }).collect();
-            assert!(worlds.freeze_paint_fixture(entries, images) && worlds.paint_fixture_ready(), "local thumbnails must be ready before replay");
-        }
+            Some((entries, images))
+        };
         panels.recents.lister = Some(list);
         panels.clock = Some(0.0);
         let (log, pictures) = match log {
@@ -264,6 +274,7 @@ impl Rig {
             None => (None, None),
         };
         Self {
+            world_fixture,
             mode,
             panels: panels.with_page_worker(),
             snap: Arc::new(snap),
@@ -374,6 +385,7 @@ impl Rig {
             }
             cost.hand = t.elapsed();
             // What is due a picture now: painted for nothing, when the turn then hands nothing over.
+            assert!(self.panels.facts.sheet != Some(super::panels::Sheet::Worlds) || self.world_fixture.is_none(), "Worlds fixture must be registered before its first paint");
             let due: Vec<Zone> = self.panels.all().filter(|p| p.dirty).map(|p| p.zone).collect();
             let t = Instant::now();
             let (mut shows, mut pixels, mut upload) = (0u32, 0u64, Duration::ZERO);
@@ -438,6 +450,9 @@ impl Rig {
         }
         cost.phases = crate::overlay::paint_phases(false);
         cost.wall = wall.elapsed();
+        // Fixture image registration is untimed preparation, as file generation is. The module
+        // itself was constructed by the real opening above, with that cost still included.
+        register_world_fixture(&mut self.panels, &mut self.world_fixture);
         self.turn_in_step += 1;
         if self.log.is_some() {
             let (kept, bytes) = self.panels.resting();
@@ -1024,4 +1039,24 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         std::fs::write(out.join("report.md"), &report)?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod review_fixture {
+    use super::*;
+    #[test]
+    fn review_world_fixture_waits_for_lazy_initialization_and_cannot_be_skipped() {
+        let _one = super::super::flows::ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+        let mut panels = Panels::new(Arc::new(crate::screenshot::Still), 2.0, true);
+        let found = orbiters_core::maps::FoundWorld { world: orbiters_core::maps::World { world_id: "wrld_fixture".into(), ..Default::default() }, ..Default::default() };
+        let entry = crate::overlay::worlds::catalog::Entry::world(&found, None, Default::default());
+        let mut fixture = Some((vec![entry], vec![egui::ColorImage::filled([4,4], egui::Color32::RED)]));
+        register_world_fixture(&mut panels, &mut fixture);
+        assert!(panels.stage.worlds.is_none() && fixture.is_some(), "keep assets pending until the lazy module exists");
+        let snap = crate::screenshot::idle_snapshot(&Settings::default(), &[]);
+        panels.takeover_place = Some(zones::in_units(Zone::Takeover));
+        panels.open_sheet(super::super::panels::Sheet::Settings, "", &snap);
+        register_world_fixture(&mut panels, &mut fixture);
+        assert!(fixture.is_none() && panels.stage.worlds.as_ref().unwrap().paint_fixture_ready());
+    }
 }

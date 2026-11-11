@@ -1852,7 +1852,14 @@ fn hero_body(p: &Painter, body: Rect, action: Action, line: &str, facts: &Facts)
                     lines(p, room.min, title, 18.0, weight::SEMIBOLD, look::LABEL, rows_in(room.height()));
                 }
                 (None, _) => {
-                    lines(p, room.min, line, 18.0, weight::SEMIBOLD, look::LABEL, rows_in(room.height()));
+                    // Whole, at the largest size at which it is (French's three lines at 18 ran into the pill), and no smaller than 16.
+                    let whole_at = |size: f32| {
+                        let job = egui::text::LayoutJob::simple(line.to_string(), look::font(size, weight::SEMIBOLD), look::LABEL, room.width() - 20.0);
+                        p.layout_job(job).size().y <= room.height()
+                    };
+                    let size = [18.0, 17.5, 17.0, 16.5, 16.0].into_iter().find(|s| whole_at(*s)).unwrap_or(16.0);
+                    let high = p.layout_no_wrap("Ag".to_string(), look::font(size, weight::SEMIBOLD), look::LABEL).size().y; // i18n: not shown (measures a line's height)
+                    lines(p, room.min, line, size, weight::SEMIBOLD, look::LABEL, ((room.height() / high).floor() as usize).max(1));
                 }
             }
         }

@@ -395,9 +395,20 @@ pub(super) fn vr_shots(out: &Path, refs: &Path) -> anyhow::Result<()> {
                     end = Some(space::apply(&plane.frame, [item.x * plane.unit, -item.y * plane.unit, 0.01]));
                 }
             }
-            if let Some(sheet) = sheet {
-                let (quad, pixels, px) = vr_sheet(facts, sheet, &plane);
-                eye.quad(&quad, &pixels, px, 1.0);
+            match sheet {
+                // VRChat's own menus reached: only the way back, where the head's button was.
+                Some(_) if facts.peek => {
+                    let back = vr::clear_of_sheet(vr::sheet_place(Zone::SheetBack), true);
+                    let at = panels::peek_place(facts, back.logical().x);
+                    let pill = zones::Placed { zone: Zone::SheetPeek, rect: egui::Rect::from_min_size(back.rect.min + at.min.to_vec2() * back.unit, at.size() * back.unit), center: back.center, unit: back.unit };
+                    let (pixels, px) = sharp_picture(&pill, facts, None, 2.0);
+                    eye.quad(&plane.quad(&pill, 0.0, 0.02), &pixels, px, 1.0);
+                }
+                Some(sheet) => {
+                    let (quad, pixels, px) = vr_sheet(facts, sheet, &plane);
+                    eye.quad(&quad, &pixels, px, 1.0);
+                }
+                None => {}
             }
             if let Some(end) = end {
                 eye.laser([0.26, 1.05, -0.25], end);
@@ -409,6 +420,17 @@ pub(super) fn vr_shots(out: &Path, refs: &Path) -> anyhow::Result<()> {
         qm_scene(&pointing(Action::Worlds), Some(0), None, &format!("vr-qm-{world}-point-worlds"))?;
         qm_scene(&Facts { sheet: Some(Sheet::All), sheet_title: "All tools".into(), ..facts.clone() }, None, Some(Sheet::All), &format!("vr-sheet-{world}-all"))?;
         qm_scene(&Facts { sheet: Some(Sheet::Pictures), sheet_title: "Pictures".into(), ..facts.clone() }, None, Some(Sheet::Pictures), &format!("vr-sheet-{world}-pictures"))?;
+        // Enzo's IMG1 (2026-11-11): All tools with what plays, its timeline, its volume at 0 and its two links.
+        let playing = Facts { sheet: Some(Sheet::All), sheet_title: "All tools".into(), music: Some(("DJ Brace - 2016 DMC Online Finals (Winning Routine)".into(), true)), music_times: Some((364, 364)), volume: Some((0, false)), can_copy_playing: true, can_drop_playing: true, ..facts.clone() };
+        qm_scene(&playing, None, Some(Sheet::All), &format!("vr-sheet-{world}-all-playing"))?;
+        // A capture around the person: Hide 3D and Small here in the head, the tabs as icons where their names do not fit.
+        let around = Facts { sheet: Some(Sheet::Instances), sheet_title: "Instances".into(), view_showing: true, ..facts.clone() };
+        qm_scene(&around, None, Some(Sheet::Instances), &format!("vr-sheet-{world}-instances-capture"))?;
+        qm_scene(&Facts { view_small: true, ..around.clone() }, None, Some(Sheet::Instances), &format!("vr-sheet-{world}-instances-capture-small"))?;
+        // A page of N4N0's own: its name after the tabs.
+        qm_scene(&Facts { sheet: Some(Sheet::Settings), sheet_title: "Settings".into(), ..facts.clone() }, None, Some(Sheet::Settings), &format!("vr-sheet-{world}-settings"))?;
+        // VRChat's own menus reached from a sheet: the way back alone.
+        qm_scene(&Facts { sheet: Some(Sheet::Pictures), sheet_title: "Pictures".into(), peek: true, ..facts.clone() }, None, Some(Sheet::Pictures), &format!("vr-sheet-{world}-peek"))?;
         }
         let _ = Target::Close;
         // A real capture standing small, drawn by the view's own renderer: in the hole of a world's side panel (the panel's picture

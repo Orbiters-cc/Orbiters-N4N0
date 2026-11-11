@@ -698,10 +698,10 @@ impl OrbitVr {
                 for i in 0..3 { frame.m[i][3] += frame.m[i][0] * gap * sign; }
                 let depth=-(0..3).map(|i| head.m[i][2]*(frame.m[i][3]-head.m[i][3])).sum::<f32>();
                 super::super::vr_log::line(&format!("camera pose: ns={}, captured {:?}, accepted {:?}, depth {}, side {:?}, unit {}, gap {}, pose {:?}, landmarks {:?}", orbiters_core::clock::now_ns(), seen.at, now, depth, self.camera_side, unit, gap, frame, seen.found)); // i18n: not shown (diagnostics)
-                self.camera_follow.seen(frame, unit);
+                let adopted=self.camera_follow.seen(frame, unit);
                 self.camera_panel_seen_ns = Some(orbiters_core::clock::now_ns());
                 self.camera_seen = Some(now);
-                self.camera_looks = self.camera_looks.saturating_add(1);
+                if adopted { self.camera_looks = self.camera_looks.saturating_add(1); }
                 }
             }
         }
@@ -855,7 +855,7 @@ impl OrbitVr {
             note: (on != Some(true)).then(|| mark("SteamVR's \"Experimental overlay input overrides\" (Settings, Developer) is off: pointing at a panel still presses in VRChat too.").to_string()),
             steamvr_overrides: on,
             camera_note: self.camera_note(cx.snap),
-            camera_provisional: self.camera_watch.is_some() && self.camera_looks <= CAMERA_LOOKS_TO_SHOW,
+            camera_provisional: self.camera_watch.is_some() && (self.camera_looks <= CAMERA_LOOKS_TO_SHOW || self.camera_follow.awaiting_confirmation()),
             camera_panel_seen_ns: self.camera_panel_seen_ns,
         };
         if self.told.as_ref() != Some(&status) {
@@ -1005,7 +1005,7 @@ impl OrbitVr {
         // Camera status changes independently of SteamVR's one-time input override setup.
         let mut status=self.told.clone().unwrap_or_default();
         status.camera_note=self.camera_note(cx.snap);
-        status.camera_provisional=camera_wanted && self.camera_looks <= CAMERA_LOOKS_TO_SHOW;
+        status.camera_provisional=camera_wanted && (self.camera_looks <= CAMERA_LOOKS_TO_SHOW || self.camera_follow.awaiting_confirmation());
         status.camera_panel_seen_ns=self.camera_panel_seen_ns;
         if self.told.as_ref()!=Some(&status) {
             cx.backend.orbit_status(status.clone());
@@ -1343,7 +1343,7 @@ impl OrbitVr {
                 if !cx.overlay.is_visible(*handle) {
                     let _ = cx.overlay.show(*handle);
                     if matches!(panel.zone, Zone::CameraPeople | Zone::CameraWorld | Zone::CameraQr) {
-                        super::super::vr_log::line(&format!("camera first shown: ns={}, zone={:?}, provisional={}", orbiters_core::clock::now_ns(), panel.zone, self.camera_looks <= CAMERA_LOOKS_TO_SHOW)); // i18n: not shown (diagnostics)
+                        super::super::vr_log::line(&format!("camera first shown: ns={}, zone={:?}, provisional={}", orbiters_core::clock::now_ns(), panel.zone, self.camera_looks <= CAMERA_LOOKS_TO_SHOW || self.camera_follow.awaiting_confirmation())); // i18n: not shown (diagnostics)
                     }
                 }
             }

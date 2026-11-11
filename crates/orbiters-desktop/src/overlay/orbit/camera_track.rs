@@ -714,33 +714,37 @@ impl Follow {
     }
 
     /// What a look saw, in the room.
-    pub fn seen(&mut self, frame: Matrix34, unit: f32) {
+    pub fn seen(&mut self, frame: Matrix34, unit: f32) -> bool {
         let local = self.local(&frame);
         let Some((wanted, wanted_unit)) = self.wanted else {
             self.at = Some((local, unit));
             self.wanted = Some((local, unit));
-            return;
+            return true;
         };
         if self.hand_moving {
-            return;
+            return false;
         }
         let far = apart(&wanted, &local);
         if far > JUMPS_M {
             if self.unsure.is_some_and(|(was, _)| apart(&was, &frame) <= JUMPS_M) {
                 self.unsure = None;
                 self.wanted = Some((local, unit));
+                return true;
             } else {
                 self.unsure = Some((frame, unit));
             }
-            return;
+            return false;
         }
         self.unsure = None;
         if far < LOOK_SAYS_NOTHING_M && turned_apart(&wanted, &local) < 2f32.to_radians() {
-            return;
+            return true;
         }
         let k = if far > CLEARLY_OFF_M { LOOK_CORRECTS } else { LOOK_NUDGES };
         self.wanted = Some((towards(&wanted, &local, k), wanted_unit + (unit - wanted_unit) * k));
+        true
     }
+
+    pub fn awaiting_confirmation(&self) -> bool { self.unsure.is_some() }
 
     pub fn clear(&mut self) {
         *self = Self::default();
@@ -1191,6 +1195,16 @@ mod tests {
         assert!(first > 0.02 && first < 0.2);
         for _ in 0..180 { follow.step(0.011, [None; 2], [false; 2], NOBODY); }
         assert!((follow.step(0.011, [None; 2], [false; 2], NOBODY).unwrap().0.m[0][3] - 1.).abs() < 0.001);
+    }
+    #[test]
+    fn a_far_fit_remains_provisional_until_its_target_is_adopted() {
+        let mut follow=Follow::default();
+        assert!(follow.seen(at(0.),0.001));
+        assert!(!follow.seen(at(1.),0.001));
+        assert!(follow.awaiting_confirmation());
+        assert!(follow.seen(at(1.),0.001));
+        assert!(!follow.awaiting_confirmation());
+        assert!(follow.step(0.011,[None;2],[false;2],NOBODY).unwrap().0.m[0][3]<0.2);
     }
 
     /// Enzo: "use the tracking of the controller that grabbed it + the headset tracking ... until the user drops it".

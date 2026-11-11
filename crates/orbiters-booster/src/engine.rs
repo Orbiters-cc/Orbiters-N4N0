@@ -318,6 +318,7 @@ impl Engine {
         self.sharpness_steps = 0;
         self.hold_test = false;
         if self.trial.as_ref().is_some_and(|t| t.kind == Kind::Sharpness) {
+            self.trial_status = TrialStatus::Interrupted;
             self.trial = None;
         }
     }
@@ -688,6 +689,17 @@ mod tests {
 
     const HZ: f32 = 72.0;
     const WORLD: u64 = 7;
+
+    #[test]
+    fn refused_sharpness_is_no_longer_a_running_trial() {
+        let mut e = Engine::new();
+        let inputs = Inputs { scene: true, ..Inputs::default() };
+        e.request(&inputs, Request::TestAnyway(Kind::Sharpness));
+        e.leave_sharpness_alone(LeftAlone::Refused);
+        let report = e.report(&inputs, &Wants::default());
+        assert_eq!(report.trial_status, TrialStatus::Interrupted);
+        assert!(report.testing.is_none());
+    }
 
     #[test]
     fn off_cancels_a_running_trial_and_explicit_off_test_has_a_stop() {

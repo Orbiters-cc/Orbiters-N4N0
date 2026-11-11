@@ -440,7 +440,7 @@ impl Gate {
         let carrying = match motion {
             None => !self.observed || self.since.is_some(),
             Some(m) if !m.speed.is_finite() => self.since.is_some(),
-            Some(m) if self.since.is_none() => m.speed >= VRCHAT_WALKS,
+            Some(m) if self.since.is_none() => { self.still_since = None; m.speed >= VRCHAT_WALKS },
             Some(m) if m.speed >= VRCHAT_STILL => { self.still_since = None; true }
             Some(_) => now.saturating_duration_since(*self.still_since.get_or_insert(now)) < STILL_FOR,
         };

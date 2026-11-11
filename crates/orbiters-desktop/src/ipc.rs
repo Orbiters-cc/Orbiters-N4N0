@@ -463,6 +463,26 @@ impl Held {
 mod smoothing_ack_tests {
     use super::*;
     #[test]
+    fn two_device_sliders_and_both_menu_sliders_survive_a_stale_snapshot() {
+        let first = Arc::new(Snapshot::new(orbiters_core::settings::Settings::default()));
+        let mut h = Held { service: first.clone(), shown: first, closed: false, next_smoothing: 0, smoothing: Vec::new() };
+        for patch in [
+            serde_json::json!({"tracking":{"ms":[90,0,0]}}),
+            serde_json::json!({"tracking":{"ms":[90,70,0]}}),
+            serde_json::json!({"orbit":{"vr_smoothing_quick_menu_ms":60}}),
+            serde_json::json!({"orbit":{"vr_smoothing_wheel_ms":75}}),
+        ] {
+            h.next_smoothing += 1;
+            h.smoothing.push((h.next_smoothing, patch, None));
+            h.follow_smoothing();
+        }
+        for _ in 0..90 { h.follow_smoothing(); }
+        assert_eq!(h.shown.settings.tracking.ms, [90,70,0]);
+        assert_eq!(h.shown.settings.orbit.vr_smoothing_quick_menu_ms, 60.0);
+        assert_eq!(h.shown.settings.orbit.vr_smoothing_wheel_ms, 75.0);
+    }
+
+    #[test]
     fn releases_survive_stale_snapshots_and_settle_on_clamp_or_refusal() {
         let first = Arc::new(Snapshot::new(orbiters_core::settings::Settings::default()));
         let mut h = Held { service: first.clone(), shown: first.clone(), closed: false, next_smoothing: 2, smoothing: vec![
@@ -652,8 +672,7 @@ impl Client {
         self.state.lock().unwrap().shown.clone()
     }
 
-    /// Shows a change before the service confirms it. The service's next state replaces it, whatever that state
-    /// changed: what is shown is then the service's again, whole, as when every state came as a whole snapshot.
+    /// Keep released slider values until both their acknowledgement and its authoritative state arrive.
     pub fn patch_smoothing(&self, patch: serde_json::Value) {
         let mut held = self.state.lock().unwrap();
         held.next_smoothing += 1;

@@ -4221,6 +4221,7 @@ dependencies = [
  "orbiters-core",
  "orbiters-i18n",
  "orbiters-n4n0-core",
+ "parking_lot",
  "rosc",
  "serde",
  "serde_json",

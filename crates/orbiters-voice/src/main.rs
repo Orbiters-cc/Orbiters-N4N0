@@ -18,7 +18,7 @@ use std::collections::VecDeque;
 use std::io::{BufRead, Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
-use std::sync::{mpsc, Arc};
+use std::sync::{mpsc, Arc, Mutex, Condvar};
 use std::time::{Duration, Instant};
 
 const RATE: usize = voice::SAMPLE_RATE as usize;
@@ -39,8 +39,6 @@ const REOPEN_MAX: Duration = Duration::from_secs(30);
 const IDLE_UNLOAD: Duration = Duration::from_secs(10 * 60);
 /// The start of a long wake-word sentence transcribed first: room for a greeting and the wake word.
 const PREFIX: usize = RATE * 5 / 2;
-/// Sentences waiting for the recogniser to load (beyond that, the oldest wake-word ones go).
-const WAITING_MOST: usize = 8;
 /// An install whose download or unpacking does not move for this long is given up (what came is kept).
 const STALL: Duration = Duration::from_secs(60);
 /// The share of the progress bar the downloads take; unpacking (15 to 30 s) the rest.
@@ -50,7 +48,6 @@ const DOWNLOAD_SHARE: f32 = 0.9;
 /// a thread being replaced may still speak once or twice after its successor started.
 enum Input {
     Command(VoiceCommand),
-    Audio(u64, Vec<f32>),
     MicOpened(u64, String),
     MicClosed(u64, Option<String>),
     /// The recogniser of load `n` loaded (or not), in this long.
@@ -123,7 +120,7 @@ enum Recognizer {
     Unloaded,
     /// Loading on a thread of its own (load number), the sentences meanwhile waiting.
     Loading(u64),
-    Ready(OfflineRecognizer),
+    Ready(Arc<Mutex<OfflineRecognizer>>),
 }
 
 /// A sentence to transcribe: for N4N0 (answering listen `listen`), or heard for the wake word.
@@ -151,8 +148,67 @@ struct Listen {
     id: u64,
 }
 
+// i18n: not shown (inference scheduler and transcript internals)
+type DecodeJob = Box<dyn FnOnce() + Send>;
+#[derive(Default)]
+struct Jobs { pending: Option<(bool, DecodeJob)>, stopped: bool }
+struct Decoder(Arc<(Mutex<Jobs>, Condvar)>);
+impl Decoder {
+    fn new() -> Self {
+        let state = Arc::new((Mutex::new(Jobs::default()), Condvar::new()));
+        let consumer = state.clone();
+        std::thread::spawn(move || loop {
+            let job = {
+                let (lock, wake) = &*consumer;
+                let mut q = lock.lock().unwrap();
+                while q.pending.is_none() && !q.stopped { q = wake.wait(q).unwrap(); }
+                if q.stopped { return; }
+                q.pending.take().unwrap().1
+            };
+            job();
+        });
+        Self(state)
+    }
+    fn submit(&self, final_job: bool, job: DecodeJob) {
+        let (lock, wake) = &*self.0;
+        let mut q = lock.lock().unwrap();
+        if final_job || !q.pending.as_ref().is_some_and(|p| p.0) {
+            q.pending = Some((final_job, job));
+            wake.notify_one();
+        }
+    }
+    fn clear(&self) { self.0.0.lock().unwrap().pending = None; }
+}
+impl Drop for Decoder {
+    fn drop(&mut self) {
+        let mut q = self.0.0.lock().unwrap(); q.stopped = true; q.pending = None; self.0.1.notify_one();
+    }
+}
+
+#[derive(Default)]
+struct LiveText { tokens: Vec<(f32, String)> }
+impl LiveText {
+    fn update(&mut self, start: f32, result: sherpa_onnx::OfflineRecognizerResult) -> String {
+        // The first second of an overlapping window supplies context only. Preserve the preceding
+        // hypothesis before that boundary; the original full audio gets one final correction.
+        let cutoff = if start > 0.0 { start + 1.0 } else { 0.0 };
+        if let Some(times) = result.timestamps.filter(|t| !t.is_empty() && t.len() == result.tokens.len()) {
+            self.tokens.retain(|(at, _)| *at < cutoff);
+            self.tokens.extend(times.into_iter().zip(result.tokens).filter_map(|(at, word)| {
+                let at = start + at; (at >= cutoff).then_some((at, word))
+            }));
+        }
+        self.tokens.iter().map(|(_, t)| t.as_str()).collect::<String>().replace('▁', " ").trim().to_string()
+    }
+}
+
 struct Worker {
     tx: mpsc::Sender<Input>,
+    audio_tx: mpsc::SyncSender<(u64, Vec<f32>)>,
+    audio_rx: mpsc::Receiver<(u64, Vec<f32>)>,
+    decoder: Decoder,
+    decode_generation: Arc<AtomicU64>,
+    live: Arc<Mutex<LiveText>>,
     models: Option<PathBuf>,
     vad: Option<VoiceActivityDetector>,
     recognizer: Recognizer,
@@ -172,6 +228,8 @@ struct Worker {
     listen: Option<Listen>,
     /// The held sentence so far.
     held: Vec<f32>,
+    partial_at: Instant,
+    partial_id: Arc<AtomicU64>,
     /// Samples waiting for a whole VAD window.
     pending: Vec<f32>,
     preroll: VecDeque<f32>,
@@ -183,8 +241,11 @@ struct Worker {
 
 impl Worker {
     fn new(tx: mpsc::Sender<Input>) -> Self {
+        let (audio_tx, audio_rx) = mpsc::sync_channel(8);
         Self {
-            tx,
+            tx, audio_tx, audio_rx, decoder: Decoder::new(),
+            decode_generation: Arc::new(AtomicU64::new(0)),
+            live: Arc::new(Mutex::new(LiveText::default())),
             models: None,
             vad: None,
             recognizer: Recognizer::Unloaded,
@@ -200,6 +261,8 @@ impl Worker {
             wake_words: Vec::new(),
             listen: None,
             held: Vec::new(),
+            partial_at: Instant::now(),
+            partial_id: Arc::new(AtomicU64::new(0)),
             pending: Vec::new(),
             preroll: VecDeque::new(),
             speaking: false,
@@ -222,8 +285,9 @@ impl Worker {
             let generation = self.mic_generation;
             let stop = Arc::new(AtomicBool::new(false));
             let (tx, id, s) = (self.tx.clone(), self.mic_id.clone(), stop.clone());
+            let audio_tx = self.audio_tx.clone();
             let _ = std::thread::Builder::new().name("mic".into()).spawn(move || {
-                let (ready, audio) = (tx.clone(), tx.clone());
+                let (ready, audio) = (tx.clone(), audio_tx);
                 let result = orbiters_audio::capture(
                     &AudioSource::Mic(id),
                     Some(voice::SAMPLE_RATE),
@@ -234,7 +298,10 @@ impl Worker {
                     },
                     |_, frames, samples| {
                         let chunk = samples.map(<[f32]>::to_vec).unwrap_or_else(|| vec![0.0; frames as usize]);
-                        audio.send(Input::Audio(generation, chunk)).map_err(|_| anyhow::anyhow!("{}", orbiters_i18n::tr("the worker stopped")))
+                        match audio.try_send((generation, chunk)) {
+                            Ok(()) | Err(mpsc::TrySendError::Full(_)) => Ok(()),
+                            Err(mpsc::TrySendError::Disconnected(_)) => Err(anyhow::anyhow!("{}", orbiters_i18n::tr("the worker stopped"))),
+                        }
                     },
                 );
                 let _ = tx.send(Input::MicClosed(generation, result.err().map(|e| format!("{e:#}"))));
@@ -324,6 +391,9 @@ impl Worker {
                 }
             }
             VoiceCommand::Listen { hold, id } => {
+                self.decoder.clear(); self.waiting.clear();
+                self.decode_generation.fetch_add(1, Ordering::SeqCst);
+                self.live = Arc::new(Mutex::new(LiveText::default()));
                 if let Some(vad) = &self.vad {
                     // A fresh sentence: what the VAD was following belongs to before.
                     vad.reset();
@@ -331,6 +401,8 @@ impl Worker {
                 self.pending.clear();
                 self.speaking = false;
                 self.held = if hold { self.preroll.iter().copied().collect() } else { Vec::new() };
+                self.partial_id.store(id, Ordering::Relaxed);
+                self.partial_at = Instant::now();
                 self.listen = Some(Listen { hold, since: Instant::now(), id });
                 // Someone speaks now: a microphone that failed a moment ago is tried again at once, and the
                 // recogniser loads while they speak.
@@ -338,12 +410,16 @@ impl Worker {
                 self.need_recognizer();
             }
             VoiceCommand::Finish => {
+                self.partial_id.store(0, Ordering::Relaxed);
                 if let Some(listen) = self.listen.take_if(|l| l.hold) {
                     let held = std::mem::take(&mut self.held);
                     self.sentence(held, true, listen.id);
                 }
             }
             VoiceCommand::Cancel => {
+                self.decoder.clear(); self.waiting.clear();
+                self.decode_generation.fetch_add(1, Ordering::SeqCst);
+                self.partial_id.store(0, Ordering::Relaxed);
                 if self.installing.is_some() {
                     // Stops the install: what was downloaded stays for the next one.
                     return false;
@@ -403,7 +479,7 @@ impl Worker {
         match result {
             Ok(recognizer) => {
                 eprintln!("voice: speech recogniser loaded in {} ms", took.as_millis());
-                self.recognizer = Recognizer::Ready(recognizer);
+                self.recognizer = Recognizer::Ready(Arc::new(Mutex::new(recognizer)));
                 self.used_at = Instant::now();
                 while let Some(s) = self.waiting.pop_front() {
                     self.decode(s);
@@ -439,10 +515,11 @@ impl Worker {
                 (*sum, *n) = (0.0, 0);
             }
         }
+        if self.listen.as_ref().is_some_and(|l| l.hold || self.speaking) && self.held.len() < LONGEST.as_secs() as usize * RATE {
+            self.held.extend_from_slice(&samples);
+            self.partial();
+        }
         if self.listen.as_ref().is_some_and(|l| l.hold) {
-            if self.held.len() < LONGEST.as_secs() as usize * RATE {
-                self.held.extend_from_slice(&samples);
-            }
             return;
         }
         self.preroll.extend(samples.iter().copied());
@@ -467,6 +544,9 @@ impl Worker {
         if speaking != self.speaking {
             self.speaking = speaking;
             emit(&VoiceEvent::Speech { active: speaking });
+            if speaking && self.listen.is_some() {
+                self.held = self.preroll.iter().copied().collect();
+            }
             if speaking && self.wake_word {
                 // A sentence starts: the recogniser loads while it goes on.
                 self.need_recognizer();
@@ -484,6 +564,10 @@ impl Worker {
 
     /// A whole sentence: transcribed now, or once the recogniser has loaded.
     fn sentence(&mut self, samples: Vec<f32>, for_n4n0: bool, listen: u64) {
+        if for_n4n0 {
+            self.partial_id.store(0, Ordering::Relaxed);
+            emit(&VoiceEvent::Finalizing { listen });
+        }
         // Less than a quarter of a second holds no word.
         if samples.len() < RATE / 4 {
             if for_n4n0 {
@@ -496,14 +580,9 @@ impl Worker {
             self.decode(sentence);
             return;
         }
-        if self.waiting.len() >= WAITING_MOST {
-            // The oldest sentence heard for the wake word goes (one for N4N0 is always answered).
-            match self.waiting.iter().position(|s| !s.for_n4n0) {
-                Some(i) => drop(self.waiting.remove(i)),
-                None if !for_n4n0 => return,
-                None => {}
-            }
-        }
+        // Latest sentence only, including while models load.
+        if !for_n4n0 && self.waiting.iter().any(|s| s.for_n4n0) { return; }
+        self.waiting.clear();
         self.waiting.push_back(sentence);
         self.need_recognizer();
     }
@@ -513,15 +592,51 @@ impl Worker {
     fn decode(&mut self, s: Sentence) {
         let Recognizer::Ready(recognizer) = &self.recognizer else { return };
         self.used_at = Instant::now();
-        let seconds = s.samples.len() as f32 / RATE as f32;
-        if !s.for_n4n0 && !self.wake_words.is_empty() && s.samples.len() > PREFIX {
-            let (start, _) = transcribe(recognizer, &s.samples[..PREFIX]);
-            if orbiters_n4n0_core::wake::command(&start, &self.wake_words).is_none() {
-                return;
+        let recognizer = recognizer.clone();
+        let wake_words = self.wake_words.clone();
+        // Final decode also runs away from the audio/VAD loop. The single recognizer serializes inference.
+        let generation = self.decode_generation.clone();
+        let expected = generation.load(Ordering::SeqCst);
+        self.decoder.submit(s.for_n4n0, Box::new(move || {
+            if generation.load(Ordering::SeqCst) != expected { return; }
+            let recognizer = recognizer.lock().unwrap();
+            let seconds = s.samples.len() as f32 / RATE as f32;
+            if !s.for_n4n0 && !wake_words.is_empty() && s.samples.len() > PREFIX {
+                let (start, _) = transcribe(&recognizer, &s.samples[..PREFIX]);
+                if orbiters_n4n0_core::wake::command(&start, &wake_words).is_none() { return; }
             }
-        }
-        let (text, decode_ms) = transcribe(recognizer, &s.samples);
-        emit(&VoiceEvent::Heard { text, for_n4n0: s.for_n4n0, seconds, decode_ms, listen: s.listen });
+            let (text, decode_ms) = transcribe(&recognizer, &s.samples);
+            if generation.load(Ordering::SeqCst) == expected {
+                emit(&VoiceEvent::Heard { text, for_n4n0: s.for_n4n0, seconds, decode_ms, listen: s.listen });
+            }
+        }));
+    }
+
+    /// One running job and one replaceable pending snapshot; an active final has priority.
+    fn partial(&mut self) {
+        if self.held.len() < RATE || self.partial_at.elapsed() < Duration::from_millis(1000) { return; }
+        let Recognizer::Ready(recognizer) = &self.recognizer else { return };
+
+        self.partial_at = Instant::now();
+        let start = self.held.len().saturating_sub(RATE * 6);
+        let (recognizer, samples) = (recognizer.clone(), self.held[start..].to_vec());
+        let live = self.live.clone();
+        let listen = self.listen.as_ref().unwrap().id;
+        let current = self.partial_id.clone();
+        self.decoder.submit(false, Box::new(move || {
+            if current.load(Ordering::Relaxed) == listen {
+                let recognizer = recognizer.lock().unwrap();
+                let stream = recognizer.create_stream();
+                stream.accept_waveform(RATE as i32, &samples);
+                recognizer.decode(&stream);
+                if current.load(Ordering::Relaxed) == listen {
+                    if let Some(result) = stream.get_result() {
+                        let text = live.lock().unwrap().update(start as f32 / RATE as f32, result);
+                        if !text.is_empty() { emit(&VoiceEvent::Provisional { listen, text }); }
+                    }
+                }
+            }
+        }));
     }
 
     /// A sentence for N4N0 that never started, or went on too long; a microphone due to open again; a recogniser
@@ -562,7 +677,13 @@ impl Worker {
         } else if (waited > NO_SPEECH && !self.speaking) || waited > LONGEST {
             let id = listen.id;
             self.listen = None;
-            emit(&VoiceEvent::Heard { text: String::new(), for_n4n0: true, seconds: 0.0, decode_ms: 0, listen: id });
+            if waited > LONGEST && !self.held.is_empty() {
+                let samples = std::mem::take(&mut self.held);
+                self.sentence(samples, true, id);
+            } else {
+                self.partial_id.store(0, Ordering::Relaxed);
+                emit(&VoiceEvent::Heard { text: String::new(), for_n4n0: true, seconds: 0.0, decode_ms: 0, listen: id });
+            }
             self.follow_mic();
         }
         true
@@ -801,6 +922,24 @@ fn transcribe_files(files: &[String]) -> anyhow::Result<()> {
     for file in files {
         let wave = sherpa_onnx::Wave::read(file).ok_or_else(|| anyhow::anyhow!("cannot read {file}"))?; // i18n: not shown (the `--transcribe` command line, for developers)
         anyhow::ensure!(wave.sample_rate() == RATE as i32, "{file}: {} Hz (16000 needed)", wave.sample_rate()); // i18n: not shown (the `--transcribe` command line, for developers)
+        for seconds in [1usize, 2, 4, 6, 8, 12, 20, 30] {
+            let count = (seconds * RATE).min(wave.samples().len());
+            let (_, ms) = transcribe(&recognizer, &wave.samples()[..count]);
+            println!("prefix {count} samples: {ms} ms");
+            if count == wave.samples().len() { break; }
+        }
+        let mut live = LiveText::default();
+        for end in (RATE..=wave.samples().len()).step_by(RATE) {
+            let start = end.saturating_sub(RATE * 6);
+            let now = Instant::now();
+            let stream = recognizer.create_stream();
+            stream.accept_waveform(RATE as i32, &wave.samples()[start..end]);
+            recognizer.decode(&stream);
+            if let Some(result) = stream.get_result() {
+                let text = live.update(start as f32 / RATE as f32, result);
+                println!("live end={} start={} ms={} text={text}", end / RATE, start / RATE, now.elapsed().as_millis());
+            }
+        }
         let (text, ms) = transcribe(&recognizer, wave.samples());
         println!("{file}: {:.1} s of audio in {ms} ms: {text}", wave.samples().len() as f32 / RATE as f32);
     }
@@ -838,15 +977,10 @@ fn main() {
     });
     let mut worker = Worker::new(tx);
     loop {
-        match rx.recv_timeout(Duration::from_millis(100)) {
+        match rx.recv_timeout(Duration::from_millis(10)) {
             Ok(Input::Command(c)) => {
                 if !worker.command(c) {
                     break;
-                }
-            }
-            Ok(Input::Audio(generation, samples)) => {
-                if worker.mic.as_ref().is_some_and(|m| m.generation == generation) {
-                    worker.audio(samples);
                 }
             }
             Ok(Input::MicOpened(generation, name)) => worker.mic_opened(generation, name),
@@ -865,6 +999,9 @@ fn main() {
             Ok(Input::StdinClosed) => break,
             Err(mpsc::RecvTimeoutError::Timeout) => {}
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
+        }
+        if let Ok((generation, samples)) = worker.audio_rx.try_recv() {
+            if worker.mic.as_ref().is_some_and(|m| m.generation == generation) { worker.audio(samples); }
         }
         if !worker.tick() {
             break;
@@ -1012,5 +1149,140 @@ mod tests {
         assert!(e.to_string().contains("SHA-256"), "{e}");
         assert!(!part.exists());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod fixture_tests {
+    use super::*;
+
+    #[test]
+    #[ignore = "requires installed CPU recognizer and ORBITERS_VOICE_FIXTURE, runs in real time without a microphone"]
+    fn review_realtime_live_fixture() {
+        let wave = sherpa_onnx::Wave::read(&std::env::var("ORBITERS_VOICE_FIXTURE").unwrap()).unwrap();
+        assert_eq!(wave.sample_rate(), RATE as i32);
+        let (tx, _) = mpsc::channel();
+        let mut worker = Worker::new(tx);
+        let models = orbiters_core::paths::models_dir();
+        worker.vad = Some(load_vad(&models).unwrap());
+        worker.recognizer = Recognizer::Ready(Arc::new(Mutex::new(load_recognizer(&models).unwrap())));
+        worker.listen = Some(Listen { hold: true, since: Instant::now(), id: 41 });
+        worker.partial_id.store(41, Ordering::Relaxed);
+        let began = Instant::now();
+        let mut previous = String::new();
+        let mut updates = 0;
+        for (i, chunk) in wave.samples().chunks(WINDOW).enumerate() {
+            worker.audio(chunk.to_vec());
+            let snapshot = format!("{:?}", worker.live.lock().unwrap().tokens);
+            if snapshot != previous && snapshot != "[]" {
+                eprintln!("live_probe at_ms={} tokens={snapshot}", began.elapsed().as_millis());
+                updates += 1; previous = snapshot;
+            }
+            let due = Duration::from_secs_f64((i + 1) as f64 * WINDOW as f64 / RATE as f64);
+            std::thread::sleep(due.saturating_sub(began.elapsed()));
+        }
+        let live = worker.live.lock().unwrap();
+        assert!(live.tokens.first().unwrap().0 < 4.0, "prefix was retained");
+        assert!(live.tokens.last().unwrap().0 > 24.0, "words kept arriving after eight seconds");
+        assert!(updates >= 15, "sustained live updates: {updates}");
+        drop(live);
+        worker.partial_id.store(0, Ordering::Relaxed);
+        worker.decoder.clear();
+        worker.listen = None;
+        let before = format!("{:?}", worker.live.lock().unwrap().tokens);
+        std::thread::sleep(Duration::from_millis(750));
+        assert_eq!(before, format!("{:?}", worker.live.lock().unwrap().tokens), "cancelled decode cannot revise live words");
+        assert!(worker.mic.is_none());
+    }
+    #[test]
+    fn review_long_sentence_never_clears_live_identity() {
+        let (tx, _) = mpsc::channel(); let mut worker = Worker::new(tx);
+        worker.listen = Some(Listen { hold: true, since: Instant::now(), id: 41 });
+        worker.partial_id.store(41, Ordering::Relaxed);
+        for seconds in [8, 9, 12, 20, 30] {
+            worker.held = vec![0.0; RATE * seconds]; worker.partial();
+            assert_eq!(worker.partial_id.load(Ordering::Relaxed), 41, "live words disappeared at {seconds}s");
+        }
+    }
+
+    #[test]
+    fn review_loading_queue_is_latest_only() {
+        let (tx, _) = mpsc::channel();
+        let mut worker = Worker::new(tx);
+        for id in 1..=100 { worker.sentence(vec![0.0; RATE], true, id); }
+        assert_eq!(worker.waiting.len(), 1);
+        assert_eq!(worker.waiting[0].listen, 100);
+        worker.sentence(vec![0.0; RATE], false, 0);
+        assert_eq!(worker.waiting[0].listen, 100, "wake work cannot displace the active final");
+        worker.command(VoiceCommand::Cancel);
+        assert!(worker.waiting.is_empty());
+    }
+
+
+    #[test]
+    fn review_long_live_text_keeps_prefix_in_all_five_languages() {
+        for words in ["one two three four five six seven eight nine ten", "un deux trois quatre cinq six sept huit neuf dix", "uno dos tres cuatro cinco seis siete ocho nueve diez", "um dois tres quatro cinco seis sete oito nove dez", "一 二 三 四 五 六 七 八 九 十"] {
+            let words: Vec<_> = words.split_whitespace().collect();
+            let mut live = LiveText::default();
+            for end in 1usize..=30 {
+                let start = end.saturating_sub(6);
+                let result = sherpa_onnx::OfflineRecognizerResult {
+                    text: String::new(),
+                    tokens: (start..end).map(|i| format!("▁{}", words[i % 10])).collect(),
+                    timestamps: Some((0..end-start).map(|i| i as f32).collect()), durations: None,
+                };
+                let text = live.update(start as f32, result);
+                assert_eq!(text, (0..end).map(|i| words[i % 10]).collect::<Vec<_>>().join(" "));
+            }
+            let kept = live.tokens.clone();
+            live.update(24.0, sherpa_onnx::OfflineRecognizerResult {
+                text: String::new(), tokens: Vec::new(), timestamps: Some(Vec::new()), durations: None,
+            });
+            assert_eq!(live.tokens, kept, "an empty decode retains the useful words");
+        }
+    }
+
+    #[test]
+    fn review_decoder_overload_keeps_only_latest_and_final_priority() {
+        let decoder = Decoder::new();
+        let (begun, started) = mpsc::channel();
+        let (release, blocked) = mpsc::channel();
+        decoder.submit(false, Box::new(move || { begun.send(()).unwrap(); blocked.recv().unwrap(); }));
+        started.recv_timeout(Duration::from_secs(2)).unwrap();
+        let (tx, rx) = mpsc::channel();
+        for i in 0..100 {
+            let tx = tx.clone();
+            decoder.submit(true, Box::new(move || { tx.send(i).unwrap(); }));
+        }
+        let spare = tx.clone();
+        decoder.submit(false, Box::new(move || { spare.send(999).unwrap(); }));
+        release.send(()).unwrap();
+        assert_eq!(rx.recv_timeout(Duration::from_secs(2)).unwrap(), 99);
+        assert!(rx.recv_timeout(Duration::from_millis(50)).is_err());
+        let (begun, started) = mpsc::channel();
+        let (release, blocked) = mpsc::channel();
+        decoder.submit(false, Box::new(move || { begun.send(()).unwrap(); blocked.recv().unwrap(); }));
+        started.recv().unwrap();
+        decoder.submit(true, Box::new(move || { tx.send(100).unwrap(); }));
+        decoder.clear(); release.send(()).unwrap();
+        assert!(rx.recv_timeout(Duration::from_millis(50)).is_err());
+    }
+
+    #[test]
+    #[ignore = "requires installed Silero and ORBITERS_VOICE_FIXTURE (16 kHz PCM), never a microphone"]
+    fn fixture_vad_ends_one_automatic_sentence() {
+        let path = std::env::var("ORBITERS_VOICE_FIXTURE").unwrap();
+        let wave = sherpa_onnx::Wave::read(&path).unwrap();
+        assert_eq!(wave.sample_rate(), RATE as i32);
+        let (tx, _) = mpsc::channel();
+        let mut worker = Worker::new(tx);
+        worker.vad = Some(load_vad(&orbiters_core::paths::models_dir()).unwrap());
+        worker.listen = Some(Listen { hold: false, since: Instant::now(), id: 41 });
+        for chunk in wave.samples().chunks(WINDOW) { worker.audio(chunk.to_vec()); }
+        for _ in 0..40 { worker.audio(vec![0.0; WINDOW]); }
+        assert!(worker.listen.is_none(), "Silero ended the sentence");
+        assert_eq!(worker.waiting.len(), 1, "exactly one final decode request");
+        assert_eq!(worker.waiting[0].listen, 41);
+        assert!(worker.mic.is_none(), "fixture never opened a microphone");
     }
 }

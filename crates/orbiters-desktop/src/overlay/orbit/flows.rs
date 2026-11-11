@@ -796,3 +796,20 @@ fn the_song_s_picture_disappearing_paints_all_tools_again() {
     }
 
 }
+
+#[test]
+fn ask_streamed_snapshot_marks_the_page_for_repaint() {
+    use orbiters_n4n0::status::{N4n0Line, N4n0Who};
+    let mut person = Person::new();
+    person.around = Some(Around::QuickMenu);
+    person.turns(40);
+    person.panels.facts.sheet = Some(Sheet::Talk);
+    for words in ["It is", "It is sunny", "It is sunny and warm."] {
+        let snap = Arc::make_mut(&mut person.snap);
+        snap.n4n0.lines = vec![N4n0Line { who: N4n0Who::N4n0, text: words.into(), at_ms: 0, streaming: true }].into();
+        for panel in &mut person.panels.list { panel.dirty = false; }
+        person.panels.follow(&person.snap, 0);
+        assert!(person.panels.list.iter().any(|p| p.dirty), "each intermediate snapshot repaints");
+        assert_eq!(person.panels.facts.talk_lines.last().unwrap().1, words);
+    }
+}

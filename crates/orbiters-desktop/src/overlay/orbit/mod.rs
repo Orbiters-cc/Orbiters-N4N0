@@ -1273,6 +1273,8 @@ impl Panels {
     /// Opens `sheet` on the sheet, with `title`.
     fn open_sheet(&mut self, sheet: Sheet, title: &str, snap: &Snapshot) {
         let Some(place) = self.takeover_place else { return };
+        let ask_enter = sheet == Sheet::Talk && self.facts.sheet != Some(Sheet::Talk);
+        if self.facts.sheet == Some(Sheet::Talk) && sheet != Sheet::Talk { self.stop_talking(); }
         self.keep_screen();
         let size = place.rect.size() * self.sharp;
         let px = [size.x.round() as u32, size.y.round() as u32];
@@ -1280,6 +1282,7 @@ impl Panels {
             self.stage = Stage::new(px, self.worlds_here, &self.media);
         }
         self.facts.sheet = Some(sheet);
+        if ask_enter { self.backend.n4n0(N4n0Command::AskPage { open: true }); }
         self.facts.sheet_title = title.to_string();
         // As it was left, whichever way this comes back to it.
         let kept = self.kept.get(&(sheet, title.to_string())).copied().unwrap_or_default();
@@ -1327,6 +1330,7 @@ impl Panels {
 
     /// What is being said ends with its page: nobody should be listened to with no sign of it.
     fn stop_talking(&mut self) {
+        if self.facts.sheet == Some(Sheet::Talk) { self.backend.n4n0(N4n0Command::AskPage { open: false }); }
         if std::mem::take(&mut self.talking) {
             self.backend.n4n0(N4n0Command::Talk { down: false });
         }
@@ -2582,9 +2586,9 @@ impl Panels {
             }
             Action::TalkToggle => {
                 if !matches!(self.facts.talk, panels::TalkNow::Off(_)) {
-                    let down = !snap.n4n0.listening;
+                    let down = snap.n4n0.voice.automatic || !snap.n4n0.listening;
                     self.talking = down;
-                    self.backend.n4n0(N4n0Command::Talk { down });
+                    self.backend.n4n0(N4n0Command::AskTalk { down });
                 }
             }
             Action::NewConversation => self.backend.n4n0(N4n0Command::NewConversation),
@@ -2985,6 +2989,7 @@ fn type_hint(p: &egui::Painter, playing: Option<&str>) {
 
 impl Drop for Panels {
     fn drop(&mut self) {
+        self.stop_talking();
         self.release();
         if self.reported.is_some_and(|r| r.0) {
             self.backend.n4n0(N4n0Command::MenuState { open: false, dictation: false, keyboard: false });
@@ -2995,6 +3000,12 @@ impl Drop for Panels {
 /// Where talking with N4N0 stands, and why it cannot when it cannot.
 fn talk_now(snap: &Snapshot) -> panels::TalkNow {
     let settings = &snap.settings.n4n0;
+    if snap.n4n0.voice.readiness == orbiters_n4n0::status::VoiceReadiness::SignIn {
+        return panels::TalkNow::Off(mark("Sign in to Orbiters to talk to N4N0."));
+    }
+    if snap.n4n0.voice.readiness == orbiters_n4n0::status::VoiceReadiness::MicrophoneProblem {
+        return panels::TalkNow::Off(mark("N4N0's ears stopped."));
+    }
     if snap.n4n0.listening {
         return panels::TalkNow::Listening((snap.n4n0.voice.level * 20.0).round() / 20.0);
     }

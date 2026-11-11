@@ -692,7 +692,7 @@ fn script(rig: &mut Rig) {
             match sheet {
                 super::panels::Sheet::Worlds => { rig.panels.act(Action::Worlds, &rig.snap, &mut super::Pressed::default()); }
                 _ => {
-                    if sheet == super::panels::Sheet::Menu { rig.panels.stage.host.menu.page = orbiters_n4n0_core::menu::Menu::default().page; }
+                    if sheet == super::panels::Sheet::Menu { rig.panels.stage.host.menu.page = orbiters_n4n0_core::menu::Page::States; }
                     if sheet == super::panels::Sheet::Instances { rig.panels.stage.host.menu.page = orbiters_n4n0_core::menu::Page::Instances; }
                     if sheet == super::panels::Sheet::Results { rig.panels.stage.host.menu.page = orbiters_n4n0_core::menu::Page::Results; }
                     rig.panels.open_sheet(sheet, "", &rig.snap);

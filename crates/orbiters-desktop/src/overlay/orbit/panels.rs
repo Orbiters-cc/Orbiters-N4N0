@@ -3555,7 +3555,9 @@ fn camera_tile_back(p: &Painter, rect: Rect, hovered: bool, pressed: bool, lit: 
             p.rect_filled(rect, round, theme::mix(look::TILE, tint, if pressed { 0.62 } else if hovered { 0.55 } else { 0.42 }));
             p.rect_stroke(rect.shrink(0.75), round, Stroke::new(2.0, tint), egui::StrokeKind::Middle);
         }
-        None if off => p.rect_filled(rect, round, theme::alpha(look::TILE, 0.82)),
+        None if off => {
+            p.rect_filled(rect, round, theme::alpha(look::TILE, 0.82));
+        }
         None => {
             tile_back(p, rect, hovered, pressed, false);
             if hovered && !look::retro() {

@@ -3255,13 +3255,26 @@ fn draw(p: &Painter, zone: Zone, item: &Item, facts: &Facts, hovered: bool, pres
             let dim = facts.rec_stopping || (!live && facts.capture_busy);
             camera_tile_back(p, rect, hovered && !dim, pressed && !dim, live.then_some(tint), dim);
             if live {
-                // What a press does now is Stop: a square, the clock over it.
                 let top = rect.center().y - 9.0;
-                let words = if facts.rec_stopping {
-                    tr("Stopping…").to_string()
-                } else if facts.rec_starting {
-                    tr("Starting…").to_string()
+                if facts.rec_stopping || facts.rec_starting {
+                    // Starting or stopping: what it is doing as its name, a sign of it over that (a spinner while it saves, its square while it starts: a press stops it).
+                    if facts.rec_stopping {
+                        widgets::icon(p, pos2(rect.center().x, top), icons::CIRCLE_NOTCH, 20.0, look::MUTED);
+                    } else {
+                        p.rect_filled(Rect::from_center_size(pos2(rect.center().x, top), Vec2::splat(14.0)), look::radius(2.5), Color32::WHITE);
+                    }
+                    camera_label(p, rect, if facts.rec_stopping { tr("Stopping…") } else { tr("Starting…") }, if dim { look::MUTED } else { look::LABEL });
                 } else {
+                    // What a press does now is Stop: a square, the clock beside it over its name.
+                    let words = clock(facts.recording_seconds.unwrap_or(0));
+                    let font = look::font(13.0, weight::BOLD);
+                    let wide = p.layout_no_wrap(words.clone(), font.clone(), Color32::WHITE).size().x;
+                    let from = rect.center().x - (wide + 18.0) / 2.0;
+                    p.rect_filled(Rect::from_center_size(pos2(from + 5.5, top), Vec2::splat(11.0)), look::radius(2.0), Color32::WHITE);
+                    p.text(pos2(from + 18.0, top), Align2::LEFT_CENTER, words, font, Color32::WHITE);
+                    camera_label(p, rect, tr_ctx("stop recording", "Stop"), look::LABEL);
+                }
+            } else {
                     clock(facts.recording_seconds.unwrap_or(0))
                 };
                 let font = look::font(13.0, weight::BOLD);

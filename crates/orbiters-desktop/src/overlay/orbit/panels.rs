@@ -3275,18 +3275,6 @@ fn draw(p: &Painter, zone: Zone, item: &Item, facts: &Facts, hovered: bool, pres
                     camera_label(p, rect, tr_ctx("stop recording", "Stop"), look::LABEL);
                 }
             } else {
-                    clock(facts.recording_seconds.unwrap_or(0))
-                };
-                let font = look::font(13.0, weight::BOLD);
-                let words = fit(p, &words, &font, rect.width() - 30.0);
-                let wide = p.layout_no_wrap(words.clone(), font.clone(), Color32::WHITE).size().x;
-                let from = rect.center().x - (wide + 18.0) / 2.0;
-                p.rect_filled(Rect::from_center_size(pos2(from + 5.5, top), Vec2::splat(11.0)), look::radius(2.0), if dim { look::MUTED } else { Color32::WHITE });
-                p.text(pos2(from + 18.0, top), Align2::LEFT_CENTER, words, font, if dim { look::MUTED } else { Color32::WHITE });
-                if !facts.rec_stopping {
-                    camera_label(p, rect, tr_ctx("stop recording", "Stop"), look::LABEL);
-                }
-            } else {
                 let at = pos2(rect.center().x, rect.center().y - 9.0);
                 p.circle_stroke(at, 10.5, Stroke::new(2.0, if dim { theme::FG_4 } else { theme::alpha(tint, 0.6) }));
                 p.circle_filled(at, 6.5, if dim { theme::FG_4 } else { tint });

@@ -148,7 +148,8 @@ impl Group {
 
     pub fn cells(self) -> &'static [Zone] {
         match self {
-            Group::Pictures => &[Zone::BloomPeople, Zone::BloomWorld, Zone::BloomRecord],
+            // Its two 3D pictures: a recording starts beside VRChat's camera alone (Enzo, F15).
+            Group::Pictures => &[Zone::BloomPeople, Zone::BloomWorld],
             Group::Playing => &[Zone::BloomPrevious, Zone::BloomNext],
         }
     }
@@ -159,11 +160,20 @@ impl Group {
 pub enum Zone {
     /// Over a corner, while a sheet is up: takes the sheet and all with it away for a moment, to reach VRChat's own menus, and brings them back as they were.
     SheetPeek,
-    /// Tiles down the left of VRChat's camera panel, and what they say over it.
+    /// Around VRChat's camera panel, in its plane: a column of tiles beside it on the side with room (two 3D pictures, Record, the QR code), what they have to say
+    /// under it with a button when there is one to press, four corners round its picture while it looks for a code, and the page a code opened, over its top edge.
     CameraPeople,
     CameraWorld,
+    CameraRecord,
     CameraQr,
     CameraCaption,
+    CameraAct,
+    CameraScan,
+    CameraWebBar,
+    CameraWeb,
+    /// While a recording runs: its clock and Stop, under the wheel and under the wing (Enzo, F13). Nothing here starts one.
+    WheelStop,
+    QmStop,
     /// Straight up, where the eyes go first: 3D world search.
     WheelWorlds,
     WheelYouTube,
@@ -175,7 +185,6 @@ pub enum Zone {
     WheelPictures,
     BloomPeople,
     BloomWorld,
-    BloomRecord,
     BloomPrevious,
     BloomNext,
     /// What is pointed at, in words, above the ring. Nothing presses here.
@@ -219,17 +228,18 @@ impl Zone {
         Zone::WheelPictures,
         Zone::BloomPeople,
         Zone::BloomWorld,
-        Zone::BloomRecord,
         Zone::BloomPrevious,
         Zone::BloomNext,
         Zone::WheelCaption,
+        Zone::WheelStop,
     ];
     pub const WING: [Zone; 8] = [Zone::WingName, Zone::WingWorlds, Zone::WingYouTube, Zone::WingInstances, Zone::WingPictures, Zone::WingTalk, Zone::WingAll, Zone::WingPlaying];
-    pub const QUICK_MENU: [Zone; 9] =
-        [Zone::WingName, Zone::WingWorlds, Zone::WingYouTube, Zone::WingInstances, Zone::WingPictures, Zone::WingTalk, Zone::WingAll, Zone::WingPlaying, Zone::QmCaption];
+    pub const QUICK_MENU: [Zone; 10] =
+        [Zone::WingName, Zone::WingWorlds, Zone::WingYouTube, Zone::WingInstances, Zone::WingPictures, Zone::WingTalk, Zone::WingAll, Zone::WingPlaying, Zone::QmCaption, Zone::QmStop];
 
     /// The zones around a menu.
-    pub const CAMERA: [Zone; 4] = [Zone::CameraPeople, Zone::CameraWorld, Zone::CameraQr, Zone::CameraCaption];
+    pub const CAMERA: [Zone; 9] =
+        [Zone::CameraScan, Zone::CameraPeople, Zone::CameraWorld, Zone::CameraRecord, Zone::CameraQr, Zone::CameraCaption, Zone::CameraAct, Zone::CameraWebBar, Zone::CameraWeb];
 
     pub fn around(around: Around) -> &'static [Zone] {
         match around {
@@ -262,7 +272,6 @@ impl Zone {
             // One arc beside its parent, of one depth, as the ring is: short of the top, where the caption right over the ring lies.
             Zone::BloomPeople => Ring::bloom(285.0, 315.0),
             Zone::BloomWorld => Ring::bloom(255.0, 285.0),
-            Zone::BloomRecord => Ring::bloom(225.0, 255.0),
             Zone::BloomPrevious => Ring::bloom(90.0, 120.0),
             Zone::BloomNext => Ring::bloom(120.0, 150.0),
             _ => return None,
@@ -272,7 +281,7 @@ impl Zone {
     /// The second ring it belongs to.
     pub fn group(self) -> Option<Group> {
         match self {
-            Zone::BloomPeople | Zone::BloomWorld | Zone::BloomRecord => Some(Group::Pictures),
+            Zone::BloomPeople | Zone::BloomWorld => Some(Group::Pictures),
             Zone::BloomPrevious | Zone::BloomNext => Some(Group::Playing),
             _ => None,
         }
@@ -289,7 +298,13 @@ impl Zone {
 
     /// Nothing is pressed here: the pointer and a click pass through to what is under it.
     pub fn passes_clicks(self) -> bool {
-        matches!(self, Zone::WheelCaption | Zone::QmCaption | Zone::CameraCaption | Zone::WheelVeil | Zone::SheetHint)
+        matches!(self, Zone::WheelCaption | Zone::QmCaption | Zone::CameraCaption | Zone::CameraScan | Zone::WheelVeil | Zone::SheetHint)
+    }
+
+    /// A part that shows only while it has something to do (a recording to stop, a code being looked for, a page opened, a button to offer): it joins the menu's
+    /// parts and leaves them as that changes ([`super::Panels::set_open`]).
+    pub fn only_while_needed(self) -> bool {
+        matches!(self, Zone::WheelStop | Zone::QmStop | Zone::CameraAct | Zone::CameraScan | Zone::CameraWebBar | Zone::CameraWeb)
     }
 
     /// Its place in the menu's units from the menu's centre, y down: around the wheel in hundredths of its radius (a 1280 x 720 window's pixels, nearly), around the Quick
@@ -332,11 +347,25 @@ impl Zone {
             // Under the tab row, where VRChat's own tooltip for what lies under the pointer appears.
             Zone::SheetHint => r(-300.0, 268.0, 300.0, 302.0),
             Zone::SheetPeek => r(362.0, -300.0, 512.0, -268.0),
-            // In the panel's own units (410 x 220, from its middle): clear of its left edge, as its row of buttons goes off to the right.
-            Zone::CameraPeople => r(-301.0, -110.0, -215.0, -40.0),
-            Zone::CameraWorld => r(-301.0, -35.0, -215.0, 35.0),
-            Zone::CameraQr => r(-301.0, 40.0, -215.0, 110.0),
-            Zone::CameraCaption => r(-301.0, -152.0, 120.0, -116.0),
+            // In the panel's own units (its picture 410 x 220, from its middle, y down; VRChat's row of buttons hangs under it from about x -165 to 150, y 113 to 158):
+            // one column beside its left edge with a real gap, from the picture's top down to the foot of that row, mirrored on the right side ([`Placed::mirrored`]).
+            // The pictures and Record together, the QR code apart, level with VRChat's own buttons.
+            Zone::CameraPeople => camera_tile(0),
+            Zone::CameraWorld => camera_tile(1),
+            Zone::CameraRecord => camera_tile(2),
+            Zone::CameraQr => camera_tile(3),
+            // Under VRChat's row of buttons, from the column's outer edge: what the tiles have to say, and a button for it at its end.
+            Zone::CameraCaption => r(CAMERA_COLUMN_OUT, CAMERA_UNDER[0], 64.0, CAMERA_UNDER[1]),
+            Zone::CameraAct => r(72.0, CAMERA_UNDER[0], 296.0, CAMERA_UNDER[0] + 34.0),
+            // Corners just off the picture's own while a code is looked for: outside it, clear of the column and of VRChat's buttons.
+            Zone::CameraScan => r(-CAMERA_HALF[0] - CAMERA_SCAN_OUT, -CAMERA_HALF[1] - CAMERA_SCAN_OUT, CAMERA_HALF[0] + CAMERA_SCAN_OUT, CAMERA_HALF[1] + CAMERA_SCAN_OUT),
+            // Over the camera's top edge, never in front of it: its bar nearest the camera, the page above. Stood up on that edge in a headset ([`super::vr`]).
+            Zone::CameraWebBar => r(-CAMERA_HALF[0], CAMERA_WEB_BAR[0], CAMERA_HALF[0], CAMERA_WEB_BAR[1]),
+            Zone::CameraWeb => r(-CAMERA_HALF[0], CAMERA_WEB_BAR[0] - 6.0 - CAMERA_WEB_TALL, CAMERA_HALF[0], CAMERA_WEB_BAR[0] - 6.0),
+            // Right under the ring, whose foot is free in any window: in reach, and over nothing of VRChat's.
+            Zone::WheelStop => r(-78.0, 188.0, 78.0, 228.0),
+            // Under the wing's foot, as wide as it.
+            Zone::QmStop => r(362.0, 213.0, 524.0, 249.0),
             // N4N0's pages' own shape, 704 wide.
             Zone::Takeover => r(-352.0, -196.0, 352.0, 200.0),
             _ => unreachable!("the rings' cells return above"),
@@ -354,6 +383,29 @@ impl Zone {
             _ => None,
         }
     }
+}
+
+/// Half VRChat's camera's picture, in its units (`camera_track::PANEL_SIZE`).
+pub const CAMERA_HALF: [f32; 2] = [205.0, 110.0];
+/// The gap between the picture's edge and the column: about 13 mm at the panel's usual size, so that they never touch as tracking moves them a little.
+pub const CAMERA_GAP: f32 = 18.0;
+const CAMERA_TILE: [f32; 2] = [92.0, 60.0];
+/// The column's outer edge.
+pub const CAMERA_COLUMN_OUT: f32 = -CAMERA_HALF[0] - CAMERA_GAP - CAMERA_TILE[0];
+/// The line under VRChat's row of buttons (from, to).
+const CAMERA_UNDER: [f32; 2] = [166.0, 226.0];
+/// How far the scanning corners stand off the picture.
+const CAMERA_SCAN_OUT: f32 = 8.0;
+/// The page's bar over the camera's top edge (from, to), and how tall the page over it is: a phone's page, about 30 cm wide.
+pub const CAMERA_WEB_BAR: [f32; 2] = [-CAMERA_HALF[1] - 16.0 - 40.0, -CAMERA_HALF[1] - 16.0];
+const CAMERA_WEB_TALL: f32 = 470.0;
+
+/// One of the camera's tiles, from the top: the 3D pictures and Record together, the QR code a little apart.
+fn camera_tile(row: usize) -> Rect {
+    const GAP: f32 = 6.0;
+    let apart = if row == 3 { 14.0 - GAP } else { 0.0 };
+    let top = -CAMERA_HALF[1] + row as f32 * (CAMERA_TILE[1] + GAP) + apart;
+    Rect::from_min_size(pos2(CAMERA_COLUMN_OUT, top), vec2(CAMERA_TILE[0], CAMERA_TILE[1]))
 }
 
 /// A tile of the wing, in its column and row.
@@ -708,5 +760,61 @@ mod tests {
         assert!((large.rect.width() / small.rect.width() - 2.0).abs() < 0.02);
         // Within what whole pixels round away: a pixel is 1.33 units in the small window, on each side.
         assert!((large.logical() - small.logical()).length() < 2.7, "the same drawing");
+    }
+    /// Enzo (F18, IMG3 and IMG4): the camera's tiles are one column beside its picture with a real gap, never over the picture or VRChat's row of buttons under it, on
+    /// either side; what they say is under that row; the page a code opened is over the camera's top edge.
+    #[test]
+    fn the_camera_s_parts_keep_clear_of_the_camera() {
+        let picture = Rect::from_min_max(pos2(-CAMERA_HALF[0], -CAMERA_HALF[1]), pos2(CAMERA_HALF[0], CAMERA_HALF[1]));
+        // VRChat's buttons under its picture (Take Photo to its arrow), measured on `testdata_camera/camera-panel-752x417.jpg`, with a margin.
+        let buttons = Rect::from_min_max(pos2(-172.0, 110.0), pos2(158.0, 160.0));
+        for right in [false, true] {
+            let at = |zone: Zone| if right { in_units(zone).mirrored().rect } else { in_units(zone).rect };
+            for zone in Zone::CAMERA {
+                let r = at(zone);
+                if zone == Zone::CameraScan {
+                    // Round the picture, just off it: corners only are drawn.
+                    assert!(r.contains_rect(picture) && r.width() - picture.width() <= 20.0, "{r:?}");
+                    continue;
+                }
+                assert!(!r.intersects(picture), "{zone:?} over the camera's picture ({right})");
+                assert!(!r.intersects(buttons), "{zone:?} over VRChat's buttons ({right})");
+            }
+            let column = [Zone::CameraPeople, Zone::CameraWorld, Zone::CameraRecord, Zone::CameraQr];
+            for zone in column {
+                let r = at(zone);
+                let gap = if right { r.left() - CAMERA_HALF[0] } else { -CAMERA_HALF[0] - r.right() };
+                assert!(gap >= 15.0, "{zone:?}: a gap of {gap} units ({right})");
+                assert!(r.top() >= -CAMERA_HALF[1] && r.bottom() <= 160.0, "{zone:?} reaches past the camera's height: {r:?}");
+                assert!(r.right() < at(Zone::CameraScan).left() || r.left() > at(Zone::CameraScan).right(), "{zone:?} touches the scanning corners");
+            }
+            // One column, in order, none over another.
+            for pair in column.windows(2) {
+                assert!(at(pair[0]).bottom() < at(pair[1]).top(), "{pair:?}");
+            }
+            for zone in [Zone::CameraWebBar, Zone::CameraWeb] {
+                assert!(at(zone).bottom() <= -CAMERA_HALF[1] - 10.0, "{zone:?} is not over the camera's top edge");
+                assert!(at(zone).left() >= -CAMERA_HALF[0] - 1.0 && at(zone).right() <= CAMERA_HALF[0] + 1.0, "{zone:?} is wider than the camera");
+            }
+            assert!(at(Zone::CameraWebBar).top() > at(Zone::CameraWeb).bottom(), "the bar nearest the camera");
+            assert!(!at(Zone::CameraCaption).intersects(at(Zone::CameraAct)));
+        }
+    }
+
+    /// Enzo (F13): the wheel's Stop lies under the ring, clear of its cells, its second rings and VRChat's wheel.
+    #[test]
+    fn the_wheel_s_stop_is_clear_of_the_ring() {
+        let stop = Zone::WheelStop.units();
+        let cells: Vec<Ring> = Zone::WHEEL.iter().filter_map(|z| z.ring()).collect();
+        for i in 0..=20 {
+            for j in 0..=8 {
+                let p = pos2(stop.left() + stop.width() * i as f32 / 20.0, stop.top() + stop.height() * j as f32 / 8.0);
+                assert!(cells.iter().all(|c| !c.contains(p.to_vec2())), "{p:?} on a cell");
+                assert!(p.to_vec2().length() > 110.0, "{p:?} on VRChat's wheel");
+            }
+        }
+        for (w, h) in SIZES {
+            assert!(place(Zone::WheelStop, vec2(w, h)).is_some(), "{w}x{h}: no room under the ring");
+        }
     }
 }

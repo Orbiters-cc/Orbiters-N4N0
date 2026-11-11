@@ -172,7 +172,8 @@ impl RecordButton {
             } else {
                 theme::REC
             };
-            let color = anim::color(&ctx, id.with("glyph-color"), target, Spring::MORPH);
+            // Disabled, the glyph greys with its face: a bright red dot read as a button that works (the dashboard with nothing to stop, F15).
+            let color = theme::mix(anim::color(&ctx, id.with("glyph-color"), target, Spring::MORPH), theme::FG_4, disabled_k);
             let k = 1.0 - busy_k;
             let g = Rect::from_center_size(c, Vec2::splat(size * scale * (0.4 + 0.6 * k)));
             p.rect_filled(g, theme::radius(radius * scale * (0.4 + 0.6 * k)), theme::alpha(color, k));

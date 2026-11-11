@@ -717,12 +717,14 @@ fn session(args: &[String]) -> anyhow::Result<Ended> {
                 vr::event::TRACKED_DEVICE_ACTIVATED | vr::event::TRACKED_DEVICE_DEACTIVATED | vr::event::TRACKED_DEVICE_ROLE_CHANGED => {
                     poses.forget(&e);
                     devices.changed();
+                    if let Some(orbit)=t.orbit.as_mut() { orbit.invalidate_camera_tracking(); }
                 }
                 vr::event::PROPERTY_CHANGED => poses.forget(&e),
                 _ => {
                     // A recenter, room setup, another universe: walk boost ends its carry; its own previews' echoes
                     // change nothing.
                     if let Some(event) = walk::PlaySpaceEvent::from_event(&e) {
+                        if let Some(orbit)=t.orbit.as_mut() { orbit.invalidate_camera_tracking(); }
                         t.walk.play_space_event(&steamvr, event);
                     }
                 }

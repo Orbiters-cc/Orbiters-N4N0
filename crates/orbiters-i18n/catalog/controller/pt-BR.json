@@ -340,5 +340,8 @@
   "{path} is not a session in Orbiters - N4N0's sessions folder.": "{path} não é uma sessão da pasta de sessões do Orbiters - N4N0.",
   "{why} Discard them to export every splat as trained: Select splats in its 3D view can remove them again.": "{why} Descarte-as para exportar todos os splats como foram treinados: selecionando splats na visão 3D dela, você poderá removê-los de novo.",
   "file\u0004Small": "Pequeno",
+  "Record beside VRChat's camera": "Gravar ao lado da câmera do VRChat",
+  "Stopping…": "Parando…",
+  "VRChat did not confirm the capture avatar. Try again.": "O VRChat não confirmou o avatar de captura. Tente novamente.",
   "Orbiters did not answer for this world's feedback. It tries again by itself.": "O Orbiters não respondeu sobre o feedback deste mundo. Ele tenta de novo sozinho."
 }

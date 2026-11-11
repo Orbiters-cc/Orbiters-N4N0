@@ -11,6 +11,7 @@
 pub mod block;
 pub mod camera_frames;
 pub mod camera_track;
+pub mod camera_web;
 pub mod detect;
 #[cfg(windows)]
 pub mod desktop;
@@ -928,7 +929,22 @@ pub struct Panels {
     reported: Option<(bool, bool, bool)>,
     /// What plays's picture as last made, by its name: panels make their own textures of it.
     art: Option<(String, ColorImage)>,
+    /// The camera's tiles lie on its right ([`super::vr`]): what they say lines up on that side.
+    pub camera_right: bool,
+    /// When Stop was pressed: it says Stopping at once, and another press does nothing.
+    stop_asked: Option<Instant>,
+    /// Where the camera's panel is not seen yet: its tools show where it most likely is ([`super::vr`]).
+    pub camera_finding: bool,
+    /// The page a code found beside the camera opened over it, and which of the camera's scans found it.
+    web: Option<camera_web::CameraWeb>,
+    web_for: Option<u64>,
+    /// When the demo avatar was put on: said for a moment.
+    demo_done: Option<Instant>,
 }
+
+/// How long Stop says Stopping after a press while the service has not said so yet; how long the camera says the demo avatar was put on.
+const STOP_SAID_FOR: Duration = Duration::from_secs(4);
+const DEMO_DONE_SAID_FOR: Duration = Duration::from_secs(20);
 
 /// Where on the page the keyboard starts (N4N0's search page: `layout::KEY_ROWS_Y`, a little over its first row).
 const KEYS_TOP: f32 = 300.0;
@@ -1008,6 +1024,12 @@ impl Panels {
             show_keys: false,
             reported: None,
             art: None,
+            camera_right: false,
+            stop_asked: None,
+            camera_finding: false,
+            web: None,
+            web_for: None,
+            demo_done: None,
         }
     }
 
@@ -1203,6 +1225,8 @@ impl Panels {
             self.facts.sheet = None;
             return;
         }
+        // What has nothing to do now is not there: a Stop with no recording, the camera's scanning corners, its page, its button.
+        let places: Vec<Placed> = places.into_iter().filter(|p| !p.zone.only_while_needed() || self.needed(p.zone)).collect();
         let live = !snap.settings.reduce_motion;
         // Opened from the wheel, the sheet is all that shows: its cut-off cells would stick out from under it. Opened from the Quick Menu the wing goes too, for the eyes
         // and for the lasers (Enzo, 2026-11-11, after 2026-11-09's "the wing stays"): the sheet's head has the same tools as tabs, its Back and its close, and the wing
@@ -1606,6 +1630,11 @@ impl Panels {
             return;
         }
         let pace = (up.abs() - REST) / (1.0 - REST) * up.signum();
+        // The page over the camera, while the laser is on it: pushed up, what is lower comes into view.
+        if let Some(web) = self.web.as_mut().filter(|w| w.pointed()) {
+            web.scroll(-pace * 1400.0 * seconds);
+            return;
+        }
         match self.facts.sheet {
             Some(Sheet::Worlds) => {
                 if let Some(worlds) = self.stage.worlds.as_mut() {
@@ -1652,7 +1681,7 @@ impl Panels {
 
     /// A number key on the wheel: as a press on that cell, clockwise from the top.
     pub fn press_cell(&mut self, cell: usize, snap: &Snapshot) -> Pressed {
-        const CELLS: [Zone; 9] = [Zone::WheelWorlds, Zone::WheelYouTube, Zone::WheelPlaying, Zone::WheelAll, Zone::WheelInstances, Zone::WheelPictures, Zone::BloomPeople, Zone::BloomWorld, Zone::BloomRecord];
+        const CELLS: [Zone; 8] = [Zone::WheelWorlds, Zone::WheelYouTube, Zone::WheelPlaying, Zone::WheelAll, Zone::WheelInstances, Zone::WheelPictures, Zone::BloomPeople, Zone::BloomWorld];
         let Some(zone) = CELLS.get(cell) else { return Pressed::default() };
         // The second ring's keys while it is out, and only then.
         if !self.list.iter().any(|p| p.zone == *zone && p.shown) {
@@ -1671,7 +1700,76 @@ impl Panels {
         away_words(snap, &self.facts.note, self.facts.picture_mode)
     }
 
+    /// Whether a part that shows only while it has something to do has it now ([`Zone::only_while_needed`]).
+    fn needed(&self, zone: Zone) -> bool {
+        panels::needed(zone, &self.facts)
+    }
+
+    /// What the parts beside VRChat's camera show, besides its tiles.
+    fn camera_now(&self, snap: &Snapshot) -> panels::CameraNow {
+        use crate::controller::camera_tools::{Demo, Qr};
+        let tools = &snap.camera_tools;
+        let qr = match &tools.qr {
+            Qr::Looking => panels::CameraQr::Looking,
+            Qr::NoStream => panels::CameraQr::NoPicture(orbiters_i18n::tr(&orbiters_n4n0_core::qr::no_camera_note(snap.camera_open_said)).to_string()),
+            Qr::Error(why) => panels::CameraQr::NoPicture(orbiters_i18n::tr(why).to_string()),
+            // Found: its page opens over the camera, and the scan stops.
+            Qr::Off | Qr::Found { .. } => panels::CameraQr::Off,
+        };
+        // Offered only where it can be done: an avatar to put on, signed in to VRChat as the one playing, nothing being recorded (camera-core's rules).
+        let can = snap.can_switch_demo_avatar();
+        let demo = match &tools.demo {
+            _ if tools.demo_avatar.is_none() => None,
+            Demo::Busy => Some(panels::DemoSwitch::Busy),
+            Demo::Done => self.demo_done.filter(|at| at.elapsed() < DEMO_DONE_SAID_FOR).map(|_| panels::DemoSwitch::Done),
+            Demo::Error(why) if can => Some(panels::DemoSwitch::Failed(orbiters_i18n::tr(why).to_string())),
+            Demo::Idle if can => Some(panels::DemoSwitch::Offered),
+            _ => None,
+        };
+        let web = self.web.as_ref().map(camera_web::CameraWeb::facts);
+        panels::CameraNow { finding: self.camera_finding, kit: snap.worn_kit, demo, qr, web, on_the_right: self.camera_right }
+    }
+
+    /// The camera's parts are painted again: what they show changed.
+    fn camera_dirty(&mut self) {
+        for panel in self.list.iter_mut().filter(|p| Zone::CAMERA.contains(&p.zone)) {
+            panel.dirty = true;
+        }
+    }
+
+    /// Whether the laser is on the page over the camera: the stick scrolls it then.
+    pub fn web_pointed(&self) -> bool {
+        self.web.as_ref().is_some_and(camera_web::CameraWeb::pointed)
+    }
+
     pub fn follow(&mut self, snap: &Snapshot, library: u64) {
+        // A code found beside the camera: its page opens over the camera, once for each scan, and the camera stops looking (Enzo, F17).
+        if let crate::controller::camera_tools::Qr::Found { url } = &snap.camera_tools.qr {
+            if self.web_for != Some(snap.camera_tools.qr_generation) {
+                self.web_for = Some(snap.camera_tools.qr_generation);
+                self.web = Some(camera_web::CameraWeb::open(url));
+                self.backend.camera_qr(false);
+                self.camera_dirty();
+            }
+        }
+        // VRChat's camera closed: its page goes with it.
+        if self.web.is_some() && snap.camera_open_said == Some(false) {
+            self.web = None;
+            self.camera_dirty();
+        }
+        if self.web.as_mut().is_some_and(camera_web::CameraWeb::turn) {
+            for panel in self.list.iter_mut().filter(|p| matches!(p.zone, Zone::CameraWeb | Zone::CameraWebBar)) {
+                panel.dirty = true;
+            }
+        }
+        // The demo avatar put on: said for a moment.
+        if (snap.camera_tools.demo == crate::controller::camera_tools::Demo::Done) != self.demo_done.is_some() {
+            self.demo_done = (snap.camera_tools.demo == crate::controller::camera_tools::Demo::Done).then(Instant::now);
+        }
+        // A recording that is no longer running needs its Stop no more.
+        if self.stop_asked.is_some() && matches!(snap.capture.state, CaptureState::Idle) {
+            self.stop_asked = None;
+        }
         // Along what plays, now it was let go.
         if let Some(fraction) = self.seek_late.take() {
             let host = &mut self.stage.host;
@@ -1888,8 +1986,12 @@ impl Panels {
             let here = world.in_world.then(|| world.world_id.as_deref().zip(world.instance.as_deref()).map(|(w, i)| format!("{w}:{i}"))).flatten();
             visited_worlds(&menu.instances, now, &self.visit_pictures, here.as_deref())
         } else { Vec::new() };
+        let live = !snap.capture.photo_3d;
         Facts {
             recording,
+            rec_starting: live && snap.capture.state == CaptureState::Starting,
+            rec_stopping: live && (snap.capture.state == CaptureState::Stopping || (self.stop_asked.is_some_and(|at| at.elapsed() < STOP_SAID_FOR) && snap.capture.state != CaptureState::Idle)),
+            camera: self.camera_now(snap),
             recording_seconds: recording.then(|| snap.capture.stats.as_ref().map_or(0, |s| s.elapsed_s as u32)),
             capture_busy: !matches!(snap.capture.state, CaptureState::Idle),
             countdown: snap.n4n0.photo_countdown,
@@ -2124,6 +2226,11 @@ impl Panels {
                     panel.dirty = true;
                 }
             }
+        }
+        // On the page over the camera: where, on it.
+        let on_web = on.and_then(|(i, p)| self.list.get(i).filter(|panel| panel.zone == Zone::CameraWeb).map(|panel| (p, panel.logical)));
+        if let Some(web) = self.web.as_mut() {
+            web.point(on_web);
         }
         for (i, panel) in self.list.iter_mut().chain(self.takeover.iter_mut()).enumerate() {
             let hover = on.filter(|(at, _)| *at == i).and_then(|(_, p)| {
@@ -2559,12 +2666,31 @@ impl Panels {
                     self.backend.n4n0(crate::ipc::N4n0Command::Photo3DWhenCamera { seconds });
                 }
             }
+            // Beside VRChat's camera alone, whose picture it records (Enzo, F14 and F15): no other part has Record, and this one does nothing elsewhere.
             Action::Record => {
-                if self.facts.recording {
-                    self.backend.stop_capture();
-                } else if !self.facts.capture_busy {
-                    self.backend.start_capture();
+                if self.open == Some(Around::Camera) && !self.facts.capture_busy {
+                    self.backend.start_camera_recording();
+                } else {
+                    out.clicked = false;
                 }
+            }
+            // Stop only, never a start: pressed again while it stops, nothing.
+            Action::StopRecording => {
+                let live = !snap.capture.photo_3d && matches!(snap.capture.state, CaptureState::Starting | CaptureState::Recording | CaptureState::Paused);
+                if live && self.stop_asked.is_none_or(|at| at.elapsed() >= STOP_SAID_FOR) {
+                    self.stop_asked = Some(Instant::now());
+                    self.backend.stop_capture();
+                    for panel in self.list.iter_mut().chain(self.takeover.iter_mut()) {
+                        panel.dirty = true;
+                    }
+                } else {
+                    out.clicked = false;
+                }
+            }
+            // The camera's own scan: around the camera, no page (Enzo, F17).
+            Action::CameraQr => {
+                self.backend.camera_qr(self.facts.camera.qr == panels::CameraQr::Off);
+                self.camera_dirty();
             }
             Action::Page(target) => self.open_page(target, snap),
             // A previous instance's world: its page on the 3D worlds sheet (F10). Nothing is sent to VRChat: only the chips invite.
@@ -2715,12 +2841,40 @@ impl Panels {
                 out.hide = self.hidden;
                 self.release();
             }
+            // Asked for, never by itself: it waits for VRChat to have put it on and for the kit to be seen (camera-core).
+            Action::DemoAvatar => {
+                if snap.can_switch_demo_avatar() {
+                    self.backend.switch_demo_avatar();
+                } else {
+                    out.clicked = false;
+                }
+            }
+            // The page in the computer's browser: only when asked, here.
+            Action::WebOpen => {
+                if let Some(url) = self.web.as_ref().map(|w| w.url.clone()) {
+                    if let Err(e) = crate::controller::open_url(&url) {
+                        super::vr_log::line(&format!("camera page: the browser did not open: {e:#}")); // i18n: not shown (a log's line)
+                    }
+                }
+            }
+            Action::WebClose => {
+                self.web = None;
+                self.camera_dirty();
+            }
+            Action::WebPage => {
+                if let Some(web) = self.web.as_mut() {
+                    web.press();
+                }
+            }
             Action::Idle => {}
         }
     }
 
     /// The pointer's button went up.
     pub fn release(&mut self) {
+        if let Some(web) = self.web.as_mut() {
+            web.release();
+        }
         if let Some(held) = self.booster_held.take() {
             let snap = self.backend.view();
             let level = self.sheet_pointer.map_or(held, |p| panels::booster_level_at(p.x));
@@ -2791,6 +2945,20 @@ impl Panels {
             panel.dirty = false;
             panel.items = panels::items(panel.zone, panel.logical, &self.facts);
             let mut facts = self.facts.clone();
+            // The page over the camera: its texture made once, then given each new picture.
+            if let (Zone::CameraWeb, Some(web)) = (panel.zone, self.web.as_mut()) {
+                if let Some(image) = web.frame.as_ref() {
+                    let ctx = panel.canvas.ctx();
+                    let texture = panel.pictures.entry("web".to_string()).or_insert_with(|| ctx.load_texture("web", image.clone(), TextureOptions::LINEAR));
+                    if web.fresh {
+                        texture.set(image.clone(), TextureOptions::LINEAR);
+                        web.fresh = false;
+                    }
+                    if let Some(page) = facts.camera.web.as_mut() {
+                        page.picture = Some(texture.id());
+                    }
+                }
+            }
             if matches!(panel.zone, Zone::WheelPlaying | Zone::WingPlaying | Zone::QmStrip | Zone::WheelVeil | Zone::WheelCaption | Zone::QmCaption) {
                 if let Some((key, image)) = art {
                     let ctx = panel.canvas.ctx();

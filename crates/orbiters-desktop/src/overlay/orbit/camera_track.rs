@@ -10,6 +10,9 @@
 
 use orbiters_openvr::Matrix34;
 
+// The X/chevron pair only seeds recognition. A spread landmark homography and rigid-plane
+// reprojection determine the live pose; panel_in_room is retained solely for the older fixture tests.
+
 /// The panel in its own units, as a picture of it 410 across has them, from its middle: its X, and its chevron.
 pub const PANEL_X: [f32; 2] = [-181.0, -83.0];
 pub const PANEL_CHEVRON: [f32; 2] = [-8.0, 100.0];
@@ -47,6 +50,9 @@ const SUPPORT_SMALL: usize = 4;
 /// One frame's reading, in pixels of what was given.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Found {
+    pub perspective: Option<[[f32; 3]; 3]>,
+    pub residual_px: f32,
+    pub landmarks: Option<(usize, [([f32;2],[f32;2]);10])>,
     pub x: [f32; 2],
     pub chevron: [f32; 2],
     pub middle: [f32; 2],
@@ -64,6 +70,16 @@ impl Found {
         (self.x, self.chevron, self.middle) = (at(self.x), at(self.chevron), at(self.middle));
         self.across /= scale;
         self.tall /= scale;
+        self.residual_px /= scale;
+        if let Some((count,points)) = self.landmarks.as_mut() {
+            for (_,q) in points.iter_mut().take(*count) { *q=at(*q); }
+        }
+        if let Some(h) = self.perspective.as_mut() {
+            for k in 0..3 {
+                h[0][k] = h[0][k] / scale + by[0] * h[2][k];
+                h[1][k] = h[1][k] / scale + by[1] * h[2][k];
+            }
+        }
         self
     }
 
@@ -74,6 +90,7 @@ impl Found {
 
     /// Where a place on the panel in its units lies in the picture.
     pub fn at(&self, unit: [f32; 2]) -> [f32; 2] {
+        if let Some(h) = self.perspective { return project(h, unit); }
         [
             self.middle[0] + self.right[0] * unit[0] * self.across + self.down[0] * unit[1] * self.tall,
             self.middle[1] + self.right[1] * unit[0] * self.across + self.down[1] * unit[1] * self.tall,
@@ -314,9 +331,6 @@ fn look(light: &Light, needs: usize) -> Option<Found> {
             }
             // Seen straight on, the two say its size and how it leans.
             let lean = v[1].atan2(v[0]) - panel_angle;
-            if lean.abs() > LEANS_AT_MOST.to_radians() {
-                continue;
-            }
             let (s, co) = lean.sin_cos();
             let (right, down) = ([co, s], [-s, co]);
             // The chevron lies along the panel's right.
@@ -358,9 +372,12 @@ fn look(light: &Light, needs: usize) -> Option<Found> {
                 if support < needs {
                     continue;
                 }
+                let fitted = landmark_fit(&reading, &all, x.middle, c.middle);
+                if lean.abs() > LEANS_AT_MOST.to_radians() && fitted.is_none() { continue; }
+                let (perspective,residual_px,landmarks) = fitted.map_or((None,f32::INFINITY,None), |(h,e,p)| (Some(h),e,Some(p)));
                 let score = looks + support as f32 * 0.2 - (x_share - X_IS).abs() * 3.0 - (c_share - CHEVRON_IS).abs() * 2.0;
                 if best.as_ref().is_none_or(|b| score > b.0) {
-                    let found = Found { x: x.middle, chevron: c.middle, middle: reading.middle, right: reading.right, down: reading.down, across: reading.across, tall: reading.tall };
+                    let found = Found { perspective, residual_px, landmarks, x: x.middle, chevron: c.middle, middle: reading.middle, right: reading.right, down: reading.down, across: reading.across, tall: reading.tall };
                     best = Some((score, found));
                 }
             }
@@ -370,6 +387,158 @@ fn look(light: &Light, needs: usize) -> Option<Found> {
 }
 
 /// The panel in a picture of 4-byte pixels, whichever way round its colours are, or `None`.
+fn project(h: [[f32; 3]; 3], p: [f32; 2]) -> [f32; 2] {
+    let q = h.map(|r| r[0] * p[0] + r[1] * p[1] + r[2]);
+    [q[0] / q[2], q[1] / q[2]]
+}
+
+/// Least squares homography from independently located, spread landmarks. Reprojection is in pixels.
+pub fn fit(points: &[([f32; 2], [f32; 2])]) -> Option<[[f32; 3]; 3]> {
+    if points.len() < 5 { return None; }
+    let mut a = [[0.0f64; 9]; 8];
+    for &(p, q) in points {
+        let (x, y, u, v) = (p[0] as f64, p[1] as f64, q[0] as f64, q[1] as f64);
+        for row in [[x,y,1.,0.,0.,0.,-u*x,-u*y,u], [0.,0.,0.,x,y,1.,-v*x,-v*y,v]] {
+            for i in 0..8 { for j in 0..9 { a[i][j] += row[i] * row[j]; } }
+        }
+    }
+    for k in 0..8 {
+        let pivot = (k..8).max_by(|&i,&j| a[i][k].abs().total_cmp(&a[j][k].abs()))?;
+        a.swap(k,pivot);
+        if a[k][k].abs() < 1e-8 { return None; }
+        let d = a[k][k];
+        for j in k..9 { a[k][j] /= d; }
+        for i in 0..8 { if i != k { let d = a[i][k]; for j in k..9 { a[i][j] -= d * a[k][j]; } } }
+    }
+    let h = [[a[0][8] as f32,a[1][8] as f32,a[2][8] as f32], [a[3][8] as f32,a[4][8] as f32,a[5][8] as f32], [a[6][8] as f32,a[7][8] as f32,1.]];
+    let error = points.iter().map(|&(p,q)| { let r=project(h,p); (r[0]-q[0]).powi(2)+(r[1]-q[1]).powi(2) }).sum::<f32>() / points.len() as f32;
+    (error.is_finite() && error.sqrt() <= 2.5).then_some(h)
+}
+
+fn landmark_fit(r: &Reading, blobs: &[Blob], x: [f32;2], chevron: [f32;2]) -> Option<([[f32;3];3],f32,(usize,[([f32;2],[f32;2]);10]))> {
+    let mut points = vec![(PANEL_X,x),(PANEL_CHEVRON,chevron)];
+    // Fixed icon centres, rather than the variable slider thumbs or mode-dependent button labels.
+    for p in [[-154.,-84.],[-190.,36.],[-190.,54.],[-190.,74.],[-190.,93.],[-148.,131.],[-35.,133.],[82.,135.]] {
+        let expected = [r.middle[0]+r.right[0]*p[0]*r.across+r.down[0]*p[1]*r.tall, r.middle[1]+r.right[1]*p[0]*r.across+r.down[1]*p[1]*r.tall];
+        let distance = |b: &Blob| (b.middle[0]-expected[0]).hypot(b.middle[1]-expected[1]);
+        if let Some(b) = blobs.iter().filter(|b| distance(b) < 8.0*r.across.max(r.tall)).min_by(|a,b| distance(a).total_cmp(&distance(b))) {
+            if !points.iter().any(|(_,q)| *q == b.middle) { points.push((p,b.middle)); }
+        }
+    }
+    // Both horizontal and vertical spread are essential; the left icon column alone is degenerate.
+    if !points.iter().any(|(p,_)| p[0] > 50.) { return None; }
+    let h=fit(&points)?;
+    let residual=(points.iter().map(|&(p,q)| { let r=project(h,p); (r[0]-q[0]).powi(2)+(r[1]-q[1]).powi(2) }).sum::<f32>()/points.len() as f32).sqrt();
+    let mut landmarks=[([0.;2],[0.;2]);10];
+    for (out,p) in landmarks.iter_mut().zip(&points) { *out=*p; }
+    Some((h,residual,(points.len(),landmarks)))
+}
+
+/// Perspective pose using the actual eye projection, with rigid-plane consistency rejection.
+pub fn perspective_pose(found: &Found, size: [f32;2], mirror: &Mirror, eye: &Matrix34, width: f32) -> Option<(Matrix34,f32)> {
+    let h = found.perspective?;
+    let points: Vec<_> = [[-205.,-110.],[205.,-110.],[205.,110.],[-205.,110.],[0.,0.]].into_iter().map(|p| {
+        let q=project(h,p); let t=mirror.tangent(q[0]/size[0],q[1]/size[1]); (p,t)
+    }).collect();
+    let h=fit(&points)?;
+    let col = |k:usize| [h[0][k],-h[1][k],-h[2][k]];
+    let norm = |v:[f32;3]| v.iter().map(|x|x*x).sum::<f32>().sqrt();
+    let (a,b,t)=(col(0),col(1),col(2));
+    let (na,nb)=(norm(a),norm(b));
+    let dot: f32=a.iter().zip(b).map(|(x,y)|x*y).sum();
+    if na.min(nb) <= 0. || (na/nb-1.).abs()>0.25 || dot.abs()/(na*nb)>0.2 { return None; }
+    let unit=width/PANEL_SIZE[0];
+    let scale=2.*unit/(na+nb);
+    let right=a.map(|x|x/na);
+    let mut down=b.map(|x|x/nb);
+    let d: f32=right.iter().zip(down).map(|(x,y)|x*y).sum();
+    down=std::array::from_fn(|i| down[i]-d*right[i]);
+    let n=norm(down); let up=down.map(|x|-x/n);
+    let z=[right[1]*up[2]-right[2]*up[1],right[2]*up[0]-right[0]*up[2],right[0]*up[1]-right[1]*up[0]];
+    let position=t.map(|x|x*scale);
+    if !(0.15..=4.).contains(&-position[2]) { return None; }
+    // A texture homography can fit a sheared quadrilateral perfectly. Verify the recovered
+    // rigid plane itself through the eye projection before accepting it as a physical panel.
+    let mut errors=Vec::new();
+    let check = |p:[f32;2],q:[f32;2]| -> Option<f32> {
+        let v: [f32;3]=std::array::from_fn(|i| position[i]+right[i]*p[0]*unit-up[i]*p[1]*unit);
+        if -v[2] <= 0.0001 { return None; }
+        let tangent=[v[0]/-v[2],-v[1]/-v[2]];
+        let px=[(tangent[0]-mirror.from[0])/mirror.spans[0]*size[0],(tangent[1]-mirror.from[1])/mirror.spans[1]*size[1]];
+        Some((px[0]-q[0]).powi(2)+(px[1]-q[1]).powi(2))
+    };
+    if let Some((count,landmarks))=found.landmarks {
+        for (p,q) in landmarks.into_iter().take(count) { errors.push(check(p,q)?); }
+    } else {
+        for &(p,_) in &points { errors.push(check(p,project(found.perspective?,p))?); }
+    }
+    let rms=(errors.iter().sum::<f32>()/errors.len().max(1) as f32).sqrt();
+    if !rms.is_finite() || rms>2.5 || errors.iter().any(|e| *e>36.) { return None; }
+    let local=Matrix34 { m: std::array::from_fn(|i| [right[i],up[i],z[i],position[i]]) };
+    Some((then(eye,&local),unit))
+}
+
+/// Metric panel pose from a frame-coherent stereo pair. No physical panel width is assumed.
+pub fn stereo_pose(left:&Found,right:&Found,sizes:[[f32;2];2],mirrors:[Mirror;2],eyes:[Matrix34;2],head:&Matrix34) -> Option<(Matrix34,f32,f32)> {
+    let dot=|a:[f32;3],b:[f32;3]| (0..3).map(|i|a[i]*b[i]).sum::<f32>();
+    let norm=|v:[f32;3]| dot(v,v).sqrt();
+    let normalized=|v:[f32;3]| { let n=norm(v); v.map(|x|x/n.max(1e-9)) };
+    let samples=[[-205.,-110.],[205.,-110.],[205.,110.],[-205.,110.]];
+    let found=[left,right];
+    let mut points=[[0.;3];4];
+    for (out,p) in points.iter_mut().zip(samples) {
+        let mut origins=[[0.;3];2]; let mut rays=[[0.;3];2];
+        for k in 0..2 {
+            let q=project(found[k].perspective?,p);
+            let t=mirrors[k].tangent(q[0]/sizes[k][0],q[1]/sizes[k][1]);
+            let ray=[t[0],-t[1],-1.];
+            origins[k]=std::array::from_fn(|i|eyes[k].m[i][3]);
+            rays[k]=normalized(std::array::from_fn(|i| (0..3).map(|j|eyes[k].m[i][j]*ray[j]).sum()));
+        }
+        let w=std::array::from_fn(|i|origins[0][i]-origins[1][i]);
+        let b=dot(rays[0],rays[1]); let d=dot(rays[0],w); let e=dot(rays[1],w);
+        let denominator=1.-b*b;
+        if denominator<1e-5 { return None; }
+        let (s,t)=((b*e-d)/denominator,(e-b*d)/denominator);
+        if s<=0. || t<=0. { return None; }
+        let a:[f32;3]=std::array::from_fn(|i|origins[0][i]+s*rays[0][i]);
+        let b:[f32;3]=std::array::from_fn(|i|origins[1][i]+t*rays[1][i]);
+        if norm(std::array::from_fn(|i|a[i]-b[i]))>0.01 { return None; }
+        *out=std::array::from_fn(|i|(a[i]+b[i])*0.5);
+    }
+    let across:[f32;3]=std::array::from_fn(|i|(points[1][i]-points[0][i]+points[2][i]-points[3][i])*0.5);
+    let down:[f32;3]=std::array::from_fn(|i|(points[3][i]-points[0][i]+points[2][i]-points[1][i])*0.5);
+    let (width,height)=(norm(across),norm(down));
+    if width<=0. || height<=0. || (width/height/(410./220.)-1.).abs()>0.15 { return None; }
+    let r=normalized(across); let along=dot(r,down);
+    let u=normalized(std::array::from_fn(|i| -down[i]+r[i]*along));
+    let z=[r[1]*u[2]-r[2]*u[1],r[2]*u[0]-r[0]*u[2],r[0]*u[1]-r[1]*u[0]];
+    let centre:[f32;3]=std::array::from_fn(|i|points.iter().map(|p|p[i]).sum::<f32>()*0.25);
+    if !(0.15..=4.).contains(&-centre[2]) { return None; }
+    let unit=(width/410.+height/220.)*0.5;
+    let mut errors=Vec::new();
+    for k in 0..2 {
+        let inverse=undone(&eyes[k]);
+        let check=|p:[f32;2],q:[f32;2]| -> Option<f32> {
+            let world:[f32;3]=std::array::from_fn(|i|centre[i]+r[i]*p[0]*unit-u[i]*p[1]*unit);
+            let v:[f32;3]=std::array::from_fn(|i|inverse.m[i][3]+(0..3).map(|j|inverse.m[i][j]*world[j]).sum::<f32>());
+            if v[2]>=0. { return None; }
+            let t=[v[0]/-v[2],-v[1]/-v[2]];
+            let px=[(t[0]-mirrors[k].from[0])/mirrors[k].spans[0]*sizes[k][0],(t[1]-mirrors[k].from[1])/mirrors[k].spans[1]*sizes[k][1]];
+            Some((px[0]-q[0]).powi(2)+(px[1]-q[1]).powi(2))
+        };
+        if let Some((count,landmarks))=found[k].landmarks {
+            for (p,q) in landmarks.into_iter().take(count) { errors.push(check(p,q)?); }
+        } else {
+            for p in samples { errors.push(check(p,project(found[k].perspective?,p))?); }
+        }
+    }
+    let rms=(errors.iter().sum::<f32>()/errors.len().max(1) as f32).sqrt();
+    if !rms.is_finite() || rms>2.5 || errors.iter().any(|e|*e>36.) { return None; }
+    let local=Matrix34 {m:std::array::from_fn(|i|[r[i],u[i],z[i],centre[i]])};
+    Some((then(head,&local),unit,rms))
+}
+
 pub fn find(pixels: &[u8], width: usize, height: usize, stride: usize) -> Option<Found> {
     find_in(pixels, width, height, stride, [0, 0, width, height], width <= LOOKS_TWICE_UP_TO)
 }
@@ -464,8 +633,56 @@ pub fn side_with_room(at: impl Fn([f32; 2]) -> [f32; 2], sides: [f32; 4], was: S
     }
 }
 
+/// A column crossing the eye's projection plane cannot be placed on that side.
+pub fn side_projects(found: &Found, side: Side) -> bool {
+    let Some(h) = found.perspective else { return false; };
+    [side.sign()*215., side.sign()*330.].into_iter().all(|x| [-135.,135.].into_iter().all(|y| h[2][0]*x+h[2][1]*y+h[2][2] > 0.05))
+}
+
+/// A low landmark RMS alone does not bound extrapolation at an oblique panel edge.
+/// Check the recovered column against the observed edge before it can replace the detached fallback.
+pub fn column_clear(found: &Found, size: [f32;2], mirror: &Mirror, eye: &Matrix34, frame: &Matrix34, unit: f32, side: Side, clearance: f32) -> bool {
+    // Validate actual submitted opaque parts, rather than an oversized imaginary rectangle.
+    // The caption is above the panel; a separating-axis test handles both above and beside.
+    let panel = [[-205.,-110.],[205.,-110.],[205.,110.],[-205.,110.]].map(|p|found.at(p));
+    let inverse = undone(eye);
+    // The opaque parts beside and under the camera: not the scanning corners (round the picture by design, transparent but for their strokes off it) nor the page,
+    // which stands on the top edge in a plane of its own.
+    let opaque = [super::zones::Zone::CameraPeople, super::zones::Zone::CameraWorld, super::zones::Zone::CameraRecord, super::zones::Zone::CameraQr, super::zones::Zone::CameraCaption, super::zones::Zone::CameraAct];
+    let mut places: Vec<_> = opaque.into_iter().map(super::zones::in_units).collect();
+    if side == Side::Right { for placed in &mut places { *placed=placed.mirrored(); } }
+    super::vr::camera_column_out(&mut places,clearance,side==Side::Right);
+    places.iter().all(|placed| {
+        let quad=super::vr::Plane {frame:*frame,unit}.camera_quad(placed);
+        let local=then(&inverse,&quad.transform);
+        let mut tile=[[0.;2];4];
+        for (out,[x,y]) in tile.iter_mut().zip([[-1.,-1.],[1.,-1.],[1.,1.],[-1.,1.]]) {
+            let v:[f32;3]=std::array::from_fn(|i|local.m[i][3]+local.m[i][0]*x*quad.width/2.+local.m[i][1]*y*quad.height/2.);
+            if v[2]>=-0.0001 { return false; }
+            let t=[v[0]/-v[2],-v[1]/-v[2]];
+            *out=[(t[0]-mirror.from[0])/mirror.spans[0]*size[0],(t[1]-mirror.from[1])/mirror.spans[1]*size[1]];
+            if !out.iter().all(|x|x.is_finite()) { return false; }
+        }
+        if !panel.iter().flatten().all(|v|v.is_finite()) { return false; }
+        let separated=[&panel,&tile].into_iter().any(|polygon| (0..4).any(|i| {
+            let a=polygon[i]; let b=polygon[(i+1)%4];
+            let axis=[b[1]-a[1],a[0]-b[0]];
+            let range=|points:&[[f32;2];4]| points.iter().map(|p|p[0]*axis[0]+p[1]*axis[1]).fold((f32::INFINITY,f32::NEG_INFINITY),|(lo,hi),v|(lo.min(v),hi.max(v)));
+            let (a,b)=(range(&panel),range(&tile));
+            a.1 < b.0 || b.1 < a.0
+        }));
+        separated
+    })
+}
+
+/// Independent observed exclusions from both eyes are required for an opaque camera attachment.
+pub fn binocular_clear(observations: &[(Found,[f32;2],Mirror,Matrix34)], frame:&Matrix34, unit:f32, side:Side, clearance:f32) -> bool {
+    observations.len()==2 && observations.iter().all(|(found,size,mirror,eye)|column_clear(found,*size,mirror,eye,frame,unit,side,clearance))
+}
+
 /// Where a panel seen by the eye lies in the room, and what one of its units is there. `eye` is that eye's pose then. In the plane facing it, turned as it is seen turned, its middle moved so
 /// that the tiles on `side` lie next to its edge even when a turn makes it narrower.
+#[cfg(test)]
 pub fn panel_in_room(found: &Found, size: [f32; 2], mirror: &Mirror, eye: &Matrix34, panel_m: f32, side: Side) -> (Matrix34, f32) {
     let on = |p: [f32; 2]| mirror.tangent(p[0] / size[0], p[1] / size[1]);
     // A place on the picture is a place in tangents; so is a way along it, and how long.
@@ -502,6 +719,49 @@ pub struct Follow {
     /// The hand moves too fast for a picture, which is older than the hand's pose, to say anything of it.
     hand_moving: bool,
     grips: [bool; 2],
+}
+
+/// Session-only reopening estimate. No guessed pose is ever learned as a fitted pose.
+#[derive(Clone, Debug, Default)]
+pub struct Reopen {
+    context: Option<(Option<String>, Option<String>, bool, Option<u32>)>,
+    cached: Option<ReopenPose>,
+}
+#[derive(Clone, Copy, Debug)]
+struct ReopenPose {
+    anchor: Option<(usize, u32)>,
+    local: Matrix34,
+    pub unit: f32,
+    pub side: Side,
+    pub clearance: f32,
+}
+impl Reopen {
+    pub fn context(&mut self, world: Option<&str>, instance: Option<&str>, in_world: bool, pid: Option<u32>) -> bool {
+        if self.context.as_ref().is_some_and(|(w,i,inside,process)|w.as_deref()==world && i.as_deref()==instance && *inside==in_world && *process==pid) { return false; }
+        self.context=Some((world.map(str::to_owned),instance.map(str::to_owned),in_world,pid));
+        self.invalidate();
+        true
+    }
+    pub fn invalidate(&mut self) { self.cached=None; }
+    pub fn remember(&mut self, frame:Matrix34, unit:f32, side:Side, clearance:f32, head:&Matrix34, hands:[Option<(u32,Matrix34)>;2], held:Option<usize>) {
+        if self.context.as_ref().is_none_or(|(world,instance,in_world,pid)|world.is_none() || instance.is_none() || !in_world || pid.is_none()) { return; }
+        let (anchor,base)=match held {
+            Some(hand) => { let Some((device,pose))=hands[hand] else {return}; (Some((hand,device)),pose) },
+            None => (None,*head),
+        };
+        self.cached=Some(ReopenPose {anchor,local:then(&undone(&base),&frame),unit,side,clearance});
+    }
+    pub fn initial(&self, head:&Matrix34, hands:[Option<(u32,Matrix34)>;2], panel_width:f32) -> (Matrix34,f32,Side,f32,bool) {
+        if let Some(cached)=self.cached {
+            let base=match cached.anchor {
+                Some((hand,device)) => hands[hand].filter(|(now,_)| *now==device).map(|(_,pose)|pose),
+                None => Some(*head),
+            };
+            if let Some(base)=base { return (then(&base,&cached.local),cached.unit,cached.side,cached.clearance,true); }
+        }
+        // Uncalibrated first-use estimate, explicitly provisional until visual fitting.
+        (super::super::floating::space::before_eyes(head,0.65,0.22),panel_width/PANEL_SIZE[0],Side::Left,0.,false)
+    }
 }
 
 /// How fast what shows goes to where it should, per second.
@@ -599,33 +859,63 @@ impl Follow {
     }
 
     /// What a look saw, in the room.
-    pub fn seen(&mut self, frame: Matrix34, unit: f32) {
+    pub fn seen(&mut self, frame: Matrix34, unit: f32) -> bool {
         let local = self.local(&frame);
         let Some((wanted, wanted_unit)) = self.wanted else {
             self.at = Some((local, unit));
             self.wanted = Some((local, unit));
-            return;
+            return true;
         };
         if self.hand_moving {
-            return;
+            return false;
         }
         let far = apart(&wanted, &local);
         if far > JUMPS_M {
             if self.unsure.is_some_and(|(was, _)| apart(&was, &frame) <= JUMPS_M) {
                 self.unsure = None;
-                self.at = Some((local, unit));
                 self.wanted = Some((local, unit));
+                return true;
             } else {
                 self.unsure = Some((frame, unit));
             }
-            return;
+            return false;
         }
         self.unsure = None;
-        if far < LOOK_SAYS_NOTHING_M && turned_apart(&wanted, &local) < 2f32.to_radians() {
-            return;
+        if far < LOOK_SAYS_NOTHING_M && turned_apart(&wanted, &local) < 2f32.to_radians() && (unit/wanted_unit-1.).abs()<0.01 {
+            return true;
         }
         let k = if far > CLEARLY_OFF_M { LOOK_CORRECTS } else { LOOK_NUDGES };
         self.wanted = Some((towards(&wanted, &local, k), wanted_unit + (unit - wanted_unit) * k));
+        true
+    }
+
+    /// First validated attachment: settle from the provisional place without waiting for a second look.
+    pub fn attach(&mut self, frame:Matrix34, unit:f32) {
+        if self.at.is_none() { self.seen(frame,unit); }
+        self.wanted=Some((self.local(&frame),unit));
+        self.unsure=None;
+    }
+    pub fn held_hand(&self) -> Option<usize> { self.held.map(|(hand,_)|hand) }
+
+    /// Check the pose that will actually be submitted, including hand movement and smoothing.
+    /// A target change can be adopted directly only when its complete hull passes the same guard.
+    pub fn safe_display(&mut self, placed: Option<(Matrix34,f32)>, clear: impl Fn(&Matrix34,f32)->bool) -> Option<(Matrix34,f32)> {
+        if let Some((frame,unit)) = placed.filter(|(frame,unit)| clear(frame,*unit)) { return Some((frame,unit)); }
+        let (frame,unit) = self.wanted?;
+        let frame = self.in_room(&frame);
+        if !clear(&frame,unit) { return None; }
+        self.at = Some((self.local(&frame),unit));
+        Some((frame,unit))
+    }
+
+    pub fn awaiting_confirmation(&self) -> bool { self.unsure.is_some() }
+
+    pub fn settled(&self) -> bool {
+        self.at.zip(self.wanted).is_some_and(|((at,unit),(wanted,wanted_unit))| apart(&at,&wanted)<0.01 && turned_apart(&at,&wanted)<2f32.to_radians() && (unit/wanted_unit-1.).abs()<0.01)
+    }
+
+    pub fn can_bind_hand(&self) -> bool {
+        self.is_held() || (self.settled() && !self.awaiting_confirmation())
     }
 
     pub fn clear(&mut self) {
@@ -883,7 +1173,311 @@ mod tests {
     }
 
     fn straight_found(at: impl Fn([f32; 2]) -> [f32; 2], per_pixel: f32) -> Found {
-        Found { x: at(PANEL_X), chevron: at(PANEL_CHEVRON), middle: at([0.0, 0.0]), right: [1.0, 0.0], down: [0.0, 1.0], across: per_pixel, tall: per_pixel }
+        Found { perspective: None, residual_px: 0., landmarks: None, x: at(PANEL_X), chevron: at(PANEL_CHEVRON), middle: at([0.0, 0.0]), right: [1.0, 0.0], down: [0.0, 1.0], across: per_pixel, tall: per_pixel }
+    }
+
+    #[test]
+    fn review_reopening_is_immediate_and_reuses_the_fitted_holding_hand() {
+        for hand in [0,1] {
+            let mut reopen=Reopen::default(); reopen.context(Some("world"),Some("1"),true,Some(7));
+            let head=STILL;
+            let initial=reopen.initial(&head,[None;2],0.3);
+            assert!(!initial.4);
+            assert!((initial.0.m[2][3]+0.65).abs()<0.001);
+            assert!((initial.0.m[1][3]-(head.m[1][3]-0.22)).abs()<0.001);
+            let mut old_hand=STILL; old_hand.m[0][3]=0.2;
+            let mut panel=old_hand; panel.m[2][3]=-0.4;
+            let mut hands=[None;2]; hands[hand]=Some((10+hand as u32,old_hand));
+            reopen.remember(panel,0.001,Side::Right,17.,&head,hands,Some(hand));
+            let mut moved=old_hand; moved.m[0][3]+=0.5;
+            // Include a rotation, so this proves a controller-relative transform rather than a copied offset.
+            moved.m[0][0]=0.; moved.m[0][2]=1.; moved.m[2][0]=-1.; moved.m[2][2]=0.;
+            hands[hand]=Some((10+hand as u32,moved));
+            let (got,unit,side,gap,reused)=reopen.initial(&head,hands,0.9);
+            let wanted=then(&moved,&then(&undone(&old_hand),&panel));
+            assert!(reused && apart(&got,&wanted)<0.0001 && turned_apart(&got,&wanted)<0.001);
+            assert_eq!((unit,side,gap),(0.001,Side::Right,17.));
+            hands[hand]=Some((99,moved));
+            assert!(!reopen.initial(&head,hands,0.3).4,"a replaced controller cannot inherit the old hand's calibration");
+            assert!(!reopen.initial(&head,[None;2],0.3).4);
+        }
+    }
+    #[test]
+    fn review_reopening_unheld_uses_head_and_invalidates_on_context_and_tracking_changes() {
+        let mut reopen=Reopen::default(); reopen.context(Some("world"),Some("1"),true,Some(7));
+        let mut panel=STILL; panel.m[2][3]=-0.5;
+        reopen.remember(panel,0.001,Side::Left,12.,&STILL,[None;2],None);
+        let mut head=STILL; head.m[0][3]=0.4;
+        assert!((reopen.initial(&head,[None;2],0.3).0.m[0][3]-0.4).abs()<0.0001);
+        assert!(!reopen.context(Some("world"),Some("1"),true,Some(7)));
+        assert!(reopen.initial(&head,[None;2],0.3).4);
+        for (world,instance,in_world,pid) in [(Some("new"),Some("1"),true,Some(7)),(Some("world"),Some("2"),true,Some(7)),(Some("world"),Some("1"),false,Some(7)),(Some("world"),Some("1"),true,Some(8))] {
+            reopen.context(Some("world"),Some("1"),true,Some(7));
+            reopen.remember(panel,0.001,Side::Left,12.,&STILL,[None;2],None);
+            assert!(reopen.initial(&head,[None;2],0.3).4);
+            assert!(reopen.context(world,instance,in_world,pid));
+            assert!(!reopen.initial(&head,[None;2],0.3).4);
+            reopen.remember(panel,0.001,Side::Left,12.,&STILL,[None;2],None);
+        }
+        reopen.invalidate();
+        assert!(!reopen.initial(&head,[None;2],0.3).4,"recenter and play-space events clear reuse");
+    }
+    #[test]
+    fn review_unknown_session_context_cannot_be_remembered_as_calibration() {
+        let mut reopen=Reopen::default();
+        reopen.remember(STILL,0.001,Side::Left,0.,&STILL,[None;2],None);
+        assert!(!reopen.initial(&STILL,[None;2],0.3).4);
+        reopen.context(None,None,false,None);
+        reopen.remember(STILL,0.001,Side::Left,0.,&STILL,[None;2],None);
+        assert!(!reopen.initial(&STILL,[None;2],0.3).4);
+    }
+
+    #[test]
+    fn review_first_fit_settles_from_provisional_and_guard_checks_each_submitted_step() {
+        let mut follow=Follow::default();
+        let (initial,unit,_,_,_)=Reopen::default().initial(&STILL,[None;2],0.3);
+        follow.seen(initial,unit);
+        let mut target=initial; target.m[0][3]+=0.3;
+        follow.attach(target,unit);
+        assert!(!follow.awaiting_confirmation());
+        let first=follow.step(1./90.,[None;2],[false;2],[None;2]).unwrap();
+        assert!(apart(&first.0,&initial)>0. && apart(&first.0,&target)>0.);
+        let shown=follow.safe_display(Some(first),|frame,_|apart(frame,&target)<0.0001).unwrap();
+        assert!(apart(&shown.0,&target)<0.0001,"unsafe crossing adopts the validated endpoint without sliding across the panel");
+    }
+
+    #[test]
+    fn review_a_visible_close_panel_at_sixty_degrees_accepts_its_actual_tiles() {
+        let (sn,cs)=60f32.to_radians().sin_cos(); let unit=0.5/410.;
+        let pose=Matrix34 {m:[[1.,0.,0.,0.],[0.,cs,-sn,1.5],[0.,sn,cs,-0.2]]};
+        let at=|p:[f32;2]| {let v=[p[0]*unit,-cs*p[1]*unit,-0.2-sn*p[1]*unit]; [v[0]/-v[2],-v[1]/-v[2]]};
+        let points:Vec<_>=[[-205.,-110.],[205.,-110.],[205.,110.],[-205.,110.],[0.,0.]].into_iter().map(|p|(p,at(p))).collect();
+        let found=Found {perspective:fit(&points),..straight_found(|p|p,1.)};
+        let mirror=Mirror {from:[0.,0.],spans:[1.,1.]};
+        assert!([Side::Left,Side::Right].into_iter().any(|side|column_clear(&found,[1.,1.],&mirror,&STILL,&pose,unit,side,0.012/unit)));
+    }
+
+    #[test]
+    fn review_fit_acceptance_sweep() {
+        let mut total=0; let mut fitted=0; let mut ordinary_total=0; let mut ordinary_fitted=0;
+        for pitch in [-60f32,-40.,-20.,0.,20.,40.,60.] { for yaw in [-60f32,-40.,-20.,0.,20.,40.,60.] { for roll in [-45f32,0.,45.] { for distance in [0.15,0.3,0.65] { for width in [0.2,0.3,0.5] {
+            let (sp,cp)=pitch.to_radians().sin_cos(); let (sy,cy)=yaw.to_radians().sin_cos(); let (sr,cr)=roll.to_radians().sin_cos();
+            let r=[cy*cr,cp*sr+sp*sy*cr,sp*sr-cp*sy*cr]; let u=[-cy*sr,cp*cr-sp*sy*sr,sp*cr+cp*sy*sr];
+            let unit=width/410.;
+            let at=|p:[f32;2]| { let v:[f32;3]=std::array::from_fn(|i|r[i]*p[0]*unit-u[i]*p[1]*unit-if i==2 {distance} else {0.}); [v[0]/-v[2],-v[1]/-v[2]] };
+            // Only physically visible camera panels belong in this acceptance denominator.
+            if [[-205.,-110.],[205.,-110.],[205.,110.],[-205.,110.]].into_iter().any(|p| distance-r[2]*p[0]*unit+u[2]*p[1]*unit <= 0.001) {continue;}
+            total+=1;
+            let ordinary=distance>=0.3 && width<=0.3;
+            if ordinary { ordinary_total+=1; }
+            let points:Vec<_>=[[-205.,-110.],[205.,-110.],[205.,110.],[-205.,110.],[0.,0.],[82.,135.]].into_iter().map(|p|(p,at(p))).collect();
+            let found=Found {perspective:fit(&points),..straight_found(|p|p,1.)};
+            let mirror=Mirror {from:[0.,0.],spans:[1.,1.]};
+            if let Some((pose,unit))=perspective_pose(&found,[1.,1.],&mirror,&STILL,width) {
+                if [Side::Left,Side::Right].into_iter().any(|side|column_clear(&found,[1.,1.],&mirror,&STILL,&pose,unit,side,0.012/unit)) { fitted+=1; if ordinary { ordinary_fitted+=1; } }
+            }
+        }}}}}
+        eprintln!("REVIEW SWEEP: total={total}, fitted={fitted}, provisional={}",total-fitted);
+        eprintln!("REVIEW ORDINARY SWEEP: total={ordinary_total}, fitted={ordinary_fitted}, provisional={}",ordinary_total-ordinary_fitted);
+        assert_eq!(ordinary_fitted,ordinary_total,"ordinary hand-held tilts through sixty degrees must not lose valid fits");
+        assert!(fitted>0);
+    }
+
+    #[test]
+    fn review_both_eyes_must_clear_the_submitted_hulls() {
+        let size=[1000.,1000.]; let mirror=mirror(); let unit=PANEL_M/410.;
+        let pose=Matrix34 {m:[[1.,0.,0.,0.],[0.,1.,0.,1.5],[0.,0.,1.,-0.5]]};
+        let observations:Vec<_>=[-0.032f32,0.032].into_iter().map(|x| {
+            let mut eye=STILL; eye.m[0][3]=x;
+            let scale=unit/0.5*500.;
+            let found=Found {perspective:Some([[scale,0.,500.-x/0.5*500.],[0.,scale,500.],[0.,0.,1.]]),..straight_found(|p|p,1.)};
+            (found,size,mirror,eye)
+        }).collect();
+        assert!(!binocular_clear(&observations[..1],&pose,unit,Side::Left,0.));
+        assert!(binocular_clear(&observations,&pose,unit,Side::Left,0.));
+        let mut wrong=observations.clone();
+        wrong[1].0.perspective.as_mut().unwrap()[0][2]-=80.;
+        assert!(!binocular_clear(&wrong,&pose,unit,Side::Left,0.));
+    }
+
+    #[test]
+    fn review_displayed_intermediate_pose_never_crosses_the_observed_camera() {
+        let size=[1000.,1000.]; let mirror=mirror();
+        let scale=PANEL_M/410./0.5*500.;
+        let found=Found {perspective:Some([[scale,0.,500.],[0.,scale,500.],[0.,0.,1.]]),..straight_found(|p|[500.+p[0]*scale,500.+p[1]*scale],scale)};
+        let (pose,unit)=perspective_pose(&found,size,&mirror,&STILL,PANEL_M).unwrap();
+        let mut bad=pose; bad.m[0][3]+=0.3;
+        let mut follow=Follow::default();
+        follow.seen(bad,unit); follow.seen(pose,unit); follow.seen(pose,unit);
+        for side in [Side::Left,Side::Right,Side::Left] {
+            for _ in 0..90 {
+                let raw=follow.step(1./90.,[None;2],[false;2],[None;2]);
+                let shown=follow.safe_display(raw,|frame,unit|column_clear(&found,size,&mirror,&STILL,frame,unit,side,0.));
+                if let Some((frame,unit))=shown { assert!(column_clear(&found,size,&mirror,&STILL,&frame,unit,side,0.)); }
+            }
+        }
+        assert!(Follow::default().safe_display(None,|_,_|true).is_none());
+    }
+
+    #[test]
+    fn perspective_ground_truth_recovers_tilted_plane_and_separates_tiles() {
+        for pitch in [-60f32, -25., 0., 40., 65.] {
+            for yaw in [-55f32,0.,55.] {
+                for roll in [-45f32,0.,70.] {
+                    for distance in [0.3,0.7,1.8] {
+                        for width in [0.2,0.3,0.5] {
+                            let (sp,cp)=pitch.to_radians().sin_cos();
+                            let (sy,cy)=yaw.to_radians().sin_cos();
+                            let (sr,cr)=roll.to_radians().sin_cos();
+                            let right=[cy*cr,cp*sr+sp*sy*cr,sp*sr-cp*sy*cr];
+                            let up=[-cy*sr,cp*cr-sp*sy*sr,sp*cr+cp*sy*sr];
+                            let unit=width/410.;
+                            let tangent=|p:[f32;2]| {
+                                let v: [f32;3]=std::array::from_fn(|i| right[i]*p[0]*unit-up[i]*p[1]*unit-if i==2 {distance} else {0.});
+                                [v[0]/-v[2],-v[1]/-v[2]]
+                            };
+                            let pts:Vec<_>=[[-205.,-110.],[205.,-110.],[205.,110.],[-205.,110.],[0.,0.],[82.,135.]].into_iter().map(|p|(p,tangent(p))).collect();
+                            let Some(h)=fit(&pts) else { panic!("ground truth fit"); };
+                            let found=Found { perspective:Some(h), ..straight_found(|p|p,1.) };
+                            let mirror=Mirror {from:[0.,0.],spans:[1.,1.]};
+                            let (pose,got_unit)=perspective_pose(&found,[1.,1.],&mirror,&STILL,width).expect("physical plane");
+                            assert!((pose.m[2][3]+distance).abs()<0.002);
+                            assert!((got_unit-unit).abs()<1e-6);
+                            for i in 0..3 {
+                                assert!((pose.m[i][0]-right[i]).abs()<0.0001, "recovered right axis differs from ground truth");
+                                assert!((pose.m[i][1]-up[i]).abs()<0.0001, "recovered up axis differs from ground truth");
+                                let wanted=STILL.m[i][3]-if i==2 {distance} else {0.};
+                                assert!((pose.m[i][3]-wanted).abs()<0.002, "recovered position differs from ground truth");
+                            }
+                            for side in [-1.,1.] {
+                                let which = if side < 0. { Side::Left } else { Side::Right };
+                                if !side_projects(&found,which) { continue; }
+                                for zone in [super::super::zones::Zone::CameraPeople,super::super::zones::Zone::CameraWorld,super::super::zones::Zone::CameraQr] {
+                                    let placed=super::super::zones::in_units(zone);
+                                    let placed=if side>0. {placed.mirrored()} else {placed};
+                                    let quad=super::super::vr::Plane {frame:pose,unit:got_unit}.camera_quad(&placed);
+                                    let edge0=tangent([side*205.,-110.]);
+                                    let edge1=tangent([side*205.,110.]);
+                                    let centre=tangent([0.,0.]);
+                                    let cross=|p:[f32;2]| (edge1[0]-edge0[0])*(p[1]-edge0[1])-(edge1[1]-edge0[1])*(p[0]-edge0[0]);
+                                    for sx in [-1.,1.] { for sy in [-1.,1.] {
+                                        let v: [f32;3]=std::array::from_fn(|i| quad.transform.m[i][3]+quad.transform.m[i][0]*sx*quad.width/2.+quad.transform.m[i][1]*sy*quad.height/2.-STILL.m[i][3]);
+                                        assert!(v[2]<0.);
+                                        assert!(cross([v[0]/-v[2],-v[1]/-v[2]])*cross(centre)<0., "submitted camera quad crosses the panel edge: {pitch} {yaw} {roll} {distance} {width} {side} {zone:?} ({sx},{sy})");
+                                    } }
+                                }
+                                // Tile hull and panel hull have a separating line at their common plane's edge,
+                                // preserved by perspective for positive depth, including both horizontal sides.
+                                for y in [-110.,0.,110.] {
+                                    for tile_x in [side*215.,side*301.] {
+                                    let q=tangent([tile_x,y]);
+                                    let edge0=tangent([side*205.,-110.]);
+                                    let edge1=tangent([side*205.,110.]);
+                                    let centre=tangent([0.,0.]);
+                                    let cross=|p:[f32;2]| (edge1[0]-edge0[0])*(p[1]-edge0[1])-(edge1[1]-edge0[1])*(p[0]-edge0[0]);
+                                    assert!(cross(q)*cross(centre)<0.);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert!(fit(&[([0.,0.],[0.,0.]);5]).is_none());
+    }
+    #[test]
+    fn a_sheared_texture_is_not_a_rigid_camera_panel() {
+        let found=Found { perspective:Some([[1.,0.18,500.],[0.,1.,500.],[0.,0.,1.]]), ..straight_found(|p|p,1.) };
+        let mirror=Mirror { from:[-1.,-1.],spans:[2.,2.] };
+        assert!(perspective_pose(&found,[1000.,1000.],&mirror,&STILL,PANEL_M).is_none());
+    }
+
+    #[test]
+    fn a_low_residual_does_not_authorize_a_column_that_crosses_the_observed_edge() {
+        let size=[1000.,1000.];
+        let mirror=mirror();
+        let scale=PANEL_M/410./0.5*500.;
+        let found=Found { perspective:Some([[scale,0.,500.],[0.,scale,500.],[0.,0.,1.]]), ..straight_found(|p|[500.+p[0]*scale,500.+p[1]*scale],scale) };
+        let (pose,unit)=perspective_pose(&found,size,&mirror,&STILL,PANEL_M).unwrap();
+        assert!(column_clear(&found,size,&mirror,&STILL,&pose,unit,Side::Left,0.));
+        assert!(column_clear(&found,size,&mirror,&STILL,&pose,unit,Side::Right,0.));
+        let mut bad=pose;
+        bad.m[0][3]-=0.03;
+        assert!(!column_clear(&found,size,&mirror,&STILL,&bad,unit,Side::Right,0.));
+        bad.m[0][3]+=0.06;
+        assert!(!column_clear(&found,size,&mirror,&STILL,&bad,unit,Side::Left,0.));
+    }
+
+    #[test]
+    fn the_uncertainty_clearance_must_not_push_the_column_through_the_eye_plane() {
+        let unit=PANEL_M/410.;
+        let (s,c)=70f32.to_radians().sin_cos();
+        let frame=Matrix34 {m:[[c,0.,-s,0.],[0.,1.,0.,1.5],[s,0.,c,-0.3]]};
+        let size=[1000.,1000.]; let mirror=mirror();
+        let pts:Vec<_>=[[-205.,-110.],[205.,-110.],[205.,110.],[-205.,110.],[0.,0.]].into_iter().map(|p| {
+            let v=[c*p[0]*unit,-p[1]*unit,s*p[0]*unit-0.3];
+            (p,[(v[0]/-v[2]+1.)*500.,(-v[1]/-v[2]+1.)*500.])
+        }).collect();
+        let found=Found {perspective:Some(fit(&pts).unwrap()),..straight_found(|p|p,1.)};
+        assert!(column_clear(&found,size,&mirror,&STILL,&frame,unit,Side::Right,0.));
+        assert!(!column_clear(&found,size,&mirror,&STILL,&frame,unit,Side::Right,200.));
+    }
+
+    #[test]
+    fn stereo_measures_scale_with_asymmetric_eyes_and_rejects_mismatches() {
+        let sizes=[[1200.,1000.];2];
+        let mirrors=[Mirror {from:[-0.85,-1.1],spans:[2.2,2.]},Mirror {from:[-1.3,-0.9],spans:[2.2,2.]}];
+        for pitch in [-50f32,0.,50.] { for yaw in [-50f32,0.,50.] { for roll in [-60f32,0.,60.] {
+            for distance in [0.4,0.8,1.8] { for width in [0.2,0.3,0.5] {
+                let (sp,cp)=pitch.to_radians().sin_cos(); let (sy,cy)=yaw.to_radians().sin_cos(); let (sr,cr)=roll.to_radians().sin_cos();
+                let r=[cy*cr,cp*sr+sp*sy*cr,sp*sr-cp*sy*cr];
+                let u=[-cy*sr,cp*cr-sp*sy*sr,sp*cr+cp*sy*sr];
+                let (s,c)=0.06f32.sin_cos();
+                let eyes=[Matrix34 {m:[[c,0.,s,-0.032],[0.,1.,0.,0.],[-s,0.,c,0.]]},Matrix34 {m:[[c,0.,-s,0.032],[0.,1.,0.,0.],[s,0.,c,0.]]}];
+                let unit=width/410.;
+                let observations:[Found;2]=std::array::from_fn(|k| {
+                    let points:Vec<_>=[[-205.,-110.],[205.,-110.],[205.,110.],[-205.,110.],[0.,0.],[82.,135.]].into_iter().map(|p| {
+                        let world:[f32;3]=std::array::from_fn(|i|r[i]*p[0]*unit-u[i]*p[1]*unit+if i==2 {-distance} else {0.});
+                        let inverse=undone(&eyes[k]);
+                        let v:[f32;3]=std::array::from_fn(|i|inverse.m[i][3]+(0..3).map(|j|inverse.m[i][j]*world[j]).sum::<f32>());
+                        let t=[v[0]/-v[2],-v[1]/-v[2]];
+                        (p,[(t[0]-mirrors[k].from[0])/mirrors[k].spans[0]*sizes[k][0],(t[1]-mirrors[k].from[1])/mirrors[k].spans[1]*sizes[k][1]])
+                    }).collect();
+                    Found {perspective:Some(fit(&points).unwrap()),..straight_found(|p|p,1.)}
+                });
+                let (pose,measured,_)=stereo_pose(&observations[0],&observations[1],sizes,mirrors,eyes,&STILL).expect("frame-coherent physical stereo plane");
+                assert!((pose.m[2][3]+distance).abs()<0.005,"{pitch} {yaw} {roll} {distance} {width}: {pose:?}");
+                assert!((measured*410.-width).abs()<0.003);
+                let mut wrong=observations[1];
+                let mut h=wrong.perspective.unwrap();
+                for j in 0..3 { h[1][j]+=40.*h[2][j]; }
+                wrong.perspective=Some(h);
+                assert!(stereo_pose(&observations[0],&wrong,sizes,mirrors,eyes,&STILL).is_none());
+            } }
+        } } }
+    }
+
+    #[test]
+    fn a_metric_size_change_is_not_discarded_as_pose_jitter() {
+        let mut follow=Follow::default();
+        follow.seen(at(0.),0.001);
+        follow.seen(at(0.),0.002);
+        assert!(!follow.settled());
+        for _ in 0..100 {
+            follow.seen(at(0.),0.002);
+            follow.step(0.1,[None;2],[false;2],NOBODY);
+        }
+        assert!((follow.step(0.1,[None;2],[false;2],NOBODY).unwrap().1-0.002).abs()<0.00002);
+    }
+
+    #[test]
+    fn real_camera_fixtures_supply_spread_landmarks() {
+        for picture in headset_pictures() {
+            let found=find(&picture.pixels,picture.width,picture.height,picture.width*4).expect("camera candidate");
+            assert!(found.perspective.is_some(),"camera candidate did not produce a spread fit: {found:?}");
+            assert!(found.landmarks.is_some_and(|(count,_)|count>=5));
+        }
     }
 
     fn mirror() -> Mirror {
@@ -921,7 +1515,7 @@ mod tests {
             let (s, c) = lean.to_radians().sin_cos();
             let (right, down) = ([c, s], [-s, c]);
             let at = |p: [f32; 2]| [px + (p[0] * right[0] + p[1] * down[0]) * per_pixel, py + (p[0] * right[1] + p[1] * down[1]) * per_pixel];
-            let found = Found { x: at(PANEL_X), chevron: at(PANEL_CHEVRON), middle: at([0.0, 0.0]), right, down, across: per_pixel, tall: per_pixel };
+            let found = Found { perspective: None, residual_px: 0., landmarks: None, x: at(PANEL_X), chevron: at(PANEL_CHEVRON), middle: at([0.0, 0.0]), right, down, across: per_pixel, tall: per_pixel };
             for panel_m in [0.2, 0.3, 0.45] {
                 for side in [Side::Left, Side::Right] {
                     let (frame, unit) = panel_in_room(&found, size, &eye, &STILL, panel_m, side);
@@ -966,7 +1560,7 @@ mod tests {
         let size = [1000.0, 1000.0];
         let per_pixel = PANEL_M / PANEL_SIZE[0] / 0.5 * 500.0;
         let at = |p: [f32; 2]| [500.0 + (p[0] * right[0] + p[1] * down[0]) * per_pixel, 700.0 + (p[0] * right[1] + p[1] * down[1]) * per_pixel];
-        let found = Found { x: at(PANEL_X), chevron: at(PANEL_CHEVRON), middle: at([0.0, 0.0]), right, down, across: per_pixel, tall: per_pixel };
+        let found = Found { perspective: None, residual_px: 0., landmarks: None, x: at(PANEL_X), chevron: at(PANEL_CHEVRON), middle: at([0.0, 0.0]), right, down, across: per_pixel, tall: per_pixel };
         let (frame, _) = panel_in_room(&found, size, &mirror(), &STILL, PANEL_M, Side::Left);
         assert!(frame.m[1][0] < -0.3, "the panel's right goes down: {:?}", frame.m);
         assert!(frame.m[1][3] < 1.5, "below the eye: {:?}", frame.m);
@@ -1002,10 +1596,28 @@ mod tests {
             }
         }
         assert!((follow.step(0.011, [None; 2], [false; 2], NOBODY).unwrap().0.m[0][3] - 0.02).abs() < 0.008);
-        // Two looks agreeing it is elsewhere: it flew, so it is there at once.
+        // Two agreeing looks change the target; the rendered plane settles without teleporting.
         follow.seen(at(1.0), 0.001);
         follow.seen(at(1.0), 0.001);
-        assert_eq!(follow.step(0.011, [None; 2], [false; 2], NOBODY).unwrap().0.m[0][3], 1.0);
+        let first = follow.step(0.011, [None; 2], [false; 2], NOBODY).unwrap().0.m[0][3];
+        assert!(first > 0.02 && first < 0.2);
+        for _ in 0..180 { follow.step(0.011, [None; 2], [false; 2], NOBODY); }
+        assert!((follow.step(0.011, [None; 2], [false; 2], NOBODY).unwrap().0.m[0][3] - 1.).abs() < 0.001);
+    }
+    #[test]
+    fn a_far_fit_remains_provisional_until_its_target_is_adopted() {
+        let mut follow=Follow::default();
+        assert!(follow.seen(at(0.),0.001));
+        assert!(follow.settled());
+        assert!(!follow.seen(at(1.),0.001));
+        assert!(follow.awaiting_confirmation());
+        assert!(!follow.can_bind_hand());
+        assert!(follow.seen(at(1.),0.001));
+        assert!(!follow.awaiting_confirmation());
+        assert!(!follow.settled() && !follow.can_bind_hand());
+        assert!(follow.step(0.011,[None;2],[false;2],NOBODY).unwrap().0.m[0][3]<0.2);
+        for _ in 0..180 { follow.step(0.011,[None;2],[false;2],NOBODY); }
+        assert!(follow.settled() && follow.can_bind_hand());
     }
 
     /// Enzo: "use the tracking of the controller that grabbed it + the headset tracking ... until the user drops it".

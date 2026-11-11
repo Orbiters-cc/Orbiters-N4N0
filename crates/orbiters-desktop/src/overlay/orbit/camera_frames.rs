@@ -2,7 +2,8 @@
 //!
 //! The compositor's picture of the eye comes first: what it covers is known from SteamVR, so nothing has to be guessed to place the tiles. Only around the last place while it is seen, ten
 //! times a second; all of it four times a second while it is not. If it cannot be read, or `camera_use_window` asks for it, VRChat's own window instead, by Windows Graphics Capture, which
-//! `Tune` says the share of. Dropped, it costs nothing, and it waits for its thread, which uses the SteamVR client. The picture goes no further than the reading of it.
+//! `Tune` says the share of. Closing signals the reader without waiting or logging on the overlay turn. OrbitVr retains it until it finishes, and joins any remainder at teardown before
+//! the borrowed SteamVR client dies. The picture goes no further than the reading of it.
 
 use super::camera_track::{self, Found};
 use orbiters_i18n::mark;
@@ -26,6 +27,15 @@ pub struct Seen {
     pub size: [f32; 2],
     pub source: Source,
     pub at: Instant,
+    pub right: Option<RightSeen>,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct RightSeen {
+    pub found: Found,
+    pub size: [f32;2],
+    pub at: Instant,
+    pub frame_index: u32,
 }
 
 /// What it reads from, and how.
@@ -83,8 +93,21 @@ impl CameraWatch {
         let (seen, stop) = (Arc::new(Mutex::new(None)), Arc::new(AtomicBool::new(false)));
         let health = Arc::new(Mutex::new(Health::default()));
         let (s, st, h) = (seen.clone(), stop.clone(), health.clone());
-        let thread = std::thread::Builder::new().name("camera panel".into()).spawn(move || run(&s, &st, &h, from)).ok(); // i18n: not shown (a thread's name)
-        Self { health, began: Instant::now(), seen, stop, thread }
+        let began = Instant::now();
+        let thread = std::thread::Builder::new().name("camera panel".into()).spawn(move || { // i18n: not shown (thread name)
+            run(&s, &st, &h, from);
+            let health = *h.lock().unwrap_or_else(|e| e.into_inner());
+            note(&format!("{:?}: {} looks, {} found the panel, over {} s", health.source, health.looks, health.finds, began.elapsed().as_secs())); // i18n: not shown (diagnostics)
+        }).ok();
+        Self { health, began, seen, stop, thread }
+    }
+
+    pub fn stop(&self) { self.stop.store(true, Ordering::Relaxed); }
+    pub fn finished(&self) -> bool { self.thread.as_ref().is_none_or(|t| t.is_finished()) }
+    /// Only during teardown (before the borrowed SteamVR client dies), or after finished().
+    pub fn finish(&mut self) {
+        self.stop();
+        if let Some(thread) = self.thread.take() { let _ = thread.join(); }
     }
 
     /// Why no tile can show, as far as reading goes: for Settings, which translates it.
@@ -101,12 +124,8 @@ impl CameraWatch {
 
 impl Drop for CameraWatch {
     fn drop(&mut self) {
-        self.stop.store(true, Ordering::Relaxed);
-        if let Some(thread) = self.thread.take() {
-            let _ = thread.join();
-        }
-        let health = *self.health.lock().unwrap_or_else(|e| e.into_inner());
-        note(&format!("{:?}: {} looks, {} found the panel, over {} s", health.source, health.looks, health.finds, self.began.elapsed().as_secs())); // i18n: not shown (a log's line)
+        // OrbitVr retains unfinished readers and calls finish before its borrowed Client can die.
+        self.stop();
     }
 }
 
@@ -128,7 +147,7 @@ const LOOK_WHOLE_EVERY: Duration = Duration::from_millis(250);
 const EYE_TRIES: u32 = 8;
 
 /// One look on a picture read: `area` is where it is in the whole.
-fn looked(pixels: &[u8], width: usize, height: usize, stride: usize, offset: [f32; 2], whole: [usize; 2], last: Option<Found>, seen: &Mutex<Option<Seen>>, health: &Mutex<Health>, source: Source, at: Instant) -> Option<Found> {
+fn looked(pixels: &[u8], width: usize, height: usize, stride: usize, offset: [f32; 2], whole: [usize; 2], last: Option<Found>, seen: &Mutex<Option<Seen>>, health: &Mutex<Health>, source: Source, at: Instant, right: Option<RightSeen>) -> Option<Found> {
     let in_part = pixels.len() < whole[0] * whole[1] * 4 && stride == width * 4 && width < whole[0];
     let found = match last {
         // Around the last place in what was read, unless what was read is that already.
@@ -136,6 +155,9 @@ fn looked(pixels: &[u8], width: usize, height: usize, stride: usize, offset: [f3
         _ => camera_track::find_in(pixels, width, height, stride, [0, 0, width, height], width <= 1400),
     };
     let found = found.map(|f| f.shifted(offset));
+    if let Some(found) = found {
+        note(&format!("landmarks: ns={}, captured={:?}, source={:?}, fit={:?}", orbiters_core::clock::now_ns(), at, source, found)); // i18n: not shown (diagnostics)
+    }
     let mut h = health.lock().unwrap_or_else(|e| e.into_inner());
     h.framed = Some(at);
     h.looks = h.looks.saturating_add(1);
@@ -143,7 +165,7 @@ fn looked(pixels: &[u8], width: usize, height: usize, stride: usize, offset: [f3
         h.found = Some(at);
         h.finds = h.finds.saturating_add(1);
         drop(h);
-        *seen.lock().unwrap_or_else(|e| e.into_inner()) = Some(Seen { found, size: [whole[0] as f32, whole[1] as f32], source, at });
+        *seen.lock().unwrap_or_else(|e| e.into_inner()) = Some(Seen { found, size: [whole[0] as f32, whole[1] as f32], source, at, right });
     }
     found
 }
@@ -178,6 +200,7 @@ fn run(seen: &Mutex<Option<Seen>>, stop: &AtomicBool, health: &Mutex<Health>, fr
             Ok(reader) => {
                 health.lock().unwrap_or_else(|e| e.into_inner()).source = Some(Source::Eye);
                 let (mut errors, mut last, mut said) = (0, None, false);
+                let mut last_right: Option<(Found,[u32;2])>=None;
                 while !stop.load(Ordering::Relaxed) && errors < EYE_TRIES {
                     let began = Instant::now();
                     // Around the last place while it is seen.
@@ -185,7 +208,27 @@ fn run(seen: &Mutex<Option<Seen>>, stop: &AtomicBool, health: &Mutex<Health>, fr
                         let a = camera_track::around(&f, whole[0] as usize, whole[1] as usize);
                         (a[2] > 0 && a[3] > 0).then_some([a[0] as u32, a[1] as u32, a[2] as u32, a[3] as u32])
                     });
-                    match reader.read_part(mirror, Eye::Left, area) {
+                    let frame_before=mirror.frame_index();
+                    let left=reader.read_part(mirror, Eye::Left, area);
+                    // Only acquire stereo after a left-eye candidate. Read both eyes before CPU
+                    // recognition, and accept metric correspondence only within one compositor frame.
+                    let right_at=Instant::now();
+                    let right_picture=last.and_then(|_| {
+                        let area=last_right.map(|(f,size)| {
+                            let a=camera_track::around(&f,size[0] as usize,size[1] as usize);
+                            [a[0] as u32,a[1] as u32,a[2] as u32,a[3] as u32]
+                        });
+                        reader.read_part(mirror,Eye::Right,area).ok()
+                    });
+                    let frame_after=mirror.frame_index();
+                    let right=right_picture.and_then(|picture| {
+                        let found=camera_track::find(&picture.rgba,picture.width as usize,picture.height as usize,picture.width as usize*4)
+                            .map(|f|f.shifted([picture.from[0] as f32,picture.from[1] as f32]));
+                        last_right=found.map(|f|(f,picture.whole));
+                        if frame_before.is_none() || frame_before!=frame_after { return None; }
+                        found.map(|found|RightSeen {found,size:[picture.whole[0] as f32,picture.whole[1] as f32],at:right_at,frame_index:frame_after.unwrap()})
+                    });
+                    match left {
                         Ok(picture) => {
                             errors = 0;
                             let whole = picture.whole;
@@ -196,7 +239,8 @@ fn run(seen: &Mutex<Option<Seen>>, stop: &AtomicBool, health: &Mutex<Health>, fr
                                 keep(&picture.rgba, picture.width as usize, picture.height as usize, picture.width as usize * 4, Source::Eye, &mut kept);
                             }
                             let offset = [picture.from[0] as f32, picture.from[1] as f32];
-                            let found = looked(&picture.rgba, picture.width as usize, picture.height as usize, picture.width as usize * 4, offset, [whole[0] as usize, whole[1] as usize], None, seen, health, Source::Eye, began);
+                            if let Some(right)=right { note(&format!("stereo frame {}: left {:?}, right {:?}, landmarks {:?}",right.frame_index,began,right.at,right.found)); } // i18n: not shown (diagnostics)
+                            let found = looked(&picture.rgba, picture.width as usize, picture.height as usize, picture.width as usize * 4, offset, [whole[0] as usize, whole[1] as usize], None, seen, health, Source::Eye, began, right);
                             last = found.map(|f| (f, whole));
                         }
                         Err(e) => {
@@ -243,7 +287,7 @@ fn run_on_window(seen: &Mutex<Option<Seen>>, stop: &AtomicBool, health: &Mutex<H
                             if keep_frames {
                                 keep(game, client[0] as usize, client[1] as usize, stride, Source::Window, kept);
                             }
-                            last = looked(game, client[0] as usize, client[1] as usize, stride, [0.0, 0.0], [client[0] as usize, client[1] as usize], last, seen, health, Source::Window, began);
+                            last = looked(game, client[0] as usize, client[1] as usize, stride, [0.0, 0.0], [client[0] as usize, client[1] as usize], last, seen, health, Source::Window, began, None);
                         }
                     }
                     std::thread::sleep(LOOK_EVERY.saturating_sub(began.elapsed()));
@@ -262,6 +306,29 @@ fn run_on_window(seen: &Mutex<Option<Seen>>, stop: &AtomicBool, health: &Mutex<H
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn retired_readers_are_joined_before_the_owner_finishes() {
+        use super::*;
+        let (release,wait)=std::sync::mpsc::channel();
+        let thread=std::thread::spawn(move || { let _=wait.recv_timeout(Duration::from_secs(1)); });
+        let mut watch=CameraWatch { health:Arc::new(Mutex::new(Health::default())),began:Instant::now(),seen:Arc::new(Mutex::new(None)),stop:Arc::new(AtomicBool::new(false)),thread:Some(thread) };
+        watch.stop();
+        assert!(!watch.finished());
+        release.send(()).unwrap();
+        watch.finish();
+        assert!(watch.finished() && watch.thread.is_none());
+    }
+    #[test]
+    fn closing_does_not_wait_for_a_reader() {
+        use super::*;
+        let (release, wait) = std::sync::mpsc::channel();
+        let thread = std::thread::spawn(move || { let _ = wait.recv_timeout(Duration::from_secs(1)); });
+        let watch = CameraWatch { health: Arc::new(Mutex::new(Health::default())), began: Instant::now(), seen: Arc::new(Mutex::new(None)), stop: Arc::new(AtomicBool::new(false)), thread: Some(thread) };
+        let began = Instant::now();
+        drop(watch);
+        assert!(began.elapsed() < Duration::from_millis(150));
+        release.send(()).unwrap();
+    }
     use super::*;
     use std::time::Duration;
 

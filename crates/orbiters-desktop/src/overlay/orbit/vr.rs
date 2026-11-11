@@ -88,9 +88,10 @@ impl MenuButtons {
 
     /// VRChat's camera opened: its wheel goes then (Enzo).
     pub fn camera_opened(&mut self) {
-        if matches!(self.open, Open::Wheel(_)) {
-            self.open = Open::Closed;
-        }
+        self.open = Open::Closed;
+        self.press = None;
+        self.closed_ahead = None;
+        self.toggle = None;
     }
 
     /// VRChat's Quick Menu to toggle now, on which hand, once.
@@ -312,7 +313,7 @@ const SHEET_OVER_THE_TABS: f32 = 9.0;
 
 /// Where a part lies in a headset, from where it does on a screen.
 pub fn clear_of_sheet(mut placed: Placed, sheet_up: bool) -> Placed {
-    if Zone::WING.contains(&placed.zone) || placed.zone == Zone::QmCaption {
+    if Zone::WING.contains(&placed.zone) || matches!(placed.zone, Zone::QmCaption | Zone::QmStop) {
         let side = if placed.rect.center().x < 0.0 { -1.0 } else { 1.0 };
         placed.rect = placed.rect.translate(egui::vec2(side * if sheet_up { WING_OFF_A_SHEET } else { WING_OFF_ITS_PANEL }, 0.0));
     } else if matches!(placed.zone, Zone::Takeover | Zone::SheetBack | Zone::SheetPeek) {
@@ -495,6 +496,10 @@ pub struct Plane {
 }
 
 impl Plane {
+    /// Camera tools share the detected panel plane. No shell depth offset or radial spring
+    /// may move their hull back over the panel at a grazing angle.
+    pub fn camera_quad(&self, placed: &Placed) -> Quad { self.quad(placed,0.0,0.0) }
+
     /// Where a panel's quad is, at `back` units toward the plane's centre (its spring).
     pub fn quad(&self, placed: &Placed, back: f32, near: f32) -> Quad {
         let c = placed.rect.center();
@@ -508,7 +513,7 @@ impl Plane {
         let (x, y) = (c.x - way.x * back, c.y - way.y * back);
         // The wing turns towards who looks about its inner edge, as VRChat's own side panels do (round 10's judges: flat beside an angled My Profile, it read as
         // pasted in front rather than a neighbour).
-        if Zone::WING.contains(&placed.zone) || placed.zone == Zone::QmCaption {
+        if Zone::WING.contains(&placed.zone) || matches!(placed.zone, Zone::QmCaption | Zone::QmStop) {
             let side = if x < 0.0 { -1.0 } else { 1.0 };
             let hinge = side * WING_HINGE;
             let out = x - hinge;
@@ -520,6 +525,38 @@ impl Plane {
         }
         Quad { transform: space::offset(&self.frame, [x * self.unit, -y * self.unit, near]), width: placed.rect.width() * self.unit, height: placed.rect.height() * self.unit }
     }
+}
+
+/// The plane of the page a code opened, over VRChat's camera: hinged on the camera's top edge and stood up as far as it can be towards upright, so that it reads as
+/// a page however the camera is held, and lies over the camera and never in front of it (Enzo, F17). Upright already, the camera's own plane. Its units go from that
+/// edge: a zone's place there is from the camera's middle, moved by [`zones::CAMERA_HALF`] (`on_camera_top`).
+pub fn camera_top_plane(camera: &Plane) -> Plane {
+    let (y, z) = (space::axis(&camera.frame, 1), space::axis(&camera.frame, 2));
+    let up = [0.0, 1.0, 0.0];
+    // A camera upside down keeps its own plane: a page flipped over it would read upside down.
+    let turn = space::dot(z, up).atan2(space::dot(y, up)).clamp(-CAMERA_PAGE_STANDS, CAMERA_PAGE_STANDS);
+    let (s, c) = turn.sin_cos();
+    let edge = space::offset(&camera.frame, [0.0, zones::CAMERA_HALF[1] * camera.unit, 0.0]);
+    let hinge = Matrix34 { m: [[1.0, 0.0, 0.0, 0.0], [0.0, c, -s, 0.0], [0.0, s, c, 0.0]] };
+    Plane { frame: space::compose(&edge, &hinge), unit: camera.unit }
+}
+
+/// How far the page over the camera turns up from the camera's plane: about upright from a camera lying flat, short of folding over one held upside down.
+const CAMERA_PAGE_STANDS: f32 = 1.4;
+
+/// The camera's column, and what it says under the camera, moved out by what the fit is unsure of beyond the 10 units its gap already allowed for it
+/// (camera-core's clearance is measured from that older gap). The scanning corners and the page stay on the camera.
+pub fn camera_column_out(places: &mut [Placed], clearance: f32, right: bool) {
+    let out = (clearance + 10.0 - zones::CAMERA_GAP).max(0.0) * if right { 1.0 } else { -1.0 };
+    for placed in places.iter_mut().filter(|p| matches!(p.zone, Zone::CameraPeople | Zone::CameraWorld | Zone::CameraRecord | Zone::CameraQr | Zone::CameraCaption | Zone::CameraAct)) {
+        placed.rect = placed.rect.translate(egui::vec2(out, 0.0));
+    }
+}
+
+/// A zone over the camera's top edge, in that edge's units ([`camera_top_plane`]).
+pub fn on_camera_top(mut placed: Placed) -> Placed {
+    placed.rect = placed.rect.translate(egui::vec2(0.0, zones::CAMERA_HALF[1]));
+    placed
 }
 
 /// The wheel on the hand that opened it, turning with it as VRChat's does.
@@ -630,9 +667,33 @@ fn settings_walk_left(snap: &Snapshot) -> bool {
 const CAMERA_LOST_AFTER: Duration = Duration::from_secs(20);
 /// How far within the eye's view the tiles must lie, of its width: its very edge is not seen through the lens.
 const CAMERA_VIEW_MARGIN: f32 = 0.1;
-const CAMERA_LOOKS_TO_SHOW: u32 = 2;
+const CAMERA_LOOKS_TO_SHOW: u32 = 1;
+
+fn camera_takeover_view(turn: &mut Turn, menu_view: &mut bool, held: bool) {
+    if *menu_view {
+        *menu_view=false;
+        if !held { turn.worlds.push(super::super::worlds::Relayed::View(super::super::worlds::panel::Action::Hide)); }
+    }
+}
 
 impl OrbitVr {
+    /// Called for tracking-space resets and device-role changes, including while the camera is closed.
+    pub fn invalidate_camera_tracking(&mut self) {
+        self.camera_reopen.invalidate();
+        self.camera_follow.clear();
+        self.camera_exclusion.clear();
+        self.camera_heads.clear();
+        self.camera_seen=None;
+        self.camera_looks=0;
+        self.camera_measured_width=None;
+        self.camera_stereo_at=None;
+        self.camera_panel_seen_ns=None;
+        self.camera_epoch=Instant::now();
+    }
+
+    fn camera_scale_measured(&self) -> bool {
+        self.camera_stereo_at.is_some_and(|at|at.elapsed()<Duration::from_secs(2))
+    }
     /// What is up, for a note in the log when a turn took too long.
     pub fn doing(&self) -> String {
         format!("open {:?}, {}", self.panels.open_menu(), self.panels.doing()) // i18n: not shown (a note in the log)
@@ -658,6 +719,21 @@ impl OrbitVr {
         let watch = self.camera_watch.as_ref()?;
         let mut poses = [Pose::default(); MAX_DEVICES];
         steamvr.predicted_poses(Universe::Standing, prediction, &mut poses);
+        let device = |role| steamvr.controller_index(role).filter(|&d| (d as usize) < MAX_DEVICES && poses[d as usize].pose_is_valid).map(|d| (d,poses[d as usize].device_to_absolute));
+        let hand_devices=[device(ControllerRole::LeftHand),device(ControllerRole::RightHand)];
+        let hands=hand_devices.map(|hand|hand.map(|(_,pose)|pose));
+        if self.camera_seen.is_none() && poses[0].pose_is_valid {
+            {
+                let (frame,unit,side,clearance,reused)=self.camera_reopen.initial(&poses[0].device_to_absolute,hand_devices,self.tune.camera_panel_m);
+                self.camera_follow.clear();
+                self.camera_follow.seen(frame,unit);
+                self.camera_side=side;
+                self.camera_clearance=clearance;
+                self.camera_measured_width=reused.then_some(unit*camera_track::PANEL_SIZE[0]);
+                self.camera_seen=Some(now);
+                self.camera_looks=CAMERA_LOOKS_TO_SHOW;
+            }
+        }
         if poses[0].pose_is_valid {
             // Where the head will be `prediction` from now, which is when this pose is for.
             self.camera_heads.push_back((now + Duration::from_secs_f32(prediction.max(0.0)), poses[0].device_to_absolute));
@@ -665,7 +741,7 @@ impl OrbitVr {
                 self.camera_heads.pop_front();
             }
         }
-        if let Some(seen) = watch.take() {
+        if let Some(seen) = watch.take().filter(|seen|seen.at>=self.camera_epoch) {
             let age = if seen.source == Source::Eye { self.tune.camera_eye_age_ms } else { self.tune.camera_window_age_ms };
             let then = seen.at.checked_sub(Duration::from_secs_f32(age.max(0.0) / 1000.0)).unwrap_or(seen.at);
             let head = self.camera_heads.iter().min_by_key(|(at, _)| if *at > then { *at - then } else { then - *at }).map(|(_, h)| *h);
@@ -685,28 +761,87 @@ impl OrbitVr {
                 let sides = camera_track::eye_sides(raw);
                 let within = (sides[1] - sides[0]) * CAMERA_VIEW_MARGIN;
                 self.camera_side = camera_track::side_with_room(tangent_of, [sides[0] + within, sides[1] - within, sides[2], sides[3]], self.camera_side);
+                if !camera_track::side_projects(&seen.found,self.camera_side) {
+                    self.camera_side = if self.camera_side == camera_track::Side::Left { camera_track::Side::Right } else { camera_track::Side::Left };
+                }
                 let _ = whole;
-                let (frame, unit) = camera_track::panel_in_room(&seen.found, seen.size, &mirror, &space::compose(&head, &eye_on_head), self.tune.camera_panel_m, self.camera_side);
-                self.camera_follow.seen(frame, unit);
+                let stereo=seen.right.and_then(|right| camera_track::stereo_pose(&seen.found,&right.found,[seen.size,right.size],
+                    [mirror,camera_track::Mirror::whole_eye(steamvr.projection_raw(vr::compositor::Eye::Right))],
+                    [eye_on_head,steamvr.eye_to_head(vr::compositor::Eye::Right)],&head));
+                let width=stereo.map(|(_,unit,_)|unit*camera_track::PANEL_SIZE[0]).or(self.camera_measured_width).unwrap_or(self.tune.camera_panel_m);
+                let pose=stereo.map(|(frame,unit,_)|(frame,unit)).or_else(||camera_track::perspective_pose(&seen.found, seen.size, &mirror, &space::compose(&head, &eye_on_head), width));
+                let clearance=|unit:f32| ((2.5+seen.found.residual_px)/seen.found.across.min(seen.found.tall).max(0.01)).max(0.012/unit.max(1e-6));
+                let clear=|frame:&Matrix34,unit:f32,side| {
+                    camera_track::column_clear(&seen.found,seen.size,&mirror,&space::compose(&head,&eye_on_head),frame,unit,side,clearance(unit))
+                    && (seen.right.is_none() || seen.right.is_some_and(|right|camera_track::column_clear(&right.found,right.size,&camera_track::Mirror::whole_eye(steamvr.projection_raw(vr::compositor::Eye::Right)),&space::compose(&head,&steamvr.eye_to_head(vr::compositor::Eye::Right)),frame,unit,side,clearance(unit))))
+                };
+                if let Some((frame,unit))=pose {
+                    if !clear(&frame,unit,self.camera_side) {
+                        let other=if self.camera_side==camera_track::Side::Left {camera_track::Side::Right} else {camera_track::Side::Left};
+                        if clear(&frame,unit,other) { self.camera_side=other; }
+                    }
+                }
+                if let Some((frame, unit)) = pose.filter(|(frame,unit)|clear(frame,*unit,self.camera_side)) {
+                if let Some((_,unit,_))=stereo {
+                    self.camera_measured_width=Some(unit*camera_track::PANEL_SIZE[0]);
+                    self.camera_stereo_at=Some(now);
+                }
+                // 2.5 pixels fit tolerance, converted through the observed scale, plus a minimum safe gap.
+                let gap = clearance(unit)*unit;
+                self.camera_clearance=clearance(unit);
+                let depth=-(0..3).map(|i| head.m[i][2]*(frame.m[i][3]-head.m[i][3])).sum::<f32>();
+                super::super::vr_log::line(&format!("camera pose: ns={}, captured {:?}, accepted {:?}, depth {}, side {:?}, unit {}, gap {}, stereo_rms {:?}, measured_width {:?}, pose {:?}, landmarks {:?}", orbiters_core::clock::now_ns(), seen.at, now, depth, self.camera_side, unit, gap, stereo.map(|(_,_,rms)|rms), self.camera_measured_width, frame, seen.found)); // i18n: not shown (diagnostics)
+                self.camera_exclusion = vec![(seen.found, seen.size, mirror, space::compose(&head,&eye_on_head))];
+                if let Some(right) = seen.right { self.camera_exclusion.push((right.found, right.size, camera_track::Mirror::whole_eye(steamvr.projection_raw(vr::compositor::Eye::Right)), space::compose(&head,&steamvr.eye_to_head(vr::compositor::Eye::Right)))); }
+                let adopted=if self.camera_looks<=CAMERA_LOOKS_TO_SHOW {
+                    self.camera_follow.attach(frame,unit); true
+                } else { self.camera_follow.seen(frame,unit) };
+                self.camera_panel_seen_ns = Some(orbiters_core::clock::now_ns());
                 self.camera_seen = Some(now);
-                self.camera_looks = self.camera_looks.saturating_add(1);
+                if adopted {
+                    self.camera_looks = self.camera_looks.saturating_add(1);
+                    self.camera_reopen.remember(frame,unit,self.camera_side,self.camera_clearance,&head,hand_devices,self.camera_follow.held_hand());
+                }
+                } else if !self.camera_follow.is_held() {
+                    self.camera_exclusion=vec![(seen.found,seen.size,mirror,space::compose(&head,&eye_on_head))];
+                    if let Some(right)=seen.right { self.camera_exclusion.push((right.found,right.size,camera_track::Mirror::whole_eye(steamvr.projection_raw(vr::compositor::Eye::Right)),space::compose(&head,&steamvr.eye_to_head(vr::compositor::Eye::Right)))); }
+                    self.camera_looks=CAMERA_LOOKS_TO_SHOW;
+                    self.camera_stereo_at=None;
+                    self.camera_panel_seen_ns=None;
+                    super::super::vr_log::line("camera pose rejected: recovered column is not safely outside the observed panel"); // i18n: not shown (diagnostics)
+                }
             }
         }
         // What tracking knows, and what grabs it. Only while it shows: a grip means nothing to it otherwise.
-        let device = |role| steamvr.controller_index(role).filter(|&d| (d as usize) < MAX_DEVICES && poses[d as usize].pose_is_valid).map(|d| poses[d as usize].device_to_absolute);
-        let hands = [device(ControllerRole::LeftHand), device(ControllerRole::RightHand)];
-        let grips = if input_read { actions.grabs(steamvr) } else { [false; 2] };
-        let lasers = if input_read { actions.lasers(steamvr, prediction) } else { [None; 2] };
+
+                let may_bind=self.camera_looks>CAMERA_LOOKS_TO_SHOW && self.camera_follow.can_bind_hand() && (self.camera_follow.is_held() || self.camera_scale_measured());
+        let grips = if input_read && may_bind { actions.grabs(steamvr) } else { [false; 2] };
+        let lasers = if input_read && may_bind { actions.lasers(steamvr, prediction) } else { [None; 2] };
         let pointers = lasers.map(|tip| tip.map(|tip| { let (o, d) = space::ray(&tip); (o, d) }));
-        let placed = self.camera_follow.step(dt, hands, grips, pointers);
+        let mut placed = self.camera_follow.step(dt, hands, grips, pointers);
         // While a hand has it, it is known, seen or not.
         if self.camera_follow.is_held() {
             self.camera_seen = Some(now);
         }
-        if self.camera_seen.is_none_or(|at| now.duration_since(at) > CAMERA_LOST_AFTER) {
+        if self.camera_seen.is_some_and(|at| now.duration_since(at) > CAMERA_LOST_AFTER) {
             self.camera_follow.clear();
-            self.camera_looks = 0;
-            return None;
+            self.camera_exclusion.clear();
+            self.camera_seen=None;
+            self.camera_looks=0;
+            self.camera_stereo_at=None;
+            self.camera_panel_seen_ns=None;
+        }
+        // Before any observation, the owner-approved initial estimate stays explicitly provisional.
+        // With observations, validate the displayed hull in every available eye. Mono remains provisional.
+        if !self.camera_exclusion.is_empty() {
+            let clear = |frame: &Matrix34, unit| {
+                if self.camera_exclusion.len()==2 { camera_track::binocular_clear(&self.camera_exclusion,frame,unit,self.camera_side,self.camera_clearance) }
+                else { self.camera_exclusion.iter().all(|(found,size,mirror,eye)|camera_track::column_clear(found,*size,mirror,eye,frame,unit,self.camera_side,self.camera_clearance)) }
+            };
+            placed = self.camera_follow.safe_display(placed, clear);
+        }
+        if let Some((frame,unit))=placed.filter(|_|self.camera_panel_seen_ns.is_some() && self.camera_follow.settled() && poses[0].pose_is_valid) {
+            self.camera_reopen.remember(frame,unit,self.camera_side,self.camera_clearance,&poses[0].device_to_absolute,hand_devices,self.camera_follow.held_hand());
         }
         if self.camera_looks < CAMERA_LOOKS_TO_SHOW {
             return None;
@@ -847,7 +982,15 @@ pub struct OrbitVr {
     takeover_plane: Option<Plane>,
     /// VRChat's camera panel: what reads its window while its camera is open, where it was last seen, and how many looks in a row saw it.
     camera_watch: Option<CameraWatch>,
+    camera_retired: Vec<CameraWatch>,
+    camera_panel_seen_ns: Option<u64>,
+    camera_measured_width: Option<f32>,
+    camera_clearance: f32,
+    camera_exclusion: Vec<(camera_track::Found, [f32;2], camera_track::Mirror, Matrix34)>,
+    camera_stereo_at: Option<Instant>,
     camera_follow: super::camera_track::Follow,
+    camera_reopen: camera_track::Reopen,
+    camera_epoch: Instant,
     camera_side: camera_track::Side,
     hole_logged: super::super::vr_log::Every,
     /// What the headset shows, kept when asked (`ORBITERS_VR_PICTURES`).
@@ -870,6 +1013,15 @@ pub struct OrbitVr {
     last_shown: bool,
     /// The sheet as one picture: its back with its head, its page on it.
     sheet: SheetPicture,
+}
+
+impl Drop for OrbitVr {
+    fn drop(&mut self) {
+        // Teardown owns this OrbitVr while borrowing the live SteamVR Client. Normal camera
+        // closing only retires readers; shutdown joins before Client::drop cleans its interfaces.
+        if let Some(watch) = self.camera_watch.as_mut() { watch.finish(); }
+        for watch in &mut self.camera_retired { watch.finish(); }
+    }
 }
 
 impl OrbitVr {
@@ -896,8 +1048,16 @@ impl OrbitVr {
             plane: None,
             takeover_plane: None,
             camera_watch: None,
+            camera_retired: Vec::new(),
+            camera_panel_seen_ns: None,
+            camera_measured_width: None,
+            camera_clearance: 0.,
+            camera_exclusion: Vec::new(),
+            camera_stereo_at: None,
             pointers: [None; 2],
             camera_follow: Default::default(),
+            camera_reopen: Default::default(),
+            camera_epoch: now,
             camera_side: Default::default(),
             hole_logged: Default::default(),
             moments: Default::default(),
@@ -937,6 +1097,9 @@ impl OrbitVr {
             note: (on != Some(true)).then(|| mark("SteamVR's \"Experimental overlay input overrides\" (Settings, Developer) is off: pointing at a panel still presses in VRChat too.").to_string()),
             steamvr_overrides: on,
             camera_note: self.camera_note(cx.snap),
+            camera_provisional: self.camera_watch.is_some() && (self.camera_looks <= CAMERA_LOOKS_TO_SHOW || self.camera_follow.awaiting_confirmation() || !self.camera_follow.settled() || !self.camera_scale_measured()),
+            camera_panel_seen_ns: self.camera_panel_seen_ns,
+            camera_scale_measured: self.camera_scale_measured(),
         };
         if self.told.as_ref() != Some(&status) {
             cx.backend.orbit_status(status.clone());
@@ -995,10 +1158,21 @@ impl OrbitVr {
     }
 
     /// A turn of the overlay's loop.
-    pub fn update(&mut self, mut cx: Cx<'_, '_>) -> Turn {
+    pub fn update(&mut self, cx: Cx<'_, '_>) -> Turn {
+        let camera_opened=cx.snap.camera_open_said==Some(true) && self.camera_was!=Some(true);
+        let held=cx.world_status.small_taken;
+        let mut turn=self.update_inner(cx);
+        if camera_opened { camera_takeover_view(&mut turn,&mut self.showed_view,held); }
+        turn
+    }
+
+    fn update_inner(&mut self, mut cx: Cx<'_, '_>) -> Turn {
         let now = Instant::now();
         let dt = now.duration_since(self.last_turn).as_secs_f32();
         self.last_turn = now;
+        if self.camera_reopen.context(cx.snap.vrchat.world.world_id.as_deref(),cx.snap.vrchat.world.instance.as_deref(),cx.snap.vrchat.world.in_world && cx.snap.vrchat.running,cx.snap.vrchat.pid) {
+            self.invalidate_camera_tracking();
+        }
         let settings = cx.snap.settings.orbit;
         let wanted = settings.any() && cx.snap.vrchat.running;
         // The parts of menus that closed are kept for a while; with no menu up nothing else comes by to let them go.
@@ -1046,24 +1220,48 @@ impl OrbitVr {
         }
         // VRChat's wheel goes when its camera opens.
         let camera = cx.snap.camera_open_said;
-        if camera == Some(true) && self.camera_was == Some(false) {
+        if camera == Some(true) && self.camera_was != Some(true) {
             self.buttons.camera_opened();
+            self.panels.close_sheet();
         }
         self.camera_was = camera;
         let open = self.buttons.open();
         // VRChat's camera panel, seen on its window while it says its camera is open, with neither of its menus up.
         // Looked for even with a menu up: VRChat's camera is opened from one, and what follows the buttons may still say it is open.
         let camera_wanted = settings.camera_tiles && camera == Some(true);
+        self.camera_retired.retain_mut(|watch| {
+            if watch.finished() { watch.finish(); false } else { true }
+        });
         if camera_wanted != self.camera_watch.is_some() {
+            if let Some(watch) = self.camera_watch.take() {
+                watch.stop();
+                self.camera_retired.push(watch);
+            }
             self.camera_watch = camera_wanted.then(|| {
                 let mirror = if self.tune.camera_use_window { None } else { cx.steamvr.compositor().ok().map(|c| c.mirror_source()) };
                 CameraWatch::start(super::camera_frames::From { mirror, adapter: cx.steamvr.dxgi_adapter_index(), keep_frames: self.tune.camera_keep_frames })
             });
             self.camera_follow.clear();
+            self.camera_exclusion.clear();
+            self.camera_measured_width=None;
+            self.camera_epoch=now;
             self.camera_seen = None;
             self.camera_looks = 0;
+            self.camera_side = camera_track::Side::Left;
+            self.camera_panel_seen_ns = None;
+            self.camera_stereo_at = None;
         }
         let camera_plane = self.camera_turn(cx.steamvr, &*cx.actions, cx.input_read, cx.prediction, now, dt);
+        // Camera status changes independently of SteamVR's one-time input override setup.
+        let mut status=self.told.clone().unwrap_or_default();
+        status.camera_note=self.camera_note(cx.snap);
+        status.camera_provisional=camera_wanted && (self.camera_looks <= CAMERA_LOOKS_TO_SHOW || self.camera_follow.awaiting_confirmation() || !self.camera_follow.settled() || !self.camera_scale_measured());
+        status.camera_panel_seen_ns=self.camera_panel_seen_ns;
+        status.camera_scale_measured=self.camera_scale_measured();
+        if self.told.as_ref()!=Some(&status) {
+            cx.backend.orbit_status(status.clone());
+            self.told=Some(status);
+        }
         let menu = match open {
             Open::QuickMenu(_) if settings.around_quick_menu() => Some(Around::QuickMenu),
             Open::Wheel(_) if settings.around_wheel() => Some(Around::Wheel),
@@ -1103,6 +1301,7 @@ impl OrbitVr {
         }
         let plane = match (menu, open) {
             (Some(Around::Wheel), Open::Wheel(hand)) => devices[hand].map(|d| wheel_plane(&poses[d as usize].device_to_absolute, hand, &self.tune, settings.vr_size)),
+            // Where the camera is: camera-core's Follow settles a jump itself, every step checked clear of the camera's picture (Enzo, F19).
             (Some(Around::Camera), _) => camera_plane,
             (Some(Around::QuickMenu), Open::QuickMenu(hand)) => devices[hand].map(|d| quick_menu_plane(&poses[d as usize].device_to_absolute, hand, &self.tune, settings.vr_size)),
             _ => None,
@@ -1122,6 +1321,12 @@ impl OrbitVr {
         // Here VRChat's wheel can close unseen: the ring has its own close.
         if menu == Some(Around::Wheel) && !self.panels.sheet_open() {
             places.push(wheel_place(Zone::WheelHide));
+        }
+        // What the camera's tiles say lines up on their side; they say where the camera is not seen yet; the column stands off by what the fit is unsure of.
+        self.panels.camera_right = self.camera_side == camera_track::Side::Right;
+        self.panels.camera_finding = self.camera_watch.is_some() && self.camera_looks <= CAMERA_LOOKS_TO_SHOW;
+        if menu == Some(Around::Camera) {
+            camera_column_out(&mut places, self.camera_clearance, self.camera_side == camera_track::Side::Right);
         }
         // Hidden: only the way back, and nothing else, whatever VRChat's menu does.
         self.panels.way_back(menu, &mut places);
@@ -1166,9 +1371,16 @@ impl OrbitVr {
             .all()
             .map(|p| {
                 let sheet = matches!(p.zone, Zone::Takeover | Zone::SheetBack | Zone::SheetPeek);
+                // The page a code opened, and its bar: stood up on the camera's top edge.
+                if matches!(p.zone, Zone::CameraWeb | Zone::CameraWebBar) {
+                    return (camera_top_plane(&plane).camera_quad(&on_camera_top(p.placed)), p.placed);
+                }
                 let on = if sheet { self.takeover_plane.unwrap_or(plane) } else { plane };
                 let near = near(p.zone, sheet_up);
-                (on.quad(&clear_of_sheet(p.placed, sheet_up), -p.outward(), near), p.placed)
+                let placed = clear_of_sheet(p.placed, sheet_up);
+                // Camera tools lie in the fitted panel's own plane, with no spring or depth (camera-core).
+                let quad = if menu == Some(Around::Camera) && !sheet { on.camera_quad(&placed) } else { on.quad(&placed, -p.outward(), near) };
+                (quad, p.placed)
             })
             .collect();
 
@@ -1323,7 +1535,7 @@ impl OrbitVr {
             Some((space::compose(&frame, &there), hole.width() / 1024.0 * quad.width / 2.0 * super::super::worlds::SMALL_FILLS_HOLE))
         });
         // The stick's up and down scrolls what is on the sheet, unless a hand holds what shows small: that is zoomed with it. The stick that does not walk, as VRChat's turning one.
-        if self.panels.sheet_open() && !cx.world_status.small_held && cx.input_read {
+        if (self.panels.sheet_open() || self.panels.web_pointed()) && !cx.world_status.small_held && cx.input_read {
             let hand = if settings_walk_left(cx.snap) { 1 } else { 0 };
             if let Some(pads) = *cx.pads.get_or_insert_with(|| cx.actions.pads(cx.steamvr)) {
                 self.panels.stick(pads.sticks[hand].y, dt, cx.snap);
@@ -1398,6 +1610,9 @@ impl OrbitVr {
                 let _ = cx.overlay.set_alpha(*handle, panel.appear.alpha());
                 if !cx.overlay.is_visible(*handle) {
                     let _ = cx.overlay.show(*handle);
+                    if matches!(panel.zone, Zone::CameraPeople | Zone::CameraWorld | Zone::CameraQr) {
+                        super::super::vr_log::line(&format!("camera first shown: ns={}, zone={:?}, provisional={}", orbiters_core::clock::now_ns(), panel.zone, self.camera_looks <= CAMERA_LOOKS_TO_SHOW || self.camera_follow.awaiting_confirmation() || !self.camera_follow.settled() || !self.camera_scale_measured())); // i18n: not shown (diagnostics)
+                    }
                 }
             }
         }
@@ -1434,6 +1649,20 @@ impl OrbitVr {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn camera_takeover_preserves_held_and_independent_views() {
+        let mut turn=super::Turn::default();
+        let mut borrowed=true;
+        super::camera_takeover_view(&mut turn,&mut borrowed,false);
+        assert!(!borrowed);
+        assert!(matches!(turn.worlds.as_slice(),[super::super::super::worlds::Relayed::View(super::super::super::worlds::panel::Action::Hide)]));
+        let mut turn=super::Turn::default();
+        let mut borrowed=true;
+        super::camera_takeover_view(&mut turn,&mut borrowed,true);
+        assert!(turn.worlds.is_empty() && !borrowed);
+        super::camera_takeover_view(&mut turn,&mut borrowed,false);
+        assert!(turn.worlds.is_empty(), "taking the view gave it independent ownership");
+    }
     use super::*;
     use orbiters_core::settings::OrbitSettings;
 
@@ -1763,7 +1992,7 @@ mod tests {
 
     /// Enzo: "when I open the camera, the wheel menu disappears".
     #[test]
-    fn the_camera_opening_closes_the_wheel_and_not_the_quick_menu() {
+    fn the_camera_opening_closes_both_companion_menus() {
         let t0 = Instant::now();
         let mut b = fresh(t0);
         assert_eq!(run(&mut b, t0, &[(1, 100, 900)], 1000), Open::Wheel(1));
@@ -1771,7 +2000,13 @@ mod tests {
         assert_eq!(b.open(), Open::Closed);
         assert_eq!(run(&mut b, t0, &[(1, 1100, 1200)], 1300), Open::QuickMenu(1), "and the next press is the Quick Menu's");
         b.camera_opened();
-        assert_eq!(b.open(), Open::QuickMenu(1));
+        assert_eq!(b.open(), Open::Closed);
+        b.step([false,true],t0+Duration::from_millis(1500));
+        assert_eq!(b.step([false,true],t0+Duration::from_millis(2000)),Open::Wheel(1));
+        b.camera_opened();
+        assert_eq!(b.step([false,true],t0+Duration::from_millis(2100)),Open::Closed,"the held press must not reopen the wheel over the camera");
+        assert_eq!(b.step([false,false],t0+Duration::from_millis(2200)),Open::Closed,"its release must not reopen a companion either");
+        assert!(b.quick_menu_to_toggle().is_none());
     }
 
     /// As Enzo laid them.
@@ -1923,5 +2158,43 @@ mod tests {
         assert_eq!(&sheet.pixels[((88 * bw) * 4) as usize..((88 * bw) * 4 + 4) as usize], &[1, 2, 3, 255]);
         sheet.back(&back_pixels, back.px, 88, [0, 0, bw, 1]);
         assert_eq!(&sheet.pixels[((88 * bw) * 4) as usize..((88 * bw) * 4 + 4) as usize], &[1, 2, 3, 255], "the page stays over a back painted again");
+    }
+    /// A camera's plane: its middle at `at`, its picture's right along `x`, its up along `y`, facing along `x` cross `y`.
+    fn camera_at(x: V3, y: V3, at: V3) -> Plane {
+        Plane { frame: space::from_axes(x, y, space::cross(x, y), at), unit: camera_track::PANEL_M / camera_track::PANEL_SIZE[0] }
+    }
+
+    /// Enzo (F17): the page a code opened lies over the camera's top edge and never in front of the camera: in its plane over a camera held upright, stood up over
+    /// one lying flat, and over one tilted back.
+    #[test]
+    fn the_page_from_a_code_stands_on_the_camera_s_top_edge() {
+        let held = [
+            ("upright", camera_at([1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 1.2, -0.4])),
+            ("flat", camera_at([1.0, 0.0, 0.0], [0.0, 0.0, -1.0], [0.0, 1.0, -0.4])),
+            ("tilted back", camera_at([1.0, 0.0, 0.0], [0.0, 0.6, -0.8], [0.0, 1.1, -0.4])),
+            ("rolled", camera_at([0.94, 0.34, 0.0], [-0.34, 0.94, 0.0], [0.0, 1.2, -0.4])),
+        ];
+        for (name, camera) in held {
+            let top = camera_top_plane(&camera);
+            let edge = zones::CAMERA_HALF[1] * camera.unit;
+            let to_camera = space::inverse(&camera.frame);
+            for zone in [Zone::CameraWebBar, Zone::CameraWeb] {
+                let quad = top.quad(&on_camera_top(zones::in_units(zone)), 0.0, NEAR_M);
+                for (u, v) in [(-0.5, -0.5), (0.5, -0.5), (-0.5, 0.5), (0.5, 0.5)] {
+                    let corner = space::apply(&quad.transform, [u * quad.width, v * quad.height, 0.0]);
+                    let local = space::apply(&to_camera, corner);
+                    assert!(local[1] >= edge - 0.005, "{name}: {zone:?} reaches over the camera ({local:?})");
+                    // Over the camera's top edge where it is, however the camera is rolled.
+                    let edge_under = space::apply(&camera.frame, [local[0], edge, 0.0])[1];
+                    assert!(corner[1] >= edge_under - 0.005, "{name}: {zone:?} hangs below the camera's top edge");
+                }
+            }
+            let (page_up, camera_up) = (space::axis(&top.frame, 1), space::axis(&camera.frame, 1));
+            match name {
+                "upright" | "rolled" => assert!(space::dot(page_up, camera_up) > 0.999, "{name}: in the camera's own plane"),
+                _ => assert!(page_up[1] > 0.95, "{name}: stood up ({page_up:?})"),
+            }
+            assert!(space::axis(&top.frame, 2)[2] > 0.5, "{name}: it faces the person");
+        }
     }
 }

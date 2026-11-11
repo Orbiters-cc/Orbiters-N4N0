@@ -607,17 +607,15 @@ fn recorder(ui: &mut Ui, snap: &Snapshot, ctl: &Ctl, card: Rect) {
     let button = Rect::from_center_size(pos2(card.center().x, card.top() + 56.0 + record::SIZE * 0.5), Vec2::splat(record::SIZE));
     let health = c.stats.as_ref().map(|s| if s.frames > 0 { s.strip_ok as f32 / s.frames as f32 } else { 1.0 }).unwrap_or(1.0);
     let mut child = ui.new_child(UiBuilder::new().max_rect(card).id_salt("overlay-recorder"));
-    let (_, toggled) = RecordButton { state: rec_state(c.state), disabled: !consent || c.state == CaptureState::Importing, health }.show_at(&mut child, button);
-    if toggled {
-        if snap.is_capturing() {
-            ctl.stop_capture();
-        } else {
-            ctl.start_capture();
-        }
+    // Stop only: a recording starts beside VRChat's camera, the picture it records (Enzo, F15).
+    let live = matches!(c.state, CaptureState::Starting | CaptureState::Recording | CaptureState::Paused);
+    let (_, toggled) = RecordButton { state: rec_state(c.state), disabled: !live, health }.show_at(&mut child, button);
+    if toggled && live {
+        ctl.stop_capture();
     }
     let title = match c.state {
         CaptureState::Idle if !consent => tr("Accept the capture notice on the desktop first"),
-        CaptureState::Idle => tr("Start recording"),
+        CaptureState::Idle => tr("Record beside VRChat's camera"),
         CaptureState::Starting => tr("Starting…"),
         CaptureState::Recording | CaptureState::Paused => tr("Stop recording"),
         CaptureState::Stopping => tr("Saving the session…"),
@@ -628,7 +626,7 @@ fn recorder(ui: &mut Ui, snap: &Snapshot, ctl: &Ctl, card: Rect) {
     widgets::text_truncated(&p, pos2(card.center().x, y + 8.0), Align2::CENTER_CENTER, &Txt::new(title, 18.0).weight(weight::SEMIBOLD), card.width() - 40.0);
     let sub = match (&c.source, c.state) {
         (Some(source), CaptureState::Recording | CaptureState::Paused) => source.clone(),
-        _ if snap.osc.listening => tr("or N4N0 › Record in your Action Menu").into(),
+        (_, CaptureState::Idle) => tr("Open VRChat's camera: Record is beside it.").into(),
         _ => tr("Saved as a session for Mixer").into(),
     };
     widgets::text_truncated(&p, pos2(card.center().x, y + 34.0), Align2::CENTER_CENTER, &Txt::new(sub, 13.5).color(theme::FG_3), card.width() - 40.0);

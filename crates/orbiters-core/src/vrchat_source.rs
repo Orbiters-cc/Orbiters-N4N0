@@ -33,6 +33,14 @@ impl Source {
     pub fn direct_available(&self) -> bool {
         self.direct.as_ref().is_some_and(|c| c.lock().unwrap().signed_in())
     }
+    /// Selection changes the playing account, so a matching log identity is mandatory.
+    pub fn select_avatar(&self, id: &str) -> anyhow::Result<()> {
+        let playing = self.log_account.as_deref().ok_or(Error::Unauthorized)?;
+        self.direct(|c| {
+            if c.current_user()?.id != playing { return Err(Error::Unauthorized); }
+            c.select_avatar(id)
+        }).ok_or(Error::Unauthorized)?
+    }
     pub fn new(direct: Option<Arc<Mutex<Client>>>, orbiters: Option<(Api, String)>, log_account: Option<String>) -> Self {
         let operation = direct.as_ref().map(|c| c.lock().unwrap().operation(std::time::Instant::now() + std::time::Duration::from_secs(60)));
         Self { direct, orbiters, log_account, operation }

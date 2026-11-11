@@ -165,8 +165,9 @@ fn actions(ui: &mut Ui, cx: &mut Cx, state: &mut State, projects: &mut super::pr
     let people_title = tr("3D picture of people");
     let people_note = tr("Goes around the people here");
     let place_title = tr("3D picture of the world");
-    let record_title = tr("Record");
-    let record_note = tr("You move the camera. Press again to stop");
+    // A recording starts beside VRChat's camera in VR alone, the picture it records (Enzo, F15): here it says how, and is its Stop while it runs.
+    let record_title = tr("Record a 3D scene");
+    let record_note = tr("In VR, open VRChat's camera: Record is beside it.");
     let people = BigAction {
         glyph: icons::USERS,
         tint: theme::VIOLET,
@@ -191,8 +192,8 @@ fn actions(ui: &mut Ui, cx: &mut Cx, state: &mut State, projects: &mut super::pr
         title: record_title,
         note: record_note,
         warn: false,
-        enabled: true,
-        why_not: "",
+        enabled: false,
+        why_not: record_note,
     };
     let chosen = [
         people.show(&mut row, cell(0), "capture-people").then_some(PictureMode::People),
@@ -201,9 +202,7 @@ fn actions(ui: &mut Ui, cx: &mut Cx, state: &mut State, projects: &mut super::pr
     if let Some(mode) = chosen.into_iter().flatten().next() {
         cx.ctl.n4n0(crate::ipc::N4n0Command::Photo3DOf { mode });
     }
-    if record.show(&mut row, cell(2), record::LABEL) {
-        cx.ctl.start_capture();
-    }
+    record.show(&mut row, cell(2), record::LABEL);
     why_last(ui, cx, state, projects);
     quiet_row(ui, cx);
 }

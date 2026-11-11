@@ -4,5 +4,6 @@ crates/orbiters-desktop/src/overlay/orbit/mod.rs
 crates/orbiters-desktop/src/overlay/orbit/desktop.rs
 crates/orbiters-desktop/src/overlay/orbit/vr.rs
 crates/orbiters-desktop/src/overlay/orbit/camera_frames.rs
+crates/orbiters-desktop/src/overlay/orbit/camera_web.rs
 crates/orbiters-desktop/src/overlay/orbit/camera_track.rs
 crates/orbiters-desktop/src/overlay/orbit/panels/mic_sheet.rs

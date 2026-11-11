@@ -329,7 +329,7 @@ impl super::Controller {
 
     /// VRChat's camera's values as its OSCQuery tree has them now (`/usercamera/Mode`, `/usercamera/Zoom`…): empty when
     /// VRChat does not say (not found, or before 2025.3.3, whose tree has no camera).
-    fn camera_values(&self) -> Vec<(String, OscValue)> {
+    pub(super) fn camera_values(&self) -> Vec<(String, OscValue)> {
         let query = self.with_osc(|o| o.vrchat_query()).flatten();
         query.map(|addr| orbiters_core::osc::vrchat_camera_values(addr, Duration::from_millis(500))).unwrap_or_default()
     }
@@ -372,7 +372,7 @@ impl super::Controller {
         // N4N0's menu and link card stand in front of their owner: while the capture kit records (N4N0/Capture/Record),
         // the avatar hides them on its owner's client, out of the picture, and shows them again after it.
         *self.burst.lock().unwrap() = BurstRuntime { recording: true, mode, length };
-        if let Err(e) = self.start_capture(false) {
+        if let Err(e) = self.start_capture(super::CapturePurpose::Short) {
             self.burst.lock().unwrap().recording = false;
             return Err(e);
         }

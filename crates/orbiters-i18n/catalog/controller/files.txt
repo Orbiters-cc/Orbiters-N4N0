@@ -55,3 +55,4 @@ crates/orbiters-desktop/src/reconstruct.rs
 crates/orbiters-desktop/src/upload_prep.rs
 crates/orbiters-desktop/src/views.rs
 crates/orbiters-desktop/src/worker.rs
+crates/orbiters-desktop/src/controller/camera_tools.rs

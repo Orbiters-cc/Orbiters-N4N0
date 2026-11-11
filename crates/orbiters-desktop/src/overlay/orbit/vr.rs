@@ -654,8 +654,7 @@ impl OrbitVr {
         steamvr.predicted_poses(Universe::Standing, prediction, &mut poses);
         if self.camera_seen.is_none() && poses[0].pose_is_valid {
             // Detached provisional tools: world-locked where the head was on opening, never a claimed panel pose.
-            let mut frame = space::before_eyes(&poses[0].device_to_absolute, 0.65, 0.22);
-            for i in 0..3 { frame.m[i][3] += frame.m[i][0] * 0.36; }
+            let frame = space::before_eyes(&poses[0].device_to_absolute, 0.65, 0.22);
             self.camera_follow.seen(frame, self.tune.camera_panel_m / camera_track::PANEL_SIZE[0]);
             self.camera_seen = Some(now);
             self.camera_looks = CAMERA_LOOKS_TO_SHOW;
@@ -708,8 +707,9 @@ impl OrbitVr {
         // What tracking knows, and what grabs it. Only while it shows: a grip means nothing to it otherwise.
         let device = |role| steamvr.controller_index(role).filter(|&d| (d as usize) < MAX_DEVICES && poses[d as usize].pose_is_valid).map(|d| poses[d as usize].device_to_absolute);
         let hands = [device(ControllerRole::LeftHand), device(ControllerRole::RightHand)];
-        let grips = if input_read { actions.grabs(steamvr) } else { [false; 2] };
-        let lasers = if input_read { actions.lasers(steamvr, prediction) } else { [None; 2] };
+        let may_bind=self.camera_looks>CAMERA_LOOKS_TO_SHOW && self.camera_follow.can_bind_hand();
+        let grips = if input_read && may_bind { actions.grabs(steamvr) } else { [false; 2] };
+        let lasers = if input_read && may_bind { actions.lasers(steamvr, prediction) } else { [None; 2] };
         let pointers = lasers.map(|tip| tip.map(|tip| { let (o, d) = space::ray(&tip); (o, d) }));
         let placed = self.camera_follow.step(dt, hands, grips, pointers);
         // While a hand has it, it is known, seen or not.
@@ -855,7 +855,7 @@ impl OrbitVr {
             note: (on != Some(true)).then(|| mark("SteamVR's \"Experimental overlay input overrides\" (Settings, Developer) is off: pointing at a panel still presses in VRChat too.").to_string()),
             steamvr_overrides: on,
             camera_note: self.camera_note(cx.snap),
-            camera_provisional: self.camera_watch.is_some() && (self.camera_looks <= CAMERA_LOOKS_TO_SHOW || self.camera_follow.awaiting_confirmation()),
+            camera_provisional: self.camera_watch.is_some() && (self.camera_looks <= CAMERA_LOOKS_TO_SHOW || self.camera_follow.awaiting_confirmation() || !self.camera_follow.settled()),
             camera_panel_seen_ns: self.camera_panel_seen_ns,
         };
         if self.told.as_ref() != Some(&status) {
@@ -1005,7 +1005,7 @@ impl OrbitVr {
         // Camera status changes independently of SteamVR's one-time input override setup.
         let mut status=self.told.clone().unwrap_or_default();
         status.camera_note=self.camera_note(cx.snap);
-        status.camera_provisional=camera_wanted && (self.camera_looks <= CAMERA_LOOKS_TO_SHOW || self.camera_follow.awaiting_confirmation());
+        status.camera_provisional=camera_wanted && (self.camera_looks <= CAMERA_LOOKS_TO_SHOW || self.camera_follow.awaiting_confirmation() || !self.camera_follow.settled());
         status.camera_panel_seen_ns=self.camera_panel_seen_ns;
         if self.told.as_ref()!=Some(&status) {
             cx.backend.orbit_status(status.clone());
@@ -1343,7 +1343,7 @@ impl OrbitVr {
                 if !cx.overlay.is_visible(*handle) {
                     let _ = cx.overlay.show(*handle);
                     if matches!(panel.zone, Zone::CameraPeople | Zone::CameraWorld | Zone::CameraQr) {
-                        super::super::vr_log::line(&format!("camera first shown: ns={}, zone={:?}, provisional={}", orbiters_core::clock::now_ns(), panel.zone, self.camera_looks <= CAMERA_LOOKS_TO_SHOW || self.camera_follow.awaiting_confirmation())); // i18n: not shown (diagnostics)
+                        super::super::vr_log::line(&format!("camera first shown: ns={}, zone={:?}, provisional={}", orbiters_core::clock::now_ns(), panel.zone, self.camera_looks <= CAMERA_LOOKS_TO_SHOW || self.camera_follow.awaiting_confirmation() || !self.camera_follow.settled())); // i18n: not shown (diagnostics)
                     }
                 }
             }

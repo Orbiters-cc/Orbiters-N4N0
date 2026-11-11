@@ -746,6 +746,14 @@ impl Follow {
 
     pub fn awaiting_confirmation(&self) -> bool { self.unsure.is_some() }
 
+    pub fn settled(&self) -> bool {
+        self.at.zip(self.wanted).is_some_and(|((at,_),(wanted,_))| apart(&at,&wanted)<0.01 && turned_apart(&at,&wanted)<2f32.to_radians())
+    }
+
+    pub fn can_bind_hand(&self) -> bool {
+        self.is_held() || (self.settled() && !self.awaiting_confirmation())
+    }
+
     pub fn clear(&mut self) {
         *self = Self::default();
     }
@@ -1200,11 +1208,16 @@ mod tests {
     fn a_far_fit_remains_provisional_until_its_target_is_adopted() {
         let mut follow=Follow::default();
         assert!(follow.seen(at(0.),0.001));
+        assert!(follow.settled());
         assert!(!follow.seen(at(1.),0.001));
         assert!(follow.awaiting_confirmation());
+        assert!(!follow.can_bind_hand());
         assert!(follow.seen(at(1.),0.001));
         assert!(!follow.awaiting_confirmation());
+        assert!(!follow.settled() && !follow.can_bind_hand());
         assert!(follow.step(0.011,[None;2],[false;2],NOBODY).unwrap().0.m[0][3]<0.2);
+        for _ in 0..180 { follow.step(0.011,[None;2],[false;2],NOBODY); }
+        assert!(follow.settled() && follow.can_bind_hand());
     }
 
     /// Enzo: "use the tracking of the controller that grabbed it + the headset tracking ... until the user drops it".

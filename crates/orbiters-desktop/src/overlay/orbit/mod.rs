@@ -2925,6 +2925,8 @@ impl Panels {
                         facts.art = Some(panel.pictures.entry(key.clone()).or_insert_with(|| ctx.load_texture("art", image.clone(), TextureOptions::LINEAR)).id());
                     }
                     let (hover, pressed) = (panel.hover, panel.pressed);
+                    // Results captured the current host data; later arrivals set this flag again.
+                    if sheet == Sheet::Results { stage.host.dirty = false; }
                     if stage.async_pages {
                         if let Some(worlds) = stage.worlds.as_mut() {
                             for visit in &mut facts.worlds_visited {
@@ -2939,8 +2941,20 @@ impl Panels {
                                 }
                             }
                         }
-                        panel.pictures.retain(|key, _| !key.starts_with("world-video "));
-                        facts.world_video_picture = stage.host.menu.world_video.as_ref().and_then(|v| orbiters_n4n0_core::videos::youtube_id(&v.url)).and_then(|id| stage.host.image(&id).map(|image| panel.pictures.entry(format!("world-video {id}")).or_insert_with(|| ctx.load_texture("world-video", image, TextureOptions::LINEAR)).id())); // i18n: not shown (texture cache keys)
+                        let video = stage.host.menu.world_video.as_ref().and_then(|v| orbiters_n4n0_core::videos::youtube_id(&v.url));
+                        let video_key = video.as_ref().map(|id| format!("world-video {id}")); // i18n: not shown (texture cache key)
+                        panel.pictures.retain(|key, _| !key.starts_with("world-video ") || video_key.as_ref() == Some(key));
+                        facts.world_video_picture = None;
+                        if sheet == Sheet::All {
+                            facts.world_video_picture = video.zip(video_key).and_then(|(id, key)| {
+                                if let Some(texture) = panel.pictures.get(&key) { return Some(texture.id()); }
+                                let image = stage.host.image(&id)?;
+                                let texture = ctx.load_texture("world-video", image, TextureOptions::LINEAR);
+                                let id = texture.id();
+                                panel.pictures.insert(key, texture);
+                                Some(id)
+                            });
+                        }
                         facts.recent_pictures.retain(|(_, id)| *id != egui::TextureId::User(u64::MAX));
                         let visible = panels::videos_shown(facts.gallery_scroll);
                         let video_keys: std::collections::HashSet<String> = stage.host.menu.results.iter().skip(visible.start).take(visible.len()).map(|r| format!("video {}", r.id)).collect(); // i18n: not shown (texture cache keys)

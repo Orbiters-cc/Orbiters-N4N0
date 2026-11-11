@@ -796,3 +796,48 @@ fn the_song_s_picture_disappearing_paints_all_tools_again() {
     }
 
 }
+
+
+#[test]
+fn unchanged_results_stop_painting_after_the_host_update_is_captured() {
+    let mut person = Person::with_a_song();
+    let mut song = crate::overlay::menu_pages::sample_media();
+    song.playing = false;
+    person.panels.media.stand_in(crate::media::Reading { media: Some(song), volume: None, art: None });
+    person.panels.stage.async_pages = true;
+    person.around = Some(Around::QuickMenu);
+    person.turns(120);
+    person.panels.open_sheet(Sheet::Results, "YouTube", &person.snap);
+    person.panels.stage.host.open(&person.snap);
+    person.panels.stage.host.menu.page = orbiters_n4n0_core::menu::Page::Results;
+    person.turns_until("the unchanged Results page rests", |p| {
+        assert_eq!(p.panels.facts.sheet, Some(Sheet::Results), "the fixture must remain on Results");
+        !p.panels.stage.host.dirty && !p.panels.stage.painter.busy() && p.panels.takeover.as_ref().is_some_and(|panel| panel.painted && !panel.dirty)
+    });
+    for _ in 0..10 {
+        std::thread::sleep(Duration::from_millis(11));
+        let handed = turn_of(&mut person.panels, &person.snap, person.around, person.library);
+        assert!(!handed.iter().any(|(zone, _, _)| *zone == Zone::Takeover), "unchanged result data produced another page frame");
+    }
+}
+
+
+#[test]
+fn unchanged_world_video_reuses_its_page_texture() {
+    let mut person = Person::with_a_song();
+    person.panels.stage.async_pages = true;
+    person.around = Some(Around::QuickMenu);
+    person.turns(120);
+    person.panels.open_sheet(Sheet::All, "", &person.snap);
+    person.panels.stage.host.open(&person.snap);
+    person.panels.stage.host.put_picture("abcdefghijk", egui::ColorImage::filled([64, 36], egui::Color32::RED));
+    let mut snap = (*person.snap).clone();
+    snap.n4n0.world_video = Some(("https://www.youtube.com/watch?v=abcdefghijk".into(), Some("test video".into()), None));
+    person.snap = Arc::new(snap);
+    person.turn();
+    let key = "world-video abcdefghijk";
+    let first = person.panels.takeover.as_ref().unwrap().pictures.get(key).unwrap().id();
+    person.panels.takeover.as_mut().unwrap().dirty = true;
+    person.turn();
+    assert_eq!(person.panels.takeover.as_ref().unwrap().pictures.get(key).unwrap().id(), first, "unchanged video recreated its texture");
+}

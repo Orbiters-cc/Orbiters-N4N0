@@ -59,16 +59,21 @@ impl Painter {
                     super::super::record_phase(3, start.elapsed());
                     Frame { epoch: request.epoch, sheet: request.sheet, facts: request.facts, items, pixels, hover: request.hover, pressed: request.pressed, phases: crate::overlay::paint_phases(false) }
                 });
-                let mut state = thread.0.lock().unwrap_or_else(|e| e.into_inner());
-                state.working = false;
-                state.frame = Some(frame);
+                let retired = {
+                    let mut state = thread.0.lock().unwrap_or_else(|e| e.into_inner());
+                    state.working = false;
+                    state.frame.replace(frame)
+                };
+                // Reclaiming a large pixel buffer must not hold the input thread's mailbox lock.
+                drop(retired);
             }
         }).expect("CPU page painter thread");
         Self { shared, ctx }
     }
     pub fn submit(&self, request: Request) {
-        self.shared.0.lock().unwrap_or_else(|e| e.into_inner()).request = Some(request);
+        let retired = self.shared.0.lock().unwrap_or_else(|e| e.into_inner()).request.replace(request);
         self.shared.1.notify_one();
+        drop(retired);
     }
     pub fn take(&self) -> Option<Frame> { self.shared.0.lock().unwrap_or_else(|e| e.into_inner()).frame.take() }
     pub fn busy(&self) -> bool { let s = self.shared.0.lock().unwrap_or_else(|e| e.into_inner()); s.working || s.request.is_some() || s.frame.is_some() }

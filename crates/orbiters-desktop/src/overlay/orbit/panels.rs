@@ -349,12 +349,12 @@ const GALLERY_GAP: f32 = 12.0;
 /// The gallery's tiles and where each lies, made once when they change. Tens of thousands of pictures are nothing unusual, and this goes around with the facts each frame: it is
 /// compared by being the same list.
 #[derive(Clone, Debug, Default)]
-pub struct Gallery(pub(super) std::sync::Arc<GalleryList>);
+pub struct Gallery(std::sync::Arc<GalleryList>);
 
 #[derive(Debug, Default)]
-pub(super) struct GalleryList {
+struct GalleryList {
     items: Vec<Recent>,
-    pub(super) rects: Vec<Rect>,
+    rects: Vec<Rect>,
     height: f32,
 }
 
@@ -4380,5 +4380,47 @@ mod tests {
         let i = (middle.y as u32 * px[0] + middle.x as u32) as usize * 4;
         assert_eq!(rgba[i..i + 4], [200, 200, 200, 200]);
         assert!(rgba.chunks_exact(4).any(|c| c == [0, 0, 0, 0]));
+    }
+}
+
+/// Keeps the first visible source at its existing offset when a refreshed list inserts entries above it.
+pub(super) fn anchored_scroll(before: &Gallery, after: &Gallery, scroll: f32) -> Option<f32> {
+    let (i, rect) = before.0.rects.iter().enumerate().find(|(_, r)| r.bottom() > scroll)?;
+    let n = after.iter().position(|r| r.dir == before[i].dir)?;
+    Some(after.0.rects[n].top() + scroll - rect.top())
+}
+#[cfg(test)]
+mod anchor_regression {
+    use super::*;
+    #[test]
+    fn incoming_rows_keep_the_visible_source_and_offset() {
+        let recent = |n: usize| Recent { dir: std::path::PathBuf::from(n.to_string()), aspect: 16.0/9.0, ..Default::default() };
+        let before: Gallery = (3..12).map(recent).collect();
+        let after: Gallery = (0..12).map(recent).collect();
+        let scroll = before.0.rects[3].top() + 17.25;
+        let moved = anchored_scroll(&before, &after, scroll).unwrap();
+        assert_eq!(moved - after.0.rects[6].top(), 17.25);
+        assert_eq!(before[3].dir, after[6].dir);
+        assert!(moved > scroll);
+    }
+}
+
+pub(super) fn remap_gallery_action(before: &Gallery, after: &Gallery, action: Action) -> Action {
+    match action {
+        Action::Capture(n) => before.get(n).and_then(|old| after.iter().position(|new| new.dir == old.dir)).map(Action::Capture).unwrap_or(Action::Idle),
+        other => other,
+    }
+}
+#[cfg(test)]
+mod click_identity_regression {
+    use super::*;
+    #[test]
+    fn a_picture_click_keeps_its_source_when_entries_arrive() {
+        let recent = |name: &str| Recent { dir: std::path::PathBuf::from(name), ..Default::default() };
+        let before: Gallery = [recent("first"), recent("pressed")].into_iter().collect();
+        let after: Gallery = [recent("new"), recent("first"), recent("pressed")].into_iter().collect();
+        let Action::Capture(n) = remap_gallery_action(&before, &after, Action::Capture(1)) else { panic!("lost click"); };
+        assert_eq!(after[n].dir, before[1].dir);
+        assert_eq!(remap_gallery_action(&before, &Gallery::default(), Action::Capture(1)), Action::Idle);
     }
 }

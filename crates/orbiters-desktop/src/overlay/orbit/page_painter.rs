@@ -19,6 +19,8 @@ pub(super) struct Frame {
     pub items: Vec<Item>,
     pub pixels: Vec<u8>,
     pub phases: crate::overlay::PaintPhases,
+    pub hover: Option<usize>,
+    pub pressed: Option<usize>,
 }
 impl Frame {
     pub fn matches(&self, epoch: u64, sheet: Option<Sheet>, gallery: &panels::Gallery) -> bool {
@@ -55,7 +57,7 @@ impl Painter {
                     let mut pixels = canvas.pixels().to_vec();
                     panels::finish_picture(&mut pixels, canvas.pixels(), px, px[0] as f32 / orbiters_n4n0_core::menu::layout::WIDTH as f32, [0, 0, px[0], px[1]]);
                     super::super::record_phase(3, start.elapsed());
-                    Frame { epoch: request.epoch, sheet: request.sheet, facts: request.facts, items, pixels, phases: crate::overlay::paint_phases(false) }
+                    Frame { epoch: request.epoch, sheet: request.sheet, facts: request.facts, items, pixels, hover: request.hover, pressed: request.pressed, phases: crate::overlay::paint_phases(false) }
                 });
                 let mut state = thread.0.lock().unwrap_or_else(|e| e.into_inner());
                 state.working = false;

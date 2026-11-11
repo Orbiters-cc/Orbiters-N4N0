@@ -1740,18 +1740,21 @@ impl Panels {
         let old_gallery = self.facts.recent.clone();
         let arranged = in_gallery && self.recents.arrange(self.facts.gallery_filter, snap.settings.photos_layout);
         if listed || arranged {
-            if let Some(panel) = self.takeover.as_mut() { panel.items.clear(); panel.hover = None; }
-            self.pressed_late = None;
-            self.drag = None;
+            if self.facts.sheet == Some(Sheet::Pictures) {
+                let index = |n: usize| old_gallery.get(n).and_then(|old| self.recents.shown.iter().position(|new| new.dir == old.dir));
+                let action = |action: Action| panels::remap_gallery_action(&old_gallery, &self.recents.shown, action);
+                if let Some(panel) = self.takeover.as_mut() {
+                    for item in &mut panel.items { item.action = action(item.action); }
+                }
+                self.pressed_late = self.pressed_late.map(action);
+                if let Some(drag) = self.drag.as_mut() { drag.action = drag.action.map(action); }
+                self.facts.opened = self.facts.opened.and_then(index);
+            }
             if self.facts.sheet == Some(Sheet::Pictures) && self.facts.gallery_scroll > 0.0 {
                 let before = self.facts.gallery_scroll;
-                if let Some((i, rect)) = old_gallery.0.rects.iter().enumerate().find(|(_, r)| r.bottom() > before) {
-                    if let Some(n) = self.recents.shown.iter().position(|r| r.dir == old_gallery[i].dir) {
-                        let after = self.recents.shown.0.rects[n].top() + before - rect.top();
-                        let delta = after - before;
-                        self.facts.gallery_scroll = after;
-                        self.gallery_to += delta;
-                    }
+                if let Some(after) = panels::anchored_scroll(&old_gallery, &self.recents.shown, before) {
+                    self.facts.gallery_scroll = after;
+                    self.gallery_to += after - before;
                 }
             }
             for panel in &mut self.list {
@@ -2810,7 +2813,7 @@ impl Panels {
                 panel.hover = self.sheet_pointer.and_then(|p| panels::hit(&frame.items, p));
                 let first = !panel.painted;
                 panel.painted = true;
-                panel.dirty |= first;
+                panel.dirty |= first || frame.hover != panel.hover || frame.pressed != panel.pressed;
                 show(panel, [0, 0, panel.px[0], panel.px[1]]);
                 stage.worker_phases = frame.phases;
                 stage.cache.retain(|f| f.sheet != frame.sheet);
@@ -2860,7 +2863,7 @@ impl Panels {
                 }
             }
             Some(sheet) => {
-                if panel.dirty {
+                if panel.dirty || (stage.async_pages && stage.remote_pictures.loading()) {
                     let first = !panel.painted;
                     panel.dirty = false;
                     let items = panels::sheet_items(sheet, &self.facts);
@@ -2936,14 +2939,15 @@ impl Panels {
                                 }
                             }
                         }
-                        facts.world_video_picture = stage.host.menu.world_video.as_ref().and_then(|v| orbiters_n4n0_core::videos::youtube_id(&v.url)).and_then(|id| stage.host.image(&id).map(|image| panel.pictures.entry(format!("world-video {id}")).or_insert_with(|| ctx.load_texture("world-video", image, TextureOptions::LINEAR)).id()));
+                        panel.pictures.retain(|key, _| !key.starts_with("world-video "));
+                        facts.world_video_picture = stage.host.menu.world_video.as_ref().and_then(|v| orbiters_n4n0_core::videos::youtube_id(&v.url)).and_then(|id| stage.host.image(&id).map(|image| panel.pictures.entry(format!("world-video {id}")).or_insert_with(|| ctx.load_texture("world-video", image, TextureOptions::LINEAR)).id())); // i18n: not shown (texture cache keys)
                         facts.recent_pictures.retain(|(_, id)| *id != egui::TextureId::User(u64::MAX));
                         let visible = panels::videos_shown(facts.gallery_scroll);
-                        let video_keys: std::collections::HashSet<String> = stage.host.menu.results.iter().skip(visible.start).take(visible.len()).map(|r| format!("video {}", r.id)).collect();
+                        let video_keys: std::collections::HashSet<String> = stage.host.menu.results.iter().skip(visible.start).take(visible.len()).map(|r| format!("video {}", r.id)).collect(); // i18n: not shown (texture cache keys)
                         panel.pictures.retain(|key, _| !key.starts_with("video ") || video_keys.contains(key));
                         for (i, (tile, result)) in facts.videos.iter_mut().zip(&stage.host.menu.results).enumerate() {
                             if !visible.contains(&i) { tile.picture = None; continue; }
-                            tile.picture = stage.host.image(&result.id).map(|image| panel.pictures.entry(format!("video {}", result.id)).or_insert_with(|| ctx.load_texture("video", image, TextureOptions::LINEAR)).id());
+                            tile.picture = stage.host.image(&result.id).map(|image| panel.pictures.entry(format!("video {}", result.id)).or_insert_with(|| ctx.load_texture("video", image, TextureOptions::LINEAR)).id()); // i18n: not shown (texture cache keys)
                         }
                         stage.painter.submit(page_painter::Request { epoch: stage.epoch, sheet, facts, hover, pressed, time, language: orbiters_i18n::language() });
                     } else {

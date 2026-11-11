@@ -669,6 +669,16 @@ fn script(rig: &mut Rig) {
     rig.panels.recents.keep(1, 0);
     if let Some(panel) = rig.panels.takeover.as_mut() { panel.pictures.clear(); panel.dirty = true; }
     rig.scroll("pictures-cold-ingestion-scroll", Rest);
+    rig.panels.recents.keep(1, 0);
+    if let Some(panel) = rig.panels.takeover.as_mut() { panel.pictures.clear(); panel.dirty = true; }
+    rig.begin("pictures-cold-ingestion-fling", Rest);
+    rig.panels.throw = 1800.0;
+    rig.turns(90);
+    rig.rest();
+    rig.panels.facts.gallery_scroll = 0.0;
+    rig.panels.gallery_to = 0.0;
+    rig.panels.throw = 0.0;
+    if let Some(panel) = rig.panels.takeover.as_mut() { panel.dirty = true; }
     rig.facts_cost("Pictures, loaded"); // i18n: not shown (benchmark report labels)
     rig.scroll("qm-sheet-pictures-scroll", Rest);
     rig.begin("pictures-fling", Rest);
@@ -679,10 +689,18 @@ fn script(rig: &mut Rig) {
         for sheet in [super::panels::Sheet::All, super::panels::Sheet::Pictures, super::panels::Sheet::Settings, super::panels::Sheet::Tracking, super::panels::Sheet::Mics, super::panels::Sheet::Booster, super::panels::Sheet::Talk, super::panels::Sheet::Instances, super::panels::Sheet::Results, super::panels::Sheet::Menu, super::panels::Sheet::Worlds, super::panels::Sheet::Pictures] {
             rig.begin(&format!("switch-{round}-{sheet:?}"), Rest);
             let opening = Instant::now();
-            rig.panels.open_sheet(sheet, "", &rig.snap);
+            match sheet {
+                super::panels::Sheet::Worlds => { rig.panels.act(Action::Worlds, &rig.snap, &mut super::Pressed::default()); }
+                _ => {
+                    if sheet == super::panels::Sheet::Instances { rig.panels.stage.host.menu.page = orbiters_n4n0_core::menu::Page::Instances; }
+                    if sheet == super::panels::Sheet::Results { rig.panels.stage.host.menu.page = orbiters_n4n0_core::menu::Page::Results; }
+                    rig.panels.open_sheet(sheet, "", &rig.snap);
+                }
+            }
             let opening = opening.elapsed();
             rig.turns(1);
             rig.steps.last_mut().unwrap().turns.last_mut().unwrap().open += opening;
+            rig.write("switch-next-turn");
             if round == 0 { rig.rest(); }
         }
     }

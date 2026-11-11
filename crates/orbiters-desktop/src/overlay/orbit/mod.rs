@@ -1384,7 +1384,7 @@ impl Panels {
 
     /// What opens a screen of the sheet, for the way back. What brought them there is what brings them back: everything else about it is kept by [`Panels::keep_screen`].
     fn opens_a_screen(action: Action) -> bool {
-        matches!(action, Action::Worlds | Action::All | Action::Pictures | Action::Talk | Action::Settings | Action::Page(_))
+        matches!(action, Action::Worlds | Action::All | Action::Pictures | Action::Talk | Action::Settings | Action::Page(_) | Action::WorldInfo(_))
     }
 
     /// Before leaving a screen, or showing another of the same name: what it has.
@@ -1994,6 +1994,7 @@ impl Panels {
             can_copy_playing: !layout::target_state(menu, Target::CopyPlaying).hidden,
             // Where a card can be dropped at all: Drop link then does it in one press, copied or not.
             can_drop_playing: menu.can_drop,
+            drop_why: panels::DropWhy::of(menu.can_drop, snap.n4n0.avatar_id.is_some(), snap.n4n0.prop_sync.is_some()),
             playing_link_copied: menu.media.as_ref().and_then(|m| m.video.as_deref()).is_some_and(|v| menu.copied.as_deref() == Some(v)),
             can_light: menu.light.is_some(),
             vr_close: self.sharp > 1.0,
@@ -2024,6 +2025,9 @@ impl Panels {
             },
             videos_for: menu.results_for.clone(),
             talk: talk_now(snap),
+            talk_auto: snap.n4n0.voice.automatic,
+            talk_heard: snap.n4n0.voice.provisional.as_ref().filter(|_| self.facts.sheet == Some(Sheet::Talk)).map(|p| p.text.clone()),
+            talk_signing_in: snap.account.state == crate::state::AccountState::SigningIn,
             tracking: snap.n4n0.tracking.as_ref().map(|t| (snap.settings.tracking.enabled, snap.settings.tracking.ms, t.note.clone())),
             tracking_note: snap.n4n0.tracking_note.clone(),
             smoothing_held: self.smoothing_held,
@@ -2428,6 +2432,7 @@ impl Panels {
             P::Crash => self.backend.booster(Command::Overlay(Request::SimulateCrash)),
             P::TestLoad(on) => self.backend.booster(Command::TestLoad(on)),
             P::Report => self.backend.booster(Command::WriteTestReport),
+            P::StopTest => self.backend.booster(Command::Overlay(Request::StopTest)),
         }
     }
 
@@ -2484,6 +2489,9 @@ impl Panels {
         match action {
             Action::Back => self.go_back(snap, out),
             // By the menu's own press, so it does here what it does on N4N0's page: that says so, and offers Drop once it was copied.
+            // Greyed where the avatar cannot drop a card (F3): pointed at, it says why; pressed, it does nothing, and above all does not mark the link copied
+            // when the clipboard never had it.
+            Action::PlayingLink(Target::DropPlaying) if !self.stage.host.menu.can_drop => {}
             Action::PlayingLink(target) => {
                 let host = &mut self.stage.host;
                 // Drop link is beside Copy link on All tools: it drops in one press, as the menu's own Drop does once copied (without touching the clipboard).
@@ -2602,6 +2610,28 @@ impl Panels {
                 }
             }
             Action::Page(target) => self.open_page(target, snap),
+            // A previous instance's world: its page on the 3D worlds sheet (F10). Nothing is sent to VRChat: only the chips invite.
+            Action::WorldInfo(group) => {
+                let Some(visit) = self.facts.worlds_visited.get(group).cloned() else { return };
+                if !self.worlds_here {
+                    return;
+                }
+                self.open_sheet(Sheet::Worlds, mark("Worlds in 3D"), snap);
+                let first = !self.worlds_opened;
+                self.worlds_opened = true;
+                let layout = self.stage.host.menu.layout;
+                if let Some(worlds) = self.stage.worlds.as_mut() {
+                    worlds.set_moves(!snap.settings.reduce_motion);
+                    if first {
+                        worlds.open_panel(layout);
+                    } else {
+                        worlds.come_back(layout);
+                    }
+                    worlds.open_world(&visit.world_id, &visit.name);
+                }
+                // The way back from further on is the sheet as it is, whatever world it shows then.
+                self.here = Some(Action::Worlds);
+            }
             Action::Invite(group, visit) => {
                 let asked = self.facts.worlds_visited.get(group).and_then(|w| {
                     let location = if visit == 0 { Some(w.location.clone()) } else { w.earlier.get(visit - 1).map(|e| e.0.clone()) };
@@ -2645,13 +2675,18 @@ impl Panels {
                     self.open_sheet(Sheet::Talk, mark("Ask N4N0"), snap);
                 }
             }
-            Action::TalkToggle => {
-                if !matches!(self.facts.talk, panels::TalkNow::Off(_)) {
+            Action::TalkToggle => match self.facts.talk {
+                panels::TalkNow::Off(_) => {}
+                // Signed out of Orbiters: the way to sign in, at once (F23).
+                panels::TalkNow::SignIn => self.backend.sign_in(),
+                panels::TalkNow::Failed => self.backend.n4n0(N4n0Command::AskRetry),
+                // The person's own press: by the button from now on, for this visit of the page (F24).
+                _ => {
                     let down = snap.n4n0.voice.automatic || !snap.n4n0.listening;
                     self.talking = down;
                     self.backend.n4n0(N4n0Command::AskTalk { down });
                 }
-            }
+            },
             Action::NewConversation => self.backend.n4n0(N4n0Command::NewConversation),
             Action::Peek => {
                 self.peek = !self.peek;
@@ -3178,27 +3213,34 @@ impl Drop for Panels {
 
 /// Where talking with N4N0 stands, and why it cannot when it cannot.
 fn talk_now(snap: &Snapshot) -> panels::TalkNow {
-    let settings = &snap.settings.n4n0;
-    if snap.n4n0.voice.readiness == orbiters_n4n0::status::VoiceReadiness::SignIn {
-        return panels::TalkNow::Off(mark("Sign in to Orbiters to talk to N4N0."));
+    use orbiters_n4n0::status::VoiceReadiness;
+    let voice = &snap.n4n0.voice;
+    // What stops it is said first, before a word (F23): the runtime checks the same before it opens the microphone.
+    match voice.readiness {
+        VoiceReadiness::SignIn => return panels::TalkNow::SignIn,
+        VoiceReadiness::AssistantOff => return panels::TalkNow::Off(mark("Turn on N4N0's assistant in Orbiters")),
+        VoiceReadiness::ModelsDownloading => return panels::TalkNow::Off(mark("Its speech models are downloading")),
+        VoiceReadiness::ModelsMissing => return panels::TalkNow::Off(mark("Install its speech in Orbiters, N4N0")),
+        VoiceReadiness::MicrophoneProblem => return panels::TalkNow::Failed,
+        VoiceReadiness::Ready => {}
     }
-    if snap.n4n0.voice.readiness == orbiters_n4n0::status::VoiceReadiness::MicrophoneProblem {
-        return panels::TalkNow::Off(mark("N4N0's ears stopped."));
-    }
+    let level = (voice.level * 20.0).round() / 20.0;
     if snap.n4n0.listening {
-        return panels::TalkNow::Listening((snap.n4n0.voice.level * 20.0).round() / 20.0);
+        // Hands-free and nobody talking yet: waiting for the person; else it hears them.
+        return if voice.automatic && !voice.speech { panels::TalkNow::Waiting } else { panels::TalkNow::Listening(level) };
     }
-    if !settings.enabled || !settings.assistant {
-        return panels::TalkNow::Off(mark("Turn on N4N0's assistant in Orbiters"));
-    }
-    if snap.n4n0.voice.downloading.is_some() {
-        return panels::TalkNow::Off(mark("Its speech models are downloading"));
-    }
-    if !snap.n4n0.voice.installed {
-        return panels::TalkNow::Off(mark("Install its speech in Orbiters, N4N0"));
+    if voice.finalizing {
+        return panels::TalkNow::Finalizing;
     }
     if snap.n4n0.thinking {
         return panels::TalkNow::Thinking;
+    }
+    if voice.automatic && voice.ask_open {
+        // Hands-free holds its ears while N4N0 answers aloud or an approval waits, then listens again.
+        if voice.output_playing || !snap.n4n0.confirmations.is_empty() {
+            return panels::TalkNow::Paused;
+        }
+        return panels::TalkNow::Waiting;
     }
     panels::TalkNow::Ready
 }

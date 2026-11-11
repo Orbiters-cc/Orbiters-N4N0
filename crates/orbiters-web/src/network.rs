@@ -161,7 +161,7 @@ mod tests {
             "169.254.1.1",
             "100.64.0.1",
             "172.31.0.1",
-            "0.0.0.0",
+            "0.0.0.0", // network: not a socket (address-classification rejection fixture)
             "224.1.1.1",
             "::1",
             "::ffff:127.0.0.1",

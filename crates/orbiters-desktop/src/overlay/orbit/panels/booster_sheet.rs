@@ -32,6 +32,8 @@ pub enum BoosterPick {
     Crash,
     TestLoad(bool),
     Report,
+    /// Stops the comparison under way, automatic or asked for (F4).
+    StopTest,
 }
 
 /// What the sheet draws, made from the snapshot each time, so that it is in the language now.
@@ -57,6 +59,10 @@ pub struct BoosterFacts {
     pub test_tools: bool,
     pub test_load: bool,
     pub holding: bool,
+    /// What was measured here just now: real frames a second, the headset's rate, whether frames come at half that rate, and the share SteamVR filled in (F4).
+    pub measured: Option<(i32, i32, bool, i32)>,
+    /// A comparison under way: of what, seconds left, with the change or without, and whether the person asked for it.
+    pub testing: Option<(Kind, u32, bool, bool)>,
 }
 
 impl BoosterFacts {
@@ -84,6 +90,12 @@ impl BoosterFacts {
             test_tools: status.test_tools,
             test_load: status.test_load,
             holding: status.overlay.sharpness.is_some(),
+            measured: report.now.map(|n| (n.real_fps.round() as i32, n.refresh_hz.round() as i32, n.half_rate_pacing, (n.filled_share * 100.0).round() as i32)),
+            // At Off only a test the person asked for runs: an older automatic one is not shown as running.
+            testing: report
+                .testing
+                .filter(|t| snap.settings.booster.level != Level::Off || t.manual)
+                .map(|t| (t.kind, t.seconds_left.ceil().max(0.0) as u32, t.side == orbiters_booster::trial::Side::With, t.manual)),
         }
     }
 }
@@ -153,6 +165,10 @@ pub(super) fn booster_items(facts: &Facts) -> Vec<Item> {
     for (i, level) in Level::ALL.into_iter().enumerate() {
         out.push(Item { action: Action::Set(Pick::Booster(BoosterPick::Level(level))), rect: cell(i), look: Look::BoosterCell(level) });
     }
+    // A test under way can be stopped from here, whoever started it (F4).
+    if b.testing.is_some() && !b.asking {
+        out.push(Item { action: Action::Set(Pick::Booster(BoosterPick::StopTest)), rect: stop_rect(), look: Look::Choice { icon: icons::X, label: tr("Stop the test"), on: false } });
+    }
     if b.asking {
         out.extend(button_row(
             BOTTOM,
@@ -177,6 +193,14 @@ pub(super) fn booster_items(facts: &Facts) -> Vec<Item> {
     }
     out
 }
+
+/// Stop, at the end of the line that says what is being tested.
+fn stop_rect() -> Rect {
+    r(X + WIDE - 230.0, STRIP_Y, 230.0, 50.0)
+}
+
+/// The line under the level's own: what is going on now, or the test under way with its Stop.
+const STRIP_Y: f32 = 152.0;
 
 fn test_buttons(b: &BoosterFacts) -> Vec<(BoosterPick, &'static str, &'static str)> {
     let mut row = vec![
@@ -240,50 +264,112 @@ pub(super) fn draw_booster(p: &Painter, facts: &Facts) {
         draw_details(p, b);
         return;
     }
-    let mut y = CELL_Y + CELL_HIGH + 10.0;
-    y = lines(p, pos2(X + 4.0, y), booster::level_line(b.held.unwrap_or(b.level)), 19.0, weight::MEDIUM, look::MUTED, WIDE - 8.0, 2);
-    y = lines(p, pos2(X + 4.0, y + 8.0), &b.status, 23.0, weight::BOLD, look::LABEL, WIDE - 8.0, 2);
-    let panel = Rect::from_min_max(pos2(X, y.max(PANEL_Y - 8.0) + 8.0), pos2(X + WIDE, BOTTOM - 8.0));
-    p.rect_filled(panel, look::radius(14.0), look::TILE);
-    let inside = pos2(panel.left() + 18.0, panel.top() + 14.0);
-    let width = panel.width() - 36.0;
+    let y = CELL_Y + CELL_HIGH + 10.0;
+    lines(p, pos2(X + 4.0, y), booster::level_line(b.held.unwrap_or(b.level)), 18.0, weight::MEDIUM, look::MUTED, WIDE - 8.0, 2);
+    // What goes on now: a test under way (with its Stop), else the one status line that matters.
+    match b.testing {
+        Some((kind, left, with, manual)) => {
+            let strip = Rect::from_min_size(pos2(X, STRIP_Y), vec2(WIDE - 240.0, 50.0));
+            p.rect_filled(strip, look::radius(14.0), theme::alpha(look::accent(), 0.16));
+            widgets::icon(p, pos2(strip.left() + 26.0, strip.center().y), icons::GAUGE, 24.0, look::accent());
+            let what = orbiters_i18n::tr!("Testing: {what}", what = booster::kind_name(kind));
+            let font = look::font(19.0, weight::BOLD);
+            p.text(pos2(strip.left() + 50.0, strip.top() + 15.0), Align2::LEFT_CENTER, fit(p, &what, &font, strip.width() - 64.0), font, look::LABEL);
+            let side = if with { tr("with the change") } else { tr("without it, to compare") };
+            let who = if manual { tr("you asked for it") } else { tr("started by the booster") };
+            let line = orbiters_i18n::tr!("{seconds} s more, {side} · {who}", seconds = left, side = side, who = who);
+            let font = look::font(15.0, weight::MEDIUM);
+            p.text(pos2(strip.left() + 50.0, strip.top() + 36.0), Align2::LEFT_CENTER, fit(p, &line, &font, strip.width() - 64.0), font, look::MUTED);
+        }
+        None => {
+            lines(p, pos2(X + 4.0, STRIP_Y + 6.0), &b.status, 22.0, weight::BOLD, look::LABEL, WIDE - 8.0, 2);
+        }
+    }
     if b.asking {
-        lines(p, inside, booster::avatars_question(), 22.0, weight::SEMIBOLD, look::LABEL, width, 4);
-    } else if b.level == Level::Avatars {
-        draw_guide(p, inside, width, b);
+        let panel = Rect::from_min_max(pos2(X, PANEL_Y), pos2(X + WIDE, BOTTOM - 8.0));
+        p.rect_filled(panel, look::radius(14.0), look::TILE);
+        lines(p, pos2(panel.left() + 18.0, panel.top() + 14.0), booster::avatars_question(), 22.0, weight::SEMIBOLD, look::LABEL, panel.width() - 36.0, 4);
+        return;
+    }
+    let half = (WIDE - 12.0) / 2.0;
+    let left = Rect::from_min_size(pos2(X, PANEL_Y), vec2(half, BOTTOM - 8.0 - PANEL_Y));
+    let right = Rect::from_min_size(pos2(X + half + 12.0, PANEL_Y), left.size());
+    for card in [left, right] {
+        p.rect_filled(card, look::radius(14.0), look::TILE);
+    }
+    draw_measured(p, left, b);
+    if b.level == Level::Avatars {
+        draw_guide(p, pos2(right.left() + 16.0, right.top() + 12.0), right.width() - 32.0, b);
     } else if !b.to_put_back.is_empty() {
-        let mut y = lines(p, inside, tr("Put these back in VRChat's menu if you want them as they were:"), 19.0, weight::SEMIBOLD, look::LABEL, width, 2);
+        let inside = pos2(right.left() + 16.0, right.top() + 12.0);
+        let mut y = lines(p, inside, tr("Put these back in VRChat's menu if you want them as they were:"), 17.0, weight::SEMIBOLD, look::LABEL, right.width() - 32.0, 2);
         for line in b.to_put_back.iter().take(5) {
-            y = lines(p, pos2(inside.x, y + 6.0), line, 17.0, weight::MEDIUM, look::MUTED, width, 1);
+            y = lines(p, pos2(inside.x, y + 6.0), line, 15.5, weight::MEDIUM, look::MUTED, right.width() - 32.0, 1);
         }
     } else {
-        draw_figures(p, inside, width, b);
+        draw_changed(p, right, b);
     }
 }
 
-/// Before and after, only from a comparison that ran to its end; otherwise only what is so now.
-fn draw_figures(p: &Painter, at: Pos2, width: f32, b: &BoosterFacts) {
-    let mut y = at.y;
-    if let Some(comparison) = &b.comparison {
-        let said = booster::before_after(comparison);
-        let title = format!("{} · {}", said.title, booster::kind_name(comparison.kind));
-        y = lines(p, pos2(at.x, y), &title, 18.0, weight::MEDIUM, look::MUTED, width, 1);
-        y = lines(p, pos2(at.x, y + 4.0), &said.figures, 46.0, weight::BOLD, look::LABEL, width, 1);
-        y = lines(p, pos2(at.x, y + 4.0), said.said, 20.0, weight::MEDIUM, look::LABEL, width, 1);
-        y = lines(p, pos2(at.x, y + 6.0), &said.filled, 17.0, weight::MEDIUM, look::MUTED, width, 1);
-    } else if let Some(now) = &b.now {
-        y = lines(p, pos2(at.x, y), now, 22.0, weight::SEMIBOLD, look::LABEL, width, 2);
-    } else {
-        y = lines(p, pos2(at.x, y), tr("Nothing measured yet."), 19.0, weight::MEDIUM, look::MUTED, width, 1);
+/// What was measured here: the frames now, and the last comparison that ran to its end, the only place a gain can come from. No comparison, no gain.
+fn draw_measured(p: &Painter, card: Rect, b: &BoosterFacts) {
+    let (x, width) = (card.left() + 16.0, card.width() - 32.0);
+    let mut y = lines(p, pos2(x, card.top() + 12.0), tr("Measured here"), 16.0, weight::BOLD, look::MUTED, width, 1);
+    match b.measured {
+        Some((fps, hz, half, filled)) => {
+            let big = look::font(44.0, weight::BOLD);
+            let galley = p.layout_no_wrap(fps.to_string(), big, look::LABEL);
+            let wide = galley.size().x;
+            p.galley(pos2(x, y + 2.0), galley, look::LABEL);
+            lines(p, pos2(x + wide + 10.0, y + 14.0), &orbiters_i18n::tr!("real frames a second at {hz} Hz", hz = hz), 16.0, weight::MEDIUM, look::LABEL, width - wide - 10.0, 2);
+            y += 58.0;
+            if half {
+                y = lines(p, pos2(x, y), tr("Half your headset's rate: SteamVR fills in the frames VRChat misses."), 15.0, weight::MEDIUM, look::MUTED, width, 2);
+            }
+            y = lines(p, pos2(x, y + 2.0), &orbiters_i18n::tr!("Filled in by SteamVR: {share} %", share = filled), 15.0, weight::MEDIUM, look::MUTED, width, 1);
+        }
+        None => {
+            y = lines(p, pos2(x, y + 6.0), tr("Measuring this scene…"), 20.0, weight::SEMIBOLD, look::LABEL, width, 1);
+        }
+    }
+    y += 14.0;
+    match &b.comparison {
+        Some(comparison) => {
+            let said = booster::before_after(comparison);
+            y = lines(p, pos2(x, y), &orbiters_i18n::tr!("Last test: {what}", what = booster::kind_name(comparison.kind)), 15.0, weight::BOLD, look::MUTED, width, 1);
+            y = lines(p, pos2(x, y + 2.0), &said.figures, 22.0, weight::BOLD, look::LABEL, width, 1);
+            lines(p, pos2(x, y + 2.0), said.said, 15.5, weight::MEDIUM, look::LABEL, width, 2);
+        }
+        None => {
+            lines(p, pos2(x, y), tr("No gain measured yet: nothing has been compared here."), 15.5, weight::MEDIUM, look::MUTED, width, 2);
+        }
     }
     if b.streamer {
-        lines(p, pos2(at.x, y + 6.0), booster::streamer_line(), 16.0, weight::MEDIUM, look::MUTED, width, 1);
+        lines(p, pos2(x, card.bottom() - 42.0), booster::streamer_line(), 14.0, weight::MEDIUM, look::MUTED, width, 2);
+    }
+}
+
+/// What the booster has changed on this computer right now, as read back: at Off, plainly nothing.
+fn draw_changed(p: &Painter, card: Rect, b: &BoosterFacts) {
+    let (x, width) = (card.left() + 16.0, card.width() - 32.0);
+    let y = lines(p, pos2(x, card.top() + 12.0), tr("What it changes now"), 16.0, weight::BOLD, look::MUTED, width, 1);
+    if b.changed.is_empty() {
+        widgets::icon(p, pos2(x + 16.0, y + 30.0), icons::CHECK_CIRCLE, 30.0, if b.level == Level::Off { look::accent() } else { look::MUTED });
+        lines(p, pos2(x + 42.0, y + 16.0), tr("Nothing is changed"), 21.0, weight::BOLD, look::LABEL, width - 42.0, 1);
+        let why = if b.level == Level::Off { tr("Off: Orbiters only watches your frames.") } else { tr("Nothing here would help yet: it changes something only where it can measure a gain.") };
+        lines(p, pos2(x, y + 58.0), why, 15.5, weight::MEDIUM, look::MUTED, width, 3);
+        return;
+    }
+    let mut y = y + 4.0;
+    for line in b.changed.iter().take(6) {
+        y = lines(p, pos2(x, y + 4.0), line, 15.5, weight::MEDIUM, look::LABEL, width, 2);
     }
 }
 
 /// Step 3's list: one item at a time. Its two figures only ever appear after Done, labelled as what they are.
 fn draw_guide(p: &Painter, at: Pos2, width: f32, b: &BoosterFacts) {
-    let mut y = at.y;
+    // Step 3's list is advice the person follows in VRChat, and says so (F4).
+    let mut y = lines(p, at, tr("Advice: you change these yourself in VRChat"), 16.0, weight::BOLD, look::MUTED, width, 1) + 6.0;
     if !b.guide.likely {
         y = lines(p, pos2(at.x, y), tr("Nothing here is likely to help right now."), 16.0, weight::MEDIUM, look::MUTED, width, 1) + 4.0;
     }
@@ -405,6 +491,36 @@ mod tests {
         snap.settings.booster.level = Level::Picture;
         assert_eq!(BoosterFacts::of(&snap, false, false, None).level, Level::Picture);
         assert_eq!(BoosterFacts::of(&snap, false, false, Some(Level::Off)).held, Some(Level::Off));
+    }
+
+    /// Enzo (VR feedback F4): Boost FPS "kept testing while set to Off". At Off nothing is shown changing or running unless the person asked for a test, and then
+    /// it says so and can be stopped; what was measured shows without a promise, a gain only from a comparison that ran to its end.
+    #[test]
+    fn off_shows_nothing_running_but_a_test_asked_for_with_its_stop() {
+        use orbiters_booster::engine::Testing;
+        use orbiters_booster::trial::Side;
+        let mut snap = Snapshot::new(Settings::default());
+        snap.settings.booster.level = Level::Off;
+        snap.booster.overlay.report.now = Some(orbiters_booster::engine::Now { real_fps: 35.9, refresh_hz: 72.0, half_rate_pacing: true, filled_share: 0.48, ..Default::default() });
+        // An automatic test from before Off was chosen: not running as far as the page goes.
+        snap.booster.overlay.report.testing = Some(Testing { kind: Kind::Programs, seconds_left: 9.0, side: Side::With, manual: false });
+        let facts = facts_with(&snap, false, false);
+        assert_eq!(facts.booster.testing, None);
+        assert!(facts.booster.changed.is_empty(), "Off: nothing changed");
+        assert!(!booster_items(&facts).iter().any(|i| i.action == Action::Set(Pick::Booster(BoosterPick::StopTest))));
+        assert_eq!(facts.booster.measured, Some((36, 72, true, 48)), "what was measured, as measured");
+        assert_eq!(facts.booster.comparison, None, "no comparison, no gain");
+        // One the person asked for: shown, said to be theirs, and stoppable.
+        snap.booster.overlay.report.testing = Some(Testing { kind: Kind::Programs, seconds_left: 9.2, side: Side::Without, manual: true });
+        let facts = facts_with(&snap, false, false);
+        assert_eq!(facts.booster.testing, Some((Kind::Programs, 10, false, true)));
+        let items = booster_items(&facts);
+        assert!(items.iter().any(|i| i.action == Action::Set(Pick::Booster(BoosterPick::StopTest))));
+        for (i, a) in items.iter().enumerate() {
+            for b in &items[i + 1..] {
+                assert!(!a.rect.intersects(b.rect), "{:?} {:?}", a.rect, b.rect);
+            }
+        }
     }
 
     /// All Tools: the booster has its own tile before Settings, and the accessories all keep theirs.

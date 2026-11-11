@@ -3,7 +3,7 @@
 
 use super::super::super::orbit::panels::look as orbit_look;
 use super::*;
-use orbiters_i18n::{tr, tr_n};
+use orbiters_i18n::{tr, tr_ctx, tr_n};
 
 /// A label of the list on the labels page (three across).
 fn label_rect(i: usize) -> Rect {
@@ -21,6 +21,10 @@ const HEADER_LEFT: Rect = Rect { min: Pos2 { x: 744.0, y: 24.0 }, max: Pos2 { x:
 const HEADER_RIGHT: Rect = Rect { min: Pos2 { x: 872.0, y: 24.0 }, max: Pos2 { x: 992.0, y: 80.0 } };
 const WRITE: Rect = Rect { min: Pos2 { x: 744.0, y: 24.0 }, max: Pos2 { x: 992.0, y: 80.0 } };
 const SEND: Rect = Rect { min: Pos2 { x: 824.0, y: 24.0 }, max: Pos2 { x: 992.0, y: 80.0 } };
+/// Reads the world's feedback again, at the foot of its comments, where Orbiters did not answer.
+const RETRY_FEEDBACK: Rect = Rect { min: Pos2 { x: 816.0, y: 514.0 }, max: Pos2 { x: 992.0, y: 562.0 } };
+/// What a press on Write a comment did not do, and the way out, said under it (F6).
+const WRITE_SAYS: Rect = Rect { min: Pos2 { x: 552.0, y: 90.0 }, max: Pos2 { x: 992.0, y: 176.0 } };
 /// A picture shown whole.
 const WHOLE: Rect = Rect { min: Pos2 { x: 32.0, y: 92.0 }, max: Pos2 { x: 992.0, y: 528.0 } };
 
@@ -77,6 +81,10 @@ impl Panel {
                 let Some(e) = self.entry(d) else { return };
                 out.push((Target::WriteComment, WRITE));
                 let wf = d.world_feedback(e);
+                // Orbiters did not answer its read: asked again from here.
+                if wf.loading && wf.error.is_some() {
+                    out.push((Target::RetryFeedback, RETRY_FEEDBACK));
+                }
                 let (page, pages) = self.comment_rows(&wf);
                 for (i, c) in wf.comments.iter().skip(page * COMMENTS_PER_PAGE).take(COMMENTS_PER_PAGE).enumerate() {
                     if c.mine && c.id != 0 {
@@ -108,12 +116,12 @@ impl Panel {
                     out.push((Target::Picture(i), picture_rect(i - first)));
                 }
             }
-            Page::Browse | Page::Typing | Page::Detail => {}
+            Page::Browse | Page::Typing | Page::Detail | Page::Go => {}
         }
     }
 
     /// The page's title beside Back: `title`, then the world's name fainter.
-    fn title(&self, p: &Painter, title: &str, world: Option<&str>, until: f32, shown: f32) {
+    pub(super) fn title(&self, p: &Painter, title: &str, world: Option<&str>, until: f32, shown: f32) {
         let mut job = orbit_look::txt(title, 28.0).weight(weight::SEMIBOLD).color(fade(theme::FG, shown)).job_truncated(until - 108.0);
         if let Some(w) = world {
             job.append(&format!("  {w}"), 0.0, orbit_look::txt("", 20.0).color(fade(theme::FG_3, shown)).format());
@@ -196,7 +204,10 @@ impl Panel {
                 for (t, rect) in targets {
                     let (h, pr) = state(*t);
                     match *t {
+                        // Signed out it says what it does then: the way to sign in (F6).
+                        Target::WriteComment if !d.feedback.signed_in => pill_button(p, *rect, Some(icons::SIGN_IN), tr("Sign in to comment"), theme::ACCENT, theme::ON_ACCENT, h, pr, shown),
                         Target::WriteComment => pill_button(p, *rect, Some(icons::PENCIL_SIMPLE), tr("Write a comment"), theme::ACCENT, theme::ON_ACCENT, h, pr, shown),
+                        Target::RetryFeedback => pill_button(p, *rect, Some(icons::ARROW_CLOCKWISE), tr("Try again"), RAISED2, theme::FG, h, pr, shown),
                         Target::Previous => round_button(p, rect.center(), icons::CARET_LEFT, h, pr, shown),
                         Target::Next => round_button(p, rect.center(), icons::CARET_RIGHT, h, pr, shown),
                         _ => {}
@@ -229,8 +240,11 @@ impl Panel {
                         icon_button(p, delete_rect(row), icons::TRASH, false, label, bg, fg, h, pr, appear);
                     }
                 }
+                let unread = wf.loading && wf.error.is_some();
                 if wf.comments.is_empty() {
-                    let (title, line) = if wf.loading && wf.comment_count > 0 {
+                    let (title, line) = if unread {
+                        (tr("The comments could not be read"), tr("Orbiters did not answer. You can still write one."))
+                    } else if wf.loading && wf.comment_count > 0 {
                         (tr("Reading the comments…"), tr("From Orbiters"))
                     } else {
                         (tr("No comment yet"), tr("Write the first one: what is there to do, who it is for"))
@@ -239,9 +253,23 @@ impl Panel {
                     text(p, pos2(512.0, 286.0), Align2::CENTER_CENTER, orbit_look::txt(title, 24.0).weight(weight::SEMIBOLD).color(fade(theme::FG, shown)));
                     text(p, pos2(512.0, 320.0), Align2::CENTER_CENTER, orbit_look::txt(line, 17.0).color(fade(theme::FG_3, shown)));
                 }
-                let note = self.note(time).map(str::to_string).or_else(|| wf.error.clone());
-                if let Some(note) = note {
-                    text_cut(p, pos2(32.0, 530.0), 380.0, orbit_look::txt(note, 15.0).color(fade(theme::WARN, shown)));
+                // What a press just did not do, under what was pressed, with the way out (F6): not in a corner of the page.
+                if let Some(note) = self.note(time) {
+                    let at = WRITE_SAYS;
+                    p.rect_filled(at, CornerRadius::same(16), theme::INK_700);
+                    p.rect_stroke(at, CornerRadius::same(16), Stroke::new(1.5, fade(theme::WARN, shown)), egui::StrokeKind::Inside);
+                    // Its point, up to the button.
+                    let tip = pos2(WRITE.center().x, at.min.y);
+                    p.add(egui::Shape::convex_polygon(vec![tip - vec2(0.0, 9.0), tip + vec2(10.0, 1.0), tip - vec2(10.0, -1.0)], theme::INK_700, Stroke::NONE));
+                    widgets::icon(p, pos2(at.min.x + 26.0, at.center().y), icons::INFO, 22.0, fade(theme::WARN, shown));
+                    let mut job = orbit_look::txt(note.to_string(), 16.0).color(fade(theme::FG, shown)).line_height(21.0).job(at.width() - 66.0);
+                    job.wrap.max_rows = 3;
+                    let galley = p.layout_job(job);
+                    p.galley(pos2(at.min.x + 48.0, at.center().y - galley.size().y / 2.0), galley, theme::FG);
+                }
+                if let Some(error) = wf.error.clone() {
+                    let room = if unread { RETRY_FEEDBACK.min.x - 48.0 } else { 960.0 };
+                    text_cut(p, pos2(32.0, 538.0), room, orbit_look::txt(error, 15.0).color(fade(theme::WARN, shown)));
                 } else if wf.comment_count as usize > wf.comments.len() && !wf.comments.is_empty() {
                     let line = tr!("The newest {shown} of {total}", shown = wf.comments.len(), total = wf.comment_count);
                     text(p, pos2(32.0, 540.0), Align2::LEFT_CENTER, orbit_look::txt(line, 15.0).color(fade(theme::FG_4, shown)));
@@ -267,14 +295,24 @@ impl Panel {
                     }
                 };
                 let (h, pr) = state(Target::Done);
-                let label = if compose == Compose::Comment { tr("Send") } else { tr("Done") };
+                // Signed out, Send is the way to sign in: what was typed stays (F6).
+                let label = match compose {
+                    Compose::Comment if !d.feedback.signed_in => tr_ctx("button", "Sign in"),
+                    Compose::Comment => tr("Send"),
+                    Compose::Reason => tr("Done"),
+                };
                 let (bg, fg) = if valid { (theme::ACCENT, theme::ON_ACCENT) } else { (RAISED, theme::FG_3) };
                 pill_button(p, SEND, Some(icons::PAPER_PLANE_TILT), label, bg, fg, h, pr, 1.0);
                 text_cut(p, pos2(36.0, 96.0), 952.0, orbit_look::txt(prompt, 19.0).weight(weight::SEMIBOLD).color(fade(theme::FG, shown)));
                 let tint = if valid { theme::ACCENT } else { theme::FG_3 };
                 text(p, pos2(36.0, 136.0), Align2::LEFT_CENTER, orbit_look::txt(count, 15.0).color(fade(tint, shown)));
                 if let Some(note) = self.note(time) {
-                    text(p, pos2(988.0, 136.0), Align2::RIGHT_CENTER, orbit_look::txt(note.to_string(), 15.0).color(fade(theme::WARN, shown)));
+                    // Beside the count, as wide as the line allows: a sign-in sentence is long (F6).
+                    let mut job = orbit_look::txt(note.to_string(), 15.0).color(fade(theme::WARN, shown)).job(560.0);
+                    job.halign = egui::Align::RIGHT;
+                    job.wrap.max_rows = 2;
+                    let galley = p.layout_job(job);
+                    p.galley(pos2(988.0, 136.0 - galley.size().y / 2.0), galley, theme::WARN);
                 }
                 // The whole text, for a long one the field shows the end of.
                 let mut job = orbit_look::txt(self.draft.clone(), 16.0).color(fade(theme::FG_2, shown)).line_height(21.0).job(952.0);
@@ -370,7 +408,7 @@ impl Panel {
                     text(p, pos2(512.0, 552.0), Align2::CENTER_CENTER, orbit_look::txt(line, 15.0).color(fade(theme::FG_4, shown)));
                 }
             }
-            Page::Browse | Page::Typing | Page::Detail => {}
+            Page::Browse | Page::Typing | Page::Detail | Page::Go => {}
         }
     }
 }

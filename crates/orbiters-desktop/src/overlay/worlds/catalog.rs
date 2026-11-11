@@ -852,6 +852,15 @@ impl Catalog {
         });
     }
 
+    /// The listing as if Orbiters had just answered `entries`.
+    #[cfg(test)]
+    pub fn put_for_test(&self, entries: Vec<Entry>) {
+        let mut s = self.state.lock().unwrap_or_else(|p| p.into_inner());
+        s.entries = entries;
+        s.fetched = Some(Instant::now());
+        s.version += 1;
+    }
+
     /// The entries, whether a read is under way, the last error, and the answer's number.
     pub fn snapshot(&self) -> (Vec<Entry>, bool, Option<String>, u64) {
         let s = self.state.lock().unwrap_or_else(|p| p.into_inner());

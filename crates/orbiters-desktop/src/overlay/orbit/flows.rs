@@ -30,6 +30,14 @@ impl Person {
         Self { panels, snap, around: None, library: 0, _alone: alone }
     }
 
+    /// A person whose presses reach a backend that keeps what it was asked: N4N0's commands and sign-ins.
+    fn heard() -> (Self, Arc<Heard>) {
+        let mut person = Self::new();
+        let heard = Arc::new(Heard::default());
+        person.panels = Panels::new(heard.clone(), 2.0, true);
+        (person, heard)
+    }
+
     /// One turn of the overlay's loop, as `vr.rs` takes it.
     fn turn(&mut self) {
         turn_of(&mut self.panels, &self.snap, self.around, self.library);
@@ -61,6 +69,26 @@ impl Person {
     /// Where something that does `action` is: its part's place in the list, and a point on it.
     fn find(&self, action: Action) -> Option<(usize, egui::Pos2)> {
         find_on(&self.panels, action)
+    }
+
+    /// Points at `target` on the 3D worlds sheet's page, presses and lets go, a turn each, the page told each turn that it is on a sheet in VR (`relay`), as
+    /// `vr.rs` tells it; the hand then goes.
+    fn press_world(&mut self, target: crate::overlay::worlds::panel::Target, relay: &crate::overlay::worlds::panel::Status) {
+        let at = self.panels.stage.worlds.as_ref().and_then(|w| w.target_for_test(target)).unwrap_or_else(|| panic!("nothing is {target:?} on the page"));
+        let sheet = self.panels.all().count() - 1;
+        let snap = self.snap.clone();
+        let step = |person: &mut Person| {
+            let _ = person.panels.world_relay(relay.clone());
+            person.turn();
+        };
+        self.panels.hover(Some((sheet, at)));
+        step(self);
+        self.panels.press(&snap);
+        step(self);
+        self.panels.release();
+        step(self);
+        self.panels.hover(None);
+        step(self);
     }
 
     /// Points at what does `action`, presses and lets go, with turns between as a hand takes them.
@@ -854,6 +882,147 @@ fn unchanged_world_video_reuses_its_page_texture() {
     assert_eq!(person.panels.takeover.as_ref().unwrap().pictures.get(key).unwrap().id(), first, "unchanged video recreated its texture");
 }
 
+/// Enzo (VR feedback F6): "Clicking Write a comment does nothing". A capture's page on the sheet in VR, small in its frame as he had it, its comments opened and
+/// Write a comment pressed, all through the hand's pointer and the host as `vr.rs` drives them, with the world's feedback never read: the development server
+/// answered 500 to every read, and Write a comment waited for that read, saying so for a few seconds in a corner of the page. A comment needs no read: signed in,
+/// the keyboard opens; signed out, the button says Sign in to comment, says why beside itself when pressed, and starts signing in.
+#[test]
+fn write_a_comment_opens_its_keyboard_on_the_sheet_in_vr() {
+    use crate::overlay::worlds::panel::{Compose, Page, Status, Target as WorldTarget};
+    use orbiters_n4n0_core::feedback::FeedbackView;
+    const LISTING: &str = r#"{"previews":[{"slot":0,"key":1,"id":7,"worldId":"wrld_4432ea9b-729c-46e3-8eaf-846aa0a37fdd","name":"Silent Dawn","author":"Mei","uploader":"a","view":{"position":[0,1,0],"target":[0,1,1]}}]}"#;
+    for signed_in in [true, false] {
+        let (mut person, heard) = Person::heard();
+        let mut snap = (*person.snap).clone();
+        snap.n4n0.feedback = FeedbackView { signed_in, ..Default::default() };
+        person.snap = Arc::new(snap);
+        person.around = Some(Around::QuickMenu);
+        person.turns(3);
+        person.press(Action::Worlds);
+        person.turns(2);
+        assert_eq!(person.panels.facts.sheet, Some(Sheet::Worlds));
+        let entry = crate::overlay::worlds::catalog::parse(LISTING).unwrap().remove(0);
+        person.panels.stage.worlds.as_mut().unwrap().pick_for_test(entry);
+        let docked = Status { headset: true, small: true, small_docked: true, shown: true, current: Some(7), ..Default::default() };
+        let _ = person.panels.world_relay(docked.clone());
+        person.turns(2);
+        let page = |person: &Person| person.panels.stage.worlds.as_ref().unwrap().page_for_test();
+        person.press_world(WorldTarget::Comments, &docked);
+        assert_eq!(page(&person), Page::Comments, "signed in {signed_in}: its comments");
+        person.press_world(WorldTarget::WriteComment, &docked);
+        if signed_in {
+            assert_eq!(page(&person), Page::Compose(Compose::Comment), "the keyboard, though the world's feedback was never read");
+            assert!(person.panels.stage.worlds.as_ref().unwrap().typing(), "the computer's keys type there too");
+        } else {
+            assert_eq!(page(&person), Page::Comments, "nothing to write as, yet");
+            assert!(person.panels.stage.worlds.as_ref().unwrap().target_for_test(WorldTarget::WriteComment).is_some(), "the way to sign in stays there");
+            assert_eq!(heard.sign_ins.load(std::sync::atomic::Ordering::Relaxed), 1, "and the press started signing in");
+        }
+    }
+}
+
+/// Enzo (VR feedback F10): "world info from the previous-instance rows". A row of Instances opens its world's page on the 3D worlds sheet, a world with a 3D
+/// capture as its capture's page and one without as its world's; opening it invites nobody; Back comes to Instances where it was scrolled to; its invite chips
+/// still invite.
+#[test]
+fn a_previous_instance_opens_its_world_s_page_and_back_comes_to_where_it_was() {
+    use crate::overlay::worlds::panel::Page;
+    use orbiters_n4n0_core::menu::InstanceRow;
+    // The second world has a 3D capture on Orbiters.
+    let world = |i: usize| format!("wrld_00000000-0000-4000-8000-{i:012}");
+    // The world the scrolled list shows first has a 3D capture on Orbiters.
+    let listing = |n: usize| {
+        format!(r#"{{"previews":[{{"slot":0,"key":1,"id":7,"worldId":"{}","name":"World","author":"Mei","uploader":"a","view":{{"position":[0,1,0],"target":[0,1,1]}}}}]}}"#, world(n))
+    };
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+    let mut person = Person::new();
+    person.around = Some(Around::QuickMenu);
+    person.turns(3);
+    person.press(Action::Page(Target::Instances));
+    person.turns(2);
+    assert_eq!(person.panels.facts.sheet, Some(Sheet::Instances));
+    let rows: Vec<InstanceRow> = (0..12).map(|i| InstanceRow { location: format!("{}:1234{i}~region(eu)", world(i)), world: format!("World {i}"), at: now - i as u64 * 3600 }).collect();
+    for capture in [false, true] {
+        // These instances, whatever this computer's history has (opening Instances reads it).
+        person.panels.stage.host.menu.set_instances(rows.clone(), true, "");
+        person.turns(2);
+        assert_eq!(person.panels.facts.worlds_visited.len(), 12);
+        // Scrolled down by the wheel, as a person reading the list is, and come to rest (a list still gliding takes a press for a drag).
+        if capture {
+            person.panels.wheel(-2.0);
+            person.turns_until("the list at rest", |p| (p.panels.facts.gallery_scroll - p.panels.gallery_to).abs() < 0.01 && p.panels.throw == 0.0);
+            person.turns(2);
+        }
+        let scroll = person.panels.gallery_to;
+        assert!(!capture || scroll > 0.0, "{scroll}");
+        // The first row wholly in sight (past the list's head).
+        let n = (0..12).find(|&i| person.find(Action::WorldInfo(i)).is_some_and(|(_, at)| at.y > 120.0)).expect("a row in sight");
+        let listed = if capture { vec![crate::overlay::worlds::catalog::parse(&listing(n)).unwrap().remove(0)] } else { Vec::new() };
+        person.panels.stage.worlds.as_ref().expect("the worlds' panel").listing_for_test(listed);
+        person.press(Action::WorldInfo(n));
+        person.turns(2);
+        assert_eq!(person.panels.facts.sheet, Some(Sheet::Worlds), "world {n}: its page");
+        let shown = person.panels.stage.worlds.as_ref().unwrap().shown_world_for_test();
+        assert_eq!(shown, Some((Page::Detail, world(n), capture)), "world {n}");
+        assert!(person.panels.invited.is_none() && !person.panels.stage.host.menu.invite_waiting, "world {n}: nobody invited");
+        // Back: Instances, as far down as it was, at once (before this computer's history replaces the rows).
+        let back = person.find(Action::Back).expect("the sheet's Back");
+        person.panels.hover(Some(back));
+        person.turn();
+        let snap = person.snap.clone();
+        person.panels.press(&snap);
+        assert_eq!(person.panels.facts.sheet, Some(Sheet::Instances), "world {n}: back where it was opened from");
+        assert_eq!(person.panels.gallery_to, scroll, "world {n}: as far down as it was");
+        person.panels.release();
+        person.panels.hover(None);
+        person.turn();
+    }
+    person.panels.stage.host.menu.set_instances(rows.clone(), true, "");
+    person.turns(2);
+    // The chips still invite.
+    let shown = (0..12).find(|&i| person.find(Action::Invite(i, 0)).is_some_and(|(_, at)| at.y > 120.0)).expect("an invite in sight");
+    person.press(Action::Invite(shown, 0));
+    assert!(person.panels.invited.is_some(), "an invite asked for");
+}
+
+/// Enzo (VR feedback F3): with no N4N0 link card on the avatar, Drop link is greyed, says why when pointed at, and a press does nothing; above all it no longer
+/// marks the link copied when the clipboard never had it.
+#[test]
+fn drop_link_without_the_avatar_s_card_says_why_and_does_nothing() {
+    use crate::overlay::menu_pages::sample_media;
+    let mut person = Person::new();
+    let media = Arc::new(crate::media::Watcher::new(|| Box::new(orbiters_n4n0::media::NoMedia)));
+    let mut playing = sample_media();
+    playing.video = Some("dQw4w9WgXcQ".into());
+    media.stand_in(crate::media::Reading { media: Some(playing), volume: None, art: None });
+    person.panels.stage = super::Stage::new([1, 1], false, &media);
+    person.panels.media = media;
+    for (avatar, prop, says) in [(None, None, "Waiting for VRChat"), (Some("avtr_x"), None, "no N4N0"), (Some("avtr_x"), Some(8), "no link card")] {
+        let mut snap = (*person.snap).clone();
+        snap.n4n0.avatar_id = avatar.map(String::from);
+        snap.n4n0.prop_sync = prop;
+        snap.n4n0.can_drop = false;
+        person.snap = Arc::new(snap);
+        person.around = Some(Around::QuickMenu);
+        person.turns(3);
+        if person.panels.facts.sheet != Some(Sheet::All) {
+            person.press(Action::All);
+            person.turns(3);
+        }
+        let drop = Action::PlayingLink(Target::DropPlaying);
+        let at = person.find(drop).expect("Drop link is there, greyed");
+        person.panels.hover(Some(at));
+        person.turn();
+        assert_eq!(person.panels.facts.pointed, Some(drop));
+        let (_, why) = super::panels::caption(drop, &person.panels.facts).unwrap();
+        assert!(why.contains(says), "{why}");
+        person.press(drop);
+        person.turns(2);
+        assert_eq!(person.panels.stage.host.menu.copied, None, "{says}: nothing marked copied");
+        assert!(person.find(Action::PlayingLink(Target::CopyPlaying)).is_some(), "Copy link stays");
+    }
+}
+
 #[test]
 fn ask_streamed_snapshot_marks_the_page_for_repaint() {
     use orbiters_n4n0::status::{N4n0Line, N4n0Who};
@@ -869,6 +1038,160 @@ fn ask_streamed_snapshot_marks_the_page_for_repaint() {
         assert!(person.panels.list.iter().any(|p| p.dirty), "each intermediate snapshot repaints");
         assert_eq!(person.panels.facts.talk_lines.last().unwrap().1, words);
     }
+}
+
+/// A backend that keeps what the menus asked of it (N4N0's commands, sign-ins), and is otherwise the screenshots' still one.
+#[derive(Default)]
+struct Heard {
+    n4n0: std::sync::Mutex<Vec<crate::ipc::N4n0Command>>,
+    sign_ins: std::sync::atomic::AtomicUsize,
+    boosters: std::sync::Mutex<Vec<String>>,
+}
+
+impl Heard {
+    fn said(&self) -> Vec<String> {
+        self.n4n0.lock().unwrap().iter().map(|c| format!("{c:?}")).collect()
+    }
+}
+
+impl crate::backend::Backend for Heard {
+    fn n4n0(&self, command: crate::ipc::N4n0Command) {
+        self.n4n0.lock().unwrap().push(command);
+    }
+    fn sign_in(&self) {
+        self.sign_ins.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+    fn booster(&self, command: crate::booster::Command) {
+        self.boosters.lock().unwrap().push(format!("{command:?}"));
+    }
+    fn view(&self) -> Arc<Snapshot> {
+        Arc::new(crate::state::Snapshot::new(Settings::default()))
+    }
+    fn take_notices(&self) -> Vec<crate::controller::Notice> {
+        Vec::new()
+    }
+    fn library_version(&self) -> u64 {
+        0
+    }
+    fn attach(&self, _ctx: &egui::Context) {}
+    fn start_capture(&self) {}
+    fn stop_capture(&self) {}
+    fn pause_capture(&self, _paused: bool) {}
+    fn start_test_capture(&self) {}
+    fn import_raw_capture(&self, _dir: std::path::PathBuf) {}
+    fn patch_settings(&self, _patch: serde_json::Value) {}
+    fn trash_session(&self, _dir: std::path::PathBuf) {}
+    fn clean_up(&self, _trim: Vec<std::path::PathBuf>, _delete: Vec<std::path::PathBuf>) {}
+    fn reconstruct(&self, _dir: std::path::PathBuf) {}
+    fn stop_reconstruction(&self) {}
+    fn unqueue_reconstruction(&self, _dir: std::path::PathBuf) {}
+    fn send_to_mixer(&self, _dir: std::path::PathBuf, _title: String) {}
+    fn reopen_sign_in(&self) {}
+    fn cancel_sign_in(&self) {}
+    fn sign_out(&self) {}
+    fn request_worker_log(&self) {}
+    fn worker_log(&self) -> Option<Vec<String>> {
+        None
+    }
+    fn upload_pictures(&self, _world_id: String, _world_name: String, _paths: Vec<std::path::PathBuf>) {}
+    fn upload_preview(&self, _world_id: String, _world_name: String, _session: std::path::PathBuf) {}
+    fn request_maps(&self) {}
+    fn maps(&self) -> Option<crate::state::MapsMine> {
+        None
+    }
+    fn calibrated(&self, _calibration: orbiters_contracts::performance::calibration::Calibration) {}
+    fn frames(&self, _chunk: crate::state::FrameChunk) {}
+    fn headset(&self, _in_use: bool) {}
+    fn walk_boost(&self, _strength: f32) {}
+    fn osc_reconnect(&self) {}
+    fn updates(&self, _action: crate::ipc::UpdateAction) {}
+    fn quit(&self) {}
+}
+
+/// Enzo (VR feedback F23, F24): Ask "does not update live while I talk" and "should say I must sign in before I can speak"; listening "automatic by default on
+/// entering the page, until I press the talk button myself". Through the hand and the host: entering asks for the page's hands-free listening and leaving lets it
+/// go; signed out, the button says so before a word and a press signs in, never listens; hands-free waits for the person, shows what it hears as it hears it,
+/// and the person's own press takes over by the button; a stopped microphone is tried again with a press.
+#[test]
+fn ask_listens_by_itself_says_what_it_hears_and_asks_for_a_sign_in_first() {
+    use orbiters_n4n0::status::{ProvisionalSpeech, VoiceReadiness};
+    use super::panels::TalkNow;
+    let (mut person, heard) = Person::heard();
+    let set = |person: &mut Person, change: &dyn Fn(&mut crate::state::Snapshot)| {
+        let mut snap = (*person.snap).clone();
+        snap.settings.n4n0.enabled = true;
+        change(&mut snap);
+        person.snap = Arc::new(snap);
+        person.turns(2);
+    };
+    set(&mut person, &|s| s.n4n0.voice.readiness = VoiceReadiness::SignIn);
+    person.around = Some(Around::QuickMenu);
+    person.turns(3);
+    person.press(Action::Talk);
+    person.turns(2);
+    assert_eq!(person.panels.facts.sheet, Some(Sheet::Talk));
+    assert!(heard.said().iter().any(|c| c.contains("AskPage") && c.contains("true")), "entering asks for the page's listening: {:?}", heard.said());
+    // Signed out: said before a word, and the press is the way to sign in.
+    assert_eq!(person.panels.facts.talk, TalkNow::SignIn);
+    let before = heard.said().len();
+    person.press(Action::TalkToggle);
+    assert_eq!(heard.sign_ins.load(std::sync::atomic::Ordering::Relaxed), 1, "the browser opens to sign in");
+    assert!(!heard.said()[before..].iter().any(|c| c.contains("AskTalk")), "nothing listened to");
+    // Signed in, hands-free: waiting for the person, then what it hears as it hears it.
+    set(&mut person, &|s| {
+        s.n4n0.voice.readiness = VoiceReadiness::Ready;
+        s.n4n0.voice.ask_open = true;
+        s.n4n0.voice.automatic = true;
+        s.n4n0.listening = true;
+    });
+    assert_eq!(person.panels.facts.talk, TalkNow::Waiting);
+    assert!(person.panels.facts.talk_auto, "the mode shows");
+    for words in ["what's", "what's the weather", "what's the weather in Paris"] {
+        set(&mut person, &|s| {
+            s.n4n0.voice.speech = true;
+            s.n4n0.voice.level = 0.4;
+            s.n4n0.voice.provisional = Some(ProvisionalSpeech { listen: 3, text: words.into() });
+        });
+        assert!(matches!(person.panels.facts.talk, TalkNow::Listening(_)));
+        assert_eq!(person.panels.facts.talk_heard.as_deref(), Some(words), "the words so far, replaced");
+        assert!(person.panels.facts.talk_lines.is_empty(), "and not in the conversation until said");
+    }
+    // The person's own press: by the button.
+    let before = heard.said().len();
+    person.press(Action::TalkToggle);
+    assert!(heard.said()[before..].iter().any(|c| c.contains("AskTalk") && c.contains("true")), "{:?}", &heard.said()[before..]);
+    // A stopped microphone: a press tries again.
+    set(&mut person, &|s| s.n4n0.voice.readiness = VoiceReadiness::MicrophoneProblem);
+    assert_eq!(person.panels.facts.talk, TalkNow::Failed);
+    let before = heard.said().len();
+    person.press(Action::TalkToggle);
+    assert!(heard.said()[before..].iter().any(|c| c.contains("AskRetry")), "{:?}", &heard.said()[before..]);
+    // Leaving lets the microphone go.
+    let before = heard.said().len();
+    person.press(Action::All);
+    person.turns(2);
+    assert!(heard.said()[before..].iter().any(|c| c.contains("AskPage") && c.contains("false")), "{:?}", &heard.said()[before..]);
+}
+
+/// Enzo (VR feedback F4): a test the booster runs can be stopped from its page, through the hand and the host: the engine is asked to stop it.
+#[test]
+fn the_booster_s_test_stops_from_its_page() {
+    use orbiters_booster::engine::Testing;
+    use orbiters_booster::trial::{Kind, Side};
+    let (mut person, heard) = Person::heard();
+    let mut snap = (*person.snap).clone();
+    snap.booster.overlay.report.testing = Some(Testing { kind: Kind::Programs, seconds_left: 20.0, side: Side::With, manual: true });
+    person.snap = Arc::new(snap);
+    person.around = Some(Around::QuickMenu);
+    person.turns(3);
+    person.press(Action::All);
+    person.turns(2);
+    person.press(Action::Booster);
+    person.turns(2);
+    assert_eq!(person.panels.facts.sheet, Some(Sheet::Booster));
+    person.press(Action::Set(super::panels::Pick::Booster(super::panels::BoosterPick::StopTest)));
+    let asked = heard.boosters.lock().unwrap().clone();
+    assert!(asked.iter().any(|c| c.contains("StopTest")), "{asked:?}");
 }
 
 #[test]

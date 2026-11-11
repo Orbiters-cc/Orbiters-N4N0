@@ -371,8 +371,9 @@ impl Service {
                 let mailbox = self.links.lock().unwrap().iter().find(|l| l.id == link).map(|l| l.mailbox.clone());
                 if let Some(mailbox) = mailbox {
                     let ctl = ctl.clone();
+                    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
                     std::thread::spawn(move || {
-                        let result = ctl.vrchat_data(scope, request);
+                        let result = ctl.vrchat_data_until(scope, request, deadline);
                         mailbox.post(ToClient::VrchatData { id, result });
                     });
                 }

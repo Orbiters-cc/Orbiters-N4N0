@@ -3,7 +3,7 @@
 //! captured and shared on Orbiters (the listing the VRChat world "N4N0 - 3D picture viewer" shows) badged 3D, and see
 //! one of those around you in SteamVR, placed as that world places it (its ground on your floor, its start view where
 //! you stand, facing your way) and drawn from the same files (docs/world-view-overlay.md). A world without a capture
-//! has its page: Invite me (an invite to oneself in VRChat) or Launch VRChat, and Open on VRChat.
+//! has its page: Invite me when signed in to VRChat (an invite to oneself), and Open on VRChat.
 //!
 //! A pill under N4N0's menu ("3D worlds") opens the panel ([`panel`]) in the menu's place; the menu's Back comes back
 //! to it. Once a capture shows or loads, a bar takes the pill's place, under the menu or the panel whatever page shows:
@@ -1574,34 +1574,20 @@ fn keep_an_eye_frame(steamvr: &vr::Client, n: u32) {
         self.panel.dirty = true;
     }
 
-    /// Joins `world` in a new public instance in the region the player is in: an invite to oneself, which VRChat shows
-    /// in the game, when signed in to VRChat in the app; else VRChat's launcher with the world (VRChat running, it may
-    /// ask to switch). What happened is said on the world's page.
+    /// The pages stream supplies the chooser. This existing action must never claim a refused invite succeeded.
     fn join(&mut self, world: String) {
-        let instance = finder::new_instance(self.region, uuid::Uuid::new_v4().as_u128() as u64);
+        if !self.vrchat { return; }
+        let (Some(backend), Some(scope)) = (self.backend.clone(), self.scope.clone()) else { return };
         let tx = self.said.0.clone();
+        let region = self.region;
         let time = self.time();
-        if self.vrchat {
-            let (Some(backend), Some(scope)) = (self.backend.clone(), self.scope.clone()) else { return };
-            self.panel.say(tr("Sending you an invite…"), time);
-            let _ = std::thread::Builder::new().name("3d-worlds-invite".into()).spawn(move || {
-                let said = match backend.vrchat_data(scope, DataRequest::InviteSelf { world, instance }) {
-                    Ok(_) => tr("Invite sent: accept it in VRChat's notifications").to_string(),
-                    Err(e) => tr!("The invite could not be sent: {e}", e = e),
-                };
-                let _ = tx.send(said);
-            });
-        } else {
-            let Some(link) = finder::launch_link(&world, &instance) else { return };
-            self.panel.say(tr("Opening VRChat's launcher…"), time);
-            let _ = std::thread::Builder::new().name("3d-worlds-launch".into()).spawn(move || {
-                let said = match finder::open_launch(&link) {
-                    Ok(()) => tr("VRChat's launcher has it: sign in to VRChat in the app to be invited instead").to_string(),
-                    Err(e) => format!("{e}"),
-                };
-                let _ = tx.send(said);
-            });
-        }
+        self.panel.say(tr("Sending you an invite…"), time);
+        let _ = std::thread::Builder::new().name("3d-worlds-invite".into()).spawn(move || {
+            // The chooser in vr1111/pages replaces this legacy destination selection.
+            let instance = finder::new_instance(region, uuid::Uuid::new_v4().as_u128() as u64);
+            let said = invite_outcome(backend.vrchat_data(scope, DataRequest::InviteSelf { world, instance }));
+            let _ = tx.send(said);
+        });
     }
 
     /// The panel's own ask, shown at once (the app's answer replaces it).
@@ -1813,4 +1799,29 @@ fn short_error(e: &anyhow::Error) -> String {
         tr!("Could not download it: {text}", text = format!("{e:#}"))
     };
     text.chars().take(90).collect()
+}
+
+fn invite_outcome(result: crate::controller::vrchat_data::Result) -> String {
+    match result {
+        Ok(DataResponse::Invited) => tr("Invite sent: accept it in VRChat's notifications").to_string(),
+        result => {
+            let error = match result {
+                Err(e) => e,
+                Ok(DataResponse::WorldError(crate::controller::vrchat_data::WorldError::Api(e))) => e.to_string(),
+                _ => orbiters_core::vrchat_api::Error::InvalidResponse.to_string(),
+            };
+            tr!("The invite could not be sent: {e}", e = error)
+        }
+    }
+}
+#[cfg(test)]
+mod invite_review_tests {
+    use super::*;
+    #[test]
+    fn typed_refusal_is_never_invite_success() {
+        let refused = invite_outcome(Ok(DataResponse::WorldError(crate::controller::vrchat_data::WorldError::NotListed)));
+        assert!(refused.contains("could not be sent"), "{refused}");
+        assert!(invite_outcome(Ok(DataResponse::Invited)).starts_with("Invite sent:"));
+        assert!(invite_outcome(Ok(DataResponse::Owned(vec![]))).contains("could not be sent"));
+    }
 }

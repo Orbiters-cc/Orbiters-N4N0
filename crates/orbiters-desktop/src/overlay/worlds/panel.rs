@@ -1286,7 +1286,7 @@ impl Panel {
                 let status = d.status;
                 let current = status.current == Some(e.id) && (status.shown || status.stage.is_some());
                 if !e.capture {
-                    out.push((Target::Join, if vr { VR_GO_HALF } else { SHOW_WHOLE }));
+                    if status.list.vrchat { out.push((Target::Join, if vr { VR_GO_HALF } else { SHOW_WHOLE })); }
                 } else if !status.headset {
                     if !live_here && !current {
                         out.push((Target::Show, SHOW_WHOLE));
@@ -1306,11 +1306,11 @@ impl Panel {
                 // Going there, from a capture as from any world; else its page on VRChat alone.
                 let web = super::finder::web_link(&e.world_id).is_some();
                 if e.capture {
-                    out.push((Target::Join, match (web, vr) {
+                    if status.list.vrchat { out.push((Target::Join, match (web, vr) {
                         (_, true) => VR_GO,
                         (true, false) => GO,
                         (false, false) => WEB_WHOLE,
-                    }));
+                    })); }
                     // A page on VRChat's site is for a screen.
                     if web && !vr {
                         out.push((Target::OpenWeb, WEB));
@@ -1485,7 +1485,7 @@ impl Panel {
                 }
                 Vec::new()
             }
-            Target::Join => self.entry(d).map(|e| Action::Join(e.world_id.clone())).into_iter().collect(),
+            Target::Join => self.entry(d).filter(|_| d.status.list.vrchat).map(|e| Action::Join(e.world_id.clone())).into_iter().collect(),
             Target::OpenWeb => self.entry(d).map(|e| Action::OpenWeb(e.world_id.clone())).into_iter().collect(),
             Target::Has3d => {
                 self.has_3d = !self.has_3d;
@@ -3088,7 +3088,7 @@ mod tests {
         assert_eq!(entries.iter().map(|e| e.id).collect::<Vec<_>>()[..2], [1, 4], "the search's captures first, both of Home");
         let world = entries.last().unwrap().clone();
         let (feedback, facts) = (FeedbackView::default(), HashMap::new());
-        let searched = Status { list: ListStatus { searching: true, more: true, ..Default::default() }, ..Default::default() };
+        let searched = Status { list: ListStatus { vrchat: true, searching: true, more: true, ..Default::default() }, ..Default::default() };
         let d = data(&entries, &searched, &feedback, &facts);
         let mut panel = Panel { query: "ho".into(), ..Default::default() };
         // Searching: 3D only instead of the sections, and a page more while the list has more.
@@ -3107,6 +3107,10 @@ mod tests {
         assert!(targets.contains(&Target::Join) && targets.contains(&Target::OpenWeb) && !targets.contains(&Target::Show), "{targets:?}");
         assert!(targets.contains(&Target::Like), "its feedback is given as a capture's");
         assert_eq!(panel.press(Target::Join, &d, 3.0), [Action::Join(cat.into())]);
+        let signed_out = Status { list: ListStatus { vrchat: false, ..searched.list.clone() }, ..searched.clone() };
+        let out = data(&entries, &signed_out, &feedback, &facts);
+        assert!(!panel.targets(&out).iter().any(|(t, _)| *t == Target::Join));
+        assert!(panel.press(Target::Join, &out, 3.0).is_empty());
         assert_eq!(panel.press(Target::OpenWeb, &d, 3.0), [Action::OpenWeb(cat.into())]);
         assert!(panel.press(Target::Show, &d, 3.0).is_empty());
         // Another list shows: its page stays, kept by the host.

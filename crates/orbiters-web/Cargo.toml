@@ -1,0 +1,16 @@
+[package]
+name = "orbiters-web"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[target.'cfg(windows)'.dependencies]
+anyhow.workspace = true
+webview2-com = "=0.39.1"
+windows = { workspace = true, features = ["Win32_System_Com", "Win32_UI_WindowsAndMessaging"] }
+serde_json.workspace = true
+url = "2"
+tempfile = "3"
+base64 = "0.22"
+png.workspace = true
+

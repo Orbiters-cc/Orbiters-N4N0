@@ -622,6 +622,9 @@ pub(crate) struct Device {
 pub struct N4n0 {
     pub(crate) n4n0: Mutex<N4n0Runtime>,
     pub(crate) voice: Mutex<VoiceRuntime>,
+    /// Capture admission and final dispatch share this owner with page and blocker changes.
+    /// Helpers reenter it; competing input, worker and watcher threads serialize here.
+    pub(crate) voice_lifecycle: parking_lot::ReentrantMutex<()>,
     pub(crate) host: Arc<dyn Host>,
     pub(crate) osc: Arc<dyn Osc>,
     pub(crate) device: Device,
@@ -642,6 +645,7 @@ impl N4n0 {
         Arc::new(Self {
             n4n0: Mutex::new(n4n0),
             voice: Mutex::new(VoiceRuntime::default()),
+            voice_lifecycle: parking_lot::ReentrantMutex::new(()),
             host,
             osc,
             device: Device { clipboard, browser, sounds, locale, ears, media },
@@ -1462,6 +1466,7 @@ impl N4n0 {
     /// The avatar menu's Talk button (or the window's, or the overlay's), pressed or let go. Letting go ends the
     /// sentence: the worker transcribes it and answers that listen by its number ([`N4n0::heard`]).
     pub(crate) fn talk(self: &Shared, down: bool, source: Source) {
+        let _lifecycle = self.voice_lifecycle.lock();
         if down && self.voice_readiness() != crate::status::VoiceReadiness::Ready { self.publish(); return; }
         let settings = self.with_settings(|s| s.n4n0.clone());
         if !settings.enabled || !settings.assistant {
@@ -1481,7 +1486,6 @@ impl N4n0 {
                 // Pressed again while held (a repeated message): still the same sentence.
                 return;
             }
-            rt.listening = Some((source, Instant::now()));
             // The sentence for N4N0 stays out of the world: mute VRChat's microphone while the menu's button is held.
             if source == Source::Menu && settings.mute_while_talking && !rt.mute_self {
                 let now = Instant::now();
@@ -1540,7 +1544,8 @@ impl N4n0 {
     }
 
     /// A hand touched N4N0: N4N0 listens to one sentence.
-    fn touch(self: &Shared) {
+    pub(crate) fn touch(self: &Shared) {
+        let _lifecycle = self.voice_lifecycle.lock();
         // A ringing call: touching N4N0 answers it.
         if self.host.ringing_in() {
             let n = self.clone();
@@ -1556,7 +1561,6 @@ impl N4n0 {
         if !settings.enabled || !settings.assistant || self.n4n0.lock().unwrap().listening.is_some() || !self.can_listen() {
             return;
         }
-        self.n4n0.lock().unwrap().listening = Some((Source::Touch, Instant::now()));
         self.voice_listen(Source::Touch);
         self.publish();
     }
@@ -1604,7 +1608,6 @@ impl N4n0 {
                 }
                 Some(command) if command.is_empty() => {
                     // Only the name: N4N0 listens to the next sentence.
-                    self.n4n0.lock().unwrap().listening = Some((Source::WakeWord, Instant::now()));
                     self.voice_listen(Source::WakeWord);
                     self.publish();
                 }
@@ -1676,6 +1679,7 @@ impl N4n0 {
 
     /// What the interfaces ask.
     pub fn command(self: &Shared, command: Command) {
+        let _lifecycle = self.voice_lifecycle.lock();
         match command {
             Command::Ask { text } => self.ask(text, "typed"),
             Command::Talk { down } => self.talk(down, Source::Window),
@@ -1861,6 +1865,7 @@ impl N4n0 {
 
     /// Puts a sentence to N4N0's assistant on a thread of its own (an answer to what N4N0 asked to do is taken here).
     pub(crate) fn ask(self: &Shared, text: String, via: &'static str) {
+        let _lifecycle = self.voice_lifecycle.lock();
         let text = text.trim().to_string();
         if text.is_empty() || self.answer(&text) {
             return;

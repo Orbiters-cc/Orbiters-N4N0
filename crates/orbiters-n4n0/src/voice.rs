@@ -134,6 +134,7 @@ impl N4n0 {
     }
 
     pub(crate) fn ask_page(self: &Shared, open: bool) {
+        let _lifecycle = self.voice_lifecycle.lock();
         self.voice_cancel();
         {
             let wake = self.with_settings(|s| s.n4n0.wake_word);
@@ -145,7 +146,6 @@ impl N4n0 {
             let mut rt = self.n4n0.lock().unwrap();
             rt.listening = None;
             rt.voice.ask_open = open;
-            rt.voice.output_playing = false;
             rt.voice.finalizing = false;
             rt.voice.automatic = open;
             rt.voice.provisional = None;
@@ -161,6 +161,7 @@ impl N4n0 {
     }
 
     pub(crate) fn ask_retry(self: &Shared) {
+        let _lifecycle = self.voice_lifecycle.lock();
         { let mut rt = self.n4n0.lock().unwrap();
           if !rt.voice.ask_open { return; }
           rt.voice.error = None;
@@ -173,6 +174,7 @@ impl N4n0 {
     }
 
     pub(crate) fn ask_talk(self: &Shared, down: bool) {
+        let _lifecycle = self.voice_lifecycle.lock();
         let takeover = {
             let mut rt = self.n4n0.lock().unwrap();
             if !rt.voice.ask_open { return; }
@@ -187,6 +189,7 @@ impl N4n0 {
 
     /// Called by the runtime watcher, independently of page paint and audio callbacks.
     pub(crate) fn ask_follow(self: &Shared) {
+        let _lifecycle = self.voice_lifecycle.lock();
         let ready = self.voice_readiness() == crate::status::VoiceReadiness::Ready;
         let (cancel, arm) = {
             let mut rt = self.n4n0.lock().unwrap();
@@ -195,7 +198,6 @@ impl N4n0 {
             if cancel { rt.listening = None; }
             let arm = ready && rt.voice.ask_open && rt.voice.automatic && rt.listening.is_none()
                 && !rt.ask_busy();
-            if arm { rt.listening = Some((Source::AskAuto, Instant::now())); }
             (cancel, arm)
         };
         if cancel {
@@ -237,6 +239,7 @@ impl N4n0 {
     /// the assistant is on, the models are here), stops it otherwise, and passes on a changed microphone or wake
     /// word (without loading anything again). Called once a second.
     pub(crate) fn voice_follow(self: &Shared) {
+        let _lifecycle = self.voice_lifecycle.lock();
         self.ask_follow();
         let settings = self.with_settings(|s| s.n4n0.clone());
         let vrchat = self.host.scene().vrchat;
@@ -310,9 +313,14 @@ impl N4n0 {
     /// N4N0 listens for a sentence from `source` (the worker starts if it was not running, as for the window's Talk
     /// button with VRChat closed, and stays a while after).
     pub(crate) fn voice_listen(self: &Shared, source: Source) {
+        let _lifecycle = self.voice_lifecycle.lock();
         if self.voice_readiness() != crate::status::VoiceReadiness::Ready { return; }
         let settings = self.with_settings(|s| s.n4n0.clone());
-        let ask = self.n4n0.lock().unwrap().voice.ask_open;
+        let ask = {
+            let n = self.n4n0.lock().unwrap();
+            if n.ask_busy() || (source == Source::AskAuto && (!n.voice.ask_open || !n.voice.automatic)) { return; }
+            n.voice.ask_open
+        };
         let mut rt = self.voice.lock().unwrap();
         if !ask { rt.ask_owned = false; }
         rt.lease_until = Some(Instant::now() + LISTEN_LIMIT + LISTEN_LEASE);
@@ -324,6 +332,7 @@ impl N4n0 {
         rt.next_listen += 1;
         let id = rt.next_listen;
         rt.current = Some(id);
+        self.n4n0.lock().unwrap().listening = Some((source, Instant::now()));
         if let Some(handle) = rt.handle.as_mut() {
             if let Err(e) = handle.inner.send(&VoiceCommand::Listen { hold, id }) {
                 eprintln!("voice: {e:#}");
@@ -340,6 +349,7 @@ impl N4n0 {
 
     /// The sentence being listened to is dropped: nothing the worker heard for it goes anywhere.
     pub(crate) fn voice_cancel(self: &Shared) {
+        let _lifecycle = self.voice_lifecycle.lock();
         let mut rt = self.voice.lock().unwrap();
         let Some(id) = rt.current.take() else { return };
         rt.cancelled.push_back(id);
@@ -410,6 +420,7 @@ impl N4n0 {
 
     /// What a voice worker said.
     pub(crate) fn on_voice_event(self: &Shared, event: VoiceEvent) {
+        let _lifecycle = self.voice_lifecycle.lock();
         match event {
             VoiceEvent::Finalizing { listen } => {
                 let rt = self.voice.lock().unwrap();
@@ -454,6 +465,12 @@ impl N4n0 {
                 if !for_n4n0 && self.voice.lock().unwrap().ask_owned { return; }
                 if self.voice_readiness() != crate::status::VoiceReadiness::Ready {
                     self.ask_follow(); self.publish(); return;
+                }
+                if !for_n4n0 {
+                    if self.n4n0.lock().unwrap().ask_busy() { return; }
+                    // A wake result can start a follow-up capture. It does not own a finalizing listen.
+                    self.heard(text, false, false);
+                    return;
                 }
                 if for_n4n0 {
                     eprintln!("voice: {seconds:.1} s transcribed in {decode_ms} ms");

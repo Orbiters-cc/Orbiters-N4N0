@@ -1,6 +1,8 @@
 //! Private, windowless WebView2 pages for VR overlays. Absent on macOS.
 #![cfg(windows)]
 mod engine;
+mod lifetime;
+mod network;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     mpsc::{self, SyncSender},
@@ -50,6 +52,10 @@ pub enum Input {
     },
 }
 pub(crate) enum Command {
+    #[cfg(test)]
+    Fixture(String),
+    #[cfg(test)]
+    FailCdp,
     Navigate(String),
     Input(Input),
     Resize(u32, u32),
@@ -76,7 +82,7 @@ impl WebPage {
         let closing = closed.clone();
         std::thread::Builder::new().name("camera-web".into()).spawn(move || {
             if let Err(e) = engine::run(width, height, rx, s.clone(), closing) {
-                s.lock().unwrap().state.load = Load::Failed(format!("{e:#}"));
+                s.lock().unwrap().state.load = Load::Failed(display_text(&format!("{e:#}"), 1024));
             }
         })?;
         Ok(Self { tx, shared, closed, seen: 0 })
@@ -114,6 +120,20 @@ impl WebPage {
         self.closed.store(true, Ordering::Relaxed);
     }
 }
+/// Page-controlled display text has a UTF-8 byte budget and no control/bidi formatting.
+fn display_text(s: &str, max: usize) -> String {
+    let mut out = String::with_capacity(max.min(s.len()));
+    for c in s.chars() {
+        if c.is_control() || matches!(c, '\u{061c}' | '\u{200e}'..='\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}') {
+            continue;
+        }
+        if out.len() + c.len_utf8() > max {
+            break;
+        }
+        out.push(c);
+    }
+    out
+}
 impl Drop for WebPage {
     fn drop(&mut self) {
         self.close();
@@ -147,5 +167,73 @@ mod tests {
         assert!(size(960, 720).is_ok());
         assert!(size(u32::MAX, 720).is_err());
         assert!(size(0, 0).is_err());
+    }
+}
+
+#[cfg(test)]
+mod review_tests {
+    use super::*;
+    #[test]
+    fn hostile_text_is_bounded_before_repeated_polls() {
+        let state = State {
+            title: display_text(&"\u{754c}".repeat(2_000_000), 512),
+            url: display_text(&"x".repeat(20000), 8192),
+            load: Load::Failed(display_text(&"x".repeat(2000000), 1024)),
+        };
+        for _ in 0..10000 {
+            let s = state.clone();
+            assert!(s.title.len() <= 512 && s.url.len() <= 8192);
+        }
+        assert_eq!(display_text("a\n\u{202e}\u{754c}", 4), "a\u{754c}");
+    }
+}
+
+#[cfg(test)]
+mod live_review_tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+    fn wait(page: &mut WebPage, predicate: impl Fn(&State, &Option<Frame>) -> bool) {
+        let t = Instant::now();
+        loop {
+            if let Some((s, f, _)) = page.poll() {
+                if predicate(&s, &f) {
+                    return;
+                }
+                if let Load::Failed(e) = s.load {
+                    panic!("browser: {e}");
+                }
+            }
+            assert!(t.elapsed() < Duration::from_secs(30), "browser timeout");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+    #[test]
+    fn runtime_hostile_title_subresources_resize_and_async_failure() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let address = listener.local_addr().unwrap();
+        let mut page = WebPage::new(640, 480).unwrap();
+        page.send(Command::Fixture(format!(r#"<body style='margin:0;background:#135'><script>document.title='x'.repeat(4000000);fetch('http://{address}/fetch').catch(()=>{{}});new WebSocket('ws://{address}/ws');new WebSocket('wss://{address}/wss');let worker=new Worker(URL.createObjectURL(new Blob(["fetch('http://{address}/worker')"],{{type:'text/javascript'}})));</script><img src='http://{address}/image'><iframe src='http://{address}/frame'></iframe>"#))).unwrap();
+        wait(&mut page, |s, f| s.title.len() == 512 && f.as_ref().is_some_and(|f| f.width == 640 && f.rgba[400 * 640 * 4..400 * 640 * 4 + 3] == [17, 51, 85]));
+        for _ in 0..10000 {
+            if let Some((s, _, _)) = page.poll() {
+                assert_eq!(s.title.len(), 512);
+            }
+        }
+        page.resize(320, 240).unwrap();
+        wait(&mut page, |_, f| f.as_ref().is_some_and(|f| f.width == 320 && f.height == 240));
+        std::thread::sleep(Duration::from_millis(500));
+        assert!(listener.accept().is_err(), "private subresource reached listener");
+        page.send(Command::FailCdp).unwrap();
+        let t = Instant::now();
+        loop {
+            if let Some((s, _, _)) = page.poll() {
+                if matches!(s.load, Load::Failed(_)) {
+                    break;
+                }
+            }
+            assert!(t.elapsed() < Duration::from_secs(30));
+            std::thread::sleep(Duration::from_millis(10));
+        }
     }
 }

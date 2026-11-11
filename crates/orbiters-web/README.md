@@ -12,7 +12,7 @@ On each overlay turn, call `poll()`. It uses try_lock: None means retain the las
 snapshot. Some returns `(State, Option<Frame>, changed)`. Upload a frame only
 when changed is true. Pixels are tightly packed, top-down, straight RGBA8;
 `rgba` is an Arc slice, so retaining the frame does not copy its pixels.
-Navigation clears the old frame. Frames can arrive before loading finishes;
+Navigation clears the old frame. Frames are gated until the current navigation completes;
 the chrome must still show the loading state. Display the `title` and `url` as
 untrusted text, never as markup. Load is Loading, Loaded, Failed(reason), Closed.
 Reasons are developer diagnostics; camera UI supplies localized friendly errors.
@@ -28,7 +28,9 @@ Only send stick scrolling while this view is the intended input target.
 
 `close()` and Drop set an atomic flag and never join. Poll until Closed if a
 caller needs confirmation that the temporary profile was deleted. The application
-should keep its process alive through this asynchronous cleanup on normal exit.
+can await Closed during normal shutdown. An independent hidden PowerShell watcher also
+cleans profiles and exact-profile browser processes after host termination. Startup reclaims
+stale sessions strictly under Temp/Orbiters-QR-Web-owned-v1. It never sweeps other Temp folders.
 Slow navigation and Chromium page processes cannot block an overlay turn.
 
 ## Rendering and isolation
@@ -76,3 +78,24 @@ To test unavailable-runtime reporting without uninstalling anything, set
 proof process environment**, then run `proof OUTPUT --expect-unavailable`.
 Close remains nonblocking after this startup failure; no browser was created.
 The failed diagnostic remains available (Closed is the normal cleanup outcome).
+
+## Review hardening
+
+Public API types and signatures are unchanged. The changed bit means frame changes only;
+inspect State on every successful poll. Titles are limited to 512 UTF-8 bytes, URLs to 8192,
+and diagnostics to 1024, with control and bidi formatting removed before publication.
+All async startup/CDP operations have cancellation checks and 15-second deadlines.
+Required guard/capture/input completion failures close the engine rather than being ignored.
+The effective UserDataFolder must equal the canonical owned folder before controller creation.
+Browser command-line network overrides and remote debugging flags are rejected before navigation.
+
+Pages use a mandatory local HTTP proxy with loopback bypass disabled. Each upstream connection
+resolves the destination, rejects the entire answer set if any address is nonpublic, and connects
+to the checked IP. This covers redirects, workers, HTTPS and secure WebSockets without a DNS
+rebinding gap. QUIC, WebTransport and nonproxied WebRTC UDP are disabled. LAN/loopback QR pages
+are intentionally unavailable here; Open in browser remains a separate trusted UI action.
+Plaintext WebSocket upgrades are refused. No LAN opt-in or legacy network policy is provided.
+
+The earlier `proof` example predates the public-network policy: its loopback rendering fixture is
+now expected to be denied. Use `cargo run -p orbiters-web --example review` for current lifecycle
+and blocked-network runtime checks, plus `cargo test -p orbiters-web -p orbiters-i18n`.

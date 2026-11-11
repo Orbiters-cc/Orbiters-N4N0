@@ -22,59 +22,137 @@ unsafe fn string(get: impl FnOnce(*mut PWSTR) -> windows::core::Result<()>) -> w
     CoTaskMemFree(Some(p.0.cast()));
     Ok(s?)
 }
-unsafe fn cdp(web: &ICoreWebView2, method: &str, args: serde_json::Value) -> windows::core::Result<()> {
+fn pump_wait<T>(rx: &Receiver<windows::core::Result<T>>, closed: &AtomicBool, timeout: Duration) -> windows::core::Result<T> {
+    let start = Instant::now();
+    loop {
+        if closed.load(Ordering::Relaxed) || start.elapsed() >= timeout {
+            return Err(windows::core::Error::from_hresult(HRESULT(0x80004004u32 as i32)));
+        }
+        if let Ok(value) = rx.try_recv() {
+            return value;
+        }
+        unsafe {
+            let mut msg = MSG::default();
+            while PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() {
+                let _ = TranslateMessage(&msg);
+                DispatchMessageW(&msg);
+            }
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+unsafe fn cdp(web: &ICoreWebView2, method: &str, args: serde_json::Value, closed: &AtomicBool) -> windows::core::Result<String> {
+    let (tx, rx) = mpsc::channel();
     web.CallDevToolsProtocolMethod(
         PCWSTR(wide(method).as_ptr()),
         PCWSTR(wide(&args.to_string()).as_ptr()),
-        &CallDevToolsProtocolMethodCompletedHandler::create(Box::new(|e, _| e)),
-    )
+        &CallDevToolsProtocolMethodCompletedHandler::create(Box::new(move |e, raw| {
+            let result =
+                e.and_then(
+                    |_| {
+                        if raw.contains("\"error\"") {
+                            Err(windows::core::Error::from_hresult(HRESULT(0x80004005u32 as i32)))
+                        } else {
+                            Ok(raw.to_owned())
+                        }
+                    },
+                );
+            let _ = tx.send(result);
+            Ok(())
+        })),
+    )?;
+    pump_wait(&rx, closed, Duration::from_secs(15))
 }
-
-pub fn run(w: u32, h: u32, rx: Receiver<Command>, shared: Arc<Mutex<Shared>>, closed: Arc<AtomicBool>) -> anyhow::Result<()> {
-    unsafe {
-        CoInitializeEx(None, COINIT_APARTMENTTHREADED).ok()?;
-        let result = run_sta(w, h, rx, shared, closed);
-        CoUninitialize();
-        result
+struct Resources {
+    controller: Option<ICoreWebView2Controller>,
+    hwnd: Option<HWND>,
+}
+impl Drop for Resources {
+    fn drop(&mut self) {
+        unsafe {
+            if let Some(c) = self.controller.take() {
+                let _ = c.Close();
+            }
+            if let Some(h) = self.hwnd.take() {
+                let _ = DestroyWindow(h);
+            }
+        }
     }
 }
-unsafe fn run_sta(w: u32, h: u32, rx: Receiver<Command>, shared: Arc<Mutex<Shared>>, closed: Arc<AtomicBool>) -> anyhow::Result<()> {
-    let profile = tempfile::Builder::new().prefix("orbiters-web-private-").tempdir()?;
-    let path = wide(&profile.path().to_string_lossy());
+pub fn run(w: u32, h: u32, rx: Receiver<Command>, shared: Arc<Mutex<Shared>>, closed: Arc<AtomicBool>) -> anyhow::Result<()> {
+    let profile = match lifetime::Profile::new(&closed) {
+        Ok(p) => p,
+        Err(_) if closed.load(Ordering::Relaxed) => {
+            shared.lock().unwrap().state.load = Load::Closed;
+            return Ok(());
+        }
+        Err(e) => return Err(e),
+    };
+    let proxy = network::Proxy::new()?;
+    let result = unsafe {
+        CoInitializeEx(None, COINIT_APARTMENTTHREADED).ok()?;
+        let result = run_sta(w, h, rx, shared.clone(), closed.clone(), &profile, proxy.port);
+        CoUninitialize();
+        result
+    };
+    let path = profile.path.clone();
+    drop(profile);
+    if result.is_ok() || closed.load(Ordering::Relaxed) {
+        anyhow::ensure!(!path.exists(), "private browser cleanup pending");
+        shared.lock().unwrap().state.load = Load::Closed;
+        return Ok(());
+    }
+    result
+}
+unsafe fn run_sta(
+    w: u32,
+    h: u32,
+    rx: Receiver<Command>,
+    shared: Arc<Mutex<Shared>>,
+    closed: Arc<AtomicBool>,
+    profile: &lifetime::Profile,
+    proxy_port: u16,
+) -> anyhow::Result<()> {
+    let mut resources = Resources { controller: None, hwnd: None };
+    let path = wide(&profile.path.to_string_lossy());
     let options: ICoreWebView2EnvironmentOptions = CoreWebView2EnvironmentOptions::default().into();
-    // No remote debugging port, account integration or ambient Windows authentication.
-    options.SetAdditionalBrowserArguments(PCWSTR(wide("--disable-gpu --disable-extensions --disable-background-networking --no-first-run").as_ptr()))?;
+    let arguments=format!("--disable-gpu --disable-extensions --disable-background-networking --no-first-run --proxy-server=http://127.0.0.1:{proxy_port} --proxy-bypass-list=<-loopback> --disable-quic --force-webrtc-ip-handling-policy=disable_non_proxied_udp --disable-features=WebTransport --enable-automation");
+    options.SetAdditionalBrowserArguments(PCWSTR(wide(&arguments).as_ptr()))?;
     options.SetAllowSingleSignOnUsingOSPrimaryAccount(false)?;
     let (tx, envrx) = mpsc::channel();
-    CreateCoreWebView2EnvironmentCompletedHandler::wait_for_async_operation(
-        Box::new(move |cb| {
-            CreateCoreWebView2EnvironmentWithOptions(PCWSTR::null(), PCWSTR(path.as_ptr()), &options, &cb).map_err(webview2_com::Error::WindowsError)
-        }),
-        Box::new(move |e, env| {
-            e?;
-            let _ = tx.send(env);
+    CreateCoreWebView2EnvironmentWithOptions(
+        PCWSTR::null(),
+        PCWSTR(path.as_ptr()),
+        &options,
+        &CreateCoreWebView2EnvironmentCompletedHandler::create(Box::new(move |e, env| {
+            let _ = tx.send(e.map(|_| env));
             Ok(())
-        }),
-    )
-    .map_err(|e| anyhow::anyhow!("WebView2 runtime unavailable or startup failed: {e}"))?;
-    let env = envrx.recv()?.ok_or_else(|| anyhow::anyhow!("WebView2 environment missing"))?;
+        })),
+    )?;
+    let env = pump_wait(&envrx, &closed, Duration::from_secs(15))
+        .map_err(|e| anyhow::anyhow!("WebView2 runtime unavailable or startup failed: {e}"))?
+        .ok_or_else(|| anyhow::anyhow!("environment missing"))?;
+    let env7: ICoreWebView2Environment7 = env.cast()?;
+    let actual = string(|p| env7.UserDataFolder(p))?;
+    verify_profile(std::path::Path::new(&actual), &profile.path)?;
     // Message-only HWND has no desktop surface, taskbar entry or activation path.
     let hwnd = CreateWindowExW(WINDOW_EX_STYLE(0), w!("STATIC"), w!(""), WINDOW_STYLE(0), 0, 0, w as i32, h as i32, Some(HWND_MESSAGE), None, None, None)?;
+    resources.hwnd = Some(hwnd);
     let (tx, crx) = mpsc::channel();
     let env10: ICoreWebView2Environment10 = env.cast()?;
     let private = env10.CreateCoreWebView2ControllerOptions()?;
     private.SetIsInPrivateModeEnabled(true)?;
-    CreateCoreWebView2CompositionControllerCompletedHandler::wait_for_async_operation(
-        Box::new(move |cb| env10.CreateCoreWebView2CompositionControllerWithOptions(hwnd, &private, &cb).map_err(webview2_com::Error::WindowsError)),
-        Box::new(move |e, c| {
-            e?;
-            let _ = tx.send(c);
+    env10.CreateCoreWebView2CompositionControllerWithOptions(
+        hwnd,
+        &private,
+        &CreateCoreWebView2CompositionControllerCompletedHandler::create(Box::new(move |e, c| {
+            let _ = tx.send(e.map(|_| c));
             Ok(())
-        }),
-    )
-    .map_err(|e| anyhow::anyhow!("WebView2 composition startup: {e}"))?;
-    let composition = crx.recv()?.ok_or_else(|| anyhow::anyhow!("WebView2 controller missing"))?;
+        })),
+    )?;
+    let composition = pump_wait(&crx, &closed, Duration::from_secs(15))?.ok_or_else(|| anyhow::anyhow!("controller missing"))?;
     let controller: ICoreWebView2Controller = composition.cast()?;
+    resources.controller = Some(controller.clone());
     // Keep captured pixels and Chromium input pixels identical in DPI-aware hosts.
     let controller3: ICoreWebView2Controller3 = controller.cast()?;
     controller3.SetShouldDetectMonitorScaleChanges(false)?;
@@ -83,6 +161,24 @@ unsafe fn run_sta(w: u32, h: u32, rx: Receiver<Command>, shared: Arc<Mutex<Share
     controller.SetBounds(RECT { left: 0, top: 0, right: w as i32, bottom: h as i32 })?;
     controller.SetIsVisible(true)?;
     let web = controller.CoreWebView2()?;
+    let command_line = cdp(&web, "Browser.getBrowserCommandLine", serde_json::json!({}), &closed)?;
+    let command_line: serde_json::Value = serde_json::from_str(&command_line)?;
+    let args = command_line["arguments"].as_array().ok_or_else(|| anyhow::anyhow!("browser arguments unavailable"))?;
+    for prefix in ["--proxy-server=", "--proxy-bypass-list=", "--force-webrtc-ip-handling-policy=", "--disable-features="] {
+        let expected = arguments.split_whitespace().find(|a| a.starts_with(prefix)).unwrap();
+        let found: Vec<_> = args.iter().filter_map(|v| v.as_str()).filter(|a| a.starts_with(prefix)).collect();
+        anyhow::ensure!(found == [expected], "browser network argument override rejected");
+    }
+    anyhow::ensure!(
+        !args.iter().filter_map(|v| v.as_str()).any(|a| a.starts_with("--remote-debugging")
+            || a == "--no-proxy-server"
+            || a.starts_with("--proxy-pac-url")
+            || a == "--no-sandbox"
+            || a == "--disable-web-security"
+            || a.starts_with("--ignore-certificate-errors")
+            || a.starts_with("--allow-file-access")),
+        "unsafe browser argument override rejected"
+    );
     let settings = web.Settings()?;
     settings.SetAreDevToolsEnabled(false)?;
     settings.SetAreDefaultContextMenusEnabled(false)?;
@@ -95,11 +191,18 @@ unsafe fn run_sta(w: u32, h: u32, rx: Receiver<Command>, shared: Arc<Mutex<Share
     settings4.SetIsGeneralAutofillEnabled(false)?;
     settings4.SetIsPasswordAutosaveEnabled(false)?;
     let guard_web = web.clone();
-    AddScriptToExecuteOnDocumentCreatedCompletedHandler::wait_for_async_operation(
-        Box::new(move |cb| guard_web.AddScriptToExecuteOnDocumentCreated(w!("for (const name of ['print','showOpenFilePicker','showSaveFilePicker','showDirectoryPicker']) { Object.defineProperty(window, name, {value:()=>undefined, writable:false, configurable:false}); }"), &cb).map_err(webview2_com::Error::WindowsError)),
-        Box::new(|e,_|e),
-    ).map_err(|e|anyhow::anyhow!("page dialog guards: {e}"))?;
+    let (tx, scriptrx) = mpsc::channel();
+    guard_web.AddScriptToExecuteOnDocumentCreated(w!("for (const name of ['print','showOpenFilePicker','showSaveFilePicker','showDirectoryPicker']) { Object.defineProperty(window, name, {value:()=>undefined, writable:false, configurable:false}); }"),
+        &AddScriptToExecuteOnDocumentCreatedCompletedHandler::create(Box::new(move |e,_|{let _=tx.send(e);Ok(())})))?;
+    pump_wait(&scriptrx, &closed, Duration::from_secs(15))?;
     let mut token = 0;
+    let navigation = Rc::new(RefCell::new(0u64));
+    let pending: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
+    let capture_navigation = Rc::new(RefCell::new(u64::MAX));
+    let active = Rc::new(RefCell::new(false));
+    let nav = navigation.clone();
+    let p = pending.clone();
+    let live = active.clone();
     let s = shared.clone();
     web.add_NavigationStarting(
         &NavigationStartingEventHandler::create(Box::new(move |_, args| {
@@ -108,8 +211,13 @@ unsafe fn run_sta(w: u32, h: u32, rx: Receiver<Command>, shared: Arc<Mutex<Share
                 if validate(&url).is_err() {
                     a.SetCancel(true)?;
                 } else {
+                    let mut id = 0;
+                    a.NavigationId(&mut id)?;
+                    *nav.borrow_mut() = id;
+                    *p.borrow_mut() = None;
+                    *live.borrow_mut() = false;
                     let mut s = s.lock().unwrap();
-                    s.state.url = url;
+                    s.state.url = display_text(&url, 8192);
                     s.state.title.clear();
                     s.state.load = Load::Loading;
                     s.frame = None;
@@ -120,11 +228,22 @@ unsafe fn run_sta(w: u32, h: u32, rx: Receiver<Command>, shared: Arc<Mutex<Share
         &mut token,
     )?;
     let s = shared.clone();
+    let nav = navigation.clone();
+    let live = active.clone();
+    let p = pending.clone();
     web.add_NavigationCompleted(
         &NavigationCompletedEventHandler::create(Box::new(move |_, args| {
             if let Some(a) = args {
+                let mut id = 0;
+                a.NavigationId(&mut id)?;
+                if id != *nav.borrow() {
+                    return Ok(());
+                }
+                *p.borrow_mut() = None;
+
                 let mut ok = BOOL(0);
                 a.IsSuccess(&mut ok)?;
+                *live.borrow_mut() = ok.as_bool();
                 s.lock().unwrap().state.load = if ok.as_bool() {
                     Load::Loaded
                 } else {
@@ -141,7 +260,7 @@ unsafe fn run_sta(w: u32, h: u32, rx: Receiver<Command>, shared: Arc<Mutex<Share
     web.add_DocumentTitleChanged(
         &DocumentTitleChangedEventHandler::create(Box::new(move |web, _| {
             if let Some(web) = web {
-                s.lock().unwrap().state.title = string(|p| web.DocumentTitle(p))?;
+                s.lock().unwrap().state.title = display_text(&string(|p| web.DocumentTitle(p))?, 512);
             }
             Ok(())
         })),
@@ -182,7 +301,7 @@ unsafe fn run_sta(w: u32, h: u32, rx: Receiver<Command>, shared: Arc<Mutex<Share
             if let Some(web) = web {
                 let url = string(|p| web.Source(p))?;
                 if validate(&url).is_ok() {
-                    s.lock().unwrap().state.url = url;
+                    s.lock().unwrap().state.url = display_text(&url, 8192);
                 }
             }
             Ok(())
@@ -241,31 +360,40 @@ unsafe fn run_sta(w: u32, h: u32, rx: Receiver<Command>, shared: Arc<Mutex<Share
         &mut token,
     )?;
     let s = shared.clone();
+    let failed = Rc::new(RefCell::new(false));
+    let process_failed = failed.clone();
     web.add_ProcessFailed(
         &ProcessFailedEventHandler::create(Box::new(move |_, _| {
             s.lock().unwrap().state.load = Load::Failed("WebView2 page process failed".into());
+            *process_failed.borrow_mut() = true;
             Ok(())
         })),
         &mut token,
     )?;
-    let pending = Rc::new(RefCell::new(None));
     let p = pending.clone();
+    let live = active.clone();
+    let nav = navigation.clone();
+    let captured = capture_navigation.clone();
     let events = web.GetDevToolsProtocolEventReceiver(w!("Page.screencastFrame"))?;
     events.add_DevToolsProtocolEventReceived(
         &DevToolsProtocolEventReceivedEventHandler::create(Box::new(move |_, args| {
             if let Some(a) = args {
-                *p.borrow_mut() = Some(string(|v| a.ParameterObjectAsJson(v))?);
+                if *live.borrow() && *nav.borrow() == *captured.borrow() {
+                    *p.borrow_mut() = Some(string(|v| a.ParameterObjectAsJson(v))?);
+                }
             }
             Ok(())
         })),
         &mut token,
     )?;
-    cdp(&web, "Page.setInterceptFileChooserDialog", serde_json::json!({"enabled":true}))?;
-    cdp(&web, "Page.startScreencast", serde_json::json!({"format":"png","maxWidth":w,"maxHeight":h,"everyNthFrame":1}))?;
+    cdp(&web, "Page.setInterceptFileChooserDialog", serde_json::json!({"enabled":true}), &closed)?;
+    let mut capturing = false;
     let mut last = Instant::now() - Duration::from_secs(1);
     let mut seq = 0;
     let mut pressed = false;
+    let mut dimensions = (w, h);
     loop {
+        anyhow::ensure!(!*failed.borrow(), "WebView2 page process failed");
         if closed.load(Ordering::Relaxed) {
             break;
         }
@@ -274,13 +402,47 @@ unsafe fn run_sta(w: u32, h: u32, rx: Receiver<Command>, shared: Arc<Mutex<Share
             let _ = TranslateMessage(&msg);
             DispatchMessageW(&msg);
         }
+        if capturing && (!*active.borrow() || *capture_navigation.borrow() != *navigation.borrow()) {
+            cdp(&web, "Page.stopScreencast", serde_json::json!({}), &closed)?;
+            capturing = false;
+            *pending.borrow_mut() = None;
+        }
+        if !capturing && *active.borrow() {
+            *pending.borrow_mut() = None;
+            *capture_navigation.borrow_mut() = *navigation.borrow();
+            cdp(&web, "Page.startScreencast", serde_json::json!({"format":"png","maxWidth":dimensions.0,"maxHeight":dimensions.1}), &closed)?;
+            capturing = true;
+        }
         for _ in 0..64 {
             match rx.try_recv() {
-                Ok(Command::Navigate(url)) => web.Navigate(PCWSTR(wide(&url).as_ptr()))?,
+                #[cfg(test)]
+                Ok(Command::Fixture(html)) => {
+                    let tree = cdp(&web, "Page.getFrameTree", serde_json::json!({}), &closed)?;
+                    let tree: serde_json::Value = serde_json::from_str(&tree)?;
+                    cdp(&web, "Page.setDocumentContent", serde_json::json!({"frameId":tree["frameTree"]["frame"]["id"],"html":html}), &closed)?;
+                    *active.borrow_mut() = true;
+                    shared.lock().unwrap().state.load = Load::Loaded;
+                }
+                #[cfg(test)]
+                Ok(Command::FailCdp) => {
+                    cdp(&web, "Page.thisMethodDoesNotExist", serde_json::json!({}), &closed)?;
+                }
+                Ok(Command::Navigate(url)) => {
+                    *active.borrow_mut() = false;
+                    *pending.borrow_mut() = None;
+                    shared.lock().unwrap().frame = None;
+                    web.Navigate(PCWSTR(wide(&url).as_ptr()))?;
+                }
                 Ok(Command::Resize(w, h)) => {
+                    dimensions = (w, h);
+                    *pending.borrow_mut() = None;
+                    shared.lock().unwrap().frame = None;
                     controller.SetBounds(RECT { left: 0, top: 0, right: w as i32, bottom: h as i32 })?;
-                    cdp(&web, "Page.stopScreencast", serde_json::json!({}))?;
-                    cdp(&web, "Page.startScreencast", serde_json::json!({"format":"png","maxWidth":w,"maxHeight":h}))?;
+                    if capturing {
+                        cdp(&web, "Page.stopScreencast", serde_json::json!({}), &closed)?;
+                        capturing = false;
+                    }
+                    *pending.borrow_mut() = None;
                 }
                 Ok(Command::Input(i)) => {
                     let (kind, x, y, dx, dy) = match i {
@@ -299,6 +461,7 @@ unsafe fn run_sta(w: u32, h: u32, rx: Receiver<Command>, shared: Arc<Mutex<Share
                         &web,
                         "Input.dispatchMouseEvent",
                         serde_json::json!({"type":kind,"x":x,"y":y,"button":if kind=="mousePressed"||kind=="mouseReleased"{"left"}else{"none"},"buttons":if pressed{1}else{0},"clickCount":if kind=="mousePressed"||kind=="mouseReleased"{1}else{0},"deltaX":dx,"deltaY":dy}),
+                        &closed,
                     )?;
                 }
                 Err(mpsc::TryRecvError::Empty) => break,
@@ -310,9 +473,11 @@ unsafe fn run_sta(w: u32, h: u32, rx: Receiver<Command>, shared: Arc<Mutex<Share
         }
         // Back-pressure Chromium by acknowledging at most ten frames per second. Static pages emit nothing.
         if last.elapsed() >= Duration::from_millis(100) {
-            if let Some(raw) = pending.borrow_mut().take() {
+            let raw = pending.borrow_mut().take();
+            if let Some(raw) = raw {
+                let frame_navigation = *capture_navigation.borrow();
                 let v: serde_json::Value = serde_json::from_str(&raw)?;
-                cdp(&web, "Page.screencastFrameAck", serde_json::json!({"sessionId":v["sessionId"]}))?;
+                cdp(&web, "Page.screencastFrameAck", serde_json::json!({"sessionId":v["sessionId"]}), &closed)?;
                 let bytes = base64::engine::general_purpose::STANDARD.decode(v["data"].as_str().unwrap_or(""))?;
                 let mut decoder = png::Decoder::new(std::io::Cursor::new(bytes));
                 decoder.set_transformations(png::Transformations::EXPAND | png::Transformations::ALPHA);
@@ -320,6 +485,9 @@ unsafe fn run_sta(w: u32, h: u32, rx: Receiver<Command>, shared: Arc<Mutex<Share
                 let mut rgba = vec![0; reader.output_buffer_size().unwrap_or(0)];
                 let info = reader.next_frame(&mut rgba)?;
                 rgba.truncate(info.buffer_size());
+                if !current_frame(frame_navigation, *navigation.borrow(), (info.width, info.height), dimensions, *active.borrow()) {
+                    continue;
+                }
                 let mut s = shared.lock().unwrap();
                 if s.frame.as_ref().is_none_or(|f| f.rgba.as_ref() != rgba.as_slice()) {
                     seq += 1;
@@ -330,30 +498,48 @@ unsafe fn run_sta(w: u32, h: u32, rx: Receiver<Command>, shared: Arc<Mutex<Share
         }
         std::thread::sleep(Duration::from_millis(5));
     }
-    cdp(&web, "Page.stopScreencast", serde_json::json!({}))?;
-    controller.Close()?;
-    drop(controller3);
-    drop(web18);
-    drop(web5);
-    drop(web14);
-    drop(web10);
-    drop(web4);
-    drop(settings4);
-    drop(settings);
-    drop(web);
-    drop(controller);
-    drop(composition);
-    drop(events);
-    drop(env);
-    DestroyWindow(hwnd)?;
-    // Browser exits asynchronously; retry deletion of our unique throwaway directory only.
-    let path = profile.keep();
-    for _ in 0..200 {
-        if std::fs::remove_dir_all(&path).is_ok() {
-            shared.lock().unwrap().state.load = Load::Closed;
-            return Ok(());
-        }
-        std::thread::sleep(Duration::from_millis(25));
+    // Close runs unconditionally through Resources, even if CDP or a browser process failed.
+    Ok(())
+}
+fn verify_profile(actual: &std::path::Path, owned: &std::path::Path) -> anyhow::Result<()> {
+    anyhow::ensure!(std::fs::canonicalize(actual)? == std::fs::canonicalize(owned)?, "effective profile override rejected");
+    Ok(())
+}
+fn current_frame(frame_nav: u64, nav: u64, frame_size: (u32, u32), size: (u32, u32), active: bool) -> bool {
+    active && frame_nav == nav && frame_size == size
+}
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn rejects_effective_profile_override_without_deleting_it() {
+        let owned = tempfile::tempdir().unwrap();
+        let external = tempfile::tempdir().unwrap();
+        assert!(super::verify_profile(external.path(), owned.path()).is_err());
+        assert!(external.path().exists());
+        assert!(super::verify_profile(owned.path(), owned.path()).is_ok());
     }
-    anyhow::bail!("private browser profile cleanup timed out: {}", path.display())
+    #[test]
+    fn delayed_navigation_and_resize_frames_are_rejected() {
+        assert!(!super::current_frame(1, 2, (960, 720), (960, 720), true));
+        assert!(!super::current_frame(2, 2, (960, 720), (800, 600), true));
+        assert!(!super::current_frame(2, 2, (800, 600), (800, 600), false));
+        assert!(super::current_frame(2, 2, (800, 600), (800, 600), true));
+    }
+    use super::*;
+    #[test]
+    fn stalled_startup_is_cancelled_and_deadlined() {
+        let (_tx, rx) = mpsc::channel::<windows::core::Result<()>>();
+        let flag = AtomicBool::new(true);
+        let t = Instant::now();
+        assert!(pump_wait(&rx, &flag, Duration::from_secs(15)).is_err());
+        assert!(t.elapsed() < Duration::from_millis(100));
+        flag.store(false, Ordering::Relaxed);
+        assert!(pump_wait(&rx, &flag, Duration::from_millis(20)).is_err());
+    }
+    #[test]
+    fn async_completion_failure_is_not_submission_success() {
+        let (tx, rx) = mpsc::channel::<windows::core::Result<()>>();
+        tx.send(Err(windows::core::Error::from_hresult(HRESULT(0x80004005u32 as i32)))).unwrap();
+        assert!(pump_wait(&rx, &AtomicBool::new(false), Duration::from_secs(1)).is_err());
+    }
 }

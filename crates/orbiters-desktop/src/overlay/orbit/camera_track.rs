@@ -661,13 +661,14 @@ pub fn column_clear(found: &Found, size: [f32;2], mirror: &Mirror, eye: &Matrix3
             if !out.iter().all(|x|x.is_finite()) { return false; }
         }
         if !panel.iter().flatten().all(|v|v.is_finite()) { return false; }
-        [&panel,&tile].into_iter().any(|polygon| (0..4).any(|i| {
+        let separated=[&panel,&tile].into_iter().any(|polygon| (0..4).any(|i| {
             let a=polygon[i]; let b=polygon[(i+1)%4];
             let axis=[b[1]-a[1],a[0]-b[0]];
             let range=|points:&[[f32;2];4]| points.iter().map(|p|p[0]*axis[0]+p[1]*axis[1]).fold((f32::INFINITY,f32::NEG_INFINITY),|(lo,hi),v|(lo.min(v),hi.max(v)));
             let (a,b)=(range(&panel),range(&tile));
             a.1 < b.0 || b.1 < a.0
-        }))
+        }));
+        separated
     })
 }
 
@@ -715,6 +716,49 @@ pub struct Follow {
     /// The hand moves too fast for a picture, which is older than the hand's pose, to say anything of it.
     hand_moving: bool,
     grips: [bool; 2],
+}
+
+/// Session-only reopening estimate. No guessed pose is ever learned as a fitted pose.
+#[derive(Clone, Debug, Default)]
+pub struct Reopen {
+    context: Option<(Option<String>, Option<String>, bool, Option<u32>)>,
+    cached: Option<ReopenPose>,
+}
+#[derive(Clone, Copy, Debug)]
+struct ReopenPose {
+    anchor: Option<(usize, u32)>,
+    local: Matrix34,
+    pub unit: f32,
+    pub side: Side,
+    pub clearance: f32,
+}
+impl Reopen {
+    pub fn context(&mut self, world: Option<&str>, instance: Option<&str>, in_world: bool, pid: Option<u32>) -> bool {
+        if self.context.as_ref().is_some_and(|(w,i,inside,process)|w.as_deref()==world && i.as_deref()==instance && *inside==in_world && *process==pid) { return false; }
+        self.context=Some((world.map(str::to_owned),instance.map(str::to_owned),in_world,pid));
+        self.invalidate();
+        true
+    }
+    pub fn invalidate(&mut self) { self.cached=None; }
+    pub fn remember(&mut self, frame:Matrix34, unit:f32, side:Side, clearance:f32, head:&Matrix34, hands:[Option<(u32,Matrix34)>;2], held:Option<usize>) {
+        if self.context.as_ref().is_none_or(|(world,instance,in_world,pid)|world.is_none() || instance.is_none() || !in_world || pid.is_none()) { return; }
+        let (anchor,base)=match held {
+            Some(hand) => { let Some((device,pose))=hands[hand] else {return}; (Some((hand,device)),pose) },
+            None => (None,*head),
+        };
+        self.cached=Some(ReopenPose {anchor,local:then(&undone(&base),&frame),unit,side,clearance});
+    }
+    pub fn initial(&self, head:&Matrix34, hands:[Option<(u32,Matrix34)>;2], panel_width:f32) -> (Matrix34,f32,Side,f32,bool) {
+        if let Some(cached)=self.cached {
+            let base=match cached.anchor {
+                Some((hand,device)) => hands[hand].filter(|(now,_)| *now==device).map(|(_,pose)|pose),
+                None => Some(*head),
+            };
+            if let Some(base)=base { return (then(&base,&cached.local),cached.unit,cached.side,cached.clearance,true); }
+        }
+        // Uncalibrated first-use estimate, explicitly provisional until visual fitting.
+        (super::super::floating::space::before_eyes(head,0.65,0.22),panel_width/PANEL_SIZE[0],Side::Left,0.,false)
+    }
 }
 
 /// How fast what shows goes to where it should, per second.
@@ -841,6 +885,14 @@ impl Follow {
         self.wanted = Some((towards(&wanted, &local, k), wanted_unit + (unit - wanted_unit) * k));
         true
     }
+
+    /// First validated attachment: settle from the provisional place without waiting for a second look.
+    pub fn attach(&mut self, frame:Matrix34, unit:f32) {
+        if self.at.is_none() { self.seen(frame,unit); }
+        self.wanted=Some((self.local(&frame),unit));
+        self.unsure=None;
+    }
+    pub fn held_hand(&self) -> Option<usize> { self.held.map(|(hand,_)|hand) }
 
     /// Check the pose that will actually be submitted, including hand movement and smoothing.
     /// A target change can be adopted directly only when its complete hull passes the same guard.
@@ -1122,6 +1174,76 @@ mod tests {
     }
 
     #[test]
+    fn review_reopening_is_immediate_and_reuses_the_fitted_holding_hand() {
+        for hand in [0,1] {
+            let mut reopen=Reopen::default(); reopen.context(Some("world"),Some("1"),true,Some(7));
+            let head=STILL;
+            let initial=reopen.initial(&head,[None;2],0.3);
+            assert!(!initial.4);
+            assert!((initial.0.m[2][3]+0.65).abs()<0.001);
+            assert!((initial.0.m[1][3]-(head.m[1][3]-0.22)).abs()<0.001);
+            let mut old_hand=STILL; old_hand.m[0][3]=0.2;
+            let mut panel=old_hand; panel.m[2][3]=-0.4;
+            let mut hands=[None;2]; hands[hand]=Some((10+hand as u32,old_hand));
+            reopen.remember(panel,0.001,Side::Right,17.,&head,hands,Some(hand));
+            let mut moved=old_hand; moved.m[0][3]+=0.5;
+            // Include a rotation, so this proves a controller-relative transform rather than a copied offset.
+            moved.m[0][0]=0.; moved.m[0][2]=1.; moved.m[2][0]=-1.; moved.m[2][2]=0.;
+            hands[hand]=Some((10+hand as u32,moved));
+            let (got,unit,side,gap,reused)=reopen.initial(&head,hands,0.9);
+            let wanted=then(&moved,&then(&undone(&old_hand),&panel));
+            assert!(reused && apart(&got,&wanted)<0.0001 && turned_apart(&got,&wanted)<0.001);
+            assert_eq!((unit,side,gap),(0.001,Side::Right,17.));
+            hands[hand]=Some((99,moved));
+            assert!(!reopen.initial(&head,hands,0.3).4,"a replaced controller cannot inherit the old hand's calibration");
+            assert!(!reopen.initial(&head,[None;2],0.3).4);
+        }
+    }
+    #[test]
+    fn review_reopening_unheld_uses_head_and_invalidates_on_context_and_tracking_changes() {
+        let mut reopen=Reopen::default(); reopen.context(Some("world"),Some("1"),true,Some(7));
+        let mut panel=STILL; panel.m[2][3]=-0.5;
+        reopen.remember(panel,0.001,Side::Left,12.,&STILL,[None;2],None);
+        let mut head=STILL; head.m[0][3]=0.4;
+        assert!((reopen.initial(&head,[None;2],0.3).0.m[0][3]-0.4).abs()<0.0001);
+        assert!(!reopen.context(Some("world"),Some("1"),true,Some(7)));
+        assert!(reopen.initial(&head,[None;2],0.3).4);
+        for (world,instance,in_world,pid) in [(Some("new"),Some("1"),true,Some(7)),(Some("world"),Some("2"),true,Some(7)),(Some("world"),Some("1"),false,Some(7)),(Some("world"),Some("1"),true,Some(8))] {
+            reopen.context(Some("world"),Some("1"),true,Some(7));
+            reopen.remember(panel,0.001,Side::Left,12.,&STILL,[None;2],None);
+            assert!(reopen.initial(&head,[None;2],0.3).4);
+            assert!(reopen.context(world,instance,in_world,pid));
+            assert!(!reopen.initial(&head,[None;2],0.3).4);
+            reopen.remember(panel,0.001,Side::Left,12.,&STILL,[None;2],None);
+        }
+        reopen.invalidate();
+        assert!(!reopen.initial(&head,[None;2],0.3).4,"recenter and play-space events clear reuse");
+    }
+    #[test]
+    fn review_unknown_session_context_cannot_be_remembered_as_calibration() {
+        let mut reopen=Reopen::default();
+        reopen.remember(STILL,0.001,Side::Left,0.,&STILL,[None;2],None);
+        assert!(!reopen.initial(&STILL,[None;2],0.3).4);
+        reopen.context(None,None,false,None);
+        reopen.remember(STILL,0.001,Side::Left,0.,&STILL,[None;2],None);
+        assert!(!reopen.initial(&STILL,[None;2],0.3).4);
+    }
+
+    #[test]
+    fn review_first_fit_settles_from_provisional_and_guard_checks_each_submitted_step() {
+        let mut follow=Follow::default();
+        let (initial,unit,_,_,_)=Reopen::default().initial(&STILL,[None;2],0.3);
+        follow.seen(initial,unit);
+        let mut target=initial; target.m[0][3]+=0.3;
+        follow.attach(target,unit);
+        assert!(!follow.awaiting_confirmation());
+        let first=follow.step(1./90.,[None;2],[false;2],[None;2]).unwrap();
+        assert!(apart(&first.0,&initial)>0. && apart(&first.0,&target)>0.);
+        let shown=follow.safe_display(Some(first),|frame,_|apart(frame,&target)<0.0001).unwrap();
+        assert!(apart(&shown.0,&target)<0.0001,"unsafe crossing adopts the validated endpoint without sliding across the panel");
+    }
+
+    #[test]
     fn review_a_visible_close_panel_at_sixty_degrees_accepts_its_actual_tiles() {
         let (sn,cs)=60f32.to_radians().sin_cos(); let unit=0.5/410.;
         let pose=Matrix34 {m:[[1.,0.,0.,0.],[0.,cs,-sn,1.5],[0.,sn,cs,-0.2]]};
@@ -1134,7 +1256,7 @@ mod tests {
 
     #[test]
     fn review_fit_acceptance_sweep() {
-        let mut total=0; let mut fitted=0;
+        let mut total=0; let mut fitted=0; let mut ordinary_total=0; let mut ordinary_fitted=0;
         for pitch in [-60f32,-40.,-20.,0.,20.,40.,60.] { for yaw in [-60f32,-40.,-20.,0.,20.,40.,60.] { for roll in [-45f32,0.,45.] { for distance in [0.15,0.3,0.65] { for width in [0.2,0.3,0.5] {
             let (sp,cp)=pitch.to_radians().sin_cos(); let (sy,cy)=yaw.to_radians().sin_cos(); let (sr,cr)=roll.to_radians().sin_cos();
             let r=[cy*cr,cp*sr+sp*sy*cr,sp*sr-cp*sy*cr]; let u=[-cy*sr,cp*cr-sp*sy*sr,sp*cr+cp*sy*sr];
@@ -1143,14 +1265,18 @@ mod tests {
             // Only physically visible camera panels belong in this acceptance denominator.
             if [[-205.,-110.],[205.,-110.],[205.,110.],[-205.,110.]].into_iter().any(|p| distance-r[2]*p[0]*unit+u[2]*p[1]*unit <= 0.001) {continue;}
             total+=1;
+            let ordinary=distance>=0.3 && width<=0.3;
+            if ordinary { ordinary_total+=1; }
             let points:Vec<_>=[[-205.,-110.],[205.,-110.],[205.,110.],[-205.,110.],[0.,0.],[82.,135.]].into_iter().map(|p|(p,at(p))).collect();
             let found=Found {perspective:fit(&points),..straight_found(|p|p,1.)};
             let mirror=Mirror {from:[0.,0.],spans:[1.,1.]};
             if let Some((pose,unit))=perspective_pose(&found,[1.,1.],&mirror,&STILL,width) {
-                if [Side::Left,Side::Right].into_iter().any(|side|column_clear(&found,[1.,1.],&mirror,&STILL,&pose,unit,side,0.012/unit)) { fitted+=1; }
+                if [Side::Left,Side::Right].into_iter().any(|side|column_clear(&found,[1.,1.],&mirror,&STILL,&pose,unit,side,0.012/unit)) { fitted+=1; if ordinary { ordinary_fitted+=1; } }
             }
         }}}}}
         eprintln!("REVIEW SWEEP: total={total}, fitted={fitted}, provisional={}",total-fitted);
+        eprintln!("REVIEW ORDINARY SWEEP: total={ordinary_total}, fitted={ordinary_fitted}, provisional={}",ordinary_total-ordinary_fitted);
+        assert_eq!(ordinary_fitted,ordinary_total,"ordinary hand-held tilts through sixty degrees must not lose valid fits");
         assert!(fitted>0);
     }
 

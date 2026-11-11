@@ -53,6 +53,7 @@ pub struct RawCaptureSummary {
 #[derive(Default)]
 struct OscValues {
     camera_received: Option<bool>,
+    camera_closed_at: Option<u64>,
     camera_command: Option<(i32,u64)>,
     camera_commanded: std::collections::HashSet<i32>,
     /// The avatar worn's parameters (those of avatars worn before go when it changes), the poses, the camera.
@@ -135,6 +136,7 @@ pub struct Controller {
     camera_stream_owners: Mutex<[bool; 2]>,
     camera_scan: Mutex<Option<Box<dyn orbiters_n4n0::QrScan>>>,
     stop_generation: AtomicU64,
+    osc_generation: AtomicU64,
     capture_start_gate: Mutex<()>,
     kit_epoch: Mutex<(u64,Option<String>)>,
     /// The capture kit's toggles as they were before a recording started from the app switched them on (Some while
@@ -433,6 +435,7 @@ impl Controller {
             camera_stream_owners: Mutex::new([false; 2]),
             camera_scan: Mutex::new(None),
             stop_generation: AtomicU64::new(0),
+            osc_generation: AtomicU64::new(0),
             capture_start_gate: Mutex::new(()),
             kit_epoch: Mutex::default(),
             avatar_before: Mutex::new(None),
@@ -1099,8 +1102,16 @@ impl Controller {
         self.acquire_camera_stream(0, vrchat);
     }
 
-    fn acquire_camera_stream(self: &Shared, owner: usize, vrchat: &[(String, OscValue)]) {
+    fn received_camera_closed(&self, evidence:&OscValues) -> bool {
+        let Some(closed)=evidence.camera_closed_at else { return false; };
+        let now=clock::now_ns();
+        !self.view().orbit.camera_panel_seen_ns.is_some_and(|seen|seen>closed && seen<=now && now-seen<2_000_000_000)
+    }
+
+    fn acquire_camera_stream(self: &Shared, owner: usize, vrchat: &[(String, OscValue)]) -> bool {
         let mut owners = self.camera_stream_owners.lock().unwrap();
+        let mut evidence=self.osc_values.lock().unwrap();
+        if self.received_camera_closed(&evidence) || self.view().camera_open_said==Some(false) { owners[owner]=false; return false; }
         owners[owner] = true;
         let value = |path: &str| vrchat.iter().find(|(p, _)| p == path).map(|(_, v)| v.clone());
         let mode = match value(CAMERA_MODE) {
@@ -1109,22 +1120,25 @@ impl Controller {
         };
         let streaming = value(CAMERA_STREAMING).is_some_and(|v| v.truthy());
         if mode == STREAM_MODE && streaming {
-            return;
+            return true;
         }
         self.camera_before.lock().unwrap().get_or_insert(CameraState { mode, streaming });
         if mode != STREAM_MODE {
-            self.camera_mode_command(STREAM_MODE);
+            evidence.camera_command=Some((STREAM_MODE,clock::now_ns()));
+            evidence.camera_commanded.insert(STREAM_MODE);
             let _ = self.with_osc(|o| o.send(CAMERA_MODE, vec![rosc::OscType::Int(STREAM_MODE)]));
         }
+        drop(evidence);
         let ctl = self.clone();
         std::thread::spawn(move || {
             std::thread::sleep(Duration::from_millis(400));
             // Unless the camera was put back meanwhile (the start failed).
             let owners = ctl.camera_stream_owners.lock().unwrap();
-            if owners.iter().any(|on| *on) && ctl.view().camera_open_said != Some(false) && ctl.osc_values.lock().unwrap().camera_received != Some(false) && ctl.camera_before.lock().unwrap().is_some() {
+            if owners.iter().any(|on| *on) && ctl.view().camera_open_said != Some(false) && !ctl.received_camera_closed(&ctl.osc_values.lock().unwrap()) && ctl.camera_before.lock().unwrap().is_some() {
                 let _ = ctl.with_osc(|o| o.send(CAMERA_STREAMING, vec![rosc::OscType::Bool(true)]));
             }
         });
+        true
     }
 
     /// Switches N4N0's capture kit's record and depth-frames toggles on (OSC), remembering how depth frames were.
@@ -1213,7 +1227,7 @@ impl Controller {
             o.send(CAMERA_STREAMING, vec![rosc::OscType::Bool(before.streaming)])?;
             // Closing the real camera wins over restoration. Writing a nonzero Mode while closed
             // changes its stored query value and would falsely certify the next live start.
-            if self.view().camera_open_said == Some(false) || self.osc_values.lock().unwrap().camera_received == Some(false) { return Ok(()); }
+            if self.view().camera_open_said == Some(false) || self.received_camera_closed(&self.osc_values.lock().unwrap()) { return Ok(()); }
             self.camera_mode_command(before.mode);
             o.send(CAMERA_MODE, vec![rosc::OscType::Int(before.mode)])
         });
@@ -1472,12 +1486,14 @@ impl Controller {
         let echo = mode.is_some_and(|mode| osc.camera_command.is_some_and(|(written,_)| written == mode));
         if echo { eprintln!("camera Mode app echo ignored at {at_ns}: {mode:?}"); } // i18n: not shown (diagnostics)
         // Command provenance lasts for this connection; a close permits a real reopening.
-        if mode == Some(0) { osc.camera_command=None; }
+        if mode == Some(0) { osc.camera_command=None; osc.camera_closed_at=Some(at_ns); }
         let camera = if echo { None } else { camera };
         if let Some(open) = camera {
             // Same-mode reopening is a visibility hint, but a previously commanded value
             // needs fresh visual evidence before authorizing a live start.
-            osc.camera_received=Some(open && mode.is_none_or(|m| !osc.camera_commanded.contains(&m)));
+            let independent=open && mode.is_none_or(|m| !osc.camera_commanded.contains(&m));
+            osc.camera_received=Some(independent);
+            if independent { osc.camera_closed_at=None; }
         }
         for (address, values) in messages {
             if osc.forwarding {
@@ -1843,12 +1859,21 @@ impl Controller {
     }
 
     /// Starts OSC for the VRChat `network` says, replacing any that runs.
+    fn apply_camera_seed(&self, generation:u64, open:bool) -> bool {
+        self.update_if(|s| {
+            if self.osc_generation.load(Ordering::Acquire)!=generation || s.camera_open_said.is_some() { return false; }
+            s.camera_open_said=Some(open);
+            true
+        })
+    }
+
     fn start_osc_on(self: &Shared, network: Network, discovery: orbiters_core::osc::Discovery, ports: orbiters_core::osc::Ports) {
+        let generation=self.osc_generation.fetch_add(1,Ordering::AcqRel)+1;
         self.camera_scan.lock().unwrap().take();
         self.release_camera_stream(1);
         self.invalidate_kit(None);
         self.update(|s| { s.camera_tools.qr_generation+=1; s.camera_tools.qr=camera_tools::Qr::Off; s.camera_open_said = None; s.orbit.camera_panel_seen_ns = None; });
-        { let mut osc=self.osc_values.lock().unwrap(); osc.camera_received=None; osc.camera_command=None; osc.camera_commanded.clear(); }
+        { let mut osc=self.osc_values.lock().unwrap(); osc.camera_received=None; osc.camera_closed_at=None; osc.camera_command=None; osc.camera_commanded.clear(); }
         let parameter = RECORD_PARAMETER.to_string();
         let ctl = self.clone();
         let wanted = vec![parameter.clone()];
@@ -1866,17 +1891,13 @@ impl Controller {
                 let ctl = self.clone();
                 std::thread::spawn(move || {
                     for _ in 0..100 {
-                        if ctl.view().camera_open_said.is_some() { break; }
+                        if ctl.osc_generation.load(Ordering::Acquire)!=generation || ctl.view().camera_open_said.is_some() { break; }
                         let camera = ctl.camera_values().into_iter().find_map(|(p,v)| match v {
                             OscValue::Int(mode) if p == CAMERA_MODE => Some(mode != 0),
                             _ => None,
                         });
                         if let Some(open) = camera {
-                            ctl.update_if(|s| {
-                                if s.camera_open_said.is_some() { return false; }
-                                s.camera_open_said = Some(open);
-                                true
-                            });
+                            ctl.apply_camera_seed(generation,open);
                             break;
                         }
                         std::thread::sleep(Duration::from_millis(100));
@@ -1896,6 +1917,7 @@ impl Controller {
     /// still tell VRChat; OSC then stops before the worker leaves, so VRChat's echo of the record toggle starts or
     /// stops nothing, and nothing queued starts once the capture or the running reconstruction ends.
     pub fn shutdown(self: &Shared) {
+        self.osc_generation.fetch_add(1,Ordering::AcqRel);
         self.stop_bridge();
         self.pending_start.lock().unwrap().take();
         self.change_queue(VecDeque::clear);
@@ -3021,12 +3043,37 @@ mod tests {
         ctl.shutdown();
     }
     #[test]
+    fn review_visual_reopening_allows_stream_but_a_late_mode_echo_cannot_reopen_it() {
+        let (ctl,socket)=review_controller();
+        ctl.camera_mode_command(2);
+        ctl.on_osc(vec![(CAMERA_MODE.into(),vec![OscValue::Int(0)])],clock::now_ns());
+        ctl.on_osc(vec![(CAMERA_MODE.into(),vec![OscValue::Int(2)])],clock::now_ns());
+        assert_eq!(ctl.view().camera_open_said,Some(true));
+        assert!(!ctl.acquire_camera_stream(1,&[(CAMERA_MODE.into(),OscValue::Int(1))]));
+        assert!(received(&socket,Duration::from_millis(50)).is_empty());
+        ctl.update(|s|s.orbit.camera_panel_seen_ns=Some(clock::now_ns()));
+        assert!(ctl.acquire_camera_stream(1,&[(CAMERA_MODE.into(),OscValue::Int(1))]));
+        assert!(received(&socket,Duration::from_millis(50)).contains(&(CAMERA_MODE.into(),rosc::OscType::Int(2))));
+        ctl.camera_qr(false); ctl.shutdown();
+    }
+
+    #[test]
+    fn review_stream_acquisition_cannot_write_mode_after_received_close() {
+        let (ctl,socket)=review_controller();
+        { let mut evidence=ctl.osc_values.lock().unwrap(); evidence.camera_received=Some(false); evidence.camera_closed_at=Some(clock::now_ns()); }
+        assert!(!ctl.acquire_camera_stream(1,&[(CAMERA_MODE.into(),OscValue::Int(1))]));
+        assert!(!ctl.camera_stream_owners.lock().unwrap()[1]);
+        assert!(received(&socket,Duration::from_millis(100)).is_empty());
+        ctl.shutdown();
+    }
+
+    #[test]
     fn review_qr_close_and_cancel_restore_without_reopening_or_a_late_stream_toggle() {
         let (ctl,socket)=review_controller();
         ctl.camera_qr(true);
         received(&socket,Duration::from_millis(30));
         // The receive/publish interval: restoration must honor a received close already.
-        ctl.osc_values.lock().unwrap().camera_received=Some(false);
+        { let mut evidence=ctl.osc_values.lock().unwrap(); evidence.camera_received=Some(false); evidence.camera_closed_at=Some(clock::now_ns()); }
         ctl.camera_qr(false);
         let sent=received(&socket,Duration::from_millis(550));
         assert!(!sent.iter().any(|(p,v)| p==CAMERA_MODE && *v!=rosc::OscType::Int(0)));
@@ -3040,6 +3087,22 @@ mod tests {
         assert!(!ctl.camera_stream_owners.lock().unwrap()[1]);
         assert!(!sent.iter().any(|(p,v)| p==CAMERA_MODE && *v!=rosc::OscType::Int(0)));
         assert!(!sent.contains(&(CAMERA_STREAMING.into(),rosc::OscType::Bool(true))));
+        ctl.shutdown();
+    }
+
+    #[test]
+    fn review_camera_bootstrap_cannot_publish_across_reconnection() {
+        let (ctl,_socket)=review_controller();
+        let old=ctl.osc_generation.load(Ordering::Acquire);
+        let release=Arc::new(std::sync::Barrier::new(2));
+        let b=release.clone(); let c=ctl.clone();
+        let response=std::thread::spawn(move || {b.wait(); c.apply_camera_seed(old,true)});
+        ctl.start_osc_with(false);
+        release.wait();
+        response.join().unwrap();
+        assert_eq!(ctl.view().camera_open_said,None);
+        ctl.apply_camera_seed(ctl.osc_generation.load(Ordering::Acquire),false);
+        assert_eq!(ctl.view().camera_open_said,Some(false));
         ctl.shutdown();
     }
 

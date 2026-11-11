@@ -77,7 +77,7 @@ impl Controller {
         if self.view().camera_open_said != Some(true) || !values.iter().any(|(p,v)|p==super::CAMERA_MODE && matches!(v,orbiters_core::osc::OscValue::Int(m) if *m != 0)) {
             self.release_camera_stream(1); self.update(|s|s.camera_tools.qr=Qr::NoStream); return;
         }
-        self.acquire_camera_stream(1, &values);
+        if !self.acquire_camera_stream(1, &values) { self.update(|s|s.camera_tools.qr=Qr::NoStream); return; }
         let generation = self.view().camera_tools.qr_generation;
         let weak = std::sync::Arc::downgrade(self);
         let events: orbiters_n4n0::QrEvents = Box::new(move |event| {
@@ -96,7 +96,7 @@ impl Controller {
         #[cfg(test)]
         { *self.test_qr_events.lock().unwrap() = Some(events); return; }
         #[cfg(not(test))]
-        match crate::qr::start(self.settings().spout_sender.clone(), events) {
+        match crate::qr::start(String::new(), events) {
             Ok(handle) => *scan = Some(handle),
             Err(e) => { self.update(|s| s.camera_tools.qr = Qr::Error(e)); self.release_camera_stream(1); },
         }

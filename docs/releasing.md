@@ -87,8 +87,9 @@ All of them take `--channel <name>`, `stable` by default. An app follows the cha
 2. Builds the setup without programs inside, with the C runtime linked in (`+crt-static`, in its own target folder).
    This is the uninstaller kept in the install folder, so it must start on any Windows.
 3. Gathers the programs, the face detector (`crates/orbiters-reconstruct/assets/faces-v1-int8.onnx`), `onnxruntime.dll`, `onnxruntime_providers_shared.dll`, `sherpa-onnx-c-api.dll`, Visual
-   C++'s `vcruntime140.dll`, the licences and the uninstaller. Every program needs `vcruntime140.dll`, which a clean
-   Windows lacks, so it ships beside them (app-local, as Microsoft allows). Each `.exe` and `.dll` is then checked:
+   C++'s `vcruntime140.dll` and `vcruntime140_1.dll`, the licences and the uninstaller. These runtimes ship beside the
+   programs (app-local, as Microsoft allows); both come from the same redistributable folder. When `ORBITERS_VCRUNTIME`
+   selects a runtime, its folder must also contain `vcruntime140_1.dll`. Each `.exe` and `.dll` is then checked:
    it may load only DLLs that come with Windows or ship beside it. If anything else is needed, `dist` stops.
 4. Signs our programs (Azure Artifact Signing), then packs everything into a zstd-compressed tar whose index lists
    each file's size and SHA-256.

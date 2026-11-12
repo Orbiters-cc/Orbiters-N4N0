@@ -308,8 +308,8 @@ impl Painter {
     /// Outside measured turns only: replay frozen inputs with the same font and texture history.
     pub fn audit(&self, frame: Frame) -> std::sync::mpsc::Receiver<Audit> {
         let (reply, rx) = std::sync::mpsc::channel();
-        self.shared.0.lock().unwrap_or_else(|e| e.into_inner()).audit = Some((frame, reply));
-        self.shared.1.notify_one(); rx
+        let retired = self.shared.0.lock().unwrap_or_else(|e| e.into_inner()).audit.replace((frame, reply));
+        self.shared.1.notify_one(); drop(retired); rx
     }
     pub fn take(&self) -> Option<Frame> { self.shared.0.lock().unwrap_or_else(|e| e.into_inner()).frame.take() }
     pub fn take_parts(&self) -> Vec<PartPicture> { self.shared.0.lock().unwrap_or_else(|e| e.into_inner()).part_frames.drain().map(|(_, f)| f).collect() }
@@ -390,7 +390,7 @@ mod tests {
                     let mut pixels = serial.pixels().to_vec();
                     panels::finish_picture(&mut pixels, serial.pixels(), [512, 288], 512.0 / orbiters_n4n0_core::menu::layout::WIDTH as f32, [0, 0, 512, 288]);
                     panels::cut_page_corners(&mut pixels, [512, 288], [0, 0, 512, 288]);
-                    assert_eq!(frame.pixels, pixels);
+                    assert_eq!(frame.pixels.as_slice(), pixels);
                 });
             }
         }

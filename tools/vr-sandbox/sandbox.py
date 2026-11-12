@@ -56,6 +56,11 @@ def process_exited(pid):
     try:return kernel.WaitForSingleObject(handle,0)==0
     finally:kernel.CloseHandle(handle)
 
+def terminate_dead_helper(p):
+    # Only called for an exact journal-owned identity after the normal wait.
+    result=subprocess.run(['taskkill','/PID',str(p.pid),'/F'],capture_output=True,text=True,timeout=10,creationflags=subprocess.CREATE_NO_WINDOW)
+    return 'There is no running instance of the task' in result.stderr
+
 def unit_rotation(values):
     norm=math.sqrt(sum(x*x for x in values))
     if norm<1e-8:raise ValueError('zero quaternion')
@@ -99,11 +104,16 @@ def process_dead(p):
 
 def processes():
     result=[]
+    dead=[]
+    if JOURNAL.exists():
+        saved=json.loads(JOURNAL.read_text())
+        dead=saved.get('dead_processes',[])
     for pid,name in process_names():
         if name.lower() in NAMES:
             try:
                 p=psutil.Process(pid)
-                if not process_dead(p):result.append({'pid':pid,'name':name,'create_time':p.create_time()})
+                info={'pid':pid,'name':name,'create_time':p.create_time()}
+                if not process_dead(p) and not any(d['pid']==pid and d['create_time']==info['create_time'] for d in dead):result.append(info)
             except psutil.NoSuchProcess:pass
     return result
 
@@ -207,11 +217,11 @@ def restore_contents(j):
     _,remaining=psutil.wait_procs(terminating,timeout=10)
     still_running={(p['pid'],p['create_time']) for p in processes()}
     remaining=[p for p in remaining if (p.pid,p.create_time()) in still_running]
-    warnings=[p.pid for p in remaining if process_dead(p)]
-    remaining=[p for p in remaining if not process_dead(p)]
+    warnings=[p.pid for p in remaining if process_dead(p) or terminate_dead_helper(p)]
+    remaining=[p for p in remaining if p.pid not in warnings]
     if remaining:
         raise RuntimeError('Owned processes did not exit after terminate: '+json.dumps([p.pid for p in remaining]))
-    if processes():
+    if [p for p in processes() if p['pid'] not in warnings]:
         raise RuntimeError('VR processes remain; configuration retained for standalone restore')
     for entry in j['files']:
         path, saved = Path(entry['path']), Path(entry['backup'])
@@ -229,6 +239,7 @@ def restore_contents(j):
         else:
             path.unlink(missing_ok=True)
     j['restored'] = True
+    j['dead_processes']=[info for info in j['processes'] if info['pid'] in warnings]
     atomic_json(JOURNAL, j)
     if j.get('app_restore_exe'):
         args=[j['app_restore_exe']]+([] if j.get('app_was_visible') else ['--hidden'])

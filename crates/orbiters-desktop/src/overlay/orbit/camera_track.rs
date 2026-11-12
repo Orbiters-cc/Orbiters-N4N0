@@ -541,6 +541,7 @@ fn outline_search(light: &Light, f: &Found, general:bool,gradient:bool) -> Optio
       Some((h,uncertainty,(4,points)))
     };
     if let Some(result)=solve() {
+        if !gradient {return Some(result);}
         // Evaluate the complete identity, rather than accepting the first four
         // strong scene edges. Print's bevel can otherwise pair the true left
         // edge with an unrelated parallel edge behind the camera.

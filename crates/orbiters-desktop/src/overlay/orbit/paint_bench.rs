@@ -870,7 +870,7 @@ fn script(rig: &mut Rig) {
             rig.begin(&format!("world-switch-{round}-{label}"), Rest);
             let at = Instant::now();
             assert!(rig.panels.stage.worlds.as_mut().unwrap().paint_fixture_page(page));
-            rig.panels.open_sheet(super::panels::Sheet::Worlds, orbiters_i18n::tr("Worlds in 3D"), &rig.snap);
+            rig.panels.open_sheet(super::panels::Sheet::Worlds, &orbiters_i18n::tr("Worlds in 3D"), &rig.snap);
             let opening = at.elapsed(); rig.turns(1);
             rig.steps.last_mut().unwrap().turns.last_mut().unwrap().open += opening;
             rig.write("switch-next-turn"); if round == 0 { rig.rest(); }

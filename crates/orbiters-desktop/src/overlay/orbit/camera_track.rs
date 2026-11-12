@@ -51,6 +51,7 @@ const SUPPORT_SMALL: usize = 4;
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Found {
     pub perspective: Option<[[f32; 3]; 3]>,
+    pub lines: Option<LineSet>,
     pub residual_px: f32,
     pub landmarks: Option<(usize, [([f32;2],[f32;2]);10])>,
     pub x: [f32; 2],
@@ -64,6 +65,9 @@ pub struct Found {
     pub tall: f32,
 }
 
+type LineSet = [([[f32;2];2],[f32;3]);4];
+type Outline = ([[f32;3];3],f32,(usize,[([f32;2],[f32;2]);10]),Option<LineSet>);
+
 impl Found {
     fn moved(mut self, by: [f32; 2], scale: f32) -> Self {
         let at = |p: [f32; 2]| [p[0] / scale + by[0], p[1] / scale + by[1]];
@@ -71,6 +75,9 @@ impl Found {
         self.across /= scale;
         self.tall /= scale;
         self.residual_px /= scale;
+        if let Some(lines)=self.lines.as_mut() {for (_,l) in lines {
+            l[2]=l[2]/scale-l[0]*by[0]-l[1]*by[1];
+        }}
         if let Some((count,points)) = self.landmarks.as_mut() {
             for (_,q) in points.iter_mut().take(*count) { *q=at(*q); }
         }
@@ -376,13 +383,13 @@ fn look(light: &Light, needs: usize) -> Option<Found> {
                 let (perspective,residual_px,landmarks) = fitted.map_or((None,f32::INFINITY,None), |(h,e,p)| (Some(h),e,Some(p)));
                 let score = looks + support as f32 * 0.2 - (x_share - X_IS).abs() * 3.0 - (c_share - CHEVRON_IS).abs() * 2.0;
                 if best.as_ref().is_none_or(|b| score > b.0) {
-                    let mut found = Found { perspective, residual_px, landmarks, x: x.middle, chevron: c.middle, middle: reading.middle, right: reading.right, down: reading.down, across: reading.across, tall: reading.tall };
+                    let mut found = Found { perspective, lines:None, residual_px, landmarks, x: x.middle, chevron: c.middle, middle: reading.middle, right: reading.right, down: reading.down, across: reading.across, tall: reading.tall };
                     // Print omits the second top-left icon. Its left status
                     // column and right sliders still identify opposite sides;
                     // replace the missing icon vote with a measured border.
                     if support<needs || (lean.abs()>LEANS_AT_MOST.to_radians() && fitted.is_none()) {
-                        let Some((h,error,points))=outline_fit(light,&found) else {continue;};
-                        found.perspective=Some(h);found.residual_px=error;found.landmarks=Some(points);
+                        let Some((h,error,points,lines))=outline_fit(light,&found) else {continue;};
+                        found.perspective=Some(h);found.residual_px=error;found.landmarks=Some(points);found.lines=lines;
                     }
                     best = Some((score, found));
                 }
@@ -392,10 +399,10 @@ fn look(light: &Light, needs: usize) -> Option<Found> {
     best.map(|(_, mut found)| {
         // Native Photo/Stream rows have different icon centres. Locate the physical
         // viewfinder border independently; the glyph pair identifies it, not its pose.
-        if let Some((h, error, points)) = outline_fit(light, &found) {
+        if let Some((h, error, points,lines)) = outline_fit(light, &found) {
             found.perspective = Some(h);
             found.residual_px = error;
-            found.landmarks = Some(points);
+            found.landmarks = Some(points);found.lines=lines;
         }
         found
     })
@@ -405,11 +412,11 @@ fn look(light: &Light, needs: usize) -> Option<Found> {
 /// not the outer border. Stereo measurements of the sandbox give 1.775:1.
 const OUTLINE_HALF_HEIGHT: f32 = 205.0 * 9.0 / 16.0;
 
-fn outline_fit(light: &Light, f: &Found) -> Option<([[f32;3];3],f32,(usize,[([f32;2],[f32;2]);10]))> {
+fn outline_fit(light: &Light, f: &Found) -> Option<Outline> {
     outline_search(light,f,false,false).or_else(||outline_search(light,f,true,false)).or_else(||outline_search(light,f,true,true))
 }
 
-fn outline_search(light: &Light, f: &Found, general:bool,gradient:bool) -> Option<([[f32;3];3],f32,(usize,[([f32;2],[f32;2]);10]))> {
+fn outline_search(light: &Light, f: &Found, general:bool,gradient:bool) -> Option<Outline> {
     let sample = |p:[f32;2]| -> Option<f32> {
         let (x,y)=(p[0].round() as isize,p[1].round() as isize);
         if x<0 || y<0 || x>=light.width as isize || y>=light.height as isize { return None; }
@@ -522,34 +529,40 @@ fn outline_search(light: &Light, f: &Found, general:bool,gradient:bool) -> Optio
             let p=on(b.middle);
             (80.0..=210.0).contains(&p[0]) && (-70.0..=100.0).contains(&p[1]) && b.long>b.short*4. && b.long>12.*scale
         }).collect();
-        let intersect=|a:&Edge,b:&Edge| -> Option<[f32;2]> {
-            let det=a.u[0]*b.u[1]-a.u[1]*b.u[0];if det.abs()<0.2{return None;}
-            let q=[b.p[0]-a.p[0],b.p[1]-a.p[1]];
-            let t=(q[0]*b.u[1]-q[1]*b.u[0])/det;
-            Some([a.p[0]+t*a.u[0],a.p[1]+t*a.u[1]])
-        };
         let mut best=None;
-        for top in &edges[0] {for bottom in &edges[2] {for left in &edges[3] {
+        for top in &edges[0] {for left in &edges[3] {
         for one in &rails {for two in &rails {
             let separation=on(two.middle)[0]-on(one.middle)[0];
             if !(10.0..=40.0).contains(&separation){continue;}
             let solve=|| -> Option<_> {
-                let lines=[*left,Edge{p:one.middle,u:one.along,error:0.5},Edge{p:two.middle,u:two.along,error:0.5}];
-                let mut points=[([0.;2],[0.;2]);10];
-                for (i,(line,x)) in lines.iter().zip([-205.,164.,186.]).enumerate() {
-                    points[i*2]=([x,-OUTLINE_HALF_HEIGHT],intersect(top,line)?);
-                    points[i*2+1]=([x,OUTLINE_HALF_HEIGHT],intersect(bottom,line)?);
+                let edges=[*top,*left,Edge{p:one.middle,u:one.along,error:0.5},Edge{p:two.middle,u:two.along,error:0.5}];
+                let models=[[[ -205.,-OUTLINE_HALF_HEIGHT],[205.,-OUTLINE_HALF_HEIGHT]],
+                    [[-205.,-OUTLINE_HALF_HEIGHT],[-205.,OUTLINE_HALF_HEIGHT]],
+                    [[164.,-OUTLINE_HALF_HEIGHT],[164.,OUTLINE_HALF_HEIGHT]],
+                    [[186.,-OUTLINE_HALF_HEIGHT],[186.,OUTLINE_HALF_HEIGHT]]];
+                let lines:LineSet=std::array::from_fn(|i| {
+                    let e=edges[i];let (a,b)=(-e.u[1],e.u[0]);(models[i],[a,b,-a*e.p[0]-b*e.p[1]])
+                });
+                let mut rows=Vec::new();
+                for (model,[a,b,c]) in lines {for [x,y] in model {
+                    rows.push([a*x,a*y,a,b*x,b*y,b,c*x,c*y,-c]);
+                }}
+                for ([x,y],[u,v]) in [(PANEL_X,f.x),(PANEL_CHEVRON,f.chevron)] {
+                    rows.push([x,y,1.,0.,0.,0.,-u*x,-u*y,u]);
+                    rows.push([0.,0.,0.,x,y,1.,-v*x,-v*y,v]);
                 }
-                let h=fit(&points[..6])?;
+                let h=homography_rows(&rows)?;
                 let mut score=0.;
-                for (p,q) in [(PANEL_X,f.x),(PANEL_CHEVRON,f.chevron)] {
+                let mut points=[([0.;2],[0.;2]);10];
+                for (i,(p,q)) in [(PANEL_X,f.x),(PANEL_CHEVRON,f.chevron)].into_iter().enumerate() {
                     let r=project(h,p);let error=(r[0]-q[0]).hypot(r[1]-q[1]);
-                    if error>16.*scale{return None;}score+=error*error;
+                    if error>16.*scale{return None;}score+=error*error;points[i]=(p,q);
                 }
-                Some((score,(h,top.error.max(bottom.error).max(left.error).max(0.5),(6,points))))
+                for (model,l) in lines {for p in model {let q=project(h,p);score+=(l[0]*q[0]+l[1]*q[1]+l[2]).powi(2);}}
+                Some((score,(h,top.error.max(left.error).max(0.5),(2,points),Some(lines))))
             };
             if let Some((score,result))=solve() {if best.as_ref().is_none_or(|(old,_)|score<*old){best=Some((score,result));}}
-        }}}}}
+        }}}}
         if let Some((_,result))=best{return Some(result);}
     }
     let mut best = None;
@@ -596,7 +609,7 @@ fn outline_search(light: &Light, f: &Found, general:bool,gradient:bool) -> Optio
         if !rail_x.iter().any(|a|rail_x.iter().any(|b|(14.0..=30.0).contains(&(a-b).abs()))) {return None;}
     }
       let uncertainty=lines.iter().map(|e|e.error).fold(0.5f32,f32::max);
-      Some((h,uncertainty,(4,points)))
+      Some((h,uncertainty,(4,points),None))
     };
     if let Some(result)=solve() {
         if !gradient {return Some(result);}
@@ -630,6 +643,17 @@ pub fn fit(points: &[([f32; 2], [f32; 2])]) -> Option<[[f32; 3]; 3]> {
             for i in 0..8 { for j in 0..9 { a[i][j] += row[i] * row[j]; } }
         }
     }
+    let h=solve_homography(a)?;
+    let error = points.iter().map(|&(p,q)| { let r=project(h,p); (r[0]-q[0]).powi(2)+(r[1]-q[1]).powi(2) }).sum::<f32>() / points.len() as f32;
+    (error.is_finite() && error.sqrt() <= 2.5).then_some(h)
+}
+
+fn homography_rows(rows:&[[f32;9]]) -> Option<[[f32;3];3]> {
+    let mut a=[[0.;9];8];
+    for row in rows {for i in 0..8 {for j in 0..9 {a[i][j]+=row[i] as f64*row[j] as f64;}}}
+    solve_homography(a)
+}
+fn solve_homography(mut a:[[f64;9];8]) -> Option<[[f32;3];3]> {
     for k in 0..8 {
         let pivot = (k..8).max_by(|&i,&j| a[i][k].abs().total_cmp(&a[j][k].abs()))?;
         a.swap(k,pivot);
@@ -639,8 +663,7 @@ pub fn fit(points: &[([f32; 2], [f32; 2])]) -> Option<[[f32; 3]; 3]> {
         for i in 0..8 { if i != k { let d = a[i][k]; for j in k..9 { a[i][j] -= d * a[k][j]; } } }
     }
     let h = [[a[0][8] as f32,a[1][8] as f32,a[2][8] as f32], [a[3][8] as f32,a[4][8] as f32,a[5][8] as f32], [a[6][8] as f32,a[7][8] as f32,1.]];
-    let error = points.iter().map(|&(p,q)| { let r=project(h,p); (r[0]-q[0]).powi(2)+(r[1]-q[1]).powi(2) }).sum::<f32>() / points.len() as f32;
-    (error.is_finite() && error.sqrt() <= 2.5).then_some(h)
+    Some(h)
 }
 
 fn landmark_fit(r: &Reading, blobs: &[Blob], x: [f32;2], chevron: [f32;2]) -> Option<([[f32;3];3],f32,(usize,[([f32;2],[f32;2]);10]))> {
@@ -663,13 +686,17 @@ fn landmark_fit(r: &Reading, blobs: &[Blob], x: [f32;2], chevron: [f32;2]) -> Op
 }
 
 #[derive(Clone,Copy)]
-struct PlaneObservation { model:[f32;2],pixel:[f32;2],inverse_eye:Matrix34,mirror:Mirror,size:[f32;2] }
+struct PlaneObservation { model:[f32;2],pixel:[f32;2],line:Option<[f32;3]>,inverse_eye:Matrix34,mirror:Mirror,size:[f32;2] }
 
 fn observations(found:&Found,size:[f32;2],mirror:Mirror,eye:&Matrix34) -> Vec<PlaneObservation> {
     let points:Vec<_>=if let Some((count,points))=found.landmarks {points.into_iter().take(count).collect()} else {
         [[-205.,-110.],[205.,-110.],[205.,110.],[-205.,110.]].into_iter().map(|p|(p,found.at(p))).collect()
     };
-    points.into_iter().map(|(model,pixel)|PlaneObservation {model,pixel,inverse_eye:undone(eye),mirror,size}).collect()
+    let mut result:Vec<_>=points.into_iter().map(|(model,pixel)|PlaneObservation {model,pixel,line:None,inverse_eye:undone(eye),mirror,size}).collect();
+    if let Some(lines)=found.lines {for (model,line) in lines {for model in model {
+        result.push(PlaneObservation{model,pixel:[0.;2],line:Some(line),inverse_eye:undone(eye),mirror,size});
+    }}}
+    result
 }
 
 /// Optimize the rigid plane in image space. Triangulation is an initializer:
@@ -683,7 +710,9 @@ fn refine_plane(mut frame:Matrix34,mut unit:f32,observed:&[PlaneObservation],met
             let v:[f64;3]=std::array::from_fn(|i|o.inverse_eye.m[i][3] as f64+(0..3).map(|j|o.inverse_eye.m[i][j] as f64*p[j]).sum::<f64>());
             if v[2]>=-1e-5 {return None;}
             let tangent=[v[0]/-v[2],-v[1]/-v[2]];
-            for k in 0..2 {out.push((tangent[k]-o.mirror.from[k] as f64)/o.mirror.spans[k] as f64*o.size[k] as f64-o.pixel[k] as f64);}
+            let px: [f64;2]=std::array::from_fn(|k|(tangent[k]-o.mirror.from[k] as f64)/o.mirror.spans[k] as f64*o.size[k] as f64);
+            if let Some(l)=o.line {out.push(l[0] as f64*px[0]+l[1] as f64*px[1]+l[2] as f64);out.push(0.);}
+            else {for k in 0..2 {out.push(px[k]-o.pixel[k] as f64);}}
         }
         out.iter().all(|v|v.is_finite()).then_some(out)
     };
@@ -782,6 +811,12 @@ pub fn perspective_pose(found: &Found, size: [f32;2], mirror: &Mirror, eye: &Mat
     } else {
         for &(p,_) in &points { errors.push(check(p,project(found.perspective?,p))?); }
     }
+    if let Some(lines)=found.lines {for (model,l) in lines {for p in model {
+        let v:[f32;3]=std::array::from_fn(|i|position[i]+right[i]*p[0]*unit-up[i]*p[1]*unit);
+        let tangent=[v[0]/-v[2],-v[1]/-v[2]];
+        let px: [f32;2]=std::array::from_fn(|i|(tangent[i]-mirror.from[i])/mirror.spans[i]*size[i]);
+        errors.push((l[0]*px[0]+l[1]*px[1]+l[2]).powi(2));
+    }}}
     let rms=(errors.iter().sum::<f32>()/errors.len().max(1) as f32).sqrt();
     if !rms.is_finite() || rms>2.5 || errors.iter().any(|e| *e>36.) { return None; }
     let local=Matrix34 { m: std::array::from_fn(|i| [right[i],up[i],z[i],position[i]]) };
@@ -848,6 +883,14 @@ pub fn stereo_pose(left:&Found,right:&Found,sizes:[[f32;2];2],mirrors:[Mirror;2]
             for p in samples { errors.push(check(p,project(found[k].perspective?,p))?); }
         }
     }
+    for k in 0..2 {if let Some(lines)=found[k].lines {for (model,l) in lines {for p in model {
+        let world:[f32;3]=std::array::from_fn(|i|centre[i]+r[i]*p[0]*unit-u[i]*p[1]*unit);
+        let inverse=undone(&eyes[k]);
+        let v:[f32;3]=std::array::from_fn(|i|inverse.m[i][3]+(0..3).map(|j|inverse.m[i][j]*world[j]).sum::<f32>());
+        let t=[v[0]/-v[2],-v[1]/-v[2]];
+        let px: [f32;2]=std::array::from_fn(|i|(t[i]-mirrors[k].from[i])/mirrors[k].spans[i]*sizes[k][i]);
+        errors.push((l[0]*px[0]+l[1]*px[1]+l[2]).powi(2));
+    }}}}
     let rms=(errors.iter().sum::<f32>()/errors.len().max(1) as f32).sqrt();
     if !rms.is_finite() || rms>2.5 || errors.iter().any(|e|*e>36.) { return None; }
     let local=Matrix34 {m:std::array::from_fn(|i|[r[i],u[i],z[i],centre[i]])};
@@ -1526,7 +1569,7 @@ mod tests {
     }
 
     fn straight_found(at: impl Fn([f32; 2]) -> [f32; 2], per_pixel: f32) -> Found {
-        Found { perspective: None, residual_px: 0., landmarks: None, x: at(PANEL_X), chevron: at(PANEL_CHEVRON), middle: at([0.0, 0.0]), right: [1.0, 0.0], down: [0.0, 1.0], across: per_pixel, tall: per_pixel }
+        Found { perspective: None, lines:None, residual_px: 0., landmarks: None, x: at(PANEL_X), chevron: at(PANEL_CHEVRON), middle: at([0.0, 0.0]), right: [1.0, 0.0], down: [0.0, 1.0], across: per_pixel, tall: per_pixel }
     }
 
     #[test]
@@ -1868,7 +1911,7 @@ mod tests {
             let (s, c) = lean.to_radians().sin_cos();
             let (right, down) = ([c, s], [-s, c]);
             let at = |p: [f32; 2]| [px + (p[0] * right[0] + p[1] * down[0]) * per_pixel, py + (p[0] * right[1] + p[1] * down[1]) * per_pixel];
-            let found = Found { perspective: None, residual_px: 0., landmarks: None, x: at(PANEL_X), chevron: at(PANEL_CHEVRON), middle: at([0.0, 0.0]), right, down, across: per_pixel, tall: per_pixel };
+            let found = Found { perspective: None, lines:None, residual_px: 0., landmarks: None, x: at(PANEL_X), chevron: at(PANEL_CHEVRON), middle: at([0.0, 0.0]), right, down, across: per_pixel, tall: per_pixel };
             for panel_m in [0.2, 0.3, 0.45] {
                 for side in [Side::Left, Side::Right] {
                     let (frame, unit) = panel_in_room(&found, size, &eye, &STILL, panel_m, side);
@@ -1913,7 +1956,7 @@ mod tests {
         let size = [1000.0, 1000.0];
         let per_pixel = PANEL_M / PANEL_SIZE[0] / 0.5 * 500.0;
         let at = |p: [f32; 2]| [500.0 + (p[0] * right[0] + p[1] * down[0]) * per_pixel, 700.0 + (p[0] * right[1] + p[1] * down[1]) * per_pixel];
-        let found = Found { perspective: None, residual_px: 0., landmarks: None, x: at(PANEL_X), chevron: at(PANEL_CHEVRON), middle: at([0.0, 0.0]), right, down, across: per_pixel, tall: per_pixel };
+        let found = Found { perspective: None, lines:None, residual_px: 0., landmarks: None, x: at(PANEL_X), chevron: at(PANEL_CHEVRON), middle: at([0.0, 0.0]), right, down, across: per_pixel, tall: per_pixel };
         let (frame, _) = panel_in_room(&found, size, &mirror(), &STILL, PANEL_M, Side::Left);
         assert!(frame.m[1][0] < -0.3, "the panel's right goes down: {:?}", frame.m);
         assert!(frame.m[1][3] < 1.5, "below the eye: {:?}", frame.m);

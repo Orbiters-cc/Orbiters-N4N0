@@ -908,7 +908,8 @@ pub fn record_near(pixels:&[u8],width:usize,height:usize,stride:usize,offset:[f3
     for y in 0..h {for x in 0..w {
         let Some(p)=pixels.get((y+y0)*stride+(x+x0)*4..(y+y0)*stride+(x+x0)*4+3) else{continue;};
         let (r,g,b)=(p[0] as u32,p[1] as u32,p[2] as u32);
-        mask[y*w+x]=b>100 && b*10>r*11 && r*10>g*13 && b*10>g*15;
+        // Record is pink/red in the actual RGBA compositor readback.
+        mask[y*w+x]=r>100 && r*10>b*11 && b*10>g*13 && r*10>g*15;
     }}
     let mut best=None;
     for i in 0..mask.len() {if !mask[i]{continue;}let mut stack=vec![i];mask[i]=false;let(mut count,mut sx,mut sy)=(0,0.,0.);let(mut xmin,mut xmax,mut ymin,mut ymax)=(w,0,h,0);

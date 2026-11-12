@@ -168,6 +168,11 @@ Activating an app waits for the installed service to quit. Wait for the bridge
 and its signed-in account state before requesting VRChat. A successful launch
 request is not proof of arrival: verify the strict private instance and zero
 other users with `get_state`.
+The log-backed `in_world` state can become true at `Joining`, while the eyes
+still show `Connecting...`. Before camera input, wait for `Finished entering
+world.` after the exact instance identifier in the current VRChat output log,
+then inspect the eye picture. Reusing an instance also risks stale log state;
+the current process's completed load and actual pixels are the readiness proof.
 
 Pose quaternions are normalized. At a mathematically exact half-turn, a literal
 zero scalar component is represented as `cos(pi/2)` to avoid a native VRChat hand
@@ -177,3 +182,14 @@ double precision; it affects only this developer controller, never real tracking
 The supervisor enumerates process names with a Windows snapshot, then queries
 creation times only for runtime processes. Snapshot failure is an error. Owned
 processes are still identified by PID plus creation time, not names alone.
+
+Recovery journal replacement retries Windows access/sharing errors 5, 32 and 33
+up to twenty attempts, 50 ms apart. A concurrent reader can briefly deny delete
+sharing. The previous journal stays intact until replacement succeeds; a
+persistent error still fails and the temporary file is removed. This does not
+relax ownership checks or treat a failed write as a successful recovery.
+
+The journalled sandbox settings disable `dashboard.enableDashboard` for the
+owned test session. SteamVR otherwise sometimes opens its dashboard over VRChat
+and intercepts the camera wheel. The original settings bytes, including the
+owner's dashboard preference, are restored with the other journal entries.

@@ -17,7 +17,7 @@ use std::sync::Arc;
 /// Thumbnails as textures of the context that draws the menu: the picture, and the same as the retro look's green dots
 /// (crisp, so drawn with nearest pixels).
 pub struct Textures {
-    ctx: egui::Context,
+    textures: crate::overlay::PaintTextures,
     /// A copy of what was fetched, by name: other canvases (a panel's own context) make their textures from it.
     images: Arc<std::sync::Mutex<std::collections::HashMap<String, ColorImage>>>,
 }
@@ -31,7 +31,7 @@ impl Textures {
             images.insert(name.to_string(), image.clone());
         }
         let green = menu_retro::phosphor(&image);
-        (self.ctx.load_texture(name, image, TextureOptions::LINEAR), self.ctx.load_texture(format!("{name}-dots"), green, TextureOptions::LINEAR))
+        (self.textures.load_texture(name, image, TextureOptions::LINEAR), self.textures.load_texture(format!("{name}-dots"), green, TextureOptions::LINEAR))
     }
 }
 
@@ -82,7 +82,7 @@ impl MenuHost {
 
     /// The same, showing what `media` reads: a test's own watcher, which plays what the test says and never what the computer does.
     pub fn with_media(ctx: egui::Context, media: Arc<crate::media::Watcher>) -> Self {
-        let host = shared::MenuHost::new(Textures { ctx, images: Default::default() }, Arc::new(crate::device::WindowsLocale), media);
+        let host = shared::MenuHost::new(Textures { textures: crate::overlay::PaintTextures::of(&ctx), images: Default::default() }, Arc::new(crate::device::WindowsLocale), media);
         // The 3D captures' pictures are the sessions' thumbnails, on this computer.
         Self(host.with_capture_pictures(Arc::new(crate::controller::menu_shares::capture_picture)))
     }
@@ -124,5 +124,12 @@ impl MenuHost {
     pub fn put_picture(&mut self, key: &str, image: ColorImage) {
         let picture = self.0.pictures().of(key, image);
         self.0.put_picture(key, picture);
+    }
+}
+
+impl MenuHost {
+    pub(crate) fn paint_pictures(&self, retro: bool) -> std::collections::HashMap<String, egui::TextureId> {
+        let names: Vec<_> = self.0.pictures().images.lock().unwrap_or_else(|e| e.into_inner()).keys().cloned().collect();
+        names.into_iter().filter_map(|key| self.picture(&key, retro).map(|id| (key, id))).collect()
     }
 }

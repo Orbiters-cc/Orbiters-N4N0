@@ -220,9 +220,102 @@ impl Presenter {
     }
 }
 
+/// CPU paint phases accumulated by the headless harness only.
+#[derive(Clone, Copy, Default, Debug)]
+pub(crate) struct PaintPhases {
+    pub facts: Duration,
+    pub text: Duration,
+    pub tessellation: Duration,
+    pub raster: Duration,
+    pub finish: Duration,
+}
+thread_local! {
+    static PAINT_PHASES: std::cell::Cell<Option<PaintPhases>> = const { std::cell::Cell::new(None) };
+}
+pub(crate) fn paint_phases(reset: bool) -> PaintPhases {
+    PAINT_PHASES.with(|p| {
+        let old = p.get().unwrap_or_default();
+        p.set(if reset { Some(PaintPhases::default()) } else { None });
+        old
+    })
+}
+fn record_phase(phase: usize, took: Duration) {
+    PAINT_PHASES.with(|p| {
+        if let Some(mut v) = p.get() {
+            match phase { 0 => v.text += took, 1 => v.tessellation += took, 2 => v.raster += took, 3 => v.finish += took, _ => v.facts += took }
+            p.set(Some(v));
+        }
+    });
+}
+
+/// Texture registration without taking the context/font lock used by CPU layout.
+#[derive(Clone)]
+pub(crate) struct PaintTextures(std::sync::Arc<egui::epaint::mutex::RwLock<egui::epaint::textures::TextureManager>>);
+impl PaintTextures {
+    pub(crate) fn of(ctx: &egui::Context) -> Self { Self(ctx.tex_manager()) }
+    pub(crate) fn load_texture(&self, name: impl Into<String>, image: impl Into<egui::ImageData>, options: egui::TextureOptions) -> egui::TextureHandle {
+        let id = self.0.write().alloc(name.into(), image.into(), options);
+        egui::TextureHandle::new(self.0.clone(), id)
+    }
+}
+
+#[cfg(test)]
+mod review_texture_registration {
+    use super::*;
+    #[test]
+    fn review_font_memory_accounting_does_not_wait_for_page_layout() {
+        use std::sync::mpsc;
+        let mut canvas = Canvas::new(64, 32);
+        canvas.paint(1.0, |p| { p.text(egui::Pos2::ZERO, egui::Align2::LEFT_TOP, "atlas", egui::FontId::proportional(12.0), egui::Color32::WHITE); });
+        let expected = canvas.ctx.fonts(|f| { let [w,h] = f.font_image_size(); w*h*8 });
+        assert_eq!(canvas.atlas_bytes(), expected);
+        let (locked, has_lock) = mpsc::channel(); let (release, go) = mpsc::channel();
+        let ctx = canvas.ctx.clone();
+        let layout = std::thread::spawn(move || ctx.data_mut(|_| { locked.send(()).unwrap(); go.recv().unwrap(); }));
+        has_lock.recv().unwrap();
+        let (started, old_started) = mpsc::channel(); let (old_done, old_received) = mpsc::channel();
+        let ctx = canvas.ctx.clone();
+        // The exact previous accounting API is the blocking control.
+        let old = std::thread::spawn(move || { started.send(()).unwrap(); let bytes = ctx.fonts(|f| { let [w,h] = f.font_image_size(); w*h*8 }); old_done.send(bytes).unwrap(); });
+        old_started.recv().unwrap();
+        let (done, received) = mpsc::channel();
+        let input = std::thread::spawn(move || done.send(canvas.atlas_bytes()).unwrap());
+        let arrived = received.recv_timeout(std::time::Duration::from_secs(2));
+        let old_blocked = old_received.try_recv().is_err();
+        release.send(()).unwrap(); layout.join().unwrap(); input.join().unwrap(); old.join().unwrap();
+        assert!(old_blocked, "the previous font-context read must exercise the held layout lock");
+        assert_eq!(arrived.expect("cache accounting waited for page layout"), expected);
+        assert_eq!(old_received.recv().unwrap(), expected);
+    }
+    #[test]
+    fn review_texture_arrival_does_not_wait_for_the_font_context() {
+        use std::sync::mpsc;
+        let mut canvas = Canvas::new(32, 32);
+        let (locked, has_lock) = mpsc::channel(); let (release, go) = mpsc::channel();
+        let ctx = canvas.ctx.clone();
+        let layout = std::thread::spawn(move || ctx.data_mut(|_| { locked.send(()).unwrap(); go.recv().unwrap(); }));
+        has_lock.recv().unwrap();
+        let (started, old_started) = mpsc::channel(); let (old_done, old_received) = mpsc::channel();
+        let ctx = canvas.ctx.clone();
+        let old = std::thread::spawn(move || { started.send(()).unwrap(); let image = ctx.load_texture("old-api", egui::ColorImage::filled([4,4], egui::Color32::BLUE), egui::TextureOptions::LINEAR); old_done.send(image).unwrap(); });
+        old_started.recv().unwrap();
+        let (done, received) = mpsc::channel(); let textures = canvas.textures.clone();
+        let input = std::thread::spawn(move || { done.send(textures.load_texture("arrival", egui::ColorImage::filled([4,4], egui::Color32::RED), egui::TextureOptions::LINEAR)).unwrap(); });
+        let arrived = received.recv_timeout(std::time::Duration::from_secs(2));
+        let old_blocked = old_received.try_recv().is_err();
+        release.send(()).unwrap(); layout.join().unwrap(); input.join().unwrap(); old.join().unwrap();
+        let image = arrived.expect("texture ingestion waited for a held layout/font context");
+        assert!(old_blocked, "the original context API must exercise the blocking control");
+        canvas.paint(1.0, |p| { p.image(image.id(), egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(16.0,16.0)), egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0,1.0)), egui::Color32::WHITE); });
+        assert_eq!(&canvas.pixels()[(4*32+4)*4..(4*32+4)*4+4], &[255,0,0,255], "the raster owner receives the registered texture delta");
+    }
+}
+
 /// An egui canvas painted on the CPU for one of the world overlays.
 pub struct Canvas {
+    id: u64,
     ctx: egui::Context,
+    textures: PaintTextures,
     painter: Software,
     /// In points.
     size: egui::Vec2,
@@ -233,13 +326,18 @@ pub struct Canvas {
     restyle_off: bool,
     /// A frame was painted: its interface has its fonts (egui has none to ask about before a first frame).
     ran: bool,
+    #[cfg(test)]
+    pub(crate) direct_paints: usize,
 }
 
 impl Canvas {
+    fn next_id() -> u64 { static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1); NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed) }
+    fn pixel_size(&self) -> [u32; 2] { [(self.size.x * self.zoom).round() as u32, (self.size.y * self.zoom).round() as u32] }
     pub fn new(width: u32, height: u32) -> Self {
         let ctx = egui::Context::default();
         orbiters_ui::install(&ctx);
-        Self { ctx, painter: Software::new(width, height), size: egui::vec2(width as f32, height as f32), zoom: 1.0, restyle: None, restyle_off: false, ran: false }
+        let textures = PaintTextures::of(&ctx);
+        Self { id: Self::next_id(), ctx, textures, painter: Software::new(width, height), size: egui::vec2(width as f32, height as f32), zoom: 1.0, restyle: None, restyle_off: false, ran: false, #[cfg(test)] direct_paints: 0 }
     }
 
     /// One of `width` x `height` pixels drawn at `zoom` pixels a point (a panel that scales with what it stands beside: text
@@ -278,8 +376,10 @@ impl Canvas {
     /// pixel what a new canvas would paint: where a letter lies in the atlas depends on what the interface drew before, and the edge of a letter drawn from another place
     /// in it can come out a level or two of 255 apart.
     pub fn renew(&mut self) {
+        self.id = Self::next_id();
         self.ctx = egui::Context::default();
         orbiters_ui::install(&self.ctx);
+        self.textures = PaintTextures::of(&self.ctx);
         self.painter.forget_textures();
         self.ran = false;
     }
@@ -289,19 +389,22 @@ impl Canvas {
         if !self.ran {
             return 0;
         }
-        let [width, height] = self.ctx.fonts(|f| f.font_image_size());
-        width * height * 8
+        // The renderer can hold the context/font lock while laying out a page.
+        // Published font texture metadata is in the short-lived texture registry.
+        self.textures.0.read().meta(egui::TextureId::Managed(0)).map_or(0, |m| m.size[0] * m.size[1] * 8)
     }
 
     /// Paints a frame (RGBA, premultiplied, transparent where nothing was drawn): only what changed is painted again,
     /// and [`Canvas::damage`] says where.
     pub fn paint(&mut self, time: f64, draw: impl FnMut(&egui::Painter)) -> &[u8] {
+        #[cfg(test)] { self.direct_paints += 1; }
         let mut draw = draw;
         let mut input = RawInput { screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), self.size)), time: Some(time), ..Default::default() };
         input.viewports.insert(ViewportId::ROOT, ViewportInfo { native_pixels_per_point: Some(self.zoom), ..Default::default() });
         let (restyle, size) = (self.restyle.filter(|_| !self.restyle_off), self.size);
         orbiters_ui::fonts::follow_language(&self.ctx);
         self.ran = true;
+        let phase = Instant::now();
         let mut full = self.ctx.run_ui(input, |ui| {
             draw(ui.painter());
             if let Some(pass) = restyle {
@@ -309,23 +412,30 @@ impl Canvas {
             }
         });
         orbiters_ui::text_audit::record(&full.shapes);
+        record_phase(0, phase.elapsed());
         self.pictures_now();
+        let phase = Instant::now();
         self.painter.set_textures(&mut full.textures_delta);
         let primitives = self.ctx.tessellate(std::mem::take(&mut full.shapes), full.pixels_per_point);
+        record_phase(1, phase.elapsed());
+        let phase = Instant::now();
         // Textures egui let go of are freed once painted with (the frame may still draw them).
         self.painter.paint(&primitives, full.pixels_per_point, egui::Color32::TRANSPARENT);
+        record_phase(2, phase.elapsed());
         self.painter.free_textures(&mut full.textures_delta);
         self.painter.pixels()
     }
 
     /// The same with a whole `Ui` to draw in (widgets that lay out or animate).
     pub fn paint_ui(&mut self, time: f64, draw: impl FnMut(&mut egui::Ui)) -> &[u8] {
+        #[cfg(test)] { self.direct_paints += 1; }
         let mut draw = draw;
         let mut input = RawInput { screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), self.size)), time: Some(time), ..Default::default() };
         input.viewports.insert(ViewportId::ROOT, ViewportInfo { native_pixels_per_point: Some(self.zoom), ..Default::default() });
         let (restyle, size) = (self.restyle.filter(|_| !self.restyle_off), self.size);
         orbiters_ui::fonts::follow_language(&self.ctx);
         self.ran = true;
+        let phase = Instant::now();
         let mut full = self.ctx.run_ui(input, |ui| {
             draw(ui);
             if let Some(pass) = restyle {
@@ -333,10 +443,15 @@ impl Canvas {
             }
         });
         orbiters_ui::text_audit::record(&full.shapes);
+        record_phase(0, phase.elapsed());
         self.pictures_now();
+        let phase = Instant::now();
         self.painter.set_textures(&mut full.textures_delta);
         let primitives = self.ctx.tessellate(std::mem::take(&mut full.shapes), full.pixels_per_point);
+        record_phase(1, phase.elapsed());
+        let phase = Instant::now();
         self.painter.paint(&primitives, full.pixels_per_point, egui::Color32::TRANSPARENT);
+        record_phase(2, phase.elapsed());
         self.painter.free_textures(&mut full.textures_delta);
         self.painter.pixels()
     }

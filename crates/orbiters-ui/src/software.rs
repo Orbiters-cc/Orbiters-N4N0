@@ -100,6 +100,7 @@ pub struct Software {
     clear: Option<Color32>,
     /// What the last frame changed (x0, y0, x1, y1).
     damage: Option<[u32; 4]>,
+    parallel: bool,
 }
 
 impl Software {
@@ -107,7 +108,7 @@ impl Software {
         Self {
             width: width as usize,
             height: height as usize,
-            pixels: vec![[0; 4]; width as usize * height as usize],
+            pixels: Vec::new(),
             backdrop: None,
             textures: HashMap::new(),
             picture_look: None,
@@ -116,6 +117,7 @@ impl Software {
             stale: true,
             clear: None,
             damage: None,
+            parallel: false,
         }
     }
 
@@ -124,6 +126,9 @@ impl Software {
         self.backdrop = Some(self.pixels.clone());
         self.stale = true;
     }
+
+    /// Independent rows preserve triangle order and the exact sampling arithmetic.
+    pub fn set_parallel(&mut self, on: bool) { self.parallel = on; }
 
     pub fn size(&self) -> (u32, u32) {
         (self.width as u32, self.height as u32)
@@ -228,21 +233,53 @@ impl Software {
     /// Paints the frame over the backdrop (or `clear`) and returns RGBA bytes (premultiplied): only the tiles that
     /// changed since the last frame are painted again ([`Software::damage`] says where).
     pub fn paint(&mut self, primitives: &[ClippedPrimitive], pixels_per_point: f32, clear: Color32) -> &[u8] {
+        // Source canvases for asynchronous overlays never paint. Allocate their large
+        // pixel storage only on the thread that actually performs the first raster.
+        self.pixels.resize(self.width * self.height, [0; 4]);
         let areas = self.changed_areas(primitives, pixels_per_point, clear);
         self.damage = areas.iter().copied().reduce(around).map(|a| a.map(|v| v as u32));
-        for area in areas {
-            self.fill(area, clear);
-            for p in primitives {
-                let Primitive::Mesh(mesh) = &p.primitive else { continue };
-                let Some(clip) = self.clip(p, pixels_per_point).and_then(|c| within(c, area)) else { continue };
-                // A mesh whose texture is not there (never set, or freed) is skipped, as egui's GPU painters do.
-                let Some(texture) = self.textures.remove(&mesh.texture_id) else { continue };
-                for t in mesh.indices.as_chunks::<3>().0 {
-                    let (a, b, c) = (&mesh.vertices[t[0] as usize], &mesh.vertices[t[1] as usize], &mesh.vertices[t[2] as usize]);
-                    self.triangle(clip, [a, b, c], pixels_per_point, &texture);
+        let width = self.width;
+        let height = self.height;
+        let backdrop = self.backdrop.as_deref();
+        let textures = &self.textures;
+        let clips: Vec<_> = primitives.iter().map(|p| self.clip(p, pixels_per_point)).collect();
+        let paint_rows = |pixels: &mut [[u8; 4]], from: usize| {
+            let band = [0, from, width, from + pixels.len() / width];
+            for area in &areas {
+                let Some(area) = within(*area, band) else { continue };
+                for y in area[1]..area[3] {
+                    let row = &mut pixels[(y-from)*width+area[0]..(y-from)*width+area[2]];
+                    match backdrop {
+                        Some(b) => row.copy_from_slice(&b[y*width+area[0]..y*width+area[2]]),
+                        None => row.fill([clear.r(), clear.g(), clear.b(), clear.a()]),
+                    }
                 }
-                self.textures.insert(mesh.texture_id, texture);
+                for (p, clip) in primitives.iter().zip(&clips) {
+                    let Primitive::Mesh(mesh) = &p.primitive else { continue };
+                    let Some(original_clip) = *clip else { continue };
+                    let Some(clip) = within(original_clip, area) else { continue };
+                    let Some(texture) = textures.get(&mesh.texture_id) else { continue };
+                    for t in mesh.indices.as_chunks::<3>().0 {
+                        let v = t.map(|i| &mesh.vertices[i as usize]);
+                        Self::triangle_rows(pixels, width, from, clip, original_clip, v, pixels_per_point, texture);
+                    }
+                }
             }
+        };
+        // Small damage stays serial. The page worker alone opts in, keeping the input thread free of thread setup.
+        let damaged: usize = areas.iter().map(|a| (a[2]-a[0])*(a[3]-a[1])).sum();
+        if self.parallel && damaged > 128 * 1024 {
+            // Retro's layered page remains raster-bound at four bands on the VR
+            // CPU fixture. Six bounded row jobs retain identical per-row arithmetic.
+            let rows = height.div_ceil(6);
+            std::thread::scope(|scope| {
+                for (n, pixels) in self.pixels.chunks_mut(rows * width).enumerate() {
+                    let paint_rows = &paint_rows;
+                    scope.spawn(move || paint_rows(pixels, n * rows));
+                }
+            });
+        } else {
+            paint_rows(&mut self.pixels, 0);
         }
         self.pixels.as_flattened()
     }
@@ -306,18 +343,7 @@ impl Software {
         areas
     }
 
-    /// The backdrop (or `clear`) back over `area`.
-    fn fill(&mut self, [x0, y0, x1, y1]: [usize; 4], clear: Color32) {
-        for y in y0..y1 {
-            let row = y * self.width;
-            match &self.backdrop {
-                Some(b) => self.pixels[row + x0..row + x1].copy_from_slice(&b[row + x0..row + x1]),
-                None => self.pixels[row + x0..row + x1].fill([clear.r(), clear.g(), clear.b(), clear.a()]),
-            }
-        }
-    }
-
-    fn triangle(&mut self, clip: [usize; 4], v: [&Vertex; 3], ppp: f32, texture: &Texture) {
+    fn triangle_rows(pixels: &mut [[u8; 4]], width: usize, from: usize, clip: [usize; 4], original_clip: [usize; 4], v: [&Vertex; 3], ppp: f32, texture: &Texture) {
         let mut p = v.map(|v| [v.pos.x * ppp, v.pos.y * ppp]);
         let mut v = v;
         let edge = |a: [f32; 2], b: [f32; 2], c: [f32; 2]| (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]);
@@ -332,6 +358,7 @@ impl Software {
             area = -area;
         }
         let Some([min_x, min_y, max_x, max_y]) = bounds(p, clip) else { return };
+        let Some([origin_min_x, _, origin_max_x, _]) = bounds(p, original_clip) else { return };
         // Edge functions w_i(x, y) = A_i x + B_i y + C_i, positive inside; w_0 is opposite vertex 0.
         let coeffs = |a: [f32; 2], b: [f32; 2]| (a[1] - b[1], b[0] - a[0], a[0] * b[1] - a[1] * b[0]);
         let e = [coeffs(p[1], p[2]), coeffs(p[2], p[0]), coeffs(p[0], p[1])];
@@ -384,7 +411,7 @@ impl Software {
             // A triangle covers one run of a row: find its ends.
             let Some(first) = (x0..x1).find(|&x| inside(w_at(x))) else { continue };
             let last = (first..x1).rev().find(|&x| inside(w_at(x))).unwrap_or(first);
-            let row = &mut self.pixels[y * self.width + first..=y * self.width + last];
+            let row = &mut pixels[(y - from) * width + first..=(y - from) * width + last];
             match flat {
                 Some(c) => {
                     let src = to_u32(c);
@@ -400,9 +427,26 @@ impl Software {
                 }
                 None => {
                     // Colour and texture coordinates are linear across the triangle: step them along the run.
-                    let l = w_at(first).map(|w| w * inv_area);
+                    // Start at the full primitive's sample: a damage clip must not change f32 accumulation.
+                    let origin = if min_x == origin_min_x { first } else {
+                        let (mut left, mut right) = (origin_min_x as f32, origin_max_x as f32);
+                        for i in 0..3 {
+                            let a = e[i].0;
+                            if a > 0.0 { left = left.max(-k[i] / a - 1.5); }
+                            else if a < 0.0 { right = right.min(-k[i] / a + 1.5); }
+                            else if k[i] < 0.0 || (k[i] == 0.0 && !tl[i]) { right = left; }
+                        }
+                        let x0 = left.floor().max(origin_min_x as f32) as usize;
+                        let x1 = (right.ceil() as usize).min(origin_max_x);
+                        (x0..x1).find(|&x| inside(w_at(x))).unwrap_or(first)
+                    };
+                    let l = w_at(origin).map(|w| w * inv_area);
                     let mut c: [f32; 4] = std::array::from_fn(|i| color[0][i] * l[0] + color[1][i] * l[1] + color[2][i] * l[2]);
                     let mut t_uv = [0, 1].map(|j| uv[0][j] * l[0] + uv[1][j] * l[1] + uv[2][j] * l[2]);
+                    for _ in origin..first {
+                        for i in 0..4 { c[i] += dc[i]; }
+                        t_uv[0] += duv[0]; t_uv[1] += duv[1];
+                    }
                     if flat_uv {
                         // One texel (egui's white for shapes): it only scales the colour.
                         let texel = texture.sample(uv[0][0], uv[0][1], false);
@@ -432,7 +476,7 @@ impl Software {
 }
 
 /// The pixels a triangle (its corners in pixels) can touch inside `clip` (x0, y0, x1, y1), as
-/// [`Software::triangle`] scans them; `None` when none (a corner that is not a number touches none).
+/// [`Software::triangle_rows`] scans them; `None` when none (a corner that is not a number touches none).
 fn bounds(p: [[f32; 2]; 3], clip: [usize; 4]) -> Option<[usize; 4]> {
     if !p.as_flattened().iter().all(|v| v.is_finite()) {
         return None;
@@ -570,6 +614,15 @@ mod tests {
     use super::*;
     use egui::{pos2, vec2, Rect};
 
+    #[test]
+    fn large_pixels_are_allocated_by_the_first_raster_not_the_source_canvas() {
+        let mut software = Software::new(1408, 792);
+        assert!(software.pixels().is_empty(), "an unpainted source canvas allocates no page pixels");
+        let pixels = software.paint(&[], 1.0, Color32::TRANSPARENT);
+        assert_eq!(pixels.len(), 1408 * 792 * 4);
+        assert!(pixels.iter().all(|b| *b == 0), "the first raster still starts transparent");
+    }
+
     fn run(ctx: &egui::Context, sw: &mut Software, ui: impl FnMut(&mut egui::Ui)) -> Vec<u8> {
         let input = egui::RawInput { screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(64.0, 32.0))), ..Default::default() };
         let mut full = ctx.run_ui(input, ui);
@@ -578,6 +631,31 @@ mod tests {
         let out = sw.paint(&prims, full.pixels_per_point, Color32::BLACK).to_vec();
         sw.free_textures(&mut full.textures_delta);
         out
+    }
+
+    #[test]
+    fn parallel_rows_are_pixel_identical_including_damage_and_textures() {
+        let ctx = egui::Context::default();
+        let mut serial = Software::new(512, 513);
+        let mut parallel = Software::new(512, 513);
+        parallel.set_parallel(true);
+        let image = ColorImage::filled([64, 64], Color32::from_rgba_premultiplied(75, 30, 50, 100));
+        let texture = ctx.load_texture("test-image", image, egui::TextureOptions::LINEAR);
+        for offset in [0.0, 13.25, -4.75, 0.0] {
+            let input = egui::RawInput { screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(512.0, 513.0))), ..Default::default() };
+            let mut full = ctx.run_ui(input, |ui| {
+                let p = ui.painter();
+                p.rect_filled(Rect::from_min_max(pos2(0.0, 0.0), pos2(512.0, 513.0)), 0.0, Color32::DARK_BLUE);
+                p.image(texture.id(), Rect::from_min_max(pos2(7.5, offset), pos2(510.0, 510.0+offset)), Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
+                p.text(pos2(20.25, 120.5+offset), egui::Align2::LEFT_TOP, "Pictures", egui::FontId::proportional(32.0), Color32::WHITE);
+                p.circle_filled(pos2(250.0, 256.0+offset), 90.0, Color32::from_white_alpha(80));
+            });
+            serial.set_textures(&mut full.textures_delta.clone());
+            parallel.set_textures(&mut full.textures_delta);
+            let primitives = ctx.tessellate(full.shapes, full.pixels_per_point);
+            assert_eq!(serial.paint(&primitives, full.pixels_per_point, Color32::TRANSPARENT), parallel.paint(&primitives, full.pixels_per_point, Color32::TRANSPARENT));
+            assert_eq!(serial.damage(), parallel.damage());
+        }
     }
 
     #[test]
@@ -754,4 +832,21 @@ mod tests {
         assert_eq!(areas.len(), 2);
         assert!(tile_areas(&[f; 6], 3, 2).is_empty());
     }
+    #[test]
+    fn review_triangle_redraw_is_independent_of_damage_clip() {
+        let texture = Texture { width: 64, height: 64, texels: (0..4096).map(|n| Color32::from_rgb((n * 37 % 256) as u8, (n * 73 % 256) as u8, (n * 19 % 256) as u8)).collect(), nearest_magnified: false, nearest_minified: false, wrap: TextureWrapMode::ClampToEdge, plain: None };
+        let vertices = [
+            Vertex { pos: pos2(3.3, 2.2), uv: pos2(0.0013, 0.0024), color: Color32::WHITE },
+            Vertex { pos: pos2(510.8, 8.1), uv: pos2(0.982, 0.2), color: Color32::WHITE },
+            Vertex { pos: pos2(220.2, 127.9), uv: pos2(0.25, 0.875), color: Color32::WHITE },
+        ];
+        let mut full = vec![[0; 4]; 512 * 128];
+        let mut split = full.clone();
+        Software::triangle_rows(&mut full, 512, 0, [0, 0, 512, 128], [0, 0, 512, 128], vertices.each_ref(), 1.0, &texture);
+        Software::triangle_rows(&mut split, 512, 0, [0, 0, 211, 128], [0, 0, 512, 128], vertices.each_ref(), 1.0, &texture);
+        Software::triangle_rows(&mut split, 512, 0, [211, 0, 512, 128], [0, 0, 512, 128], vertices.each_ref(), 1.0, &texture);
+        let different = full.iter().zip(&split).filter(|(a,b)| a != b).count();
+        assert!(full == split, "damage clipping changed {different} pixels from the identical full redraw");
+    }
+
 }

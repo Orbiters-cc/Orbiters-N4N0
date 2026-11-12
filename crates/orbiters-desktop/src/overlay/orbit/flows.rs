@@ -74,6 +74,7 @@ impl Person {
     /// Points at `target` on the 3D worlds sheet's page, presses and lets go, a turn each, the page told each turn that it is on a sheet in VR (`relay`), as
     /// `vr.rs` tells it; the hand then goes.
     fn press_world(&mut self, target: crate::overlay::worlds::panel::Target, relay: &crate::overlay::worlds::panel::Status) {
+        if self.panels.stage.async_pages { self.turns_until("the displayed worlds page", |p| !p.panels.stage.painter.busy() && p.panels.takeover.as_ref().is_some_and(|p| p.painted && !p.dirty) && p.panels.stage.worlds.as_ref().is_some_and(|w| w.target_for_test(target).is_some())); }
         let at = self.panels.stage.worlds.as_ref().and_then(|w| w.target_for_test(target)).unwrap_or_else(|| panic!("nothing is {target:?} on the page"));
         let sheet = self.panels.all().count() - 1;
         let snap = self.snap.clone();
@@ -93,6 +94,7 @@ impl Person {
 
     /// Points at what does `action`, presses and lets go, with turns between as a hand takes them.
     fn press(&mut self, action: Action) -> super::Pressed {
+        if self.panels.stage.async_pages { self.turns_until("the displayed control", |p| p.find(action).is_some()); }
         let (part, at) = self.find(action).unwrap_or_else(|| panic!("nothing does {action:?}"));
         self.panels.hover(Some((part, at)));
         self.turn();
@@ -366,11 +368,16 @@ fn press_on(panels: &mut Panels, snap: &Snapshot, around: Option<Around>, action
 /// pixel of any part is more than a few levels from the new part's, and few are off at all; with it made anew, none is.
 #[test]
 fn a_kept_part_is_a_level_or_two_off_a_new_one_at_most_and_not_at_all_with_its_interface_anew() {
+    // This sample corpus has an English atlas-history bound. Do not let an earlier
+    // controller test or the computer's locale select a different corpus halfway
+    // through its retained/fresh comparison. Pixel assertions remain unchanged.
+    orbiters_i18n::in_language(orbiters_i18n::Language::En, || {
     fn none(_: &std::path::Path, _: &[std::path::PathBuf]) -> Vec<super::LoadedRecent> {
         Vec::new()
     }
     for anew in [false, true] {
         let mut person = Person::with_a_song();
+        Arc::make_mut(&mut person.snap).settings.language = Some("en".into());
         person.panels.recents.lister = Some(none);
         person.panels.fonts_anew = anew;
         person.panels.clock = Some(1.0);
@@ -441,6 +448,7 @@ fn a_kept_part_is_a_level_or_two_off_a_new_one_at_most_and_not_at_all_with_its_i
             assert!(off * 500 <= pixels, "and {off} of {pixels} bytes are off at all");
         }
     }
+    });
 }
 
 /// With a menu up and nothing changing, no part is due a picture. Every part was, every turn: the facts held a new empty gallery each turn, and galleries are compared by
@@ -838,6 +846,51 @@ fn the_song_s_picture_disappearing_paints_all_tools_again() {
 
 }
 
+
+#[test]
+fn unchanged_results_stop_painting_after_the_host_update_is_captured() {
+    let mut person = Person::with_a_song();
+    let mut song = crate::overlay::menu_pages::sample_media();
+    song.playing = false;
+    person.panels.media.stand_in(crate::media::Reading { media: Some(song), volume: None, art: None });
+    person.panels.stage.async_pages = true;
+    person.around = Some(Around::QuickMenu);
+    person.turns(120);
+    person.panels.open_sheet(Sheet::Results, "YouTube", &person.snap);
+    person.panels.stage.host.open(&person.snap);
+    person.panels.stage.host.menu.page = orbiters_n4n0_core::menu::Page::Results;
+    person.turns_until("the unchanged Results page rests", |p| {
+        assert_eq!(p.panels.facts.sheet, Some(Sheet::Results), "the fixture must remain on Results");
+        !p.panels.stage.host.dirty && !p.panels.stage.painter.busy() && p.panels.takeover.as_ref().is_some_and(|panel| panel.painted && !panel.dirty)
+    });
+    for _ in 0..10 {
+        std::thread::sleep(Duration::from_millis(11));
+        let handed = turn_of(&mut person.panels, &person.snap, person.around, person.library);
+        assert!(!handed.iter().any(|(zone, _, _)| *zone == Zone::Takeover), "unchanged result data produced another page frame");
+    }
+}
+
+
+#[test]
+fn unchanged_world_video_reuses_its_page_texture() {
+    let mut person = Person::with_a_song();
+    person.panels.stage.async_pages = true;
+    person.around = Some(Around::QuickMenu);
+    person.turns(120);
+    person.panels.open_sheet(Sheet::All, "", &person.snap);
+    person.panels.stage.host.open(&person.snap);
+    person.panels.stage.host.put_picture("abcdefghijk", egui::ColorImage::filled([64, 36], egui::Color32::RED));
+    let mut snap = (*person.snap).clone();
+    snap.n4n0.world_video = Some(("https://www.youtube.com/watch?v=abcdefghijk".into(), Some("test video".into()), None));
+    person.snap = Arc::new(snap);
+    person.turn();
+    let key = "world-video abcdefghijk";
+    let first = person.panels.takeover.as_ref().unwrap().pictures.get(key).unwrap().id();
+    person.panels.takeover.as_mut().unwrap().dirty = true;
+    person.turn();
+    assert_eq!(person.panels.takeover.as_ref().unwrap().pictures.get(key).unwrap().id(), first, "unchanged video recreated its texture");
+}
+
 /// Enzo (F13, F15): nothing on the wheel, the Quick Menu or a sheet starts a recording; beside VRChat's camera, Record does. While one runs, Stop is in reach on the
 /// wheel, beside the Quick Menu, on a sheet's head and at the camera; pressed, it says Stopping at once and a second press does nothing.
 #[test]
@@ -1028,8 +1081,9 @@ fn write_a_comment_opens_its_keyboard_on_the_sheet_in_vr() {
     use crate::overlay::worlds::panel::{Compose, Page, Status, Target as WorldTarget};
     use orbiters_n4n0_core::feedback::FeedbackView;
     const LISTING: &str = r#"{"previews":[{"slot":0,"key":1,"id":7,"worldId":"wrld_4432ea9b-729c-46e3-8eaf-846aa0a37fdd","name":"Silent Dawn","author":"Mei","uploader":"a","view":{"position":[0,1,0],"target":[0,1,1]}}]}"#;
-    for signed_in in [true, false] {
+    for (signed_in, worker) in [(true, false), (false, false), (true, true), (false, true)] {
         let (mut person, heard) = Person::heard();
+        person.panels.stage.async_pages = worker;
         let mut snap = (*person.snap).clone();
         snap.n4n0.feedback = FeedbackView { signed_in, ..Default::default() };
         person.snap = Arc::new(snap);
@@ -1050,6 +1104,14 @@ fn write_a_comment_opens_its_keyboard_on_the_sheet_in_vr() {
         if signed_in {
             assert_eq!(page(&person), Page::Compose(Compose::Comment), "the keyboard, though the world's feedback was never read");
             assert!(person.panels.stage.worlds.as_ref().unwrap().typing(), "the computer's keys type there too");
+            // Physical keys and a laser key arrive while older pictures may still be pending.
+            let worlds = person.panels.stage.worlds.as_mut().unwrap();
+            worlds.keys(&[]);
+            worlds.keys(&[(1, orbiters_n4n0_core::menu::KeyInput::Text("hello".into()))]);
+            person.press_world(WorldTarget::Space, &docked);
+            person.press_world(WorldTarget::Key('a'), &docked);
+            assert_eq!(person.panels.stage.worlds.as_ref().unwrap().draft_for_test(), "hello a");
+
         } else {
             assert_eq!(page(&person), Page::Comments, "nothing to write as, yet");
             assert!(person.panels.stage.worlds.as_ref().unwrap().target_for_test(WorldTarget::WriteComment).is_some(), "the way to sign in stays there");
@@ -1493,9 +1555,10 @@ fn the_way_to_vrchat_s_menus_keeps_its_place_on_the_head() {
 #[test]
 fn every_page_has_its_sheet_s_corners() {
     use orbiters_core::settings::MenuLook;
-    for look in [MenuLook::Modern, MenuLook::Retro] {
+    for (look, worker) in [(MenuLook::Modern, false), (MenuLook::Retro, false), (MenuLook::Modern, true), (MenuLook::Retro, true)] {
         for opens in [Action::All, Action::Worlds, Action::Pictures, Action::Page(Target::YouTube), Action::Page(Target::Instances)] {
             let mut person = Person::new();
+            person.panels.stage.async_pages = worker;
             let mut snap = (*person.snap).clone();
             snap.settings.orbit.theme = look;
             person.snap = Arc::new(snap);
@@ -1529,4 +1592,308 @@ fn every_page_has_its_sheet_s_corners() {
             assert!(alpha(&whole, w / 2, h / 2) > 250, "{look:?} {opens:?}: solid in its middle");
         }
     }
+}
+
+
+#[test]
+fn worker_switches_publish_matching_page_header_and_hit_geometry() {
+    let mut person = Person::new();
+    person.panels.stage.async_pages = true;
+    person.around = Some(Around::QuickMenu);
+    person.turns(4);
+    person.panels.open_sheet(Sheet::Settings, "Settings", &person.snap);
+    person.turns_until("settings worker frame", |p| p.panels.takeover.as_ref().is_some_and(|p| p.painted) && !p.panels.stage.painter.busy());
+    let settings = person.panels.takeover.as_ref().unwrap().pixels().to_vec();
+    let epoch = person.panels.stage.epoch;
+    person.panels.open_sheet(Sheet::Tracking, "Tracking", &person.snap);
+    person.turn();
+    if !person.panels.takeover.as_ref().unwrap().painted {
+        assert!(person.panels.takeover.as_ref().unwrap().items.is_empty(), "a cold blank page has no targets");
+    }
+    person.turns_until("tracking worker frame", |p| p.panels.takeover.as_ref().is_some_and(|p| p.painted) && !p.panels.stage.painter.busy());
+    person.panels.open_sheet(Sheet::Settings, "Settings", &person.snap);
+    person.turn();
+    assert!(person.panels.stage.epoch > epoch);
+    let page = person.panels.takeover.as_ref().unwrap();
+    assert_eq!(page.pixels(), settings, "A-B-A restores A on the next turn");
+    let (_, shown, _) = person.panels.stage.presented.as_ref().unwrap();
+    assert_eq!(shown.sheet, Some(Sheet::Settings));
+    assert_eq!(page.items, super::panels::sheet_items(Sheet::Settings, shown));
+    let back = person.panels.list.iter().find(|p| p.zone == Zone::SheetBack).unwrap();
+    assert_eq!(back.items, super::panels::items(back.zone, back.logical, shown));
+    assert!(super::vr::page_row(back, page).is_some());
+    // Invalidation also invalidates the page-cache identity, so old language/look results cannot return.
+    let before = person.panels.stage.epoch;
+    person.panels.paint_all_again();
+    assert!(person.panels.stage.epoch > before);
+    assert!(person.panels.stage.cache.is_empty());
+}
+
+
+#[test]
+fn special_pages_consume_the_outer_paint_request() {
+    for sheet in [Sheet::Menu, Sheet::Worlds] {
+        let mut person = Person::new();
+        person.around = Some(Around::QuickMenu);
+        person.turns(4);
+        if sheet == Sheet::Worlds {
+            person.panels.act(Action::Worlds, &person.snap, &mut super::Pressed::default());
+        } else {
+            person.panels.stage.host.menu.page = orbiters_n4n0_core::menu::Page::States;
+            person.panels.open_sheet(sheet, "", &person.snap);
+        }
+        let panel = person.panels.takeover.as_mut().unwrap();
+        panel.dirty = true;
+        panel.painted = false;
+        person.panels.paint(&person.snap, |_, _| {});
+        assert!(!person.panels.takeover.as_ref().unwrap().dirty, "{sheet:?} left a consumed paint request pending");
+    }
+}
+
+
+#[test]
+fn review_every_page_paints_off_the_overlay_thread() {
+    for sheet in [Sheet::Menu, Sheet::Worlds] {
+        let mut person = Person::new();
+        person.panels.stage.async_pages = true;
+        person.around = Some(Around::QuickMenu);
+        person.turns(4);
+        if sheet == Sheet::Worlds { person.panels.act(Action::Worlds, &person.snap, &mut super::Pressed::default()); }
+        else { person.panels.stage.host.menu.page = orbiters_n4n0_core::menu::Page::States; person.panels.open_sheet(sheet, "", &person.snap); }
+        let before = person.panels.stage.canvas.direct_paints;
+        person.panels.takeover.as_mut().unwrap().painted = false;
+        person.panels.paint(&person.snap, |_, _| {});
+        assert_eq!(person.panels.stage.canvas.direct_paints, before, "{sheet:?} painted on the overlay thread");
+        person.turns_until("the worker paints its page", |p| p.panels.takeover.as_ref().is_some_and(|p| p.painted));
+    }
+}
+
+#[test]
+fn review_a_stale_invite_press_never_invites_a_new_row() {
+    for cached in [false, true] {
+        let (mut person, heard) = Person::heard();
+        person.panels.stage.async_pages = true;
+        person.around = Some(Around::QuickMenu);
+        person.turns(4);
+        person.panels.open_sheet(Sheet::Instances, "Instances", &person.snap);
+        person.panels.stage.host.menu.page = orbiters_n4n0_core::menu::Page::Instances;
+        person.turn();
+        person.panels.takeover.as_mut().unwrap().dirty = true;
+        let a = super::panels::WorldVisit { world_id: "wrld_a".into(), name: "Shown A".into(), location: "wrld_a:111".into(), ..Default::default() };
+        person.panels.facts.worlds_visited = vec![a];
+        let began = Instant::now();
+        while !person.panels.takeover.as_ref().unwrap().painted || person.panels.stage.painter.busy() {
+            assert!(began.elapsed() < Duration::from_secs(10));
+            person.panels.paint(&person.snap, |_, _| {});
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        person.panels.facts.worlds_visited = vec![super::panels::WorldVisit { world_id: "wrld_b".into(), name: "New B".into(), location: "wrld_b:222".into(), ..Default::default() }];
+        if cached {
+            person.panels.open_sheet(Sheet::Settings, "", &person.snap);
+            person.panels.open_sheet(Sheet::Instances, "Instances", &person.snap);
+            person.panels.paint(&person.snap, |_, _| {});
+        }
+        let i = person.panels.list.len();
+        let at = person.panels.takeover.as_ref().unwrap().items.iter().find(|x| x.action == Action::Invite(0, 0)).unwrap_or_else(|| panic!("cached={cached}, items={:?}, cache={:?}", person.panels.takeover.as_ref().unwrap().items, person.panels.stage.cache.iter().map(|f| (f.key(), f.items.len())).collect::<Vec<_>>())).rect.center();
+        person.panels.hover(Some((i, at)));
+        person.panels.press(&person.snap);
+        person.panels.release();
+        if let Some(action) = person.panels.pressed_late.take() { person.panels.act(action, &person.snap, &mut super::Pressed::default()); }
+        assert_eq!(person.panels.invited.as_ref().map(|x| x.0.as_str()), Some("wrld_a:111"), "cached {cached}: the shown row must retain its source");
+        assert!(heard.said().iter().any(|s| s.contains("wrld_a:111")), "the backend must receive A");
+    }
+}
+
+#[test]
+fn review_shell_pictures_are_rendered_off_the_overlay_thread() {
+    let mut person = Person::with_a_song(); person.panels.stage.async_pages = true; person.around = Some(Around::QuickMenu);
+    person.turns_until("shell pictures", |p| !p.panels.is_empty() && p.panels.all().all(|p| p.painted));
+    assert!(person.panels.all().all(|p| p.canvas.direct_paints == 0));
+}
+#[test]
+fn review_streamed_ask_words_and_answers_reach_the_published_picture() {
+    use orbiters_n4n0::status::{N4n0Line, N4n0Who, ProvisionalSpeech, VoiceReadiness};
+    let mut person = Person::new(); person.panels.stage.async_pages = true; person.around = Some(Around::QuickMenu); person.turns(4);
+    person.panels.open_sheet(Sheet::Talk, "Ask", &person.snap);
+    for words in ["what", "what is", "what is new"] {
+        let s = Arc::make_mut(&mut person.snap); s.settings.n4n0.enabled = true; s.n4n0.voice.readiness = VoiceReadiness::Ready; s.n4n0.voice.speech = true; s.n4n0.voice.automatic = true; s.n4n0.voice.provisional = Some(ProvisionalSpeech { listen: 3, text: words.into() });
+        person.turn();
+        person.turns_until("live words on the picture", |p| p.panels.stage.presented.as_ref().is_some_and(|(_,f,_)| f.talk_heard.as_deref() == Some(words)));
+    }
+    for words in ["Here", "Here is", "Here is the answer."] {
+        Arc::make_mut(&mut person.snap).n4n0.lines = vec![N4n0Line { who: N4n0Who::N4n0, text: words.into(), at_ms: 0, streaming: true }].into();
+        person.turn();
+        person.turns_until("streamed answer on the picture", |p| p.panels.stage.presented.as_ref().is_some_and(|(_,f,_)| f.talk_lines.last().is_some_and(|(_,s)| s == words)));
+    }
+}
+
+#[test]
+fn review_camera_web_frames_and_header_stop_repaint_on_the_worker() {
+    use super::panels::WebState;
+    let mut person = Person::new(); person.panels.stage.async_pages = true;
+    person.around = Some(Around::Camera);
+    Arc::make_mut(&mut person.snap).camera_open_said = Some(true);
+    person.panels.web = Some(super::camera_web::CameraWeb::open("https://orbiters.cc"));
+    for color in [egui::Color32::RED, egui::Color32::BLUE] {
+        let web = person.panels.web.as_mut().unwrap(); web.frame = Some(egui::ColorImage::filled([32,32], color)); web.state = WebState::Shown; web.fresh = true;
+        for panel in &mut person.panels.list { panel.dirty = true; }
+        person.turn();
+        person.turns_until("camera web frame", |p| p.panels.list.iter().find(|p| p.zone == Zone::CameraWeb).is_some_and(|p| p.painted && !p.dirty) && !p.panels.stage.painter.busy());
+        let panel = person.panels.list.iter().find(|p| p.zone == Zone::CameraWeb).unwrap();
+        assert_eq!(panel.canvas.direct_paints, 0);
+        assert!(panel.displayed.as_ref().unwrap().camera.web.as_ref().unwrap().picture.is_some());
+        assert!(panel.pixels().chunks_exact(4).any(|p| p == color.to_array()), "camera web texture did not reach the shown picture");
+    }
+    person.around = Some(Around::QuickMenu); person.turns(2);
+    person.panels.open_sheet(Sheet::Settings, "", &person.snap);
+    Arc::make_mut(&mut person.snap).capture.state = crate::state::CaptureState::Recording;
+    person.turns_until("header Stop", |p| p.find(Action::StopRecording).is_some());
+    let head = person.panels.list.iter().find(|p| p.zone == Zone::SheetBack).unwrap();
+    assert_eq!(head.canvas.direct_paints, 0); assert!(head.displayed.as_ref().unwrap().recording);
+    person.press(Action::StopRecording);
+    person.turns_until("Stopping header", |p| p.panels.list.iter().find(|p| p.zone == Zone::SheetBack).is_some_and(|p| p.displayed.as_ref().is_some_and(|f| f.rec_stopping)));
+    assert!(person.find(Action::StopRecording).is_none());
+}
+
+#[test]
+fn review_a_held_or_cached_video_press_keeps_the_shown_source() {
+    use orbiters_n4n0_core::youtube::Video;
+    let video = |id: &str| Video { id: id.into(), title: id.into(), channel: String::new(), duration: None, live: false };
+    for cached in [false, true] { for reorder in [false, true] {
+        let (mut person, heard) = Person::heard(); person.panels.stage.async_pages = true; person.around = Some(Around::QuickMenu); person.turns(4);
+        person.panels.open_sheet(Sheet::Results, "", &person.snap);
+        person.panels.stage.host.menu.page = orbiters_n4n0_core::menu::Page::Results; person.turn();
+        person.panels.stage.host.menu.open = true;
+        person.panels.stage.host.menu.can_drop = true; person.panels.stage.host.menu.copied = Some("aaaaaaaaaaa".into());
+        person.panels.stage.host.menu.results = vec![video("aaaaaaaaaaa")];
+        person.panels.facts.videos = vec![super::panels::VideoTile { id: "aaaaaaaaaaa".into(), title: "Shown A".into(), channel: String::new(), duration: None, picture: None }];
+        person.panels.facts.video_copied = Some(0); person.panels.takeover.as_mut().unwrap().dirty = true;
+        let start = Instant::now();
+        loop { person.panels.paint(&person.snap, |_,_| {}); if person.panels.stage.presented.as_ref().is_some_and(|(_,f,_)| f.videos.first().is_some_and(|v| v.id == "aaaaaaaaaaa")) && !person.panels.stage.painter.busy() { break; } assert!(start.elapsed() < Duration::from_secs(10)); std::thread::sleep(Duration::from_millis(2)); }
+        if cached { person.panels.open_sheet(Sheet::Settings, "", &person.snap); person.panels.open_sheet(Sheet::Results, "", &person.snap); person.panels.paint(&person.snap, |_,_| {}); }
+        let i = person.panels.list.len();
+        let at = person.panels.takeover.as_ref().unwrap().items.iter().find(|i| i.action == Action::VideoDrop(0)).unwrap_or_else(|| panic!("cached={cached}, items={:?}, cache={:?}", person.panels.takeover.as_ref().unwrap().items, person.panels.stage.cache.iter().map(|f| (f.key(), f.items.len())).collect::<Vec<_>>())).rect.center();
+        person.panels.hover(Some((i, at))); person.panels.press(&person.snap);
+        assert!(person.panels.drag.is_some(), "the press waits for release");
+        person.panels.stage.host.menu.results = if reorder { vec![video("bbbbbbbbbbb"), video("aaaaaaaaaaa")] } else { vec![video("bbbbbbbbbbb")] };
+        if !reorder { person.panels.stage.host.menu.copied = Some("bbbbbbbbbbb".into()); }
+        person.panels.release();
+        let action = person.panels.pressed_late.take().unwrap(); person.panels.act(action, &person.snap, &mut super::Pressed::default());
+        let said = heard.said();
+        assert!(!said.iter().any(|s| s.contains("bbbbbbbbbbb")), "cached={cached}, reorder={reorder}: shown A dispatched B: {said:?}");
+        assert_eq!(said.iter().filter(|s| s.contains("aaaaaaaaaaa")).count(), usize::from(reorder), "a surviving shown source must still work");
+    } }
+}
+
+#[test]
+fn review_the_instance_chooser_paints_and_returns_on_the_page_worker() {
+    use crate::overlay::worlds::panel::{Page, Status, Target as WTarget};
+    let (mut person, heard) = Person::heard(); person.panels.stage.async_pages = true;
+    let snap = Arc::make_mut(&mut person.snap); snap.vrchat_login.allowed = true;
+    snap.vrchat_login.user = Some(orbiters_core::vrchat_api::User { id: "usr_replay".into(), display_name: "Replay".into(), ..Default::default() });
+    person.around = Some(Around::QuickMenu); person.turns(3); person.press(Action::Worlds);
+    let found = orbiters_core::maps::FoundWorld { world: orbiters_core::maps::World { world_id: "wrld_replay".into(), name: "Replay".into(), ..Default::default() }, ..Default::default() };
+    let entry = crate::overlay::worlds::catalog::Entry::world(&found, None, Default::default());
+    person.panels.stage.worlds.as_mut().unwrap().pick_for_test(entry);
+    let status = Status { headset: true, ..Default::default() }; let _ = person.panels.world_relay(status.clone()); person.turn();
+    person.press_world(WTarget::Join, &status);
+    person.turns_until("instance chooser picture", |p| matches!(&p.panels.stage.presented_scene, Some(super::page_painter::Scene::Worlds(s)) if s.panel.page == Page::Go));
+    assert_eq!(person.panels.stage.canvas.direct_paints, 0);
+    assert!(!heard.said().iter().any(|s| s.contains("InviteMe")), "opening a chooser must not invite");
+    person.press(Action::Back);
+    person.turns_until("detail picture after chooser", |p| matches!(&p.panels.stage.presented_scene, Some(super::page_painter::Scene::Worlds(s)) if s.panel.page == Page::Detail));
+}
+
+#[test]
+fn review_new_shell_parts_build_masks_on_the_raster_owner() {
+    let mut person = Person::new(); person.panels.stage.async_pages = true; person.around = Some(Around::Wheel);
+    let places = Zone::around(Around::Wheel).iter().map(|z| zones::in_units(*z)).collect();
+    person.panels.set_open(person.around, places, &person.snap);
+    assert!(person.panels.list.iter().filter(|p| p.zone.ring().is_some()).all(|p| p.mask.is_none()));
+    person.turns_until("ring masks with their pictures", |p| p.panels.list.iter().filter(|p| p.zone.ring().is_some()).all(|p| p.painted && p.mask.is_some()));
+    assert!(person.panels.list.iter().all(|p| p.canvas.direct_paints == 0));
+}
+#[test]
+fn review_invalidated_pictures_are_retired_one_pair_per_input_turn() {
+    let mut person = Person::new(); person.panels.stage.async_pages = true; person.around = Some(Around::QuickMenu); person.turns(3);
+    for sheet in [Sheet::Settings, Sheet::Tracking, Sheet::Mics] {
+        person.panels.open_sheet(sheet, "", &person.snap);
+        person.turns_until("cached picture", |p| p.panels.stage.cache.iter().any(|f| f.sheet == sheet) && !p.panels.stage.painter.busy());
+    }
+    assert_eq!(person.panels.stage.cache.len(), 3);
+    person.panels.paint_all_again();
+    assert!(person.panels.stage.cache.is_empty(), "old look/language pictures cannot be restored");
+    assert_eq!(person.panels.stage.retired.len(), 3);
+    person.panels.follow(&person.snap, 0);
+    assert_eq!(person.panels.stage.retired.len(), 2, "free one pair, not the whole cache on the input thread");
+}
+
+#[test]
+fn review_the_worker_publishes_the_complete_sheet_and_matching_geometry() {
+    let mut person = Person::new(); person.panels.stage.async_pages = true; person.around = Some(Around::QuickMenu); person.turns(3);
+    person.panels.open_sheet(Sheet::Settings, "", &person.snap);
+    person.turns_until("complete worker sheet", |p| p.panels.stage.sheet_picture.is_some());
+    let picture = person.panels.take_sheet_picture().unwrap();
+    let back = person.panels.list.iter().find(|p| p.zone == Zone::SheetBack).unwrap();
+    let page = person.panels.takeover.as_ref().unwrap();
+    assert_eq!(picture.0.as_slice(), super::vr::compose_sheet(back.pixels(), back.px, page.pixels(), page.px, picture.2));
+    let mut sheet = super::vr::SheetPicture::default(); let original = picture.0.clone(); let size = picture.1;
+    sheet.adopt(picture);
+    assert_eq!(sheet.pixels().as_ptr(), original.as_ptr(), "input adopts the worker allocation without pixel work");
+    assert_eq!(sheet.changed, Some([0,0,size[0],size[1]]), "damage covers the entire composed picture");
+    let rendered = person.panels.stage.cache.iter().find(|f| f.sheet == Sheet::Settings).unwrap();
+    assert_eq!(page.pixels().as_ptr(), rendered.pixels.as_ptr(), "input adopts the raw page allocation without a pixel copy");
+    assert_eq!(back.pixels().as_ptr(), rendered.header.as_ref().unwrap().pixels.as_ptr(), "input adopts the matching raw header allocation");
+    assert_eq!(page.items, super::panels::sheet_items(Sheet::Settings, &page.displayed.as_ref().unwrap()));
+}
+#[test]
+fn review_a_camera_bar_for_a_previous_url_cannot_act_on_the_new_page() {
+    let mut person = Person::new(); person.panels.stage.async_pages = true; person.around = Some(Around::Camera);
+    Arc::make_mut(&mut person.snap).camera_open_said = Some(true);
+    person.panels.web = Some(super::camera_web::CameraWeb::open("https://orbiters.cc/a"));
+    person.turns_until("camera bar A", |p| p.find(Action::WebClose).is_some());
+    person.panels.web.as_mut().unwrap().url = "https://orbiters.cc/b".into();
+    let at = person.find(Action::WebClose).unwrap(); person.panels.hover(Some(at)); person.panels.press(&person.snap); person.panels.release();
+    assert_eq!(person.panels.web.as_ref().map(|w| w.url.as_str()), Some("https://orbiters.cc/b"), "the old bar must not close a different page");
+    person.turns_until("camera bar B", |p| p.panels.list.iter().find(|p| p.zone == Zone::CameraWebBar).is_some_and(|p| p.displayed.as_ref().and_then(|f| f.camera.web.as_ref()).is_some_and(|w| w.url == "https://orbiters.cc/b")));
+    let at = person.find(Action::WebClose).unwrap(); person.panels.hover(Some(at)); person.panels.press(&person.snap);
+    assert!(person.panels.web.is_none(), "the current bar still closes its own page");
+}
+
+#[test]
+fn review_accepted_worker_pictures_consume_the_opening_flag_and_keep_the_atlas() {
+    let mut person = Person::new(); person.panels.stage.async_pages = true; person.around = Some(Around::QuickMenu); person.turns(3);
+    person.panels.open_sheet(Sheet::Settings, "", &person.snap);
+    person.turns_until("first picture", |p| p.panels.takeover.as_ref().is_some_and(|p| p.painted) && !p.panels.stage.painter.busy());
+    person.panels.close_sheet(); person.turns(2);
+    person.panels.open_sheet(Sheet::Settings, "", &person.snap);
+    person.turns_until("reopened picture", |p| p.panels.list.iter().find(|p| p.zone == Zone::SheetBack).is_some_and(|p| p.painted) && !p.panels.stage.painter.busy());
+    let header = person.panels.list.iter().find(|p| p.zone == Zone::SheetBack).unwrap();
+    let atlas = header.canvas.id;
+    assert!(!header.again && !person.panels.takeover.as_ref().unwrap().again, "a published picture has completed the new opening");
+    person.panels.paint_all_again();
+    assert_eq!(person.panels.list.iter().find(|p| p.zone == Zone::SheetBack).unwrap().canvas.id, atlas, "an already painted header must keep its atlas through a color repaint");
+}
+
+#[test]
+fn review_cached_header_pixels_do_not_claim_a_new_context_has_fonts() {
+    let mut person = Person::new(); person.panels.stage.async_pages = true; person.around = Some(Around::QuickMenu); person.turns(3);
+    person.panels.open_sheet(Sheet::Settings, "", &person.snap);
+    person.turns_until("original header", |p| p.panels.takeover.as_ref().is_some_and(|p| p.painted) && !p.panels.stage.painter.busy());
+    let old_id = person.panels.stage.cache.iter().find(|f| f.sheet == Sheet::Settings).unwrap().header_spec.as_ref().unwrap().canvas_id;
+    person.panels.close_sheet();
+    person.turns_until("closed header", |p| !p.panels.list.iter().any(|p| p.zone == Zone::SheetBack) && !p.panels.stage.painter.busy());
+    person.panels.rested.retain(|p| p.panel.zone != Zone::SheetBack);
+    let (at, go) = person.panels.stage.painter.hold_next();
+    person.panels.open_sheet(Sheet::Settings, "", &person.snap); person.turn();
+    at.recv_timeout(Duration::from_secs(10)).unwrap();
+    let header = person.panels.list.iter().find(|p| p.zone == Zone::SheetBack).unwrap();
+    let id = header.canvas.id;
+    assert_ne!(id, old_id);
+    assert!(header.painted, "the old valid picture is immediately visible");
+    assert!(!header.canvas.ran, "cached pixels do not initialize a different context's fonts");
+    assert_eq!(header.canvas.atlas_bytes(), 0);
+    go.send(()).unwrap();
+    person.turns_until("new header fonts", |p| p.panels.list.iter().find(|p| p.zone == Zone::SheetBack).is_some_and(|p| p.canvas.ran) && !p.panels.stage.painter.busy());
+    assert!(person.panels.list.iter().find(|p| p.zone == Zone::SheetBack).unwrap().canvas.atlas_bytes() > 0);
 }

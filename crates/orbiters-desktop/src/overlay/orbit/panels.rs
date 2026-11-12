@@ -55,12 +55,12 @@ pub mod look {
 
     /// Whether the retro look is chosen.
     pub fn retro() -> bool {
-        RETRO_NOW.load(Ordering::Relaxed)
+        super::render_settings().map_or_else(|| RETRO_NOW.load(Ordering::Relaxed), |s| s.theme == orbiters_core::settings::MenuLook::Retro)
     }
 
     /// How pictures are drawn: in the retro menu's dots if they are not to keep their colours, as they are otherwise.
     pub fn picture_look() -> Option<orbiters_ui::software::PictureLook> {
-        DOTS_NOW.load(Ordering::Relaxed).then_some(super::super::retro::phosphor as orbiters_ui::software::PictureLook)
+        super::render_settings().map_or_else(|| DOTS_NOW.load(Ordering::Relaxed), |s| s.theme == orbiters_core::settings::MenuLook::Retro && !s.retro_pictures).then_some(super::super::retro::phosphor as orbiters_ui::software::PictureLook)
     }
 
     /// Text of the look chosen, for what lays out its own: the retro menu's monospace, a little smaller as it is wider.
@@ -84,7 +84,7 @@ pub mod look {
 
     /// The accent chosen.
     pub fn accent() -> Color32 {
-        let [_, r, g, b] = ACCENT_NOW.load(Ordering::Relaxed).to_be_bytes();
+        let [r, g, b] = super::render_settings().map(|s| if s.theme == orbiters_core::settings::MenuLook::Retro { [185; 3] } else { s.accent }).unwrap_or_else(|| { let [_, r, g, b] = ACCENT_NOW.load(Ordering::Relaxed).to_be_bytes(); [r, g, b] });
         Color32::from_rgb(r, g, b)
     }
 
@@ -295,6 +295,7 @@ pub const SWATCHES: [[u8; 3]; 8] = [[0x00, 0xda, 0x6d], [0x2b, 0xd9, 0xc8], [0x4
 /// A result of a YouTube search, as its list shows it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct VideoTile {
+    pub id: String,
     pub title: String,
     pub channel: String,
     pub duration: Option<String>,
@@ -1589,11 +1590,13 @@ pub fn in_ramp(pixels: &mut [u8], width: u32, changed: [u32; 4], ramp: &[[u8; 3]
 pub fn finish_picture(out: &mut [u8], from: &[u8], px: [u32; 2], zoom: f32, changed: [u32; 4]) {
     let pictures = PICTURES.with(|l| std::mem::take(&mut *l.borrow_mut()));
     let colours = COLOURS.with(|l| std::mem::take(&mut *l.borrow_mut()));
-    let style = STYLE.lock().unwrap_or_else(|e| e.into_inner());
-    let Some((ramp, keep)) = style.as_ref() else { return };
+    let style = captured_finish_style();
+    let Some((ramp, keep)) = style else { return };
     let changed = [changed[0], changed[1], changed[2].min(px[0]), changed[3].min(px[1])];
-    in_ramp(out, px[0], changed, ramp);
-    let keeping = if *keep { pictures } else { Vec::new() };
+    #[cfg(test)]
+    if let Some((ready, go)) = FINISH_GATE.lock().unwrap().take() { ready.send(()).unwrap(); go.recv().unwrap(); }
+    in_ramp(out, px[0], changed, &ramp);
+    let keeping = if keep { pictures } else { Vec::new() };
     for rect in keeping.into_iter().chain(colours) {
         let (x0, x1) = (((rect.left() * zoom) as u32).max(changed[0]), ((rect.right() * zoom).ceil() as u32).min(changed[2]));
         for y in ((rect.top() * zoom) as u32).max(changed[1])..((rect.bottom() * zoom).ceil() as u32).min(changed[3]) {
@@ -1606,13 +1609,31 @@ pub fn finish_picture(out: &mut [u8], from: &[u8], px: [u32; 2], zoom: f32, chan
 }
 
 /// The retro look's ramp and whether pictures keep their colours: none with the modern look.
-static STYLE: std::sync::Mutex<Option<(Vec<[u8; 3]>, bool)>> = std::sync::Mutex::new(None);
+static STYLE: std::sync::Mutex<Option<(std::sync::Arc<Vec<[u8; 3]>>, bool)>> = std::sync::Mutex::new(None);
+
+#[derive(Clone)]
+struct RenderStyle { settings: OrbitSettings, finish: Option<(std::sync::Arc<Vec<[u8; 3]>>, bool)> }
+thread_local! { static RENDER_STYLE: std::cell::RefCell<Option<RenderStyle>> = const { std::cell::RefCell::new(None) }; }
+fn render_settings() -> Option<OrbitSettings> { RENDER_STYLE.with(|s| s.borrow().as_ref().map(|s| s.settings)) }
+fn captured_finish_style() -> Option<(std::sync::Arc<Vec<[u8; 3]>>, bool)> {
+    if let Some(style) = RENDER_STYLE.with(|s| s.borrow().clone()) { return style.finish; }
+    STYLE.lock().unwrap_or_else(|e| e.into_inner()).clone()
+}
+/// A job's complete immutable look, scoped to its rendering thread. No shared guard spans pixel work.
+pub(crate) fn with_render_style<T>(settings: OrbitSettings, draw: impl FnOnce() -> T) -> T {
+    let finish = (settings.theme == MenuLook::Retro).then(|| (std::sync::Arc::new(retro_ramp(settings.retro_color)), settings.retro_pictures));
+    let prior = RENDER_STYLE.with(|s| s.replace(Some(RenderStyle { settings, finish })));
+    struct Restore(Option<RenderStyle>);
+    impl Drop for Restore { fn drop(&mut self) { RENDER_STYLE.with(|s| { s.replace(self.0.take()); }); } }
+    let _restore = Restore(prior);
+    draw()
+}
 
 /// Takes what is chosen in Settings as how the parts look from now on.
 pub fn set_style(o: &OrbitSettings) {
     let retro = o.theme == MenuLook::Retro;
     look::choose(o.accent, retro, !o.retro_pictures);
-    *STYLE.lock().unwrap_or_else(|e| e.into_inner()) = retro.then(|| (retro_ramp(o.retro_color), o.retro_pictures));
+    *STYLE.lock().unwrap_or_else(|e| e.into_inner()) = retro.then(|| (std::sync::Arc::new(retro_ramp(o.retro_color)), o.retro_pictures));
 }
 
 /// How high a sheet's head is, above its page.
@@ -2453,6 +2474,26 @@ fn cell_edge(p: &Painter, ring: Ring, center: Pos2, width: f32, color: Color32) 
 
 /// Draws a part (in units, its corner at the painter's origin): its fill and everything on it.
 pub fn paint(p: &Painter, zone: Zone, size: Vec2, facts: &Facts, hover: Option<usize>, pressed: Option<usize>) {
+    if zone == Zone::SheetBack && super::paint_bench::take_font_fixture(p.ctx()) {
+        // Untimed benchmark pictures only. Latest-only jobs skip transient headings, so
+        // uncontrolled atlas histories are different inputs to an exact pixel comparison.
+        // Allocate the fixture's header glyphs in a fixed order, without adding shapes.
+        let mut words: String = (' '..='~').chain("…".chars()).collect();
+        for (_, _, label) in HEAD_TOOLS { words.push_str(tr_ctx("tile", label)); }
+        let mut labels: Vec<&str> = HEAD_TOOLS.iter().map(|t| tr_ctx("tile", t.2)).collect();
+        labels.extend(["Settings", "Smooth tracking", "Microphones", "Boost FPS", "Saved looks", "All tools", "Instances", "Pictures", "Worlds", "Ask N4N0", "YouTube"].map(sheet_name)); // i18n: not shown (benchmark glyph corpus)
+        for (size, weight) in [(13.5, weight::MEDIUM), (13.5, weight::BOLD), (15.5, weight::SEMIBOLD), (15.5, weight::BOLD), (18.0, weight::SEMIBOLD), (14.5, weight::BOLD), (12.5, weight::MEDIUM), (12.0, weight::SEMIBOLD), (13.5, weight::SEMIBOLD)] {
+            let _ = p.layout_no_wrap(words.clone(), look::font(size, weight), Color32::WHITE);
+            // Glyph keys also include subpixel shaping bins: allocate each real label at
+            // its own origin, not just its characters in the concatenated corpus.
+            for label in &labels { let _ = p.layout_no_wrap((*label).into(), look::font(size, weight), Color32::WHITE); }
+        }
+        for size in [16.5, 17.0, 18.0, 19.8, 21.0, 21.6] {
+            for glyph in HEAD_TOOLS.iter().map(|t| t.1).chain([icons::ARROW_LEFT, icons::X, icons::EYE, icons::EYE_SLASH, icons::SQUARE, icons::GEAR_SIX, icons::PLAY, icons::PAUSE, icons::SKIP_BACK, icons::SKIP_FORWARD]) {
+                let _ = p.layout_no_wrap(glyph.into(), FontId::new(size, orbiters_ui::fonts::icons()), Color32::WHITE);
+            }
+        }
+    }
     let panel = Rect::from_min_size(pos2(0.0, 0.0), size);
     if facts.desktop && zone.on_the_wing_backing() && !facts.hidden {
         wing_backing(p, zone, panel);
@@ -2594,6 +2635,10 @@ pub fn paint(p: &Painter, zone: Zone, size: Vec2, facts: &Facts, hover: Option<u
 
 /// Draws a sheet's page (in N4N0's page's units): native to these menus, in VRChat's manner.
 pub fn paint_sheet(p: &Painter, sheet: Sheet, facts: &Facts, hover: Option<usize>, pressed: Option<usize>) {
+    if let Some(corpus) = super::paint_bench::take_page_fonts(p.ctx()) {
+        for title in &corpus.0 { let _ = p.layout_no_wrap(title.clone(), look::font(19.0, weight::BOLD), Color32::WHITE); }
+        for date in &corpus.1 { let _ = p.layout_no_wrap(date.clone(), look::font(15.0, weight::MEDIUM), Color32::WHITE); }
+    }
     let page = Rect::from_min_size(pos2(0.0, 0.0), vec2(1024.0, 576.0));
     p.rect_filled(page, 0.0, look::OPAQUE);
     if sheet == Sheet::Pictures && facts.opened.is_none() && facts.gallery_set.is_none() {
@@ -5031,7 +5076,7 @@ mod tests {
         let tile = |n: usize| (0..n).map(|i| Recent { title: format!("W{i}"), kind: RecentKind::Picture, ..Default::default() }).collect::<Gallery>();
         let vr = Facts { desktop: false, can_call: true, can_states: true, can_light: true, music: Some(("A song".into(), true)), music_times: Some((30, 120)), can_seek: true, volume: Some((50, false)), recent: tile(60), ..Facts::default() };
         let visits = vec![WorldVisit { here: false, name: "A world".into(), earlier: vec![("a".into(), "Sat 06:33".into()); 3], ..Default::default() }; 20];
-        let videos = vec![VideoTile { title: "A".into(), channel: "B".into(), duration: None, picture: None }; 12];
+        let videos = vec![VideoTile { id: String::new(), title: "A".into(), channel: "B".into(), duration: None, picture: None }; 12];
         let sheets = [
             (Sheet::All, vr.clone()),
             (Sheet::Pictures, vr.clone()),
@@ -5128,7 +5173,7 @@ mod tests {
 
     #[test]
     fn youtube_results_are_one_list_and_lay_only_what_shows() {
-        let video = |i: usize| VideoTile { title: format!("V{i}"), channel: "C".into(), duration: None, picture: None };
+        let video = |i: usize| VideoTile { id: String::new(), title: format!("V{i}"), channel: "C".into(), duration: None, picture: None };
         let facts = Facts { videos: (0..200).map(video).collect(), desktop: true, ..facts() };
         let tiles = |f: &Facts| sheet_items(Sheet::Results, f).iter().filter_map(|i| if let Look::Video(n) = i.look { Some(n) } else { None }).collect::<Vec<_>>();
         assert!(tiles(&facts).contains(&0) && tiles(&facts).len() < 16);
@@ -5200,7 +5245,7 @@ mod tests {
     /// Enzo: "I don't see a copy link button anymore".
     #[test]
     fn a_youtube_result_says_it_copies_its_link_and_shows_when_it_did() {
-        let video = VideoTile { title: "V".into(), channel: "C".into(), duration: None, picture: None };
+        let video = VideoTile { id: String::new(), title: "V".into(), channel: "C".into(), duration: None, picture: None };
         let facts = Facts { videos: vec![video], desktop: true, ..facts() };
         let items = sheet_items(Sheet::Results, &facts);
         let copy = items.iter().find(|i| matches!(i.look, Look::VideoCopy(0))).expect("a button");
@@ -5414,7 +5459,7 @@ mod tests {
         use orbiters_core::settings::MenuLook;
         use orbiters_i18n::Language;
         let _alone = super::super::flows::ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
-        let videos = (0..4).map(|i| VideoTile { title: format!("Rain sounds for sleeping {i} hours, a long title that wraps"), channel: "Calm Channel".into(), duration: Some("3:02:11".into()), picture: None }).collect::<Vec<_>>();
+        let videos = (0..4).map(|i| VideoTile { id: String::new(), title: format!("Rain sounds for sleeping {i} hours, a long title that wraps"), channel: "Calm Channel".into(), duration: Some("3:02:11".into()), picture: None }).collect::<Vec<_>>();
         let base = Facts {
             n4n0: true,
             music: Some(("DJ Brace - 2016 DMC Online Finals (Winning Routine)".into(), true)),
@@ -5530,5 +5575,85 @@ mod tests {
                 }
             }
         }
+    }
+}
+
+/// Keeps the first visible source at its existing offset when a refreshed list inserts entries above it.
+pub(super) fn anchored_scroll(before: &Gallery, after: &Gallery, scroll: f32) -> Option<f32> {
+    let (first, rect) = before.0.rects.iter().enumerate().find(|(_, r)| r.bottom() > scroll)?;
+    let offset = scroll - rect.top();
+    // Prefer the visible source, then the next surviving source, then the previous one.
+    // The survivor occupies the removed source's viewport offset, including at the top.
+    let survivor = (first..before.len()).chain((0..first).rev()).find_map(|i| after.iter().position(|r| r.dir == before[i].dir))?;
+    Some((after.0.rects[survivor].top() + offset).max(0.0))
+}
+#[cfg(test)]
+mod anchor_regression {
+    use super::*;
+    #[test]
+    fn incoming_rows_keep_the_visible_source_and_offset() {
+        let recent = |n: usize| Recent { dir: std::path::PathBuf::from(n.to_string()), aspect: 16.0/9.0, ..Default::default() };
+        let before: Gallery = (3..12).map(recent).collect();
+        let after: Gallery = (0..12).map(recent).collect();
+        let scroll = before.0.rects[3].top() + 17.25;
+        let moved = anchored_scroll(&before, &after, scroll).unwrap();
+        assert_eq!(moved - after.0.rects[6].top(), 17.25);
+        assert_eq!(before[3].dir, after[6].dir);
+        assert!(moved > scroll);
+    }
+}
+
+pub(super) fn remap_gallery_action(before: &Gallery, after: &Gallery, action: Action) -> Action {
+    match action {
+        Action::Capture(n) => before.get(n).and_then(|old| after.iter().position(|new| new.dir == old.dir)).map(Action::Capture).unwrap_or(Action::Idle),
+        other => other,
+    }
+}
+#[cfg(test)]
+mod click_identity_regression {
+    use super::*;
+    #[test]
+    fn a_picture_click_keeps_its_source_when_entries_arrive() {
+        let recent = |name: &str| Recent { dir: std::path::PathBuf::from(name), ..Default::default() };
+        let before: Gallery = [recent("first"), recent("pressed")].into_iter().collect();
+        let after: Gallery = [recent("new"), recent("first"), recent("pressed")].into_iter().collect();
+        let Action::Capture(n) = remap_gallery_action(&before, &after, Action::Capture(1)) else { panic!("lost click"); };
+        assert_eq!(after[n].dir, before[1].dir);
+        assert_eq!(remap_gallery_action(&before, &Gallery::default(), Action::Capture(1)), Action::Idle);
+    }
+}
+
+#[cfg(test)]
+static FINISH_GATE: std::sync::Mutex<Option<(std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>)>> = std::sync::Mutex::new(None);
+#[cfg(test)]
+mod review_regressions {
+    use super::*;
+    #[test]
+    fn review_retro_pixel_work_does_not_hold_the_style_lock() {
+        let _one = super::super::flows::ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+        set_style(&OrbitSettings { theme: MenuLook::Retro, ..Default::default() });
+        let (ready, waiting) = std::sync::mpsc::channel();
+        let (go, proceed) = std::sync::mpsc::channel();
+        *FINISH_GATE.lock().unwrap() = Some((ready, proceed));
+        let paint = std::thread::spawn(|| {
+            let mut out = vec![127; 64 * 64 * 4];
+            let from = out.clone();
+            finish_picture(&mut out, &from, [64, 64], 1.0, [0, 0, 64, 64]);
+        });
+        waiting.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
+        let free = STYLE.try_lock().is_ok();
+        go.send(()).unwrap();
+        paint.join().unwrap();
+        set_style(&OrbitSettings::default());
+        assert!(free, "input/header style access waits for the blocked pixel finish");
+    }
+    #[test]
+    fn review_removed_gallery_anchor_uses_the_nearest_surviving_source() {
+        let recent = |n: usize| Recent { dir: std::path::PathBuf::from(n.to_string()), aspect: 16.0/9.0, ..Default::default() };
+        let before: Gallery = (0..12).map(recent).collect();
+        let after: Gallery = (3..12).map(recent).collect();
+        let scroll = before.0.rects[0].top() + 17.25;
+        let moved = anchored_scroll(&before, &after, scroll).expect("the nearest surviving neighbor anchors the view");
+        assert_eq!(moved, after.0.rects[0].top() + 17.25);
     }
 }

@@ -25,5 +25,13 @@ crates/orbiters-booster
 crates/orbiters-desktop/src/harness.rs
 crates/orbiters-desktop/src/overlay/orbit/paint_bench.rs
 
+# CPU paint worker: thread names and developer assertions only.
+crates/orbiters-desktop/src/overlay/orbit/page_painter.rs
 # Browser engine diagnostics are mapped by camera UI; no user wording here.
 crates/orbiters-web
+
+# Immutable paint data: texture names and internal cache keys.
+crates/orbiters-desktop/src/overlay/worlds/paint_snapshot.rs
+
+# Interaction regression fixtures and developer assertions only.
+crates/orbiters-desktop/src/overlay/orbit/flows.rs

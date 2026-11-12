@@ -36,7 +36,24 @@ use std::time::{Duration, Instant};
 /// VRChat's window in desktop mode, for where the parts go and how large they are.
 const CLIENT: Vec2 = vec2(1920.0, 1080.0);
 /// How many pictures the made-up gallery holds: several pages of it, so that it scrolls.
-const GALLERY: usize = 60;
+static RETRO: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static GALLERY: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(60);
+
+const FONT_FIXTURE: &str = "orbit-paint-bench-header-font-fixture";
+type PageFonts = Arc<(Vec<String>, Vec<String>)>;
+const PAGE_FONTS: &str = "orbit-paint-bench-page-font-fixture";
+pub(super) fn take_page_fonts(ctx: &egui::Context) -> Option<PageFonts> {
+    ctx.data_mut(|d| { let id = egui::Id::new(PAGE_FONTS); let corpus = d.get_temp::<PageFonts>(id); if corpus.is_some() { d.remove::<PageFonts>(id); } corpus })
+}
+fn mark_font_fixture(ctx: &egui::Context) { ctx.data_mut(|d| d.insert_temp(egui::Id::new(FONT_FIXTURE), true)); }
+pub(super) fn take_font_fixture(ctx: &egui::Context) -> bool {
+    ctx.data_mut(|d| {
+        let id = egui::Id::new(FONT_FIXTURE);
+        let marked = d.get_temp::<bool>(id).unwrap_or(false);
+        if marked { d.remove::<bool>(id); }
+        marked
+    })
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Mode {
@@ -82,6 +99,9 @@ struct Cost {
     /// Pointing and pressing.
     hand: Duration,
     paint: Duration,
+    phases: crate::overlay::PaintPhases,
+    worker: crate::overlay::PaintPhases,
+    wall: Duration,
     /// Writing the pictures to their textures, with `--upload` (not part of `paint`).
     upload: Duration,
     /// Pictures handed to the platform, and their pixels.
@@ -113,7 +133,19 @@ struct Step {
     complete: Option<usize>,
 }
 
+type WorldFixture = (Vec<crate::overlay::worlds::catalog::Entry>, Vec<egui::ColorImage>);
+fn register_world_fixture(panels: &mut Panels, fixture: &mut Option<WorldFixture>) {
+    // The real lazy module constructor remains inside its measured opening turn.
+    if let Some(worlds) = panels.stage.worlds.as_mut() {
+        if let Some((entries, images)) = fixture.take() {
+            assert!(worlds.freeze_paint_fixture(entries, images) && worlds.paint_fixture_ready(), "local thumbnails must be ready before replay");
+        }
+    }
+}
 struct Rig {
+    world_fixture: Option<WorldFixture>,
+    fixture_fonts: std::collections::HashSet<u64>,
+    page_fonts: Option<PageFonts>,
     mode: Mode,
     panels: Panels,
     snap: Arc<Snapshot>,
@@ -122,6 +154,7 @@ struct Rig {
     pointer: Option<(usize, Pos2)>,
     clock: f64,
     was_shown: bool,
+    sheet: vr::SheetPicture,
     step: String,
     logged: Logged,
     turn_in_step: usize,
@@ -164,8 +197,14 @@ static PICTURES: OnceLock<Vec<(PathBuf, u64)>> = OnceLock::new();
 /// Writes the made-up pictures: skies of a few colours with a sun somewhere, told apart at a glance.
 fn make_pictures(dir: &Path) -> anyhow::Result<Vec<(PathBuf, u64)>> {
     std::fs::create_dir_all(dir)?;
-    let mut out = Vec::new();
-    for n in 0..GALLERY {
+    let mut out: Vec<(PathBuf, u64)> = Vec::new();
+    for n in 0..GALLERY.load(std::sync::atomic::Ordering::Relaxed) {
+        if n >= 60 {
+            let path = dir.join(format!("bench-picture-{n:04}.png"));
+            std::fs::hard_link(&out[n % 60].0, &path)?;
+            out.push((path, out[n % 60].1));
+            continue;
+        }
         let (w, h) = (640u32, 360u32);
         let mut image = image::RgbImage::new(w, h);
         let (sx, sy) = (((n * 97) % 640) as f32, ((n * 53) % 300) as f32);
@@ -230,12 +269,33 @@ fn music(position: u32) {
 
 impl Rig {
     fn new(mode: Mode, scratch: &Path, log: Option<(std::fs::File, PathBuf)>) -> Self {
-        let settings = Settings { sessions_dir: scratch.join("sessions"), picture_folders: Vec::new(), ..Settings::default() };
+        let mut settings = Settings { sessions_dir: scratch.join("sessions"), picture_folders: Vec::new(), ..Settings::default() };
+        if RETRO.load(std::sync::atomic::Ordering::Relaxed) { settings.orbit.theme = orbiters_core::settings::MenuLook::Retro; }
         let mut snap = crate::screenshot::idle_snapshot(&settings, &[]);
         // In a headset SteamVR runs; on the desktop it does not, which is what the parts go by.
         snap.steamvr.running = mode == Mode::Vr;
         snap.steamvr.overlay = mode == Mode::Vr;
         let mut panels = Panels::new(Arc::new(crate::screenshot::Still), if mode == Mode::Vr { 2.0 } else { 1.0 }, true);
+        let page_fonts = log.as_ref().map(|_| {
+            // Only the untimed visual replay. The full fixture corpus prevents skipped
+            // intermediate scroll rows from changing the date/title glyph allocations.
+            let mut titles = std::collections::BTreeSet::new();
+            let mut dates = std::collections::BTreeSet::new();
+            for entry in list(&scratch.join("sessions"), &[]) {
+                titles.insert(entry.title.clone());
+                dates.insert(super::recent_state(&entry, &snap, 1_800_000_000));
+            }
+            Arc::new((titles.into_iter().collect(), dates.into_iter().collect()))
+        });
+        let world_fixture = {
+            let previews: Vec<_> = (0..6).map(|i| serde_json::json!({"slot": i, "key": i+1, "id": i+1, "worldId": format!("wrld_00000000-0000-4000-8000-{i:012}"), "name": format!("Replay world {i}"), "author": "Replay", "uploader": "fixture", "view": {"position": [0,1,0], "target": [0,1,1]}})).collect();
+            let entries = crate::overlay::worlds::catalog::parse(&serde_json::json!({"previews": previews}).to_string()).expect("local world fixtures");
+            let images = (0..entries.len()).map(|i| {
+                let image = image::open(&PICTURES.get().expect("local pictures")[i].0).expect("fixture image").to_rgba8();
+                egui::ColorImage::from_rgba_unmultiplied([image.width() as usize, image.height() as usize], image.as_raw())
+            }).collect();
+            Some((entries, images))
+        };
         panels.recents.lister = Some(list);
         panels.clock = Some(0.0);
         let (log, pictures) = match log {
@@ -243,14 +303,18 @@ impl Rig {
             None => (None, None),
         };
         Self {
+            world_fixture,
+            fixture_fonts: Default::default(),
+            page_fonts,
             mode,
-            panels,
+            panels: panels.with_page_worker(),
             snap: Arc::new(snap),
             hints: Hints::default(),
             around: None,
             pointer: None,
             clock: 0.0,
             was_shown: false,
+            sheet: vr::SheetPicture::default(),
             step: String::new(),
             logged: Logged::Turns,
             turn_in_step: 0,
@@ -285,10 +349,13 @@ impl Rig {
 
     /// One turn of the loop, as `vr.rs` and `desktop.rs` take it, with what a hand does in it.
     fn turn(&mut self, act: Option<Act>) {
+        let wall = Instant::now();
+        std::thread::sleep(Duration::from_millis(11));
         let dt = self.mode.turn();
         self.clock += dt as f64;
         self.panels.clock = Some(self.clock);
         let mut cost = Cost::default();
+        crate::overlay::paint_phases(true);
         let t = Instant::now();
         let mut places = self.places(self.around);
         match self.mode {
@@ -349,11 +416,38 @@ impl Rig {
             }
             cost.hand = t.elapsed();
             // What is due a picture now: painted for nothing, when the turn then hands nothing over.
+            assert!(self.panels.facts.sheet != Some(super::panels::Sheet::Worlds) || self.world_fixture.is_none(), "Worlds fixture must be registered before its first paint");
+            // The picture replay controls atlas allocation as well as Facts/time/assets. This
+            // marker is absent from timing runs and from the application. Priming happens in
+            // the real draw, so its texture delta reaches that canvas's raster owner.
+            if self.log.is_some() {
+                for panel in self.panels.all().filter(|p| p.zone == Zone::SheetBack) {
+                    if self.fixture_fonts.insert(panel.canvas.id) { mark_font_fixture(panel.canvas.ctx()); }
+                }
+                if self.fixture_fonts.insert(self.panels.stage.canvas.id) {
+                    let corpus = self.page_fonts.as_ref().unwrap().clone();
+                    self.panels.stage.canvas.ctx().data_mut(|d| d.insert_temp(egui::Id::new(PAGE_FONTS), corpus));
+                }
+            }
             let due: Vec<Zone> = self.panels.all().filter(|p| p.dirty).map(|p| p.zone).collect();
             let t = Instant::now();
             let (mut shows, mut pixels, mut upload) = (0u32, 0u64, Duration::ZERO);
             let (gpu, handles, notes) = (&mut self.gpu, &mut self.handles, &mut self.notes);
+            let page_top = (self.mode == Mode::Vr).then(|| self.panels.all().find(|p| p.zone == Zone::SheetBack).zip(self.panels.takeover.as_ref()).and_then(|(b, p)| vr::page_row(b, p))).flatten();
+            let mode = self.mode;
+            let worker_sheet = mode == Mode::Vr && self.panels.stage.async_pages && page_top.is_some();
+            let sheet = &mut self.sheet;
+            if page_top.is_none() { sheet.page = false; }
             self.panels.paint(&self.snap, |panel, changed| {
+                if let (Some(top), Zone::SheetBack | Zone::Takeover) = (page_top, panel.zone) {
+                    if worker_sheet { return; }
+                    let at = Instant::now();
+                    if panel.zone == Zone::SheetBack { sheet.back(panel.pixels(), panel.px, top, changed); }
+                    else { sheet.page(panel.pixels(), panel.px, top, changed); }
+                    super::super::record_phase(3, at.elapsed());
+                    return;
+                }
+                if mode == Mode::Vr && panel.zone == Zone::Takeover { return; }
                 shows += 1;
                 pixels += (changed[2].saturating_sub(changed[0]) as u64) * (changed[3].saturating_sub(changed[1]) as u64);
                 if let Some(textures) = gpu.as_mut() {
@@ -366,6 +460,28 @@ impl Rig {
                     upload += t.elapsed();
                 }
             });
+            if worker_sheet { if let Some(picture) = self.panels.take_sheet_picture() { sheet.adopt(picture); } }
+            if let Some(top) = page_top.filter(|_| !worker_sheet) {
+                if !sheet.page {
+                    if let Some(page) = self.panels.takeover.as_ref().filter(|p| p.painted) {
+                        sheet.page(page.pixels(), page.px, top, [0, 0, page.px[0], page.px[1]]);
+                    }
+                }
+            }
+            if let Some(changed) = sheet.changed.take() {
+                shows += 1;
+                pixels += (changed[2] - changed[0]) as u64 * (changed[3] - changed[1]) as u64;
+                if let Some(textures) = gpu.as_mut() {
+                    let at = Instant::now();
+                    let next = handles.len() as orbiters_openvr::OverlayHandle + 1;
+                    let handle = *handles.entry(Zone::SheetBack).or_insert(next);
+                    if let Err(e) = textures.write_part(handle, sheet.pixels(), sheet.px[0], sheet.px[1], changed) {
+                        notes.push(format!("a composed texture could not be written: {e}")); // i18n: not shown (benchmark diagnostics)
+                    }
+                    upload += at.elapsed();
+                }
+            }
+            cost.worker = self.panels.stage.worker_phases;
             cost.upload = upload;
             cost.paint = t.elapsed().saturating_sub(upload);
             (cost.shows, cost.pixels) = (shows, pixels);
@@ -375,6 +491,11 @@ impl Rig {
                 }
             }
         }
+        cost.phases = crate::overlay::paint_phases(false);
+        cost.wall = wall.elapsed();
+        // Fixture image registration is untimed preparation, as file generation is. The module
+        // itself was constructed by the real opening above, with that cost still included.
+        register_world_fixture(&mut self.panels, &mut self.world_fixture);
         self.turn_in_step += 1;
         if self.log.is_some() {
             let (kept, bytes) = self.panels.resting();
@@ -397,7 +518,7 @@ impl Rig {
     /// Whether a part is due a picture, is still coming in, or was handed one in the turn just taken. (Not `Panels::busy`: that also counts N4N0's menu being due a picture, which
     /// it stays while it is on no sheet.)
     fn moving(&self) -> bool {
-        self.panels.all().any(|p| p.dirty || !p.appear.settled()) || self.steps.last().and_then(|s| s.turns.last()).is_some_and(|c| c.shows > 0)
+        (!self.panels.is_empty() && self.panels.stage.painter.busy()) || self.panels.all().any(|p| p.dirty || !p.appear.settled()) || self.steps.last().and_then(|s| s.turns.last()).is_some_and(|c| c.shows > 0)
     }
 
     /// The seconds to a 3D picture counting down, then where the music is moving on, eight turns a second's worth: what one part says changes, and nothing else.
@@ -469,6 +590,28 @@ impl Rig {
     /// Each part's picture as a file, where the script rests.
     fn save_pictures(&mut self) {
         let Some(dir) = self.pictures.clone() else { return };
+        // The logged replay is untimed. Audit the same frozen draw inputs, fonts and textures
+        // through full serial and parallel redraws before saving the shown picture.
+        if self.panels.stage.async_pages {
+            if let Some(frame) = self.panels.stage.cache.iter().rev().find(|f| self.panels.facts.sheet == Some(f.sheet)) {
+                let rx = self.panels.stage.painter.audit(frame.clone());
+                match rx.recv_timeout(Duration::from_secs(20)) {
+                    Ok(audit) => {
+                        let line = format!("{} {} frozen pixels={} header={} parallel={} parallel_header={} geometry={} hash={:016x} sheet_pixels={} parallel_sheet_pixels={}\n", self.mode.name(), self.step, audit.pixels, audit.header_pixels, audit.parallel_pixels, audit.parallel_header_pixels, audit.items, audit.hash, audit.sheet_pixels, audit.parallel_sheet_pixels);
+                        use std::io::Write;
+                        if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(dir.parent().unwrap().join("frozen-parity.txt")) { let _ = file.write_all(line.as_bytes()); }
+                        if audit.sheet_pixels != 0 || audit.parallel_sheet_pixels != 0 || audit.pixels != 0 || audit.header_pixels != 0 || audit.parallel_pixels != 0 || audit.parallel_header_pixels != 0 || !audit.items { self.notes.push(line); }
+                    }
+                    Err(e) => self.notes.push(format!("frozen parity did not finish: {e}")),
+                }
+            }
+        }
+
+        if self.mode == Mode::Vr && self.panels.sheet_open() && !self.sheet.pixels().is_empty() {
+            let image = egui::ColorImage::from_rgba_premultiplied([self.sheet.px[0] as usize, self.sheet.px[1] as usize], self.sheet.pixels());
+            let path = dir.join(format!("{}-{}-Composed.png", self.mode.name(), self.step)); // i18n: not shown (benchmark artifact path)
+            if let Err(e) = orbiters_ui::offscreen::save_png(&path, &image) { self.notes.push(e.to_string()); }
+        }
         for panel in self.panels.all().filter(|p| p.painted && p.shown) {
             let image = egui::ColorImage::from_rgba_premultiplied([panel.px[0] as usize, panel.px[1] as usize], panel.pixels());
             let path = dir.join(format!("{}-{}-{:?}.png", self.mode.name(), self.step, panel.zone)); // i18n: not shown (a developer's benchmark command)
@@ -561,6 +704,15 @@ impl Rig {
 
     /// Points at what does `action`, presses and lets go, a turn each as a hand takes them, and the hand goes. Says whether there was such a thing.
     fn press(&mut self, action: Action) -> bool {
+        // The wing is hidden with a page up: go back through its real Close control first.
+        if self.find(action).is_none() && self.panels.sheet_open() && action != Action::CloseSheet {
+            self.press(Action::CloseSheet);
+            self.rest();
+        }
+        if self.find(action).is_none() && !matches!(action, Action::All | Action::Back | Action::CloseSheet) && self.find(Action::All).is_some() {
+            self.press(Action::All);
+            self.rest();
+        }
         let Some(at) = self.find(action) else {
             self.notes.push(format!("{} {}: nothing does {action:?}", self.mode.name(), self.step)); // i18n: not shown (a developer's benchmark command)
             return false;
@@ -630,6 +782,14 @@ impl Rig {
     }
 }
 
+fn world_pages() -> [(crate::overlay::worlds::panel::Page, &'static str); 11] {
+    use crate::overlay::worlds::panel::{Page, Compose};
+    [(Page::Browse, "Browse"), (Page::Typing, "Typing"), (Page::Detail, "Detail"),
+     (Page::Filter, "Filter"), (Page::Labels, "Labels"), (Page::Comments, "Comments"),
+     (Page::Compose(Compose::Comment), "ComposeComment"), (Page::Compose(Compose::Reason), "ComposeReason"),
+     (Page::Pictures, "Pictures"), (Page::Go, "Go"), (Page::Detail, "Detail")]
+}
+
 /// What a person does, the same in both modes.
 fn script(rig: &mut Rig) {
     use Logged::{Rest, Turns};
@@ -649,8 +809,86 @@ fn script(rig: &mut Rig) {
     rig.facts_cost("All tools"); // i18n: not shown (benchmark report labels)
     rig.scroll("qm-sheet-all-scroll", Rest);
     rig.pressing("qm-sheet-pictures", Action::Pictures, Rest);
-    rig.facts_cost("Pictures, 60 of them"); // i18n: not shown (benchmark report labels)
+    rig.panels.recents.keep(1, 0);
+    if let Some(panel) = rig.panels.takeover.as_mut() { panel.pictures.clear(); panel.dirty = true; }
+    rig.scroll("pictures-cold-ingestion-scroll", Rest);
+    rig.panels.recents.keep(1, 0);
+    if let Some(panel) = rig.panels.takeover.as_mut() { panel.pictures.clear(); panel.dirty = true; }
+    rig.begin("pictures-cold-ingestion-fling", Rest);
+    rig.panels.throw = 1800.0;
+    rig.turns(90);
+    rig.rest();
+    rig.panels.facts.gallery_scroll = 0.0;
+    rig.panels.gallery_to = 0.0;
+    rig.panels.throw = 0.0;
+    if let Some(panel) = rig.panels.takeover.as_mut() { panel.dirty = true; }
+    rig.facts_cost("Pictures, loaded"); // i18n: not shown (benchmark report labels)
     rig.scroll("qm-sheet-pictures-scroll", Rest);
+    rig.begin("pictures-fling", Rest);
+    rig.panels.throw = 1800.0;
+    rig.turns(90);
+    rig.rest();
+    for round in 0..2 {
+        for sheet in [super::panels::Sheet::All, super::panels::Sheet::Pictures, super::panels::Sheet::Settings, super::panels::Sheet::Tracking, super::panels::Sheet::Mics, super::panels::Sheet::Booster, super::panels::Sheet::Talk, super::panels::Sheet::Instances, super::panels::Sheet::Results, super::panels::Sheet::Menu, super::panels::Sheet::Worlds, super::panels::Sheet::Pictures] {
+            rig.begin(&format!("switch-{round}-{sheet:?}"), Rest);
+            let opening = Instant::now();
+            match sheet {
+                super::panels::Sheet::Worlds => { rig.panels.act(Action::Worlds, &rig.snap, &mut super::Pressed::default()); }
+                _ => {
+                    if sheet == super::panels::Sheet::Menu { rig.panels.stage.host.menu.page = orbiters_n4n0_core::menu::Page::States; }
+                    if sheet == super::panels::Sheet::Instances { rig.panels.stage.host.menu.page = orbiters_n4n0_core::menu::Page::Instances; }
+                    if sheet == super::panels::Sheet::Results { rig.panels.stage.host.menu.page = orbiters_n4n0_core::menu::Page::Results; }
+                    rig.panels.open_sheet(sheet, "", &rig.snap);
+                }
+            }
+            let opening = opening.elapsed();
+            rig.turns(1);
+            rig.steps.last_mut().unwrap().turns.last_mut().unwrap().open += opening;
+            rig.write("switch-next-turn");
+            if round == 0 { rig.rest(); }
+        }
+    }
+    rig.rest();
+    // Every shared menu screen, with first visits settled and a second rapid sweep.
+    use orbiters_n4n0_core::menu::Page;
+    for round in 0..2 {
+        for page in [Page::Home, Page::Search, Page::Results, Page::Call, Page::Photo, Page::Music, Page::Light, Page::States, Page::Card, Page::NewState, Page::Type, Page::Tracking, Page::Suggest, Page::More, Page::Instances, Page::AddFriend, Page::Qr, Page::History, Page::ShareTo, Page::Explicit, Page::Feedback, Page::FeedbackLabels, Page::Comments, Page::Mirror, Page::States] {
+            rig.begin(&format!("menu-switch-{round}-{page:?}"), Rest);
+            let at = Instant::now();
+            rig.panels.stage.host.menu.page = page;
+            rig.panels.open_sheet(super::panels::Sheet::Menu, "", &rig.snap);
+            let opening = at.elapsed(); rig.turns(1);
+            rig.steps.last_mut().unwrap().turns.last_mut().unwrap().open += opening;
+            rig.write("switch-next-turn"); if round == 0 { rig.rest(); }
+        }
+    }
+    rig.rest();
+    // Worlds' internal pages, including both composers and the instance chooser.
+    // Returning to Detail also checks A-to-B-to-A with the same selected world.
+    for round in 0..2 {
+        for (page, label) in world_pages() {
+            rig.begin(&format!("world-switch-{round}-{label}"), Rest);
+            let at = Instant::now();
+            assert!(rig.panels.stage.worlds.as_mut().unwrap().paint_fixture_page(page));
+            rig.panels.open_sheet(super::panels::Sheet::Worlds, &orbiters_i18n::tr("Worlds in 3D"), &rig.snap);
+            let opening = at.elapsed(); rig.turns(1);
+            rig.steps.last_mut().unwrap().turns.last_mut().unwrap().open += opening;
+            rig.write("switch-next-turn"); if round == 0 { rig.rest(); }
+        }
+    }
+    rig.rest();
+    rig.begin("return-pictures-after-menu", Rest);
+    rig.panels.open_sheet(super::panels::Sheet::Pictures, "", &rig.snap); rig.turns(1); rig.rest();
+    rig.begin("live-color-scroll", Rest);
+    let from_scroll = rig.panels.facts.gallery_scroll;
+    let mut moved = false;
+    for n in 0..90 {
+        if n % 15 == 0 { Arc::make_mut(&mut rig.snap).settings.orbit.retro_color = if n % 30 == 0 { [170,30,210] } else { [0,190,160] }; }
+        rig.turn(Some(Act::Wheel(-1.0)));
+        moved |= (rig.panels.facts.gallery_scroll - from_scroll).abs() > 0.01;
+    }
+    assert!(moved, "live color scrolling must move the gallery, not snap to the same row");
+    rig.rest();
     rig.point_at_each("qm-sheet-pictures-point", true, Rest);
     rig.pressing("qm-sheet-instances", Action::Page(Target::Instances), Rest);
     rig.pressing("qm-sheet-all-again", Action::All, Rest);
@@ -736,6 +974,29 @@ fn summary(mode: Mode, run: usize, rig: &Rig, out: &mut String) {
             step.turns.iter().map(|c| c.pixels).sum::<u64>() as f64 / 1e6,
         );
     }
+    let _ = writeln!(out, "\n| step | completed page frames | active wall seconds | completed page frames/s |\n|---|---:|---:|---:|");
+    for step in &rig.steps {
+        let frames = step.turns.iter().filter(|c| c.worker.raster > Duration::ZERO).count();
+        let wall: Duration = step.turns.iter().map(|c| c.wall).sum();
+        let _ = writeln!(out, "| {} | {frames} | {:.3} | {:.2} |", step.name, wall.as_secs_f64(), frames as f64 / wall.as_secs_f64().max(0.001));
+    }
+    let _ = writeln!(out, "\n| step | phase | p50 ms | p95 ms | p99 ms | max ms |\n|---|---|---:|---:|---:|---:|");
+    for step in &rig.steps {
+        for phase in 0..9 {
+            let mut values: Vec<f64> = step.turns.iter().map(|c| ms(match phase {
+                0 => c.whole(), 1 => c.phases.text, 2 => c.phases.tessellation,
+                3 => c.phases.raster, 4 => c.phases.finish,
+                7 => c.phases.facts, 8 => c.worker.facts,
+                6 => c.worker.facts + c.worker.text + c.worker.tessellation + c.worker.raster + c.worker.finish,
+                _ => c.paint.saturating_sub(c.phases.text + c.phases.tessellation + c.phases.raster + c.phases.finish),
+            })).collect();
+            values.sort_by(f64::total_cmp);
+            if values.is_empty() { continue; }
+            let percentile = |p: f64| values[((values.len() as f64 * p).ceil() as usize).saturating_sub(1)];
+            let label = ["turn", "text/layout", "textures/tessellation", "raster", "finish/copy", "paint remainder", "worker", "facts/items", "worker items"][phase];
+            let _ = writeln!(out, "| {} | {label} | {:.3} | {:.3} | {:.3} | {:.3} |", step.name, percentile(0.50), percentile(0.95), percentile(0.99), values[values.len()-1]);
+        }
+    }
     for (state, made, copied) in &rig.facts {
         let _ = writeln!(out, "\nFacts, {state}: made again and compared {made:.1} us a turn; copied {copied:.1} us a part painted.");
     }
@@ -767,8 +1028,12 @@ fn summary(mode: Mode, run: usize, rig: &Rig, out: &mut String) {
 pub fn run(args: &[String]) -> anyhow::Result<()> {
     let value = |name: &str| args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).cloned();
     let runs: usize = value("--runs").and_then(|v| v.parse().ok()).unwrap_or(5);
+    GALLERY.store(value("--entries").and_then(|v| v.parse().ok()).unwrap_or(60), std::sync::atomic::Ordering::Relaxed);
+    if let Some(tag) = value("--language") { if let Some(language) = orbiters_i18n::normalize(&tag) { orbiters_i18n::pin_language(language); orbiters_ui::fonts::prefer_language(language.tag()); } }
     let only = value("--only");
     let upload = args.iter().any(|a| a == "--upload");
+    RETRO.store(args.iter().any(|a| a == "--retro"), std::sync::atomic::Ordering::Relaxed);
+    let synchronous = args.iter().any(|a| a == "--sync");
     let fonts_anew = args.iter().any(|a| a == "--fonts-anew");
     let out = value("--out").map(PathBuf::from);
     // Nothing of the app's own folders: all of it in a scratch that goes when this ends.
@@ -795,6 +1060,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             let log = std::fs::File::create(out.join(format!("pictures-{}.txt", mode.name())))?; // i18n: not shown (a developer's benchmark command)
             let mut rig = Rig::new(mode, &scratch, Some((log, dir)));
             rig.panels.fonts_anew = fonts_anew;
+            rig.panels.stage.async_pages = !synchronous;
             script(&mut rig);
             if let Some(log) = rig.log.as_mut() {
                 log.flush()?;
@@ -811,6 +1077,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         for run in 1..=runs {
             let mut rig = Rig::new(mode, &scratch, None);
             rig.panels.fonts_anew = fonts_anew;
+            rig.panels.stage.async_pages = !synchronous;
             if upload {
                 rig.gpu = Some(orbiters_openvr::gpu::OverlayTextures::new(None).map_err(|e| anyhow::anyhow!(e))?);
             }
@@ -821,11 +1088,11 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             }
             summary(mode, run, &rig, &mut report);
             if let Some(out) = &out {
-                let mut csv = String::from("step,turn,set_open_ms,follow_ms,hand_ms,paint_ms,upload_ms,shows,pixels\n"); // i18n: not shown (machine-readable benchmark column names)
+                let mut csv = String::from("step,turn,set_open_ms,follow_ms,hand_ms,paint_ms,upload_ms,shows,pixels,wall_ms,worker_text_ms,worker_tess_ms,worker_raster_ms,worker_finish_ms,facts_items_ms,text_ms,tess_ms,raster_ms,finish_ms,worker_items_ms\n"); // i18n: not shown (machine-readable benchmark column names)
                 for step in &rig.steps {
                     for (n, c) in step.turns.iter().enumerate() {
                         use std::fmt::Write as _;
-                        let _ = writeln!(csv, "{},{n},{:.4},{:.4},{:.4},{:.4},{:.4},{},{}", step.name, ms(c.open), ms(c.follow), ms(c.hand), ms(c.paint), ms(c.upload), c.shows, c.pixels);
+                        let _ = writeln!(csv, "{},{n},{:.4},{:.4},{:.4},{:.4},{:.4},{},{},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4}", step.name, ms(c.open), ms(c.follow), ms(c.hand), ms(c.paint), ms(c.upload), c.shows, c.pixels, ms(c.wall), ms(c.worker.text), ms(c.worker.tessellation), ms(c.worker.raster), ms(c.worker.finish), ms(c.phases.facts), ms(c.phases.text), ms(c.phases.tessellation), ms(c.phases.raster), ms(c.phases.finish), ms(c.worker.facts));
                     }
                 }
                 std::fs::write(out.join(format!("turns-{}-{run}.csv", mode.name())), csv)?; // i18n: not shown (a developer's benchmark command)
@@ -837,4 +1104,63 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         std::fs::write(out.join("report.md"), &report)?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod review_fixture {
+    use super::*;
+    #[test]
+    fn review_header_fixture_controls_glyph_history_without_drawing_extra_pixels() {
+        let _one = super::super::flows::ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+        use super::super::{panels, Canvas, Facts};
+        let style = orbiters_core::settings::OrbitSettings::default();
+        panels::with_render_style(style, || {
+            let size = Zone::SheetBack.units().size();
+            let make = || Canvas::zoomed((size.x * 2.0) as u32, (size.y * 2.0) as u32, 2.0).in_orbit_look();
+            let (mut a, mut b) = (make(), make());
+            for canvas in [&mut a, &mut b] { mark_font_fixture(canvas.ctx()); }
+            let draw = |canvas: &mut Canvas, sheet, title: &str| {
+                let facts = Facts { sheet: Some(sheet), sheet_title: title.into(), orbit: style, ..Default::default() };
+                canvas.paint(1.0, |p| panels::paint(p, Zone::SheetBack, size, &facts, None, None));
+            };
+            draw(&mut a, panels::Sheet::Pictures, "Pictures");
+            draw(&mut a, panels::Sheet::Worlds, "Worlds");
+            draw(&mut b, panels::Sheet::Settings, "Settings");
+            draw(&mut b, panels::Sheet::Instances, "Instances");
+            for canvas in [&mut a, &mut b] { draw(canvas, panels::Sheet::Settings, "Settings"); }
+            let different = |a: &Canvas, b: &Canvas| a.pixels().chunks_exact(4).zip(b.pixels().chunks_exact(4)).filter(|(a,b)| a != b).count();
+            let incremental = different(&a, &b);
+            for canvas in [&mut a, &mut b] { canvas.invalidate(); draw(canvas, panels::Sheet::Settings, "Settings"); }
+            let full = different(&a, &b);
+            assert_eq!((incremental, full), (0,0), "different transient headings must not change settled fixture pixels (incremental/full redraw)");
+            assert!(!take_font_fixture(a.ctx()) && !take_font_fixture(b.ctx()), "prime once per atlas");
+        });
+    }
+    #[test]
+    fn review_world_fixture_waits_for_lazy_initialization_and_cannot_be_skipped() {
+        let _one = super::super::flows::ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+        let mut panels = Panels::new(Arc::new(crate::screenshot::Still), 2.0, true);
+        let found = orbiters_core::maps::FoundWorld { world: orbiters_core::maps::World { world_id: "wrld_fixture".into(), ..Default::default() }, ..Default::default() };
+        let entry = crate::overlay::worlds::catalog::Entry::world(&found, None, Default::default());
+        let mut fixture = Some((vec![entry], vec![egui::ColorImage::filled([4,4], egui::Color32::RED)]));
+        register_world_fixture(&mut panels, &mut fixture);
+        assert!(panels.stage.worlds.is_none() && fixture.is_some(), "keep assets pending until the lazy module exists");
+        let snap = crate::screenshot::idle_snapshot(&Settings::default(), &[]);
+        panels.takeover_place = Some(zones::in_units(Zone::Takeover));
+        panels.open_sheet(super::super::panels::Sheet::Settings, "", &snap);
+        register_world_fixture(&mut panels, &mut fixture);
+        assert!(fixture.is_none() && panels.stage.worlds.as_ref().unwrap().paint_fixture_ready());
+        let worlds = panels.stage.worlds.as_mut().unwrap();
+        let pages = world_pages();
+        assert_eq!(pages.len(), 11);
+        assert_eq!(pages[2].0, pages[10].0, "the return sweep includes Detail-to-other-to-Detail");
+        for (page, _) in pages {
+            assert!(worlds.paint_fixture_page(page));
+            assert_eq!(worlds.prepare_paint(&egui::Context::default()).panel.page, page);
+            std::thread::sleep(Duration::from_millis(24));
+            assert!(!worlds.wants_paint(), "a frozen {page:?} must settle even when its real-time caret/fade would animate");
+            worlds.repaint();
+            assert!(worlds.wants_paint(), "explicit state changes must still repaint the frozen fixture");
+        }
+    }
 }

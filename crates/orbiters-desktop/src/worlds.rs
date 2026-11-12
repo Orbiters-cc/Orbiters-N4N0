@@ -604,11 +604,15 @@ impl Pictures {
     /// waits, so what is on screen loads first).
     pub fn get(&mut self, ctx: &egui::Context, picture: &Picture) -> Option<TextureHandle> {
         let now = ctx.input(|i| i.time);
+        self.get_at(&crate::overlay::PaintTextures::of(ctx), now, picture)
+    }
+
+    pub(crate) fn get_at(&mut self, textures: &crate::overlay::PaintTextures, now: f64, picture: &Picture) -> Option<TextureHandle> {
         for (p, image) in std::mem::take(&mut *self.done.lock().unwrap()) {
             // One no longer wanted (scrolled past while it was decoded) is dropped.
             let Some(kept) = self.slots.get_mut(&p) else { continue };
             kept.slot = match image {
-                Some(image) => Slot::Ready(ctx.load_texture(format!("picture-{:x}", key(&p)), image, TextureOptions::LINEAR)),
+                Some(image) => Slot::Ready(textures.load_texture(format!("picture-{:x}", key(&p)), image, TextureOptions::LINEAR)),
                 None => Slot::Missing,
             };
         }

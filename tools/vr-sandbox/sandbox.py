@@ -261,6 +261,10 @@ class Session:
         self.devices()
         config = json.loads(SETTINGS.read_text(encoding='utf-8-sig')) if SETTINGS.exists() else {}
         config.setdefault('steamvr', {}).update({'forcedDriver': 'orbiters_sandbox', 'forcedHmd': 'orbiters-sandbox-head', 'activateMultipleDrivers': True, 'enableHomeApp': False, 'supersampleScale': 1.0, 'showMirrorView': False})
+        # A startup dashboard intercepts the emulated camera wheel and covers
+        # the eye pictures. Disable it only in this journalled test session;
+        # restore_contents restores the original settings bytes afterward.
+        config.setdefault('dashboard', {})['enableDashboard'] = False
         config['driver_orbiters_sandbox'] = {'enable': True}
         for directory in (RUNTIME/'drivers').iterdir():
             if directory.is_dir():

@@ -782,6 +782,14 @@ impl Rig {
     }
 }
 
+fn world_pages() -> [(crate::overlay::worlds::panel::Page, &'static str); 11] {
+    use crate::overlay::worlds::panel::{Page, Compose};
+    [(Page::Browse, "Browse"), (Page::Typing, "Typing"), (Page::Detail, "Detail"),
+     (Page::Filter, "Filter"), (Page::Labels, "Labels"), (Page::Comments, "Comments"),
+     (Page::Compose(Compose::Comment), "ComposeComment"), (Page::Compose(Compose::Reason), "ComposeReason"),
+     (Page::Pictures, "Pictures"), (Page::Go, "Go"), (Page::Detail, "Detail")]
+}
+
 /// What a person does, the same in both modes.
 fn script(rig: &mut Rig) {
     use Logged::{Rest, Turns};
@@ -849,6 +857,20 @@ fn script(rig: &mut Rig) {
             let at = Instant::now();
             rig.panels.stage.host.menu.page = page;
             rig.panels.open_sheet(super::panels::Sheet::Menu, "", &rig.snap);
+            let opening = at.elapsed(); rig.turns(1);
+            rig.steps.last_mut().unwrap().turns.last_mut().unwrap().open += opening;
+            rig.write("switch-next-turn"); if round == 0 { rig.rest(); }
+        }
+    }
+    rig.rest();
+    // Worlds' internal pages, including both composers and the instance chooser.
+    // Returning to Detail also checks A-to-B-to-A with the same selected world.
+    for round in 0..2 {
+        for (page, label) in world_pages() {
+            rig.begin(&format!("world-switch-{round}-{label}"), Rest);
+            let at = Instant::now();
+            assert!(rig.panels.stage.worlds.as_mut().unwrap().paint_fixture_page(page));
+            rig.panels.open_sheet(super::panels::Sheet::Worlds, "", &rig.snap);
             let opening = at.elapsed(); rig.turns(1);
             rig.steps.last_mut().unwrap().turns.last_mut().unwrap().open += opening;
             rig.write("switch-next-turn"); if round == 0 { rig.rest(); }
@@ -1128,5 +1150,13 @@ mod review_fixture {
         panels.open_sheet(super::super::panels::Sheet::Settings, "", &snap);
         register_world_fixture(&mut panels, &mut fixture);
         assert!(fixture.is_none() && panels.stage.worlds.as_ref().unwrap().paint_fixture_ready());
+        let worlds = panels.stage.worlds.as_mut().unwrap();
+        let pages = world_pages();
+        assert_eq!(pages.len(), 11);
+        assert_eq!(pages[2].0, pages[10].0, "the return sweep includes Detail-to-other-to-Detail");
+        for (page, _) in pages {
+            assert!(worlds.paint_fixture_page(page));
+            assert_eq!(worlds.prepare_paint(&egui::Context::default()).panel.page, page);
+        }
     }
 }

@@ -55,10 +55,12 @@ mod review_navigation {
         let accepts = |worlds: &Worlds, target| shown.compatible(worlds, &worlds.entries(), &worlds.status(), worlds.picked(), target);
         assert!(accepts(&worlds, panel::Target::Comments));
         assert!(accepts(&worlds, panel::Target::Join));
+        assert!(accepts(&worlds, panel::Target::Back));
         assert!(!accepts(&worlds, panel::Target::WriteComment));
         worlds.pick_for_test(entry("wrld_other"));
         assert!(!accepts(&worlds, panel::Target::Comments));
         assert!(!accepts(&worlds, panel::Target::Join));
+        assert!(!accepts(&worlds, panel::Target::Back));
     }
 }
 impl Worlds {
@@ -106,4 +108,12 @@ impl Worlds {
         ready
     }
     pub(crate) fn paint_fixture_ready(&self) -> bool { self.paint_fixture.as_ref().is_some_and(|f| f.entries.len() == f.thumbs.len()) }
+    /// Selects a local replay page without effects or external data requests.
+    pub(crate) fn paint_fixture_page(&mut self, page: panel::Page) -> bool {
+        let Some(entry) = self.paint_fixture.as_ref().and_then(|f| f.entries.first().cloned()) else { return false };
+        self.open = true;
+        self.picked = Some(entry.clone());
+        self.panel.restore(page, Some(entry.id), 1.0);
+        true
+    }
 }

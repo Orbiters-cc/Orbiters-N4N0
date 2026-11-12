@@ -392,6 +392,11 @@ mod tests {
         for entry in std::fs::read_dir(dir).expect("the real frames") {
             let path = entry.unwrap().path();
             let name = path.file_stem().unwrap().to_string_lossy().to_string();
+            // The folder also holds the camera tools' own pictures: only the frames named by what they show are read here.
+            let shows = name.split('-').next().unwrap_or_default().split('_').next().unwrap_or_default();
+            if path.extension().is_none_or(|e| e != "png") || !["wheel", "qm", "none"].contains(&shows) {
+                continue;
+            }
             let fields: Vec<&str> = name.split('_').collect();
             let size: Vec<f32> = fields[fields.len() - 3].split('x').map(|v| v.parse().unwrap()).collect();
             let (x0, y0): (u32, u32) = (fields[fields.len() - 2].parse().unwrap(), fields[fields.len() - 1].parse().unwrap());

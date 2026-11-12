@@ -276,7 +276,13 @@ class Session:
             visible=any('--window' in p.cmdline() for p in psutil.process_iter(['name']) if p.info['name']=='orbiters-desktop.exe')
             self.j.update(app_test_exe=str(exe),app_restore_exe=str(install),app_was_visible=visible)
             atomic_json(JOURNAL,self.j)
+            # --quit only signals the service. Wait for its existing processes to
+            # exit before launching our binary, or single-instance arbitration can
+            # silently discard it while the installed service is still shutting down.
+            previous=[p for p in psutil.process_iter(['exe']) if p.info['exe'] and Path(p.info['exe']).resolve()==install.resolve()]
             subprocess.run([str(install),'--quit'],timeout=20,creationflags=subprocess.CREATE_NO_WINDOW,check=True)
+            _,alive=psutil.wait_procs(previous,timeout=20)
+            if alive:raise RuntimeError('Installed Orbiters did not finish quitting; sandbox app was not launched')
             env=os.environ.copy();env['ORBITERS_VR_SANDBOX_ROOT']=str(Path(__file__).parent.resolve());env.pop('ORBITERS_NO_NETWORK_LISTENING',None)
             with (ROOT/'app-out.log').open('a') as out,(ROOT/'app-err.log').open('a') as err:
                 proc=subprocess.Popen([str(exe),'--hidden'],env=env,stdout=out,stderr=err,creationflags=subprocess.CREATE_NO_WINDOW,cwd=exe.parent)

@@ -159,12 +159,17 @@ impl Service {
         }
         let snap = self.ctl.view();
         let session = snap.steamvr.pid.unwrap_or(0);
-        if !snap.steamvr.running || *self.steamvr_start_seen.lock().unwrap() == Some(session) {
+        if snap.settings.steamvr_overlay || !snap.steamvr.running || (*self.steamvr_start_seen.lock().unwrap() == Some(session) && !snap.settings.startup.steamvr_pending)
+            || crate::steamvr_start::ready_session().is_none_or(|(pid, _)| pid != session) {
             return;
         }
+        // Closing an overlay is asynchronous: do not overlap its connection.
+        if self.links.lock().unwrap().iter().any(|l| l.role == Role::Overlay)
+            || self.overlay.lock().unwrap().as_mut().is_some_and(|(child, _, _)| matches!(child.try_wait(), Ok(None))) { return; }
         // Not yet answering (it is starting, or going): asked again next turn.
         let Ok(client) = orbiters_openvr::Client::connect(orbiters_openvr::AppType::Background) else { return };
         *self.steamvr_start_seen.lock().unwrap() = Some(session);
+        self.smoothing.lock().unwrap().set_kinds((0..64).map(|i| crate::tracking::DeviceKind::of(client.device_class(i))).collect());
         if let Some(startup) = crate::startup::reconcile(&client, &snap.settings.startup) {
             self.ctl.update_settings(|s| s.startup = startup);
         }
@@ -228,6 +233,9 @@ impl Service {
             return;
         }
         if connected.is_some() {
+            return;
+        }
+        if crate::steamvr_start::ready_session().is_none_or(|(pid, _)| Some(pid) != snap.steamvr.pid) {
             return;
         }
         drop(links);
@@ -539,7 +547,7 @@ impl Service {
 }
 
 /// An overlay that failed is started again after this.
-const OVERLAY_RETRY: Duration = Duration::from_secs(20);
+const OVERLAY_RETRY: Duration = Duration::from_secs(2);
 
 /// Whether to start an overlay again, the last one started `since` ago for the SteamVR `started_for` (its process id)
 /// having `exited` (`None` while it runs; its exit code, if any), SteamVR now being `steamvr`. Not while it runs; not

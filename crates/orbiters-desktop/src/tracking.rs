@@ -307,12 +307,9 @@ impl Smoothing {
             return;
         }
         let absent = self.overlay_absent_since.is_some_and(|t| now.saturating_duration_since(t) >= NO_OVERLAY_FOR);
-        if !fresh && absent && w.settings.enabled && self.kinds_read.is_none_or(|t| now.saturating_duration_since(t) >= SELF_READ_EVERY) {
-            self.kinds_read = Some(now);
-            if let Ok(client) = orbiters_openvr::Client::connect(orbiters_openvr::AppType::Background) {
-                self.kinds = read_kinds(|i| client.device_class(i));
-            }
-        }
+        // Runtime initialization belongs to the overlay, or the service's single startup connection
+        // while overlays are disabled. Never open a competing fallback connection here.
+        let _ = (absent, SELF_READ_EVERY);
         if self.kinds.is_empty() {
             self.kinds = default_kinds();
         }

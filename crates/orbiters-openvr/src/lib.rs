@@ -32,7 +32,7 @@ pub const MAX_DEVICES: usize = 64;
 pub enum AppType {
     /// Draws overlays; starts SteamVR when it is not running.
     Overlay = 2,
-    /// Reads poses only; fails when SteamVR is not running.
+    /// Fails when SteamVR is not running; does not keep it running after other apps quit.
     Background = 3,
 }
 
@@ -299,6 +299,17 @@ pub fn runtime_dir() -> Option<PathBuf> {
     runtime_from_vrpath(&std::fs::read_to_string(base.join("openvr").join("openvrpaths.vrpath")).ok()?)
 }
 
+/// SteamVR's registered log directory can be on a different drive from its runtime.
+pub fn log_dir() -> Option<PathBuf> {
+    let base = std::env::var_os("LOCALAPPDATA").map(PathBuf::from).or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))?;
+    log_from_vrpath(&std::fs::read_to_string(base.join("openvr/openvrpaths.vrpath")).ok()?)
+}
+
+fn log_from_vrpath(text: &str) -> Option<PathBuf> {
+    let json: serde_json::Value = serde_json::from_str(text).ok()?;
+    json["log"].as_array()?.iter().filter_map(|v| v.as_str()).map(PathBuf::from).find(|p| p.is_dir())
+}
+
 fn runtime_from_vrpath(text: &str) -> Option<PathBuf> {
     let json: serde_json::Value = serde_json::from_str(text).ok()?;
     json["runtime"].as_array()?.iter().filter_map(|v| v.as_str()).map(PathBuf::from).find(|p| p.is_dir())
@@ -418,7 +429,11 @@ impl SettingsHandle {
         let _serial = settings_lock();
         // SAFETY: IVRSettings_003 entry 5 is GetBool; NUL-terminated names.
         let value = unsafe { entry::<F>(self.table, SETTINGS_GET_BOOL)(section.as_ptr(), key.as_ptr(), &mut error) };
-        if error == 0 { Ok(value) } else { Err(error) }
+        if error == 0 {
+            Ok(value)
+        } else {
+            Err(error)
+        }
     }
 
     pub fn get_float(&self, section: &std::ffi::CStr, key: &std::ffi::CStr) -> Result<f32, i32> {
@@ -427,7 +442,11 @@ impl SettingsHandle {
         let _serial = settings_lock();
         // SAFETY: IVRSettings_003 entry 7 is GetFloat; NUL-terminated names.
         let value = unsafe { entry::<F>(self.table, 7)(section.as_ptr(), key.as_ptr(), &mut error) };
-        if error == 0 { Ok(value) } else { Err(error) }
+        if error == 0 {
+            Ok(value)
+        } else {
+            Err(error)
+        }
     }
 
     pub fn set_bool(&self, section: &std::ffi::CStr, key: &std::ffi::CStr, value: bool) -> Result<(), i32> {
@@ -436,7 +455,11 @@ impl SettingsHandle {
         let _serial = settings_lock();
         // SAFETY: IVRSettings_003 entry 1 is SetBool; NUL-terminated names.
         unsafe { entry::<F>(self.table, 1)(section.as_ptr(), key.as_ptr(), value, &mut error) };
-        if error == 0 { Ok(()) } else { Err(error) }
+        if error == 0 {
+            Ok(())
+        } else {
+            Err(error)
+        }
     }
 
     pub fn set_float(&self, section: &std::ffi::CStr, key: &std::ffi::CStr, value: f32) -> Result<(), i32> {
@@ -445,7 +468,11 @@ impl SettingsHandle {
         let _serial = settings_lock();
         // SAFETY: IVRSettings_003 entry 3 is SetFloat; NUL-terminated names.
         unsafe { entry::<F>(self.table, 3)(section.as_ptr(), key.as_ptr(), value, &mut error) };
-        if error == 0 { Ok(()) } else { Err(error) }
+        if error == 0 {
+            Ok(())
+        } else {
+            Err(error)
+        }
     }
 
     pub fn remove(&self, section: &std::ffi::CStr, key: &std::ffi::CStr) -> Result<(), i32> {
@@ -454,7 +481,11 @@ impl SettingsHandle {
         let _serial = settings_lock();
         // SAFETY: IVRSettings_003 entry 10 is RemoveKeyInSection; NUL-terminated names.
         unsafe { entry::<F>(self.table, 10)(section.as_ptr(), key.as_ptr(), &mut error) };
-        if error == 0 { Ok(()) } else { Err(error) }
+        if error == 0 {
+            Ok(())
+        } else {
+            Err(error)
+        }
     }
 }
 
@@ -488,6 +519,17 @@ pub const SYSTEM_VERSION: &str = "IVRSystem_026";
 pub const OVERLAY_VERSION: &str = "IVROverlay_028";
 
 impl Client {
+    /// Obtain overlays on the existing non-launching connection. No second Init, no application-type transition.
+    pub fn connect_overlay_without_launch() -> Result<Self, Error> {
+        Self::overlay_on_existing(Self::connect)
+    }
+
+    fn overlay_on_existing(connect: impl FnOnce(AppType) -> Result<Self, Error>) -> Result<Self, Error> {
+        let mut client = connect(AppType::Background)?;
+        client.overlay = Some(client.interface(OVERLAY_VERSION)?);
+        Ok(client)
+    }
+
     pub fn connect(app: AppType) -> Result<Self, Error> {
         let runtime = runtime_dir().ok_or(Error::NotInstalled)?;
         Self::connect_to(&runtime, app)
@@ -496,7 +538,7 @@ impl Client {
     pub fn connect_to(runtime: &Path, app: AppType) -> Result<Self, Error> {
         let library = platform::Library::open(runtime).map_err(Error::Load)?;
         let factory = library.symbol(c"VRClientCoreFactory").ok_or_else(|| Error::Load("no VRClientCoreFactory".into()))?; // i18n: not shown (a symbol name in a load error detail)
-        // SAFETY: the documented factory signature of vrclient.
+                                                                                                                           // SAFETY: the documented factory signature of vrclient.
         let factory: FactoryFn = unsafe { std::mem::transmute(factory) };
         let mut code = 0;
         // SAFETY: NUL-terminated interface name and a valid out-parameter.
@@ -1067,6 +1109,64 @@ pub fn role_name(class: DeviceClass, role: ControllerRole, controller_type: Opti
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn registered_log_folder_is_independent_of_runtime_library() {
+        let log = std::env::current_dir().unwrap();
+        let runtime = std::env::temp_dir();
+        let text = serde_json::json!({"runtime": [runtime], "log": [log]}).to_string();
+        assert_eq!(log_from_vrpath(&text), Some(log));
+        assert_eq!(runtime_from_vrpath(&text), Some(runtime));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn overlay_uses_one_background_init_and_keeps_that_connection() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static INIT: AtomicUsize = AtomicUsize::new(0);
+        static CLEANUP: AtomicUsize = AtomicUsize::new(0);
+        unsafe extern "system" fn init(_: *mut c_void, kind: i32, _: *const c_char) -> i32 {
+            assert_eq!(kind, 3);
+            INIT.fetch_add(1, Ordering::Relaxed);
+            0
+        }
+        unsafe extern "system" fn cleanup(_: *mut c_void) {
+            CLEANUP.fetch_add(1, Ordering::Relaxed);
+        }
+        unsafe extern "system" fn valid(_: *mut c_void, _: *const c_char) -> i32 {
+            0
+        }
+        unsafe extern "system" fn interface(_: *mut c_void, name: *const c_char, error: *mut i32) -> *mut c_void {
+            assert_eq!(unsafe { std::ffi::CStr::from_ptr(name) }, c"FnTable:IVROverlay_028");
+            unsafe {
+                *error = 0;
+            }
+            std::ptr::dangling_mut::<usize>().cast()
+        }
+        let table = ClientCoreVtbl { init, cleanup, is_interface_version_valid: valid, get_generic_interface: interface };
+        let mut object = &table as *const ClientCoreVtbl;
+        let core = (&mut object as *mut *const ClientCoreVtbl).cast();
+        let client = Client::overlay_on_existing(|kind| {
+            assert_eq!(unsafe { init(core, kind as i32, c"".as_ptr()) }, 0);
+            Ok(Client {
+                core,
+                system: std::ptr::null(),
+                overlay: None,
+                input_table: OnceCell::new(),
+                compositor_table: OnceCell::new(),
+                chaperone_setup_table: OnceCell::new(),
+                applications_table: OnceCell::new(),
+                settings_table: OnceCell::new(),
+                _library: unsafe { std::mem::zeroed() },
+            })
+        })
+        .unwrap();
+        assert!(client.overlay.is_some());
+        assert_eq!(INIT.load(Ordering::Relaxed), 1);
+        assert_eq!(CLEANUP.load(Ordering::Relaxed), 0);
+        drop(client);
+        assert_eq!(CLEANUP.load(Ordering::Relaxed), 1);
+    }
 
     #[test]
     fn layouts_match_openvr() {

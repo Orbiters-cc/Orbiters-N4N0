@@ -167,6 +167,8 @@ fn factory_init_hook_filter_and_cleanup() {
     // Init with smoothing off: nothing of SteamVR's is patched, not even the context's own table.
     let context_entry = unsafe { *(*(&CONTEXT_OBJECT as *const _ as *const *const usize)) };
     let init = unsafe { (vtable.init)(provider, &CONTEXT_OBJECT as *const _ as *mut c_void) };
+    assert!(LOGGED.lock().unwrap().is_empty(), "Init defers all optional setup and logging");
+    unsafe { (vtable.run_frame)(provider) };
     assert_eq!(init, 0, "Init returns VRInitError_None");
     assert!(LOGGED.lock().unwrap().iter().any(|l| l.contains("loaded")), "Init's line reached the log's Log: {:?}", LOGGED.lock().unwrap());
     for _ in 0..3 {
@@ -219,6 +221,8 @@ fn factory_init_hook_filter_and_cleanup() {
     send_pose(2, fast);
     assert_eq!(LAST_POSE.lock().unwrap().unwrap().1.vec_velocity, [0.0, 0.0, 0.0], "on again: damped");
 
+    // B fetched this callback, then paused before publishing its hook.
+    let saved_callback = host_pose_entry();
     // Cleanup restores the host's table.
     unsafe { (vtable.cleanup)(provider) };
     assert_eq!(host_pose_entry(), unhooked, "Cleanup put the host's original back");
@@ -227,15 +231,19 @@ fn factory_init_hook_filter_and_cleanup() {
     send_pose(2, DriverPose::at([9.0, 0.0, 0.0], Quaternion::IDENTITY));
     assert_eq!(LAST_POSE.lock().unwrap().unwrap().1.vec_position, [9.0, 0.0, 0.0]);
 
-    // An add-on installed first remains our original and is restored by Cleanup.
+    // A fetched callback can survive successful restoration. Publishing another
+    // add-on before re-Init must not mutate that callback's old successor.
     control.set_enabled(true);
-    OTHER_NEXT.store(unhooked, Ordering::Release);
+    OTHER_NEXT.store(saved_callback, Ordering::Release);
     replace_host_pose(other_hook as *const () as usize);
     unsafe { (vtable.init)(provider, &CONTEXT_OBJECT as *const _ as *mut c_void) };
+    unsafe { (vtable.run_frame)(provider) };
+    assert_eq!(host_pose_entry(), other_hook as *const () as usize, "saved callback must never acquire B as successor");
     let before = OTHER_CALLS.load(Ordering::Relaxed);
     send_pose(2, fast);
     assert_eq!(OTHER_CALLS.load(Ordering::Relaxed), before + 1);
-    assert_eq!(LAST_POSE.lock().unwrap().unwrap().1.vec_velocity, [0.0; 3]);
+    assert_eq!(LAST_POSE.lock().unwrap().unwrap().1.vec_velocity, fast.vec_velocity);
+    assert_eq!(control.driver_heartbeat().unwrap().hooks, 0, "changed successor is ambiguous");
     unsafe { (vtable.cleanup)(provider) };
     assert_eq!(host_pose_entry(), other_hook as *const () as usize);
     replace_host_pose(unhooked);
@@ -244,6 +252,7 @@ fn factory_init_hook_filter_and_cleanup() {
     // reinitializing must reuse it, never replace its original with the add-on (a cycle).
     control.set_enabled(true);
     unsafe { (vtable.init)(provider, &CONTEXT_OBJECT as *const _ as *mut c_void) };
+    unsafe { (vtable.run_frame)(provider) };
     let our_entry = host_pose_entry();
     OTHER_NEXT.store(our_entry, Ordering::Release);
     replace_host_pose(other_hook as *const () as usize);
@@ -252,12 +261,21 @@ fn factory_init_hook_filter_and_cleanup() {
     send_pose(2, fast);
     assert_eq!(LAST_POSE.lock().unwrap().unwrap().1.vec_velocity, fast.vec_velocity, "buried hook is passive after Cleanup");
     unsafe { (vtable.init)(provider, &CONTEXT_OBJECT as *const _ as *mut c_void) };
+    unsafe { (vtable.run_frame)(provider) };
     assert_eq!(host_pose_entry(), other_hook as *const () as usize, "reinit must not create other -> us -> other recursion");
     send_pose(2, fast);
-    assert_eq!(LAST_POSE.lock().unwrap().unwrap().1.vec_velocity, [0.0; 3]);
+    assert_eq!(LAST_POSE.lock().unwrap().unwrap().1.vec_velocity, fast.vec_velocity, "opaque chain must be reported inactive");
+    assert_eq!(control.driver_heartbeat().unwrap().hooks, 0);
     unsafe { (vtable.cleanup)(provider) };
     replace_host_pose(unhooked);
 
+    // The foreign hook can detach us entirely. An address retained in bookkeeping
+    // does not prove reachability and must not suppress honest status/recovery.
+    unsafe { (vtable.init)(provider, &CONTEXT_OBJECT as *const _ as *mut c_void) };
+    unsafe { (vtable.run_frame)(provider) };
+    assert_eq!(control.driver_heartbeat().unwrap().hooks, 0, "detached callback is not an installed hook");
+    assert_eq!(host_pose_entry(), unhooked);
+    unsafe { (vtable.cleanup)(provider) };
     control.set_enabled(false);
 }
 

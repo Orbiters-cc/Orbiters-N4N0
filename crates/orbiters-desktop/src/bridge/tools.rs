@@ -249,7 +249,7 @@ impl Bridge {
                 if !matches!(args["action"].as_str(), Some("stop" | "restore" | "status")) {
                     if let Some(paused) = self.paused() { return Err(paused_failure(&paused)); }
                 }
-                self.exclusively(|| super::sandbox::call(args))
+                self.exclusively(|| self.sandbox_call(args))
             }
             unity if super::projects::NAMES.contains(&unity) => self.projects.call(unity, args, call, self.paused()),
             "get_state" => Ok(Answer::Data(self.state())),

@@ -10,9 +10,12 @@ import json
 import math
 import mmap
 import os
+import re
 from pathlib import Path
 import secrets
 import shutil
+import socket
+import struct
 import subprocess
 import sys
 import threading
@@ -45,8 +48,12 @@ kernel.ReleaseMutex.argtypes = [C.c_void_p]
 kernel.CloseHandle.argtypes = [C.c_void_p]
 
 def processes():
-    return [p.info for p in psutil.process_iter(['pid', 'name', 'create_time'])
-            if p.info['name'] and p.info['name'].lower() in NAMES]
+    result=[]
+    for p in psutil.process_iter(['pid','name']):
+        if p.info['name'] and p.info['name'].lower() in NAMES:
+            try:result.append(dict(p.info,create_time=p.create_time()))
+            except psutil.NoSuchProcess:pass
+    return result
 
 def same_process(info):
     try:
@@ -73,17 +80,30 @@ def backup(journal, path, tree=False):
     entry['backup'] = str(saved)
     journal['files'].append(entry)
 
+def tree_hashes(path):
+    return {str(p.relative_to(path)):hashlib.sha256(p.read_bytes()).hexdigest() for p in path.rglob('*') if p.is_file()}
+
 def restore():
     if not JOURNAL.exists():
         return {'restored': False, 'reason': 'no recovery journal'}
     j = json.loads(JOURNAL.read_text())
     if j.get('restored'):
         return {'restored': True, 'already_restored': True}
+    if j.get('pid') != os.getpid() and j.get('owner_create_time') and same_process({'pid':j['pid'],'create_time':j['owner_create_time']}):
+        remote({'action':'stop'})
+        deadline=time.monotonic()+45
+        while time.monotonic()<deadline:
+            latest=json.loads(JOURNAL.read_text())
+            if latest.get('restored'):return {'restored':True,'verified_files':len(latest['files'])}
+            time.sleep(.25)
+        raise RuntimeError('Live sandbox did not finish restoration; inspect its error log')
     # Only stop exact process identities recorded by this session. Refuse a foreign VR session.
     owned = {(p['pid'], p['create_time']) for p in j['processes']}
     foreign = [p for p in processes() if (p['pid'], p['create_time']) not in owned]
     if foreign:
         raise RuntimeError('Restore refused while unowned VR processes run: ' + json.dumps(foreign))
+    if j.get('app_test_exe'):
+        subprocess.run([j['app_test_exe'],'--quit'],timeout=20,creationflags=subprocess.CREATE_NO_WINDOW,check=True)
     terminating=[]
     for info in sorted(j['processes'], key=lambda p: p['name'].lower() != 'vrmonitor.exe'):
         p = same_process(info)
@@ -94,6 +114,8 @@ def restore():
             except psutil.NoSuchProcess:
                 pass
     _,remaining=psutil.wait_procs(terminating,timeout=10)
+    still_running={(p['pid'],p['create_time']) for p in processes()}
+    remaining=[p for p in remaining if (p.pid,p.create_time()) in still_running]
     if remaining:
         raise RuntimeError('Owned processes did not exit after terminate: '+json.dumps([p.pid for p in remaining]))
     if processes():
@@ -101,10 +123,12 @@ def restore():
     for entry in j['files']:
         path, saved = Path(entry['path']), Path(entry['backup'])
         if entry['tree']:
+            expected=tree_hashes(saved) if entry['exists'] else {}
             if path.exists():
                 shutil.rmtree(path)
             if entry['exists']:
                 shutil.copytree(saved, path)
+                if tree_hashes(path)!=expected:raise RuntimeError('Restore tree hash mismatch: '+str(path))
         elif entry['exists']:
             shutil.copy2(saved, path)
             if hashlib.sha256(path.read_bytes()).hexdigest() != entry['sha256']:
@@ -113,6 +137,9 @@ def restore():
             path.unlink(missing_ok=True)
     j['restored'] = True
     atomic_json(JOURNAL, j)
+    if j.get('app_restore_exe'):
+        args=[j['app_restore_exe']]+([] if j.get('app_was_visible') else ['--hidden'])
+        subprocess.Popen(args,creationflags=subprocess.CREATE_NO_WINDOW)
     # Do not release somebody else's lock.
     if LOCK.exists() and json.loads(LOCK.read_text())['session'] == j['session']:
         LOCK.unlink()
@@ -122,6 +149,9 @@ class Session:
     def __init__(self):
         self.stop = threading.Event()
         self.guard = threading.Lock()
+        self.j = None
+
+    def devices(self):
         self.mm = mmap.mmap(-1, C.sizeof(Shared), tagname='Local\\OrbitersVrSandbox1112')
         self.shared = Shared.from_buffer(self.mm)
         self.mutex = kernel.CreateMutexW(None, False, 'Local\\OrbitersVrSandbox1112Mutex')
@@ -129,7 +159,6 @@ class Session:
         for i, d in enumerate(self.shared.devices):
             d.p[:] = ([0, 1.65, 0], [-.25, 1.2, -.35], [.25, 1.2, -.35])[i]
             d.q[:] = [1, 0, 0, 0]
-        self.j = None
 
     def start(self):
         ROOT.mkdir(parents=True, exist_ok=True)
@@ -142,7 +171,7 @@ class Session:
         lock = {'session': identity, 'pid': os.getpid(), 'stream': 'vr1112/sandbox-camera', 'time': time.time()}
         with LOCK.open('x') as f:
             json.dump(lock, f)
-        self.j = {'session': identity, 'pid': os.getpid(), 'created': time.time(), 'token': secrets.token_hex(32), 'files': [], 'processes': [], 'restored': False}
+        self.j = {'session': identity, 'pid': os.getpid(), 'owner_create_time':psutil.Process().create_time(), 'created': time.time(), 'token': secrets.token_hex(32), 'files': [], 'processes': [], 'restored': False}
         # Keep old recoveries; every new session gets its own backup directory.
         old = ROOT / 'backup'
         if old.exists():
@@ -154,6 +183,7 @@ class Session:
         atomic_json(JOURNAL, self.j)
         # Recovery outlives the control server, including an abrupt crash.
         subprocess.Popen([sys.executable, __file__, 'watch', str(os.getpid()), str(psutil.Process().create_time())], creationflags=subprocess.CREATE_NO_WINDOW)
+        self.devices()
         config = json.loads(SETTINGS.read_text(encoding='utf-8-sig')) if SETTINGS.exists() else {}
         config.setdefault('steamvr', {}).update({'forcedDriver': 'orbiters_sandbox', 'forcedHmd': 'orbiters-sandbox-head', 'activateMultipleDrivers': True, 'enableHomeApp': False, 'supersampleScale': 1.0, 'showMirrorView': False})
         config['driver_orbiters_sandbox'] = {'enable': True}
@@ -174,6 +204,12 @@ class Session:
         known = {(p['pid'],p['create_time']) for p in self.j['processes']}
         for p in processes():
             if (p['pid'],p['create_time']) not in known:
+                if p['name'].lower()=='vrchat.exe':
+                    link=self.j.get('launch_link')
+                    if not link or any(x['name'].lower()=='vrchat.exe' for x in self.j['processes']):continue
+                    try:
+                        if link not in psutil.Process(p['pid']).cmdline():continue
+                    except psutil.Error:continue
                 self.j['processes'].append(p)
         atomic_json(JOURNAL, self.j)
 
@@ -186,17 +222,85 @@ class Session:
             self.record()
             self.stop.set()
             return {'stopping':True}
-        if action in ('capture','overlays','devices'):
+        if action in ('menu','flick','camera'):
+            hand=args.get('device','right')
+            if hand not in ('left','right'):raise ValueError('controller required')
+            slot=1 if hand=='left' else 2
+            def inputs(values):
+                if kernel.WaitForSingleObject(self.mutex,1000)!=0:raise RuntimeError('IPC mutex timeout')
+                try:
+                    for index,value in values.items():self.shared.devices[slot].inputs[index]=value
+                finally:kernel.ReleaseMutex(self.mutex)
+            def flick(stick):
+                if len(stick)!=2 or not all(math.isfinite(x) and -1<=x<=1 for x in stick):raise ValueError('stick requires two finite axes in -1..1')
+                inputs({2:stick[0],3:stick[1]});self.stop.wait(.25);inputs({2:0,3:0});self.stop.wait(.3)
+            button=14 if slot==1 else 10
+            with self.guard:
+                if action=='flick':flick(args['stick'])
+                elif action=='camera':
+                    inputs({button:0,2:0,3:0});self.stop.wait(.2)
+                    inputs({button:1});self.stop.wait(.9)
+                    flick([-.866,.5]);flick([-.951,.309])
+                    inputs({button:0})
+                else:
+                    menu=args['menu']
+                    if menu=='wheel':inputs({button:1});self.stop.wait(.8)
+                    elif menu=='quick':inputs({button:1});self.stop.wait(.12);inputs({button:0})
+                    elif menu=='close':inputs({button:0,2:0,3:0})
+                    else:raise ValueError('menu must be quick, wheel or close')
+            return {'commanded':action,'device':hand,'verify':'Inspect a composited eye capture before the next selection.'}
+        if action=='camera_fly':
+            if not isinstance(args.get('enabled'),bool):raise ValueError('enabled must be a boolean')
+            address=b'/usercamera/Flying';address+=b'\0'*(4-len(address)%4)
+            packet=address+(b',T\0\0' if args['enabled'] else b',F\0\0')
+            with socket.socket(socket.AF_INET,socket.SOCK_DGRAM) as osc:osc.sendto(packet,('127.0.0.1',9000))
+            return {'flying_requested':bool(args['enabled']),'verify':'Read /usercamera/Flying and inspect the camera.'}
+        if action=='app':
+            exe=Path(args['app_exe']).resolve()
+            if not exe.is_file() or not exe.is_relative_to(ROOT):raise ValueError('app binary must be inside the sandbox root')
+            install=Path(os.environ['LOCALAPPDATA'])/'Programs/Orbiters - N4N0/orbiters-desktop.exe'
+            if self.j.get('app_test_exe'):raise RuntimeError('App already replaced in this session')
+            appdir=Path(os.environ['APPDATA'])/'Orbiters/Desktop'
+            for path in [appdir/'settings.json',appdir/'vrchat-bridge.dat',Path(os.environ['USERPROFILE'])/'.codex/config.toml',Path(os.environ['USERPROFILE'])/'.claude.json']:
+                backup(self.j,path)
+            visible=any('--window' in p.cmdline() for p in psutil.process_iter(['name']) if p.info['name']=='orbiters-desktop.exe')
+            self.j.update(app_test_exe=str(exe),app_restore_exe=str(install),app_was_visible=visible)
+            atomic_json(JOURNAL,self.j)
+            subprocess.run([str(install),'--quit'],timeout=20,creationflags=subprocess.CREATE_NO_WINDOW,check=True)
+            env=os.environ.copy();env['ORBITERS_VR_SANDBOX_ROOT']=str(Path(__file__).parent.resolve());env.pop('ORBITERS_NO_NETWORK_LISTENING',None)
+            with (ROOT/'app-out.log').open('a') as out,(ROOT/'app-err.log').open('a') as err:
+                proc=subprocess.Popen([str(exe),'--hidden'],env=env,stdout=out,stderr=err,creationflags=subprocess.CREATE_NO_WINDOW,cwd=exe.parent)
+            return {'app_pid':proc.pid,'restore':str(install)}
+        if action=='vrchat':
+            if any(p['name'].lower()=='vrchat.exe' for p in processes()):raise RuntimeError('VRChat already running')
+            world,instance,user=args['world_id'],args['instance'],args['user_id']
+            if not re.fullmatch(r'wrld_[0-9a-f-]{36}',world) or not re.fullmatch(r'usr_[0-9a-f-]{36}',user):raise ValueError('invalid identity')
+            if not re.fullmatch(r'[0-9]+~private\('+re.escape(user)+r'\)~region\((eu|us|use|jp)\)',instance):raise ValueError('only a strict private instance of this account')
+            url=f'vrchat://launch?ref=orbiters.cc&id={world}:{instance}'
+            self.j['launch_link']=url
+            atomic_json(JOURNAL,self.j)
+            launch=STEAM/'steamapps/common/VRChat/launch.exe'
+            proc=subprocess.Popen([str(launch),url,'-screen-fullscreen','0','-screen-width','1280','-screen-height','720'],creationflags=subprocess.CREATE_NO_WINDOW)
+            self.record()
+            return {'launch_pid':proc.pid,'url':url,'mode':'SteamVR auto-detection; no --no-vr'}
+        if action in ('capture','overlays','devices','view'):
             command=[str(ROOT/'probe.exe'),action]
             if action=='capture':
                 prefix=Path(args['output_prefix']).resolve()
                 prefix.parent.mkdir(parents=True,exist_ok=True)
                 command.append(str(prefix))
             elif action=='overlays':
-                command.extend(args.get('overlay_keys',[]))
+                keys=args.get('overlay_keys')
+                if keys is None:
+                    source=(Path(__file__).parents[2]/'crates/orbiters-desktop/src/overlay/orbit/zones.rs').read_text(encoding='utf-8')
+                    enum=source.split('pub enum Zone {',1)[1].split('\n}',1)[0]
+                    keys=['cc.orbiters.desktop.orbit.'+name for name in re.findall(r'^\s+([A-Z]\w*),',enum,re.M)]
+                command.extend(keys)
             result=subprocess.run(command,capture_output=True,text=True,timeout=30,creationflags=subprocess.CREATE_NO_WINDOW)
             if result.returncode:raise RuntimeError(result.stderr)
-            return json.loads(result.stdout)
+            data=json.loads(result.stdout)
+            if action=='capture':return {'eyes':data,'paths':[str(prefix)+'-left.png',str(prefix)+'-right.png'],'timestamp':time.time()}
+            return data
         slot = {'head':0,'left':1,'right':2}[args.get('device','head')]
         with self.guard:
             d = self.shared.devices[slot]
@@ -225,10 +329,20 @@ class Session:
             if action == 'input':
                 names=['trigger','grip','stick_x','stick_y','trigger_touch','grip_touch','stick_click','stick_touch','a','a_touch','b','b_touch','x','x_touch','y','y_touch','menu','menu_touch','thumbrest','trigger_click']
                 index=names.index(args['input']);value=float(args['value'])
-                if slot==0 or not math.isfinite(value) or not (-1 if index in [2,3] else 0)<=value<=1:raise ValueError('invalid controller input')
+                duration=float(args.get('duration_s',0))
+                if slot==0 or not math.isfinite(value) or not (-1 if index in [2,3] else 0)<=value<=1 or not 0<=duration<=10:raise ValueError('invalid controller input/duration')
                 if kernel.WaitForSingleObject(self.mutex,1000)!=0:raise RuntimeError('IPC mutex timeout')
-                try:d.inputs[index]=value
+                try:
+                    d.inputs[index]=value
+                    if index==0:d.inputs[19]=float(value>=.55);d.inputs[4]=float(value>0)
                 finally:kernel.ReleaseMutex(self.mutex)
+                if duration:
+                    self.stop.wait(duration)
+                    if kernel.WaitForSingleObject(self.mutex,1000)!=0:raise RuntimeError('IPC mutex timeout')
+                    try:
+                        d.inputs[index]=0
+                        if index==0:d.inputs[19]=0;d.inputs[4]=0
+                    finally:kernel.ReleaseMutex(self.mutex)
                 return {'device':args['device'],'input':args['input'],'value':value}
         raise ValueError('unknown action')
 

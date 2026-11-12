@@ -35,7 +35,14 @@ int wmain(int argc,wchar_t **argv) {
     if(e!=vr::VRInitError_None){std::cerr<<"VR_Init: "<<vr::VR_GetVRInitErrorAsEnglishDescription(e)<<" ("<<e<<")\n";return 3;}
     try {
         std::wstring cmd=argv[1];
-        if(cmd==L"devices") {
+        if(cmd==L"view") {
+            vr::TrackedDevicePose_t poses[64];system->GetDeviceToAbsoluteTrackingPose(vr::TrackingUniverseStanding,0,poses,64);
+            std::cout<<"{\"head\":[";for(int a=0;a<3;++a)for(int b=0;b<4;++b){if(a||b)std::cout<<",";std::cout<<poses[0].mDeviceToAbsoluteTracking.m[a][b];}
+            std::cout<<"],\"eyes\":[";
+            for(int eye=0;eye<2;++eye){if(eye)std::cout<<",";float l,r,t,b;system->GetProjectionRaw((vr::EVREye)eye,&l,&r,&t,&b);auto m=system->GetEyeToHeadTransform((vr::EVREye)eye);
+                std::cout<<"{\"projection\":["<<l<<","<<r<<","<<t<<","<<b<<"],\"eye_to_head\":[";for(int a=0;a<3;++a)for(int b=0;b<4;++b){if(a||b)std::cout<<",";std::cout<<m.m[a][b];}std::cout<<"]}";
+            }std::cout<<"]}\n";
+        } else if(cmd==L"devices") {
             vr::TrackedDevicePose_t poses[64];system->GetDeviceToAbsoluteTrackingPose(vr::TrackingUniverseStanding,0,poses,64);
             std::cout<<"[";bool first=true;
             for(unsigned i=0;i<64;++i)if(system->IsTrackedDeviceConnected(i)){

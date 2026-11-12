@@ -101,7 +101,19 @@ def same_process(info):
 def atomic_json(path, value):
     tmp = path.with_suffix('.tmp')
     tmp.write_text(json.dumps(value, indent=2), encoding='utf-8')
-    os.replace(tmp, path)
+    try:
+        for attempt in range(20):
+            try:
+                os.replace(tmp, path)
+                return
+            except PermissionError as error:
+                # A concurrent journal reader can briefly deny DELETE sharing
+                # on Windows. Keep the previous recovery intact while retrying.
+                if getattr(error, 'winerror', None) not in (5, 32, 33) or attempt == 19:
+                    raise
+                time.sleep(.05)
+    finally:
+        tmp.unlink(missing_ok=True)
 
 def backup(journal, path, tree=False):
     entry = {'path': str(path), 'tree': tree, 'exists': path.exists()}

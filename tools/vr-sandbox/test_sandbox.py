@@ -7,6 +7,33 @@ import unittest
 from unittest.mock import patch
 import sandbox
 
+class JournalTests(unittest.TestCase):
+    def test_temporary_windows_reader_does_not_abort_the_session(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path=Path(folder)/'journal.json';path.write_text('{"session":"old"}')
+            replace=sandbox.os.replace
+            denied=PermissionError('journal reader holds Windows delete sharing');denied.winerror=5
+            attempts=[]
+            def sharing_then_replace(source,destination):
+                attempts.append(1)
+                self.assertEqual(json.loads(path.read_text()),{'session':'old'})
+                if len(attempts)<3:raise denied
+                replace(source,destination)
+            with patch.object(sandbox.os,'replace',side_effect=sharing_then_replace),patch.object(sandbox.time,'sleep'):
+                sandbox.atomic_json(path,{'session':'new'})
+            self.assertEqual(json.loads(path.read_text()),{'session':'new'})
+            self.assertEqual(len(attempts),3)
+
+    def test_persistent_windows_sharing_failure_preserves_previous_journal(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path=Path(folder)/'journal.json';original=b'{"session":"old"}';path.write_bytes(original)
+            denied=PermissionError('persistent sharing violation');denied.winerror=32
+            with patch.object(sandbox.os,'replace',side_effect=denied) as replace,patch.object(sandbox.time,'sleep'):
+                with self.assertRaises(PermissionError):sandbox.atomic_json(path,{'session':'new'})
+            self.assertEqual(replace.call_count,20)
+            self.assertEqual(path.read_bytes(),original)
+            self.assertFalse(path.with_suffix('.tmp').exists())
+
 class RotationTests(unittest.TestCase):
     def test_half_turn_uses_continuous_representation_without_changing_orientation(self):
         import math

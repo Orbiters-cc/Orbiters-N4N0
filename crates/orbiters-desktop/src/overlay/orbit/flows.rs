@@ -1736,7 +1736,7 @@ fn review_camera_web_frames_and_header_stop_repaint_on_the_worker() {
         let panel = person.panels.list.iter().find(|p| p.zone == Zone::CameraWeb).unwrap();
         assert_eq!(panel.canvas.direct_paints, 0);
         assert!(panel.displayed.as_ref().unwrap().camera.web.as_ref().unwrap().picture.is_some());
-        assert!(panel.out.chunks_exact(4).any(|p| p == color.to_array()), "camera web texture did not reach the shown picture");
+        assert!(panel.pixels().chunks_exact(4).any(|p| p == color.to_array()), "camera web texture did not reach the shown picture");
     }
     person.around = Some(Around::QuickMenu); person.turns(2);
     person.panels.open_sheet(Sheet::Settings, "", &person.snap);

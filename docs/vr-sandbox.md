@@ -94,3 +94,37 @@ Driver ABI: [Valve OpenVR v2.12.14](https://github.com/ValveSoftware/openvr/tree
 The vendored headers retain Valve's BSD license. The published
 [virtual display interface](https://github.com/ValveSoftware/virtual_display)
 documents the final composited display handoff.
+
+## Tested bootstrap and camera route
+
+The feedback directory contains the sandbox-ready handoff and inspected live
+captures. Before starting, wait for the existing SteamVR lock to be released.
+Use the installed bridge's existing authentication; do not print its credentials.
+After starting the supervisor, activate a debug executable copied inside the
+sandbox build root through the standalone controller:
+
+```python
+import sys
+sys.path.insert(0, 'tools/vr-sandbox')
+import sandbox
+sandbox.remote({'action':'app', 'app_exe':
+    'C:/Users/Enzo/.orbiters-build/vr-sandbox/orbiters-sandbox-desktop-next.exe'})
+from client import Bench
+b = Bench()
+b.call(action='vrchat', world_id='wrld_b6ad492e-2e9f-415b-ab5e-b237cb4a0221')
+b.call(action='camera', device='right')
+b.call(action='capture', output_prefix='C:/Users/Enzo/.orbiters-build/vr-sandbox/check')
+```
+
+`menu` accepts quick/wheel/close (close releases the held wheel button, not a
+Quick Menu toggle). `flick` accepts `stick:[x,y]` and recentres both axes atomically;
+Enzo's binding selects on stick release. `camera` holds B/Y, flicks Tools then
+Camera, and releases. Inspect the capture to confirm the actual UI state.
+`camera_fly` accepts `enabled:true/false`; verify the OSC readback and picture.
+`view` returns actual head, eye transforms and projection tangents. To grab the
+camera, set `input:grip,value:1`, move that controller with `pose`, then release
+grip with zero. These operate real VRChat; pose commands alone do not prove a grab.
+
+The app activation journals its settings, bridge/client configuration and installed
+service before replacement. Stop/restore returns the installed service. It is a
+development bootstrap operation, not a publicly exposed MCP action.

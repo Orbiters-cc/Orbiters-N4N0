@@ -1130,6 +1130,7 @@ pub struct Follow {
     scene_ages: [f32;5],
     scene_age_count: usize,
     scene_age_next: usize,
+    clock_pixels: Option<([f32;2],[f32;2])>,
 }
 
 #[derive(Clone,Copy,Debug)]
@@ -1366,8 +1367,15 @@ impl Follow {
     }
     /// Compare scene and overlay pixels from the SAME compositor image. Delaying
     /// by the scene's absolute age would count overlay submission latency twice.
-    pub fn composited_clock(&mut self,native_age:f32,record:[f32;2],size:[f32;2],mirror:Mirror,eye:&Matrix34,samples:&[(f32,[Option<Matrix34>;2])]) {
+    pub fn composited_clock(&mut self,native_age:f32,native:[f32;2],record:[f32;2],size:[f32;2],mirror:Mirror,eye:&Matrix34,samples:&[(f32,[Option<Matrix34>;2])]) {
         if !self.is_held(){return;}
+        // A stopped camera can still match moving poses left in the history.
+        // Repeated scene/overlay pixels contain no new timing information;
+        // treating them as new samples makes the learned delay drift at stops.
+        let previous=self.clock_pixels.replace((native,record));
+        let Some((was_native,was_record))=previous else{return;};
+        if (native[0]-was_native[0]).hypot(native[1]-was_native[1])<0.5
+            || (record[0]-was_record[0]).hypot(record[1]-was_record[1])<0.5 {return;}
         let Some(anchor)=self.record_anchor else{return;};let inverse=undone(eye);
         let mut candidates=Vec::new();
         for &(age,hands) in samples {
@@ -1790,8 +1798,14 @@ mod tests {
         assert!((follow.record_anchor.unwrap()[0]+280.).abs()<0.1);
         let still_samples=[(0.2,samples[2].1),(0.,samples[2].1)];
         assert!(follow.record_still(&still_samples));assert!(!follow.record_still(&samples));
-        follow.composited_clock(age,record,size,mirror,&eye,&samples);
+        follow.clock_pixels=Some(([native.x[0]-2.,native.x[1]],[record[0]-2.,record[1]]));
+        follow.composited_clock(age,native.x,record,size,mirror,&eye,&samples);
         assert!((follow.scene_age().unwrap()-0.01).abs()<1e-4,"one quarter of the observed 40ms relative error, not absolute scene age");
+        let delay=follow.scene_age();
+        for stopped_age in [0.08,0.1,0.15,0.19] {
+            follow.composited_clock(stopped_age,native.x,record,size,mirror,&eye,&samples);
+        }
+        assert_eq!(follow.scene_age(),delay,"stopped pixels must not invent extra delay from old moving history");
     }
 
     #[test]

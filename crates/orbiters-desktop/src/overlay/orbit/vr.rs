@@ -792,7 +792,7 @@ impl OrbitVr {
                 let matching=self.camera_follow.match_image_hands(&seen.found,seen.size,mirror,&image_eye,&samples);
                 let captured_hands=matching.map(|(_,hands)|hands).unwrap_or(captured_hands);
                 if let Some((age,record))=matching.map(|(age,_)|age).zip(seen.record) {
-                    self.camera_follow.composited_clock(age,record,seen.size,mirror,&image_eye,&samples);
+                    self.camera_follow.composited_clock(age,seen.found.x,record,seen.size,mirror,&image_eye,&samples);
                 }
                 if cfg!(debug_assertions) && std::env::var_os("ORBITERS_VR_SANDBOX_ROOT").is_some() {
                     super::super::vr_log::line(&format!("camera compositor clock: ns={}, record {:?}, native_age {:?}, calibrated {}, delay {:?}",orbiters_core::clock::now_ns(),seen.record,matching.map(|(age,_)|age),self.camera_follow.record_ready(),self.camera_follow.scene_age())); // i18n: not shown (sandbox diagnostics)

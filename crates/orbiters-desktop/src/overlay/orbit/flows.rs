@@ -1868,3 +1868,26 @@ fn review_accepted_worker_pictures_consume_the_opening_flag_and_keep_the_atlas()
     person.panels.paint_all_again();
     assert_eq!(person.panels.list.iter().find(|p| p.zone == Zone::SheetBack).unwrap().canvas.id, atlas, "an already painted header must keep its atlas through a color repaint");
 }
+
+#[test]
+fn review_cached_header_pixels_do_not_claim_a_new_context_has_fonts() {
+    let mut person = Person::new(); person.panels.stage.async_pages = true; person.around = Some(Around::QuickMenu); person.turns(3);
+    person.panels.open_sheet(Sheet::Settings, "", &person.snap);
+    person.turns_until("original header", |p| p.panels.takeover.as_ref().is_some_and(|p| p.painted) && !p.panels.stage.painter.busy());
+    let old_id = person.panels.stage.cache.iter().find(|f| f.sheet == Sheet::Settings).unwrap().header_spec.as_ref().unwrap().canvas_id;
+    person.panels.close_sheet();
+    person.turns_until("closed header", |p| !p.panels.list.iter().any(|p| p.zone == Zone::SheetBack) && !p.panels.stage.painter.busy());
+    person.panels.rested.retain(|p| p.panel.zone != Zone::SheetBack);
+    let (at, go) = person.panels.stage.painter.hold_next();
+    person.panels.open_sheet(Sheet::Settings, "", &person.snap); person.turn();
+    at.recv_timeout(Duration::from_secs(10)).unwrap();
+    let header = person.panels.list.iter().find(|p| p.zone == Zone::SheetBack).unwrap();
+    let id = header.canvas.id;
+    assert_ne!(id, old_id);
+    assert!(header.painted, "the old valid picture is immediately visible");
+    assert!(!header.canvas.ran, "cached pixels do not initialize a different context's fonts");
+    assert_eq!(header.canvas.atlas_bytes(), 0);
+    go.send(()).unwrap();
+    person.turns_until("new header fonts", |p| p.panels.list.iter().find(|p| p.zone == Zone::SheetBack).is_some_and(|p| p.canvas.ran) && !p.panels.stage.painter.busy());
+    assert!(person.panels.list.iter().find(|p| p.zone == Zone::SheetBack).unwrap().canvas.atlas_bytes() > 0);
+}

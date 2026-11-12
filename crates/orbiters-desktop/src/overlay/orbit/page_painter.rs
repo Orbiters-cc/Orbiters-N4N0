@@ -199,6 +199,11 @@ impl Engine {
     }
 }
 impl Painter {
+    #[cfg(test)]
+    pub(super) fn hold_next(&self) -> (std::sync::mpsc::Receiver<()>, std::sync::mpsc::Sender<()>) {
+        let (ready, at) = std::sync::mpsc::channel(); let (go, wait) = std::sync::mpsc::channel();
+        self.shared.0.lock().unwrap().gate = Some((ready, wait)); (at, go)
+    }
     pub fn new(px: [u32; 2]) -> Self { Self::with_context(px, Canvas::new(1, 1).ctx().clone()) }
     pub fn with_context(px: [u32; 2], ctx: egui::Context) -> Self {
         let mut page = Canvas::zoomed(px[0], px[1], px[0] as f32 / orbiters_n4n0_core::menu::layout::WIDTH as f32).in_orbit_look();

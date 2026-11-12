@@ -178,6 +178,7 @@ impl Panel {
     /// Its interface made anew, as a new part's: its fonts' atlas from nothing, so that its text is drawn from the same places in it as a new part's, to the last level of
     /// grey. Its textures were the old interface's.
     fn renew(&mut self) {
+        self.token = Canvas::next_id();
         self.canvas.renew();
         self.pictures.clear();
     }
@@ -3135,7 +3136,7 @@ impl Panels {
         back.shown_pixels = Some(header.pixels.clone());
         back.items.clone_from(&header.items);
         back.hover = back.pointer.and_then(|p| panels::hit(&back.items, p)); back.pressed = pressed.and_then(|a| back.items.iter().position(|i| i.action == a));
-        back.canvas.ran = true;
+        back.canvas.ran |= frame.header_spec.as_ref().is_some_and(|spec| spec.canvas_id == back.canvas.id);
         back.painted = true; back.again = false; back.dirty = header.hover != back.hover || header.pressed != back.pressed;
         back.displayed = Some(frame.facts.clone());
         super::record_phase(3, at.elapsed());

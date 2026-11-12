@@ -1258,6 +1258,12 @@ impl Follow {
             }}
         }
     }
+    /// Unknown input is not a release event. It cannot initiate a hold;
+    /// controller tracking loss still ends an existing hold in step().
+    pub fn grip_samples(&self,samples:[Option<bool>;2]) -> [bool;2] {
+        std::array::from_fn(|i|samples[i].unwrap_or(self.held_hand()==Some(i)))
+    }
+
     /// Hand motion predicts a search region, not a visible attachment. The
     /// reader must still find the actual glyph pixels before a grab is bound.
     pub fn search_hint(&self,size:[f32;2],mirror:Mirror,eye:&Matrix34,hands:[Option<Matrix34>;2]) -> Option<Found> {
@@ -1988,6 +1994,21 @@ mod tests {
                 assert!((got.m[0][3]-0.112).abs()<0.001);
             }
         }
+    }
+
+    #[test]
+    fn missing_input_does_not_release_a_verified_camera_or_initiate_a_grab() {
+        let mut f=Follow::default();assert_eq!(f.grip_samples([None;2]),[false;2]);
+        let mut relation=STILL;relation.m[1][3]=0.3;
+        for i in 0..4 {let mut hand=STILL;hand.m[0][3]=i as f32*0.02;f.observe_grab(then(&hand,&relation),0.001,[None,Some(hand)],[false,true]);}
+        assert_eq!(f.held_hand(),Some(1));
+        let mut hand=STILL;hand.m[0][3]=0.3;
+        let grips=f.grip_samples([None;2]);assert_eq!(grips,[false,true]);
+        let held=f.step(1./72.,[None,Some(hand)],grips,[None;2]).unwrap().0;
+        assert!(apart(&held,&then(&hand,&relation))<0.001);
+        let released=f.grip_samples([Some(false);2]);
+        let dropped=f.step(1./72.,[None,Some(hand)],released,[None;2]).unwrap().0;
+        assert!(!f.is_held());assert!(apart(&held,&dropped)<0.001);
     }
 
     #[test]

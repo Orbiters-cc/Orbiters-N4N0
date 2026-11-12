@@ -731,7 +731,8 @@ impl OrbitVr {
                 self.camera_heads.pop_front();
             }
         }
-        let observed_grips=if input_read {actions.grabs(steamvr)} else {[false;2]};
+        let raw_grips=if input_read {actions.grab_states(steamvr)} else {[None;2]};
+        let observed_grips=self.camera_follow.grip_samples(raw_grips);
         if let Some((baseline,size,mirror,eye))=self.camera_exclusion.first() {
             self.camera_follow.begin_image_grab(baseline,*size,*mirror,eye,hands,observed_grips);
         }
@@ -801,7 +802,7 @@ impl OrbitVr {
                 } else { self.camera_follow.seen_in_hands(frame,unit,captured_hands) };
                 self.camera_panel_seen_ns = Some(orbiters_core::clock::now_ns());
                 self.camera_seen = Some(now);
-                let observed_grips=if input_read {actions.grabs(steamvr)} else {[false;2]};
+
                 if self.camera_stereo_recent() {
                     if let Some(hand)=self.camera_follow.observe_grab(frame,unit,captured_hands,observed_grips) {
                         super::super::vr_log::line(&format!("camera grab verified by rigid motion: hand {hand}, grips {observed_grips:?}")); // i18n: not shown (diagnostics)
@@ -818,8 +819,15 @@ impl OrbitVr {
 
         // A grip near a viewfinder is not VRChat's grab acknowledgement. Only
         // observed rigid motion binds a hand; thereafter raw grips release it.
-        let grips = if input_read && self.camera_follow.is_held() { actions.grabs(steamvr) } else { [false; 2] };
+        let grips = if self.camera_follow.is_held() { observed_grips } else { [false; 2] };
+        let was_held=self.camera_follow.held_hand();
         let mut placed = self.camera_follow.step(dt, hands, grips, [None;2]);
+        if was_held!=self.camera_follow.held_hand() {
+            super::super::vr_log::line(&format!("camera hold changed: {:?} to {:?}, input_read {}, raw {:?}, hands valid {:?}",was_held,self.camera_follow.held_hand(),input_read,raw_grips,hands.map(|h|h.is_some()))); // i18n: not shown (diagnostics)
+        }
+        if self.camera_input_logged.due(Duration::from_secs(1)) {
+            super::super::vr_log::line(&format!("camera follow: held {:?}, input_read {}, raw {:?}, grips {:?}, looks {}, measured {}, placed {:?}",self.camera_follow.held_hand(),input_read,raw_grips,grips,self.camera_looks,self.camera_scale_measured(),placed)); // i18n: not shown (diagnostics)
+        }
         // While a hand has it, it is known, seen or not.
         if self.camera_follow.is_held() {
             self.camera_seen = Some(now);
@@ -995,6 +1003,7 @@ pub struct OrbitVr {
     osc_toggle: Option<(usize, Instant)>,
     camera_seen: Option<Instant>,
     camera_looks: u32,
+    camera_input_logged:super::super::vr_log::Every,
     /// The head lately, for where it was when a look's frame was taken.
     camera_heads: std::collections::VecDeque<(Instant, Matrix34,[Option<Matrix34>;2])>,
     trigger_was: [bool; 2],
@@ -1061,6 +1070,7 @@ impl OrbitVr {
             osc_toggle: None,
             camera_seen: None,
             camera_looks: 0,
+            camera_input_logged:Default::default(),
             camera_heads: Default::default(),
             trigger_was: [true; 2],
             pointing_since: now,

@@ -373,17 +373,120 @@ fn look(light: &Light, needs: usize) -> Option<Found> {
                     continue;
                 }
                 let fitted = landmark_fit(&reading, &all, x.middle, c.middle);
-                if lean.abs() > LEANS_AT_MOST.to_radians() && fitted.is_none() { continue; }
                 let (perspective,residual_px,landmarks) = fitted.map_or((None,f32::INFINITY,None), |(h,e,p)| (Some(h),e,Some(p)));
                 let score = looks + support as f32 * 0.2 - (x_share - X_IS).abs() * 3.0 - (c_share - CHEVRON_IS).abs() * 2.0;
                 if best.as_ref().is_none_or(|b| score > b.0) {
-                    let found = Found { perspective, residual_px, landmarks, x: x.middle, chevron: c.middle, middle: reading.middle, right: reading.right, down: reading.down, across: reading.across, tall: reading.tall };
+                    let mut found = Found { perspective, residual_px, landmarks, x: x.middle, chevron: c.middle, middle: reading.middle, right: reading.right, down: reading.down, across: reading.across, tall: reading.tall };
+                    if lean.abs()>LEANS_AT_MOST.to_radians() && fitted.is_none() {
+                        let Some((h,error,points))=outline_fit(light,&found) else {continue;};
+                        found.perspective=Some(h);found.residual_px=error;found.landmarks=Some(points);
+                    }
                     best = Some((score, found));
                 }
             }
         }
     }
-    best.map(|b| b.1)
+    best.map(|(_, mut found)| {
+        // Native Photo/Stream rows have different icon centres. Locate the physical
+        // viewfinder border independently; the glyph pair identifies it, not its pose.
+        if let Some((h, error, points)) = outline_fit(light, &found) {
+            found.perspective = Some(h);
+            found.residual_px = error;
+            found.landmarks = Some(points);
+        }
+        found
+    })
+}
+
+/// Native viewfinder is 16:9. PANEL_SIZE describes the older interior glyph grid,
+/// not the outer border. Stereo measurements of the sandbox give 1.775:1.
+const OUTLINE_HALF_HEIGHT: f32 = 205.0 * 9.0 / 16.0;
+
+fn outline_fit(light: &Light, f: &Found) -> Option<([[f32;3];3],f32,(usize,[([f32;2],[f32;2]);10]))> {
+    let sample = |p:[f32;2]| -> Option<f32> {
+        let (x,y)=(p[0].round() as isize,p[1].round() as isize);
+        if x<0 || y<0 || x>=light.width as isize || y>=light.height as isize { return None; }
+        Some(light.px[y as usize*light.width+x as usize] as f32)
+    };
+    let scale=f.across.max(f.tall);
+    let contrast=|p:[f32;2],n:[f32;2]| -> f32 {
+        let Some(dark)=sample(p).filter(|v|*v<35.) else {return 0.;};
+        let a=sample([p[0]+n[0]*4.*scale,p[1]+n[1]*4.*scale]);
+        let b=sample([p[0]-n[0]*4.*scale,p[1]-n[1]*4.*scale]);
+        a.zip(b).map_or(0.,|(a,b)| ((a+b)*0.5-dark-8.).clamp(0.,40.))
+    };
+    let seed=|x:f32,y:f32| [f.middle[0]+f.right[0]*x*f.across+f.down[0]*y*f.tall,
+        f.middle[1]+f.right[1]*x*f.across+f.down[1]*y*f.tall];
+    let seeds=[seed(-205.,-110.),seed(205.,-110.),seed(205.,110.),seed(-205.,110.)];
+    let mut lines=[([0.;2],[0.;2]);4];
+    let mut uncertainty=0.0f32;
+    for i in 0..4 {
+        let (a,b)=(seeds[i],seeds[(i+1)%4]);
+        let length=(b[0]-a[0]).hypot(b[1]-a[1]);
+        let middle=[(a[0]+b[0])*0.5,(a[1]+b[1])*0.5];
+        let direction=[(b[0]-a[0])/length,(b[1]-a[1])/length];
+        let mut best=(0.,middle,direction);
+        // A glyph similarity seed can be very far from the right border under
+        // perspective. Search complete straight edges, rather than nearest blobs.
+        for angle in 0..33 {
+            let (s,c)=(-0.22+0.44*angle as f32/32.).sin_cos();
+            let u=[direction[0]*c-direction[1]*s,direction[0]*s+direction[1]*c];
+            let n=[-u[1],u[0]];
+            let reach=100.*scale;
+            for offset in 0..=(reach*2./0.8) as usize {
+                let offset=-reach+offset as f32*0.8;
+                let p=[middle[0]+offset*n[0],middle[1]+offset*n[1]];
+                let score=(0..33).map(|k| {
+                    let t=(-0.35+0.7*k as f32/32.)*length;
+                    contrast([p[0]+t*u[0],p[1]+t*u[1]],n)
+                }).sum::<f32>();
+                if score>best.0 {best=(score,p,u);}
+            }
+        }
+        if best.0<33.*10. {return None;}
+        let (_,p,u)=best;
+        let n=[-u[1],u[0]];
+        // Refit the selected dark stroke from distributed local samples. This
+        // removes angle-grid quantization without relaxing reprojection bounds.
+        let mut samples=Vec::new();
+        for k in 0..49 {
+            let t=(-0.35+0.7*k as f32/48.)*length;
+            let base=[p[0]+t*u[0],p[1]+t*u[1]];
+            let mut best=(0.,0.);
+            for j in -12..=12 {
+                let d=j as f32*0.25;
+                let score=contrast([base[0]+d*n[0],base[1]+d*n[1]],n);
+                if score>best.0 {best=(score,d);}
+            }
+            if best.0>10. {samples.push((t,best.1));}
+        }
+        if samples.len()<25 {return None;}
+        let count=samples.len() as f32;
+        let (mt,md)=(samples.iter().map(|p|p.0).sum::<f32>()/count,samples.iter().map(|p|p.1).sum::<f32>()/count);
+        let slope=samples.iter().map(|&(t,d)|(t-mt)*(d-md)).sum::<f32>()/samples.iter().map(|&(t,_)|(t-mt).powi(2)).sum::<f32>();
+        let offset=md-slope*mt;
+        uncertainty=uncertainty.max((samples.iter().map(|&(t,d)|(d-offset-slope*t).powi(2)).sum::<f32>()/count).sqrt());
+        let norm=(1.+slope*slope).sqrt();
+        lines[i]=([p[0]+offset*n[0],p[1]+offset*n[1]],[(u[0]+slope*n[0])/norm,(u[1]+slope*n[1])/norm]);
+    }
+    let model=[[-205.,-OUTLINE_HALF_HEIGHT],[205.,-OUTLINE_HALF_HEIGHT],[205.,OUTLINE_HALF_HEIGHT],[-205.,OUTLINE_HALF_HEIGHT]];
+    let mut points=[([0.;2],[0.;2]);10];
+    for i in 0..4 {
+        let (p,u)=lines[(i+3)%4];let (q,v)=lines[i];
+        let cross=|a:[f32;2],b:[f32;2]|a[0]*b[1]-a[1]*b[0];
+        let determinant=cross(u,v);
+        if determinant.abs()<0.2 {return None;}
+        let t=cross([q[0]-p[0],q[1]-p[1]],v)/determinant;
+        points[i]=(model[i],[p[0]+t*u[0],p[1]+t*u[1]]);
+    }
+    let h=fit(&points[..4])?;
+    // Glyph coordinates are an identity check with icon-sized tolerance, not
+    // exact correspondences pretending that a raster glyph centroid is fixed.
+    for (p,q) in [(PANEL_X,f.x),(PANEL_CHEVRON,f.chevron)] {
+        let r=project(h,p);
+        if (r[0]-q[0]).hypot(r[1]-q[1])>16.*scale {return None;}
+    }
+    (uncertainty<=2.5).then_some((h,uncertainty.max(0.5),(4,points)))
 }
 
 /// The panel in a picture of 4-byte pixels, whichever way round its colours are, or `None`.
@@ -394,7 +497,9 @@ fn project(h: [[f32; 3]; 3], p: [f32; 2]) -> [f32; 2] {
 
 /// Least squares homography from independently located, spread landmarks. Reprojection is in pixels.
 pub fn fit(points: &[([f32; 2], [f32; 2])]) -> Option<[[f32; 3]; 3]> {
-    if points.len() < 5 { return None; }
+    // Four independently measured, non-collinear corners determine a plane.
+    // Degenerate sets are still rejected by the pivot and rigid reprojection gates.
+    if points.len() < 4 { return None; }
     let mut a = [[0.0f64; 9]; 8];
     for &(p, q) in points {
         let (x, y, u, v) = (p[0] as f64, p[1] as f64, q[0] as f64, q[1] as f64);
@@ -1679,13 +1784,23 @@ mod sandbox_regression {
     #[test]
     fn live_photo_grab_and_stream_have_a_measured_plane_in_both_eyes() {
         let root=std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/overlay/orbit/testdata_camera/sandbox");
+        let mirrors=[Mirror::whole_eye([-1.376,0.839,-1.376,0.9]),Mirror::whole_eye([-0.839,1.376,-1.376,0.9])];
+        let identity=Matrix34 {m:[[1.,0.,0.,0.],[0.,1.,0.,0.],[0.,0.,1.,0.]]};
+        let mut eyes=[identity;2];eyes[0].m[0][3]=-0.032;eyes[1].m[0][3]=0.032;
         for mode in ["camera-open-wheel","camera-grab-move","camera-stream-baseline"] {
-            for eye in ["left","right"] {
+            let mut pair=Vec::new();
+            for (index,eye) in ["left","right"].into_iter().enumerate() {
                 let name=format!("{mode}-{eye}.png");
                 let image=image::open(root.join(&name)).unwrap().to_rgba8();
                 let found=find(image.as_raw(),image.width() as usize,image.height() as usize,image.width() as usize*4).expect(&name);
                 assert!(found.perspective.is_some(),"{name}: glyphs found but no usable camera plane: {found:?}");
+                let found=found.shifted([if index==0 {650.} else {180.},650.]);
+                assert!(perspective_pose(&found,[1620.,1800.],&mirrors[index],&eyes[index],0.3).is_some(),"{name}: measured outline must pass unchanged rigid reprojection: {found:?}");
+                pair.push(found);
             }
+            let (_,unit,error)=stereo_pose(&pair[0],&pair[1],[[1620.,1800.];2],mirrors,eyes,&identity).unwrap_or_else(||panic!("{mode}: native stereo must recover a metric plane"));
+            assert!((0.27..0.32).contains(&(unit*PANEL_SIZE[0])),"{mode}: wrong metric width {}",unit*PANEL_SIZE[0]);
+            assert!(error<=2.5,"unchanged stereo reprojection gate");
         }
     }
 }

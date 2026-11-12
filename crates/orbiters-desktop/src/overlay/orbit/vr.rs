@@ -664,7 +664,7 @@ fn settings_walk_left(snap: &Snapshot) -> bool {
 
 /// How long the tiles stay where they are with no look seeing the panel (a hand over it, a white world behind its X, a head turned away): let go it stays still in the room, so what is known of it
 /// stays true for long. And how many looks it takes to show them at first. They go at once when VRChat says its camera closed.
-const CAMERA_LOST_AFTER: Duration = Duration::from_secs(20);
+const CAMERA_LOST_AFTER: Duration = Duration::from_millis(500);
 /// How far within the eye's view the tiles must lie, of its width: its very edge is not seen through the lens.
 const CAMERA_VIEW_MARGIN: f32 = 0.1;
 const CAMERA_LOOKS_TO_SHOW: u32 = 1;
@@ -722,18 +722,8 @@ impl OrbitVr {
         let device = |role| steamvr.controller_index(role).filter(|&d| (d as usize) < MAX_DEVICES && poses[d as usize].pose_is_valid).map(|d| (d,poses[d as usize].device_to_absolute));
         let hand_devices=[device(ControllerRole::LeftHand),device(ControllerRole::RightHand)];
         let hands=hand_devices.map(|hand|hand.map(|(_,pose)|pose));
-        if self.camera_seen.is_none() && poses[0].pose_is_valid {
-            {
-                let (frame,unit,side,clearance,reused)=self.camera_reopen.initial(&poses[0].device_to_absolute,hand_devices,self.tune.camera_panel_m);
-                self.camera_follow.clear();
-                self.camera_follow.seen(frame,unit);
-                self.camera_side=side;
-                self.camera_clearance=clearance;
-                self.camera_measured_width=reused.then_some(unit*camera_track::PANEL_SIZE[0]);
-                self.camera_seen=Some(now);
-                self.camera_looks=CAMERA_LOOKS_TO_SHOW;
-            }
-        }
+        // Opening is a state signal, not a panel transform. Never submit a cached
+        // or head-relative guess while waiting for an actual camera observation.
         if poses[0].pose_is_valid {
             // Where the head will be `prediction` from now, which is when this pose is for.
             self.camera_heads.push_back((now + Duration::from_secs_f32(prediction.max(0.0)), poses[0].device_to_absolute));
@@ -833,7 +823,7 @@ impl OrbitVr {
         }
         // Before any observation, the owner-approved initial estimate stays explicitly provisional.
         // With observations, validate the displayed hull in every available eye. Mono remains provisional.
-        if !self.camera_exclusion.is_empty() {
+        if !self.camera_follow.is_held() && !self.camera_exclusion.is_empty() {
             let clear = |frame: &Matrix34, unit| {
                 if self.camera_exclusion.len()==2 { camera_track::binocular_clear(&self.camera_exclusion,frame,unit,self.camera_side,self.camera_clearance) }
                 else { self.camera_exclusion.iter().all(|(found,size,mirror,eye)|camera_track::column_clear(found,*size,mirror,eye,frame,unit,self.camera_side,self.camera_clearance)) }

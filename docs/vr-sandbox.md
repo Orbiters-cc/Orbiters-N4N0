@@ -193,3 +193,5 @@ The journalled sandbox settings disable `dashboard.enableDashboard` for the
 owned test session. SteamVR otherwise sometimes opens its dashboard over VRChat
 and intercepts the camera wheel. The original settings bytes, including the
 owner's dashboard preference, are restored with the other journal entries.
+
+Recovery ignores processes confirmed dead by zombie status, zero threads or zero handles; live foreign processes still prevent changes. App activation allows 90 seconds for the bounded installed-service shutdown and launch sequence.

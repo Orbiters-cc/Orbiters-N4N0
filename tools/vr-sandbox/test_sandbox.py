@@ -45,6 +45,16 @@ class RotationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,'zero quaternion'):sandbox.unit_rotation([0,0,0,0])
 
 class ProcessTests(unittest.TestCase):
+    def test_dead_processes_do_not_refuse_new_sessions(self):
+        from unittest.mock import Mock
+        for threads,handles in [(0,4),(2,0)]:
+            p=Mock();p.num_threads.return_value=threads;p.num_handles.return_value=handles
+            self.assertTrue(sandbox.process_dead(p))
+            with patch.object(sandbox,'process_names',return_value=[(123,'vrwebhelper.exe')]),patch.object(sandbox.psutil,'Process',return_value=p):
+                self.assertEqual(sandbox.processes(),[])
+        p=Mock();p.status.side_effect=sandbox.psutil.NoSuchProcess(123)
+        self.assertTrue(sandbox.process_dead(p))
+
     def test_only_runtime_names_are_queried_for_creation_identity(self):
         with patch.object(sandbox,'process_names',return_value=[(1,'unrelated.exe'),(2,'VRChat.exe'),(3,'vrserver.exe')]),patch.object(sandbox.psutil,'Process') as process:
             process.return_value.create_time.return_value=123.5

@@ -83,18 +83,26 @@ def process_names():
                 return result
     finally:kernel.CloseHandle(handle)
 
+def process_dead(p):
+    try:
+        return p.status() == psutil.STATUS_ZOMBIE or p.num_threads() == 0 or p.num_handles() == 0
+    except psutil.NoSuchProcess:
+        return True
+
 def processes():
     result=[]
     for pid,name in process_names():
         if name.lower() in NAMES:
-            try:result.append({'pid':pid,'name':name,'create_time':psutil.Process(pid).create_time()})
+            try:
+                p=psutil.Process(pid)
+                if not process_dead(p):result.append({'pid':pid,'name':name,'create_time':p.create_time()})
             except psutil.NoSuchProcess:pass
     return result
 
 def same_process(info):
     try:
         p = psutil.Process(info['pid'])
-        return p if p.create_time() == info['create_time'] else None
+        return p if p.create_time() == info['create_time'] and not process_dead(p) else None
     except psutil.NoSuchProcess:
         return None
 
@@ -191,6 +199,8 @@ def restore_contents(j):
     _,remaining=psutil.wait_procs(terminating,timeout=10)
     still_running={(p['pid'],p['create_time']) for p in processes()}
     remaining=[p for p in remaining if (p.pid,p.create_time()) in still_running]
+    warnings=[p.pid for p in remaining if process_dead(p)]
+    remaining=[p for p in remaining if not process_dead(p)]
     if remaining:
         raise RuntimeError('Owned processes did not exit after terminate: '+json.dumps([p.pid for p in remaining]))
     if processes():
@@ -218,7 +228,7 @@ def restore_contents(j):
     # Do not release somebody else's lock.
     if LOCK.exists() and json.loads(LOCK.read_text())['session'] == j['session']:
         LOCK.unlink()
-    return {'restored': True, 'verified_files': len(j['files'])}
+    return {'restored': True, 'verified_files': len(j['files']), 'leftover_dead_pids': warnings}
 
 class Session:
     def __init__(self):
@@ -493,7 +503,7 @@ def serve():
 def remote(args,journal=None):
     j=json.loads(JOURNAL.read_text()) if journal is None else journal
     req=urllib.request.Request(f'http://127.0.0.1:{PORT}/',data=json.dumps(args).encode(),headers={'Authorization':'Bearer '+j['token'],'Content-Type':'application/json'})
-    with urllib.request.urlopen(req,timeout=40) as r:return json.load(r)
+    with urllib.request.urlopen(req,timeout=90 if args.get('action')=='app' else 40) as r:return json.load(r)
 
 if __name__=='__main__':
     cmd=sys.argv[1]

@@ -581,6 +581,83 @@ fn landmark_fit(r: &Reading, blobs: &[Blob], x: [f32;2], chevron: [f32;2]) -> Op
     Some((h,residual,(points.len(),landmarks)))
 }
 
+#[derive(Clone,Copy)]
+struct PlaneObservation { model:[f32;2],pixel:[f32;2],inverse_eye:Matrix34,mirror:Mirror,size:[f32;2] }
+
+fn observations(found:&Found,size:[f32;2],mirror:Mirror,eye:&Matrix34) -> Vec<PlaneObservation> {
+    let points=if let Some((count,points))=found.landmarks {points.into_iter().take(count).collect()} else {
+        [[-205.,-110.],[205.,-110.],[205.,110.],[-205.,110.]].into_iter().map(|p|(p,found.at(p))).collect()
+    };
+    points.into_iter().map(|(model,pixel)|PlaneObservation {model,pixel,inverse_eye:undone(eye),mirror,size}).collect()
+}
+
+/// Optimize the rigid plane in image space. Triangulation is an initializer:
+/// averaging noisy 3D corners does not minimize the observed pixel error (depth
+/// noise grows quadratically with range). Rotation stays on SO(3), never shear.
+fn refine_plane(mut frame:Matrix34,mut unit:f32,observed:&[PlaneObservation],metric:bool) -> Option<(Matrix34,f32)> {
+    let residual=|frame:&Matrix34,unit:f32| -> Option<Vec<f64>> {
+        let mut out=Vec::with_capacity(observed.len()*2);
+        for o in observed {
+            let p:[f64;3]=std::array::from_fn(|i|frame.m[i][3] as f64+frame.m[i][0] as f64*o.model[0] as f64*unit as f64-frame.m[i][1] as f64*o.model[1] as f64*unit as f64);
+            let v:[f64;3]=std::array::from_fn(|i|o.inverse_eye.m[i][3] as f64+(0..3).map(|j|o.inverse_eye.m[i][j] as f64*p[j]).sum::<f64>());
+            if v[2]>=-1e-5 {return None;}
+            let tangent=[v[0]/-v[2],-v[1]/-v[2]];
+            for k in 0..2 {out.push((tangent[k]-o.mirror.from[k] as f64)/o.mirror.spans[k] as f64*o.size[k] as f64-o.pixel[k] as f64);}
+        }
+        out.iter().all(|v|v.is_finite()).then_some(out)
+    };
+    let advance=|frame:&Matrix34,unit:f32,delta:[f64;7],amount:f64| {
+        let rotation=[delta[3]*amount,delta[4]*amount,delta[5]*amount];
+        let angle=rotation.iter().map(|v|v*v).sum::<f64>().sqrt();
+        let mut next=*frame;
+        if angle>1e-12 {
+            let axis=rotation.map(|v|v/angle);let (s,c)=angle.sin_cos();
+            for k in 0..3 {
+                let v=frame.m.map(|r|r[k] as f64);let dot=(0..3).map(|i|axis[i]*v[i]).sum::<f64>();
+                let cross=[axis[1]*v[2]-axis[2]*v[1],axis[2]*v[0]-axis[0]*v[2],axis[0]*v[1]-axis[1]*v[0]];
+                for i in 0..3 {next.m[i][k]=(v[i]*c+cross[i]*s+axis[i]*dot*(1.-c)) as f32;}
+            }
+        }
+        for i in 0..3 {next.m[i][3]=(frame.m[i][3] as f64+delta[i]*amount) as f32;}
+        (next,(unit as f64*(delta[6]*amount).exp()) as f32)
+    };
+    let n=if metric {7} else {6};let mut damping=1e-4f64;
+    let mut r=residual(&frame,unit)?;
+    for _ in 0..24 {
+        let cost=r.iter().map(|v|v*v).sum::<f64>();
+        if cost<1e-10 {break;}
+        let mut jacobian:[Vec<f64>;7]=std::array::from_fn(|_|Vec::new());
+        for k in 0..n {
+            let epsilon=if k<3 {1e-4} else {1e-3};let mut d=[0.;7];d[k]=epsilon;
+            let (candidate,scale)=advance(&frame,unit,d,1.);
+            jacobian[k]=residual(&candidate,scale)?.iter().zip(&r).map(|(a,b)|(a-b)/epsilon).collect();
+        }
+        let mut a=[[0.0f64;8];7];
+        for i in 0..n {
+            for j in 0..n {a[i][j]=jacobian[i].iter().zip(&jacobian[j]).map(|(a,b)|a*b).sum();}
+            a[i][n]=-jacobian[i].iter().zip(&r).map(|(a,b)|a*b).sum::<f64>();
+            a[i][i]+=damping*(a[i][i]+1.);
+        }
+        for k in 0..n {
+            let pivot=(k..n).max_by(|&i,&j|a[i][k].abs().total_cmp(&a[j][k].abs()))?;a.swap(k,pivot);
+            if a[k][k].abs()<1e-12 {return None;}
+            let d=a[k][k];for j in k..=n {a[k][j]/=d;}
+            for i in 0..n {if i!=k {let d=a[i][k];for j in k..=n {a[i][j]-=d*a[k][j];}}}
+        }
+        let delta=std::array::from_fn(|i|if i<n {a[i][n]} else {0.});
+        let mut accepted=false;
+        for amount in [1.,0.5,0.25,0.125] {
+            let (candidate,scale)=advance(&frame,unit,delta,amount);
+            if !scale.is_finite() || scale<=0. {continue;}
+            if let Some(next)=residual(&candidate,scale).filter(|v|v.iter().map(|v|v*v).sum::<f64>()<cost) {
+                frame=candidate;unit=scale;r=next;damping=(damping*0.3).max(1e-8);accepted=true;break;
+            }
+        }
+        if !accepted {damping*=10.;if damping>1e8 {break;}}
+    }
+    Some((frame,unit))
+}
+
 /// Perspective pose using the actual eye projection, with rigid-plane consistency rejection.
 pub fn perspective_pose(found: &Found, size: [f32;2], mirror: &Mirror, eye: &Matrix34, width: f32) -> Option<(Matrix34,f32)> {
     let h = found.perspective?;
@@ -604,6 +681,11 @@ pub fn perspective_pose(found: &Found, size: [f32;2], mirror: &Mirror, eye: &Mat
     let z=[right[1]*up[2]-right[2]*up[1],right[2]*up[0]-right[0]*up[2],right[0]*up[1]-right[1]*up[0]];
     let position=t.map(|x|x*scale);
     if !(0.15..=4.).contains(&-position[2]) { return None; }
+    let local=Matrix34 {m:std::array::from_fn(|i|[right[i],up[i],z[i],position[i]])};
+    let identity=Matrix34 {m:[[1.,0.,0.,0.],[0.,1.,0.,0.],[0.,0.,1.,0.]]};
+    let (local,_)=refine_plane(local,unit,&observations(found,size,*mirror,&identity),false)?;
+    let right=local.m.map(|r|r[0]);let up=local.m.map(|r|r[1]);let z=local.m.map(|r|r[2]);let position=local.m.map(|r|r[3]);
+    if !(0.15..=4.).contains(&-position[2]) {return None;}
     // A texture homography can fit a sheared quadrilateral perfectly. Verify the recovered
     // rigid plane itself through the eye projection before accepting it as a physical panel.
     let mut errors=Vec::new();
@@ -663,6 +745,11 @@ pub fn stereo_pose(left:&Found,right:&Found,sizes:[[f32;2];2],mirrors:[Mirror;2]
     let centre:[f32;3]=std::array::from_fn(|i|points.iter().map(|p|p[i]).sum::<f32>()*0.25);
     if !(0.15..=4.).contains(&-centre[2]) { return None; }
     let unit=(width/410.+height/220.)*0.5;
+    let local=Matrix34 {m:std::array::from_fn(|i|[r[i],u[i],z[i],centre[i]])};
+    let observed:Vec<_>=(0..2).flat_map(|k|observations(found[k],sizes[k],mirrors[k],&eyes[k])).collect();
+    let (local,unit)=refine_plane(local,unit,&observed,true)?;
+    let r=local.m.map(|row|row[0]);let u=local.m.map(|row|row[1]);let z=local.m.map(|row|row[2]);let centre=local.m.map(|row|row[3]);
+    if !(0.15..=4.).contains(&-centre[2]) {return None;}
     let mut errors=Vec::new();
     for k in 0..2 {
         let inverse=undone(&eyes[k]);
@@ -1884,6 +1971,7 @@ mod sandbox_regression {
         let mirrors=[Mirror::whole_eye([-1.376,0.839,-1.376,0.9]),Mirror::whole_eye([-0.839,1.376,-1.376,0.9])];
         let identity=Matrix34 {m:[[1.,0.,0.,0.],[0.,1.,0.,0.],[0.,0.,1.,0.]]};
         let mut eyes=[identity;2];eyes[0].m[0][3]=-0.032;eyes[1].m[0][3]=0.032;
+        let mut stereo_failures=Vec::new();
         for (mode,origins) in [("camera-open-wheel",[[650.,650.],[180.,650.]]),("camera-grab-move",[[650.,650.],[180.,650.]]),("camera-stream-baseline",[[650.,650.],[180.,650.]]),("close-open",[[500.,900.],[0.,900.]]),("close-held",[[700.,800.],[150.,800.]]),("mode-print",[[830.,570.],[350.,570.]]),("mode-drone",[[830.,570.],[350.,570.]])] {
             let mut pair=Vec::new();
             for (index,eye) in ["left","right"].into_iter().enumerate() {
@@ -1895,9 +1983,13 @@ mod sandbox_regression {
                 assert!(perspective_pose(&found,[1620.,1800.],&mirrors[index],&eyes[index],0.3).is_some(),"{name}: measured outline must pass unchanged rigid reprojection: {found:?}");
                 pair.push(found);
             }
-            let (_,unit,error)=stereo_pose(&pair[0],&pair[1],[[1620.,1800.];2],mirrors,eyes,&identity).unwrap_or_else(||panic!("{mode}: native stereo must recover a metric plane"));
+            let Some((_,unit,error))=stereo_pose(&pair[0],&pair[1],[[1620.,1800.];2],mirrors,eyes,&identity) else {
+                eprintln!("stereo failure {mode}: {pair:?}");
+                stereo_failures.push(mode);continue;
+            };
             assert!((0.27..0.32).contains(&(unit*PANEL_SIZE[0])),"{mode}: wrong metric width {}",unit*PANEL_SIZE[0]);
             assert!(error<=2.5,"unchanged stereo reprojection gate");
         }
+        assert!(stereo_failures.is_empty(),"native stereo must recover metric planes: {stereo_failures:?}");
     }
 }

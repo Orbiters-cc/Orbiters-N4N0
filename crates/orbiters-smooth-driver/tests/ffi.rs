@@ -221,6 +221,18 @@ fn factory_init_hook_filter_and_cleanup() {
     send_pose(2, fast);
     assert_eq!(LAST_POSE.lock().unwrap().unwrap().1.vec_velocity, [0.0, 0.0, 0.0], "on again: damped");
 
+    // A foreign writer bypasses us while enabled, without Cleanup/re-Init.
+    let active_callback = host_pose_entry();
+    replace_host_pose(unhooked);
+    unsafe { (vtable.run_frame)(provider) };
+    assert_eq!(control.driver_heartbeat().unwrap().hooks, 0, "live detachment must not report healthy");
+    assert_eq!(host_pose_entry(), unhooked, "never blindly reinstall over a detached foreign chain");
+    assert!(LOGGED.lock().unwrap().iter().any(|l| l.contains("live pose hook detached")));
+    // A directly exposed saved callback is verifiably reachable again.
+    replace_host_pose(active_callback);
+    unsafe { (vtable.run_frame)(provider) };
+    assert_eq!(control.driver_heartbeat().unwrap().hooks, 1);
+
     // B fetched this callback, then paused before publishing its hook.
     let saved_callback = host_pose_entry();
     // Cleanup restores the host's table.

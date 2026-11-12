@@ -584,7 +584,7 @@ unsafe fn get_interface(version: &CStr) -> *mut c_void {
 unsafe fn install_host_hooks(setup: &mut Setup) {
     setup.last_hook_attempt_ms = tick_ms().max(1);
     let detours = pose_detours();
-    let mut hooked = STATE.hooks_installed.load(Ordering::Relaxed);
+    let mut hooked = 0;
     let mut mask = 0;
     for (index, version) in [SERVER_DRIVER_HOST_006, SERVER_DRIVER_HOST_005].into_iter().enumerate() {
         let host = get_interface(version);
@@ -741,9 +741,33 @@ fn try_open_control(setup: &mut Setup) {
     }
 }
 
+/// Revalidate exposed callbacks during the active lifecycle, not just Init.
+/// An opaque/bypassed chain is not proof of reachability. No pointer is written;
+/// retained records prevent install_host_hooks from blindly splicing it back in.
+/// SAFETY: provider lifecycle owns these host tables until Cleanup.
+unsafe fn revalidate_host_hooks(setup: &Setup) {
+    let detours = pose_detours();
+    let mut mask = 0u32;
+    for &(address, detour) in &setup.patched {
+        let current = (&*(address as *const AtomicUsize)).load(Ordering::Acquire);
+        if current == detour {
+            if let Some(index) = detours.iter().position(|&p| p == detour) {
+                mask |= 1 << index;
+            }
+        }
+    }
+    let prior = STATE.attached_mask.swap(mask, Ordering::AcqRel);
+    STATE.hooks_installed.store(mask.count_ones(), Ordering::Relaxed);
+    if prior & !mask != 0 {
+        log_line("Orbiters smoothing: live pose hook detached or obscured; that interface is passive until directly reachable");
+    }
+}
+
 /// Reads the app's settings into the lock-free cache, hooks the hosts the first time smoothing is on, and bumps the
 /// heartbeat. Smoothing goes inactive when the block is gone, invalid, disabled, or its owner process has exited.
 fn refresh_from_control(setup: &mut Setup) {
+    // SAFETY: RunFrame holds setup and provider lifecycle keeps host tables live.
+    unsafe { revalidate_host_hooks(setup) };
     let now = tick_ms();
     let Some(mapping) = setup.control.as_ref() else {
         STATE.active.store(false, Ordering::Release);

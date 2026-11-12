@@ -47,6 +47,14 @@ kernel.CreateMutexW.restype = C.c_void_p
 kernel.WaitForSingleObject.argtypes = [C.c_void_p, C.c_uint32]
 kernel.ReleaseMutex.argtypes = [C.c_void_p]
 kernel.CloseHandle.argtypes = [C.c_void_p]
+kernel.OpenProcess.argtypes = [C.c_uint32,C.c_bool,C.c_uint32]
+kernel.OpenProcess.restype = C.c_void_p
+
+def process_exited(pid):
+    handle=kernel.OpenProcess(0x100000,False,pid)
+    if not handle:return C.get_last_error()==87
+    try:return kernel.WaitForSingleObject(handle,0)==0
+    finally:kernel.CloseHandle(handle)
 
 def unit_rotation(values):
     norm=math.sqrt(sum(x*x for x in values))
@@ -85,7 +93,7 @@ def process_names():
 
 def process_dead(p):
     try:
-        return p.status() == psutil.STATUS_ZOMBIE or p.num_threads() == 0 or p.num_handles() == 0
+        return p.status() == psutil.STATUS_ZOMBIE or p.num_threads() == 0 or p.num_handles() == 0 or process_exited(p.pid)
     except psutil.NoSuchProcess:
         return True
 

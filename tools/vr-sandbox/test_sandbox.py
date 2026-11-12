@@ -56,7 +56,7 @@ class ProcessTests(unittest.TestCase):
         self.assertTrue(sandbox.process_dead(p))
 
     def test_only_runtime_names_are_queried_for_creation_identity(self):
-        with patch.object(sandbox,'process_names',return_value=[(1,'unrelated.exe'),(2,'VRChat.exe'),(3,'vrserver.exe')]),patch.object(sandbox.psutil,'Process') as process:
+        with patch.object(sandbox,'process_exited',return_value=False),patch.object(sandbox,'process_names',return_value=[(1,'unrelated.exe'),(2,'VRChat.exe'),(3,'vrserver.exe')]),patch.object(sandbox.psutil,'Process') as process:
             process.return_value.create_time.return_value=123.5
             self.assertEqual(sandbox.processes(),[{'pid':2,'name':'VRChat.exe','create_time':123.5},{'pid':3,'name':'vrserver.exe','create_time':123.5}])
             self.assertEqual([call.args[0] for call in process.call_args_list],[2,3])

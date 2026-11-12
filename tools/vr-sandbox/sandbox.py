@@ -90,11 +90,13 @@ def restore():
     if j.get('restored'):
         return {'restored': True, 'already_restored': True}
     if j.get('pid') != os.getpid() and j.get('owner_create_time') and same_process({'pid':j['pid'],'create_time':j['owner_create_time']}):
-        remote({'action':'stop'})
+        try:remote({'action':'stop'})
+        except (OSError,urllib.error.URLError):pass # owner may already be closing its HTTP server
         deadline=time.monotonic()+45
         while time.monotonic()<deadline:
             latest=json.loads(JOURNAL.read_text())
             if latest.get('restored'):return {'restored':True,'verified_files':len(latest['files'])}
+            if not same_process({'pid':j['pid'],'create_time':j['owner_create_time']}):return restore()
             time.sleep(.25)
         raise RuntimeError('Live sandbox did not finish restoration; inspect its error log')
     # Only stop exact process identities recorded by this session. Refuse a foreign VR session.
@@ -249,12 +251,19 @@ class Session:
                     elif menu=='close':inputs({button:0,2:0,3:0})
                     else:raise ValueError('menu must be quick, wheel or close')
             return {'commanded':action,'device':hand,'verify':'Inspect a composited eye capture before the next selection.'}
-        if action=='camera_fly':
-            if not isinstance(args.get('enabled'),bool):raise ValueError('enabled must be a boolean')
-            address=b'/usercamera/Flying';address+=b'\0'*(4-len(address)%4)
-            packet=address+(b',T\0\0' if args['enabled'] else b',F\0\0')
+        if action in ('camera_fly','camera_mode'):
+            if action=='camera_fly':
+                if not isinstance(args.get('enabled'),bool):raise ValueError('enabled must be a boolean')
+                address=b'/usercamera/Flying';value=args['enabled']
+                payload=b',T\0\0' if value else b',F\0\0'
+            else:
+                value=args.get('mode')
+                if type(value) is not int or not 0<=value<=6:raise ValueError('mode must be an integer 0..6')
+                address=b'/usercamera/Mode';payload=b',i\0\0'+struct.pack('>i',value)
+            address+=b'\0'*(4-len(address)%4)
+            packet=address+payload
             with socket.socket(socket.AF_INET,socket.SOCK_DGRAM) as osc:osc.sendto(packet,('127.0.0.1',9000))
-            return {'flying_requested':bool(args['enabled']),'verify':'Read /usercamera/Flying and inspect the camera.'}
+            return {'requested':value,'address':address.rstrip(b'\0').decode(),'verify':'Read OSCQuery and inspect the camera; a write is not proof.'}
         if action=='app':
             exe=Path(args['app_exe']).resolve()
             if not exe.is_file() or not exe.is_relative_to(ROOT):raise ValueError('app binary must be inside the sandbox root')

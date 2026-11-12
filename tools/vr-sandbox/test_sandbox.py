@@ -36,6 +36,13 @@ class RecoveryTests(unittest.TestCase):
                 self.assertFalse(json.loads(journal.read_text())['restored'])
 
 class InputTests(unittest.TestCase):
+    def test_camera_modes_reject_unknown_values_before_sending_osc(self):
+        s=self.session()
+        with patch.object(sandbox.socket,'socket') as socket:
+            for mode in [-1,7,True,1.5]:
+                with self.assertRaisesRegex(ValueError,'mode'):s.call({'action':'camera_mode','mode':mode})
+            socket.assert_not_called()
+
     def session(self):
         s=object.__new__(sandbox.Session)
         s.shared=sandbox.Shared();s.guard=threading.Lock();s.stop=threading.Event();s.mutex=123

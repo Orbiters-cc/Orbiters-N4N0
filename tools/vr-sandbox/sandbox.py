@@ -84,14 +84,18 @@ def restore():
     foreign = [p for p in processes() if (p['pid'], p['create_time']) not in owned]
     if foreign:
         raise RuntimeError('Restore refused while unowned VR processes run: ' + json.dumps(foreign))
+    terminating=[]
     for info in sorted(j['processes'], key=lambda p: p['name'].lower() != 'vrmonitor.exe'):
         p = same_process(info)
         if p:
             try:
                 p.terminate()
-                p.wait(10)
+                terminating.append(p)
             except psutil.NoSuchProcess:
                 pass
+    _,remaining=psutil.wait_procs(terminating,timeout=10)
+    if remaining:
+        raise RuntimeError('Owned processes did not exit after terminate: '+json.dumps([p.pid for p in remaining]))
     if processes():
         raise RuntimeError('VR processes remain; configuration retained for standalone restore')
     for entry in j['files']:
@@ -153,6 +157,9 @@ class Session:
         config = json.loads(SETTINGS.read_text(encoding='utf-8-sig')) if SETTINGS.exists() else {}
         config.setdefault('steamvr', {}).update({'forcedDriver': 'orbiters_sandbox', 'forcedHmd': 'orbiters-sandbox-head', 'activateMultipleDrivers': True, 'enableHomeApp': False, 'supersampleScale': 1.0, 'showMirrorView': False})
         config['driver_orbiters_sandbox'] = {'enable': True}
+        for directory in (RUNTIME/'drivers').iterdir():
+            if directory.is_dir():
+                config.setdefault('driver_'+directory.name,{})['enable']=False
         # Prevent unrelated drivers and utility overlays from changing emulated poses.
         config.setdefault('steamvr', {})['activateMultipleDrivers'] = False
         atomic_json(SETTINGS, config)
@@ -179,6 +186,17 @@ class Session:
             self.record()
             self.stop.set()
             return {'stopping':True}
+        if action in ('capture','overlays','devices'):
+            command=[str(ROOT/'probe.exe'),action]
+            if action=='capture':
+                prefix=Path(args['output_prefix']).resolve()
+                prefix.parent.mkdir(parents=True,exist_ok=True)
+                command.append(str(prefix))
+            elif action=='overlays':
+                command.extend(args.get('overlay_keys',[]))
+            result=subprocess.run(command,capture_output=True,text=True,timeout=30,creationflags=subprocess.CREATE_NO_WINDOW)
+            if result.returncode:raise RuntimeError(result.stderr)
+            return json.loads(result.stdout)
         slot = {'head':0,'left':1,'right':2}[args.get('device','head')]
         with self.guard:
             d = self.shared.devices[slot]
@@ -254,4 +272,20 @@ if __name__=='__main__':
         while same_process(identity):time.sleep(.5)
         try:restore()
         except Exception as e:(ROOT/'restore-error.txt').write_text(str(e))
+    elif cmd=='request':
+        args=json.loads(sys.argv[2]);action=args['action']
+        if action=='restore':answer=restore()
+        elif action=='start':
+            ROOT.mkdir(parents=True,exist_ok=True)
+            with (ROOT/'server-out.log').open('a') as out,(ROOT/'server-err.log').open('a') as err:
+                child=subprocess.Popen([sys.executable,__file__,'start'],stdout=out,stderr=err,creationflags=subprocess.CREATE_NO_WINDOW)
+            deadline=time.monotonic()+45
+            while True:
+                if child.poll() is not None:raise RuntimeError((ROOT/'server-err.log').read_text())
+                try:answer=remote({'action':'status'});break
+                except Exception:
+                    if time.monotonic()>deadline:raise RuntimeError('Sandbox startup timeout; inspect logs and restore')
+                    time.sleep(.25)
+        else:answer=remote(args)
+        print(json.dumps(answer))
     else:print(json.dumps(remote(json.loads(sys.argv[2]) if cmd=='call' else {'action':cmd})))

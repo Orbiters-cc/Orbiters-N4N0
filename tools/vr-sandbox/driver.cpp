@@ -4,6 +4,8 @@
 #include <windows.h>
 #include "vendor/openvr_driver.h"
 #include <array>
+#include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstring>
 #include <string>
@@ -18,9 +20,11 @@ static Shared *shared=nullptr;
 static bool alive=false;
 static const wchar_t *mapName=L"Local\\OrbitersVrSandbox1112";
 static const wchar_t *mutexName=L"Local\\OrbitersVrSandbox1112Mutex";
-class Device final : public ITrackedDeviceServerDriver, public IVRDisplayComponent {
+class Device final : public ITrackedDeviceServerDriver, public IVRDisplayComponent, public IVRVirtualDisplay {
     uint32_t slot; TrackedDeviceIndex_t id=k_unTrackedDeviceIndexInvalid;
     std::array<VRInputComponentHandle_t,20> inputs{};
+    std::atomic<bool> ready{false};
+    std::chrono::steady_clock::time_point epoch=std::chrono::steady_clock::now();
 public:
     explicit Device(uint32_t s):slot(s){}
     EVRInitError Activate(uint32_t index) override {
@@ -37,6 +41,7 @@ public:
             props->SetFloatProperty(c,Prop_SecondsFromVsyncToPhotons_Float,0.0f);
             props->SetBoolProperty(c,Prop_IsOnDesktop_Bool,false);
             props->SetBoolProperty(c,Prop_HasDisplayComponent_Bool,true);
+            props->SetBoolProperty(c,Prop_HasVirtualDisplayComponent_Bool,true);
             props->SetBoolProperty(c,Prop_ContainsProximitySensor_Bool,false);
         } else {
             props->SetStringProperty(c,Prop_ControllerType_String,"oculus_touch");
@@ -54,11 +59,26 @@ public:
             VRDriverInput()->CreateHapticComponent(c,"/output/haptic",&haptic);
         }
         VRDriverLog()->Log(slot==0?"Sandbox HMD activated":slot==1?"Sandbox left controller activated":"Sandbox right controller activated");
-        return VRInitError_None;
+        ready.store(true); return VRInitError_None;
     }
-    void Deactivate() override { id=k_unTrackedDeviceIndexInvalid; }
+    void Deactivate() override { ready.store(false);id=k_unTrackedDeviceIndexInvalid; }
     void EnterStandby() override {}
-    void *GetComponent(const char *name) override { return !slot && !strcmp(name,IVRDisplayComponent_Version)?static_cast<IVRDisplayComponent*>(this):nullptr; }
+    void *GetComponent(const char *name) override {
+        if(slot)return nullptr;
+        if(!strcmp(name,IVRDisplayComponent_Version))return static_cast<IVRDisplayComponent*>(this);
+        if(!strcmp(name,IVRVirtualDisplay_Version))return static_cast<IVRVirtualDisplay*>(this);
+        return nullptr;
+    }
+    void Present(const PresentInfo_t *,uint32_t) override {}
+    void WaitForPresent() override {
+        auto elapsed=std::chrono::duration<double>(std::chrono::steady_clock::now()-epoch).count();
+        auto next=(std::floor(elapsed*72)+1)/72;
+        Sleep((DWORD)std::max(1.0,(next-elapsed)*1000));
+    }
+    bool GetTimeSinceLastVsync(float *seconds,uint64_t *counter) override {
+        auto elapsed=std::chrono::duration<double>(std::chrono::steady_clock::now()-epoch).count();
+        *counter=(uint64_t)(elapsed*72);*seconds=(float)(elapsed-*counter/72.0);return true;
+    }
     void DebugRequest(const char*,char *out,uint32_t n) override {if(n) out[0]=0;}
     DriverPose_t GetPose() override {
         DriverPose_t p{}; p.qWorldFromDriverRotation.w=1; p.qDriverFromHeadRotation.w=1;
@@ -69,7 +89,7 @@ public:
         return p;
     }
     void frame() {
-        if(id==k_unTrackedDeviceIndexInvalid)return;
+        if(!ready.load()||id==k_unTrackedDeviceIndexInvalid)return;
         auto pose=GetPose(); VRServerDriverHost()->TrackedDevicePoseUpdated(id,pose,sizeof(pose));
         if(slot)for(size_t i=0;i<inputs.size();++i) {
             float value=alive?snapshot.devices[slot].inputs[i]:0;

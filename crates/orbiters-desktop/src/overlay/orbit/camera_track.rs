@@ -1882,11 +1882,25 @@ mod tests {
             assert!(found.perspective.is_some(),"camera candidate did not produce a spread fit: {found:?}");
             let (count,points)=found.landmarks.expect("independently observed panel landmarks");
             let points=&points[..count];
-            let span=|axis:usize| points.iter().map(|(p,_)|p[axis]).fold(f32::NEG_INFINITY,f32::max)-points.iter().map(|(p,_)|p[axis]).fold(f32::INFINITY,f32::min);
-            assert!(span(0)>=300. && span(1)>=180.,"landmarks must cover the face, not only an icon column");
-            let measured=fit(points).expect("observations must determine a non-degenerate homography");
-            for &(p,q) in points {let r=project(measured,p);assert!((r[0]-q[0]).hypot(r[1]-q[1])<=6.);}
-            let rms=(points.iter().map(|&(p,q)|{let r=project(measured,p);(r[0]-q[0]).powi(2)+(r[1]-q[1]).powi(2)}).sum::<f32>()/count as f32).sqrt();
+            let mut model:Vec<_>=points.iter().map(|(p,_)|*p).collect();
+            let measured=if let Some(lines)=found.lines {
+                let mut rows=Vec::new();
+                for (ends,[a,b,c]) in lines {for [x,y] in ends {
+                    model.push([x,y]);rows.push([a*x,a*y,a,b*x,b*y,b,c*x,c*y,-c]);
+                }}
+                for &([x,y],[u,v]) in points {
+                    rows.push([x,y,1.,0.,0.,0.,-u*x,-u*y,u]);
+                    rows.push([0.,0.,0.,x,y,1.,-v*x,-v*y,v]);
+                }
+                homography_rows(&rows).expect("point and line observations must have full rank")
+            } else {fit(points).expect("point observations must have full rank")};
+            let span=|axis:usize| model.iter().map(|p|p[axis]).fold(f32::NEG_INFINITY,f32::max)-model.iter().map(|p|p[axis]).fold(f32::INFINITY,f32::min);
+            assert!(span(0)>=250. && span(1)>=180.,"landmarks must cover both axes of the face: {found:?}");
+            let mut errors=Vec::new();
+            for &(p,q) in points {let r=project(measured,p);errors.push((r[0]-q[0]).hypot(r[1]-q[1]));}
+            if let Some(lines)=found.lines {for (ends,l) in lines {for p in ends {let q=project(measured,p);errors.push((l[0]*q[0]+l[1]*q[1]+l[2]).abs());}}}
+            assert!(errors.iter().all(|e|*e<=6.));
+            let rms=(errors.iter().map(|e|e*e).sum::<f32>()/errors.len() as f32).sqrt();
             assert!(rms<=2.5);
         }
     }

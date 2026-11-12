@@ -26,7 +26,7 @@ impl PaintSnapshot {
     pub(super) fn target_for_test(&self, target: panel::Target) -> Option<egui::Pos2> { self.with_data(|panel, d| panel.targets(d).into_iter().find(|(t, _)| *t == target).map(|(_, r)| r.center())) }
     pub(super) fn compatible(&self, live: &Worlds, entries: &[Entry], status: &panel::Status, picked: Option<&Entry>, target: panel::Target) -> bool {
         if !self.panel.same_input(&live.panel, target) || self.picked.as_ref().map(|e| (e.id, &e.world_id)) != picked.map(|e| (e.id, &e.world_id)) { return false; }
-        if matches!(target, panel::Target::Key(_) | panel::Target::Space | panel::Target::Backspace | panel::Target::Comments | panel::Target::Join) { return true; }
+        if matches!(target, panel::Target::Key(_) | panel::Target::Space | panel::Target::Backspace | panel::Target::Comments | panel::Target::Join | panel::Target::Back) { return true; }
         self.entries.len() == entries.len()
             && self.entries.iter().zip(entries).all(|(a, b)| (a.id, &a.world_id, a.capture) == (b.id, &b.world_id, b.capture))
             && self.picked.as_ref().map(|e| (e.id, &e.world_id)) == picked.map(|e| (e.id, &e.world_id))
@@ -61,6 +61,14 @@ mod review_navigation {
         assert!(!accepts(&worlds, panel::Target::Comments));
         assert!(!accepts(&worlds, panel::Target::Join));
         assert!(!accepts(&worlds, panel::Target::Back));
+        worlds.pick_for_test(entry("wrld_shown"));
+        worlds.panel.restore(panel::Page::Go, worlds.panel.selected, 1.0);
+        let chooser = worlds.prepare_paint(&ctx);
+        worlds.feedback.signed_in = !chooser.feedback.signed_in;
+        worlds.panel.scroll_by(17.0);
+        assert!(chooser.compatible(&worlds, &worlds.entries(), &worlds.status(), worlds.picked(), panel::Target::Back));
+        worlds.panel.restore(panel::Page::Comments, worlds.panel.selected, 1.0);
+        assert!(!chooser.compatible(&worlds, &worlds.entries(), &worlds.status(), worlds.picked(), panel::Target::Back), "a different live page still drops the old Back");
     }
 }
 impl Worlds {

@@ -3390,10 +3390,10 @@ impl Panel {
     }
     pub(crate) fn same_input(&self, b: &Self, target: Target) -> bool {
         if self.page != b.page || self.selected != b.selected || self.layout != b.layout { return false; }
-        // These navigate to the selected world's page; arriving descriptions/comments
+        // These navigate within the selected world; arriving descriptions/comments
         // and list scroll do not change their source. Snapshot validation checks that
         // world's identity separately. Indexed actions and edits keep the full guard.
-        if matches!(target, Target::Comments | Target::Join) { return true; }
+        if matches!(target, Target::Comments | Target::Join | Target::Back) { return true; }
         if matches!(target, Target::Key(_) | Target::Space | Target::Backspace) { return true; }
         self.query == b.query && self.results_page == b.results_page && self.sort == b.sort && self.section == b.section
             && self.labels == b.labels && self.official == b.official && self.has_3d == b.has_3d && self.draft == b.draft

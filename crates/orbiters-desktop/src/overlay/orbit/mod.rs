@@ -44,6 +44,30 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 use zones::{Around, Group, Placed, Zone};
 
+/// Fixed navigation belongs to the displayed row, not every unrelated field in the menu.
+/// Indexed actions retain whole-menu validation so replacement data cannot inherit a press.
+fn menu_press_compatible(shown: &orbiters_n4n0_core::menu::Menu, live: &orbiters_n4n0_core::menu::Menu, element: usize) -> bool {
+    let page = layout::cached(ScreenPage::of(shown));
+    let Some(row) = page.elements.get(element) else { return false; };
+    if matches!(row.target, Target::Key(_) | Target::Space | Target::Backspace) {
+        return shown.page == live.page && shown.layout == live.layout && shown.typing == live.typing
+            && shown.subject == live.subject && shown.feedback.subjects.get(shown.subject) == live.feedback.subjects.get(live.subject)
+            && shown.sharing == live.sharing;
+    }
+    if !matches!(row.target, Target::Close | Target::Back | Target::YouTube | Target::Call | Target::Photo | Target::Music
+        | Target::Light | Target::States | Target::Tracking | Target::Suggest | Target::More | Target::Instances | Target::History | Target::Microphones) {
+        return shown == live;
+    }
+    if shown.page != live.page || shown.open != live.open || !live.open || shown.pages != live.pages
+        || shown.back_on_the_sheet != live.back_on_the_sheet { return false; }
+    // Back has a contextual destination on the keyboard and sharing pages.
+    if row.target == Target::Back && ((shown.page == Page::Type && shown.typing != live.typing)
+        || (matches!(shown.page, Page::ShareTo | Page::Explicit) && shown.share_from != live.share_from)) { return false; }
+    let current = layout::cached(ScreenPage::of(live));
+    current.elements.get(element) == Some(row) && layout::state(shown, row).pointable()
+        && layout::state(shown, row) == layout::state(live, row)
+}
+
 /// Whether the desktop's panels are wanted: VRChat runs without SteamVR, on this computer, and the setting says so.
 pub fn wanted_on_desktop(snap: &Snapshot) -> bool {
     orbiters_core::osc::VRCHAT_RUNS_HERE && snap.vrchat.running && !snap.vrchat.remote && !snap.steamvr.running && snap.settings.orbit.any()
@@ -2449,10 +2473,7 @@ impl Panels {
                         let shown = self.stage.presented_scene.as_ref().and_then(|s| s.menu()).unwrap_or(&host.menu);
                         let page = layout::cached(ScreenPage::of(shown));
                         if let Some(e) = page.elements.get(element) {
-                            let typing = matches!(e.target, Target::Key(_) | Target::Space | Target::Backspace);
-                            let compatible = if typing { shown.page == host.menu.page && shown.layout == host.menu.layout && shown.typing == host.menu.typing && shown.subject == host.menu.subject && shown.feedback.subjects.get(shown.subject) == host.menu.feedback.subjects.get(host.menu.subject) && shown.sharing == host.menu.sharing }
-                                else { *shown == host.menu };
-                            if !compatible { return out; }
+                            if !menu_press_compatible(shown, &host.menu, element) { return out; }
                             panel.pressed = Some(element);
                             out.clicked = true;
                             let effects = host.press(e.target);

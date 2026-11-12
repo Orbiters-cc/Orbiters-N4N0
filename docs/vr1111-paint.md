@@ -1,5 +1,7 @@
 # Current review handoff
 
+Integration follow-up: fixed shared Menu navigation now validates its displayed element, position, availability and page context rather than the entire Menu. Unrelated arrivals no longer swallow a visible navigation press. Back retains its keyboard/sharing destination checks; indexed and data-changing actions retain strict whole-Menu validation. The integration regression freezes a published Photo page before an unrelated arrival, then presses History; changed pages and unavailable rows are still rejected.
+
 Measured application source: `ca1b2791dfda5b2c1accdd2cb092124be856b520` on `vr1111/paint`, including local main `dc1ef14b718501088354a680d3b5492aa1a377dc` (dev.40). All six review findings are addressed. The final CPU harness gates **pass**: maximum input turn **4.762 ms** across modern 60/600/6000 and retro 600 cases; visited-page pictures restore on the next turn in **48/48** checks per case; 600-entry steady-scroll rates and the 45 frames/s threshold are reported separately for modern and retro. Exact controlled settled pixels and matching geometry pass without tolerance. The complete merged desktop suite passes **931 tests**, with 25 existing ignored tests.
 
 These are CPU results, not a measured bound for physical controller/walk/pose work, D3D upload or headset delivery. The final documentation commit changes only this report and its CPU chart. Nothing was pushed or released.

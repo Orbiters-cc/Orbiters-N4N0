@@ -1669,6 +1669,59 @@ fn review_every_page_paints_off_the_overlay_thread() {
 }
 
 #[test]
+fn review_menu_navigation_acts_on_the_visible_row_after_unrelated_arrivals() {
+    for change in [0, 1, 2] {
+        let mut person = Person::new();
+        person.panels.stage.async_pages = true;
+        person.around = Some(Around::QuickMenu);
+        person.turns(4);
+        person.panels.stage.host.menu.page = orbiters_n4n0_core::menu::Page::Photo;
+        person.panels.stage.host.menu.open = true;
+        person.panels.open_sheet(Sheet::Menu, "", &person.snap);
+        person.turns_until("the displayed menu", |p| p.panels.stage.presented_scene.as_ref().and_then(|s| s.menu()).is_some()
+            && p.panels.takeover.as_ref().is_some_and(|p| p.painted) && !p.panels.stage.painter.busy());
+        let shown = person.panels.stage.presented_scene.as_ref().unwrap().menu().unwrap();
+        let page = orbiters_n4n0_core::menu::layout::cached(orbiters_n4n0_core::menu::layout::ScreenPage::of(shown));
+        let element = page.elements.iter().position(|e| e.target == Target::History).expect("the displayed History row");
+        assert!(orbiters_n4n0_core::menu::layout::state(shown, &page.elements[element]).pointable());
+        // Freeze the published picture, then let unrelated backend data arrive before the press.
+        person.panels.stage.host.menu.heard = Some("arrived after painting".into());
+        if change == 1 { person.panels.stage.host.menu.page = orbiters_n4n0_core::menu::Page::Results; }
+        if change == 2 { person.panels.stage.host.menu.pages = orbiters_n4n0_core::menu::Pages::Four; }
+        person.panels.takeover.as_mut().unwrap().hover = Some(element);
+        person.panels.press(&person.snap);
+        assert_eq!(person.panels.stage.host.menu.page,
+            match change { 0 => orbiters_n4n0_core::menu::Page::History, 1 => orbiters_n4n0_core::menu::Page::Results, _ => orbiters_n4n0_core::menu::Page::Photo },
+            "the same displayed navigation survives unrelated arrivals; a different page rejects it");
+    }
+}
+
+#[test]
+fn review_menu_navigation_keeps_context_and_indexed_actions_guarded() {
+    use orbiters_n4n0_core::menu::{Menu, Page, Pages, Typing};
+    use orbiters_n4n0_core::menu::layout::{self, ScreenPage};
+    let accepts = |shown: &Menu, live: &Menu, target| {
+        let page = layout::cached(ScreenPage::of(shown));
+        let index = page.elements.iter().position(|e| e.target == target).expect("the shown control");
+        super::menu_press_compatible(shown, live, index)
+    };
+    let mut shown = Menu::default();
+    shown.open = true;
+    shown.pages = Pages::ALL;
+    shown.page = Page::Type;
+    shown.typing = Typing::StateName;
+    let mut live = shown.clone();
+    live.heard = Some("an unrelated arrival".into());
+    assert!(accepts(&shown, &live, Target::Back));
+    live.typing = Typing::Suggestion;
+    assert!(!accepts(&shown, &live, Target::Back), "Back must keep its destination");
+    shown.page = Page::Results;
+    let mut live = shown.clone();
+    live.heard = Some("an unrelated arrival".into());
+    assert!(!accepts(&shown, &live, Target::Copy(0)), "indexed actions keep strict state validation");
+}
+
+#[test]
 fn review_a_stale_invite_press_never_invites_a_new_row() {
     for cached in [false, true] {
         let (mut person, heard) = Person::heard();

@@ -1157,6 +1157,10 @@ mod review_fixture {
         for (page, _) in pages {
             assert!(worlds.paint_fixture_page(page));
             assert_eq!(worlds.prepare_paint(&egui::Context::default()).panel.page, page);
+            std::thread::sleep(Duration::from_millis(24));
+            assert!(!worlds.wants_paint(), "a frozen {page:?} must settle even when its real-time caret/fade would animate");
+            worlds.repaint();
+            assert!(worlds.wants_paint(), "explicit state changes must still repaint the frozen fixture");
         }
     }
 }

@@ -1918,6 +1918,9 @@ fn keep_an_eye_frame(steamvr: &vr::Client, n: u32) {
 
     /// Whether the panel should be painted now (something changed or moves), at most 45 times a second.
     pub fn wants_paint(&self) -> bool {
+        // The CPU replay draws at frozen time with acknowledged local pictures.
+        // A real-time caret/fade tick must not keep that settled fixture busy.
+        if self.paint_fixture.is_some() { return self.hole_changed || self.panel.dirty || self.facts_pending; }
         let since = self.last_paint.map(|t| t.elapsed());
         let due = since.is_none_or(|t| t >= Duration::from_millis(22));
         let facts = self.facts_pending && since.is_none_or(|t| t >= FACTS_EVERY);

@@ -263,6 +263,31 @@ impl PaintTextures {
 mod review_texture_registration {
     use super::*;
     #[test]
+    fn review_font_memory_accounting_does_not_wait_for_page_layout() {
+        use std::sync::mpsc;
+        let mut canvas = Canvas::new(64, 32);
+        canvas.paint(1.0, |p| { p.text(egui::Pos2::ZERO, egui::Align2::LEFT_TOP, "atlas", egui::FontId::proportional(12.0), egui::Color32::WHITE); });
+        let expected = canvas.ctx.fonts(|f| { let [w,h] = f.font_image_size(); w*h*8 });
+        assert_eq!(canvas.atlas_bytes(), expected);
+        let (locked, has_lock) = mpsc::channel(); let (release, go) = mpsc::channel();
+        let ctx = canvas.ctx.clone();
+        let layout = std::thread::spawn(move || ctx.data_mut(|_| { locked.send(()).unwrap(); go.recv().unwrap(); }));
+        has_lock.recv().unwrap();
+        let (started, old_started) = mpsc::channel(); let (old_done, old_received) = mpsc::channel();
+        let ctx = canvas.ctx.clone();
+        // The exact previous accounting API is the blocking control.
+        let old = std::thread::spawn(move || { started.send(()).unwrap(); let bytes = ctx.fonts(|f| { let [w,h] = f.font_image_size(); w*h*8 }); old_done.send(bytes).unwrap(); });
+        old_started.recv().unwrap();
+        let (done, received) = mpsc::channel();
+        let input = std::thread::spawn(move || done.send(canvas.atlas_bytes()).unwrap());
+        let arrived = received.recv_timeout(std::time::Duration::from_secs(2));
+        let old_blocked = old_received.try_recv().is_err();
+        release.send(()).unwrap(); layout.join().unwrap(); input.join().unwrap(); old.join().unwrap();
+        assert!(old_blocked, "the previous font-context read must exercise the held layout lock");
+        assert_eq!(arrived.expect("cache accounting waited for page layout"), expected);
+        assert_eq!(old_received.recv().unwrap(), expected);
+    }
+    #[test]
     fn review_texture_arrival_does_not_wait_for_the_font_context() {
         use std::sync::mpsc;
         let mut canvas = Canvas::new(32, 32);
@@ -364,8 +389,9 @@ impl Canvas {
         if !self.ran {
             return 0;
         }
-        let [width, height] = self.ctx.fonts(|f| f.font_image_size());
-        width * height * 8
+        // The renderer can hold the context/font lock while laying out a page.
+        // Published font texture metadata is in the short-lived texture registry.
+        self.textures.0.read().meta(egui::TextureId::Managed(0)).map_or(0, |m| m.size[0] * m.size[1] * 8)
     }
 
     /// Paints a frame (RGBA, premultiplied, transparent where nothing was drawn): only what changed is painted again,

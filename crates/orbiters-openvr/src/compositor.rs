@@ -68,6 +68,9 @@ pub struct MirrorSource {
 unsafe impl Send for MirrorSource {}
 
 impl MirrorSource {
+    #[cfg(test)]
+    pub(crate) fn test_table(table:*const usize) -> Self {Self {table}}
+
     /// Latest compositor frame, for rejecting eye reads that straddle a frame boundary.
     pub fn frame_index(&self) -> Option<u32> {
         type F = unsafe extern "system" fn(*mut FrameTiming, u32) -> bool;

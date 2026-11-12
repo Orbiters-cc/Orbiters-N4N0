@@ -1341,9 +1341,9 @@ impl Follow {
     }
     /// Calibrate the actual icon raster against the measured plane while still.
     /// It is an observation of our own compositor output, never a camera detector.
-    pub fn calibrate_record(&mut self,p:[f32;2],size:[f32;2],mirror:Mirror,eye:&Matrix34) {
-        if self.is_held() || self.record_anchor.is_some(){return;}
-        let Some((panel,unit))=self.at else{return;};let local=undone(&panel);
+    pub fn calibrate_record(&mut self,p:[f32;2],size:[f32;2],mirror:Mirror,eye:&Matrix34,hands:[Option<Matrix34>;2],still:bool) {
+        if !still || self.record_anchor.is_some(){return;}
+        let Some((panel,unit))=self.panel_in_hands(hands) else{return;};let local=undone(&panel);
         let t=mirror.tangent(p[0]/size[0],p[1]/size[1]);
         let ray:[f32;3]=std::array::from_fn(|i|eye.m[i][0]*t[0]-eye.m[i][1]*t[1]-eye.m[i][2]);
         let denominator=(0..3).map(|i|panel.m[i][2]*ray[i]).sum::<f32>();
@@ -1353,6 +1353,15 @@ impl Follow {
         let world:[f32;3]=std::array::from_fn(|i|eye.m[i][3]+ray[i]*distance);
         let q:[f32;2]=std::array::from_fn(|i|(local.m[i][3]+(0..3).map(|j|local.m[i][j]*world[j]).sum::<f32>())/unit);
         self.record_anchor=Some([q[0],-q[1]]);
+    }
+    pub fn record_ready(&self) -> bool {self.record_anchor.is_some()}
+    pub fn record_still(&self,samples:&[(f32,[Option<Matrix34>;2])]) -> bool {
+        let Some(hand)=self.held_hand() else{return true;};
+        let Some((first_age,first))=samples.first() else{return false;};
+        let Some((last_age,_))=samples.last() else{return false;};
+        if (first_age-last_age).abs()<0.15{return false;}
+        let Some(first)=first[hand] else{return false;};
+        samples.iter().all(|(_,poses)|poses[hand].is_some_and(|pose|apart(&first,&pose)<0.001 && turned_apart(&first,&pose)<0.25f32.to_radians()))
     }
     /// Compare scene and overlay pixels from the SAME compositor image. Delaying
     /// by the scene's absolute age would count overlay submission latency twice.
@@ -1771,9 +1780,15 @@ mod tests {
         assert!(follow.scene_age().is_none());
         // The scene is 60ms old, but our visible overlay is already 20ms old.
         // Only the 40ms difference is corrected; absolute scene age double counts.
-        follow.record_anchor=Some([-280.,40.]);
         let record_world=[samples[2].1[1].unwrap().m[0][3]-0.28,-0.04];
         let record=[(record_world[0]-mirror.from[0])/mirror.spans[0]*size[0],(-record_world[1]-mirror.from[1])/mirror.spans[1]*size[1]];
+        follow.calibrate_record(record,size,mirror,&eye,samples[2].1,false);
+        assert!(!follow.record_ready(),"a moving held camera cannot calibrate overlay latency");
+        follow.calibrate_record(record,size,mirror,&eye,samples[2].1,true);
+        assert!(follow.record_ready(),"the first ring can arrive AFTER hand binding");
+        assert!((follow.record_anchor.unwrap()[0]+280.).abs()<0.1);
+        let still_samples=[(0.2,samples[2].1),(0.,samples[2].1)];
+        assert!(follow.record_still(&still_samples));assert!(!follow.record_still(&samples));
         follow.composited_clock(age,record,size,mirror,&eye,&samples);
         assert!((follow.scene_age().unwrap()-0.01).abs()<1e-4,"one quarter of the observed 40ms relative error, not absolute scene age");
     }

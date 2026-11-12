@@ -788,11 +788,14 @@ impl OrbitVr {
                 }
                 let image_eye=space::compose(&head,&eye_on_head);
                 let samples:Vec<_>=self.camera_heads.iter().filter_map(|(at,_,hands)|seen.at.checked_duration_since(*at).filter(|age|*age<=Duration::from_millis(200)).map(|age|(age.as_secs_f32(),*hands))).collect();
-                if let Some(record)=seen.record {self.camera_follow.calibrate_record(record,seen.size,mirror,&image_eye);}
+                if let Some(record)=seen.record {let still=self.camera_follow.record_still(&samples);self.camera_follow.calibrate_record(record,seen.size,mirror,&image_eye,captured_hands,still);}
                 let matching=self.camera_follow.match_image_hands(&seen.found,seen.size,mirror,&image_eye,&samples);
                 let captured_hands=matching.map(|(_,hands)|hands).unwrap_or(captured_hands);
                 if let Some((age,record))=matching.map(|(age,_)|age).zip(seen.record) {
                     self.camera_follow.composited_clock(age,record,seen.size,mirror,&image_eye,&samples);
+                }
+                if cfg!(debug_assertions) && std::env::var_os("ORBITERS_VR_SANDBOX_ROOT").is_some() {
+                    super::super::vr_log::line(&format!("camera compositor clock: ns={}, record {:?}, native_age {:?}, calibrated {}, delay {:?}",orbiters_core::clock::now_ns(),seen.record,matching.map(|(age,_)|age),self.camera_follow.record_ready(),self.camera_follow.scene_age())); // i18n: not shown (sandbox diagnostics)
                 }
                 if let Some(hand)=self.camera_follow.observe_image_grab(&seen.found,seen.size,mirror,&space::compose(&head,&eye_on_head),captured_hands,observed_grips) {
                     super::super::vr_log::line(&format!("camera grab verified by projected glyph motion: hand {hand}")); // i18n: not shown (diagnostics)

@@ -406,10 +406,10 @@ fn look(light: &Light, needs: usize) -> Option<Found> {
 const OUTLINE_HALF_HEIGHT: f32 = 205.0 * 9.0 / 16.0;
 
 fn outline_fit(light: &Light, f: &Found) -> Option<([[f32;3];3],f32,(usize,[([f32;2],[f32;2]);10]))> {
-    outline_search(light,f,false).or_else(||outline_search(light,f,true))
+    outline_search(light,f,false,false).or_else(||outline_search(light,f,true,false)).or_else(||outline_search(light,f,true,true))
 }
 
-fn outline_search(light: &Light, f: &Found, general:bool) -> Option<([[f32;3];3],f32,(usize,[([f32;2],[f32;2]);10]))> {
+fn outline_search(light: &Light, f: &Found, general:bool,gradient:bool) -> Option<([[f32;3];3],f32,(usize,[([f32;2],[f32;2]);10]))> {
     let sample = |p:[f32;2]| -> Option<f32> {
         let (x,y)=(p[0].round() as isize,p[1].round() as isize);
         if x<0 || y<0 || x>=light.width as isize || y>=light.height as isize { return None; }
@@ -417,6 +417,12 @@ fn outline_search(light: &Light, f: &Found, general:bool) -> Option<([[f32;3];3]
     };
     let scale=f.across.max(f.tall);
     let contrast=|p:[f32;2],n:[f32;2]| -> f32 {
+        // Print has a gray beveled body, not a black stroke. Its material edge
+        // is a first derivative; keep the same complete-plane validation.
+        if gradient {
+            let radius=scale.max(1.);
+            return sample([p[0]+n[0]*radius,p[1]+n[1]*radius]).zip(sample([p[0]-n[0]*radius,p[1]-n[1]*radius])).map_or(0.,|(a,b)|((a-b).abs()-8.).clamp(0.,40.));
+        }
         let Some(dark)=sample(p).filter(|v|*v<35.) else {return 0.;};
         let a=sample([p[0]+n[0]*4.*scale,p[1]+n[1]*4.*scale]);
         let b=sample([p[0]-n[0]*4.*scale,p[1]-n[1]*4.*scale]);
@@ -482,11 +488,14 @@ fn outline_search(light: &Light, f: &Found, general:bool) -> Option<([[f32;3];3]
             let t=(-0.35+0.7*k as f32/48.)*length;
             let base=[p[0]+t*u[0],p[1]+t*u[1]];
             let mut best=(0.,0.);
+            let mut weighted=(0.,0.);
             for j in -12..=12 {
                 let d=j as f32*0.25;
                 let score=contrast([base[0]+d*n[0],base[1]+d*n[1]],n);
                 if score>best.0 {best=(score,d);}
+                weighted.0+=score*d;weighted.1+=score;
             }
+            if gradient && weighted.1>0. {best.1=weighted.0/weighted.1;}
             if best.0>10. {samples.push((t,best.1));}
         }
         if samples.len()<25 {continue;}

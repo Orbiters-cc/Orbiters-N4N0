@@ -66,6 +66,19 @@ class ProcessTests(unittest.TestCase):
             with self.assertRaises(OSError):sandbox.processes()
 
 class RecoveryTests(unittest.TestCase):
+    def test_exiting_owned_helper_warns_and_restores_files(self):
+        from unittest.mock import Mock
+        with tempfile.TemporaryDirectory() as folder:
+            root=Path(folder);target=root/'settings';target.write_bytes(b'original')
+            info={'pid':123,'create_time':1,'name':'vrwebhelper.exe'}
+            j={'session':'exiting','files':[],'processes':[info],'restored':False}
+            p=Mock();p.pid=123;p.create_time.return_value=1
+            with patch.multiple(sandbox,ROOT=root,LOCK=root/'lock',JOURNAL=root/'journal'),patch.object(sandbox,'processes',return_value=[info]),patch.object(sandbox,'same_process',return_value=p),patch.object(sandbox.psutil,'wait_procs',return_value=([],[p])),patch.object(sandbox,'process_dead',return_value=False),patch.object(sandbox,'terminate_dead_helper',return_value=True):
+                sandbox.backup(j,target);target.write_bytes(b'changed')
+                result=sandbox.restore_contents(j)
+                self.assertEqual(result['leftover_dead_pids'],[123]);self.assertEqual(target.read_bytes(),b'original')
+                self.assertEqual(json.loads(sandbox.JOURNAL.read_text())['dead_processes'],[info])
+
     def test_stale_watchdog_cannot_stop_a_new_session(self):
         with tempfile.TemporaryDirectory() as folder:
             journal=Path(folder)/'journal';journal.write_text(json.dumps({'session':'new','restored':False}))

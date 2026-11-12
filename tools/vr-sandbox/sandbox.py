@@ -48,6 +48,17 @@ kernel.WaitForSingleObject.argtypes = [C.c_void_p, C.c_uint32]
 kernel.ReleaseMutex.argtypes = [C.c_void_p]
 kernel.CloseHandle.argtypes = [C.c_void_p]
 
+def unit_rotation(values):
+    norm=math.sqrt(sum(x*x for x in values))
+    if norm<1e-8:raise ValueError('zero quaternion')
+    q=[x/norm for x in values]
+    # A literal zero W at a half-turn makes VRChat's native hand/camera snap,
+    # while cos(pi/2) at the same orientation does not (live matrix-b4/b5).
+    # Use the continuous trigonometric representation. The angular change is
+    # below double precision at this orientation; the driver remains dev-only.
+    if q[0]==0:q[0]=math.cos(math.pi/2)
+    return q
+
 def processes():
     result=[]
     for p in psutil.process_iter(['pid','name']):
@@ -354,9 +365,7 @@ class Session:
                 seconds = float(args.get('duration_s',0))
                 if len(target)!=3 or len(q)!=4 or not all(math.isfinite(float(x)) for x in target+q) or not 0<=seconds<=30:
                     raise ValueError('finite position[3], quaternion[w,x,y,z], duration 0..30 required')
-                norm = math.sqrt(sum(x*x for x in q))
-                if norm<1e-8: raise ValueError('zero quaternion')
-                q=[x/norm for x in q]
+                q=unit_rotation(q)
                 p0,q0=list(d.p),list(d.q)
                 if sum(a*b for a,b in zip(q,q0))<0:q=[-x for x in q]
                 start=time.monotonic()

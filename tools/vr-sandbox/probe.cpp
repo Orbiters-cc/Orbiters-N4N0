@@ -11,24 +11,32 @@
 #include "vendor/openvr.h"
 using Microsoft::WRL::ComPtr;
 static void check(HRESULT h) {if(FAILED(h))throw std::runtime_error("HRESULT "+std::to_string((unsigned long)h));}
-static void save(const wchar_t *path,ID3D11Device *dev,ID3D11DeviceContext *ctx,ID3D11Texture2D *texture,double *copied_at=nullptr) {
+struct Pixels {unsigned width,height;DXGI_FORMAT format;std::vector<unsigned char> rgba;};
+static Pixels read_pixels(ID3D11Device *dev,ID3D11DeviceContext *ctx,ID3D11Texture2D *texture,double *copied_at=nullptr) {
     D3D11_TEXTURE2D_DESC desc;texture->GetDesc(&desc);desc.Usage=D3D11_USAGE_STAGING;desc.BindFlags=0;desc.MiscFlags=0;desc.CPUAccessFlags=D3D11_CPU_ACCESS_READ;
     ComPtr<ID3D11Texture2D> stage;check(dev->CreateTexture2D(&desc,nullptr,&stage));ctx->CopyResource(stage.Get(),texture);
     D3D11_MAPPED_SUBRESOURCE data{};check(ctx->Map(stage.Get(),0,D3D11_MAP_READ,0,&data));
     if(copied_at){LARGE_INTEGER counter,frequency;QueryPerformanceCounter(&counter);QueryPerformanceFrequency(&frequency);*copied_at=double(counter.QuadPart)/frequency.QuadPart;}
+    Pixels result{desc.Width,desc.Height,desc.Format,std::vector<unsigned char>(size_t(desc.Width)*desc.Height*4)};
+    bool bgra=desc.Format==DXGI_FORMAT_B8G8R8A8_UNORM||desc.Format==DXGI_FORMAT_B8G8R8A8_UNORM_SRGB||desc.Format==DXGI_FORMAT_B8G8R8A8_TYPELESS;
+    bool rgb=desc.Format==DXGI_FORMAT_R8G8B8A8_UNORM||desc.Format==DXGI_FORMAT_R8G8B8A8_UNORM_SRGB||desc.Format==DXGI_FORMAT_R8G8B8A8_TYPELESS;
+    if(!bgra&&!rgb){ctx->Unmap(stage.Get(),0);throw std::runtime_error("Unsupported mirror format "+std::to_string(desc.Format));}
+    for(unsigned y=0;y<desc.Height;++y)for(unsigned x=0;x<desc.Width;++x){auto src=(unsigned char*)data.pData+y*data.RowPitch+x*4;auto dst=result.rgba.data()+(y*desc.Width+x)*4;dst[0]=src[bgra?2:0];dst[1]=src[1];dst[2]=src[bgra?0:2];dst[3]=255;}
+    ctx->Unmap(stage.Get(),0);return result;
+}
+static void write_png(const wchar_t *path,const Pixels &pixels) {
     ComPtr<IWICImagingFactory> factory;check(CoCreateInstance(CLSID_WICImagingFactory,nullptr,CLSCTX_INPROC_SERVER,IID_PPV_ARGS(&factory)));
     ComPtr<IWICStream> stream;check(factory->CreateStream(&stream));check(stream->InitializeFromFilename(path,GENERIC_WRITE));
     ComPtr<IWICBitmapEncoder> encoder;check(factory->CreateEncoder(GUID_ContainerFormatPng,nullptr,&encoder));check(encoder->Initialize(stream.Get(),WICBitmapEncoderNoCache));
-    ComPtr<IWICBitmapFrameEncode> frame;check(encoder->CreateNewFrame(&frame,nullptr));check(frame->Initialize(nullptr));check(frame->SetSize(desc.Width,desc.Height));
+    ComPtr<IWICBitmapFrameEncode> frame;check(encoder->CreateNewFrame(&frame,nullptr));check(frame->Initialize(nullptr));check(frame->SetSize(pixels.width,pixels.height));
     auto format=GUID_WICPixelFormat32bppRGBA;check(frame->SetPixelFormat(&format));
-    std::vector<unsigned char> rgba(desc.Width*desc.Height*4);
-    bool bgra=desc.Format==DXGI_FORMAT_B8G8R8A8_UNORM||desc.Format==DXGI_FORMAT_B8G8R8A8_UNORM_SRGB||desc.Format==DXGI_FORMAT_B8G8R8A8_TYPELESS;
-    bool rgb=desc.Format==DXGI_FORMAT_R8G8B8A8_UNORM||desc.Format==DXGI_FORMAT_R8G8B8A8_UNORM_SRGB||desc.Format==DXGI_FORMAT_R8G8B8A8_TYPELESS;
-    if(!bgra&&!rgb)throw std::runtime_error("Unsupported mirror format "+std::to_string(desc.Format));
-    for(unsigned y=0;y<desc.Height;++y)for(unsigned x=0;x<desc.Width;++x){auto src=(unsigned char*)data.pData+y*data.RowPitch+x*4;auto dst=rgba.data()+(y*desc.Width+x)*4;dst[0]=src[bgra?2:0];dst[1]=src[1];dst[2]=src[bgra?0:2];dst[3]=255;}
-    ctx->Unmap(stage.Get(),0);check(frame->WritePixels(desc.Height,desc.Width*4,(UINT)rgba.size(),rgba.data()));check(frame->Commit());check(encoder->Commit());
-    std::cout<<"{\"width\":"<<desc.Width<<",\"height\":"<<desc.Height<<",\"format\":"<<desc.Format<<"}";
+    check(frame->WritePixels(pixels.height,pixels.width*4,(UINT)pixels.rgba.size(),const_cast<unsigned char*>(pixels.rgba.data())));check(frame->Commit());check(encoder->Commit());
+    std::cout<<"{\"width\":"<<pixels.width<<",\"height\":"<<pixels.height<<",\"format\":"<<pixels.format<<"}";
 }
+static void save(const wchar_t *path,ID3D11Device *dev,ID3D11DeviceContext *ctx,ID3D11Texture2D *texture,double *copied_at=nullptr) {
+    write_png(path,read_pixels(dev,ctx,texture,copied_at));
+}
+
 int wmain(int argc,wchar_t **argv) {
     if(argc<2)return 2;
     CoInitializeEx(nullptr,COINIT_MULTITHREADED);

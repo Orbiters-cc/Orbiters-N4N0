@@ -7,6 +7,16 @@ import unittest
 from unittest.mock import patch
 import sandbox
 
+class RotationTests(unittest.TestCase):
+    def test_half_turn_uses_continuous_representation_without_changing_orientation(self):
+        import math
+        for raw in [[0,1,0,0],[0,0,.9238795325,.3826834324],[0,0,-.9238795325,-.3826834324]]:
+            q=sandbox.unit_rotation(raw);n=math.sqrt(sum(x*x for x in raw));expected=[x/n for x in raw]
+            self.assertNotEqual(q[0],0)
+            self.assertLess(sum((a-b)**2 for a,b in zip(q,expected)),1e-28)
+            self.assertAlmostEqual(sum(x*x for x in q),1,places=14)
+        with self.assertRaisesRegex(ValueError,'zero quaternion'):sandbox.unit_rotation([0,0,0,0])
+
 class RecoveryTests(unittest.TestCase):
     def test_refusing_an_existing_vr_session_never_opens_device_ipc(self):
         with patch.object(sandbox,'processes',return_value=[{'pid':1,'name':'VRChat.exe'}]),patch.object(sandbox.mmap,'mmap') as mapping:

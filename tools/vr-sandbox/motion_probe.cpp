@@ -26,6 +26,9 @@ int wmain(int argc,wchar_t **argv){
         Sleep(250);
         const std::wstring prefix=argv[1];std::ofstream log(prefix+L"-motion.jsonl");if(!log)throw std::runtime_error("cannot create motion manifest");log<<std::setprecision(12);
         std::cout<<"{\"ready\":true}"<<std::endl;
+        struct Pending {std::wstring path;Pixels pixels;};
+        std::vector<Pending> pending;pending.reserve(frames*2);
+        size_t bytes=0;
         const double began=seconds();
         for(int frame=0;frame<frames;++frame){
             double target=began+duration*frame/(frames-1);while(seconds()<target)std::this_thread::sleep_for(std::chrono::milliseconds(1));
@@ -37,10 +40,16 @@ int wmain(int argc,wchar_t **argv){
                 for(int k=0;k<2;++k){if(k)log<<",";auto index=system->GetTrackedDeviceIndexForControllerRole(k?vr::TrackedControllerRole_RightHand:vr::TrackedControllerRole_LeftHand);if(index>=64||!poses[index].bPoseIsValid)log<<"null";else matrix(log,poses[index].mDeviceToAbsoluteTracking);}log<<"],\"overlays\":[";
                 bool first=true;for(auto name:{"CameraPeople","CameraWorld","CameraRecord","CameraQr"}){std::string key=std::string("cc.orbiters.desktop.orbit.")+name;vr::VROverlayHandle_t h;if(vr::VROverlay()->FindOverlay(key.c_str(),&h)!=vr::VROverlayError_None)continue;float width;vr::VROverlay()->GetOverlayWidthInMeters(h,&width);vr::HmdMatrix34_t m;vr::ETrackingUniverseOrigin origin;vr::VROverlay()->GetOverlayTransformAbsolute(h,&origin,&m);if(!first)log<<",";first=false;log<<"{\"key\":"<<std::quoted(key)<<",\"visible\":"<<(vr::VROverlay()->IsOverlayVisible(h)?"true":"false")<<",\"width_m\":"<<width<<",\"transform\":";matrix(log,m);log<<"}";}log<<"]";
                 wchar_t suffix[64];swprintf_s(suffix,L"-%03d-%s.png",frame,eye?L"right":L"left");std::wstring path=prefix+suffix;double copied=0;
-                save(path.c_str(),dev.Get(),ctx.Get(),textures[eye].Get(),&copied);std::cout<<std::endl;
+                auto pixels=read_pixels(dev.Get(),ctx.Get(),textures[eye].Get(),&copied);
+                bytes+=pixels.rgba.size();
+                if(bytes>size_t(2)*1024*1024*1024)throw std::runtime_error("Capture exceeds 2 GiB raw memory budget; reduce frames");
+                pending.push_back({path,std::move(pixels)});
                 log<<",\"copied_qpc\":"<<copied<<",\"done_qpc\":"<<seconds()<<",\"path\":"<<std::quoted(utf8(path))<<"}"<<std::endl;
             }
         }
+        // PNG encoding is deliberately outside the timed sampling interval.
+        // Keep full native pixels, with a bounded raw buffer, then encode them.
+        for(auto &item:pending){write_png(item.path.c_str(),item.pixels);std::cout<<std::endl;item.pixels.rgba.clear();item.pixels.rgba.shrink_to_fit();}
         for(auto view:views)if(view)vr::VRCompositor()->ReleaseMirrorTextureD3D11(view);vr::VR_Shutdown();return 0;
     }catch(const std::exception &e){std::cerr<<e.what();for(auto view:views)if(view)vr::VRCompositor()->ReleaseMirrorTextureD3D11(view);vr::VR_Shutdown();return 4;}
 }

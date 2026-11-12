@@ -1859,11 +1859,12 @@ mod tests {
 
     #[test]
     fn compositor_backlog_uses_the_delay_of_the_visible_submission() {
-        let mirror=Mirror::whole_eye(QUEST_PRO);let size=[1620.,1800.];let eye=STILL;
-        let mut panel=STILL;panel.m[2][3]=-1.;let unit=0.001;
-        let mut follow=Follow::default();follow.attach(panel,unit);follow.held=Some((1,STILL));
+        let identity=Matrix34 { m:[[1.,0.,0.,0.],[0.,1.,0.,0.],[0.,0.,1.,0.]] };
+        let mirror=Mirror::whole_eye(QUEST_PRO);let size=[1620.,1800.];let eye=identity;
+        let mut panel=identity;panel.m[2][3]=-1.;let unit=0.001;
+        let mut follow=Follow::default();follow.attach(panel,unit);follow.held=Some((1,identity));
         let pixel=|x:f32,y:f32|[(x-mirror.from[0])/mirror.spans[0]*size[0],(-y-mirror.from[1])/mirror.spans[1]*size[1]];
-        follow.calibrate_record(pixel(-0.28,-0.04),size,mirror,&eye,[None,Some(STILL)],true);
+        follow.calibrate_record(pixel(-0.28,-0.04),size,mirror,&eye,[None,Some(identity)],true);
         // These outputs were submitted with zero delay. Recognition is delayed
         // until a newer control value has already risen to 80ms.
         for k in 0..=5 {
@@ -1873,7 +1874,7 @@ mod tests {
         follow.scene_ages=[0.08;5];follow.scene_age_count=5;follow.scene_age_next=0;
         let captured=std::time::Instant::now();
         for k in 0..=5 {
-            let samples:Vec<_>=(0..=10).map(|i| {let mut hand=STILL;hand.m[0][3]=0.1+k as f32*0.01-i as f32*0.01;(i as f32*0.01,[None,Some(hand)])}).collect();
+            let samples:Vec<_>=(0..=10).map(|i| {let mut hand=identity;hand.m[0][3]=0.1+k as f32*0.01-i as f32*0.01;(i as f32*0.01,[None,Some(hand)])}).collect();
             let native=follow.search_hint(size,mirror,&eye,samples[6].1).unwrap();
             let record=pixel(0.08+k as f32*0.01-0.28,-0.04);
             follow.composited_clock(0.06,native.x,record,size,mirror,&eye,&samples,captured);

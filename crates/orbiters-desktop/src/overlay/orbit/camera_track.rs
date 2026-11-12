@@ -513,6 +513,45 @@ fn outline_search(light: &Light, f: &Found, general:bool,gradient:bool) -> Optio
     let model=[[-205.,-OUTLINE_HALF_HEIGHT],[205.,-OUTLINE_HALF_HEIGHT],[205.,OUTLINE_HALF_HEIGHT],[-205.,OUTLINE_HALF_HEIGHT]];
     let mut rails=Vec::new();
     if gradient {for level in BRIGHT {blobs(light,level,&mut rails);}}
+    if gradient {
+        let on=|p:[f32;2]| {
+            let d=[p[0]-f.middle[0],p[1]-f.middle[1]];
+            [(d[0]*f.right[0]+d[1]*f.right[1])/f.across,(d[0]*f.down[0]+d[1]*f.down[1])/f.tall]
+        };
+        let rails:Vec<_>=rails.iter().filter(|b| {
+            let p=on(b.middle);
+            (80.0..=210.0).contains(&p[0]) && (-70.0..=100.0).contains(&p[1]) && b.long>b.short*4. && b.long>12.*scale
+        }).collect();
+        let intersect=|a:&Edge,b:&Edge| -> Option<[f32;2]> {
+            let det=a.u[0]*b.u[1]-a.u[1]*b.u[0];if det.abs()<0.2{return None;}
+            let q=[b.p[0]-a.p[0],b.p[1]-a.p[1]];
+            let t=(q[0]*b.u[1]-q[1]*b.u[0])/det;
+            Some([a.p[0]+t*a.u[0],a.p[1]+t*a.u[1]])
+        };
+        let mut best=None;
+        for top in &edges[0] {for bottom in &edges[2] {for left in &edges[3] {
+        for one in &rails {for two in &rails {
+            let separation=on(two.middle)[0]-on(one.middle)[0];
+            if !(10.0..=40.0).contains(&separation){continue;}
+            let solve=|| -> Option<_> {
+                let lines=[*left,Edge{p:one.middle,u:one.along,error:0.5},Edge{p:two.middle,u:two.along,error:0.5}];
+                let mut points=[([0.;2],[0.;2]);10];
+                for (i,(line,x)) in lines.iter().zip([-205.,164.,186.]).enumerate() {
+                    points[i*2]=([x,-OUTLINE_HALF_HEIGHT],intersect(top,line)?);
+                    points[i*2+1]=([x,OUTLINE_HALF_HEIGHT],intersect(bottom,line)?);
+                }
+                let h=fit(&points[..6])?;
+                let mut score=0.;
+                for (p,q) in [(PANEL_X,f.x),(PANEL_CHEVRON,f.chevron)] {
+                    let r=project(h,p);let error=(r[0]-q[0]).hypot(r[1]-q[1]);
+                    if error>16.*scale{return None;}score+=error*error;
+                }
+                Some((score,(h,top.error.max(bottom.error).max(left.error).max(0.5),(6,points))))
+            };
+            if let Some((score,result))=solve() {if best.as_ref().is_none_or(|(old,_)|score<*old){best=Some((score,result));}}
+        }}}}}
+        if let Some((_,result))=best{return Some(result);}
+    }
     let mut best = None;
     for a in &edges[0] {for b in &edges[1] {for c in &edges[2] {for d in &edges[3] {
     let lines=[a,b,c,d];

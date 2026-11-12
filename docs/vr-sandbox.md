@@ -14,6 +14,7 @@ From this worktree, use Windows Python with `psutil` and Visual Studio C++ tools
 
 ```powershell
 & tools/vr-sandbox/build.ps1
+& tools/vr-sandbox/build-motion.ps1
 python tools/vr-sandbox/sandbox.py start
 ```
 
@@ -22,6 +23,9 @@ The controller stays running. In another terminal, or an agent tool call, use
 Python's `sandbox.remote({...})` directly to avoid shell JSON quoting.
 
 Build Rust through the shared `deskcargo.sh` queue, with its existing target.
+Stop and restore your SteamVR/VRChat session before compiling. Keep live capture
+batches short, then restore and release the lock so other streams get a turn.
+Do not delete another stream's build artifacts to make space.
 The sandbox bridge adapter exists only in debug builds and only when
 `ORBITERS_VR_SANDBOX_ROOT` points to this worktree's `tools/vr-sandbox` directory.
 The normal bridge's authentication and feature gate remain in effect.
@@ -44,6 +48,10 @@ development process. Its actions are:
 | `pose` | `device`: head/left/right, `position`: Standing metres, `rotation`: quaternion **w,x,y,z**, optional `duration_s` 0–30. A duration interpolates smoothly at 144 updates/second. |
 | `input` | `device`: left/right, `input`, `value`; optional `duration_s` releases it after a bounded press. Otherwise release explicitly with zero. |
 | `capture` | `output_prefix`; saves `-left.png` and `-right.png` from SteamVR's composited eye textures, including overlays. |
+| `motion_capture` | `device`, optional target `position`/`rotation`, `duration_s`, `frames` 3-80, `output_prefix`; timed native eye PNG pairs plus JSONL with QPC readback intervals, scene frame, head/hands, projection and overlay readback. |
+| `view` | Head, eye transforms and projection tangents from SteamVR. |
+| `menu` / `flick` / `camera` | Quick Menu, held Action Menu, stick-release selection, and the camera route described below. |
+| `camera_mode` / `camera_fly` | Documented OSC mode 0-6 or Flying boolean; inspect the actual native UI after writing. |
 | `overlays` | `overlay_keys`; SteamVR readback of existing handles, visibility, alpha, width and absolute transforms. Camera keys start `cc.orbiters.desktop.orbit.Camera`. |
 | `stop` | Stops owned VR processes, restores the journal and releases the lock. |
 | `restore` | Standalone recovery, including after the controlling app crashes. |
@@ -144,8 +152,28 @@ Before `stop` or standalone `restore`, read the lock and ensure it is your
 session. These commands recover the current journal; never use them to terminate
 another stream's live test. Wait for that stream to finish restoration.
 
-The initial camera fixes and their observed failures remain in the feedback
-capture directory. The latest rigid solver requires a new queued build and live
-matrix before acceptance. See `done2-sandbox-camera.md` there for the precise
-implemented/tested/blocked boundary; do not give this experimental app to the
-owner as a verified camera fix.
+The camera implementation and its observed failures remain in the feedback
+capture directory. See `done2-sandbox-camera.md` there for the precise
+implemented/tested boundary; sandbox readiness alone is not camera acceptance.
+
+## Motion evidence
+
+The motion probe queues native RGBA readbacks during sampling and encodes PNGs
+only afterward. Its raw-buffer budget is 2 GiB; 48 pairs at the tested 1620x1800
+resolution use about 1.1 GiB. Requested duration and frame count are targets:
+measure actual QPC intervals from the manifest. The local dense run achieved
+about 22 eye pairs/second. Eyes remain sequential, including during motion.
+
+Activating an app waits for the installed service to quit. Wait for the bridge
+and its signed-in account state before requesting VRChat. A successful launch
+request is not proof of arrival: verify the strict private instance and zero
+other users with `get_state`.
+
+Pose quaternions are normalized. At a mathematically exact half-turn, a literal
+zero scalar component is represented as `cos(pi/2)` to avoid a native VRChat hand
+snap observed with the zero endpoint. This changes orientation below meaningful
+double precision; it affects only this developer controller, never real tracking.
+
+The supervisor enumerates process names with a Windows snapshot, then queries
+creation times only for runtime processes. Snapshot failure is an error. Owned
+processes are still identified by PID plus creation time, not names alone.

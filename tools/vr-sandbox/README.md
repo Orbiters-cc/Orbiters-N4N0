@@ -24,6 +24,6 @@ The OpenVR driver header in `vendor` is Valve's v2.12.14 header, BSD-3-Clause;
 its license is retained beside it. It is used to compile the development driver
 against the published C++ ABI rather than inventing server vtable slots.
 
-Implementation and live validation are in progress; this file is not a readiness
+The real SteamVR/VRChat bench has been exercised; this file is not a readiness
 claim. Only `sandbox-ready.md` in the feedback evidence directory declares a
 working sandbox after a real compositor run.

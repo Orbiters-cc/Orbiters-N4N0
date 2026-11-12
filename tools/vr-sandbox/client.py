@@ -3,11 +3,17 @@ import importlib.util
 import json
 from pathlib import Path
 import time
+import sys
 
 repo=Path(__file__).parents[2]
 spec=importlib.util.spec_from_file_location('bridge_live',repo/'scripts/bridge-live.py')
 module=importlib.util.module_from_spec(spec)
-spec.loader.exec_module(module)
+previous_bytecode=sys.dont_write_bytecode
+try:
+    sys.dont_write_bytecode=True
+    spec.loader.exec_module(module)
+finally:
+    sys.dont_write_bytecode=previous_bytecode
 
 class Bench:
     def __init__(self):self.bridge=module.Bridge()

@@ -5,7 +5,7 @@ and two `oculus_touch` controllers. It is separate from the tracking smoothing
 driver and is not shipped in the installer. Its driver refuses activation without
 a shared-memory session owned by a live controller process.
 
-This work is still being validated. The feedback directory's `sandbox-ready.md`
+The feedback directory's `sandbox-ready.md`
 is the readiness handoff; this guide alone is not a completion claim.
 
 ## Build and start
@@ -128,3 +128,24 @@ grip with zero. These operate real VRChat; pose commands alone do not prove a gr
 The app activation journals its settings, bridge/client configuration and installed
 service before replacement. Stop/restore returns the installed service. It is a
 development bootstrap operation, not a publicly exposed MCP action.
+
+## Current verification boundary
+
+The sandbox has run real SteamVR, real VRChat in a signed-in strict private
+instance, and the application's overlays in composited eye captures. Normal
+restoration verified eleven journal entries; a supervisor crash test verified
+seven SteamVR entries and lock release without MCP. This is bench validation,
+not completion of the camera attachment acceptance matrix.
+
+`camera_mode` accepts integer `mode` 0 through 6 after opening the camera through
+the wheel. The tested client displays Photo, Stream, Animated (value 3),
+Multilayer, Print and Drone. A mode write is a request; inspect the native label.
+Before `stop` or standalone `restore`, read the lock and ensure it is your
+session. These commands recover the current journal; never use them to terminate
+another stream's live test. Wait for that stream to finish restoration.
+
+The initial camera fixes and their observed failures remain in the feedback
+capture directory. The latest rigid solver requires a new queued build and live
+matrix before acceptance. See `done2-sandbox-camera.md` there for the precise
+implemented/tested/blocked boundary; do not give this experimental app to the
+owner as a verified camera fix.

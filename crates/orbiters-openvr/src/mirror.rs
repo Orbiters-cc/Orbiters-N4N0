@@ -77,6 +77,28 @@ impl EyeReader {
     }
 
     fn copy(&self, raw: &*mut c_void, area: Option<[u32; 4]>) -> Result<EyePicture, String> {
+        let queued=self.stage(raw,area)?;
+        self.finish(queued)
+    }
+
+    /// Queue both eyes before either CPU Map waits on the GPU. Sequential
+    /// read_part calls can straddle a compositor update on every attempt.
+    /// The index brackets submission of the copies, not their later readback.
+    pub fn read_pair(&self,source:MirrorSource,areas:[Option<[u32;4]>;2]) -> Result<([EyePicture;2],Option<u32>),String> {
+        let before=source.frame_index();
+        let left=unsafe {source.mirror_d3d11(Eye::Left,self.device.as_raw())}.map_err(|e|format!("left mirror: {e}"))?;
+        let right=match unsafe {source.mirror_d3d11(Eye::Right,self.device.as_raw())} {
+            Ok(raw)=>raw,
+            Err(e)=>{unsafe {source.release_mirror_d3d11(left)};return Err(format!("right mirror: {e}"));}
+        };
+        let staged=self.stage(&left,areas[0]).and_then(|left|self.stage(&right,areas[1]).map(|right|[left,right]));
+        let after=source.frame_index();
+        unsafe {source.release_mirror_d3d11(left);source.release_mirror_d3d11(right);}
+        let [left,right]=staged?;
+        Ok(([self.finish(left)?,self.finish(right)?],before.filter(|_|before==after)))
+    }
+
+    fn stage(&self, raw: &*mut c_void, area: Option<[u32; 4]>) -> Result<QueuedEye, String> {
         // SAFETY: SteamVR's view, alive until it is released after this call; borrowed, never released by us.
         let view = unsafe { ID3D11ShaderResourceView::from_raw_borrowed(raw) }.ok_or("no mirror view")?; // i18n: not shown (a graphics call named in an error detail)
         // SAFETY: a valid view.
@@ -110,14 +132,18 @@ impl EyeReader {
         // SAFETY: valid description and out parameter.
         unsafe { self.device.CreateTexture2D(&staging_desc, None, Some(&mut staging)) }.map_err(|e| format!("CreateTexture2D: {e}"))?;
         let staging = staging.ok_or("no staging texture")?; // i18n: not shown (a graphics call named in an error detail)
-        let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
         let part = D3D11_BOX { left: x0, top: y0, front: 0, right: x0 + part_w, bottom: y0 + part_h, back: 1 };
         // SAFETY: both textures are this device's, of one format, and the box lies within the source and fits the copy; Map waits for the copy.
         unsafe {
             self.context.CopySubresourceRegion(&staging, 0, 0, 0, 0, &texture, 0, Some(&part));
-            self.context.Map(&staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped))
         }
-        .map_err(|e| format!("Map: {e}"))?; // i18n: not shown (a graphics call named in an error detail)
+        Ok(QueuedEye {staging,from:[x0,y0],size:[part_w,part_h],whole:[desc.Width,desc.Height],swap})
+    }
+
+    fn finish(&self,queued:QueuedEye) -> Result<EyePicture,String> {
+        let QueuedEye {staging,from:[x0,y0],size:[part_w,part_h],whole,swap}=queued;
+        let mut mapped=D3D11_MAPPED_SUBRESOURCE::default();
+        unsafe {self.context.Map(&staging,0,D3D11_MAP_READ,0,Some(&mut mapped))}.map_err(|e|format!("Map: {e}"))?; // i18n: not shown (a graphics call named in an error detail)
         let (w, h) = (part_w as usize, part_h as usize);
         let mut rgba = vec![0u8; w * h * 4];
         for y in 0..h {
@@ -131,6 +157,8 @@ impl EyeReader {
         }
         // SAFETY: mapped above.
         unsafe { self.context.Unmap(&staging, 0) };
-        Ok(EyePicture { width: part_w, height: part_h, rgba, from: [x0, y0], whole: [desc.Width, desc.Height] })
+        Ok(EyePicture { width: part_w, height: part_h, rgba, from: [x0, y0], whole })
     }
 }
+
+struct QueuedEye {staging:ID3D11Texture2D,from:[u32;2],size:[u32;2],whole:[u32;2],swap:bool}

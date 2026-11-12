@@ -216,8 +216,14 @@ fn run(seen: &Mutex<Option<Seen>>, stop: &AtomicBool, health: &Mutex<Health>, hi
                         let a = camera_track::around(&f, whole[0] as usize, whole[1] as usize);
                         (a[2] > 0 && a[3] > 0).then_some([a[0] as u32, a[1] as u32, a[2] as u32, a[3] as u32])
                     });
-                    let frame_before=mirror.frame_index();
-                    let left=reader.read_part(mirror, Eye::Left, area);
+                    let right_area=last_right.map(|(f,size)| {
+                        let a=camera_track::around(&f,size[0] as usize,size[1] as usize);
+                        [a[0] as u32,a[1] as u32,a[2] as u32,a[3] as u32]
+                    });
+                    let (left,right_picture,paired)=match reader.read_pair(mirror,[area,right_area]) {
+                        Ok(([left,right],index))=>(Ok(left),Some(right),index),
+                        Err(error)=>(Err(error),None,None),
+                    };
                     let guided=left.as_ref().ok().and_then(|picture|hint.and_then(|hint|camera_track::glyphs_near(&picture.rgba,picture.width as usize,picture.height as usize,picture.width as usize*4,[picture.from[0] as f32,picture.from[1] as f32],hint)));
                     if let (Some(found),Ok(picture))=(guided,left.as_ref()) {
                         {let mut h=health.lock().unwrap_or_else(|e|e.into_inner());h.framed=Some(began);h.found=Some(began);h.looks=h.looks.saturating_add(1);h.finds=h.finds.saturating_add(1);}
@@ -229,24 +235,13 @@ fn run(seen: &Mutex<Option<Seen>>, stop: &AtomicBool, health: &Mutex<Health>, hi
                             std::thread::sleep(Duration::from_millis(16).saturating_sub(began.elapsed()));continue;
                         }
                     }
-                    refined=Instant::now();
-                    // Only acquire stereo after a left-eye candidate. Read both eyes before CPU
-                    // recognition, and accept metric correspondence only within one compositor frame.
-                    let right_at=Instant::now();
-                    let right_picture=last.and_then(|_| {
-                        let area=last_right.map(|(f,size)| {
-                            let a=camera_track::around(&f,size[0] as usize,size[1] as usize);
-                            [a[0] as u32,a[1] as u32,a[2] as u32,a[3] as u32]
-                        });
-                        reader.read_part(mirror,Eye::Right,area).ok()
-                    });
-                    let frame_after=mirror.frame_index();
+                    let right_at=began;
                     let right=right_picture.and_then(|picture| {
                         let found=camera_track::find(&picture.rgba,picture.width as usize,picture.height as usize,picture.width as usize*4)
                             .map(|f|f.shifted([picture.from[0] as f32,picture.from[1] as f32]));
                         last_right=found.map(|f|(f,picture.whole));
-                        if frame_before.is_none() || frame_before!=frame_after { return None; }
-                        found.map(|found|RightSeen {found,size:[picture.whole[0] as f32,picture.whole[1] as f32],at:right_at,frame_index:frame_after.unwrap()})
+                        if paired.is_none() { return None; }
+                        found.map(|found|RightSeen {found,size:[picture.whole[0] as f32,picture.whole[1] as f32],at:right_at,frame_index:paired.unwrap()})
                     });
                     match left {
                         Ok(picture) => {
@@ -271,6 +266,7 @@ fn run(seen: &Mutex<Option<Seen>>, stop: &AtomicBool, health: &Mutex<Health>, hi
                             }
                         }
                     }
+                    refined=Instant::now();
                     let every = if last.is_some() { LOOK_EVERY } else { LOOK_WHOLE_EVERY };
                     std::thread::sleep(every.saturating_sub(began.elapsed()));
                 }

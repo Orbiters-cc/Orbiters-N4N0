@@ -1101,6 +1101,10 @@ pub struct Follow {
     grips: [bool; 2],
     grab_candidates: [Option<(Matrix34,Matrix34,Matrix34,u32)>;2],
     image_grabs: [Option<ImageGrab>;2],
+    held_anchors: Option<[[f32;2];2]>,
+    scene_ages: [f32;5],
+    scene_age_count: usize,
+    scene_age_next: usize,
 }
 
 #[derive(Clone,Copy,Debug)]
@@ -1268,7 +1272,7 @@ impl Follow {
     /// reader must still find the actual glyph pixels before a grab is bound.
     pub fn search_hint(&self,size:[f32;2],mirror:Mirror,eye:&Matrix34,hands:[Option<Matrix34>;2]) -> Option<Found> {
         let (frame,unit,anchors)=if let Some((hand,_))=self.held {
-            let (local,unit)=self.at?;(then(&hands[hand]?,&local),unit,[PANEL_X,PANEL_CHEVRON])
+            let (local,unit)=self.at?;(then(&hands[hand]?,&local),unit,self.held_anchors.unwrap_or([PANEL_X,PANEL_CHEVRON]))
         } else {
             let (hand,candidate)=self.image_grabs.iter().enumerate().find_map(|(i,c)|c.map(|c|(i,c)))?;
             (then(&hands[hand]?,&candidate.relation),candidate.unit,candidate.anchors)
@@ -1285,6 +1289,35 @@ impl Follow {
         let across=(r[0]-middle[0]).hypot(r[1]-middle[1]);let tall=(d[0]-middle[0]).hypot(d[1]-middle[1]);
         if across<=0. || tall<=0.{return None;}
         Some(Found{perspective:None,lines:None,landmarks:None,residual_px:f32::INFINITY,x:pixel(anchors[0])?,chevron:pixel(anchors[1])?,middle,right:[(r[0]-middle[0])/across,(r[1]-middle[1])/across],down:[(d[0]-middle[0])/tall,(d[1]-middle[1])/tall],across,tall})
+    }
+
+    /// The controller time actually visible in the scene, measured from two
+    /// native camera glyphs. No age is learned from a stationary/ambiguous hand.
+    /// This compensates VRChat's scene latency rather than making overlays lead it.
+    pub fn match_image_hands(&mut self,found:&Found,size:[f32;2],mirror:Mirror,eye:&Matrix34,samples:&[(f32,[Option<Matrix34>;2])]) -> Option<[Option<Matrix34>;2]> {
+        let mut candidates=Vec::new();
+        for &(age,hands) in samples {
+            if !(0.0..=0.2).contains(&age) {continue;}
+            let Some(predicted)=self.search_hint(size,mirror,eye,hands) else{continue;};
+            let error=predicted.x.into_iter().zip(found.x).chain(predicted.chevron.into_iter().zip(found.chevron)).map(|(a,b)|(a-b).powi(2)).sum::<f32>();
+            candidates.push((error,age,hands,predicted));
+        }
+        let first=candidates.first()?.3;
+        let identifiable=candidates.iter().any(|(_,_,_,p)|(p.x[0]-first.x[0]).hypot(p.x[1]-first.x[1])>=3. && (p.chevron[0]-first.chevron[0]).hypot(p.chevron[1]-first.chevron[1])>=3.);
+        if !identifiable {return None;}
+        let (error,age,hands,_)=candidates.into_iter().min_by(|a,b|a.0.total_cmp(&b.0))?;
+        // Same six-pixel two-glyph agreement required to prove the rigid grab.
+        if error>2.*6f32.powi(2) {return None;}
+        self.scene_ages[self.scene_age_next]=age;
+        self.scene_age_next=(self.scene_age_next+1)%self.scene_ages.len();
+        self.scene_age_count=(self.scene_age_count+1).min(self.scene_ages.len());
+        Some(hands)
+    }
+    pub fn scene_age(&self) -> Option<f32> {
+        if self.scene_age_count==0 {return None;}
+        let mut ages=self.scene_ages;
+        ages[..self.scene_age_count].sort_by(f32::total_cmp);
+        Some(ages[self.scene_age_count/2])
     }
 
     /// Border fitting may miss during a pickup. Verify the measured plane's
@@ -1314,6 +1347,7 @@ impl Follow {
             });
             if consistent {
                 self.held=Some((hand,pose));self.at=Some((candidate.relation,candidate.unit));self.wanted=self.at;self.unsure=None;self.grips=grips;
+                self.held_anchors=Some(candidate.anchors);
                 self.image_grabs=[None;2];self.grab_candidates=[None;2];return Some(hand);
             }
         }
@@ -1651,6 +1685,28 @@ mod tests {
     }
 
     /// How long a look takes on 1280 x 720, whole and around the panel. Printed: a debug build, so far slower than what ships.
+    #[test]
+    fn native_glyph_motion_selects_scene_time_not_the_newest_controller_pose() {
+        let mirror=Mirror::whole_eye(QUEST_PRO);let size=[1620.,1800.];let eye=STILL;
+        let mut panel=STILL;panel.m[2][3]=-1.;let unit=0.001;
+        let baseline=straight_found(|p| {let world=[p[0]*unit,-p[1]*unit,-1.];[(world[0]-mirror.from[0])/mirror.spans[0]*size[0],(-world[1]-mirror.from[1])/mirror.spans[1]*size[1]]},1.);
+        let mut follow=Follow::default();follow.attach(panel,unit);
+        follow.begin_image_grab(&baseline,size,mirror,&eye,[None,Some(STILL)],[false,true]);
+        let samples:Vec<_>=(0..=10).map(|i| {let mut hand=STILL;hand.m[0][3]=0.1-i as f32*0.01;(i as f32*0.01,[None,Some(hand)])}).collect();
+        let native=follow.search_hint(size,mirror,&eye,samples[6].1).unwrap();
+        let matched=follow.match_image_hands(&native,size,mirror,&eye,&samples).unwrap();
+        assert!((matched[1].unwrap().m[0][3]-0.04).abs()<1e-5);
+        assert!((follow.scene_age().unwrap()-0.06).abs()<1e-5);
+        assert_eq!(follow.observe_image_grab(&native,size,mirror,&eye,matched,[false,true]),Some(1));
+        // Static poses cannot identify latency, and unrelated pixels cannot
+        // manufacture a different clock or camera attachment.
+        let static_samples=vec![(0.,matched),(0.1,matched)];
+        assert!(follow.match_image_hands(&native,size,mirror,&eye,&static_samples).is_none());
+        let mut wrong=native;wrong.x[0]+=500.;wrong.chevron[0]+=500.;
+        assert!(follow.match_image_hands(&wrong,size,mirror,&eye,&samples).is_none());
+        assert!((follow.scene_age().unwrap()-0.06).abs()<1e-5);
+    }
+
     #[test]
     fn how_long_a_look_takes() {
         let [p, _] = headset_pictures();

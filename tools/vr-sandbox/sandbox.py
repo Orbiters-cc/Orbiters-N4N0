@@ -279,7 +279,7 @@ class Session:
             # --quit only signals the service. Wait for its existing processes to
             # exit before launching our binary, or single-instance arbitration can
             # silently discard it while the installed service is still shutting down.
-            previous=[p for p in psutil.process_iter(['exe']) if p.info['exe'] and Path(p.info['exe']).resolve()==install.resolve()]
+            previous=[p for p in psutil.process_iter(['name']) if p.info['name']==install.name and Path(p.exe()).resolve()==install.resolve()]
             subprocess.run([str(install),'--quit'],timeout=20,creationflags=subprocess.CREATE_NO_WINDOW,check=True)
             _,alive=psutil.wait_procs(previous,timeout=20)
             if alive:raise RuntimeError('Installed Orbiters did not finish quitting; sandbox app was not launched')

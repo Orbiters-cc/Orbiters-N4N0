@@ -1078,7 +1078,11 @@ pub struct Follow {
     hand_moving: bool,
     grips: [bool; 2],
     grab_candidates: [Option<(Matrix34,Matrix34,Matrix34,u32)>;2],
+    image_grabs: [Option<ImageGrab>;2],
 }
+
+#[derive(Clone,Copy,Debug)]
+struct ImageGrab { panel:Matrix34,relation:Matrix34,unit:f32,anchors:[[f32;2];2] }
 
 /// Session-only reopening estimate. No guessed pose is ever learned as a fitted pose.
 #[derive(Clone, Debug, Default)]
@@ -1205,6 +1209,65 @@ fn takes(frame: &Matrix34, unit: f32, hand: &Matrix34, pointer: Option<([f32; 3]
 }
 
 impl Follow {
+    /// Begin from an already measured camera, never from hand proximity. A
+    /// later image must prove that its two identity glyphs moved with this hand.
+    pub fn begin_image_grab(&mut self,baseline:&Found,size:[f32;2],mirror:Mirror,eye:&Matrix34,hands:[Option<Matrix34>;2],grips:[bool;2]) {
+        if self.is_held(){return;}
+        let Some((at,unit))=self.at else{return;};let panel=self.in_room(&at);
+        // Intersect the actual glyph pixels with the measured plane. Glyph
+        // raster centroids need not equal the ideal UI design coordinates.
+        let local=undone(&panel);
+        let anchor=|q:[f32;2]| -> Option<[f32;2]> {
+            let t=mirror.tangent(q[0]/size[0],q[1]/size[1]);
+            let ray:[f32;3]=std::array::from_fn(|i|eye.m[i][0]*t[0]-eye.m[i][1]*t[1]-eye.m[i][2]);
+            let denominator=(0..3).map(|i|panel.m[i][2]*ray[i]).sum::<f32>();
+            if denominator.abs()<1e-5{return None;}
+            let distance=(0..3).map(|i|panel.m[i][2]*(panel.m[i][3]-eye.m[i][3])).sum::<f32>()/denominator;
+            if distance<=0.{return None;}
+            let world:[f32;3]=std::array::from_fn(|i|eye.m[i][3]+ray[i]*distance);
+            let p:[f32;2]=std::array::from_fn(|i|local.m[i][3]+(0..3).map(|j|local.m[i][j]*world[j]).sum::<f32>());
+            Some([p[0]/unit,-p[1]/unit])
+        };
+        let Some(anchors)=anchor(baseline.x).zip(anchor(baseline.chevron)).map(|(x,c)|[x,c]) else{return;};
+        for hand in 0..2 {
+            if !grips[hand] {self.image_grabs[hand]=None;continue;}
+            if self.image_grabs[hand].is_none() {if let Some(pose)=hands[hand] {
+                self.image_grabs[hand]=Some(ImageGrab{panel,relation:then(&undone(&pose),&panel),unit,anchors});
+            }}
+        }
+    }
+    /// Border fitting may miss during a pickup. Verify the measured plane's
+    /// predicted two-glyph motion instead; stationary cameras and unrelated
+    /// grips cannot pass the observed-motion check. Capture-time hands only.
+    pub fn observe_image_grab(&mut self,found:&Found,size:[f32;2],mirror:Mirror,eye:&Matrix34,hands:[Option<Matrix34>;2],grips:[bool;2]) -> Option<usize> {
+        if self.is_held(){return None;}
+        let inverse=undone(eye);
+        let pixel=|frame:&Matrix34,unit:f32,p:[f32;2]| -> Option<[f32;2]> {
+            let world:[f32;3]=std::array::from_fn(|i|frame.m[i][3]+frame.m[i][0]*p[0]*unit-frame.m[i][1]*p[1]*unit);
+            let v:[f32;3]=std::array::from_fn(|i|inverse.m[i][3]+(0..3).map(|j|inverse.m[i][j]*world[j]).sum::<f32>());
+            if v[2]>=-0.0001{return None;}
+            let t=[v[0]/-v[2],-v[1]/-v[2]];
+            Some(std::array::from_fn(|i|(t[i]-mirror.from[i])/mirror.spans[i]*size[i]))
+        };
+        for hand in 0..2 {
+            if !grips[hand]{self.image_grabs[hand]=None;continue;}
+            let Some((candidate,pose))=self.image_grabs[hand].zip(hands[hand]) else{continue;};
+            let carried=then(&pose,&candidate.relation);
+            let consistent=candidate.anchors.into_iter().zip([found.x,found.chevron]).all(|(model,actual)| {
+                let Some((before,predicted))=pixel(&candidate.panel,candidate.unit,model).zip(pixel(&carried,candidate.unit,model)) else{return false;};
+                let seen=[actual[0]-before[0],actual[1]-before[1]];
+                let moved=[predicted[0]-before[0],predicted[1]-before[1]];
+                let a=seen[0].hypot(seen[1]);let b=moved[0].hypot(moved[1]);
+                a>=3. && b>=3. && (0.5..=2.).contains(&(a/b)) && seen[0]*moved[0]+seen[1]*moved[1]>0.
+                    && (actual[0]-predicted[0]).hypot(actual[1]-predicted[1])<=6.
+            });
+            if consistent {
+                self.held=Some((hand,pose));self.at=Some((candidate.relation,candidate.unit));self.wanted=self.at;self.unsure=None;self.grips=grips;
+                self.image_grabs=[None;2];self.grab_candidates=[None;2];return Some(hand);
+            }
+        }
+        None
+    }
     /// Express the measured plane in the holding hand at capture time before
     /// carrying it to the current hand. Otherwise even slow motion acquires
     /// the image reader's latency through every visual correction.
@@ -1852,6 +1915,34 @@ mod tests {
                 assert!(stereo_pose(&observations[0],&wrong,sizes,mirrors,eyes,&STILL).is_none());
             } }
         } } }
+    }
+
+    #[test]
+    fn observed_glyph_motion_verifies_a_pickup_without_a_new_border_fit() {
+        let eye=STILL;let mirror=mirror();let size=[1000.,1000.];let unit=PANEL_M/410.;
+        let mut panel=STILL;panel.m[2][3]=-0.65;
+        let pixel=|frame:&Matrix34,p:[f32;2]| {
+            let v=then(&undone(&eye),frame);
+            let q:[f32;3]=std::array::from_fn(|i|v.m[i][3]+v.m[i][0]*p[0]*unit-v.m[i][1]*p[1]*unit);
+            [(q[0]/-q[2]+1.)*500.,(-q[1]/-q[2]+1.)*500.]
+        };
+        let baseline=straight_found(|p|pixel(&panel,p),1.);
+        let mut hand=panel;hand.m[1][3]+=0.3;
+        for moving_camera in [false,true] {
+            let mut f=Follow::default();f.attach(panel,unit);
+            f.begin_image_grab(&baseline,size,mirror,&eye,[None,Some(hand)],[false,true]);
+            let mut moved=hand;moved.m[0][3]+=0.012;
+            let mut seen=panel;if moving_camera {seen.m[0][3]+=0.012;}
+            let found=straight_found(|p|pixel(&seen,p),1.);
+            assert!(found.perspective.is_none(),"the border fit is deliberately absent");
+            assert_eq!(f.observe_image_grab(&found,size,mirror,&eye,[None,Some(moved)],[false,true]),moving_camera.then_some(1));
+            assert_eq!(f.is_held(),moving_camera);
+            if moving_camera {
+                moved.m[0][3]+=0.1;
+                let got=f.step(1./72.,[None,Some(moved)],[false,true],[None;2]).unwrap().0;
+                assert!((got.m[0][3]-0.112).abs()<0.001);
+            }
+        }
     }
 
     #[test]

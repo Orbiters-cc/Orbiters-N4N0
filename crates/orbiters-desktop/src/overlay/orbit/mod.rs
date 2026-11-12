@@ -1730,6 +1730,13 @@ impl Panels {
         panels::CameraNow { finding: self.camera_finding, kit: snap.worn_kit, demo, qr, web, on_the_right: self.camera_right }
     }
 
+    /// Tracking state is part of the painted caption, independently of Facts.
+    fn camera_tracking(&mut self,right:bool,finding:bool) {
+        if (self.camera_right,self.camera_finding)!=(right,finding) {
+            self.camera_right=right;self.camera_finding=finding;self.camera_dirty();
+        }
+    }
+
     /// The camera's parts are painted again: what they show changed.
     fn camera_dirty(&mut self) {
         for panel in self.list.iter_mut().filter(|p| Zone::CAMERA.contains(&p.zone)) {

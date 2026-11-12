@@ -2357,7 +2357,7 @@ mod sandbox_regression {
         let identity=Matrix34 {m:[[1.,0.,0.,0.],[0.,1.,0.,0.],[0.,0.,1.,0.]]};
         let mut eyes=[identity;2];eyes[0].m[0][3]=-0.032;eyes[1].m[0][3]=0.032;
         let mut stereo_failures=Vec::new();
-        for (mode,origins) in [("camera-open-wheel",[[650.,650.],[180.,650.]]),("camera-grab-move",[[650.,650.],[180.,650.]]),("camera-stream-baseline",[[650.,650.],[180.,650.]]),("close-open",[[500.,900.],[0.,900.]]),("close-held",[[700.,800.],[150.,800.]]),("mode-print",[[830.,570.],[350.,570.]]),("mode-drone",[[830.,570.],[350.,570.]])] {
+        for (mode,origins) in [("cold-highlight",[[550.,900.],[0.,900.]]),("camera-open-wheel",[[650.,650.],[180.,650.]]),("camera-grab-move",[[650.,650.],[180.,650.]]),("camera-stream-baseline",[[650.,650.],[180.,650.]]),("close-open",[[500.,900.],[0.,900.]]),("close-held",[[700.,800.],[150.,800.]]),("mode-print",[[830.,570.],[350.,570.]]),("mode-drone",[[830.,570.],[350.,570.]])] {
             let mut pair=Vec::new();
             for (index,eye) in ["left","right"].into_iter().enumerate() {
                 let name=format!("{mode}-{eye}.png");

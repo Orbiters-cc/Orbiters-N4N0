@@ -662,9 +662,6 @@ fn settings_walk_left(snap: &Snapshot) -> bool {
     snap.settings.walk_boost.hand == orbiters_core::settings::Hand::Left
 }
 
-/// Briefly bridge missed visual observations, or follow a verified holding hand.
-/// Closing the camera hides immediately; opening never supplies a guessed pose.
-const CAMERA_LOST_AFTER: Duration = Duration::from_millis(500);
 /// How far within the eye's view the tiles must lie, of its width: its very edge is not seen through the lens.
 const CAMERA_VIEW_MARGIN: f32 = 0.1;
 const CAMERA_LOOKS_TO_SHOW: u32 = 1;
@@ -692,6 +689,9 @@ impl OrbitVr {
     }
 
     fn camera_scale_measured(&self) -> bool {
+        self.camera_measured_width.is_some()
+    }
+    fn camera_stereo_recent(&self) -> bool {
         self.camera_stereo_at.is_some_and(|at|at.elapsed()<Duration::from_secs(2))
     }
     /// What is up, for a note in the log when a turn took too long.
@@ -750,9 +750,12 @@ impl OrbitVr {
                 };
                 let sides = camera_track::eye_sides(raw);
                 let within = (sides[1] - sides[0]) * CAMERA_VIEW_MARGIN;
-                self.camera_side = camera_track::side_with_room(tangent_of, [sides[0] + within, sides[1] - within, sides[2], sides[3]], self.camera_side);
-                if !camera_track::side_projects(&seen.found,self.camera_side) {
-                    self.camera_side = if self.camera_side == camera_track::Side::Left { camera_track::Side::Right } else { camera_track::Side::Left };
+                let mut side=self.camera_side;
+                if self.camera_seen.is_none() {
+                    side = camera_track::side_with_room(tangent_of, [sides[0] + within, sides[1] - within, sides[2], sides[3]], side);
+                }
+                if !camera_track::side_projects(&seen.found,side) {
+                    side = if side == camera_track::Side::Left { camera_track::Side::Right } else { camera_track::Side::Left };
                 }
                 let _ = whole;
                 let stereo=seen.right.and_then(|right| camera_track::stereo_pose(&seen.found,&right.found,[seen.size,right.size],
@@ -766,12 +769,13 @@ impl OrbitVr {
                     && (seen.right.is_none() || seen.right.is_some_and(|right|camera_track::column_clear(&right.found,right.size,&camera_track::Mirror::whole_eye(steamvr.projection_raw(vr::compositor::Eye::Right)),&space::compose(&head,&steamvr.eye_to_head(vr::compositor::Eye::Right)),frame,unit,side,clearance(unit))))
                 };
                 if let Some((frame,unit))=pose {
-                    if !clear(&frame,unit,self.camera_side) {
-                        let other=if self.camera_side==camera_track::Side::Left {camera_track::Side::Right} else {camera_track::Side::Left};
-                        if clear(&frame,unit,other) { self.camera_side=other; }
+                    if !clear(&frame,unit,side) {
+                        let other=if side==camera_track::Side::Left {camera_track::Side::Right} else {camera_track::Side::Left};
+                        if clear(&frame,unit,other) { side=other; }
                     }
                 }
-                if let Some((frame, unit)) = pose.filter(|(frame,unit)|clear(frame,*unit,self.camera_side)) {
+                if let Some((frame, unit)) = pose.filter(|(frame,unit)|clear(frame,*unit,side)) {
+                self.camera_side=side;
                 if let Some((_,unit,_))=stereo {
                     self.camera_measured_width=Some(unit*camera_track::PANEL_SIZE[0]);
                     self.camera_stereo_at=Some(now);
@@ -789,7 +793,7 @@ impl OrbitVr {
                 self.camera_panel_seen_ns = Some(orbiters_core::clock::now_ns());
                 self.camera_seen = Some(now);
                 let observed_grips=if input_read {actions.grabs(steamvr)} else {[false;2]};
-                if self.camera_scale_measured() {
+                if self.camera_stereo_recent() {
                     if let Some(hand)=self.camera_follow.observe_grab(frame,unit,captured_hands,observed_grips) {
                         super::super::vr_log::line(&format!("camera grab verified by rigid motion: hand {hand}, grips {observed_grips:?}")); // i18n: not shown (diagnostics)
                     }
@@ -798,19 +802,12 @@ impl OrbitVr {
                     self.camera_looks = self.camera_looks.saturating_add(1);
                     self.camera_reopen.remember(frame,unit,self.camera_side,self.camera_clearance,&head,hand_devices,self.camera_follow.held_hand());
                 }
-                } else if !self.camera_follow.is_held() {
-                    self.camera_exclusion=vec![(seen.found,seen.size,mirror,space::compose(&head,&eye_on_head))];
-                    if let Some(right)=seen.right { self.camera_exclusion.push((right.found,right.size,camera_track::Mirror::whole_eye(steamvr.projection_raw(vr::compositor::Eye::Right)),space::compose(&head,&steamvr.eye_to_head(vr::compositor::Eye::Right)))); }
-                    self.camera_looks=CAMERA_LOOKS_TO_SHOW;
-                    self.camera_stereo_at=None;
-                    self.camera_panel_seen_ns=None;
-                    super::super::vr_log::line("camera pose rejected: recovered column is not safely outside the observed panel"); // i18n: not shown (diagnostics)
                 }
             }
         }
         // What tracking knows, and what grabs it. Only while it shows: a grip means nothing to it otherwise.
 
-                let may_bind=self.camera_looks>CAMERA_LOOKS_TO_SHOW && self.camera_follow.can_bind_hand() && (self.camera_follow.is_held() || self.camera_scale_measured());
+        let may_bind=self.camera_looks>CAMERA_LOOKS_TO_SHOW && self.camera_follow.can_bind_hand() && (self.camera_follow.is_held() || self.camera_stereo_recent());
         let grips = if input_read && may_bind { actions.grabs(steamvr) } else { [false; 2] };
         let lasers = if input_read && may_bind { actions.lasers(steamvr, prediction) } else { [None; 2] };
         let pointers = lasers.map(|tip| tip.map(|tip| { let (o, d) = space::ray(&tip); (o, d) }));
@@ -819,14 +816,9 @@ impl OrbitVr {
         if self.camera_follow.is_held() {
             self.camera_seen = Some(now);
         }
-        if self.camera_seen.is_some_and(|at| now.duration_since(at) > CAMERA_LOST_AFTER) {
-            self.camera_follow.clear();
-            self.camera_exclusion.clear();
-            self.camera_seen=None;
-            self.camera_looks=0;
-            self.camera_stereo_at=None;
-            self.camera_panel_seen_ns=None;
-        }
+        // A dropped camera remains at its measured Standing pose. An image miss
+        // is not a camera-close event. OSC open/closed and tracking/world epoch
+        // changes retire the attachment; images refine it rather than gate it.
         // Validate unheld display against the observed eyes. A verified holding
         // hand propagates the measured plane; old eye coordinates cannot guard
         // that new position against the panel's previous position.

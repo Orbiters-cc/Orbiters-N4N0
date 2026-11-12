@@ -269,7 +269,9 @@ impl Software {
         // Small damage stays serial. The page worker alone opts in, keeping the input thread free of thread setup.
         let damaged: usize = areas.iter().map(|a| (a[2]-a[0])*(a[3]-a[1])).sum();
         if self.parallel && damaged > 128 * 1024 {
-            let rows = height.div_ceil(4);
+            // Retro's layered page remains raster-bound at four bands on the VR
+            // CPU fixture. Six bounded row jobs retain identical per-row arithmetic.
+            let rows = height.div_ceil(6);
             std::thread::scope(|scope| {
                 for (n, pixels) in self.pixels.chunks_mut(rows * width).enumerate() {
                     let paint_rows = &paint_rows;

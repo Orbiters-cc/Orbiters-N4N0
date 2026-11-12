@@ -74,7 +74,9 @@ impl Person {
     /// Points at `target` on the 3D worlds sheet's page, presses and lets go, a turn each, the page told each turn that it is on a sheet in VR (`relay`), as
     /// `vr.rs` tells it; the hand then goes.
     fn press_world(&mut self, target: crate::overlay::worlds::panel::Target, relay: &crate::overlay::worlds::panel::Status) {
-        if self.panels.stage.async_pages { self.turns_until("the displayed worlds page", |p| !p.panels.stage.painter.busy() && p.panels.takeover.as_ref().is_some_and(|p| p.painted && !p.dirty) && p.panels.stage.worlds.as_ref().is_some_and(|w| w.target_for_test(target).is_some())); }
+        // A docked view animates continuously, so the painter need never be idle. Wait for the
+        // requested target in the published picture, just as a person presses what is visible.
+        if self.panels.stage.async_pages { self.turns_until("the displayed worlds page", |p| p.panels.takeover.as_ref().is_some_and(|p| p.painted) && p.panels.stage.worlds.as_ref().is_some_and(|w| w.target_for_test(target).is_some())); }
         let at = self.panels.stage.worlds.as_ref().and_then(|w| w.target_for_test(target)).unwrap_or_else(|| panic!("nothing is {target:?} on the page"));
         let sheet = self.panels.all().count() - 1;
         let snap = self.snap.clone();

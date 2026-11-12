@@ -897,6 +897,28 @@ pub fn stereo_pose(left:&Found,right:&Found,sizes:[[f32;2];2],mirrors:[Mirror;2]
     Some((then(head,&local),unit,rms))
 }
 
+/// Locate only the two measured identity glyphs near a projected search hint.
+/// The hint is never returned as evidence: no border/pose is inferred here.
+pub fn glyphs_near(pixels:&[u8],width:usize,height:usize,stride:usize,offset:[f32;2],hint:Found) -> Option<Found> {
+    let local=hint.shifted([-offset[0],-offset[1]]);
+    let radius=(24.*local.across.max(local.tall)).max(12.);
+    let min=[local.x[0].min(local.chevron[0])-radius,local.x[1].min(local.chevron[1])-radius];
+    let max=[local.x[0].max(local.chevron[0])+radius,local.x[1].max(local.chevron[1])+radius];
+    let origin=[min[0].max(0.) as usize,min[1].max(0.) as usize];
+    if origin[0]>=width || origin[1]>=height{return None;}
+    let light=Light::of(pixels,width,height,stride,[origin[0],origin[1],(max[0]-origin[0] as f32).max(0.) as usize,(max[1]-origin[1] as f32).max(0.) as usize]);
+    if light.width<16 || light.height<16{return None;}
+    let mut all=Vec::new();for level in BRIGHT {blobs(&light,level,&mut all);}
+    let position=|b:&Blob|[b.middle[0]+origin[0] as f32,b.middle[1]+origin[1] as f32];
+    let distance=|b:&Blob,p:[f32;2]|{let q=position(b);(q[0]-p[0]).hypot(q[1]-p[1])};
+    let lean=local.right[1].atan2(local.right[0]);
+    let x=all.iter().filter(|b|b.may_be_x() && distance(b,local.x)<=radius && x_looks(&light,b.middle,b.size() as f32*0.625,lean)>=X_LOOKS).min_by(|a,b|distance(a,local.x).total_cmp(&distance(b,local.x)))?;
+    let c=all.iter().filter(|b|b.may_be_chevron() && distance(b,local.chevron)<=radius && (b.along[0]*local.right[0]+b.along[1]*local.right[1]).abs()>35f32.to_radians().cos()).min_by(|a,b|distance(a,local.chevron).total_cmp(&distance(b,local.chevron)))?;
+    let mut found=local;found.x=position(x);found.chevron=position(c);
+    found.perspective=None;found.landmarks=None;found.lines=None;found.residual_px=f32::INFINITY;
+    Some(found.shifted(offset))
+}
+
 pub fn find(pixels: &[u8], width: usize, height: usize, stride: usize) -> Option<Found> {
     find_in(pixels, width, height, stride, [0, 0, width, height], width <= LOOKS_TWICE_UP_TO)
 }
@@ -1236,6 +1258,29 @@ impl Follow {
             }}
         }
     }
+    /// Hand motion predicts a search region, not a visible attachment. The
+    /// reader must still find the actual glyph pixels before a grab is bound.
+    pub fn search_hint(&self,size:[f32;2],mirror:Mirror,eye:&Matrix34,hands:[Option<Matrix34>;2]) -> Option<Found> {
+        let (frame,unit,anchors)=if let Some((hand,_))=self.held {
+            let (local,unit)=self.at?;(then(&hands[hand]?,&local),unit,[PANEL_X,PANEL_CHEVRON])
+        } else {
+            let (hand,candidate)=self.image_grabs.iter().enumerate().find_map(|(i,c)|c.map(|c|(i,c)))?;
+            (then(&hands[hand]?,&candidate.relation),candidate.unit,candidate.anchors)
+        };
+        let inverse=undone(eye);
+        let pixel=|p:[f32;2]| -> Option<[f32;2]> {
+            let world:[f32;3]=std::array::from_fn(|i|frame.m[i][3]+frame.m[i][0]*p[0]*unit-frame.m[i][1]*p[1]*unit);
+            let v:[f32;3]=std::array::from_fn(|i|inverse.m[i][3]+(0..3).map(|j|inverse.m[i][j]*world[j]).sum::<f32>());
+            if v[2]>=-0.0001{return None;}
+            let t=[v[0]/-v[2],-v[1]/-v[2]];
+            Some(std::array::from_fn(|i|(t[i]-mirror.from[i])/mirror.spans[i]*size[i]))
+        };
+        let middle=pixel([0.,0.])?;let r=pixel([1.,0.])?;let d=pixel([0.,1.])?;
+        let across=(r[0]-middle[0]).hypot(r[1]-middle[1]);let tall=(d[0]-middle[0]).hypot(d[1]-middle[1]);
+        if across<=0. || tall<=0.{return None;}
+        Some(Found{perspective:None,lines:None,landmarks:None,residual_px:f32::INFINITY,x:pixel(anchors[0])?,chevron:pixel(anchors[1])?,middle,right:[(r[0]-middle[0])/across,(r[1]-middle[1])/across],down:[(d[0]-middle[0])/tall,(d[1]-middle[1])/tall],across,tall})
+    }
+
     /// Border fitting may miss during a pickup. Verify the measured plane's
     /// predicted two-glyph motion instead; stationary cameras and unrelated
     /// grips cannot pass the observed-motion check. Capture-time hands only.
@@ -2215,8 +2260,16 @@ mod sandbox_regression {
         let hands=|entry:usize|[Some(matrix(&metadata[entry]["hands"][0])),Some(matrix(&metadata[entry]["hands"][1]))];
         let mut follow=Follow::default();follow.attach(frame,unit);
         follow.begin_image_grab(&pairs[0][0],[1620.,1800.],mirrors[0],&then(&head,&eyes[0]),hands(0),[false,true]);
-        let mut glyphs=pairs[1][0];glyphs.perspective=None;glyphs.landmarks=None;glyphs.lines=None;
-        assert_eq!(follow.observe_image_grab(&glyphs,[1620.,1800.],mirrors[0],&then(&matrix(&metadata[1]["head"]),&eyes[0]),hands(1),[false,true]),Some(1),"the first moving native frame must verify the calibrated hand relation without waiting for a border");
+        let eye=then(&matrix(&metadata[1]["head"]),&eyes[0]);
+        let hint=follow.search_hint([1620.,1800.],mirrors[0],&eye,hands(1)).expect("calibrated motion search hint");
+        let image=image::open(root.join("pickup-first-motion-left.png")).unwrap().to_rgba8();
+        let glyphs=glyphs_near(image.as_raw(),image.width() as usize,image.height() as usize,image.width() as usize*4,[500.,850.],hint).expect("the reader must deliver actual glyphs without full border recognition");
+        assert!(glyphs.perspective.is_none(),"a search hint must not become a measured homography");
+        assert!((glyphs.x[0]-pairs[1][0].x[0]).hypot(glyphs.x[1]-pairs[1][0].x[1])<1.);
+        assert!((glyphs.chevron[0]-pairs[1][0].chevron[0]).hypot(glyphs.chevron[1]-pairs[1][0].chevron[1])<1.);
+        assert_eq!(follow.observe_image_grab(&glyphs,[1620.,1800.],mirrors[0],&eye,hands(1),[false,true]),Some(1),"the first moving native frame must verify the calibrated hand relation without waiting for a border");
+        let blank=vec![0u8;image.as_raw().len()];
+        assert!(glyphs_near(&blank,image.width() as usize,image.height() as usize,image.width() as usize*4,[500.,850.],hint).is_none(),"the same pose hint with no camera pixels must never be published as evidence");
     }
 
     #[test]

@@ -735,6 +735,8 @@ impl OrbitVr {
         if let Some((baseline,size,mirror,eye))=self.camera_exclusion.first() {
             self.camera_follow.begin_image_grab(baseline,*size,*mirror,eye,hands,observed_grips);
         }
+        let hint=self.camera_exclusion.first().and_then(|(_,size,mirror,_)|poses[0].pose_is_valid.then(|| self.camera_follow.search_hint(*size,*mirror,&space::compose(&poses[0].device_to_absolute,&steamvr.eye_to_head(vr::compositor::Eye::Left)),hands)).flatten());
+        watch.guide(hint);
         if let Some(seen) = watch.take().filter(|seen|seen.at>=self.camera_epoch) {
             let age = if seen.source == Source::Eye { self.tune.camera_eye_age_ms } else { self.tune.camera_window_age_ms };
             let then = seen.at.checked_sub(Duration::from_secs_f32(age.max(0.0) / 1000.0)).unwrap_or(seen.at);
@@ -1092,7 +1094,7 @@ impl OrbitVr {
             note: (on != Some(true)).then(|| mark("SteamVR's \"Experimental overlay input overrides\" (Settings, Developer) is off: pointing at a panel still presses in VRChat too.").to_string()),
             steamvr_overrides: on,
             camera_note: self.camera_note(cx.snap),
-            camera_provisional: self.camera_watch.is_some() && (self.camera_looks <= CAMERA_LOOKS_TO_SHOW || self.camera_follow.awaiting_confirmation() || !self.camera_follow.settled() || !self.camera_scale_measured()),
+            camera_provisional: self.camera_watch.is_some() && (self.camera_looks < CAMERA_LOOKS_TO_SHOW || self.camera_follow.awaiting_confirmation() || !self.camera_follow.settled() || !self.camera_scale_measured()),
             camera_panel_seen_ns: self.camera_panel_seen_ns,
             camera_scale_measured: self.camera_scale_measured(),
         };
@@ -1250,7 +1252,7 @@ impl OrbitVr {
         // Camera status changes independently of SteamVR's one-time input override setup.
         let mut status=self.told.clone().unwrap_or_default();
         status.camera_note=self.camera_note(cx.snap);
-        status.camera_provisional=camera_wanted && (self.camera_looks <= CAMERA_LOOKS_TO_SHOW || self.camera_follow.awaiting_confirmation() || !self.camera_follow.settled() || !self.camera_scale_measured());
+        status.camera_provisional=camera_wanted && (self.camera_looks < CAMERA_LOOKS_TO_SHOW || self.camera_follow.awaiting_confirmation() || !self.camera_follow.settled() || !self.camera_scale_measured());
         status.camera_panel_seen_ns=self.camera_panel_seen_ns;
         status.camera_scale_measured=self.camera_scale_measured();
         if self.told.as_ref()!=Some(&status) {
@@ -1318,7 +1320,7 @@ impl OrbitVr {
             places.push(wheel_place(Zone::WheelHide));
         }
         // What the camera's tiles say lines up on their side; they say where the camera is not seen yet; the column stands off by what the fit is unsure of.
-        self.panels.camera_tracking(self.camera_side == camera_track::Side::Right,self.camera_watch.is_some() && self.camera_looks <= CAMERA_LOOKS_TO_SHOW);
+        self.panels.camera_tracking(self.camera_side == camera_track::Side::Right,self.camera_watch.is_some() && !self.camera_scale_measured());
         if menu == Some(Around::Camera) {
             camera_column_out(&mut places, self.camera_clearance, self.camera_side == camera_track::Side::Right);
         }
@@ -1605,7 +1607,7 @@ impl OrbitVr {
                 if !cx.overlay.is_visible(*handle) {
                     let _ = cx.overlay.show(*handle);
                     if matches!(panel.zone, Zone::CameraPeople | Zone::CameraWorld | Zone::CameraQr) {
-                        super::super::vr_log::line(&format!("camera first shown: ns={}, zone={:?}, provisional={}", orbiters_core::clock::now_ns(), panel.zone, self.camera_looks <= CAMERA_LOOKS_TO_SHOW || self.camera_follow.awaiting_confirmation() || !self.camera_follow.settled() || !self.camera_scale_measured())); // i18n: not shown (diagnostics)
+                        super::super::vr_log::line(&format!("camera first shown: ns={}, zone={:?}, provisional={}", orbiters_core::clock::now_ns(), panel.zone, self.camera_looks < CAMERA_LOOKS_TO_SHOW || self.camera_follow.awaiting_confirmation() || !self.camera_follow.settled() || !self.camera_scale_measured())); // i18n: not shown (diagnostics)
                     }
                 }
             }

@@ -23,3 +23,6 @@ $driverCommand=if ($ProbeOnly) { 'rem driver unchanged' } else { "cl /nologo /st
 "@ | Set-Content -LiteralPath $bat
 & $env:ComSpec /d /c $bat
 if ($LASTEXITCODE -ne 0) { throw "Driver build failed: $LASTEXITCODE" }
+
+& "$out\..\probe.exe" png-self-test "$out\..\encoder-selftest.png"
+if($LASTEXITCODE -ne 0){throw "Probe PNG channel self-test failed: $LASTEXITCODE"}

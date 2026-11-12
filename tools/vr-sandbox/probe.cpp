@@ -30,14 +30,41 @@ static void write_png(const wchar_t *path,const Pixels &pixels) {
     ComPtr<IWICBitmapEncoder> encoder;check(factory->CreateEncoder(GUID_ContainerFormatPng,nullptr,&encoder));check(encoder->Initialize(stream.Get(),WICBitmapEncoderNoCache));
     ComPtr<IWICBitmapFrameEncode> frame;check(encoder->CreateNewFrame(&frame,nullptr));check(frame->Initialize(nullptr));check(frame->SetSize(pixels.width,pixels.height));
     auto format=GUID_WICPixelFormat32bppRGBA;check(frame->SetPixelFormat(&format));
-    check(frame->WritePixels(pixels.height,pixels.width*4,(UINT)pixels.rgba.size(),const_cast<unsigned char*>(pixels.rgba.data())));check(frame->Commit());check(encoder->Commit());
+    // SetPixelFormat is IN/OUT: Windows PNG chooses BGRA for an RGBA request.
+    // Honor the returned format instead of silently swapping red and blue.
+    std::vector<unsigned char> converted;
+    const unsigned char *bytes=pixels.rgba.data();
+    if(IsEqualGUID(format,GUID_WICPixelFormat32bppBGRA)) {
+        converted=pixels.rgba;
+        for(size_t i=0;i<converted.size();i+=4)std::swap(converted[i],converted[i+2]);
+        bytes=converted.data();
+    } else if(!IsEqualGUID(format,GUID_WICPixelFormat32bppRGBA))throw std::runtime_error("PNG encoder selected an unsupported pixel format");
+    check(frame->WritePixels(pixels.height,pixels.width*4,(UINT)pixels.rgba.size(),const_cast<unsigned char*>(bytes)));check(frame->Commit());check(encoder->Commit());
     std::cout<<"{\"width\":"<<pixels.width<<",\"height\":"<<pixels.height<<",\"format\":"<<pixels.format<<"}";
 }
 static void save(const wchar_t *path,ID3D11Device *dev,ID3D11DeviceContext *ctx,ID3D11Texture2D *texture,double *copied_at=nullptr) {
     write_png(path,read_pixels(dev,ctx,texture,copied_at));
 }
 
+static void png_self_test(const wchar_t *path) {
+    Pixels expected{4,1,DXGI_FORMAT_R8G8B8A8_UNORM,{255,0,0,255,0,0,255,255,0,255,0,255,128,64,32,255}};
+    write_png(path,expected);
+    ComPtr<IWICImagingFactory> factory;check(CoCreateInstance(CLSID_WICImagingFactory,nullptr,CLSCTX_INPROC_SERVER,IID_PPV_ARGS(&factory)));
+    ComPtr<IWICBitmapDecoder> decoder;check(factory->CreateDecoderFromFilename(path,nullptr,GENERIC_READ,WICDecodeMetadataCacheOnLoad,&decoder));
+    ComPtr<IWICBitmapFrameDecode> decoded;check(decoder->GetFrame(0,&decoded));
+    ComPtr<IWICFormatConverter> converter;check(factory->CreateFormatConverter(&converter));
+    check(converter->Initialize(decoded.Get(),GUID_WICPixelFormat32bppRGBA,WICBitmapDitherTypeNone,nullptr,0,WICBitmapPaletteTypeCustom));
+    std::vector<unsigned char> actual(expected.rgba.size());check(converter->CopyPixels(nullptr,expected.width*4,(UINT)actual.size(),actual.data()));
+    if(actual!=expected.rgba)throw std::runtime_error("PNG RGBA roundtrip changed channels");
+    std::cout<<"\n{\"png_roundtrip\":\"ok\",\"pixels\":4}\n";
+}
+
 int wmain(int argc,wchar_t **argv) {
+    if(argc==3 && std::wstring(argv[1])==L"png-self-test") {
+        try {CoInitializeEx(nullptr,COINIT_MULTITHREADED);png_self_test(argv[2]);return 0;}
+        catch(const std::exception &error){std::cerr<<error.what()<<std::endl;return 1;}
+    }
+
     if(argc<2)return 2;
     CoInitializeEx(nullptr,COINIT_MULTITHREADED);
     vr::EVRInitError e;auto system=vr::VR_Init(&e,vr::VRApplication_Background);

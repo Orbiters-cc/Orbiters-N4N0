@@ -119,22 +119,47 @@ def backup(journal, path, tree=False):
 def tree_hashes(path):
     return {str(p.relative_to(path)):hashlib.sha256(p.read_bytes()).hexdigest() for p in path.rglob('*') if p.is_file()}
 
-def restore():
+def restore(expected_session=None):
     if not JOURNAL.exists():
         return {'restored': False, 'reason': 'no recovery journal'}
     j = json.loads(JOURNAL.read_text())
+    if expected_session is not None and j['session']!=expected_session:
+        return {'restored':False,'reason':'session changed'}
     if j.get('restored'):
         return {'restored': True, 'already_restored': True}
     if j.get('pid') != os.getpid() and j.get('owner_create_time') and same_process({'pid':j['pid'],'create_time':j['owner_create_time']}):
-        try:remote({'action':'stop'})
+        try:remote({'action':'stop'},journal=j)
         except (OSError,urllib.error.URLError):pass # owner may already be closing its HTTP server
         deadline=time.monotonic()+45
         while time.monotonic()<deadline:
             latest=json.loads(JOURNAL.read_text())
+            if latest['session']!=j['session']:return {'restored':False,'reason':'session changed'}
             if latest.get('restored'):return {'restored':True,'verified_files':len(latest['files'])}
-            if not same_process({'pid':j['pid'],'create_time':j['owner_create_time']}):return restore()
+            if not same_process({'pid':j['pid'],'create_time':j['owner_create_time']}):return restore_session(j['session'])
             time.sleep(.25)
         raise RuntimeError('Live sandbox did not finish restoration; inspect its error log')
+    return restore_session(j['session'])
+
+def restore_session(expected_session):
+    # Owner shutdown is requested BEFORE taking this mutex: its finally block
+    # must be able to restore while the caller waits for it. Watchdog and manual
+    # retries serialize file mutation and re-read the journal under the mutex.
+    mutex=kernel.CreateMutexW(None,False,'Local\\OrbitersVrSandboxRestore1112')
+    if not mutex:raise C.WinError(C.get_last_error())
+    acquired=False
+    try:
+        result=kernel.WaitForSingleObject(mutex,30000)
+        if result not in (0,128):raise RuntimeError('Another restore did not finish within 30 seconds')
+        acquired=True
+        j=json.loads(JOURNAL.read_text())
+        if j['session']!=expected_session:return {'restored':False,'reason':'session changed'}
+        if j.get('restored'):return {'restored':True,'already_restored':True}
+        return restore_contents(j)
+    finally:
+        if acquired:kernel.ReleaseMutex(mutex)
+        kernel.CloseHandle(mutex)
+
+def restore_contents(j):
     # Only stop exact process identities recorded by this session. Refuse a foreign VR session.
     owned = {(p['pid'], p['create_time']) for p in j['processes']}
     foreign = [p for p in processes() if (p['pid'], p['create_time']) not in owned]
@@ -220,7 +245,7 @@ class Session:
             backup(self.j, path, tree=True)
         atomic_json(JOURNAL, self.j)
         # Recovery outlives the control server, including an abrupt crash.
-        subprocess.Popen([sys.executable, __file__, 'watch', str(os.getpid()), str(psutil.Process().create_time())], creationflags=subprocess.CREATE_NO_WINDOW)
+        subprocess.Popen([sys.executable, __file__, 'watch', str(os.getpid()), str(psutil.Process().create_time()), self.j['session']], creationflags=subprocess.CREATE_NO_WINDOW)
         self.devices()
         config = json.loads(SETTINGS.read_text(encoding='utf-8-sig')) if SETTINGS.exists() else {}
         config.setdefault('steamvr', {}).update({'forcedDriver': 'orbiters_sandbox', 'forcedHmd': 'orbiters-sandbox-head', 'activateMultipleDrivers': True, 'enableHomeApp': False, 'supersampleScale': 1.0, 'showMirrorView': False})
@@ -449,8 +474,8 @@ def serve():
         if s.j and JOURNAL.exists():
             s.record();print(json.dumps(restore()),flush=True)
 
-def remote(args):
-    j=json.loads(JOURNAL.read_text())
+def remote(args,journal=None):
+    j=json.loads(JOURNAL.read_text()) if journal is None else journal
     req=urllib.request.Request(f'http://127.0.0.1:{PORT}/',data=json.dumps(args).encode(),headers={'Authorization':'Bearer '+j['token'],'Content-Type':'application/json'})
     with urllib.request.urlopen(req,timeout=40) as r:return json.load(r)
 
@@ -461,7 +486,7 @@ if __name__=='__main__':
     elif cmd=='watch':
         identity={'pid':int(sys.argv[2]),'create_time':float(sys.argv[3])}
         while same_process(identity):time.sleep(.5)
-        try:restore()
+        try:restore(expected_session=sys.argv[4])
         except Exception as e:(ROOT/'restore-error.txt').write_text(str(e))
     elif cmd=='request':
         args=json.loads(sys.argv[2]);action=args['action']

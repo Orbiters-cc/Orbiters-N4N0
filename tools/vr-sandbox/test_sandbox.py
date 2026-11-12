@@ -29,6 +29,31 @@ class ProcessTests(unittest.TestCase):
             with self.assertRaises(OSError):sandbox.processes()
 
 class RecoveryTests(unittest.TestCase):
+    def test_stale_watchdog_cannot_stop_a_new_session(self):
+        with tempfile.TemporaryDirectory() as folder:
+            journal=Path(folder)/'journal';journal.write_text(json.dumps({'session':'new','restored':False}))
+            with patch.object(sandbox,'JOURNAL',journal),patch.object(sandbox,'remote') as remote:
+                self.assertEqual(sandbox.restore(expected_session='old')['reason'],'session changed')
+                remote.assert_not_called()
+
+    def test_watchdog_and_manual_restore_copy_configuration_once(self):
+        import time
+        with tempfile.TemporaryDirectory() as folder:
+            root=Path(folder);target=root/'settings';target.write_bytes(b'original')
+            j={'session':'concurrent','files':[],'processes':[],'restored':False}
+            with patch.multiple(sandbox,ROOT=root,LOCK=root/'lock',JOURNAL=root/'journal'),patch.object(sandbox,'processes',return_value=[]):
+                sandbox.backup(j,target);target.write_bytes(b'changed');sandbox.atomic_json(sandbox.JOURNAL,j)
+                entered=threading.Event();release=threading.Event();original=sandbox.shutil.copy2;calls=[];errors=[];answers=[]
+                def copy(source,destination,*args,**kwargs):
+                    calls.append(destination);entered.set();release.wait(2)
+                    return original(source,destination,*args,**kwargs)
+                def recover():
+                    try:answers.append(sandbox.restore())
+                    except Exception as error:errors.append(error)
+                with patch.object(sandbox.shutil,'copy2',side_effect=copy):
+                    first=threading.Thread(target=recover);second=threading.Thread(target=recover);first.start();self.assertTrue(entered.wait(2));second.start();time.sleep(.05);release.set();first.join(3);second.join(3)
+                self.assertFalse(first.is_alive() or second.is_alive());self.assertFalse(errors);self.assertEqual(len(calls),1);self.assertEqual(len(answers),2);self.assertEqual(target.read_bytes(),b'original')
+
     def test_refusing_an_existing_vr_session_never_opens_device_ipc(self):
         with patch.object(sandbox,'processes',return_value=[{'pid':1,'name':'VRChat.exe'}]),patch.object(sandbox.mmap,'mmap') as mapping:
             session=sandbox.Session()

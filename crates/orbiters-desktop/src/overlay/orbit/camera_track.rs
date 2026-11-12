@@ -2193,6 +2193,33 @@ mod tests {
 mod sandbox_regression {
     use super::*;
     #[test]
+    fn recorded_first_pickup_binds_before_border_reacquisition() {
+        let root=std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/overlay/orbit/testdata_camera/sandbox");
+        let metadata:serde_json::Value=serde_json::from_str(&std::fs::read_to_string(root.join("pickup-motion.json")).unwrap()).unwrap();
+        let matrix=|v:&serde_json::Value|Matrix34{m:std::array::from_fn(|i|std::array::from_fn(|j|v[i*4+j].as_f64().unwrap() as f32))};
+        let identity=Matrix34{m:[[1.,0.,0.,0.],[0.,1.,0.,0.],[0.,0.,1.,0.]]};
+        let mirrors=[Mirror::whole_eye([-1.376,0.839,-1.376,0.9]),Mirror::whole_eye([-0.839,1.376,-1.376,0.9])];
+        let mut eyes=[identity;2];eyes[0].m[0][3]=-0.032;eyes[1].m[0][3]=0.032;
+        let mut pairs=Vec::new();
+        for entry in metadata.as_array().unwrap() {
+            let name=entry["name"].as_str().unwrap();let mut pair=Vec::new();
+            for (i,eye) in ["left","right"].into_iter().enumerate() {
+                let image=image::open(root.join(format!("{name}-{eye}.png"))).unwrap().to_rgba8();
+                let found=find(image.as_raw(),image.width() as usize,image.height() as usize,image.width() as usize*4).expect("visible pickup glyphs");
+                pair.push(found.shifted([entry["origins"][i][0].as_f64().unwrap() as f32,entry["origins"][i][1].as_f64().unwrap() as f32]));
+            }
+            pairs.push(pair);
+        }
+        let head=matrix(&metadata[0]["head"]);
+        let (frame,unit,_)=stereo_pose(&pairs[0][0],&pairs[0][1],[[1620.,1800.];2],mirrors,eyes,&head).expect("initial measured camera");
+        let hands=|entry:usize|[Some(matrix(&metadata[entry]["hands"][0])),Some(matrix(&metadata[entry]["hands"][1]))];
+        let mut follow=Follow::default();follow.attach(frame,unit);
+        follow.begin_image_grab(&pairs[0][0],[1620.,1800.],mirrors[0],&then(&head,&eyes[0]),hands(0),[false,true]);
+        let mut glyphs=pairs[1][0];glyphs.perspective=None;glyphs.landmarks=None;glyphs.lines=None;
+        assert_eq!(follow.observe_image_grab(&glyphs,[1620.,1800.],mirrors[0],&then(&matrix(&metadata[1]["head"]),&eyes[0]),hands(1),[false,true]),Some(1),"the first moving native frame must verify the calibrated hand relation without waiting for a border");
+    }
+
+    #[test]
     fn delayed_images_do_not_pull_a_slowly_held_camera_backwards() {
         let identity=Matrix34 {m:[[1.,0.,0.,0.],[0.,1.,0.,0.],[0.,0.,1.,0.]]};
         let mut relation=identity;relation.m[1][3]=-0.3;relation.m[2][3]=0.1;
